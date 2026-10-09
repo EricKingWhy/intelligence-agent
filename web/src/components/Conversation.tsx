@@ -36,6 +36,7 @@ import { ApprovalEchoCard } from './ApprovalEchoCard';
 import { ApprovalModal } from './ApprovalModal';
 import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho';
 import { MemoryActivity } from './MemoryActivity';
+import { MessageImages } from './MessageImages';
 
 interface Props {
   conversation: ConversationState | null;
@@ -61,7 +62,7 @@ interface Props {
   onFork?: (fromSeq: number) => void;
   /** ADR-0030（#195）§5.3：编辑最新一条用户消息（supersede 语义）。
    *  保存即发 POST /messages {supersedes_seq}；编辑态在 TurnView 原地。 */
-  onEditTurn?: (fromSeq: number, newContent: string) => void;
+  onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void;
   /** APR-01：审批卡提交时后端回 404（队列已 GC）→ 把该 approval_id 上报为失效。
    *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
   goneApprovalIds?: ReadonlySet<string>;
@@ -69,6 +70,11 @@ interface Props {
   /** #420 AC2：审批决策 POST 成功 → App 对账一次（resync），保证决策后事件
    *  （resolved → … → run/completed）有一条消费路径。参数 = 会话 id。 */
   onApprovalDecided?: (sessionId: string) => void;
+  /** #825（MM-04）AC7：当前所选模型的能力位（三态，见 `lib/api.ts::ModelCatalogEntry.supportsVision`）。
+   *  `false` ⇒ 附图入口在 Composer 侧禁用并说明原因；**已附图的历史轮次**在该轮图旁标注
+   *  「图已被省略」——因为此时后端投影确实把图换成了文本占位符（PRD D6 双保险的界面侧）。
+   *  非 `false`（true / 缺失）一律不标注：把"后端没说"当成"不支持"是伪造。 */
+  supportsVision?: boolean | null;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -90,7 +96,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -425,6 +431,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
                 latestEditableSeq={latestEditableSeq}
                 onEditTurn={onEditTurn}
                 isSupersededTurn={turns[vi.index].superseded === true}
+                supportsVision={supportsVision}
               />
             </div>
           ))}
@@ -536,7 +543,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
 // 浅比较才真的会命中原注释所声明的效果。注意它**不能**做成「身份永不改变」：那样
 // override 变化时 memo 也会 bail out，点击工具行的档位循环会静默无效（见
 // lib/disclosure.ts 顶部注释与 Conversation.render.test.tsx 的 AC8 代理用例）。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string) => void; isSupersededTurn?: boolean }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn, supportsVision = null }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void; isSupersededTurn?: boolean; supportsVision?: boolean | null }) {
   // F1（#270）必做 2：`cycle` 回调此前在链路渲染器里**每次渲染现建一个新闭包**，
   // 作为 prop 传给 memo(ToolCard) ⇒ 浅比较恒不等，memo 恒 miss。移到组件里用
   // useCallback 建立一次（依赖 disclosure——它只在 override / density 变化时换引用，
@@ -585,6 +592,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
     turn.user_message_seq !== null &&
     !turn.injected_by &&
     turn.user_message_seq === latestEditableSeq;
+  /** #825（MM-04）：该轮的图片引用（缺省 = 旧版后端 / 纯文本轮）。 */
+  const userImages = turn.user_attachments ?? [];
 
   return (
     <div className={`turn turn-${turn.status}`} data-step-key={`step:${turn.step_id}`}>
@@ -602,7 +611,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
       )}
       {/* User message — minimal, right-aligned；harness 注入的纠正消息
           （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
-      {turn.user_message &&
+      {(turn.user_message || userImages.length > 0) &&
         (turn.injected_by ? (
           <div className="msg msg-system">
             <div
@@ -627,7 +636,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   e.preventDefault();
                   const trimmed = editValue.trim();
                   if (!trimmed || turn.user_message_seq === null) return;
-                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  onEditTurn?.(
+                    turn.user_message_seq,
+                    trimmed,
+                    userImages.map((image) => image.attachment_id),
+                  );
                   setEditing(false);
                 }
                 if (e.key === 'Escape') {
@@ -645,7 +658,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                 onClick={() => {
                   const trimmed = editValue.trim();
                   if (!trimmed || turn.user_message_seq === null) return;
-                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  onEditTurn?.(
+                    turn.user_message_seq,
+                    trimmed,
+                    userImages.map((image) => image.attachment_id),
+                  );
                   setEditing(false);
                 }}
                 aria-label="保存修改"
@@ -663,7 +680,15 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
           </div>
         ) : (
           <div className="msg msg-user">
-            <div className="msg-bubble-user">{turn.user_message}</div>
+            {/* #825（MM-04）AC5/AC6/AC7：附图在气泡**上方**（先图后文，与主流聊天一致）。
+                数据是事件的引用（`Turn.user_attachments`），字节走受控端点——刷新/重放后
+                仍在；`omitted` = 当前模型不支持视觉时的「图已被省略」标注（AC7）。 */}
+            <MessageImages
+              sessionId={sessionId ?? null}
+              images={userImages}
+              omitted={supportsVision === false}
+            />
+            {turn.user_message && <div className="msg-bubble-user">{turn.user_message}</div>}
             {/* §5.3 动作行：复制 / 编辑 / 分叉（对齐 Codex 的三图标）。
                 编辑在最新一条用户消息上可用；其余禁用（置灰 + title 说明），
                 因为 supersede 只允许最新一条（D8）。 */}

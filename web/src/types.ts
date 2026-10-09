@@ -9,6 +9,8 @@
  */
 export { EventType, STREAM_ONLY_TYPES, type EventTypeValue } from './generated/event-types';
 
+import type { ImageAttachmentRef } from './lib/attachmentRefs';
+
 /** A single SSE frame from POST /api/sessions or durable event from GET events. */
 export interface AgentEvent {
   type: string;
@@ -342,6 +344,13 @@ export interface Turn {
   step_id: number;
   /** User input that kicked off this turn. */
   user_message: string;
+  /**
+   * #825（MM-04）：该轮 `user/message` 携带的图片引用（`data.attachments`，形状见
+   * `lib/attachmentRefs.ts::ImageAttachmentRef`）。**引用而非字节**——字节永远从受控端点
+   * `GET /api/sessions/{id}/attachments/{aid}/content` 取回（不变量 #15：事件流里没有 base64）。
+   * 缺省 = 该轮没有附图（旧版后端 / 纯文本轮次），渲染层据此不渲染图片区。
+   */
+  user_attachments?: ImageAttachmentRef[];
   /**
    * Latest model segment (kept for streaming caret + existing consumers).
    *
@@ -831,4 +840,11 @@ export interface UndeliveredInput {
   content: string;
   seq: number;
   created_at: string;
+  /** #825（MM-04）：该条待发送输入带的附图引用（`message/queued` /
+   *  `steer/requested` 事件里的同一个字段，形状同 `user/message.data.attachments`）。
+   *  「立即 / 编辑」重投递时**原样回传**——不回传等于把这些图静默丢掉
+   *  （后端按本请求的 attachments 重建 user/message，不会继承旧项的引用）。
+   *  缺省 = 该条本来就没有图，或本项来自 `GET /queue` 补齐（该端点不下发附件，
+   *  见报告里的 NEEDS-USER-DECISION）。 */
+  attachments?: ImageAttachmentRef[];
 }

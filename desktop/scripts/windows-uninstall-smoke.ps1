@@ -12,8 +12,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-& $Installer /S
-if ($LASTEXITCODE -ne 0) { throw "installer exited with $LASTEXITCODE" }
+# GUI-subsystem executables need Start-Process for both the wait and the exit
+# code — `& $exe` returns at once and leaves $LASTEXITCODE empty (#831).
+$install = Start-Process -FilePath $Installer -ArgumentList '/S' -Wait -PassThru
+if ($install.ExitCode -ne 0) { throw "installer exited with $($install.ExitCode)" }
 
 $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$RegistryKey"
 $installLocation = (Get-ItemProperty -Path $regKey -ErrorAction Stop).InstallLocation
@@ -25,8 +27,8 @@ $marker = Join-Path $dataDir 'smoke-marker.txt'
 
 $uninstaller = Join-Path $installLocation "Uninstall $ProductName.exe"
 if (-not (Test-Path $uninstaller)) { throw "uninstaller missing: $uninstaller" }
-& $uninstaller /S
-if ($LASTEXITCODE -ne 0) { throw "uninstaller exited with $LASTEXITCODE" }
+$remove = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+if ($remove.ExitCode -ne 0) { throw "uninstaller exited with $($remove.ExitCode)" }
 
 Start-Sleep -Seconds 2
 if (Test-Path $installLocation) { throw "install dir still present after uninstall: $installLocation" }

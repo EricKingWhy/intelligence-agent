@@ -1052,7 +1052,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .project-dialog,
 .memory-panel,
 .provider-dialog,
-.recovery-list-panel {
+.recovery-list-panel,
+.image-lightbox {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -1086,7 +1087,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .project-dialog[data-state='closed'],
 .memory-panel[data-state='closed'],
-.recovery-list-panel[data-state='closed'] {
+.recovery-list-panel[data-state='closed'],
+.image-lightbox[data-state='closed'] {
   animation: palette-out var(--dur-out) var(--ease-apple);
 }
 .project-dialog-head {
@@ -3337,6 +3339,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-xs);
   color: var(--color-foreground);
 }
+/* #825（MM-04）：带图待发送项的**张数**指示（不渲染缩略图：投递前受控读回是 404）。 */
+.queue-item-attachments {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
 .queue-item-actions {
   flex-shrink: 0;
   display: inline-flex;
@@ -3456,12 +3464,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer-actions > button {
   pointer-events: auto;
 }
-/* 动作簇的实测宽度（右缩进 8 + 提示 64 + 间距 4 + 按钮 32 = 108，取 124 留余量——
-   提示文案随字体度量浮动，取小了会重新压回档位行）。
+/* 动作簇的实测宽度（右缩进 8 + 附图入口 32 + 间距 4 + 提示 64 + 间距 4 + 发送 32
+   + 间距 4 + 停止 32 = 180 的保守下界，取 160：#825 之前本常量只算了「提示 + 一个
+   按钮」，而流式时簇里一直并存发送与停止两个按钮 ⇒ 取值只保证"不比改动前更差、且把
+   本票新增的 36px（32 按钮 + 4 间距）算进去了"；真正的重算是布局票，不在本票范围。
    **必须定义在 dock 上**：消费方 `.composer-controls` 与 `.composer-actions` 是兄弟，
    定义在簇里的话档位行读不到，`padding-right` 会在计算值阶段落回 0——本票踩过。 */
 .composer-dock {
-  --composer-actions-w: 124px;
+  --composer-actions-w: 160px;
 }
 /* 流式中把档位行的右端让给动作簇。
    为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
@@ -6382,6 +6392,14 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
+.composer-fallback-effort-note {
+  max-width: min(100%, 340px);
+  padding: 4px 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 /* #426：新建会话的预算入口（一维 turns）。与档位 picker 同行同高——它是同级的
    "本次运行条件"设置，不是全局设置页的成员；数值窄框 + 前置标签，留空即默认。 */
 .composer-budget {
@@ -6499,6 +6517,13 @@ button.json-row {
   font-weight: 600;
   color: var(--text-secondary);
   user-select: none;
+}
+.picker-custom-body {
+  padding: 0 var(--space-sm) var(--space-sm);
+}
+.picker-content-custom {
+  width: min(340px, calc(100vw - 24px));
+  min-width: min(320px, calc(100vw - 24px));
 }
 .picker-foot {
   margin-top: var(--space-xs);
@@ -7499,4 +7524,669 @@ button.json-row {
   display: flex;
   justify-content: flex-end;
   padding: var(--space-xs) var(--space-md);
+}
+
+/* Reasoning effort slider: the blue-to-violet fill and energy are state-driven. */
+.reasoning-effort-slider {
+  --effort-energy: 0;
+  --effort-fill: 14px;
+  --effort-color: #4d93f8;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 216px;
+  padding: var(--space-xs) 0;
+}
+.reasoning-effort-slider__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.reasoning-effort-slider__current,
+.composer-trigger-current[data-tone="blue"],
+.composer-trigger-current[data-tone="violet"],
+.composer-trigger-current[data-tone="deep"] {
+  font-weight: 600;
+}
+.reasoning-effort-slider__current {
+  color: var(--text-primary);
+}
+.reasoning-effort-slider__current[data-tone="blue"],
+.composer-trigger-current[data-tone="blue"] {
+  color: #9bc4ff;
+}
+.reasoning-effort-slider__current[data-tone="violet"],
+.composer-trigger-current[data-tone="violet"] {
+  color: #d2b2ff;
+}
+.reasoning-effort-slider__current[data-tone="deep"],
+.composer-trigger-current[data-tone="deep"] {
+  color: #e0caff;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="blue"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="blue"] {
+  color: #2456a4;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="violet"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="violet"] {
+  color: #6534b1;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="deep"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="deep"] {
+  color: #4c1d95;
+}
+.reasoning-effort-slider__track {
+  position: relative;
+  height: 28px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  touch-action: none;
+}
+.reasoning-effort-slider__track::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  border-radius: inherit;
+  box-shadow: 0 1px 12px rgba(168, 85, 247, 0.45);
+  opacity: var(--effort-energy);
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+}
+.reasoning-effort-slider__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: var(--effort-fill);
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4d93f8 0%, var(--effort-color) 100%);
+  pointer-events: none;
+  transition: background 160ms ease;
+}
+.reasoning-effort-slider__energy {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  width: var(--effort-fill);
+  overflow: hidden;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3b1178 0%, #6d28d9 30%, #9333ea 62%, #c084fc 100%);
+  opacity: var(--effort-energy);
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+.reasoning-effort-slider__sweep {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 18%, rgba(255, 255, 255, 0.3) 50%, transparent 82%);
+  transform: translateX(100%);
+  animation: reasoning-effort-sweep 2.4s linear infinite;
+}
+@keyframes reasoning-effort-sweep {
+  to { transform: translateX(-100%); }
+}
+.reasoning-effort-slider__stars {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 3;
+  width: var(--effort-fill);
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.reasoning-effort-slider__star {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin-top: -1.5px;
+  pointer-events: none;
+  animation-name: reasoning-effort-star-cross;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.reasoning-effort-slider__star-dot {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  width: 3px;
+  height: 3px;
+  margin-left: -1.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.9);
+  opacity: var(--effort-star-brightness, 1);
+  transform: scale(var(--effort-star-brightness, 1));
+}
+@keyframes reasoning-effort-star-cross {
+  0% { transform: translate3d(100%, 0, 0); opacity: 0; }
+  6%, 94% { opacity: 1; }
+  100% { transform: translate3d(-100%, 0, 0); opacity: 0; }
+}
+.reasoning-effort-slider__tick {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px 0 0 -1.5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 28%, transparent);
+  pointer-events: none;
+}
+.reasoning-effort-slider__tick[data-passed="true"] {
+  background: rgba(255, 255, 255, 0.68);
+}
+.reasoning-effort-slider__input {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+.reasoning-effort-slider__input:active {
+  cursor: grabbing;
+}
+.reasoning-effort-slider__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.reasoning-effort-slider__input::-webkit-slider-runnable-track {
+  height: 28px;
+  border: 0;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-moz-range-track {
+  height: 28px;
+  border: 0;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-moz-range-progress {
+  height: 28px;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-webkit-slider-thumb {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  appearance: none;
+  border: 1px solid rgba(15, 17, 21, 0.08);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+.reasoning-effort-slider__input::-moz-range-thumb {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(15, 17, 21, 0.08);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+.reasoning-effort-slider__labels {
+  display: grid;
+  gap: 2px;
+  margin-top: var(--space-xs);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.reasoning-effort-slider__labels span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reasoning-effort-slider__labels span[data-active="true"] {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-effort-slider__fill,
+  .reasoning-effort-slider__energy,
+  .reasoning-effort-slider__track::after {
+    transition: none;
+  }
+  .reasoning-effort-slider__sweep {
+    display: none;
+  }
+  .reasoning-effort-slider__star {
+    left: var(--effort-star-x);
+    right: auto;
+    width: 3px;
+    animation: none;
+    opacity: var(--effort-star-brightness, 1);
+    transform: none;
+  }
+  .reasoning-effort-slider__star-dot {
+    left: 50%;
+    margin-left: -1.5px;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__track {
+  opacity: 0.55;
+}
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__sweep,
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__star {
+  animation-play-state: paused;
+}
+.reasoning-effort-slider__input:disabled {
+  cursor: not-allowed;
+}
+.reasoning-effort-slider__input:not(:disabled):hover::-webkit-slider-thumb {
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.42);
+}
+.reasoning-effort-slider__input:not(:disabled):hover::-moz-range-thumb {
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.42);
+}
+
+
+.reasoning-effort-slider__track[data-energy="off"] .reasoning-effort-slider__sweep {
+  animation-play-state: paused;
+}
+
+/* ═══ #825（MM-04）：图片附件（粘贴 / 拖放 / 选择器 → 草稿栏 → 消息内图片） ═══
+ * 全部走既有语义 token（§15 双主题：不新增 token，故无需改 :root 两份定义）；
+ * 视觉语言沿用同族既有类：浮层用 .project-dialog 那套材质与定位组，
+ * 图标按钮用 .msg-action-btn 的 pill 形态。 */
+
+/* ── 整页拖放遮罩（AC1）────────────────────────────────────
+ * `pointer-events: none` 是**语义**不是样式偏好：遮罩必须对拖放透明，
+ * 否则 document 级的 dragenter/dragleave 计数会被遮罩自己吃掉一半
+ * （上游 DropOverlay 的注释同款结论）。z-index 高于一般浮层（50/51）：
+ * 拖放邀请盖住一切才成立。 */
+.drop-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+  animation: palette-fade var(--dur-palette) var(--ease-apple);
+}
+.drop-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-2xl);
+  background: var(--surface-overlay);
+  border: 1px dashed color-mix(in srgb, var(--color-accent) 55%, transparent);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+}
+.drop-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.drop-desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* ── Composer 草稿栏（AC2/AC3/AC4）───────────────────────────
+ * 换行网格而不是横向滚动 + 翻页箭头：本仓单条上限 20 张
+ * （`lib/attachments.ts::IMAGE_LIMITS`），一眼可见比"藏着要翻页"更符合
+ * 「已附了哪几张、还能加几张」这个要回答的问题。 */
+.composer-attach-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md) 0;
+}
+.composer-attach-budget {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.composer-attach-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  max-width: 260px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+/* 状态用边框区分（上传中=accent、失败=danger）；进度本身是卡片上的百分比文本
+   （`上传中 42%`，AC4）——不做进度条：缩略图卡片只有 44px，条与文字二选一，
+   文字还顺手带上了"在传"这个状态，条不额外说明任何事。 */
+.composer-attach-card[data-status='uploading'] {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+}
+.composer-attach-card[data-status='failed'] {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+}
+.composer-attach-thumb {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+.composer-attach-thumb-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 2px;
+  font-size: 9px;
+  line-height: 1.1;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.composer-attach-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.composer-attach-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+}
+.composer-attach-size {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.composer-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.composer-attach-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.composer-attach-remove {
+  flex-shrink: 0;
+}
+.composer-attach-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 150px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+.composer-attach-failed-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-attach-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.composer-attach-add:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+/* AC3：整批被拒的原因**常驻**（不自动消失——自动消失的提示等于没提示）。 */
+.composer-attach-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-sm) var(--space-md) 0;
+  padding: var(--space-xs) var(--space-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+}
+.composer-attach-error-text {
+  flex: 1;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+}
+.composer-attach-error-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.composer-attach-error-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+/* AC7：非视觉模型的可见禁用说明（与 .composer-locked-hint 同一版式语言）。 */
+.composer-attach-hint {
+  margin: var(--space-sm) var(--space-lg) 0;
+  padding: 2px var(--space-sm);
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
+  font-size: var(--text-xs);
+}
+/* 附图入口按钮：与发送/停止按钮同高（32px），落在 .composer-actions 里。 */
+.composer-attach-trigger {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.composer-attach-trigger:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.composer-attach-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── 消息内图片（AC5/AC6/AC7）───────────────────────────────
+ * `.msg` 是 flex 行（右对齐用户气泡）。让附图**独占一行**需要 `.msg-user`
+ * 换行 + 附图 `flex-basis: 100%`：既拿到"图在气泡上方"，又不给气泡套一层
+ * 容器——套容器会把 `.msg-bubble-user` 的 `max-width: 78%` 改成相对容器计算，
+ * 那是**所有**用户气泡的宽度回归。无附图时该元素不渲染（`MessageImages` 直接
+ * 返回 null），`:has(.msg-images)` 也不命中 ⇒ 纯文本轮次的 `.msg-user` 拿到的是
+ * 与改动前**逐字相同**的 `flex-wrap: nowrap`（否则窄列下动作行会从"气泡被压窄"
+ * 变成"动作行换行"，那是本票不该顺带引入的视觉变化）。 */
+.msg-user:has(.msg-images) {
+  flex-wrap: wrap;
+}
+.msg-images {
+  flex: 0 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+}
+.msg-image {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.msg-image-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  width: 120px;
+  height: 120px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: zoom-in;
+}
+.msg-image-btn:disabled {
+  cursor: default;
+}
+.msg-image-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.msg-image-state {
+  padding: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-align: center;
+  word-break: break-all;
+}
+.msg-image-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.msg-image-retry:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.msg-images-omitted {
+  align-self: center;
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  border-radius: var(--radius-full);
+}
+
+/* ── 原图浮层（AC6）────────────────────────────────────────
+ * 定位必须来自下面这个选择器组（#203 的教训，见其上注释）——`.image-lightbox`
+ * 已加进 `.project-dialog` 组；这里只覆盖尺寸与内部版式。 */
+.image-lightbox {
+  width: min(920px, calc(100vw - 48px));
+  max-height: min(88vh, 920px);
+  padding: var(--space-md);
+  gap: var(--space-sm);
+}
+.image-lightbox-overlay {
+  /* 必须与 `.image-lightbox` 的 51 配对（`Radix Dialog.Portal` 把 Overlay 与 Content
+     渲染成 body 下的**兄弟节点**，两者都 fixed + 显式 z-index ⇒ 同一层叠上下文）。
+     overlay 高于 content 的后果不是"遮罩更黑"：`inset: 0` 的遮罩会把指针事件全接走，
+     浮层里的复制/下载/关闭全部点不到，任意点击还会被 Radix 判成 outside 而直接关层
+     ——即 AC6 的复制/下载整条不可用。全仓 13 处 Dialog.Overlay 用的都是裸
+     `.palette-overlay`(50)，这里也照抄那一对（#203 的教训：浮层问题一律先看层叠配对）。 */
+  z-index: 50;
+}
+.image-lightbox-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.image-lightbox-title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.image-lightbox-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+.image-lightbox-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  text-decoration: none;
+  cursor: pointer;
+}
+.image-lightbox-btn:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.image-lightbox-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.image-lightbox-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  overflow: auto;
+}
+.image-lightbox-img {
+  max-width: 100%;
+  max-height: calc(88vh - 140px);
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+}
+.image-lightbox-empty {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.image-lightbox-error {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--danger);
 }

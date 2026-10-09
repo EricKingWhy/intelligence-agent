@@ -4,6 +4,10 @@
 // on any OS. Windows paths are joined with backslashes by hand (no
 // node:path): the values are consumed by the NSIS installer and by
 // app.setPath('userData', ...) on win32 only.
+// Exception: resolveDesktopDataRoot feeds a child-process environment variable,
+// so it uses node:path and native separators on every platform.
+
+import { join } from 'node:path'
 
 /** Stable application id: NSIS GUID seed, uninstall registry key, mutex names. */
 export function installerAppId(): string {
@@ -67,4 +71,58 @@ export function resolvePythonPath(deps: PythonPathDeps): string {
     if (deps.existsSync(bundled)) return bundled
   }
   return deps.execPath.replace(/electron(.exe)?$/i, 'python')
+}
+
+/**
+ * Data root the shell gives the Python service (W-21 defect D4 / #813).
+ *
+ * `agent-harness serve` publishes the endpoint state file, the instance lock and
+ * `harness.db` under `Settings.workspace_dir`; the shell passes this directory to
+ * the child as an absolute `WORKSPACE_DIR` and reads the endpoint file from the
+ * same absolute path. It is deliberately not `process.cwd()`: in the packaged app
+ * that is the install directory, which an update replaces, and the child's cwd is
+ * not necessarily the shell's (PI-Desktop `data-paths.ts`: "the result is absolute,
+ * because it reaches host-core as a child-process environment variable from a
+ * working directory that need not be this one").
+ *
+ * @param userDataDir - Electron `app.getPath('userData')` (already absolute).
+ * @returns an absolute directory under user data, outside the install dir.
+ */
+export function resolveDesktopDataRoot(userDataDir: string): string {
+  if (userDataDir.trim() === '') {
+    throw new Error('resolveDesktopDataRoot: userData dir is empty')
+  }
+  return join(userDataDir, 'workspace')
+}
+
+/**
+ * Credential channel shared with the service child (W-21 D3 / #815).
+ *
+ * The shell spawns the service and must present the host token to the service's
+ * API (the window is served through the shell's proxy, which attaches it). The
+ * OS keyring backend is a native facility the shell cannot open without an extra
+ * native module (`host-client.ts` documents that gap), so the shell selects the
+ * server's cross-process file backend with `AGENT_HARNESS_HOST_CREDENTIALS` — the
+ * same shape both upstream products ship (PI-Desktop stores the host token in a
+ * `0600` file under the app's data dir; DSH keeps its launch token in the
+ * desktop process). The file lives beside the data root in the per-user profile,
+ * which Windows already ACLs to that user, and never inside the install dir that
+ * an update replaces.
+ *
+ * @param userDataDir - Electron `app.getPath('userData')` (already absolute).
+ * @returns absolute path of the JSON credential file.
+ */
+export function resolveHostCredentialPath(userDataDir: string): string {
+  if (userDataDir.trim() === '') {
+    throw new Error('resolveHostCredentialPath: userData dir is empty')
+  }
+  return join(userDataDir, 'host-credentials.json')
+}
+
+/** Value for `AGENT_HARNESS_HOST_CREDENTIALS` selecting that file backend. */
+export function hostCredentialsEnvValue(credentialPath: string): string {
+  if (credentialPath.trim() === '') {
+    throw new Error('hostCredentialsEnvValue: credential path is empty')
+  }
+  return `file:${credentialPath}`
 }

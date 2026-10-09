@@ -22,6 +22,7 @@ from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
+from agent_harness.tools._line_endings import replace_with_line_ending_tolerance
 
 
 class _EditArgs(BaseModel):
@@ -77,7 +78,7 @@ class EditTool(Tool):
         )
 
     async def execute(self, args: _EditArgs) -> ToolResult:
-        """read_text → count → 替换或失败 → write_text。"""
+        """read_text → 行尾容忍匹配 → 替换或失败 → write_text。"""
         try:
             content = self._sandbox.read_text(args.path)
         except PermissionError as e:
@@ -91,7 +92,9 @@ class EditTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
 
-        count = content.count(args.old_string)
+        count, new_content = replace_with_line_ending_tolerance(
+            content, args.old_string, args.new_string, replace_all=args.replace_all
+        )
         if count == 0:
             return ToolResult.failure(
                 message=f"在 '{args.path}' 中未找到匹配的字符串。",
@@ -106,12 +109,7 @@ class EditTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
 
-        if args.replace_all:
-            new_content = content.replace(args.old_string, args.new_string)
-            replacements = count
-        else:
-            new_content = content.replace(args.old_string, args.new_string, 1)
-            replacements = 1
+        replacements = count if args.replace_all else 1
 
         try:
             self._sandbox.write_text(args.path, new_content)

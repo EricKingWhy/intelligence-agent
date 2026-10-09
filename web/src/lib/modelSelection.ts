@@ -32,3 +32,18 @@ export function modelChangeTarget(
   if (selected) return selected;
   return models.find((m) => m.default)?.name ?? null;
 }
+
+/** **当前生效的目录条目**：显式选中项；未选（默认链）则目录里 `default` 那条；
+ *  目录为空 / 名字不在目录里 → undefined（不认识就说不认识，不猜一条）。
+ *
+ *  #825（MM-04）AC7 用它取 `supportsVision`：附图入口的可用性、以及历史轮次的
+ *  「图已被省略」标注，都必须与**这次真正会用的模型**一致——`App`（消息区标注）
+ *  与 `Composer`（入口门禁）共用这一处解析，避免两边各写一遍"谁是当前模型"
+ *  而漂移（漂移的后果是一边禁用、另一边却在图上标"已省略"）。 */
+export function effectiveModelEntry(
+  selected: string | null,
+  models: readonly ModelCatalogEntry[],
+): ModelCatalogEntry | undefined {
+  if (selected) return models.find((m) => m.name === selected);
+  return models.find((m) => m.default);
+}

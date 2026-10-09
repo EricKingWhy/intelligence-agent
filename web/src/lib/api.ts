@@ -692,6 +692,14 @@ export interface SendMessagePayload {
   agent_profile?: string;
   reasoning_effort?: string;
   context_providers?: string[];
+  /** #825（MM-04）：本条消息携带的**附件引用 id**（引自 `POST …/attachments` 的回执
+   *  `attachment_id`，顺序即附图顺序）。缺省 / 空数组 = 纯文本，既有行为逐字不变
+   *  （「有值才带键」由 `SEND_MESSAGE_FIELDS` 单点执行）。
+   *
+   *  契约（后端 `web/app.py::SendMessageRequest`，基线 df2b2435 已在 main）：
+   *  `attachments: list[str]`，`max_length = _MAX_ATTACHMENTS_PER_MESSAGE`，
+   *  逐条校验"存在且属本会话"，不合法 → 422。 */
+  attachments?: string[];
 }
 
 /** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；`mode` 有后端默认值，
@@ -722,6 +730,11 @@ const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
   context_providers: (p) =>
     p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+  // #825（MM-04）：与其余 amend 字段同款「有值才带键」。空数组**不发键**——后端
+  // 默认即空列表，发一个显式 `[]` 只会让请求体多一个无意义字段（与
+  // `context_providers` 同一纪律）。
+  attachments: (p) =>
+    p.attachments && p.attachments.length > 0 ? ['attachments', p.attachments] : null,
 };
 
 export async function sendMessage(sessionId: string, payload: SendMessagePayload): Promise<Response> {
@@ -804,6 +817,51 @@ export async function postApproval(
  *  （`app.py:1044-1093`）；内置 preset / catalog 条目恒 `true`。所以"不可用"这一态在
  *  默认部署（没配任何自定义供应商）里根本不会出现——UI 实现了它，不等于默认部署能看到。
  */
+export interface ModelReasoningEffortCapability {
+  supported: string[];
+  default: string;
+  wireMapping: Record<string, string>;
+}
+
+const REASONING_EFFORT_WIRE_VALUES = new Set([
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+]);
+
+function parseModelReasoningEffort(value: unknown): ModelReasoningEffortCapability | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (
+    !Array.isArray(raw.supported) ||
+    raw.supported.length === 0 ||
+    raw.supported.some((level) => typeof level !== 'string' || level.length === 0) ||
+    new Set(raw.supported).size !== raw.supported.length ||
+    typeof raw.default !== 'string' ||
+    !raw.supported.includes(raw.default) ||
+    typeof raw.wire_mapping !== 'object' ||
+    raw.wire_mapping === null ||
+    Array.isArray(raw.wire_mapping)
+  ) {
+    return undefined;
+  }
+
+  const wireMapping = raw.wire_mapping as Record<string, unknown>;
+  if (
+    Object.keys(wireMapping).length !== raw.supported.length ||
+    raw.supported.some((level) =>
+      typeof wireMapping[level] !== 'string' ||
+      !REASONING_EFFORT_WIRE_VALUES.has(wireMapping[level] as string)
+    )
+  ) {
+    return undefined;
+  }
+
+  return {
+    supported: raw.supported as string[],
+    default: raw.default,
+    wireMapping: wireMapping as Record<string, string>,
+  };
+}
+
 export interface ModelCatalogEntry {
   name: string;
   provider: string | null;
@@ -823,6 +881,8 @@ export interface ModelCatalogEntry {
   supportsTools?: boolean | null;
   supportsVision?: boolean | null;
   supportsReasoningSummary?: boolean | null;
+  /** Explicit backend declaration; absent or malformed means no slider for this model. */
+  reasoningEffort?: ModelReasoningEffortCapability;
 }
 
 /** GET /api/models。窄化解析（零伪造）：仅 name 非空字符串的条目入选，
@@ -864,6 +924,7 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
           typeof r.supports_reasoning_summary === 'boolean'
             ? r.supports_reasoning_summary
             : null,
+        reasoningEffort: parseModelReasoningEffort(r.reasoning_effort),
       },
     ];
   });
@@ -1236,6 +1297,131 @@ export async function getArtifactContent(
     throw new ArtifactContentError('error', detail, res.status, code);
   }
   return parseArtifactSlice(await res.json());
+}
+
+// ── 附件上传 / 受控读取（#825 / MM-04）──
+//
+// 契约（`src/agent_harness/web/attachments.py`，基线 df2b2435 已在 main）：
+//   POST /api/sessions/{id}/attachments?name=<file>   body = 原始字节，Content-Type: image/*
+//   GET  /api/sessions/{id}/attachments/{aid}/content 原始字节 + 真 Content-Type
+// 读端点的授权闸门（#823 / MM-02）：id 必须被**本会话某条 `user/message`** 引用，
+// 否则 404 —— 所以**发送前**的草稿缩略图不能走这个端点（那时还没有事件引用它），
+// 只能本地预览；发送后（事件已落地）才由它渲染。这不是可以简化掉的一步。
+
+/** `POST …/attachments` 的回执（后端 `AttachmentUploadResponse`）。 */
+export interface AttachmentUploadReceipt {
+  attachment_id: string;
+  media_type: string;
+  bytes: number;
+  width: number;
+  height: number;
+  name?: string | null;
+}
+
+/** 一次上传的句柄：`promise` 给结局，`abort` 给"移除草稿时停掉在途上传"。 */
+export interface AttachmentUpload {
+  promise: Promise<AttachmentUploadReceipt>;
+  abort: () => void;
+}
+
+/** 上传回执的窄化解析：形状不符即抛（不伪造 id——那会让发送带上一个不存在的引用）。 */
+function parseAttachmentReceipt(raw: unknown): AttachmentUploadReceipt {
+  if (typeof raw !== 'object' || raw === null) throw new Error('附件上传回执不是对象');
+  const r = raw as Record<string, unknown>;
+  if (typeof r.attachment_id !== 'string' || !r.attachment_id) {
+    throw new Error('附件上传回执缺少 attachment_id');
+  }
+  if (typeof r.media_type !== 'string' || !r.media_type) {
+    throw new Error('附件上传回执缺少 media_type');
+  }
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    attachment_id: r.attachment_id,
+    media_type: r.media_type,
+    bytes: num(r.bytes),
+    width: num(r.width),
+    height: num(r.height),
+    name: typeof r.name === 'string' ? r.name : null,
+  };
+}
+
+/** XHR → Response：只为复用 `readErrorDetail` 那一处错误体读取（它只认 `Response`）。 */
+function responseFromXhr(xhr: XMLHttpRequest): Response {
+  return new Response(xhr.responseText ?? '', {
+    status: xhr.status,
+    headers: { 'content-type': xhr.getResponseHeader('content-type') ?? '' },
+  });
+}
+
+/** 上传一张图片的字节。
+ *
+ *  用 `XMLHttpRequest` 而不是 `fetch`：AC4 要**上传进度**，而 `fetch` 读不到发送方向的
+ *  进度（`ReadableStream` 上传在 Chromium 上仍未落地）。取 `xhr.upload.onprogress` 的
+ *  `loaded/total` 直接转述，不自己估算百分比。
+ *
+ *  `Content-Type` 如实转述浏览器对文件的判定（不猜）：后端按字节判定并与声明比对，
+ *  不符即拒（#822 AC）——客户端在这里"帮忙修正"只会把认知偏差藏起来。 */
+export function uploadAttachment(
+  sessionId: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): AttachmentUpload {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<AttachmentUploadReceipt>((resolve, reject) => {
+    const query = file.name ? `?name=${encodeURIComponent(file.name)}` : '';
+    xhr.open('POST', `/api/sessions/${encodeURIComponent(sessionId)}/attachments${query}`);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = (event) => {
+        if (event.total > 0) onProgress(event.loaded, event.total);
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        void readErrorDetail(responseFromXhr(xhr)).then((detail) => {
+          const message = detail || 'Missing identity token';
+          emitUnauthorized(message);
+          reject(new UnauthorizedError(message));
+        });
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(parseAttachmentReceipt(JSON.parse(xhr.responseText)));
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error('附件上传回执解析失败'));
+        }
+        return;
+      }
+      void readErrorDetail(responseFromXhr(xhr)).then((detail) =>
+        reject(new Error(detail || `附件上传失败（${xhr.status}）`)),
+      );
+    };
+    xhr.onerror = () => reject(new Error('附件上传失败：网络错误'));
+    xhr.onabort = () => reject(new Error('附件上传已取消'));
+    xhr.send(file);
+  });
+  return { promise, abort: () => xhr.abort() };
+}
+
+/** 受控读回地址（同源 `/api/...` ⇒ 现有 CSP `img-src 'self' data:` 直接放行）。
+ *  装配层不在这里改语义：调用方决定是直连（无 token 部署）还是带 auth 头取字节。 */
+export function attachmentContentUrl(sessionId: string, attachmentId: string): string {
+  return (
+    `/api/sessions/${encodeURIComponent(sessionId)}/attachments/` +
+    `${encodeURIComponent(attachmentId)}/content`
+  );
+}
+
+/** 带 auth 头取原始字节：配了 Bearer token 的部署里 `<img src>` 带不上头（后端
+ *  auth_seam fail-closed ⇒ 401），这一条路给出可渲染的字节。无 token 时调用方
+ *  应直接用 `attachmentContentUrl`（少一次全量拷贝）。 */
+export async function getAttachmentBytes(sessionId: string, attachmentId: string): Promise<Blob> {
+  const res = await apiFetch(attachmentContentUrl(sessionId, attachmentId));
+  if (!res.ok) throw new Error((await readErrorDetail(res)) || `图片读取失败（${res.status}）`);
+  return res.blob();
 }
 
 // ── Session hard delete（#172 / ADR-0029：用户显式硬删，不可恢复）──

@@ -1528,12 +1528,8 @@ class SessionService:
         session_id = str(uuid4())
         if cwd is not None:
             workspace = self._resolve_cwd(cwd)
-        elif workspace_name is not None:
-            workspace = self._workspaces_root / workspace_name
-            workspace.mkdir(parents=True, exist_ok=True)
         else:
-            workspace = self._workspaces_root / session_id
-            workspace.mkdir(parents=True, exist_ok=True)
+            workspace = self._workspaces_root / (workspace_name or session_id)
 
         # 模型 catalog 校验（在落盘前，避免孤儿）；合法则记为会话初始模型，
         # 使后续 run 不传 amend 也能从事件流派生出「当前模型」（T7 #137）。
@@ -1541,20 +1537,31 @@ class SessionService:
         # /api/models 广告的自定义条目必须在这里也能解析，否则 UI 能选、一提交
         # 就 422（feature promise 断裂）。
         initial_model_data: dict[str, Any] = {}
-        if amend is not None and amend.model is not None:
+        if amend is not None and (
+            amend.model is not None or amend.reasoning_effort is not None
+        ):
             from agent_harness.model.provider_store import ProviderStore
 
             try:
-                store = ProviderStore.for_settings(self._settings)
-                initial_model = ModelConfig.resolve_selection(
-                    self._settings, amend.model, store,
-                )
+                if amend.model is not None:
+                    store = ProviderStore.for_settings(self._settings)
+                    initial_model = ModelConfig.resolve_selection(
+                        self._settings, amend.model, store,
+                    )
+                else:
+                    initial_model = ModelConfig.from_settings(self._settings)
             except ConfigError as error:
                 raise InvalidDecision(str(error)) from error
-            initial_model_data = {
-                "provider": initial_model.provider,
-                "model_id": amend.model,
-            }
+            if amend.reasoning_effort is not None:
+                initial_model.validate_reasoning_effort(amend.reasoning_effort)
+            if amend.model is not None:
+                initial_model_data = {
+                    "provider": initial_model.provider,
+                    "model_id": amend.model,
+                }
+
+        if cwd is None:
+            workspace.mkdir(parents=True, exist_ok=True)
 
         # F15 #234：会话级**权限决策**（档位 + 是否自动批准）也是会话的属性，必须随
         # session/started 落进事件流。续聊路径（resume_and_launch）读不到创建请求，

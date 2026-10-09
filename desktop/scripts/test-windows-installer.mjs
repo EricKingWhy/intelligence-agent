@@ -54,8 +54,13 @@ const output = await mkdtemp(join(outputRoot, 'run-'))
 const payload = join(output, 'payload')
 await mkdir(join(payload, 'resources'), { recursive: true })
 
-const { createWindowsInstallerConfig } = await import('./build-windows-installer.mjs')
+const { createWindowsInstallerConfig, validateInstallerScripts } = await import('./build-windows-installer.mjs')
 const childOptions = { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+
+// #831: run the same build-time LangString assertion the production build runs,
+// so a language-guard regression fails this smoke build early — before the
+// per-language makensis runs below — instead of aborting inside makensis.
+validateInstallerScripts(join(appRoot, 'installer'))
 
 let succeeded = false
 try {
@@ -94,9 +99,17 @@ SectionEnd
       config: {
         ...baseConfig,
         extraMetadata: { name: `@ia-installer-test-${id.slice(0, 8)}/app-${id}` },
-        artifactName: 'installer-test.exe',
         directories: { output: languageOutput },
-        nsis: { ...baseConfig.nsis, guid, installerLanguages: [language] },
+        // The target-level artifactName (from the production config) wins over
+        // a top-level one, so the override has to live in `nsis`: without it
+        // the build writes `<productName>-Setup-<version>.exe` while the smoke
+        // script below is handed `installer-test.exe` and never runs (#831).
+        nsis: {
+          ...baseConfig.nsis,
+          guid,
+          installerLanguages: [language],
+          artifactName: 'installer-test.exe',
+        },
       },
     })
     if (compileOnly) continue

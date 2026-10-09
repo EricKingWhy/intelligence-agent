@@ -1,0 +1,1 @@
+2026-10-09	#865 窄宽度修复后双轴复审：Spec PASS；Standards PASS-WITH-FINDINGS（P3：只测水平视口边界，注释声称全视口；fixture duplication 为低风险 smell）。P0/P1/P2/P3/P4=0/0/0/1/0。	b49d7cfb66cfaa1b9d6c83782a429c43de169e10..23ff045a8e89fd2f0829ed8e0c7da2685b4e2f39

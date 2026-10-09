@@ -17,8 +17,12 @@ import { DESKTOP_IPC, assertDesktopSender } from './ipc.ts'
 /**
  * Install the application-lifetime directory picker IPC handler.
  * @param getWindow - Current local application window; shell pages and subframes cannot open dialogs.
+ * @param allowedOrigins - Origins of the shell's own document (see `assertDesktopSender`).
  */
-export function installDesktopDirectoryPicker(getWindow: () => BrowserWindow | undefined): void {
+export function installDesktopDirectoryPicker(
+  getWindow: () => BrowserWindow | undefined,
+  allowedOrigins: () => readonly string[],
+): void {
   const pending = new WeakMap<BrowserWindow, Promise<string | null>>()
   ipcMain.handle(DESKTOP_IPC.directoryPick, async (event) => {
     const window = getWindow()
@@ -26,7 +30,7 @@ export function installDesktopDirectoryPicker(getWindow: () => BrowserWindow | u
       || event.senderFrame !== window.webContents.mainFrame) {
       throw new Error('ia desktop: rejected directory picker from an unowned renderer')
     }
-    assertDesktopSender(event)
+    assertDesktopSender(event, allowedOrigins())
     const existing = pending.get(window)
     if (existing !== undefined) return existing
     if (window.isMinimized()) window.restore()

@@ -147,6 +147,46 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
     });
   });
 
+  it('reasoning_effort capability is retained only when its support contract is complete', async () => {
+    captureFetch(200, {
+      models: [
+        {
+          name: 'declared',
+          reasoning_effort: {
+            supported: ['minimal', 'deep'],
+            default: 'minimal',
+            wire_mapping: { minimal: 'low', deep: 'high' },
+          },
+        },
+        {
+          name: 'incomplete',
+          reasoning_effort: {
+            supported: ['minimal', 'deep'],
+            default: 'standard',
+            wire_mapping: { minimal: 'low' },
+          },
+        },
+        {
+          name: 'invalid-wire-value',
+          reasoning_effort: {
+            supported: ['minimal'],
+            default: 'minimal',
+            wire_mapping: { minimal: 'deep' },
+          },
+        },
+      ],
+    });
+
+    const models = await getModels();
+    expect(models[0].reasoningEffort).toEqual({
+      supported: ['minimal', 'deep'],
+      default: 'minimal',
+      wireMapping: { minimal: 'low', deep: 'high' },
+    });
+    expect(models[1].reasoningEffort).toBeUndefined();
+    expect(models[2].reasoningEffort).toBeUndefined();
+  });
+
   it('#199：is_available 是**三态**——没说 ≠ 可用（`!== false` 是伪造）', async () => {
     captureFetch(200, {
       models: [

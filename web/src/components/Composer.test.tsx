@@ -72,6 +72,43 @@ describe('Composer 队列条（ADR-0030 §5.2）', () => {
     expect(html).toContain('aria-label="取消排队消息"');
   });
 
+  it('带图的排队项渲染「附图 N 张」指示（投递前缩略图必然 404，所以只给张数）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base,
+        undelivered: [
+          {
+            kind: 'queue' as const,
+            id: 'q-2',
+            content: '排队里的图',
+            seq: 2,
+            created_at: '',
+            attachments: [
+              { kind: 'image', attachment_id: 'sha256:aa', media_type: 'image/png', bytes: 1, width: 1, height: 1 },
+              { kind: 'image', attachment_id: 'sha256:bb', media_type: 'image/png', bytes: 1, width: 1, height: 1 },
+            ],
+          },
+        ],
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('附图 2 张');
+    expect(html).toContain('queue-item-attachments');
+    // 只给张数：受控读回在投递前是 404（引用还没进事件流），缩略图会是一排"加载失败"。
+    expect(html).not.toContain('<img');
+  });
+
+  it('不带图的排队项不渲染附图指示（不占位）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base,
+        undelivered: [{ kind: 'queue' as const, id: 'q-3', content: '纯文本', seq: 3, created_at: '' }],
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('纯文本');
+    // 用类名判定"没渲染这条指示"：Composer 别处（附图入口的 aria/title）本来含"附图"二字。
+    expect(html).not.toContain('queue-item-attachments');
+  });
+
   it('steer 项不渲染三个动作（无后端取消/编辑通道，点了就是静默 404）', () => {
     const html = renderToString(
       createElement(Composer, {
