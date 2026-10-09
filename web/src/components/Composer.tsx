@@ -6,14 +6,19 @@
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
+import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
+import { budgetText, filesFromClipboard, IMAGE_LIMITS } from '../lib/attachments';
+import { installDocumentDropEvents } from '../lib/dropEvents';
+import { effectiveModelEntry } from '../lib/modelSelection';
+import { useDraftAttachments } from '../hooks/useDraftAttachments';
+import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
@@ -32,10 +37,15 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean) => void;
+  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string, rememberAsProceduralRule: boolean) => void;
+  onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** #825（MM-04）：**当前会话 id**——附图上传端点是 per-session 的
+   *  （`POST /api/sessions/{id}/attachments`），所以没有会话就没有附图入口
+   *  （`null` = 新建态 → 入口禁用并说明原因，而不是让用户传到一个不存在的会话下）。
+   *  会话切换时草稿清空并中止在途上传（见 `hooks/useDraftAttachments.ts`）。 */
+  sessionId?: string | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
@@ -102,6 +112,7 @@ export const Composer = memo(function Composer({
   constraintInputPending = false,
   onSubmit,
   onSteer,
+  sessionId = null,
   onCancel,
   presetTask,
   models = [],
@@ -138,6 +149,16 @@ export const Composer = memo(function Composer({
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+
+  // ── #825（MM-04）附图草稿 ──
+  // 状态机在 hook 里（上传/缩略图/失败重试/换会话清理），这里只做**入口门禁**与
+  // 把「已就绪」的引用交给提交通道。（纯文本发送不依赖任何草稿状态：发送按钮的
+  // 可用性只看文本——AC4「上传失败不得阻塞纯文本发送」的落点。）
+  const attachments = useDraftAttachments(sessionId);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** 整页拖拽计数：document 级 dragenter/dragleave 会成对触发，用计数判断"还在页面内"。 */
+  const dragDepth = useRef(0);
+  const [dragActive, setDragActive] = useState(false);
 
   // ADR-0030 §5.1 D10：`locked` 拆开——approvalPending 仍禁用（等待审批时输入
   // 无意义且与审批 UI 竞争）；streaming **不再**禁用。issue #196 的根因正是
@@ -271,18 +292,27 @@ export const Composer = memo(function Composer({
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    // #825（MM-04）：只带**已就绪**的引用（在途/失败的草稿不参与本次发送——AC4：
+    // 上传失败不阻塞纯文本发送）。文本仍必填：`POST /messages` 的 `content` 是必填项，
+    // 空文本 + 纯图片不是本票支持的路由。
+    const attachmentIds = attachments.readyIds;
     // steer 通道的**失败兜底不在这一层**（#219）：没有可打断的在途 run 时后端回 409
     // （session/service.py::SteerTargetNotFound），由交付层改投 queue 把消息送到
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
     if (mode === 'steer' && onSteer) {
-      onSteer(trimmed, rememberAsProceduralRule);
+      onSteer(trimmed, rememberAsProceduralRule, attachmentIds);
     } else {
-      onSubmit(trimmed, rememberAsProceduralRule);
+      onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
     }
     setValue('');
     setRememberAsProceduralRule(false);
+    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
+    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
+    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
+    // 或下一轮再带。
+    attachments.clearSent(attachmentIds);
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
@@ -302,9 +332,60 @@ export const Composer = memo(function Composer({
     }
   };
 
-  const currentModel = selectedModel === null
-    ? models.find((model) => model.default)
-    : models.find((model) => model.name === selectedModel);
+  const currentModel = effectiveModelEntry(selectedModel, models);
+  // ── #825（MM-04）附图入口门禁（AC1/AC7）──
+  // 三条互斥原因，**都不许静默**：会话缺失、模型非视觉、等待审批/澄清。原因同时是
+  // 拖放遮罩上的文案与按钮 title，用户不必对着禁止光标猜。
+  const visionUnsupported = currentModel?.supportsVision === false;
+  const attachBlockedReason = locked
+    ? lockHint
+    : sessionId === null
+      ? '图片需要先有会话：附图上传挂在会话上，请先新建或选中一个会话'
+      : visionUnsupported
+        ? '当前模型不支持视觉（supports_vision=false），已禁用附图'
+        : '';
+  const canAttach = attachBlockedReason === '';
+  const pickFiles = () => {
+    if (canAttach) fileInputRef.current?.click();
+  };
+  const addDraftFiles = attachments.addFiles;
+  /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
+   *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
+   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
+   *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
+   *  （hook 每次渲染返回新对象字面量）。 */
+  const addFiles = useCallback(
+    (files: readonly File[], directories?: ReadonlySet<File>) => {
+      if (!canAttach) return;
+      addDraftFiles(files, directories);
+    },
+    [canAttach, addDraftFiles],
+  );
+  /** 把文本插到**光标处**（混合剪贴板的文本回填，见 `onPaste`）。
+   *
+   *  受控 textarea 的 `value` 由 React 在提交阶段写入，那一刻浏览器会把插入符推到
+   *  末尾——所以目标位置先存进 ref，由渲染后的 effect 消费（否则光标落在粘贴内容之后，
+   *  用户接着敲的字会跑到粘贴文本的后面）。 */
+  const pendingCaret = useRef<number | null>(null);
+  useEffect(() => {
+    const caret = pendingCaret.current;
+    if (caret === null) return;
+    pendingCaret.current = null;
+    inputRef.current?.setSelectionRange(caret, caret);
+  });
+  const insertAtCaret = (text: string) => {
+    const element = inputRef.current;
+    const start = element?.selectionStart ?? value.length;
+    const end = element?.selectionEnd ?? start;
+    pendingCaret.current = start + text.length;
+    setValue(`${value.slice(0, start)}${text}${value.slice(end)}`);
+  };
+  // 整页拖放（AC1）：document 级监听，拖到任意位置都算——只把"是否接受"交给这里，
+  // 计数/命中判断在 `lib/dropEvents.ts`（上游 COPY，含空目录剔除）。
+  useEffect(
+    () => installDocumentDropEvents(canAttach, addFiles, dragDepth, setDragActive),
+    [canAttach, addFiles],
+  );
   const effortModel = reasoningEffortProjection ? reasoningEffortProjection.model : currentModel;
   const reasoningEffortCapability =
     effortModel?.isAvailable === false ? undefined : effortModel?.reasoningEffort;
@@ -402,6 +483,17 @@ export const Composer = memo(function Composer({
               <span className={`queue-item-badge queue-item-${item.kind}`}>
                 {item.kind === 'steer' ? '引导' : '排队'}
               </span>
+              {/* #825（MM-04）：投递前草稿已从附图栏清掉、受控读回又被授权闸门挡成
+                  404（引用还没写进事件流）⇒ 这一条在 UI 里本来**零痕迹**，用户会以为
+                  图丢了。只给张数、不渲染缩略图（那必然是一片"加载失败"）。 */}
+              {item.attachments !== undefined && item.attachments.length > 0 && (
+                <span
+                  className="queue-item-attachments"
+                  title="这条待发送输入带着图片，投递时会连附件引用一起发出去"
+                >
+                  附图 {item.attachments.length} 张
+                </span>
+              )}
               <span className="queue-item-content" title={item.content}>
                 {item.content.length > 40 ? `${item.content.slice(0, 40)}…` : item.content}
               </span>
@@ -469,8 +561,44 @@ export const Composer = memo(function Composer({
         </div>
       )}
       <div className="composer-dock surface-floating">
+        <ComposerAttachments
+          items={attachments.items}
+          intakeError={attachments.intakeError}
+          budget={budgetText(
+            attachments.items.map((item) => ({ bytes: item.file.size })),
+            IMAGE_LIMITS,
+          )}
+          dragActive={dragActive}
+          canAcceptDrop={canAttach}
+          dropBlockedReason={attachBlockedReason}
+          onPickFiles={pickFiles}
+          onRemove={attachments.remove}
+          onRetry={attachments.retry}
+          onDismissIntakeError={attachments.dismissIntakeError}
+        />
+        {/* 文件选择器（AC1）：`hidden` 而不是 display:none——`.click()` 仍可编程触发，
+            且不进 tab 顺序（入口是旁边那个带 aria-label 的按钮）。`value` 每次清空，
+            否则连选同一张图不会触发 change。 */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={IMAGE_LIMITS.mediaTypes.join(',')}
+          multiple
+          hidden
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = '';
+            addFiles(files);
+          }}
+        />
         {/* UI-01：审批待决时给出锁定原因（置灰不是隐形）。 */}
         {showLock && <div className="composer-locked-hint">{lockHint}</div>}
+        {/* #825 AC7：非视觉模型**可见**的禁用原因（不是只藏在 title 里）。 */}
+        {visionUnsupported && (
+          <div className="composer-attach-hint" role="status">
+            当前模型不支持视觉（supports_vision=false）：已禁用附图；历史附图会被省略为文本占位
+          </div>
+        )}
         <textarea
           ref={inputRef}
           id="composer-input"
@@ -480,6 +608,25 @@ export const Composer = memo(function Composer({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={(event) => {
+            // AC1 剪贴板粘贴：只截取 `kind === 'file'` 的图片。没有文件时**不**
+            // preventDefault——纯文本粘贴必须原样进输入框（这是粘贴的默认语义，
+            // 抢先接管会把普通复制粘贴弄坏）。
+            const files = filesFromClipboard(event.clipboardData);
+            if (files.length === 0) return;
+            // 门禁命中时同样**不**接管：`addFiles` 会直接 return，而
+            // preventDefault 已经执行 ⇒ 事件被吞、毫无反馈（三方通道里另两条在禁用
+            // 态都有显式出口，粘贴这条不能例外地静默）。
+            if (!canAttach) return;
+            event.preventDefault();
+            // 网页 / Word 的剪贴板是**混合**的：`items` 里有图，`text/plain` 里还有
+            // 文字（标题、选区文本、图注）。`preventDefault` 之后原生粘贴不再发生
+            // ⇒ 不回填就等于把文本吞掉（上游 `keymap.ts:161-187` 同款做法：有文件时
+            // 照样读 `text/plain`，非空即接管并交给文本通道）。
+            const pastedText = event.clipboardData.getData('text/plain');
+            if (pastedText !== '') insertAtCaret(pastedText);
+            addFiles(files);
+          }}
           rows={2}
           disabled={locked}
           aria-label="Agent 任务"
@@ -623,6 +770,19 @@ export const Composer = memo(function Composer({
             动作的两个 affordance 被放在了相反的两侧。现在两者共用一个右锚点，按钮
             的像素位置与改动前完全一致（right/bottom 同一组值），提示作为它的左邻出现。 */}
         <div className="composer-actions">
+          {/* #825（MM-04）AC1/AC7：附图入口（第三个通道：选择器；另两个是粘贴与拖放）。
+              禁用时 title 给出原因，且**不是唯一出口**——非视觉模型的可见说明在上方
+              `.composer-attach-hint` 里。 */}
+          <button
+            type="button"
+            className="composer-attach-trigger"
+            onClick={pickFiles}
+            disabled={!canAttach}
+            aria-label="添加图片"
+            title={canAttach ? '添加图片（也可直接粘贴或拖入页面）' : attachBlockedReason}
+          >
+            <ImagePlus size={16} />
+          </button>
           {streaming && (
             /* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App
                全局，这里只做可见性——所以整个簇 pointer-events: none，只有按钮可点。 */

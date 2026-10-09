@@ -458,7 +458,7 @@ def serve_once(
     import uvicorn
     from pydantic import SecretStr
 
-    from agent_harness.web.app import create_app
+    from agent_harness.web.app import create_app, mount_static
 
     endpoint: HostEndpointInfo | None = None
     configured = settings.jwt_secret.get_secret_value() if settings.jwt_secret else ""
@@ -477,9 +477,15 @@ def serve_once(
         algorithm="HS256",
     )
 
+    app = create_app(effective, enable_cors=False)
+    # W-21 D3 (#815)：桌面壳加载的页面就是这个服务自己的 origin（壳的 loopback
+    # 代理只加凭据、不改路径），所以这里必须把渲染层产物挂上；产物目录来自
+    # `Settings.web_dist_dir`（env `WEB_DIST_DIR`，打包形态指安装目录的
+    # `resources/web`）。目录不存在时不挂载——开发机未构建前端的行为不变。
+    mount_static(app, effective.web_dist_dir)
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(effective, enable_cors=False),
+            app,
             host=host,
             port=0,
             log_level="warning",

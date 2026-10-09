@@ -5,7 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { SeqCursor } from "../src/sse.ts";
+import { SeqCursor, consumeSseBody } from "../src/sse.ts";
+import type { EventEnvelope } from "../src/events.ts";
 
 function frame(seq: number | null, type = "text/delta") {
   return {
@@ -65,4 +66,99 @@ test("markRebuilt：全量重建后游标取真实 max seq", () => {
   assert.equal(cursor.lastSeq, 42);
   assert.equal(cursor.next(frame(42)), "skip", "重建覆盖的 seq 不重复应用");
   assert.equal(cursor.next(frame(43)), "apply");
+});
+
+
+// ---------------------------------------------------------------------------
+// 帧切分（IO 壳 consumeSseBody）。
+//
+// 夹具是**真实服务抓下来的原始字节**，不是照客户端假设手写的形状：服务端
+// sse-starlette 的帧分隔符是 CRLF（`ServerSentEvent.DEFAULT_SEPARATOR = "\r\n"`，
+// `_sse_response` 没有传 `sep`）。只认裸 LF 就一帧都切不出来——字节照收、流照常
+// 收尾并重连，但永远没有帧，也不报错（#854：附着后收不到任何 run 的直播帧）。
+// ---------------------------------------------------------------------------
+
+/** 真实 `POST /api/sessions` 响应的前两帧（2026-10-08 抓取，原样）。 */
+const REAL_FRAME_USER_MESSAGE =
+  'data: {"type": "user/message", "data": {"content": "抓原始字节"}, "seq": 2, "run_id": null, "step_id": null, "session_id": "cad0044f-6d09-4419-a64f-584b09dc0937", "time": "2026-10-08T08:18:21.259+00:00", "schema_version": "runtime_event/v1", "durability": "durable"}';
+const REAL_FRAME_RUN_STARTED =
+  'data: {"type": "run/started", "data": {"turn_index": 1, "agent_profile": "main", "model": "deepseek-chat"}, "seq": 3, "run_id": "70add1d1-9c8e-4f13-b574-d4acc89942d5", "step_id": null, "session_id": "cad0044f-6d09-4419-a64f-584b09dc0937", "time": "2026-10-08T08:18:21.300+00:00", "schema_version": "runtime_event/v1", "durability": "durable"}';
+
+function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder();
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+}
+
+async function drainStream(
+  chunks: string[],
+): Promise<{ frames: EventEnvelope[]; truncated: number }> {
+  const frames: EventEnvelope[] = [];
+  let truncated = 0;
+  await consumeSseBody(streamOf(chunks), {
+    onFrame: (frame) => frames.push(frame),
+    onTruncated: () => {
+      truncated += 1;
+    },
+  });
+  return { frames, truncated };
+}
+
+test("CRLF 分隔的真实服务字节必须切出全部帧（#854）", async () => {
+  const { frames } = await drainStream([
+    `${REAL_FRAME_USER_MESSAGE}\r\n\r\n${REAL_FRAME_RUN_STARTED}\r\n\r\n`,
+  ]);
+  assert.deepEqual(
+    frames.map((f) => f.type),
+    ["user/message", "run/started"],
+  );
+  assert.deepEqual(
+    frames.map((f) => f.seq),
+    [2, 3],
+  );
+  assert.equal(frames[0]?.session_id, "cad0044f-6d09-4419-a64f-584b09dc0937");
+});
+
+test("帧分隔符跨 chunk 边界（\r 与 \n 分属两段）仍能切帧", async () => {
+  const { frames } = await drainStream([
+    `${REAL_FRAME_USER_MESSAGE}\r\n\r`,
+    `\n${REAL_FRAME_RUN_STARTED}\r\n\r\n`,
+  ]);
+  assert.deepEqual(
+    frames.map((f) => f.seq),
+    [2, 3],
+  );
+});
+
+test("裸 LF 分隔仍可用（回归：不能改成只认 CRLF）", async () => {
+  const { frames } = await drainStream([
+    `${REAL_FRAME_USER_MESSAGE}\n\n${REAL_FRAME_RUN_STARTED}\n\n`,
+  ]);
+  assert.deepEqual(
+    frames.map((f) => f.seq),
+    [2, 3],
+  );
+});
+
+test("ping 注释行不产生帧（CRLF 与 LF 两种形状）", async () => {
+  const crlf = await drainStream([
+    ": ping - 2026-10-08T08:18:21Z\r\n\r\n",
+    `${REAL_FRAME_USER_MESSAGE}\r\n\r\n`,
+  ]);
+  assert.deepEqual(
+    crlf.frames.map((f) => f.seq),
+    [2],
+  );
+  const lf = await drainStream([
+    ": ping - 2026-10-08T08:18:21Z\n\n",
+    `${REAL_FRAME_USER_MESSAGE}\n\n`,
+  ]);
+  assert.deepEqual(
+    lf.frames.map((f) => f.seq),
+    [2],
+  );
 });

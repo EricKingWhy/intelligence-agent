@@ -67,9 +67,21 @@ dev = [
 # 让项目根进入 sys.path，使 tests/ 下的测试辅助模块（如 scripted_model）
 # 能以 tests.xxx 形式被跨文件导入；否则只有 src 在路径上。
 pythonpath = ["."]
+# 仓库根无参数 pytest 的收集面 = tests/。不设这条时收集面是整个 rootdir，会走进根下两棵
+# gitignored 的打包产物树（desktop/dist-installer、desktop/installer/staging，各含一份
+# Python 运行时）：其中 pywin32 的 test_addtask.py 在收集期就把解释器打成访问违例、
+# 零用例执行，输出里没有任何失败签名（#856）。
+testpaths = ["tests"]
 # 集成测试默认不跑（烧 token、依赖真实 LLM）。
 # 手动跑：uv run pytest -m integration
-addopts = ["-m", "not integration and not qiniu"]
+# testpaths 只兜住「不给路径」的调用；显式 `pytest .` 仍从 rootdir 走，所以按路径追加
+# 忽略那两棵产物树（不用 norecursedirs：它会替换掉 pytest 的默认忽略表，
+# .* / build / dist / node_modules / venv 都得自己抄回来）。
+addopts = [
+    "-m", "not integration and not qiniu",
+    "--ignore=desktop/dist-installer",
+    "--ignore=desktop/installer/staging",
+]
 markers = [
     "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
     "live_services: integration test that intentionally reads credentials for real services",

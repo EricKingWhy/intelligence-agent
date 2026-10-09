@@ -1774,11 +1774,18 @@ export function useSession() {
    *  复用 `/messages` 的 mode='steer' 分支——在途 run 在下个循环头消费；
    *  无在途 run 时后端可能回 launched/错误，与 sendFollowUp 同一条错误通道。 */
   const sendSteer = useCallback(
-    async (sessionId: string, content: string, rememberAsProceduralRule = false) => {
+    async (
+      sessionId: string,
+      content: string,
+      rememberAsProceduralRule = false,
+      /** #825（MM-04）：附图引用（已就绪的那些）。空 = 纯文本，请求体逐字不变。 */
+      attachmentIds: readonly string[] = [],
+    ) => {
       await sendFollowUp(sessionId, content, {
         amend: {
           mode: 'steer',
           ...(rememberAsProceduralRule ? { remember_as_procedural_rule: true } : {}),
+          ...(attachmentIds.length > 0 ? { attachments: [...attachmentIds] } : {}),
         },
       });
     },

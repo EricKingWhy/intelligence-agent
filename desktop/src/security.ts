@@ -33,10 +33,14 @@ export function desktopWebPreferences(preload: string): DesktopWebPreferences {
 
 /** The shell's own renderer origins. */
 export interface LocalPagePolicy {
-  /** Custom scheme served from disk, e.g. `ia-app`. */
-  readonly scheme: string
-  /** Host of the packaged page, e.g. `app`. */
-  readonly host: string
+  /**
+   * Exact origin of the shell's own page. W-21 D3 (#815): the window loads the
+   * packaged UI from the local service, because the shipped frontend addresses
+   * its API and live channel relative to its own origin
+   * (`web/src/lib/wsStream.ts`: `${proto}//${window.location.host}/api/ws`),
+   * which only resolves for the service origin.
+   */
+  readonly origin: string
   /** A vite dev-server origin allowed only while developing, e.g. `http://127.0.0.1:5173`. */
   readonly devServerOrigin?: string | undefined
 }
@@ -59,7 +63,7 @@ function parse(rawUrl: string): URL | undefined {
 export function isLocalAppPage(rawUrl: string, policy: LocalPagePolicy): boolean {
   const url = parse(rawUrl)
   if (url === undefined) return false
-  if (url.protocol === `${policy.scheme}:` && url.hostname === policy.host) return true
+  if (url.origin === policy.origin) return true
   if (policy.devServerOrigin !== undefined) {
     const dev = parse(policy.devServerOrigin)
     if (dev !== undefined && url.origin === dev.origin) return true

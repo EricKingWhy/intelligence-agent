@@ -25,22 +25,33 @@
 
 !include "LogicLib.nsh"
 
-; #885 — capture THIS file's directory at PARSE time into IA_INSTALLER_DIR.
-; electron-builder `!include`s this file by absolute path, so ${__FILEDIR__}
-; here is .../desktop/installer. It must be captured now (not inside the
-; macro): the macro body is expanded later, while makensis reads installer.nsi
-; (fed on stdin, cwd = the NSIS template dir, where ${__FILEDIR__} is "."), so
-; a bare ${__FILEDIR__} inside the macro points at the template, not us.
+; #816 (W-21 D1): `__FILEDIR__` is only usable here, at the top level of this
+; file. Inside a macro body it is substituted when the macro is inserted — in
+; the *inserting* file's context, i.e. the stock template directory — which is
+; why the previous `!include "${__FILEDIR__}\installer-directories.nsh"` inside
+; `customHeader` aborted the build with "could not find:
+; …\app-builder-lib\templates\nsis\installer-directories.nsh" (measured; see
+; #816). `!define` substitutes eagerly, so the two-level form below is enough
+; (same shape as DeepSeek Harness installer.nsh:3-4).
+;
+; The include itself stays inside `customHeader` on purpose, and is
+; installer-only:
+;   - `multiUser.nsh` — which defines `${INSTALL_REGISTRY_KEY}`, used by the
+;     stash macros — is included *after* this file's top level (app-builder-lib
+;     injects the custom include into the generated script header), so a
+;     top-level include would hit `warning 6000: unknown variable/constant`;
+;   - the uninstaller build inserts `customHeader` too and references none of
+;     these functions, so including them there fails the build with
+;     `warning 6010: install function "iaPromoteApplication" not referenced`
+;     (both warnings are errors under electron-builder's makensis settings).
 !define IA_INSTALLER_DIR "${__FILEDIR__}"
 
 !macro customHeader
   ManifestDPIAware true
 
-  ; Keep the literal `\`: on Windows ${__FILEDIR__} has NO trailing separator
-  ; (NSIS strips it via PathRemoveFileSpec), so it must be added here; on POSIX
-  ; it keeps one and the doubled separator is tolerated. Omitting it produced
-  ; `...\desktop\installerinstaller-directories.nsh` on the Windows runner.
-  !include "${IA_INSTALLER_DIR}\installer-directories.nsh"
+  !ifndef BUILD_UNINSTALLER
+    !include "${IA_INSTALLER_DIR}\installer-directories.nsh"
+  !endif
 
   ; Bilingual UI strings. The template loads only the configured
   ; installerLanguages, so guard each language: a ${LANG_<NAME>} that is not

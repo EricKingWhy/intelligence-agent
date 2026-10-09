@@ -66,7 +66,7 @@ import {
   type StartSessionPayload,
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
-import { modelChangeTarget } from './lib/modelSelection';
+import { effectiveModelEntry, modelChangeTarget } from './lib/modelSelection';
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
@@ -537,6 +537,11 @@ export default function App() {
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
   const reasoningEffortProjection = projectActiveFallbackModel(conversation, models);
+  /** #825（MM-04）AC7：当前生效模型的能力位，三态（`false` / `true` / `null`(后端没说)）。
+   *  与 Composer 的入口门禁共用同一处解析（`effectiveModelEntry`）——分散解析一旦漂移，
+   *  就会出现"一边禁用入口、另一边却给历史图打上已省略"的自相矛盾。
+   *  只有显式 `false` 才用于标注/禁用：后端沉默不等于不支持。 */
+  const currentModelSupportsVision = effectiveModelEntry(selectedModel, models)?.supportsVision ?? null;
 
   // #426：新建会话的预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
   // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
@@ -576,7 +581,7 @@ export default function App() {
   );
 
   const handleSubmit = useCallback(
-    (task: string, rememberAsProceduralRule = false) => {
+    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -591,10 +596,20 @@ export default function App() {
       // 新会话：无 selectedId → startSession 创建新会话。
       if (selectedId) {
         void sendMessage(selectedId, task, {
-          amend: { ...toAmendFields(composerControls), ...ruleSignal },
+          amend: {
+            ...toAmendFields(composerControls),
+            ...ruleSignal,
+            // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
+            // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
+            ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+          },
         });
         return;
       }
+      // 新建会话（#825）：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
+      // 无 `attachments`），所以新建态**不给**附图入口（Composer 按 `sessionId === null`
+      // 禁用并说明原因）⇒ 这条分支上 `attachmentIds` 恒为空。此处不写丢弃逻辑：
+      // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
       void submitTask({
         task,
         auto_approve: true,
@@ -697,12 +712,12 @@ export default function App() {
   // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
   // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
-    (task: string, rememberAsProceduralRule = false) => {
+    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
       if (!selectedId) {
-        handleSubmit(task, rememberAsProceduralRule);
+        handleSubmit(task, rememberAsProceduralRule, attachmentIds);
         return;
       }
-      void sendSteer(selectedId, task, rememberAsProceduralRule);
+      void sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
     [sendSteer, selectedId, handleSubmit],
   );
@@ -719,12 +734,18 @@ export default function App() {
 
   /** ADR-0030 §5.3 编辑最新一条用户消息 → supersede（POST /messages 带
    *  supersedes_seq）。只传 fromSeq（新内容由 Composer 的 textarea 已 trim）；
-   *  409（非最新/已取代）走 sendMessage 的既有错误通道。 */
+   *  409（非最新/已取代）走 sendMessage 的既有错误通道。
+   *  #825（MM-04）：该轮已带的附图引用必须随重投递一起回去——后端只按**本请求**
+   *  的 attachments 重建 `user/message`，supersede 不继承旧消息的引用，不带就是
+   *  静默丢图（旧轮整段移除 + 新轮无图 + 字节成孤儿）。 */
   const handleEditTurn = useCallback(
-    (fromSeq: number, newContent: string) => {
+    (fromSeq: number, newContent: string, attachmentIds: readonly string[] = []) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        amend: { supersedes_seq: fromSeq },
+        amend: {
+          supersedes_seq: fromSeq,
+          ...(attachmentIds.length > 0 ? { attachments: [...attachmentIds] } : {}),
+        },
       });
     },
     [sendMessage, selectedId],
@@ -739,8 +760,15 @@ export default function App() {
   const handleSteerItem = useCallback(
     (item: UndeliveredInput) => {
       if (!selectedId) return;
+      const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
       void sendMessage(selectedId, item.content, {
-        amend: { mode: 'steer', queue_id: item.id },
+        amend: {
+          mode: 'steer',
+          queue_id: item.id,
+          // #825（MM-04）：重投递必须带回该条自己的附图引用——后端按本请求重建
+          // `user/message`，不带就把队列项里的图静默丢掉（界面也无从察觉）。
+          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+        },
       });
     },
     [sendMessage, selectedId],
@@ -762,8 +790,14 @@ export default function App() {
   const handleEditItem = useCallback(
     (item: UndeliveredInput, newContent: string) => {
       if (!selectedId) return;
+      const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
       void sendMessage(selectedId, newContent, {
-        amend: { mode: 'queue', queue_id: item.id },
+        amend: {
+          mode: 'queue',
+          queue_id: item.id,
+          // 同 handleSteerItem：就地编辑排队项时把该条原有的附图引用原样带回。
+          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+        },
       });
     },
     [sendMessage, selectedId],
@@ -1380,6 +1414,8 @@ export default function App() {
                     onApprovalGone={onApprovalGone}
                     /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
                     onApprovalDecided={resyncAfterDecision}
+                    /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
+                    supportsVision={currentModelSupportsVision}
                   />
                   <Composer
                     streaming={streaming}
@@ -1394,6 +1430,8 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
+                    /* #825（MM-04）：附图上传挂会话——`null`（新建态）时入口禁用并说明。 */
+                    sessionId={selectedId}
                     onCancel={cancelStream}
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
                     onSteerItem={handleSteerItem}
