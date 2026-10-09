@@ -261,6 +261,51 @@ def test_session_delete_drops_receipt_but_keeps_global_object(tmp_path: Path) ->
     )
 
 
+def test_discard_removes_readonly_receipt_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 语义回归（#916）：只读回执删不掉 ⇒ discard 仍须带走回执、留下全局对象。
+
+    发布出去的对象是只读的（`_publish_blob` 的 `chmod 0o400`），会话回执是它的 hardlink
+    ⇒ Windows 上回执共享同一只读属性，`os.unlink` 抛 `PermissionError`；Linux 上 unlink
+    不受只读位约束（只看目录写权限），所以这里显式把 `os.unlink` 换成 Windows 语义：无
+    写位的常规文件不可删。修复前 `rmtree(..., ignore_errors=True)` 会把失败静默吞掉 ⇒
+    回执残留（本用例红）。
+    """
+    store = _store(tmp_path, "sess-a")
+    blob = asyncio.run(store.save_bytes("sess-a", b"readonly-receipt", mime_type="image/png"))
+    receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
+    assert receipt.is_file()
+    assert not (os.stat(receipt).st_mode & stat.S_IWUSR), "回执应是只读的（与全局对象同 inode）"
+
+    real_unlink = os.unlink
+
+    def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        """模拟 Windows 的 FILE_ATTRIBUTE_READONLY：无写位的常规文件 unlink 被拒。
+
+        要按 `dir_fd` 解析（fd 版 rmtree 用 `os.unlink(entry.name, dir_fd=...)`），否则
+        相对名会落到 CWD、模拟失效。
+        """
+        try:
+            st = os.stat(path, dir_fd=dir_fd)
+        except OSError:
+            return real_unlink(path, dir_fd=dir_fd)
+        if stat.S_ISREG(st.st_mode) and not (st.st_mode & stat.S_IWUSR):
+            raise PermissionError(13, "Access is denied (simulated Windows read-only file)")
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", _windows_unlink)
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert not receipt.exists()
+    assert _object_path(tmp_path, blob.artifact_id).is_file()
+    assert (
+        asyncio.run(_store(tmp_path, "sess-b").load_bytes(blob.artifact_id)).content
+        == b"readonly-receipt"
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：会话名不得吃掉全局对象根")
 def test_session_named_like_the_global_root_cannot_eat_it(tmp_path: Path) -> None:
     """名为 `attachments` / `.attachments` 的会话删不掉全局对象根（前导点点目录纪律）。

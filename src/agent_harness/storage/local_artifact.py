@@ -34,7 +34,8 @@ import json
 import logging
 import os
 import shutil
-from collections.abc import Iterable
+import stat
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -520,6 +521,35 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _clear_readonly_and_retry(
+    func: Callable[..., object], path: str, _exc_info: object
+) -> None:
+    """`shutil.rmtree` 的 `onerror` 回调：清只读位后重试一次删除（#916）。
+
+    `_publish_blob` 发布的对象是只读的（`os.chmod(target, 0o400)`），而会话回执是它的
+    hardlink ⇒ Windows 上回执与全局对象共享同一只读属性，`os.unlink` 抛
+    `PermissionError`；改动前 `rmtree(..., ignore_errors=True)` 会把它静默吞掉，回执因此
+    残留。POSIX 上 unlink 不受只读位约束（只看目录写权限），本回调不会被触发。
+
+    只对 `os.unlink` / `os.rmdir` 重试：rmtree 对 `os.open` 等内部操作传的 func 需要更多
+    参数，盲目 `func(path)` 会抛 `TypeError`；其余情况直接返回（不抛）。重试仍失败时静默
+    放弃——保持改动前 best-effort 的"会话删除不因残留文件而崩溃"语义。
+
+    清位用"原 mode **或上**写位"而不是 `stat.S_IWRITE`：后者把 mode 归一成 0o200（只写），
+    在 POSIX 上会连**读**权限一起抹掉（hardlink 共享 inode ⇒ 全局对象也变不可读）。只加写位
+    对 Windows 同样有效（`os.chmod` 只认写位来清 FILE_ATTRIBUTE_READONLY）。
+
+    副作用（Windows 固有，非本函数引入）：hardlink 共享文件属性，清回执的只读位会同时清掉
+    其全局对象的只读位——这是删除只读 hardlink 在 Windows 上无法回避的代价；对象内容的
+    content-addressable 自证仍在读回时兜底。
+    """
+    with suppress(OSError):
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+    if func in (os.unlink, os.rmdir):
+        with suppress(OSError):
+            func(path)
+
+
 def discard_local_artifacts(settings: Settings, session_id: str) -> None:
     """会话硬删时丢弃该会话的**本地** artifact 目录。幂等。
 
@@ -547,7 +577,9 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
         return
     target = Path(root).resolve() / session_id
     if target.is_dir():
-        shutil.rmtree(target, ignore_errors=True)
+        # 回执是只读对象的 hardlink：Windows 上直接 rmtree 删不掉（旧的 ignore_errors
+        # 会静默吞掉、留下回执）。改用 onerror 清只读位后重试，见 `_clear_readonly_and_retry`。
+        shutil.rmtree(target, onerror=_clear_readonly_and_retry)
 
 
 def delete_local_artifacts(
