@@ -59,3 +59,28 @@ so their non-zero makensis exit is a pass.
 
 Last reproduced 2026-10-10 from a clean checkout: all nine probes matched the
 table, the key was deleted (`reg delete` exit 0).
+
+## r1-drivers/
+
+The #901 / R1 real-machine drivers, imported from that round's out-of-tree
+harness so the runs are reproducible from the checkout. Scratch state lives
+under `%TEMP%\ia-r1-drivers` unless `-EvidenceDir` / `-Keep` say otherwise.
+
+| file | role |
+| --- | --- |
+| `drive-r1-update.ps1` | end-to-end update driver: install #1 → plant payload → install #2 → assert. `-Case success` plants a >MAX_PATH tree (only a working long-path prefix can remove it); `-Case failure` plants a DELETE-denied child (promote must record the leftover instead of orphaning it). Installs only under `%LOCALAPPDATA%\Programs\IA Installer Test*` and asserts the real product dirs are untouched |
+| `leftover-probe.nsi` | compiled with `/DPROBE_TARGET=<long dir>` / `/DPROBE_CONTROL=<short dir>`; reports both `${FileExists}` forms on the long target, the short control, and a deep write attempt |
+| `run-leftover-probe.ps1` | builds the >MAX_PATH tree, compiles and runs the probe from it, prints the reading, removes the scratch tree |
+
+```powershell
+# test artifact first (prints the installer path it built):
+node scripts/test-windows-installer.mjs --compile-only
+powershell -File r1-drivers/drive-r1-update.ps1 -Installer <installer-test.exe> -Tag t1 -Case success -Expect fixed
+powershell -File r1-drivers/run-leftover-probe.ps1
+```
+
+`drive-r1-update.ps1` is the driver the #901 evidence logs came from (logs stay
+out of tree; the driver writes them under its evidence dir). Last run
+2026-10-10 from the checkout: `run-leftover-probe.ps1` printed
+`target_len=327 unprefixed=[false] prefixed=[true] control_short=[true] deepwrite=[failed]`
+and removed its scratch tree.
