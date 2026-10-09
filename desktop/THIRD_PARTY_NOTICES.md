@@ -13,7 +13,7 @@ source line range. This file holds the license texts and the provenance ledger.
 ```
 MIT License
 
-Copyright (c) 2024 DeepSeek
+Copyright (c) 2026 DeepSeek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,11 @@ SOFTWARE.
 | `src/background-notice.ts` | `apps/desktop/src/background-notice.ts` @ `5badb15` | 1–~60 | ADAPT (window-close hint marker) |
 | `src/directory-picker.ts` | `apps/desktop/src/directory-picker.ts` @ `5badb15` | 1–30 | ADAPT (channel + sender guard) |
 | `src/service-proxy.ts` | `apps/desktop/src/web-document.ts` @ `5badb15` | 75–100 | ADAPT (same authenticated-forwarding idea: shell attaches the credential, hop-by-hop response headers are withheld from the renderer; Node `http` server with an explicit socket splice for `upgrade` instead of a Request/Response handler, and a Bearer host token instead of a cookie — W-21 D3) |
+| `src/preload.cts` | `apps/desktop/src/preload-app.ts` @ `5badb15` | 76–84 | ADAPT (#826 / MM-05: the `__DSH_HOST_PATHS__` shape — a single `pathFor(file)` over Electron's `webUtils.getPathForFile` — becomes `__IA_HOST_PATHS__` on its own global. Upstream gates the whole exposure block on its own scheme (`dsh-app://app`); here the gate is the ownership check this preload already used (`isOwnLocalPage`), and an unowned frame gets **no** host-path global at all. Not ported: directory references and the rail chip — see `web/src/lib/hostFiles.ts` and `web/THIRD_PARTY_NOTICES.md`) |
+
+> The upstream license text above is quoted verbatim from `LICENSE` at
+> `5badb15009ae1756c3afe0ae0cef1faafc290ccc`; the copyright year was corrected
+> from `2024` to `2026` in #826 after re-reading that file at the pinned commit.
 
 ## PI-Desktop (`vastsa/PI-Desktop`) — reference only, no code copied
 
