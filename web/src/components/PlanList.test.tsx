@@ -180,6 +180,78 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     expect(container.querySelector('[data-plan-id="p11"]')?.hasAttribute('hidden')).toBe(false);
   });
 
+  it('AC4 点击可见的悬浮展开组 → 收起（按展开态切换，而非无脑固定）', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      const after = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-after .plan-list-fold-toggle',
+      )!;
+      act(() => fireEnter(after));
+      act(() => {
+        vi.advanceTimersByTime(HOVER_OPEN_DELAY_MS);
+      });
+      expect(after.getAttribute('aria-expanded')).toBe('true');
+      act(() => fireClick(after)); // 已展开（悬浮来源）→ 点击收起
+      expect(after.getAttribute('aria-expanded')).toBe('false');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC4 固定态不被悬浮静默解除：悬浮他组后离开，回落到固定组', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      const before = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-before .plan-list-fold-toggle',
+      )!;
+      const after = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-after .plan-list-fold-toggle',
+      )!;
+      act(() => fireClick(before)); // 固定前组
+      expect(before.getAttribute('aria-expanded')).toBe('true');
+      act(() => fireEnter(after)); // 悬浮后组：临时接管（互斥）
+      act(() => {
+        vi.advanceTimersByTime(HOVER_OPEN_DELAY_MS);
+      });
+      expect(after.getAttribute('aria-expanded')).toBe('true');
+      expect(before.getAttribute('aria-expanded')).toBe('false');
+      act(() => fireLeave(after)); // 离开后组：回落到仍固定的前组
+      act(() => {
+        vi.advanceTimersByTime(HOVER_CLOSE_DELAY_MS);
+      });
+      expect(after.getAttribute('aria-expanded')).toBe('false');
+      expect(before.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC4 触摸设备（hover:none）：悬浮不开（无悬浮层），点按切换固定', () => {
+    // jsdom 默认**无** window.matchMedia（实测 undefined）⇒ 其余用例走「有悬浮」分支；
+    // 本用例显式装上返回 matches:true 的匹配器，走触摸分支。
+    const original = window.matchMedia;
+    window.matchMedia = (() => ({ matches: true })) as unknown as typeof window.matchMedia;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      const after = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-after .plan-list-fold-toggle',
+      )!;
+      act(() => fireEnter(after));
+      act(() => {
+        vi.advanceTimersByTime(HOVER_OPEN_DELAY_MS);
+      });
+      expect(after.getAttribute('aria-expanded')).toBe('false'); // 悬浮被 hover:none 拦下
+      act(() => fireClick(after)); // 点按切换固定
+      expect(after.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      vi.useRealTimers();
+      window.matchMedia = original;
+    }
+  });
+
   it('AC6 脏数据容错：双 in_progress 只高亮第一个，不崩', () => {
     act(() =>
       root.render(createElement(PlanList, { items: [item('a', 'in_progress'), item('b', 'in_progress')] })),

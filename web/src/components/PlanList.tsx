@@ -61,6 +61,15 @@ export interface PlanFold {
   after: FoldRow;
 }
 
+/** 一个被折叠组的构成：切片非空且全为该状态 → 该状态，否则 mixed。
+ *  （空组 count=0、kind 无意义——折叠行不渲染，文案取空串。） */
+function groupRow(slice: PlanItem[], matchStatus: 'completed' | 'pending'): FoldRow {
+  return {
+    count: slice.length,
+    kind: slice.length > 0 && slice.every((it) => it.status === matchStatus) ? matchStatus : 'mixed',
+  };
+}
+
 /** 折叠决策（纯函数，AC8a）：阈值、锚点、窗口起点 clamp、组构成。 */
 export function computePlanFold(items: PlanItem[]): PlanFold {
   const n = items.length;
@@ -75,26 +84,12 @@ export function computePlanFold(items: PlanItem[]): PlanFold {
   // 窗口起点 = clamp(锚点, 0, n-3)（n > 阈值 ≥ 3 ⇒ n-3 ≥ 1）。
   const start = Math.min(Math.max(anchor, 0), n - WINDOW_SIZE);
   const end = start + WINDOW_SIZE;
-  const beforeItems = items.slice(0, start);
-  const afterItems = items.slice(end);
   return {
     folded: true,
     windowStart: start,
     windowEnd: end,
-    before: {
-      count: beforeItems.length,
-      kind:
-        beforeItems.length > 0 && beforeItems.every((it) => it.status === 'completed')
-          ? 'completed'
-          : 'mixed',
-    },
-    after: {
-      count: afterItems.length,
-      kind:
-        afterItems.length > 0 && afterItems.every((it) => it.status === 'pending')
-          ? 'pending'
-          : 'mixed',
-    },
+    before: groupRow(items.slice(0, start), 'completed'),
+    after: groupRow(items.slice(end), 'pending'),
   };
 }
 
@@ -152,10 +147,11 @@ function PlanRow({ item, current, collapsed }: { item: PlanItem; current: boolea
 }
 
 export function PlanList({ items }: { items: PlanItem[] }) {
-  // 交互状态：openGroup = 当前展开组（悬浮或已固定）；pinnedRef = 由 click 固定的组。
-  // 悬浮是**短暂**的：延迟打开、延迟关闭；click / 键盘固定后不再被悬浮关闭接管。
-  const [openGroup, setOpenGroup] = useState<FoldSide | null>(null);
-  const pinnedRef = useRef<FoldSide | null>(null);
+  // 交互：pinnedGroup = click/键盘**固定**展开的组；hoverGroup = 悬浮**临时**展开的组。
+  // 生效组 = hoverGroup ?? pinnedGroup（悬浮临时接管、离开即回落到固定组）。
+  // 单一生效组天然满足互斥（打开一组自动收起另一组）；固定态不会被悬浮静默解除。
+  const [pinnedGroup, setPinnedGroup] = useState<FoldSide | null>(null);
+  const [hoverGroup, setHoverGroup] = useState<FoldSide | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -178,35 +174,35 @@ export function PlanList({ items }: { items: PlanItem[] }) {
   const completed = items.filter((it) => it.status === 'completed');
   const currentId = items.find((it) => it.status === 'in_progress')?.id ?? null;
 
+  const openGroup: FoldSide | null = hoverGroup ?? pinnedGroup;
   const beforeOpen = fold.folded && openGroup === 'before';
   const afterOpen = fold.folded && openGroup === 'after';
 
-  // click / Enter / Space（原生 button 语义）：切换并**固定**；再点同一组则收起并取消固定。
-  // 「打开一组自动收起另一组」由单一 openGroup 状态自然成立。
+  // click / Enter / Space（原生 button 语义）：按**可见展开态**切换——已展开（无论由
+  // 悬浮还是固定而来）则收起，否则展开并**固定**。打开一组自动收起另一组（单一生效组）。
   const activate = (side: FoldSide) => {
     clearTimer();
-    if (pinnedRef.current === side) {
-      pinnedRef.current = null;
-      setOpenGroup(null);
+    if (openGroup === side) {
+      setPinnedGroup(null);
+      setHoverGroup(null);
     } else {
-      pinnedRef.current = side;
-      setOpenGroup(side);
+      setPinnedGroup(side);
+      setHoverGroup(null);
     }
   };
   const hoverEnter = (side: FoldSide) => {
     if (hoverNone()) return;
     clearTimer();
     timerRef.current = setTimeout(() => {
-      pinnedRef.current = null; // 悬浮接管：上一组的固定被解除（互斥）
-      setOpenGroup(side);
+      setHoverGroup(side);
       timerRef.current = null;
     }, HOVER_OPEN_DELAY_MS);
   };
   const hoverLeave = (side: FoldSide) => {
-    if (pinnedRef.current === side) return; // 已固定：悬浮离开不收起
+    // 只解除**临时**展开；固定组由 pinnedGroup 承担 ⇒ 悬浮离开后自动回落到固定组。
     clearTimer();
     timerRef.current = setTimeout(() => {
-      setOpenGroup((cur) => (cur === side ? null : cur));
+      setHoverGroup((cur) => (cur === side ? null : cur));
       timerRef.current = null;
     }, HOVER_CLOSE_DELAY_MS);
   };
