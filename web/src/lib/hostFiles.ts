@@ -66,14 +66,26 @@ export function hostPathsBridge(scope: unknown = globalThis): HostPathsBridge | 
   const host = scope as Record<string, unknown>;
   const candidate = host[HOST_PATHS_GLOBAL];
   if (typeof candidate !== 'object' || candidate === null) return undefined;
-  if (!('pathFor' in candidate) || typeof candidate.pathFor !== 'function') return undefined;
-  const { pathFor } = candidate;
+  // 形状探测本身也是**可抛点**：`in` 会走 Proxy 的 `has` 陷阱、属性读取会走 getter，
+  // 而这两样都由页面脚本控制（暴力测试 R1/R3 实测：`has` 陷阱抛错会让拖入路径上抛出一个
+  // 未捕获错误，文件既不进引用也不进上传——静默吞掉整次投递）。所以探测整体包进 try：
+  // 坏形状的唯一合法归宿还是"没有桥"（上一段承诺的降级纪律）。
+  let pathFor: unknown;
+  try {
+    const probe = candidate as { pathFor?: unknown }; // Named assertion: 页面全局无 schema，逐成员运行期判。
+    if (!('pathFor' in probe)) return undefined;
+    pathFor = probe.pathFor;
+  } catch {
+    return undefined;
+  }
+  if (typeof pathFor !== 'function') return undefined;
+  const lookup = pathFor; // `const` 绑定：闭包里保住收窄后的函数类型。
   return {
     // `call` binds back to the bridge object: a contextBridge proxy is not promised
     // to stay callable once detached. Non-string answers are flattened here so the
     // returned bridge keeps its declared shape.
     pathFor: (file: File) => {
-      const path: unknown = pathFor.call(candidate, file);
+      const path: unknown = lookup.call(candidate, file);
       return typeof path === 'string' ? path : '';
     },
   };

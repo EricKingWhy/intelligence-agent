@@ -57,6 +57,27 @@ describe('#826 hostPathsBridge — 形状判定', () => {
     }
   });
 
+  it('形状探测自身抛错（Proxy 的 has 陷阱 / 抛错 getter）→ undefined，不抛', () => {
+    // 暴力测试（R1/R3）实测：这两样都能让旧写法把异常抛到拖入路径上——文件既不进引用也不进
+    // 上传，整次投递被静默吞掉。`in` 与属性读取都由页面脚本控制，属"坏形状"，归宿只能是"没有桥"。
+    const hostileHas = new Proxy({}, {
+      has: () => {
+        throw new Error('has trap');
+      },
+    });
+    const throwingGetter = Object.defineProperty({}, 'pathFor', {
+      get() {
+        throw new Error('getter');
+      },
+      configurable: true,
+    });
+    for (const hostile of [hostileHas, throwingGetter]) {
+      const scope = { [HOST_PATHS_GLOBAL]: hostile };
+      expect(() => hostPathsBridge(scope)).not.toThrow();
+      expect(hostPathsBridge(scope)).toBeUndefined();
+    }
+  });
+
   it('形状正确 → 可直接调用，且非字符串返回值被压成空串（桥的声明形状不被破坏）', () => {
     const bridge = hostPathsBridge({ [HOST_PATHS_GLOBAL]: { pathFor: () => 7 } });
     expect(bridge).toBeDefined();
