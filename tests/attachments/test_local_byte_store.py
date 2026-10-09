@@ -1,7 +1,7 @@
 """LocalArtifactStore 字节路径（#822 MM-01；#830 D1 对象根全局化）。
 
 落盘算法来源: DeepSeek Harness `5badb150` `attachment-local/src/store.ts`（MIT）。
-对象根全局化 + 跨会话去重的来源: DSH `store.ts:47-51`、oh-my-pi
+对象根全局化 + 跨会话去重的来源: DSH `store.ts:47-54`、oh-my-pi
 `packages/coding-agent/src/session/blob-store.ts:40-68`（均 MIT，见
 `docs/agents/830-d1-global-attachment-store-design-proposal.md` §0）。
 
@@ -174,6 +174,34 @@ def test_legacy_session_scoped_object_is_still_readable(tmp_path: Path) -> None:
         asyncio.run(other.load_bytes(attachment_id))
     with pytest.raises(KeyError):
         asyncio.run(other.load_uploaded_bytes(attachment_id))
+
+
+def test_tampered_global_object_falls_back_to_intact_session_copy(tmp_path: Path) -> None:
+    """全局对象"存在但自证失败"不得终止回落：本会话同 sha 的完好副本仍应读得到。
+
+    回落的未命中判据必须包含"存在但 hash 不自证"（带外篡改 / 写坏），而不只是
+    `FileNotFoundError`；否则一份被篡改的全局对象会遮蔽升级前落在会话路径里的合法副本，
+    把本可读的回退成 `KeyError`。
+    """
+    store = _store(tmp_path, "sess-a")
+    payload = b"intact-session-copy"
+    attachment_id = compute_byte_artifact_id(payload)
+
+    # 升级前落在会话路径的完好旧对象（旧布局位同时就是上传回执位）。
+    legacy = _receipt_path(tmp_path, "sess-a", attachment_id)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(payload)
+
+    # 全局对象**存在**，但字节被带外篡改（sha 不再自证）。
+    tampered = _object_path(tmp_path, attachment_id)
+    tampered.parent.mkdir(parents=True, exist_ok=True)
+    tampered.write_bytes(b"tampered-global-object")
+
+    loaded = asyncio.run(store.load_bytes(attachment_id))
+    assert loaded.content == payload, "全局候选自证失败后必须继续回落，不得遮蔽完好的会话副本"
+    assert loaded.size == len(payload)
+    # 归属读只看会话位（完好），不被全局候选的损坏影响。
+    assert asyncio.run(store.load_uploaded_bytes(attachment_id)).content == payload
 
 
 def test_missing_and_malformed_ids_raise_key_error(tmp_path: Path) -> None:
