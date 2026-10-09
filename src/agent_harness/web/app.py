@@ -1735,8 +1735,10 @@ def _bearer_from_subprotocols(subprotocols: list[str]) -> str | None:
     token 本身不是 UTF-8 文本的先验（JWT 是 ASCII，但这里不假定）⇒ 解码失败
     一律返回 None（当作"没给凭据"），交给 `_resolve_identity` 的 fail-closed 处理。
 
-    解码是**宽容的**：尾部多余的非 base64 字符会被 `urlsafe_b64decode` 忽略，
-    缺的 padding 由上面那行 `=` 补齐 ⇒ 不同子协议串可解出**同一 token**。
+    解码是**部分宽容的**：多余字符数恰在 padding 补齐窗口内时被忽略；
+    其它尾部字符可能抛 `binascii.Error`（`ValueError` 子类，落 fail-closed 分支）
+    或被解成另一 token。缺的 padding 由上面那行 `=` 补齐，故不同子协议串可解出
+    **同一 token**。
     结果等价，仍走同一 `_resolve_identity` 鉴权路径，不构成绕过（实跑确认）。
     """
     proto = _token_subprotocol(subprotocols)
