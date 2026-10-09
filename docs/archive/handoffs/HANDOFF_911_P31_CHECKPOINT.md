@@ -4,7 +4,7 @@
 - 分支 `claude/911-p31-gate-exclusions`，worktree `/home/hatch/workspace/intelligence-agent-wt/911-p31`
 - **已 push**，**PR #918 已开**（base=main）：https://github.com/EricKingWhy/intelligence-agent/pull/918
 - 基线 origin/main `8edade99`；已做 **2 次先回后正同步**（merge `6f39f595` 合 8f55233c；merge `27078c50` 合 cab16c30）
-- 推送 tip：`git rev-parse HEAD`（本文件写入时为 `6e9aa9ad`）
+- 推送 tip：`git rev-parse HEAD`（本文件写入时为 `6e9aa9ad`；**终态 tip `ac80586f`**）
 - **本票两文件自被审 SHA `e2c8b8ff` 起逐字节未变**：`derive.py` blob `5d3a4fa3724d85c73394b696e6bea48ba1c3d9b8`、
   测试 blob `5925a6a7082b7eb6c0962688f2600a1db4f6ea7c`（`git diff e2c8b8ff..HEAD -- <这两个路径>` 为空）。
   ⚠ **不要**用 `git diff e2c8b8ff..HEAD -- src/ tests/`（无路径限定）来佐证：该 range 含第 2 次同步合并
@@ -15,10 +15,16 @@
 - 本机 Gate-0：`f9c1ed02` / tree `b2f191ab` **6/6 PASS**（22.6s，收据 `docs/gate/f9c1ed02….json`）；
   更早数枚 6/6（含合并树 `350b6d81`）均在库
 - 覆盖闸门 `check_review_coverage.py`：**exit 0**，0 条 ❌
-- **集成树全量（终态读数）**：tip `76de42ce` / tree `b14dd2cd`（含 main #890 侧代码），
-  `uv sync --locked --all-extras` + `pnpm install --frozen-lockfile`，日志
-  `/home/hatch/pytest-911/verify-911v5.log` —— **7185 passed / 0 failed / 27 skipped / 51 deselected
-  （425.82s）**；沙箱 Gate-0 同树 **6/6 PASS**（收据 `docs/gate/76de42ce….json`，随该树生成）
+- **集成树全量（终态读数）**：**终态 tip `ac80586f` / tree `c3c852f5`**（第 3 次同步合并后，含 main #916 侧代码），
+  `uv sync --locked --all-extras` + `pnpm install --frozen-lockfile`，沙箱日志
+  `~/pytest-911/relaunch2/verify-911v6.log`（源：`sbx --cloud` `shell/omp-911-p31:/home/agent/verify-911v6.log`，
+  sha256 `a544ce30add0c2d91ed9e46702e293b495a3c9f1ace2ab7220940a46e15f23e0`）—— **7189 passed / 0 failed
+  / 27 skipped / 51 deselected（424.49s，2026-10-09T20:51:20Z）**；沙箱 Gate-0 同树 **6/6 PASS**
+  （沙箱读数 `docs/gate/ac80586f….json` 由 `verify-911v6.log` 第 4 节生成；本机复跑同 SHA 亦 6/6 PASS，两枚读数的
+  `tree` 均为 `c3c852f5`，仅工具版本字段不同）
+- 前一读数（预合并树 `76de42ce` / tree `b14dd2cd`）：本机全量 7185 passed / 0 failed（425.82s），
+  该树已被第 3 次同步合并 `b4bdb496` 取代（`68abc223` 带入 main 侧 #916 代码）⇒ 按 §8.1 第 3 条判据
+  ①（`name-status` 出现非 docs 的 `M`）不成立，**读数在新树上重跑**，即上面 `ac80586f` 那一条
 - 前一轮同法读数（预合并树 `6f39f595`）：7142 passed / **1 failed** / 27 skipped（406.55s），
   唯一红 = `test_real_ledger_passes_after_the_431_fix`（根因 = 台账行当时未入库，与产品代码无因果
   关系）；该红在集成树上已消失（同文件隔离复跑 **4 passed**）
