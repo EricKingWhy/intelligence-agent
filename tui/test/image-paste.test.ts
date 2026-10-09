@@ -181,24 +181,45 @@ test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞�
   }
 });
 
-test("readImageFile：符号链接指向常规图片照常可读（常规文件守卫不误伤链接）", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ia827-link-"));
+/**
+ * symlink 是**宿主能力**：Windows 未开开发者模式/非管理员时 `symlinkSync` 直接 `EPERM`。
+ * 探针失败按能力跳过（runner 与 Linux 上探针通过、真跑本用例），不把环境差异判成产品红。
+ */
+function symlinkSkipReason(): false | string {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-link-probe-"));
   try {
     const target = join(dir, "shot.png");
     writeFileSync(target, PNG);
-    const link = join(dir, "link.png");
-    // Windows 上建符号链接要管理员/开发者模式（GitHub runner 有）；无权限时红属环境限制。
-    symlinkSync(target, link);
-    const result = readImageFile(link);
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.image.mimeType, "image/png");
-      assert.equal(result.image.name, "link.png");
-    }
+    symlinkSync(target, join(dir, "link.png"));
+    return false;
+  } catch {
+    return "宿主不允许创建符号链接（Windows 需开发者模式或管理员），按能力探测跳过";
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}
+
+test(
+  "readImageFile：符号链接指向常规图片照常可读（常规文件守卫不误伤链接）",
+  { skip: symlinkSkipReason() },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "ia827-link-"));
+    try {
+      const target = join(dir, "shot.png");
+      writeFileSync(target, PNG);
+      const link = join(dir, "link.png");
+      symlinkSync(target, link);
+      const result = readImageFile(link);
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.image.mimeType, "image/png");
+        assert.equal(result.image.name, "link.png");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("readImageFile：超过 20 MiB 上限 ⇒ too_large，且不把整文件读进内存", () => {
   const dir = mkdtempSync(join(tmpdir(), "ia827-big-"));
