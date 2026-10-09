@@ -61,6 +61,18 @@ if TYPE_CHECKING:
 _LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def origin_is_local(origin: str) -> bool:
+    """该 `Origin` 是否算"本机来源"（HTTP 与 WS 两条面的**同一判据**，#890）。
+
+    `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 不算本机。
+    抽出来是为了让 WS 来源闸（`AuthSeamMiddleware._authenticate_websocket`）与
+    下面的 `require_trusted_origin` 共用一份实现——两处各写一份必然漂移，
+    而"WS 与 HTTP 同口径"正是 #890 的验收内容。
+    """
+    hostname = urlparse(origin).hostname
+    return hostname is not None and hostname.lower() in _LOCAL_HOSTNAMES
+
+
 def require_trusted_origin(request: Request) -> None:
     """宿主侧端点的来源闸（ADR-0025 D1 的 (b)；ADR-0028 D2 起 `GET /api/host/dirs` 复用同一份）。
 
@@ -73,8 +85,7 @@ def require_trusted_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin is None:
         return  # 非浏览器发起：第三方网页无法构造不带 Origin 的浏览器请求
-    hostname = urlparse(origin).hostname
-    if hostname is None or hostname.lower() not in _LOCAL_HOSTNAMES:
+    if not origin_is_local(origin):
         raise HTTPException(
             status_code=403,
             detail=(
