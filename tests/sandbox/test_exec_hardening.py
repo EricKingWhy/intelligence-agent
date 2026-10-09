@@ -1022,23 +1022,28 @@ def test_docker_exec_fails_closed_when_response_close_fails():
     with pytest.raises(RuntimeError, match="HTTP response did not close"):
         sandbox.exec("echo done", timeout=5)
 
+    api.exec_start.return_value.close.assert_not_called()
+
     with pytest.raises(RuntimeError, match="previous cleanup was unconfirmed"):
         sandbox.exec("must not run", timeout=5)
 
 
-def test_docker_exec_does_not_close_stream_during_response_close():
-    """A response-close timeout must not race stream.close on the same socket."""
+@pytest.mark.parametrize("late_cleanup", [False, True])
+def test_docker_exec_finishes_response_close_before_unblocking_reader(late_cleanup):
+    """A slow response close must finish before stream.close unblocks the reader."""
     from agent_harness.sandbox.docker import DockerSandbox
 
     close_started = threading.Event()
     release_close = threading.Event()
     close_finished = threading.Event()
+    stream_close_started = threading.Event()
+    reader_release = threading.Event()
     state = {}
 
     class _Response:
         def close(self):
             close_started.set()
-            release_close.wait(2)
+            release_close.wait()
             close_finished.set()
 
     response = _Response()
@@ -1047,26 +1052,55 @@ def test_docker_exec_does_not_close_stream_during_response_close():
         _response = response
 
         def close(self):
-            if close_started.is_set() and not close_finished.is_set():
+            if not close_finished.is_set():
                 state["overlap"] = True
-            release_close.set()
+            stream_close_started.set()
+            reader_release.set()
 
-    worker = threading.Thread(target=lambda: None)
+    worker = threading.Thread(target=lambda: reader_release.wait(5))
     worker.start()
-    worker.join()
     sandbox = object.__new__(DockerSandbox)
+    stream = _Stream()
+    holder = {"stream": stream}
+    if late_cleanup:
+        response_closed, stream_closed, close_state = sandbox._close_exec_resources(
+            stream,
+        )
+        holder["stream_cleanup"] = (
+            stream,
+            response_closed,
+            stream_closed,
+            close_state,
+        )
+    cleanup_errors = []
+
+    def cleanup():
+        try:
+            sandbox._close_exec_reader(
+                holder, worker, threading.Lock(),
+            )
+        except RuntimeError as error:
+            cleanup_errors.append(error)
+
+    cleanup_thread = threading.Thread(target=cleanup)
+    cleanup_thread.start()
 
     try:
-        with pytest.raises(RuntimeError, match="HTTP response did not close"):
-            sandbox._close_exec_reader(
-                {"stream": _Stream()}, worker, threading.Lock(),
-            )
+        assert close_started.wait(2)
+        assert not stream_close_started.wait(0.5)
+        release_close.set()
+        cleanup_thread.join(4)
+        assert not cleanup_thread.is_alive()
+        assert not cleanup_errors
+        assert close_finished.is_set()
+        assert stream_close_started.is_set()
+        assert not state.get("overlap", False)
+        assert not worker.is_alive()
     finally:
         release_close.set()
-
-    assert close_finished.wait(1)
-    assert not state.get("overlap", False)
-
+        reader_release.set()
+        cleanup_thread.join(4)
+        worker.join(1)
 
 def test_docker_exec_reports_reader_thread_after_container_stop_failure():
     """A stop exception must not skip the final reader-thread liveness check."""
