@@ -40,8 +40,9 @@
 #
 # 加固
 #
-# `permissions: contents: read`（只读仓库）。所有第三方 action 一律**完整 SHA + 版本注释**
-# （与仓库既有工作流一致；tag 可变、可删，有投毒面），升级走 Dependabot。
+# `permissions`：仓库内容只读（`contents: read`）+ `actions: write`（artifact 上传需要）。
+# 所有第三方 action 一律**完整 SHA + 版本注释**（与仓库既有工作流一致；tag 可变、可删，
+# 有投毒面），升级走 Dependabot。
 
 name: windows-installer-smoke
 
@@ -55,18 +56,21 @@ on:
         default: false
   pull_request:
     # 路径过滤：只在安装器相关文件变化时跑，不给每个 PR 增加 10–20 分钟负担。
+    # 除票面点名的三条外，另加 build-windows-installer.mjs（烟测直接 import 它）、
+    # desktop 的依赖清单（本 job 跑 `npm ci` 构建安装包）与本工作流自身。
     paths:
       - 'desktop/installer/**'
-      - 'installer/**'
       - 'desktop/scripts/test-windows-installer.mjs'
       - 'desktop/scripts/build-windows-installer.mjs'
       - 'desktop/package.json'
       - 'desktop/package-lock.json'
       - '.github/workflows/windows-installer-smoke.yml'
 
-# 本工作流只读仓库，不需要任何写权限。
+# 仓库只读；artifact 上传需要 `actions: write` —— GitHub 对 token 的作用域要求，
+# 缺它会 403 "Resource not accessible"（与仓库既有 gate1.yml / security.yml 同口径）。
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   # 同一 PR 连推多次时只保留最后一次 —— 前一次的结论对判定没有意义。
