@@ -1,27 +1,34 @@
 <!-- 断点交接（一次性）：#911 P3-1 施工中断用的续跑断点，随本票落进版本控制。 -->
-# #911 断点
+# #911 P3-1 收尾状态（2026-10-10）
 
-- 基线：`origin/main` = `8edade996c294e9560bed1717edc7cbe6113010e`（开工时 `git fetch` 后 `rev-parse` 复核）
-- 分支：`claude/911-p31-gate-exclusions`；worktree：`~/workspace/intelligence-agent-wt/911-p31`
-- 规则已读：`~/workspace/system/agent-workflow-prompt.md`（全文 106 行）、`AGENTS.md`（545 行全文）、`CLAUDE.md`（16 行）、Issue #911 全文、`~/workspace/system/dispatch/862-run.log`（00:20:43 节）
-- 触发细则已读：`docs/agents/review-debug-playbook.md`、`docs/agents/implementation-discipline.md`、`docs/agents/issue-tracker.md`、`docs/agents/git-workflow.md`、规格 00/03/13/14 相关章节
+- 分支 `claude/911-p31-gate-exclusions`，worktree `/home/hatch/workspace/intelligence-agent-wt/911-p31`
+- **已 push**，**PR #918 已开**（base=main）：https://github.com/EricKingWhy/intelligence-agent/pull/918
+- 基线 origin/main `8edade99`；已做 **2 次先回后正同步**（merge `6f39f595` 合 8f55233c；merge `27078c50` 合 cab16c30）
+- 推送 tip：见 `git rev-parse HEAD`（本文件写入时为 `b88bdef4`，tree `1f9e9ddd`）
+- **代码面自被审 SHA `e2c8b8ff` 起逐字节未变**（`git diff e2c8b8ff..HEAD -- src/ tests/` 为空；
+  `derive.py` blob `5d3a4fa3724d85c73394b696e6bea48ba1c3d9b8`）；其后全部为 docs-only（台账/归档/tracker/收据）
 
-## 探针（仓库外 `~/pytest-911/`）
-- `probe_gate.py` — replace 污染形状（supersede 在途）→ 闸门选中 replace 事件 seq=4，`is_direct`=False ⇒ **分叉成立**
-- `probe_bracket.py` — replace 落在 compaction bracket 内 → 替身投影成 `(s,s)`，闸门选中 ⇒ **分叉成立**
-- `probe_input_request.py` — 真生产点 `_constraint_input_answer_data` 产出四种答复 → `latest`=None 且 `is_direct`=False ⇒ **一致，无分叉**
+## 门禁
+- 本机 Gate-0：推送 tip `b88bdef4` / tree `1f9e9ddd` **6/6 PASS**（`--no-record` 复跑同结论）；
+  收据 `docs/gate/350b6d81…json`（合并树）与更早数枚 6/6 均在库
+- 覆盖闸门 `check_review_coverage.py`：**exit 0**，0 条 ❌
+- 沙箱全量 pytest（冻结树 `e2c8b8ff`，`uv sync --locked --all-extras` + `pnpm install --frozen-lockfile`）：
+  运行中（日志 `~/verify-911v4.log` @ sandbox `shell/omp-911-p31`）；预期唯一红 =
+  `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`
+  （根因 = 台账行当时未入库，已在后续提交入库，与产品代码无因果关系）
+- 前一轮同法读数（冻结树 `6f39f595`）：7142 passed / 1 failed / 27 skipped（406.55s），唯一红即上述那条
 
-## 状态（收尾更新 2026-10-10；SPECKIT 上游已停用本文件作状态载体 ⇒ 状态以 `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-10.md` 为准，此处只留断点续跑所需的最小事实）
+## 审查（四轮，零未闭合 finding）
+发现阶段两轴（正确性 PASS 2×P4 / 标准 PASS-WITH-FINDINGS 2×P2+1×P3）→ 修后重审两轴
+（A 轴 P4-a 采纳 / P4-b 经独立复核实为**假阳性**故不改代码 / P3 闭合；B 轴上一轮 3 条全闭合 + 4 条记账面 findings 全处置）
+→ 窄复验 C 轴（三问全闭合，自写探针 0 分叉 / 20 例）→ 窄复验 D 轴（三问全闭合，无新 finding）。
+报告：`/home/hatch/pytest-911/review3/{A-correctness,B-standards,C-closure,D-closure2}.md`
 
-- [x] 可达性调查 —— ⚠ **下条结论已被后续实证推翻，保留原文以留痕**：「input_request_id 不可分叉」**错**：
-  澄清答复之后又有 user 消息、而该后续消息被 `message/superseded` 整轮 shadow 时，投影里 seq 最高的可见
-  `HumanMessage` 正是答复本身（早退守卫只在答复**就是末条**时触发）⇒ 分叉可达。上面
-  `probe_input_request.py` 只试了「答复就是末条」的形状，故得出相反结论；正确形状的复现见
-  `tests/session/test_derive_direct_user_input.py` 的两条 input_request_id 用例。
-  两条排除**均已**补齐（`replace` 虽无生产写点，但不可达理由不是被 shadow）。
-- [x] TDD 红 → 修 → 绿（红证：`8edade99` 实现 + 新用例 = 4 failed / 9 passed）
-- [x] 本机 focused + ruff
-- [x] 沙箱全量（见归档节的读数与其唯一红的归因）
-- [x] 台账（`docs/review_ledger.d/911-p31-*.tsv`）
-- [x] 两轴审查（发现阶段 + 修后重审 + 两轮窄复验，零未闭合 finding）
-- [ ] Gate0 终态收据已落；Push + PR 待授权（§14.4）
+## 未做（按 §14.4 交用户）
+- **未 merge、未关 Issue #911**（用户未授权；PR 已就绪等 CI 必需检查绿）
+- 一条**协议条文冲突**登记在 `docs/SDD_TICKET_TRACKER.md` 的 #911 状态行，供用户裁断
+
+## 断点续跑怎么做
+1. `cd` 到 worktree，`git fetch origin && git log --oneline -1` 核对 tip
+2. 若 CI `gate0` 绿且 `mergeStateStatus` 非 BEHIND ⇒ 报告 Muse，等 merge 授权
+3. 若 main 又前进 ⇒ 按 §14.6 再做一次同步合并 + 补机械归属行 + Gate-0（本轮已做两遍，流程同上）
