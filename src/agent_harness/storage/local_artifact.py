@@ -305,7 +305,9 @@ class LocalArtifactStore(ArtifactStore):
         handle: int | None = None
         try:
             handle = os.open(
-                temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                temporary,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+                0o600,
             )
             # `os.write` 不保证一次写完（大对象必然部分写）——循环写完。
             view = memoryview(data)

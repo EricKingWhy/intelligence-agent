@@ -717,7 +717,7 @@ export const Composer = memo(function Composer({
               title="这次会话用哪个档位？"
               options={toCatalogOptions(agentProfiles, catalogIcon)}
               value={selectedAgentProfile}
-              onChange={onAgentProfileChange ?? (() => {})}
+              onChange={(id) => onAgentProfileChange?.(id)}
               icon={User}
               placeholder="Agent"
               disabled={locked}

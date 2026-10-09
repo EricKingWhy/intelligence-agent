@@ -97,6 +97,27 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
   await pickControl(page, '权限模式', 1, '只读');
 });
 
+test('Agent Profile selection does not pass an unsupported state callback', async ({ page }) => {
+  const callbackWarnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' && message.text().includes('State updates from the useState() and useReducer() Hooks')) {
+      callbackWarnings.push(message.text());
+    }
+  });
+
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.goto('/');
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+
+  expect(callbackWarnings).toEqual([]);
+});
+
 test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
   // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）。
   // 长目录来自 fixtures 公共构造，避免内联后与其它 spec 漂移。
