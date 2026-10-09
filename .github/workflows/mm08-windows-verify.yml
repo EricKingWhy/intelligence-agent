@@ -70,7 +70,11 @@ on:
     branches:
       - omp/830-mm08-cross-client-verify
     paths:
+      # 只盯本 workflow 与它真正消费的两个脚本：改证据脚本要能在 Windows runner 上复跑，
+      # 但 docs-only 的后续提交不该再触发（省 runner 分钟）。
       - .github/workflows/mm08-windows-verify.yml
+      - scripts/verify_830_mm08.py
+      - scripts/mm08_stub_server.py
 
 permissions:
   contents: read

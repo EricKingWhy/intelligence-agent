@@ -612,6 +612,11 @@ def run_tui_client(
         ],
         capture_output=True,
         text=True,
+        # 子进程的输出一律是 UTF-8（脚本正文按 UTF-8 写、断言里含中文）；父进程不能吃
+        # locale 默认编码——Windows runner 上是 cp1252，`subprocess` 的 reader 线程会
+        # `UnicodeDecodeError` 直接炸掉读数（GA #37941349749 实测）。
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         cwd=str(work),
         check=False,
@@ -653,6 +658,9 @@ def run_cli(
             "MODEL_NAME": "vision-probe",
             "AGENT_MODELS": CATALOG,
             "PYTHONPATH": str(REPO / "src"),
+            # 真 CLI 的 stderr 是中文；固定子进程按 UTF-8 写、父进程按 UTF-8 读，
+            # 免得 Windows runner 的 cp1252 让读数在 reader 线程里炸掉（见 run_tui_client 注释）。
+            "PYTHONIOENCODING": "utf-8",
             "no_proxy": "localhost,127.0.0.1",
             "NO_PROXY": "localhost,127.0.0.1",
         }
@@ -664,6 +672,8 @@ def run_cli(
         argv,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         env=env,
         cwd=str(root),
