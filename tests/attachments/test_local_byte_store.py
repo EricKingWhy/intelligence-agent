@@ -105,7 +105,16 @@ def test_object_permission_is_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"perm", mime_type="image/png"))
     path = _object_path(tmp_path, "sess-a", blob.artifact_id)
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o400
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if os.name == "nt":
+        # Windows 没有 POSIX 权限位：CPython 按"只读属性"**合成** st_mode（只读 ⇒ 0o444、
+        # 可写 ⇒ 0o666），`os.chmod(path, 0o400)` 只落成"清掉写入位"⇒ 0o400 在 Windows 上
+        # 不可满足（#830 D2 的 GA 实跑抓到的既有断言，与本票改动无关）。这里断言同一条
+        # 语义（对象不可写），判别力不变：真被写成可写，下面两条都红。
+        assert mode & 0o222 == 0, f"对象必须是只读的，实际 mode={oct(mode)}"
+        assert not os.access(path, os.W_OK)
+    else:
+        assert mode == 0o400
 
 
 def test_halfway_failure_leaves_no_readable_residue(
@@ -315,6 +324,10 @@ def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
     平台行为注入进来——`os.O_BINARY` 补一位模拟位、`os.open` 把它剥掉后再交给真
     `os.open`（Linux 不认这个 flag），并让**不带**该位的 fd 走 CRT 文本模式语义
     （写盘时 `0x0A` -> `0x0D 0x0A`）。缺陷机理与真 Windows 逐条同形。
+
+    模拟层按 **fd 号**记状态 ⇒ 每次 open 都要**双向**刷新它（带位就从集合里删）：fd 号会被
+    复用，只往里加、不删的话，同一个号先被别人不带位地打开、再被本次发布打开时，陈旧记录
+    还在 ⇒ 对象那次写被误判成文本模式 ⇒ 用例假红。以"本次 open 的真实位"为准。
     """
     monkeypatch.setattr(os, "O_BINARY", _EMULATED_O_BINARY, raising=False)
     real_open, real_write = os.open, os.write
@@ -322,7 +335,9 @@ def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
 
     def emulating_open(path, flags, *args, **kwargs):
         fd = real_open(path, flags & ~_EMULATED_O_BINARY, *args, **kwargs)
-        if not flags & _EMULATED_O_BINARY:
+        if flags & _EMULATED_O_BINARY:
+            text_mode_fds.discard(fd)
+        else:
             text_mode_fds.add(fd)
         return fd
 

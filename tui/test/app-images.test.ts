@@ -127,7 +127,11 @@ function makeHarness(options?: {
       baseUrl: "http://127.0.0.1:0",
       sessionId: "s1",
       fetchImpl: fetchFn,
-      platform: options?.platform ?? "linux",
+      // 默认取**宿主**平台：本文件里 AC2/AC4/P3/N1 会把仓库内的真 fixture 路径喂进去
+      // （`FIXTURE_PNG` 由 `fileURLToPath` 产出），而路径语义由注入的 platform 决定
+      // （`resolvePastedImagePath` 在非 win32 上做 `\<char>` 反转义）——写死 "linux"
+      // 时 Windows 上的 `D:\...` 会被反转义毁掉 ⇒ 图读不回来（#830 D3 余下的 3 例）。
+      platform: options?.platform ?? process.platform,
       env: options?.env ?? {},
       initialImages: options?.initialImages,
       readClipboardImage: async () => {
