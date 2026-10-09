@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（Dependabot 维护 SHA pin）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.4.0（Dependabot 维护 SHA pin）
         # 全量历史：全量 pytest 含审查覆盖闸门用例，按 ledger 区间走 git 历史，浅克隆必 FAIL（gate0 检出同理）
         with:
           fetch-depth: 0
@@ -83,7 +83,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: 装 pnpm 10.32.1
