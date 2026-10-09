@@ -455,6 +455,9 @@ class DockerSandbox(Sandbox):
                         "Docker exec cleanup could not be confirmed: output stream worker did not stop"
                     ) from holder["error"]
                 raise holder["error"]
+            stream = holder.get("stream")
+            if stream is not None and hasattr(stream, "close"):
+                self._best_effort_bounded_call(stream.close, 0.2)
 
         if control_pending:
             text = stderr_decoder.feed(bytes(control_pending))
