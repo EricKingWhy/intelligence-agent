@@ -231,6 +231,15 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.equal(stripNsisComments('x $" ; still in string'), 'x $" ; still in string')
   })
 
+  it('keeps a `;` that follows an escaped quote inside a string', () => {
+    // Measured on makensis 3.0.4.1: `$\"` stores a literal quote and does not
+    // end the string, so the `;` after it is still string content.
+    assert.equal(stripNsisComments('x "a$\\" ; keep'), 'x "a$\\" ; keep')
+    // A bare `$"` is not an escape — that quote closes the string, and the `;`
+    // after it starts a comment ("WriteRegStr expects 4 parameters, got 5").
+    assert.equal(stripNsisComments('x "a$" ; gone'), 'x "a$" ')
+  })
+
   it('flags the pre-#901 prefix and accepts the corrected one', () => {
     assert.deepEqual(malformedLongPathPrefixes(FIXED_DELETE), [])
     assert.deepEqual(malformedLongPathPrefixes(BROKEN_DELETE), [{ line: 1, text: BROKEN_DELETE }])
@@ -309,6 +318,54 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     ])
   })
 
+  it('flags a delete whose iaClearBackupDir call is gone (the window cannot run on)', () => {
+    const noClear = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(noClear), [
+      { line: 2, what: 'no !insertmacro iaClearBackupDir after the delete' },
+    ])
+  })
+
+  it('does not let another function satisfy the check (fail-closed window)', () => {
+    const acrossFunctions = [
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      'FunctionEnd',
+      'Function other',
+      '  ${If} ${Errors}',
+      '  ${EndIf}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(acrossFunctions), [
+      { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
+      { line: 3, what: 'missing ${Errors} check before iaClearBackupDir' },
+      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+    ])
+  })
+
+  it('flags a ClearErrors between the delete and the read', () => {
+    const interposed = [
+      'ClearErrors',
+      FIXED_DELETE,
+      'ClearErrors',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(interposed), [
+      { line: 2, what: 'ClearErrors between the delete and the ${Errors} read discards the failed delete' },
+    ])
+  })
+
   it('is fail-closed: no delete site at all is a problem', () => {
     assert.deepEqual(unguardedBackupDelete('Function nothing\nFunctionEnd'), [
       { line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' },
@@ -326,6 +383,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
     assert.deepEqual(malformedLongPathPrefixes(source), [])
     assert.deepEqual(unguardedBackupDelete(source), [])
+    // The record must not outlive the directory it names: a promote drops it
+    // when the recorded path is gone, and keeps it while the directory exists.
+    assert.match(source, /\$\{IfNot\}\s+\$\{FileExists\}\s+"\$iaLeftoverDirectory"/)
+    assert.match(source, /\$\{IfNot\}[\s\S]*?DeleteRegValue[^\n]*"IaLeftoverDir"[\s\S]*?\$\{EndIf\}/)
   })
 
   it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {

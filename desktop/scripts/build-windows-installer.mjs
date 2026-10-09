@@ -685,8 +685,14 @@ export function validateLangStringGuards(source, filename) {
 
 /**
  * Blank out NSIS `;` line comments (NSIS has no block comments). A `;` inside a
- * double-quoted string is not a comment, and `$\"` escapes a quote inside a
- * string, so the scan tracks both (#901).
+ * double-quoted string is not a comment, so the scan has to follow the string
+ * state, including the one escape that can carry a quote (#901).
+ *
+ * Measured on makensis 3.0.4.1: `"a$\"b"` stores `a"b`, so `$\"` is an escaped
+ * quote and does not end the string; `"a$"b"` is a parse error ("WriteRegStr
+ * expects 4 parameters, got 5"), so a bare `$"` is no escape at all — that `"`
+ * closes the string. Treating `$"` as an escape and `$\"` as ordinary
+ * characters made the scan disagree with the compiler on both forms.
  */
 export function stripNsisComments(source) {
   return source
@@ -696,9 +702,9 @@ export function stripNsisComments(source) {
       let out = ''
       for (let i = 0; i < line.length; i += 1) {
         const ch = line[i]
-        if (inQuote && ch === '$' && line[i + 1] === '"') {
-          out += '$"'
-          i += 1
+        if (inQuote && ch === '$' && line[i + 1] === '\\' && line[i + 2] === '"') {
+          out += '$\\"'
+          i += 2
         } else if (ch === '"') {
           inQuote = !inQuote
           out += ch
@@ -768,6 +774,12 @@ export function validateLongPathPrefixes(source, filename) {
  *     update, 3.50 GiB measured on one machine), and a silent install has no
  *     UI and writes no NSIS detail log to read it back from.
  *
+ * The check window ends at `iaClearBackupDir` or at the enclosing `FunctionEnd`,
+ * whichever comes first, and a delete without a following `iaClearBackupDir` is
+ * itself a problem: bounding the window by the clear call alone made the guard
+ * fail open — with the call removed, an unrelated `${Errors}` read further down
+ * the file satisfied the check for this site.
+ *
  * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
  * is reported as a problem, so removing the delete site cannot pass silently.
  */
@@ -775,6 +787,7 @@ export function unguardedBackupDelete(source) {
   const problems = []
   const lines = stripNsisComments(source).split(/\r?\n/)
   const deleteLine = /RMDir\s+\/r\s+"\\\\\?\\\$iaBackupDirectory"/
+  const errorsMacro = '${Errors}'
   let sites = 0
   for (let i = 0; i < lines.length; i += 1) {
     if (!deleteLine.test(lines[i])) continue
@@ -784,16 +797,27 @@ export function unguardedBackupDelete(source) {
       problems.push({ line: i + 1, what: 'missing ClearErrors before the delete' })
     }
     const rest = lines.slice(i + 1)
+    const functionEnd = rest.findIndex((line) => /^\s*FunctionEnd\b/.test(line))
     const clearIndex = rest.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
-    const window = clearIndex === -1 ? rest : rest.slice(0, clearIndex)
-    const errorsMacro = '${Errors}'
+    if (clearIndex === -1 || (functionEnd !== -1 && functionEnd < clearIndex)) {
+      problems.push({ line: i + 1, what: 'no !insertmacro iaClearBackupDir after the delete' })
+    }
+    const bounds = [functionEnd, clearIndex].filter((index) => index !== -1)
+    const window = bounds.length === 0 ? rest : rest.slice(0, Math.min(...bounds))
     const reads = window.filter((line) => line.includes(errorsMacro)).length
+    const firstRead = window.findIndex((line) => line.includes(errorsMacro))
     if (reads === 0) {
       problems.push({ line: i + 1, what: `missing ${errorsMacro} check before iaClearBackupDir` })
     } else if (reads > 1) {
       problems.push({
         line: i + 1,
         what: `${reads} ${errorsMacro} reads between the delete and iaClearBackupDir — only the first can see the failed delete`,
+      })
+    }
+    if (firstRead !== -1 && window.slice(0, firstRead).some((line) => /^\s*ClearErrors\b/.test(line))) {
+      problems.push({
+        line: i + 1,
+        what: `ClearErrors between the delete and the ${errorsMacro} read discards the failed delete`,
       })
     }
     if (!window.some((line) => /WriteRegStr\b[^\n]*"IaLeftoverDir"/.test(line))) {

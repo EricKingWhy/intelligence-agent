@@ -17,12 +17,16 @@
 ;   iaPromoteApplication (customInstall, end of the install section):
 ;                          if the new files are in place, delete the backup;
 ;                          otherwise roll back. A backup that cannot be deleted
-;                          is left in place and reported three ways — the
+;                          is left in place and recorded — always the
 ;                          IaLeftoverDir value in this application's own
-;                          registry key, the detail log, and $(iaStaleBackup)
-;                          where a UI is running; the backup pointer is cleared
-;                          either way, so a finished install can never be
-;                          mistaken for an incomplete one below.
+;                          registry key, always the detail log, and
+;                          $(iaStaleBackup) in a UI install (a silent one has no
+;                          box to show it). The record names the most recent
+;                          leftover and is dropped once that directory is gone,
+;                          not by the next delete that happens to succeed. The
+;                          backup pointer is cleared either way, so a finished
+;                          install can never be mistaken for an incomplete one
+;                          below.
 ;   iaRollbackApplication: remove the partial install and rename the backup
 ;                          back. A backup that cannot be restored is left in
 ;                          place, never deleted (same rule as upstream).
@@ -35,6 +39,7 @@
 
 Var iaFinalDirectory
 Var iaBackupDirectory
+Var iaLeftoverDirectory
 
 ; Stash the backup location where customInstall / .onGUIEnd can find it.
 ; Per-user installer: the current-user hive is always correct.
@@ -48,6 +53,12 @@ Var iaBackupDirectory
 
 !macro iaReadBackupDir
   ReadRegStr $iaBackupDirectory HKCU "${INSTALL_REGISTRY_KEY}" "IaBackupDir"
+!macroend
+
+; The record a failed delete leaves behind (#901). It is read back on every
+; promote so it can be dropped once the directory it names is gone.
+!macro iaReadLeftoverDir
+  ReadRegStr $iaLeftoverDirectory HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
 !macroend
 
 ; customInit: move a previous installation aside before the section
@@ -127,6 +138,16 @@ Function iaPromoteApplication
       WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
       DetailPrint "iaPromoteApplication: could not remove $iaBackupDirectory"
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK
+    ${EndIf}
+    ; An earlier record names a directory that may be gone by now (removed by
+    ; hand, or by a later delete that got through). Drop it once it is no longer
+    ; true and keep it while the directory is still there: clearing it blindly
+    ; would hide an older leftover behind the update that just succeeded.
+    !insertmacro iaReadLeftoverDir
+    ${If} $iaLeftoverDirectory != ""
+      ${IfNot} ${FileExists} "$iaLeftoverDirectory"
+        DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
+      ${EndIf}
     ${EndIf}
     !insertmacro iaClearBackupDir
   ${Else}
