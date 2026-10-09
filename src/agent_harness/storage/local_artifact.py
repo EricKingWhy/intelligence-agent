@@ -301,8 +301,8 @@ class LocalArtifactStore(ArtifactStore):
                 # 继续回落，不遮蔽同一 sha 在另一候选（本会话旧路径）里的完好副本。回落语义
                 # 覆盖"不存在"与"存在但损坏"两种未命中，全部候选都失败才 KeyError。
                 logger.warning(
-                    "blob candidate %s failed content-address verification; "
-                    "falling back to the next candidate (artifact %s)",
+                    "blob candidate %s failed content-address verification "
+                    "(artifact %s)",
                     path,
                     artifact_id,
                 )
