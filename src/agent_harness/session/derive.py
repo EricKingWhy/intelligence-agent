@@ -1800,11 +1800,17 @@ def latest_direct_user_input_event(
 ) -> SessionEvent | None:
     """Find the newest direct user message still present in model input.
 
-    C2 同源（#862）：候选投影项排除 compaction summary（`message.name ==
-    COMPACTION_SUMMARY_MESSAGE_NAME`，与 `is_direct_user_input_event` 的 C2 收紧同一手法）。
-    不排除时，「已被 live-supersede 的事件 s 的单事件 bracket 的 summary 文本恰等于 s 的
-    content」会让 `(s, s)` 那项把一条**已作废**的消息重选为"最新直接用户输入"——summary 是
-    投影替身、不是用户原话，不得据此复活已撤回消息。
+    候选闸门与 `is_direct_user_input_event` 的事件事实闸门**同口径**（#862 C2 + #911 P3-1）：
+
+    - C2（#862）：候选投影项排除 compaction summary（`message.name ==
+      COMPACTION_SUMMARY_MESSAGE_NAME`）。不排除时，「已被 live-supersede 的事件 s 的单事件
+      bracket 的 summary 文本恰等于 s 的 content」会让 `(s, s)` 那项把一条**已作废**的
+      消息重选为"最新直接用户输入"——summary 是投影替身、不是用户原话，不得据此复活已撤回
+      消息。
+    - P3-1（#911）：候选**事件**排除 `replace`（compaction 摘要替身）与 `input_request_id`
+      （澄清答复）——事实闸门的两条既有排除。二者都是真 `HumanMessage`、投影文本与自身
+      content 逐字相等，天然满足候选条件；可达性证据见下方候选循环内的注释与
+      `tests/session/test_derive_direct_user_input.py` 的 P3-1 用例。
     """
     latest_direct_message = next(
         (
@@ -1848,18 +1854,27 @@ def latest_direct_user_input_event(
         if text is None or text not in final_user_texts:
             continue
         event = events_by_seq.get(source_range[0])
-        # 已知残余（P3-1，非本票）：本候选闸门与 `is_direct_user_input_event` 的事件事实
-        # 闸门口径未完全对齐——后者含 `or event.data.get("replace")` 与
-        # `or "input_request_id" in event.data`，此处只查 type/injected_by/content 形状。
-        # `user/message(replace=True)` 是 compaction 摘要替身事件，若被投影成 (seq, seq)
-        # 且未被 shadow，其 content 与自身逐字相等 ⇒ 会被选为"最新直接用户输入"，与
-        # `is_direct_user_input_event`（判 False）分叉。**可达性未证实**：全仓 `src/` 未
-        # 发现 `replace=True` 的产生点，该事件形状疑为遗留。建议另票评估是否补齐，不阻塞
-        # #862（本票范围明确限定 compaction summary）。
+        # P3-1（#911）：本候选闸门与 `is_direct_user_input_event` 的事件事实闸门**同口径**
+        # ——`replace`（compaction 摘要替身）与 `input_request_id`（澄清答复）两类事件都
+        # 不是"新的约束来源"，在事实闸门里被排除，此处同样排除。
+        #
+        # 分叉可达，不是理论洁癖：候选只要求「单事件来源范围 + 投影文本 == 事件 content」，
+        # 而这两类事件**天然满足**（它们是真 `HumanMessage`，不是被改名/改写过的 summary
+        # 投影）。此前只有 C2（summary 命名）那一支被拦下：
+        #   * `replace=True`：`session/event.py` 的 4-event bracket 形状里该替身的 seq 落在
+        #     自己 bracket 的 shadow 区间内 ⇒ 现行写入路径（`context/builder.py` 只落
+        #     START / CONTEXT_COMPACTED / END，不落替身）下不可达；但历史日志或外部导入里
+        #     一旦出现该形状且 bracket 三事件缺席，它就被投影成 `(seq, seq)` 并被选中。
+        #   * `input_request_id`：**可达**——答复之后又有 user 消息、而那条后续消息被
+        #     `message/superseded` 取代（整轮 shadow）时，投影里 seq 最高的可见
+        #     `HumanMessage` 正是答复本身（函数开头的 `latest_direct_message` 早退守卫只在
+        #     答复**就是最后一条**事件时才触发）。此时闸门把澄清答复选成"最新直接用户输入"。
         if (
             event is None
             or event.type != USER_MESSAGE
             or event.data.get("injected_by")
+            or event.data.get("replace")
+            or "input_request_id" in event.data
             or not isinstance(event.data.get("content"), str)
             or not event.data["content"].strip()
             or event.data["content"] != text
