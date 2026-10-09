@@ -7960,3 +7960,12 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **残余（登记不修，交用户裁决；最小修法见月档 §6）**：Q1 promote 位 arming 未钉（`installer-directories.nsh:242`，「1」→「0」可让形状检查被跳过而无规则拦截）；Q2 arming 规则钉「存在」非「末值」（实测在其后插第二笔 `"0"` 赋值 ⇒ 75/75 全绿）；Q3 两条新规则未做分支/路径过滤（arming 无 `onSameBranch`、exit-code 无路径过滤且不在 `guarded[]`）；Q4 stray 规则文案对 `RMDir /r /REBOOTOK "$iaDeleteTarget"` 与串内 `RMDir /r` 误导（fail-closed 方向）；Q5 nightly `windows-latest` 腿为**条件性红**（`mkfifo`/`truncate` 调用点无能力探针：`tui/test/image-paste.test.ts:152-165`、`:211-233`、`tui/test/app-images.test.ts:562-570`）；Q6 **promote 的 `failed` 删除当前返回成功码**（rc 2 只给 `refused-*`：`installer-directories.nsh:267-269`；与 sweep/rollback 两处的 `failed`/失败分支不一致）；Q7 `partial` policy 的记录规则只查存在性；Q8 `installer.nsh`（新 sweep）无产品变异覆盖（`teeth-check.mjs` 只变异 `installer-directories.nsh`）+ 新 `iaSweepDeclined` 分支无规则钉；Q9 未实测项（NSIS 栈深 ~4 条目/层 vs 512 阀、`\\?\UNC\` 目标的 `RMDir /r`、`\\?\` 超过 ~327 字符的 FindFirst）；Q10 证据指针（`c3/c4` 日志所指 `…-install2-nsis.log` 不存在，断言不读它；两个探针表无仓库内日志，跑法在树内可复跑）。
 - **冻结树全量 13 车道**（`a19fe022` / tree `c79236b9`；日志 `D:\w21-work\gate-a19e.txt`）：读数见月档 §7（同表）。
 - **待批准**：push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿，本地绿不代替 CI 绿）；#904/#905/#908 关单在集成后（§14.12）。
+
+**集成收口（第 11 次同步，2026-10-10；合并 `b58fce87` / 修复 `fbfaea7a`+`c8e08a49` / 台账 `953550c9` / 收据 `6534026e`；PR #920）**：
+
+- **先回后正**：`origin/main`（`64349c87`，+133 提交）→ merge `b58fce87`（tree `879e837b`）；5 文件冲突按 §14.7 报告后处置（3 个 tui 测试文件 = 同一缺陷两种修法 ⇒ 取 main 版 + 回补本批独有的能力探针 `symlinkSkipReason()`；2 个 docs 追加 ⇒ 并集零删除、CRLF 字节核对）。处置依据：`git rebase` 的 patch-id 去重是**逐字近似**判据（Pro Git）⇒ 两侧机制不同不会自动去重，"谁赢"必须显式裁决；同族先例 = 第 10 次同步「重叠代码面两侧为同一修复 ⇒ 取 main 版」。
+- **集成期最小修复（main 侧 CI 不可见回归）**：`fbfaea7a` 安装器锁 `engines` 跟到 `>=22.1`（#830/#916 抬 tui 地板；断言要求严格相等；无 CI 车道跑 desktop 单测）+ `c8e08a49` 处置两轴 P4 两条（幻影符号注 / 陈旧夹具）。两轴独立审查均 `APPROVE-WITH-FINDINGS` 且均裁定为合法的集成期最小修复；台账行 `w21-nodefloor-fix-two-axis-fbfaea7a-c8e08a49.tsv`。
+- **新残余 Q11（P3：`engines` minor 地板无机器执行面；实测 `node.version=22.0.0` 穿过 validator + 全套用例）** ⇒ 登记进 #919（更名 Q1–Q11）。**Q5 消解**：三处调用点已由 main #830 修法覆盖（2 × 原生 `truncateSync`、1 × `mkfifo` ENOENT skip）+ 本批探针；nightly tui（windows）腿待合并后首跑。
+- **冻结树 13 车道（`953550c9` / tree `a10e6b07`；日志 `D:\w21-work\gate-final.txt`）**：13/13 全绿（pytest 7183 passed / 0 failed；playwright 538 passed；coverage rc=0）；Gate-0 6/6 收据 `docs/gate/953550c9bbac00ae010802d0c3faaa9e7f4b518e.json`（40.1s）；`6534026e` 为 docs-only 收据提交 ⇒ §8.8.4 文档面机械归属。
+- **无答复披露**：三问（tui 冲突取法 / docs 冲突取法 / nightly tui 腿是否加 `npm run check`）用户未作答，按报告推荐项执行，已在 PR #920 正文披露供否决。
+- **待批准**：PR #920 merge（push 已执行）；#904/#905/#908 关单在集成后（§14.12）。
