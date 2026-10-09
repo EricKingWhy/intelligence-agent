@@ -247,7 +247,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 ## 9. Windows 近似验证（`windows-latest`）
 
-**交付物**：`.github/workflows/mm08-windows-verify.yml`（`on: workflow_dispatch` **+ 本分支 `push`**〔`branches: [omp/830-mm08-cross-client-verify]`、`paths` 只盯该 workflow 文件自身〕，两个 job：`tui` / `cli`，`runs-on: windows-latest`，action 全部 pin 到 commit SHA，`permissions: contents: read` + `actions: write`）。加 `push` 的唯一目的是**绕过 `workflow_dispatch` 要求 workflow 在默认分支**这条限制（本票不 push main）而真触发一次 Windows runner；设计上只做**同一代码路径的近似**。**本节的步骤清单与 workflow 文件逐条一致，两处互相引用——改一处必须同步改另一处**（本票审查 P3-1 就是二者漂移产生的）：
+**交付物**：`.github/workflows/mm08-windows-verify.yml`（`on: workflow_dispatch` **+ 本分支 `push`**〔`branches: [omp/830-mm08-cross-client-verify]`；`paths` = 本 workflow 文件 + `scripts/verify_830_mm08.py` + `scripts/mm08_stub_server.py`——后两者是它在 runner 上真正消费的脚本，纳进来是为了让**证据脚本自身的修复**能在同一 runner 上复跑；docs-only 提交不触发，不烧 runner 分钟〕，两个 job：`tui` / `cli`，`runs-on: windows-latest`，action 全部 pin 到 commit SHA，`permissions: contents: read` + `actions: write`）。加 `push` 的唯一目的是**绕过 `workflow_dispatch` 要求 workflow 在默认分支**这条限制（本票不 push main）而真触发一次 Windows runner；设计上只做**同一代码路径的近似**。**本节的步骤清单与 workflow 文件逐条一致，两处互相引用——改一处必须同步改另一处**（本票审查 P3-1 就是二者漂移产生的）：
 - Job `tui`（`working-directory: tui`，Node 22）：
   1. `npm ci --no-audit --no-fund`；
   2. **类型检查 `npm run check`（= `tsc --noEmit`，`include` 覆盖 `src/**` 与 `test/**`）**——win32 分支（`tui/src/lib/host.ts` 的 `%APPDATA%`/盘符/反斜杠路径）的类型面在这里取证（gate0 的 tsc 车道只扫 `web/`，`--experimental-transform-types` 只剥类型不做检查 ⇒ tui 类型面此前无车道覆盖）；日志 `01-tsc.log`；
@@ -327,7 +327,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | U1 | **D1（AC3 缺陷）修不修、怎么修** | (a) fork 复制/链接附件对象；(b) 附件改全局内容寻址（DSH 式）；(c) child 读回回落父命名空间。本票只登记 |
 | U2 | ~~**AC6-VISION 凭证**~~ | **已闭环**（2026-10-09 用户裁决）：lighthouse `deepseek-ai/DeepSeek-V4.1-Flash` 即视觉线路，无需新凭证 ⇒ AC6-VISION 真跑 **PASS**（§4 AC6） |
 | U3 | **Windows 真机走查** | 真机（有人有 Windows Terminal 的机器）走一次；或接受 §9 的 GA 近似并明确标注 |
-| U4 | ~~**GA 触发路径**~~ | **已解决**（2026-10-09）：`workflow_dispatch` 要求 workflow 在**默认分支**（本票不 push main ⇒ `gh workflow run`/REST dispatch 双双 404）。改走 **`on: push`（仅本分支 `omp/830-mm08-cross-client-verify`，`paths` 只盯该 workflow 文件）** 真触发一次 `windows-latest`。**实测结果见 §9「GA 触发结果」**。已保留 `workflow_dispatch` 供日后合入 main 后手工跑 |
+| U4 | ~~**GA 触发路径**~~ | **已解决**（2026-10-09）：`workflow_dispatch` 要求 workflow 在**默认分支**（本票不 push main ⇒ `gh workflow run`/REST dispatch 双双 404）。改走 **`on: push`（仅本分支 `omp/830-mm08-cross-client-verify`；`paths` 盯本 workflow 文件 + 两个证据脚本）** 真触发一次 `windows-latest`。**实测结果见 §9「GA 触发结果」**。已保留 `workflow_dispatch` 供日后合入 main 后手工跑 |
 | U5 | push/PR/merge 边界 | 本票只推了特性分支 `omp/830-mm08-cross-client-verify`（为触发 GA，用户 2026-10-09 批准）；未开 PR、未合 main |
 | U6 | **D2 / D3 修不修、怎么修**（GA 近似验证新发现） | (a) D2 一行修（`flags \|= getattr(os, "O_BINARY", 0)`）+ 补一条 Windows 落盘字节直读的回归用例，D3 另开票改 6 条测试；(b) 全留观察项不修（Windows 附件字节仍是坏的）；(c) 只修 D2。本票只登记 |
 
