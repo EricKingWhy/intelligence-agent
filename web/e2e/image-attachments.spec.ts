@@ -459,3 +459,88 @@ test('AC8：队列条「编辑」重投递同样带回复图引用', async ({ pa
     attachments: [QUEUED_IMAGE],
   });
 });
+
+// ── #826（MM-05）：桌面宿主路径桥在场时的拖入分流 ────────────────────────────
+//
+// AC7「复用同一份 spec，不另开测试接缝」在这里落地：桌面加载的就是这一份 React 应用，
+// 与 Web 的唯一差别是 preload 往页面多写了一个全局桥（`desktop/src/preload.cts` 的
+// `window.__IA_HOST_PATHS__`）。所以桌面语境 = 本 spec + 注入那一个全局；那个字面量的
+// 跨包守卫在 `desktop/test/preload-host-paths.test.ts`，桥自身的收窄语义（谁拿到它、
+// `pathFor` 只对真从磁盘来的 File 回路径）由 desktop 侧的 vm 用例负责，这里不重复造。
+// 真 Electron 与 Chromium 的 `DataTransfer`/File 语义同源，分流判据完全落在前端这一层。
+
+/** 拖放用的真宿主路径：**故意含空白**，顺带钉住引号形态。 */
+const HOST_DROP_PATH = 'C:\\Users\\tester\\My Documents\\notes.pdf';
+
+/** 页面里的 preload 桥替身：只对指定文件名的文件返回宿主路径（其余一律空串，与 Electron 同形）。 */
+async function installHostPathBridge(page: Page, fileName: string, realPath: string): Promise<void> {
+  const args: [string, string] = [fileName, realPath];
+  await page.addInitScript((arg: [string, string]) => {
+    Object.defineProperty(globalThis, '__IA_HOST_PATHS__', {
+      configurable: true,
+      value: { pathFor: (file: File) => (file.name === arg[0] ? arg[1] : '') },
+    });
+  }, args);
+}
+
+/** 在页面里构造一次真拖放并投递任意文件（`dragInPage` 只投图片，分流要看非图片）。 */
+async function dropFiles(page: Page, files: Array<{ name: string; type: string }>): Promise<void> {
+  await page.evaluate((specs) => {
+    const dataTransfer = new DataTransfer();
+    for (const spec of specs) {
+      dataTransfer.items.add(new File([new Uint8Array(1)], spec.name, { type: spec.type }));
+    }
+    document.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }));
+  }, files);
+}
+
+test('#826 AC1/AC2：桌面桥在场 → 非图片拖入变 @path 引用（不上传字节），图片仍走上传', async ({ page }) => {
+  const uploads: string[] = [];
+  await installHostPathBridge(page, 'notes.pdf', HOST_DROP_PATH);
+  await openSession(page, {
+    onAttachmentPost: async (route) => {
+      uploads.push(new URL(route.request().url()).searchParams.get('name') ?? '');
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          attachment_id: `sha256:${'d'.repeat(64)}`,
+          media_type: 'image/png',
+          bytes: PNG_3PX.length,
+          width: 3,
+          height: 3,
+        }),
+      });
+    },
+  });
+
+  // ① 非图片 + 有真实路径 → `@path` 引用进输入框（含空白 ⇒ 引号形态），一个字节都没上传。
+  await dropFiles(page, [{ name: 'notes.pdf', type: 'application/pdf' }]);
+  const input = page.getByLabel('Agent 任务');
+  await expect(input).toHaveValue(`@"${HOST_DROP_PATH}" `);
+  await expect(page.locator('.composer-attach-card')).toHaveCount(0);
+  expect(uploads).toEqual([]);
+
+  // ② 图片（即使有真实路径）→ 照旧上传：AC2 的另一半。
+  await input.fill('');
+  await dropFiles(page, [{ name: 'shot.png', type: 'image/png' }]);
+  await expect(page.locator('.composer-attach-card')).toHaveCount(1);
+  await expect.poll(() => uploads).toEqual(['shot.png']);
+
+  // ③ 桥回空串的非图片（未主动选择 / 无磁盘后端）→ 原样进既有上传入口，得到既有拒绝文案：
+  //    桥不给路径时前端**不会凭空造一个**，也就绕不过既有的预检（AC3 的负向面）。
+  await dropFiles(page, [{ name: 'other.pdf', type: 'application/pdf' }]);
+  await expect(page.locator('.composer-attach-error[role="alert"]')).toContainText('other.pdf');
+  await expect(input).toHaveValue('');
+});
+
+test('#826 AC2（Web 侧不变）：无桥 → 非图片仍是既有拒绝，绝不产生 @path 引用', async ({ page }) => {
+  await openSession(page, {
+    onAttachmentPost: async (route) => {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"本用例不应发生上传"}' });
+    },
+  });
+  await dropFiles(page, [{ name: 'notes.pdf', type: 'application/pdf' }]);
+  await expect(page.locator('.composer-attach-error[role="alert"]')).toContainText('notes.pdf');
+  await expect(page.getByLabel('Agent 任务')).toHaveValue('');
+});
