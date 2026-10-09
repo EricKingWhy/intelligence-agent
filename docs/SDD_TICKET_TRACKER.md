@@ -13,7 +13,7 @@
 > §14 的现行模型看，不要照历史条目里的旧分支分工。
 
 ---
-> **当前状态（2026-10-09，#871 CLOSED）**：#871「项目级本地 Skill 安装、启停与移除」已完成并关闭，交付评论 [issuecomment-6069627082](https://github.com/EricKingWhy/intelligence-agent/issues/871#issuecomment-6069627082)；`in-progress` 已移除。分支 `codex/issue-871-skill-lifecycle` 已同步到 `origin/main` `c812d8bca84c7e79b8d6bdfb46e1ab6c8ab3de57`，最新同步合并 `9bc1be5e` 仅新增 #825 审查台账行，已补机械归属。本地 `main` 已按常设授权快进到经验证的 #871 代码树（tree 一致）。定向 pytest 201 passed / 4 skipped；完整 pytest（忽略 Windows 收集错误文件）7108 passed / 32 skipped / 51 deselected / 16 failed，16 个失败节点及 `os.geteuid()` 收集错误均在干净 main `00238569` 精确复现，不记作全绿。前端 tsc、Vitest 1556、oxlint、Playwright 530、Vite build 均通过。Gate-0 六车道 6/6 PASS，收据 `docs/gate/3d7cc8d2a10fb01d8e2f4557d3ca3038abe30887.json`；coverage exit 0、全分支 diff-check exit 0。未 push、未开 PR、未合并 GitHub。
+> **当前状态（2026-10-09，#871 CLOSED）**：#871「项目级本地 Skill 安装、启停与移除」已完成并关闭，交付评论 [issuecomment-6069627082](https://github.com/EricKingWhy/intelligence-agent/issues/871#issuecomment-6069627082)；`in-progress` 已移除。分支 `codex/issue-871-skill-lifecycle` 已同步到最新 `origin/main` `76577061575714e8e0aacc3d84f2f59885e168a8`，合并 `145011be` 的 10 个 incoming 文件均与 main 父树一致，机械归属行已补；无冲突。`origin/main` 新增 `.github/workflows/windows-installer-smoke.yml` 属非 docs 路径，因此此前 Gate-0 与全量验证不传递；最新同步树的完整验证与 Gate-0 待执行。Issue 仍 CLOSED；未 push、未开 PR、未合并 GitHub。
 
 > **当前状态（2026-10-09，#865）**：PR [#881](https://github.com/EricKingWhy/intelligence-agent/pull/881) 已合入 `main`，merge commit `5eaeabb9675f32d3913ddbd6f1106d1ccb422607`；Issue #865 已随 PR 自动关闭，`in-progress` 已移除，交付评论为 `issuecomment-6065790688`。分支 `codex/effort-slider` 的 PR head 为 `83dfbd3f544e44fbf833f9b04c7e9340ff6cddcd`。GitHub 必需 `gate0`、Chromium PR smoke（5m54s）和 gitleaks 均通过。本地及完整门禁读数、既有测试红与非阻断 P3 见 2026-10 月档 #865；未将 Vitest / pytest 全量表述为全绿。
 
