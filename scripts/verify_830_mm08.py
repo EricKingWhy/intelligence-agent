@@ -9,14 +9,17 @@
     python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08 --out /home/hatch/pytest-830/mm08/evidence.json
 
 它拉起 `scripts/mm08_stub_server.py`（**真实 uvicorn**：真实 HTTP、真实会话 JSONL、
-真实 Local 附件字节；只有模型 provider 是确定性替身），然后逐条验 AC1–AC7。
-AC6 的「真实视觉模型回答」在本机无凭证，恒记 NOT_RUN（不 mock 冒充）。
+真实 Local 附件字节；AC1–AC7 的模型 provider 是确定性替身），然后逐条验 AC1–AC7。
+AC6-VISION 另起一个**不打桩**的同类服务，走真实 lighthouse 视觉模型
+（`deepseek-ai/DeepSeek-V4.1-Flash`）读一张真实截图并断言回答——截图里含一条只可能
+来自读图的校验码，回答不符即 FAIL。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -28,7 +31,9 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import zlib
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -56,12 +61,27 @@ CATALOG = json.dumps(
 SUMMARY_ENTRY = "mm08-summary"
 SUMMARY_NAME = "mm08-summary-model"
 
+# ── AC6-VISION：真实视觉模型（#830 用户裁决：lighthouse deepseek-v4.1-flash 本就是视觉模型）──
+# 接线全部走环境变量 / 配置（不写死 key、不改产品代码）：
+#   * 上游 base_url / 模型 id 可用环境变量覆盖，默认取 2026-10-09 的 lighthouse 视觉线路；
+#   * key 只从 VISION_KEY_ENV 指定的环境变量读取（本机 = LIGHTHOUSE_API_KEY）。
+VISION_BASE_URL_ENV = "MM08_VISION_BASE_URL"
+VISION_MODEL_ENV = "MM08_VISION_MODEL"
+VISION_KEY_ENV = "LIGHTHOUSE_API_KEY"
+VISION_BASE_URL_DEFAULT = "https://lighthouse.dphn.ai/run/text-v/v1"
+VISION_MODEL_DEFAULT = "deepseek-ai/DeepSeek-V4.1-Flash"
+VISION_CATALOG_NAME = "mm08-vision"
+VISION_EXPECTED_CODE = "830-KX74"
+_AC6_VISION_NAME = "真实视觉模型读截图并正确回答（lighthouse deepseek-v4.1-flash，真跑）"
+
 _TERMINAL_RUN_TYPES = {
     "run/completed",
     "run/paused",
     "run/failed",
     "run/cancelled",
 }
+# 「裸 base64 长串」扫描：≥200 个 base64 字符连排即可疑（合法 JSONL 里的 uuid/hex/
+# 中文不会连续产出这么长的 base64 字母表串）；命中即说明有图片字节落进了事件流。
 _BASE64_RUN = re.compile(rb"[A-Za-z0-9+/]{200,}")
 _CLI_WRAPPER = """\
 import os
@@ -121,6 +141,33 @@ def large_png_bytes(width: int, height: int, payload_bytes: int) -> bytes:
     return out
 
 
+def screenshot_png() -> bytes:
+    """一张「真实截图」：白底 + 色块 + 大号高对比文字，内含校验码 `VISION_EXPECTED_CODE`。
+
+    AC6-VISION 的判据靠**这张图里的校验码只可能来自读图**：文字用 DejaVu 粗体渲染
+    （字号大、对比高，避免 OCR 抖动把「真能力」验成随机）；字体缺失时回落 PIL 默认
+    位图字体。Pillow 是本仓 declared 依赖（`pyproject.toml`：`pillow>=10`），故不是新增面。
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (720, 260), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # 一条明显色带 + 一个实心圆：模型即便读不出字也能描述"绿色横条/圆形"
+    draw.rectangle([0, 0, 720, 44], fill=(20, 160, 60))
+    draw.ellipse([600, 80, 700, 180], fill=(20, 40, 220))
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        big = ImageFont.truetype(font_path, 56)
+        mid = ImageFont.truetype(font_path, 34)
+    except OSError:  # 字体缺失：回落位图字体（小但可读）
+        big = mid = ImageFont.load_default()
+    draw.text((28, 96), "MM-08 VISION CHECK", fill=(0, 0, 0), font=mid)
+    draw.text((28, 160), f"CODE: {VISION_EXPECTED_CODE}", fill=(200, 0, 0), font=big)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # --------------------------------------------------------------------------- #
 # 报告
 # --------------------------------------------------------------------------- #
@@ -168,16 +215,57 @@ class Report:
 # --------------------------------------------------------------------------- #
 # 服务进程
 # --------------------------------------------------------------------------- #
+def real_model_env() -> dict[str, str]:
+    """AC6-VISION 真 provider 的环境注入（base_url/模型名走环境默认，**key 只从环境读**）。
+
+    key 不落到本文件、也不落到命令行：由父进程从 `VISION_KEY_ENV` 环境变量取值后经
+    子进程环境传入（`repr`/`ps` 里看不到）。catalog 条目带 `supports_vision=true` +
+    真实 `base_url`，`create_session(model=VISION_CATALOG_NAME)` 据此解析。
+    """
+    base_url = os.environ.get(VISION_BASE_URL_ENV, VISION_BASE_URL_DEFAULT)
+    model = os.environ.get(VISION_MODEL_ENV, VISION_MODEL_DEFAULT)
+    catalog = json.dumps(
+        [
+            {
+                "name": VISION_CATALOG_NAME,
+                "provider": "deepseek",
+                "model_name": model,
+                "base_url": base_url,
+                "supports_vision": True,
+            }
+        ],
+        ensure_ascii=False,
+    )
+    return {
+        "MM08_REAL_MODEL": "1",
+        "MM08_MODEL_PROVIDER": "deepseek",
+        "MM08_MODEL_NAME": model,
+        "MM08_MODEL_BASE_URL": base_url,
+        "MM08_MODEL_API_KEY": os.environ.get(VISION_KEY_ENV, ""),
+        "MM08_AGENT_MODELS": catalog,
+    }
+
+
 class Server:
-    """`scripts/mm08_stub_server.py` 的子进程封装（可 kill / 重启同一数据目录）。"""
+    """`scripts/mm08_stub_server.py` 的子进程封装（可 kill / 重启同一数据目录）。
+
+    `real_model=True` 时不打桩（AC6-VISION 真 provider）；其余行为一致。
+    """
 
     def __init__(
-        self, root: pathlib.Path, port: int, *, delay_ms: int = 0, tag: str = "srv"
+        self,
+        root: pathlib.Path,
+        port: int,
+        *,
+        delay_ms: int = 0,
+        tag: str = "srv",
+        real_model: bool = False,
     ) -> None:
         self.root = root
         self.port = port
         self.delay_ms = delay_ms
         self.tag = tag
+        self.real_model = real_model
         self.proc: subprocess.Popen[bytes] | None = None
         self.log_path = root / f"{tag}.log"
 
@@ -204,6 +292,9 @@ class Server:
                 "NO_PROXY": "localhost,127.0.0.1",
             }
         )
+        if self.real_model:
+            env.pop("MM08_SUMMARY_MODEL", None)
+            env.update(real_model_env())
         return env
 
     def start(self) -> None:
@@ -270,13 +361,13 @@ def new_client(server: Server, timeout: float = 120.0) -> httpx.Client:
     return httpx.Client(base_url=server.base_url, timeout=timeout)
 
 
-def create_session(client: httpx.Client, task: str) -> str:
-    """`POST /api/sessions`（SSE）：从帧里取 session_id。"""
+def create_session(client: httpx.Client, task: str, model: str = "vision-probe") -> str:
+    """`POST /api/sessions`（SSE）：从帧里取 session_id。`model` 为空串 = 默认链。"""
     response = client.post(
         "/api/sessions",
         json={
             "task": task,
-            "model": "vision-probe",
+            **({"model": model} if model else {}),
             "budget": {"local": {"max_agent_turns": 8}},
         },
     )
@@ -365,6 +456,39 @@ def refs_of(rows: list[dict[str, Any]]) -> list[str]:
 
 def sha256_of(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def assistant_text(rows: list[dict[str, Any]]) -> str:
+    """会话事件里**最后一条** `model/completed` 的助手文本（真模型回答的落点）。"""
+    for row in reversed(rows):
+        if row.get("type") == "model/completed":
+            content = (row.get("data") or {}).get("content")
+            if isinstance(content, str):
+                return content
+    return ""
+
+
+def _alnum(text: str) -> str:
+    """只留字母数字并大写——用于「回答里有没有那条校验码」的稳健比对（容忍空格/连字符差异）。"""
+    return re.sub(r"[^0-9A-Za-z]", "", text).upper()
+
+
+def vision_jsonl_fragment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """AC6-VISION 的事件 JSONL 片段：带图 `user/message` + 最后一条 `model/completed`。"""
+    picked: list[dict[str, Any]] = [
+        row for row in rows if row["type"] == "user/message" and refs_of([row])
+    ]
+    for row in reversed(rows):
+        if row["type"] == "model/completed":
+            picked.append(row)
+            break
+    fragment: list[dict[str, Any]] = []
+    for row in picked:
+        data = json.loads(json.dumps(row.get("data") or {}, ensure_ascii=False))
+        if isinstance(data.get("content"), str):
+            data["content"] = data["content"][:600]
+        fragment.append({"seq": row.get("seq"), "type": row["type"], "data": data})
+    return fragment
 
 
 # --------------------------------------------------------------------------- #
@@ -601,6 +725,18 @@ def sink_rows(server: Server) -> list[dict[str, Any]]:
     return rows
 
 
+# AC 的展示名集中在这里：正常路径（各 AC 内的 `rep.add`）与异常兜底（`run_ac` → `rep.fail`）
+# 共用同一份字面量，杜绝两处漂移。
+_AC1_NAME = "同一 session：Web 上传/引用 → TUI 客户端读到同一 attachment 引用与同一字节"
+_AC2_NAME = "kill -9 / 重启：事件与附件字节稳态；在途 run 被打断后事实不丢且可 resume 接续"
+_AC3_NAME = "fork 边界语义与图复用：child 继承边界前的 ref，且该图在 child 仍可取回/可解释"
+_AC4_NAME = "压缩后摘要保留 artifact ref（精确标识清单）；旧图可找回；事实不被压缩删除"
+_AC5_NAME = "事件流只记引用/尺寸/mime，不含 base64；大图不造成事件爆炸"
+_AC6_NAME = "三端走查：真 TUI 客户端（AC6-TUI）/ 真 CLI 子进程（AC6-CLI）/ 真实视觉模型（无凭证 ⇒ NOT_RUN）"
+_AC6_CLI_NAME = "CLI `--image`：成功 exit 0 且事件带引用；缺文件/非图片/扩展名不符 exit 1 且零附件"
+_AC7_NAME = "真实服务上跨会话读附件 404（与不存在不可区分）；未引用 404；形状非法 422"
+
+
 # --------------------------------------------------------------------------- #
 # AC 1-7
 # --------------------------------------------------------------------------- #
@@ -649,7 +785,7 @@ def ac1_cross_client(rep: Report, server: Server, work: pathlib.Path) -> dict[st
             notes.append(f"tui_err={tui.get('err')}")
         return rep.add(
             "AC1",
-            "同一 session：Web 上传/引用 → TUI 客户端读到同一 attachment 引用与同一字节",
+            _AC1_NAME,
             "PASS" if ok else "FAIL",
             evidence,
             notes,
@@ -741,6 +877,7 @@ def ac2_lifecycle(
             "content_sha256_after_restart": sha256_of(after_read.content),
             "content_status_after_restart": after_read.status_code,
             "in_flight_request": in_flight,
+            "in_flight_window_hit": "error" in in_flight,
             "in_flight_user_message_persisted": bool(crashed_user),
             "in_flight_user_message_seq": crashed_seq,
             "content_status_after_crash": crashed_read.status_code,
@@ -765,11 +902,23 @@ def ac2_lifecycle(
             and post_read.status_code == 200
             and sha256_of(post_read.content) == before_hash
         )
+        # P4-7：不把「窗口是否命中」并入 ok（那会让 AC2 随负载抖动）；只在未命中时显式登记。
+        notes = (
+            []
+            if evidence["in_flight_window_hit"]
+            else [
+                (
+                    "在途窗口未命中（1.5s 内请求已 200 完成）：『被打断』前提由 "
+                    f"in_flight_request={in_flight} 佐证；判据仍按既有口径。"
+                )
+            ]
+        )
         return rep.add(
             "AC2",
-            "kill -9 / 重启：事件与附件字节稳态；在途 run 被打断后事实不丢且可 resume 接续",
+            _AC2_NAME,
             "PASS" if ok else "FAIL",
             evidence,
+            notes,
         )
     finally:
         client.close()
@@ -897,7 +1046,7 @@ def ac3_fork(rep: Report, server: Server, work: pathlib.Path) -> dict[str, Any]:
             )
         return rep.add(
             "AC3",
-            "fork 边界语义与图复用：child 继承边界前的 ref，且该图在 child 仍可取回/可解释",
+            _AC3_NAME,
             "PASS" if (boundary_ok and explicable) else "FAIL",
             evidence,
             notes,
@@ -1001,7 +1150,7 @@ def ac4_compaction(rep: Report, server: Server) -> dict[str, Any]:
         )
         return rep.add(
             "AC4",
-            "压缩后摘要保留 artifact ref（精确标识清单）；旧图可找回；事实不被压缩删除",
+            _AC4_NAME,
             "PASS" if ok else "FAIL",
             evidence,
         )
@@ -1054,6 +1203,12 @@ def ac5_no_base64(rep: Report, server: Server) -> dict[str, Any]:
                 [row for row in sink_rows(server) if row["role"] == "main"]
             ),
         }
+        # 判据阈值（P4-6 补依据）：
+        #   * 增长 < 8192B ≈ 「事件里只多了引用/尺寸/mime 元数据」的量级上界——单条
+        #     附件元数据事件是百字节级，8 KiB 给足余量又远小于任何 base64 载荷；
+        #   * 增长比 < 0.02（相对 512KB 原图）= 千分之二十，卡住「插图导致事件流按图
+        #     尺寸膨胀」这一类退化；
+        #   * `provider_request_image_blocks > 0` = 图片确实进了模型载荷（不能只有前端缓存）。
         ok = (
             not evidence["jsonl_has_base64_run"]
             and evidence["jsonl_growth_bytes"] < 8192
@@ -1062,7 +1217,7 @@ def ac5_no_base64(rep: Report, server: Server) -> dict[str, Any]:
         )
         return rep.add(
             "AC5",
-            "事件流只记引用/尺寸/mime，不含 base64；大图不造成事件爆炸",
+            _AC5_NAME,
             "PASS" if ok else "FAIL",
             evidence,
         )
@@ -1070,8 +1225,92 @@ def ac5_no_base64(rep: Report, server: Server) -> dict[str, Any]:
         client.close()
 
 
+def ac6_vision(rep: Report, work: pathlib.Path) -> dict[str, Any]:
+    """AC6-VISION：Web 端上传**真实截图** → **真实** lighthouse 视觉模型 → 回答须含图中校验码。
+
+    「#830 用户裁决」后的实测项（原 NOT_RUN 作废）：lighthouse
+    `deepseek-ai/DeepSeek-V4.1-Flash` 本身就是视觉模型。服务侧接线全部走
+    配置/环境变量（`real_model_env`，key 从环境读、不写死），**不打桩、不 mock**。
+    判据 = 回答里出现了**只可能来自读图**的校验码 `VISION_EXPECTED_CODE`；答错即 FAIL。
+    """
+    key = os.environ.get(VISION_KEY_ENV, "")
+    if not key.strip():
+        return rep.add(
+            "AC6-VISION",
+            _AC6_VISION_NAME,
+            "NOT_RUN",
+            {"reason": f"环境变量 {VISION_KEY_ENV} 缺失；按要求不 mock 冒充，记 NOT_RUN。"},
+        )
+    base_url = os.environ.get(VISION_BASE_URL_ENV, VISION_BASE_URL_DEFAULT)
+    model = os.environ.get(VISION_MODEL_ENV, VISION_MODEL_DEFAULT)
+    root = work / "vision"
+    root.mkdir(parents=True, exist_ok=True)
+    server = Server(root, free_port(), tag="vision", real_model=True)
+    started = time.monotonic()
+    question = "读这张截图：找到「CODE:」后面的校验码（大写字母/数字/连字符），只回该校验码本身。"
+    evidence: dict[str, Any] = {
+        "provider_base_url": base_url,
+        "model": model,
+        "expected_code": VISION_EXPECTED_CODE,
+        "api_calls": [
+            "POST /api/sessions {model: mm08-vision}",
+            "POST /api/sessions/<sid>/attachments?name=mm08-vision.png  (真实截图字节)",
+            "POST /api/sessions/<sid>/messages {content: <问题>, attachments: [<ref>]}",
+            "GET  /api/sessions/<sid>/events",
+        ],
+    }
+    session_id = ""
+    try:
+        server.start()
+        server.wait_ready()
+        client = new_client(server, timeout=180.0)
+        try:
+            screenshot = screenshot_png()
+            evidence["screenshot_bytes"] = len(screenshot)
+            evidence["attachment_sha256"] = sha256_of(screenshot)
+            session_id = create_session(
+                client, "AC6-VISION 截图识别", model=VISION_CATALOG_NAME
+            )
+            evidence["session_id"] = session_id
+            receipt = upload(client, session_id, screenshot, "mm08-vision.png")
+            ref = receipt["attachment_id"]
+            status = send_with_image(client, session_id, question, ref)
+            rows = events(client, session_id)
+            answer = assistant_text(rows)
+            readback = read_content(client, session_id, ref)
+            evidence.update(
+                {
+                    "send_status": status,
+                    "attachment_id": ref,
+                    "readback_status": readback.status_code,
+                    "readback_sha256": sha256_of(readback.content),
+                    "answer": answer[:800],
+                    "answer_has_expected_code": _alnum(VISION_EXPECTED_CODE) in _alnum(answer),
+                    "elapsed_s": round(time.monotonic() - started, 2),
+                    "events_jsonl_fragment": vision_jsonl_fragment(rows),
+                }
+            )
+            ok = (
+                status == 200
+                and readback.status_code == 200
+                and sha256_of(readback.content) == sha256_of(screenshot)
+                and evidence["answer_has_expected_code"]
+                and bool(answer.strip())
+            )
+            return rep.add(
+                "AC6-VISION",
+                _AC6_VISION_NAME,
+                "PASS" if ok else "FAIL",
+                evidence,
+            )
+        finally:
+            client.close()
+    finally:
+        server.kill()
+
+
 def ac6_clients(rep: Report, server: Server, work: pathlib.Path) -> list[dict[str, Any]]:
-    """AC6：三端上传附图；真实视觉模型回答 = NOT_RUN（无凭证，不 mock）。"""
+    """AC6：三端——TUI 写路径 / CLI 子进程 / 真实视觉模型（真跑 lighthouse）。"""
     results: list[dict[str, Any]] = []
     # ① TUI 客户端的**写**路径（真实 `ApiClient.uploadAttachment/sendMessage`）
     tui = run_tui_client(work, "write", server.base_url, "unused", "ac6-tui.png")
@@ -1103,26 +1342,8 @@ def ac6_clients(rep: Report, server: Server, work: pathlib.Path) -> list[dict[st
     # ② CLI（独立子进程：真 argparse / 真落盘）
     results.append(ac6_cli(rep, work, server.sink))
 
-    # ③ 真实视觉模型的回答：本机无凭证 → NOT_RUN
-    results.append(
-        rep.add(
-            "AC6-VISION",
-            "真实视觉模型对同一张图给出回答（服务端真跑）",
-            "NOT_RUN",
-            {
-                "reason": (
-                    "仓库内无任何模型凭证：无 .env、无 MODEL_* 环境变量；"
-                    "`model_supports_vision` 只有 `mimo` provider preset 声明 "
-                    "supports_vision=true，需 MiMo key（缺失）。凭证缺失时**不 mock 冒充**，"
-                    "按缺口①记 NOT_RUN。"
-                ),
-                "what_was_instead_verified": (
-                    "真实 uvicorn + 真实 HTTP + 真实落盘 + 确定性替身模型："
-                    "附件上传/引用/回读/跨端/跨生命周期/授权/压缩全部真跑。"
-                ),
-            },
-        )
-    )
+    # ③ 真实视觉模型：不打桩的同类服务 + lighthouse deepseek-v4.1-flash（#830 用户裁决）
+    results.append(ac6_vision(rep, work))
     return results
 
 
@@ -1161,7 +1382,7 @@ def ac6_cli(rep: Report, work: pathlib.Path, sink: pathlib.Path) -> dict[str, An
     )
     return rep.add(
         "AC6-CLI",
-        "CLI `--image`：成功 exit 0 且事件带引用；缺文件/非图片/扩展名不符 exit 1 且零附件",
+        _AC6_CLI_NAME,
         "PASS" if cli_ok else "FAIL",
         {
             "success_exit": ok_run["exit"],
@@ -1274,12 +1495,40 @@ def ac7_authorization(rep: Report, server: Server) -> dict[str, Any]:
         )
         return rep.add(
             "AC7",
-            "真实服务上跨会话读附件 404（与不存在不可区分）；未引用 404；形状非法 422",
+            _AC7_NAME,
             "PASS" if ok else "FAIL",
             evidence,
         )
     finally:
         client.close()
+
+
+# --------------------------------------------------------------------------- #
+def run_ac(
+    rep: Report,
+    check_id: str,
+    name: str,
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+) -> Any:
+    """跑一条 AC，把**任何非预期异常**兜成该 AC 的 FAIL（traceback 进 notes）。
+
+    只兜异常面：正常路径的判据分毫不动。目的是保证 `write_summary` 在任何情况下都被调用——
+    一次非 2xx / 超时（`create_session` / `upload` / `wait_settled` / `run_cli` 的
+    `subprocess.run(timeout=…)` 等）只该让**这条** AC 落一条 FAIL，而不是丢掉整份
+    `evidence.json`。返回被调函数的返回值（异常时为 `None`）。
+    """
+    try:
+        return fn(rep, *args)
+    except Exception as exc:  # noqa: BLE001 —— 兜底就是要拦下所有异常
+        rep.fail(
+            check_id,
+            name,
+            f"{type(exc).__name__}: {exc}",
+            traceback=traceback.format_exc(),
+        )
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1291,8 +1540,12 @@ def main() -> int:
     parser.add_argument(
         "--only",
         default="all",
-        choices=("all", "ac6-cli"),
-        help="只跑一段；ac6-cli 不需要 uvicorn 服务（Windows 近似验证复用同一份断言）",
+        choices=("all", "ac6-cli", "ac6-vision"),
+        help=(
+            "只跑一段。ac6-cli 不需要 uvicorn 服务（Windows 近似验证复用同一份断言）；"
+            "ac6-vision 另起不打桩的真实视觉模型服务（需 LIGHTHOUSE_API_KEY）。"
+            "其余 AC 依赖同一台 stub 服务的生命周期，只能随 all 跑。"
+        ),
     )
     args = parser.parse_args()
 
@@ -1305,38 +1558,66 @@ def main() -> int:
     rep.log(f"repo={REPO}")
     rep.log(f"work={work}")
     rep.log(f"python={sys.executable}")
+    started = time.monotonic()
 
     if args.only == "ac6-cli":
         sink = work / "cli-sink.jsonl"
         rep.log(f"only=ac6-cli sink={sink}")
-        ac6_cli(rep, work, sink)
-        return write_summary(rep, out, work=work, server_log=None, model_sink=sink)
+        run_ac(rep, "AC6-CLI", _AC6_CLI_NAME, ac6_cli, work, sink)
+        return write_summary(
+            rep, out, work=work, server_log=None, model_sink=sink, started=started
+        )
+    if args.only == "ac6-vision":
+        sink = work / "vision" / "model-sink.jsonl"
+        rep.log("only=ac6-vision（不打桩的真实视觉模型）")
+        run_ac(rep, "AC6-VISION", _AC6_VISION_NAME, ac6_vision, work)
+        return write_summary(
+            rep, out, work=work, server_log=None, model_sink=sink, started=started
+        )
 
     server = Server(work, args.port or free_port())
-    started = time.monotonic()
     try:
-        server.start()
-        server.wait_ready()
+        try:
+            server.start()
+            server.wait_ready()
+        except Exception as exc:  # noqa: BLE001 —— 服务起不来 ⇒ AC 无现场，但证据仍必须落盘
+            rep.fail(
+                "AC1",
+                _AC1_NAME,
+                f"真实服务未就绪，AC1–AC7 均无法执行：{type(exc).__name__}: {exc}",
+                traceback=traceback.format_exc(),
+            )
+            rep.log("server failed to start; AC1-AC7 unrun")
+            return write_summary(
+                rep,
+                out,
+                work=work,
+                server_log=server.log_path,
+                model_sink=server.sink,
+                started=started,
+            )
         rep.log(f"server ready at {server.base_url} (pid={server.proc.pid})")
 
-        acl = ac1_cross_client(rep, server, work)
-        ref = acl["evidence"].get("attachment_id")
-        sid = acl["evidence"].get("session_id")
+        acl = run_ac(rep, "AC1", _AC1_NAME, ac1_cross_client, server, work)
+        ac1_evidence = (acl or {}).get("evidence", {})
+        ref = ac1_evidence.get("attachment_id")
+        sid = ac1_evidence.get("session_id")
         if ref and sid:
-            ac2_lifecycle(rep, server, work, sid, ref)
+            run_ac(rep, "AC2", _AC2_NAME, ac2_lifecycle, server, work, sid, ref)
         else:
-            rep.fail("AC2", "kill/restart 稳态", "AC1 未产出可用 session/ref")
-        ac3_fork(rep, server, work)
-        ac4_compaction(rep, server)
-        ac5_no_base64(rep, server)
-        ac6_clients(rep, server, work)
-        ac7_authorization(rep, server)
+            rep.fail("AC2", _AC2_NAME, "AC1 未产出可用 session/ref")
+        run_ac(rep, "AC3", _AC3_NAME, ac3_fork, server, work)
+        run_ac(rep, "AC4", _AC4_NAME, ac4_compaction, server)
+        run_ac(rep, "AC5", _AC5_NAME, ac5_no_base64, server)
+        run_ac(rep, "AC6", _AC6_NAME, ac6_clients, server, work)
+        run_ac(rep, "AC7", _AC7_NAME, ac7_authorization, server)
     finally:
         server.kill()
         rep.log(f"server killed; elapsed={time.monotonic() - started:.1f}s")
 
     return write_summary(
-        rep, out, work=work, server_log=server.log_path, model_sink=server.sink
+        rep, out, work=work, server_log=server.log_path, model_sink=server.sink,
+        started=started,
     )
 
 
@@ -1347,8 +1628,13 @@ def write_summary(
     work: pathlib.Path,
     server_log: pathlib.Path | None,
     model_sink: pathlib.Path,
+    started: float | None = None,
 ) -> int:
-    """落盘证据 JSON 并以「有无 FAIL」定退出码（0 = 无 FAIL）。"""
+    """落盘证据 JSON 并以「有无 FAIL」定退出码（0 = 无 FAIL）。
+
+    `started`（`time.monotonic()` 起点）非空时把整轮墙钟写进 `elapsed_s`——审查 P4-2
+    指出此前的墙钟只活在未入库的 `verify.log` 里，无法核对；落进证据 JSON 后字节可核。
+    """
     summary = {
         "issue": 830,
         "ticket": "MM-08 跨端与恢复验证",
@@ -1356,6 +1642,9 @@ def write_summary(
         "work": str(work),
         "server_log": str(server_log) if server_log is not None else None,
         "model_sink": str(model_sink),
+        "elapsed_s": (
+            round(time.monotonic() - started, 2) if started is not None else None
+        ),
         "checks": rep.checks,
         "counts": {
             status: sum(1 for check in rep.checks if check["status"] == status)

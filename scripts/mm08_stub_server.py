@@ -8,6 +8,12 @@ JSONL、真实 Local 附件字节、真实进程 kill/restart、真实压缩落�
 
 **这不是产品代码**；只有 `scripts/verify_830_mm08.py` 以子进程方式拉起它。
 
+`MM08_REAL_MODEL=1` 时**不打桩**，直接走真 `create_chat_model`——AC6-VISION 要求
+「真实视觉模型回答」（#830 用户裁决：lighthouse `deepseek-ai/DeepSeek-V4.1-Flash`
+本就是视觉模型，无需新凭证）。真实 provider 的 base_url / key / 模型名 / 能力位全部由
+父进程经环境注入（`MM08_MODEL_BASE_URL` / `MM08_MODEL_API_KEY` / `MM08_MODEL_NAME` /
+`MM08_AGENT_MODELS`），**本文件不写死任何 key**。
+
 替身接线（两个独立 seam，必须都换，否则压缩会打真实 API 而鉴权失败）：
   * `agent_harness.assembly.create_chat_model`      —— run 的主模型（assembly 顶层 import）
   * `agent_harness.model.provider.create_chat_model` —— 摘要模型 / `_compact_context_builder`
@@ -21,6 +27,9 @@ JSONL、真实 Local 附件字节、真实进程 kill/restart、真实压缩落�
     MM08_SUMMARY_NAME   → 摘要替身标记用的 `model_name`（与主模型区分）
     MM08_MODEL_SINK     → 替身每次被调用时追加一行请求快照的 JSONL 路径
     MM08_PORT           → uvicorn 监听端口（只绑 loopback）
+    MM08_REAL_MODEL     → "1" = 不打桩，走真 provider（AC6-VISION）
+    MM08_MODEL_BASE_URL → 真 provider base_url（仅真实模式；不写死)
+    MM08_MODEL_API_KEY  → 真 provider key（仅真实模式；由父进程从环境注入，非本文件常量）
 """
 
 from __future__ import annotations
@@ -157,7 +166,11 @@ class VerifyModel(ScriptedModel):
 
 
 def build_settings() -> Settings:
-    """从注入的环境变量构造 Settings（不吃仓库根 `.env`：`_env_file=None`）。"""
+    """从注入的环境变量构造 Settings（不吃仓库根 `.env`：`_env_file=None`）。
+
+    真实视觉模型模式（`MM08_REAL_MODEL=1`）下 `MM08_MODEL_API_KEY` / `MM08_MODEL_BASE_URL`
+    指向真实 provider；这两个值由父进程从环境读取后注入，**本文件不写死任何 key**。
+    """
     kwargs: dict[str, Any] = {}
     summary = os.environ.get("MM08_SUMMARY_MODEL")
     if summary:
@@ -166,7 +179,8 @@ def build_settings() -> Settings:
         _env_file=None,
         workspace_dir=os.environ["MM08_WORKSPACE_DIR"],
         artifact_dir=os.environ["MM08_ARTIFACT_DIR"],
-        model_api_key="sk-mm08-verify",
+        model_api_key=os.environ.get("MM08_MODEL_API_KEY", "sk-mm08-verify"),
+        model_base_url=os.environ.get("MM08_MODEL_BASE_URL", ""),
         model_provider=os.environ.get("MM08_MODEL_PROVIDER", "deepseek"),
         model_name=os.environ.get("MM08_MODEL_NAME", "vision-probe"),
         agent_models=os.environ.get("MM08_AGENT_MODELS", ""),
@@ -190,6 +204,10 @@ def main() -> None:
     settings = build_settings()
     app = create_app(settings, enable_cors=False)
     port = int(os.environ.get("MM08_PORT", "0"))
+    if os.environ.get("MM08_REAL_MODEL") == "1":
+        # AC6-VISION：真实 provider（lighthouse 视觉模型），不打桩。
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        return
     with patch.object(assembly_module, "create_chat_model", factory), patch.object(
         provider_module, "create_chat_model", factory,
     ):

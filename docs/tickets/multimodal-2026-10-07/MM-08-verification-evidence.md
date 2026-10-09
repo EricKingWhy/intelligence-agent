@@ -58,7 +58,7 @@
 ```bash
 export no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1
 export PATH="$HOME/workspace/intelligence-agent/.venv/bin:$PATH" PYTHONPATH="$PWD/src"
-python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-fix   # 全量（AC1-AC7）
+python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-r3   # 全量（AC1-AC7）
 python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单条（Windows GA 复用同一断言）
 ```
 
@@ -66,7 +66,9 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 ## 4. 八条 AC 逐条证据
 
-**判据汇总（本机最终跑 `/home/hatch/pytest-830/mm08-fix`，墙钟 58.5s；`counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`）**
+**判据汇总（本机最终跑 `/home/hatch/pytest-830/mm08-r3`，墙钟 61.3s；`counts={'PASS': 8, 'FAIL': 1, 'NOT_RUN': 0}`）**
+
+> 本表是 **AC6-VISION 补跑后**的读数（`NOT_RUN` 归零）：原 `NOT_RUN` 项已由 lighthouse `deepseek-ai/DeepSeek-V4.1-Flash` 真跑转 **PASS**（见 AC6 节）。`FAIL` 仍是产品真缺陷 **D1**（AC3），按验证票口径只登记不修。沙箱（无常视觉凭证）的同批读数仍是 7 PASS/1 FAIL/1 NOT_RUN（§10.1），两处不矛盾——差的正是这一条 keyed 的 AC6-VISION。
 
 | AC | 票面要求 | 探针 | 读数 |
 | --- | --- | --- | --- |
@@ -75,16 +77,16 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | AC3 | fork 会话能看到 fork 边界之前的图 | fork 后 child 读回 + 装配面 | **FAIL（真缺陷 D1）** |
 | AC4 | compaction 后摘要留 refs、旧图可找回、事实不被删 | 真压缩 → 摘要/JSONL/回读 | **PASS** |
 | AC5 | 事件流可定位附件引用且**无 base64** | 大图（512KB）后扫 JSONL | **PASS** |
-| AC6 | 真机走查三端 | Web→真实视觉模型（**NOT_RUN**）/ TUI Windows Terminal（见 §9）/ CLI `--image` | AC6-TUI **PASS**、AC6-CLI **PASS**、AC6-VISION **NOT_RUN（缺口①）** |
+| AC6 | 真机走查三端 | Web→真实视觉模型（**真跑 PASS**）/ TUI Windows Terminal（见 §9）/ CLI `--image` | AC6-TUI **PASS**、AC6-CLI **PASS**、AC6-VISION **PASS** |
 | AC7 | 跨 session 读附件 404 授权断言在真实服务复验 | 真服务上打 4 种状态 | **PASS** |
 | AC8 | 缺陷以票面+证据回报，不扩大范围 | 本文件 §5（D1）即其证据 | **PASS（过程项）** |
 
-**原始读数（入库、字节可核）**：`docs/evidence/830-mm08-cross-client-local.json`（本机驱动全量 `evidence.json`，即上表逐条字段的来源）、`docs/evidence/830-mm08-cross-client-sandbox-verifier.txt`（沙箱驱动 stdout，同样 7 PASS/1 FAIL/1 NOT_RUN）。沙箱那次的 `evidence.json` 随沙箱销毁，但同批 `~/logs` 已整体取回本机（`/home/hatch/pytest-830/box-logs/logs.tgz`，391 KB）。
+**原始读数（入库、字节可核）**：`docs/evidence/830-mm08-cross-client-local.json`（本机最终驱动全量 `evidence.json`，即上表逐条字段的来源，`counts={'PASS':8,'FAIL':1,'NOT_RUN':0}`、`elapsed_s=61.33`）、`docs/evidence/830-mm08-cross-client-local-verify.txt`（同轮 `verify.log`：逐条 `[PASS]/[FAIL]` 行 + 墙钟，审查 P4-2 要求墙钟可核）、`docs/evidence/830-mm08-cross-client-sandbox-verifier.txt`（沙箱驱动 stdout，**无常视觉凭证** ⇒ 7 PASS/1 FAIL/1 NOT_RUN；那份早于 AC6-VISION 接线，故与本地读数差这一条）。沙箱那次的 `evidence.json` 随沙箱销毁，但同批 `~/logs` 已整体取回本机（`/home/hatch/pytest-830/box-logs/logs.tgz`，391 KB）。
 
 ### AC1 — 跨端一致（PASS）
 
-- 命令：`python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-fix`（退出码 1，因 AC3 FAIL）
-- `session_id=eb9ee8da-a375-410b-8727-d11810f3f87c`；`attachment_id = sha256:0936d7fc…d1cae6`
+- 命令：`python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-r3`（退出码 1，因 AC3 FAIL）
+- `session_id=ffdd76e0-22fd-4c5d-967d-1b14096c8a16`；`attachment_id = sha256:0936d7fc…d1cae6`
 - Web 侧：`POST /attachments` 200，`GET /attachments/<ref>/content` 200，读回 sha256 == 期望 sha256
 - TUI 侧（真 `tui/src/api.ts`）：`getEvents` 17 条 → `tui_event_refs == ["sha256:0936d7fc…"]`、读回 `tui_read_status=200` 且 sha256 相同、`node_exit=0`
 - **模型面**：替身收到的请求里图片块 = `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…","detail":"auto"}}`（`provider_request_image_block_count=1`）——即"同一张图"不是靠前端缓存，而是服务端事件 + 装配链一致。
@@ -92,7 +94,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 ### AC2 — crash / 重启 / resume（PASS）
 
-- 重启前 `event_count=17`、`events.jsonl` 5690 字节、`event_ids` 集合不变、字节完全一致（`jsonl_bytes_stable=true`）
+- 重启前 `event_count=17`、`events.jsonl` 5689 字节、`event_ids` 集合不变、字节完全一致（`jsonl_bytes_stable=true`）
 - `kill -9` 后：附件回读仍 200、sha256 不变
 - **在途 run 被打断**：`POST /messages` 在途时杀进程（客户端拿到 `RemoteProtocolError`）→ 该用户消息**已落盘**（`in_flight_user_message_persisted=true`, `seq=18`），附件字节仍可取回
 - `POST /resume`（body `{"task":"崩溃后继续"}`）→ 200，SSE 首帧为 `user/message(seq=24)`，`new_terminal_run_after_resume=true`，`event_count_after_resume=31`，回读仍 200/同 sha256
@@ -100,42 +102,55 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 ### AC3 — fork 边界复用（**FAIL，真缺陷 D1**）
 
-- `parent_session_id=77561199-…`，带图用户轮 `seq=10`（`image_event_id=cb22ea50-…`）
-- fork：`POST /api/sessions/{id}/forks {"from_seq": 26}` → child `ff4e3b5e-…`，29 条事件
+- `parent_session_id=2f322e70-…`，带图用户轮 `seq=10`（`image_event_id=d12f4576-…`）
+- fork：`POST /api/sessions/{id}/forks {"from_seq": 26}` → child `4ce291cb-…`，29 条事件
 - child **继承了引用**：`child_refs=["sha256:a7c8e890…"]`、`child_image_event_present_by_id=true`
 - child **取不回字节**：`GET /api/sessions/{child}/attachments/sha256:a7c8e890…/content` → **404**，body：
-  `attachment 'sha256:a7c8e890…' 不在会话 'ff4e3b5e-…' 的命名空间里（不存在，或属于别的会话）`
+  `attachment 'sha256:a7c8e890…' 不在会话 '4ce291cb-…' 的命名空间里（不存在，或属于别的会话）`
 - **装配面同样退化**：child 再跑一轮时，替身收到的请求里 `child_model_request_image_blocks=[]` 且出现 `"(image omitted: model does not support images)"` 占位符（`child_model_request_has_placeholder=true`）
 - 边界对照：`from_seq=image_seq` 的 fork 自身不带该 ref（`boundary_refs=[]`）——即"图正好在边界"时 child 不继承引用这一侧是**正确**的；缺陷只在"边界之前已继承的引用解不开"。
-- 现场：`child_artifact_dir_exists=false`，父对象在 `…/art/77561199-…/attachments/objects/` ⇒ 字节只存在**父 session 命名空间**下。
+- 现场：`child_artifact_dir_exists=false`，父对象在 `…/art/2f322e70-…/attachments/objects/` ⇒ 字节只存在**父 session 命名空间**下。
 
 **根因**：`LocalArtifactStore` 按 `session_id` 分目录（`<artifact_dir>/<session_id>/attachments/objects/<sha[:2]>/<sha>`），而 fork 只复制 **workspace**（`src/agent_harness/session/fork.py::_copy_workspace`），不复制/不链接附件对象。于是 child 继承了指向"别的会话命名空间"的 ref ⇒ 受控读回 404 ⇒ `_load_image_payloads` 失败 ⇒ `multimodal._translate_block` 把块降级成占位符。
 
 ### AC4 — compaction 保留 refs（PASS）
 
-- `POST /context/compact` → 200（`compact_attempts=2`，见观察项 O1），`{"source_seq_start":2,"source_seq_end":31,"tokens_before":1631,"tokens_after":625,"compacted_turn_count":4}`
+- `POST /context/compact` → 200（`compact_attempts=2`，见观察项 O1），`{"source_seq_start":2,"source_seq_end":31,"tokens_before":1631,"tokens_after":636,"compacted_turn_count":4}`
 - 摘要（`context/compacted`，schema `eight_section`）**含 ref**：`## 精确标识清单` 段列出 `sha256:1829930fe7…`；`summary_has_base64=false`
 - 摘要请求的原始 transcript（发往 provider 的 sink）里**只出现 file_id、无 base64**（`summary_transcript_has_file_id=true`, `summary_transcript_has_base64=false`）
-- **事实不被删**：压缩前的带图 `user/message`（`seq=10`）仍在，且 `pre_compaction_user_message_unmodified=true`（该事件的 `attachments[0].attachment_id` 仍是原 ref）；`jsonl_grew_only=true`（13211 → 15330 字节，只增不减）
+- **事实不被删**：压缩前的带图 `user/message`（`seq=10`）仍在，且 `pre_compaction_user_message_unmodified=true`（该事件的 `attachments[0].attachment_id` 仍是原 ref）；`jsonl_grew_only=true`（13210 → 15329 字节，只增不减）
 - 压缩后旧图仍可取回：200 且 sha256 == 期望
 - **探针自纠**：初版探针取 `user_rows[0]`（= 建会话那条任务消息，无 `attachments`），导致 `unmodified` 退化成恒假；已改为按 `ref in refs_of([row])` 选中**带图的那条**，并把 `pre_compaction_user_message_unmodified` 纳入 PASS 判据。
 
 ### AC5 — 事件流无 base64、大图不爆流（PASS）
 
 - 512 KB 大图（`big_image_bytes=524345`；尺寸 320×240 PNG）上传引用后：
-  - `events.jsonl` 5699 → 8412 字节（`+2713`，增长比 **0.005174**，即千分之五）
+  - `events.jsonl` 5697 → 8410 字节（`+2713`，增长比 **0.005174**，即千分之五）
   - 事件数 17 → 25（`+8`，无逐块事件爆炸）
   - `jsonl_base64_run_count=0`（用 base64 字符长串正则扫全文件）
   - 附件元数据只记录 `{"attachment_id","media_type","bytes","width","height"}`；字节数 = 磁盘对象字节数（524345）
 - 模型面收到的是 `data:` URL **仅存在于发往 provider 的载荷里**，不落 JSONL。
 
-### AC6 — 真机走查（TUI PASS / CLI PASS / 视觉模型 NOT_RUN）
+### AC6 — 真机走查（TUI PASS / CLI PASS / 视觉模型 PASS，真跑）
 
 - **AC6-CLI（PASS）**：真 CLI 子进程（`python -m agent_harness.cli … --image …`）
   - 成功路径：`exit=0`，事件带引用 `sha256:0936d7fc…`，附件对象落在 CLI 会话命名空间
   - 失败路径三条全部 `exit=1` 且**零附件**：文件不存在、非图片字节（`bad.txt`）、扩展名与字节不符（`mismatched.png`）——stderr 分别是 `--image 文件不存在：…` / `不支持或无法识别的图片字节。`
 - **AC6-TUI（PASS）**：真 `tui/src/api.ts::ApiClient` 上传 8×6 PNG（68 字节）→ 事件带引用 → 回读 200 / 68 字节 / `node_exit=0`
-- **AC6-VISION（NOT_RUN，缺口①）**：仓库内**没有任何视觉模型凭证**（无 `.env`、无 `MODEL_*` 环境变量；`model/config.py` 中只有 `mimo` preset 声明 `supports_vision=true`，缺 MiMo key）。**不 mock 冒充**，按缺口登记；本项由协调员/用户提供凭证后补跑（复用 `--only ac6-cli` 的同构入口即可）。
+- **AC6-VISION（PASS，真跑）**：**原 NOT_RUN 作废**（#830 用户裁决：lighthouse `deepseek-ai/DeepSeek-V4.1-Flash` 本就是视觉模型，用现有线路、无需新凭证）。服务侧接线**全部走配置/环境变量**（`MM08_REAL_MODEL=1` + `MM08_MODEL_BASE_URL`/`MM08_MODEL_API_KEY`/`MM08_AGENT_MODELS`，key 从 `LIGHTHOUSE_API_KEY` 环境变量读入，**不写死**），**不打桩、不 mock**：
+  - **做法**：Web 粘贴路径（`POST /attachments` 上传真实截图 → `POST /messages` 带附件引用）→ 真 provider（`https://lighthouse.dphn.ai/run/text-v/v1`，`deepseek-ai/DeepSeek-V4.1-Flash`）→ 读回答。
+  - **判据**：截图（`screenshot_png()`，白底 + 绿横条 + 蓝圆 + 56px 粗体文字）里嵌了一条**只可能来自读图**的校验码 `830-KX74`；回答必须含它。答错即 FAIL。
+  - **四件套证据**：① 运行 ID = `session_id=c62305a2-484a-4b83-ad8d-0750cc9b64a1`；② 命令 = `python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-r3`（单跑同构入口：`--only ac6-vision`）；③ 退出码 = **1**（整轮退出码，含 D1 FAIL；AC6-VISION 自身 PASS）；④ 事件 JSONL 片段：
+    ```json
+    [
+      {"seq":11,"type":"user/message","data":{"content":"读这张截图：找到「CODE:」后面的校验码（大写字母/数字/连字符），只回该校验码本身。",
+        "attachments":[{"attachment_id":"sha256:1cfc8e6b…20bf9","media_type":"image/png","bytes":16263,"width":720,"height":260,"kind":"image"}]}},
+      {"seq":16,"type":"model/completed","data":{"content":"830-KX74","model":"deepseek-ai/DeepSeek-V4.1-Flash",
+        "usage":{"prompt_tokens":5137,"completion_tokens":50,"total_tokens":5187,"cached_tokens":4480},"finish_reason":"stop"}}
+    ]
+    ```
+  - **读数**：`send_status=200`、`readback_status=200` 且 `readback_sha256 == attachment_sha256 == 1cfc8e6b…20bf9`（16 263 字节截图）、`answer="830-KX74"`、`answer_has_expected_code=true`、单条墙钟 `elapsed_s=10.55`。**回答内容即证据**：模型正确读出了图里的校验码。
+  - **诚实边界**：这是**同代码路径的 API 层真跑**（Web 前端粘贴走的就是这两个端点），不是浏览器 GUI 点击；`mimo` preset 仍非本项线路，本项走的是用户指定的视觉线路。
 
 ### AC7 — 授权断言在真实服务复验（PASS）
 
@@ -185,10 +200,11 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 - **O2 TUI 无历史图回读路径**：见 AC1 注。属 MM-06 范围的产品决策（TUI 是否显示历史图），本票只如实登记。
 - **O3 沙箱 node 不支持 TS**：沙箱（Ubuntu 26.04 apt）的 `node v22.22.1` 编译时**未带** TypeScript 支持，`--experimental-transform-types` 直接抛 `ERR_NO_TYPESCRIPT`。换官方 nodejs.org 构建（同 v22.22.1）后正常。这是**沙箱环境差异**，非仓库问题；但记录在此，避免后人误判"TUI 探针在 CI 上挂了"。
 - **O4 resume 不带 attachments**：见 AC2 注（`ResumeRequest` 无该字段）。
+- **O5 fork 与「在写 progress 临时文件」的复制竞态（环境敏感，非 D1）**：本轮复跑中一次运行的 AC3 在 `POST /api/sessions/{id}/forks` 上抛 **500**，`srv.log` 的根因是 `shutil.Error: [... progress.meta.json._<rand>.tmp ...] No such file or directory`——`session/fork.py::_copy_workspace` 直接 `copytree` 工作区，与后台 progress 写入器留下的**临时文件**在同一时刻擦写 ⇒ scandir/copy 窗口失手。它**不是** D1（D1 是 fork 成功但 child 读图 404），只是同一条链路上一类**时序敏感**的稳健性问题；同批重跑即复现 D1 的结构化读数（`child_read_status=404`）。P3-2 的逐 AC 异常兜底保证这类异常只把该条 AC 记 FAIL（traceback 进 notes），不再丢整份 `evidence.json`。建议：fork 复制时忽略 `*.tmp`/写入中的文件，或在 fork 前后取一致快照。**本票只登记不修**。
 
-## 7. 由本票登记的两个缺口
+## 7. 由本票登记的两条事项
 
-1. **真实视觉模型凭证**（AC6-VISION = `NOT_RUN`）：仓库与环境中无任何视觉模型 key；`mimo` 是唯一声明 `supports_vision` 的 preset。**不 mock 冒充**。→ 需用户提供凭证后补跑（否则该 AC 永久 NOT_RUN）。
+1. **~~真实视觉模型凭证~~ → 已解除**（2026-10-09 用户裁决）：lighthouse `deepseek-ai/DeepSeek-V4.1-Flash` **本就是视觉模型**，用现有线路跑、**无需新凭证**。AC6-VISION 已由 NOT_RUN 转 **PASS**（§4 AC6 的四件套证据）；key 经 `LIGHTHOUSE_API_KEY` 环境变量注入，**不写死**、不改产品代码。
 2. **Windows Terminal 真机**（本机是 Linux 云电脑）：走 GitHub Actions `windows-latest` 近似验证（置 `WT_SESSION` 走同代码路径）。**近似 ≠ 真机 GUI**，证据里必须如实标注；见 §9。
 
 ## 8. 云端沙箱
@@ -203,14 +219,22 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 ## 9. Windows 近似验证（`windows-latest`）
 
-**交付物**：`.github/workflows/mm08-windows-verify.yml`（`on: workflow_dispatch` only，两个 job：`tui` / `cli`，`runs-on: windows-latest`，action 全部 pin 到 commit SHA，`permissions: contents: read` + `actions: write`）。设计上只做**同一代码路径的近似**：
-- Job `tui`：`tui/` 目录 `npm ci` + `node --test test/*.test.ts` + `npx tsc --noEmit`；脚本里置 `WT_SESSION` 走 Windows Terminal 分支，并断言 `[Image #N]` 文本占位路径 + 终端的**负例断言**（不得出现原始转义/fallback）。
-- Job `cli`：复用 `scripts/verify_830_mm08.py --only ac6-cli`（**与本地同一套断言**，不另写一份）。
-- 不写任何 secret；日志上传为 artifact。
+**交付物**：`.github/workflows/mm08-windows-verify.yml`（`on: workflow_dispatch` **+ 本分支 `push`**〔`branches: [omp/830-mm08-cross-client-verify]`、`paths` 只盯该 workflow 文件自身〕，两个 job：`tui` / `cli`，`runs-on: windows-latest`，action 全部 pin 到 commit SHA，`permissions: contents: read` + `actions: write`）。加 `push` 的唯一目的是**绕过 `workflow_dispatch` 要求 workflow 在默认分支**这条限制（本票不 push main）而真触发一次 Windows runner；设计上只做**同一代码路径的近似**。**本节的步骤清单与 workflow 文件逐条一致，两处互相引用——改一处必须同步改另一处**（本票审查 P3-1 就是二者漂移产生的）：
+- Job `tui`（`working-directory: tui`，Node 22）：
+  1. `npm ci --no-audit --no-fund`；
+  2. **类型检查 `npm run check`（= `tsc --noEmit`，`include` 覆盖 `src/**` 与 `test/**`）**——win32 分支（`tui/src/lib/host.ts` 的 `%APPDATA%`/盘符/反斜杠路径）的类型面在这里取证（gate0 的 tsc 车道只扫 `web/`，`--experimental-transform-types` 只剥类型不做检查 ⇒ tui 类型面此前无车道覆盖）；日志 `01-tsc.log`；
+  3. **AC6-W1**：置 `WT_SESSION` 的 `.ts` 断言脚本（`node --experimental-transform-types wt-session-placeholder.check.ts`）——`getCapabilities().images === null`、`renderDraftImage().kind === "text"`、文本**不含**图片协议转义（`\x1b_G` / `\x1b]1337;File=` / `\x1bP`）、保留 Windows 原始长路径、并按宿主 `isAbsolute` 判定 OSC 8 链接（另有绝对路径正向锚）；日志 `02-wt-session.log`；
+  4. **AC6-W2**：`node --experimental-transform-types --test --test-reporter=spec test/host.test.ts`（Windows 路径约定；两条断言在 Linux 上必红）；日志 `03-windows-paths.log`；
+  5. **全量用例 `npm test`**（= `node --experimental-transform-types --test --test-reporter=dot … test/*.test.ts`，含 AC6 占位/负向转义断言与 AC7 缩略图断言）；日志 `04-tui-full.log`；
+  6. `if: always()` 上传 `mm08-tui` artifact（前置还有 `00-env.log`：node/npm/OS/`WT_SESSION` 未置位基线）。
+- Job `cli`（`runs-on: windows-latest`，Python 3.13 + uv，`if: ${{ !inputs.tui_only }}`）：`uv sync --locked --python 3.13` → `scripts/verify_830_mm08.py --only ac6-cli`（**与本地同一套断言**，不另写一份）→ `uv run pytest tests/test_cli_image.py -q`（16 例，Windows `tmp_path` 下重跑）→ `if: always()` 上传 `mm08-windows-cli` artifact。
+- 不写任何 secret；每条步骤都 `Tee-Object` 落 `$RUNNER_TEMP\mm08-tui` / `mm08-cli*`，`if: always()` 上传为 artifact。
 
-**本机（Linux）已能给出的同源读数**：`tui` 套件 201 条中 199 通过，**2 条失败且都只可能在 Windows 上通过**——`tui/test/host.test.ts:215`（`路径约定：数据根与凭据文件是同一层`）与 `:225`（`python 解析`）：两者断言的是 Windows 路径形状（`path.join` 在 Linux 下产出 `/`）。`tui/test/image-view.test.ts:68` 覆盖 `WT_SESSION`（`images:null`）⇒ 文本占位 + 负例转义序列 + 不得内嵌 base64；`:90` 覆盖「无 OSC 8 能力」时的文本路径。
+**本机（Linux）已能给出的同源读数**：`tui` 套件 201 条中 199 通过，**2 条失败且都只可能在 Windows 上通过**——`tui/test/host.test.ts:215`（`路径约定：数据根与凭据文件是同一层`）与 `:225`（`python 解析`）：两者断言的是 Windows 路径形状（`path.join` 在 Linux 下产出 `/`）。`cd tui && npm run check`（= workflow 步骤 2 同命令）**exit 0**（Linux 上类型面即过，win32 分支的类型面由 Windows runner 取证）。`tui/test/image-view.test.ts:68` 覆盖 `WT_SESSION`（`images:null`）⇒ 文本占位 + 负例转义序列 + 不得内嵌 base64；`:90` 覆盖「无 OSC 8 能力」时的文本路径。
 
-**GA 触发结果（实测 404，登不进 —— 见 §11 U4）**
+**GA 触发结果（`workflow_dispatch` 实测 404 → 改用 `push` 触发；见 §11 U4）**
+
+> 下面这段是**加 `push` 之前**的老读数，保留为决策依据。加 `push` 后的**真触发结果**在同批提交里补写（`push` ⇒ workflow 自动跑，不需要 workflow 在默认分支）。
 
 - 分支已推：`omp/830-mm08-cross-client-verify`；workflow 文件**确实在分支上**（`gh api .../contents/.github/workflows/mm08-windows-verify.yml?ref=<branch>` → `sha=578aa72bea16783e4b9e0127232d2b78e2c1c8ae`）。
 - 但 `gh workflow run mm08-windows-verify.yml --ref <branch>` → **HTTP 404 “not found on the default branch”**；REST `POST /actions/workflows/mm08-windows-verify.yml/dispatches` → 同样 404。`gh api .../actions/workflows` 列出的 6 个 workflow 里**没有它**。
@@ -223,7 +247,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 | 步骤 | 命令 | 退出码 | 读数 |
 | --- | --- | --- | --- |
-| 验证驱动（AC1-AC7） | `python scripts/verify_830_mm08.py --work ~/m8b` | 1（= AC3 FAIL） | `counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`，墙钟 20.4s；**判据与本机同形** |
+| 验证驱动（AC1-AC7） | `python scripts/verify_830_mm08.py --work ~/m8b` | 1（= AC3 FAIL） | `counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`，墙钟 20.4s；**判据与本机同形**（差的一份 `NOT_RUN` = AC6-VISION：沙箱无常视觉凭证，且那份脚本早于 AC6-VISION 接线；本机 keyed 视图为 8 PASS/1 FAIL/0 NOT_RUN，见 §4） |
 | 验证驱动（单条） | `python scripts/verify_830_mm08.py --only ac6-cli --work ~/m8c` | 0 | 1 PASS |
 | `tests/agent` … `tests/tools`（逐目录分块，含 `websearch` 38 passed、`workspace` 118 passed + 2 skipped） | `python -m pytest tests/<dir> -q --basetemp=~/bt-*` | 全 0 | 与基线一致，无新增红（第一轮分块 + 第二轮补跑，共 26 个目录） |
 | `tests/memory` + `tests/evaluation` | 同上（**装齐 extras 后**） | 0 | **1198 passed**（先前 1 红 + 1 collection error 是 `uv sync --locked` 未装 `--all-extras` 的**环境假红**：缺 `langgraph` / `langfuse`） |
@@ -231,7 +255,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | `tests/web` + `tests/transport` | 同上 | 0 | **859 passed**（185s） |
 | `tests/tooling` | 同上 | 0 | **378 passed**（含 `test_review_coverage_immutable_ref.py`——它要求真台账干净，**所以必须在台账行提交之后跑**；A 树上它是 1 failed = 台账缺行，预期） |
 | `tui` 全量 | `npm ci` + `npm test`（TAP 取计数） | 1 | **201 tests / 199 pass / 2 fail**，与本机逐字一致；两条失败 = `host.test.ts` 的 Windows 路径断言（Linux 上必红、Windows 上必须 0） |
-| `tui` 类型 | `npx tsc --noEmit` | 0 | 干净 |
+| `tui` 类型 | `npm run check`（= `tsc --noEmit`，与 workflow 步骤 2 同命令） | 0 | 干净 |
 | `web` 全量 | `pnpm install --frozen-lockfile` + `vitest run` | 0 | **112 files / 1575 tests 全过**，61.3s |
 | Gate-0 裸全量（tip=脚手架提交 A″） | `python scripts/gate0.py` | 1 | **5/6**：diff-check / ruff / oxlint / tsc / guards PASS，**coverage FAIL**（A″ 未审查且未声明——台账行还没提交，预期） |
 | Gate-0 裸全量（tip = 台账提交 B1 `1fc9bc54`） | 同上 | **0** | **6/6 PASS**，`tree=944ff04657ea`，墙钟 13.0s；读数落盘 `docs/gate/1fc9bc54b3540b291df5a51ff3fc08c730b99354.json` |
@@ -242,7 +266,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 | 步骤 | 命令 | 读数 |
 | --- | --- | --- |
-| 验证驱动 | `python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-fix` | `counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`，墙钟 58.5s；`evidence.json` 即 §4 的原始读数 |
+| 验证驱动 | `python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-r3` | `counts={'PASS': 8, 'FAIL': 1, 'NOT_RUN': 0}`，墙钟 61.3s；`evidence.json` 即 §4 的原始读数（入库 `docs/evidence/830-mm08-cross-client-local.json` + 同轮 `verify.log` → `…-verify.txt`） |
 | 守卫（verification.map + 执行位） | `python -m pytest tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q` | 32 passed |
 | 台账覆盖（真判据：无 flag） | `python scripts/check_review_coverage.py` | exit 0 |
 | Gate-0 裸全量 | `python scripts/gate0.py` | **4/6**：本机**没有** `web/node_modules` ⇒ oxlint/tsc 两条车道**阻塞**（不是失败面），其余 4 条 PASS；6/6 以沙箱读数为准（§10.1） |
@@ -254,9 +278,9 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | # | 事项 | 选项 |
 | --- | --- | --- |
 | U1 | **D1（AC3 缺陷）修不修、怎么修** | (a) fork 复制/链接附件对象；(b) 附件改全局内容寻址（DSH 式）；(c) child 读回回落父命名空间。本票只登记 |
-| U2 | **AC6-VISION 凭证** | 提供 MiMo（或其它声明 `supports_vision` 的 preset）凭证 → 补跑；否则该 AC 永久 NOT_RUN |
+| U2 | ~~**AC6-VISION 凭证**~~ | **已闭环**（2026-10-09 用户裁决）：lighthouse `deepseek-ai/DeepSeek-V4.1-Flash` 即视觉线路，无需新凭证 ⇒ AC6-VISION 真跑 **PASS**（§4 AC6） |
 | U3 | **Windows 真机走查** | 真机（有人有 Windows Terminal 的机器）走一次；或接受 §9 的 GA 近似并明确标注 |
-| U4 | **GA 触发路径** | 实测：`workflow_dispatch` 要求 workflow 文件存在于**默认分支**（本票只 push 了特性分支 ⇒ `gh workflow run` 与 REST dispatch **双双 404**，见 §9）。三条出路：(a) 允许把该 workflow 合到 `main`——它**只挂 `workflow_dispatch`**，不当常驻 CI，同仓 #885 的 `windows-installer-smoke.yml` 已是这个形态（`d82b3ab8` 引入，至今只在 main 上手工触发）；(b) 允许我另建一个**临时仓库**跑同一 workflow（会多出一个仓库，需明确同意）；(c) 保持 `NOT_RUN`，按 §7 缺口②登记 |
+| U4 | ~~**GA 触发路径**~~ | **已解决**（2026-10-09）：`workflow_dispatch` 要求 workflow 在**默认分支**（本票不 push main ⇒ `gh workflow run`/REST dispatch 双双 404）。改走 **`on: push`（仅本分支 `omp/830-mm08-cross-client-verify`，`paths` 只盯该 workflow 文件）** 真触发一次 `windows-latest`。**实测结果见 §9「GA 触发结果」**。已保留 `workflow_dispatch` 供日后合入 main 后手工跑 |
 | U5 | push/PR/merge 边界 | 本票只推了特性分支 `omp/830-mm08-cross-client-verify`（为触发 GA，用户 2026-10-09 批准）；未开 PR、未合 main |
 
 ## 12. 三问自检
@@ -275,7 +299,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | 真实入口 | 真服务 + 真客户端，非单测 | §3 + §4（三入口） |
 | 逐 AC 证据 | 命令 / 退出码 / 片段 | §4（每条含判据与读数；原始 JSON 在运行目录 `evidence.json`） |
 | 缺陷回报 | 现象/复现/证据/严重度/目标仓库 | §5（D1） |
-| 缺口 | 如实登记，不 mock | §7（两条）+ §4 AC6-VISION |
+| 缺口 | 如实登记，不 mock | §7（两条，①AC6-VISION 已闭环为 PASS）+ §4 AC6 |
 | 沙箱 | id / 资源 / 姿态 / 收尾 | §8 |
 | 门禁 | 读数落盘 | §10 |
 | 待决策 | 交回用户的判断项 | §11 |

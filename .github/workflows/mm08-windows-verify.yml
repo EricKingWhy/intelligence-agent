@@ -20,6 +20,10 @@
 # 它跑什么（对准 AC6 的 Windows 部分）
 #
 #   job `tui`（Node 22，与 `tui/package.json` 的 `engines: >=22` 一致）
+#     0. `npm run check`（= `tsc --noEmit`，`include` 覆盖 `src/**` 与 `test/**`）：win32 分支
+#        （`tui/src/lib/host.ts` 的 `%APPDATA%`/盘符/反斜杠路径）的**类型面**在这里取证——
+#        gate0 的 tsc 车道只扫 `web/`，且 `--experimental-transform-types` 只剥类型不做检查，
+#        所以 tui 的类型面此前没有车道覆盖（#830 双轴审查 P3-1）；
 #     1. WT_SESSION 断言脚本：`getCapabilities().images === null` ⇒ `renderDraftImage` 必须返回
 #        `kind: "text"`，且文本**不含**图片协议转义（`\x1b_G` / `\x1b]1337;File=` / `\x1bP`），
 #        并保留 Windows 原始路径（盘符 + 反斜杠 + >260 字符长路径）；OSC 8 链接按上游
@@ -31,6 +35,8 @@
 #     3. 全量 `npm test`（含 AC6 占位/负向转义断言、AC7 缩略图断言）。
 #     顺序刻意是「最能定案的先跑」：后面一条红不会把前面的证据吃掉（每条都 tee 到
 #     `$RUNNER_TEMP\mm08-tui`，最后统一上传）。
+#   步骤与证据包 `docs/tickets/multimodal-2026-10-07/MM-08-verification-evidence.md` §9 互相引用，
+#   两处必须逐条一致（#830 审查 P3-1 即由二者漂移产生）。
 #
 #   job `cli`（Python 3.13 + uv，与 gate0.yml 的环境对齐）
 #     1. `scripts/verify_830_mm08.py --only ac6-cli`：真 CLI 子进程四态——附图成功 `exit 0`
@@ -40,12 +46,16 @@
 #
 # 触发与边界
 #
-#   `on:` **只挂 `workflow_dispatch`**（手动触发）：不挂 push / pull_request / schedule，
-#   不做常驻 CI、不设为 main 必需状态检查。#830 是验证票，本 workflow 只是它的一次性取证工具。
-#   **不含任何密钥**（AC6 的"真实视觉模型回答"因无凭证恒记 NOT_RUN，见 Issue #830）。
+#   `on:` 挂 **`workflow_dispatch`**（手动触发，任意分支/ref）+ **`push`**（仅本票特性
+#   分支 `omp/830-mm08-cross-client-verify`，且 `paths` 只盯本 workflow 文件自身）。
+#   加 `push` 的唯一目的是把 Windows 近似验证真跑一次并留证（GitHub 的
+#   `workflow_dispatch` 要求 workflow 文件在**默认分支**，本票不 push main ⇒ 只能靠 push
+#   本分支触发，见证据包 §9）。不挂 pull_request / schedule，不做常驻 CI、不设为 main
+#   必需状态检查。#830 是验证票，本 workflow 只是它的一次性取证工具。
+#   **CI 里不含任何密钥**；AC6 的"真实视觉模型回答"在本地经 lighthouse 线路实测
+#   （见证据包 AC6 节），本 workflow**不跑**它（runner 上无凭证）。
 #   第三方 action 一律**完整 SHA + 版本注释**（与仓库既有工作流一致，tag 可变、有投毒面；
 #   升级走 Dependabot）。
-
 name: mm08-windows-verify
 
 on:
@@ -56,6 +66,11 @@ on:
         required: false
         type: boolean
         default: false
+  push:
+    branches:
+      - omp/830-mm08-cross-client-verify
+    paths:
+      - .github/workflows/mm08-windows-verify.yml
 
 permissions:
   contents: read
@@ -90,6 +105,14 @@ jobs:
       - name: 装 tui 依赖（npm ci）
         working-directory: tui
         run: npm ci --no-audit --no-fund
+
+      - name: 类型检查（npm run check = tsc --noEmit，覆盖 src/** 与 test/**）
+        working-directory: tui
+        run: |
+          npm run check 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\01-tsc.log"
+          $code = $LASTEXITCODE
+          Write-Output "tsc --noEmit 退出码=$code"
+          exit $code
 
       - name: AC6-W1 WT_SESSION ⇒ 文本占位（无假缩略图 / 无图片协议转义 / 长路径保留）
         working-directory: tui
@@ -159,7 +182,7 @@ jobs:
           console.log("AC6-W1 OK");
           '@ | Set-Content -Encoding utf8 wt-session-placeholder.check.ts
           node --experimental-transform-types wt-session-placeholder.check.ts 2>&1 |
-            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\01-wt-session.log"
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\02-wt-session.log"
           $code = $LASTEXITCODE
           Remove-Item -LiteralPath wt-session-placeholder.check.ts -Force
           Write-Output "AC6-W1 退出码=$code"
@@ -169,7 +192,7 @@ jobs:
         working-directory: tui
         run: |
           node --experimental-transform-types --test --test-reporter=spec test/host.test.ts 2>&1 |
-            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\02-windows-paths.log"
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\03-windows-paths.log"
           $code = $LASTEXITCODE
           Write-Output "AC6-W2 host.test.ts 退出码=$code（Linux 上两条 Windows 路径断言必红，Windows 上必须 0）"
           exit $code
@@ -177,7 +200,7 @@ jobs:
       - name: TUI 全量用例（含 AC6 占位与负向转义断言）
         working-directory: tui
         run: |
-          npm test 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\03-tui-full.log"
+          npm test 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\04-tui-full.log"
           $code = $LASTEXITCODE
           Write-Output "npm test 退出码=$code"
           exit $code
