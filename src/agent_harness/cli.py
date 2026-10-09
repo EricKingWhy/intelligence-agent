@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -29,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from agent_harness.agent import AgentEvent
@@ -1005,9 +1007,138 @@ class RunOutcome:
     paused: bool = False
 
 
+#: `--image` 接纳失败的退出码。与 argparse 的用法错误（exit 2，"命令行形状不对"）
+#: 分开：这一档是"输入不成立"——路径不存在 / 不是受支持格式 / 超限 / 模型不支持视觉。
+#: 先例：Pi `packages/coding-agent/src/cli/file-processor.ts:36-41`（路径不存在 ⇒
+#: `Error: File not found: <abs>` + `process.exit(1)`）；Aider `aider/main.py:1120-1129`
+#: （`Message file not found: …` + `return 1`）。
+IMAGE_INPUT_EXIT_CODE = 1
+
+
+class ImageInputRejected(Exception):
+    """`--image` 的输入在提交前被拒（文案可直接展示；见 `_admit_cli_images`）。"""
+
+
+async def _admit_cli_images(
+    settings: Settings, session_id: str, paths: list[str]
+) -> list[dict[str, Any]]:
+    """把 `--image <path>` 变成 `user/message` 的附件引用数组（MM-07 / `#828`）。
+
+    复用面（**不**另立第二条消息路径，**不**另立任何限值）：
+
+    - 探测：`attachments.detect_image` —— 字节签名表（纯标准库，无新依赖），与 Web
+      上传端点 `web/attachments.py` 同一个函数（扩展名不参与判定）；
+    - 限值：`attachments.resolve_image_limits` —— MM-03 的单张字节 / 单条数量 /
+      单条总字节 / 像素 / 边长，同一份配置；
+    - 存储：`storage.artifact_select.select_artifact_store` + `ArtifactStore.save_bytes`
+      （内容寻址，id = `sha256:<64hex>`，同字节天然去重）—— Web 上传端点同一个落点；
+    - 视觉闸门：`model.config.model_supports_vision` —— MM-03 的
+      `SessionService._supports_vision_for_request` 同一个函数（未声明/未知一律 False）。
+
+    顺序把**唯一的写点**（`save_bytes`）放在所有判定之后：任何一条被拒都不留附件字节、
+    不产生任何事件——MM-03 的零残留口径在 CLI 侧同样成立。
+
+    引用形状与 `SessionService._resolve_attachment_refs` 逐字段一致（含按
+    `attachment_id` 去重、不写 `name`），所以下游消费者（`parse_image_refs` → 图片内容块
+    → provider 载荷）无需区分引用来自 CLI 还是 Web。
+
+    接纳期保留待上传字节（上界 = 调用方给的图片字节和，且写前必判聚合上限）——换来
+    **同一份字节**既用于判定、又用于落存储，没有"判定之后文件被换掉"的 TOCTOU 窗口。
+    """
+    # 惰性导入：纯文本调用不该为一个没用到的旗标付附件包（含 Pillow）的导入成本
+    # ——与 `session/service.py::_resolve_attachment_refs` 同一姿势。
+    from agent_harness.attachments import (
+        KIND_IMAGE,
+        AttachmentError,
+        DetectedImage,
+        detect_image,
+        resolve_image_limits,
+    )
+    from agent_harness.model.config import ModelConfig, model_supports_vision
+    from agent_harness.storage.artifact_select import select_artifact_store
+
+    limits = resolve_image_limits(settings)
+    pending: list[tuple[bytes, DetectedImage]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            raise ImageInputRejected(f"--image 文件不存在：{path}")
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            raise ImageInputRejected(
+                f"--image 文件读取失败：{path}（{error}）"
+            ) from error
+        if len(data) > limits.max_image_bytes:
+            raise ImageInputRejected(
+                f"--image 文件超过单张上限（{limits.max_image_bytes} 字节）："
+                f"{path} 为 {len(data)} 字节"
+            )
+        try:
+            detected = detect_image(
+                data,
+                max_pixels=limits.max_image_pixels,
+                max_dimension=limits.max_image_dimension,
+                allowed_media_types=limits.media_types,
+            )
+        except AttachmentError as error:
+            raise ImageInputRejected(
+                f"--image 文件不是受支持的图片：{path}（{error}）"
+            ) from error
+        attachment_id = "sha256:" + hashlib.sha256(data).hexdigest()
+        if attachment_id in seen:  # 同字节只引用一次（与发送端点同口径）
+            continue
+        seen.add(attachment_id)
+        total_bytes += len(data)
+        pending.append((data, detected))
+    if len(pending) > limits.max_images_per_message:
+        raise ImageInputRejected(
+            f"单条消息最多 {limits.max_images_per_message} 张图片，"
+            f"本次引用了 {len(pending)} 张"
+        )
+    if total_bytes > limits.max_message_image_bytes:
+        raise ImageInputRejected(
+            "单条消息的图片总字节超过上限"
+            f"（{limits.max_message_image_bytes} 字节）：本次合计 {total_bytes} 字节"
+        )
+    # MM-03 的视觉闸门（不另立口径）：不支持就**在提交前**拒——而且拒在落存储之前。
+    if not model_supports_vision(settings, ModelConfig.from_settings(settings)):
+        raise ImageInputRejected(
+            "不能用 --image：当前所选模型不支持图片输入（supports_vision=false）"
+            "——请改选支持视觉的模型，或去掉 --image"
+        )
+    selection = select_artifact_store(settings, session_id)
+    if selection is None:
+        raise ImageInputRejected(
+            "本部署没有可用的附件存储（artifact_dir 为空，或对象存储只配了一半）"
+        )
+    refs: list[dict[str, Any]] = []
+    for data, detected in pending:
+        try:
+            blob = await selection.store.save_bytes(
+                session_id, data, mime_type=detected.media_type
+            )
+        except OSError as error:
+            raise ImageInputRejected(f"--image 附件写入失败：{error}") from error
+        refs.append(
+            {
+                "kind": KIND_IMAGE,
+                "attachment_id": blob.artifact_id,
+                "media_type": detected.media_type,
+                "bytes": blob.size,
+                "width": detected.width,
+                "height": detected.height,
+            }
+        )
+    return refs
+
+
 async def run(
     message: str,
     *,
+    images: list[str] | None = None,
     run_turns_total: int | None = None,
     run_model_requests: int | None = None,
     run_total_tokens: int | None = None,
@@ -1053,6 +1184,12 @@ async def run(
     `#315`：`run_deadline_at` 是本 run 的**绝对截止时刻**（RFC 3339 UTC 文本，与 Web
     的 `budget.run.deadline_at` 同源、同一份形状判定）。给了已过去的时刻是合法的——
     等于立刻到点（即时 `run/paused reason=deadline`）。
+
+    `#828` / MM-07：`images` 是 `--image` 收集到的本地图片路径。给了就按「读文件 →
+    字节签名探测 MIME → MM-03 的限值与视觉闸门 → 上传到本会话附件存储」接纳，并把引用
+    数组随首条 `user/message` 事件发出（MM-02 的引用契约）。任何一条被拒都抛
+    `ImageInputRejected`（调用方转 exit 1）——**不发消息、不留附件字节**。缺省 `None`
+    ⇒ 纯文本路径零改动（`user_input_metadata` 恒 None）。
     """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -1075,6 +1212,13 @@ async def run(
         # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。
         session_id = str(uuid4())
         workspace = workspace_root / "workspaces" / session_id
+        # `#828` / MM-07：`--image` 的附图接纳（读文件 → 探测 → 限值 → 视觉闸门 →
+        # 落存储）全部早于 `build_runtime` / `run_stream`——任何一条被拒都不产生事件、
+        # 不留附件字节。纯文本调用（`images` 空）根本不走这条路径，
+        # `user_input_metadata` 恒 None ⇒ 既有行为逐字不变。
+        attachments = (
+            await _admit_cli_images(settings, session_id, images) if images else None
+        )
         # local fuse（#308）：CLI 不再自带一个低位数字——生效值 = Deployment 默认 500，
         # 会话级覆盖走 `budget.local.max_agent_turns`（CLI 暂无该开关，与 Web 同一条解析）。
         # 档位声明同样参与收窄（CLI 走默认 main 档位，与 `build_runtime` 的档位选择同源）。
@@ -1156,7 +1300,16 @@ async def run(
         final_text = ""
         pause_data: dict | None = None
         try:
-            async for event in runtime.run_stream(session, message):
+            async for event in runtime.run_stream(
+                session,
+                message,
+                # MM-02 的发送契约：附件引用随首条 `user/message` 事件落盘
+                # （`agent/runtime.py::_drive` 把这个键原样拷进事件 data）。没有附图时
+                # 恒 None —— 与 MM-02 之前逐字相同。
+                user_input_metadata=(
+                    {"attachments": attachments} if attachments else None
+                ),
+            ):
                 renderer.handle(event)
                 if event.type == RUN_COMPLETED:
                     final_text = event.data.get("final_text", "")
@@ -1291,6 +1444,13 @@ def _main_dispatch() -> None:
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
     parser.add_argument(
+        "--image", action="append", default=None, metavar="PATH",
+        help="给这条消息附一张图片（可重复）。读文件 → 按字节签名探测 MIME → 上传到"
+             "本会话附件存储 → 首条 user/message 事件带上引用。只收 png/jpeg/webp/gif；"
+             "路径不存在 / 不是受支持的图片 / 超过单张或单条消息的限值 / 当前模型不支持"
+             "视觉，都在提交前拒（exit 1：不发消息、不留附件字节）。",
+    )
+    parser.add_argument(
         "--run-turns-total", type=int, default=None,
         help="本次 run 的**绝对** turn ceiling（budget.run.max_agent_turns_total；"
              "缺省=不设 run 档 ceiling）。低值会让 run 在预算处 `run/paused`，"
@@ -1369,24 +1529,32 @@ def _main_dispatch() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
-    outcome = asyncio.run(
-        run(
-            args.message,
-            run_turns_total=args.run_turns_total,
-            run_model_requests=args.run_model_requests,
-            run_total_tokens=args.run_total_tokens,
-            run_cost_usd=args.run_cost_usd,
-            run_deadline_at=args.run_deadline,
-            run_tool_limits=tool_limits,
-            session_turns_total=args.session_turns_total,
-            session_model_requests=args.session_model_requests,
-            session_total_tokens=args.session_total_tokens,
-            session_cost_usd=args.session_cost_usd,
-            session_deadline_at=args.session_deadline,
-            session_tool_limits=session_tool_limits,
-            session_max_delegations=args.session_max_delegations,
+    try:
+        outcome = asyncio.run(
+            run(
+                args.message,
+                images=args.image,
+                run_turns_total=args.run_turns_total,
+                run_model_requests=args.run_model_requests,
+                run_total_tokens=args.run_total_tokens,
+                run_cost_usd=args.run_cost_usd,
+                run_deadline_at=args.run_deadline,
+                run_tool_limits=tool_limits,
+                session_turns_total=args.session_turns_total,
+                session_model_requests=args.session_model_requests,
+                session_total_tokens=args.session_total_tokens,
+                session_cost_usd=args.session_cost_usd,
+                session_deadline_at=args.session_deadline,
+                session_tool_limits=session_tool_limits,
+                session_max_delegations=args.session_max_delegations,
+            )
         )
-    )
+    except ImageInputRejected as error:
+        # `#828` / MM-07：附图输入不成立 ⇒ 清晰文案 + exit 1。**不发消息、不留附件
+        # 字节**由接纳流程保证（唯一写点 `save_bytes` 在所有判定之后）；argparse 的
+        # 用法错误仍是 exit 2（两条通道不混）。
+        _emit_stderr(f"错误：{error}")
+        raise SystemExit(IMAGE_INPUT_EXIT_CODE) from error
     if outcome.paused:
         # `#312`：预算暂停**不是**失败——退出码 0，且暂停块 + 恢复指令已经打印。
         # 把它也压成 exit 1 会让脚本把"被预算挡住、可恢复"读成"跑挂了"。
