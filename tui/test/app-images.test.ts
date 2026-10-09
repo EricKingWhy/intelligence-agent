@@ -79,6 +79,8 @@ function jsonResponse(body: unknown): Response {
 function makeHarness(options?: {
   models?: unknown;
   modelsFail?: boolean;
+  /** 视觉预检（GET /api/models）在途时先挂起（复审 N1：模拟"预检窗口里用户又贴了一张"）。 */
+  modelsGate?: Promise<void>;
   clipboard?: ClipboardImage | null;
   clipboardThrows?: boolean;
   initialImages?: string[];
@@ -109,6 +111,7 @@ function makeHarness(options?: {
     }
     if (url.includes("/api/models")) {
       if (options?.modelsFail === true) return new Response("nope", { status: 503 });
+      if (options?.modelsGate) await options.modelsGate;
       return jsonResponse({ models: options?.models ?? [] });
     }
     // GET /events（切会话/启动时的全量重建）：空历史。
@@ -478,6 +481,40 @@ test("独立审查 P3：上传窗口里新贴的图不被吞掉（收尾只清�
   assert.equal(app.pendingImages.length, 1, "窗口内的新图还在");
   assert.equal(app.pendingImages[0]?.path, FIXTURE_PNG, "留下的正是窗口内新贴的那张");
   assert.equal(app.editor.getText(), "[Image #1]", "新图标记重编号为 1");
+  assert.deepEqual(messageBodies(harness.calls), [
+    { content: "[Image #1] 第一张", mode: "queue", attachments: ["sha256:img1"] },
+  ]);
+});
+
+test("复审 N1：视觉预检 listModels 的 await 窗口里新贴的图不被吞掉（快照覆盖全部 await）", async () => {
+  // 预检（GET /api/models）挂在一个可控的未决 promise 上（不用真计时器）：提交停在这个
+  // 窗口内，此时经 AC2 的路径粘贴注入一张新图。旧代码把快照取在 listModels 之后 =>
+  // 新图下标 < 快照 => 收尾被静默清掉；新代码快照前移 => 新图被保留。
+  let releaseModels!: () => void;
+  const modelsGate = new Promise<void>((resolve) => {
+    releaseModels = resolve;
+  });
+  const harness = makeHarness({ models: VISION_MODELS, modelsGate });
+  const app = harness.app;
+  app.state.modelName = "m";
+  app.interceptKeys("\x1bv");
+  await settle();
+  assert.equal(app.pendingImages.length, 1);
+  // pi-tui 的 submitValue() 先清编辑器再 onSubmit(text)：按真实时序建模。
+  app.editor.setText("");
+
+  const submitting = app.handleSubmit("[Image #1] 第一张");
+  app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+  assert.equal(app.pendingImages.length, 2, "预检窗口内新贴的图已入列");
+
+  releaseModels();
+  await submitting;
+
+  assert.equal(app.pendingImages.length, 1, "窗口内新贴的图不被吞掉");
+  assert.equal(app.pendingImages[0]?.path, FIXTURE_PNG, "留下的正是窗口内新贴的那张");
+  assert.equal(app.editor.getText(), "[Image #1]", "新图标记重编号为 1");
+  const notes = app.chatContainer.children.map((child) => child.render(500).join("\n")).join("\n");
+  assert.ok(notes.includes("提交期间新粘贴"), "给出保留提示");
   assert.deepEqual(messageBodies(harness.calls), [
     { content: "[Image #1] 第一张", mode: "queue", attachments: ["sha256:img1"] },
   ]);

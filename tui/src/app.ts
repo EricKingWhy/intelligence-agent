@@ -312,9 +312,13 @@ export class TuiApp {
       await this.runCommand(trimmed);
       return;
     }
+    // 本次提交开始时的数组张数（快照）：下标 >= 它的才是各 await 窗口内新贴的图。
+    // 必须在**任何 await 之前**取：下面 AC8 的视觉预检 `listModels` 同样是异地的 await，
+    // 它的窗口内新贴的图若晚于快照，收尾会被当成本次已提交的图静默清掉（复审 N1）。
+    const countAtSubmit = this.pendingImages.length;
     // AC3：提交时稠密重编号 -- 仍被正文引用的图保留（按原下标升序），标记被删掉的图丢弃，
     // 引用不到的悬空标记（手打 `[Image #99]`）由 compact 一并删掉。`null` = 无需改写。
-    const compacted = compactDraftImages(trimmed, this.pendingImages.length);
+    const compacted = compactDraftImages(trimmed, countAtSubmit);
     const keep = compacted === null ? this.pendingImages.map((_, index) => index) : compacted.keep;
     const content = compacted?.text ?? trimmed;
     // AC8：**只有正文里仍被引用的图**才需要视觉能力预检（独立审查 P1：按数组长度判定会把
@@ -339,8 +343,6 @@ export class TuiApp {
     const keptImages = keep
       .map((index) => this.pendingImages[index])
       .filter((image): image is PendingImage => image !== undefined);
-    // 本次提交开始时数组的张数 = 上传窗口的边界（下标不小于它的才是窗口内新贴的图）。
-    const countAtSubmit = this.pendingImages.length;
     // AC5：先按服务端契约上传每张图（字节流式 + Content-Type/<name> 与字节判定一致），
     // 拿到 attachment_id 再投消息。上传失败**保留草稿**（已改的正文也留给用户重发）。
     const attachments: string[] = [];
