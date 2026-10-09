@@ -108,6 +108,7 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 | Django Channels `@531894e5`（= tag `4.3.2`） | ASGI 框架的 WS 来源校验实现 | `channels/security/websocket.py`：`OriginValidator.__call__` 在交给 application **之前**判定、deny 走 `WebsocketDenier.connect()` 的 `await self.close()`（accept 前 close）；`valid_origin` 对 `None` 的处理 |
 | Phoenix `@v1.8.15` | 生产级 channel 传输的握手校验 | `lib/phoenix/socket/transport.ex:341-400` `check_origin`：`is_nil(origin) -> conn`（无 Origin 放行）、不匹配 ⇒ 握手前 `resp(conn, :forbidden, "")`；`:624-628` 的 `:conn` 模式 = 来源必须等于本连接 host/scheme/port |
 | [Socket.IO middlewares 官方文档](https://socket.io/docs/v4/middlewares/) | handshake 中间件规范 | `io.use()` 里鉴权：**"the Socket instance is not actually connected when the middleware gets executed"**；`next(new Error(...))` ⇒ 连接被拒（不是先建连再发错误帧）；凭据经 `socket.handshake.auth` |
+| Kubernetes `@714f97d7`（PR #47740，liggitt） | 浏览器端 WS 凭据通道（子协议方案） | `staging/src/k8s.io/apiserver/pkg/authentication/request/websocket/protocol.go`：`bearerProtocolPrefix = "base64url.bearer.authorization.k8s.io."`，仅对 WS 升级请求从 `Sec-WebSocket-Protocol` 取此前缀、`base64.RawURLEncoding`（无 padding）解码后走常规 token 鉴权器；成功后**剥离该子协议不回显**（防泄漏），并要求客户端至少再带一个真实子协议 |
 
 判定（`ADAPT`）、取舍与 License 结论见 `docs/research/2026-10-09-ws-auth-handshake-product-research.md`。
 

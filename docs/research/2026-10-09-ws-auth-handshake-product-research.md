@@ -24,6 +24,25 @@
 HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn 对握手前的 close
 固定回 403。
 
+## 浏览器凭据通道：`Sec-WebSocket-Protocol` 子协议（#890 P1-1）
+
+独立审查指出：只认 `Authorization` 头等于把 `/api/ws` 变成"只有能塞裸 HTTP 头的客户端才
+连得上"，而浏览器原生 `WebSocket` 构造器**不能**设该头 —— "反向代理 + JWT"这个官方认可
+形态下的浏览器客户端因此结构性连不上（HTTP 面 200，唯独 live 通道 403）。用户裁决按
+**Kubernetes 的做法**补一条浏览器可用的凭据通道：
+
+- 来源：k8s commit `714f97d7baf4975ad3aa47735a868a81a984d1f0`
+  `staging/src/k8s.io/apiserver/pkg/authentication/request/websocket/protocol.go`。
+- 形状：子协议值 `base64url.bearer.authorization.<ns>.<base64url 无 padding 的 token>`；
+  本项目命名空间取 `agent-harness`（k8s 用 `k8s.io`）。
+- 为什么 base64url 无 padding：子协议值必须是 RFC 6455 的合法 HTTP token 字符，
+  padding 的 `=` 会被浏览器直接拒发。
+- 关键细节照搬：校验成功后**剥离该子协议、101 响应不回显**（防泄漏）；因浏览器请求了
+  子协议就必须收到一个回显，客户端另带一个业务子协议（本项目 `agent-harness.v1`）。
+- 两种来源**等价**：桌面外壳 loopback 代理注入的 `Bearer` 头与子协议通道任一通过即放行。
+
+前端对侧在 `web/src/lib/wsStream.ts`（token 取自与 HTTP 面同一处 `auth.getToken()`）。
+
 ## 取舍（本项目为什么这样适配）
 
 1. **认证与来源分属两态，不叠加成"与"**：
@@ -39,12 +58,21 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
    收紧成 `:conn` 会让 Vite dev（5173 → 代理到 8000）整体失效。
 3. **无 Origin = 放行**（Phoenix 口径）：第三方网页**构造不出**不带 Origin 的浏览器握手，故这条放行不构成
    drive-by 面；反过来若按 Channels 的 `None ⇒ False` 拒绝，会打断 CLI / curl /
-   本机脚本这条真实使用路径（本票验收 3"本地开发形态行为不变"）。
+   本机脚本这条真实使用路径。
+   ⚠ **这一条是相对改动前的行为变更**，不是"零影响"：base 对**任意** Origin 的 WS 握手
+   一律放行，现在跨源被拒（受影响旧用法：从 `file://` / sandboxed iframe 打开本服务，
+   它们的 `Origin` 是 `null`）。票面验收 3 的准确表述是"本地信任模式仍可用；跨源浏览器
+   握手由放行改为拒绝"。
 4. **拒的落点**：`await send({"type": "websocket.close", ...})` 且**不**先 accept。
    实测（uvicorn 0.52.4 `protocols/websockets/websockets_impl.py:295-303`）：
    握手前的 `websocket.close` 一律以 HTTP **403** 收场、连接不建立 ⇒ 与 Phoenix 的
    403 同形；给出 `code=1008`（policy violation）是为了在 ASGI 层表达语义，
    但**不声称**它到达客户端（HTTP/1.1 403 响应里没有 close code）。
+5. **出口的文案形状分叉，策略不分叉**：策略（含 `origin_is_local` 与原因文案）抽成
+   `projects.check_trusted_origin` 由 HTTP / WS 共用（#890 P3-4）；两侧只在出口上分叉——
+   HTTP 转 403 JSON，WS 转握手前 close。WS 侧的 `Origin` 只进日志且按 `[:120]` 截断
+   （客户端可控、无长度上界），close `reason` 用固定短 ASCII（ASGI 限 ≤123 字节可打印
+   ASCII，且它到不了客户端）。
 
 ## 与既有来源清单的关系（§3.1 偏差披露）
 

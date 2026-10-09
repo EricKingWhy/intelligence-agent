@@ -65,12 +65,51 @@ def origin_is_local(origin: str) -> bool:
     """该 `Origin` 是否算"本机来源"（HTTP 与 WS 两条面的**同一判据**，#890）。
 
     `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 不算本机。
+    `urlsplit`（`urlparse` 就是它加一段 params 拆分）对畸形 netloc（如 `http://[::1`
+    少一个 `]`）抛 `ValueError` —— 那是**不可信输入**，按"不是本机"处理（#890 P3-5：
+    不接住会冒泡成 500，把一次设计的 403 变成"服务器出错"，还给任意客户端一个选
+    失败模式的手段）。判据方向不变，仍是 fail-closed。
+
     抽出来是为了让 WS 来源闸（`AuthSeamMiddleware._authenticate_websocket`）与
     下面的 `require_trusted_origin` 共用一份实现——两处各写一份必然漂移，
     而"WS 与 HTTP 同口径"正是 #890 的验收内容。
     """
-    hostname = urlparse(origin).hostname
+    try:
+        hostname = urlparse(origin).hostname
+    except ValueError:
+        return False
     return hostname is not None and hostname.lower() in _LOCAL_HOSTNAMES
+
+
+def cross_origin_reason(origin: str) -> str:
+    """跨源拒的**唯一文案**（HTTP 403 detail 与 WS 日志共用，防两处漂移）。
+
+    只写"拒绝原因"，不含出口形状：HTTP 面把它放进 403 的 JSON `detail`，WS 面把它
+    记进日志（close reason 另有固定短 ASCII 常量，ASGI 限 ≤123 字节可打印 ASCII）。
+    """
+    return (
+        f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举 / WS 会话流）"
+        "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
+    )
+
+
+def check_trusted_origin(origin: str | None, *, jwt_secret_configured: bool) -> str | None:
+    """来源闸的**策略本体**（HTTP 与 WS 共用一份，#890 P3-4）。
+
+    返回 `None` = 放行；返回字符串 = 拒绝原因（即 `(ok, reason)` 里的 `reason`）。
+    判定顺序与常量都只此一处：
+
+    1. 配了 `jwt_secret` ⇒ 放行（认证层才是边界，见 `AuthSeamMiddleware`）；
+    2. 无 `Origin` ⇒ 放行（非浏览器发起：第三方网页**无法**构造不带 Origin 的
+       浏览器请求/握手，故这条不构成 drive-by 面）；
+    3. 否则只接受本机 hostname（`origin_is_local`）。
+
+    两侧只在**出口形状**上分叉：HTTP 把它转成 403 JSON，WS 把它转成握手前的
+    `websocket.close`。策略、文案、常量不再各写一份。
+    """
+    if jwt_secret_configured or origin is None or origin_is_local(origin):
+        return None
+    return cross_origin_reason(origin)
 
 
 def require_trusted_origin(request: Request) -> None:
@@ -78,21 +117,15 @@ def require_trusted_origin(request: Request) -> None:
 
     只在未配置 `jwt_secret`（本地信任模式）时生效；无 `Origin` 或本机 `Origin` 放行。
     `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 拒绝。
+    策略正文在 `check_trusted_origin`（与 WS 面共用），此处只做出口形状。
     """
     state = request.app.state.agent
-    if state.settings.jwt_secret:
-        return  # 认证层才是边界（fail-closed，见 AuthSeamMiddleware）
-    origin = request.headers.get("origin")
-    if origin is None:
-        return  # 非浏览器发起：第三方网页无法构造不带 Origin 的浏览器请求
-    if not origin_is_local(origin):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举）"
-                "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
-            ),
-        )
+    reason = check_trusted_origin(
+        request.headers.get("origin"),
+        jwt_secret_configured=bool(state.settings.jwt_secret),
+    )
+    if reason is not None:
+        raise HTTPException(status_code=403, detail=reason)
 
 
 def _require_absolute_path(value: str) -> str:

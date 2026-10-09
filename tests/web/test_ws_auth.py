@@ -2,11 +2,16 @@
 
 三条契约（票面验收 1–3 逐条对应）：
 
-1. **配置 `jwt_secret` = fail-closed**：无 Bearer / 坏 Bearer / 过期 Bearer 的握手
-   一律在 `websocket.accept()` **之前**被拒；带合法 Bearer 才建连。
-2. **未配置 `jwt_secret` = 本地信任模式 + 来源闸**：无凭据照常可用（开发形态语义不变），
-   但带 `Origin` 且非本机 hostname 的握手被拒——这正是浏览器 drive-by 的形状
-   （WS 握手不受 CORS 约束，服务端不判 Origin 就等于允许任意网页连上来读写会话）。
+1. **配置 `jwt_secret` = fail-closed**：无凭据 / 坏凭据 / 过期凭据的握手一律在
+   `websocket.accept()` **之前**被拒；凭据齐备才建连。凭据有**两条等价来源**：
+   `Authorization: Bearer`（桌面外壳 loopback 代理注入的那条）与
+   `Sec-WebSocket-Protocol` 子协议（浏览器唯一能用的那条，k8s 同款形状）——
+   任一通过即放行。
+2. **未配置 `jwt_secret` = 本地信任模式 + 来源闸**：无凭据照常可用，但带 `Origin`
+   且非本机 hostname 的握手被拒——这正是浏览器 drive-by 的形状（WS 握手不受 CORS
+   约束，服务端不判 Origin 就等于允许任意网页连上来读写会话）。
+   ⚠ **这条相对改动前是行为变更**（跨源握手由放行改为拒绝），不是"零影响"：
+   受影响的是从 `file://` / sandboxed iframe（`Origin: null`）打开本服务的旧用法。
 3. **有凭据行为不变**：接缝放行的连接继续走既有 `handle_websocket`（本文件只锚握手层，
    下行帧契约由 `tests/web/test_web_ws_relay.py` 等既有用例钉住）。
 
@@ -19,17 +24,32 @@
   `is_nil(origin)`（非浏览器发起）⇒ **放行**；否则比对来源，不匹配 ⇒ 握手前 403。
 - Socket.IO 4.8.4 官方文档 `docs/v4/middlewares/`：鉴权在**连接建立之前**完成，
   失败即拒绝连接（不是建立后再发错误帧）。
+- Kubernetes `714f97d7baf4975ad3aa47735a868a81a984d1f0`
+  `staging/.../authentication/request/websocket/protocol.go`：子协议
+  `base64url.bearer.authorization.k8s.io.<base64url 无 padding 的 token>` 承载 Bearer，
+  校验成功后**剥离该子协议不回显**（防泄漏）。
 
-判别力说明（为什么这些用例能区分"拒"与"放行"）：被拒的握手由 uvicorn 回 HTTP 403，
-客户端在 `__enter__` 阶段就抛 `WebSocketUpgradeError`（`response.status_code == 403`）；
-放行的握手拿到 `websocket.accept`，客户端正常进入协议循环。断言里**同时**要求
-"抛的是升级失败"且"状态码 403"，因此"先 accept 再关"的实现（handler 里主动 close）
-会被区分出来——那种实现拿到的是已建立的连接。
+判别力说明（为什么这些用例能区分"拒"与"放行"）：本文件共 **33 例**，走**两条不同的
+测试接缝**，断言强度不同，别混为一谈。
+
+**接缝一：真实 uvicorn + httpx2**（末尾 2 例）。被拒的握手由 uvicorn 回 HTTP 403，
+客户端在 `client.websocket(...)` 的 `__enter__` 抛 `HTTPXWSException`，其 `.response`
+带 `status_code == 403`——**只有这两例能断言状态码**。它们覆盖的正是"拒发生在协议层、
+连会话面都没进"这个结构性事实（订阅 / 写入都到不了业务侧，且同一服务上带凭据的连接
+照常工作——拒的是连接，不是把进程搞崩）。
+
+**接缝二：starlette `TestClient`**（其余 **31 例**，含 parametrize 展开）。`__enter__`
+收到 accept 之前的 close 就抛 `WebSocketDisconnect`，**拿不到 status_code**（它只在
+`websocket.http.response.start` 那条路上才带状态码，见 `starlette/testclient.py` 的
+`_raise_on_close`）。这里锚的是"升级阶段就失败"这个事实本身——**先 accept 再关**的实现
+不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。这 31 例
+覆盖的是**判据矩阵**（凭据来源 × 有无 Origin × 本机/跨源），不是状态码。
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,7 +60,11 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from agent_harness.config import Settings
-from agent_harness.web.app import create_app
+from agent_harness.web.app import (
+    WS_BEARER_SUBPROTOCOL_PREFIX,
+    WS_BUSINESS_SUBPROTOCOL,
+    create_app,
+)
 
 _SECRET = "ws-auth-test-signing-secret-at-least-32-chars"
 
@@ -54,16 +78,17 @@ def _token(secret: str = _SECRET, *, expires_in: int | None = 600) -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+def _bearer_subprotocol(token: str) -> str:
+    """按 k8s 同款形状把 token 编成子协议值（`base64url` 无 padding）。"""
+    encoded = base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
+    return f"{WS_BEARER_SUBPROTOCOL_PREFIX}{encoded}"
+
+
 def _app(tmp_path: Path, *, jwt_secret: str | None = None):
     return create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=jwt_secret, enable_cors=False,
     ))
-
-
-def _headers(**headers: str) -> dict[str, str] | None:
-    # 空 headers 必须**省略**这个 kwarg：TestClient 收到显式 `None` 会在迭代时报错。
-    return headers or None
 
 
 def _ping_pong(ws) -> str:
@@ -96,8 +121,9 @@ def test_refuses_bearerless_handshake_when_secret_configured(tmp_path: Path) -> 
     f"Bearer {_token()}extra",                                     # 形状不合
 ])
 def test_refuses_bad_bearer_when_secret_configured(tmp_path: Path, authorization: str) -> None:
-    """坏 token 与漏 token 同一结果：拒绝。逐条对应 HTTP 面 `AuthSeamMiddleware`
-    已有的四种 401 形状（无 exp / 过期 / 伪造签名 / 非 Bearer）。"""
+    """坏 token 与漏 token 同一结果：拒绝。这 5 项对应 HTTP 面既有的坏凭据形状
+    （非 JWT / 签名不对 / 已过期 / 无 exp / 形状不合）；**非 Bearer scheme**
+    另见 `test_refuses_bearer_that_is_not_bearer_scheme`。"""
     with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
             pytest.raises(WebSocketDisconnect), \
             client.websocket_connect("/api/ws", headers={"Authorization": authorization}):
@@ -143,7 +169,9 @@ def test_valid_bearer_does_not_make_origin_a_gate(tmp_path: Path) -> None:
         assert _ping_pong(ws) == "pong"
 
 
-# ── 未配置 jwt_secret：本地信任模式 + 来源闸（验收 2 / 3）─────────────
+# ── 未配置 jwt_secret：本地信任模式 + 来源闸（验收 3）──────────────────
+# ⚠ 相对改动前是**行为变更**：跨源浏览器握手由放行改为拒绝（受影响旧用法 =
+#   从 `file://` / sandboxed iframe 打开本服务）。本地信任模式本身仍可用。
 
 
 def test_unconfigured_keeps_local_dev_shape(tmp_path: Path) -> None:
@@ -192,20 +220,163 @@ def test_unconfigured_refuses_cross_origin_browser_handshake(
     "http://LOCALHOST:5173",   # 大小写
 ])
 def test_unconfigured_accepts_local_browser_origins(tmp_path: Path, origin: str) -> None:
-    """本机来源的浏览器握手照常放行——CLI / Web 开发形态零影响。"""
+    """本机来源的浏览器握手照常放行；无凭据的本地开发形态仍可用。
+
+    ⚠ **不是"零影响"**：跨源握手这一侧确实由放行改成了拒绝（见上方分节标题），
+    受影响的是从 `file://` / sandboxed iframe 打开本服务的旧用法。
+    """
     with TestClient(_app(tmp_path)) as client, \
             client.websocket_connect("/api/ws", headers={"Origin": origin}) as ws:
+        assert _ping_pong(ws) == "pong"
+
+
+def test_unconfigured_ignores_malformed_origin_instead_of_500(tmp_path: Path) -> None:
+    """畸形 `Origin`（失配方括号）判**拒**，不是 500（#890 P3-5）。
+
+    `urlsplit("http://[::1")` 抛 `ValueError`；不接住的话它会冒泡到 starlette 的
+    `ServerErrorMiddleware`，把一次设计的 403 变成 500——判据方向没被绕过（仍
+    fail-closed），但错误分类与日志被污染，且给了任意客户端一个选失败模式的手段。
+    """
+    with TestClient(_app(tmp_path)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect("/api/ws", headers={"Origin": "http://[::1"}):
+        pass
+
+
+# ── 浏览器凭据通道：Sec-WebSocket-Protocol 子协议（#890 P1-1）──────────
+# 浏览器 `WebSocket` 构造器不能设 `Authorization` 头，子协议是它唯一的凭据通道。
+# 这组用例锚的正是"反代 + JWT"这个官方认可形态下浏览器能不能连上。
+
+
+def test_accepts_bearer_via_subprotocol_when_secret_configured(tmp_path: Path) -> None:
+    """配了密钥 + 只带子协议凭据（无 `Authorization` 头）⇒ 放行且能驱动会话。
+
+    这是 P1-1 的正面锚：仓内真实浏览器客户端只有这条路，用例若只走 `Authorization`
+    头就覆盖不到它（P1-1 正是藏在"用头注入凭据"的形态背后）。
+    `handle_websocket` 的 ping/pong 证明放行的是既有协议行为。
+    """
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[
+                    WS_BUSINESS_SUBPROTOCOL, _bearer_subprotocol(_token()),
+                ]) as ws:
+        assert _ping_pong(ws) == "pong"
+
+
+def test_subprotocol_credential_is_not_echoed(tmp_path: Path) -> None:
+    """承载 token 的子协议**不回显**（防泄漏，k8s 同款），业务子协议照常协商。"""
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[
+                    WS_BUSINESS_SUBPROTOCOL, _bearer_subprotocol(_token()),
+                ]) as ws:
+        assert ws.accepted_subprotocol == WS_BUSINESS_SUBPROTOCOL
+
+
+def test_refuses_browser_shaped_client_without_credential(tmp_path: Path) -> None:
+    """浏览器形客户端**完全不带**凭据（裸 `new WebSocket(url)`）⇒ 被拒。
+
+    P1-1 点名要补的鉴别力缺口：AC2 原来只知道"塞了 `Authorization` 头的客户端能过 /
+    没头就拒"，而浏览器**根本设不了那个头**——它发的就是这条形状。这里刻意带上
+    真实浏览器的全套头（`Origin` + `User-Agent` + `Upgrade`），锚一个反直觉的推论：
+    **`Origin` 不能救一条无凭据的握手**（配了密钥时 Origin 不参与判定，与
+    `test_valid_bearer_does_not_make_origin_a_gate` 是同一条策略的两面）。
+    """
+    headers = {
+        "Origin": "http://localhost:5173",
+        "User-Agent": "Mozilla/5.0",
+        "Upgrade": "websocket",
+    }
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect("/api/ws", headers=headers):
+        pass
+
+
+def test_refuses_browser_shaped_client_with_only_business_subprotocol(tmp_path: Path) -> None:
+    """浏览器形客户端只带业务子协议（有子协议、没 token）⇒ 被拒。
+
+    这条是仓内前端真实发出的形状（`wsSubprotocols()` 无 token 时正好只发业务子协议），
+    与上一条（完全不发子协议）是两个不同的请求形状，各锚一半。
+    """
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[WS_BUSINESS_SUBPROTOCOL]):
+        pass
+
+
+@pytest.mark.parametrize("token", [
+    "not-a-jwt",
+    jwt.encode({"tenant_id": "acme", "user_id": "alice",
+                "exp": int((datetime.now(UTC) + timedelta(seconds=600)).timestamp())},
+               "another-signing-secret-32-chars-long!!", algorithm="HS256"),
+])
+def test_refuses_bad_token_via_subprotocol(tmp_path: Path, token: str) -> None:
+    """子协议里的坏 token（非 JWT / 签名不对）⇒ 被拒——与头通道同一出口。"""
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[
+                    WS_BUSINESS_SUBPROTOCOL, _bearer_subprotocol(token),
+                ]):
+        pass
+
+
+def test_subprotocol_prefix_without_token_is_refused(tmp_path: Path) -> None:
+    """只有前缀、没有编码体 ⇒ 当作"没给凭据" ⇒ 拒（不静默降级成放行）。"""
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[
+                    WS_BUSINESS_SUBPROTOCOL, WS_BEARER_SUBPROTOCOL_PREFIX,
+                ]):
+        pass
+
+
+def test_bad_header_does_not_shadow_valid_subprotocol_credential(tmp_path: Path) -> None:
+    """两个来源**等价**：头坏了不该把子协议里的好凭据挤掉（任一通过即放行）。
+
+    桌面外壳代理注入头、浏览器只能发子协议；两种部署各用一条。这条锚住"任一条
+    有效就放行"，避免实现被写成"先看头、头不合法就拒"。
+    """
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            client.websocket_connect(
+                "/api/ws",
+                headers={"Authorization": "Bearer not-a-jwt"},
+                subprotocols=[WS_BUSINESS_SUBPROTOCOL, _bearer_subprotocol(_token())],
+            ) as ws:
+        assert _ping_pong(ws) == "pong"
+
+
+def test_unconfigured_local_shape_works_with_subprotocols(tmp_path: Path) -> None:
+    """未配置密钥时，浏览器形客户端（只发业务子协议）照常连上。
+
+    ⚠ 只说**子协议这条通道**不构成影响：该形态下后端不看凭据。**跨源握手那一侧仍是
+    行为变更**（由放行改为拒绝），见上方分节标题——两条别混。
+    """
+    with TestClient(_app(tmp_path)) as client, \
+            client.websocket_connect(
+                "/api/ws", subprotocols=[WS_BUSINESS_SUBPROTOCOL]) as ws:
         assert _ping_pong(ws) == "pong"
 
 
 # ── 鉴权发生在业务之前：被拒的连接不得建立任何会话面（验收 1 的读写面）──
 
 
-async def _serve(app) -> tuple[object, asyncio.Task, int]:
+async def _start_server(tmp_path: Path, *, jwt_secret: str | None = None):
+    """启动真实 uvicorn，返回 `(server, serve_task, port)`。
+
+    与 `tests/web/test_web_ws_relay.py:86` 同款接缝（那一个的签名多了 `monkeypatch`
+    与模型工厂 `model_factory`，本文件只注入 JWT 设置、不需要造模型，**实现不复用**）；
+    **`_shutdown` 直接复用** `tests/web/test_web_ws_relay.py:118` 那一份，见两处
+    async 用例的 `from tests.web.test_web_ws_relay import _shutdown`。
+    """
     import uvicorn
 
     server = uvicorn.Server(uvicorn.Config(
-        app, host="127.0.0.1", port=0, log_level="error", lifespan="on",
+        _app(tmp_path, jwt_secret=jwt_secret),
+        host="127.0.0.1", port=0, log_level="error", lifespan="on",
     ))
     serve_task = asyncio.create_task(server.serve())
     for _ in range(200):
@@ -230,7 +401,9 @@ async def test_unauthorized_handshake_starts_no_session_work(tmp_path: Path) -> 
     import httpx2
     from httpx2.websockets import HTTPXWSException
 
-    server, serve_task, port = await _serve(_app(tmp_path, jwt_secret=_SECRET))
+    from tests.web.test_web_ws_relay import _shutdown
+
+    server, serve_task, port = await _start_server(tmp_path, jwt_secret=_SECRET)
     try:
         async with httpx2.AsyncClient(timeout=10) as client:
             # ① 无凭据：握手失败（uvicorn 对握手前的 `websocket.close` 回 403）
@@ -252,12 +425,7 @@ async def test_unauthorized_handshake_starts_no_session_work(tmp_path: Path) -> 
                 await ws.send_text(json.dumps({"type": "ping"}))
                 assert json.loads(await ws.receive_text())["type"] == "pong"
     finally:
-        server.should_exit = True
-        serve_task.cancel()
-        try:
-            await serve_task
-        except asyncio.CancelledError:
-            pass
+        await _shutdown(server, serve_task)
 
 
 @pytest.mark.asyncio
@@ -280,13 +448,13 @@ async def test_unauthorized_handshake_cannot_read_nor_drive_a_real_session(
     import httpx2
     from httpx2.websockets import HTTPXWSException
 
-    from tests.web.test_web_ws_relay import _OneTurnModel, _recv_until
+    from tests.web.test_web_ws_relay import _OneTurnModel, _recv_until, _shutdown
 
     monkeypatch.setattr(
         "agent_harness.assembly.create_chat_model",
         lambda config, **kw: _OneTurnModel(),
     )
-    server, serve_task, port = await _serve(_app(tmp_path, jwt_secret=_SECRET))
+    server, serve_task, port = await _start_server(tmp_path, jwt_secret=_SECRET)
     auth = {"Authorization": f"Bearer {_token()}"}
     base = f"http://127.0.0.1:{port}"
     ws_url = f"ws://127.0.0.1:{port}/api/ws"
@@ -349,9 +517,4 @@ async def test_unauthorized_handshake_cannot_read_nor_drive_a_real_session(
 
             assert await event_count() > before, "对照：带凭据的写入确实增了事件"
     finally:
-        server.should_exit = True
-        serve_task.cancel()
-        try:
-            await serve_task
-        except asyncio.CancelledError:
-            pass
+        await _shutdown(server, serve_task)
