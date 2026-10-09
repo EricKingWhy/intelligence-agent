@@ -86,10 +86,14 @@ def cross_origin_reason(origin: str) -> str:
 
     只写"拒绝原因"，不含出口形状：HTTP 面把它放进 403 的 JSON `detail`，WS 面把它
     记进日志（close reason 另有固定短 ASCII 常量，ASGI 限 ≤123 字节可打印 ASCII）。
+
+    ⚠ **不枚举端点**：`require_trusted_origin` 现在服务项目 / 目录列举 / 记忆 / 工作区文件 /
+    WS 握手等多个面，写死"宿主侧 API（项目 / 目录列举）"会在一半调用点上是事实错误，
+    也会把 HTTP 的端点词带进 WS 日志。只写这条闸自身的口径，措辞与调用面无关。
     """
     return (
-        f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举）"
-        "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
+        f"拒绝跨源访问：Origin={origin!r}。该接口只接受本机来源"
+        "（配置 JWT_SECRET 后由认证层接管）。"
     )
 
 

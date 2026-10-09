@@ -277,14 +277,13 @@ def test_subprotocol_credential_is_not_echoed(tmp_path: Path) -> None:
         assert ws.accepted_subprotocol == WS_BUSINESS_SUBPROTOCOL
 
 
-def test_does_not_echo_unknown_subprotocol(tmp_path: Path) -> None:
-    """客户端自带一个第三方子协议（无凭据）⇒ 仍被拒。
+def test_refuses_unknown_subprotocol_without_credential(tmp_path: Path) -> None:
+    """客户端自带一个第三方子协议、**无凭据** ⇒ 仍被拒（白名单化没把闸门一起放松）。
 
-    子协议协商的基本约定是"回显 = 我实现了这个协议"：原实现回显"第一个非 token 前缀的
-    子协议"，客户端自带什么就回显什么。白名单化后**没有人**会拿到那个回显——拒绝路径上
-    `__enter__` 直接抛（本用例），放行路径上 `accepted_subprotocol` 恒为 `None` 或业务
-    子协议（见 `test_unknown_subprotocol_is_not_echoed_even_when_credential_is_valid`）。
-    这条同时锚住"改了回显策略不是把闸门一起放松"。
+    ⚠ **本用例对白名单零判别力**，别把它读成回显面的锚：无凭据在第一层就被
+    `_authenticate_websocket` 拒掉（`accept()` 之前），协商根本没跑到，回显值读不到。
+    它的价值只有一个——钉住"改了回显策略 ≠ 放松了认证"，新旧实现上它都绿。
+    量回显的真读数在 `test_unknown_subprotocol_is_not_echoed_even_when_credential_is_valid`。
     """
     with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
             pytest.raises(WebSocketDisconnect), \

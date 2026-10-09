@@ -11,7 +11,7 @@
 用本项目已有的 `AuthSeamMiddleware` + `Settings.jwt_secret` + `require_trusted_origin`
 的判据实现，不引第三方库、不加新依赖。
 
-三家独立实现给的是**同一条形状**，且"拒"的落点都在 accept/握手之前：
+下表三家实现给的是**同一条形状**（k8s 另见下节），且"拒"的落点都在 accept/握手之前：
 
 | 来源 | 判定点 | 拒的落点 |
 | --- | --- | --- |

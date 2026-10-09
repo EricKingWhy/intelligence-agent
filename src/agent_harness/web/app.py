@@ -1751,8 +1751,10 @@ def _negotiate_subprotocol(subprotocols: list[str]) -> str | None:
     会拿到 `Sec-WebSocket-Protocol: other.product.v9`）——违反子协议协商的基本约定。
 
     不回显承载 token 的那一个则是防泄漏（k8s 同款：校验成功后把它从协商列表剔除）。
-    返回 None 的两种情形：客户端没请求任何子协议（本就该不设该字段），或**只**请求了
-    承载 token 的那一个——后者浏览器会因"请求了子协议却没收到回显"自己判握手失败
+
+    返回 None 即"**业务子协议不在请求列表里**"，穷尽所有情形：没请求任何子协议；只请求了
+    承载 token 的那一个；只请求了第三方子协议（`other.product.v9`）；第三方 + token 而**没**
+    带业务子协议。后三种里浏览器都会因"请求了子协议却没收到回显"自己判握手失败
     （k8s 直接报 `missing additional subprotocol` 错误；本项目靠浏览器这条语义兜住，
     我们自己的客户端永远会带业务子协议）。
     """
