@@ -1,0 +1,1 @@
+2026-10-09	#gate1-4fix 修后重审（两轴，1d82fe07..e80b72a5）+ P2 闭合复核（e80b72a5..21026bb2）：复审报 P2=1（seal guard _EXEMPT 撤回漏入库），21026bb2 修复后复核 CLOSED；两轴各自在隔离 clone 独立红证（删 _EXEMPT 仍 GREEN / 去 pin 转 RED，证 pin 承重）；F3 码族对齐 + F4 import 归位；终态 P0=P1=P2=P3=P4=0	1d82fe0739440515f52b48d391b0abc3a35ae4f1..21026bb285ed1bb18acc9cd18ba42f413c4dbc51
