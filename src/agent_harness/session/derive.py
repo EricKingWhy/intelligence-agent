@@ -1808,8 +1808,7 @@ def latest_direct_user_input_event(
       消息重选为"最新直接用户输入"——summary 是投影替身、不是用户原话，不得据此复活已撤回
       消息。
     - P3-1（#911）：候选**事件**排除 `replace`（compaction 摘要替身）与 `input_request_id`
-      （澄清答复）——事实闸门的两条既有排除。二者都是真 `HumanMessage`、投影文本与自身
-      content 逐字相等，天然满足候选条件；可达性证据见候选循环内的注释与
+      （澄清答复）——事实闸门的两条既有排除。两者的可达性证据见候选循环内的注释与
       `tests/session/test_derive_direct_user_input.py` 的 P3-1 用例。
     """
     latest_direct_message = next(
