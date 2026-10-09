@@ -486,10 +486,29 @@ describe('wsStreamResponse — 凭据走子协议（#890 P1-1）', () => {
     });
   });
 
-  /** 按后端口径（base64url 无 padding）算出期望的子协议值。 */
+  /** 按后端口径（base64url 无 padding）算出期望的子协议值。
+   *
+   *  只用 DOM 全域（`TextEncoder` + `btoa`），与仓内既有做法一致（`auth.ts:74`、
+   *  `wsStream.ts:110`）：`tsconfig.app.json` 的 `types` 只有 `vite/client`，
+   *  没有 node 类型，`Buffer` 会直接把 gate0 的 `tsc -b` 车道打红。
+   *  外部锚在下一行的字面量上（不是自己编自己解）。 */
   function expectBearerSubprotocol(token: string): string {
-    return PREFIX + Buffer.from(token, 'utf8').toString('base64url');
+    const bytes = new TextEncoder().encode(token);
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    const encoded = btoa(binary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return PREFIX + encoded;
   }
+
+  // 独立算出的锚（`base64.urlsafe_b64encode(...).rstrip('=')`，非本函数产出）：
+  // 让「与后端逐字同形」这句声称有外部证据，而不是自己编自己解的空转。
+  it('编码口径锚定在外部算出的值上', () => {
+    expect(expectBearerSubprotocol('abc.def-ghi')).toBe(`${PREFIX}YWJjLmRlZi1naGk`);
+    expect(expectBearerSubprotocol('令牌')).toBe(`${PREFIX}5Luk54mM`);
+  });
 
   it('无 token（本地信任形态）→ 只发业务子协议，不造凭据通道', () => {
     wsStreamResponse(sid).body!.getReader();
