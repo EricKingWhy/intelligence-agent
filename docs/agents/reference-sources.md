@@ -100,6 +100,17 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 | [Uvicorn settings](https://www.uvicorn.org/settings/) | ASGI server configuration | `--ws-max-size` and `--ws` backend applicability; compare transport-level bounds with app-level checks. |
 | [websockets memory guide](https://websockets.readthedocs.io/en/stable/topics/memory.html) | WebSocket implementation behavior | `max_size` / `max_queue` bound queued message memory; implementation-specific message-size handling. |
 
+**WebSocket 握手鉴权接入面（2026-10-09 新增，#890 调研）** —— 上面四行覆盖传输/限额，
+不覆盖「握手前怎么判凭据与来源」；本票按 §3.1 补录：
+
+| Source | What it is | What to check |
+|---|---|---|
+| Django Channels `@531894e5`（= tag `4.3.2`） | ASGI 框架的 WS 来源校验实现 | `channels/security/websocket.py`：`OriginValidator.__call__` 在交给 application **之前**判定、deny 走 `WebsocketDenier.connect()` 的 `await self.close()`（accept 前 close）；`valid_origin` 对 `None` 的处理 |
+| Phoenix `@v1.8.15` | 生产级 channel 传输的握手校验 | `lib/phoenix/socket/transport.ex:341-400` `check_origin`：`is_nil(origin) -> conn`（无 Origin 放行）、不匹配 ⇒ 握手前 `resp(conn, :forbidden, "")`；`:624-628` 的 `:conn` 模式 = 来源必须等于本连接 host/scheme/port |
+| [Socket.IO middlewares 官方文档](https://socket.io/docs/v4/middlewares/) | handshake 中间件规范 | `io.use()` 里鉴权：**"the Socket instance is not actually connected when the middleware gets executed"**；`next(new Error(...))` ⇒ 连接被拒（不是先建连再发错误帧）；凭据经 `socket.handshake.auth` |
+
+判定（`ADAPT`）、取舍与 License 结论见 `docs/research/2026-10-09-ws-auth-handshake-product-research.md`。
+
 ### Workbench 桌面 / 宿主 / 在场 / 发布（2026-10-04 补强批次）
 
 | 来源 | 是什么 | 看什么 |
