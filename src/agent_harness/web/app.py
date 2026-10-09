@@ -1694,10 +1694,14 @@ class CSPHeaderMiddleware:
 #: 前端对侧在 `web/src/lib/wsStream.ts` 的同名常量。
 WS_BEARER_SUBPROTOCOL_PREFIX = "base64url.bearer.authorization.agent-harness."
 
-#: 业务子协议：只为满足"浏览器请求了子协议就必须收到一个回显"这条规范
-#: （WHATWG 的 establish-a-WebSocket-connection：请求了子协议而响应里没有 ⇒ 客户端
-#: 自己 fail 掉连接）。服务端**从不**回显承载 token 的那一个（防泄漏），所以客户端
-#: 必须再带一个可回显的。k8s 同款：它要求客户端"至少再带一个真实子协议"。
+#: 业务子协议：只为满足"浏览器请求了子协议就必须收到一个回显"这条规范。
+#: 出处是 **WHATWG** 的 `establish a WebSocket connection`（响应里没有可回显的子协议 ⇒
+#: 客户端自己 fail 掉连接）。⚠ 这一条**不在** RFC 6455 里：RFC 6455 §4.1 第 6 步只对
+#: "服务端回显了客户端**没请求过**的子协议"要求 MUST fail，对"请求了却没回显"没有规定
+#: —— WHATWG 在该步的 note 里明确点出了这个差别。RFC 6455 一侧对应的是 §4.2.2 的
+#: **服务端**义务：不同意客户端任何一个请求时 MUST NOT 回显。本仓据此**从不**回显承载
+#: token 的那一个（防泄漏），所以客户端必须再带一个可回显的。k8s 同款：它要求客户端
+#: "至少再带一个真实子协议"。
 WS_BUSINESS_SUBPROTOCOL = "agent-harness.v1"
 
 #: 跨源拒的 close reason。**固定短 ASCII**：ASGI 规定 `reason` ≤123 字节且限可打印

@@ -109,7 +109,9 @@ def check_trusted_origin(origin: str | None, *, jwt_secret_configured: bool) -> 
     3. 否则只接受本机 hostname（`origin_is_local`）。
 
     两侧只在**出口形状**上分叉：HTTP 把它转成 403 JSON，WS 把它转成握手前的
-    `websocket.close`。策略、文案、常量不再各写一份。
+    `websocket.close`。策略与文案只有这一份（`WS_ORIGIN_DENIED_REASON` /
+    `WS_CREDENTIAL_REJECTED_REASON` 是 WS 出口专有的**短 ASCII** close reason，
+    ASGI 限 ≤123 字节，与这里的长文案用途不同，仍留在 `app.py` 各一份）。
     """
     if jwt_secret_configured or origin is None or origin_is_local(origin):
         return None

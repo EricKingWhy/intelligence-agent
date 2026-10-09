@@ -7,6 +7,12 @@ Both axes returned and I've cross-verified their load-bearing claims myself. Con
 > ⚠ 本文件首行 `[claude-code:unrecognized_model] {"model":"dolphin/…",…}` 是派工 harness 打给
 > CLI 的模型名 warning（该 warning 本身无害，请求照常成功；同族现象见 `AGENTS.md` 2026-10-09 条），
 > 是日志原文的一部分，**不是**本报告的正文——读报告从下一行起。
+>
+> ⚠ **正文本节里的部分断言已过时，本文不回头改（逐字副本的性质）**：由于是逐字副本，正文保留
+> 当时的原文，其中**至少一处已被后续工作证伪**——「P3-B｜交付树 `dd1f5d70` 没有任何覆盖它的
+> Gate-0 读数」（正文下方那张表）。该缺口**其后已闭合**：`bfa7c7f6` 之后的读数笔（`3692dfac` /
+> `da6e6d51` / `e98b9fda` / `30e05f58`）已在干净沙箱对本票代码面跑出 **Gate-0 6/6**，交付读数
+> `docs/gate/e98b9fda1b5de5cfb8c9f1e5d1f6ce33c32b460b.json`。**读该节的结论请以本指针为准。**
 
 ---
 
