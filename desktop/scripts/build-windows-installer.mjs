@@ -788,16 +788,30 @@ export function validateLongPathPrefixes(source, filename) {
  * is not the same as code that runs them (both verified against this guard):
  *
  *   - a conditional-compilation directive (`!if` / `!ifdef` / `!ifndef` /
- *     `!else` / `!endif`) inside the window: the delete and its checks can be
- *     wrapped in a branch that never compiles;
- *   - a `iaClearBackupDir` nested deeper in LogicLib `${If}` blocks than the
- *     delete: on the path that skips those blocks the pointer is never cleared,
- *     so a finished install still reads as incomplete.
+ *     `!ifmacrodef` / `!else` / `!elseif` / `!endif`) anywhere in the delete's
+ *     enclosing block (`Function` … `FunctionEnd` or `!macro` … `!macroend`):
+ *     the delete and its checks can be wrapped in a branch that never compiles.
+ *     The whole block, not just the window, because the common wrapping form
+ *     puts the `!ifdef` above the delete and the `!endif` after the clear — a
+ *     window-scoped rule cannot see the opener and passed it;
+ *   - a `iaClearBackupDir` nested deeper in LogicLib blocks than the delete: on
+ *     the path that skips those blocks the pointer is never cleared, so a
+ *     finished install still reads as incomplete.
  *
  * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
  * is reported as a problem, so removing the delete site cannot pass silently.
  * The site match is case-insensitive — NSIS directives are — so a re-cased
  * `rmdir /r` is recognized rather than reported as a missing delete.
+ *
+ * Limits of this scan (it reads one file's text, not compiled code): `${Errors}`
+ * is counted wherever it appears, including inside a string literal; the delete
+ * argument and the record value are matched in the shipped double-quoted
+ * spelling with the shipped `$iaBackupDirectory` casing, so a single-quote or
+ * backtick argument is reported as a missing delete and a re-cased or
+ * concatenated record value as not recorded — both fail closed (reported, not
+ * silently accepted). Two shapes are not detected at all, and a delete sitting
+ * in a macro that nothing inserts, or in an `!include`d file, is invisible here;
+ * the follow-up issue for #901 tracks them.
  */
 export function unguardedBackupDelete(source) {
   const problems = []
@@ -808,7 +822,10 @@ export function unguardedBackupDelete(source) {
   for (let i = 0; i < lines.length; i += 1) {
     if (!deleteLine.test(lines[i])) continue
     sites += 1
-    const before = lines.slice(Math.max(0, i - 3), i).filter((line) => line.trim() !== '')
+    const before = lines
+      .slice(0, i)
+      .filter((line) => line.trim() !== '')
+      .slice(-3)
     if (!before.some((line) => /^\s*ClearErrors\b/.test(line))) {
       problems.push({ line: i + 1, what: 'missing ClearErrors before the delete' })
     }
@@ -840,24 +857,49 @@ export function unguardedBackupDelete(source) {
         what: `ClearErrors between the delete and the ${errorsMacro} read discards the failed delete`,
       })
     }
-    if (!window.some((line) => /WriteRegStr\b[^\n]*"IaLeftoverDir"[^\n]*\$iaBackupDirectory/.test(line))) {
+    // The value has to be the whole directory, not a name built from it: a
+    // record of "$iaBackupDirectory-tmp" names a directory nothing will find.
+    if (
+      !window.some((line) =>
+        /WriteRegStr\b[^\n]*"IaLeftoverDir"\s+"?\$iaBackupDirectory"?\s*$/.test(line),
+      )
+    ) {
       problems.push({
         line: i + 1,
         what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)',
       })
     }
-    if (window.some((line) => /^\s*!(if|ifdef|ifndef|else|endif)\b/.test(line))) {
+    const conditional = /^\s*!(if\b|ifdef\b|ifndef\b|ifmacrodef\b|ifmacrondef\b|else\b|elseif\b|endif\b)/
+    const blockStart = (() => {
+      for (let j = i - 1; j >= 0; j -= 1) {
+        if (/^\s*(Function|!macro)\b/.test(lines[j])) return j
+      }
+      return 0
+    })()
+    const blockEnd = (() => {
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (/^\s*(FunctionEnd|!macroend)\b/.test(lines[j])) return j
+      }
+      return lines.length - 1
+    })()
+    if (lines.slice(blockStart, blockEnd + 1).some((line) => conditional.test(line))) {
       problems.push({
         line: i + 1,
-        what: 'conditional compilation inside the delete window — the delete and its checks can be compiled out',
+        what:
+          "conditional compilation in the delete's enclosing block — the delete and its checks can be compiled out",
       })
     }
-    // LogicLib nesting at the clear call: the macro names that open a block are
-    // counted here; `${Else}` and the one-line `${IfThen}` forms do not nest.
+    // LogicLib nesting at the clear call: the macros that open a block are
+    // counted here per line, so a one-line `${If} … ${EndIf}` cancels itself
+    // (one directive per line used to count as an opener only, and made a
+    // balanced line read as nesting); `${Else}` and the `${IfThen}` forms do
+    // not nest.
+    const opensBlock = /\$\{(If|IfNot|Unless|While|Do|DoWhile|DoUntil|For|ForEach|Select|Switch)\}/g
+    const closesBlock = /\$\{(EndIf|EndWhile|Loop|Next|EndSelect|EndSwitch)\}/g
     let depth = 0
     for (const line of window) {
-      if (/^\s*\$\{(If|IfNot|Unless|While|Do|For|Select)\}/.test(line)) depth += 1
-      else if (/^\s*\$\{(EndIf|EndWhile|Loop|Next|EndSelect)\}/.test(line)) depth -= 1
+      depth += (line.match(opensBlock) ?? []).length
+      depth -= (line.match(closesBlock) ?? []).length
     }
     if (clearIndex !== -1 && depth > 0) {
       problems.push({

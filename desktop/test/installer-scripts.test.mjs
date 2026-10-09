@@ -279,6 +279,39 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(guarded), [])
   })
 
+  it('finds ClearErrors across blank lines, which do not consume the window', () => {
+    // Blank lines are layout, not statements: letting them shorten the window
+    // rejected a correct layout with three blank lines above the delete.
+    const spaced = [
+      'ClearErrors',
+      '',
+      '',
+      '',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(spaced), [])
+    // The window is still three statements: a clear call four statements up no
+    // longer covers this delete.
+    const farAbove = [
+      'ClearErrors',
+      'StrCpy $0 "1"',
+      'StrCpy $1 "1"',
+      'StrCpy $2 "1"',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(farAbove), [
+      { line: 5, what: 'missing ClearErrors before the delete' },
+    ])
+  })
+
   it('flags a second ${Errors} read: it cannot see the failed delete', () => {
     // Measured on NSIS 3.0.4.1: LogicLib's ${Errors} is IfErrors, which consumes
     // the error flag — the first read after a failing delete reports it, an
@@ -422,9 +455,45 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(deadBranch), [
       {
         line: 3,
-        what: 'conditional compilation inside the delete window — the delete and its checks can be compiled out',
+        what: "conditional compilation in the delete's enclosing block — the delete and its checks can be compiled out",
       },
     ])
+    // The wrapping form is the common one, and the one a window-scoped rule
+    // missed: `!ifdef` above the delete, `!endif` after the clear. Every line
+    // the window checks is present, and none of them compiles without NOPE.
+    const wrapped = [
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      '  !ifdef NOPE',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      '  !endif',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(wrapped), [
+      {
+        line: 4,
+        what: "conditional compilation in the delete's enclosing block — the delete and its checks can be compiled out",
+      },
+    ])
+    // Control: the shipped file wraps a different function in `!ifndef`, and a
+    // conditional outside the delete's own block must not be reported.
+    const outside = [
+      '!ifndef BUILD_UNINSTALLER',
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+      '!endif',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(outside), [])
   })
 
   it('flags a clear call nested deeper than the delete', () => {
@@ -454,6 +523,49 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '!insertmacro iaClearBackupDir',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(balanced), [])
+    // A line that opens and closes a block counts as neither: counting only the
+    // opener made this balanced layout read as nesting.
+    const oneLine = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  ${If} 1 == 0 ${EndIf}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(oneLine), [])
+    // The loop and switch forms nest as much as `${If}` does, so a clear inside
+    // one of them is just as skippable.
+    const switchNested = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '${Switch} $0',
+      '  ${Case} 1',
+      '    !insertmacro iaClearBackupDir',
+      '${EndSwitch}',
+    ].join('\n')
+    const forEachNested = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '${ForEach} $0 in $1',
+      '  !insertmacro iaClearBackupDir',
+      '${Next}',
+    ].join('\n')
+    for (const fixture of [switchNested, forEachNested]) {
+      assert.deepEqual(unguardedBackupDelete(fixture), [
+        {
+          line: 2,
+          what: 'iaClearBackupDir sits 1 LogicLib level(s) deeper than the delete — a path skips the clear',
+        },
+      ])
+    }
   })
 
   it('flags a record that names a different directory', () => {
@@ -466,6 +578,18 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '!insertmacro iaClearBackupDir',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(wrongValue), [
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
+    ])
+    // A value built from the backup path names a directory nothing will find.
+    const suffixed = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory-tmp',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(suffixed), [
       { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
   })
@@ -504,27 +628,66 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // read the record, probe it with BOTH forms — measured on NSIS 3.0.4.1, an
     // unprefixed >MAX_PATH path answers "false" while the prefixed form is the
     // one that cannot express a UNC path — and drop it as the first statement of
-    // the innermost negative branch, where both forms agreed the directory is
-    // gone.
+    // the innermost negative branch, where none of the probes can see the
+    // directory any more.
     const body = promoteApplicationBody(
       readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
     )
     const lines = body.map((line) => line.trim()).filter((line) => line !== '')
+    const del = lines.findIndex((line) => /^RMDir\s+\/r\b/.test(line))
     const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
     const plain = lines.findIndex((line) => /^\$\{IfNot\}\s+\$\{FileExists\}\s+"\$iaLeftoverDirectory"$/.test(line))
     const prefixed = lines.findIndex((line) =>
       /^\$\{IfNot\}\s+\$\{FileExists\}\s+"\\\\\?\\\$iaLeftoverDirectory"$/.test(line),
     )
-    const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
-    assert.notEqual(read, -1)
-    assert.notEqual(plain, -1)
-    assert.notEqual(prefixed, -1)
-    assert.ok(read < plain)
-    assert.equal(prefixed, plain + 1)
+    const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
+    const clear = lines.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
+    for (const [name, index] of [
+      ['the delete', del],
+      ['the record read', read],
+      ['the plain probe', plain],
+      ['the prefixed probe', prefixed],
+      ['the record drop', drop],
+      ['the clear call', clear],
+    ]) {
+      assert.notEqual(index, -1, `${name} is missing from the promote body`)
+    }
+    // Record handling comes after the delete, and each step after the one it
+    // depends on: same-shaped statements placed earlier in the body (in an
+    // unreachable `${If} 1 == 0` block, say) satisfy every index check above
+    // while the real site is gone — this order is what makes them unusable.
+    assert.ok(
+      del < read && read < plain && plain < prefixed && prefixed < drop && drop < clear,
+      `promote body out of order: ${JSON.stringify({ del, read, plain, prefixed, drop, clear })}`,
+    )
+    // And the record handling has to run on the delete's own path: a
+    // same-shaped block parked inside an extra never-taken branch (`${If} 1 == 0`)
+    // satisfies every assertion above while the record handling never runs.
+    // Depth is counted with the same block macros the build guard counts, so the
+    // two notions of nesting agree.
+    const opensBlock = /\$\{(If|IfNot|Unless|While|Do|DoWhile|DoUntil|For|ForEach|Select|Switch)\}/g
+    const closesBlock = /\$\{(EndIf|EndWhile|Loop|Next|EndSelect|EndSwitch)\}/g
+    const depthAt = (index) => {
+      let depth = 0
+      for (const line of lines.slice(0, index)) {
+        depth += (line.match(opensBlock) ?? []).length
+        depth -= (line.match(closesBlock) ?? []).length
+      }
+      return depth
+    }
+    assert.equal(depthAt(read), depthAt(del), 'the record read is not on the delete path')
+    assert.equal(depthAt(clear), depthAt(del), 'the clear call is not on the delete path')
+    assert.deepEqual(
+      [depthAt(plain), depthAt(prefixed), depthAt(drop)],
+      [depthAt(del) + 1, depthAt(del) + 2, depthAt(del) + 3],
+      'the record is not dropped inside both negative probes',
+    )
     // Drop as the first statement after both probes, and exactly once: a second
     // drop site would be a second guess about the same record.
+    const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
     assert.equal(drops, 1)
-    assert.equal(lines[prefixed + 1], 'DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"')
+    assert.equal(drop, prefixed + 1)
+    assert.equal(lines[drop], 'DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"')
   })
 
   it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {
