@@ -25,13 +25,16 @@ class FakeWebSocket {
   readyState = FakeWebSocket.CONNECTING;
   sent: string[] = [];
   readonly url: string;
+  /** 构造时带的子协议列表（#890 凭据通道就挂在它上面）。 */
+  readonly protocols: string[] | undefined;
   onopen: (() => void) | null = null;
   onmessage: ((msg: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string[] | string) {
     this.url = url;
+    this.protocols = typeof protocols === 'string' ? [protocols] : protocols;
     FakeWebSocket.instances.push(this);
   }
 
@@ -352,6 +355,30 @@ describe('wsStreamResponse — WS 不可用时降级到 HTTP SSE', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
+  it('#890：降级必须打 console.warn（否则现场只剩「直播卡住」，排障无从下手）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse('data: {"type":"a","seq":1}\n\n')));
+
+    const reader = openStream();
+    socket.fireClose(); // 凭据/部署有问题时就是这个形状
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(String(warn.mock.calls[0][0])).toContain('降级到 HTTP SSE');
+    warn.mockRestore();
+    void reader.cancel().catch(() => {});
+  });
+
+  it('#890：已收到服务帧后断流**不**打降级 warn（那是上层重连的事，不刷屏）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const reader = openStream();
+    socket.fire({ type: 'server_ping' });
+    socket.fireClose();
+
+    expect(await readEvent(reader)).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('连 WebSocket 都构造不出来（CSP / 非 WS 环境）→ 直接降级', async () => {
     vi.stubGlobal('WebSocket', class {
       constructor() {
@@ -439,6 +466,79 @@ describe('wsStreamResponse — WS 不可用时降级到 HTTP SSE', () => {
     sock.fireClose();
     sock.fireError();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('wsStreamResponse — 凭据走子协议（#890 P1-1）', () => {
+  // 浏览器 `WebSocket` 构造器不能设 `Authorization` 头，子协议是唯一通道。
+  // 后端前缀/业务子协议名见 `src/agent_harness/web/app.py` 的同名常量。
+  const PREFIX = 'base64url.bearer.authorization.agent-harness.';
+  const BUSINESS = 'agent-harness.v1';
+
+  /** node 环境没有 localStorage（项目无 jsdom）：按 density.test.ts 的手法打桩。 */
+  const store = new Map<string, string>();
+  beforeEach(() => {
+    store.clear();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+  });
+
+  /** 按后端口径（base64url 无 padding）算出期望的子协议值。
+   *
+   *  只用 DOM 全域（`TextEncoder` + `btoa`），与仓内既有做法一致（`auth.ts:74`、
+   *  `wsStream.ts:110`）：`tsconfig.app.json` 的 `types` 只有 `vite/client`，
+   *  没有 node 类型，`Buffer` 会直接把 gate0 的 `tsc -b` 车道打红。
+   *  外部锚在下一行的字面量上（不是自己编自己解）。 */
+  function expectBearerSubprotocol(token: string): string {
+    const bytes = new TextEncoder().encode(token);
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    const encoded = btoa(binary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return PREFIX + encoded;
+  }
+
+  // 独立算出的锚（`base64.urlsafe_b64encode(...).rstrip('=')`，非本函数产出）：
+  // 让「与后端逐字同形」这句声称有外部证据，而不是自己编自己解的空转。
+  it('编码口径锚定在外部算出的值上', () => {
+    expect(expectBearerSubprotocol('abc.def-ghi')).toBe(`${PREFIX}YWJjLmRlZi1naGk`);
+    expect(expectBearerSubprotocol('令牌')).toBe(`${PREFIX}5Luk54mM`);
+  });
+
+  it('无 token（本地信任形态）→ 只发业务子协议，不造凭据通道', () => {
+    wsStreamResponse(sid).body!.getReader();
+    expect(FakeWebSocket.instances[0].protocols).toEqual([BUSINESS]);
+  });
+
+  it('有 token → 额外带上 base64url 编码的 bearer 子协议（与后端逐字同形）', () => {
+    localStorage.setItem('ahi.apiToken', 'abc.def-ghi');
+    wsStreamResponse(sid).body!.getReader();
+    const protocols = FakeWebSocket.instances[0].protocols!;
+    // 业务子协议必须**在**：后端永不回显 token 那个，浏览器请求了子协议却收不到
+    // 回显会自己判握手失败。
+    expect(protocols).toEqual([BUSINESS, expectBearerSubprotocol('abc.def-ghi')]);
+  });
+
+  it('base64url 无 padding：子协议值必须是合法 HTTP token 字符（不含 `=`/`+`/`/`）', () => {
+    // padding 的 `=` 会被浏览器直接拒发这个子协议——编码方式不是风格问题。
+    localStorage.setItem('ahi.apiToken', 'x'.repeat(10)); // 10 字节 ⇒ base64 有 padding
+    wsStreamResponse(sid).body!.getReader();
+    const bearer = FakeWebSocket.instances[0].protocols![1];
+    expect(bearer).not.toMatch(/[=+/]/);
+    expect(bearer.startsWith(PREFIX)).toBe(true);
+  });
+
+  it('非 ASCII token 也能编（btoa 只吃 Latin-1，故必须先过 TextEncoder）', () => {
+    localStorage.setItem('ahi.apiToken', '令牌');
+    wsStreamResponse(sid).body!.getReader();
+    const bearer = FakeWebSocket.instances[0].protocols![1];
+    expect(bearer).toBe(expectBearerSubprotocol('令牌'));
+    expect(bearer).not.toMatch(/[=+/]/);
   });
 });
 
