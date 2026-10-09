@@ -237,10 +237,21 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     return lines.slice(start, end)
   }
 
-  it('strips `;` comments but not `;` inside a string', () => {
+  it('strips `;` and `#` comments but not either inside a string', () => {
     assert.equal(stripNsisComments('RMDir /r "a;b" ; trailing'), 'RMDir /r "a;b" ')
     assert.equal(stripNsisComments('; whole line'), '')
     assert.equal(stripNsisComments('x $" ; still in string'), 'x $" ; still in string')
+    // NSIS also takes `#` comments — at the start of a line or after a complete
+    // statement (measured on makensis 3.0.4.1: `DetailPrint "x" # trailing`
+    // compiles while `DetailPrint "x" stray` fails with "Error in script", so
+    // the `#` starts a comment rather than being ignored) — but a `#` inside a
+    // string is text, and one glued to a token is left alone so a stray `#` can
+    // only ever over-report, never eat code.
+    assert.equal(stripNsisComments('# whole line'), '')
+    assert.equal(stripNsisComments('  # indented'), '  ')
+    assert.equal(stripNsisComments('DetailPrint "x" # trailing'), 'DetailPrint "x" ')
+    assert.equal(stripNsisComments('DetailPrint "a # b"'), 'DetailPrint "a # b"')
+    assert.equal(stripNsisComments('StrCpy $0 "a"#$1'), 'StrCpy $0 "a"#$1')
   })
 
   it('keeps a `;` that follows an escaped quote inside a string', () => {
@@ -272,7 +283,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -289,7 +300,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -303,7 +314,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'StrCpy $2 "1"',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -324,7 +335,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  StrCpy $4 "1"',
       '${EndIf}',
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -334,6 +345,23 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         what: '2 ${Errors} reads between the delete and iaClearBackupDir — only the first can see the failed delete',
       },
     ])
+  })
+
+  it('does not count a `${Errors}` that only appears in a comment', () => {
+    // The read count is what makes the failure branch reachable, so a comment
+    // mentioning the macro must not inflate it — and `#` is a comment too, not
+    // just `;` (a `;`-only stripper reported "2 reads" for this layout).
+    const commented = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '# ${Errors} is sticky, so read it exactly once',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '  # trailing note about ${Errors}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(commented), [])
   })
 
   it('flags a failure that is only logged, not recorded', () => {
@@ -368,7 +396,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(noClear), [
@@ -385,7 +413,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'Function other',
       '  ${If} ${Errors}',
       '  ${EndIf}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '  !insertmacro iaClearBackupDir',
       'FunctionEnd',
     ].join('\n')
@@ -402,7 +430,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       FIXED_DELETE,
       'ClearErrors',
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -420,7 +448,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'Function other',
       '  ${If} ${Errors}',
       '  ${EndIf}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '  !insertmacro iaClearBackupDir',
       'FunctionEnd',
     ].join('\n')
@@ -447,7 +475,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '!ifdef NOPE',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!endif',
       '!insertmacro iaClearBackupDir',
@@ -455,7 +483,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(deadBranch), [
       {
         line: 3,
-        what: "conditional compilation in the delete's enclosing block — the delete and its checks can be compiled out",
+        what: 'the delete sits inside 1 open conditional compilation directive(s) — the delete and its checks can be compiled out',
       },
     ])
     // The wrapping form is the common one, and the one a window-scoped rule
@@ -467,7 +495,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  !ifdef NOPE',
       `  ${FIXED_DELETE}`,
       '  ${If} ${Errors}',
-      '    WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '  ${EndIf}',
       '  !insertmacro iaClearBackupDir',
       '  !endif',
@@ -476,24 +504,149 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(wrapped), [
       {
         line: 4,
-        what: "conditional compilation in the delete's enclosing block — the delete and its checks can be compiled out",
+        what: 'the delete sits inside 1 open conditional compilation directive(s) — the delete and its checks can be compiled out',
       },
     ])
-    // Control: the shipped file wraps a different function in `!ifndef`, and a
-    // conditional outside the delete's own block must not be reported.
-    const outside = [
+    // Directives are case-insensitive: makensis 3.0.4.1 skips a block wrapped in
+    // `!IFDEF NOPE` … `!ENDIF` (probe: `!ifdef`/`!endif` and their upper-case
+    // spellings both compile), so the scan cannot be case-sensitive either.
+    const cased = [
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      '  !IFDEF NOPE',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      '  !ENDIF',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(cased), [
+      {
+        line: 4,
+        what: 'the delete sits inside 1 open conditional compilation directive(s) — the delete and its checks can be compiled out',
+      },
+    ])
+    // The block-bounding directives are case-insensitive too (probe: `!MACRO`,
+    // `!MACROEND` and `!INSERTMACRO` all compile on 3.0.4.1), so a scan that did
+    // not recognise `!MACRO` would start the block at line 1 and read the
+    // `${If} 1 == 1` above the macro as a branch above the delete — depth the
+    // delete does not have.
+    const casedBlock = [
+      '${If} 1 == 1',
+      '!MACRO iaPromoteApplication',
+      '  ClearErrors',
+      '  ${If} ${FileExists} "$INSTDIR\\app.exe"',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      '  ${EndIf}',
+      '!MACROEND',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(casedBlock), [])
+    // Fail-closed on the wrapper that a block-scoped scan cannot see: a
+    // conditional opened above the enclosing Function and closed after its
+    // `FunctionEnd` is indistinguishable from a branch that drops the block —
+    // the same idiom the shipped file uses for `.onGUIEnd`. An intentional
+    // wrapper around the guarded block therefore has to be recorded here.
+    // The second copy of the same body sits outside that wrapper and stays
+    // clean, so the rule keys on the directive actually being open — not on the
+    // file merely mentioning one.
+    const outerWrap = [
       '!ifndef BUILD_UNINSTALLER',
       'Function iaPromoteApplication',
       '  ClearErrors',
       `  ${FIXED_DELETE}`,
       '  ${If} ${Errors}',
-      '    WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '  ${EndIf}',
       '  !insertmacro iaClearBackupDir',
       'FunctionEnd',
       '!endif',
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
     ].join('\n')
-    assert.deepEqual(unguardedBackupDelete(outside), [])
+    assert.deepEqual(unguardedBackupDelete(outerWrap), [
+      {
+        line: 4,
+        what: 'the delete sits inside 1 open conditional compilation directive(s) — the delete and its checks can be compiled out',
+      },
+    ])
+  })
+
+  it('flags a branch above the delete that can skip the whole guarded block', () => {
+    // Absolute depth, not relative: wrapping delete, record and clear together
+    // in one never-taken `${If} 1 == 0` inside the promote guard leaves the
+    // delete exactly as deep as the clear and as the probes above it, so every
+    // relative check passes while nothing runs (verified against this guard).
+    const wrappedAll = [
+      'Function iaPromoteApplication',
+      '  ${If} ${FileExists} "$INSTDIR\\app.exe"',
+      '    ClearErrors',
+      '    ${If} 1 == 0',
+      `    ${FIXED_DELETE}`,
+      '      ${If} ${Errors}',
+      '        WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '      ${EndIf}',
+      '      !insertmacro iaClearBackupDir',
+      '    ${EndIf}',
+      '  ${EndIf}',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(wrappedAll), [
+      {
+        line: 5,
+        what: 'the delete sits 2 LogicLib level(s) inside the block — a branch above it can skip the delete and its checks',
+      },
+    ])
+    // Control: the promote guard itself is one level, and nothing is reported.
+    const promoteGuardOnly = [
+      'Function iaPromoteApplication',
+      '  ${If} ${FileExists} "$INSTDIR\\app.exe"',
+      '    ClearErrors',
+      `    ${FIXED_DELETE}`,
+      '    ${If} ${Errors}',
+      '      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '    ${EndIf}',
+      '    !insertmacro iaClearBackupDir',
+      '  ${EndIf}',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(promoteGuardOnly), [])
+  })
+
+  it('accepts every LogicLib closer documented for the openers it counts', () => {
+    // `${Do} … ${LoopUntil}` / `${LoopWhile}` and `${Unless} … ${EndUnless}` are
+    // documented LogicLib pairs (verified with makensis 3.0.4.1: all three
+    // compile). Counting only `${Loop}`/`${EndIf}` read three correctly closed
+    // layouts as nesting that is not there.
+    for (const [open, close] of [
+      ['${Do}', '${LoopUntil} $0 == "x"'],
+      ['${DoWhile} $0 == ""', '${LoopWhile} $0 == ""'],
+      ['${Unless} $0 == ""', '${EndUnless}'],
+    ]) {
+      const layout = [
+        'ClearErrors',
+        FIXED_DELETE,
+        `${open}`,
+        '  StrCpy $1 "n"',
+        `${close}`,
+        '${If} ${Errors}',
+        '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+        '${EndIf}',
+        '!insertmacro iaClearBackupDir',
+      ].join('\n')
+      assert.deepEqual(unguardedBackupDelete(layout), [], `${open} … ${close} reported`)
+    }
   })
 
   it('flags a clear call nested deeper than the delete', () => {
@@ -504,7 +657,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '  !insertmacro iaClearBackupDir',
       '${EndIf}',
     ].join('\n')
@@ -518,7 +671,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -530,7 +683,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       FIXED_DELETE,
       '${If} ${Errors}',
       '  ${If} 1 == 0 ${EndIf}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -541,7 +694,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '${Switch} $0',
       '  ${Case} 1',
@@ -552,7 +705,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '${ForEach} $0 in $1',
       '  !insertmacro iaClearBackupDir',
@@ -573,7 +726,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $INSTDIR',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $INSTDIR',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -585,13 +738,72 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       FIXED_DELETE,
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory-tmp',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory-tmp',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(suffixed), [
       { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
+    // Where the record lands matters as much as its value: the reader opens
+    // HKCU under this application's own key, so a record written to another
+    // hive or key is a silent orphan — the R1 symptom — and the guard has to
+    // report it rather than accept any `IaLeftoverDir` write.
+    const elsewhere = [
+      '  WriteRegStr HKLM "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "Software" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "\\${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+    ]
+    for (const record of elsewhere) {
+      const layout = [
+        'ClearErrors',
+        FIXED_DELETE,
+        '${If} ${Errors}',
+        record,
+        '${EndIf}',
+        '!insertmacro iaClearBackupDir',
+      ].join('\n')
+      assert.deepEqual(
+        unguardedBackupDelete(layout),
+        [{ line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' }],
+        record,
+      )
+    }
+  })
+
+  it('does not let a ClearErrors outside the delete block satisfy the check', () => {
+    // The flag is sticky across the whole installer, so a clear in the previous
+    // function reads as "this delete preceded by a clear" while the delete's own
+    // path has none.
+    const previousFunction = [
+      'Function other',
+      '  ClearErrors',
+      'FunctionEnd',
+      'Function iaPromoteApplication',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    const uninsertedMacro = [
+      '!macro helper',
+      '  ClearErrors',
+      '!macroend',
+      'Function iaPromoteApplication',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    for (const layout of [previousFunction, uninsertedMacro]) {
+      assert.deepEqual(unguardedBackupDelete(layout), [
+        { line: 5, what: 'missing ClearErrors before the delete' },
+      ])
+    }
   })
 
   it('recognizes a re-cased delete instead of reporting it as missing', () => {
@@ -601,7 +813,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'ClearErrors',
       'rmdir /r "\\\\?\\$iaBackupDirectory"',
       '${If} ${Errors}',
-      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
       '${EndIf}',
       '!insertmacro iaClearBackupDir',
     ].join('\n')
@@ -677,6 +889,13 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     }
     assert.equal(depthAt(read), depthAt(del), 'the record read is not on the delete path')
     assert.equal(depthAt(clear), depthAt(del), 'the clear call is not on the delete path')
+    // Absolute, not only relative: a wrapper around the whole guarded body
+    // moves delete, probes, record and clear down together, so every
+    // comparison above still holds while nothing runs. The delete's own depth
+    // is what pins it to the promote path — one branch, the "new files are in
+    // place" guard — and the build guard reports more than that.
+    assert.equal(depthAt(del), 1, 'the delete is not one branch deep inside the promote body')
+    assert.equal(depthAt(read), 1, 'the record read is not one branch deep inside the promote body')
     assert.deepEqual(
       [depthAt(plain), depthAt(prefixed), depthAt(drop)],
       [depthAt(del) + 1, depthAt(del) + 2, depthAt(del) + 3],
