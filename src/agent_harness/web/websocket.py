@@ -102,6 +102,12 @@ async def _enqueue_relay_error(out_q: asyncio.Queue, session_id: str) -> None:
 async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     """WebSocket 主入口：接受连接 → 多路复用 session 事件流。
 
+    到达这里时**凭据与来源已由 `AuthSeamMiddleware` 判定完毕**（#890，握手前、
+    accept 之前）——当前唯一调用方（`app.py` 的 `/api/ws` 路由）挂在那个中间件
+    之后，本函数不重复做鉴权。⚠ 是"调用方已判完"，不是"本函数从不接受未认证
+    连接"：未配置 `jwt_secret` 的本地信任模式下它接受的正是**无凭据**连接
+    （只是来源闸放行）。
+
     上行消息格式（JSON）：
       {"type": "subscribe", "session_id": "...", "after_seq": N}
            after_seq 可选（#208）：本地游标，只补 (after_seq, replay_upto]；
