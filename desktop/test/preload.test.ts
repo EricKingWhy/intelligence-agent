@@ -18,7 +18,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { DESKTOP_IPC, SERVICE_ORIGIN_SWITCH } from '../src/ipc.ts'
+import { DESKTOP_IPC, HOST_PATHS_GLOBAL, SERVICE_ORIGIN_SWITCH } from '../src/ipc.ts'
 
 const desktopDir = join(import.meta.dirname, '..')
 const preloadSource = readFileSync(join(desktopDir, 'src', 'preload.cts'), 'utf8')
@@ -40,6 +40,29 @@ describe('preload source (W-21 D3 #815)', () => {
     for (const [name, channel] of Object.entries(DESKTOP_IPC)) {
       assert.ok(preloadSource.includes(`'${channel}'`), `preload must use DESKTOP_IPC.${name} (${channel})`)
     }
+  })
+
+  it('writes the host-path global ipc.ts names (#826)', () => {
+    // The literal is necessarily duplicated (a sandboxed preload imports nothing);
+    // preload-host-paths.test.ts holds the other half — that the web app reads it.
+    assert.ok(
+      preloadSource.includes(`'${HOST_PATHS_GLOBAL}'`),
+      `preload must expose the host-path lookup on HOST_PATHS_GLOBAL (${HOST_PATHS_GLOBAL})`,
+    )
+  })
+
+  it('requires nothing but electron — no filesystem module can sneak in', () => {
+    // The existing relative-require guard only rejects `./`-style requires; a bare
+    // `require('fs')` in a preload would hand the renderer arbitrary reads, which
+    // is exactly what #826 must not add.
+    assert.equal(/require\(\s*['"](?!electron['"])/.test(preloadSource), false, 'only electron may be required')
+  })
+
+  it('delegates the host-path lookup to Electron, adding no lookup of its own', () => {
+    assert.ok(
+      preloadSource.includes('webUtils.getPathForFile('),
+      'the path must come from webUtils.getPathForFile (the only source that answers "" for a File with no disk backend)',
+    )
   })
 
   it('reads the same origin switch main appends to argv', () => {
