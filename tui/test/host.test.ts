@@ -210,7 +210,10 @@ test("端点载荷按协议解析；形状不符一律拒绝", () => {
   assert.equal(parseHostEndpoint("nope"), undefined);
 });
 
-test("路径约定：数据根与凭据文件是同一层（与桌面壳同源）", () => {
+// 下面两例断言的是 **Windows 路径形状**（`path.join`/`path.resolve` 在 win32 上用 `\`），
+// 在 POSIX 上 `join("C:\\x", "workspace")` 会得到 `C:\x/workspace`（分隔符由 `path` 的实现决定），
+// 这是宿主平台的正确行为而非缺陷 ⇒ 非 win32 平台跳过（#830 D3；GA `windows-latest` 上真跑）。
+test("路径约定：数据根与凭据文件是同一层（与桌面壳同源）", { skip: process.platform !== "win32" }, () => {
   const userData = resolveUserDataDir("C:\\Users\\tester\\AppData\\Roaming");
   assert.equal(userData, "C:\\Users\\tester\\AppData\\Roaming\\intelligence-agent");
   assert.equal(resolveDataRoot(userData), `${userData}\\workspace`);
@@ -219,7 +222,7 @@ test("路径约定：数据根与凭据文件是同一层（与桌面壳同源�
   assert.throws(() => resolveUserDataDir(undefined), /APPDATA/);
 });
 
-test("python 解析：内置运行时优先，其次仓库 venv，最后交给 PATH", () => {
+test("python 解析：内置运行时优先，其次仓库 venv，最后交给 PATH", { skip: process.platform !== "win32" }, () => {
   const bundled = "C:\\app\\resources\\python\\python.exe";
   const venv = "C:\\app\\resources\\.venv\\Scripts\\python.exe";
   assert.equal(

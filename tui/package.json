@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit",
-    "test": "node --experimental-transform-types --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts"
+    "test": "node --experimental-transform-types --test --test-reporter=spec --test-reporter-destination=stdout test/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^1.0.4"

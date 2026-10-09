@@ -322,12 +322,17 @@ def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
     上一条用例在 Linux 上恒绿（Linux 没有文本模式），而 Linux 正是 CI 真正跑测试的
     平台：只有这条用例能在 Linux 上守住"发布必须带 `O_BINARY`"这条纪律。做法是把
     平台行为注入进来——`os.O_BINARY` 补一位模拟位、`os.open` 把它剥掉后再交给真
-    `os.open`（Linux 不认这个 flag），并让**不带**该位的 fd 走 CRT 文本模式语义
-    （写盘时 `0x0A` -> `0x0D 0x0A`）。缺陷机理与真 Windows 逐条同形。
+    `os.open`(Linux 不认这个 flag),并让**不带**该位的 fd 走 CRT 文本模式语义
+    (写盘时 `0x0A` -> `0x0D 0x0A`)。缺陷机理与真 Windows 逐条同形。
 
-    模拟层按 **fd 号**记状态 ⇒ 每次 open 都要**双向**刷新它（带位就从集合里删）：fd 号会被
-    复用，只往里加、不删的话，同一个号先被别人不带位地打开、再被本次发布打开时，陈旧记录
+    模拟层按 **fd 号**记状态 ⇒ 每次 open 都要**双向**刷新它(带位就从集合里删):fd 号会被
+    复用,只往里加、不删的话,同一个号先被别人不带位地打开、再被本次发布打开时,陈旧记录
     还在 ⇒ 对象那次写被误判成文本模式 ⇒ 用例假红。以"本次 open 的真实位"为准。
+
+    **识别面(不许改错层)**:本用例识别的是 **open flag 路线**——它挂钩 `os.open` 的
+    `flags` 位。若产品改用 `msvcrt.setmode(fd, os.O_BINARY)` 这类**运行时切 fd** 的等价
+    修法,模拟层不会看到那个位 ⇒ 本例假红。换产品修法请**同步改模拟层**(在 `emulating_open`
+    里按路线登记),别把用例删成恒绿。
     """
     monkeypatch.setattr(os, "O_BINARY", _EMULATED_O_BINARY, raising=False)
     real_open, real_write = os.open, os.write

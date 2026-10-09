@@ -178,8 +178,9 @@ class InstanceLock:
         with _shared_root_registry_lock(self._root):
             path = self._root / f"{_SHARED_ROOT_LEASE_PREFIX}{uuid.uuid4().hex}{_SHARED_ROOT_LEASE_SUFFIX}"
             # 载荷是 UTF-8 文本，但显式带 `O_BINARY`：Windows 的 CRT 缺它时会把 `\n` 撑成
-            # CRLF，读回（`_read_holder` 走 `read_text()`）虽能容忍，但落盘字节不再等于本进程
-            # 写下的那些。与 `context/project_instructions.py` / `skills/inspection.py` 同一惯例。
+            # CRLF，落盘字节不再等于本进程写下的那些。租约内容**仅供人工诊断**、本仓无读回
+            # 路径（`_scan_shared_root_writers` 只看存在性与时间戳）；真正会被 `_read_holder`
+            # 读回的是主锁文件那处写（`_write_holder` 的目标，见下）。
             fd = os.open(
                 path,
                 os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
