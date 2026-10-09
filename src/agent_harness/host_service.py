@@ -490,12 +490,18 @@ def query_attached_skill_catalog(
     else:
         return None
     deadline = time.monotonic() + connect_timeout
+    # Reuse the existing iterative guard so json.loads never has to parse an
+    # unexpectedly deep response from the loopback service.
+    from agent_harness.web.wire_safety import BODY_MAX_DEPTH, json_container_depth
+
     try:
         health_status, _, health_body = asyncio.run(
             _loopback_get_bytes_with_deadline(
                 endpoint.port, "/api/health", headers={}, timeout=max(0.001, deadline - time.monotonic())
             )
         )
+        if json_container_depth(health_body) > BODY_MAX_DEPTH:
+            return None
         health = json.loads(health_body.decode("utf-8"))
     except (OSError, ValueError, TimeoutError, EOFError, RecursionError):
         return None
@@ -533,6 +539,8 @@ def query_attached_skill_catalog(
             token, nonce, endpoint.service_uuid, timestamp, status, body
         )
         if status != 200 or not hmac.compare_digest(response_proof, expected_proof):
+            return None
+        if json_container_depth(body) > BODY_MAX_DEPTH:
             return None
         payload = json.loads(body.decode("utf-8"))
     except (OSError, ValueError, TimeoutError, EOFError, RecursionError):
