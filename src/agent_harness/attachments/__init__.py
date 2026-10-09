@@ -16,6 +16,15 @@
 - 只移植契约与纯算法，**不移植**任何 Cordis 绑定的类。
 """
 
+from agent_harness.attachments.admission import (
+    STORAGE_UNAVAILABLE_MESSAGE,
+    check_declared_image_matches,
+    image_reference,
+    message_images_too_large_message,
+    read_image_file_bounded,
+    single_image_too_large_message,
+    too_many_images_message,
+)
 from agent_harness.attachments.errors import (
     AttachmentError,
     AttachmentErrorCode,
@@ -45,6 +54,7 @@ __all__ = [
     "EXTENSION_MEDIA_TYPES",
     "IMAGE_OMITTED_PLACEHOLDER",
     "KIND_IMAGE",
+    "STORAGE_UNAVAILABLE_MESSAGE",
     "SUPPORTED_IMAGE_MEDIA_TYPES",
     "AttachmentError",
     "AttachmentErrorCode",
@@ -54,12 +64,18 @@ __all__ = [
     "ImageRef",
     "NormalizedImage",
     "attachment_http_status",
+    "check_declared_image_matches",
     "content_block_with_text",
     "detect_image",
     "file_leaf_name",
     "image_content_block",
+    "image_reference",
+    "message_images_too_large_message",
     "normalize_image",
     "parse_image_refs",
+    "read_image_file_bounded",
     "resolve_image_limits",
+    "single_image_too_large_message",
     "text_with_omitted_images",
+    "too_many_images_message",
 ]
