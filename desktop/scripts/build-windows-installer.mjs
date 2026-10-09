@@ -197,7 +197,7 @@ export const GOOD_NODE_LOCK = {
     url: 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip',
     sha256: '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541',
   },
-  requirements: { engines: '>=22', minimumMajor: 22 },
+  requirements: { engines: '>=22.1', minimumMajor: 22 },
   layout: { resourcesDir: 'node', executable: 'node/node.exe' },
 }
 
