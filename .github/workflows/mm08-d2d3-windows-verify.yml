@@ -1,0 +1,161 @@
+# .github/workflows/mm08-d2d3-windows-verify.yml —— #830 D2 / D3 修复的 **Windows 验证**
+#
+# 为什么存在
+#
+# MM-08（#830）的 `windows-latest` 近似验证抓出两条只在 Windows 上显形的缺陷：
+#   D2（产品，P1）：`LocalArtifactStore._publish_blob` 用文本模式 `os.open` 发布二进制
+#      对象 ⇒ 含 `0x0A` 的字节被撑成 CRLF ⇒ 读回哈希不符（`tests/test_cli_image.py` 2 例红）；
+#   D3（测试可移植性，P2）：`tui` 全量 201 例里 6 例红（`.pathname` / 写死 `file:///home/u`
+#      / `fileURLToPath` 不吃注入的 platform）。
+# 施工机是 Linux 云电脑，这两条在 Linux 上**不可复现**（Linux 无 CRT 文本模式；POSIX 路径
+# 约定本就成立），所以修复的验收只能在 Windows runner 上取证。
+#
+# 它跑什么（对准本票的两条判据）
+#   job `cli`：`uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py tests/test_instance_lock.py -q`
+#     - D2 判据：`tests/test_cli_image.py` 由 **2 failed** 转 **0 failed**；
+#     - 新增回归 `test_published_object_bytes_are_not_newline_expanded` 与
+#       `test_publish_blob_forces_binary_mode_under_emulated_text_mode`（后者 win32 上 skip）。
+#   job `tui`：`npm ci` -> `npm run check`（tsc --noEmit）-> `npm test`
+#     - D3 判据：`npm test` 的 spec reporter 摘要里 `ℹ tests 201` 且 `ℹ fail 0`
+#       （Windows 上两条 win32-only 路径断言**真跑**；Linux 上它们是 `skipped 2` ——
+#       `test/host.test.ts` 两例按 `process.platform !== "win32"` 跳过，不再红；
+#       另有 1 例 win32-skip（`/dev/zero` 字符设备，`tui/test/image-paste.test.ts:237`
+#       在 win32 上 skip））。
+#
+# 触发与边界
+#   `on:` 挂 `workflow_dispatch`（合入默认分支后可手工跑）+ `push`（仅本票特性分支）。
+#   加 `push` 的唯一目的是绕过"`workflow_dispatch` 要求 workflow 文件在**默认分支**"这条
+#   限制（本票不 push main / 不开 PR），与 #830 的 `mm08-windows-verify.yml` 同一处置。
+#   不挂 pull_request / schedule，不做常驻 CI。CI 里不含任何密钥。
+#   第三方 action 一律完整 SHA + 版本注释（tag 可变、有投毒面）。
+#
+# 与同仓另一条 Windows 车道的关系（复审 P3）
+#   `mm08-windows-verify.yml`（#830 的近似验证，目前只存在于 `omp/830-mm08-cross-client-verify`
+#   分支）与本文件在检出/装 Node/装 uv/上传证据四步上同形。两文件服务**同一票（#830）**的
+#   两条交付线/不同验证目标、且都依赖 `push` 分支触发（本票不 push main / 不开 PR），所以本次
+#   **没有**合并成一份：合并要么需要改到别人的分支，要么把两条判据耦合成一份 `inputs` 契约。
+#   代价是重复 —— 处置是两边都写清分工（本文件就是 D2/D3 的车辆），并把四个 action 的
+#   SHA 与版本注释保持同一组：
+#     actions/checkout v4.4.0 / actions/setup-node v4.4.0 / actions/upload-artifact v7.0.1 /
+#     astral-sh/setup-uv v10.2.0。
+#   重跑纪律：**改本文件列出的 `paths` 里任一文件、或升级 Node/uv 之后，必须重跑本车道并把
+#   新读数写进证据**（这条车道不在常驻门禁里 —— `workflow_dispatch` 要求 workflow 在默认
+#   分支，D2/D3 的 Windows 回归首轮就是这样漏到验证票才发现的）。
+name: mm08-d2d3-windows-verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - omp/fix-mm08-d2-d3-windows
+    paths:
+      # 只在真正决定这两条判据的路径变化时触发（docs-only 提交不烧 runner 分钟）。
+      # 依赖锁/清单也算「决定判据」：Node 或 uv 一升级，这两条车道的读数就不可比，
+      # 漏了它们会出现「依赖变了、车道静默不跑」。
+      # 边界口径（复审第 2 轮 Correctness P3 + Standards F2-residual）：按目录粒度，
+      # 宁多烧 runner 也不静默跳过 —— `tui/src/**`、`tui/test/**`、`tui/tsconfig.json`、
+      # `src/agent_harness/instance_lock.py`、`tests/test_instance_lock.py` 全纳入；
+      # 工作流自身与 .github 下其它 workflow 也触发（改 CI 契约必须重跑）。
+      - .github/workflows/**
+      - uv.lock
+      - pyproject.toml
+      - src/agent_harness/storage/local_artifact.py
+      - src/agent_harness/instance_lock.py
+      - tests/test_cli_image.py
+      - tests/test_instance_lock.py
+      - tests/attachments/test_local_byte_store.py
+      - tui/package.json
+      - tui/package-lock.json
+      - tui/tsconfig.json
+      - tui/src/**
+      - tui/test/**
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cli:
+    name: D2（Windows 字节发布不再是文本模式）
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 装 uv（与 gate0.yml 同版本 pin）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: 同步依赖（uv.lock 锁文件）
+        run: |
+          uv python install 3.13
+          uv sync --locked --python 3.13
+          uv run python -V
+
+      - name: D2 回归：Windows 下 CLI --image 真字节落盘读回
+        run: |
+          # instance_lock 的两处 O_BINARY 与本车道 paths 同源（Windows 专属字节语义），
+          # 一并真跑取证，不靠「纪律一致性」空判（复审第 2 轮 Correctness F1）。
+          uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py tests/test_instance_lock.py -q -p no:cacheprovider 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-cli-pytest.log"
+          $code = $LASTEXITCODE
+          Write-Output "pytest 退出码=$code（修复前 tests/test_cli_image.py = 2 failed）"
+          exit $code
+
+      - name: 上传 CLI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-d2d3-windows-cli
+          path: ${{ runner.temp }}/mm08-d2d3-cli-pytest.log
+          if-no-files-found: warn
+
+  tui:
+    name: D3（tui 全量在 Windows 上可移植）
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 装 Node 22（与 tui/package.json engines 对齐）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # `22` 解析到 22.x 的最新。注意 `tui/package.json` 的 `engines.node`
+          # （`>=22.1`）只是声明下界，**有效**下界更高：依赖
+          # `@earendil-works/pi-tui@1.0.4` 自带 `engines: {"node": ">=22.19.0"}`，
+          # 且 `npm test` 走的 `--experimental-transform-types` 需 Node ≥22.7.0
+          # ⇒ **有效下界为 ≥22.19**。`fileURLToPath` 的 `windows` 选项自 v22.1.0
+          # 起才有，22.0.x 会**静默忽略**它（复审 P3）。
+          node-version: '22'
+
+      - name: 装 tui 依赖（npm ci）
+        working-directory: tui
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查（npm run check = tsc --noEmit）
+        working-directory: tui
+        run: |
+          npm run check 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-tsc.log"
+          $code = $LASTEXITCODE
+          Write-Output "tsc --noEmit 退出码=$code"
+          exit $code
+
+      - name: D3 回归：tui 全量（修复前 6 failed）
+        working-directory: tui
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-tui-full.log"
+          $code = $LASTEXITCODE
+          # spec reporter（`--test-reporter=spec`）的摘要行带显式计数，落进证据日志：
+          #   ℹ tests / ℹ pass / ℹ fail / ℹ skipped
+          # 只对 pass/skip 做**读数记录**，不把它们做成第二套判据（退出码才是判据）。
+          Select-String -Path "${{ runner.temp }}\mm08-d2d3-tui-full.log" -Pattern '^ℹ (tests|pass|fail|skipped) ' |
+            ForEach-Object { Write-Output $_.Line }
+          Write-Output "npm test 退出码=$code（修复前 = 6 failed / 201；修复后 fail=0，另有 1 例 win32-skip）"
+          exit $code
+
+      - name: 上传 TUI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-d2d3-windows-tui
+          path: ${{ runner.temp }}/mm08-d2d3-*.log
+          if-no-files-found: warn

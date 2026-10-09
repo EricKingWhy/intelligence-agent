@@ -10,11 +10,11 @@
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` 同一套受控 cast 访问面）。
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { TuiApp } from "../src/app.ts";
 import type { ConversationState } from "../src/adapter.ts";
@@ -31,8 +31,10 @@ const PNG_BYTES = Uint8Array.from([
 ]);
 
 /** 仓库内的真图片 fixture（AC2/AC4 要真读盘）。 */
-const FIXTURE_PNG = new URL("./fixtures/shot.png", import.meta.url).pathname;
-const MISSING_PNG = new URL("./fixtures/not-there.png", import.meta.url).pathname;
+// `URL.pathname` 在 Windows 上给 `/D:/...`（前导斜杠 + 正斜杠），`statSync` 解不出来
+// => 图被判"读不到"（#830 D3）。`fileURLToPath` 是本平台正确的转换。
+const FIXTURE_PNG = fileURLToPath(new URL("./fixtures/shot.png", import.meta.url));
+const MISSING_PNG = fileURLToPath(new URL("./fixtures/not-there.png", import.meta.url));
 
 /** 让挂起的异步剪贴板读取跑完（纯微任务，不涉真计时器）。 */
 async function settle(): Promise<void> {
@@ -124,7 +126,11 @@ function makeHarness(options?: {
       baseUrl: "http://127.0.0.1:0",
       sessionId: "s1",
       fetchImpl: fetchFn,
-      platform: options?.platform ?? "linux",
+      // 默认取**宿主**平台：本文件里 AC2/AC4/P3/N1 会把仓库内的真 fixture 路径喂进去
+      // （`FIXTURE_PNG` 由 `fileURLToPath` 产出），而路径语义由注入的 platform 决定
+      // （`resolvePastedImagePath` 在非 win32 上做 `\<char>` 反转义）——写死 "linux"
+      // 时 Windows 上的 `D:\...` 会被反转义毁掉 ⇒ 图读不回来（#830 D3 余下的 3 例）。
+      platform: options?.platform ?? process.platform,
       env: options?.env ?? {},
       initialImages: options?.initialImages,
       readClipboardImage: async () => {
@@ -558,7 +564,10 @@ test("独立审查 P3/P4：超过 20 MiB 的 @path 参数给出上限提示，�
   const dir = mkdtempSync(join(tmpdir(), "ia827-app-big-"));
   try {
     const big = join(dir, "big.png");
-    execFileSync("truncate", ["-s", "21M", big]);
+    // 稀疏文件（Node 原生 `truncateSync`，先建空文件——外部 `truncate -s` 才自带创建；那个
+    // 二进制在 Windows 上靠 runner 镜像的 Git for Windows coreutils，属外部依赖——复审 P3）。
+    writeFileSync(big, "");
+    truncateSync(big, 21 * 1024 * 1024);
     const harness = makeHarness({ initialImages: [big] });
 
     assert.equal(harness.app.pendingImages.length, 0);
