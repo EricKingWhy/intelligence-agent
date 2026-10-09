@@ -606,7 +606,11 @@ def test_cli_plugins_lifecycle_tracks_saved_and_live_runtime_state(
     monkeypatch.setattr(
         cli,
         "Settings",
-        lambda: SimpleNamespace(workspace_dir=str(workspace), skill_global_dir=str(global_skills)),
+        lambda: SimpleNamespace(
+            workspace_dir=str(workspace),
+            skill_global_dir=str(global_skills),
+            capabilities=json.dumps({"skills": {"enabled": True}}),
+        ),
     )
     monkeypatch.setattr(cli, "_query_current_skill_runtime", lambda *_: tuple(runtime))
     monkeypatch.setattr(cli, "setup_logging", lambda *args, **kwargs: pytest.fail("plugins command initialized logging"))
@@ -676,6 +680,52 @@ def test_cli_plugins_lifecycle_tracks_saved_and_live_runtime_state(
     run("remove", "complete-skill")
     assert not (workspace / "skills" / ".managed" / "complete-skill").exists()
     assert json.loads(run("list"))["packages"] == []
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [None, '{"skills":{"enabled":false}}'],
+)
+def test_cli_plugins_enable_requires_skills_capability_without_changing_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    capabilities: str | None,
+) -> None:
+    source = tmp_path / "complete-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: complete-skill\ndescription: Complete local package.\n---\n\nBody.\n",
+    )
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: SimpleNamespace(
+            workspace_dir=str(workspace),
+            skill_global_dir=str(global_skills),
+            **({} if capabilities is None else {"capabilities": capabilities}),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_query_current_skill_runtime",
+        lambda *_: ("not_running", "absent", None),
+    )
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "install", str(source)])
+    cli.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "enable", "complete-skill"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2
+    assert "Skills capability is enabled in CAPABILITIES" in capsys.readouterr().err
+    manifest = json.loads((workspace / "plugin-installs.json").read_text(encoding="utf-8"))
+    assert manifest["packages"]["complete-skill"]["enabled"] is False
 
 
 def test_cli_plugins_install_uses_configured_extension_skill_sources(

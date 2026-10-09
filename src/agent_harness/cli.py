@@ -1708,6 +1708,11 @@ def _main_plugins(argv: list[str]) -> None:
             )
             return
         if args.command == "enable":
+            if enabled_skills_config is None:
+                raise SkillPackageError(
+                    "cannot enable Skill packages unless the Skills capability is enabled "
+                    "in CAPABILITIES"
+                )
             manager.enable(args.name)
             print(json.dumps({"name": args.name, "saved_selection": "enabled"}, ensure_ascii=False))
             return
