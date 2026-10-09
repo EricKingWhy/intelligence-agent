@@ -45,14 +45,21 @@ src/installer/
   per-machine install of the same app id is refused with a message.
 - **Atomic update + rollback** (DSH `installer-directories.nsh` protocol,
   adapted to stock electron-builder hooks): the new installer's `customInit`
-  renames the live dir to `$INSTDIR.old-<guid>` before the install section
+  renames the live dir to `$INSTDIR.old-{guid}` before the install section
   (a running app locks its directory, so the rename also guards against
-  updating over a live process); `customInstall` verifies the new files and
+  updating over a live process; the braces are `System::Call`'s `g` GUID form,
+  and #904's delete path and leftover sweep match exactly that name shape — a
+  name without the braces is not touched); `customInstall` verifies the new files and
   then deletes the backup, records it, or rolls back. A delete that fails
   because a child cannot be removed (#901) leaves the install finished, the
   directory in place and its path in `IaLeftoverDir`, so the next promote can
   still name it; a backup that cannot be restored is left in place, never
-  deleted.
+  deleted. The uninstall section sweeps those `<install dir>.old-{guid}`
+  siblings by name shape (#904 item 4) and sets exit code 2 when it had to
+  leave one behind — visible to a caller that launches the uninstaller in
+  place (`_?=`, the form the stock updater's own call uses), whereas a plain
+  launch reports the NSIS stub's 0 either way (measured readings:
+  `test/harness/nsis-probes/launch-form-probe`).
 - **User data isolation**: `%APPDATA%\intelligence-agent` (set via
   `app.setPath('userData', …)` in `src/main.ts`), always outside the install
   dir. Uninstall never touches it; explicit cleanup is
