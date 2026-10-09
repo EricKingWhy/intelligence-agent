@@ -13,7 +13,7 @@ source line range. This file holds the license texts and the provenance ledger.
 ```
 MIT License
 
-Copyright (c) 2024 DeepSeek
+Copyright (c) 2026 DeepSeek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -47,9 +47,32 @@ SOFTWARE.
 | `src/lib/attachments.ts` | `packages/client/ui-conversation/src/client/input/editor/keymap.ts` @ `5badb15` | 161–187 | ADAPT (paste intake: `clipboardData.items` where `kind === 'file'`; text-paste fallthrough — no files ⇒ the event is never taken over; files + `text/plain` ⇒ text is inserted at the caret). Directory-entry detection (`webkitGetAsEntry`) is **not** ported — `filesFromClipboard` returns every `kind === 'file'` item and the drop path (`dropEvents.ts`) handles directories |
 | `src/hooks/useDraftAttachments.ts` | `packages/client/ui-conversation/src/client/service.ts` @ `5badb15` | 329–400 | PORT DESIGN (upload state machine: per-item status/progress/retry; DSH's Cordis `ctx.fileUpload` worker pool is not reproduced — one XHR per image, browser-scheduled) |
 
+### Adapted files — #826 (MM-05) desktop host-path intake
+
+| Local file | Upstream file @ commit | Source lines | Nature |
+| --- | --- | --- | --- |
+| `src/lib/hostFiles.ts` | `packages/client/ui-conversation/src/client/apply.ts` (`HostPathBridge` + `hostPathBridge()` + the `addFiles` split) and `packages/context/file-reference/src/grammar.ts` (`formatFileMention`) @ `5badb15` | apply.ts 99–109 / 460–497; grammar.ts 45–59 | ADAPT (the split rule `path === '' \|\| isImage` → upload, else a reference, is kept verbatim; so are the quoted `@"path"` form and the give-up rule for control characters / `"`). **Not** ported: directory references (out of scope for #826 — directories are dropped as before), the rail chip (this repo has no file-reference channel in the backend yet, so the reference is inserted as message text), and `relativizeToCwd` (no session cwd at the Composer seam) |
+
 `src/lib/attachmentThumbnail.ts`, `src/lib/attachmentRefs.ts`,
 `src/lib/clipboardImage.ts`, `src/hooks/useAttachmentImage.ts` contain no
 upstream code (written against this repo's CSP and controlled-endpoint contract).
+
+> The upstream license text above is quoted verbatim from `LICENSE` at
+> `5badb15009ae1756c3afe0ae0cef1faafc290ccc`; the copyright year was corrected
+> from `2024` to `2026` in #826 after re-reading that file at the pinned commit.
+
+## VS Code (`microsoft/vscode`) — reference only, no code copied
+
+- **Commit read:** `a64c64ab9ce9136625cf080db3cd091263d90e0c` (`main`)
+- **License:** MIT
+- **Use:** second independent source for the **consumer side** of `src/lib/hostFiles.ts`
+  (#826 / MM-05) — `src/vs/platform/dnd/browser/dnd.ts:566–585` reads its
+  Electron-host bridge defensively (`typeof … === 'function'` on each level, and
+  a missing bridge degrades to `undefined` instead of throwing), and
+  `src/vs/base/parts/sandbox/electron-browser/preload.ts:184–190` exposes only a
+  minimal `webUtils.getPathForFile` wrapper rather than Electron's `webUtils`
+  object. No VS Code source is copied: this repo's bridge shape and its
+  degrade-to-`''` rule are its own, written against `HOST_PATHS_GLOBAL`.
 
 ## LibreChat (`danny-avila/LibreChat`)
 
