@@ -13,6 +13,7 @@ import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
+import { parseImageRefs, type ImageAttachmentRef } from './attachmentRefs';
 
 // 事件类型常量统一取 EventType（generated/event-types.ts，后端 event.py 生成物）。
 // 此前 reasoning / tool-output 两族以本地字面量先行（fixture 驱动，不硬阻塞后端），
@@ -80,6 +81,16 @@ function applySupersedeShadow(state: ConversationState): void {
 function projectUndelivered(state: ConversationState, event: AgentEvent): void {
   const { type } = event;
   const data = event.data;
+  // #825（MM-04）：待发送输入也带附图引用（后端 `_enqueue` 把 `user_input_metadata`
+  // 原样写进 `message/queued` / `steer/requested`）。不解析它，队列条的「立即 / 编辑」
+  // 重投递就不带引用，后端按本请求重建 `user/message` ⇒ 图静默消失。
+  // 「非空才写」（与 `Turn.user_attachments` 同一纪律）：不制造空数组这种"看起来有话说"
+  // 的取值；做成函数是为了只在**新增**两个分支里解析，摘除类事件（cancelled/consumed）
+  // 不为一个用不上的字段白跑一趟。
+  const refsField = (): { attachments?: ImageAttachmentRef[] } => {
+    const attachments = parseImageRefs(data.attachments);
+    return attachments.length > 0 ? { attachments } : {};
+  };
   if (type === EventType.MESSAGE_QUEUED) {
     const id = data.queue_id;
     if (typeof id !== 'string' || !id) return;
@@ -91,6 +102,7 @@ function projectUndelivered(state: ConversationState, event: AgentEvent): void {
         content: String(data.content ?? ''),
         seq: event.seq ?? 0,
         created_at: event.time ?? '',
+        ...refsField(),
       },
     ];
     return;
@@ -106,6 +118,7 @@ function projectUndelivered(state: ConversationState, event: AgentEvent): void {
         content: String(data.content ?? ''),
         seq: event.seq ?? 0,
         created_at: event.time ?? '',
+        ...refsField(),
       },
     ];
     return;
@@ -128,11 +141,17 @@ function projectUndelivered(state: ConversationState, event: AgentEvent): void {
 
 /** 首屏/重连补齐：用 `GET /queue` 的响应**替换**未投递列表（§5.2 状态源优先级：
  *  事件流是唯一事实，本端点只做补齐）。替换而非合并——重复执行幂等。
- *  由 useSession 在历史装载 / 重连时调用。 */
+ *  由 useSession 在历史装载 / 重连时调用。
+ *
+ *  #825（MM-04）例外：`GET /queue` 的响应体里**没有**附件字段（后端未暴露），
+ *  而事件流里的 `message/queued` / `steer/requested` 有。若按字面"替换"，一次
+ *  刷新就会把"这条排队项带图"这件事抹掉 ⇒ 之后「立即 / 编辑」重投递静默丢图。
+ *  故按 id 把**事件流已知**的引用带过来（内容/时间仍以本端点为准）。 */
 export function restoreUndeliveredFromQueue(
   state: ConversationState,
   queue: { items: Array<{ queue_id: string; content: string; created_at: string }>; steers: Array<{ steer_id: string; content: string; created_at: string }> },
 ): void {
+  const known = new Map(state.undelivered.map((u) => [u.id, u]));
   const items: UndeliveredInput[] = [
     ...queue.items.map((i) => ({
       kind: 'queue' as const,
@@ -140,6 +159,7 @@ export function restoreUndeliveredFromQueue(
       content: i.content,
       seq: Number.MAX_SAFE_INTEGER,
       created_at: i.created_at,
+      attachments: known.get(i.queue_id)?.attachments,
     })),
     ...queue.steers.map((s) => ({
       kind: 'steer' as const,
@@ -147,6 +167,7 @@ export function restoreUndeliveredFromQueue(
       content: s.content,
       seq: Number.MAX_SAFE_INTEGER,
       created_at: s.created_at,
+      attachments: known.get(s.steer_id)?.attachments,
     })),
   ];
   state.undelivered = items;
@@ -403,6 +424,12 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
     turn.user_message = String(event.data.content ?? '');
+    // #825（MM-04）：附图是 `content` 的**平行字段**（PRD D3），事件里只有引用。
+    // 与 `user_message` 的无条件覆盖不同，附件**非空才写**：同一 step 里重复到达的
+    // 空帧（既有 projection 的 broken 不变量，见 `withTurnAt` 注释）不该把已解析出的
+    // 引用抹掉——"后端这帧没带"与"这轮没有图"在这里不是同一件事。
+    const attachments = parseImageRefs(event.data.attachments);
+    if (attachments.length > 0) turn.user_attachments = attachments;
     // BUG-001：fork 锚点需要 user/message 的 seq（持久事实），
     // 而非 turn.step_id（resolveStep 合成值）。null-seq 帧不入册。
     if (event.seq !== null) {
