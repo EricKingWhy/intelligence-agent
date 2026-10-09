@@ -225,6 +225,18 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
   const BROKEN_DELETE = 'RMDir /r "\\\\?$iaBackupDirectory"'
   const FIXED_DELETE = 'RMDir /r "\\\\?\\$iaBackupDirectory"'
 
+  // Lines of the promote body only: a decoy copy of the same shape elsewhere in
+  // the file (say in the rollback function) must not satisfy an assertion about
+  // what promote does, so the shape checks are anchored to this range.
+  function promoteApplicationBody(source) {
+    const lines = stripNsisComments(source).split(/\r?\n/)
+    const start = lines.findIndex((line) => /^\s*Function\s+iaPromoteApplication\b/.test(line))
+    assert.notEqual(start, -1)
+    const end = lines.findIndex((line, index) => index > start && /^\s*FunctionEnd\b/.test(line))
+    assert.ok(end > start)
+    return lines.slice(start, end)
+  }
+
   it('strips `;` comments but not `;` inside a string', () => {
     assert.equal(stripNsisComments('RMDir /r "a;b" ; trailing'), 'RMDir /r "a;b" ')
     assert.equal(stripNsisComments('; whole line'), '')
@@ -254,7 +266,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete([FIXED_DELETE, '!insertmacro iaClearBackupDir'].join('\n')), [
       { line: 1, what: 'missing ClearErrors before the delete' },
       { line: 1, what: 'missing ${Errors} check before iaClearBackupDir' },
-      { line: 1, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+      { line: 1, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
     const guarded = [
       'ClearErrors',
@@ -301,7 +313,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '!insertmacro iaClearBackupDir',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(loggedOnly), [
-      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
   })
 
@@ -314,7 +326,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(withoutTest), [
       { line: 2, what: 'missing ${Errors} check before iaClearBackupDir' },
-      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
   })
 
@@ -347,7 +359,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(acrossFunctions), [
       { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
       { line: 3, what: 'missing ${Errors} check before iaClearBackupDir' },
-      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
   })
 
@@ -382,7 +394,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(acrossMacros), [
       { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
       { line: 3, what: 'missing ${Errors} check before iaClearBackupDir' },
-      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
     ])
   })
 
@@ -390,6 +402,86 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete('Function nothing\nFunctionEnd'), [
       { line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' },
     ])
+  })
+
+  it('flags text that satisfies the checks but can be compiled out', () => {
+    // Every check below is textual, so text that never compiles would pass it.
+    // Verified against this guard before the rule existed: wrapping the whole
+    // guarded block in `!ifdef NOPE` (or `!if 0`) returned [] — a build-time
+    // guard a dead branch can satisfy is not a guard.
+    const deadBranch = [
+      'ClearErrors',
+      '!ifdef NOPE',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!endif',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(deadBranch), [
+      {
+        line: 3,
+        what: 'conditional compilation inside the delete window — the delete and its checks can be compiled out',
+      },
+    ])
+  })
+
+  it('flags a clear call nested deeper than the delete', () => {
+    // The other verified bypass: keep the clear inside the failure branch, so a
+    // path that does not take that branch never clears the pointer — a finished
+    // install then still reads as incomplete and .onGUIEnd rolls it back.
+    const nested = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  !insertmacro iaClearBackupDir',
+      '${EndIf}',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(nested), [
+      {
+        line: 2,
+        what: 'iaClearBackupDir sits 1 LogicLib level(s) deeper than the delete — a path skips the clear',
+      },
+    ])
+    const balanced = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(balanced), [])
+  })
+
+  it('flags a record that names a different directory', () => {
+    const wrongValue = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $INSTDIR',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(wrongValue), [
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
+    ])
+  })
+
+  it('recognizes a re-cased delete instead of reporting it as missing', () => {
+    // NSIS directives are case-insensitive, so `rmdir /r` is the same delete:
+    // reporting it as "no delete found" would blame a correct layout.
+    const lower = [
+      'ClearErrors',
+      'rmdir /r "\\\\?\\$iaBackupDirectory"',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(lower), [])
   })
 
   it('validateBackupDeleteGuards names the file', () => {
@@ -407,26 +499,32 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
 
   it('keeps the leftover record exactly while the recorded directory exists', () => {
     // Existence-only regexes let a branch swap pass (keep when the directory
-    // exists, drop when it is gone), so this pins the shape: read the record,
-    // probe it with the long-path prefix — measured on NSIS 3.0.4.1 to be the
-    // only form that answers "true" for a >MAX_PATH directory — and drop it as
-    // the first statement of the negative branch.
-    const lines = stripNsisComments(
+    // exists, drop when it is gone), and searching the whole file lets a decoy
+    // copy satisfy them, so this pins the shape inside the promote body only:
+    // read the record, probe it with BOTH forms — measured on NSIS 3.0.4.1, an
+    // unprefixed >MAX_PATH path answers "false" while the prefixed form is the
+    // one that cannot express a UNC path — and drop it as the first statement of
+    // the innermost negative branch, where both forms agreed the directory is
+    // gone.
+    const body = promoteApplicationBody(
       readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
     )
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
+    const lines = body.map((line) => line.trim()).filter((line) => line !== '')
     const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
-    const probe = lines.findIndex((line) =>
+    const plain = lines.findIndex((line) => /^\$\{IfNot\}\s+\$\{FileExists\}\s+"\$iaLeftoverDirectory"$/.test(line))
+    const prefixed = lines.findIndex((line) =>
       /^\$\{IfNot\}\s+\$\{FileExists\}\s+"\\\\\?\\\$iaLeftoverDirectory"$/.test(line),
     )
-    const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
+    const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
     assert.notEqual(read, -1)
-    assert.notEqual(probe, -1)
-    assert.notEqual(drop, -1)
-    assert.ok(read < probe)
-    assert.equal(drop, probe + 1)
+    assert.notEqual(plain, -1)
+    assert.notEqual(prefixed, -1)
+    assert.ok(read < plain)
+    assert.equal(prefixed, plain + 1)
+    // Drop as the first statement after both probes, and exactly once: a second
+    // drop site would be a second guess about the same record.
+    assert.equal(drops, 1)
+    assert.equal(lines[prefixed + 1], 'DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"')
   })
 
   it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {

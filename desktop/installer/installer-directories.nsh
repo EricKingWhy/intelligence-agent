@@ -24,8 +24,9 @@
 ;                          box to show it; the detail line only reaches a file
 ;                          in a log-enabled build). The record names the most
 ;                          recent leftover; a promote that gets past the checks
-;                          below drops it once that directory is gone, while one
-;                          that returns early leaves it. The
+;                          below drops it once both probe forms agree that
+;                          directory is gone, while one that returns early leaves
+;                          it. The
 ;                          backup pointer is cleared either way, so a finished
 ;                          install can never be mistaken for an incomplete one
 ;                          below.
@@ -142,17 +143,22 @@ Function iaPromoteApplication
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK
     ${EndIf}
     ; An earlier record names a directory that may be gone by now (removed by
-    ; hand, or by a later delete that got through). Drop it once it is no longer
-    ; true and keep it while the directory is still there: clearing it blindly
-    ; would hide an older leftover behind the update that just succeeded. The
-    ; probe needs the long-path prefix just like the delete above — measured on
-    ; NSIS 3.0.4.1, ${FileExists} answers "false" for a >MAX_PATH directory when
-    ; the path is unprefixed, which would drop the record for the very leftover
-    ; this block exists to keep.
+    ; hand, or by a later delete that got through). Drop it only when both probe
+    ; forms agree it is gone, and keep it otherwise: clearing it blindly would
+    ; hide an older leftover behind the update that just succeeded, and either
+    ; form on its own answers "false" for a directory that exists but that this
+    ; form cannot express — measured on NSIS 3.0.4.1, ${FileExists} says "false"
+    ; for an unprefixed >MAX_PATH path, while the prefixed form cannot name a UNC
+    ; path (that needs the "\\?\UNC\" spelling) and does not resolve "..". A
+    ; directory that one form can see is still a directory, so the record stays;
+    ; reachability here is defensive — with a default-length install root the
+    ; record is short enough that both forms agree.
     !insertmacro iaReadLeftoverDir
     ${If} $iaLeftoverDirectory != ""
-      ${IfNot} ${FileExists} "\\?\$iaLeftoverDirectory"
-        DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
+      ${IfNot} ${FileExists} "$iaLeftoverDirectory"
+        ${IfNot} ${FileExists} "\\?\$iaLeftoverDirectory"
+          DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
+        ${EndIf}
       ${EndIf}
     ${EndIf}
     !insertmacro iaClearBackupDir

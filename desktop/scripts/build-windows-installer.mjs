@@ -769,11 +769,13 @@ export function validateLongPathPrefixes(source, filename) {
  *     immediate second read reports none, while an intervening `StrCpy` does
  *     not clear it. A second read therefore turns the failure branch into dead
  *     code;
- *   - the failure has to be recorded as `IaLeftoverDir`. Without it a failed
- *     delete cleared the pointer that named the previous version and the
- *     directory stayed on disk with nothing referencing it (R1: ~0.7 GB per
- *     update, 3.50 GiB measured on one machine), and a silent install has no
- *     UI and writes no NSIS detail log to read it back from.
+ *   - the failure has to be recorded as `IaLeftoverDir`, carrying
+ *     `$iaBackupDirectory`: a record naming anything else hides the leftover it
+ *     was written for. Without a record at all a failed delete cleared the
+ *     pointer that named the previous version and the directory stayed on disk
+ *     with nothing referencing it (R1: ~0.7 GB per update, 3.50 GiB measured on
+ *     one machine), and a silent install has no UI and writes no NSIS detail log
+ *     to read it back from.
  *
  * The check window ends at `iaClearBackupDir`, at the enclosing `FunctionEnd`,
  * or at the enclosing `!macroend`, whichever comes first, and a delete without a
@@ -782,13 +784,25 @@ export function validateLongPathPrefixes(source, filename) {
  * unrelated `${Errors}` read further down the file satisfied the check for this
  * site, and a delete inside a macro had no enclosing `FunctionEnd` to stop at.
  *
+ * Two shapes are problems on their own, because text that satisfies the checks
+ * is not the same as code that runs them (both verified against this guard):
+ *
+ *   - a conditional-compilation directive (`!if` / `!ifdef` / `!ifndef` /
+ *     `!else` / `!endif`) inside the window: the delete and its checks can be
+ *     wrapped in a branch that never compiles;
+ *   - a `iaClearBackupDir` nested deeper in LogicLib `${If}` blocks than the
+ *     delete: on the path that skips those blocks the pointer is never cleared,
+ *     so a finished install still reads as incomplete.
+ *
  * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
  * is reported as a problem, so removing the delete site cannot pass silently.
+ * The site match is case-insensitive — NSIS directives are — so a re-cased
+ * `rmdir /r` is recognized rather than reported as a missing delete.
  */
 export function unguardedBackupDelete(source) {
   const problems = []
   const lines = stripNsisComments(source).split(/\r?\n/)
-  const deleteLine = /RMDir\s+\/r\s+"\\\\\?\\\$iaBackupDirectory"/
+  const deleteLine = /RMDir\s+\/r\s+"\\\\\?\\\$iaBackupDirectory"/i
   const errorsMacro = '${Errors}'
   let sites = 0
   for (let i = 0; i < lines.length; i += 1) {
@@ -826,8 +840,30 @@ export function unguardedBackupDelete(source) {
         what: `ClearErrors between the delete and the ${errorsMacro} read discards the failed delete`,
       })
     }
-    if (!window.some((line) => /WriteRegStr\b[^\n]*"IaLeftoverDir"/.test(line))) {
-      problems.push({ line: i + 1, what: 'failed delete is not recorded (no IaLeftoverDir write)' })
+    if (!window.some((line) => /WriteRegStr\b[^\n]*"IaLeftoverDir"[^\n]*\$iaBackupDirectory/.test(line))) {
+      problems.push({
+        line: i + 1,
+        what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)',
+      })
+    }
+    if (window.some((line) => /^\s*!(if|ifdef|ifndef|else|endif)\b/.test(line))) {
+      problems.push({
+        line: i + 1,
+        what: 'conditional compilation inside the delete window — the delete and its checks can be compiled out',
+      })
+    }
+    // LogicLib nesting at the clear call: the macro names that open a block are
+    // counted here; `${Else}` and the one-line `${IfThen}` forms do not nest.
+    let depth = 0
+    for (const line of window) {
+      if (/^\s*\$\{(If|IfNot|Unless|While|Do|For|Select)\}/.test(line)) depth += 1
+      else if (/^\s*\$\{(EndIf|EndWhile|Loop|Next|EndSelect)\}/.test(line)) depth -= 1
+    }
+    if (clearIndex !== -1 && depth > 0) {
+      problems.push({
+        line: i + 1,
+        what: `iaClearBackupDir sits ${depth} LogicLib level(s) deeper than the delete — a path skips the clear`,
+      })
     }
   }
   if (sites === 0) {
