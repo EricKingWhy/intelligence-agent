@@ -45,9 +45,10 @@
 不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。
 
 这 33 例不是一个模子：**拒**侧（凭据来源 × 有无 Origin × 本机/跨源）锚的是判据矩阵，
-**放行**侧 8 例（`_ping_pong` 证明放行的是既有 `handle_websocket` 协议行为、`ws.accepted_subprotocol`
-证明协商值）锚的是"没被过度收紧"——后者是 over-fix 的反锚，与"拒"侧同等重要，别被
-"判据矩阵"四个字盖过去。
+**放行**侧锚 over-fix（"没被过度收紧"）的共 **10 个用例函数**——其中 8 个走 `_ping_pong`
+（证明放行的是既有 `handle_websocket` 协议行为，连同 `test_unconfigured_accepts_local_browser_origins`
+的 4 项 parametrize 展开共 11 例）、2 个断言 `ws.accepted_subprotocol`（证明协商值）。
+它与"拒"侧同等重要，别被"判据矩阵"四个字盖过去。
 """
 
 from __future__ import annotations
