@@ -422,10 +422,14 @@ class DockerSandbox(Sandbox):
             stop_stream.set()
             self._terminate_exec(api, exec_id, control_pid)
             stream = holder.get("stream")
-            if stream is not None and hasattr(stream, "close"):
-                self._best_effort_bounded_call(stream.close, 0.2)
-            self._stop_container()
-            worker.join(1.0)
+            self._close_exec_stream(stream)
+            try:
+                self._stop_container()
+            finally:
+                worker.join(1.0)
+                self._close_exec_response(stream)
+            if worker.is_alive():
+                worker.join(1.0)
             if worker.is_alive():
                 self._mark_exec_cleanup_failed()
                 raise RuntimeError(
@@ -442,13 +446,15 @@ class DockerSandbox(Sandbox):
             if "error" in holder:
                 self._terminate_exec(api, exec_id, control_pid)
                 stream = holder.get("stream")
-                if stream is not None and hasattr(stream, "close"):
-                    self._best_effort_bounded_call(stream.close, 0.2)
+                self._close_exec_stream(stream)
                 try:
                     self._stop_container()
                 except RuntimeError as cleanup_error:
+                    worker.join(1.0)
+                    self._close_exec_response(stream)
                     raise cleanup_error from holder["error"]
                 worker.join(1.0)
+                self._close_exec_response(stream)
                 if worker.is_alive():
                     self._mark_exec_cleanup_failed()
                     raise RuntimeError(
@@ -456,8 +462,8 @@ class DockerSandbox(Sandbox):
                     ) from holder["error"]
                 raise holder["error"]
             stream = holder.get("stream")
-            if stream is not None and hasattr(stream, "close"):
-                self._best_effort_bounded_call(stream.close, 0.2)
+            self._close_exec_response(stream)
+            self._close_exec_stream(stream)
 
         if control_pending:
             text = stderr_decoder.feed(bytes(control_pending))
@@ -564,6 +570,26 @@ class DockerSandbox(Sandbox):
         except Exception as error:  # noqa: BLE001
             logger.debug("Docker cleanup call failed: %s", type(error).__name__)
             return False, None
+
+    @staticmethod
+    def _close_exec_response(stream: object | None) -> None:
+        if stream is None:
+            return
+        # docker-py 7.x wraps streaming exec responses in CancellableStream.
+        # Its close() shuts down the socket but leaves the retained HTTPResponse
+        # for garbage collection, where urllib3 can raise on the closed socket.
+        response = getattr(stream, "_response", None)
+        response_close = getattr(response, "close", None)
+        if response_close is not None:
+            DockerSandbox._best_effort_bounded_call(response_close, 0.2)
+
+    @staticmethod
+    def _close_exec_stream(stream: object | None) -> None:
+        if stream is None:
+            return
+        stream_close = getattr(stream, "close", None)
+        if stream_close is not None:
+            DockerSandbox._best_effort_bounded_call(stream_close, 0.2)
 
     def _stop_container(self) -> None:
         kill_error: Exception | None = None

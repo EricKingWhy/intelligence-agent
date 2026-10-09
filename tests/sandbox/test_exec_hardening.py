@@ -885,7 +885,12 @@ def test_docker_exec_closes_stream_after_successful_read():
         def close(self):
             self.closed = True
 
+    response = Mock()
     stream = _CloseTrackingStream()
+    # docker-py 7.x returns a CancellableStream that retains the HTTPResponse
+    # in `_response`; its public close() shuts down the socket but does not
+    # close that response object.
+    stream._response = response
     api = Mock()
     api.exec_create.return_value = {"Id": "exec-close"}
     api.exec_start.return_value = stream
@@ -901,6 +906,7 @@ def test_docker_exec_closes_stream_after_successful_read():
     assert result.exit_code == 0
     assert result.stdout == "done"
     assert stream.closed is True
+    response.close.assert_called_once_with()
 
 
 class _StreamingDockerExec:
