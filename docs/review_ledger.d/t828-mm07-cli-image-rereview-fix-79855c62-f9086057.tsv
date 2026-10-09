@@ -1,0 +1,1 @@
+2026-10-09	#828 MM-07 CLI --image 复审修复批：A-R1[P3] 读取 OSError 归类恢复（文件读取失败 + exit 1）+ run() docstring 枚举化；B New-3[P4] 拒因文案去重（三条限值码括号只补上限数值，其余码用领域层自述）；B New-2′[P4 灰区] 复核判不违规维持不动。证据：tests/test_cli_image.py 17 passed；回归面 web 附件/限值 + tests/attachments 99 passed；ruff 全过	79855c62f1b84341141159c844f0aed13ac16e49..f9086057858bc667c234a47550927ae884e0c500
