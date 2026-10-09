@@ -1809,7 +1809,7 @@ def latest_direct_user_input_event(
       消息。
     - P3-1（#911）：候选**事件**排除 `replace`（compaction 摘要替身）与 `input_request_id`
       （澄清答复）——事实闸门的两条既有排除。二者都是真 `HumanMessage`、投影文本与自身
-      content 逐字相等，天然满足候选条件；可达性证据见下方候选循环内的注释与
+      content 逐字相等，天然满足候选条件；可达性证据见候选循环内的注释与
       `tests/session/test_derive_direct_user_input.py` 的 P3-1 用例。
     """
     latest_direct_message = next(
@@ -1854,21 +1854,22 @@ def latest_direct_user_input_event(
         if text is None or text not in final_user_texts:
             continue
         event = events_by_seq.get(source_range[0])
-        # P3-1（#911）：本候选闸门与 `is_direct_user_input_event` 的事件事实闸门**同口径**
-        # ——`replace`（compaction 摘要替身）与 `input_request_id`（澄清答复）两类事件都
-        # 不是"新的约束来源"，在事实闸门里被排除，此处同样排除。
+        # P3-1（#911）：`replace`（compaction 摘要替身）与 `input_request_id`（澄清答复）
+        # 都不是"新的约束来源"，在事实闸门里被排除，此处同样排除。
         #
-        # 分叉可达，不是理论洁癖：候选只要求「单事件来源范围 + 投影文本 == 事件 content」，
-        # 而这两类事件**天然满足**（它们是真 `HumanMessage`，不是被改名/改写过的 summary
-        # 投影）。此前只有 C2（summary 命名）那一支被拦下：
-        #   * `replace=True`：`session/event.py` 的 4-event bracket 形状里该替身的 seq 落在
-        #     自己 bracket 的 shadow 区间内 ⇒ 现行写入路径（`context/builder.py` 只落
-        #     START / CONTEXT_COMPACTED / END，不落替身）下不可达；但历史日志或外部导入里
-        #     一旦出现该形状且 bracket 三事件缺席，它就被投影成 `(seq, seq)` 并被选中。
+        # 两类事件都是真 `HumanMessage`、投影文本与自身 content 逐字相等 ⇒ 天然满足候选
+        # 的「单事件来源范围 + 投影文本 == 事件 content」，此前只有 C2（summary 命名）那一支
+        # 被拦下。分叉可达性（对照 `tests/session/test_derive_direct_user_input.py` 的 P3-1 用例）：
         #   * `input_request_id`：**可达**——答复之后又有 user 消息、而那条后续消息被
         #     `message/superseded` 取代（整轮 shadow）时，投影里 seq 最高的可见
         #     `HumanMessage` 正是答复本身（函数开头的 `latest_direct_message` 早退守卫只在
         #     答复**就是最后一条**事件时才触发）。此时闸门把澄清答复选成"最新直接用户输入"。
+        #   * `replace=True`：**无生产点**（全 `src/` 与全部 git 历史都无写点；
+        #     `context/builder.py` 只落 START / CONTEXT_COMPACTED / END，不落
+        #     `session/event.py` 登记的那条替身）。但"不可达"的理由**不是**它被 shadow——
+        #     投影只 shadow `source_seq_start..source_seq_end`，替身写在 SUMMARY 之后、
+        #     区间之外 ⇒ 旧日志 / 外部导入里一旦出现该形状就会被投影成 `(seq, seq)` 并被
+        #     选中。按票面"同源修法"一并补齐。
         if (
             event is None
             or event.type != USER_MESSAGE

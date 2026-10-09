@@ -33,6 +33,14 @@ from agent_harness.session.event import (
     QUEUE_CANCELLED,
 )
 
+#: 澄清答复的正文与载荷（取值与真生产点 `session/service.py::_constraint_input_answer_data`
+#: 的 `current_task_only` 分支逐字一致）。
+_ANSWER_TEXT = "用户选择仅在当前任务采用此约束：For this task, use TypeScript."
+_ANSWER_DATA = {
+    "input_request_id": "request-1",
+    "input_request_answer": {"request_id": "request-1", "choice": "current_task_only"},
+}
+
 _REF = {
     "kind": "image",
     "attachment_id": "sha256:" + "a" * 64,
@@ -246,22 +254,25 @@ def test_plain_text_message_selection_is_byte_identical() -> None:
 
 
 def test_replace_summary_stand_in_within_bracket_is_not_latest_input() -> None:
-    """P3-1（#911）：bracket 内的 `user/message(replace)` 替身不得被选为最新直接输入。
+    """P3-1（#911）：`user/message(replace)` 替身一旦落盘就会被投影，不得被选为最新输入。
 
-    `event.py:191` 登记的 4-event bracket 形状是
-    ``COMPACTION_START → CONTEXT_COMPACTED → USER_MESSAGE(replace) → COMPACTION_END``；
-    `derive_messages_with_source_ranges` 跳过整段被 shadow 的区间（summary 已由
-    CONTEXT_COMPACTED 投影），所以那条替身**不产生投影项**。但历史日志/导入路径里
-    bracket 三事件缺席（被压缩段仍在投影中）而替身事件的 seq 恰好落在**另一条**已落盘
-    bracket 的 shadow 区间之外时，它会被投影成 `(seq, seq)` 的 `HumanMessage`，其
-    content 与自身逐字相等 ⇒ 未修复前本闸门把它选为"最新直接用户输入"，而
-    `is_direct_user_input_event`（含 `event.data.get("replace")` 排除）判 False —— 两侧分叉。
+    `session/event.py` 登记过 4-event bracket 形状（``COMPACTION_START → CONTEXT_COMPACTED
+    → USER_MESSAGE(replace) → COMPACTION_END``），但**现行写入路径不落这条替身**
+    （`context/builder.py` 只写 START / CONTEXT_COMPACTED / END），全仓 `src/` 与全部
+    git 历史都无 `replace=True` 生产点。因此"不可达"成立，但**理由不是它被 shadow**：
+    投影只 shadow `source_seq_start..source_seq_end` 区间，而替身写在 SUMMARY 之后、
+    区间之外 ⇒ 只要有这条事件就会被投影成 `(seq, seq)`（`_bracket` 已钉住这一点）。
 
-    修法：#862 同源——候选闸门补 `event.data.get("replace")` 排除。
+    本条用例证明的正是"**若**历史上出现过该形状（旧日志 / 外部导入），闸门会把它选为
+    最新直接用户输入"——其 content 与自身逐字相等，天然满足候选条件；而
+    `is_direct_user_input_event`（含 `event.data.get("replace")` 排除）判 False ⇒ 两侧分叉。
+
+    修法：#862 同源——候选闸门补 `event.data.get("replace")` 排除，使两处口径一致。
     """
     summary = "摘要：用户要求不要新增依赖"
     real = _user(1, "本题只用标准库")
-    # 替身事件：`replace=True`（compaction 摘要替身的既有形状），不被任何 shadow 区间覆盖。
+    # 替身事件：`replace=True`（compaction 摘要替身的登记形状）。投影只 shadow bracket 的
+    # source 区间 [1, 1]，替身的 seq=2 在区间之外 ⇒ 它会被投影成 (2, 2)。
     stand_in = SessionEvent(
         seq=2, type=USER_MESSAGE, session_id="s1",
         data={"content": summary, "replace": True},
@@ -318,13 +329,6 @@ def test_replace_stand_in_does_not_resurrect_superseded_target() -> None:
     selected = latest_direct_user_input_event(events, messages)
     assert selected is not None and selected.event_id == replacement.event_id
     assert is_direct_user_input_event(events, selected.event_id)
-
-
-_ANSWER_TEXT = "用户选择仅在当前任务采用此约束：For this task, use TypeScript."
-_ANSWER_DATA = {
-    "input_request_id": "request-1",
-    "input_request_answer": {"request_id": "request-1", "choice": "current_task_only"},
-}
 
 
 def test_input_request_answer_with_later_message_edited_is_not_latest_input() -> None:
