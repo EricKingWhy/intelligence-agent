@@ -293,10 +293,10 @@ def test_replace_summary_stand_in_within_bracket_is_not_latest_input() -> None:
 
     # 分叉证据：替换替身不是用户原话（事件口径判 False）。
     assert not is_direct_user_input_event(events, stand_in.event_id)
-    # 修复后：替身不得被选为最新直接输入（另行选中的只能是原文，但原文被 bracket 换成
-    # summary 投影 ⇒ 无候选）。
+    # 修复后：替身被排除；原文的 (1,1) 投影项是 summary 命名消息（C2 排除）、替身在 (2,2) 被
+    # 排除 ⇒ **无候选**（锚定态，非"或原文"——原文早已被 bracket 换成 summary 投影）。
     selected = latest_direct_user_input_event(events, messages)
-    assert selected is None or selected.event_id == real.event_id
+    assert selected is None
 
 
 def test_replace_stand_in_does_not_resurrect_superseded_target() -> None:
