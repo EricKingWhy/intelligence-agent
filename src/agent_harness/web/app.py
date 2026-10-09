@@ -1734,6 +1734,10 @@ def _bearer_from_subprotocols(subprotocols: list[str]) -> str | None:
     padding 的 `=` 不是合法 HTTP token 字符，浏览器会直接拒发这个子协议。
     token 本身不是 UTF-8 文本的先验（JWT 是 ASCII，但这里不假定）⇒ 解码失败
     一律返回 None（当作"没给凭据"），交给 `_resolve_identity` 的 fail-closed 处理。
+
+    解码是**宽容的**：尾部多余的非 base64 字符会被 `urlsafe_b64decode` 忽略，
+    缺的 padding 由上面那行 `=` 补齐 ⇒ 不同子协议串可解出**同一 token**。
+    结果等价，仍走同一 `_resolve_identity` 鉴权路径，不构成绕过（实跑确认）。
     """
     proto = _token_subprotocol(subprotocols)
     if proto is None:
@@ -1876,8 +1880,10 @@ class AuthSeamMiddleware:
         # 配了密钥时它自己短路放行（认证层才是边界），所以此处无条件调用。
         from agent_harness.web.projects import check_trusted_origin
 
-        # 判据**与出口文案**都取自 `projects`：HTTP 面把它放进 403 的 `detail`，
-        # 这里把它记进日志——同一条字符串，两处各写一份必然漂移。
+        # 判据取自 `projects`（`check_trusted_origin`）：HTTP 面把它放进 403 的
+        # `detail`，这里把它截断记进日志。注意：WS 的 close reason **不是**这条
+        # 文案，而是本模块自有常量 `WS_ORIGIN_DENIED_REASON`（固定短 ASCII，
+        # 受 ASGI ≤123 字节可打印 ASCII 约束）——`projects` 返回的文案只进日志。
         cross_origin = check_trusted_origin(
             headers.get("origin"),
             jwt_secret_configured=bool(self._settings.jwt_secret),
