@@ -131,6 +131,7 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         "model_provider": "deepseek", "model_name": "primary-model",
         "model_api_key": SecretStr("sk-primary"),
         "model_base_url": "https://primary.example.com",
+        "agent_models": SecretStr(""),
         "temperature": 0.2,
         "fallback_model_provider": "mimo", "fallback_model_name": "fallback-model",
         "fallback_model_api_key": SecretStr("sk-fallback"),
