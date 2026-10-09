@@ -162,10 +162,12 @@ class ArtifactStore(ABC):
         本方法答"属于本会话吗"（PRD D5：发送时校验 id "属于本 session 上下文"）。
         不是本会话上传的（含别的会话、从未上传）统一 `KeyError` → 422。
 
-        默认实现 = `load_bytes`：远端 Provider 的字节 key 本就带会话前缀
-        （`{session_id}/attachments/{sha256}`），命名空间即会话 ⇒ 两者等价。
+        默认实现 = `load_bytes`：**字节 key 已带会话前缀的 Provider**（S3 / MinIO，key 形状
+        `{session_id}/attachments/{sha256}`）命名空间即会话 ⇒ 两者等价。
         **字节根跨会话全局去重的 Provider 必须覆写它**（`LocalArtifactStore` 即如此），
-        否则"存在于全局"会被误当成"属于本会话"。
+        否则"存在于全局"会被误当成"属于本会话"。测试替身 `FakeArtifactStore` 正属后者
+        （扁平按 id 的全局 dict），但它**刻意不实现归属语义**——见其类 docstring：
+        禁止用它断言发送侧归属闸门。
         """
         return await self.load_bytes(artifact_id)
 
@@ -276,7 +278,17 @@ def slice_artifact(
 
 
 class FakeArtifactStore(ArtifactStore):
-    """内存 dict 实现——给单元测试用。不碰网络。"""
+    """内存 dict 实现——给单元测试用。不碰网络。
+
+    **本替身不实现归属语义（#830 D1 审查 A-P3 / B-F2 登记）**：`_blobs` 是**按 id 的
+    扁平全局 dict**（`save_bytes` 忽略命名空间、跨会话去重），`load_bytes` 返回任意会话
+    存进来的 blob。因此它**不覆写** `load_uploaded_bytes`，后者退化为会话无关的
+    `load_bytes`——"存在于全局"被当成"属于本会话"，发送侧归属闸门在它身上**形同虚设**。
+
+    ⇒ **禁止用本替身断言发送侧归属 / 跨会话拒绝**（如"别的会话 send → 422"）：那条闸门
+    只对覆写了 `load_uploaded_bytes` 的会话感知 Provider（`LocalArtifactStore`）成立。
+    本替身只用于形状、往返、`inspect` 切片等与会话归属无关的用例。
+    """
 
     def __init__(self) -> None:
         self._artifacts: dict[str, tuple[Artifact, str]] = {}  # id → (meta, content)

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 from collections.abc import Iterable
@@ -54,6 +55,8 @@ from agent_harness.storage.artifact import (
     compute_byte_artifact_id,
     slice_artifact,
 )
+
+logger = logging.getLogger("agent_harness.storage.local_artifact")
 
 #: 旁挂元数据的后缀。用后缀而不是把元数据塞进内容头部：内容必须**逐字节**等于
 #: 模型当初产出的大输出（`compute_artifact_id` 要对得上），塞头部就会改变内容。
@@ -229,7 +232,7 @@ class LocalArtifactStore(ArtifactStore):
     # workspace，**绝不**复制附件对象（其 docstring 原文："Artifact 是全局 store 的
     # 内容寻址 ref…绝不复制"）。对象若按会话命名空间落盘，fork 出的子会话就永远
     # 读不回它自己在种子事件里继承的引用（404 + 模型侧退化成占位符）。
-    # 与上游两条独立实现同构：DeepSeek Harness `attachment-local/src/store.ts:47-51`
+    # 与上游两条独立实现同构：DeepSeek Harness `attachment-local/src/store.ts:47-54`
     # （对象根 `DSH_HOME/attachments/v1`，每用户全局）、oh-my-pi
     # `packages/coding-agent/src/session/blob-store.ts:40-68`（`~/.omp/agent/blobs`
     # 全局，"Content-addressing … provides automatic deduplication across sessions"）。
@@ -238,8 +241,10 @@ class LocalArtifactStore(ArtifactStore):
     # session 上下文"）不能再用"对象读得到"（全局之后它对人人都读得到），改看回执；
     # 读回授权则仍由调用方的事件引用闸门负责（`web/attachments.py`，
     # 与 DSH `commands.ts:405-410` 的 `ATTACHMENT_NOT_REFERENCED` 同构）。
-    # 回执是 hardlink（同一 inode）⇒ 不复制字节、去重不受影响；会话硬删时随目录一起
-    # 消失，全局对象留在原地（孤儿回收见 PRD D2"v1 不做自动清理"，后续票）。
+    # 回执是全局对象的 hardlink（同一 inode）⇒ 不复制字节、去重不受影响；**升级场景例外**：
+    # 该会话旧路径若已有同 sha 对象（升级前布局），`os.link` 撞 `FileExistsError` ⇒
+    # 保留**旧 inode**（字节与该 sha 逐字节相同，功能等价，但与全局对象不是同一 inode）。
+    # 会话硬删时回执随目录一起消失，全局对象留在原地（孤儿回收见 PRD D2"v1 不做自动清理"）。
 
     async def save_bytes(
         self, session_id: str, data: bytes, *, mime_type: str
@@ -289,10 +294,22 @@ class LocalArtifactStore(ArtifactStore):
                 body = path.read_bytes()
             except FileNotFoundError:
                 continue
-            return self._blob_from_bytes(artifact_id, sha256, body)
-        # not-found 是契约内的结果（从未上传 / 本部署里查无此对象），统一 KeyError →
-        # 404；不把"服务端异常"谎报成"不存在"。**归属**不在这里判——那是调用方的
-        # 事件引用闸门（读回）与会话回执（发送）的事，见本类字节路径段注释。
+            try:
+                return self._blob_from_bytes(artifact_id, sha256, body)
+            except KeyError:
+                # **"存在但自证失败"同样算该候选未命中**（带外篡改 / 写坏）：记 warning 后
+                # 继续回落，不遮蔽同一 sha 在另一候选（本会话旧路径）里的完好副本。回落语义
+                # 覆盖"不存在"与"存在但损坏"两种未命中，全部候选都失败才 KeyError。
+                logger.warning(
+                    "blob candidate %s failed content-address verification; "
+                    "falling back to the next candidate (artifact %s)",
+                    path,
+                    artifact_id,
+                )
+                continue
+        # not-found 是契约内的结果（从未上传 / 本部署里查无此对象 / 全部候选都自证失败），
+        # 统一 KeyError → 404；不把"服务端异常"谎报成"不存在"。**归属**不在这里判——那是
+        # 调用方的事件引用闸门（读回）与会话回执（发送）的事，见本类字节路径段注释。
         raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
 
     def _load_uploaded_bytes_blocking(self, artifact_id: str) -> BlobArtifact:
@@ -358,24 +375,38 @@ class LocalArtifactStore(ArtifactStore):
         return {}
 
     def _write_blob_meta(self, sha256: str, blob: BlobArtifact) -> None:
+        """写**全局**对象旁挂元数据（按 sha 单一文件）。
+
+        `session_id` **剥离**：全局对象跨会话去重、每个 sha 只有一份旁挂，写上传者会话 id
+        只会被后上传者覆盖 ⇒ 该字段对全局对象无意义（会误导读者以为有单一归属）。消费侧
+        （`_blob_from_bytes` / `_read_blob_meta`）只读 `mime_type`，而 mime 由内容派生
+        ⇒ 同字节同值，剥离无行为影响。
+        """
         target = self._global_blob_meta_path(sha256)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._write_atomic(
             target,
-            json.dumps(blob.model_dump(exclude={"content"}), ensure_ascii=False).encode(
-                "utf-8"
-            ),
+            json.dumps(
+                blob.model_dump(exclude={"content", "session_id"}), ensure_ascii=False
+            ).encode("utf-8"),
         )
 
     def _link_session_receipt(self, sha256: str) -> None:
-        """在本会话命名空间建一条回执 hardlink（同一 inode，不复制字节）。幂等。"""
+        """在本会话命名空间建一条回执 hardlink，指向全局对象（不复制字节）。幂等。
+
+        **升级场景**：该会话旧路径下若已存在同 sha 的升级前旧对象，`os.link` 抛
+        `FileExistsError`，此时**保留旧 inode**（不改动、不收敛）——旧对象的字节与该 sha
+        逐字节相同，读/归属行为等价；差别只是它与全局对象不是同一 inode。故"回执就是全局
+        对象的 hardlink"这条不变量**只在本次写入新建回执时成立**。
+        """
         target = self._global_blob_object_path(sha256)
         receipt = self._session_blob_object_path(sha256)
         receipt.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(target, receipt)
         except FileExistsError:
-            # 同会话重复上传同一字节：回执已在，幂等返回。
+            # 回执位已被占用：同会话重复上传同一字节（幂等返回），或升级前旧对象占位
+            # （保留旧 inode，见 docstring）。两种情形都无需再动磁盘。
             return
         # 回执是**授权事实**，必须比 HTTP 回执先落稳：目录项也要 fsync。
         self._sync_blob_dirs(receipt.parent)
@@ -495,10 +526,16 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
     这里的路径完全由 `settings.artifact_dir` 与 session_id 拼成，只有 harness 会往里写，
     所以删除判定是"写死的构造规则"，碰不到用户目录——这正是 ADR-0029 D2 要求的安全形状。
 
-    **两条刻意不做的**（记录在案，不在本票范围）：
+    **三条刻意不做的**（记录在案，不在本票范围）：
     - 配置了 S3/MinIO 时**远端对象不删**（那些 Provider 没有 delete）；
     - 不做任何自动 TTL / 体积清理（ADR-0004 明确不做自动 TTL；ADR-0029 Non-Goals 同款）。
-      于是 artifact 的生命周期 = 会话生命周期：只要会话还在，它的引用就必然可解析。
+      文本 artifact 仍满足旧口径"生命周期 = 会话生命周期：只要会话还在，它的引用就必然可解析"；
+    - **#830 D1 起，附件字节对象的回收已从"会话删除"语义中剥离**：字节对象落在全局内容
+      寻址根（`<root>/.attachments/objects/…`，跨会话去重），本函数只删 `<root>/<session_id>`
+      （连带回执），**全局字节对象留在原地、不随会话删除回收**。这是相对 D1 之前的行为回归
+      （旧布局下字节对象在会话目录内、随目录一起删），当前**刻意接受**（设计文档 §8.2 / PRD D2
+      "v1 不做自动清理"）；后续 GC（引用计数 / 宽限期；DSH 有 `gc`、oh-my-pi 有 `omp gc`）
+      是独立的 follow-up 票，不由本函数承担。别把这里的"幂等删除"读成"字节也被回收了"。
     """
     root = settings.artifact_dir.strip()
     if not root:

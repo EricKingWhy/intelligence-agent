@@ -2907,7 +2907,7 @@ class SessionService:
                 blob = await store.load_uploaded_bytes(attachment_id)
             except KeyError as error:
                 raise AttachmentReferenceInvalid(
-                    f"附件 {attachment_id!r} 不在会话 {session_id!r} 的命名空间里"
+                    f"本会话未上传过该附件 {attachment_id!r}"
                     "（不存在，或属于别的会话）"
                 ) from error
             data = blob.content

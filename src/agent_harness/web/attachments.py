@@ -5,8 +5,9 @@
 - `POST /api/sessions/{session_id}/attachments`（octet-stream 流式上传）——
   原始字节进得来、按字节判 MIME、内容寻址落盘，回不透明 `sha256:<hex>` id；
 - `GET /api/sessions/{session_id}/attachments/{attachment_id}/content`——
-  受控读回原始字节 + `Content-Type`；只认**本会话**命名空间里的 id，别的会话 /
-  未上传过的 id 一律 404（不泄露存在性）。
+  受控读回原始字节 + `Content-Type`；只认**本会话事件流引用过**的 id，别的会话 /
+  未上传过的 id 一律 404（不泄露存在性）。#830 D1 起字节对象全局内容寻址，隔离**不再**
+  由 store 的会话命名空间提供，这里的引用闸门是唯一屏障（见下方路由体内不变量注释）。
 
 **授权口径（MM-02 收紧，闭合 MM-01 的已知缺口）**：读回要求该 `attachment_id`
 被**本 Session 的 `user/message` 事件真实引用**（PRD D5 / DSH
@@ -229,6 +230,16 @@ def register_attachment_routes(
         # 权衡已登记：**正确性优先**——事件日志是唯一权威来源，且这是受控读回入口
         # （非热路径）；大会话 + 多图场景的索引/缓存优化（如按会话缓存被引用 id 集合、
         # 或落附件引用索引）留待后续票，不在此引入易与事件流漂移的旁路状态。
+        #
+        # **#830 D1 起，本闸门是唯一屏障**：字节对象已改全局内容寻址
+        # （`<root>/.attachments/objects/…`），store 侧的会话命名空间**不再**提供隔离
+        # （第二屏障已不存在，纵深由两层降为一层）——"别的会话拿不到字节"完全由下面这一行
+        # 「本会话事件流是否引用该 id」保证。为守住这条唯一屏障，以下不变量必须成立：
+        #   **任何新增写入 `user/message.attachments` 的路径，都必须先经发送闸门
+        #   `session/service.py::_resolve_attachment_refs`（形态校验 + 本会话上传回执归属
+        #   校验）**，否则该路径会直接变成跨会话字节读取。当前唯一写入者就是它
+        #   （`POST /sessions/{id}/messages`；队列 / steer 复用的是已解析引用，
+        #   `ResumeRequest` 无 `attachments` 字段，也没有原始事件追加端点）。
         events = await service.get_events(session_id)
         if attachment_id not in referenced_attachment_ids(events):
             raise _attachment_not_found(session_id, attachment_id)
