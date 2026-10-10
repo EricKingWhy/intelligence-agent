@@ -1,0 +1,1 @@
+2026-10-10	#873 Plugin T4 双轴审查：Spec PASS（P0/P1/P2/P3/P4=0）；Standards PASS-WITH-FINDINGS（P0/P1/P2=0，P3=1，P4=0；空 global list 创建 store/lock 为非阻塞建议）；作者红证通过；证据=docs/phase_status/2026-10.md#issue-873	03efb8384e88f071aac2edb4a7b945017daea1fe..9f1635598d44a14d15eaabf188aea0c0c5f8176c

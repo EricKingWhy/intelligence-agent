@@ -294,7 +294,19 @@ async def _wire_skills(
         additional_skill_directories=additional_directories,
         additional_skill_paths=manual_paths,
     )
+    global_package_manager = SkillPackageManager(
+        settings.workspace_dir,
+        global_skills_dir=global_dir,
+        scope="global",
+    )
     managed_dir = package_manager.managed_skills_dir
+    try:
+        global_package_manager.apply_pending_versions()
+    except SkillPackageError as error:
+        logger.warning(
+            "pending global Skill package versions were not applied: %s",
+            error,
+        )
     try:
         package_manager.apply_pending_versions()
     except SkillPackageError as error:
