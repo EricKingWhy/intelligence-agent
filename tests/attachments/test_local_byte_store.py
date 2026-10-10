@@ -25,11 +25,13 @@ import stat
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import pytest
 
 from agent_harness.config import Settings
+from agent_harness.storage import local_artifact
 from agent_harness.storage.artifact import compute_byte_artifact_id
 from agent_harness.storage.local_artifact import (
     LocalArtifactStore,
@@ -75,6 +77,17 @@ def _meta_path(tmp_path: Path, attachment_id: str) -> Path:
 
 def _staging_dir(tmp_path: Path) -> Path:
     return tmp_path / "artifacts" / ".attachments" / "tmp"
+
+
+class _FakeSys:
+    """只提供 `version_info` 的 `sys` 替身（#922 版本分支用）。
+
+    不 monkeypatch 真实 `sys.version_info`：那是解释器全局状态，pytest / anyio / asyncio
+    自己也读它，改掉会连带歪曲框架的版本判断。
+    """
+
+    def __init__(self, version_info: tuple[int, int, int]) -> None:
+        self.version_info = version_info
 
 
 def test_bytes_roundtrip_is_byte_equal(tmp_path: Path) -> None:
@@ -304,6 +317,116 @@ def test_discard_removes_readonly_receipt_hardlink(
         asyncio.run(_store(tmp_path, "sess-b").load_bytes(blob.artifact_id)).content
         == b"readonly-receipt"
     )
+
+
+@pytest.mark.parametrize(
+    "fake_version, expected_kwarg",
+    [
+        pytest.param((3, 12, 0), "onexc", id="py312-plus-onexc"),
+        pytest.param((3, 11, 0), "onerror", id="legacy-onerror"),
+    ],
+)
+def test_discard_registers_version_appropriate_rmtree_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_version: tuple[int, int, int],
+    expected_kwarg: str,
+) -> None:
+    """版本分支（#922）：3.12+ 传 `onexc=`，旧版本传 `onerror=`，且只传一个。
+
+    版本用替身对象注入模块的 `sys`，不碰真实 `sys.version_info`（全局改它会让 pytest /
+    anyio 自身的版本判断一起歪掉）。分支判定必须是**调用时**读的：import 时写死的话这里
+    测不出来。两个参数值都不等于真实解释器版本，所以用例不依赖跑的是哪个 Python。
+    """
+    asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"x", mime_type="image/png")
+    )
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
+    monkeypatch.setattr(
+        local_artifact.shutil, "rmtree", lambda _path, **kwargs: captured.append(kwargs)
+    )
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert len(captured) == 1, "会话目录存在时必须调用一次 rmtree"
+    assert set(captured[0]) == {expected_kwarg}, (
+        f"Python {fake_version} 应且只应注册 {expected_kwarg}="
+    )
+
+
+@pytest.mark.parametrize(
+    "fake_version, exc_is_tuple",
+    [
+        pytest.param((3, 12, 0), False, id="py312-plus-exc-instance"),
+        pytest.param((3, 11, 0), True, id="legacy-exc-info-tuple"),
+    ],
+)
+def test_discard_callback_receives_version_appropriate_exc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_version: tuple[int, int, int],
+    exc_is_tuple: bool,
+) -> None:
+    """回调第三个参数随分支变（#922）：onexc ⇒ 异常**实例**；onerror ⇒ exc_info 三元组。
+
+    端到端跑：模拟 Windows 只读文件语义（同 `test_discard_removes_readonly_receipt_hardlink`），
+    再用 spy 包住真回调，既断言参数形态、也断言清只读位后的重试确实成功（回执被带走）。
+    旧分支由真实解释器接受 `onerror=`（deprecated 但可用）执行。
+    """
+    store = _store(tmp_path, "sess-a")
+    blob = asyncio.run(store.save_bytes("sess-a", b"readonly-receipt", mime_type="image/png"))
+    receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
+    assert receipt.is_file()
+
+    real_unlink = os.unlink
+
+    def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        try:
+            st = os.stat(path, dir_fd=dir_fd)
+        except OSError:
+            return real_unlink(path, dir_fd=dir_fd)
+        if stat.S_ISREG(st.st_mode) and not (st.st_mode & stat.S_IWUSR):
+            raise PermissionError(13, "Access is denied (simulated Windows read-only file)")
+        return real_unlink(path, dir_fd=dir_fd)
+
+    seen: list[object] = []
+    real_callback = local_artifact._clear_readonly_and_retry
+
+    def _spy(func: object, path: str, exc: object) -> None:
+        seen.append(exc)
+        real_callback(func, path, exc)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", _windows_unlink)
+    monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
+    monkeypatch.setattr(local_artifact, "_clear_readonly_and_retry", _spy)
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert seen, "只读回执必须触发一次回调（否则本用例什么都没测到）"
+    for exc in seen:
+        if exc_is_tuple:
+            assert isinstance(exc, tuple), f"onerror 应收到 exc_info 三元组，实收 {exc!r}"
+            assert isinstance(exc[1], PermissionError), f"三元组第二位应是异常实例：{exc!r}"
+        else:
+            assert isinstance(exc, PermissionError), f"onexc 应收到异常实例，实收 {exc!r}"
+    assert not receipt.exists(), "清只读位后重试必须把回执带走"
+    assert _object_path(tmp_path, blob.artifact_id).is_file()
+
+
+def test_discard_emits_no_deprecation_warning(tmp_path: Path) -> None:
+    """前向守卫（#922）：discard 不得吃 `DeprecationWarning`。
+
+    诚实的量法说明：截至 CPython 3.12.3，`shutil.rmtree` **没有**为 `onerror` 发运行时
+    `DeprecationWarning`（`Lib/shutil.py` 里根本没有 `warnings.warn`；deprecation 只在
+    文档与 whatsnew 里）。所以本用例迁移前后都会过，它守的是 CPython 将来真开始发警告
+    （或移除 `onerror`）时的第一道信号，**不是**本次迁移本身的证据。
+    """
+    asyncio.run(_store(tmp_path, "sess-a").save_bytes("sess-a", b"warn", mime_type="image/png"))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        discard_local_artifacts(_settings(tmp_path), "sess-a")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：会话名不得吃掉全局对象根")
