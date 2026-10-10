@@ -75,10 +75,10 @@ describe('#368 CleanupPreviewDialog', () => {
       resolvePreview(preview());
       await Promise.resolve();
     });
-    // affected：短 ref + 人性化大小 + referenced_by
+    // affected：短 ref + 人性化大小 + referenced_by（#937 / M-22 起唯一实现是 1024 + IEC 标签）
     expect(text()).toContain('art_aaaaaaaaaaaaaaaa…');
-    expect(text()).toContain('1.0 KB');
-    expect(text()).toContain('2.0 MB');
+    expect(text()).toContain('1 KiB');
+    expect(text()).toContain('2 MiB');
     // blocked：中文解释
     expect(text()).toContain('art_c');
     expect(text()).toContain('有在途任务');

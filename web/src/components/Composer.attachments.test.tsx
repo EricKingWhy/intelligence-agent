@@ -43,7 +43,14 @@ function setInputFiles(input: HTMLInputElement, files: File[]): void {
 }
 
 function imageFile(name: string, type = 'image/png', size = 12): File {
-  const file = new File([new Uint8Array(0)], name, { type });
+  // #937 / M-20 起 intake 以文件头魔数判型（`detectImageMediaType`）：空壳文件会
+  // 被 fail-closed 判为"非图片"。fixture 必须带真实签名——image/png 给 PNG 头，
+  // 其余类型给探测不认识的字节（走拒收路径，如 notes.pdf）。
+  const bytes =
+    type === 'image/png'
+      ? Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+      : Uint8Array.of(0x25, 0x50, 0x44, 0x46, 0x2d);
+  const file = new File([bytes], name, { type });
   Object.defineProperty(file, 'size', { value: size });
   return file;
 }
@@ -162,6 +169,8 @@ describe('Composer 附图：#825 AC1 三条 intake 通道', () => {
   it('粘贴图片文件 → 入栏（缩略图卡 + 预算），文本粘贴不 preventDefault', async () => {
     paint({});
     pasteFiles(textarea(), [imageFile('shot.png')]);
+    // #937 / M-20：addFiles 内部是 async IIFE（字节探测），入栏晚一个微任务。
+    await act(async () => {});
 
     expect(cards()).toHaveLength(1);
     expect(container.querySelector('.composer-attach-budget')?.textContent).toContain('已附 1/20 张');
@@ -183,6 +192,7 @@ describe('Composer 附图：#825 AC1 三条 intake 通道', () => {
     // 光标落在「看图」与「吧」之间：插入位置必须真按光标算，不能只往末尾追加。
     ta.setSelectionRange(2, 2);
     const event = pasteFiles(ta, [imageFile('shot.png')], '（来自网页）');
+    await act(async () => {});
 
     // 有文件 ⇒ 事件被接管（图要入栏），文本由**我们**回填（不回填就等于吞掉）。
     expect(event.defaultPrevented).toBe(true);
@@ -216,6 +226,7 @@ describe('Composer 附图：#825 AC1 三条 intake 通道', () => {
     await act(async () => {
       dispatchDrag('drop', [imageFile('d.png')]);
     });
+    await act(async () => {});
     expect(document.querySelector('.drop-mask')).toBeNull();
     expect(cards()).toHaveLength(1);
   });
@@ -226,6 +237,7 @@ describe('Composer 附图：#825 AC2/AC3 预检与提示', () => {
     paint({});
     const huge = imageFile('huge.png', 'image/png', 21 * 1024 * 1024);
     pasteFiles(textarea(), [huge, imageFile('ok.png')]);
+    await act(async () => {});
 
     expect(cards()).toHaveLength(0);
     const alert = container.querySelector('.composer-attach-error[role="alert"]');
@@ -246,6 +258,7 @@ describe('Composer 附图：#825 AC2/AC3 预检与提示', () => {
   it('非图片文件被点名拒绝（AC3 要能行动，不是一句"上传失败"）', async () => {
     paint({});
     pasteFiles(textarea(), [imageFile('notes.pdf', 'application/pdf')]);
+    await act(async () => {});
     expect(container.querySelector('.composer-attach-error')?.textContent).toContain('notes.pdf');
   });
 });
@@ -254,6 +267,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
   it('上传中就绪前后：先 uploading，resolve 后 ready；发送只带已就绪引用', async () => {
     paint({});
     pasteFiles(textarea(), [imageFile('a.png')]);
+    await act(async () => {});
     expect(cards()[0].dataset.status).toBe('uploading');
 
     // 进度来自 xhr.upload.onprogress 转述（回调由 api 层交给 hook）。
@@ -279,6 +293,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
   it('上传失败：卡片给出原因与重试；**纯文本发送不被阻塞**，且失败项不进请求', async () => {
     paint({});
     pasteFiles(textarea(), [imageFile('bad.png')]);
+    await act(async () => {});
     await act(async () => {
       rejectUpload?.(new Error('413 AttachmentMessageTooLarge'));
     });
@@ -316,6 +331,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
   it('移除草稿：中止在途上传并离开栏', async () => {
     paint({});
     pasteFiles(textarea(), [imageFile('a.png')]);
+    await act(async () => {});
     await act(async () => {
       container.querySelector<HTMLButtonElement>('.composer-attach-remove')!.click();
     });
@@ -335,14 +351,22 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     const hint = container.querySelector('.composer-attach-hint');
     expect(hint?.textContent).toContain('supports_vision=false');
 
+    // #937 / M-24：title 与可见提示同源（NON_VISION_MODEL_REASON 常量），逐字节钉住
+    // 两串——抽常量后任何一侧漂移都立刻红，而不是靠人眼对。
+    expect(hint?.textContent).toBe(
+      '当前模型不支持视觉（supports_vision=false）：已禁用附图；历史附图会被省略为文本占位',
+    );
+
     // 粘贴：不入栏，且**不接管**事件（`preventDefault` 一开，混合剪贴板里的文本也丢）。
     const pasteEvent = pasteFiles(textarea(), [imageFile('a.png')]);
     expect(pasteEvent.defaultPrevented).toBe(false);
     await act(async () => {
       dispatchDrag('dragenter', [imageFile('a.png')]);
     });
-    // 遮罩给的是**禁止**插图 + 原因，而不是"松开即可"。
-    expect(document.querySelector('.drop-title')?.textContent).toContain('不支持视觉');
+    // 遮罩给的是**禁止**插图 + 原因，而不是"松开即可"。（M-24：与 title 逐字节同源）
+    expect(document.querySelector('.drop-title')?.textContent).toBe(
+      '当前模型不支持视觉（supports_vision=false），已禁用附图',
+    );
     await act(async () => {
       dispatchDrag('drop', [imageFile('a.png')]);
     });

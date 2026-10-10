@@ -1,0 +1,1 @@
+2026-10-10	#937 返工：6 findings 全修——P4-1 Composer 订阅 onTokenChange 刷新 limits（方案 a）；P4-2 loadImageLimits 失败返回调用前 currentLimits 不冲服务端值；P4-3 补判别力用例（成功后失败钉服务端值 / 魔数边界 FF D8 00·RIFF+非WEBP·GIF8 / api 形状防御，均先红后绿）；P3 limits wire 改 snake_case（app.py+api.ts 映射+双侧测试）；P4 mediaTypes 注释与 Pi mime.ts 来源标注改为经由 probe.py 对齐	295662dc..9fd9df5b

@@ -51,6 +51,7 @@ import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget } from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
+import { loadImageLimits } from './lib/attachments';
 import {
   describeSessionError,
   getAgentProfiles,
@@ -263,6 +264,9 @@ export default function App() {
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
         void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
         void fetchCapabilities(); // 能力 manifest 也走 apiFetch——补拉
+        // #937/M-08：附图上限是服务端权威配置，token 变更后补拉。首屏首拉由
+        // Composer 自己的挂载 effect 负责（App 层只补拉，不与它抢首拉）。
+        void loadImageLimits();
       }),
     [refreshSessions, fetchModels, fetchControlCatalogs, fetchCapabilities],
   );
