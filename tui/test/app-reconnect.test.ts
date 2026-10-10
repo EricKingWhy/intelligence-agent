@@ -13,6 +13,7 @@
  * ④ `truncated` 是重建路径、不计入失败；
  * ⑤ 切会话重置熔断（新会话重新给满阈值，不被上一会话的耗尽状态锁死）。
  * ⑥ truncated（#859）：先等 GET /events 重建完成、再按重建游标续订；重建失败与连接失败同一退避/额度。
+ * ⑦ 切会话（#958）：旧会话迟到的 GET /events 重建结果被丢弃，不改新会话 state / 游标。
  *
  * 全部经**注入 fetch**（`AppOptions.fetchImpl`）驱动：不碰真网络、不碰真 TTY。
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` / `app-images.test.ts` 同一套受控 cast 访问面）。
