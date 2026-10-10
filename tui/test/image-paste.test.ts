@@ -16,8 +16,11 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import {
+  checkMessageImageLimits,
   clipboardImageName,
   isImagePath,
+  MAX_IMAGES_PER_MESSAGE,
+  MAX_MESSAGE_IMAGE_BYTES,
   MAX_IMAGE_BYTES,
   pastedImagePath,
   readImageFile,
@@ -262,3 +265,33 @@ test(
     assert.ok(Date.now() - started < 2_000, "字符设备不得被读盘阻塞");
   },
 );
+
+test("M-21：单条数量/总量上限与服务端 config.py 默认值同值（镜像口径，漂移 = 预检放行、服务端 413/422）", () => {
+  // 与 web/src/lib/attachments.ts 的 IMAGE_LIMITS 同一规则、同一默认（PRD D11：
+  // 后端权威、前端镜像；#824 明确不加 GET limits 端点）。改动必须三处同步。
+  assert.equal(MAX_IMAGES_PER_MESSAGE, 20);
+  assert.equal(MAX_MESSAGE_IMAGE_BYTES, 200 * 1024 * 1024);
+  // 单张上限沿用既有 MAX_IMAGE_BYTES 镜像（attachment_max_image_bytes 默认 20 MiB）。
+  assert.equal(MAX_IMAGE_BYTES, 20 * 1024 * 1024);
+});
+
+test("M-21：checkMessageImageLimits 数量超限（第 21 张被拒，理由含上限与出路）", () => {
+  const reason = checkMessageImageLimits(20, 0, 95);
+  assert.ok(reason !== null);
+  assert.ok(reason.includes("最多 20 张"));
+});
+
+test("M-21：checkMessageImageLimits 总字节超限（已附 + 本批 一起算）", () => {
+  // 已附 190 MiB + 本批 20 MiB > 200 MiB：即便没到 20 张也拒。
+  const mib = 1024 * 1024;
+  const reason = checkMessageImageLimits(2, 190 * mib, 20 * mib);
+  assert.ok(reason !== null);
+  assert.ok(reason.includes("200 MiB"));
+  // 恰好压线（不超）放行：199 + 1 = 200 MiB。
+  assert.equal(checkMessageImageLimits(2, 199 * mib, 1 * mib), null);
+});
+
+test("M-21：checkMessageImageLimits 未超限 => null（放行）", () => {
+  assert.equal(checkMessageImageLimits(0, 0, 95), null);
+  assert.equal(checkMessageImageLimits(19, 199 * 1024 * 1024, 1024), null);
+});

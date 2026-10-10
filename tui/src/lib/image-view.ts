@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { PendingImage } from "./pending-images.ts";
+import type { TurnImageRef } from "../adapter.ts";
 
 export interface DraftImageRenderers {
   /** pi-tui `Image` 组件的降级文字色（协议不可用时由它着色，AC6）。 */
@@ -49,12 +50,52 @@ export function renderDraftImage(
         base64,
         image.mimeType,
         { fallbackColor: renderers.fallbackColor },
-        { maxWidthCells: MAX_THUMBNAIL_WIDTH_CELLS, filename: image.path ?? image.name },
+        { maxWidthCells: MAX_THUMBNAIL_WIDTH_CELLS, filename: displayPath(image) },
         dimensions ?? undefined,
       ),
     };
   }
   return { kind: "text", lines: [imageFallback(image.mimeType, dimensions ?? undefined, displayPath(image))] };
+}
+
+/**
+ * M-09：历史附图（transcript 里的引用）的渲染决定 -- 与 `renderDraftImage` **同一个分派**：
+ * transcript 是历史的视图、draft 是待发的视图，两者对"图片 -> 像素或文本"的判定是同一个
+ * 决策，不复制第二套。
+ *
+ * 字节来源（M-09 可行性一手结论）：事件只带引用（不变量 #15：事件流里没有 base64），字节
+ * 经受控端点 `GET /api/sessions/{id}/attachments/{aid}/content` 异步取回（web 端
+ * `getAttachmentBytes` 同款通道）。`bytes === null`（还没取回 / 取回失败）时先给文本占位，
+ * 字节到手后由调用方重投影换缩略图；**绝不**在字节不在手时渲染假缩略图。
+ */
+export function renderHistoryImage(
+  ref: TurnImageRef,
+  bytes: Uint8Array | null,
+  renderers: DraftImageRenderers,
+): DraftImageRender {
+  // 无展示名是服务端结构性缺省（上传回执的 name 未持久化）：占位里给真实 attachment_id，
+  // 不编造文件名。
+  const displayName = ref.name ?? ref.attachment_id;
+  if (bytes === null) {
+    // pi-tui 的维度字段是 widthPx/heightPx（ImageDimensions）；引用里是 width/height，
+    // 这里做唯一一次字段名转接。
+    const dimensions =
+      ref.width > 0 && ref.height > 0
+        ? { widthPx: ref.width, heightPx: ref.height }
+        : undefined;
+    return {
+      kind: "text",
+      lines: [imageFallback(ref.media_type, dimensions, displayName)],
+    };
+  }
+  // 字节在手 => 装配成与待发图同形状，走同一条分派（同一判定、同一 maxWidth、同一占位文案）。
+  const pending: PendingImage = {
+    bytes,
+    mimeType: ref.media_type,
+    name: displayName,
+    path: null,
+  };
+  return renderDraftImage(pending, renderers);
 }
 
 /**
