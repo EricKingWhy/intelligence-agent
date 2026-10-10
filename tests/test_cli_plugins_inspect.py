@@ -1084,3 +1084,33 @@ def test_cli_global_git_update_rollback_and_remove_route_to_global_store(
     assert removed["removed"] is True
     assert run("list", "--scope", "global")["packages"] == []
     assert not (workspace / "plugin-installs.json").exists()
+
+
+def test_cli_plugins_inspect_reports_a_deeply_nested_description_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """修复轮 R2：真实 CLI 对 40 KB 深嵌套描述必须给明确失败，不能掀 RecursionError。
+
+    预检契约"绝不崩"在**用户入口**上同样成立——`inspect` 只是把报告打出来，深嵌套
+    描述落成 `MCP_DESCRIPTION_TOO_DEEP` 并照常 exit 1（unsupported），不是 traceback。
+    """
+    source = tmp_path / "deep-mcp"
+    _write(source / "SKILL.md", "---\nname: deep-mcp\ndescription: Deep MCP.\n---\nBody.\n")
+    _write(source / "mcp.json", '{"mcpServers": ' + "[" * 20_000 + "0" + "]" * 20_000 + "}")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    before = _snapshot(source, workspace, global_skills)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()  # RecursionError 会在这里穿出去，测试直接 error
+
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "unsupported"
+    assert "MCP_DESCRIPTION_TOO_DEEP" in {
+        error["code"] for error in report["mcp"]["errors"]
+    }
+    assert _snapshot(source, workspace, global_skills) == before

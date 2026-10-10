@@ -98,6 +98,18 @@ _RELATIVE_PATH = re.compile(r"\.{1,2}[/\\]")
 #: 裸命令名的形状（真正"在不在 PATH"是部署事实，静态判不了、也不猜）。
 _COMMAND_SHAPE = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 
+#: 描述嵌套超深时的固定文案（`MCP_DESCRIPTION_TOO_DEEP`；与 TOO_LARGE 同档：读得出、判不了）。
+_TOO_DEEP_MESSAGE = "描述嵌套过深，无法静态解析。"
+
+#: 本仓首版**不实现的已知 MCP transport**：`sse`/`ws`/`sdk` 在 MCP 与 Claude Code
+#: 里都真实存在，只是 `MCPServerConfig` 没有对应表达。ADR-0052 D2 把"自定义 transport"
+#: 与 OAuth/resources/prompts 并列为首版不支持项 ⇒ 它们是**能力收窄**（可适配的缺口），
+#: 与"transport 字段写坏"（拼错的名字、缺字段、有 url 没 type）分属两档。直接取
+#: `_CLAUDE_TRANSPORTS` 里映射为 `None` 的那些名字（写死一份就是第二份会漂的真相）。
+_UNIMPLEMENTED_TRANSPORTS = frozenset(
+    name for name, mapped in _CLAUDE_TRANSPORTS.items() if mapped is None
+)
+
 
 def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
     """预检一个包里的 MCP server 描述；返回报告，绝不启动 server / 展开凭据。
@@ -219,6 +231,13 @@ def _find_description(root: Path, errors: list[dict[str, str]]) -> tuple[str, st
 def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
+    except RecursionError:
+        # 预检契约是"绝不崩"：嵌套超过解析器递归上限的描述只能落成**明确失败**，
+        # 不能把 RecursionError 掀给 CLI / 安装闸门（skills/inspection.py 对 frontmatter
+        # 同款兜底）。深度边界的唯一权威是解析器自己——另写一份深度扫描器就是第二份
+        # 会漂的真相，而这里的唯一诉求是"不崩"（无独立产品配额，与 web 层不同）。
+        _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
+        return None
     except (json.JSONDecodeError, ValueError) as error:
         _add_error(errors, "MCP_DESCRIPTION_INVALID", relative, f"JSON 无法解析: {error}")
         return None
@@ -230,18 +249,22 @@ def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -
             f"描述必须是 JSON 对象，得到 {type(parsed).__name__}",
         )
         return None
-    _check_duplicate_keys(text, parsed, relative, errors)
+    if not _check_duplicate_keys(text, parsed, relative, errors):
+        return None
     return parsed
 
 
 def _check_duplicate_keys(
     text: str, parsed: dict[str, Any], relative: str, errors: list[dict[str, str]]
-) -> None:
-    """JSON 里重复的键 → 明确失败。
+) -> bool:
+    """JSON 里重复的键 → 明确失败；返回描述是否仍可判（`False` = 太深，已记 TOO_DEEP）。
 
     `json.loads` 对重复键**静默取后者**：`{"mcpServers": {"a": {...}, "a": {...}}}`
     会不声不响地少一个 server（AC3 的"重复名"在 Claude 形状里唯一的出现方式）。
     先按 object_pairs_hook 收一遍重复键，再按它是不是 server 名给出对应的错误码。
+
+    第二遍带 hook，每个容器比第一遍多一层 Python 帧（实测对象嵌套上限 9997→9995）
+    ⇒ 它可能**先于**第一遍撞上递归上限，所以这里同样不许把 RecursionError 放出去。
     """
     duplicates: list[str] = []
 
@@ -255,10 +278,13 @@ def _check_duplicate_keys(
 
     try:
         json.loads(text, object_pairs_hook=_hook)
+    except RecursionError:
+        _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
+        return False
     except (json.JSONDecodeError, ValueError):  # pragma: no cover - 上面已解析成功过
-        return
+        return True
     if not duplicates:
-        return
+        return True
     wrapper = parsed.get(_CLAUDE_WRAPPER)
     server_names = set(wrapper) if isinstance(wrapper, dict) else set()
     for key in sorted(set(duplicates)):
@@ -276,6 +302,7 @@ def _check_duplicate_keys(
                 relative,
                 f"描述里键 {key!r} 重复（JSON 重复键语义不明确，一律拒绝）",
             )
+    return True
 
 
 def _is_claude_shape(raw: dict[str, Any]) -> bool:
@@ -383,11 +410,23 @@ def _inspect_entry(
     def fail(code: str, path: str, message: str) -> None:
         _add_error(failures, code, f"{name}.{path}" if path else name, message)
 
+    def narrow(code: str, path: str, message: str) -> None:
+        """记一条**能力收窄**级发现：MCP 面内照旧明确失败（AC3），但不拦整包安装。
+
+        与 `fail` 的唯一差别是那条 `adaptive` 标记——`attach_mcp_section` 据此把"本仓
+        首版不支持"与"包作者写坏了描述"分档：前者让包停在 needs-adaptation（可装、
+        不可启用），后者 fail-closed 拦安装。
+        """
+        _add_error(failures, code, f"{name}.{path}" if path else name, message)
+        failures[-1]["adaptive"] = True
+
     def gap(kind: str, support: str, name_of_item: str, reason: str) -> None:
         requirements.append({"kind": kind, "name": name_of_item, "support": support, "reason": reason})
 
     transport = (
-        _claude_transport(entry, name, fail) if claude_shape else _native_transport(entry, name, fail)
+        _claude_transport(entry, name, fail, narrow)
+        if claude_shape
+        else _native_transport(entry, name, fail, narrow)
     )
     if transport is None:
         report["status"] = "unsupported"
@@ -416,7 +455,7 @@ def _inspect_entry(
     return report
 
 
-def _claude_transport(entry: dict[str, Any], server: str, fail) -> str | None:
+def _claude_transport(entry: dict[str, Any], server: str, fail, narrow) -> str | None:
     """Claude Code 形状：`type` 决定 transport；无 type 而带 url 是它自己会失败的写法。"""
     declared = entry.get("type")
     if declared is None:
@@ -442,7 +481,8 @@ def _claude_transport(entry: dict[str, Any], server: str, fail) -> str | None:
         return None
     mapped = _CLAUDE_TRANSPORTS[declared]
     if mapped is None:
-        fail(
+        # 已知 transport、本仓首版不实现 ⇒ 能力收窄（可适配的缺口），不是描述写坏。
+        narrow(
             "MCP_TRANSPORT_UNSUPPORTED",
             "type",
             f"server {server!r} 的 transport {declared!r} 不被支持：本仓只有 stdio 与"
@@ -451,14 +491,14 @@ def _claude_transport(entry: dict[str, Any], server: str, fail) -> str | None:
     return mapped
 
 
-def _native_transport(entry: dict[str, Any], server: str, fail) -> str | None:
+def _native_transport(entry: dict[str, Any], server: str, fail, narrow) -> str | None:
     """本仓形状：直接吃 `MCPServerConfig.transport`（即 `parse_mcp_servers` 的输入）。"""
     declared = entry.get("transport")
     if not isinstance(declared, str):
         fail("MCP_TRANSPORT_UNSUPPORTED", "transport", f"server {server!r} 缺少字符串 transport")
         return None
     if declared not in _NATIVE_TRANSPORTS:
-        fail(
+        (narrow if declared in _UNIMPLEMENTED_TRANSPORTS else fail)(
             "MCP_TRANSPORT_UNSUPPORTED",
             "transport",
             f"server {server!r} 的 transport {declared!r} 不被支持（只有 stdio / http）",
@@ -804,9 +844,10 @@ def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
     `plugins inspect` 的输出上是拦不住安装的（ADR-0052 D4）。
     - Skill 面已经判 `unsupported` 时保持原样：包本身就被拒了，再叠 MCP 缺口只会让
       "为什么被拒"更难读；MCP 段仍照出（`report["mcp"]`）。
-    - MCP 段判 `unsupported`（描述读不出来 / server 报错）⇒ 包级 status 也是 `unsupported`
-      （AC3 的"明确失败"要能拦住安装，与 Skill 面"有 errors ⇒ unsupported"同档）；
-    - MCP 段只有**缺口** ⇒ 包级降一档到 `needs-adaptation`（可装、不可启用）；
+    - MCP 段判 `unsupported` 且含**描述写坏**的发现（`_blocks_install`）⇒ 包级 status 也
+      是 `unsupported`（AC3 的"明确失败"要能拦住安装，与 Skill 面"有 errors ⇒ unsupported"同档）；
+    - MCP 段只有**缺口**、或全是**首版不支持**的发现（`adaptive` 标记）⇒ 包级降一档到
+      `needs-adaptation`（可装、不可启用）；
     - 没有描述 ⇒ MCP 段自己就是 `needs-adaptation`，包级不动（Skill 仍然能用）。
     """
     source = report.get("source")
@@ -819,11 +860,27 @@ def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
     requirements = mcp_compatibility_requirements(mcp_report)
     report.setdefault("requirements", []).extend(requirements)
     if report.get("status") == "complete":
-        if mcp_report["status"] == "unsupported":
+        if _blocks_install(mcp_report):
             report["status"] = "unsupported"
         elif any(item["support"] == "unsupported" for item in requirements):
             report["status"] = "needs-adaptation"
     return report
+
+
+def _blocks_install(report: dict[str, Any]) -> bool:
+    """MCP 报告是否含**描述写坏**的发现——只有这一类才拦整包安装。
+
+    "首版不支持的能力"（被 `narrow` 打了 `adaptive` 标记）是可适配的缺口：它让包停在
+    `needs-adaptation`（可装、不可启用），不把 Skill 面健康的包一起拒掉。反之，描述
+    读不出来 / 缺 command / 未知字段 / 越界路径 / transport 写坏这类**作者错误**仍然
+    fail-closed。**判据是那条标记，不是错误码**：同一个 `MCP_TRANSPORT_UNSUPPORTED`
+    既标"本仓不实现 `sse`"（收窄）也标"transport 字段拼错了"（写坏），按码判会把
+    后者一起放行。
+    """
+    errors = list(report.get("errors", []))
+    for server in report.get("servers", []):
+        errors.extend(server.get("errors", []))
+    return any(not error.get("adaptive") for error in errors)
 
 
 def mcp_compatibility_requirements(report: dict[str, Any]) -> list[dict[str, Any]]:

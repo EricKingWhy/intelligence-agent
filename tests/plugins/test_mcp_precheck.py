@@ -684,3 +684,135 @@ def test_skill_package_manager_refuses_to_install_a_broken_mcp_description(tmp_p
     # 关键行为是"装不进去"，MCP 细节在 `report["mcp"]` 与 `requirements` 里可查。
     with pytest.raises(SkillPackageError, match="preflight rejected"):
         manager.install(package)
+
+
+# ------------------------------------------------------------------ 修复轮 R2：深嵌套描述
+
+def _deep_description(depth: int = 20_000) -> str:
+    """约 40 KB 的恶意嵌套描述（20000 层数组 ⇒ 40017 字节）。"""
+    return '{"mcpServers": ' + "[" * depth + "0" + "]" * depth + "}"
+
+
+def test_deeply_nested_description_fails_explicitly_instead_of_crashing(tmp_path: Path) -> None:
+    """预检契约是"绝不崩"：深嵌套描述只能落成**明确失败**，不能是 RecursionError。
+
+    `json.loads` 自带的递归限制（CPython 3.12 实测约 9997 层）会先于任何尺寸上限炸；
+    40017 字节又远在 1 MB 读上限之内 ⇒ **深度是唯一的门槛**，守卫必须落在解析点。
+    这条与 `skills/inspection.py` 对 frontmatter 的 RecursionError 兜底同源。
+    """
+    root = _package(tmp_path, None)
+    _write(root / "mcp.json", _deep_description())
+
+    report = inspect_mcp_servers(root)  # 不抛异常本身就是这条用例的一半
+
+    assert report["status"] == "unsupported"
+    assert "MCP_DESCRIPTION_TOO_DEEP" in {error["code"] for error in report["errors"]}
+
+
+def test_install_gate_survives_a_deeply_nested_description(tmp_path: Path) -> None:
+    """install 路径同样不得掀桌：拒绝要经 `SkillPackageError`，不是 RecursionError。"""
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
+    )
+
+    package = _package(tmp_path, None)
+    _write(package / "mcp.json", _deep_description())
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Deep MCP.\n---\nBody.\n")
+    manager = SkillPackageManager(tmp_path / "workspace", global_skills_dir=tmp_path / "global")
+
+    with pytest.raises(SkillPackageError):
+        manager.install(package)
+
+
+# ------------------------------------------------------------------ 修复轮 R2：作用域外条目
+
+def test_attach_mcp_section_keeps_an_out_of_scope_transport_from_rejecting_the_package(
+    tmp_path: Path,
+) -> None:
+    """旧式 `sse` 条目是**首版不支持的缺口**（ADR-0052 D2 与 OAuth/resources 并列），
+    不是"描述写坏"。
+
+    它必须在 MCP 面内明确失败（AC3），但不得把一份 Skill 面健康的包升格成整包拒绝——
+    否则一句作用域外的 transport 就能让整个 Skill 装不进来（相对 base 的回归）。
+    """
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["mcp"]["status"] == "unsupported"  # MCP 面内仍明确失败（AC3）
+    assert merged["status"] == "needs-adaptation"  # 但不传染成整包拒绝
+    assert any(item["kind"] == "mcp-server-error" for item in merged["requirements"])
+
+
+def test_skill_package_manager_installs_a_package_with_an_out_of_scope_transport(
+    tmp_path: Path,
+) -> None:
+    """端到端：旧式 `sse` 的包可装（needs-adaptation），但不可启用（缺口）。"""
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
+    )
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Legacy transport.\n---\nBody.\n")
+    manager = SkillPackageManager(tmp_path / "workspace", global_skills_dir=tmp_path / "global")
+
+    record = manager.install(package)
+
+    assert record["compatibility"]["status"] == "needs-adaptation"
+    with pytest.raises(SkillPackageError, match="only complete packages can be enabled"):
+        manager.enable("plugin", scope="project")
+
+
+def test_skill_package_manager_installs_a_skill_package_without_an_mcp_description(
+    tmp_path: Path,
+) -> None:
+    """回归护栏：包里没有 MCP 描述时，一份健康的 Skill 包照常装成 complete。"""
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    package = _package(tmp_path, None)
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Skill only.\n---\nBody.\n")
+    manager = SkillPackageManager(tmp_path / "workspace", global_skills_dir=tmp_path / "global")
+
+    record = manager.install(package)
+
+    assert record["compatibility"]["status"] == "complete"
+
+
+def test_a_misspelled_transport_still_blocks_install(tmp_path: Path) -> None:
+    """收窄只认**本仓不实现的已知 transport**；"字段写坏"（拼错的名字）仍是作者错误。
+
+    同一个 `MCP_TRANSPORT_UNSUPPORTED` 码两种含义，闸门必须按那条 finding 自身判，
+    不能按码判——否则一句打错的 `transport: "stido"` 会从"拦安装"滑成"可装"。
+    """
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"typo": {
+        "type": "stido", "command": "npx",
+    }}})
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["mcp"]["status"] == "unsupported"
+    assert merged["status"] == "unsupported"  # 写坏的描述仍然 fail-closed
+
+
+def test_a_url_entry_without_a_type_still_blocks_install(tmp_path: Path) -> None:
+    """同类：有 url 没 type 是 Claude Code 自己会失败的写法（作者错误），仍拦安装。"""
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"bad": {"url": "https://mcp.example.com/mcp"}}})
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["status"] == "unsupported"
