@@ -1,0 +1,5 @@
+▶ 纯净环境跑 pytest（PYTHONPATH 已清空，绕开 safe-delete shim）
+  目标: tests/web/test_ws_auth.py
+
+...................................                                      [100%]
+35 passed in 9.31s
