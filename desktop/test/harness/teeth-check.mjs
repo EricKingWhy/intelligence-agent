@@ -162,41 +162,64 @@ const targets = [
 // to the shipped text), so the run fails: a harness that only prints them is
 // easy to read as green.
 let survivors = 0
-for (const target of targets) {
-  const nsh = join(desktop, 'installer', target.name)
-  const raw = readFileSync(nsh, 'utf8')
-  const original = raw.replace(/\r\n/g, '\n')
-  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
-  process.stdout.write(`\n=== ${target.name} sha256 = ${sha(raw)} eol=${JSON.stringify(eol)} ===\n`)
-  for (const [name, mutate] of Object.entries(target.mutations)) {
-    let mutated
-    try {
-      mutated = mutate(original)
-    } catch (error) {
-      process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
-      survivors += 1
-      continue
-    }
-    writeFileSync(nsh, mutated.replace(/\r?\n/g, eol))
-    let failed = false
-    let tail = ''
-    try {
-      await execute(process.execPath, ['--test', 'test/installer-scripts.test.mjs'], { cwd: desktop })
-    } catch (error) {
-      failed = true
-      tail = String(error.stdout || '')
-        .split('\n')
-        .filter((line) => /^not ok|^# fail/.test(line))
-        .slice(0, 4)
-        .join(' | ')
-    }
-    writeFileSync(nsh, raw)
-    if (failed === false) survivors += 1
-    process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
+// #919 review (F5): the restore is the harness's documented guarantee, so it
+// survives an interrupted run: a Ctrl-C or kill between the write and the
+// restore would otherwise leave the mutated text behind, and the next run would
+// read it as its baseline and "restore" to it.
+let current = null
+const restoreCurrent = () => {
+  if (current !== null && readFileSync(current.path, 'utf8') !== current.raw) {
+    writeFileSync(current.path, current.raw)
   }
-  const restored = readFileSync(nsh, 'utf8')
-  process.stdout.write(`restored ${target.name} sha256 = ${sha(restored)} identical=${restored === raw}\n`)
-  if (restored !== raw) survivors += 1
+}
+process.on('SIGINT', () => {
+  restoreCurrent()
+  process.exit(130)
+})
+process.on('SIGTERM', () => {
+  restoreCurrent()
+  process.exit(143)
+})
+try {
+  for (const target of targets) {
+    const nsh = join(desktop, 'installer', target.name)
+    const raw = readFileSync(nsh, 'utf8')
+    const original = raw.replace(/\r\n/g, '\n')
+    const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+    current = { path: nsh, raw }
+    process.stdout.write(`\n=== ${target.name} sha256 = ${sha(raw)} eol=${JSON.stringify(eol)} ===\n`)
+    for (const [name, mutate] of Object.entries(target.mutations)) {
+      let mutated
+      try {
+        mutated = mutate(original)
+      } catch (error) {
+        process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
+        survivors += 1
+        continue
+      }
+      writeFileSync(nsh, mutated.replace(/\r?\n/g, eol))
+      let failed = false
+      let tail = ''
+      try {
+        await execute(process.execPath, ['--test', 'test/installer-scripts.test.mjs'], { cwd: desktop })
+      } catch (error) {
+        failed = true
+        tail = String(error.stdout || '')
+          .split('\n')
+          .filter((line) => /^not ok|^# fail/.test(line))
+          .slice(0, 4)
+          .join(' | ')
+      }
+      writeFileSync(nsh, raw)
+      if (failed === false) survivors += 1
+      process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
+    }
+    const restored = readFileSync(nsh, 'utf8')
+    process.stdout.write(`restored ${target.name} sha256 = ${sha(restored)} identical=${restored === raw}\n`)
+    if (restored !== raw) survivors += 1
+  }
+} finally {
+  restoreCurrent()
 }
 process.stdout.write(`\nsurviving mutations = ${survivors}\n`)
 if (survivors > 0) process.exitCode = 1

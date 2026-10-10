@@ -232,14 +232,17 @@ export function validateNodeRuntimeLockfile(lock) {
   // carries a minor (`>=22.1`), and a pin like 22.0.x satisfies the major check
   // while still missing the runtime the client needs (#919 Q11). Parse the
   // floor and compare the tuple: below the floor's major fails outright, at it
-  // the minor decides.
+  // the minor decides. #919 review (S4): the pattern is anchored so a trailing
+  // patch or junk cannot ride along — `>=22.1.5` against a `22.1.0` pin was
+  // accepted, and `>=22x` parsed as `>=22` though semver rejects it.
   const engines = lock.requirements?.engines
-  const floor = /^\s*>=\s*(\d+)(?:\.(\d+))?/.exec(String(engines ?? ''))
+  const floor = /^\s*>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*$/.exec(String(engines ?? ''))
   if (floor === null) {
-    failNode(`requirements.engines must be a ">=<major>[.<minor>]" floor, got ${JSON.stringify(engines)}`)
+    failNode(`requirements.engines must be a ">=<major>[.<minor>[.<patch>]]" floor, got ${JSON.stringify(engines)}`)
   }
   const floorMajor = Number(floor[1])
   const floorMinor = floor[2] === undefined ? 0 : Number(floor[2])
+  const floorPatch = floor[3] === undefined ? 0 : Number(floor[3])
   if (major < floorMajor) {
     failNode(`node ${node.version} is below requirements.engines ${JSON.stringify(engines)} (tui engines)`)
   }
@@ -250,7 +253,12 @@ export function validateNodeRuntimeLockfile(lock) {
         `node.version ${String(node.version)} has no minor to hold the requirements.engines floor ${JSON.stringify(engines)}`,
       )
     }
-    if (minor < floorMinor) {
+    const [patchText] = String(node.version ?? '').split('.').slice(2)
+    const patch = patchText === undefined ? 0 : Number(patchText)
+    if (!Number.isInteger(patch)) {
+      failNode(`node.version ${String(node.version)} has a non-numeric patch`)
+    }
+    if (minor < floorMinor || (minor === floorMinor && patch < floorPatch)) {
       failNode(`node ${node.version} is below requirements.engines ${JSON.stringify(engines)} (tui engines)`)
     }
   }
@@ -1157,7 +1165,13 @@ function restoreFailureWindow(lines, trace, { start, end }, onPath, isRead) {
     }
   }
   if (read === -1) return null
-  const close = trace.closeOf.get(read) ?? end
+  // #919 review (F2): the read must name its own end. The raw `IfErrors` form
+  // has no `${EndIf}` to close it, and falling back to the site's end made the
+  // window unbounded — the refused branch's record then satisfied the rule the
+  // window exists for (measured). An unreadable window is reported by the
+  // caller, like a read the guard cannot name.
+  const close = trace.closeOf.get(read)
+  if (close === undefined) return null
   const divide = trace.dividers.find((divider) => divider.opener === read)?.line ?? -1
   return { from: read + 1, to: divide === -1 ? close : Math.min(close, divide) }
 }
@@ -1316,21 +1330,82 @@ export function unguardedBackupDelete(source, options = {}) {
       // item 3 — so this gate keys on the candidate, not on every non-sweep
       // site.
       const armsBackupName = (() => {
+        // The last copy into $iaDeleteCandidate above the prepare call decides
+        // what the target is built from (the Q2 reading, applied to the
+        // source). #919 review (F1): NSIS strings take all three quote forms
+        // and the bare variable is the same copy (measured on 3.0.4.1), so the
+        // earlier double-quote-only match read three legal copies as "no
+        // candidate". The rollback's own partial install is the one source that
+        // skips the requirement (#904 item 3); everything else — the backup
+        // spelling, a register, a joined name, a copy the guard cannot read —
+        // is held to it (fail-closed).
+        let source
         for (let j = blockStart; j < prepareIndex; j += 1) {
           if (!onDeletePath(j)) continue
-          if (/^\s*StrCpy\s+\$iaDeleteCandidate\s+"\$iaBackupDirectory"\s*$/i.test(lines[j])) return true
+          if (!/^\s*StrCpy\s+\$iaDeleteCandidate\b/i.test(lines[j])) continue
+          const copy =
+            /^\s*StrCpy\s+\$iaDeleteCandidate\s+(?:(['"`])(\S+)\1|(\S+))\s*$/i.exec(lines[j])
+          source = copy === null ? null : copy[2] ?? copy[3]
         }
-        return false
+        if (source === undefined) return false
+        return !/^\$iaFinalDirectory$/i.test(source ?? '')
       })()
       // #919 Q2: the flag is read when iaPrepareDelete runs, so the LAST
       // assignment above the call is the one that decides. The window used to
       // be satisfied by any `"1"` in it, so arming and then turning the flag
       // off again right after passed the whole guard and suite (measured).
+      // #919 review (F1): the value takes any quote form or none — a
+      // single-quoted `'0'` disarmed the site while the old match read the
+      // line as not-an-assignment — and an assignment whose value the guard
+      // cannot read (a register source) may be the disarm, so it cannot count
+      // as an arming: it is carried as `null` and fails the `'1'` test below.
       const arming = []
       for (let j = blockStart; j < prepareIndex; j += 1) {
         if (!onDeletePath(j)) continue
-        const assignment = /^\s*StrCpy\s+\$iaDeleteShapeCheck\s+"([01])"\s*$/i.exec(lines[j])
-        if (assignment !== null) arming.push({ index: j, value: assignment[1] })
+        if (!/^\s*StrCpy\s+\$iaDeleteShapeCheck\b/i.test(lines[j])) continue
+        const assignment =
+          /^\s*StrCpy\s+\$iaDeleteShapeCheck\s+(?:(['"`])([01])\1|([01]))\s*$/i.exec(lines[j])
+        arming.push({ index: j, value: assignment === null ? null : (assignment[2] ?? assignment[3]) })
+      }
+      // #905's ruling is to fail closed on macro insertion, and the arming
+      // window is where it matters most: an `!insertmacro` on the delete's path
+      // expands statements this text does not show, so a body that writes the
+      // candidate or the flag leaves the delete running with a state no line
+      // above reads (measured: a disarm inserted between the arming and the
+      // prepare call passed the whole guard and suite — #919 review F1, A4).
+      // The lookup is name-keyed and resolves nested `!insertmacro`s; a macro
+      // this text does not define is the include boundary, which the guard does
+      // not follow (round-5 item 4) and so counts as writing them.
+      const macroBodies = new Map()
+      for (const range of macroRanges) {
+        const name = /^\s*!macro\s+(\S+)/i.exec(lines[range.start])?.[1]
+        if (name !== undefined) macroBodies.set(name.toLowerCase(), lines.slice(range.start + 1, range.end))
+      }
+      const writesDeleteVars = (name, seen = new Set()) => {
+        if (seen.has(name)) return false
+        seen.add(name)
+        const body = macroBodies.get(name)
+        if (body === undefined) return true
+        return body.some((line) => {
+          if (/\$iaDeleteCandidate\b|\$iaDeleteShapeCheck\b/i.test(line)) return true
+          const nested = INSERT_MACRO.exec(line)?.[1]
+          return nested !== undefined && writesDeleteVars(nested.toLowerCase(), seen)
+        })
+      }
+      const armedByInsert = []
+      for (let j = blockStart; j < prepareIndex; j += 1) {
+        if (!onDeletePath(j)) continue
+        const insert = INSERT_MACRO.exec(lines[j])
+        if (insert !== null && writesDeleteVars(insert[1].toLowerCase())) {
+          armedByInsert.push({ index: j, name: insert[1] })
+        }
+      }
+      const hiddenInsert = armedByInsert[0]
+      if (hiddenInsert !== undefined) {
+        problems.push({
+          line: i + 1,
+          what: `!insertmacro ${hiddenInsert.name} at line ${hiddenInsert.index + 1} expands inside the arming window and writes $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)`,
+        })
       }
       const lastArmed = arming[arming.length - 1]
       const mustArm = policy === 'sweep' || armsBackupName
@@ -1470,6 +1545,10 @@ export function unguardedBackupDelete(source, options = {}) {
     // #919 Q3: the sweep's exit code is found here so it can join the
     // dead-branch scan below like every other guarded statement (-1 elsewhere).
     let exitCodeIndex = -1
+    // #919 review (S2): the declined branch's exit code belongs to the scan for
+    // the same reason — a `SetErrorLevel 2` the declined branch never reaches
+    // still satisfied the declined-exit rule.
+    let declinedExitIndex = -1
     if (wants.sweepReport) {
       // The uninstaller sweep: the application's registry key is being removed,
       // so the record is the report and the exit code. Enumerating by name shape
@@ -1503,33 +1582,80 @@ export function unguardedBackupDelete(source, options = {}) {
       // success label used to pass every check (measured).
       const promptOffset = block.findIndex((line) => /\$\(iaLeftoverSweep\)/.test(line))
       if (promptOffset !== -1) {
-        const cancelTarget = /IDCANCEL\s+(\S+)/i.exec(block[promptOffset])?.[1]
+        // The prompt's branch table is `<action> <label>` pairs after the
+        // `/SD <default>` marker: `MessageBox … /SD IDOK IDOK iaSweepDelete
+        // IDCANCEL iaSweepDeclined`. The first action token after `/SD` is the
+        // silent default, not a branch — `/IDOK\s+(\S+)/` paired that marker
+        // with the next action keyword and read the IDOK target as the literal
+        // "IDOK" (measured, #919 review). String contents are blanked before
+        // tokenizing, so the prompt text cannot contribute tokens.
+        const tokens = outsideStrings(block[promptOffset]).trim().split(/\s+/)
+        const ACTION = /^(IDOK|IDCANCEL|IDABORT|IDRETRY|IDIGNORE|IDYES|IDNO|IDCLOSE)$/i
+        const branchLabels = new Map()
+        for (let k = 0; k + 1 < tokens.length; k += 1) {
+          if (tokens[k - 1] === '/SD') continue
+          if (ACTION.test(tokens[k]) && !ACTION.test(tokens[k + 1])) {
+            branchLabels.set(tokens[k].toUpperCase(), tokens[k + 1])
+          }
+        }
+        const cancelTarget = branchLabels.get('IDCANCEL')
         if (cancelTarget === undefined) {
           problems.push({
             line: blockStart + promptOffset + 1,
             what: 'the sweep prompt has no IDCANCEL branch — a UI uninstall cannot decline the sweep',
           })
         } else {
-          const declinedLabel = new RegExp(
-            `^\\s*${cancelTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*$`,
-            'i',
-          )
-          const labelOffset = block.findIndex((line) => declinedLabel.test(line))
-          const branchEnd = (() => {
+          const declaredTarget = (target) => new RegExp(`^\\s*${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*$`, 'i')
+          const labelOffset = block.findIndex((line) => declaredTarget(cancelTarget).test(line))
+          const nextLabelOffset = (() => {
             for (let j = labelOffset + 1; j < block.length; j += 1) {
-              if (/^\s*[A-Za-z0-9_.]+:\s*$/.test(block[j])) return blockStart + j - 1
+              if (/^\s*[A-Za-z0-9_.]+:\s*$/.test(block[j])) return j
             }
-            return blockEnd
+            return -1
           })()
+          const branchEnd = nextLabelOffset === -1 ? blockEnd : blockStart + nextLabelOffset - 1
           const declinedExit =
             labelOffset === -1
               ? -1
               : keptExitLevel(lines, blockStart + labelOffset, branchEnd, onDeletePath)
+          declinedExitIndex = declinedExit
           if (declinedExit === -1) {
             problems.push({
               line: labelOffset === -1 ? blockStart + promptOffset + 1 : blockStart + labelOffset + 1,
               what: 'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success',
             })
+          }
+          // #919 review (F3): setting the exit code is not enough — the branch
+          // has to keep. Control that lands above the delete statement runs
+          // into it again (the delete pass is the region the prompt's IDOK
+          // names), so a `Goto` to a label declared above the delete, a
+          // fall-through to the next label when that label sits above it, or
+          // the delete statement itself inside the branch span is reported.
+          // A jump that lands between such a label and the delete would be
+          // reported too: the declined contract is "keep only", so the
+          // fail-closed direction is the right one.
+          if (labelOffset !== -1) {
+            const body = block.slice(labelOffset + 1, nextLabelOffset === -1 ? block.length : nextLabelOffset)
+            const deleteOffset = i - blockStart
+            const labelOffsetOf = (target) => block.findIndex((line) => declaredTarget(target).test(line))
+            const jumpsIntoDelete = body.some((line) => {
+              const jump = /^\s*Goto\s+(\S+)\s*$/i.exec(outsideStrings(line))
+              if (jump === null) return false
+              const landing = labelOffsetOf(jump[1])
+              return landing !== -1 && landing < deleteOffset
+            })
+            const lastMeaningful = body.filter((line) => stripNsisComments(line).trim() !== '').pop()
+            const fallsThrough =
+              nextLabelOffset !== -1 &&
+              nextLabelOffset < deleteOffset &&
+              (lastMeaningful === undefined || !/^\s*(Goto|Return|Abort|Quit)\b/i.test(outsideStrings(lastMeaningful)))
+            const coversDelete = body.some((line) => deleteLine.test(line))
+            if (jumpsIntoDelete || fallsThrough || coversDelete) {
+              problems.push({
+                line: blockStart + labelOffset + 1,
+                what: 'the declined sweep branch can still reach the delete pass — a declined sweep must only keep',
+              })
+            }
           }
         }
       }
@@ -1617,6 +1743,7 @@ export function unguardedBackupDelete(source, options = {}) {
       ...readHits.map((hit) => ({ line: hit.index, label: `the ${ERRORS} read` })),
       ...(recordHit === undefined ? [] : [{ line: recordHit.index, label: 'the leftover record' }]),
       ...(exitCodeIndex === -1 ? [] : [{ line: exitCodeIndex, label: 'the exit code' }]),
+      ...(declinedExitIndex === -1 ? [] : [{ line: declinedExitIndex, label: 'the declined exit code' }]),
       ...(clearIndex === -1 ? [] : [{ line: i + 1 + clearIndex, label: 'iaClearBackupDir' }]),
     ]
     const lastGuarded = Math.max(...guarded.map((target) => target.line))

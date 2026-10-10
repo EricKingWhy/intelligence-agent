@@ -94,8 +94,30 @@ describe('node runtime lockfile pin', () => {
     spelled.requirements.engines = '^22.1'
     assert.throws(
       () => validateNodeRuntimeLockfile(spelled),
-      /requirements\.engines must be a ">=<major>\[\.<minor>\]" floor/,
+      /requirements\.engines must be a ">=<major>\[\.<minor>\[\.<patch>\]\]" floor/,
     )
+  })
+
+  it('holds the pin against a patch floor and refuses a floor it cannot read (#919 review S4)', () => {
+    // The floor may carry a patch (`>=22.1.5`); with the pattern unanchored it
+    // was read as `>=22.1` and a 22.1.0 pin passed, and `>=22x` was read as
+    // `>=22` though semver rejects it (both measured). A patch floor with a pin
+    // that has no patch is held at 0, the fail-closed reading.
+    const patchFloor = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    patchFloor.requirements.engines = '>=22.1.5'
+    patchFloor.node.version = '22.1.0'
+    assert.throws(
+      () => validateNodeRuntimeLockfile(patchFloor),
+      /node 22\.1\.0 is below requirements\.engines ">=22\.1\.5"/,
+    )
+    const atPatch = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    atPatch.requirements.engines = '>=22.1.5'
+    atPatch.node.version = '22.1.5'
+    validateNodeRuntimeLockfile(atPatch)
+
+    const junk = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    junk.requirements.engines = '>=22x'
+    assert.throws(() => validateNodeRuntimeLockfile(junk), /requirements\.engines must be a/)
   })
 
   it('rejects a plaintext url and a malformed hash', () => {

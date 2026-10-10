@@ -622,6 +622,25 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '!insertmacro iaPromoteApplication',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(casedBlock), [])
+    // The closing directive is case-insensitive for the block scan too (#919
+    // review F1): `fUNCTIONEND` ends the block, so a directive below it is not
+    // part of the delete's block. Measured: with CLOSES_FUNCTION made
+    // case-sensitive the closer is not recognized, the block runs on, and this
+    // fixture reported the `!ifdef` below it as covering the delete.
+    const recasedCloser = [
+      'Function iaPromoteApplication',
+      ...PREPARE.map((line) => `  ${line}`),
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      '  fUNCTIONEND',
+      '!ifdef NOPE',
+      '!endif',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(recasedCloser), [])
     // Fail-closed on the wrapper that a block-scoped scan cannot see: a
     // conditional opened above the enclosing Function and closed after its
     // `FunctionEnd` is indistinguishable from a branch that drops the block —
@@ -1682,6 +1701,52 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         },
       ],
     )
+    // #919 review (F3): setting the exit code is not enough — the branch has to
+    // stop there. `Goto` into the prompt's IDOK target walks a declined sweep
+    // straight into the delete pass, and a branch whose last meaningful line
+    // just falls through to the next label does the same when that label is the
+    // target (the shipped layout). Both used to pass every check (measured).
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('  Goto iaSweepDone', '  Goto iaSweepDelete'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 6,
+          what: 'the declined sweep branch can still reach the delete pass — a declined sweep must only keep',
+        },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('  Goto iaSweepDone\n', ''), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 6,
+          what: 'the declined sweep branch can still reach the delete pass — a declined sweep must only keep',
+        },
+      ],
+    )
+    // #919 review (S2): the declined branch's exit code is a guarded statement
+    // too. Inside a constant-false branch it never runs, and without the
+    // dead-branch scan it satisfied the declined-exit rule (measured) — the
+    // same hole Q3 closed for the main exit code.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped(
+          '  SetErrorLevel 2\n  Goto iaSweepDone',
+          '  ${If} 1 == 0\n    SetErrorLevel 2\n  ${EndIf}\n  Goto iaSweepDone',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [
+        {
+          line: 19,
+          what: 'the constant-false condition `${If} 1 == 0` covers the declined exit code — that code can never run',
+        },
+      ],
+    )
     const armingMessage =
       'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built'
     // #919 Q3: the arming has to run on the path the prepare call (and the
@@ -1804,6 +1869,168 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
   })
 
+  it('reads every StrCpy spelling of the candidate and the arming (#919 review F1)', () => {
+    // Measured on makensis 3.0.4.1: double quotes, single quotes, backticks and
+    // no quotes at all store the same value, so the candidate copy and the
+    // arming are the same statement in any of the four forms. The rule knew only
+    // the double-quoted spelling, and a site that wrote either line another
+    // legal way read as "no candidate, nothing to arm" — the promote fixture
+    // below passed with the flag off (measured).
+    const spelling = (quote) =>
+      [
+        'Function iaPromoteApplication',
+        `  StrCpy $iaDeleteCandidate ${quote}$iaBackupDirectory${quote}`,
+        '  StrCpy $iaDeleteBase "$iaFinalDirectory"',
+        `  StrCpy $iaDeleteShapeCheck ${quote}1${quote}`,
+        '  Call iaPrepareDelete',
+        '  StrCmp $iaDeleteStatus "ok" 0 iaPromoteDeleteSkipped',
+        '  ClearErrors',
+        `  RMDir /r "$iaDeleteTarget"`,
+        ...GUARDED_TAIL.map((line) => `  ${line}`),
+        'FunctionEnd',
+      ].join('\n')
+    for (const quote of ['"', "'", '`', '']) {
+      assert.deepEqual(unguardedBackupDelete(spelling(quote)), [], `quote form ${JSON.stringify(quote)}`)
+    }
+    // The miss the widening closes: both lines single-quoted, flag off — the old
+    // match saw no candidate and no assignment, so the delete passed unchecked.
+    assert.deepEqual(unguardedBackupDelete(spelling("'").replace("'1'", "'0'")), [
+      {
+        line: 8,
+        what: 'the delete of a $iaBackupDirectory candidate does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+      },
+    ])
+    // The read's other half: $iaFinalDirectory is the one candidate source that
+    // may skip the arming (#904 item 3), and that reading only survives while
+    // every legal spelling of the copy is recognized. With the double-quoted
+    // spelling alone the other three read as a copy the guard cannot recognize —
+    // fail-closed — and the rollback's own deliberate "0" is reported as a
+    // missing arming.
+    const exempt = (quote) =>
+      spelling(quote)
+        .replace(
+          `StrCpy $iaDeleteCandidate ${quote}$iaBackupDirectory${quote}`,
+          `StrCpy $iaDeleteCandidate ${quote}$iaFinalDirectory${quote}`,
+        )
+        .replace(
+          `StrCpy $iaDeleteShapeCheck ${quote}1${quote}`,
+          `StrCpy $iaDeleteShapeCheck ${quote}0${quote}`,
+        )
+    for (const quote of ['"', "'", '`', '']) {
+      assert.deepEqual(unguardedBackupDelete(exempt(quote)), [], `exempt source spelled with ${JSON.stringify(quote)}`)
+    }
+    // The insertion spelling of the same bypass (#919 review F1, A4): #905's
+    // ruling is to fail closed on macro insertion, and the window is where it
+    // matters — an `!insertmacro` on the prepare call's path expands statements
+    // the window's text does not show, so a body that writes the flag leaves the
+    // delete running disarmed while every line above still reads like an arming.
+    const withInsert = (defs, name) =>
+      [
+        defs.join('\n'),
+        spelling('"').replace('  Call iaPrepareDelete', `  !insertmacro ${name}\n  Call iaPrepareDelete`),
+      ].join('\n')
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withInsert(
+          ['!macro iaForeignDisarm', "  StrCpy $iaDeleteShapeCheck '0'", '!macroend'],
+          'iaForeignDisarm',
+        ),
+      ),
+      [
+        {
+          line: 12,
+          what: "!insertmacro iaForeignDisarm at line 8 expands inside the arming window and writes $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+    // A nested insertion and an insertion of a macro this text does not define
+    // (the include boundary the guard does not follow) are the same unreadable
+    // state, so both fail closed.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withInsert(
+          [
+            '!macro iaOuterStep',
+            '  !insertmacro iaInnerDisarm',
+            '!macroend',
+            '!macro iaInnerDisarm',
+            '  StrCpy $iaDeleteShapeCheck "0"',
+            '!macroend',
+          ],
+          'iaOuterStep',
+        ),
+      ),
+      [
+        {
+          line: 15,
+          what: "!insertmacro iaOuterStep at line 11 expands inside the arming window and writes $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        spelling('"').replace('  Call iaPrepareDelete', '  !insertmacro iaFromAnInclude\n  Call iaPrepareDelete'),
+      ),
+      [
+        {
+          line: 9,
+          what: "!insertmacro iaFromAnInclude at line 5 expands inside the arming window and writes $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+    // The rule is keyed to what the body writes, not to insertions as such: the
+    // shipped rollback window inserts iaClearBackupDir (a DeleteRegValue) above
+    // its prepare call and has to stay green.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withInsert(
+          ['!macro iaClearBackupDirLike', '  DeleteRegValue HKCU "Software\\\\x" "IaBackupDir"', '!macroend'],
+          'iaClearBackupDirLike',
+        ),
+      ),
+      [],
+    )
+    // A copy or a value the guard cannot read is not evidence of anything: a
+    // register source may hold the backup path or the disarm, so both fail
+    // closed (#919 review F1: these register spellings passed the whole guard
+    // before — measured).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        spelling('"').replace('  Call iaPrepareDelete', '  StrCpy $iaDeleteShapeCheck $0\n  Call iaPrepareDelete'),
+      ),
+      [
+        {
+          line: 9,
+          what: 'the delete of a $iaBackupDirectory candidate does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(spelling('"').replace('"$iaBackupDirectory"', '$0').replace('"1"', '"0"')),
+      [
+        {
+          line: 8,
+          what: 'the delete of a $iaBackupDirectory candidate does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        },
+      ],
+    )
+    // A copy line the guard cannot even read (a trailing operand makes it a
+    // different statement) is the same fail-closed direction, not "no copy".
+    assert.deepEqual(
+      unguardedBackupDelete(
+        spelling('"')
+          .replace('"$iaBackupDirectory"', '"$iaBackupDirectory" 3')
+          .replace('"1"', '"0"'),
+      ),
+      [
+        {
+          line: 8,
+          what: 'the delete of a $iaBackupDirectory candidate does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        },
+      ],
+    )
+  })
+
   it('flags a recursive delete that is not the prepared target (#904, round 6)', () => {
     // Every other rule here binds `RMDir /r "$iaDeleteTarget"`; a second
     // recursive delete of anything else — a path read from the registry, say —
@@ -1897,6 +2124,37 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         '  ${Else}\n    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory\n  ${EndIf}',
       )
     assert.deepEqual(unguardedBackupDelete(elseOnly, { sitePolicies: DELETE_SITE_POLICIES }), [
+      {
+        line: 7,
+        what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
+      },
+    ])
+    // #919 review (F2): the window has to name its own end. The raw `IfErrors`
+    // jump form has no `${EndIf}` to close it, and the old fallback to the
+    // site's end left the window unbounded — the refused branch's own record
+    // anywhere below satisfied the rule the window exists for. Measured: this
+    // fixture passed every check before the fix.
+    const rawJump = [
+      'Function iaRollbackApplication',
+      '  StrCpy $iaDeleteCandidate "$iaFinalDirectory"',
+      '  StrCpy $iaDeleteShapeCheck "0"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaRollbackRefused',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      '  ClearErrors',
+      '  Rename $iaBackupDirectory $iaFinalDirectory',
+      '  IfErrors 0 iaRollbackRestored',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      'iaRollbackRestored:',
+      '  !insertmacro iaClearBackupDir',
+      '  Return',
+      'iaRollbackRefused:',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(rawJump, { sitePolicies: DELETE_SITE_POLICIES }), [
       {
         line: 7,
         what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',

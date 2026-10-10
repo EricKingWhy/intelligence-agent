@@ -12,13 +12,14 @@
 ;   /DPROBE_RESULT=<reading file>
 ;
 ; The two modes are separate runs on purpose. The mimic leg recurses until the
-; stack dies at some depth, and a run that dies cannot write a reading
+; stack dies at some depth, and a run that dies cannot write its line
 ; afterwards. A first version of this probe wrote progress from inside the
 ; recursion with FileOpen "a", and the append writes landed at the file's
 ; BEGINNING, overwriting the first reading (measured, #919 Q9); this version
-; writes nothing during the recursion, so a fresh result file is either a
-; completed run's single line or absent, and the runner reads the outcome from
-; the exit code instead of from mid-flight progress.
+; writes nothing during the recursion. The result file is opened before the
+; recursion, so a crashed run leaves an empty file (measured: the 1400 rung
+; reads back as no lines at all, not as absent), and the runner reads the
+; outcome from the exit code instead of from mid-flight progress.
 ;
 ; Measurements (the readings the sweep's depth valve and path forms rest on):
 ;   1  FindFirst through "\\?\<dir>" past the 327-char boundary the leftover

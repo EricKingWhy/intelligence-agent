@@ -11,8 +11,9 @@
 #   mimic (one run per depth in the ladder, one file each)
 #     3  the scan's own load (4 pushes + one Call per level) recursed to the
 #        depth; each run is classified by its exit code, because a run whose
-#        stack dies cannot write a reading afterwards. 512 is the valve in
-#        iaScanReparsePointsBody; the higher rungs bracket the stack's own
+#        stack dies cannot write its line afterwards (the result file is
+#        already open, so the crashed rung reads back empty). 512 is the valve
+#        in iaScanReparsePointsBody; the higher rungs bracket the stack's own
 #        limit, so the ladder says how much headroom the valve has.
 #
 # Scratch state lives under %TEMP%\ia-limits-probe-* and is removed at the end
@@ -169,7 +170,21 @@ foreach ($step in $ladder) {
     $text = (Get-Content -LiteralPath $depthReading) -join ' '
   }
   $verdict = 'FAIL'
-  if ($actual -eq $step.Expect) { $verdict = 'PASS' } else { $mismatch = $true }
+  if ($actual -ne $step.Expect) {
+    $mismatch = $true
+  } elseif ($step.Expect -eq 'completed') {
+    # #919 review (F4): exit 0 alone would also pass a recursion that returned
+    # early, and the rung only measures the real per-level load (4 pushes + one
+    # Call) when the ladder ran to the depth. The probe prints the depth it
+    # actually reached, so a completed rung has to show it.
+    if ($text -match ("mimic_completed=" + $step.Depth + "(?!\d)")) {
+      $verdict = 'PASS'
+    } else {
+      $mismatch = $true
+    }
+  } else {
+    $verdict = 'PASS'
+  }
   Write-Host ("mimic_check depth={0} exit={1} expected={2} actual={3} {4} reading=[{5}]" -f $step.Depth, $run.ExitCode, $step.Expect, $actual, $verdict, $text)
 }
 

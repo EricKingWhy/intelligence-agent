@@ -3,23 +3,35 @@
 Opt-in checks that `npm test` does not run: the test script only globs
 `test/*.test.ts` and `test/*.test.mjs`, and these mutate files in place.
 
-Both teeth scripts mutate their source files in place, run
-`node --test test/installer-scripts.test.mjs`, restore the original bytes and
-verify the restore byte-for-byte. Every mutation must turn the suite red; a
-survivor is a hole in the assertions, and the run exits non-zero when one
-remains (or when the restore is not byte-identical). `teeth-check.mjs` walks
-its list once per installer script it covers.
+Both teeth scripts mutate their source files in place, restore the original
+bytes and verify the restore byte-for-byte (an interrupted run restores on
+SIGINT/SIGTERM and in a `finally`, so a killed run cannot leave the mutated
+text behind as the next run's baseline). Every mutation must turn the suite
+red; a survivor is a hole in the assertions, and the run exits non-zero when
+one remains (or when the restore is not byte-identical). `teeth-check.mjs`
+walks its list once per installer script it covers and runs
+`node --test test/installer-scripts.test.mjs`.
+`teeth-check-guards.mjs` runs both guard test files —
+`test/installer-scripts.test.mjs` and `test/installer-node-runtime.test.mjs` —
+because the node-runtime lock rules (#919 Q11) live in the second one.
 
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
 | `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (4) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 11/11 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `909e3a16…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) | 59/59 red, 0 survivors, restore identical (sha256 `944a0908…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) | 69/69 red, 0 survivors, restore identical (sha256 `6f3f5519…`) |
 
 The #919 batch added five mutations to `teeth-check.mjs` (the failed delete's
 exit code plus the four installer.nsh sweep rules — the first entries that do
 not rewrite `installer-directories.nsh`) and thirteen to
-`teeth-check-guards.mjs`; both were re-run from the checkout on 2026-10-10
-with 0 survivors and byte-identical restores.
+`teeth-check-guards.mjs`; the #919 review disposition added ten more to the
+guard harness (the candidate and arming spellings, the values the guard cannot
+read, the `!insertmacro` in the arming window, the declined branch's reach, the
+unclosed restore window, the declined exit in the dead-branch scan, the engines
+floor anchor and patch). Both were re-run from the checkout on 2026-10-10
+with 0 survivors and byte-identical restores. The disposition's first
+`teeth-check-guards.mjs` run also caught a real gap in the disposition itself:
+the candidate-copy mutation survived (every fixture armed with `"1"`), which is
+why the exemption's four spellings are asserted with the flag off.
 
 Run from `desktop/`:
 
@@ -139,10 +151,15 @@ recurses the scan's per-level runtime load (4 pushes + one Call — the shape of
 `iaScanReparsePointsBody`) to the depth given by `/DPROBE_CALL_MAX` and writes
 a single line once the ladder returns. The runner runs the readings once and
 the mimic once per ladder depth, and grades each mimic run by its exit code,
-because a run whose stack dies cannot write a reading afterwards. (A first
+because a run whose stack dies cannot write its line afterwards. (A first
 version wrote progress from inside the recursion with `FileOpen "a"`; the
 append writes landed at the file's beginning and overwrote the first reading,
-which is why this one writes nothing during the recursion.)
+which is why this one writes nothing during the recursion. The result file is
+opened before the recursion, so a crashed rung reads back empty rather than
+absent.) Each completed rung's exit 0 must come with the depth it printed
+(`mimic_completed=<depth>`): exit 0 alone would also pass a recursion that
+returned early, and the rung only measures the real per-level load when the
+ladder ran to the depth.
 
 | reading | value | what it decides |
 | --- | --- | --- |

@@ -67,8 +67,15 @@ const swapAfter = (marker, mutate) => (source) => {
   return source.replace(old, replaced)
 }
 
-/** Drop the trailing case-insensitive flag of a regex literal line. */
-const dropCaseFlag = (line) => line.replace(/\/i$/, '')
+/**
+ * Drop the trailing case-insensitive flag of a regex literal line.
+ *
+ * The trailing `/i` is the closing slash plus the flag: removing both leaves an
+ * unterminated literal, and the suite then dies of a SyntaxError instead of the
+ * rule under test (measured in the #919 review — three mutations did exactly
+ * that). Removing only the flag keeps the literal terminated.
+ */
+const dropCaseFlag = (line) => line.replace(/\/i$/, '/')
 /** Analyze one quote style only, like a single-quote-blind scan would. */
 const oneQuoteStyle = (line) => line.replace(/\(\['"`\]\)/g, '(")')
 
@@ -365,46 +372,126 @@ const mutations = {
   // validator and the whole suite (measured in #919). The mutation reverts the
   // engines tuple comparison to that shape.
   'node engines minor floor dropped (#919 Q11)': swap(
-    '    if (minor < floorMinor) {',
+    '    if (minor < floorMinor || (minor === floorMinor && patch < floorPatch)) {',
     '    if (false) {',
+  ),
+
+  // --- rules the #919 two-axis review added or tightened ---
+  // F1: the candidate copy and the arming value take any of the three quote
+  // forms or none (measured on 3.0.4.1), so each regex accepts all four. The
+  // mutations re-narrow one of them to the double-quoted spelling; the
+  // re-spelled fixtures are what has to catch it.
+  'candidate copy accepts one quote style only (#919 review F1)': onLine(
+    (line) => line.trimStart().startsWith('/^\\s*StrCpy\\s+\\$iaDeleteCandidate'),
+    oneQuoteStyle,
+  ),
+  'arming value accepts one quote style only (#919 review F1)': onLine(
+    (line) => line.trimStart().startsWith('/^\\s*StrCpy\\s+\\$iaDeleteShapeCheck'),
+    oneQuoteStyle,
+  ),
+  // F1, fail-closed half: an assignment whose value the guard cannot read must
+  // not pass as "no assignment" (the register spelling passed the whole guard
+  // before, measured).
+  'arming value the guard cannot read ignored again (#919 review F1)': swap(
+    "        arming.push({ index: j, value: assignment === null ? null : (assignment[2] ?? assignment[3]) })",
+    '        if (assignment !== null) arming.push({ index: j, value: assignment[2] ?? assignment[3] })',
+  ),
+  'non-backup candidate sources arms nothing again (#919 review F1)': swap(
+    "        return !/^\\$iaFinalDirectory$/i.test(source ?? '')",
+    "        return /^\\$iaBackupDirectory$/i.test(source ?? '')",
+  ),
+  // F1/A4: an `!insertmacro` in the arming window is a write the guard cannot
+  // read, so the rule refuses wherever the inserted body touches the candidate
+  // or the flag. A future edit that drops that refusal reopens the disarm the
+  // review measured green.
+  'macro insertions in the arming window ignored again (#919 review F1/A4)': swap(
+    '      if (hiddenInsert !== undefined) {',
+    '      if (false) {',
+  ),
+  // F3: the declined branch may not reach the delete pass — a `Goto` into the
+  // prompt's IDOK target, or a fall-through into it.
+  'declined branch may reach the delete pass again (#919 review F3)': swap(
+    '            if (jumpsIntoDelete || fallsThrough || coversDelete) {',
+    '            if (false) {',
+  ),
+  // F2: an unclosed read (the raw `IfErrors` form has no `${EndIf}`) must make
+  // the window unreadable and report, not fall back to the site's end.
+  'unclosed restore window falls back to the site end again (#919 review F2)': swap(
+    '  const close = trace.closeOf.get(read)\n  if (close === undefined) return null',
+    '  const close = trace.closeOf.get(read) ?? end',
+  ),
+  // S2: the declined branch's exit code joins the dead-branch scan like the
+  // main one, so a `SetErrorLevel 2` it never reaches does not count.
+  'declined exit left out of the dead-branch scan (#919 review S2)': swap(
+    "      ...(declinedExitIndex === -1 ? [] : [{ line: declinedExitIndex, label: 'the declined exit code' }]),\n",
+    '',
+  ),
+  // S4: the engines floor is anchored and may carry a patch; unanchored, a
+  // `>=22.1.5` floor was read as `>=22.1` and `>=22x` as `>=22`.
+  'engines floor unanchored again (#919 review S4)': swap(
+    '\\s*$/.exec(String(engines ?? \'\'))',
+    '/.exec(String(engines ?? \'\'))',
+  ),
+  'engines patch floor dropped (#919 review S4)': swap(
+    "const floor = /^\\s*>=\\s*(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?\\s*$/",
+    "const floor = /^\\s*>=\\s*(\\d+)(?:\\.(\\d+))?\\s*$/",
   ),
 }
 
 let survivors = 0
-for (const [name, mutate] of Object.entries(mutations)) {
-  let mutated
-  try {
-    mutated = mutate(original)
-  } catch (error) {
-    process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
-    survivors += 1
-    continue
+// #919 review (F5): the restore is the harness's documented guarantee, so it
+// survives an interrupted run: a Ctrl-C or kill between the write and the
+// restore would otherwise leave the guard mutated, and the next run would read
+// that text as its baseline and "restore" to it.
+const restore = () => {
+  if (readFileSync(guardPath, 'utf8') !== raw) writeFileSync(guardPath, raw)
+}
+process.on('SIGINT', () => {
+  restore()
+  process.exit(130)
+})
+process.on('SIGTERM', () => {
+  restore()
+  process.exit(143)
+})
+try {
+  for (const [name, mutate] of Object.entries(mutations)) {
+    let mutated
+    try {
+      mutated = mutate(original)
+    } catch (error) {
+      process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
+      survivors += 1
+      continue
+    }
+    if (mutated === original) {
+      process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: replacement changed nothing\n`)
+      survivors += 1
+      continue
+    }
+    writeFileSync(guardPath, mutated.replace(/\r?\n/g, eol))
+    let failed = false
+    let tail = ''
+    try {
+      await execute(
+        process.execPath,
+        ['--test', 'test/installer-scripts.test.mjs', 'test/installer-node-runtime.test.mjs'],
+        { cwd: desktop },
+      )
+    } catch (error) {
+      failed = true
+      tail = String(error.stdout || '')
+        .split('\n')
+        .filter((line) => /^not ok|^# fail/.test(line))
+        .slice(0, 3)
+        .join(' | ')
+    }
+    writeFileSync(guardPath, raw)
+    if (failed === false) survivors += 1
+    process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
   }
-  if (mutated === original) {
-    process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: replacement changed nothing\n`)
-    survivors += 1
-    continue
-  }
-  writeFileSync(guardPath, mutated.replace(/\r?\n/g, eol))
-  let failed = false
-  let tail = ''
-  try {
-    await execute(
-      process.execPath,
-      ['--test', 'test/installer-scripts.test.mjs', 'test/installer-node-runtime.test.mjs'],
-      { cwd: desktop },
-    )
-  } catch (error) {
-    failed = true
-    tail = String(error.stdout || '')
-      .split('\n')
-      .filter((line) => /^not ok|^# fail/.test(line))
-      .slice(0, 3)
-      .join(' | ')
-  }
-  writeFileSync(guardPath, raw)
-  if (failed === false) survivors += 1
-  process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
+} finally {
+  restore()
 }
 
 const restored = readFileSync(guardPath, 'utf8')
