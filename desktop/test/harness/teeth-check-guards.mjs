@@ -322,6 +322,19 @@ const mutations = {
     '',
   ),
 
+  // Q7: the rollback's record was pinned to the restore-failure branch instead
+  // of the block. Each hole gets a mutation and its own fixture: a record that
+  // lives only in the refused branch, and one that sits in the `${Else}` half
+  // of the failure branch (both measured green in #919).
+  'rollback record counted anywhere in the block again (#919 Q7)': swap(
+    '          .slice(failure.from, failure.to)',
+    '          .slice(blockStart, blockEnd + 1)',
+  ),
+  'rollback record free to sit past the failure branch (#919 Q7)': swap(
+    '  return { from: read + 1, to: divide === -1 ? close : Math.min(close, divide) }',
+    '  return { from: read + 1, to: close }',
+  ),
+
   // The node runtime lock validator compared the pin's major against
   // minimumMajor only; a 22.0.x pin (below the TUI's ">=22.1" floor) passed the
   // validator and the whole suite (measured in #919). The mutation reverts the

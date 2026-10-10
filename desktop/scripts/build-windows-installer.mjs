@@ -1101,6 +1101,39 @@ function deadBranchText(line) {
 }
 
 /**
+ * The window of a rollback's restore-failure record: from the `${Errors}` read
+ * that follows the last `Rename` to the end of that read's branch — its
+ * `${Else}`-family divider or closing `${EndIf}` — as `{ from, to }`, or `null`
+ * when the block has no rename, no such read, or the read never closes.
+ *
+ * The rollback policy (#904) wants the record for the restore failure: the
+ * delete's own error is deliberately not read, and the rename is the operation
+ * whose failure has to be visible. #919 Q7: the check was "some record in the
+ * block", which the refused branch's own record satisfied — a rollback that
+ * stopped recording the restore failure passed every check (measured). The
+ * last `Rename` of the site is the restore (the rollback renames the backup
+ * back, and nothing after it renames anything).
+ */
+function restoreFailureWindow(lines, trace, { start, end }, onPath, isRead) {
+  let rename = -1
+  for (let j = start; j <= end; j += 1) {
+    if (onPath(j) && /^\s*Rename\b/i.test(lines[j])) rename = j
+  }
+  if (rename === -1) return null
+  let read = -1
+  for (let j = rename + 1; j <= end; j += 1) {
+    if (onPath(j) && isRead(lines[j])) {
+      read = j
+      break
+    }
+  }
+  if (read === -1) return null
+  const close = trace.closeOf.get(read) ?? end
+  const divide = trace.dividers.find((divider) => divider.opener === read)?.line ?? -1
+  return { from: read + 1, to: divide === -1 ? close : Math.min(close, divide) }
+}
+
+/**
  * First `SetErrorLevel 2` on `onPath` in `(after, end]`, else -1 — the sweep's
  * "leftovers were kept" reading (#904 item 4), as a line index.
  *
@@ -1379,12 +1412,26 @@ export function unguardedBackupDelete(source, options = {}) {
     if (wants.deferredRecord) {
       // The rollback site: the delete's own error is not read (the rename that
       // follows is the operation whose failure has to be visible), but the
-      // function has to record the backup somewhere when the restore fails.
-      const block = lines.slice(blockStart, blockEnd + 1)
-      if (!block.some((line) => recordWrite.test(line))) {
+      // restore-failure branch has to record the backup — that branch, not the
+      // function at large: the refused branch carries its own record, so
+      // pinning the record to the block let a rollback drop the restore
+      // failure's record while every check stayed green (#919 Q7, measured).
+      const failure = restoreFailureWindow(
+        lines,
+        trace,
+        { start: blockStart, end: blockEnd },
+        onDeletePath,
+        (line) => errorsRead.test(line),
+      )
+      const recorded =
+        failure !== null &&
+        lines
+          .slice(failure.from, failure.to)
+          .some((line, offset) => onDeletePath(failure.from + offset) && recordWrite.test(line))
+      if (!recorded) {
         problems.push({
           line: i + 1,
-          what: 'the rollback site does not record a leftover (no IaLeftoverDir write of $iaBackupDirectory)',
+          what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
         })
       }
     }

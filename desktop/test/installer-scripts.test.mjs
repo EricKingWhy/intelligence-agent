@@ -1822,6 +1822,37 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     const problems = unguardedBackupDelete(silent, { sitePolicies: DELETE_SITE_POLICIES })
     assert.ok(problems.some((p) => /does not record a leftover/.test(p.what)), JSON.stringify(problems))
     assert.ok(problems.some((p) => /no Call iaPrepareDelete before the delete/.test(p.what)))
+    // #919 Q7: the record has to sit on the path where the RESTORE fails — the
+    // rename is the operation whose failure matters, and the refused branch
+    // carries its own record. Pinning the record to the function at large left
+    // the restore-failure branch free to stop recording: keeping the refused
+    // record alone passed every check (measured).
+    const refusedOnly = rollback
+      .replace('    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory\n', '')
+      .replace(
+        'iaRollbackRefused:\n',
+        'iaRollbackRefused:\n  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory\n',
+      )
+    assert.deepEqual(unguardedBackupDelete(refusedOnly, { sitePolicies: DELETE_SITE_POLICIES }), [
+      {
+        line: 7,
+        what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
+      },
+    ])
+    // A record in the `${Else}` half of that branch is not on the failure path
+    // either: the rename succeeded there.
+    const elseOnly = rollback
+      .replace('    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory\n', '')
+      .replace(
+        '  ${EndIf}',
+        '  ${Else}\n    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory\n  ${EndIf}',
+      )
+    assert.deepEqual(unguardedBackupDelete(elseOnly, { sitePolicies: DELETE_SITE_POLICIES }), [
+      {
+        line: 7,
+        what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
+      },
+    ])
   })
 
   it('validateCleanupHelpers is fail-closed about the #904 primitives', () => {
