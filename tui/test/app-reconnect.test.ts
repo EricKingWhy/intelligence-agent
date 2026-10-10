@@ -12,6 +12,7 @@
  * ③ 干净收束（`ended` = Host 活着）重置连续计数，阈值内照常重连；
  * ④ `truncated` 是重建路径、不计入失败；
  * ⑤ 切会话重置熔断（新会话重新给满阈值，不被上一会话的耗尽状态锁死）。
+ * ⑥ truncated（#859）：先等 GET /events 重建完成、再按重建游标续订；重建失败与连接失败同一退避/额度。
  *
  * 全部经**注入 fetch**（`AppOptions.fetchImpl`）驱动：不碰真网络、不碰真 TTY。
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` / `app-images.test.ts` 同一套受控 cast 访问面）。
@@ -27,6 +28,7 @@ type Step = "error" | "ended" | "truncated";
 
 interface AppInternals {
   state: ConversationState;
+  cursor: { lastSeq: number };
   running: boolean;
   reconnectFailures: number;
   streamStopped: boolean;
@@ -66,6 +68,15 @@ function sseResponse(body: string): Response {
   });
 }
 
+/**
+ * 真实形状的 truncated 控制帧：与服务端
+ * `json.dumps(build_truncated_control("s1", after_seq=-1, latest_seq=N), ensure_ascii=False)`
+ * 逐字节相同（`src/agent_harness/web/serialization.py`）——**不带 `time`**（#859）。
+ */
+function truncatedFrame(latestSeq: number): string {
+  return `data: {"type": "stream/truncated", "data": {"after_seq": -1, "latest_seq": ${latestSeq}}, "seq": null, "run_id": null, "step_id": null, "session_id": "s1", "schema_version": "runtime_event/v1", "durability": "transient"}`;
+}
+
 /** 第 n 次 /stream 订阅按 `steps[n]` 行为；超出脚本一律 "error"。 */
 function makeHarness(steps: Step[]): Harness {
   let streamCalls = 0;
@@ -79,19 +90,7 @@ function makeHarness(steps: Step[]): Harness {
     streamCalls += 1;
     if (step === "error") throw new TypeError("fetch failed");
     if (step === "ended") return sseResponse("");
-    // truncated 控制帧（无 seq，键序无关；parseEnvelope 只认字段名）。
-    return sseResponse(
-      `data: ${JSON.stringify({
-        type: "stream/truncated",
-        data: { latest_seq: 0 },
-        seq: null,
-        run_id: null,
-        step_id: null,
-        session_id: "s1",
-        time: "2026-10-10T00:00:00Z",
-        durability: "transient",
-      })}\r\n\r\n`,
-    );
+    return sseResponse(`${truncatedFrame(0)}\r\n\r\n`);
   }) as typeof fetch;
   const app = new TuiApp(
     { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
@@ -184,6 +183,160 @@ test("#843 切会话重置熔断：新会话重新给满阈值，不被上一会
     assert.equal(app.streamStopped, false, "新会话不得继承上一会话的熔断状态");
     assert.equal(app.reconnectFailures, 0);
     assert.equal(bannerText(app), "", "切会话后提示横幅须撤下");
+  } finally {
+    halt(app);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// truncated 重建与续订的先后（#859 范围扩展，用户 2026-10-11 00:38 批准）。
+//
+// ADR-0016 §2.3：收到 `stream/truncated` ⇒ 先 GET /events 全量重建，**再**带
+// `after_seq=<重建后真实 max seq>` 重连。对齐 web 端 `useSession.doTruncatedRebuild`
+// （hold → 等重建 → 以 maxSeq 续传；重建失败走 scheduleReconnect 同一退避/额度）。
+// 全部走 app 层：真实无 `time` 的控制帧经 consumeSseBody → onTruncated → 重建。
+// ---------------------------------------------------------------------------
+
+/** 一条真实形状的 durable 事件行（GET /events 与 /stream 同形；带 time）。 */
+function userRow(seq: number, content: string): Record<string, unknown> {
+  return {
+    type: "user/message",
+    data: { content },
+    seq,
+    run_id: null,
+    step_id: null,
+    session_id: "s1",
+    time: "Sun 2026-10-11 0:38 AM CST (UTC+08:00)",
+    schema_version: "runtime_event/v1",
+    durability: "durable",
+  };
+}
+
+interface RebuildHarness {
+  app: AppInternals;
+  /** 按发生顺序记录的请求：`stream:<after_seq>` 或 `events`。 */
+  log: string[];
+  /** 每次 /stream 请求发起的时刻（ms），用于证明失败路径有退避、不空转。 */
+  streamTimes: number[];
+  /** 放行当前挂起的 GET /events（只对 `holdEvents` 模式有效）。 */
+  releaseEvents: () => void;
+}
+
+/**
+ * - `/stream` 第 n 次按 `streams[n]` 返回响应体（超出脚本：返回空体 = 干净收束）；
+ * - `/events`：`"hold"` = 挂起直到 `releaseEvents()`，然后返回 `history`；`"fail"` = 恒 HTTP 500。
+ */
+function makeRebuildHarness(
+  streams: string[],
+  events: "hold" | "fail",
+  history: Record<string, unknown>[] = [],
+): RebuildHarness {
+  const log: string[] = [];
+  const streamTimes: number[] = [];
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let streamCalls = 0;
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/events")) {
+      log.push("events");
+      if (events === "fail") {
+        return new Response('{"detail":"boom"}', {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      await gate;
+      return new Response(JSON.stringify(history), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    log.push(`stream:${url.searchParams.get("after_seq")}`);
+    streamTimes.push(Date.now());
+    const body = streams[streamCalls] ?? "";
+    streamCalls += 1;
+    return sseResponse(body);
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  return { app, log, streamTimes, releaseEvents: () => release() };
+}
+
+const HISTORY_0_TO_20 = Array.from({ length: 21 }, (_, seq) => userRow(seq, `history-${seq}`));
+
+test("#859 truncated：重建期间不重连，重建只发一次 GET /events，完成后带重建游标续订", async () => {
+  const { app, log, releaseEvents } = makeRebuildHarness(
+    [`${truncatedFrame(20)}\r\n\r\n`],
+    "hold",
+    HISTORY_0_TO_20,
+  );
+  app.subscribeLoop();
+  try {
+    await waitFor(() => log.includes("events"));
+    // 重建挂起期间给足时间：此时任何 /stream 都是「带旧游标抢跑」。
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(log, ["stream:-1", "events"], "重建完成前不得重连 /stream");
+    releaseEvents();
+    await waitFor(() => log.length >= 3);
+    // ADR-0016 §2.3 的先后：全量重建 → 再以重建后真实 max seq 续订。
+    assert.deepEqual(log.slice(0, 3), ["stream:-1", "events", "stream:20"]);
+    assert.equal(log.filter((x) => x === "events").length, 1, "一次 truncated 只重建一次");
+    assert.equal(app.cursor.lastSeq, 20);
+    assert.equal(app.reconnectFailures, 0, "成功重建不计失败");
+  } finally {
+    halt(app);
+  }
+});
+
+test("#859 truncated：重建得到的新 state 不得覆盖续订流已投影的帧（帧不丢）", async () => {
+  const live21 = `data: ${JSON.stringify(userRow(21, "live-21"))}\r\n\r\n`;
+  const { app, log, releaseEvents } = makeRebuildHarness(
+    // 第 2 次订阅（无论何时发起）都投递 seq 21 这一条新事实。
+    [`${truncatedFrame(20)}\r\n\r\n`, live21],
+    "hold",
+    HISTORY_0_TO_20,
+  );
+  app.subscribeLoop();
+  try {
+    await waitFor(() => log.includes("events"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    releaseEvents();
+    await waitFor(() => log.filter((x) => x.startsWith("stream:")).length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const texts = app.state.turns.map((t) => t.text).join("\n");
+    assert.ok(texts.includes("history-20"), "重建结果在场");
+    assert.ok(texts.includes("live-21"), `续订流投影的 seq 21 不得被重建覆盖丢失，实际：${texts}`);
+    assert.equal(app.cursor.lastSeq, 21);
+  } finally {
+    halt(app);
+  }
+});
+
+test("#859 truncated 后 GET /events 持续失败：按退避计失败并熔断，不空转", async () => {
+  const frame = `${truncatedFrame(20)}\r\n\r\n`;
+  const { app, log, streamTimes } = makeRebuildHarness(
+    Array.from({ length: 50 }, () => frame),
+    "fail",
+  );
+  app.subscribeLoop();
+  try {
+    await waitFor(() => app.streamStopped);
+    assert.equal(streamTimes.length, 5, "重建失败与连接失败同一额度：恰 5 次后熔断");
+    assert.equal(log.filter((x) => x === "events").length, 5, "每次 truncated 只重建一次");
+    assert.equal(app.reconnectFailures, 5);
+    const gaps = streamTimes.slice(1).map((t, i) => t - (streamTimes[i] ?? t));
+    assert.ok(
+      gaps.every((gap) => gap >= 900),
+      `重建失败后须走 1s 退避，实际间隔（ms）：${gaps.join(", ")}`,
+    );
+    const chat = chatText(app);
+    assert.ok(chat.includes("boom"), `重建失败须留可见原因，实际：${chat}`);
+    assert.ok(chat.includes("Host 连接已断开"), "熔断提示照常出现");
   } finally {
     halt(app);
   }

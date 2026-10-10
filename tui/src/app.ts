@@ -287,7 +287,8 @@ export class TuiApp {
     const gen = this.generation;
     void (async () => {
       while (this.running && gen === this.generation) {
-        const outcome = await new Promise<"ended" | "error" | "truncated">((resolve) => {
+        let rebuild: Promise<void> = Promise.resolve();
+        let outcome = await new Promise<"ended" | "error" | "truncated">((resolve) => {
           void openStream(
             this.options.baseUrl,
             this.options.sessionId,
@@ -299,7 +300,7 @@ export class TuiApp {
                 this.renderIncremental();
               },
               onTruncated: () => {
-                void this.rebuildFromHistory();
+                rebuild = this.rebuildFromHistory();
               },
               onClosed: (reason, error) => {
                 if (reason === "error" && error !== undefined) {
@@ -311,8 +312,18 @@ export class TuiApp {
             { signal: this.abort.signal, fetchImpl: this.fetchImpl },
           );
         });
+        if (outcome === "truncated") {
+          // ADR-0016 2.3 节：先等全量重建完成，再以重建游标重连（对齐 web doTruncatedRebuild）；
+          // 重建失败按一次 "error" 计（与 web scheduleReconnect 同一退避/额度）。
+          try {
+            await rebuild;
+          } catch (error) {
+            this.appendNote(`stream rebuild: ${String(error)}`);
+            outcome = "error";
+          }
+        }
         if (!this.running || gen !== this.generation) return;
-        if (outcome === "truncated") continue; // 重建后立即重连
+        if (outcome === "truncated") continue; // 重建已完成，按新游标立即重连
         // 计数规则（#843）：只有 outcome 为 "error" 才计一次失败；
         // "ended" 是 Host 干净收束（这条流曾活过），清零连续失败计数；
         // abort 路径在上面 generation/running 守卫处已被丢弃，不进入计数。
