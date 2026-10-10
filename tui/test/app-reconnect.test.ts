@@ -15,6 +15,10 @@
  * ⑥ truncated（#859）：先等 GET /events 重建完成、再按重建游标续订；重建失败与连接失败同一退避/额度。
  * ⑦ 切会话（#958）：旧会话迟到的 GET /events 重建结果被丢弃，不改新会话 state / 游标。
  * ⑧ 连续切会话 A→B→C（#958）：被取代的 switchSession 不再起订阅循环，C 只有一条 /stream。
+ * ⑨ 切会话（#961）：旧会话迟到的 truncated 重建**失败**被丢弃，新会话 chat 不出现 `stream rebuild:`。
+ * ⑩ 连续切会话 A→B→C（#961）：被取代的 B 重建失败不在 C 的 chat 里留 `switch failed:`。
+ * ⑪ 切会话（#961）：旧订阅被 abort 的 `stream reconnect:` 不留在新会话 chat（新会话重建失败、无 renderAll 兜底时可见）。
+ * ⑫ 回归（#961）：**当前**会话的重建失败 / 连接失败 / 切换失败照常留提示。
  *
  * 全部经**注入 fetch**（`AppOptions.fetchImpl`）驱动：不碰真网络、不碰真 TTY。
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` / `app-images.test.ts` 同一套受控 cast 访问面）。
@@ -39,6 +43,8 @@ interface AppInternals {
   chatContainer: { children: { render(width: number): string[] }[] };
   subscribeLoop(): void;
   switchSession(sessionId: string): Promise<void>;
+  showSessionPicker(): Promise<void>;
+  tui: { showOverlay(component: unknown, options?: unknown): { hide(): void } };
 }
 
 interface Harness {
@@ -429,5 +435,167 @@ test("#958 连续切会话 A→B→C：被取代的 switchSession 不再起订�
   } finally {
     halt(app);
     app.abort.abort();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 切会话后旧会话的**失败**（#961）：与 #958 丢弃过期成功同一 generation 判据；
+// 过期失败静默丢弃（对齐 web `useSession` 的 `streamGenRef.current !== gen` 先于
+// setError / scheduleReconnect），当前会话的失败照常可见。
+// ---------------------------------------------------------------------------
+
+const JSON_HEADERS = { "content-type": "application/json" };
+
+function failEvents(sid: string): Response {
+  return new Response(JSON.stringify({ detail: `boom-${sid}` }), { status: 500, headers: JSON_HEADERS });
+}
+
+/** 走真实选择器：overlay 换成捕获器，再按用户选中一项（onSelect 内 `.catch` 原样生效）。 */
+async function pick(app: AppInternals, sessionId: string): Promise<void> {
+  let list: { onSelect?: (item: { value: string }) => void } | undefined;
+  app.tui.showOverlay = (component) => {
+    list = component as typeof list;
+    return { hide() {} };
+  };
+  await app.showSessionPicker();
+  list?.onSelect?.({ value: sessionId });
+}
+
+function sidOf(url: URL): string {
+  return url.pathname.split("/").find((part) => /^s\d$/.test(part)) ?? "?";
+}
+
+test("#961 切会话后旧会话迟到的重建失败被丢弃：新会话 chat 不出现旧会话的 stream rebuild 提示", async () => {
+  const log: string[] = [];
+  let releaseS1: () => void = () => {};
+  const s1Gate = new Promise<void>((resolve) => {
+    releaseS1 = resolve;
+  });
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    const sid = sidOf(url);
+    if (url.pathname.endsWith("/events")) {
+      log.push(`events:${sid}`);
+      if (sid !== "s1") return new Response("[]", { status: 200, headers: JSON_HEADERS });
+      await s1Gate; // 旧会话的重建挂起，直到切会话完成后才以失败返回
+      log.push("events:s1:failed");
+      return failEvents("s1");
+    }
+    return sseResponse(`${truncatedFrame(20)}\r\n\r\n`);
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  app.subscribeLoop();
+  try {
+    await waitFor(() => log.includes("events:s1"));
+    app.subscribeLoop = () => {};
+    await app.switchSession("s2");
+    releaseS1();
+    await waitFor(() => log.includes("events:s1:failed"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const chat = chatText(app);
+    assert.ok(!chat.includes("stream rebuild"), `旧会话的重建失败不得写进新会话 chat，实际：${chat}`);
+    assert.ok(!chat.includes("boom-s1"), `旧会话的错误原因不得出现在新会话，实际：${chat}`);
+  } finally {
+    halt(app);
+  }
+});
+
+test("#961 连续切会话 A→B→C：被取代的 B 重建失败不在 C 的 chat 里留 switch failed", async () => {
+  const log: string[] = [];
+  let releaseS2: () => void = () => {};
+  const s2Gate = new Promise<void>((resolve) => {
+    releaseS2 = resolve;
+  });
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/sessions") return new Response("[]", { status: 200, headers: JSON_HEADERS });
+    const sid = sidOf(url);
+    log.push(`events:${sid}`);
+    if (sid !== "s2") return new Response("[]", { status: 200, headers: JSON_HEADERS });
+    await s2Gate; // B 的重建挂起，直到切到 C 完成后才以失败返回
+    log.push("events:s2:failed");
+    return failEvents("s2");
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  app.subscribeLoop = () => {}; // 订阅循环与本例无关（C 的单订阅由 #958 ⑧ 覆盖）
+  try {
+    await pick(app, "s2");
+    await waitFor(() => log.includes("events:s2"));
+    await pick(app, "s3");
+    await waitFor(() => log.includes("events:s3"));
+    await new Promise((resolve) => setTimeout(resolve, 100)); // C 的重建与 renderAll 落地
+    releaseS2();
+    await waitFor(() => log.includes("events:s2:failed"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const chat = chatText(app);
+    assert.ok(!chat.includes("switch failed"), `被取代的 B 的失败不得写进 C 的 chat，实际：${chat}`);
+    assert.ok(!chat.includes("boom-s2"), `B 的错误原因不得出现在 C，实际：${chat}`);
+  } finally {
+    halt(app);
+  }
+});
+
+test("#961 切会话 abort 旧订阅：旧流的 stream reconnect 不留在新会话 chat（新会话重建失败时）", async () => {
+  const log: string[] = [];
+  const fetchFn = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/sessions") return new Response("[]", { status: 200, headers: JSON_HEADERS });
+    const sid = sidOf(url);
+    if (url.pathname.endsWith("/events")) {
+      log.push(`events:${sid}`);
+      return failEvents(sid);
+    }
+    log.push(`stream:${sid}`);
+    // 订阅保持打开直到被 abort（切会话时）。
+    return new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  app.subscribeLoop();
+  try {
+    await waitFor(() => log.includes("stream:s1"));
+    await pick(app, "s2");
+    await waitFor(() => log.includes("events:s2"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const chat = chatText(app);
+    assert.ok(chat.includes("switch failed"), `当前会话的切换失败须照常可见，实际：${chat}`);
+    assert.ok(!chat.includes("stream reconnect"), `旧订阅被 abort 的提示不得写进新会话 chat，实际：${chat}`);
+  } finally {
+    halt(app);
+  }
+});
+
+test("#961 回归：当前会话的重建失败与连接失败照常留提示", async () => {
+  let streamCalls = 0;
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/events")) return failEvents("s1");
+    streamCalls += 1;
+    if (streamCalls === 1) return sseResponse(`${truncatedFrame(20)}\r\n\r\n`);
+    throw new TypeError("fetch failed");
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  app.subscribeLoop();
+  try {
+    await waitFor(() => chatText(app).includes("stream reconnect"));
+    const chat = chatText(app);
+    assert.ok(chat.includes("stream rebuild"), `当前会话的重建失败须留提示，实际：${chat}`);
+    assert.ok(chat.includes("boom-s1"), "提示须带失败原因");
+    assert.ok(chat.includes("fetch failed"), "当前会话的连接失败须留提示");
+  } finally {
+    halt(app);
   }
 });
