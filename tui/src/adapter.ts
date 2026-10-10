@@ -10,10 +10,28 @@ export type { EventEnvelope };
 
 export type RunStatus = "idle" | "running" | "paused" | "completed" | "failed" | "interrupted";
 
+/**
+ * 历史附图引用（M-09）：`user/message.data["attachments"]` 里一条图片引用的镜像。
+ * 形状 = 服务端 `attachments/projection.py::ImageRef`（kind="image" + 引用五字段）；
+ * **引用而非字节**：`bytes` 是字节数（int），图片内容经受控端点
+ * `GET /api/sessions/{id}/attachments/{aid}/content` 取回（不变量 #15：事件流里没有 base64）。
+ */
+export interface TurnImageRef {
+  attachment_id: string;
+  media_type: string;
+  bytes: number;
+  width: number;
+  height: number;
+  /** 展示名；服务端写入路径恒缺省（结构性缺省），缺省时渲染端用 attachment_id 兜底。 */
+  name: string | null;
+}
+
 export interface Turn {
   role: "user" | "assistant";
   text: string;
   tools: ToolCard[];
+  /** 本轮 user/message 携带的图片引用（M-09）；空数组 = 无附图（旧数据 / 纯文本轮）。 */
+  attachments: TurnImageRef[];
   /** 本轮关联的事件 seq 上限（排序与重建用）。 */
   seq: number | null;
 }
@@ -123,7 +141,13 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
   const data = event.data;
   switch (event.type) {
     case EVENT.USER_MESSAGE:
-      state.turns.push({ role: "user", text: asString(data.content), tools: [], seq: event.seq });
+      state.turns.push({
+        role: "user",
+        text: asString(data.content),
+        tools: [],
+        attachments: parseImageRefs(data.attachments),
+        seq: event.seq,
+      });
       break;
     case EVENT.TEXT_DELTA:
       assistantTurn(state, event.seq).text += asString(data.delta);
@@ -286,13 +310,65 @@ function projectPlanUpdated(state: ConversationState, data: Record<string, unkno
   state.plan = items;
 }
 
+/**
+ * M-09：`user/message.data["attachments"]` -> 引用数组；坏形状**逐条**跳过（不 brick 重建）。
+ * 容错口径与服务端 `attachments/projection.py::parse_image_refs` 同一纪律：投影/恢复必经
+ * 节点上，一行坏数据不能拖垮整个会话。只收 `kind === "image"` 且五字段形状合格的条目。
+ *
+ * F3 修回：数值谓词也对齐服务端 `_is_non_negative_int`（非负整数）：负数/小数逐条跳过，
+ * 不再借道 `asNumber`（它只保有限 number，形状同、数值谓词更宽）。JS 里 bool 不是
+ * number（`Number.isInteger(true) === false`），与服务端排除 bool 的口径天然一致。
+ */
+function parseImageRefs(raw: unknown): TurnImageRef[] {
+  if (!Array.isArray(raw)) return [];
+  const refs: TurnImageRef[] = [];
+  for (const item of raw) {
+    if (!isRecord(item) || item["kind"] !== "image") continue;
+    const attachmentId = item["attachment_id"];
+    const mediaType = item["media_type"];
+    const bytes = asNonNegativeInt(item["bytes"]);
+    const width = asNonNegativeInt(item["width"]);
+    const height = asNonNegativeInt(item["height"]);
+    if (
+      typeof attachmentId !== "string" ||
+      attachmentId === "" ||
+      typeof mediaType !== "string" ||
+      mediaType === "" ||
+      bytes === null ||
+      width === null ||
+      height === null
+    ) {
+      continue;
+    }
+    const name = item["name"];
+    refs.push({
+      attachment_id: attachmentId,
+      media_type: mediaType,
+      bytes,
+      width,
+      height,
+      name: typeof name === "string" && name !== "" ? name : null,
+    });
+  }
+  return refs;
+}
+
+/**
+ * 服务端 `attachments/projection.py::_is_non_negative_int` 的镜像（F3 修回）：
+ * 只收非负整数；`null` = 不合格（逐条跳过，与 parseImageRefs 的容错语义同向）。
+ * `asNumber` 不动：它服务于 durationMs/size 等其它字段，全局收紧是 Scope 外改动。
+ */
+function asNonNegativeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
 function assistantTurn(state: ConversationState, seq: number | null): Turn {
   const last = state.turns[state.turns.length - 1];
   if (last && last.role === "assistant") {
     if (seq === null || last.seq === null || seq >= last.seq) last.seq = seq;
     return last;
   }
-  const turn: Turn = { role: "assistant", text: "", tools: [], seq };
+  const turn: Turn = { role: "assistant", text: "", tools: [], attachments: [], seq };
   state.turns.push(turn);
   return turn;
 }
