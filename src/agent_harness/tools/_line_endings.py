@@ -29,6 +29,9 @@ __all__ = [
     "replace_with_line_ending_tolerance",
 ]
 
+# write 重写路径的统一后缀（P4-3）：四处提示共用，避免逐处抄写漂移。
+_WRITE_SUFFIX = "（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+
 
 def dominant_newline(content: str) -> str | None:
     """返回 content 的主导行尾（CRLF 或 LF）。
@@ -117,6 +120,10 @@ def not_found_hint(content: str, old_string: str) -> str:
     所以**不得**再用「请改用 write」把它封成唯一路径。
 
     两侧行尾种类相同时（各段落位置不同）也给谨慎提示，不吞掉（#851 二轮修回 P3）。
+
+    文件行尾单一、两侧种类不等时（四轮修回 P4-5 补记）：落到末尾那条提示，
+    直接给「按该文件的行尾改写 old_string」—— 这种文件上归一化路径本就启用，
+    照文件行尾改写即字节精确命中，无需再提混行尾。
     """
     mismatch = line_ending_mismatch(content, old_string)
     if mismatch is None:
@@ -126,33 +133,29 @@ def not_found_hint(content: str, old_string: str) -> str:
     old_newline = " / ".join(old_kinds)
     if set(file_kinds) == set(old_kinds):
         return (
-            f"该文件与 old_string 的行尾种类相同（{file_newline}，集合相等，"
-            f"但各段落的位置与处数可能不同）；建议核对对应段落的行尾，"
-            f"或改用 write 整文件重写"
-            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+            f"该文件与 old_string 的行尾种类相同（{file_newline}），"
+            f"但各处行尾出现的位置或次数可能不同；建议逐位置核对对应段落的行尾，"
+            f"或改用 write 整文件重写{_WRITE_SUFFIX}"
         )
     if len(file_kinds) > 1 and set(old_kinds) <= set(file_kinds):
         return (
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}。"
-            f"可尝试把 old_string 改写成文件中对应段落的行尾后重试；"
-            f"若该行尾种类在文件中只出现在文件末端，改写后仍可能不命中；"
-            f"若仍不命中，改用 write 整文件重写"
-            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+            f"可尝试逐位置照抄对应段落的行尾改写 old_string 后重试；"
+            f"若 old_string 中某处行尾与对应段落不一致，改写后仍可能不命中；"
+            f"若仍不命中，改用 write 整文件重写{_WRITE_SUFFIX}"
         )
     if len(file_kinds) > 1:
         return (
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}，含有该文件里不存在的行尾种类。"
             f"可尝试把 old_string 中文件里没有的行尾种类改写成文件中对应段落"
-            f"的行尾后重试；若仍不命中，改用 write 整文件重写"
-            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+            f"的行尾后重试；若仍不命中，改用 write 整文件重写{_WRITE_SUFFIX}"
         )
     return (
         f"该文件的行尾是 {file_newline}，old_string 的是 {old_newline}，"
         f"两者只在行尾上不同。请按该文件的行尾改写 old_string 后重试，"
-        f"或改用 write 整文件重写"
-        f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+        f"或改用 write 整文件重写{_WRITE_SUFFIX}"
     )
 
 

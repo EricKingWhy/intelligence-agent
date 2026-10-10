@@ -419,17 +419,21 @@ class TestEditNotFoundHint:
     async def test_mixed_file_old_kind_only_at_tail_warns_rewrite_may_miss(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """#851 三轮修回 P4：old 的行尾种类在文件里只出现在末端 ⇒ 改写后仍可能不命中。
+        """#851 四轮修回 P3-1：混行尾文件里 old 的行尾与对应段落不一致 ⇒ 改写后仍不命中。
 
-        文件 `a = 1\\r\\nb = 2\\nc = 3\\r\\n` 的行尾是 CRLF+LF 混用，但 CRLF 只
-        出现在**末尾**那一处；old `a = 1\\r\\nb = 2\\r\\n` 自行带 CRLF，照
-        「改写成对应段落的行尾」做仍 `count()==0`（事实先行断言）。提示须点出
-        这种末端情形，不扩大语义。
+        文件 `a = 1\\nb = 2\\nc = 3\\r\\n` 的行尾是 LF+CRLF 混用，CRLF 只在**末尾**
+        那一处；old `a = 1\\r\\nb = 2\\r\\n` 把两处都写成 CRLF，与对应的前两段（LF）
+        都不一致 ⇒ `count()==0`。真实成因是**逐位置行尾错配**，不是「末端独有」：
+        折平后命中即位置对齐，逐位置照抄对应段落行尾改写（`a = 1\\nb = 2\\n`）就
+        `count()==1`（下一条机械断言钉死）。提示须给出这条可执行的改写指引。
         """
-        content = "a = 1\r\nb = 2\nc = 3\r\n"
+        content = "a = 1\nb = 2\nc = 3\r\n"
         old = "a = 1\r\nb = 2\r\n"
         sandbox.write_text("f.py", content)
         assert content.count(old) == 0
+        faithful = "a = 1\nb = 2\n"
+        assert content.count(faithful) == 1
+        assert content.count(faithful.replace("\n", "\r\n")) == 0
 
         result = await executor.execute(
             _tool_call({"path": "f.py", "old_string": old, "new_string": "a = 9\r\nb = 2\r\n"})
@@ -439,7 +443,7 @@ class TestEditNotFoundHint:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
         assert "对应段落的行尾" in msg
-        assert "末端" in msg
+        assert "末端" not in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == content
 
@@ -450,8 +454,8 @@ class TestEditNotFoundHint:
         """判别力（LF 文件侧，#851 三轮修回 P4 补回）：LF 文件里的纯上下文抄错不提行尾。
 
         `9b6f6a25` 删近重复用例时把 edit 侧这条判别力删没了（只剩 CRLF 版）；
-        它与 CRLF 版走 `line_ending_mismatch` 的不同早退路径
-        （`canonical_old not in canonical_content`），补回。
+        本用例补 LF 文件侧的覆盖——两版的早退路径相同
+        （`canonical_old not in canonical_content`），是覆盖差别，不是路径差别。
         """
         sandbox.write_text("f.py", "a = 1\nb = 2\n")
 
@@ -491,7 +495,7 @@ class TestEditNotFoundHint:
         msg = result.result.message
         assert "行尾" in msg
         assert "种类相同" in msg
-        assert "处数可能不同" in msg
+        assert "位置或次数可能不同" in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
 
