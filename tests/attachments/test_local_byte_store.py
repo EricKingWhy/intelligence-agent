@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 import warnings
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,36 @@ def _meta_path(tmp_path: Path, attachment_id: str) -> Path:
 
 def _staging_dir(tmp_path: Path) -> Path:
     return tmp_path / "artifacts" / ".attachments" / "tmp"
+
+
+def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
+    """模拟 Windows 的 FILE_ATTRIBUTE_READONLY：无写位的常规文件 unlink 被拒。
+
+    要按 `dir_fd` 解析（fd 版 rmtree 用 `os.unlink(entry.name, dir_fd=...)`），否则
+    相对名会落到 CWD、模拟失效。
+    """
+    real_unlink = _windows_unlink.real  # type: ignore[attr-defined]
+    try:
+        st = os.stat(path, dir_fd=dir_fd)
+    except OSError:
+        return real_unlink(path, dir_fd=dir_fd)
+    if stat.S_ISREG(st.st_mode) and not (st.st_mode & stat.S_IWUSR):
+        raise PermissionError(13, "Access is denied (simulated Windows read-only file)")
+    return real_unlink(path, dir_fd=dir_fd)
+
+
+def _install_windows_unlink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 `os.unlink` 换成 Windows 只读语义（见 `_windows_unlink`）。"""
+    _windows_unlink.real = os.unlink  # type: ignore[attr-defined]
+    monkeypatch.setattr(os, "unlink", _windows_unlink)
+
+
+def _object_is_read_only(path: Path) -> bool:
+    """对象是否处于发布时的只读态（与 `test_object_permission_is_read_only` 同判据）。"""
+    file_stat = os.stat(path)
+    if os.name == "nt":
+        return bool(file_stat.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY)
+    return stat.S_IMODE(file_stat.st_mode) == 0o400
 
 
 class _FakeSys:
@@ -291,23 +322,7 @@ def test_discard_removes_readonly_receipt_hardlink(
     assert receipt.is_file()
     assert not (os.stat(receipt).st_mode & stat.S_IWUSR), "回执应是只读的（与全局对象同 inode）"
 
-    real_unlink = os.unlink
-
-    def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
-        """模拟 Windows 的 FILE_ATTRIBUTE_READONLY：无写位的常规文件 unlink 被拒。
-
-        要按 `dir_fd` 解析（fd 版 rmtree 用 `os.unlink(entry.name, dir_fd=...)`），否则
-        相对名会落到 CWD、模拟失效。
-        """
-        try:
-            st = os.stat(path, dir_fd=dir_fd)
-        except OSError:
-            return real_unlink(path, dir_fd=dir_fd)
-        if stat.S_ISREG(st.st_mode) and not (st.st_mode & stat.S_IWUSR):
-            raise PermissionError(13, "Access is denied (simulated Windows read-only file)")
-        return real_unlink(path, dir_fd=dir_fd)
-
-    monkeypatch.setattr(os, "unlink", _windows_unlink)
+    _install_windows_unlink(monkeypatch)
 
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
@@ -317,6 +332,199 @@ def test_discard_removes_readonly_receipt_hardlink(
         asyncio.run(_store(tmp_path, "sess-b").load_bytes(blob.artifact_id)).content
         == b"readonly-receipt"
     )
+
+
+def test_discard_restores_readonly_on_global_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#923：Windows 语义下 discard 删掉只读回执后，全局字节对象必须**恢复只读**。
+
+    对象发布时是 `0o400`，回执是它的 hardlink ⇒ Windows 上共享同一只读属性，清回执的
+    只读位会连带清掉对象的（`_clear_readonly_and_retry` docstring 记录的副作用）。修法
+    是在本次 discard 的局部状态里记下"实际清过只读位的回执"，删完后按回执路径里嵌的
+    sha256 推导出全局对象、best-effort 恢复 `0o400`。
+    """
+    store = _store(tmp_path, "sess-a")
+    blob = asyncio.run(
+        store.save_bytes("sess-a", b"restore-readonly", mime_type="image/png")
+    )
+    object_path = _object_path(tmp_path, blob.artifact_id)
+    assert _object_is_read_only(object_path)
+
+    _install_windows_unlink(monkeypatch)
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert not _receipt_path(tmp_path, "sess-a", blob.artifact_id).exists()
+    assert object_path.is_file()
+    assert _object_is_read_only(object_path), "discard 后全局对象必须回到发布时的只读位"
+    assert (
+        asyncio.run(_store(tmp_path, "sess-b").load_bytes(blob.artifact_id)).content
+        == b"restore-readonly"
+    )
+
+
+def test_discard_twice_keeps_object_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """幂等：同一会话 discard 两次不崩，且每次结束后对象都是只读。
+
+    第二次调用时会话目录已不在 ⇒ 不触发 rmtree ⇒ 本次 touched 为空 ⇒ 恢复是 no-op。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"twice", mime_type="image/png")
+    )
+    object_path = _object_path(tmp_path, blob.artifact_id)
+    _install_windows_unlink(monkeypatch)
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert not _receipt_path(tmp_path, "sess-a", blob.artifact_id).exists()
+    assert _object_is_read_only(object_path)
+    assert asyncio.run(_store(tmp_path, "sess-a").load_bytes(blob.artifact_id)).content == b"twice"
+
+
+def test_discard_does_not_touch_objects_it_did_not_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只恢复**本次 discard 碰过的**对象：别的全局对象（此处刻意可写）不许被动。
+
+    全量扫 `<root>/.attachments` 再 chmod 的实现会误改这里的 `0o600` 对象——它可达性上
+    与本次删除毫无关系（它在全局根里，本次删的是会话目录）。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"touched", mime_type="image/png")
+    )
+    other_payload = b"not-touched-by-this-discard"
+    other = _object_path(tmp_path, compute_byte_artifact_id(other_payload))
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_bytes(other_payload)
+    os.chmod(other, 0o600)  # 模拟"不归本次 discard 管"的既有状态
+
+    _install_windows_unlink(monkeypatch)
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert _object_is_read_only(_object_path(tmp_path, blob.artifact_id))
+    assert stat.S_IMODE(os.stat(other).st_mode) == 0o600, (
+        "未触碰的对象被改了权限：恢复只许作用于本次清过只读位的那几个对象"
+    )
+
+
+def test_discard_without_readonly_receipt_never_chmods(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX 语义（unlink 不看只读位）下回调不触发 ⇒ touched 为空 ⇒ 恢复是 no-op。
+
+    用 spy 观察 `os.chmod`：一次都不许发生。只断言"对象仍是只读"是假绿——对象本来就没
+    被动过，读不出"恢复逻辑有没有乱改别的路径"。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"posix", mime_type="image/png")
+    )
+    calls: list[tuple[str, int]] = []
+    real_chmod = os.chmod
+
+    def _spy_chmod(path: str, mode: int) -> None:
+        calls.append((str(path), mode))
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(os, "chmod", _spy_chmod)
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert calls == [], f"POSIX 上不应有任何 chmod（touched 必为空），实收 {calls!r}"
+    assert _object_is_read_only(_object_path(tmp_path, blob.artifact_id))
+
+
+def test_discard_survives_object_removed_before_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """恢复是 best-effort：全局对象在恢复前被并发删掉 ⇒ discard 照样不抛。
+
+    在 `os.unlink` 模拟层里"删回执的同时把对象也删掉"，精确落在清位与恢复之间的竞态窗口。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"concurrent", mime_type="image/png")
+    )
+    object_path = _object_path(tmp_path, blob.artifact_id)
+    _install_windows_unlink(monkeypatch)
+    real_unlink = _windows_unlink.real  # type: ignore[attr-defined]
+
+    def _unlink_and_drop_object(path: str, *, dir_fd: int | None = None) -> None:
+        _windows_unlink(path, dir_fd=dir_fd)
+        with suppress(FileNotFoundError):
+            real_unlink(object_path)
+
+    monkeypatch.setattr(os, "unlink", _unlink_and_drop_object)
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")  # 不得抛
+
+    assert not _receipt_path(tmp_path, "sess-a", blob.artifact_id).exists()
+    assert not object_path.exists()
+
+
+def test_restore_touches_only_unlinked_files_not_directories(tmp_path: Path) -> None:
+    """纵深防御：恢复只由**文件**回执触发，目录（含名字像 sha 的）一概不记、不改。
+
+    回执是文件（hardlink）⇒ 只有它能共享全局对象的只读属性。若把 `os.rmdir` 也记进
+    `touched`，`_global_object_for_receipt` 就成了唯一守门人——而这里刻意构造一个**形状完全
+    合法的目录路径**（`attachments/objects/<sha[:2]>/<sha>` 但末段是目录），断言它既不触发对
+    该路径的 chmod，也不误改全局对象。
+    """
+    sha = "ab" * 32
+    fake_receipt = _sharded(
+        tmp_path / "artifacts" / "sess-a" / "attachments" / "objects", f"sha256:{sha}"
+    )
+    fake_receipt.mkdir(parents=True)
+    object_path = _object_path(tmp_path, f"sha256:{sha}")
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    object_path.write_bytes(b"untouched-global-object")
+    os.chmod(object_path, 0o600)
+
+    session_dir = tmp_path / "artifacts" / "sess-a"
+    local_artifact._rmtree_clearing_readonly(session_dir, set())
+
+    assert not fake_receipt.exists()
+    assert stat.S_IMODE(os.stat(object_path).st_mode) == 0o600
+
+
+def test_global_object_for_receipt_rejects_malformed_paths(tmp_path: Path) -> None:
+    """路径推导是信任边界：形状不符 / 越界一律返回 `None`（不许推导出任意路径）。"""
+    root = tmp_path / "artifacts"
+    session_dir = root / "sess-a"
+    derive = local_artifact._global_object_for_receipt
+    sha = "cd" * 32
+    good = _sharded(session_dir / "attachments" / "objects", f"sha256:{sha}")
+
+    assert derive(session_dir, good, root) == _object_path(tmp_path, f"sha256:{sha}")
+    # 段数不对 / 中段不符 / 摘要非 64 位 hex / shard 与摘要前缀不符 → 一律拒绝。
+    assert derive(session_dir, session_dir / "attachments" / sha, root) is None
+    assert derive(session_dir, session_dir / "objects" / sha[:2] / sha, root) is None
+    assert derive(session_dir, session_dir / "attachments" / "objects" / sha[:2] / "nope", root) is None
+    assert derive(session_dir, session_dir / "attachments" / "objects" / "zz" / sha, root) is None
+    # 不在会话目录之下（`relative_to` 抛 ValueError）→ 拒绝。
+    assert derive(session_dir, root / "sess-b" / "attachments" / "objects" / sha[:2] / sha, root) is None
+
+
+def test_discard_restores_global_object_when_receipt_is_a_legacy_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """升级场景边界（`_link_session_receipt` docstring）：回执与全局对象**不是同一 inode**。
+
+    此时清回执的只读位不会波及全局对象；恢复按 sha 推导出的**全局对象路径**照常执行
+    （best-effort，对已是只读的对象重复 chmod 无害），不为旧 inode 加特殊分支。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"legacy-inode", mime_type="image/png")
+    )
+    object_path = _object_path(tmp_path, blob.artifact_id)
+    receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
+    # 把回执换成同字节的**独立 inode**（升级前旧对象的形状），两边都只读。
+    receipt.unlink()
+    receipt.write_bytes(b"legacy-inode")
+    os.chmod(receipt, 0o400)
+    assert receipt.stat().st_ino != object_path.stat().st_ino
+
+    _install_windows_unlink(monkeypatch)
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert not receipt.exists()
+    assert _object_is_read_only(object_path)
 
 
 @pytest.mark.parametrize(
@@ -379,27 +587,22 @@ def test_discard_callback_receives_version_appropriate_exc(
     receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
     assert receipt.is_file()
 
-    real_unlink = os.unlink
-
-    def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
-        try:
-            st = os.stat(path, dir_fd=dir_fd)
-        except OSError:
-            return real_unlink(path, dir_fd=dir_fd)
-        if stat.S_ISREG(st.st_mode) and not (st.st_mode & stat.S_IWUSR):
-            raise PermissionError(13, "Access is denied (simulated Windows read-only file)")
-        return real_unlink(path, dir_fd=dir_fd)
-
     seen: list[object] = []
-    real_callback = local_artifact._clear_readonly_and_retry
+    real_factory = local_artifact._readonly_retry_handler
 
-    def _spy(func: object, path: str, exc: object) -> None:
-        seen.append(exc)
-        real_callback(func, path, exc)  # type: ignore[arg-type]
+    def _spy_factory(touched: set[Path]) -> object:
+        """包住回调工厂：记下回调收到的第三个参数，其余行为原样透传。"""
+        inner = real_factory(touched)
 
-    monkeypatch.setattr(os, "unlink", _windows_unlink)
+        def _spy(func: object, path: str, exc: object) -> None:
+            seen.append(exc)
+            inner(func, path, exc)  # type: ignore[arg-type]
+
+        return _spy
+
+    _install_windows_unlink(monkeypatch)
     monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
-    monkeypatch.setattr(local_artifact, "_clear_readonly_and_retry", _spy)
+    monkeypatch.setattr(local_artifact, "_readonly_retry_handler", _spy_factory)
 
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
