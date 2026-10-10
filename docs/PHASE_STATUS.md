@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 `codex/issue-877-dsh-adapter`，tip `fc7af0fb`）：调研目标插件、DSH、VS Code、Claude Code、Pi；静态预检复用安全读取，只核对固定清单，不执行源码。由于上游 `Off` 会下发 `off`、#865 `Default` 会省略请求字段，来源标为 `needs-adaptation` 且禁用。定向 CLI 测试 48 passed / 2 skipped；源包冒烟匹配所列文件摘要；双轴修后复审 APPROVE、零新 findings。全量 pytest/Gate-0 未跑；未 push/PR/merge；Issue OPEN + `in-progress`。明细见月档 #877 与 `docs/research/2026-10-11-issue-877-plugin-preflight-research.md`。
+- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 codex/issue-877-dsh-adapter，tip 4684e493）：调研与实现、固定来源 MIT 夹具及双轴修后审查已完成；上游 Off 下发 off 与 #865 Default 省略字段不等价，包保持 needs-adaptation 且禁用。全量 pytest 7388 passed / 40 skipped / 51 deselected；完整 Playwright E2E 540 passed（2 workers）。冻结 SHA/tree 与逐文件 hash、首次红因及修复见月档 #877。Gate-0 未跑；未 push/PR/merge；Issue OPEN + in-progress。
 
 - **2026-10-10 · #872 Git Skills T3（分支 `codex/issue-872-skill-git`，已验证代码点 `15ea25f3` / tree `b10fb266`）**：固定 Git Skill 来源与内容摘要，显式 update/rollback，待启用版本重启后切换；失败保留活动版本。两轴终审无未关闭 finding；Gate-0 6/6、clean 全量 pytest 7285P/28S/51D、focused 118P/2S。已同步 `origin/main` `c8f43a7c`（merge `fbe5fa1c`，仅新增 Gate-0 收据、代码与测试目录无变化）；Issue OPEN + `in-progress`。尚未 push/PR/merge，等用户批准。
 
