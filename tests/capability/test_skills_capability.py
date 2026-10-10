@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -210,6 +211,72 @@ class TestWiring:
         assert [e.name for e in capability.catalog()] == ["pdf-export"]
         assert any(isinstance(p, SkillCatalogContextProvider) for p in wiring.context_providers)
         assert any(isinstance(t, LoadSkillTool) for t in wiring.tools)
+
+    @pytest.mark.asyncio
+    async def test_next_runtime_applies_pending_git_skill_before_discovery(self, tmp_path):
+        from agent_harness.capability.config import parse_capabilities_config
+        from agent_harness.skills.package_manager import SkillPackageManager
+
+        repo = tmp_path / "repo"
+        skill = repo / "packages" / "runtime-skill"
+        skill.mkdir(parents=True)
+        (skill / "references").mkdir()
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+            )
+            return result.stdout.strip()
+
+        def write_version(body: str, resource: str) -> None:
+            (skill / "SKILL.md").write_text(
+                "---\nname: runtime-skill\ndescription: Runtime update.\n---\n\n"
+                f"{body}\nRead [the guide](references/guide.md).\n",
+                encoding="utf-8",
+            )
+            (skill / "references" / "guide.md").write_text(resource, encoding="utf-8")
+
+        write_version("Old body.", "Old resource.\n")
+        git("init", "-q")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        git("add", ".")
+        git("commit", "-qm", "old version")
+        old_commit = git("rev-parse", "HEAD")
+        write_version("New body.", "New resource.\n")
+        git("add", ".")
+        git("commit", "-qm", "new version")
+        new_commit = git("rev-parse", "HEAD")
+
+        workspace = tmp_path / "workspace"
+        manager = SkillPackageManager(workspace)
+        manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/runtime-skill")
+        manager.enable("runtime-skill")
+        manager.update("runtime-skill", ref=new_commit)
+        assert "Old body." in (manager.managed_skills_dir / "runtime-skill" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(workspace),
+            skill_global_dir=str(tmp_path / "no-global"),
+        )
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"skills": {}}'),
+            settings=settings,
+        )
+
+        assert manager.list_packages()["runtime-skill"]["resolved_commit"] == new_commit
+        load_tool = next(tool for tool in wiring.tools if isinstance(tool, LoadSkillTool))
+        loaded = await load_tool.execute(load_tool.args_schema(name="runtime-skill"))
+        assert loaded.ok is True
+        assert "New body." in loaded.data["content"]
+        assert (Path(loaded.data["resource_root"]) / "references" / "guide.md").read_text(
+            encoding="utf-8"
+        ) == "New resource.\n"
 
     @pytest.mark.asyncio
     async def test_new_runtime_loads_only_enabled_managed_skill_packages(self, tmp_path):

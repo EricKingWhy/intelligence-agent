@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,238 @@ def _complete_package(root: Path, name: str = "sample-skill") -> Path:
     _write(package / "references" / "guide.md", "Guide content.\n")
     _write(package / "assets" / "icon.bin", b"\x00\x01asset")
     return package
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def _git_skill_repo(root: Path) -> tuple[Path, str, str]:
+    repo = root / "repo"
+    package = repo / "packages" / "sample-skill"
+    _write(
+        package / "SKILL.md",
+        "---\nname: sample-skill\ndescription: Versioned example.\n---\n\n"
+        "Read [the guide](references/guide.md). Old body.\n",
+    )
+    _write(package / "references" / "guide.md", "Old resource.\n")
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "old version")
+    old_commit = _git(repo, "rev-parse", "HEAD")
+
+    _write(
+        package / "SKILL.md",
+        "---\nname: sample-skill\ndescription: Versioned example.\n---\n\n"
+        "Read [the guide](references/guide.md). New body.\n",
+    )
+    _write(package / "references" / "guide.md", "New resource.\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "new version")
+    new_commit = _git(repo, "rev-parse", "HEAD")
+    return repo, old_commit, new_commit
+
+
+def _load_installed_skill(manager: SkillPackageManager) -> tuple[str, Path]:
+    digests = manager.enabled_skill_digests()
+    discovery = SkillDiscovery(
+        directories=[manager.project_skills_dir, manager.managed_skills_dir],
+        project_dir=manager.project_skills_dir,
+        managed_directory=manager.managed_skills_dir,
+        enabled_managed_skills=set(digests),
+        enabled_managed_skill_digests=digests,
+    )
+    tool = LoadSkillTool(SkillCapability(discovery))
+    result = asyncio.run(tool.execute(tool.args_schema(name="sample-skill")))
+    assert result.data is not None
+    return result.data["content"], Path(result.data["resource_root"])
+
+
+def test_git_skill_update_and_rollback_keep_complete_snapshots(tmp_path: Path) -> None:
+    repo, old_commit, new_commit = _git_skill_repo(tmp_path)
+    manager = SkillPackageManager(tmp_path / "workspace")
+
+    installed = manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
+    assert installed["source"] == repo.as_uri()
+    assert installed["resolved_commit"] == old_commit
+    assert installed["enabled"] is False
+    assert installed["sha256"] == package_manager._git_tree_sha256(
+        manager.managed_skills_dir / "sample-skill", installed["git_modes_sha256"]
+    )
+
+    manager.enable("sample-skill")
+    old_body, old_root = _load_installed_skill(manager)
+    assert "Old body." in old_body
+    assert (old_root / "references" / "guide.md").read_text(encoding="utf-8") == "Old resource.\n"
+
+    pending = manager.update("sample-skill", ref=new_commit)
+    assert pending["pending_version"]["resolved_commit"] == new_commit
+    assert (manager.managed_skills_dir / "sample-skill" / "references" / "guide.md").read_text(
+        encoding="utf-8"
+    ) == "Old resource.\n"
+
+    manager.apply_pending_versions()
+    current = manager.list_packages()["sample-skill"]
+    assert current["resolved_commit"] == new_commit
+    assert current["previous_version"]["resolved_commit"] == old_commit
+    new_body, new_root = _load_installed_skill(manager)
+    assert "New body." in new_body
+    assert (new_root / "references" / "guide.md").read_text(encoding="utf-8") == "New resource.\n"
+
+    rollback = manager.rollback("sample-skill")
+    assert rollback["pending_version"]["resolved_commit"] == old_commit
+    assert (manager.managed_skills_dir / "sample-skill" / "references" / "guide.md").read_text(
+        encoding="utf-8"
+    ) == "New resource.\n"
+
+    manager.apply_pending_versions()
+    restored = manager.list_packages()["sample-skill"]
+    assert restored["resolved_commit"] == old_commit
+    assert restored["previous_version"]["resolved_commit"] == new_commit
+    old_body, old_root = _load_installed_skill(manager)
+    assert "Old body." in old_body
+    assert (old_root / "references" / "guide.md").read_text(encoding="utf-8") == "Old resource.\n"
+
+    manager.remove("sample-skill")
+    assert not (manager.managed_skills_dir / "sample-skill").exists()
+    assert not (manager.managed_versions_dir / "sample-skill").exists()
+
+
+def test_git_skill_update_failure_preserves_manifest_and_active_snapshot(tmp_path: Path) -> None:
+    repo, old_commit, _new_commit = _git_skill_repo(tmp_path)
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
+    active = manager.managed_skills_dir / "sample-skill"
+    before_manifest = manager.manifest_path.read_bytes()
+    record = manager.list_packages()["sample-skill"]
+    before_tree = package_manager._git_tree_sha256(active, record["git_modes_sha256"])
+
+    with pytest.raises(SkillPackageError, match="fetch"):
+        manager.update("sample-skill", ref="missing-ref")
+
+    assert manager.manifest_path.read_bytes() == before_manifest
+    assert package_manager._git_tree_sha256(active, record["git_modes_sha256"]) == before_tree
+
+
+def test_git_skill_activation_io_failure_keeps_old_skill_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, old_commit, new_commit = _git_skill_repo(tmp_path)
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
+    manager.enable("sample-skill")
+    manager.update("sample-skill", ref=new_commit)
+
+    real_copytree = shutil.copytree
+    def fail_staging_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(destination).parent.name.startswith(".staging-"):
+            raise OSError("simulated disk full")
+        return real_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(package_manager.shutil, "copytree", fail_staging_copy)
+
+    with pytest.raises(SkillPackageError, match="pending Git Skill activation failed"):
+        manager.apply_pending_versions()
+
+    current = manager.list_packages()["sample-skill"]
+    assert current["resolved_commit"] == old_commit
+    assert current["pending_version"]["resolved_commit"] == new_commit
+    content, resource_root = _load_installed_skill(manager)
+    assert "Old body." in content
+    assert (resource_root / "references" / "guide.md").read_text(encoding="utf-8") == "Old resource.\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose Git executable bits in st_mode")
+def test_git_skill_install_preserves_and_verifies_executable_mode(tmp_path: Path) -> None:
+    repo, _old_commit, _new_commit = _git_skill_repo(tmp_path)
+    _write(repo / "packages" / "sample-skill" / "references" / "run.sh", "#!/bin/sh\necho ready\n")
+    _git(repo, "add", ".")
+    _git(repo, "update-index", "--chmod=+x", "packages/sample-skill/references/run.sh")
+    _git(repo, "commit", "-qm", "add executable resource")
+    commit = _git(repo, "rev-parse", "HEAD")
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=commit, subdirectory="packages/sample-skill")
+
+    script = manager.managed_skills_dir / "sample-skill" / "references" / "run.sh"
+    assert script.stat().st_mode & 0o111
+    script.chmod(0o644)
+    record = manager.list_packages()["sample-skill"]
+    with pytest.raises(SkillPackageError, match="changed after installation"):
+        manager._verify_package(manager.managed_skills_dir / "sample-skill", record)
+    assert not (manager.managed_skills_dir / ".pending" / "sample-skill").exists()
+
+
+def test_git_skill_rejects_credentials_and_unsafe_subdirectory(tmp_path: Path) -> None:
+    manager = SkillPackageManager(tmp_path / "workspace")
+
+    with pytest.raises(SkillPackageError) as credentials_error:
+        manager.install_git(
+            "https://user:secret-token@example.invalid/repo.git",
+            ref="main",
+            subdirectory="packages/sample-skill",
+        )
+    assert "secret-token" not in str(credentials_error.value)
+    assert manager.list_packages() == {}
+
+    with pytest.raises(SkillPackageError, match="subdirectory"):
+        manager.install_git(
+            "https://example.invalid/repo.git",
+            ref="main",
+            subdirectory="../../outside",
+        )
+    assert manager.list_packages() == {}
+
+
+def test_git_skill_install_never_runs_repository_scripts(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "packages" / "scripted-skill"
+    marker = tmp_path / "script-ran"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: scripted-skill\ndescription: Script must stay inert.\n---\n\n"
+        "Run [the helper](scripts/run.py).\n",
+    )
+    _write(
+        skill / "scripts" / "run.py",
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n",
+    )
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "scripted skill")
+    commit = _git(repo, "rev-parse", "HEAD")
+
+    manager = SkillPackageManager(tmp_path / "workspace")
+    installed = manager.install_git(
+        repo.as_uri(), ref=commit, subdirectory="packages/scripted-skill"
+    )
+
+    assert installed["compatibility"]["status"] == "needs-adaptation"
+    assert installed["enabled"] is False
+    assert not marker.exists()
+
+
+def test_git_manifest_rejects_tampered_version_metadata(tmp_path: Path) -> None:
+    repo, old_commit, new_commit = _git_skill_repo(tmp_path)
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
+    manager.update("sample-skill", ref=new_commit)
+
+    manifest = json.loads(manager.manifest_path.read_text(encoding="utf-8"))
+    manifest["packages"]["sample-skill"]["pending_version"]["source_ref"] = "../secret"
+    manager.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SkillPackageError, match="manifest record") as error:
+        manager.list_packages()
+    assert "secret" not in str(error.value)
 
 
 def test_install_snapshots_complete_package_and_enables_only_after_explicit_selection(
