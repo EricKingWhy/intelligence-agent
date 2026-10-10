@@ -1223,8 +1223,25 @@ export function unguardedBackupDelete(source, options = {}) {
       // so the sweep would remove every "$INSTDIR.old-*" sibling, foreign or
       // unbraced (measured: a `"1"`→`"0"` mutation at installer.nsh:174 passed
       // every check of this guard and the whole unit suite).
+      //
+      // #919 Q1: the promote site's candidate is the other name that has to
+      // pass the check. $iaBackupDirectory comes from HKCU, and only the
+      // ".old-{guid}" shape separates the installer's own backup from any other
+      // directory a user-writable value can name; the rule used to gate on the
+      // sweep policy alone, so flipping the promote arming to "0" kept the
+      // whole guard and suite green (measured). The rollback's candidate is the
+      // partial install — a different contract, whose deliberate "0" is #904
+      // item 3 — so this gate keys on the candidate, not on every non-sweep
+      // site.
+      const armsBackupName = (() => {
+        for (let j = blockStart; j < prepareIndex; j += 1) {
+          if (!onDeletePath(j)) continue
+          if (/^\s*StrCpy\s+\$iaDeleteCandidate\s+"\$iaBackupDirectory"\s*$/i.test(lines[j])) return true
+        }
+        return false
+      })()
       if (
-        policy === 'sweep' &&
+        (policy === 'sweep' || armsBackupName) &&
         !lines
           .slice(blockStart, prepareIndex)
           .some(
@@ -1235,7 +1252,7 @@ export function unguardedBackupDelete(source, options = {}) {
       ) {
         problems.push({
           line: i + 1,
-          what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: `${policy === 'sweep' ? 'the sweep' : 'the delete of a $iaBackupDirectory candidate'} does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built`,
         })
       }
     }

@@ -1636,6 +1636,47 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
   })
 
+  it('the promote delete arms the shape check like the sweep does (#919 Q1)', () => {
+    // The flag is what makes iaPrepareDelete run the name check, and the promote
+    // site's candidate is the other name that has to pass it: $iaBackupDirectory
+    // comes from HKCU, and only the ".old-{guid}" shape separates the
+    // installer's own backup from any other directory a user-writable value can
+    // name. The rule used to gate on the sweep policy alone, so flipping the
+    // promote arming to "0" passed the whole guard and suite (measured in #919).
+    const promote = [
+      'Function iaPromoteApplication',
+      '  StrCpy $iaDeleteCandidate "$iaBackupDirectory"',
+      '  StrCpy $iaDeleteBase "$iaFinalDirectory"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaPromoteDeleteSkipped',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      ...GUARDED_TAIL.map((line) => `  ${line}`),
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(promote), [])
+    // Disarming the arming is the only change, and it leaves the target
+    // unchecked: whatever name the pointer holds is deleted by name alone.
+    assert.deepEqual(unguardedBackupDelete(promote.replace('"1"', '"0"')), [
+      {
+        line: 8,
+        what: 'the delete of a $iaBackupDirectory candidate does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+      },
+    ])
+    // The rollback's candidate is the partial install, a different contract —
+    // its deliberate "0" is #904 item 3 — so the rule keys on the candidate
+    // rather than on every non-sweep site.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        promote
+          .replace('StrCpy $iaDeleteCandidate "$iaBackupDirectory"', 'StrCpy $iaDeleteCandidate "$iaFinalDirectory"')
+          .replace('"1"', '"0"'),
+      ),
+      [],
+    )
+  })
+
   it('flags a recursive delete that is not the prepared target (#904, round 6)', () => {
     // Every other rule here binds `RMDir /r "$iaDeleteTarget"`; a second
     // recursive delete of anything else — a path read from the registry, say —

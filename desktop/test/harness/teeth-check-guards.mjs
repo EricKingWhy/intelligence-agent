@@ -264,7 +264,7 @@ const mutations = {
   // whole guard and the unit suite), the exit-code value and its position on the
   // kept path (P3), and the stray second recursive delete (P3).
   'sweep shape-check arming requirement dropped (#904)': swap(
-    "        policy === 'sweep' &&",
+    "        (policy === 'sweep' || armsBackupName) &&",
     '        false &&',
   ),
   'sweep exit-code value pin dropped (#904)': swap(
@@ -280,7 +280,16 @@ const mutations = {
     '    if (true) continue',
   ),
 
-  // --- rule #919 Q11 added ---
+  // --- rules #919 added ---
+  // Q1: the arming rule covered the sweep policy alone, so a promote site that
+  // disarmed the shape check deleted an HKCU-writable name unvalidated and the
+  // whole suite stayed green (measured in #919). The mutation limits the
+  // requirement back to the sweep; the promote fixture is what has to catch it.
+  'backup-site arming requirement dropped (#919 Q1)': swap(
+    "        (policy === 'sweep' || armsBackupName) &&",
+    "        policy === 'sweep' &&",
+  ),
+
   // The node runtime lock validator compared the pin's major against
   // minimumMajor only; a 22.0.x pin (below the TUI's ">=22.1" floor) passed the
   // validator and the whole suite (measured in #919). The mutation reverts the
