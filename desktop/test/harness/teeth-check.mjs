@@ -162,10 +162,13 @@ const targets = [
 // to the shipped text), so the run fails: a harness that only prints them is
 // easy to read as green.
 let survivors = 0
-// #919 review (F5): the restore is the harness's documented guarantee, so it
-// survives an interrupted run: a Ctrl-C or kill between the write and the
-// restore would otherwise leave the mutated text behind, and the next run would
-// read it as its baseline and "restore" to it.
+// #919 review (F5): the restore is the harness's documented guarantee: a
+// Ctrl-C or an exception inside the run between the write and the restore
+// would otherwise leave the mutated text behind, and the next run would read it
+// as its baseline and "restore" to it. A forced kill (`taskkill /F`, Task
+// Manager, closing the console) runs no handler at all — the end-of-run
+// byte-for-byte check is what catches that case (measured; disposition review
+// N4/R8).
 let current = null
 const restoreCurrent = () => {
   if (current !== null && readFileSync(current.path, 'utf8') !== current.raw) {

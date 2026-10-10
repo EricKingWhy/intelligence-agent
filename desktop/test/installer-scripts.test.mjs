@@ -1788,6 +1788,37 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       }),
       [],
     )
+    // The fix round's own review (F1) measured two constructions on the real
+    // `installer.nsh` that this rule read as clean, both on its new surface:
+    // the loop's back-jump spelled as a two-target `StrCmp` (no bare `Goto`
+    // below the delete, so the span collapsed onto the delete and the tail legs
+    // fell outside it), and a hop label declared below the loop whose body
+    // jumps back into the tail (the declined `Goto` landed outside the span and
+    // the hop was never followed). Both are reported now; the hop whose body
+    // stays outside the pass is still the kept path.
+    const twoTarget = looped.replace(
+      '  Goto iaSweepLoop',
+      '  StrCmp $1 "" iaSweepLoopEnd iaSweepLoop',
+    )
+    assert.deepEqual(unguardedBackupDelete(twoTarget, { sitePolicies: DELETE_SITE_POLICIES }), [])
+    assert.deepEqual(
+      unguardedBackupDelete(twoTarget.replace('  Goto iaSweepDone', '  Goto iaSweepKept'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    const withHop = (hopBody) =>
+      looped
+        .replace('  Goto iaSweepDone', '  Goto iaSweepHop')
+        .replace('!macroend', `iaSweepHop:\n  ${hopBody}\n!macroend`)
+    assert.deepEqual(
+      unguardedBackupDelete(withHop('Goto iaSweepKept'), { sitePolicies: DELETE_SITE_POLICIES }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(withHop('Goto iaSweepLoopEnd'), { sitePolicies: DELETE_SITE_POLICIES }),
+      [],
+    )
     // Registered fail-closed limits of the same rule, pinned so they cannot
     // drift silently: the arming is read in its plain form, and the branch's
     // last statement is text — a maxlen `StrCpy … "1" 2` that arms at runtime
@@ -2175,9 +2206,11 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
     // #919 disposition review (R2): the insertion rule follows `${define}`
     // expansions and an `!include` too — a define can carry the insertion or
-    // the write itself, and both spellings are live NSIS (both compiled and ran
-    // the disarm on makensis 3.0.4.1), while the literal-`!insertmacro` rule
-    // alone read them as clean.
+    // the write itself, and the literal-`!insertmacro` rule alone read them as
+    // clean. Measured on makensis 3.0.4.1: the carried insertion does expand,
+    // and its body then sits inside the value's own quotes, which is a compile
+    // error rather than a silent disarm — the guard reads the spelling anyway
+    // (fail-closed, one quote form away from compiling).
     const withUse = (defs, use) =>
       [
         defs.join('\n'),
@@ -2224,6 +2257,21 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(
       unguardedBackupDelete(withUse(['!define IA_PROMPT "old leftovers?"'], 'MessageBox MB_OK "${IA_PROMPT}"')),
       [],
+    )
+    // #919 fix-round review (F3): dot- and dash-spelled define names are legal
+    // on makensis 3.0.4.1 (`!define IA.X "…"` + `${IA.X}` compiles and expands,
+    // measured), and the token used to read `${…}` only took word characters —
+    // so the same carried state was invisible under those spellings.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withUse(['!define IA.DISARM "!insertmacro iaDisarmShape"'], '${IA.DISARM}'),
+      ),
+      [
+        {
+          line: 10,
+          what: "${IA.DISARM} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
     )
   })
 

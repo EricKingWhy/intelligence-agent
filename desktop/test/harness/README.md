@@ -21,7 +21,7 @@ because the node-runtime lock rules (#919 Q11) live in the second one.
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
 | `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (4) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 11/11 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `909e3a16…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — and the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) | 75/75 red, 0 survivors, restore identical (sha256 `d9cf073e…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names | 78/78 red, 0 survivors, restore identical (sha256 `efe5864d…`) |
 
 The #919 batch added five mutations to `teeth-check.mjs` (the failed delete's
 exit code plus the four installer.nsh sweep rules — the first entries that do
@@ -30,10 +30,12 @@ not rewrite `installer-directories.nsh`) and thirteen to
 guard harness (the candidate and arming spellings, the values the guard cannot
 read, the `!insertmacro` in the arming window, the declined branch's reach, the
 unclosed restore window, the declined exit in the dead-branch scan, the engines
-floor anchor and patch), and the disposition review's own round added six more
+floor anchor and patch), the disposition review's own round added six more
 (one per reading the window gained: the insertion bodies, the `${define}`
 expansions, the `!include`, any other statement using the delete state, the
-candidate source as the whole window, and the loop tail in the delete pass).
+candidate source as the whole window, and the loop tail in the delete pass),
+and the fix round's own review added three (the delete-loop span read from any
+statement, the hop chase into the pass, and the dotted-define token).
 Both were re-run from the checkout on 2026-10-10
 with 0 survivors and byte-identical restores. The disposition's first
 `teeth-check-guards.mjs` run also caught a real gap in the disposition itself:

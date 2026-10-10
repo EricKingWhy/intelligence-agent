@@ -434,7 +434,7 @@ const mutations = {
   // F3: the declined branch may not reach the delete pass — a `Goto` into the
   // prompt's IDOK target, or a fall-through into it.
   'declined branch may reach the delete pass again (#919 review F3)': swap(
-    '            if (jumpsIntoDelete || fallsThrough || coversDelete) {',
+    '            if (reaches || fallsThrough || coversDelete) {',
     '            if (false) {',
   ),
   // R3: the delete pass is the labelled loop the delete sits in, so a landing
@@ -467,13 +467,39 @@ const mutations = {
     "const floor = /^\\s*>=\\s*(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?\\s*$/",
     "const floor = /^\\s*>=\\s*(\\d+)(?:\\.(\\d+))?\\s*$/",
   ),
+  // F1 (fix round): the delete-pass span is read from any statement naming a
+  // label above the delete, not only from a bare `Goto` — the two-target
+  // `StrCmp $1 "" iaSweepLoopEnd iaSweepLoop` back-jump collapsed the span onto
+  // the delete, and the tail legs (`iaSweepKept`, `iaSweepNext`) then read as
+  // outside it (measured on the real installer.nsh by the fix round's review).
+  'delete loop span read from bare Goto only again (#919 fix-round review F1)': swap(
+    '            const labelTokens = (line) =>\n              outsideStrings(line)\n                .trim()',
+    "            const labelTokens = (line) =>\n              (/^\\s*Goto\\s+(\\S+)\\s*$/i.exec(outsideStrings(line))?.[1] ?? '')\n                .trim()",
+  ),
+  // F1 (fix round): a label whose own span jumps back into the pass counts as
+  // reaching it — without the walk, a hop label declared below the loop
+  // laundered `Goto iaSweepHop` into a silent green.
+  'hop labels no longer followed into the delete pass (#919 fix-round review F1)': swap(
+    '                const hit = span.some((line) =>\n                  labelTokens(line).some((token) => visit(token, walk)),\n                )',
+    '                const hit = false',
+  ),
+  // F3 (fix round): the `${...}` token takes any name up to a brace — dot- and
+  // dash-spelled define names are legal on makensis 3.0.4.1 (measured with the
+  // real compiler) and were invisible to the `\\w+` reading of the use site.
+  'define token back to word characters only (#919 fix-round review F3)': swap(
+    '        const defineUse = (code.match(/\\$\\{[^}\\s]+\\}/g) ?? []).find((token) => {',
+    '        const defineUse = (code.match(/\\$\\{\\w+\\}/g) ?? []).find((token) => {',
+  ),
 }
 
 let survivors = 0
-// #919 review (F5): the restore is the harness's documented guarantee, so it
-// survives an interrupted run: a Ctrl-C or kill between the write and the
-// restore would otherwise leave the guard mutated, and the next run would read
-// that text as its baseline and "restore" to it.
+// #919 review (F5): the restore is the harness's documented guarantee: a
+// Ctrl-C or an exception inside the run between the write and the restore
+// would otherwise leave the guard mutated, and the next run would read that
+// text as its baseline and "restore" to it. A forced kill (`taskkill /F`, Task
+// Manager, closing the console) runs no handler at all — the end-of-run
+// byte-for-byte check is what catches that case (measured; disposition review
+// N4/R8).
 const restore = () => {
   if (readFileSync(guardPath, 'utf8') !== raw) writeFileSync(guardPath, raw)
 }
