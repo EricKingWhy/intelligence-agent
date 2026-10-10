@@ -289,13 +289,14 @@ class TestApplyPatchNotFoundHint:
         assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
 
     @pytest.mark.asyncio
-    async def test_mixed_line_endings_hint_points_to_write(
+    async def test_mixed_line_endings_hint_gives_rewrite_path(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """混行尾文件 ⇒ 点名行尾事实并指向 write，且不得给不可执行的改写指令。
+        """混行尾文件 ⇒ 点名行尾事实，并**同时**给改写与 write 两条路。
 
-        #851 P1 的 apply_patch 侧对称用例：段与段行尾不同时「按该文件的行尾改写」
-        照做仍 count()==0，这条指令必须不出现。
+        #851 二轮修回 P1 的 apply_patch 侧对称用例：混行尾文件里改写成
+        「对应段落的行尾」是可能命中的（同一份文件里另一段就命中得了），
+        「无法靠改写 old_string 的行尾命中」这种绝对断言为假、必须不出现。
         """
         sandbox.write_text("f.py", "a = 1\r\nb = 2\nc = 3\n")
 
@@ -313,8 +314,9 @@ class TestApplyPatchNotFoundHint:
         assert "混用" in msg
         assert "CRLF" in msg
         assert "LF" in msg
-        assert "write" in msg
-        assert "按该文件的行尾改写" not in msg
+        assert "对应段落的行尾" in msg
+        assert "改用 write 整文件重写" in msg
+        assert "无法" not in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
 
     @pytest.mark.asyncio

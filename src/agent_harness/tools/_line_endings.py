@@ -60,8 +60,8 @@ def _kinds(text: str) -> list[str]:
     return [label for label, n in present if n]
 
 
-def line_ending_mismatch(content: str, old_string: str) -> tuple[str, str] | None:
-    """内容与 old_string 只在行尾上不同时，返回 (文件行尾, old_string 行尾)。
+def line_ending_mismatch(content: str, old_string: str) -> tuple[list[str], list[str]] | None:
+    """内容与 old_string 只在行尾上不同时，返回 (文件行尾种类, old_string 行尾种类)。
 
     返回 None ⇒ 差异不止行尾（就是上下文抄错），调用方**不得**提行尾，
     否则模型会去修一个不存在的行尾问题。
@@ -72,42 +72,70 @@ def line_ending_mismatch(content: str, old_string: str) -> tuple[str, str] | Non
 
     两侧行尾都按实际种类枚举（#851 P2）：只取「主导/最后一个」行尾会在混杂时
     拼出自相矛盾的句子（文件是 LF、old 也是 LF 却称「两者只在行尾上不同」）。
-    若枚举后两侧种类集合**完全相同**（正常不会发生：折平能命中而字节不命中，
-    只可能是行尾编码差异），降级为 None——不误报。
+    返回**种类列表**而不是拼好的字符串（#851 二轮修回 P3）：调用方要判
+    「混行尾」（`len(file_kinds) > 1`）与「old 是文件的子集」
+    （`set(old_kinds) <= set(file_kinds)`），靠 `" / " in text` 嗅探字符串是脆的。
 
-    `old_string` 里**一个 `\\n` 都没有**（例如整段由裸 CR 分隔）时也返回 None：
-    无法命名它的「行尾差异」，保守起见不提行尾。裸 CR 分隔的内容在 read 的展示
-    文本里通常带不出裸 CR，据此把它判成「行尾差异」更可能掩盖真正的抄错。
+    两侧种类集合相同时**不**降级（#851 二轮修回 P3）：折平能命中而字节不命中，
+    在混行尾文件里完全可能 —— old_string 自带 CRLF 与 LF 各一处、只是与文件的
+    段落位置对不上（实测 old `"a = 1\\r\\nb = 2\\nc = 3\\r\\n"` vs
+    文件 `"a = 1\\r\\nb = 2\\nc = 3\\n"`）。旧实现把它当「不可能发生」防御性
+    返回 None ⇒ 把真实的行尾问题吞成「上下文抄错」，模型只能盲试。
+
+    `old_string` 里**一个 `\\n` 都没有**（例如整段由裸 CR 分隔）时同样照报：
+    它就是要提的那类行尾差异（折平后命中、字节不命中），不再提前返回 None
+    （#851 二轮修回 P3）；只有两侧**一方的行尾记号种类为空**（单行、无任何
+    行尾记号）才返回 None —— 那种情况没有任何可命名的行尾差异。
     """
     canonical_content = content.replace("\r\n", "\n").replace("\r", "\n")
     canonical_old = old_string.replace("\r\n", "\n").replace("\r", "\n")
     if canonical_old not in canonical_content:
         return None
-    if "\n" not in old_string:
-        return None
     file_kinds = _kinds(content)
     old_kinds = _kinds(old_string)
-    if not file_kinds or not old_kinds or file_kinds == old_kinds:
+    if not file_kinds or not old_kinds:
         return None
-    return (" / ".join(file_kinds), " / ".join(old_kinds))
+    return (file_kinds, old_kinds)
 
 
 def not_found_hint(content: str, old_string: str) -> str:
     """未命中时的可执行后缀；差异不止行尾时返回空串（#851 验收 2 的判别力）。
 
-    混行尾的文件（#851 P1）不套统一后缀：对这种文件「按该文件的行尾改写
-    old_string」是不可执行的指令（段与段行尾不同，照做仍命中不了），
-    只给唯一可行的动作——用 write 整文件重写。
+    混行尾的文件（#851 P1）段与段行尾并不一致，所以给**两条**路：把 old_string
+    改写成文件中**对应段落**的行尾后重试，或改用 write 整文件重写。这里**不得**
+    断言「无法靠改写 old_string 的行尾命中」—— 那是假的（2026-10-10 复审反例：
+    混行尾文件里 old 改写成对应段落的行尾后 `count()==1`），绝对断言会让模型
+    放弃一条本来走得通的路。old 含有文件中没有的行尾种类（不是子集）时，
+    「按该文件的行尾改写」才真的不可执行，此时只给 write 一条路。
+
+    两侧行尾种类相同时（各段落位置不同）也给谨慎提示，不吞掉（#851 二轮修回 P3）。
     """
     mismatch = line_ending_mismatch(content, old_string)
     if mismatch is None:
         return ""
-    file_newline, old_newline = mismatch
-    if " / " in file_newline:
+    file_kinds, old_kinds = mismatch
+    file_newline = " / ".join(file_kinds)
+    old_newline = " / ".join(old_kinds)
+    if set(file_kinds) == set(old_kinds):
+        return (
+            f"该文件与 old_string 的行尾种类相同（{file_newline}），"
+            f"但各段落位置可能不同；建议核对对应段落的行尾，"
+            f"或改用 write 整文件重写"
+            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+        )
+    if len(file_kinds) > 1 and set(old_kinds) <= set(file_kinds):
         return (
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}。"
-            f"这种文件无法靠改写 old_string 的行尾命中，请改用 write 整文件重写。"
+            f"可尝试把 old_string 改写成文件中对应段落的行尾后重试；"
+            f"若仍不命中，改用 write 整文件重写"
+            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+        )
+    if len(file_kinds) > 1:
+        return (
+            f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
+            f"old_string 的行尾是 {old_newline}，含有该文件里不存在的行尾种类。"
+            f"请改用 write 整文件重写（必须照抄原文件逐字节行尾，勿统一成 LF）。"
         )
     return (
         f"该文件的行尾是 {file_newline}，old_string 的是 {old_newline}，"

@@ -328,10 +328,13 @@ class TestEditNotFoundHint:
     async def test_mixed_line_endings_report_line_ending_hint(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """混行尾文件 + 能归一化命中的 old_string ⇒ 点名行尾事实，且指向 write。
+        """混行尾文件 + 行尾种类是文件子集的 old_string ⇒ 两条路都给。
 
-        #851 P1：混行尾文件里「按该文件的行尾改写 old_string」不可执行
-        （段与段行尾不同，照做仍 count()==0），这条指令必须不出现。
+        #851 二轮修回 P1：混行尾文件的段与段行尾不一致，「改写成**对应段落**的行尾」
+        是可能命中的（本条的 old 照 LF 抄确实命中不了，但同一份文件里另一段命中得了
+        ——见下一条机械对照用例），所以文案必须同时给「改写后重试」与
+        「write 整文件重写」两条路，**不得**再出现「无法靠改写 old_string 的行尾命中」
+        这种绝对断言（2026-10-10 复审反例已证伪它）。
         """
         sandbox.write_text("f.py", "a = 1\r\nb = 2\nc = 3\n")
 
@@ -350,19 +353,77 @@ class TestEditNotFoundHint:
         assert "混用" in msg
         assert "CRLF" in msg
         assert "LF" in msg
-        assert "write" in msg
-        assert "按该文件的行尾改写" not in msg
+        assert "对应段落的行尾" in msg
+        assert "改用 write 整文件重写" in msg
+        assert "无法" not in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
 
     @pytest.mark.asyncio
-    async def test_all_fields_bare_cr_does_not_report_line_ending_hint(
+    async def test_mixed_line_endings_rewrite_that_can_hit_gets_both_paths(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """#851 P4-逻辑：old_string 一个 LF 都没有（全裸 CR 分隔）⇒ 不提行尾。
+        """#851 二轮修回 P1 的机械对照：混行尾文件里改写成对应段落行尾**真能命中**。
 
-        混行尾文件不走归一化，old_string 只有折平行尾才命中；此时两侧种类集合
-        确实不同（本该报行尾），但 old_string 里连一个 `\\n` 都没有，无法命名
-        它的「行尾差异」，保守起见不误报——否则会掩盖真正的上下文抄错。
+        先钉死事实（不靠文案自证）：这段 old_string 改写成 CRLF 后在本文件里
+        `count()==1`；再断言提示同时给两条路，且不含「无法」这类绝对断言。
+        """
+        content = "a = 1\r\nb = 2\r\nc = 3\n"
+        sandbox.write_text("f.py", content)
+        assert content.count("a = 1\r\nb = 2\r\n") == 1
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "a = 1\nb = 2\n",
+                "new_string": "a = 9\nb = 2\n",
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "对应段落的行尾" in msg
+        assert "改用 write 整文件重写" in msg
+        assert "无法" not in msg
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
+    async def test_same_line_ending_kinds_different_positions_still_hints(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 二轮修回 P3：两侧行尾**种类相同**、只是段落位置不同 ⇒ 不许吞掉。
+
+        混行尾文件里 old_string 自带 CRLF 与 LF 各一处、位置与文件对不上：
+        字节不命中、折平命中，而枚举出的种类集合两侧相同。旧实现把这当成
+        「不可能发生」防御性降级成 None ⇒ 漏报；现在出谨慎提示。
+        """
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\nc = 3\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "a = 1\r\nb = 2\nc = 3\r\n",
+                "new_string": "a = 9\r\nb = 2\nc = 3\r\n",
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert "种类相同" in msg
+        assert "改用 write 整文件重写" in msg
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
+
+    @pytest.mark.asyncio
+    async def test_bare_cr_old_string_reports_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 二轮修回 P3：old_string 里一个 `\\n` 都没有（全裸 CR）也提行尾。
+
+        这是货真价实的行尾差异（折平后命中、字节不命中）。旧实现用
+        「old_string 里连一个 \\n 都没有，无法命名它的行尾差异」提前返回 None ⇒
+        把真实的行尾差异吞成「上下文抄错」，模型只能盲试。
         """
         sandbox.write_text("f.py", "a = 1\r\nb = 2\n")
 
@@ -378,7 +439,8 @@ class TestEditNotFoundHint:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
         assert "未找到匹配的字符串" in msg
-        assert "行尾" not in msg
+        assert "行尾" in msg
+        assert "裸 CR" in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"
 
     @pytest.mark.asyncio
@@ -398,19 +460,3 @@ class TestEditNotFoundHint:
         assert "未找到匹配的字符串" in msg
         assert "行尾" not in msg
         assert "\\r" not in msg
-
-    @pytest.mark.asyncio
-    async def test_plain_context_typo_on_lf_file_stays_clean(
-        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
-    ):
-        """判别力（LF 文件侧）：LF 文件里的抄错同样不得提行尾。"""
-        sandbox.write_text("f.py", "a = 1\nb = 2\n")
-
-        result = await executor.execute(
-            _tool_call({"path": "f.py", "old_string": "z = 99\n", "new_string": "z = 100\n"})
-        )
-
-        assert result.result.ok is False
-        msg = result.result.message
-        assert "未找到匹配的字符串" in msg
-        assert "行尾" not in msg
