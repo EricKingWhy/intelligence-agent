@@ -35,6 +35,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -524,7 +525,11 @@ def _optional_str(value: object) -> str | None:
 def _clear_readonly_and_retry(
     func: Callable[..., object], path: str, _exc_info: object
 ) -> None:
-    """`shutil.rmtree` 的 `onerror` 回调：清只读位后重试一次删除（#916）。
+    """`shutil.rmtree` 的错误回调：清只读位后重试一次删除（#916）。
+
+    注册方式按解释器版本分支，见 `_rmtree_clearing_readonly`：两者只差第三个参数
+    （`onexc` 收异常实例、`onerror` 收 `sys.exc_info()` 三元组），而本函数不使用它
+    ⇒ 同一个回调直接给两个分支，不需要适配层。
 
     `_publish_blob` 发布的对象是只读的（`os.chmod(target, 0o400)`），而会话回执是它的
     hardlink ⇒ Windows 上回执与全局对象共享同一只读属性，`os.unlink` 抛
@@ -550,6 +555,23 @@ def _clear_readonly_and_retry(
             os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
         with suppress(OSError):
             func(path)
+
+
+def _rmtree_clearing_readonly(path: Path) -> None:
+    """删除目录树，只读文件清位后重试一次（#916）。
+
+    `onerror` 在 Python 3.12 被 `onexc` 取代（CPython `Lib/shutil.py` 起把 `onerror`
+    委托给 `onexc`），这里按版本选参数名，形状同 pip
+    `src/pip/_internal/utils/misc.py:160-164`（`if sys.version_info >= (3, 12)`）。
+    两分支共用 `_clear_readonly_and_retry`（它不读第三个参数）⇒ 不存在逻辑分叉。
+
+    版本判定读在**调用时**的 `sys.version_info`：import 时求值会写死在模块里，
+    测试注入替身（以及将来冻进旧解释器的构建）都改不动。
+    """
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly_and_retry)
 
 
 def discard_local_artifacts(settings: Settings, session_id: str) -> None:
@@ -580,8 +602,9 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
     target = Path(root).resolve() / session_id
     if target.is_dir():
         # 回执是只读对象的 hardlink：Windows 上直接 rmtree 删不掉（旧的 ignore_errors
-        # 会静默吞掉、留下回执）。改用 onerror 清只读位后重试，见 `_clear_readonly_and_retry`。
-        shutil.rmtree(target, onerror=_clear_readonly_and_retry)
+        # 会静默吞掉、留下回执）。改用清只读位后重试的错误回调，
+        # 见 `_rmtree_clearing_readonly` / `_clear_readonly_and_retry`。
+        _rmtree_clearing_readonly(target)
 
 
 def delete_local_artifacts(
