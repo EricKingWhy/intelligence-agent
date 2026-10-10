@@ -947,3 +947,140 @@ def _snapshot(*roots: Path) -> dict[str, bytes | None]:
         for root in roots
         for path in sorted(root.rglob("*"))
     }
+
+
+def test_cli_global_scope_is_shared_and_project_list_keeps_it_unselected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    workspace = tmp_path / "project-a"
+    source = tmp_path / "global-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: global-skill\ndescription: Shared package.\n---\n\nBody.\n",
+    )
+    settings = SimpleNamespace(
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+        capabilities=json.dumps({"skills": {"enabled": True}}),
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        cli, "_query_current_skill_runtime", lambda *_: ("not_running", "stopped", None)
+    )
+
+    def run(*args: str) -> dict[str, object]:
+        monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", *args])
+        cli.main()
+        return json.loads(capsys.readouterr().out)
+
+    installed = run("install", str(source), "--scope", "global")
+    assert installed["scope"] == "global"
+    listing = run("list")
+    assert listing["packages"] == []
+    available = listing["available_global_packages"]
+    assert available[0]["name"] == "global-skill"
+    assert available[0]["saved_selection"] == "not_selected"
+    assert available[0]["availability"] == "available_to_enable"
+    assert available[0]["runtime_version"] is None
+
+    settings.workspace_dir = str(tmp_path / "project-b")
+    second_project = run("list")
+    assert second_project["packages"] == []
+    assert second_project["available_global_packages"] == available
+
+    project_source = tmp_path / "project-skill"
+    _write(
+        project_source / "SKILL.md",
+        "---\nname: project-skill\ndescription: Local package.\n---\n\nBody.\n",
+    )
+    run("install", str(project_source))
+    project_listing = run("list")
+    assert [item["name"] for item in project_listing["packages"]] == ["project-skill"]
+    assert [item["name"] for item in project_listing["available_global_packages"]] == [
+        "global-skill"
+    ]
+
+
+def test_cli_global_git_update_rollback_and_remove_route_to_global_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "packages" / "global-git-skill"
+
+    def write_version(body: str) -> None:
+        _write(
+            source / "SKILL.md",
+            "---\nname: global-git-skill\ndescription: Global Git package.\n---\n\n"
+            f"{body}\n",
+        )
+
+    write_version("Old version.")
+    repo.mkdir(parents=True, exist_ok=True)
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    git("add", ".")
+    git("commit", "-qm", "old version")
+    old_commit = git("rev-parse", "HEAD")
+    write_version("New version.")
+    git("add", ".")
+    git("commit", "-qm", "new version")
+    new_commit = git("rev-parse", "HEAD")
+
+    workspace = tmp_path / "project"
+    settings = SimpleNamespace(
+        workspace_dir=str(workspace),
+        skill_global_dir=str(tmp_path / "home" / ".intelligence-agent" / "skills"),
+        capabilities=json.dumps({"skills": {"enabled": True}}),
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        cli, "_query_current_skill_runtime", lambda *_: ("not_running", "stopped", None)
+    )
+
+    def run(*args: str) -> dict[str, object]:
+        monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", *args])
+        cli.main()
+        return json.loads(capsys.readouterr().out)
+
+    installed = run(
+        "install-git",
+        repo.as_uri(),
+        "--ref",
+        old_commit,
+        "--subdirectory",
+        "packages/global-git-skill",
+        "--scope",
+        "global",
+    )
+    assert installed["scope"] == "global"
+    assert run("update", "global-git-skill", "--ref", new_commit, "--scope", "global")[
+        "pending_version"
+    ]["resolved_commit"] == new_commit
+    staged = run("list", "--scope", "global")["packages"][0]
+    assert staged["current_version"]["resolved_commit"] == old_commit
+    assert staged["pending_restart"] is True
+
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    global_manager = SkillPackageManager(
+        workspace,
+        scope="global",
+        global_skills_dir=settings.skill_global_dir,
+    )
+    assert global_manager.apply_pending_versions() == 1
+    rolled_back = run("rollback", "global-git-skill", "--scope", "global")
+    assert rolled_back["pending_version"]["resolved_commit"] == old_commit
+    assert global_manager.apply_pending_versions() == 1
+    removed = run("remove", "global-git-skill", "--scope", "global")
+    assert removed["removed"] is True
+    assert run("list", "--scope", "global")["packages"] == []
+    assert not (workspace / "plugin-installs.json").exists()
