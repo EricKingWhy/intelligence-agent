@@ -817,3 +817,34 @@ def test_a_url_entry_without_a_type_still_blocks_install(tmp_path: Path) -> None
     merged = attach_mcp_section(report)
 
     assert merged["status"] == "unsupported"
+
+
+def test_native_shape_out_of_scope_transport_also_stays_installable(tmp_path: Path) -> None:
+    """本仓形状（`servers` 列表）走的是另一条分派，收窄必须同样接上。
+
+    `_native_transport` 用 `(narrow if declared in _UNIMPLEMENTED_TRANSPORTS else fail)`
+    分档——只测 Claude 形状会漏掉这条边；而 native 形状**认得出** sse 却本仓没实现，
+    与 Claude 形状同档（可装不可启用），拼错的名字仍拦安装。
+    """
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, None)
+    _write(package / "mcp.json", json.dumps({"servers": [
+        {"name": "legacy", "transport": "sse", "url": "https://old.example.com/sse"},
+    ]}))
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["mcp"]["status"] == "unsupported"  # MCP 面内照旧明确失败（AC3）
+    assert merged["status"] == "needs-adaptation"
+
+    typo = _package(tmp_path / "typo", None)
+    _write(typo / "mcp.json", json.dumps({"servers": [
+        {"name": "bad", "transport": "stido", "command": "npx"},
+    ]}))
+    mistyped = attach_mcp_section(
+        {"status": "complete", "source": str(typo), "requirements": [], "errors": []}
+    )
+
+    assert mistyped["status"] == "unsupported"  # 写坏的 transport 仍 fail-closed
