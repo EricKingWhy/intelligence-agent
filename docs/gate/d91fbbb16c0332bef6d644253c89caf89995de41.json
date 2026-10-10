@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-10T08:29:26+00:00",
+  "sha": "d91fbbb16c0332bef6d644253c89caf89995de41",
+  "tree": "88c676687c2335eb72a3bd70ad47494085d33ccf",
+  "argv": [],
+  "result": "PASS",
+  "passed": 6,
+  "total": 6,
+  "failed": [],
+  "env_failures": [],
+  "wall_seconds": 21.92,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.43.0",
+    "python": "Python 3.12.3",
+    "ruff": "ruff 0.16.3",
+    "node": "v24.20.0",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.01,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.09,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/ruff",
+        "check",
+        "."
+      ],
+      "command": "./.venv/bin/ruff check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.71,
+      "cwd": "web",
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "/usr/bin/node node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 13.37,
+      "cwd": "web",
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "/usr/bin/node node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 5.29,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/bin/python -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 2.44,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/bin/python scripts/check_review_coverage.py"
+    }
+  ]
+}
