@@ -286,6 +286,10 @@ class TestApplyPatchNotFoundHint:
         assert "行尾" in msg
         assert "裸 CR" in msg
         assert "CRLF" not in msg
+        # #851 八轮修回 P2：同一标点约定的另一侧——前导句「未找到匹配。」+ 不带
+        # 前导空格的提示后缀 = `…。该文件…`。两处 caller 共用这条约定，故都钉。
+        assert "。 " not in msg
+        assert "未找到匹配。该文件" in msg
         assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
 
     @pytest.mark.asyncio

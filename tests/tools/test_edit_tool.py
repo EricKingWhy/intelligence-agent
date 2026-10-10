@@ -325,6 +325,30 @@ class TestEditNotFoundHint:
         assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
 
     @pytest.mark.asyncio
+    async def test_hint_joins_prefix_without_space_after_full_width_period(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 八轮修回 P2：提示后缀与「未找到」前导句的**拼接边界**。
+
+        两侧 caller 的前导句与 `not_found_hint` 的返回值是两条各自独立的文案，
+        边界靠标点约定：调用方前导句以 `。` 收尾，提示后缀**不带前导空格**，
+        拼出来才是 `…。该文件…`（中文正文里句号后不跟空格）。旧实现把分隔符塞进
+        提示后缀（前导空格），前导句又留着 `。` ⇒ 出现「。」+ 空格 的异常断句。
+        本用例只钉边界本身，不绑定任何一侧的措辞。
+        """
+        sandbox.write_text("f.py", "a = 1\rb = 2\r")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "b = 2\n", "new_string": "b = 22\n"})
+        )
+
+        assert result.result.ok is False
+        msg = result.result.message
+        assert "行尾" in msg  # 先确认走的是带提示的路径，边界断言才有意义
+        assert "。 " not in msg
+        assert "字符串。该文件" in msg  # 前导句末的句号直接接提示正文
+
+    @pytest.mark.asyncio
     async def test_mixed_line_endings_report_line_ending_hint(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):

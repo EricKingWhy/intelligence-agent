@@ -158,6 +158,12 @@ def not_found_hint(
     四条分支的**事实描述**不同（种类相同 / 文件混用且 old 是子集 / old 含文件里
     没有的种类 / 文件行尾单一），**动作句**是同一条，统一在 `_REWRITE_ACTION`
     一处拼接。
+
+    返回值**不带**与前导句之间的分隔符（无前导空格）：分隔符属于**拼接方**，由调用方
+    按自己的前导句标点决定。两处 caller 的前导句都以全角句号收尾，中文排印里句号后
+    不接空格，故两者都直接拼接、不加分隔符。把分隔符放进被复用的返回值，等于要求
+    每个调用方都记住「我的前导句得配一个空格」——任一处文案改动都会静默产出
+    「。」+ 空格的异常断句（#851 八轮修回 P2）。
     """
     base = content if search_base is None else search_base
     # 前置契约（P3）：调用方声明的基准里 old_string **字节精确存在** ⟹ 本次失败与
@@ -193,7 +199,7 @@ def not_found_hint(
             f"该文件的行尾是 {file_newline}，old_string 的是 {old_newline}，"
             f"两者只在行尾上不同"
         )
-    return f" {fact}。{_REWRITE_ACTION}{_WRITE_HINT_TAIL}"
+    return f"{fact}。{_REWRITE_ACTION}{_WRITE_HINT_TAIL}"
 
 
 def _from_lf(text: str, newline: str) -> str:
