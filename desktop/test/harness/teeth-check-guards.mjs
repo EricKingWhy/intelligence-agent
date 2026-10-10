@@ -268,12 +268,12 @@ const mutations = {
     '      const mustArm = false',
   ),
   'sweep exit-code value pin dropped (#904)': swap(
-    '/^\\s*SetErrorLevel\\s+2\\s*$/i.test(line)',
-    '/^\\s*SetErrorLevel\\b/i.test(line)',
+    '/^\\s*SetErrorLevel\\s+2\\s*$/i.test(lines[j])',
+    '/^\\s*SetErrorLevel\\b/i.test(lines[j])',
   ),
   'sweep exit-code position weakened to the whole block (#904)': swap(
-    '          .slice(i + 1, blockEnd + 1)',
-    '          .slice(blockStart, blockEnd + 1)',
+    'keptExitLevel(lines, i, blockEnd, onDeletePath)',
+    'keptExitLevel(lines, blockStart - 1, blockEnd, onDeletePath)',
   ),
   'stray recursive-delete rule dropped (#904)': swap(
     '    if (!/RMDir\\s+\\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue',
@@ -294,8 +294,32 @@ const mutations = {
   // whole guard and suite (measured in #919). The mutation restores that
   // presence reading; the sweep fixture's two-assignment case catches it.
   'arming presence check instead of the last assignment (#919 Q2)': swap(
-    "      const armed = lastArmed !== undefined && lastArmed.value === '1'",
-    "      const armed = arming.some((entry) => entry.value === '1')",
+    "        lastArmed.value === '1' &&",
+    "        arming.some((entry) => entry.value === '1') &&",
+  ),
+  // Q3: the arming only counts on the path the prepare call is on. Each branch
+  // clause gets its own mutation, and each is caught by its own fixture: an
+  // arming inside a branch that closes above the call, and one on the other
+  // side of an `${Else}` the call does not reach (both measured green in #919).
+  'arming branch-chain check dropped (#919 Q3)': swap(
+    '        onSameBranch(trace, lastArmed.index, prepareIndex) &&',
+    '        true &&',
+  ),
+  'arming sibling-divider check dropped (#919 Q3)': swap(
+    '        branchDividersBetween(trace, lastArmed.index, prepareIndex).length === 0',
+    '        true',
+  ),
+  // Q3: the exit code is a guarded statement — it has to sit on the delete's
+  // path, and it joins the dead-branch scan, so a `2` that never runs (inside
+  // another macro body, or inside a constant-false branch) no longer reports a
+  // kept sweep (both measured green in #919).
+  'sweep exit-code path filter dropped (#919 Q3)': swap(
+    '    if (!onPath(j)) continue',
+    '    if (false) continue',
+  ),
+  'sweep exit-code left out of the dead-branch scan (#919 Q3)': swap(
+    /      \.\.\.\(exitCodeIndex === -1 \? \[\] : \[\{ line: exitCodeIndex, label: 'the exit code' \}\]\),\n/,
+    '',
   ),
 
   // The node runtime lock validator compared the pin's major against

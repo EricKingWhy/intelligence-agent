@@ -1650,6 +1650,82 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       }),
       [{ line: 14, what: "missing ${Errors} check before the end of the delete's block" }],
     )
+    const armingMessage =
+      'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built'
+    // #919 Q3: the arming has to run on the path the prepare call (and the
+    // delete) is on. Inside a branch that closes above the call the flag is
+    // never set when the delete runs, and inside the other side of an
+    // `${Else}` the call runs without it — the branch handling the prepare and
+    // gate rules already have (measured in #919: both passed).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped(
+          '  StrCpy $iaDeleteShapeCheck "1"',
+          '  ${If} $9 == 0\n    StrCpy $iaDeleteShapeCheck "1"\n  ${EndIf}',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 16, what: armingMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep
+          .replace('  StrCpy $iaDeleteShapeCheck "1"', '  ${If} $9 == 0\n  StrCpy $iaDeleteShapeCheck "1"\n  ${Else}')
+          .replace('iaSweepDone:\n!macroend', 'iaSweepDone:\n  ${EndIf}\n!macroend'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 16, what: armingMessage }],
+    )
+    // #919 Q3: the exit code is a guarded statement too. A `SetErrorLevel 2`
+    // inside another macro body in the same span does not run at this site, and
+    // one inside a constant-false branch never runs at all — both used to
+    // satisfy the rule (measured). The guard names its sites by the enclosing
+    // block, so the sweep's text-level shape here is a Function: in a `!macro`
+    // body the scan reads an inner `!macroend` as the outer close, and this
+    // case cannot be written at all.
+    const foreignExit = [
+      'Function customUnInstall',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      '  FindClose $0',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDone',
+      'iaSweepDelete:',
+      '  ${GetParent} "$INSTDIR" $2',
+      '  StrCpy $iaDeleteCandidate "$2\\$1"',
+      '  StrCpy $iaDeleteBase "$INSTDIR"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      '  IfErrors 0 iaSweepNext',
+      'iaSweepKept:',
+      '  StrCpy $9 ""',
+      'iaSweepNext:',
+      '  FindClose $0',
+      'iaSweepDone:',
+      '  !macro iaNotTheSweep',
+      '    SetErrorLevel 2',
+      '  !macroend',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(foreignExit, { sitePolicies: DELETE_SITE_POLICIES }), [
+      { line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
+    ])
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep
+          .replace('iaSweepKept:\n  SetErrorLevel 2', 'iaSweepKept:\n  StrCpy $9 ""')
+          .replace('iaSweepNext:', '  ${If} 1 == 0\n    SetErrorLevel 2\n  ${EndIf}\niaSweepNext:'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [
+        {
+          line: 14,
+          what: 'the constant-false condition `${If} 1 == 0` covers the exit code — that code can never run',
+        },
+      ],
+    )
   })
 
   it('the promote delete arms the shape check like the sweep does (#919 Q1)', () => {

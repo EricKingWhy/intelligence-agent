@@ -1100,6 +1100,23 @@ function deadBranchText(line) {
   return (negated ? !truth : truth) ? undefined : line.trim()
 }
 
+/**
+ * First `SetErrorLevel 2` on `onPath` in `(after, end]`, else -1 — the sweep's
+ * "leftovers were kept" reading (#904 item 4), as a line index.
+ *
+ * #919 Q3: the scan used to take any match in the span, so a `SetErrorLevel 2`
+ * inside another macro body — which only runs where that macro is inserted —
+ * satisfied the rule. Returning the index lets the caller hand the hit to the
+ * dead-branch scan, which asks whether the line can run at all.
+ */
+function keptExitLevel(lines, after, end, onPath) {
+  for (let j = after + 1; j <= end; j += 1) {
+    if (!onPath(j)) continue
+    if (/^\s*SetErrorLevel\s+2\s*$/i.test(lines[j])) return j
+  }
+  return -1
+}
+
 export function unguardedBackupDelete(source, options = {}) {
   const { sitePolicies = {}, requireSite = true } = options
   const problems = []
@@ -1252,7 +1269,17 @@ export function unguardedBackupDelete(source, options = {}) {
       }
       const lastArmed = arming[arming.length - 1]
       const mustArm = policy === 'sweep' || armsBackupName
-      const armed = lastArmed !== undefined && lastArmed.value === '1'
+      // #919 Q3: the arming only counts when it runs on the path the prepare
+      // call is on — the same branch conditions the prepare and gate rules
+      // already carry. Inside a branch that closes above the call the flag is
+      // never set when the delete runs, and inside the other side of an
+      // `${Else}` it is set somewhere the call does not reach (measured: both
+      // forms passed the whole guard and suite).
+      const armed =
+        lastArmed !== undefined &&
+        lastArmed.value === '1' &&
+        onSameBranch(trace, lastArmed.index, prepareIndex) &&
+        branchDividersBetween(trace, lastArmed.index, prepareIndex).length === 0
       if (mustArm && !armed) {
         problems.push({
           line: i + 1,
@@ -1361,6 +1388,9 @@ export function unguardedBackupDelete(source, options = {}) {
         })
       }
     }
+    // #919 Q3: the sweep's exit code is found here so it can join the
+    // dead-branch scan below like every other guarded statement (-1 elsewhere).
+    let exitCodeIndex = -1
     if (wants.sweepReport) {
       // The uninstaller sweep: the application's registry key is being removed,
       // so the record is the report and the exit code. Enumerating by name shape
@@ -1389,12 +1419,14 @@ export function unguardedBackupDelete(source, options = {}) {
       // so its value is pinned — 2, the reading the launch-form probe and the
       // real-machine driver assert — and it has to sit below the delete: a
       // `SetErrorLevel 0` next to it, or one above the delete that runs before
-      // anything was kept, used to satisfy a presence check.
-      if (
-        !lines
-          .slice(i + 1, blockEnd + 1)
-          .some((line) => /^\s*SetErrorLevel\s+2\s*$/i.test(line))
-      ) {
+      // anything was kept, used to satisfy a presence check. #919 Q3: it also
+      // has to sit on the delete's path (a `SetErrorLevel 2` inside another
+      // macro body in the same span only runs where that macro is inserted),
+      // and it joins the dead-branch scan below — a `2` inside a
+      // constant-false branch never runs at all, and both forms used to
+      // satisfy this rule (measured).
+      exitCodeIndex = keptExitLevel(lines, i, blockEnd, onDeletePath)
+      if (exitCodeIndex === -1) {
         problems.push({
           line: i + 1,
           what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)',
@@ -1466,6 +1498,7 @@ export function unguardedBackupDelete(source, options = {}) {
       { line: i, label: 'the delete' },
       ...readHits.map((hit) => ({ line: hit.index, label: `the ${ERRORS} read` })),
       ...(recordHit === undefined ? [] : [{ line: recordHit.index, label: 'the leftover record' }]),
+      ...(exitCodeIndex === -1 ? [] : [{ line: exitCodeIndex, label: 'the exit code' }]),
       ...(clearIndex === -1 ? [] : [{ line: i + 1 + clearIndex, label: 'iaClearBackupDir' }]),
     ]
     const lastGuarded = Math.max(...guarded.map((target) => target.line))
