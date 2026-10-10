@@ -30,8 +30,10 @@
 ;                          registry key and the DetailPrint line, plus
 ;                          $(iaStaleBackup) in a UI install (a silent one has no
 ;                          box to show it; the detail line only reaches a file
-;                          in a log-enabled build). That record names the most
-;                          recent leftover; the authoritative discovery path is
+;                          in a log-enabled build). A kept backup also sets the
+;                          exit code to 2 — a refusal and a failed delete alike
+;                          (#919 Q6). That record names the most recent
+;                          leftover; the authoritative discovery path is
 ;                          the uninstaller's name-shape sweep (installer.nsh),
 ;                          so a superseded record loses nothing. A promote that
 ;                          gets past the checks drops the record once no path
@@ -253,7 +255,10 @@ iaPromoteDeleteSkipped:
     ; tooling can read back. Both a refused delete (reparse point, unreadable
     ; child, tree too deep) and a failed one record the path; a shape refusal
     ; records nothing — that value is not this installer's backup, and a foreign
-    ; path must not be published as "delete this folder". The pointer below is
+    ; path must not be published as "delete this folder". A kept backup — a
+    ; refusal or a failed delete — reports the same reading: exit code 2 (#919
+    ; Q6), like the uninstaller sweep (installer.nsh) and the rollback rename
+    ; failure. The pointer below is
     ; still cleared on purpose — .onGUIEnd and iaRollbackApplication read a
     ; non-empty IaBackupDir as "the install section never completed" and would
     ; roll back a good update over a directory that is merely undeletable.
@@ -264,9 +269,7 @@ iaPromoteDeleteSkipped:
       WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
       DetailPrint "iaPromoteApplication: could not remove $iaBackupDirectory ($iaDeleteStatus)"
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK
-      ${If} $iaDeleteStatus != "failed"
-        SetErrorLevel 2
-      ${EndIf}
+      SetErrorLevel 2
     ${EndIf}
     ; An earlier record names a directory that may be gone by now (removed by
     ; hand, or by a later delete that got through). Drop it only when no path
