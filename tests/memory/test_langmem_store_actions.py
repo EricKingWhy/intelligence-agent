@@ -21,6 +21,8 @@ import logging
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
+
+pytest.importorskip("langgraph")  # 不变量 #20：langgraph 是可选编排层，缺失时整模块优雅 skip
 from langgraph.store.base import PutOp
 from pydantic import Field
 

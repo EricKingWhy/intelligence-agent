@@ -39,6 +39,7 @@ from agent_harness.attachments.projection import (
     parse_image_refs,
     text_with_omitted_images,
 )
+from agent_harness.session.errors import AttachmentNotReferenced
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
@@ -1196,6 +1197,32 @@ def referenced_attachment_ids(events: list[SessionEvent]) -> set[str]:
         for ref in parse_image_refs(event.data.get("attachments")):
             referenced.add(ref.attachment_id)
     return referenced
+
+
+def assert_attachment_referenced(
+    events: list[SessionEvent], attachment_id: str,
+) -> None:
+    """附件读回的**唯一授权入口**（#934 M-05 / M-06）。
+
+    谓词（`referenced_attachment_ids`）与判断收拢在同一模块——与 DSH 一手
+    源码（`packages/api/session-controller/src/commands.ts @ d7432673`：
+    谓词 `referencedImage` 在 :682 定义，消费点 `attachment()` 在 :391、
+    :405 调用谓词）同构：谓词和消费点住同一模块边界。调用方（`web/` 传输层、
+    将来的其他读路径）只调本函数，**不许**手写 `not in referenced_attachment_ids`
+    式判断，否则两处语义会漂移。
+
+    未被本会话某条 `user/message` 事件真实引用 → 抛 `AttachmentNotReferenced`
+    （领域异常；调用方译为 HTTP 404，与"从未上传 / 属于别的会话"不可区分，
+    不泄露存在性 —— PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED` 语义）。
+
+    纯函数：无副作用；M-05 的变异守卫（`tests/session/test_attachments_authz.py`）
+    钉住"删掉下面的 `raise` 必须红"。
+    """
+    if attachment_id not in referenced_attachment_ids(events):
+        raise AttachmentNotReferenced(
+            f"attachment {attachment_id!r} 未被本会话的事件引用"
+            "（不存在，或属于别的会话）"
+        )
 
 
 def derive_messages_with_source_ranges(
