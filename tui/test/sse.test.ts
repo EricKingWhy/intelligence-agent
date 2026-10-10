@@ -162,3 +162,41 @@ test("ping 注释行不产生帧（CRLF 与 LF 两种形状）", async () => {
     [2],
   );
 });
+
+// ---------------------------------------------------------------------------
+// stream/truncated 控制帧（#859）。
+//
+// 夹具是**真实服务抓下来的原始字节**（#859 票面探针：`STREAM_REPLAY_MAX_EVENTS=5`
+// 后 `GET /stream?after_seq=0`）。服务端 `build_truncated_control` 按设计**不带 `time`**
+// ——它不是运行事实（不变量 #4 边界）。旧夹具照客户端假设给它补了 `time`，
+// 于是 `parseEnvelope` 丢帧、`onTruncated` 永不触发这件事一直测不出来。
+// ---------------------------------------------------------------------------
+
+/** 真实 backlog 超限响应的唯一一帧（#859 票面，原样；keys 无 `time`）。 */
+const REAL_FRAME_TRUNCATED =
+  'data: {"type": "stream/truncated", "data": {"after_seq": 0, "latest_seq": 17}, "seq": null, "run_id": null, "step_id": null, "session_id": "18ed3001-aa67-4ab6-b889-d3935349a320", "schema_version": "runtime_event/v1", "durability": "transient"}';
+
+test("不带 time 的真实 stream/truncated 帧必须触发 onTruncated（#859）", async () => {
+  const hints: (number | null)[] = [];
+  const frames: EventEnvelope[] = [];
+  await consumeSseBody(streamOf([`${REAL_FRAME_TRUNCATED}\r\n\r\n`]), {
+    onFrame: (frame) => frames.push(frame),
+    onTruncated: (hint) => hints.push(hint),
+  });
+  assert.deepEqual(hints, [17], "控制帧必须到达重建分支，并带回 latest_seq 提示");
+  assert.equal(frames.length, 0, "控制帧不是运行事实，不得投影");
+});
+
+test("运行事实仍须带 time：缺 time 的普通事件照旧按坏帧丢弃（#859 不放宽）", async () => {
+  const noTime = REAL_FRAME_USER_MESSAGE.replace(/, "time": "[^"]*"/, "");
+  assert.notEqual(noTime, REAL_FRAME_USER_MESSAGE, "夹具必须真的去掉了 time");
+  const { frames, truncated } = await drainStream([
+    `${noTime}\r\n\r\n${REAL_FRAME_RUN_STARTED}\r\n\r\n`,
+  ]);
+  assert.deepEqual(
+    frames.map((f) => f.seq),
+    [3],
+    "缺 time 的运行事实丢弃，带 time 的照常投影",
+  );
+  assert.equal(truncated, 0);
+});

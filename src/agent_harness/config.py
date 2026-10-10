@@ -181,6 +181,9 @@ class Settings(BaseSettings):
     # （`_encode_within` 质量阶梯用尽仍可能 > 目标，见 `attachments/normalize.py`），
     # 不是硬上限——名字/注释如实，不谎称硬约束。
     image_normalize_max_dimension: int = Field(default=2048, ge=1)
+    # 注意（#935 同步义务）：token 估算侧 `context.tokens.IMAGE_MAX_DIMENSION` 必须 ≥ 本值，
+    # 否则"尺寸未知回退 = 上限²"的保守契约会被静默击穿（估算封顶在小值、实际可发更大图）。
+    # 调大本值时务必同步核对 `IMAGE_MAX_DIMENSION`（见其 docstring 的同步义务）。
     image_normalize_max_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间

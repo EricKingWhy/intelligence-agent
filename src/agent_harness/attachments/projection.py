@@ -88,20 +88,34 @@ def _is_non_negative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def image_content_block(ref: ImageRef) -> dict[str, str]:
+def image_content_block(ref: ImageRef) -> dict[str, object]:
     """引用 → **标准**图片内容块（provider 无关的中间层）。
 
     形状即 LangChain v1 的 `ImageContentBlock`（`{"type":"image", ...}`，见
     `langchain_core/messages/content.py`）：这里用 `file_id` 承载内容寻址的
     `attachment_id`（该字段的语义正是"外部文件存储里的引用"），**不**在此嵌入
     base64——真正的字节由请求装配 adapter 在发送前一刻物化（见 `model/multimodal.py`）。
+
+    `width`/`height`（**便宜的图像元数据**，与 `mime_type` 同类）随块一并带出：token 估算
+    （`context.tokens.image_tokens_for_size`）需要尺寸才能按尺寸相关近似公式计费，而本层
+    正是尺寸的已知点（`ImageRef` 已带）。刻意排除的是**载荷**（base64），不是元数据。该块
+    是**服务端内部**的投影产物（`derive_messages` → `model.multimodal`），不是跨端契约
+    ——跨端数据是事件（`user/message.data["attachments"]`，其形状不变）。provider 块
+    （`image_url`）由 `model.multimodal._translate_block` 生成，**不带**这两个字段（其形状
+    由 provider 协议决定），故估算对 provider 块走尺寸未知回退。
     """
-    return {"type": "image", "file_id": ref.attachment_id, "mime_type": ref.media_type}
+    return {
+        "type": "image",
+        "file_id": ref.attachment_id,
+        "mime_type": ref.media_type,
+        "width": ref.width,
+        "height": ref.height,
+    }
 
 
-def content_block_with_text(text: str, refs: list[ImageRef]) -> list[dict[str, str]]:
+def content_block_with_text(text: str, refs: list[ImageRef]) -> list[dict[str, object]]:
     """视觉模型路径下的 user 消息内容：文本块 + 每个引用一张图片块（保持顺序）。"""
-    blocks: list[dict[str, str]] = [{"type": "text", "text": text}]
+    blocks: list[dict[str, object]] = [{"type": "text", "text": text}]
     blocks.extend(image_content_block(ref) for ref in refs)
     return blocks
 

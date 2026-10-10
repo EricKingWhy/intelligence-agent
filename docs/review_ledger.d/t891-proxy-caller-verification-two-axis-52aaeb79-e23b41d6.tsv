@@ -1,0 +1,1 @@
+2026-10-11	#891 desktop proxy caller verification 两轴独立审查（c155fbaa..e23b41d6 = 3 笔代码：52aaeb79 test red 合同钉面 token→cookie、600dfbc7 feat P2 launch token→signed cookie、e23b41d6 修回 fail-closed URL parse + 双轴 findings 全修）。独立双轴首轮：Correctness/Standards 两独立 fresh 会话（codebuddy --model glm-5.3-flash）均 APPROVE；聚焦复审同样 APPROVE。P0–P4 清零，findings 全部处置于 e23b41d6。	c155fbaa..e23b41d6

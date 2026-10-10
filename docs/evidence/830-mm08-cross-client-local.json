@@ -1,0 +1,433 @@
+{
+  "issue": 830,
+  "ticket": "MM-08 跨端与恢复验证",
+  "repo": "/home/hatch/workspace/intelligence-agent-wt/mm08-cross-client-verify",
+  "work": "/home/hatch/pytest-830/mm08-r3",
+  "server_log": "/home/hatch/pytest-830/mm08-r3/srv.log",
+  "model_sink": "/home/hatch/pytest-830/mm08-r3/model-sink.jsonl",
+  "elapsed_s": 61.33,
+  "checks": [
+    {
+      "id": "AC1",
+      "name": "同一 session：Web 上传/引用 → TUI 客户端读到同一 attachment 引用与同一字节",
+      "status": "PASS",
+      "evidence": {
+        "session_id": "ffdd76e0-22fd-4c5d-967d-1b14096c8a16",
+        "web_send_status": 200,
+        "attachment_id": "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "expected_sha256": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "web_read_status": 200,
+        "web_read_sha256": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "web_event_refs": [
+          "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6"
+        ],
+        "tui_event_refs": [
+          "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6"
+        ],
+        "tui_read_status": 200,
+        "tui_read_sha256": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "tui_event_count": 17,
+        "tui_node_exit": 0,
+        "provider_request_image_blocks": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          }
+        ],
+        "provider_request_image_block_count": 1
+      },
+      "notes": []
+    },
+    {
+      "id": "AC2",
+      "name": "kill -9 / 重启：事件与附件字节稳态；在途 run 被打断后事实不丢且可 resume 接续",
+      "status": "PASS",
+      "evidence": {
+        "session_id": "ffdd76e0-22fd-4c5d-967d-1b14096c8a16",
+        "event_count_before": 17,
+        "event_count_after_restart": 17,
+        "event_ids_stable": true,
+        "jsonl_bytes_stable": true,
+        "jsonl_bytes_before": 5689,
+        "content_sha256_before": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "content_sha256_after_restart": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "content_status_after_restart": 200,
+        "in_flight_request": {
+          "error": "RemoteProtocolError"
+        },
+        "in_flight_window_hit": true,
+        "in_flight_user_message_persisted": true,
+        "in_flight_user_message_seq": 18,
+        "content_status_after_crash": 200,
+        "content_sha256_after_crash": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "resume_status": 200,
+        "resume_body": "data: {\"type\": \"user/message\", \"data\": {\"content\": \"崩溃后继续\"}, \"seq\": 24, \"run_id\": null, \"step_id\": null, \"session_id\": \"ffdd76e0-22fd-4c5d-967d-1b14096c8a16\", \"time\": \"2026-10-09T14:01:11.326+00:00\", ",
+        "new_terminal_run_after_resume": true,
+        "event_count_after_resume": 31,
+        "content_status_after_resume": 200,
+        "content_sha256_after_resume": "0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6"
+      },
+      "notes": []
+    },
+    {
+      "id": "AC3",
+      "name": "fork 边界语义与图复用：child 继承边界前的 ref，且该图在 child 仍可取回/可解释",
+      "status": "FAIL",
+      "evidence": {
+        "parent_session_id": "2f322e70-fa31-4f2b-8d8b-46ab584c6fea",
+        "image_event_id": "d12f4576-0f99-4f55-84cf-be2827843e3f",
+        "image_user_seq": 10,
+        "fork_from_seq": 26,
+        "child_session_id": "4ce291cb-4851-4e5c-a94b-13f8fe0cb1bc",
+        "child_event_count": 29,
+        "child_refs": [
+          "sha256:a7c8e890c9a07823bf084235656009111fd868a12a7de1f75aaeeaa5d1a098e9"
+        ],
+        "child_image_event_present_by_id": true,
+        "child_read_status": 404,
+        "child_read_body": "{\"detail\":\"attachment 'sha256:a7c8e890c9a07823bf084235656009111fd868a12a7de1f75aaeeaa5d1a098e9' 不在会话 '4ce291cb-4851-4e5c-a94b-13f8fe0cb1bc' 的命名空间里（不存在，或属于别的会话）\"",
+        "child_read_sha256": null,
+        "expected_sha256": "a7c8e890c9a07823bf084235656009111fd868a12a7de1f75aaeeaa5d1a098e9",
+        "child_model_request_image_blocks": [],
+        "child_model_request_has_placeholder": true,
+        "child_artifact_dir_exists": false,
+        "parent_artifact_object": "/home/hatch/pytest-830/mm08-r3/art/2f322e70-fa31-4f2b-8d8b-46ab584c6fea/attachments/objects",
+        "boundary_fork_session_id": "da5eb76b-11ea-4ab3-a166-a75c659d0d58",
+        "boundary_refs": [],
+        "boundary_read_status": 404,
+        "child_has_session_forked": true,
+        "parent_has_session_forked": false,
+        "child_event_ids_subset_of_parent": false,
+        "parent_event_count_unchanged": true
+      },
+      "notes": [
+        "缺陷候选（AC3）：child 的 user/message 继承了 attachment ref，但附件字节在 child 命名空间里取不回（LocalArtifactStore 按 session_id 分目录，fork 不复制/不链接附件对象）⇒ 受控读回 404，且装配给模型的图片块被降级成 '(image omitted: model does not support images)' 占位符。"
+      ]
+    },
+    {
+      "id": "AC4",
+      "name": "压缩后摘要保留 artifact ref（精确标识清单）；旧图可找回；事实不被压缩删除",
+      "status": "PASS",
+      "evidence": {
+        "session_id": "2d19d324-196a-4cdf-8723-3011f8a6268d",
+        "compact_status": 200,
+        "compact_attempts": 2,
+        "compact_body": {
+          "bracket_id": "d80ea20a-cc55-4af3-821c-e9dc09d35071",
+          "source_seq_start": 2,
+          "source_seq_end": 31,
+          "tokens_before": 1631,
+          "tokens_after": 636,
+          "compacted_turn_count": 4,
+          "summary_model": "mm08-summary"
+        },
+        "summary_event_count": 1,
+        "summary_schema": "eight_section",
+        "summary_contains_ref": true,
+        "summary_ref_section": [
+          "[\"1\", \"sha256:1829930fe7bad53341245052ad4631b2b8825919964ad58390a64d239614abb7\", \"2\", \"3\"]",
+          "## 文件清单",
+          "(none)"
+        ],
+        "summary_has_base64": false,
+        "summary_transcript_has_file_id": true,
+        "summary_transcript_has_base64": false,
+        "pre_compaction_user_message_still_present": true,
+        "pre_compaction_user_message_unmodified": true,
+        "pre_compaction_image_event_seq": 10,
+        "jsonl_grew_only": true,
+        "jsonl_bytes_before": 13210,
+        "jsonl_bytes_after": 15329,
+        "content_status_after_compaction": 200,
+        "content_sha256_after_compaction": "1829930fe7bad53341245052ad4631b2b8825919964ad58390a64d239614abb7",
+        "expected_sha256": "1829930fe7bad53341245052ad4631b2b8825919964ad58390a64d239614abb7"
+      },
+      "notes": []
+    },
+    {
+      "id": "AC5",
+      "name": "事件流只记引用/尺寸/mime，不含 base64；大图不造成事件爆炸",
+      "status": "PASS",
+      "evidence": {
+        "session_id": "52c08c7d-d548-4b64-b0af-cc6ef87aaa63",
+        "big_image_bytes": 524345,
+        "jsonl_bytes_before_big": 5697,
+        "jsonl_bytes_after_big": 8410,
+        "jsonl_growth_bytes": 2713,
+        "jsonl_growth_ratio": 0.005174,
+        "jsonl_has_base64_run": false,
+        "jsonl_base64_run_count": 0,
+        "events_before_big": 17,
+        "events_after_big": 25,
+        "event_growth": 8,
+        "attachment_meta_recorded": [
+          {
+            "attachment_id": "sha256:8ce13cbf4e6377dac3c026721b5b42f99440e1663cd0c53a5fe9d445d7c0f0b9",
+            "media_type": "image/png",
+            "bytes": 524345,
+            "width": 320,
+            "height": 240
+          }
+        ],
+        "artifact_bytes_on_disk": 524345,
+        "event_stream_base64_runs": 0,
+        "provider_request_image_blocks": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 867 chars>",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "<data-url 699150 chars>",
+              "detail": "auto"
+            }
+          }
+        ]
+      },
+      "notes": []
+    },
+    {
+      "id": "AC6-TUI",
+      "name": "真实 TUI 客户端代码（tui/src/api.ts）上传附图 → 事件带引用 → 回读同字节",
+      "status": "PASS",
+      "evidence": {
+        "session_id": "e42a45e7-c51f-4731-9167-73fd19433d59",
+        "receipt": {
+          "attachment_id": "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+          "media_type": "image/png",
+          "bytes": 68,
+          "width": 8,
+          "height": 6,
+          "name": "ac6-tui.png"
+        },
+        "event_refs": [
+          "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6"
+        ],
+        "read_status": 200,
+        "read_bytes": 68,
+        "node_exit": 0,
+        "err": null
+      },
+      "notes": []
+    },
+    {
+      "id": "AC6-CLI",
+      "name": "CLI `--image`：成功 exit 0 且事件带引用；缺文件/非图片/扩展名不符 exit 1 且零附件",
+      "status": "PASS",
+      "evidence": {
+        "success_exit": 0,
+        "success_stdout_tail": "ok\n\n",
+        "missing_exit": 1,
+        "missing_stderr_tail": "错误：--image 文件不存在：/home/hatch/pytest-830/mm08-r3/cli/missing.png\n",
+        "non_image_exit": 1,
+        "non_image_stderr_tail": "错误：--image /home/hatch/pytest-830/mm08-r3/cli/bad.txt：不支持或无法识别的图片字节。\n",
+        "mismatched_ext_exit": 1,
+        "mismatched_ext_stderr_tail": "错误：--image /home/hatch/pytest-830/mm08-r3/cli/mismatched.png：不支持或无法识别的图片字节。\n",
+        "cli_event_refs": [
+          "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6"
+        ],
+        "expected_ref": "sha256:0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+        "cli_attachment_objects": [
+          "/home/hatch/pytest-830/mm08-r3/cli/art/7de26798-3015-4234-89c3-fa5295764a7a/attachments/objects/09/0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6",
+          "/home/hatch/pytest-830/mm08-r3/cli/art/7de26798-3015-4234-89c3-fa5295764a7a/attachments/objects/09/0936d7fc16d3849fc1ed863f977b2b0a28347c0b151eeb532e05a2c0c8d1cae6.json"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "id": "AC6-VISION",
+      "name": "真实视觉模型读截图并正确回答（lighthouse deepseek-v4.1-flash，真跑）",
+      "status": "PASS",
+      "evidence": {
+        "provider_base_url": "https://lighthouse.dphn.ai/run/text-v/v1",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "expected_code": "830-KX74",
+        "api_calls": [
+          "POST /api/sessions {model: mm08-vision}",
+          "POST /api/sessions/<sid>/attachments?name=mm08-vision.png  (真实截图字节)",
+          "POST /api/sessions/<sid>/messages {content: <问题>, attachments: [<ref>]}",
+          "GET  /api/sessions/<sid>/events"
+        ],
+        "screenshot_bytes": 16263,
+        "attachment_sha256": "1cfc8e6b177834e15084756647b000947e84b67fc0f1c84849af73f6ac420bf9",
+        "session_id": "c62305a2-484a-4b83-ad8d-0750cc9b64a1",
+        "send_status": 200,
+        "attachment_id": "sha256:1cfc8e6b177834e15084756647b000947e84b67fc0f1c84849af73f6ac420bf9",
+        "readback_status": 200,
+        "readback_sha256": "1cfc8e6b177834e15084756647b000947e84b67fc0f1c84849af73f6ac420bf9",
+        "answer": "830-KX74",
+        "answer_has_expected_code": true,
+        "elapsed_s": 10.55,
+        "events_jsonl_fragment": [
+          {
+            "seq": 11,
+            "type": "user/message",
+            "data": {
+              "content": "读这张截图：找到「CODE:」后面的校验码（大写字母/数字/连字符），只回该校验码本身。",
+              "attachments": [
+                {
+                  "attachment_id": "sha256:1cfc8e6b177834e15084756647b000947e84b67fc0f1c84849af73f6ac420bf9",
+                  "media_type": "image/png",
+                  "bytes": 16263,
+                  "width": 720,
+                  "height": 260,
+                  "kind": "image"
+                }
+              ]
+            }
+          },
+          {
+            "seq": 16,
+            "type": "model/completed",
+            "data": {
+              "content": "830-KX74",
+              "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+              "usage": {
+                "prompt_tokens": 5137,
+                "completion_tokens": 50,
+                "total_tokens": 5187,
+                "cached_tokens": 4480,
+                "uncached_tokens": 657
+              },
+              "finish_reason": "stop"
+            }
+          }
+        ]
+      },
+      "notes": []
+    },
+    {
+      "id": "AC7",
+      "name": "真实服务上跨会话读附件 404（与不存在不可区分）；未引用 404；形状非法 422",
+      "status": "PASS",
+      "evidence": {
+        "owner_session": "f6f6665b-21a7-4324-8cbe-10e6b3d76a26",
+        "other_session": "39e3d5c9-005d-4847-a876-ddf27af770a2",
+        "attachment_id": "sha256:cb7f57881552a2434744d09c34111aa8c67ab22b32f3751816db87010fec113b",
+        "cross_session_status": 404,
+        "cross_session_body": "{\"detail\":\"attachment 'sha256:cb7f57881552a2434744d09c34111aa8c67ab22b32f3751816db87010fec113b' 不在会话 '39e3d5c9-005d-4847-a876-ddf27af770a2' 的命名空间里（不存在，或属于别的会话）\"}",
+        "absent_status": 404,
+        "absent_body": "{\"detail\":\"attachment 'sha256:0000000000000000000000000000000000000000000000000000000000000000' 不在会话 '39e3d5c9-005d-4847-a876-ddf27af770a2' 的命名空间里（不存在，或属于别的会话）\"}",
+        "same_session_unreferenced_status": 404,
+        "same_session_unreferenced_body": "{\"detail\":\"attachment 'sha256:dbb2a3ad0371a2a96c95e0782ad92c9359c3e476307ac30f1c9ee260c9cba29a' 不在会话 '39e3d5c9-005d-4847-a876-ddf27af770a2' 的命名空间里（不存在，或属于别的会话）\"}",
+        "same_session_unreferenced_sha256": "sha256:dbb2a3ad0371a2a96c95e0782ad92c9359c3e476307ac30f1c9ee260c9cba29a",
+        "same_bytes_uploaded_only_id": "sha256:cb7f57881552a2434744d09c34111aa8c67ab22b32f3751816db87010fec113b",
+        "same_bytes_uploaded_only_status": 404,
+        "malformed_status": 422,
+        "malformed_body": "{\"detail\":\"attachment_id 必须形如 sha256:<64 位小写十六进制>：'sha256:nothex'\"}",
+        "owner_read_status": 200,
+        "owner_read_sha256": "cb7f57881552a2434744d09c34111aa8c67ab22b32f3751816db87010fec113b",
+        "expected_sha256": "cb7f57881552a2434744d09c34111aa8c67ab22b32f3751816db87010fec113b",
+        "cross_body_identical_to_absent": true,
+        "cross_body_identical_to_unreferenced": true,
+        "reupload_same_bytes_yields_same_id": true,
+        "other_session_own_image_sha256": "d08c56d9c398730a5e1aa2a87774df91a6a3fc8068abf37cc4466c50410ce28b",
+        "other_session_own_read_status": 200
+      },
+      "notes": []
+    }
+  ],
+  "counts": {
+    "PASS": 8,
+    "FAIL": 1,
+    "NOT_RUN": 0
+  }
+}
