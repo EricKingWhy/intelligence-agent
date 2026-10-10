@@ -41,7 +41,7 @@ class SkillCapability:
         return list(self._discovery.catalog().entries)
 
     def errors(self) -> list[str]:
-        """发现阶段的解析/边界错误（可观察，不静默）。"""
+        """发现阶段的解析/边界错误，以及受管包选择失效（可观察，不静默）。"""
         return list(self._discovery.catalog().errors)
 
     def conflicts(self) -> list[str]:
