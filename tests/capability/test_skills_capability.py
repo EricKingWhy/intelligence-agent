@@ -279,6 +279,73 @@ class TestWiring:
         ) == "New resource.\n"
 
     @pytest.mark.asyncio
+    async def test_next_runtime_applies_global_version_without_selecting_global_skill(self, tmp_path):
+        from agent_harness.capability.config import parse_capabilities_config
+        from agent_harness.skills.package_manager import SkillPackageManager
+
+        repo = tmp_path / "repo"
+        skill = repo / "packages" / "shared-skill"
+        skill.mkdir(parents=True)
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+            )
+            return result.stdout.strip()
+
+        def write_version(body: str) -> None:
+            (skill / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: Global version.\n---\n\n"
+                f"{body}\n",
+                encoding="utf-8",
+            )
+
+        write_version("Old version.")
+        git("init", "-q")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        git("add", ".")
+        git("commit", "-qm", "old version")
+        old_commit = git("rev-parse", "HEAD")
+        write_version("New version.")
+        git("add", ".")
+        git("commit", "-qm", "new version")
+        new_commit = git("rev-parse", "HEAD")
+
+        workspace = tmp_path / "workspace"
+        global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+        manager = SkillPackageManager(
+            workspace, global_skills_dir=global_skills, scope="global"
+        )
+        manager.install_git(
+            repo.as_uri(), ref=old_commit, subdirectory="packages/shared-skill"
+        )
+        manager.update("shared-skill", ref=new_commit)
+        assert manager.list_packages()["shared-skill"]["pending_version"][
+            "resolved_commit"
+        ] == new_commit
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(workspace),
+            skill_global_dir=str(global_skills),
+        )
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"skills": {}}'),
+            settings=settings,
+        )
+
+        record = manager.list_packages()["shared-skill"]
+        assert record["resolved_commit"] == new_commit
+        assert record["pending_version"] is None
+        assert registry.get("skills").catalog() == []
+        load_tool = next(tool for tool in wiring.tools if isinstance(tool, LoadSkillTool))
+        result = await load_tool.execute(load_tool.args_schema(name="shared-skill"))
+        assert result.ok is False
+
+    @pytest.mark.asyncio
     async def test_new_runtime_loads_only_enabled_managed_skill_packages(self, tmp_path):
         from agent_harness.capability.config import parse_capabilities_config
         from agent_harness.skills.package_manager import SkillPackageManager
@@ -514,3 +581,63 @@ async def test_unknown_name_failure_message_is_single_line(tmp_path):
     assert result.error_code is ErrorCode.INVALID_ARGUMENT
     assert "\n" not in result.message
     assert "ghost" in result.message  # 名字本身仍在（单行化不吞内容）
+
+
+@pytest.mark.asyncio
+async def test_global_packages_do_not_enter_runtime_catalog_context_or_tools(tmp_path):
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    source = tmp_path / "source" / "scripted-skill"
+    source.mkdir(parents=True)
+    sentinel = tmp_path / "script-ran"
+    (source / "SKILL.md").write_text(
+        "---\nname: scripted-skill\ndescription: Global package.\n---\n"
+        "Read [the helper](scripts/run.py).\n",
+        encoding="utf-8",
+    )
+    script = source / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    manager = SkillPackageManager(
+        workspace, global_skills_dir=global_skills, scope="global"
+    )
+    ready = tmp_path / "source" / "global-ready"
+    ready.mkdir(parents=True)
+    (ready / "SKILL.md").write_text(
+        "---\nname: global-ready\ndescription: Complete global package.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    assert manager.install(ready)["compatibility"]["status"] == "complete"
+    installed = manager.install(source)
+    assert installed["compatibility"]["status"] == "needs-adaptation"
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+    registry = CapabilityRegistry()
+    wiring = await wire_capabilities(
+        registry,
+        parse_capabilities_config('{"skills": {}}'),
+        settings=settings,
+    )
+
+    assert registry.get("skills").catalog() == []
+    provider = next(
+        provider for provider in wiring.context_providers
+        if isinstance(provider, SkillCatalogContextProvider)
+    )
+    assert await provider.select(Session.__new__(Session), 1000) == []
+    load_tool = next(tool for tool in wiring.tools if isinstance(tool, LoadSkillTool))
+    ready_result = await load_tool.execute(load_tool.args_schema(name="global-ready"))
+    assert ready_result.ok is False
+    result = await load_tool.execute(load_tool.args_schema(name="scripted-skill"))
+    assert result.ok is False
+    assert not sentinel.exists()
