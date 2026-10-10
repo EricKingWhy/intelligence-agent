@@ -384,14 +384,13 @@ def test_discard_twice_keeps_object_read_only(tmp_path: Path, monkeypatch: pytes
     assert asyncio.run(_store(tmp_path, "sess-a").load_bytes(blob.artifact_id)).content == b"twice"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：Windows 的 S_IMODE 恒为 0o666")
 def test_discard_does_not_touch_objects_it_did_not_clear(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """只恢复**本次 discard 碰过的**对象：别的全局对象（此处刻意可写）不许被动。
 
-    全量扫 `<root>/.attachments` 再 chmod 的实现会误改这里的 `0o600` 对象——它可达性上
-    与本次删除毫无关系（它在全局根里，本次删的是会话目录）。
+    全量扫 `<root>/.attachments` 再 chmod 的实现会误改这里的可写对象——它可达性上与本次
+    删除毫无关系（它在全局根里，本次删的是会话目录）。
     """
     blob = asyncio.run(
         _store(tmp_path, "sess-a").save_bytes("sess-a", b"touched", mime_type="image/png")
@@ -400,13 +399,21 @@ def test_discard_does_not_touch_objects_it_did_not_clear(
     other = _object_path(tmp_path, compute_byte_artifact_id(other_payload))
     other.parent.mkdir(parents=True, exist_ok=True)
     other.write_bytes(other_payload)
-    os.chmod(other, 0o600)  # 模拟"不归本次 discard 管"的既有状态
+    os.chmod(other, 0o600)  # 模拟"不归本次 discard 管"的既有可写状态
 
     _install_windows_unlink(monkeypatch)
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
     assert _object_is_read_only(_object_path(tmp_path, blob.artifact_id))
-    assert stat.S_IMODE(os.stat(other).st_mode) == 0o600, (
+    # 未触碰的对象必须保持 discard 前的可写态："全量扫再 chmod" 的实现会把它一并翻成只读，
+    # 正是本用例要拦的回归。Windows 没有 POSIX 权限位（CPython 由只读属性合成 `st_mode`，
+    # S_IMODE 只有 0o444/0o666 两态），等价观测是"未被翻成只读"——复用本文件
+    # `_object_is_read_only` 的 nt 感知判据；POSIX 面保持原有的精确 0o600 断言（由 CI 覆盖）。
+    if os.name == "nt":
+        untouched_kept_writable = not _object_is_read_only(other)
+    else:
+        untouched_kept_writable = stat.S_IMODE(os.stat(other).st_mode) == 0o600
+    assert untouched_kept_writable, (
         "未触碰的对象被改了权限：恢复只许作用于本次清过只读位的那几个对象"
     )
 
@@ -554,7 +561,6 @@ def test_sha256_pattern_matches_byte_artifact_id_digest_shape() -> None:
     )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：setup 直接 unlink 只读文件（Windows 抛错）")
 def test_discard_restores_global_object_when_receipt_is_a_legacy_inode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -568,10 +574,15 @@ def test_discard_restores_global_object_when_receipt_is_a_legacy_inode(
     )
     object_path = _object_path(tmp_path, blob.artifact_id)
     receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
-    # 把回执换成同字节的**独立 inode**（升级前旧对象的形状），两边都只读。
+    # 把回执换成同字节的**独立 inode**（升级前旧对象的形状），两边都只读。只读文件在
+    # Windows 上不可直接 unlink（抛 PermissionError）⇒ 先清只读位再删；这一步此刻仍作用于
+    # 全局对象的 hardlink（共享属性），清位会连带把对象也变可写，故删后把对象复位回只读。
+    # 清位沿用生产同一写法"原 mode 或上写位"（`_read_only_retry_handler`），不新造原语。
+    os.chmod(receipt, os.stat(receipt).st_mode | stat.S_IWUSR)
     receipt.unlink()
     receipt.write_bytes(b"legacy-inode")
     os.chmod(receipt, 0o400)
+    os.chmod(object_path, 0o400)
     assert receipt.stat().st_ino != object_path.stat().st_ino
 
     _install_windows_unlink(monkeypatch)

@@ -19,7 +19,7 @@
  *  真实的层级要表达，两套切分叠在一起会让同一行出现在两个不同的分类逻辑下。
  */
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useMemo, useRef, useState } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
   Archive,
@@ -144,6 +144,15 @@ export const SessionList = memo(function SessionList({
   /** 「在此项目中新建任务」的目标项目（null = 确认面关闭）。 */
   const [startTaskFor, setStartTaskFor] = useState<Project | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  /** #945：这一次菜单关闭是不是因为选中了「重命名项目」。选中它时我们把焦点**主动**
+   *  交给就地挂载的 InlineRename 输入框（`autoFocus`）⇒ 菜单关闭时**不该**再把焦点
+   *  归还给 trigger。Radix 默认的归还是一个 `setTimeout` 里的 `trigger.focus()`
+   *  （`@radix-ui/react-dropdown-menu` 的 `onCloseAutoFocus`），它与输入框的
+   *  `autoFocus` 竞态：晚到就 blur 掉输入框，`InlineRename.onBlur` 会把它当成
+   *  "用户离开了"并取消编辑态（含刚显示的空白名错误提示）——表现为 e2e 里
+   *  `getByLabel('项目名')` 在两个断言之间凭空消失。只此一处跳过归还，其余菜单项
+   *  （开对话框 / 纯动作）保持默认的焦点归还。 */
+  const focusMovedIntoRename = useRef(false);
   const [opError, setOpError] = useState<string | null>(null);
   // 拖拽重排（HTML5 DnD）：记**来源项目**而不只是被拖的会话 id——跨项目拖动
   // 不是重排（那是 attach，有 cwd 校验），落点提示只能在来源项目内亮。
@@ -425,7 +434,20 @@ export const SessionList = memo(function SessionList({
                           </button>
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Portal>
-                          <DropdownMenu.Content className="rail-menu" align="end" sideOffset={4}>
+                          <DropdownMenu.Content
+                            className="rail-menu"
+                            align="end"
+                            sideOffset={4}
+                            // #945：选中「重命名项目」时焦点已被交给行内输入框，
+                            // 别再让关闭时默认的"归还 trigger 焦点"把它 blur 掉（见
+                            // `focusMovedIntoRename` 注释）。其余情况保持 Radix 默认。
+                            onCloseAutoFocus={(event) => {
+                              if (focusMovedIntoRename.current) {
+                                focusMovedIntoRename.current = false;
+                                event.preventDefault();
+                              }
+                            }}
+                          >
                             {/* 第一项：本票的主入口（AC9）。放在最前是因为它是这个项目
                                 行最常用、也最不容易误伤的操作——重命名/删除在它下面。 */}
                             <DropdownMenu.Item
@@ -437,7 +459,10 @@ export const SessionList = memo(function SessionList({
                             <DropdownMenu.Separator className="rail-menu-sep" />
                             <DropdownMenu.Item
                               className="rail-menu-item"
-                              onSelect={() => setRenamingId(project.id)}
+                              onSelect={() => {
+                                focusMovedIntoRename.current = true;
+                                setRenamingId(project.id);
+                              }}
                             >
                               重命名项目
                             </DropdownMenu.Item>
