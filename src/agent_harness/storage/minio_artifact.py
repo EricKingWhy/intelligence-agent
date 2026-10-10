@@ -7,39 +7,43 @@ via the ``read_artifact`` tool.
 
 Design notes:
 - Content-addressable: ``artifact_id = sha256(content)[:16]``.
-- Session-scoped namespace: S3 key = ``{session_id}/{artifact_id}``.
 - Verification on load: recomputes the hash and compares.
 - Graceful degradation: if MinIO is unreachable during ``save``, the handler
   falls back to keeping the original (untruncated) tool result in-session.
+
+Key 布局分两套（**文本**仍是会话命名空间，**字节**在 #933 M-01 之后不是）：
+
+- 文本 artifact：``{session_id}/{artifact_id}``（会话命名空间，未变）；
+- 字节 artifact：全局内容寻址对象 ``.attachments/objects/<sha[:2]>/<sha>``
+  ＋ 每会话回执对象 ``{session_id}/attachments/<sha>``（归属事实，见 ``RemoteByteStoreMixin``）。
 """
 
 from __future__ import annotations
 
-import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
-    BYTE_ARTIFACT_ID_PATTERN,
     SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
-    BlobArtifact,
     compute_artifact_id,
-    compute_byte_artifact_id,
     slice_artifact,
 )
+from agent_harness.storage.remote_byte_store import RemoteByteStoreMixin
 
 
-class MinioArtifactStore(ArtifactStore):
+class MinioArtifactStore(RemoteByteStoreMixin, ArtifactStore):
     """S3-compatible store backed by MinIO for externalized large tool results.
 
-    Unlike the generic ``S3ArtifactStore``, this store is purpose-built for
-    the T5 overflow path: it stores raw tool output under a session-scoped
-    key and verifies content integrity on load.
+    Unlike the generic ``S3ArtifactStore``, this store is purpose-built for the T5
+    overflow path. **文本** artifact 仍是会话命名空间（``{session_id}/{artifact_id}``）；
+    **字节** artifact 自 #933 M-01 起走全局内容寻址 + 会话回执（共享实现在
+    ``RemoteByteStoreMixin``，见模块 docstring）。两个 Provider 的字节契约逐字相同
+    （spec 06 §9），故不各写一份。
     """
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:
@@ -178,61 +182,4 @@ class MinioArtifactStore(ArtifactStore):
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-
-    # ── 字节路径（#822 MM-01）───────────────────────────────────────────────
-    # 键 `{session_id}/attachments/<sha>`：会话前缀是隔离来源（#185 同口径），
-    # 与文本路径的 `{session_id}/{artifact_id}` 用不同子前缀，避免两个 id 空间撞键。
-
-    async def save_bytes(
-        self, session_id: str, data: bytes, *, mime_type: str
-    ) -> BlobArtifact:
-        if session_id != self._session_id:
-            raise ValueError("save_bytes session_id must match the store namespace")
-        artifact_id = compute_byte_artifact_id(data)
-        sha256 = artifact_id.split(":", 1)[1]
-        blob = BlobArtifact(
-            artifact_id=artifact_id,
-            session_id=session_id,
-            size=len(data),
-            mime_type=mime_type,
-        )
-        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            await client.put_object(
-                Bucket=self._bucket,
-                Key=f"{session_id}/attachments/{sha256}",
-                Body=data,
-                ContentType=mime_type,
-            )
-        return blob
-
-    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
-        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
-            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
-        sha256 = artifact_id.split(":", 1)[1]
-        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            try:
-                response = await client.get_object(
-                    Bucket=self._bucket,
-                    Key=f"{self._session_id}/attachments/{sha256}",
-                )
-            except self._client_error as error:
-                if error.response.get("Error", {}).get("Code") == "NoSuchKey":
-                    raise KeyError(
-                        f"Blob artifact '{artifact_id}' does not exist"
-                    ) from error
-                raise
-            async with response["Body"] as stream:
-                body = await stream.read()
-        if hashlib.sha256(body).hexdigest() != sha256:
-            raise KeyError(
-                f"Blob artifact '{artifact_id}' content hash mismatch "
-                "(object modified or corrupted out-of-band)"
-            )
-        return BlobArtifact(
-            artifact_id=artifact_id,
-            session_id=self._session_id,
-            size=len(body),
-            mime_type=response.get("ContentType", "application/octet-stream"),
-            content=body,
         )
