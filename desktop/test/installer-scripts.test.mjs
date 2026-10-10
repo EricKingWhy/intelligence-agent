@@ -3319,3 +3319,229 @@ describe('clean-user-data', () => {
     )
   })
 })
+
+
+describe('installer delete-site reads: fix round H (#919)', () => {
+  // The sweep builder is the round-2 one (`sweep(read)` in the Q9 fixtures):
+  // the failure leg is green unless a case replaces it, so every expectation
+  // below is the feature's own delta. The line numbers are the reads' own.
+  const greenDeclined = ['  SetErrorLevel 2', '  Goto iaSweepDone']
+  const greenRead = [
+    '  ${IfNot} ${Errors}',
+    '    Goto iaSweepNext',
+    '  ${Else}',
+    '    IntOp $9 $9 + 1',
+    '  ${EndIf}',
+  ]
+  const sweep = (declinedRead = greenDeclined, tailRead = greenRead) =>
+    [
+      '!macro customUnInstall',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      ...declinedRead,
+      'iaSweepDelete:',
+      '  ${GetParent} "$INSTDIR" $2',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      'iaSweepLoop:',
+      '  StrCmp $1 "" iaSweepLoopEnd',
+      '  StrCpy $iaDeleteCandidate "$2\\$1"',
+      '  StrCpy $iaDeleteBase "$INSTDIR"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+      '  ClearErrors',
+      '  RMDir /r "$iaDeleteTarget"',
+      ...tailRead,
+      'iaSweepKept:',
+      '  SetErrorLevel 2',
+      'iaSweepNext:',
+      '  FindNext $0 $1',
+      '  Goto iaSweepLoop',
+      'iaSweepLoopEnd:',
+      '  FindClose $0',
+      'iaSweepDone:',
+      '!macroend',
+    ].join('\n')
+  const inWindow = (source, use) =>
+    source.replace(
+      '  StrCpy $iaDeleteShapeCheck "1"\n',
+      `  StrCpy $iaDeleteShapeCheck "1"\n  ${use}\n`,
+    )
+  const withDefs = (defines, source) => `${defines.join('\n')}\n${source}`
+  const sweepProblems = (source) =>
+    unguardedBackupDelete(source, { sitePolicies: DELETE_SITE_POLICIES })
+
+  it('reads a depth-2 define token in the arming window (P2)', () => {
+    // The fix round's review measured the hole: `${${${A}}}` with A -> B -> C
+    // -> disarm resolved one nesting level and read as the name `${a}`, which
+    // no map holds — so the window stayed green while the token executes the
+    // disarm the delete then runs with. The `IA-DISARM`-style single level and
+    // the define body carrying one read the same way and are pinned by the
+    // F-2/N3 fixtures above.
+    assert.deepEqual(
+      sweepProblems(
+        withDefs(
+          ['!define A "B"', '!define B "C"', '!define C "StrCpy $iaDeleteShapeCheck 0"'],
+          inWindow(sweep(), '${${${A}}}'),
+        ),
+      ),
+      [
+        {
+          line: 24,
+          what: "${${${A}}} at line 20 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+  })
+
+  it('reads a define body that carries a depth-2 token (P2)', () => {
+    assert.deepEqual(
+      sweepProblems(
+        withDefs(
+          [
+            '!define A "B"',
+            '!define B "C"',
+            '!define C "StrCpy $iaDeleteShapeCheck 0"',
+            '!define WRAP "${${${A}}}"',
+          ],
+          inWindow(sweep(), '${WRAP}'),
+        ),
+      ),
+      [
+        {
+          line: 25,
+          what: "${WRAP} at line 21 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+  })
+
+  it('does not read message text as a label reference (P3)', () => {
+    // `DetailPrint "iaSweepNext"` is correct code: the message names a label of
+    // this text, and the earlier read took every quoted span on every line as a
+    // label candidate — so the message was read as a jump into the delete pass
+    // (measured: one problem for the message, two for a string naming two
+    // labels). A quoted operand where one is real is still read, so the third
+    // read below reports the `Goto`.
+    assert.deepEqual(
+      sweepProblems(sweep(['  SetErrorLevel 2', '  DetailPrint "iaSweepNext"', '  Goto iaSweepDone'])),
+      [],
+    )
+    assert.deepEqual(
+      sweepProblems(
+        sweep([
+          '  SetErrorLevel 2',
+          '  DetailPrint "iaSweepKept"',
+          '  DetailPrint "iaSweepNext"',
+          '  Goto iaSweepDone',
+        ]),
+      ),
+      [],
+    )
+    assert.deepEqual(
+      sweepProblems(sweep(['  SetErrorLevel 2', '  Goto "iaSweepNext"', '  Goto iaSweepDone'])),
+      [
+        {
+          line: 5,
+          what: 'the declined sweep branch can reach the delete pass, or does not end in a jump out of it — a declined sweep must only keep',
+        },
+      ],
+    )
+  })
+
+  it('flags a recursive delete that a define carries (P3)', () => {
+    // The body sits inside the define's own quotes, so reading the line as a
+    // statement blanks it with them — measured: the define-carried delete
+    // compiled, deleted the directory, and passed every scan.
+    assert.deepEqual(
+      sweepProblems(
+        withDefs(
+          ["!define IAHIDDEN 'RMDir /r \"$INSTDIR.old-hidden\"'"],
+          sweep().replace('  ClearErrors\n', '  ClearErrors\n  ${IAHIDDEN}\n'),
+        ),
+      ),
+      [
+        {
+          line: 1,
+          what: 'the define IAHIDDEN carries a recursive delete (`RMDir /r`) in its body — the delete sites this scan reads are statements of this file, and this one is text the define inserts wherever it is used',
+        },
+      ],
+    )
+  })
+
+  it('names the unquoted target instead of calling it another delete (P4)', () => {
+    // `RMDir /r $iaDeleteTarget` compiles and deletes. The old pair of messages
+    // called it "something other than $iaDeleteTarget" and then "no recursive
+    // RMDir of $iaDeleteTarget … found" — both false for this text.
+    assert.deepEqual(
+      sweepProblems(sweep().replace('  RMDir /r "$iaDeleteTarget"\n', '  RMDir /r $iaDeleteTarget\n')),
+      [
+        {
+          line: 20,
+          what: "the recursive delete's target is not in the quoted form the rules bind — `RMDir /r $iaDeleteTarget` compiles and deletes, but no rule reads an unquoted target, so this delete is neither validated nor scanned here",
+        },
+        {
+          line: 0,
+          what: 'no recursive RMDir of the prepared target in the quoted form the rules bind ("$iaDeleteTarget") was found, though this text does carry recursive deletes — the deletes it carries are the statements reported above',
+        },
+      ],
+    )
+  })
+
+  it('reports an unresolved IDCANCEL target as unresolved (P4)', () => {
+    // `IDCANCEL +4` is a relative jump, so no label in the block carries the
+    // target and the branch cannot be read. Reported as "does not set the exit
+    // code to 2" it said the branch had been read and found wanting.
+    assert.deepEqual(
+      sweepProblems(sweep().replace('IDCANCEL iaSweepDeclined', 'IDCANCEL +4')),
+      [
+        {
+          line: 4,
+          what: "the sweep prompt's IDCANCEL target is not a label this block declares — a relative or `$`-built target cannot be followed, so whether the declined branch keeps cannot be read here (fail-closed)",
+        },
+      ],
+    )
+  })
+
+  it('reports a divider-less ${Switch} branch that falls into the delete pass (R6)', () => {
+    // LogicLib's `${Switch}` emits a `Goto` into the `${EndSwitch}` label and
+    // the body is skipped, so control continues at the line after
+    // `${EndSwitch}` — `iaSweepDelete:` here. Reading the skipped body's `Goto
+    // iaSweepDone` as the branch's exit made the shape read clean (the
+    // disposition review's R6); the F-1 mutation reverts the reading.
+    assert.deepEqual(
+      sweepProblems(sweep(['  SetErrorLevel 2', '  ${Switch} $9', '    Goto iaSweepDone', '  ${EndSwitch}'])),
+      [
+        {
+          line: 5,
+          what: 'the declined sweep branch can reach the delete pass, or does not end in a jump out of it — a declined sweep must only keep',
+        },
+      ],
+    )
+  })
+
+  it('asserts the !include set of the scanned script files (P3)', () => {
+    // The three scanned files are the whole surface of this guard: an
+    // `!include` that can point at a fourth file is a recursive delete none of
+    // the scans sees (measured: a file holding its own unguarded `RMDir /r
+    // "$iaDeleteTarget"`, included from installer.nsh, passed).
+    const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-include-'))
+    for (const file of ['installer.nsh', 'installer-cleanup.nsh', 'installer-directories.nsh']) {
+      writeFileSync(join(dir, file), readFileSync(join(installerDir, file), 'utf8'))
+    }
+    assert.doesNotThrow(() => validateInstallerScripts(dir))
+    writeFileSync(join(dir, 'installer-extra.nsh'), 'Section\n  RMDir /r "$iaDeleteTarget"\nSectionEnd\n')
+    writeFileSync(
+      join(dir, 'installer.nsh'),
+      `${readFileSync(join(dir, 'installer.nsh'), 'utf8')}\n!include "installer-extra.nsh"\n`,
+    )
+    assert.throws(
+      () => validateInstallerScripts(dir),
+      /installer\.nsh: !include "installer-extra\.nsh" is not one of the scanned installer files/,
+    )
+  })
+})

@@ -1352,9 +1352,29 @@ function labelDeclaration(line) {
  * jump (measured, probes r3 and the review's q2/q3) — so the quoted spans are
  * read as their own candidates (the fix round's N1).
  */
+/**
+ * Statements whose operands can be a label. A quoted span is read as a label
+ * candidate only on one of these: the fix round's review (P3) measured
+ * `DetailPrint "iaSweepNext"` — message text equal to a label this text
+ * declares — read as a jump to that label and reported as a declined branch
+ * that reaches the delete pass (one problem for the message, two for a string
+ * naming two labels; both are correct code). Quoted operands stay read where
+ * they are real: `Goto "iaSweepHop"` is a jump (measured), and the
+ * `MessageBox … IDOK <label> IDCANCEL <label>` / `StrCmp` / `IfErrors` / `If*`
+ * family all take label operands. `Call` is deliberately not here: its operand
+ * names a function, and a function is not a label.
+ */
+const LABEL_OPERAND_STATEMENT =
+  /^\s*(?:Goto|GotoIf|IfErrors|IfSilent|IfAbort|IfFileExists|StrCmp|StrCmpS|IntCmp|IntCmpU|MessageBox|MessageBoxEx)\b/i
+
 function lineTokens(line) {
   const code = outsideStrings(line)
-  const quoted = [...line.matchAll(/(['"`])([^'"`]*)\1/g)].map((match) => match[2].trim())
+  // The statement without its comments: a `#`-comment naming a label is not a
+  // jump either, and the earlier read took the quoted spans of the raw line.
+  const statement = stripNsisComments(line)
+  const quoted = LABEL_OPERAND_STATEMENT.test(statement)
+    ? [...statement.matchAll(/(['"`])([^'"`]*)\1/g)].map((match) => match[2].trim())
+    : []
   return [...code.trim().split(/\s+/), ...quoted]
     .map((token) => token.toLowerCase())
     .filter((token) => token !== '')
@@ -1392,28 +1412,44 @@ function defineTokens(code) {
 }
 
 /**
- * The define name a `${…}` token uses, resolved the way the preprocessor
- * resolves it. `!define`s hold static text and the inner token is expanded
- * first, so `${${IA.SEL}}` with `!define IA.SEL "IA.DISARM"` looks up
- * `IA.DISARM` — measured on 3.0.4.1: with `!define IA.DISARM "StrCpy
- * $iaDeleteShapeCheck 0"` the token executes the disarm (probe r5). The braces
- * are paired by `defineTokens`, so the name is whatever the token's inner text
- * expands to: for a nested token, the inner define's bare value when it is a
- * plain name, else the inner name itself; "plain name" is read as one
- * non-whitespace token, so a dash-spelled value resolves too — measured: with
- * `!define IA.SEL "IA-DISARM"` and `!define IA-DISARM "StrCpy
- * $iaDeleteShapeCheck 0"` the token expands and the disarm runs (probe n6),
- * while the value test's old `[A-Za-z0-9_.]` class resolved the dashed twin
- * back to the inner name and read this window clean (gap A-2). Every name is
- * compared case-insensitively like every other directive name.
+ * The define name a `${…}` token (or a bare name) names, resolved the way the
+ * preprocessor resolves it. `!define`s hold static text and the innermost token
+ * is expanded first, so `${${IA.SEL}}` with `!define IA.SEL "IA.DISARM"` looks
+ * up `IA.DISARM` — measured on 3.0.4.1: with `!define IA.DISARM "StrCpy
+ * $iaDeleteShapeCheck 0"` the token executes the disarm (probe r5), and the
+ * dashed value resolves because "plain name" is read as one non-whitespace
+ * token (probe n6; the old `[A-Za-z0-9_.]` class resolved the dashed twin back
+ * to the inner name and read that window clean — gap A-2). The walk repeats:
+ * the braces are paired by `defineTokens`, and any name whose body is one more
+ * token or bare name is replaced by it while that holds — so `${${${A}}}` with
+ * A -> B -> C -> disarm reaches `C` and the disarm is read with it. One level of
+ * nesting was all the earlier read did, so the depth-2 spelling and a define
+ * body carrying one read as names no map holds and the window stayed green (the
+ * fix round's review, P2). A body with whitespace is a statement (or several),
+ * not a name, and stops the walk; a name no define holds stops it too — that is
+ * the include boundary this guard does not follow (round-5 item 4). The walk is
+ * bounded by `seen`, so `!define A "${A}"` (and `!define A "A"`) returns `a`
+ * instead of looping. Every name is compared case-insensitively like every
+ * other directive name.
  */
-function defineName(token, substitutions) {
-  const inner = token.slice(2, -1).trim()
-  if (!inner.startsWith('${') || !inner.endsWith('}')) return inner.toLowerCase()
-  const innerName = inner.slice(2, -1).trim().toLowerCase()
-  const body = substitutions.get(innerName)
-  const value = body === undefined ? undefined : body.join(' ').trim()
-  return value !== undefined && !/\s/.test(value) ? value.toLowerCase() : innerName
+function defineName(text, substitutions) {
+  const seen = new Set()
+  let name = text.trim().toLowerCase()
+  for (;;) {
+    const wrapped = /^\$\{([\s\S]*)\}$/.exec(name)
+    if (wrapped !== null) {
+      name = wrapped[1].trim().toLowerCase()
+      if (seen.has(name)) return name
+      seen.add(name)
+      continue
+    }
+    const body = substitutions.get(name)
+    const value = body === undefined ? undefined : body.join(' ').trim()
+    if (value === undefined || /\s/.test(value)) return name
+    name = value.toLowerCase()
+    if (seen.has(name)) return name
+    seen.add(name)
+  }
 }
 
 /**
@@ -1730,6 +1766,19 @@ export function unguardedBackupDelete(source, options = {}) {
         // below takes any name up to a brace.
         const unquoted = /^(['"`])([\s\S]*)\1$/.exec(value)?.[2] ?? value
         substitutions.set(define[1].toLowerCase(), [unquoted])
+        // The define's body is text the delete-site scans cannot see: the value
+        // sits inside its own quotes, so a `RMDir /r` inside it is blanked with
+        // them (measured: `!define IAHIDDEN 'RMDir /r "…"'` plus `${IAHIDDEN}`
+        // compiled, deleted the directory, and passed every scan — the fix
+        // round's review, P3). A recursive delete is reported where it is
+        // written; the delete sites this guard reads are statements of this
+        // file, not text a define inserts.
+        if (/RMDir\s+\/r/i.test(unquoted)) {
+          problems.push({
+            line: j + 1,
+            what: `the define ${define[1]} carries a recursive delete (\`RMDir /r\`) in its body — the delete sites this scan reads are statements of this file, and this one is text the define inserts wherever it is used`,
+          })
+        }
       }
       const touchesDeleteVars = (name, seen = new Set()) => {
         if (seen.has(name)) return false
@@ -2197,9 +2246,17 @@ export function unguardedBackupDelete(source, options = {}) {
                 )
           declinedExitIndex = declinedExit
           if (declinedExit === -1) {
+            // The fix round's review (P4) measured `IDCANCEL +4` — a relative
+            // jump, so no label in this block carries the name — reported as
+            // "does not set the exit code to 2", which says the branch was read
+            // and found wanting. It was not read at all: the target is what
+            // cannot be resolved, and that is what is reported.
             problems.push({
               line: labelOffset === -1 ? blockStart + promptOffset + 1 : blockStart + labelOffset + 1,
-              what: 'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success',
+              what:
+                labelOffset === -1
+                  ? "the sweep prompt's IDCANCEL target is not a label this block declares — a relative or `$`-built target cannot be followed, so whether the declined branch keeps cannot be read here (fail-closed)"
+                  : 'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success',
             })
           }
           // #919 review (F3): setting the exit code is not enough — the branch
@@ -2474,15 +2531,30 @@ export function unguardedBackupDelete(source, options = {}) {
   // #919 Q4: the scan reads code only — a `RMDir /r` inside a message string is
   // not a delete — and the prepared-target delete is excluded in its
   // option-carrying spelling too (both measured as false reports).
+  let sawRecursiveDelete = false
   for (let i = 0; i < lines.length; i += 1) {
-    if (!/RMDir\s+\/r/i.test(outsideStrings(lines[i])) || deleteLine.test(lines[i])) continue
+    if (!/RMDir\s+\/r/i.test(outsideStrings(lines[i]))) continue
+    sawRecursiveDelete = true
+    if (deleteLine.test(lines[i])) continue
+    // The fix round's review (P4) measured both spellings of the message being
+    // wrong for their statement: `RMDir /r $iaDeleteTarget` (unquoted) is the
+    // prepared target, and the old text called it "something other than
+    // $iaDeleteTarget" — the truth is that the rules bind the quoted form and
+    // the unquoted one is not read (it compiles and deletes).
     problems.push({
       line: i + 1,
-      what: 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',
+      what: /\$iaDeleteTarget\b/i.test(outsideStrings(lines[i]))
+        ? "the recursive delete's target is not in the quoted form the rules bind — `RMDir /r $iaDeleteTarget` compiles and deletes, but no rule reads an unquoted target, so this delete is neither validated nor scanned here"
+        : 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',
     })
   }
   if (sites === 0 && requireSite) {
-    problems.push({ line: 0, what: 'no recursive RMDir of $iaDeleteTarget (a prepared target) found' })
+    problems.push({
+      line: 0,
+      what: sawRecursiveDelete
+        ? 'no recursive RMDir of the prepared target in the quoted form the rules bind ("$iaDeleteTarget") was found, though this text does carry recursive deletes — the deletes it carries are the statements reported above'
+        : 'no recursive RMDir of $iaDeleteTarget (a prepared target) found',
+    })
   }
   return problems
 }
@@ -2596,9 +2668,31 @@ export function validateCleanupHelpers(source, filename) {
  * with the #904 site policies applied, and the cleanup primitives themselves are
  * asserted separately.
  */
+/** The `!include`s the three scanned installer scripts may carry. */
+const KNOWN_INSTALLER_INCLUDES = new Set([
+  'logiclib.nsh',
+  'filefunc.nsh',
+  'installer-cleanup.nsh',
+  'installer-directories.nsh',
+])
+
 export function validateInstallerScripts(installerDir) {
   for (const file of ['installer.nsh', 'installer-cleanup.nsh', 'installer-directories.nsh']) {
     const source = readFileSync(join(installerDir, file), 'utf8')
+    // A fourth file's text is not read by this guard, so an `!include` that can
+    // point at one is a recursive delete none of the three scans sees (the fix
+    // round's review, P3: a file holding its own unguarded `RMDir /r
+    // "$iaDeleteTarget"`, included from a site file, passed). The set is the
+    // includes the shipped scripts use, matched by basename.
+    for (const match of source.matchAll(/^\s*!\s*include\s+(.+?)\s*$/gim)) {
+      const spec = match[1].trim().replace(/^["']|["']$/g, '')
+      const base = spec.split(/[\\/]/).pop().toLowerCase()
+      if (!KNOWN_INSTALLER_INCLUDES.has(base)) {
+        throw new Error(
+          `${file}: !include "${spec}" is not one of the scanned installer files — its text is not read by this guard, so a recursive delete it carries is invisible`,
+        )
+      }
+    }
     validateLangStringGuards(source, file)
     validateLongPathPrefixes(source, file)
   }

@@ -29,6 +29,21 @@ const original = raw.replace(/\r\n/g, '\n')
 const eol = raw.includes('\r\n') ? '\r\n' : '\n'
 const sha = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
 process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
+// #919 fix round (P4): the run restores the guard in a `finally`, but a
+// force-kill (SIGPIPE from a piped `head`, a closed terminal) leaves the
+// mutation in the file, and the next run then reads the *mutated* text as its
+// baseline: `restored … identical=true` and every count are self-consistent
+// about the wrong file (measured once by the review; a probe left a mutation in
+// the worktree the same way). The recorded digest of the committed text makes
+// that state loud instead of vacuous. Update it in the same change that edits
+// the guard's text.
+const GUARD_BASELINE_SHA256 = '3ea817b5099c84b9210d1dc2aa02dfd8ba57be73130d6f5f2fbe5105b8d973bc'
+if (sha(original) !== GUARD_BASELINE_SHA256) {
+  process.stderr.write(
+    `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
+  )
+  process.exit(1)
+}
 
 /** Replace `from` with `to` in the source, throwing if `from` is absent. */
 const swap = (from, to) => (source) => {
@@ -283,7 +298,7 @@ const mutations = {
     'keptExitLevel(lines, blockStart - 1, blockEnd, onDeletePath)',
   ),
   'stray recursive-delete rule dropped (#904)': swap(
-    '    if (!/RMDir\\s+\\/r/i.test(outsideStrings(lines[i])) || deleteLine.test(lines[i])) continue',
+    '    if (deleteLine.test(lines[i])) continue',
     '    if (true) continue',
   ),
   // Q4: the prepared-target delete's option-carrying spelling (`/REBOOTOK`
@@ -603,8 +618,8 @@ const mutations = {
       "          if (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(only) && substitutions.has(only.toLowerCase())) {",
     )(
       swap(
-        "  return value !== undefined && !/\\s/.test(value) ? value.toLowerCase() : innerName",
-        "  return value !== undefined && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(value) ? value.toLowerCase() : innerName",
+        "    if (value === undefined || /\\s/.test(value)) return name",
+        "    if (value === undefined || !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(value)) return name",
       )(source),
     ),
   // Gap A-3 (own review): the one-argument `IfErrors label` jumps *on* error,
@@ -613,6 +628,38 @@ const mutations = {
   'one-argument IfErrors read as the fall-through again (#919 gap A-3)': swap(
     '          if (reads.has(at)) {',
     '          if (false && reads.has(at)) {',
+  ),
+  // #919 fix round H: the review's P2/P3/P4 items, each pinned by the fixture
+  // that measured it (the test file's "fix round H" describe). The R6 fixture
+  // is pinned by the F-1 mutation above (a case-less `${Switch}` read as an
+  // arm), which the fixture goes red under as well.
+  'depth-2 define token resolved one level again (#919 fix round H)': swap(
+    '    const wrapped = /^\\$\\{([\\s\\S]*)\\}$/.exec(name)',
+    '    const wrapped = null',
+  ),
+  'quoted spans read as label candidates on every line again (#919 fix round H)': swap(
+    '  /^\\s*(?:Goto|GotoIf|IfErrors|IfSilent|IfAbort|IfFileExists|StrCmp|StrCmpS|IntCmp|IntCmpU|MessageBox|MessageBoxEx)\\b/i',
+    '  /^/i',
+  ),
+  'include set not asserted again (#919 fix round H)': swap(
+    '      if (!KNOWN_INSTALLER_INCLUDES.has(base)) {',
+    '      if (false) {',
+  ),
+  'define-carried recursive delete invisible again (#919 fix round H)': swap(
+    '        if (/RMDir\\s+\\/r/i.test(unquoted)) {',
+    '        if (false) {',
+  ),
+  'unquoted target called another delete again (#919 fix round H)': swap(
+    '      what: /\\$iaDeleteTarget\\b/i.test(outsideStrings(lines[i]))',
+    '      what: false',
+  ),
+  'seen-but-unmatched delete called none again (#919 fix round H)': swap(
+    '      what: sawRecursiveDelete',
+    '      what: false',
+  ),
+  'unresolved prompt target called an unset exit code again (#919 fix round H)': swap(
+    '              what:\n                labelOffset === -1\n',
+    '              what:\n                false\n',
   ),
   // F-1 (review): a case-less `${Switch}` has no arm that runs — LogicLib jumps
   // to the `${EndSwitch}` label and control leaves the block (measured: probes
