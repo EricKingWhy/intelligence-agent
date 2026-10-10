@@ -295,3 +295,85 @@ class TestEditLineEndingTolerance:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         # 文件逐字节不变
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"
+
+
+class TestEditNotFoundHint:
+    """#851 验收 (2)：匹配失败的**文案**必须可执行，且不把两类失败混为一类。
+
+    `3ef9f8de` 已让纯 CRLF/LF 文件的行尾差异自动命中，所以剩下的失败里
+    「只差行尾」只会出现在裸 CR 或混行尾文件上。命中该事实时给出可执行提示；
+    纯上下文抄错时**不得**冒出行尾字样，否则模型会去改一个不存在的行尾问题。
+    """
+
+    @pytest.mark.asyncio
+    async def test_bare_cr_file_reports_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """裸 CR 文件 + LF old_string：确实只差行尾 ⇒ 提示必须点名行尾事实。"""
+        sandbox.write_text("f.py", "a = 1\rb = 2\r")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "b = 2\n", "new_string": "b = 22\n"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert "\\r" in msg
+        assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
+
+    @pytest.mark.asyncio
+    async def test_mixed_line_endings_report_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """混行尾文件 + 能归一化命中的 old_string ⇒ 同样点名行尾事实。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\nc = 3\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "a = 1\nb = 2\n",
+                "new_string": "a = 9\nb = 2\n",
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
+
+    @pytest.mark.asyncio
+    async def test_plain_context_typo_does_not_mention_line_endings(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """判别力：纯上下文抄错（连折平行尾也对不上）⇒ 不得误报行尾问题。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\r\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "z = 99\n", "new_string": "z = 100\n"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "未找到匹配的字符串" in msg
+        assert "行尾" not in msg
+        assert "\\r" not in msg
+
+    @pytest.mark.asyncio
+    async def test_plain_context_typo_on_lf_file_stays_clean(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """判别力（LF 文件侧）：LF 文件里的抄错同样不得提行尾。"""
+        sandbox.write_text("f.py", "a = 1\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "z = 99\n", "new_string": "z = 100\n"})
+        )
+
+        assert result.result.ok is False
+        msg = result.result.message
+        assert "未找到匹配的字符串" in msg
+        assert "行尾" not in msg

@@ -14,7 +14,10 @@ from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
-from agent_harness.tools._line_endings import replace_with_line_ending_tolerance
+from agent_harness.tools._line_endings import (
+    not_found_hint,
+    replace_with_line_ending_tolerance,
+)
 
 
 class _Hunk(BaseModel):
@@ -76,7 +79,10 @@ class ApplyPatchTool(Tool):
             )
             if count == 0:
                 return ToolResult.failure(
-                    message=f"第 {idx} 块补丁在 '{args.path}' 中未找到匹配。",
+                    message=(
+                        f"第 {idx} 块补丁在 '{args.path}' 中未找到匹配。"
+                        f"{not_found_hint(current, hunk.old_string)}"
+                    ),
                     error_code=ErrorCode.TOOL_EXECUTION_ERROR,
                 )
             if count > 1:

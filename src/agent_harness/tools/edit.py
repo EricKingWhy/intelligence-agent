@@ -22,7 +22,10 @@ from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
-from agent_harness.tools._line_endings import replace_with_line_ending_tolerance
+from agent_harness.tools._line_endings import (
+    not_found_hint,
+    replace_with_line_ending_tolerance,
+)
 
 
 class _EditArgs(BaseModel):
@@ -97,7 +100,10 @@ class EditTool(Tool):
         )
         if count == 0:
             return ToolResult.failure(
-                message=f"在 '{args.path}' 中未找到匹配的字符串。",
+                message=(
+                    f"在 '{args.path}' 中未找到匹配的字符串。"
+                    f"{not_found_hint(content, args.old_string)}"
+                ),
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
         if count > 1 and not args.replace_all:

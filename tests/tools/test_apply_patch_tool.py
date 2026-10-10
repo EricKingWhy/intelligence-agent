@@ -261,3 +261,47 @@ class TestApplyPatchLineEndingTolerance:
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"
+
+
+class TestApplyPatchNotFoundHint:
+    """#851 验收 (2) 的 apply_patch 侧：未命中文案同样不得把行尾与抄错混为一类。"""
+
+    @pytest.mark.asyncio
+    async def test_bare_cr_file_reports_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """裸 CR 文件 + LF old_string ⇒ 提示点名行尾事实，且整批原子失败。"""
+        sandbox.write_text("f.py", "a = 1\rb = 2\r")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [{"old_string": "b = 2\n", "new_string": "b = 22\n"}],
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert "\\r" in msg
+        assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
+
+    @pytest.mark.asyncio
+    async def test_plain_context_typo_does_not_mention_line_endings(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """判别力：纯抄错 ⇒ 仍是原「未找到匹配」，不得误报行尾。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\r\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [{"old_string": "z = 99\n", "new_string": "z = 100\n"}],
+            })
+        )
+
+        assert result.result.ok is False
+        msg = result.result.message
+        assert "未找到匹配" in msg
+        assert "行尾" not in msg
