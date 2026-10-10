@@ -58,6 +58,11 @@ from agent_harness.storage.artifact import (
     compute_byte_artifact_id,
     slice_artifact,
 )
+from agent_harness.storage.attachment_layout import (
+    BYTE_OBJECTS_DIRNAME,
+    GLOBAL_ATTACHMENT_DIRNAME,
+    SESSION_ATTACHMENTS_DIRNAME,
+)
 
 logger = logging.getLogger("agent_harness.storage.local_artifact")
 
@@ -65,20 +70,14 @@ logger = logging.getLogger("agent_harness.storage.local_artifact")
 #: 模型当初产出的大输出（`compute_artifact_id` 要对得上），塞头部就会改变内容。
 _META_SUFFIX = ".json"
 
-#: 字节对象根（全局内容寻址）的目录名，位于 `artifact_dir` 之下。
-#: **前导点**让它不可能是合法的 `SESSION_KEY_PATTERN`（`[A-Za-z0-9_-]{1,128}`），
-#: 于是名为 `attachments` 的会话永远拼不出这个路径——`discard_local_artifacts`
-#: 之类的"setting + session_id 拼路径"入口在构造上碰不到全局对象根
-#: （同 `sandbox/registry.py` 的 `.fork-tmp` 先例）。
-_GLOBAL_ATTACHMENT_DIRNAME = ".attachments"
-
 #: 内容寻址对象的摘要形状（与 `artifact.BYTE_ARTIFACT_ID_PATTERN` 的摘要段同形）。
 #: 恢复只读位时用它逐段校验回执路径（#923）——路径里嵌的 sha 既是推导依据也是形状约束。
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 #: 回执相对会话目录的固定中段（与 `_session_blob_object_path` 同形）：
-#: `<session_dir>/attachments/objects/<sha[:2]>/<sha>`。
-_RECEIPT_RELATIVE_PARTS = ("attachments", "objects")
+#: `<session_dir>/attachments/objects/<sha[:2]>/<sha>`。由共享布局常量拼出，不写字面量
+#: （#933 M-16：布局常量只此一份，见 `storage/attachment_layout.py`）。
+_RECEIPT_RELATIVE_PARTS = (SESSION_ATTACHMENTS_DIRNAME, BYTE_OBJECTS_DIRNAME)
 
 #: 发布与恢复共用的对象权限。恢复必须与 `_publish_blob` 发布时逐位一致，否则"恢复"会写在
 #: 一个与发布态不同的值上。
@@ -356,31 +355,57 @@ class LocalArtifactStore(ArtifactStore):
     # 路径构造：全局对象根（新写入的唯一落点）与会话命名空间（回执 / 升级前旧对象）。
 
     def _global_blob_objects_dir(self) -> Path:
-        return self._root / _GLOBAL_ATTACHMENT_DIRNAME / "objects"
+        return self._root / GLOBAL_ATTACHMENT_DIRNAME / BYTE_OBJECTS_DIRNAME
 
     def _global_blob_staging_dir(self) -> Path:
-        return self._root / _GLOBAL_ATTACHMENT_DIRNAME / "tmp"
+        return self._root / GLOBAL_ATTACHMENT_DIRNAME / "tmp"
 
     def _global_blob_object_path(self, sha256: str) -> Path:
         return self._global_blob_objects_dir() / sha256[:2] / sha256
 
     def _global_blob_meta_path(self, sha256: str) -> Path:
+        """**写**侧旁挂路径（读侧走 `_blob_object_candidates` 派生的那份清单）。"""
         return self._global_blob_objects_dir() / sha256[:2] / f"{sha256}.json"
 
     def _session_blob_object_path(self, sha256: str) -> Path:
         """本会话命名空间里的对象路径 = 上传回执位 / 升级前旧对象的落点。"""
-        return self._dir / "attachments" / "objects" / sha256[:2] / sha256
+        return (
+            self._dir
+            / SESSION_ATTACHMENTS_DIRNAME
+            / BYTE_OBJECTS_DIRNAME
+            / sha256[:2]
+            / sha256
+        )
 
-    def _session_blob_meta_path(self, sha256: str) -> Path:
-        return self._dir / "attachments" / "objects" / sha256[:2] / f"{sha256}.json"
+    def _blob_object_candidates(self, sha256: str) -> tuple[Path, ...]:
+        """读回候选路径，**顺序即优先级**（#933 M-16：布局演化只改**这一处**）。
 
-    def _blob_object_candidates(self, sha256: str) -> tuple[Path, Path]:
-        """读回候选路径，**顺序即优先级**：全局对象根 → 本会话旧路径。"""
+        候选是"同一 sha 可能出现在哪几个历史布局里"的**清单**，读回（`_load_bytes_blocking`）
+        与旁挂元数据读（`_read_blob_meta`）都从它派生——此前两者各写一份路径元组，加一条
+        候选就会出现"对象读得到、旁挂读不到"的静默错配（正是 M-16 说的不可扩展）。
+
+        逐条：
+
+        1. 全局内容寻址根（`_global_blob_object_path`，`GLOBAL_ATTACHMENT_DIRNAME` 之下）——
+           **现行布局，唯一写入落点**（#830 D1）；
+        2. 本会话命名空间（`_session_blob_object_path`）——**升级兼容包袱**：它同时是
+           回执位与 #830 D1 之前旧对象的落点。**本票不删**：旧对象只在这里，删掉候选
+           就会把升级前的附件全部 brick；删除前提是"旧附件已迁移"（迁移需要有回填/双读
+           窗口的独立票，方案文档 §7/§8.3 已登记）。
+
+        **扩展方式**（本方法的全部意义）：加一条候选 = 在返回元组里插一个路径，读回与
+        旁挂元数据两侧同时生效，无需改动任何消费点。
+        """
         return (self._global_blob_object_path(sha256), self._session_blob_object_path(sha256))
 
     def _read_blob_meta(self, sha256: str) -> dict:
-        """读旁挂元数据：全局优先、回落本会话旧旁挂；都缺或损坏都返回 `{}`。"""
-        for path in (self._global_blob_meta_path(sha256), self._session_blob_meta_path(sha256)):
+        """读旁挂元数据：**候选与对象读同源**（#933 M-16），全局优先；都缺或损坏返回 `{}`。
+
+        旁挂路径由候选路径派生（`.json` 后缀），不另列一份清单——两条清单会漂移，
+        而"对象读得到、旁挂读不到"只会静默退化成 octet-stream（症状最轻、最难发现）。
+        """
+        for candidate in self._blob_object_candidates(sha256):
+            path = candidate.with_name(f"{candidate.name}.json")
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -427,7 +452,20 @@ class LocalArtifactStore(ArtifactStore):
         self._sync_blob_dirs(receipt.parent)
 
     def _publish_blob(self, data: bytes, sha256: str) -> None:
-        """staging → fsync → hardlink 原子发布（全局对象根）；失败不留可读半文件。"""
+        """staging → fsync → **读回自证** → hardlink 原子发布（全局对象根）。
+
+        自证的目的（#933 M-04）："**落盘字节** == 预期摘要"。所以校验必须读回**暂存文件**
+        再算摘要（来源: DSH `attachment-local/src/store.ts:390-394` `digestFile`——它读文件
+        算摘要，不是拿内存里那份再算一遍）。改动前这里是
+        `hashlib.sha256(data).hexdigest() != sha256`：`sha256` 由同一份内存 `data` 派生
+        （`_save_bytes_blocking` 的 `compute_byte_artifact_id(data)`），恒真——一道**从未
+        工作过**的检查。删掉它不加读回检查，才是真的退步；两者是同一件事的"假版本/真版本"。
+
+        失败面：平台把字节写坏（Windows MSVCRT 文本模式 LF→CRLF、部分写、被截断）时，
+        自证在**发布前**抛 `OSError`，目标位置不会出现坏对象——而不是等读回时才发现
+        `content hash mismatch`（那时对象已发布、噪声更大、也更难归因）。这也是
+        `O_BINARY`（见下）的道具之外的第二道防线。
+        """
         staging_dir = self._global_blob_staging_dir()
         staging_dir.mkdir(parents=True, exist_ok=True)
         target = self._global_blob_object_path(sha256)
@@ -448,9 +486,12 @@ class LocalArtifactStore(ArtifactStore):
             written = 0
             while written < len(view):
                 written += os.write(handle, view[written:])
-            if hashlib.sha256(data).hexdigest() != sha256:
-                raise OSError("staged bytes do not match their publication digest")
+            # **读回自证**（#933 M-04）：关句柄前先 flush 到内核再读回文件字节——`os.read`
+            # 看到的就是后续 `os.link`/读者会拿到的那份字节（同 inode、无中间缓冲）。
             os.fsync(handle)
+            with open(temporary, "rb") as staged:
+                if hashlib.file_digest(staged, "sha256").hexdigest() != sha256:
+                    raise OSError("staged bytes do not match their publication digest")
             os.close(handle)
             handle = None
 
@@ -599,12 +640,15 @@ def _global_object_for_receipt(receipt: Path, session_dir: Path, root: Path) -> 
     except ValueError:
         return None
     parts = relative.parts
-    if len(parts) != 4 or parts[:2] != _RECEIPT_RELATIVE_PARTS:
+    # 中段与 `_RECEIPT_RELATIVE_PARTS` 同源（#933 M-16）：把中段长度当偏移量推导，
+    # 而不是写死 `parts[2], parts[3]`——改布局常量时这里跟着走，不会静默错位。
+    offset = len(_RECEIPT_RELATIVE_PARTS)
+    if len(parts) != offset + 2 or parts[:offset] != _RECEIPT_RELATIVE_PARTS:
         return None
-    shard, sha256 = parts[2], parts[3]
+    shard, sha256 = parts[offset], parts[offset + 1]
     if shard != sha256[:2] or not _SHA256_PATTERN.fullmatch(sha256):
         return None
-    objects_dir = (root / _GLOBAL_ATTACHMENT_DIRNAME / "objects").resolve()
+    objects_dir = (root / GLOBAL_ATTACHMENT_DIRNAME / BYTE_OBJECTS_DIRNAME).resolve()
     derived = (objects_dir / shard / sha256).resolve()
     if not derived.is_relative_to(objects_dir):
         return None

@@ -1,6 +1,11 @@
-"""Session-scoped S3 ArtifactStore；SDK 仅在构造 Provider 时加载。"""
+"""S3 ArtifactStore（七牛云 Kodo S3 兼容）；SDK 仅在构造 Provider 时加载。
 
-import hashlib
+#933 M-01：**字节路径不再按会话命名空间寻址**——字节对象落全局内容寻址根，
+本会话另存一份回执对象作为归属事实（字节契约见 `storage/remote_byte_store.py` 的
+`RemoteByteStoreMixin`）。文本路径
+（`{session_id}/{artifact_id}`）语义一字未动，仍是会话命名空间。
+"""
+
 import importlib
 import json
 from datetime import UTC, datetime
@@ -8,20 +13,22 @@ from datetime import UTC, datetime
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
-    BYTE_ARTIFACT_ID_PATTERN,
     SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
-    BlobArtifact,
     compute_artifact_id,
-    compute_byte_artifact_id,
     slice_artifact,
 )
+from agent_harness.storage.remote_byte_store import RemoteByteStoreMixin
 
 
-class S3ArtifactStore(ArtifactStore):
-    """绑定 Session 命名空间，无需内存索引即可恢复 artifact_id 的 S3 key。"""
+class S3ArtifactStore(RemoteByteStoreMixin, ArtifactStore):
+    """绑定 Session 命名空间，无需内存索引即可恢复 artifact_id 的 key。
+
+    **文本** artifact 的 key 是 `{session_id}/{artifact_id}`（会话命名空间，未变）；
+    **字节** artifact 走全局内容寻址 + 会话回执（#933 M-01，见 `RemoteByteStoreMixin`）。
+    """
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:
         # 键段形态用共享定义（`storage/artifact.py`）：这条规则三个 Provider 与
@@ -124,59 +131,4 @@ class S3ArtifactStore(ArtifactStore):
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-
-    # ── 字节路径（#822 MM-01）───────────────────────────────────────────────
-
-    async def save_bytes(
-        self, session_id: str, data: bytes, *, mime_type: str
-    ) -> BlobArtifact:
-        if session_id != self._session_id:
-            raise ValueError("save_bytes session_id must match the store namespace")
-        artifact_id = compute_byte_artifact_id(data)
-        sha256 = artifact_id.split(":", 1)[1]
-        blob = BlobArtifact(
-            artifact_id=artifact_id,
-            session_id=session_id,
-            size=len(data),
-            mime_type=mime_type,
-        )
-        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            await client.put_object(
-                Bucket=self._bucket,
-                Key=f"{session_id}/attachments/{sha256}",
-                Body=data,
-                ContentType=mime_type,
-            )
-        return blob
-
-    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
-        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
-            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
-        sha256 = artifact_id.split(":", 1)[1]
-        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            try:
-                response = await client.get_object(
-                    Bucket=self._bucket,
-                    Key=f"{self._session_id}/attachments/{sha256}",
-                )
-            except self._client_error as error:
-                if error.response.get("Error", {}).get("Code") == "NoSuchKey":
-                    raise KeyError(
-                        f"Blob artifact '{artifact_id}' does not exist"
-                    ) from error
-                raise
-            async with response["Body"] as stream:
-                body = await stream.read()
-        if hashlib.sha256(body).hexdigest() != sha256:
-            raise KeyError(
-                f"Blob artifact '{artifact_id}' content hash mismatch "
-                "(object modified or corrupted out-of-band)"
-            )
-        return BlobArtifact(
-            artifact_id=artifact_id,
-            session_id=self._session_id,
-            size=len(body),
-            mime_type=response.get("ContentType", "application/octet-stream"),
-            content=body,
         )

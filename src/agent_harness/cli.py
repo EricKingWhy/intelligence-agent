@@ -1673,16 +1673,23 @@ def _main_dispatch() -> None:
 
 
 def _main_plugins(argv: list[str]) -> None:
-    """Inspect and manage project-local Skill packages without running package code."""
+    """Inspect and manage scoped Skill packages without running package code."""
     parser = argparse.ArgumentParser(prog="agent-harness plugins")
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    def add_scope_argument(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--scope", choices=["project", "global"], default="project"
+        )
+
     inspect = subcommands.add_parser(
         "inspect", help="inspect a local Skill package without installing it"
     )
     inspect.add_argument("local_dir", help="local directory containing SKILL.md")
-    inspect.add_argument("--scope", choices=["project"], required=True)
+    add_scope_argument(inspect)
     install = subcommands.add_parser("install", help="install a local Skill package disabled")
     install.add_argument("local_dir", help="local directory containing SKILL.md")
+    add_scope_argument(install)
     install_git = subcommands.add_parser(
         "install-git", help="install a pinned Skill snapshot from a Git repository"
     )
@@ -1691,18 +1698,23 @@ def _main_plugins(argv: list[str]) -> None:
     install_git.add_argument(
         "--subdirectory", "--subdir", required=True, help="repository directory containing SKILL.md"
     )
+    add_scope_argument(install_git)
     update = subcommands.add_parser("update", help="stage an explicit Git Skill version for restart")
     update.add_argument("name")
     update.add_argument("--ref", required=True, help="required target branch, tag, or commit")
+    add_scope_argument(update)
     rollback = subcommands.add_parser("rollback", help="stage the previous Git Skill snapshot")
     rollback.add_argument("name")
+    add_scope_argument(rollback)
     enable = subcommands.add_parser("enable", help="enable a complete installed Skill for new Runtimes")
     enable.add_argument("name")
     disable = subcommands.add_parser("disable", help="disable an installed Skill for new Runtimes")
     disable.add_argument("name")
     remove = subcommands.add_parser("remove", help="remove an unchanged installed Skill package")
     remove.add_argument("name")
-    subcommands.add_parser("list", help="list saved selection and current Runtime state")
+    add_scope_argument(remove)
+    listing = subcommands.add_parser("list", help="list saved selection and current Runtime state")
+    add_scope_argument(listing)
     args = parser.parse_args(argv)
 
     settings = Settings()
@@ -1723,6 +1735,7 @@ def _main_plugins(argv: list[str]) -> None:
         )
         manager = SkillPackageManager(
             settings.workspace_dir,
+            scope=getattr(args, "scope", "project"),
             global_skills_dir=settings.skill_global_dir or None,
             additional_skill_directories=(
                 coerce_skill_path_list(enabled_skills_config, "directories")
@@ -1739,7 +1752,7 @@ def _main_plugins(argv: list[str]) -> None:
             report = inspect_skill_package(
                 args.local_dir,
                 scope=args.scope,
-                existing_skills=manager.project_skills_dir,
+                existing_skills=manager.scope_skills_dir,
             )
             print(json.dumps(report, ensure_ascii=False, indent=2))
             if report["status"] == "unsupported":
@@ -1833,7 +1846,17 @@ def _query_current_skill_runtime(
 
 
 def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> dict[str, object]:
+    if manager.scope == "global":
+        return {
+            "runtime": {
+                "state": "not_selected",
+                "detail": "global packages are not selected by this project",
+            },
+            "packages": _global_skill_package_listing(manager),
+        }
     runtime_state, detail, runtime_skill_sources = _query_current_skill_runtime(settings.workspace_dir)
+    from agent_harness.skills.package_manager import SkillPackageManager
+
     packages: list[dict[str, object]] = []
     for name, record in sorted(manager.list_packages().items()):
         enabled = bool(record["enabled"])
@@ -1883,7 +1906,56 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
     return {
         "runtime": {"state": runtime_state, "detail": detail},
         "packages": packages,
+        "available_global_packages": _global_skill_package_listing(
+            SkillPackageManager(
+                settings.workspace_dir,
+                scope="global",
+                global_skills_dir=settings.skill_global_dir or None,
+            )
+        ),
     }
+
+
+def _global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str, object]]:
+    packages: list[dict[str, object]] = []
+    for name, record in sorted(manager.list_packages().items()):
+        pending = record.get("pending_version")
+        current_version = None
+        if record.get("source_kind") == "git":
+            current_version = {
+                "ref": record["source_ref"],
+                "resolved_commit": record["resolved_commit"],
+                "sha256": record["sha256"],
+            }
+        packages.append(
+            {
+                "name": name,
+                "type": record["type"],
+                "scope": "global",
+                "source": record["source"],
+                "saved_selection": "not_selected",
+                "availability": (
+                    "available_to_enable"
+                    if record["compatibility"]["status"] == "complete"
+                    else record["compatibility"]["status"]
+                ),
+                "compatibility": record["compatibility"],
+                "trust": record["trust"],
+                "current_version": current_version,
+                "runtime_version": None,
+                "pending_version": (
+                    {
+                        "ref": pending["source_ref"],
+                        "resolved_commit": pending["resolved_commit"],
+                        "sha256": pending["sha256"],
+                    }
+                    if isinstance(pending, dict) else None
+                ),
+                "current_runtime": "not_selected",
+                "pending_restart": pending is not None,
+            }
+        )
+    return packages
 
 
 def _main_ingest(argv: list[str]) -> None:

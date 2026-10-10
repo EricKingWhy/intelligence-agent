@@ -1,0 +1,1 @@
+2026-10-10	机械归属（非内容审查）：merge=`991a26b9`，同步 `origin/main a01e4476` 到 `codex/issue-873-closeout`；父一 `87f16d52`、父二 `a01e4476`、merge-base `64f721f9`。`merge-tree` 预演 exit 0，两侧路径交集 0，`git show --cc --name-only` 为空，无手工组合内容。父二的 PR #941/#933 代码与既有审查/同步记账各自归属；本行只归属 merge。合并树 `b0ab7b04` 不等于两父树，覆盖闸门要求对此 fail-closed 形状登记。	87f16d52..991a26b9

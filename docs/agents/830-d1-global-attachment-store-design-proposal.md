@@ -71,8 +71,13 @@ rmtree 连带删除"在构造上不可能（同 `sandbox/registry.py:181-192` �
 - `load_bytes(id)`（读回/投影用）：**全局优先，未命中回落本会话旧路径** → 未命中才 `KeyError`。回落保证
   升级前已落盘的旧对象不被 brick。
 - `load_uploaded_bytes(id)`（**发送归属**用，新窄方法）：只读本会话路径（= 回执 / 升级前的旧对象）。
-  `ArtifactStore` 基类默认实现 = `load_bytes`（远端 Provider 的字节日志 key 本就是 `{session_id}/attachments/{sha}`，
-  两者等价，行为零变化；Local 覆写）。
+
+  ⚠ **本票（#830 D1）当时给 `ArtifactStore` 留的默认实现 `= load_bytes` 已由 #933 M-01 删除**
+  （改为 `NotImplementedError`）：它的前提是"远端 Provider 的字节日志 key 本就是
+  `{session_id}/attachments/{sha}` ⇒ 两者等价"，而 #933 把远端也改成全局寻址之后这个前提不再成立
+  （全局对象**必然**跨会话读得到），留着它就是把"别的会话的字节"判成"本会话上传过"。**每个 Provider
+  必须各自实现**归属（Local = 会话回执 hardlink；远端 = 会话回执对象 key）。当时"行为零变化"的判断
+  只对**当时的**远端 key 布局成立——原文保留以留痕，口径以本条为准。
 
 ## 5. 授权闸门（不弱化，逐条对齐 PRD）
 
@@ -99,11 +104,17 @@ GET 200 / 模型载荷含图片块。子会话目录**不产生任何附件字�
 
 ## 8. 已知取舍与未修项（如实登记，不在本票范围）
 
-1. **远端 Provider（S3/MinIO）不修 —— 本票对 D1 的修复只覆盖 Local Provider（默认）**：字节日志 key 仍是
+1. ~~**远端 Provider（S3/MinIO）不修 —— 本票对 D1 的修复只覆盖 Local Provider（默认）**：字节日志 key 仍是
    `{session_id}/attachments/{sha}`，fork 后子会话读不回的问题在这两个 Provider 上**仍然存在**（即 S3/MinIO
    部署下 D1 = 未修复，仍是已知缺口）。理由：本票根因与证据都在 Local；改远端 key 是存储布局迁移
    （需要回填/双读），属独立票（PRD D2 的"加法式扩展"边界）。⇒ 关单 comment 与 PRD 层面**不许**把这点
-   含糊成"fork 继承引用已修"，必须写明"仅 Local Provider"。
+   含糊成"fork 继承引用已修"，必须写明"仅 Local Provider"。~~
+   **已由 #933 M-01 关闭（2026-10-10）**：远端 Provider 改走**同一套**全局内容寻址语义——对象落
+   `<bucket>/.attachments/objects/<sha[:2]>/<sha>`，加一份每会话回执对象 `<bucket>{sid}/attachments/{sha}`
+   作为归属事实（对象存储无 hardlink，回执是对象副本；发布顺序反过来为"回执先、对象后"，不变量仍是
+   「有回执 ⇒ 有对象」）。旧 key 双读回落、**不回填**（与本文件 §7 对 Local 的策略一致）。`ArtifactStore`
+   的 `load_uploaded_bytes` 默认实现已删（改 `NotImplementedError`）⇒ 不再存在"默认路径静默换个语义"。
+   **本条原判的"属独立票"已兑现**（#933），此处保留原文以留痕，不再作为未修缺口。
 2. **孤儿字节不回收**：对象全局驻留 + 内容寻址去重，会话硬删后全局对象仍在（磁盘增长）。PRD D2 已登记
    "v1 不做自动清理、孤儿附件保留"；本方案把保留面从"未发送的上传"扩到"被删会话的字节"，同属后续票
    （GC 需引用计数/宽限期，DSH 有 `gc`、oh-my-pi 有 `omp gc`，我们暂无）。
