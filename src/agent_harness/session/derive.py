@@ -1204,9 +1204,10 @@ def assert_attachment_referenced(
 ) -> None:
     """附件读回的**唯一授权入口**（#934 M-05 / M-06）。
 
-    谓词（`referenced_attachment_ids`）与判断收拢在同一模块（与 DSH
-    `packages/api/session-controller/src/commands.ts` 的 `referencedImage` +
-    `attachment()` 同构：谓词和消费点住同一模块边界）——调用方（`web/` 传输层、
+    谓词（`referenced_attachment_ids`）与判断收拢在同一模块——与 DSH 一手
+    源码（`packages/api/session-controller/src/commands.ts @ d7432673`：
+    谓词 `referencedImage` 在 :682 定义，消费点 `attachment()` 在 :391、
+    :405 调用谓词）同构：谓词和消费点住同一模块边界。调用方（`web/` 传输层、
     将来的其他读路径）只调本函数，**不许**手写 `not in referenced_attachment_ids`
     式判断，否则两处语义会漂移。
 
