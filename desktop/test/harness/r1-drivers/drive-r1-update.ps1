@@ -109,10 +109,15 @@ function RegVal([string]$key, [string]$name) {
   return [string]$item.$name
 }
 
-function RunInstaller([string]$exe, [string]$logFile) {
-  $arguments = @('/S')
-  if (-not [string]::IsNullOrEmpty($logFile)) { $arguments = $arguments + ('/O{0}' -f $logFile) }
-  $p = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru
+# No /O log switch here: NSIS only honours it on a stub built with
+# NSIS_CONFIG_LOG, and the makensis this repo builds with has it off
+# ("Error: LogSet specified, NSIS_CONFIG_LOG not defined", measured #919 Q10).
+# electron-builder's template calls ${LogSet} only behind
+# ENABLE_LOGGING_ELECTRON_BUILDER, which its build does not define either, so a
+# log file can never appear and an /O path recorded in the evidence would be a
+# dead pointer. The run is a plain /S launch; nothing reads a log.
+function RunInstaller([string]$exe) {
+  $p = Start-Process -FilePath $exe -ArgumentList '/S' -Wait -PassThru
   return $p.ExitCode
 }
 
@@ -235,7 +240,7 @@ $before = TestProductDirs $productsRoot
 Log ('test product dirs before = [{0}]' -f ($before -join ', '))
 
 # ---------------------------------------------------------------- install #1
-$rc1 = RunInstaller $installerPath $null
+$rc1 = RunInstaller $installerPath
 Log ('install #1 rc = {0}' -f $rc1)
 Assert 'install1_rc0' ($rc1 -eq 0) ('rc={0}' -f $rc1)
 
@@ -339,8 +344,7 @@ if ($Case -eq 'sweep') {
   Log ('plain planted: junction={0} -> {1}' -f $plainFixture.Junction, $scratch)
   Log ('plain planted: unbraced={0}' -f $plainFixture.Unbraced)
   Log ('plain planted: decoy={0}' -f $plainFixture.Decoy)
-  $plainLog = Join-Path $evidence ('{0}-{1}-{2}-sweep-plain-nsis.log' -f $Tag, $Case, $Expect)
-  $rcu = RunInstaller $uninstaller.FullName $plainLog
+  $rcu = RunInstaller $uninstaller.FullName
   Log ('plain uninstall rc = {0} (the stub reports 0 for every artifact)' -f $rcu)
   Assert-SweepOutcome 'sweep_plain' $plainFixture $sweepFixed $rcu 0
   Assert 'sweep_plain_installdir_gone' (-not (Test-Path -LiteralPath $instDir)) ('installdir_exists={0}' -f (Test-Path -LiteralPath $instDir))
@@ -352,7 +356,7 @@ if ($Case -eq 'sweep') {
   # its uninstaller with it. The app id is fixed, so the directory name has to
   # come back identical -- if it does not, the fixture paths below would be
   # built beside a different directory than the one the sweep enumerates.
-  $rc2 = RunInstaller $installerPath $null
+  $rc2 = RunInstaller $installerPath
   Log ('reinstall rc = {0}' -f $rc2)
   Assert 'sweep_reinstall_rc0' ($rc2 -eq 0) ('rc={0}' -f $rc2)
   $reinstalled = @(TestProductDirs $productsRoot)
@@ -483,10 +487,8 @@ switch ($Case) {
 }
 
 # ------------------------------------------------------- install #2 (update)
-$nsisLog = Join-Path $evidence ('{0}-{1}-{2}-install2-nsis.log' -f $Tag, $Case, $Expect)
-$rc2 = RunInstaller $installerPath $nsisLog
+$rc2 = RunInstaller $installerPath
 Log ('install #2 (update) rc = {0}' -f $rc2)
-Log ('nsis install log = {0}' -f $nsisLog)
 Assert 'install2_rc_expected' ($rc2 -eq $expectRc2) ('rc={0} expected={1}' -f $rc2, $expectRc2)
 
 # ------------------------------------------------------------------ observe
@@ -548,7 +550,7 @@ if ($Case -eq 'failure' -and $siblings.Count -gt 0) {
   $ace = Invoke-Native 'icacls' @((ToLongPath (Join-Path $staleDir 'protected-child')), '/remove:d', '*S-1-1-0', '/T', '/C')
   Log ('icacls remove deny under the leftover -> {0}' -f ($ace -join ' '))
 
-  $rc3 = RunInstaller $installerPath $null
+  $rc3 = RunInstaller $installerPath
   Log ('install #3 rc = {0}' -f $rc3)
   Assert 'install3_rc0' ($rc3 -eq 0) ('rc={0}' -f $rc3)
   $leftover3 = RegVal $appKeyPath 'IaLeftoverDir'
@@ -564,7 +566,7 @@ if ($Case -eq 'failure' -and $siblings.Count -gt 0) {
   }
   Assert 'stale_dir_removed_by_hand' $removed ('exists={0}' -f (Test-Path -LiteralPath $staleDir))
 
-  $rc4 = RunInstaller $installerPath $null
+  $rc4 = RunInstaller $installerPath
   Log ('install #4 rc = {0}' -f $rc4)
   Assert 'install4_rc0' ($rc4 -eq 0) ('rc={0}' -f $rc4)
   $leftover4 = RegVal $appKeyPath 'IaLeftoverDir'
@@ -620,7 +622,7 @@ if ($null -ne $junctionTarget) {
 }
 $uninstaller = @(Get-ChildItem -LiteralPath $instDir -Filter 'Uninstall*.exe' -ErrorAction SilentlyContinue)[0]
 if ($null -ne $uninstaller) {
-  $rcu = RunInstaller $uninstaller.FullName $null
+  $rcu = RunInstaller $uninstaller.FullName
   Log ('uninstall rc = {0}' -f $rcu)
 } else {
   Log ('WARNING: no uninstaller found in {0}' -f $instDir)
