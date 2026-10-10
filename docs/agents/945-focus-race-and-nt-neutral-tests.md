@@ -28,9 +28,14 @@
 
 | 来源 | 版本 / commit | 文件:行 | 读到的事实 | 判定 |
 | --- | --- | --- | --- | --- |
-| 本机 CPython 标准库（测试实际运行的解释器） | CPython 3.12.3（`/usr/lib/python3.12/`） | `stat.py:172` | `FILE_ATTRIBUTE_READONLY = 0x1` —— Windows 只读位就是这一个属性 | **REUSE** |
+| 本机 CPython 标准库（测试实际运行的解释器） | CPython 3.12.3（`/usr/lib/python3.12/`） | `stat.py:183` | `FILE_ATTRIBUTE_READONLY = 1` —— Windows 只读位就是这一个属性 | **REUSE** |
 | CPython 官方文档（**独立第二来源**） | `docs.python.org/3/library/stat.html`（`stat` 模块） | 「`stat.FILE_ATTRIBUTE_READONLY`」节 | 原文：*"On Windows, the following file attribute constants are available for use when testing bits in the **`st_file_attributes`** member returned by `os.stat()`."* —— Windows 的权限观测点就是 `st_file_attributes`，不是 `st_mode` 的低位 | 复核一致 |
-| 本仓库既有先例（同文件自身的 nt 感知模式） | 本票基点树 | `tests/attachments/test_local_byte_store.py:107-112`（`_object_is_read_only`）、`:285-292`（`test_object_permission_is_read_only`） | 注释原文：*"Windows 没有 POSIX 权限位：CPython 按只读属性合成 st_mode（只读 ⇒ 0o444、可写 ⇒ 0o666），`os.chmod(path, 0o400)` 在 Windows 上不可满足 ⇒ 用原生 FILE_ATTRIBUTE_READONLY 更精确。"* | **REUSE（同文件模式）** |
+| 本仓库既有先例（同文件自身的 nt 感知模式） | 本票基点树 | `tests/attachments/test_local_byte_store.py:107-112`（`_object_is_read_only`）、`:281-293`（`test_object_permission_is_read_only`） | 注释原文：*"Windows 没有 POSIX 权限位：CPython 按只读属性合成 st_mode（只读 ⇒ 0o444、可写 ⇒ 0o666），`os.chmod(path, 0o400)` 在 Windows 上不可满足 ⇒ 用原生 FILE_ATTRIBUTE_READONLY 更精确。"* | **REUSE（同文件模式）** |
+
+> vendored 路径按 **pnpm 布局**解析：`react-menu` / `react-focus-scope` 是传递依赖，不在顶层
+> `web/node_modules/@radix-ui/` 下，实际位于
+> `web/node_modules/.pnpm/@radix-ui+<pkg>@<ver>…/node_modules/@radix-ui/<pkg>/dist/<file>`；
+> 顶层 `web/node_modules/@radix-ui/react-dropdown-menu/dist/…` 可直接打开（直接依赖）。
 
 **License 结论**：`radix-ui/primitives` 为 MIT；只**复用其公开事件 API 的用法**（`onCloseAutoFocus` 的 `preventDefault`），不复制源码行。CPython 为 PSF 许可；只引用文档事实与常量。
 
@@ -60,7 +65,7 @@
 → 晚到时输入框被 blur → `InlineRename.onBlur` 判为取消 → 编辑态卸载 → `:172`/`:173` 断言的定位器消失。
 
 **结论**：这是**产品层的焦点竞态缺陷**（不是纯 flake），`:172`/`:173` 是同一个家族（同一根因、相邻断言）；
-`web/src/components/SessionList.tsx` 与 `ProjectDialogs.tsx` 与 `origin/main` 逐字节相同
+`web/src/components/SessionList.tsx` 与 `ProjectDialogs.tsx` 在**改前（= 本票基点 `c3c4a908`）**与 `origin/main` 逐字节相同
 ⇒ #919 第 5b 轮的机械取证（"与 main 相同"）恰好说明缺陷**本就在 main 里**，只是负载下才现形。
 
 ## 2. T2 修法（奥卡姆剃刀 + 抄 Radix 原生先例）
@@ -77,7 +82,8 @@
 
 ## 3. T3：A/C 例平台中立改写（复用同文件 nt 感知模式）
 
-两例的 nt skip 由 `aaec51fc` 引入（`web`… 否，`tests/attachments/test_local_byte_store.py`，+3/−0）。根因是**判据/建场用了 POSIX 独有观测**，不是产品缺陷。
+两例的 nt skip 由 `aaec51fc` 引入（该笔一次给 3 例各补一条 nt 守卫，本票移除其中的 A、C 两例；
+第三例 `test_discard_without_readonly_receipt_never_chmods` 保持 POSIX 专用）。根因是**判据/建场用了 POSIX 独有观测**，不是产品缺陷。
 
 ### 3.1 A 例（P0）`test_discard_does_not_touch_objects_it_did_not_clear`
 
@@ -123,3 +129,17 @@
   应 36 passed / 0 skipped）。列为待办上报，不自行声称已绿。
 - `:173` 独立确认：与 `:172` 同族同根因（相邻断言、同一输入框），本票回归例已同时覆盖编辑态存活
   （含 `aria-invalid`），据此并案确认。
+
+## 7. 独立双轴审查（fresh 会话，§8.8.1；范围 `c3c4a908..d7b2be14`）
+
+两轴均 `APPROVE-WITH-FINDINGS`，**无 P0–P2**：
+
+- **Standards 轴**：P3×3、P4×3，全为文档准确性（`stat.py` 行号 `172`→`183`、vendored pnpm 路径可解析性、
+  §3 残留草稿片段、`test_object_permission_is_read_only` 定义行、`origin/main` 逐字节措辞、ref 不变量注释）。
+- **Correctness 轴**：P3×2、P4×2 —— 共享 ref 的不变量（与 Standards 同点）、同类「菜单关闭归还 vs 挂载即
+  autoFocus 浮层」竞态未覆盖（`SessionList.tsx` 的「新建任务」「加入项目」路径，未复现失败）、Windows nt 分支
+  无 CI 覆盖（见 §6）、审查者受只读约束未能亲测"改前红证"（依源码机制核对 + 修复后绿 + §5 探针）。
+
+**处置（P0–P4 全修）**：文档 5 条、代码注释 1 条（`focusMovedIntoRename` 不变量）随修笔闭合；
+Correctness P3（同类竞态）**登记为残留**（不在本票 scope，未复现失败）、P4（CI/只读约束）为如实记录。
+修笔 commit 见 tracker/台账行。

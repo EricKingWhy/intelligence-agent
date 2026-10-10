@@ -151,7 +151,10 @@ export const SessionList = memo(function SessionList({
    *  `autoFocus` 竞态：晚到就 blur 掉输入框，`InlineRename.onBlur` 会把它当成
    *  "用户离开了"并取消编辑态（含刚显示的空白名错误提示）——表现为 e2e 里
    *  `getByLabel('项目名')` 在两个断言之间凭空消失。只此一处跳过归还，其余菜单项
-   *  （开对话框 / 纯动作）保持默认的焦点归还。 */
+   *  （开对话框 / 纯动作）保持默认的焦点归还。
+   *
+   *  不变量：同一时刻只有一个项目菜单能开着，且 Radix 每次关闭都会触发一次
+   *  `onCloseAutoFocus` ⇒ 置位后必在紧接着的那次关闭里被消费复位，标志不跨关闭残留。 */
   const focusMovedIntoRename = useRef(false);
   const [opError, setOpError] = useState<string | null>(null);
   // 拖拽重排（HTML5 DnD）：记**来源项目**而不只是被拖的会话 id——跨项目拖动
