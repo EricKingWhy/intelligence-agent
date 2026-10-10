@@ -1,0 +1,1 @@
+2026-10-10	#851 空提交笔机械归属（本行不是对内容的审查主张）：空提交重触发 PR CI，无代码改动。前次 push（8f660e00..7bcd2f25）的 synchronize 事件丢失，gate0/e2e pull_request 工作流从未触发（仅 gitleaks 绿），经用户批准 push 空提交重触发。范围：零文件改动（--allow-empty）。	7bcd2f25868e51c04e6b221d48c74ea4e9a92094..d3156a599a1f3e3844dcdbd827745baa7dd68393

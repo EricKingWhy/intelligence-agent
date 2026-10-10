@@ -14,7 +14,10 @@ from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
-from agent_harness.tools._line_endings import replace_with_line_ending_tolerance
+from agent_harness.tools._line_endings import (
+    not_found_hint,
+    replace_with_line_ending_tolerance,
+)
 
 
 class _Hunk(BaseModel):
@@ -75,8 +78,16 @@ class ApplyPatchTool(Tool):
                 current, hunk.old_string, hunk.new_string, replace_all=False
             )
             if count == 0:
+                # 描述基准用**原文件** content：current 的行尾景观是前块自己造的
+                # （模型没读到过那个文件），拿它算会把「原文件里普通的行尾差异」
+                # 误说成「文件行尾混用」。搜索基准必须传 current——失配发生在
+                # current 上，前块已消费掉 old_string 时不得给出走不通的
+                # 「改写行尾后重试」（#851 七轮修回 P1）。
                 return ToolResult.failure(
-                    message=f"第 {idx} 块补丁在 '{args.path}' 中未找到匹配。",
+                    message=(
+                        f"第 {idx} 块补丁在 '{args.path}' 中未找到匹配。"
+                        f"{not_found_hint(content, hunk.old_string, search_base=current)}"
+                    ),
                     error_code=ErrorCode.TOOL_EXECUTION_ERROR,
                 )
             if count > 1:
