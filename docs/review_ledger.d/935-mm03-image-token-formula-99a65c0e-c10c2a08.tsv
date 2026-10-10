@@ -1,0 +1,1 @@
+2026-10-10	#935 M-03 图片 token 口径改回尺寸相关近似公式（用户决定 2026-10-10，废弃 #824 固定常量 1200）：tokens.py 新增 image_tokens_for_size=85+170×tiles(512px)、长边按 2048 截断、缺尺寸保守回退；projection.py 标准块携带 width/height（内部投影产物，非跨端契约）；builder.py/PRD 同步口径；测试小图/大图/边界/回退/消融全覆，消融证据落盘 dispatch/935-ablation；本笔含产品代码	99a65c0e978a038f982cd2b2a0d767e9dad9041c..c10c2a08d72ec59e0b246ad612125b4cd5203291
