@@ -387,7 +387,8 @@ class SqliteMemoryV2JobStore:
     # `memory_ids`，见 executor.py 的 apply 回调）。整块重跑会把已经记过一次的外部副作用再
     # 记一次，与"仅 BEGIN IMMEDIATE 可超时、事务未提交、整块重跑等价首次"这个重试前提不同
     # （其它被包装的写方法体内没有调用方回调）。本方法不是 #376 的 HTTP 失败路径：BEGIN
-    # IMMEDIATE 拿不到锁时异常向上走 executor 的作业生命周期，job 保持非终态可重认领。
+    # IMMEDIATE 拿不到锁时异常向上走 executor，被 apply 环节的 `except Exception` 折成
+    # `DegradedReason.APPLY_FAILED`，最终落成**终态** `DEGRADED`（不重认领）。
     async def commit_with_outcome(
         self, *, job_id: str, worker_id: str, outcome: MemoryJobOutcome,
         work: Callable[[aiosqlite.Connection], Awaitable[T]],
