@@ -151,6 +151,15 @@ const baseMutations = {
     '  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
     '  StrCpy $9 $9',
   ),
+  // #919 fix round (Q9 follow-up): the failed delete has to reach the kept
+  // accounting. The guard's walk follows the failure path through this block's
+  // labels; measured before the rule, this exact edit kept the whole suite
+  // green while every failed delete went uncounted (the silent direction — no
+  // report, exit code left at 0).
+  'failed delete skips the kept count (#919 fix round Q9)': replace(
+    ['  StrCpy $iaDeleteStatus "failed"', 'iaSweepKept:'].join(lf),
+    ['  StrCpy $iaDeleteStatus "failed"', '  Goto iaSweepNext', 'iaSweepKept:'].join(lf),
+  ),
 }
 
 const targets = [

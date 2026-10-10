@@ -1626,7 +1626,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       [
         {
           line: 17,
-          what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
     )
@@ -1642,7 +1642,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       [
         {
           line: 18,
-          what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
     )
@@ -1819,22 +1819,46 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       unguardedBackupDelete(withHop('Goto iaSweepLoopEnd'), { sitePolicies: DELETE_SITE_POLICIES }),
       [],
     )
-    // Registered fail-closed limits of the same rule, pinned so they cannot
-    // drift silently: the arming is read in its plain form, and the branch's
-    // last statement is text — a maxlen `StrCpy … "1" 2` that arms at runtime
-    // and an `${If}`/`${Else}` whose arms both jump out are reported
-    // (disposition review R5/R6).
+    // The measured operand forms of the same rule (disposition review R5, read
+    // on makensis 3.0.4.1 with a declared variable: `"1" 1`, `"1" 2` and
+    // `"1" 1 0` all store "1", so they ARM — the earlier reading reported the
+    // maxlen spelling although it arms — while `"1" 0` and `"1" 2 1` store ""
+    // and stay reported). A `[maxlen]`/`[startoffset]` the scan cannot read as a
+    // number is not evidence of an arming either.
     assert.deepEqual(
       unguardedBackupDelete(swapped('  StrCpy $iaDeleteShapeCheck "1"', '  StrCpy $iaDeleteShapeCheck "1" 2'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [
-        {
-          line: 17,
-          what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
-        },
-      ],
+      [],
     )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped('  StrCpy $iaDeleteShapeCheck "1"', '  StrCpy $iaDeleteShapeCheck "1" 1 0'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    for (const truncating of ['  StrCpy $iaDeleteShapeCheck "1" 0', '  StrCpy $iaDeleteShapeCheck "1" 2 1', '  StrCpy $iaDeleteShapeCheck "1" $0']) {
+      assert.deepEqual(
+        unguardedBackupDelete(swapped('  StrCpy $iaDeleteShapeCheck "1"', truncating), {
+          sitePolicies: DELETE_SITE_POLICIES,
+        }),
+        [
+          {
+            line: 17,
+            what: 'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          },
+        ],
+        truncating,
+      )
+    }
+    // The tail test runs LogicLib's own block structure (disposition review R6):
+    // a branch closing with `${EndIf}` over arms that each jump out ends in a
+    // jump like a bare trailing `Goto` does, so it is not reported — and an arm
+    // that can fall through still is, `${Switch}`'s `${Case}` dividers included
+    // (the text before a switch's first `${Case}` is its discriminant, not a
+    // path). A `Goto` carrying a trailing comment ends in a jump too: the
+    // comment writes nothing.
     assert.deepEqual(
       unguardedBackupDelete(
         swapped(
@@ -1843,7 +1867,25 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         ),
         { sitePolicies: DELETE_SITE_POLICIES },
       ),
-      [{ line: 6, what: declinedMessage }],
+      [],
+    )
+    for (const falling of [
+      '  SetErrorLevel 2\n  ${If} $9 == ""\n    Goto iaSweepDone\n  ${Else}\n    DetailPrint "kept"\n  ${EndIf}',
+      '  SetErrorLevel 2\n  ${Switch} $9\n    ${Case} 1\n      Goto iaSweepDone\n    ${CaseElse}\n      DetailPrint "kept"\n  ${EndSwitch}',
+    ]) {
+      assert.deepEqual(
+        unguardedBackupDelete(swapped('  SetErrorLevel 2\n  Goto iaSweepDone', falling), {
+          sitePolicies: DELETE_SITE_POLICIES,
+        }),
+        [{ line: 6, what: declinedMessage }],
+        falling,
+      )
+    }
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('  Goto iaSweepDone', '  Goto iaSweepDone ; keep the leftovers'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [],
     )
     // #919 review (S2): the declined branch's exit code is a guarded statement
     // too. Inside a constant-false branch it never runs, and without the
@@ -1865,7 +1907,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       ],
     )
     const armingMessage =
-      'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built'
+      'the sweep has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built'
     // #919 Q3: the arming has to run on the path the prepare call (and the
     // delete) is on. Inside a branch that closes above the call the flag is
     // never set when the delete runs, and inside the other side of an
@@ -1970,7 +2012,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(promote.replace('"1"', '"0"')), [
       {
         line: 8,
-        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
       },
     ])
     // The rollback's candidate is the partial install, a different contract —
@@ -2014,7 +2056,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(spelling("'").replace("'1'", "'0'")), [
       {
         line: 8,
-        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
       },
     ])
     // The read's other half: $iaFinalDirectory is the one candidate source that
@@ -2118,7 +2160,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       [
         {
           line: 9,
-          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
     )
@@ -2127,7 +2169,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       [
         {
           line: 8,
-          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
     )
@@ -2142,7 +2184,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       [
         {
           line: 8,
-          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+          what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
     )
@@ -2170,7 +2212,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(branchDivergent), [
       {
         line: 11,
-        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        what: 'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built',
       },
     ])
     // #919 disposition review (R1): the state the delete runs with is not only
@@ -2272,6 +2314,468 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
           what: "${IA.DISARM} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
         },
       ],
+    )
+  })
+
+  it('reads the label declarations the sweep branch lands on (#919 fix round F-1/N1/F-2)', () => {
+    // A label is a position, and NSIS 3.0.4.1 accepts the statement on the
+    // label's own line — in a Section, in a `!macro` body and at a loop head
+    // (measured: `Hop: Goto Target` and a chain `L1: L2: Goto X` both compiled
+    // and jumped). Reading only the stand-alone spelling was the review's F-1:
+    // an inline-declared declined label was invisible, so the whole declined
+    // contract went unchecked for it, and an inline-declared hop into the
+    // delete pass laundered the reach check. A jump target may also be quoted —
+    // `Goto "L"` and `IfErrors 0 "L"` compile and jump (measured) — which the
+    // token scan used to blank away (N1).
+    const sweepLoop = [
+      '!macro customUnInstall',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      '  SetErrorLevel 2',
+      '  Goto iaSweepDone',
+      'iaSweepDelete:',
+      '  ${GetParent} "$INSTDIR" $2',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      'iaSweepLoop:',
+      '  StrCmp $1 "" iaSweepLoopEnd',
+      '  StrCpy $iaDeleteCandidate "$2\\$1"',
+      '  StrCpy $iaDeleteBase "$INSTDIR"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      '  IfErrors 0 iaSweepNext',
+      '  StrCpy $iaDeleteStatus "failed"',
+      'iaSweepKept:',
+      '  SetErrorLevel 2',
+      'iaSweepNext:',
+      '  FindNext $0 $1',
+      '  Goto iaSweepLoop',
+      'iaSweepLoopEnd:',
+      '  FindClose $0',
+      'iaSweepDone:',
+      '!macroend',
+    ].join('\n')
+    const loopSwapped = (from, to) => sweepLoop.replace(from, to)
+    assert.deepEqual(unguardedBackupDelete(sweepLoop, { sitePolicies: DELETE_SITE_POLICIES }), [])
+    const declinedMessage =
+      'the declined sweep branch can reach the delete pass, or does not end in a jump out of it — a declined sweep must only keep'
+    const declinedExitMessage =
+      'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success'
+    // The inline label with its statement read: the same branch as the shipped
+    // one, spelled on the label's line.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        loopSwapped(
+          'iaSweepDeclined:\n  SetErrorLevel 2\n  Goto iaSweepDone',
+          'iaSweepDeclined: SetErrorLevel 2\n  Goto iaSweepDone',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    // The bypass the old reading let through: with the label invisible there
+    // was no declined branch to check, so a declined sweep carrying no exit
+    // code at all read as clean.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        loopSwapped(
+          'iaSweepDeclined:\n  SetErrorLevel 2\n  Goto iaSweepDone',
+          'iaSweepDeclined: DetailPrint "kept $9"\n  Goto iaSweepDone',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 5, what: declinedExitMessage }],
+    )
+    // An inline hop whose own body enters the pass, and the same hop kept out
+    // of it — the F-1 reach reading, both directions.
+    const withHop = (hop) =>
+      loopSwapped('  Goto iaSweepDone', '  Goto iaSweepHop').replace('!macroend', `${hop}\n!macroend`)
+    assert.deepEqual(
+      unguardedBackupDelete(withHop('iaSweepHop: Goto iaSweepKept'), { sitePolicies: DELETE_SITE_POLICIES }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(withHop('iaSweepHop: Goto iaSweepLoopEnd'), { sitePolicies: DELETE_SITE_POLICIES }),
+      [],
+    )
+    // A chain declares two names at one position: the jump to the second one is
+    // the same jump, kept out of the pass here and into it in the next case.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withHop('iaSweepHopA: iaSweepHopB: Goto iaSweepLoopEnd').replace('  Goto iaSweepHop', '  Goto iaSweepHopB'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withHop('iaSweepHopA: iaSweepHopB: Goto iaSweepKept').replace('  Goto iaSweepHop', '  Goto iaSweepHopB'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 5, what: declinedMessage }],
+    )
+    // Quoted targets (N1): the delete pass and its loop head are both reached
+    // through the quoted spelling, and the kept label through it stays kept.
+    assert.deepEqual(
+      unguardedBackupDelete(loopSwapped('  Goto iaSweepDone', '  Goto "iaSweepKept"'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(loopSwapped('  Goto iaSweepDone', '  Goto "iaSweepLoop"'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(loopSwapped('  Goto iaSweepDone', '  Goto "iaSweepDone"'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [],
+    )
+    // A jump to a label this block does not declare but the file does (F-2):
+    // sibling `!macro` bodies share the label namespace (measured: a cross-body
+    // `Goto` compiled and jumped), so the target's own body can enter the pass
+    // beyond this block's text — fail-closed. A target no label in the file
+    // declares cannot compile at all, so it is not reported here.
+    const sibling = (name) => `!macro iaElsewhere\n${name}:\n  DetailPrint "kept"\n!macroend\n`
+    assert.deepEqual(
+      unguardedBackupDelete(sibling('iaSweepElsewhere') + loopSwapped('  Goto iaSweepDone', '  Goto iaSweepElsewhere'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 9,
+          what: 'the declined sweep branch references iasweepelsewhere, a label the file declares outside this block — where that jump lands cannot be read here (fail-closed)',
+        },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(loopSwapped('  Goto iaSweepDone', '  Goto iaSweepNowhere'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [],
+    )
+  })
+
+  it('reads the quoted-output copy and the arming operands (#919 fix round N2/R5)', () => {
+    // Measured on makensis 3.0.4.1 with declared variables: `StrCpy` stores the
+    // same value when its output is quoted (`StrCpy "$vFlag" "0"` wrote the 0 —
+    // probe r9), and its optional `[maxlen] [startoffset]` decide what is left
+    // of the value (`"1" 1`, `"1" 2` and `"1" 1 0` store "1"; `"1" 0` and
+    // `"1" 2 1` store "" — probe r6). Reading only the bare-output,
+    // two-operand spelling was the review's N2 (a quoted-output copy hid the
+    // candidate, which skipped the arming requirement entirely) and the
+    // disposition review's R5 (a maxlen that arms was reported as no arming).
+    const promote = [
+      'Function iaPromoteApplication',
+      '  StrCpy $iaDeleteCandidate "$iaBackupDirectory"',
+      '  StrCpy $iaDeleteBase "$iaFinalDirectory"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaPromoteDeleteSkipped',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      ...GUARDED_TAIL.map((line) => `  ${line}`),
+      'FunctionEnd',
+    ].join('\n')
+    const armingMessage =
+      'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built'
+    assert.deepEqual(unguardedBackupDelete(promote), [])
+    const quoted = (from, to) => promote.replace(from, to)
+    // The quoted-output copy now counts as a copy of the backup name, so the
+    // site is held to a readable arming — and the quoted-output disarm is that
+    // arming, read as "0": before, both lines were invisible and the delete ran
+    // unchecked.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        quoted('StrCpy $iaDeleteCandidate "$iaBackupDirectory"', 'StrCpy "$iaDeleteCandidate" "$iaBackupDirectory"').replace(
+          'StrCpy $iaDeleteShapeCheck "1"',
+          'StrCpy "$iaDeleteShapeCheck" "0"',
+        ),
+      ),
+      [{ line: 8, what: armingMessage }],
+    )
+    // The same two quoted spellings with the flag on are the same armed window,
+    // and a quoted-output copy whose source the scan cannot read is still a copy
+    // — the arming is what protects the delete then (fail-closed).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        quoted('StrCpy $iaDeleteCandidate "$iaBackupDirectory"', 'StrCpy "$iaDeleteCandidate" "$iaBackupDirectory"').replace(
+          'StrCpy $iaDeleteShapeCheck "1"',
+          'StrCpy "$iaDeleteShapeCheck" "1"',
+        ),
+      ),
+      [],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(quoted('StrCpy $iaDeleteCandidate "$iaBackupDirectory"', 'StrCpy "$iaDeleteCandidate" $0')),
+      [],
+    )
+    // A quoted output whose *value* cannot be read is not an arming, and a
+    // quoted `$var` parameter of another instruction is the same write one
+    // quote form away (measured: `Pop "$vA"` after `Push "hidden"` stored it,
+    // and `IntOp "$vB" 2 + 3` stored 5 — probes w3/w2), so both report.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        quoted('StrCpy $iaDeleteShapeCheck "1"', 'StrCpy "$iaDeleteShapeCheck" $0'),
+      ),
+      [{ line: 8, what: armingMessage }],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        quoted('  Call iaPrepareDelete', '  Pop "$iaDeleteShapeCheck"\n  Call iaPrepareDelete'),
+      ),
+      [
+        {
+          line: 9,
+          what: 'a statement at line 5 uses $iaDeleteCandidate or $iaDeleteShapeCheck outside the two copies the guard reads (StrCpy $iaDeleteCandidate <source>, StrCpy $iaDeleteShapeCheck "[01]") — the state the delete runs with cannot be read from this window (fail-closed)',
+        },
+      ],
+    )
+  })
+
+  it('pairs nested tokens and joins continued defines in the window scans (#919 fix round F-3/N3)', () => {
+    // Measured on makensis 3.0.4.1 (probe r5): `!define IA.SEL "IA.DISARM"` +
+    // `${${IA.SEL}}` with `!define IA.DISARM "StrCpy $iaDeleteShapeCheck 0"`
+    // expands to the disarm and executes it, and a `!define` value continued
+    // with `\` compiles and its `${NAME}` insertion executes (probe u4). The
+    // old token reading stopped at the first `}` — it saw `${${IA.SEL` and no
+    // map holds that name, so the disarm counted as clean (the review's F-3) —
+    // and the single-line define body cut a continued value at the backslash
+    // (N3).
+    const promote = [
+      'Function iaPromoteApplication',
+      '  StrCpy $iaDeleteCandidate "$iaBackupDirectory"',
+      '  StrCpy $iaDeleteBase "$iaFinalDirectory"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaPromoteDeleteSkipped',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      ...GUARDED_TAIL.map((line) => `  ${line}`),
+      'FunctionEnd',
+    ].join('\n')
+    const armingMessage =
+      'the delete of a $iaBackupDirectory candidate has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming whose value, maxlen or offset truncates the flag, or whose shape this scan cannot read, counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built'
+    const withDefs = (defs, use) =>
+      [defs.join('\n'), promote.replace('StrCpy $iaDeleteShapeCheck "1"', use)].join('\n')
+    const disarm = ['!define IA.SEL "IA.DISARM"', '!define IA.DISARM "StrCpy $iaDeleteShapeCheck 0"']
+    // The hole F-3 closed first, told apart from the arming rule's own report:
+    // with an explicit arming above, the nested token is the only thing that
+    // disarms — reading the token as `${${IA.SEL` (a name no map holds) left
+    // this window green and the delete ran disarmed.
+    assert.deepEqual(
+      unguardedBackupDelete([
+        disarm.join('\n'),
+        promote.replace('StrCpy $iaDeleteShapeCheck "1"', 'StrCpy $iaDeleteShapeCheck "1"\n  ${${IA.SEL}}'),
+      ].join('\n')),
+      [
+        {
+          line: 11,
+          what: "${${IA.SEL}} at line 7 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
+    // The hole N3 closed: the write may sit entirely on a `\`-continued line
+    // (`!define D "\` + `StrCpy $iaDeleteShapeCheck 0"` compiled and ran the
+    // statement — measured, probe w4), and the single-line reading kept only
+    // the backslash, so this window read as clean with the token as its only
+    // disarm.
+    assert.deepEqual(
+      unguardedBackupDelete([
+        '!define D "\\',
+        'StrCpy $iaDeleteShapeCheck 0"',
+        promote.replace('StrCpy $iaDeleteShapeCheck "1"', 'StrCpy $iaDeleteShapeCheck "1"\n  ${D}'),
+      ].join('\n')),
+      [
+        {
+          line: 11,
+          what: '${D} at line 7 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window\'s text (fail-closed)',
+        },
+      ],
+    )
+    // The nested token, resolved the way the preprocessor resolves it.
+    assert.deepEqual(unguardedBackupDelete(withDefs(disarm, '${${IA.SEL}}')), [
+      {
+        line: 10,
+        what: "${${IA.SEL}} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+      },
+      { line: 10, what: armingMessage },
+    ])
+    // The same carried state one define further out, and inside a macro body
+    // the window inserts.
+    assert.deepEqual(
+      unguardedBackupDelete(withDefs([...disarm, '!define IA.OUTER "${${IA.SEL}}"'], '${IA.OUTER}')),
+      [
+        {
+          line: 11,
+          what: '${IA.OUTER} at line 7 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window\'s text (fail-closed)',
+        },
+        { line: 11, what: armingMessage },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withDefs(
+          ['!macro iaNested', ...disarm.map((line) => `  ${line}`), '  ${${IA.SEL}}', '!macroend'],
+          '!insertmacro iaNested',
+        ),
+      ),
+      [
+        {
+          line: 13,
+          what: '!insertmacro iaNested at line 9 expands inside the arming window and touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window\'s text (fail-closed)',
+        },
+        { line: 13, what: armingMessage },
+      ],
+    )
+    // The pre-existing reading of the same carried state: a single-line define
+    // value that names the variable inside a multi-line statement.
+    assert.deepEqual(
+      unguardedBackupDelete(withDefs(['!define D "StrCpy $iaDeleteShapeCheck \\', '0"'], '${D}')),
+      [
+        {
+          line: 10,
+          what: '${D} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window\'s text (fail-closed)',
+        },
+        { line: 10, what: armingMessage },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(withDefs(['!define D "StrCpy $iaDeleteShapeCheck 0"'], '${D}')),
+      [
+        {
+          line: 9,
+          what: '${D} at line 5 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window\'s text (fail-closed)',
+        },
+        { line: 9, what: armingMessage },
+      ],
+    )
+    // The pairing reads braces, not names: a token whose inner name is defined
+    // nowhere resolves to nothing here and is harmless text — only the arming
+    // rule fires (its line is the arming).
+    assert.deepEqual(unguardedBackupDelete(withDefs(['!define IA.HARMLESS "DetailPrint \\"x\\""'], '${${NOPE}}')), [
+      { line: 9, what: armingMessage },
+    ])
+  })
+
+  it('follows the failed delete to the kept accounting (#919 fix round Q9 follow-up)', () => {
+    // Measured gap (the fix round's own probe, before the rule below): the
+    // ${Errors} rule pins that the delete's own error is *read*, not where the
+    // failure path goes. A `Goto iaSweepNext` between the failure-branch status
+    // write and the kept label kept the whole suite green — every failed delete
+    // skipped the kept accounting, so a sweep whose deletes all failed reported
+    // nothing and left the exit code at its 0 default. That is the silent
+    // direction of the kept contract, and it is the path a UNC target takes
+    // (measured: `RMDir /r` refuses the `\\?\UNC\` spelling iaBuildLongPath
+    // builds, so the failure branch is all a UNC sweep can reach).
+    const sweepKeep = [
+      '!macro customUnInstall',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      '  SetErrorLevel 2',
+      '  Goto iaSweepDone',
+      'iaSweepDelete:',
+      '  ${GetParent} "$INSTDIR" $2',
+      '  FindFirst $0 $1 "$INSTDIR.old-*"',
+      '  StrCmp $0 "" iaSweepDone',
+      'iaSweepLoop:',
+      '  StrCmp $1 "" iaSweepLoopEnd',
+      '  StrCpy $iaDeleteCandidate "$2\\$1"',
+      '  StrCpy $iaDeleteBase "$INSTDIR"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
+      '  Call iaPrepareDelete',
+      '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+      '  ClearErrors',
+      `  RMDir /r "$iaDeleteTarget"`,
+      '  IfErrors 0 iaSweepNext',
+      '  StrCpy $iaDeleteStatus "failed"',
+      'iaSweepKept:',
+      '  SetErrorLevel 2',
+      'iaSweepNext:',
+      '  FindNext $0 $1',
+      '  Goto iaSweepLoop',
+      'iaSweepLoopEnd:',
+      '  FindClose $0',
+      'iaSweepDone:',
+      '!macroend',
+    ].join('\n')
+    const keepSwapped = (from, to) => sweepKeep.replace(from, to)
+    const failedMessage =
+      "the failed delete's path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or any counter bump), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0"
+    assert.deepEqual(unguardedBackupDelete(sweepKeep, { sitePolicies: DELETE_SITE_POLICIES }), [])
+    // The measured hole itself: the failure path jumps past the kept label.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        keepSwapped(
+          '  StrCpy $iaDeleteStatus "failed"\niaSweepKept:',
+          '  StrCpy $iaDeleteStatus "failed"\n  Goto iaSweepNext\niaSweepKept:',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 20, what: failedMessage }],
+    )
+    // Leaving the sweep entirely is the same silent outcome: `Goto iaSweepDone`
+    // is the exit that runs when `$9` never moved.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        keepSwapped(
+          '  StrCpy $iaDeleteStatus "failed"\niaSweepKept:',
+          '  StrCpy $iaDeleteStatus "failed"\n  Goto iaSweepDone\niaSweepKept:',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 20, what: failedMessage }],
+    )
+    // A terminal statement on the failure path ends it before the counter too.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        keepSwapped(
+          '  StrCpy $iaDeleteStatus "failed"\niaSweepKept:',
+          '  StrCpy $iaDeleteStatus "failed"\n  Return\niaSweepKept:',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 20, what: failedMessage }],
+    )
+    // The forms that do keep: the explicit jump to the same label, and a sweep
+    // that keeps its own books with a counter bump of its own.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        keepSwapped(
+          '  StrCpy $iaDeleteStatus "failed"',
+          '  StrCpy $iaDeleteStatus "failed"\n  Goto iaSweepKept',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        keepSwapped(
+          '  StrCpy $iaDeleteStatus "failed"',
+          '  StrCpy $iaDeleteStatus "failed"\n  IntOp $9 $9 + 1\n  Goto iaSweepNext',
+        ),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    // The read rule owns the missing-read report; this rule must not add a
+    // second problem to the same line.
+    assert.deepEqual(
+      unguardedBackupDelete(keepSwapped('  IfErrors 0 iaSweepNext', '  StrCpy $0 ""'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 20, what: "missing ${Errors} check before the end of the delete's block" }],
     )
   })
 

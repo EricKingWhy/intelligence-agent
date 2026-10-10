@@ -313,8 +313,8 @@ const mutations = {
   // whole guard and suite (measured in #919). The mutation restores that
   // presence reading; the sweep fixture's two-assignment case catches it.
   'arming presence check instead of the last assignment (#919 Q2)': swap(
-    "        lastArmed.value === '1' &&",
-    "        arming.some((entry) => entry.value === '1') &&",
+    '        lastArmed.armed &&',
+    '        arming.some((entry) => entry.armed) &&',
   ),
   // Q3: the arming only counts on the path the prepare call is on. Each branch
   // clause gets its own mutation, and each is caught by its own fixture: an
@@ -380,21 +380,24 @@ const mutations = {
   // F1: the candidate copy and the arming value take any of the three quote
   // forms or none (measured on 3.0.4.1), so each regex accepts all four. The
   // mutations re-narrow one of them to the double-quoted spelling; the
-  // re-spelled fixtures are what has to catch it.
+  // re-spelled fixtures are what has to catch it. (The fix round moved the
+  // value-reading half into the `CANDIDATE_COPY`/`SHAPE_ARMING` pair and left
+  // the bare-or-quoted output gate in the `_OUT` pair: the mutation targets the
+  // value pattern, whose quote classes are what the fixtures re-spell.)
   'candidate copy accepts one quote style only (#919 review F1)': onLine(
-    (line) => line.trimStart().startsWith('/^\\s*StrCpy\\s+\\$iaDeleteCandidate'),
+    (line) => line.startsWith('  const CANDIDATE_COPY ='),
     oneQuoteStyle,
   ),
   'arming value accepts one quote style only (#919 review F1)': onLine(
-    (line) => line.trimStart().startsWith('/^\\s*StrCpy\\s+\\$iaDeleteShapeCheck'),
+    (line) => line.startsWith('  const SHAPE_ARMING ='),
     oneQuoteStyle,
   ),
   // F1, fail-closed half: an assignment whose value the guard cannot read must
   // not pass as "no assignment" (the register spelling passed the whole guard
   // before, measured).
   'arming value the guard cannot read ignored again (#919 review F1)': swap(
-    "        arming.push({ index: j, value: assignment === null ? null : (assignment[2] ?? assignment[3]) })",
-    '        if (assignment !== null) arming.push({ index: j, value: assignment[2] ?? assignment[3] })',
+    '        const assignment = SHAPE_ARMING.exec(lines[j])\n        const value = assignment === null ? null : (assignment[3] ?? assignment[4])',
+    '        const assignment = SHAPE_ARMING.exec(lines[j])\n        if (assignment === null) continue\n        const value = assignment[3] ?? assignment[4]',
   ),
   'non-backup candidate sources arms nothing again (#919 review F1)': swap(
     "        return !/^\\$iaFinalDirectory$/i.test(readable[0])",
@@ -421,7 +424,7 @@ const mutations = {
     '        if (false) {',
   ),
   'any other statement using the delete state ignored again (#919 disposition review R1)': swap(
-    '          /\\$iaDeleteCandidate\\b|\\$iaDeleteShapeCheck\\b/i.test(code) &&',
+    '          /\\$iaDeleteCandidate\\b|\\$iaDeleteShapeCheck\\b/i.test(mention) &&',
     '          false &&',
   ),
   // N1: the candidate source is the whole window. Reading only its last copy
@@ -473,8 +476,8 @@ const mutations = {
   // the delete, and the tail legs (`iaSweepKept`, `iaSweepNext`) then read as
   // outside it (measured on the real installer.nsh by the fix round's review).
   'delete loop span read from bare Goto only again (#919 fix-round review F1)': swap(
-    '            const labelTokens = (line) =>\n              outsideStrings(line)\n                .trim()',
-    "            const labelTokens = (line) =>\n              (/^\\s*Goto\\s+(\\S+)\\s*$/i.exec(outsideStrings(line))?.[1] ?? '')\n                .trim()",
+    '            const labelTokens = (line) => lineTokens(line).filter((token) => labelOffsets.has(token))',
+    "            const labelTokens = (line) =>\n              (/^\\s*Goto\\s+(\\S+)\\s*$/i.exec(outsideStrings(line))?.[1] ?? '')\n                .trim()\n                .split(/\\s+/)\n                .map((token) => token.toLowerCase())\n                .filter((token) => labelOffsets.has(token))",
   ),
   // F1 (fix round): a label whose own span jumps back into the pass counts as
   // reaching it — without the walk, a hop label declared below the loop
@@ -483,12 +486,92 @@ const mutations = {
     '                const hit = span.some((line) =>\n                  labelTokens(line).some((token) => visit(token, walk)),\n                )',
     '                const hit = false',
   ),
-  // F3 (fix round): the `${...}` token takes any name up to a brace — dot- and
-  // dash-spelled define names are legal on makensis 3.0.4.1 (measured with the
-  // real compiler) and were invisible to the `\\w+` reading of the use site.
-  'define token back to word characters only (#919 fix-round review F3)': swap(
-    '        const defineUse = (code.match(/\\$\\{[^}\\s]+\\}/g) ?? []).find((token) => {',
-    '        const defineUse = (code.match(/\\$\\{\\w+\\}/g) ?? []).find((token) => {',
+
+  // --- rules the #919 fix round added or tightened (round-4 findings) ---
+  // F-1: a label is a position — `iaSweepDeclined: SetErrorLevel 2` declares the
+  // label the prompt jumps to, and the statement on its line is the branch's
+  // first (measured legal in a Section and in a `!macro` body). Reading only the
+  // stand-alone spelling left the whole declined contract unchecked for that
+  // shape. Three mutations, one per half of the reading: the label lookup, the
+  // statement on the label's line (the exit code), and that statement inside the
+  // branch body / span walk.
+  'inline label declarations invisible again (#919 fix round F-1)': swap(
+    "            (line) => labelDeclaration(line)?.name === cancelTarget.toLowerCase(),",
+    "            (line) => labelDeclaration(line)?.name === cancelTarget.toLowerCase() && (labelDeclaration(line)?.rest ?? '') === '',",
+  ),
+  'inline label statement dropped from the exit-code read (#919 fix round F-1)': swap(
+    '                  labelDeclaration(block[labelOffset]).rest,\n',
+    "                  '',\n",
+  ),
+  'inline label statement dropped from the branch body (#919 fix round F-1)': swap(
+    "            const restOf = (at) => labelDeclaration(block[at])?.rest ?? ''",
+    "            const restOf = () => ''",
+  ),
+  // The label chain `A: B: Goto X` is one position and two names; reading only
+  // the first name left a jump through the second one unread.
+  'label chains read as the first name only (#919 fix round F-1)': swap(
+    '  let text = stripNsisComments(line)\n  for (;;) {',
+    '  let text = stripNsisComments(line)\n  for (let once = 0; once < 1; once += 1) {',
+  ),
+  // N1: a jump target may be quoted (`Goto "L"` compiles and jumps), and
+  // `outsideStrings` blanks quoted contents away — the token read has to take
+  // the quoted spans as candidates of their own.
+  'quoted label references invisible again (#919 fix round N1)': swap(
+    '            const labelTokens = (line) => lineTokens(line).filter((token) => labelOffsets.has(token))',
+    '            const labelTokens = (line) =>\n              outsideStrings(line)\n                .trim()\n                .split(/\\s+/)\n                .map((token) => token.toLowerCase())\n                .filter((token) => labelOffsets.has(token))',
+  ),
+  // F-2: sibling `!macro` bodies share the label namespace (measured: a
+  // cross-body `Goto` compiled and jumped), so a jump to a label the file
+  // declares outside this block is a path the scan cannot follow.
+  'labels outside the block no longer reported (#919 fix round F-2)': swap(
+    '            if (foreignJump !== undefined) {',
+    '            if (false) {',
+  ),
+  // R6: the branch's tail is LogicLib structure, not just text — an `${EndIf}`
+  // over arms that each jump out ends in a jump, and an arm that can fall
+  // through does not.
+  'branch tail read as the last text line again (#919 fix round R6)': swap(
+    '              !endsInJump(statements)',
+    "              !/^\\s*(Goto|Return|Abort|Quit)\\b/i.test(statements[statements.length - 1] ?? '')",
+  ),
+  // N2: the output of the two window statements may be quoted (`StrCpy "$vFlag"
+  // "0"` compiles and stores the 0 — measured, probe r9), so the gates that
+  // collect the copies read both spellings.
+  'quoted-output candidate copy invisible again (#919 fix round N2)': onLine(
+    (line) => line.startsWith('  const CANDIDATE_COPY_OUT ='),
+    () => '  const CANDIDATE_COPY_OUT = /^\\s*StrCpy\\s+\\$iaDeleteCandidate\\b/i',
+  ),
+  'quoted-output arming invisible again (#919 fix round N2)': onLine(
+    (line) => line.startsWith('  const SHAPE_ARMING_OUT ='),
+    () => '  const SHAPE_ARMING_OUT = /^\\s*StrCpy\\s+\\$iaDeleteShapeCheck\\b/i',
+  ),
+  // R5: `StrCpy`'s `[maxlen] [startoffset]` decide what is stored (measured,
+  // probe r6), so the operands are part of the rule.
+  'arming operands ignored again (#919 fix round R5)': swap(
+    '          armed:\n            value === \'1\' &&\n            (maxlen === undefined || Number(maxlen) >= 1) &&\n            (offset === undefined || Number(offset) === 0),',
+    "          armed: value === '1',",
+  ),
+  // N3: a trailing `\` continues the value on the next line and the
+  // preprocessor joins the pieces (measured, probes u4/w4), so the join is what
+  // makes the body readable.
+  'continued define values read as the first fragment again (#919 fix round N3)': swap(
+    '        while (/\\\\\\s*$/.test(value) && j + 1 < lines.length) {',
+    '        while (false) {',
+  ),
+  // F-3: `${...}` tokens pair their braces — `${${X}}` is one token whose name is
+  // X's value (measured, probe r5), and the earlier reading stopped at the first
+  // `}` (`${${X` — a name no map holds), which hid the carried write.
+  'nested ${...} tokens read to the first brace again (#919 fix round F-3)': swap(
+    'function defineTokens(code) {\n  const tokens = []\n  for (let i = 0; i + 1 < code.length; i += 1) {\n    if (code[i] !== \'$\' || code[i + 1] !== \'{\') continue\n    let depth = 0\n    let end = i + 1\n    for (; end < code.length; end += 1) {\n      if (code[end] === \'{\') depth += 1\n      else if (code[end] === \'}\') {\n        depth -= 1\n        if (depth === 0) break\n      }\n    }\n    if (depth !== 0) break\n    tokens.push(code.slice(i, end + 1))\n    i = end\n  }\n  return tokens\n}',
+    'function defineTokens(code) {\n  return code.match(/\\$\\{[^}\\s]+\\}/g) ?? []\n}',
+  ),
+  // Q9 follow-up: the failed delete's path must reach the kept accounting. The
+  // probe measured the gap this pins: a `Goto iaSweepNext` between the failure
+  // status write and the kept label left the suite green while every failed
+  // delete went uncounted (no report, exit code 0).
+  'failed-delete keep-accounting walk dropped (#919 fix round Q9)': swap(
+    '        if (!keeps) {',
+    '        if (false) {',
   ),
 }
 

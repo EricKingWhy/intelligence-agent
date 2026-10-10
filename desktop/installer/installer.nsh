@@ -79,7 +79,7 @@
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
   LangString iaStaleBackup ${LANG_ENGLISH} "The update is complete, but the previous version could not be removed completely. Delete this folder to reclaim the space:"
   LangString iaLeftoverSweep ${LANG_ENGLISH} "Earlier updates left backup folders of the previous version next to the installation directory, and they can take up a lot of disk space. Delete them now?"
-  LangString iaLeftoverKept ${LANG_ENGLISH} "Some backup folders could not be removed: they are in use, contain links, or were not created by this installer. They were left in place — delete them by hand to reclaim the space."
+  LangString iaLeftoverKept ${LANG_ENGLISH} "Some backup folders could not be removed: they are in use, contain links, were not created by this installer, or the delete itself failed — which is what happens when the installation is on a network (UNC) path, where the uninstaller cannot delete. They were left in place — delete them by hand to reclaim the space."
   !endif
   !ifdef LANG_SIMPCHINESE
   LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
@@ -88,7 +88,7 @@
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
   LangString iaStaleBackup ${LANG_SIMPCHINESE} "更新已完成，但旧版本未能完全删除。可手动删除以下文件夹以回收磁盘空间："
   LangString iaLeftoverSweep ${LANG_SIMPCHINESE} "早前的更新在安装目录旁留下了旧版本的备份文件夹，可能占用大量磁盘空间。现在删除它们吗？"
-  LangString iaLeftoverKept ${LANG_SIMPCHINESE} "部分备份文件夹未能删除：它们正在使用、包含链接，或不是本安装程序创建的。已保留原样，可手动删除以回收磁盘空间。"
+  LangString iaLeftoverKept ${LANG_SIMPCHINESE} "部分备份文件夹未能删除：它们正在使用、包含链接、不是本安装程序创建的，或者删除操作本身失败了——安装目录位于网络（UNC）路径时即如此，卸载程序无法在其上删除。已保留原样，可手动删除以回收磁盘空间。"
   !endif
 !macroend
 
