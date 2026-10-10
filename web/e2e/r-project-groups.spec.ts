@@ -204,6 +204,50 @@ test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', as
   await expect.poll(() => railOrder(page, '改名后的项目')).toEqual(['s3', 's1', 's2']);
 });
 
+/** #945：AC4 里 `:172` / `:173` 的家族根因，以及它的确定性回归。
+ *
+ *  根因（受控观测见 `docs/agents/945-*` 方案依据块）：从项目菜单点「重命名项目」时，
+ *  Radix 关闭菜单会在 `setTimeout` 里把焦点**归还给 trigger**（`@radix-ui/react-dropdown-menu`
+ *  的 `onCloseAutoFocus` → `triggerRef.current?.focus()`，见 FocusScope 的 `AUTOFOCUS_ON_UNMOUNT`
+ *  也是 `setTimeout(0)`）。它与新挂载的 `InlineRename` 输入框的 `autoFocus` 是一对竞态：
+ *  谁最后落地谁拿到焦点。归还晚到时输入框被 blur ⇒ `InlineRename.onBlur` 把"值被 trim 成空"
+ *  当作取消 ⇒ 编辑态（含刚显示的空白名错误提示）整块卸载 ⇒ 紧随其后的
+ *  `getByLabel('项目名')` 断言 `element(s) not found`。负载越高，那道 `setTimeout` 越可能晚到。
+ *
+ *  修法：`SessionList` 在选中「重命名项目」时标记 `focusMovedIntoRename`，菜单关闭时跳过
+ *  这一次归还（焦点已被**主动**交给行内编辑器，不该再抢走）——其余菜单项保持默认的归还。
+ *
+ *  本用例把那次归还**确定性地延后**（故障注入 = 消融实验的"改前红"那一半）：修复前
+ *  输入框会被延迟的归还 blur 掉、本断言红；修复后归还被跳过、编辑态存活、本断言绿。 */
+test('#945：菜单归还焦点的竞态不得取消行内重命名（编辑态必须存活）', async ({ page }) => {
+  await page.addInitScript(() => {
+    const real = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (this: HTMLElement, ...args: unknown[]) {
+      // 只延后菜单 trigger 的 `.focus()`——Radix 关闭菜单时的"归还焦点"正是它。
+      if (this.classList?.contains('rail-menu-btn')) {
+        setTimeout(() => real.apply(this, args as []), 1500);
+        return;
+      }
+      return real.apply(this, args as []);
+    };
+  });
+  await routeApi(page, { sessions: baseSessions(), projects: [P1, P2] });
+  await page.goto('/');
+  await expect.poll(() => railOrder(page, '项目 alpha')).toEqual(['s2', 's1']);
+
+  await openProjectMenu(page, '项目 alpha');
+  await page.getByRole('menuitem', { name: '重命名项目' }).click();
+  const rename = page.getByLabel('项目名');
+  await rename.fill('   ');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.project-rename-error')).toBeVisible();
+
+  // 等那道被延后的归还焦点落地：编辑态必须仍在（修复前这里会 red）。
+  await page.waitForTimeout(2200);
+  await expect(rename).toBeVisible();
+  await expect(rename).toHaveAttribute('aria-invalid', 'true');
+});
+
 test('加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致）就地显示后端原因，归属不变', async ({
   page,
 }) => {
