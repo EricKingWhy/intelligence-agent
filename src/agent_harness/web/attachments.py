@@ -42,8 +42,12 @@ from agent_harness.attachments import (
     resolve_image_limits,
     single_image_too_large_message,
 )
-from agent_harness.session.derive import referenced_attachment_ids
-from agent_harness.session.errors import InvalidSessionId, SessionNotFound
+from agent_harness.session.derive import assert_attachment_referenced
+from agent_harness.session.errors import (
+    AttachmentNotReferenced,
+    InvalidSessionId,
+    SessionNotFound,
+)
 from agent_harness.storage.artifact import BYTE_ARTIFACT_ID_PATTERN
 from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.web.app import session_service
@@ -240,9 +244,16 @@ def register_attachment_routes(
         #   校验）**，否则该路径会直接变成跨会话字节读取。当前唯一写入者就是它
         #   （`POST /sessions/{id}/messages`；队列 / steer 复用的是已解析引用，
         #   `ResumeRequest` 无 `attachments` 字段，也没有原始事件追加端点）。
+        #
+        # #934 M-06：判断不住在传输层——`assert_attachment_referenced` 是
+        # `session/derive.py` 里的唯一授权入口（谓词 + 判断同模块），这里只做
+        # 领域异常 → HTTP 404 的翻译（不可区分口径见 `_attachment_not_found`），
+        # 不手写 `not in` 判断。
         events = await service.get_events(session_id)
-        if attachment_id not in referenced_attachment_ids(events):
-            raise _attachment_not_found(session_id, attachment_id)
+        try:
+            assert_attachment_referenced(events, attachment_id)
+        except AttachmentNotReferenced as error:
+            raise _attachment_not_found(session_id, attachment_id) from error
 
         store = _build_attachment_store(state.settings, session_id)
         if store is None:

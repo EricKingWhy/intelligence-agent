@@ -144,9 +144,12 @@ def run_langfuse_experiment(
             "status": "skipped",
             "reason": "LANGFUSE_PUBLIC_KEY/SECRET_KEY 未配置——云端实验跳过（本地报告不受影响）",
         }
-    from langfuse import Langfuse  # 云端操作前台执行，非旁路热路径
+    # 默认 factory 惰性 import：注入 client_factory（测试/离线）时完全不碰 langfuse
+    def _default_factory(**kwargs):
+        from langfuse import Langfuse  # 云端操作前台执行，非旁路热路径
+        return Langfuse(**kwargs)
 
-    factory = client_factory or (lambda **kwargs: Langfuse(**kwargs))
+    factory = client_factory or _default_factory
     client = factory(public_key=public_key, secret_key=secret_key, base_url=base_url)
     dataset = client.get_dataset(dataset_name)
     dataset_items = list(dataset.items)

@@ -259,6 +259,19 @@ class AttachmentReferenceInvalid(SessionServiceError):
     """
 
 
+class AttachmentNotReferenced(SessionServiceError):
+    """读回附件时该 id 未被本会话事件引用（#934 M-05 / M-06）。
+
+    读端点（`GET .../attachments/{id}/content`）的唯一授权异常：只有被本会话某条
+    `user/message` 事件真实引用的 `attachment_id` 才允许读回（PRD D5 / DSH
+    `ATTACHMENT_NOT_REFERENCED` 语义）。调用方（web/）把它译为 404，且与"从未
+    上传 / 属于别的会话"**不可区分**（不泄露存在性）。
+
+    判定逻辑住在 `session/derive.py::assert_attachment_referenced`（与谓词
+    `referenced_attachment_ids` 同一模块）；本异常只是领域→传输的翻译载体。
+    """
+
+
 class TooManyAttachments(SessionServiceError):
     """单条消息引用的图片**数量**超过部署上限（#824 / MM-03）。
 
