@@ -319,6 +319,7 @@ async def _wire_skills(
     except SkillPackageError as error:
         logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
         enabled_managed_skill_digests = {}
+    selection_errors: list[str] = []
     try:
         # #874 T5：全局安装根与自动发现根已分开（T4），但「装了什么」不等于「谁能装配」。
         # 只有本项目显式选择 global 的包才进 catalog；被选版本失效时**不回落**项目版，
@@ -332,6 +333,7 @@ async def _wire_skills(
             error,
         )
         enabled_global_skill_digests = {}
+        selection_errors.append(f"global Skill package selection cannot be honoured: {error}")
     global_managed_dir = global_package_manager.managed_skills_dir
     directories = [global_dir, project_dir, managed_dir]
     if enabled_global_skill_digests:
@@ -351,12 +353,13 @@ async def _wire_skills(
             "project": enabled_managed_skill_digests,
             "global": enabled_global_skill_digests,
         },
+        selection_errors=selection_errors,
     )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。
     if catalog.errors:
-        logger.warning("skill 发现阶段有 %d 个解析错误：%s", len(catalog.errors), catalog.errors)
+        logger.warning("skill 发现阶段有 %d 个错误：%s", len(catalog.errors), catalog.errors)
     # #529 T-529-5：沉淀状态机装配（staging 在 project skill 目录第二层，单层
     # 扫描不可见——未确认草稿结构上进不了 catalog）。
     from agent_harness.skills.promote import SkillPromoter

@@ -435,3 +435,46 @@ def test_t4_manifest_without_enable_results_keeps_project_packages(tmp_path: Pat
     manifest["packages"][PACKAGE_NAME]["enabled"] = False
     project.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     assert world.project("alpha").enable_results() == {}
+
+
+def test_switching_to_global_clears_the_project_records_enabled_bit(tmp_path: Path) -> None:
+    """改选全局版后，项目记录的 enabled 位必须熄灭（CLI 列表面直接读它）。
+
+    `saved_selection` / `pending_restart` 都从项目记录的 enabled 位派生。若改选
+    global 后它仍是 True，`plugins list` 会把这条项目记录报成「已启用、待重启」，
+    而实际装配的是全局版——用户看到两版同时生效（T5 AC2 可见面）。
+    """
+    world = _World(tmp_path)
+    project = world.project("alpha")
+    project.install(_package(tmp_path / "project-src"))
+    world.global_().install(_package(tmp_path / "src"))
+    project.enable(PACKAGE_NAME, scope="project")
+    assert project.list_packages()[PACKAGE_NAME]["enabled"] is True
+
+    project.enable(PACKAGE_NAME, scope="global")
+
+    assert project.list_packages()[PACKAGE_NAME]["enabled"] is False
+    assert project.enable_results()[PACKAGE_NAME]["selected_scope"] == "global"
+
+    # 对照：改回项目版后 enabled 位复归，两个方向都不留旧值。
+    project.enable(PACKAGE_NAME, scope="project")
+    assert project.list_packages()[PACKAGE_NAME]["enabled"] is True
+
+
+def test_global_scope_write_attempts_leave_the_manifest_untouched(tmp_path: Path) -> None:
+    """全局 manager 的越权启用/停用必须零副作用（T5 AC1：选择属于项目）。
+
+    只断言抛错消息不够：若拒绝发生在写盘之后，全局清单会被留下半截状态。
+    判据是字节面——拒绝路径的清单与调用前逐字节相同。
+    """
+    world = _World(tmp_path)
+    global_manager = world.global_()
+    global_manager.install(_package(tmp_path / "src"))
+    before = global_manager.manifest_path.read_bytes()
+
+    with pytest.raises(SkillPackageError, match="enabled per project"):
+        global_manager.enable(PACKAGE_NAME, scope="global")
+    with pytest.raises(SkillPackageError, match="disabled per project"):
+        global_manager.disable(PACKAGE_NAME)
+
+    assert global_manager.manifest_path.read_bytes() == before

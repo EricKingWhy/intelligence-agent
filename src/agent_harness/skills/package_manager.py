@@ -107,7 +107,7 @@ class SkillPackageManager:
         """全局 scope 的安装记录；无则 None。清单损坏时响亮失败，不静默吞掉。"""
         return self.global_manager().list_packages().get(name)
 
-    def enable_results(self, *, name: str | None = None) -> dict[str, dict[str, Any]]:
+    def enable_results(self) -> dict[str, dict[str, Any]]:
         """本项目保存的启用结果表副本（只读投影，供 CLI/装配面消费）。
 
         键是 `enable <id>` 用的 id（安装器保证它等于包名：检查阶段要求 SKILL.md
@@ -115,10 +115,7 @@ class SkillPackageManager:
         要求安装记录至少能还原「显式项目启用选择」，这条属于项目自己的清单）。
         """
         with self._locked_registry():
-            results = self._read_manifest()[ENABLE_RESULTS_FIELD]
-            if name is None:
-                return copy.deepcopy(results)
-            return {name: copy.deepcopy(results[name])} if name in results else {}
+            return copy.deepcopy(self._read_manifest()[ENABLE_RESULTS_FIELD])
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
         source_report = inspect_skill_package(
@@ -466,6 +463,11 @@ class SkillPackageManager:
                 self._verify_selected_global(name, global_record)
                 source = global_record["source"]
                 version = global_record.get("resolved_commit") or global_record["sha256"]
+                if local is not None:
+                    # 改选全局版后，项目记录的 enabled 位必须跟着熄灭：它同时喂给
+                    # 列表面（saved_selection / pending_restart）与装配面，留着 True
+                    # 会让 CLI 把「已改选全局」的那条项目记录报成已启用且待重启。
+                    local["enabled"] = False
             results[name] = {
                 "selected_scope": target,
                 "source": source,
@@ -616,8 +618,10 @@ class SkillPackageManager:
     def enabled_skill_digests(self) -> dict[str, str]:
         """本项目从 project scope 装配的 Skill 与安装期正文摘要。
 
-        只收「显式选择了 project」且记录完整的包；选择了 global 的同名包由
-        :meth:`enabled_global_skill_digests` 承担，两处互斥（T5 AC2：只装配所选一版）。
+        两个条件都要满足：启用结果表说「本项目选了 project scope」，且项目记录
+        仍是 `enabled`。前者决定选哪一版（T5 AC2：同 ID 只装配所选一版），后者是
+        安装记录的既有门。选择了 global 的同名包由
+        :meth:`enabled_global_skill_digests` 承担，两处互斥。
         """
         if self.scope == "global":
             return {}
@@ -707,7 +711,9 @@ class SkillPackageManager:
             raise SkillPackageError("install manifest has an unsupported shape")
         # T4 时代的清单只有 enabled 位、没有启用结果表。升级后按「显式项目选择」
         # 补齐，否则已启用的项目包会在读侧静默消失（AC1 要求会话间一致）。
-        # 这是版本 1 内的字段演进，不动 MANIFEST_VERSION。
+        # 这是版本 1 内的字段演进，不动 MANIFEST_VERSION。补齐落在 payload 上，
+        # 因此**下一次任何写盘都会把它持久化**——这正是我们要的升级迁移（幂等，
+        # 回填值等于 T4 的 enabled 语义），不是只存在于本次读的临时视图。
         for legacy_name, legacy_record in payload["packages"].items():
             if (
                 isinstance(legacy_record, dict)

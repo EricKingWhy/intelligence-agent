@@ -15,7 +15,7 @@ import re
 import stat
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -213,6 +213,12 @@ def serialize_skill_markdown(entry: SkillCatalogEntry) -> str:
     return f"---\n{frontmatter}---\n\n{entry.load_body().strip()}\n"
 
 
+class _ManagedClaim(NamedTuple):
+    """受管根的归属声明：命中的安装期正文摘要；None = 命中受管根但未被本项目选中。"""
+
+    digest: str | None
+
+
 class SkillDiscovery:
     """扫描 skill 目录（只一层 `skills/<name>/SKILL.md`）+ 手动指定路径。
 
@@ -229,6 +235,7 @@ class SkillDiscovery:
         *,
         managed_directories: dict[str, Path] | None = None,
         enabled_managed_digests: dict[str, dict[str, str]] | None = None,
+        selection_errors: list[str] | None = None,
     ) -> None:
         self._directories = [Path(d) for d in directories]
         self._manual_paths = [Path(p) for p in (manual_paths or [])]
@@ -240,6 +247,13 @@ class SkillDiscovery:
         self._managed_directories = {
             scope: Path(root) for scope, root in (managed_directories or {}).items()
         }
+        # 装配期读启用结果失败（例如本项目选中的全局版本失效）不能只留一行日志：
+        # spec 08 §6.3 要求管理状态在可观察面留痕，否则「被选版本失效」与「本来
+        # 就没选」在程序上不可区分。这条错误随每次 discover() 进 catalog.errors，
+        # 由 SkillCapability.errors() / Web 只读面呈现（T5 AC3）。
+        self._selection_errors = [
+            f"[selection] {message}" for message in (selection_errors or [])
+        ]
         self._enabled_managed_digests = {
             scope: dict(digests)
             for scope, digests in (enabled_managed_digests or {}).items()
@@ -258,15 +272,15 @@ class SkillDiscovery:
         return self._project_dir
 
     def discover(self) -> SkillCatalog:
-        catalog = SkillCatalog()
+        catalog = SkillCatalog(errors=list(self._selection_errors))
         seen: dict[str, tuple[Path, bool]] = {}
         blocked_managed_conflicts: set[str] = set()
 
         def _consider(path: Path, origin: str, root: Path | None) -> None:
             claim = self._managed_claim_for(path)
-            if claim is not None and claim[1] is None:
+            if claim is not None and claim.digest is None:
                 return
-            managed_digest = claim[1] if claim is not None else None
+            managed_digest = claim.digest if claim is not None else None
             entry, errors = parse_skill_markdown(path)
             catalog.errors.extend(f"[{origin}] {e}" for e in errors)
             if entry is None:
@@ -372,11 +386,13 @@ class SkillDiscovery:
         except (OSError, RuntimeError):
             return False
 
-    def _managed_claim_for(self, path: Path) -> tuple[str, str | None] | None:
-        """受管归属声明：``(scope, 安装期正文摘要)``；未受管返回 None。
+    def _managed_claim_for(self, path: Path) -> _ManagedClaim | None:
+        """受管归属声明；未受管返回 None。
 
-        摘要为 None 表示「路径确实落在某个受管根里，但不是本次装配选中的那个
+        `digest` 为 None 表示「路径确实落在某个受管根里，但不是本次装配选中的那个
         快照」——调用方据此丢弃该条目（受管根不得绕过本项目保存的启用结果）。
+        用具名字段而不是裸元组：`(scope, digest)` 的 scope 位无人消费，写成
+        `if claim:` 之类会把它误当成"已选中"放行。
         """
         for scope, root in self._managed_roots():
             try:
@@ -394,19 +410,17 @@ class SkillDiscovery:
             if not lexical_candidate and not resolved_candidate:
                 continue
             if not self._managed_directory_is_safe(root) or relative is None:
-                return scope, None
+                return _ManagedClaim(None)
             if (
                 len(relative.parts) != 2
                 or relative.parts[1].casefold() != "skill.md"
                 or _is_reparse_point(root / relative.parts[0])
                 or _is_reparse_point(path)
             ):
-                return scope, None
+                return _ManagedClaim(None)
             name = relative.parts[0]
             digest = self._enabled_digests(scope).get(name)
-            if digest is None:
-                return scope, None
-            return scope, digest
+            return _ManagedClaim(digest)
         return None
 
     # ── #529：当前目录（缓存投影）+ 闭环写入路径 ──────────────────────────────
