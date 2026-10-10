@@ -68,6 +68,8 @@ _BODY_BEARING_METHODS = frozenset({"post", "put", "patch", "delete"})
 #: #515：存储写重试耗尽（`StorageBusyError` → 503）已武装的写端点——
 #: sessions 族 8 个 + projects 族 6 个写端点（`_translated()` 的
 #: StorageBusyError 臂包住全部项目写操作，修后重审 P2-A）；
+#: #376-1：memory-v2 族 4 个写端点（`web/memory.py` 的 except 臂，同样把
+#: 重试耗尽翻成 503）；
 #: #517：会构造模型 client 的端点（`ModelClientConstructionError` → 503）。
 _503_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
     {
@@ -86,6 +88,10 @@ _503_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
         ("/api/projects/{project_id}/sessions", "post"),
         ("/api/projects/{project_id}/sessions/{session_id}", "delete"),
         ("/api/projects/{project_id}/sessions/{session_id}/order", "post"),
+        ("/api/memories/{memory_id}", "delete"),
+        ("/api/memories/{memory_id}", "patch"),
+        ("/api/memories/bulk-delete", "post"),
+        ("/api/memory-settings", "patch"),
     }
 )
 

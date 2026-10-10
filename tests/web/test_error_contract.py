@@ -238,6 +238,12 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
         ("/api/projects/{project_id}/sessions", "post"),
         ("/api/projects/{project_id}/sessions/{session_id}", "delete"),
         ("/api/projects/{project_id}/sessions/{session_id}/order", "post"),
+        # memory-v2 族写端点（#376-1）：web/memory.py 的 except StorageBusyError 臂
+        # 同样把重试耗尽翻成 503——声明面必须与臂同步。
+        ("/api/memories/{memory_id}", "delete"),
+        ("/api/memories/{memory_id}", "patch"),
+        ("/api/memories/bulk-delete", "post"),
+        ("/api/memory-settings", "patch"),
     }
     for path, method in expectations:
         op = api["paths"][path][method]

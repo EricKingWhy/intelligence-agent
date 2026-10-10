@@ -52,6 +52,7 @@ from agent_harness.memory.v2.types import (
     TrustedMemoryIdentity,
     assert_trusted_identity,
 )
+from agent_harness.storage.sqlite import retry_on_busy
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,7 @@ class SqliteMemoryV2Store:
     # 写路径
     # ----------------------------------------------------------------------------------
 
+    @retry_on_busy
     async def create(
         self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
@@ -206,6 +208,7 @@ class SqliteMemoryV2Store:
         return await self._insert(
             draft, trusted, root_id=None, version=1, previous=None, connection=connection)
 
+    @retry_on_busy
     async def update(
         self, previous_id: str, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
@@ -235,6 +238,7 @@ class SqliteMemoryV2Store:
             previous=previous, connection=connection,
         )
 
+    @retry_on_busy
     async def invalidate(
         self, memory_id: str, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
@@ -528,6 +532,7 @@ class SqliteMemoryV2Store:
             raise KeyError(root_id)
         return [_to_tombstone(row) for row in rows]
 
+    @retry_on_busy
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity, *,
         reason: str = "user_request",
@@ -552,6 +557,7 @@ class SqliteMemoryV2Store:
             await connection.commit()
         return receipt
 
+    @retry_on_busy
     async def bulk_delete(
         self, trusted: TrustedMemoryIdentity, *, kind: MemoryKind | None,
     ) -> list[MemoryDeletionReceiptV2]:
@@ -624,6 +630,7 @@ class SqliteMemoryV2Store:
             return MemorySettingsV2()
         return MemorySettingsV2(bool(row["extraction_enabled"]), bool(row["recall_enabled"]))
 
+    @retry_on_busy
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
@@ -654,6 +661,7 @@ class SqliteMemoryV2Store:
             await connection.commit()
         return MemorySettingsV2(extraction, recall)
 
+    @retry_on_busy
     async def purge_expired_tombstones(self, *, now: datetime | None = None) -> int:
         """Purge tombstone hashes after 30 days; ``now`` is an injectable test clock."""
         cutoff = (now or self._now()).astimezone(UTC).isoformat()
@@ -736,6 +744,7 @@ class SqliteMemoryV2Store:
     # outbox（relay 专用，不暴露给模型/请求）
     # ----------------------------------------------------------------------------------
 
+    @retry_on_busy
     async def enqueue_active_index_rebuild(self, *, page_size: int = 500) -> int:
         """Requeue every authoritative active row for an operator-led index rebuild.
 
@@ -794,6 +803,7 @@ class SqliteMemoryV2Store:
             rows = await cursor.fetchall()
         return [self._change(row) for row in rows]
 
+    @retry_on_busy
     async def acknowledge(self, change: PendingMemoryChangeV2) -> bool:
         """按 `revision` 原子确认一条变更已收敛；匹配到才返回 `True`（重放第二次即 `False`）。
 

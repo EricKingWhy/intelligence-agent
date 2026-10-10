@@ -53,7 +53,12 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.event import MEMORY_RECALLED
-from agent_harness.web.domain_errors import http_error, memory_http_error
+from agent_harness.storage.sqlite import StorageBusyError
+from agent_harness.web.domain_errors import (
+    http_error,
+    memory_http_error,
+    storage_http_error,
+)
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
@@ -309,6 +314,9 @@ def register_memory_routes(app: FastAPI) -> None:
         trusted = await _trusted_v2(project_id)
         try:
             receipt = await service.delete(memory_id, trusted)
+        except StorageBusyError as error:
+            # #376-1 / #515：memory-v2 写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            raise storage_http_error(error) from error
         except KeyError as error:
             record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_ABSENT)
             raise memory_http_error(MemoryNotFound(memory_id)) from error
@@ -395,6 +403,9 @@ def register_memory_routes(app: FastAPI) -> None:
                 content=request.content, payload=request.payload,
                 importance=request.importance, strength=request.strength,
             )
+        except StorageBusyError as error:
+            # #376-1 / #515：memory-v2 写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            raise storage_http_error(error) from error
         except StaleMemoryVersion as error:
             raise HTTPException(status_code=409, detail="memory version is stale") from error
         except InvalidMemoryPayload as error:
@@ -422,6 +433,9 @@ def register_memory_routes(app: FastAPI) -> None:
         trusted = await _trusted_v2(project_id)
         try:
             receipts = await service.bulk_delete(trusted, kind=request.kind)
+        except StorageBusyError as error:
+            # #376-1 / #515：memory-v2 写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            raise storage_http_error(error) from error
         except PermissionError as error:
             raise memory_http_error(error) from error
         except MemoryIndexDeletePending as error:
@@ -466,10 +480,15 @@ def register_memory_routes(app: FastAPI) -> None:
     ) -> MemorySettingsResponse:
         service = await _v2_service()
         trusted = await _trusted_v2()
-        settings = await service.update_settings(
-            trusted, extraction_enabled=request.extraction_enabled,
-            recall_enabled=request.recall_enabled,
-        )
+        try:
+            settings = await service.update_settings(
+                trusted, extraction_enabled=request.extraction_enabled,
+                recall_enabled=request.recall_enabled,
+            )
+        except StorageBusyError as error:
+            # #376-1 / #515：写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            # 这正是 #376 票面的失败点（store.update_settings 的 BEGIN IMMEDIATE）。
+            raise storage_http_error(error) from error
         record_memory_change(
             entry_point=ENTRY_API, action="settings", affected_count=1,
         )
