@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
+import { formatBytes, formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -102,6 +102,37 @@ describe('truncateForDisplay — 不可信大输出渲染截断', () => {
     const out = truncateForDisplay('abcdef', 5);
     expect(out.startsWith('abcde')).toBe(true);
     expect(out).toContain('已截断');
+  });
+});
+
+/**
+ * #937 / M-22：`formatBytes` 收口为本仓**唯一**实现（此前 format.ts / attachments.ts /
+ * StepDetail.tsx 三处并存、口径不一：同一 2 MiB 输入渲染出 '2.0 MB' 与 '2 MiB'）。
+ * 统一为 1024 进制 + IEC 标签（B/KiB/MiB/GiB，与后端 MiB 口径一致）——
+ * e2e 与单测钉住 `'超过单张上限 20 MiB'`，旧 KB/MB 标签退役。
+ */
+describe('formatBytes — 唯一实现（#937 / M-22：1024 进制 + IEC 标签）', () => {
+  it('B / KiB / MiB / GiB（1024 进制，与后端 MiB 口径一致）', () => {
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1024)).toBe('1 KiB');
+    expect(formatBytes(2048)).toBe('2 KiB');
+    expect(formatBytes(2 * 1024 * 1024)).toBe('2 MiB');
+    expect(formatBytes(20 * 1024 * 1024)).toBe('20 MiB');
+    expect(formatBytes(1.5 * 1024 * 1024)).toBe('1.5 MiB');
+  });
+
+  it('舍入语义：KiB 取整；MiB ≥10 取整、<10 一位小数；GiB 一位小数', () => {
+    expect(formatBytes(1024 + 512)).toBe('2 KiB'); // 1.5 KiB → 取整
+    expect(formatBytes(10.4 * 1024 * 1024)).toBe('10 MiB'); // ≥10 取整
+    expect(formatBytes(5.25 * 1024 * 1024)).toBe('5.3 MiB'); // <10 一位小数
+    expect(formatBytes(1.5 * 1024 * 1024 * 1024)).toBe('1.5 GiB'); // GiB 一位小数
+    expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2 GiB');
+  });
+
+  it('非有限 / 负值返回 \'—\'（宁可显"不可得"，也不编一个像样的数字）', () => {
+    expect(formatBytes(-1)).toBe('—');
+    expect(formatBytes(NaN)).toBe('—');
+    expect(formatBytes(Infinity)).toBe('—');
   });
 });
 

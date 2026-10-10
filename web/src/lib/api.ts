@@ -22,6 +22,7 @@ import type {
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import type { ImageIntakeLimits } from './attachments';
 import type { RunLimitField } from './runBudget';
 import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
@@ -1307,6 +1308,41 @@ export async function getArtifactContent(
 // 读端点的授权闸门（#823 / MM-02）：id 必须被**本会话某条 `user/message`** 引用，
 // 否则 404 —— 所以**发送前**的草稿缩略图不能走这个端点（那时还没有事件引用它），
 // 只能本地预览；发送后（事件已落地）才由它渲染。这不是可以简化掉的一步。
+
+/** #937 / M-08：GET /api/attachments/limits —— 附件图片上限的**服务端权威下发**。
+ *
+ *  返回值即前端的 `ImageIntakeLimits`（后端 `app.py::get_attachment_limits` 已按
+ *  camelCase 输出，`allowedMediaTypes` 对应前端的 `mediaTypes`）。与 `getSandboxBackends`
+ *  的宽容解析不同，这里**非 ok / 形状非法一律抛 Error**、不吞成默认值：「拿不到就用
+ *  旧值」是调用方（`attachments.ts::loadImageLimits` → 离线 fallback `IMAGE_LIMITS`）
+ *  的决策，fetch 层无权替它做。形状防御沿用本文件惯例（`parseAttachmentReceipt` 等）：
+ *  逐字段窄化，可疑数据宁可失败也不伪造。
+ */
+export async function getAttachmentLimits(): Promise<ImageIntakeLimits> {
+  const res = await apiFetch('/api/attachments/limits');
+  if (!res.ok) throw new Error(`GET /api/attachments/limits → ${res.status}`);
+  const body: unknown = await res.json();
+  if (typeof body !== 'object' || body === null) {
+    throw new Error('GET /api/attachments/limits：响应体不是对象');
+  }
+  const r = body as Record<string, unknown>;
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!num(r.maxImageBytes) || !num(r.maxImagesPerMessage) || !num(r.maxMessageImageBytes)) {
+    throw new Error('GET /api/attachments/limits：数值字段缺失或非法');
+  }
+  if (
+    !Array.isArray(r.allowedMediaTypes) ||
+    !r.allowedMediaTypes.every((t): t is string => typeof t === 'string')
+  ) {
+    throw new Error('GET /api/attachments/limits：allowedMediaTypes 不是字符串数组');
+  }
+  return {
+    maxImageBytes: r.maxImageBytes,
+    maxImagesPerMessage: r.maxImagesPerMessage,
+    maxMessageImageBytes: r.maxMessageImageBytes,
+    mediaTypes: r.allowedMediaTypes,
+  };
+}
 
 /** `POST …/attachments` 的回执（后端 `AttachmentUploadResponse`）。 */
 export interface AttachmentUploadReceipt {

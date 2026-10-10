@@ -1,5 +1,7 @@
 /** #825（MM-04）：附图**纯函数层**的契约——`filesFromClipboard`（AC10）、
- *  `partitionIntake`（AC2/AC3 的整批判定）、`budgetText` / `formatBytes`（AC2 预算）。
+ *  `partitionIntake`（AC2/AC3 的整批判定）、`budgetText`（AC2 预算）。
+ *  #937 / M-22 起 `formatBytes` 收口到 `format.ts`（唯一实现），其直测随迁到
+ *  `format.test.ts`；本文件只钉预算文案引用它产出的 MiB 行为。
  *
  *  为什么值得单独钉：这些函数是"用户看得见的拒绝理由"的唯一来源（AC3 要求点名
  *  文件与具体上限），且 AC10 明确要求粘贴取文件逻辑独立成纯函数供桌面复用——
@@ -10,13 +12,17 @@
  *  `data:` 缩略图与受控读回在 `e2e/image-attachments.spec.ts`（需要真浏览器）。
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   budgetText,
+  detectImageMediaType,
   filesFromClipboard,
-  formatBytes,
+  getImageLimits,
   IMAGE_LIMITS,
+  loadImageLimits,
   partitionIntake,
+  setImageLimits,
+  sumBytes,
   type ImageIntakeLimits,
 } from './attachments';
 
@@ -27,6 +33,11 @@ const file = (name: string, type: string, size: number): File => {
   Object.defineProperty(f, 'size', { value: size });
   return f;
 };
+
+/** 探针测试专用：真实字节构造 File（空 blob + 伪造 size 的 `file` 骗不过字节探测，
+ *  也让 `file.slice(0,16).arrayBuffer()` 拿到的是真字节）。 */
+const byteFile = (name: string, bytes: Uint8Array<ArrayBuffer>, type = ''): File =>
+  new File([bytes], name, { type });
 
 /** 只关心"条目形状"的 DataTransfer 替身（jsdom 的 DataTransfer 构造受限）。 */
 const transfer = (items: Array<{ kind: string; file: File | null }>): DataTransfer =>
@@ -125,7 +136,110 @@ describe('partitionIntake — AC2/AC3 的整批判定', () => {
   });
 });
 
-describe('budgetText / formatBytes — AC2 的预算提示', () => {
+/**
+ * #937 / M-20：字节探测（对齐后端 `probe.py::_detect` 的四种签名，判据又对译自
+ * Pi `mime.ts`）。客户端声明的 `file.type` 可伪造（`.txt` 改名 `.png` 即可骗过），
+ * 预检的「是不是图片」必须由字节回答。
+ */
+describe('detectImageMediaType — #937 / M-20 字节探测', () => {
+  it('PNG 魔数（89 50 4E 47 0D 0A 1A 0A）→ image/png', async () => {
+    const bytes = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52);
+    await expect(detectImageMediaType(byteFile('a.png', bytes, 'image/png'))).resolves.toBe('image/png');
+  });
+
+  it('GIF87a → image/gif', async () => {
+    const bytes = new TextEncoder().encode('GIF87a');
+    await expect(detectImageMediaType(byteFile('a.gif', bytes, 'image/gif'))).resolves.toBe('image/gif');
+  });
+
+  it('GIF89a → image/gif', async () => {
+    const bytes = new TextEncoder().encode('GIF89a');
+    await expect(detectImageMediaType(byteFile('a.gif', bytes, 'image/gif'))).resolves.toBe('image/gif');
+  });
+
+  it('JPEG SOI（FF D8 FF）→ image/jpeg', async () => {
+    const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46);
+    await expect(detectImageMediaType(byteFile('a.jpg', bytes, 'image/jpeg'))).resolves.toBe('image/jpeg');
+  });
+
+  it('RIFF…WEBP → image/webp', async () => {
+    const bytes = Uint8Array.of(0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20);
+    await expect(detectImageMediaType(byteFile('a.webp', bytes, 'image/webp'))).resolves.toBe('image/webp');
+  });
+
+  it('纯文本字节 → null（改名骗不过字节）', async () => {
+    const bytes = new TextEncoder().encode('hello plain text');
+    await expect(detectImageMediaType(byteFile('a.png', bytes, 'image/png'))).resolves.toBeNull();
+  });
+
+  it('空文件 → null', async () => {
+    await expect(detectImageMediaType(byteFile('empty.png', new Uint8Array(0), 'image/png'))).resolves.toBeNull();
+  });
+
+  it('2 字节截断文件 → null（不够任何一种签名的最短判据）', async () => {
+    await expect(detectImageMediaType(byteFile('cut.png', Uint8Array.of(0x89, 0x50), 'image/png'))).resolves.toBeNull();
+  });
+});
+
+/**
+ * #937 / M-20：`partitionIntake` 与探测结果的接线——map 里有条目就字节说了算
+ * （null = 字节证伪），没有条目回退浏览器声明（兼容不探针的调用方）。
+ */
+describe('partitionIntake × probedTypes — #937 / M-20 接线', () => {
+  const limits: ImageIntakeLimits = {
+    maxImageBytes: 100,
+    maxImagesPerMessage: 3,
+    maxMessageImageBytes: 250,
+    mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+  };
+
+  const fakePng = byteFile('a.png', new TextEncoder().encode('hello plain text'), 'image/png');
+  const realPng = byteFile(
+    'b.png',
+    Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13),
+    'image/png',
+  );
+  const gifBytes = byteFile('c.png', new TextEncoder().encode('GIF89a…'), 'image/png');
+
+  it('声明 image/png 但 probed 给 null（字节是文本）→ 拒「不支持的图片格式」', () => {
+    const out = partitionIntake([fakePng], [], limits, new Map([[fakePng, null]]));
+    expect(out.accepted).toEqual([]);
+    expect(out.error).toContain('不支持的图片格式');
+    expect(out.error).toContain('a.png');
+  });
+
+  it('真实 PNG 字节（probed 给 image/png）→ accepted', () => {
+    const out = partitionIntake([realPng], [], limits, new Map([[realPng, 'image/png']]));
+    expect(out.error).toBeNull();
+    expect(out.accepted).toEqual([realPng]);
+  });
+
+  it('声明 png、字节是 GIF（probed 给 image/gif）→ accepted：字节赢了且仍在允许集内', () => {
+    const out = partitionIntake([gifBytes], [], limits, new Map([[gifBytes, 'image/gif']]));
+    expect(out.error).toBeNull();
+    expect(out.accepted).toEqual([gifBytes]);
+  });
+
+  it('不传 probedTypes → 老行为（浏览器声明生效）', () => {
+    const out = partitionIntake([fakePng], [], limits);
+    expect(out.error).toBeNull();
+    expect(out.accepted).toEqual([fakePng]);
+  });
+
+  it('probed map 只有部分条目：有条目的按字节、没条目的回退声明', () => {
+    const out = partitionIntake(
+      [fakePng, realPng],
+      [],
+      limits,
+      new Map([[fakePng, null]]), // realPng 不在 map 里 → 用声明的 image/png
+    );
+    expect(out.accepted).toEqual([]);
+    expect(out.error).toContain('a.png');
+    expect(out.error).not.toContain('b.png');
+  });
+});
+
+describe('budgetText — AC2 的预算提示', () => {
   it('张数与剩余字节两条都给出', () => {
     const text = budgetText([{ bytes: 1024 * 1024 }, { bytes: 0 }]);
     expect(text).toContain('已附 2/20 张');
@@ -144,10 +258,103 @@ describe('budgetText / formatBytes — AC2 的预算提示', () => {
     expect(text).toContain('剩余 0 张');
   });
 
-  it('formatBytes 用 1024 进制（与后端 MiB 口径一致）', () => {
-    expect(formatBytes(512)).toBe('512 B');
-    expect(formatBytes(2048)).toBe('2 KiB');
-    expect(formatBytes(20 * 1024 * 1024)).toBe('20 MiB');
-    expect(formatBytes(1.5 * 1024 * 1024)).toBe('1.5 MiB');
+  it('formatBytes 已收口到 ./format（M-22）：预算文案里的 MiB 由唯一实现渲染', () => {
+    // 行为钉子：budgetText 的剩余字节串走 format.ts 的 IEC 实现（'200 MiB' 而非 '200.0 MB'）。
+    const text = budgetText([]);
+    expect(text).toContain('200 MiB');
+  });
+});
+
+/** #937 / M-23：字节求和收口——此前 234/235/253 行三处手写 reduce 逐字重复。 */
+describe('sumBytes — M-23 字节求和收口', () => {
+  it('空数组 → 0', () => {
+    expect(sumBytes([] as { bytes: number }[], (item) => item.bytes)).toBe(0);
+  });
+
+  it('混合条目逐项求和', () => {
+    expect(sumBytes([{ bytes: 10 }, { bytes: 32 }], (item) => item.bytes)).toBe(42);
+    expect(sumBytes([new File(['x'], 'a'), new File(['xx'], 'b')], (f) => f.size)).toBe(3);
+  });
+});
+
+/**
+ * #937 / M-08：上限从服务端下发（GET /api/attachments/limits），
+ * `IMAGE_LIMITS` 退为离线 fallback。这里 mock 的是 `globalThis.fetch`——
+ * `api.ts::getAttachmentLimits` 走 `apiFetch`（相对路径 fetch），
+ * 在 node 环境下 stub 全局 fetch 即可覆盖整条链（含线上形状
+ * `allowedMediaTypes` → `mediaTypes` 的映射）。
+ */
+describe('loadImageLimits / getImageLimits — #937 M-08 服务端下发', () => {
+  /** 与 `IMAGE_LIMITS` **不同**的一组值——证明真的被服务端覆盖，而不是碰巧同值。 */
+  const SERVER_LIMITS: ImageIntakeLimits = {
+    maxImageBytes: 5 * 1024 * 1024,
+    maxImagesPerMessage: 3,
+    maxMessageImageBytes: 6 * 1024 * 1024,
+    mediaTypes: ['image/avif'],
+  };
+  /** 后端 `app.py::get_attachment_limits` 的线上形状（camelCase + allowedMediaTypes）。 */
+  const wireBody = {
+    maxImageBytes: SERVER_LIMITS.maxImageBytes,
+    maxImagesPerMessage: SERVER_LIMITS.maxImagesPerMessage,
+    maxMessageImageBytes: SERVER_LIMITS.maxMessageImageBytes,
+    allowedMediaTypes: [...SERVER_LIMITS.mediaTypes],
+  };
+
+  beforeEach(() => {
+    setImageLimits(IMAGE_LIMITS); // 模块级状态在用例间复位
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('成功 → getImageLimits() 返回服务端的值（与默认值不同，证明真的被覆盖）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => wireBody }) as Response),
+    );
+    const loaded = await loadImageLimits();
+    expect(loaded).toEqual(SERVER_LIMITS);
+    expect(getImageLimits()).toEqual(SERVER_LIMITS);
+    expect(getImageLimits()).not.toEqual(IMAGE_LIMITS);
+  });
+
+  it('fetch 抛错 → 回落 IMAGE_LIMITS 且不抛（fallback 语义）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('network down');
+    }));
+    await expect(loadImageLimits()).resolves.toEqual(IMAGE_LIMITS);
+    expect(getImageLimits()).toEqual(IMAGE_LIMITS);
+  });
+
+  it('非 ok → 回落 IMAGE_LIMITS 且不抛', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }) as Response),
+    );
+    await expect(loadImageLimits()).resolves.toEqual(IMAGE_LIMITS);
+    expect(getImageLimits()).toEqual(IMAGE_LIMITS);
+  });
+
+  it('并发调用共用同一个 in-flight promise（fetch 只打一次）', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => wireBody }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    const [a, b] = await Promise.all([loadImageLimits(), loadImageLimits()]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(a).toEqual(SERVER_LIMITS);
+    expect(b).toEqual(SERVER_LIMITS);
+  });
+
+  it('partitionIntake 默认参数吃刷新后的值（不传 limits 也按新上限拒绝）', async () => {
+    setImageLimits({
+      maxImageBytes: 50,
+      maxImagesPerMessage: 3,
+      maxMessageImageBytes: 250,
+      mediaTypes: ['image/png'],
+    });
+    // 60 B > 刷新后的单张上限 50 B：默认参数路径必须拒绝（旧代码会按 20 MiB 放行）
+    const out = partitionIntake([file('big.png', 'image/png', 60)]);
+    expect(out.accepted).toEqual([]);
+    expect(out.error).toContain('50 B');
   });
 });

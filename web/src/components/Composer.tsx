@@ -14,7 +14,7 @@ import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
-import { budgetText, filesFromClipboard, IMAGE_LIMITS } from '../lib/attachments';
+import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
@@ -30,6 +30,9 @@ import { ReasoningEffortSlider } from './ReasoningEffortSlider';
  *  「目录里的一个 id」与「危险判定」，所以不在前端另立第二张表（那样两处一漂移，
  *  「确认」就会挂在错的档位上——比不确认更糟）。 */
 const DANGER_PERMISSION_MODE = 'danger-full-access';
+
+/** 非视觉模型禁用附图的原因前缀（#937 / M-24 收口：title 与可见提示两处同源，改一处即两处）。 */
+const NON_VISION_MODEL_REASON = '当前模型不支持视觉（supports_vision=false）';
 
 interface Props {
   streaming: boolean;
@@ -160,6 +163,21 @@ export const Composer = memo(function Composer({
   /** 整页拖拽计数：document 级 dragenter/dragleave 会成对触发，用计数判断"还在页面内"。 */
   const dragDepth = useRef(0);
   const [dragActive, setDragActive] = useState(false);
+
+  // ── #937 / M-08：附图上限从服务端下发 ──
+  // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次并落进本地 state——
+  // 预检文案（budgetText）与文件选择器 accept 都消费这份。失败时 loadImageLimits
+  // 返回离线 fallback（IMAGE_LIMITS），不抛、不打扰用户。
+  const [limits, setLimits] = useState<ImageIntakeLimits>(() => getImageLimits());
+  useEffect(() => {
+    let alive = true;
+    void loadImageLimits().then((next) => {
+      if (alive) setLimits(next);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // ADR-0030 §5.1 D10：`locked` 拆开——approvalPending 仍禁用（等待审批时输入
   // 无意义且与审批 UI 竞争）；streaming **不再**禁用。issue #196 的根因正是
@@ -343,7 +361,7 @@ export const Composer = memo(function Composer({
     : sessionId === null
       ? '图片需要先有会话：附图上传挂在会话上，请先新建或选中一个会话'
       : visionUnsupported
-        ? '当前模型不支持视觉（supports_vision=false），已禁用附图'
+        ? `${NON_VISION_MODEL_REASON}，已禁用附图`
         : '';
   const canAttach = attachBlockedReason === '';
   const pickFiles = () => {
@@ -590,7 +608,7 @@ export const Composer = memo(function Composer({
           intakeError={attachments.intakeError}
           budget={budgetText(
             attachments.items.map((item) => ({ bytes: item.file.size })),
-            IMAGE_LIMITS,
+            limits,
           )}
           dragActive={dragActive}
           canAcceptDrop={canAttach}
@@ -606,7 +624,7 @@ export const Composer = memo(function Composer({
         <input
           ref={fileInputRef}
           type="file"
-          accept={IMAGE_LIMITS.mediaTypes.join(',')}
+          accept={limits.mediaTypes.join(',')}
           multiple
           hidden
           onChange={(event) => {
@@ -620,7 +638,7 @@ export const Composer = memo(function Composer({
         {/* #825 AC7：非视觉模型**可见**的禁用原因（不是只藏在 title 里）。 */}
         {visionUnsupported && (
           <div className="composer-attach-hint" role="status">
-            当前模型不支持视觉（supports_vision=false）：已禁用附图；历史附图会被省略为文本占位
+            {NON_VISION_MODEL_REASON}：已禁用附图；历史附图会被省略为文本占位
           </div>
         )}
         <textarea
