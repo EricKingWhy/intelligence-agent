@@ -1598,6 +1598,16 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       }),
       [{ line: 17, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
     )
+    // A label may carry the statement on its own line (measured, probes r1/r2),
+    // so `iaSweepKept: SetErrorLevel 2` is the same kept reading — the scan
+    // graded the span line-by-line and read the inline spelling as a missing
+    // exit code (the fix round's review, F-4).
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('iaSweepKept:\n  SetErrorLevel 2', 'iaSweepKept: SetErrorLevel 2'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [],
+    )
     // The value is the contract the caller reads (rc 2: the launch-form probe
     // and the real-machine driver assert it), and it has to sit on the kept
     // path below the delete — a `SetErrorLevel 0` next to it, or a `SetErrorLevel
@@ -1700,6 +1710,25 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
           what: 'the sweep prompt has no IDCANCEL branch — a UI uninstall cannot decline the sweep',
         },
       ],
+    )
+    // A chain declares two names at one position (`A: B:` — the delta's own
+    // measured shape, probe r8), so the prompt's target may be either name, and
+    // the branch's first statement is what follows the last name. Reading only
+    // the first name reported the legal chain as a missing exit code (the fix
+    // round's review, F-5); the statement may also sit on the chain's own line.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped('iaSweepDeclined:\n  SetErrorLevel 2', 'iaSweepHopA: iaSweepDeclined:\n  SetErrorLevel 2'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped('iaSweepDeclined:\n  SetErrorLevel 2', 'iaSweepHopA: iaSweepDeclined: SetErrorLevel 2'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
     )
     // #919 review (F3): setting the exit code is not enough — the branch has to
     // stop there. `Goto` into the prompt's IDOK target walks a declined sweep
@@ -1872,6 +1901,15 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     for (const falling of [
       '  SetErrorLevel 2\n  ${If} $9 == ""\n    Goto iaSweepDone\n  ${Else}\n    DetailPrint "kept"\n  ${EndIf}',
       '  SetErrorLevel 2\n  ${Switch} $9\n    ${Case} 1\n      Goto iaSweepDone\n    ${CaseElse}\n      DetailPrint "kept"\n  ${EndSwitch}',
+      // A case-less `${Switch}` is the third falling shape, and the one this
+      // suite's own reading got wrong: with no `${Case}`/`${CaseElse}` at all
+      // there is no arm to run — LogicLib jumps straight to the `${EndSwitch}`
+      // label, so the body (its `Goto` included) is dead text and control
+      // leaves the block. Measured on 3.0.4.1: the body's marker file was never
+      // written while the one after `${EndSwitch}` was (probes t7/t8). Reading
+      // the dead tail as the branch's ending jump accepted this fall-through
+      // (the fix round's review, F-1 regression: the base guard reported it).
+      '  SetErrorLevel 2\n  ${Switch} $9\n    Goto iaSweepDone\n  ${EndSwitch}',
     ]) {
       assert.deepEqual(
         unguardedBackupDelete(swapped('  SetErrorLevel 2\n  Goto iaSweepDone', falling), {
@@ -2315,6 +2353,19 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         },
       ],
     )
+    // The dash-spelled twin of the case above, because the comment above claims
+    // both spellings (the fix round's review, F-6: the claim had no assertion).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withUse(['!define IA-DISARM "!insertmacro iaDisarmShape"'], '${IA-DISARM}'),
+      ),
+      [
+        {
+          line: 10,
+          what: "${IA-DISARM} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+      ],
+    )
   })
 
   it('reads the label declarations the sweep branch lands on (#919 fix round F-1/N1/F-2)', () => {
@@ -2397,6 +2448,20 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       loopSwapped('  Goto iaSweepDone', '  Goto iaSweepHop').replace('!macroend', `${hop}\n!macroend`)
     assert.deepEqual(
       unguardedBackupDelete(withHop('iaSweepHop: Goto iaSweepKept'), { sitePolicies: DELETE_SITE_POLICIES }),
+      [{ line: 5, what: declinedMessage }],
+    )
+    // Gap A-1 (this round's own probe): a label name's measured alphabet is a
+    // letter, `_`, `.`, `%` or `@` to start and letters, digits, `_`, `.`, `+`,
+    // `!`, `%`, `#`, `@`, `$`, `-` or `:` inside (measured on 3.0.4.1, probes
+    // n8/n9, re-measured this round), so the declaration read takes that class.
+    // With the narrow class the dashed hop was not a declaration at
+    // all, so `Goto iaSweepHop-A` resolved to nothing and this same reach into
+    // the delete pass read clean where its plain-name twin reports.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withHop('iaSweepHop-A: Goto iaSweepKept').replace('  Goto iaSweepHop', '  Goto iaSweepHop-A'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
       [{ line: 5, what: declinedMessage }],
     )
     assert.deepEqual(
@@ -2609,6 +2674,24 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       },
       { line: 10, what: armingMessage },
     ])
+    // Gap A-2: the inner *value* may carry a dash too — measured on 3.0.4.1,
+    // `!define IA.SEL "IA-DISARM"` + `!define IA-DISARM "StrCpy
+    // $iaDeleteShapeCheck 0"` expands and runs the disarm (probe n6), where
+    // the value-name tests' old `[A-Za-z0-9_.]` class resolved the token back
+    // to the inner name (no map holds it as a write) and read this window
+    // clean — the dashed twin of the case above, with the same readings.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        withDefs(['!define IA.SEL "IA-DISARM"', '!define IA-DISARM "StrCpy $iaDeleteShapeCheck 0"'], '${${IA.SEL}}'),
+      ),
+      [
+        {
+          line: 10,
+          what: "${${IA.SEL}} at line 6 expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)",
+        },
+        { line: 10, what: armingMessage },
+      ],
+    )
     // The same carried state one define further out, and inside a macro body
     // the window inserts.
     assert.deepEqual(
@@ -2711,7 +2794,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     ].join('\n')
     const keepSwapped = (from, to) => sweepKeep.replace(from, to)
     const failedMessage =
-      "the failed delete's path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or any counter bump), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0"
+      "the failed delete's path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or a counter bump this scan can read), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0"
     assert.deepEqual(unguardedBackupDelete(sweepKeep, { sitePolicies: DELETE_SITE_POLICIES }), [])
     // The measured hole itself: the failure path jumps past the kept label.
     assert.deepEqual(
@@ -2776,6 +2859,233 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
       [{ line: 20, what: "missing ${Errors} check before the end of the delete's block" }],
+    )
+  })
+
+  it('reads the one-argument IfErrors form as the failure leg (#919 gap A-3)', () => {
+    // The raw read the rules accept has two spellings, and they jump opposite
+    // ways: `IfErrors 0 label` jumps when there is *no* error (so the
+    // fall-through is the failure path), while the one-argument
+    // `IfErrors label` jumps *on* error (the jump is the failure path). The
+    // walk used to read the fall-through either way, which is wrong in both
+    // directions — measured before the fix (a one-argument sweep compiles:
+    // probe n10): a failure path that jumps straight past the kept count
+    // stayed green, and a correct one that jumps *to* the kept branch was
+    // reported.
+    const oneArgSweep = (read, middle) =>
+      [
+        '!macro customUnInstall',
+        '  FindFirst $0 $1 "$INSTDIR.old-*"',
+        '  StrCmp $0 "" iaSweepDone',
+        '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+        'iaSweepDeclined:',
+        '  SetErrorLevel 2',
+        '  Goto iaSweepDone',
+        'iaSweepDelete:',
+        '  ${GetParent} "$INSTDIR" $2',
+        '  FindFirst $0 $1 "$INSTDIR.old-*"',
+        '  StrCmp $0 "" iaSweepDone',
+        'iaSweepLoop:',
+        '  StrCmp $1 "" iaSweepLoopEnd',
+        '  StrCpy $iaDeleteCandidate "$2\\$1"',
+        '  StrCpy $iaDeleteBase "$INSTDIR"',
+        '  StrCpy $iaDeleteShapeCheck "1"',
+        '  Call iaPrepareDelete',
+        '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+        '  ClearErrors',
+        `  RMDir /r "$iaDeleteTarget"`,
+        `  ${read}`,
+        ...middle,
+        'iaSweepKept:',
+        '  SetErrorLevel 2',
+        'iaSweepNext:',
+        '  FindNext $0 $1',
+        '  Goto iaSweepLoop',
+        'iaSweepLoopEnd:',
+        '  FindClose $0',
+        'iaSweepDone:',
+        '!macroend',
+      ].join('\n')
+    const failedMessage =
+      "the failed delete's path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or a counter bump this scan can read), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0"
+    // The silent direction: on error the read jumps to `iaSweepNext` — past
+    // the kept count — and only the success fall-through reaches the kept
+    // label. Reading the fall-through called this path kept.
+    assert.deepEqual(
+      unguardedBackupDelete(oneArgSweep('IfErrors iaSweepNext', ['  StrCpy $iaDeleteStatus "failed"']), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 20, what: failedMessage }],
+    )
+    // The over-report direction: a correct one-argument sweep — the failure
+    // leg jumps to a label that records "failed" and falls into the kept
+    // accounting, the success leg jumps to the next entry — reads clean.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        oneArgSweep('IfErrors iaSweepFail', [
+          '  Goto iaSweepNext',
+          'iaSweepFail:',
+          '  StrCpy $iaDeleteStatus "failed"',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+  })
+
+  it("reads the failure leg the read's own form names (#919 review P1)", () => {
+    // The walk used to seed at the read and follow the fall-through whatever
+    // the read said. `IfErrors label` jumps *on* error, so the leg it walked
+    // was the success path (gap A-3's fixtures cover that silent direction),
+    // and the `${IfNot}`/`${Unless}` `${Errors}` spellings put the failure leg
+    // in the `${Else}` arm. The review's four legal spellings (P1) are
+    // `IfErrors 0 label` (the fall-through), `IfErrors label` and `IfErrors
+    // label 0` (the target), `${If} ${Errors}` (its own arm) and `${IfNot}` /
+    // `${Unless} ${Errors}` (the `${Else}` arm). The cases below pin each
+    // reading, the dead-branch exclusion, the divider continuation, the
+    // chain's last name and the counter's alphabet.
+    const sweep = (read) =>
+      [
+        '!macro customUnInstall',
+        '  FindFirst $0 $1 "$INSTDIR.old-*"',
+        '  StrCmp $0 "" iaSweepDone',
+        '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+        'iaSweepDeclined:',
+        '  SetErrorLevel 2',
+        '  Goto iaSweepDone',
+        'iaSweepDelete:',
+        '  ${GetParent} "$INSTDIR" $2',
+        '  FindFirst $0 $1 "$INSTDIR.old-*"',
+        '  StrCmp $0 "" iaSweepDone',
+        'iaSweepLoop:',
+        '  StrCmp $1 "" iaSweepLoopEnd',
+        '  StrCpy $iaDeleteCandidate "$2\\$1"',
+        '  StrCpy $iaDeleteBase "$INSTDIR"',
+        '  StrCpy $iaDeleteShapeCheck "1"',
+        '  Call iaPrepareDelete',
+        '  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept',
+        '  ClearErrors',
+        `  RMDir /r "$iaDeleteTarget"`,
+        ...read,
+        'iaSweepKept:',
+        '  SetErrorLevel 2',
+        'iaSweepNext:',
+        '  FindNext $0 $1',
+        '  Goto iaSweepLoop',
+        'iaSweepLoopEnd:',
+        '  FindClose $0',
+        'iaSweepDone:',
+        '!macroend',
+      ].join('\n')
+    const failedMessage =
+      "the failed delete's path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or a counter bump this scan can read), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0"
+    const forkedMessage =
+      "the failed delete's path leaves the read through an arm this scan cannot read — a second divider (`${ElseIf}`) forks the failure leg, so whether a failed delete is counted or reported cannot be read here (fail-closed)"
+    // `${IfNot} ${Errors}`: the failure leg is the `${Else}` arm, and its bump
+    // is the only kept accounting — the then-arm (the success path) jumps out,
+    // so reading the fall-through finds nothing and reports where the sweep is
+    // in fact correct.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  ${IfNot} ${Errors}',
+          '    Goto iaSweepDone',
+          '  ${Else}',
+          '    IntOp $9 $9 + 1',
+          '  ${EndIf}',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    // `IfErrors label 0`: the error leg is the target and the trailing `0` is
+    // the no-error leg, so it reads like the one-argument form.
+    assert.deepEqual(
+      unguardedBackupDelete(sweep(['  IfErrors iaSweepKept 0', '  Goto iaSweepDone']), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [],
+    )
+    // An arm a second divider forks cannot be read: the report names the
+    // forking line instead of guessing which arm of the fork runs (the
+    // fail-closed direction).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  ${IfNot} ${Errors}',
+          '    Goto iaSweepDone',
+          '  ${ElseIf} $0 == ""',
+          '    IntOp $9 $9 + 1',
+          '  ${EndIf}',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 23, what: forkedMessage }],
+    )
+    // A bump in a branch that cannot run is not the kept accounting: the dead
+    // arm is skipped, so the counter never moves on this path.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  IfErrors 0 iaSweepNext',
+          '  StrCpy $iaDeleteStatus "failed"',
+          '  ${If} 1 == 0',
+          '    IntOp $9 $9 + 1',
+          '  ${EndIf}',
+          '  Goto iaSweepDone',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 20, what: failedMessage }],
+    )
+    // Reaching an `${Else}` from inside its own block means the block's end
+    // (LogicLib jumps to after the `${EndIf}`), so the failure leg does not run
+    // the sibling arm: the sibling's bump keeps, and a leg that does not may
+    // not borrow it.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  IfErrors 0 iaSweepNext',
+          '  StrCpy $iaDeleteStatus "failed"',
+          '  ${If} $0 == ""',
+          '    StrCpy $iaDeleteStatus "kept"',
+          '  ${Else}',
+          '    IntOp $9 $9 + 1',
+          '  ${EndIf}',
+          '  Goto iaSweepDone',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [{ line: 20, what: failedMessage }],
+    )
+    // A chain declares its names at one position, so the statement is what
+    // follows the *last* name: the hop below jumps to the kept label, while
+    // reading the first name's rest as the statement made it look like the leg
+    // fell out of the sweep.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  IfErrors 0 iaSweepNext',
+          'iaSweepHop: iaSweepHop2: Goto iaSweepKept',
+          '  Goto iaSweepDone',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
+    )
+    // The counter bump is any positive integer — `IntOp $9 $9 + 2` moves the
+    // same counter the exit code reads.
+    assert.deepEqual(
+      unguardedBackupDelete(
+        sweep([
+          '  IfErrors 0 iaSweepNext',
+          '  StrCpy $iaDeleteStatus "failed"',
+          '  IntOp $9 $9 + 2',
+          '  Goto iaSweepDone',
+        ]),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [],
     )
   })
 

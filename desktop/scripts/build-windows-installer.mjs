@@ -1000,7 +1000,21 @@ export function validateLongPathPrefixes(source, filename) {
  *     — measured legal in a Section and in a `!macro` body) is read with the
  *     statement on its line, and a label reference may be quoted (`Goto "L"`
  *     compiles and jumps — measured), so a quoted target is followed like a bare
- *     one;
+ *     one. A label's name is read as the measured alphabet: a name starts with
+ *     a letter, `_`, `.`, `%` or `@` and carries letters, digits, `_`, `.`,
+ *     `+`, `!`, `%`, `#`, `@`, `$`, `-` or `:` (measured on 3.0.4.1 with
+ *     declared variables: `.a:`, `a-b:`, `a+b:`, `a!b:`, `a%b:`, `a#b:`,
+ *     `a@b:`, `a:b:`, `a$$b:`, `%ab:`, `@ab:` and `_ab:` all compile and every
+ *     jump lands — probes n8/n9, the `%`/`@` starts and the colon form
+ *     re-measured in this disposal round), while a *leading* digit, `$`, `!`
+ *     or `+`/`-` is refused (`Goto targets cannot begin with 0-9, $, !`;
+ *     `+`/`-` start a relative jump) and a `#` at line start is a comment. The
+ *     old `[A-Za-z0-9_.]` class read `ia-hop-into-delete:`, `.iaHop:` and the
+ *     other spellings as no declaration at all, so a declined branch jumping
+ *     through such a hop into the delete pass went unreported where the
+ *     plain-name twin reported (the fix round's own review, gap A-1, and the
+ *     two-axis review's P2: the dot-start form was a regression against the
+ *     base guard);
  *   - the declined branch's reach back into the delete pass is a text scan of
  *     label references: a label is "in the pass" when it sits above the delete
  *     or between the label a statement below the delete names and that
@@ -1021,7 +1035,12 @@ export function validateLongPathPrefixes(source, filename) {
  *     followed and reads as not reaching it (fail-closed). The gap this closes
  *     was measured: a `Goto iaSweepNext` between the failure-branch status write
  *     and the kept label kept the whole suite green while every failed delete
- *     went uncounted — no report, exit code left at 0;
+ *     went uncounted — no report, exit code left at 0. Which leg of the read
+ *     is the failure path comes from the read's own form: `IfErrors 0 label`
+ *     jumps when there is *no* error, so the fall-through is the failure path,
+ *     while the one-argument `IfErrors label` jumps *on* error — there the
+ *     walk follows the jump, and a target the block does not declare reports
+ *     (fail-closed);
  *   - the rollback's restore-failure window is the `${Errors}` read after the
  *     last `Rename` and the branch it closes. A raw `IfErrors 0 label` jump has
  *     neither a name nor a closer the scan reads, so a rollback using that form
@@ -1282,9 +1301,16 @@ function keptExitLevel(lines, after, end, onPath, inline = '') {
   // is legal in a Section and in a `!macro` body (probe r1/r2, fix round F-1) —
   // so the label's own line is read before the lines below it.
   if (/^\s*SetErrorLevel\s+2\s*$/i.test(inline)) return after
+  // A statement may sit on a label's own line anywhere in the span, not only on
+  // the first label's: `iaSweepKept: SetErrorLevel 2` is the same kept reading
+  // (measured, probes r1/r2), and the *last* label of a chain carries the
+  // statement that follows the chain. Reading whole lines only reported those
+  // spellings as a missing exit code (the fix round's review, F-4).
+  const declaresInlineExit = (line) =>
+    labelDeclarations(line).some((declaration) => /^\s*SetErrorLevel\s+2\s*$/i.test(declaration.rest))
   for (let j = after + 1; j <= end; j += 1) {
     if (!onPath(j)) continue
-    if (/^\s*SetErrorLevel\s+2\s*$/i.test(lines[j])) return j
+    if (/^\s*SetErrorLevel\s+2\s*$/i.test(lines[j]) || declaresInlineExit(lines[j])) return j
   }
   return -1
 }
@@ -1307,7 +1333,7 @@ function labelDeclarations(line) {
   const out = []
   let text = stripNsisComments(line)
   for (;;) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_.]*)\s*:/.exec(text)
+    const match = /^\s*([A-Za-z_.%@][A-Za-z0-9_.+!%#@$:-]*)\s*:/.exec(text)
     if (match === null) return out
     out.push({ name: match[1].toLowerCase(), rest: text.slice(match[0].length) })
     text = text.slice(match[0].length)
@@ -1373,8 +1399,13 @@ function defineTokens(code) {
  * $iaDeleteShapeCheck 0"` the token executes the disarm (probe r5). The braces
  * are paired by `defineTokens`, so the name is whatever the token's inner text
  * expands to: for a nested token, the inner define's bare value when it is a
- * plain name, else the inner name itself. Every name is compared
- * case-insensitively like every other directive name.
+ * plain name, else the inner name itself; "plain name" is read as one
+ * non-whitespace token, so a dash-spelled value resolves too — measured: with
+ * `!define IA.SEL "IA-DISARM"` and `!define IA-DISARM "StrCpy
+ * $iaDeleteShapeCheck 0"` the token expands and the disarm runs (probe n6),
+ * while the value test's old `[A-Za-z0-9_.]` class resolved the dashed twin
+ * back to the inner name and read this window clean (gap A-2). Every name is
+ * compared case-insensitively like every other directive name.
  */
 function defineName(token, substitutions) {
   const inner = token.slice(2, -1).trim()
@@ -1382,7 +1413,7 @@ function defineName(token, substitutions) {
   const innerName = inner.slice(2, -1).trim().toLowerCase()
   const body = substitutions.get(innerName)
   const value = body === undefined ? undefined : body.join(' ').trim()
-  return value !== undefined && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(value) ? value.toLowerCase() : innerName
+  return value !== undefined && !/\s/.test(value) ? value.toLowerCase() : innerName
 }
 
 /**
@@ -1419,10 +1450,18 @@ function endsInJump(statements) {
     // Then arm and counts.) A switch with no divider at all keeps the plain
     // reading, so it is still reported (fail-closed).
     const firstDivider = cuts.length > 2 ? cuts[1] : undefined
-    const boundaries =
-      firstDivider !== undefined && /^\s*\$\{(Switch|Select)\b/i.test(statements[opener])
-        ? cuts.slice(1)
-        : cuts
+    const isSwitch = /^\s*\$\{(Switch|Select)\b/i.test(statements[opener])
+    // A `${Switch}`/`${Select}` with no `${Case}`/`${CaseElse}` at all has no
+    // arm that can run: LogicLib jumps straight to the `${EndSwitch}` label, so
+    // the body — a `Goto` in it included — is dead text and control leaves the
+    // block after the closer (measured on 3.0.4.1: the body's marker file was
+    // never written and the one after `${EndSwitch}` was — probes t7/t8). It
+    // cannot be the branch's ending jump, so it is reported (fail-closed).
+    // Reading the dead body's tail as an arm was this rule's own regression
+    // (the fix round's review, F-1: the base guard reported the shape and the
+    // fix round accepted it).
+    if (isSwitch && firstDivider === undefined) return false
+    const boundaries = firstDivider !== undefined && isSwitch ? cuts.slice(1) : cuts
     for (let a = 0; a + 1 < boundaries.length; a += 1) {
       if (!visit(boundaries[a] + 1, boundaries[a + 1] - 1)) return false
     }
@@ -1697,14 +1736,16 @@ export function unguardedBackupDelete(source, options = {}) {
         seen.add(name)
         const body = substitutions.get(name)
         if (body === undefined) return true
-        // A body that is one bare name continues the chain: `${${IA.SEL}}` with
-        // `!define IA.SEL "IA.DISARM"` resolves the inner token to that text and
+        // A body that is one bare name — any single non-whitespace token, dash
+        // spellings included (measured, probe n6) — continues the chain:
+        // `${${IA.SEL}}` with `!define IA.SEL "IA.DISARM"` resolves the inner
+        // token to that text and
         // uses it as the outer name (measured, probe r5) — `defineName` follows
         // the measured step, and a body that is itself a defined name is
         // followed too (fail-closed: following can only find more writes).
         if (body.length === 1) {
           const only = body[0].trim()
-          if (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(only) && substitutions.has(only.toLowerCase())) {
+          if (!/\s/.test(only) && substitutions.has(only.toLowerCase())) {
             return touchesDeleteVars(only.toLowerCase(), seen)
           }
         }
@@ -1955,12 +1996,19 @@ export function unguardedBackupDelete(source, options = {}) {
       // never moved for a failed candidate, so a sweep whose deletes all failed
       // reported nothing and left the exit code at its 0 default (the fix
       // round's own probe: that edit kept the whole suite green). The walk below
-      // follows bare `Goto`s through this block's label table; the failure path
-      // must reach the label the status gate jumps to — the refusal landing,
-      // where a kept candidate is counted — or pass a counter bump of its own
-      // (a sweep that keeps its own books in a branch of its own is legal). A
-      // path that loops back, leaves the block, or runs out of statements
-      // without either is reported (fail-closed).
+      // follows the read's own failure leg through this block's label table —
+      // the leg the read's form names: the fall-through for `IfErrors 0 label`,
+      // the target for `IfErrors label` / `IfErrors label 0`, the then-arm for
+      // `${If} ${Errors}`, and the `${Else}` arm (or the
+      // line after the `${EndIf}` when there is none) for the `${IfNot}` and
+      // `${Unless}` `${Errors}` spellings. The failure path must reach the label
+      // the status gate jumps to — the refusal landing, where a kept candidate
+      // is counted — or pass a counter bump of its own (a sweep that keeps its
+      // own books in a branch of its own is legal). A bump in a branch that
+      // cannot run (`1 == 0`) does not count, and a leg a second divider
+      // (`${ElseIf}`) forks is reported rather than guessed at. A path that
+      // loops back, leaves the block, or runs out of statements without either
+      // is reported (fail-closed).
       const gateTarget = (() => {
         for (const line of block) {
           const match = /^\s*StrCmp\s+\$iaDeleteStatus\s+"ok"\s+0\s+(\S+)/i.exec(line)
@@ -1982,19 +2030,87 @@ export function unguardedBackupDelete(source, options = {}) {
           }
         }
         const gateOffset = reachOffsets.get(gateTarget)
-        const countBump = /^\s*IntOp\s+(\$\S+)\s+\1\s*\+\s*1\s*$/i
+        const countBump = /^\s*IntOp\s+(\$\S+)\s+\1\s*\+\s*(?:[1-9]\d*)\s*$/i
         const bareJump = /^\s*Goto\s+(\S+)\s*$/i
         const terminal = /^\s*(?:Return|Abort|Quit)\b/i
+        // Which leg of the read is the failure path comes from the read's own
+        // form (the fix round's review, P1): `IfErrors 0 label` jumps when there
+        // is *no* error, so the failure path is the line after the read, while
+        // `IfErrors label` and `IfErrors label 0` jump *on* error, so the
+        // failure path is that label — reading the fall-through for every form
+        // stayed green on a one-argument sweep whose failure path skipped the
+        // kept count and reported its correct twin (measured, probe n10).
+        // `${If} ${Errors}` has the failure path in its own arm; the `${IfNot}`
+        // and `${Unless}` spellings have it in the `${Else}` arm, or after the
+        // `${EndIf}` when there is none. An arm a second divider forks
+        // (`${ElseIf}`) is reported rather than guessed at, and a target built
+        // from a variable reads as undeclared, so that read reports too
+        // (fail-closed).
+        const failureLegOf = (readAt) => {
+          const text = stripNsisComments(block[readAt])
+          const jump = /^\s*IfErrors\s+(\S+)(?:\s+(\S+))?/i.exec(text)
+          if (jump !== null && jump[1] !== '0') {
+            const target = jump[1].replace(/^(['"`])([\s\S]*)\1$/, '$2').toLowerCase()
+            return { at: reachOffsets.get(target) ?? -1 }
+          }
+          if (!/^\s*\$\{(?:IfNot|Unless)\}\s+\$\{Errors\}/i.test(text)) {
+            return { at: readAt + 1 }
+          }
+          const close = trace.closeOf.get(blockStart + readAt)
+          if (close === undefined) return { at: readAt + 1 }
+          const divide =
+            trace.dividers.find((divider) => divider.opener === blockStart + readAt)?.line ?? -1
+          if (divide === -1) return { at: close - blockStart + 1 }
+          if (!/^\s*\$\{Else\}/i.test(lines[divide])) return { blocked: divide - blockStart }
+          return { at: divide - blockStart + 1 }
+        }
+        // A branch whose condition is a constant false never runs, so a counter
+        // bump inside it is not the kept accounting (the review's minimal fix
+        // reuses the dead-branch reading the exit-code scan uses).
+        const deadRanges = []
+        for (let k = 0; k < block.length; k += 1) {
+          if (deadBranchText(block[k]) === undefined) continue
+          deadRanges.push([k, (trace.closeOf.get(blockStart + k) ?? blockEnd) - blockStart])
+        }
+        const leg = failureLegOf(failureReads[0])
+        let blocked = leg.blocked
+        const reads = new Set(failureReads)
         const seen = new Set()
         let keeps = false
-        let at = failureReads[0]
+        let at = leg.at ?? -1
         while (at >= 0 && at < block.length && !seen.has(at)) {
           seen.add(at)
           if (gateOffset !== undefined && at === gateOffset) {
             keeps = true
             break
           }
-          const declaration = labelDeclaration(block[at])
+          const dead = deadRanges.find(([from, to]) => at >= from && at <= to)
+          if (dead !== undefined) {
+            at = dead[1] + 1
+            continue
+          }
+          // Reaching an `${Else}`-family divider from inside its own block means
+          // the block's end (LogicLib jumps there), so the walk continues after
+          // the matching close instead of walking into a sibling arm.
+          const divider = trace.dividers.find(
+            (entry) =>
+              entry.line === blockStart + at &&
+              trace.stackBefore[blockStart + at].includes(entry.opener),
+          )
+          if (divider !== undefined) {
+            at = (trace.closeOf.get(divider.opener) ?? blockEnd) - blockStart + 1
+            continue
+          }
+          if (reads.has(at)) {
+            const next = failureLegOf(at)
+            if (next.blocked !== undefined) {
+              blocked = next.blocked
+              break
+            }
+            at = next.at
+            continue
+          }
+          const declaration = labelDeclarations(block[at]).at(-1) ?? null
           const statement = stripNsisComments(
             declaration === null ? block[at] : declaration.rest,
           ).trim()
@@ -2012,8 +2128,11 @@ export function unguardedBackupDelete(source, options = {}) {
         }
         if (!keeps) {
           problems.push({
-            line: i + 1,
-            what: 'the failed delete\'s path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or any counter bump), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0',
+            line: blocked === undefined ? i + 1 : blockStart + blocked + 1,
+            what:
+              blocked === undefined
+                ? 'the failed delete\'s path does not reach the kept accounting — it jumps away, loops back, or leaves the block before the label the status gate jumps to (or a counter bump this scan can read), so a failed delete is neither counted nor reported: the sweep can finish with the leftovers on disk and the exit code still at 0'
+                : 'the failed delete\'s path leaves the read through an arm this scan cannot read — a second divider (`${ElseIf}`) forks the failure leg, so whether a failed delete is counted or reported cannot be read here (fail-closed)',
           })
         }
       }
@@ -2052,9 +2171,13 @@ export function unguardedBackupDelete(source, options = {}) {
             what: 'the sweep prompt has no IDCANCEL branch — a UI uninstall cannot decline the sweep',
           })
         } else {
-          const labelOffset = block.findIndex(
-            (line) => labelDeclaration(line)?.name === cancelTarget.toLowerCase(),
-          )
+          // A chain declares both names at one position (`A: B:` — measured
+          // legal, probe r8), so the prompt's target may be any name on the
+          // line: matching only the first reported a legal chain as a missing
+          // exit code (the fix round's review, F-5).
+          const canceledBy = (line) =>
+            labelDeclarations(line).some((declaration) => declaration.name === cancelTarget.toLowerCase())
+          const labelOffset = block.findIndex(canceledBy)
           const nextLabelOffset = (() => {
             for (let j = labelOffset + 1; j < block.length; j += 1) {
               if (labelDeclaration(block[j]) !== null) return j
@@ -2070,7 +2193,7 @@ export function unguardedBackupDelete(source, options = {}) {
                   blockStart + labelOffset,
                   branchEnd,
                   onDeletePath,
-                  labelDeclaration(block[labelOffset]).rest,
+                  labelDeclarations(block[labelOffset]).at(-1)?.rest ?? '',
                 )
           declinedExitIndex = declinedExit
           if (declinedExit === -1) {
@@ -2107,7 +2230,7 @@ export function unguardedBackupDelete(source, options = {}) {
             // to the label table), so the branch body is the label's inline rest
             // followed by the lines below it, and a label's span below starts
             // from the same rest.
-            const restOf = (at) => labelDeclaration(block[at])?.rest ?? ''
+            const restOf = (at) => labelDeclarations(block[at]).at(-1)?.rest ?? ''
             const body = [restOf(labelOffset), ...block.slice(labelOffset + 1, nextLabelOffset === -1 ? block.length : nextLabelOffset)]
             const labelOffsets = new Map()
             const labelNames = new Map()

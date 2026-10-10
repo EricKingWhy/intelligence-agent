@@ -495,16 +495,20 @@ const mutations = {
   // shape. Three mutations, one per half of the reading: the label lookup, the
   // statement on the label's line (the exit code), and that statement inside the
   // branch body / span walk.
+  // The F-5 fix rewrote the prompt target lookup and the chain tail reads, so
+  // these three anchors name the new text with their old meaning: a label
+  // counts only when it is alone on its line, and the branch reads only what
+  // follows the first name / drops the inline statement.
   'inline label declarations invisible again (#919 fix round F-1)': swap(
-    "            (line) => labelDeclaration(line)?.name === cancelTarget.toLowerCase(),",
-    "            (line) => labelDeclaration(line)?.name === cancelTarget.toLowerCase() && (labelDeclaration(line)?.rest ?? '') === '',",
+    "            labelDeclarations(line).some((declaration) => declaration.name === cancelTarget.toLowerCase())",
+    "            labelDeclarations(line).some((declaration) => declaration.name === cancelTarget.toLowerCase() && declaration.rest === '')",
   ),
   'inline label statement dropped from the exit-code read (#919 fix round F-1)': swap(
-    '                  labelDeclaration(block[labelOffset]).rest,\n',
+    "                  labelDeclarations(block[labelOffset]).at(-1)?.rest ?? '',\n",
     "                  '',\n",
   ),
   'inline label statement dropped from the branch body (#919 fix round F-1)': swap(
-    "            const restOf = (at) => labelDeclaration(block[at])?.rest ?? ''",
+    "            const restOf = (at) => labelDeclarations(block[at]).at(-1)?.rest ?? ''",
     "            const restOf = () => ''",
   ),
   // The label chain `A: B: Goto X` is one position and two names; reading only
@@ -572,6 +576,101 @@ const mutations = {
   'failed-delete keep-accounting walk dropped (#919 fix round Q9)': swap(
     '        if (!keeps) {',
     '        if (false) {',
+  ),
+  // Gap A-1 (own review): a label name's measured alphabet is a letter, `_`,
+  // `.`, `%` or `@` to start and letters, digits, `_`, `.`, `+`, `!`, `%`, `#`,
+  // `@`, `$`, `-` or `:` inside (measured: each compiles and every jump lands —
+  // probes n8/n9), so the declaration read takes that class. The narrow class
+  // left `ia-hop-into-delete:` unread, and a declined branch jumping through
+  // such a hop into the delete pass read clean.
+  'label alphabet narrowed back (#919 gap A-1)': swap(
+    '    const match = /^\\s*([A-Za-z_.%@][A-Za-z0-9_.+!%#@$:-]*)\\s*:/.exec(text)',
+    '    const match = /^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*:/.exec(text)',
+  ),
+  // Gap A-2 (own review): a define's bare value may carry a dash
+  // (`!define IA.SEL "IA-DISARM"` + `${${IA.SEL}}` disarms — probe n6), so
+  // both value-name tests read one non-whitespace token. Narrowed back, the
+  // dashed twin of the nested-define fixture resolves to the inner name and
+  // the fixture's window reads clean.
+  // Both value-name sites in one mutation: `defineName`'s value test and the
+  // chain-follow test inside `touchesDeleteVars` are the same rule reachable
+  // twice (a single-site revert is closed by the other site, so it would
+  // survive as a false alarm — measured), and the dashed nested fixture is red
+  // only when both read the old class.
+  'dash-spelled define values read as inner names again (#919 gaps A-2/F-2)': (source) =>
+    swap(
+      "          if (!/\\s/.test(only) && substitutions.has(only.toLowerCase())) {",
+      "          if (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(only) && substitutions.has(only.toLowerCase())) {",
+    )(
+      swap(
+        "  return value !== undefined && !/\\s/.test(value) ? value.toLowerCase() : innerName",
+        "  return value !== undefined && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(value) ? value.toLowerCase() : innerName",
+      )(source),
+    ),
+  // Gap A-3 (own review): the one-argument `IfErrors label` jumps *on* error,
+  // so the failure leg is the jump. Read as the fall-through again, the
+  // fail-open fixture goes green and the correct one is over-reported.
+  'one-argument IfErrors read as the fall-through again (#919 gap A-3)': swap(
+    '          if (reads.has(at)) {',
+    '          if (false && reads.has(at)) {',
+  ),
+  // F-1 (review): a case-less `${Switch}` has no arm that runs — LogicLib jumps
+  // to the `${EndSwitch}` label and control leaves the block (measured: probes
+  // t7/t8). Reading the dead body as an arm accepted the fall-through.
+  'case-less Switch read as an arm again (#919 review F-1)': swap(
+    '    if (isSwitch && firstDivider === undefined) return false\n',
+    '    if (false && isSwitch && firstDivider === undefined) return false\n',
+  ),
+  // F-4 (review): a statement on a label's own line anywhere in the span is the
+  // same reading (`iaSweepKept: SetErrorLevel 2`); whole-line scanning reported
+  // it as missing.
+  'inline label statements invisible to the kept-exit scan again (#919 review F-4)': swap(
+    '    labelDeclarations(line).some((declaration) => /^\\s*SetErrorLevel\\s+2\\s*$/i.test(declaration.rest))',
+    '    false',
+  ),
+  // F-5 (review): a chain declares two names at one position, so the prompt's
+  // target may be either; matching only the first reported the legal chain as a
+  // missing exit code.
+  'prompt target matched by the chain\'s first name only again (#919 review F-5)': swap(
+    '            labelDeclarations(line).some((declaration) => declaration.name === cancelTarget.toLowerCase())',
+    '            labelDeclarations(line)[0]?.name === cancelTarget.toLowerCase()',
+  ),
+  'branch tail read from the chain\'s first name again (#919 review F-5)': swap(
+    "                  labelDeclarations(block[labelOffset]).at(-1)?.rest ?? '',",
+    "                  labelDeclarations(block[labelOffset])[0]?.rest ?? '',",
+  ),
+  // #919 review (P1): the failure leg is now read by the read's own form. Each
+  // mutation below puts one reading back the way the review found it, and the
+  // P1 fixtures hold it down: the operand position, the inverted read's
+  // `${Else}` arm, the forked-arm report, the dead-branch exclusion, the
+  // divider continuation, the chain's last name and the counter's alphabet.
+  'the read jump ignored and the fall-through walked again (#919 review P1)': swap(
+    "          if (jump !== null && jump[1] !== '0') {",
+    "          if (false) {",
+  ),
+  'inverted Errors read walked as the fall-through again (#919 review P1)': swap(
+    "          if (!/^\\s*\\$\\{(?:IfNot|Unless)\\}\\s+\\$\\{Errors\\}/i.test(text)) {",
+    "          if (true) {",
+  ),
+  'forked failure arm walked into again (#919 review P1)': swap(
+    "          if (!/^\\s*\\$\\{Else\\}/i.test(lines[divide])) return { blocked: divide - blockStart }",
+    "          if (false) return { blocked: divide - blockStart }",
+  ),
+  'dead-branch exclusion dropped from the failure-leg walk (#919 review P1)': swap(
+    "          if (deadBranchText(block[k]) === undefined) continue",
+    "          if (true) continue",
+  ),
+  'divider continuation dropped from the failure-leg walk (#919 review P1)': swap(
+    "          if (divider !== undefined) {",
+    "          if (false) {",
+  ),
+  'chain statement read from the first name again (#919 review P1)': swap(
+    "          const declaration = labelDeclarations(block[at]).at(-1) ?? null",
+    "          const declaration = labelDeclarations(block[at])[0] ?? null",
+  ),
+  'counter bump alphabet narrowed back to +1 (#919 review P1)': swap(
+    "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*(?:[1-9]\\d*)\\s*$/i",
+    "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*1\\s*$/i",
   ),
 }
 
