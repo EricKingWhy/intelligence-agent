@@ -76,6 +76,14 @@ _GLOBAL_ATTACHMENT_DIRNAME = ".attachments"
 #: 恢复只读位时用它逐段校验回执路径（#923）——路径里嵌的 sha 既是推导依据也是形状约束。
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
+#: 回执相对会话目录的固定中段（与 `_session_blob_object_path` 同形）：
+#: `<session_dir>/attachments/objects/<sha[:2]>/<sha>`。
+_RECEIPT_RELATIVE_PARTS = ("attachments", "objects")
+
+#: 发布与恢复共用的对象权限。恢复必须与 `_publish_blob` 发布时逐位一致，否则"恢复"会写在
+#: 一个与发布态不同的值上。
+_OBJECT_MODE = 0o400
+
 
 class LocalArtifactStore(ArtifactStore):
     """本地文件系统上的 ArtifactStore（默认 Provider，零外部依赖）。"""
@@ -224,7 +232,7 @@ class LocalArtifactStore(ArtifactStore):
     # 落盘算法移植自 DeepSeek Harness `5badb150`
     # `packages/attachment/attachment-local/src/store.ts:214-388,431-458`（MIT）：
     # staging → fsync →
-    # 原子发布（`os.link` hardlink）→ 权限收紧（0o400）→ 目录 fsync。与文本路径的
+    # 原子发布（`os.link` hardlink）→ 权限收紧（`_OBJECT_MODE`）→ 目录 fsync。与文本路径的
     # `temp + os.replace` 是两个纪律：字节路径要"半途失败不产生可被读到的半文件"，
     # 靠的是**先写完整 staging 文件并 fsync，再 hardlink 到目标**——目标在任何时刻
     # 要么不存在、要么是完整对象。
@@ -527,23 +535,15 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-#: 回执相对会话目录的固定中段（与 `_session_blob_object_path` 同形）：
-#: `<session_dir>/attachments/objects/<sha[:2]>/<sha>`。
-_RECEIPT_RELATIVE_PARTS = ("attachments", "objects")
-
-#: 发布与恢复共用的对象权限。恢复必须与 `_publish_blob` 发布时逐位一致，否则"恢复"会写在
-#: 一个与发布态不同的值上。
-_OBJECT_MODE = 0o400
-
-
-def _readonly_retry_handler(touched: set[Path]) -> Callable[..., None]:
+def _read_only_retry_handler(cleared_receipts: set[Path]) -> Callable[..., None]:
     """构造 `shutil.rmtree` 的错误回调：清只读位后重试一次删除（#916），并登记改过位的路径。
 
-    注册方式按解释器版本分支，见 `_rmtree_clearing_readonly`：两个分支（`onexc` 收异常
-    实例 / `onerror` 收 `sys.exc_info()` 三元组）**共用本工厂产出的同一个回调**——回调
-    不使用第三个参数，所以版本差异不进这里，touched 记录逻辑也就不存在"只修了一条分支"。
+    注册方式按解释器版本分支，见 `_rmtree_clearing_read_only`：两个分支（`onexc` 收异常
+    实例 / `onerror` 收 `sys.exc_info()` 三元组）**共用本工厂产出的同一个回调**——不读第三个
+    参数的是内层 `_handler`（形参 `_exc_info`）；工厂本身没有第三个形参，所以版本差异不进
+    这里，cleared_receipts 的记录逻辑也就不存在"只修了一条分支"。
 
-    `_publish_blob` 发布的对象是只读的（`os.chmod(target, 0o400)`），而会话回执是它的
+    `_publish_blob` 发布的对象是只读的（`os.chmod(target, _OBJECT_MODE)`），而会话回执是它的
     hardlink ⇒ Windows 上回执与全局对象共享同一只读属性，`os.unlink` 抛
     `PermissionError`；改动前 `rmtree(..., ignore_errors=True)` 会把它静默吞掉，回执因此
     残留。POSIX 上 unlink 不受只读位约束（只看目录写权限），本回调不会被触发。
@@ -556,13 +556,16 @@ def _readonly_retry_handler(touched: set[Path]) -> Callable[..., None]:
     在 POSIX 上会连**读**权限一起抹掉（hardlink 共享 inode ⇒ 全局对象也变不可读）。只加写位
     对 Windows 同样有效（`os.chmod` 只认写位来清 FILE_ATTRIBUTE_READONLY）。
 
-    副作用（Windows 固有，非本回调引入）：hardlink 共享文件属性，清回执的只读位会同时清掉
-    其全局对象的只读位——这是删除只读 hardlink 在 Windows 上无法回避的代价。**#923 起这一
-    副作用由调用方收尾**：回调把"确实清过位的只读**文件**回执"路径记进 `touched`（"回调被
-    调到"但没改成位的不记——那没有产生副作用；`os.rmdir` 的目录也不记——目录不共享对象的只读
-    属性），`discard_local_artifacts` 在本轮删除结束后据此恢复对应全局对象的只读位。
+    **副作用（Windows 固有，非本回调引入；本段是这一因果的权威叙述）**：hardlink 共享文件
+    属性，清回执的只读位会同时清掉其全局对象的只读位——这是删除只读 hardlink 在 Windows 上
+    无法回避的代价。**#923 起由调用方收尾**：回调把"确实清过位的只读**文件**回执"路径记进
+    `cleared_receipts`，`discard_local_artifacts` 在删除结束后据此恢复对应全局对象的只读位。
 
-    `touched` 是**单次 discard 调用的局部状态**：不做全量扫描，也不跨调用累积。
+    `cleared_receipts` 是**单次 discard 调用的局部状态**：不做全量扫描，也不跨调用累积。
+
+    保留为工厂而非内联进 `_rmtree_clearing_read_only` 的唯一原因是**测试需要注入 spy**
+    （`test_discard_callback_receives_version_appropriate_exc` monkeypatch 本符号）；生产调用
+    点唯一。
     """
 
     def _handler(func: Callable[..., object], path: str, _exc_info: object) -> None:
@@ -570,21 +573,20 @@ def _readonly_retry_handler(touched: set[Path]) -> Callable[..., None]:
             # 改位与重试**同域**：只对可单参重试的两个 func 清只读位。对 `os.open` 等其余
             # func 触发时不碰权限（它们需要更多参数、无法重试，改位会是纯粹的越界副作用）。
             return
-        cleared = False
         with suppress(OSError):
             os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
-            cleared = True
-        if cleared and func is os.unlink:
-            # 只记 `os.unlink`：能共享对象只读属性的只有**文件** hardlink。`os.rmdir` 清的是
-            # 目录的写位，即便目录名恰好长得像 sha256 也不是对象，不记（形状校验另有一道）。
-            touched.add(Path(path))
+            if func is os.unlink:
+                # 只登记 `os.unlink`：能共享对象只读属性的只有**文件** hardlink。`os.rmdir`
+                # 分支上面那行 chmod 照样执行（否则清位后重试删不掉目录），但它清的是目录的
+                # 写位，目录不是对象、不共享全局对象的属性 ⇒ 不登记（形状校验另有一道）。
+                cleared_receipts.add(Path(path))
         with suppress(OSError):
             func(path)
 
     return _handler
 
 
-def _global_object_for_receipt(session_dir: Path, receipt: Path, root: Path) -> Path | None:
+def _global_object_for_receipt(receipt: Path, session_dir: Path, root: Path) -> Path | None:
     """回执路径 → 它指向的全局对象路径；形状不符或越界时返回 `None`（纵深防御）。
 
     回执路径里嵌着 sha256，所以可机械推导：`<session_dir>/attachments/objects/<sha[:2]>/<sha>`
@@ -609,43 +611,46 @@ def _global_object_for_receipt(session_dir: Path, receipt: Path, root: Path) -> 
     return derived
 
 
-def _rmtree_clearing_readonly(path: Path, touched: set[Path]) -> None:
+def _rmtree_clearing_read_only(path: Path, cleared_receipts: set[Path]) -> None:
     """删除目录树，只读文件清位后重试一次（#916）。
 
     `onerror` 在 Python 3.12 被 `onexc` 取代（CPython `Lib/shutil.py` 起把 `onerror`
     委托给 `onexc`），这里按版本选参数名，形状同 pip
     `src/pip/_internal/utils/misc.py:160-164`（`if sys.version_info >= (3, 12)`）。
-    两分支共用 `_clear_readonly_and_retry`（它不读第三个参数）⇒ 不存在逻辑分叉。
+    两分支共用 `_read_only_retry_handler` 产出的回调（内层 `_handler` 不读第三个参数）
+    ⇒ 不存在逻辑分叉。
 
     版本判定读在**调用时**的 `sys.version_info`：import 时求值会写死在模块里，
     测试注入替身（以及将来冻进旧解释器的构建）都改不动。
 
-    `touched` 由调用方持有（见 `_readonly_retry_handler`）：回调在本轮删除中实际清过只读位的
-    回执路径会登记进去，供删除结束后恢复全局对象的只读位（#923）。
+    `cleared_receipts` 由调用方持有（见 `_read_only_retry_handler`）：回调在本轮删除中实际清过
+    只读位的回执路径会登记进去，供删除结束后恢复全局对象的只读位（#923）。
     """
-    handler = _readonly_retry_handler(touched)
+    handler = _read_only_retry_handler(cleared_receipts)
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=handler)
     else:
         shutil.rmtree(path, onerror=handler)
 
 
-def _restore_object_read_only(session_dir: Path, receipt: Path, root: Path) -> None:
+def _restore_object_read_only(receipt: Path, session_dir: Path, root: Path) -> None:
     """把 `receipt` 指向的全局字节对象恢复成发布时的只读态（#923）。best-effort。
 
-    只对**确实被清过只读位**的回执调用（调用方据 `touched` 驱动），失败一律 `suppress(OSError)`
-    ——对象可能已被并发删除、权限不够、父目录不可写等，都不许让会话硬删崩溃（保持
-    `discard_local_artifacts` 原有的 best-effort 语义）。
+    只对**确实被清过只读位**的回执调用（调用方据 `cleared_receipts` 驱动），失败一律
+    `suppress(OSError, RuntimeError)`——对象可能已被并发删除、权限不够、父目录不可写，以及
+    `_global_object_for_receipt` 里 `.resolve()` 撞上符号链接环（抛 `RuntimeError`，**不是**
+    `OSError`），都不许让会话硬删崩溃（保持 `discard_local_artifacts` 原有的 best-effort 语义）。
+    清位副作用的因果见 `_read_only_retry_handler` docstring。
 
     **升级场景例外**（`_link_session_receipt` docstring）：旧布局下回执可能与全局对象**不是同一
     inode**（`os.link` 撞 `FileExistsError` 时保留了旧 inode）。此时清回执的只读位根本没波及对象，
     但按 sha 推导出的全局对象路径照常恢复——对已是只读的对象重复 `chmod` 无害，故不为旧 inode
     加特殊分支（Scope Lock）。
     """
-    object_path = _global_object_for_receipt(session_dir, receipt, root)
-    if object_path is None:
-        return
-    with suppress(OSError):
+    with suppress(OSError, RuntimeError):
+        object_path = _global_object_for_receipt(receipt, session_dir, root)
+        if object_path is None:
+            return
         os.chmod(object_path, _OBJECT_MODE)
 
 
@@ -668,9 +673,9 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
       "v1 不做自动清理"）；后续 GC（引用计数 / 宽限期；DSH 有 `gc`、oh-my-pi 有 `omp gc`）
       是独立的 follow-up 票，不由本函数承担。别把这里的"幂等删除"读成"字节也被回收了"。
 
-    Windows 上删除只读回执会连带清掉其全局对象的只读位（hardlink 共享属性），本函数在删除
-    结束后按本轮实际清过位的回执把它们恢复成发布时的只读态（#923，见
-    `_readonly_retry_handler` / `_restore_object_read_only`）；恢复是 best-effort，失败不影响
+    Windows 上删除只读回执会连带清掉其全局对象的只读位（hardlink 共享属性 ⇒ 副作用原文见
+    `_read_only_retry_handler` docstring），本函数在删除结束后把本轮实际清过位的回执恢复成
+    发布时的只读态（#923，见 `_restore_object_read_only`）；恢复是 best-effort，失败不影响
     会话删除本身。
     """
     root = settings.artifact_dir.strip()
@@ -680,17 +685,18 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
         # 硬删入口已校验过 id 形态（422），这里再挡一次：本函数只允许删自己拼得出的路径。
         return
     root_path = Path(root).resolve()
-    target = root_path / session_id
-    if target.is_dir():
+    session_dir = root_path / session_id
+    if session_dir.is_dir():
         # 回执是只读对象的 hardlink：Windows 上直接 rmtree 删不掉（旧的 ignore_errors
         # 会静默吞掉、留下回执）。改用清只读位后重试的错误回调，
-        # 见 `_rmtree_clearing_readonly` / `_readonly_retry_handler`。
-        touched: set[Path] = set()
-        _rmtree_clearing_readonly(target, touched)
-        # 收尾（#923）：本次删掉的只读回执背后是**共享同一属性**的全局字节对象，删完把它们
-        # 恢复成发布时的只读态。touched 为空（POSIX 上 unlink 不看只读位）就是 no-op。
-        for receipt in touched:
-            _restore_object_read_only(target, receipt, root_path)
+        # 见 `_rmtree_clearing_read_only` / `_read_only_retry_handler`。
+        cleared_receipts: set[Path] = set()
+        _rmtree_clearing_read_only(session_dir, cleared_receipts)
+        # 收尾（#923）：本轮清过只读位的回执背后是**共享同一属性**的全局字节对象，删完把它们
+        # 恢复成发布时的只读态（清位副作用的因果见 `_read_only_retry_handler` docstring）。
+        # POSIX 上 unlink 不看只读位 ⇒ cleared_receipts 为空 ⇒ no-op。
+        for receipt in cleared_receipts:
+            _restore_object_read_only(receipt, session_dir, root_path)
 
 
 def delete_local_artifacts(

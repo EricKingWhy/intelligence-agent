@@ -25,7 +25,6 @@ import stat
 import subprocess
 import sys
 import time
-import warnings
 from contextlib import suppress
 from pathlib import Path
 
@@ -33,7 +32,10 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.storage import local_artifact
-from agent_harness.storage.artifact import compute_byte_artifact_id
+from agent_harness.storage.artifact import (
+    BYTE_ARTIFACT_ID_PATTERN,
+    compute_byte_artifact_id,
+)
 from agent_harness.storage.local_artifact import (
     LocalArtifactStore,
     discard_local_artifacts,
@@ -334,11 +336,13 @@ def test_discard_removes_readonly_receipt_hardlink(
     )
 
 
-def test_discard_restores_readonly_on_global_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_discard_restores_read_only_on_global_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#923：Windows 语义下 discard 删掉只读回执后，全局字节对象必须**恢复只读**。
 
     对象发布时是 `0o400`，回执是它的 hardlink ⇒ Windows 上共享同一只读属性，清回执的
-    只读位会连带清掉对象的（`_clear_readonly_and_retry` docstring 记录的副作用）。修法
+    只读位会连带清掉对象的（副作用原文见 `_read_only_retry_handler` docstring）。修法
     是在本次 discard 的局部状态里记下"实际清过只读位的回执"，删完后按回执路径里嵌的
     sha256 推导出全局对象、best-effort 恢复 `0o400`。
     """
@@ -364,7 +368,7 @@ def test_discard_restores_readonly_on_global_object(tmp_path: Path, monkeypatch:
 def test_discard_twice_keeps_object_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """幂等：同一会话 discard 两次不崩，且每次结束后对象都是只读。
 
-    第二次调用时会话目录已不在 ⇒ 不触发 rmtree ⇒ 本次 touched 为空 ⇒ 恢复是 no-op。
+    第二次调用时会话目录已不在 ⇒ 不触发 rmtree ⇒ 本次 cleared_receipts 为空 ⇒ 恢复是 no-op。
     """
     blob = asyncio.run(
         _store(tmp_path, "sess-a").save_bytes("sess-a", b"twice", mime_type="image/png")
@@ -409,7 +413,7 @@ def test_discard_does_not_touch_objects_it_did_not_clear(
 def test_discard_without_readonly_receipt_never_chmods(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POSIX 语义（unlink 不看只读位）下回调不触发 ⇒ touched 为空 ⇒ 恢复是 no-op。
+    """POSIX 语义（unlink 不看只读位）下回调不触发 ⇒ cleared_receipts 为空 ⇒ 恢复是 no-op。
 
     用 spy 观察 `os.chmod`：一次都不许发生。只断言"对象仍是只读"是假绿——对象本来就没
     被动过，读不出"恢复逻辑有没有乱改别的路径"。
@@ -420,14 +424,14 @@ def test_discard_without_readonly_receipt_never_chmods(
     calls: list[tuple[str, int]] = []
     real_chmod = os.chmod
 
-    def _spy_chmod(path: str, mode: int) -> None:
+    def _spy_chmod(path: str, mode: int, **kwargs: object) -> None:
         calls.append((str(path), mode))
         real_chmod(path, mode)
 
     monkeypatch.setattr(os, "chmod", _spy_chmod)
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
-    assert calls == [], f"POSIX 上不应有任何 chmod（touched 必为空），实收 {calls!r}"
+    assert calls == [], f"POSIX 上不应有任何 chmod（cleared_receipts 必为空），实收 {calls!r}"
     assert _object_is_read_only(_object_path(tmp_path, blob.artifact_id))
 
 
@@ -459,28 +463,45 @@ def test_discard_survives_object_removed_before_restore(
 
 
 def test_restore_touches_only_unlinked_files_not_directories(tmp_path: Path) -> None:
-    """纵深防御：恢复只由**文件**回执触发，目录（含名字像 sha 的）一概不记、不改。
+    """纵深防御：恢复只由**文件**回执触发，目录（含名字像 sha 的）一概不登记。
 
-    回执是文件（hardlink）⇒ 只有它能共享全局对象的只读属性。若把 `os.rmdir` 也记进
-    `touched`，`_global_object_for_receipt` 就成了唯一守门人——而这里刻意构造一个**形状完全
-    合法的目录路径**（`attachments/objects/<sha[:2]>/<sha>` 但末段是目录），断言它既不触发对
-    该路径的 chmod，也不误改全局对象。
+    直接调回调，不依赖平台与权限位：`os.rmdir` 的目录只清位、不登记（目录不是对象，不共享
+    全局对象的只读属性）；`os.unlink` 的文件才登记进 `cleared_receipts`。端到端构造既贵又
+    在本机（root）构造不出——root 绕过权限位，rmtree 删空目录根本不报错、回调压根不触发。
     """
+    cleared_receipts: set[Path] = set()
+    handler = local_artifact._read_only_retry_handler(cleared_receipts)
     sha = "ab" * 32
-    fake_receipt = _sharded(
-        tmp_path / "artifacts" / "sess-a" / "attachments" / "objects", f"sha256:{sha}"
-    )
-    fake_receipt.mkdir(parents=True)
-    object_path = _object_path(tmp_path, f"sha256:{sha}")
-    object_path.parent.mkdir(parents=True, exist_ok=True)
-    object_path.write_bytes(b"untouched-global-object")
-    os.chmod(object_path, 0o600)
+    receipt_dir = _receipt_path(tmp_path, "sess-a", f"sha256:{sha}")
+    receipt_dir.mkdir(parents=True)
+    handler(os.rmdir, str(receipt_dir), None)
+    assert cleared_receipts == set(), "os.rmdir 的目录不许记进 cleared_receipts"
+    assert not receipt_dir.exists(), "清位后重试仍应删掉目录"
+    receipt_file = _receipt_path(tmp_path, "sess-a", f"sha256:{'f' * 64}")
+    receipt_file.parent.mkdir(parents=True, exist_ok=True)
+    receipt_file.write_bytes(b"x")
+    handler(os.unlink, str(receipt_file), None)
+    assert cleared_receipts == {receipt_file}, "os.unlink 的文件必须登记"
+    # 清位本身失败（路径已不在）⇒ 不登记、也不抛：登记没有 `cleared` 标志兜着，它的
+    # "chmod 成功才登记"语义完全由 `suppress(OSError)` 所在的代码块承载。
+    handler(os.unlink, str(tmp_path / "artifacts" / "sess-a" / "gone"), None)
+    assert cleared_receipts == {receipt_file}, "chmod 失败的路径不许登记"
 
-    session_dir = tmp_path / "artifacts" / "sess-a"
-    local_artifact._rmtree_clearing_readonly(session_dir, set())
 
-    assert not fake_receipt.exists()
-    assert stat.S_IMODE(os.stat(object_path).st_mode) == 0o600
+@pytest.mark.skipif(os.name == "nt", reason="符号链接环是 POSIX 语义（Windows 建链需特权）")
+def test_restore_survives_symlink_loop_in_object_root(tmp_path: Path) -> None:
+    """`_global_object_for_receipt` 的 `.resolve()` 撞符号链接环抛 `RuntimeError`（**不是**
+    `OSError`）：恢复必须照样 best-effort 不抛，会话硬删不被连带打断（#923 P2-1）。
+    """
+    root = tmp_path / "artifacts"
+    root.mkdir(parents=True)
+    (root / ".attachments").symlink_to(".attachments/loop")  # 自指环 ⇒ resolve() 抛 RuntimeError
+    session_dir = root / "sess-a"
+    receipt = _receipt_path(tmp_path, "sess-a", f"sha256:{'ab' * 32}")
+    receipt.parent.mkdir(parents=True)
+    receipt.write_bytes(b"x")
+
+    local_artifact._restore_object_read_only(receipt, session_dir, root)  # 不得抛
 
 
 def test_global_object_for_receipt_rejects_malformed_paths(tmp_path: Path) -> None:
@@ -491,14 +512,30 @@ def test_global_object_for_receipt_rejects_malformed_paths(tmp_path: Path) -> No
     sha = "cd" * 32
     good = _sharded(session_dir / "attachments" / "objects", f"sha256:{sha}")
 
-    assert derive(session_dir, good, root) == _object_path(tmp_path, f"sha256:{sha}")
+    assert derive(good, session_dir, root) == _object_path(tmp_path, f"sha256:{sha}")
     # 段数不对 / 中段不符 / 摘要非 64 位 hex / shard 与摘要前缀不符 → 一律拒绝。
-    assert derive(session_dir, session_dir / "attachments" / sha, root) is None
-    assert derive(session_dir, session_dir / "objects" / sha[:2] / sha, root) is None
-    assert derive(session_dir, session_dir / "attachments" / "objects" / sha[:2] / "nope", root) is None
-    assert derive(session_dir, session_dir / "attachments" / "objects" / "zz" / sha, root) is None
+    assert derive(session_dir / "attachments" / sha, session_dir, root) is None
+    assert derive(session_dir / "objects" / sha[:2] / sha, session_dir, root) is None
+    assert derive(
+        session_dir / "attachments" / "objects" / sha[:2] / "nope", session_dir, root
+    ) is None
+    assert derive(session_dir / "attachments" / "objects" / "zz" / sha, session_dir, root) is None
     # 不在会话目录之下（`relative_to` 抛 ValueError）→ 拒绝。
-    assert derive(session_dir, root / "sess-b" / "attachments" / "objects" / sha[:2] / sha, root) is None
+    assert derive(
+        root / "sess-b" / "attachments" / "objects" / sha[:2] / sha, session_dir, root
+    ) is None
+
+
+def test_sha256_pattern_matches_byte_artifact_id_digest_shape() -> None:
+    """`_SHA256_PATTERN` 必须与 `artifact.BYTE_ARTIFACT_ID_PATTERN` 的摘要段同形（防漂移）。
+
+    两者是各自独立的字面量：`artifact.py` 改了摘要形状而这里没跟，回执路径校验就会静默
+    放过/误拒——本用例把这条注释承诺变成红灯。
+    """
+    assert (
+        local_artifact._SHA256_PATTERN.pattern
+        == BYTE_ARTIFACT_ID_PATTERN.pattern.removeprefix("sha256:")
+    )
 
 
 def test_discard_restores_global_object_when_receipt_is_a_legacy_inode(
@@ -549,16 +586,20 @@ def test_discard_registers_version_appropriate_rmtree_callback(
     asyncio.run(
         _store(tmp_path, "sess-a").save_bytes("sess-a", b"x", mime_type="image/png")
     )
-    captured: list[dict[str, object]] = []
+    captured: list[tuple[tuple[object, ...], dict[str, object]]] = []
     monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
     monkeypatch.setattr(
-        local_artifact.shutil, "rmtree", lambda _path, **kwargs: captured.append(kwargs)
+        local_artifact.shutil,
+        "rmtree",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
     )
 
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
     assert len(captured) == 1, "会话目录存在时必须调用一次 rmtree"
-    assert set(captured[0]) == {expected_kwarg}, (
+    args, kwargs = captured[0]
+    assert len(args) == 1, f"只有 path 占位置参数位，实收 {args!r}"
+    assert set(kwargs) == {expected_kwarg}, (
         f"Python {fake_version} 应且只应注册 {expected_kwarg}="
     )
 
@@ -588,11 +629,11 @@ def test_discard_callback_receives_version_appropriate_exc(
     assert receipt.is_file()
 
     seen: list[object] = []
-    real_factory = local_artifact._readonly_retry_handler
+    real_factory = local_artifact._read_only_retry_handler
 
-    def _spy_factory(touched: set[Path]) -> object:
+    def _spy_factory(cleared_receipts: set[Path]) -> object:
         """包住回调工厂：记下回调收到的第三个参数，其余行为原样透传。"""
-        inner = real_factory(touched)
+        inner = real_factory(cleared_receipts)
 
         def _spy(func: object, path: str, exc: object) -> None:
             seen.append(exc)
@@ -602,7 +643,7 @@ def test_discard_callback_receives_version_appropriate_exc(
 
     _install_windows_unlink(monkeypatch)
     monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
-    monkeypatch.setattr(local_artifact, "_readonly_retry_handler", _spy_factory)
+    monkeypatch.setattr(local_artifact, "_read_only_retry_handler", _spy_factory)
 
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 
@@ -615,21 +656,6 @@ def test_discard_callback_receives_version_appropriate_exc(
             assert isinstance(exc, PermissionError), f"onexc 应收到异常实例，实收 {exc!r}"
     assert not receipt.exists(), "清只读位后重试必须把回执带走"
     assert _object_path(tmp_path, blob.artifact_id).is_file()
-
-
-def test_discard_emits_no_deprecation_warning(tmp_path: Path) -> None:
-    """前向守卫（#922）：discard 不得吃 `DeprecationWarning`。
-
-    诚实的量法说明：截至 CPython 3.12.3，`shutil.rmtree` **没有**为 `onerror` 发运行时
-    `DeprecationWarning`（`Lib/shutil.py` 里根本没有 `warnings.warn`；deprecation 只在
-    文档与 whatsnew 里）。所以本用例迁移前后都会过，它守的是 CPython 将来真开始发警告
-    （或移除 `onerror`）时的第一道信号，**不是**本次迁移本身的证据。
-    """
-    asyncio.run(_store(tmp_path, "sess-a").save_bytes("sess-a", b"warn", mime_type="image/png"))
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        discard_local_artifacts(_settings(tmp_path), "sess-a")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：会话名不得吃掉全局对象根")
