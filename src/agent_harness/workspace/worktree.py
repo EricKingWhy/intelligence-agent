@@ -31,6 +31,7 @@ def is_git_repo(path: Path) -> bool:
         ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     return proc.returncode == 0 and proc.stdout.strip() == "true"
@@ -42,6 +43,7 @@ def _git_toplevel(path: Path) -> Path:
         ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if proc.returncode != 0:
@@ -78,6 +80,7 @@ def create_worktree(repo_path: Path, *, path: Path | None = None,
          str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if proc.returncode != 0:

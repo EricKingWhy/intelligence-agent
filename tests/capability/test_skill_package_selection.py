@@ -17,7 +17,11 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.skills.capability import SkillCapability
-from agent_harness.skills.package_manager import SkillPackageError, SkillPackageManager
+from agent_harness.skills.package_manager import (
+    SkillManifestError,
+    SkillPackageError,
+    SkillPackageManager,
+)
 
 PACKAGE_NAME = "shared-skill"
 
@@ -478,3 +482,20 @@ def test_global_scope_write_attempts_leave_the_manifest_untouched(tmp_path: Path
         global_manager.disable(PACKAGE_NAME)
 
     assert global_manager.manifest_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("selected_scope", [[], {}], ids=["list", "object"])
+def test_unhashable_selected_scope_is_reported_as_manifest_error(
+    tmp_path: Path, selected_scope: object
+) -> None:
+    import json
+
+    project = _World(tmp_path).project("alpha")
+    project.install(_package(tmp_path / "src"))
+    project.enable(PACKAGE_NAME, scope="project")
+    manifest = json.loads(project.manifest_path.read_text(encoding="utf-8"))
+    manifest["enable_results"][PACKAGE_NAME]["selected_scope"] = selected_scope
+    project.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SkillManifestError, match="enable result"):
+        _World(tmp_path).project("alpha").enable_results()

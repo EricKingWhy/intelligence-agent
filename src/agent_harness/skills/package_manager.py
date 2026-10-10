@@ -742,6 +742,7 @@ class SkillPackageManager:
                 not isinstance(name, str)
                 or not _NAME_PATTERN.fullmatch(name)
                 or not isinstance(result, dict)
+                or not isinstance(result.get("selected_scope"), str)
                 or result.get("selected_scope") not in {"project", "global"}
                 or not isinstance(result.get("source"), str)
                 or not isinstance(result.get("version"), (str, type(None)))
