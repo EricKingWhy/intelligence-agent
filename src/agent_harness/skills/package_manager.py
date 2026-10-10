@@ -9,21 +9,33 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import tarfile
 import tempfile
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
-from agent_harness.skills.inspection import _is_junction, inspect_skill_package
+from agent_harness.skills.inspection import (
+    _MAX_PACKAGE_ENTRIES,
+    _is_junction,
+    inspect_skill_package,
+)
 from agent_harness.skills.package_lock import MANIFEST_FILENAME
 from agent_harness.skills.package_lock import registry_lock as _registry_lock
 
 MANIFEST_VERSION = 1
 MANAGED_DIRECTORY_NAME = ".managed"
+VERSION_DIRECTORY_NAME = ".versions"
 _NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_COMMIT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_SNAPSHOT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})-[0-9a-f]{64}\Z")
+_SCP_GIT_URL_PATTERN = re.compile(r"(?:git@)?[A-Za-z0-9.-]+:[^\s:][^\s]*\Z")
+_GIT_TIMEOUT_SECONDS = 120
 
 
 class SkillPackageError(ValueError):
@@ -44,6 +56,7 @@ class SkillPackageManager:
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.project_skills_dir = self.workspace_dir / "skills"
         self.managed_skills_dir = self.project_skills_dir / MANAGED_DIRECTORY_NAME
+        self.managed_versions_dir = self.managed_skills_dir / VERSION_DIRECTORY_NAME
         self.manifest_path = self.workspace_dir / MANIFEST_FILENAME
         self.global_skills_dir = (
             Path(global_skills_dir).expanduser()
@@ -66,7 +79,25 @@ class SkillPackageManager:
         if not isinstance(name, str) or not _NAME_PATTERN.fullmatch(name):
             raise SkillPackageError("preflight did not return a valid Skill name")
         source_root = Path(source_report["source"])
+        return self._install_snapshot(
+            source_root,
+            name=name,
+            source_value=str(source_root),
+            initial_report=source_report,
+        )
 
+    def _install_snapshot(
+        self,
+        source_root: Path,
+        *,
+        name: str,
+        source_value: str,
+        initial_report: dict[str, Any],
+        record_extras: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._raise_if_uninstallable(initial_report)
+        if initial_report.get("name") != name:
+            raise SkillPackageError("Skill name changed before snapshot installation")
         with _registry_lock(self.manifest_path):
             manifest = self._read_manifest()
             packages = manifest["packages"]
@@ -81,7 +112,12 @@ class SkillPackageManager:
                     f"managed path for Skill {name!r} already exists without an install record"
                 )
 
-            source_digest = _tree_sha256(source_root)
+            def tree_digest(root: Path) -> str:
+                if record_extras and record_extras.get("source_kind") == "git":
+                    return _git_tree_sha256(root, record_extras["git_modes_sha256"])
+                return _tree_sha256(root)
+
+            source_digest = tree_digest(source_root)
             staging_root = self.managed_skills_dir / f".staging-{uuid.uuid4().hex}"
             staging_package = staging_root / name
             staging_root.mkdir()
@@ -93,7 +129,7 @@ class SkillPackageManager:
                     copy_function=shutil.copy2,
                     ignore=_reject_junctions,
                 )
-                if _tree_sha256(staging_package) != source_digest:
+                if tree_digest(staging_package) != source_digest:
                     raise SkillPackageError(
                         "Skill package changed or could not be copied without following linked directories"
                     )
@@ -103,11 +139,11 @@ class SkillPackageManager:
                         "Skill name changed between preflight and package snapshot"
                     )
                 self._raise_if_uninstallable(report)
-                digest = _tree_sha256(staging_package)
+                digest = tree_digest(staging_package)
                 record = {
                     "type": "skill",
                     "scope": "project",
-                    "source": str(source_root),
+                    "source": source_value,
                     "sha256": digest,
                     "skill_sha256": _file_sha256(staging_package / "SKILL.md"),
                     "trust": {"status": "untrusted", "sha256": digest},
@@ -120,6 +156,8 @@ class SkillPackageManager:
                         "errors": report["errors"],
                     },
                 }
+                if record_extras:
+                    record.update(copy.deepcopy(record_extras))
                 os.rename(staging_package, target)
                 packages[name] = record
                 try:
@@ -132,6 +170,208 @@ class SkillPackageManager:
             finally:
                 if staging_root.exists():
                     shutil.rmtree(staging_root, ignore_errors=True)
+
+    def install_git(
+        self,
+        url: str,
+        *,
+        ref: str,
+        subdirectory: str,
+    ) -> dict[str, Any]:
+        safe_url = _validate_git_url(url)
+        safe_ref = _validate_git_ref(ref)
+        safe_subdirectory = _validate_git_subdirectory(subdirectory)
+        with tempfile.TemporaryDirectory(prefix="agent-harness-skill-git-") as temporary:
+            package, commit, git_modes_sha256 = _fetch_git_skill(
+                safe_url, safe_ref, safe_subdirectory, Path(temporary)
+            )
+            report = inspect_skill_package(
+                package, scope="project", existing_skills=self.project_skills_dir
+            )
+            self._raise_if_uninstallable(report)
+            name = report.get("name")
+            if not isinstance(name, str) or not _NAME_PATTERN.fullmatch(name):
+                raise SkillPackageError("Git package preflight did not return a valid Skill name")
+            return self._install_snapshot(
+                package,
+                name=name,
+                source_value=safe_url,
+                initial_report=report,
+                record_extras={
+                    "source_kind": "git",
+                    "git_subdirectory": safe_subdirectory,
+                    "source_ref": safe_ref,
+                    "resolved_commit": commit,
+                    "git_modes_sha256": git_modes_sha256,
+                    "previous_version": None,
+                    "pending_version": None,
+                },
+            )
+
+    def update(self, name: str, *, ref: str) -> dict[str, Any]:
+        safe_ref = _validate_git_ref(ref)
+        with _registry_lock(self.manifest_path):
+            manifest = self._read_manifest()
+            record = self._record(manifest, name)
+            if record.get("source_kind") != "git":
+                raise SkillPackageError(f"Skill {name!r} is not installed from Git")
+            if record.get("pending_version") is not None:
+                raise SkillPackageError(f"Skill {name!r} already has a pending version")
+            if record["compatibility"]["status"] != "complete":
+                raise SkillPackageError(
+                    f"Skill {name!r} must have complete compatibility before it can be updated"
+                )
+            source_url = _validate_git_url(record["source"])
+            subdirectory = _validate_git_subdirectory(record["git_subdirectory"])
+            current_commit = record["resolved_commit"]
+
+        with tempfile.TemporaryDirectory(prefix="agent-harness-skill-update-") as temporary:
+            package, commit, git_modes_sha256 = _fetch_git_skill(
+                source_url, safe_ref, subdirectory, Path(temporary)
+            )
+            report = inspect_skill_package(package, scope="project")
+            self._raise_if_uninstallable(report)
+            if report.get("name") != name:
+                raise SkillPackageError(
+                    f"Git ref resolves to a different Skill name than {name!r}"
+                )
+            if report["status"] != "complete":
+                raise SkillPackageError(
+                    f"Git update preflight is {report['status']!r}; the installed version was kept"
+                )
+            if commit == current_commit:
+                raise SkillPackageError(f"Git ref already resolves to the installed commit for {name!r}")
+            digest = _git_tree_sha256(package, git_modes_sha256)
+            pending = _version_metadata(
+                safe_ref,
+                commit,
+                digest,
+                git_modes_sha256,
+                _file_sha256(package / "SKILL.md"),
+                report,
+            )
+
+            with _registry_lock(self.manifest_path):
+                manifest = self._read_manifest()
+                record = self._record(manifest, name)
+                if (
+                    record.get("source_kind") != "git"
+                    or record["source"] != source_url
+                    or record["resolved_commit"] != current_commit
+                    or record.get("pending_version") is not None
+                ):
+                    raise SkillPackageError(
+                        f"Git source for Skill {name!r} changed during update; retry"
+                    )
+                self._store_version_snapshot(package, name, pending)
+                record["pending_version"] = pending
+                self._write_manifest(manifest)
+                return copy.deepcopy(record)
+
+    def rollback(self, name: str) -> dict[str, Any]:
+        with _registry_lock(self.manifest_path):
+            manifest = self._read_manifest()
+            record = self._record(manifest, name)
+            if record.get("source_kind") != "git":
+                raise SkillPackageError(f"Skill {name!r} is not installed from Git")
+            if record.get("pending_version") is not None:
+                raise SkillPackageError(f"Skill {name!r} already has a pending version")
+            previous = record.get("previous_version")
+            if previous is None:
+                raise SkillPackageError(f"Skill {name!r} has no previous Git snapshot to restore")
+            active = self._package_path(name)
+            self._verify_package(active, record)
+            snapshot = self._version_snapshot_path(name, previous["snapshot_id"])
+            if _git_tree_sha256(snapshot, previous["git_modes_sha256"]) != previous["sha256"]:
+                raise SkillPackageError(f"previous Git snapshot for Skill {name!r} changed")
+            record["pending_version"] = copy.deepcopy(previous)
+            self._write_manifest(manifest)
+            return copy.deepcopy(record)
+
+    def apply_pending_versions(self) -> int:
+        """Apply staged Git snapshots before a new Runtime discovers Skills."""
+        try:
+            return self._apply_pending_versions()
+        except OSError as error:
+            raise SkillPackageError(
+                "pending Git Skill activation failed; installed versions remain selected"
+            ) from error
+
+    def _apply_pending_versions(self) -> int:
+        applied = 0
+        with _registry_lock(self.manifest_path):
+            manifest = self._read_manifest()
+            for name in sorted(manifest["packages"]):
+                record = manifest["packages"][name]
+                pending = record.get("pending_version")
+                if pending is None:
+                    continue
+                active = self._package_path(name)
+                self._verify_package(active, record)
+                snapshot = self._version_snapshot_path(name, pending["snapshot_id"])
+                if _git_tree_sha256(snapshot, pending["git_modes_sha256"]) != pending["sha256"]:
+                    raise SkillPackageError(f"pending Git snapshot for Skill {name!r} changed")
+
+                current = _current_version_metadata(record)
+                self._store_version_snapshot(active, name, current)
+                staging_root = self.managed_skills_dir / f".staging-{uuid.uuid4().hex}"
+                staged = staging_root / name
+                displaced = self.managed_skills_dir / f".replacing-{uuid.uuid4().hex}"
+                staging_root.mkdir()
+                try:
+                    shutil.copytree(
+                        snapshot,
+                        staged,
+                        symlinks=True,
+                        copy_function=shutil.copy2,
+                        ignore=_reject_junctions,
+                    )
+                    if _git_tree_sha256(staged, pending["git_modes_sha256"]) != pending["sha256"]:
+                        raise SkillPackageError(
+                            f"pending Git snapshot for Skill {name!r} changed while staging"
+                        )
+                    report = inspect_skill_package(staged, scope="project")
+                    self._raise_if_uninstallable(report)
+                    if report.get("name") != name or report["status"] != "complete":
+                        raise SkillPackageError(
+                            f"pending Git snapshot for Skill {name!r} no longer passes preflight"
+                        )
+                    os.rename(active, displaced)
+                    try:
+                        os.rename(staged, active)
+                    except BaseException:
+                        os.rename(displaced, active)
+                        raise
+
+                    record["previous_version"] = current
+                    record["source_ref"] = pending["source_ref"]
+                    record["resolved_commit"] = pending["resolved_commit"]
+                    record["sha256"] = pending["sha256"]
+                    record["git_modes_sha256"] = pending["git_modes_sha256"]
+                    record["skill_sha256"] = pending["skill_sha256"]
+                    record["trust"] = {
+                        "status": "untrusted",
+                        "sha256": pending["sha256"],
+                    }
+                    record["compatibility"] = copy.deepcopy(pending["compatibility"])
+                    record["pending_version"] = None
+                    try:
+                        self._write_manifest(manifest)
+                    except BaseException:
+                        shutil.rmtree(active, ignore_errors=True)
+                        try:
+                            os.rename(displaced, active)
+                        except OSError as error:
+                            raise SkillPackageError(
+                                f"Skill {name!r} manifest update failed; old snapshot remains at {displaced}"
+                            ) from error
+                        raise
+                    shutil.rmtree(displaced, ignore_errors=True)
+                    applied += 1
+                finally:
+                    if staging_root.exists():
+                        shutil.rmtree(staging_root, ignore_errors=True)
+        return applied
 
     def enable(self, name: str) -> None:
         with _registry_lock(self.manifest_path):
@@ -170,7 +410,7 @@ class SkillPackageManager:
             tombstone = self.managed_skills_dir / f".removing-{uuid.uuid4().hex}"
             os.rename(package, tombstone)
             try:
-                unchanged = _tree_sha256(tombstone) == record["sha256"]
+                unchanged = _managed_package_sha256(tombstone, record) == record["sha256"]
             except BaseException:
                 try:
                     os.rename(tombstone, package)
@@ -204,6 +444,37 @@ class SkillPackageManager:
                 raise SkillPackageError(
                     f"Skill {name!r} was unregistered, but cleanup remains at {tombstone}"
                 ) from error
+            if record.get("source_kind") == "git":
+                self._remove_version_snapshots(name)
+
+    def _remove_version_snapshots(self, name: str) -> None:
+        if not self._path_exists(self.managed_versions_dir):
+            return
+        skill_versions = self._version_directory(name, create=False)
+        for snapshot in skill_versions.iterdir():
+            match = _SNAPSHOT_PATTERN.fullmatch(snapshot.name)
+            if match is None:
+                continue
+            expected_digest = snapshot.name.rsplit("-", 1)[1]
+            if (
+                _is_reparse_point(snapshot)
+                or not snapshot.is_dir()
+                or snapshot.resolve(strict=True).parent != skill_versions.resolve(strict=True)
+                or _tree_sha256(snapshot) != expected_digest
+            ):
+                raise SkillPackageError(
+                    f"Skill {name!r} version snapshot changed; retained at {snapshot}"
+                )
+            try:
+                shutil.rmtree(snapshot)
+            except OSError as error:
+                raise SkillPackageError(
+                    f"Skill {name!r} was unregistered, but version cleanup remains at {snapshot}"
+                ) from error
+        with suppress(OSError):
+            skill_versions.rmdir()
+        with suppress(OSError):
+            self.managed_versions_dir.rmdir()
 
     def list_packages(self) -> dict[str, dict[str, Any]]:
         with _registry_lock(self.manifest_path):
@@ -262,6 +533,7 @@ class SkillPackageManager:
                 or record["compatibility"].get("status") not in {"complete", "needs-adaptation"}
             ):
                 raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+            _validate_git_manifest_record(name, record)
         return payload
 
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
@@ -297,10 +569,85 @@ class SkillPackageManager:
         return package
 
     def _verify_package(self, package: Path, record: dict[str, Any]) -> None:
-        if _tree_sha256(package) != record["sha256"]:
+        if _managed_package_sha256(package, record) != record["sha256"]:
             raise SkillPackageError(
                 f"Skill {package.name!r} changed after installation; refusing this operation"
             )
+
+    def _version_directory(self, name: str, *, create: bool) -> Path:
+        if not _NAME_PATTERN.fullmatch(name):
+            raise SkillPackageError(f"invalid Skill name {name!r}")
+        self._ensure_managed_directory()
+        versions = self.managed_versions_dir
+        if _is_reparse_point(versions):
+            raise SkillPackageError("managed Skill versions directory is unsafe")
+        if create:
+            versions.mkdir(exist_ok=True)
+        elif not versions.is_dir():
+            raise SkillPackageError("managed Skill versions directory is missing")
+        if versions.resolve(strict=True).parent != self.managed_skills_dir.resolve(strict=True):
+            raise SkillPackageError("managed Skill versions directory resolves outside its root")
+        skill_versions = versions / name
+        if _is_reparse_point(skill_versions):
+            raise SkillPackageError(f"version history for Skill {name!r} is unsafe")
+        if create:
+            skill_versions.mkdir(exist_ok=True)
+        elif not skill_versions.is_dir():
+            raise SkillPackageError(f"version history for Skill {name!r} is missing")
+        if skill_versions.resolve(strict=True).parent != versions.resolve(strict=True):
+            raise SkillPackageError(f"version history for Skill {name!r} resolves outside its root")
+        return skill_versions
+
+    def _store_version_snapshot(
+        self, source: Path, name: str, version: dict[str, Any]
+    ) -> Path:
+        digest = version["sha256"]
+        snapshot_id = version["snapshot_id"]
+        if (
+            not _DIGEST_PATTERN.fullmatch(digest)
+            or not _SNAPSHOT_PATTERN.fullmatch(snapshot_id)
+            or snapshot_id != f"{version['resolved_commit']}-{digest}"
+        ):
+            raise SkillPackageError(f"version metadata for Skill {name!r} is invalid")
+        if _git_tree_sha256(source, version["git_modes_sha256"]) != digest:
+            raise SkillPackageError(f"source snapshot for Skill {name!r} changed")
+        target = self._version_directory(name, create=True) / snapshot_id
+        if self._path_exists(target):
+            if (
+                _is_reparse_point(target)
+                or not target.is_dir()
+                or _git_tree_sha256(target, version["git_modes_sha256"]) != digest
+            ):
+                raise SkillPackageError(f"stored Git snapshot for Skill {name!r} is unsafe")
+            return target
+        try:
+            shutil.copytree(
+                source,
+                target,
+                symlinks=True,
+                copy_function=shutil.copy2,
+                ignore=_reject_junctions,
+            )
+            if _git_tree_sha256(target, version["git_modes_sha256"]) != digest:
+                raise SkillPackageError(f"Git snapshot for Skill {name!r} changed while storing")
+            return target
+        except BaseException:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            raise
+
+    def _version_snapshot_path(self, name: str, snapshot_id: str) -> Path:
+        if not _SNAPSHOT_PATTERN.fullmatch(snapshot_id):
+            raise SkillPackageError(f"version snapshot id for Skill {name!r} is invalid")
+        target = self._version_directory(name, create=False) / snapshot_id
+        if (
+            _is_reparse_point(target)
+            or not target.is_dir()
+            or target.resolve(strict=True).parent
+            != self._version_directory(name, create=False).resolve(strict=True)
+        ):
+            raise SkillPackageError(f"version snapshot for Skill {name!r} is missing or unsafe")
+        return target
 
     def _assert_no_shadow_conflict(self, name: str) -> None:
         if self._path_exists(self.project_skills_dir / name):
@@ -382,6 +729,531 @@ class SkillPackageManager:
         raise SkillPackageError(f"Skill preflight rejected the package: {codes or 'unsupported'}")
 
 
+def _validate_git_url(value: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise SkillPackageError("Git URL must be a non-empty URL without surrounding whitespace")
+    if any(ord(character) < 0x20 for character in value) or "\\" in value:
+        raise SkillPackageError("Git URL contains an invalid character")
+    if PureWindowsPath(value).drive:
+        raise SkillPackageError("local filesystem paths are not Git URLs; use a file:// URL")
+    if "://" not in value and _SCP_GIT_URL_PATTERN.fullmatch(value):
+        if value.startswith("-"):
+            raise SkillPackageError("Git URL is invalid")
+        return value
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+    except ValueError as error:
+        raise SkillPackageError("Git URL is malformed") from error
+    if scheme not in {"https", "ssh", "git", "file"}:
+        raise SkillPackageError("Git URL must use https, ssh, git, or file")
+    if parsed.query or parsed.fragment:
+        raise SkillPackageError("Git URL query strings and fragments are not accepted")
+    if (parsed.username or parsed.password) and (
+        scheme != "ssh" or parsed.username != "git" or parsed.password
+    ):
+        raise SkillPackageError(
+            "credential-bearing Git URLs are not accepted; configure a Git credential helper"
+        )
+    if scheme == "file":
+        if parsed.netloc not in {"", "localhost"} or not parsed.path:
+            raise SkillPackageError("file:// Git URL must point to a local repository")
+    elif not hostname or not parsed.path:
+        raise SkillPackageError("Git URL must include a host and repository path")
+    return value
+
+
+def _validate_git_ref(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 1024
+        or value.startswith("-")
+        or any(ord(character) < 0x20 for character in value)
+    ):
+        raise SkillPackageError("Git ref is invalid")
+    if _COMMIT_PATTERN.fullmatch(value):
+        return value
+    try:
+        result = subprocess.run(
+            ["git", "check-ref-format", "--allow-onelevel", value],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SkillPackageError("could not validate Git ref") from error
+    if result.returncode != 0:
+        raise SkillPackageError("Git ref is invalid")
+    return value
+
+
+def _validate_git_subdirectory(value: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:
+        raise SkillPackageError("Skill subdirectory is invalid")
+    normalized = value.removesuffix("/")
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or PureWindowsPath(normalized).drive
+        or ":" in normalized
+        or "/".join(path.parts) != normalized
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise SkillPackageError("Skill subdirectory must be a normalized relative path")
+    return normalized
+
+
+def _validate_git_tree_path(value: str) -> str:
+    path = PurePosixPath(value)
+    reserved_names = {"con", "prn", "aux", "nul"} | {
+        f"{prefix}{number}"
+        for prefix in ("com", "lpt")
+        for number in range(1, 10)
+    }
+    if (
+        not value
+        or value.startswith("/")
+        or "\\" in value
+        or ":" in value
+        or any(character in '<>"|?*' or ord(character) < 0x20 for character in value)
+        or PureWindowsPath(value).drive
+        or "/".join(path.parts) != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(part.endswith((".", " ")) for part in path.parts)
+        or any(part.split(".", 1)[0].casefold() in reserved_names for part in path.parts)
+    ):
+        raise SkillPackageError("Git package contains an unsafe path")
+    return value
+
+
+def _validate_symlink_target(link_path: str, target: str) -> str:
+    if not target or "\\" in target or ":" in target or PurePosixPath(target).is_absolute():
+        raise SkillPackageError("Git package contains an unsafe symbolic link")
+    if PureWindowsPath(target).drive:
+        raise SkillPackageError("Git package contains an unsafe symbolic link")
+    parts = list(PurePosixPath(link_path).parent.parts)
+    for part in PurePosixPath(target).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise SkillPackageError("Git package symbolic link escapes its Skill directory")
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts)
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    operation: str,
+    stdout: Any = subprocess.PIPE,
+) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            check=False,
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise SkillPackageError(f"Git {operation} timed out") from error
+    except OSError as error:
+        raise SkillPackageError(f"Git {operation} could not start") from error
+    if result.returncode != 0:
+        raise SkillPackageError(f"Git {operation} failed (exit {result.returncode})")
+    if stdout == subprocess.PIPE:
+        return result.stdout
+    return b""
+
+
+def _fetch_git_skill(
+    url: str,
+    ref: str,
+    subdirectory: str,
+    temporary_root: Path,
+) -> tuple[Path, str, str]:
+    repo = temporary_root / "source.git"
+    repo.mkdir()
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["GCM_INTERACTIVE"] = "never"
+    _run_git(
+        ["init", "--bare", "--quiet", str(repo)],
+        cwd=temporary_root,
+        env=environment,
+        operation="repository initialization",
+    )
+    _run_git(
+        [
+            f"--git-dir={repo}",
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--",
+            url,
+            ref,
+        ],
+        cwd=temporary_root,
+        env=environment,
+        operation="fetch",
+    )
+    commit = _run_git(
+        [f"--git-dir={repo}", "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+        cwd=temporary_root,
+        env=environment,
+        operation="commit resolution",
+    ).decode("ascii", errors="strict").strip()
+    if not _COMMIT_PATTERN.fullmatch(commit):
+        raise SkillPackageError("Git ref did not resolve to a commit")
+    tree_oid = _run_git(
+        [
+            f"--git-dir={repo}",
+            "rev-parse",
+            "--verify",
+            f"{commit}:{subdirectory}",
+        ],
+        cwd=temporary_root,
+        env=environment,
+        operation="Skill subdirectory resolution",
+    ).decode("ascii", errors="strict").strip()
+    if not _COMMIT_PATTERN.fullmatch(tree_oid):
+        raise SkillPackageError("Git Skill subdirectory did not resolve to a tree")
+    object_type = _run_git(
+        [f"--git-dir={repo}", "cat-file", "-t", tree_oid],
+        cwd=temporary_root,
+        env=environment,
+        operation="Skill tree verification",
+    ).decode("ascii", errors="strict").strip()
+    if object_type != "tree":
+        raise SkillPackageError("Git Skill subdirectory is not a directory")
+    object_format = _run_git(
+        [f"--git-dir={repo}", "rev-parse", "--show-object-format"],
+        cwd=temporary_root,
+        env=environment,
+        operation="object format detection",
+    ).decode("ascii", errors="strict").strip()
+    if object_format not in {"sha1", "sha256"}:
+        raise SkillPackageError("Git repository uses an unsupported object format")
+    package = temporary_root / PurePosixPath(subdirectory).name
+    modes_sha256 = _extract_git_tree(
+        repo, tree_oid, package, object_format, temporary_root, environment
+    )
+    return package, commit, modes_sha256
+
+
+def _extract_git_tree(
+    repo: Path,
+    tree_oid: str,
+    package: Path,
+    object_format: str,
+    temporary_root: Path,
+    environment: dict[str, str],
+) -> str:
+    listing = _run_git(
+        [f"--git-dir={repo}", "ls-tree", "-r", "-z", "--full-tree", tree_oid],
+        cwd=temporary_root,
+        env=environment,
+        operation="Skill tree listing",
+    )
+    entries: dict[str, tuple[str, str]] = {}
+    folded_paths: dict[str, str] = {}
+    for item in listing.split(b"\0"):
+        if not item:
+            continue
+        try:
+            metadata, raw_path = item.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode("ascii").split(" ")
+            path = _validate_git_tree_path(raw_path.decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise SkillPackageError("Git package has an invalid tree entry") from error
+        if path in entries:
+            raise SkillPackageError("Git package contains duplicate paths")
+        if mode not in {"100644", "100755", "120000"} or object_type != "blob":
+            raise SkillPackageError("Git Skill submodules and special entries are unsupported")
+        if not re.fullmatch(r"[0-9a-f]{40}" if object_format == "sha1" else r"[0-9a-f]{64}", object_id):
+            raise SkillPackageError("Git package contains an invalid object id")
+        entries[path] = (mode, object_id)
+    if not entries:
+        raise SkillPackageError("Git Skill subdirectory contains no tracked files")
+    if len(entries) > _MAX_PACKAGE_ENTRIES:
+        raise SkillPackageError("Git Skill package exceeds the supported file count")
+
+    expected_directories: set[str] = set()
+    for path in entries:
+        parts = PurePosixPath(path).parts
+        for index in range(1, len(parts) + 1):
+            component_path = "/".join(parts[:index])
+            folded = component_path.casefold()
+            previous_path = folded_paths.get(folded)
+            if previous_path is not None and previous_path != component_path:
+                raise SkillPackageError("Git package contains paths that collide on Windows")
+            folded_paths[folded] = component_path
+        for index in range(1, len(parts)):
+            parent = "/".join(parts[:index])
+            if parent in entries:
+                raise SkillPackageError("Git package path conflicts with a file")
+            expected_directories.add(parent)
+
+    archive_path = temporary_root / "package.tar"
+    with archive_path.open("xb") as archive_file:
+        _run_git(
+            [
+                "-c",
+                "core.autocrlf=false",
+                f"--git-dir={repo}",
+                "archive",
+                "--format=tar",
+                "--prefix=package/",
+                tree_oid,
+            ],
+            cwd=temporary_root,
+            env=environment,
+            operation="Skill snapshot creation",
+            stdout=archive_file,
+        )
+
+    package.mkdir()
+    members_by_path: dict[str, tarfile.TarInfo] = {}
+    with tarfile.open(archive_path, mode="r:") as archive:
+        for member in archive.getmembers():
+            member_name = member.name.rstrip("/") if member.isdir() else member.name
+            if member_name == "package":
+                continue
+            if not member_name.startswith("package/"):
+                raise SkillPackageError("Git archive contains a path outside the Skill directory")
+            path = _validate_git_tree_path(member_name[len("package/") :])
+            if member.isdir():
+                if path not in expected_directories:
+                    raise SkillPackageError("Git archive contains an unexpected directory")
+                continue
+            if path in members_by_path:
+                raise SkillPackageError("Git archive contains duplicate paths")
+            expected = entries.get(path)
+            if expected is None:
+                raise SkillPackageError("Git archive contains an untracked path")
+            if member.isfile() and expected[0] in {"100644", "100755"}:
+                if bool(member.mode & 0o111) != (expected[0] == "100755"):
+                    raise SkillPackageError("Git archive file mode does not match the pinned commit")
+            elif member.issym() and expected[0] == "120000":
+                _validate_symlink_target(path, member.linkname)
+            else:
+                raise SkillPackageError("Git archive contains an unsupported filesystem entry")
+            members_by_path[path] = member
+        if members_by_path.keys() != entries.keys():
+            raise SkillPackageError("Git archive omitted tracked Skill files")
+
+        directory_targets: dict[str, bool] = {}
+
+        def points_to_directory(path: str, seen: set[str] | None = None) -> bool:
+            if path in expected_directories:
+                return True
+            entry = entries.get(path)
+            if entry is None or entry[0] != "120000":
+                return False
+            visited = set() if seen is None else set(seen)
+            if path in visited:
+                return False
+            visited.add(path)
+            target = members_by_path[path].linkname
+            resolved = _validate_symlink_target(path, target)
+            return points_to_directory(resolved, visited)
+
+        for path, member in members_by_path.items():
+            if member.issym():
+                directory_targets[path] = points_to_directory(
+                    _validate_symlink_target(path, member.linkname)
+                )
+
+        resolved_package = package.resolve(strict=True)
+        for path, member in members_by_path.items():
+            if not member.isfile():
+                continue
+            target = package.joinpath(*PurePosixPath(path).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not _path_is_within(target.parent.resolve(strict=True), resolved_package):
+                raise SkillPackageError("Git package path escaped its extraction directory")
+            digest = hashlib.new(object_format)
+            digest.update(f"blob {member.size}\0".encode("ascii"))
+            content = archive.extractfile(member)
+            if content is None:
+                raise SkillPackageError("Git archive contains an unreadable file")
+            with content, target.open("xb") as output:
+                while chunk := content.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+            if digest.hexdigest() != entries[path][1]:
+                raise SkillPackageError("Git archive content does not match the pinned commit")
+            os.chmod(target, 0o755 if entries[path][0] == "100755" else 0o644)
+
+        for path, member in members_by_path.items():
+            if not member.issym():
+                continue
+            target = package.joinpath(*PurePosixPath(path).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not _path_is_within(target.parent.resolve(strict=True), resolved_package):
+                raise SkillPackageError("Git package symbolic link escaped its extraction directory")
+            link_bytes = member.linkname.encode("utf-8", errors="strict")
+            digest = hashlib.new(object_format)
+            digest.update(f"blob {len(link_bytes)}\0".encode("ascii"))
+            digest.update(link_bytes)
+            if digest.hexdigest() != entries[path][1]:
+                raise SkillPackageError("Git archive symbolic link does not match the pinned commit")
+            os.symlink(
+                member.linkname,
+                target,
+                target_is_directory=directory_targets[path],
+            )
+    return _git_modes_sha256({path: entry[0] for path, entry in entries.items()})
+
+
+def _path_is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _version_metadata(
+    source_ref: str,
+    resolved_commit: str,
+    sha256: str,
+    git_modes_sha256: str,
+    skill_sha256: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "source_ref": source_ref,
+        "resolved_commit": resolved_commit,
+        "snapshot_id": f"{resolved_commit}-{sha256}",
+        "sha256": sha256,
+        "git_modes_sha256": git_modes_sha256,
+        "skill_sha256": skill_sha256,
+        "compatibility": {
+            "status": report["status"],
+            "license": report["license"],
+            "requirements": report["requirements"],
+            "errors": report["errors"],
+        },
+    }
+
+
+def _validate_git_manifest_record(name: str, record: dict[str, Any]) -> None:
+    git_fields = {
+        "git_subdirectory",
+        "source_ref",
+        "resolved_commit",
+        "git_modes_sha256",
+        "previous_version",
+        "pending_version",
+    }
+    source_kind = record.get("source_kind")
+    if source_kind is None:
+        if git_fields.intersection(record):
+            raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+        return
+    if source_kind != "git":
+        raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+
+    try:
+        _validate_git_url(record["source"])
+        subdirectory = _validate_git_subdirectory(record["git_subdirectory"])
+        if PurePosixPath(subdirectory).name != name:
+            raise SkillPackageError("Skill subdirectory does not match package name")
+        _validate_git_ref(record["source_ref"])
+        current = {
+            "source_ref": record["source_ref"],
+            "resolved_commit": record["resolved_commit"],
+            "snapshot_id": f"{record['resolved_commit']}-{record['sha256']}",
+            "sha256": record["sha256"],
+            "git_modes_sha256": record["git_modes_sha256"],
+            "skill_sha256": record["skill_sha256"],
+            "compatibility": record["compatibility"],
+        }
+        _validate_version_metadata(current, allow_needs_adaptation=True)
+        for key in ("previous_version", "pending_version"):
+            version = record.get(key)
+            if version is not None:
+                _validate_version_metadata(version, allow_needs_adaptation=False)
+    except (KeyError, SkillPackageError) as error:
+        raise SkillPackageError(f"install manifest record for {name!r} is invalid") from error
+
+
+def _validate_version_metadata(
+    version: Any, *, allow_needs_adaptation: bool
+) -> None:
+    required = {
+        "source_ref",
+        "resolved_commit",
+        "snapshot_id",
+        "sha256",
+        "git_modes_sha256",
+        "skill_sha256",
+        "compatibility",
+    }
+    if not isinstance(version, dict) or set(version) != required:
+        raise SkillPackageError("version metadata has an invalid shape")
+    source_ref = version["source_ref"]
+    commit = version["resolved_commit"]
+    digest = version["sha256"]
+    modes_digest = version["git_modes_sha256"]
+    skill_digest = version["skill_sha256"]
+    compatibility = version["compatibility"]
+    if (
+        not isinstance(commit, str)
+        or not _COMMIT_PATTERN.fullmatch(commit)
+        or not isinstance(digest, str)
+        or not _DIGEST_PATTERN.fullmatch(digest)
+        or not isinstance(modes_digest, str)
+        or not _DIGEST_PATTERN.fullmatch(modes_digest)
+        or not isinstance(skill_digest, str)
+        or not _DIGEST_PATTERN.fullmatch(skill_digest)
+        or version["snapshot_id"] != f"{commit}-{digest}"
+    ):
+        raise SkillPackageError("version metadata does not match its snapshot")
+    _validate_git_ref(source_ref)
+    if (
+        not isinstance(compatibility, dict)
+        or compatibility.get("status") not in {"complete", "needs-adaptation"}
+        or (
+            not allow_needs_adaptation
+            and compatibility.get("status") != "complete"
+        )
+        or not isinstance(compatibility.get("requirements"), list)
+        or not isinstance(compatibility.get("errors"), list)
+        or (
+            compatibility.get("license") is not None
+            and not isinstance(compatibility.get("license"), str)
+        )
+    ):
+        raise SkillPackageError("version compatibility metadata is invalid")
+
+
+def _current_version_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_ref": record["source_ref"],
+        "resolved_commit": record["resolved_commit"],
+        "snapshot_id": f"{record['resolved_commit']}-{record['sha256']}",
+        "sha256": record["sha256"],
+        "git_modes_sha256": record["git_modes_sha256"],
+        "skill_sha256": record["skill_sha256"],
+        "compatibility": copy.deepcopy(record["compatibility"]),
+    }
+
+
 def _is_reparse_point(path: Path) -> bool:
     try:
         info = path.lstat()
@@ -456,3 +1328,50 @@ def _tree_sha256(root: Path) -> str:
 
     visit(root)
     return digest.hexdigest()
+
+
+def _managed_package_sha256(root: Path, record: dict[str, Any]) -> str:
+    if record.get("source_kind") == "git":
+        return _git_tree_sha256(root, record["git_modes_sha256"])
+    return _tree_sha256(root)
+
+
+def _git_tree_sha256(root: Path, expected_modes: str) -> str:
+    """Validate the pinned Git modes while retaining the package content digest."""
+    if not _DIGEST_PATTERN.fullmatch(expected_modes):
+        raise SkillPackageError("Git Skill file-mode digest is invalid")
+    if os.name != "nt" and _git_modes_sha256_from_package(root) != expected_modes:
+        raise SkillPackageError(f"Git Skill file modes changed after installation: {root}")
+    return _tree_sha256(root)
+
+
+def _git_modes_sha256(modes: dict[str, str]) -> str:
+    digest = hashlib.sha256(b"git-skill-modes-v1\0")
+
+    def add(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+    for path in sorted(modes):
+        add(path.encode("utf-8", errors="surrogateescape"))
+        add(modes[path].encode("ascii"))
+    return digest.hexdigest()
+
+
+def _git_modes_sha256_from_package(root: Path) -> str:
+    modes: dict[str, str] = {}
+
+    def visit(directory: Path) -> None:
+        for path in sorted(directory.iterdir(), key=lambda item: item.name):
+            info = path.lstat()
+            if _is_reparse_point(path):
+                modes[path.relative_to(root).as_posix()] = "120000"
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                visit(path)
+            elif stat.S_ISREG(info.st_mode):
+                mode = "100755" if info.st_mode & 0o111 else "100644"
+                modes[path.relative_to(root).as_posix()] = mode
+
+    visit(root)
+    return _git_modes_sha256(modes)
