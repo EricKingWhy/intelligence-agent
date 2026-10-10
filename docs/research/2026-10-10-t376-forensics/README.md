@@ -14,7 +14,7 @@
 2. 战役途中唯一一次 `database is locked` 落在**另一个站点**（`harness.db` 的 `SqliteOperationLedger.initialize()` 之 `PRAGMA journal_mode=WAL`），且经 A/B 判定为**取证探针自身造成的伪影**：首版探针的 witness 线程每 50 ms 对每个"有活连接"的库另开连接并发 `BEGIN IMMEDIATE`；实验（§4）机械证明"另有连接持 `BEGIN IMMEDIATE` 时 `PRAGMA journal_mode=WAL` 必报 `database is locked`"。改为**非侵入式 witness**（仅在被跟踪写事务在途时才开连接）后，同命令同负载复跑 **0 failed**。
 3. 按 AC 二选一：**未复现 ⇒ 登记已知 flake**（§8.6 第 3 条表，签名 + 不生效状态），**不硬改代码、不伪造修复**。
 4. 附带两项 scope 外发现（§6）：memory-v2 写路径**未挂**仓内既有 `retry_on_busy`/`StorageBusyError`（#515 模式）；`-n 4` 全量收集因 `test_ws_auth.py` 的时间戳参数化而**非确定**。二者均**未擅改**，报请用户裁决。
-5. 门禁：本仓 Gate-0 **6/6 PASS**（40.1s；收据 `docs/gate/341414a41b74e4f09c2009093ac94fa02700002a.json`）；覆盖闸门 `scripts/check_review_coverage.py` **exit 0**（docs-only 自动归属）。
+5. 门禁：本仓 Gate-0 **6/6 PASS**（tip `341414a4`，40.1s；收据 `docs/gate/341414a41b74e4f09c2009093ac94fa02700002a.json`）。**最终树 tip `419a26ee`** 在干净沙箱 `shell/ia-test` 复跑 Gate-0 **6/6 PASS**（19.3s；收据 `docs/gate/419a26eee9f85a3d047ae3694f6a850a927e92aa.json`）；覆盖闸门 `scripts/check_review_coverage.py` **exit 0**（docs-only 自动归属）。
 
 ---
 
@@ -182,4 +182,5 @@ python -m pytest tests/ -q --no-header -p no:cacheprovider -p no:randomly -p t37
 - `s4-xdist-collection-error.txt`（收集期 xdist 报错原文）/ `s4b-main.txt` / `s4b-wsauth.txt` — `-n 4` 相关读数。
 - `commands.txt` — 送码、环境、各轮命令、§4 最小实验的可复跑命令。
 - `docs/gate/341414a41b74e4f09c2009093ac94fa02700002a.json`（仓内）— 本地 Gate-0 **6/6 PASS** 的机器落盘读数（`sha=341414a4…` / `tree=f18fa079…`）。
+- `docs/gate/419a26eee9f85a3d047ae3694f6a850a927e92aa.json`（仓内）— **最终树** tip 在干净沙箱 `shell/ia-test` 复跑 Gate-0 **6/6 PASS** 的机器落盘读数（`sha=419a26ee…` / `tree=fcfcf5e4…`，19.3s）。
 - `t376_probe.py.txt` — 探针源码（后缀改为 `.txt` 以避免触发 Gate-0 的"未跟踪 `.py` 车道输入"判据）。
