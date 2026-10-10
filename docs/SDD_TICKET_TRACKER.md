@@ -8055,3 +8055,14 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **残余（登记不修，不在本票 scope）**：Correctness 轴 P3——`SessionList.tsx` 的「新建任务」「加入项目」路径存在**同类**「菜单关闭归还 vs 挂载即 autoFocus 浮层」竞态（未复现失败；两条路径走 `TaskCreationDialog`/`AttachToProjectDialog`、不经 `focusMovedIntoRename` 分支）；Correctness 轴 P4——Windows nt 分支无 CI 自动覆盖。
 - **待办（用户侧，不自行声称）**：票面要求 4「本机（Windows）全绿」= agent 在 Linux 上只做平台中立改写 + POSIX 面 CI 验证，**Windows 本机需用户在 Windows 机实跑**确认（`pytest tests/attachments/test_local_byte_store.py` 应 36 passed / 0 skipped）。`:173` 与 `:172` 同族同根因，回归例已并案覆盖（含 `aria-invalid`）。
 - **待批准**：push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）。
+
+
+## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 `codex/issue-877-dsh-adapter`；基线 `origin/main` `09e6142cf47b63e94de712bfec51ee6cab2b0ec9`；tip `fc7af0fb441832aaf6130c3c2a85fed294485cc8`；Issue OPEN + `in-progress`）
+
+- **票面与范围**：为固定来源做静态预检，逐项映射 #865 项目原生模型能力、请求映射、键盘、主题与 reduced-motion 证据；禁止执行 DSH/Cordis、访问私有 DOM 或建立第二份模型状态。
+- **方案依据**：调研报告 `docs/research/2026-10-11-issue-877-plugin-preflight-research.md` 核对目标插件、DSH preflight/runtime、VS Code、Claude Code、Pi；目标 MIT 来源 commit `af723caf3387e64ae28aa69c4fd235b1b662e3ae`、tree `8a732b7c00ba5da3b06e122c243205db4ab190b1`。
+- **语义判定**：上游 `Off` 会发送 `reasoningEffort="off"`；#865 的 `Default` 是 `null` 并省略请求字段，二者不等价。因此固定来源当前为 `needs-adaptation`，安装后禁用；不声称完整兼容。
+- **实现**：`plugin_inspection.py` 复用有界、安全文件读取，静态核验固定清单与摘要，不执行包代码；CLI `plugins inspect` 路由到此预检；固定 MIT 载荷夹具覆盖成功路径及漂移/缺项；输出项目原生能力、映射、证据与缺口。首笔 `fd4c5e6e`，精度/覆盖修复 `fc7af0fb`。
+- **针对性验证**：`tests/test_cli_plugins_inspect.py` 48 passed / 2 skipped；Ruff lint 通过，新检查器格式检查通过；固定上游来源 CLI 冒烟返回 `needs-adaptation`、`checked_files_match=true`、无 findings、`package_code_run=false`、`activation_allowed=false`。八个已散列夹具文件经审查逐字节匹配上游，MIT 许可全文/版权保留。全量 pytest 与 Gate-0 尚未执行。
+- **双轴审查**：首轮 `09e6142..fd4c5e6e`：Spec APPROVE-WITH-FINDINGS（P0-P4=0/1/2/0/0）；Standards APPROVE-WITH-FINDINGS（回溯归类 P0-P4=0/0/1/1/0，首轮报告未逐条固定等级）。问题包括局部摘要误称整体来源匹配、缺固定源正例及 AC2 证据不完整。修复 `fc7af0fb` 将字段限定为所列文件摘要、补固定 MIT 正例与逐项证据。复审 `fd4c5e6e..fc7af0fb` 两轴 APPROVE、零新 findings；Standards 核对 8 个夹具文件与上游逐字节相同。四条审查行见 `docs/review_ledger.d/t877-*.tsv`。
+- **发布状态**：未 push、未开 PR、未 merge；Issue 保持 OPEN + `in-progress`。完成全量门禁后再按 Git 流程处理发布。
