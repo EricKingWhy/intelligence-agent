@@ -40,6 +40,8 @@
 
 ## 当前工作焦点
 
+- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 `codex/issue-877-dsh-adapter`；同步合并 `28947fc3` / tree `174f07e7`；验证 tip `3fd58966` / tree `87405ff5`）：实现与两轴复审完成；上游 Off 与 #865 Default 语义不等价，包保持 needs-adaptation 且禁用。全量 pytest 7471 passed、42 skipped、51 deselected，唯一覆盖闸门红项补齐审查行后针对性复验通过；Gate-0 6/6、E2E 540 passed、Web Vitest 1637 passed、TUI 232 passed / 3 skipped；Desktop 测试和两端类型检查通过。Issue 仍 OPEN + `in-progress`，本地验证完成，待 push/PR。明细见 Tracker 与月档 #877。
+
 - **2026-10-10 · #872 Git Skills T3（分支 `codex/issue-872-skill-git`，已验证代码点 `15ea25f3` / tree `b10fb266`）**：固定 Git Skill 来源与内容摘要，显式 update/rollback，待启用版本重启后切换；失败保留活动版本。两轴终审无未关闭 finding；Gate-0 6/6、clean 全量 pytest 7285P/28S/51D、focused 118P/2S。已同步 `origin/main` `c8f43a7c`（merge `fbe5fa1c`，仅新增 Gate-0 收据、代码与测试目录无变化）；Issue OPEN + `in-progress`。尚未 push/PR/merge，等用户批准。
 
 - **2026-10-10 · #873 Plugin T4（`codex/issue-873-global-scope`，实现 `d79d6158`）**：复用 SkillPackageManager 实现 global 独立包/版本记录、scope CLI 与未选择的全局库存视图；Runtime 不自动发现/注入 global 包。调研见 `docs/research/2026-10-10-plugin-global-package-scope.md`。双轴完成：Spec PASS；Standards PASS-WITH-FINDINGS，P3=1 非阻塞建议；作者红证通过。Docker 沙箱全量 pytest 7291P/28S/51D。Gate-0 6/6 PASS（收据 `docs/gate/d45c84e62b074f825db592edd2c79ab1aa05f192.json`；71.23s，超过 60s 目标但无失败车道）；整分支 `git diff --check` 通过。Issue CLOSED，`in-progress` 已移除；未 push/PR/merge。详见月档 #873。

@@ -1723,9 +1723,9 @@ def _main_plugins(argv: list[str]) -> None:
         )
 
     inspect = subcommands.add_parser(
-        "inspect", help="inspect a local Skill package without installing it"
+        "inspect", help="inspect a local package without installing or executing it"
     )
-    inspect.add_argument("local_dir", help="local directory containing SKILL.md")
+    inspect.add_argument("local_dir", help="local package directory")
     add_scope_argument(inspect)
     install = subcommands.add_parser("install", help="install a local Skill package disabled")
     install.add_argument("local_dir", help="local directory containing SKILL.md")
@@ -1776,6 +1776,14 @@ def _main_plugins(argv: list[str]) -> None:
     )
 
     try:
+        if args.command == "inspect":
+            from agent_harness.plugin_inspection import inspect_dsh_effort_slider
+
+            report = inspect_dsh_effort_slider(args.local_dir, scope=args.scope)
+            if report is not None:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return
+
         skills_config = parse_capabilities_config(
             getattr(settings, "capabilities", None)
         ).get("skills")

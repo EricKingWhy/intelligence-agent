@@ -949,6 +949,130 @@ def _snapshot(*roots: Path) -> dict[str, bytes | None]:
     }
 
 
+def _write_dsh_slider_package(
+    source: Path, *, version: str = "1.0.0", include_client: bool = True
+) -> None:
+    package = {
+        "name": "dsh-codex-effort-slider",
+        "version": version,
+        "license": "MIT",
+        "main": "./lib/index.js",
+        "exports": {".": "./lib/index.js", "./client": "./lib/client.js"},
+        "dsh": {
+            "bundle": {"patch": "./cordis.patch.yml"},
+            "client": {"platform": "web", "immediately": True},
+        },
+    }
+    _write(source / "package.json", json.dumps(package))
+    _write(source / "LICENSE", "MIT License\n")
+    _write(source / "cordis.patch.yml", "- name: dsh-codex-effort-slider\n")
+    _write(source / "install-profile.ps1", "# fixture only\n")
+    _write(source / "install.cmd", "rem fixture only\r\n")
+    _write(source / "pack-dist.ps1", "# fixture only\n")
+    _write(source / "lib" / "index.js", "throw new Error('must never run')\n")
+    if include_client:
+        _write(source / "lib" / "client.js", "throw new Error('must never run')\n")
+
+
+def test_cli_plugins_inspect_matches_pinned_dsh_effort_slider_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = Path(__file__).parent / "fixtures" / "dsh-codex-effort-slider"
+    before = _snapshot(source)
+    _configure_cli_inspect(
+        monkeypatch, source, tmp_path / "workspace", tmp_path / "global-skills"
+    )
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["source_pin"]["commit"] == "af723caf3387e64ae28aa69c4fd235b1b662e3ae"
+    assert report["checked_files_match"] is True
+    assert report["observed_checked_files_sha256"] == report["source_pin"][
+        "checked_files_sha256"
+    ]
+    assert report["findings"] == []
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert report["execution"]["package_code_run"] is False
+    assert report["implementation_summary"].startswith(
+        "The upstream DSH JavaScript is inspected as data only."
+    )
+    assert report["project_contract"]["supported_effort_ids"] == [
+        "minimal",
+        "standard",
+        "deep",
+    ]
+    assert report["project_contract"]["wire_mapping_examples"] == {
+        "minimal": "minimal",
+        "standard": "medium",
+        "deep": "high",
+    }
+    assert any(
+        "prefers-reduced-motion" in item
+        for contribution in report["contributions"]
+        for item in contribution["verification_evidence"]
+    )
+    assert _snapshot(source) == before
+
+
+def test_cli_plugins_inspect_maps_dsh_slider_candidate_without_executing_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "dsh-codex-effort-slider"
+    _write_dsh_slider_package(source)
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    marker = tmp_path / "must-not-exist"
+    _write(source / "lib" / "index.js", f"from pathlib import Path; Path({str(marker)!r}).touch()\n")
+    before = _snapshot(source)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["package"] == "dsh-codex-effort-slider"
+    assert report["source_pin"]["commit"] == "af723caf3387e64ae28aa69c4fd235b1b662e3ae"
+    assert report["license"] == "MIT"
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert report["checked_files_match"] is False
+    assert "SOURCE_CONTENT_DRIFT" in {item["code"] for item in report["findings"]}
+    assert any(
+        item["name"] == "off" and item["status"] == "unmapped"
+        for item in report["gaps"]
+    )
+    assert {item["name"] for item in report["dependencies"]} >= {"DSH", "Cordis"}
+    assert not marker.exists()
+    assert _snapshot(source) == before
+
+
+@pytest.mark.parametrize(
+    ("version", "include_client", "expected_gap"),
+    [("1.1.0", True, "SOURCE_VERSION_DRIFT"), ("1.0.0", False, "MISSING_CLIENT_ENTRY")],
+)
+def test_cli_plugins_inspect_never_marks_drifted_or_incomplete_dsh_source_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    version: str,
+    include_client: bool,
+    expected_gap: str,
+) -> None:
+    source = tmp_path / "dsh-codex-effort-slider"
+    _write_dsh_slider_package(source, version=version, include_client=include_client)
+    _configure_cli_inspect(
+        monkeypatch, source, tmp_path / "workspace", tmp_path / "global-skills"
+    )
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert expected_gap in {item["code"] for item in report["findings"]}
+
+
 def test_cli_global_scope_is_shared_and_project_list_keeps_it_unselected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
