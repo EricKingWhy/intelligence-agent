@@ -696,9 +696,10 @@ def _deep_description(depth: int = 20_000) -> str:
 def test_deeply_nested_description_fails_explicitly_instead_of_crashing(tmp_path: Path) -> None:
     """预检契约是"绝不崩"：深嵌套描述只能落成**明确失败**，不能是 RecursionError。
 
-    `json.loads` 自带的递归限制（CPython 3.12 实测约 9997 层）会先于任何尺寸上限炸；
-    40017 字节又远在 1 MB 读上限之内 ⇒ **深度是唯一的门槛**，守卫必须落在解析点。
-    这条与 `skills/inspection.py` 对 frontmatter 的 RecursionError 兜底同源。
+    `json.loads` 自带的递归限制会先于任何尺寸上限炸（具体层数取决于进程递归限制与
+    栈余量，不是常量）；40017 字节又远在 1 MB 读上限之内 ⇒ **深度是唯一的门槛**，
+    守卫必须落在解析点。这条与 `skills/inspection.py` 对 frontmatter 的 RecursionError
+    兜底同源。
     """
     root = _package(tmp_path, None)
     _write(root / "mcp.json", _deep_description())

@@ -229,13 +229,33 @@ def _find_description(root: Path, errors: list[dict[str, str]]) -> tuple[str, st
 
 
 def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -> dict[str, Any] | None:
+    """解析描述；**只解析一遍**，重复键的侦测搭在这次解析的 hook 上。
+
+    两件事必须同一次解析完成：`object_pairs_hook` 每个容器比裸 `json.loads` 多压一层
+    Python 帧，所以"先裸解析一遍、再带 hook 解析一遍"会开出两个不同的递归上限
+    （实测对象形状 9998 vs 9996）——中间那条缝里的描述能过第一遍、却把第二遍掀翻，
+    于是"绝不崩"要靠在**两处**兜 RecursionError 才能维持。单遍解析把那条缝直接消掉：
+    深度边界的权威只剩解析器自己，守卫也只剩一处。
+    """
+    duplicates: list[str] = []
+
+    def _hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        seen: set[str] = set()
+        for key, _ in pairs:
+            if key in seen:
+                duplicates.append(key)
+            seen.add(key)
+        return dict(pairs)
+
     try:
-        parsed = json.loads(text)
+        # `dict(pairs)` 与裸 `json.loads` 同语义（重复键取后者），所以单遍不改变解析结果。
+        parsed = json.loads(text, object_pairs_hook=_hook)
     except RecursionError:
         # 预检契约是"绝不崩"：嵌套超过解析器递归上限的描述只能落成**明确失败**，
-        # 不能把 RecursionError 掀给 CLI / 安装闸门（skills/inspection.py 对 frontmatter
-        # 同款兜底）。深度边界的唯一权威是解析器自己——另写一份深度扫描器就是第二份
-        # 会漂的真相，而这里的唯一诉求是"不崩"（无独立产品配额，与 web 层不同）。
+        # 不能把 RecursionError 掀给 CLI / 安装闸门（`skills/inspection.py` 对 frontmatter
+        # 同款兜底）。这个上限取决于进程递归限制与栈余量、不是常量——所以这里不设
+        # 自己的深度数字，只信解析器抛出来的那一下（无独立产品配额，与 web 层不同：
+        # 那边的 `BODY_MAX_DEPTH` 是用户可见契约，必须比解析器更早、且与它无关）。
         _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
         return None
     except (json.JSONDecodeError, ValueError) as error:
@@ -249,42 +269,21 @@ def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -
             f"描述必须是 JSON 对象，得到 {type(parsed).__name__}",
         )
         return None
-    if not _check_duplicate_keys(text, parsed, relative, errors):
-        return None
+    _report_duplicate_keys(duplicates, parsed, relative, errors)
     return parsed
 
 
-def _check_duplicate_keys(
-    text: str, parsed: dict[str, Any], relative: str, errors: list[dict[str, str]]
-) -> bool:
-    """JSON 里重复的键 → 明确失败；返回描述是否仍可判（`False` = 太深，已记 TOO_DEEP）。
+def _report_duplicate_keys(
+    duplicates: list[str], parsed: dict[str, Any], relative: str, errors: list[dict[str, str]]
+) -> None:
+    """JSON 里重复的键 → 明确失败。
 
     `json.loads` 对重复键**静默取后者**：`{"mcpServers": {"a": {...}, "a": {...}}}`
     会不声不响地少一个 server（AC3 的"重复名"在 Claude 形状里唯一的出现方式）。
-    先按 object_pairs_hook 收一遍重复键，再按它是不是 server 名给出对应的错误码。
-
-    第二遍带 hook，每个容器比第一遍多一层 Python 帧（实测对象嵌套上限 9997→9995）
-    ⇒ 它可能**先于**第一遍撞上递归上限，所以这里同样不许把 RecursionError 放出去。
+    名字由 `_parse_description` 的 hook 收好传进来，再按它是不是 server 名给出对应的错误码。
     """
-    duplicates: list[str] = []
-
-    def _hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        seen: set[str] = set()
-        for key, _ in pairs:
-            if key in seen:
-                duplicates.append(key)
-            seen.add(key)
-        return dict(pairs)
-
-    try:
-        json.loads(text, object_pairs_hook=_hook)
-    except RecursionError:
-        _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
-        return False
-    except (json.JSONDecodeError, ValueError):  # pragma: no cover - 上面已解析成功过
-        return True
     if not duplicates:
-        return True
+        return
     wrapper = parsed.get(_CLAUDE_WRAPPER)
     server_names = set(wrapper) if isinstance(wrapper, dict) else set()
     for key in sorted(set(duplicates)):
@@ -302,7 +301,6 @@ def _check_duplicate_keys(
                 relative,
                 f"描述里键 {key!r} 重复（JSON 重复键语义不明确，一律拒绝）",
             )
-    return True
 
 
 def _is_claude_shape(raw: dict[str, Any]) -> bool:
