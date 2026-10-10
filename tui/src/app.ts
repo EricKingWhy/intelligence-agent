@@ -272,7 +272,7 @@ export class TuiApp {
   async rebuildFromHistory(): Promise<void> {
     const gen = this.generation;
     const events = await this.api.getEvents(this.options.sessionId);
-    // 期间切过会话（#958）：这是旧会话的结果，丢弃——不改 state / 游标、不渲染。
+    // 期间切过会话（#958）：这是旧会话的结果，丢弃：不改 state / 游标、不渲染。
     if (gen !== this.generation) return;
     this.state = createState();
     for (const event of events) applyEvent(this.state, event);
