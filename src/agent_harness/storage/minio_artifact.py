@@ -7,15 +7,22 @@ via the ``read_artifact`` tool.
 
 Design notes:
 - Content-addressable: ``artifact_id = sha256(content)[:16]``.
-- Session-scoped namespace: S3 key = ``{session_id}/{artifact_id}``.
 - Verification on load: recomputes the hash and compares.
 - Graceful degradation: if MinIO is unreachable during ``save``, the handler
   falls back to keeping the original (untruncated) tool result in-session.
+
+Key 布局分两套（**文本**仍是会话命名空间，**字节**在 #933 M-01 之后不是）：
+
+- 文本 artifact：``{session_id}/{artifact_id}``（会话命名空间，未变）；
+- 字节 artifact：全局内容寻址对象 ``.attachments/objects/<sha[:2]>/<sha>``
+  ＋ 每会话回执对象 ``{session_id}/attachments/<sha>``（归属事实）。
+  见本文件字节路径段注释。
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,6 +39,12 @@ from agent_harness.storage.artifact import (
     compute_byte_artifact_id,
     slice_artifact,
 )
+from agent_harness.storage.attachment_layout import (
+    GLOBAL_BYTE_KEY_PREFIX,
+    SESSION_ATTACHMENTS_DIRNAME,
+)
+
+logger = logging.getLogger("agent_harness.storage.minio_artifact")
 
 
 class MinioArtifactStore(ArtifactStore):
@@ -180,9 +193,46 @@ class MinioArtifactStore(ArtifactStore):
             max_chars_per_line=max_chars_per_line,
         )
 
-    # ── 字节路径（#822 MM-01）───────────────────────────────────────────────
-    # 键 `{session_id}/attachments/<sha>`：会话前缀是隔离来源（#185 同口径），
-    # 与文本路径的 `{session_id}/{artifact_id}` 用不同子前缀，避免两个 id 空间撞键。
+    # ── 字节路径（#822 MM-01；#933 M-01 全局寻址 + 会话回执）───────────────
+    #
+    # 对象存储没有 hardlink，所以"全局对象 + 每会话回执"是**两份 key、同一个 body**：
+    #     <bucket>/{GLOBAL_BYTE_KEY_PREFIX}/<sha[:2]>/<sha>   全局内容寻址对象
+    #     <bucket>/{session_id}/attachments/<sha>             本会话回执（归属事实）
+    #
+    # **发布顺序：回执先、对象后**。对象存储没有跨键原子性（单 S3 API 无事务），所以
+    # 必须挑一个"半途失败也无害"的顺序：回执先落 ⇒ 失败面只可能是"有回执、没对象"，
+    # 而本实现的读回候选里**回执 key 就是旧的会话内对象位置**（全局化之前字节就落那儿），
+    # `load_bytes` 会在全局未命中时回落到它 ⇒ 那种半成品**仍然读得回字节**、发送侧归属
+    # 也照常成立。反过来（对象先落、回执后落）失败面是"有对象、没回执"：**别的会话**读得
+    # 到字节、**本会话自己**发不了——归属静默失守，是最不该出现的失败面。
+    #
+    # 旧布局（`{session_id}/attachments/<sha>`）被双读回落兼容、**不回填**：与 Local 的
+    # #830 D1 同策略（方案文档 §7），升级时不动任何既有对象。
+    #
+    # 来源: DSH `5badb150` `packages/attachment/attachment-local/src/store.ts:44-54`
+    # （对象根 = 每用户全局 `DSH_HOME/attachments/v1`，路径无 session 段）、oh-my-pi
+    # `a507b623` `packages/coding-agent/src/session/blob-store.ts:1-68`（扁平全局根，
+    # docstring 逐字 "automatic deduplication across sessions"）。
+
+    def _receipt_key(self, sha256: str) -> str:
+        """本会话回执 key = 全局化之前的旧字节 key（升级兼容因此不需要额外分支）。"""
+        return f"{self._session_id}/{SESSION_ATTACHMENTS_DIRNAME}/{sha256}"
+
+    def _global_key(self, sha256: str) -> str:
+        return f"{GLOBAL_BYTE_KEY_PREFIX}/{sha256[:2]}/{sha256}"
+
+    def _byte_key_candidates(self, sha256: str) -> tuple[str, ...]:
+        """读回候选 key，**顺序即优先级**（#933 M-16：布局演化只改**这一处**）。
+
+        1. 全局内容寻址根 —— 现行布局、唯一写入落点（跨会话/fork 可寻址靠它）；
+        2. 本会话回执 key —— 同时是回执位与**升级前旧对象**的落点。**本票不删**：
+           删掉就会把升级前的附件全部 brick（删除前提是旧对象已迁移，见 #933 M-16 的
+           审计结论与 Local 同款候选的 docstring）。
+
+        对象存储侧没有旁挂元数据文件（ContentType 随对象走），所以候选只有一个消费点
+        （`load_bytes`）；与 Local 一样，加一条候选 = 在这里加一个 key。
+        """
+        return (self._global_key(sha256), self._receipt_key(sha256))
 
     async def save_bytes(
         self, session_id: str, data: bytes, *, mime_type: str
@@ -198,9 +248,17 @@ class MinioArtifactStore(ArtifactStore):
             mime_type=mime_type,
         )
         async with self._sdk_session.client("s3", **self._client_kwargs) as client:
+            # 顺序见本节顶注：回执先（失败面只剩"有回执、没对象"，而回执 key 本身
+            # 就在读回候选里 ⇒ 那种半成品仍读得回字节）。
             await client.put_object(
                 Bucket=self._bucket,
-                Key=f"{session_id}/attachments/{sha256}",
+                Key=self._receipt_key(sha256),
+                Body=data,
+                ContentType=mime_type,
+            )
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=self._global_key(sha256),
                 Body=data,
                 ContentType=mime_type,
             )
@@ -211,10 +269,49 @@ class MinioArtifactStore(ArtifactStore):
             raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
         sha256 = artifact_id.split(":", 1)[1]
         async with self._sdk_session.client("s3", **self._client_kwargs) as client:
+            for key in self._byte_key_candidates(sha256):
+                try:
+                    response = await client.get_object(Bucket=self._bucket, Key=key)
+                except self._client_error as error:
+                    if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                        continue
+                    raise
+                async with response["Body"] as stream:
+                    body = await stream.read()
+                if hashlib.sha256(body).hexdigest() != sha256:
+                    # "存在但自证失败"（带外篡改）与"不存在"同样算该候选未命中：继续回落
+                    # （本会话回执通常是同一份字节的完好副本），全部失败才 KeyError。
+                    logger.warning(
+                        "blob candidate %s failed content-address verification "
+                        "(artifact %s)",
+                        key,
+                        artifact_id,
+                    )
+                    continue
+                return BlobArtifact(
+                    artifact_id=artifact_id,
+                    session_id=self._session_id,
+                    size=len(body),
+                    mime_type=response.get("ContentType", "application/octet-stream"),
+                    content=body,
+                )
+        raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+
+    async def load_uploaded_bytes(self, artifact_id: str) -> BlobArtifact:
+        """按字节 id 读回**本会话上传过**的字节（#933 M-01：发送侧归属判据）。
+
+        全局化之后"读得到"不再等于"属于本会话"（别的会话/fork 子会话也读得到全局对象），
+        所以归属必须另立事实：**本会话回执对象**（`save_bytes` 写的那份 key）。
+        没上传过（含从未上传、属于别的会话）统一 `KeyError` → 422，与 Local 同契约。
+        旧布局下这份 key 就是上传时对象的落点 ⇒ 升级前的旧附件仍是本会话的字节。
+        """
+        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+        sha256 = artifact_id.split(":", 1)[1]
+        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
             try:
                 response = await client.get_object(
-                    Bucket=self._bucket,
-                    Key=f"{self._session_id}/attachments/{sha256}",
+                    Bucket=self._bucket, Key=self._receipt_key(sha256)
                 )
             except self._client_error as error:
                 if error.response.get("Error", {}).get("Code") == "NoSuchKey":
