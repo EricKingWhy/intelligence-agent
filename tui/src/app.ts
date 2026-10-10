@@ -270,7 +270,10 @@ export class TuiApp {
   /** 全量重建（进会话 / truncated）：重置状态后从 GET /events 重投影，
    *  幂等游标回填 max seq。重放不叠加（不变量 #22：重建后状态仍可对账）。 */
   async rebuildFromHistory(): Promise<void> {
+    const gen = this.generation;
     const events = await this.api.getEvents(this.options.sessionId);
+    // 期间切过会话（#958）：这是旧会话的结果，丢弃——不改 state / 游标、不渲染。
+    if (gen !== this.generation) return;
     this.state = createState();
     for (const event of events) applyEvent(this.state, event);
     const maxSeq = events.reduce(
