@@ -532,8 +532,27 @@ class ContextCompactor:
                 # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
                 # 会话的行为逐字节等价。
                 if events is not None:
+                    # #844 A-vis：比较基准对齐摘要器的**可见窗口**——摘要只覆盖
+                    # early 段 `[prefix_end:cut]`（含 #639 缩小后的实际段），落在
+                    # cut 之后的计划更新对摘要器不可见，不应要求其逐字出现。窗口
+                    # 右界取自既有 `early_ranges` 的最大来源 seq（与成功路径
+                    # `source_seq_start/source_seq_end` 同源；缩小路径下 early_ranges
+                    # 已被同步截断，天然一致）。区间不可用（early_ranges 为 None，
+                    # 或含未对齐项）时回落现行全量行为——无来源区间路径不变。
+                    plan_events = events
+                    if early_ranges and all(
+                        source_range is not None for source_range in early_ranges
+                    ):
+                        window_end_seq = max(
+                            source_range[1]
+                            for source_range in early_ranges
+                            if source_range is not None
+                        )
+                        plan_events = [
+                            event for event in events if event.seq <= window_end_seq
+                        ]
                     _validate_plan_section(
-                        candidate_summary_text, derive_plan(events).items,
+                        candidate_summary_text, derive_plan(plan_events).items,
                     )
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
@@ -1266,10 +1285,16 @@ def _validate_plan_section(
     """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
 
     会话**有**清单时启用（PRD §6.1 表行 5「与进度清单 in_progress 项一致」）：
-    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单存在
-    但零 in_progress ⇒ 第 5 节必须是 `(none)`（与 `aux:compaction` prompt 的
-    「无则写 (none)」同款约定）。无清单（items 为空）不启用——未用清单的会话
-    第 5 节本就是自由文本，保持 W-04 之前的既有行为。
+    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单**零
+    未完成项**（`status != "completed"`，即无 `pending` 且无 `in_progress`）⇒
+    第 5 节必须是 `(none)`。
+
+    #844 A-sem：`(none)` 触发条件由「零 `in_progress`」放宽为「零未完成项」——
+    对齐 `aux:compaction` prompt「列出尚未完成的工作……无则写 (none)」
+    （`prompt/builtin.py:90`）的语义；`pending` 也是尚未完成的工作。有未完成项
+    但无 `in_progress` 项时既不强制 `(none)`、也无逐字要求（只放宽不收紧）。
+    `in_progress` 项的逐字校验（PRD §6.1 表行 5）一字不动。无清单（items 为空）
+    不启用——未用清单的会话第 5 节本就是自由文本，保持 W-04 之前的既有行为。
 
     判据刻意用逐字子串而非语义比对：PRD 执行约束要求确定性机制兜底，弱模型
     重述不能靠"觉得差不多"。清单表本身就在转录的 update_plan 工具调用里，
@@ -1278,14 +1303,15 @@ def _validate_plan_section(
     if not plan_items:
         return
     section = _parse_summary_sections(summary, _SUMMARY_HEADINGS)[4]
-    in_progress = [item for item in plan_items if item.status == "in_progress"]
-    if not in_progress:
+    unfinished = [item for item in plan_items if item.status != "completed"]
+    if not unfinished:
         if section != "(none)":
             raise _SummaryRejected(
                 "plan_section_mismatch",
-                "Plan section must be (none): no plan item is in progress",
+                "Plan section must be (none): no plan item is unfinished",
             )
         return
+    in_progress = [item for item in plan_items if item.status == "in_progress"]
     missing = [
         item.id for item in in_progress
         if item.content not in section and item.active_form not in section
