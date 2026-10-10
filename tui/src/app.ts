@@ -633,7 +633,7 @@ export class TuiApp {
   /** 切会话：打断旧订阅（generation + abort），重置状态与游标，重建 + 重订。 */
   private async switchSession(sessionId: string): Promise<void> {
     if (sessionId === this.options.sessionId) return;
-    this.generation += 1;
+    const gen = ++this.generation;
     this.abort.abort();
     this.abort = new AbortController();
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
@@ -648,6 +648,8 @@ export class TuiApp {
     const draft = this.editor.getText();
     if (parseImageMarkers(draft).length > 0) this.editor.setText(stripImageMarkers(draft));
     await this.rebuildFromHistory();
+    // 重建期间又切走了（#958）：由更新的那次切换起循环，这里再起会重复订阅。
+    if (gen !== this.generation) return;
     this.subscribeLoop();
   }
 
