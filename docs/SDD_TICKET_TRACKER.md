@@ -8100,7 +8100,7 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **本票同时关闭 #958 登记的残余 ①**（过期重建 reject 导致 `stream rebuild:` / `switch failed:` 落进新会话 chat）。
 - **待批准**：两轴审查后 push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）；关单。
 
-## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；基线 origin/main 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；tip 4684e493b8bc7608ef1c1409f3a7b61ce3143867；Issue OPEN + in-progress）
+## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；原始基线 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；同步 origin/main f5e5bb5ee2b0c1ec21fea010b3865c299dd69f1c；tip 5cd1bfbd96c2400f4d7332030b170e50eeb1efc0；Issue OPEN + in-progress）
 
 - **票面与范围**：为固定来源做静态预检，逐项映射 #865 项目原生模型能力、请求映射、键盘、主题与 reduced-motion 证据；禁止执行 DSH/Cordis、访问私有 DOM 或建立第二份模型状态。
 - **方案依据**：调研报告 `docs/research/2026-10-11-issue-877-plugin-preflight-research.md` 核对目标插件、DSH preflight/runtime、VS Code、Claude Code、Pi；目标 MIT 来源 commit `af723caf3387e64ae28aa69c4fd235b1b662e3ae`、tree `8a732b7c00ba5da3b06e122c243205db4ab190b1`。
@@ -8108,7 +8108,7 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **实现**：`plugin_inspection.py` 复用有界、安全文件读取，静态核验固定清单与摘要，不执行包代码；CLI `plugins inspect` 路由到此预检；固定 MIT 载荷夹具覆盖成功路径及漂移/缺项；输出项目原生能力、映射、证据与缺口。首笔 `fd4c5e6e`，精度/覆盖修复 `fc7af0fb`。
 - **验证状态**：tests/test_cli_plugins_inspect.py 48 passed / 2 skipped；Ruff lint/format 通过；固定来源 CLI 冒烟判 needs-adaptation 且保持禁用。冻结树 pytest 7388 passed / 40 skipped / 51 deselected（1118.75s），完整 Playwright E2E 540 passed（12.2m）。首轮两项红因、修复及冻结文件 git hash-object 清单见月档 #877。
 - **全量首次红修复**：首轮 7386 passed / 2 failed；验证映射漏登 plugin_inspection.py，由 4684e493 补入 backend-entry 行并登记 focused CLI 测试；隔离工作树缺 .venv 使 Gate-0 接线守卫拿到空 argv，通过连接本机已有 venv 后重跑。两个守卫 focused 测试 32 passed。
-- **冻结点**：4684e493b8bc7608ef1c1409f3a7b61ce3143867 / tree 06332a08f992f1b08caaffb51c3ff9adbf8567d9。全量 pytest 与 E2E 均在此 SHA/tree 执行；冻结文件哈希明细见月档 #877。
-- **门禁范围**：全量 pytest 与完整 E2E 已绿；Gate-0 尚未执行。
+- **冻结点**：合并 main 后代码验证点 `5cd1bfbd96c2400f4d7332030b170e50eeb1efc0` / tree `4980729a15e6dc8bb4419d587fa6b447adbad82f`；全量 pytest 与 Gate-0 在该点执行。完整 E2E 在 `4684e493` 执行；从该点至当前点没有 tracked `web/` 变更。原始冻结文件 hash-object 清单仍对应 `4684e493`，见下。
+- **门禁范围**：合并 main 后全量 pytest 与全量 Gate-0 均通过；完整 E2E 540 passed，且当前点到其代码点无 tracked `web/` 变更。Gate-0 回执见 `docs/gate/5cd1bfbd96c2400f4d7332030b170e50eeb1efc0.json`。
 - **双轴审查**：首轮 `09e6142..fd4c5e6e`：Spec APPROVE-WITH-FINDINGS（P0-P4=0/1/2/0/0）；Standards APPROVE-WITH-FINDINGS（回溯归类 P0-P4=0/0/1/1/0，首轮报告未逐条固定等级）。问题包括局部摘要误称整体来源匹配、缺固定源正例及 AC2 证据不完整。修复 `fc7af0fb` 将字段限定为所列文件摘要、补固定 MIT 正例与逐项证据。复审 `fd4c5e6e..fc7af0fb` 两轴 APPROVE、零新 findings；Standards 核对 8 个夹具文件与上游逐字节相同。四条审查行见 `docs/review_ledger.d/t877-*.tsv`。
-- **发布状态**：未 push、未开 PR、未 merge；Issue #877 保持 OPEN + in-progress。后续发布需完成 Gate-0 并按 Git 流程取得对应授权。
+- **发布状态**：验证已通过；用户已批准在无问题时 push、开 PR、merge 并关闭 Issue。记录本次批准时 Issue 为 OPEN + in-progress。
