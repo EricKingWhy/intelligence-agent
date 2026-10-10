@@ -193,3 +193,32 @@ def test_cli_list_reports_this_projects_selection_of_both_scopes(
     assert [
         item["saved_selection"] for item in other["available_global_packages"]
     ] == ["not_selected"]
+
+
+def test_cli_list_does_not_report_a_same_id_global_copy_as_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """选了项目版时，同名全局版不得被列成已启用（T5 AC2：只装配所选一版）。
+
+    两条安装记录同名并存，启用结果只可能属于其中一条。若可用性视图只看
+    「名字在不在启用结果表里」，选了项目版会把全局版一并报成 enabled——
+    用户会以为两版同时生效。判据必须带上 selected_scope。
+    """
+    cli_world = _Cli(tmp_path, monkeypatch, capsys)
+    cli_world.run("install", str(_package(tmp_path / "project-src")))
+    cli_world.run("install", str(_package(tmp_path / "global-src")), "--scope", "global")
+
+    cli_world.run("enable", PACKAGE_NAME, "--scope", "project")
+    listing = cli_world.run("list")
+
+    assert listing["packages"][0]["selected_scope"] == "project"
+    assert [
+        item["saved_selection"] for item in listing["available_global_packages"]
+    ] == ["not_selected"]
+
+    # 对照：显式改选全局版后，同一条可用项才标 enabled。
+    cli_world.run("enable", PACKAGE_NAME, "--scope", "global")
+    assert [
+        item["saved_selection"]
+        for item in cli_world.run("list")["available_global_packages"]
+    ] == ["enabled"]

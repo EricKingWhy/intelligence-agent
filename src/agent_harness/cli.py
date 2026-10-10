@@ -1976,7 +1976,9 @@ def _available_global_skill_package_listing(manager: SkillPackageManager) -> lis
     packages = []
     for item in _global_skill_package_listing(global_manager):
         item = dict(item)
-        item["saved_selection"] = "enabled" if item["name"] in results else "not_selected"
+        # 同名双 scope 并存时，选了项目版的那条不能把全局版报成已启用（T5 AC2）。
+        selected = results.get(item["name"], {}).get("selected_scope") == "global"
+        item["saved_selection"] = "enabled" if selected else "not_selected"
         packages.append(item)
     return packages
 
