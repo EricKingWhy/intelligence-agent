@@ -55,7 +55,13 @@ def _minio_store(session_id: str):
     return MinioArtifactStore(settings, session_id=session_id)
 
 
-def test_minio_save_bytes_uses_session_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_minio_save_bytes_writes_receipt_key_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回执 key（升级兼容位）先落 —— 顺序是失败面选择，见 `remote_byte_store` 模块顶注。
+
+    #933 之前这条用例叫 `..._uses_session_prefixed_key`，锚的是"字节对象按会话命名空间寻址"
+    ——那正是本票要杀死的误解。两条 key 的**完整**契约（回执 + 全局、顺序、body）由
+    下方的参数化组 `test_remote_save_bytes_writes_global_object_and_session_receipt` 钉住。
+    """
     store = _minio_store("sess-a")
     client = FakeS3Client()
     monkeypatch.setattr(store, "_sdk_session", FakeSDKSession(client))
@@ -206,7 +212,7 @@ def test_remote_save_bytes_writes_global_object_and_session_receipt(
     assert client.put_keys == [
         f"sess-a/attachments/{sha}",
         f"{_GLOBAL_PREFIX}/{sha[:2]}/{sha}",
-    ], "回执先落、对象后落：(有回执 ⇒ 有对象) 这条不变量靠顺序保证"
+    ], "回执先落、对象后落（顺序即失败面选择，见 remote_byte_store 模块顶注）"
     assert set(client.objects.values()) == {payload}
 
 

@@ -9,7 +9,9 @@
 为什么 content-hash 寻址：
 - 同一内容自动去重（两个 Tool 产出相同的 stdout 只存一份）；
 - 寻址不需要额外 ID 生成器——hash 就是 ID；
-- 跨 Session 理论上可共享（相同内容同 hash），但 Phase 5 按 session 隔离 key。
+- 跨 Session 理论上可共享（相同内容同 hash）。**文本** artifact 仍按 session 隔离 key
+  （`{session_id}/{artifact_id}`）；**字节** artifact 自 #933 M-01 起走全局内容寻址根 +
+  每会话回执（跨会话/fork 可寻址，归属由回执回答）。
 
 物理位置：Runtime 域存储，不经过 Sandbox（spec 06 §3 + ADR-0006）。
 默认 Provider：LocalArtifactStore（spec 06 §3：Local filesystem，开发/小型部署）。

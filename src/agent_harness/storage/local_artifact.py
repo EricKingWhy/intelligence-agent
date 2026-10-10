@@ -640,9 +640,12 @@ def _global_object_for_receipt(receipt: Path, session_dir: Path, root: Path) -> 
     except ValueError:
         return None
     parts = relative.parts
-    if len(parts) != 4 or parts[:2] != _RECEIPT_RELATIVE_PARTS:
+    # 中段与 `_RECEIPT_RELATIVE_PARTS` 同源（#933 M-16）：把中段长度当偏移量推导，
+    # 而不是写死 `parts[2], parts[3]`——改布局常量时这里跟着走，不会静默错位。
+    offset = len(_RECEIPT_RELATIVE_PARTS)
+    if len(parts) != offset + 2 or parts[:offset] != _RECEIPT_RELATIVE_PARTS:
         return None
-    shard, sha256 = parts[2], parts[3]
+    shard, sha256 = parts[offset], parts[offset + 1]
     if shard != sha256[:2] or not _SHA256_PATTERN.fullmatch(sha256):
         return None
     objects_dir = (root / GLOBAL_ATTACHMENT_DIRNAME / BYTE_OBJECTS_DIRNAME).resolve()
