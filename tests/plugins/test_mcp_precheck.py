@@ -6,8 +6,9 @@
 - AC3 未知字段、缺 command/URL、重复名、越界路径、不支持 transport 明确失败。
 - AC4 OAuth-only 标 `oauth_required_unsupported`；resources/prompts 逐项列缺口。
 
-"零连接"在单测里可机械判定：预检全程不 import 任何 client/session 模块（见
-`test_precheck_imports_no_connection_machinery`），且预检把包目录设成只读后照常出报告。
+"零连接 / 零 spawn"在单测里可机械判定：子进程里跑一遍预检后查 `sys.modules`
+（`test_precheck_imports_no_connection_machinery`），以及把 `subprocess.Popen/run`
+打桩成会炸（`test_precheck_never_spawns_a_process`）。
 """
 
 from __future__ import annotations
@@ -99,7 +100,7 @@ def test_stdio_report_lists_transport_command_env_names_and_dependencies(tmp_pat
     assert server["status"] == "needs-adaptation"  # 凭据引用待运行时判定
     assert server["transport"] == "stdio"
     assert server["command"] == "npx"
-    assert server["args"] == ["-y", "@example/mcp-server"]
+    assert server["args"] == ["-y", "@example/mcp-server"]  # 不含引用的参数原样回显
     assert server["timeout_seconds"] == 120.0  # Claude Code 的 timeout 单位是毫秒
     assert server["tool_permissions"] == [
         {"tool": "search", "permission": "read-only"},
@@ -247,7 +248,8 @@ def test_precheck_does_not_write_into_the_package(tmp_path: Path) -> None:
 def test_unsupported_shapes_fail_explicitly(tmp_path: Path, entry: dict, expected_code: str) -> None:
     report = inspect_mcp_servers(_package(tmp_path, {"mcpServers": {"bad": entry}}))
 
-    assert report["status"] == "needs-adaptation"
+    # AC3 的"明确失败"：整份描述判 unsupported（不是"待适配"——那是留缺口的语义）。
+    assert report["status"] == "unsupported"
     assert _server(report, "bad")["status"] == "unsupported"
     assert expected_code in _codes(report, "bad")
 
@@ -328,9 +330,11 @@ def test_escaping_symlink_description_is_refused(tmp_path: Path) -> None:
 
     report = inspect_mcp_servers(root)
 
+    # 描述文件**在**、但越界读不了 ⇒ 这是失败，不是"包里没有描述"（两者要用户做的事不同）。
     assert report["servers"] == []
-    assert report["status"] == "needs-adaptation"  # 越界文件按"没有描述"处理并留痕
+    assert report["status"] == "unsupported"
     assert "MCP_DESCRIPTION_OUTSIDE_PACKAGE" in {error["code"] for error in report["errors"]}
+    assert report["requirements"] == []
 
 
 def test_malformed_json_fails_without_crashing(tmp_path: Path) -> None:
@@ -475,3 +479,208 @@ def test_cli_plugins_inspect_mcp_only_package_still_prints_the_mcp_report(
     assert report["status"] == "unsupported"
     assert "SKILL_FILE_MISSING" in {error["code"] for error in report["errors"]}
     assert report["mcp"]["servers"][0]["name"] == "local"  # 描述仍然进了报告
+
+
+# ------------------------------------------------------------------ 审查修复面（R1）
+
+def test_absurd_timeout_value_fails_instead_of_crashing(tmp_path: Path) -> None:
+    """P0-1：`timeout` 是任意大整数时，除毫秒→秒会抛 OverflowError 掀翻 CLI。"""
+    huge = json.loads("1" + "0" * 400)
+    report = inspect_mcp_servers(_package(tmp_path, {"mcpServers": {"bad": {
+        "type": "stdio", "command": "npx", "timeout": huge,
+    }}}))
+
+    assert "MCP_SERVER_INVALID" in _codes(report, "bad")
+    assert _server(report, "bad")["status"] == "unsupported"
+
+
+def test_plaintext_next_to_a_broken_reference_is_not_echoed(tmp_path: Path) -> None:
+    """P1-1：`hunter2${}` 这种"明文 + 坏引用"不能把明文抄进报告。"""
+    root = _package(tmp_path, {"mcpServers": {"bad": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["--token=hunter2${API_KEY}"],
+        "env": {"PASSWORD": "hunter2${}"},
+    }}})
+
+    report = inspect_mcp_servers(root)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert "MCP_SECRET_REFERENCE_INVALID" in _codes(report, "bad")
+    assert "hunter2" not in serialized
+    # args 里"明文 + 引用"混排时只回显引用名（AC2：不回显 secret 值）
+    assert _server(report, "bad")["args"] == [
+        {"kind": "reference", "references": [{"name": "API_KEY", "has_default": False}]}
+    ]
+
+
+def test_unreadable_description_file_is_a_failure_not_a_missing_one(tmp_path: Path) -> None:
+    """P1-2：描述文件在、但读不出来时，不能落进"请补一份描述"那条正常结论。"""
+    root = _package(tmp_path, {"mcpServers": {"s": {"type": "stdio", "command": "npx"}}})
+    (root / "mcp.json").chmod(0)
+    if os.access(root / "mcp.json", os.R_OK):  # root 绕过权限位（本仓已知环境假红形态）
+        pytest.skip("running as a user that can read mode-000 files")
+
+    report = inspect_mcp_servers(root)
+
+    assert report["status"] == "unsupported"
+    assert "MCP_DESCRIPTION_UNREADABLE" in {error["code"] for error in report["errors"]}
+    assert report["requirements"] == []  # 不得同时说"包里没有描述"
+
+
+def test_description_that_is_not_a_regular_file_is_a_failure(tmp_path: Path) -> None:
+    """同一类：mcp.json 是目录 ⇒ 失败，而不是"没有描述"。"""
+    root = _package(tmp_path, None)
+    (root / "mcp.json").mkdir()
+
+    report = inspect_mcp_servers(root)
+
+    assert report["status"] == "unsupported"
+    assert "MCP_DESCRIPTION_NOT_A_FILE" in {error["code"] for error in report["errors"]}
+
+
+@pytest.mark.parametrize("name", ["evil.tool", "a__b/c", "bad name", "", "中文"])
+@pytest.mark.parametrize("shape", ["claude", "native"])
+def test_server_names_the_runtime_model_rejects_are_rejected_here(
+    tmp_path: Path, name: str, shape: str
+) -> None:
+    """P0-4：`name` 会成为工具命名空间段，合法性由运行期模型定（别抄第二份规则）。
+
+    `MCPServerConfig._validate_name` 只认 `^[A-Za-z0-9_-]+$`；预检比它松的话，
+    一份判成 `complete` 的描述到了装配期会 `init_failed`。
+    """
+    payload = (
+        {"mcpServers": {name: {"type": "stdio", "command": "npx"}}}
+        if shape == "claude"
+        else {"servers": [{"name": name, "transport": "stdio", "command": "npx"}]}
+    )
+
+    report = inspect_mcp_servers(_package(tmp_path, payload))
+
+    assert report["status"] == "unsupported"
+    # 两种形状的落点不同：Claude 形状以键为名（名字合法性问题），native 形状
+    # 空/非字符串名在结构层就被拒（`MCP_SERVER_INVALID`）——都是明确失败。
+    codes = {error["code"] for error in report["errors"]}
+    assert codes & {"MCP_SERVER_NAME_INVALID", "MCP_SERVER_INVALID"}, codes
+
+
+def test_resources_declaration_is_a_gap_in_both_shapes(tmp_path: Path) -> None:
+    """P2-3：native 形状下 `resources` 只能被"能力缺口"判一次，不再叠一条未知字段。"""
+    report = inspect_mcp_servers(_package(tmp_path, {"servers": [{
+        "name": "rich", "transport": "stdio", "command": "npx",
+        "resources": ["file:///x"], "prompts": ["y"],
+    }]}))
+
+    server = _server(report, "rich")
+    kinds = {item["kind"] for item in server["requirements"] if item["support"] == "unsupported"}
+    assert {"resources", "prompts"} <= kinds
+    assert "MCP_FIELD_UNKNOWN" not in _codes(report, "rich")
+
+
+@pytest.mark.parametrize("declared", ["file:///x", ["x"], {"a": 1}, True, 1])
+def test_resources_declared_in_any_form_is_a_gap(tmp_path: Path, declared: object) -> None:
+    """P2：声明形态不止 list/dict——字符串/数字的声明不能被静默丢掉。"""
+    report = inspect_mcp_servers(_package(tmp_path, {"mcpServers": {"rich": {
+        "type": "http", "url": "https://a/mcp", "resources": declared,
+    }}}))
+
+    server = _server(report, "rich")
+    assert any(item["kind"] == "resources" for item in server["requirements"])
+    assert server["status"] == "needs-adaptation"
+
+
+# ------------------------------------------------------------------ AC4 的安装期闸门
+
+def test_attach_mcp_section_downgrades_a_package_with_an_oauth_only_server(
+    tmp_path: Path,
+) -> None:
+    """AC4：OAuth-only 描述不得以"完整兼容"过关——降级必须发生在**这份报告**里。"""
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    report = {
+        "status": "complete",
+        "source": str(_package(tmp_path, {"mcpServers": {"login": {
+            "type": "http", "url": "https://mcp.example.com/mcp", "oauth": {"callbackPort": 8080},
+        }}})),
+        "requirements": [],
+        "errors": [],
+    }
+
+    merged = attach_mcp_section(report)
+
+    assert merged["status"] == "needs-adaptation"
+    assert any(item["kind"] == "mcp-oauth_required_unsupported" for item in merged["requirements"])
+    assert merged["mcp"]["servers"][0]["status"] == "needs-adaptation"
+
+
+def test_attach_mcp_section_leaves_a_clean_skill_package_complete(tmp_path: Path) -> None:
+    """反向：包里没有 MCP 描述时，包级 status 不被 MCP lane 的结论污染。"""
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, None)
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Skill only.\n---\nBody.\n")
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["status"] == "complete"
+    assert merged["requirements"] == []  # "需要一份 MCP 描述"不进包级 requirements
+    assert merged["mcp"]["status"] == "needs-adaptation"
+
+
+def test_skill_package_manager_gate_sees_mcp_gaps(tmp_path: Path) -> None:
+    """端到端：`SkillPackageManager.install` 的闸门必须能看见 MCP 面的缺口。"""
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    package = _package(tmp_path, {"mcpServers": {"login": {
+        "type": "http", "url": "https://mcp.example.com/mcp", "oauth": {"callbackPort": 8080},
+    }}})
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Needs OAuth.\n---\nBody.\n")
+    manager = SkillPackageManager(tmp_path / "workspace", global_skills_dir=tmp_path / "global")
+
+    record = manager.install(package)
+
+    assert record["compatibility"]["status"] == "needs-adaptation"
+    assert any("oauth_required_unsupported" in json.dumps(item) for item in record["compatibility"]["requirements"])
+
+
+def test_gaps_stay_needs_adaptation_while_errors_are_unsupported(tmp_path: Path) -> None:
+    """状态阶梯：**缺口**（待适配）与**错误**（明确失败）必须是两档，不能混。"""
+    gap_report = inspect_mcp_servers(_package(tmp_path / "gap", {"mcpServers": {"g": {
+        "type": "http", "url": "https://a/mcp", "oauth": {"callbackPort": 1},
+    }}}))
+    error_report = inspect_mcp_servers(_package(tmp_path / "err", {"mcpServers": {"e": {
+        "type": "stdio",
+    }}}))
+
+    assert gap_report["status"] == "needs-adaptation"
+    assert error_report["status"] == "unsupported"
+
+
+def test_attach_mcp_section_makes_a_broken_description_block_install(tmp_path: Path) -> None:
+    """AC3 要能拦住安装：MCP 描述本身就是坏的时候，包级 status 是 unsupported。"""
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"broken": {"type": "stdio"}}})  # 缺 command
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert merged["status"] == "unsupported"
+    assert any(item["kind"] == "mcp-server-error" for item in merged["requirements"])
+
+
+def test_skill_package_manager_refuses_to_install_a_broken_mcp_description(tmp_path: Path) -> None:
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
+    )
+
+    package = _package(tmp_path, {"mcpServers": {"broken": {"type": "stdio"}}})
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Broken MCP.\n---\nBody.\n")
+    manager = SkillPackageManager(tmp_path / "workspace", global_skills_dir=tmp_path / "global")
+
+    # 拒绝理由走的是 Skill 面既有的码表（`_raise_if_uninstallable` 只列错误码）；
+    # 关键行为是"装不进去"，MCP 细节在 `report["mcp"]` 与 `requirements` 里可查。
+    with pytest.raises(SkillPackageError, match="preflight rejected"):
+        manager.install(package)

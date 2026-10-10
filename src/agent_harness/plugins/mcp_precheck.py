@@ -32,14 +32,16 @@ import os
 import re
 from pathlib import Path
 from typing import Any, get_args
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import ValidationError
 
 from agent_harness.mcp.config import MCPServerConfig
-from agent_harness.redaction import redact_secret_values
 from agent_harness.skills.inspection import _add_error, read_package_text
 from agent_harness.tooling.contract import ToolPermission
 
 #: 显式 server 描述文件（相对包根，顺序即优先序）。
-MCP_DESCRIPTION_FILES = ("mcp.json", ".mcp.json", "mcp-servers.json", "mcpServers.json")
+MCP_DESCRIPTION_FILES = ("mcp.json", ".mcp.json")
 
 #: 两种形状的包装键：Claude Code 是 `mcpServers` 对象，本仓是 `servers` 列表。
 _CLAUDE_WRAPPER = "mcpServers"
@@ -61,13 +63,16 @@ _CLAUDE_TRANSPORTS: dict[str, str | None] = {
 #: 本仓无对应字段，但由 `_capability_gaps` 逐项给出缺口，不在这里重复报。
 #: 本仓形状的合法键**就是模型自己的字段**——预检比模型严，就等于拒绝一份
 #: `MCPServerConfig` 明明能表达的描述（AC1 的边界是"能否表达"，不是"我们喜不喜欢"）。
-_NATIVE_FIELDS = frozenset(MCPServerConfig.model_fields)
+#: `resources`/`prompts` 额外放行：它们是"本仓首版不支持"的**能力收窄**（由
+#: `_check_capability_gaps` 逐项出缺口），不是"字段无法表达"，不能同时被两条规则定罪。
+_NATIVE_FIELDS = frozenset(MCPServerConfig.model_fields) | {"resources", "prompts"}
 
 #: 本仓支持的 transport 直接取自模型的 `Literal`（写死一份就等于多一个会漂的真相）。
 _NATIVE_TRANSPORTS = frozenset(get_args(MCPServerConfig.model_fields["transport"].annotation))
 
-#: Claude Code 形状的合法键按 transports 分别列（其文档里 stdio 用 command/args/env，
-#: http 用 url/headers；`env` 在 http 上虽无意义但无害，照样接受并只列出变量名）。
+#: Claude Code 形状的合法键按 transport 分别列（其文档里 stdio 用 command/args/env，
+#: http 用 url/headers）。`env` 两边都放行：本仓 `MCPServerConfig` 两种 transport 都有
+#: 该字段，预检比模型严就等于拒绝一份模型能表达的描述；报告里 env 只出变量名与形状。
 #: `oauth`/`resources`/`prompts` 不在这里出结论——它们各自由显式缺口检查处理。
 _CLAUDE_FIELDS = {
     "stdio": frozenset(
@@ -94,11 +99,11 @@ _RELATIVE_PATH = re.compile(r"\.{1,2}[/\\]")
 _COMMAND_SHAPE = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 
 
-def inspect_mcp_servers(source: Path | str, *, root: Path | str | None = None) -> dict[str, Any]:
+def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
     """预检一个包里的 MCP server 描述；返回报告，绝不启动 server / 展开凭据。
 
-    `root` 是已解析的包根（`plugins inspect` 与 Skill 预检共用同一个根与同一套边界
-    读写）；缺省时用 `source` 自身解析。任何情况下都不执行包内代码。
+    `source` 是包根：`plugins inspect` 传的是 Skill 预检解析出来的同一个根，
+    所以两种包类型看到的是同一棵树、同一套边界读写。任何情况下都不执行包内代码。
     """
     source_path = Path(source).expanduser()
     report: dict[str, Any] = {
@@ -111,7 +116,7 @@ def inspect_mcp_servers(source: Path | str, *, root: Path | str | None = None) -
     }
     errors: list[dict[str, str]] = report["errors"]
     try:
-        package_root = Path(root).resolve(strict=True) if root is not None else source_path.resolve(strict=True)
+        package_root = source_path.resolve(strict=True)
     except (OSError, RuntimeError):
         _add_error(errors, "MCP_PACKAGE_NOT_FOUND", ".", "包目录不存在或无法解析。")
         report["status"] = "unsupported"
@@ -119,6 +124,12 @@ def inspect_mcp_servers(source: Path | str, *, root: Path | str | None = None) -
     report["source"] = str(package_root)
 
     found = _find_description(package_root, errors)
+    if found is None and errors:
+        # 描述文件**在**，但读不出来（越界 symlink / 不是常规文件 / 读取中变化 / 过大）。
+        # 这不是"包里没有描述"，不能掉进下面那条正常结论里——否则一份越界的 mcp.json
+        # 会得到"请补一份描述"的建议，而真正的失败原因被埋进 errors 无人复检。
+        report["status"] = "unsupported"
+        return report
     if found is None:
         # 没有描述 ≠ 坏包：这是"需要一份薄适配描述"的正常结论（AC1），不是错误。
         report["requirements"].append(
@@ -149,6 +160,10 @@ def inspect_mcp_servers(source: Path | str, *, root: Path | str | None = None) -
 
     seen: set[str] = set()
     for name, body in entries:
+        name_error = _server_name_error(name)
+        if name_error is not None:
+            _add_error(errors, "MCP_SERVER_NAME_INVALID", relative, f"server 名 {name!r} 非法：{name_error}")
+            continue
         if name in seen:
             _add_error(
                 errors,
@@ -167,6 +182,11 @@ def inspect_mcp_servers(source: Path | str, *, root: Path | str | None = None) -
     elif not report["servers"]:
         # 描述文件在，但一个 server 都没有：不是一个可用的描述（AC1 的否定面）。
         _add_error(errors, "MCP_DESCRIPTION_EMPTY", relative, "描述里没有任何 server 条目。")
+        report["status"] = "unsupported"
+    elif any(server["errors"] for server in report["servers"]):
+        # 有 server **报错**（缺 command/URL、越界路径、非法权限、坏引用……）⇒ 这份描述
+        # 不能用（AC3"明确失败"）；只有"缺口"（OAuth/resources/env 引用等待适配项）才是
+        # needs-adaptation —— 两者要用户做的事不同，状态不能混。
         report["status"] = "unsupported"
     elif any(server["status"] != "supported" for server in report["servers"]):
         report["status"] = "needs-adaptation"
@@ -260,6 +280,22 @@ def _check_duplicate_keys(
 
 def _is_claude_shape(raw: dict[str, Any]) -> bool:
     return isinstance(raw.get(_CLAUDE_WRAPPER), dict)
+
+
+def _server_name_error(name: str) -> str | None:
+    """server 名是否被运行期 `MCPServerConfig` 接受——**问模型，不抄规则**。
+
+    `name` 会成为工具命名空间段 `mcp__{server}__{tool}`，模型侧有它自己的白名单
+    （`mcp/config.py` 的 `_validate_name`）。AC1 的判据是"只接受 `MCPServerConfig`
+    可表示的描述"，所以这里就拿真模型验一遍：抄一份正则出来就等于多一个会漂的真相。
+    """
+    try:
+        MCPServerConfig.model_validate({"name": name, "transport": "stdio", "command": "__probe__"})
+    except ValidationError as error:
+        for detail in error.errors():
+            if detail.get("loc") == ("name",):
+                return str(detail.get("msg"))
+    return None
 
 
 def _server_entries(
@@ -446,7 +482,10 @@ def _check_stdio(package_root, entry, server, fail, gap, report, relative) -> No
         return
     if isinstance(cwd, str):
         _resolve_package_path(package_root, cwd.strip(), "cwd", server, fail, report)
-    report["args"] = list(args)
+    report["args"] = [_arg_display(item) for item in args]
+    if _has_invalid_reference(command):
+        fail("MCP_SECRET_REFERENCE_INVALID", "command", f"server {server!r} 的 command 含非法引用写法")
+        return
     executable = _resolve_package_path(package_root, command.strip(), "command", server, fail, report)
     if executable is None:
         return
@@ -461,24 +500,22 @@ def _check_stdio(package_root, entry, server, fail, gap, report, relative) -> No
             "reason": "外部命令是否可用由部署环境决定；本预检不执行、也不查 PATH。",
         }
     )
-    unexpanded = set(_unexpanded_refs(command)) | {
-        ref for item in args for ref in _unexpanded_refs(item)
-    }
-    if unexpanded:
+    if _has_invalid_reference(command) or any(_has_invalid_reference(item) for item in args):
+        # 只报**形状**，不回显原文：`--token=hunter2${}` 这串里既有明文又有坏引用，
+        # 把原文写进报告等于把凭据抄进了安装记录 / 诊断（spec 09 §1.1）。
         fail(
             "MCP_SECRET_REFERENCE_INVALID",
             "command",
-            f"server {server!r} 的 command/args 含无法展开的引用: {sorted(unexpanded)}"
-            "（本仓只展开 env/headers 的值）",
+            f"server {server!r} 的 command/args 含非法引用写法（空引用/非法变量名/嵌套）",
         )
         return
     for value in (command, *args):
-        if _SECRET_REF.search(value):
+        for var in sorted(_unexpanded_refs(value)):
             gap(
                 "env-var",
                 "manual_review",
-                value,
-                "该值在运行时由部署环境提供；本预检不注入、不读取进程环境。",
+                var,
+                f"参数里的 {var} 由部署环境在运行时提供；本预检不注入、不读取进程环境。",
             )
 
 
@@ -488,9 +525,11 @@ def _check_http(entry, server, fail, gap, report) -> None:
         fail("MCP_URL_MISSING", "url", f"http server {server!r} 缺少非空 url")
         return
     url = url.strip()
-    report["url"] = url
-    refs = _unexpanded_refs(url)
-    for var in sorted(refs):
+    report["url"] = _url_display(url)
+    if _has_invalid_reference(url):
+        fail("MCP_SECRET_REFERENCE_INVALID", "url", f"server {server!r} 的 url 含非法引用写法")
+        return
+    for var in sorted(_unexpanded_refs(url)):
         gap(
             "env-var",
             "manual_review",
@@ -534,9 +573,23 @@ def _check_capability_gaps(entry, server, gap) -> None:
         ("resources", "本仓 MCP 只实现 tools 原语；resources 未实现，该 server 的这部分能力不可用。"),
         ("prompts", "本仓 MCP 只实现 tools 原语；prompts 未实现，该 server 的这部分能力不可用。"),
     ):
-        declared = entry.get(primitive)
-        if declared is True or (isinstance(declared, (list, dict)) and declared):
+        if _declares(entry.get(primitive)):
             gap(primitive, "unsupported", f"{server}:{primitive}", detail)
+
+
+def _declares(declared: Any) -> bool:
+    """该原语是否被**声明了需求**（`None`/`false`/空串/0/空表 = 没声明）。
+
+    写坏的类型（字符串、数字）也算声明：把 `resources: "file:///x"` 静默丢掉，
+    等于用户以为它生效了却什么都没发生——那正是 AC4 要显式列缺口的情形。
+    """
+    if declared is None or declared is False:
+        return False
+    if isinstance(declared, (str, list, dict)):
+        return len(declared) > 0
+    if isinstance(declared, (int, float)):
+        return declared != 0
+    return True
 
 
 def _check_unknown_fields(entry, server, claude_shape, fail, report) -> None:
@@ -591,23 +644,16 @@ def _check_environment(entry, server, fail, gap, report) -> None:
 
 def _check_secret_value(server, label, value, fail, gap) -> None:
     """`${VAR}` 引用按名登记；写法非法（空引用/非法名/嵌套）明确失败。"""
-    refs = _unexpanded_refs(value)
-    if not refs:
-        # 明文常量：不回显内容，也不因此判不兼容（AC2 只要求不回显）。
-        if _SECRET_REF.search(value):
-            fail(
-                "MCP_SECRET_REFERENCE_INVALID",
-                label,
-                f"引用写法非法（空引用/非法变量名/嵌套）：{redact_secret_values(value)!r}",
-            )
-        return
-    if "${" in _SECRET_REF.sub("", value):
+    if _has_invalid_reference(value):
         fail(
             "MCP_SECRET_REFERENCE_INVALID",
             label,
-            f"引用写法非法（空引用/非法变量名/嵌套）：{redact_secret_values(value)!r}",
+            "引用写法非法（空引用/非法变量名/嵌套）；请改用 ${VAR} 或 ${VAR:-default}",
         )
         return
+    refs = _unexpanded_refs(value)
+    if not refs:
+        return  # 明文常量：不回显内容，也不因此判不兼容（AC2 只要求不回显）。
     for var in sorted(refs):
         gap(
             "env-var",
@@ -626,7 +672,13 @@ def _check_timeout(entry, server, fail, report) -> None:
         if isinstance(declared, bool) or not isinstance(declared, (int, float)):
             fail("MCP_SERVER_INVALID", "timeout", f"server {server!r} 的 timeout 必须是数字（毫秒）")
             return
-        value = declared / 1000
+        try:
+            value = declared / 1000
+        except OverflowError:
+            # 任意长整数除法会溢出（`10**400 / 1000`）；预检契约是"绝不崩"，
+            # 一个荒唐的 timeout 值只能变成一条明确失败，不能掀翻 CLI。
+            fail("MCP_SERVER_INVALID", "timeout", f"server {server!r} 的 timeout 超出可取范围")
+            return
     if value is None:
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
@@ -648,6 +700,53 @@ def _value_shape(value: str) -> dict[str, Any]:
     }
 
 
+def _url_display(url: str) -> str:
+    """URL 的回显形状：没有引用就原样；含引用（或坏引用）则折叠 query/fragment。
+
+    `https://host/mcp?token=abc${API_KEY}` 这种参数里躺着明文凭据，原样回显等于把
+    凭据抄进报告与安装记录（AC2）。scheme/host/path 保留——那才是"这是哪个 server"
+    的信息；T7 要真 URL 时读的是包里的描述文件本身。
+    """
+    if "${" not in url:
+        return url
+    parts = urlsplit(url)
+    collapsed = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if parts.query or parts.fragment:
+        collapsed += "?<redacted>"
+    return collapsed
+
+
+def _arg_display(value: str) -> Any:
+    """参数回显成**不可泄漏**的形状：不含引用就原样，含引用则只列引用名。
+
+    参数里"明文 + 引用"混排很常见（`--token=hunter2${API_KEY}`），原样回显等于把
+    凭据抄进报告（AC2）。T7 要真参数时读的是包里的描述文件本身，不是这份预览。
+    """
+    refs = _unexpanded_refs(value)
+    if not refs:
+        return value
+    return {
+        "kind": "reference",
+        "references": [
+            {"name": var, "has_default": default is not None}
+            for var, default in sorted(refs.items())
+        ],
+    }
+
+
+def _has_invalid_reference(value: str) -> bool:
+    """值里是否含**写坏了的** `${...}`：去掉全部合法引用后仍残留 `${`。
+
+    空引用 `${}`、非法变量名 `${1x}`、嵌套 `${a${b}}` 都落在这里。调用方只据此报
+    "写法非法"，**不**把原文写进报告（`${VAR}` 的原文里常常同时躺着明文凭据）。
+    """
+    if "${" not in value:
+        return False
+    if not _unexpanded_refs(value):
+        return True  # 有 `${` 却一个合法引用都解析不出来（`${}` / `${1x}`）⇒ 写法坏了
+    return "${" in _SECRET_REF.sub("", value)
+
+
 def _unexpanded_refs(value: str) -> dict[str, str | None]:
     """`${VAR}` / `${VAR:-default}` 的引用名 → 默认值（None = 无默认）。"""
     return {match.group(1): match.group(2) for match in _SECRET_NAME.finditer(value)}
@@ -664,7 +763,7 @@ def _resolve_package_path(package_root, value: str, field: str, server: str, fai
         if looks_like_path:
             candidate = Path(value)
             resolved = candidate.resolve() if candidate.is_absolute() else (package_root / candidate).resolve()
-            if not _path_within(resolved, package_root):
+            if not resolved.is_relative_to(package_root):
                 fail(
                     "MCP_PATH_OUTSIDE_PACKAGE",
                     field,
@@ -692,11 +791,80 @@ def _resolve_package_path(package_root, value: str, field: str, server: str, fai
     return Path(value).name
 
 
-def _path_within(path: Path, root: Path) -> bool:
-    """`Path.is_relative_to` 的兜底形态（与 skills.inspection._within 同一语义）。"""
-    return path == root or root in path.parents
-
-
 def _package_label(resolved: Path, package_root: Path) -> str:
     """报告里只出现包内相对标签，不泄漏预检机的绝对路径。"""
     return f"${{PACKAGE}}/{resolved.relative_to(package_root).as_posix()}"
+
+
+def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
+    """把 MCP 预检折进一份 Skill 报告（`report["mcp"]` + 顶层 requirements/status）。
+
+    **安装/启用闸门读的就是这份报告**：`SkillPackageManager` 以 `status == "complete"`
+    放行、以 `requirements` 列缺口。所以 MCP 面的结论必须住在这里，只挂在
+    `plugins inspect` 的输出上是拦不住安装的（ADR-0052 D4）。
+    - Skill 面已经判 `unsupported` 时保持原样：包本身就被拒了，再叠 MCP 缺口只会让
+      "为什么被拒"更难读；MCP 段仍照出（`report["mcp"]`）。
+    - MCP 段判 `unsupported`（描述读不出来 / server 报错）⇒ 包级 status 也是 `unsupported`
+      （AC3 的"明确失败"要能拦住安装，与 Skill 面"有 errors ⇒ unsupported"同档）；
+    - MCP 段只有**缺口** ⇒ 包级降一档到 `needs-adaptation`（可装、不可启用）；
+    - 没有描述 ⇒ MCP 段自己就是 `needs-adaptation`，包级不动（Skill 仍然能用）。
+    """
+    source = report.get("source")
+    if not isinstance(source, str) or not source:
+        return report
+    mcp_report = inspect_mcp_servers(source)
+    report["mcp"] = mcp_report
+    if report.get("status") == "unsupported":
+        return report  # 包本身已被拒；MCP 段照出，但不叠加"为什么被拒"的噪音
+    requirements = mcp_compatibility_requirements(mcp_report)
+    report.setdefault("requirements", []).extend(requirements)
+    if report.get("status") == "complete":
+        if mcp_report["status"] == "unsupported":
+            report["status"] = "unsupported"
+        elif any(item["support"] == "unsupported" for item in requirements):
+            report["status"] = "needs-adaptation"
+    return report
+
+
+def mcp_compatibility_requirements(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """把 MCP 预检的缺口/错误折成 `inspect_skill_package` 形状的 requirements 条目。
+
+    安装期闸门（`SkillPackageManager._raise_if_uninstallable` 与 `enable` 的
+    `status == "complete"` 判据）只吃 Skill 报告的 requirements；如果 MCP 面自己不
+    折进去，一份 OAuth-only 的 server 描述就会以"完整兼容"被装进来并启用——正是
+    ADR-0052 D4"不能用能装代替能用"要挡的形态（T7 的 AC 也会原样继承这个漏洞）。
+    折进来的条目沿用同一张 `support` 词表（见 `skills/inspection.py`）：`unsupported`
+    会把包级 status 压成 needs-adaptation，`manual_review`/`needs-adaptation` 则如实列出。
+    """
+    requirements: list[dict[str, Any]] = []
+    for error in report.get("errors", []):
+        requirements.append(
+            {
+                "kind": "mcp-description-error",
+                "name": error.get("code", "unknown"),
+                "support": "unsupported",
+                "reason": f"{error.get('path', '')}: {error.get('message', '')}".strip(": "),
+            }
+        )
+    for server in report.get("servers", []):
+        for error in server.get("errors", []):
+            requirements.append(
+                {
+                    "kind": "mcp-server-error",
+                    "name": f"{server.get('name')}:{error.get('code', 'unknown')}",
+                    "support": "unsupported",
+                    "reason": f"{error.get('path', '')}: {error.get('message', '')}".strip(": "),
+                }
+            )
+        for item in server.get("requirements", []):
+            if item.get("support") == "supported":
+                continue  # 没有缺口的条目不进 Skill 报告的 requirements（那边用它判 status）
+            requirements.append(
+                {
+                    "kind": f"mcp-{item.get('kind', 'requirement')}",
+                    "name": f"{server.get('name')}:{item.get('name', '')}",
+                    "support": item.get("support", "manual_review"),
+                    "reason": item.get("reason", ""),
+                }
+            )
+    return requirements

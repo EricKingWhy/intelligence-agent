@@ -1689,12 +1689,19 @@ def _inspect_package(local_dir: str, scope: str, manager: Any) -> dict[str, Any]
 
     两种包类型各自的预检互不知情（`skills.inspection` 与 `plugins.mcp_precheck`），
     这里只做**汇总**：
-    - Skill 占了报告顶层（#870–#874 的既有形状与字段，不动）；
+
+    - Skill 占了报告顶层（#870–#874 的既有形状与字段，**含包级 `status`**，不动）；
     - MCP 段落始终存在（哪怕包里没有 server —— 那句"需要一份显式描述"本身就是结论）；
-    - 顶层 status 取两者里更保守的一档：`unsupported` > `needs-adaptation` > `complete`。
-      一个包不会因为"MCP 面没有描述"就被判不兼容（Skill 仍然能装），报告里如实写两段。
+    - MCP 面判不兼容时，把它的缺口**折进顶层 `requirements`**（`mcp_compatibility_requirements`），
+      而不是改写 `status`。这一条是必要的：安装/启用闸门
+      （`SkillPackageManager` 以 `status == "complete"` 放行）读的就是报告的
+      requirements/status，MCP 缺口进不去就等于一份 OAuth-only 的 server 描述能以
+      "完整兼容"被装进来并启用（ADR-0052 D4）。
+
+    顶层 `status` 仍由 Skill 段单独判定：改它会把**只有 SKILL.md、没有 MCP 描述**的
+    干净包从 `complete` 静默降到 `needs-adaptation`，那是另一条 lane 的语义，本票不动。
     """
-    from agent_harness.plugins.mcp_precheck import inspect_mcp_servers
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
     from agent_harness.skills.inspection import inspect_skill_package
 
     report = inspect_skill_package(
@@ -1702,19 +1709,7 @@ def _inspect_package(local_dir: str, scope: str, manager: Any) -> dict[str, Any]
         scope=scope,
         existing_skills=manager.scope_skills_dir,
     )
-    skill_root = Path(str(report["source"]))
-    mcp_report = inspect_mcp_servers(skill_root)
-    report["mcp"] = mcp_report
-    report["status"] = _combined_package_status(report["status"], mcp_report["status"])
-    return report
-
-
-#: 包级状态按保守序合成：任一预检判不支持，整个包就是不支持。
-def _combined_package_status(*statuses: str) -> str:
-    for status in ("unsupported", "needs-adaptation", "complete"):
-        if status in statuses:
-            return status
-    return "needs-adaptation"
+    return attach_mcp_section(report)
 
 
 def _main_plugins(argv: list[str]) -> None:
