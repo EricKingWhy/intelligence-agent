@@ -121,6 +121,15 @@ def not_found_hint(content: str, old_string: str) -> str:
 
     两侧行尾种类相同时（各段落位置不同）也给谨慎提示，不吞掉（#851 二轮修回 P3）。
 
+    子集分支（`set(old_kinds) <= set(file_kinds)`）同样**不得**断言「逐位置照抄
+    本就不可能命中」（#851 六轮修回 P4）：2026-10-10 场景 `content="a\\r\\nb\\n"`
+    + `old="a\\n"` 即是反例 —— old 的种类（LF）是文件（CRLF + LF）的子集，把那一处
+    改成对应段落的 CRLF（`"a\\r\\n"`）后 `count()==1`。该断言为假，会让模型跳过
+    一条走得通的路（与 P1 那条同缺陷类）。改成条件式会成死代码：上游
+    `canonical_old not in canonical_content → return None` 已保证本分支只在折平
+    能命中时触发，故只写**事实 + 可执行动作**（逐处核对行尾后改正重试），不写
+    证不出的断言。
+
     文件行尾单一、两侧种类不等时（四轮修回 P4-5 补记；五轮修回 P4-3 更正依据句）：
     落到末尾那条提示，直接给「按该文件的行尾改写 old_string」。本支 file_kinds 只有
     一种：归一化路径在 CRLF / LF 上启用，整段由裸 CR 分隔时**关闭**
@@ -144,8 +153,8 @@ def not_found_hint(content: str, old_string: str) -> str:
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}。"
             f"可尝试逐位置照抄对应段落的行尾改写 old_string 后重试；"
-            f"若 old_string 中某处行尾与对应段落不一致，按这种改写逐位置照抄本就不"
-            f"可能命中，需先纠正该处；"
+            f"重试前逐处核对 old_string 各行的行尾与对应段落是否一致，"
+            f"把对不上的改写为该段落的行尾；"
             f"若仍不命中，改用 write 整文件重写{_WRITE_SUFFIX}"
         )
     if len(file_kinds) > 1:

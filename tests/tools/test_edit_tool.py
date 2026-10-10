@@ -419,14 +419,18 @@ class TestEditNotFoundHint:
     async def test_mixed_file_old_kind_subset_position_mismatch_warns_rewrite_may_miss(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """#851 四轮修回 P3-1：混行尾文件里 old 的行尾与对应段落不一致 ⇒ 改写后仍不命中。
+        """#851 四轮修回 P3-1 + 六轮修回 P4：混行尾里 old 与对应段落不一致 ⇒ 提示给逐处核对的做法。
 
         文件 `a = 1\\nb = 2\\nc = 3\\r\\n` 的行尾是 LF+CRLF 混用，CRLF 只在**末尾**
         那一处；old `a = 1\\r\\nb = 2\\r\\n` 把两处都写成 CRLF，与对应的前两段（LF）
         都不一致 ⇒ `count()==0`。真实成因是**逐位置行尾错配**，不是「末端独有」
         （用例名与 docstring 一致，五轮修回 P4-1 改名）：折平后命中即位置对齐，
         逐位置照抄对应段落行尾改写（`a = 1\\nb = 2\\n`）就 `count()==1`
-        （下一条机械断言钉死）。提示须给出这条可执行的改写指引。
+        （下面的机械断言钉死）。提示须给出这条可执行的改写指引。
+
+        #851 六轮修回 P4：本条**不**再断言「不可能命中，需先纠正该处」——
+        那个断言在子集分支上是假的（反例见下一条 `..._subset_kind_rewrite_can_hit...`），
+        文案改为条件式「逐处核对行尾后改正重试」。本条的机械断言相应改锚新措辞。
         """
         content = "a = 1\nb = 2\nc = 3\r\n"
         old = "a = 1\r\nb = 2\r\n"
@@ -445,8 +449,44 @@ class TestEditNotFoundHint:
         msg = result.result.message
         assert "对应段落的行尾" in msg
         assert "逐位置照抄" in msg
-        assert "不可能命中，需先纠正该处" in msg
+        assert "逐处核对" in msg
+        assert "把对不上的改写为该段落的行尾" in msg
+        assert "不可能命中" not in msg
         assert "末端" not in msg
+        assert "改用 write 整文件重写" in msg
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
+    async def test_mixed_file_subset_kind_rewrite_can_hit_no_impossible_claim(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 六轮修回 P4：子集分支不得再断言「逐位置照抄本就不可能命中」（有反例）。
+
+        反例（2026-10-10 补丁级复核给出）：`content="a\\r\\nb\\n"`、`old="a\\n"`。
+        old 的行尾种类（LF）是文件种类（CRLF + LF）的**子集**，错配只是少了几处
+        行尾；把那一处改成对应段落的 CRLF（`"a\\r\\n"`）后 `count()==1`（下两条
+        机械断言钉死）。旧文案在子集分支上无条件打「按这种改写逐位置照抄本就不可能
+        命中」，在本场景为假，且「需先纠正该处」无处可纠正 ⇒ 模型被劝离一条走得通的路。
+
+        本用例钉住新措辞：给可执行动作、不含该绝对断言，也不出现「不可能」式措辞。
+        """
+        content = "a\r\nb\n"
+        old = "a\n"
+        sandbox.write_text("f.py", content)
+        assert content.count(old) == 0
+        assert content.count("a\r\n") == 1
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": old, "new_string": "a\nX"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert "对应段落的行尾" in msg
+        assert "逐处核对" in msg
+        assert "不可能" not in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == content
 
