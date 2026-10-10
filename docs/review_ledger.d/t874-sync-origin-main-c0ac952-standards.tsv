@@ -1,0 +1,1 @@
+2026-10-11	#874 同步 origin/main c0ac952 / merge 39ae7403：Standards PASS。复用 Radix onCloseAutoFocus 原生 API 与文件内 _object_is_read_only；单一局部 ref 分支，无新依赖或抽象。新增确定性焦点延迟 E2E；Windows 断言使用平台原生只读属性，POSIX 断言保持精确。风格与简化原则一致；无硬违例或可操作异味。核对源提交两轴记录与 PR #954 检查读数。	53eaee080c2d812f06a3cb2af13877fe98229d93..39ae7403debefb949d5308df9b03d0ea4ebd1a8e
