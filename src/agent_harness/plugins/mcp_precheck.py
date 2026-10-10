@@ -1,0 +1,925 @@
+"""MCP server 描述预检（T6 / #875）：静态解析 → 映射到现有 `MCPServerConfig`。
+
+预检的本质是**静态分析描述文件**：只读包内声明，不启动子进程、不连远端、不读
+部署环境、不回显凭据值。描述只有落在本仓 `MCPServerConfig` 能表达的字段上才算被
+接受（spec 09 §1.1）；包里没有明确描述时报告"需要适配描述"，不去猜 package.json、
+README 或脚本里的命令（ADR-0052 D2、AC1）。
+
+来源（一手）：
+- MCP 2025-11-25 Transports：标准 transport 只有 stdio 与 Streamable HTTP。stdio 由
+  客户端起子进程、凭据走进程环境；Streamable HTTP 是**单一 endpoint URL**；HTTP+SSE
+  是 2024-11-05 的弃用形态。⇒ 独立 `sse` 形状在本仓 `MCPServerConfig`（只有 stdio/http）
+  里没有对应字段，必须明确失败而不是静默降级成 http。
+- MCP 2025-11-25 Authorization：OAuth 对实现**可选**；HTTP transport SHOULD 遵从，
+  stdio SHOULD NOT 而改为从环境取凭据；客户端在 401/403 上才发起授权。⇒ 需要登录的
+  server 在本仓无法以匿名方式使用，只能显式标 `oauth_required_unsupported`（AC4）。
+- Claude Code MCP 文档（code.claude.com/docs/en/mcp）：`.mcp.json` 的
+  `{"mcpServers": {name: {...}}}` 形状、stdio 的 `type`/`command`/`args`/`env`、
+  http 的 `type`/`url`/`headers`、`streamable-http` 是 `http` 的别名、`sse` 已弃用
+  （"The SSE transport is deprecated"）、`oauth` 对象即"需要登录"（用 `/mcp` 授权）、
+  无 `type` 的 url 条目会被它自己当 stdio（"a url entry without a type fails"）、
+  `timeout` 单位是毫秒、`headersHelper` 是每次连接现跑一个脚本取头。
+- 本机 venv 里的 MCP Python SDK 2.1.1：`mcp/client/stdio.py:93` 的
+  `StdioServerParameters`（command/args/env/cwd）与 `mcp/cli/claude.py:107` 读
+  `mcpServers` 键——SDK 侧**不做静态 schema 校验**（未知键要到启动时才炸）⇒ 本仓
+  沿用 ADR-0012 的 strict pydantic 校验，未知字段响亮失败（AC3）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, get_args
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import ValidationError
+
+from agent_harness.mcp.config import MCPServerConfig
+from agent_harness.skills.inspection import _add_error, read_package_text
+from agent_harness.tooling.contract import ToolPermission
+
+#: 显式 server 描述文件（相对包根，顺序即优先序）。
+MCP_DESCRIPTION_FILES = ("mcp.json", ".mcp.json")
+
+#: 两种形状的包装键：Claude Code 是 `mcpServers` 对象，本仓是 `servers` 列表。
+_CLAUDE_WRAPPER = "mcpServers"
+_NATIVE_WRAPPER = "servers"
+
+#: Claude Code 的 `type` → 本仓 transport。`streamable-http` 是它文档里的 `http` 别名；
+#: `sse`/`ws`/`sdk` 本仓无表达（None ⇒ 明确失败，见 `_claude_transport`）。
+_CLAUDE_TRANSPORTS: dict[str, str | None] = {
+    "stdio": "stdio",
+    "http": "http",
+    "streamable-http": "http",
+    "sse": None,
+    "ws": None,
+    "sdk": None,
+}
+
+#: 两种形状下本仓 `MCPServerConfig` 会读的键。其余键要么是别家的形状、要么是写错的
+#: 字段名——两种都不能静默丢弃（ADR-0012）。`resources`/`prompts` 是**声明面**：
+#: 本仓无对应字段，但由 `_capability_gaps` 逐项给出缺口，不在这里重复报。
+#: 本仓形状的合法键**就是模型自己的字段**——预检比模型严，就等于拒绝一份
+#: `MCPServerConfig` 明明能表达的描述（AC1 的边界是"能否表达"，不是"我们喜不喜欢"）。
+#: `resources`/`prompts` 额外放行：它们是"本仓首版不支持"的**能力收窄**（由
+#: `_check_capability_gaps` 逐项出缺口），不是"字段无法表达"，不能同时被两条规则定罪。
+_NATIVE_FIELDS = frozenset(MCPServerConfig.model_fields) | {"resources", "prompts"}
+
+#: 本仓支持的 transport 直接取自模型的 `Literal`（写死一份就等于多一个会漂的真相）。
+_NATIVE_TRANSPORTS = frozenset(get_args(MCPServerConfig.model_fields["transport"].annotation))
+
+#: Claude Code 形状的合法键按 transport 分别列（其文档里 stdio 用 command/args/env，
+#: http 用 url/headers）。`env` 两边都放行：本仓 `MCPServerConfig` 两种 transport 都有
+#: 该字段，预检比模型严就等于拒绝一份模型能表达的描述；报告里 env 只出变量名与形状。
+#: `oauth`/`resources`/`prompts` 不在这里出结论——它们各自由显式缺口检查处理。
+_CLAUDE_FIELDS = {
+    "stdio": frozenset(
+        {"type", "command", "args", "env", "cwd", "timeout", "enabled", "tool_permissions", "resources", "prompts"}
+    ),
+    "http": frozenset(
+        {"type", "url", "headers", "env", "timeout", "enabled", "tool_permissions", "oauth", "resources", "prompts"}
+    ),
+}
+
+#: HTTP header 名的合法形态（RFC 7230 token）。
+_HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+\Z")
+
+#: 未展开的 `${...}`（含 `${VAR}` / `${VAR:-default}`）。
+_SECRET_REF = re.compile(r"\$\{[^}]*\}")
+
+#: `${VAR}` / `${VAR:-default}` 的引用名与默认值（与本仓 config.py 的 `_SECRET_REF` 同形）。
+_SECRET_NAME = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+#: 相对形态（`./`、`../`、`.\`、`..\`）：出现即按"包内路径"判，而不是当作裸命令名。
+_RELATIVE_PATH = re.compile(r"\.{1,2}[/\\]")
+
+#: 裸命令名的形状（真正"在不在 PATH"是部署事实，静态判不了、也不猜）。
+_COMMAND_SHAPE = re.compile(r"[A-Za-z0-9_.+-]+\Z")
+
+#: 描述嵌套超深时的固定文案（`MCP_DESCRIPTION_TOO_DEEP`；与 TOO_LARGE 同档：读得出、判不了）。
+_TOO_DEEP_MESSAGE = "描述嵌套过深，无法静态解析。"
+
+#: 本仓首版**不实现的已知 MCP transport**：`sse`/`ws`/`sdk` 在 MCP 与 Claude Code
+#: 里都真实存在，只是 `MCPServerConfig` 没有对应表达。ADR-0052 D2 把"自定义 transport"
+#: 与 OAuth/resources/prompts 并列为首版不支持项 ⇒ 它们是**能力收窄**（可适配的缺口），
+#: 与"transport 字段写坏"（拼错的名字、缺字段、有 url 没 type）分属两档。直接取
+#: `_CLAUDE_TRANSPORTS` 里映射为 `None` 的那些名字（写死一份就是第二份会漂的真相）。
+_UNIMPLEMENTED_TRANSPORTS = frozenset(
+    name for name, mapped in _CLAUDE_TRANSPORTS.items() if mapped is None
+)
+
+
+def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
+    """预检一个包里的 MCP server 描述；返回报告，绝不启动 server / 展开凭据。
+
+    `source` 是包根：`plugins inspect` 传的是 Skill 预检解析出来的同一个根，
+    所以两种包类型看到的是同一棵树、同一套边界读写。任何情况下都不执行包内代码。
+    """
+    source_path = Path(source).expanduser()
+    report: dict[str, Any] = {
+        "status": "needs-adaptation",
+        "source": str(source_path),
+        "description_file": None,
+        "servers": [],
+        "requirements": [],
+        "errors": [],
+    }
+    errors: list[dict[str, str]] = report["errors"]
+    try:
+        package_root = source_path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        _add_error(errors, "MCP_PACKAGE_NOT_FOUND", ".", "包目录不存在或无法解析。")
+        report["status"] = "unsupported"
+        return report
+    report["source"] = str(package_root)
+
+    found = _find_description(package_root, errors)
+    if found is None and errors:
+        # 描述文件**在**，但读不出来（越界 symlink / 不是常规文件 / 读取中变化 / 过大）。
+        # 这不是"包里没有描述"，不能掉进下面那条正常结论里——否则一份越界的 mcp.json
+        # 会得到"请补一份描述"的建议，而真正的失败原因被埋进 errors 无人复检。
+        report["status"] = "unsupported"
+        return report
+    if found is None:
+        # 没有描述 ≠ 坏包：这是"需要一份薄适配描述"的正常结论（AC1），不是错误。
+        report["requirements"].append(
+            {
+                "kind": "mcp-description",
+                "name": " / ".join(MCP_DESCRIPTION_FILES),
+                "support": "needs-adaptation",
+                "reason": (
+                    "包里没有显式 MCP server 描述。请补一份声明 server 的描述文件；"
+                    "预检不从 package.json、README 或任意脚本猜启动命令（ADR-0052 D2）。"
+                ),
+            }
+        )
+        return report
+
+    relative, text = found
+    report["description_file"] = relative
+    raw = _parse_description(text, relative, errors)
+    if raw is None:
+        report["status"] = "unsupported"
+        return report
+
+    claude_shape = _is_claude_shape(raw)
+    entries = _server_entries(raw, relative, errors)
+    if entries is None:
+        report["status"] = "unsupported"
+        return report
+
+    seen: set[str] = set()
+    for name, body in entries:
+        name_error = _server_name_error(name)
+        if name_error is not None:
+            _add_error(errors, "MCP_SERVER_NAME_INVALID", relative, f"server 名 {name!r} 非法：{name_error}")
+            continue
+        if name in seen:
+            _add_error(
+                errors,
+                "MCP_SERVER_NAME_DUPLICATE",
+                relative,
+                f"server 名重复: {name!r}（同名先到先得会静默吞掉后者）",
+            )
+            continue
+        seen.add(name)
+        report["servers"].append(
+            _inspect_entry(package_root, relative, name, body, claude_shape=claude_shape)
+        )
+
+    if errors:
+        report["status"] = "unsupported"
+    elif not report["servers"]:
+        # 描述文件在，但一个 server 都没有：不是一个可用的描述（AC1 的否定面）。
+        _add_error(errors, "MCP_DESCRIPTION_EMPTY", relative, "描述里没有任何 server 条目。")
+        report["status"] = "unsupported"
+    elif any(server["errors"] for server in report["servers"]):
+        # 有 server **报错**（缺 command/URL、越界路径、非法权限、坏引用……）⇒ 这份描述
+        # 不能用（AC3"明确失败"）；只有"缺口"（OAuth/resources/env 引用等待适配项）才是
+        # needs-adaptation —— 两者要用户做的事不同，状态不能混。
+        report["status"] = "unsupported"
+    elif any(server["status"] != "supported" for server in report["servers"]):
+        report["status"] = "needs-adaptation"
+    else:
+        report["status"] = "complete"
+    return report
+
+
+def _find_description(root: Path, errors: list[dict[str, str]]) -> tuple[str, str] | None:
+    """按固定顺序找第一个显式描述文件；读取走包内边界读写（越界/过大/变化都记错误）。"""
+    for relative in MCP_DESCRIPTION_FILES:
+        candidate = root / relative
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        text = read_package_text(
+            root,
+            relative,
+            errors,
+            too_large_code="MCP_DESCRIPTION_TOO_LARGE",
+            unreadable_code="MCP_DESCRIPTION_UNREADABLE",
+            changed_code="MCP_DESCRIPTION_CHANGED",
+            not_file_code="MCP_DESCRIPTION_NOT_A_FILE",
+            outside_code="MCP_DESCRIPTION_OUTSIDE_PACKAGE",
+        )
+        if text is not None:
+            return relative, text
+    return None
+
+
+def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -> dict[str, Any] | None:
+    """解析描述；**只解析一遍**，重复键的侦测搭在这次解析的 hook 上。
+
+    两件事必须同一次解析完成：`object_pairs_hook` 每个容器比裸 `json.loads` 多压一层
+    Python 帧，所以"先裸解析一遍、再带 hook 解析一遍"会开出两个不同的递归上限
+    （实测对象形状 9998 vs 9996）——中间那条缝里的描述能过第一遍、却把第二遍掀翻，
+    于是"绝不崩"要靠在**两处**兜 RecursionError 才能维持。单遍解析把那条缝直接消掉：
+    深度边界的权威只剩解析器自己，守卫也只剩一处。
+    """
+    duplicates: list[str] = []
+
+    def _hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        seen: set[str] = set()
+        for key, _ in pairs:
+            if key in seen:
+                duplicates.append(key)
+            seen.add(key)
+        return dict(pairs)
+
+    try:
+        # `dict(pairs)` 与裸 `json.loads` 同语义（重复键取后者），所以单遍不改变解析结果。
+        parsed = json.loads(text, object_pairs_hook=_hook)
+    except RecursionError:
+        # 预检契约是"绝不崩"：嵌套超过解析器递归上限的描述只能落成**明确失败**，
+        # 不能把 RecursionError 掀给 CLI / 安装闸门（`skills/inspection.py` 对 frontmatter
+        # 同款兜底）。这个上限取决于进程递归限制与栈余量、不是常量——所以这里不设
+        # 自己的深度数字，只信解析器抛出来的那一下（无独立产品配额，与 web 层不同：
+        # 那边的 `BODY_MAX_DEPTH` 是用户可见契约，必须比解析器更早、且与它无关）。
+        _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
+        return None
+    except (json.JSONDecodeError, ValueError) as error:
+        _add_error(errors, "MCP_DESCRIPTION_INVALID", relative, f"JSON 无法解析: {error}")
+        return None
+    if not isinstance(parsed, dict):
+        _add_error(
+            errors,
+            "MCP_DESCRIPTION_INVALID",
+            relative,
+            f"描述必须是 JSON 对象，得到 {type(parsed).__name__}",
+        )
+        return None
+    _report_duplicate_keys(duplicates, parsed, relative, errors)
+    return parsed
+
+
+def _report_duplicate_keys(
+    duplicates: list[str], parsed: dict[str, Any], relative: str, errors: list[dict[str, str]]
+) -> None:
+    """JSON 里重复的键 → 明确失败。
+
+    `json.loads` 对重复键**静默取后者**：`{"mcpServers": {"a": {...}, "a": {...}}}`
+    会不声不响地少一个 server（AC3 的"重复名"在 Claude 形状里唯一的出现方式）。
+    名字由 `_parse_description` 的 hook 收好传进来，再按它是不是 server 名给出对应的错误码。
+    """
+    if not duplicates:
+        return
+    wrapper = parsed.get(_CLAUDE_WRAPPER)
+    server_names = set(wrapper) if isinstance(wrapper, dict) else set()
+    for key in sorted(set(duplicates)):
+        if key in server_names:
+            _add_error(
+                errors,
+                "MCP_SERVER_NAME_DUPLICATE",
+                relative,
+                f"server 名重复: {key!r}（JSON 重复键会被静默取后者，等于少一个 server）",
+            )
+        else:
+            _add_error(
+                errors,
+                "MCP_DESCRIPTION_DUPLICATE_KEY",
+                relative,
+                f"描述里键 {key!r} 重复（JSON 重复键语义不明确，一律拒绝）",
+            )
+
+
+def _is_claude_shape(raw: dict[str, Any]) -> bool:
+    return isinstance(raw.get(_CLAUDE_WRAPPER), dict)
+
+
+def _server_name_error(name: str) -> str | None:
+    """server 名是否被运行期 `MCPServerConfig` 接受——**问模型，不抄规则**。
+
+    `name` 会成为工具命名空间段 `mcp__{server}__{tool}`，模型侧有它自己的白名单
+    （`mcp/config.py` 的 `_validate_name`）。AC1 的判据是"只接受 `MCPServerConfig`
+    可表示的描述"，所以这里就拿真模型验一遍：抄一份正则出来就等于多一个会漂的真相。
+    """
+    try:
+        MCPServerConfig.model_validate({"name": name, "transport": "stdio", "command": "__probe__"})
+    except ValidationError as error:
+        for detail in error.errors():
+            if detail.get("loc") == ("name",):
+                return str(detail.get("msg"))
+    return None
+
+
+def _server_entries(
+    raw: dict[str, Any], relative: str, errors: list[dict[str, str]]
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """归一成 `[(name, entry)]`；两种形状以外一律明确失败，不做形状猜测。"""
+    claude = raw.get(_CLAUDE_WRAPPER)
+    native = raw.get(_NATIVE_WRAPPER)
+    if claude is not None and native is not None:
+        _add_error(
+            errors,
+            "MCP_DESCRIPTION_INVALID",
+            relative,
+            f"同时出现 {_CLAUDE_WRAPPER!r} 与 {_NATIVE_WRAPPER!r}；一次只接受一种形状",
+        )
+        return None
+    if isinstance(claude, dict):
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for name, body in claude.items():
+            if not isinstance(body, dict):
+                _add_error(
+                    errors,
+                    "MCP_SERVER_INVALID",
+                    relative,
+                    f"server {name!r} 必须是对象，得到 {type(body).__name__}",
+                )
+                continue
+            entries.append((str(name), body))
+        return entries
+    if isinstance(native, list):
+        entries = []
+        for index, body in enumerate(native):
+            if not isinstance(body, dict):
+                _add_error(
+                    errors,
+                    "MCP_SERVER_INVALID",
+                    relative,
+                    f"{_NATIVE_WRAPPER}[{index}] 必须是对象，得到 {type(body).__name__}",
+                )
+                continue
+            name = body.get("name")
+            if not isinstance(name, str) or not name:
+                _add_error(
+                    errors,
+                    "MCP_SERVER_INVALID",
+                    relative,
+                    f"{_NATIVE_WRAPPER}[{index}] 缺少字符串 name（本仓以 name 字段为键）",
+                )
+                continue
+            entries.append((name, body))
+        return entries
+    _add_error(
+        errors,
+        "MCP_DESCRIPTION_INVALID",
+        relative,
+        f"描述必须含 {_CLAUDE_WRAPPER} 对象（Claude Code 形状）或 {_NATIVE_WRAPPER} 列表（本仓形状）",
+    )
+    return None
+
+
+def _inspect_entry(
+    package_root: Path, relative: str, name: str, entry: dict[str, Any], *, claude_shape: bool
+) -> dict[str, Any]:
+    """单个 server 条目的静态预检；每条判定都落成报告字段。"""
+    report: dict[str, Any] = {
+        "name": name,
+        "status": "supported",
+        "transport": None,
+        "command": None,
+        "args": [],
+        "url": None,
+        "cwd": None,
+        "environment": [],
+        "headers": [],
+        "timeout_seconds": None,
+        "enabled": True,
+        "tool_permissions": [],
+        "dependencies": [],
+        "requirements": [],
+        "errors": [],
+    }
+    failures: list[dict[str, str]] = report["errors"]
+    requirements: list[dict[str, str]] = report["requirements"]
+
+    def fail(code: str, path: str, message: str) -> None:
+        _add_error(failures, code, f"{name}.{path}" if path else name, message)
+
+    def narrow(code: str, path: str, message: str) -> None:
+        """记一条**能力收窄**级发现：MCP 面内照旧明确失败（AC3），但不拦整包安装。
+
+        与 `fail` 的唯一差别是那条 `adaptive` 标记——`attach_mcp_section` 据此把"本仓
+        首版不支持"与"包作者写坏了描述"分档：前者让包停在 needs-adaptation（可装、
+        不可启用），后者 fail-closed 拦安装。
+        """
+        _add_error(failures, code, f"{name}.{path}" if path else name, message)
+        failures[-1]["adaptive"] = True
+
+    def gap(kind: str, support: str, name_of_item: str, reason: str) -> None:
+        requirements.append({"kind": kind, "name": name_of_item, "support": support, "reason": reason})
+
+    transport = (
+        _claude_transport(entry, name, fail, narrow)
+        if claude_shape
+        else _native_transport(entry, name, fail, narrow)
+    )
+    if transport is None:
+        report["status"] = "unsupported"
+        return report
+    report["transport"] = transport
+
+    if transport == "stdio":
+        _check_stdio(package_root, entry, name, fail, gap, report, relative)
+    else:
+        _check_http(entry, name, fail, gap, report)
+        if claude_shape:
+            _check_oauth(entry, name, gap)
+        _check_headers(entry, name, fail, gap, report)
+
+    _check_capability_gaps(entry, name, gap)
+    _check_unknown_fields(entry, name, claude_shape, fail, report)
+    _check_tool_permissions(entry, name, fail, report)
+    _check_environment(entry, name, fail, gap, report)
+    _check_timeout(entry, name, fail, report)
+    report["enabled"] = entry.get("enabled", True) is not False
+
+    if failures:
+        report["status"] = "unsupported"
+    elif any(item["support"] != "supported" for item in requirements):
+        report["status"] = "needs-adaptation"
+    return report
+
+
+def _claude_transport(entry: dict[str, Any], server: str, fail, narrow) -> str | None:
+    """Claude Code 形状：`type` 决定 transport；无 type 而带 url 是它自己会失败的写法。"""
+    declared = entry.get("type")
+    if declared is None:
+        if "url" in entry:
+            fail(
+                "MCP_TRANSPORT_UNSUPPORTED",
+                "type",
+                f"server {server!r} 有 url 但没有 type；无 type 的条目被当作 stdio，会失败"
+                "（请显式写 type: \"http\"）",
+            )
+            return None
+        declared = "stdio"
+    if not isinstance(declared, str):
+        fail("MCP_SERVER_INVALID", "type", f"server {server!r} 的 type 必须是字符串")
+        return None
+    if declared not in _CLAUDE_TRANSPORTS:
+        fail(
+            "MCP_TRANSPORT_UNSUPPORTED",
+            "type",
+            f"server {server!r} 的 type {declared!r} 不是本仓支持的 transport"
+            f"（支持: stdio / http / streamable-http）",
+        )
+        return None
+    mapped = _CLAUDE_TRANSPORTS[declared]
+    if mapped is None:
+        # 已知 transport、本仓首版不实现 ⇒ 能力收窄（可适配的缺口），不是描述写坏。
+        narrow(
+            "MCP_TRANSPORT_UNSUPPORTED",
+            "type",
+            f"server {server!r} 的 transport {declared!r} 不被支持：本仓只有 stdio 与"
+            " Streamable HTTP（http）；MCP 2025-11-25 已用 Streamable HTTP 取代 HTTP+SSE",
+        )
+    return mapped
+
+
+def _native_transport(entry: dict[str, Any], server: str, fail, narrow) -> str | None:
+    """本仓形状：直接吃 `MCPServerConfig.transport`（即 `parse_mcp_servers` 的输入）。"""
+    declared = entry.get("transport")
+    if not isinstance(declared, str):
+        fail("MCP_TRANSPORT_UNSUPPORTED", "transport", f"server {server!r} 缺少字符串 transport")
+        return None
+    if declared not in _NATIVE_TRANSPORTS:
+        (narrow if declared in _UNIMPLEMENTED_TRANSPORTS else fail)(
+            "MCP_TRANSPORT_UNSUPPORTED",
+            "transport",
+            f"server {server!r} 的 transport {declared!r} 不被支持（只有 stdio / http）",
+        )
+        return None
+    return declared
+
+
+def _check_stdio(package_root, entry, server, fail, gap, report, relative) -> None:
+    command = entry.get("command")
+    if not isinstance(command, str) or not command.strip():
+        fail("MCP_COMMAND_MISSING", "command", f"stdio server {server!r} 缺少非空 command")
+        return
+    args = entry.get("args", [])
+    if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+        fail("MCP_SERVER_INVALID", "args", f"server {server!r} 的 args 必须是字符串列表")
+        return
+    cwd = entry.get("cwd")
+    if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
+        fail("MCP_SERVER_INVALID", "cwd", f"server {server!r} 的 cwd 必须是非空字符串")
+        return
+    if isinstance(cwd, str):
+        _resolve_package_path(package_root, cwd.strip(), "cwd", server, fail, report)
+    report["args"] = [_arg_display(item) for item in args]
+    if _has_invalid_reference(command):
+        fail("MCP_SECRET_REFERENCE_INVALID", "command", f"server {server!r} 的 command 含非法引用写法")
+        return
+    executable = _resolve_package_path(package_root, command.strip(), "command", server, fail, report)
+    if executable is None:
+        return
+    if report["command"] is None:
+        report["command"] = command.strip()
+    report["dependencies"].append(
+        {
+            "kind": "command",
+            "name": executable,
+            "source": relative,
+            "support": "manual_review",
+            "reason": "外部命令是否可用由部署环境决定；本预检不执行、也不查 PATH。",
+        }
+    )
+    if _has_invalid_reference(command) or any(_has_invalid_reference(item) for item in args):
+        # 只报**形状**，不回显原文：`--token=hunter2${}` 这串里既有明文又有坏引用，
+        # 把原文写进报告等于把凭据抄进了安装记录 / 诊断（spec 09 §1.1）。
+        fail(
+            "MCP_SECRET_REFERENCE_INVALID",
+            "command",
+            f"server {server!r} 的 command/args 含非法引用写法（空引用/非法变量名/嵌套）",
+        )
+        return
+    for value in (command, *args):
+        for var in sorted(_unexpanded_refs(value)):
+            gap(
+                "env-var",
+                "manual_review",
+                var,
+                f"参数里的 {var} 由部署环境在运行时提供；本预检不注入、不读取进程环境。",
+            )
+
+
+def _check_http(entry, server, fail, gap, report) -> None:
+    url = entry.get("url")
+    if not isinstance(url, str) or not url.strip():
+        fail("MCP_URL_MISSING", "url", f"http server {server!r} 缺少非空 url")
+        return
+    url = url.strip()
+    report["url"] = _url_display(url)
+    if _has_invalid_reference(url):
+        fail("MCP_SECRET_REFERENCE_INVALID", "url", f"server {server!r} 的 url 含非法引用写法")
+        return
+    for var in sorted(_unexpanded_refs(url)):
+        gap(
+            "env-var",
+            "manual_review",
+            var,
+            "URL 里的部署环境变量引用在运行时展开；本预检只列出引用名，不取值。",
+        )
+
+
+def _check_oauth(entry, server, gap) -> None:
+    """Claude Code 形状的 `oauth` 对象 = 该 server 需要登录（`claude mcp login`）。"""
+    if "oauth" not in entry:
+        return
+    gap(
+        "oauth_required_unsupported",
+        "unsupported",
+        server,
+        "该 server 声明需要 OAuth 凭据；本仓首版不实现 OAuth 登录，不能以完整兼容启用"
+        "（spec 09 §1.1、ADR-0052 D2）。",
+    )
+
+
+def _check_headers(entry, server, fail, gap, report) -> None:
+    headers = entry.get("headers", {})
+    if not isinstance(headers, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items()
+    ):
+        fail("MCP_SERVER_INVALID", "headers", f"server {server!r} 的 headers 必须是字符串到字符串的对象")
+        return
+    for key, value in headers.items():
+        if not _HEADER_NAME.fullmatch(key):
+            fail("MCP_HEADER_NAME_INVALID", "headers", f"server {server!r} 的 header 名 {key!r} 非法")
+            continue
+        # header 值不回显（`Authorization: Bearer <token>` 之类），只留键名与引用形状。
+        report["headers"].append({"name": key, "value": _value_shape(value)})
+        _check_secret_value(server, f"headers.{key}", value, fail, gap)
+
+
+def _check_capability_gaps(entry, server, gap) -> None:
+    """这个包声明要用到的 MCP 原语，逐项对照本仓支持面（AC4）。"""
+    for primitive, detail in (
+        ("resources", "本仓 MCP 只实现 tools 原语；resources 未实现，该 server 的这部分能力不可用。"),
+        ("prompts", "本仓 MCP 只实现 tools 原语；prompts 未实现，该 server 的这部分能力不可用。"),
+    ):
+        if _declares(entry.get(primitive)):
+            gap(primitive, "unsupported", f"{server}:{primitive}", detail)
+
+
+def _declares(declared: Any) -> bool:
+    """该原语是否被**声明了需求**（`None`/`false`/空串/0/空表 = 没声明）。
+
+    写坏的类型（字符串、数字）也算声明：把 `resources: "file:///x"` 静默丢掉，
+    等于用户以为它生效了却什么都没发生——那正是 AC4 要显式列缺口的情形。
+    """
+    if declared is None or declared is False:
+        return False
+    if isinstance(declared, (str, list, dict)):
+        return len(declared) > 0
+    if isinstance(declared, (int, float)):
+        return declared != 0
+    return True
+
+
+def _check_unknown_fields(entry, server, claude_shape, fail, report) -> None:
+    declared = report["transport"] or "stdio"
+    allowed = _CLAUDE_FIELDS[declared] if claude_shape else _NATIVE_FIELDS
+    unknown = sorted(set(entry) - allowed)
+    if unknown:
+        fail(
+            "MCP_FIELD_UNKNOWN",
+            "",
+            f"server {server!r} 含本仓无法表达的字段 {unknown}：未知字段响亮失败，不静默丢弃"
+            "（配置写错是人的错误，必须立刻看见）。本仓可表达: "
+            f"{sorted(allowed)}",
+        )
+
+
+def _check_tool_permissions(entry, server, fail, report) -> None:
+    declared = entry.get("tool_permissions")
+    if declared is None:
+        return
+    if not isinstance(declared, dict):
+        fail("MCP_SERVER_INVALID", "tool_permissions", f"server {server!r} 的 tool_permissions 必须是对象")
+        return
+    for tool_name, value in declared.items():
+        try:
+            permission = ToolPermission(value)
+        except ValueError:
+            fail(
+                "MCP_TOOL_PERMISSION_INVALID",
+                "tool_permissions",
+                f"server {server!r} 工具 {tool_name!r} 的权限 {value!r} 不是合法值"
+                f"（{[item.value for item in ToolPermission]}）",
+            )
+            continue
+        report["tool_permissions"].append({"tool": str(tool_name), "permission": permission.value})
+
+
+def _check_environment(entry, server, fail, gap, report) -> None:
+    """env 的**值**永不回显；只留变量名与"是 ${VAR} 引用还是明文"。"""
+    env = entry.get("env", {})
+    if not isinstance(env, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
+    ):
+        fail("MCP_SERVER_INVALID", "env", f"server {server!r} 的 env 必须是字符串到字符串的对象")
+        return
+    if not env:
+        return
+    for key, value in env.items():
+        report["environment"].append({"name": key, "value": _value_shape(value)})
+        _check_secret_value(server, f"env.{key}", value, fail, gap)
+
+
+def _check_secret_value(server, label, value, fail, gap) -> None:
+    """`${VAR}` 引用按名登记；写法非法（空引用/非法名/嵌套）明确失败。"""
+    if _has_invalid_reference(value):
+        fail(
+            "MCP_SECRET_REFERENCE_INVALID",
+            label,
+            "引用写法非法（空引用/非法变量名/嵌套）；请改用 ${VAR} 或 ${VAR:-default}",
+        )
+        return
+    refs = _unexpanded_refs(value)
+    if not refs:
+        return  # 明文常量：不回显内容，也不因此判不兼容（AC2 只要求不回显）。
+    for var in sorted(refs):
+        gap(
+            "env-var",
+            "manual_review",
+            var,
+            f"{label} 引用了进程环境变量 {var}；本预检不读取部署环境，"
+            "展开与缺失判定发生在运行时（ADR-0012）。",
+        )
+
+
+def _check_timeout(entry, server, fail, report) -> None:
+    value = entry.get("timeout_seconds")
+    if value is None and "timeout" in entry:
+        # Claude Code 的 `timeout` 单位是毫秒（其文档明示），本仓记秒。
+        declared = entry["timeout"]
+        if isinstance(declared, bool) or not isinstance(declared, (int, float)):
+            fail("MCP_SERVER_INVALID", "timeout", f"server {server!r} 的 timeout 必须是数字（毫秒）")
+            return
+        try:
+            value = declared / 1000
+        except OverflowError:
+            # 任意长整数除法会溢出（`10**400 / 1000`）；预检契约是"绝不崩"，
+            # 一个荒唐的 timeout 值只能变成一条明确失败，不能掀翻 CLI。
+            fail("MCP_SERVER_INVALID", "timeout", f"server {server!r} 的 timeout 超出可取范围")
+            return
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        fail("MCP_SERVER_INVALID", "timeout_seconds", f"server {server!r} 的 timeout 必须是正数")
+        return
+    report["timeout_seconds"] = float(value)
+
+
+def _value_shape(value: str) -> dict[str, Any]:
+    """值 → 可安全回显的形状描述（引用名 / 是否有默认值 / 是否明文），不含值本身。"""
+    refs = _unexpanded_refs(value)
+    if not refs:
+        return {"kind": "literal"}
+    return {
+        "kind": "reference",
+        "references": [
+            {"name": var, "has_default": default is not None} for var, default in sorted(refs.items())
+        ],
+    }
+
+
+def _url_display(url: str) -> str:
+    """URL 的回显形状：没有引用就原样；含引用（或坏引用）则折叠 query/fragment。
+
+    `https://host/mcp?token=abc${API_KEY}` 这种参数里躺着明文凭据，原样回显等于把
+    凭据抄进报告与安装记录（AC2）。scheme/host/path 保留——那才是"这是哪个 server"
+    的信息；T7 要真 URL 时读的是包里的描述文件本身。
+    """
+    if "${" not in url:
+        return url
+    parts = urlsplit(url)
+    collapsed = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if parts.query or parts.fragment:
+        collapsed += "?<redacted>"
+    return collapsed
+
+
+def _arg_display(value: str) -> Any:
+    """参数回显成**不可泄漏**的形状：不含引用就原样，含引用则只列引用名。
+
+    参数里"明文 + 引用"混排很常见（`--token=hunter2${API_KEY}`），原样回显等于把
+    凭据抄进报告（AC2）。T7 要真参数时读的是包里的描述文件本身，不是这份预览。
+    """
+    refs = _unexpanded_refs(value)
+    if not refs:
+        return value
+    return {
+        "kind": "reference",
+        "references": [
+            {"name": var, "has_default": default is not None}
+            for var, default in sorted(refs.items())
+        ],
+    }
+
+
+def _has_invalid_reference(value: str) -> bool:
+    """值里是否含**写坏了的** `${...}`：去掉全部合法引用后仍残留 `${`。
+
+    空引用 `${}`、非法变量名 `${1x}`、嵌套 `${a${b}}` 都落在这里。调用方只据此报
+    "写法非法"，**不**把原文写进报告（`${VAR}` 的原文里常常同时躺着明文凭据）。
+    """
+    if "${" not in value:
+        return False
+    if not _unexpanded_refs(value):
+        return True  # 有 `${` 却一个合法引用都解析不出来（`${}` / `${1x}`）⇒ 写法坏了
+    return "${" in _SECRET_REF.sub("", value)
+
+
+def _unexpanded_refs(value: str) -> dict[str, str | None]:
+    """`${VAR}` / `${VAR:-default}` 的引用名 → 默认值（None = 无默认）。"""
+    return {match.group(1): match.group(2) for match in _SECRET_NAME.finditer(value)}
+
+
+def _resolve_package_path(package_root, value: str, field: str, server: str, fail, report) -> str | None:
+    """包内路径字段（command/cwd）的静态边界判定；返回报告要写的可执行名。
+
+    含 `${VAR}` 的值静态判不了（那是部署环境解出来的路径），交给运行时；
+    **只读**：只 `resolve()` 比较，不执行、也不跟随越界 symlink。
+    """
+    if not _SECRET_REF.search(value):
+        looks_like_path = bool(_RELATIVE_PATH.match(value)) or "/" in value or "\\" in value
+        if looks_like_path:
+            candidate = Path(value)
+            resolved = candidate.resolve() if candidate.is_absolute() else (package_root / candidate).resolve()
+            if not resolved.is_relative_to(package_root):
+                fail(
+                    "MCP_PATH_OUTSIDE_PACKAGE",
+                    field,
+                    f"{field} 指向包外路径（{value!r}）；包只允许引用自身内容",
+                )
+                return None
+            if not resolved.exists():
+                fail("MCP_PATH_MISSING", field, f"{field} 指向的包内路径不存在: {value!r}")
+                return None
+            if field == "cwd":
+                if not resolved.is_dir():
+                    fail("MCP_PATH_NOT_DIRECTORY", field, f"{field} 指向的不是目录: {value!r}")
+                    return None
+                report["cwd"] = _package_label(resolved, package_root)
+                return resolved.name
+            # 可执行位只在 POSIX 上判：Windows 没有这个位，os.access(X_OK) 恒真。
+            if os.name == "posix" and not os.access(resolved, os.X_OK):
+                fail("MCP_PATH_NOT_EXECUTABLE", field, f"{field} 指向的文件不可执行: {value!r}")
+                return None
+            report["command"] = _package_label(resolved, package_root)
+            return resolved.name
+        if not _COMMAND_SHAPE.fullmatch(value):
+            fail("MCP_COMMAND_UNUSABLE", field, f"{field} 的值不像可执行命令: {value!r}")
+            return None
+    return Path(value).name
+
+
+def _package_label(resolved: Path, package_root: Path) -> str:
+    """报告里只出现包内相对标签，不泄漏预检机的绝对路径。"""
+    return f"${{PACKAGE}}/{resolved.relative_to(package_root).as_posix()}"
+
+
+def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
+    """把 MCP 预检折进一份 Skill 报告（`report["mcp"]` + 顶层 requirements/status）。
+
+    **安装/启用闸门读的就是这份报告**：`SkillPackageManager` 以 `status == "complete"`
+    放行、以 `requirements` 列缺口。所以 MCP 面的结论必须住在这里，只挂在
+    `plugins inspect` 的输出上是拦不住安装的（ADR-0052 D4）。
+    - Skill 面已经判 `unsupported` 时保持原样：包本身就被拒了，再叠 MCP 缺口只会让
+      "为什么被拒"更难读；MCP 段仍照出（`report["mcp"]`）。
+    - MCP 段判 `unsupported` 且含**描述写坏**的发现（`_blocks_install`）⇒ 包级 status 也
+      是 `unsupported`（AC3 的"明确失败"要能拦住安装，与 Skill 面"有 errors ⇒ unsupported"同档）；
+    - MCP 段只有**缺口**、或全是**首版不支持**的发现（`adaptive` 标记）⇒ 包级降一档到
+      `needs-adaptation`（可装、不可启用）；
+    - 没有描述 ⇒ MCP 段自己就是 `needs-adaptation`，包级不动（Skill 仍然能用）。
+    """
+    source = report.get("source")
+    if not isinstance(source, str) or not source:
+        return report
+    mcp_report = inspect_mcp_servers(source)
+    report["mcp"] = mcp_report
+    if report.get("status") == "unsupported":
+        return report  # 包本身已被拒；MCP 段照出，但不叠加"为什么被拒"的噪音
+    requirements = mcp_compatibility_requirements(mcp_report)
+    report.setdefault("requirements", []).extend(requirements)
+    if report.get("status") == "complete":
+        if _blocks_install(mcp_report):
+            report["status"] = "unsupported"
+        elif any(item["support"] == "unsupported" for item in requirements):
+            report["status"] = "needs-adaptation"
+    return report
+
+
+def _blocks_install(report: dict[str, Any]) -> bool:
+    """MCP 报告是否含**描述写坏**的发现——只有这一类才拦整包安装。
+
+    "首版不支持的能力"（被 `narrow` 打了 `adaptive` 标记）是可适配的缺口：它让包停在
+    `needs-adaptation`（可装、不可启用），不把 Skill 面健康的包一起拒掉。反之，描述
+    读不出来 / 缺 command / 未知字段 / 越界路径 / transport 写坏这类**作者错误**仍然
+    fail-closed。**判据是那条标记，不是错误码**：同一个 `MCP_TRANSPORT_UNSUPPORTED`
+    既标"本仓不实现 `sse`"（收窄）也标"transport 字段拼错了"（写坏），按码判会把
+    后者一起放行。
+    """
+    errors = list(report.get("errors", []))
+    for server in report.get("servers", []):
+        errors.extend(server.get("errors", []))
+    return any(not error.get("adaptive") for error in errors)
+
+
+def mcp_compatibility_requirements(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """把 MCP 预检的缺口/错误折成 `inspect_skill_package` 形状的 requirements 条目。
+
+    安装期闸门（`SkillPackageManager._raise_if_uninstallable` 与 `enable` 的
+    `status == "complete"` 判据）只吃 Skill 报告的 requirements；如果 MCP 面自己不
+    折进去，一份 OAuth-only 的 server 描述就会以"完整兼容"被装进来并启用——正是
+    ADR-0052 D4"不能用能装代替能用"要挡的形态（T7 的 AC 也会原样继承这个漏洞）。
+    折进来的条目沿用同一张 `support` 词表（见 `skills/inspection.py`）：`unsupported`
+    会把包级 status 压成 needs-adaptation，`manual_review`/`needs-adaptation` 则如实列出。
+    """
+    requirements: list[dict[str, Any]] = []
+    for error in report.get("errors", []):
+        requirements.append(
+            {
+                "kind": "mcp-description-error",
+                "name": error.get("code", "unknown"),
+                "support": "unsupported",
+                "reason": f"{error.get('path', '')}: {error.get('message', '')}".strip(": "),
+            }
+        )
+    for server in report.get("servers", []):
+        for error in server.get("errors", []):
+            requirements.append(
+                {
+                    "kind": "mcp-server-error",
+                    "name": f"{server.get('name')}:{error.get('code', 'unknown')}",
+                    "support": "unsupported",
+                    "reason": f"{error.get('path', '')}: {error.get('message', '')}".strip(": "),
+                }
+            )
+        for item in server.get("requirements", []):
+            if item.get("support") == "supported":
+                continue  # 没有缺口的条目不进 Skill 报告的 requirements（那边用它判 status）
+            requirements.append(
+                {
+                    "kind": f"mcp-{item.get('kind', 'requirement')}",
+                    "name": f"{server.get('name')}:{item.get('name', '')}",
+                    "support": item.get("support", "manual_review"),
+                    "reason": item.get("reason", ""),
+                }
+            )
+    return requirements

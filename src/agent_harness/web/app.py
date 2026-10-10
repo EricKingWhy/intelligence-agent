@@ -2264,6 +2264,29 @@ def create_app(
             ]
         }
 
+    # #937 / M-08：附件上限的服务端权威下发（前端 `IMAGE_LIMITS` 手写镜像就此退役）。
+    # 值经 `resolve_image_limits` 单一解析点读出，不许在此直接逐个拼
+    # `settings.attachment_max_*`（第二份解析会让两处规则漂移）。
+    from agent_harness.attachments.types import resolve_image_limits
+
+    @app.get("/api/attachments/limits")
+    async def get_attachment_limits() -> dict:
+        """附件图片上限（前端上传闸门用，部署者改配置后刷新页面即生效）。
+
+        纯查询、零副作用：只把部署者的非秘密配置值（字节数 / 张数 / 类型名）
+        按 wire 惯例（snake_case，同附件域 `attachment_id` / `media_type`）下发；
+        前端 `api.ts::getAttachmentLimits` 自行做 snake→camel 映射。不含密钥、路径、
+        用户信息。鉴权走既有 `AuthSeamMiddleware`，与 `/api/sandbox-backends`
+        完全一致——不新增豁免，也不新增鉴权逻辑。
+        """
+        limits = resolve_image_limits(settings)
+        return {
+            "max_image_bytes": limits.max_image_bytes,
+            "max_images_per_message": limits.max_images_per_message,
+            "max_message_image_bytes": limits.max_message_image_bytes,
+            "allowed_media_types": list(limits.media_types),
+        }
+
     # #362 / W-18：MCP server 状态与断开（Chrome DevTools MCP 可选 capability）。
     # 来源闸与下方项目路由共用 `require_trusted_origin`（ADR-0025 D1），此处先导入。
     from agent_harness.web.projects import require_trusted_origin

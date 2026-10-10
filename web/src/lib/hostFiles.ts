@@ -37,7 +37,7 @@
  *    因为猜错根目录而把一个可用的路径改坏。
  */
 
-import { IMAGE_LIMITS } from './attachments';
+import { getImageLimits } from './attachments';
 
 /**
  * preload 暴露窄桥的全局名。与 `desktop/src/preload.cts` 的字面量**必须**同值——preload 在
@@ -146,14 +146,14 @@ export interface HostFileRouting {
  * @param files - 本次投递的文件（`dropEvents.ts` 已剔除空目录壳之外的原始数组）。
  * @param options.directories - 被识别为目录的成员：**强制走 uploads**，由
  *   `useDraftAttachments` 按既有行为丢弃（本票不做目录引用，见模块头差异 ①）。
- * @param options.mediaTypes - 图片判定集合；默认与后端同口径的 `IMAGE_LIMITS.mediaTypes`
- *   （#824/MM-04 的跨层漂移守卫钉住的那一份），不在这里另立第二套。
+ * @param options.mediaTypes - 图片判定集合；默认取当前生效的 `getImageLimits().mediaTypes`
+ *   （#937/M-08：服务端下发成功即服务端值，否则离线 fallback `IMAGE_LIMITS`），不在这里另立第二套。
  */
 export function routeHostFiles(
   files: readonly File[],
   options: { directories?: ReadonlySet<File>; mediaTypes?: readonly string[] } = {},
 ): HostFileRouting {
-  const mediaTypes = options.mediaTypes ?? IMAGE_LIMITS.mediaTypes;
+  const mediaTypes = options.mediaTypes ?? getImageLimits().mediaTypes;
   // 一次拖入只查一次桥：同一次投递里每个文件看到的是**同一个**桥（页面脚本在循环中途
   // 改全局不该让同一批文件一半走引用、一半走上传）。
   const bridge = hostPathsBridge();

@@ -17,6 +17,7 @@ import {
   Spacer,
   Text,
   TuiMainScreen,
+  getCapabilities,
   getTerminalColorMode,
   matchesKey,
   type Component,
@@ -40,6 +41,7 @@ import {
   type ClipboardImageOptions,
 } from "./lib/clipboard-image.ts";
 import {
+  checkMessageImageLimits,
   clipboardImageName,
   isImagePath,
   pastedImagePath,
@@ -47,7 +49,7 @@ import {
   uploadDeclaredName,
   MAX_IMAGE_BYTES,
 } from "./lib/image-paste.ts";
-import { renderDraftImage } from "./lib/image-view.ts";
+import { renderDraftImage, renderHistoryImage } from "./lib/image-view.ts";
 import {
   compactDraftImages,
   imageMarker,
@@ -107,8 +109,14 @@ export interface AppOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-/** 已渲染轮次的签名：文本尾部 + 工具卡摘要（变了才重建该轮组件）。 */
-function turnSignature(turn: Turn): string {
+/** 已渲染轮次的签名：文本尾部 + 工具卡摘要（变了才重建该轮组件）。
+ *  M-09：带历史附图的用户轮把引用 id 集 + 历史图版本并进签名 -- 字节异步取回、版本 +1
+ *  时该轮重建（占位换缩略图）；无附图的轮次签名逐字不变。 */
+function turnSignature(turn: Turn, historyImagesVersion = 0): string {
+  const images =
+    turn.attachments.length > 0
+      ? `|img:${turn.attachments.map((ref) => ref.attachment_id).join(",")}|v${String(historyImagesVersion)}`
+      : "";
   return (
     `${turn.role}|${turn.text.length}|${turn.text.slice(-80)}|` +
     turn.tools
@@ -116,7 +124,8 @@ function turnSignature(turn: Turn): string {
         (t) =>
           `${t.toolCallId}:${t.status}:${t.output.length}:${t.message.length}:${t.artifact?.artifact_id ?? ""}`,
       )
-      .join(";")
+      .join(";") +
+    images
   );
 }
 
@@ -162,6 +171,16 @@ export class TuiApp {
   private planExpanded = false;
   private renderedTurns: RenderedTurn[] = [];
   private renderedOrphanCount = 0;
+  /**
+   * M-09：历史附图的字节缓存（key = attachment_id）。值缺省 = 还没取；`null` = 取回
+   * 失败（占位定格，不重试风暴）。只有 `getCapabilities().images !== null` 的终端才会
+   * 发起取回 -- 无协议终端的文本占位就是终态，一个字节都不用拉。
+   */
+  private readonly historyImageBytes = new Map<string, Uint8Array | null>();
+  /** 已发起取回的 attachment_id（防重复取回：每轮重投影都会路过这里）。 */
+  private readonly historyImageStarted = new Set<string>();
+  /** 历史图字节到手一次 +1：进 turnSignature，让带附图的轮次重建换上缩略图。 */
+  private historyImagesVersion = 0;
   private running = true;
   /** 会话代际：切会话（/sessions /new）时 +1，旧订阅循环自行退出。 */
   private generation = 0;
@@ -519,8 +538,32 @@ export class TuiApp {
     this.attachImageFile(filePath);
   }
 
-  /** 追加一张待发图：数组 push + 光标处插 `[Image #N]`（N = 插入后的张数，AC3）。 */
+  /**
+   * 追加一张待发图：数组 push + 光标处插 `[Image #N]`（N = 插入后的张数，AC3）。
+   *
+   * M-21：这里是全部图片入场（剪贴板 / 粘贴路径 / `@path` 参数 / 提交窗口保留）的
+   * **唯一汇聚点**，单条数量与总字节预检只装这一道：口径是服务端
+   * `resolve_image_limits` 的客户端镜像（`image-paste.ts` 两个常量，与 web 的
+   * IMAGE_LIMITS 同值），本地先拒省一次注定 413/422 的发送。被拒不改动既有草稿
+   * （数组与正文标记原样），一行明确说明原因。
+   *
+   * M-21 修回（F1）：预检用**与提交同一谓词**（正文当前标记集仍引用的图）计数/计字节：
+   * 删标记只隐藏不缩数组（数组在提交 compact 或切会话时才清），服务端按实际发送的
+   * refs 计数（session/service.py 按 refs），预检若按数组全量计数，删光标记的用户会被
+   * 误拒，且提示给出的出路（删标记）已失效。计数口径必须与「实际会发送什么」一致。
+   */
   private addPendingImage(image: PendingImage): void {
+    const markers = new Set(parseImageMarkers(this.editor.getText()));
+    const referenced = this.pendingImages.filter((_, index) => markers.has(index + 1));
+    const rejection = checkMessageImageLimits(
+      referenced.length,
+      referenced.reduce((sum, item) => sum + item.bytes.length, 0),
+      image.bytes.length,
+    );
+    if (rejection !== null) {
+      this.appendNote(rejection);
+      return;
+    }
     this.pendingImages.push(image);
     this.pendingImagesVersion += 1;
     this.editor.insertTextAtCursor(imageMarker(this.pendingImages.length));
@@ -654,6 +697,9 @@ export class TuiApp {
     // 独立审查 P3（#6）：待发图片是**旧会话**的草稿，切会话时清空数组并抹掉正文里的标记，
     // 兑现 `pendingImages` 注释的承诺（否则旧会话的图会被带进新会话）。
     this.setPendingImages([]);
+    // M-09：历史附图的字节缓存与取回标记同属旧会话，一并清场（新会话按需重取）。
+    this.historyImageBytes.clear();
+    this.historyImageStarted.clear();
     const draft = this.editor.getText();
     if (parseImageMarkers(draft).length > 0) this.editor.setText(stripImageMarkers(draft));
     await this.rebuildFromHistory();
@@ -718,8 +764,8 @@ export class TuiApp {
       this.renderedTurns = [{ sig: "", comps: [emptyStateComponent(this.theme)] }];
     } else {
       this.renderedTurns = this.state.turns.map((turn) => ({
-        sig: turnSignature(turn),
-        comps: turnComponents(turn, this.theme),
+        sig: turnSignature(turn, this.historyImagesVersion),
+        comps: this.turnComps(turn),
       }));
     }
     this.rebuildChat();
@@ -730,6 +776,7 @@ export class TuiApp {
     this.renderPauseBanner();
     this.renderApproval();
     this.renderStreamHint();
+    this.scheduleHistoryImages();
     this.refreshStatus();
   }
 
@@ -753,13 +800,13 @@ export class TuiApp {
     for (let i = 0; i < this.state.turns.length; i++) {
       const turn = this.state.turns[i];
       if (turn === undefined) continue;
-      const sig = turnSignature(turn);
+      const sig = turnSignature(turn, this.historyImagesVersion);
       const rendered = this.renderedTurns[i];
       if (rendered === undefined) {
-        this.renderedTurns[i] = { sig, comps: turnComponents(turn, this.theme) };
+        this.renderedTurns[i] = { sig, comps: this.turnComps(turn) };
       } else if (rendered.sig !== sig) {
         // 空状态占位块（sig 为空）也要让位
-        this.renderedTurns[i] = { sig, comps: turnComponents(turn, this.theme) };
+        this.renderedTurns[i] = { sig, comps: this.turnComps(turn) };
       }
     }
     if (this.renderedTurns.length > this.state.turns.length) {
@@ -770,7 +817,69 @@ export class TuiApp {
     this.renderPlan();
     this.renderPauseBanner();
     this.renderApproval();
+    this.scheduleHistoryImages();
     this.refreshStatus();
+  }
+
+  /**
+   * M-09：一轮的组件 = 文本/工具卡（`turnComponents` 纯投影）+ 用户轮的历史附图。
+   * 附图走与待发图**同一个**"能力 -> 缩略图 or 文本占位"分派（`renderHistoryImage`）：
+   * 字节在手且协议可用 => pi-tui 缩略图；字节未到 / 无协议 => 文本占位（引用宽高兜底）。
+   */
+  private turnComps(turn: Turn): Component[] {
+    const comps = turnComponents(turn, this.theme);
+    if (turn.role !== "user" || turn.attachments.length === 0) return comps;
+    for (const ref of turn.attachments) {
+      const rendered = renderHistoryImage(
+        ref,
+        this.historyImageBytes.get(ref.attachment_id) ?? null,
+        { fallbackColor: (value) => this.theme.dim(value) },
+      );
+      comps.push(
+        rendered.kind === "image" ? rendered.component : new Text(rendered.lines.join("\n")),
+      );
+    }
+    return comps;
+  }
+
+  /**
+   * M-09：按需取回历史附图字节（协议可用才有这一步）。取回在途/失败都由
+   * `historyImageStarted` 挡住重复发起；到手后版本 +1 触发带附图轮次的重投影。
+   */
+  /**
+   * M-09：按需取回历史附图字节（协议可用才有这一步）。取回在途/失败都由
+   * `historyImageStarted` 挡住重复发起；到手后版本 +1 触发带附图轮次的重投影。
+   *
+   * M-09 修回（F2）：回调捕获发起时的 sessionId 代际，落缓存/出提示前先核对：
+   * 切会话只清缓存、不取消在途 fetch（abort 只打断订阅流），旧会话的结果若不设防
+   * 会写进已清空的缓存并触发新会话重投影，失败提示更会打进新会话的 chat 区。
+   * 异步回调的「世界」必须与发起时一致，代际变了结果就无家可归（直接丢弃：
+   * attachment_id 是 sha256 内容寻址，新会话若真引用同一图会按需重取）。
+   */
+  private scheduleHistoryImages(): void {
+    if (getCapabilities().images === null) return;
+    const sessionId = this.options.sessionId;
+    for (const turn of this.state.turns) {
+      if (turn.role !== "user") continue;
+      for (const ref of turn.attachments) {
+        if (this.historyImageStarted.has(ref.attachment_id)) continue;
+        this.historyImageStarted.add(ref.attachment_id);
+        void this.api
+          .getAttachmentBytes(sessionId, ref.attachment_id)
+          .then((bytes) => {
+            if (this.options.sessionId !== sessionId) return;
+            this.historyImageBytes.set(ref.attachment_id, bytes);
+            this.historyImagesVersion += 1;
+            this.renderIncremental();
+          })
+          .catch((error: unknown) => {
+            if (this.options.sessionId !== sessionId) return;
+            // 字节读不回（404 / 存储不可用）：占位定格在文本形态，一行明确提示，不静默。
+            this.historyImageBytes.set(ref.attachment_id, null);
+            this.appendNote(`历史图片读取失败：${String(error)}`);
+          });
+      }
+    }
   }
 
   /** artifact/created 找不到宿主工具卡时：一行入口占位（真实 id，不编归属）。 */

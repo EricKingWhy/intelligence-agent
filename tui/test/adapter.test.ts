@@ -157,3 +157,106 @@ test("run/resumed 更新恢复快照；来源 seq 留痕（在场协议重连展
   assert.equal(state.lastResume?.fromPauseSeq, 7);
   assert.equal(state.lastResume?.basis, "client_return");
 });
+
+test("M-09：user/message.data.attachments 投影进用户轮（引用形状，ImageRef 镜像）", () => {
+  const state = createState();
+  applyEvent(state, env(1, "user/message", {
+    content: "看这张图",
+    attachments: [
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "a".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 1,
+        height: 1,
+      },
+    ],
+  }));
+  const turn = state.turns[0];
+  assert.equal(turn?.role, "user");
+  assert.equal(turn?.attachments.length, 1);
+  const ref = turn?.attachments[0];
+  assert.equal(ref?.attachment_id, "sha256:" + "a".repeat(64));
+  assert.equal(ref?.media_type, "image/png");
+  assert.equal(ref?.width, 1);
+  assert.equal(ref?.height, 1);
+  assert.equal(ref?.name, null, "服务端写入路径 name 恒缺省（结构性缺省）");
+});
+
+test("M-09：坏形状逐条跳过（一行坏数据不拖垮整轮，与 parse_image_refs 同容错）", () => {
+  const state = createState();
+  applyEvent(state, env(1, "user/message", {
+    content: "mixed",
+    attachments: [
+      "not-an-object",
+      { kind: "file", attachment_id: "sha256:" + "b".repeat(64) },
+      { kind: "image", attachment_id: "", media_type: "image/png", bytes: 1, width: 1, height: 1 },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "c".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 2,
+        height: 3,
+        name: "shot.png",
+      },
+    ],
+  }));
+  const refs = state.turns[0]?.attachments ?? [];
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]?.attachment_id, "sha256:" + "c".repeat(64));
+  assert.equal(refs[0]?.name, "shot.png");
+});
+
+test("M-09：无 attachments 键（纯文本轮 / 旧数据）=> 空数组", () => {
+  const state = createState();
+  applyEvent(state, env(1, "user/message", { content: "hi" }));
+  assert.deepEqual(state.turns[0]?.attachments, []);
+});
+
+test("M-09 修回（F3）：数值谓词与服务端同一纪律（非负整数；负数/小数逐条跳过）", () => {
+  const state = createState();
+  applyEvent(state, env(1, "user/message", {
+    content: "bad numbers",
+    attachments: [
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "f".repeat(64),
+        media_type: "image/png",
+        bytes: -1,
+        width: 1,
+        height: 1,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "9".repeat(64),
+        media_type: "image/png",
+        bytes: 1.5,
+        width: 1,
+        height: 1,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "8".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 0.5,
+        height: 3,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "7".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 2,
+        height: 3,
+        name: "ok.png",
+      },
+    ],
+  }));
+  const refs = state.turns[0]?.attachments ?? [];
+  assert.equal(refs.length, 1, "负数/小数进不了引用（对齐 _is_non_negative_int）");
+  assert.equal(refs[0]?.attachment_id, "sha256:" + "7".repeat(64));
+  assert.equal(refs[0]?.name, "ok.png");
+});

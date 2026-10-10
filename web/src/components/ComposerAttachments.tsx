@@ -19,7 +19,7 @@
 
 import { ImagePlus, RotateCcw, X } from 'lucide-react';
 import type { DraftAttachment } from '../hooks/useDraftAttachments';
-import { formatBytes } from '../lib/attachments';
+import { formatBytes } from '../lib/format';
 import { DropOverlay } from './DropOverlay';
 
 interface Props {
