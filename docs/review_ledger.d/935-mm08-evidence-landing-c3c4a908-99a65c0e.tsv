@@ -1,0 +1,1 @@
+2026-10-10	#935 M-02 证据落盘：恢复 #830 MM-08 证据包（evidence .md + 原始读数 json/txt + 驱动与 Windows workflow，均逐字节取自 omp/830-mm08-cross-client-verify@5c7cf23a）并补 §14 逐条 AC 来源映射；本笔纯 docs/scripts/workflow、零产品代码	c3c4a908795aa37a056368a4fcb53bb2588c2671..99a65c0e978a038f982cd2b2a0d767e9dad9041c

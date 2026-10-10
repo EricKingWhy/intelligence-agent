@@ -62,11 +62,13 @@ def test_image_content_block_is_provider_neutral_standard_block() -> None:
         height=3,
     )
     block = image_content_block(ref)
-    # 标准块：带 file_id + mime_type，绝不带 base64（AC3）。
+    # 标准块：带 file_id + mime_type + 尺寸元数据（#935 / M-03），绝不带 base64（AC3）。
     assert block == {
         "type": "image",
         "file_id": "sha256:" + "c" * 64,
         "mime_type": "image/webp",
+        "width": 2,
+        "height": 3,
     }
     assert "base64" not in block
     assert "data:" not in str(block)
