@@ -189,6 +189,7 @@ def test_matrix_normalization_consistency():
                     hint = not_found_hint(content, old_string)
                     if hint != "":
                         # 提示只应在未命中时出现。
+                        # T3 前置：hint 只应在字节未命中时出现；若此断言红，说明 not_found_hint 的前置守卫坏了（非 T3 主断言的目标）。
                         assert exact == 0, (
                             f"T3 violated {ctx!r}: not_found_hint emitted but "
                             "byte-exact match exists"
