@@ -654,13 +654,13 @@ class ContextBuilder:
                     for fact in active_facts
                 ],
             )
-        # 口径（#824 / MM-03，AC7 / PRD D3）：带图消息的 token 估算**已计入图片成本**
-        # ——`_estimate_tokens_cached` 在结构 token 上按 `IMAGE_TOKENS_PER_IMAGE`
-        # 追加每张图的近似开销（常量与来源见 `context/tokens.py`）。真正的 base64
-        # 载荷仍在 `_load_image_payloads`/`_finalize` 装配请求时才注入；估算用的是
-        # Pi 式固定近似（1200 token/图，标准块不带像素尺寸故不按 Provider 像素公式
-        # 精算），**目的是防止"图不计费导致 hard guard 失守"**，不追求逐 Provider 精确。
-        # 真实 usage 仍以 Provider 回执为权威（`_usage_anchored_tokens` 只抬高）。
+        # 口径（#935 / M-03，替代 #824 的固定常量）：带图消息的 token 估算**已计入图片成本**
+        # ——`_estimate_tokens_cached` 在结构 token 上按 `context/tokens.py` 的
+        # **尺寸相关近似公式**（tile 制）追加每张图的开销。真正的 base64 载荷仍在
+        # `_load_image_payloads`/`_finalize` 装配请求时才注入；估算靠标准图片块携带的
+        # `width`/`height`（投影处即已知），**目的是防止"图不计费导致 hard guard 失守"**，
+        # 不追求逐 Provider 精确。真实 usage 仍以 Provider 回执为权威
+        # （`_usage_anchored_tokens` 只抬高）。
         token_estimate = self._estimate_tokens_cached(session, messages)
         # #448：真实 usage 锚（Pi `compaction.ts:214-243` estimateContextTokens 同构）。
         # tiktoken 估算对数字/十六进制密集的 tool 结果会**低估**（#448 实测两 provider
@@ -1481,10 +1481,10 @@ class ContextBuilder:
             key = (session.session_id, event.seq, self._supports_vision)
             cost = self._token_memo.get(key)
             if cost is None:
-                # 结构 token + 图片近似成本（#824 / MM-03，AC7）：`message_cost` 单点
-                # 定义该惯用式；带图消息在视觉口径下含标准图片块，按
-                # IMAGE_TOKENS_PER_IMAGE 追加；非视觉口径投影成占位符文本（无图片
-                # 块），增量为 0。key 带视觉维度，故两口径各记一次。
+                # 结构 token + 图片近似成本（#935 / M-03）：`message_cost` 单点定义该
+                # 惯用式；带图消息在视觉口径下含标准图片块（带 `width`/`height`），按
+                # `context/tokens.py` 的尺寸相关近似公式追加；非视觉口径投影成占位符
+                # 文本（无图片块），增量为 0。key 带视觉维度，故两口径各记一次。
                 cost = message_cost(message)
                 self._token_memo[key] = cost
             total += cost
