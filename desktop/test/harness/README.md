@@ -8,9 +8,15 @@ bytes and verify the restore byte-for-byte. An interrupted run (Ctrl-C, or an
 exception inside the run) restores through the SIGINT/SIGTERM handlers and a
 `finally`; a forced kill — `taskkill /F`, Task Manager, closing the console —
 runs no handler at all and can leave the mutated text behind as the next run's
-baseline (measured), which is why the byte-for-byte check runs at the end of
-every run. Every mutation must turn the suite
-red; a survivor is a hole in the assertions, and the run exits non-zero when
+baseline (measured — it happened once in the #919 review round and once to a
+probe, and both times the left-behind mutation was only noticed afterwards),
+which is why the byte-for-byte check runs at the end of every run **and**
+`teeth-check-guards.mjs` refuses a baseline that is not the committed guard: it
+hashes the text it reads at startup against the recorded `GUARD_BASELINE_SHA256`
+and exits 1 with a `guard baseline mismatch` line when they differ (update that
+constant in the same change that edits the guard's text). Every mutation must
+turn the suite red; a survivor is a hole in the assertions, and the run exits
+non-zero when
 one remains (or when the restore is not byte-identical). `teeth-check.mjs`
 walks its list once per installer script it covers and runs
 `node --test test/installer-scripts.test.mjs`.
@@ -20,8 +26,8 @@ because the node-runtime lock rules (#919 Q11) live in the second one.
 
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
-| `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (4) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 11/11 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `909e3a16…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names | 78/78 red, 0 survivors, restore identical (sha256 `efe5864d…`) |
+| `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (5) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 12/12 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `f99f887a…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names — and the disposal rounds: the failure leg read by the read's own form and the label-name alphabet, the depth-2 define token, the quoted-span operand set, the define-carried recursive delete and the `!include` set, the two messages, and the divider-less `${Switch}` body | 111/111 red, 0 survivors, restore identical (sha256 `482a65e0…`) |
 
 The #919 batch added five mutations to `teeth-check.mjs` (the failed delete's
 exit code plus the four installer.nsh sweep rules — the first entries that do
@@ -35,7 +41,18 @@ floor anchor and patch), the disposition review's own round added six more
 expansions, the `!include`, any other statement using the delete state, the
 candidate source as the whole window, and the loop tail in the delete pass),
 and the fix round's own review added three (the delete-loop span read from any
-statement, the hop chase into the pass, and the dotted-define token).
+statement, the hop chase into the pass, and the dotted-define token). The #919
+residuals disposal then closed the review findings it inherited with its own
+additions (the F-1/N1/F-2 readings and the dash and quoted spellings), which the
+review of that disposal measured at 90 guard mutations and 12 for the installer
+scripts, and its own two fix rounds added fourteen and then seven (the
+failure-leg forms and the label-name alphabet; the depth-2 define token, the
+quoted-span operand set, the define-carried delete, the `!include` set, the two
+messages, the `${Switch}` body and the baseline digest) — the harnesses now walk
+111 guard mutations and 12 installer ones. Per protocol §8.3 #4 the disposal
+round's new mutations share test-level failure sets (five single-test sets plus
+one that fails seven tests; the assertion diffs inside a shared test still
+differ, measured), so they are not cited as per-rule discrimination.
 Both were re-run from the checkout on 2026-10-10
 with 0 survivors and byte-identical restores. The disposition's first
 `teeth-check-guards.mjs` run also caught a real gap in the disposition itself:
