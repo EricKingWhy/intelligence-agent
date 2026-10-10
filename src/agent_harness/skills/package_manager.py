@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from agent_harness.plugins.mcp_precheck import attach_mcp_section
 from agent_harness.skills.inspection import (
     _MAX_PACKAGE_ENTRIES,
     _is_junction,
@@ -50,6 +51,22 @@ class SkillManifestError(SkillPackageError):
     调用方要分开说这两件事：「选中的版本失效」是用户做过的选择出了问题，
     「清单损坏」是盘上状态出了问题，两者该让用户做的事完全不同。
     """
+
+
+def _inspected(
+    source: str | os.PathLike[str],
+    *,
+    scope: str,
+    existing_skills: Path | str | None = None,
+) -> dict[str, Any]:
+    """预检一份包，并把 MCP 段折进去——安装/启停闸门读的就是这份报告。
+
+    单点在这里而不是各个调用点：`install` / `install_git` / `update` / 暂存复核 /
+    回退复核五处都靠 `status == "complete"` 与 `requirements` 放行，任何一处漏折
+    MCP 段，一份 OAuth-only 的 server 描述就能以"完整兼容"进库（ADR-0052 D4、#875 AC4）。
+    """
+    report = inspect_skill_package(source, scope=scope, existing_skills=existing_skills)
+    return attach_mcp_section(report)
 
 
 class SkillPackageManager:
@@ -129,7 +146,7 @@ class SkillPackageManager:
             return copy.deepcopy(self._read_manifest()[ENABLE_RESULTS_FIELD])
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
-        source_report = inspect_skill_package(
+        source_report = _inspected(
             source, scope=self.scope, existing_skills=self.scope_skills_dir
         )
         self._raise_if_uninstallable(source_report)
@@ -191,7 +208,7 @@ class SkillPackageManager:
                     raise SkillPackageError(
                         "Skill package changed or could not be copied without following linked directories"
                     )
-                report = inspect_skill_package(staging_package, scope=self.scope)
+                report = _inspected(staging_package, scope=self.scope)
                 if report.get("name") != name:
                     raise SkillPackageError(
                         "Skill name changed between preflight and package snapshot"
@@ -243,7 +260,7 @@ class SkillPackageManager:
             package, commit, git_modes_sha256 = _fetch_git_skill(
                 safe_url, safe_ref, safe_subdirectory, Path(temporary)
             )
-            report = inspect_skill_package(
+            report = _inspected(
                 package, scope=self.scope, existing_skills=self.scope_skills_dir
             )
             self._raise_if_uninstallable(report)
@@ -287,7 +304,7 @@ class SkillPackageManager:
             package, commit, git_modes_sha256 = _fetch_git_skill(
                 source_url, safe_ref, subdirectory, Path(temporary)
             )
-            report = inspect_skill_package(package, scope=self.scope)
+            report = _inspected(package, scope=self.scope)
             self._raise_if_uninstallable(report)
             if report.get("name") != name:
                 raise SkillPackageError(
@@ -388,7 +405,7 @@ class SkillPackageManager:
                         raise SkillPackageError(
                             f"pending Git snapshot for Skill {name!r} changed while staging"
                         )
-                    report = inspect_skill_package(staged, scope=self.scope)
+                    report = _inspected(staged, scope=self.scope)
                     self._raise_if_uninstallable(report)
                     if report.get("name") != name or report["status"] != "complete":
                         raise SkillPackageError(
