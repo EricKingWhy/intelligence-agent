@@ -120,6 +120,35 @@ without a space — reproduced twice):
 | `self_array_spaced_*` / `self_array_nospace_*` | spaced: `rc 0`, dir removed; nospace: `rc 2`, in place | an array element goes through PowerShell's native argument quoting: with a space the token comes out quoted, the leading `"` hides `_?=` from NSIS and the stub silently falls back to the copy form. This is why the driver builds its in-place line as one string |
 | `copy_raw_*` | `rc 2`, dir removed whole | electron-builder's primary shape (a copy outside the install dir, then `_?=<dir>`) also carries the code, and nothing runs from inside the directory so the section removes it completely |
 
+### the #919 limits probe (self-driving)
+
+```powershell
+powershell -File limits-probe/run-limits-probe.ps1
+```
+
+`limits-probe/limits-probe.nsi` runs in two modes, one invocation each:
+`readings` takes every measurement once, into a fresh file, and `mimic`
+recurses the scan's per-level runtime load (4 pushes + one Call — the shape of
+`iaScanReparsePointsBody`) to the depth given by `/DPROBE_CALL_MAX` and writes
+a single line once the ladder returns. The runner runs the readings once and
+the mimic once per ladder depth, and grades each mimic run by its exit code,
+because a run whose stack dies cannot write a reading afterwards. (A first
+version wrote progress from inside the recursion with `FileOpen "a"`; the
+append writes landed at the file's beginning and overwrote the first reading,
+which is why this one writes nothing during the recursion.)
+
+| reading | value | what it decides |
+| --- | --- | --- |
+| `long_findfirst_1..4` | `len=419/826/1603/3009 handle=[…] first=[.] entries=3` | `FindFirst` through `\\?\` walks a tree past `MAX_PATH` at every depth the leftover record keeps |
+| `unc_plain_findfirst`, `unc_long_findfirst` | `handle=[…] first=[.]` for both spellings | both UNC forms are readable by `FindFirst` |
+| `unc_plain_rmdir` | `flag=clear dir_gone=yes inner_gone=yes` | the plain UNC sibling is the writability control: the share works and the tree goes |
+| `unc_long_rmdir` | `flag=set dir_gone=no inner_gone=no` | **`RMDir /r` on the `\\?\UNC\` form sets the error flag and deletes nothing**, on the tree its own `FindFirst` read a line earlier. `iaBuildLongPath` builds that form for a UNC target, so a prepared delete there only reaches the site's failure branch (sweep: candidate kept, exit 2; rollback: leftover recorded, rename fails on the surviving tree). Measured; registered on #919 as a new finding, not fixed in that batch |
+| mimic ladder `512 / 1024 / 1300` | `exit=0`, `mimic_completed=<depth>` | the 512 valve in `iaScanReparsePointsBody` is reached long before the stack runs out |
+| mimic ladder `1400` | `exit=-1073741571` (`STATUS_STACK_OVERFLOW`) | the only depth limit above the valve is the stack itself, between 1300 and 1400 levels — no NSIS call-depth cap; the valve has ≥2.5x headroom on this frame shape |
+
+Last run 2026-10-10 from the checkout: readings run exit 0, ladder `VERDICT:
+mimic ladder matched expectations`.
+
 ## r1-drivers/
 
 The #901 / R1 real-machine drivers, imported from that round's out-of-tree
