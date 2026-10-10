@@ -382,10 +382,10 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 | AC | 原始读数出处（机器可核） | 散件佐证 |
 | --- | --- | --- |
-| AC1 | `local.json` `checks[id=AC1].evidence`（`web_send_status=200`、`tui_read_status=200`、`tui_node_exit=0`、`provider_request_image_block_count=1`）；`local-verify.txt:5` `[PASS] AC1` | `830-omp-run.log:24`（counts 汇总）；驱动与散件 `verify_830_mm08.py` 同文件 |
+| AC1 | `local.json` `checks[id=AC1].evidence`（`web_send_status=200`、`tui_read_status=200`、`tui_node_exit=0`、`provider_request_image_block_count=1`）；`local-verify.txt:5` `[PASS] AC1` | `830-omp-run.log:25`（counts 汇总）；驱动与散件 `verify_830_mm08.py` 同文件 |
 | AC2 | `checks[id=AC2]`（`jsonl_bytes_stable=true`、`in_flight_user_message_persisted=true`、`resume_status=200`、`event_count_after_resume=31`）；`local-verify.txt:6` | 同上 |
 | AC3 | `checks[id=AC3].status="FAIL"`（`child_read_status=404`、`child_model_request_has_placeholder=true`、`child_artifact_dir_exists=false`）；`local-verify.txt:7-8` | 同上 |
-| AC4 | `checks[id=AC4]`（`tokens_before=1631`→`tokens_after=636`、`summary_contains_ref=true`、`summary_has_base64=false`、`jsonl_grew_only=true`）；`local-verify.txt:9` | 同上 |
+| AC4 | `checks[id=AC4].evidence.compact_body.{tokens_before=1631,tokens_after=636}`、`checks[id=AC4].evidence.{summary_contains_ref=true,summary_has_base64=false,jsonl_grew_only=true}`；`local-verify.txt:9` | 同上 |
 | AC5 | `checks[id=AC5]`（`big_image_bytes=524345`、`jsonl_growth_ratio=0.005174`、`jsonl_base64_run_count=0`）；`local-verify.txt:10` | 同上 |
 | AC6-TUI | `checks[id=AC6-TUI]`（`read_status=200`、`read_bytes=68`、`node_exit=0`）；`local-verify.txt:11` | 同上 |
 | AC6-CLI | `checks[id=AC6-CLI]`（`success_exit=0`、`missing_exit=1`、`non_image_exit=1`、`mismatched_ext_exit=1`）；`local-verify.txt:12` | 同上 |
@@ -394,6 +394,6 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | AC7 | `checks[id=AC7]`（`cross_session_status=404`、`malformed_status=422`、`cross_body_identical_to_absent=true`）；`local-verify.txt:14` | 同上 |
 | AC8 | 过程项 = 本文件 §5 缺陷清单（D1/D2/D3） | `fix-mm08-d2-d3-dispatch.md`（D2/D3 另开修复票的派工单，引本包 §5）；D2/D3 的**修复**属另一票，不在 #830 读数内 |
 
-**散件缺失如实标注**：AC1–AC7 的**逐条机器读数**不在散件目录内（散件含派工单/简报/审查记录/驱动脚本，不含 `evidence.json` 输出）；其权威原文即 14.2 的 `docs/evidence/830-mm08-cross-client-local.json`（现已随本文件落盘入库）。散件只提供**汇总读数**（`830-omp-run.log:24`：`counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`，沙箱轮）与 **Windows run 的复核**（`830-d2d3-review*`）。本机轮 `counts={'PASS': 8, 'FAIL': 1, 'NOT_RUN': 0}` 的原文见 14.2 `local-verify.txt:16`。
+**散件缺失如实标注**：AC1–AC7 的**逐条机器读数**不在散件目录内（散件含派工单/简报/审查记录/驱动脚本，不含 `evidence.json` 输出）；其权威原文即 14.2 的 `docs/evidence/830-mm08-cross-client-local.json`（现已随本文件落盘入库）。散件只提供**汇总读数**（`830-omp-run.log:25`：`counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}`，沙箱轮）与 **Windows run 的复核**（`830-d2d3-review*`）。本机轮 `counts={'PASS': 8, 'FAIL': 1, 'NOT_RUN': 0}` 的原文见 14.2 `local-verify.txt:16`。
 
 **范围边界**：D1（AC3 fork 读图）在本包中按验证票口径只登记不修（`NEEDS-USER-DECISION`）；D2/D3 的修复见另票 `fix-mm08-d2-d3-windows`（不在本包、不在 #935 范围）。

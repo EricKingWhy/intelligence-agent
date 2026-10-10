@@ -36,9 +36,10 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: **口径（显式记录）**：一张图的近似成本 = `IMAGE_TOKENS_BASE +
 #: IMAGE_TOKENS_PER_TILE × (tiles)`，其中
 #: `tiles = ceil(w / IMAGE_TILE_PX) × ceil(h / IMAGE_TILE_PX)`（长边先按
-#: `IMAGE_MAX_DIMENSION` 截断）。三家主流 Provider 全部用尺寸相关公式、无一家用固定
-#: 常量，本仓取**最简的 tile 制**作统一近似（不逐 Provider 精算），来源（≥2 独立来源，
-#: 官方原文核对见 `docs/tickets/.../MM-08-verification-evidence.md` 之外的本票 checkpoint）：
+#: `IMAGE_MAX_DIMENSION` **等比**缩小，与发送前归一化同语义）。三家主流 Provider 全部用
+#: 尺寸相关公式、无一家用固定常量，本仓取**最简的 tile 制**作统一近似（不逐 Provider
+#: 精算），来源（≥2 独立来源，官方原文核对见 tracked 文档
+#: `docs/tickets/multimodal-2026-10-07/M-03-image-token-sizing.md`）：
 #:
 #: - **OpenAI** Images 指南（`developers.openai.com/api/docs/guides/images`，章节
 #:   "Calculating costs" → "Tile-based image tokenization"）：`gpt-4o`/`gpt-4.1`
@@ -52,18 +53,21 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: **为什么这些常数**：取 OpenAI 的 512px tile + 85/170 是因为本仓请求装配发的正是
 #: OpenAI 风格 `image_url` 块（`model/multimodal.py`），其成本模型最贴合本仓实际
 #: Provider 面。**简化之处**：不复制 OpenAI 的"先缩进 2048²、再把短边压到 768"两段
-#: 预处理（那是逐 Provider 精算）；改用**长边截断到 `IMAGE_MAX_DIMENSION`** 一步近似，
-#: 与发送前归一化口径（`attachments.normalize.TARGET_MAX_DIMENSION`，长边 ≤2048）对齐。
+#: 预处理（那是逐 Provider 精算）；只用一步**长边等比缩放**到 `IMAGE_MAX_DIMENSION`
+#: （与发送前归一化 `attachments.normalize` 的 `frame.thumbnail((N,N))` **同语义**：
+#: 保持长宽比、只缩长边）。故对**极端长宽比**图（如 2048×100）仍可能相对 OpenAI 真值
+#: 低估——这是已披露的简化代价，不追求逐 Provider 精确。
 #:
 #: **尺寸来源**：标准图片块（`attachments.projection.image_content_block`）**携带
 #: `width`/`height`**（该数据在投影处即 ImageRef 的字段，随块一起带给估算层），故本
 #: 估算保持**消息的纯函数**——全部估算调用点（builder / compactor / service / 各
-#: Provider）自动同口径，无需任何 session 反查管道。（设计取舍见本票 checkpoint。）
+#: Provider）自动同口径，无需任何 session 反查管道。（设计取舍见 tracked 文档
+#: `docs/tickets/multimodal-2026-10-07/M-03-image-token-sizing.md`。）
 #:
 #: **目的**：防止"图不计费导致 hard guard 失守"——多张大图会让估算随尺寸单调抬高；
-#: 同时不再对大图系统性低估（旧 1200 常量在 2048² 归一化上限下相对 Anthropic 口径
-#: 低估约 4.6 倍）。真实 usage 仍以 Provider 回执为权威
-#: （`builder._usage_anchored_tokens` 的锚价只抬高）。
+#: 同时不再对大图系统性低估（旧 1200 常量在 2048² 归一化上限下，相对 Anthropic patch
+#: 口径 `⌈2048/28⌉²=5476`——封顶后 4784——低估约 4.0–4.6 倍，两种基准结论一致）。真实
+#: usage 仍以 Provider 回执为权威（`builder._usage_anchored_tokens` 的锚价只抬高）。
 IMAGE_TILE_PX = 512
 
 #: tile 制的 base / per-tile（OpenAI `gpt-4o`/`gpt-4.1` 行）。
@@ -71,25 +75,38 @@ IMAGE_TOKENS_BASE = 85
 IMAGE_TOKENS_PER_TILE = 170
 
 #: 长边归一化上限（与 `attachments.normalize.TARGET_MAX_DIMENSION` **同值**：发送前
-#: 长边 ≤ 2048px）。估算只按此上限截断，不逐 Provider 精算其缩放阶梯。
+#: 长边 ≤ 2048px）。估算按此做**等比**缩放（`frame.thumbnail((N,N))` 同语义），不逐
+#: Provider 精算其缩放阶梯。
+#:
+#: **同步义务（保守性前提）**：运行期实际上限由可配置的
+#: `Settings.image_normalize_max_dimension`（`agent_harness/config.py`，默认 2048）决定；
+#: 本常量必须 **≥** 该设置值，否则"尺寸未知回退 = 上限²"的保守契约会在设置被调大时
+#: 静默击穿。改动其中之一，务必同步核对二者。
 IMAGE_MAX_DIMENSION = 2048
 
 
 def image_tokens_for_size(width: int, height: int) -> int:
     """单张 `width×height` 图的近似 token 成本（tile 制，见模块常量注释）。
 
-    长边先按 `IMAGE_MAX_DIMENSION` 截断（对齐发送前归一化），再按 `IMAGE_TILE_PX`
-    方块向上取整计数；退化尺寸（0）只计 base。纯函数、确定性。
+    长边先**等比**缩放到 `IMAGE_MAX_DIMENSION`（与发送前归一化 `frame.thumbnail` 同语义：
+    保持长宽比、只缩长边），再按 `IMAGE_TILE_PX` 方块向上取整计数；退化尺寸（0）只计
+    base。纯函数、确定性。
     """
-    capped_w = max(0, min(int(width), IMAGE_MAX_DIMENSION))
-    capped_h = max(0, min(int(height), IMAGE_MAX_DIMENSION))
-    tiles = math.ceil(capped_w / IMAGE_TILE_PX) * math.ceil(capped_h / IMAGE_TILE_PX)
+    w = max(0, int(width))
+    h = max(0, int(height))
+    longest = max(w, h)
+    if longest > IMAGE_MAX_DIMENSION:
+        scale = IMAGE_MAX_DIMENSION / longest
+        w = round(w * scale)
+        h = round(h * scale)
+    tiles = math.ceil(w / IMAGE_TILE_PX) * math.ceil(h / IMAGE_TILE_PX)
     return IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * tiles
 
 
 #: 尺寸**未知**时的回退值（provider 块 `image_url` 无尺寸字段、或块形状异常）。
-#: 第一性原理：管线单图可发送的最大尺寸即 `IMAGE_MAX_DIMENSION²`；未知尺寸时按该
-#: 上限估是**保守方向**（只可能多算、更早拦截），与 hard guard 的 fail-closed 语义
+#: 第一性原理：管线单图可发送的最大尺寸即 `IMAGE_MAX_DIMENSION²`（前提见 `IMAGE_MAX_DIMENSION`
+#: 的同步义务：运行期 `image_normalize_max_dimension ≤ IMAGE_MAX_DIMENSION`）；未知尺寸时按
+#: 该上限估是**保守方向**（只可能多算、更早拦截），与 hard guard 的 fail-closed 语义
 #: 一致——绝不因"不知道多大"而少算图片开销。
 IMAGE_TOKENS_UNKNOWN_SIZE = image_tokens_for_size(IMAGE_MAX_DIMENSION, IMAGE_MAX_DIMENSION)
 

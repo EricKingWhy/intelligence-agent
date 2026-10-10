@@ -1,20 +1,23 @@
 """#935 / M-03：图片按**尺寸相关近似公式**计入 token 估算与上下文压力。
 
 口径见 `context/tokens.image_tokens_for_size`（OpenAI `gpt-4o` tile 制：`85 + 170×tiles`，
-512px 方块，长边按 `IMAGE_MAX_DIMENSION` 归一化上限截断）。本文件钉住：
+512px 方块，长边按 `IMAGE_MAX_DIMENSION` 等比缩小——与发送前 `normalize` 的
+`frame.thumbnail` 同语义）。本文件钉住：
 
 1. 标准图片块（`{"type":"image",...,"width","height"}`）按尺寸计费，随尺寸**单调**增长；
 2. provider 块（`image_url`，无尺寸字段）走 `IMAGE_TOKENS_UNKNOWN_SIZE` 保守回退；
 3. 无附件的纯文本消息口径逐字不变（AC9）；
 4. ContextBuilder 的增量估算（`_estimate_tokens_cached`）在视觉口径下真的多算图片；
 5. 消融：旧固定常量（1200）对小图高估、对 2048² 大图系统性低估；新公式两侧都更正。
+
+断言一律用**硬编码的期望值**（如 8×6 → 255、2048² → 2805），不复用被测公式自身的
+tile 算法——否则是"拿公式验公式"的同义反复。
 """
 
 from __future__ import annotations
 
 import io
 import json
-import math
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -25,7 +28,6 @@ from agent_harness.attachments.types import ImageAttachmentRef
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.tokens import (
     IMAGE_MAX_DIMENSION,
-    IMAGE_TILE_PX,
     IMAGE_TOKENS_BASE,
     IMAGE_TOKENS_PER_TILE,
     IMAGE_TOKENS_UNKNOWN_SIZE,
@@ -44,10 +46,6 @@ _AID = "sha256:" + "a" * 64
 _OLD_FIXED_TOKENS_PER_IMAGE = 1200
 
 
-def _tiles(width: int, height: int) -> int:
-    return math.ceil(width / IMAGE_TILE_PX) * math.ceil(height / IMAGE_TILE_PX)
-
-
 def _standard_block(width: int, height: int, *, file_id: str = _AID) -> dict:
     return {"type": "image", "file_id": file_id, "mime_type": "image/png",
             "width": width, "height": height}
@@ -61,25 +59,35 @@ _PROVIDER_BLOCK = {
 
 
 def test_formula_matches_openai_tile_structure() -> None:
-    """公式 = base + per_tile × tiles（512px 方块）。"""
-    assert image_tokens_for_size(8, 6) == IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * _tiles(8, 6)
-    assert image_tokens_for_size(1024, 1024) == IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * 4
-    assert image_tokens_for_size(2048, 2048) == IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * 16
+    """公式 = base + per_tile × tiles（512px 方块）；tile 数与总值都是硬编码期望。"""
+    # 8×6 → 1 tile；1024² → 4 tiles；2048² → 16 tiles。
+    assert image_tokens_for_size(8, 6) == 255
+    assert image_tokens_for_size(1024, 1024) == 765
+    assert image_tokens_for_size(2048, 2048) == 2805
+    # 常数本身也钉住（改常数会同时打破上面的硬编码值）。
+    assert (IMAGE_TOKENS_BASE, IMAGE_TOKENS_PER_TILE) == (85, 170)
 
 
 def test_formula_is_monotonic_in_size() -> None:
     """尺寸单调：更大的图不会算得更少（防"大图被低估"）。"""
-    sizes = [(8, 6), (256, 256), (512, 512), (1024, 1024), (2048, 2048), (4096, 4096)]
+    sizes = [(8, 6), (256, 256), (512, 512), (1024, 1024), (1536, 1536),
+             (2048, 2048), (4096, 4096)]
     values = [image_tokens_for_size(w, h) for w, h in sizes]
     assert values == sorted(values)
 
 
-def test_large_image_capped_at_normalization_max() -> None:
-    """长边超过归一化上限（2048）按上限截断——与发送前 `normalize` 口径对齐。"""
+def test_large_image_scaled_to_normalization_max_keeping_aspect() -> None:
+    """长边超过归一化上限（2048）按**等比**缩放到上限——与发送前 `normalize` 同语义。"""
+    # 正方形：4096² 缩到 2048²。
     assert image_tokens_for_size(4096, 4096) == image_tokens_for_size(
         IMAGE_MAX_DIMENSION, IMAGE_MAX_DIMENSION
     )
-    assert image_tokens_for_size(8192, 100) == image_tokens_for_size(IMAGE_MAX_DIMENSION, 100)
+    # 2:1 长图：4000×2000 缩到 2048×1024（不是逐轴 clamp 到 2048×2048）；
+    # 2048×1024 → 4×2 = 8 tiles。
+    assert image_tokens_for_size(4000, 2000) == image_tokens_for_size(2048, 1024)
+    assert image_tokens_for_size(2048, 1024) == 85 + 170 * 8
+    # 极端长宽比：长边缩到 2048、短边保持比例（100 不放大）。
+    assert image_tokens_for_size(8192, 100) == image_tokens_for_size(2048, 100)
 
 
 def test_zero_dimension_only_base() -> None:
@@ -105,12 +113,28 @@ def test_projection_block_feeds_estimator() -> None:
 
 
 def test_provider_block_without_dimensions_falls_back_conservatively() -> None:
-    """provider 块无尺寸字段 ⇒ 保守回退（按归一化上限估，绝不少算）。"""
+    """provider 块无尺寸字段 ⇒ 回退到 UNKNOWN，且该值对采样尺寸恒**保守**（≥ 真值）。"""
     msg = HumanMessage(content=[{"type": "text", "text": "x"}, _PROVIDER_BLOCK])
     assert image_tokens_in_message(msg) == IMAGE_TOKENS_UNKNOWN_SIZE
-    assert IMAGE_TOKENS_UNKNOWN_SIZE == image_tokens_for_size(
-        IMAGE_MAX_DIMENSION, IMAGE_MAX_DIMENSION
-    )
+    # 真·保守判据（非同义反复）：回退值不低于一组尺寸各自算出的成本。
+    for w, h in [(8, 6), (512, 512), (1024, 1024), (2048, 2048), (4000, 2000)]:
+        assert IMAGE_TOKENS_UNKNOWN_SIZE >= image_tokens_for_size(w, h)
+
+
+def test_standard_block_missing_dimensions_falls_back_conservatively() -> None:
+    """标准块缺 width/height（如遗留 3 键块）⇒ 同走 UNKNOWN 回退，绝不少算。"""
+    block = {"type": "image", "file_id": _AID, "mime_type": "image/png"}
+    msg = HumanMessage(content=[{"type": "text", "text": "x"}, block])
+    assert image_tokens_in_message(msg) == IMAGE_TOKENS_UNKNOWN_SIZE
+
+
+@pytest.mark.parametrize("bad", [True, False, 3.5, -1, "512", None])
+def test_non_negative_int_required_for_dimensions(bad) -> None:
+    """非「非负 int」的 width（bool/float/负数/字符串/缺失）⇒ UNKNOWN 回退。"""
+    block = _standard_block(512, 512)
+    block["width"] = bad
+    msg = HumanMessage(content=[{"type": "text", "text": "x"}, block])
+    assert image_tokens_in_message(msg) == IMAGE_TOKENS_UNKNOWN_SIZE
 
 
 def test_multiple_images_scale_with_each_size() -> None:
