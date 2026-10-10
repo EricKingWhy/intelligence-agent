@@ -11,10 +11,6 @@
  * 同样按 magic bytes 判型，声明与字节不符直接拒（`IMAGE_TYPE_MISMATCH`）。客户端
  * 先按字节判，是为了把「发出去才发现被拒」提前成「本地明确错误」（PRD 用户故事 24）。
  */
-import { open } from "node:fs/promises";
-
-/** 从文件头判型只需前 4100 字节（Pi 同值：覆盖最大图片头 + 动画 PNG 的 acTL 扫描）。 */
-const IMAGE_TYPE_SNIFF_BYTES = 4100;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export function detectSupportedImageMimeType(buffer: Uint8Array): string | null {
@@ -35,19 +31,6 @@ export function detectSupportedImageMimeType(buffer: Uint8Array): string | null 
     return "image/bmp";
   }
   return null;
-}
-
-export async function detectSupportedImageMimeTypeFromFile(
-  filePath: string,
-): Promise<string | null> {
-  const fileHandle = await open(filePath, "r");
-  try {
-    const buffer = Buffer.alloc(IMAGE_TYPE_SNIFF_BYTES);
-    const { bytesRead } = await fileHandle.read(buffer, 0, IMAGE_TYPE_SNIFF_BYTES, 0);
-    return detectSupportedImageMimeType(buffer.subarray(0, bytesRead));
-  } finally {
-    await fileHandle.close();
-  }
 }
 
 function isPng(buffer: Uint8Array): boolean {
