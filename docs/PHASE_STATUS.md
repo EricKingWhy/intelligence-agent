@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 `codex/issue-877-dsh-adapter`，同步 main 后 tip `5cd1bfbd` / tree `4980729a`）：实现和双轴修后审查完成；上游 Off 与 #865 Default 语义不等价，包保持 needs-adaptation 且禁用。当前树 pytest 7403 passed / 40 skipped / 51 deselected；TUI 214 passed / 3 skipped，Desktop 测试与两端类型检查通过；Gate-0 回执 `docs/gate/5cd1bfbd96c2400f4d7332030b170e50eeb1efc0.json`。Playwright E2E 540 passed，当前树与该次验证的 tracked `web/` 相同。用户已批准验证无问题后 push、开 PR、merge、关 issue。明细见月档 #877。
+- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 `codex/issue-877-dsh-adapter`；同步合并 `28947fc3` / tree `174f07e7`；验证 tip `3fd58966` / tree `87405ff5`）：实现与两轴复审完成；上游 Off 与 #865 Default 语义不等价，包保持 needs-adaptation 且禁用。全量 pytest 7471 passed、42 skipped、51 deselected，唯一覆盖闸门红项补齐审查行后针对性复验通过；Gate-0 6/6、E2E 540 passed、Web Vitest 1637 passed、TUI 232 passed / 3 skipped；Desktop 测试和两端类型检查通过。Issue 仍 OPEN + `in-progress`，本地验证完成，待 push/PR。明细见 Tracker 与月档 #877。
 
 - **2026-10-10 · #872 Git Skills T3（分支 `codex/issue-872-skill-git`，已验证代码点 `15ea25f3` / tree `b10fb266`）**：固定 Git Skill 来源与内容摘要，显式 update/rollback，待启用版本重启后切换；失败保留活动版本。两轴终审无未关闭 finding；Gate-0 6/6、clean 全量 pytest 7285P/28S/51D、focused 118P/2S。已同步 `origin/main` `c8f43a7c`（merge `fbe5fa1c`，仅新增 Gate-0 收据、代码与测试目录无变化）；Issue OPEN + `in-progress`。尚未 push/PR/merge，等用户批准。
 

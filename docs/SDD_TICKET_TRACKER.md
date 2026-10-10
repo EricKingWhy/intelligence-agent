@@ -8100,7 +8100,7 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **本票同时关闭 #958 登记的残余 ①**（过期重建 reject 导致 `stream rebuild:` / `switch failed:` 落进新会话 chat）。
 - **待批准**：两轴审查后 push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）；关单。
 
-## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；原始基线 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；同步 origin/main f5e5bb5ee2b0c1ec21fea010b3865c299dd69f1c；tip 5cd1bfbd96c2400f4d7332030b170e50eeb1efc0；Issue OPEN + in-progress）
+## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；原始基线 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；同步 origin/main 6ee4b51bcc72b09b6d74fd96017cd4f756fcffdf；同步合并 28947fc35649bd5060fa69af0218479373e4ef1b；验证 tip 3fd589663eaaa4d86e88edb6e26cf034f137bd27；Issue OPEN + in-progress）
 
 - **票面与范围**：为固定来源做静态预检，逐项映射 #865 项目原生模型能力、请求映射、键盘、主题与 reduced-motion 证据；禁止执行 DSH/Cordis、访问私有 DOM 或建立第二份模型状态。
 - **方案依据**：调研报告 `docs/research/2026-10-11-issue-877-plugin-preflight-research.md` 核对目标插件、DSH preflight/runtime、VS Code、Claude Code、Pi；目标 MIT 来源 commit `af723caf3387e64ae28aa69c4fd235b1b662e3ae`、tree `8a732b7c00ba5da3b06e122c243205db4ab190b1`。
