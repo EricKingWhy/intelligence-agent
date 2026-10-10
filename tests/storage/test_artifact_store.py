@@ -229,6 +229,7 @@ class TestFakeArtifactStoreInspectCharCap:
         loaded = await store.load(artifact.artifact_id)
         assert loaded.content == long_content
 
+
 class TestUploadedBytesContractWithoutDefault:
     """`load_uploaded_bytes` 没有默认实现（#933 M-01，ABI 级契约）。"""
 

@@ -51,10 +51,18 @@
 回执后）失败面是"有对象、没回执"：**别的会话读得到、本会话发不了**——归属静默失守，最不该出现的
 失败面。不变量仍是「**有回执 ⇒ 有对象**」（回执指向的字节永远真实存在）。
 
-**TDD**：`tests/attachments/test_byte_store_providers.py` 新增 6 条用例参数化跑 minio/s3 两遍
-（`remote_provider` fixture）——写两份 key 且顺序正确、fork 子会话读回父会话字节、旧 key 单读回落、
-归属只看本会话回执（且**不发**全局请求）、畸形 id 零请求、全局对象被篡改 → `KeyError`。
-红：`8 failed, 17 passed`；绿：`101 passed`（`tests/attachments` 全体）。
+**TDD**：`tests/attachments/test_byte_store_providers.py` 新增 **8 条用例**（其中 7 条由
+`remote_provider` fixture 参数化跑 minio/s3 两遍 ⇒ 该文件收集数 **9 → 25**：写两份 key 且顺序
+正确、fork 子会话读回父会话字节、旧 key 单读回落、归属只看本会话回执（且**不发**全局请求）、
+归属认升级前旧 key、字节/归属两侧畸形 id 零请求、全局对象被篡改 → `KeyError`；另 1 条
+`test_minio_load_bytes_roundtrip` 为 minio 单跑基线，原名
+`test_minio_save_bytes_uses_session_prefixed_key` 的用例改名 `..._writes_receipt_key_first`）。
+同票 `test_local_byte_store.py` 另加 M-16 两条（候选顺序契约 + 加一条候选的可扩展性），
+`tests/attachments` 全体 **85 → 103**。红：**`8 failed, 17 passed`**（当时该文件 17 条）；
+绿：**`101 passed`**（`tests/attachments` 全体，改动后复测 103）。
+
+> 口径订正：本行初稿写"新增 6 条用例"，与 `git show 6bd66d01` 的 8 个新 `def test_` 及上述
+> 实测收集数不符（修后重审 Standards P3 指出），已按实测改正。
 
 ## 2. M-04（P3）：`_publish_blob` staged 自证的恒真式
 
