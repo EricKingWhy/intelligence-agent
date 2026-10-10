@@ -1,10 +1,17 @@
 """#844：手动压缩被计划节闸门（`plan_section_mismatch`）误拒的复现与消融。
 
-本文件锁定方案 A 的两个调整（详见 `~/workspace/system/dispatch/844-plan.md`）：
+Issue #844 的根因：闸门拿摘要第 5 节与**全量** `derive_plan(events)` 逐字比对，
+而摘要只覆盖 early 段 `[prefix_end:cut]`。两个来源可见范围不同，两种子情形都
+不可满足：(1) 计划零 `in_progress` 仍有 `pending` 时 prompt 要罗列、闸门要
+`(none)`；(2) `in_progress` 的计划更新落在 cut 之后，对摘要器不可见却被要求
+逐字出现。
+
+本文件锁定方案 A 的两个调整：
 
 - **A-sem**：(none) 触发条件从「零 `in_progress`」放宽为「零**未完成项**」
   （`status != "completed"`，即无 `pending` 且无 `in_progress`）——对齐 prompt
-  「列出尚未完成的工作……无则写 (none)」的语义（`prompt/builtin.py:90`）。
+  「列出尚未完成的工作及其当前状态；无则写 (none)」的语义
+  （`src/agent_harness/prompt/builtin.py:102`）。
 - **A-vis**：闸门比较基准对齐摘要器的**可见窗口**——摘要只覆盖 early 段
   `[prefix_end:cut]`，落在 `cut` 之后的计划更新对摘要器不可见，闸门不再要求
   其逐字出现。
@@ -12,7 +19,10 @@
 用例分工（消融）：
 - R1 只 exercise A-sem（计划更新全在窗口内，A-vis 输入不变）；
 - R2 只 exercise A-vis（窗口内计划仍含 `in_progress` 项，A-sem 不参与判定）；
-- D1/D2 锁判别力保留；D4 锁「只放宽不收紧」；R3 锁自动路径逐字节等价。
+- D1/D2 锁判别力保留；D4 锁「只放宽不收紧」；R3 锁闸门输入与全量 derive 一致；
+- P2 回归：early 窗口出现无来源区间的合成消息（dangling tool call）时，闸门取
+  **可用**来源区间窗口、不整段回落全量（复现见该用例 docstring）。
+（无 D3 用例：D3「无清单会话闸门不启用」由既有空接缝语义覆盖，不另立用例。）
 
 fixture 写法沿用 `tests/context/test_plan_reinjection.py`（PLAN_ITEMS_* / ScriptedModel）。
 """
@@ -207,11 +217,17 @@ async def test_pending_items_with_none_section_still_passes(tmp_path):
 
 @pytest.mark.asyncio
 async def test_plan_as_of_cut_equals_full_plan_for_auto_path(tmp_path, monkeypatch):
-    """R3（自动路径结构等价）：计划更新在 early 窗口内 ⇒ 闸门输入 == 全量 derive。
+    """R3（窗口覆盖全部计划更新时，闸门输入 ≡ 全量 derive）：计划更新在 early 窗口内。
 
     捕获 `_validate_plan_section` 实际收到的 `plan_items`，与
     `derive_plan(session.events).items` 逐字节比对。计划更新落在窗口内时，
-    A-vis 的窗口过滤是恒等变换——自动路径典型态行为不变（结构保证，非巧合）。
+    A-vis 的 seq 过滤是恒等变换 ⇒ 输入与全量一致。
+
+    口径注意：这只证明**窗口覆盖全部计划更新**时的等价，不是「自动路径永不
+    受 A-vis 影响」的结构保证——自动与手动共用同一 `build()`，若触发时最新计划
+    更新落在 cut 之后，A-vis 同样会收窄比较基准（只放宽、不新增拒绝）。本用例
+    也不单独证明过滤分支被执行（回落分支下恒等同样成立）；过滤分支的执行由 R2
+    （计划更新在 cut 之后、断言不被要求）覆盖。
     """
     captured: dict[str, tuple] = {}
     original = compactor._validate_plan_section
@@ -264,3 +280,50 @@ async def test_recent_plan_update_not_required_in_summary(tmp_path):
     failures = [e for e in session.events if e.type == CONTEXT_COMPACTION_FAILED]
     assert [e.data["error_class"] for e in failures] == []
     assert any(event.type == COMPACTION_END for event in session.events)
+
+
+@pytest.mark.asyncio
+async def test_dangling_source_range_does_not_fall_back_to_full_plan(tmp_path):
+    """P2 回归：early 窗口含无来源区间的合成消息（dangling tool call）时，闸门取
+    **可用**来源区间窗口，不整段回落全量 derive。
+
+    复现（修前）：early 窗口里一条 `MODEL_COMPLETED` 带 `tool_calls` 但无匹配
+    `TOOL_RESULT` ⇒ `derive` 注入 synthetic dangling `ToolMessage`（来源区间 None）。
+    旧实现要求 `early_ranges` **全部**非 None 才启用窗口过滤，一条 None 即整段
+    回落全量 ⇒ early 窗口内忠实总结 V1（item2 in_progress）却被拿去和 cut 之后的
+    V2（item3 in_progress）比对 ⇒ 误拒 `plan_section_mismatch`（复现读数：
+    error_class=['plan_section_mismatch','plan_section_mismatch']、零 bracket）。
+
+    修后：窗口取可用区间最大值，V2 被排除 ⇒ 闸门不再报 `plan_section_mismatch`。
+    该会话因来源区间缺失仍无法持久化（无来源区间时成功路径给出*准确*的
+    `source_range_unavailable` 诊断，见 compactor 的 T4/source_seq 判据——那条
+    判据要区间完整，与本闸门**故意**不同口径），故此处只断言不出现
+    `plan_section_mismatch`、且零 bracket。
+    """
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "开始任务。"})
+    # early 窗口内：带 tool_calls 但无 TOOL_RESULT ⇒ derive 注入 synthetic dangling
+    session.append(MODEL_COMPLETED, {
+        "content": "",
+        "tool_calls": [{"id": "dangling-1", "name": "read", "args": {"path": "x"}}],
+    })
+    _apply_plan(session, PLAN_ITEMS_V1)  # 窗口内
+    session.append(MODEL_COMPLETED, {"content": "历史 " * 900})
+    session.append(USER_MESSAGE, {"content": "current request"})  # cut
+    _apply_plan(session, PLAN_ITEMS_V2)  # cut 之后
+    model = ScriptedModel([
+        AIMessage(content=_model_sections("正在实现清单重注入。")),
+        AIMessage(content=_model_sections("正在实现清单重注入。")),
+    ])
+
+    await ContextBuilder(
+        model, max_context_tokens=10000, auto_compact_threshold=0.3,
+    ).build(session)
+
+    failures = [e for e in session.events if e.type == CONTEXT_COMPACTION_FAILED]
+    classes = [e.data["error_class"] for e in failures]
+    assert "plan_section_mismatch" not in classes
+    assert not any(
+        event.type in {COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END}
+        for event in session.events
+    )
