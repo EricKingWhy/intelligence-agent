@@ -1,0 +1,1 @@
+2026-10-10	#843 修回（独立双轴审查 P3 必修）：tui/src/app.ts 计数规则注释重写——只有 error 计数、ended（干净收束）清零、abort 路径由 generation/running 守卫在计数前丢弃（原注释"abort 竞态下的 ended"与代码/sse.ts 三方矛盾）；P4 顺手：vscode-languageclient 注释"同值同语义"弱化为"同值、语义相近"。纯注释改动，零行为代码。tui npm test 206/204 pass/0 fail/2 skipped；npx tsc --noEmit exit 0。	ead68bf3983b2ad4fefd47f9e92b186af7053eee..c43b3c71332e299e3732ac121f4db5cbc774cf70
