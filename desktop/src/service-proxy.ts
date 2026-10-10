@@ -55,7 +55,7 @@ export interface ServiceProxyOptions {
 /** A running proxy: the origin to load the window from, and its shutdown. */
 export interface ServiceProxy {
   readonly origin: string
-  /** Initial navigation URL carrying the one-shot launch token (#891). */
+  /** Initial navigation URL carrying the per-start launch token (#891). */
   readonly launchUrl: string
   close(): Promise<void>
 }
@@ -113,7 +113,16 @@ const COOKIE_PAYLOAD_VERSION = 1
 /** 32 bytes of entropy for both the launch token and the HMAC secret. */
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
-/** Session lifetime when production does not pass `cookieMaxAgeMs`. */
+/**
+ * Session lifetime when production does not pass `cookieMaxAgeMs`.
+ *
+ * There is no sliding renewal: once the window stays open past this lifetime,
+ * every request is refused with 401 until the window is reopened (the 401 body
+ * already carries that diagnostic hint). Sliding renewal was evaluated and
+ * rejected: the WebSocket upgrade cannot carry a Set-Cookie, so re-issuing on
+ * every hop would need a full-path rework — a cost out of proportion for a P4
+ * edge case whose recovery is simply reopening the window.
+ */
 const DEFAULT_COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/
 
@@ -179,7 +188,7 @@ function signature(secret: Buffer, body: string): Buffer {
 
 function encodeCookie(payload: CookiePayload, secret: Buffer): string {
   const body = encodeBase64Url(Buffer.from(JSON.stringify(payload), 'utf8'))
-  return `v1.${body}.${encodeBase64Url(signature(secret, body))}`
+  return `v${String(COOKIE_PAYLOAD_VERSION)}.${body}.${encodeBase64Url(signature(secret, body))}`
 }
 
 function sessionCookie(value: string, expiresAt: number): string {
@@ -195,7 +204,7 @@ function sessionCookie(value: string, expiresAt: number): string {
 function decodeCookie(value: string, secret: Buffer): CookiePayload | undefined {
   const parts = value.split('.')
   const [version, body, encodedSignature] = parts
-  if (parts.length !== 3 || version !== 'v1' || body === undefined || encodedSignature === undefined) {
+  if (parts.length !== 3 || version !== `v${String(COOKIE_PAYLOAD_VERSION)}` || body === undefined || encodedSignature === undefined) {
     return undefined
   }
   const expected = signature(secret, body)
@@ -259,7 +268,15 @@ function writeUnauthorized(response: ServerResponse): void {
  * false the response has already been written.
  */
 function authorizeRequest(request: IncomingMessage, response: ServerResponse, auth: CallerAuth): boolean {
-  const url = new URL(request.url ?? '/', 'http://proxy.invalid')
+  // An absolute-form request line (e.g. `GET http://example.com:notaport/ HTTP/1.1`)
+  // makes `new URL` throw synchronously; uncaught, it would crash the shell. Fail closed.
+  let url: URL
+  try {
+    url = new URL(request.url ?? '/', 'http://proxy.invalid')
+  } catch {
+    writeUnauthorized(response)
+    return false
+  }
   const tokens = url.searchParams.getAll(TOKEN_QUERY)
   if (tokens.length > 0) {
     const authority = requestAuthority(request.headers)
@@ -301,6 +318,22 @@ function authorizeRequest(request: IncomingMessage, response: ServerResponse, au
 }
 
 /**
+ * Remove the launch-token query parameter from a request path before it is
+ * forwarded upstream: a request that already carries a valid cookie but still
+ * has `?token=` in its URL (e.g. `GET /api/ws?token=<launch>`) must not leak
+ * the token into the service's logs. Everything else in the query is kept.
+ */
+function stripLaunchToken(path: string): string {
+  const queryStart = path.indexOf('?')
+  if (queryStart === -1) return path
+  const params = new URLSearchParams(path.slice(queryStart + 1))
+  if (!params.has(TOKEN_QUERY)) return path
+  params.delete(TOKEN_QUERY)
+  const rest = params.toString()
+  return rest === '' ? path.slice(0, queryStart) : `${path.slice(0, queryStart)}?${rest}`
+}
+
+/**
  * Start the proxy on a random loopback port.
  * @param options - upstream service origin, host token and test seams.
  * @returns the origin / launch URL the window must load, plus `close()`.
@@ -316,7 +349,7 @@ export async function startServiceProxy(options: ServiceProxyOptions): Promise<S
     host: target.host,
     port: target.port,
     method: request.method,
-    path: request.url,
+    path: stripLaunchToken(request.url ?? '/'),
     headers: upstreamHeaders(request, options.token),
   })
 

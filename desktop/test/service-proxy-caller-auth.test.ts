@@ -14,7 +14,7 @@
  *
  * `launchToken` / `cookieMaxAgeMs` are test-only seams: production never
  * passes them, and `startServiceProxy` mints both when they are absent. They
- * are supplied here (via a cast against today's interface) so the launch
+ * are supplied here as ordinary `ServiceProxyOptions` fields so the launch
  * flow and expiry can be exercised deterministically.
  */
 import { describe, it } from 'node:test'
@@ -28,16 +28,11 @@ import { startServiceProxy, type ServiceProxy, type ServiceProxyOptions } from '
 const TOKEN = 'unit-test-host-token'
 const LAUNCH = 'unit-test-launch-token'
 
-/** Options shape the proxy will grow in this ticket (cast until then). */
-type CallerAuthOptions = ServiceProxyOptions & {
-  readonly launchToken?: string
-  readonly cookieMaxAgeMs?: number
-}
-
 interface Upstream {
   readonly origin: string
   readonly seen: { method: string; url: string; authorization?: string; body: string }[]
   readonly upgrades: string[]
+  readonly upgradeUrls: string[]
   close(): Promise<void>
 }
 
@@ -45,6 +40,7 @@ interface Upstream {
 async function startUpstream(options: { readonly refuseUpgrade?: boolean } = {}): Promise<Upstream> {
   const seen: Upstream['seen'] = []
   const upgrades: string[] = []
+  const upgradeUrls: string[] = []
   const upgraded = new Set<{ destroy(): void }>()
   const server = createServer((request, response) => {
     const chunks: Buffer[] = []
@@ -67,6 +63,7 @@ async function startUpstream(options: { readonly refuseUpgrade?: boolean } = {})
   })
   server.on('upgrade', (request, socket) => {
     upgrades.push(request.headers.authorization ?? 'none')
+    upgradeUrls.push(request.url ?? '')
     if (options.refuseUpgrade === true) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n')
       return
@@ -82,6 +79,7 @@ async function startUpstream(options: { readonly refuseUpgrade?: boolean } = {})
     origin: `http://127.0.0.1:${String(address.port)}`,
     seen,
     upgrades,
+    upgradeUrls,
     close: () => new Promise<void>((resolve) => {
       for (const socket of upgraded) socket.destroy()
       server.closeAllConnections()
@@ -90,8 +88,8 @@ async function startUpstream(options: { readonly refuseUpgrade?: boolean } = {})
   }
 }
 
-function startProxy(options: CallerAuthOptions): Promise<ServiceProxy> {
-  return startServiceProxy(options as ServiceProxyOptions)
+function startProxy(options: ServiceProxyOptions): Promise<ServiceProxy> {
+  return startServiceProxy(options)
 }
 
 /** The initial navigation URL the shell must load the window from. */
@@ -141,7 +139,7 @@ function rawGet(origin: string, pathAndQuery: string, headers: Record<string, st
 }
 
 /** Raw WebSocket handshake, returning what the proxy wrote to the socket. */
-function rawHandshake(origin: string, headers: Record<string, string>): Promise<string> {
+function rawHandshake(origin: string, headers: Record<string, string>, path = '/api/ws'): Promise<string> {
   return new Promise((resolve) => {
     const url = new URL(origin)
     const socket = connect({ host: url.hostname, port: Number(url.port) })
@@ -149,7 +147,7 @@ function rawHandshake(origin: string, headers: Record<string, string>): Promise<
     socket.on('data', (chunk: Buffer) => { chunks.push(chunk.toString('utf8')) })
     socket.on('connect', () => {
       const lines = [
-        'GET /api/ws HTTP/1.1',
+        `GET ${path} HTTP/1.1`,
         `Host: ${url.host}`,
         'Upgrade: websocket',
         'Connection: Upgrade',
@@ -348,12 +346,44 @@ describe('proxy caller authentication (#891 P2)', () => {
     const upstream = await startUpstream()
     const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN, launchToken: LAUNCH })
     try {
-      // A well-formed cookie whose signature decodes to the wrong byte length
-      // makes a constant-time compare throw unless verification is guarded.
+      // A well-formed cookie whose signature is not valid base64url of the
+      // expected byte length is rejected by the decode/length guards before
+      // any constant-time compare runs; either way the request must 401 and
+      // never reach the upstream.
       const cookie = `ia-proxy-auth=v1.${'AAAA'.repeat(11)}.short-sig`
       const response = await fetch(`${proxy.origin}/api/health`, { headers: { cookie } })
       assert.equal(response.status, 401)
       assert.equal(upstream.seen.length, 0, 'a verification failure must not reach the service')
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
+  })
+
+  it('survives an absolute-form request line that new URL cannot parse (401, no crash)', async () => {
+    const upstream = await startUpstream()
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN, launchToken: LAUNCH })
+    try {
+      const response = await rawGet(proxy.origin, 'http://example.com:notaport/', {})
+      assert.match(response, /HTTP\/1\.1 401/)
+      assert.equal(upstream.seen.length, 0, 'an unparseable request must not reach the service')
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
+  })
+
+  it('strips the launch token from the upgraded request before it reaches the upstream', async () => {
+    const upstream = await startUpstream()
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN, launchToken: LAUNCH })
+    try {
+      const cookie = await mintSessionCookie(proxy)
+      const received = await rawHandshake(proxy.origin, { cookie }, `/api/ws?token=${LAUNCH}&x=1`)
+      assert.match(received, /101 Switching Protocols/)
+      assert.equal(upstream.upgrades[0], `Bearer ${TOKEN}`, 'the host token must still be injected')
+      const url = new URL(`http://upstream.invalid${upstream.upgradeUrls[0] ?? ''}`)
+      assert.equal(url.searchParams.get('token'), null, 'the launch token must not be forwarded upstream')
+      assert.equal(url.searchParams.get('x'), '1', 'other query parameters must be preserved')
     } finally {
       await proxy.close()
       await upstream.close()
