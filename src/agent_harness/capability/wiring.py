@@ -319,7 +319,23 @@ async def _wire_skills(
     except SkillPackageError as error:
         logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
         enabled_managed_skill_digests = {}
+    try:
+        # #874 T5：全局安装根与自动发现根已分开（T4），但「装了什么」不等于「谁能装配」。
+        # 只有本项目显式选择 global 的包才进 catalog；被选版本失效时**不回落**项目版，
+        # 该全局贡献降级缺席并在此留痕（spec 08 §6.3：导入包不得改变 Agent Core 的
+        # 启动条件，所以是响亮告警 + 缺席，不是装配失败）。
+        enabled_global_skill_digests = package_manager.enabled_global_skill_digests()
+    except SkillPackageError as error:
+        logger.warning(
+            "this project's global Skill package selection cannot be honoured; "
+            "those Skills stay disabled (no fallback to project scope): %s",
+            error,
+        )
+        enabled_global_skill_digests = {}
+    global_managed_dir = global_package_manager.managed_skills_dir
     directories = [global_dir, project_dir, managed_dir]
+    if enabled_global_skill_digests:
+        directories.append(global_managed_dir)
     directories.extend(additional_directories)
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
@@ -327,9 +343,14 @@ async def _wire_skills(
         directories=directories,
         manual_paths=manual_paths,
         project_dir=project_dir,
-        managed_directory=managed_dir,
-        enabled_managed_skills=set(enabled_managed_skill_digests),
-        enabled_managed_skill_digests=enabled_managed_skill_digests,
+        managed_directories={
+            "project": managed_dir,
+            "global": global_managed_dir,
+        },
+        enabled_managed_digests={
+            "project": enabled_managed_skill_digests,
+            "global": enabled_global_skill_digests,
+        },
     )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，

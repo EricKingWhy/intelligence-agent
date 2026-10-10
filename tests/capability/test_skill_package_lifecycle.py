@@ -78,9 +78,8 @@ def _load_installed_skill(manager: SkillPackageManager) -> tuple[str, Path]:
     discovery = SkillDiscovery(
         directories=[manager.project_skills_dir, manager.managed_skills_dir],
         project_dir=manager.project_skills_dir,
-        managed_directory=manager.managed_skills_dir,
-        enabled_managed_skills=set(digests),
-        enabled_managed_skill_digests=digests,
+        managed_directories={"project": manager.managed_skills_dir},
+        enabled_managed_digests={"project": digests},
     )
     tool = LoadSkillTool(SkillCapability(discovery))
     result = asyncio.run(tool.execute(tool.args_schema(name="sample-skill")))
@@ -295,9 +294,8 @@ def test_install_snapshots_complete_package_and_enables_only_after_explicit_sele
     discovery = SkillDiscovery(
         directories=[restarted.project_skills_dir, restarted.managed_skills_dir],
         project_dir=restarted.project_skills_dir,
-        managed_directory=restarted.managed_skills_dir,
-        enabled_managed_skills=set(restarted.enabled_skill_digests()),
-        enabled_managed_skill_digests=restarted.enabled_skill_digests(),
+        managed_directories={"project": restarted.managed_skills_dir},
+        enabled_managed_digests={"project": restarted.enabled_skill_digests()},
     )
     catalog = discovery.discover()
 
@@ -490,9 +488,8 @@ def test_loaded_package_reports_root_for_relative_resources(tmp_path: Path) -> N
     discovery = SkillDiscovery(
         directories=[manager.project_skills_dir, manager.managed_skills_dir],
         project_dir=manager.project_skills_dir,
-        managed_directory=manager.managed_skills_dir,
-        enabled_managed_skills=set(digests),
-        enabled_managed_skill_digests=digests,
+        managed_directories={"project": manager.managed_skills_dir},
+        enabled_managed_digests={"project": digests},
     )
     tool = LoadSkillTool(SkillCapability(discovery))
 
@@ -518,7 +515,7 @@ def test_promoted_project_skill_cannot_shadow_an_installed_snapshot(tmp_path: Pa
     discovery = SkillDiscovery(
         directories=[manager.project_skills_dir, manager.managed_skills_dir],
         project_dir=manager.project_skills_dir,
-        managed_directory=manager.managed_skills_dir,
+        managed_directories={"project": manager.managed_skills_dir},
     )
 
     with pytest.raises(ValueError, match="managed Skill 'sample-skill' already exists"):
@@ -647,9 +644,8 @@ def test_discovery_drops_managed_skill_when_a_conflict_appears_after_snapshot(
 
     catalog = SkillDiscovery(
         directories=[manager.project_skills_dir, manager.managed_skills_dir],
-        managed_directory=manager.managed_skills_dir,
-        enabled_managed_skills=set(digests),
-        enabled_managed_skill_digests=digests,
+        managed_directories={"project": manager.managed_skills_dir},
+        enabled_managed_digests={"project": digests},
     ).discover()
 
     assert not any(entry.name == "sample-skill" for entry in catalog.entries)
@@ -737,18 +733,16 @@ def test_managed_package_cannot_bypass_saved_selection_through_path_alias(tmp_pa
 
     disabled = SkillDiscovery(
         directories=[alias],
-        managed_directory=managed,
-        enabled_managed_skills=manager.enabled_skill_names(),
-        enabled_managed_skill_digests=manager.enabled_skill_digests(),
+        managed_directories={"project": managed},
+        enabled_managed_digests={"project": manager.enabled_skill_digests()},
     ).discover()
     assert disabled.entries == []
 
     manager.enable("sample-skill")
     enabled = SkillDiscovery(
         directories=[alias],
-        managed_directory=managed,
-        enabled_managed_skills=manager.enabled_skill_names(),
-        enabled_managed_skill_digests=manager.enabled_skill_digests(),
+        managed_directories={"project": managed},
+        enabled_managed_digests={"project": manager.enabled_skill_digests()},
     ).discover()
     assert [entry.name for entry in enabled.entries] == ["sample-skill"]
 
@@ -769,9 +763,8 @@ def test_managed_directory_swap_cannot_expose_a_previously_enabled_name(tmp_path
 
     catalog = SkillDiscovery(
         directories=[managed],
-        managed_directory=managed,
-        enabled_managed_skills=set(previously_enabled),
-        enabled_managed_skill_digests=previously_enabled,
+        managed_directories={"project": managed},
+        enabled_managed_digests={"project": previously_enabled},
     ).discover()
 
     assert catalog.entries == []
@@ -829,9 +822,8 @@ def test_lazy_runtime_load_refuses_skill_body_changed_after_discovery(tmp_path: 
     manager.enable("sample-skill")
     discovery = SkillDiscovery(
         directories=[manager.managed_skills_dir],
-        managed_directory=manager.managed_skills_dir,
-        enabled_managed_skills=set(manager.enabled_skill_digests()),
-        enabled_managed_skill_digests=manager.enabled_skill_digests(),
+        managed_directories={"project": manager.managed_skills_dir},
+        enabled_managed_digests={"project": manager.enabled_skill_digests()},
     )
     entry = discovery.discover().entries[0]
     skill_file = manager.managed_skills_dir / "sample-skill" / "SKILL.md"
@@ -1044,7 +1036,7 @@ def test_global_git_package_is_shared_and_lifecycle_isolated_from_projects(tmp_p
     assert global_b.list_packages() == global_a.list_packages()
     assert global_a.manifest_path == global_b.manifest_path
     manifest_before_enable = global_a.manifest_path.read_bytes()
-    with pytest.raises(SkillPackageError, match="explicit project selection"):
+    with pytest.raises(SkillPackageError, match="enabled per project"):
         global_a.enable("sample-skill")
     assert global_a.manifest_path.read_bytes() == manifest_before_enable
     for manager, snapshot in project_states:
