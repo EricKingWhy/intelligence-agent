@@ -14,6 +14,7 @@
  * ⑤ 切会话重置熔断（新会话重新给满阈值，不被上一会话的耗尽状态锁死）。
  * ⑥ truncated（#859）：先等 GET /events 重建完成、再按重建游标续订；重建失败与连接失败同一退避/额度。
  * ⑦ 切会话（#958）：旧会话迟到的 GET /events 重建结果被丢弃，不改新会话 state / 游标。
+ * ⑧ 连续切会话 A→B→C（#958）：被取代的 switchSession 不再起订阅循环，C 只有一条 /stream。
  *
  * 全部经**注入 fetch**（`AppOptions.fetchImpl`）驱动：不碰真网络、不碰真 TTY。
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` / `app-images.test.ts` 同一套受控 cast 访问面）。
@@ -391,5 +392,42 @@ test("#958 切会话后旧会话迟到的 GET /events 结果被丢弃：新会�
     assert.equal(app.cursor.lastSeq, 2, "旧会话的 maxSeq 不得回填到新会话游标");
   } finally {
     halt(app);
+  }
+});
+
+test("#958 连续切会话 A→B→C：被取代的 switchSession 不再起订阅循环，C 只有一条 /stream", async () => {
+  const streams: string[] = [];
+  let releaseS2: () => void = () => {};
+  const s2Gate = new Promise<void>((resolve) => {
+    releaseS2 = resolve;
+  });
+  const fetchFn = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input));
+    const sid = url.pathname.split("/").find((part) => /^s\d$/.test(part)) ?? "?";
+    if (url.pathname.endsWith("/events")) {
+      if (sid === "s2") await s2Gate; // B 的重建挂起，直到切到 C 完成后才放行
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    streams.push(sid);
+    // 订阅保持打开直到被 abort：一条循环恰好对应一条 /stream，不靠计时。
+    return new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals & { abort: AbortController };
+  try {
+    const toB = app.switchSession("s2");
+    await app.switchSession("s3");
+    await waitFor(() => streams.includes("s3"));
+    releaseS2();
+    await toB;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(streams, ["s3"], "C 只能有一条订阅；被取代的 B 不得再起循环");
+  } finally {
+    halt(app);
+    app.abort.abort();
   }
 });
