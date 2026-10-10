@@ -416,16 +416,17 @@ class TestEditNotFoundHint:
         assert sandbox.read_text("f.py") == content
 
     @pytest.mark.asyncio
-    async def test_mixed_file_old_kind_only_at_tail_warns_rewrite_may_miss(
+    async def test_mixed_file_old_kind_subset_position_mismatch_warns_rewrite_may_miss(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
         """#851 四轮修回 P3-1：混行尾文件里 old 的行尾与对应段落不一致 ⇒ 改写后仍不命中。
 
         文件 `a = 1\\nb = 2\\nc = 3\\r\\n` 的行尾是 LF+CRLF 混用，CRLF 只在**末尾**
         那一处；old `a = 1\\r\\nb = 2\\r\\n` 把两处都写成 CRLF，与对应的前两段（LF）
-        都不一致 ⇒ `count()==0`。真实成因是**逐位置行尾错配**，不是「末端独有」：
-        折平后命中即位置对齐，逐位置照抄对应段落行尾改写（`a = 1\\nb = 2\\n`）就
-        `count()==1`（下一条机械断言钉死）。提示须给出这条可执行的改写指引。
+        都不一致 ⇒ `count()==0`。真实成因是**逐位置行尾错配**，不是「末端独有」
+        （用例名与 docstring 一致，五轮修回 P4-1 改名）：折平后命中即位置对齐，
+        逐位置照抄对应段落行尾改写（`a = 1\\nb = 2\\n`）就 `count()==1`
+        （下一条机械断言钉死）。提示须给出这条可执行的改写指引。
         """
         content = "a = 1\nb = 2\nc = 3\r\n"
         old = "a = 1\r\nb = 2\r\n"
@@ -443,6 +444,8 @@ class TestEditNotFoundHint:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
         assert "对应段落的行尾" in msg
+        assert "逐位置照抄" in msg
+        assert "不可能命中，需先纠正该处" in msg
         assert "末端" not in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == content

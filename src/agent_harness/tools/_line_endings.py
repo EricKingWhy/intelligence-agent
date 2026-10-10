@@ -121,9 +121,11 @@ def not_found_hint(content: str, old_string: str) -> str:
 
     两侧行尾种类相同时（各段落位置不同）也给谨慎提示，不吞掉（#851 二轮修回 P3）。
 
-    文件行尾单一、两侧种类不等时（四轮修回 P4-5 补记）：落到末尾那条提示，
-    直接给「按该文件的行尾改写 old_string」—— 这种文件上归一化路径本就启用，
-    照文件行尾改写即字节精确命中，无需再提混行尾。
+    文件行尾单一、两侧种类不等时（四轮修回 P4-5 补记；五轮修回 P4-3 更正依据句）：
+    落到末尾那条提示，直接给「按该文件的行尾改写 old_string」。本支 file_kinds 只有
+    一种：归一化路径在 CRLF / LF 上启用，整段由裸 CR 分隔时**关闭**
+    （`dominant_newline("a\\rb\\r")` 返回 None，只剩字节精确匹配）。按文件行尾改写
+    只是命中的**必要**条件、不是充分条件（内容本身还得逐字对得上）。无需再提混行尾。
     """
     mismatch = line_ending_mismatch(content, old_string)
     if mismatch is None:
@@ -142,7 +144,8 @@ def not_found_hint(content: str, old_string: str) -> str:
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}。"
             f"可尝试逐位置照抄对应段落的行尾改写 old_string 后重试；"
-            f"若 old_string 中某处行尾与对应段落不一致，改写后仍可能不命中；"
+            f"若 old_string 中某处行尾与对应段落不一致，按这种改写逐位置照抄本就不"
+            f"可能命中，需先纠正该处；"
             f"若仍不命中，改用 write 整文件重写{_WRITE_SUFFIX}"
         )
     if len(file_kinds) > 1:
