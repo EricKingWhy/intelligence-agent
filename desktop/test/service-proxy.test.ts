@@ -5,6 +5,10 @@
  * host token, and it must attach that token to both plain HTTP and the live
  * channel's WebSocket handshake (Electron's `webRequest` never sees the upgrade —
  * measured 2026-10-07, /d/w21-work/header-probe).
+ *
+ * #891 P2: every request must first pass the caller check — a launch exchange
+ * (`GET /?token=…`) mints the session cookie and 302s to a clean path; the callers
+ * below present that cookie the way the real window does after the redirect.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -12,9 +16,10 @@ import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { once } from 'node:events'
 
-import { parseLoopbackOrigin, startServiceProxy, upstreamHeaders } from '../src/service-proxy.ts'
+import { parseLoopbackOrigin, startServiceProxy, upstreamHeaders, type ServiceProxy, type ServiceProxyOptions } from '../src/service-proxy.ts'
 
 const TOKEN = 'unit-test-token'
+const LAUNCH = 'unit-test-launch-token'
 
 interface Upstream {
   readonly origin: string
@@ -76,6 +81,32 @@ async function startUpstream(options: { readonly refuseUpgrade?: boolean } = {})
   }
 }
 
+/** The initial navigation URL the shell must load the window from. */
+function launchUrl(origin: string, launch: string): string {
+  return `${origin}/?token=${encodeURIComponent(launch)}`
+}
+
+/** First `name=value` of the minted cookie, or undefined when none is set. */
+function sessionCookieFrom(response: Response): string | undefined {
+  const setCookie = response.headers.get('set-cookie')
+  if (setCookie === null || setCookie === undefined) return undefined
+  const first = setCookie.split(';')[0]
+  return first === undefined ? undefined : first
+}
+
+/** Perform the launch exchange and return the minted cookie (the #891 flow). */
+async function mintSessionCookie(proxy: ServiceProxy): Promise<string> {
+  const exchange = await fetch(launchUrl(proxy.origin, LAUNCH), { redirect: 'manual' })
+  assert.equal(exchange.status, 302, 'the launch exchange must redirect, not serve')
+  const cookie = sessionCookieFrom(exchange)
+  assert.ok(cookie, 'the launch exchange must mint a session cookie')
+  return cookie
+}
+
+function startProxy(options: ServiceProxyOptions): Promise<ServiceProxy> {
+  return startServiceProxy({ ...options, launchToken: LAUNCH })
+}
+
 describe('parseLoopbackOrigin', () => {
   it('accepts a loopback http origin', () => {
     assert.deepEqual(parseLoopbackOrigin('http://127.0.0.1:60942'), { host: '127.0.0.1', port: 60942 })
@@ -112,14 +143,15 @@ describe('upstreamHeaders', () => {
 describe('startServiceProxy', () => {
   it('serves the renderer page and forwards the host token instead of the page credential', async () => {
     const upstream = await startUpstream()
-    const proxy = await startServiceProxy({ serviceOrigin: upstream.origin, token: TOKEN })
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN })
     try {
-      const page = await fetch(`${proxy.origin}/`)
+      const cookie = await mintSessionCookie(proxy)
+      const page = await fetch(`${proxy.origin}/`, { headers: { cookie } })
       assert.equal(page.status, 200)
       assert.match(await page.text(), /id="root"/)
       assert.equal(upstream.seen[0]?.authorization, `Bearer ${TOKEN}`)
 
-      const api = await fetch(`${proxy.origin}/api/health`, { headers: { authorization: 'Bearer page-supplied' } })
+      const api = await fetch(`${proxy.origin}/api/health`, { headers: { cookie, authorization: 'Bearer page-supplied' } })
       assert.equal(api.status, 200)
       assert.equal(upstream.seen[1]?.authorization, `Bearer ${TOKEN}`, 'the page credential must not reach the service')
       assert.equal(upstream.seen[1]?.url, '/api/health')
@@ -131,11 +163,12 @@ describe('startServiceProxy', () => {
 
   it('preserves method, path, query and body', async () => {
     const upstream = await startUpstream()
-    const proxy = await startServiceProxy({ serviceOrigin: upstream.origin, token: TOKEN })
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN })
     try {
+      const cookie = await mintSessionCookie(proxy)
       const response = await fetch(`${proxy.origin}/api/sessions?limit=2`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { cookie, 'content-type': 'application/json' },
         body: JSON.stringify({ client_id: 'desktop' }),
       })
       assert.equal(response.status, 200)
@@ -151,15 +184,16 @@ describe('startServiceProxy', () => {
 
   it('attaches the token to the live channel WebSocket handshake', async () => {
     const upstream = await startUpstream()
-    const proxy = await startServiceProxy({ serviceOrigin: upstream.origin, token: TOKEN })
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN })
     const address = new URL(proxy.origin)
     try {
+      const cookie = await mintSessionCookie(proxy)
       const socket = connect({ host: address.hostname, port: Number(address.port) })
       const chunks: string[] = []
       socket.on('data', (chunk: Buffer) => { chunks.push(chunk.toString('utf8')) })
       await once(socket, 'connect')
       socket.write(
-        'GET /api/ws HTTP/1.1\r\nHost: ' + address.host + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+        'GET /api/ws HTTP/1.1\r\nHost: ' + address.host + '\r\nCookie: ' + cookie + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
         + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
       )
       await new Promise((resolve) => { setTimeout(resolve, 200) })
@@ -174,15 +208,16 @@ describe('startServiceProxy', () => {
 
   it('relays a refused handshake instead of hanging the live channel', async () => {
     const upstream = await startUpstream({ refuseUpgrade: true })
-    const proxy = await startServiceProxy({ serviceOrigin: upstream.origin, token: TOKEN })
+    const proxy = await startProxy({ serviceOrigin: upstream.origin, token: TOKEN })
     const address = new URL(proxy.origin)
     try {
+      const cookie = await mintSessionCookie(proxy)
       const socket = connect({ host: address.hostname, port: Number(address.port) })
       const chunks: string[] = []
       socket.on('data', (chunk: Buffer) => { chunks.push(chunk.toString('utf8')) })
       await once(socket, 'connect')
       socket.write(
-        'GET /api/ws HTTP/1.1\r\nHost: ' + address.host + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+        'GET /api/ws HTTP/1.1\r\nHost: ' + address.host + '\r\nCookie: ' + cookie + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
         + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
       )
       await once(socket, 'close')
@@ -198,9 +233,12 @@ describe('startServiceProxy', () => {
     const upstream = await startUpstream()
     const origin = upstream.origin
     await upstream.close()
-    const proxy = await startServiceProxy({ serviceOrigin: origin, token: TOKEN })
+    const proxy = await startProxy({ serviceOrigin: origin, token: TOKEN })
     try {
-      const response = await fetch(`${proxy.origin}/api/health`)
+      // The launch exchange is handled by the proxy itself and does not touch
+      // the service, so a session cookie can be minted even once it is gone.
+      const cookie = await mintSessionCookie(proxy)
+      const response = await fetch(`${proxy.origin}/api/health`, { headers: { cookie } })
       assert.equal(response.status, 502)
       assert.match(await response.text(), /service unreachable/)
     } finally {
