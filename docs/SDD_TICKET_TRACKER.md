@@ -8053,3 +8053,16 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **残余（登记不修，不在本票 scope）**：Correctness 轴 P3——`SessionList.tsx` 的「新建任务」「加入项目」路径存在**同类**「菜单关闭归还 vs 挂载即 autoFocus 浮层」竞态（未复现失败；两条路径走 `TaskCreationDialog`/`AttachToProjectDialog`、不经 `focusMovedIntoRename` 分支）；Correctness 轴 P4——Windows nt 分支无 CI 自动覆盖。
 - **待办（用户侧，不自行声称）**：票面要求 4「本机（Windows）全绿」= agent 在 Linux 上只做平台中立改写 + POSIX 面 CI 验证，**Windows 本机需用户在 Windows 机实跑**确认（`pytest tests/attachments/test_local_byte_store.py` 应 36 passed / 0 skipped）。`:173` 与 `:172` 同族同根因，回归例已并案覆盖（含 `aria-invalid`）。
 - **待批准**：push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）。
+
+## #859 [W-21] TUI 丢弃 stream/truncated 控制帧（2026-10-11；分支 `claude/859-tui-truncated-control-frame`，基点 `origin/main` = `c0ac9527`；**两轴审查待做、push/PR 待批准，未集成**）
+
+- **范围锁**：只动 `tui/src/events.ts`（+`parseTruncatedControl`）、`tui/src/sse.ts`（`consumeSseBody` 先识别控制帧再走 `parseEnvelope`）、`tui/test/sse.test.ts`（+2 例）。`parseEnvelope` 一字未改；服务端零改动。
+- **票面核实（未证伪）**：真服务（`tests/web/test_web_stream.py` 的 `_start_server` + `STREAM_REPLAY_MAX_EVENTS=5`，隔离克隆内 ad-hoc 采集、不入库）抓到 `/stream?after_seq=0` 原始字节 = 单帧 `stream/truncated`，keys 无 `time`（`latest_seq`=20）；`serialization.py:71 build_truncated_control` docstring 明写「客户端只按 type + data 分派」；GLOSSARY「after_seq 重连」定义为「无 seq、非运行事实」的控制帧 ⇒ 缺口在 TUI 侧校验过严。旧夹具 `tui/test/app-reconnect.test.ts:82-91` 给控制帧补了 `time`，故此前测不出。
+- **豁免判定**：纯缺陷修复（协议 §1.3 豁免方案依据块）；懒惰阶梯第 2 级 = 对齐仓库已有 `web/src/lib/sse.ts parseFrame`（只认 `type`）。
+- **红→绿**：新例「不带 time 的真实 stream/truncated 帧必须触发 onTruncated（#859）」修复前 red（`actual: []`，期望 `[17]`）→ 修复后 green；守卫例「运行事实仍须带 time」修复前后均 green。
+- **消融/变异（隔离克隆 `/tmp/abl859`，命中数断言 ==1）**：A1 回退 sse.ts 调用点 / A2 先 parseEnvelope 后识别 / A3 helper 要求 time / A4 helper 丢 latest_seq ⇒ 各 1 红，**四者失败集合相同（同一新例）⇒ 共用失败面，互不构成鉴别力证据**，只证明每处改动必要；M1 helper 不判 type ⇒ 5 红（含 #854 四例 + 守卫例）；M2 删 parseEnvelope 的 time 校验 ⇒ 守卫例单红。
+- **真实入口验证**：同一份真服务字节喂 `consumeSseBody`：`origin/main` ⇒ `onTruncated: []`；`8a06c589` ⇒ `[20]`。TuiApp 级模拟（/events 延迟 30ms、after_seq<20 才截断）2.5s 窗口：修复前 3 次 /stream、0 次重建、游标停 -1（空转）；修复后收敛到游标 20，但期间 7 次重建 / 10 次 /stream（见残余①）。
+- **读数**：冻结 `8a06c5895ce1` / tree `fee18193ef57`；hash-object events.ts `cfcf4aae`、sse.ts `5e920b53`、sse.test.ts `b83eae0f`。tui `npm run check`（tsc --noEmit）rc=0；`npm test` 208 tests / 206 pass / 0 fail / 2 skipped（改前 206/204/0/2）；`git diff --check origin/main..HEAD` rc=0；Gate-0 裸全量 `docs/gate/8a06c5895ce11f42e232ea2f5985173de89ca8e8.json`（除 coverage 外全绿，coverage 唯一 ❌ = `8a06c589` 本票代码笔，符合 §8.2 第 4 条）。tui 无 lint 车道（oxlint 只扫 web/）。
+- **审查**：**未做**。施工者为子代理、无法派发 Matt `code-review` 两轴独立子代理；未写台账行（不伪造）。集成前必须补两轴发现审查（范围 `c0ac9527..8a06c589`）并落台账行。
+- **残余（登记不修，Scope Lock）**：① `tui/src/app.ts:301-303` `onTruncated` 用 `void this.rebuildFromHistory()` 不等重建完成、`subscribeLoop` 对 `truncated` 立即 `continue` 重连 ⇒ 重连可能带旧游标再吃一次 truncated、叠发多次 GET /events（模拟 7 次）后才收敛；web `useSession.doTruncatedRebuild` 是 hold → await 重建 → 用 maxSeq 续传。此前分支不可达故潜伏，#859 修复后可达。是否另开票 / 并入本票待用户裁决。② `app-reconnect.test.ts` 的控制帧夹具仍带 `time`（非真实形状，本票未改）。③ 票面标签 `phase-11`，内容属 Roadmap Phase 9（Streaming Surfaces / CLI Renderer）与 Phase 10 Gate（刷新后由持久 Event 重建）。
+- **待批准**：两轴审查后 push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）；关单。
