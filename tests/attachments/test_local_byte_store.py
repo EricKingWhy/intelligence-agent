@@ -935,3 +935,145 @@ def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
 
     assert _object_path(tmp_path, blob.artifact_id).read_bytes() == payload
     assert asyncio.run(store.load_bytes(blob.artifact_id)).content == payload
+
+
+# ── #933 M-04：staged 自证必须校验**落盘字节**，不是内存里那份 ──────────────
+#
+# 缺陷：`_publish_blob` 的 self-check 是 `hashlib.sha256(data).hexdigest() != sha256`，
+# 而 `sha256` 由同一份内存 `data` 派生（`compute_byte_artifact_id(data)` 在
+# `_save_bytes_blocking` 里算出来）⇒ **恒真**，从未工作过。目的本来是"落盘字节 == 预期
+# 摘要"（平台把字节写坏时在发布前拦住），实际比的是"内存 == 内存"。
+#
+# 修法依据（来源: DSH `5badb150` `attachment-local/src/store.ts:390-394` `digestFile`
+# 与 `:214-229` `publishImmutableObject`）：校验读的是**文件字节**；去重命中时
+# `:287`/`:363` 同样 `digestFile(target)` 读回已有对象。
+#
+# 下方两条用例是**消融实验**（ablation）：不改产品代码、只把"磁盘写坏"注入进来
+# （挂钩 `os.write`，与同文件 #830 D2 用例同一手法），看自证是否真的发现得了。
+# - 修前：`save_bytes` 静默返回，坏字节被发布成对象 ⇒ 用例红；
+# - 修后：发布前抛 `OSError`，目标位置没有对象 ⇒ 用例绿。
+# 断言刻意**不**挂钩具体校验原语（不 patch `hashlib.file_digest`）：换一种读回算法
+# 不该让用例变红，只有"根本没读回"才该红——那是这条检查的意义所在。
+
+
+def _emulate_corrupting_write(monkeypatch: pytest.MonkeyPatch, transform) -> None:
+    """把 `os.write` 换成"先写坏再落盘"的替身（模拟平台改写字节 / 部分写）。"""
+    real_write = os.write
+
+    def corrupting_write(fd: int, data) -> int:
+        return real_write(fd, transform(bytes(data)))
+
+    monkeypatch.setattr(os, "write", corrupting_write)
+
+
+def _residue(staging_dir: Path) -> list[Path]:
+    return [p for p in staging_dir.iterdir()] if staging_dir.is_dir() else []
+
+
+def test_publish_rejects_staged_bytes_expanded_by_platform_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """消融①：平台把 `0x0A` 撑成 `0x0D 0x0A`（Windows 文本模式形状）⇒ 发布前必须抛。
+
+    这是票面点名的场景（`O_BINARY` 挡的是它，自证是第二道防线）。修前这道检查恒真，
+    坏字节会被当成正常对象发布出去，直到读回才 404/占位符。
+    """
+    monkeypatch.delattr(os, "O_BINARY", raising=False)  # 让"平台改写"不再被 O_BINARY 挡住
+    _emulate_corrupting_write(monkeypatch, lambda raw: raw.replace(b"\n", b"\r\n"))
+
+    store = _store(tmp_path, "sess-a")
+    payload = b"\x89PNG\r\n\x1a\n" + b"line\n" * 4
+
+    with pytest.raises(OSError, match="do not match their publication digest"):
+        asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
+
+    attachment_id = compute_byte_artifact_id(payload)
+    assert not _object_path(tmp_path, attachment_id).exists(), "坏字节不得被发布成对象"
+    assert not _receipt_path(tmp_path, "sess-a", attachment_id).exists(), "更不得留下回执"
+    assert _residue(_staging_dir(tmp_path)) == [], "staging 不得留下残渣"
+
+
+def test_publish_rejects_same_length_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """消融②：**等长**篡改（`0x0A` → `0x0D`）⇒ 仍必须抛（证明校验的是摘要，不是长度）。"""
+    monkeypatch.delattr(os, "O_BINARY", raising=False)
+    _emulate_corrupting_write(monkeypatch, lambda raw: raw.replace(b"\n", b"\r"))
+
+    store = _store(tmp_path, "sess-a")
+    payload = b"first line\nsecond line\n"
+
+    with pytest.raises(OSError, match="do not match their publication digest"):
+        asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
+
+    assert not _object_path(tmp_path, compute_byte_artifact_id(payload)).exists()
+    assert _residue(_staging_dir(tmp_path)) == []
+
+
+def test_publish_self_check_passes_for_byte_exact_staging(tmp_path: Path) -> None:
+    """阳性对照：字节没被改写时自证通过、对象照常发布（这条不是恒真的假绿）。"""
+    store = _store(tmp_path, "sess-a")
+    payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) + b"\n"
+
+    blob = asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
+
+    assert _object_path(tmp_path, blob.artifact_id).read_bytes() == payload
+    assert _residue(_staging_dir(tmp_path)) == []
+
+
+# ── #933 M-16：读回候选是**可扩展的单一事实源** ─────────────────────────────
+#
+# 缺陷：`_blob_object_candidates` 硬编码两条路径，而**旁挂元数据读**（`_read_blob_meta`）
+# 另写了一份自己的两条路径元组 ⇒ 布局演化时"加一条候选"要在两处各改一次，漏一处就得到
+# "对象读得到、旁挂读不到"的静默错配（症状最轻：mime 退化成 octet-stream）。
+#
+# 修法：候选构造收口成一处，旁挂路径由候选派生（`候选.with_name(name + ".json")`）。
+# 下方第二条用例就是这个 claim 的机械证明：**只**给候选列表加一条，对象与旁挂同时可读。
+
+
+def test_blob_object_candidates_order_is_global_then_legacy_session(
+    tmp_path: Path,
+) -> None:
+    """候选清单与顺序 = 布局契约本身（全局现行根 → 本会话升级兼容位）。"""
+    store = _store(tmp_path, "sess-a")
+    sha256 = "ab" * 32
+
+    assert store._blob_object_candidates(sha256) == (
+        tmp_path / "artifacts" / ".attachments" / "objects" / "ab" / sha256,
+        tmp_path / "artifacts" / "sess-a" / "attachments" / "objects" / "ab" / sha256,
+    ), "顺序即优先级：全局（现行）在前，本会话（升级兼容）在后"
+
+
+def test_adding_a_candidate_layout_needs_no_consumer_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**只**加一条候选 ⇒ 对象读与旁挂读**同时**生效（M-16 的可扩展性判据）。
+
+    改动前这条用例会红：`_read_blob_meta` 有自己的一份路径清单，新布局的旁挂读不到，
+    mime 退化成 `application/octet-stream`。
+    """
+    store = _store(tmp_path, "sess-a")
+    payload = b"third-layout-bytes"
+    attachment_id = compute_byte_artifact_id(payload)
+    sha256 = attachment_id.split(":", 1)[1]
+    # 假想的下一次布局迁移：对象挪到 `<root>/legacy-v0/<sha[:2]>/<sha>`。
+    extra = tmp_path / "artifacts" / "legacy-v0" / sha256[:2] / sha256
+    extra.parent.mkdir(parents=True)
+    extra.write_bytes(payload)
+    extra.with_name(f"{sha256}.json").write_text(
+        '{"mime_type": "image/webp"}', encoding="utf-8"
+    )
+
+    original = LocalArtifactStore._blob_object_candidates
+    monkeypatch.setattr(
+        LocalArtifactStore,
+        "_blob_object_candidates",
+        lambda self, sha: (*original(self, sha), extra),
+    )
+
+    loaded = asyncio.run(store.load_bytes(attachment_id))
+
+    assert loaded.content == payload
+    assert loaded.mime_type == "image/webp", (
+        "旁挂元数据必须从**同一份候选**派生：加一条候选就该两处同时生效"
+    )

@@ -102,8 +102,8 @@ def inspect_skill_package(
     }
 
     errors: list[dict[str, str]] = report["errors"]
-    if scope != "project":
-        _add_error(errors, "UNSUPPORTED_SCOPE", str(source_path), "Only project scope is supported.")
+    if scope not in {"project", "global"}:
+        _add_error(errors, "UNSUPPORTED_SCOPE", str(source_path), "Scope must be project or global.")
         return report
     try:
         root = source_path.resolve(strict=True)
@@ -193,7 +193,7 @@ def inspect_skill_package(
 
     installed_target = _safe_skill_target(existing_skills, entry.name)
     if installed_target is not None and (installed_target.exists() or installed_target.is_symlink()):
-        _add_error(errors, "NAME_CONFLICT", "SKILL.md", f"Project Skill name {entry.name!r} already exists.")
+        _add_error(errors, "NAME_CONFLICT", "SKILL.md", f"{scope.title()} Skill name {entry.name!r} already exists.")
 
     files, scan_errors, symlink_paths = _inventory(root)
     errors.extend(scan_errors)

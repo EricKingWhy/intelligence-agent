@@ -9,7 +9,9 @@
 为什么 content-hash 寻址：
 - 同一内容自动去重（两个 Tool 产出相同的 stdout 只存一份）；
 - 寻址不需要额外 ID 生成器——hash 就是 ID；
-- 跨 Session 理论上可共享（相同内容同 hash），但 Phase 5 按 session 隔离 key。
+- 跨 Session 理论上可共享（相同内容同 hash）。**文本** artifact 仍按 session 隔离 key
+  （`{session_id}/{artifact_id}`）；**字节** artifact 自 #933 M-01 起走全局内容寻址根 +
+  每会话回执（跨会话/fork 可寻址，归属由回执回答）。
 
 物理位置：Runtime 域存储，不经过 Sandbox（spec 06 §3 + ADR-0006）。
 默认 Provider：LocalArtifactStore（spec 06 §3：Local filesystem，开发/小型部署）。
@@ -162,14 +164,29 @@ class ArtifactStore(ABC):
         本方法答"属于本会话吗"（PRD D5：发送时校验 id "属于本 session 上下文"）。
         不是本会话上传的（含别的会话、从未上传）统一 `KeyError` → 422。
 
-        默认实现 = `load_bytes`：**字节 key 已带会话前缀的 Provider**（S3 / MinIO，key 形状
-        `{session_id}/attachments/{sha256}`）命名空间即会话 ⇒ 两者等价。
-        **字节根跨会话全局去重的 Provider 必须覆写它**（`LocalArtifactStore` 即如此），
-        否则"存在于全局"会被误当成"属于本会话"。测试替身 `FakeArtifactStore` 正属后者
-        （扁平按 id 的全局 dict），但它**刻意不实现归属语义**——见其类 docstring：
-        禁止用它断言发送侧归属闸门。
+        **没有默认实现，这是刻意的（#933 M-01）**。改动前这里是 `return await
+        self.load_bytes(...)`，出处是"字节 key 带会话前缀时命名空间即会话，两者等价"——
+        #830 D1 之后这个前提在两个方向上都塌了：
+
+        - 对**全局寻址的 Provider**（Local，以及 #933 起的 S3/MinIO），`load_bytes` 按内容
+          寻址、**必然**跨会话读得到 ⇒ 默认实现会把"别的会话/fork 子会话的字节"判成
+          "本会话上传过"，发送侧归属闸门（PRD D5）静默失效，且**失败方向是放宽授权**；
+        - 对**没有归属事实的替身**（`FakeArtifactStore` 的扁平 dict），默认实现让替身
+          "看起来实现了归属"，于是用它写的归属断言全是假绿。
+
+        所以本方法要求每个 Provider**各自回答**"本会话凭什么说这些字节是自己的"
+        （`LocalArtifactStore` = 会话回执 hardlink；远端 Provider = 会话回执对象 key）。
+        来源: DSH `packages/attachment/attachment/src/index.ts:53-265`——那里的
+        `AttachmentStore` 没有任何"默认实现换个语义"的方法，能力缺失一律显式拒绝
+        （`saveFile` → `ATTACHMENT_FILES_UNSUPPORTED`），不存在静默回落。
+
+        未实现即 `NotImplementedError`（不是 `KeyError`）：它是**编程错误**，不是
+        契约内的"不存在"，不许被 404/422 的错误处理顺手吞掉。
         """
-        return await self.load_bytes(artifact_id)
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement load_uploaded_bytes to answer "
+            '"are these bytes this session\'s?" (#933 M-01)'
+        )
 
 
 def compute_artifact_id(content: str) -> str:
@@ -280,14 +297,17 @@ def slice_artifact(
 class FakeArtifactStore(ArtifactStore):
     """内存 dict 实现——给单元测试用。不碰网络。
 
-    **本替身不实现归属语义（#830 D1 审查 A-P3 / B-F2 登记）**：`_blobs` 是**按 id 的
+    **本替身没有归属语义，且现在会**大声**失败（#933 M-01）**：`_blobs` 是**按 id 的
     扁平全局 dict**（`save_bytes` 忽略命名空间、跨会话去重），`load_bytes` 返回任意会话
-    存进来的 blob。因此它**不覆写** `load_uploaded_bytes`，后者退化为会话无关的
-    `load_bytes`——"存在于全局"被当成"属于本会话"，发送侧归属闸门在它身上**形同虚设**。
+    存进来的 blob ⇒ 它答不了"这些字节属于哪个会话"。改动前它靠继承 ABC 的
+    `load_uploaded_bytes = load_bytes` 默认实现，把"存在于全局"当成"属于本会话"，
+    发送侧归属闸门在它身上形同虚设且**看不出来**；现在 ABC 不再给那个默认实现，
+    本替身调用它会 `NotImplementedError`（响亮的编程错误，而不是假绿）。
 
     ⇒ **禁止用本替身断言发送侧归属 / 跨会话拒绝**（如"别的会话 send → 422"）：那条闸门
-    只对覆写了 `load_uploaded_bytes` 的会话感知 Provider（`LocalArtifactStore`）成立。
-    本替身只用于形状、往返、`inspect` 切片等与会话归属无关的用例。
+    只对实现了 `load_uploaded_bytes` 的会话感知 Provider（`LocalArtifactStore`、S3/MinIO）
+    成立。本替身只用于形状、往返、`inspect` 切片等与会话归属无关的用例；真要归属语义，
+    就用 `LocalArtifactStore`（临时目录）或远端 Provider 的 SDK 替身。
     """
 
     def __init__(self) -> None:
