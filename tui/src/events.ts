@@ -70,6 +70,27 @@ export function parseEnvelope(raw: string): EventEnvelope | null {
   };
 }
 
+/**
+ * `stream/truncated` 控制帧（backlog 超限）-> `data.latest_seq` 提示；不是该帧返回 null。
+ *
+ * 它不是运行事实（不变量 #4 边界）：服务端 `build_truncated_control` 按设计不带
+ * `time`、`seq` 恒 null，所以不能过 `parseEnvelope` 的运行事实校验（缺 `time` 即丢，
+ * #859）。这里只认 `type`，与 `web/src/lib/sse.ts` 的 `parseFrame` 同口径。
+ */
+export function parseTruncatedControl(
+  raw: string,
+): { latestSeq: number | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.type !== "stream/truncated") return null;
+  const hint = isRecord(parsed.data) ? parsed.data.latest_seq : undefined;
+  return { latestSeq: typeof hint === "number" ? hint : null };
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

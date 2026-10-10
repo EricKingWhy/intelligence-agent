@@ -4,7 +4,7 @@
  * - StreamClient 是 IO 壳：fetch GET /api/sessions/{id}/stream?after_seq=N，
  *   断开由调用方按游标重连；网络层不维护第二份会话状态。
  */
-import { parseEnvelope, type EventEnvelope } from "./events.ts";
+import { parseEnvelope, parseTruncatedControl, type EventEnvelope } from "./events.ts";
 /**
  * SSE 帧分隔符（空行）与行分隔符。
  *
@@ -85,13 +85,14 @@ export async function consumeSseBody(
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (!payload) continue;
-          const frame = parseEnvelope(payload);
-          if (frame === null) continue;
-          if (frame.type === "stream/truncated") {
-            const hint = frame.data.latest_seq;
-            handlers.onTruncated(typeof hint === "number" ? hint : null);
+          // 控制帧先于信封校验识别：它不带 time，过 parseEnvelope 会被当坏帧丢掉（#859）。
+          const truncated = parseTruncatedControl(payload);
+          if (truncated !== null) {
+            handlers.onTruncated(truncated.latestSeq);
             continue;
           }
+          const frame = parseEnvelope(payload);
+          if (frame === null) continue;
           handlers.onFrame(frame);
         }
       }
