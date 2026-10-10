@@ -253,3 +253,38 @@ def test_cli_runtime_projection_follows_the_selected_scope(
     entry = cli_world.run("list")["available_global_packages"][0]
     assert entry["current_runtime"] == "not_discovered"
     assert entry["pending_restart"] is True
+
+
+def test_cli_does_not_ask_for_a_restart_after_disable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`disable` 后运行态仍持有该包 ≠ 待重启（T5 AC3：范围如实可见）。
+
+    取消选择只是把这条包移出装配面，不会让运行中的那一版"变成另一版"——叫用户去
+    重启一个不会再生效的包是错的。坏组合尤其明显：`saved_selection=disabled` 与
+    `current_runtime=discovered` 并列，无法自洽解读。
+    """
+    import os
+
+    cli_world = _Cli(tmp_path, monkeypatch, capsys)
+    cli_world.run("install", str(_package(tmp_path / "project-src")))
+    cli_world.run("enable", PACKAGE_NAME, "--scope", "project")
+    project_managed = cli_world.project(cli_world.alpha).managed_skills_dir / PACKAGE_NAME / "SKILL.md"
+    monkeypatch.setattr(
+        cli,
+        "_query_current_skill_runtime",
+        lambda *_: (
+            "running",
+            "live",
+            {os.path.normcase(os.path.realpath(str(project_managed)))},
+        ),
+    )
+
+    enabled = cli_world.run("list")
+    assert enabled["packages"][0]["pending_restart"] is False
+
+    cli_world.run("disable", PACKAGE_NAME)
+    after = cli_world.run("list")["packages"][0]
+    assert after["saved_selection"] == "disabled"
+    assert after["current_runtime"] == "discovered"
+    assert after["pending_restart"] is False

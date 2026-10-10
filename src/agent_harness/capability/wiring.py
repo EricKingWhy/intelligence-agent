@@ -322,9 +322,20 @@ async def _wire_skills(
         # 与全局侧同一条降级契约：整个受管根缺席 + 留痕，但**不**静默。
         # 混装（有的项目包坏了）不是可选项——受管根是单一命名空间，部分装配
         # 只会让「谁生效」变得不可解释；项目版失效时也**不**回落到全局版。
+        # 标签分两类（与全局侧同判据）：清单读不出来是盘上状态坏了，不是用户
+        # 的选择失效——两者要用户做的事完全不同。
         logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
         enabled_managed_skill_digests = {}
-        selection_errors.append(f"managed Skill package selection cannot be honoured: {error}")
+        label = (
+            "Skill package storage is unreadable"
+            if isinstance(error, SkillManifestError)
+            else "managed Skill package selection cannot be honoured"
+        )
+        # 受管根是全有全无：一条坏掉，**其余受管包一起缺席**。不说这句，用户会以为
+        # 坏的只有异常消息里那一个、其余照常运行。
+        selection_errors.append(
+            f"{label}: {error} (every managed Skill stays disabled until this is fixed)"
+        )
     try:
         # #874 T5：全局安装根与自动发现根已分开（T4），但「装了什么」不等于「谁能装配」。
         # 只有本项目显式选择 global 的包才进 catalog；被选版本失效时**不回落**项目版，
@@ -341,7 +352,7 @@ async def _wire_skills(
         # 清单损坏也会走到这里。标签分开写：把「清单读不出来」说成「选择失效」
         # 会指控一个用户没做过的动作，而这两者要用户做的事完全不同。
         prefix = (
-            "global Skill package storage is unreadable"
+            "Skill package storage is unreadable"
             if isinstance(error, SkillManifestError)
             else "global Skill package selection cannot be honoured"
         )

@@ -746,9 +746,9 @@ class SkillPackageManager:
                 or not isinstance(result.get("source"), str)
                 or not isinstance(result.get("version"), (str, type(None)))
             ):
-                raise SkillPackageError(f"enable result for {name!r} is invalid")
+                raise SkillManifestError(f"enable result for {name!r} is invalid")
             if result["selected_scope"] == "project" and name not in payload["packages"]:
-                raise SkillPackageError(
+                raise SkillManifestError(
                     f"enable result for {name!r} names a missing project package"
                 )
         for name, record in payload["packages"].items():

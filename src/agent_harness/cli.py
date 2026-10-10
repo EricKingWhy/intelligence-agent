@@ -1942,8 +1942,10 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
             package_source = os.path.normcase(os.path.realpath(str(package_skill)))
             discovered = package_source in (runtime_skill_sources or set())
             current = "discovered" if discovered else "not_discovered"
-            # 被选却不在运行态 = 待重启；没被选却还在运行态 = 反过来也要说。
-            pending_restart = (installed is not None) != discovered or has_pending_version
+            # 只有**本项目选中**的那一版才谈得上「待重启」：选了却没进运行态
+            # ⇒ 待重启。没选却还在运行态是「运行态还持有已取消选择的包」——它不
+            # 会再进装配面，叫人去重启一个不会生效的包是错的（`disable` 后即此形）。
+            pending_restart = (installed is not None and not discovered) or has_pending_version
         current_version = None
         if record.get("source_kind") == "git":
             current_version = {
@@ -2032,7 +2034,8 @@ def _available_global_skill_package_listing(
             item["pending_restart"] = None
         else:
             item["current_runtime"] = "discovered" if discovered else "not_discovered"
-            item["pending_restart"] = selected != discovered
+            # 只有本项目选中的那条才谈得上待重启（未选中项没有可兑现的选择）。
+            item["pending_restart"] = selected and not discovered
         packages.append(item)
     return packages
 

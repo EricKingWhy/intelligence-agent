@@ -793,5 +793,41 @@ async def test_corrupt_global_manifest_is_not_reported_as_a_selection_failure(tm
     )
     errors = registry.get("skills").errors()
     assert len(errors) == 1
-    assert "global Skill package storage is unreadable" in errors[0]
+    # 标签不带 scope：启用结果表住在**项目**清单里，全局侧读它时也会抛 —— 按 scope
+    # 命名会把「项目清单坏了」指控成「全局存储坏了」。
+    assert "Skill package storage is unreadable" in errors[0]
     assert "selection cannot be honoured" not in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_corrupt_project_manifest_is_not_reported_as_a_selection_failure(tmp_path):
+    """项目侧与全局侧同判据：清单损坏不冒充「选择失效」（也不反向指控全局存储）。
+
+    修前项目清单写坏会让全局侧也报一条 `global Skill package storage is unreadable`
+    ——同一条错误被两个 scope 各指控一次，且两次都指向用户没做过的动作。
+    """
+    from agent_harness.capability.config import parse_capabilities_config
+
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    global_skills.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    (workspace / "plugin-installs.json").write_text("{not json", encoding="utf-8")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+    registry = CapabilityRegistry()
+    await wire_capabilities(
+        registry,
+        parse_capabilities_config('{"skills": {}}'),
+        settings=settings,
+    )
+    errors = registry.get("skills").errors()
+    assert errors[0] == (
+        "[selection] Skill package storage is unreadable: "
+        "cannot read install manifest: JSONDecodeError "
+        "(every managed Skill stays disabled until this is fixed)"
+    )
