@@ -1,0 +1,96 @@
+# #376 取证战役：复跑命令（树 a932927d315414d104659085ff72efe51168dcf0 / tree df506e6d49e32e3d48b7d14bcfef6c1924a78d56）
+
+Agent（Muse 系统服务器）只做代码进出与编排；**全部 pytest 在云端沙箱 shell/ia-test 跑**。
+本机与沙箱的固定树同 SHA（bundle 校验 `git rev-parse HEAD`）。
+
+## 0. 送码进箱（本机 → 沙箱）
+
+```sh
+# 本机 worktree
+cd /home/hatch/workspace/intelligence-agent-wt/376-write-lock
+git rev-parse HEAD                     # a932927d315414d104659085ff72efe51168dcf0
+git rev-parse HEAD^{tree}              # df506e6d49e32e3d48b7d14bcfef6c1924a78d56
+git bundle create /home/hatch/t376-probe/t376.bundle HEAD
+git bundle verify /home/hatch/t376-probe/t376.bundle     # "records a complete history"
+
+# 注意：sbx --cloud cp 一律用绝对路径；沙箱 home 是 /home/agent
+sbx --cloud cp /home/hatch/t376-probe/t376.bundle  shell/ia-test:/home/agent/376/t376.bundle
+sbx --cloud cp /home/hatch/t376-probe/t376_probe.py shell/ia-test:/home/agent/376/t376_probe.py
+
+# 箱内：克隆 + 依赖（本仓 web/ 用 pnpm，但 pytest 不需要；后端用 uv）
+sbx --cloud exec shell/ia-test -- sh -c '
+  cd /home/agent/376 && rm -rf repo && git clone -q t376.bundle repo && cd repo &&
+  git rev-parse HEAD && uv sync --locked --all-extras'
+# 沙箱 venv = Python 3.13.12；uv sync --locked 不装 pytest-xdist，-n 4 前需补：
+sbx --cloud exec shell/ia-test -- sh -c 'cd /home/agent/376/repo && VIRTUAL_ENV=$PWD/.venv uv pip install pytest-xdist'
+```
+
+## 1. 环境（每个 pytest 命令前）
+
+```sh
+cd /home/agent/376/repo
+export PATH="$PWD/.venv/bin:$PATH"            # venv bin 前置（真实沙箱子进程用例必需）
+export PYTHONPATH="$PWD/src:/home/agent/376"  # src + 探针目录（探针在仓外，避免 .py 触发 Gate-0 未跟踪判据）
+export no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1   # 大小写都清
+export PYTHONUNBUFFERED=1
+export --basetemp=/home/agent/376/bt-<run>    # ✓ 显式 --basetemp 落 overlay，防 /tmp tmpfs 打满假红
+```
+
+## 2. 各轮命令
+
+```sh
+# S1 —— 串行全量 + 探针 v1（侵入式 witness）+ 2 燃烧器
+export T376_PROBE=1 T376_PROBE_OUT=/home/agent/376/probe-serial.jsonl T376_PROBE_HOLD_MS=100
+export T376_PROBE_FLOOR_MS=2 T376_PROBE_POLL_MS=50
+python scripts/_t508_burn_cpu.py 2 3600 &
+python -m pytest tests/ -q --no-header -p no:cacheprovider -p no:randomly -p t376_probe \
+  --basetemp=/home/agent/376/bt-serial > /home/agent/376/serial.log 2>&1
+# => logs/s1-serial.txt：1 failed, 7261 passed, 28 skipped, 51 deselected in 513.85s
+
+# S2 —— 隔离 A/B（无探针，×3）
+unset T376_PROBE
+python scripts/_t508_burn_cpu.py 2 900 &
+for i in 1 2 3; do python -m pytest tests/recovery/test_constraint_input_crash.py \
+  -q --no-header -p no:cacheprovider -p no:randomly --basetemp=/home/agent/376/bt-s2-$i; done
+# => 10 passed / 10 passed / 10 passed
+
+# S3 —— 串行全量 + 探针 v2（非侵入式 witness）+ 2 燃烧器（主读数）
+export T376_PROBE=1 T376_PROBE_OUT=/home/agent/376/probe-s3.jsonl T376_PROBE_HOLD_MS=100
+export T376_PROBE_FLOOR_MS=2 T376_PROBE_POLL_MS=50
+python scripts/_t508_burn_cpu.py 2 3600 &
+python -m pytest tests/ -q --no-header -p no:cacheprovider -p no:randomly -p t376_probe \
+  --basetemp=/home/agent/376/bt-s3 > /home/agent/376/s3.log 2>&1
+# => logs/s3-serial.txt：7262 passed, 28 skipped, 51 deselected in 733.82s（0 failed）
+
+# S4 —— -n 4 全量（收集期失败，见日志）
+unset T376_PROBE
+PYTEST_EXTRA_ARGS="-q --no-header -p no:cacheprovider -p no:randomly -n 4" \
+  sh scripts/run_tests_clean.sh > /home/agent/376/s4.log 2>&1
+# => logs/s4-xdist-collection-error.txt：Different tests were collected between gw1 and gw2
+
+# S4b —— -n 4 全量（忽略时间戳参数化的 ws_auth）+ ws_auth 串行
+PYTEST_EXTRA_ARGS="-q --no-header -p no:cacheprovider -p no:randomly -n 4 --ignore=tests/web/test_ws_auth.py" \
+  sh scripts/run_tests_clean.sh > /home/agent/376/s4b-main.log 2>&1       # 7227 passed, 28 skipped, 0 failed, 196.82s
+PYTEST_EXTRA_ARGS="-q --no-header -p no:cacheprovider -p no:randomly" \
+  sh scripts/run_tests_clean.sh tests/web/test_ws_auth.py > /home/agent/376/s4b-wsauth.log 2>&1  # 35 passed, 9.31s
+```
+
+## 3. `PRAGMA journal_mode=WAL` 撞并发写锁的最小实验（§4，纯标准库 sqlite3）
+
+```python
+import sqlite3, os, tempfile
+os.makedirs("/tmp/t376exp", exist_ok=True)
+p = os.path.join(tempfile.mkdtemp(dir="/tmp/t376exp"), "h.db")
+a = sqlite3.connect(p); a.execute("CREATE TABLE t(x)"); a.commit()
+# A：另一连接仅打开（无事务）
+b = sqlite3.connect(p, timeout=5.0)
+print("A:", b.execute("PRAGMA journal_mode=WAL").fetchone())   # A: ('wal',) —— 成功
+b.close()
+# B：另一连接持 BEGIN IMMEDIATE
+a.execute("BEGIN IMMEDIATE")
+c = sqlite3.connect(p, timeout=1.0)
+try:
+    print("B:", c.execute("PRAGMA journal_mode=WAL").fetchone())
+except sqlite3.OperationalError as e:
+    print("B BUSY:", e)                                        # B BUSY: database is locked
+```
