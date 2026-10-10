@@ -18,7 +18,8 @@ import { fileURLToPath } from "node:url";
 
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
-import { renderDraftImage } from "../src/lib/image-view.ts";
+import { renderDraftImage, renderHistoryImage } from "../src/lib/image-view.ts";
+import type { TurnImageRef } from "../src/adapter.ts";
 import type { PendingImage } from "../src/lib/pending-images.ts";
 
 /** 1x1 PNG（IHDR width=height=1），足够让 dimensity 探测出 1x1。 */
@@ -36,6 +37,26 @@ const IMAGE: PendingImage = {
 };
 
 const theme = { fallbackColor: (text: string): string => text };
+
+/** M-09：历史附图引用（服务端 ImageRef 镜像；宽高 2x3 与字节里的 1x1 PNG 不同步是刻意的：
+ *  引用里的宽高是上传时服务端判定的，占位渲染只信引用，不要求与字节一致）。 */
+const REF: TurnImageRef = {
+  attachment_id: "sha256:" + "d".repeat(64),
+  media_type: "image/png",
+  bytes: 95,
+  width: 2,
+  height: 3,
+  name: "shot.png",
+};
+
+const ANON_REF: TurnImageRef = {
+  attachment_id: "sha256:" + "e".repeat(64),
+  media_type: "image/png",
+  bytes: 95,
+  width: 2,
+  height: 3,
+  name: null,
+};
 
 /** 图片协议转义序列（kitty APC / iTerm2 OSC 1337）——AC6 的负向断言集。 */
 const IMAGE_PROTOCOL_ESCAPES = ["\x1b_G", "\x1b]1337;File=", "\x1bP"];
@@ -138,5 +159,50 @@ test("损坏字节（尺寸未知）也照常降级，不抛", () => {
     const rendered = renderDraftImage(broken, theme);
     assert.ok(rendered.kind === "text");
     assert.ok(rendered.lines.join("\n").includes("broken.png"));
+  });
+});
+
+test("M-09：历史附图（字节已取回）走与待发图同一个分派：协议终端 => 缩略图", () => {
+  withCapabilities("kitty", true, () => {
+    const rendered = renderHistoryImage(REF, PNG_BYTES, theme);
+    assert.ok(rendered.kind === "image", "字节在手 + 协议可用 => 与 renderDraftImage 同一分支");
+    assert.ok(
+      rendered.component.render(80).join("\n").includes("\x1b_G"),
+      "kitty 图形协议序列应由 pi-tui 生成（复用而非第二套）",
+    );
+  });
+});
+
+test("M-09：历史附图无协议 => 文本占位（media type + 尺寸 + 展示名）", () => {
+  withCapabilities(null, true, () => {
+    const rendered = renderHistoryImage(REF, PNG_BYTES, theme);
+    assert.ok(rendered.kind === "text");
+    const output = rendered.lines.join("\n");
+    for (const escape of IMAGE_PROTOCOL_ESCAPES) assert.ok(!output.includes(escape));
+    assert.ok(output.includes("shot.png"), "有展示名给展示名");
+    // 字节在手时尺寸以**真实字节**的探测为准（1x1 PNG），引用里的宽高只是字节缺席时的兜底。
+    assert.ok(output.includes("1x1"));
+    assert.ok(output.includes("image/png"));
+  });
+});
+
+test("M-09：字节未取回（协议终端上也先给占位，字节到了再换缩略图）", () => {
+  withCapabilities("kitty", true, () => {
+    const rendered = renderHistoryImage(REF, null, theme);
+    assert.ok(rendered.kind === "text", "字节不在手绝不渲染假缩略图");
+    const output = rendered.lines.join("\n");
+    for (const escape of IMAGE_PROTOCOL_ESCAPES) assert.ok(!output.includes(escape));
+    assert.ok(output.includes("2x3"), "字节缺席时占位用引用里的宽高兜底");
+  });
+});
+
+test("M-09：无展示名（服务端结构性缺省）=> 用 attachment_id 兜底，不编造文件名", () => {
+  withCapabilities(null, true, () => {
+    const rendered = renderHistoryImage(ANON_REF, null, theme);
+    assert.ok(rendered.kind === "text");
+    assert.ok(
+      rendered.lines.join("\n").includes("sha256:" + "e".repeat(8)),
+      "占位里应出现 attachment_id 前缀（真实 id，不伪造）",
+    );
   });
 });

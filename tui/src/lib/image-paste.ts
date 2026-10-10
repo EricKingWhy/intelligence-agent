@@ -87,6 +87,48 @@ export type ReadImageFileResult =
  */
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
+/**
+ * M-21：单条消息图片**数量**上限：镜像服务端 `config.py:167`
+ * `attachment_max_images_per_message` 默认 20（PRD D11「后端权威、前端镜像」；
+ * #824 明确不加 GET limits 端点，故无下发通道）。漂移的后果是「预检放行、服务端
+ * 413/422」-- 消息仍会被权威拒绝，不会静默出错。web 侧同一份值在
+ * `web/src/lib/attachments.ts::IMAGE_LIMITS`；改默认必须三处同步。
+ */
+export const MAX_IMAGES_PER_MESSAGE = 20;
+
+/**
+ * M-21：单条消息图片**总字节**上限：镜像服务端 `config.py:168`
+ * `attachment_max_message_image_bytes` 默认 200 MiB（口径同上）。
+ */
+export const MAX_MESSAGE_IMAGE_BYTES = 200 * 1024 * 1024;
+
+/**
+ * M-21：单条「数量 / 总字节」预检的纯判定（返回**拒绝原因**，`null` = 放行）。
+ *
+ * 第一性原理：预检是服务端规则的客户端礼貌副本 -- 判定口径单一来源是服务端
+ * `resolve_image_limits`（本文件两个镜像常量），这里只做「超没超」的比较与文案，
+ * 不另立数字。唯一调用点是 `app.addPendingImage`（全部图片入场的汇聚点）。
+ */
+export function checkMessageImageLimits(
+  existingCount: number,
+  existingBytes: number,
+  incomingBytes: number,
+): string | null {
+  if (existingCount >= MAX_IMAGES_PER_MESSAGE) {
+    return (
+      `最多 ${String(MAX_IMAGES_PER_MESSAGE)} 张图片/条（服务端上限）：` +
+      "先删掉正文里多余的 [Image #N] 标记再附图。"
+    );
+  }
+  if (existingBytes + incomingBytes > MAX_MESSAGE_IMAGE_BYTES) {
+    return (
+      `单条消息图片总字节超过 ${String(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MiB 上限` +
+      "（服务端 attachment_max_message_image_bytes 同口径）：请换更小的图或删掉已附的图。"
+    );
+  }
+  return null;
+}
+
 export function isImagePath(filePath: string): boolean {
   const normalized = filePath.toLowerCase();
   return IMAGE_EXTENSIONS.some((extension) => normalized.endsWith(extension));
