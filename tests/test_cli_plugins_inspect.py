@@ -974,6 +974,48 @@ def _write_dsh_slider_package(
         _write(source / "lib" / "client.js", "throw new Error('must never run')\n")
 
 
+def test_cli_plugins_inspect_matches_pinned_dsh_effort_slider_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = Path(__file__).parent / "fixtures" / "dsh-codex-effort-slider"
+    before = _snapshot(source)
+    _configure_cli_inspect(
+        monkeypatch, source, tmp_path / "workspace", tmp_path / "global-skills"
+    )
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["source_pin"]["commit"] == "af723caf3387e64ae28aa69c4fd235b1b662e3ae"
+    assert report["checked_files_match"] is True
+    assert report["observed_checked_files_sha256"] == report["source_pin"][
+        "checked_files_sha256"
+    ]
+    assert report["findings"] == []
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert report["execution"]["package_code_run"] is False
+    assert report["implementation_summary"].startswith(
+        "The upstream DSH JavaScript is inspected as data only."
+    )
+    assert report["project_contract"]["supported_effort_ids"] == [
+        "minimal",
+        "standard",
+        "deep",
+    ]
+    assert report["project_contract"]["wire_mapping_examples"] == {
+        "minimal": "minimal",
+        "standard": "medium",
+        "deep": "high",
+    }
+    assert any(
+        "prefers-reduced-motion" in item
+        for contribution in report["contributions"]
+        for item in contribution["verification_evidence"]
+    )
+    assert _snapshot(source) == before
+
+
 def test_cli_plugins_inspect_maps_dsh_slider_candidate_without_executing_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -994,7 +1036,7 @@ def test_cli_plugins_inspect_maps_dsh_slider_candidate_without_executing_code(
     assert report["license"] == "MIT"
     assert report["status"] == "needs-adaptation"
     assert report["activation_allowed"] is False
-    assert report["source_pin_matches"] is False
+    assert report["checked_files_match"] is False
     assert "SOURCE_CONTENT_DRIFT" in {item["code"] for item in report["findings"]}
     assert any(
         item["name"] == "off" and item["status"] == "unmapped"

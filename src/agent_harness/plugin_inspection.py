@@ -21,18 +21,21 @@ _PINNED_FILES = (
     "lib/index.js",
     "lib/client.js",
 )
-_PINNED_FILES_SHA256 = "67035efef55780aaf649ff47959d3f4eface8b55d0c9dea1b80b6f089d8e881e"
+_PINNED_FILES_SHA256 = (
+    "67035efef55780aaf649ff47959d3f4eface8b55d0c9dea1b80b6f089d8e881e"
+)
 _FILE_LIMITS = {"package.json": 64_000, "lib/client.js": 512_000}
 _SOURCE_PIN = {
     "repository": "https://github.com/Microqian2th/dsh-codex-effort-slider",
     "commit": "af723caf3387e64ae28aa69c4fd235b1b662e3ae",
     "tree": "8a732b7c00ba5da3b06e122c243205db4ab190b1",
     "archive_sha256": "122917c83671d5e2ec9f759875db071d47cf738c5774f0810a9d428d20ccce0c",
-    "checked_files_sha256": _PINNED_FILES_SHA256,
 }
 
 
-def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> dict[str, Any] | None:
+def inspect_dsh_effort_slider(
+    source: Path | str, *, scope: str = "project"
+) -> dict[str, Any] | None:
     """Report the DSH slider's project-side mapping without importing package code.
 
     ``None`` means the directory is not this known package, so the caller may
@@ -72,15 +75,21 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
     source_files: dict[str, bytes] = {}
     for relative in _PINNED_FILES:
         if relative == "package.json":
-            source_files[relative] = package_text.encode("utf-8").replace(b"\r\n", b"\n")
+            source_files[relative] = package_text.encode("utf-8").replace(
+                b"\r\n", b"\n"
+            )
             continue
         file_errors: list[dict[str, str]] = []
         package_file = root / relative
         if not package_file.exists():
-            findings.append({
-                "code": "MISSING_CLIENT_ENTRY" if relative == "lib/client.js" else "MISSING_REQUIRED_FILE",
-                "path": relative,
-            })
+            findings.append(
+                {
+                    "code": "MISSING_CLIENT_ENTRY"
+                    if relative == "lib/client.js"
+                    else "MISSING_REQUIRED_FILE",
+                    "path": relative,
+                }
+            )
             continue
         text = _read_bounded_package_text(
             root,
@@ -102,13 +111,17 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
     version = manifest.get("version")
     license_name = manifest.get("license")
     if version != _PINNED_VERSION:
-        findings.append({
-            "code": "SOURCE_VERSION_DRIFT",
-            "expected": _PINNED_VERSION,
-            "actual": str(version),
-        })
+        findings.append(
+            {
+                "code": "SOURCE_VERSION_DRIFT",
+                "expected": _PINNED_VERSION,
+                "actual": str(version),
+            }
+        )
     if license_name != "MIT":
-        findings.append({"code": "LICENSE_DRIFT", "expected": "MIT", "actual": str(license_name)})
+        findings.append(
+            {"code": "LICENSE_DRIFT", "expected": "MIT", "actual": str(license_name)}
+        )
 
     expected_dsh = {
         "bundle": {"patch": "./cordis.patch.yml"},
@@ -131,7 +144,13 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
             digest.update(source_files[relative] + b"\0")
         observed_digest = digest.hexdigest()
         if observed_digest != _PINNED_FILES_SHA256:
-            findings.append({"code": "SOURCE_CONTENT_DRIFT", "expected": _PINNED_FILES_SHA256, "actual": observed_digest})
+            findings.append(
+                {
+                    "code": "SOURCE_CONTENT_DRIFT",
+                    "expected": _PINNED_FILES_SHA256,
+                    "actual": observed_digest,
+                }
+            )
 
     license_file = source_files.get("LICENSE", b"").decode("utf-8", errors="replace")
     if license_file and not license_file.startswith("MIT License"):
@@ -139,16 +158,18 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
 
     # `off` is an upstream request value. Project Default maps to None, which
     # intentionally omits the wire field; these behaviors cannot be equated.
-    gaps = [{
-        "name": "off",
-        "status": "unmapped",
-        "reason": "The native model catalog supports minimal/standard/deep; Default omits the request field.",
-        "evidence": [
-            "src/agent_harness/model/config.py:95,108-117",
-            "src/agent_harness/model/provider.py:95-102",
-            "web/src/components/ReasoningEffortSlider.tsx:89-115,122-125",
-        ],
-    }]
+    gaps = [
+        {
+            "name": "off",
+            "status": "unmapped",
+            "reason": "The native model catalog supports minimal/standard/deep; Default omits the request field.",
+            "evidence": [
+                "src/agent_harness/model/config.py:95,108-117",
+                "src/agent_harness/model/provider.py:95-102",
+                "web/src/components/ReasoningEffortSlider.tsx:89-115,122-125",
+            ],
+        }
+    ]
     return {
         "status": "needs-adaptation",
         "source": str(root),
@@ -156,13 +177,57 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
         "package": _PACKAGE_NAME,
         "version": version,
         "license": license_name or "未声明",
-        "source_pin": dict(_SOURCE_PIN),
-        "source_pin_matches": not findings and observed_digest == _PINNED_FILES_SHA256,
+        "source_pin": {
+            **_SOURCE_PIN,
+            "checked_files_sha256": _PINNED_FILES_SHA256,
+        },
+        "checked_files_match": observed_digest == _PINNED_FILES_SHA256,
         "observed_checked_files_sha256": observed_digest,
+        "implementation_summary": (
+            "The upstream DSH JavaScript is inspected as data only. Equivalent user-facing "
+            "behavior is provided by the project's native model catalog, Provider mapping, "
+            "and Composer slider."
+        ),
+        "project_contract": {
+            "supported_effort_ids": ["minimal", "standard", "deep"],
+            "default": (
+                "Per-model reasoning_effort.default; an unselected value omits the "
+                "reasoning_effort request field."
+            ),
+            "request_mapping": (
+                "Per-model reasoning_effort.wire_mapping after validation."
+            ),
+            "wire_mapping_examples": {
+                "minimal": "minimal",
+                "standard": "medium",
+                "deep": "high",
+            },
+            "verification_evidence": [
+                "tests/model/test_reasoning_effort.py::test_web_effort_levels_match_model_catalog_vocabulary",
+                "tests/model/test_reasoning_effort.py::test_create_chat_model_no_reasoning_effort_by_default",
+                "tests/model/test_reasoning_effort.py::test_create_chat_model_uses_selected_model_wire_mapping",
+                "tests/model/test_reasoning_effort.py::test_create_chat_model_translates_deep_to_wire_enum",
+                "tests/model/test_reasoning_effort.py::test_create_chat_model_translates_standard_to_wire_enum",
+                "tests/model/test_reasoning_effort.py::test_create_chat_model_minimal_reasoning_effort",
+                "web/e2e/continuation.spec.ts:82 (reasoning_effort request payload)",
+            ],
+        },
         "dependencies": [
-            {"name": "DSH", "required_by_source": True, "evidence": "package.json:dsh.client"},
-            {"name": "Cordis", "required_by_source": True, "evidence": "package.json:dsh.bundle.patch"},
-            {"name": "DSH client UI / private DOM", "required_by_source": True, "evidence": "pinned lib/client.js"},
+            {
+                "name": "DSH",
+                "required_by_source": True,
+                "evidence": "package.json:dsh.client",
+            },
+            {
+                "name": "Cordis",
+                "required_by_source": True,
+                "evidence": "package.json:dsh.bundle.patch",
+            },
+            {
+                "name": "DSH client UI / private DOM",
+                "required_by_source": True,
+                "evidence": "pinned lib/client.js",
+            },
         ],
         "contributions": [
             {
@@ -170,21 +235,43 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
                 "source": "lib/client.js:183-225",
                 "project_mapping": "Model catalog capabilities + native Composer slider",
                 "status": "adapted",
-                "evidence": ["src/agent_harness/model/config.py:108-163", "web/src/components/Composer.tsx:413-429"],
+                "evidence": [
+                    "src/agent_harness/model/config.py:108-163",
+                    "web/src/components/Composer.tsx:413-429",
+                ],
+                "verification_evidence": [
+                    "tests/model/test_reasoning_effort.py::test_web_effort_levels_match_model_catalog_vocabulary",
+                    "tests/model/test_reasoning_effort.py::test_create_chat_model_no_reasoning_effort_by_default",
+                ],
             },
             {
                 "name": "Select and send an effort value",
                 "source": "lib/client.js:1117-1121",
                 "project_mapping": "Provider validates the selected level and applies its wire mapping",
                 "status": "adapted",
-                "evidence": ["src/agent_harness/model/provider.py:95-104", "tests/model/test_reasoning_effort.py:40-45,71-73"],
+                "evidence": [
+                    "src/agent_harness/model/provider.py:95-104",
+                    "tests/model/test_reasoning_effort.py:40-45,71-73",
+                ],
+                "verification_evidence": [
+                    "tests/model/test_reasoning_effort.py::test_create_chat_model_uses_selected_model_wire_mapping",
+                    "tests/model/test_reasoning_effort.py::test_create_chat_model_translates_deep_to_wire_enum",
+                    "tests/model/test_reasoning_effort.py::test_create_chat_model_translates_standard_to_wire_enum",
+                    "web/e2e/continuation.spec.ts:82",
+                ],
             },
             {
                 "name": "Keyboard and accessible slider interaction",
                 "source": "lib/client.js:1220-1234,1298-1312",
                 "project_mapping": "Native range input with keyboard and aria labels",
                 "status": "adapted",
-                "evidence": ["web/src/components/ReasoningEffortSlider.tsx:126-137,181-194"],
+                "evidence": [
+                    "web/src/components/ReasoningEffortSlider.tsx:126-137,181-194"
+                ],
+                "verification_evidence": [
+                    "web/e2e/g-visual-qa.spec.ts:35-77 (slider remains usable at narrow widths)",
+                    "web/src/components/ReasoningEffortSlider.tsx:126-137,181-194 (native keyboard and aria behavior)",
+                ],
             },
             {
                 "name": "Theme and reduced motion",
@@ -193,6 +280,10 @@ def inspect_dsh_effort_slider(source: Path | str, *, scope: str = "project") -> 
                 "status": "adapted",
                 "note": "Project suppresses motion while upstream slows its decorative animation.",
                 "evidence": ["web/src/styles/app.css:7570-7580,7758-7780"],
+                "verification_evidence": [
+                    "web/e2e/g-visual-qa.spec.ts:92-117 (light theme)",
+                    "web/src/styles/app.css:7758-7780 (prefers-reduced-motion rule; no slider-specific automated assertion is listed in #865 evidence)",
+                ],
             },
         ],
         "gaps": gaps,
