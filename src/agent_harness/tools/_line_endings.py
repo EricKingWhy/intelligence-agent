@@ -69,11 +69,35 @@ def dominant_newline(content: str) -> str | None:
 
 
 def _canonical(text: str) -> str:
-    """行尾归一的规范形：CRLF 与裸 CR 都折成 LF。"""
+    """行尾归一的规范形：CRLF 与裸 CR 都折成 LF。
+
+    语义来源：Python `io` 的 universal newlines（`open(..., newline=None)`）——
+    `\\r`、`\\r\\n`、`\\n` 统一译为 `\\n`。三类全折是标准库确立的语义，本函数照此实现。
+
+    适用场景：诊断路径（`line_ending_mismatch` / `not_found_hint`）的折平判据专用。
+    判据问的是「两侧折成同一行尾后能不能命中」，裸 CR 也是行尾差异，必须一起折。
+    """
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _to_lf(text: str) -> str:
+def _crlf_to_lf(text: str) -> str:
+    """把 CRLF 折成 LF；裸 CR 原样保留。
+
+    语义：只折 `\\r\\n` → `\\n`，单独的 `\\r`（裸 CR）**不动**——与 `_canonical` 不同，
+    后者三类全折。
+
+    适用场景：匹配路径 `replace_with_line_ending_tolerance` 的归一化专用，与
+    `_from_lf` 配对——先把文件与 old/new 归一化成 LF 匹配，再把结果经 `_from_lf`
+    转回该文件的主导行尾写回。
+
+    为什么裸 CR 不折：本函数与 `_from_lf` 配对使用，往返必须逐字节无损；`_from_lf`
+    会把每个 `\\n` 都转成主导行尾——若归一化时把裸 CR 也折成 `\\n`，转回时它会被
+    静默改写成主导行尾，文件 / new 里原有的裸 CR 就被改掉了；且这是整文件所有裸
+    CR（归一化 → 转回走的是整文件），不只是 old 命中的那一段——这正是模块头
+    docstring 里『只有命中段会变』的安全论证所不允许的。所以裸 CR 必须原样保留、
+    不参与归一化变换。诊断路径（`not_found_hint`）对裸 CR 场景另行给出可执行的
+    「改写行尾后重试」提示，两者分工见模块头 docstring。
+    """
     return text.replace("\r\n", "\n")
 
 
@@ -231,14 +255,14 @@ def replace_with_line_ending_tolerance(
     if newline is None:
         return 0, content
 
-    normalized = _to_lf(content)
-    normalized_old = _to_lf(old_string)
+    normalized = _crlf_to_lf(content)
+    normalized_old = _crlf_to_lf(old_string)
     count = normalized.count(normalized_old)
     if count == 0:
         return 0, content
 
     if replace_all:
-        replaced = normalized.replace(normalized_old, _to_lf(new_string))
+        replaced = normalized.replace(normalized_old, _crlf_to_lf(new_string))
     else:
-        replaced = normalized.replace(normalized_old, _to_lf(new_string), 1)
+        replaced = normalized.replace(normalized_old, _crlf_to_lf(new_string), 1)
     return count, _from_lf(replaced, newline)
