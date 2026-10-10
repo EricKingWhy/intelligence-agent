@@ -394,3 +394,77 @@ class TestApplyPatchNotFoundHint:
         msg = result.result.message
         assert "未找到匹配" in msg
         assert "行尾" not in msg
+
+
+class TestApplyPatchHintTracksSearchBase:
+    """#851 七轮修回 P1：提示的**可执行性**必须按实际搜索的基准核对。
+
+    前块消费/改写掉 old_string 之后，末块的 `count == 0` 与行尾无关（失败是前块造成的）；
+    此时任何「改写行尾后重试」的提示都是死路——模型照做永不命中。两个反例来自
+    2026-10-10 最终独立双轴审查（Correctness P1），先机械钉死成因，再断言提示不提行尾。
+    """
+
+    @pytest.mark.asyncio
+    async def test_old_consumed_by_earlier_hunk_gets_no_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """反例1：前块把 old_string 消费掉 ⇒ 末块失配与行尾无关，不得提行尾。
+
+        机械钉死成因：原文件里 old 字节精确存在（`count == 1`），是前块把它替换掉的；
+        该文件行尾处处一致（纯 LF），「逐位置核对行尾」照做永不命中。
+        """
+        content = "a = 1\nb = 2\n"
+        sandbox.write_text("f.py", content)
+        assert content.count("b = 2\n") == 1
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [
+                    {"old_string": "b = 2\n", "new_string": "b = 22\n"},
+                    {"old_string": "b = 2\n", "new_string": "b = 22\n"},
+                ],
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        assert "第 2 块" in result.result.message
+        assert "行尾" not in result.result.message
+        # 原子性：整批失败，文件逐字节不变
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
+    async def test_old_exact_then_rewritten_by_earlier_hunk_gets_no_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """old 在原文件里字节精确存在，是被**前块改写**掉的（改写时行尾也换了）。
+
+        修法要点（P3 前置契约）：`content.count(old) == 1` —— 调用方声明的基准里
+        old 字节精确存在 ⟹ 本次失配与行尾无关，不得提行尾。文件 `a = 1\\nb = 2\\n` 里
+        第一块把 `b = 2\\n` 换成 CRLF 结尾的 `b = 2\\r\\n`，末块再找同一个 old 时在
+        内存态 current 上 `count(old)==0`；把 old 改写成 `b = 2\\r\\n` 也仍 `count()==0`
+        —— 该文件行尾本就不含 CRLF，任何「按行尾改写后重试」都走不通。
+        """
+        content = "a = 1\nb = 2\n"
+        sandbox.write_text("f.py", content)
+        assert content.count("b = 2\n") == 1  # 原文件里字节精确存在（前块消费掉它）
+        after_first_hunk = content.replace("b = 2\n", "b = 2\r\n", 1)
+        assert after_first_hunk.count("b = 2\n") == 0    # 内存态里已经找不到了
+        assert after_first_hunk.count("b = 2\r\n") == 1  # 但那是因为前块改了行尾
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [
+                    {"old_string": "b = 2\n", "new_string": "b = 2\r\n"},
+                    {"old_string": "b = 2\n", "new_string": "b = 22\n"},
+                ],
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        assert "第 2 块" in result.result.message
+        assert "行尾" not in result.result.message
+        assert sandbox.read_text("f.py") == content

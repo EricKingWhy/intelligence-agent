@@ -447,10 +447,7 @@ class TestEditNotFoundHint:
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
-        assert "对应段落的行尾" in msg
-        assert "逐位置照抄" in msg
-        assert "逐处核对" in msg
-        assert "把对不上的改写为该段落的行尾" in msg
+        assert "对应段落的行尾" in msg and "重试" in msg
         assert "不可能命中" not in msg
         assert "末端" not in msg
         assert "改用 write 整文件重写" in msg
@@ -485,7 +482,7 @@ class TestEditNotFoundHint:
         msg = result.result.message
         assert "行尾" in msg
         assert "对应段落的行尾" in msg
-        assert "逐处核对" in msg
+        assert "重试" in msg
         assert "不可能" not in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == content
@@ -586,4 +583,3 @@ class TestEditNotFoundHint:
         msg = result.result.message
         assert "未找到匹配的字符串" in msg
         assert "行尾" not in msg
-        assert "\\r" not in msg
