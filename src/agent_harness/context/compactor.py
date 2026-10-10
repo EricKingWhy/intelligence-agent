@@ -532,8 +532,38 @@ class ContextCompactor:
                 # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
                 # 会话的行为逐字节等价。
                 if events is not None:
+                    # #844 A-vis：比较基准对齐摘要器的**可见窗口**——摘要只覆盖
+                    # early 段 `[prefix_end:cut]`（含 #639 缩小后的实际段），落在
+                    # cut 之后的计划更新对摘要器不可见，不应要求其逐字出现。窗口
+                    # 右界取既有 `early_ranges` 里**可用来源区间**的最大 seq（与成功
+                    # 路径 `source_seq_start/source_seq_end` 同一数据源；缩小路径下
+                    # early_ranges 已被同步截断，天然一致）。单条消息没有来源区间
+                    # （对齐失败／derive 注入的 synthetic dangling ToolMessage）时该条
+                    # 不参与取 max，但不放弃整段——否则整段回落全量、误拒照旧复发
+                    # （P2 复审已复现）。仅当**一条可用区间都没有**（early_ranges 为
+                    # None／为空／全是 None）时才回落全量行为。
+                    #
+                    # 与下方成功路径的 source-seq 判据**故意分道**：那里决定能否
+                    # 持久化，要求区间**完整**（有一条 None 即拒绝并给
+                    # source_range_unavailable 诊断）；此处只决定比较基准，尽力取
+                    # 可用窗口即可。两处口径不同是有意的，勿强行合并成一个 helper。
+                    #
+                    # 不变量（P4 复审提示）：计划更新只经 update_plan 工具调用写入，
+                    # 其事件投影为一条真实消息、必然带来源区间，故「early 窗口内可见
+                    # 的计划更新 ⊆ 本处 seq 过滤保留的集合」。若日后出现非投影式的
+                    # 计划更新写入口，需重新核对本窗口推导。
+                    plan_events = events
+                    window_ranges = (
+                        [r for r in early_ranges if r is not None]
+                        if early_ranges else []
+                    )
+                    if window_ranges:
+                        window_end_seq = max(r[1] for r in window_ranges)
+                        plan_events = [
+                            event for event in events if event.seq <= window_end_seq
+                        ]
                     _validate_plan_section(
-                        candidate_summary_text, derive_plan(events).items,
+                        candidate_summary_text, derive_plan(plan_events).items,
                     )
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
@@ -1266,10 +1296,16 @@ def _validate_plan_section(
     """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
 
     会话**有**清单时启用（PRD §6.1 表行 5「与进度清单 in_progress 项一致」）：
-    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单存在
-    但零 in_progress ⇒ 第 5 节必须是 `(none)`（与 `aux:compaction` prompt 的
-    「无则写 (none)」同款约定）。无清单（items 为空）不启用——未用清单的会话
-    第 5 节本就是自由文本，保持 W-04 之前的既有行为。
+    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单**零
+    未完成项**（`status != "completed"`，即无 `pending` 且无 `in_progress`）⇒
+    第 5 节必须是 `(none)`。
+
+    #844 A-sem：`(none)` 触发条件由「零 `in_progress`」放宽为「零未完成项」——
+    对齐 `aux:compaction` prompt「列出尚未完成的工作……无则写 (none)」
+    （`prompt/builtin.py:102`）的语义；`pending` 也是尚未完成的工作。有未完成项
+    但无 `in_progress` 项时既不强制 `(none)`、也无逐字要求（只放宽不收紧）。
+    `in_progress` 项的逐字校验（PRD §6.1 表行 5）一字不动。无清单（items 为空）
+    不启用——未用清单的会话第 5 节本就是自由文本，保持 W-04 之前的既有行为。
 
     判据刻意用逐字子串而非语义比对：PRD 执行约束要求确定性机制兜底，弱模型
     重述不能靠"觉得差不多"。清单表本身就在转录的 update_plan 工具调用里，
@@ -1278,14 +1314,15 @@ def _validate_plan_section(
     if not plan_items:
         return
     section = _parse_summary_sections(summary, _SUMMARY_HEADINGS)[4]
-    in_progress = [item for item in plan_items if item.status == "in_progress"]
-    if not in_progress:
+    unfinished = [item for item in plan_items if item.status != "completed"]
+    if not unfinished:
         if section != "(none)":
             raise _SummaryRejected(
                 "plan_section_mismatch",
-                "Plan section must be (none): no plan item is in progress",
+                "Plan section must be (none): no plan item is unfinished",
             )
         return
+    in_progress = [item for item in plan_items if item.status == "in_progress"]
     missing = [
         item.id for item in in_progress
         if item.content not in section and item.active_form not in section
