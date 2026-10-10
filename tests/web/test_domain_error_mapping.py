@@ -75,6 +75,9 @@ def test_status_map_is_the_audited_contract():
         # #823 / MM-02：发送消息引用的 attachment_id 不合法（形态 / 不存在 / 读不回）——
         # 入参错误（客户端可纠正），与读端点"未被事件引用"的 404 口径分开。
         "AttachmentReferenceInvalid": 422,
+        # #934 M-05/M-06：读回时 id 未被本会话事件引用（PRD D5 / DSH
+        # ATTACHMENT_NOT_REFERENCED）——与"从未上传 / 属于别的会话"不可区分的 404。
+        "AttachmentNotReferenced": 404,
         # #824 / MM-03：发送端点的聚合上限与视觉门禁（落盘前判定）。数量超限 / 所选
         # 模型不支持视觉却附图 → 422（入参可纠正）；单消息图片总字节超限 → 413（载荷太大）。
         "TooManyAttachments": 422,

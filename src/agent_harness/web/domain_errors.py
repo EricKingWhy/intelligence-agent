@@ -119,6 +119,7 @@ from agent_harness.session.errors import (
     ApprovalQueueMissing,
     ApprovalRequestMissing,
     AttachmentMessageTooLarge,
+    AttachmentNotReferenced,
     AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
@@ -186,6 +187,11 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid 先例）；本表是
     # 精确类型索引，子类必须自己登记。
     SessionCwdUnavailable: 404,
+    # #934 M-05/M-06：读回附件时 id 未被本会话事件引用（PRD D5 / DSH
+    # `ATTACHMENT_NOT_REFERENCED`）——与"从未上传 / 属于别的会话"不可区分的 404
+    #（不泄露存在性）。读端点在自己的 except 里把它译成定制 404 文案；本表登记
+    # 是为了"新增领域异常必须显式登记"的覆盖纪律（漏登记先红）。
+    AttachmentNotReferenced: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # F6 / #635：手动压缩的两个类型化拒绝（in-flight 防重 / 落盘并发改动）。
