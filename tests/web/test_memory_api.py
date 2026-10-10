@@ -837,6 +837,63 @@ async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memor
     assert await service._store.pending() == []
 
 
+@pytest.mark.parametrize(
+    ("http_method", "path", "store_method", "body", "seed"),
+    [
+        # 票面失败点：`PATCH /api/memory-settings` → `store.update_settings`。
+        ("patch", "/api/memory-settings", "update_settings", {"recall_enabled": False}, False),
+        ("delete", "/api/memories/{memory_id}", "delete", None, False),
+        # edit 先 `store.get` 校验版本/种类才写；给一条真实记录，才走得到被注入的 update 臂。
+        ("patch", "/api/memories/{memory_id}", "update",
+         {"expected_version": 1, "content": "锁耗尽也应 503",
+          "payload": {"kind": "semantic", "subject": "s", "fact": "f",
+                      "category": "preference"}}, True),
+        ("post", "/api/memories/bulk-delete", "bulk_delete", {"confirmation": "DELETE"}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_memory_write_lock_exhaustion_maps_to_503(
+    memory_app, monkeypatch: pytest.MonkeyPatch, http_method: str, path: str,
+    store_method: str, body: dict | None, seed: bool,
+):
+    """#376-1 / #515 模式：memory-v2 四个写端点的写锁重试耗尽（`StorageBusyError`）
+    一律翻成结构化 503，不再裸 500。
+
+    与 #515 已武装的端点同款：`storage_http_status` 只认类型，每个端点在自己的 except
+    元组里声明翻译（不靠全局 handler——它的 `Exception` 臂只给 500）。与 #515 唯一不同
+    之处是 **detail 形状**：memory 族用带机读码的 `{"code": "storage_busy", "message"}`
+    （同端点已有多类 503，按 ADR-0035 §3 必须带码；前端 `memoryV2Api.ts` 读 `detail.code`）。
+    这里在 **store** 边界注入 `StorageBusyError`（写锁耗尽的真实发生地；store 内的重试链→
+    耗尽由 `tests/memory/v2/test_v2_write_retry.py` 的行为测试证明），断言四条路由各自的
+    except 臂都把 HTTP 面翻成带码 503 而不是 500。
+    """
+    from agent_harness.memory.v2.store import SqliteMemoryV2Store
+    from agent_harness.storage.sqlite import StorageBusyError
+
+    client, _components = memory_app
+
+    async def _exhausted(*_args, **_kwargs):
+        raise StorageBusyError("SQLite 写锁竞争在 3 次重试后仍超时")
+
+    monkeypatch.setattr(SqliteMemoryV2Store, store_method, _exhausted)
+
+    if seed:
+        record = await _seed_v2(client, _ALICE, "edit 前先落一条 active 记录")
+        request_path = path.format(memory_id=record.id)
+    else:
+        request_path = path.format(memory_id="lock-exhaustion") if "{memory_id}" in path else path
+
+    kwargs: dict = {"headers": _auth(_ALICE)}
+    if body is not None:
+        kwargs["json"] = body
+    response = getattr(client, http_method)(request_path, **kwargs)
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "storage_busy", detail
+    assert "写锁" in detail["message"]
+
+
 @pytest.mark.asyncio
 async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory_app):
     client, _components = memory_app

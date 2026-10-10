@@ -57,6 +57,69 @@ describe('node runtime lockfile pin', () => {
     assert.throws(() => validateNodeRuntimeLockfile(bad), /below requirements\.minimumMajor 22/)
   })
 
+  it('rejects a runtime below the engines minor floor (#919 Q11)', () => {
+    // minimumMajor is only the integer mirror of the TUI floor; the floor
+    // itself is ">=22.1" (tui/package.json) and a 22.0.x pin used to pass every
+    // check (measured in #919: an in-memory mutation of node.version to 22.0.0
+    // was accepted by the validator with the whole suite green).
+    const bad = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    bad.node.version = '22.0.0'
+    assert.throws(
+      () => validateNodeRuntimeLockfile(bad),
+      /node 22\.0\.0 is below requirements\.engines ">=22\.1"/,
+    )
+
+    const at = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    at.node.version = '22.1.0'
+    validateNodeRuntimeLockfile(at)
+
+    // Above the floor's major the minor is not a floor: 23.0.0 is newer.
+    const newer = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    newer.node.version = '23.0.0'
+    validateNodeRuntimeLockfile(newer)
+  })
+
+  it('is fail-closed about a node pin or engines floor it cannot compare (#919 Q11)', () => {
+    // A pin with no minor cannot be held against a minor floor, and a floor in
+    // another operator's spelling is not decidable here: both refuse instead of
+    // assuming the floor holds.
+    const noMinor = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    noMinor.node.version = '22'
+    assert.throws(
+      () => validateNodeRuntimeLockfile(noMinor),
+      /has no minor to hold the requirements\.engines floor/,
+    )
+
+    const spelled = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    spelled.requirements.engines = '^22.1'
+    assert.throws(
+      () => validateNodeRuntimeLockfile(spelled),
+      /requirements\.engines must be a ">=<major>\[\.<minor>\[\.<patch>\]\]" floor/,
+    )
+  })
+
+  it('holds the pin against a patch floor and refuses a floor it cannot read (#919 review S4)', () => {
+    // The floor may carry a patch (`>=22.1.5`); with the pattern unanchored it
+    // was read as `>=22.1` and a 22.1.0 pin passed, and `>=22x` was read as
+    // `>=22` though semver rejects it (both measured). A patch floor with a pin
+    // that has no patch is held at 0, the fail-closed reading.
+    const patchFloor = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    patchFloor.requirements.engines = '>=22.1.5'
+    patchFloor.node.version = '22.1.0'
+    assert.throws(
+      () => validateNodeRuntimeLockfile(patchFloor),
+      /node 22\.1\.0 is below requirements\.engines ">=22\.1\.5"/,
+    )
+    const atPatch = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    atPatch.requirements.engines = '>=22.1.5'
+    atPatch.node.version = '22.1.5'
+    validateNodeRuntimeLockfile(atPatch)
+
+    const junk = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
+    junk.requirements.engines = '>=22x'
+    assert.throws(() => validateNodeRuntimeLockfile(junk), /requirements\.engines must be a/)
+  })
+
   it('rejects a plaintext url and a malformed hash', () => {
     const http = JSON.parse(JSON.stringify(GOOD_NODE_LOCK))
     http.node.url = 'http://nodejs.org/node.zip'

@@ -384,6 +384,7 @@ def test_discard_twice_keeps_object_read_only(tmp_path: Path, monkeypatch: pytes
     assert asyncio.run(_store(tmp_path, "sess-a").load_bytes(blob.artifact_id)).content == b"twice"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：Windows 的 S_IMODE 恒为 0o666")
 def test_discard_does_not_touch_objects_it_did_not_clear(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -410,6 +411,7 @@ def test_discard_does_not_touch_objects_it_did_not_clear(
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：unlink 不看只读位（Windows 走清位回退）")
 def test_discard_without_readonly_receipt_never_chmods(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -552,6 +554,7 @@ def test_sha256_pattern_matches_byte_artifact_id_digest_shape() -> None:
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：setup 直接 unlink 只读文件（Windows 抛错）")
 def test_discard_restores_global_object_when_receipt_is_a_legacy_inode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -278,6 +278,7 @@ async def _wire_skills(
     from agent_harness.skills.context_provider import SkillCatalogContextProvider
     from agent_harness.skills.discovery import SkillDiscovery
     from agent_harness.skills.package_manager import (
+        SkillManifestError,
         SkillPackageError,
         SkillPackageManager,
     )
@@ -314,12 +315,52 @@ async def _wire_skills(
             "pending managed Skill versions were not applied; installed versions remain selected: %s",
             error,
         )
+    selection_errors: list[str] = []
     try:
         enabled_managed_skill_digests = package_manager.enabled_skill_digests()
     except SkillPackageError as error:
+        # 与全局侧同一条降级契约：整个受管根缺席 + 留痕，但**不**静默。
+        # 混装（有的项目包坏了）不是可选项——受管根是单一命名空间，部分装配
+        # 只会让「谁生效」变得不可解释；项目版失效时也**不**回落到全局版。
+        # 标签分两类（与全局侧同判据）：清单读不出来是盘上状态坏了，不是用户
+        # 的选择失效——两者要用户做的事完全不同。
         logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
         enabled_managed_skill_digests = {}
+        label = (
+            "Skill package storage is unreadable"
+            if isinstance(error, SkillManifestError)
+            else "managed Skill package selection cannot be honoured"
+        )
+        # 受管根是全有全无：一条坏掉，**其余受管包一起缺席**。不说这句，用户会以为
+        # 坏的只有异常消息里那一个、其余照常运行。
+        selection_errors.append(
+            f"{label}: {error} (every managed Skill stays disabled until this is fixed)"
+        )
+    try:
+        # #874 T5：全局安装根与自动发现根已分开（T4），但「装了什么」不等于「谁能装配」。
+        # 只有本项目显式选择 global 的包才进 catalog；被选版本失效时**不回落**项目版，
+        # 该全局贡献降级缺席并在此留痕（spec 08 §6.3：导入包不得改变 Agent Core 的
+        # 启动条件，所以是响亮告警 + 缺席，不是装配失败）。
+        enabled_global_skill_digests = package_manager.enabled_global_skill_digests()
+    except SkillPackageError as error:
+        logger.warning(
+            "this project's global Skill package selection cannot be honoured; "
+            "those Skills stay disabled (no fallback to project scope): %s",
+            error,
+        )
+        enabled_global_skill_digests = {}
+        # 清单损坏也会走到这里。标签分开写：把「清单读不出来」说成「选择失效」
+        # 会指控一个用户没做过的动作，而这两者要用户做的事完全不同。
+        prefix = (
+            "Skill package storage is unreadable"
+            if isinstance(error, SkillManifestError)
+            else "global Skill package selection cannot be honoured"
+        )
+        selection_errors.append(f"{prefix}: {error}")
+    global_managed_dir = global_package_manager.managed_skills_dir
     directories = [global_dir, project_dir, managed_dir]
+    if enabled_global_skill_digests:
+        directories.append(global_managed_dir)
     directories.extend(additional_directories)
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
@@ -327,15 +368,21 @@ async def _wire_skills(
         directories=directories,
         manual_paths=manual_paths,
         project_dir=project_dir,
-        managed_directory=managed_dir,
-        enabled_managed_skills=set(enabled_managed_skill_digests),
-        enabled_managed_skill_digests=enabled_managed_skill_digests,
+        managed_directories={
+            "project": managed_dir,
+            "global": global_managed_dir,
+        },
+        enabled_managed_digests={
+            "project": enabled_managed_skill_digests,
+            "global": enabled_global_skill_digests,
+        },
+        selection_errors=selection_errors,
     )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。
     if catalog.errors:
-        logger.warning("skill 发现阶段有 %d 个解析错误：%s", len(catalog.errors), catalog.errors)
+        logger.warning("skill 发现阶段有 %d 个错误：%s", len(catalog.errors), catalog.errors)
     # #529 T-529-5：沉淀状态机装配（staging 在 project skill 目录第二层，单层
     # 扫描不可见——未确认草稿结构上进不了 catalog）。
     from agent_harness.skills.promote import SkillPromoter
