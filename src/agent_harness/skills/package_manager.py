@@ -29,6 +29,7 @@ from agent_harness.skills.package_lock import MANIFEST_FILENAME
 from agent_harness.skills.package_lock import registry_lock as _registry_lock
 
 MANIFEST_VERSION = 1
+ENABLE_RESULTS_FIELD = "enable_results"
 MANAGED_DIRECTORY_NAME = ".managed"
 VERSION_DIRECTORY_NAME = ".versions"
 _NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -41,6 +42,14 @@ _GIT_TIMEOUT_SECONDS = 120
 
 class SkillPackageError(ValueError):
     """A package lifecycle operation cannot safely be completed."""
+
+
+class SkillManifestError(SkillPackageError):
+    """安装清单本身读不出 / 不合形状（区别于某个生命周期动作失败）。
+
+    调用方要分开说这两件事：「选中的版本失效」是用户做过的选择出了问题，
+    「清单损坏」是盘上状态出了问题，两者该让用户做的事完全不同。
+    """
 
 
 class SkillPackageManager:
@@ -84,6 +93,40 @@ class SkillPackageManager:
         self.additional_skill_paths = [
             Path(path).expanduser() for path in (additional_skill_paths or [])
         ]
+        self._global_manager_cache: SkillPackageManager | None = None
+
+    def global_manager(self) -> SkillPackageManager:
+        """本 manager 所属安装根的全局 scope 视图（同 workspace、同全局目录）。
+
+        启用结果是「本项目选了哪个 scope 的哪一版」——判断同 ID 是否跨 scope 并存
+        必须同时读两个安装根（T5 AC2），所以项目 manager 需要一个全局视图。
+        """
+        if self.scope == "global":
+            return self
+        if self._global_manager_cache is None:
+            self._global_manager_cache = SkillPackageManager(
+                self.workspace_dir,
+                scope="global",
+                global_skills_dir=self.global_skills_dir,
+            )
+        return self._global_manager_cache
+
+    def global_record(self, name: str) -> dict[str, Any] | None:
+        """全局 scope 的安装记录；无则 None。清单损坏时响亮失败，不静默吞掉。"""
+        return self.global_manager().list_packages().get(name)
+
+    def enable_results(self) -> dict[str, dict[str, Any]]:
+        """本项目的启用结果表副本（只读投影，供 CLI/装配面消费）。
+
+        含读侧从 T4 旧清单派生补齐的条目（`_read_manifest` 回填），所以不等于
+        「盘上原样保存的那份」——回填结果在下一次写盘时持久化。
+
+        键是 `enable <id>` 用的 id（安装器保证它等于包名：检查阶段要求 SKILL.md
+        的 name 与所在目录名一致）；值记录被选 scope / 来源 / 版本（spec 08 §6.2
+        要求安装记录至少能还原「显式项目启用选择」，这条属于项目自己的清单）。
+        """
+        with self._locked_registry():
+            return copy.deepcopy(self._read_manifest()[ENABLE_RESULTS_FIELD])
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
         source_report = inspect_skill_package(
@@ -388,40 +431,124 @@ class SkillPackageManager:
                         shutil.rmtree(staging_root, ignore_errors=True)
         return applied
 
-    def enable(self, name: str) -> None:
-        if self.scope == "global":
-            raise SkillPackageError("global packages require explicit project selection")
-        with self._locked_registry():
-            manifest = self._read_manifest()
-            record = self._record(manifest, name)
-            status = record["compatibility"]["status"]
-            if status != "complete":
-                raise SkillPackageError(
-                    f"Skill {name!r} has status {status!r}; only complete packages can be enabled"
-                )
-            self._assert_no_shadow_conflict(name)
-            package = self._package_path(name)
-            self._verify_package(package, record)
-            if record["enabled"]:
-                return
-            record["enabled"] = True
-            self._write_manifest(manifest)
+    def enable(self, name: str, *, scope: str | None = None) -> dict[str, Any]:
+        """显式启用本项目对该包的装配（spec 08 §6.2 / ADR-0052 D3）。
 
-    def disable(self, name: str) -> None:
+        `scope` 是显式选择：同 ID 的项目版与全局版并存且尚无启用结果时必须给出，
+        否则拒绝并列出两项来源/版本（T5 AC2）。启用结果一旦落盘就不会被后来的安装
+        或升级静默改写（T5 AC3）；被选 scope 失效时报错，不自动切到另一 scope。
+        本方法只写启用结果：不触碰 permission mode / tool permission / approval
+        策略，包声明的权限不因选择提升（T5 AC4）。
+        """
+        if scope is not None and scope not in {"project", "global"}:
+            raise SkillPackageError(f"unsupported package scope {scope!r}")
         if self.scope == "global":
-            raise SkillPackageError("global packages have no shared enabled state")
+            raise SkillPackageError(
+                "global packages are enabled per project; select them from the project that uses them"
+            )
         with self._locked_registry():
             manifest = self._read_manifest()
-            record = self._record(manifest, name)
-            if not record["enabled"]:
-                return
-            record["enabled"] = False
+            results = manifest[ENABLE_RESULTS_FIELD]
+            previous = results.get(name, {}).get("selected_scope")
+            local = manifest["packages"].get(name)
+            global_record = self.global_record(name)
+            target = scope
+            if target is None:
+                if local is not None and global_record is not None:
+                    raise SkillPackageError(self._ambiguous_scope_message(name, local, global_record))
+                if local is None and global_record is None:
+                    raise SkillPackageError(f"Skill {name!r} is not installed")
+                target = "project" if local is not None else "global"
+            if target == "project":
+                if local is None:
+                    raise SkillPackageError(
+                        f"Skill {name!r} has no project version; refusing to fall back to another scope"
+                    )
+                self._adopt_project_package(name, local)
+                source, version = local["source"], None
+            else:
+                if global_record is None:
+                    raise SkillPackageError(
+                        f"Skill {name!r} has no global version; refusing to fall back to another scope"
+                    )
+                self._verify_selected_global(name, global_record)
+                source = global_record["source"]
+                version = global_record.get("resolved_commit") or global_record["sha256"]
+                if local is not None:
+                    # 改选全局版后，项目记录的 enabled 位必须跟着熄灭：它同时喂给
+                    # 列表面（saved_selection / pending_restart）与装配面，留着 True
+                    # 会让 CLI 把「已改选全局」的那条项目记录报成已启用且待重启。
+                    local["enabled"] = False
+            results[name] = {
+                "selected_scope": target,
+                "source": source,
+                "version": version,
+            }
             self._write_manifest(manifest)
+            return {
+                "selected_scope": target,
+                "source": source,
+                "version": version,
+                "previous_scope": previous if isinstance(previous, str) else None,
+            }
+
+    def _adopt_project_package(self, name: str, record: dict[str, Any]) -> None:
+        status = record["compatibility"]["status"]
+        if status != "complete":
+            raise SkillPackageError(
+                f"Skill {name!r} has status {status!r}; only complete packages can be enabled"
+            )
+        self._assert_no_shadow_conflict(name)
+        package = self._package_path(name)
+        self._verify_package(package, record)
+        record["enabled"] = True
+
+    def _verify_selected_global(self, name: str, record: dict[str, Any]) -> None:
+        """被选的全局版本必须可装配；失效就报错，不 shadow（T5 AC3）。"""
+        status = record["compatibility"]["status"]
+        if status != "complete":
+            raise SkillPackageError(
+                f"global Skill {name!r} has status {status!r}; only complete packages can be enabled"
+            )
+        manager = self.global_manager()
+        package = manager._package_path(name)
+        manager._verify_package(package, record)
+
+    def _ambiguous_scope_message(
+        self, name: str, local: dict[str, Any], global_record: dict[str, Any]
+    ) -> str:
+        return (
+            f"Skill {name!r} exists in both project and global scope; "
+            f"project {_source_label(local)} / global {_source_label(global_record)}. "
+            f"Choose one explicitly with --scope project or --scope global"
+        )
+
+    def disable(self, name: str) -> dict[str, Any]:
+        """清掉本项目对该包的启用结果（不动另一 scope 的记录，不静默切换）。"""
+        if self.scope == "global":
+            raise SkillPackageError(
+                "global packages are disabled per project; clear the selection from that project"
+            )
+        with self._locked_registry():
+            manifest = self._read_manifest()
+            results = manifest[ENABLE_RESULTS_FIELD]
+            previous = results.get(name, {}).get("selected_scope")
+            record = manifest["packages"].get(name)
+            if record is not None:
+                record["enabled"] = False
+            results.pop(name, None)
+            self._write_manifest(manifest)
+            return {"selected_scope": previous if isinstance(previous, str) else None}
 
     def remove(self, name: str) -> None:
         with self._locked_registry():
             manifest = self._read_manifest()
             self._record(manifest, name)
+            if manifest[ENABLE_RESULTS_FIELD].get(name, {}).get("selected_scope") == "global":
+                raise SkillPackageError(
+                    f"Skill {name!r} is selected from global scope; remove the global copy instead"
+                )
+            manifest[ENABLE_RESULTS_FIELD].pop(name, None)
             record = manifest["packages"][name]
             package = self._package_path(name)
             self._verify_package(package, record)
@@ -500,13 +627,22 @@ class SkillPackageManager:
             return copy.deepcopy(self._read_manifest()["packages"])
 
     def enabled_skill_digests(self) -> dict[str, str]:
-        """Return selected Skills and their install-time bodies after snapshot checks."""
+        """本项目从 project scope 装配的 Skill 与安装期正文摘要。
+
+        两个条件都要满足：启用结果表说「本项目选了 project scope」，且项目记录
+        仍是 `enabled`。前者决定选哪一版（T5 AC2：同 ID 只装配所选一版），后者是
+        安装记录的既有门。选择了 global 的同名包由
+        :meth:`enabled_global_skill_digests` 承担，两处互斥。
+        """
         if self.scope == "global":
             return {}
         with self._locked_registry():
-            packages = self._read_manifest()["packages"]
+            manifest = self._read_manifest()
+            results = manifest[ENABLE_RESULTS_FIELD]
             enabled: dict[str, str] = {}
-            for name, record in packages.items():
+            for name, record in manifest["packages"].items():
+                if results.get(name, {}).get("selected_scope") != "project":
+                    continue
                 if not record["enabled"] or record["compatibility"]["status"] != "complete":
                     continue
                 self._assert_no_shadow_conflict(name)
@@ -521,6 +657,46 @@ class SkillPackageManager:
         """Return selected Skills after validating their installed snapshots."""
         return set(self.enabled_skill_digests())
 
+    def enabled_global_skill_digests(self) -> dict[str, str]:
+        """本项目显式选择 global scope 的 Skill 与安装期正文摘要。
+
+        被选版本失效（记录被移除、快照被改、状态不再是 complete）时报错，
+        **不**回落到项目版（T5 AC3：不自动 shadow）。其他项目的选择不进本清单
+        （启用结果写在各项目自己的清单里）。
+        """
+        selected = self.global_selections()
+        manager = self.global_manager()
+        records = manager.list_packages()
+        digests: dict[str, str] = {}
+        for name in sorted(selected):
+            record = records.get(name)
+            if record is None:
+                raise SkillPackageError(
+                    f"Skill {name!r} is selected from global scope but that record no longer exists"
+                )
+            if record["compatibility"]["status"] != "complete":
+                raise SkillPackageError(
+                    f"global Skill {name!r} has status "
+                    f"{record['compatibility']['status']!r}; only complete packages can be enabled"
+                )
+            package = manager.managed_skills_dir / name
+            if not manager._is_managed_package(package):
+                raise SkillPackageError(f"selected global Skill {name!r} is missing or unsafe")
+            manager._verify_package(package, record)
+            digests[name] = record["skill_sha256"]
+        return digests
+
+    def global_selections(self) -> dict[str, dict[str, Any]]:
+        """本项目显式选择 global scope 的启用结果（只读投影）。
+
+        键就是 `enable <id>` 的 id，等于该 scope 安装记录里的包名。
+        """
+        return {
+            name: dict(result)
+            for name, result in self.enable_results().items()
+            if result.get("selected_scope") == "global"
+        }
+
     def _read_manifest(self) -> dict[str, Any]:
         if self.scope == "global" and self._path_exists(self.scope_root) and (
             _is_reparse_point(self.scope_root)
@@ -528,19 +704,53 @@ class SkillPackageManager:
             or self.scope_root.resolve(strict=True).parent
             != self.scope_root.parent.resolve(strict=True)
         ):
-            raise SkillPackageError("global package storage directory is unsafe")
+            raise SkillManifestError("global package storage directory is unsafe")
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return {"version": MANIFEST_VERSION, "packages": {}}
+            return {"version": MANIFEST_VERSION, "packages": {}, ENABLE_RESULTS_FIELD: {}}
         except (OSError, ValueError) as error:
-            raise SkillPackageError(f"cannot read install manifest: {type(error).__name__}") from error
+            raise SkillManifestError(f"cannot read install manifest: {type(error).__name__}") from error
         if (
             not isinstance(payload, dict)
             or payload.get("version") != MANIFEST_VERSION
             or not isinstance(payload.get("packages"), dict)
         ):
-            raise SkillPackageError("install manifest has an unsupported shape")
+            raise SkillManifestError("install manifest has an unsupported shape")
+        results = payload.setdefault(ENABLE_RESULTS_FIELD, {})
+        if not isinstance(results, dict):
+            raise SkillManifestError("install manifest has an unsupported shape")
+        # T4 时代的清单只有 enabled 位、没有启用结果表。升级后按「显式项目选择」
+        # 补齐，否则已启用的项目包会在读侧静默消失（AC1 要求会话间一致）。
+        # 这是版本 1 内的字段演进，不动 MANIFEST_VERSION。补齐落在 payload 上，
+        # 因此**下一次任何写盘都会把它持久化**——这正是我们要的升级迁移（幂等，
+        # 回填值等于 T4 的 enabled 语义），不是只存在于本次读的临时视图。
+        for legacy_name, legacy_record in payload["packages"].items():
+            if (
+                isinstance(legacy_record, dict)
+                and legacy_record.get("enabled") is True
+                and isinstance(legacy_record.get("source"), str)
+                and legacy_name not in results
+            ):
+                results[legacy_name] = {
+                    "selected_scope": "project",
+                    "source": legacy_record["source"],
+                    "version": None,
+                }
+        for name, result in results.items():
+            if (
+                not isinstance(name, str)
+                or not _NAME_PATTERN.fullmatch(name)
+                or not isinstance(result, dict)
+                or result.get("selected_scope") not in {"project", "global"}
+                or not isinstance(result.get("source"), str)
+                or not isinstance(result.get("version"), (str, type(None)))
+            ):
+                raise SkillManifestError(f"enable result for {name!r} is invalid")
+            if result["selected_scope"] == "project" and name not in payload["packages"]:
+                raise SkillManifestError(
+                    f"enable result for {name!r} names a missing project package"
+                )
         for name, record in payload["packages"].items():
             if (
                 not isinstance(name, str)
@@ -561,7 +771,7 @@ class SkillPackageManager:
                 or not isinstance(record.get("compatibility"), dict)
                 or record["compatibility"].get("status") not in {"complete", "needs-adaptation"}
             ):
-                raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+                raise SkillManifestError(f"install manifest record for {name!r} is invalid")
             _validate_git_manifest_record(name, record)
         return payload
 
@@ -570,7 +780,7 @@ class SkillPackageManager:
         self._ensure_scope_root()
         with _registry_lock(self.manifest_path):
             if self.scope == "global" and _is_reparse_point(self.scope_root):
-                raise SkillPackageError("global package storage directory is unsafe")
+                raise SkillManifestError("global package storage directory is unsafe")
             yield
 
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
@@ -706,7 +916,9 @@ class SkillPackageManager:
                 *self.additional_skill_directories,
             ],
             manual_paths=self.additional_skill_paths,
-            managed_directory=self.managed_skills_dir,
+            # 本 scope 的托管根里的内容不算「外部同名冲突」：它们是本安装根自己
+            # 的快照，由启用结果决定是否装配（不传 enabled digests ⇒ 全不可见）。
+            managed_directories={"project": self.managed_skills_dir},
         ).discover()
         source = next((entry.source_path for entry in catalog.entries if entry.name == name), None)
         if source is not None:
@@ -781,6 +993,12 @@ class SkillPackageManager:
             raise SkillPackageError(f"{self.scope} Skill {name!r} already exists")
         codes = ", ".join(error.get("code", "unknown") for error in report["errors"])
         raise SkillPackageError(f"Skill preflight rejected the package: {codes or 'unsupported'}")
+
+
+def _source_label(record: dict[str, Any]) -> str:
+    """来源/版本标签：Git 记录带 commit，其余退回内容摘要。"""
+    version = record.get("resolved_commit") or record.get("sha256", "")
+    return f"{record.get('source')}@{version}"
 
 
 def _validate_git_url(value: str) -> str:
@@ -1217,10 +1435,10 @@ def _validate_git_manifest_record(name: str, record: dict[str, Any]) -> None:
     source_kind = record.get("source_kind")
     if source_kind is None:
         if git_fields.intersection(record):
-            raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+            raise SkillManifestError(f"install manifest record for {name!r} is invalid")
         return
     if source_kind != "git":
-        raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+        raise SkillManifestError(f"install manifest record for {name!r} is invalid")
 
     try:
         _validate_git_url(record["source"])
@@ -1243,7 +1461,7 @@ def _validate_git_manifest_record(name: str, record: dict[str, Any]) -> None:
             if version is not None:
                 _validate_version_metadata(version, allow_needs_adaptation=False)
     except (KeyError, SkillPackageError) as error:
-        raise SkillPackageError(f"install manifest record for {name!r} is invalid") from error
+        raise SkillManifestError(f"install manifest record for {name!r} is invalid") from error
 
 
 def _validate_version_metadata(
