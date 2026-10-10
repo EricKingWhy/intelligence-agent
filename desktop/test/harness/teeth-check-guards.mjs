@@ -335,6 +335,19 @@ const mutations = {
     '  return { from: read + 1, to: close }',
   ),
 
+  // Q8: declining the sweep prompt is its own "kept" outcome, and the prompt's
+  // IDCANCEL target names the branch that has to carry the exit code. Each half
+  // gets a mutation and a fixture: the cancel landing on the success label, and
+  // a prompt with no IDCANCEL at all (both measured green in #919).
+  'declined-sweep exit-code rule dropped (#919 Q8)': swap(
+    '          if (declinedExit === -1) {',
+    '          if (false) {',
+  ),
+  'sweep prompt IDCANCEL requirement dropped (#919 Q8)': swap(
+    '        if (cancelTarget === undefined) {',
+    '        if (false) {',
+  ),
+
   // The node runtime lock validator compared the pin's major against
   // minimumMajor only; a 22.0.x pin (below the TUI's ">=22.1" floor) passed the
   // validator and the whole suite (measured in #919). The mutation reverts the

@@ -1462,6 +1462,45 @@ export function unguardedBackupDelete(source, options = {}) {
       for (const { re, what } of required) {
         if (!block.some((line) => re.test(line))) problems.push({ line: i + 1, what })
       }
+      // #919 Q8: declining the prompt is a third "kept" outcome — the leftovers
+      // are still on disk — and it is UI-only (a silent run takes the /SD IDOK
+      // default), so nothing else here reads it. The prompt's own IDCANCEL
+      // target names the branch: it has to exist (a prompt with no way to say
+      // no is not the contract), and the branch has to set the exit code
+      // exactly like the kept path below the delete. A cancel that lands on the
+      // success label used to pass every check (measured).
+      const promptOffset = block.findIndex((line) => /\$\(iaLeftoverSweep\)/.test(line))
+      if (promptOffset !== -1) {
+        const cancelTarget = /IDCANCEL\s+(\S+)/i.exec(block[promptOffset])?.[1]
+        if (cancelTarget === undefined) {
+          problems.push({
+            line: blockStart + promptOffset + 1,
+            what: 'the sweep prompt has no IDCANCEL branch — a UI uninstall cannot decline the sweep',
+          })
+        } else {
+          const declinedLabel = new RegExp(
+            `^\\s*${cancelTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*$`,
+            'i',
+          )
+          const labelOffset = block.findIndex((line) => declinedLabel.test(line))
+          const branchEnd = (() => {
+            for (let j = labelOffset + 1; j < block.length; j += 1) {
+              if (/^\s*[A-Za-z0-9_.]+:\s*$/.test(block[j])) return blockStart + j - 1
+            }
+            return blockEnd
+          })()
+          const declinedExit =
+            labelOffset === -1
+              ? -1
+              : keptExitLevel(lines, blockStart + labelOffset, branchEnd, onDeletePath)
+          if (declinedExit === -1) {
+            problems.push({
+              line: labelOffset === -1 ? blockStart + promptOffset + 1 : blockStart + labelOffset + 1,
+              what: 'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success',
+            })
+          }
+        }
+      }
       // #904 item 4 (round 6): the exit code is the contract the caller reads,
       // so its value is pinned — 2, the reading the launch-form probe and the
       // real-machine driver assert — and it has to sit below the delete: a

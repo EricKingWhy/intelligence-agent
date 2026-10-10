@@ -1,10 +1,12 @@
 /**
  * Teeth check for the #901 repair-round test assertions.
  *
- * Mutates desktop/installer/installer-directories.nsh in place, runs the guard
- * test file, restores the original bytes (verified byte-for-byte), and reports
- * which mutation the tests caught. Every mutation is expected to fail, so a
- * surviving mutation is a gap in the assertions.
+ * Mutates the shipped installer scripts in place — installer-directories.nsh
+ * (the update protocol) and installer.nsh (the uninstaller sweep; #919 Q8: the
+ * sweep rules had no product mutation at all) — runs the guard test file,
+ * restores the original bytes (verified byte-for-byte), and reports which
+ * mutation the tests caught. Every mutation is expected to fail, so a surviving
+ * mutation is a gap in the assertions.
  *
  * The working tree may carry CRLF (core.autocrlf=true and .gitattributes does
  * not pin .nsh), so mutations are applied to the LF form and written back with
@@ -21,17 +23,11 @@ import { promisify } from 'node:util'
 
 const execute = promisify(execFile)
 const desktop = fileURLToPath(new URL('../../', import.meta.url))
-const nsh = join(desktop, 'installer', 'installer-directories.nsh')
-const raw = readFileSync(nsh, 'utf8')
-const original = raw.replace(/\r\n/g, '\n')
-const eol = raw.includes('\r\n') ? '\r\n' : '\n'
 const sha = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
-process.stdout.write(`original sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
+const lf = '\n'
 
 const unprefixedProbe = '${IfNot} ${FileExists} "$iaLeftoverDirectory"'
 const dropLine = 'DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"'
-const lf = '\n'
-
 const readLine = `    !insertmacro iaReadLeftoverDir${lf}`
 // The shipped shape (#904): the record is dropped only after iaProbePath, the
 // helper that tries every form that can name the path. The pre-#904 shape (the
@@ -68,7 +64,13 @@ const swappedBlock = [
   '    ${EndIf}',
 ].join(lf)
 
-const mutations = {
+/** Run a mutation that rewrites `from` to `to`, throwing when `from` is gone. */
+const replace = (from, to) => (source) => {
+  if (!source.includes(from)) throw new Error(`anchor not found: ${String(from).split('\n')[0]}`)
+  return source.replace(from, to)
+}
+
+const directoriesMutations = {
   'probe without the long-path helper (B-1)': (source) => {
     if (!source.includes(shippedProbeBlock)) throw new Error('probe block not found')
     return source.replace(shippedProbeBlock, unprefixedOnlyBlock)
@@ -128,38 +130,73 @@ const mutations = {
   },
 }
 
-let survivors = 0
-for (const [name, mutate] of Object.entries(mutations)) {
-  let mutated
-  try {
-    mutated = mutate(original)
-  } catch (error) {
-    process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
-    survivors += 1
-    continue
-  }
-  writeFileSync(nsh, mutated.replace(/\r?\n/g, eol))
-  let failed = false
-  let tail = ''
-  try {
-    await execute(process.execPath, ['--test', 'test/installer-scripts.test.mjs'], { cwd: desktop })
-  } catch (error) {
-    failed = true
-    tail = String(error.stdout || '')
-      .split('\n')
-      .filter((line) => /^not ok|^# fail/.test(line))
-      .slice(0, 4)
-      .join(' | ')
-  }
-  writeFileSync(nsh, raw)
-  if (failed === false) survivors += 1
-  process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
+// #919 Q8: the sweep had no product mutation before — every teeth-check entry
+// above rewrites installer-directories.nsh, so a weakened installer.nsh sweep
+// (the delete pass and the prompt the user answers) went unnoticed by this
+// harness. Each mutation below reverts one pinned rule of that file.
+const baseMutations = {
+  'sweep arming flipped to "0" (#919 Q8)': replace(
+    ['  StrCpy $iaDeleteBase "$INSTDIR"', '  StrCpy $iaDeleteShapeCheck "1"'].join(lf),
+    ['  StrCpy $iaDeleteBase "$INSTDIR"', '  StrCpy $iaDeleteShapeCheck "0"'].join(lf),
+  ),
+  'declined sweep branch returns success (#919 Q8)': replace(
+    '  DetailPrint "customUnInstall: leftover sweep declined: $9 kept"' + lf + '  SetErrorLevel 2',
+    '  DetailPrint "customUnInstall: leftover sweep declined: $9 kept"',
+  ),
+  'sweep prompt cannot be declined (#919 Q8)': replace(
+    'IDCANCEL iaSweepDeclined',
+    'IDCANCEL iaSweepDone',
+  ),
+  'sweep asks nothing before deleting (#919 Q8)': replace(
+    '  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+    '  StrCpy $9 $9',
+  ),
 }
 
-const restored = readFileSync(nsh, 'utf8')
-process.stdout.write(`\nrestored sha256 = ${sha(restored)} identical=${restored === raw}\n`)
-process.stdout.write(`surviving mutations = ${survivors}\n`)
+const targets = [
+  { name: 'installer-directories.nsh', mutations: directoriesMutations },
+  { name: 'installer.nsh', mutations: baseMutations },
+]
+
 // A survivor is a hole in the assertions (or a mutation that no longer applies
 // to the shipped text), so the run fails: a harness that only prints them is
 // easy to read as green.
-if (survivors > 0 || restored !== raw) process.exitCode = 1
+let survivors = 0
+for (const target of targets) {
+  const nsh = join(desktop, 'installer', target.name)
+  const raw = readFileSync(nsh, 'utf8')
+  const original = raw.replace(/\r\n/g, '\n')
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  process.stdout.write(`\n=== ${target.name} sha256 = ${sha(raw)} eol=${JSON.stringify(eol)} ===\n`)
+  for (const [name, mutate] of Object.entries(target.mutations)) {
+    let mutated
+    try {
+      mutated = mutate(original)
+    } catch (error) {
+      process.stdout.write(`\n[${name}] MUTATION FAILED TO APPLY: ${error.message}\n`)
+      survivors += 1
+      continue
+    }
+    writeFileSync(nsh, mutated.replace(/\r?\n/g, eol))
+    let failed = false
+    let tail = ''
+    try {
+      await execute(process.execPath, ['--test', 'test/installer-scripts.test.mjs'], { cwd: desktop })
+    } catch (error) {
+      failed = true
+      tail = String(error.stdout || '')
+        .split('\n')
+        .filter((line) => /^not ok|^# fail/.test(line))
+        .slice(0, 4)
+        .join(' | ')
+    }
+    writeFileSync(nsh, raw)
+    if (failed === false) survivors += 1
+    process.stdout.write(`\n[${name}]\n  tests red = ${failed}\n  ${tail}\n`)
+  }
+  const restored = readFileSync(nsh, 'utf8')
+  process.stdout.write(`restored ${target.name} sha256 = ${sha(restored)} identical=${restored === raw}\n`)
+  if (restored !== raw) survivors += 1
+}
+process.stdout.write(`\nsurviving mutations = ${survivors}\n`)
+if (survivors > 0) process.exitCode = 1

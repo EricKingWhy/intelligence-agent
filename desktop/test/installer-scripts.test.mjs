@@ -1520,7 +1520,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       `  RMDir /r "$iaDeleteTarget"`,
       '  IfErrors 0 iaSweepDone',
       '  SetErrorLevel 2',
-      '  MessageBox MB_OK "$(iaLeftoverSweep)"',
+      '  MessageBox MB_OKCANCEL "$(iaLeftoverSweep)" IDOK iaSweepDone IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      '  SetErrorLevel 2',
+      '  Goto iaSweepDone',
       'iaSweepDone:',
       '!MACROEND',
     ].join('\n')
@@ -1533,7 +1536,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  FindFirst $0 $1 "$INSTDIR.old-*"',
       '  StrCmp $0 "" iaSweepDone',
       '  FindClose $0',
-      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDone',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      '  SetErrorLevel 2',
+      '  Goto iaSweepDone',
       'iaSweepDelete:',
       '  ${GetParent} "$INSTDIR" $2',
       '  StrCpy $iaDeleteCandidate "$2\\$1"',
@@ -1559,19 +1565,19 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       unguardedBackupDelete(swapped('FindFirst $0 $1 "$INSTDIR.old-*"', 'StrCpy $0 ""'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: 'the sweep does not enumerate "$INSTDIR.old-*" by name shape' }],
+      [{ line: 17, what: 'the sweep does not enumerate "$INSTDIR.old-*" by name shape' }],
     )
     assert.deepEqual(
       unguardedBackupDelete(swapped('"($9) $(iaLeftoverSweep)"', '"old leftovers?"'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: 'the sweep does not ask before deleting (no $(iaLeftoverSweep) prompt)' }],
+      [{ line: 17, what: 'the sweep does not ask before deleting (no $(iaLeftoverSweep) prompt)' }],
     )
     assert.deepEqual(
-      unguardedBackupDelete(swapped('  SetErrorLevel 2', '  StrCpy $9 ""'), {
+      unguardedBackupDelete(swapped('iaSweepKept:\n  SetErrorLevel 2', 'iaSweepKept:\n  StrCpy $9 ""'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
+      [{ line: 17, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
     )
     // The value is the contract the caller reads (rc 2: the launch-form probe
     // and the real-machine driver assert it), and it has to sit on the kept
@@ -1579,18 +1585,16 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // 2` above the delete that runs before anything was kept, both used to
     // satisfy the earlier presence check (round-6 review, P3).
     assert.deepEqual(
-      unguardedBackupDelete(swapped('  SetErrorLevel 2', '  SetErrorLevel 0'), {
+      unguardedBackupDelete(swapped('iaSweepKept:\n  SetErrorLevel 2', 'iaSweepKept:\n  SetErrorLevel 0'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
+      [{ line: 17, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
     )
     const aboveOnly = sweep
-      .split('\n')
-      .map((line) => (line === '  SetErrorLevel 2' ? '  StrCpy $9 ""' : line))
-      .join('\n')
-      .replace('  FindFirst $0 $1 "$INSTDIR.old-*"', '  SetErrorLevel 2\n  FindFirst $0 $1 "$INSTDIR.old-*"')
+      .replace('iaSweepKept:\n  SetErrorLevel 2', 'iaSweepKept:\n  StrCpy $9 ""')
+      .replace('iaSweepDelete:\n', 'iaSweepDelete:\n  SetErrorLevel 2\n')
     assert.deepEqual(unguardedBackupDelete(aboveOnly, { sitePolicies: DELETE_SITE_POLICIES }), [
-      { line: 15, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
+      { line: 18, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
     ])
     // The flag is what makes iaPrepareDelete run the name check at all: with it
     // off, the delete pass removes every "$INSTDIR.old-*" sibling — foreign or
@@ -1602,7 +1606,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       }),
       [
         {
-          line: 14,
+          line: 17,
           what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
@@ -1618,7 +1622,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       ),
       [
         {
-          line: 15,
+          line: 18,
           what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
         },
       ],
@@ -1648,7 +1652,35 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       unguardedBackupDelete(swapped('  IfErrors 0 iaSweepNext', '  StrCpy $9 ""'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: "missing ${Errors} check before the end of the delete's block" }],
+      [{ line: 17, what: "missing ${Errors} check before the end of the delete's block" }],
+    )
+    // #919 Q8: the declined prompt is a third "kept" outcome — the leftovers
+    // are still there — and it is UI-only (a silent run takes the /SD IDOK
+    // default), so nothing else in this suite reads it. The prompt's own
+    // IDCANCEL target names the branch: it has to exist and it has to set the
+    // exit code. Landing the cancel on the success label used to pass, and so
+    // did a prompt with no way to say no (measured).
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('IDCANCEL iaSweepDeclined', 'IDCANCEL iaSweepDone'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 23,
+          what: 'the declined sweep branch does not set the exit code to 2 — a declined sweep reports success',
+        },
+      ],
+    )
+    assert.deepEqual(
+      unguardedBackupDelete(swapped(' IDCANCEL iaSweepDeclined', ''), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 5,
+          what: 'the sweep prompt has no IDCANCEL branch — a UI uninstall cannot decline the sweep',
+        },
+      ],
     )
     const armingMessage =
       'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built'
@@ -1665,7 +1697,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         ),
         { sitePolicies: DELETE_SITE_POLICIES },
       ),
-      [{ line: 16, what: armingMessage }],
+      [{ line: 19, what: armingMessage }],
     )
     assert.deepEqual(
       unguardedBackupDelete(
@@ -1674,7 +1706,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
           .replace('iaSweepDone:\n!macroend', 'iaSweepDone:\n  ${EndIf}\n!macroend'),
         { sitePolicies: DELETE_SITE_POLICIES },
       ),
-      [{ line: 16, what: armingMessage }],
+      [{ line: 19, what: armingMessage }],
     )
     // #919 Q3: the exit code is a guarded statement too. A `SetErrorLevel 2`
     // inside another macro body in the same span does not run at this site, and
@@ -1688,7 +1720,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  FindFirst $0 $1 "$INSTDIR.old-*"',
       '  StrCmp $0 "" iaSweepDone',
       '  FindClose $0',
-      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDone',
+      '  MessageBox MB_OKCANCEL "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
+      'iaSweepDeclined:',
+      '  SetErrorLevel 2',
+      '  Goto iaSweepDone',
       'iaSweepDelete:',
       '  ${GetParent} "$INSTDIR" $2',
       '  StrCpy $iaDeleteCandidate "$2\\$1"',
@@ -1710,7 +1745,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       'FunctionEnd',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(foreignExit, { sitePolicies: DELETE_SITE_POLICIES }), [
-      { line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
+      { line: 17, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
     ])
     assert.deepEqual(
       unguardedBackupDelete(
@@ -1721,7 +1756,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       ),
       [
         {
-          line: 14,
+          line: 17,
           what: 'the constant-false condition `${If} 1 == 0` covers the exit code — that code can never run',
         },
       ],
