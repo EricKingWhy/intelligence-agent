@@ -27,7 +27,7 @@ function image(name: string): PendingImage {
 
 interface AppInternals {
   pendingImages: PendingImage[];
-  editor: { getText(): string };
+  editor: { getText(): string; setText(text: string): void };
   chatContainer: { children: { render(width: number): string[] }[] };
   addPendingImage(image: PendingImage): void;
 }
@@ -73,4 +73,15 @@ test("M-21：未超限时既有行为逐字不变（数组 + 标记同步增长�
   app.addPendingImage(image("b.png"));
   assert.equal(app.pendingImages.length, 2);
   assert.ok(app.editor.getText().includes("[Image #2]"));
+});
+
+test("M-21 修回（F1）：删光标记后预检与提交同一谓词，仍被引用的图才计数", () => {
+  const app = makeApp();
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`ok-${String(i)}.png`));
+  // 用户在正文里删掉全部 [Image #N] 标记：这 20 张已撤销（提交路径不会发送它们，
+  // 服务端按实际 refs 计数本会接受新图）。预检若仍按数组全量计数就是误拒。
+  app.editor.setText("这些图都不要了");
+  app.addPendingImage(image("fresh.png"));
+  assert.equal(app.pendingImages.length, 21, "被删标记的图不计入上限，新图应进数组");
+  assert.ok(app.editor.getText().includes("[Image #21]"), "新图照常插标记");
 });

@@ -37,16 +37,22 @@ async function until(condition: () => boolean): Promise<void> {
 interface AppInternals {
   state: { turns: { role: string; attachments: unknown[] }[] };
   chatContainer: { children: { render(width: number): string[] }[] };
+  historyImageBytes: Map<string, Uint8Array | null>;
   rebuildFromHistory(): Promise<void>;
   switchSession(sessionId: string): Promise<void>;
   subscribeLoop(): void;
 }
 
-function makeHarness(options?: { contentFails?: boolean }): {
+function makeHarness(options?: {
+  contentFails?: boolean;
+  contentDelayMs?: number;
+  eventsOnlyFirstCall?: boolean;
+}): {
   app: AppInternals;
   contentCalls: { count: number };
 } {
   const contentCalls = { count: 0 };
+  const eventsCalls = { count: 0 };
   const events = [
     {
       type: "user/message",
@@ -74,6 +80,14 @@ function makeHarness(options?: { contentFails?: boolean }): {
   const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
     const url = String(input);
     if (url.includes("/events")) {
+      // F2 用例：第二次 /events（切会话后的重建）回空表，避免新会话再排新取回干扰断言。
+      if (options?.eventsOnlyFirstCall === true && eventsCalls.count >= 1) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      eventsCalls.count += 1;
       return new Response(JSON.stringify(events), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -81,6 +95,9 @@ function makeHarness(options?: { contentFails?: boolean }): {
     }
     if (url.includes("/content")) {
       contentCalls.count += 1;
+      if (options?.contentDelayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.contentDelayMs));
+      }
       if (options?.contentFails === true) {
         return new Response(JSON.stringify({ detail: "404: 未被引用" }), { status: 404 });
       }
@@ -158,6 +175,37 @@ test("M-09：字节取回失败（404）=> 占位定格 + 一行明确提示，�
     assert.equal(contentCalls.count, 1, "失败不重试（started 标记挡住重复发起）");
     const output = chatText(app);
     assert.ok(!output.includes("\x1b_G"), "字节不在手绝不渲染缩略图");
+  } finally {
+    resetCapabilitiesCache();
+  }
+});
+
+test("M-09 修回（F2）：切会话后在途的取回不落缓存，错误提示不泄漏进新会话", async () => {
+  setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+  try {
+    // 旧会话的取回慢（30ms 后 404）：rebuild 发起后立刻切会话，取回仍在途。
+    const { app, contentCalls } = makeHarness({
+      contentFails: true,
+      contentDelayMs: 30,
+      eventsOnlyFirstCall: true,
+    });
+    await app.rebuildFromHistory();
+    // 与 app-images.test.ts 同一约定：切会话会起新会话的订阅循环（无限重连定时器
+    // 会挂住 node 进程不退出），本用例只关心取回代际，stub 掉。
+    app.subscribeLoop = () => {};
+    await app.switchSession("s2");
+    // 等旧取回的失败路径落定（代际已变：不落缓存、不出提示）。
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(contentCalls.count, 1, "旧会话的取回恰好发起一次");
+    assert.equal(
+      app.historyImageBytes.size,
+      0,
+      "代际已变的旧结果不写进已清空的缓存",
+    );
+    assert.ok(
+      !chatText(app).includes("历史图片读取失败"),
+      "旧会话的取回错误不得打进新会话 chat 区",
+    );
   } finally {
     resetCapabilitiesCache();
   }

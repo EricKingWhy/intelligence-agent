@@ -534,11 +534,18 @@ export class TuiApp {
    * `resolve_image_limits` 的客户端镜像（`image-paste.ts` 两个常量，与 web 的
    * IMAGE_LIMITS 同值），本地先拒省一次注定 413/422 的发送。被拒不改动既有草稿
    * （数组与正文标记原样），一行明确说明原因。
+   *
+   * M-21 修回（F1）：预检用**与提交同一谓词**（正文当前标记集仍引用的图）计数/计字节：
+   * 删标记只隐藏不缩数组（数组在提交 compact 或切会话时才清），服务端按实际发送的
+   * refs 计数（session/service.py 按 refs），预检若按数组全量计数，删光标记的用户会被
+   * 误拒，且提示给出的出路（删标记）已失效。计数口径必须与「实际会发送什么」一致。
    */
   private addPendingImage(image: PendingImage): void {
+    const markers = new Set(parseImageMarkers(this.editor.getText()));
+    const referenced = this.pendingImages.filter((_, index) => markers.has(index + 1));
     const rejection = checkMessageImageLimits(
-      this.pendingImages.length,
-      this.pendingImages.reduce((sum, item) => sum + item.bytes.length, 0),
+      referenced.length,
+      referenced.reduce((sum, item) => sum + item.bytes.length, 0),
       image.bytes.length,
     );
     if (rejection !== null) {
@@ -825,21 +832,34 @@ export class TuiApp {
    * M-09：按需取回历史附图字节（协议可用才有这一步）。取回在途/失败都由
    * `historyImageStarted` 挡住重复发起；到手后版本 +1 触发带附图轮次的重投影。
    */
+  /**
+   * M-09：按需取回历史附图字节（协议可用才有这一步）。取回在途/失败都由
+   * `historyImageStarted` 挡住重复发起；到手后版本 +1 触发带附图轮次的重投影。
+   *
+   * M-09 修回（F2）：回调捕获发起时的 sessionId 代际，落缓存/出提示前先核对：
+   * 切会话只清缓存、不取消在途 fetch（abort 只打断订阅流），旧会话的结果若不设防
+   * 会写进已清空的缓存并触发新会话重投影，失败提示更会打进新会话的 chat 区。
+   * 异步回调的「世界」必须与发起时一致，代际变了结果就无家可归（直接丢弃：
+   * attachment_id 是 sha256 内容寻址，新会话若真引用同一图会按需重取）。
+   */
   private scheduleHistoryImages(): void {
     if (getCapabilities().images === null) return;
+    const sessionId = this.options.sessionId;
     for (const turn of this.state.turns) {
       if (turn.role !== "user") continue;
       for (const ref of turn.attachments) {
         if (this.historyImageStarted.has(ref.attachment_id)) continue;
         this.historyImageStarted.add(ref.attachment_id);
         void this.api
-          .getAttachmentBytes(this.options.sessionId, ref.attachment_id)
+          .getAttachmentBytes(sessionId, ref.attachment_id)
           .then((bytes) => {
+            if (this.options.sessionId !== sessionId) return;
             this.historyImageBytes.set(ref.attachment_id, bytes);
             this.historyImagesVersion += 1;
             this.renderIncremental();
           })
           .catch((error: unknown) => {
+            if (this.options.sessionId !== sessionId) return;
             // 字节读不回（404 / 存储不可用）：占位定格在文本形态，一行明确提示，不静默。
             this.historyImageBytes.set(ref.attachment_id, null);
             this.appendNote(`历史图片读取失败：${String(error)}`);

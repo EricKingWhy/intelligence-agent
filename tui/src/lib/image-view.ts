@@ -67,6 +67,12 @@ export function renderDraftImage(
  * 经受控端点 `GET /api/sessions/{id}/attachments/{aid}/content` 异步取回（web 端
  * `getAttachmentBytes` 同款通道）。`bytes === null`（还没取回 / 取回失败）时先给文本占位，
  * 字节到手后由调用方重投影换缩略图；**绝不**在字节不在手时渲染假缩略图。
+ *
+ * 产品溯源（成熟产品一手来源，2026-10-10 实读 docs.openclaw.ai/web/tui，逐字引文）：
+ * "Terminals without a supported graphics protocol keep text output."（无协议终端保持
+ * 文本输出：本文件 `bytes === null` 与 `getCapabilities().images === null` 两条降级路径
+ * 的判定依据）；"Previews also appear when reopening a conversation or reconnecting."
+ * （重开会话或重连时也要显示预览：本函数的存在动机，历史附图渲染）。
  */
 export function renderHistoryImage(
   ref: TurnImageRef,

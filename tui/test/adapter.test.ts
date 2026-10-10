@@ -214,3 +214,49 @@ test("M-09：无 attachments 键（纯文本轮 / 旧数据）=> 空数组", () 
   applyEvent(state, env(1, "user/message", { content: "hi" }));
   assert.deepEqual(state.turns[0]?.attachments, []);
 });
+
+test("M-09 修回（F3）：数值谓词与服务端同一纪律（非负整数；负数/小数逐条跳过）", () => {
+  const state = createState();
+  applyEvent(state, env(1, "user/message", {
+    content: "bad numbers",
+    attachments: [
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "f".repeat(64),
+        media_type: "image/png",
+        bytes: -1,
+        width: 1,
+        height: 1,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "9".repeat(64),
+        media_type: "image/png",
+        bytes: 1.5,
+        width: 1,
+        height: 1,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "8".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 0.5,
+        height: 3,
+      },
+      {
+        kind: "image",
+        attachment_id: "sha256:" + "7".repeat(64),
+        media_type: "image/png",
+        bytes: 95,
+        width: 2,
+        height: 3,
+        name: "ok.png",
+      },
+    ],
+  }));
+  const refs = state.turns[0]?.attachments ?? [];
+  assert.equal(refs.length, 1, "负数/小数进不了引用（对齐 _is_non_negative_int）");
+  assert.equal(refs[0]?.attachment_id, "sha256:" + "7".repeat(64));
+  assert.equal(refs[0]?.name, "ok.png");
+});
