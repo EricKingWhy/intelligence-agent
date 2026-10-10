@@ -54,9 +54,12 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: OpenAI 风格 `image_url` 块（`model/multimodal.py`），其成本模型最贴合本仓实际
 #: Provider 面。**简化之处**：不复制 OpenAI 的"先缩进 2048²、再把短边压到 768"两段
 #: 预处理（那是逐 Provider 精算）；只用一步**长边等比缩放**到 `IMAGE_MAX_DIMENSION`
-#: （与发送前归一化 `attachments.normalize` 的 `frame.thumbnail((N,N))` **同语义**：
-#: 保持长宽比、只缩长边）。故对**极端长宽比**图（如 2048×100）仍可能相对 OpenAI 真值
-#: 低估——这是已披露的简化代价，不追求逐 Provider 精确。
+#: （与发送前归一化 `attachments.normalize` 的 `frame.thumbnail((N,N))` **近似同语义**：
+#: 同为长边等比、保持长宽比，但**取整判据不同**——PIL thumbnail 按长宽比误差最小挑
+#: 整数并保下界 1，估算侧用 `math.ceil` 取保守上界（`max(1, ...)`），不声称逐像素等价）。
+#: 取整分叉真正出现在**长短边比接近 4:1/2:1 且缩放商落在整数边界下侧的常规尺寸**（如
+#: 4096×1025、3073×769，Round 1 已实测两侧 tile 数不同）；2048×100 实测估算与 PIL 一致
+#: （765=765）——这是已披露的简化代价，不追求逐 Provider 精确。
 #:
 #: **尺寸来源**：标准图片块（`attachments.projection.image_content_block`）**携带
 #: `width`/`height`**（该数据在投影处即 ImageRef 的字段，随块一起带给估算层），故本
@@ -75,7 +78,8 @@ IMAGE_TOKENS_BASE = 85
 IMAGE_TOKENS_PER_TILE = 170
 
 #: 长边归一化上限（与 `attachments.normalize.TARGET_MAX_DIMENSION` **同值**：发送前
-#: 长边 ≤ 2048px）。估算按此做**等比**缩放（`frame.thumbnail((N,N))` 同语义），不逐
+#: 长边 ≤ 2048px）。估算按此做**等比**缩放（与 `frame.thumbnail((N,N))` 近似同语义、
+#: 取整判据不同），不逐
 #: Provider 精算其缩放阶梯。
 #:
 #: **同步义务（保守性前提）**：运行期实际上限由可配置的
@@ -88,8 +92,8 @@ IMAGE_MAX_DIMENSION = 2048
 def image_tokens_for_size(width: int, height: int) -> int:
     """单张 `width×height` 图的近似 token 成本（tile 制，见模块常量注释）。
 
-    长边先**等比**缩放到 `IMAGE_MAX_DIMENSION`（与发送前归一化 `frame.thumbnail` 同语义：
-    保持长宽比、只缩长边），再按 `IMAGE_TILE_PX` 方块向上取整计数；退化尺寸（0）只计
+    长边先**等比**缩放到 `IMAGE_MAX_DIMENSION`（与发送前归一化 `frame.thumbnail` 近似
+    同语义：同为长边等比、保持长宽比，取整判据不同），再按 `IMAGE_TILE_PX` 方块向上取整计数；退化尺寸（0）只计
     base。纯函数、确定性。
     """
     w = max(0, int(width))
@@ -97,8 +101,8 @@ def image_tokens_for_size(width: int, height: int) -> int:
     longest = max(w, h)
     if longest > IMAGE_MAX_DIMENSION:
         scale = IMAGE_MAX_DIMENSION / longest
-        w = round(w * scale)
-        h = round(h * scale)
+        w = max(1, math.ceil(w * scale))
+        h = max(1, math.ceil(h * scale))
     tiles = math.ceil(w / IMAGE_TILE_PX) * math.ceil(h / IMAGE_TILE_PX)
     return IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * tiles
 

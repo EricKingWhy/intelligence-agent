@@ -19,7 +19,11 @@ tiles = ceil(w' / 512) × ceil(h' / 512)
 ```
 
 其中 `w', h'` 是长边先**等比**缩放到 `IMAGE_MAX_DIMENSION(=2048)` 后的尺寸——与发送
-前归一化 `attachments.normalize`（`frame.thumbnail((N,N))`，保持长宽比）**同语义**。
+前归一化 `attachments.normalize`（`frame.thumbnail((N,N))`）**近似同语义**：同为长边
+等比、保持长宽比，但**取整判据不同**（PIL thumbnail 按长宽比误差最小挑整数并保下界 1，
+估算侧用 `math.ceil` 取保守上界）。取整分叉真正出现在长短边比接近 4:1/2:1 且缩放商
+落在整数边界下侧的常规尺寸（如 4096×1025、3073×769，已实测两侧 tile 数不同）；
+2048×100 实测估算与 PIL 一致（765=765）。
 尺寸未知（provider 块 `image_url` 无尺寸字段、或块形状异常）时回退
 `IMAGE_TOKENS_UNKNOWN_SIZE = tokens(2048, 2048) = 2805`（保守方向，fail-closed）。
 

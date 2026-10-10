@@ -68,12 +68,39 @@ def test_formula_matches_openai_tile_structure() -> None:
     assert (IMAGE_TOKENS_BASE, IMAGE_TOKENS_PER_TILE) == (85, 170)
 
 
-def test_formula_is_monotonic_in_size() -> None:
-    """尺寸单调：更大的图不会算得更少（防"大图被低估"）。"""
+def test_formula_is_monotonic_on_diagonal_sizes() -> None:
+    """对角线/正方形采样单调：更大的正方形不会算得更少（防"大图被低估"）。
+
+    只保证对角线/正方形采样单调，**不保证任意尺寸对单调**——长边缩放的
+    `math.ceil` 取整在缩放商落整数边界下侧时存在有界回退，量化见
+    `test_documents_bounded_fallback_at_rounding_boundaries`。
+    """
     sizes = [(8, 6), (256, 256), (512, 512), (1024, 1024), (1536, 1536),
              (2048, 2048), (4096, 4096)]
     values = [image_tokens_for_size(w, h) for w, h in sizes]
     assert values == sorted(values)
+
+
+def test_documents_bounded_fallback_at_rounding_boundaries() -> None:
+    """非对角尺寸对在取整边界处存在**有界回退**：量化上界 680 token。
+
+    680 = 4 tiles × 170/token：长边 >2048 的图缩放后长边恒为 2048（列数固定 4），
+    短边 h' = ceil(h×2048/w) 随 w 增大而减小，相邻尺寸间 h' 最多跨一个 512 边界
+    （2048²×8/w² ≤ 8px），tile 行数 2→1 ⇒ 最多回退 4 个 tile。实测（W∈[2049,8192]、
+    H∈[1,2048]、步长 8，W×H ≤ 64M 子集）387 对递减、最大回退恰为 680
+    （最差对 (2049,513)→(2057,513)：1445 → 765）。
+    """
+    step = 8
+    max_fallback = 0
+    for w in range(2049, 8193, step):
+        for h in range(1, 2049, step):
+            if image_tokens_for_size(w, h) < image_tokens_for_size(w - step, h):
+                fallback = image_tokens_for_size(w - step, h) - image_tokens_for_size(w, h)
+                max_fallback = max(max_fallback, fallback)
+            if image_tokens_for_size(w, h) < image_tokens_for_size(w, h - step):
+                fallback = image_tokens_for_size(w, h - step) - image_tokens_for_size(w, h)
+                max_fallback = max(max_fallback, fallback)
+    assert max_fallback <= 680  # 4 tiles × 170：取整回退的有界上界（实测恰好取到）
 
 
 def test_large_image_scaled_to_normalization_max_keeping_aspect() -> None:
