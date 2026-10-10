@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -680,6 +681,82 @@ def test_cli_plugins_lifecycle_tracks_saved_and_live_runtime_state(
     run("remove", "complete-skill")
     assert not (workspace / "skills" / ".managed" / "complete-skill").exists()
     assert json.loads(run("list"))["packages"] == []
+
+
+def test_cli_git_skill_install_update_list_and_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "packages" / "cli-skill"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: cli-skill\ndescription: CLI lifecycle example.\n---\n\nOld version.\n",
+    )
+    _write(skill / "references" / "guide.md", "Old guide.\n")
+    repo.mkdir(parents=True, exist_ok=True)
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    git("add", ".")
+    git("commit", "-qm", "old version")
+    old_commit = git("rev-parse", "HEAD")
+    _write(
+        skill / "SKILL.md",
+        "---\nname: cli-skill\ndescription: CLI lifecycle example.\n---\n\nNew version.\n",
+    )
+    _write(skill / "references" / "guide.md", "New guide.\n")
+    git("add", ".")
+    git("commit", "-qm", "new version")
+    new_commit = git("rev-parse", "HEAD")
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: SimpleNamespace(
+            workspace_dir=str(workspace),
+            skill_global_dir=str(tmp_path / "global-skills"),
+            capabilities=json.dumps({"skills": {"enabled": True}}),
+        ),
+    )
+    monkeypatch.setattr(
+        cli, "_query_current_skill_runtime", lambda *_: ("not_running", "stopped", None)
+    )
+
+    def run(*args: str) -> dict[str, object]:
+        monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", *args])
+        cli.main()
+        return json.loads(capsys.readouterr().out)
+
+    installed = run(
+        "install-git",
+        repo.as_uri(),
+        "--ref",
+        old_commit,
+        "--subdirectory",
+        "packages/cli-skill",
+    )
+    assert installed["resolved_commit"] == old_commit
+    assert run("update", "cli-skill", "--ref", new_commit)["pending_version"][
+        "resolved_commit"
+    ] == new_commit
+    listed = run("list")["packages"][0]
+    assert listed["current_version"]["resolved_commit"] == old_commit
+    assert listed["pending_version"]["resolved_commit"] == new_commit
+    assert listed["pending_restart"] is True
+
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    SkillPackageManager(workspace).apply_pending_versions()
+    rolled_back = run("rollback", "cli-skill")
+    assert rolled_back["pending_version"]["resolved_commit"] == old_commit
 
 
 @pytest.mark.parametrize(

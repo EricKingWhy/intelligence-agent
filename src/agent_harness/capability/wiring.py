@@ -296,6 +296,13 @@ async def _wire_skills(
     )
     managed_dir = package_manager.managed_skills_dir
     try:
+        package_manager.apply_pending_versions()
+    except SkillPackageError as error:
+        logger.warning(
+            "pending managed Skill versions were not applied; installed versions remain selected: %s",
+            error,
+        )
+    try:
         enabled_managed_skill_digests = package_manager.enabled_skill_digests()
     except SkillPackageError as error:
         logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
