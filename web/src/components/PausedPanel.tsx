@@ -12,7 +12,7 @@
  *     requests 卡住"显示成"已消耗 0 轮 · 无上限"，那是在陈述一件没发生过的事——
  *     四维清单（`facts.dimensions`）保证另外三维的事实也在屏幕上。`#314` 的
  *     per-tool 配额同理：它有自己的清单（`facts.toolQuotas`），且**两个 counter
- *     分开显示**（calls = 被接纳的逻辑调用，attempts = 真实尝试含 retry）。
+ *     分开显示**（calls = 被接纳的逻辑调用数，attempts = 真实尝试含 retry）。
  *  3. **没有权威的本地状态**：面板整体由 `conversation.run_paused` 投影驱动（不变量 #22）
  *     ——`run/resumed` 一到它自己消失；刷新/重放得到同一个投影。输入框里的草稿是**用户
  *     意图**（不是会话事实），所以由 App 持有（重读日志不会把它清掉）。
@@ -20,6 +20,10 @@
  *     resume_basis=budget_increase（本票唯一合法值）；ceiling 落在哪一维由
  *     `facts.resumeTarget` 决定（run 维给字段名，工具配额给工具名）。
  *  5. 被拒（409/422）时**不动**输入框内容：用户只需把数字改大再来一次。
+ *
+ *  `#968`：`reason=stuck` 是例外——它**没有**可抬的 ceiling（后端对
+ *  `resume_basis=budget_increase` 一律 409），所以本组件对它整段换掉恢复控件为
+ *  steer / 环境 / 策略变更的指路文案，绝不给必败的"恢复同一 run"按钮。
  *
  *  纯展示组件：不 fetch、不改会话状态；`onResume` 由 App 转给 `useSession`。 */
 
@@ -30,6 +34,7 @@ import {
   CONTINUATION_SECTIONS,
   DEADLINE_DIMENSION,
   DEADLINE_EXAMPLE,
+  PAUSE_REASON_STUCK,
   pauseFacts,
   resumeInputHint,
   resumeTargetLabel,
@@ -74,6 +79,12 @@ export function PausedPanel({
   const facts = pauseFacts(paused);
   const draftError = ceilingDraftError(paused, ceilingDraft);
   const continuation = paused.continuation;
+  // `#317` / `#968`：stuck 暂停**没有**可抬的 ceiling——后端对
+  // `resume_basis=budget_increase` 一律 409（它缺的不是额度，是"外部输入变了"）。
+  // 所以这个分支整段换掉"抬 ceiling → 恢复同一 run"控件：渲染它等于给用户一个
+  // 点了必败的按钮（AC-17 stuck-resume restriction）。恢复通道是输入框的 steer
+  // （Ctrl/Cmd+Enter，Composer 不在本组件内，不得因本分支禁用它）。
+  const stuckPause = paused.reason === PAUSE_REASON_STUCK;
   // 标题按**命中的那一维**报读数：命中 local fuse（非 run 维）或某个**工具配额**
   // （`#314`）时没有 run 维读数可报，回落成维度标签（不把 turns 冒充成"卡住的那一维"）。
   const tripped = facts.tripped;
@@ -105,9 +116,11 @@ export function PausedPanel({
       <div className="pause-panel-head">
         <PauseCircle size={14} aria-hidden="true" />
         <span>
-          {facts.deadlinePause
-            ? '已在绝对截止时刻处暂停——同一 run 的非终态收口，不是失败'
-            : '已在预算到顶处暂停——同一 run 的非终态收口，不是失败'}
+          {stuckPause
+            ? '已在疑似卡住处暂停——同一 run 的非终态收口，不是失败'
+            : facts.deadlinePause
+              ? '已在绝对截止时刻处暂停——同一 run 的非终态收口，不是失败'
+              : '已在预算到顶处暂停——同一 run 的非终态收口，不是失败'}
         </span>
       </div>
       <div className="pause-panel-facts">
@@ -159,44 +172,57 @@ export function PausedPanel({
           恢复前置条件：{paused.resume_requirements.join('；')}
         </div>
       )}
-      <div className="pause-panel-resume">
-        <label htmlFor="pause-resume-ceiling">
-          {/* `#315`：deadline 的目标是**时刻**不是 ceiling 数字——标签与输入模式都要换，
-              否则用户会按数字形状去填一个 RFC 3339 文本（或者反过来）。 */}
-          {facts.deadlinePause
-            ? `新的绝对截止时刻（${resumeTargetLabel(facts.resumeTarget)}，RFC 3339 UTC）`
-            : `绝对 ceiling（${resumeTargetLabel(facts.resumeTarget)}）`}
-        </label>
-        <input
-          id="pause-resume-ceiling"
-          type="text"
-          inputMode={facts.deadlinePause ? 'text' : 'decimal'}
-          placeholder={facts.deadlinePause ? DEADLINE_EXAMPLE : undefined}
-          value={ceilingDraft}
-          onChange={(e) => onCeilingDraftChange(e.target.value)}
-          aria-label={
-            facts.deadlinePause
-              ? `恢复用的绝对截止时刻：${resumeTargetLabel(facts.resumeTarget)}（RFC 3339 UTC）`
-              : `恢复用的绝对 ceiling：${resumeTargetLabel(facts.resumeTarget)}`
-          }
-          disabled={resuming}
-        />
-        <button
-          className="pause-resume-btn"
-          onClick={onResume}
-          disabled={resuming || draftError !== null}
-          title={`以同一 run_id 恢复：提交 ${resumeTargetLabel(facts.resumeTarget)} 的绝对值与当前预算版本（CAS）`}
-        >
-          <PauseCircle size={14} aria-hidden="true" />
-          {resuming ? '恢复中…' : '恢复同一 run'}
-        </button>
-        {draftError !== null && !resuming && (
-          <span className="pause-panel-error">{draftError}</span>
-        )}
-        {draftError === null && !resuming && (
-          <span className="pause-panel-hint">{resumeInputHint(facts)}</span>
-        )}
-      </div>
+      {stuckPause ? (
+        // `#968`：stuck 的恢复**不是**给绝对值——上面"恢复前置条件"一行已列出投影
+        // 带回来的可用依据子集（relevant_steer / environment_change / policy_change
+        // 的现场证据子集，后端 `stuck_resume_requirements` 算出）。这里只补一句指路：
+        // 新的指示走输入框 steer（Ctrl/Cmd+Enter，与日常补充指令同一通道），环境 /
+        // 策略变更是另两条依据。不给按钮——给了就是必败的 409。
+        <div className="pause-panel-stuck">
+          本暂停不是预算到顶：抬高 ceiling 解不开"同一个动作重复"，后端对该恢复方式一律
+          拒绝（409）。请在下方输入框给出新的指示（steer，Ctrl/Cmd+Enter 发送）；或在
+          工作区 / 环境、策略 / 档位发生变化后，再以同一 run_id 恢复。
+        </div>
+      ) : (
+        <div className="pause-panel-resume">
+          <label htmlFor="pause-resume-ceiling">
+            {/* `#315`：deadline 的目标是**时刻**不是 ceiling 数字——标签与输入模式都要换，
+                否则用户会按数字形状去填一个 RFC 3339 文本（或者反过来）。 */}
+            {facts.deadlinePause
+              ? `新的绝对截止时刻（${resumeTargetLabel(facts.resumeTarget)}，RFC 3339 UTC）`
+              : `绝对 ceiling（${resumeTargetLabel(facts.resumeTarget)}）`}
+          </label>
+          <input
+            id="pause-resume-ceiling"
+            type="text"
+            inputMode={facts.deadlinePause ? 'text' : 'decimal'}
+            placeholder={facts.deadlinePause ? DEADLINE_EXAMPLE : undefined}
+            value={ceilingDraft}
+            onChange={(e) => onCeilingDraftChange(e.target.value)}
+            aria-label={
+              facts.deadlinePause
+                ? `恢复用的绝对截止时刻：${resumeTargetLabel(facts.resumeTarget)}（RFC 3339 UTC）`
+                : `恢复用的绝对 ceiling：${resumeTargetLabel(facts.resumeTarget)}`
+            }
+            disabled={resuming}
+          />
+          <button
+            className="pause-resume-btn"
+            onClick={onResume}
+            disabled={resuming || draftError !== null}
+            title={`以同一 run_id 恢复：提交 ${resumeTargetLabel(facts.resumeTarget)} 的绝对值与当前预算版本（CAS）`}
+          >
+            <PauseCircle size={14} aria-hidden="true" />
+            {resuming ? '恢复中…' : '恢复同一 run'}
+          </button>
+          {draftError !== null && !resuming && (
+            <span className="pause-panel-error">{draftError}</span>
+          )}
+          {draftError === null && !resuming && (
+            <span className="pause-panel-hint">{resumeInputHint(facts)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
