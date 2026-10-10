@@ -222,3 +222,34 @@ def test_cli_list_does_not_report_a_same_id_global_copy_as_enabled(
         item["saved_selection"]
         for item in cli_world.run("list")["available_global_packages"]
     ] == ["enabled"]
+
+
+def test_cli_runtime_projection_follows_the_selected_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """选了 global 时，运行态必须拿**全局**受管路径比对（T5 AC3）。
+
+    只看项目根下有没有同名文件的话，「全局版正在生效」与「全局版装配缺席」会投影
+    成同一个值，用户看不出自己选的那一版到底有没有生效。
+    """
+    import os
+
+    cli_world = _Cli(tmp_path, monkeypatch, capsys)
+    cli_world.run("install", str(_package(tmp_path / "global-src")), "--scope", "global")
+    cli_world.run("enable", PACKAGE_NAME, "--scope", "global")
+    global_managed = cli_world.global_().managed_skills_dir / PACKAGE_NAME / "SKILL.md"
+
+    runtime: list = []
+    monkeypatch.setattr(cli, "_query_current_skill_runtime", lambda *_: runtime[0])
+    runtime.append(
+        ("running", "live", {os.path.normcase(os.path.realpath(str(global_managed)))})
+    )
+    entry = cli_world.run("list")["available_global_packages"][0]
+    assert entry["current_runtime"] == "discovered"
+    assert entry["pending_restart"] is False
+
+    # 全局版失效（装配缺席）⇒ 被选却不在运行态 = 待重启，不是「无事发生」。
+    runtime[0] = ("running", "live", set())
+    entry = cli_world.run("list")["available_global_packages"][0]
+    assert entry["current_runtime"] == "not_discovered"
+    assert entry["pending_restart"] is True

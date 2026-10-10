@@ -1893,9 +1893,19 @@ def _query_current_skill_runtime(
 def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
     """`--scope` 决定看哪个安装根的清单；项目视图另附本项目选了哪一版。
 
-    项目视图的 `saved_selection` 是本项目对该包的**启用结果**（T5）：被选中的那条
-    记录 `enabled`，同名但没选这里的 `not_selected`，选的是另一 scope 的 `disabled`。
-    同名并存时两个 scope 各自一行，只有选中的那行进装配面（AC2）。
+    两个视图的 `saved_selection` **口径不同**，这是有意的（T4 的记录面与 T5 的选择面
+    必须各自可见，spec 08 §6.2）：
+    - `packages[]`（安装记录视图）：该根里这条记录自己的 `enabled` 位；本项目的选择是
+      旁边的 `selected_scope`。因此选 global 时项目行显示 `disabled` + `selected_scope=global`。
+    - `available_global_packages[]`（本项目可启用面）：`enabled` = 本项目选了这条全局包，
+      否则 `not_selected`；`current_runtime` / `pending_restart` 也按**本项目的选择**投影
+      （没选就没有运行态可言），而不是全局记录自己的启用位。
+
+    同名 ID 在两个 scope 各有一行，只有选中的那版进装配面（AC2）。
+
+    两处共同的不变量：**在不在运行态，比的必须是本项目选中的那个 scope 的实际
+    受管路径**，不是「项目根下有没有同名文件」。选了 global 却拿项目路径去比对，
+    「已装配」与「装配缺席」会投影成同一个值（AC3 要求范围与运行态如实可见）。
     """
     if manager.scope == "global":
         return {
@@ -1909,10 +1919,17 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
         str(manager.workspace_dir)
     )
     results = manager.enable_results()
+    global_managed_dir = _global_managed_skills_dir(manager)
     packages: list[dict[str, object]] = []
     for name, record in sorted(manager.list_packages().items()):
-        enabled = bool(record["enabled"])
         has_pending_version = record.get("pending_version") is not None
+        # 「本项目选中的那一版」才是运行态的主语；两个 scope 都没有启用结果时
+        # （disable 过 / 旧清单未回填）退回记录自己的 enabled 位——与
+        # enabled_skill_digests 的判据一致。
+        selected_scope = results.get(name, {}).get("selected_scope")
+        installed = selected_scope if isinstance(selected_scope, str) else (
+            "project" if record["enabled"] else None
+        )
         if runtime_state == "not_running":
             current = "not_running"
             pending_restart: bool | None = has_pending_version
@@ -1920,11 +1937,13 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
             current = "unavailable"
             pending_restart = None
         else:
-            package_skill = manager.managed_skills_dir / name / "SKILL.md"
+            root = global_managed_dir if installed == "global" else manager.managed_skills_dir
+            package_skill = root / name / "SKILL.md"
             package_source = os.path.normcase(os.path.realpath(str(package_skill)))
             discovered = package_source in (runtime_skill_sources or set())
             current = "discovered" if discovered else "not_discovered"
-            pending_restart = enabled != discovered or has_pending_version
+            # 被选却不在运行态 = 待重启；没被选却还在运行态 = 反过来也要说。
+            pending_restart = (installed is not None) != discovered or has_pending_version
         current_version = None
         if record.get("source_kind") == "git":
             current_version = {
@@ -1939,8 +1958,8 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
                 "type": record["type"],
                 "scope": record["scope"],
                 "source": record["source"],
-                "saved_selection": "enabled" if enabled else "disabled",
-                "selected_scope": results.get(name, {}).get("selected_scope"),
+                "saved_selection": "enabled" if record["enabled"] else "disabled",
+                "selected_scope": selected_scope,
                 "compatibility": record["compatibility"],
                 "trust": record["trust"],
                 "current_version": current_version,
@@ -1959,12 +1978,35 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
     return {
         "runtime": {"state": runtime_state, "detail": detail},
         "packages": packages,
-        "available_global_packages": _available_global_skill_package_listing(manager),
+        "available_global_packages": _available_global_skill_package_listing(
+            manager, runtime_state, runtime_skill_sources
+        ),
     }
 
 
-def _available_global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str, object]]:
-    """本项目可显式启用的全局包：T4 的可用性视图 + 本项目已选中的那条。"""
+def _global_managed_skills_dir(manager: SkillPackageManager) -> Path:
+    """本项目可启用的全局包实际装配在哪：全局安装根的 `<root>/skills/.managed`。"""
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    return SkillPackageManager(
+        manager.workspace_dir,
+        scope="global",
+        global_skills_dir=manager.global_skills_dir,
+    ).managed_skills_dir
+
+
+def _available_global_skill_package_listing(
+    manager: SkillPackageManager,
+    runtime_state: str,
+    runtime_skill_sources: set[str] | None,
+) -> list[dict[str, object]]:
+    """本项目可显式启用的全局包：T4 的可用性视图 + 本项目已选中的那条。
+
+    运行态按**本项目的选择**投影（与 `packages[]` 同一口径）：`_global_skill_package_listing`
+    只看全局记录自己的启用位，而全局包一律 `enabled is False`（T4 语义：全局包由各项目
+    选择），照搬会把「本机已装配这条全局包」报成 `not_selected`（T5 AC3 要求范围与运行态
+    如实可见）。未选中的条目没有运行态可言，`pending_restart` 只反映它自己的待升版本。
+    """
     from agent_harness.skills.package_manager import SkillPackageManager
 
     global_manager = SkillPackageManager(
@@ -1979,6 +2021,18 @@ def _available_global_skill_package_listing(manager: SkillPackageManager) -> lis
         # 同名双 scope 并存时，选了项目版的那条不能把全局版报成已启用（T5 AC2）。
         selected = results.get(item["name"], {}).get("selected_scope") == "global"
         item["saved_selection"] = "enabled" if selected else "not_selected"
+        skill = global_manager.managed_skills_dir / str(item["name"]) / "SKILL.md"
+        source = os.path.normcase(os.path.realpath(str(skill)))
+        discovered = source in (runtime_skill_sources or set())
+        if runtime_state == "not_running":
+            item["current_runtime"] = "not_running"
+            item["pending_restart"] = item["pending_version"] is not None
+        elif runtime_state == "unavailable":
+            item["current_runtime"] = "unavailable"
+            item["pending_restart"] = None
+        else:
+            item["current_runtime"] = "discovered" if discovered else "not_discovered"
+            item["pending_restart"] = selected != discovered
         packages.append(item)
     return packages
 

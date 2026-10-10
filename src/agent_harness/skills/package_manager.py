@@ -44,6 +44,14 @@ class SkillPackageError(ValueError):
     """A package lifecycle operation cannot safely be completed."""
 
 
+class SkillManifestError(SkillPackageError):
+    """安装清单本身读不出 / 不合形状（区别于某个生命周期动作失败）。
+
+    调用方要分开说这两件事：「选中的版本失效」是用户做过的选择出了问题，
+    「清单损坏」是盘上状态出了问题，两者该让用户做的事完全不同。
+    """
+
+
 class SkillPackageManager:
     """Install immutable Skill snapshots in project or user-global scope."""
 
@@ -108,7 +116,10 @@ class SkillPackageManager:
         return self.global_manager().list_packages().get(name)
 
     def enable_results(self) -> dict[str, dict[str, Any]]:
-        """本项目保存的启用结果表副本（只读投影，供 CLI/装配面消费）。
+        """本项目的启用结果表副本（只读投影，供 CLI/装配面消费）。
+
+        含读侧从 T4 旧清单派生补齐的条目（`_read_manifest` 回填），所以不等于
+        「盘上原样保存的那份」——回填结果在下一次写盘时持久化。
 
         键是 `enable <id>` 用的 id（安装器保证它等于包名：检查阶段要求 SKILL.md
         的 name 与所在目录名一致）；值记录被选 scope / 来源 / 版本（spec 08 §6.2
@@ -693,22 +704,22 @@ class SkillPackageManager:
             or self.scope_root.resolve(strict=True).parent
             != self.scope_root.parent.resolve(strict=True)
         ):
-            raise SkillPackageError("global package storage directory is unsafe")
+            raise SkillManifestError("global package storage directory is unsafe")
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {"version": MANIFEST_VERSION, "packages": {}, ENABLE_RESULTS_FIELD: {}}
         except (OSError, ValueError) as error:
-            raise SkillPackageError(f"cannot read install manifest: {type(error).__name__}") from error
+            raise SkillManifestError(f"cannot read install manifest: {type(error).__name__}") from error
         if (
             not isinstance(payload, dict)
             or payload.get("version") != MANIFEST_VERSION
             or not isinstance(payload.get("packages"), dict)
         ):
-            raise SkillPackageError("install manifest has an unsupported shape")
+            raise SkillManifestError("install manifest has an unsupported shape")
         results = payload.setdefault(ENABLE_RESULTS_FIELD, {})
         if not isinstance(results, dict):
-            raise SkillPackageError("install manifest has an unsupported shape")
+            raise SkillManifestError("install manifest has an unsupported shape")
         # T4 时代的清单只有 enabled 位、没有启用结果表。升级后按「显式项目选择」
         # 补齐，否则已启用的项目包会在读侧静默消失（AC1 要求会话间一致）。
         # 这是版本 1 内的字段演进，不动 MANIFEST_VERSION。补齐落在 payload 上，
@@ -760,7 +771,7 @@ class SkillPackageManager:
                 or not isinstance(record.get("compatibility"), dict)
                 or record["compatibility"].get("status") not in {"complete", "needs-adaptation"}
             ):
-                raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+                raise SkillManifestError(f"install manifest record for {name!r} is invalid")
             _validate_git_manifest_record(name, record)
         return payload
 
@@ -769,7 +780,7 @@ class SkillPackageManager:
         self._ensure_scope_root()
         with _registry_lock(self.manifest_path):
             if self.scope == "global" and _is_reparse_point(self.scope_root):
-                raise SkillPackageError("global package storage directory is unsafe")
+                raise SkillManifestError("global package storage directory is unsafe")
             yield
 
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
@@ -1424,10 +1435,10 @@ def _validate_git_manifest_record(name: str, record: dict[str, Any]) -> None:
     source_kind = record.get("source_kind")
     if source_kind is None:
         if git_fields.intersection(record):
-            raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+            raise SkillManifestError(f"install manifest record for {name!r} is invalid")
         return
     if source_kind != "git":
-        raise SkillPackageError(f"install manifest record for {name!r} is invalid")
+        raise SkillManifestError(f"install manifest record for {name!r} is invalid")
 
     try:
         _validate_git_url(record["source"])
@@ -1450,7 +1461,7 @@ def _validate_git_manifest_record(name: str, record: dict[str, Any]) -> None:
             if version is not None:
                 _validate_version_metadata(version, allow_needs_adaptation=False)
     except (KeyError, SkillPackageError) as error:
-        raise SkillPackageError(f"install manifest record for {name!r} is invalid") from error
+        raise SkillManifestError(f"install manifest record for {name!r} is invalid") from error
 
 
 def _validate_version_metadata(

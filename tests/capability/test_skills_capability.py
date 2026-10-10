@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -641,3 +642,156 @@ async def test_global_packages_do_not_enter_runtime_catalog_context_or_tools(tmp
     result = await load_tool.execute(load_tool.args_schema(name="scripted-skill"))
     assert result.ok is False
     assert not sentinel.exists()
+
+
+@pytest.mark.asyncio
+async def test_invalidated_global_selection_is_observable_and_not_silently_absent(tmp_path):
+    """AC3：被选版本失效时报错，不静默缺席（也不静默回落到项目版）。
+
+    这里走**真装配面**（不是直接调 manager）：`wiring` 把
+    `enabled_global_skill_digests()` 的失败折成「缺席 + 留痕」，留痕必须能被
+    `SkillCapability.errors()` 读到，否则「被选版本失效」与「本来没选」在程序上
+    不可区分。反面对照：未选任何全局包的同一棵树里 errors 为空。
+    """
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    source = tmp_path / "source" / "global-pick"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: global-pick\ndescription: Global package.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    global_manager = SkillPackageManager(workspace, global_skills_dir=global_skills, scope="global")
+    assert global_manager.install(source)["compatibility"]["status"] == "complete"
+    project_manager = SkillPackageManager(workspace, global_skills_dir=global_skills)
+    project_manager.enable("global-pick", scope="global")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+    registry = CapabilityRegistry()
+    await wire_capabilities(
+        registry,
+        parse_capabilities_config('{"skills": {}}'),
+        settings=settings,
+    )
+    assert registry.get("skills").errors() == []
+    assert [entry.name for entry in registry.get("skills").catalog()] == ["global-pick"]
+
+    # 被选版本从全局安装根消失（记录仍在 ⇒ 走 "missing or unsafe" 分支）。
+    shutil.rmtree(global_manager.managed_skills_dir / "global-pick")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+    registry = CapabilityRegistry()
+    await wire_capabilities(
+        registry,
+        parse_capabilities_config('{"skills": {}}'),
+        settings=settings,
+    )
+    errors = registry.get("skills").errors()
+    assert len(errors) == 1
+    assert "[selection]" in errors[0]
+    assert "global-pick" in errors[0]
+    assert [entry.name for entry in registry.get("skills").catalog()] == []
+    # 重复发现（同一 capability 再读一次）不会把留痕清掉。
+    assert registry.get("skills").errors() == errors
+
+
+@pytest.mark.asyncio
+async def test_project_side_selection_failure_is_observable_like_the_global_one(tmp_path):
+    """AC3 两侧对称：项目版被选后失效，同样响亮留痕，不静默缺席。
+
+    反面对照（同一棵树、未启用时）errors 为空；坏包前后 `catalog` 的差异必须
+    能从 `errors()` 读出来——否则用户只能看到技能凭空消失。
+    """
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    source = tmp_path / "source" / "project-pick"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: project-pick\ndescription: Project package.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    manager = SkillPackageManager(workspace, global_skills_dir=global_skills)
+    assert manager.install(source)["compatibility"]["status"] == "complete"
+    manager.enable("project-pick", scope="project")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+
+    async def wire() -> CapabilityRegistry:
+        registry = CapabilityRegistry()
+        await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"skills": {}}'),
+            settings=settings,
+        )
+        return registry
+
+    assert [entry.name for entry in (await wire()).get("skills").catalog()] == ["project-pick"]
+    assert (await wire()).get("skills").errors() == []
+
+    # 被选快照被改坏 ⇒ 该记录不再可装配（摘要复核失败）。
+    (manager.managed_skills_dir / "project-pick" / "SKILL.md").write_text(
+        "---\nname: project-pick\ndescription: Tampered.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    registry = await wire()
+    errors = registry.get("skills").errors()
+    assert len(errors) == 1
+    assert "[selection]" in errors[0]
+    assert "managed Skill package selection cannot be honoured" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_corrupt_global_manifest_is_not_reported_as_a_selection_failure(tmp_path):
+    """清单损坏 ≠ 用户的选择失效：两者要用户做的事完全不同（T5 AC3 的可观察面）。
+
+    修前两者共用一个 `[selection] global Skill package selection cannot be
+    honoured` 标签，用户会以为自己选错了；实际是盘上清单读不出来。
+    """
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    global_manager = SkillPackageManager(workspace, global_skills_dir=global_skills, scope="global")
+    source = tmp_path / "source" / "corrupt-me"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: corrupt-me\ndescription: Package.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    global_manager.install(source)
+    global_manager.manifest_path.write_text("{not json", encoding="utf-8")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+    )
+    registry = CapabilityRegistry()
+    await wire_capabilities(
+        registry,
+        parse_capabilities_config('{"skills": {}}'),
+        settings=settings,
+    )
+    errors = registry.get("skills").errors()
+    assert len(errors) == 1
+    assert "global Skill package storage is unreadable" in errors[0]
+    assert "selection cannot be honoured" not in errors[0]
