@@ -118,13 +118,16 @@ def test_refuses_bearerless_handshake_when_secret_configured(tmp_path: Path) -> 
         pass
 
 
+# ids 固定：token 的 `exp` 取自挂钟（秒级），交给 pytest 自动生成 id 会让 id 随收集时刻
+# 变化——xdist 各 worker 在不同秒收集时 id 不一致，`-n 4` 报 "Different tests were collected"
+# （#931）。值本身仍按真实时间构造，只把标签钉死。
 @pytest.mark.parametrize("authorization", [
     "Bearer not-a-jwt",
     f"Bearer {_token('another-signing-secret-32-chars-long!!')}",  # 签名不对
     f"Bearer {_token(expires_in=-60)}",                            # 已过期
     f"Bearer {_token(expires_in=None)}",                           # 无 exp（强制过期语义）
     f"Bearer {_token()}extra",                                     # 形状不合
-])
+], ids=["not-a-jwt", "wrong-signature", "expired", "no-exp", "trailing-garbage"])
 def test_refuses_bad_bearer_when_secret_configured(tmp_path: Path, authorization: str) -> None:
     """坏 token 与漏 token 同一结果：拒绝。这 5 项对应 HTTP 面既有的坏凭据形状
     （非 JWT / 签名不对 / 已过期 / 无 exp / 形状不合）；**非 Bearer scheme**
@@ -139,7 +142,7 @@ def test_refuses_bad_bearer_when_secret_configured(tmp_path: Path, authorization
     "Basic YWxpY2U6cHc=",  # 非 Bearer scheme
     _token(),              # 裸 token（漏了 scheme）
     "Bearer",              # 只有 scheme
-])
+], ids=["basic-scheme", "bare-token-no-scheme", "scheme-only"])
 def test_refuses_bearer_that_is_not_bearer_scheme(tmp_path: Path, authorization: str) -> None:
     """`Basic ...` / 裸 token 一律拒——HTTP 面同款（scheme 必须是 bearer）。"""
     with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
@@ -349,7 +352,7 @@ def test_refuses_browser_shaped_client_with_only_business_subprotocol(tmp_path: 
     jwt.encode({"tenant_id": "acme", "user_id": "alice",
                 "exp": int((datetime.now(UTC) + timedelta(seconds=600)).timestamp())},
                "another-signing-secret-32-chars-long!!", algorithm="HS256"),
-])
+], ids=["not-a-jwt", "wrong-signature"])
 def test_refuses_bad_token_via_subprotocol(tmp_path: Path, token: str) -> None:
     """子协议里的坏 token（非 JWT / 签名不对）⇒ 被拒——与头通道同一出口。"""
     with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \

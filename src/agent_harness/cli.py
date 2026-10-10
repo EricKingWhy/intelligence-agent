@@ -1672,6 +1672,18 @@ def _main_dispatch() -> None:
         raise SystemExit(1)
 
 
+def _plugins_workspace(settings: Settings, args: argparse.Namespace) -> str:
+    """本次操作作用的项目 workspace（--project 覆盖本进程默认）。"""
+    return getattr(args, "project", None) or settings.workspace_dir
+
+
+def _plugins_install_scope(args: argparse.Namespace) -> str:
+    """本次操作的安装根 scope；enable/disable 的 --scope 是启用结果语义，不作为安装根。"""
+    if args.command in {"enable", "disable"}:
+        return "project"
+    return getattr(args, "scope", None) or "project"
+
+
 def _main_plugins(argv: list[str]) -> None:
     """Inspect and manage scoped Skill packages without running package code."""
     parser = argparse.ArgumentParser(prog="agent-harness plugins")
@@ -1706,15 +1718,24 @@ def _main_plugins(argv: list[str]) -> None:
     rollback = subcommands.add_parser("rollback", help="stage the previous Git Skill snapshot")
     rollback.add_argument("name")
     add_scope_argument(rollback)
-    enable = subcommands.add_parser("enable", help="enable a complete installed Skill for new Runtimes")
+    enable = subcommands.add_parser(
+        "enable",
+        help="select a complete installed Skill for one project's new Runtimes",
+    )
     enable.add_argument("name")
-    disable = subcommands.add_parser("disable", help="disable an installed Skill for new Runtimes")
+    # enable 的 --scope 是「选哪个 scope 装配」（spec 08 §6.2），不是安装根：
+    # 同 ID 并存且尚无启用结果时必须显式给出（T5 AC2）。--project 指定作用于哪个项目。
+    enable.add_argument("--scope", choices=["project", "global"])
+    enable.add_argument("--project", help="project workspace to enable in (default: this one)")
+    disable = subcommands.add_parser("disable", help="clear this project's Skill selection")
     disable.add_argument("name")
+    disable.add_argument("--project", help="project workspace to disable in (default: this one)")
     remove = subcommands.add_parser("remove", help="remove an unchanged installed Skill package")
     remove.add_argument("name")
     add_scope_argument(remove)
     listing = subcommands.add_parser("list", help="list saved selection and current Runtime state")
     add_scope_argument(listing)
+    listing.add_argument("--project", help="project workspace to report on (default: this one)")
     args = parser.parse_args(argv)
 
     settings = Settings()
@@ -1733,9 +1754,12 @@ def _main_plugins(argv: list[str]) -> None:
         enabled_skills_config = (
             skills_config if skills_config is not None and skills_config.enabled else None
         )
+        workspace_dir = _plugins_workspace(settings, args)
+        # enable/disable 的 --scope 是启用结果语义，不是安装根：它们始终写
+        # **项目**清单（T5 AC1），--project 决定写哪个项目。
         manager = SkillPackageManager(
-            settings.workspace_dir,
-            scope=getattr(args, "scope", "project"),
+            workspace_dir,
+            scope=_plugins_install_scope(args),
             global_skills_dir=settings.skill_global_dir or None,
             additional_skill_directories=(
                 coerce_skill_path_list(enabled_skills_config, "directories")
@@ -1789,12 +1813,33 @@ def _main_plugins(argv: list[str]) -> None:
                     "cannot enable Skill packages unless the Skills capability is enabled "
                     "in CAPABILITIES"
                 )
-            manager.enable(args.name)
-            print(json.dumps({"name": args.name, "saved_selection": "enabled"}, ensure_ascii=False))
+            result = manager.enable(args.name, scope=args.scope)
+            print(
+                json.dumps(
+                    {
+                        "name": args.name,
+                        "saved_selection": "enabled",
+                        "selected_scope": result["selected_scope"],
+                        "project": str(workspace_dir),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return
         if args.command == "disable":
-            manager.disable(args.name)
-            print(json.dumps({"name": args.name, "saved_selection": "disabled"}, ensure_ascii=False))
+            result = manager.disable(args.name)
+            print(
+                json.dumps(
+                    {
+                        "name": args.name,
+                        "saved_selection": "disabled",
+                        # 被清掉的那个选择如实报告；disable 本身不选任何 scope。
+                        "previous_scope": result["selected_scope"],
+                        "project": str(workspace_dir),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return
         if args.command == "remove":
             if os.environ.get(ALLOW_SHARED_ROOT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -1802,7 +1847,7 @@ def _main_plugins(argv: list[str]) -> None:
                     "cannot safely remove while ALLOW_SHARED_ROOT is enabled; disable it and retry"
                 )
             try:
-                removal_lock = InstanceLock(settings.workspace_dir).acquire()
+                removal_lock = InstanceLock(workspace_dir).acquire()
             except (InstanceLockError, OSError) as error:
                 raise SkillPackageError(
                     "cannot verify that the current Runtime is stopped; removal was refused"
@@ -1814,7 +1859,7 @@ def _main_plugins(argv: list[str]) -> None:
             print(json.dumps({"name": args.name, "removed": True}, ensure_ascii=False))
             return
         if args.command == "list":
-            print(json.dumps(_skill_package_listing(settings, manager), ensure_ascii=False, indent=2))
+            print(json.dumps(_skill_package_listing(manager), ensure_ascii=False, indent=2))
             return
     except (CapabilityError, SkillPackageError, OSError) as error:
         _emit_stderr(str(error))
@@ -1845,7 +1890,23 @@ def _query_current_skill_runtime(
     return "not_running", "workspace lock is available; no Runtime owns the workspace", None
 
 
-def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> dict[str, object]:
+def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
+    """`--scope` 决定看哪个安装根的清单；项目视图另附本项目选了哪一版。
+
+    两个视图的 `saved_selection` **口径不同**，这是有意的（T4 的记录面与 T5 的选择面
+    必须各自可见，spec 08 §6.2）：
+    - `packages[]`（安装记录视图）：该根里这条记录自己的 `enabled` 位；本项目的选择是
+      旁边的 `selected_scope`。因此选 global 时项目行显示 `disabled` + `selected_scope=global`。
+    - `available_global_packages[]`（本项目可启用面）：`enabled` = 本项目选了这条全局包，
+      否则 `not_selected`；`current_runtime` / `pending_restart` 也按**本项目的选择**投影
+      （没选就没有运行态可言），而不是全局记录自己的启用位。
+
+    同名 ID 在两个 scope 各有一行，只有选中的那版进装配面（AC2）。
+
+    两处共同的不变量：**在不在运行态，比的必须是本项目选中的那个 scope 的实际
+    受管路径**，不是「项目根下有没有同名文件」。选了 global 却拿项目路径去比对，
+    「已装配」与「装配缺席」会投影成同一个值（AC3 要求范围与运行态如实可见）。
+    """
     if manager.scope == "global":
         return {
             "runtime": {
@@ -1854,13 +1915,21 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
             },
             "packages": _global_skill_package_listing(manager),
         }
-    runtime_state, detail, runtime_skill_sources = _query_current_skill_runtime(settings.workspace_dir)
-    from agent_harness.skills.package_manager import SkillPackageManager
-
+    runtime_state, detail, runtime_skill_sources = _query_current_skill_runtime(
+        str(manager.workspace_dir)
+    )
+    results = manager.enable_results()
+    global_managed_dir = _global_managed_skills_dir(manager)
     packages: list[dict[str, object]] = []
     for name, record in sorted(manager.list_packages().items()):
-        enabled = bool(record["enabled"])
         has_pending_version = record.get("pending_version") is not None
+        # 「本项目选中的那一版」才是运行态的主语；两个 scope 都没有启用结果时
+        # （disable 过 / 旧清单未回填）退回记录自己的 enabled 位——与
+        # enabled_skill_digests 的判据一致。
+        selected_scope = results.get(name, {}).get("selected_scope")
+        installed = selected_scope if isinstance(selected_scope, str) else (
+            "project" if record["enabled"] else None
+        )
         if runtime_state == "not_running":
             current = "not_running"
             pending_restart: bool | None = has_pending_version
@@ -1868,11 +1937,15 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
             current = "unavailable"
             pending_restart = None
         else:
-            package_skill = manager.managed_skills_dir / name / "SKILL.md"
+            root = global_managed_dir if installed == "global" else manager.managed_skills_dir
+            package_skill = root / name / "SKILL.md"
             package_source = os.path.normcase(os.path.realpath(str(package_skill)))
             discovered = package_source in (runtime_skill_sources or set())
             current = "discovered" if discovered else "not_discovered"
-            pending_restart = enabled != discovered or has_pending_version
+            # 只有**本项目选中**的那一版才谈得上「待重启」：选了却没进运行态
+            # ⇒ 待重启。没选却还在运行态是「运行态还持有已取消选择的包」——它不
+            # 会再进装配面，叫人去重启一个不会生效的包是错的（`disable` 后即此形）。
+            pending_restart = (installed is not None and not discovered) or has_pending_version
         current_version = None
         if record.get("source_kind") == "git":
             current_version = {
@@ -1887,7 +1960,8 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
                 "type": record["type"],
                 "scope": record["scope"],
                 "source": record["source"],
-                "saved_selection": "enabled" if enabled else "disabled",
+                "saved_selection": "enabled" if record["enabled"] else "disabled",
+                "selected_scope": selected_scope,
                 "compatibility": record["compatibility"],
                 "trust": record["trust"],
                 "current_version": current_version,
@@ -1906,14 +1980,64 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
     return {
         "runtime": {"state": runtime_state, "detail": detail},
         "packages": packages,
-        "available_global_packages": _global_skill_package_listing(
-            SkillPackageManager(
-                settings.workspace_dir,
-                scope="global",
-                global_skills_dir=settings.skill_global_dir or None,
-            )
+        "available_global_packages": _available_global_skill_package_listing(
+            manager, runtime_state, runtime_skill_sources
         ),
     }
+
+
+def _global_managed_skills_dir(manager: SkillPackageManager) -> Path:
+    """本项目可启用的全局包实际装配在哪：全局安装根的 `<root>/skills/.managed`。"""
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    return SkillPackageManager(
+        manager.workspace_dir,
+        scope="global",
+        global_skills_dir=manager.global_skills_dir,
+    ).managed_skills_dir
+
+
+def _available_global_skill_package_listing(
+    manager: SkillPackageManager,
+    runtime_state: str,
+    runtime_skill_sources: set[str] | None,
+) -> list[dict[str, object]]:
+    """本项目可显式启用的全局包：T4 的可用性视图 + 本项目已选中的那条。
+
+    运行态按**本项目的选择**投影（与 `packages[]` 同一口径）：`_global_skill_package_listing`
+    只看全局记录自己的启用位，而全局包一律 `enabled is False`（T4 语义：全局包由各项目
+    选择），照搬会把「本机已装配这条全局包」报成 `not_selected`（T5 AC3 要求范围与运行态
+    如实可见）。未选中的条目没有运行态可言，`pending_restart` 只反映它自己的待升版本。
+    """
+    from agent_harness.skills.package_manager import SkillPackageManager
+
+    global_manager = SkillPackageManager(
+        manager.workspace_dir,
+        scope="global",
+        global_skills_dir=manager.global_skills_dir,
+    )
+    results = manager.enable_results()
+    packages = []
+    for item in _global_skill_package_listing(global_manager):
+        item = dict(item)
+        # 同名双 scope 并存时，选了项目版的那条不能把全局版报成已启用（T5 AC2）。
+        selected = results.get(item["name"], {}).get("selected_scope") == "global"
+        item["saved_selection"] = "enabled" if selected else "not_selected"
+        skill = global_manager.managed_skills_dir / str(item["name"]) / "SKILL.md"
+        source = os.path.normcase(os.path.realpath(str(skill)))
+        discovered = source in (runtime_skill_sources or set())
+        if runtime_state == "not_running":
+            item["current_runtime"] = "not_running"
+            item["pending_restart"] = item["pending_version"] is not None
+        elif runtime_state == "unavailable":
+            item["current_runtime"] = "unavailable"
+            item["pending_restart"] = None
+        else:
+            item["current_runtime"] = "discovered" if discovered else "not_discovered"
+            # 只有本项目选中的那条才谈得上待重启（未选中项没有可兑现的选择）。
+            item["pending_restart"] = selected and not discovered
+        packages.append(item)
+    return packages
 
 
 def _global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str, object]]:
