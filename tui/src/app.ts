@@ -56,7 +56,7 @@ import {
 } from "./lib/pending-images.ts";
 import { resolveVisionSupport, type ModelOptionView } from "./lib/vision.ts";
 import { SeqCursor, openStream } from "./sse.ts";
-import { createTheme, type IaTheme } from "./theme.ts";
+import { createTheme, GLYPHS, type IaTheme } from "./theme.ts";
 import {
   conversationComponents,
   emptyStateComponent,
@@ -69,6 +69,19 @@ import { renderPauseLines, renderResumeHint } from "./views/pause.ts";
 import { renderPlanList } from "./views/plan.ts";
 
 const RECONNECT_DELAY_MS = 1000;
+/**
+ * 连续重连失败上限（#843，W-21 D13）：Host 被 kill 后桌面以**新端口**重开服务，已附着的
+ * TUI 不重解析端点文件，旧 base 永久 `fetch failed`；修复前是无声的永久重连风暴。
+ * 本票裁决只做「熔断 + 可见提示」，不做 base 迁移（scope 锁死）。
+ *
+ * 取值 = 5（连续失败，退避窗口约 5 秒），与 `vscode-languageclient`
+ * `DefaultErrorHandler` 同值同语义：来源 microsoft/vscode-languageserver-node
+ * client/src/common/client.ts:1181 `new DefaultErrorHandler(this, maxRestartCount ?? 4)`
+ * （即连续 5 次退出后 `CloseAction.DoNotRestart` + 用户可见 message，client.ts:465-470）。
+ * 更短会和单次网络抖动难以区分，更长只是把「转瞬即逝 vs 已死」的判定拖长；
+ * 只有干净收束（`ended`：Host 应答了流）才重置，所以短暂抖动不会累积成假熔断。
+ */
+const MAX_RECONNECT_FAILURES = 5;
 
 /** 终端括号粘贴标记（pi-tui `StdinBuffer` 也按这两个标记聚合，见 stdin-buffer.js:23）。 */
 const BRACKETED_PASTE_START = "\x1b[200~";
@@ -153,6 +166,12 @@ export class TuiApp {
   private generation = 0;
   private abort = new AbortController();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 连续重连失败次数（#843）；干净收束（`ended`）归零，达 `MAX_RECONNECT_FAILURES` 熔断。 */
+  private reconnectFailures = 0;
+  /** 是否已停止重连（熔断后为 true；提示横幅在场期间不再订阅）。 */
+  private streamStopped = false;
+  /** 熔断提示横幅（footer 常驻，与 pause/approval 横幅同位）；null = 未熔断。 */
+  private streamHintText: Text | null = null;
 
   constructor(
     private readonly options: AppOptions,
@@ -262,7 +281,8 @@ export class TuiApp {
   }
 
   /** 订阅循环：断开按游标重连（seq 幂等去重）；truncated 走全量重建；
-   *  切会话（generation 变化）后旧循环退出，由 switchSession 起新循环。 */
+   *  切会话（generation 变化）后旧循环退出，由 switchSession 起新循环。
+   *  连续失败达 `MAX_RECONNECT_FAILURES` 即熔断退出（#843）：不再重试并给出可见提示。 */
   private subscribeLoop(): void {
     const gen = this.generation;
     void (async () => {
@@ -293,11 +313,57 @@ export class TuiApp {
         });
         if (!this.running || gen !== this.generation) return;
         if (outcome === "truncated") continue; // 重建后立即重连
+        // 干净收束 = Host 应答过这条流（活着）；只有它清零连续失败计数，
+        // 其余（error，以及 abort 竞态下的 ended）都算一次失败（#843）。
+        this.reconnectFailures = outcome === "ended" ? 0 : this.reconnectFailures + 1;
+        if (this.reconnectFailures >= MAX_RECONNECT_FAILURES) {
+          this.stopStreaming();
+          return;
+        }
         await new Promise((resolve) => {
           this.reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
         });
       }
     })();
+  }
+
+  /** 熔断收口（#843）：停止重连，并在 chat 留一行 + footer 挂常驻横幅。
+   *  只停客户端重连，不 cancel 服务端 run（与本包其它失败路径同纪律）。 */
+  private stopStreaming(): void {
+    this.streamStopped = true;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    // chat 里留一行收尾（替代原本每秒一行的重连风暴），footer 再挂常驻横幅：
+    // 与 pause/approval 横幅同一个渲染位置，避免熔断提示被 renderAll 漏画（#843 审查 P2）。
+    this.appendNote(this.streamStoppedMessage());
+    this.renderStreamHint();
+  }
+
+  /** 熔断提示文案：说清发生了什么 + 用户能做什么（chat 行与 footer 横幅共用一份）。 */
+  private streamStoppedMessage(): string {
+    return (
+      "Host 连接已断开（可能已重启），已停止重连；请重开 TUI：" +
+      `ia-tui --session ${this.options.sessionId}`
+    );
+  }
+
+  /** 熔断提示（footer 常驻）：说清发生了什么 + 用户能做什么。
+   *
+   *  为什么是「用户自己看提示然后重开」而不是自动重试：TUI 只订阅启动时读到的那个
+   *  base（`host.ts:138` 的端点文件只在自身启动/派生路径上解析），Host 换了端口就再没有
+   *  对得上的地址；继续重试永远不会成功，静默重试正是本票要消灭的行为。
+   *  这也是成熟产品在同一位置的选择：tmux 客户端在 server 消失时 fail-closed 退出并
+   *  在一行里说清原因（tmux client.c:211 `"server exited unexpectedly"`，由
+   *  client.c:581 `CLIENT_EXIT_LOST_SERVER` / client.c:781 `CLIENT_EXIT_SERVER_EXITED` 置位，
+   *  client.c:185-206 `client_exit_message()` 渲染），而不是无限重连。 */
+  private renderStreamHint(): void {
+    if (this.streamHintText !== null) {
+      this.footerContainer.removeChild(this.streamHintText);
+      this.streamHintText = null;
+    }
+    if (!this.streamStopped) return;
+    this.streamHintText = new Text(this.theme.error(`${GLYPHS.circle} ${this.streamStoppedMessage()}`));
+    this.footerContainer.addChild(this.streamHintText);
+    this.tui.requestRender();
   }
 
   private async handleSubmit(text: string): Promise<void> {
@@ -556,6 +622,9 @@ export class TuiApp {
     this.abort.abort();
     this.abort = new AbortController();
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    // 熔断是**上一会话**的状态：新会话重新给满阈值（#843）。
+    this.reconnectFailures = 0;
+    this.streamStopped = false;
     this.options.sessionId = sessionId;
     this.cursor = new SeqCursor();
     // 独立审查 P3（#6）：待发图片是**旧会话**的草稿，切会话时清空数组并抹掉正文里的标记，
@@ -634,6 +703,7 @@ export class TuiApp {
     this.renderPendingImages();
     this.renderPauseBanner();
     this.renderApproval();
+    this.renderStreamHint();
     this.refreshStatus();
   }
 
