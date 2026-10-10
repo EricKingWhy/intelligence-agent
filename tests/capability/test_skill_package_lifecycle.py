@@ -1002,3 +1002,102 @@ def test_install_registry_write_failure_leaves_no_visible_or_partial_package(
 
     assert not manager.manifest_path.exists()
     assert not (manager.managed_skills_dir / "sample-skill").exists()
+
+
+def test_global_git_package_is_shared_and_lifecycle_isolated_from_projects(tmp_path: Path) -> None:
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    workspace_a = tmp_path / "project-a"
+    workspace_b = tmp_path / "project-b"
+    project_a = SkillPackageManager(workspace_a, global_skills_dir=global_skills)
+    project_b = SkillPackageManager(workspace_b, global_skills_dir=global_skills)
+    global_a = SkillPackageManager(
+        workspace_a, global_skills_dir=global_skills, scope="global"
+    )
+    global_b = SkillPackageManager(
+        workspace_b, global_skills_dir=global_skills, scope="global"
+    )
+
+    project_a.install(_complete_package(tmp_path / "project-a-source"))
+    project_b.install(_complete_package(tmp_path / "project-b-source"))
+
+    def project_snapshot(manager: SkillPackageManager) -> tuple[bytes, dict[str, bytes]]:
+        return (
+            manager.manifest_path.read_bytes(),
+            {
+                item.relative_to(manager.managed_skills_dir).as_posix(): item.read_bytes()
+                for item in manager.managed_skills_dir.rglob("*")
+                if item.is_file()
+            },
+        )
+
+    project_states = [
+        (manager, project_snapshot(manager)) for manager in (project_a, project_b)
+    ]
+
+    repo, old_commit, new_commit = _git_skill_repo(tmp_path / "upstream")
+    installed = global_a.install_git(
+        repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill"
+    )
+
+    assert installed["scope"] == "global"
+    assert installed["enabled"] is False
+    assert global_b.list_packages() == global_a.list_packages()
+    assert global_a.manifest_path == global_b.manifest_path
+    manifest_before_enable = global_a.manifest_path.read_bytes()
+    with pytest.raises(SkillPackageError, match="explicit project selection"):
+        global_a.enable("sample-skill")
+    assert global_a.manifest_path.read_bytes() == manifest_before_enable
+    for manager, snapshot in project_states:
+        assert project_snapshot(manager) == snapshot
+
+    global_state = {
+        item.relative_to(global_a.scope_root).as_posix(): item.read_bytes()
+        for item in global_a.scope_root.rglob("*")
+        if item.is_file()
+    }
+    project_extra = tmp_path / "project-extra"
+    _write(
+        project_extra / "SKILL.md",
+        "---\nname: project-extra\ndescription: Project-only package.\n---\n\nBody.\n",
+    )
+    project_a.install(project_extra)
+    assert {
+        item.relative_to(global_a.scope_root).as_posix(): item.read_bytes()
+        for item in global_a.scope_root.rglob("*")
+        if item.is_file()
+    } == global_state
+    project_states = [
+        (manager, project_snapshot(manager)) for manager in (project_a, project_b)
+    ]
+
+    global_a.update("sample-skill", ref=new_commit)
+    assert global_a.apply_pending_versions() == 1
+    assert global_a.list_packages()["sample-skill"]["resolved_commit"] == new_commit
+    assert global_a.rollback("sample-skill")["pending_version"]["resolved_commit"] == old_commit
+    assert global_a.apply_pending_versions() == 1
+    global_a.remove("sample-skill")
+
+    for manager, snapshot in project_states:
+        assert project_snapshot(manager) == snapshot
+    assert global_b.list_packages() == {}
+    assert not (global_a.managed_skills_dir / "sample-skill").exists()
+
+
+def test_global_storage_link_fails_without_falling_back_to_project_scope(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    global_skills = tmp_path / "home" / ".intelligence-agent" / "skills"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    storage = global_skills.parent / "plugin-packages"
+    storage.parent.mkdir(parents=True)
+    try:
+        storage.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable on this host")
+
+    manager = SkillPackageManager(workspace, global_skills_dir=global_skills, scope="global")
+    with pytest.raises(SkillPackageError, match="global package storage directory"):
+        manager.install(_complete_package(tmp_path / "source"))
+
+    assert not (workspace / "plugin-installs.json").exists()
+    assert list(outside.iterdir()) == []

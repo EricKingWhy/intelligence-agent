@@ -413,3 +413,14 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 4. 失败时**只重跑失败的那条**（`--only`），不整条流水线重跑；整票级的受影响重跑用 `--affected <rev>`
    （见 §2 ⑭），但**它标出的 `unproven` 必须一并写进读数**。
 5. 不要用"失败总数"归因：沙箱负载下非确定性，只看**失败集合差集**。
+
+---
+
+## 6. #933 实测记录（本 worktree、Linux、`1beb8d31` 基线）
+
+`2026-10-10` 本机（`~/workspace/intelligence-agent-wt/933-storage`）实测：**Gate-0 的 6 条车道里
+`oxlint` / `tsc` 跑不动**——它们的输入是 `web/node_modules`，而 worktree 是 `git worktree add` 出来的、
+**没有** `node_modules`（本机 `node` / `npm` / `pnpm` 都在，但装依赖会污染主工作树，见协议 §8.1 第 6 条
+的隔离要求）。⇒ 本票的 Gate-0 读数只覆盖 `diff-check` / `ruff` / `guards` / `coverage` 四条，
+`oxlint` / `tsc` **如实标注 blocked（本机无 `web/node_modules`）**，由协调员在云端沙箱补跑
+（`docs/agents/verification.md` §5 的沙箱说明）。本节只记这一次的事实，不改任何门禁口径。
