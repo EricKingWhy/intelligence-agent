@@ -8100,7 +8100,7 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **本票同时关闭 #958 登记的残余 ①**（过期重建 reject 导致 `stream rebuild:` / `switch failed:` 落进新会话 chat）。
 - **待批准**：两轴审查后 push 分支 / PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）；关单。
 
-## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；原始基线 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；同步 origin/main 6ee4b51bcc72b09b6d74fd96017cd4f756fcffdf；同步合并 28947fc35649bd5060fa69af0218479373e4ef1b；验证 tip 3fd589663eaaa4d86e88edb6e26cf034f137bd27；Issue OPEN + in-progress）
+## #877 Plugin T8 DSH 推理滑条项目侧适配清单与完整性预检（2026-10-11；分支 codex/issue-877-dsh-adapter；原始基线 09e6142cf47b63e94de712bfec51ee6cab2b0ec9；同步 origin/main 6ee4b51bcc72b09b6d74fd96017cd4f756fcffdf；同步合并 28947fc35649bd5060fa69af0218479373e4ef1b；验证 tip 3fd589663eaaa4d86e88edb6e26cf034f137bd27；PR #971 已合入，merge commit fc8d1fd236f35b0627927cb8773663f854818271；Issue CLOSED，in-progress 已移除）
 
 - **票面与范围**：为固定来源做静态预检，逐项映射 #865 项目原生模型能力、请求映射、键盘、主题与 reduced-motion 证据；禁止执行 DSH/Cordis、访问私有 DOM 或建立第二份模型状态。
 - **方案依据**：调研报告 `docs/research/2026-10-11-issue-877-plugin-preflight-research.md` 核对目标插件、DSH preflight/runtime、VS Code、Claude Code、Pi；目标 MIT 来源 commit `af723caf3387e64ae28aa69c4fd235b1b662e3ae`、tree `8a732b7c00ba5da3b06e122c243205db4ab190b1`。
@@ -8111,4 +8111,4 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **冻结点**：合并 main 后代码验证点 `5cd1bfbd96c2400f4d7332030b170e50eeb1efc0` / tree `4980729a15e6dc8bb4419d587fa6b447adbad82f`；全量 pytest 与 Gate-0 在该点执行。完整 E2E 在 `4684e493` 执行；从该点至当前点没有 tracked `web/` 变更。原始冻结文件 hash-object 清单仍对应 `4684e493`，见下。
 - **门禁范围**：合并 main 后全量 pytest 与全量 Gate-0 均通过；完整 E2E 540 passed，且当前点到其代码点无 tracked `web/` 变更。Gate-0 回执见 `docs/gate/5cd1bfbd96c2400f4d7332030b170e50eeb1efc0.json`。
 - **双轴审查**：首轮 `09e6142..fd4c5e6e`：Spec APPROVE-WITH-FINDINGS（P0-P4=0/1/2/0/0）；Standards APPROVE-WITH-FINDINGS（回溯归类 P0-P4=0/0/1/1/0，首轮报告未逐条固定等级）。问题包括局部摘要误称整体来源匹配、缺固定源正例及 AC2 证据不完整。修复 `fc7af0fb` 将字段限定为所列文件摘要、补固定 MIT 正例与逐项证据。复审 `fd4c5e6e..fc7af0fb` 两轴 APPROVE、零新 findings；Standards 核对 8 个夹具文件与上游逐字节相同。四条审查行见 `docs/review_ledger.d/t877-*.tsv`。
-- **发布状态**：验证已通过；用户已批准在无问题时 push、开 PR、merge 并关闭 Issue。记录本次批准时 Issue 为 OPEN + in-progress。
+- **发布状态**：已 push 分支并开 PR #971（https://github.com/EricKingWhy/intelligence-agent/pull/971），head 048dc2ff5a6eea66fedf0f2ea8bd192f1e94ebc9；PR 于 2026-10-10T22:19:36Z 合入 main，merge commit fc8d1fd236f35b0627927cb8773663f854818271。PR body 的 Closes #877 于 2026-10-10T22:19:37Z 自动关单；已移除 in-progress，证据评论 issuecomment-6102810993。CI gate0、Chromium E2E 冒烟和 gitleaks 均通过（详见月档）。同步树 pytest 唯一红为 review coverage 漏行；补入真实审查行后定向回归 1 passed、coverage checker exit 0，未重跑全量。
