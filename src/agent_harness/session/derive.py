@@ -1416,7 +1416,7 @@ def derive_messages_with_source_ranges(
             if refs:
                 text = content if isinstance(content, str) else str(content)
                 if supports_vision:
-                    projected: str | list[dict[str, str]] = content_block_with_text(text, refs)
+                    projected: str | list[dict[str, object]] = content_block_with_text(text, refs)
                 else:
                     projected = text_with_omitted_images(text)
                 messages.append((HumanMessage(content=projected), (event.seq, event.seq)))

@@ -39,7 +39,14 @@ def test_vision_materializes_image_block_without_base64() -> None:
     (message, _range), = derive_messages_with_source_ranges(events, supports_vision=True)
     assert message.content == [
         {"type": "text", "text": "看图"},
-        {"type": "image", "file_id": _REF["attachment_id"], "mime_type": "image/png"},
+        # #935 / M-03：标准块随块携带尺寸（token 估算按尺寸相关公式计费用）。
+        {
+            "type": "image",
+            "file_id": _REF["attachment_id"],
+            "mime_type": "image/png",
+            "width": 640,
+            "height": 480,
+        },
     ]
     # 事件流 / 投影里绝不出现 base64（AC3）。
     assert "base64" not in str(message.content)

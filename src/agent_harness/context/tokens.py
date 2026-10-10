@@ -22,6 +22,7 @@ registry 内嵌 sha256 校验，坏缓存自动删除并重取——真离线时
 from __future__ import annotations
 
 import logging
+import math
 import threading
 
 import tiktoken
@@ -30,26 +31,67 @@ from pydantic_core import PydanticSerializationError
 
 logger = logging.getLogger("agent_harness.context.tokens")
 
-#: 一张图片的近似 token 成本（#824 / MM-03，AC7 / PRD D3）。
+#: 图片 token 的**尺寸相关近似公式**（#935 / M-03，替代 #824 的固定 1200 常量）。
 #:
-#: **口径（显式记录）**：投影层的**标准图片块**
-#: （`{"type":"image","file_id":...}`，`attachments.projection.image_content_block`）
-#: 只带内容寻址 id，不带像素/字节尺寸——本仓在估算处按**固定近似值**计入图片开销，
-#: 而不是按 Provider 像素公式精算。依据（≥2 独立来源）：
+#: **口径（显式记录）**：一张图的近似成本 = `IMAGE_TOKENS_BASE +
+#: IMAGE_TOKENS_PER_TILE × (tiles)`，其中
+#: `tiles = ceil(w / IMAGE_TILE_PX) × ceil(h / IMAGE_TILE_PX)`（长边先按
+#: `IMAGE_MAX_DIMENSION` 截断）。三家主流 Provider 全部用尺寸相关公式、无一家用固定
+#: 常量，本仓取**最简的 tile 制**作统一近似（不逐 Provider 精算），来源（≥2 独立来源，
+#: 官方原文核对见 `docs/tickets/.../MM-08-verification-evidence.md` 之外的本票 checkpoint）：
 #:
-#: - Pi `packages/ai/src/utils/estimate.ts:16,34`（MIT，commit `1b347794`）：
-#:   图片按 `ESTIMATED_IMAGE_CHARS = 4800` 字符计 → `4800 / 4 = 1200` token/图。
-#: - Open WebUI 的图片预算下界参照 = 1000 token/图（`docs/research/
-#:   2026-10-07-multimodal-image-input-research.md` §3.2 第 6 条）。
-#: - DSH 有更精确的 DeepSeek 像素公式（`packages/llm/llm-deepseek/
-#:   src/image-tokens.ts`，MIT，commit `5badb150`：14px patch、3:1 下采样、封顶
-#:   1024 token），但需要图片像素尺寸，而标准块刻意不携带（加字段会破坏跨端投影
-#:   契约，见 `attachments/projection.py` 的块形状）；故取"下界 + 常量"这一更稳的口径。
+#: - **OpenAI** Images 指南（`developers.openai.com/api/docs/guides/images`，章节
+#:   "Calculating costs" → "Tile-based image tokenization"）：`gpt-4o`/`gpt-4.1`
+#:   **base 85 + tile 170**，按 **512px** 方块计数；低细节固定 = base。
+#: - **Gemini**（Firebase AI Logic《Count tokens for Gemini models》，"Image input
+#:   files"）：小图（两维 ≤384px）= 258；大图按 **768×768** tile、每 tile 258。
+#: - **Anthropic**（`platform.claude.com/.../vision`，"Image limits and costs"）：
+#:   `⌈w/28⌉ × ⌈h/28⌉`（28×28 patch），上限 1568/4784——同为尺寸相关（旧版为
+#:   `(w×h)/750`、上限 1600，现已被 patch 制取代）。
 #:
-#: **目的**：防止"图不计费导致 hard guard 失守"——多张大图会让估算显著抬高，
-#: 不再让 `max_context_tokens * hard_guard_threshold` 对图片开销视而不见。真实
-#: usage 仍以 Provider 回执为权威（`builder._usage_anchored_tokens` 的锚价只抬高）。
-IMAGE_TOKENS_PER_IMAGE = 1200
+#: **为什么这些常数**：取 OpenAI 的 512px tile + 85/170 是因为本仓请求装配发的正是
+#: OpenAI 风格 `image_url` 块（`model/multimodal.py`），其成本模型最贴合本仓实际
+#: Provider 面。**简化之处**：不复制 OpenAI 的"先缩进 2048²、再把短边压到 768"两段
+#: 预处理（那是逐 Provider 精算）；改用**长边截断到 `IMAGE_MAX_DIMENSION`** 一步近似，
+#: 与发送前归一化口径（`attachments.normalize.TARGET_MAX_DIMENSION`，长边 ≤2048）对齐。
+#:
+#: **尺寸来源**：标准图片块（`attachments.projection.image_content_block`）**携带
+#: `width`/`height`**（该数据在投影处即 ImageRef 的字段，随块一起带给估算层），故本
+#: 估算保持**消息的纯函数**——全部估算调用点（builder / compactor / service / 各
+#: Provider）自动同口径，无需任何 session 反查管道。（设计取舍见本票 checkpoint。）
+#:
+#: **目的**：防止"图不计费导致 hard guard 失守"——多张大图会让估算随尺寸单调抬高；
+#: 同时不再对大图系统性低估（旧 1200 常量在 2048² 归一化上限下相对 Anthropic 口径
+#: 低估约 4.6 倍）。真实 usage 仍以 Provider 回执为权威
+#: （`builder._usage_anchored_tokens` 的锚价只抬高）。
+IMAGE_TILE_PX = 512
+
+#: tile 制的 base / per-tile（OpenAI `gpt-4o`/`gpt-4.1` 行）。
+IMAGE_TOKENS_BASE = 85
+IMAGE_TOKENS_PER_TILE = 170
+
+#: 长边归一化上限（与 `attachments.normalize.TARGET_MAX_DIMENSION` **同值**：发送前
+#: 长边 ≤ 2048px）。估算只按此上限截断，不逐 Provider 精算其缩放阶梯。
+IMAGE_MAX_DIMENSION = 2048
+
+
+def image_tokens_for_size(width: int, height: int) -> int:
+    """单张 `width×height` 图的近似 token 成本（tile 制，见模块常量注释）。
+
+    长边先按 `IMAGE_MAX_DIMENSION` 截断（对齐发送前归一化），再按 `IMAGE_TILE_PX`
+    方块向上取整计数；退化尺寸（0）只计 base。纯函数、确定性。
+    """
+    capped_w = max(0, min(int(width), IMAGE_MAX_DIMENSION))
+    capped_h = max(0, min(int(height), IMAGE_MAX_DIMENSION))
+    tiles = math.ceil(capped_w / IMAGE_TILE_PX) * math.ceil(capped_h / IMAGE_TILE_PX)
+    return IMAGE_TOKENS_BASE + IMAGE_TOKENS_PER_TILE * tiles
+
+
+#: 尺寸**未知**时的回退值（provider 块 `image_url` 无尺寸字段、或块形状异常）。
+#: 第一性原理：管线单图可发送的最大尺寸即 `IMAGE_MAX_DIMENSION²`；未知尺寸时按该
+#: 上限估是**保守方向**（只可能多算、更早拦截），与 hard guard 的 fail-closed 语义
+#: 一致——绝不因"不知道多大"而少算图片开销。
+IMAGE_TOKENS_UNKNOWN_SIZE = image_tokens_for_size(IMAGE_MAX_DIMENSION, IMAGE_MAX_DIMENSION)
 
 #: 图片内容块的判别值：标准块（投影后 / 装配前）与 provider 块（装配后）。
 #: 取值与 `attachments.projection.image_content_block`（产出 `"image"`）和
@@ -132,30 +174,46 @@ def _contains_lone_surrogate(value: object) -> bool:
     return False
 
 
-def image_tokens_in_message(message: AnyMessage) -> int:
-    """消息内容里的图片块数 × 单图近似成本（#824 / MM-03，AC7）。
+def _as_dimension(value: object) -> int | None:
+    """`width`/`height` 取值：非负 int（`bool` 除外）才收，否则 `None`（走尺寸未知回退）。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
-    识别**标准块**（`{"type":"image",...}`，投影后、装配前）与 **provider 块**
-    （`{"type":"image_url",...}`，装配后）两种形态；纯文本（`str` 内容）或只含
-    文本块的列表一律 0——无附件的纯文本链路 token 口径逐字不变（AC9）。
-    成本常量与口径见 `IMAGE_TOKENS_PER_IMAGE`。
+
+def image_tokens_in_message(message: AnyMessage) -> int:
+    """消息内容里的图片块按**尺寸相关近似**计费（#935 / M-03；替代 #824 的固定常量）。
+
+    识别**标准块**（`{"type":"image",...,"width","height"}`，投影后、装配前）与
+    **provider 块**（`{"type":"image_url",...}`，装配后）两种形态。标准块在投影处已带
+    `width`/`height`（`attachments.projection.image_content_block`），按
+    `image_tokens_for_size` 计；provider 块无尺寸字段（其形状由 provider 协议决定，
+    不可加字段）⇒ 按 `IMAGE_TOKENS_UNKNOWN_SIZE` 保守回退。纯文本（`str` 内容）或只含
+    文本块的列表一律 0——无附件的纯文本链路 token 口径逐字不变（AC9）。成本与口径见
+    `IMAGE_TOKENS_BASE` / `IMAGE_TOKENS_PER_TILE` / `IMAGE_TILE_PX`。
     """
     content = message.content
     if not isinstance(content, list):
         return 0
-    return sum(
-        1
-        for block in content
-        if isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES
-    ) * IMAGE_TOKENS_PER_IMAGE
+    total = 0
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES):
+            continue
+        width = _as_dimension(block.get("width"))
+        height = _as_dimension(block.get("height"))
+        if width is None or height is None:
+            total += IMAGE_TOKENS_UNKNOWN_SIZE
+        else:
+            total += image_tokens_for_size(width, height)
+    return total
 
 
 def message_cost(message: AnyMessage, *, payload: str | None = None) -> int:
-    """单条消息的 token 成本 = 结构 token + 图片近似成本（#824 / MM-03，AC7）。
+    """单条消息的 token 成本 = 结构 token + 图片近似成本（#935 / M-03）。
 
     结构 token 走 `estimate_tokens(model_dump_json)`（与全仓同一编码）；图片增量见
-    `image_tokens_in_message` / `IMAGE_TOKENS_PER_IMAGE`。预算/增量/锚三条估算路径
-    共用本函数，避免"结构 + 图片"这一惯用式在四处各写一遍而漂移。`payload` 已由
+    `image_tokens_in_message` / `image_tokens_for_size`（尺寸相关近似）。预算/增量/锚三条
+    估算路径共用本函数，避免"结构 + 图片"这一惯用式在四处各写一遍而漂移。`payload` 已由
     调用方算好时直接传入（`estimate_message_tokens` 要先拿它做 surrogate 校验，
     否则会重复序列化）。
     """
@@ -167,11 +225,11 @@ def message_cost(message: AnyMessage, *, payload: str | None = None) -> int:
 def estimate_message_tokens(messages: list[AnyMessage]) -> int:
     """计入消息结构和 tool_calls；与文本估算使用同一个编码。
 
-    图片口径（#824 / MM-03，AC7 / PRD D3）：带图消息里的标准图片块
-    （`{"type":"image","file_id",...}`）在 `model_dump_json` 里只有几 token，真正
-    的 base64 载荷在请求装配时才注入。为**不让图不计费击穿 hard guard**，本函数在
-    结构 token 之外，按 `image_tokens_in_message` 追加每张图的近似成本（常量与来源
-    见 `IMAGE_TOKENS_PER_IMAGE`）。纯文本消息该增量为 0，既有口径逐字不变（AC9）。
+    图片口径（#935 / M-03，替代 #824 / PRD D3 的固定常量）：带图消息里的标准图片块
+    （`{"type":"image","file_id",...,"width","height"}`）在 `model_dump_json` 里只有几 token，
+    真正的 base64 载荷在请求装配时才注入。为**不让图不计费击穿 hard guard**，本函数在
+    结构 token 之外，按 `image_tokens_in_message` 追加每张图的**尺寸相关近似**成本
+    （公式与来源见 `IMAGE_TOKENS_BASE` 等常量）。纯文本消息该增量为 0，既有口径逐字不变（AC9）。
 
     #650：孤立 Unicode surrogate 能通过 Python 层校验、却无法编码进
     JSON——``model_dump_json`` 裸抛 ``PydanticSerializationError``（未收敛）。
