@@ -569,6 +569,27 @@ while True:
 """
 
 
+def _read_text_settling(path: Path, *, attempts: int = 50, delay: float = 0.02) -> str:
+    """kill 后读取带界重试：只对 ``PermissionError`` 重试，内容判定不变。
+
+    #919 全量门禁表外红（不在 flake 表签名内 ⇒ 按阻塞归因）：``proc.kill()``
+    与 ``wait()`` 之后，对刚写完的 progress.md 读到过一次 ``[Errno 13]``。
+    这是「暂时打不开」，不是内容损坏——写侧是同目录临时文件 + 原子替换，文件
+    只可能是完整旧版或完整新版——所以按有界重试处理：只吃掉共享类拒绝，内容
+    断言原样保留（截断/半文件仍由断言报错，牙齿探针实测）。界 = 50 × 20ms
+    ≈ 1 秒；真锁死照样失败。
+    """
+
+    for attempt in range(attempts):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="票面要求 Windows 真文件系统语义")
 class TestKillMidWriteWindows:
     def test_kill_mid_write_leaves_complete_old_or_new_version(self, tmp_path) -> None:
@@ -592,10 +613,10 @@ class TestKillMidWriteWindows:
             proc.wait(timeout=10)
             md = list(target_dir.glob("*/progress.md"))
             assert md, "至少已完成一次完整写入"
-            body = md[0].read_text(encoding="utf-8")
+            body = _read_text_settling(md[0])
             assert body.rstrip().endswith(END_MARKER), "kill 后文件完整（旧版或新版）"
             meta_path = md[0].parent / "progress.meta.json"
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = json.loads(_read_text_settling(meta_path))
             assert meta["source_event_seq"] >= 1
 
 
