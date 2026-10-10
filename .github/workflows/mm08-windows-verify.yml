@@ -1,0 +1,263 @@
+# .github/workflows/mm08-windows-verify.yml —— #830 / MM-08 AC6 的 **Windows 近似验证**
+#
+# 为什么存在
+#
+# #830 的 AC6 要求"三端各走一次真机"，其中 TUI 端点名 Windows Terminal。本项目的施工机是
+# Linux 云电脑（云端 Docker 沙箱也是 Linux）⇒ 本机无法执行 Windows 侧的路径与终端语义。
+# 仓库是 public，GitHub 托管的 `windows-latest` runner 免费，跑的是**同一份仓库代码的同一批
+# 用例**，因此可以把"本机跑不了的 Windows 分支"补上（与 #885 / #831 同一处置）。
+#
+# 诚实声明（不许被读成"Windows 真机走查通过"）
+#
+#   `windows-latest` runner 是 **headless** 的：**没有**真的 Windows Terminal GUI，也没有交互
+#   终端。本工作流用**置位 `WT_SESSION` 环境变量**的方式走**同一条代码路径**——上游事实：
+#   `@earendil-works/pi-tui@1.0.4` `dist/terminal-image.js:67-69` 在 `process.env.WT_SESSION`
+#   存在时自报 `{ images: null }`，于是 `tui/src/lib/image-view.ts::renderDraftImage` 走
+#   `imageFallback()` 文本占位分支。所以本工作流证明的是：
+#     "WT_SESSION 语义 ⇒ 文本占位、无假缩略图、无图片协议转义"，
+#   **不是**"Windows Terminal 里肉眼看过一次"。证据包必须按近似验证（same-code-path）登记。
+#
+# 它跑什么（对准 AC6 的 Windows 部分）
+#
+#   job `tui`（Node 22，与 `tui/package.json` 的 `engines: >=22` 一致）
+#     0. `npm run check`（= `tsc --noEmit`，`include` 覆盖 `src/**` 与 `test/**`）：win32 分支
+#        （`tui/src/lib/host.ts` 的 `%APPDATA%`/盘符/反斜杠路径）的**类型面**在这里取证——
+#        gate0 的 tsc 车道只扫 `web/`，且 `--experimental-transform-types` 只剥类型不做检查，
+#        所以 tui 的类型面此前没有车道覆盖（#830 双轴审查 P3-1）；
+#     1. WT_SESSION 断言脚本：`getCapabilities().images === null` ⇒ `renderDraftImage` 必须返回
+#        `kind: "text"`，且文本**不含**图片协议转义（`\x1b_G` / `\x1b]1337;File=` / `\x1bP`），
+#        并保留 Windows 原始路径（盘符 + 反斜杠 + >260 字符长路径）；OSC 8 链接按上游
+#        `imageFallback` 的真实条件断言（`hyperlinks && isAbsolute(filename)`：Windows 上有链接，
+#        POSIX 上无——断言与宿主判定保持一致，另有绝对路径的正向锚）；
+#     2. `tui/test/host.test.ts` 的 Windows 路径约定（`%APPDATA%\intelligence-agent`、
+#        反斜杠、盘符）——这两条断言**在 Linux 上必然红**（`path.join` 产出 `/`），
+#        所以只能在 Windows runner 上取证；
+#     3. 全量 `npm test`（含 AC6 占位/负向转义断言、AC7 缩略图断言）。
+#     顺序刻意是「最能定案的先跑」：后面一条红不会把前面的证据吃掉（每条都 tee 到
+#     `$RUNNER_TEMP\mm08-tui`，最后统一上传）。
+#   步骤与证据包 `docs/tickets/multimodal-2026-10-07/MM-08-verification-evidence.md` §9 互相引用，
+#   两处必须逐条一致（#830 审查 P3-1 即由二者漂移产生）。
+#
+#   job `cli`（Python 3.13 + uv，与 gate0.yml 的环境对齐）
+#     1. `scripts/verify_830_mm08.py --only ac6-cli`：真 CLI 子进程四态——附图成功 `exit 0`
+#        且 `user/message` 带引用、缺文件 / 非图片 / 扩展名不符 `exit 1` 且零残留；
+#     2. 仓库自带 `tests/test_cli_image.py`（16 例）——成功路径 + 各失败路径在 **Windows 的
+#        `tmp_path`（盘符 + 反斜杠路径）** 下重跑一遍。
+#
+# 触发与边界
+#
+#   `on:` 挂 **`workflow_dispatch`**（手动触发，任意分支/ref）+ **`push`**（仅本票特性
+#   分支 `omp/830-mm08-cross-client-verify`，且 `paths` 只盯本 workflow 文件自身）。
+#   加 `push` 的唯一目的是把 Windows 近似验证真跑一次并留证（GitHub 的
+#   `workflow_dispatch` 要求 workflow 文件在**默认分支**，本票不 push main ⇒ 只能靠 push
+#   本分支触发，见证据包 §9）。不挂 pull_request / schedule，不做常驻 CI、不设为 main
+#   必需状态检查。#830 是验证票，本 workflow 只是它的一次性取证工具。
+#   **CI 里不含任何密钥**；AC6 的"真实视觉模型回答"在本地经 lighthouse 线路实测
+#   （见证据包 AC6 节），本 workflow**不跑**它（runner 上无凭证）。
+#   第三方 action 一律**完整 SHA + 版本注释**（与仓库既有工作流一致，tag 可变、有投毒面；
+#   升级走 Dependabot）。
+name: mm08-windows-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      tui_only:
+        description: '只跑 TUI 三项（跳过 Python CLI 两项），用于快速自检'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - omp/830-mm08-cross-client-verify
+    paths:
+      # 只盯本 workflow 与它真正消费的两个脚本：改证据脚本要能在 Windows runner 上复跑，
+      # 但 docs-only 的后续提交不该再触发（省 runner 分钟）。
+      - .github/workflows/mm08-windows-verify.yml
+      - scripts/verify_830_mm08.py
+      - scripts/mm08_stub_server.py
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  tui:
+    name: TUI 占位与 Windows 路径语义（近似验证）
+    runs-on: windows-latest
+    steps:
+      - name: 检出（workflow_dispatch ⇒ 手动选中的分支/ref）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: 装 Node 22（与 tui/package.json engines 对齐）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: 环境记录
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ runner.temp }}\mm08-tui" | Out-Null
+          node -v
+          npm -v
+          Write-Output "platform=$([System.Environment]::OSVersion.VersionString)"
+          Write-Output "WT_SESSION(未置位的基线)=$env:WT_SESSION"
+          node -v | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\00-env.log"
+          Write-Output "platform=$([System.Environment]::OSVersion.VersionString)" |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\00-env.log" -Append
+
+      - name: 装 tui 依赖（npm ci）
+        working-directory: tui
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查（npm run check = tsc --noEmit，覆盖 src/** 与 test/**）
+        working-directory: tui
+        run: |
+          npm run check 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\01-tsc.log"
+          $code = $LASTEXITCODE
+          Write-Output "tsc --noEmit 退出码=$code"
+          exit $code
+
+      - name: AC6-W1 WT_SESSION ⇒ 文本占位（无假缩略图 / 无图片协议转义 / 长路径保留）
+        working-directory: tui
+        env:
+          # 置位即走上游 `dist/terminal-image.js` 的 WT_SESSION 分支（同一代码路径）
+          WT_SESSION: mm08-windows-verify
+        run: |
+          @'
+          import assert from "node:assert/strict";
+          import { isAbsolute } from "node:path";
+          import { getCapabilities } from "@earendil-works/pi-tui";
+          import { renderDraftImage } from "./src/lib/image-view.ts";
+
+          // 1x1 PNG；只用于让 getImageDimensions 有东西可读
+          const PNG_BASE64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+          const bytes = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
+
+          // 盘符 + 反斜杠 + >260 字符（长路径：不依赖 LongPathsEnabled，只断言字符串不被改写）
+          const longDir = "C:\\Users\\tester\\AppData\\Local\\Temp\\mm08\\" + "d".repeat(240);
+          const longPath = longDir + "\\shot.png";
+          assert.ok(longPath.length > 260, `期望长路径 >260，实际 ${longPath.length}`);
+
+          assert.ok(process.env.WT_SESSION, "WT_SESSION 必须置位：本断言的就是该环境变量驱动的分支");
+          const caps = getCapabilities();
+          console.log(`AC6-W1 capabilities.images=${JSON.stringify(caps.images)} hyperlinks=${String(caps.hyperlinks)}`);
+          assert.equal(caps.images, null, "WT_SESSION ⇒ pi-tui 必须自报 images: null（Windows Terminal 不支持 inline image）");
+
+          const render = renderDraftImage(
+            { bytes, mimeType: "image/png", name: "shot.png", path: longPath },
+            { fallbackColor: (text) => text },
+          );
+          assert.equal(render.kind, "text", `WT_SESSION 下必须是文本占位（出现缩略图 = 假缩略图），实际 kind=${render.kind}`);
+          const text = render.lines.join("\n");
+          console.log(`AC6-W1 placeholder=${JSON.stringify(text)}`);
+
+          for (const escape of ["\x1b_G", "\x1b]1337;File=", "\x1bP"]) {
+            assert.ok(!text.includes(escape), `占位文本泄漏图片协议转义 ${JSON.stringify(escape)}`);
+          }
+          assert.ok(text.includes("shot.png"), "占位必须给出文件名");
+          assert.ok(text.includes("C:\\Users\\tester"), `占位必须保留 Windows 原始路径（盘符+反斜杠），实际: ${JSON.stringify(text)}`);
+          assert.ok(text.includes("d".repeat(240)), "占位必须保留完整长路径内容（不截断；此断言与路径分隔符无关）");
+          // OSC 8 链接的条件是上游 `imageFallback` 的 `hyperlinks && isAbsolute(filename)`：
+          // 在 Windows runner 上 `C:\...` 是绝对路径 ⇒ 必须有链接；在 POSIX 上它不是 ⇒ 必无链接。
+          // 断言按**宿主的 isAbsolute 判定**取一致值，避免把平台差异误报成缺陷。
+          const linked = text.includes("\x1b]8;;file://");
+          assert.equal(
+            linked,
+            isAbsolute(longPath),
+            `OSC 8 链接必须与宿主 isAbsolute 判定一致（link=${linked} isAbsolute=${isAbsolute(longPath)} host=${process.platform}）`,
+          );
+          console.log(`AC6-W1 link=${linked} isAbsolute=${isAbsolute(longPath)} host=${process.platform}`);
+
+          // 同一能力位下的正向锚：**绝对**路径必须给出可打开的 OSC 8 链接（Windows 用 C:\…，
+          // POSIX 用 /tmp/…），保证"链接能力"本身也被锚住，而不是只锚"没链接"。
+          const absPath = isAbsolute(longPath) ? longPath : "/tmp/mm08/shot.png";
+          const absRender = renderDraftImage(
+            { bytes, mimeType: "image/png", name: "shot.png", path: absPath },
+            { fallbackColor: (text) => text },
+          );
+          const absText = absRender.lines.join("\n");
+          assert.ok(
+            absText.includes("\x1b]8;;file://"),
+            `绝对路径 + hyperlinks=true ⇒ 必须给出 OSC 8 file:// 链接，实际: ${JSON.stringify(absText)}`,
+          );
+          console.log(`AC6-W1 absLink=ok path=${absPath}`);
+          console.log("AC6-W1 OK");
+          '@ | Set-Content -Encoding utf8 wt-session-placeholder.check.ts
+          node --experimental-transform-types wt-session-placeholder.check.ts 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\02-wt-session.log"
+          $code = $LASTEXITCODE
+          Remove-Item -LiteralPath wt-session-placeholder.check.ts -Force
+          Write-Output "AC6-W1 退出码=$code"
+          exit $code
+
+      - name: AC6-W2 Windows 路径约定（%APPDATA%/反斜杠/盘符 —— Linux 上必红的用例）
+        working-directory: tui
+        run: |
+          node --experimental-transform-types --test --test-reporter=spec test/host.test.ts 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\03-windows-paths.log"
+          $code = $LASTEXITCODE
+          Write-Output "AC6-W2 host.test.ts 退出码=$code（Linux 上两条 Windows 路径断言必红，Windows 上必须 0）"
+          exit $code
+
+      - name: TUI 全量用例（含 AC6 占位与负向转义断言）
+        working-directory: tui
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-tui\04-tui-full.log"
+          $code = $LASTEXITCODE
+          Write-Output "npm test 退出码=$code"
+          exit $code
+
+      - name: 上传 TUI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-windows-tui
+          path: ${{ runner.temp }}/mm08-tui
+          if-no-files-found: warn
+
+  cli:
+    name: CLI --image Windows 冒烟（真 CLI 子进程）
+    runs-on: windows-latest
+    if: ${{ !inputs.tui_only }}
+    steps:
+      - name: 检出（workflow_dispatch ⇒ 手动选中的分支/ref）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: 装 uv（与 gate0.yml 同版本 pin）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: 同步依赖（uv.lock 锁文件）
+        run: |
+          uv python install 3.13
+          uv sync --locked --python 3.13
+          uv run python -V
+
+      - name: AC6-W3 真 CLI 子进程四态（附图成功 exit 0 / 缺文件·非图片·扩展名不符 exit 1）
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          uv run python scripts/verify_830_mm08.py --only ac6-cli --work "${{ runner.temp }}\mm08-cli" 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-cli-verify.log"
+          $code = $LASTEXITCODE
+          Write-Output "AC6-W3 verifier 退出码=$code（0 = AC6-CLI PASS）"
+          exit $code
+
+      - name: AC6-W3 仓库自带 CLI 用例在 Windows 下重跑（16 例；tmp_path = 盘符+反斜杠）
+        run: |
+          uv run pytest tests/test_cli_image.py -q -p no:cacheprovider 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-cli-pytest.log"
+          $code = $LASTEXITCODE
+          Write-Output "pytest tests/test_cli_image.py 退出码=$code"
+          exit $code
+
+      - name: 上传 CLI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-windows-cli
+          path: ${{ runner.temp }}/mm08-cli*
+          if-no-files-found: warn
