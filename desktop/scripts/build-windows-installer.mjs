@@ -946,6 +946,30 @@ export function validateLongPathPrefixes(source, filename) {
  *     from variables, `${FileExists}`, arithmetic or an unlisted condition is
  *     not analyzed at all — e.g. `${If} $0 != ""` … with `$0` known to the
  *     installer as empty. Catching that needs a evaluator, not a text scan;
+ *   - the arming window (#919 Q2/Q3) is read as statements: the candidate is
+ *     the last `StrCpy $iaDeleteCandidate <source>` above the prepare call, the
+ *     flag the last `StrCpy $iaDeleteShapeCheck "[01]"`, both in any quote form
+ *     or bare. A value written in another instruction or with an extra operand
+ *     (`Pop`, `IntOp`, `ReadRegStr`, a maxlen `StrCpy $iaDeleteShapeCheck "1"
+ *     2`) is not readable as the value it sets, so the guard counts it as "not
+ *     armed" and over-reports the maxlen form (disposition review R5). Any
+ *     other statement in the window that uses either variable outside strings,
+ *     a `${define}` use whose body touches one of them, and an `!insertmacro` of
+ *     a macro that does (or that this text does not define) are reported; the
+ *     substitution set is this text's `!macro` bodies and its single-line
+ *     `!define` bodies: a `${NAME}` whose define lives in an `!include`d file
+ *     resolves to nothing here and is invisible in the window, and a `!define`
+ *     body counts as its one line;
+ *   - the declined-sweep branch must end in `Goto`/`Return`/`Abort`/`Quit`: its
+ *     last statement is tested as text, so an `${If}`/`${Else}` whose arms each
+ *     jump out still reads as unterminated through the closing `${EndIf}` and is
+ *     reported (fail-closed, disposition review R6);
+ *   - the rollback's restore-failure window is the `${Errors}` read after the
+ *     last `Rename` and the branch it closes. A raw `IfErrors 0 label` jump has
+ *     neither a name nor a closer the scan reads, so a rollback using that form
+ *     is reported as "not measurable" even where its branch does record
+ *     (fail-closed, disposition review R7); LogicLib's `${If} ${Errors}` is the
+ *     measurable form;
  *   - a delete reached through `!include` is invisible here, and so is a macro
  *     `!insertmacro`d from an `!include`d file (the include boundary, round-5
  *     item 4): only the named installer scripts are scanned.
@@ -1168,8 +1192,12 @@ function restoreFailureWindow(lines, trace, { start, end }, onPath, isRead) {
   // #919 review (F2): the read must name its own end. The raw `IfErrors` form
   // has no `${EndIf}` to close it, and falling back to the site's end made the
   // window unbounded — the refused branch's record then satisfied the rule the
-  // window exists for (measured). An unreadable window is reported by the
-  // caller, like a read the guard cannot name.
+  // window exists for (measured). A window this function cannot read comes back
+  // as `null`, and the caller gives that its own reason — "the read is not in a
+  // form this scan can measure" — instead of reporting a missing record: a raw
+  // jump whose branch does record would otherwise be called "does not record"
+  // (the disposition review's N2/R7 measured exactly that; the direction is
+  // fail-closed, the reason was not true).
   const close = trace.closeOf.get(read)
   if (close === undefined) return null
   const divide = trace.dividers.find((divider) => divider.opener === read)?.line ?? -1
@@ -1330,25 +1358,33 @@ export function unguardedBackupDelete(source, options = {}) {
       // item 3 — so this gate keys on the candidate, not on every non-sweep
       // site.
       const armsBackupName = (() => {
-        // The last copy into $iaDeleteCandidate above the prepare call decides
-        // what the target is built from (the Q2 reading, applied to the
-        // source). #919 review (F1): NSIS strings take all three quote forms
-        // and the bare variable is the same copy (measured on 3.0.4.1), so the
-        // earlier double-quote-only match read three legal copies as "no
-        // candidate". The rollback's own partial install is the one source that
-        // skips the requirement (#904 item 3); everything else — the backup
-        // spelling, a register, a joined name, a copy the guard cannot read —
-        // is held to it (fail-closed).
-        let source
+        // Every copy into $iaDeleteCandidate above the prepare call is what the
+        // target can be built from: the Q2 reading, applied to the source. #919
+        // review (F1): NSIS strings take all three quote forms and the bare
+        // variable is the same copy (measured on 3.0.4.1), so the earlier
+        // double-quote-only match read three legal copies as "no candidate".
+        // The rollback's own partial install is the one source that skips the
+        // requirement (#904 item 3) — and only when it is the single source the
+        // window reads: a copy the guard cannot read, or two different sources
+        // (different branches can each write the candidate), leave the name the
+        // delete runs with unreadable, so the site is held to the arming
+        // (fail-closed). Reading only the textually last copy was the
+        // disposition review's N1: a branch-divergent layout hid the backup
+        // spelling the presence rule had caught.
+        const sources = []
         for (let j = blockStart; j < prepareIndex; j += 1) {
           if (!onDeletePath(j)) continue
           if (!/^\s*StrCpy\s+\$iaDeleteCandidate\b/i.test(lines[j])) continue
           const copy =
             /^\s*StrCpy\s+\$iaDeleteCandidate\s+(?:(['"`])(\S+)\1|(\S+))\s*$/i.exec(lines[j])
-          source = copy === null ? null : copy[2] ?? copy[3]
+          sources.push(copy === null ? null : copy[2] ?? copy[3])
         }
-        if (source === undefined) return false
-        return !/^\$iaFinalDirectory$/i.test(source ?? '')
+        if (sources.length === 0) return false
+        const readable = sources
+          .filter((source) => source !== null)
+          .map((source) => source.toLowerCase())
+        if (readable.length !== sources.length || new Set(readable).size > 1) return true
+        return !/^\$iaFinalDirectory$/i.test(readable[0])
       })()
       // #919 Q2: the flag is read when iaPrepareDelete runs, so the LAST
       // assignment above the call is the one that decides. The window used to
@@ -1368,45 +1404,101 @@ export function unguardedBackupDelete(source, options = {}) {
         arming.push({ index: j, value: assignment === null ? null : (assignment[2] ?? assignment[3]) })
       }
       // #905's ruling is to fail closed on macro insertion, and the arming
-      // window is where it matters most: an `!insertmacro` on the delete's path
-      // expands statements this text does not show, so a body that writes the
-      // candidate or the flag leaves the delete running with a state no line
-      // above reads (measured: a disarm inserted between the arming and the
-      // prepare call passed the whole guard and suite — #919 review F1, A4).
-      // The lookup is name-keyed and resolves nested `!insertmacro`s; a macro
-      // this text does not define is the include boundary, which the guard does
-      // not follow (round-5 item 4) and so counts as writing them.
-      const macroBodies = new Map()
+      // window is where it matters most: an `!insertmacro`, a `${define}` or an
+      // `!include` on the delete's path expands statements this text does not
+      // show, so a body that touches the candidate or the flag leaves the delete
+      // running with a state no line above reads (measured: a disarm inserted
+      // between the arming and the prepare call, and the same disarm carried by
+      // a define, passed the whole guard and suite — #919 review F1/A4 and the
+      // disposition review's R2). The map holds the `!macro` bodies of this text
+      // and its single-line `!define` bodies; the lookup is name-keyed and
+      // resolves nested tokens. A macro this text does not define counts as
+      // touching the variables (the include boundary, which the guard does not
+      // follow — round-5 item 4); a `${NAME}` this text does not define is a
+      // LogicLib/FileFunc helper and is not resolved (a define from an
+      // `!include`d file is the same boundary); an `!include` is refused
+      // outright.
+      const substitutions = new Map()
       for (const range of macroRanges) {
         const name = /^\s*!macro\s+(\S+)/i.exec(lines[range.start])?.[1]
-        if (name !== undefined) macroBodies.set(name.toLowerCase(), lines.slice(range.start + 1, range.end))
+        if (name !== undefined) substitutions.set(name.toLowerCase(), lines.slice(range.start + 1, range.end))
       }
-      const writesDeleteVars = (name, seen = new Set()) => {
+      for (const line of lines) {
+        const define = /^\s*!define\s+(\S+)\s+(.+)$/i.exec(line)
+        if (define === null) continue
+        // The value is taken verbatim by NSIS, quotes included, and `${NAME}`
+        // expands it where it is used. A body written as one quoted string that
+        // holds a statement (`!define IA_RUN "!insertmacro iaDisarm"`) is read
+        // with its outer quotes stripped, or the string rule would hide the
+        // statement it carries (#919 review R2, X1/X4: both spellings compiled
+        // and ran the disarm on makensis 3.0.4.1).
+        const value = define[2].trim()
+        const unquoted = /^(['"`])([\s\S]*)\1$/.exec(value)?.[2] ?? value
+        substitutions.set(define[1].toLowerCase(), [unquoted])
+      }
+      const touchesDeleteVars = (name, seen = new Set()) => {
         if (seen.has(name)) return false
         seen.add(name)
-        const body = macroBodies.get(name)
+        const body = substitutions.get(name)
         if (body === undefined) return true
         return body.some((line) => {
-          if (/\$iaDeleteCandidate\b|\$iaDeleteShapeCheck\b/i.test(line)) return true
-          const nested = INSERT_MACRO.exec(line)?.[1]
-          return nested !== undefined && writesDeleteVars(nested.toLowerCase(), seen)
+          const code = outsideStrings(line)
+          if (/\$iaDeleteCandidate\b|\$iaDeleteShapeCheck\b/i.test(code)) return true
+          const insert = INSERT_MACRO.exec(code)?.[1]
+          if (insert !== undefined && touchesDeleteVars(insert.toLowerCase(), seen)) return true
+          return (code.match(/\$\{\w+\}/g) ?? []).some((token) => {
+            const nested = token.slice(2, -1).toLowerCase()
+            return substitutions.has(nested) && touchesDeleteVars(nested, seen)
+          })
         })
       }
-      const armedByInsert = []
+      // The window's own statements are read as the two tracked copies, and a
+      // copy whose value the guard cannot read is carried as such (F1 above).
+      // Anything else that uses either variable is a state the guard cannot
+      // follow: `Pop`/`IntOp`/`ReadRegStr`/`StrLen` can write them, a status
+      // compare reads them, and the insertion/define/include forms expand text
+      // from elsewhere. All of it is reported (fail-closed; the disposition
+      // review's R1 measured the instruction forms green at both the
+      // disposition and its base).
+      const windowHazards = []
       for (let j = blockStart; j < prepareIndex; j += 1) {
         if (!onDeletePath(j)) continue
-        const insert = INSERT_MACRO.exec(lines[j])
-        if (insert !== null && writesDeleteVars(insert[1].toLowerCase())) {
-          armedByInsert.push({ index: j, name: insert[1] })
+        const code = outsideStrings(lines[j])
+        const insert = INSERT_MACRO.exec(code)
+        if (insert !== null && touchesDeleteVars(insert[1].toLowerCase())) {
+          windowHazards.push(
+            `!insertmacro ${insert[1]} at line ${j + 1} expands inside the arming window and touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)`,
+          )
+          continue
+        }
+        if (/^\s*!include\b/i.test(code)) {
+          windowHazards.push(
+            `!include at line ${j + 1} sits in the arming window — the included text is not read here (round-5 item 4) and can write the candidate or the flag (fail-closed)`,
+          )
+          continue
+        }
+        const defineUse = (code.match(/\$\{\w+\}/g) ?? []).find((token) => {
+          const name = token.slice(2, -1).toLowerCase()
+          return substitutions.has(name) && touchesDeleteVars(name)
+        })
+        if (defineUse !== undefined) {
+          windowHazards.push(
+            `${defineUse} at line ${j + 1} expands to a define that touches $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)`,
+          )
+          continue
+        }
+        if (
+          /\$iaDeleteCandidate\b|\$iaDeleteShapeCheck\b/i.test(code) &&
+          !/^\s*StrCpy\s+\$iaDeleteCandidate\b/i.test(code) &&
+          !/^\s*StrCpy\s+\$iaDeleteShapeCheck\b/i.test(code)
+        ) {
+          windowHazards.push(
+            `a statement at line ${j + 1} uses $iaDeleteCandidate or $iaDeleteShapeCheck outside the two copies the guard reads (StrCpy $iaDeleteCandidate <source>, StrCpy $iaDeleteShapeCheck "[01]") — the state the delete runs with cannot be read from this window (fail-closed)`,
+          )
         }
       }
-      const hiddenInsert = armedByInsert[0]
-      if (hiddenInsert !== undefined) {
-        problems.push({
-          line: i + 1,
-          what: `!insertmacro ${hiddenInsert.name} at line ${hiddenInsert.index + 1} expands inside the arming window and writes $iaDeleteCandidate or $iaDeleteShapeCheck — the state the delete runs with is not in this window's text (fail-closed)`,
-        })
-      }
+      const windowHazard = windowHazards[0]
+      if (windowHazard !== undefined) problems.push({ line: i + 1, what: windowHazard })
       const lastArmed = arming[arming.length - 1]
       const mustArm = policy === 'sweep' || armsBackupName
       // #919 Q3: the arming only counts when it runs on the path the prepare
@@ -1423,7 +1515,7 @@ export function unguardedBackupDelete(source, options = {}) {
       if (mustArm && !armed) {
         problems.push({
           line: i + 1,
-          what: `${policy === 'sweep' ? 'the sweep' : 'the delete of a $iaBackupDirectory candidate'} does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built`,
+          what: `${policy === 'sweep' ? 'the sweep' : 'the delete of a $iaBackupDirectory candidate'} has no readable StrCpy $iaDeleteShapeCheck "1" above its prepare call — an arming with an extra operand or an unreadable source counts as not armed (fail-closed), and iaPrepareDelete then skips the name check and deletes whatever name the caller built`,
         })
       }
     }
@@ -1538,7 +1630,10 @@ export function unguardedBackupDelete(source, options = {}) {
       if (!recorded) {
         problems.push({
           line: i + 1,
-          what: 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
+          what:
+            failure === null
+              ? 'the rollback site\'s restore-failure read is not in a form this scan can measure (a raw IfErrors/StrCmp jump leaves no readable branch end), so the record that path has to carry cannot be verified here (fail-closed)'
+              : 'the rollback site does not record a leftover on the restore-failure path (no IaLeftoverDir write of $iaBackupDirectory under the post-Rename ${Errors} read)',
         })
       }
     }
@@ -1585,10 +1680,13 @@ export function unguardedBackupDelete(source, options = {}) {
         // The prompt's branch table is `<action> <label>` pairs after the
         // `/SD <default>` marker: `MessageBox … /SD IDOK IDOK iaSweepDelete
         // IDCANCEL iaSweepDeclined`. The first action token after `/SD` is the
-        // silent default, not a branch — `/IDOK\s+(\S+)/` paired that marker
-        // with the next action keyword and read the IDOK target as the literal
-        // "IDOK" (measured, #919 review). String contents are blanked before
-        // tokenizing, so the prompt text cannot contribute tokens.
+        // silent default, not a branch — the old `/IDCANCEL\s+(\S+)/` scan read
+        // that marker as the branch keyword and paired it with the next action
+        // keyword instead of a label, so a legal `/SD IDCANCEL` default was
+        // reported as a declined branch that does not set the exit code
+        // (measured, #919 review N5: false positive pre-fix, this parser
+        // green). String contents are blanked before tokenizing, so the prompt
+        // text cannot contribute tokens.
         const tokens = outsideStrings(block[promptOffset]).trim().split(/\s+/)
         const ACTION = /^(IDOK|IDCANCEL|IDABORT|IDRETRY|IDIGNORE|IDYES|IDNO|IDCLOSE)$/i
         const branchLabels = new Map()
@@ -1626,34 +1724,58 @@ export function unguardedBackupDelete(source, options = {}) {
             })
           }
           // #919 review (F3): setting the exit code is not enough — the branch
-          // has to keep. Control that lands above the delete statement runs
-          // into it again (the delete pass is the region the prompt's IDOK
-          // names), so a `Goto` to a label declared above the delete, a
-          // fall-through to the next label when that label sits above it, or
-          // the delete statement itself inside the branch span is reported.
-          // A jump that lands between such a label and the delete would be
-          // reported too: the declined contract is "keep only", so the
-          // fail-closed direction is the right one.
+          // has to keep. The delete pass is the labelled loop the delete sits
+          // in: a `Goto` that lands on a label above the delete runs into it
+          // again, and so does one that lands on a label inside the loop below
+          // the `RMDir` (the disposition review's R3 measured `Goto iaSweepNext`
+          // re-entering the loop tail with the enumeration handle already
+          // closed). The loop's span is the label a `Goto` below the delete
+          // jumps back to, up to that `Goto`; a jump to a label outside it, or
+          // to a label this block does not declare, is the kept path. The branch
+          // must also end in a jump out: an unterminated branch, or one whose
+          // last statement the guard cannot read (an `${EndIf}` over arms that
+          // each jump), is reported — the declined contract is "keep only", so
+          // the fail-closed direction is the right one.
           if (labelOffset !== -1) {
             const body = block.slice(labelOffset + 1, nextLabelOffset === -1 ? block.length : nextLabelOffset)
+            const labelLine = (line) =>
+              /^\s*([A-Za-z0-9_.]+):\s*$/.exec(stripNsisComments(line))?.[1]?.toLowerCase()
+            const labelOffsets = new Map()
+            for (let k = 0; k < block.length; k += 1) {
+              const name = labelLine(block[k])
+              if (name !== undefined && !labelOffsets.has(name)) labelOffsets.set(name, k)
+            }
             const deleteOffset = i - blockStart
-            const labelOffsetOf = (target) => block.findIndex((line) => declaredTarget(target).test(line))
+            const loopHeads = []
+            const loopJumps = []
+            for (let k = deleteOffset; k < block.length; k += 1) {
+              const jump = /^\s*Goto\s+(\S+)\s*$/i.exec(outsideStrings(block[k]))
+              if (jump === null) continue
+              const target = labelOffsets.get(jump[1].toLowerCase())
+              if (target !== undefined && target <= deleteOffset) {
+                loopHeads.push(target)
+                loopJumps.push(k)
+              }
+            }
+            const passStart = loopHeads.length === 0 ? deleteOffset : Math.min(...loopHeads)
+            const passEnd = loopJumps.length === 0 ? deleteOffset : Math.max(...loopJumps)
+            const landsInDeletePass = (landing) =>
+              landing !== -1 && (landing <= deleteOffset || (landing >= passStart && landing <= passEnd))
             const jumpsIntoDelete = body.some((line) => {
               const jump = /^\s*Goto\s+(\S+)\s*$/i.exec(outsideStrings(line))
               if (jump === null) return false
-              const landing = labelOffsetOf(jump[1])
-              return landing !== -1 && landing < deleteOffset
+              return landsInDeletePass(labelOffsets.get(jump[1].toLowerCase()) ?? -1)
             })
             const lastMeaningful = body.filter((line) => stripNsisComments(line).trim() !== '').pop()
             const fallsThrough =
               nextLabelOffset !== -1 &&
-              nextLabelOffset < deleteOffset &&
+              landsInDeletePass(nextLabelOffset) &&
               (lastMeaningful === undefined || !/^\s*(Goto|Return|Abort|Quit)\b/i.test(outsideStrings(lastMeaningful)))
             const coversDelete = body.some((line) => deleteLine.test(line))
             if (jumpsIntoDelete || fallsThrough || coversDelete) {
               problems.push({
                 line: blockStart + labelOffset + 1,
-                what: 'the declined sweep branch can still reach the delete pass — a declined sweep must only keep',
+                what: 'the declined sweep branch can reach the delete pass, or does not end in a jump out of it — a declined sweep must only keep',
               })
             }
           }

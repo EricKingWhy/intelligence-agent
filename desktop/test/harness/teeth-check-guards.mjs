@@ -397,22 +397,53 @@ const mutations = {
     '        if (assignment !== null) arming.push({ index: j, value: assignment[2] ?? assignment[3] })',
   ),
   'non-backup candidate sources arms nothing again (#919 review F1)': swap(
-    "        return !/^\\$iaFinalDirectory$/i.test(source ?? '')",
-    "        return /^\\$iaBackupDirectory$/i.test(source ?? '')",
+    "        return !/^\\$iaFinalDirectory$/i.test(readable[0])",
+    "        return /^\\$iaBackupDirectory$/i.test(readable[0])",
   ),
-  // F1/A4: an `!insertmacro` in the arming window is a write the guard cannot
-  // read, so the rule refuses wherever the inserted body touches the candidate
-  // or the flag. A future edit that drops that refusal reopens the disarm the
-  // review measured green.
+  // F1/A4 + R1/R2: the arming window is a text the guard has to refuse wherever
+  // it cannot read the state — an `!insertmacro`, a `${define}` expansion, an
+  // `!include`, or any other statement that uses either variable. One switch per
+  // reading, so the fixtures that pin each rule die on their own.
   'macro insertions in the arming window ignored again (#919 review F1/A4)': swap(
-    '      if (hiddenInsert !== undefined) {',
-    '      if (false) {',
+    '      const windowHazard = windowHazards[0]\n      if (windowHazard !== undefined) problems.push({ line: i + 1, what: windowHazard })',
+    '      const windowHazard = windowHazards[0]\n      if (false) problems.push({ line: i + 1, what: windowHazard })',
+  ),
+  'insertion bodies no longer read for the delete state (#919 review F1/A4)': swap(
+    '        if (insert !== null && touchesDeleteVars(insert[1].toLowerCase())) {',
+    '        if (insert !== null && false) {',
+  ),
+  'define expansions no longer resolved (#919 disposition review R2)': swap(
+    '          return substitutions.has(name) && touchesDeleteVars(name)',
+    '          return false',
+  ),
+  'an include in the arming window no longer refused (#919 disposition review R2)': swap(
+    '        if (/^\\s*!include\\b/i.test(code)) {',
+    '        if (false) {',
+  ),
+  'any other statement using the delete state ignored again (#919 disposition review R1)': swap(
+    '          /\\$iaDeleteCandidate\\b|\\$iaDeleteShapeCheck\\b/i.test(code) &&',
+    '          false &&',
+  ),
+  // N1: the candidate source is the whole window. Reading only its last copy
+  // let a branch-divergent layout hide the backup copy behind the exempt
+  // `$iaFinalDirectory` one (the Q1 bypass the widened spellings kept closed).
+  'candidate source read as the last copy again (#919 disposition review N1)': swap(
+    "        if (readable.length !== sources.length || new Set(readable).size > 1) return true\n        return !/^\\$iaFinalDirectory$/i.test(readable[0])",
+    "        return !/^\\$iaFinalDirectory$/i.test(sources[sources.length - 1] ?? '')",
   ),
   // F3: the declined branch may not reach the delete pass — a `Goto` into the
   // prompt's IDOK target, or a fall-through into it.
   'declined branch may reach the delete pass again (#919 review F3)': swap(
     '            if (jumpsIntoDelete || fallsThrough || coversDelete) {',
     '            if (false) {',
+  ),
+  // R3: the delete pass is the labelled loop the delete sits in, so a landing
+  // on a label between the `RMDir` and the loop's back-jump is in it. The
+  // one-sided reading (above the delete only) let `Goto iaSweepKept` and
+  // `Goto iaSweepNext` re-enter the loop tail with the handle closed.
+  'landing in the delete loop tail no longer counts (#919 disposition review R3)': swap(
+    '            const landsInDeletePass = (landing) =>\n              landing !== -1 && (landing <= deleteOffset || (landing >= passStart && landing <= passEnd))',
+    '            const landsInDeletePass = (landing) => landing !== -1 && landing <= deleteOffset',
   ),
   // F2: an unclosed read (the raw `IfErrors` form has no `${EndIf}`) must make
   // the window unreadable and report, not fall back to the site's end.
