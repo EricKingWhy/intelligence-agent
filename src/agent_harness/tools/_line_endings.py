@@ -76,11 +76,6 @@ def _canonical(text: str) -> str:
 
     适用场景：诊断路径（`line_ending_mismatch` / `not_found_hint`）的折平判据专用。
     判据问的是「两侧折成同一行尾后能不能命中」，裸 CR 也是行尾差异，必须一起折。
-
-    为什么匹配路径不用它：匹配路径归一化后还要经 `_from_lf` 转回主导行尾写回；若用
-    三类全折，会把 old_string / new_string 里的裸 CR 静默改写成主导行尾，改变用户可见
-    行为。故匹配路径用 `_crlf_to_lf`。两个函数语义不同、名字不同、适用场景不同，见
-    `_crlf_to_lf` 的 docstring。
     """
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -95,11 +90,11 @@ def _crlf_to_lf(text: str) -> str:
     `_from_lf` 配对——先把文件与 old/new 归一化成 LF 匹配，再把结果经 `_from_lf`
     转回该文件的主导行尾写回。
 
-    为什么裸 CR 不折：归一化路径只在 `dominant_newline(content)` 非 None（文件行尾纯
-    CRLF 或纯 LF）时启用，此时文件侧没有裸 CR；old_string 含裸 CR 时归一化匹配自然
-    落空（count=0），诊断路径（`not_found_hint`）会另行给出可执行的「改写行尾后重试」
-    提示。自动改写保守、诊断提示宽松，是 #851 有意确立的分工，不得把裸 CR 的折叠塞进
-    本函数。
+    为什么裸 CR 不折：本函数与 `_from_lf` 配对使用，往返必须逐字节无损；`_from_lf`
+    会把每个 `\\n` 都转成主导行尾——若归一化时把裸 CR 也折成 `\\n`，转回时它会被
+    静默改写成主导行尾，文件 / old / new 里原有的裸 CR 就被改掉了。所以裸 CR 必须
+    原样保留、不参与归一化变换。诊断路径（`not_found_hint`）对裸 CR 场景另行给出
+    可执行的「改写行尾后重试」提示，两者分工见模块头 docstring。
     """
     return text.replace("\r\n", "\n")
 

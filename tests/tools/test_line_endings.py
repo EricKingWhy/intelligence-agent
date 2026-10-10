@@ -15,9 +15,6 @@
 
 矩阵部分把「窄归一化命中（T1）」与「诊断折平对不上则窄必不命中（T2）」两条
 不变式在 文件行尾模式 × old 模板 × old 行尾模式 × replace_all 上全量验证。
-
-注：`_crlf_to_lf` 在收口实现落地前尚不存在，本文件引用它现在会红，这是预期的
-TDD 红。
 """
 
 from __future__ import annotations
@@ -27,6 +24,8 @@ import io
 from agent_harness.tools._line_endings import (
     _canonical,
     _crlf_to_lf,
+    line_ending_mismatch,
+    not_found_hint,
     replace_with_line_ending_tolerance,
 )
 
@@ -163,6 +162,24 @@ def test_matrix_normalization_consistency():
                 new_string = _render_old(["REPLACED"], old_mode)
                 for replace_all in (False, True):
                     ctx = (file_mode, template, old_mode, replace_all)
+                    mismatch = line_ending_mismatch(content, old_string)
+                    hint = not_found_hint(content, old_string)
+                    # 诊断路径前置契约可执行化：报出行尾差异 ⟹ 折平判据必通过。
+                    if mismatch is not None:
+                        assert _canonical(old_string) in _canonical(content), (
+                            f"mismatch precondition violated {ctx!r}: "
+                            "line_ending_mismatch reported but canonical fold missed"
+                        )
+                    # 提示可执行化：给出「改写行尾后重试」⟹ 字节不命中且折平命中。
+                    if hint != "":
+                        assert content.count(old_string) == 0, (
+                            f"hint violated {ctx!r}: not_found_hint emitted but "
+                            "byte-exact match exists"
+                        )
+                        assert _canonical(old_string) in _canonical(content), (
+                            f"hint violated {ctx!r}: not_found_hint emitted but "
+                            "canonical fold missed"
+                        )
                     exact = content.count(old_string)
                     count, _ = replace_with_line_ending_tolerance(
                         content, old_string, new_string, replace_all=replace_all
