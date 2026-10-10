@@ -388,6 +388,85 @@ class TestEditNotFoundHint:
         assert sandbox.read_text("f.py") == content
 
     @pytest.mark.asyncio
+    async def test_old_kind_absent_from_file_gets_both_paths_not_write_only(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 三轮修回 P2：old 含文件里没有的行尾种类 ⇒ **不是**只有 write 一条路。
+
+        不靠文案自证，先钉死事实：混行尾文件 `a\\r\\nb\\nc\\n` 里的 old
+        `a\\rb\\n`（含文件里不存在的裸 CR）折平后命中；把 old 的裸 CR 改写成
+        该段的 CRLF 后 `count()==1`，改写重试真走得通。旧文案「请改用 write
+        整文件重写」是唯一路径断言，封死了这条可行路（与上轮 P1 同缺陷类）。
+        """
+        content = "a\r\nb\nc\n"
+        sandbox.write_text("f.py", content)
+        assert content.count("a\r\nb\n") == 1
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "a\rb\n", "new_string": "a\rb\nX"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "行尾" in msg
+        assert "改写" in msg and "重试" in msg
+        assert "改用 write 整文件重写" in msg
+        assert "请改用" not in msg
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
+    async def test_mixed_file_old_kind_only_at_tail_warns_rewrite_may_miss(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 三轮修回 P4：old 的行尾种类在文件里只出现在末端 ⇒ 改写后仍可能不命中。
+
+        文件 `a = 1\\r\\nb = 2\\nc = 3\\r\\n` 的行尾是 CRLF+LF 混用，但 CRLF 只
+        出现在**末尾**那一处；old `a = 1\\r\\nb = 2\\r\\n` 自行带 CRLF，照
+        「改写成对应段落的行尾」做仍 `count()==0`（事实先行断言）。提示须点出
+        这种末端情形，不扩大语义。
+        """
+        content = "a = 1\r\nb = 2\nc = 3\r\n"
+        old = "a = 1\r\nb = 2\r\n"
+        sandbox.write_text("f.py", content)
+        assert content.count(old) == 0
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": old, "new_string": "a = 9\r\nb = 2\r\n"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "对应段落的行尾" in msg
+        assert "末端" in msg
+        assert "改用 write 整文件重写" in msg
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
+    async def test_plain_context_typo_on_lf_file_stays_clean(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """判别力（LF 文件侧，#851 三轮修回 P4 补回）：LF 文件里的纯上下文抄错不提行尾。
+
+        `9b6f6a25` 删近重复用例时把 edit 侧这条判别力删没了（只剩 CRLF 版）；
+        它与 CRLF 版走 `line_ending_mismatch` 的不同早退路径
+        （`canonical_old not in canonical_content`），补回。
+        """
+        sandbox.write_text("f.py", "a = 1\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "z = 99\n", "new_string": "z = 100\n"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "未找到匹配的字符串" in msg
+        assert "行尾" not in msg
+        assert sandbox.read_text("f.py") == "a = 1\nb = 2\n"
+
+    @pytest.mark.asyncio
     async def test_same_line_ending_kinds_different_positions_still_hints(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
@@ -412,6 +491,7 @@ class TestEditNotFoundHint:
         msg = result.result.message
         assert "行尾" in msg
         assert "种类相同" in msg
+        assert "处数可能不同" in msg
         assert "改用 write 整文件重写" in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
 

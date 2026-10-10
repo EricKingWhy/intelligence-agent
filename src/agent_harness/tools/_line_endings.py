@@ -14,6 +14,10 @@
 第 2 步安全：行尾单一的文件整体 CRLF → LF → CRLF 往返逐字节无损，所以只有
 `old_string` 命中的那一段会变，不会产生整文件 diff。混行尾文件不做归一化——
 宁可报错，也不替用户改写整文件行尾。
+
+例外（#851 三轮修回）：`not_found_hint` 在混行尾文件上可以建议「把 old_string
+改写成对应段落的行尾后重试」。那次重试走的是**字节精确匹配**（`count(old)`），
+不是上面的归一化路径，两者不矛盾——归一化的不启用只限制自动改写，不限制提示。
 """
 
 from __future__ import annotations
@@ -105,8 +109,12 @@ def not_found_hint(content: str, old_string: str) -> str:
     改写成文件中**对应段落**的行尾后重试，或改用 write 整文件重写。这里**不得**
     断言「无法靠改写 old_string 的行尾命中」—— 那是假的（2026-10-10 复审反例：
     混行尾文件里 old 改写成对应段落的行尾后 `count()==1`），绝对断言会让模型
-    放弃一条本来走得通的路。old 含有文件中没有的行尾种类（不是子集）时，
-    「按该文件的行尾改写」才真的不可执行，此时只给 write 一条路。
+    放弃一条本来走得通的路。
+
+    old 含有文件中没有的行尾种类时同样给两条路（#851 三轮修回 P2）：把那个
+    文件中不存在的记号改写成对应段落的行尾后重试是**可能**命中的（反例：
+    文件 `"a\\r\\nb\\nc\\n"` + old `"a\\rb\\n"`，把裸 CR 改成 CRLF 后 `count()==1`），
+    所以**不得**再用「请改用 write」把它封成唯一路径。
 
     两侧行尾种类相同时（各段落位置不同）也给谨慎提示，不吞掉（#851 二轮修回 P3）。
     """
@@ -118,8 +126,8 @@ def not_found_hint(content: str, old_string: str) -> str:
     old_newline = " / ".join(old_kinds)
     if set(file_kinds) == set(old_kinds):
         return (
-            f"该文件与 old_string 的行尾种类相同（{file_newline}），"
-            f"但各段落位置可能不同；建议核对对应段落的行尾，"
+            f"该文件与 old_string 的行尾种类相同（{file_newline}，集合相等，"
+            f"但各段落的位置与处数可能不同）；建议核对对应段落的行尾，"
             f"或改用 write 整文件重写"
             f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
         )
@@ -128,6 +136,7 @@ def not_found_hint(content: str, old_string: str) -> str:
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}。"
             f"可尝试把 old_string 改写成文件中对应段落的行尾后重试；"
+            f"若该行尾种类在文件中只出现在文件末端，改写后仍可能不命中；"
             f"若仍不命中，改用 write 整文件重写"
             f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
         )
@@ -135,12 +144,15 @@ def not_found_hint(content: str, old_string: str) -> str:
         return (
             f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
             f"old_string 的行尾是 {old_newline}，含有该文件里不存在的行尾种类。"
-            f"请改用 write 整文件重写（必须照抄原文件逐字节行尾，勿统一成 LF）。"
+            f"可尝试把 old_string 中文件里没有的行尾种类改写成文件中对应段落"
+            f"的行尾后重试；若仍不命中，改用 write 整文件重写"
+            f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
         )
     return (
         f"该文件的行尾是 {file_newline}，old_string 的是 {old_newline}，"
         f"两者只在行尾上不同。请按该文件的行尾改写 old_string 后重试，"
-        f"或改用 write 整文件重写。"
+        f"或改用 write 整文件重写"
+        f"（必须照抄原文件逐字节行尾，勿统一成 LF）。"
     )
 
 

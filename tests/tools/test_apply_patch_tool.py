@@ -341,6 +341,42 @@ class TestApplyPatchNotFoundHint:
         assert sandbox.read_text("f.py") == "a = 1\nb = 2\n"
 
     @pytest.mark.asyncio
+    async def test_later_hunk_hint_uses_original_file_not_patched_view(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 三轮修回 P4(b)：末块失配的提示必须基于**原文件**，不是前块改过的视图。
+
+        前一块成功把 a = 1 改成了 LF ⇒ in-memory `current` 成了混行尾，而原文件
+        仍是纯 CRLF；末块 old（LF）在原文件里就是普通行尾差异。用前块的 `current`
+        算提示会把它说成「文件行尾混用」并建议改写——那是前块自己造出来的景观，
+        不是模型读到的文件。本用例钉死：提示描述的是原文件（纯 CRLF 单一主导），
+        且不出现混行尾字样；同时仍给出可执行的两条路。
+        """
+        content = "a = 1\r\nb = 2\r\nc = 3\r\n"
+        sandbox.write_text("f.py", content)
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [
+                    {"old_string": "a = 1\r\n", "new_string": "a = 1\n"},
+                    {"old_string": "b = 2\nc = 3\n", "new_string": "b = 22\nc = 3\n"},
+                ],
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "第 2 块" in msg
+        assert "行尾混用" not in msg
+        assert "混用" not in msg
+        assert "CRLF" in msg
+        assert "改用 write 整文件重写" in msg
+        # 原子性：整批失败，文件逐字节不变
+        assert sandbox.read_text("f.py") == content
+
+    @pytest.mark.asyncio
     async def test_plain_context_typo_does_not_mention_line_endings(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):

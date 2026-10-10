@@ -78,10 +78,14 @@ class ApplyPatchTool(Tool):
                 current, hunk.old_string, hunk.new_string, replace_all=False
             )
             if count == 0:
+                # 提示一律基于**原文件** content，不用被前几块改动过的 current：
+                # current 的行尾景观是前块自己造的（模型没读到过那个文件），
+                # 拿它算会把「原文件里普通的行尾差异」误说成「文件行尾混用」，
+                # 而且末块永远拿不到准确警示（#851 三轮修回 P4b）。
                 return ToolResult.failure(
                     message=(
                         f"第 {idx} 块补丁在 '{args.path}' 中未找到匹配。"
-                        f"{not_found_hint(current, hunk.old_string)}"
+                        f"{not_found_hint(content, hunk.old_string)}"
                     ),
                     error_code=ErrorCode.TOOL_EXECUTION_ERROR,
                 )
