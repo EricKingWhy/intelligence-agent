@@ -341,3 +341,54 @@ test("#859 truncated 后 GET /events 持续失败：按退避计失败并熔断�
     halt(app);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 切会话期间旧会话的 GET /events 迟到（#958）：重建结果只在发起时的 generation
+// 仍是当前时才落地（与 subscribeLoop 的 `gen !== this.generation` 同一守卫）；
+// 过期结果丢弃：不改 state、不改 cursor。
+// ---------------------------------------------------------------------------
+
+test("#958 切会话后旧会话迟到的 GET /events 结果被丢弃：新会话 state 与游标不受影响", async () => {
+  const s1History = HISTORY_0_TO_20;
+  const s2History = [0, 1, 2].map((seq) => ({ ...userRow(seq, `s2-${seq}`), session_id: "s2" }));
+  const log: string[] = [];
+  let releaseS1: () => void = () => {};
+  const s1Gate = new Promise<void>((resolve) => {
+    releaseS1 = resolve;
+  });
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/events")) {
+      const sid = url.pathname.includes("/s2/") ? "s2" : "s1";
+      log.push(`events:${sid}`);
+      if (sid === "s1") await s1Gate; // 旧会话的重建挂起，直到切会话完成后才放行
+      return new Response(JSON.stringify(sid === "s1" ? s1History : s2History), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    log.push(`stream:${url.searchParams.get("after_seq")}`);
+    return sseResponse(`${truncatedFrame(20)}\r\n\r\n`);
+  }) as typeof fetch;
+  const app = new TuiApp(
+    { baseUrl: "http://127.0.0.1:0", sessionId: "s1", fetchImpl: fetchFn },
+    false,
+  ) as unknown as AppInternals;
+  app.subscribeLoop();
+  try {
+    await waitFor(() => log.includes("events:s1"));
+    // 新会话的订阅循环与本例无关（其 truncated 重建路径由 #859 例覆盖）：空实现顶掉。
+    app.subscribeLoop = () => {};
+    await app.switchSession("s2");
+    const s2Texts = () => app.state.turns.map((t) => t.text).join(",");
+    assert.equal(s2Texts(), "s2-0,s2-1,s2-2", "切会话完成后应是新会话的重建结果");
+    assert.equal(app.cursor.lastSeq, 2);
+    releaseS1();
+    await waitFor(() => log.filter((x) => x.startsWith("events:")).length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(s2Texts(), "s2-0,s2-1,s2-2", "旧会话迟到的重建结果不得写入新会话 state");
+    assert.equal(app.cursor.lastSeq, 2, "旧会话的 maxSeq 不得回填到新会话游标");
+  } finally {
+    halt(app);
+  }
+});
