@@ -525,6 +525,20 @@ def test_global_object_for_receipt_rejects_malformed_paths(tmp_path: Path) -> No
         root / "sess-b" / "attachments" / "objects" / sha[:2] / sha, session_dir, root
     ) is None
 
+    # shard 目录是 symlink 且指向 root 之外：resolve 后逃逸出 objects 根 ⇒ 拒绝。
+    # 这是 `_global_object_for_receipt` 里 `is_relative_to` 安全闸的守卫
+    #（变异 `if False:` 后全绿，B 轴复审新 P3）。
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    escaped_shard = root / ".attachments" / "objects" / sha[:2]
+    escaped_shard.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        escaped_shard.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("建目录符号链接需特权（Windows 无提权时跳过）")
+    escaped_receipt = session_dir / "attachments" / "objects" / sha[:2] / sha
+    assert derive(escaped_receipt, session_dir, root) is None
+
 
 def test_sha256_pattern_matches_byte_artifact_id_digest_shape() -> None:
     """`_SHA256_PATTERN` 必须与 `artifact.BYTE_ARTIFACT_ID_PATTERN` 的摘要段同形（防漂移）。
