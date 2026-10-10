@@ -250,7 +250,10 @@ async function main(): Promise<void> {
   })
 
   // Packaged web build served through the shell's loopback proxy (W-21 D3).
-  await win.loadURL(`${pagePolicy.origin}/`)
+  // #891 P2: the window opens through the launch URL, whose per-start token
+  // exchanges for the session cookie before the page itself loads; the token
+  // never reaches the renderer (最终文档的 URL 干净 via the 302 to `./`).
+  await win.loadURL(serviceProxy.launchUrl)
 
   // 4. Tray: only "open" and "quit".
   tray = new DesktopTray({
