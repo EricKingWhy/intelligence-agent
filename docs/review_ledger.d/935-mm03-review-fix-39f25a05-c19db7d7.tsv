@@ -1,0 +1,1 @@
+2026-10-10	#935 M-03 审查修复轮（独立双轴 Correctness/Standards，无 P0-P2）：等比缩放口径替换逐轴 clamp（对齐 normalize）、保守性前提登记同步义务、补缺尺寸/bool-float-负值回退测试、消融措辞收敛、MM-08 §14.3 行号与键路径更正、M-03 来源补 tracked 载体（M-03-image-token-sizing.md）；本笔含产品代码	39f25a0542bfe6a5ba8fe862311f1a36c39689df..c19db7d7b19c08a745d8d3cd38d661e63ff0b237
