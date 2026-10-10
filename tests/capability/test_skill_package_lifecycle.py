@@ -96,8 +96,8 @@ def test_git_skill_update_and_rollback_keep_complete_snapshots(tmp_path: Path) -
     assert installed["source"] == repo.as_uri()
     assert installed["resolved_commit"] == old_commit
     assert installed["enabled"] is False
-    assert installed["sha256"] == package_manager._tree_sha256(
-        manager.managed_skills_dir / "sample-skill"
+    assert installed["sha256"] == package_manager._git_tree_sha256(
+        manager.managed_skills_dir / "sample-skill", installed["git_modes_sha256"]
     )
 
     manager.enable("sample-skill")
@@ -144,13 +144,61 @@ def test_git_skill_update_failure_preserves_manifest_and_active_snapshot(tmp_pat
     manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
     active = manager.managed_skills_dir / "sample-skill"
     before_manifest = manager.manifest_path.read_bytes()
-    before_tree = package_manager._tree_sha256(active)
+    record = manager.list_packages()["sample-skill"]
+    before_tree = package_manager._git_tree_sha256(active, record["git_modes_sha256"])
 
     with pytest.raises(SkillPackageError, match="fetch"):
         manager.update("sample-skill", ref="missing-ref")
 
     assert manager.manifest_path.read_bytes() == before_manifest
-    assert package_manager._tree_sha256(active) == before_tree
+    assert package_manager._git_tree_sha256(active, record["git_modes_sha256"]) == before_tree
+
+
+def test_git_skill_activation_io_failure_keeps_old_skill_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, old_commit, new_commit = _git_skill_repo(tmp_path)
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=old_commit, subdirectory="packages/sample-skill")
+    manager.enable("sample-skill")
+    manager.update("sample-skill", ref=new_commit)
+
+    real_copytree = shutil.copytree
+    def fail_staging_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(destination).parent.name.startswith(".staging-"):
+            raise OSError("simulated disk full")
+        return real_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(package_manager.shutil, "copytree", fail_staging_copy)
+
+    with pytest.raises(SkillPackageError, match="pending Git Skill activation failed"):
+        manager.apply_pending_versions()
+
+    current = manager.list_packages()["sample-skill"]
+    assert current["resolved_commit"] == old_commit
+    assert current["pending_version"]["resolved_commit"] == new_commit
+    content, resource_root = _load_installed_skill(manager)
+    assert "Old body." in content
+    assert (resource_root / "references" / "guide.md").read_text(encoding="utf-8") == "Old resource.\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose Git executable bits in st_mode")
+def test_git_skill_install_preserves_and_verifies_executable_mode(tmp_path: Path) -> None:
+    repo, _old_commit, _new_commit = _git_skill_repo(tmp_path)
+    _write(repo / "packages" / "sample-skill" / "references" / "run.sh", "#!/bin/sh\necho ready\n")
+    _git(repo, "add", ".")
+    _git(repo, "update-index", "--chmod=+x", "packages/sample-skill/references/run.sh")
+    _git(repo, "commit", "-qm", "add executable resource")
+    commit = _git(repo, "rev-parse", "HEAD")
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.install_git(repo.as_uri(), ref=commit, subdirectory="packages/sample-skill")
+
+    script = manager.managed_skills_dir / "sample-skill" / "references" / "run.sh"
+    assert script.stat().st_mode & 0o111
+    script.chmod(0o644)
+    record = manager.list_packages()["sample-skill"]
+    with pytest.raises(SkillPackageError, match="changed after installation"):
+        manager._verify_package(manager.managed_skills_dir / "sample-skill", record)
     assert not (manager.managed_skills_dir / ".pending" / "sample-skill").exists()
 
 
