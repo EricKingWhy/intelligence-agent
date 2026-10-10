@@ -313,3 +313,73 @@ describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
     expect(html).toContain('disabled');
   });
 });
+
+describe('PausedPanel — stuck 暂停（`#317` / `#968` stuck-resume restriction，AC-17）', () => {
+  // 后端事实（勿重查）：`reason=stuck` 时 `resume_basis=budget_increase` 一律 409
+  // （run_budget.py 恢复闸门），stuck 只接受 relevant_steer / environment_change /
+  // policy_change 且每条都要现场证据。Web 若照旧渲染"抬 ceiling → 恢复同一 run"，
+  // 用户点了必败——这就是 #968。本 describe 锁的就是：stuck 不给这个必败控件，
+  // 改为引导走 steer / 环境 / 策略变更通道。
+  function stuckPaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
+    return paused({
+      reason: 'stuck',
+      // 后端 `_stuck_pause_arm`：trigger_dimension 用**模式名**（不是预算维度路径）——
+      // stuck 没有"该抬高哪一个 ceiling"可言。
+      trigger_dimension: 'repeated_tool_use',
+      consumed_dimensions: {
+        agent_turns: 6, model_requests: 9, total_tokens: 300, cost_usd: null,
+        tool_calls: 4, tool_attempts: 7,
+        tool_calls_by_tool: { bash: 4 }, tool_attempts_by_tool: { bash: 7 },
+      },
+      run_limits: {
+        max_agent_turns_total: 50,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: null,
+        tool_call_limits: {},
+      },
+      continuation: {
+        completed: ['已用 bash 以同一姿势尝试 4 次'],
+        remaining: ['目标仍未达成'],
+        blockers: ['同一模式重复到阈值，无相关进展'],
+        next_safe_action: '给出新的指示或改变环境 / 策略后恢复',
+      },
+      // 投影里的可用依据子集（后端 stuck_resume_requirements 算出：证据端口缺格时
+      // 列的是**子集**——列一条恒拒的依据就是在暗示可安全续跑）。
+      resume_requirements: ['relevant_steer', 'environment_change', 'policy_change'],
+      ...overrides,
+    });
+  }
+
+  it('不给"抬 ceiling → 恢复同一 run"控件（点了必然 409）', () => {
+    const html = render(stuckPaused(), { draft: '10' });
+    // 没有 ceiling 输入框、没有恢复按钮、没有"绝对 ceiling（…）"标签。
+    expect(html).not.toContain('pause-resume-ceiling');
+    expect(html).not.toContain('恢复同一 run');
+    expect(html).not.toContain('绝对 ceiling（');
+    expect(html).not.toContain('新的绝对截止时刻');
+  });
+
+  it('改为引导：说明抬 ceiling 无效（409），指引走 steer / 环境 / 策略变更', () => {
+    const html = render(stuckPaused());
+    expect(html).toContain('新的指示');
+    expect(html).toContain('steer');
+    expect(html).toContain('409');
+    expect(html).toContain('环境');
+    expect(html).toContain('策略');
+  });
+
+  it('如实列出投影带来的可用依据子集（不暗示必败的依据）', () => {
+    const html = render(stuckPaused());
+    expect(html).toContain('relevant_steer；environment_change；policy_change');
+  });
+
+  it('状态行说"疑似卡住"，不说"预算到顶"', () => {
+    const html = render(stuckPaused());
+    const head = html.slice(0, html.indexOf('pause-panel-facts'));
+    expect(head).toContain('疑似卡住');
+    expect(head).toContain('不是失败');
+    expect(head).not.toContain('已在预算到顶处暂停');
+  });
+});
