@@ -12,7 +12,7 @@
  *     requests 卡住"显示成"已消耗 0 轮 · 无上限"，那是在陈述一件没发生过的事——
  *     四维清单（`facts.dimensions`）保证另外三维的事实也在屏幕上。`#314` 的
  *     per-tool 配额同理：它有自己的清单（`facts.toolQuotas`），且**两个 counter
- *     分开显示**（calls = 被接纳的逻辑调用数，attempts = 真实尝试含 retry）。
+ *     分开显示**（calls = 被接纳的逻辑调用，attempts = 真实尝试含 retry）。
  *  3. **没有权威的本地状态**：面板整体由 `conversation.run_paused` 投影驱动（不变量 #22）
  *     ——`run/resumed` 一到它自己消失；刷新/重放得到同一个投影。输入框里的草稿是**用户
  *     意图**（不是会话事实），所以由 App 持有（重读日志不会把它清掉）。
