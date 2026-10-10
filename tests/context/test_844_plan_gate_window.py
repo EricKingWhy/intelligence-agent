@@ -297,8 +297,9 @@ async def test_dangling_source_range_does_not_fall_back_to_full_plan(tmp_path):
     修后：窗口取可用区间最大值，V2 被排除 ⇒ 闸门不再报 `plan_section_mismatch`。
     该会话因来源区间缺失仍无法持久化（无来源区间时成功路径给出*准确*的
     `source_range_unavailable` 诊断，见 compactor 的 T4/source_seq 判据——那条
-    判据要区间完整，与本闸门**故意**不同口径），故此处只断言不出现
-    `plan_section_mismatch`、且零 bracket。
+    判据要区间完整，与本闸门**故意**不同口径），故此处断言终态为
+    `source_range_unavailable`（既排除 `plan_section_mismatch`、又钉住准确诊断）、
+    且零 bracket。
     """
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "开始任务。"})
@@ -322,7 +323,8 @@ async def test_dangling_source_range_does_not_fall_back_to_full_plan(tmp_path):
 
     failures = [e for e in session.events if e.type == CONTEXT_COMPACTION_FAILED]
     classes = [e.data["error_class"] for e in failures]
-    assert "plan_section_mismatch" not in classes
+    # 终态由无来源区间的成功路径判据给出（准确诊断），本闸门不报 mismatch。
+    assert classes == ["source_range_unavailable"]
     assert not any(
         event.type in {COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END}
         for event in session.events
