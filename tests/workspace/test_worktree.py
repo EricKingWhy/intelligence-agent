@@ -46,6 +46,15 @@ class TestIsGitRepo:
 
 
 class TestCreateWorktree:
+    def test_non_ascii_repo_path(self, git_repo: Path, tmp_path: Path):
+        repo = tmp_path / "仓库"
+        git_repo.rename(repo)
+
+        wt = create_worktree(repo, path=tmp_path / "工作树")
+
+        assert wt.is_dir()
+        assert (wt / "a.txt").read_text() == "a"
+
     def test_creates_worktree(self, git_repo: Path, tmp_path: Path):
         wt = create_worktree(git_repo, path=tmp_path / "wt1")
         assert wt.is_dir()
