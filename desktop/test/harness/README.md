@@ -3,16 +3,23 @@
 Opt-in checks that `npm test` does not run: the test script only globs
 `test/*.test.ts` and `test/*.test.mjs`, and these mutate files in place.
 
-Both teeth scripts mutate one source file, run
+Both teeth scripts mutate their source files in place, run
 `node --test test/installer-scripts.test.mjs`, restore the original bytes and
 verify the restore byte-for-byte. Every mutation must turn the suite red; a
 survivor is a hole in the assertions, and the run exits non-zero when one
-remains (or when the restore is not byte-identical).
+remains (or when the restore is not byte-identical). `teeth-check.mjs` walks
+its list once per installer script it covers.
 
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
-| `teeth-check.mjs` | `installer/installer-directories.nsh` | the promote site's leftover record (#904): 6 mutated shapes — long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch | 6/6 red, 0 survivors, restore identical (sha256 `47261c9d…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule | 46/46 red, 0 survivors, restore identical (sha256 `c1d7fc0d…`) |
+| `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (4) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 11/11 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `909e3a16…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) | 59/59 red, 0 survivors, restore identical (sha256 `944a0908…`) |
+
+The #919 batch added five mutations to `teeth-check.mjs` (the failed delete's
+exit code plus the four installer.nsh sweep rules — the first entries that do
+not rewrite `installer-directories.nsh`) and thirteen to
+`teeth-check-guards.mjs`; both were re-run from the checkout on 2026-10-10
+with 0 survivors and byte-identical restores.
 
 Run from `desktop/`:
 
