@@ -705,6 +705,21 @@ class SkillPackageManager:
         results = payload.setdefault(ENABLE_RESULTS_FIELD, {})
         if not isinstance(results, dict):
             raise SkillPackageError("install manifest has an unsupported shape")
+        # T4 时代的清单只有 enabled 位、没有启用结果表。升级后按「显式项目选择」
+        # 补齐，否则已启用的项目包会在读侧静默消失（AC1 要求会话间一致）。
+        # 这是版本 1 内的字段演进，不动 MANIFEST_VERSION。
+        for legacy_name, legacy_record in payload["packages"].items():
+            if (
+                isinstance(legacy_record, dict)
+                and legacy_record.get("enabled") is True
+                and isinstance(legacy_record.get("source"), str)
+                and legacy_name not in results
+            ):
+                results[legacy_name] = {
+                    "selected_scope": "project",
+                    "source": legacy_record["source"],
+                    "version": None,
+                }
         for name, result in results.items():
             if (
                 not isinstance(name, str)

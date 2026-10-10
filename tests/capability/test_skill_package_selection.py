@@ -406,3 +406,32 @@ async def test_global_package_with_scripts_cannot_be_enabled_at_all(tmp_path: Pa
     with pytest.raises(SkillPackageError, match="needs-adaptation"):
         world.project("alpha").enable(PACKAGE_NAME, scope="global")
     assert await world.catalog_names("alpha") == []
+
+
+def test_t4_manifest_without_enable_results_keeps_project_packages(tmp_path: Path) -> None:
+    """升级兼容：T4 清单只有 enabled 位，读侧要按「项目选择」补齐（T5 AC1）。
+
+    不补的话，升级后已启用的项目包会在装配面静默消失——`enabled` 位还在，
+    但新的读路径只认启用结果表。MANIFEST_VERSION 不变，属版本 1 内的字段演进。
+    """
+    import json
+
+    world = _World(tmp_path)
+    project = world.project("alpha")
+    project.install(_package(tmp_path / "src"))
+    project.enable(PACKAGE_NAME, scope="project")
+
+    # 回写成 T4 形状：只有 enabled 位、没有启用结果表。
+    manifest = json.loads(project.manifest_path.read_text(encoding="utf-8"))
+    manifest["packages"][PACKAGE_NAME]["enabled"] = True
+    del manifest["enable_results"]
+    project.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    fresh = world.project("alpha")
+    assert fresh.enable_results()[PACKAGE_NAME]["selected_scope"] == "project"
+    assert set(fresh.enabled_skill_digests()) == {PACKAGE_NAME}
+
+    # 对照：没启用的旧记录不该被补成「已选择」。
+    manifest["packages"][PACKAGE_NAME]["enabled"] = False
+    project.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert world.project("alpha").enable_results() == {}
