@@ -27,11 +27,14 @@ Jupyter Server 默认 loopback + token 默认启用 PORT DESIGN，不复制代�
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import getpass
 import hashlib
+import hmac
 import json
 import os
+import re
 import secrets as secrets_module
 import socket
 import threading
@@ -61,6 +64,11 @@ __all__ = [
     "ENDPOINT_FILENAME",
     "HOST_CREDENTIALS_ENV",
     "HOST_PROTOCOL_VERSION",
+    "HOST_SKILLS_NONCE_HEADER",
+    "HOST_SKILLS_PROOF_HEADER",
+    "HOST_SKILLS_PROOF_WINDOW_SECONDS",
+    "HOST_SKILLS_RESPONSE_PROOF_HEADER",
+    "HOST_SKILLS_TIMESTAMP_HEADER",
     "HOST_TOKEN_TTL_SECONDS",
     "AttachResult",
     "AttachStatus",
@@ -74,8 +82,11 @@ __all__ = [
     "default_credentials",
     "describe_lock_error_with_attach",
     "ensure_service",
+    "host_skills_request_proof",
+    "host_skills_response_proof",
     "host_token_username",
     "publish_endpoint",
+    "query_attached_skill_catalog",
     "read_endpoint",
     "serve_once",
 ]
@@ -107,6 +118,69 @@ HOST_TOKEN_TTL_SECONDS = 7 * 24 * 3600
 
 #: 锁竞争输家二次检查的轮询间隔（秒）。
 _ATTACH_POLL_INTERVAL = 0.25
+
+# Bound local JSON reads so a stale or unexpected loopback service cannot force
+# an unbounded allocation during attach probing.
+_MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+HOST_SKILLS_NONCE_HEADER = "X-Agent-Harness-Nonce"
+HOST_SKILLS_PROOF_HEADER = "X-Agent-Harness-Proof"
+HOST_SKILLS_TIMESTAMP_HEADER = "X-Agent-Harness-Timestamp"
+HOST_SKILLS_RESPONSE_PROOF_HEADER = "X-Agent-Harness-Response-Proof"
+_HOST_SKILLS_NONCE_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_HOST_SKILLS_SERVICE_UUID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+_HOST_SKILLS_TIMESTAMP_PATTERN = re.compile(r"[0-9]{1,12}\Z")
+HOST_SKILLS_PROOF_WINDOW_SECONDS = 30
+
+
+def host_skills_request_proof(
+    token: str, nonce: str, service_uuid: str, timestamp: str
+) -> str:
+    """Authenticate a one-use catalog query without transmitting the host bearer token."""
+    _validate_host_skills_proof_fields(nonce, service_uuid, timestamp)
+    message = (
+        b"agent-harness-host:v1\nGET\n/api/skills\n"
+        + nonce.encode("ascii")
+        + b"\n"
+        + service_uuid.encode("ascii")
+        + b"\n"
+        + timestamp.encode("ascii")
+    )
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def host_skills_response_proof(
+    token: str,
+    nonce: str,
+    service_uuid: str,
+    timestamp: str,
+    status: int,
+    body: bytes,
+) -> str:
+    """Bind an authenticated catalog response to its request challenge and body."""
+    _validate_host_skills_proof_fields(nonce, service_uuid, timestamp)
+    body_digest = hashlib.sha256(body).hexdigest().encode("ascii")
+    message = (
+        b"agent-harness-host:v1\nRESPONSE\nGET\n/api/skills\n"
+        + nonce.encode("ascii")
+        + b"\n"
+        + service_uuid.encode("ascii")
+        + b"\n"
+        + timestamp.encode("ascii")
+        + b"\n"
+        + str(status).encode("ascii")
+        + b"\n"
+        + body_digest
+    )
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _validate_host_skills_proof_fields(nonce: str, service_uuid: str, timestamp: str) -> None:
+    if not _HOST_SKILLS_NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("host Skills challenge nonce must be 32 random bytes in hex")
+    if not _HOST_SKILLS_SERVICE_UUID_PATTERN.fullmatch(service_uuid):
+        raise ValueError("host Skills proof requires a 16-byte service UUID in hex")
+    if not _HOST_SKILLS_TIMESTAMP_PATTERN.fullmatch(timestamp):
+        raise ValueError("host Skills proof timestamp must be decimal Unix seconds")
 
 
 class HostServiceError(RuntimeError):
@@ -308,12 +382,172 @@ class HostTokenStore:
 _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def _read_bounded_body(response: Any) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as error:
+            raise ValueError("local service returned an invalid Content-Length") from error
+        if declared_length < 0 or declared_length > _MAX_JSON_RESPONSE_BYTES:
+            raise ValueError("local service JSON response exceeds size limit")
+    body = response.read(_MAX_JSON_RESPONSE_BYTES + 1)
+    if len(body) > _MAX_JSON_RESPONSE_BYTES:
+        raise ValueError("local service JSON response exceeds size limit")
+    return body
+
+
+async def _loopback_get_bytes_with_deadline(
+    port: int,
+    path: str,
+    *,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, dict[str, str], bytes]:
+    """GET one fixed loopback route with an absolute deadline and bounded body."""
+    async with asyncio.timeout(timeout):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            request_headers = {
+                "Host": "127.0.0.1",
+                "Accept": "application/json",
+                "Connection": "close",
+                **headers,
+            }
+            request = f"GET {path} HTTP/1.1\r\n" + "".join(
+                f"{name}: {value}\r\n" for name, value in request_headers.items()
+            ) + "\r\n"
+            writer.write(request.encode("ascii"))
+            await writer.drain()
+
+            status_line = await reader.readline()
+            if len(status_line) > 8192 or not status_line.endswith(b"\r\n"):
+                raise ValueError("local service returned an invalid HTTP status line")
+            parts = status_line[:-2].decode("ascii").split(" ", 2)
+            if len(parts) < 2 or not parts[0].startswith("HTTP/"):
+                raise ValueError("local service returned an invalid HTTP status line")
+            status = int(parts[1])
+
+            response_headers: dict[str, str] = {}
+            header_bytes = 0
+            while True:
+                line = await reader.readline()
+                header_bytes += len(line)
+                if header_bytes > 64 * 1024 or not line.endswith(b"\r\n"):
+                    raise ValueError("local service returned invalid or oversized HTTP headers")
+                if line == b"\r\n":
+                    break
+                try:
+                    name, value = line[:-2].decode("latin-1").split(":", 1)
+                except ValueError as error:
+                    raise ValueError("local service returned an invalid HTTP header") from error
+                key = name.strip().lower()
+                if key in response_headers:
+                    raise ValueError("local service returned duplicate HTTP headers")
+                response_headers[key] = value.strip()
+            if "transfer-encoding" in response_headers:
+                raise ValueError("local service returned an unsupported transfer encoding")
+            try:
+                body_size = int(response_headers["content-length"])
+            except (KeyError, ValueError) as error:
+                raise ValueError("local service returned an invalid Content-Length") from error
+            if body_size < 0 or body_size > _MAX_JSON_RESPONSE_BYTES:
+                raise ValueError("local service JSON response exceeds size limit")
+            body = await reader.readexactly(body_size)
+            return status, response_headers, body
+        finally:
+            writer.close()
+
+
 def _http_get_json(url: str, *, token: str | None, timeout: float) -> tuple[int, object]:
     request = urllib.request.Request(url)
     if token is not None:
         request.add_header("Authorization", f"Bearer {token}")
     with _LOOPBACK_OPENER.open(request, timeout=timeout) as response:
-        return response.status, json.loads(response.read().decode("utf-8"))
+        return response.status, json.loads(_read_bounded_body(response).decode("utf-8"))
+
+
+def query_attached_skill_catalog(
+    root: str | os.PathLike[str],
+    *,
+    credentials: Credentials | None = None,
+    connect_timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    """Read the live Skills catalog using nonce HMACs, never sending the bearer token.
+
+    Returns ``None`` when the endpoint is absent, stale, older than the challenge
+    extension, unauthenticated, or returns an invalidly signed response.
+    """
+    endpoint = read_endpoint(root)
+    if endpoint is None or not endpoint.auth_required:
+        return None
+    if not _HOST_SKILLS_SERVICE_UUID_PATTERN.fullmatch(endpoint.service_uuid):
+        return None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return None
+    deadline = time.monotonic() + connect_timeout
+    # Reuse the existing iterative guard so json.loads never has to parse an
+    # unexpectedly deep response from the loopback service.
+    from agent_harness.web.wire_safety import BODY_MAX_DEPTH, json_container_depth
+
+    try:
+        health_status, _, health_body = asyncio.run(
+            _loopback_get_bytes_with_deadline(
+                endpoint.port, "/api/health", headers={}, timeout=max(0.001, deadline - time.monotonic())
+            )
+        )
+        if json_container_depth(health_body) > BODY_MAX_DEPTH:
+            return None
+        health = json.loads(health_body.decode("utf-8"))
+    except (OSError, ValueError, TimeoutError, EOFError, RecursionError):
+        return None
+    if (
+        health_status != 200
+        or not isinstance(health, dict)
+        or health.get("status") != "ok"
+        or health.get("protocol_version") != HOST_PROTOCOL_VERSION
+    ):
+        return None
+
+    token = HostTokenStore(credentials).get_token(root)
+    if not token:
+        return None
+    nonce = secrets_module.token_hex(32)
+    timestamp = str(int(time.time()))
+    proof_headers = {
+        HOST_SKILLS_NONCE_HEADER: nonce,
+        HOST_SKILLS_TIMESTAMP_HEADER: timestamp,
+        HOST_SKILLS_PROOF_HEADER: host_skills_request_proof(
+            token, nonce, endpoint.service_uuid, timestamp
+        ),
+    }
+    try:
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            return None
+        status, response_headers, body = asyncio.run(
+            _loopback_get_bytes_with_deadline(
+                endpoint.port, "/api/skills", headers=proof_headers, timeout=timeout
+            )
+        )
+        response_proof = response_headers.get(HOST_SKILLS_RESPONSE_PROOF_HEADER.lower(), "")
+        expected_proof = host_skills_response_proof(
+            token, nonce, endpoint.service_uuid, timestamp, status, body
+        )
+        if status != 200 or not hmac.compare_digest(response_proof, expected_proof):
+            return None
+        if json_container_depth(body) > BODY_MAX_DEPTH:
+            return None
+        payload = json.loads(body.decode("utf-8"))
+    except (OSError, ValueError, TimeoutError, EOFError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+        return None
+    return payload
 
 
 def attach_probe(
@@ -465,11 +699,13 @@ def serve_once(
     secret = configured if configured.strip() else secrets_module.token_hex(32)
     effective = settings.model_copy(update={"jwt_secret": SecretStr(secret)})
     now = int(time.time())
+    service_uuid = uuid.uuid4().hex
     token = jwt.encode(
         {
             "tenant_id": "local",
             "user_id": getpass.getuser(),
             "scopes": ["user", "session"],
+            "service_uuid": service_uuid,
             "iat": now,
             "exp": now + HOST_TOKEN_TTL_SECONDS,
         },
@@ -477,7 +713,7 @@ def serve_once(
         algorithm="HS256",
     )
 
-    app = create_app(effective, enable_cors=False)
+    app = create_app(effective, enable_cors=False, host_service_token=token)
     # W-21 D3 (#815)：桌面壳加载的页面就是这个服务自己的 origin（壳的 loopback
     # 代理只加凭据、不改路径），所以这里必须把渲染层产物挂上；产物目录来自
     # `Settings.web_dist_dir`（env `WEB_DIST_DIR`，打包形态指安装目录的
@@ -505,7 +741,7 @@ def serve_once(
         else:
             raise RuntimeError("服务 60s 未完成启动")
         port = int(server.servers[0].sockets[0].getsockname()[1])
-        endpoint = HostEndpointInfo(pid=os.getpid(), port=port)
+        endpoint = HostEndpointInfo(pid=os.getpid(), port=port, service_uuid=service_uuid)
         token_store.set_token(root, token)
         publish_endpoint(root, endpoint)
         # 启动自验：与附着方完全同一条探针（健康面形状 + 限权 token 鉴权）。

@@ -7,6 +7,7 @@ serve 子进程测试里闭环（票面验收：真实子进程 + loopback 套�
 
 from __future__ import annotations
 
+import hmac
 import json
 import socket
 import threading
@@ -18,13 +19,20 @@ import pytest
 
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
+    HOST_SKILLS_NONCE_HEADER,
+    HOST_SKILLS_PROOF_HEADER,
+    HOST_SKILLS_RESPONSE_PROOF_HEADER,
+    HOST_SKILLS_TIMESTAMP_HEADER,
     AttachStatus,
     HostEndpointInfo,
     HostTokenStore,
     attach_probe,
     clear_endpoint,
+    host_skills_request_proof,
+    host_skills_response_proof,
     host_token_username,
     publish_endpoint,
+    query_attached_skill_catalog,
     read_endpoint,
 )
 from agent_harness.model.provider_store import MemoryCredentialStore
@@ -40,26 +48,84 @@ def _free_loopback_port() -> int:
 class _StubService:
     """最小 HTTP 桩：/api/health 永远 200；/api/sessions 按 `auth_ok` 返回 200/401。"""
 
-    def __init__(self, *, auth_ok: bool, protocol_version: int = HOST_PROTOCOL_VERSION) -> None:
+    def __init__(
+        self,
+        *,
+        auth_ok: bool,
+        protocol_version: int = HOST_PROTOCOL_VERSION,
+        oversized_health: bool = False,
+        host_token: str | None = None,
+        response_token: str | None = None,
+        skill_catalog: dict[str, object] | None = None,
+    ) -> None:
         self.protocol_version = protocol_version
+        self.service_uuid = "a" * 32
+        service_uuid = self.service_uuid
+        self.auth_headers: list[str | None] = []
+        captured_auth_headers = self.auth_headers
 
         class _Handler(BaseHTTPRequestHandler):
             def log_message(self, *args: object) -> None:  # 静音测试输出
                 pass
 
-            def _reply(self, status: int, payload: dict[str, object]) -> None:
+            def _reply(
+                self,
+                status: int,
+                payload: object,
+                extra_headers: dict[str, str] | None = None,
+            ) -> None:
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                for name, value in (extra_headers or {}).items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(body)
 
             def do_GET(self) -> None:
                 if self.path == "/api/health":
-                    self._reply(200, {"status": "ok", "protocol_version": handler_protocol[0]})
+                    payload: dict[str, object] = {
+                        "status": "ok",
+                        "protocol_version": handler_protocol[0],
+                    }
+                    if oversized_health:
+                        payload["padding"] = "x" * (8 * 1024 * 1024 + 1)
+                    self._reply(200, payload)
                 elif self.path.startswith("/api/sessions"):
                     self._reply(200 if auth_ok else 401, [] if auth_ok else {"detail": "Invalid identity token"})
+                elif self.path == "/api/skills" and skill_catalog is not None:
+                    request_nonce = self.headers.get(HOST_SKILLS_NONCE_HEADER, "")
+                    request_timestamp = self.headers.get(HOST_SKILLS_TIMESTAMP_HEADER, "")
+                    request_proof = self.headers.get(HOST_SKILLS_PROOF_HEADER, "")
+                    captured_auth_headers.append(self.headers.get("Authorization"))
+                    if (
+                        host_token is None
+                        or not request_nonce
+                        or not hmac.compare_digest(
+                            request_proof,
+                            host_skills_request_proof(
+                                host_token, request_nonce, service_uuid, request_timestamp
+                            ),
+                        )
+                    ):
+                        self._reply(401, {"detail": "Invalid host proof"})
+                    else:
+                        body = json.dumps(skill_catalog).encode("utf-8")
+                        self._reply(
+                            200,
+                            skill_catalog,
+                            {
+                                HOST_SKILLS_RESPONSE_PROOF_HEADER: host_skills_response_proof(
+                                    response_token or host_token,
+                                    request_nonce,
+                                    service_uuid,
+                                    request_timestamp,
+                                    200,
+                                    body,
+                                )
+                            },
+                        )
                 else:
                     self._reply(404, {"detail": "not found"})
 
@@ -178,7 +244,10 @@ def test_attach_probe_auth_failed(tmp_path: Path) -> None:
     service = _StubService(auth_ok=False)
     try:
         root = tmp_path / "ws"
-        publish_endpoint(root, HostEndpointInfo(pid=1, port=service.port))
+        publish_endpoint(
+            root,
+            HostEndpointInfo(pid=1, port=service.port, service_uuid=service.service_uuid),
+        )
         # set 与 probe 必须共享同一后端实例（生产里两者走同一系统凭据管理器）。
         backend = MemoryCredentialStore()
         HostTokenStore(backend).set_token(root, "stale-token")
@@ -209,6 +278,162 @@ def test_attach_probe_auth_required_without_token_is_auth_failed(
     publish_endpoint(root, HostEndpointInfo(pid=1, port=stub_service.port))
     result = attach_probe(root, credentials=MemoryCredentialStore())
     assert result.status is AttachStatus.AUTH_FAILED
+
+
+def test_attach_probe_rejects_json_response_over_limit(tmp_path: Path) -> None:
+    service = _StubService(auth_ok=True, oversized_health=True)
+    try:
+        root = tmp_path / "ws"
+        publish_endpoint(root, HostEndpointInfo(pid=1, port=service.port))
+
+        result = attach_probe(root, credentials=MemoryCredentialStore())
+
+        assert result.status is AttachStatus.STALE
+        assert "ValueError" in result.detail
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize(
+    ("client_token", "response_token", "expected_catalog"),
+    [
+        ("shared-token", None, True),
+        ("wrong-token", None, False),
+        ("shared-token", "forged-token", False),
+    ],
+)
+def test_live_skill_catalog_uses_challenge_proof_without_bearer_header(
+    tmp_path: Path,
+    client_token: str,
+    response_token: str | None,
+    expected_catalog: bool,
+) -> None:
+    root = tmp_path / "workspace"
+    credentials = MemoryCredentialStore()
+    HostTokenStore(credentials).set_token(root, client_token)
+    catalog = {"skills": [{"name": "sample", "source": "/workspace/skills/sample/SKILL.md"}]}
+    service = _StubService(
+        auth_ok=True,
+        host_token="shared-token",
+        response_token=response_token,
+        skill_catalog=catalog,
+    )
+    try:
+        publish_endpoint(
+            root,
+            HostEndpointInfo(pid=1, port=service.port, service_uuid=service.service_uuid),
+        )
+
+        result = query_attached_skill_catalog(root, credentials=credentials)
+
+        assert (result == catalog) is expected_catalog
+        assert service.auth_headers == [None]
+    finally:
+        service.stop()
+
+
+def test_live_skill_catalog_enforces_total_deadline_for_slow_drip(tmp_path: Path) -> None:
+    class _SlowDripHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            response = (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n"
+                b'{"status":"ok"}'
+            )
+            for byte in response:
+                try:
+                    self.wfile.write(bytes((byte,)))
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.02)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowDripHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = tmp_path / "slow-workspace"
+        publish_endpoint(root, HostEndpointInfo(pid=1, port=int(server.server_port)))
+        started = time.monotonic()
+
+        result = query_attached_skill_catalog(
+            root,
+            credentials=MemoryCredentialStore(),
+            connect_timeout=0.15,
+        )
+
+        assert result is None
+        assert time.monotonic() - started < 0.75
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("deep_health", [True, False])
+def test_live_skill_catalog_rejects_deep_json_without_raising(
+    tmp_path: Path, deep_health: bool
+) -> None:
+    service_uuid = "b" * 32
+    token = "deep-json-test-token"
+    nested = b"[" * 5000 + b"0" + b"]" * 5000
+    deep_health_body = b'{"status":"ok","padding":' + nested + b"}"
+    deep_catalog_body = b'{"skills":[' + nested + b"]}"
+
+    class _DeepJsonHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self.path == "/api/health":
+                body = (
+                    deep_health_body if deep_health
+                    else json.dumps({"status": "ok", "protocol_version": HOST_PROTOCOL_VERSION}).encode()
+                )
+            elif self.path == "/api/skills":
+                body = deep_catalog_body
+                nonce = self.headers.get(HOST_SKILLS_NONCE_HEADER, "")
+                timestamp = self.headers.get(HOST_SKILLS_TIMESTAMP_HEADER, "")
+                headers[HOST_SKILLS_RESPONSE_PROOF_HEADER] = host_skills_response_proof(
+                    token, nonce, service_uuid, timestamp, 200, body
+                )
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DeepJsonHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = tmp_path / "deep-json-workspace"
+        credentials = MemoryCredentialStore()
+        HostTokenStore(credentials).set_token(root, token)
+        publish_endpoint(
+            root,
+            HostEndpointInfo(
+                pid=1, port=int(server.server_port), service_uuid=service_uuid
+            ),
+        )
+
+        result = query_attached_skill_catalog(root, credentials=credentials)
+
+        assert result is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # ── serve_once 优雅停机（审查修复轮 P2-1：此前 finally 清理只被崩溃路径间接覆盖） ──

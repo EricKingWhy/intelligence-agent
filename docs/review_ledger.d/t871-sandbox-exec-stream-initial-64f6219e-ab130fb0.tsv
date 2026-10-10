@@ -1,0 +1,1 @@
+2026-10-10	#871 Docker exec stream close; Spec P2: missing test for unrelated DockerSandbox.delete client close; Standards: delete-side client close was out of scope; both closed in b828bc1c after revert.	64f6219e0e13edab287a790a83c5d1e5fb0776c9..ab130fb04573928677c3f2d4942b7a3245fdce89

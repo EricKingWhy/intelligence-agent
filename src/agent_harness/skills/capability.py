@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from agent_harness.capability.base import CapabilityError
@@ -83,6 +84,14 @@ class SkillCapability:
                     raise CapabilityError(
                         f"skill '{name}' body unreadable: {error}", code="io",
                     ) from error
+        raise CapabilityError(f"skill '{name}' is not in the catalog", code="not_found")
+
+    def load_with_resource_root(self, name: str) -> tuple[str, Path]:
+        """Load one Skill body with the root for resolving its relative resources."""
+        body = self.load(name)
+        for entry in self._discovery.catalog().entries:
+            if entry.name == name:
+                return body, entry.source_path.parent
         raise CapabilityError(f"skill '{name}' is not in the catalog", code="not_found")
 
     def contributes_tools(self) -> list:

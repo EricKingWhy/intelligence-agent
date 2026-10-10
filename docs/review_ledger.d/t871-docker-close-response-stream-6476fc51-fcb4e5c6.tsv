@@ -1,0 +1,3 @@
+2026-10-10	#871 Docker close review: Spec P2+P3; Standards P2 (timeout race/late cleanup). Fixed and re-reviewed at e1836eaa; details in 2026-10 archive.	6476fc51acb925c95c92daabfe5812c150981d59..dd93e4430e0e458f703ba75e115762aace8302ef
+2026-10-10	#871 post-fix review: Spec Clean; Standards P2 (response.close error skipped stream.close). Fixed by fcb4e5c6; details in 2026-10 archive.	6476fc51acb925c95c92daabfe5812c150981d59..e1836eaa42fdf317e9c42cba06fac61105c030dd
+2026-10-10	#871 final cleanup review: Spec and Standards Clean; response failure still attempts ordered stream close and remains fail-closed. Details in 2026-10 archive.	e1836eaa42fdf317e9c42cba06fac61105c030dd..fcb4e5c6b29cbd10378ef4259199b7af00038f07

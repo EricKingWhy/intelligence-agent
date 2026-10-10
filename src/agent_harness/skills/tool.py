@@ -71,10 +71,12 @@ class LoadSkillTool(Tool):
 
     async def execute(self, args: _LoadSkillArgs) -> ToolResult:
         try:
-            # 读盘卸载到线程池：SkillCapability.load 是同步 Path.read_text，
+            # 读盘卸载到线程池：SkillCapability.load_with_resource_root 是同步 Path.read_text，
             # 直接在协程里跑会阻塞事件循环（所有并发 session 的流被磁盘延迟
             # 拖住），且 executor 的 asyncio.timeout 打不断同步 IO。
-            body = await asyncio.to_thread(self._capability.load, args.name)
+            body, resource_root = await asyncio.to_thread(
+                self._capability.load_with_resource_root, args.name
+            )
         except CapabilityError as error:
             # TOOL_NOT_FOUND 的语义是"未知工具名"；技能名不存在是模型传参错误，
             # 归 INVALID_ARGUMENT（不重试，回模型自纠错）。其余 CapabilityError
@@ -92,6 +94,8 @@ class LoadSkillTool(Tool):
             )
         return ToolResult.success(
             message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_skill').fragment_text}"
-                    f"已加载技能 '{args.name}'。",
-            data={"content": _cap_body(body)},
+                    f"已加载技能 '{args.name}'。正文中的相对资源以 "
+                    f"{single_line(str(resource_root))} 为根目录；请用现有文件工具读取，"
+                    "继续遵循该工具原有的路径权限。",
+            data={"content": _cap_body(body), "resource_root": str(resource_root)},
         )

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness import cli
+from agent_harness.instance_lock import InstanceLockError
 from agent_harness.skills import inspection
 from agent_harness.skills.inspection import inspect_skill_package
 
@@ -51,6 +52,31 @@ def test_inspection_reports_skill_metadata_resources_and_requirements(tmp_path: 
     assert report["resources"]["assets"][0]["path"] == "assets/logo.bin"
     assert report["requirements"]
     assert report["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "command_guidance",
+    ["Run `pandoc` to render the report.", "Execute `pandoc --version` before rendering."],
+)
+def test_inspection_marks_bare_inline_host_command_for_manual_review(
+    tmp_path: Path, command_guidance: str
+) -> None:
+    source = tmp_path / "command-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: command-skill\ndescription: Uses a host command.\n---\n\n"
+        f"{command_guidance}\n",
+    )
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert any(
+        requirement["kind"] == "command-runtime"
+        and requirement["name"] == "pandoc"
+        and requirement["support"] == "manual_review"
+        for requirement in report["requirements"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -562,6 +588,245 @@ def test_cli_plugins_inspect_reports_negative_samples_without_writes(
     assert report["status"] == "unsupported"
     assert expected_code in {error["code"] for error in report["errors"]}
     assert _snapshot(source, workspace, global_skills) == before
+
+
+def test_cli_plugins_lifecycle_tracks_saved_and_live_runtime_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "complete-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: complete-skill\ndescription: Complete local package.\n---\n"
+        "Read [the guide](references/guide.md).\n",
+    )
+    _write(source / "references" / "guide.md", "Guide.\n")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    runtime = ["unavailable", "host Skills catalog is not queryable", None]
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: SimpleNamespace(
+            workspace_dir=str(workspace),
+            skill_global_dir=str(global_skills),
+            capabilities=json.dumps({"skills": {"enabled": True}}),
+        ),
+    )
+    monkeypatch.setattr(cli, "_query_current_skill_runtime", lambda *_: tuple(runtime))
+    monkeypatch.setattr(cli, "setup_logging", lambda *args, **kwargs: pytest.fail("plugins command initialized logging"))
+    monkeypatch.setattr(cli, "flush_process_sink", lambda *args, **kwargs: pytest.fail("plugins command flushed telemetry"))
+
+    def run(*args: str) -> str:
+        monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", *args])
+        cli.main()
+        return capsys.readouterr().out
+
+    installed = json.loads(run("install", str(source)))
+    assert installed["name"] == "complete-skill"
+    assert installed["enabled"] is False
+    assert installed["compatibility"]["status"] == "complete"
+
+    run("enable", "complete-skill")
+    listing = json.loads(run("list"))
+    package = listing["packages"][0]
+    assert package["saved_selection"] == "enabled"
+    assert package["current_runtime"] == "unavailable"
+    assert package["pending_restart"] is None
+
+    run("disable", "complete-skill")
+    listing = json.loads(run("list"))
+    assert listing["packages"][0]["saved_selection"] == "disabled"
+    assert listing["packages"][0]["current_runtime"] == "unavailable"
+    assert listing["packages"][0]["pending_restart"] is None
+
+    managed_skill = (
+        workspace / "skills" / ".managed" / "complete-skill" / "SKILL.md"
+    ).resolve()
+    runtime[:] = ["running", "authenticated live Skills catalog", {os.path.normcase(str(managed_skill))}]
+    run("enable", "complete-skill")
+    listing = json.loads(run("list"))
+    assert listing["packages"][0]["current_runtime"] == "discovered"
+    assert listing["packages"][0]["pending_restart"] is False
+
+    runtime[:] = ["running", "authenticated live Skills catalog", set()]
+    listing = json.loads(run("list"))
+    assert listing["packages"][0]["current_runtime"] == "not_discovered"
+    assert listing["packages"][0]["pending_restart"] is True
+
+    run("disable", "complete-skill")
+    listing = json.loads(run("list"))
+    assert listing["packages"][0]["saved_selection"] == "disabled"
+    assert listing["packages"][0]["current_runtime"] == "not_discovered"
+    assert listing["packages"][0]["pending_restart"] is False
+
+    class _RunningRuntime:
+        def acquire(self):
+            raise InstanceLockError("held")
+
+    monkeypatch.setattr(cli, "InstanceLock", lambda *_args, **_kwargs: _RunningRuntime())
+    with pytest.raises(SystemExit) as excinfo:
+        run("remove", "complete-skill")
+    assert excinfo.value.code == 2
+    assert (workspace / "skills" / ".managed" / "complete-skill" / "SKILL.md").exists()
+
+    class _StoppedRuntime:
+        def acquire(self):
+            return self
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cli, "InstanceLock", lambda *_args, **_kwargs: _StoppedRuntime())
+    run("remove", "complete-skill")
+    assert not (workspace / "skills" / ".managed" / "complete-skill").exists()
+    assert json.loads(run("list"))["packages"] == []
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [None, '{"skills":{"enabled":false}}'],
+)
+def test_cli_plugins_enable_requires_skills_capability_without_changing_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    capabilities: str | None,
+) -> None:
+    source = tmp_path / "complete-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: complete-skill\ndescription: Complete local package.\n---\n\nBody.\n",
+    )
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: SimpleNamespace(
+            workspace_dir=str(workspace),
+            skill_global_dir=str(global_skills),
+            **({} if capabilities is None else {"capabilities": capabilities}),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_query_current_skill_runtime",
+        lambda *_: ("not_running", "absent", None),
+    )
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "install", str(source)])
+    cli.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "enable", "complete-skill"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2
+    assert "Skills capability is enabled in CAPABILITIES" in capsys.readouterr().err
+    manifest = json.loads((workspace / "plugin-installs.json").read_text(encoding="utf-8"))
+    assert manifest["packages"]["complete-skill"]["enabled"] is False
+
+
+def test_cli_plugins_install_uses_configured_extension_skill_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "duplicate-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: duplicate-skill\ndescription: Imported package.\n---\n\nBody.\n",
+    )
+    extension = tmp_path / "extension-skills"
+    _write(
+        extension / "custom-folder" / "SKILL.md",
+        "---\nname: duplicate-skill\ndescription: Existing extension Skill.\n---\n\nBody.\n",
+    )
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    settings = SimpleNamespace(
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+        capabilities=json.dumps(
+            {"skills": {"options": {"directories": [str(extension)]}}}
+        ),
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "install", str(source)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2
+    assert "configured Skill 'duplicate-skill' already exists" in capsys.readouterr().err
+    assert not (workspace / "plugin-installs.json").exists()
+
+
+def test_cli_plugins_lists_adaptation_requirements_and_rejects_enable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "scripted-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: scripted-skill\ndescription: Keeps a script disabled.\n---\n"
+        "Read [the helper](scripts/run.py).\n",
+    )
+    script = b"raise RuntimeError('must never run')\n"
+    _write(source / "scripts" / "run.py", script)
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: SimpleNamespace(workspace_dir=str(workspace), skill_global_dir=str(global_skills)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_query_current_skill_runtime",
+        lambda *_: ("not_running", "absent", None),
+    )
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "install", str(source)])
+    cli.main()
+    installed = json.loads(capsys.readouterr().out)
+
+    assert installed["enabled"] is False
+    assert installed["compatibility"]["status"] == "needs-adaptation"
+    assert any(
+        requirement["kind"] == "script-runtime"
+        for requirement in installed["compatibility"]["requirements"]
+    )
+    copied_script = workspace / "skills" / ".managed" / "scripted-skill" / "scripts" / "run.py"
+    assert copied_script.read_bytes() == script
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "enable", "scripted-skill"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 2
+    assert copied_script.read_bytes() == script
+
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "list"])
+    cli.main()
+    listing = json.loads(capsys.readouterr().out)
+    package = listing["packages"][0]
+    assert package["saved_selection"] == "disabled"
+    assert package["compatibility"]["status"] == "needs-adaptation"
+    assert package["compatibility"]["requirements"][0]["name"] == "scripts/run.py"
+
+
+def test_current_runtime_query_falls_back_to_instance_lock_without_host_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    stopped = cli._query_current_skill_runtime(str(workspace))
+    assert stopped[0] == "not_running"
+
+    class _LockedRuntime:
+        def acquire(self):
+            raise InstanceLockError("held")
+
+    monkeypatch.setattr(cli, "InstanceLock", lambda *_args, **_kwargs: _LockedRuntime())
+    active = cli._query_current_skill_runtime(str(workspace))
+    assert active[0] == "unavailable"
 
 
 def _configure_cli_inspect(

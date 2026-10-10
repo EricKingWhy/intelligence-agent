@@ -1,0 +1,2 @@
+2026-10-10	#871 Docker exec stream cleanup; Spec and Standards reviews clean; tested response-stream close and replaced global collection with target weakref assertion.	7d840e104b1756f27a0998f59f0e79515bde6489..7862cafd2734b161fbcadc21aeb62d98ca6281d4
+2026-10-10	#871 validation red cleanup; Spec/Correctness and Standards reviews clean; removed process-wide GC and asserted callback result is concrete.	7862cafd2734b161fbcadc21aeb62d98ca6281d4..438e1e0e3b96e175f39cc47ea756fa57d0a1ddea

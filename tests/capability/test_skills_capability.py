@@ -12,7 +12,8 @@ from agent_harness.capability.base import (
     CapabilityRegistry,
     Degradation,
 )
-from agent_harness.capability.wiring import wire_capabilities
+from agent_harness.capability.config import ProviderConfig
+from agent_harness.capability.wiring import coerce_skill_path_list, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
@@ -211,6 +212,73 @@ class TestWiring:
         assert any(isinstance(t, LoadSkillTool) for t in wiring.tools)
 
     @pytest.mark.asyncio
+    async def test_new_runtime_loads_only_enabled_managed_skill_packages(self, tmp_path):
+        from agent_harness.capability.config import parse_capabilities_config
+        from agent_harness.skills.package_manager import SkillPackageManager
+
+        workspace = tmp_path / "workspace"
+        user_skill = workspace / "skills" / "user-skill" / "SKILL.md"
+        user_skill.parent.mkdir(parents=True)
+        user_skill.write_text(
+            "---\nname: user-skill\ndescription: User maintained.\n---\n\nUser body.\n",
+            encoding="utf-8",
+        )
+        source = tmp_path / "source" / "managed-skill"
+        (source / "references").mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\nname: managed-skill\ndescription: Imported complete package.\n---\n\n"
+            "Read [the reference](references/guide.md).\n",
+            encoding="utf-8",
+        )
+        (source / "references" / "guide.md").write_text("Managed reference.\n", encoding="utf-8")
+        manager = SkillPackageManager(workspace)
+        manager.install(source)
+        manager.enable("managed-skill")
+        scripted = tmp_path / "source" / "scripted-skill"
+        (scripted / "scripts").mkdir(parents=True)
+        (scripted / "SKILL.md").write_text(
+            "---\nname: scripted-skill\ndescription: Must remain disabled.\n---\n\n"
+            "Run [the helper](scripts/run.py).\n",
+            encoding="utf-8",
+        )
+        (scripted / "scripts" / "run.py").write_text("raise RuntimeError('never run')\n", encoding="utf-8")
+        manager.install(scripted)
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(workspace),
+            skill_global_dir=str(tmp_path / "no-global"),
+        )
+        registry = CapabilityRegistry()
+
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"skills": {}}'),
+            settings=settings,
+        )
+
+        capability = registry.get("skills")
+        assert {entry.name for entry in capability.catalog()} == {"user-skill", "managed-skill"}
+        load_tool = next(tool for tool in wiring.tools if isinstance(tool, LoadSkillTool))
+        result = await load_tool.execute(load_tool.args_schema(name="managed-skill"))
+        assert result.ok is True
+        assert result.data["content"] == "Read [the reference](references/guide.md)."
+        managed_entry = next(entry for entry in capability.catalog() if entry.name == "managed-skill")
+        reference = managed_entry.source_path.parent / "references" / "guide.md"
+        assert reference.read_text(encoding="utf-8") == "Managed reference.\n"
+
+        manager.disable("managed-skill")
+        next_runtime = CapabilityRegistry()
+        next_wiring = await wire_capabilities(
+            next_runtime,
+            parse_capabilities_config('{"skills": {}}'),
+            settings=settings,
+        )
+        assert {entry.name for entry in next_runtime.get("skills").catalog()} == {"user-skill"}
+        next_load_tool = next(tool for tool in next_wiring.tools if isinstance(tool, LoadSkillTool))
+        disabled_result = await next_load_tool.execute(next_load_tool.args_schema(name="managed-skill"))
+        assert disabled_result.ok is False
+
+    @pytest.mark.asyncio
     async def test_skills_disabled_is_skipped(self, tmp_path):
         settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
         registry = CapabilityRegistry()
@@ -256,6 +324,11 @@ class TestSkillsPathOptionCoercion:
         registry = CapabilityRegistry()
         await self._wire(registry, {"paths": str(entry.source_path)}, tmp_path)
         assert [e.name for e in registry.get("skills").catalog()] == ["manual-str"]
+
+    def test_user_home_is_expanded_for_runtime_skill_sources(self):
+        config = ProviderConfig(options={"directories": "~/skills"})
+
+        assert coerce_skill_path_list(config, "directories") == [Path.home() / "skills"]
 
     @pytest.mark.asyncio
     async def test_non_iterable_directories_raise_init_failed(self, tmp_path):
