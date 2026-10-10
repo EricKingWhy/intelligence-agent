@@ -452,7 +452,7 @@ class LocalArtifactStore(ArtifactStore):
         self._sync_blob_dirs(receipt.parent)
 
     def _publish_blob(self, data: bytes, sha256: str) -> None:
-        """staging → **读回自证** → fsync → hardlink 原子发布（全局对象根）。
+        """staging → fsync → **读回自证** → hardlink 原子发布（全局对象根）。
 
         自证的目的（#933 M-04）："**落盘字节** == 预期摘要"。所以校验必须读回**暂存文件**
         再算摘要（来源: DSH `attachment-local/src/store.ts:390-394` `digestFile`——它读文件

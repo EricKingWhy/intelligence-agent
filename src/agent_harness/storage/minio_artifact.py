@@ -15,13 +15,11 @@ Key 布局分两套（**文本**仍是会话命名空间，**字节**在 #933 M-
 
 - 文本 artifact：``{session_id}/{artifact_id}``（会话命名空间，未变）；
 - 字节 artifact：全局内容寻址对象 ``.attachments/objects/<sha[:2]>/<sha>``
-  ＋ 每会话回执对象 ``{session_id}/attachments/<sha>``（归属事实）。
-  见本文件字节路径段注释。
+  ＋ 每会话回执对象 ``{session_id}/attachments/<sha>``（归属事实，见 ``RemoteByteStoreMixin``）。
 """
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,8 +34,6 @@ from agent_harness.storage.artifact import (
     slice_artifact,
 )
 from agent_harness.storage.remote_byte_store import RemoteByteStoreMixin
-
-logger = logging.getLogger("agent_harness.storage.minio_artifact")
 
 
 class MinioArtifactStore(RemoteByteStoreMixin, ArtifactStore):

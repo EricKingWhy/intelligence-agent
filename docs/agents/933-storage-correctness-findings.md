@@ -57,8 +57,8 @@
 归属认升级前旧 key、字节/归属两侧畸形 id 零请求、全局对象被篡改 → `KeyError`；另 1 条
 `test_minio_load_bytes_roundtrip` 为 minio 单跑基线，原名
 `test_minio_save_bytes_uses_session_prefixed_key` 的用例改名 `..._writes_receipt_key_first`）。
-同票 `test_local_byte_store.py` 另加 M-16 两条（候选顺序契约 + 加一条候选的可扩展性），
-`tests/attachments` 全体 **85 → 103**。红：**`8 failed, 17 passed`**（当时该文件 17 条）；
+同票 `test_local_byte_store.py` 另加 M-16 5 条（候选顺序契约 + 加一条候选的可扩展性），
+`tests/attachments` 全体 **82 → 103**。红：**`8 failed, 17 passed`**（当时该文件 17 条）；
 绿：**`101 passed`**（`tests/attachments` 全体，改动后复测 103）。
 
 > 口径订正：本行初稿写"新增 6 条用例"，与 `git show 6bd66d01` 的 8 个新 `def test_` 及上述
@@ -90,7 +90,8 @@
 
 ## 3. M-16（P3）：读回候选不可扩展
 
-**第一性原理推导（一句话）**：候选清单是**布局演化的兼容面**，其构造与消费必须收口同一处，否则
+**第一性原理推导（一句话）**：候选清单是**布局演化的兼容面**，其构造与消费必须在**读回路径**
+收口同一处，否则
 "加一条候选"要在对象读与旁挂元数据读两处各改一次，漏一处得到"对象读得到、旁挂读不到"的静默错配
 （症状最轻：mime 退化成 `application/octet-stream`）。
 

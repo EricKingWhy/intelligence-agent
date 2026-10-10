@@ -1,13 +1,13 @@
 """S3 ArtifactStore（七牛云 Kodo S3 兼容）；SDK 仅在构造 Provider 时加载。
 
 #933 M-01：**字节路径不再按会话命名空间寻址**——字节对象落全局内容寻址根，
-本会话另存一份回执对象作为归属事实（详见本文件字节路径段注释）。文本路径
+本会话另存一份回执对象作为归属事实（字节契约见 `storage/remote_byte_store.py` 的
+`RemoteByteStoreMixin`）。文本路径
 （`{session_id}/{artifact_id}`）语义一字未动，仍是会话命名空间。
 """
 
 import importlib
 import json
-import logging
 from datetime import UTC, datetime
 
 from agent_harness.config import Settings
@@ -22,14 +22,12 @@ from agent_harness.storage.artifact import (
 )
 from agent_harness.storage.remote_byte_store import RemoteByteStoreMixin
 
-logger = logging.getLogger("agent_harness.storage.s3_artifact")
-
 
 class S3ArtifactStore(RemoteByteStoreMixin, ArtifactStore):
     """绑定 Session 命名空间，无需内存索引即可恢复 artifact_id 的 key。
 
     **文本** artifact 的 key 是 `{session_id}/{artifact_id}`（会话命名空间，未变）；
-    **字节** artifact 走全局内容寻址 + 会话回执（#933 M-01，见字节路径段）。
+    **字节** artifact 走全局内容寻址 + 会话回执（#933 M-01，见 `RemoteByteStoreMixin`）。
     """
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:

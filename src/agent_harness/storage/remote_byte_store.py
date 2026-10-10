@@ -4,15 +4,15 @@
 
 `S3ArtifactStore` 与 `MinioArtifactStore` 的字节路径**契约必须逐字相同**（spec 06 §9
 "MinIO Provider 可替换 Local Provider"，回归面由 `tests/attachments/test_byte_store_providers.py`
-的参数化组同时跑两遍钉住）。改动前这段逻辑在两个文件里各写一份（139 行逐字节相同），
+的参数化组同时跑两遍钉住）。改动前这段逻辑在两个文件里各写一份（140 行逐字节相同），
 违反"同一条规则只写一处"——本仓已因此吃过两次亏（`SESSION_KEY_PATTERN` 曾是第二份正则、
-`artifact.py:14` 的"按 session 隔离 key"是第二份过期口径）。
+`artifact.py` 的 `SESSION_KEY_PATTERN`（"按 session 隔离 key"）是第二份过期口径）。
 
-两个 Provider 的差异只有四个 SDK 钩子（`_sdk_session` / `_client_kwargs` / `_bucket` /
+两个 Provider 的差异只有五个钩子（`_session_id` / `_sdk_session` / `_client_kwargs` / `_bucket` /
 `_client_error`），全部由各自 `__init__` 提供 ⇒ 其余（key 形状、候选顺序、发布顺序、
 自证、归属）收口到这里一份。
 
-## 布局与不变量（**正本在此**，两个 Provider 只留一行指针）
+## 布局与不变量（**正本在此**；两个 Provider 各以简短注释指向本模块：s3 3 处、minio 2 处）
 
     全局对象（内容寻址，跨会话/fork 可寻址）: <bucket>/{GLOBAL_BYTE_KEY_PREFIX}/<sha[:2]>/<sha>
     本会话回执（归属事实）:                    <bucket>/{session_id}/attachments/<sha>

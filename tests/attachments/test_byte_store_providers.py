@@ -127,6 +127,7 @@ def test_minio_load_bytes_rejects_malformed_id_without_network(
     with pytest.raises(KeyError):
         asyncio.run(store.load_bytes(bad))
 
+
 # ── #933 M-01：远端 Provider 的全局寻址 + 发送侧归属（会话回执）──────────────
 #
 # 缺陷：`load_uploaded_bytes` 的 ABC 默认实现 = `load_bytes`，而 S3/MinIO 的字节 key 是

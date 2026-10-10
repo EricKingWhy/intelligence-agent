@@ -77,9 +77,6 @@ class FakeSDKSession:
         return _ClientCM()
 
 
-__all__ = ["FakeBody", "FakeS3Client", "FakeSDKSession"]
-
-
 class FakeKeyedS3Client:
     """**按键存取**的 s3 替身：支持多个对象、缺键抛 `NoSuchKey`、记录请求顺序。
 
