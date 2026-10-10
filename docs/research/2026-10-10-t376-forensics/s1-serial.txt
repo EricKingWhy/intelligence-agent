@@ -147,12 +147,12 @@ result_data = {'tool_call_id': 'malformed-result', 'content': '{}', 'budget_delt
             run_id=run_id,
         )
         session.append(TOOL_RESULT, result_data, run_id=run_id)
-    
+
         operation_ledger = SqliteOperationLedger(tmp_path / "harness.db")
 >       await operation_ledger.initialize()
 
-tests/recovery/test_constraint_input_crash.py:146: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/recovery/test_constraint_input_crash.py:146:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 src/agent_harness/storage/sqlite.py:176: in initialize
     await connection.execute("PRAGMA journal_mode=WAL")
 .venv/lib/python3.13/site-packages/aiosqlite/core.py:223: in execute
@@ -164,23 +164,23 @@ src/agent_harness/storage/sqlite.py:176: in initialize
 .venv/lib/python3.13/site-packages/aiosqlite/core.py:160: in _execute
     return await future
            ^^^^^^^^^^^^
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 tx = <_queue.SimpleQueue object at 0x7f29ad3160e0>
 
     def _connection_worker_thread(tx: _TxQueue):
         """
         Execute function calls on a separate thread.
-    
+
         :meta private:
         """
         while True:
             # Continues running until all queue items are processed,
             # even after connection is closed (so we can finalize all
             # futures)
-    
+
             future, function = tx.get()
-    
+
             try:
                 LOG.debug("executing %s", function)
 >               result = function()
