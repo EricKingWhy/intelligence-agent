@@ -264,8 +264,8 @@ const mutations = {
   // whole guard and the unit suite), the exit-code value and its position on the
   // kept path (P3), and the stray second recursive delete (P3).
   'sweep shape-check arming requirement dropped (#904)': swap(
-    "        (policy === 'sweep' || armsBackupName) &&",
-    '        false &&',
+    "      const mustArm = policy === 'sweep' || armsBackupName",
+    '      const mustArm = false',
   ),
   'sweep exit-code value pin dropped (#904)': swap(
     '/^\\s*SetErrorLevel\\s+2\\s*$/i.test(line)',
@@ -286,8 +286,16 @@ const mutations = {
   // whole suite stayed green (measured in #919). The mutation limits the
   // requirement back to the sweep; the promote fixture is what has to catch it.
   'backup-site arming requirement dropped (#919 Q1)': swap(
-    "        (policy === 'sweep' || armsBackupName) &&",
-    "        policy === 'sweep' &&",
+    "      const mustArm = policy === 'sweep' || armsBackupName",
+    "      const mustArm = policy === 'sweep'",
+  ),
+  // Q2: the arming window was satisfied by any `"1"` in it, so a second
+  // assignment that turned the flag off again just below the arming passed the
+  // whole guard and suite (measured in #919). The mutation restores that
+  // presence reading; the sweep fixture's two-assignment case catches it.
+  'arming presence check instead of the last assignment (#919 Q2)': swap(
+    "      const armed = lastArmed !== undefined && lastArmed.value === '1'",
+    "      const armed = arming.some((entry) => entry.value === '1')",
   ),
 
   // The node runtime lock validator compared the pin's major against

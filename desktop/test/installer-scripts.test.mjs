@@ -1607,6 +1607,22 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         },
       ],
     )
+    // #919 Q2: the flag is read when iaPrepareDelete runs, so the LAST
+    // assignment above the call is the one that decides — arming "1" and
+    // turning it off again right after used to satisfy the presence check
+    // (measured).
+    assert.deepEqual(
+      unguardedBackupDelete(
+        swapped('  Call iaPrepareDelete', '  StrCpy $iaDeleteShapeCheck "0"\n  Call iaPrepareDelete'),
+        { sitePolicies: DELETE_SITE_POLICIES },
+      ),
+      [
+        {
+          line: 15,
+          what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        },
+      ],
+    )
     // FileFunc's argument order is "[path]" $result. Swapped, the macro's last
     // Pop lands on $INSTDIR: on the real uninstaller the delete pass then
     // enumerated ".old-*" relative, found nothing, and deleted nothing while the

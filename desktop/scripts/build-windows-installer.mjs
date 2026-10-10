@@ -1240,16 +1240,20 @@ export function unguardedBackupDelete(source, options = {}) {
         }
         return false
       })()
-      if (
-        (policy === 'sweep' || armsBackupName) &&
-        !lines
-          .slice(blockStart, prepareIndex)
-          .some(
-            (line, offset) =>
-              onDeletePath(blockStart + offset) &&
-              /^\s*StrCpy\s+\$iaDeleteShapeCheck\s+"1"\s*$/i.test(line),
-          )
-      ) {
+      // #919 Q2: the flag is read when iaPrepareDelete runs, so the LAST
+      // assignment above the call is the one that decides. The window used to
+      // be satisfied by any `"1"` in it, so arming and then turning the flag
+      // off again right after passed the whole guard and suite (measured).
+      const arming = []
+      for (let j = blockStart; j < prepareIndex; j += 1) {
+        if (!onDeletePath(j)) continue
+        const assignment = /^\s*StrCpy\s+\$iaDeleteShapeCheck\s+"([01])"\s*$/i.exec(lines[j])
+        if (assignment !== null) arming.push({ index: j, value: assignment[1] })
+      }
+      const lastArmed = arming[arming.length - 1]
+      const mustArm = policy === 'sweep' || armsBackupName
+      const armed = lastArmed !== undefined && lastArmed.value === '1'
+      if (mustArm && !armed) {
         problems.push({
           line: i + 1,
           what: `${policy === 'sweep' ? 'the sweep' : 'the delete of a $iaBackupDirectory candidate'} does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built`,
