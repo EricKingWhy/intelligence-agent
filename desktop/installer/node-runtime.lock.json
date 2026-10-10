@@ -26,7 +26,7 @@
   "requirements": {
     "engines": ">=22.1",
     "minimumMajor": 22,
-    "note": "tui/package.json engines.node 的镜像：desktop/test/installer-node-runtime.test.mjs 以严格相等钉住本行字符串与 minimumMajor；validateNodeRuntimeLockfile 按 minimumMajor 守 major 底限"
+    "note": "tui/package.json engines.node 的镜像：desktop/test/installer-node-runtime.test.mjs 以严格相等钉住本行字符串与 minimumMajor；validateNodeRuntimeLockfile 按 engines 的 major.minor 元组守底限（minimumMajor 是同一底限的整数镜像，#919 Q11）"
   },
   "layout": {
     "resourcesDir": "node",

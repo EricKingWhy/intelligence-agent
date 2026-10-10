@@ -3,12 +3,13 @@
  *
  * The nsh mutation check (teeth-check.mjs) shows the shape assertions bite the
  * product. This one shows the *guard* assertions bite the guard: each mutation
- * reverts one rule to its earlier form, and `test/installer-scripts.test.mjs`
+ * reverts one rule to its earlier form, and the guard test files
+ * (test/installer-scripts.test.mjs and test/installer-node-runtime.test.mjs)
  * must then fail. A survivor means a fixture that does not pin its rule.
  *
- * Each mutation is applied to the guard module in place, the guard test file is
- * run, and the original bytes are restored and verified. The working tree may
- * carry CRLF (core.autocrlf=true and .gitattributes does not pin .mjs), so
+ * Each mutation is applied to the guard module in place, the guard test files
+ * are run, and the original bytes are restored and verified. The working tree
+ * may carry CRLF (core.autocrlf=true and .gitattributes does not pin .mjs), so
  * mutations are applied to the LF form and written back with the file's own EOL.
  *
  * Usage (from desktop/): node test/harness/teeth-check-guards.mjs
@@ -278,6 +279,16 @@ const mutations = {
     '    if (!/RMDir\\s+\\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue',
     '    if (true) continue',
   ),
+
+  // --- rule #919 Q11 added ---
+  // The node runtime lock validator compared the pin's major against
+  // minimumMajor only; a 22.0.x pin (below the TUI's ">=22.1" floor) passed the
+  // validator and the whole suite (measured in #919). The mutation reverts the
+  // engines tuple comparison to that shape.
+  'node engines minor floor dropped (#919 Q11)': swap(
+    '    if (minor < floorMinor) {',
+    '    if (false) {',
+  ),
 }
 
 let survivors = 0
@@ -299,7 +310,11 @@ for (const [name, mutate] of Object.entries(mutations)) {
   let failed = false
   let tail = ''
   try {
-    await execute(process.execPath, ['--test', 'test/installer-scripts.test.mjs'], { cwd: desktop })
+    await execute(
+      process.execPath,
+      ['--test', 'test/installer-scripts.test.mjs', 'test/installer-node-runtime.test.mjs'],
+      { cwd: desktop },
+    )
   } catch (error) {
     failed = true
     tail = String(error.stdout || '')

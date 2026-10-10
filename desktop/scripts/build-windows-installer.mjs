@@ -220,12 +220,39 @@ export function validateNodeRuntimeLockfile(lock) {
   }
   const node = lock.node
   if (node === null || typeof node !== 'object') failNode('missing "node" pin')
-  const [major] = String(node.version ?? '').split('.').map(Number)
+  const [majorText, minorText] = String(node.version ?? '').split('.')
+  const major = Number(majorText)
   if (!Number.isInteger(major)) failNode(`bad node.version ${String(node.version)}`)
   const minimum = lock.requirements?.minimumMajor
   if (!Number.isInteger(minimum)) failNode('requirements.minimumMajor must be an integer')
   if (major < minimum) {
     failNode(`node ${node.version} is below requirements.minimumMajor ${String(minimum)} (tui engines)`)
+  }
+  // The integer minimum is only the mirror of the TUI floor; the floor itself
+  // carries a minor (`>=22.1`), and a pin like 22.0.x satisfies the major check
+  // while still missing the runtime the client needs (#919 Q11). Parse the
+  // floor and compare the tuple: below the floor's major fails outright, at it
+  // the minor decides.
+  const engines = lock.requirements?.engines
+  const floor = /^\s*>=\s*(\d+)(?:\.(\d+))?/.exec(String(engines ?? ''))
+  if (floor === null) {
+    failNode(`requirements.engines must be a ">=<major>[.<minor>]" floor, got ${JSON.stringify(engines)}`)
+  }
+  const floorMajor = Number(floor[1])
+  const floorMinor = floor[2] === undefined ? 0 : Number(floor[2])
+  if (major < floorMajor) {
+    failNode(`node ${node.version} is below requirements.engines ${JSON.stringify(engines)} (tui engines)`)
+  }
+  if (major === floorMajor) {
+    const minor = Number(minorText)
+    if (!Number.isInteger(minor)) {
+      failNode(
+        `node.version ${String(node.version)} has no minor to hold the requirements.engines floor ${JSON.stringify(engines)}`,
+      )
+    }
+    if (minor < floorMinor) {
+      failNode(`node ${node.version} is below requirements.engines ${JSON.stringify(engines)} (tui engines)`)
+    }
   }
   if (typeof node.url !== 'string' || !node.url.startsWith('https://')) failNode('node.url must be https')
   if (!SHA256_RE.test(node.sha256 ?? '')) failNode('node.sha256 must be 64 lowercase hex chars')
