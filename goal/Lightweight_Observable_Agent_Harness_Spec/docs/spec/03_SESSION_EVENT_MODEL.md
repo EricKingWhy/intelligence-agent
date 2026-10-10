@@ -120,7 +120,8 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 词表已重新生成（`docs/EVENT_VOCABULARY.md` 的 `RUN_PAUSED` / `RUN_RESUMED` 条目）；本节仍是这两个名字的**字段语义权威**。
 
 - **`run/paused`**：#305 基线 `reason ∈ {budget_exhausted, deadline, stuck}`；个人工作台后续扩展
-  `client_absent`（仅受客户端在场协议管理的 Run）。`trigger_dimension`（触发维度、stuck 模式或
+  `client_absent`（仅受客户端在场协议管理的 Run）与 `user_input`（steer 直送路径，
+  `src/agent_harness/agent/run_budget.py` 的 `REASON_USER_INPUT`）。`trigger_dimension`（触发维度、stuck 模式或
   `client_presence`）、预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 /
   下一步安全动作）、`closeout_source ∈ {model, deterministic}`、`resume_requirements`（预算与
   deadline 暂停为空）。`client_absent` 的 `closeout_source` MUST 为 `deterministic`，不得额外发起模型请求。
