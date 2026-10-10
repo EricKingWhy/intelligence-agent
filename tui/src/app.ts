@@ -28,6 +28,7 @@ import {
   applyEvent,
   createState,
   type ConversationState,
+  type EventEnvelope,
   type Turn,
 } from "./adapter.ts";
 import { formatTokens } from "./format.ts";
@@ -271,7 +272,14 @@ export class TuiApp {
    *  幂等游标回填 max seq。重放不叠加（不变量 #22：重建后状态仍可对账）。 */
   async rebuildFromHistory(): Promise<void> {
     const gen = this.generation;
-    const events = await this.api.getEvents(this.options.sessionId);
+    let events: EventEnvelope[];
+    try {
+      events = await this.api.getEvents(this.options.sessionId);
+    } catch (error) {
+      // 旧会话的失败同样丢弃（#961）：否则调用方会把它当新会话的错误写进 chat。
+      if (gen !== this.generation) return;
+      throw error;
+    }
     // 期间切过会话（#958）：这是旧会话的结果，丢弃：不改 state / 游标、不渲染。
     if (gen !== this.generation) return;
     this.state = createState();
@@ -306,7 +314,8 @@ export class TuiApp {
                 rebuild = this.rebuildFromHistory();
               },
               onClosed: (reason, error) => {
-                if (reason === "error" && error !== undefined) {
+                // 切会话 abort 的旧流（#961）：同 onFrame 的 generation 守卫，不写进新会话 chat。
+                if (reason === "error" && error !== undefined && gen === this.generation) {
                   this.appendNote(`stream reconnect: ${String(error)}`);
                 }
                 resolve(reason);
