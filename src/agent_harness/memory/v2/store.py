@@ -198,6 +198,16 @@ class SqliteMemoryV2Store:
     # ----------------------------------------------------------------------------------
     # 写路径
     # ----------------------------------------------------------------------------------
+    #
+    # #376-1：这里的每个写方法都自开 `BEGIN IMMEDIATE`（直接，或经 `write_connection`），
+    # 挂 `@retry_on_busy`（#515 模式，正本 `storage/sqlite.py`）。重试安全性：`BEGIN
+    # IMMEDIATE` 是方法体内的第一条语句，写锁超时只可能发生在它、此时事务未提交，整块重跑
+    # 等价于首次执行；拿到写锁后本连接独占写者，后续语句不会再撞 `database is locked`。
+    #
+    # 借用路径（`create` / `update` / `invalidate` 的 `connection=`）下装饰器是 no-op：
+    # 借用者只在"调用方事务已持有写锁"时被传入（唯一借用方 `capability.*_in` 由
+    # `jobs.commit_with_outcome` 的 `BEGIN IMMEDIATE` 之内调用）⇒ 同一条连接不可能再超时。
+    # 该前提写在测试里（`tests/memory/v2/test_v2_write_retry.py`），不是新契约。
 
     @retry_on_busy
     async def create(

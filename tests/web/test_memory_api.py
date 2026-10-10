@@ -860,10 +860,12 @@ async def test_memory_write_lock_exhaustion_maps_to_503(
     一律翻成结构化 503，不再裸 500。
 
     与 #515 已武装的端点同款：`storage_http_status` 只认类型，每个端点在自己的 except
-    元组里声明翻译（不靠全局 handler——它的 `Exception` 臂只给 500）。这里在 **store**
-    边界注入 `StorageBusyError`（写锁耗尽的真实发生地；store 内的重试链→耗尽由
-    `tests/memory/v2/test_v2_write_retry.py` 的行为测试证明），断言四条路由各自的
-    except 臂都把 HTTP 面翻成 503 而不是 500。
+    元组里声明翻译（不靠全局 handler——它的 `Exception` 臂只给 500）。与 #515 唯一不同
+    之处是 **detail 形状**：memory 族用带机读码的 `{"code": "storage_busy", "message"}`
+    （同端点已有多类 503，按 ADR-0035 §3 必须带码；前端 `memoryV2Api.ts` 读 `detail.code`）。
+    这里在 **store** 边界注入 `StorageBusyError`（写锁耗尽的真实发生地；store 内的重试链→
+    耗尽由 `tests/memory/v2/test_v2_write_retry.py` 的行为测试证明），断言四条路由各自的
+    except 臂都把 HTTP 面翻成带码 503 而不是 500。
     """
     from agent_harness.memory.v2.store import SqliteMemoryV2Store
     from agent_harness.storage.sqlite import StorageBusyError
@@ -887,7 +889,9 @@ async def test_memory_write_lock_exhaustion_maps_to_503(
     response = getattr(client, http_method)(request_path, **kwargs)
 
     assert response.status_code == 503, response.text
-    assert "写锁" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["code"] == "storage_busy", detail
+    assert "写锁" in detail["message"]
 
 
 @pytest.mark.asyncio

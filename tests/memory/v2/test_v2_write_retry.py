@@ -22,9 +22,17 @@
 `BEGIN IMMEDIATE` 持有写锁（WAL 下读者不受影响、写者阻塞）；把 memory-v2 的
 `BUSY_TIMEOUT_MS` 调小让每次尝试快速失败，避免真实 10s 等待拖垮墙钟。
 
-覆盖面：`SqliteMemoryV2Store` 与 `SqliteMemoryV2JobStore` 里**所有会开写事务的公开
-方法**——既含直接 `BEGIN IMMEDIATE` 的（`delete` / `bulk_delete` / `update_settings`
-等），也含经 `write_connection` 自开事务的（`create` / `update` / `invalidate`）。
+覆盖面：`SqliteMemoryV2Store` 与 `SqliteMemoryV2JobStore` 里**请求 / 后台写路径上、
+自开写事务的公开方法**——既含直接 `BEGIN IMMEDIATE` 的（`delete` / `bulk_delete` /
+`update_settings` 等），也含经 `write_connection` 自开事务的（`create` / `update` /
+`invalidate`）。两处**故意不挂**，不是遗漏（复审 F3 / F1）：
+
+- `initialize`：装配期 DDL（`PRAGMA journal_mode=WAL` + 建表），不属请求 / 后台写路径；
+  它的失败在装配期被折成 `DegradedReason.INIT_FAILED`，与 #376 的 HTTP 500 不同形。
+- `commit_with_outcome`（`jobs.py`）：它在事务里执行**调用方传入的** `work`（executor
+  的 apply 回调会改写调用方的 `_RunState`）。整块重跑会重复那份外部副作用，不满足
+  「整块重跑等价首次」的前提——见该方法处的注释与
+  `test_commit_with_outcome_is_not_retry_wrapped`。它与 #376 的 HTTP 失败路径无关。
 
 `create` / `update` / `invalidate` 另有一条 `connection=` 借用路径（供 `*_in` 在
 调用方的事务里写）：同一装饰器包住这条路径并无害——写锁在事务拥有者
@@ -41,10 +49,11 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import aiosqlite
 import pytest
 import pytest_asyncio
 
-from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.storage.sqlite import StorageBusyError
@@ -118,7 +127,7 @@ async def test_update_settings_retries_through_transient_lock(store: SqliteMemor
     这是 #376 票面 500 的直接解法：`update_settings` 的 `BEGIN IMMEDIATE` 在瞬时
     竞争窗口内自愈，不再把 `OperationalError` 打到 HTTP 面。
     """
-    holder = _LockHolder(store.database_path, hold_seconds=0.5)
+    holder = _LockHolder(store.database_path, hold_seconds=0.2)
     holder.start()
     try:
         settings = await store.update_settings(USER_A, recall_enabled=False)
@@ -136,7 +145,7 @@ async def test_create_retries_through_transient_lock(store: SqliteMemoryV2Store)
     证明重试覆盖的不止 `update_settings` 那条直接 `BEGIN IMMEDIATE`，`create` 的
     自开事务路径同样在场。
     """
-    holder = _LockHolder(store.database_path, hold_seconds=0.5)
+    holder = _LockHolder(store.database_path, hold_seconds=0.2)
     holder.start()
     try:
         created = await store.create(make_draft(), USER_A)
@@ -149,7 +158,7 @@ async def test_create_retries_through_transient_lock(store: SqliteMemoryV2Store)
 @pytest.mark.asyncio
 async def test_enqueue_retries_through_transient_lock(jobs: SqliteMemoryV2JobStore) -> None:
     """job 存储的写路径同样自愈（formation job 入队是请求/后台热路径）。"""
-    holder = _LockHolder(jobs.database_path, hold_seconds=0.5)
+    holder = _LockHolder(jobs.database_path, hold_seconds=0.2)
     holder.start()
     try:
         job = await jobs.enqueue(idempotency_key="retry-1", trusted=USER_A, session_id="retry-1")
@@ -237,10 +246,12 @@ async def test_non_lock_operational_error_is_not_retried(tmp_path: Path, monkeyp
         (
             SqliteMemoryV2JobStore,
             (
+                # `commit_with_outcome` **故意不在列**：它执行调用方传入的 `work`，整块
+                # 重跑会重复外部副作用（复审 F1）——由
+                # `test_commit_with_outcome_is_not_retry_wrapped` 反向钉住。
                 "enqueue",
                 "claim",
                 "transition",
-                "commit_with_outcome",
                 "start_protected_fact_extraction",
                 "save_protected_fact_candidates",
                 "finish_protected_fact_extraction",
@@ -249,14 +260,102 @@ async def test_non_lock_operational_error_is_not_retried(tmp_path: Path, monkeyp
     ],
 )
 def test_write_methods_are_retry_wrapped(store_cls, method_names) -> None:
-    """memory-v2 两个 Store 的每个自持写事务方法都必须挂上重试包装（#515 模式）。
+    """memory-v2 两个 Store 请求 / 后台写路径上的自持写事务方法都必须挂上重试包装。
 
     读方法（get / list / latest / pending / get_settings）不在范围内：WAL 下读者不被
-    写者阻塞，没有同样的失败形态。用 `__wrapped__`（functools.wraps 产物）证明包装
-    真的在。
+    写者阻塞，没有同样的失败形态；`initialize`（装配期 DDL）与 `commit_with_outcome`
+    （非幂等 `work`）是**故意排除**，见模块 docstring。用 `__wrapped__`（functools.wraps
+    产物）证明包装真的在。本用例是**在场性**检查（列出的必须挂），不是完备性闸门——
+    新增写方法仍需在实现时自行挂上并补进列表。
     """
     for name in method_names:
         method = getattr(store_cls, name)
         assert getattr(method, "__wrapped__", None) is not None, (
             f"{store_cls.__name__}.{name} 未挂锁竞争重试（#376-1 / #515 模式）"
         )
+
+
+# --------------------------------------------------------------------------------------
+# 路径类别覆盖：耗尽分支不止 update_settings 一条（复审 STD-5）
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_exhaustion_raises_storage_busy(store: SqliteMemoryV2Store) -> None:
+    """`write_connection` 自开事务这一类路径的耗尽分支（对照 `update_settings` 的直开）。
+
+    `create` 经 `write_connection` 自开 `BEGIN IMMEDIATE`，与 `update_settings` 直接
+    `BEGIN IMMEDIATE` 是两类不同的落点——耗尽映射两类都必须成立，否则只测一处会漏。
+    """
+    holder = _LockHolder(store.database_path)
+    holder.start()
+    try:
+        with pytest.raises(StorageBusyError) as excinfo:
+            await store.create(make_draft(), USER_A)
+    finally:
+        holder.stop()
+    assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_exhaustion_raises_storage_busy(jobs: SqliteMemoryV2JobStore) -> None:
+    """job 存储这一类路径的耗尽分支。"""
+    holder = _LockHolder(jobs.database_path)
+    holder.start()
+    try:
+        with pytest.raises(StorageBusyError):
+            await jobs.enqueue(
+                idempotency_key="exhaust", trusted=USER_A, session_id="exhaust")
+    finally:
+        holder.stop()
+
+
+# --------------------------------------------------------------------------------------
+# 边界：commit_with_outcome 故意不挂重试（复审 F1）
+# --------------------------------------------------------------------------------------
+
+
+def test_commit_with_outcome_is_not_retry_wrapped() -> None:
+    """`commit_with_outcome` 不得被重试包装：它在事务里执行调用方传入的 `work`，整块
+    重跑会重复那份外部副作用。反向断言 `__wrapped__` 缺席，与正向清单互补。"""
+    assert getattr(
+        SqliteMemoryV2JobStore.commit_with_outcome, "__wrapped__", None
+    ) is None, (
+        "commit_with_outcome 挂了重试——它执行调用方传入的 work，重跑会重复副作用（#376-1 F1）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_with_outcome_work_runs_once_under_commit_lock_error(
+    jobs: SqliteMemoryV2JobStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """锁错误落在 `work` 之后（强制首个 `commit()` 抛 `database is locked`）时，`work`
+    只跑一次、异常原样上抛——不重试、不重复副作用。
+
+    这直接钉住 F1：若把本方法挂上 `retry_on_busy`，同一次 `work` 会被执行两遍
+    （executor 的 apply 回调用它改写调用方的 `_RunState`，计数与 memory_ids 会翻倍）。
+    """
+    await jobs.enqueue(idempotency_key="f1", trusted=USER_A, session_id="f1")
+    claimed = await jobs.claim(worker_id="w1")
+    assert claimed is not None
+
+    calls = {"work": 0, "commit": 0}
+    real_commit = aiosqlite.Connection.commit
+
+    async def flaky_commit(self) -> None:
+        calls["commit"] += 1
+        if calls["commit"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        await real_commit(self)
+
+    async def work(connection) -> str:
+        calls["work"] += 1
+        return "ok"
+
+    monkeypatch.setattr(aiosqlite.Connection, "commit", flaky_commit)
+    with pytest.raises(sqlite3.OperationalError):
+        await jobs.commit_with_outcome(
+            job_id=claimed.job_id, worker_id="w1",
+            outcome=MemoryJobOutcome.COMMITTED, work=work)
+
+    assert calls["work"] == 1, f"work 被执行了 {calls['work']} 次（重试重复副作用）"
