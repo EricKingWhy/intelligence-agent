@@ -46,6 +46,20 @@ def _to_lf(text: str) -> str:
     return text.replace("\r\n", "\n")
 
 
+def _kinds(text: str) -> list[str]:
+    """按 CRLF / 裸 CR / LF 三类枚举 text 里**实际存在**的行尾记号。
+
+    对文件与 old_string 走同一套枚举，输出的两个集合才可比（#851 P2）。
+    """
+    crlf = text.count("\r\n")
+    present = (
+        ("CRLF（\\r\\n）", crlf),
+        ("裸 CR（\\r）", text.count("\r") - crlf),
+        ("LF（\\n）", text.count("\n") - crlf),
+    )
+    return [label for label, n in present if n]
+
+
 def line_ending_mismatch(content: str, old_string: str) -> tuple[str, str] | None:
     """内容与 old_string 只在行尾上不同时，返回 (文件行尾, old_string 行尾)。
 
@@ -55,33 +69,46 @@ def line_ending_mismatch(content: str, old_string: str) -> tuple[str, str] | Non
     只在调用方已经确认「字节精确 + 主导行尾归一化都没命中」之后才调用（#851）。
     判据：把 CRLF 与裸 CR 都折成 LF 后能命中，即差异只在行尾编码上。
     混行尾文件在主导行尾归一化下会落空，但这里仍能命中，正是本条存在的意义。
+
+    两侧行尾都按实际种类枚举（#851 P2）：只取「主导/最后一个」行尾会在混杂时
+    拼出自相矛盾的句子（文件是 LF、old 也是 LF 却称「两者只在行尾上不同」）。
+    若枚举后两侧种类集合**完全相同**（正常不会发生：折平能命中而字节不命中，
+    只可能是行尾编码差异），降级为 None——不误报。
+
+    `old_string` 里**一个 `\\n` 都没有**（例如整段由裸 CR 分隔）时也返回 None：
+    无法命名它的「行尾差异」，保守起见不提行尾。裸 CR 分隔的内容在 read 的展示
+    文本里通常带不出裸 CR，据此把它判成「行尾差异」更可能掩盖真正的抄错。
     """
     canonical_content = content.replace("\r\n", "\n").replace("\r", "\n")
     canonical_old = old_string.replace("\r\n", "\n").replace("\r", "\n")
     if canonical_old not in canonical_content:
         return None
-    old_newline = "\\r\\n" if "\r\n" in old_string else "\\n" if "\n" in old_string else None
-    if old_newline is None:
+    if "\n" not in old_string:
         return None
-    crlf = content.count("\r\n")
-    kinds = [
-        label
-        for label, present in (("\\r\\n", crlf), ("\\r", content.count("\r") - crlf),
-                               ("\\n", content.count("\n") - crlf))
-        if present
-    ]
-    if not kinds:
+    file_kinds = _kinds(content)
+    old_kinds = _kinds(old_string)
+    if not file_kinds or not old_kinds or file_kinds == old_kinds:
         return None
-    file_newline = " / ".join(kinds) + (" 混用" if len(kinds) > 1 else "")
-    return (file_newline, old_newline)
+    return (" / ".join(file_kinds), " / ".join(old_kinds))
 
 
 def not_found_hint(content: str, old_string: str) -> str:
-    """未命中时的可执行后缀；差异不止行尾时返回空串（#851 验收 2 的判别力）。"""
+    """未命中时的可执行后缀；差异不止行尾时返回空串（#851 验收 2 的判别力）。
+
+    混行尾的文件（#851 P1）不套统一后缀：对这种文件「按该文件的行尾改写
+    old_string」是不可执行的指令（段与段行尾不同，照做仍命中不了），
+    只给唯一可行的动作——用 write 整文件重写。
+    """
     mismatch = line_ending_mismatch(content, old_string)
     if mismatch is None:
         return ""
     file_newline, old_newline = mismatch
+    if " / " in file_newline:
+        return (
+            f"该文件的行尾是混用的（{file_newline}），段与段的行尾并不一致；"
+            f"old_string 的行尾是 {old_newline}。"
+            f"这种文件无法靠改写 old_string 的行尾命中，请改用 write 整文件重写。"
+        )
     return (
         f"该文件的行尾是 {file_newline}，old_string 的是 {old_newline}，"
         f"两者只在行尾上不同。请按该文件的行尾改写 old_string 后重试，"

@@ -320,14 +320,19 @@ class TestEditNotFoundHint:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
         assert "行尾" in msg
-        assert "\\r" in msg
+        assert "裸 CR" in msg
+        assert "CRLF" not in msg
         assert sandbox.read_text("f.py") == "a = 1\rb = 2\r"
 
     @pytest.mark.asyncio
     async def test_mixed_line_endings_report_line_ending_hint(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """混行尾文件 + 能归一化命中的 old_string ⇒ 同样点名行尾事实。"""
+        """混行尾文件 + 能归一化命中的 old_string ⇒ 点名行尾事实，且指向 write。
+
+        #851 P1：混行尾文件里「按该文件的行尾改写 old_string」不可执行
+        （段与段行尾不同，照做仍 count()==0），这条指令必须不出现。
+        """
         sandbox.write_text("f.py", "a = 1\r\nb = 2\nc = 3\n")
 
         result = await executor.execute(
@@ -342,7 +347,39 @@ class TestEditNotFoundHint:
         assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
         msg = result.result.message
         assert "行尾" in msg
+        assert "混用" in msg
+        assert "CRLF" in msg
+        assert "LF" in msg
+        assert "write" in msg
+        assert "按该文件的行尾改写" not in msg
         assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\nc = 3\n"
+
+    @pytest.mark.asyncio
+    async def test_all_fields_bare_cr_does_not_report_line_ending_hint(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """#851 P4-逻辑：old_string 一个 LF 都没有（全裸 CR 分隔）⇒ 不提行尾。
+
+        混行尾文件不走归一化，old_string 只有折平行尾才命中；此时两侧种类集合
+        确实不同（本该报行尾），但 old_string 里连一个 `\\n` 都没有，无法命名
+        它的「行尾差异」，保守起见不误报——否则会掩盖真正的上下文抄错。
+        """
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "a = 1\rb = 2",
+                "new_string": "a = 9\rb = 2",
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        msg = result.result.message
+        assert "未找到匹配的字符串" in msg
+        assert "行尾" not in msg
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"
 
     @pytest.mark.asyncio
     async def test_plain_context_typo_does_not_mention_line_endings(
