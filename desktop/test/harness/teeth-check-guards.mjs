@@ -276,8 +276,20 @@ const mutations = {
     'keptExitLevel(lines, blockStart - 1, blockEnd, onDeletePath)',
   ),
   'stray recursive-delete rule dropped (#904)': swap(
-    '    if (!/RMDir\\s+\\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue',
+    '    if (!/RMDir\\s+\\/r/i.test(outsideStrings(lines[i])) || deleteLine.test(lines[i])) continue',
     '    if (true) continue',
+  ),
+  // Q4: the prepared-target delete's option-carrying spelling (`/REBOOTOK`
+  // between `/r` and the target) is the same delete, and a `RMDir /r` inside a
+  // message string is not a delete statement. Each reverted alone makes its
+  // fixture report (measured in #919).
+  'prepared-target delete options no longer recognized (#919 Q4)': swap(
+    '(?:\\s+\\/[A-Za-z]+)*\\s+',
+    '\\s+',
+  ),
+  'stray scan reads string contents again (#919 Q4)': swap(
+    'outsideStrings(lines[i])',
+    'lines[i]',
   ),
 
   // --- rules #919 added ---

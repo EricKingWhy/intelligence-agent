@@ -769,6 +769,35 @@ export function stripNsisComments(source) {
 }
 
 /**
+ * `line` with the contents of every string replaced by spaces, so a scan that
+ * should read code only does not match text inside a message.
+ *
+ * The string rules are the measured ones `stripNsisComments` uses — all three
+ * quote forms, and `$\<quote>` inside a string is an escape that does not close
+ * it — and comments are already gone where this is used, so only the string
+ * bodies are blanked (#919 Q4: `DetailPrint "run: RMDir /r …"` was read as a
+ * recursive delete statement).
+ */
+function outsideStrings(line) {
+  let quote = ''
+  let out = ''
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]
+    if (quote !== '' && ch === '$' && line[i + 1] === '\\' && line[i + 2] === quote) {
+      out += '   '
+      i += 2
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      if (quote === '') quote = ch
+      else if (quote === ch) quote = ''
+      out += ch
+    } else {
+      out += quote === '' ? ch : ' '
+    }
+  }
+  return out
+}
+
+/**
  * Every `\\?` in code (comments ignored) that does not carry the separator
  * backslash of a complete long-path prefix, as `{ line, text }` (#901 / R1).
  *
@@ -1160,7 +1189,10 @@ export function unguardedBackupDelete(source, options = {}) {
   // and `RMDir /r `…`` both compile and remove the directory. The target is the
   // variable iaPrepareDelete writes and clears again on a refusal (#904), so a
   // delete of anything else is a site this guard cannot say anything about.
-  const deleteLine = /RMDir\s+\/r\s+(['"`])\$iaDeleteTarget\1/i
+  // #919 Q4: NSIS takes options between `/r` and the target — `/REBOOTOK` is
+  // the one that applies to RMDir — and that spelling is the same delete
+  // (measured: it compiled and removed), so the options are part of the match.
+  const deleteLine = /RMDir\s+\/r(?:\s+\/[A-Za-z]+)*\s+(['"`])\$iaDeleteTarget\1/i
   const ERRORS = '${Errors}'
   const errorsMacro = /\$\{Errors\}/i
   // A read is a line-anchored `${If}`/`${IfNot}`/`${Unless}` condition carrying
@@ -1633,8 +1665,11 @@ export function unguardedBackupDelete(source, options = {}) {
   // may have. The rules all bind `RMDir /r "$iaDeleteTarget"`, so a second
   // recursive delete of anything else — a registry-read path, say — used to
   // pass every check while the delete that really runs is the unvalidated one.
+  // #919 Q4: the scan reads code only — a `RMDir /r` inside a message string is
+  // not a delete — and the prepared-target delete is excluded in its
+  // option-carrying spelling too (both measured as false reports).
   for (let i = 0; i < lines.length; i += 1) {
-    if (!/RMDir\s+\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue
+    if (!/RMDir\s+\/r/i.test(outsideStrings(lines[i])) || deleteLine.test(lines[i])) continue
     problems.push({
       line: i + 1,
       what: 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',

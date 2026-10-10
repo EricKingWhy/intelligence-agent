@@ -1824,6 +1824,20 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
         what: 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',
       },
     ])
+    // #919 Q4: NSIS takes options between `/r` and the target, and the
+    // /REBOOTOK spelling is the same delete — it used to be reported both as a
+    // stray recursive delete and as a missing site. And a `RMDir /r` inside a
+    // message string is not a delete at all.
+    const withOption = ['ClearErrors', ...PREPARE, 'RMDir /r /REBOOTOK "$iaDeleteTarget"', ...GUARDED_TAIL].join('\n')
+    assert.deepEqual(unguardedBackupDelete(withOption), [])
+    const inString = [
+      'ClearErrors',
+      ...PREPARE,
+      FIXED_DELETE,
+      ...GUARDED_TAIL,
+      'DetailPrint "run: RMDir /r $iaBackupDirectory would remove it"',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(inString), [])
   })
 
   it('the rollback delete records the backup instead of reading its own error (#904)', () => {
