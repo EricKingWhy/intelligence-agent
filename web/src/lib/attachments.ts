@@ -27,10 +27,12 @@
  *
  * 上限的**权威在服务端**（`src/agent_harness/config.py:162-170` 的 `attachment_max_*`，
  * 默认 20 MiB / 20 张 / 200 MiB / 四种 media type），经 `GET /api/attachments/limits`
- * 下发（后端 `app.py::get_attachment_limits`，camelCase）。前端在应用启动时由
- * `loadImageLimits()` 拉取并缓存进模块状态（`getImageLimits()` 取当前值；
- * App 层在 token 变更后补拉）。下面的 `IMAGE_LIMITS` 只是**离线 fallback**：
- * 拉取失败 / 端点缺席（旧服务端）时用，值必须与服务端默认值一致——
+ * 下发（后端 `app.py::get_attachment_limits`，snake_case wire，前端自行映射）。
+ * 前端在应用启动时由 `loadImageLimits()` 拉取并缓存进模块状态（`getImageLimits()`
+ * 取当前值；App 层与 Composer 都在 token 变更后补拉）。下面的 `IMAGE_LIMITS` 只是
+ * **首次成功拉取前的离线 fallback**：拉取失败不冲掉已拉到的服务端值
+ * （`loadImageLimits` 失败时返回调用前旧值）；端点缺席（旧服务端）时 fallback 值
+ * 必须与服务端默认值一致——
  * 跨端闸门 `tests/web/test_attachment_limits_contract.py` 逐字钉住这份对账。
  * 漂移的后果从「预检放行、服务端 413/422」降级为「fallback 与服务端不一致**时**
  * 才出现」：正常路径下预检用的就是服务端下发的值。
@@ -55,7 +57,8 @@ export interface ImageIntakeLimits {
   maxImagesPerMessage: number;
   /** 单条消息图片合计字节上限。 */
   maxMessageImageBytes: number;
-  /** 允许的 media types（服务端按**字节**判定，这里用浏览器声明的 type 做预检）。 */
+  /** 允许的 media types；预检判定口径见 `partitionIntake`（有探测条目时以字节为准，
+   *  否则回退浏览器声明）。 */
   mediaTypes: readonly string[];
 }
 
@@ -65,7 +68,8 @@ export interface ImageIntakeLimits {
 // 不需要改任何调用点签名。
 let currentLimits: ImageIntakeLimits = IMAGE_LIMITS;
 
-/** 当前生效的附图上限（服务端下发成功后的值；拉取前 / 失败时 = `IMAGE_LIMITS`）。 */
+/** 当前生效的附图上限（服务端下发成功后的值；拉取前 = `IMAGE_LIMITS`，
+ *  失败时保持上次成功的值）。 */
 export function getImageLimits(): ImageIntakeLimits {
   return currentLimits;
 }
@@ -81,9 +85,10 @@ let limitsInflight: Promise<ImageIntakeLimits> | null = null;
  * 从服务端拉取附图上限并缓存进模块状态（应用启动 / token 变更后调用）。
  *
  * 成功：`currentLimits` = 服务端值并返回。失败（网络错 / 非 ok / 形状非法）：
- * **返回 `IMAGE_LIMITS` 且不抛**——「拿不到就用旧值」在这里落定，调用方
+ * **返回调用前的 `currentLimits` 且不抛**——「拿不到就用旧值」在这里落定，调用方
  * （Composer / App）可以 fire-and-forget；`currentLimits` 保持原样（已拉到的
- * 服务端值不因一次瞬时失败被冲掉）。并发调用共用同一个 in-flight promise
+ * 服务端值不因一次瞬时失败被冲掉；首次拉取失败时它仍是 `IMAGE_LIMITS`）。
+ * 并发调用共用同一个 in-flight promise
  * （App 补拉与 Composer 挂载同时发生时只打一次 GET）；promise 落定后清空，
  * 下一次调用是真重拉（token 变更后的补拉因此有效）。
  */
@@ -94,7 +99,7 @@ export function loadImageLimits(): Promise<ImageIntakeLimits> {
       currentLimits = limits;
       return limits;
     })
-    .catch(() => IMAGE_LIMITS)
+    .catch(() => currentLimits)
     .finally(() => {
       limitsInflight = null;
     });
@@ -139,8 +144,8 @@ export function sumBytes<T>(items: readonly T[], pick: (item: T) => number): num
 /**
  * 字节探测：读文件头魔数判定真实 media type（#937 / M-20）。
  *
- * 四种签名对齐后端 `src/agent_harness/attachments/probe.py::_detect`（判据又对译自
- * Pi `packages/coding-agent/src/utils/mime.ts`，MIT）：PNG `89 50 4E 47 0D 0A 1A 0A`、
+ * 四种签名对齐后端 `src/agent_harness/attachments/probe.py::_detect`（判据经由该文件
+ * 对齐，其来源登记见文件头）：PNG `89 50 4E 47 0D 0A 1A 0A`、
  * GIF `GIF87a`/`GIF89a`、JPEG `FF D8 FF`、WebP `RIFF`+`WEBP`。前端只做**头签名**判定
  * （尺寸/像素上限、APNG 排除等深解析是服务端 `detect_image` 的职责），口径与后端一致。
  *

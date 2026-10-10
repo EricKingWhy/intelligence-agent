@@ -137,8 +137,8 @@ describe('partitionIntake — AC2/AC3 的整批判定', () => {
 });
 
 /**
- * #937 / M-20：字节探测（对齐后端 `probe.py::_detect` 的四种签名，判据又对译自
- * Pi `mime.ts`）。客户端声明的 `file.type` 可伪造（`.txt` 改名 `.png` 即可骗过），
+ * #937 / M-20：字节探测（判据经由后端 `probe.py::_detect` 对齐，其来源登记见该
+ * 文件头）。客户端声明的 `file.type` 可伪造（`.txt` 改名 `.png` 即可骗过），
  * 预检的「是不是图片」必须由字节回答。
  */
 describe('detectImageMediaType — #937 / M-20 字节探测', () => {
@@ -178,6 +178,21 @@ describe('detectImageMediaType — #937 / M-20 字节探测', () => {
 
   it('2 字节截断文件 → null（不够任何一种签名的最短判据）', async () => {
     await expect(detectImageMediaType(byteFile('cut.png', Uint8Array.of(0x89, 0x50), 'image/png'))).resolves.toBeNull();
+  });
+
+  it('FF D8 00 → null（JPEG 判据是 3 字节 FF D8 FF，2 字节 SOI 不够）', async () => {
+    const bytes = Uint8Array.of(0xff, 0xd8, 0x00, 0x10);
+    await expect(detectImageMediaType(byteFile('a.jpg', bytes, 'image/jpeg'))).resolves.toBeNull();
+  });
+
+  it('RIFF + 非 WEBP（RIFF....XXXX）→ null（只认 RIFF 容器里的 WebP）', async () => {
+    const bytes = Uint8Array.of(0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x58, 0x58, 0x58, 0x58);
+    await expect(detectImageMediaType(byteFile('a.riff', bytes, 'image/webp'))).resolves.toBeNull();
+  });
+
+  it('4 字节 GIF8 → null（GIF 判据是 6 字节 GIF87a/GIF89a）', async () => {
+    const bytes = new TextEncoder().encode('GIF8');
+    await expect(detectImageMediaType(byteFile('a.gif', bytes, 'image/gif'))).resolves.toBeNull();
   });
 });
 
@@ -281,8 +296,8 @@ describe('sumBytes — M-23 字节求和收口', () => {
  * #937 / M-08：上限从服务端下发（GET /api/attachments/limits），
  * `IMAGE_LIMITS` 退为离线 fallback。这里 mock 的是 `globalThis.fetch`——
  * `api.ts::getAttachmentLimits` 走 `apiFetch`（相对路径 fetch），
- * 在 node 环境下 stub 全局 fetch 即可覆盖整条链（含线上形状
- * `allowedMediaTypes` → `mediaTypes` 的映射）。
+ * 在 node 环境下 stub 全局 fetch 即可覆盖整条链（含线上 snake_case → 内部
+ * camelCase 的映射，`allowed_media_types` → `mediaTypes`）。
  */
 describe('loadImageLimits / getImageLimits — #937 M-08 服务端下发', () => {
   /** 与 `IMAGE_LIMITS` **不同**的一组值——证明真的被服务端覆盖，而不是碰巧同值。 */
@@ -292,12 +307,12 @@ describe('loadImageLimits / getImageLimits — #937 M-08 服务端下发', () =>
     maxMessageImageBytes: 6 * 1024 * 1024,
     mediaTypes: ['image/avif'],
   };
-  /** 后端 `app.py::get_attachment_limits` 的线上形状（camelCase + allowedMediaTypes）。 */
+  /** 后端 `app.py::get_attachment_limits` 的线上形状（snake_case wire 惯例）。 */
   const wireBody = {
-    maxImageBytes: SERVER_LIMITS.maxImageBytes,
-    maxImagesPerMessage: SERVER_LIMITS.maxImagesPerMessage,
-    maxMessageImageBytes: SERVER_LIMITS.maxMessageImageBytes,
-    allowedMediaTypes: [...SERVER_LIMITS.mediaTypes],
+    max_image_bytes: SERVER_LIMITS.maxImageBytes,
+    max_images_per_message: SERVER_LIMITS.maxImagesPerMessage,
+    max_message_image_bytes: SERVER_LIMITS.maxMessageImageBytes,
+    allowed_media_types: [...SERVER_LIMITS.mediaTypes],
   };
 
   beforeEach(() => {
@@ -334,6 +349,20 @@ describe('loadImageLimits / getImageLimits — #937 M-08 服务端下发', () =>
     );
     await expect(loadImageLimits()).resolves.toEqual(IMAGE_LIMITS);
     expect(getImageLimits()).toEqual(IMAGE_LIMITS);
+  });
+
+  it('先成功一次、再失败一次 → getImageLimits() 仍是服务端值（P4-2：失败不冲掉已拉到的值）', async () => {
+    // 第一次成功拉到服务端值；第二次（token 变更后的补拉）网络失败。
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async () => ({ ok: true, json: async () => wireBody }) as Response)
+      .mockImplementationOnce(async () => {
+        throw new Error('network down');
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(loadImageLimits()).resolves.toEqual(SERVER_LIMITS);
+    // 失败那次返回**调用前旧值**（= 已拉到的服务端值），而不是离线 fallback。
+    await expect(loadImageLimits()).resolves.toEqual(SERVER_LIMITS);
+    expect(getImageLimits()).toEqual(SERVER_LIMITS);
   });
 
   it('并发调用共用同一个 in-flight promise（fetch 只打一次）', async () => {

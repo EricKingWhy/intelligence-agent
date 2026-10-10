@@ -1311,10 +1311,12 @@ export async function getArtifactContent(
 
 /** #937 / M-08：GET /api/attachments/limits —— 附件图片上限的**服务端权威下发**。
  *
- *  返回值即前端的 `ImageIntakeLimits`（后端 `app.py::get_attachment_limits` 已按
- *  camelCase 输出，`allowedMediaTypes` 对应前端的 `mediaTypes`）。与 `getSandboxBackends`
+ *  后端 `app.py::get_attachment_limits` 按 wire 惯例输出 snake_case（同附件域
+ *  `attachment_id`），这里做 snake→camel 映射成前端的 `ImageIntakeLimits`
+ *  （`allowed_media_types` 对应前端的 `mediaTypes`；模式与 `parseAttachmentReceipt`
+ *  一致：线 snake_case、内 camelCase）。与 `getSandboxBackends`
  *  的宽容解析不同，这里**非 ok / 形状非法一律抛 Error**、不吞成默认值：「拿不到就用
- *  旧值」是调用方（`attachments.ts::loadImageLimits` → 离线 fallback `IMAGE_LIMITS`）
+ *  旧值」是调用方（`attachments.ts::loadImageLimits` → 返回调用前旧值）
  *  的决策，fetch 层无权替它做。形状防御沿用本文件惯例（`parseAttachmentReceipt` 等）：
  *  逐字段窄化，可疑数据宁可失败也不伪造。
  */
@@ -1327,20 +1329,20 @@ export async function getAttachmentLimits(): Promise<ImageIntakeLimits> {
   }
   const r = body as Record<string, unknown>;
   const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-  if (!num(r.maxImageBytes) || !num(r.maxImagesPerMessage) || !num(r.maxMessageImageBytes)) {
+  if (!num(r.max_image_bytes) || !num(r.max_images_per_message) || !num(r.max_message_image_bytes)) {
     throw new Error('GET /api/attachments/limits：数值字段缺失或非法');
   }
   if (
-    !Array.isArray(r.allowedMediaTypes) ||
-    !r.allowedMediaTypes.every((t): t is string => typeof t === 'string')
+    !Array.isArray(r.allowed_media_types) ||
+    !r.allowed_media_types.every((t): t is string => typeof t === 'string')
   ) {
-    throw new Error('GET /api/attachments/limits：allowedMediaTypes 不是字符串数组');
+    throw new Error('GET /api/attachments/limits：allowed_media_types 不是字符串数组');
   }
   return {
-    maxImageBytes: r.maxImageBytes,
-    maxImagesPerMessage: r.maxImagesPerMessage,
-    maxMessageImageBytes: r.maxMessageImageBytes,
-    mediaTypes: r.allowedMediaTypes,
+    maxImageBytes: r.max_image_bytes,
+    maxImagesPerMessage: r.max_images_per_message,
+    maxMessageImageBytes: r.max_message_image_bytes,
+    mediaTypes: r.allowed_media_types,
   };
 }
 

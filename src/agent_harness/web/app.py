@@ -2274,16 +2274,17 @@ def create_app(
         """附件图片上限（前端上传闸门用，部署者改配置后刷新页面即生效）。
 
         纯查询、零副作用：只把部署者的非秘密配置值（字节数 / 张数 / 类型名）
-        映射成前端 `ImageIntakeLimits`（camelCase）形状；不含密钥、路径、
+        按 wire 惯例（snake_case，同附件域 `attachment_id` / `media_type`）下发；
+        前端 `api.ts::getAttachmentLimits` 自行做 snake→camel 映射。不含密钥、路径、
         用户信息。鉴权走既有 `AuthSeamMiddleware`，与 `/api/sandbox-backends`
         完全一致——不新增豁免，也不新增鉴权逻辑。
         """
         limits = resolve_image_limits(settings)
         return {
-            "maxImageBytes": limits.max_image_bytes,
-            "maxImagesPerMessage": limits.max_images_per_message,
-            "maxMessageImageBytes": limits.max_message_image_bytes,
-            "allowedMediaTypes": list(limits.media_types),
+            "max_image_bytes": limits.max_image_bytes,
+            "max_images_per_message": limits.max_images_per_message,
+            "max_message_image_bytes": limits.max_message_image_bytes,
+            "allowed_media_types": list(limits.media_types),
         }
 
     # #362 / W-18：MCP server 状态与断开（Chrome DevTools MCP 可选 capability）。

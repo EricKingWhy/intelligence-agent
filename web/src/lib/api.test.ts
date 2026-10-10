@@ -31,6 +31,7 @@ import {
   ApprovalGoneError,
   ArtifactContentError,
   getArtifactContent,
+  getAttachmentLimits,
   postApproval,
   readErrorDetail,
   recoverSession,
@@ -1742,5 +1743,30 @@ describe('worktreePathFromResponse — 裸头优先 + RFC 5987 编码伴随头�
       headers: { 'X-Worktree-Path-Encoded': "UTF-8''%E7%8E" }, // 截断的 %XX 序列
     });
     expect(worktreePathFromResponse(badEscape)).toBeNull();
+  });
+});
+
+describe('getAttachmentLimits — 附件上限下发形状防御（#937 M-08 / P4-3c）', () => {
+  /** 合法 snake_case wire body（与后端 `app.py::get_attachment_limits` 同形）。 */
+  const wireBody = {
+    max_image_bytes: 1024,
+    max_images_per_message: 3,
+    max_message_image_bytes: 4096,
+    allowed_media_types: ['image/png', 'image/webp'],
+  };
+
+  it('合法 body → snake→camel 映射成 ImageIntakeLimits', async () => {
+    captureFetch(200, wireBody);
+    await expect(getAttachmentLimits()).resolves.toEqual({
+      maxImageBytes: 1024,
+      maxImagesPerMessage: 3,
+      maxMessageImageBytes: 4096,
+      mediaTypes: ['image/png', 'image/webp'],
+    });
+  });
+
+  it('allowed_media_types 含非字符串 → 抛错（不伪造默认值）', async () => {
+    captureFetch(200, { ...wireBody, allowed_media_types: ['image/png', 42] });
+    await expect(getAttachmentLimits()).rejects.toThrow('allowed_media_types 不是字符串数组');
   });
 });

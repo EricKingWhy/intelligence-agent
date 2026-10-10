@@ -15,6 +15,7 @@ import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
+import { onTokenChange } from '../lib/auth';
 import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
@@ -165,17 +166,24 @@ export const Composer = memo(function Composer({
   const [dragActive, setDragActive] = useState(false);
 
   // ── #937 / M-08：附图上限从服务端下发 ──
-  // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次并落进本地 state——
-  // 预检文案（budgetText）与文件选择器 accept 都消费这份。失败时 loadImageLimits
-  // 返回离线 fallback（IMAGE_LIMITS），不抛、不打扰用户。
+  // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次落进本地 state，并
+  // 订阅 token 变更补拉（P4-1：否则 token 换部署后显示与执行漂移）。预检文案
+  // （budgetText）与文件选择器 accept 都消费这份。失败时 loadImageLimits 返回
+  // 调用前旧值，不抛、不打扰用户。App 层与这里同时触发时 in-flight 去重保证
+  // 只打一次 GET。
   const [limits, setLimits] = useState<ImageIntakeLimits>(() => getImageLimits());
   useEffect(() => {
     let alive = true;
-    void loadImageLimits().then((next) => {
-      if (alive) setLimits(next);
-    });
+    const refresh = (): void => {
+      void loadImageLimits().then((next) => {
+        if (alive) setLimits(next);
+      });
+    };
+    refresh();
+    const unsubscribe = onTokenChange(refresh);
     return () => {
       alive = false;
+      unsubscribe();
     };
   }, []);
 
