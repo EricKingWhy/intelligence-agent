@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from agent_harness.storage.artifact import (
@@ -18,6 +20,7 @@ from agent_harness.storage.artifact import (
     ArtifactStore,
     FakeArtifactStore,
     compute_artifact_id,
+    compute_byte_artifact_id,
     slice_lines,
 )
 
@@ -225,3 +228,26 @@ class TestFakeArtifactStoreInspectCharCap:
         await store.inspect(artifact.artifact_id)
         loaded = await store.load(artifact.artifact_id)
         assert loaded.content == long_content
+
+
+class TestUploadedBytesContractWithoutDefault:
+    """`load_uploaded_bytes` 没有默认实现（#933 M-01，ABI 级契约）。"""
+
+    def test_fake_store_has_no_ownership_semantics(self) -> None:
+        """没有归属事实的替身必须**响亮失败**，不许静默退化成 `load_bytes`。
+
+        静默默认的失败方向是放宽授权：`load_bytes` 答"存在吗"，而发送侧闸门问的是
+        "属于本会话吗"。替身（或将来任何新 Provider）漏实现这个方法时，
+        `NotImplementedError` 会在第一次真实调用点炸出来，而不是让归属闸门悄悄失效。
+        """
+        store = FakeArtifactStore()
+        artifact_id = compute_byte_artifact_id(b"owned-by-nobody")
+        asyncio.run(store.save_bytes("some-session", b"owned-by-nobody", mime_type="image/png"))
+
+        with pytest.raises(NotImplementedError, match="load_uploaded_bytes"):
+            asyncio.run(store.load_uploaded_bytes(artifact_id))
+
+    def test_error_names_the_concrete_provider(self) -> None:
+        """报错必须点名具体 Provider（否则运维看不出是谁漏实现）。"""
+        with pytest.raises(NotImplementedError, match="FakeArtifactStore"):
+            asyncio.run(FakeArtifactStore().load_uploaded_bytes("sha256:" + "0" * 64))

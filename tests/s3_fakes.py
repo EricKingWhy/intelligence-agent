@@ -77,4 +77,54 @@ class FakeSDKSession:
         return _ClientCM()
 
 
-__all__ = ["FakeBody", "FakeS3Client", "FakeSDKSession"]
+class FakeKeyedS3Client:
+    """**按键存取**的 s3 替身：支持多个对象、缺键抛 `NoSuchKey`、记录请求顺序。
+
+    与 `FakeS3Client` 的分工：那个是"一个固定回包"的最小替身（够断言单键的 key 形状），
+    本类用于**多候选 key 的读回落**与**回执归属**用例——那时同一个 store 要先试
+    `.attachments/objects/…`、再试 `{session}/attachments/…`，两次 `get_object`
+    必须得到**两个不同的答案**，固定回包做不到。
+
+    `not_found` 由调用方从被测 store 的 `_client_error` 构造（botocore `ClientError`
+    形状：`{"Error": {"Code": "NoSuchKey"}}`）——本替身不 import botocore，保持离线。
+    """
+
+    def __init__(self, *, not_found: Exception, content_type: str = "image/png") -> None:
+        self.objects: dict[str, bytes] = {}
+        self.requests: list[dict] = []
+        self._not_found = not_found
+        self._content_type = content_type
+
+    async def put_object(self, **kwargs: object) -> dict:
+        self.requests.append(kwargs)
+        body = kwargs["Body"]
+        assert isinstance(body, bytes)
+        self.objects[str(kwargs["Key"])] = body
+        return {}
+
+    async def get_object(self, **kwargs: object) -> dict:
+        self.requests.append(kwargs)
+        key = str(kwargs["Key"])
+        if key not in self.objects:
+            raise self._not_found
+        return {
+            "Body": FakeBody(self.objects[key]),
+            "ContentType": self._content_type,
+        }
+
+    @property
+    def keys(self) -> list[str]:
+        """按请求顺序记录的 key（`put_object` 与 `get_object` 都在内）。"""
+        return [str(request["Key"]) for request in self.requests]
+
+    @property
+    def put_keys(self) -> list[str]:
+        return [str(r["Key"]) for r in self.requests if "Body" in r]
+
+
+__all__ = [
+    "FakeBody",
+    "FakeKeyedS3Client",
+    "FakeS3Client",
+    "FakeSDKSession",
+]
