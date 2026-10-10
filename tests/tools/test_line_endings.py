@@ -24,7 +24,8 @@ import io
 from agent_harness.tools._line_endings import (
     _canonical,
     _crlf_to_lf,
-    line_ending_mismatch,
+    _from_lf,
+    dominant_newline,
     not_found_hint,
     replace_with_line_ending_tolerance,
 )
@@ -146,7 +147,7 @@ def _render_old(lines: list[str], mode: str) -> str:
 
 
 def test_matrix_normalization_consistency():
-    """文件模式 × old 模板 × old 模式 × replace_all 的全矩阵 T1/T2 一致性。
+    """文件模式 × old 模板 × old 模式 × replace_all 的全矩阵 T1/T2/T3 一致性。
 
     对每一组 (content, old_string) 在 replace_all 取 False / True 下断言：
 
@@ -154,6 +155,10 @@ def test_matrix_normalization_consistency():
       （若 count > 0 且 exact == 0，则 `_canonical(old) in _canonical(content)`）。
     - T2：诊断折平对不上 ⟹ 匹配必不命中
       （若 `_canonical(old) not in _canonical(content)`，则 count == 0）。
+    - T3：hint 声称「把 old_string 改写成文件主导行尾后重试」可命中，此处独立验证该改写
+      确实可命中（被测函数内部只产出文案，不做该改写验证，故非其守卫的镜像）。
+      只在文件行尾单一且无裸 CR 时验证：此时
+      `_from_lf(_canonical(content), dominant) == content` 逐字节成立，改写 old_string 才有命中保证。
     """
     for file_mode, content in _FILE_CONTENT.items():
         for template, lines in _OLD_TEMPLATE_LINES.items():
@@ -162,24 +167,6 @@ def test_matrix_normalization_consistency():
                 new_string = _render_old(["REPLACED"], old_mode)
                 for replace_all in (False, True):
                     ctx = (file_mode, template, old_mode, replace_all)
-                    mismatch = line_ending_mismatch(content, old_string)
-                    hint = not_found_hint(content, old_string)
-                    # 诊断路径前置契约可执行化：报出行尾差异 ⟹ 折平判据必通过。
-                    if mismatch is not None:
-                        assert _canonical(old_string) in _canonical(content), (
-                            f"mismatch precondition violated {ctx!r}: "
-                            "line_ending_mismatch reported but canonical fold missed"
-                        )
-                    # 提示可执行化：给出「改写行尾后重试」⟹ 字节不命中且折平命中。
-                    if hint != "":
-                        assert content.count(old_string) == 0, (
-                            f"hint violated {ctx!r}: not_found_hint emitted but "
-                            "byte-exact match exists"
-                        )
-                        assert _canonical(old_string) in _canonical(content), (
-                            f"hint violated {ctx!r}: not_found_hint emitted but "
-                            "canonical fold missed"
-                        )
                     exact = content.count(old_string)
                     count, _ = replace_with_line_ending_tolerance(
                         content, old_string, new_string, replace_all=replace_all
@@ -196,3 +183,23 @@ def test_matrix_normalization_consistency():
                             f"T2 violated {ctx!r}: canonical fold missed but "
                             "match hit"
                         )
+                    # T3：hint 声称「把 old_string 改写成文件主导行尾后重试」，
+                    # 此处独立验证该改写确实可命中——被测函数内部只产出文案，并不
+                    # 做这个改写验证，故不是其守卫的镜像。
+                    hint = not_found_hint(content, old_string)
+                    if hint != "":
+                        # 提示只应在未命中时出现。
+                        assert exact == 0, (
+                            f"T3 violated {ctx!r}: not_found_hint emitted but "
+                            "byte-exact match exists"
+                        )
+                        dominant = dominant_newline(content)
+                        # 只有文件行尾单一、且无裸 CR 时，
+                        # `_from_lf(_canonical(content), dominant) == content` 才逐
+                        # 字节成立，改写 old_string 才有命中保证。
+                        if dominant is not None and "\r" not in _crlf_to_lf(content):
+                            rewritten = _from_lf(_canonical(old_string), dominant)
+                            assert content.count(rewritten) > 0, (
+                                f"T3 violated {ctx!r}: hint promised "
+                                f"rewrite-retry but rewritten {rewritten!r} misses"
+                            )
