@@ -1450,6 +1450,32 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     ])
   })
 
+  it('reports a kept backup with a non-zero exit code, refusals and failures alike (#919 Q6)', () => {
+    // A delete that fails (a denied child, a sharing violation) keeps the
+    // backup for the same reason a refusal does: the directory is still there,
+    // so the run must not read as a success. All three kept-leftover sites
+    // report alike — the uninstaller sweep and the rollback rename failure set
+    // `SetErrorLevel 2` — while the promote site used to exempt `failed` and
+    // return 0 (measured on the real machine: the driver's `failure` case read
+    // rc 0 with the backup kept and recorded).
+    const body = promoteApplicationBody(
+      readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
+    )
+    const lines = body.map((line) => line.trim()).filter((line) => line !== '')
+    // No status value may be carved out of the exit-code path: the exemption
+    // was `${If} $iaDeleteStatus != "failed"` around the single SetErrorLevel.
+    assert.ok(
+      !lines.some((line) => /\$iaDeleteStatus\s*!=\s*"failed"/i.test(line)),
+      'a status value is exempted from the kept-backup exit code',
+    )
+    const report = lines.findIndex((line) => /\$\(iaStaleBackup\)/.test(line))
+    assert.notEqual(report, -1, 'the stale-backup report is missing from the promote body')
+    // Report and exit code sit together and unbranched: a conditional between
+    // them is the exemption again, and a `SetErrorLevel` further down is not
+    // necessarily on this path.
+    assert.equal(lines[report + 1], 'SetErrorLevel 2')
+  })
+
   it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ia-nsh901-'))
     const okLang = '!ifdef LANG_ENGLISH\nLangString a ${LANG_ENGLISH} "x"\n!endif\n'

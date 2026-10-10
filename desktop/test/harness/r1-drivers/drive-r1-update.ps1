@@ -11,8 +11,10 @@
                   only remove the previous version's tree with a working
                   long-path prefix.
   Case failure  : the planted payload contains a DELETE-denied child directory,
-                  so promote cannot remove the backup and must record the
-                  leftover instead of orphaning it silently.
+                  so promote cannot remove the backup: it must record the
+                  leftover instead of orphaning it silently AND report rc 2
+                  (#919 Q6 -- a kept backup is not a success; the pre-Q6 build
+                  returned 0 here, the measured defect).
   Case junction : (#904 item 5) the planted payload contains a junction to a
                   directory outside the install directory. RMDir /r deletes
                   THROUGH a junction (measured, see ../nsis-probes/junction-probe),
@@ -462,9 +464,12 @@ switch ($Case) {
   }
   'failure' {
     # The denied child makes the delete itself fail: both builds keep the
-    # backup, only the fixed one records it. A delete that fails is not a
-    # refusal, so the exit code stays 0 in both.
+    # backup, only the fixed one records it. A kept backup is not a success:
+    # the fixed build reports rc 2 (#919 Q6 -- the same reading the refusal
+    # cases and the uninstaller sweep use), while the baseline artifact has no
+    # such exit code and keeps its measured rc 0.
     $expectLeftover = $isFixed
+    if ($isFixed) { $expectRc2 = 2 }
   }
   'junction' {
     # Scan refusal: the backup is kept and recorded, the exit code is 2, and

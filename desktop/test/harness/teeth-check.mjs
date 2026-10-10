@@ -106,6 +106,26 @@ const mutations = {
     if (!source.includes(anchor)) throw new Error('record-handling anchor not found')
     return source.replace(anchor, `    \${If} 1 == 0${lf}${anchor}${lf}    \${EndIf}`)
   },
+  'failed delete exempted from the exit code (Q6, #919)': (source) => {
+    // The promote delete's own failure keeps the backup exactly like a refusal
+    // does, so it reports rc 2 too (measured: the real-machine driver's
+    // `failure` case read rc 0 before #919 Q6, rc 2 after). This mutation
+    // restores the exemption the pre-fix build shipped.
+    const anchor = [
+      '      MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK',
+      '      SetErrorLevel 2',
+    ].join(lf)
+    if (!source.includes(anchor)) throw new Error('stale-backup report anchor not found')
+    return source.replace(
+      anchor,
+      [
+        '      MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK',
+        '      ${If} $iaDeleteStatus != "failed"',
+        '        SetErrorLevel 2',
+        '      ${EndIf}',
+      ].join(lf),
+    )
+  },
 }
 
 let survivors = 0
