@@ -182,7 +182,7 @@ export function deadlineInstant(paused: RunPausedInfo): string | null {
  *
  *  为什么自己判时区而不是直接 `Date.parse`：后端 `parse_deadline_at` 对**朴素时间**
  *  （无时区）一律 422——同一份请求在不同机器上代表不同瞬时。`Date.parse` 会把
- *  `2026-09-26T04:10:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
+ *  `2026-09-26T04:30:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
  *  且提示词还是错的（说好的格式其实不合法）。
  *
  *  `Z` 只认**大写**（`#315` 的审查发现）：后端走 `datetime.fromisoformat`，它收 `Z`
@@ -407,7 +407,7 @@ function addDecimal(raw: string | number, extra: number): string | null {
 
 /** 两个十进制文本的精确相加（#537：投影折叠 cost 账与 `minResumeValue` 消费**同一
  *  份**十进制实现——前端不许出现第二套小数运算）。形状不合 ⇒ null（粘性不可得）。 */
-export function addDecimalTexts(left: string, right: string): number | null {
+export function addDecimalTexts(left: string, right: string): string | null {
   const a = parseDecimalText(left);
   const b = parseDecimalText(right);
   if (a === null || b === null) return null;
