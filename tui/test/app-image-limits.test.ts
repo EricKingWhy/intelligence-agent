@@ -2,7 +2,7 @@
  * M-21：单条「数量 / 总字节」客户端预检的接线（app 装配层）。
  *
  * `addPendingImage` 是全部图片入场（剪贴板 / 粘贴路径 / `@path` 参数 / 提交窗口保留）
- * 的唯一汇聚点，预检装在这里 ⇒ 三个入口自动同守。判定纯函数在 image-paste.ts
+ * 的唯一汇聚点，预检装在这里 ⇒ 四个入口自动同守。判定纯函数在 image-paste.ts
  * （checkMessageImageLimits），本文件只钉接线行为：被拒的图不进数组、不插标记、
  * chat 区留一行明确原因（不静默）；未超限的既有行为逐字不变。
  */
@@ -10,16 +10,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { TuiApp } from "../src/app.ts";
+import { PNG_BYTES } from "./fixtures.ts";
 import type { PendingImage } from "../src/lib/pending-images.ts";
-
-/** 1x1 PNG（与 app-images.test.ts 同一枚；本文件不读盘、不碰剪贴板）。 */
-const PNG_BYTES = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
-  0x1f, 0x15, 0xc4, 0x89,
-  0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0xae, 0x42, 0x60, 0x82,
-]);
 
 function image(name: string): PendingImage {
   return { bytes: PNG_BYTES, mimeType: "image/png", name, path: null };

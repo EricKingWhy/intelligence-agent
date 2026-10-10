@@ -15,15 +15,7 @@ import { test } from "node:test";
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
 import { TuiApp } from "../src/app.ts";
-
-/** 1x1 PNG（合法签名 + IHDR），与 app-images.test.ts 同一枚。 */
-const PNG_BYTES = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
-  0x1f, 0x15, 0xc4, 0x89,
-  0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0xae, 0x42, 0x60, 0x82,
-]);
+import { PNG_BYTES } from "./fixtures.ts";
 
 const ATTACHMENT_ID = "sha256:" + "a".repeat(64);
 
@@ -172,9 +164,11 @@ test("M-09：字节取回失败（404）=> 占位定格 + 一行明确提示，�
     await app.rebuildFromHistory();
     await until(() => contentCalls.count === 1);
     await until(() => chatText(app).includes("sha256:"));
+    await until(() => chatText(app).includes("历史图片读取失败"));
     assert.equal(contentCalls.count, 1, "失败不重试（started 标记挡住重复发起）");
     const output = chatText(app);
     assert.ok(!output.includes("\x1b_G"), "字节不在手绝不渲染缩略图");
+    assert.ok(output.includes("历史图片读取失败"), "失败应有一行明确提示");
   } finally {
     resetCapabilitiesCache();
   }
