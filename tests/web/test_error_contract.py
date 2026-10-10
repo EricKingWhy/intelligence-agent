@@ -217,10 +217,16 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
     """#515 存储写重试耗尽与 #517 构造失败的 503 必须如实声明。
 
     审查 P2-2 修正：resume / messages / flush 的 launched 路径同样武装了两类
-    503 臂——声明面必须与臂同步，否则又是"Undocumented status"残留。
+    503 臂——这些端点必须声明 503。本用例断言声明**在场**与 **schema 形状**与被声明
+    端点真实返回的信封一致；「except 臂本身在场」由各端点自己的行为用例守
+    （如 `tests/web/test_memory_api.py` 的写锁耗尽→503 用例），不在这里重复。
+
+    #376-1 复审 STD-2：memory 族写端点的 503 **带机读码**（`{code, message}`，见
+    ADR-0035 §3），所以它们声明成 `ErrorCodeEnvelope` 而不是字符串 `ErrorEnvelope`——
+    两张表、两种 schema，各自与被声明端点真实返回的形状一致。
     """
     api = _openapi(_client(tmp_path))
-    expectations = {
+    string_envelope = {
         ("/api/sessions/{session_id}/archive", "post"),
         ("/api/sessions/{session_id}/archive", "delete"),
         ("/api/sessions/{session_id}", "delete"),
@@ -239,12 +245,30 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
         ("/api/projects/{project_id}/sessions/{session_id}", "delete"),
         ("/api/projects/{project_id}/sessions/{session_id}/order", "post"),
     }
-    for path, method in expectations:
+    # #376-1：memory 族写端点。它们的 503 一律带码（重试耗尽的 storage_busy /
+    # 派生索引待删 / 装配降级），schema 是 ErrorCodeEnvelope。
+    coded_envelope = {
+        ("/api/memories/{memory_id}", "delete"),
+        ("/api/memories/{memory_id}", "patch"),
+        ("/api/memories/bulk-delete", "post"),
+        ("/api/memory-settings", "patch"),
+    }
+    assert "ErrorCodeEnvelope" in api["components"]["schemas"], (
+        "带码信封的组件 schema 必须注册（memory 族 503 引用它）"
+    )
+    for path, method in string_envelope:
         op = api["paths"][path][method]
         assert "503" in op["responses"], f"{method.upper()} {path} 未声明 503"
         schema = op["responses"]["503"]["content"]["application/json"]["schema"]
-        assert schema.get("$ref", "").endswith("ErrorEnvelope"), (
+        assert schema.get("$ref") == "#/components/schemas/ErrorEnvelope", (
             f"{method.upper()} {path} 的 503 schema：{schema}"
+        )
+    for path, method in coded_envelope:
+        op = api["paths"][path][method]
+        assert "503" in op["responses"], f"{method.upper()} {path} 未声明 503"
+        schema = op["responses"]["503"]["content"]["application/json"]["schema"]
+        assert schema.get("$ref") == "#/components/schemas/ErrorCodeEnvelope", (
+            f"{method.upper()} {path} 的 503 应为带码信封：{schema}"
         )
 
 

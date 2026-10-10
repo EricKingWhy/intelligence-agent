@@ -52,6 +52,7 @@ import aiosqlite
 
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
+from agent_harness.storage.sqlite import retry_on_busy
 
 #: `commit_with_outcome` 里 `work` 的返回类型（调用方自己决定要带回什么）。
 T = TypeVar("T")
@@ -236,6 +237,7 @@ class SqliteMemoryV2JobStore:
     # 入队
     # ----------------------------------------------------------------------------------
 
+    @retry_on_busy
     async def enqueue(
         self, *, idempotency_key: str, trusted: TrustedMemoryIdentity, session_id: str,
         run_id: str | None = None, protected_fact_token_budget: int | None = None,
@@ -268,6 +270,7 @@ class SqliteMemoryV2JobStore:
     # 认领（单属主 + 按用户串行）
     # ----------------------------------------------------------------------------------
 
+    @retry_on_busy
     async def claim(
         self, *, worker_id: str, lease_seconds: float = DEFAULT_LEASE_SECONDS,
         now: datetime | None = None,
@@ -335,6 +338,7 @@ class SqliteMemoryV2JobStore:
     # 阶段推进
     # ----------------------------------------------------------------------------------
 
+    @retry_on_busy
     async def transition(
         self, *, job_id: str, worker_id: str, stage: MemoryJobStage,
         state: dict[str, Any] | None = None, outcome: MemoryJobOutcome | None = None,
@@ -378,6 +382,13 @@ class SqliteMemoryV2JobStore:
             await connection.commit()
         return _to_job(row) if row is not None else None
 
+    # 故意不挂 @retry_on_busy（#376-1 复审 F1）：本方法在事务里执行**调用方传入的** `work`
+    # ——executor 的 apply 回调用它改写调用方的 `_RunState`（`discarded` 计数 / `actions` /
+    # `memory_ids`，见 executor.py 的 apply 回调）。整块重跑会把已经记过一次的外部副作用再
+    # 记一次，与"仅 BEGIN IMMEDIATE 可超时、事务未提交、整块重跑等价首次"这个重试前提不同
+    # （其它被包装的写方法体内没有调用方回调）。本方法不是 #376 的 HTTP 失败路径：BEGIN
+    # IMMEDIATE 拿不到锁时异常向上走 executor，被 apply 环节的 `except Exception` 折成
+    # `DegradedReason.APPLY_FAILED`，最终落成**终态** `DEGRADED`（不重认领）。
     async def commit_with_outcome(
         self, *, job_id: str, worker_id: str, outcome: MemoryJobOutcome,
         work: Callable[[aiosqlite.Connection], Awaitable[T]],
@@ -445,6 +456,7 @@ class SqliteMemoryV2JobStore:
             raise KeyError(job_id)
         return _to_job(row)
 
+    @retry_on_busy
     async def start_protected_fact_extraction(
         self, *, job_id: str, worker_id: str, now: datetime | None = None,
     ) -> MemoryFormationJob | None:
@@ -474,6 +486,7 @@ class SqliteMemoryV2JobStore:
             await connection.commit()
         return _to_job(_require(row, job_id))
 
+    @retry_on_busy
     async def save_protected_fact_candidates(
         self, *, job_id: str, worker_id: str, candidates: list[dict[str, str]],
         now: datetime | None = None,
@@ -504,6 +517,7 @@ class SqliteMemoryV2JobStore:
             await connection.commit()
         return _to_job(row) if row is not None else None
 
+    @retry_on_busy
     async def finish_protected_fact_extraction(
         self, *, job_id: str, worker_id: str, now: datetime | None = None,
     ) -> bool:
