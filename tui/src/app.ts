@@ -75,7 +75,7 @@ const RECONNECT_DELAY_MS = 1000;
  * 本票裁决只做「熔断 + 可见提示」，不做 base 迁移（scope 锁死）。
  *
  * 取值 = 5（连续失败，退避窗口约 5 秒），与 `vscode-languageclient`
- * `DefaultErrorHandler` 同值同语义：来源 microsoft/vscode-languageserver-node
+ * `DefaultErrorHandler` 同值、语义相近：来源 microsoft/vscode-languageserver-node
  * client/src/common/client.ts:1181 `new DefaultErrorHandler(this, maxRestartCount ?? 4)`
  * （即连续 5 次退出后 `CloseAction.DoNotRestart` + 用户可见 message，client.ts:465-470）。
  * 更短会和单次网络抖动难以区分，更长只是把「转瞬即逝 vs 已死」的判定拖长；
@@ -313,8 +313,9 @@ export class TuiApp {
         });
         if (!this.running || gen !== this.generation) return;
         if (outcome === "truncated") continue; // 重建后立即重连
-        // 干净收束 = Host 应答过这条流（活着）；只有它清零连续失败计数，
-        // 其余（error，以及 abort 竞态下的 ended）都算一次失败（#843）。
+        // 计数规则（#843）：只有 outcome 为 "error" 才计一次失败；
+        // "ended" 是 Host 干净收束（这条流曾活过），清零连续失败计数；
+        // abort 路径在上面 generation/running 守卫处已被丢弃，不进入计数。
         this.reconnectFailures = outcome === "ended" ? 0 : this.reconnectFailures + 1;
         if (this.reconnectFailures >= MAX_RECONNECT_FAILURES) {
           this.stopStreaming();
