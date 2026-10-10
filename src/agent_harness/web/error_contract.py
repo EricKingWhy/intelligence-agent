@@ -36,7 +36,8 @@ BUG-06 的修法是**如实声明**，不是改形状：业务 4xx 仍是 detail
 - 不给没声明 422 的操作补 422：哪些操作会出业务 422 由各 handler 的
   except 元组决定，静态后处理推断不了，硬补是二次谎报。
 - 503 只声明在真实会出现的端点上（#515 的存储写锁耗尽 + #517 的模型
-  构造失败两条根因各自武装的 15 个端点），不全局撒。
+  构造失败两条根因各自武装的 15 个字符串信封端点，外加 #376-1 memory 族
+  4 个**带机读码**端点，见 `_503_CODED_OPERATIONS`），不全局撒。
 """
 
 from __future__ import annotations
@@ -55,6 +56,29 @@ _ERROR_ENVELOPE_SCHEMA: dict[str, Any] = {
 }
 
 _ENVELOPE = {"$ref": _ENVELOPE_REF}
+_CODE_ENVELOPE_REF = "#/components/schemas/ErrorCodeEnvelope"
+
+#: 带机读码的错误信封：`{"detail": {"code": "<码>", "message": "<文本>"}}`。memory 族的 503
+#: 用这个形状（装配降级 `{code: <DegradeReason>}` / `memory_index_delete_pending` /
+#: #376-1 的 `storage_busy`）——同一状态码下已有多个原因 ⇒ 按 ADR-0035 §3 必须带码。
+#: 组件 schema 由本模块注册。
+_ERROR_CODE_ENVELOPE_SCHEMA: dict[str, Any] = {
+    "title": "ErrorCodeEnvelope",
+    "type": "object",
+    "required": ["detail"],
+    "properties": {
+        "detail": {
+            "title": "Detail",
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+                "code": {"title": "Code", "type": "string"},
+                "message": {"title": "Message", "type": "string"},
+            },
+        }
+    },
+}
+_CODE_ENVELOPE = {"$ref": _CODE_ENVELOPE_REF}
 _HTTP_METHODS = frozenset(
     {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
 )
@@ -64,7 +88,7 @@ _HTTP_METHODS = frozenset(
 #: 都可能超 1 MiB 回 413；GET/HEAD 等本仓不消费请求体，不撒网。
 _BODY_BEARING_METHODS = frozenset({"post", "put", "patch", "delete"})
 
-#: (path, method) → 该操作真实可能返回 503 的声明清单。
+#: (path, method) → 该操作真实可能返回 503 的声明清单（**字符串 detail** 信封）。
 #: #515：存储写重试耗尽（`StorageBusyError` → 503）已武装的写端点——
 #: sessions 族 8 个 + projects 族 6 个写端点（`_translated()` 的
 #: StorageBusyError 臂包住全部项目写操作，修后重审 P2-A）；
@@ -89,6 +113,20 @@ _503_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
+#: (path, method) → 真实可能返回 503 且**带机读码**（`ErrorCodeEnvelope`）的写端点。
+#: #376-1：memory-v2 族 4 个写端点。它们的 503 一律是 `{code, message}` 形状——重试耗尽
+#: 的 `storage_busy`、派生索引待删的 `memory_index_delete_pending`、装配降级的
+#: `<DegradeReason>`——而非 #515 那种字符串 detail，所以**另立一张表**，声明形状与
+#: `_503_OPERATIONS` 不同（ADR-0035；不加进上面那张会让声明与真实体不符）。
+_503_CODED_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("/api/memories/{memory_id}", "delete"),
+        ("/api/memories/{memory_id}", "patch"),
+        ("/api/memories/bulk-delete", "post"),
+        ("/api/memory-settings", "patch"),
+    }
+)
+
 #: 200 恒为（或可为）`text/event-stream` 的流式路由。`POST /api/sessions`
 #: 的 `application/json`（launch=false 只建路径）由 FastAPI 已声明，保留。
 _SSE_200_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
@@ -109,9 +147,17 @@ def _json_envelope_response(description: str) -> dict[str, Any]:
     }
 
 
+def _json_code_envelope_response(description: str) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {"application/json": {"schema": dict(_CODE_ENVELOPE)}},
+    }
+
+
 def _post_process(schema: dict[str, Any]) -> dict[str, Any]:
     components = schema.setdefault("components", {}).setdefault("schemas", {})
     components.setdefault("ErrorEnvelope", dict(_ERROR_ENVELOPE_SCHEMA))
+    components.setdefault("ErrorCodeEnvelope", dict(_ERROR_CODE_ENVELOPE_SCHEMA))
 
     for path, path_item in schema.get("paths", {}).items():
         if not path.startswith("/api/"):
@@ -134,6 +180,10 @@ def _post_process(schema: dict[str, Any]) -> dict[str, Any]:
             if (path, method) in _503_OPERATIONS:
                 responses.setdefault(
                     "503", _json_envelope_response("Service Unavailable")
+                )
+            if (path, method) in _503_CODED_OPERATIONS:
+                responses.setdefault(
+                    "503", _json_code_envelope_response("Service Unavailable")
                 )
             # 422：FastAPI 的校验数组形态与业务字符串信封并存——oneOf 二选一。
             # 只改已有声明的 schema；没有 422 声明的操作不发明。

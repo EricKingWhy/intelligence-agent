@@ -53,6 +53,7 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.event import MEMORY_RECALLED
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.domain_errors import http_error, memory_http_error
 from agent_harness.web.projects import require_trusted_origin
 
@@ -88,6 +89,28 @@ _DEGRADED_MESSAGE: dict[DegradeReason, str] = {
         "完整原因在后端日志的「capability 'memory' 初始化失败」那条里，排除后重启后端即可恢复。"
     ),
 }
+
+#: #376-1：memory-v2 写锁重试耗尽（`StorageBusyError`）的机读码。memory 族的 503 一律带码
+#: （装配降级 `{code: <DegradeReason>}`、`memory_index_delete_pending`），同一状态码下已有
+#: 多个原因 ⇒ 按 ADR-0035 §3 必须给码，前端只按码分支（`memoryV2Api.ts` 已读 `detail.code`）。
+#: 该码只表达「这个端点是哪一类 503」（存储写竞争、可稍后重试），不细分内部机理。
+_MEMORY_STORAGE_BUSY_CODE = "storage_busy"
+
+
+def _storage_busy_error(error: StorageBusyError) -> HTTPException:
+    """memory-v2 写锁重试耗尽 → 带机读码的结构化 503（不伪装成 500）。
+
+    暂时性故障：`retry_on_busy` 的退避预算已在 store 内耗尽，业务层不再自救、交由客户端
+    稍后重试。四个写端点共用本函数——完整叙述只此一处（§16.1）。
+
+    最坏延迟约 30–40s（4 次尝试 × `BUSY_TIMEOUT_MS=10000` + 0.05/0.15/0.3s 退避）——
+    与 #515 的预算同源（复审 F4 登记）：持续写竞争下 PATCH 可能在客户端读超时后才拿到
+    503。改预算要连 `_sqlite.BUSY_TIMEOUT_MS` 与重试梯子一起动，属另一票。
+    """
+    return HTTPException(
+        status_code=503,
+        detail={"code": _MEMORY_STORAGE_BUSY_CODE, "message": str(error)},
+    )
 
 
 class MemorySummary(BaseModel):
@@ -309,6 +332,8 @@ def register_memory_routes(app: FastAPI) -> None:
         trusted = await _trusted_v2(project_id)
         try:
             receipt = await service.delete(memory_id, trusted)
+        except StorageBusyError as error:
+            raise _storage_busy_error(error) from error
         except KeyError as error:
             record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_ABSENT)
             raise memory_http_error(MemoryNotFound(memory_id)) from error
@@ -395,6 +420,8 @@ def register_memory_routes(app: FastAPI) -> None:
                 content=request.content, payload=request.payload,
                 importance=request.importance, strength=request.strength,
             )
+        except StorageBusyError as error:
+            raise _storage_busy_error(error) from error
         except StaleMemoryVersion as error:
             raise HTTPException(status_code=409, detail="memory version is stale") from error
         except InvalidMemoryPayload as error:
@@ -422,6 +449,8 @@ def register_memory_routes(app: FastAPI) -> None:
         trusted = await _trusted_v2(project_id)
         try:
             receipts = await service.bulk_delete(trusted, kind=request.kind)
+        except StorageBusyError as error:
+            raise _storage_busy_error(error) from error
         except PermissionError as error:
             raise memory_http_error(error) from error
         except MemoryIndexDeletePending as error:
@@ -466,10 +495,14 @@ def register_memory_routes(app: FastAPI) -> None:
     ) -> MemorySettingsResponse:
         service = await _v2_service()
         trusted = await _trusted_v2()
-        settings = await service.update_settings(
-            trusted, extraction_enabled=request.extraction_enabled,
-            recall_enabled=request.recall_enabled,
-        )
+        try:
+            settings = await service.update_settings(
+                trusted, extraction_enabled=request.extraction_enabled,
+                recall_enabled=request.recall_enabled,
+            )
+        except StorageBusyError as error:
+            # #376 票面失败点（store.update_settings 的 BEGIN IMMEDIATE）走同一条 mapping。
+            raise _storage_busy_error(error) from error
         record_memory_change(
             entry_point=ENTRY_API, action="settings", affected_count=1,
         )
