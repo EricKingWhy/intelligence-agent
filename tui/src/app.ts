@@ -270,7 +270,10 @@ export class TuiApp {
   /** 全量重建（进会话 / truncated）：重置状态后从 GET /events 重投影，
    *  幂等游标回填 max seq。重放不叠加（不变量 #22：重建后状态仍可对账）。 */
   async rebuildFromHistory(): Promise<void> {
+    const gen = this.generation;
     const events = await this.api.getEvents(this.options.sessionId);
+    // 期间切过会话（#958）：这是旧会话的结果，丢弃：不改 state / 游标、不渲染。
+    if (gen !== this.generation) return;
     this.state = createState();
     for (const event of events) applyEvent(this.state, event);
     const maxSeq = events.reduce(
@@ -630,7 +633,7 @@ export class TuiApp {
   /** 切会话：打断旧订阅（generation + abort），重置状态与游标，重建 + 重订。 */
   private async switchSession(sessionId: string): Promise<void> {
     if (sessionId === this.options.sessionId) return;
-    this.generation += 1;
+    const gen = ++this.generation;
     this.abort.abort();
     this.abort = new AbortController();
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
@@ -645,6 +648,8 @@ export class TuiApp {
     const draft = this.editor.getText();
     if (parseImageMarkers(draft).length > 0) this.editor.setText(stripImageMarkers(draft));
     await this.rebuildFromHistory();
+    // 重建期间又切走了（#958）：由更新的那次切换起循环，这里再起会重复订阅。
+    if (gen !== this.generation) return;
     this.subscribeLoop();
   }
 
