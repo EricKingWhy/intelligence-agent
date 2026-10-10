@@ -13,7 +13,8 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -43,26 +44,40 @@ class SkillPackageError(ValueError):
 
 
 class SkillPackageManager:
-    """Install immutable local Skill snapshots and persist project activation."""
+    """Install immutable Skill snapshots in project or user-global scope."""
 
     def __init__(
         self,
         workspace_dir: str | os.PathLike[str],
         *,
+        scope: str = "project",
         global_skills_dir: str | os.PathLike[str] | None = None,
         additional_skill_directories: list[str | os.PathLike[str]] | None = None,
         additional_skill_paths: list[str | os.PathLike[str]] | None = None,
     ) -> None:
+        if scope not in {"project", "global"}:
+            raise SkillPackageError("Skill package scope must be project or global")
         self.workspace_dir = Path(workspace_dir).expanduser()
+        self.scope = scope
         self.project_skills_dir = self.workspace_dir / "skills"
-        self.managed_skills_dir = self.project_skills_dir / MANAGED_DIRECTORY_NAME
-        self.managed_versions_dir = self.managed_skills_dir / VERSION_DIRECTORY_NAME
-        self.manifest_path = self.workspace_dir / MANIFEST_FILENAME
         self.global_skills_dir = (
             Path(global_skills_dir).expanduser()
             if global_skills_dir is not None
             else Path.home() / ".intelligence-agent" / "skills"
         )
+        self.scope_root = (
+            self.workspace_dir
+            if scope == "project"
+            else self.global_skills_dir.parent / "plugin-packages"
+        )
+        self.scope_skills_dir = (
+            self.project_skills_dir
+            if scope == "project"
+            else self.scope_root / "skills"
+        )
+        self.managed_skills_dir = self.scope_skills_dir / MANAGED_DIRECTORY_NAME
+        self.managed_versions_dir = self.managed_skills_dir / VERSION_DIRECTORY_NAME
+        self.manifest_path = self.scope_root / MANIFEST_FILENAME
         self.additional_skill_directories = [
             Path(path).expanduser() for path in (additional_skill_directories or [])
         ]
@@ -72,7 +87,7 @@ class SkillPackageManager:
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
         source_report = inspect_skill_package(
-            source, scope="project", existing_skills=self.project_skills_dir
+            source, scope=self.scope, existing_skills=self.scope_skills_dir
         )
         self._raise_if_uninstallable(source_report)
         name = source_report["name"]
@@ -98,7 +113,7 @@ class SkillPackageManager:
         self._raise_if_uninstallable(initial_report)
         if initial_report.get("name") != name:
             raise SkillPackageError("Skill name changed before snapshot installation")
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             manifest = self._read_manifest()
             packages = manifest["packages"]
             if name in packages:
@@ -133,7 +148,7 @@ class SkillPackageManager:
                     raise SkillPackageError(
                         "Skill package changed or could not be copied without following linked directories"
                     )
-                report = inspect_skill_package(staging_package, scope="project")
+                report = inspect_skill_package(staging_package, scope=self.scope)
                 if report.get("name") != name:
                     raise SkillPackageError(
                         "Skill name changed between preflight and package snapshot"
@@ -142,7 +157,7 @@ class SkillPackageManager:
                 digest = tree_digest(staging_package)
                 record = {
                     "type": "skill",
-                    "scope": "project",
+                    "scope": self.scope,
                     "source": source_value,
                     "sha256": digest,
                     "skill_sha256": _file_sha256(staging_package / "SKILL.md"),
@@ -186,7 +201,7 @@ class SkillPackageManager:
                 safe_url, safe_ref, safe_subdirectory, Path(temporary)
             )
             report = inspect_skill_package(
-                package, scope="project", existing_skills=self.project_skills_dir
+                package, scope=self.scope, existing_skills=self.scope_skills_dir
             )
             self._raise_if_uninstallable(report)
             name = report.get("name")
@@ -210,7 +225,7 @@ class SkillPackageManager:
 
     def update(self, name: str, *, ref: str) -> dict[str, Any]:
         safe_ref = _validate_git_ref(ref)
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             if record.get("source_kind") != "git":
@@ -229,7 +244,7 @@ class SkillPackageManager:
             package, commit, git_modes_sha256 = _fetch_git_skill(
                 source_url, safe_ref, subdirectory, Path(temporary)
             )
-            report = inspect_skill_package(package, scope="project")
+            report = inspect_skill_package(package, scope=self.scope)
             self._raise_if_uninstallable(report)
             if report.get("name") != name:
                 raise SkillPackageError(
@@ -251,7 +266,7 @@ class SkillPackageManager:
                 report,
             )
 
-            with _registry_lock(self.manifest_path):
+            with self._locked_registry():
                 manifest = self._read_manifest()
                 record = self._record(manifest, name)
                 if (
@@ -269,7 +284,7 @@ class SkillPackageManager:
                 return copy.deepcopy(record)
 
     def rollback(self, name: str) -> dict[str, Any]:
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             if record.get("source_kind") != "git":
@@ -299,7 +314,7 @@ class SkillPackageManager:
 
     def _apply_pending_versions(self) -> int:
         applied = 0
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             manifest = self._read_manifest()
             for name in sorted(manifest["packages"]):
                 record = manifest["packages"][name]
@@ -330,7 +345,7 @@ class SkillPackageManager:
                         raise SkillPackageError(
                             f"pending Git snapshot for Skill {name!r} changed while staging"
                         )
-                    report = inspect_skill_package(staged, scope="project")
+                    report = inspect_skill_package(staged, scope=self.scope)
                     self._raise_if_uninstallable(report)
                     if report.get("name") != name or report["status"] != "complete":
                         raise SkillPackageError(
@@ -374,7 +389,9 @@ class SkillPackageManager:
         return applied
 
     def enable(self, name: str) -> None:
-        with _registry_lock(self.manifest_path):
+        if self.scope == "global":
+            raise SkillPackageError("global packages require explicit project selection")
+        with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             status = record["compatibility"]["status"]
@@ -391,7 +408,9 @@ class SkillPackageManager:
             self._write_manifest(manifest)
 
     def disable(self, name: str) -> None:
-        with _registry_lock(self.manifest_path):
+        if self.scope == "global":
+            raise SkillPackageError("global packages have no shared enabled state")
+        with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             if not record["enabled"]:
@@ -400,7 +419,7 @@ class SkillPackageManager:
             self._write_manifest(manifest)
 
     def remove(self, name: str) -> None:
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             manifest = self._read_manifest()
             self._record(manifest, name)
             record = manifest["packages"][name]
@@ -477,12 +496,14 @@ class SkillPackageManager:
             self.managed_versions_dir.rmdir()
 
     def list_packages(self) -> dict[str, dict[str, Any]]:
-        with _registry_lock(self.manifest_path):
+        with self._locked_registry():
             return copy.deepcopy(self._read_manifest()["packages"])
 
     def enabled_skill_digests(self) -> dict[str, str]:
         """Return selected Skills and their install-time bodies after snapshot checks."""
-        with _registry_lock(self.manifest_path):
+        if self.scope == "global":
+            return {}
+        with self._locked_registry():
             packages = self._read_manifest()["packages"]
             enabled: dict[str, str] = {}
             for name, record in packages.items():
@@ -501,6 +522,13 @@ class SkillPackageManager:
         return set(self.enabled_skill_digests())
 
     def _read_manifest(self) -> dict[str, Any]:
+        if self.scope == "global" and self._path_exists(self.scope_root) and (
+            _is_reparse_point(self.scope_root)
+            or not self.scope_root.is_dir()
+            or self.scope_root.resolve(strict=True).parent
+            != self.scope_root.parent.resolve(strict=True)
+        ):
+            raise SkillPackageError("global package storage directory is unsafe")
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -519,7 +547,7 @@ class SkillPackageManager:
                 or not _NAME_PATTERN.fullmatch(name)
                 or not isinstance(record, dict)
                 or record.get("type") != "skill"
-                or record.get("scope") != "project"
+                or record.get("scope") != self.scope
                 or not isinstance(record.get("source"), str)
                 or not isinstance(record.get("sha256"), str)
                 or not _DIGEST_PATTERN.fullmatch(record["sha256"])
@@ -529,6 +557,7 @@ class SkillPackageManager:
                 or record["trust"].get("status") != "untrusted"
                 or record["trust"].get("sha256") != record.get("sha256")
                 or not isinstance(record.get("enabled"), bool)
+                or (self.scope == "global" and record.get("enabled") is not False)
                 or not isinstance(record.get("compatibility"), dict)
                 or record["compatibility"].get("status") not in {"complete", "needs-adaptation"}
             ):
@@ -536,11 +565,19 @@ class SkillPackageManager:
             _validate_git_manifest_record(name, record)
         return payload
 
+    @contextmanager
+    def _locked_registry(self) -> Iterator[None]:
+        self._ensure_scope_root()
+        with _registry_lock(self.manifest_path):
+            if self.scope == "global" and _is_reparse_point(self.scope_root):
+                raise SkillPackageError("global package storage directory is unsafe")
+            yield
+
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_scope_root()
         data = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=self.manifest_path.name + ".tmp-", dir=self.workspace_dir
+            prefix=self.manifest_path.name + ".tmp-", dir=self.scope_root
         )
         temporary = Path(temporary_name)
         try:
@@ -650,14 +687,16 @@ class SkillPackageManager:
         return target
 
     def _assert_no_shadow_conflict(self, name: str) -> None:
-        if self._path_exists(self.project_skills_dir / name):
+        if self._path_exists(self.scope_skills_dir / name):
             raise SkillPackageError(
-                f"project Skill {name!r} already exists; refusing a shadow conflict"
+                f"{self.scope} Skill {name!r} already exists; refusing a shadow conflict"
             )
         if self._path_exists(self.global_skills_dir / name):
             raise SkillPackageError(
                 f"global Skill {name!r} already exists; refusing a shadow conflict"
             )
+        if self.scope == "global":
+            return
         from agent_harness.skills.discovery import SkillDiscovery
 
         catalog = SkillDiscovery(
@@ -687,44 +726,59 @@ class SkillPackageManager:
 
     def _is_managed_package(self, package: Path) -> bool:
         if (
-            _is_reparse_point(self.project_skills_dir)
+            _is_reparse_point(self.scope_skills_dir)
             or _is_reparse_point(self.managed_skills_dir)
             or _is_reparse_point(package)
             or not package.is_dir()
         ):
             return False
+        if self.scope == "global" and _is_reparse_point(self.scope_root):
+            return False
         try:
-            workspace_root = self.workspace_dir.resolve(strict=True)
-            project_root = self.project_skills_dir.resolve(strict=True)
+            storage_root = self.scope_root.resolve(strict=True)
+            skills_root = self.scope_skills_dir.resolve(strict=True)
             root = self.managed_skills_dir.resolve(strict=True)
             resolved = package.resolve(strict=True)
         except (OSError, RuntimeError):
             return False
-        return project_root.parent == workspace_root and root.parent == project_root and resolved.parent == root
+        return skills_root.parent == storage_root and root.parent == skills_root and resolved.parent == root
 
     def _ensure_managed_directory(self) -> None:
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        if _is_reparse_point(self.project_skills_dir):
-            raise SkillPackageError("project Skills directory cannot be a symbolic link or junction")
-        self.project_skills_dir.mkdir(exist_ok=True)
-        if self.project_skills_dir.resolve(strict=True).parent != self.workspace_dir.resolve(strict=True):
-            raise SkillPackageError("project Skills directory resolves outside the workspace")
+        self._ensure_scope_root()
+        if _is_reparse_point(self.scope_skills_dir):
+            raise SkillPackageError(
+                f"{self.scope} package Skills directory cannot be a symbolic link or junction"
+            )
+        self.scope_skills_dir.mkdir(exist_ok=True)
+        if self.scope_skills_dir.resolve(strict=True).parent != self.scope_root.resolve(strict=True):
+            raise SkillPackageError(f"{self.scope} package Skills directory resolves outside its root")
         if _is_reparse_point(self.managed_skills_dir):
             raise SkillPackageError("managed Skills directory cannot be a symbolic link or junction")
         self.managed_skills_dir.mkdir(exist_ok=True)
-        if self.managed_skills_dir.resolve(strict=True).parent != self.project_skills_dir.resolve(strict=True):
-            raise SkillPackageError("managed Skills directory resolves outside the project Skills directory")
+        if self.managed_skills_dir.resolve(strict=True).parent != self.scope_skills_dir.resolve(strict=True):
+            raise SkillPackageError(f"managed Skills directory resolves outside the {self.scope} Skills directory")
+
+    def _ensure_scope_root(self) -> None:
+        if self.scope == "project":
+            self.scope_root.mkdir(parents=True, exist_ok=True)
+            return
+        parent = self.scope_root.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if self._path_exists(self.scope_root) and _is_reparse_point(self.scope_root):
+            raise SkillPackageError("global package storage directory cannot be a symbolic link or junction")
+        self.scope_root.mkdir(exist_ok=True)
+        if self.scope_root.resolve(strict=True).parent != parent.resolve(strict=True):
+            raise SkillPackageError("global package storage directory resolves outside its parent")
 
     def _path_exists(self, path: Path) -> bool:
         return path.exists() or path.is_symlink() or _is_reparse_point(path)
 
-    @staticmethod
-    def _raise_if_uninstallable(report: dict[str, Any]) -> None:
+    def _raise_if_uninstallable(self, report: dict[str, Any]) -> None:
         if report["status"] != "unsupported":
             return
         if any(error.get("code") == "NAME_CONFLICT" for error in report["errors"]):
             name = report.get("name")
-            raise SkillPackageError(f"project Skill {name!r} already exists")
+            raise SkillPackageError(f"{self.scope} Skill {name!r} already exists")
         codes = ", ".join(error.get("code", "unknown") for error in report["errors"])
         raise SkillPackageError(f"Skill preflight rejected the package: {codes or 'unsupported'}")
 
