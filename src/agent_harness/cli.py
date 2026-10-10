@@ -1683,6 +1683,19 @@ def _main_plugins(argv: list[str]) -> None:
     inspect.add_argument("--scope", choices=["project"], required=True)
     install = subcommands.add_parser("install", help="install a local Skill package disabled")
     install.add_argument("local_dir", help="local directory containing SKILL.md")
+    install_git = subcommands.add_parser(
+        "install-git", help="install a pinned Skill snapshot from a Git repository"
+    )
+    install_git.add_argument("url", help="Git repository URL without embedded credentials")
+    install_git.add_argument("--ref", required=True, help="branch, tag, or commit to resolve")
+    install_git.add_argument(
+        "--subdirectory", "--subdir", required=True, help="repository directory containing SKILL.md"
+    )
+    update = subcommands.add_parser("update", help="stage an explicit Git Skill version for restart")
+    update.add_argument("name")
+    update.add_argument("--ref", required=True, help="required target branch, tag, or commit")
+    rollback = subcommands.add_parser("rollback", help="stage the previous Git Skill snapshot")
+    rollback.add_argument("name")
     enable = subcommands.add_parser("enable", help="enable a complete installed Skill for new Runtimes")
     enable.add_argument("name")
     disable = subcommands.add_parser("disable", help="disable an installed Skill for new Runtimes")
@@ -1741,6 +1754,21 @@ def _main_plugins(argv: list[str]) -> None:
                     indent=2,
                 )
             )
+            return
+        if args.command == "install-git":
+            record = manager.install_git(
+                args.url, ref=args.ref, subdirectory=args.subdirectory
+            )
+            print(json.dumps({"name": record["git_subdirectory"].rsplit("/", 1)[-1], **record},
+                             ensure_ascii=False, indent=2))
+            return
+        if args.command == "update":
+            record = manager.update(args.name, ref=args.ref)
+            print(json.dumps({"name": args.name, **record}, ensure_ascii=False, indent=2))
+            return
+        if args.command == "rollback":
+            record = manager.rollback(args.name)
+            print(json.dumps({"name": args.name, **record}, ensure_ascii=False, indent=2))
             return
         if args.command == "enable":
             if enabled_skills_config is None:
@@ -1809,9 +1837,10 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
     packages: list[dict[str, object]] = []
     for name, record in sorted(manager.list_packages().items()):
         enabled = bool(record["enabled"])
+        has_pending_version = record.get("pending_version") is not None
         if runtime_state == "not_running":
             current = "not_running"
-            pending_restart: bool | None = False
+            pending_restart: bool | None = has_pending_version
         elif runtime_state == "unavailable":
             current = "unavailable"
             pending_restart = None
@@ -1820,7 +1849,15 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
             package_source = os.path.normcase(os.path.realpath(str(package_skill)))
             discovered = package_source in (runtime_skill_sources or set())
             current = "discovered" if discovered else "not_discovered"
-            pending_restart = enabled != discovered
+            pending_restart = enabled != discovered or has_pending_version
+        current_version = None
+        if record.get("source_kind") == "git":
+            current_version = {
+                "ref": record["source_ref"],
+                "resolved_commit": record["resolved_commit"],
+                "sha256": record["sha256"],
+            }
+        pending_version = record.get("pending_version")
         packages.append(
             {
                 "name": name,
@@ -1830,6 +1867,15 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
                 "saved_selection": "enabled" if enabled else "disabled",
                 "compatibility": record["compatibility"],
                 "trust": record["trust"],
+                "current_version": current_version,
+                "pending_version": (
+                    {
+                        "ref": pending_version["source_ref"],
+                        "resolved_commit": pending_version["resolved_commit"],
+                        "sha256": pending_version["sha256"],
+                    }
+                    if isinstance(pending_version, dict) else None
+                ),
                 "current_runtime": current,
                 "pending_restart": pending_restart,
             }
