@@ -135,10 +135,16 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
 ];
 
-/** `run/paused.data.reason` 的两个取值（后端 `run_budget.REASON_*` 的镜像）。
- *  `stuck` 属 `#317`，本模块不认它。 */
+/** `run/paused.data.reason` 的取值（后端 `run_budget.REASON_*` 的镜像）。
+ *
+ *  前两个的恢复动作是"给一个绝对值"（抬 ceiling / 换时刻），所以本模块的维度表与
+ *  预校验为它们服务；`stuck`（`#317`）**没有**可抬的 ceiling 也没有可换的时刻——
+ *  `resume_basis=budget_increase` 对它一律 409，恢复依据是 relevant_steer /
+ *  environment_change / policy_change 三条外部变更。这个常量只供展示层
+ *  （`PausedPanel`）认出"这不是预算暂停，不给抬 ceiling 控件"，不进维度表。 */
 export const PAUSE_REASON_BUDGET_EXHAUSTED = 'budget_exhausted';
 export const PAUSE_REASON_DEADLINE = 'deadline';
+export const PAUSE_REASON_STUCK = 'stuck';
 
 /** deadline 维（`#315`）：`trigger_dimension` 的取值（后端 `run_budget.TRIGGER_RUN_DEADLINE`）。
  *
@@ -176,7 +182,7 @@ export function deadlineInstant(paused: RunPausedInfo): string | null {
  *
  *  为什么自己判时区而不是直接 `Date.parse`：后端 `parse_deadline_at` 对**朴素时间**
  *  （无时区）一律 422——同一份请求在不同机器上代表不同瞬时。`Date.parse` 会把
- *  `2026-09-26T04:30:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
+ *  `2026-09-26T04:10:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
  *  且提示词还是错的（说好的格式其实不合法）。
  *
  *  `Z` 只认**大写**（`#315` 的审查发现）：后端走 `datetime.fromisoformat`，它收 `Z`
@@ -401,7 +407,7 @@ function addDecimal(raw: string | number, extra: number): string | null {
 
 /** 两个十进制文本的精确相加（#537：投影折叠 cost 账与 `minResumeValue` 消费**同一
  *  份**十进制实现——前端不许出现第二套小数运算）。形状不合 ⇒ null（粘性不可得）。 */
-export function addDecimalTexts(left: string, right: string): string | null {
+export function addDecimalTexts(left: string, right: string): number | null {
   const a = parseDecimalText(left);
   const b = parseDecimalText(right);
   if (a === null || b === null) return null;
