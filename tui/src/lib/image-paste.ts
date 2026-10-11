@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { detectSupportedImageMimeType } from "./mime.ts";
 import type { PendingImage } from "./pending-images.ts";
 
-/** 服务端 v1 接受的栅格图 media types（`attachments/types.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
+/** 服务端 v1 接受的栅格图 media types（`attachments/validation.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
 export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
   "image/png",
   "image/jpeg",

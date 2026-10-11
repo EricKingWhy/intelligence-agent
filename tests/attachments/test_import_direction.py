@@ -1,7 +1,7 @@
 """`config` ↔ `attachments` 的**依赖方向**闸门（#939 M-15）。
 
 **问题**：`config.Settings` 的字段校验（启动期 fail-loud）调
-`attachments.types.parse_allowed_media_types`，而 `attachments.types.resolve_image_limits`
+`attachments.validation.parse_allowed_media_types`，而 `attachments.types.resolve_image_limits`
 又在运行期读 `Settings` 的字段——两个模块概念上互相依赖。审计（MM A-F14）核到的实际形态是：
 反向边由 `@field_validator` **函数体内**的延迟 import 提供，故 **import 期无环**；但这层保护
 只写在注释里，**没有任何机械守卫**——把 import 提到模块顶部、或把解析函数搬个位置，全门禁照绿，
@@ -9,12 +9,14 @@
 
 **为什么把解析搬到中性模块而不是延迟 import**：`config.py` 已有大量想留在 `Settings` 旁边的
 非附件字段校验；把**每一种附属领域**的规则都搬进 `config` 才是真正的耦合增长。中性模块
-`attachments.validation` 让方向单向 `config → validation → types`，`config` 的 validator 里
-那句延迟 import 随之**删除**（不再是"靠延迟导入躲环"）。
+`attachments.validation` 让方向单向（`#988 F-2` 按实际 import 边写）：
+`config ──import──▶ validation ◀──import── types`，`config` 的 validator 里那句延迟 import
+随之**删除**（不再是"靠延迟导入躲环"）。
 
 判定口径：本用例在**子进程**里 import（避免被测试进程已加载的模块掩蔽），断言
 ① `attachments` 侧不在 import 期拉进 `config`；② 子模块**不许反向依赖** `config`；
-③ `config` 侧的解析函数住中性模块（真身不在 `attachments.types`）。
+③ `config` 侧的解析函数住中性模块（真身不在 `attachments.types`）；
+④ `#988 F-2` 收窄守卫：`attachments.types` **不再**把真身的名字列进自己的 `__all__`。
 """
 
 from __future__ import annotations
@@ -83,6 +85,13 @@ def test_config_side_media_type_validation_lives_in_the_neutral_module() -> None
     import agent_harness.attachments.validation as validation_module
 
     assert validation_module.parse_allowed_media_types is types_module.parse_allowed_media_types
+    # #988 F-2：收窄再导出面后，`types` 只**内部调用**真身，不再对外声明它。上面那条同一性
+    # 断言钉的是"单一真身、非第二份定义"（保留）；这条钉的是"声明面不反弹"——把
+    # `parse_allowed_media_types` 加回 `types.__all__`（即恢复宽再导出面）当场变红。
+    assert "parse_allowed_media_types" not in types_module.__all__, (
+        "`attachments.types.__all__` 又出现了 `parse_allowed_media_types`——真身在中性模块 "
+        "`attachments.validation`（#988 F-2 收窄了宽再导出面）；需要它的调用方直接 import 真身。"
+    )
     # 方向判据：`config` 的 validator 必须调用**中性模块**的名字。这里用源码级断言
     # （此前那条 `model_fields[...].metadata is not None` 是恒真的装饰——pydantic 的
     # `FieldInfo.metadata` 是空列表而不是 `None`，与本票要守的方向无关）。
