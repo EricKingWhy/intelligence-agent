@@ -1690,7 +1690,7 @@ def _plugins_install_scope(args: argparse.Namespace) -> str:
 def _inspect_package(local_dir: str, scope: str, manager: Any) -> dict[str, Any]:
     """一个包一次预检，报告按包类型分段（Skill / MCP），不另起第二个命令。
 
-    两种包类型各自的预检互不知情（`skills.inspection` 与 `plugins.mcp_precheck`），
+    两种包类型各自的预检互不知情（`skills.inspection` 与 `mcp_precheck`），
     这里只做**汇总**：
 
     - Skill 占了报告顶层（#870–#874 的既有形状与字段，**含包级 `status`**，不动）；
@@ -1704,7 +1704,7 @@ def _inspect_package(local_dir: str, scope: str, manager: Any) -> dict[str, Any]
     顶层 `status` 仍由 Skill 段单独判定：改它会把**只有 SKILL.md、没有 MCP 描述**的
     干净包从 `complete` 静默降到 `needs-adaptation`，那是另一条 lane 的语义，本票不动。
     """
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
     from agent_harness.skills.inspection import inspect_skill_package
 
     report = inspect_skill_package(
