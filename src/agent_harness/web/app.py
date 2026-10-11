@@ -1851,7 +1851,7 @@ class AuthSeamMiddleware:
         identity: IdentityContext | None = None
         if (
             scope.get("method") == "GET"
-            and scope.get("path") == "/api/skills"
+            and scope.get("path") in {"/api/skills", "/api/mcp/packages"}
             and self._host_service_token
             and self._settings.jwt_secret
         ):
@@ -1868,7 +1868,11 @@ class AuthSeamMiddleware:
                     )
                     service_uuid = claims.get("service_uuid")
                     expected = host_skills_request_proof(
-                        self._host_service_token, nonce, service_uuid, proof_timestamp
+                        self._host_service_token,
+                        nonce,
+                        service_uuid,
+                        proof_timestamp,
+                        path=scope.get("path", "/api/skills"),
                     )
                     scopes = claims.get("scopes", ["user", "session"])
                     try:
@@ -2348,6 +2352,11 @@ def create_app(
     from agent_harness.web.skills import register_skill_routes
 
     register_skill_routes(app)
+
+    # T7 MCP package status shares the authenticated host challenge used by Skills.
+    from agent_harness.web.mcp_packages import register_mcp_package_routes
+
+    register_mcp_package_routes(app)
 
     # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
     from agent_harness.web.host_dirs import register_host_dir_routes

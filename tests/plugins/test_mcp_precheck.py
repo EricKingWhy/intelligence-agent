@@ -355,10 +355,47 @@ def test_invalid_secret_reference_syntax_fails(tmp_path: Path) -> None:
     assert "MCP_SECRET_REFERENCE_INVALID" in _codes(report, "bad")
 
 
+@pytest.mark.parametrize(
+    ("body", "server_name"),
+    [
+        ({"type": "stdio", "command": "npx${EXEC_SUFFIX}"}, "bad-command"),
+        (
+            {"type": "stdio", "command": "npx", "args": ["--token=hunter2${API_KEY}"]},
+            "bad-args",
+        ),
+        ({"type": "stdio", "command": "npx", "cwd": "${PACKAGE_DIR}"}, "bad-cwd"),
+        (
+            {"type": "http", "url": "https://example.com/mcp?token=hunter2${API_KEY}"},
+            "bad-url",
+        ),
+    ],
+)
+def test_runtime_references_outside_env_and_headers_are_rejected(
+    tmp_path: Path, body: dict, server_name: str
+) -> None:
+    report = inspect_mcp_servers(
+        _package(tmp_path, {"mcpServers": {server_name: body}})
+    )
+
+    assert "MCP_SECRET_REFERENCE_UNSUPPORTED" in _codes(report, server_name)
+    assert "hunter2" not in json.dumps(report, ensure_ascii=False)
+
+
 def test_invalid_tool_permission_fails(tmp_path: Path) -> None:
-    report = inspect_mcp_servers(_package(tmp_path, {"mcpServers": {"bad": {
-        "type": "stdio", "command": "npx", "tool_permissions": {"search": "sudo"},
-    }}}))
+    report = inspect_mcp_servers(
+        _package(
+            tmp_path,
+            {
+                "mcpServers": {
+                    "bad": {
+                        "type": "stdio",
+                        "command": "npx",
+                        "tool_permissions": {"search": "sudo"},
+                    }
+                }
+            },
+        )
+    )
 
     assert "MCP_TOOL_PERMISSION_INVALID" in _codes(report, "bad")
 

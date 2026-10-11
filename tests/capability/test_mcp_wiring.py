@@ -18,6 +18,8 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.mcp.client import MCPServerDownError
+from agent_harness.plugins.mcp_package_manager import MCPPackageManager
+from agent_harness.skills.package_manager import SkillPackageError
 from tests.mcp_client.fake_server import make_fake_tool
 
 
@@ -44,9 +46,13 @@ class StubConnection:
         self.closed = True
 
 
+_DEFAULT_LIST_TOOLS = StubConnection.list_tools
+
+
 @pytest.fixture()
 def stub_connections(monkeypatch):
     StubConnection.instances = []
+    monkeypatch.setattr(StubConnection, "list_tools", _DEFAULT_LIST_TOOLS)
     monkeypatch.setattr(
         "agent_harness.mcp.capability.MCPServerConnection", StubConnection
     )
@@ -160,6 +166,198 @@ async def test_zero_tool_capability_still_attached_to_lifecycle(tmp_path, stub_c
     assert wiring.lifecycle, "零工具 capability 必须仍挂 lifecycle（连接要能被关闭）"
     await wiring.lifecycle[0].aclose()
     assert stub_connections.instances[0].closed
+
+
+@pytest.mark.asyncio
+async def test_selected_mcp_package_uses_the_existing_runtime_path(
+    tmp_path, stub_connections
+):
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {"name": "installed", "transport": "stdio", "command": "fake"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    global_dir = tmp_path / "home" / "skills"
+    manager = MCPPackageManager(tmp_path, global_skills_dir=global_dir)
+    manager.install(source, package_id="installed-tools")
+    manager.trust("installed-tools")
+    manager.enable("installed-tools")
+    selected = manager.selected_servers()
+    assert [server.name for server in selected] == ["installed"], manager.errors
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(global_dir),
+        model_api_key="sk-test",
+    )
+    registry = CapabilityRegistry()
+    wiring = await wire_capabilities(registry, {}, settings=settings)
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__installed__echo"]
+    assert [connection.config.name for connection in stub_connections.instances] == [
+        "installed"
+    ]
+    assert wiring.mcp_packages == [
+        {
+            "package_id": "installed-tools",
+            "scope": "project",
+            "sha256": manager.list_packages()["installed-tools"]["current_version"][
+                "sha256"
+            ],
+            "server_names": ["installed"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_configured_server_does_not_block_package_activation(
+    tmp_path, stub_connections
+):
+    global_dir = tmp_path / "home" / "skills"
+    manager = MCPPackageManager(tmp_path, global_skills_dir=global_dir)
+    current = tmp_path / "current"
+    current.mkdir()
+    (current / "mcp.json").write_text(
+        json.dumps({"servers": [_stdio("weather")]}), encoding="utf-8"
+    )
+    manager.install(current, package_id="weather-tools")
+    manager.trust("weather-tools")
+    manager.enable("weather-tools")
+
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    (pending / "mcp.json").write_text(
+        json.dumps({"servers": [_stdio("reserved")]}), encoding="utf-8"
+    )
+    manager.update("weather-tools", source=pending)
+    manager.trust("weather-tools", pending=True)
+
+    config = parse_capabilities_config(
+        json.dumps(
+            {
+                "mcp": {
+                    "provider": "builtin",
+                    "enabled": True,
+                    "options": {"servers": [_stdio("reserved", enabled=False)]},
+                },
+            }
+        )
+    )
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(global_dir),
+        model_api_key="sk-test",
+    )
+
+    wiring = await wire_capabilities(CapabilityRegistry(), config, settings=settings)
+
+    record = manager.list_packages()["weather-tools"]
+    assert record["pending_version"] is None
+    assert record["current_version"]["server_names"] == ["reserved"]
+    assert [tool.name for tool in wiring.tools] == ["mcp__reserved__echo"]
+    assert [connection.config.name for connection in stub_connections.instances] == [
+        "reserved"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_package_registry_oserror_does_not_block_core(
+    tmp_path, monkeypatch, caplog
+):
+    def fail_registry_read(self):
+        raise OSError("registry unavailable")
+
+    monkeypatch.setattr(MCPPackageManager, "enable_results", fail_registry_read)
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+    )
+
+    wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+
+    assert wiring.tools == []
+    assert any(
+        "managed MCP package selection is unavailable" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_skills_storage_error_is_translated_at_mcp_boundary(
+    tmp_path, monkeypatch, caplog
+):
+    def fail_scope_root(self):
+        raise SkillPackageError("global package root is unsafe")
+
+    monkeypatch.setattr(
+        "agent_harness.skills.package_manager.SkillPackageManager._ensure_scope_root",
+        fail_scope_root,
+    )
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+    )
+
+    wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+
+    assert wiring.tools == []
+    assert any(
+        "managed MCP package selection is unavailable" in record.getMessage()
+        and "global package root is unsafe" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_untrusted_selected_mcp_snapshot_is_never_started(
+    tmp_path, stub_connections, caplog
+):
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {"name": "untrusted", "transport": "stdio", "command": "fake"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = MCPPackageManager(
+        tmp_path, global_skills_dir=tmp_path / "home" / "skills"
+    )
+    manager.install(source, package_id="untrusted-tools")
+    with manager._locked_registry():
+        manifest = manager._read_manifest()
+        manifest["enable_results"]["untrusted-tools"] = {
+            "selected_scope": "project",
+            "source": str(source),
+        }
+        manager._write_manifest(manifest)
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(tmp_path / "home" / "skills"),
+        model_api_key="sk-test",
+    )
+    wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+
+    assert stub_connections.instances == []
+    assert wiring.tools == []
+    assert any("untrusted; server not started" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
