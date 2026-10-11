@@ -458,3 +458,65 @@ class TestSkillWritePath:
             discovery.register(entry)
         assert not (tmp_path / "escape").exists()
         assert not (tmp_path / "project" / "escape").exists()
+
+
+# ── #981：frontmatter 深嵌套不得让 RecursionError 掀掉发现/装配/安装 ──
+
+
+def _deep_frontmatter(depth: int) -> str:
+    """构造 `a: [[[…]]]` 流式嵌套 frontmatter（本机实测 ~500 层即触发 yaml 递归上限）。"""
+    return f"name: deep\ndescription: d\na: {'[' * depth}{']' * depth}"
+
+
+def test_deeply_nested_frontmatter_is_error_not_crash(tmp_path):
+    """#981：深嵌套 frontmatter 只损失这一条，不进 errors 之外——绝不向上抛 RecursionError。
+
+    `yaml.safe_load` 对递归嵌套有上限且**先于** SKILL_FILE_MAX_BYTES 尺寸上限生效
+    （本机实测 500 层 ≈ 1 KB 即触发），原实现的 `except yaml.YAMLError` 兜不住
+    （RecursionError 是 RuntimeError 子类，不是 YAMLError/ValueError）；分模块
+    docstring 明写的契约「解析失败显式进 errors 列表，不静默跳过」在这条路径上是
+    反契约——RecursionError 会一路掀给装配期（wiring）与安装期（install）。
+    """
+    skills_dir = tmp_path / "skills"
+    bad = skills_dir / "deep"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text(
+        f"---\n{_deep_frontmatter(2000)}\n---\n\n正文\n", encoding="utf-8"
+    )
+    good = skills_dir / "good"
+    good.mkdir()
+    (good / "SKILL.md").write_text(f"---\n{_fm('good')}\n---\n正文\n", encoding="utf-8")
+
+    catalog = SkillDiscovery([skills_dir]).discover()
+
+    # 坏技能被单条拒绝（不中断扫描），兄弟技能照常发现。
+    assert [e.name for e in catalog.entries] == ["good"]
+    assert any("deep" in err for err in catalog.errors)
+
+
+def test_deeply_nested_frontmatter_single_file_returns_error(tmp_path):
+    """单文件入口 parse_skill_markdown 同样返回 (None, errors)，不抛。"""
+    skill_dir = tmp_path / "deep"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n{_deep_frontmatter(2000)}\n---\n\n正文\n", encoding="utf-8"
+    )
+
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+
+    assert entry is None
+    assert errors
+
+
+def test_shallow_frontmatter_still_parses_after_guard(tmp_path):
+    """消融对照：合法（浅）frontmatter 的解析行为不受本次守卫影响。"""
+    skill_dir = tmp_path / "ok"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: ok\ndescription: d\nversion: 2\n---\n\n正文\n", encoding="utf-8"
+    )
+
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+
+    assert errors == []
+    assert entry is not None and entry.name == "ok" and entry.meta.get("version") == 2

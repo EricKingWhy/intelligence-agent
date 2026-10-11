@@ -165,6 +165,13 @@ def parse_skill_markdown_text(
         return None, [f"{_spath(path)}: missing '---' frontmatter fence"]
     try:
         meta = yaml.safe_load(frontmatter)
+    except RecursionError:
+        # #981: yaml 对递归嵌套有上限，且先于 SKILL_FILE_MAX_BYTES 的 1 MB 尺寸上限生效
+        # （本机实测 500 层 ≈ 1 KB 即触发）。RecursionError 是 RuntimeError 子类、
+        # 不是 yaml.YAMLError——原 except 兜不住，它会掀给装配期 wiring 与安装期 install，
+        # 让该目录里其余技能一起消失。与 #973 `skills/inspection.py` 同款裁决与守卫形态：
+        # 深度边界的唯一权威是解析器自己，另写深度扫描器就是第二份会漂的真相。
+        return None, [f"{_spath(path)}: frontmatter nesting is too deep to parse"]
     except yaml.YAMLError as error:
         return None, [f"{_spath(path)}: invalid YAML frontmatter ({type(error).__name__})"]
     if not isinstance(meta, dict):
