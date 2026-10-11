@@ -726,7 +726,10 @@ class SkillPackageManager:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {"version": MANIFEST_VERSION, "packages": {}, ENABLE_RESULTS_FIELD: {}}
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
+            # RecursionError（深嵌套清单）既非 OSError 也非 ValueError，会掀给 CLI / 安装闸门。
+            # 同 `skills/inspection.py` 的 `DEPENDENCY_FILE_TOO_DEEP` 契约：读得出、判不了就明确
+            # 失败，不崩桌。
             raise SkillManifestError(f"cannot read install manifest: {type(error).__name__}") from error
         if (
             not isinstance(payload, dict)

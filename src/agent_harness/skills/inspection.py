@@ -1098,8 +1098,7 @@ def _inspect_dependencies(
                                             errors,
                                         )
             except RecursionError:
-                # 同 package.json：tomllib 的递归上限更低（本机实测 330 层对象嵌套；上限随
-                # 解释器版本与栈大小漂移，这里只作量级参照，守卫判据不依赖该数字）。
+                # 同上；tomllib 的递归上限比 json 低得多，故可达深度更小。
                 _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "pyproject.toml", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")

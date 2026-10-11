@@ -67,10 +67,11 @@ def inspect_dsh_effort_slider(
     try:
         manifest = json.loads(package_text)
     except (json.JSONDecodeError, RecursionError):
-        # 超深的 package.json 同样“读不出来”：既然读不出来就不可能是这个钉定包，
-        # 与 JSONDecodeError 同意：交回 None 继续常规 Skill 预检（那边会把它落成
-        # DEPENDENCY_FILE_TOO_DEEP 明确失败）。不兜底则任意目录都能把 RecursionError
-        # 掀到 CLI（plugins inspect 的第一步就是它）。
+        # A deeply nested package.json is likewise unreadable, and therefore cannot be
+        # this pinned package: same outcome as JSONDecodeError, return None and let the
+        # regular Skill preflight report DEPENDENCY_FILE_TOO_DEEP. Without this guard any
+        # directory could raise RecursionError into the CLI (this is `plugins inspect`'s
+        # first step).
         return None
     if not isinstance(manifest, dict) or manifest.get("name") != _PACKAGE_NAME:
         return None

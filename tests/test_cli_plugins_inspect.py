@@ -280,15 +280,15 @@ def test_inspection_rejects_unrecognized_dependency_manifest_shapes(
 def _deep_json(depth: int = 20_000) -> str:
     """深嵌套但**尺寸很小**的 package.json：深度是唯一的门槛。
 
-    20_000 层对象约 120 KB，远在 1 MB 读上限之内；`json.loads` 自带递归上限
-    （CPython 3.12 本机实测对象嵌套 9997 层；上限随解释器与栈漂移）先于任何尺寸上限炸——与 #875 的 MCP
-    描述同形状（同一文件里的 MCP_DESCRIPTION_TOO_DEEP 用例）。
+    20_000 层对象约 120 KB，远在 1 MB 读上限之内；`json.loads` 自带递归上限（具体层数随解释器
+    版本与栈大小漂移），先于任何尺寸上限炸——与 #875 的 MCP 描述同形状（同一文件里的
+    MCP_DESCRIPTION_TOO_DEEP 用例）。
     """
     return '{"dependencies":' + '{"a":' * depth + "1" + "}" * depth + "}"
 
 
 def _deep_toml(depth: int = 1_000) -> str:
-    """同形状的 pyproject.toml：`tomllib` 的递归上限低得多（实测 330 层对象嵌套）。"""
+    """同形状的 pyproject.toml：`tomllib` 的递归上限比 `json` 低得多。"""
     return (
         "[project]\ndependencies = []\n[tool.poetry.dependencies]\nx = "
         + "{a=" * depth
@@ -351,7 +351,7 @@ def test_cli_plugins_inspect_survives_a_deeply_nested_package_json(
         source / "SKILL.md",
         "---\nname: deep-package-json-cli\ndescription: Example.\n---\n",
     )
-    _write(source / "package.json", '{"x":' + '{"a":' * 10_000 + "1" + "}" * 10_000 + "}")
+    _write(source / "package.json", _deep_json())
     workspace = tmp_path / "workspace"
     global_skills = tmp_path / "global-skills"
     _write(workspace / "plugin-installs.json", '{"project": []}\n')
