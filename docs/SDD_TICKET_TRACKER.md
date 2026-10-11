@@ -8184,4 +8184,3 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **§8.1 重跑判据**：`git diff --name-status --no-renames a04a7c38 f70458b2` 含非 docs 路径（`M desktop/installer/ia-tui.cmd`、`M desktop/test/installer-tui.test.mjs`、`A tui/test/installer-launcher.test.ts`）⇒ 树不同、旧读数不传递，在新树重跑完整门禁。
 - **合并树全量复验**：云端沙箱 `shell/ia-test` 全量 pytest `-n 4`（排除 `tests/web/test_ws_auth.py`，理由同上）= **7694 passed / 28 skipped / 0 failed**（130.9s），`test_ws_auth.py` 串行 **35 passed**；裸全量 Gate-0（tip `9fbe2351`，tree `25b8891a`）= **6/6 PASS**（29.6s，读数 `docs/gate/9fbe23517816995c19084c78160d335acd68cbea.json`）；`--since origin/main --no-record` 17 文件（docs 10 / src 3 / tests 2 / tui 2）六车道 **6/6 PASS**（22.1s）。原始日志 `dispatch/1014-review/sandbox-logs/1014-sync-*.log`。
 - **残余 / 待批准**：sync 后 push 已获用户批准；merge 与关单需用户单独批准（本轮只 push，不 merge、不关单）。
-
