@@ -26,7 +26,7 @@ from typing import Any
 from agent_harness.attachments.errors import AttachmentError
 from agent_harness.attachments.filenames import file_leaf_name
 from agent_harness.attachments.projection import ImageRef
-from agent_harness.attachments.types import EXTENSION_MEDIA_TYPES
+from agent_harness.attachments.validation import EXTENSION_MEDIA_TYPES
 
 #: 存储不可用（`artifact_dir` 置空且无对象存储）时的**唯一**文案。三个入口共用，
 #: 机读码由各自的错误通道给（HTTP 走 `web/attachments.py::ATTACHMENT_STORAGE_UNAVAILABLE`）。

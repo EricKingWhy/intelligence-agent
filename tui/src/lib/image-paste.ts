@@ -9,7 +9,7 @@
  *
  * 与上游的四处差别（都在 NOTICE 里登记）：
  * 1. **砍掉 OpenTUI 依赖**：上游的 `PasteLikeEvent{bytes,metadata}` 来自 OpenTUI，
- *    `IMAGE_EXTENSIONS` 里的 bmp/svg 本仓服务端不收（`attachments/types.py::EXTENSION_MEDIA_TYPES`
+ *    `IMAGE_EXTENSIONS` 里的 bmp/svg 本仓服务端不收（`attachments/validation.py::EXTENSION_MEDIA_TYPES`
  *    只有 png/jpg/jpeg/webp/gif）=> 扩展名集与服务端 **逐字对齐**；
  * 2. 上游用 `resolveExistingFilePath`（`@cline/shared/storage`，本仓无此包）做
  *    macOS 文件名变体归位；本仓 TUI 的粘贴路径只做"剥引号 / CRLF 归一 / `file://` 转换"，
@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { detectSupportedImageMimeType } from "./mime.ts";
 import type { PendingImage } from "./pending-images.ts";
 
-/** 服务端 v1 接受的栅格图 media types（`attachments/types.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
+/** 服务端 v1 接受的栅格图 media types（`attachments/validation.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
 export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
   "image/png",
   "image/jpeg",
