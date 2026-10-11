@@ -1,0 +1,1 @@
+2026-10-11	#969 sync merge origin/main 机械归属行（非新审查主张）：merge f10bd66b 合并 main 2fd6f042，父一 94fda8f8（本票已验证冻结树，docs-only 订正已由 969-spec-note-922a370b-11f26ab4 行覆盖）、父二 2fd6f042（含 #981 discovery 深嵌套守卫，已由 t981-* 各行覆盖）。merge-base 922a370b；ort 零冲突；git show --cc 文件表空、树两父之并	94fda8f824f4cd832d7ca453dc8c6908acece20b..f10bd66bdb40f19c3629af2925f293a9c28809c2
