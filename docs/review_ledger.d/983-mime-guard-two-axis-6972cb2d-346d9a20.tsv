@@ -1,1 +1,2 @@
 2026-10-10	#983 B3-1: 删 tui mime.ts bmp 分支（权威表无 bmp、两条生产路径本就拒收，删后零行为变化）+ 新增 tui/test/mime-image-types.test.ts 同构守卫（ADAPT web P3-1/#938 形状，node:test）钉住识别集与权威快照精确相等；tui npm test 239 pass/0 fail/2 skip，tsc 0 错；双轴独立审查由协调者另行安排	6972cb2d0980a797ee9777fd4a3f68235547d5b5..346d9a2053f31ecd730a4736d0ea004f5d21933a
+2026-10-11	#983 死代码收尾：删 tui mime.ts 孤儿 helper readUint16LE（唯一调用者 isBmp 已于上一笔删除，删后 grep tui/src tui/test 零命中）；tui npm test 239 pass/0 fail/2 skip，tsc --noEmit 0 错	346d9a2053f31ecd730a4736d0ea004f5d21933a..9238a3b0342c1ff69eefe3286350fd80a0dbee3a
