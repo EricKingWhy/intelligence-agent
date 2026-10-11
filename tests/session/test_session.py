@@ -269,6 +269,24 @@ class TestRunLifecycle:
         assert last.data.get("trace_url") == "https://lf.example/traces/tr-failed"
         assert last.data.get("reason") == "boom"
 
+    def test_end_run_failed_persists_http_status_only_when_given(
+        self, store: JsonlSessionStore,
+    ):
+        """#996：未分类 provider 失败的 HTTP 状态码是可选整数键——给值才落，
+        不给不落（不伪造）；completed 终态永不带它。"""
+        session = Session.start(store)
+        run_id, _ = session.begin_run()
+        session.end_run(run_id, status="failed", reason="BadRequestError", http_status=400)
+        assert session.events[-1].data.get("http_status") == 400
+
+        run_id, _ = session.begin_run()
+        session.end_run(run_id, status="failed", reason="APIConnectionError")
+        assert "http_status" not in session.events[-1].data
+
+        run_id, _ = session.begin_run()
+        session.end_run(run_id, status="completed", final_text="ok", http_status=500)
+        assert "http_status" not in session.events[-1].data
+
     def test_end_run_trace_fields_null_when_not_provided(self, store: JsonlSessionStore):
         """trace_id / trace_url 键恒存在（前端契约据此降级显示）；未追踪 = null，
         不伪造占位字符串（保持 None 语义；与既有 completed 的 cost_usd 同款）。"""

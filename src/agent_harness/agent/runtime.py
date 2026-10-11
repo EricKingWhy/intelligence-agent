@@ -127,6 +127,8 @@ from agent_harness.model.failure import (
     UNCLASSIFIED_FAILURE_MESSAGE,
     classify_provider_failure,
     has_malformed_tool_call_markup,
+    provider_http_status,
+    unclassified_failure_message,
 )
 from agent_harness.model.fallback import (
     FallbackPolicy,
@@ -556,6 +558,7 @@ class _RunFinalizer:
         message: str | None = None, trace_id: str | None = None,
         trace_url: str | None = None,
         primary_error: str | None = None, fallback_error: str | None = None,
+        http_status: int | None = None,
     ) -> SessionEvent | None:
         """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
 
@@ -563,7 +566,8 @@ class _RunFinalizer:
         原因，与取消臂的 reason=cancelled 同一语义层。message 是固定可读文案
         （reason+message 成对，与上下文超限路径的 RUN_FAILED 形状一致）。
         `primary_error` / `fallback_error` 只在**同一决策两级都失败**时给（#551
-        M10-8），同样是类型名、不带正文。本方法不替调用方编原因（两个入参缺省即
+        M10-8），同样是类型名、不带正文。`http_status` 是未分类 provider 失败的
+        整数状态码（#996），有才给。本方法不替调用方编原因（两个入参缺省即
         不落键）；运行期每条失败路径都必须带 reason 这件事由**逐路径用例**守，清单见
         docs/adr/0033-run-failure-attribution-surface.md §2.4。
         """
@@ -578,6 +582,7 @@ class _RunFinalizer:
             trace_url=trace_url,
             primary_error=primary_error,
             fallback_error=fallback_error,
+            http_status=http_status,
         )
         self._terminal_written = True
         return event
@@ -3802,10 +3807,14 @@ class AgentRuntime:
         # 终态文案：未分类也必须有可读兜底（#222）。**只喂 run/failed**——
         # model/failed 那侧保持原样（未分类时它是 "model call failed: {type}"，
         # 前端不投影它，见 ADR-0033 §3），两个面各有各的读者。
-        terminal_message = (
-            provider_message
-            or UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=type(error).__name__)
+        # #996：未分类且模型调用在途 ⇒ 按异常结构补状态码与类别（只代入类名 +
+        # 整数状态码）；窗口外沿用 #222 原句——工具/投影阶段的 HTTP 错误不是供应商的。
+        unclassified_in_window = provider_reason is None and arms.terminal.model_call_open
+        terminal_message = provider_message or (
+            unclassified_failure_message(error) if unclassified_in_window
+            else UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=type(error).__name__)
         )
+        terminal_http_status = provider_http_status(error) if unclassified_in_window else None
         stages = _TerminalStages()
         interrupted_events = stages.run("interrupt_streams", ctx.interrupt_streams)
         for streamed in interrupted_events:
@@ -3841,6 +3850,7 @@ class AgentRuntime:
             trace_url=arms.telemetry.trace_url,
             primary_error=double_failure[0] if double_failure else None,
             fallback_error=double_failure[1] if double_failure else None,
+            http_status=terminal_http_status,
         )
         if end_event is not None:
             yield to_agent_event(end_event)
