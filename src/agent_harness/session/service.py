@@ -254,11 +254,9 @@ from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
     SessionToolLimitsPurge,
 )
-from agent_harness.storage.local_artifact import (
-    delete_local_artifacts,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import delete_local_artifacts
 from agent_harness.storage.operation import OperationState, needs_reconcile
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -2925,9 +2923,10 @@ class SessionService:
                     f"附件 {attachment_id!r} 字节无法解析为图片：{error}"
                 ) from error
             seen.add(attachment_id)
-            # #823 / MM-02（B6）：不写 `name`——发送端点只收 id 列表，上传回执的
-            # 展示名未持久化、也无回传信道，故事件引用数组的 `name` 结构性缺省
-            # （AC1 该字段可选）。展示名接线留待前端票 / MM-03。
+            # #823 / MM-02（B6）+ #939 M-27：不写 `name`——发送端点只收 id 列表，
+            # 上传回执的展示名未持久化，**没有回传信道**捎带过来（不是"字段恒缺省"，
+            # CLI `--image <path>` 走同一份 `image_reference` 时是真的带名字的）。
+            # 事件引用数组的 `name` 因此可选（AC1），前端据缺省回落显示。
             # 形状单源 = `attachments.admission.image_reference`（CLI `--image` 同一份）。
             refs.append(
                 image_reference(

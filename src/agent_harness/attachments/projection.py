@@ -37,6 +37,13 @@ class ImageRef(ImageAttachmentRef):
 
     #823 / MM-02（B1）：**继承** MM-01 的持久化契约 `ImageAttachmentRef`，只加一个
     `kind` 判别字段——不再是与之重复的第二份领域模型。
+
+    这个形状有**两个**跨端手写副本：`web/src/lib/attachmentRefs.ts::ImageAttachmentRef`
+    （由 `tests/web/test_attachment_ref_contract.py` 机械对账：字段名 / 判别字面量 /
+    可空性）与 `tui/src/adapter.ts::TurnImageRef`（**目前无守卫**——它声明的是本模型
+    去掉 `kind` 的子集，后端加字段时 TUI 会静默缺省。已登记残余，见 checkpoint；
+    #939 M-07：此前 web 那份手写镜像零守卫，后端加字段、前端漏跟会让全门禁绿而该
+    字段在 UI 上永远缺省）。
     """
 
     kind: str = KIND_IMAGE

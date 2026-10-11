@@ -21,7 +21,7 @@
 import { useState } from 'react';
 import { RotateCcw } from 'lucide-react';
 import type { ImageAttachmentRef } from '../lib/attachmentRefs';
-import { IMAGE_OMITTED_PLACEHOLDER } from '../lib/attachments';
+import { IMAGE_OMITTED_PLACEHOLDER, displayAttachmentName } from '../lib/attachments';
 import { useAttachmentImage } from '../hooks/useAttachmentImage';
 import { ImageLightbox } from './ImageLightbox';
 
@@ -55,7 +55,7 @@ function MessageImageTile({ sessionId, image }: { sessionId: string | null; imag
   const [open, setOpen] = useState(false);
   /** 直连路上 `<img>` 的失败只有 onError 知道（token 路的失败在 `error` 里）。 */
   const [imgFailed, setImgFailed] = useState(false);
-  const name = image.name && image.name.length > 0 ? image.name : '图片';
+  const name = displayAttachmentName(image.name);
   const failed = error !== null || imgFailed;
 
   return (

@@ -18,10 +18,8 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import compute_artifact_id
-from agent_harness.storage.local_artifact import (
-    LocalArtifactStore,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import LocalArtifactStore
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 
 SESSION = "sess-local-1"
 CONTENT = "line-1\nline-2\nline-3\n"
@@ -182,6 +180,52 @@ class TestInspect:
     async def test_inspect_missing_artifact_raises_key_error(self, tmp_path: Path) -> None:
         with pytest.raises(KeyError):
             await store(tmp_path).inspect("0" * 16)
+
+
+class TestLayoutLiteralsComeFromOnePlace:
+    """#939 M-14：布局**没有**第二种拼法——`"tmp"` 也必须是共享常量。
+
+    这些字面量有非零后果：上手改 `attachment_layout.py` 的目录名时，逃逸的那处会
+    静默错配（写进 A、从 B 读），症状与 `artifact_select` 要消灭的同族。故钉住拼法，
+    而不只是钉住"某次调用能跑通"。
+    """
+
+    def test_global_staging_dir_uses_the_shared_constant(self, tmp_path: Path) -> None:
+        from agent_harness.storage.attachment_layout import (
+            BYTE_STAGING_DIRNAME,
+            GLOBAL_ATTACHMENT_DIRNAME,
+        )
+
+        store = LocalArtifactStore(settings(tmp_path), session_id=SESSION)
+        assert store._global_blob_staging_dir() == (
+            tmp_path / "artifacts" / GLOBAL_ATTACHMENT_DIRNAME / BYTE_STAGING_DIRNAME
+        )
+
+    def test_layout_module_defines_every_dirname_used_by_the_store(self) -> None:
+        """store 侧不许再有裸字面量目录名：三个都从 `attachment_layout` 来。"""
+        import ast
+        from pathlib import Path as _Path
+
+        import agent_harness.storage.attachment_layout as layout
+
+        source = (
+            _Path(__file__).resolve().parents[2]
+            / "src" / "agent_harness" / "storage" / "local_artifact.py"
+        ).read_text(encoding="utf-8")
+        defined = set(layout.__all__)
+        # `Path(...) / "字面量"` 形式的路径段：只允许出现在注释/文档里。
+        tree = ast.parse(source)
+        offenders = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value in {"attachments", "objects", "tmp", ".attachments"}
+        ]
+        assert offenders == [], (
+            f"local_artifact.py 仍有裸目录名字面量 {offenders}——布局拼法必须单源"
+            f"（`attachment_layout` 的 {sorted(defined)}）"
+        )
 
 
 class TestConstructorGuards:
