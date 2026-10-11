@@ -5,7 +5,7 @@
 
 **依赖方向是单向的 `plugins → skills`**（#974）：各车道自己的预检住在自己的车道里，
 `skills/` **不得**反向 import `plugins/`（`tests/test_package_boundary.py` 守这条）。
-因此两车道的**共享叶子**——MCP server 描述预检（`inspect_mcp_servers` /
+因此两车道的**共享模块**——MCP server 描述预检（`inspect_mcp_servers` /
 `attach_mcp_section`）——住在既不属于 skills 也不属于 plugins 的中性顶层模块
 `agent_harness.mcp_precheck`，由 Skill 安装闸门与 MCP 包生命周期各自 import；
 把折 MCP 段的逻辑直接写进 `skills/package_manager.py` 会让
