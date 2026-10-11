@@ -1764,9 +1764,65 @@ def _main_plugins(argv: list[str]) -> None:
     listing = subcommands.add_parser("list", help="list saved selection and current Runtime state")
     add_scope_argument(listing)
     listing.add_argument("--project", help="project workspace to report on (default: this one)")
+
+    mcp = subcommands.add_parser("mcp", help="manage installed MCP server packages")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    def add_mcp_scope(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--scope", choices=["project", "global"], default="project")
+        command_parser.add_argument("--project", help="project workspace (default: this one)")
+
+    mcp_install = mcp_commands.add_parser(
+        "install", help="snapshot a local MCP description without starting its server"
+    )
+    mcp_install.add_argument("source", help="local directory containing mcp.json or .mcp.json")
+    mcp_install.add_argument("--id", dest="package_id", help="stable package id (defaults to directory name)")
+    add_mcp_scope(mcp_install)
+
+    mcp_install_git = mcp_commands.add_parser(
+        "install-git", help="install an MCP description from an explicitly pinned Git ref"
+    )
+    mcp_install_git.add_argument("url", help="Git URL without embedded credentials")
+    mcp_install_git.add_argument("--ref", required=True, help="branch, tag, or commit to resolve")
+    mcp_install_git.add_argument("--subdirectory", required=True, help="directory containing the MCP description")
+    mcp_install_git.add_argument("--id", dest="package_id", help="stable package id (defaults to subdirectory name)")
+    add_mcp_scope(mcp_install_git)
+
+    mcp_trust = mcp_commands.add_parser(
+        "trust", help="explicitly trust the exact installed MCP snapshot"
+    )
+    mcp_trust.add_argument("package_id")
+    mcp_trust.add_argument("--pending", action="store_true", help="trust a staged version")
+    add_mcp_scope(mcp_trust)
+
+    mcp_update = mcp_commands.add_parser("update", help="stage a local snapshot or explicit Git ref")
+    mcp_update.add_argument("package_id")
+    update_source = mcp_update.add_mutually_exclusive_group(required=True)
+    update_source.add_argument("--source", help="local package directory to snapshot")
+    update_source.add_argument("--ref", help="new Git branch, tag, or commit")
+    add_mcp_scope(mcp_update)
+
+    mcp_rollback = mcp_commands.add_parser("rollback", help="stage the previous MCP snapshot")
+    mcp_rollback.add_argument("package_id")
+    add_mcp_scope(mcp_rollback)
+
+    mcp_enable = mcp_commands.add_parser("enable", help="select an installed MCP package for this project")
+    mcp_enable.add_argument("package_id")
+    mcp_enable.add_argument("--scope", choices=["project", "global"])
+    mcp_enable.add_argument("--project", help="project workspace to enable in (default: this one)")
+
+    mcp_disable = mcp_commands.add_parser("disable", help="clear this project's MCP package selection")
+    mcp_disable.add_argument("package_id")
+    mcp_disable.add_argument("--project", help="project workspace to disable in (default: this one)")
+
+    mcp_list = mcp_commands.add_parser("list", help="list installed, selected, and pending MCP packages")
+    add_mcp_scope(mcp_list)
     args = parser.parse_args(argv)
 
     settings = Settings()
+    if args.command == "mcp":
+        _main_mcp_plugins(args, settings)
+        return
     from agent_harness.capability.base import CapabilityError
     from agent_harness.capability.config import parse_capabilities_config
     from agent_harness.capability.wiring import coerce_skill_path_list
@@ -1894,6 +1950,189 @@ def _main_plugins(argv: list[str]) -> None:
     except (CapabilityError, SkillPackageError, OSError) as error:
         _emit_stderr(str(error))
         raise SystemExit(2) from error
+
+
+def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
+    from agent_harness.plugins.mcp_package_manager import (
+        MCPPackageError,
+        MCPPackageManager,
+    )
+    from agent_harness.skills.package_manager import SkillPackageError
+
+    workspace = getattr(args, "project", None) or settings.workspace_dir
+    global_dir = settings.skill_global_dir or None
+
+    def manager_for(scope: str) -> MCPPackageManager:
+        return MCPPackageManager(
+            workspace,
+            scope=scope,
+            global_skills_dir=global_dir,
+        )
+
+    try:
+        if args.mcp_command == "install":
+            record = manager_for(args.scope).install(args.source, package_id=args.package_id)
+            print(json.dumps({"package_id": args.package_id or Path(args.source).name, **record},
+                             ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "install-git":
+            record = manager_for(args.scope).install_git(
+                args.url,
+                ref=args.ref,
+                subdirectory=args.subdirectory,
+                package_id=args.package_id,
+            )
+            package_id = args.package_id or Path(args.subdirectory.replace("\\", "/")).name
+            print(json.dumps({"package_id": package_id, **record}, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "trust":
+            record = manager_for(args.scope).trust(args.package_id, pending=args.pending)
+            print(json.dumps({"package_id": args.package_id, **record}, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "update":
+            record = manager_for(args.scope).update(
+                args.package_id,
+                source=args.source,
+                ref=args.ref,
+            )
+            print(json.dumps({"package_id": args.package_id, **record}, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "rollback":
+            record = manager_for(args.scope).rollback(args.package_id)
+            print(json.dumps({"package_id": args.package_id, **record}, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "enable":
+            result = manager_for("project").enable(args.package_id, scope=args.scope)
+            print(json.dumps({
+                "package_id": args.package_id,
+                "saved_selection": "enabled",
+                "selected_scope": result["selected_scope"],
+                "project": str(workspace),
+            }, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "disable":
+            result = manager_for("project").disable(args.package_id)
+            print(json.dumps({
+                "package_id": args.package_id,
+                "saved_selection": "disabled",
+                "previous_scope": result["selected_scope"],
+                "project": str(workspace),
+                "pending_restart": True,
+            }, ensure_ascii=False, indent=2))
+            return
+        if args.mcp_command == "list":
+            project_manager = manager_for("project")
+            selections = project_manager.enable_results()
+            runtime_state, runtime_packages = _query_current_mcp_runtime(workspace)
+            if args.scope == "global":
+                manager = manager_for("global")
+                print(json.dumps({
+                    "runtime": {"state": runtime_state},
+                    "packages": _mcp_packages_for_listing(
+                        manager, selections, runtime_state, runtime_packages
+                    ),
+                }, ensure_ascii=False, indent=2))
+            else:
+                manager = project_manager
+                global_manager = manager_for("global")
+                print(json.dumps({
+                    "runtime": {"state": runtime_state},
+                    "packages": _mcp_packages_for_listing(
+                        manager, selections, runtime_state, runtime_packages
+                    ),
+                    "available_global_packages": _mcp_packages_for_listing(
+                        global_manager, selections, runtime_state, runtime_packages
+                    ),
+                }, ensure_ascii=False, indent=2))
+            return
+    except (MCPPackageError, SkillPackageError, OSError) as error:
+        _emit_stderr(str(error))
+        raise SystemExit(2) from error
+
+
+def _mcp_packages_for_listing(
+    manager: Any,
+    selections: dict[str, dict[str, Any]],
+    runtime_state: str,
+    runtime_packages: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    packages: list[dict[str, Any]] = []
+    for package_id, record in sorted(manager.list_packages().items()):
+        current = record["current_version"]
+        pending = record.get("pending_version")
+        selected = selections.get(package_id, {}).get("selected_scope")
+        active = next((
+            item for item in (runtime_packages or [])
+            if item.get("package_id") == package_id and item.get("scope") == record["scope"]
+        ), None)
+        is_current = (
+            active is not None
+            and active.get("sha256") == current["sha256"]
+            and selected == record["scope"]
+        )
+        desired_in_scope = selected == record["scope"]
+        if runtime_state == "running":
+            if is_current:
+                current_runtime = "loaded"
+            elif desired_in_scope or active is not None:
+                current_runtime = "pending_restart"
+            else:
+                current_runtime = "not_selected"
+            pending_restart: bool | None = bool(
+                pending is not None or (desired_in_scope and not is_current) or (not desired_in_scope and active is not None)
+            )
+        elif runtime_state == "not_running":
+            current_runtime = "not_running"
+            pending_restart = pending is not None
+        else:
+            current_runtime = "unavailable"
+            pending_restart = True if pending is not None else None
+        packages.append({
+            "package_id": package_id,
+            "type": "mcp",
+            "scope": record["scope"],
+            "source": record["source"],
+            "saved_selection": "enabled" if selected == record["scope"] else "disabled",
+            "selected_scope": selected,
+            "trust": current["trust_status"],
+            "compatibility": current["compatibility"],
+            "current_version": {
+                "sha256": current["sha256"],
+                "ref": current.get("source_ref"),
+                "resolved_commit": current.get("resolved_commit"),
+            },
+            "pending_version": (
+                {
+                    "sha256": pending["sha256"],
+                    "ref": pending.get("source_ref"),
+                    "resolved_commit": pending.get("resolved_commit"),
+                    "trust": pending["trust_status"],
+                }
+                if pending is not None else None
+            ),
+            "current_runtime": current_runtime,
+            "pending_restart": pending_restart,
+        })
+    return packages
+
+
+def _query_current_mcp_runtime(
+    workspace_dir: str,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Read active MCP package ids over the authenticated local host challenge."""
+    if os.environ.get(ALLOW_SHARED_ROOT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "unavailable", None
+    from agent_harness.host_service import query_attached_mcp_packages
+
+    payload = query_attached_mcp_packages(workspace_dir)
+    if payload is not None:
+        return "running", payload["packages"]
+    try:
+        probe_lock = InstanceLock(workspace_dir).acquire()
+    except (InstanceLockError, OSError):
+        return "unavailable", None
+    probe_lock.release()
+    return "not_running", None
 
 
 def _query_current_skill_runtime(

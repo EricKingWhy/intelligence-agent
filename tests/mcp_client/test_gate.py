@@ -21,6 +21,7 @@ from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.plugins.mcp_package_manager import MCPPackageManager
 from agent_harness.session import (
     MODEL_COMPLETED,
     RUN_COMPLETED,
@@ -146,6 +147,75 @@ async def test_gate1_remote_mcp_tool_goes_through_unified_executor(tmp_path):
     call_event = next(e for e in session.events if e.type == TOOL_CALL)
     assert call_event.data["tool_call_id"] == "call-mcp"
     assert "done" in str([e.data for e in session.events if e.type == RUN_COMPLETED])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "connection"),
+    [
+        ("stdio", {"command": "fake-mcp"}),
+        ("http", {"url": "http://127.0.0.1:5000/mcp"}),
+    ],
+)
+async def test_installed_mcp_package_tool_uses_ledger_and_session_events(
+    tmp_path, transport: str, connection: dict[str, str]
+):
+    source = tmp_path / "weather-package"
+    source.mkdir()
+    (source / "mcp.json").write_text(
+        json.dumps({
+            "servers": [{
+                "name": "packaged",
+                "transport": transport,
+                **connection,
+            }]
+        }),
+        encoding="utf-8",
+    )
+    global_dir = tmp_path / "home" / "skills"
+    manager = MCPPackageManager(tmp_path, global_skills_dir=global_dir)
+    manager.install(source, package_id="weather-package")
+    manager.trust("weather-package")
+    manager.enable("weather-package")
+
+    fake = FakeMCPServer(tools=[make_fake_tool("echo", read_only=True)])
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(global_dir),
+        model_api_key="sk-test",
+    )
+
+    def factory(config):
+        return StubConnection(config, fake)
+
+    with patch("agent_harness.mcp.capability.MCPServerConnection", factory):
+        wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+    tool_registry = ToolRegistry()
+    for tool in wiring.tools:
+        tool_registry.register(tool)
+    ledger = SqliteOperationLedger(tmp_path / "installed-mcp-state.db")
+    await ledger.initialize()
+    executor = ToolExecutor(tool_registry, operation_ledger=ledger)
+    model = ScriptedModel([
+        AIMessage(content="", tool_calls=[
+            {"id": "call-installed-mcp", "name": "mcp__packaged__echo",
+             "args": {"text": "from package"}, "type": "tool_call"},
+        ]),
+        AIMessage(content="completed"),
+    ])
+    runtime = AgentRuntime(model, tool_registry, executor)
+    session = make_session(tmp_path / "installed-mcp-sessions")
+
+    result = await runtime.run(session, "use the installed MCP tool")
+
+    assert result.completed
+    operation = await ledger.get(session.session_id, "call-installed-mcp")
+    assert operation is not None and operation.state == OperationState.SUCCEEDED
+    assert fake.call_count == 1
+    event_types = [event.type for event in session.events]
+    assert event_types.count(TOOL_CALL) == 1
+    assert event_types.count(TOOL_RESULT) == 1
 
 
 @pytest.mark.asyncio
