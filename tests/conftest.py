@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -141,6 +141,59 @@ def _reset_sse_shutdown_latch() -> Iterator[None]:
     _reset()
     yield
     _reset()
+
+
+#: loopback 主机名白名单：发往这些主机的请求必须绕过任何代理。
+#: 裸 `::1` 是唯一正确写法——方括号 `[::1]` 会让 httpx2 在**客户端构造期**抛
+#: `InvalidURL: Invalid port: ':1]'`（`httpx2/_utils.py::get_environment_proxies`
+#: 对 `[::1]` 走 `all://*[::1]` 分支，`URLPattern` 构造即炸）。
+_LOOPBACK_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def ensure_loopback_proxy_exemption(env: MutableMapping[str, str]) -> None:
+    """把 loopback 三项追加进 `NO_PROXY` 与 `no_proxy`（缺则设、恰为 `*` 则不动）。
+
+    环境变量豁免是 urllib → requests → httpx 一脉的成熟语义（来源：httpx 官方
+    `docs/environment_variables.md`；httpx2 `_utils.py::get_environment_proxies`
+    同构）：`NO_PROXY` 是逗号分隔的 hostname 列表，命中即绕过代理。大小写两个键
+    都写——`urllib.request.getproxies()` 读代理 env 时对大写敏感。已有条目保留
+    去重，不重复追加；值恰为 `*`（全豁免）时保持原样。
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = env.get(key)
+        if raw is None or not raw.strip():
+            env[key] = ",".join(_LOOPBACK_PROXY_HOSTS)
+            continue
+        entries = [host.strip() for host in raw.split(",") if host.strip()]
+        if "*" in entries:
+            continue
+        for host in _LOOPBACK_PROXY_HOSTS:
+            if host not in entries:
+                entries.append(host)
+        env[key] = ",".join(entries)
+
+
+@pytest.fixture(autouse=True)
+def _seal_loopback_proxy_exemption() -> Iterator[None]:
+    """#963：把 loopback 加入代理豁免，用例结束后恢复原 `NO_PROXY`/`no_proxy`。
+
+    宿主设了 `HTTP_PROXY`/`HTTPS_PROXY` 却没给 loopback 豁免时，httpx/httpx2 默认
+    `trust_env=True` 会把发往 `127.0.0.1` 的请求送进代理 → 一切走真实本机 HTTP 服务
+    的用例假红（issue #963 点名的 `test_http_transport_round_trip` 等）。在 conftest
+    统一修，不逐个改用例。
+
+    豁免只动 loopback，不影响 `qiniu`/`live_services` 等真实外部端点，故无需跳过；
+    机制对齐 httpx 一脉的成熟语义（见 `ensure_loopback_proxy_exemption` docstring）。
+    save/restore 用 try/finally，避免污染同进程内后续用例。
+    """
+    saved = {key: os.environ[key] for key in ("NO_PROXY", "no_proxy") if key in os.environ}
+    try:
+        ensure_loopback_proxy_exemption(os.environ)
+        yield
+    finally:
+        for key in ("NO_PROXY", "no_proxy"):
+            os.environ.pop(key, None)
+        os.environ.update(saved)
 
 
 @pytest.fixture(scope="session")
