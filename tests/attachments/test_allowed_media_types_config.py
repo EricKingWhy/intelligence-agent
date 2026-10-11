@@ -57,3 +57,23 @@ def test_image_projection_config_overrides() -> None:
     assert settings.image_detail == "low"
     assert settings.image_normalize_max_dimension == 1024
     assert settings.image_normalize_max_bytes == 512 * 1024
+
+
+# --- #939 M-27：展示名（`name`）的真实来源 ---
+
+
+def test_image_reference_carries_the_display_name() -> None:
+    """引用形状**能**带展示名；不传即缺省（`name` 是可空字段，不是恒缺省）。"""
+    from agent_harness.attachments import image_reference
+
+    without = image_reference(
+        "sha256:" + "a" * 64, "image/png", size=10, width=2, height=3
+    )
+    assert "name" not in without  # `exclude_none=True`：缺省就是字段不出现
+
+    with_name = image_reference(
+        "sha256:" + "a" * 64, "image/png", size=10, width=2, height=3,
+        name="/tmp/shots/cat.png",
+    )
+    # 展示名必须**去掉本地路径**（`file_leaf_name` 是唯一消毒点）
+    assert with_name["name"] == "cat.png"
