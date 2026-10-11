@@ -1,0 +1,1 @@
+2026-10-11	#879 logout fence: Standards PASS, zero findings; new auth flow rechecks saved OAuth token before sending; cumulative diff 9906ac32..a1694e68	9906ac32f498c4d76bdbb9da85fd6e4724b5a6db..a1694e68804318fb5dd495010a63f8751c458d99

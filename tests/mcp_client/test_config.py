@@ -19,6 +19,41 @@ def _http(**overrides):
 
 
 class TestParseServers:
+    def test_http_oauth_settings_are_parsed_and_secret_references_expanded(self, monkeypatch):
+        monkeypatch.setenv("MCP_OAUTH_SECRET", "secret-value")
+
+        server = parse_mcp_servers({"servers": [_http(oauth={
+            "callbackPort": 8080,
+            "scopes": "files:read",
+            "clientId": "registered-client",
+            "clientSecret": "${MCP_OAUTH_SECRET}",
+        })]})[0]
+
+        assert server.oauth.callback_port == 8080
+        assert server.oauth.scopes == "files:read"
+        assert server.oauth.client_id == "registered-client"
+        assert server.oauth.client_secret.get_secret_value() == "secret-value"
+        assert "secret-value" not in repr(server.oauth)
+
+    def test_oauth_is_restricted_to_http_servers(self):
+        with pytest.raises(ConfigError, match="OAuth is only supported for HTTP"):
+            parse_mcp_servers({"servers": [_stdio(oauth={})]})
+
+    def test_oauth_client_secret_must_be_an_environment_reference(self):
+        with pytest.raises(ConfigError) as error:
+            parse_mcp_servers({"servers": [_http(oauth={"client_secret": "plain-secret"})]})
+
+        assert "plain-secret" not in str(error.value)
+
+    def test_oauth_rejects_static_authorization_header_without_echoing_value(self):
+        with pytest.raises(ConfigError) as error:
+            parse_mcp_servers({"servers": [_http(
+                headers={"Authorization": "Bearer static-secret"},
+                oauth={},
+            )]})
+
+        assert "static-secret" not in str(error.value)
+
     def test_valid_stdio_and_http_with_defaults(self):
         servers = parse_mcp_servers({"servers": [_stdio(), _http()]})
         assert [s.name for s in servers] == ["local", "remote"]
