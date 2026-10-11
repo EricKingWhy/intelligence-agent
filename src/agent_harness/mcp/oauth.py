@@ -268,6 +268,7 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
         try:
             outgoing = await anext(flow)
             while True:
+                await self._ensure_saved_token_is_current(outgoing)
                 response = yield outgoing
                 if (
                     response.status_code < 300
@@ -292,6 +293,19 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
             raise
         finally:
             await flow.aclose()
+
+    async def _ensure_saved_token_is_current(self, request: httpx2.Request) -> None:
+        if not self._is_mcp_request(request) or not request.headers.get("authorization"):
+            return
+        get_tokens = getattr(self.context.storage, "get_tokens", None)
+        if get_tokens is None:
+            return
+        stored = await get_tokens()
+        current = self.context.current_tokens
+        if stored is None or current is None or stored.access_token != current.access_token:
+            raise MCPReauthorizationRequired(
+                "MCP OAuth credentials were cleared or changed; run login before reconnecting"
+            )
 
     def _is_mcp_request(self, request: httpx2.Request) -> bool:
         return request.url == httpx2.URL(self.context.server_url)

@@ -322,6 +322,53 @@ def test_oauth_client_provider_uses_the_locked_sdk_and_registered_redirect():
 
 
 @pytest.mark.asyncio
+async def test_existing_oauth_provider_stops_sending_cached_tokens_after_logout():
+    import httpx2
+    from mcp.shared.auth import OAuthToken
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import (
+        MCPReauthorizationRequired,
+        logout_mcp_oauth,
+        make_oauth_client_provider,
+    )
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+    keyring = FakeKeyring()
+    runtime_storage = MCPKeyringTokenStorage(config.name, config.url, keyring_api=keyring)
+    await runtime_storage.set_tokens(OAuthToken(
+        access_token="live-access",
+        refresh_token="live-refresh",
+        expires_in=3600,
+    ))
+    provider = make_oauth_client_provider(config, runtime_storage)
+    authorizations = []
+
+    def transport(request):
+        authorizations.append(request.headers.get("authorization"))
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        auth=provider,
+        transport=httpx2.MockTransport(transport),
+    ) as client:
+        assert (await client.get(config.url)).status_code == 200
+        logout_storage = MCPKeyringTokenStorage(config.name, config.url, keyring_api=keyring)
+        result = await logout_mcp_oauth(logout_storage)
+        assert result["local_cleared"]
+        with pytest.raises(MCPReauthorizationRequired):
+            await client.get(config.url)
+
+    assert authorizations == ["Bearer live-access"]
+    assert await runtime_storage.get_tokens() is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_refuses_oauth_connection_without_saved_credentials(monkeypatch):
     from contextlib import asynccontextmanager
 
