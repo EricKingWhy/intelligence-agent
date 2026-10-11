@@ -338,7 +338,7 @@ def test_dsh_git_install_update_apply_rollback_and_pending_restart(
     _configure_cli(monkeypatch, workspace, global_skills)
     repo = tmp_path / "repo"
     commit1 = _seed_repo(repo)
-    url = f"file://{repo}"
+    url = repo.as_uri()
 
     record = _cli_run(
         monkeypatch, capsys, "install-git", url, "--ref", "main", "--subdirectory", DSH_NAME
@@ -397,7 +397,7 @@ def test_dsh_git_update_rejects_drift_and_keeps_installed_version(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
@@ -445,6 +445,9 @@ def test_dsh_git_record_carries_modes_and_detects_chmod_drift(
     """
     import os
 
+    if os.name == "nt":
+        pytest.skip("Windows does not expose Git executable-bit changes for mode-drift checks")
+
     from agent_harness.skills.package_manager import _git_modes_sha256_from_package
 
     workspace = tmp_path / "workspace"
@@ -456,7 +459,7 @@ def test_dsh_git_record_carries_modes_and_detects_chmod_drift(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
@@ -547,7 +550,7 @@ def test_dsh_rollback_rejects_without_previous_or_with_pending(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
@@ -582,7 +585,7 @@ def test_dsh_apply_staged_drift_keeps_installed_version(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
@@ -622,7 +625,7 @@ def test_dsh_apply_recognition_failure_keeps_installed_version(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
@@ -742,7 +745,7 @@ def test_dsh_disable_then_update_projection_coexists_pending(
         monkeypatch,
         capsys,
         "install-git",
-        f"file://{repo}",
+        repo.as_uri(),
         "--ref",
         "main",
         "--subdirectory",
