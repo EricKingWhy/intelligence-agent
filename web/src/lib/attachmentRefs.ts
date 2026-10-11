@@ -11,7 +11,14 @@
  * 2000+ 行的聚合模块。
  */
 
-/** 事件里一条图片引用的形状（= 后端 `attachments.types.ImageRef`）。 */
+/**
+ * 事件里一条图片引用的形状（= 后端 `attachments.projection.ImageRef`，它继承持久化
+ * 契约 `attachments.types.ImageAttachmentRef` 并加一个 `kind` 判别字段）。
+ *
+ * 字段名 / 判别字面量 / 可空性由 `tests/web/test_attachment_ref_contract.py` 与后端
+ * 模型机械对账——单边改必红（此前这里指错了模块：声明名是 `ImageAttachmentRef`、
+ * 模块坐标却指向 `attachments.types.ImageRef`——一个不含 `kind` 的类）。
+ */
 export interface ImageAttachmentRef {
   kind: 'image';
   attachment_id: string;
