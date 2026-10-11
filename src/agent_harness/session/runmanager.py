@@ -71,11 +71,29 @@ logger = logging.getLogger("agent_harness.session.runmanager")
 SUBSCRIBER_QUEUE_MAX = 2000
 
 _DONE = object()  # run 终结 sentinel（入队后订阅者迭代结束）
+#: 会话级订阅者队列溢出哨兵（`#1014` A-opt）。run 订阅者丢帧可由「客户端据 seq gap
+#: 重连」自愈，而 follow 连接**不再有 run 终态触发的重连**——丢帧会变成永久空洞。
+#: 故 `_fanout_session` 溢出时清空队列并投本哨兵；端点收到它即**收流**，客户端据此
+#: 走既有的「ended → after_seq 重连」路径重放补洞（与既有 SoT 对账同源）。
+_RESYNC = object()
 
 
 @dataclass
 class Subscriber:
     """一个 SSE 连接对应一个订阅者：有界队列 + 断连移除。"""
+
+    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX))
+
+
+@dataclass
+class SessionFollower:
+    """`?follow=1` 的**会话级**订阅者：有界队列，**跨 run 存活**（#1014 A-opt）。
+
+    与 `Subscriber` 的区别是刻意的：`Subscriber` 挂在**一个 run** 上，run 终态时收
+    `DONE` 哨兵并结束；会话级订阅者挂在**会话**上，run 终态只是一段安静期，连接保持，
+    下一轮 run 的帧照常到达。因此它**永不**收 `DONE`。来源 = 该会话任一在途 run 的
+    既有 listener 扇出（`ManagedRun._fanout`），由 RunManager 按 session_id 派发。
+    """
 
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX))
 
@@ -221,6 +239,10 @@ class ManagedRun:
                     sub.queue.get_nowait()
                 with contextlib.suppress(asyncio.QueueFull):
                     sub.queue.put_nowait(event)
+        # #1014 A-opt：同一事件多扇出一路给该会话的**会话级**订阅者（`?follow=1`）。
+        # 恰好一次：`_fanout` 的两个调用点（`enqueue_agent_event` /
+        # `enqueue_session_event`）都已在调用前按 seq 去重，故此处不重复投递。
+        self._manager._fanout_session(self.session.session_id, event)
 
     def _arm_orphan_timer(self) -> None:
         grace = self._manager.disconnect_grace_seconds
@@ -295,6 +317,7 @@ class RunManager:
     """在途 run 注册表：launch / subscribe / cancel / 孤儿回收 / 关停。"""
 
     DONE = _DONE
+    RESYNC = _RESYNC  # 会话级订阅者队列溢出哨兵（端点侧收流重连，#1014）
 
     def __init__(
         self,
@@ -325,10 +348,53 @@ class RunManager:
         # 才是每会话状态的常驻 owner（本字典与 `_runs` 同寿命），所以它同时是这把锁
         # 的正确归属（AC-8：并发恢复只允许一个赢家）。
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # #1014 A-opt：会话级（`?follow=1`）订阅者注册表，按 session_id 记账。
+        # 与 `Subscriber`（挂单个 run）不同，这些订阅者跨 run 存活——run 终态只是
+        # 一段安静期，连接保持。`ManagedRun._fanout` 把每个事件多扇出一路到这里。
+        # 归 RunManager 而不是端点：端点每个请求新建、且 `Session` 对象每次 launch
+        # 都重建（挂在 `Session` 上的监听器活不过 run 边界），只有常驻的 RunManager
+        # 才能按 session_id 跨 run 派发。
+        self._session_followers: dict[str, list[SessionFollower]] = {}
         # 关停中：`aclose()` 取消在途 run 会走 `_drive` 的 finally，而那条路径默认
         # 会触发接力投递——关机时又拉起新 run 显然是错的（进程马上没了，新 run
         # 只会被半个生命周期地拖死）。置位后终态回调直接跳过。
         self._closing = False
+
+    # ── 会话级订阅（`?follow=1`，#1014 A-opt）──
+
+    def subscribe_session(self, session_id: str) -> SessionFollower:
+        """注册一个会话级订阅者（跨 run 存活；只收事件，永不给 `DONE`）。"""
+        follower = SessionFollower()
+        self._session_followers.setdefault(session_id, []).append(follower)
+        return follower
+
+    def unsubscribe_session(self, session_id: str, follower: SessionFollower) -> None:
+        """注销会话级订阅者（幂等：未注册时静默）；空表即回收该键。"""
+        followers = self._session_followers.get(session_id)
+        if not followers:
+            return
+        with contextlib.suppress(ValueError):
+            followers.remove(follower)
+        if not followers:
+            self._session_followers.pop(session_id, None)
+
+    def _fanout_session(self, session_id: str, event: AgentEvent) -> None:
+        """把一条已合并事件扇给该会话的全部会话级订阅者。
+
+        慢订阅者满队列时**不**丢最旧继续（那是 run 订阅者的策略，靠客户端 seq gap
+        重连自愈）：会话级订阅者没有 run 终态重连，丢帧会永久留洞 ⇒ 改为作废整个
+        队列并投 `_RESYNC` 哨兵，端点据此收流、客户端重连重放补洞。
+        """
+        for follower in list(self._session_followers.get(session_id, ())):
+            try:
+                follower.queue.put_nowait(event)
+            except asyncio.QueueFull:
+                while True:
+                    try:
+                        follower.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                follower.queue.put_nowait(_RESYNC)
 
     def session_lock(self, session_id: str) -> asyncio.Lock:
         """取得该会话的串行化锁（同会话恢复临界区，`#312` / `#342`）。

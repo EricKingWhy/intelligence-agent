@@ -54,6 +54,27 @@
 - 帧形状全端统一：`{type, data, seq?, run_id?, step_id?, session_id, time, event_id?, block_id?}`（重放帧来自 SessionEvent、live 帧来自 AgentEvent，同形）。
 - 前端按 seq 幂等投影（C5）；后端承诺：不重置、不回跳（store 追加写 + resume 校验已保证）。
 
+> **`?follow=1` opt-in 注记（#1014，2026-10-11）**：第 4 条（run 不在途 → 重放到 latest
+> 后收尾）对**常驻附着**的 TUI 客户端会与客户端的「`ended` → 1s 重连」叠加成每秒建/收一次
+> 的空转（实测 idle 会话每 60s ≈54 轮）。新增 **opt-in** 查询参数 `follow`（默认 `0`）：
+> `follow=1` 时重放 `(after_seq, latest_seq]` 后**不收流**，改为**会话级订阅**
+> （`RunManager.subscribe_session`；事件经既有的 `Session.add_listener` 通道
+> `ManagedRun._fanout` 多扇出一路），run 收尾只是一段安静期、连接保持，跨 run 边界继续推送
+> 该会话的后续事件（含**别的客户端**起的 run）。`follow=0`（缺省）时第 1–5 条**逐字不变**
+> （旧客户端/旧测试零影响）。
+>
+> **`follow=1` 的两类收流触发**：① backlog 超 `STREAM_REPLAY_MAX_EVENTS` → 与默认分支**同判据**、
+> 同发单帧 `stream/truncated` 控制帧后收流；② **慢客户端队列溢出**（会话级订阅者队列满，`put_nowait`
+> 抛 `QueueFull`，容量 `SUBSCRIBER_QUEUE_MAX`）→ `RunManager._fanout_session` 作废队列并投 `RESYNC` 哨兵，
+> 端点据此**静默**收流（**不**发控制帧），客户端走既有
+> 「`ended` → `after_seq` 重连」重放补洞。②是为「follow 连接没有 run 终态触发的重连」而设：沿用 run 订阅者
+> 的「丢最旧」策略（`ManagedRun._fanout`）会在 follow 上留**不可自愈**的永久空洞。**边界**：`follow=1` 只推**经 run 监听通道**产生的
+> 事件；run listener 注册**之前**由非 run 路径 append 的事件（`POST /resume` / `POST /compact` 等）不实时推送，
+> 由客户端重连 / `truncated` 后 `GET /events` 全量重建回收（11 §6「SessionEvent history + live AgentEvent stream」
+> 的既有对账路径）。另：重放窗口内入队的**无 seq** transient 帧（如 `model/started`）会在整段 durable 重放之后
+> 投递（相对自然时序滞后）；客户端一律不投影无 seq 的 transient 帧（TUI `SeqCursor` 对 `seq=null` 返回 skip，
+> 无 seq 的 `stream/truncated` 走独立路径），无可见影响。
+
 ## 3. 决策二：delta 合帧落盘 + reasoning 事件族（D-B / C1）
 
 ### 3.1 词汇扩展（session/event.py 单一真相源 + gen_event_types.py 再生成）
