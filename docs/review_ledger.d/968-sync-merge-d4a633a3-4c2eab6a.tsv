@@ -1,0 +1,1 @@
+2026-10-11	sync merge main（#968 分支先回后正）：父 d4a633a3（本线 tip）/ b86cadd3feb1（origin/main），merge-base 517b5f69，零冲突；--cc 空表；三树互不相等（merge 69ebb804ab0e ≠ 父一 fe6e7fcdc2bd ≠ 父二 d9bbb9f41fd2）。来侧变更：docs/ + src/agent_harness/context/tokens.py + tui/（与本线 web/ 改动面零重叠）；来侧各笔由来侧台账覆盖，本行只归属合并提交本身。	d4a633a3..4c2eab6ae4cd3e929f3768abad72b5102c25cc0e
