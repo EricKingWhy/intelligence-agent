@@ -290,17 +290,18 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
         flow = super().async_auth_flow(request)
         try:
             outgoing = await anext(flow)
-            if self.context.token_expiry_time is None and self.context.current_tokens is not None:
-                self.context.update_token_expiry(self.context.current_tokens)
-                if not self.context.is_token_valid():
-                    expired_token = self.context.current_tokens.access_token
-                    if request.headers.get("authorization") == f"Bearer {expired_token}":
-                        request.headers.pop("authorization", None)
-                    await flow.aclose()
-                    flow = super().async_auth_flow(request)
-                    outgoing = await anext(flow)
             while True:
                 await self._ensure_saved_token_is_current(outgoing)
+                if self.context.token_expiry_time is None and self.context.current_tokens is not None:
+                    self.context.update_token_expiry(self.context.current_tokens)
+                    if not self.context.is_token_valid():
+                        expired_token = self.context.current_tokens.access_token
+                        if request.headers.get("authorization") == f"Bearer {expired_token}":
+                            request.headers.pop("authorization", None)
+                        await flow.aclose()
+                        flow = super().async_auth_flow(request)
+                        outgoing = await anext(flow)
+                        continue
                 response = yield outgoing
                 if (
                     response.status_code < 300
@@ -359,6 +360,8 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
             raise MCPReauthorizationRequired(
                 "MCP OAuth credentials were cleared or changed; run login before reconnecting"
             )
+        if self.context.token_expiry_time is None:
+            self.context.current_tokens = stored
 
     def _is_mcp_request(self, request: httpx2.Request) -> bool:
         return request.url == httpx2.URL(self.context.server_url)

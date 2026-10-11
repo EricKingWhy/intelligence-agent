@@ -428,6 +428,77 @@ async def test_cancelled_sdk_initialization_rechecks_loaded_token_expiry_on_retr
 
 
 @pytest.mark.asyncio
+async def test_expired_token_during_sdk_initialization_is_refreshed_before_mcp_request(monkeypatch):
+    import asyncio
+
+    import httpx2
+    import mcp.client.auth.oauth2 as oauth2_sdk
+    from mcp.shared import auth_utils
+
+    import agent_harness.mcp.oauth as oauth_storage
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class Clock:
+        now = 1000.0
+
+        def time(self):
+            return self.now
+
+    clock = Clock()
+    monkeypatch.setattr(oauth2_sdk, "time", clock)
+    monkeypatch.setattr(auth_utils, "time", clock)
+    monkeypatch.setattr(oauth_storage, "time", clock)
+
+    class BlockingClientInfoStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.client_info_read = asyncio.Event()
+            self.release_client_info = asyncio.Event()
+
+        async def get_client_info(self):
+            self.client_info_read.set()
+            await self.release_client_info.wait()
+            return await super().get_client_info()
+
+    storage = BlockingClientInfoStorage(config.name, config.url, keyring_api=FakeKeyring())
+    await storage.set_tokens(OAuthToken(
+        access_token="short-lived",
+        refresh_token="refresh-token",
+        expires_in=2,
+    ))
+    await storage.set_client_info(OAuthClientInformationFull(
+        client_id="client-id",
+        token_endpoint_auth_method="none",
+    ))
+    await storage.set_oauth_metadata(_metadata())
+    provider = make_oauth_client_provider(config, storage)
+    flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+
+    async def initialize_flow():
+        try:
+            return await anext(flow)
+        finally:
+            await flow.aclose()
+
+    initialization = asyncio.create_task(initialize_flow())
+    await storage.client_info_read.wait()
+    clock.now = 1003.0
+    storage.release_client_info.set()
+
+    outgoing = await initialization
+    assert outgoing.url == httpx2.URL("https://as.example.com/token")
+    assert outgoing.headers.get("authorization") != "Bearer short-lived"
+
+
+@pytest.mark.asyncio
 async def test_queued_oauth_flow_does_not_extend_an_expired_token(monkeypatch):
     import asyncio
 
