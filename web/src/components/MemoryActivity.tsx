@@ -17,6 +17,20 @@ interface ActivityItems {
   updated: AgentEvent[];
 }
 
+/** #1017 审查 P4：同会话并发展开多张召回卡共享同一在途请求。只去重**并发**
+ *  （settle 即从表里移除，不做结果缓存）——后展开的卡仍各自拿新鲜列表，
+ *  不引入第二套记忆状态（不变量 #22）；失败不缓存，重试按钮照常重新拉取。 */
+const inFlightRecallFetches = new Map<string, Promise<SessionMemoryRecall[]>>();
+function fetchRecallsShared(sessionId: string): Promise<SessionMemoryRecall[]> {
+  const existing = inFlightRecallFetches.get(sessionId);
+  if (existing) return existing;
+  const promise = getSessionMemoryRecalls(sessionId).finally(() => {
+    inFlightRecallFetches.delete(sessionId);
+  });
+  inFlightRecallFetches.set(sessionId, promise);
+  return promise;
+}
+
 /** Notices are derived from the append-only event stream; details are fetched only on disclosure.
  *
  * #1017：`memory/recalled` 不再在此累积渲染——它们已由投影按轮归位（turn.recalls），
@@ -135,7 +149,7 @@ export function RecallNotice({ event, sessionId }: { event: AgentEvent; sessionI
     setLoading(true);
     setRecalls(null);
     setError(null);
-    try { setRecalls(await getSessionMemoryRecalls(sessionId)); }
+    try { setRecalls(await fetchRecallsShared(sessionId)); }
     catch (cause) { setError(describeMemoryError(cause, '读取召回说明失败')); }
     finally { setLoading(false); }
   };

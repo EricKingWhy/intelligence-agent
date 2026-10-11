@@ -123,7 +123,7 @@ describe('Conversation — memory/recalled 按轮归位（#1017 消融）', () =
 
     render(<Conversation conversation={multiTurnState('s-4', 5, true)} loadingHistory={false} density="balanced" />);
 
-    // 第 3 轮的卡：展开后只出现 seq=9/run-3 的记录（对账成功），不串其他轮的
+    // 第 3 轮的卡：展开后只出现 run-3/seq=11 的记录（对账成功），不串其他轮的
     const turns = container!.querySelectorAll<HTMLElement>('.turn');
     const thirdTurnCard = turns[2].querySelector<HTMLButtonElement>('.memory-v2-activity-toggle')!;
     await act(async () => { thirdTurnCard.click(); await Promise.resolve(); });

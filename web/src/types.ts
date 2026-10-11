@@ -403,6 +403,10 @@ export interface Turn {
    *  → recalled 的顺序恒成立）。copy-on-write 契约与 notices/delegations 同：
    *  cloneTurn 浅拷贝数组，变更必须整体 reassign。 */
   recalls?: AgentEvent[];
+  /** #1017 审查 P3：本轮 run 的归属戳（run/started 信封携带的 run_id）——
+   *  memory/recalled 归位时的 run_id 校验锚（两侧都在且不等 = 乱序回跳，
+   *  弃挂防静默错挂）。缺省 = 该轮尚未收到 run/started（防御）。 */
+  run_id?: string | null;
 }
 
 /** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。

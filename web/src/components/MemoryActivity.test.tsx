@@ -109,8 +109,13 @@ describe('MemoryActivity disclosure', () => {
       }],
     }]));
     vi.stubGlobal('fetch', fetchMock);
-    const recalled = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {})).turns[0]?.recalls?.[0]
-      ?? ({ type: 'memory/recalled', seq: 2, data: {}, run_id: 'run-1', time: '2026-09-25T10:00:00Z' } as AgentEvent);
+    // 被测前提（投影已归位）必须成立——先建轮再发 recalled，不用假事件兜底（审查 P4）
+    let conversation = applyEvent(initConversation('s-1'), event('user/message', 0, { content: 'hi' }));
+    conversation = applyEvent(conversation, event('run/started', 1, { turn_index: 1 }));
+    conversation = applyEvent(conversation, event('memory/recalled', 2, {}));
+    const recalledTurn = conversation.turns[0];
+    expect(recalledTurn?.recalls).toBeDefined();
+    const recalled = recalledTurn!.recalls![0];
 
     act(() => root.render(<RecallNotice event={recalled} sessionId="s-1" />));
 
