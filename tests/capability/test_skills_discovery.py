@@ -491,7 +491,8 @@ def test_deeply_nested_frontmatter_is_error_not_crash(tmp_path):
 
     # 坏技能被单条拒绝（不中断扫描），兄弟技能照常发现。
     assert [e.name for e in catalog.entries] == ["good"]
-    assert any("deep" in err for err in catalog.errors)
+    # 断言精确到消息，不是路径子串：路径里就有 "deep"，只查子串会让任何错误都算过。
+    assert any("nesting is too deep" in err for err in catalog.errors), catalog.errors
 
 
 def test_deeply_nested_frontmatter_single_file_returns_error(tmp_path):
@@ -505,7 +506,7 @@ def test_deeply_nested_frontmatter_single_file_returns_error(tmp_path):
     entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
 
     assert entry is None
-    assert errors
+    assert errors and "nesting is too deep" in errors[0], errors
 
 
 def test_shallow_frontmatter_still_parses_after_guard(tmp_path):
@@ -520,3 +521,27 @@ def test_shallow_frontmatter_still_parses_after_guard(tmp_path):
 
     assert errors == []
     assert entry is not None and entry.name == "ok" and entry.meta.get("version") == 2
+
+
+def test_guard_does_not_swallow_unexpected_parser_errors(tmp_path, monkeypatch):
+    """守卫精度：只兜 `RecursionError`，不把解析器的任何故障都洗成「太深」。
+
+    「嵌套太深」是一条**可归因**的结论（会写进 catalog.errors 给人看）；若守卫宽到
+    吞掉一切异常，真正的解析器 bug 会被伪装成一条无关的深度告警、再也浮不出来。
+    变异实测：把 `except RecursionError` 放宽成 `BaseException` 时，本用例是唯一转红的。
+    """
+    import yaml as yaml_module
+
+    skill_dir = tmp_path / "x"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n{_fm('x')}\n---\n正文\n", encoding="utf-8"
+    )
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("unexpected loader failure")
+
+    monkeypatch.setattr(yaml_module, "safe_load", boom)
+
+    with pytest.raises(ValueError, match="unexpected loader failure"):
+        parse_skill_markdown(skill_dir / "SKILL.md")
