@@ -1,0 +1,1 @@
+2026-10-11	#985 A-MM03-01/02 文档表述修正：tokens.py 常量注释两处（单调性不保证+保守属性；取整分叉举例以 Pillow 12.3.0 实测更正）与 M-03 tracked 文档同步更正；check_semantic_equiv 判纯注释语义等价，focused 49 passed，零行为改动	2fd6f042dc581de2291997b51e9d88ed0f995a29..8b6aa4e9ed74049f172d8ed112e298e5966380fe
