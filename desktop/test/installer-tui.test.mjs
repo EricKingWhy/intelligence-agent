@@ -6,7 +6,19 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -177,34 +189,60 @@ describe('ia-tui.cmd', () => {
     )
   })
 
-  it('forwards arguments and keeps the environment local to the launcher', () => {
+  it('forwards arguments and invokes the child after ending local scope', () => {
     assert.match(launcher, /%$|\s%\*$/m, 'forwards argv')
     assert.match(launcher, /^setlocal$/m)
-    assert.match(launcher, /^endlocal & exit \/b %rc%$/m, 'endlocal then leave with the captured code')
+    assert.match(
+      launcher,
+      /^endlocal & "%~dp0resources\\node\\node\.exe" .* %\*$/m,
+      'the child runs after endlocal as the launcher’s final command',
+    )
   })
 
   it('propagates the child exit code (W-21 #847: a bare endlocal swallowed it)', () => {
-    assert.match(launcher, /^set "rc=%ERRORLEVEL%"$/m, 'capture the node exit code before endlocal')
     assert.ok(
-      !/^endlocal\s*$/m.test(launcher),
-      'a bare endlocal resets the exit code to 0, so a failed TUI start reads as success',
+      !/^set "rc=%ERRORLEVEL%"$/m.test(launcher),
+      'the ERRORLEVEL environment variable can shadow cmd.exe’s dynamic exit code',
     )
   })
 
-  it('captures the exit code after the child ran, not before (W-21 #848 R6)', () => {
-    // M3 mutation: moving the capture line above the node line kept the old guard 17/17
-    // green while the launcher returned the pre-launch error code. Order is the whole
-    // point, so it gets its own assertion. Both patterns are line-anchored: the comment
-    // block above also mentions resources\node\node.exe.
-    const lines = launcher.split(/\r?\n/)
-    const childLine = lines.findIndex((line) => /^"%~dp0resources\\node\\node\.exe"/.test(line))
-    const captureLine = lines.findIndex((line) => /^set "rc=%ERRORLEVEL%"$/.test(line))
-    assert.ok(childLine >= 0, 'the node invocation line must exist')
-    assert.ok(captureLine >= 0, 'the capture line must exist')
-    assert.ok(
-      captureLine > childLine,
-      `the capture must run after the child (child at ${String(childLine)}, capture at ${String(captureLine)})`,
-    )
+  it('forwards the child exit code when ERRORLEVEL is inherited (W-21 #847)', {
+    skip: process.platform !== 'win32' ? 'cmd.exe is available only on Windows' : false,
+  }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'ia-tui-exit-code-'))
+    const launcherPath = join(root, 'ia-tui.cmd')
+    const nodePath = join(root, 'resources', 'node', 'node.exe')
+    const entryPath = join(root, 'resources', 'tui', 'dist', 'src', 'index.js')
+
+    try {
+      mkdirSync(dirname(nodePath), { recursive: true })
+      mkdirSync(dirname(entryPath), { recursive: true })
+      try {
+        linkSync(process.execPath, nodePath)
+      } catch (error) {
+        if (error.code !== 'EXDEV' && error.code !== 'EPERM') throw error
+        copyFileSync(process.execPath, nodePath)
+      }
+      writeFileSync(entryPath, 'process.exit(Number(process.env.TUI_TEST_EXIT_CODE))\n')
+      writeFileSync(launcherPath, launcher)
+
+      for (const exitCode of [0, 23]) {
+        const result = spawnSync(
+          process.env.ComSpec ?? 'cmd.exe',
+          ['/d', '/c', 'call ia-tui.cmd --check'],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env: { ...process.env, ERRORLEVEL: '77', TUI_TEST_EXIT_CODE: String(exitCode) },
+            windowsHide: true,
+          },
+        )
+        assert.equal(result.error, undefined, result.error?.message)
+        assert.equal(result.status, exitCode, result.stderr)
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
   })
 
   it('keeps comments parser-safe (cmd evaluates pipes/angles before rem)', () => {
