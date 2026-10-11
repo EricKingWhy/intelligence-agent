@@ -116,8 +116,7 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 长任务的执行边界由两类**持久化**事件表达：**`run/paused`** 与 **`run/resumed`**（#305 §5 冻结的名字）。
 本节是这两个名字的**语义与字段权威**（#305 基线契约冻结于 ADR-0044；个人工作台客户端在场扩展见 ADR-0046）；机器可读的**枚举**副本由
 `docs/EVENT_VOCABULARY.md` 承载，而该文件是从 `src/agent_harness/session/event.py` **生成**的：
-本契约尚未落地为常量，故两个名字的枚举条目会在实现票把常量加入 `event.py` 并重新生成后出现
-（先写规格再写代码）。在枚举条目出现之前，本节就是它们的权威定义。
+两个名字的常量已落地于 `src/agent_harness/session/event.py`（`RUN_PAUSED`、`RUN_RESUMED`，T4/#312），词表已重新生成并收录对应枚举行（`docs/EVENT_VOCABULARY.md`）。本节仍是这两个名字的**语义与字段权威**（#305 AC-16 的 `run/paused`/`run/resumed` replay/Streaming 投影契约、AC-14 的 Fork/replay 持久历史等价契约均以本节字段语义为准；本注记由 #969 订正）。
 
 - **`run/paused`**：#305 基线 `reason ∈ {budget_exhausted, deadline, stuck}`；个人工作台后续扩展
   `client_absent`（仅受客户端在场协议管理的 Run）。`trigger_dimension`（触发维度、stuck 模式或
@@ -129,6 +128,7 @@ src/agent_harness/session/event.py                  ← 唯一事实源
   consumed（**等于**暂停快照，直到产生新工作）、
   `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`；个人工作台
   后续扩展 `client_return` 仅用于显式继续 `client_absent`，重新连接本身不得自动产生 `run/resumed`。
+  实现另有 `user_input` 扩展（`src/agent_harness/agent/run_budget.py` 的 `RESUME_BASIS_USER_INPUT`，答复挂起的 `input_request`——protected-fact 冲突的用户明确输入，ADR-0051），四值基线不变。
 
 不变量：
 

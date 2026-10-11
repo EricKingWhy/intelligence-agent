@@ -1884,9 +1884,15 @@ def _main_plugins(argv: list[str]) -> None:
             return
         if args.command == "install":
             record = manager.install(args.local_dir)
+            # DSH 原生包的名字锚定包自身（来源目录名可能是任意的临时路径）。
+            name = (
+                record["package"]
+                if record.get("type") == "dsh-native"
+                else Path(record["source"]).name
+            )
             print(
                 json.dumps(
-                    {"name": Path(record["source"]).name, **record},
+                    {"name": name, **record},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -1896,6 +1902,9 @@ def _main_plugins(argv: list[str]) -> None:
             record = manager.install_git(
                 args.url, ref=args.ref, subdirectory=args.subdirectory
             )
+            # name 取 subdirectory 尾段：DSH 车道在安装前强制 basename==包名
+            # （package_manager.install_git），Skill 车道靠清单校验同判据兜底
+            # （_validate_git_manifest_record）——回显点在此不做二次校验（S-P4c）。
             print(json.dumps({"name": record["git_subdirectory"].rsplit("/", 1)[-1], **record},
                              ensure_ascii=False, indent=2))
             return
@@ -1914,11 +1923,23 @@ def _main_plugins(argv: list[str]) -> None:
                     "in CAPABILITIES"
                 )
             result = manager.enable(args.name, scope=args.scope)
+            # 回显按 record type 派生，不硬编码：DSH 包的启用语义是
+            # enabled-adapted（Q1 待裁决，当前实现），与 list 投影同词。
+            if result["selected_scope"] == "project":
+                target_record = manager.list_packages().get(args.name)
+            else:
+                target_record = manager.global_record(args.name)
+            saved_selection = (
+                "enabled-adapted"
+                if isinstance(target_record, dict)
+                and target_record.get("type") == "dsh-native"
+                else "enabled"
+            )
             print(
                 json.dumps(
                     {
                         "name": args.name,
-                        "saved_selection": "enabled",
+                        "saved_selection": saved_selection,
                         "selected_scope": result["selected_scope"],
                         "project": str(workspace_dir),
                     },
@@ -2321,6 +2342,15 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
 
     同名 ID 在两个 scope 各有一行，只有选中的那版进装配面（AC2）。
 
+    DSH 词轴（#878 T9）：DSH 行走提前分支，不进 SKILL.md 发现路径比对；各
+    视图用词与 skill 行不同轴——saved_selection 正态 `enabled-adapted`
+    （Q1 待裁决，当前实现）、负态 `disabled`（记录面，S-P2）；
+    available_global（选择面）负态仍为 `not_selected`；current_runtime 是
+    记录面断言：启用 → `active(native adaptation)`（runtime 未运行时亦然，
+    因 #865 原生 UI 语义不进 SKILL.md 发现路径）、停用 → `not_selected`；
+    只有运行时探针不可用（unavailable）且已启用时才如实报
+    `unknown(adaptation selected)`。
+
     两处共同的不变量：**在不在运行态，比的必须是本项目选中的那个 scope 的实际
     受管路径**，不是「项目根下有没有同名文件」。选了 global 却拿项目路径去比对，
     「已装配」与「装配缺席」会投影成同一个值（AC3 要求范围与运行态如实可见）。
@@ -2341,10 +2371,71 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
     packages: list[dict[str, object]] = []
     for name, record in sorted(manager.list_packages().items()):
         has_pending_version = record.get("pending_version") is not None
+        selected_scope = results.get(name, {}).get("selected_scope")
+        current_version = None
+        if record.get("source_kind") in {"git", "dsh-git"}:
+            current_version = {
+                "ref": record["source_ref"],
+                "resolved_commit": record["resolved_commit"],
+                "sha256": record["sha256"],
+            }
+        pending_version = record.get("pending_version")
+        if record.get("type") == "dsh-native":
+            # DSH 分支提前 continue（与 available_global 视图一致）：下面的
+            # SKILL.md realpath 发现路径比对对 DSH 记录没有意义，白做一次还
+            # 要被丢弃。DSH 原生包的投影（#878 T9）：适配激活是产品原生语义
+            # （#865 滑条一直在 web/ 里），不按 SKILL.md 发现路径比对；
+            # enabled-adapted → active(native adaptation)，暂存的 update/
+            # rollback → 待重启，停用 → not_selected。没有第二套状态。
+            packages.append(
+                {
+                    "name": name,
+                    "type": "dsh-native",
+                    "scope": record["scope"],
+                    "source": record["source"],
+                    # 负态用 skill 行同词 disabled：这是记录面（本视图），
+                    # not_selected 是选择面的词（available_global）；disable
+                    # 回显也是 disabled，三处对齐（S-P2）。
+                    "saved_selection": (
+                        "enabled-adapted" if record["enabled"] else "disabled"
+                    ),
+                    "selected_scope": selected_scope,
+                    "compatibility": record["compatibility"],
+                    "trust": record["trust"],
+                    "adapter": record["adapter"],
+                    "gaps": record["gaps"],
+                    "current_version": current_version,
+                    "pending_version": (
+                        {
+                            "ref": pending_version["source_ref"],
+                            "resolved_commit": pending_version["resolved_commit"],
+                            "sha256": pending_version["sha256"],
+                        }
+                        if isinstance(pending_version, dict) else None
+                    ),
+                    "current_runtime": (
+                        # unavailable 时如实报 unknown：适配激活是记录面语义
+                        # （#865 原生 UI，不进 SKILL.md 发现路径），与 skill
+                        # 行的运行时可发现性（not_running/discovered/
+                        # unavailable）不同轴——同一行既承认运行态查不到、
+                        # 又断言生效中，两句话会互相打架。
+                        "unknown(adaptation selected)"
+                        if runtime_state == "unavailable" and record["enabled"]
+                        else "active(native adaptation)"
+                        if record["enabled"]
+                        else "not_selected"
+                    ),
+                    "pending_restart": (
+                        has_pending_version
+                        if runtime_state != "unavailable"
+                        else None
+                    ),
+                }
+            )
+            continue
         # 「本项目选中的那一版」才是运行态的主语；两个 scope 都没有启用结果时
         # （disable 过 / 旧清单未回填）退回记录自己的 enabled 位——与
         # enabled_skill_digests 的判据一致。
-        selected_scope = results.get(name, {}).get("selected_scope")
         installed = selected_scope if isinstance(selected_scope, str) else (
             "project" if record["enabled"] else None
         )
@@ -2364,14 +2455,6 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
             # ⇒ 待重启。没选却还在运行态是「运行态还持有已取消选择的包」——它不
             # 会再进装配面，叫人去重启一个不会生效的包是错的（`disable` 后即此形）。
             pending_restart = (installed is not None and not discovered) or has_pending_version
-        current_version = None
-        if record.get("source_kind") == "git":
-            current_version = {
-                "ref": record["source_ref"],
-                "resolved_commit": record["resolved_commit"],
-                "sha256": record["sha256"],
-            }
-        pending_version = record.get("pending_version")
         packages.append(
             {
                 "name": name,
@@ -2440,6 +2523,31 @@ def _available_global_skill_package_listing(
         item = dict(item)
         # 同名双 scope 并存时，选了项目版的那条不能把全局版报成已启用（T5 AC2）。
         selected = results.get(item["name"], {}).get("selected_scope") == "global"
+        if item.get("type") == "dsh-native":
+            # DSH 原生包没有 SKILL.md 发现路径：适配激活按产品原生语义投影。
+            # DSH 分支先行（S-P4b），避免通用赋值再覆盖的死存储：
+            # saved_selection 与 packages[] 的 DSH 行同词 enabled-adapted——
+            # 沿用通用分支的 "enabled" 会让同一 Q1 语义在两个视图两个名字，
+            # 按 saved_selection 分派的消费方会漏掉 adapted 语义。
+            item["saved_selection"] = (
+                "enabled-adapted" if selected else "not_selected"
+            )
+            # unavailable 时如实报 unknown：该词汇与 skill 行不同轴（适配是
+            # 记录面语义，#865），不与「运行态查得到吗」混用。
+            item["current_runtime"] = (
+                "unknown(adaptation selected)"
+                if runtime_state == "unavailable" and selected
+                else "active(native adaptation)"
+                if selected
+                else "not_selected"
+            )
+            item["pending_restart"] = (
+                None
+                if runtime_state == "unavailable"
+                else item["pending_version"] is not None
+            )
+            packages.append(item)
+            continue
         item["saved_selection"] = "enabled" if selected else "not_selected"
         skill = global_manager.managed_skills_dir / str(item["name"]) / "SKILL.md"
         source = os.path.normcase(os.path.realpath(str(skill)))
@@ -2463,12 +2571,24 @@ def _global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str
     for name, record in sorted(manager.list_packages().items()):
         pending = record.get("pending_version")
         current_version = None
-        if record.get("source_kind") == "git":
+        if record.get("source_kind") in {"git", "dsh-git"}:
             current_version = {
                 "ref": record["source_ref"],
                 "resolved_commit": record["resolved_commit"],
                 "sha256": record["sha256"],
             }
+        if record.get("type") == "dsh-native":
+            # DSH 记录可启用（适配版，Q1 待裁决，当前实现）：availability 的语义是「能
+            # 不能启用」，把 compatibility.status 原样透出会把可启用的包报成
+            # 不可启用（needs-adaptation ≠ 不可用）。全仓统一这一个词。
+            # 两词对照（S-P3）：skill 车道的 needs-adaptation = 兼容性未达标、
+            # 不可启用；这里的 available_adapted = 可启用（适配版），形近义反，
+            # 消费时别按前缀推断。
+            availability = "available_adapted"
+        elif record["compatibility"]["status"] == "complete":
+            availability = "available_to_enable"
+        else:
+            availability = record["compatibility"]["status"]
         packages.append(
             {
                 "name": name,
@@ -2476,11 +2596,7 @@ def _global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str
                 "scope": "global",
                 "source": record["source"],
                 "saved_selection": "not_selected",
-                "availability": (
-                    "available_to_enable"
-                    if record["compatibility"]["status"] == "complete"
-                    else record["compatibility"]["status"]
-                ),
+                "availability": availability,
                 "compatibility": record["compatibility"],
                 "trust": record["trust"],
                 "current_version": current_version,
