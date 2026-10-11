@@ -70,6 +70,7 @@ class TestSessionFollower:
         await asyncio.wait_for(run.task, timeout=10)
 
         items = await _drain(follower.queue)
+        assert items, "会话级订阅者应至少收到 run 事件（否则本用例空集假绿）"
         assert manager.DONE not in items, "会话级订阅者不得收到 DONE 哨兵"
 
     @pytest.mark.asyncio

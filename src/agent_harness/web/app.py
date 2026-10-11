@@ -1576,6 +1576,20 @@ def _sse_response(
     )
 
 
+async def _truncated_sse_stream(session_id: str, after_seq: int, latest_seq: int):
+    """单帧 `stream/truncated` 控制帧后收流（续传两条分支共用）。
+
+    `stream_session` 的默认分支与 `follow=1` 分支都以「backlog 超阈值 → **同一**控制帧
+    后收流」收束；抽到一处让两条分支共用同一形状，避免各写一遍后漂移。帧本身仍来自
+    `serialization.build_truncated_control` 的单一构建点（`#208`）——这里只是外层 async
+    generator 包装的唯一实现。
+    """
+    control = build_truncated_control(
+        session_id, after_seq=after_seq, latest_seq=latest_seq,
+    )
+    yield {"data": json.dumps(control, ensure_ascii=False)}
+
+
 def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     """生效 local fuse 的**只读投影**：响应头形式（`#308` Must Do）。
 
@@ -2843,14 +2857,9 @@ def create_app(
             if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
                 # 与默认分支同判据、同纪律：截断即**先退订**再收流，队列不留孤儿。
                 state.run_manager.unsubscribe_session(session_id, follower)
-
-                async def truncated_follow_generator():
-                    control = build_truncated_control(
-                        session_id, after_seq=after_seq, latest_seq=latest_seq,
-                    )
-                    yield {"data": json.dumps(control, ensure_ascii=False)}
-
-                return _sse_response(truncated_follow_generator())
+                return _sse_response(
+                    _truncated_sse_stream(session_id, after_seq, latest_seq)
+                )
 
             async def follow_generator():
                 try:
@@ -2867,6 +2876,10 @@ def create_app(
                         # 会话级订阅者**永不**收 DONE（run 收尾不是本条流的终点）。
                         if item.seq is not None and item.seq <= latest_seq:
                             continue
+                        # 无 seq 的 transient 帧（如 model/started）不参与序幂等：它若在
+                        # 「订阅-读盘」窗口内入队，会在整段 durable 重放之后才投递（相对
+                        # 自然时序滞后）。客户端一律不投影无 seq 帧（TUI: `SeqCursor` 对
+                        # seq=null 返回 skip），无可见影响；登记于 ADR-0016 §2.3 注记。
                         yield _event_to_sse_dict(item, session_id)
                 finally:
                     state.run_manager.unsubscribe_session(session_id, follower)
@@ -2898,15 +2911,9 @@ def create_app(
             if subscriber is not None and run is not None:
                 run.unsubscribe(subscriber)
 
-            async def truncated_generator():
-                # 帧形状来自 serialization 的**单一构建点**（#208）：WS 快照
-                # 超限时发的是同一个函数产出的帧，两条通道一字不差。
-                control = build_truncated_control(
-                    session_id, after_seq=after_seq, latest_seq=latest_seq,
-                )
-                yield {"data": json.dumps(control, ensure_ascii=False)}
-
-            return _sse_response(truncated_generator())
+            return _sse_response(
+                _truncated_sse_stream(session_id, after_seq, latest_seq)
+            )
 
         async def event_generator():
             try:

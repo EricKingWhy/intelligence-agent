@@ -312,3 +312,44 @@ async def test_default_stream_never_registers_session_follower(tmp_path, monkeyp
         assert manager._session_followers == {}
     finally:
         await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_follow_closes_and_unsubscribes_on_resync(tmp_path, monkeypatch):
+    """慢客户端队列溢出 ⇒ 端点收到 RESYNC 哨兵即**收流并退订**（#1014）。
+
+    真实灌满 2000 帧的溢出构造成本高且慢；这里直接向端点的会话级订阅者队列注入
+    `RunManager.RESYNC`（正是 `_fanout_session` 溢出时投的产物），验证端点**响应**：
+    连接收束 + 订阅者从注册表移除。溢出→哨兵那一半由
+    `tests/session/test_runmanager_session_follow.py::test_queue_overflow_emits_resync` 覆盖。
+    """
+    server, serve_task, port, app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_idle_session(port)
+        manager = app.state.agent.run_manager
+        async with _Follow(
+            port, f"/api/sessions/{session_id}/stream?after_seq=-1&follow=1"
+        ) as follower:
+            await follower.wait_for(lambda fs: len(fs) >= 1)
+            for _ in range(200):
+                if session_id in manager._session_followers:
+                    break
+                await asyncio.sleep(0.01)
+            assert session_id in manager._session_followers
+
+            manager._session_followers[session_id][0].queue.put_nowait(
+                manager.RESYNC)
+
+            for _ in range(200):
+                if follower.closed.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            assert follower.closed.is_set(), "RESYNC 应令端点收流"
+
+        for _ in range(200):
+            if session_id not in manager._session_followers:
+                break
+            await asyncio.sleep(0.02)
+        assert session_id not in manager._session_followers, "收流后应退订"
+    finally:
+        await _shutdown(server, serve_task)
