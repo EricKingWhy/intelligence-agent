@@ -47,10 +47,12 @@ class ImageAttachmentRef(BaseModel):
     bytes: int
     width: int
     height: int
-    #: 展示名（去本地路径）。#823 / MM-02（B6）：写入路径**恒缺省**——上传回执的 name
-    #: 未持久化（`web/attachments.py` 只存字节+mime），发送端点只收 id 列表、无回传信道，
-    #: 属**结构性缺省**；`parse_image_refs` 会解析它（兼容未来写入方）。展示名接线留待
-    #: 前端票 / MM-03，不留无声死字段。
+    #: 展示名（去本地路径）。**可空**，不是"恒缺省"（#939 M-27 起的实际口径）：
+    #: CLI `--image <path>` 手上有文件名 ⇒ **真的带上**（`cli.py::_admit_cli_images` 传
+    #: `name=str(path)`，经 `admission.image_reference` 的 `file_leaf_name` 消毒）；
+    #: Web 上传回执不持久化 name（`web/attachments.py` 只存字节+mime），发送端点只收
+    #: id 列表 ⇒ 那条**无回传信道**、缺省。`parse_image_refs` 会解析它（兼容未来写入方）。
+    #: 前端 `web/src/lib/attachmentRefs.ts` 的 `name` JSDoc 与本字段互为权威。
     name: str | None = None
 
 
