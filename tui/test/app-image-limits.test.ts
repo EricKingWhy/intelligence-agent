@@ -110,6 +110,31 @@ test("B2-01（#984）：积压超过 20 张后再贴 ⇒ 明确拒绝（不进�
   assert.ok(notes.includes("未被正文引用"), "点明计数口径");
   assert.ok(notes.includes("20 张"), "给出上限值（与单条消息图片上限同口径）");
   assert.ok(notes.includes("提交当前草稿"), "给出路：提交即清场");
+  assert.ok(notes.includes("草稿为空时先输入任意内容"), "出路覆盖空草稿边界（审查 F1）");
+});
+
+test("B2-01（#984 审查 F2）：按 M-21 指引删标记后撞上积压闸门，拒绝文案的出路仍然可用", async () => {
+  // 场景（审查 Correctness F2）：20 引用 + 20 死图时贴图被 M-21 拒；用户照指引删
+  // 1 个标记（19 引用 + 21 死）再贴，撞上积压闸门。断言这次的文案出路（提交清场）
+  // 真实可走：提交后队列清空、可继续贴图，指引环有终态。
+  const app = makeApp();
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`a-${String(i)}.png`));
+  app.editor.setText("");
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`b-${String(i)}.png`));
+  assert.equal(app.pendingImages.length, 40);
+  app.editor.setText("[Image #1] 引用一张");
+  app.addPendingImage(image("over.png"));
+  assert.equal(app.pendingImages.length, 40, "19 引用 + 21 未引用：积压闸门拒绝");
+  const notes = app.chatContainer.children
+    .map((child) => child.render(500).join("\n"))
+    .join("\n");
+  assert.ok(notes.includes("先提交当前草稿"), "给出可用的出路");
+  // 提交前删掉标记（无引用：无视觉预检、零上传），只验证出路本身可走。
+  app.editor.setText("");
+  await app.handleSubmit("按出路清场");
+  assert.equal(app.pendingImages.length, 0, "出路真实可用：提交即清场");
+  app.addPendingImage(image("new.png"));
+  assert.equal(app.pendingImages.length, 1, "清场后恢复可贴");
 });
 
 test("B2-01（#984）：提交草稿即清场，之后可继续贴图（拒绝提示给出的出路真实可用）", async () => {
