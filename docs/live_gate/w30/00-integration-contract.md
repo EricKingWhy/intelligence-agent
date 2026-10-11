@@ -24,7 +24,7 @@
 
 | 输入 | 本仓路径 | 被哪条判据消费 |
 |---|---|---|
-| `compaction/start`、`compaction/end` 事件定义 | `src/agent_harness/session/event.py` | C1 / C2 / C3 / C4 |
+| `compaction/start`、`compaction/end` 事件定义 | `src/agent_harness/session/event.py` | C1（start + end）/ C2（end）/ C3（end）/ C4（start） |
 | `tool/call`、`tool/result` 事件对 | `src/agent_harness/session/event.py` | C2 / C3 |
 | `progress.md` 快照（`progress_md_sha256` 独立单列） | `src/agent_harness/session/evidence.py` | C1 |
 | UI 进度清单投影 | `web/src/components/PlanList.tsx` | C1 / C4 |
@@ -32,7 +32,7 @@
 | LiveEvidence 证据契约（`attempts` / `assertions` 形态） | `evaluation/live_gate/schema.py` | C3 |
 | W-21 harness 证据组织形态 | `docs/live_gate/w21/30-gates.md` | C1 |
 
-判定（`tests/live_gate/test_w30_criteria.py::test_harness_inputs_exist_in_repo`）：
+判定（`tests/live_gate/test_live_gate_w30_criteria.py::test_harness_inputs_exist_in_repo`）：
 上面每一行路径在本仓真实存在；任一缺席即集成契约破裂，测试红。
 
 ## 3. 输出证据格式
@@ -101,7 +101,7 @@
 ## 6. Backend 判定器的消费契约
 
 `intelligence-agent-backend` 的判定器实现消费本目录的 `criteria.json`
-（`$id` 见 `criteria.schema.json`）：
+（机器定义；JSON Schema 见 `criteria.schema.json`，其 `$id` 声明在 schema 文件第 1 行）：
 - 按 `check_id` 逐条实现判定逻辑；
 - 输入 = §2 的 harness 产物（由 backend 从运行环境采集）；
 - 输出 = §3 的证据格式（`sha` + `tree` 必含）；

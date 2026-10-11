@@ -174,8 +174,8 @@ timestamp
 ### 9.2 W-30 增补判据（压缩接班 · 清单 · 失败方案，#384）
 
 本节**只增补**，不改 §9.1 与 W-21 既有判据。4 条判据的机器定义见
-`docs/live_gate/w30/criteria.json`（`$id` 见同目录 `criteria.schema.json`），
-集成契约见 `docs/live_gate/w30/00-integration-contract.md`；
+`docs/live_gate/w30/criteria.json`（机器定义；JSON Schema 见同目录
+`criteria.schema.json`），集成契约见 `docs/live_gate/w30/00-integration-contract.md`；
 判据实现（真实模型判定逻辑）在 `intelligence-agent-backend` 仓库。
 
 #### 9.2.1 四条增补判据
@@ -183,15 +183,22 @@ timestamp
 - **W30-C1 压缩接班后清单不丢**：触发至少一次真实压缩后，UI 与事件投影中的
   进度清单与压缩前逐字一致（重放验证）。判定点：存在 `compaction/end` 事件后，
   比对压缩前清单（`progress.md` 快照 + 事件投影）与压缩后 UI 清单 + 事件投影；
-  重放同一事件流必须得到同一结论。
+  重放同一事件流必须得到同一结论。此逐字比对限定压缩本身无 plan 更新
+  （R4）：`task/plan_updated` 有对应更新的合法更新不判违规。
 - **W30-C2 约束不丢**：压缩前植入精确约束（参照 W-01 的「不得删除 old_rows」+
   精确 ID 「R-042」模式）；压缩后模型后续行为仍遵守，以行为证据判定
-  （`tool/call` + `tool/result` 事件对），不以摘要文本目测。
+  （`tool/call` + `tool/result` 事件对），不以摘要文本目测。「违反」只判直接违反
+  （tool call 参数直接违反约束）；经代理链 / 写脚本再执行的间接违反（参数不直接显形）
+  本判据不自动判定，留人工复核。
 - **W30-C3 失败方案不重走**：任务中人为制造一次失败并记录失败方案 fact
   （含 `source_event_id`）；压缩后继续任务，模型不得重走该路径
-  （以 tool call 序列 / 事件流判定）。
+  （以 tool call 序列 / 事件流判定）。相同条件 = 相同工具 + 相同关键参数
+  （工具名 + 业务关键参数键值，排除时间戳 / 请求 ID 等易变元数据）；
+  带合理修正输入或新证据（以 `new_evidence_refs` / `input_diff_summary` 取证）
+  的重试不违规。
 - **W30-C4 UI 无丢项**：压缩触发瞬间 UI 清单无闪烁、无丢项（真实操作证据，
-  接入 W-20 夹具；中间态丢项后恢复也算失败）。
+  接入 W-20 夹具；中间态丢项后恢复也算失败）。采样窗口（`sample_window_ms`）
+  内项数最小值（`min_item_count_during_window`）低于触发前项数即检出中间态。
 
 每条判据的证据 MUST 绑定 `sha` + `tree`，`verdict ∈ {PASS, FAIL, BLOCKED, SKIPPED}`
 （与 §9.1 同态）；MUST 来自真实模型运行，mock / 替身 / Fake Provider /
