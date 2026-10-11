@@ -72,7 +72,8 @@ def test_discard_via_new_module_still_drops_session_dir(tmp_path: Path) -> None:
 
 def test_empty_artifact_dir_is_a_noop(tmp_path: Path) -> None:
     """拼不出安全路径就不动手（ADR-0029 D2 的既有安全形状，逐字不变）。"""
-    readonly_fs.discard_local_artifacts(Settings(_env_file=None, artifact_dir="", model_api_key="sk-test"), "sess-a")
+    settings = Settings(_env_file=None, artifact_dir="", model_api_key="sk-test")
+    readonly_fs.discard_local_artifacts(settings, "sess-a")
 
 
 @pytest.mark.parametrize("bad", ["../escape", "a/b", ""])

@@ -2,7 +2,8 @@
 
 审查 P3-4：此前校验只在 `resolve_image_limits`（请求路径）跑，配错会让**每次上传**
 返回 500，而不是启动即失败。现在 `Settings` 的 `field_validator` 在构造期就校验，
-与同族 `Field(ge=1)` 同风格；解析规则单点仍是 `attachments.types.parse_allowed_media_types`。
+与同族 `Field(ge=1)` 同风格；解析规则单点现为 `attachments.validation.parse_allowed_media_types`
+（#939 M-15 迁移，`attachments.types` 仍原样再导出同一对象）。
 """
 
 from __future__ import annotations

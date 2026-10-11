@@ -171,7 +171,8 @@ class Settings(BaseSettings):
     attachment_max_image_pixels: int = Field(default=64_000_000, ge=1)
     attachment_max_image_dimension: int = Field(default=8192, ge=1)
     # 允许的图片 media types（逗号分隔）。解析规则单点在
-    # `attachments.types.parse_allowed_media_types`；本字段在**构造期**（= 启动期）
+    # `attachments.validation.parse_allowed_media_types`（#939 M-15 从 `attachments.types`
+    # 迁到中性模块，断掉 config ↔ attachments 的环）；本字段在**构造期**（= 启动期）
     # 就校验它（下面的 validator），配错即响亮失败，不会拖到请求路径才 500。
     attachment_allowed_media_types: str = "image/png,image/jpeg,image/webp,image/gif"
     # #823 / MM-02（B2）：发给视觉模型时图片块的 `detail` 档位（PRD D4/D11 的

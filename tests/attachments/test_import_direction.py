@@ -83,8 +83,11 @@ def test_config_side_media_type_validation_lives_in_the_neutral_module() -> None
     import agent_harness.attachments.validation as validation_module
 
     assert validation_module.parse_allowed_media_types is types_module.parse_allowed_media_types
-    # `Settings` 的 validator 调的就是它——两个名字必须是同一个对象。
-    from agent_harness.config import Settings
-
-    assert Settings.model_fields["attachment_allowed_media_types"].metadata is not None
-    assert callable(validation_module.parse_allowed_media_types)
+    # 方向判据：`config` 的 validator 必须调用**中性模块**的名字。这里用源码级断言
+    # （此前那条 `model_fields[...].metadata is not None` 是恒真的装饰——pydantic 的
+    # `FieldInfo.metadata` 是空列表而不是 `None`，与本票要守的方向无关）。
+    config_source = (
+        Path(__file__).resolve().parents[2] / "src" / "agent_harness" / "config.py"
+    ).read_text(encoding="utf-8")
+    assert "from agent_harness.attachments.validation import parse_allowed_media_types" in config_source
+    assert "from agent_harness.attachments.types import parse_allowed_media_types" not in config_source

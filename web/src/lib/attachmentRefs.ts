@@ -27,9 +27,11 @@ export interface ImageAttachmentRef {
   width: number;
   height: number;
   /**
-   * 展示名（去本地路径）。**当前写入路径恒缺省**（后端注释：上传回执的 name 未持久化，
-   * 属结构性缺省——`src/agent_harness/attachments/types.py` 的 `name` 字段注释）。
-   * 界面据此回落显示"图片"而不是伪造一个文件名。
+   * 展示名（去本地路径）。**可空**，不是"恒缺省"（#939 M-27 起的实际口径）：
+   * CLI `--image <path>` 手上有文件名 ⇒ 真的带上；Web 发送端点只收 `attachment_ids`
+   * （`SendMessageRequest.attachments: list[str]`），**没有回传信道** ⇒ 那条缺省。
+   * 权威注释在 `src/agent_harness/attachments/types.py` 的 `name` 字段与本目录的
+   * `admission.image_reference`。界面据此回落显示"图片"而不是伪造一个文件名。
    */
   name?: string | null;
 }
