@@ -428,7 +428,8 @@ async def test_cancelled_sdk_initialization_rechecks_loaded_token_expiry_on_retr
 
 
 @pytest.mark.asyncio
-async def test_restart_discards_persisted_metadata_when_resource_changes_issuer():
+@pytest.mark.parametrize("client_info_issuer", [None, "https://old-as.example.com"])
+async def test_restart_discards_persisted_metadata_when_resource_changes_issuer(client_info_issuer):
     import httpx2
 
     from agent_harness.mcp.config import parse_mcp_servers
@@ -446,6 +447,7 @@ async def test_restart_discards_persisted_metadata_when_resource_changes_issuer(
     await before_restart.set_client_info(OAuthClientInformationFull(
         client_id="legacy-client",
         token_endpoint_auth_method="none",
+        issuer=client_info_issuer,
     ))
     await before_restart.set_oauth_metadata(_metadata(
         issuer="https://old-as.example.com",
@@ -488,6 +490,47 @@ async def test_restart_discards_persisted_metadata_when_resource_changes_issuer(
     assert provider.context.auth_server_url == "https://new-as.example.com"
     assert provider.context.oauth_metadata is None
     assert await storage.get_oauth_metadata() is None
+
+
+@pytest.mark.asyncio
+async def test_changed_issuer_cleanup_preserves_metadata_written_concurrently():
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+    keyring = FakeKeyring()
+    old_metadata = _metadata(
+        issuer="https://old-as.example.com",
+        authorization_endpoint="https://old-as.example.com/authorize",
+        token_endpoint="https://old-as.example.com/token",
+    )
+    new_metadata = _metadata(
+        issuer="https://new-as.example.com",
+        authorization_endpoint="https://new-as.example.com/authorize",
+        token_endpoint="https://new-as.example.com/token",
+    )
+
+    concurrent_writer = MCPKeyringTokenStorage(config.name, config.url, keyring_api=keyring)
+
+    class RacingStorage(MCPKeyringTokenStorage):
+        async def clear_oauth_metadata(self, *args, **kwargs):
+            await concurrent_writer.set_oauth_metadata(new_metadata)
+            return await super().clear_oauth_metadata(*args, **kwargs)
+
+    storage = RacingStorage(config.name, config.url, keyring_api=keyring)
+    provider = make_oauth_client_provider(config, storage)
+    provider.context.auth_server_url = "https://new-as.example.com"
+    provider.context.oauth_metadata = old_metadata
+
+    await provider._discard_oauth_metadata_for_changed_issuer()
+
+    assert provider.context.oauth_metadata is None
+    assert await storage.get_oauth_metadata() == new_metadata
 
 
 @pytest.mark.asyncio

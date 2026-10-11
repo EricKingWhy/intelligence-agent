@@ -144,8 +144,11 @@ class MCPKeyringTokenStorage:
     async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
         await self._update("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
 
-    async def clear_oauth_metadata(self) -> bool:
-        return await self._update("oauth_metadata", None)
+    async def clear_oauth_metadata(self, *, expected: OAuthMetadata | None = None) -> bool:
+        expected_value = (
+            expected.model_dump(mode="json", exclude_none=True) if expected is not None else None
+        )
+        return await self._update("oauth_metadata", None, expected_value=expected_value)
 
     async def get_resource_metadata(self) -> ProtectedResourceMetadata | None:
         async with self._lock:
@@ -175,11 +178,19 @@ class MCPKeyringTokenStorage:
                     ) from error
                 self._generation = next_generation
 
-    async def _update(self, field: str, value: dict[str, Any] | None) -> bool:
+    async def _update(
+        self,
+        field: str,
+        value: dict[str, Any] | None,
+        *,
+        expected_value: dict[str, Any] | None = None,
+    ) -> bool:
         async with self._lock:
             with self._record_lock():
                 record = self._read()
                 if not self._is_current_generation(record):
+                    return False
+                if expected_value is not None and record.get(field) != expected_value:
                     return False
                 if value is None:
                     record.pop(field, None)
@@ -320,13 +331,22 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
     async def _discard_oauth_metadata_for_changed_issuer(self) -> None:
         metadata = self.context.oauth_metadata
         auth_server_url = self.context.auth_server_url
-        metadata_issuer = str(metadata.issuer) if metadata is not None and metadata.issuer else None
-        if metadata is None or auth_server_url is None or metadata_issuer == auth_server_url:
+        if auth_server_url is None:
             return
+
+        if metadata is None:
+            get_metadata = getattr(self.context.storage, "get_oauth_metadata", None)
+            if get_metadata is None:
+                return
+            metadata = await get_metadata()
+        metadata_issuer = str(metadata.issuer) if metadata is not None and metadata.issuer else None
+        if metadata is None or metadata_issuer == auth_server_url:
+            return
+
         self.context.oauth_metadata = None
         clear_metadata = getattr(self.context.storage, "clear_oauth_metadata", None)
         if clear_metadata is not None:
-            await clear_metadata()
+            await clear_metadata(expected=metadata)
 
     async def _ensure_saved_token_is_current(self, request: httpx2.Request) -> None:
         if not self._is_mcp_request(request) or not request.headers.get("authorization"):
