@@ -117,11 +117,28 @@ _SUBMODULE_ALIAS_EXTRA = {
 }
 
 
+def _declares_all(node: ast.stmt) -> bool:
+    """该模块级语句是否在绑定 `__all__`。
+
+    **三种**绑定形态都要认（`ast.Assign` / `ast.AnnAssign` / `ast.AugAssign`）——
+    只认第一种会给诚实实现留后门：把 `__all__ = [...]` 写成
+    `__all__: list[str] = [...]`（合法、ruff 不报），本守卫就**静默漏掉整个模块**。
+    这正是 #988 F-1 要消灭的那类盲区，只不过发生在守卫自己的检测器上。
+    """
+    if isinstance(node, ast.Assign):
+        return any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+    if isinstance(node, ast.AugAssign):
+        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+    return False
+
+
 def _exporting_submodules() -> list[tuple[str, Path]]:
     """`attachments/` 下**每一个**定义了模块级 `__all__` 的子模块（`__init__` 除外）。
 
     覆盖面按目录枚举而不是硬编码文件名——新增一个带 `__all__` 的子模块会自动进入守卫
-    范围，不需要有人记得来加一行。
+    范围，不需要有人记得来加一行；三种绑定形态都认（见 `_declares_all`）。
     """
     found: list[tuple[str, Path]] = []
     for path in sorted(_PKG_DIR.glob("*.py")):
@@ -131,12 +148,7 @@ def _exporting_submodules() -> list[tuple[str, Path]]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - 语法坏掉由 ruff/import 先报
             continue
-        assigns_all = any(
-            isinstance(node, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
-            for node in tree.body
-        )
-        if assigns_all:
+        if any(_declares_all(node) for node in tree.body):
             found.append((path.stem, path))
     return found
 
