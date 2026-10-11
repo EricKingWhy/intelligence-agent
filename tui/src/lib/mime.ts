@@ -7,6 +7,12 @@
  * 仅把上游的 tab 缩进改成本包的两空格并把类型放宽到 `Uint8Array`（上游已是
  * `Uint8Array`，`Buffer` 是其子类，故调用面不变）。
  *
+ * 与上游的偏离（#983）：删去 bmp 分支与 `isBmp`。权威表
+ * `validation.py::SUPPORTED_IMAGE_MEDIA_TYPES` 无 image/bmp，两条生产路径
+ * （`image-paste.ts` 的 `SUPPORTED_IMAGE_MEDIA_TYPES` 过滤、
+ * `clipboard-image.ts` 的 `isSupportedImageMimeType`）本就拒收 bmp，
+ * 删除后可观察行为不变；守卫见 `tui/test/mime-image-types.test.ts`。
+ *
  * 为什么必须按字节判而不是看扩展名：服务端 `POST /api/sessions/{id}/attachments`
  * 同样按 magic bytes 判型，声明与字节不符直接拒（`IMAGE_TYPE_MISMATCH`）。客户端
  * 先按字节判，是为了把「发出去才发现被拒」提前成「本地明确错误」（PRD 用户故事 24）。
@@ -26,9 +32,6 @@ export function detectSupportedImageMimeType(buffer: Uint8Array): string | null 
   }
   if (startsWithAscii(buffer, 0, "RIFF") && startsWithAscii(buffer, 8, "WEBP")) {
     return "image/webp";
-  }
-  if (startsWithAscii(buffer, 0, "BM") && isBmp(buffer)) {
-    return "image/bmp";
   }
   return null;
 }
@@ -56,51 +59,12 @@ function isAnimatedPng(buffer: Uint8Array): boolean {
   return false;
 }
 
-function isBmp(buffer: Uint8Array): boolean {
-  if (buffer.length < 26) return false;
-
-  const declaredFileSize = readUint32LE(buffer, 2);
-  const pixelDataOffset = readUint32LE(buffer, 10);
-  const dibHeaderSize = readUint32LE(buffer, 14);
-  if (declaredFileSize !== 0 && declaredFileSize < 26) return false;
-  if (pixelDataOffset < 14 + dibHeaderSize) return false;
-  if (declaredFileSize !== 0 && pixelDataOffset >= declaredFileSize) return false;
-
-  let colorPlanes: number;
-  let bitsPerPixel: number;
-  if (dibHeaderSize === 12) {
-    colorPlanes = readUint16LE(buffer, 22);
-    bitsPerPixel = readUint16LE(buffer, 24);
-  } else if (dibHeaderSize >= 40 && dibHeaderSize <= 124) {
-    if (buffer.length < 30) return false;
-    colorPlanes = readUint16LE(buffer, 26);
-    bitsPerPixel = readUint16LE(buffer, 28);
-  } else {
-    return false;
-  }
-
-  return colorPlanes === 1 && [1, 4, 8, 16, 24, 32].includes(bitsPerPixel);
-}
-
-function readUint16LE(buffer: Uint8Array, offset: number): number {
-  return (buffer[offset] ?? 0) + ((buffer[offset + 1] ?? 0) << 8);
-}
-
 function readUint32BE(buffer: Uint8Array, offset: number): number {
   return (
     (buffer[offset] ?? 0) * 0x1000000 +
     ((buffer[offset + 1] ?? 0) << 16) +
     ((buffer[offset + 2] ?? 0) << 8) +
     (buffer[offset + 3] ?? 0)
-  );
-}
-
-function readUint32LE(buffer: Uint8Array, offset: number): number {
-  return (
-    (buffer[offset] ?? 0) +
-    ((buffer[offset + 1] ?? 0) << 8) +
-    ((buffer[offset + 2] ?? 0) << 16) +
-    (buffer[offset + 3] ?? 0) * 0x1000000
   );
 }
 
