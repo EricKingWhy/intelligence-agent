@@ -18,9 +18,17 @@ reason / 固定文案 / 布尔判定，不持有 vendor / protocol 字面量（�
 与 ``model/fallback.py`` 的分工（不变量 #9 的邻居）：fallback 判「是否值得换一台模型」
 （retryability，结构化判据），本模块判「失败是什么」（attribution，按供应商错误文本）；
 共用异常对象，但判据与消费者不同，故不合并——本模块的消费者是失败终态的载荷。
+**唯一共用的判据**是 :func:`transport_failure_kind`（没拿到 HTTP 响应的超时 / 连接失败，
+#999）：文案按它分类别，fallback 按它判瞬时，一处定义、两处消费。
 """
 
 from __future__ import annotations
+
+from typing import Literal
+
+import httpx
+
+from agent_harness.model.stall import ModelStallError
 
 #: DeepSeek 系（主/备 provider 均为 deepseek 模型）工具调用的协议保留标记。
 #: 碎片化流下网关的 DSML 工具调用可能未被解析成结构化 tool_calls 而以乱码
@@ -85,8 +93,16 @@ UNCLASSIFIED_HTTP_STATUS_MESSAGE = (
     "运行失败（{error_type}，HTTP {http_status}），未分类异常；完整原始信息见后端日志"
 )
 
-# openai SDK 类名（不硬 import openai，与 ``fallback._TRANSIENT_ERROR_NAMES`` 同口径）。
-# ``APITimeoutError`` 是 ``APIConnectionError`` 的子类 ⇒ 按 MRO 判时先判超时。
+# 传输层失败的两类（#999），口径照 openai-python ``_base_client``（3.0.0）的包装：
+# ``except timeout_exceptions()``（httpx ``TimeoutException`` 族）⇒ ``APITimeoutError``，
+# 其余发送期异常 ⇒ ``APIConnectionError``。本仓另有三类同形异常源一并归入：卡流看门狗
+# ``ModelStallError``（超时）、内建 ``TimeoutError`` / ``ConnectionError``（含子类，如拒连 /
+# 被重置）、未经 openai 包装的 httpx ``TransportError``。判据一律按继承，不按精确类名。
+# openai 类按 MRO 类名识别（不硬 import openai：避免版本与 LangChain 包装层变化）。
+_TIMEOUT_TYPES: tuple[type[BaseException], ...] = (
+    ModelStallError, TimeoutError, httpx.TimeoutException,
+)
+_CONNECTION_TYPES: tuple[type[BaseException], ...] = (ConnectionError, httpx.TransportError)
 _TIMEOUT_ERROR_NAMES = frozenset({"APITimeoutError"})
 _CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError"})
 
@@ -157,11 +173,27 @@ def provider_http_status(error: BaseException) -> int | None:
     return None
 
 
+def transport_failure_kind(error: BaseException) -> Literal["timeout", "connection"] | None:
+    """没拿到 HTTP 响应的传输层失败 ⇒ ``"timeout"`` / ``"connection"``，否则 None。
+
+    文案类别（:func:`unclassified_failure_message`）与 fallback 瞬时判据
+    （``fallback.is_transient_model_error``）的**唯一**来源。超时必须先判：
+    ``httpx.TimeoutException`` 是 ``TransportError`` 的子类、``APITimeoutError`` 是
+    ``APIConnectionError`` 的子类，后判会被连接类吞掉。
+    """
+    mro_names = {cls.__name__ for cls in type(error).__mro__}
+    if isinstance(error, _TIMEOUT_TYPES) or mro_names & _TIMEOUT_ERROR_NAMES:
+        return "timeout"
+    if isinstance(error, _CONNECTION_TYPES) or mro_names & _CONNECTION_ERROR_NAMES:
+        return "connection"
+    return None
+
+
 def unclassified_failure_message(error: BaseException) -> str:
     """未分类失败的固定可读句（#222 兜底 + #996 结构化细节），只代入类名与状态码。
 
     有状态码 ⇒ 4xx「拒绝了请求」/ 5xx「服务端错误」/ 其他「未分类」，都带 ``HTTP <code>``；
-    无状态码 ⇒ 按 MRO 类名判超时、再判连接失败；都不是 ⇒ 逐字是 #222 的兜底句。
+    无状态码 ⇒ 按 :func:`transport_failure_kind` 判超时 / 连接失败；都不是 ⇒ 逐字是 #222 的兜底句。
     """
     error_type = type(error).__name__
     status = provider_http_status(error)
@@ -173,10 +205,10 @@ def unclassified_failure_message(error: BaseException) -> str:
         else:
             template = UNCLASSIFIED_HTTP_STATUS_MESSAGE
         return template.format(error_type=error_type, http_status=status)
-    mro_names = {cls.__name__ for cls in type(error).__mro__}
-    if mro_names & _TIMEOUT_ERROR_NAMES:
+    kind = transport_failure_kind(error)
+    if kind == "timeout":
         return UNCLASSIFIED_TIMEOUT_MESSAGE.format(error_type=error_type)
-    if mro_names & _CONNECTION_ERROR_NAMES:
+    if kind == "connection":
         return UNCLASSIFIED_CONNECTION_MESSAGE.format(error_type=error_type)
     return UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=error_type)
 
