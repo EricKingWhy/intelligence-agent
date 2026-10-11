@@ -187,6 +187,9 @@ async def test_image_is_stored_and_referenced_in_the_user_message(
     attachment_id = "sha256:" + hashlib.sha256(payload).hexdigest()
     assert event.data["attachments"] == [
         {
+            # #939 M-27：CLI 手上有文件名 ⇒ 展示名从**真实来源**接上（去路径的叶子名）。
+            # `.bin` 也带 name：`name` 是展示名，不是类型判据（类型判据是字节签名）。
+            "name": filename,
             "kind": "image",
             "attachment_id": attachment_id,
             "media_type": "image/png",

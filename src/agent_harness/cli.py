@@ -1090,7 +1090,7 @@ async def _admit_cli_images(
     from agent_harness.storage.artifact_select import select_artifact_store
 
     limits = resolve_image_limits(settings)
-    pending: list[tuple[bytes, DetectedImage]] = []
+    pending: list[tuple[bytes, DetectedImage, Path]] = []
     seen: set[str] = set()
     total_bytes = 0
     for raw in paths:
@@ -1136,7 +1136,7 @@ async def _admit_cli_images(
             continue
         seen.add(attachment_id)
         total_bytes += len(data)
-        pending.append((data, detected))
+        pending.append((data, detected, path))
         # 聚合上限**边走边判**（#828 审查 A-F2）：拒绝点提到读下一张之前 ⇒ 峰值内存
         # ≈ 总字节上限 + 单张，而不是"所有入参字节和"。
         if len(pending) > limits.max_images_per_message:
@@ -1159,7 +1159,7 @@ async def _admit_cli_images(
     if selection is None:
         raise ImageInputRejected(STORAGE_UNAVAILABLE_MESSAGE)
     refs: list[dict[str, Any]] = []
-    for data, detected in pending:
+    for data, detected, path in pending:
         try:
             blob = await selection.store.save_bytes(
                 session_id, data, mime_type=detected.media_type
@@ -1168,6 +1168,8 @@ async def _admit_cli_images(
             raise ImageInputRejected(f"--image 附件写入失败：{error}") from error
         # 引用形状单源（`attachments.admission.image_reference`）——与发送端点
         # `SessionService._resolve_attachment_refs` 逐字段一致。
+        # #939 M-27：展示名在这里**产得出**（文件名就在手上），此前被丢掉 ⇒ 事件里
+        # `name` 恒缺省。传原始路径，消毒由 `image_reference` 的 `file_leaf_name` 单点做。
         refs.append(
             image_reference(
                 blob.artifact_id,
@@ -1175,6 +1177,7 @@ async def _admit_cli_images(
                 size=blob.size,
                 width=detected.width,
                 height=detected.height,
+                name=str(path),
             )
         )
     return refs

@@ -27,55 +27,35 @@ from agent_harness.attachments.admission import (
 )
 from agent_harness.attachments.errors import (
     AttachmentError,
-    AttachmentErrorCode,
     attachment_http_status,
 )
 from agent_harness.attachments.filenames import file_leaf_name
-from agent_harness.attachments.normalize import NormalizedImage, normalize_image
 from agent_harness.attachments.probe import DetectedImage, detect_image
-from agent_harness.attachments.projection import (
-    IMAGE_OMITTED_PLACEHOLDER,
-    KIND_IMAGE,
-    ImageRef,
-    content_block_with_text,
-    image_content_block,
-    parse_image_refs,
-    text_with_omitted_images,
-)
 from agent_harness.attachments.types import (
-    EXTENSION_MEDIA_TYPES,
-    SUPPORTED_IMAGE_MEDIA_TYPES,
     ImageAttachmentLimits,
-    ImageAttachmentRef,
     resolve_image_limits,
 )
 
+#: 包根的导出面（#939 M-30：**只留真的从包根 import 的名字**）。
+#:
+#: 此前这里再导出了 13 个名字（`KIND_IMAGE` / `ImageRef` / 投影纯函数 / 归一化 /
+#: 词汇表等），它们**唯一定义点**在子模块里，而全仓没有任何调用方从包根取用它们
+#: （`grep` 复核 + `tests/attachments/test_export_surface.py` 已机械化）。再导出的
+#: 代价是"读代码的人以为包根是公开 API"，导出面因此只增不减。子模块仍可**直接** import——
+#: `from agent_harness.attachments.projection import ImageRef`。
 __all__ = [
-    "EXTENSION_MEDIA_TYPES",
-    "IMAGE_OMITTED_PLACEHOLDER",
-    "KIND_IMAGE",
     "STORAGE_UNAVAILABLE_MESSAGE",
-    "SUPPORTED_IMAGE_MEDIA_TYPES",
     "AttachmentError",
-    "AttachmentErrorCode",
     "DetectedImage",
     "ImageAttachmentLimits",
-    "ImageAttachmentRef",
-    "ImageRef",
-    "NormalizedImage",
     "attachment_http_status",
     "check_declared_image_matches",
-    "content_block_with_text",
     "detect_image",
     "file_leaf_name",
-    "image_content_block",
     "image_reference",
     "message_images_too_large_message",
-    "normalize_image",
-    "parse_image_refs",
     "read_image_file_bounded",
     "resolve_image_limits",
     "single_image_too_large_message",
-    "text_with_omitted_images",
     "too_many_images_message",
 ]

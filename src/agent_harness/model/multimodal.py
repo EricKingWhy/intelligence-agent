@@ -13,18 +13,35 @@
 字节从**字节存储**按 `file_id` 取回、归一化后 base64 内联——事件流与 JSONL 里只有
 引用，没有 base64（不变量 #15 + AC3）。取不回（引用悬空/存储不可用）的那张，降级为
 占位文本块而不是静默丢弃（`derive` 的非视觉分支同款语义）。
+
+**"取字节 + 归一化 + base64"也在本模块**（`load_image_payloads`，#939 M-12）。此前这段
+住在 `ContextBuilder._load_image_payloads`，而接缝（`ImageResolver` / `to_provider_messages`）
+在这里——三处 docstring（本模块、`attachments/projection.py`、`session/derive.py`）都声称
+字节在本模块取回，实现却在别处，属"声称与实现错位"。装配的**两个半边**现在同处一室：
+半张是同步纯函数（块 → 载荷），半张是异步有 I/O 的 loader；`ContextBuilder` 只调一次接缝、
+不再自己解析。loader 不 import `context.*` / `session.*`（`referenced` 是入参、不是
+`Session`），因此依赖仍是单向的 `context.builder → model.multimodal`。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import base64
+import logging
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import AnyMessage
 
+from agent_harness.attachments.normalize import normalize_image
 from agent_harness.attachments.projection import (
     IMAGE_OMITTED_PLACEHOLDER,
     text_with_omitted_images,
 )
+
+if TYPE_CHECKING:
+    from agent_harness.storage.artifact import ArtifactStore
+
+logger = logging.getLogger("agent_harness.model.multimodal")
 
 #: 默认 `detail`（PRD D4 / OpenAI Chat Completions 取值：auto|low|high|original）。
 DEFAULT_IMAGE_DETAIL = "auto"
@@ -35,6 +52,53 @@ _PROVIDER_IMAGE_TYPE = "image_url"
 
 #: 解析器：`file_id`（内容寻址 `attachment_id`）→ `(media_type, base64_data)`，取不回返回 None。
 ImageResolver = Callable[[str], "tuple[str, str] | None"]
+
+
+async def load_image_payloads(
+    store: ArtifactStore | None,
+    *,
+    referenced: Iterable[str],
+    max_dimension: int,
+    max_bytes: int,
+) -> dict[str, tuple[str, str]] | None:
+    """把事件引用过的附件物化成 `attachment_id → (media_type, base64)` 载荷表。
+
+    `None` 表示**接缝不存在**（没有字节存储——本部署没配附件存储，或本次请求模型不支持
+    视觉）：调用方据此整条跳过装配，而不是拿到一张空表去逐块查。空表 = "有存储但一个都
+    取不回"，两者对 `resolve_image` 的行为相同，但对调用方是两回事。
+
+    **per-image 降级**：单张字节缺失 / 解码失败 / 归一化失败都只让**那一个 id 缺席**，
+    其余照常返回——该引用在 `_translate_block` 里降级为占位文本块（不静默丢弃、不 brick
+    run）。这正是本 loader 与 `to_provider_messages` 同处一个模块的理由：降级的两个半边
+    在同一个文件里读得到。
+
+    `referenced` 由调用方给（不传 `Session`）：授权判据是
+    `session.derive.referenced_attachment_ids(session.events)`，#939 M-12 刻意不把它搬进来
+    ——那会让 provider 装配层懂 Session 事件语义，内聚账是负的。调用方负责**只传被引用的
+    id**（未引用的 id 不得读回，PRD D5）。
+    """
+    if store is None:
+        return None
+    payloads: dict[str, tuple[str, str]] = {}
+    for attachment_id in sorted(set(referenced)):
+        try:
+            blob = await store.load_bytes(attachment_id)
+        except Exception:  # noqa: BLE001 —— 存储故障降级为占位符，不让一张图 brick run
+            logger.warning("附件字节读取失败（%s）——投影降级为占位符", attachment_id)
+            continue
+        data = blob.content
+        if not data:
+            continue
+        try:
+            normalized = normalize_image(
+                data, max_dimension=max_dimension, max_bytes=max_bytes
+            )
+            media_type, raw = normalized.media_type, normalized.data
+        except Exception:  # noqa: BLE001 —— 解码失败回退原始字节（best-effort）
+            logger.warning("附件归一化失败（%s）——按原始字节发送", attachment_id)
+            media_type, raw = blob.mime_type, data
+        payloads[attachment_id] = (media_type, base64.b64encode(raw).decode("ascii"))
+    return payloads
 
 
 def image_data_url(media_type: str, base64_data: str) -> str:
@@ -146,5 +210,6 @@ __all__ = [
     "ImageResolver",
     "downgrade_to_non_vision",
     "image_data_url",
+    "load_image_payloads",
     "to_provider_messages",
 ]
