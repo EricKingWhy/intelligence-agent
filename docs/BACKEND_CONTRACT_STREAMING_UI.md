@@ -78,6 +78,11 @@
   ```
   客户端应走 `GET /events` 全量重建，再带 `after_seq=latest_seq` 重连。
 - 推荐重连时机：连接异常关闭（非用户主动 abort）、seq gap 检测、页面恢复前台。
+- **`?follow=1`（opt-in，#1014，2026-10-11）**：默认 `follow=0`（缺省）时上述语义**逐字不变**。
+  `follow=1` 时重放 `(after_seq, latest_seq]` 后**不收流**，改为**会话级订阅**——推送该会话的
+  后续事件（含**别的客户端**起的 run 的帧），run 收尾不关流、跨 run 边界保持，直到客户端断连
+  或 backlog 超阈值（此时与默认同发 `stream/truncated` 控制帧后收流）。用于 TUI 等**常驻附着**
+  客户端消灭 idle 空转（实测 idle 会话每 60s ≈54 轮建/收）；web 主通道（`GET /api/ws`）不受影响。
 
 ### GET /api/ws（**实时流主通道**，#205 起）— 多路复用 WebSocket
 
