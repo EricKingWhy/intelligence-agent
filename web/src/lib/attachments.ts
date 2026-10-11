@@ -266,7 +266,7 @@ export function budgetText(
  */
 export const IMAGE_OMITTED_PLACEHOLDER = '(image omitted: model does not support images)';
 
-/** 无名附件的展示名缺省（#938 M-26 收口：此前 `'图片'` 在 ComposerAttachments / MessageImages 各写一遍）。 */
+/** 无名附件的展示名缺省（#938 M-26 收口：此前 `'图片'` 在 ComposerAttachments（×2）/ MessageImages 共三处手写）。 */
 export function displayAttachmentName(name: string | null | undefined): string {
   return name && name.length > 0 ? name : '图片';
 }

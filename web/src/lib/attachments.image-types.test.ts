@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 
 import { expect, it } from 'vitest';
 
-import { IMAGE_LIMITS } from './attachments';
+import { detectImageMediaType, IMAGE_LIMITS } from './attachments';
 
 const SNAPSHOT = new URL(
   '../../../src/agent_harness/attachments/image_media_types.snapshot.txt',
@@ -37,4 +37,26 @@ function parseMediaTypes(source: string): string[] {
 it('IMAGE_LIMITS.mediaTypes 与快照 media_types 一致（#938 M-10）', () => {
   const snapshot = parseMediaTypes(readFileSync(SNAPSHOT, 'utf8'));
   expect([...IMAGE_LIMITS.mediaTypes].sort()).toEqual(snapshot);
+});
+
+// Correctness P3-1（#938 修回）跟进：`detectImageMediaType` 的魔数字节签名表是事实上的
+// 第四张图片类型表——若未来权威源新增类型（如 image/avif）而这里没跟，全门禁绿但对应
+// 字节会被静默判 null。本测试钉住「字节探测能识别的类型集 == 权威源集」。
+it('detectImageMediaType 能按魔数识别的媒体类型集与快照 media_types 一致', async () => {
+  const cases: Array<[string, Uint8Array, string]> = [
+    ['x.png', Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a), 'image/png'],
+    ['x.gif', new TextEncoder().encode('GIF89a'), 'image/gif'],
+    ['x.gif', new TextEncoder().encode('GIF87a'), 'image/gif'],
+    ['x.jpg', Uint8Array.of(0xff, 0xd8, 0xff), 'image/jpeg'],
+    ['x.webp', Uint8Array.of(0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50), 'image/webp'],
+  ];
+  const seen = new Set<string>();
+  for (const [name, bytes, expected] of cases) {
+    // type 传 ''：证明判定完全由字节（而非浏览器声明）说了算。
+    const file = new File([bytes], name, { type: '' });
+    await expect(detectImageMediaType(file)).resolves.toBe(expected);
+    seen.add(expected);
+  }
+  const snapshot = parseMediaTypes(readFileSync(SNAPSHOT, 'utf8'));
+  expect([...seen].sort()).toEqual(snapshot);
 });

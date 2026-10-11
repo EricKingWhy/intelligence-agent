@@ -55,7 +55,7 @@ test("SUPPORTED_IMAGE_MEDIA_TYPES 与快照 media_types 一致", () => {
 
 test("MEDIA_TYPE_BY_EXTENSION 的条目集合与快照 extension_media_types 一致", () => {
   const snapshot = parseSnapshot(readFileSync(SNAPSHOT, "utf8"));
-  const actual = Object.entries(MEDIA_TYPE_BY_EXTENSION).sort(([a], [b]) => a.localeCompare(b));
+  const actual = Object.entries(MEDIA_TYPE_BY_EXTENSION).sort();
   assert.deepEqual(actual, snapshot.extensionMediaTypes);
 });
 
