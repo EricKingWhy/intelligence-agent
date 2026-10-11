@@ -100,6 +100,72 @@ FunctionEnd
   ReadRegStr $iaLeftoverDirectory HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
 !macroend
 
+; An earlier installer may have been hard-killed after moving the live install
+; aside. Offer a deliberate choice before the stock installer writes into the
+; now-missing or partial $INSTDIR. Silent installs fail closed: they cannot
+; choose between restoring an older version and continuing fresh.
+!macro iaRecoverInterruptedInstall
+  StrCpy $iaFinalDirectory $INSTDIR
+  !insertmacro iaReadBackupDir
+  ${If} $iaBackupDirectory != ""
+    ${IfNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+      StrCpy $iaShapeCandidate "$iaBackupDirectory"
+      StrCpy $iaShapeBase "$iaFinalDirectory"
+      Call iaCheckBackupShape
+      ${If} $iaShapeOk != "1"
+        DetailPrint "iaRecoverInterruptedInstall: refusing backup shape: $iaBackupDirectory"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      StrCpy $iaPlainPath "$iaBackupDirectory"
+      Call iaProbePath
+      ${If} $iaProbeFound != "1"
+        DetailPrint "iaRecoverInterruptedInstall: backup is missing: $iaBackupDirectory"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      IfSilent iaInterruptedSilent
+      MessageBox MB_YESNO|MB_ICONQUESTION "$(iaInterruptedInstall) $iaBackupDirectory" /SD IDNO IDYES iaInterruptedRestore IDNO iaInterruptedFresh
+iaInterruptedRestore:
+      Call iaRollbackApplication
+      Quit
+iaInterruptedFresh:
+      ; Keep the old version discoverable before disarming the interrupted
+      ; transaction. The uninstaller's shape sweep remains the full discovery
+      ; path when this one registry slot is later replaced.
+      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+      ; Let the stock installer write the selected fresh version into $INSTDIR.
+      ; Refuse a partial tree with reparse points or unreadable entries before
+      ; allowing NSIS to write through it; the old backup stays armed on refusal.
+      SetOutPath $TEMP
+      StrCpy $iaPlainPath "$iaFinalDirectory"
+      Call iaProbePath
+      ${If} $iaProbeFound == "1"
+        StrCpy $iaDeleteCandidate "$iaFinalDirectory"
+        StrCpy $iaDeleteShapeCheck "0"
+        Call iaPrepareDelete
+        StrCmp $iaDeleteStatus "ok" 0 iaInterruptedFreshUnsafe
+        ; No recursive delete is needed for the empty directory produced by
+        ; the rename interruption. The stock section overlays any partial files.
+        Goto iaInterruptedFreshSafeDone
+iaInterruptedFreshUnsafe:
+        DetailPrint "iaRecoverInterruptedInstall: refusing partial install ($iaDeleteStatus)"
+        SetErrorLevel 2
+        Quit
+iaInterruptedFreshSafeDone:
+      ${EndIf}
+      !insertmacro iaClearBackupDir
+      SetOutPath $iaFinalDirectory
+      Goto iaInterruptedDone
+iaInterruptedSilent:
+      DetailPrint "iaRecoverInterruptedInstall: rerun interactively to restore or continue fresh"
+      SetErrorLevel 2
+      Quit
+iaInterruptedDone:
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 ; customInit: move a previous installation aside before the section
 ; (and its uninstallOldVersion step) touches it.
 !macro iaStageApplication

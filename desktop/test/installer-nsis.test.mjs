@@ -134,3 +134,31 @@ describe('assertNsisLangStringGuards', () => {
     assert.doesNotThrow(() => assertNsisLangStringGuards(source))
   })
 })
+
+describe('interrupted installer startup recovery (#915)', () => {
+  it('offers recovery before staging a fresh install', () => {
+    const source = readFileSync(new URL('../installer/installer.nsh', import.meta.url), 'utf8')
+    const customInit = source.match(/!macro customInit([\s\S]*?)!macroend/)?.[1]
+
+    assert.ok(customInit, 'customInit macro is missing')
+    const recovery = customInit.indexOf('iaRecoverInterruptedInstall')
+    const stage = customInit.indexOf('iaStageApplication')
+    assert.ok(recovery >= 0, 'customInit does not recover an interrupted installation')
+    assert.ok(stage >= 0, 'customInit does not stage the existing installation')
+    assert.ok(recovery < stage, 'recovery must resolve the saved backup before staging')
+  })
+
+  it('fails closed for silent reruns before showing the interactive choice', () => {
+    const source = readFileSync(new URL('../installer/installer-directories.nsh', import.meta.url), 'utf8')
+    const recovery = source.match(/!macro iaRecoverInterruptedInstall([\s\S]*?)!macroend/)?.[1]
+
+    assert.ok(recovery, 'interrupted-install recovery macro is missing')
+    const silent = recovery.indexOf('IfSilent iaInterruptedSilent')
+    const prompt = recovery.indexOf('MessageBox')
+    const silentBranch = recovery.match(/iaInterruptedSilent:[\s\S]*?iaInterruptedDone:/)?.[0]
+    assert.ok(silent >= 0, 'silent rerun is not handled')
+    assert.ok(prompt >= 0, 'interactive recovery prompt is missing')
+    assert.ok(silent < prompt, 'silent reruns must fail closed before any prompt')
+    assert.match(silentBranch ?? '', /SetErrorLevel 2[\s\S]*Quit/)
+  })
+})
