@@ -1,0 +1,230 @@
+{
+  "criteria": [
+    {
+      "check_id": "W30-C1",
+      "decision_point": "存在至少一个 compaction/end 事件后，对压缩前的进度清单（progress.md 快照 + 事件投影）与压缩后的 UI 清单（PlanList 投影）+ 事件投影做逐字比对；重放同一事件流必须得到同一结论。比对限定压缩本身无 plan 更新（R4 口径）：plan_updated_ref 有对应更新的合法更新不在本条逐字比对之内。",
+      "evidence_fields": [
+        "schema_version",
+        "scenario_id",
+        "sha",
+        "tree",
+        "verdict",
+        "compaction_event_ids",
+        "checklist_before_sha256",
+        "checklist_after_sha256",
+        "ui_projection_ref",
+        "plan_updated_ref"
+      ],
+      "evidence_rule": "证据 MUST 来自真实模型运行的 SessionEvent + 真实 UI 操作记录；mock / 替身 / Fake Provider 的输出不得计入 PASS（上限锁 FAIL），与 evaluation/live_gate/schema.py 的注入判据同形。",
+      "fail_rule": "压缩本身无 plan 更新（plan_updated_ref 无对应更新），但压缩后任一清单与压缩前不一致（丢项 / 改写）。",
+      "forbid_mock": true,
+      "harness_inputs": [
+        {
+          "artifact": "compaction/start 与 compaction/end 事件定义",
+          "path": "src/agent_harness/session/event.py"
+        },
+        {
+          "artifact": "progress.md 快照（progress_md_sha256 独立单列）",
+          "path": "src/agent_harness/session/evidence.py"
+        },
+        {
+          "artifact": "UI 进度清单投影",
+          "path": "web/src/components/PlanList.tsx"
+        },
+        {
+          "artifact": "plan 更新信号（task/plan_updated：PlanList 的整表覆盖数据源，用于区分合法 plan 更新与丢项 / 改写）",
+          "path": "web/src/components/PlanList.tsx"
+        },
+        {
+          "artifact": "W-21 harness 证据组织形态",
+          "path": "docs/live_gate/w21/30-gates.md"
+        }
+      ],
+      "mature_refs": [
+        "Q1 调研结论：Claude Code / Codex CLI / Cursor / Cline / OpenHands 均无“后继验证接班清单”机制——本判据为本项目自创，按 R4 限定口径执行，不擅自扩大。"
+      ],
+      "pass_rule": "压缩本身无 plan 更新时，压缩后 UI 清单与事件投影清单与压缩前逐字一致；plan_updated_ref 有对应更新的合法更新不判违规（R4 限定口径）。",
+      "ticket_contract": "压缩接班后清单不丢：触发至少一次真实压缩后，UI 与事件投影中的进度清单与压缩前逐字一致（重放验证）。",
+      "title": "压缩接班后清单不丢",
+      "user_rulings": [
+        "R1",
+        "R2",
+        "R4"
+      ],
+      "verdict_values": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "SKIPPED"
+      ]
+    },
+    {
+      "check_id": "W30-C2",
+      "decision_point": "压缩前在任务中植入精确约束；压缩后检查模型后续 tool call 序列：无违反约束的调用即遵守。只看行为证据（tool/call + tool/result 事件对），不看压缩摘要文本里有没有提到约束。「违反」的判定边界：直接违反（tool call 参数直接违反约束，如约束禁删 old_rows 而调用删了 old_rows）判 FAIL；经代理链 / 写脚本再执行的间接违反（参数不直接显形）本判据不自动判定，须把可疑调用链记入 violating_tool_call_ids 并留人工复核。",
+      "evidence_fields": [
+        "schema_version",
+        "scenario_id",
+        "sha",
+        "tree",
+        "verdict",
+        "constraint_text",
+        "violating_tool_call_ids"
+      ],
+      "evidence_rule": "同 W30-C1：真实模型行为证据；mock / 替身输出不得计入 PASS（上限锁 FAIL）。",
+      "fail_rule": "压缩后出现违反植入约束的 tool call（如删除了 old_rows）。",
+      "forbid_mock": true,
+      "harness_inputs": [
+        {
+          "artifact": "compaction/end 事件 + tool/call、tool/result 事件对",
+          "path": "src/agent_harness/session/event.py"
+        },
+        {
+          "artifact": "W-20 挑战夹具判定器（R-042 / R-043 验收形态）",
+          "path": "tools/challenge-fixture/judge.py"
+        }
+      ],
+      "mature_refs": [
+        "SWE-bench：FAIL_TO_PASS 测试在 agent 动手前冻结——约束在压缩前植入即冻结，压缩后行为对照冻结约束判定（PORT DESIGN）。"
+      ],
+      "pass_rule": "压缩后模型后续行为中无违反植入约束的 tool call。",
+      "ticket_contract": "约束不丢：压缩前植入精确约束（参照 W-01 的“不得删除 old_rows”+ 精确 ID “R-042”模式），压缩后模型后续行为仍遵守（以行为证据判定，不以摘要文本目测）。",
+      "title": "约束不丢",
+      "user_rulings": [
+        "R1",
+        "R2"
+      ],
+      "verdict_values": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "SKIPPED"
+      ]
+    },
+    {
+      "check_id": "W30-C3",
+      "decision_point": "失败 fact（含 source_event_id）在压缩前落盘；压缩后比对模型 tool call 序列：出现与失败方案相同条件（相同工具 + 相同关键参数：工具名 + 业务关键参数键值，排除时间戳 / 请求 ID 等易变元数据）且无新证据的调用即重走。",
+      "evidence_fields": [
+        "schema_version",
+        "scenario_id",
+        "sha",
+        "tree",
+        "verdict",
+        "failed_plan_fact_ref",
+        "source_event_id",
+        "rewalk_tool_call_ids",
+        "new_evidence_refs",
+        "input_diff_summary"
+      ],
+      "evidence_rule": "同 W30-C1：真实模型行为证据；mock / 替身输出不得计入 PASS（上限锁 FAIL）。",
+      "fail_rule": "压缩后出现相同条件且无新证据的失败路径重走。",
+      "forbid_mock": true,
+      "harness_inputs": [
+        {
+          "artifact": "tool/call、tool/result 事件对 + compaction/end 事件",
+          "path": "src/agent_harness/session/event.py"
+        },
+        {
+          "artifact": "LiveEvidence 证据契约（attempts / assertions 形态，W-21 harness 证据口径）",
+          "path": "evaluation/live_gate/schema.py"
+        }
+      ],
+      "mature_refs": [
+        "OpenHands StuckDetector：4x 相同 action/observation 或 3x 相同 action→error → 一次 corrective nudge，之后仍重复则终止/暂停（PORT DESIGN：相同条件重复→禁；一次纠正机会）。",
+        "LangGraph RetryPolicy：相同输入重试只给分类为 transient 的错误（5xx/429），逻辑错误零系统重试、须带修正参数返回（PORT DESIGN：带新证据/修正输入的重试不违规）。"
+      ],
+      "pass_rule": "压缩后未出现相同条件 / 无新证据的失败路径重走；带合理修正输入或新证据的重试不判违规（以 new_evidence_refs / input_diff_summary 取证）。",
+      "ticket_contract": "失败方案不重走：任务中人为制造一次失败并记录失败方案 fact（含 source_event_id）；压缩后继续任务，模型不得重走该路径（以 tool call 序列 / 事件流判定）。",
+      "title": "失败方案不重走",
+      "user_rulings": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "verdict_values": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "SKIPPED"
+      ]
+    },
+    {
+      "check_id": "W30-C4",
+      "decision_point": "在压缩触发瞬间（含 compaction/start 事件前后 sample_window_ms 定义的采样窗口内）做真实 UI 操作并记录：触发前后清单项数量与内容一致，且采样窗口内项数最小值（min_item_count_during_window）不低于触发前项数，无闪烁（中间态丢项后恢复也算失败）。",
+      "evidence_fields": [
+        "schema_version",
+        "scenario_id",
+        "sha",
+        "tree",
+        "verdict",
+        "ui_operation_ref",
+        "item_count_before",
+        "item_count_after",
+        "sample_window_ms",
+        "min_item_count_during_window"
+      ],
+      "evidence_rule": "真实操作证据（操作日志 / 录屏引用）；mock / UI 绿勾不得代替真实操作（上限锁 FAIL）。",
+      "fail_rule": "触发瞬间（含采样窗口内）出现丢项或闪烁（含先丢后恢复的中间态；以 min_item_count_during_window < item_count_before 检出）。",
+      "forbid_mock": true,
+      "harness_inputs": [
+        {
+          "artifact": "UI 进度清单组件",
+          "path": "web/src/components/PlanList.tsx"
+        },
+        {
+          "artifact": "W-20 挑战夹具（真实操作证据形态）",
+          "path": "tools/challenge-fixture/judge.py"
+        },
+        {
+          "artifact": "compaction/start 事件（触发瞬间锚点）",
+          "path": "src/agent_harness/session/event.py"
+        }
+      ],
+      "mature_refs": [
+        "本仓 prove-it-works 方法（docs/agents/skills/principle-prove-it-works/SKILL.md）：真实产物取证；无直接对标的成熟产品机制。"
+      ],
+      "pass_rule": "压缩触发瞬间 UI 清单项数与内容无变化、无闪烁。",
+      "ticket_contract": "UI 无丢项：压缩触发瞬间 UI 清单无闪烁、无丢项（真实操作证据，接入 W-20 夹具）。",
+      "title": "UI 无丢项",
+      "user_rulings": [
+        "R1",
+        "R2"
+      ],
+      "verdict_values": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "SKIPPED"
+      ]
+    }
+  ],
+  "frozen_at": "2026-10-11",
+  "issue": 384,
+  "schema": "w30-criteria/1",
+  "ticket": "W-30",
+  "user_rulings": [
+    {
+      "decided_at": "2026-10-11",
+      "id": "R1",
+      "ruling": "判定器在最终发布 Gate 执行前合入，消费 W-21 harness 而非要求 W-21 先 passed（解决“先发版再补判据”顺序问题）。",
+      "title": "判定器顺序"
+    },
+    {
+      "decided_at": "2026-10-11",
+      "id": "R2",
+      "ruling": "区分“真阻塞”和“非阻塞”两种边含义：真阻塞 = W-21 harness 产物存在（判定器消费的输入）；非阻塞 = W-21 的 passed 状态（#384 不等待它；#365 已按用户口径收口关闭，未声明 passed）。",
+      "title": "#365 依赖边含义"
+    },
+    {
+      "decided_at": "2026-10-11",
+      "id": "R3",
+      "ruling": "失败路径禁止重走限定相同条件 / 无新证据——合理修正输入后的重试不违规。",
+      "title": "失败重试限定"
+    },
+    {
+      "decided_at": "2026-10-11",
+      "id": "R4",
+      "ruling": "清单逐字一致限定压缩本身无 plan 更新——实时合法更新不能判失败。",
+      "title": "清单一致限定"
+    }
+  ]
+}
