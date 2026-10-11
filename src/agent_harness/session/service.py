@@ -254,11 +254,9 @@ from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
     SessionToolLimitsPurge,
 )
-from agent_harness.storage.local_artifact import (
-    delete_local_artifacts,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import delete_local_artifacts
 from agent_harness.storage.operation import OperationState, needs_reconcile
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,

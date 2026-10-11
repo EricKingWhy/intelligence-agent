@@ -31,15 +31,13 @@ from pathlib import Path
 import pytest
 
 from agent_harness.config import Settings
-from agent_harness.storage import local_artifact
+from agent_harness.storage import readonly_fs
 from agent_harness.storage.artifact import (
     BYTE_ARTIFACT_ID_PATTERN,
     compute_byte_artifact_id,
 )
-from agent_harness.storage.local_artifact import (
-    LocalArtifactStore,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import LocalArtifactStore
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -479,7 +477,7 @@ def test_restore_touches_only_unlinked_files_not_directories(tmp_path: Path) -> 
     在本机（root）构造不出——root 绕过权限位，rmtree 删空目录根本不报错、回调压根不触发。
     """
     cleared_receipts: set[Path] = set()
-    handler = local_artifact._read_only_retry_handler(cleared_receipts)
+    handler = readonly_fs._read_only_retry_handler(cleared_receipts)
     sha = "ab" * 32
     receipt_dir = _receipt_path(tmp_path, "sess-a", f"sha256:{sha}")
     receipt_dir.mkdir(parents=True)
@@ -510,14 +508,14 @@ def test_restore_survives_symlink_loop_in_object_root(tmp_path: Path) -> None:
     receipt.parent.mkdir(parents=True)
     receipt.write_bytes(b"x")
 
-    local_artifact._restore_object_read_only(receipt, session_dir, root)  # 不得抛
+    readonly_fs._restore_object_read_only(receipt, session_dir, root)  # 不得抛
 
 
 def test_global_object_for_receipt_rejects_malformed_paths(tmp_path: Path) -> None:
     """路径推导是信任边界：形状不符 / 越界一律返回 `None`（不许推导出任意路径）。"""
     root = tmp_path / "artifacts"
     session_dir = root / "sess-a"
-    derive = local_artifact._global_object_for_receipt
+    derive = readonly_fs._global_object_for_receipt
     sha = "cd" * 32
     good = _sharded(session_dir / "attachments" / "objects", f"sha256:{sha}")
 
@@ -556,7 +554,7 @@ def test_sha256_pattern_matches_byte_artifact_id_digest_shape() -> None:
     放过/误拒——本用例把这条注释承诺变成红灯。
     """
     assert (
-        local_artifact._SHA256_PATTERN.pattern
+        readonly_fs._SHA256_PATTERN.pattern
         == BYTE_ARTIFACT_ID_PATTERN.pattern.removeprefix("sha256:")
     )
 
@@ -615,9 +613,9 @@ def test_discard_registers_version_appropriate_rmtree_callback(
         _store(tmp_path, "sess-a").save_bytes("sess-a", b"x", mime_type="image/png")
     )
     captured: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
+    monkeypatch.setattr(readonly_fs, "sys", _FakeSys(fake_version))
     monkeypatch.setattr(
-        local_artifact.shutil,
+        readonly_fs.shutil,
         "rmtree",
         lambda *args, **kwargs: captured.append((args, kwargs)),
     )
@@ -657,7 +655,7 @@ def test_discard_callback_receives_version_appropriate_exc(
     assert receipt.is_file()
 
     seen: list[object] = []
-    real_factory = local_artifact._read_only_retry_handler
+    real_factory = readonly_fs._read_only_retry_handler
 
     def _spy_factory(cleared_receipts: set[Path]) -> object:
         """包住回调工厂：记下回调收到的第三个参数，其余行为原样透传。"""
@@ -670,8 +668,8 @@ def test_discard_callback_receives_version_appropriate_exc(
         return _spy
 
     _install_windows_unlink(monkeypatch)
-    monkeypatch.setattr(local_artifact, "sys", _FakeSys(fake_version))
-    monkeypatch.setattr(local_artifact, "_read_only_retry_handler", _spy_factory)
+    monkeypatch.setattr(readonly_fs, "sys", _FakeSys(fake_version))
+    monkeypatch.setattr(readonly_fs, "_read_only_retry_handler", _spy_factory)
 
     discard_local_artifacts(_settings(tmp_path), "sess-a")
 

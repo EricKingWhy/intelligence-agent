@@ -18,10 +18,8 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import compute_artifact_id
-from agent_harness.storage.local_artifact import (
-    LocalArtifactStore,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import LocalArtifactStore
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 
 SESSION = "sess-local-1"
 CONTENT = "line-1\nline-2\nline-3\n"
