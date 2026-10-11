@@ -44,16 +44,8 @@ from agent_harness.model.accounting import (
     REQUEST_OUTCOME_FAILED,
 )
 from agent_harness.model.concurrency import ModelCallGate
-from agent_harness.model.stall import ModelStallError, stream_with_stall_guard
-
-# openai SDK 的瞬时错误类名（不硬 import openai：按类名识别，避免版本
-# 差异与 LangChain 包装层变化破坏分类）。
-_TRANSIENT_ERROR_NAMES = frozenset({
-    "APITimeoutError",       # openai 请求超时
-    "APIConnectionError",    # openai 连接失败
-    "TimeoutError",          # 内建 / asyncio 超时（3.11+ 同一类）
-    "ConnectionError",       # 内建 socket 连接失败
-})
+from agent_harness.model.failure import transport_failure_kind
+from agent_harness.model.stall import stream_with_stall_guard
 
 
 def _elapsed_ms(started_ns: int) -> int:
@@ -90,27 +82,22 @@ def _chunk_finish_reason(chunk: Any) -> str | None:
 def is_transient_model_error(error: BaseException) -> bool:
     """判断模型调用错误是否瞬时（值得切 fallback 重试）。
 
-    覆盖四层异常源：
-    - 卡流看门狗：ModelStallError（超时形状，冒烟实测的 10 分钟缓速流）；
-    - httpx 传输层：TimeoutException / TransportError（连接被拒、读失败等）；
-    - httpx.HTTPStatusError：5xx / 429 瞬时，4xx 认证/参数错非瞬时；
-    - openai SDK 风格：带 status_code 属性的按状态码判，APITimeoutError /
-      APIConnectionError 按类名判（langchain-openai 的真实异常源）。
+    两路判据：
+    - 拿到了 HTTP 响应：``httpx.HTTPStatusError.response.status_code`` 或 openai SDK 风格
+      的 ``status_code`` 属性——5xx / 429 瞬时，4xx 认证/参数错非瞬时；
+    - 没拿到响应：``failure.transport_failure_kind`` 判为超时 / 连接失败即瞬时（卡流看门狗
+      ModelStallError、httpx 传输层、内建 Timeout/ConnectionError、openai APITimeoutError /
+      APIConnectionError）。该判据与 run/failed 文案类别**同一来源**（#999），不在此另列。
     """
-    if isinstance(error, ModelStallError):
-        return True
     # httpx.HTTPStatusError 与 TransportError 是兄弟分支（同出 HTTPError），
     # 先判状态错再判传输错，语义各自独立。
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         return status >= 500 or status == 429
-    if isinstance(error, httpx.TransportError):
-        # 含 TimeoutException（其子类）与 ConnectError / ReadError 等传输故障
-        return True
     status_code = getattr(error, "status_code", None)
     if isinstance(status_code, int) and not isinstance(status_code, bool):
         return status_code >= 500 or status_code == 429
-    return type(error).__name__ in _TRANSIENT_ERROR_NAMES
+    return transport_failure_kind(error) is not None
 
 
 @dataclass(frozen=True)

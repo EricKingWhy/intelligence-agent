@@ -20,15 +20,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
+import httpx2
 import openai
 import pytest
+from langchain_openai import ChatOpenAI
 
 from agent_harness.model.failure import (
     UNCLASSIFIED_FAILURE_MESSAGE,
     provider_http_status,
+    transport_failure_kind,
     unclassified_failure_message,
 )
+from agent_harness.model.fallback import is_transient_model_error
+from agent_harness.model.stall import ModelStallError
 
 #: 植入的"假凭证 / 回显文本"：真实供应商错误体会回显请求内容与 key 前缀（ADR-0033 §1.2）。
 PLANTED_SECRETS: tuple[str, ...] = (
@@ -38,6 +46,7 @@ PLANTED_SECRETS: tuple[str, ...] = (
 )
 _ECHO = " ".join(PLANTED_SECRETS)
 _REQUEST = httpx.Request("POST", "https://gateway.invalid/v1/chat/completions")
+_REQUEST2 = httpx2.Request("POST", "https://gateway.invalid/v1/chat/completions")
 
 
 def _status_error(cls: type[openai.APIStatusError], code: int) -> openai.APIStatusError:
@@ -109,7 +118,7 @@ def test_timeout_is_not_reported_as_connection_failure() -> None:
 
 
 def test_connection_subclass_by_name_is_recognised() -> None:
-    """按 MRO 类名识别（不硬 import openai，与 ``fallback._TRANSIENT_ERROR_NAMES`` 同口径）：
+    """按 MRO 类名识别（不硬 import openai；fallback 瞬时判据经 ``transport_failure_kind`` 同源）：
     项目外的子类（例如 SDK 包装层）同样归入连接失败。"""
 
     class WrappedConnectionError(openai.APIConnectionError):
@@ -184,4 +193,136 @@ def test_other_valid_status_codes_keep_status_in_message(code: int) -> None:
         assert "模型供应商服务端错误" in message
     else:
         assert "未分类异常" in message
+    _assert_no_echo(message)
+
+
+# ---- #999：没拿到 HTTP 响应的传输层失败 —— 与 fallback 瞬时判据同一来源 ----
+#
+# 口径照 openai-python ``_base_client``（3.0.0）的包装：``timeout_exceptions()``
+# （httpx ``TimeoutException`` 族）⇒ ``APITimeoutError``，其余发送期异常 ⇒
+# ``APIConnectionError``。本仓在此之外还有三类「同形」异常源：项目自有的卡流看门狗
+# ``ModelStallError``、内建 ``TimeoutError`` / ``ConnectionError``（含子类）、未经
+# openai 包装的 httpx 传输错。它们 fallback 早已判瞬时，文案却落「未分类」（#996 P3-2）。
+
+#: case id → (异常工厂, 期望类别)。超时类故意含 ``httpx.ConnectTimeout``：它同时是
+#: ``TransportError``（连接类的父）⇒ 钉「超时先于连接判」这条判序。
+_TRANSPORT_CASES: dict[str, tuple] = {
+    "stall_idle": (lambda: ModelStallError(30.0), "timeout"),
+    "stall_total": (lambda: ModelStallError(600.0, kind="total"), "timeout"),
+    "builtin_timeout": (lambda: TimeoutError(_ECHO), "timeout"),
+    "httpx_read_timeout": (lambda: httpx.ReadTimeout(_ECHO, request=_REQUEST), "timeout"),
+    "httpx_connect_timeout": (lambda: httpx.ConnectTimeout(_ECHO, request=_REQUEST), "timeout"),
+    "openai_timeout": (lambda: openai.APITimeoutError(request=_REQUEST), "timeout"),
+    "builtin_connection": (lambda: ConnectionError(_ECHO), "connection"),
+    "builtin_connection_refused": (lambda: ConnectionRefusedError(_ECHO), "connection"),
+    "httpx_connect_error": (lambda: httpx.ConnectError(_ECHO, request=_REQUEST), "connection"),
+    "httpx_remote_protocol": (
+        lambda: httpx.RemoteProtocolError(_ECHO, request=_REQUEST), "connection",
+    ),
+    "openai_connection": (
+        lambda: openai.APIConnectionError(message=_ECHO, request=_REQUEST), "connection",
+    ),
+    # openai 3.0 的默认传输是**另一个包** ``httpx2``（``_httpx2.py``；ChatOpenAI 的
+    # async client 亦为 ``httpx2.AsyncClient``），其异常与 ``httpx`` 的**不相交**。流中途
+    # 断开 / 读超时不经 openai 包装、原样抛出 ``httpx2.*``（下方真栈用例实测）。
+    "httpx2_read_timeout": (lambda: httpx2.ReadTimeout(_ECHO, request=_REQUEST2), "timeout"),
+    "httpx2_connect_timeout": (
+        lambda: httpx2.ConnectTimeout(_ECHO, request=_REQUEST2), "timeout",
+    ),
+    "httpx2_connect_error": (lambda: httpx2.ConnectError(_ECHO, request=_REQUEST2), "connection"),
+    "httpx2_remote_protocol": (
+        lambda: httpx2.RemoteProtocolError(_ECHO, request=_REQUEST2), "connection",
+    ),
+}
+
+_CATEGORY_PHRASE = {"timeout": "模型供应商请求超时", "connection": "无法连接模型供应商"}
+_OTHER_PHRASE = {"timeout": "无法连接", "connection": "超时"}
+
+
+@pytest.mark.parametrize("case", list(_TRANSPORT_CASES))
+def test_transport_failures_get_timeout_or_connection_category(case: str) -> None:
+    make_error, kind = _TRANSPORT_CASES[case]
+    error = make_error()
+    assert transport_failure_kind(error) == kind
+    assert provider_http_status(error) is None
+    message = unclassified_failure_message(error)
+    assert _CATEGORY_PHRASE[kind] in message
+    assert _OTHER_PHRASE[kind] not in message
+    assert "HTTP" not in message
+    assert type(error).__name__ in message
+    _assert_no_echo(message)
+
+
+@pytest.mark.parametrize("case", list(_TRANSPORT_CASES))
+def test_transport_category_and_fallback_transience_share_one_judgment(case: str) -> None:
+    """单一判据来源：文案判为超时 / 连接的，fallback 必须判瞬时（反过来见下一条）。"""
+    error = _TRANSPORT_CASES[case][0]()
+    assert is_transient_model_error(error) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(_ECHO),
+        ValueError(_ECHO),
+        openai.APIError(_ECHO, request=_REQUEST, body=None),
+        httpx.DecodingError(_ECHO, request=_REQUEST),
+        httpx2.DecodingError(_ECHO, request=_REQUEST2),
+        OSError(_ECHO),
+    ],
+    ids=[
+        "RuntimeError", "ValueError", "openai.APIError", "httpx.DecodingError",
+        "httpx2.DecodingError", "OSError",
+    ],
+)
+def test_non_transport_errors_have_no_transport_kind(error: BaseException) -> None:
+    """不是传输层失败的（含 httpx 同属 ``RequestError`` 但非 ``TransportError`` 的
+    ``DecodingError``、``ConnectionError`` 的父类 ``OSError``）：无类别、fallback 不判瞬时。"""
+    assert transport_failure_kind(error) is None
+    assert is_transient_model_error(error) is False
+
+
+def test_real_stack_mid_stream_disconnect_is_a_transient_connection_failure() -> None:
+    """真栈（生产同款 ``ChatOpenAI`` → openai → 其默认传输）：响应头与首个 SSE 块已到、
+    随后对端掐断连接。该异常发生在 openai 的发送期包装之外（流迭代中）⇒ 原样抛出传输层
+    异常。不论它来自哪个传输包，都必须判为「连接」且 fallback 判瞬时——同形用例只用
+    ``httpx.*`` 构造时会漏掉 openai 3.0 实际使用的 ``httpx2``。"""
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(65536)
+        chunk = {
+            "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+        }
+        body = f"data: {json.dumps(chunk)}\n\n".encode()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            + f"{len(body):x}\r\n".encode() + body + b"\r\n"
+        )
+        await writer.drain()
+        await asyncio.sleep(0.1)
+        writer.transport.abort()
+
+    async def run() -> BaseException:
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        model = ChatOpenAI(
+            model="m", api_key="sk-PLANTED-0123456789abcdef",
+            base_url=f"http://127.0.0.1:{port}/v1", max_retries=0, request_timeout=10,
+        )
+        try:
+            async for _ in model.astream("ping"):
+                pass
+        except Exception as error:  # noqa: BLE001 - 取出真栈异常供断言
+            return error
+        finally:
+            server.close()
+        raise AssertionError("对端掐断连接却没有抛错")
+
+    error = asyncio.run(run())
+    assert transport_failure_kind(error) == "connection", type(error).__mro__
+    assert is_transient_model_error(error) is True
+    message = unclassified_failure_message(error)
+    assert _CATEGORY_PHRASE["connection"] in message
     _assert_no_echo(message)

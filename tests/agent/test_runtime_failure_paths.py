@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_FAILED
 from agent_harness.model.failure import UNCLASSIFIED_FAILURE_MESSAGE
+from agent_harness.model.stall import ModelStallError
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_FAILED,
@@ -739,7 +740,16 @@ _DETAIL_CASES: dict[str, tuple] = {
         lambda: openai.APIError(f"stream error {_ECHO_996}", request=_REQ_996, body={"m": _ECHO_996}),
         None, "未分类异常",
     ),
+    # #999：fallback 早判瞬时、却落「未分类」的两类传输层失败（看门狗 / 裸 httpx）。
+    "stall": (lambda: ModelStallError(30.0), None, "模型供应商请求超时"),
+    "httpx_connect": (
+        lambda: httpx.ConnectError(f"connect failed {_ECHO_996}", request=_REQ_996),
+        None, "无法连接模型供应商",
+    ),
 }
+
+#: 异常正文本身不带植入物的 case（仪器自检跳过这几条，反向扫描仍照做）。
+_NO_ECHO_CASES = frozenset({"timeout", "stall"})
 
 
 class TestUnclassifiedFailureDetail:
@@ -783,7 +793,7 @@ class TestUnclassifiedFailureDetail:
         assert model_failed.data["message"] == f"model call failed: {error_type}"
         assert "http_status" not in model_failed.data
         # 仪器自检：植入物确实在异常正文里（否则下面的反向扫描是空转）
-        assert all(token in str(error) or case == "timeout" for token in _PLANTED)
+        assert all(token in str(error) or case in _NO_ECHO_CASES for token in _PLANTED)
         # OBS-008：植入的假凭证 / 回显文本 / 网关地址不得出现在任何持久化事件里
         persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
         for event in [*session.events, *persisted]:
