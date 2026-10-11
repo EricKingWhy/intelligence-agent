@@ -100,7 +100,8 @@ def test_root_all_star_matches_module_attributes() -> None:
 #
 # 机械规则（模块 S、名字 N ∈ S.__all__）：
 #   ① `hasattr(S, N)` —— `import *` 一致性；防"加了个根本不存在的名字"型变异；
-#   ② N **定义在 S**（模块级 def/class/赋值；`from … import` 进来的不算定义），
+#   ② N **自有定义在 S**（模块级 def/class/赋值；`from … import` 绑定与"赋值借名"
+#      ——`B = <import 进来的名字或其属性>`——都不算，见 `_module_level_defined_names`），
 #      **或** N 有**经 S 路径**的消费者（`from agent_harness.attachments.S import N`
 #      / 绑定别名 `<alias>.N`，alias ∈ {S 短名}；排除 S 自身文件）。
 #
@@ -108,6 +109,19 @@ def test_root_all_star_matches_module_attributes() -> None:
 # 模块定义、又无人经本模块取用的名字。**模块自有定义是否为死代码是另一回事**，属
 # ruff / 代码审查；本守卫不对自有定义做消费者计数（否则会把"定义在本模块但暂时无人用"
 # 的合法符号判红，与包根那条的语义混成一团）。
+#
+# "经 S 路径的消费者"那半边分支在当前树**零正例**：8 个含 `__all__` 的子模块、32 个导出名
+# 全部走"自有定义"通过（`only-consumed` 恒为空集）。它不是死代码，守的是**合法的再导出**
+# 这种未来形态——`from … import N` 拿进来、**且真有人经本模块取用**（`from …S import N`）。
+# 独立审查的带外探针证过它的两种失败面：造一个消费者 ⇒ 绿，删掉它 ⇒ 红。这里不补正例，
+# 因为当前树没有合法再导出可钉（为凑正例而造一条再导出，正是本守卫要消灭的动作）。
+#
+# 两条**已知欠近似**（登记，不是完备性主张）：
+#   - 消费者识别要求**绝对** import 路径（`node.module == "agent_harness.attachments.S"`
+#     且 `level == 0`）。同包内的相对 import（`from .validation import N`）不计入消费者
+#     ⇒ 若将来出现这种写法会**假阳性**判红（全仓 `src/tests/scripts` 实测 0 处相对 import）；
+#   - `test_types_no_longer_reexports_validation_names` 的四名硬编码是 F-2 的**具名**守卫，
+#     它只钉 `types` 与那四个名字；**新的**借名不自动落入该名单，靠规则②兜底。
 # --------------------------------------------------------------------------
 
 _SUBMODULE_ALIAS_EXTRA = {
@@ -167,21 +181,81 @@ def _bound_names(target: ast.expr) -> set[str]:
     return set()
 
 
-def _module_level_defined_names(path: Path) -> set[str]:
-    """模块级**定义**的名字：def / class / 赋值 / 注解赋值 / `for` 与 `with` 的绑定。
+def _import_bound_names(tree: ast.Module) -> set[str]:
+    """模块级 `import` / `from … import` 绑定的名字（含 `as`）。
 
-    刻意**不含** `import` / `from … import` 绑定的名字——那正是本规则要区分开的
-    "借来的名字"（`types.py` 从 `validation` import 进来的四个就属这类）。
+    含模块级 `if` / `try` 块**内**的绑定——那两处是条件 import（如
+    `if TYPE_CHECKING:`）的常见栖身处。`TYPE_CHECKING` 下的名字运行期并不存在，把它算
+    import-bound 只会让下面的"赋值借用"多判红：方向安全（宁可吵，不可静默放行）。
     """
-    defined: set[str] = set()
+    bound: set[str] = set()
+
+    def visit(statements: list[ast.stmt]) -> None:
+        for node in statements:
+            if isinstance(node, ast.Import):
+                bound.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                bound.update(alias.asname or alias.name for alias in node.names)
+            elif isinstance(node, (ast.If, ast.Try)):
+                visit(node.body)
+                visit(node.orelse)
+                visit(getattr(node, "finalbody", []))
+
+    visit(tree.body)
+    return bound
+
+
+def _borrows_a_name(value: ast.expr, imported: set[str]) -> bool:
+    """`Name = <value>` 的 `<value>` 是否**借来的**（#988 修回 P2-1）。
+
+    **借名判定看值的来源，不看绑定的语法**：`B = parse_allowed_media_types`（RHS 是
+    import 进来的裸名）与 `B = _v.EXTENSION_MEDIA_TYPES`（RHS 是 import 进来的模块别名的
+    属性）里的 `B`，都只是真身的**第二个名字**，不是本模块的定义——故与
+    `from … import X` 走同一条规则②（消费者判据）。反过来，值的来源与本模块 import 的
+    名字无关时（`Literal[...]` 下标、`{...}` / `(...)` 字面量、`Call` 返回值、非
+    import-bound 的裸名），它仍是自有定义。
+
+    边界（欠近似，不是完备性主张）：解包 / 三元 / 多值等复杂表达式不展开（奥卡姆剃刀），
+    它们的借名行为由代码审查兜底；`D = d["k"]`（import 进来的映射的下标）同样不展开。
+    """
+    if isinstance(value, ast.Name):
+        return value.id in imported
+    if isinstance(value, ast.Attribute):
+        return isinstance(value.value, ast.Name) and value.value.id in imported
+    return False
+
+
+def _module_level_defined_names(path: Path) -> set[str]:
+    """模块级**自有定义**的名字：def / class / 赋值 / 注解赋值 / `for` 与 `with` 的绑定。
+
+    口径只有一条，**看值的来源**（#988 修回 P4-2：旧 docstring 说"不含 import 绑定"、
+    代码却把 `Assign` 绑定的名字无条件算作定义，两套口径自相矛盾，现已统一）：
+
+    - `import` / `from … import` 绑定的名字是**借来的**，不算自有定义；
+    - 模块级 `Name = <value>` / `Name: T = <value>` 只在 `<value>` 的来源与本模块 import
+      无关时才算自有定义；是 import 进来的裸名或它的属性时同样是借名（见
+      `_borrows_a_name`）。
+
+    为什么赋值形态必须一起判：赋值式再导出会**同时**绕过规则①（`hasattr` 为真）与旧口径
+    的规则②（任何模块级赋值都算自有定义），而 ruff 对赋值式**不报 F401**——复发成本比
+    已被守住的 `from … import` 路径更低，正是 F-1 要消灭的那类死名。
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported = _import_bound_names(tree)
+    defined: set[str] = set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(node.name)
         elif isinstance(node, ast.Assign):
+            if _borrows_a_name(node.value, imported):
+                continue
             for target in node.targets:
                 defined.update(_bound_names(target))
-        elif isinstance(node, (ast.AnnAssign, ast.For, ast.AsyncFor)):
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is not None and _borrows_a_name(node.value, imported):
+                continue
+            defined.update(_bound_names(node.target))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
             defined.update(_bound_names(node.target))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
@@ -195,6 +269,11 @@ def _submodule_consumers(submodule: str) -> dict[str, list[str]]:
 
     与包根那条同口径：**必须是经 S 路径取的**。定义模块自身对符号的使用**不算**消费者
     ——否则每个再导出名都会因为它在自己模块里被用而"合格"，守卫立刻退化成恒真。
+
+    本函数只在规则②的"有消费者"半边被用到，而**当前树没有任何名字靠它通过**（见上面对
+    该分支零正例的说明）——它的作用是让**未来**那条合法的再导出（import 进来 + 有人真的
+    经本模块取用）不至于被误判成死名。注意口径是**绝对**路径（`level == 0`）：同包相对
+    import 不计，这条欠近似已在文件头登记。
     """
     module_path = _PKG_DIR / f"{submodule}.py"
     full_module = f"{_PKG}.{submodule}"
@@ -284,6 +363,59 @@ def test_every_submodule_export_is_defined_here_or_consumed_via_here() -> None:
         + "\n  - ".join(violations)
         + "\n真身若在别的模块，就不要在本模块 `__all__` 里声明它——调用方直接 import 真身；"
         "确实要给外部用的再导出，请让调用方**经本模块**取用（`from …S import N`）。"
+    )
+
+
+def test_borrowed_names_are_not_counted_as_definitions(tmp_path: Path) -> None:
+    """`_module_level_defined_names` 的"看值的来源"口径（#988 修回 P2-1 的机制自检）。
+
+    这是规则②唯一一处"判绿"的口径，所以它自己的分类逻辑必须有一条恒常可跑的红线——
+    否则赋值式再导出的判别力只存在于一次性变异脚本里。四种形态各钉一条：
+
+    - 借名（三种绑定语法）⇒ **不算**自有定义：`from … import X` / `B = X`（裸名）/
+      `B = _m.X`（模块别名的属性）/ `B: T = X`（注解赋值同形）；
+    - 自有定义 ⇒ 算：与 import 无关的裸名 `B = LOCAL`、字面量、下标、class/def。
+    """
+    module = tmp_path / "probe_module.py"
+    module.write_text(
+        "from __future__ import annotations\n"
+        "\n"
+        "import os\n"
+        "from typing import Literal\n"
+        "from agent_harness.attachments import validation as _v\n"
+        "from agent_harness.attachments.validation import parse_allowed_media_types\n"
+        "\n"
+        "LOCAL_CONST = 3\n"
+        "BORROWED_ALIAS = parse_allowed_media_types\n"
+        "BORROWED_ATTR = _v.EXTENSION_MEDIA_TYPES\n"
+        "BORROWED_ANN: object = parse_allowed_media_types\n"
+        "BORROWED_STAR = os.path\n"
+        "OWN_LITERAL = Literal[\"a\"]\n"
+        "OWN_MAP = {\"a\": \"b\"}\n"
+        "OWN_TUP = (\"a\", \"b\")\n"
+        "OWN_ALIAS_OF_LOCAL = LOCAL_CONST\n"
+        "\n"
+        "\n"
+        "def own_func() -> None:\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "class OwnClass:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    defined = _module_level_defined_names(module)
+    assert defined == {
+        "LOCAL_CONST",
+        "OWN_LITERAL",
+        "OWN_MAP",
+        "OWN_TUP",
+        "OWN_ALIAS_OF_LOCAL",
+        "own_func",
+        "OwnClass",
+    }, (
+        "借名 / 自有定义的分类口径变了（#988 修回 P2-1）——规则②的判绿面就是这里：\n"
+        f"  得到 {sorted(defined)}"
     )
 
 
