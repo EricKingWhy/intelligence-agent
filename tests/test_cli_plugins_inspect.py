@@ -351,7 +351,10 @@ def test_cli_plugins_inspect_survives_a_deeply_nested_package_json(
         source / "SKILL.md",
         "---\nname: deep-package-json-cli\ndescription: Example.\n---\n",
     )
-    _write(source / "package.json", _deep_json())
+    # 深度必须落在 `plugin_inspection` 的 64 KB 读上限**之内**，否则有界读先返回 None、
+    # `json.loads`（与该守卫）根本跑不到——那样这条用例就测不到 DSH 预检这一步（`_deep_json()`
+    # 默认 20_000 层 = 120 KB，会静默滑过 64 KB 门）。
+    _write(source / "package.json", _deep_json(10_000))
     workspace = tmp_path / "workspace"
     global_skills = tmp_path / "global-skills"
     _write(workspace / "plugin-installs.json", '{"project": []}\n')
