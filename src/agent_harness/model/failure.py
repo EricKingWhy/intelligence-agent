@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Literal
 
 import httpx
+import httpx2
 
 from agent_harness.model.stall import ModelStallError
 
@@ -98,11 +99,16 @@ UNCLASSIFIED_HTTP_STATUS_MESSAGE = (
 # 其余发送期异常 ⇒ ``APIConnectionError``。本仓另有三类同形异常源一并归入：卡流看门狗
 # ``ModelStallError``（超时）、内建 ``TimeoutError`` / ``ConnectionError``（含子类，如拒连 /
 # 被重置）、未经 openai 包装的 httpx ``TransportError``。判据一律按继承，不按精确类名。
+# httpx 族**两个包都认**（同 openai ``timeout_exceptions()`` 的双包姿势）：openai 3.0 的默认
+# 传输是独立包 ``httpx2``（异常与 ``httpx`` 不相交），流迭代中途的断连 / 读超时不经 openai
+# 包装、原样抛 ``httpx2.*``；调用方自带 ``httpx`` 客户端时则是 ``httpx.*``。
 # openai 类按 MRO 类名识别（不硬 import openai：避免版本与 LangChain 包装层变化）。
 _TIMEOUT_TYPES: tuple[type[BaseException], ...] = (
-    ModelStallError, TimeoutError, httpx.TimeoutException,
+    ModelStallError, TimeoutError, httpx.TimeoutException, httpx2.TimeoutException,
 )
-_CONNECTION_TYPES: tuple[type[BaseException], ...] = (ConnectionError, httpx.TransportError)
+_CONNECTION_TYPES: tuple[type[BaseException], ...] = (
+    ConnectionError, httpx.TransportError, httpx2.TransportError,
+)
 _TIMEOUT_ERROR_NAMES = frozenset({"APITimeoutError"})
 _CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError"})
 
