@@ -2878,8 +2878,9 @@ def create_app(
                             continue
                         # 无 seq 的 transient 帧（如 model/started）不参与序幂等：它若在
                         # 「订阅-读盘」窗口内入队，会在整段 durable 重放之后才投递（相对
-                        # 自然时序滞后）。客户端一律不投影无 seq 帧（TUI: `SeqCursor` 对
-                        # seq=null 返回 skip），无可见影响；登记于 ADR-0016 §2.3 注记。
+                        # 自然时序滞后）。客户端一律不投影无 seq 的 transient 帧
+                        # （TUI: `SeqCursor` 对 seq=null 返回 skip），无可见影响；
+                        # 登记于 ADR-0016 §2.3 注记。
                         yield _event_to_sse_dict(item, session_id)
                 finally:
                     state.run_manager.unsubscribe_session(session_id, follower)

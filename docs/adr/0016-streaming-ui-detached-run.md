@@ -64,14 +64,16 @@
 > （旧客户端/旧测试零影响）。
 >
 > **`follow=1` 的两类收流触发**：① backlog 超 `STREAM_REPLAY_MAX_EVENTS` → 与默认分支**同判据**、
-> 同发单帧 `stream/truncated` 控制帧后收流；② **慢客户端队列溢出**（会话级订阅者队列 > `SUBSCRIBER_QUEUE_MAX`）
-> → `ManagedRun._fanout` 作废队列并投 `RESYNC` 哨兵，端点据此**静默**收流（**不**发控制帧），客户端走既有
+> 同发单帧 `stream/truncated` 控制帧后收流；② **慢客户端队列溢出**（会话级订阅者队列满，`put_nowait`
+> 抛 `QueueFull`，容量 `SUBSCRIBER_QUEUE_MAX`）→ `RunManager._fanout_session` 作废队列并投 `RESYNC` 哨兵，
+> 端点据此**静默**收流（**不**发控制帧），客户端走既有
 > 「`ended` → `after_seq` 重连」重放补洞。②是为「follow 连接没有 run 终态触发的重连」而设：沿用 run 订阅者
-> 的「丢最旧」策略会在 follow 上留**不可自愈**的永久空洞。**边界**：`follow=1` 只推**经 run 监听通道**产生的
+> 的「丢最旧」策略（`ManagedRun._fanout`）会在 follow 上留**不可自愈**的永久空洞。**边界**：`follow=1` 只推**经 run 监听通道**产生的
 > 事件；run listener 注册**之前**由非 run 路径 append 的事件（`POST /resume` / `POST /compact` 等）不实时推送，
 > 由客户端重连 / `truncated` 后 `GET /events` 全量重建回收（11 §6「SessionEvent history + live AgentEvent stream」
 > 的既有对账路径）。另：重放窗口内入队的**无 seq** transient 帧（如 `model/started`）会在整段 durable 重放之后
-> 投递（相对自然时序滞后）；客户端一律不投影无 seq 帧（TUI `SeqCursor` 对 `seq=null` 返回 skip），无可见影响。
+> 投递（相对自然时序滞后）；客户端一律不投影无 seq 的 transient 帧（TUI `SeqCursor` 对 `seq=null` 返回 skip，
+> 无 seq 的 `stream/truncated` 走独立路径），无可见影响。
 
 ## 3. 决策二：delta 合帧落盘 + reasoning 事件族（D-B / C1）
 
