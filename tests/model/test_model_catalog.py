@@ -200,3 +200,57 @@ class TestModelSupportsVision:
         )
         config = ModelConfig.resolve_selection(settings, "vis")
         assert model_supports_vision(settings, config) is True
+
+
+class TestDefaultEntryResolution:
+    """#1016：``/api/models`` 的默认条目 id（= 默认链模型名）经统一解析点
+    ``resolve_selection`` 解析成**默认链**，与切换路径判定一致。
+
+    第一性原理：「默认 / 继承默认链」是取值空间之外的一个状态，不是一个 id。
+    ``/api/models`` 把默认链广告成一条 id=默认模型名的条目 ⇒ 同一个字符串在
+    切换路径（``resolve_model_target``）与续聊 amend 校验路径（``resolve_selection``）
+    必须判定一致，否则用户点那条「默认」后会永久 422。
+    """
+
+    @staticmethod
+    def _settings(**kwargs) -> Settings:
+        return Settings(
+            _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
+            model_provider="deepseek", model_name="deepseek-chat", **kwargs,
+        )
+
+    def test_resolve_selection_accepts_default_entry_as_default_chain(self):
+        config = ModelConfig.resolve_selection(self._settings(), "deepseek-chat")
+        assert config.provider == "deepseek"
+        assert config.model_name == "deepseek-chat"
+
+    def test_unified_paths_agree_on_default_entry(self):
+        """切换路径与续聊校验路径（裸 resolve_selection）对默认条目判定一致。"""
+        from agent_harness.session.model_switch import (
+            default_model_id,
+            resolve_model_target,
+        )
+
+        settings = self._settings()
+        default_id = default_model_id(settings)
+        target = resolve_model_target(settings, "deepseek", default_id)
+        assert target is not None
+        assert target.model_id is None  # 切换路径：接受为「清除会话级覆盖」
+        # 续聊 amend 走的是裸 resolve_selection——必须同样接受。
+        config = ModelConfig.resolve_selection(settings, default_id)
+        assert config.model_name == default_id
+
+    def test_default_entry_shadows_same_named_catalog_entry(self):
+        """消融实验 4（AC5）：MODEL_NAME 恰与某 catalog 条目同名时，默认条目名解析成
+        默认链（与 resolve_model_target:165-167 的「默认条目优先」一致），不锁死到
+        该 catalog 条目的 base_url / temperature。"""
+        settings = self._settings(agent_models=json.dumps([
+            {"name": "deepseek-chat", "provider": "deepseek",
+             "model_name": "deepseek-reasoner"},
+        ]))
+        config = ModelConfig.resolve_selection(settings, "deepseek-chat")
+        assert config.model_name == "deepseek-chat"  # 默认链，而非 deepseek-reasoner
+
+    def test_unknown_model_still_raises(self):
+        with pytest.raises(ConfigError):
+            ModelConfig.resolve_selection(self._settings(), "definitely-not-a-model")

@@ -1321,6 +1321,11 @@ export const MODELS = [
   { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
 ];
 
+/** 目录里第一个**非默认**条目（#1016）。默认条目（`default: true`）表示「清除会话级
+ *  覆盖、回到默认链」，**不**进二级列表、也不是一个可选模型——所以"第一个可选模型"
+ *  是第一个非默认条目。 */
+export const FIRST_SELECTABLE_MODEL = MODELS.find((m) => !m.default)!;
+
 /** #199：可用性 + 能力位的**载荷形状**夹具（键名与真后端一致：`is_available` /
  *  `unavailable_reason` / `supports_*`，`getModels` 逐字段窄化）。
  *

@@ -1566,7 +1566,13 @@ class SessionService:
                 raise InvalidDecision(str(error)) from error
             if amend.reasoning_effort is not None:
                 initial_model.validate_reasoning_effort(amend.reasoning_effort)
-            if amend.model is not None:
+            # 默认条目名 = 「清除会话级覆盖」的同义表达（#1016）：与
+            # resolve_model_target / resolve_selection 共用同一判据，不把它落成
+            # 一个"等于默认模型名"的假覆盖（那会让会话事件里出现一个既非 catalog
+            # 条目、又是默认链的 model_id）。
+            if amend.model is not None and not ModelConfig.is_default_entry(
+                self._settings, amend.model
+            ):
                 initial_model_data = {
                     "provider": initial_model.provider,
                     "model_id": amend.model,
