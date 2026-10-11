@@ -20,6 +20,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from agent_harness.plugin_inspection import (
+    DSH_SLIDER_PACKAGE_NAME,
+    DSH_SLIDER_PINNED_COMMIT,
+    DSH_SLIDER_PINNED_FILES_SHA256,
+    DSH_SLIDER_PINNED_VERSION,
+    inspect_dsh_effort_slider,
+)
 from agent_harness.plugins.mcp_precheck import attach_mcp_section
 from agent_harness.skills.inspection import (
     _MAX_PACKAGE_ENTRIES,
@@ -146,15 +153,19 @@ class SkillPackageManager:
             return copy.deepcopy(self._read_manifest()[ENABLE_RESULTS_FIELD])
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
-        from agent_harness.plugin_inspection import inspect_dsh_effort_slider
 
         # DSH 原生包识别复用 T8 的 inspect：识别成功就走 DSH 车道，不进 Skill 预检。
         dsh_report = inspect_dsh_effort_slider(source, scope=self.scope)
         if dsh_report is not None:
+            # 记录存识别器解析后的绝对路径（expanduser + resolve），与
+            # skill 车道的 source_value=str(source_root) 同源：直接对用户
+            # 原始输入 resolve() 会把 "~/x" 展开成 "<cwd>/~/x"（Path.resolve
+            # 不做 expanduser），写进记录的 source 就不可还原了（C-P2）。
+            source_root = Path(dsh_report["source"])
             return self._install_dsh_snapshot(
-                Path(dsh_report["source"]),
+                source_root,
                 report=dsh_report,
-                source_value=str(source),
+                source_value=str(source_root),
             )
         source_report = _inspected(
             source, scope=self.scope, existing_skills=self.scope_skills_dir
@@ -180,6 +191,13 @@ class SkillPackageManager:
         initial_report: dict[str, Any],
         record_extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Skill 快照安装（staging + 树摘要 + 原子改名 + 清单回滚）。
+
+        与 :meth:`_install_dsh_snapshot` 有意保持同构、不抽公共脚手架：两者
+        的预检函数、门槛判据、记录字段集各不相同，参数化需要 5-6 个钩子，
+        抽象成本高于重复本身。单边修 bug（尤其 manifest 写失败的恢复路径）
+        必须同步检查另一处。
+        """
         self._raise_if_uninstallable(initial_report)
         if initial_report.get("name") != name:
             raise SkillPackageError("Skill name changed before snapshot installation")
@@ -266,11 +284,12 @@ class SkillPackageManager:
     ) -> dict[str, Any]:
         """DSH 原生包的不可变快照安装（#878 T9）。
 
-        与 Skill 快照同构（staging + 树摘要 + 原子改名 + 清单回滚），但预检/
-        复核都走 :func:`inspect_dsh_effort_slider`，且门槛更严：pin 文件摘要
-        不匹配（drift）一律拒装。包内 JS 只被哈希/复制，从不执行。
+        与 :meth:`_install_snapshot` 同构（staging + 树摘要 + 原子改名 +
+        清单回滚），两处有意不抽公共脚手架（理由见对方 docstring）；单边修
+        bug（尤其 manifest 写失败恢复路径）必须同步另一处。预检/复核都走
+        :func:`inspect_dsh_effort_slider`，且门槛更严：pin 文件摘要不匹配
+        （drift）一律拒装。包内 JS 只被哈希/复制，从不执行。
         """
-        from agent_harness.plugin_inspection import inspect_dsh_effort_slider
 
         self._raise_if_dsh_drift(report, "preflight")
         name = report["package"]
@@ -278,17 +297,25 @@ class SkillPackageManager:
             manifest = self._read_manifest()
             packages = manifest["packages"]
             if name in packages:
-                raise SkillPackageError(f"Skill {name!r} is already installed")
+                raise SkillPackageError(f"DSH package {name!r} is already installed")
             self._assert_no_shadow_conflict(name)
 
             self._ensure_managed_directory()
             target = self.managed_skills_dir / name
             if self._path_exists(target):
                 raise SkillPackageError(
-                    f"managed path for Skill {name!r} already exists without an install record"
+                    f"managed path for DSH package {name!r} already exists without an install record"
                 )
 
-            source_digest = _tree_sha256(source_root)
+            def tree_digest(root: Path) -> str:
+                # 与 _install_snapshot.tree_digest 同形：dsh-git 记录在案时
+                # 连文件 mode 一起对账（C-P3）；_git_tree_sha256 先校验 mode
+                # 摘要、返回的仍是纯内容摘要，落盘的 sha256 口径不变。
+                if record_extras and record_extras.get("source_kind") == "dsh-git":
+                    return _git_tree_sha256(root, record_extras["git_modes_sha256"])
+                return _tree_sha256(root)
+
+            source_digest = tree_digest(source_root)
             staging_root = self.managed_skills_dir / f".staging-{uuid.uuid4().hex}"
             staging_package = staging_root / name
             staging_root.mkdir()
@@ -300,7 +327,7 @@ class SkillPackageManager:
                     copy_function=shutil.copy2,
                     ignore=_reject_junctions,
                 )
-                if _tree_sha256(staging_package) != source_digest:
+                if tree_digest(staging_package) != source_digest:
                     raise SkillPackageError(
                         "DSH package changed or could not be copied without following linked directories"
                     )
@@ -320,7 +347,7 @@ class SkillPackageManager:
                     "trust": {"status": "untrusted", "sha256": source_digest},
                     "enabled": False,
                     "installed_at": datetime.now(UTC).isoformat(),
-                    # Q1 裁决：enabled-adapted——如实携带 needs-adaptation + gaps，
+                    # Q1（待裁决，当前按 enabled-adapted 实现）：如实携带 needs-adaptation + gaps，
                     # 不标 complete；适配激活 = 原生 reasoning-effort 语义（#865）。
                     "compatibility": {
                         "status": "needs-adaptation",
@@ -350,15 +377,30 @@ class SkillPackageManager:
 
     @staticmethod
     def _raise_if_dsh_drift(report: dict[str, Any], phase: str) -> None:
-        """pin 摘要不匹配（drift）⇒ 拒绝；fail-closed，不降级不续装。"""
+        """pin 摘要不匹配（drift）⇒ 拒绝；fail-closed，不降级不续装。
+
+        错误消息必须可操作：附 pin 提交、各 finding 的 path/expected/actual，
+        并给出恢复动作——只报裸 code 列表时用户既不知道差在哪、也不知道
+        该恢复到什么内容。
+        """
         if report.get("checked_files_match") is True and not report.get("findings"):
             return
-        codes = ", ".join(
-            finding.get("code", "unknown") for finding in report.get("findings", [])
-        )
+        pin_commit = (report.get("source_pin") or {}).get("commit") or "unknown"
+        details: list[str] = []
+        for finding in report.get("findings", []):
+            parts = [str(finding.get("code", "unknown"))]
+            if finding.get("path"):
+                parts.append(f"path={finding['path']}")
+            if "expected" in finding:
+                parts.append(f"expected={finding['expected']}")
+            if "actual" in finding:
+                parts.append(f"actual={finding['actual']}")
+            details.append(" ".join(parts))
         raise SkillPackageError(
             f"DSH package {phase} does not match the pinned source"
-            f" ({codes or 'content drift'}); refusing"
+            f" (pinned commit {pin_commit}); refusing"
+            f" ({'; '.join(details) or 'content drift'})."
+            f" Restore the content of pinned commit {pin_commit} and retry"
         )
 
     def install_git(
@@ -375,7 +417,6 @@ class SkillPackageManager:
             package, commit, git_modes_sha256 = _fetch_git_skill(
                 safe_url, safe_ref, safe_subdirectory, Path(temporary)
             )
-            from agent_harness.plugin_inspection import inspect_dsh_effort_slider
 
             dsh_report = inspect_dsh_effort_slider(package, scope=self.scope)
             if dsh_report is not None:
@@ -383,7 +424,8 @@ class SkillPackageManager:
                 # fail-closed 判据同形），内容漂移拒装。
                 if PurePosixPath(safe_subdirectory).name != dsh_report["package"]:
                     raise SkillPackageError(
-                        "DSH Git subdirectory does not match the package name"
+                        f"DSH Git subdirectory {safe_subdirectory!r} does not match"
+                        f" package name {dsh_report['package']!r}"
                     )
                 return self._install_dsh_snapshot(
                     package,
@@ -394,6 +436,10 @@ class SkillPackageManager:
                         "git_subdirectory": safe_subdirectory,
                         "source_ref": safe_ref,
                         "resolved_commit": commit,
+                        # 顶层落 modes 摘要（与 skill git 记录同形）：让
+                        # _managed_package_sha256 对 dsh-git 也能对账文件
+                        # mode，活动快照的 chmod 漂移才可检（P1-1 修法 a）。
+                        "git_modes_sha256": git_modes_sha256,
                         "previous_version": None,
                         "pending_version": None,
                     },
@@ -423,13 +469,13 @@ class SkillPackageManager:
 
     def update(self, name: str, *, ref: str) -> dict[str, Any]:
         safe_ref = _validate_git_ref(ref)
-        # 只窥探记录类型（_update_dsh 自带两段锁，不能在持锁时调用）。
+        # 只窥探记录类型（_update_dsh_version 自带两段锁，不能在持锁时调用）。
         with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             is_dsh = record.get("type") == "dsh-native"
         if is_dsh:
-            return self._update_dsh(name, safe_ref)
+            return self._update_dsh_version(name, safe_ref)
         with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
@@ -488,27 +534,30 @@ class SkillPackageManager:
                 self._write_manifest(manifest)
                 return copy.deepcopy(record)
 
-    def _update_dsh(self, name: str, safe_ref: str) -> dict[str, Any]:
+    def _update_dsh_version(self, name: str, safe_ref: str) -> dict[str, Any]:
         """DSH 原生包的显式 Git 版本暂存（与 Skill update 同构，两段锁）。
 
         预检门槛与安装一致：pin 文件摘要不匹配（drift）拒收，已装版本保留。
         适配内容永远锚定 pin，因此暂存成功只意味着「同 pin 内容的新提交」。
         """
-        from agent_harness.plugin_inspection import inspect_dsh_effort_slider
 
         with self._locked_registry():
             manifest = self._read_manifest()
             record = self._record(manifest, name)
             if record.get("source_kind") != "dsh-git":
-                raise SkillPackageError(f"Skill {name!r} is not installed from Git")
+                raise SkillPackageError(f"DSH package {name!r} is not installed from Git")
             if record.get("pending_version") is not None:
-                raise SkillPackageError(f"Skill {name!r} already has a pending version")
+                raise SkillPackageError(
+                    f"DSH package {name!r} already has a pending version"
+                )
             source_url = _validate_git_url(record["source"])
             subdirectory = _validate_git_subdirectory(record["git_subdirectory"])
             current_commit = record["resolved_commit"]
 
         with tempfile.TemporaryDirectory(prefix="agent-harness-dsh-update-") as temporary:
-            package, commit, _modes = _fetch_git_skill(
+            # modes 摘要直接复用 fetch 产物：提取时已按 git mode 逐文件落盘，
+            # 对同一目录再算一遍是重复劳动（且语义上就是同一个值）。
+            package, commit, modes = _fetch_git_skill(
                 source_url, safe_ref, subdirectory, Path(temporary)
             )
             report = inspect_dsh_effort_slider(package, scope=self.scope)
@@ -528,7 +577,7 @@ class SkillPackageManager:
                 "resolved_commit": commit,
                 "snapshot_id": f"{commit}-{digest}",
                 "sha256": digest,
-                "git_modes_sha256": _git_modes_sha256_from_package(package),
+                "git_modes_sha256": modes,
                 "compatibility": {
                     "status": "needs-adaptation",
                     "license": report["license"],
@@ -545,7 +594,7 @@ class SkillPackageManager:
                     or record.get("pending_version") is not None
                 ):
                     raise SkillPackageError(
-                        f"Git source for Skill {name!r} changed during update; retry"
+                        f"Git source for DSH package {name!r} changed during update; retry"
                     )
                 self._store_version_snapshot(package, name, pending)
                 record["pending_version"] = pending
@@ -559,24 +608,25 @@ class SkillPackageManager:
             if record.get("type") == "dsh-native":
                 if record.get("source_kind") != "dsh-git":
                     raise SkillPackageError(
-                        f"Skill {name!r} is not installed from Git"
+                        f"DSH package {name!r} is not installed from Git"
                     )
                 if record.get("pending_version") is not None:
                     raise SkillPackageError(
-                        f"Skill {name!r} already has a pending version"
+                        f"DSH package {name!r} already has a pending version"
                     )
                 previous = record.get("previous_version")
                 if previous is None:
                     raise SkillPackageError(
-                        f"Skill {name!r} has no previous DSH snapshot to restore"
+                        f"DSH package {name!r} has no previous DSH snapshot to restore"
                     )
                 _validate_dsh_version_metadata(previous)
                 active = self._package_path(name)
                 self._verify_package(active, record)
                 snapshot = self._version_snapshot_path(name, previous["snapshot_id"])
-                if _tree_sha256(snapshot) != previous["sha256"]:
+                # 与 skill git 车道同判据：连文件 mode 一起对账（P1-1 修法 a）。
+                if _git_tree_sha256(snapshot, previous["git_modes_sha256"]) != previous["sha256"]:
                     raise SkillPackageError(
-                        f"previous DSH snapshot for Skill {name!r} changed"
+                        f"previous DSH snapshot for DSH package {name!r} changed"
                     )
                 record["pending_version"] = copy.deepcopy(previous)
                 self._write_manifest(manifest)
@@ -607,6 +657,12 @@ class SkillPackageManager:
             ) from error
 
     def _apply_pending_versions(self) -> int:
+        """把暂存的 Skill 快照换到活动位（重启时由 Runtime 调用）。
+
+        与 :meth:`_apply_dsh_pending_version` 有意保持同构、不抽公共脚手架
+        （复核函数、门槛判据、落盘字段集不同，参数化需要 5-6 个钩子）；单边
+        修 bug（尤其 manifest 写失败的恢复路径）必须同步检查另一处。
+        """
         applied = 0
         with self._locked_registry():
             manifest = self._read_manifest()
@@ -695,24 +751,31 @@ class SkillPackageManager:
     ) -> None:
         """把暂存的 DSH 快照换到活动位（重启时由 Runtime 调用）。
 
-        复核与安装同门槛：字节摘要 + inspect 识别 + 无 drift；失败时已装版本
-        保持选中，不半换。
+        复核与安装同门槛：字节摘要 + 文件 mode（P1-1 修法 a）+ inspect 识别 +
+        无 drift；失败时已装版本保持选中，不半换。与 :meth:`_apply_pending_versions`
+        有意保持同构、不抽公共脚手架（理由见对方 docstring）；单边修 bug
+        （尤其 manifest 写失败恢复路径）必须同步另一处。
         """
-        from agent_harness.plugin_inspection import inspect_dsh_effort_slider
 
         _validate_dsh_version_metadata(pending)
         active = self._package_path(name)
         self._verify_package(active, record)
         snapshot = self._version_snapshot_path(name, pending["snapshot_id"])
-        if _tree_sha256(snapshot) != pending["sha256"]:
-            raise SkillPackageError(f"pending DSH snapshot for Skill {name!r} changed")
+        if _git_tree_sha256(snapshot, pending["git_modes_sha256"]) != pending["sha256"]:
+            raise SkillPackageError(
+                f"pending DSH snapshot for DSH package {name!r} changed"
+            )
 
         current = {
             "source_ref": record["source_ref"],
             "resolved_commit": record["resolved_commit"],
             "snapshot_id": f"{record['resolved_commit']}-{record['sha256']}",
             "sha256": record["sha256"],
-            "git_modes_sha256": _git_modes_sha256_from_package(active),
+            # 顶层 modes 摘要取记录值而非从活动目录现算：_verify_package 已在
+            # 上面按记录值对活动快照做过 mode+内容对账，现算反而会让随后
+            # _store_version_snapshot 的 mode 复核对着新值恒过、失去判别力，
+            # 且 verify→store 窗口的漂移会被烘焙进 previous_version（C-P4）。
+            "git_modes_sha256": record["git_modes_sha256"],
             "compatibility": copy.deepcopy(record["compatibility"]),
         }
         # 当前活动版本先落成版本快照，rollback 才有 previous 可回（与 Skill 流一致）。
@@ -729,14 +792,14 @@ class SkillPackageManager:
                 copy_function=shutil.copy2,
                 ignore=_reject_junctions,
             )
-            if _tree_sha256(staged) != pending["sha256"]:
+            if _git_tree_sha256(staged, pending["git_modes_sha256"]) != pending["sha256"]:
                 raise SkillPackageError(
-                    f"pending DSH snapshot for Skill {name!r} changed while staging"
+                    f"pending DSH snapshot for DSH package {name!r} changed while staging"
                 )
             report = inspect_dsh_effort_slider(staged, scope=self.scope)
             if report is None or report.get("package") != name:
                 raise SkillPackageError(
-                    f"pending DSH snapshot for Skill {name!r} is no longer recognized"
+                    f"pending DSH snapshot for DSH package {name!r} is no longer recognized"
                 )
             self._raise_if_dsh_drift(report, "pending snapshot")
             os.rename(active, displaced)
@@ -750,6 +813,9 @@ class SkillPackageManager:
             record["source_ref"] = pending["source_ref"]
             record["resolved_commit"] = pending["resolved_commit"]
             record["sha256"] = pending["sha256"]
+            # 顶层 modes 摘要跟着换上的版本走（与 skill 车道一致）：
+            # _managed_package_sha256 对 dsh-git 要拿它对账活动快照。
+            record["git_modes_sha256"] = pending["git_modes_sha256"]
             record["trust"] = {
                 "status": "untrusted",
                 "sha256": pending["sha256"],
@@ -764,7 +830,7 @@ class SkillPackageManager:
                     os.rename(displaced, active)
                 except OSError as error:
                     raise SkillPackageError(
-                        f"Skill {name!r} manifest update failed; old snapshot remains at {displaced}"
+                        f"DSH package {name!r} manifest update failed; old snapshot remains at {displaced}"
                     ) from error
                 raise
             shutil.rmtree(displaced, ignore_errors=True)
@@ -835,7 +901,7 @@ class SkillPackageManager:
 
     def _adopt_project_package(self, name: str, record: dict[str, Any]) -> None:
         if record.get("type") == "dsh-native":
-            # Q1 裁决：DSH 包启用适配版（enabled-adapted）——如实携带
+            # Q1（待裁决，当前按 enabled-adapted 实现）：DSH 包启用适配版——如实携带
             # needs-adaptation + gaps，不标 complete（spec 08 §6.3 禁止的是
             # "以完整兼容启用"）。适配激活 = 原生 UI 语义（#865），不进 Skill
             # 装配面；用快照字节对账证明激活对象就是安装时的那份内容。
@@ -856,7 +922,7 @@ class SkillPackageManager:
     def _verify_selected_global(self, name: str, record: dict[str, Any]) -> None:
         """被选的全局版本必须可装配；失效就报错，不 shadow（T5 AC3）。"""
         if record.get("type") == "dsh-native":
-            # DSH 全局版同样按 enabled-adapted 放行（Q1 裁决），字节对账放行。
+            # DSH 全局版同样按 enabled-adapted 放行（Q1 待裁决，当前实现），字节对账放行。
             manager = self.global_manager()
             manager._verify_package(manager._package_path(name), record)
             return
@@ -1181,7 +1247,7 @@ class SkillPackageManager:
     def _verify_package(self, package: Path, record: dict[str, Any]) -> None:
         if _managed_package_sha256(package, record) != record["sha256"]:
             raise SkillPackageError(
-                f"Skill {package.name!r} changed after installation; refusing this operation"
+                f"package {package.name!r} changed after installation; refusing this operation"
             )
 
     def _version_directory(self, name: str, *, create: bool) -> Path:
@@ -1364,15 +1430,9 @@ def _validate_dsh_manifest_record(
     """DSH 原生包记录的 fail-closed 校验（#878 T9）。
 
     与 Skill 记录的关键差异：type 固定 ``dsh-native``、包名锚定 pin、
-    compatibility **永远** needs-adaptation（Q1 裁决：不标 complete）、
+    compatibility **永远** needs-adaptation（Q1 待裁决，当前实现不标 complete）、
     source_pin/逐贡献映射/gaps 必须在案。
     """
-    from agent_harness.plugin_inspection import (
-        DSH_SLIDER_PACKAGE_NAME,
-        DSH_SLIDER_PINNED_COMMIT,
-        DSH_SLIDER_PINNED_FILES_SHA256,
-        DSH_SLIDER_PINNED_VERSION,
-    )
 
     try:
         if name != DSH_SLIDER_PACKAGE_NAME:
@@ -1396,6 +1456,9 @@ def _validate_dsh_manifest_record(
             raise SkillPackageError("trust metadata is invalid")
         if not isinstance(record.get("enabled"), bool):
             raise SkillPackageError("enabled flag is invalid")
+        # 与 Skill 车道同判据：global scope 的记录不允许 enabled（C-P4）。
+        if scope == "global" and record.get("enabled") is not False:
+            raise SkillPackageError("global DSH record must not be enabled")
         compatibility = record.get("compatibility")
         if (
             not isinstance(compatibility, dict)
@@ -1417,11 +1480,42 @@ def _validate_dsh_manifest_record(
         contributions = record.get("contributions")
         if not isinstance(contributions, list) or not contributions:
             raise SkillPackageError("contribution mapping is missing")
+        # 条目关键字段形状 fail-closed：被篡改的贡献映射只要还是非空 list
+        # 就放行，等于没有校验。evidence 只要求是 list（元素形状是信息性
+        # 字段，不参与任何判据，不校验；注释不宣称"全格式校验"，与实际
+        # 强度一致——C-P4）。
+        for contribution in contributions:
+            if (
+                not isinstance(contribution, dict)
+                or not isinstance(contribution.get("name"), str)
+                or not contribution["name"]
+                or not isinstance(contribution.get("source"), str)
+                or not contribution["source"]
+                or not isinstance(contribution.get("project_mapping"), str)
+                or not contribution["project_mapping"]
+                or contribution.get("status") != "adapted"
+                or not isinstance(contribution.get("evidence"), list)
+            ):
+                raise SkillPackageError("contribution mapping entry is invalid")
         gaps = record.get("gaps")
-        if not isinstance(gaps, list) or not any(
-            isinstance(gap, dict) and gap.get("name") == "off" for gap in gaps
+        if not isinstance(gaps, list) or not gaps:
+            raise SkillPackageError("declared gaps are missing")
+        for gap in gaps:
+            if (
+                not isinstance(gap, dict)
+                or not isinstance(gap.get("name"), str)
+                or not gap["name"]
+                or not isinstance(gap.get("status"), str)
+                or not gap["status"]
+                or not isinstance(gap.get("reason"), str)
+                or not gap["reason"]
+                or not isinstance(gap.get("evidence"), list)
+            ):
+                raise SkillPackageError("declared gap entry is invalid")
+        if not any(
+            gap["name"] == "off" and gap["status"] == "unmapped" for gap in gaps
         ):
-            raise SkillPackageError("declared gaps must include the off gap")
+            raise SkillPackageError("declared gaps must include the unmapped off gap")
 
         source_kind = record.get("source_kind")
         git_fields = {
@@ -1438,10 +1532,17 @@ def _validate_dsh_manifest_record(
             return
         if source_kind != "dsh-git":
             raise SkillPackageError(f"unsupported DSH source kind {source_kind!r}")
+        # dsh-git 记录必须携带合法的顶层 modes 摘要（_managed_package_sha256
+        # 对 dsh-git 要拿它对账文件 mode；schema 承诺的维度必须在案）。
+        modes = record.get("git_modes_sha256")
+        if not isinstance(modes, str) or not _DIGEST_PATTERN.fullmatch(modes):
+            raise SkillPackageError("Git file-mode digest is missing or invalid")
         _validate_git_url(record["source"])
         subdirectory = _validate_git_subdirectory(record["git_subdirectory"])
         if PurePosixPath(subdirectory).name != name:
-            raise SkillPackageError("Git subdirectory does not match package name")
+            raise SkillPackageError(
+                f"Git subdirectory {subdirectory!r} does not match package name {name!r}"
+            )
         _validate_git_ref(record["source_ref"])
         commit = record.get("resolved_commit")
         if not isinstance(commit, str) or not _COMMIT_PATTERN.fullmatch(commit):
@@ -2099,8 +2200,15 @@ def _tree_sha256(root: Path) -> str:
 
 
 def _managed_package_sha256(root: Path, record: dict[str, Any]) -> str:
-    if record.get("source_kind") == "git":
-        return _git_tree_sha256(root, record["git_modes_sha256"])
+    if record.get("source_kind") in {"git", "dsh-git"}:
+        # git 与 dsh-git 记录同判据：内容 + 文件 mode 一起对账，活动快照的
+        # chmod 漂移才逃不过 _verify_package（P1-1 修法 a）。
+        modes = record.get("git_modes_sha256")
+        if not isinstance(modes, str) or not _DIGEST_PATTERN.fullmatch(modes):
+            raise SkillPackageError(
+                "package record is missing a valid Git file-mode digest"
+            )
+        return _git_tree_sha256(root, modes)
     return _tree_sha256(root)
 
 
@@ -2109,7 +2217,7 @@ def _git_tree_sha256(root: Path, expected_modes: str) -> str:
     if not _DIGEST_PATTERN.fullmatch(expected_modes):
         raise SkillPackageError("Git Skill file-mode digest is invalid")
     if os.name != "nt" and _git_modes_sha256_from_package(root) != expected_modes:
-        raise SkillPackageError(f"Git Skill file modes changed after installation: {root}")
+        raise SkillPackageError(f"Git file modes changed after installation: {root}")
     return _tree_sha256(root)
 
 
