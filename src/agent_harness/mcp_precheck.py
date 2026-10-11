@@ -1,5 +1,11 @@
 """MCP server 描述预检（T6 / #875）：静态解析 → 映射到现有 `MCPServerConfig`。
 
+**中性顶层模块（#974）**：本模块是 Skill 安装闸门与 MCP 包生命周期**共享的叶子**，
+既不属于 `agent_harness.skills` 也不属于 `agent_harness.plugins`，所以两边都能
+import 而不成环——`skills → plugins → skills` 会破坏包边界（`plugins/__init__.py`
+自述、`tests/test_package_boundary.py` 守）。`plugins/mcp_package_manager.py`
+（跨市场 MCP 包生命周期）与 `skills/package_manager.py` 的安装闸门都从这里取。
+
 预检的本质是**静态分析描述文件**：只读包内声明，不启动子进程、不连远端、不读
 部署环境、不回显凭据值。描述只有落在本仓 `MCPServerConfig` 能表达的字段上才算被
 接受（spec 09 §1.1）；包里没有明确描述时报告"需要适配描述"，不去猜 package.json、

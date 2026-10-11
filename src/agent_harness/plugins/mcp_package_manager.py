@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from agent_harness.plugins.mcp_precheck import inspect_mcp_servers, load_mcp_servers
+from agent_harness.mcp_precheck import inspect_mcp_servers, load_mcp_servers
 from agent_harness.skills.package_lock import registry_lock
 from agent_harness.skills.package_manager import (
     _COMMIT_PATTERN,
