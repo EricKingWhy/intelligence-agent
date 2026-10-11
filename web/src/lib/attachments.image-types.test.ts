@@ -5,18 +5,17 @@
  * `tests/attachments/test_image_media_types_snapshot.py` 从 `types.py` 权威表钉住；
  * 本文件钉住"`IMAGE_LIMITS.mediaTypes` == 快照"——web 侧单方面增删类型就红。
  * 对账做法 ADAPT 自本仓 `tests/web/test_attachment_limits_contract.py`（python 读
- * 对端源逐字对账）与 `tui/test/host.test.ts`（`new URL(...)` 读仓库文件）先例。
+ * 对端源逐字对账）先例。
+ *
+ * 用 Vite 原生 `?raw` 导入而不用 `node:fs` 读文件：app tsconfig 的 `types` 刻意只有
+ * `["vite/client"]`（无 node 类型，TS2591），而 `vite/client` 已声明 `*?raw` 模块，
+ * `tsc -b` 可过。
  */
-import { readFileSync } from 'node:fs';
+import snapshotText from '../../../src/agent_harness/attachments/image_media_types.snapshot.txt?raw';
 
 import { expect, it } from 'vitest';
 
 import { detectImageMediaType, IMAGE_LIMITS } from './attachments';
-
-const SNAPSHOT = new URL(
-  '../../../src/agent_harness/attachments/image_media_types.snapshot.txt',
-  import.meta.url,
-);
 
 /** 解析快照 [media_types] 一节（跳过 `#` 注释与空行）。 */
 function parseMediaTypes(source: string): string[] {
@@ -35,7 +34,7 @@ function parseMediaTypes(source: string): string[] {
 }
 
 it('IMAGE_LIMITS.mediaTypes 与快照 media_types 一致（#938 M-10）', () => {
-  const snapshot = parseMediaTypes(readFileSync(SNAPSHOT, 'utf8'));
+  const snapshot = parseMediaTypes(snapshotText);
   expect([...IMAGE_LIMITS.mediaTypes].sort()).toEqual(snapshot);
 });
 
@@ -43,7 +42,7 @@ it('IMAGE_LIMITS.mediaTypes 与快照 media_types 一致（#938 M-10）', () => 
 // 第四张图片类型表——若未来权威源新增类型（如 image/avif）而这里没跟，全门禁绿但对应
 // 字节会被静默判 null。本测试钉住「字节探测能识别的类型集 == 权威源集」。
 it('detectImageMediaType 能按魔数识别的媒体类型集与快照 media_types 一致', async () => {
-  const cases: Array<[string, Uint8Array, string]> = [
+  const cases: Array<[string, Uint8Array<ArrayBuffer>, string]> = [
     ['x.png', Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a), 'image/png'],
     ['x.gif', new TextEncoder().encode('GIF89a'), 'image/gif'],
     ['x.gif', new TextEncoder().encode('GIF87a'), 'image/gif'],
@@ -57,6 +56,6 @@ it('detectImageMediaType 能按魔数识别的媒体类型集与快照 media_typ
     await expect(detectImageMediaType(file)).resolves.toBe(expected);
     seen.add(expected);
   }
-  const snapshot = parseMediaTypes(readFileSync(SNAPSHOT, 'utf8'));
+  const snapshot = parseMediaTypes(snapshotText);
   expect([...seen].sort()).toEqual(snapshot);
 });
