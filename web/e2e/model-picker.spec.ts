@@ -135,7 +135,7 @@ test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → tri
 });
 
 test('#199：长目录不再需要搜索框——provider 分组就是导航', async ({ page }) => {
-  // SEARCHABLE_MODELS：5 个模型 / 4 个 provider。
+  // SEARCHABLE_MODELS：5 条（1 条默认）/ 4 个 provider；#1016 后对账分母是可选的 4 条。
   await routeApi(page, { sessions: [], events: [], models: SEARCHABLE_MODELS });
   await page.goto('/');
 
