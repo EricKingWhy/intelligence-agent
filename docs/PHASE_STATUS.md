@@ -40,6 +40,8 @@
 
 ## 当前工作焦点
 
+- **2026-10-11 · #973 深嵌套依赖清单预检递归兜底**（分支 `claude/973-inspection-recursion-guard`，基点 `a63adb00`→同步 `51964dc1`，合并 tip `1f8581d9` / tree `8d39d48c`）：`inspection.py` / `plugin_inspection.py` / `package_manager.py` 四处解析点兜 `RecursionError` ⇒ `DEPENDENCY_FILE_TOO_DEEP` / DSH 预检 None / `SkillManifestError`，不掀桌。两轴发现轮无 P0/P1，修后重审 Standards CHANGES-REQUESTED 抓到并修复一处测试鉴别力回退（夹具越过 64 KB 读上限）。合并树全量 pytest 7520 passed / 1 failed（覆盖闸门自指，落台账行后 rc=0）/ 28 skipped；Gate-0 `--since` 5/6（唯一红 = coverage = 本票笔）。二次解冲突同步 `origin/main` `c29a0a81` ⇒ 合并 tip `0d9eee57` / tree `1b6871aa`（唯一冲突 = 本票月档尾部追加对追加，并集零删除；产品代码 ort 并集无语义丢失）。旧读数不传递（`src/**`/`tests/**` 有 `M`）⇒ 新树重跑全量 pytest **7528 passed / 28 skipped / 0 failed**、ruff rc=0、Gate-0 裸全量 **6/6 PASS**（读数 `docs/gate/2a7a726e5fe0222782b0e11860aa16782feeec1e.json`）、vitest 114 文件 / 1641 passed、tsc/oxlint rc=0。PR #980 已开（不带 `Closes`）；**PR merge 已获用户批准、待执行**。
+
 - **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 codex/issue-877-dsh-adapter；PR #971 已合入，merge fc8d1fd2）：实现与两轴复审完成；固定来源因上游 Off 与 #865 Default 语义不等价，保持 needs-adaptation 且禁用。同步树 pytest 为 7471 passed / 42 skipped / 51 deselected / 1 failed，唯一红为新增同步合并审查归属漏记；补真实审查行后定向回归 1 passed、coverage checker exit 0，未重跑全量。PR CI 的 Gate-0、Chromium 冒烟与 gitleaks 通过；本地完整 E2E 540 passed、Web Vitest 1637 passed、TUI 232 passed / 3 skipped、Desktop tests/check 通过。Issue CLOSED，in-progress 已移除。详见 Tracker 与月档 #877。
 
 - **2026-10-10 · #872 Git Skills T3（分支 `codex/issue-872-skill-git`，已验证代码点 `15ea25f3` / tree `b10fb266`）**：固定 Git Skill 来源与内容摘要，显式 update/rollback，待启用版本重启后切换；失败保留活动版本。两轴终审无未关闭 finding；Gate-0 6/6、clean 全量 pytest 7285P/28S/51D、focused 118P/2S。已同步 `origin/main` `c8f43a7c`（merge `fbe5fa1c`，仅新增 Gate-0 收据、代码与测试目录无变化）；Issue OPEN + `in-progress`。尚未 push/PR/merge，等用户批准。

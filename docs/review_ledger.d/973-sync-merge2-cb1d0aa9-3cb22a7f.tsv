@@ -1,0 +1,1 @@
+2026-10-11	sync merge main（二轮 strict，先回后正）：父 cb1d0aa9（本线 tip：已含一轮解冲突同步 + 合并树重验证读数）/ b86cadd3（origin/main，含 PR #993/#984 TUI pendingImages 积压上限）。零冲突（ort 自动合并）；代码面改动全部来自 main 侧 tui/**（本线未触 tui），本线改动面为 docs/** 与 main 无交集。git show --cc --name-only 为空表、三树互不相等（merge2 53d885d9 / ours ddc178f9 / main d9bbb9f4）、merge-base c29a0a81 ⇒ 补本机械归属行；本行只做机械归属，不是对内容的审查主张。	cb1d0aa9..3cb22a7f
