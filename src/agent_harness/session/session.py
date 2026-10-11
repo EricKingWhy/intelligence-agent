@@ -682,6 +682,7 @@ class Session:
         message: str | None = None,
         primary_error: str | None = None,
         fallback_error: str | None = None,
+        http_status: int | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
@@ -724,6 +725,10 @@ class Session:
             data["primary_error"] = primary_error
         if status != "completed" and fallback_error:
             data["fallback_error"] = fallback_error
+        # #996：未分类 provider 失败的 HTTP 状态码（整数，取自异常结构属性、非回显
+        # 正文；ADR-0033 §2.4）。仅在给值时才落键。
+        if status != "completed" and http_status is not None:
+            data["http_status"] = http_status
         return self.append(
             event_type,
             data,

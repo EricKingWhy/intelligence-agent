@@ -13,7 +13,11 @@ import pytest
 from agent_harness.skills import inspection, package_lock, package_manager
 from agent_harness.skills.capability import SkillCapability
 from agent_harness.skills.discovery import SkillDiscovery, parse_skill_markdown_text
-from agent_harness.skills.package_manager import SkillPackageError, SkillPackageManager
+from agent_harness.skills.package_manager import (
+    SkillManifestError,
+    SkillPackageError,
+    SkillPackageManager,
+)
 from agent_harness.skills.tool import LoadSkillTool
 
 
@@ -1093,3 +1097,19 @@ def test_global_storage_link_fails_without_falling_back_to_project_scope(tmp_pat
 
     assert not (workspace / "plugin-installs.json").exists()
     assert list(outside.iterdir()) == []
+
+
+def test_manifest_reader_fails_closed_on_deeply_nested_json(tmp_path: Path) -> None:
+    """深嵌套的 plugin-installs.json：`json.loads` 抛的 `RecursionError` 既非 `OSError`
+    也非 `ValueError`，不兜底就掀给 CLI / 安装闸门。同 `skills/inspection.py` 的
+    `DEPENDENCY_FILE_TOO_DEEP` 一条契约：读得出、判不了就明确失败，不崩桌。
+    """
+    manager = SkillPackageManager(tmp_path / "workspace")
+    manager.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.manifest_path.write_text(
+        '{"packages":' + '{"a":' * 20_000 + "1" + "}" * 20_000 + "}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SkillManifestError, match="cannot read install manifest: RecursionError"):
+        manager.list_packages()

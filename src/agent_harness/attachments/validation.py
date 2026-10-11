@@ -5,17 +5,19 @@
 运行期读 `Settings`，`Settings` 的 validator 又要调 `types` 的解析函数，两边概念上互指
 （实际靠函数体内延迟 import 躲开 import 环，而那道保护只写在注释里、无机械守卫）。
 
-把**纯规则**放进本模块后方向变成单向：
+把**纯规则**放进本模块后方向变成单向（箭头按**实际 import 边**画，`#988 F-2` 订正——此前
+这里画成 `validation ──import──▶ types`，与代码相反）：
 
-    config  ──import──▶  attachments.validation  ──import──▶  attachments.types
-    （validator 调规则）        （规则 + 词汇表）              （resolve_image_limits 读 Settings）
+    config ──import──▶ attachments.validation ◀──import── attachments.types
+      （validator 调规则）   （规则 + 词汇表，真身）      （resolve_image_limits 读 Settings）
 
-- 本模块**不 import `config`**（甚至连 `TYPE_CHECKING` 都不需要：规则只吃字符串）；
+- 本模块**不 import 包内任何模块**（连 `config` 也不 import，甚至不需要 `TYPE_CHECKING`：
+  规则只吃字符串）⇒ 它是上面这张图的**汇点**，两个箭头都指向它；
 - `config` 的 validator 直接 `from agent_harness.attachments.validation import ...`，
   不再有"躲环用的延迟 import"；
-- `attachments.types` 原样再导出这些名字，既有的
-  `from agent_harness.attachments.types import parse_allowed_media_types` 与
-  `from agent_harness.attachments import …` 调用点一字不改（**单一真身，不是第二份定义**）。
+- `attachments.types` 只**内部调用** `parse_allowed_media_types`（不进它的 `__all__`）；
+  需要这几个名字的调用方一律从**本模块**取用（`#988 F-2` 收窄了 `types` 的再导出面
+  ——单一真身，不是第二份定义）。
 """
 
 from __future__ import annotations

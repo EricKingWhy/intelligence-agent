@@ -135,10 +135,13 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
 ];
 
-/** `run/paused.data.reason` 的两个取值（后端 `run_budget.REASON_*` 的镜像）。
- *  `stuck` 属 `#317`，本模块不认它。 */
+/** `run/paused.data.reason` 的三个取值（后端 `run_budget.REASON_*` 的镜像）。
+ *  `stuck` 属 `#317`：本模块不做它的恢复输入预校验（那是 budget/deadline 的
+ *  「抬高 ceiling」语义，stuck 没有），但取值本身在 `pauseReasonLabel` 特判、
+ *  `App` 的面板分支用到——常量在此导出以保持同一取值口径。 */
 export const PAUSE_REASON_BUDGET_EXHAUSTED = 'budget_exhausted';
 export const PAUSE_REASON_DEADLINE = 'deadline';
+export const PAUSE_REASON_STUCK = 'stuck';
 
 /** deadline 维（`#315`）：`trigger_dimension` 的取值（后端 `run_budget.TRIGGER_RUN_DEADLINE`）。
  *
@@ -478,7 +481,7 @@ export function pauseReasonLabel(paused: RunPausedInfo): string {
   if (paused.reason === PAUSE_REASON_BUDGET_EXHAUSTED) {
     return '预算到顶（budget_exhausted：某一维的绝对 ceiling 用尽）';
   }
-  if (paused.reason === 'stuck') {
+  if (paused.reason === PAUSE_REASON_STUCK) {
     return '疑似卡住（stuck：需要变更依据才能恢复，属 #317）';
   }
   return paused.reason || '暂停原因未声明';
