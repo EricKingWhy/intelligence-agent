@@ -271,7 +271,6 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
         self._metadata_restore_attempted = False
 
     async def async_auth_flow(self, request: httpx2.Request):
-        restore_token_expiry = self.context.token_expiry_time is None
         async with self.context.lock:
             if not self._metadata_restore_attempted:
                 if self.context.oauth_metadata is None:
@@ -291,7 +290,7 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
         flow = super().async_auth_flow(request)
         try:
             outgoing = await anext(flow)
-            if restore_token_expiry and self.context.current_tokens is not None:
+            if self.context.token_expiry_time is None and self.context.current_tokens is not None:
                 self.context.update_token_expiry(self.context.current_tokens)
                 if not self.context.is_token_valid():
                     expired_token = self.context.current_tokens.access_token

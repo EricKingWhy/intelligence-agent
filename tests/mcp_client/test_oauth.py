@@ -428,6 +428,102 @@ async def test_cancelled_sdk_initialization_rechecks_loaded_token_expiry_on_retr
 
 
 @pytest.mark.asyncio
+async def test_queued_oauth_flow_does_not_extend_an_expired_token(monkeypatch):
+    import asyncio
+
+    import httpx2
+    import mcp.client.auth.oauth2 as oauth2_sdk
+    from mcp.shared import auth_utils
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class Clock:
+        now = 1000.0
+
+        def time(self):
+            return self.now
+
+    clock = Clock()
+    monkeypatch.setattr(oauth2_sdk, "time", clock)
+    monkeypatch.setattr(auth_utils, "time", clock)
+
+    class BlockingMetadataStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.metadata_read_started = asyncio.Event()
+            self.release_metadata_read = asyncio.Event()
+
+        async def get_tokens(self):
+            return OAuthToken(access_token="short-lived", expires_in=10)
+
+        async def get_client_info(self):
+            return OAuthClientInformationFull(client_id="client-id")
+
+        async def get_oauth_metadata(self):
+            self.metadata_read_started.set()
+            await self.release_metadata_read.wait()
+
+        async def get_resource_metadata(self):
+            pass
+
+    storage = BlockingMetadataStorage(config.name, config.url, keyring_api=FakeKeyring())
+    provider = make_oauth_client_provider(config, storage)
+    first_flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+    second_flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+    requests = asyncio.Queue()
+    responses = {name: asyncio.Queue() for name in ("first", "second")}
+
+    async def drive_flow(name, flow):
+        try:
+            outgoing = await anext(flow)
+            await requests.put((name, outgoing))
+            response = await responses[name].get()
+            try:
+                await flow.asend(response)
+            except StopAsyncIteration:
+                pass
+        finally:
+            await flow.aclose()
+
+    first_task = asyncio.create_task(drive_flow("first", first_flow))
+    await storage.metadata_read_started.wait()
+
+    second_started = asyncio.Event()
+
+    async def start_second_flow():
+        second_started.set()
+        await drive_flow("second", second_flow)
+
+    second_task = asyncio.create_task(start_second_flow())
+    await second_started.wait()
+    await asyncio.sleep(0)
+    storage.release_metadata_read.set()
+
+    try:
+        leader_name, leader_request = await requests.get()
+        assert leader_request.headers.get("authorization") == "Bearer short-lived"
+        initial_expiry = provider.context.token_expiry_time
+        clock.now = 1011.0
+        await responses[leader_name].put(httpx2.Response(403))
+        waiting_name, waiting_request = await requests.get()
+        assert waiting_name != leader_name
+        assert waiting_request.headers.get("authorization") is None
+        assert provider.context.token_expiry_time == initial_expiry
+    finally:
+        await responses["first"].put(httpx2.Response(403))
+        await responses["second"].put(httpx2.Response(403))
+        await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("client_info_issuer", [None, "https://old-as.example.com"])
 async def test_restart_discards_persisted_metadata_when_resource_changes_issuer(client_info_issuer):
     import httpx2
