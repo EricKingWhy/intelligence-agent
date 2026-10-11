@@ -27,6 +27,7 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { StuckPausedPanel } from './components/StuckPausedPanel';
 import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
@@ -1348,15 +1349,23 @@ export default function App() {
           )}
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
               出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
-              暂停有（抬高绝对 ceiling → 同 run 恢复）。 */}
+              预算暂停有（抬高绝对 ceiling → 同 run 恢复）。
+              #968：stuck 暂停没有这个动作——后端对 stuck 的 budget_increase 一律 409
+              （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
+              （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
+              输入通道照常可用。 */}
           {canResumePaused && paused && paused.reason !== 'user_input' && (
-            <PausedPanel
-              paused={paused}
-              ceilingDraft={pauseCeilingDraft}
-              onCeilingDraftChange={handlePauseCeilingChange}
-              onResume={handleResumePaused}
-              resuming={resumingRunId === paused.run_id}
-            />
+            paused.reason === 'stuck' ? (
+              <StuckPausedPanel paused={paused} />
+            ) : (
+              <PausedPanel
+                paused={paused}
+                ceilingDraft={pauseCeilingDraft}
+                onCeilingDraftChange={handlePauseCeilingChange}
+                onResume={handleResumePaused}
+                resuming={resumingRunId === paused.run_id}
+              />
+            )
           )}
           {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
           {selectedId !== null && (
