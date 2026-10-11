@@ -1,0 +1,1 @@
+2026-10-11	机械归属（非内容审查主张）：#996 分支二轮 sync merge 20271bb7，父一 ad0f150c（本线 tip）/ 父二 de5bc6ea（origin/main，#993/#980，main 侧仅 tui/** 与 #973 inspection 面，本票代码面未触）。唯一冲突 docs/SDD_TICKET_TRACKER.md 文末两节追加（#996 / #973 并存，零删除）；--cc 仅该 docs 文件，代码零冲突。合并树 84b83868。	ad0f150c209beea688d445bba4dc8713132a2097..20271bb7f3cd315d3473e65790eca7e6dde7abca
