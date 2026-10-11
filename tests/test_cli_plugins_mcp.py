@@ -99,11 +99,40 @@ def test_cli_mcp_oauth_status_does_not_expose_tokens(tmp_path: Path, monkeypatch
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "server": "remote",
-        "status": "connected",
+        "status": "token_stored",
         "scope": "files:read",
         "expires_in": 3600,
     }
     assert "private-access-token" not in json.dumps(output)
+
+
+def test_cli_mcp_oauth_status_does_not_hide_unexpected_runtime_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = SimpleNamespace(
+        workspace_dir=str(tmp_path / "workspace"),
+        skill_global_dir="",
+        capabilities=json.dumps({"mcp": {"options": {"servers": [{
+            "name": "remote",
+            "transport": "http",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": {},
+        }]}}}),
+    )
+
+    class Storage:
+        async def get_tokens(self):
+            raise RuntimeError("unexpected programming error")
+
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.mcp.oauth.make_oauth_token_storage",
+        lambda _server: Storage(),
+    )
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "mcp", "status", "remote"])
+
+    with pytest.raises(RuntimeError, match="unexpected programming error"):
+        cli.main()
 
 
 def test_cli_mcp_oauth_logout_clears_local_credentials(tmp_path: Path, monkeypatch, capsys) -> None:

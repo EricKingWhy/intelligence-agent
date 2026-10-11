@@ -96,7 +96,9 @@ async def test_oversized_credentials_fail_before_keyring_write():
 
 
 @pytest.mark.asyncio
-async def test_clear_is_idempotent_and_deletes_persisted_oauth_data():
+async def test_clear_is_idempotent_and_removes_persisted_oauth_data():
+    import json
+
     keyring = FakeKeyring()
     storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
     await storage.set_tokens(OAuthToken(access_token="access"))
@@ -105,21 +107,73 @@ async def test_clear_is_idempotent_and_deletes_persisted_oauth_data():
     await storage.clear()
 
     assert await storage.get_tokens() is None
-    assert keyring.values == {}
+    assert [json.loads(value) for value in keyring.values.values()] == [{"generation": 1}]
 
 
 @pytest.mark.asyncio
-async def test_clear_verifies_keyring_delete_failure_before_reporting_success():
-    from keyring.errors import PasswordDeleteError
+async def test_old_storage_instance_cannot_restore_credentials_after_logout():
+    keyring = FakeKeyring()
+    runtime_storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    logout_storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    restarted = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    await runtime_storage.set_tokens(OAuthToken(access_token="before-logout"))
+
+    await logout_storage.clear()
+    with pytest.raises(OAuthCredentialError, match="changed during authorization"):
+        await runtime_storage.set_tokens(OAuthToken(access_token="late-refresh"))
+
+    assert await restarted.get_tokens() is None
+
+    login_storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    await login_storage.set_tokens(OAuthToken(access_token="after-login"))
+    assert (await MCPKeyringTokenStorage(
+        "remote", "https://mcp.example.com/mcp", keyring_api=keyring
+    ).get_tokens()).access_token == "after-login"
+    assert await runtime_storage.get_tokens() is None
+
+
+@pytest.mark.asyncio
+async def test_independent_storage_instances_preserve_concurrent_record_updates():
+    import asyncio
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    class RacingKeyring(FakeKeyring):
+        def get_password(self, service, username):
+            value = super().get_password(service, username)
+            if value is None:
+                time.sleep(0.05)
+            return value
+
+    keyring = RacingKeyring()
+    token_storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    client_storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        token_write = executor.submit(asyncio.run, token_storage.set_tokens(OAuthToken(access_token="access")))
+        client_write = executor.submit(
+            asyncio.run,
+            client_storage.set_client_info(OAuthClientInformationFull(client_id="client")),
+        )
+        token_write.result(timeout=5)
+        client_write.result(timeout=5)
+
+    restarted = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
+    assert (await restarted.get_tokens()).access_token == "access"
+    assert (await restarted.get_client_info()).client_id == "client"
+
+
+@pytest.mark.asyncio
+async def test_clear_reports_keyring_write_failure_without_hiding_credentials():
+    from keyring.errors import PasswordSetError
 
     keyring = FakeKeyring()
     storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)
     await storage.set_tokens(OAuthToken(access_token="access"))
 
-    def fail_delete(*_):
-        raise PasswordDeleteError("locked")
+    def fail_set(*_):
+        raise PasswordSetError("locked")
 
-    keyring.delete_password = fail_delete
+    keyring.set_password = fail_set
 
     with pytest.raises(OAuthCredentialError, match="could not clear MCP OAuth data"):
         await storage.clear()
@@ -229,8 +283,9 @@ async def test_logout_clears_local_state_when_stored_oauth_record_is_malformed()
                 return json.dumps({"tokens": {"access_token": 7}})
             return None
 
-        def delete_password(self, service, username):
+        def set_password(self, service, username, value):
             self.deleted = True
+            super().set_password(service, username, value)
 
     keyring = MalformedKeyring()
     storage = MCPKeyringTokenStorage("remote", "https://mcp.example.com/mcp", keyring_api=keyring)

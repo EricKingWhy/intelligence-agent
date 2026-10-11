@@ -7,7 +7,10 @@ import base64
 import hashlib
 import ipaddress
 import json
+import threading
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlsplit
 
@@ -26,10 +29,32 @@ from mcp.shared.auth import (
 from pydantic import ValidationError
 
 from agent_harness.mcp.config import MCPServerConfig
+from agent_harness.skills.package_lock import registry_lock
 
 KEYRING_SERVICE = "agent-harness:mcp-oauth"
 MAX_CREDENTIAL_BLOB_BYTES = 2560
-_RECORD_FIELDS = {"tokens", "tokens_saved_at", "client_info", "oauth_metadata", "resource_metadata"}
+_RECORD_FIELDS = {
+    "tokens", "tokens_saved_at", "client_info", "oauth_metadata", "resource_metadata", "generation",
+}
+_PROCESS_LOCKS: dict[str, threading.RLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _credential_lock_path(username: str) -> Path:
+    lock_id = hashlib.sha256(username.encode()).hexdigest()
+    return Path.home() / ".cache" / "agent-harness" / "mcp-oauth" / lock_id
+
+
+def _process_lock_for(username: str) -> threading.RLock:
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(username, threading.RLock())
+
+
+@contextmanager
+def _serialized_record_lock(process_lock: threading.RLock, lock_path: Path):
+    """Serialize record updates across both storage instances and processes."""
+    with process_lock, registry_lock(lock_path):
+        yield
 
 
 class OAuthCredentialError(RuntimeError):
@@ -61,10 +86,21 @@ class MCPKeyringTokenStorage:
         self._client_info = client_info
         self._keyring = keyring_api
         self._lock = asyncio.Lock()
+        # A logout advances this marker so an older provider cannot restore tokens.
+        self._generation: int | None = None
+
+    def _record_lock(self):
+        return _serialized_record_lock(
+            _process_lock_for(self._username),
+            _credential_lock_path(self._username),
+        )
 
     async def get_tokens(self) -> OAuthToken | None:
         async with self._lock:
-            record = self._read()
+            with self._record_lock():
+                record = self._read()
+                if not self._is_current_generation(record):
+                    return None
             value = record.get("tokens")
             if value is None:
                 return None
@@ -77,13 +113,18 @@ class MCPKeyringTokenStorage:
             return tokens
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        await self._update("tokens", tokens.model_dump(mode="json", exclude_none=True))
+        if not await self._update("tokens", tokens.model_dump(mode="json", exclude_none=True)):
+            raise OAuthCredentialError("OAuth credentials changed during authorization; run login again")
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         async with self._lock:
             if self._client_info is not None:
                 return self._client_info
-            value = self._read().get("client_info")
+            with self._record_lock():
+                record = self._read()
+                if not self._is_current_generation(record):
+                    return None
+                value = record.get("client_info")
             if value is not None:
                 return OAuthClientInformationFull.model_validate(value)
             return self._client_info
@@ -93,7 +134,11 @@ class MCPKeyringTokenStorage:
 
     async def get_oauth_metadata(self) -> OAuthMetadata | None:
         async with self._lock:
-            value = self._read().get("oauth_metadata")
+            with self._record_lock():
+                record = self._read()
+                if not self._is_current_generation(record):
+                    return None
+                value = record.get("oauth_metadata")
             return OAuthMetadata.model_validate(value) if value is not None else None
 
     async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
@@ -101,7 +146,11 @@ class MCPKeyringTokenStorage:
 
     async def get_resource_metadata(self) -> ProtectedResourceMetadata | None:
         async with self._lock:
-            value = self._read().get("resource_metadata")
+            with self._record_lock():
+                record = self._read()
+                if not self._is_current_generation(record):
+                    return None
+                value = record.get("resource_metadata")
             return ProtectedResourceMetadata.model_validate(value) if value is not None else None
 
     async def set_resource_metadata(self, metadata: ProtectedResourceMetadata) -> None:
@@ -109,25 +158,64 @@ class MCPKeyringTokenStorage:
 
     async def clear(self) -> None:
         async with self._lock:
-            try:
-                self._keyring.delete_password(KEYRING_SERVICE, self._username)
-            except (KeyringError, KeyError) as error:
+            with self._record_lock():
+                record = self._read_for_clear()
+                generation = max(self._record_generation(record), self._generation or 0)
+                already_cleared = set(record) <= {"generation"} and generation > 0
+                next_generation = generation if already_cleared else generation + 1
                 try:
-                    remaining = self._keyring.get_password(KEYRING_SERVICE, self._username)
-                except (KeyringError, KeyError) as read_error:
+                    # Keep only a non-secret tombstone to fence in-flight refreshes.
+                    self._write({"generation": next_generation})
+                except OAuthCredentialError as error:
                     raise OAuthCredentialError(
-                        "system credential store could not verify MCP OAuth data was cleared"
-                    ) from read_error
-                if remaining is not None:
-                    raise OAuthCredentialError("system credential store could not clear MCP OAuth data") from error
+                        "system credential store could not clear MCP OAuth data"
+                    ) from error
+                self._generation = next_generation
 
-    async def _update(self, field: str, value: dict[str, Any]) -> None:
+    async def _update(self, field: str, value: dict[str, Any]) -> bool:
         async with self._lock:
-            record = self._read()
-            record[field] = value
-            if field == "tokens":
-                record["tokens_saved_at"] = time.time()
-            self._write(record)
+            with self._record_lock():
+                record = self._read()
+                if not self._is_current_generation(record):
+                    return False
+                record[field] = value
+                if field == "tokens":
+                    record["tokens_saved_at"] = time.time()
+                self._write(record)
+                return True
+
+    def _is_current_generation(self, record: dict[str, Any]) -> bool:
+        generation = self._record_generation(record)
+        if self._generation is None:
+            self._generation = generation
+        return generation == self._generation
+
+    @staticmethod
+    def _record_generation(record: dict[str, Any]) -> int:
+        generation = record.get("generation", 0)
+        if type(generation) is not int or generation < 0:
+            raise OAuthCredentialError("stored MCP OAuth data is invalid")
+        return generation
+
+    def _read_for_clear(self) -> dict[str, Any]:
+        try:
+            raw = self._keyring.get_password(KEYRING_SERVICE, self._username)
+        except KeyringError as error:
+            raise OAuthCredentialError("system credential store is unavailable") from error
+        if raw is None:
+            return {}
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError):
+            return {"generation": self._generation or 0}
+        if not isinstance(record, dict):
+            return {"generation": self._generation or 0}
+        generation = record.get("generation", 0)
+        if type(generation) is not int or generation < 0:
+            return {"generation": self._generation or 0}
+        if not set(record).issubset(_RECORD_FIELDS):
+            return {"generation": generation}
+        return record
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -142,6 +230,7 @@ class MCPKeyringTokenStorage:
             raise OAuthCredentialError("stored MCP OAuth data is invalid") from error
         if not isinstance(record, dict) or not set(record).issubset(_RECORD_FIELDS):
             raise OAuthCredentialError("stored MCP OAuth data is invalid")
+        self._record_generation(record)
         return record
 
     def _write(self, record: dict[str, Any]) -> None:

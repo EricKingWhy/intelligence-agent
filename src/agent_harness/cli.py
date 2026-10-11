@@ -2009,7 +2009,7 @@ def _resolve_mcp_oauth_server(
 def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
     from agent_harness.capability.base import CapabilityError
     from agent_harness.capability.config import parse_capabilities_config
-    from agent_harness.mcp.client import MCPServerConnection
+    from agent_harness.mcp.client import MCPServerConnection, MCPServerDownError
     from agent_harness.mcp.config import ConfigError, parse_mcp_servers
     from agent_harness.mcp.oauth import (
         OAuthCredentialError,
@@ -2052,7 +2052,7 @@ def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
                 elif tokens.expires_in is not None and tokens.expires_in <= 0:
                     status = "expired"
                 else:
-                    status = "connected"
+                    status = "token_stored"
                 print(json.dumps({
                     "server": server.name,
                     "status": status,
@@ -2194,7 +2194,7 @@ def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
                 }, ensure_ascii=False, indent=2))
             return
     except (CapabilityError, ConfigError, MCPPackageError, OAuthCredentialError,
-            SkillPackageError, OSError, RuntimeError, ValueError) as error:
+            MCPServerDownError, SkillPackageError, OSError, ValueError) as error:
         _emit_stderr(str(error))
         raise SystemExit(2) from error
 
