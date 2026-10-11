@@ -1,0 +1,1 @@
+2026-10-11	Standards review: reviewed the launcher and Windows cmd.exe regression path over both changed files, including exit-status propagation and inherited environment behavior; no standards finding.	fd1a8ef1e9422787b96550585eeb031e42d87e67..9a102b91152e1bb9a8a5e6f9e085f5c8d2c7db61
