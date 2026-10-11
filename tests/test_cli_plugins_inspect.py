@@ -277,6 +277,116 @@ def test_inspection_rejects_unrecognized_dependency_manifest_shapes(
     assert "DEPENDENCY_FILE_INVALID" in {error["code"] for error in report["errors"]}
 
 
+def _deep_json(depth: int = 20_000) -> str:
+    """深嵌套但**尺寸很小**的 package.json：深度是唯一的门槛。
+
+    20_000 层对象约 120 KB，远在 1 MB 读上限之内；`json.loads` 自带递归上限
+    （CPython 3.12 本机实测对象嵌套 9997 层；上限随解释器与栈漂移）先于任何尺寸上限炸——与 #875 的 MCP
+    描述同形状（同一文件里的 MCP_DESCRIPTION_TOO_DEEP 用例）。
+    """
+    return '{"dependencies":' + '{"a":' * depth + "1" + "}" * depth + "}"
+
+
+def _deep_toml(depth: int = 1_000) -> str:
+    """同形状的 pyproject.toml：`tomllib` 的递归上限低得多（实测 330 层对象嵌套）。"""
+    return (
+        "[project]\ndependencies = []\n[tool.poetry.dependencies]\nx = "
+        + "{a=" * depth
+        + "1"
+        + "}" * depth
+        + "\n"
+    )
+
+
+def test_inspection_reports_deeply_nested_package_json_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """预检契约是「读得出、判不了就明确失败」，不是把 RecursionError 掀给调用方。
+
+    深度边界的唯一权威是解析器自己，故守卫落在**解析点**（#875 同款做法），
+    不另写一份会漂的深度扫描器。
+    """
+    source = tmp_path / "deep-package-json"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-package-json\ndescription: Example.\n---\n",
+    )
+    _write(source / "package.json", _deep_json())
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+
+
+def test_inspection_reports_deeply_nested_pyproject_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """同一 `_inspect_dependencies` 里的第二个解析点，缺陷形状相同（票面只点了
+    package.json，实测 pyproject.toml 同样让 RecursionError 逃逸）。"""
+    source = tmp_path / "deep-pyproject"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-pyproject\ndescription: Example.\n---\n",
+    )
+    _write(source / "pyproject.toml", _deep_toml())
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+
+
+def test_cli_plugins_inspect_survives_a_deeply_nested_package_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`plugins inspect` 的**第一步**是 DSH 预检（`plugin_inspection.py`），它比 Skill
+    预检更早解析 package.json，且**先于**包名过滤 ⇒ 任意目录都能触发同形 RecursionError。
+
+    与 `inspection.py` 的两个解析点同属「预检绝不掀桌」这一条契约；不兜它，
+    票面的「不掀桌」在这个命令上就不成立（实测：CLI 抛裸 RecursionError）。
+    """
+    source = tmp_path / "deep-package-json-cli"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-package-json-cli\ndescription: Example.\n---\n",
+    )
+    _write(source / "package.json", '{"x":' + '{"a":' * 10_000 + "1" + "}" * 10_000 + "}")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    before = _snapshot(source, workspace, global_skills)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    # 治理形态 = 报告 + exit 1（受控的 unsupported 出口），**不是**裸 RecursionError 崩桌。
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+    assert _snapshot(source, workspace, global_skills) == before
+
+
+def test_inspection_still_reads_a_shallow_manifest_after_the_depth_guard(
+    tmp_path: Path,
+) -> None:
+    """消融对照的另一半：护栏不得把正常清单一起拦掉（否则"永不崩"变成"永不用"）。"""
+    source = tmp_path / "shallow-package-json"
+    _write(
+        source / "SKILL.md",
+        "---\nname: shallow-package-json\ndescription: Example.\n---\n",
+    )
+    _write(source / "package.json", '{"dependencies":{"left-pad":"^1.3.0"}}\n')
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert [item["name"] for item in report["dependencies"]] == ["left-pad"]
+
+
 @pytest.mark.parametrize(
     "include",
     ["-r base.txt", "--requirement base.txt", "-rbase.txt", "--requirement=base.txt"],
