@@ -396,6 +396,13 @@ export interface Turn {
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;
+  /** #1017：本轮收到的 `memory/recalled` 事件（verbatim 引用——事件流仍是唯一
+   *  真相，展开详情由 RecallNotice 按 seq/run_id 对账 /memory-recalls）。
+   *  后端每 run 至多 append 一条（recall.py 的 context select）；投影按「事件
+   *  到达时的最后一轮」归属（append-only 流里 user/message 建轮 → run/started
+   *  → recalled 的顺序恒成立）。copy-on-write 契约与 notices/delegations 同：
+   *  cloneTurn 浅拷贝数组，变更必须整体 reassign。 */
+  recalls?: AgentEvent[];
 }
 
 /** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。

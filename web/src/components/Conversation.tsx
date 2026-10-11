@@ -35,7 +35,7 @@ import { ApprovalCard } from './ApprovalCard';
 import { ApprovalEchoCard } from './ApprovalEchoCard';
 import { ApprovalModal } from './ApprovalModal';
 import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho';
-import { MemoryActivity } from './MemoryActivity';
+import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { MessageImages } from './MessageImages';
 
 interface Props {
@@ -784,6 +784,16 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
           </div>
         </div>
       )}
+
+      {/* #1017：本轮的记忆召回说明（投影 turn.recalls，每 run 至多一条）——
+          就地折叠、展开才对账 /memory-recalls。挂在执行链之后 = 「这次回答
+          用了我哪条记忆」的归属行；折叠态单行，测高由虚拟化 measureElement
+          动态吸收（与 notices/delegations 同一机制）。 */}
+      {!isSupersededTurn && sessionId && turn.recalls?.map((recallEvent) => (
+        <section className="memory-v2-activity" aria-label="记忆召回说明" key={`recalls-${recallEvent.seq ?? recallEvent.time}`}>
+          <RecallNotice event={recallEvent} sessionId={sessionId} />
+        </section>
+      ))}
     </div>
   );
 });

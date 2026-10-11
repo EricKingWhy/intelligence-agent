@@ -15,35 +15,35 @@ interface Props {
 
 interface ActivityItems {
   updated: AgentEvent[];
-  recalled: AgentEvent[];
 }
 
-/** Notices are derived from the append-only event stream; details are fetched only on disclosure. */
+/** Notices are derived from the append-only event stream; details are fetched only on disclosure.
+ *
+ * #1017：`memory/recalled` 不再在此累积渲染——它们已由投影按轮归位（turn.recalls），
+ * 由 Conversation 的 TurnView 在所属轮次内就地渲染（RecallNotice）。尾部常驻块只剩
+ * `memory/updated` 提交型计数卡（#301 契约：count/memory_ids，不带内容）。 */
 export function MemoryActivity({ conversation }: Props) {
   const processed = useRef(0);
-  const [items, setItems] = useState<ActivityItems>({ updated: [], recalled: [] });
+  const [items, setItems] = useState<ActivityItems>({ updated: [] });
 
   useEffect(() => {
     const appended = conversation.events.slice(processed.current);
     processed.current = conversation.events.length;
     const updated = appended.filter((event) => event.type === 'memory/updated'
       && Number.isSafeInteger(event.data.count) && (event.data.count as number) > 0);
-    const recalled = appended.filter((event) => event.type === 'memory/recalled');
-    if (updated.length || recalled.length) {
+    if (updated.length) {
       setItems((previous) => ({
         updated: [...previous.updated, ...updated],
-        recalled: [...previous.recalled, ...recalled],
       }));
     }
     // `events` is intentionally mutated in place; eventsVersion is its append signal.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation.eventsVersion, conversation.session_id]);
 
-  if (items.updated.length === 0 && items.recalled.length === 0) return null;
+  if (items.updated.length === 0) return null;
   return (
     <section className="memory-v2-activity" aria-label="记忆活动">
       {items.updated.map((event, index) => <MemoryUpdateNotice key={`updated-${event.seq ?? index}`} event={event} sessionId={conversation.session_id} />)}
-      {items.recalled.map((event, index) => <RecallNotice key={`recalled-${event.seq ?? index}`} event={event} sessionId={conversation.session_id} />)}
     </section>
   );
 }
@@ -121,7 +121,11 @@ function MemoryUpdateNotice({ event, sessionId }: { event: AgentEvent; sessionId
   );
 }
 
-function RecallNotice({ event, sessionId }: { event: AgentEvent; sessionId: string }) {
+/** #1017：召回说明卡——挂在所属轮次内（TurnView），每 run 至多一条。
+ *  展开才拉 `GET /api/sessions/{id}/memory-recalls`，并按本事件的
+ *  `seq`/`run_id` 取对应记录（验收 #3 的可对账锚点；PRD V2 §6.5：Web UI
+ *  只用 API 作记忆真相）。 */
+export function RecallNotice({ event, sessionId }: { event: AgentEvent; sessionId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [recalls, setRecalls] = useState<SessionMemoryRecall[] | null>(null);
   const [error, setError] = useState<string | null>(null);

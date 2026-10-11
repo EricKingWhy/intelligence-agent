@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryActivity } from './MemoryActivity';
+import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { applyEvent, initConversation } from '../lib/projection';
 import type { AgentEvent, ConversationState } from '../types';
 
@@ -92,7 +92,14 @@ describe('MemoryActivity disclosure', () => {
     expect(host.textContent).toContain('project memory');
   });
 
-  it('loads recall details only when expanded and renders allowlisted redacted ranking fields', async () => {
+  it('does not render recalled events in the tail block (#1017: recalls live in their turns)', () => {
+    const conversation = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {}));
+    render(conversation);
+    expect(host.textContent).not.toContain('记忆召回说明');
+    expect(host.querySelector('.memory-v2-activity')).toBeNull();
+  });
+
+  it('RecallNotice loads recall details only when expanded and renders allowlisted redacted ranking fields', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response([{
       run_id: 'run-1', seq: 2, time: '2026-09-25T10:00:00Z', memories: [{
         memory_id: 'm-1', kind: 'semantic', scope: 'user_global', source_type: 'automatic',
@@ -102,9 +109,10 @@ describe('MemoryActivity disclosure', () => {
       }],
     }]));
     vi.stubGlobal('fetch', fetchMock);
-    const conversation = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {}));
+    const recalled = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {})).turns[0]?.recalls?.[0]
+      ?? ({ type: 'memory/recalled', seq: 2, data: {}, run_id: 'run-1', time: '2026-09-25T10:00:00Z' } as AgentEvent);
 
-    render(conversation);
+    act(() => root.render(<RecallNotice event={recalled} sessionId="s-1" />));
 
     expect(host.textContent).toContain('记忆召回说明');
     expect(fetchMock).not.toHaveBeenCalled();
