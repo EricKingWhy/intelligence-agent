@@ -29,8 +29,14 @@ from PIL import Image, ImageOps
 TARGET_MAX_DIMENSION = 2048
 TARGET_MAX_BYTES = 4 * 1024 * 1024
 
-#: 质量阶梯（有损）：从高到低找第一档 ≤ 目标字节数；上限比 DSH 的 82 更保守，
-#: 保证桌面截图（文字密集、PNG 转 JPEG 后偏大）也能落进 4 MiB。
+#: 质量阶梯（有损）：从高到低找第一档 ≤ 目标字节数。上限 90 **高于** DSH 的 85
+#: （`encoding.ts` 的 `[85, 75, 60]`），是更**激进**的选择（更高质量、更大体积倾向），
+#: 不是“更保守”；能落进默认 4 MiB 的真正原因是 2048² 尺寸上限，不是 90-vs-85。
+#: 默认预算下低档极少介入：2048² 最坏情况（全随机字节）JPEG q90 = 3.59 MiB、
+#: WEBP q90 = 3.35 MiB，均 < 4 MiB，实测 16 组输入全部命中 q90；阶梯只在调小
+#: `image_normalize_max_bytes` 时介入。降档**不省 token**：token 成本按尺寸计
+#: （`context/tokens.py::image_tokens_for_size`，tile 制），阶梯只改字节不改宽高；
+#: 降档买到的是“同一字节预算下的画质”，不是 token。
 _QUALITY_LADDER: tuple[int, ...] = (90, 85, 80, 75, 70, 60, 50)
 
 #: 输出 media type（有 alpha → WebP，否则 JPEG）。
