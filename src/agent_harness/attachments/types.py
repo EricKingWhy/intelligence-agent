@@ -4,9 +4,11 @@
 只移植 MM-01 需要的三个契约：`ImageAttachmentRef` / `ImageAttachmentLimits` /
 `AttachmentId`（本仓用 `str` + 别名表达 opacity，落库形状见 `storage/artifact.py`
 的 `BYTE_ARTIFACT_ID_PATTERN`）。**配置面解析规则**（`parse_allowed_media_types` 与
-词汇表）住在 `attachments.validation`，本模块原样再导出——`config` 只 import 前者，
-方向因此单向（#939 M-15）。`PromptContentPart` 一族（浏览器提交 → 落库引用的
-admission 流程）属 MM-02 的投影层，本票不移植。
+词汇表）住在 `attachments.validation`：本模块只**内部调用**它（`resolve_image_limits`
+把 `Settings` 里的字符串解析成契约），**不再**对外再导出——真身、`__all__` 与消费者
+都在那边，需要这几个名字的调用方直接 import `attachments.validation`（#988 F-2；
+`config` 本来就只 import 前者，方向因此单向）。`PromptContentPart` 一族（浏览器提交 →
+落库引用的 admission 流程）属 MM-02 的投影层，本票不移植。
 """
 
 from __future__ import annotations
@@ -15,12 +17,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from agent_harness.attachments.validation import (
-    EXTENSION_MEDIA_TYPES,
-    SUPPORTED_IMAGE_MEDIA_TYPES,
-    ImageMediaType,
-    parse_allowed_media_types,
-)
+# 只为本模块内部调用（`resolve_image_limits`）；**不是**再导出，故不进 `__all__`（#988 F-2）。
+from agent_harness.attachments.validation import parse_allowed_media_types
 
 if TYPE_CHECKING:
     from agent_harness.config import Settings
@@ -78,9 +76,9 @@ def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:
     """把 `Settings` 里的附件上限键解析成领域契约（单一解析点）。
 
     `attachment_allowed_media_types` 是逗号分隔的字符串（沿用本仓"复杂配置 = env
-    里字符串"的既有形制）；解析规则单点在 `parse_allowed_media_types`，且**已由
-    `Settings` 在构造期（= 启动期）预校验**——请求路径不会再撞上配置错误（配错在
-    服务起来时即响亮失败）。
+    里字符串"的既有形制）；解析规则单点在
+    `attachments.validation.parse_allowed_media_types`，且**已由 `Settings` 在构造期
+    （= 启动期）预校验**——请求路径不会再撞上配置错误（配错在服务起来时即响亮失败）。
     """
     return ImageAttachmentLimits(
         max_image_bytes=settings.attachment_max_image_bytes,
@@ -93,12 +91,8 @@ def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:
 
 
 __all__ = [
-    "EXTENSION_MEDIA_TYPES",
-    "SUPPORTED_IMAGE_MEDIA_TYPES",
     "AttachmentId",
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
-    "ImageMediaType",
-    "parse_allowed_media_types",
     "resolve_image_limits",
 ]

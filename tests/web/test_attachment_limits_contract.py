@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agent_harness.attachments.types import parse_allowed_media_types
+from agent_harness.attachments.validation import parse_allowed_media_types
 from agent_harness.config import Settings
 
 #: 前端那份镜像的**声明点**（跨端对账要读的源文件）。
