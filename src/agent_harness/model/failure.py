@@ -10,6 +10,8 @@ reason / 固定文案 / 布尔判定，不持有 vendor / protocol 字面量（�
   reason（配 :data:`PROVIDER_FAILURE_MESSAGES` 的固定可读文案）。**只做分类**——
   provider 回显原文绝不外传（脱敏不变量 OBS-008）。机制全文见
   ``docs/adr/0033-run-failure-attribution-surface.md`` §2.1。
+  未命中时 :func:`unclassified_failure_message` / :func:`provider_http_status` 按异常
+  **结构**补状态码与故障类别（#996，ADR-0033 §2.4），同样不碰原文。
 - :func:`has_malformed_tool_call_markup`：正文含协议保留标记 = 网关没把工具调用解析成
   结构化字段（DSML 泄漏），按模型故障处理，绝不把这段标记文本当最终回答持久化。
 
@@ -62,6 +64,32 @@ UNCLASSIFIED_FAILURE_MESSAGE = (
     "运行失败（{error_type}），未分类异常；完整原始信息见后端日志"
 )
 
+#: 未分类失败的结构化细节（#996）：同一兜底句，按**异常结构**（状态码属性 / MRO
+#: 类名）补「连不上 / 超时 / 被拒 4xx / 服务端 5xx」与 ``HTTP <code>``。代入的只有
+#: 类名与整数状态码——仍不碰 ``str(error)``（OBS-008）。口径见 ADR-0033 §2.4。
+UNCLASSIFIED_CONNECTION_MESSAGE = (
+    "运行失败（{error_type}）：无法连接模型供应商（网络或网关不可达）；完整原始信息见后端日志"
+)
+UNCLASSIFIED_TIMEOUT_MESSAGE = (
+    "运行失败（{error_type}）：模型供应商请求超时；完整原始信息见后端日志"
+)
+UNCLASSIFIED_REJECTED_MESSAGE = (
+    "运行失败（{error_type}，HTTP {http_status}）：模型供应商拒绝了请求；"
+    "完整原始信息见后端日志"
+)
+UNCLASSIFIED_SERVER_ERROR_MESSAGE = (
+    "运行失败（{error_type}，HTTP {http_status}）：模型供应商服务端错误；"
+    "完整原始信息见后端日志"
+)
+UNCLASSIFIED_HTTP_STATUS_MESSAGE = (
+    "运行失败（{error_type}，HTTP {http_status}），未分类异常；完整原始信息见后端日志"
+)
+
+# openai SDK 类名（不硬 import openai，与 ``fallback._TRANSIENT_ERROR_NAMES`` 同口径）。
+# ``APITimeoutError`` 是 ``APIConnectionError`` 的子类 ⇒ 按 MRO 判时先判超时。
+_TIMEOUT_ERROR_NAMES = frozenset({"APITimeoutError"})
+_CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError"})
+
 #: 分类表：``str(error)`` 里的小写标记子串 → 分类 reason。顺序即优先级。
 #:
 #: ⚠ 匹配面是整个 ``str(error)``（含 provider 错误体里的 ``code`` **与** ``message``
@@ -107,6 +135,45 @@ def classify_provider_failure(error: BaseException) -> str | None:
         if marker in text:
             return reason
     return None
+
+
+def provider_http_status(error: BaseException) -> int | None:
+    """异常携带的 HTTP 状态码（100–599 的 int），没有或形状不对 ⇒ None。
+
+    取结构化属性，不解析文本：openai ``APIStatusError.status_code``；
+    ``httpx.HTTPStatusError`` 在 ``response.status_code``（与 ``fallback.py`` 同口径）。
+    bool 是 int 子类，单独排除；非 int 一律不认（不把任意属性值拼进事件）。
+    """
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        return status
+    return None
+
+
+def unclassified_failure_message(error: BaseException) -> str:
+    """未分类失败的固定可读句（#222 兜底 + #996 结构化细节），只代入类名与状态码。
+
+    有状态码 ⇒ 4xx「拒绝了请求」/ 5xx「服务端错误」/ 其他「未分类」，都带 ``HTTP <code>``；
+    无状态码 ⇒ 按 MRO 类名判超时、再判连接失败；都不是 ⇒ 逐字是 #222 的兜底句。
+    """
+    error_type = type(error).__name__
+    status = provider_http_status(error)
+    if status is not None:
+        if 400 <= status < 500:
+            template = UNCLASSIFIED_REJECTED_MESSAGE
+        elif status >= 500:
+            template = UNCLASSIFIED_SERVER_ERROR_MESSAGE
+        else:
+            template = UNCLASSIFIED_HTTP_STATUS_MESSAGE
+        return template.format(error_type=error_type, http_status=status)
+    mro_names = {cls.__name__ for cls in type(error).__mro__}
+    if mro_names & _TIMEOUT_ERROR_NAMES:
+        return UNCLASSIFIED_TIMEOUT_MESSAGE.format(error_type=error_type)
+    if mro_names & _CONNECTION_ERROR_NAMES:
+        return UNCLASSIFIED_CONNECTION_MESSAGE.format(error_type=error_type)
+    return UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=error_type)
 
 
 def has_malformed_tool_call_markup(content: str) -> bool:
