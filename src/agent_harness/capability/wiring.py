@@ -93,6 +93,8 @@ class CapabilityWiring:
     #: 存在的意义：装配期只把原因写进 logger.warning，路由层无从区分"没配"与"配了
     #: 但坏了"，只能给一句话（#225）。
     degradations: dict[str, str] = field(default_factory=dict)
+    #: Package/version identity for the MCP descriptors assembled into this Runtime.
+    mcp_packages: list[dict[str, Any]] = field(default_factory=list)
 
     async def aclose(self) -> None:
         """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
@@ -417,6 +419,10 @@ async def _wire_mcp(
     """
     from agent_harness.mcp.capability import build_mcp_capability
     from agent_harness.mcp.config import ConfigError, parse_mcp_servers
+    from agent_harness.plugins.mcp_package_manager import (
+        MCPPackageError,
+        MCPPackageManager,
+    )
 
     try:
         servers = parse_mcp_servers(cfg.options)
@@ -424,8 +430,34 @@ async def _wire_mcp(
         raise CapabilityError(
             f"capability 'mcp' 配置错误：{error}", code="init_failed"
         ) from error
-    servers = [server for server in servers if server.enabled]
-
+    package_manager = MCPPackageManager(
+        settings.workspace_dir,
+        global_skills_dir=settings.skill_global_dir or None,
+    )
+    configured_servers = [server for server in servers if server.enabled]
+    try:
+        packaged_servers = package_manager.selected_servers(
+            reserved_server_names={server.name for server in configured_servers}
+        )
+        wiring.mcp_packages = package_manager.runtime_packages
+        for package_error in package_manager.errors:
+            logger.warning("managed MCP package degraded: %s", package_error)
+    except (MCPPackageError, OSError) as error:
+        logger.warning("managed MCP packages are unavailable: %s", error)
+        packaged_servers = []
+        wiring.mcp_packages = []
+    servers = [
+        *configured_servers,
+        *(server for server in packaged_servers if server.enabled),
+    ]
+    names = [server.name for server in servers]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise CapabilityError(
+            f"MCP server names conflict between configured and installed packages: {duplicates}; "
+            "resolve the source explicitly",
+            code="init_failed",
+        )
     capability = await build_mcp_capability(servers)
     # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
     # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了
@@ -800,6 +832,24 @@ async def wire_capabilities(
             )
             wiring.degradations[name] = DegradeReason.INIT_FAILED.value
             continue
+
+    if "mcp" not in config:
+        # A selected imported package is an explicit MCP selection and uses the same
+        # capability factory even when the deployment has no hand-written section.
+        from agent_harness.plugins.mcp_package_manager import (
+            MCPPackageError,
+            MCPPackageManager,
+        )
+
+        package_manager = MCPPackageManager(
+            settings.workspace_dir,
+            global_skills_dir=settings.skill_global_dir or None,
+        )
+        try:
+            if package_manager.enable_results():
+                await _wire_mcp(registry, ProviderConfig(), settings, wiring)
+        except (MCPPackageError, OSError) as error:
+            logger.warning("managed MCP package selection is unavailable: %s", error)
 
     # Wire V2 as the only active memory service before the common tool collection loop.
     await _wire_memory_v2(

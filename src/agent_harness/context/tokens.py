@@ -57,9 +57,12 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: （与发送前归一化 `attachments.normalize` 的 `frame.thumbnail((N,N))` **近似同语义**：
 #: 同为长边等比、保持长宽比，但**取整判据不同**——PIL thumbnail 按长宽比误差最小挑
 #: 整数并保下界 1，估算侧用 `math.ceil` 取保守上界（`max(1, ...)`），不声称逐像素等价）。
-#: 取整分叉真正出现在**长短边比接近 4:1/2:1 且缩放商落在整数边界下侧的常规尺寸**（如
-#: 4096×1025、3073×769，Round 1 已实测两侧 tile 数不同）；2048×100 实测估算与 PIL 一致
-#: （765=765）——这是已披露的简化代价，不追求逐 Provider 精确。
+#: 取整分叉在常规尺寸下并未出现（Pillow 12.3.0 实测：4096×1025 与 3073×769 的估算
+#: 与 PIL 真实归一化一致，均为 1445=1445；2048×100 同样 765=765）。真实分叉罕见且
+#: 方向恒为保守（只多算、更早拦截）：3000 个随机尺寸中实测 5 例，均为估算高估
+#: （如 1208×4830：估算 1445，PIL 真实归一化 512×2048 计 765，多算 680=4 tiles）；
+#: tile 边界穿越同样保守（如 4097×1025：估算 1445，PIL 765；10000×5001：估算 2125，
+#: PIL 真实归一化 2048×1024 计 1445）。这是已披露的简化代价，不追求逐 Provider 精确。
 #:
 #: **尺寸来源**：标准图片块（`attachments.projection.image_content_block`）**携带
 #: `width`/`height`**（该数据在投影处即 ImageRef 的字段，随块一起带给估算层），故本
@@ -67,8 +70,11 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: Provider）自动同口径，无需任何 session 反查管道。（设计取舍见 tracked 文档
 #: `docs/tickets/multimodal-2026-10-07/M-03-image-token-sizing.md`。）
 #:
-#: **目的**：防止"图不计费导致 hard guard 失守"——多张大图会让估算随尺寸单调抬高；
-#: 同时不再对大图系统性低估（旧 1200 常量在 2048² 归一化上限下，相对 Anthropic patch
+#: **目的**：防止"图不计费导致 hard guard 失守"。估算并非逐尺寸单调（长边等比缩放
+#: 加 ceil tile 量化的固有行为，实测反例 513×1025=1105 > 513×3000=765，PIL 真实
+#: 归一化同样 6 tiles 降为 4 tiles，忠实于实际发送）；核心安全属性成立：逐尺寸
+#: 不低估实际发送成本（估算 tiles ≥ PIL 实际归一化 tiles，保守方向：只多算、
+#: 更早拦截）；同时不再对大图系统性低估（旧 1200 常量在 2048² 归一化上限下，相对 Anthropic patch
 #: 口径 `⌈2048/28⌉²=5476`——封顶后 4784——低估约 4.0–4.6 倍，两种基准结论一致）。真实
 #: usage 仍以 Provider 回执为权威（`builder._usage_anchored_tokens` 的锚价只抬高）。
 IMAGE_TILE_PX = 512
