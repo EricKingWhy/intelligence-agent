@@ -45,6 +45,11 @@ except ImportError:  # pragma: no cover
     stdio_client = None  # type: ignore[assignment]
 
 from agent_harness.mcp.config import MCPServerConfig
+from agent_harness.mcp.oauth import (
+    PersistingOAuthClientProvider,
+    make_oauth_client_provider,
+    make_oauth_token_storage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +87,11 @@ def build_stdio_launch_env(config: MCPServerConfig) -> dict[str, str]:
     return launch_env
 
 
-def build_http_client(config: MCPServerConfig) -> httpx2.AsyncClient:
+def build_http_client(
+    config: MCPServerConfig,
+    *,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
     """为 http transport 构造带认证 headers 的 HTTP 客户端（SDK 2.x 把
     headers/auth 收敛到预配置的 httpx2 客户端；值已经过 parse 层 ${VAR} 展开）。
 
@@ -91,6 +100,7 @@ def build_http_client(config: MCPServerConfig) -> httpx2.AsyncClient:
     """
     return httpx2.AsyncClient(
         headers=dict(config.headers) if config.headers else None,
+        auth=auth,
         timeout=httpx2.Timeout(timeout=None, connect=10.0, pool=30.0),
     )
 
@@ -103,11 +113,16 @@ class MCPServerConnection:
         config: MCPServerConfig,
         *,
         session_factory: (Callable[[], Any] | None) = None,
+        oauth_redirect_handler: Callable[[str], Any] | None = None,
+        oauth_callback_handler: Callable[[], Any] | None = None,
     ) -> None:
         """session_factory：测试注入点——返回 async CM，yield 已初始化的
         ClientSession（绕过真实 transport）。生产路径按 transport 走 stdio/http。"""
         self._config = config
         self._session_factory = session_factory
+        self._oauth_redirect_handler = oauth_redirect_handler
+        self._oauth_callback_handler = oauth_callback_handler
+        self._oauth_provider: PersistingOAuthClientProvider | None = None
         self._session: ClientSession | None = None
         self._owner_task: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -128,6 +143,21 @@ class MCPServerConnection:
         """server 配置名（#362 / W-18：按名断开/状态查询用）。"""
         return self._config.name
 
+    @property
+    def _has_interactive_oauth_handlers(self) -> bool:
+        return (
+            self._oauth_redirect_handler is not None
+            and self._oauth_callback_handler is not None
+        )
+
+    def _oauth_login_guidance(self) -> str | None:
+        if self._config.oauth is None or self._has_interactive_oauth_handlers:
+            return None
+        return (
+            "OAuth authorization could not be renewed; run "
+            f"'agent-harness plugins mcp login {self._config.name}'"
+        )
+
     async def connect(self) -> None:
         """建立并初始化会话（wiring 时调用；幂等）。失败抛 MCPServerDownError。
 
@@ -144,6 +174,7 @@ class MCPServerConnection:
         self._ready = asyncio.Event()
         self._stop = asyncio.Event()
         self._setup_error = None
+        self._oauth_provider = None
         # 协议违规状态随新连接重置：重连即新会话，旧 fault 不污染后续调用。
         self._protocol_fault = None
         self._protocol_fault_event = asyncio.Event()
@@ -172,8 +203,15 @@ class MCPServerConnection:
             )
         if self._setup_error is not None:
             await self._reap_owner()
+            login_hint = (
+                self._oauth_login_guidance()
+                if self._oauth_provider is not None
+                and self._oauth_provider.reauthorization_required
+                else None
+            )
             raise MCPServerDownError(
-                f"server '{self._config.name}' 连接失败: {self._setup_error}"
+                f"server '{self._config.name}' 连接失败: "
+                f"{login_hint or self._setup_error}"
             ) from self._setup_error
         self.connected = True
 
@@ -206,7 +244,25 @@ class MCPServerConnection:
                     assert self._config.url is not None
                     if streamable_http_client is None:  # pragma: no cover
                         raise MCPServerDownError("SDK 缺少 streamable HTTP transport")
-                    http_client = build_http_client(self._config)
+                    auth = None
+                    if self._config.oauth is not None:
+                        storage = make_oauth_token_storage(self._config)
+                        tokens = await storage.get_tokens()
+                        interactive = self._has_interactive_oauth_handlers
+                        if not interactive and not (
+                            tokens and (tokens.access_token or tokens.refresh_token)
+                        ):
+                            raise MCPServerDownError(
+                                "OAuth login is required; run 'agent-harness plugins mcp login <server>'"
+                            )
+                        auth = make_oauth_client_provider(
+                            self._config,
+                            storage,
+                            redirect_handler=self._oauth_redirect_handler,
+                            callback_handler=self._oauth_callback_handler,
+                        )
+                        self._oauth_provider = auth
+                    http_client = build_http_client(self._config, auth=auth)
                     stack.push_async_callback(http_client.aclose)
                     read, write = await stack.enter_async_context(
                         streamable_http_client(self._config.url, http_client=http_client)  # type: ignore[misc]
@@ -331,6 +387,13 @@ class MCPServerConnection:
         except MCPError as error:
             if error.code == CONNECTION_CLOSED:
                 self.connected = False
+                if (
+                    self._oauth_provider is not None
+                    and self._oauth_provider.reauthorization_required
+                ):
+                    guidance = self._oauth_login_guidance()
+                    if guidance is not None:
+                        raise MCPServerDownError(guidance) from error
                 raise MCPServerDownError(
                     f"server '{self._config.name}' 连接已断开（CONNECTION_CLOSED），"
                     f"调用 {name!r} 未完成"
@@ -342,6 +405,14 @@ class MCPServerConnection:
             # transport/协议框架死亡（ClosedResourceError 等）→ 连接标记断开；
             # 本次调用失败，下次调用重连。
             self.connected = False
+            guidance = (
+                self._oauth_login_guidance()
+                if self._oauth_provider is not None
+                and self._oauth_provider.reauthorization_required
+                else None
+            )
+            if guidance is not None:
+                raise MCPServerDownError(guidance) from error
             raise MCPServerDownError(
                 f"server '{self._config.name}' transport failure during call {name!r}: "
                 f"{type(error).__name__}"

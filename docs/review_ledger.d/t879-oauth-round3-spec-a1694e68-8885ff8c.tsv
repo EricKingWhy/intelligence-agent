@@ -1,0 +1,1 @@
+2026-10-11	#879 Correctness/Spec review, cumulative range NEEDS-FIX; P2×1 (token may expire during SDK initialization before the first MCP request); fixed by a14e3430 and closed in round 4. Evidence: docs/phase_status/2026-10.md#879.	a1694e68804318fb5dd495010a63f8751c458d99..8885ff8cede328f7b9778b4bf1193451d4993888
