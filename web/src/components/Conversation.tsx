@@ -785,7 +785,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
         </div>
       )}
 
-      {/* #1017：本轮的记忆召回说明（投影 turn.recalls，每 run 至多一条）——
+      {/* #1017：本轮的记忆召回说明（投影 turn.recalls，正常流每 run 一条，
+          投影防御路径允许多条并逐条渲染）——
           就地折叠、展开才对账 /memory-recalls。挂在执行链之后 = 「这次回答
           用了我哪条记忆」的归属行；折叠态单行，测高由虚拟化 measureElement
           动态吸收（与 notices/delegations 同一机制）。 */}
