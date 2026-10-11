@@ -73,6 +73,10 @@ _MAX_PACKAGE_ENTRIES = 10_000
 _MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
 
+#: 描述文件嵌套超深时的固定文案（`DEPENDENCY_FILE_TOO_DEEP`；与 `DEPENDENCY_FILE_INVALID` 同档：
+#: 文件读得出（未超 1 MB 读上限），但内容解析不了）。
+_DEPENDENCY_TOO_DEEP_MESSAGE = "Dependency manifest nesting is too deep to parse statically."
+
 
 class _PackageReadBoundaryError(Exception):
     def __init__(self, code: str, message: str) -> None:
@@ -964,6 +968,12 @@ def _inspect_dependencies(
                             dependencies.extend(_dependency(str(name), "package.json") for name in values)
                         else:
                             _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", f"{section} must be a JSON object.")
+            except RecursionError:
+                # 预检契约是"绝不崩"：嵌套超过解析器递归上限的清单只能落成**明确失败**，
+                # 不能把 RecursionError 掀给 CLI / 安装闸门（同文件对 frontmatter 与
+                # plugins 预检已有同款兜底）。深度边界的唯一权威是解析器自己——
+                # 另写一份深度扫描器就是第二份会漂的真相。
+                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "package.json", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (json.JSONDecodeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
     pyproject = paths.get("pyproject.toml")
@@ -1087,6 +1097,9 @@ def _inspect_dependencies(
                                             requirements,
                                             errors,
                                         )
+            except RecursionError:
+                # 同上；tomllib 的递归上限比 json 低得多，故可达深度更小。
+                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "pyproject.toml", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
     dependencies.sort(key=lambda item: (item["source"], item["name"].lower()))

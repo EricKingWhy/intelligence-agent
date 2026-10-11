@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
+import openai
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
@@ -687,3 +689,145 @@ async def test_consumer_throw_after_completed_does_not_double_terminal(tmp_path)
     assert persisted.count("run/failed") == 0, (
         f"已终结的 run 不得补第二条终态事件，实际事件链：{persisted}"
     )
+
+
+# ---- #996：未分类 provider 失败带 HTTP 状态码与故障类别（结构化、不回显） ----
+
+_PLANTED = ("sk-PLANTED-996-deadbeef", "PLANTED_ECHO_996", "planted-org-996")
+_ECHO_996 = " ".join(_PLANTED)
+_REQ_996 = httpx.Request("POST", "https://gateway.invalid/v1/chat/completions")
+
+
+def _openai_status_error(cls: type, code: int) -> BaseException:
+    return cls(
+        f"Error code: {code} - {{'message': '{_ECHO_996}'}}",
+        response=httpx.Response(code, request=_REQ_996, text=_ECHO_996),
+        body={"message": _ECHO_996},
+    )
+
+
+class _RaisingModel:
+    """ainvoke / astream 一律抛给定异常（真实 openai SDK 类，正文植入假凭证）。"""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        raise self._error
+
+    async def astream(self, messages: list, **kwargs):
+        raise self._error
+        yield AIMessageChunk(content="")  # 不可达：仅为声明成 async generator
+
+
+#: case → (异常工厂, 期望 http_status 键值（None = 不落键）, 文案里必须出现的固定片段)
+_DETAIL_CASES: dict[str, tuple] = {
+    "connection": (
+        lambda: openai.APIConnectionError(message=f"Connection error. {_ECHO_996}", request=_REQ_996),
+        None, "无法连接模型供应商",
+    ),
+    "timeout": (
+        lambda: openai.APITimeoutError(request=_REQ_996), None, "模型供应商请求超时",
+    ),
+    "rejected_4xx": (
+        lambda: _openai_status_error(openai.BadRequestError, 400), 400, "模型供应商拒绝了请求",
+    ),
+    "server_5xx": (
+        lambda: _openai_status_error(openai.InternalServerError, 502), 502, "模型供应商服务端错误",
+    ),
+    "no_status": (
+        lambda: openai.APIError(f"stream error {_ECHO_996}", request=_REQ_996, body={"m": _ECHO_996}),
+        None, "未分类异常",
+    ),
+}
+
+
+class TestUnclassifiedFailureDetail:
+    """#996：run/failed 的未分类兜底补「连不上 / 超时 / 4xx / 5xx」与状态码；
+    reason 仍是异常类型名（开集口径不变），供应商回显一字不进事件。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_stream", [False, True], ids=["run", "run_stream"])
+    @pytest.mark.parametrize("case", list(_DETAIL_CASES))
+    async def test_terminal_carries_status_and_category_without_echo(
+        self, tmp_path, case, use_stream,
+    ):
+        make_error, expected_status, phrase = _DETAIL_CASES[case]
+        error = make_error()
+        session = make_session(tmp_path)
+        runtime = _runtime(_RaisingModel(error))
+
+        if use_stream:
+            frames = [f async for f in runtime.run_stream(session, "你好")]
+            assert frames[-1].type == RUN_FAILED
+        else:
+            result = await runtime.run(session, "你好")
+            assert result.status == STATUS_FAILED
+
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        error_type = type(error).__name__
+        assert run_failed.data["reason"] == error_type, "reason 仍是异常类型名（开集）"
+        message = run_failed.data["message"]
+        assert phrase in message
+        assert error_type in message
+        if expected_status is None:
+            assert "http_status" not in run_failed.data, "无状态码 ⇒ 不落键（不伪造）"
+            assert "HTTP" not in message
+        else:
+            assert run_failed.data["http_status"] == expected_status
+            assert f"HTTP {expected_status}" in message
+        if case == "no_status":
+            assert message == UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=error_type)
+        # model/failed 不跟着变（ADR-0033 §2.4 边界 2）
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == f"model call failed: {error_type}"
+        assert "http_status" not in model_failed.data
+        # 仪器自检：植入物确实在异常正文里（否则下面的反向扫描是空转）
+        assert all(token in str(error) or case == "timeout" for token in _PLANTED)
+        # OBS-008：植入的假凭证 / 回显文本 / 网关地址不得出现在任何持久化事件里
+        persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+        for event in [*session.events, *persisted]:
+            blob = str(event.data)
+            for token in (*_PLANTED, "gateway.invalid"):
+                assert token not in blob, f"{case}: {token!r} 漏进 {event.type}"
+
+    @pytest.mark.asyncio
+    async def test_classified_failure_keeps_fixed_message_and_no_status_key(self, tmp_path):
+        """已分类（命中标记表）的 400 走原固定文案：#996 只动未分类兜底，不改分类面。"""
+        error = openai.BadRequestError(
+            "Error code: 400 - {'code': 'billing'}",
+            response=httpx.Response(400, request=_REQ_996),
+            body={"code": "billing"},
+        )
+        session = make_session(tmp_path)
+        await _runtime(_RaisingModel(error)).run(session, "你好")
+
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "provider_account_unavailable"
+        assert "HTTP" not in run_failed.data["message"]
+        assert "http_status" not in run_failed.data
+
+    @pytest.mark.asyncio
+    async def test_status_error_outside_model_window_is_not_attributed_to_provider(
+        self, tmp_path,
+    ):
+        """归因窗口外（投影阶段）抛出带状态码的异常：不得标成供应商 4xx/5xx，
+        也不落 http_status——与分类表「只在模型调用在途时分类」同一边界。"""
+
+        class _StatusExplodingBuilder:
+            async def build(self, session: Any) -> list:
+                raise _openai_status_error(openai.InternalServerError, 503)
+
+        session = make_session(tmp_path)
+        reg = ToolRegistry()
+        runtime = AgentRuntime(
+            model=ListContentModel(), registry=reg, executor=ToolExecutor(reg),
+            context_builder=_StatusExplodingBuilder(),
+        )
+        await runtime.run(session, "你好")
+
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="InternalServerError",
+        )
+        assert "http_status" not in run_failed.data

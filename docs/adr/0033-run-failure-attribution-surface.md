@@ -100,7 +100,7 @@
 | `max_steps` 保险丝 | `max_steps_exceeded` | 与 `agent_decision` 日志同一句（「连续 N 轮仍在请求工具，触发保险丝」） |
 | （`#312` 起）`max_steps` / 预算到顶 | **不再是失败终态** | 改落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），本表该行只对历史载荷成立，见下方边界 4 |
 | 同错熔断硬保险丝 | `identical_tool_failure_loop` | 无（码即信息） |
-| 异常臂（模型在途 / 工具 / 执行器 / **投影阶段**） | 分类常量，未分类则 `type(error).__name__` | 分类固定文案，未分类则 `UNCLASSIFIED_FAILURE_MESSAGE` 模板 |
+| 异常臂（模型在途 / 工具 / 执行器 / **投影阶段**） | 分类常量，未分类则 `type(error).__name__` | 分类固定文案；未分类则 `UNCLASSIFIED_FAILURE_MESSAGE` 模板——**模型在途**时按异常结构细化为连接失败 / 超时 / 请求被拒（4xx）/ 服务端错误（5xx）并带 `HTTP <code>`，另落可选键 `http_status`（#996，见边界 6） |
 | 取消臂 / 孤儿回收 | `cancelled` / `orphaned` | 无 |
 
 三条边界，都写在这里而不是只写在代码里：
@@ -110,6 +110,7 @@
 3. **`max_steps` 改走 `failure_terminal`**。这条路径原先自己拼 `session.end_run`，绕过了终态字段的唯一 owner —— 这正是它"一个键都没有"而长期没人发现的机制原因（字段集中供给被绕过，下次加字段还会漏它）。
 4. **（`#312` 追加）预算到顶不是失败，故它离开了本表**。撞 `local.max_agent_turns` / `run.max_agent_turns_total` 时该次执行落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），既不写 `run/failed` 也不写 `run/completed`；`max_steps_exceeded` 这个受控失败终态随之**在运行期不可达并删除**（`memory/v2/eligibility.py` 的白名单同步移除它）。本表上一条只对 `#312` 之前的历史载荷成立 ⇒ 读到旧载荷要照旧渲染成失败，但**不得**把它当作今天还可能出现的归因面。前端契约的对应处已同步（`docs/BACKEND_CONTRACT_STREAMING_UI.md` §4）。
 5. **（`#348` 追加）context 超限也不是失败，同它离开了本表**。`ContextWindowExceededError` 的收口从"直接 append `run/failed`"改为委托**既有暂停生命周期**（`_terminal_paused`）：`trigger_dimension="max_context_tokens"`（config.py 的配置字段路径，非计数维）经 `reason_for_dimension` 自动映射为 `reason=budget_exhausted`——**不新增 reason 值**（`03 §3.4` 词表冻结）。理由：超限是"投影放不进窗口"，抬任意 run ceiling 都改变不了这个事实，它和预算到顶一样是**可恢复**的停止，不是终结。`STATUS_CONTEXT_WINDOW_EXCEEDED` 常量保留只读历史载荷；恢复侧的窄豁免（不点名 run ceiling 也可恢复）见 `run_budget.validate_resume`。本表该行只对 `#348` 之前的历史载荷成立。
+6. **（`#996` 追加）未分类兜底补结构化细节，仍不回显**。真机（2026-10-11 integration gate）三条未分类失败只剩 `APIConnectionError` / `BadRequestError` / `APIError`，分不清连不上 / 超时 / 被拒 / 网关 5xx。口径：**仅当未命中分类表且模型调用在途**（`model_call_open`，与 §2.1 分类同一归因窗口；工具 / 投影阶段带状态码的异常不是供应商的）时，`model/failure.py` 的 `unclassified_failure_message` 按**异常结构**（不是文本）选固定句：有 HTTP 状态码（openai `APIStatusError.status_code`；`httpx.HTTPStatusError.response.status_code`；只认 100–599 的 int）⇒ 4xx「模型供应商拒绝了请求」/ 5xx「模型供应商服务端错误」/ 其余「未分类异常」，句中带 `HTTP <code>`，并在 `run/failed` 载荷落可选整数键 `http_status`（无状态码不落键，不伪造）；无状态码 ⇒ MRO 类名含 `APITimeoutError`「模型供应商请求超时」（它是 `APIConnectionError` 的子类，故先判）、含 `APIConnectionError`「无法连接模型供应商（网络或网关不可达）」；都不是 ⇒ 逐字仍是 #222 的兜底句。**代入的只有类名与整数状态码**——边界 1 不变：`str(error)`、错误体、响应正文一个片段都不进事件（植入假凭证的反向用例：`tests/model/test_unclassified_failure_detail.py`、`tests/agent/test_runtime_failure_paths.py::TestUnclassifiedFailureDetail`）。`reason` 仍是异常类型名（开集口径不变），已分类的固定文案、`model/failed.message`（边界 2）均不变；类名识别不硬 import openai，与 `model/fallback.py` 的 `_TRANSIENT_ERROR_NAMES` 同口径。
 
 **未覆盖（有据，非本票引入）**：失败发生在 `begin_run` **之前**（`USER_ACCEPTED` checkpoint / 写 user 消息阶段）时 `run_id` 为 `None`，此时**没有任何终态事件可写**（`failure_terminal` 返回 `None`），durable 历史停在 `run/started` 之前。这是"没有 run 可终结"的正当语义，不是本票要改的形状；真要覆盖得先定义"无 run 的失败"往哪写。
 
