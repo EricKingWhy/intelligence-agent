@@ -116,9 +116,8 @@ FunctionEnd
     ; "leftover to delete" would be worse than dropping the hint.
     !insertmacro iaReadBackupDir
     ${If} $iaBackupDirectory != ""
-      StrCpy $iaDeleteCandidate "$iaBackupDirectory"
-      StrCpy $iaDeleteBase "$iaFinalDirectory"
-      StrCpy $iaDeleteShapeCheck "1"
+      StrCpy $iaShapeCandidate "$iaBackupDirectory"
+      StrCpy $iaShapeBase "$iaFinalDirectory"
       Call iaCheckBackupShape
       ${If} $iaShapeOk == "1"
         StrCpy $iaPlainPath "$iaBackupDirectory"
