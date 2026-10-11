@@ -1346,7 +1346,9 @@ export const FIRST_SELECTABLE_MODEL = MODELS.find((m) => !m.default)!;
  *  （详见设计稿 §3 的"可达性前置"）。夹具的职责是把两边的分支都喂到，不是证伪后端。 */
 export const MODELS_WITH_AVAILABILITY = [
   {
-    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: true,
+    // #1016（AC1）：默认条目不进二级列表 ⇒ 这里不能标 default:true——标了 zhipu 组
+    // 二级就只剩 glm-4.6-air，「能力徽标按条不按 provider」的组内对照就没了载体。
+    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: false,
     is_available: true, unavailable_reason: null,
     supports_tools: true, supports_vision: true, supports_reasoning_summary: true,
   },

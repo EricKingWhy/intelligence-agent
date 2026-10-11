@@ -147,12 +147,16 @@ test('#199：长目录不再需要搜索框——provider 分组就是导航', a
   // 旧模型选择器用的是 `.model-picker-search-wrap`——数它永远是 0，等于断言了个 vacuous truth）。
   await expect(noSearchInputIn(page, '[role="menu"]')).toHaveCount(0);
 
-  // 一级必须逐字给出每组条数（不堆数据，但也不藏），且各组合计 = 目录长度：
-  // 否则"分组"可能只是画面上分了、实际漏掉了模型。
+  // 一级必须逐字给出每组条数（不堆数据，但也不藏），且各组合计 = **可选条目数**：
+  // 否则"分组"可能只是画面上分了、实际漏掉了模型。#1016（AC1）后默认条目不进二级
+  // 列表（它的唯一入口是一级「默认链」，由上面两条用例锁住），所以这里对账的分母
+  // 是去掉默认条目后的目录长度，不是 SEARCHABLE_MODELS.length。
   const counts = await providers.evaluateAll((els) =>
     els.map((el) => Number(el.textContent?.match(/(\d+) 个模型/)?.[1] ?? 0)),
   );
-  expect(counts.reduce((a, b) => a + b, 0)).toBe(SEARCHABLE_MODELS.length);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(
+    SEARCHABLE_MODELS.filter((m) => !m.default).length,
+  );
 });
 
 test('#199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽标', async ({ page }) => {
