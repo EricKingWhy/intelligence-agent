@@ -56,6 +56,7 @@ from agent_harness.storage.artifact import (
 )
 from agent_harness.storage.attachment_layout import (
     BYTE_OBJECTS_DIRNAME,
+    BYTE_STAGING_DIRNAME,
     GLOBAL_ATTACHMENT_DIRNAME,
     SESSION_ATTACHMENTS_DIRNAME,
 )
@@ -346,7 +347,7 @@ class LocalArtifactStore(ArtifactStore):
         return self._root / GLOBAL_ATTACHMENT_DIRNAME / BYTE_OBJECTS_DIRNAME
 
     def _global_blob_staging_dir(self) -> Path:
-        return self._root / GLOBAL_ATTACHMENT_DIRNAME / "tmp"
+        return self._root / GLOBAL_ATTACHMENT_DIRNAME / BYTE_STAGING_DIRNAME
 
     def _global_blob_object_path(self, sha256: str) -> Path:
         return self._global_blob_objects_dir() / sha256[:2] / sha256

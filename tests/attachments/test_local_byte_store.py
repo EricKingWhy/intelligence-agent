@@ -36,6 +36,10 @@ from agent_harness.storage.artifact import (
     BYTE_ARTIFACT_ID_PATTERN,
     compute_byte_artifact_id,
 )
+from agent_harness.storage.attachment_layout import (
+    BYTE_STAGING_DIRNAME,
+    GLOBAL_ATTACHMENT_DIRNAME,
+)
 from agent_harness.storage.local_artifact import LocalArtifactStore
 from agent_harness.storage.readonly_fs import discard_local_artifacts
 
@@ -77,7 +81,12 @@ def _meta_path(tmp_path: Path, attachment_id: str) -> Path:
 
 
 def _staging_dir(tmp_path: Path) -> Path:
-    return tmp_path / "artifacts" / ".attachments" / "tmp"
+    return (
+        tmp_path
+        / "artifacts"
+        / GLOBAL_ATTACHMENT_DIRNAME
+        / BYTE_STAGING_DIRNAME
+    )
 
 
 def _windows_unlink(path: str, *, dir_fd: int | None = None) -> None:
