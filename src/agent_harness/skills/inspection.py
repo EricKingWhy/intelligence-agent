@@ -1314,14 +1314,45 @@ def _manual_requirement(
     }
 
 
-def _read_small_file(
-    root: Path, relative: str, errors: list[dict[str, str]]
+def read_package_text(
+    root: Path,
+    relative: str,
+    errors: list[dict[str, str]],
+    *,
+    max_bytes: int = _MAX_METADATA_SCAN_BYTES,
+    too_large_code: str = "PACKAGE_FILE_TOO_LARGE",
+    unreadable_code: str = "PACKAGE_FILE_UNREADABLE",
+    changed_code: str = "PACKAGE_FILE_CHANGED",
+    not_file_code: str = "PACKAGE_FILE_NOT_A_FILE",
+    outside_code: str = "PACKAGE_FILE_OUTSIDE_PACKAGE",
 ) -> str | None:
+    """按包内**相对路径**读一个文本文件的公共入口（越界 / 过大 / 读取中变化都记错误）。
+
+    边界读写只有一份实现（`_read_bounded_package_text`）：symlink 解析后必须仍在
+    包内、打开后再核对 inode、尺寸上限在 stat 与 read 两侧各拦一次。第二个消费者
+    （MCP 描述预检）需要同一套保证，只是错误码属于自己那套词表 ⇒ 在这里把码参数化，
+    而不是让调用方去 import 私有实现。`_read_small_file` 是本函数的一个旧码表绑定。
+    """
     return _read_bounded_package_text(
         root,
         root / relative,
         relative,
-        _MAX_METADATA_SCAN_BYTES,
+        max_bytes,
+        errors,
+        too_large_code=too_large_code,
+        unreadable_code=unreadable_code,
+        changed_code=changed_code,
+        not_file_code=not_file_code,
+        outside_code=outside_code,
+    )
+
+
+def _read_small_file(
+    root: Path, relative: str, errors: list[dict[str, str]]
+) -> str | None:
+    return read_package_text(
+        root,
+        relative,
         errors,
         too_large_code="DEPENDENCY_FILE_TOO_LARGE",
         unreadable_code="DEPENDENCY_FILE_UNREADABLE",

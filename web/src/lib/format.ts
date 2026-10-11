@@ -46,14 +46,20 @@ export function formatRelativeTime(iso: string | null, now: number = Date.now())
   return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-/** 字节数人性化（#368 W-24）：B / KB / MB / GB，一位小数。
+/** 字节数人性化——**唯一实现**（#937 / M-22 收口：此前 format.ts / attachments.ts /
+ *  StepDetail.tsx 三处并存，同一输入渲染出 '2.0 MB' 与 '2 MiB' 两种串）。
+ *  1024 进制 + IEC 标签（B / KiB / MiB / GiB），与后端 MiB 口径一致；
+ *  B/KB/MB 旧标签已退役（e2e 与单测钉住 `'超过单张上限 20 MiB'`）。
+ *  舍入：KiB 取整；MiB ≥10 取整、<10 一位小数；GiB 一位小数。
  *  非有限 / 负值返回 '—'——宁可显"不可得"，也不编一个像样的数字。 */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—';
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${Math.round(kib)} KiB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib >= 10 ? Math.round(mib) : Math.round(mib * 10) / 10} MiB`;
+  return `${Math.round((mib / 1024) * 10) / 10} GiB`;
 }
 
 /** 不可信大输出的展示截断上限（字符）。20k 字符远超正常阅读需要，

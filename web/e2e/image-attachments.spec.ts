@@ -83,6 +83,13 @@ async function pasteFiles(page: Page, files: IntakeFile[]): Promise<void> {
         spec.base64 !== null
           ? Uint8Array.from(atob(spec.base64), (c) => c.charCodeAt(0))
           : new Uint8Array(spec.size ?? 0);
+      // M-20 起前端做字节探测（detectImageMediaType，fail-closed）：只关心大小的图片
+      // 替身若为零字节，会在格式检查就被"不支持的图片格式"拒收。前 8 字节写真实 PNG
+      // 魔数（其余保持零），让尺寸检查（AC3 的超限路径）真正走到——这是探测正确工作
+      // 的证据，不是绕过。
+      if (spec.zeroFilledImage && bytes.length >= 8) {
+        bytes.set(Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a));
+      }
       dt.items.add(new File([bytes], spec.name, { type: spec.type }));
     }
     const target = document.querySelector<HTMLTextAreaElement>('#composer-input')!;
@@ -93,6 +100,7 @@ async function pasteFiles(page: Page, files: IntakeFile[]): Promise<void> {
     type: f.type,
     size: Buffer.isBuffer(f.bytes) ? null : f.bytes,
     base64: Buffer.isBuffer(f.bytes) ? f.bytes.toString('base64') : null,
+    zeroFilledImage: !Buffer.isBuffer(f.bytes) && f.type.startsWith('image/'),
   })));
 }
 
@@ -100,8 +108,13 @@ async function pasteFiles(page: Page, files: IntakeFile[]): Promise<void> {
 async function dragInPage(page: Page, phase: 'enter' | 'drop', bytes = 1): Promise<void> {
   await page.evaluate(
     ({ phase, bytes }) => {
+      // M-20 起前端按字节探测图片格式（fail-closed）：图片替身必须带真实 PNG 魔数，
+      // 否则 drop 的文件在 intake 就被"不支持的图片格式"拒收（enter 只看 types，不
+      // 走 intake，行为不变）。魔数计入总长度：前 8 字节为签名，其余保持零。
+      const payload = new Uint8Array(bytes);
+      payload.set(Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).subarray(0, Math.min(8, bytes)));
       const dt = new DataTransfer();
-      dt.items.add(new File([new Uint8Array(bytes)], phase === 'enter' ? 'probe.png' : 'dropped.png', { type: 'image/png' }));
+      dt.items.add(new File([payload], phase === 'enter' ? 'probe.png' : 'dropped.png', { type: 'image/png' }));
       document.dispatchEvent(
         new DragEvent(phase === 'enter' ? 'dragenter' : 'drop', { dataTransfer: dt, bubbles: true, cancelable: true }),
       );
@@ -512,7 +525,12 @@ async function dropFiles(page: Page, files: Array<{ name: string; type: string }
   await page.evaluate((specs) => {
     const dataTransfer = new DataTransfer();
     for (const spec of specs) {
-      dataTransfer.items.add(new File([new Uint8Array(1)], spec.name, { type: spec.type }));
+      // M-20 起前端按字节探测图片格式（fail-closed）：image/* 替身须带真实 PNG 魔数
+      // 才能走到上传路径；非图片保持无签名（它们本就该被格式检查拒收）。
+      const content = spec.type.startsWith('image/')
+        ? Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        : new Uint8Array(1);
+      dataTransfer.items.add(new File([content], spec.name, { type: spec.type }));
     }
     document.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }));
   }, files);

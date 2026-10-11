@@ -40,6 +40,8 @@
 
 ## 当前工作焦点
 
+- **2026-10-11 · #877 Plugin T8 DSH 推理滑条预检**（分支 codex/issue-877-dsh-adapter；PR #971 已合入，merge fc8d1fd2）：实现与两轴复审完成；固定来源因上游 Off 与 #865 Default 语义不等价，保持 needs-adaptation 且禁用。同步树 pytest 为 7471 passed / 42 skipped / 51 deselected / 1 failed，唯一红为新增同步合并审查归属漏记；补真实审查行后定向回归 1 passed、coverage checker exit 0，未重跑全量。PR CI 的 Gate-0、Chromium 冒烟与 gitleaks 通过；本地完整 E2E 540 passed、Web Vitest 1637 passed、TUI 232 passed / 3 skipped、Desktop tests/check 通过。Issue CLOSED，in-progress 已移除。详见 Tracker 与月档 #877。
+
 - **2026-10-10 · #872 Git Skills T3（分支 `codex/issue-872-skill-git`，已验证代码点 `15ea25f3` / tree `b10fb266`）**：固定 Git Skill 来源与内容摘要，显式 update/rollback，待启用版本重启后切换；失败保留活动版本。两轴终审无未关闭 finding；Gate-0 6/6、clean 全量 pytest 7285P/28S/51D、focused 118P/2S。已同步 `origin/main` `c8f43a7c`（merge `fbe5fa1c`，仅新增 Gate-0 收据、代码与测试目录无变化）；Issue OPEN + `in-progress`。尚未 push/PR/merge，等用户批准。
 
 - **2026-10-10 · #873 Plugin T4（`codex/issue-873-global-scope`，实现 `d79d6158`）**：复用 SkillPackageManager 实现 global 独立包/版本记录、scope CLI 与未选择的全局库存视图；Runtime 不自动发现/注入 global 包。调研见 `docs/research/2026-10-10-plugin-global-package-scope.md`。双轴完成：Spec PASS；Standards PASS-WITH-FINDINGS，P3=1 非阻塞建议；作者红证通过。Docker 沙箱全量 pytest 7291P/28S/51D。Gate-0 6/6 PASS（收据 `docs/gate/d45c84e62b074f825db592edd2c79ab1aa05f192.json`；71.23s，超过 60s 目标但无失败车道）；整分支 `git diff --check` 通过。Issue CLOSED，`in-progress` 已移除；未 push/PR/merge。详见月档 #873。
@@ -209,6 +211,7 @@ tree `ff714fb9`）：后端全量 **4614 passed / 2 skipped / 0 failed / 1068.13
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
+| 2026-10-11 | 2 个 ## 小节（#874 合并后硬化同步与聚焦验证；#877 Plugin T8 实现、验证与 PR 发布关单） | 2026-10.md L2155（#874）+ L2164（#877），发布收尾见 #877 节末尾 |
 | 2026-10-10 | 4 个 `## ` 小节（#365/#901 第 8–10 次先回后正同步 + R1 集成 + 合并树门禁；#904/#905/#908 修复批；#872 Git Skills T3 / #873 Plugin T4） | `2026-10.md` L1586（#365 节）+ L1688-L1769（#904/#905/#908） + L1857（#872） + L1905（#873）；**索引缺口（既存）**：本表原先只到 2026-10-06 —— 10-07..10-09 各线小节（4+14+6 个）未入表，小节本身在文件内（按日期 grep 可定位） |
 | 2026-10-06 | 9 个 `## ` 小节（#663 部分交付、AC16 未完成；及 6 日其余记录） | `2026-10.md` L616（#663） + L625（#663 AC16） + L752 + L765 + L778 + L794 + L805 + L816 + L826 |
 | 2026-10-05 | 11 个 `## ` 小节（含 #638、#641、#520、#524、#523、#668、#644、#522、#646、#650、#640、#649；小节不计入条目数） | `2026-10.md` L565 + L573 + L581 + L590 + L599 + L607 + L640 + L675 + L682 + L690 + L738 |

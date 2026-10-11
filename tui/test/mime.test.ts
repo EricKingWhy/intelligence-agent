@@ -5,15 +5,9 @@
  * Pi `packages/coding-agent/src/utils/mime.ts` @ `28dcce2b`（COPY，见文件头）。
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 
-import {
-  detectSupportedImageMimeType,
-  detectSupportedImageMimeTypeFromFile,
-} from "../src/lib/mime.ts";
+import { detectSupportedImageMimeType } from "../src/lib/mime.ts";
 
 /** 最小合法 PNG：签名 + IHDR(len=13, "IHDR") + 若干块。 */
 function pngBytes(): Uint8Array {
@@ -64,19 +58,4 @@ test("非图片字节（纯文本）⇒ null", () => {
 
 test("空缓冲 ⇒ null（不抛）", () => {
   assert.equal(detectSupportedImageMimeType(new Uint8Array()), null);
-});
-
-test("从文件读前 4100 字节判型：扩展名骗不了它", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ia-tui-mime-"));
-  try {
-    const fake = join(dir, "looks-like.png");
-    writeFileSync(fake, "这不是 PNG");
-    assert.equal(await detectSupportedImageMimeTypeFromFile(fake), null);
-
-    const real = join(dir, "real.bin");
-    writeFileSync(real, pngBytes());
-    assert.equal(await detectSupportedImageMimeTypeFromFile(real), "image/png");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

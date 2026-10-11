@@ -3,15 +3,24 @@
 
 只移植 MM-01 需要的三个契约：`ImageAttachmentRef` / `ImageAttachmentLimits` /
 `AttachmentId`（本仓用 `str` + 别名表达 opacity，落库形状见 `storage/artifact.py`
-的 `BYTE_ARTIFACT_ID_PATTERN`）。`PromptContentPart` 一族（浏览器提交 → 落库引用的
+的 `BYTE_ARTIFACT_ID_PATTERN`）。**配置面解析规则**（`parse_allowed_media_types` 与
+词汇表）住在 `attachments.validation`，本模块原样再导出——`config` 只 import 前者，
+方向因此单向（#939 M-15）。`PromptContentPart` 一族（浏览器提交 → 落库引用的
 admission 流程）属 MM-02 的投影层，本票不移植。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+
+from agent_harness.attachments.validation import (
+    EXTENSION_MEDIA_TYPES,
+    SUPPORTED_IMAGE_MEDIA_TYPES,
+    ImageMediaType,
+    parse_allowed_media_types,
+)
 
 if TYPE_CHECKING:
     from agent_harness.config import Settings
@@ -19,25 +28,6 @@ if TYPE_CHECKING:
 #: 内容寻址 id（`sha256:<64 hex>`）。**永不**是路径 / 裸 URL / bearer 句柄。
 #: 来源: DSH `attachment-local/src/file-store.ts:45-56` `FILE_ID_PATTERN`。
 AttachmentId = str
-
-#: v1 接受的栅格图片 media types（来源: DSH `types.ts` `ImageMediaType`）。
-ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
-
-SUPPORTED_IMAGE_MEDIA_TYPES: tuple[ImageMediaType, ...] = (
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-)
-
-#: 扩展名 → media type（用于"声明文件名与字节不符"的判定；大小写不敏感）。
-EXTENSION_MEDIA_TYPES: dict[str, ImageMediaType] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
 
 
 class ImageAttachmentRef(BaseModel):
@@ -57,10 +47,12 @@ class ImageAttachmentRef(BaseModel):
     bytes: int
     width: int
     height: int
-    #: 展示名（去本地路径）。#823 / MM-02（B6）：写入路径**恒缺省**——上传回执的 name
-    #: 未持久化（`web/attachments.py` 只存字节+mime），发送端点只收 id 列表、无回传信道，
-    #: 属**结构性缺省**；`parse_image_refs` 会解析它（兼容未来写入方）。展示名接线留待
-    #: 前端票 / MM-03，不留无声死字段。
+    #: 展示名（去本地路径）。**可空**，不是"恒缺省"（#939 M-27 起的实际口径）：
+    #: CLI `--image <path>` 手上有文件名 ⇒ **真的带上**（`cli.py::_admit_cli_images` 传
+    #: `name=str(path)`，经 `admission.image_reference` 的 `file_leaf_name` 消毒）；
+    #: Web 上传回执不持久化 name（`web/attachments.py` 只存字节+mime），发送端点只收
+    #: id 列表 ⇒ 那条**无回传信道**、缺省。`parse_image_refs` 会解析它（兼容未来写入方）。
+    #: 前端 `web/src/lib/attachmentRefs.ts` 的 `name` JSDoc 与本字段互为权威。
     name: str | None = None
 
 
@@ -80,30 +72,6 @@ class ImageAttachmentLimits(BaseModel):
     max_image_pixels: int
     max_image_dimension: int
     media_types: tuple[str, ...]
-
-
-def parse_allowed_media_types(raw: str) -> tuple[str, ...]:
-    """解析逗号分隔的允许图片类型；未知类型 / 空 → `ValueError`（响亮失败）。
-
-    **单一解析点**：`Settings` 的字段校验（**启动期**，见 `config.Settings`）与
-    `resolve_image_limits`（请求期）共用它，避免两处规则漂移。未知类型静默忽略会让
-    部署者以为某格式已放行、实际被悄悄拒绝（fail-closed 的反面）。
-    """
-    media_types: list[str] = []
-    for item in raw.split(","):
-        value = item.strip()
-        if not value:
-            continue
-        if value not in SUPPORTED_IMAGE_MEDIA_TYPES:
-            raise ValueError(
-                "attachment_allowed_media_types 含不支持的图片类型"
-                f"（允许: {', '.join(SUPPORTED_IMAGE_MEDIA_TYPES)}）：{value!r}"
-            )
-        if value not in media_types:
-            media_types.append(value)
-    if not media_types:
-        raise ValueError("attachment_allowed_media_types 不能为空")
-    return tuple(media_types)
 
 
 def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:

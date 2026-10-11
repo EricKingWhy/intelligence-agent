@@ -25,7 +25,7 @@ import {
   type AttachmentUploadReceipt,
 } from '../lib/api';
 import { makeThumbnailDataUrl } from '../lib/attachmentThumbnail';
-import { partitionIntake } from '../lib/attachments';
+import { partitionIntake, detectImageMediaType } from '../lib/attachments';
 
 export interface DraftAttachment {
   /** 客户端 key（React key + 状态机身份）。与 `attachment_id` **无关**：上传成功才有引用。 */
@@ -127,6 +127,9 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
     [sessionId, patch],
   );
 
+  // 签名保持同步 `(files, directories?) => void`（调用方都是事件处理器里直接调用、
+  // 不 await）。内部是 async IIFE：#937 / M-20 的字节探测是异步的，拒绝原因仍经
+  // `setIntakeError` 同一通道呈现（AC3），不新增第二条用户可见的错误路径。
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
       // 会话缺失时**静默返回**，不给文案：用户可见的原因由 Composer 单点给出
@@ -137,23 +140,33 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
       // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
       const candidates = files.filter((file) => !directories?.has(file));
       if (candidates.length === 0) return;
-      const existing = itemsRef.current.map((item) => ({ bytes: item.file.size }));
-      const outcome = partitionIntake(candidates, existing);
-      if (outcome.error !== null || outcome.accepted.length === 0) {
-        setIntakeError(outcome.error);
-        return;
-      }
-      setIntakeError(null);
-      const drafts: DraftAttachment[] = outcome.accepted.map((file) => ({
-        id: `draft-${++draftSeq}`,
-        file,
-        status: 'uploading' as const,
-        loaded: 0,
-        total: file.size,
-        thumb: null,
-      }));
-      commit([...itemsRef.current, ...drafts]);
-      for (const draft of drafts) startUpload(draft.id, draft.file);
+      void (async () => {
+        // 字节探测先行（#937 / M-20）：`file.type` 可伪造，预检的「是不是图片」
+        // 以文件头魔数为准（对齐后端 `probe.py`）；探测后 `partitionIntake` 仍
+        // 用默认 limits（`getImageLimits()`，M-08 起权威在服务端下发）。
+        const probed = new Map(
+          await Promise.all(
+            candidates.map(async (file) => [file, await detectImageMediaType(file)] as const),
+          ),
+        );
+        const existing = itemsRef.current.map((item) => ({ bytes: item.file.size }));
+        const outcome = partitionIntake(candidates, existing, undefined, probed);
+        if (outcome.error !== null || outcome.accepted.length === 0) {
+          setIntakeError(outcome.error);
+          return;
+        }
+        setIntakeError(null);
+        const drafts: DraftAttachment[] = outcome.accepted.map((file) => ({
+          id: `draft-${++draftSeq}`,
+          file,
+          status: 'uploading' as const,
+          loaded: 0,
+          total: file.size,
+          thumb: null,
+        }));
+        commit([...itemsRef.current, ...drafts]);
+        for (const draft of drafts) startUpload(draft.id, draft.file);
+      })();
     },
     [sessionId, commit, setIntakeError, startUpload],
   );

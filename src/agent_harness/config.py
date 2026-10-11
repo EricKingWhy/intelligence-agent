@@ -5,6 +5,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings
 
+from agent_harness.attachments.validation import parse_allowed_media_types
+
 #: .env 锚定到仓库根（config.py 位于 <root>/src/agent_harness/）——
 #: 相对路径 ".env" 依赖 CWD，从其它目录启动 uvicorn/CLI 会静默加载不到
 #: 配置，错误推迟到首个请求内才爆（R6-5）。安装为 site-packages 时锚点
@@ -169,7 +171,8 @@ class Settings(BaseSettings):
     attachment_max_image_pixels: int = Field(default=64_000_000, ge=1)
     attachment_max_image_dimension: int = Field(default=8192, ge=1)
     # 允许的图片 media types（逗号分隔）。解析规则单点在
-    # `attachments.types.parse_allowed_media_types`；本字段在**构造期**（= 启动期）
+    # `attachments.validation.parse_allowed_media_types`（#939 M-15 从 `attachments.types`
+    # 迁到中性模块，断掉 config ↔ attachments 的环）；本字段在**构造期**（= 启动期）
     # 就校验它（下面的 validator），配错即响亮失败，不会拖到请求路径才 500。
     attachment_allowed_media_types: str = "image/png,image/jpeg,image/webp,image/gif"
     # #823 / MM-02（B2）：发给视觉模型时图片块的 `detail` 档位（PRD D4/D11 的
@@ -224,9 +227,10 @@ class Settings(BaseSettings):
 
         配置错误（未知类型 / 空）在服务起来时即响亮失败，而不是拖到每次上传才在
         请求路径抛 `ValueError`（那会变成 500，运维只能从请求日志发现配置错误）。
-        解析规则单点在 `attachments.types.parse_allowed_media_types`。
+        解析规则单点在 `attachments.validation.parse_allowed_media_types`——该模块
+        **不依赖 `Settings`**，故这里可以模块顶部直接 import（#939 M-15：此前为了
+        躲开与 `attachments.types` 的 import 环，这里写的是函数体内延迟 import，
+        而那道保护无机械守卫；解析规则搬进中性模块后方向单向，延迟 import 一并删除）。
         """
-        from agent_harness.attachments.types import parse_allowed_media_types
-
         parse_allowed_media_types(value)
         return value

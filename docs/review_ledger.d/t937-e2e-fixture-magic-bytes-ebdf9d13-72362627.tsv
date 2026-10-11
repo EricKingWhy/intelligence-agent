@@ -1,0 +1,1 @@
+2026-10-11	#937 e2e 替身修复（72362627）：M-20 字节探测 fail-closed 后，web/e2e/image-attachments.spec.ts 三个 helper（dragInPage/pasteFiles/dropFiles）的零字节图片替身被正确拒收 → 补真实 PNG 魔数（图片替身前 8 字节；非图片替身保持无签名）。测试-only，断言零改动（git diff 无 expect 行变更）。沙箱 e2e 该文件 18 passed/0 failed。	ebdf9d136266fc2054249a74ca5ec59535851176..7236262712588b43bc9700ebb872d6b55e13dc70

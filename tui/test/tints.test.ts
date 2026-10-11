@@ -25,7 +25,7 @@ const theme: IaTheme = createTheme("truecolor");
 
 test("用户轮与三种状态的工具卡都能装配（rgb() 字面量会在这里抛）", () => {
   const components = turnComponents(
-    { role: "user", text: "hello", tools: [], seq: 1 },
+    { role: "user", text: "hello", tools: [], attachments: [], seq: 1 },
     theme,
   );
   assert.equal(components.length, 1);
