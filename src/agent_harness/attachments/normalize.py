@@ -31,12 +31,16 @@ TARGET_MAX_BYTES = 4 * 1024 * 1024
 
 #: 质量阶梯（有损）：从高到低找第一档 ≤ 目标字节数。上限 90 **高于** DSH 的 85
 #: （`encoding.ts` 的 `[85, 75, 60]`），是更**激进**的选择（更高质量、更大体积倾向），
-#: 不是“更保守”；能落进默认 4 MiB 的真正原因是 2048² 尺寸上限，不是 90-vs-85。
-#: 默认预算下低档极少介入：2048² 最坏情况（全随机字节）JPEG q90 = 3.59 MiB、
-#: WEBP q90 = 3.35 MiB，均 < 4 MiB，实测 16 组输入全部命中 q90；阶梯只在调小
-#: `image_normalize_max_bytes` 时介入。降档**不省 token**：token 成本按尺寸计
+#: 不是"更保守"；能落进默认 4 MiB 的真正原因是 2048² 尺寸上限，不是 90-vs-85。
+#: 默认预算下 JPEG 支路低档极少介入：2048² 高熵输入（全随机字节；探针语料内 JPEG
+#: 体积上界，非字面最坏情况）q90 = 3.59 MiB < 4 MiB，实测 16 组输入全部命中 q90。
+#: WEBP 支路恒收 RGBA（`normalize_image` 的 `has_alpha` 分支转 RGBA，见下），体积
+#: 显著更大：2048² 全随机 RGBA 实测 WEBP q90 = 7.39 MiB、q50 = 6.16 MiB，均 > 4 MiB，
+#: 默认预算下阶梯会一路下探到 q50 仍超限（"尽力而为"，见 TARGET_MAX_BYTES 注释）。
+#: 3.35 MiB 是 RGB 语料的 WEBP q90 读数（探针的 WEBP 流编码的是 RGB，未触及真实
+#: alpha 路径），不代表 alpha 支路。降档**不省 token**：token 成本按尺寸计
 #: （`context/tokens.py::image_tokens_for_size`，tile 制），阶梯只改字节不改宽高；
-#: 降档买到的是“同一字节预算下的画质”，不是 token。
+#: 降档买到的是"同一字节预算下的画质"，不是 token。
 _QUALITY_LADDER: tuple[int, ...] = (90, 85, 80, 75, 70, 60, 50)
 
 #: 输出 media type（有 alpha → WebP，否则 JPEG）。
