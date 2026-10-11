@@ -1,6 +1,5 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
-import base64
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
@@ -14,7 +13,6 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from agent_harness.attachments.normalize import (
     TARGET_MAX_BYTES,
     TARGET_MAX_DIMENSION,
-    normalize_image,
 )
 from agent_harness.context.compactor import (
     CompactionFailure,
@@ -30,6 +28,7 @@ from agent_harness.context.tokens import estimate_message_tokens, message_cost
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
+    load_image_payloads,
     to_provider_messages,
 )
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -657,7 +656,7 @@ class ContextBuilder:
         # 口径（#935 / M-03，替代 #824 的固定常量）：带图消息的 token 估算**已计入图片成本**
         # ——`_estimate_tokens_cached` 在结构 token 上按 `context/tokens.py` 的
         # **尺寸相关近似公式**（tile 制）追加每张图的开销。真正的 base64 载荷仍在
-        # `_load_image_payloads`/`_finalize` 装配请求时才注入；估算靠标准图片块携带的
+        # `model.multimodal.load_image_payloads`/`_finalize` 装配请求时才注入；估算靠标准图片块携带的
         # `width`/`height`（投影处即已知），**目的是防止"图不计费导致 hard guard 失守"**，
         # 不追求逐 Provider 精确。真实 usage 仍以 Provider 回执为权威
         # （`_usage_anchored_tokens` 只抬高）。
@@ -1306,49 +1305,38 @@ class ContextBuilder:
         return [SystemMessage(content=self.system_prompt), *messages]
 
     async def _load_image_payloads(self, session: Session) -> dict[str, tuple[str, str]]:
-        """按事件引用过的附件 id 取回字节、归一化并 base64 编码（#823 / MM-02）。
+        """本会话被引用附件的载荷表（`attachment_id → (media_type, base64)`）。
 
-        只在 `model_supports_vision` 时执行。store 缺席、单个字节缺失或解码失败都
-        不抛出——该引用在装配 adapter 里降级为占位文本块（不静默丢弃、不 brick run）。
-        返回 `attachment_id → (media_type, base64)`，供 `_finalize` 的 adapter 使用。
+        接缝在 `model.multimodal.load_image_payloads`（#939 M-12：取字节 + 归一化 +
+        base64 与它的两个消费半边同处一模块）；本方法只做两件本层才知道的事——
+        ① 按**事件**取授权后的引用集（`referenced_attachment_ids`：未引用的 id 不得
+        读回，PRD D5）；② 走实例级缓存（#823 / MM-02 B3：内容寻址不可变，同一 builder
+        实例内同 id 终身可复用）。
+
+        `model_supports_vision=False` 或无 store ⇒ `{}`（无载荷 = 接缝不存在，与
+        `load_image_payloads` 的 `None` 同义，这里归一成空表让 `_finalize` 无需分支）。
         """
         if not self._supports_vision or self._artifact_store is None:
             return {}
-        payloads: dict[str, tuple[str, str]] = {}
-        for attachment_id in sorted(referenced_attachment_ids(session.events)):
-            # #823 / MM-02（B3）：命中实例级缓存即复用（内容寻址不可变，见
-            # `_image_payload_cache` 注释）——跳过整条 load/解码/编码/base64 链。
-            cached = self._image_payload_cache.get(attachment_id)
-            if cached is not None:
-                payloads[attachment_id] = cached
-                continue
-            try:
-                blob = await self._artifact_store.load_bytes(attachment_id)
-            except Exception:  # noqa: BLE001 —— 存储故障降级为占位符，不让一张图 brick run
-                logger.warning(
-                    "附件字节读取失败（%s）——投影降级为占位符", attachment_id,
-                )
-                continue
-            data = blob.content
-            if not data:
-                continue
-            try:
-                # B4：归一化目标从配置接线（默认 = 模块常量 DSH 一组）。
-                normalized = normalize_image(
-                    data,
-                    max_dimension=self._image_normalize_max_dimension,
-                    max_bytes=self._image_normalize_max_bytes,
-                )
-                media_type, raw = normalized.media_type, normalized.data
-            except Exception:  # noqa: BLE001 —— 解码失败回退原始字节（best-effort）
-                logger.warning(
-                    "附件归一化失败（%s）——按原始字节发送", attachment_id,
-                )
-                media_type, raw = blob.mime_type, data
-            payload = (media_type, base64.b64encode(raw).decode("ascii"))
-            self._image_payload_cache[attachment_id] = payload
-            payloads[attachment_id] = payload
-        return payloads
+        referenced = sorted(referenced_attachment_ids(session.events))
+        missing = [aid for aid in referenced if aid not in self._image_payload_cache]
+        if missing:
+            # 只让**未命中缓存**的 id 走接缝——命中即复用，跳过整条
+            # load/解码/编码/base64 链（缓存注释里的性能契约）。
+            fresh = await load_image_payloads(
+                self._artifact_store,
+                referenced=missing,
+                max_dimension=self._image_normalize_max_dimension,
+                max_bytes=self._image_normalize_max_bytes,
+            )
+            # 接缝的 per-image 降级语义（取不回 ⇒ 该 id 缺席）在此收窄：**失败不进缓存**，
+            # 暂态读取失败可在下一轮 build 重试。
+            self._image_payload_cache.update(fresh or {})
+        return {
+            aid: self._image_payload_cache[aid]
+            for aid in referenced
+            if aid in self._image_payload_cache
+        }
 
     def set_supports_vision(self, supports_vision: bool) -> None:
         """更新本次投影的视觉判定（#823 / MM-02 A2：跟随**当前请求模型**）。

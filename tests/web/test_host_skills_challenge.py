@@ -45,11 +45,14 @@ class _SkillCapability:
 
 
 class _FakeAgent:
-    def __init__(self, capability: _SkillCapability) -> None:
+    def __init__(
+        self, capability: _SkillCapability, mcp_packages: list[dict[str, object]] | None = None
+    ) -> None:
         self._capability = capability
+        self._mcp_packages = mcp_packages or []
 
     async def get_wiring(self):
-        return None, SimpleNamespace(skills=self._capability)
+        return None, SimpleNamespace(skills=self._capability, mcp_packages=self._mcp_packages)
 
 
 def _host_token(secret: str, *, expires_in: timedelta) -> str:
@@ -100,6 +103,51 @@ def test_host_service_challenge_authenticates_and_signs_live_skills_response(
         invalid = dict(headers)
         invalid[HOST_SKILLS_PROOF_HEADER] = "0" * 64
         assert client.get("/api/skills", headers=invalid).status_code == 401
+
+
+def test_host_service_challenge_authenticates_and_signs_live_mcp_package_response(
+    tmp_path: Path,
+) -> None:
+    secret = "host-challenge-test-secret-with-sufficient-length"
+    token = _host_token(secret, expires_in=timedelta(minutes=5))
+    packages = [{
+        "package_id": "weather-tools",
+        "scope": "project",
+        "sha256": "a" * 64,
+        "server_names": ["weather"],
+    }]
+    app = create_app(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+        enable_cors=False,
+        host_service_token=token,
+    )
+    app.state.agent = _FakeAgent(
+        _SkillCapability(tmp_path / "skills" / "sample-skill" / "SKILL.md"), packages
+    )
+    nonce = secrets.token_hex(32)
+    timestamp = str(int(datetime.now(UTC).timestamp()))
+    headers = {
+        HOST_SKILLS_NONCE_HEADER: nonce,
+        HOST_SKILLS_TIMESTAMP_HEADER: timestamp,
+        HOST_SKILLS_PROOF_HEADER: host_skills_request_proof(
+            token, nonce, _SERVICE_UUID, timestamp, path="/api/mcp/packages"
+        ),
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/mcp/packages", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["packages"] == packages
+        assert response.headers[HOST_SKILLS_RESPONSE_PROOF_HEADER] == host_skills_response_proof(
+            token,
+            nonce,
+            _SERVICE_UUID,
+            timestamp,
+            response.status_code,
+            response.content,
+            path="/api/mcp/packages",
+        )
+        assert client.get("/api/mcp/packages", headers=headers).status_code == 401
 
 
 def test_bearer_authenticates_skills_when_host_challenge_is_invalid(

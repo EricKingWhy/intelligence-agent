@@ -36,7 +36,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
-from agent_harness.mcp.config import MCPServerConfig
+from agent_harness.mcp.config import ConfigError, MCPServerConfig, parse_mcp_servers
 from agent_harness.skills.inspection import _add_error, read_package_text
 from agent_harness.tooling.contract import ToolPermission
 
@@ -205,6 +205,79 @@ def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
     else:
         report["status"] = "complete"
     return report
+
+
+def load_mcp_servers(source: Path | str) -> list[MCPServerConfig]:
+    """Read a preflighted descriptor into Runtime configs, expanding refs at Runtime only.
+
+    Static inspection remains the install/trust gate and never reads environment values.
+    This loader accepts references in env/header values only, but rejects every other
+    incomplete or unsupported descriptor before a server process or HTTP connection starts.
+    """
+    root = Path(source).expanduser().resolve(strict=True)
+    report = inspect_mcp_servers(root)
+    if report["status"] == "unsupported" or not report.get("description_file"):
+        raise ConfigError("MCP package failed static preflight")
+    requirements = list(report.get("requirements", []))
+    for server in report.get("servers", []):
+        requirements.extend(server.get("requirements", []))
+    runtime_refs_only = (
+        report["status"] == "needs-adaptation"
+        and bool(requirements)
+        and all(
+            isinstance(item, dict)
+            and item.get("kind") == "env-var"
+            and item.get("support") == "manual_review"
+            for item in requirements
+        )
+        and all(not server.get("errors") for server in report.get("servers", []))
+        and not report.get("errors")
+    )
+    if report["status"] != "complete" and not runtime_refs_only:
+        raise ConfigError("MCP package is not fully compatible")
+
+    errors: list[dict[str, str]] = []
+    found = _find_description(root, errors)
+    if found is None:
+        raise ConfigError("MCP package description is unavailable")
+    relative, text = found
+    raw = _parse_description(text, relative, errors)
+    if raw is None or errors:
+        raise ConfigError("MCP package description changed or is invalid")
+    entries = _server_entries(raw, relative, errors)
+    if entries is None or errors:
+        raise ConfigError("MCP package server declarations are invalid")
+    claude_shape = _is_claude_shape(raw)
+    normalized: list[dict[str, Any]] = []
+    for name, body in entries:
+        if claude_shape:
+            declared_transport = body.get("type", "stdio")
+            transport = _CLAUDE_TRANSPORTS.get(declared_transport)
+            if transport is None:
+                raise ConfigError("MCP package transport is unsupported")
+            config = dict(body)
+            config.pop("type", None)
+            config.pop("oauth", None)
+            if "timeout" in config:
+                config["timeout_seconds"] = config.pop("timeout") / 1000
+        else:
+            config = dict(body)
+            transport = config.pop("transport", None)
+        config.pop("resources", None)
+        config.pop("prompts", None)
+        if transport == "stdio":
+            command = config.get("command")
+            if isinstance(command, str) and _is_package_path("command", command):
+                resolved_command = _resolve_runtime_package_path(root, command)
+                config["command"] = str(resolved_command)
+                if config.get("cwd") is None:
+                    config["cwd"] = str(root)
+            cwd = config.get("cwd")
+            if isinstance(cwd, str):
+                config["cwd"] = str(_resolve_runtime_package_path(root, cwd))
+        config.update(name=name, transport=transport)
+        normalized.append(config)
+    return parse_mcp_servers({"servers": normalized})
 
 
 def _find_description(root: Path, errors: list[dict[str, str]]) -> tuple[str, str] | None:
@@ -432,7 +505,7 @@ def _inspect_entry(
     report["transport"] = transport
 
     if transport == "stdio":
-        _check_stdio(package_root, entry, name, fail, gap, report, relative)
+        _check_stdio(package_root, entry, name, fail, report, relative)
     else:
         _check_http(entry, name, fail, gap, report)
         if claude_shape:
@@ -505,26 +578,59 @@ def _native_transport(entry: dict[str, Any], server: str, fail, narrow) -> str |
     return declared
 
 
-def _check_stdio(package_root, entry, server, fail, gap, report, relative) -> None:
+def _check_stdio(package_root, entry, server, fail, report, relative) -> None:
     command = entry.get("command")
     if not isinstance(command, str) or not command.strip():
-        fail("MCP_COMMAND_MISSING", "command", f"stdio server {server!r} 缺少非空 command")
+        fail(
+            "MCP_COMMAND_MISSING",
+            "command",
+            f"stdio server {server!r} 缺少非空 command",
+        )
         return
     args = entry.get("args", [])
     if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
-        fail("MCP_SERVER_INVALID", "args", f"server {server!r} 的 args 必须是字符串列表")
+        fail(
+            "MCP_SERVER_INVALID", "args", f"server {server!r} 的 args 必须是字符串列表"
+        )
         return
     cwd = entry.get("cwd")
     if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
         fail("MCP_SERVER_INVALID", "cwd", f"server {server!r} 的 cwd 必须是非空字符串")
         return
+    if isinstance(cwd, str) and _has_invalid_reference(cwd):
+        fail(
+            "MCP_SECRET_REFERENCE_INVALID",
+            "cwd",
+            f"server {server!r} 的 cwd 含非法引用写法",
+        )
+        return
+    if isinstance(cwd, str) and _unexpanded_refs(cwd):
+        fail(
+            "MCP_SECRET_REFERENCE_UNSUPPORTED",
+            "cwd",
+            f"server {server!r} 的 cwd 不支持环境变量引用；引用只允许用于 env 值",
+        )
+        return
     if isinstance(cwd, str):
         _resolve_package_path(package_root, cwd.strip(), "cwd", server, fail, report)
     report["args"] = [_arg_display(item) for item in args]
     if _has_invalid_reference(command):
-        fail("MCP_SECRET_REFERENCE_INVALID", "command", f"server {server!r} 的 command 含非法引用写法")
+        fail(
+            "MCP_SECRET_REFERENCE_INVALID",
+            "command",
+            f"server {server!r} 的 command 含非法引用写法",
+        )
         return
-    executable = _resolve_package_path(package_root, command.strip(), "command", server, fail, report)
+    if _unexpanded_refs(command) or any(_unexpanded_refs(item) for item in args):
+        fail(
+            "MCP_SECRET_REFERENCE_UNSUPPORTED",
+            "command",
+            f"server {server!r} 的 command/args 不支持环境变量引用；引用只允许用于 env 值",
+        )
+        return
+    executable = _resolve_package_path(
+        package_root, command.strip(), "command", server, fail, report
+    )
     if executable is None:
         return
     if report["command"] is None:
@@ -538,23 +644,6 @@ def _check_stdio(package_root, entry, server, fail, gap, report, relative) -> No
             "reason": "外部命令是否可用由部署环境决定；本预检不执行、也不查 PATH。",
         }
     )
-    if _has_invalid_reference(command) or any(_has_invalid_reference(item) for item in args):
-        # 只报**形状**，不回显原文：`--token=hunter2${}` 这串里既有明文又有坏引用，
-        # 把原文写进报告等于把凭据抄进了安装记录 / 诊断（spec 09 §1.1）。
-        fail(
-            "MCP_SECRET_REFERENCE_INVALID",
-            "command",
-            f"server {server!r} 的 command/args 含非法引用写法（空引用/非法变量名/嵌套）",
-        )
-        return
-    for value in (command, *args):
-        for var in sorted(_unexpanded_refs(value)):
-            gap(
-                "env-var",
-                "manual_review",
-                var,
-                f"参数里的 {var} 由部署环境在运行时提供；本预检不注入、不读取进程环境。",
-            )
 
 
 def _check_http(entry, server, fail, gap, report) -> None:
@@ -567,12 +656,11 @@ def _check_http(entry, server, fail, gap, report) -> None:
     if _has_invalid_reference(url):
         fail("MCP_SECRET_REFERENCE_INVALID", "url", f"server {server!r} 的 url 含非法引用写法")
         return
-    for var in sorted(_unexpanded_refs(url)):
-        gap(
-            "env-var",
-            "manual_review",
-            var,
-            "URL 里的部署环境变量引用在运行时展开；本预检只列出引用名，不取值。",
+    if _unexpanded_refs(url):
+        fail(
+            "MCP_SECRET_REFERENCE_UNSUPPORTED",
+            "url",
+            f"server {server!r} 的 url 不支持环境变量引用；引用只允许用于 headers 值",
         )
 
 
@@ -797,7 +885,7 @@ def _resolve_package_path(package_root, value: str, field: str, server: str, fai
     **只读**：只 `resolve()` 比较，不执行、也不跟随越界 symlink。
     """
     if not _SECRET_REF.search(value):
-        looks_like_path = bool(_RELATIVE_PATH.match(value)) or "/" in value or "\\" in value
+        looks_like_path = field == "cwd" or _is_package_path(field, value)
         if looks_like_path:
             candidate = Path(value)
             resolved = candidate.resolve() if candidate.is_absolute() else (package_root / candidate).resolve()
@@ -827,6 +915,15 @@ def _resolve_package_path(package_root, value: str, field: str, server: str, fai
             fail("MCP_COMMAND_UNUSABLE", field, f"{field} 的值不像可执行命令: {value!r}")
             return None
     return Path(value).name
+
+
+def _is_package_path(field: str, value: str) -> bool:
+    return field == "cwd" or bool(_RELATIVE_PATH.match(value)) or "/" in value or "\\" in value
+
+
+def _resolve_runtime_package_path(package_root: Path, value: str) -> Path:
+    candidate = Path(value)
+    return (candidate if candidate.is_absolute() else package_root / candidate).resolve(strict=True)
 
 
 def _package_label(resolved: Path, package_root: Path) -> str:

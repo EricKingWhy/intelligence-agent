@@ -11,7 +11,14 @@
  * 2000+ 行的聚合模块。
  */
 
-/** 事件里一条图片引用的形状（= 后端 `attachments.types.ImageRef`）。 */
+/**
+ * 事件里一条图片引用的形状（= 后端 `attachments.projection.ImageRef`，它继承持久化
+ * 契约 `attachments.types.ImageAttachmentRef` 并加一个 `kind` 判别字段）。
+ *
+ * 字段名 / 判别字面量 / 可空性由 `tests/web/test_attachment_ref_contract.py` 与后端
+ * 模型机械对账——单边改必红（此前这里指错了模块：声明名是 `ImageAttachmentRef`、
+ * 模块坐标却指向 `attachments.types.ImageRef`——一个不含 `kind` 的类）。
+ */
 export interface ImageAttachmentRef {
   kind: 'image';
   attachment_id: string;
@@ -20,9 +27,11 @@ export interface ImageAttachmentRef {
   width: number;
   height: number;
   /**
-   * 展示名（去本地路径）。**当前写入路径恒缺省**（后端注释：上传回执的 name 未持久化，
-   * 属结构性缺省——`src/agent_harness/attachments/types.py` 的 `name` 字段注释）。
-   * 界面据此回落显示"图片"而不是伪造一个文件名。
+   * 展示名（去本地路径）。**可空**，不是"恒缺省"（#939 M-27 起的实际口径）：
+   * CLI `--image <path>` 手上有文件名 ⇒ 真的带上；Web 发送端点只收 `attachment_ids`
+   * （`SendMessageRequest.attachments: list[str]`），**没有回传信道** ⇒ 那条缺省。
+   * 权威注释在 `src/agent_harness/attachments/types.py` 的 `name` 字段与本目录的
+   * `admission.image_reference`。界面据此回落显示"图片"而不是伪造一个文件名。
    */
   name?: string | null;
 }
