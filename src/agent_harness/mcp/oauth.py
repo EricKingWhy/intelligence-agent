@@ -144,6 +144,9 @@ class MCPKeyringTokenStorage:
     async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
         await self._update("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
 
+    async def clear_oauth_metadata(self) -> bool:
+        return await self._update("oauth_metadata", None)
+
     async def get_resource_metadata(self) -> ProtectedResourceMetadata | None:
         async with self._lock:
             with self._record_lock():
@@ -172,13 +175,16 @@ class MCPKeyringTokenStorage:
                     ) from error
                 self._generation = next_generation
 
-    async def _update(self, field: str, value: dict[str, Any]) -> bool:
+    async def _update(self, field: str, value: dict[str, Any] | None) -> bool:
         async with self._lock:
             with self._record_lock():
                 record = self._read()
                 if not self._is_current_generation(record):
                     return False
-                record[field] = value
+                if value is None:
+                    record.pop(field, None)
+                else:
+                    record[field] = value
                 if field == "tokens":
                     record["tokens_saved_at"] = time.time()
                 self._write(record)
@@ -254,7 +260,7 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
         self._metadata_restore_attempted = False
 
     async def async_auth_flow(self, request: httpx2.Request):
-        restore_token_expiry = self.context.current_tokens is None
+        restore_token_expiry = self.context.token_expiry_time is None
         async with self.context.lock:
             if not self._metadata_restore_attempted:
                 if self.context.oauth_metadata is None:
@@ -296,6 +302,7 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
                     outgoing = await flow.asend(response)
                 except StopAsyncIteration:
                     return
+                await self._discard_oauth_metadata_for_changed_issuer()
                 metadata = self.context.oauth_metadata
                 persist = getattr(self.context.storage, "set_oauth_metadata", None)
                 if metadata is not None and persist is not None:
@@ -309,6 +316,17 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
             raise
         finally:
             await flow.aclose()
+
+    async def _discard_oauth_metadata_for_changed_issuer(self) -> None:
+        metadata = self.context.oauth_metadata
+        auth_server_url = self.context.auth_server_url
+        metadata_issuer = str(metadata.issuer) if metadata is not None and metadata.issuer else None
+        if metadata is None or auth_server_url is None or metadata_issuer == auth_server_url:
+            return
+        self.context.oauth_metadata = None
+        clear_metadata = getattr(self.context.storage, "clear_oauth_metadata", None)
+        if clear_metadata is not None:
+            await clear_metadata()
 
     async def _ensure_saved_token_is_current(self, request: httpx2.Request) -> None:
         if not self._is_mcp_request(request) or not request.headers.get("authorization"):

@@ -377,6 +377,120 @@ async def test_oauth_provider_validates_the_token_snapshot_loaded_by_the_sdk():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_sdk_initialization_rechecks_loaded_token_expiry_on_retry():
+    import asyncio
+
+    import httpx2
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class BlockingClientInfoStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.client_info_read = asyncio.Event()
+            self.release_client_info = asyncio.Event()
+            self.block_client_info = True
+
+        async def get_tokens(self):
+            return OAuthToken(access_token="expired-access", expires_in=-1)
+
+        async def get_client_info(self):
+            if self.block_client_info:
+                self.client_info_read.set()
+                await self.release_client_info.wait()
+
+    storage = BlockingClientInfoStorage(config.name, config.url, keyring_api=FakeKeyring())
+    provider = make_oauth_client_provider(config, storage)
+    cancelled_flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+    initialization = asyncio.create_task(anext(cancelled_flow))
+    await storage.client_info_read.wait()
+    initialization.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initialization
+    await cancelled_flow.aclose()
+
+    storage.block_client_info = False
+    retry_flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+    try:
+        outgoing = await anext(retry_flow)
+    finally:
+        await retry_flow.aclose()
+
+    assert outgoing.headers.get("authorization") is None
+
+
+@pytest.mark.asyncio
+async def test_restart_discards_persisted_metadata_when_resource_changes_issuer():
+    import httpx2
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+    keyring = FakeKeyring()
+    before_restart = MCPKeyringTokenStorage(config.name, config.url, keyring_api=keyring)
+    await before_restart.set_tokens(OAuthToken(access_token="old-access", expires_in=3600))
+    await before_restart.set_client_info(OAuthClientInformationFull(
+        client_id="legacy-client",
+        token_endpoint_auth_method="none",
+    ))
+    await before_restart.set_oauth_metadata(_metadata(
+        issuer="https://old-as.example.com",
+        authorization_endpoint="https://old-as.example.com/authorize",
+        token_endpoint="https://old-as.example.com/token",
+    ))
+    await before_restart.set_resource_metadata(ProtectedResourceMetadata(
+        resource=config.url,
+        authorization_servers=["https://old-as.example.com"],
+    ))
+
+    storage = MCPKeyringTokenStorage(config.name, config.url, keyring_api=keyring)
+    provider = make_oauth_client_provider(config, storage)
+    flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+    try:
+        mcp_request = await anext(flow)
+        assert mcp_request.headers["authorization"] == "Bearer old-access"
+        prm_request = await flow.asend(httpx2.Response(
+            401,
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer resource_metadata="https://mcp.example.com/'
+                    '.well-known/oauth-protected-resource"'
+                )
+            },
+            request=mcp_request,
+        ))
+        discovery_request = await flow.asend(httpx2.Response(
+            200,
+            json={
+                "resource": config.url,
+                "authorization_servers": ["https://new-as.example.com"],
+            },
+            request=prm_request,
+        ))
+    finally:
+        await flow.aclose()
+
+    assert discovery_request.url.host == "new-as.example.com"
+    assert provider.context.auth_server_url == "https://new-as.example.com"
+    assert provider.context.oauth_metadata is None
+    assert await storage.get_oauth_metadata() is None
+
+
+@pytest.mark.asyncio
 async def test_oauth_provider_does_not_overwrite_metadata_discovered_while_loading():
     import asyncio
 
