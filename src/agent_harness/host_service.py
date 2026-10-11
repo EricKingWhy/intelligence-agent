@@ -86,6 +86,7 @@ __all__ = [
     "host_skills_response_proof",
     "host_token_username",
     "publish_endpoint",
+    "query_attached_mcp_packages",
     "query_attached_skill_catalog",
     "read_endpoint",
     "serve_once",
@@ -133,12 +134,12 @@ HOST_SKILLS_PROOF_WINDOW_SECONDS = 30
 
 
 def host_skills_request_proof(
-    token: str, nonce: str, service_uuid: str, timestamp: str
+    token: str, nonce: str, service_uuid: str, timestamp: str, *, path: str = "/api/skills"
 ) -> str:
     """Authenticate a one-use catalog query without transmitting the host bearer token."""
     _validate_host_skills_proof_fields(nonce, service_uuid, timestamp)
     message = (
-        b"agent-harness-host:v1\nGET\n/api/skills\n"
+        f"agent-harness-host:v1\nGET\n{path}\n".encode("ascii")
         + nonce.encode("ascii")
         + b"\n"
         + service_uuid.encode("ascii")
@@ -155,12 +156,14 @@ def host_skills_response_proof(
     timestamp: str,
     status: int,
     body: bytes,
+    *,
+    path: str = "/api/skills",
 ) -> str:
     """Bind an authenticated catalog response to its request challenge and body."""
     _validate_host_skills_proof_fields(nonce, service_uuid, timestamp)
     body_digest = hashlib.sha256(body).hexdigest().encode("ascii")
     message = (
-        b"agent-harness-host:v1\nRESPONSE\nGET\n/api/skills\n"
+        f"agent-harness-host:v1\nRESPONSE\nGET\n{path}\n".encode("ascii")
         + nonce.encode("ascii")
         + b"\n"
         + service_uuid.encode("ascii")
@@ -473,7 +476,41 @@ def query_attached_skill_catalog(
     credentials: Credentials | None = None,
     connect_timeout: float = PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
-    """Read the live Skills catalog using nonce HMACs, never sending the bearer token.
+    """Read the live Skills catalog using nonce HMACs, never sending the bearer token."""
+    return _query_attached_runtime_payload(
+        root,
+        path="/api/skills",
+        payload_key="skills",
+        credentials=credentials,
+        connect_timeout=connect_timeout,
+    )
+
+
+def query_attached_mcp_packages(
+    root: str | os.PathLike[str],
+    *,
+    credentials: Credentials | None = None,
+    connect_timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    """Read active MCP package identities using the host's one-use HMAC challenge."""
+    return _query_attached_runtime_payload(
+        root,
+        path="/api/mcp/packages",
+        payload_key="packages",
+        credentials=credentials,
+        connect_timeout=connect_timeout,
+    )
+
+
+def _query_attached_runtime_payload(
+    root: str | os.PathLike[str],
+    *,
+    path: str,
+    payload_key: str,
+    credentials: Credentials | None,
+    connect_timeout: float,
+) -> dict[str, Any] | None:
+    """Read one authenticated Runtime status payload without sending its bearer token.
 
     Returns ``None`` when the endpoint is absent, stale, older than the challenge
     extension, unauthenticated, or returns an invalidly signed response.
@@ -522,7 +559,7 @@ def query_attached_skill_catalog(
         HOST_SKILLS_NONCE_HEADER: nonce,
         HOST_SKILLS_TIMESTAMP_HEADER: timestamp,
         HOST_SKILLS_PROOF_HEADER: host_skills_request_proof(
-            token, nonce, endpoint.service_uuid, timestamp
+            token, nonce, endpoint.service_uuid, timestamp, path=path
         ),
     }
     try:
@@ -531,12 +568,12 @@ def query_attached_skill_catalog(
             return None
         status, response_headers, body = asyncio.run(
             _loopback_get_bytes_with_deadline(
-                endpoint.port, "/api/skills", headers=proof_headers, timeout=timeout
+                endpoint.port, path, headers=proof_headers, timeout=timeout
             )
         )
         response_proof = response_headers.get(HOST_SKILLS_RESPONSE_PROOF_HEADER.lower(), "")
         expected_proof = host_skills_response_proof(
-            token, nonce, endpoint.service_uuid, timestamp, status, body
+            token, nonce, endpoint.service_uuid, timestamp, status, body, path=path
         )
         if status != 200 or not hmac.compare_digest(response_proof, expected_proof):
             return None
@@ -545,7 +582,7 @@ def query_attached_skill_catalog(
         payload = json.loads(body.decode("utf-8"))
     except (OSError, ValueError, TimeoutError, EOFError, RecursionError):
         return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+    if not isinstance(payload, dict) or not isinstance(payload.get(payload_key), list):
         return None
     return payload
 
