@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   budgetText,
   detectImageMediaType,
+  displayAttachmentName,
   filesFromClipboard,
   getImageLimits,
   IMAGE_LIMITS,
@@ -385,5 +386,17 @@ describe('loadImageLimits / getImageLimits — #937 M-08 服务端下发', () =>
     const out = partitionIntake([file('big.png', 'image/png', 60)]);
     expect(out.accepted).toEqual([]);
     expect(out.error).toContain('50 B');
+  });
+});
+
+describe('displayAttachmentName — #938 / M-26 文件名缺省收口', () => {
+  it('正常名原样返回', () => {
+    expect(displayAttachmentName('photo.png')).toBe('photo.png');
+  });
+
+  it('空串 / null / undefined 都回缺省名（此前三处手写，#938 收口）', () => {
+    expect(displayAttachmentName('')).toBe('图片');
+    expect(displayAttachmentName(null)).toBe('图片');
+    expect(displayAttachmentName(undefined)).toBe('图片');
   });
 });

@@ -20,6 +20,7 @@
 import { ImagePlus, RotateCcw, X } from 'lucide-react';
 import type { DraftAttachment } from '../hooks/useDraftAttachments';
 import { formatBytes } from '../lib/format';
+import { displayAttachmentName } from '../lib/attachments';
 import { DropOverlay } from './DropOverlay';
 
 interface Props {
@@ -97,12 +98,12 @@ export function ComposerAttachments({
               ) : (
                 // 缩略图生成失败（浏览器解不了这张图）→ 如实显示文件名，不画假图。
                 <span className="composer-attach-thumb composer-attach-thumb-fallback">
-                  {item.file.name || '图片'}
+                  {displayAttachmentName(item.file.name)}
                 </span>
               )}
               <span className="composer-attach-meta">
                 <span className="composer-attach-name" title={item.file.name}>
-                  {item.file.name || '图片'}
+                  {displayAttachmentName(item.file.name)}
                 </span>
                 <span className="composer-attach-size">
                   {item.status === 'uploading'
