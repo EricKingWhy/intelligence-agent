@@ -14,6 +14,7 @@ test_context_usage.py 同：真实 ASGI 服务器（uvicorn port=0）+ 可控请
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 
@@ -180,6 +181,7 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
     - 再发 /api/health：正确实现 ~0.2s 内返回（health_elapsed < 0.8 保持绿）；
       变异实现此时循环仍被扫描占住 ⇒ health ≥ 1.5s，确定性红。
     metrics_elapsed ≥ 1.4 证明慢扫描真的拖住了 /metrics 响应（钉有区分度）。
+    等待有 5s 明确上限（#964）：请求到不了服务端时以失败结束，不挂死。
     """
 
     scan_started = threading.Event()
@@ -195,9 +197,12 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
     try:
         started = time.monotonic()
         metrics_task = asyncio.create_task(_get_raw(port, "/metrics"))
-        while not scan_started.is_set():
-            await asyncio.sleep(0.05)
-        assert time.monotonic() - started < 5.0, "扫描 5s 内没开始（服务器没接住请求）"
+        try:
+            async with asyncio.timeout(5.0):
+                while not scan_started.is_set():
+                    await asyncio.sleep(0.05)
+        except TimeoutError:
+            pytest.fail("扫描 5s 内没开始：/metrics 请求到不了服务端（服务器没接住请求）")
         health_status, _h, _t = await _get_raw(port, "/api/health")
         health_elapsed = time.monotonic() - started
         metrics_status, _h, _t = await metrics_task
@@ -211,3 +216,42 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
     assert health_elapsed < 0.8, (
         f"/api/health 在扫描开始后 {health_elapsed:.2f}s 才返回——事件循环被慢采集阻塞了"
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 等待上限钉（#964：请求到不了服务端时等待必须有明确上限，不挂死）
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_metrics_scan_wait_has_deadline_when_request_never_arrives(
+    tmp_path, monkeypatch
+):
+    """#964 红证：请求永远到不了服务端时，扫描开始等待必须在有限时间内失败。
+
+    模拟 #505 第 1 轮的现场（代理黑洞：/metrics 请求发出后永不到达服务端，
+    scan_started 永不置位）。直接调用真实的
+    test_metrics_slow_resampling_does_not_block_event_loop 本体（不是拷贝），
+    只把它的 _get_raw 换成黑洞：
+    - 修复前：等待循环无截止 ⇒ 本用例挂起，由外部 `timeout` 命令判红；
+    - 修复后：asyncio.timeout 到期 ⇒ 本体以 pytest.fail 失败 ⇒ 本用例通过。
+    """
+    real_get_raw = sys.modules[__name__]._get_raw
+
+    async def _blackhole(port: int, path: str):
+        if path == "/metrics":
+            await asyncio.sleep(3600)  # 请求到不了服务端：永不返回
+            raise AssertionError("unreachable")
+        return await real_get_raw(port, path)
+
+    monkeypatch.setattr(sys.modules[__name__], "_get_raw", _blackhole)
+
+    started = time.monotonic()
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        await test_metrics_slow_resampling_does_not_block_event_loop(
+            tmp_path, monkeypatch
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, f"等待应在有限时间内失败，实际耗时 {elapsed:.1f}s（疑似挂起）"
+    assert "没开始" in str(excinfo.value), f"失败原因应指明扫描没开始：{excinfo.value}"
