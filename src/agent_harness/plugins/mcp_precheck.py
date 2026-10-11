@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, get_args
 from urllib.parse import urlsplit, urlunsplit
@@ -100,6 +101,12 @@ _COMMAND_SHAPE = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 
 #: 描述嵌套超深时的固定文案（`MCP_DESCRIPTION_TOO_DEEP`；与 TOO_LARGE 同档：读得出、判不了）。
 _TOO_DEEP_MESSAGE = "描述嵌套过深，无法静态解析。"
+
+#: 安装闸门分档用的**内部** finding 标记：区分"本仓首版不支持的能力"（可适配的缺口）与
+#: "描述写坏"（作者错误）。它只被 `_blocks_install` 消费一次，不属于 error 契约
+#: （`skills/inspection._add_error` 的 {code, path, message}），消费后必须从报告里摘掉，
+#: 否则会外泄进 `plugins inspect` 的可见 JSON（#975）。
+_INTERNAL_FINDING_MARKER = "adaptive"
 
 #: 本仓首版**不实现的已知 MCP transport**：`sse`/`ws`/`sdk` 在 MCP 与 Claude Code
 #: 里都真实存在，只是 `MCPServerConfig` 没有对应表达。ADR-0052 D2 把"自定义 transport"
@@ -484,12 +491,13 @@ def _inspect_entry(
     def narrow(code: str, path: str, message: str) -> None:
         """记一条**能力收窄**级发现：MCP 面内照旧明确失败（AC3），但不拦整包安装。
 
-        与 `fail` 的唯一差别是那条 `adaptive` 标记——`attach_mcp_section` 据此把"本仓
-        首版不支持"与"包作者写坏了描述"分档：前者让包停在 needs-adaptation（可装、
-        不可启用），后者 fail-closed 拦安装。
+        与 `fail` 的唯一差别是那条 `_INTERNAL_FINDING_MARKER` 标记——`attach_mcp_section`
+        据此把"本仓首版不支持"与"包作者写坏了描述"分档：前者让包停在 needs-adaptation
+        （可装、不可启用），后者 fail-closed 拦安装。标记是预检内部的路由信号，
+        `attach_mcp_section` 消费后即摘除，不外泄进可见 JSON（#975）。
         """
         _add_error(failures, code, f"{name}.{path}" if path else name, message)
-        failures[-1]["adaptive"] = True
+        failures[-1][_INTERNAL_FINDING_MARKER] = True
 
     def gap(kind: str, support: str, name_of_item: str, reason: str) -> None:
         requirements.append({"kind": kind, "name": name_of_item, "support": support, "reason": reason})
@@ -941,41 +949,71 @@ def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
       "为什么被拒"更难读；MCP 段仍照出（`report["mcp"]`）。
     - MCP 段判 `unsupported` 且含**描述写坏**的发现（`_blocks_install`）⇒ 包级 status 也
       是 `unsupported`（AC3 的"明确失败"要能拦住安装，与 Skill 面"有 errors ⇒ unsupported"同档）；
-    - MCP 段只有**缺口**、或全是**首版不支持**的发现（`adaptive` 标记）⇒ 包级降一档到
+    - MCP 段只有**缺口**、或全是**首版不支持**的发现（内部分档标记）⇒ 包级降一档到
       `needs-adaptation`（可装、不可启用）；
     - 没有描述 ⇒ MCP 段自己就是 `needs-adaptation`，包级不动（Skill 仍然能用）。
+
+    分档标记是预检内部信号：这里**先算出安装结论，再把它摘掉**，使返回的报告（也就是
+    `plugins inspect` 序列化出去的那份）只含用户可见的契约字段（#975）。
     """
     source = report.get("source")
     if not isinstance(source, str) or not source:
         return report
     mcp_report = inspect_mcp_servers(source)
+    blocks_install = _blocks_install(mcp_report)  # 消费标记：必须在摘除之前
+    _drop_internal_finding_marker(mcp_report)
     report["mcp"] = mcp_report
     if report.get("status") == "unsupported":
         return report  # 包本身已被拒；MCP 段照出，但不叠加"为什么被拒"的噪音
     requirements = mcp_compatibility_requirements(mcp_report)
     report.setdefault("requirements", []).extend(requirements)
     if report.get("status") == "complete":
-        if _blocks_install(mcp_report):
+        if blocks_install:
             report["status"] = "unsupported"
         elif any(item["support"] == "unsupported" for item in requirements):
             report["status"] = "needs-adaptation"
     return report
 
 
+def _iter_error_dicts(report: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """遍历 MCP 报告里的全部 finding：顶层 `errors` 与每个 server 的 `errors`。
+
+    预检把 finding 放在这两处；安装闸门（`_blocks_install`）与内部分档标记的摘除
+    （`_drop_internal_finding_marker`）都要扫这两处，共用一个遍历以免两处判据漂移
+    （#975 复审）。
+    """
+    yield from report.get("errors", [])
+    for server in report.get("servers", []):
+        yield from server.get("errors", [])
+
+
+def _drop_internal_finding_marker(report: dict[str, Any]) -> None:
+    """摘掉只供安装闸门消费的内部分档标记，避免它进可见 JSON（#975）。
+
+    `narrow` 把它挂在"本仓首版不支持的能力"那条 error 上，`_blocks_install` 据此区分
+    "能力收窄"与"描述写坏"；分类是预检内部的路由信号，不是 error 契约的一部分
+    （`skills/inspection._add_error` 的 {code, path, message}）。消费后即从顶层与每个
+    server 的 errors 里摘除。
+    """
+    for error in _iter_error_dicts(report):
+        error.pop(_INTERNAL_FINDING_MARKER, None)
+
+
 def _blocks_install(report: dict[str, Any]) -> bool:
     """MCP 报告是否含**描述写坏**的发现——只有这一类才拦整包安装。
 
-    "首版不支持的能力"（被 `narrow` 打了 `adaptive` 标记）是可适配的缺口：它让包停在
-    `needs-adaptation`（可装、不可启用），不把 Skill 面健康的包一起拒掉。反之，描述
-    读不出来 / 缺 command / 未知字段 / 越界路径 / transport 写坏这类**作者错误**仍然
-    fail-closed。**判据是那条标记，不是错误码**：同一个 `MCP_TRANSPORT_UNSUPPORTED`
-    既标"本仓不实现 `sse`"（收窄）也标"transport 字段拼错了"（写坏），按码判会把
-    后者一起放行。
+    "首版不支持的能力"（被 `narrow` 打了 `_INTERNAL_FINDING_MARKER` 标记）是可适配的
+    缺口：它让包停在 `needs-adaptation`（可装、不可启用），不把 Skill 面健康的包一起
+    拒掉。反之，描述读不出来 / 缺 command / 未知字段 / 越界路径 / transport 写坏这类
+    **作者错误**仍然 fail-closed。**判据是那条标记，不是错误码**：同一个
+    `MCP_TRANSPORT_UNSUPPORTED` 既标"本仓不实现 `sse`"（收窄）也标"transport 字段拼错了"
+    （写坏），按码判会把后者一起放行。
+
+    只读不摘：标记的摘除归 `attach_mcp_section`（它消费本函数的结论后统一摘）。
     """
-    errors = list(report.get("errors", []))
-    for server in report.get("servers", []):
-        errors.extend(server.get("errors", []))
-    return any(not error.get("adaptive") for error in errors)
+    return any(
+        not error.get(_INTERNAL_FINDING_MARKER) for error in _iter_error_dicts(report)
+    )
 
 
 def mcp_compatibility_requirements(report: dict[str, Any]) -> list[dict[str, Any]]:
