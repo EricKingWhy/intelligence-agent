@@ -27,8 +27,11 @@ import pytest
 from agent_harness.model.failure import (
     UNCLASSIFIED_FAILURE_MESSAGE,
     provider_http_status,
+    transport_failure_kind,
     unclassified_failure_message,
 )
+from agent_harness.model.fallback import is_transient_model_error
+from agent_harness.model.stall import ModelStallError
 
 #: 植入的"假凭证 / 回显文本"：真实供应商错误体会回显请求内容与 key 前缀（ADR-0033 §1.2）。
 PLANTED_SECRETS: tuple[str, ...] = (
@@ -185,3 +188,74 @@ def test_other_valid_status_codes_keep_status_in_message(code: int) -> None:
     else:
         assert "未分类异常" in message
     _assert_no_echo(message)
+
+
+# ---- #999：没拿到 HTTP 响应的传输层失败 —— 与 fallback 瞬时判据同一来源 ----
+#
+# 口径照 openai-python ``_base_client``（3.0.0）的包装：``timeout_exceptions()``
+# （httpx ``TimeoutException`` 族）⇒ ``APITimeoutError``，其余发送期异常 ⇒
+# ``APIConnectionError``。本仓在此之外还有三类「同形」异常源：项目自有的卡流看门狗
+# ``ModelStallError``、内建 ``TimeoutError`` / ``ConnectionError``（含子类）、未经
+# openai 包装的 httpx 传输错。它们 fallback 早已判瞬时，文案却落「未分类」（#996 P3-2）。
+
+#: case id → (异常工厂, 期望类别)。超时类故意含 ``httpx.ConnectTimeout``：它同时是
+#: ``TransportError``（连接类的父）⇒ 钉「超时先于连接判」这条判序。
+_TRANSPORT_CASES: dict[str, tuple] = {
+    "stall_idle": (lambda: ModelStallError(30.0), "timeout"),
+    "stall_total": (lambda: ModelStallError(600.0, kind="total"), "timeout"),
+    "builtin_timeout": (lambda: TimeoutError(_ECHO), "timeout"),
+    "httpx_read_timeout": (lambda: httpx.ReadTimeout(_ECHO, request=_REQUEST), "timeout"),
+    "httpx_connect_timeout": (lambda: httpx.ConnectTimeout(_ECHO, request=_REQUEST), "timeout"),
+    "openai_timeout": (lambda: openai.APITimeoutError(request=_REQUEST), "timeout"),
+    "builtin_connection": (lambda: ConnectionError(_ECHO), "connection"),
+    "builtin_connection_refused": (lambda: ConnectionRefusedError(_ECHO), "connection"),
+    "httpx_connect_error": (lambda: httpx.ConnectError(_ECHO, request=_REQUEST), "connection"),
+    "httpx_remote_protocol": (
+        lambda: httpx.RemoteProtocolError(_ECHO, request=_REQUEST), "connection",
+    ),
+    "openai_connection": (
+        lambda: openai.APIConnectionError(message=_ECHO, request=_REQUEST), "connection",
+    ),
+}
+
+_CATEGORY_PHRASE = {"timeout": "模型供应商请求超时", "connection": "无法连接模型供应商"}
+_OTHER_PHRASE = {"timeout": "无法连接", "connection": "超时"}
+
+
+@pytest.mark.parametrize("case", list(_TRANSPORT_CASES))
+def test_transport_failures_get_timeout_or_connection_category(case: str) -> None:
+    make_error, kind = _TRANSPORT_CASES[case]
+    error = make_error()
+    assert transport_failure_kind(error) == kind
+    assert provider_http_status(error) is None
+    message = unclassified_failure_message(error)
+    assert _CATEGORY_PHRASE[kind] in message
+    assert _OTHER_PHRASE[kind] not in message
+    assert "HTTP" not in message
+    assert type(error).__name__ in message
+    _assert_no_echo(message)
+
+
+@pytest.mark.parametrize("case", list(_TRANSPORT_CASES))
+def test_transport_category_and_fallback_transience_share_one_judgment(case: str) -> None:
+    """单一判据来源：文案判为超时 / 连接的，fallback 必须判瞬时（反过来见下一条）。"""
+    error = _TRANSPORT_CASES[case][0]()
+    assert is_transient_model_error(error) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(_ECHO),
+        ValueError(_ECHO),
+        openai.APIError(_ECHO, request=_REQUEST, body=None),
+        httpx.DecodingError(_ECHO, request=_REQUEST),
+        OSError(_ECHO),
+    ],
+    ids=["RuntimeError", "ValueError", "openai.APIError", "httpx.DecodingError", "OSError"],
+)
+def test_non_transport_errors_have_no_transport_kind(error: BaseException) -> None:
+    """不是传输层失败的（含 httpx 同属 ``RequestError`` 但非 ``TransportError`` 的
+    ``DecodingError``、``ConnectionError`` 的父类 ``OSError``）：无类别、fallback 不判瞬时。"""
+    assert transport_failure_kind(error) is None
+    assert is_transient_model_error(error) is False
