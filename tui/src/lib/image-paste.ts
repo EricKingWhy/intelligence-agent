@@ -22,6 +22,10 @@
  *    冻住整个 TUI 事件循环（`openSync` 落在 FIFO 上同样会阻塞，故这条 `statSync` 筛查
  *    不能省）。同一 fd 上还做**大小上限**预检（与服务端 `attachment_max_image_bytes`
  *    同口径），超限直接拒，不把整文件读进内存。
+ *
+ * #938 / M-10：类型三表（IMAGE_EXTENSIONS / MEDIA_TYPE_BY_EXTENSION /
+ * CLIPBOARD_NAME_BY_MEDIA_TYPE）已 export，跨端快照守卫见
+ * tui/test/image-media-types-snapshot.test.ts（读服务端权威源的 canonical 快照对账）。
  */
 import { closeSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -39,10 +43,10 @@ export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
 ];
 
 /** 扩展名 -> 是图片（与服务端 `EXTENSION_MEDIA_TYPES` 的键集逐字一致）。 */
-const IMAGE_EXTENSIONS: readonly string[] = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+export const IMAGE_EXTENSIONS: readonly string[] = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
 /** 扩展名 -> media type（镜像服务端 `EXTENSION_MEDIA_TYPES`，用于声明一致性判定）。 */
-const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
+export const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -51,7 +55,7 @@ const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
 };
 
 /** 剪贴板字节的展示名（没有本地文件名）：扩展名必须与 media type 一致。 */
-const CLIPBOARD_NAME_BY_MEDIA_TYPE: Record<string, string> = {
+export const CLIPBOARD_NAME_BY_MEDIA_TYPE: Record<string, string> = {
   "image/png": "clipboard.png",
   "image/jpeg": "clipboard.jpg",
   "image/webp": "clipboard.webp",
