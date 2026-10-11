@@ -10,7 +10,7 @@
 2. **SDK 是 OAuth 协议实现，不是登录产品。** 调用方必须提供 TokenStorage、重定向处理器和回调处理器；TokenStorage 只有读取/写入 token/client_info 四个异步方法，没有删除接口。SDK 不负责本仓的浏览器/无浏览器路径、凭据持久化选择、状态呈现、注销 UX 或失败恢复政策。来源：[SDK API 文档](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/docs/client/oauth-clients.md#L193-L209)、[TokenStorage 定义](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/client/auth/oauth2.py#L127-L144)。
 3. **票面“撤销”须区分本地注销与服务端撤销。** 当前 MCP Authorization 规范全文没有定义客户端 logout/RFC 7009 调用。RFC 8414 的 revocation_endpoint 是可选元数据；RFC 7009 的远端撤销要求客户端向可信 HTTPS endpoint 发 POST。SDK 2.1.1 能解析可选 revocation_endpoint，也有可选的**服务端** /revoke handler；但其**客户端** OAuth 实现没有调用 revocation endpoint。因此清除内存 token 或本地凭据不能称为服务端撤销。若 AC 要求对任意 OAuth-only server 远端撤销，协议与 SDK 不提供普遍保证；若 AC 的“撤销”意为本地安全注销，应明确命名为“清除本地凭据”，并将远端撤销限定为服务器支持时提供。来源：[RFC 8414](https://www.rfc-editor.org/rfc/rfc8414#section-2)、[RFC 7009](https://www.rfc-editor.org/rfc/rfc7009#section-2)、[SDK OAuthMetadata](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/shared/auth.py#L203-L230)、[SDK server revoke route](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/auth/routes.py#L193-L196)、[SDK server handler](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/auth/handlers/revoke.py#L32-L80)。
 4. **现有 keyring seam 不能默认承载一个 OAuth JSON cache。** Windows CredentialBlob 官方上限是 5×512 = 2560 bytes；SDK token/client_info 是结构对象，序列化后可能超过单条上限，单个 JWT 也可能超限。keyring 上游 #540 记录过约 1280 个双字节字符的实际边界，并讨论了分片升级后降级会静默读回截断值的风险。七个客户端的公开资料没有披露一个可复用且证明可承载超长 token 的通用存储格式/上限。本报告不建议把合并 JSON 直接写入一个 entry，也不把未经验证的分片视为成熟方案。来源：[Microsoft CredentialBlob](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentiala#credentialblobsize)、[keyring 上游 #540](https://github.com/jaraco/keyring/issues/540)。
-5. 项目现有 [MCP config](../../src/agent_harness/mcp/config.py#L33-L49) 仅表达 headers；[HTTP client seam](../../src/agent_harness/mcp/client.py#L85-L95) 仅注入静态 headers；[OAuth 预检](../../src/agent_harness/plugins/mcp_precheck.py#L667-L677) 将 OAuth 描述标为 oauth_required_unsupported。SDK provider 可接入 HTTPX AsyncClient auth seam，但 token cache、回调/UI、登录状态、失效清理需单独适配；新增路径仍应走现有 MCP client/wiring 与 Tool Permission、Executor、Ledger、SessionEvent。
+5. 研究开始时项目 [MCP config](../../src/agent_harness/mcp/config.py#L33-L49) 仅表达 headers；[HTTP client seam](../../src/agent_harness/mcp/client.py#L85-L95) 仅注入静态 headers；[OAuth 预检](../../src/agent_harness/plugins/mcp_precheck.py#L667-L677) 将 OAuth 描述标为 oauth_required_unsupported。SDK provider 可接入 HTTPX AsyncClient auth seam，但 token cache、回调/UI、登录状态、失效清理需单独适配；新增路径仍应走现有 MCP client/wiring 与 Tool Permission、Executor、Ledger、SessionEvent。
 
 ## 规范与 SDK 2.1.1：覆盖面和边界
 
@@ -52,10 +52,10 @@ SDK v2.1.1 shared OAuthMetadata 含 revocation_endpoint；server auth 可选启�
 
 来源：[Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)，核实日期 2026-10-11。
 
-- **发起/回调：** /mcp 或 claude mcp login 发起 OAuth；支持 DCR/CIMD 自动流程和预注册 client。callback 默认本机端口，可设固定端口。无浏览器时显示 URL；用户在浏览器授权后将完整 redirect URL 粘回交互终端。
+- **发起/回调：** /mcp 或 claude mcp login 发起 OAuth；支持 DCR/CIMD 自动流程和预注册 client。callback 默认本机端口，可设固定端口；预注册的 mcp.json OAuth 对象使用 clientId、callbackPort 和 scopes。无浏览器时显示 URL；用户在浏览器授权后将完整 redirect URL 粘回交互终端。
 - **存储/刷新/重登：** 文档称 token 安全存储并自动刷新；refresh token 被拒后提示重登。公开文档未披露 OAuth token 后端。另明确说 client secret 存于 macOS keychain 或 credentials file，不写 config；不能据此推断所有 token 都用同一后端。
 - **注销/状态：** claude mcp logout 清除本地存储凭据；移除 remote server 删除本地 token 与 client registration。/mcp 的 Clear authentication 文案称 revoke access，但没有说明是否调用 RFC 7009 endpoint，不能以 UI 措辞证明远端撤销。列表可显示 Connected、Needs authentication、Failed to connect。
-- **契合与判定：PORT DESIGN。** 借鉴显式登录、无浏览器回调和可见状态/重登；不照搬 Claude 专属配置/secret store，也不将其 revoke 文案当作远端调用证据。
+- **契合与判定：PORT DESIGN。** 复用显式登录、无浏览器 URL 粘贴、clientId/callbackPort/scopes 命名与可见状态；不复制 Claude 专属 keychain 实现，也不把 revoke 文案当作远端调用证据。
 
 ### Visual Studio Code
 
@@ -116,7 +116,7 @@ SDK v2.1.1 shared OAuthMetadata 含 revocation_endpoint；server auth 可选启�
 
 七个成熟客户端官方材料均未给出 OAuth token 的 Windows 存储容量、JWT 上限或可移植的大对象 credential 编码。因此当前证据支持：
 
-- **ADAPT**：保留凭据抽象 seam，但需验证 SDK TokenStorage 对象映射和安全存储容量；不得默认整个 OAuthToken + client_info JSON 可以放入单条 keyring entry。
+- **ADAPT**：新增 SDK TokenStorage 适配器，经 OS keyring 存序列化记录；Windows CredentialBlob 按 UTF-16LE 字节限制为 2560 bytes，超限明确失败，不明文、不分片。其他 OS 后端尚未现场验证。
 - **DEFER**：没有产品官方资料支持“任意大 token 可存”或特定分片/文件方案；实现前应实测各平台后端的字节上限、异常和失败语义，不静默截断、不落明文。
 - 这是新增 OAuth storage 的边界，不代表现有 provider API-key store 应在本票内改造。
 
@@ -140,9 +140,12 @@ SDK v2.1.1 shared OAuthMetadata 含 revocation_endpoint；server auth 可选启�
 - 不引入自制 OAuth 流程、HTTP 头 token passthrough、匿名回退或自创 token exchange；SDK OAuthClientProvider 是 wire 优先实现。只对产品 glue 和 SDK 缺少的、有条件 remote revoke 请求评估最小补充。
 - Windows 存储需检查序列化字节数和真实后端写入失败路径；字符数、JWT 长度猜测和 issue 中 workaround 都不能代替安全边界验证。
 
-## 尚待确认
+## 用户决策（2026-10-11）
 
-1. #879 的“撤销”是清除本地登录材料，还是要求服务端 RFC 7009 revoke？两者语义和服务器依赖不同；证据不足以替主开发改 AC。
-2. OAuth-only server 的现实兼容范围需用实际服务端验收 CIMD、DCR、预注册、callback、PKCE metadata；锁定 SDK 版本本身不能证明生态互通。
-3. 当前没有可从成熟客户端官方资料直接复用的跨 Windows/macOS/Linux token store 方案；Windows keyring 的 blob 大小尤其要验证。
-4. 产品官方文档没披露 revoke 请求时，本报告只将其 credential clearing 视为本地语义，除非官方来源或代码能证明 RFC 7009 调用。
+用户确认：提供显式 CLI login/logout；logout 无论远端情况总是清除本地凭据；授权服务器 metadata 宣告 RFC 7009 revocation endpoint 时尝试远端撤销并如实报告，未宣告时报告 not_supported；远端撤销不是本地登出成功的前提。当前 CLI 同时提供 status 以查看 scope 与有效期。
+
+## 尚未现场验证
+
+- 尚未用真实 OAuth server 矩阵验证预注册、CIMD、DCR、callback、PKCE metadata 和 refresh 的生态互通；当前验证使用官方 SDK 与本地协议夹具。
+- 尚未逐 OS 验证 keyring 真实后端；Windows 上限按 UTF-16LE 字节 fail closed，其它后端写入失败也不降级明文。
+- 本票使用 SDK 标准 metadata discovery，不增加 Claude Code 的 authServerMetadataUrl 覆盖项；若实际服务需要该入口，应另行确认范围。
