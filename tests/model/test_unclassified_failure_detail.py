@@ -156,6 +156,22 @@ def test_non_http_status_values_are_ignored(status_code: object) -> None:
     )
 
 
+class _ExplodingStatus(Exception):
+    @property
+    def status_code(self) -> int:
+        raise RuntimeError(_ECHO)
+
+
+def test_status_attribute_that_raises_degrades_to_no_status() -> None:
+    """失败收尾里先于终态写入执行：属性访问自己抛错也只能退成"没有状态码"，
+    不能把异常带出去（否则连 run/failed 一起丢）。"""
+    error = _ExplodingStatus("x")
+    assert provider_http_status(error) is None
+    assert unclassified_failure_message(error) == UNCLASSIFIED_FAILURE_MESSAGE.format(
+        error_type="_ExplodingStatus",
+    )
+
+
 @pytest.mark.parametrize("code", [301, 418, 451, 599])
 def test_other_valid_status_codes_keep_status_in_message(code: int) -> None:
     """1xx–3xx 走「带状态码的未分类」句；4xx / 5xx 边界值进各自类别。"""

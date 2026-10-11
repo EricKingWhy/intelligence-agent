@@ -143,10 +143,15 @@ def provider_http_status(error: BaseException) -> int | None:
     取结构化属性，不解析文本：openai ``APIStatusError.status_code``；
     ``httpx.HTTPStatusError`` 在 ``response.status_code``（与 ``fallback.py`` 同口径）。
     非 int 一律不认（不把任意属性值拼进事件）；bool 虽是 int 子类，但 0/1 落在范围外。
+    本函数在失败收尾里先于终态写入执行：属性访问抛任何异常都当"没有状态码"，
+    不让细节缺失变成连 run/failed 一起丢（ADR-0033 §4）。
     """
-    status = getattr(error, "status_code", None)
-    if status is None:
-        status = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        status = getattr(error, "status_code", None)
+        if status is None:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+    except Exception:  # noqa: BLE001 - 细节可缺，终态不可丢
+        return None
     if isinstance(status, int) and 100 <= status <= 599:
         return status
     return None
