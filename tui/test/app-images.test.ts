@@ -573,3 +573,31 @@ test("独立审查 P3/P4：超过 20 MiB 的 @path 参数给出上限提示，�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("B2-02/D8 特征（#984）：同一文件粘贴两次 ⇒ 逐份上传、两个 ref（客户端不做上传去重，服务端内容寻址兜底）", async () => {
+  // #984 B2-02 裁决为 DEFER：同一字节两次上传只浪费上行，数据正确性由服务端
+  // 内容寻址（sha256:<hex> id + refs 去重保序）承担；本用例把现状钉成契约，
+  // 将来若做客户端去重必须是有意识的行为变更，不是无意识漂移。
+  const harness = makeHarness({ models: VISION_MODELS });
+  const app = harness.app;
+  app.state.modelName = "m";
+  app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+  app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+  assert.equal(app.pendingImages.length, 2);
+  assert.equal(app.editor.getText(), "[Image #1][Image #2]");
+
+  await app.handleSubmit("[Image #1] 和 [Image #2] 都看看");
+
+  assert.equal(
+    harness.calls.filter((call) => call.url.includes("/attachments")).length,
+    2,
+    "同一文件两次粘贴 = 两次上传（不去重）",
+  );
+  assert.deepEqual(messageBodies(harness.calls), [
+    {
+      content: "[Image #1] 和 [Image #2] 都看看",
+      mode: "queue",
+      attachments: ["sha256:img1", "sha256:img2"],
+    },
+  ]);
+});

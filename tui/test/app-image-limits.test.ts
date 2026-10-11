@@ -22,6 +22,7 @@ interface AppInternals {
   editor: { getText(): string; setText(text: string): void };
   chatContainer: { children: { render(width: number): string[] }[] };
   addPendingImage(image: PendingImage): void;
+  handleSubmit(text: string): Promise<void>;
 }
 
 function makeApp(): AppInternals {
@@ -76,4 +77,52 @@ test("M-21 修回（F1）：删光标记后预检与提交同一谓词，仍被�
   app.addPendingImage(image("fresh.png"));
   assert.equal(app.pendingImages.length, 21, "被删标记的图不计入上限，新图应进数组");
   assert.ok(app.editor.getText().includes("[Image #21]"), "新图照常插标记");
+});
+
+test("B2-01（#984 D6）：贴 20 删光再贴 20 ⇒ 数组有界（40），held bytes 不随循环线性增长", () => {
+  const app = makeApp();
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`a-${String(i)}.png`));
+  app.editor.setText("第一批不要了");
+  // 第二批每张贴入时积压恰为 20（未超过上限）：全部放行，数组到 40。
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`b-${String(i)}.png`));
+  assert.equal(app.pendingImages.length, 40, "第二批 20 张全部入列");
+  app.editor.setText("第二批也不要了");
+  app.addPendingImage(image("c.png"));
+  assert.equal(app.pendingImages.length, 40, "积压超过 20 张后再贴被拒：数组停在 40");
+  const held = app.pendingImages.reduce((sum, item) => sum + item.bytes.length, 0);
+  assert.equal(held, 40 * PNG_BYTES.length, "held bytes 有界");
+});
+
+test("B2-01（#984）：积压超过 20 张后再贴 ⇒ 明确拒绝（不进数组、不插标记、留原因与出路）", () => {
+  const app = makeApp();
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`ok-${String(i)}.png`));
+  app.editor.setText("");
+  app.addPendingImage(image("fresh.png"));
+  assert.equal(app.pendingImages.length, 21, "积压恰 20 张时仍放行（与 F1 同一边界）");
+  app.editor.setText("");
+  app.addPendingImage(image("over.png"));
+  assert.equal(app.pendingImages.length, 21, "积压 21 张后再贴被拒");
+  assert.ok(!app.editor.getText().includes("[Image #22]"), "被拒不插标记");
+  // 提示较长：用宽渲染取全文（80 列会折行截断短语，与 app-images P1 用例同形）。
+  const notes = app.chatContainer.children
+    .map((child) => child.render(500).join("\n"))
+    .join("\n");
+  assert.ok(notes.includes("未被正文引用"), "点明计数口径");
+  assert.ok(notes.includes("20 张"), "给出上限值（与单条消息图片上限同口径）");
+  assert.ok(notes.includes("提交当前草稿"), "给出路：提交即清场");
+});
+
+test("B2-01（#984）：提交草稿即清场，之后可继续贴图（拒绝提示给出的出路真实可用）", async () => {
+  const app = makeApp();
+  for (let i = 0; i < 20; i++) app.addPendingImage(image(`ok-${String(i)}.png`));
+  app.editor.setText("");
+  app.addPendingImage(image("fresh.png"));
+  app.editor.setText("");
+  app.addPendingImage(image("over.png"));
+  assert.equal(app.pendingImages.length, 21);
+  // 提交纯文字草稿（无标记：无视觉预检、零上传），队列清空。
+  await app.handleSubmit("清空队列");
+  assert.equal(app.pendingImages.length, 0, "提交后待发数组清空");
+  app.addPendingImage(image("new.png"));
+  assert.equal(app.pendingImages.length, 1, "清场后恢复可贴");
 });

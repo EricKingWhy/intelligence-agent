@@ -47,6 +47,7 @@ import {
   pastedImagePath,
   readImageFile,
   uploadDeclaredName,
+  MAX_IMAGES_PER_MESSAGE,
   MAX_IMAGE_BYTES,
 } from "./lib/image-paste.ts";
 import { renderDraftImage, renderHistoryImage } from "./lib/image-view.ts";
@@ -551,6 +552,22 @@ export class TuiApp {
    * 删标记只隐藏不缩数组（数组在提交 compact 或切会话时才清），服务端按实际发送的
    * refs 计数（session/service.py 按 refs），预检若按数组全量计数，删光标记的用户会被
    * 误拒，且提示给出的出路（删标记）已失效。计数口径必须与「实际会发送什么」一致。
+   *
+   * B2-01（#984）：删标记只隐藏不缩数组，被撤销图的字节仍驻留，若放任不管，
+   * 「贴 20 张、删光标记、再贴 20 张」循环会让数组无界增长（D6）。这里加第二道
+   * 闸门：未被正文引用的图积压**超过** MAX_IMAGES_PER_MESSAGE（20，与单条消息
+   * 图片上限同一常量，即积压了一整条消息的量）后，再贴新图拒绝并给一行出路。
+   * 三个设计约束的交点：
+   * 1) 计数口径是**未引用张数**而非数组全量：被引用的图是活工作集，已由上面的
+   *    M-21 预检把守；数组全量 cap 20 会误杀 F1 场景（贴 20、删光、再贴 1 必须成功）。
+   * 2) 阈值取 > 20 而非 >= 20：新贴的图立即自插标记（恒为"被引用"），死图只经
+   *    "删标记"产生，粘贴闸门是唯一强制点；积压恰 20 张时放行正是 F1 的边界
+   *    （app-image-limits.test.ts 钉死），这是与 F1 相容的最小阈值。由此数组的
+   *    机械上界 = 20 活 + 20 死 = 40 张，held bytes 随之有界，线性增长被消灭。
+   * 3) 只拒绝、不静默淘汰：淘汰数组中段元素会使后方下标整体前移，正文里的
+   *    [Image #N] 标记全部错位；淘汰尾部则破坏"手打标记可复活旧下标"的 F1 语义
+   *    （复活引用变悬空标记被静默删除）。所以超限走微信/飞书"上限 + 明确提示"
+   *    的交互（原生选择器达上限即不可再选并计数展示），被拒不改动既有草稿。
    */
   private addPendingImage(image: PendingImage): void {
     const markers = new Set(parseImageMarkers(this.editor.getText()));
@@ -562,6 +579,15 @@ export class TuiApp {
     );
     if (rejection !== null) {
       this.appendNote(rejection);
+      return;
+    }
+    const unreferenced = this.pendingImages.length - referenced.length;
+    if (unreferenced > MAX_IMAGES_PER_MESSAGE) {
+      this.appendNote(
+        `待发队列里未被正文引用的图片已积压超过 ${String(MAX_IMAGES_PER_MESSAGE)} 张` +
+          "（与单条消息图片上限同口径）：先提交当前草稿即可清空队列" +
+          "（未引用的图不会随消息发送），再继续附图。",
+      );
       return;
     }
     this.pendingImages.push(image);
