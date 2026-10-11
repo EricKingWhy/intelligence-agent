@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, get_args
 from urllib.parse import urlsplit, urlunsplit
@@ -974,6 +975,18 @@ def attach_mcp_section(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _iter_error_dicts(report: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """遍历 MCP 报告里的全部 finding：顶层 `errors` 与每个 server 的 `errors`。
+
+    预检把 finding 放在这两处；安装闸门（`_blocks_install`）与内部分档标记的摘除
+    （`_drop_internal_finding_marker`）都要扫这两处，共用一个遍历以免两处判据漂移
+    （#975 复审）。
+    """
+    yield from report.get("errors", [])
+    for server in report.get("servers", []):
+        yield from server.get("errors", [])
+
+
 def _drop_internal_finding_marker(report: dict[str, Any]) -> None:
     """摘掉只供安装闸门消费的内部分档标记，避免它进可见 JSON（#975）。
 
@@ -982,10 +995,7 @@ def _drop_internal_finding_marker(report: dict[str, Any]) -> None:
     （`skills/inspection._add_error` 的 {code, path, message}）。消费后即从顶层与每个
     server 的 errors 里摘除。
     """
-    errors = list(report.get("errors", []))
-    for server in report.get("servers", []):
-        errors.extend(server.get("errors", []))
-    for error in errors:
+    for error in _iter_error_dicts(report):
         error.pop(_INTERNAL_FINDING_MARKER, None)
 
 
@@ -1001,10 +1011,9 @@ def _blocks_install(report: dict[str, Any]) -> bool:
 
     只读不摘：标记的摘除归 `attach_mcp_section`（它消费本函数的结论后统一摘）。
     """
-    errors = list(report.get("errors", []))
-    for server in report.get("servers", []):
-        errors.extend(server.get("errors", []))
-    return any(not error.get(_INTERNAL_FINDING_MARKER) for error in errors)
+    return any(
+        not error.get(_INTERNAL_FINDING_MARKER) for error in _iter_error_dicts(report)
+    )
 
 
 def mcp_compatibility_requirements(report: dict[str, Any]) -> list[dict[str, Any]]:
