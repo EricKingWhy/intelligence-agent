@@ -54,9 +54,7 @@ export function StuckPausedPanel({ paused }: StuckPausedPanelProps) {
         </div>
       )}
       <div className="pause-panel-facts">
-        {
-          '恢复方式：提供新指示（steer）——在下方输入框输入，按 Ctrl/Cmd+Enter 发送；或做出环境 / 策略变更后再恢复。恢复需要变更依据，本面板不提供一键恢复。'
-        }
+        恢复方式：提供新指示（steer）——在下方输入框输入，按 Ctrl/Cmd+Enter 发送；或做出环境 / 策略变更后再恢复。恢复需要变更依据，本面板不提供一键恢复。
       </div>
     </div>
   );

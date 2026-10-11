@@ -50,7 +50,7 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
-import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget } from './lib/runBudget';
+import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
 import {
@@ -1355,7 +1355,7 @@ export default function App() {
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
               输入通道照常可用。 */}
           {canResumePaused && paused && paused.reason !== 'user_input' && (
-            paused.reason === 'stuck' ? (
+            paused.reason === PAUSE_REASON_STUCK ? (
               <StuckPausedPanel paused={paused} />
             ) : (
               <PausedPanel
