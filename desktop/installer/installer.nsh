@@ -52,6 +52,11 @@
 ;     (both warnings are errors under electron-builder's makensis settings).
 !define IA_INSTALLER_DIR "${__FILEDIR__}"
 
+!macro customWelcomePage
+  Page custom iaRecoveryPageCreate iaRecoveryPageLeave
+  !insertmacro MUI_PAGE_WELCOME
+!macroend
+
 !macro customHeader
   ManifestDPIAware true
 
@@ -77,7 +82,11 @@
   LangString iaAppRunning ${LANG_ENGLISH} "Intelligence Agent (or one of its background processes) is still running. Close it and run the installer again — the previous version was left untouched."
   LangString iaUpdateFailed ${LANG_ENGLISH} "The update failed: the new files are incomplete. The previous version has been restored."
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
-  LangString iaInterruptedInstall ${LANG_ENGLISH} "An earlier update was interrupted. Choose Yes to restore the previous version, or No to continue with a fresh installation. Backup:"
+  LangString iaRecoveryTitle ${LANG_ENGLISH} "An earlier update was interrupted"
+  LangString iaRecoveryDescription ${LANG_ENGLISH} "Your previous version backup is still available."
+  LangString iaInterruptedInstall ${LANG_ENGLISH} "Choose how to continue. Backup:"
+  LangString iaRestorePrevious ${LANG_ENGLISH} "Restore previous version"
+  LangString iaContinueFresh ${LANG_ENGLISH} "Continue with a fresh installation"
   LangString iaStaleBackup ${LANG_ENGLISH} "The update is complete, but the previous version could not be removed completely. Delete this folder to reclaim the space:"
   LangString iaLeftoverSweep ${LANG_ENGLISH} "Earlier updates left backup folders of the previous version next to the installation directory, and they can take up a lot of disk space. Delete them now?"
   LangString iaLeftoverKept ${LANG_ENGLISH} "Some backup folders could not be removed: they are in use, contain links, were not created by this installer, or the delete itself failed — which is what happens when the installation is on a network (UNC) path, where the uninstaller cannot delete. They were left in place — delete them by hand to reclaim the space."
@@ -87,7 +96,11 @@
   LangString iaAppRunning ${LANG_SIMPCHINESE} "Intelligence Agent（或其后台进程）仍在运行。请关闭后重新运行安装程序——旧版本未被改动。"
   LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
-  LangString iaInterruptedInstall ${LANG_SIMPCHINESE} "上次更新被中断。选择“是”恢复旧版本，选择“否”继续全新安装。备份路径："
+  LangString iaRecoveryTitle ${LANG_SIMPCHINESE} "上次更新已中断"
+  LangString iaRecoveryDescription ${LANG_SIMPCHINESE} "旧版本备份仍然可用。"
+  LangString iaInterruptedInstall ${LANG_SIMPCHINESE} "请选择下一步操作。备份路径："
+  LangString iaRestorePrevious ${LANG_SIMPCHINESE} "恢复旧版本"
+  LangString iaContinueFresh ${LANG_SIMPCHINESE} "继续全新安装"
   LangString iaStaleBackup ${LANG_SIMPCHINESE} "更新已完成，但旧版本未能完全删除。可手动删除以下文件夹以回收磁盘空间："
   LangString iaLeftoverSweep ${LANG_SIMPCHINESE} "早前的更新在安装目录旁留下了旧版本的备份文件夹，可能占用大量磁盘空间。现在删除它们吗？"
   LangString iaLeftoverKept ${LANG_SIMPCHINESE} "部分备份文件夹未能删除：它们正在使用、包含链接、不是本安装程序创建的，或者删除操作本身失败了——安装目录位于网络（UNC）路径时即如此，卸载程序无法在其上删除。已保留原样，可手动删除以回收磁盘空间。"
@@ -105,7 +118,9 @@
   ; Move any previous version aside; aborts (leaving it untouched) when the
   ; rename fails, e.g. because the app is still running.
   !insertmacro iaRecoverInterruptedInstall
-  !insertmacro iaStageApplication
+  ${If} $iaRecoveryPending != "1"
+    !insertmacro iaStageApplication
+  ${EndIf}
 !macroend
 
 !macro customInstall

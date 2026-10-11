@@ -7,6 +7,8 @@
 
   Usage:
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe>
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -AbsentInstallDirectory
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -BlockRollback
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice silent
 
@@ -19,7 +21,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$Installer,
   [ValidateSet('restore', 'continue', 'silent')][string]$Choice = 'restore',
-  [string]$EvidenceDir = ''
+  [string]$EvidenceDir = '',
+  [switch]$AbsentInstallDirectory,
+  [switch]$BlockRollback
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +33,15 @@ Add-Type -AssemblyName System.Windows.Forms
 
 if ([string]::IsNullOrEmpty($EvidenceDir)) { $EvidenceDir = Join-Path $env:TEMP 'ia-r3-recovery\evidence' }
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
+$rollbackBlockPath = ''
+$rollbackTarget = ''
+$rollbackMarker = ''
+if (($AbsentInstallDirectory -or $BlockRollback) -and $Choice -ne 'restore') {
+  throw 'restore fixtures require -Choice restore'
+}
+if ($AbsentInstallDirectory -and $BlockRollback) {
+  throw 'choose only one restore fixture'
+}
 $logPath = Join-Path $EvidenceDir ('recovery-{0}-{1}.log' -f $Choice, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $script:failures = 0
 
@@ -106,7 +119,16 @@ function Invoke-Button($windowRecord, [string]$namePattern) {
 
 function Find-RecoveryPrompt([int]$processId) {
   foreach ($window in Get-ProcessWindows $processId) {
-    if ($window.Text -match '(?is)(interrupted.*restore.*previous version.*fresh installation|\u4e0a\u6b21\u66f4\u65b0\u88ab\u4e2d\u65ad.*\u6062\u590d\u65e7\u7248\u672c.*\u7ee7\u7eed\u5168\u65b0\u5b89\u88c5)') {
+    if ($window.Text -match '(?is)(interrupted.*restore.*previous version.*fresh installation|\u4e0a\u6b21\u66f4\u65b0\u5df2\u4e2d\u65ad.*\u6062\u590d\u65e7\u7248\u672c.*\u7ee7\u7eed\u5168\u65b0\u5b89\u88c5)') {
+      return $window
+    }
+  }
+  return $null
+}
+
+function Find-RollbackFailurePrompt([int]$processId) {
+  foreach ($window in Get-ProcessWindows $processId) {
+    if ($window.Text -match '(?is)(Could not restore the previous version automatically|\u65e0\u6cd5\u81ea\u52a8\u6062\u590d\u65e7\u7248\u672c)') {
       return $window
     }
   }
@@ -131,9 +153,24 @@ if ($null -eq $payloadExe) { throw 'isolated app executable missing' }
 $productsRoot = Join-Path $env:LOCALAPPDATA 'Programs'
 $installDir = Join-Path $productsRoot $productName
 $appPath = Join-Path $installDir $payloadExe.Name
+$shortcutRoots = @(
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+  [Environment]::GetFolderPath('Desktop')
+)
 $testDirsBefore = @(Get-ChildItem -LiteralPath $productsRoot -Directory | Where-Object Name -like 'IA Installer Test*' | ForEach-Object FullName)
 $realDirsBefore = @(Get-ChildItem -LiteralPath $productsRoot -Directory | Where-Object Name -like 'Intelligence Agent*' | ForEach-Object FullName)
 if ($testDirsBefore -contains $installDir) { throw "test fixture already exists: $installDir" }
+
+function Assert-NoTestShortcuts([string]$phase) {
+  $shortcuts = @(
+    foreach ($root in $shortcutRoots) {
+      if (Test-Path -LiteralPath $root) {
+        Get-ChildItem -LiteralPath $root -Filter ($productName + '.lnk') -File -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  )
+  Assert ('no_test_shortcuts_{0}' -f $phase) ($shortcuts.Count -eq 0) ('found=[{0}]' -f (($shortcuts | ForEach-Object FullName) -join ', '))
+}
 
 $appKeyPath = ''
 $backupDir = ''
@@ -146,6 +183,7 @@ try {
   $first = Invoke-Installer $installerPath '/S'
   Assert 'initial_install_rc0' ($first.ExitCode -eq 0) ('rc={0}' -f $first.ExitCode)
   Assert 'initial_app_present' (Test-Path -LiteralPath $appPath) ('exists={0}' -f (Test-Path -LiteralPath $appPath))
+  Assert-NoTestShortcuts 'after_initial_install'
 
   $appKey = Get-ChildItem 'HKCU:\Software' -ErrorAction SilentlyContinue | Where-Object {
     $location = (Get-ItemProperty -Path $_.PSPath -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
@@ -178,6 +216,28 @@ try {
   Assert 'hard_kill_left_backup_and_pointer' (($backupApp) -and ($pointerAfterKill -ieq $backupDir)) `
       ('backup_app={0} pointer_matches={1}' -f $backupApp, ($pointerAfterKill -ieq $backupDir))
   Assert 'hard_kill_removed_current_app' (-not (Test-Path -LiteralPath $appPath)) ('app_exists={0}' -f (Test-Path -LiteralPath $appPath))
+  if ($AbsentInstallDirectory) {
+    if (Test-Path -LiteralPath $installDir) {
+      $partialEntries = @(Get-ChildItem -LiteralPath $installDir -Force)
+      Assert 'pre_restore_install_dir_empty' ($partialEntries.Count -eq 0) ('entry_count={0}' -f $partialEntries.Count)
+      if ($partialEntries.Count -eq 0) { [System.IO.Directory]::Delete($installDir, $false) }
+    }
+    Assert 'hard_kill_state_install_dir_absent' (-not (Test-Path -LiteralPath $installDir)) ('exists={0}' -f (Test-Path -LiteralPath $installDir))
+  }
+  if ($BlockRollback) {
+    if (-not (Test-Path -LiteralPath $installDir)) { [System.IO.Directory]::CreateDirectory($installDir) | Out-Null }
+    $rollbackBlockPath = Join-Path $installDir 'rollback-block'
+    $rollbackTarget = Join-Path $EvidenceDir ('rollback-target-{0}' -f [Guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($rollbackTarget) | Out-Null
+    $rollbackMarker = Join-Path $rollbackTarget 'must-survive.txt'
+    [System.IO.File]::WriteAllText($rollbackMarker, 'untouched')
+    New-Item -ItemType Junction -Path $rollbackBlockPath -Target $rollbackTarget | Out-Null
+    $isReparsePoint = ((Get-Item -LiteralPath $rollbackBlockPath).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    Assert 'rollback_block_fixture_created' $isReparsePoint ('path={0}' -f $rollbackBlockPath)
+  }
+  if ($AbsentInstallDirectory) {
+    New-ItemProperty -Path $appKeyPath -Name 'IaTestRemoveInstallDirectory' -PropertyType String -Value '1' -Force | Out-Null
+  }
 
   $prompt = $null
   if ($Choice -eq 'silent') {
@@ -194,10 +254,28 @@ try {
     Assert 'recovery_choice_shown' ($null -ne $prompt) ('prompt_found={0}' -f ($null -ne $prompt))
 
     if ($null -ne $prompt) {
+      if ($AbsentInstallDirectory) {
+        Assert 'recovery_entry_install_dir_absent' (-not (Test-Path -LiteralPath $installDir)) ('exists={0}' -f (Test-Path -LiteralPath $installDir))
+      }
       Log ('prompt buttons=[{0}]' -f (($prompt.Buttons | ForEach-Object { $_.Current.Name }) -join ', '))
-      $choicePattern = if ($Choice -eq 'restore') { '^(Yes|\u662f)(\(.*\))?$' } else { '^(No|\u5426)(\(.*\))?$' }
+      $choicePattern = if ($Choice -eq 'restore') { '^(Restore previous version|\u6062\u590d\u65e7\u7248\u672c)$' } else { '^(Continue with a fresh installation|\u7ee7\u7eed\u5168\u65b0\u5b89\u88c5)$' }
       $clicked = Invoke-Button $prompt $choicePattern
       Assert 'recovery_choice_accepted' ($null -ne $clicked) ('choice={0} button={1}' -f $Choice, $clicked)
+
+      if ($BlockRollback -and $Choice -eq 'restore' -and $null -ne $clicked) {
+        $failurePrompt = $null
+        $failureDeadline = (Get-Date).AddSeconds(8)
+        while ((Get-Date) -lt $failureDeadline -and -not $recoveryProcess.HasExited) {
+          $failurePrompt = Find-RollbackFailurePrompt $recoveryProcess.Id
+          if ($null -ne $failurePrompt) { break }
+          Start-Sleep -Milliseconds 100
+        }
+        Assert 'rollback_failure_prompt_shown' ($null -ne $failurePrompt) ('prompt_found={0}' -f ($null -ne $failurePrompt))
+        if ($null -ne $failurePrompt) {
+          $acknowledged = Invoke-Button $failurePrompt '^(OK|\u786e\u5b9a)(\(.*\))?$'
+          Assert 'rollback_failure_prompt_acknowledged' ($null -ne $acknowledged) ('button={0}' -f $acknowledged)
+        }
+      }
 
       if ($Choice -eq 'continue' -and $null -ne $clicked) {
         # The stock assisted installer uses Next, Install, and Finish buttons.
@@ -213,9 +291,19 @@ try {
           else { Log ('wizard button={0}' -f $clickedWizard); Start-Sleep -Milliseconds 400 }
         }
         Assert 'fresh_install_completed' $recoveryProcess.HasExited ('process_exited={0}' -f $recoveryProcess.HasExited)
+        if ($recoveryProcess.HasExited) {
+          Assert 'fresh_install_exit_0' ($recoveryProcess.ExitCode -eq 0) ('rc={0}' -f $recoveryProcess.ExitCode)
+        }
       } else {
         $recoveryProcess.WaitForExit(15000)
         Assert 'restore_exits_installer' $recoveryProcess.HasExited ('process_exited={0}' -f $recoveryProcess.HasExited)
+        if ($recoveryProcess.HasExited) {
+          if ($BlockRollback) {
+            Assert 'restore_refusal_exit_2' ($recoveryProcess.ExitCode -eq 2) ('rc={0}' -f $recoveryProcess.ExitCode)
+          } else {
+            Assert 'restore_installer_exit_0' ($recoveryProcess.ExitCode -eq 0) ('rc={0}' -f $recoveryProcess.ExitCode)
+          }
+        }
       }
     } else {
       if (-not $recoveryProcess.HasExited) { Stop-Process -Id $recoveryProcess.Id -Force }
@@ -227,9 +315,17 @@ try {
   $leftoverPointer = Get-RegistryValue $appKeyPath 'IaLeftoverDir'
   $appPresent = Test-Path -LiteralPath $appPath
   if ($Choice -eq 'restore') {
-    Assert 'restore_app_present' $appPresent ('exists={0}' -f $appPresent)
-    Assert 'restore_backup_consumed' (-not $backupStillExists) ('backup_exists={0}' -f $backupStillExists)
-    Assert 'restore_backup_pointer_cleared' ([string]::IsNullOrEmpty($backupPointer)) ('IaBackupDir={0}' -f $backupPointer)
+    if ($BlockRollback) {
+      Assert 'restore_refusal_app_absent' (-not $appPresent) ('exists={0}' -f $appPresent)
+      Assert 'restore_refusal_backup_retained' $backupStillExists ('backup_exists={0}' -f $backupStillExists)
+      Assert 'restore_refusal_backup_recorded' ($leftoverPointer -ieq $backupDir) ('IaLeftoverDir={0}' -f $leftoverPointer)
+      Assert 'restore_refusal_backup_pointer_cleared' ([string]::IsNullOrEmpty($backupPointer)) ('IaBackupDir={0}' -f $backupPointer)
+      Assert 'rollback_block_target_untouched' (Test-Path -LiteralPath $rollbackMarker) ('marker_exists={0}' -f (Test-Path -LiteralPath $rollbackMarker))
+    } else {
+      Assert 'restore_app_present' $appPresent ('exists={0}' -f $appPresent)
+      Assert 'restore_backup_consumed' (-not $backupStillExists) ('backup_exists={0}' -f $backupStillExists)
+      Assert 'restore_backup_pointer_cleared' ([string]::IsNullOrEmpty($backupPointer)) ('IaBackupDir={0}' -f $backupPointer)
+    }
   } elseif ($Choice -eq 'continue') {
     Assert 'fresh_app_present' $appPresent ('exists={0}' -f $appPresent)
     Assert 'fresh_backup_retained' $backupStillExists ('backup_exists={0}' -f $backupStillExists)
@@ -241,6 +337,7 @@ try {
     Assert 'silent_backup_pointer_preserved' ($backupPointer -ieq $backupDir) ('IaBackupDir={0}' -f $backupPointer)
     Assert 'silent_leftover_pointer_unchanged' ([string]::IsNullOrEmpty($leftoverPointer)) ('IaLeftoverDir={0}' -f $leftoverPointer)
   }
+  Assert-NoTestShortcuts 'after_recovery'
   if ($appPresent) {
     $appRun = Start-Process -FilePath $appPath -Wait -PassThru
     $launchMarker = Test-Path -LiteralPath (Join-Path $installDir 'launched.txt')
@@ -249,6 +346,13 @@ try {
 } finally {
   if ($null -ne $stageProcess -and -not $stageProcess.HasExited) { Stop-Process -Id $stageProcess.Id -Force }
   if ($null -ne $recoveryProcess -and -not $recoveryProcess.HasExited) { Stop-Process -Id $recoveryProcess.Id -Force }
+  if ($appKeyPath -and (Test-Path -LiteralPath $appKeyPath)) {
+    Remove-ItemProperty -Path $appKeyPath -Name 'IaTestRemoveInstallDirectory' -ErrorAction SilentlyContinue
+  }
+
+  if ($rollbackBlockPath -and (Test-Path -LiteralPath $rollbackBlockPath)) {
+    [System.IO.Directory]::Delete($rollbackBlockPath, $false)
+  }
 
   # For a baseline artifact that never offered recovery, put the isolated old
   # install back before invoking its own uninstaller.
@@ -261,12 +365,17 @@ try {
     $uninstaller = Get-ChildItem -LiteralPath $installDir -Filter 'Uninstall*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($uninstaller) { $cleanup = Invoke-Installer $uninstaller.FullName '/S'; Log ('cleanup rc={0}' -f $cleanup.ExitCode) }
   }
+  if ($rollbackMarker -and (Test-Path -LiteralPath $rollbackMarker)) { [System.IO.File]::Delete($rollbackMarker) }
+  if ($rollbackTarget -and (Test-Path -LiteralPath $rollbackTarget)) { [System.IO.Directory]::Delete($rollbackTarget, $false) }
 }
 
 $testDirsAfter = @(Get-ChildItem -LiteralPath $productsRoot -Directory | Where-Object Name -like 'IA Installer Test*' | ForEach-Object FullName)
 $realDirsAfter = @(Get-ChildItem -LiteralPath $productsRoot -Directory | Where-Object Name -like 'Intelligence Agent*' | ForEach-Object FullName)
 Assert 'test_install_cleaned' ($testDirsAfter.Count -eq 0) ('test_dirs=[{0}]' -f ($testDirsAfter -join ', '))
 Assert 'real_product_dirs_untouched' (($realDirsBefore -join ',') -eq ($realDirsAfter -join ',')) ('before=[{0}] after=[{1}]' -f ($realDirsBefore -join ', '), ($realDirsAfter -join ', '))
+$testRegistryKeyExistsAfter = $appKeyPath -and (Test-Path -LiteralPath $appKeyPath)
+Assert 'test_registry_key_cleaned' (-not $testRegistryKeyExistsAfter) ('app_key={0} exists={1}' -f $appKeyPath, $testRegistryKeyExistsAfter)
+Assert-NoTestShortcuts 'after_cleanup'
 Log ('DONE assertions_failed={0}' -f $script:failures)
 if ($script:failures -gt 0) { exit 1 }
 exit 0

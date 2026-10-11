@@ -242,6 +242,62 @@ describe('installer.nsh LangString guards (#831)', () => {
   })
 })
 
+describe('rollback install-directory probe (#1023)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('uses the shared long-path helper before reading install-directory attributes', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const input = rollback.indexOf('StrCpy $iaPlainPath "$iaFinalDirectory"')
+    const helper = rollback.indexOf('Call iaBuildLongPath')
+    const target = rollback.indexOf('StrCpy $0 "$iaDeleteTarget"', helper)
+    const attributes = rollback.indexOf("System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'", target)
+
+    assert.ok(input >= 0, 'rollback must pass the install directory to iaBuildLongPath')
+    assert.ok(helper > input, 'rollback must build the long-path form before probing')
+    assert.ok(target > helper, 'GetFileAttributes must receive the path produced by the helper')
+    assert.ok(attributes > target, 'the attribute query must follow the helper output')
+  })
+})
+
+describe('interrupted installer recovery choices (#915)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('defers recovery to explicit buttons and keeps the backup armed on cancel', () => {
+    const installer = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+    const directories = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const recovery = directories.match(/!macro iaRecoverInterruptedInstall([\s\S]*?)!macroend/)?.[1] ?? ''
+    const page = directories.match(/Function iaRecoveryPageCreate([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const pageLeave = directories.match(/Function iaRecoveryPageLeave([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restoreClick = directories.match(/Function iaRecoveryRestoreClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const freshClick = directories.match(/Function iaRecoveryFreshClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const guiEnd = directories.match(/Function \.onGUIEnd([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+
+    assert.match(installer, /Page custom iaRecoveryPageCreate iaRecoveryPageLeave/)
+    assert.match(recovery, /StrCpy \$iaRecoveryPending "1"/)
+    assert.doesNotMatch(recovery, /MessageBox MB_YESNO/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaRestorePrevious\)/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaContinueFresh\)/)
+    assert.match(pageLeave, /StrCmp \$iaRecoveryChoice "continue"[\s\S]*?StrCmp \$iaRecoveryChoice "restore"[\s\S]*?Abort/)
+    assert.match(pageLeave, /Call iaContinueInterruptedFresh/)
+    assert.match(pageLeave, /Call iaRollbackApplication[\s\S]*?quitSuccess/)
+    assert.match(restoreClick, /StrCpy \$iaRecoveryChoice "restore"[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.match(freshClick, /StrCpy \$iaRecoveryChoice "continue"[\s\S]*?ShowWindow \$0 \$\{SW_SHOW\}[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.doesNotMatch(restoreClick + freshClick, /Call iaRollbackApplication|Call iaContinueInterruptedFresh|\bQuit\b|quitSuccess/)
+    assert.match(guiEnd, /iaRecoveryPending == "1"[\s\S]*?Return/)
+  })
+})
+
+describe('Windows installer test shortcuts (#1034)', () => {
+  it('disables desktop and Start Menu shortcuts for isolated test installs', () => {
+    const source = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const nsis = source.match(/nsis:\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? ''
+
+    assert.match(nsis, /createDesktopShortcut:\s*false/)
+    assert.match(nsis, /createStartMenuShortcut:\s*false/)
+  })
+})
+
 describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
   // The pre-#901 shape: "\\?" with no separator backslash. NSIS strings have no

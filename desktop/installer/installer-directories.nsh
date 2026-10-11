@@ -54,11 +54,17 @@
 ; rollback-on-update-failure works for updates FROM this release onward.
 
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
 
 Var iaFinalDirectory
 Var iaBackupDirectory
 Var iaLeftoverDirectory
 Var iaProbeFound
+Var iaRollbackStatus
+Var iaRecoveryPending
+Var iaRecoveryChoice
+Var iaRecoveryRestoreButton
+Var iaRecoveryFreshButton
 
 ; Existence probe for a path this protocol recorded (#904). The unprefixed form
 ; cannot name a longer-than-MAX_PATH path and a UNC path has to be probed in its
@@ -101,9 +107,9 @@ FunctionEnd
 !macroend
 
 ; An earlier installer may have been hard-killed after moving the live install
-; aside. Offer a deliberate choice before the stock installer writes into the
-; now-missing or partial $INSTDIR. Silent installs fail closed: they cannot
-; choose between restoring an older version and continuing fresh.
+; aside. Defer the choice to the custom page before the stock installer writes
+; into the now-missing or partial $INSTDIR. Silent installs fail closed: they
+; cannot choose between restoring an older version and continuing fresh.
 !macro iaRecoverInterruptedInstall
   StrCpy $iaFinalDirectory $INSTDIR
   !insertmacro iaReadBackupDir
@@ -125,37 +131,7 @@ FunctionEnd
         Quit
       ${EndIf}
       IfSilent iaInterruptedSilent
-      MessageBox MB_YESNO|MB_ICONQUESTION "$(iaInterruptedInstall) $iaBackupDirectory" /SD IDNO IDYES iaInterruptedRestore IDNO iaInterruptedFresh
-iaInterruptedRestore:
-      Call iaRollbackApplication
-      Quit
-iaInterruptedFresh:
-      ; Keep the old version discoverable before disarming the interrupted
-      ; transaction. The uninstaller's shape sweep remains the full discovery
-      ; path when this one registry slot is later replaced.
-      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
-      ; Let the stock installer write the selected fresh version into $INSTDIR.
-      ; Refuse a partial tree with reparse points or unreadable entries before
-      ; allowing NSIS to write through it; the old backup stays armed on refusal.
-      SetOutPath $TEMP
-      StrCpy $iaPlainPath "$iaFinalDirectory"
-      Call iaProbePath
-      ${If} $iaProbeFound == "1"
-        StrCpy $iaDeleteCandidate "$iaFinalDirectory"
-        StrCpy $iaDeleteShapeCheck "0"
-        Call iaPrepareDelete
-        StrCmp $iaDeleteStatus "ok" 0 iaInterruptedFreshUnsafe
-        ; No recursive delete is needed for the empty directory produced by
-        ; the rename interruption. The stock section overlays any partial files.
-        Goto iaInterruptedFreshSafeDone
-iaInterruptedFreshUnsafe:
-        DetailPrint "iaRecoverInterruptedInstall: refusing partial install ($iaDeleteStatus)"
-        SetErrorLevel 2
-        Quit
-iaInterruptedFreshSafeDone:
-      ${EndIf}
-      !insertmacro iaClearBackupDir
-      SetOutPath $iaFinalDirectory
+      StrCpy $iaRecoveryPending "1"
       Goto iaInterruptedDone
 iaInterruptedSilent:
       DetailPrint "iaRecoverInterruptedInstall: rerun interactively to restore or continue fresh"
@@ -165,6 +141,98 @@ iaInterruptedDone:
     ${EndIf}
   ${EndIf}
 !macroend
+
+; Show the explicit recovery choices before the stock welcome page. Pressing
+; Enter or any hidden wizard control cannot bypass the user's choice.
+Function iaRecoveryPageCreate
+  ${If} $iaRecoveryPending != "1"
+    Abort
+  ${EndIf}
+  StrCpy $iaRecoveryChoice ""
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    DetailPrint "iaRecoveryPageCreate: could not create recovery page"
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(iaRecoveryTitle)" "$(iaRecoveryDescription)"
+  ${NSD_CreateLabel} 0u 0u 100% 36u "$(iaInterruptedInstall)"
+  Pop $0
+  ${NSD_CreateLabel} 0u 38u 100% 34u "$iaBackupDirectory"
+  Pop $0
+  ${NSD_CreateButton} 0u 82u 100% 24u "$(iaRestorePrevious)"
+  Pop $iaRecoveryRestoreButton
+  ${NSD_OnClick} $iaRecoveryRestoreButton iaRecoveryRestoreClick
+  ${NSD_CreateButton} 0u 114u 100% 24u "$(iaContinueFresh)"
+  Pop $iaRecoveryFreshButton
+  ${NSD_OnClick} $iaRecoveryFreshButton iaRecoveryFreshClick
+  GetDlgItem $0 $HWNDPARENT 1
+  ShowWindow $0 ${SW_HIDE}
+  GetDlgItem $0 $HWNDPARENT 3
+  ShowWindow $0 ${SW_HIDE}
+  nsDialogs::Show
+FunctionEnd
+
+Function iaRecoveryPageLeave
+  StrCmp $iaRecoveryChoice "continue" iaRecoveryPageLeaveContinue
+  StrCmp $iaRecoveryChoice "restore" iaRecoveryPageLeaveRestore
+  Abort
+iaRecoveryPageLeaveContinue:
+  Call iaContinueInterruptedFresh
+  Return
+iaRecoveryPageLeaveRestore:
+  Call iaRollbackApplication
+  StrCmp $iaRollbackStatus "restored" iaRecoveryPageLeaveRestoreSucceeded
+  SetErrorLevel 2
+  Quit
+iaRecoveryPageLeaveRestoreSucceeded:
+  !insertmacro quitSuccess
+FunctionEnd
+
+Function iaRecoveryRestoreClick
+  Pop $0
+  StrCpy $iaRecoveryChoice "restore"
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${BM_CLICK} 0 0
+FunctionEnd
+
+Function iaRecoveryFreshClick
+  Pop $0
+  StrCpy $iaRecoveryChoice "continue"
+  GetDlgItem $0 $HWNDPARENT 1
+  ShowWindow $0 ${SW_SHOW}
+  SendMessage $0 ${BM_CLICK} 0 0
+FunctionEnd
+
+Function iaContinueInterruptedFresh
+  ; Keep the old version discoverable before disarming the interrupted
+  ; transaction. The uninstaller's shape sweep remains the full discovery path.
+  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+  ; Let the stock installer write the selected fresh version into $INSTDIR.
+  ; Refuse a partial tree with reparse points or unreadable entries before
+  ; allowing NSIS to write through it; the old backup stays armed on refusal.
+  SetOutPath $TEMP
+  StrCpy $iaPlainPath "$iaFinalDirectory"
+  Call iaProbePath
+  ${If} $iaProbeFound == "1"
+    StrCpy $iaDeleteCandidate "$iaFinalDirectory"
+    StrCpy $iaDeleteShapeCheck "0"
+    Call iaPrepareDelete
+    StrCmp $iaDeleteStatus "ok" 0 iaInterruptedFreshUnsafe
+    ; No recursive delete is needed for the empty directory produced by
+    ; the rename interruption. The stock section overlays any partial files.
+    Goto iaInterruptedFreshSafeDone
+iaInterruptedFreshUnsafe:
+    DetailPrint "iaRecoverInterruptedInstall: refusing partial install ($iaDeleteStatus)"
+    SetErrorLevel 2
+    Quit
+iaInterruptedFreshSafeDone:
+  ${EndIf}
+  !insertmacro iaClearBackupDir
+  StrCpy $iaRecoveryPending "0"
+  SetOutPath $iaFinalDirectory
+FunctionEnd
 
 ; customInit: move a previous installation aside before the section
 ; (and its uninstallOldVersion step) touches it.
@@ -223,6 +291,7 @@ iaInterruptedDone:
 ; $INSTDIR is removed; the backup is renamed back. If the restore rename
 ; fails (locked files), the complete backup is left in place and reported.
 Function iaRollbackApplication
+  StrCpy $iaRollbackStatus "failed"
   !insertmacro iaReadBackupDir
   ${If} $iaBackupDirectory == ""
     Return
@@ -245,6 +314,20 @@ Function iaRollbackApplication
   ; #904 item 5: the partial install is removed through the shared prepare step,
   ; which refuses a tree containing a reparse point — RMDir /r deletes THROUGH
   ; a junction (measured), and this delete is older than the backup one.
+  ; A hard kill can land after the backup pointer is written but before SetOutPath
+  ; creates $iaFinalDirectory. Skip the scan only for the two Win32 not-found
+  ; errors; access and other failures still go through the fail-closed scan.
+  StrCpy $iaPlainPath "$iaFinalDirectory"
+  Call iaBuildLongPath
+  StrCpy $0 "$iaDeleteTarget"
+  System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'
+  Pop $2
+  IntCmp $1 -1 iaRollbackCheckMissing iaRollbackPrepareDelete iaRollbackPrepareDelete
+iaRollbackCheckMissing:
+  IntCmp $2 2 iaRollbackRestoreBackup iaRollbackCheckPathMissing iaRollbackCheckPathMissing
+iaRollbackCheckPathMissing:
+  IntCmp $2 3 iaRollbackRestoreBackup iaRollbackPrepareDelete iaRollbackPrepareDelete
+iaRollbackPrepareDelete:
   StrCpy $iaDeleteCandidate "$iaFinalDirectory"
   StrCpy $iaDeleteShapeCheck "0"
   Call iaPrepareDelete
@@ -254,6 +337,7 @@ Function iaRollbackApplication
   ; The delete's own error is not read here: the restore is the operation that
   ; has to succeed, and a partial install that survived the delete makes the
   ; rename below fail on a non-empty directory — the recorded, non-zero case.
+iaRollbackRestoreBackup:
   ClearErrors
   Rename $iaBackupDirectory $iaFinalDirectory
   ${If} ${Errors}
@@ -265,6 +349,7 @@ Function iaRollbackApplication
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaRollbackFailed): $iaBackupDirectory" /SD IDOK
     SetErrorLevel 2
   ${Else}
+    StrCpy $iaRollbackStatus "restored"
     ; The program is usable again. Note: DisplayVersion keeps the failed
     ; version's value (only InstallLocation is restored) — cosmetic, and the
     ; next successful update rewrites the whole entry.
@@ -364,6 +449,10 @@ FunctionEnd
 
 !ifndef BUILD_UNINSTALLER
 Function .onGUIEnd
+  ; Cancel on the recovery page leaves the backup pointer armed for next run.
+  ${If} $iaRecoveryPending == "1"
+    Return
+  ${EndIf}
   ; If the install section never reached iaPromoteApplication (extraction
   ; error, user cancel, crash of the section), restore the previous version.
   !insertmacro iaReadBackupDir

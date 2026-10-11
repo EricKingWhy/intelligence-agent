@@ -148,17 +148,17 @@ describe('interrupted installer startup recovery (#915)', () => {
     assert.ok(recovery < stage, 'recovery must resolve the saved backup before staging')
   })
 
-  it('fails closed for silent reruns before showing the interactive choice', () => {
+  it('fails closed for silent reruns before queuing the interactive choice', () => {
     const source = readFileSync(new URL('../installer/installer-directories.nsh', import.meta.url), 'utf8')
     const recovery = source.match(/!macro iaRecoverInterruptedInstall([\s\S]*?)!macroend/)?.[1]
 
     assert.ok(recovery, 'interrupted-install recovery macro is missing')
     const silent = recovery.indexOf('IfSilent iaInterruptedSilent')
-    const prompt = recovery.indexOf('MessageBox')
+    const prompt = recovery.indexOf('StrCpy $iaRecoveryPending "1"')
     const silentBranch = recovery.match(/iaInterruptedSilent:[\s\S]*?iaInterruptedDone:/)?.[0]
     assert.ok(silent >= 0, 'silent rerun is not handled')
-    assert.ok(prompt >= 0, 'interactive recovery prompt is missing')
-    assert.ok(silent < prompt, 'silent reruns must fail closed before any prompt')
+    assert.ok(prompt >= 0, 'interactive recovery page is not queued')
+    assert.ok(silent < prompt, 'silent reruns must fail closed before queuing interactive recovery')
     assert.match(silentBranch ?? '', /SetErrorLevel 2[\s\S]*Quit/)
   })
 })

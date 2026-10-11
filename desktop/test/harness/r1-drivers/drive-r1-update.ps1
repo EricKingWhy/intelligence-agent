@@ -304,6 +304,9 @@ Log ('registry before update: IaBackupDir={0} IaLeftoverDir={1} InstallLocation=
 if ($Case -eq 'prior-pointer') {
   $priorBackup = $instDir + '.old-' + ([guid]::NewGuid().ToString('B').ToUpperInvariant())
   Copy-Item -LiteralPath $instDir -Destination $priorBackup -Recurse
+  $priorExePath = Join-Path $priorBackup $exe.Name
+  $priorExeExistsBefore = Test-Path -LiteralPath $priorExePath
+  Assert 'prior_backup_payload_seeded' $priorExeExistsBefore ('exe={0}' -f $priorExePath)
   Set-ItemProperty -Path $appKeyPath -Name 'IaBackupDir' -Value $priorBackup
   Log ('seeded prior backup pointer = {0}' -f $priorBackup)
 
@@ -312,11 +315,13 @@ if ($Case -eq 'prior-pointer') {
   $leftover = RegVal $appKeyPath 'IaLeftoverDir'
   $pointer = RegVal $appKeyPath 'IaBackupDir'
   $oldBackupExists = Test-Path -LiteralPath $priorBackup
+  $priorExeExistsAfter = Test-Path -LiteralPath $priorExePath
   $exeStillThere = Test-Path -LiteralPath $exe.FullName
   Log ('prior-pointer update rc={0} IaLeftoverDir={1} IaBackupDir={2} prior_backup_exists={3}' -f `
       $rc, $leftover, $pointer, $oldBackupExists)
   Assert 'prior_pointer_update_rc' ($rc -eq $expectedRc) ('rc={0} expected={1}' -f $rc, $expectedRc)
   Assert 'prior_backup_kept' $oldBackupExists ('backup_exists={0}' -f $oldBackupExists)
+  Assert 'prior_backup_payload_preserved' ($priorExeExistsBefore -and $priorExeExistsAfter) ('exe_exists_before={0} after={1}' -f $priorExeExistsBefore, $priorExeExistsAfter)
   Assert 'prior_backup_recorded' (($leftover -ieq $priorBackup) -eq ($Expect -eq 'fixed')) `
       ('IaLeftoverDir={0} expected={1}' -f $leftover, $(if ($Expect -eq 'fixed') { $priorBackup } else { '<empty>' }))
   Assert 'current_backup_pointer_cleared' ([string]::IsNullOrEmpty($pointer)) ('IaBackupDir={0}' -f $pointer)
