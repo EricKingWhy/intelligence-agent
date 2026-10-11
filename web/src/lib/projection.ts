@@ -239,6 +239,7 @@ function cloneTurn(t: Turn): Turn {
     tools: [...t.tools],
     activities: [...t.activities],
     delegations: t.delegations ? [...t.delegations] : undefined,
+    recalls: t.recalls ? [...t.recalls] : undefined,
   };
   const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
   if (lastModel && lastModel.kind === 'model') {
@@ -297,6 +298,32 @@ function cloneTool(t: ToolCall): ToolCall {
 function pushDelegation(turn: Turn, delegation: Delegation): void {
   turn.delegations = [...(turn.delegations ?? []), delegation];
   turn.activities.push({ kind: 'delegation', child_session_id: delegation.child_session_id });
+}
+
+/** #1017：memory/recalled 归位到「事件到达时的最后一轮」（= 它所属 run 的轮次）。
+ *
+ * 后端该事件只带 `run_id`、不带 `step_id`（recall.py 的 context select）；而
+ * append-only 流里 `user/message`（建轮）→ `run/started` → `memory/recalled`
+ * 的顺序恒成立，live 流、历史重放与 fork 重放下「最后一轮」与「run 归属」等价。
+ *
+ * #1017 审查 P3：run_id 双向可验时才归位——两侧都在且不等 = 乱序回跳的错挂
+ * 信号（ADR-0016 的乱序小窗重排 DEFER 的防御），弃挂保真（事件仍在 events
+ * 日志）；任一侧缺失 = 旧数据 / 信封无 run_id，无法证伪归属，按序归位。
+ *
+ * 为什么不走 withTurnAt/resolveStep：recalled 无 step_id，resolveStep 的兜底链
+ * （active_step_id → turns.length+1）会为它**凭空新建**一个错位空轮。这里只
+ * 附着、不建轮：无轮次可归属时（defensive，正常流不会出现）事件留在 events
+ * 日志，不伪造归属。verbatim 引用入 turn.recalls——展开详情仍按 seq/run_id
+ * 对账 /memory-recalls（不变量 #22：不复制、不改写事件真相）。 */
+function projectMemoryRecalled(state: ConversationState, event: AgentEvent): void {
+  const lastIdx = state.turns.length - 1;
+  if (lastIdx === -1) return;
+  const last = state.turns[lastIdx];
+  const eventRunId = typeof event.run_id === 'string' && event.run_id ? event.run_id : null;
+  if (eventRunId !== null && last.run_id != null && last.run_id !== eventRunId) return;
+  const turn = cloneTurn(last);
+  turn.recalls = [...(turn.recalls ?? []), event];
+  replaceTurnAt(state, lastIdx, turn);
 }
 
 /** model activity 缺位回填（MODEL_COMPLETED 与 MODEL_DELTA/TEXT_DELTA 共享）：
@@ -555,16 +582,19 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
   // 导致所有历史轮次显示同一个数字。
   const idx = event.data.turn_index;
-  if (typeof idx !== 'number' || !Number.isFinite(idx)) return;
-  state.turn_index = idx; // 会话级镜像（Langfuse / turn 元数据消费）
+  const hasIdx = typeof idx === 'number' && Number.isFinite(idx);
+  if (hasIdx) state.turn_index = idx; // 会话级镜像（Langfuse / turn 元数据消费）
   // 当轮 = 最后一个 turn：生产时序为 user/message（建轮）→ run/started，
   // 故 RUN_STARTED 到达时本轮 turn 已存在。不调用 withTurnAt——它在无匹配时
   // 会新建空 turn，而 RUN_STARTED 本身不携带 step（在途 run 的 step 无法解析），
-  // 会凭空多出一个错位轮次。仅在已有轮次时回填。
+  // 会凭空多出一个错位轮次。仅在已有轮次时回填 turn_index；
+  // #1017 审查 P3：同时盖 run_id 归属戳（recalled 归位的校验锚）。
   const last = state.turns[state.turns.length - 1];
-  if (last) {
+  const envelopeRunId = typeof event.run_id === 'string' && event.run_id ? event.run_id : null;
+  if (last && (hasIdx || envelopeRunId !== null)) {
     const turn = cloneTurn(last);
-    turn.turn_index = idx;
+    if (hasIdx) turn.turn_index = idx;
+    if (envelopeRunId !== null) turn.run_id = envelopeRunId;
     replaceTurnAt(state, state.turns.length - 1, turn);
   }
 }
@@ -1646,8 +1676,9 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // ——生成物 `event-types.ts` 由 `scripts/gen_event_types.py` 生成，加类型就必须在这里登记。
   // UI 展示面归 MEM-V2-5（#301），本行只负责穷尽性。
   [EventType.MEMORY_UPDATED]: { apply: noopProjection, summarize: emptySummary },
-  // The event is durable for the #301 explanation UI, but does not mutate session projection state.
-  [EventType.MEMORY_RECALLED]: { apply: noopProjection, summarize: emptySummary },
+  // #1017：不再是无归属的 no-op——按「事件到达时的最后一轮」verbatim 归位（呈现层
+  // 与轮次锚定，消灭尾部游离卡），事件本体照旧留在 events 日志（Inspector Timeline）。
+  [EventType.MEMORY_RECALLED]: { apply: projectMemoryRecalled, summarize: emptySummary },
   // #346: protected facts are a durable context projection, not a conversation timeline item.
   [EventType.TASK_PROTECTED_FACT]: { apply: noopProjection, summarize: emptySummary },
   // #352：evidence/recorded 是验收证据的 durable 事实，不是对话时间线项；
