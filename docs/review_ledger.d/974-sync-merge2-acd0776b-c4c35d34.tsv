@@ -1,0 +1,1 @@
+2026-10-11	sync merge main（#974 分支第二轮）：父 acd0776b（#974）/ f00c9ff0（main，#975 已合），ort 自动合；合后 #975 回归测试引旧模块路径致 1 failed，机械改 import 为新位置，75 passed/1 skipped	acd0776b..c4c35d34
