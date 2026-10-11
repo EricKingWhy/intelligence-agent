@@ -22,7 +22,8 @@ export interface TurnImageRef {
   bytes: number;
   width: number;
   height: number;
-  /** 展示名；服务端写入路径恒缺省（结构性缺省），缺省时渲染端用 attachment_id 兜底。 */
+  /** 展示名；**可空**（不是恒缺省）：服务端 CLI 路径会带上文件名，Web 发送端点无
+   * 回传信道故缺省。缺省时渲染端用 attachment_id 兜底。 */
   name: string | null;
 }
 
