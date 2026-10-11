@@ -897,7 +897,7 @@ def test_attach_mcp_section_does_not_leak_its_internal_finding_marker(tmp_path: 
     error 字典的键，就会随 `attach_mcp_section` 的返回序列化出去。用整份报告的 JSON 判，
     逐键点检漏一个就绿了。
     """
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, {"mcpServers": {"legacy": {
         "type": "sse", "url": "https://old.example.com/sse",
