@@ -147,7 +147,7 @@ class _OddStatus(Exception):
     ids=["bool", "str", "float", "none", "99", "600", "neg"],
 )
 def test_non_http_status_values_are_ignored(status_code: object) -> None:
-    """``status_code`` 只认 100–599 的 int（bool 是 int 子类，单独排除）：形状不对就当没有，
+    """``status_code`` 只认 100–599 的 int（bool 是 int 子类，靠范围排除）：形状不对就当没有，
     不把任意属性值（可能是供应商给的字符串）拼进文案。"""
     error = _OddStatus(status_code)
     assert provider_http_status(error) is None
