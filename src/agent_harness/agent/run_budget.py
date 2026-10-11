@@ -305,12 +305,13 @@ def reason_for_dimension(dimension: str) -> str:
 CLOSEOUT_MODEL = "model"
 CLOSEOUT_DETERMINISTIC = "deterministic"
 
-#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值基线 + client_return 扩展）。
+#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值基线 + client_return 扩展 + user_input 扩展）。
 #: 本模块只把它当**声明**收下；哪一种暂停接受哪一条由 `validate_resume` 决定：
 #: 预算 / deadline 只接受 `budget_increase`，stuck 只接受中间三者并且每一条都要
 #: **现场观测到**（`#317`；证据算法在 `agent/resume_evidence.py`，判定在
 #: `stuck_resume_evidence`），client_absent 只接受 `client_return`（W-22 `#366`；
-#: `11 §6.2`：重连本身不自动恢复，显式请求就是那个显式动作）。
+#: `11 §6.2`：重连本身不自动恢复，显式请求就是那个显式动作），user_input 只接受
+#: `user_input`（ADR-0051 `#663`：答复挂起的 input_request（protected-fact 冲突澄清））。
 RESUME_BASIS_BUDGET_INCREASE = "budget_increase"
 RESUME_BASIS_RELEVANT_STEER = "relevant_steer"
 RESUME_BASIS_ENVIRONMENT_CHANGE = "environment_change"
