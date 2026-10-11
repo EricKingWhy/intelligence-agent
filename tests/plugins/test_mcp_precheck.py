@@ -4,7 +4,7 @@
 - AC1 只接受 `MCPServerConfig` 可表达的显式描述；没有描述 → 报"需要薄适配描述"，不猜。
 - AC2 报告 name/transport/command/URL/权限覆写/环境变量名与依赖；不回显 secret 值。
 - AC3 未知字段、缺 command/URL、重复名、越界路径、不支持 transport 明确失败。
-- AC4 OAuth-only 标 `oauth_required_unsupported`；resources/prompts 逐项列缺口。
+- AC4 HTTP OAuth 进入显式登录流程；resources/prompts 逐项列缺口。
 
 "零连接 / 零 spawn"在单测里可机械判定：子进程里跑一遍预检后查 `sys.modules`
 （`test_precheck_imports_no_connection_machinery`），以及把 `subprocess.Popen/run`
@@ -410,18 +410,25 @@ def test_both_shapes_at_once_fails(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ AC4：OAuth 与能力缺口
 
-def test_oauth_only_server_is_marked_unsupported(tmp_path: Path) -> None:
-    report = inspect_mcp_servers(_package(tmp_path, {"mcpServers": {"login": {
+def test_oauth_only_server_is_supported_and_preserved_for_runtime(tmp_path: Path) -> None:
+    from agent_harness.plugins.mcp_precheck import load_mcp_servers
+
+    package = _package(tmp_path, {"mcpServers": {"login": {
         "type": "http",
         "url": "https://mcp.example.com/mcp",
-        "oauth": {"callbackPort": 8080, "scopes": "files:read"},
-    }}}))
+        "oauth": {"callbackPort": 8080, "clientId": "registered-client", "scopes": "files:read"},
+    }}})
+    report = inspect_mcp_servers(package)
 
     server = _server(report, "login")
-    assert server["status"] == "needs-adaptation"
-    assert "complete" != report["status"]
-    assert any(item["kind"] == "oauth_required_unsupported" for item in server["requirements"])
-    assert all(item["support"] != "supported" for item in server["requirements"])
+    assert server["status"] == "supported"
+    assert report["status"] == "complete"
+    assert not any(item["kind"] == "oauth_required_unsupported" for item in server["requirements"])
+
+    loaded = load_mcp_servers(package)
+    assert loaded[0].oauth.callback_port == 8080
+    assert loaded[0].oauth.client_id == "registered-client"
+    assert loaded[0].oauth.scopes == "files:read"
 
 
 def test_resources_and_prompts_declarations_become_listed_gaps(tmp_path: Path) -> None:
@@ -628,10 +635,10 @@ def test_resources_declared_in_any_form_is_a_gap(tmp_path: Path, declared: objec
 
 # ------------------------------------------------------------------ AC4 的安装期闸门
 
-def test_attach_mcp_section_downgrades_a_package_with_an_oauth_only_server(
+def test_attach_mcp_section_keeps_an_oauth_server_complete(
     tmp_path: Path,
 ) -> None:
-    """AC4：OAuth-only 描述不得以"完整兼容"过关——降级必须发生在**这份报告**里。"""
+    """AC4: OAuth-only MCP servers are supported capabilities after explicit login."""
     from agent_harness.plugins.mcp_precheck import attach_mcp_section
 
     report = {
@@ -645,9 +652,9 @@ def test_attach_mcp_section_downgrades_a_package_with_an_oauth_only_server(
 
     merged = attach_mcp_section(report)
 
-    assert merged["status"] == "needs-adaptation"
-    assert any(item["kind"] == "mcp-oauth_required_unsupported" for item in merged["requirements"])
-    assert merged["mcp"]["servers"][0]["status"] == "needs-adaptation"
+    assert merged["status"] == "complete"
+    assert not any(item["kind"] == "mcp-oauth_required_unsupported" for item in merged["requirements"])
+    assert merged["mcp"]["servers"][0]["status"] == "supported"
 
 
 def test_attach_mcp_section_leaves_a_clean_skill_package_complete(tmp_path: Path) -> None:
@@ -665,8 +672,8 @@ def test_attach_mcp_section_leaves_a_clean_skill_package_complete(tmp_path: Path
     assert merged["mcp"]["status"] == "needs-adaptation"
 
 
-def test_skill_package_manager_gate_sees_mcp_gaps(tmp_path: Path) -> None:
-    """端到端：`SkillPackageManager.install` 的闸门必须能看见 MCP 面的缺口。"""
+def test_skill_package_manager_gate_accepts_oauth_mcp(tmp_path: Path) -> None:
+    """OAuth support is a complete MCP capability, so the package gate accepts it."""
     from agent_harness.skills.package_manager import SkillPackageManager
 
     package = _package(tmp_path, {"mcpServers": {"login": {
@@ -677,14 +684,14 @@ def test_skill_package_manager_gate_sees_mcp_gaps(tmp_path: Path) -> None:
 
     record = manager.install(package)
 
-    assert record["compatibility"]["status"] == "needs-adaptation"
-    assert any("oauth_required_unsupported" in json.dumps(item) for item in record["compatibility"]["requirements"])
+    assert record["compatibility"]["status"] == "complete"
+    assert not any("oauth_required_unsupported" in json.dumps(item) for item in record["compatibility"]["requirements"])
 
 
 def test_gaps_stay_needs_adaptation_while_errors_are_unsupported(tmp_path: Path) -> None:
     """状态阶梯：**缺口**（待适配）与**错误**（明确失败）必须是两档，不能混。"""
     gap_report = inspect_mcp_servers(_package(tmp_path / "gap", {"mcpServers": {"g": {
-        "type": "http", "url": "https://a/mcp", "oauth": {"callbackPort": 1},
+        "type": "http", "url": "https://a/mcp", "resources": ["file:///x"],
     }}}))
     error_report = inspect_mcp_servers(_package(tmp_path / "err", {"mcpServers": {"e": {
         "type": "stdio",
