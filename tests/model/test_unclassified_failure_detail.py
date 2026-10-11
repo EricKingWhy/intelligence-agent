@@ -112,7 +112,7 @@ def test_timeout_is_not_reported_as_connection_failure() -> None:
 
 
 def test_connection_subclass_by_name_is_recognised() -> None:
-    """按 MRO 类名识别（不硬 import openai，与 ``fallback._TRANSIENT_ERROR_NAMES`` 同口径）：
+    """按 MRO 类名识别（不硬 import openai；fallback 瞬时判据经 ``transport_failure_kind`` 同源）：
     项目外的子类（例如 SDK 包装层）同样归入连接失败。"""
 
     class WrappedConnectionError(openai.APIConnectionError):
