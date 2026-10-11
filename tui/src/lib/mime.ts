@@ -59,10 +59,6 @@ function isAnimatedPng(buffer: Uint8Array): boolean {
   return false;
 }
 
-function readUint16LE(buffer: Uint8Array, offset: number): number {
-  return (buffer[offset] ?? 0) + ((buffer[offset + 1] ?? 0) << 8);
-}
-
 function readUint32BE(buffer: Uint8Array, offset: number): number {
   return (
     (buffer[offset] ?? 0) * 0x1000000 +
