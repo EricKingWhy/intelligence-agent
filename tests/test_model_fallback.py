@@ -84,6 +84,17 @@ class TestIsTransientModelError:
         assert is_transient_model_error(exc) is True
 
     @pytest.mark.parametrize("exc", [
+        ConnectionRefusedError("refused"),
+        ConnectionResetError("reset"),
+        type("WrappedAPITimeoutError", (APITimeoutError,), {})("t"),
+    ], ids=["ConnectionRefusedError", "ConnectionResetError", "APITimeoutError-subclass"])
+    def test_subclasses_of_transient_shapes_are_transient(self, exc):
+        """#999：判据按继承（isinstance / MRO 类名）而不是精确类名——与 openai-python
+        ``except timeout_exceptions()`` / httpx 异常层级同一姿势。内建 ``ConnectionError``
+        的子类（拒连 / 被重置）正是"连不上"本身，旧的精确类名匹配把它们漏成非瞬时。"""
+        assert is_transient_model_error(exc) is True
+
+    @pytest.mark.parametrize("exc", [
         ValueError("bad args"),
         KeyError("missing"),
         RuntimeError("unknown"),
