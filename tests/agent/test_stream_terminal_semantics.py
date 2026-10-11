@@ -201,7 +201,7 @@ class _AlwaysFailingModel:
 
 
 class _FakeAPIConnectionError(Exception):
-    """类名命中原 openai 瞬时错误表（`fallback.py` 的 `_TRANSIENT_ERROR_NAMES`）的替身。"""
+    """类名命中 openai 连接失败类名（`failure.transport_failure_kind` 按 MRO 类名识别）的替身。"""
 
 
 def _http_500() -> httpx.HTTPStatusError:

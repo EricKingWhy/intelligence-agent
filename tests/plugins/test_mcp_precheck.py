@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_harness.plugins.mcp_precheck import inspect_mcp_servers
+from agent_harness.mcp_precheck import inspect_mcp_servers
 
 
 def _write(path: Path, content: str | bytes) -> None:
@@ -179,7 +179,7 @@ def test_precheck_imports_no_connection_machinery(tmp_path: Path) -> None:
     root = _package(tmp_path, {"mcpServers": {"local": {"type": "stdio", "command": "npx"}}})
     probe = (
         "import sys, json;"
-        "from agent_harness.plugins.mcp_precheck import inspect_mcp_servers;"
+        "from agent_harness.mcp_precheck import inspect_mcp_servers;"
         f"report = inspect_mcp_servers({str(root)!r});"
         "loaded = sorted(n for n in sys.modules if n.startswith(('mcp.', 'agent_harness.mcp.')));"
         "runtimes = sorted(n for n in ('httpx2', 'anyio') if n in sys.modules);"
@@ -632,7 +632,7 @@ def test_attach_mcp_section_downgrades_a_package_with_an_oauth_only_server(
     tmp_path: Path,
 ) -> None:
     """AC4：OAuth-only 描述不得以"完整兼容"过关——降级必须发生在**这份报告**里。"""
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     report = {
         "status": "complete",
@@ -652,7 +652,7 @@ def test_attach_mcp_section_downgrades_a_package_with_an_oauth_only_server(
 
 def test_attach_mcp_section_leaves_a_clean_skill_package_complete(tmp_path: Path) -> None:
     """反向：包里没有 MCP 描述时，包级 status 不被 MCP lane 的结论污染。"""
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, None)
     _write(package / "SKILL.md", "---\nname: plugin\ndescription: Skill only.\n---\nBody.\n")
@@ -696,7 +696,7 @@ def test_gaps_stay_needs_adaptation_while_errors_are_unsupported(tmp_path: Path)
 
 def test_attach_mcp_section_makes_a_broken_description_block_install(tmp_path: Path) -> None:
     """AC3 要能拦住安装：MCP 描述本身就是坏的时候，包级 status 是 unsupported。"""
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, {"mcpServers": {"broken": {"type": "stdio"}}})  # 缺 command
     report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
@@ -774,7 +774,7 @@ def test_attach_mcp_section_keeps_an_out_of_scope_transport_from_rejecting_the_p
     它必须在 MCP 面内明确失败（AC3），但不得把一份 Skill 面健康的包升格成整包拒绝——
     否则一句作用域外的 transport 就能让整个 Skill 装不进来（相对 base 的回归）。
     """
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, {"mcpServers": {"legacy": {
         "type": "sse", "url": "https://old.example.com/sse",
@@ -831,7 +831,7 @@ def test_a_misspelled_transport_still_blocks_install(tmp_path: Path) -> None:
     同一个 `MCP_TRANSPORT_UNSUPPORTED` 码两种含义，闸门必须按那条 finding 自身判，
     不能按码判——否则一句打错的 `transport: "stido"` 会从"拦安装"滑成"可装"。
     """
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, {"mcpServers": {"typo": {
         "type": "stido", "command": "npx",
@@ -846,7 +846,7 @@ def test_a_misspelled_transport_still_blocks_install(tmp_path: Path) -> None:
 
 def test_a_url_entry_without_a_type_still_blocks_install(tmp_path: Path) -> None:
     """同类：有 url 没 type 是 Claude Code 自己会失败的写法（作者错误），仍拦安装。"""
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, {"mcpServers": {"bad": {"url": "https://mcp.example.com/mcp"}}})
     report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
@@ -863,7 +863,7 @@ def test_native_shape_out_of_scope_transport_also_stays_installable(tmp_path: Pa
     分档——只测 Claude 形状会漏掉这条边；而 native 形状**认得出** sse 却本仓没实现，
     与 Claude 形状同档（可装不可启用），拼错的名字仍拦安装。
     """
-    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+    from agent_harness.mcp_precheck import attach_mcp_section
 
     package = _package(tmp_path, None)
     _write(package / "mcp.json", json.dumps({"servers": [
@@ -885,3 +885,65 @@ def test_native_shape_out_of_scope_transport_also_stays_installable(tmp_path: Pa
     )
 
     assert mistyped["status"] == "unsupported"  # 写坏的 transport 仍 fail-closed
+
+
+# ------------------------------------------------------------------ #975：分档标记不外泄进可见 JSON
+
+def test_attach_mcp_section_does_not_leak_its_internal_finding_marker(tmp_path: Path) -> None:
+    """#975：安装闸门的分档信号是**预检内部**的路由标记，不得进可见 JSON。
+
+    `narrow` 用它把"本仓首版不支持的能力"与"描述写坏"分档给 `_blocks_install`；它是
+    实现细节，不属于 error 契约（`_add_error` 的 {code, path, message}）。一旦它成了
+    error 字典的键，就会随 `attach_mcp_section` 的返回序列化出去。用整份报告的 JSON 判，
+    逐键点检漏一个就绿了。
+    """
+    from agent_harness.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert "adaptive" not in json.dumps(merged, ensure_ascii=False)
+    # 分档行为逐字不变：MCP 面照旧明确失败、包级只降一档，error 是纯净的三字段。
+    assert merged["mcp"]["status"] == "unsupported"
+    assert merged["status"] == "needs-adaptation"
+    server_error = merged["mcp"]["servers"][0]["errors"][0]
+    assert server_error["code"] == "MCP_TRANSPORT_UNSUPPORTED"
+    assert set(server_error) == {"code", "path", "message"}
+
+
+def test_cli_plugins_inspect_stdout_has_no_internal_finding_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """真实 CLI（#975 的复现路径）：stdout 的 JSON 里不得出现分档标记。"""
+    from agent_harness import cli
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Legacy transport.\n---\nBody.\n")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: type("S", (), {
+            "workspace_dir": str(workspace),
+            "skill_global_dir": str(global_skills),
+            "capabilities": None,
+        })(),
+    )
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "inspect", str(package), "--scope", "project"])
+
+    cli.main()
+
+    out = capsys.readouterr().out
+    assert "adaptive" not in out
+    report = json.loads(out)
+    assert report["status"] == "needs-adaptation"  # 降档结论仍照出
+    assert report["mcp"]["servers"][0]["errors"][0]["code"] == "MCP_TRANSPORT_UNSUPPORTED"

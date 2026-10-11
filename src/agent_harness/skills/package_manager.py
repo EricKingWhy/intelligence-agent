@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from agent_harness.mcp_precheck import attach_mcp_section
 from agent_harness.plugin_inspection import (
     DSH_SLIDER_PACKAGE_NAME,
     DSH_SLIDER_PINNED_COMMIT,
@@ -27,7 +28,6 @@ from agent_harness.plugin_inspection import (
     DSH_SLIDER_PINNED_VERSION,
     inspect_dsh_effort_slider,
 )
-from agent_harness.plugins.mcp_precheck import attach_mcp_section
 from agent_harness.skills.inspection import (
     _MAX_PACKAGE_ENTRIES,
     _is_junction,
