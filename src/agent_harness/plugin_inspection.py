@@ -32,6 +32,12 @@ _SOURCE_PIN = {
     "archive_sha256": "122917c83671d5e2ec9f759875db071d47cf738c5774f0810a9d428d20ccce0c",
 }
 
+# 供包管理器的 DSH 原生包车道做记录校验用（避免各处复制这份常量）。
+DSH_SLIDER_PACKAGE_NAME = _PACKAGE_NAME
+DSH_SLIDER_PINNED_VERSION = _PINNED_VERSION
+DSH_SLIDER_PINNED_COMMIT = _SOURCE_PIN["commit"]
+DSH_SLIDER_PINNED_FILES_SHA256 = _PINNED_FILES_SHA256
+
 
 def inspect_dsh_effort_slider(
     source: Path | str, *, scope: str = "project"

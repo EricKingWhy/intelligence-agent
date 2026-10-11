@@ -1814,9 +1814,15 @@ def _main_plugins(argv: list[str]) -> None:
             return
         if args.command == "install":
             record = manager.install(args.local_dir)
+            # DSH 原生包的名字锚定包自身（来源目录名可能是任意的临时路径）。
+            name = (
+                record["package"]
+                if record.get("type") == "dsh-native"
+                else Path(record["source"]).name
+            )
             print(
                 json.dumps(
-                    {"name": Path(record["source"]).name, **record},
+                    {"name": name, **record},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -1977,13 +1983,54 @@ def _skill_package_listing(manager: SkillPackageManager) -> dict[str, object]:
             # 会再进装配面，叫人去重启一个不会生效的包是错的（`disable` 后即此形）。
             pending_restart = (installed is not None and not discovered) or has_pending_version
         current_version = None
-        if record.get("source_kind") == "git":
+        if record.get("source_kind") in {"git", "dsh-git"}:
             current_version = {
                 "ref": record["source_ref"],
                 "resolved_commit": record["resolved_commit"],
                 "sha256": record["sha256"],
             }
         pending_version = record.get("pending_version")
+        if record.get("type") == "dsh-native":
+            # DSH 原生包的投影（#878 T9）：适配激活是产品原生语义（#865 滑条
+            # 一直在 web/ 里），不按 SKILL.md 发现路径比对；enabled-adapted →
+            # active(native adaptation)，暂存的 update/rollback → 待重启，
+            # 停用 → not_selected。没有第二套状态。
+            packages.append(
+                {
+                    "name": name,
+                    "type": "dsh-native",
+                    "scope": record["scope"],
+                    "source": record["source"],
+                    "saved_selection": (
+                        "enabled-adapted" if record["enabled"] else "not_selected"
+                    ),
+                    "selected_scope": selected_scope,
+                    "compatibility": record["compatibility"],
+                    "trust": record["trust"],
+                    "adapter": record["adapter"],
+                    "gaps": record["gaps"],
+                    "current_version": current_version,
+                    "pending_version": (
+                        {
+                            "ref": pending_version["source_ref"],
+                            "resolved_commit": pending_version["resolved_commit"],
+                            "sha256": pending_version["sha256"],
+                        }
+                        if isinstance(pending_version, dict) else None
+                    ),
+                    "current_runtime": (
+                        "active(native adaptation)"
+                        if record["enabled"]
+                        else "not_selected"
+                    ),
+                    "pending_restart": (
+                        has_pending_version
+                        if runtime_state != "unavailable"
+                        else None
+                    ),
+                }
+            )
+            continue
         packages.append(
             {
                 "name": name,
@@ -2053,6 +2100,18 @@ def _available_global_skill_package_listing(
         # 同名双 scope 并存时，选了项目版的那条不能把全局版报成已启用（T5 AC2）。
         selected = results.get(item["name"], {}).get("selected_scope") == "global"
         item["saved_selection"] = "enabled" if selected else "not_selected"
+        if item.get("type") == "dsh-native":
+            # DSH 原生包没有 SKILL.md 发现路径：适配激活按产品原生语义投影。
+            item["current_runtime"] = (
+                "active(native adaptation)" if selected else "not_selected"
+            )
+            item["pending_restart"] = (
+                None
+                if runtime_state == "unavailable"
+                else item["pending_version"] is not None
+            )
+            packages.append(item)
+            continue
         skill = global_manager.managed_skills_dir / str(item["name"]) / "SKILL.md"
         source = os.path.normcase(os.path.realpath(str(skill)))
         discovered = source in (runtime_skill_sources or set())
@@ -2075,7 +2134,7 @@ def _global_skill_package_listing(manager: SkillPackageManager) -> list[dict[str
     for name, record in sorted(manager.list_packages().items()):
         pending = record.get("pending_version")
         current_version = None
-        if record.get("source_kind") == "git":
+        if record.get("source_kind") in {"git", "dsh-git"}:
             current_version = {
                 "ref": record["source_ref"],
                 "resolved_commit": record["resolved_commit"],
