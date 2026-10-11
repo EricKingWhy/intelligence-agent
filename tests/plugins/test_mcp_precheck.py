@@ -885,3 +885,65 @@ def test_native_shape_out_of_scope_transport_also_stays_installable(tmp_path: Pa
     )
 
     assert mistyped["status"] == "unsupported"  # 写坏的 transport 仍 fail-closed
+
+
+# ------------------------------------------------------------------ #975：分档标记不外泄进可见 JSON
+
+def test_attach_mcp_section_does_not_leak_its_internal_finding_marker(tmp_path: Path) -> None:
+    """#975：安装闸门的分档信号是**预检内部**的路由标记，不得进可见 JSON。
+
+    `narrow` 用它把"本仓首版不支持的能力"与"描述写坏"分档给 `_blocks_install`；它是
+    实现细节，不属于 error 契约（`_add_error` 的 {code, path, message}）。一旦它成了
+    error 字典的键，就会随 `attach_mcp_section` 的返回序列化出去。用整份报告的 JSON 判，
+    逐键点检漏一个就绿了。
+    """
+    from agent_harness.plugins.mcp_precheck import attach_mcp_section
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    report = {"status": "complete", "source": str(package), "requirements": [], "errors": []}
+
+    merged = attach_mcp_section(report)
+
+    assert "adaptive" not in json.dumps(merged, ensure_ascii=False)
+    # 分档行为逐字不变：MCP 面照旧明确失败、包级只降一档，error 是纯净的三字段。
+    assert merged["mcp"]["status"] == "unsupported"
+    assert merged["status"] == "needs-adaptation"
+    server_error = merged["mcp"]["servers"][0]["errors"][0]
+    assert server_error["code"] == "MCP_TRANSPORT_UNSUPPORTED"
+    assert set(server_error) == {"code", "path", "message"}
+
+
+def test_cli_plugins_inspect_stdout_has_no_internal_finding_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """真实 CLI（#975 的复现路径）：stdout 的 JSON 里不得出现分档标记。"""
+    from agent_harness import cli
+
+    package = _package(tmp_path, {"mcpServers": {"legacy": {
+        "type": "sse", "url": "https://old.example.com/sse",
+    }}})
+    _write(package / "SKILL.md", "---\nname: plugin\ndescription: Legacy transport.\n---\nBody.\n")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: type("S", (), {
+            "workspace_dir": str(workspace),
+            "skill_global_dir": str(global_skills),
+            "capabilities": None,
+        })(),
+    )
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "inspect", str(package), "--scope", "project"])
+
+    cli.main()
+
+    out = capsys.readouterr().out
+    assert "adaptive" not in out
+    report = json.loads(out)
+    assert report["status"] == "needs-adaptation"  # 降档结论仍照出
+    assert report["mcp"]["servers"][0]["errors"][0]["code"] == "MCP_TRANSPORT_UNSUPPORTED"
