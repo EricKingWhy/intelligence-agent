@@ -251,22 +251,38 @@ class PersistingOAuthClientProvider(OAuthClientProvider):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.reauthorization_required = False
-
-    async def _initialize(self) -> None:
-        await super()._initialize()
-        if self.context.current_tokens is not None:
-            self.context.update_token_expiry(self.context.current_tokens)
-        get_oauth_metadata = getattr(self.context.storage, "get_oauth_metadata", None)
-        get_resource_metadata = getattr(self.context.storage, "get_resource_metadata", None)
-        if get_oauth_metadata is not None:
-            self.context.oauth_metadata = await get_oauth_metadata()
-        if get_resource_metadata is not None:
-            self.context.protected_resource_metadata = await get_resource_metadata()
+        self._metadata_restore_attempted = False
 
     async def async_auth_flow(self, request: httpx2.Request):
+        restore_token_expiry = self.context.current_tokens is None
+        async with self.context.lock:
+            if not self._metadata_restore_attempted:
+                if self.context.oauth_metadata is None:
+                    get_oauth_metadata = getattr(self.context.storage, "get_oauth_metadata", None)
+                    if get_oauth_metadata is not None:
+                        oauth_metadata = await get_oauth_metadata()
+                        if self.context.oauth_metadata is None:
+                            self.context.oauth_metadata = oauth_metadata
+                if self.context.protected_resource_metadata is None:
+                    get_resource_metadata = getattr(self.context.storage, "get_resource_metadata", None)
+                    if get_resource_metadata is not None:
+                        resource_metadata = await get_resource_metadata()
+                        if self.context.protected_resource_metadata is None:
+                            self.context.protected_resource_metadata = resource_metadata
+                self._metadata_restore_attempted = True
+
         flow = super().async_auth_flow(request)
         try:
             outgoing = await anext(flow)
+            if restore_token_expiry and self.context.current_tokens is not None:
+                self.context.update_token_expiry(self.context.current_tokens)
+                if not self.context.is_token_valid():
+                    expired_token = self.context.current_tokens.access_token
+                    if request.headers.get("authorization") == f"Bearer {expired_token}":
+                        request.headers.pop("authorization", None)
+                    await flow.aclose()
+                    flow = super().async_auth_flow(request)
+                    outgoing = await anext(flow)
             while True:
                 await self._ensure_saved_token_is_current(outgoing)
                 response = yield outgoing

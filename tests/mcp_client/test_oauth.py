@@ -304,7 +304,10 @@ def test_oauth_client_provider_uses_the_locked_sdk_and_registered_redirect():
     from mcp.client.auth.oauth2 import OAuthClientProvider
 
     from agent_harness.mcp.config import parse_mcp_servers
-    from agent_harness.mcp.oauth import make_oauth_client_provider
+    from agent_harness.mcp.oauth import (
+        PersistingOAuthClientProvider,
+        make_oauth_client_provider,
+    )
 
     config = parse_mcp_servers({"servers": [{
         "name": "remote",
@@ -317,8 +320,177 @@ def test_oauth_client_provider_uses_the_locked_sdk_and_registered_redirect():
     provider = make_oauth_client_provider(config, storage)
 
     assert isinstance(provider, OAuthClientProvider)
+    assert "_initialize" not in PersistingOAuthClientProvider.__dict__
     assert str(provider.context.client_metadata.redirect_uris[0]) == "http://localhost:8123/callback"
     assert provider.context.client_metadata.scope == "files:read"
+
+
+@pytest.mark.asyncio
+async def test_oauth_provider_validates_the_token_snapshot_loaded_by_the_sdk():
+    import httpx2
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import (
+        MCPReauthorizationRequired,
+        make_oauth_client_provider,
+    )
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class ChangingTokenStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.snapshots = []
+
+        async def get_tokens(self):
+            if self.snapshots:
+                return self.snapshots.pop(0)
+            return await super().get_tokens()
+
+    storage = ChangingTokenStorage(config.name, config.url, keyring_api=FakeKeyring())
+    await storage.set_tokens(OAuthToken(access_token="snapshot-expired", expires_in=-1))
+    await storage.set_client_info(OAuthClientInformationFull(client_id="client-id"))
+    storage.snapshots = [
+        OAuthToken(access_token="snapshot-valid", expires_in=3600),
+        OAuthToken(access_token="snapshot-expired", expires_in=-1),
+    ]
+    provider = make_oauth_client_provider(config, storage)
+    sent_requests = []
+
+    def transport(request):
+        sent_requests.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        auth=provider,
+        transport=httpx2.MockTransport(transport),
+    ) as client:
+        with pytest.raises(MCPReauthorizationRequired):
+            await client.get(config.url)
+
+    assert sent_requests == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_provider_does_not_overwrite_metadata_discovered_while_loading():
+    import asyncio
+
+    import httpx2
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class BlockingMetadataStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.oauth_read_started = asyncio.Event()
+            self.oauth_read_release = asyncio.Event()
+            self.resource_read_started = asyncio.Event()
+            self.resource_read_release = asyncio.Event()
+
+        async def get_oauth_metadata(self):
+            self.oauth_read_started.set()
+            await self.oauth_read_release.wait()
+            return _metadata(revocation_endpoint="https://old.example.com/revoke")
+
+        async def get_resource_metadata(self):
+            self.resource_read_started.set()
+            await self.resource_read_release.wait()
+            return ProtectedResourceMetadata(
+                resource="https://old.example.com/mcp",
+                authorization_servers=["https://old.example.com"],
+            )
+
+    storage = BlockingMetadataStorage(config.name, config.url, keyring_api=FakeKeyring())
+    provider = make_oauth_client_provider(config, storage)
+    flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+
+    async def open_and_close_flow():
+        try:
+            await anext(flow)
+        finally:
+            await flow.aclose()
+
+    first_request = asyncio.create_task(open_and_close_flow())
+    await storage.oauth_read_started.wait()
+    provider.context.oauth_metadata = _metadata(
+        revocation_endpoint="https://new.example.com/revoke"
+    )
+    storage.oauth_read_release.set()
+    await storage.resource_read_started.wait()
+    provider.context.protected_resource_metadata = ProtectedResourceMetadata(
+        resource="https://new.example.com/mcp",
+        authorization_servers=["https://new.example.com"],
+    )
+    storage.resource_read_release.set()
+    await first_request
+
+    assert str(provider.context.oauth_metadata.revocation_endpoint) == "https://new.example.com/revoke"
+    assert str(provider.context.protected_resource_metadata.resource) == "https://new.example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_oauth_provider_does_not_restore_metadata_after_sdk_invalidation():
+    import httpx2
+
+    from agent_harness.mcp.config import parse_mcp_servers
+    from agent_harness.mcp.oauth import make_oauth_client_provider
+
+    config = parse_mcp_servers({"servers": [{
+        "name": "remote",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {},
+    }]})[0]
+
+    class CountingMetadataStorage(MCPKeyringTokenStorage):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.oauth_reads = 0
+            self.resource_reads = 0
+
+        async def get_oauth_metadata(self):
+            self.oauth_reads += 1
+            return _metadata(revocation_endpoint="https://old.example.com/revoke")
+
+        async def get_resource_metadata(self):
+            self.resource_reads += 1
+            return ProtectedResourceMetadata(
+                resource="https://old.example.com/mcp",
+                authorization_servers=["https://old.example.com"],
+            )
+
+    storage = CountingMetadataStorage(config.name, config.url, keyring_api=FakeKeyring())
+    provider = make_oauth_client_provider(config, storage)
+
+    async def open_and_close_flow():
+        flow = provider.async_auth_flow(httpx2.Request("GET", config.url))
+        try:
+            await anext(flow)
+        finally:
+            await flow.aclose()
+
+    await open_and_close_flow()
+    provider.context.oauth_metadata = None
+    provider.context.protected_resource_metadata = None
+    await open_and_close_flow()
+
+    assert provider.context.oauth_metadata is None
+    assert provider.context.protected_resource_metadata is None
+    assert storage.oauth_reads == 1
+    assert storage.resource_reads == 1
 
 
 @pytest.mark.asyncio
