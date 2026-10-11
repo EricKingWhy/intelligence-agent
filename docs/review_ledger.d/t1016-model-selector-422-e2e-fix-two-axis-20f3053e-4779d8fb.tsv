@@ -1,0 +1,1 @@
+2026-10-12	#1016 e2e 漏网修复审查（发现阶段双轴，fresh 会话 glm-5.3-flash，实现者不自审）：4779d8fb 把 :137/:158 两条用例对齐票面 AC1 新语义（默认条目不进二级列表）。Correctness 轴 APPROVE（P3 :138 注释 5/4 歧义、P4 既有 glm-4.6 子串锚定非本 diff 引入）；Standards 轴 APPROVE-WITH-FINDINGS（P4 同一注释项）。0×P0-P2。语义核对：分母改可选条目数不削弱反漂移意图；夹具 glm-4.6 default:false 保住徽标按条对照；grep 证无其他用例依赖两夹具 default 位。处置：P3/P4 注释澄清落 d8736360，修后重审另行走账。	20f3053e..4779d8fb

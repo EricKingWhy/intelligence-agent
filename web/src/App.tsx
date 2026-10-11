@@ -68,7 +68,7 @@ import {
   type StartSessionPayload,
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
-import { effectiveModelEntry, modelChangeTarget } from './lib/modelSelection';
+import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from './lib/modelSelection';
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
@@ -494,7 +494,10 @@ export default function App() {
 
   const handleModelChange = useCallback(
     (name: string | null) => {
-      setSelectedModel(name);
+      // #1016：默认条目名 = 「清除会话级覆盖」的同义表达 ⇒ 本地状态归 null。否则
+      // `selectedModel` 会被固化成默认模型名，此后每次续聊都带着它 → 后端 422。
+      const selected = normalizeSelectedModel(name, models);
+      setSelectedModel(selected);
       // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
       // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
       //
@@ -516,9 +519,9 @@ export default function App() {
           void changeModel(selectedId, entry.provider, target)
             .then((result) => {
               // 用响应里的规范 model_id 更新本地状态（不回显请求值）。
-              // 例外：选「默认链」时保持 null——trigger 要显示「默认链」而不是被回填成
-              // 具体模型名（那会和用户刚点的选项不一致）。
-              if (name !== null) setSelectedModel(result.model_id);
+              // 例外：选「默认链」或默认条目时保持 null（#1016）——trigger 要显示
+              // 「默认链」而不是被回填成具体模型名（那会和用户刚点的选项不一致）。
+              if (selected !== null) setSelectedModel(result.model_id);
             })
             .catch(() => {
               // 切换失败静默——用户可重试；不阻塞主流程

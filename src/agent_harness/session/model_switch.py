@@ -131,16 +131,17 @@ def is_default_selection(settings: Settings, provider: str, model_id: str) -> bo
 
     默认条目不是一个 catalog 条目，但前端 picker 会展示它——选中它 = 清除会话级
     覆盖、回到默认链（事件写 ``to_model_id=None``）。
+
+    「模型名这一半」的判定与续聊 / 创建 amend 的 ``resolve_selection`` **共用同一
+    事实源**（``ModelConfig.is_default_entry``，见 #1016）——否则同一 id 在切换路径
+    接受、在续聊校验路径拒绝。「default」是 ``POST /model`` 的既有字面别名（不经
+    ``/api/models``），故只在带 provider 的结构化路径上接受。
     """
-    from agent_harness.model.config import ConfigError
+    from agent_harness.model.config import ModelConfig
 
     if provider != settings.model_provider:
         return False
-    try:
-        resolved_default = default_model_id(settings)
-    except ConfigError:
-        return False
-    return model_id in {resolved_default, "default"}
+    return model_id == "default" or ModelConfig.is_default_entry(settings, model_id)
 
 
 @dataclass(frozen=True)
