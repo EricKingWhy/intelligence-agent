@@ -48,6 +48,9 @@ export function normalizeSelectedModel(
   models: readonly ModelCatalogEntry[],
 ): string | null {
   if (selected === null) return null;
+  // 目录未加载（空）时无法判「默认性」——原样返回。乱归零一个可能真实的模型名，
+  // 比漏归零一个暂不可判的名字更危险（后者等目录加载后再次 changeModel 即纠正）。
+  if (models.length === 0) return selected;
   return models.find((m) => m.name === selected)?.default ? null : selected;
 }
 

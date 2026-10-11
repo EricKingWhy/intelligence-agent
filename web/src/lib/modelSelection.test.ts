@@ -55,6 +55,10 @@ describe('normalizeSelectedModel（#1016：默认条目名归一为 null，不�
     expect(normalizeSelectedModel('removed-model', catalog)).toBe('removed-model');
   });
 
+  it('目录未加载（空数组）→ 原样返回（无法判默认性，不乱归零，审查 P2）', () => {
+    expect(normalizeSelectedModel('deepseek-v4-flash-0731', [])).toBe('deepseek-v4-flash-0731');
+  });
+
   it('消融实验 4：默认条目与同名 catalog 条目折叠成一个符号时 → 仍归 null', () => {
     // 后端此时让默认条目优先；前端据同一条 `default` 标记归一，语义一致。
     const collapsed = [

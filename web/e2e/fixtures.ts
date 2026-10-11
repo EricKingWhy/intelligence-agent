@@ -1562,7 +1562,8 @@ export async function pickControl(
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
-/** 选目录里的**第一个模型**（`MODELS[0]`，provider = `MODELS[0].provider`），
+/** 选二级列表里的**第一个可选模型**（`FIRST_SELECTABLE_MODEL`，#1016 后默认条目
+ *  不进二级列表——「选默认」走一级「默认链」入口，不属于本 helper 的语义），
  *  断言 trigger 文本变成该模型名（#199 两级飞出）。
  *
  * 与旧版的差别是**语义变了，不是断言变松**：一级只列 provider，模型在二级子菜单里，
@@ -1573,7 +1574,7 @@ export async function pickControl(
  * 关闭态的信号是 `[role="menu"]`（菜单语义），不再是 `[role="listbox"]`：两级飞出在
  * 平台上就是「菜单 + 子菜单」，见 `ModelPicker.tsx` 顶部对语义变更的说明。 */
 export async function pickFirstModel(page: Page): Promise<void> {
-  await pickModel(page, MODELS[0].provider, MODELS[0].name);
+  await pickModel(page, FIRST_SELECTABLE_MODEL.provider, FIRST_SELECTABLE_MODEL.name);
 }
 
 /** 「这个面板里没有搜索入口」的**可失败**口径：任何输入控件 / 搜索语义都算。
