@@ -154,3 +154,37 @@ B 路线（保留原文继续发送超窗请求）违反 spec 06 §8 冻结条�
 未采纳。实现落点：`src/agent_harness/context/compactor.py`（#1026 分支
 `codebuddy/1026-compaction-timeout`）；失败面经既有 #348 有界失败通道
 （`deterministic_truncation_fallback` 诊断，attempt=0）落任务可见状态。
+
+## 修订注（2026-10-12，用户裁决 R1，#1041）
+
+spec 06 §8 原文「Summary 失败：保存 raw artifact，走 fallback summary」对**失败出口
+的落盘面**存在字面歧义（"走 fallback summary"与 #1026 的确定性截断不产生摘要之间
+错配）。用户 **2026-10-12 17:48 裁决读法 = R1**：**摘要失败的三条出口中，"抛错停止"
+与"截断降级"两条落盘原始早期窗口全文的独立快照；"安全继续"出口不落盘。** 判据是
+"早期原文是否离开模型视野，或会话是否因失败受损"：
+
+1. **落盘（§8/R1 的独立快照前提成立）**：
+   - ① 双失败且不可截断 ⇒ `ContextWindowExceededError`（hard guard，run/paused）；
+   - ② 双失败后走确定性截断降级（`fallback_used=True`，早期原文被压出模型视野）；
+   - ③ 预检拒绝 + 无法缩小 + 有效用量仍超 hard ⇒ `ContextWindowExceededError`
+     （会话受损、早期原文离开模型视野）——同为"抛错停止"出口的变体。
+   三者都把**原始 early 窗口 `messages[prefix_end:cut]` 的完整转录文本**（含"截断
+   保留 + 逐出"两部分，是"逐出集"的超集、非仅被逐出集）落成 raw artifact，ref 回填
+   进 `context/compaction_failed.artifact_ref`。
+2. **不落盘（独立快照前提不成立）**：双失败但有效用量 ≤ hard 的**安全继续**出口——
+   旧投影逐字保留、早期原文仍在模型视野内、且仍在 append-only 事件流里可原样回放，
+   会话未受损 ⇒ 无需独立快照，落盘只是每轮触发的无界冗余写。
+
+**背书**：Aider（raw 对话历史无条件追加落盘，独立于摘要）与 LangGraph checkpointer
+（完整状态历史持久化，摘要替换当前状态后原文仍可经 checkpoint 回溯）同证"raw 原文
+恒久留存"原则；与 ADR-0007 第 2 层修订、#348「摘要失败 ≠ 压缩发生」一致。
+
+**发现入口**：raw artifact 无 `artifact/created` / `artifact/externalized` 事件，其唯一
+发现入口是 `context/compaction_failed.data["artifact_ref"]`——该载体已登记进 artifact
+可达引用注册表（`session/service.py::_artifact_refs_in_event`，标签
+`compaction_failed:<seq>`），故该快照进入 retention 可达集、在清理预览里判 `referenced`
+（阻断删除），不被当作"未引用孤儿"误删。
+
+实现落点：`context/compactor.py`（失败分支带出原始早期窗口全文）、`context/builder.py`
+（builder-owned 落盘 + ref 回填，fail-open、绝不伪造）、`session/service.py`（引用注册表
+登记）。
