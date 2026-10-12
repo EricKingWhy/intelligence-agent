@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from typing import Any
@@ -75,6 +76,25 @@ class _RememberV2Args(BaseModel):
     payload: MemoryPayload
     importance: float = Field(default=0.8, ge=0.0, le=1.0)
     strength: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _coerce_stringified_payload(cls, value: Any) -> Any:
+        """#1025（方案 A）：字段作者在契约里显式声明接受字符串形态。
+
+        经 OpenAI 兼容网关的模型常把对象字段双重编码成 JSON 字符串；
+        合法 JSON 字符串先 ``json.loads`` 再走正常判联合校验。解析失败
+        原样返回 ⇒ 保留 Pydantic 原错误（不静默吞错、不猜测修复）；
+        dict 入站零影响。``RecursionError`` 与 ``ValueError`` 一起捕获
+        （executor.py 同款先例）：极端深嵌套不能冒出 ``model_validate``
+        破坏「对外永不抛异常」不变量。只声明本字段——不碰其他字段。
+        """
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (ValueError, RecursionError):
+                return value
+        return value
 
     @field_validator("content")
     @classmethod
