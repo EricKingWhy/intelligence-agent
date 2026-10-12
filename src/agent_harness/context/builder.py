@@ -421,15 +421,31 @@ def _inject_modified_paths(
 def _with_artifact_ref(
     failures: list[CompactionFailure], artifact_ref: str | None,
 ) -> list[CompactionFailure]:
-    """#1041（spec 06 §8）：把本轮落盘的 raw artifact ref 回填进每条失败记录。
+    """#1041（spec 06 §8）：把本轮落盘的 raw artifact ref 回填进失败记录。
 
     ref 为 None（store 缺席 / 未落盘）时原样返回（失败记录默认 `artifact_ref=None`，
     绝不伪造）；否则用 `dataclasses.replace` 产出带同一 ref 的副本——`CompactionFailure`
     是 frozen，不回改 compactor 造出的原始记录。
+
+    回填面（#1041 修回 F5）：ref 是**本轮级**的 raw snapshot 指针，只归属"摘要失败
+    来源"的诊断——本轮发生了摘要尝试（`attempt>=1`）时，预检拒绝诊断（`attempt=0`
+    的 `preflight_request_exceeds_hard_limit`，按 #639 语义**不是**摘要尝试）保持
+    `None`，ref 归摘要尝试失败与截断降级诊断；纯预检轮（无任何摘要尝试：预检拒绝
+    + 无法缩小 ⇒ raise）里预检诊断是本轮唯一失败记录，ref 由它承载（否则落盘快照
+    无从发现）。
     """
     if artifact_ref is None:
         return failures
-    return [replace(failure, artifact_ref=artifact_ref) for failure in failures]
+    has_summary_attempt = any(failure.attempt >= 1 for failure in failures)
+    return [
+        failure
+        if (
+            has_summary_attempt
+            and failure.error_class == _PREFLIGHT_REJECTION_ERROR_CLASS
+        )
+        else replace(failure, artifact_ref=artifact_ref)
+        for failure in failures
+    ]
 
 
 class ContextBuilder:
@@ -1064,15 +1080,15 @@ class ContextBuilder:
                 supports_vision=self._supports_vision,
             )
         except ContextWindowExceededError as error:
-            # #1041（spec 06 §8）：摘要双失败 + 不可截断（hard guard 停止）⇒ 先把
-            # early 原文落盘成 raw artifact，把 ref 回填进本轮失败记录，再抛。
+            # #1041（spec 06 §8）：失败面 raise（双失败不可截断 / 预检拒绝无法缩小）
+            # ⇒ 先把早期原文落盘成 raw artifact，把 ref 回填进本轮失败记录，再抛。
             artifact_ref = await self._save_failure_raw_artifact(
                 session, error.raw_artifact_content)
             self._record_compaction_failures(
                 session, _with_artifact_ref(error.failures, artifact_ref))
             raise
-        # #1041（spec 06 §8，R1 裁决）：截断降级**成功**分支同样落盘 early 原文，
-        # 事件/诊断回填 artifact_ref。成功压缩 / 低水位 / 安全继续路径
+        # #1041（spec 06 §8，R1 裁决）：截断降级**成功**分支同样落盘**原始 early 窗口
+        # 全文**，事件/诊断回填 artifact_ref。成功压缩 / 低水位 / 安全继续路径
         # raw_artifact_content 为 None ⇒ 不落盘、ref 保持 None（不伪造）。
         artifact_ref = await self._save_failure_raw_artifact(
             session, result.raw_artifact_content)
@@ -1211,9 +1227,10 @@ class ContextBuilder:
     async def _save_failure_raw_artifact(
         self, session: Session, raw: str | None,
     ) -> str | None:
-        """#1041（spec 06 §8）：摘要失败的 early 原文落盘成 raw artifact，返回 ref。
+        """#1041（spec 06 §8）：摘要失败分支带出的**原始 early 窗口全文**落盘成 raw
+        artifact，返回其内容寻址 ref。
 
-        - `raw is None`（成功 / 安全继续 / 预检拒绝等无 early 原文可存的路径）或
+        - `raw is None`（成功 / 安全继续 / 低水位 / 无早期窗口等无原文可存的路径）或
           `self._artifact_store is None`（未装配 store）⇒ **不落盘、返回 None**
           （§8「上传失败不能伪造 artifact_ref」）。
         - 落盘失败同样 fail-open 返回 None 并记 warning：本方法在**既有的失败路径**上
@@ -1247,9 +1264,11 @@ class ContextBuilder:
         `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
 
-        #1041（spec 06 §8）：`artifact_ref` 是本轮"摘要失败保存的 early 原文 raw
-        artifact"的内容寻址 id（由调用方在落盘后回填进失败记录）；store 缺席 / 未落盘
-        时为 None（additive 键，绝不伪造）。
+        #1041（spec 06 §8）：`artifact_ref` 是本轮**原始 early 窗口全文** raw artifact
+        的内容寻址 id（由调用方在落盘后回填进失败记录）。它是**本轮级**指针：只落在
+        "摘要失败来源"的诊断上——预检拒绝诊断（`attempt=0`，非摘要尝试）在本轮另有
+        摘要尝试失败时保持 None（纯预检轮则例外，见 `_with_artifact_ref`）。store 缺席 /
+        未落盘时为 None（additive 键，绝不伪造）。
         """
         for failure in failures:
             session.append(CONTEXT_COMPACTION_FAILED, {

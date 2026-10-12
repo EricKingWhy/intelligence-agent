@@ -167,6 +167,7 @@ from agent_harness.session.errors import (
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
+    CONTEXT_COMPACTION_FAILED,
     EVIDENCE_RECORDED,
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
@@ -964,7 +965,7 @@ def _tool_result_artifact_ref(content: object) -> str | None:
 
 
 def _artifact_refs_in_event(event: SessionEvent) -> list[tuple[str, str]]:
-    """一条事件里的 (artifact_ref, 定位标签) 列表（四类事件，见 #368 票面）。"""
+    """一条事件里的 (artifact_ref, 定位标签) 列表（五类事件，见 #368 票面 + #1041）。"""
     data = event.data if isinstance(event.data, dict) else {}
     if event.type == EVIDENCE_RECORDED:
         ref = data.get("artifact_ref")
@@ -982,6 +983,14 @@ def _artifact_refs_in_event(event: SessionEvent) -> list[tuple[str, str]]:
             ref = _tool_result_artifact_ref(data.get("content"))
         if isinstance(ref, str) and ref:
             return [(ref, f"tool_result:{data.get('tool_call_id')}")]
+    elif event.type == CONTEXT_COMPACTION_FAILED:
+        # #1041（spec 06 §8）：摘要失败保存的 raw artifact（独立恢复快照）只经
+        # `store.save` 落盘、**无** creation 事件，其 ref 只出现在本事件里——登记进
+        # 引用注册表，使该快照进入可达集（否则会被清理预览当"未引用孤儿"误列、可被
+        # 删除，审计快照丢失）。ref 缺失 / None（未落盘、不伪造）⇒ 不产出条目。
+        ref = data.get("artifact_ref")
+        if isinstance(ref, str) and ref:
+            return [(ref, f"compaction_failed:{event.seq}")]
     return []
 
 
@@ -4429,7 +4438,9 @@ class SessionService:
         - ``birth_certificate``：artifact 自身的 creation 事件、以及产生它的那条
           tool/result（``tool_call_id`` 与 artifact 元数据一致）——"出生证明"，
           不阻断（只剩出生证明的 artifact 正是本票要清的对象）；
-        - ``referenced``：其他引用该 artifact 的 tool/result——活引用，阻断；
+        - ``referenced``：其他引用该 artifact 的 tool/result——活引用，阻断；#1041
+          起 `context/compaction_failed.artifact_ref`（摘要失败保存的 raw 恢复快照，
+          无 creation 事件）同样归此类——删掉即失去审计原件，按活引用阻断；
         - ``evidence`` / ``evidence_stale``：证据引用的 freshness 未 stale / 已 stale
           ——前者是活引用（阻断），后者是"删掉会失去什么"的告知（不阻断）；
         - ``unreconciled_operation`` / ``fork_child_reference``：阻断。
@@ -4487,6 +4498,10 @@ class SessionService:
                 )
             elif event.type in (ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED):
                 reason = "birth_certificate"
+            elif event.type == CONTEXT_COMPACTION_FAILED:
+                # #1041（spec 06 §8）：摘要失败保存的 raw 恢复快照是 durable 审计引用
+                # ——删掉即失去"事后对账/人工恢复"的原件，按活引用阻断清理。
+                reason = "referenced"
             else:
                 continue
             for ref, tag in _artifact_refs_in_event(event):
