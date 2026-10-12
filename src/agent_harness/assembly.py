@@ -285,6 +285,9 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    windows_psec_sandbox = isinstance(sandbox, WindowsPsecSandbox)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -293,11 +296,18 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            kwargs["project_instructions_loader"] = (
-                lambda relative_path: project_instructions.load_for_path(
-                    session_id, workspace, workspace / relative_path,
+            if windows_psec_sandbox:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_sandbox_path(
+                        session_id, sandbox, relative_path,
+                    )
                 )
-            )
+            else:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_path(
+                        session_id, workspace, workspace / relative_path,
+                    )
+                )
         registry.register(tool_cls(sandbox, **kwargs))
 
     # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
@@ -586,13 +596,22 @@ async def build_runtime(
         if workspace_registry.exists(session_id)
         else workspace
     )
-    instruction_cwd = _project_instruction_cwd(
-        instruction_workspace, workspace_registry, session_id,
-    )
     project_instructions = project_instruction_store(settings)
-    await asyncio.to_thread(
-        project_instructions.load_for_session, session_id, instruction_cwd,
-    )
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    if isinstance(instruction_workspace, WindowsPsecSandbox):
+        await asyncio.to_thread(
+            project_instructions.load_for_sandbox_session,
+            session_id,
+            instruction_workspace,
+        )
+    else:
+        instruction_cwd = _project_instruction_cwd(
+            instruction_workspace, workspace_registry, session_id,
+        )
+        await asyncio.to_thread(
+            project_instructions.load_for_session, session_id, instruction_cwd,
+        )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
     root_profile = _root_profile_spec(agent_profile)

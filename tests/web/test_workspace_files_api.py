@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
@@ -149,6 +150,32 @@ def test_lists_files_as_sorted_relative_posix_paths(tmp_path: Path) -> None:
     assert body["total"] == 3
     assert body["returned"] == 3
     assert body["truncated"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
+def test_workspace_file_routes_use_windows_psec_sandbox_handles(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    registry = client.app.state.agent.workspace_registry
+    registry.delete(sid)
+    sandbox = registry.create(
+        sid,
+        workspace_root=tmp_path / "windows-workspace",
+        backend="windows_psec",
+    )
+    sandbox.write_text("nested/file.txt", "handle-safe route")
+
+    listing = client.get(_url(sid, "/files"))
+    file_response = client.get(
+        _url(sid, "/file"), params={"path": "nested/file.txt"},
+    )
+
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["files"] == ["nested/file.txt"]
+    assert file_response.status_code == 200, file_response.text
+    assert "handle-safe route" in file_response.text
 
 
 def test_pattern_filters_and_total_counts_matches(tmp_path: Path) -> None:

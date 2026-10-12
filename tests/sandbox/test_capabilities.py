@@ -6,7 +6,10 @@ SandboxUnavailableError（抄 DSH `SANDBOX_UNAVAILABLE` fail-closed）。
 
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +21,7 @@ from agent_harness.sandbox.capabilities import (
     probe_all_capabilities,
     probe_docker_capabilities,
     probe_local_capabilities,
+    probe_windows_psec_capabilities,
 )
 from agent_harness.sandbox.registry import WorkspaceRegistry
 
@@ -70,9 +74,12 @@ class TestProbeLocal:
 class TestProbeDocker:
     def test_docker_sdk_missing(self):
         """docker SDK 未安装 → 不可用，原因指明安装方式。"""
-        with patch.dict("sys.modules", {"docker": None}), patch(
-            "agent_harness.sandbox.capabilities._import_docker",
-            side_effect=ModuleNotFoundError("No module named 'docker'"),
+        with (
+            patch.dict("sys.modules", {"docker": None}),
+            patch(
+                "agent_harness.sandbox.capabilities._import_docker",
+                side_effect=ModuleNotFoundError("No module named 'docker'"),
+            ),
         ):
             caps = probe_docker_capabilities()
         assert caps.backend == "docker"
@@ -101,12 +108,97 @@ class TestProbeDocker:
         assert caps.available is False
         assert caps.reason is not None and "daemon" in caps.reason.lower()
 
-    def test_probe_all_returns_both_backends(self):
-        """probe_all 返回 local + docker 两项。"""
+    def test_probe_all_returns_available_backend_families(self):
+        """probe_all 展示 local、docker 与 Windows PSEC 能力。"""
         caps = probe_all_capabilities()
         backends = {c.backend for c in caps}
-        assert backends == {"local", "docker"}
+        assert backends == {"local", "docker", "windows_psec"}
         assert all(isinstance(c, SandboxCapabilities) for c in caps)
+
+
+class TestProbeWindowsPsec:
+    def test_probe_accepts_only_basecontainer_for_the_requested_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import agent_harness.sandbox.capabilities as cap_mod
+
+        executable = str(tmp_path / "wxc-exec.exe")
+        policy = {
+            "version": "1.0.0",
+            "containment": "processcontainer",
+            "filesystem": {
+                "readwritePaths": [str(tmp_path)],
+                "deniedPaths": [str(tmp_path / "protected")],
+            },
+            "fallback": {"allowDaclMutation": False},
+        }
+        probe = {
+            "tier": "base-container",
+            "needsDaclAugmentation": False,
+            "probes": {"baseContainerApiPresent": True},
+        }
+        monkeypatch.setattr(
+            cap_mod,
+            "os",
+            SimpleNamespace(name="nt", environ={}),
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(args: list[str], **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(probe),
+                stderr="",
+            )
+
+        caps = probe_windows_psec_capabilities(
+            executable=executable,
+            config=policy,
+            run=run,
+        )
+
+        assert caps.available is True
+        assert caps.backend == "windows_psec"
+        assert caps.details["tier"] == "base-container"
+        assert calls[0][0][:2] == [executable, "--probe"]
+        encoded = calls[0][0][3]
+        assert json.loads(base64.b64decode(encoded)) == policy
+
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            {"tier": "appcontainer-bfs", "needsDaclAugmentation": False},
+            {"tier": "base-container", "needsDaclAugmentation": True},
+        ],
+    )
+    def test_probe_rejects_fallback_tiers_and_dacl_mutation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        probe: dict,
+    ) -> None:
+        import agent_harness.sandbox.capabilities as cap_mod
+
+        monkeypatch.setattr(
+            cap_mod,
+            "os",
+            SimpleNamespace(name="nt", environ={}),
+        )
+        caps = probe_windows_psec_capabilities(
+            executable=str(tmp_path / "wxc-exec.exe"),
+            run=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(probe),
+                stderr="",
+            ),
+        )
+
+        assert caps.available is False
+        assert caps.backend == "windows_psec"
+        assert caps.reason
 
 
 class TestRegistryBackendSelection:
@@ -136,10 +228,13 @@ class TestRegistryBackendSelection:
         unavailable = SandboxCapabilities(
             backend="docker", available=False, reason="daemon 不可达", details={}
         )
-        with patch(
-            "agent_harness.sandbox.registry.probe_docker_capabilities",
-            return_value=unavailable,
-        ), pytest.raises(SandboxUnavailableError) as exc_info:
+        with (
+            patch(
+                "agent_harness.sandbox.registry.probe_docker_capabilities",
+                return_value=unavailable,
+            ),
+            pytest.raises(SandboxUnavailableError) as exc_info,
+        ):
             registry.create("sess_4", backend="docker")
         # 关键断言：不是 LocalSubprocessSandbox，没有静默降级
         assert "docker" in str(exc_info.value).lower()

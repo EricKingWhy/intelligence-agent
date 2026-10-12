@@ -119,6 +119,23 @@ describe('createWindowsInstallerConfig', () => {
     assert.equal(python.from, '/tmp/fake-installer/staging/python/')
   })
 
+  it('bundles only the MXC PSEC executable, native DLL and license', () => {
+    assert.deepEqual(
+      config.extraResources.filter((resource) => resource.to.startsWith('mxc/')),
+      [
+        {
+          from: 'node_modules/@microsoft/mxc-sdk/bin/x64/',
+          to: 'mxc/',
+          filter: ['wxc-exec.exe', 'mxc_ffi.dll'],
+        },
+        {
+          from: 'node_modules/@microsoft/mxc-sdk/LICENSE.md',
+          to: 'mxc/LICENSE.md',
+        },
+      ],
+    )
+  })
+
   it('ships a space-free artifact name with version macro', () => {
     assert.match(config.nsis.artifactName, /^Intelligence-Agent-Setup-\$\{version\}\.\$\{ext\}$/)
   })

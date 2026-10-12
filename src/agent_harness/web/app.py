@@ -2611,6 +2611,16 @@ def create_app(
         if cwd is None:
             return empty_project_instruction_status("no_cwd")
         store = project_instruction_store(app.state.agent.settings)
+        registry = service.workspace_registry
+        if registry.exists(session_id):
+            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+            sandbox = registry.get(session_id)
+            if isinstance(sandbox, WindowsPsecSandbox):
+                await asyncio.to_thread(
+                    store.reload_for_sandbox_session, session_id, sandbox,
+                )
+                return store.status_for_session(session_id)
         await asyncio.to_thread(store.reload_for_session, session_id, cwd)
         return store.status_for_session(session_id)
 

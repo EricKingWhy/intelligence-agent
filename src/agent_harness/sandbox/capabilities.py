@@ -11,13 +11,18 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
+import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("agent_harness.sandbox.capabilities")
 
 #: 支持的后端名（DSH：非法值在加载时响亮拒绝，不静默改策略）。
-SUPPORTED_BACKENDS = ("local", "docker")
+SUPPORTED_BACKENDS = ("local", "docker", "windows_psec")
 
 
 @dataclass(frozen=True)
@@ -135,9 +140,97 @@ def probe_docker_capabilities(image: str = "python:3-slim") -> SandboxCapabiliti
     return SandboxCapabilities(backend="docker", available=True, details=details)
 
 
+def probe_windows_psec_capabilities(
+    *,
+    executable: str | None = None,
+    config: Mapping[str, object] | None = None,
+    run=None,
+) -> SandboxCapabilities:
+    """Probe MXC's exact request and accept only its native BaseContainer tier."""
+    if os.name != "nt":
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="Windows PSEC sandbox requires Windows",
+        )
+    path = executable or os.environ.get("IA_MXC_EXECUTABLE")
+    if not path:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="MXC wxc-exec.exe is not configured",
+            details={
+                "remediation": "install the desktop runtime or set IA_MXC_EXECUTABLE",
+            },
+        )
+
+    args = [path, "--probe"]
+    if config is not None:
+        payload = json.dumps(config, separators=(",", ":")).encode("utf-8")
+        args.extend(["--config-base64", base64.b64encode(payload).decode("ascii")])
+    try:
+        result = (run or subprocess.run)(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe failed: {exc}",
+        )
+    if result.returncode != 0:
+        detail = str(result.stderr or result.stdout or "").strip()
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe exited {result.returncode}: {detail}",
+        )
+    try:
+        report = json.loads(result.stdout)
+        probes = report["probes"]
+        tier = report["tier"]
+        dacl_augmentation = report["needsDaclAugmentation"]
+        base_container_present = probes["baseContainerApiPresent"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe returned invalid JSON: {exc}",
+        )
+
+    details = {
+        "tier": str(tier),
+        "needs_dacl_augmentation": str(dacl_augmentation).lower(),
+        "base_container_api": str(base_container_present).lower(),
+    }
+    if (
+        tier != "base-container"
+        or dacl_augmentation is not False
+        or base_container_present is not True
+    ):
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=(
+                "MXC did not select BaseContainer/PSEC without DACL mutation "
+                f"(tier={tier}, needsDaclAugmentation={dacl_augmentation})"
+            ),
+            details=details,
+        )
+    return SandboxCapabilities(backend="windows_psec", available=True, details=details)
+
+
 def probe_all_capabilities(image: str = "python:3-slim") -> list[SandboxCapabilities]:
     """探针全部后端（给选择器 UI 用：展示能力 + 缺依赖原因）。"""
-    return [probe_local_capabilities(), probe_docker_capabilities(image=image)]
+    return [
+        probe_local_capabilities(),
+        probe_docker_capabilities(image=image),
+        probe_windows_psec_capabilities(),
+    ]
 
 
 def require_available(
