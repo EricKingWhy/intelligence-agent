@@ -5038,6 +5038,30 @@ class SessionService:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
 
+    async def pending_decisions(self, session_id: str) -> list[dict]:
+        """待人工裁决清单的只读出口（#1049，``GET /api/sessions/{id}/recovery``）。
+
+        与 ``recover`` 409 的 ``pending_decisions`` **同源**（同一个
+        ``_reconcile_pending``，逐字段一致）：前端打开会话即可主动得知要裁决什么，
+        不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
+        **零写入**：不建协调器、不迁移 Ledger、不追加事件。存在性 / 损坏判据与
+        ``recover`` 的前导逐条相同（422 / 404 / 损坏 409）。
+        会话有在途 run ⇒ 空：其 RUNNING 行是正在执行，不是待裁决——拿它提交裁决
+        只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
+        所以不能当裁决清单用）。
+        """
+        self._validate_session_id(session_id)
+        await self._ensure_stores()
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
+        )
+        if not existing and not integrity.corrupt_lines:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        self._raise_if_event_log_corrupt(session_id, integrity)
+        if self._run_manager.get_active(session_id) is not None:
+            return []
+        return await self._reconcile_pending(session_id, existing)
+
     async def _reconcile_pending(self, session_id: str, events: list) -> list[dict]:
         """待人工裁决的 Operation 清单（#547 的机器可读 409 载荷）。
 
