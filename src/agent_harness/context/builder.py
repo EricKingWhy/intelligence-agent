@@ -436,6 +436,12 @@ class ContextBuilder:
         # 原样透传给 ToolResultPruner——校验在 pruner 构造处响亮失败，本层不重复。
         keep_recent_tool_results: int = 3,
         clear_at_least_tokens: int = 5000,
+        # #1026：摘要墙钟缩放与分块参数（Settings 透传链，原样传给
+        # ContextCompactor——校验在 compactor 构造处响亮失败，本层不重复）。
+        summary_timeout_seconds: float = 30.0,
+        summary_timeout_per_kilotoken_seconds: float = 0.25,
+        summary_chunk_request_ratio: float = 0.5,
+        summary_chunk_max_tokens: int = 24_000,
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
@@ -460,6 +466,12 @@ class ContextBuilder:
             # W-29 (#383)：0 会让兜底判据退化为"变更即恒注入"，配错必须响亮失败。
             raise ValueError("plan_reinject_every_messages must be positive")
         self.model_provider = model_provider
+        # #1026：摘要墙钟缩放与分块参数（原样透传给 compactor）。
+        self._summary_timeout_seconds = summary_timeout_seconds
+        self._summary_timeout_per_kilotoken_seconds = (
+            summary_timeout_per_kilotoken_seconds)
+        self._summary_chunk_request_ratio = summary_chunk_request_ratio
+        self._summary_chunk_max_tokens = summary_chunk_max_tokens
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
         # 档位选择留配置面（后续票），本层只透传给 compactor。
         self.summary_model = summary_model
@@ -1017,6 +1029,12 @@ class ContextBuilder:
             hard_guard_threshold=self.hard_guard_threshold,
             summary_model=self.summary_model,
             model_call_gate=self.model_call_gate,
+            # #1026：摘要墙钟缩放与分块参数（Settings 透传链终点）。
+            summary_timeout_seconds=self._summary_timeout_seconds,
+            summary_timeout_per_kilotoken_seconds=(
+                self._summary_timeout_per_kilotoken_seconds),
+            summary_chunk_request_ratio=self._summary_chunk_request_ratio,
+            summary_chunk_max_tokens=self._summary_chunk_max_tokens,
         )
         try:
             result = await compactor.compact(
@@ -1045,6 +1063,12 @@ class ContextBuilder:
                     failures=result.failures,
                 )
             # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
+            # #1026 裁决 A：降级截断例外——compacted_turn_count==0 但 fallback_used
+            # 置位 ⇒ 返回截断投影供**本次请求**使用（无摘要、无 bracket，不持久化；
+            # 下次 build 面对同一投影会再做同一次确定性截断，天然收敛）。恢复依据
+            # 是"投影已压回 auto_limit 内"，不是"压缩已发生"。
+            if result.fallback_used:
+                return result
             return None
         # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
         self._preflight_rejection_streaks.pop(session.session_id, None)
@@ -1092,6 +1116,8 @@ class ContextBuilder:
                 # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
                 # 逐字节等价）。这是本次唯一新增的事件键。
                 "narrowed": result.narrowed,
+                # #1026：成功走分块摘要路径的 marker（验收 3 的事件可观测）。
+                "chunked": result.chunked,
                 "bracket_id": bracket_id,
                 "summary_model_id": result.summary_model_id,
                 "duration_ms": result.duration_ms,

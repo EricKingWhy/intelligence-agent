@@ -902,6 +902,12 @@ async def build_runtime(
             model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
             plan_reinject_every_messages=settings.plan_reinject_every_messages,
+            # #1026：摘要墙钟缩放与分块参数（Settings 透传链起点，原样下传）。
+            summary_timeout_seconds=settings.summary_timeout_seconds,
+            summary_timeout_per_kilotoken_seconds=(
+                settings.summary_timeout_per_kilotoken_seconds),
+            summary_chunk_request_ratio=settings.summary_chunk_request_ratio,
+            summary_chunk_max_tokens=settings.summary_chunk_max_tokens,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
             # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
             context_providers=_select_context_providers(
