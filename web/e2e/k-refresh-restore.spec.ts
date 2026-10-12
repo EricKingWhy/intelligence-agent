@@ -207,7 +207,14 @@ test('BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）�
   await page.addInitScript(([k, v]) => localStorage.setItem(k, v), [KEY, SID]);
 
   await page.goto('/');
-  // 历史照旧渲染，不因空流而清屏
+  // 就绪锚点（真实渲染状态，非固定时长）：`.conversation-scroll` 只在
+  // `!loadingHistory && conversation.turns.length > 0` 时挂载（Conversation.tsx:356
+  // 的加载占位 / :366 的空态都不含它）——它出现即「历史已加载且会话非空」，
+  // 正文在同一次 React 提交里就位。用它承载渲染等待，取代 `.model-output`
+  // 文本断言隐含的固定 5s 窗（#1041 实测该窗为薄余量）；上限 15s ≈ 阶段 A
+  // 最坏整测观测 9.4s（load 29）的 1.6 倍余量，且是条件等待（就绪即返回）。
+  await expect(page.locator('.conversation-scroll')).toBeVisible({ timeout: 15_000 });
+  // 历史照旧渲染，不因空流而清屏（文本内容断言强度不变）
   await expect(page.locator('.model-output').last()).toContainText('刷新前已有的内容。');
   await expect(page.locator('.reconnect-banner')).toBeHidden();
   await expect(page.locator('.session-item.selected')).toHaveCount(1);

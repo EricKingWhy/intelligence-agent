@@ -40,6 +40,13 @@ const episodic = (id: string, content: string): MemoryFixture => ({
 
 const panel = (page: Page) => page.locator('.memory-panel');
 const openPanel = async (page: Page) => {
+  // 就绪锚点（真实外壳渲染状态，非固定时长）：`.app-frame` 是 App 的根外壳
+  // （App.tsx:1191），React 首帧挂载即渲染；「记忆管理」入口就在它的顶栏
+  // （TopBar.tsx 里无条件渲染）。等它可见 = 应用已渲染，再交互——取代
+  // 「goto 后立刻点」把整段渲染时序都压给 click 的绝对假设。上限 15s 是
+  // 给冷启动渲染的余量（正常 <1s；#1041 实测该按钮曾撞 30s click 超时 ≥
+  // 一次），且是条件等待（就绪即返回）；click 自带 actionability 检查保留。
+  await expect(page.locator('.app-frame')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: '记忆管理' }).click();
   await expect(panel(page)).toBeVisible();
 };
