@@ -114,7 +114,9 @@ FunctionEnd
   StrCpy $iaFinalDirectory $INSTDIR
   !insertmacro iaReadBackupDir
   ${If} $iaBackupDirectory != ""
-    ${IfNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+    StrCpy $iaPlainPath "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+    Call iaProbePath
+    ${If} $iaProbeFound != "1"
       StrCpy $iaShapeCandidate "$iaBackupDirectory"
       StrCpy $iaShapeBase "$iaFinalDirectory"
       Call iaCheckBackupShape
@@ -256,7 +258,9 @@ FunctionEnd
 !macro iaStageApplication
   StrCpy $iaFinalDirectory $INSTDIR
   StrCpy $iaBackupDirectory ""
-  ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  StrCpy $iaPlainPath "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  Call iaProbePath
+  ${If} $iaProbeFound == "1"
     ; #904 item 2: the pointer is a single slot, so the value below overwrites
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a
@@ -411,7 +415,9 @@ Function iaPromoteApplication
   ${If} $iaBackupDirectory == ""
     Return
   ${EndIf}
-  ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  StrCpy $iaPlainPath "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  Call iaProbePath
+  ${If} $iaProbeFound == "1"
     !insertmacro iaReadLeftoverDir
     StrCmp $iaLeftoverDirectory $iaBackupDirectory iaPromoteBackupAlreadyLeftover
     ; #904 item 6/5: the pointer has to pass the backup-shape check before it
