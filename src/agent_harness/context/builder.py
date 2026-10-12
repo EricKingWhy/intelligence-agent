@@ -418,6 +418,20 @@ def _inject_modified_paths(
     ]
 
 
+def _with_artifact_ref(
+    failures: list[CompactionFailure], artifact_ref: str | None,
+) -> list[CompactionFailure]:
+    """#1041（spec 06 §8）：把本轮落盘的 raw artifact ref 回填进每条失败记录。
+
+    ref 为 None（store 缺席 / 未落盘）时原样返回（失败记录默认 `artifact_ref=None`，
+    绝不伪造）；否则用 `dataclasses.replace` 产出带同一 ref 的副本——`CompactionFailure`
+    是 frozen，不回改 compactor 造出的原始记录。
+    """
+    if artifact_ref is None:
+        return failures
+    return [replace(failure, artifact_ref=artifact_ref) for failure in failures]
+
+
 class ContextBuilder:
     """按预算压缩投影与选择 Provider 内容，不修改历史。"""
 
@@ -1050,9 +1064,20 @@ class ContextBuilder:
                 supports_vision=self._supports_vision,
             )
         except ContextWindowExceededError as error:
-            self._record_compaction_failures(session, error.failures)
+            # #1041（spec 06 §8）：摘要双失败 + 不可截断（hard guard 停止）⇒ 先把
+            # early 原文落盘成 raw artifact，把 ref 回填进本轮失败记录，再抛。
+            artifact_ref = await self._save_failure_raw_artifact(
+                session, error.raw_artifact_content)
+            self._record_compaction_failures(
+                session, _with_artifact_ref(error.failures, artifact_ref))
             raise
-        self._record_compaction_failures(session, result.failures)
+        # #1041（spec 06 §8，R1 裁决）：截断降级**成功**分支同样落盘 early 原文，
+        # 事件/诊断回填 artifact_ref。成功压缩 / 低水位 / 安全继续路径
+        # raw_artifact_content 为 None ⇒ 不落盘、ref 保持 None（不伪造）。
+        artifact_ref = await self._save_failure_raw_artifact(
+            session, result.raw_artifact_content)
+        self._record_compaction_failures(
+            session, _with_artifact_ref(result.failures, artifact_ref))
         if not result.compacted_turn_count:
             # #639 阶段 B：连续预检拒绝达阈值 ⇒ 不再静默保留旧投影，经 #348 既有
             # 通道显式失败（failures 已由上一行落盘），run 走非终态暂停。未达阈值
@@ -1183,6 +1208,35 @@ class ContextBuilder:
             insertion += 1
         return [facts_messages[0], *messages[:insertion], *facts_messages[1:], *messages[insertion:]]
 
+    async def _save_failure_raw_artifact(
+        self, session: Session, raw: str | None,
+    ) -> str | None:
+        """#1041（spec 06 §8）：摘要失败的 early 原文落盘成 raw artifact，返回 ref。
+
+        - `raw is None`（成功 / 安全继续 / 预检拒绝等无 early 原文可存的路径）或
+          `self._artifact_store is None`（未装配 store）⇒ **不落盘、返回 None**
+          （§8「上传失败不能伪造 artifact_ref」）。
+        - 落盘失败同样 fail-open 返回 None 并记 warning：本方法在**既有的失败路径**上
+          调用，不得把受控的压缩失败升级成未捕获异常（对标 `tooling/overflow.py` 的
+          fail-open 先例）。content-hash 寻址 ⇒ 重复落盘天然去重。
+        """
+        if raw is None or self._artifact_store is None:
+            return None
+        try:
+            artifact = await self._artifact_store.save(
+                session.session_id, raw,
+                mime_type="application/json",
+                source_tool="context_compactor",
+                tool_call_id="compaction_failure_raw",
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "Artifact store unavailable; compaction raw artifact not saved: %s",
+                error,
+            )
+            return None
+        return artifact.artifact_id
+
     def _record_compaction_failures(
         self, session: Session, failures: list[CompactionFailure],
     ) -> None:
@@ -1192,6 +1246,10 @@ class ContextBuilder:
         summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
         `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
+
+        #1041（spec 06 §8）：`artifact_ref` 是本轮"摘要失败保存的 early 原文 raw
+        artifact"的内容寻址 id（由调用方在落盘后回填进失败记录）；store 缺席 / 未落盘
+        时为 None（additive 键，绝不伪造）。
         """
         for failure in failures:
             session.append(CONTEXT_COMPACTION_FAILED, {
@@ -1207,6 +1265,8 @@ class ContextBuilder:
                 "request_budget_tokens": failure.request_budget_tokens,
                 # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
                 "narrowed": failure.narrowed,
+                # #1041：本轮失败保存的 raw artifact ref（None = 未落盘）。
+                "artifact_ref": failure.artifact_ref,
             })
 
     def _note_preflight_rejection(

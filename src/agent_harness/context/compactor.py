@@ -325,6 +325,11 @@ class CompactionFailure:
     #: #639 阶段 A：该诊断是否为**缩小段**判定（False = 全段预检）。仅预检拒绝
     #: （attempt=0）会置位；其余诊断/摘要尝试失败保持默认假值。有界布尔，不撑载荷。
     narrowed: bool = False
+    #: #1041（spec 06 §8）：本轮失败保存的 early 原文 raw artifact 的 ref
+    #: （内容寻址 `artifact_id` = sha256(content)[:16]）。**由调用方（builder）在落盘
+    #: 后回填**——compactor 纯变换、不接触 store，故 compactor 直调结果恒为 None；
+    #: store 缺席或未落盘时同样保持 None（绝不伪造 ref）。有界 16hex。
+    artifact_ref: str | None = None
 
 
 class _SummaryRejected(ValueError):
@@ -350,6 +355,7 @@ class ContextWindowExceededError(RuntimeError):
     def __init__(
         self, message: str, *,
         failures: list[CompactionFailure] | None = None,
+        raw_artifact_content: str | None = None,
     ) -> None:
         super().__init__(message)
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。
@@ -358,6 +364,11 @@ class ContextWindowExceededError(RuntimeError):
         #: failures 由调用方落任务可见状态。#648 之前"保持为空表"是刻意设计，
         #: 2026-10-06 用户批准选项 B 后刻意反转（只加诊断，判定与抛点不动）。
         self.failures = list(failures or [])
+        #: #1041（spec 06 §8）：摘要双失败且不可截断（hard guard 停止）时，被
+        #: 逐出模型视野的 early 原文转录文本（与摘要请求同形）。由 builder 落盘成
+        #: raw artifact 并回填 ref（§8「摘要失败保存 raw artifact」）。**纯文本搬运**，
+        #: compactor 不接触 store；其余抛点保持 None（非"摘要失败"语义）。
+        self.raw_artifact_content = raw_artifact_content
 
 
 class CompactionPostWriteError(ContextWindowExceededError):
@@ -411,6 +422,11 @@ class CompactionResult:
     #: #1026：本次摘要是否走分块路径（请求超分块阈值且可切 >1 块）。成功时置位，
     #: 经 `CONTEXT_COMPACTED` 事件持久化（验收 3 的事件可观测）；其余路径默认假值。
     chunked: bool = False
+    #: #1041（spec 06 §8，R1 裁决）：摘要双失败后走**确定性截断降级**（fallback_used
+    #: =True）时，被截断逐出模型视野的 early 原文转录文本（与摘要请求同形）。由
+    #: builder 落盘成 raw artifact 并回填 `CompactionFailure.artifact_ref`。**纯文本
+    #: 搬运**——compactor 不接触 store；成功压缩 / 低水位 / 安全继续等路径保持 None。
+    raw_artifact_content: str | None = None
 
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
@@ -935,6 +951,15 @@ class ContextCompactor:
                 # 线内、有效用量仍超护栏"的假成功会把超窗请求放出去。开销**单扣**
                 # （修回口径见 `_fallback_message_budget`）——reserved 与 overhead
                 # 是同一笔加回的两种计量，不叠加。
+                # #1041（spec 06 §8，R1 裁决）：被逐出模型视野的 early 原文转录文本，
+                # 带出给 builder 落盘成 raw artifact（截断降级成功分支同样保存）。用
+                # **原始** early 窗口 `messages[prefix_end:cut]`（不受缩小段/截断影响），
+                # 保证快照完整、格式与摘要转录同形。
+                raw_early_text = json.dumps(
+                    [message.model_dump(mode="json")
+                     for message in messages[prefix_end:cut]],
+                    ensure_ascii=False,
+                )
                 truncated = _deterministic_truncation(
                     messages, prefix_end, cut,
                     _fallback_message_budget(
@@ -967,10 +992,12 @@ class ContextCompactor:
                     return CompactionResult(
                         truncated, 0, estimate_message_tokens(truncated), True,
                         failures=failures,
+                        raw_artifact_content=raw_early_text,
                     )
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard",
                     failures=failures,
+                    raw_artifact_content=raw_early_text,
                 ) from None
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
