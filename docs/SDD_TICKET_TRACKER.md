@@ -8237,3 +8237,23 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **双轴审查**：发现轮 Correctness 0/0/0/1/3 + Standards 0/0/0/1/4 全处置（`719d8d1c`+`2d638fb6`；4 笔 reword 树逐笔不变）；修后复审 Correctness **APPROVE**（全零）/Standards **APPROVE-WITH-FINDINGS**（唯一 P4-N1 台账文件名 cosmetic，`e0e03338` git mv 处置、coverage rc=0）。台账 5 行（3 归属 + 1 sync-merge 机械归属 + `t1025-two-axis-review` 结论行）。
 - **终态全量（沙箱 `shell/ia-test`，验证树 `9f3e8a4e`；日志 `dispatch/1025-sandbox-logs/e-*.log`）**：pytest `-n4` **7734P/28S/0F**（144.0s）+ ws_auth 串行 35P；vitest **1681P**/119 文件；e2e 首轮 539P/1F（h-density 共享负载 flake：spec/src 与基线逐字节同、隔离 6/6、复跑 **540P/0F**）；ruff/tsc rc=0；oxlint 0E/55W（存量）；coverage rc=0；Gate-0 `--since 5ae3882c` 与裸全量均 **6/6**（读数 `docs/gate/9f3e8a4e2c324459e290c1b0838826d751b944b3.json`，tree `715fe709`，env_failures=[]）。读数传递：`9f3e8a4e` → 收口 tip 全 docs-only。
 - **残余 / 待批准**：merge/关单待王浩宇裁决；GLOSSARY remember_this 词条漂移 FYI 未处置（不扩 scope）。
+
+## #505
+
+**[Tracking] 测试稳定性伞票收口证据**（2026-10-11；分支 `claude/505-stability-closure`，冻结树 = `f5e5bb5e`（tree `11f2ff4e`，PR #962 合入后的 `main`）；**仅本地提交，未 push / 未开 PR / 未关单 / 未发 comment**）
+
+- **范围**：只做证据归集（本票约定「不代替子票修复」）。本节和证据文件都是 docs-only，`src/**`、`tests/**`、`scripts/**` 零改动。
+- **证据文件**：`docs/evidence/505-stability-closure-f5e5bb5e.md`（读数表、命令、NO_PROXY 说明），机读版 `docs/evidence/505-stability-closure-f5e5bb5e.json`。
+
+| 关单条件（票面原文） | 现状 | 证据 |
+| --- | --- | --- |
+| 1. 上述两票全部修复，并在冻结树上有复跑证据 | **#376：未复现、已登记、已加固**，不算根因修复。根因修复没有做到：写锁超时从未复现（2026-10-10 续跑，最大持锁 105.3 ms，离 10 s busy_timeout 约 95 倍），签名已登记进「已知环境 flake」表，状态「不生效（待独立确认）」；写路径已按 #515 模式接入 `retry_on_busy` 并加 503 映射（#376-1，PR #948 → `1e28a638`，是 `f5e5bb5e` 的祖先），issue 已于 2026-10-10 关闭。**#338：** 未知红，按「不生效」登记后关闭（2026-10-03，8 轮全量 0/8），同样不是根因修复。两条目标用例在冻结树上 **3/3 轮 passed**。 | 本节上文 `## #376 续跑（2026-10-10）`、「已知环境 flake」表中 #376 那一行（tracker:4181）；`docs/review_ledger.d/t376-memory-v2-busy-retry-*.tsv`；月档 `docs/phase_status/2026-10.md` 2026-10-03 集成区批（#338）；证据文件「两条目标用例」表 |
+| 2. 全量 pytest 连续 3 轮 0 failed，且没有新的间歇红登记进本票 | **成立**：在 `f5e5bb5e` 上串行跑 3 轮，每轮都是 `7399 passed / 0 failed / 0 errors / 40 skipped / 51 deselected`，rc=0，每轮前后工作树都干净。#505 的评论区（截至 2026-10-11）只有 2026-10-02 那条进展通报，没有新登记的间歇红。 | 证据文件「三轮读数」表 |
+
+- **环境项（如实登记）**：
+  - 同一冻结树上，**不设** NO_PROXY 的第 1 轮是红的：10 F，之后在 `tests/web/test_metrics.py` 卡死，被 SIGABRT 终止。根因已证明是**沙箱环境**：`HTTP(S)_PROXY` 没有回环豁免，httpx 在 `trust_env` 下把发往 127.0.0.1 的请求送进了代理。主执行方 A/B 实测：不设 NO_PROXY 时 7 个用例里 6 个失败，设了以后 25 passed；`test_metrics.py` 设了以后 3 passed / 3.5 s。
+  - 所以三轮统一加了 `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost`，不跳过任何用例，也不改断言。这次代理红记为**环境问题**，后续票（例如测试侧是否对回环显式 `trust_env=False`，以及 `test_metrics_slow_resampling` 的等待循环没有超时）**由主执行方另开**，不在本票范围。
+  - 另有一次尝试被作废：第 1 轮跑到约 81% 时沙箱虚拟机重启，属于基础设施中断，不是测试失败。之后从第 1 轮整组重跑。
+- **残余**：#376 / #338 的根因仍未定位。#376 的签名还在已知 flake 表里，状态「不生效」；#338 没有失败签名，没进 flake 表，仍按「未知红、不生效」登记。以后任何全量读数里再出现这两条用例的红，都按阻断处理，并回到对应子票。
+- **Gate-0 / 覆盖闸门 / 读数传递**（在提交 `c6c5c2f1` 的干净树上跑）：裸跑 `python3 scripts/gate0.py`，读数在 `docs/gate/c6c5c2f1f532022812738fc938863d81b1d8e4c1.json`（`tracked_matches_head=true`，无未跟踪文件）。`python3 scripts/check_review_coverage.py` exit 0，`c6c5c2f1` 按 docs-only 路径自动归属，**不需要新增台账行**。裸跑不带 `--since`，所以另补跑了 `git diff --check f5e5bb5e..HEAD`，exit 0。§8.1 第 3 条判据 ①：`git diff --name-status --no-renames f5e5bb5e c6c5c2f1` 共 3 行（`M docs/SDD_TICKET_TRACKER.md`、`A docs/evidence/505-stability-closure-f5e5bb5e.json`、`A docs/evidence/505-stability-closure-f5e5bb5e.md`），全是 A/M，且都命中 `DOC_PATTERN`；两个 `rev-parse --verify …^{commit}` 分开调用，都是 exit 0。判据 ②：落本行前 `git status --short` 只有本 gate json（`docs/**.json`，命中模式）。⇒ 三轮全量读数可以传递到本分支 tip。
+- **待批准**：push 分支 / 开 PR / PR merge（各需单独批准，§14.4；CI `gate0` 须绿）；#505 关单与关单 comment（草稿在交付报告里，未发）。
