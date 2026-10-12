@@ -371,10 +371,9 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
 });
 
 test('AC8: pagination stops at the backend offset ceiling with an explicit boundary', async ({ page }) => {
-  // 兜底防挂死（**不是**给慢用例的时长预算）：正常 <15s。阶段 A 极端基线（8 workers
-  // + 4 CPU burners、单文件 --repeat-each=15）插桩实测：慢实例 82s 才推到 170/200 次
-  // ⇒ 全程约 96–115s，旧 90s 总时限正是被它撞穿。取 ~2x 余量作**兜底**；真正的挂死
-  // 由下面的**无进展**护栏拦截（单轮点击 20s 不恢复即判死），不靠这个总时限兜。
+  // 套件里唯一一处用例级时限（理由见下方块注释）：本用例按产品语义要串行做 ~200 次
+  // 「加载更多」，极端负载下整测可从正常 <15s 拉长到 ~115s（阶段 A 实测），全局 30s 不够，
+  // 故显式抬高；它只作**防挂死兜底**，真正的挂死由下面的无进展护栏拦截。
   test.setTimeout(240_000);
   const requestedOffsets: number[] = [];
   const memories = Array.from({ length: 50 }, (_, index) => semantic(`m-boundary-${index}`, `boundary fact ${index}`));
@@ -396,23 +395,26 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
 
   // 分页到后端 offset 上限是产品语义决定的固定**工作量**：MEMORY_MAX_OFFSET /
-  // MEMORY_PAGE_SIZE = 200 次「加载更多」（web/src/lib/memory.ts:107-108）。旧写法把
+  // MEMORY_PAGE_SIZE = 200 次「加载更多」（web/src/lib/memory.ts:105,108）。旧写法把
   // 这 200 次迭代全塞进**单次** page.evaluate，整条用例只有一个 90s 总时限——这是
   // 「固定工作量 × 固定墙钟」：极端并行负载把每轮「点击→按钮恢复可用」的周期拉长后，
   // 总时长线性膨胀、必然撞穿总时限（阶段 A 插桩实测：慢实例 82s 才推到 170/200）。
   // 改成**按进度推进**（票面 ADAPT；Playwright 官方 Best Practices：用锚定应用状态的
-  // web-first 断言与条件等待，测试时长由进度决定，timeout 是防挂死的兜底而非慢用例的
-  // 预算）：1) 终止条件是**到达边界**（「加载更多」按钮消失），不是数满 200 次；
-  // 2) 每次 evaluate 只推进一个有界的块，块间由 Playwright 侧断言分页请求数单调前进
-  // ——真实进度条件，不随时钟走；3) 护栏是**无进展**：单轮点击若 NO_PROGRESS_MS 内不
-  // 恢复就判死（防真挂死），整块零进展且尚未到达边界即失败。它不随机器快慢变化。
-  const PAGE_SIZE = 50;
-  const MAX_OFFSET = 10_000;
+  // web-first 断言与条件等待，测试时长由进度决定）：唯一终止条件是**到达边界**（「加载
+  // 更多」按钮消失），循环不再有固定 200 次的上界；每次 evaluate 只推进一个有界的块，
+  // 块间由 Playwright 侧断言分页请求数单调前进——真实进度条件，不随时间窗走；护栏是
+  // **无进展**：单轮点击若 NO_PROGRESS_MS 内不恢复就判死（防真挂死）。
+  // 残余风险（诚实标注）：200 次点击是**串行**的、总墙钟仍随单轮延迟线性增长。上面的
+  // 240s 兜底相对阶段 A 极端基线实测最坏 ~115s 留了 ~2x 余量；若负载再恶化 ~2x 仍可能
+  // 撞线——这是「200 次串行交互」这一产品语义的固有代价，非本 diff 可消除，故显式记录。
+  const PAGE_SIZE = 50; // 必须与 web/src/lib/memory.ts:105 MEMORY_PAGE_SIZE 同步
+  const MAX_OFFSET = 10_000; // 必须与 web/src/lib/memory.ts:108 MEMORY_MAX_OFFSET 同步
   const EXPECTED_PAGES = MAX_OFFSET / PAGE_SIZE; // 200：后端 offset 上限对应的页数（边界语义）
   const NO_PROGRESS_MS = 20_000;
   const PAGES_PER_EVALUATE = 20;
 
-  // 在页内驱动真实按钮 handler 推进至多 maxPages 页，到边界即提前停（返回实际推进页数）。
+  // 在页内驱动真实按钮 handler 推进至多 maxPages 页，到边界（按钮消失）即提前停；
+  // 返回实际推进页数（0 = 本轮开始时按钮已消失 = 已到达边界）。
   const advancePages = (maxPages: number) =>
     page.evaluate(async ({ maxPages: pageBudget, noProgressMs }) => {
       const clickAndWaitForPage = async () => {
@@ -439,7 +441,7 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
       };
 
       let advanced = 0;
-      for (let page = 0; page < pageBudget; page += 1) {
+      for (let step = 0; step < pageBudget; step += 1) {
         // 到达边界：按钮消失即唯一终止信号——不再有第 201 次点击。
         if (!document.querySelector('.memory-more-btn')) break;
         await clickAndWaitForPage();
@@ -449,13 +451,16 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
     }, { maxPages, noProgressMs: NO_PROGRESS_MS });
 
   let pagesAdvanced = 0;
-  while (pagesAdvanced < EXPECTED_PAGES) {
+  for (;;) {
     const advanced = await advancePages(PAGES_PER_EVALUATE);
+    // 唯一合法终止：到达边界（按钮消失）。先于进度断言判定，免得把「边界」误判成「没进展」。
+    if (advanced === 0) break;
     pagesAdvanced += advanced;
     // 进度条件（真实断言）：本块结束时分页请求数必须与本块累计推进的页数一致——每一轮
     // 点击都必须换来一次下一页请求；不推进就说明挂死在按钮/请求上，而不是机器慢。
     expect(requestedOffsets.filter((offset) => offset > 0)).toHaveLength(pagesAdvanced);
-    if (advanced === 0) break; // 到达边界（按钮消失）——唯一合法终止
+    // 越过后端 offset 上限即产品缺陷（本夹具下不可达，防御未来夹具/产品改动使循环失控）。
+    expect(pagesAdvanced).toBeLessThanOrEqual(EXPECTED_PAGES);
   }
 
   const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
