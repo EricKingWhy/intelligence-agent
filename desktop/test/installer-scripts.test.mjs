@@ -260,6 +260,41 @@ describe('rollback install-directory probe (#1023)', () => {
   })
 })
 
+describe('long-path app executable detection (#1045)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('routes recovery, stage, and promote through the shared existence probe', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const bodyBetween = (start, end) => {
+      const startAt = source.indexOf(start)
+      assert.ok(startAt >= 0, 'missing block: ' + start)
+      const bodyStart = startAt + start.length
+      const endAt = source.indexOf(end, bodyStart)
+      assert.ok(endAt >= 0, 'missing block end: ' + end)
+      return source.slice(bodyStart, endAt)
+    }
+    const recovery = bodyBetween('!macro iaRecoverInterruptedInstall', '!macroend')
+    const stage = bodyBetween('!macro iaStageApplication', '!macroend')
+    const promote = bodyBetween('Function iaPromoteApplication', 'FunctionEnd')
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+
+    const assertProbe = (body, name, condition) => {
+      const input = body.indexOf(appPath)
+      const call = body.indexOf('Call iaProbePath', input)
+      const guard = body.indexOf('$' + '{If} $iaProbeFound ' + condition, call)
+
+      assert.ok(input >= 0, name + ' does not pass the app path to iaProbePath')
+      assert.ok(call > input && call - input < 160, name + ' does not call iaProbePath for the app path')
+      assert.ok(guard > call && guard - call < 120, name + ' does not branch on the probe result')
+      assert.doesNotMatch(body, /FileExists.*APP_EXECUTABLE_FILENAME/)
+    }
+
+    assertProbe(recovery, 'recovery', '!= "1"')
+    assertProbe(stage, 'stage', '== "1"')
+    assertProbe(promote, 'promote', '== "1"')
+  })
+})
+
 describe('interrupted installer recovery choices (#915)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
 
@@ -335,7 +370,15 @@ describe('interrupted installer recovery journal (#1035)', () => {
     assert.doesNotMatch(continueFresh, /iaClearBackupDir/, 'the old version stays recoverable until the fresh installation commits')
 
     const promote = source.match(/Function iaPromoteApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
-    assert.match(promote, /FileExists.*APP_EXECUTABLE_FILENAME[\s\S]*?iaClearBackupDir/)
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+    const appProbe = promote.indexOf(appPath)
+    const appProbeCall = promote.indexOf('Call iaProbePath', appProbe)
+    const appGuard = promote.indexOf('$' + '{If} $iaProbeFound == "1"', appProbeCall)
+    const clearBackup = promote.indexOf('!insertmacro iaClearBackupDir', appProbeCall)
+    assert.ok(
+      appProbe >= 0 && appProbeCall > appProbe && appGuard > appProbeCall && appGuard < clearBackup,
+      'promote must decide whether the installed executable exists through iaProbePath before clearing the backup pointer',
+    )
     assert.match(promote, /iaReadLeftoverDir\s+StrCmp \$iaLeftoverDirectory \$iaBackupDirectory iaPromoteBackupAlreadyLeftover/)
     assert.match(promote, /iaPromoteBackupAlreadyLeftover:[\s\S]*?iaClearBackupDir/)
 
@@ -1436,8 +1479,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     const del = lines.findIndex((line) => /^RMDir\s+\/r\b/.test(line))
     const read = lines.findLastIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
     const plain = lines.findIndex((line) => /^StrCpy\s+\$iaPlainPath\s+"\$iaLeftoverDirectory"$/.test(line))
-    const probe = lines.findIndex((line) => /^Call\s+iaProbePath\b/.test(line))
-    const guarded = lines.findIndex((line) => /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line))
+    const probe = lines.findIndex((line, index) => index > plain && /^Call\s+iaProbePath\b/.test(line))
+    const guarded = lines.findIndex(
+      (line, index) => index > probe && /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line),
+    )
     const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
     const clear = lines.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
     for (const [name, index] of [
@@ -1495,7 +1540,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // Exactly one probe and one drop: a second probe site would be a second
     // guess about the same record, and a second drop a second guess about when
     // it is gone.
-    const probes = lines.filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
+    const probes = lines.slice(plain).filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
     assert.equal(probes, 1, 'the promote body probes the leftover record more than once')
     const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
     assert.equal(drops, 1)
