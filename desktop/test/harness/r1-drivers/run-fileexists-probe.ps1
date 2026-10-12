@@ -112,6 +112,7 @@ if ($reading -notmatch 'existing_long=1 missing_long=0 existing_short=1') {
 if (-not $Keep) {
   [System.IO.Directory]::Delete('\\?\' + $probeRoot, $true)
   Remove-Item -Recurse -Force -LiteralPath $buildDir
+  Remove-Item -Recurse -Force -LiteralPath $shortDir
   Remove-Item -LiteralPath $result -Force
   Write-Host 'scratch tree removed (pass -Keep to retain it)'
 }
