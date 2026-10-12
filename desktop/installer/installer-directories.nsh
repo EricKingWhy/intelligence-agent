@@ -10,7 +10,12 @@
 ; electron-builder NSIS hooks because the stock template owns file
 ; extraction and cannot redirect it into a staging directory):
 ;   iaStageApplication   (customInit, before the install section):
-;                          move the live $INSTDIR aside to $INSTDIR.old-{guid}
+;                          refuse the update while the product is running from
+;                          $INSTDIR (iaRequireNoRunningProduct, #914: stop the
+;                          bundled runtime, abort for anything else — the rename
+;                          alone does not stop a headless service, see §1.3 of
+;                          docs/live_gate/w21/58-issue-914-service-in-use-gate.md),
+;                          then move the live $INSTDIR aside to $INSTDIR.old-{guid}
 ;                          (the braces are System::Call's "g" GUID form) and
 ;                          stash the backup path in the registry. A pointer
 ;                          an earlier run left behind is recorded as a leftover
@@ -60,11 +65,115 @@ Var iaFinalDirectory
 Var iaBackupDirectory
 Var iaLeftoverDirectory
 Var iaProbeFound
+; #914 process gate (iaRequireNoRunningProduct): the last classification answer
+; ("0" = nothing runs, "11" = only the bundled runtime, "12" = more than the
+; runtime, anything else = undetermined), the stop call's exit code (log only),
+; the bounded re-ask counter, and the PowerShell path the gate resolves itself —
+; the template fills its own $PowerShellPath only inside the section, long after
+; .onInit runs this gate.
+Var iaRunningProduct
+Var iaRuntimeStopStatus
+Var iaRuntimeExitWaits
+Var iaPowerShellPath
 Var iaRollbackStatus
 Var iaRecoveryPending
 Var iaRecoveryChoice
 Var iaRecoveryRestoreButton
 Var iaRecoveryFreshButton
+
+; ---------------------------------------------------------------------------
+; #914 [W-16 R2] process gate: a directory holding a live installation must not
+; be moved. Measured facts this is built on (probes and readings:
+; docs/live_gate/w21/58-issue-914-service-in-use-gate.md §1):
+;   - the atomic rename below is NOT a guard for the product: an exe image is
+;     opened share-delete, so a headless process does not block a directory
+;     rename — with only the bundled service running, the rename succeeded and
+;     the service kept answering new clients out of "<install dir>.old-{guid}".
+;     Only the Electron client's own handles block it (leg ① of #365's readings);
+;   - the stock CHECK_APP_RUNNING cannot cover that case: its predicate ends in
+;     `(... | ? {...}).Count -gt 0`, and a SINGLE CimInstance carries no synthetic
+;     Count, so `$null -gt 0` is false and the guard answers "not running"
+;     whenever exactly one process matches — the service-only case is exactly one
+;     match (probe log: the same "not running" reading before and after a force
+;     kill). The stock probe still runs in the section; it is the template's.
+; So this gate asks with the cast forced (@(...)) and refuses the update for
+; every answer it cannot prove clean (fail-closed) instead of inheriting that
+; failure mode. While a process from this directory exists, this installer
+; records nothing, stages nothing and renames nothing.
+;
+; iaClassifyRunningProduct — what runs from $iaFinalDirectory?
+;   exit code 0  : nothing
+;   exit code 11 : only the bundled runtime ($iaFinalDirectory\resources\python\)
+;   exit code 12 : anything else, or the runtime plus anything else (desktop
+;                  client, TUI, …)
+;   anything else: undetermined — PowerShell missing or blocked, WMI/CIM failure,
+;                  or a parse error. Windows PowerShell itself exits 1 in those
+;                  cases, which is why the three answers above avoid 1 and 2.
+; The path prefix carries its separator on purpose: the stock predicate's bare
+; `StartsWith('$INSTDIR')` also matches sibling directories that merely share the
+; text prefix ("…\Intelligence Agent 2", "…\Intelligence Agent.old-…").
+Function iaClassifyRunningProduct
+  nsExec::Exec `"$iaPowerShellPath" -NoProfile -NonInteractive -Command "$$ErrorActionPreference='Stop'; $$iaRoot='$iaFinalDirectory\'; $$iaRuntime='$iaFinalDirectory\resources\python\'; try { $$iaAll=@(Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Path -and $$_.Path.StartsWith($$iaRoot,'CurrentCultureIgnoreCase') }); if ($$iaAll.Count -eq 0) { exit 0 }; $$iaRuntimeProcs=@($$iaAll | Where-Object { $$_.Path.StartsWith($$iaRuntime,'CurrentCultureIgnoreCase') }); if ($$iaRuntimeProcs.Count -eq $$iaAll.Count) { exit 11 }; exit 12 } catch { exit 13 }"`
+  Pop $iaRunningProduct
+  DetailPrint "iaClassifyRunningProduct: answer $iaRunningProduct for $iaFinalDirectory"
+FunctionEnd
+
+; iaRequireNoRunningProduct — the policy: a proven-clean answer returns; the
+; bundled runtime on its own is stopped and asked again (bounded); everything
+; else refuses the update with exit code 2 and a message, before this installer
+; has recorded or moved anything.
+; The interactive client is never killed here: it holds the user's live session,
+; the mature installers do not force-close a GUI on update either (Inno Setup
+; documents the unsaved-work loss; DeepSeek Harness aborts instead of killing),
+; and the user is standing in front of the wizard — $(iaAppRunning) tells them to
+; close it. A refusal that cannot distinguish the cases reports the probe itself
+; as the problem ($(iaProcessCheckFailed)).
+Function iaRequireNoRunningProduct
+  ; The template sets its own $PowerShellPath inside the section, long after this
+  ; gate runs; resolve the same interpreter here.
+  StrCpy $iaPowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  StrCpy $iaRuntimeExitWaits "0"
+  Call iaClassifyRunningProduct
+  ${If} $iaRunningProduct == "11"
+    ; Only the headless runtime is up: stop it (#914 adjudication — try to stop
+    ; the service first, refuse the update only when it does not stop). -Force,
+    ; because a headless service has no message loop to close and the installer
+    ; has no channel to ask it; work in flight is covered by the product's own
+    ; crash recovery (src/agent_harness/recovery/coordinator.py), which is what
+    ; the ticket's "safe pause + ledger settle" would otherwise rebuild.
+    nsExec::Exec `"$iaPowerShellPath" -NoProfile -NonInteractive -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Path -and $$_.Path.StartsWith('$iaFinalDirectory\resources\python\','CurrentCultureIgnoreCase') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+    Pop $iaRuntimeStopStatus
+    DetailPrint "iaRequireNoRunningProduct: stop bundled runtime (exit $iaRuntimeStopStatus)"
+    ; Stop-Process returns before the process object is gone, so re-ask with a
+    ; bounded wait (8 × 250 ms) before calling the runtime unstoppable — the same
+    ; "give it a moment to exit" idea as the stock guard's Sleep/KILL retry loop
+    ; and DeepSeek Harness's 10 s grace period.
+    ${DoWhile} $iaRunningProduct == "11"
+      IntOp $iaRuntimeExitWaits $iaRuntimeExitWaits + 1
+      ${If} $iaRuntimeExitWaits > 8
+        ${ExitDo}
+      ${EndIf}
+      Sleep 250
+      Call iaClassifyRunningProduct
+    ${Loop}
+  ${EndIf}
+  ${If} $iaRunningProduct == "0"
+    DetailPrint "iaRequireNoRunningProduct: clean after $iaRuntimeExitWaits wait(s)"
+    Return
+  ${EndIf}
+  DetailPrint "iaRequireNoRunningProduct: refusing the update (answer $iaRunningProduct after $iaRuntimeExitWaits wait(s))"
+  ${If} $iaRunningProduct == "11"
+  ${OrIf} $iaRunningProduct == "12"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaAppRunning)" /SD IDOK
+  ${Else}
+    ; Not a proven-clean answer — PowerShell missing or blocked, WMI/CIM broken,
+    ; or a parse error. Fail closed, the refusal DeepSeek Harness makes when its
+    ; probe returns a value it cannot read.
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaProcessCheckFailed)" /SD IDOK
+  ${EndIf}
+  SetErrorLevel 2
+  Quit
+FunctionEnd
 
 ; Existence probe for a path this protocol recorded (#904). The unprefixed form
 ; cannot name a longer-than-MAX_PATH path and a UNC path has to be probed in its
@@ -261,6 +370,12 @@ FunctionEnd
   StrCpy $iaPlainPath "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
   Call iaProbePath
   ${If} $iaProbeFound == "1"
+    ; #914: this directory is about to move, so nothing may be running from it.
+    ; The gate runs before the backup pointer is read or armed and before the
+    ; rename. Every refusal it raises therefore leaves the installation exactly
+    ; as it was, and a non-empty IaBackupDir keeps meaning "the install section
+    ; started" for .onGUIEnd and iaRollbackApplication.
+    Call iaRequireNoRunningProduct
     ; #904 item 2: the pointer is a single slot, so the value below overwrites
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a
