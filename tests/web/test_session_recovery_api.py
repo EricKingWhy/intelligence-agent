@@ -182,9 +182,13 @@ def test_endpoint_is_zero_write(client):
     assert _snapshot(state, sid) == before
 
 
-def test_unknown_session_is_404_and_invalid_id_422(client):
-    """AC5：不存在的会话 404；非法 id 与其他会话端点同口径 422。"""
+def test_unknown_session_is_404(client):
+    """AC5：不存在的会话 404。"""
     assert client.get("/api/sessions/nonexistent-id-123/recovery").status_code == 404
+
+
+def test_invalid_session_id_is_422(client):
+    """非法 id 先于存在性判定 ⇒ 422（与其他会话端点同口径，防路径穿越）。"""
     assert client.get("/api/sessions/bad.id/recovery").status_code == 422
 
 
