@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**当前状态（2026-10-12，#1045）**：Issue #1045 OPEN（bug/P2/in-progress，EricKingWhy）。分支 `codex/issue-1045-installer-fileexists`，实现提交 `1904c8a7`：恢复、暂存、提升三处 app.exe 判断统一复用 `iaProbePath`。Desktop 全量测试 / 类型检查通过；340 字符文件探针读数 `1/0/1`；生产安装器 `--compile-only` 通过（临时 ASCII `W:` 映射，规避 NSIS 中文绝对输出路径限制）。双轴审查、完整门禁及 CI 待完成；详证入当月归档。
+
 **已完成（2026-10-12，#915 Windows 安装器恢复批次）**：PR #1042 已按 merge commit 7d7b164e0661d1db148e0429133a152ef6a84ca7 合入 GitHub main；head 891655336defe85ba9018a559f496437465466a0。#915/#1021/#1023/#1034/#1035/#1037/#1040 均 CLOSED（completed），in-progress 已移除。冻结树后端全量结果和 Gate-0 收据 docs/gate/91d247c9b35227e7c0f1d5957afb390405b10d70.json；PR CI Gate-0、Windows installer smoke、Chromium E2E、gitleaks 全通过。完整票面、Windows 证据及读数传递见月档「#915 Windows 安装器恢复批次最终验证与集成」。独立 FileExists 长路径探针目前仅确认目录形态，文件场景未证实；单独候选及后续复现记录见月档。
 
 **冻结代码/测试 blob（git hash-object，冻结 tip 相对 origin/main 的改动面）**：
