@@ -121,3 +121,36 @@ LLM 摘要可能失败（模型超时、格式不对、拒绝生成）。失败�
 - 新增 `context/compacted` SessionEvent（记录 compaction 发生 + `fallback_used: bool`）。
 - `tiktoken` 加入 `requirements`（核心依赖，非可选——Compaction 是 Core 能力）。
 - Runtime loop 第 1 步从 `session.derive_messages()` 改为 `context_builder.build(session)`。
+
+## 修订注（2026-10-12，用户裁决 A）
+
+#1026 修复引入的**确定性截断降级**（`_deterministic_truncation`，摘要双失败且有效
+用量超硬护栏时按 AIMessage 原子边界截断最早轮次、压回 auto 预算内，fallback 标记
+可观测）**部分回调**本 ADR 第 2 层修订与 #348 冻结的「摘要失败 ≠ 压缩发生（不伪造
+截断拼贴）」语义。回调范围严格受限，两条前提缺一不可：
+
+1. **仅限分块/缩墙钟之后仍彻底失败**：摘要请求已经过规模缩放墙钟、分块递进归并
+   与两次 attempt，全部失败且调用方有效用量已超 `hard_guard_threshold`——即第 3 层
+   hard guard 的既有出口（`ContextWindowExceededError` → run/paused）是唯一剩余路径
+   时，才允许确定性截断作为降级产物介入；
+2. **截断后不发送超窗请求**：截断预算把 messages 压回 `auto_limit` 内（非 messages
+   开销单扣），spec 06 §8 的 hard guard 冻结条款（"必须停止或要求用户处理，不能
+   继续发送超窗口请求"）不受影响——截断不是"压缩发生"（无摘要、无 bracket、
+   `compacted_turn_count=0`），而是失败语义的第三条出口：既不伪造摘要、也不必然
+   停止会话。
+
+三家成熟产品的同构设计背书（"按轮次/原子边界确定性截断最早历史"是业界正式的
+history reduction 策略，非权宜 hack）：
+
+- **Microsoft Semantic Kernel `ChatHistoryTruncationReducer`**：历史超限时按 safe
+  boundary 消除最早消息（不拆 function call/result 配对），truncation 是与
+  Summarization 并列的正式 History Reduction 策略；
+- **MemGPT**（arXiv 2310.08560）：主上下文按 FIFO 队列管理，eviction 触发时截断
+  队首消息（或递归摘要），被逐出内容仍可检索；
+- **LangChain `trim_messages`**（strategy="last"）：保留最近消息、丢弃最早；
+  `allow_partial=False` 不拆分单条消息/轮次，trim 后仍超窗才显式报错。
+
+B 路线（保留原文继续发送超窗请求）违反 spec 06 §8 冻结条款且无任何一家产品背书，
+未采纳。实现落点：`src/agent_harness/context/compactor.py`（#1026 分支
+`codebuddy/1026-compaction-timeout`）；失败面经既有 #348 有界失败通道
+（`deterministic_truncation_fallback` 诊断，attempt=0）落任务可见状态。
