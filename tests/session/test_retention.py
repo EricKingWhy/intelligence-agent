@@ -24,6 +24,7 @@ from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
+    CONTEXT_COMPACTION_FAILED,
     EVIDENCE_RECORDED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -186,6 +187,65 @@ async def test_reachable_scan_covers_all_reference_sources(make_session_service,
     assert ref_tool in reachable
     assert ref_created in reachable
     assert ref_orphan not in reachable
+
+
+# ── a2) #1041：compaction_failed 的 raw artifact ref 也进可达集（引用注册表登记）──
+
+
+@pytest.mark.asyncio
+async def test_compaction_failed_ref_is_reachable_and_blocks_cleanup(
+    make_session_service, env
+):
+    """#1041：`context/compaction_failed.artifact_ref` 登记进引用注册表 ⇒ 落盘的 raw
+    恢复快照进入可达集、在清理预览里 blocked（不被当"未引用孤儿"误列可删）。
+
+    该 artifact 无 creation 事件（builder 只 `store.save`），其 ref 只出现在
+    `context/compaction_failed` 里——注册表若不认第五类载体，快照会被清理当孤儿。
+    """
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    ref, _ = await _add_artifact(settings, sid, "raw-early-window")
+    session.append(
+        CONTEXT_COMPACTION_FAILED,
+        {
+            "attempt": 0,
+            "error_class": "deterministic_truncation_fallback",
+            "artifact_ref": ref,
+        },
+    )
+
+    service = _make_service(make_session_service, settings, store)
+    reachable = await service._reachable_for_session(
+        sid, await service._children_by_parent()
+    )
+    assert ref in reachable, "compaction_failed.artifact_ref 必须进可达集"
+    assert "referenced" in reachable[ref]["reasons"]
+    assert any(tag.startswith("compaction_failed:") for tag in reachable[ref]["referenced_by"])
+
+    preview = await service.preview_artifact_cleanup(sid)
+    blocked = {item["artifact_ref"]: item["reason"] for item in preview["blocked"]}
+    assert blocked.get(ref) == "referenced", (
+        f"raw 快照必须 blocked；实际 blocked={preview['blocked']}")
+    assert all(item["artifact_ref"] != ref for item in preview["affected"])
+
+
+@pytest.mark.asyncio
+async def test_compaction_failed_without_ref_adds_no_reachable_entry(
+    make_session_service, env
+):
+    """artifact_ref 为 None / 缺失的 compaction_failed 不产出可达条目（fail-open）。"""
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    session.append(CONTEXT_COMPACTION_FAILED, {"attempt": 1, "artifact_ref": None})
+    session.append(CONTEXT_COMPACTION_FAILED, {"attempt": 0})
+
+    service = _make_service(make_session_service, settings, store)
+    reachable = await service._reachable_for_session(
+        sid, await service._children_by_parent()
+    )
+    assert reachable == {}
 
 
 # ── b) 多引用者：同一 ref 被两条证据引用，可达集只出现一次 ──────────────────
