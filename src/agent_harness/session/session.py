@@ -60,6 +60,21 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
+#: `Session._persist_event` 写一次事件的**总尝试次数**（含首次；#1024）。
+#:
+#: 语义按「总尝试」而不是「重试次数」命名：`range(_APPEND_MAX_TRIES)` 里
+#: `_APPEND_MAX_TRIES = 1` 就等于**不重投**，按「重试次数」命名会踩这个 off-by-one。
+#:
+#: 为什么是 **3**（= 首次 + 至多 2 次 resync 重投）而不是 2 或无界：
+#: 重投要盖住的是「取号与写盘之间被旁路写者抢号」的竞争窗口，每次重投前都按盘上
+#: max 纠正过缓存，单次被抢的概率本就很低；但竞争者在窗口内**再**抢一次是可能的
+#: ——#1024 的 AC3 并发用例实测：只给 1 次重投时终态偶发丢失（多次重跑里出现过
+#: 单一失败轮），给到 2 次重投后 20 次重跑全绿。再往上加没有实测收益，无界重投则
+#: 会在持续竞争下活锁。数值与服务层既有的 `service._WRITE_CONFLICT_ATTEMPTS`
+#: （= 3，BUG-011 的「读快照 → 取号 → 重试」循环）一致；超限即原样抛出、
+#: 由调用方的既有失败归因接手（绝不吞成「写成功」）。
+_APPEND_MAX_TRIES: int = 3
+
 
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
     """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
@@ -434,35 +449,45 @@ class Session:
         **seq 冲突即 resync（#1024）**：本聚合的计数器只是「盘上最大 seq」的乐观
         缓存，任何旁路写者（后台记忆作业的 ``SessionEventSink``、服务层的旁路追加）
         都能在两次 append 之间把号占掉。撞号不是终局，而是协议的一部分：重读当前
-        盘上最大 seq、纠正 ``_next_seq``、用新号重投一次（EventStoreDB
+        盘上最大 seq、纠正 ``_next_seq``、用新号有界重投（EventStoreDB
         ``WrongCurrentVersionError`` / Marten ``ConcurrencyException`` 同型协议——
         存储层 fail-closed 拒写，读-改-写闭环在写者一侧完成）。没有这一步，受害
         run 的下一次 append 必炸，而失败终态又走同一枚过期计数器、必然再炸，
         run 永远拿不到终态（#1024 的真机事故形状）。
         """
-        try:
-            self._store.append_event(self.session_id, event)
-        except SeqConflict:
-            if self._snapshot_in_hand:
-                # 手持快照 ⇒ 不做 resync，原样抛给调用方：它的号不是「被抢」而是
-                # 「按旧快照推的」，收口方式（换快照重试 / 报 409）由调用方 owner
-                # ——服务层的 `change_model` 一族按 `_WRITE_CONFLICT_ATTEMPTS` 有界
-                # 重试，把冲突在这一层吞掉会让那些上界与失败归因变成不可观测。
-                raise
-            # 只重读一次、只重投一次：上界取 1 而不是无界重试，是因为这里的冲突是
-            # 「谁的号新」的竞争、不是瞬态故障；重投前已按盘上 max 纠正，若仍被抢
-            # 说明该号又被占到（此时原样抛出去，由调用方既有的失败归因接手）。只认
-            # ``SeqConflict`` 这一个信号：其它 OSError / RuntimeError 是真故障，
-            # 仍按原契约向上抛（注入故障的既有用例不受影响）。
-            self._next_seq = max(
-                (e.seq for e in self._store.read_events(self.session_id)), default=-1,
-            ) + 1
-            event = replace(event, seq=self._next_seq)
-            self._store.append_event(self.session_id, event)
+        for attempt in range(_APPEND_MAX_TRIES):
+            try:
+                self._store.append_event(self.session_id, event)
+            except SeqConflict:
+                if self._snapshot_in_hand:
+                    # 手持快照 ⇒ 不做 resync，原样抛给调用方：它的号不是「被抢」而是
+                    # 「按旧快照推的」，收口方式（换快照重试 / 报 409）由调用方 owner
+                    # ——服务层的 `change_model` 一族按 `_WRITE_CONFLICT_ATTEMPTS` 有界
+                    # 重试，把冲突在这一层吞掉会让那些上界与失败归因变成不可观测。
+                    raise
+                if attempt == _APPEND_MAX_TRIES - 1:
+                    # 上界用尽仍被抢：原样抛出去（fail-loud）。**不**在这里兜底吞掉
+                    # ——调用方（runtime 的终结臂）已有自己的失败归因；把冲突吞成
+                    # 「写成功」才是 #1024 事故里真正的静默失真源。
+                    raise
+                # 重读当前盘上最大 seq、纠正缓存、用新号重投（EventStoreDB
+                # `WrongCurrentVersionError` / Marten `ConcurrencyException` 同型协议）。
+                # 只认 ``SeqConflict``：其它 OSError / RuntimeError 是真故障，原契约
+                # 向上抛（注入故障的既有用例不受影响）。
+                self._next_seq = max(
+                    (e.seq for e in self._store.read_events(self.session_id)),
+                    default=-1,
+                ) + 1
+                event = replace(event, seq=self._next_seq)
+                continue
+            # 落盘成功 —— 跳出重投循环（**不可省**：漏掉它会拿同一枚事件再投一次，
+            # 把一次正常 append 变成一串「自己抢自己」的冲突）。
+            break
         self._events.append(event)
-        # 写盘成功后才推进计数器——失败不消耗 seq。按**实际写入的号**前进（而不是
-        # 无脑 +1）：并发写者可能在本聚合取号之后替它前进过（此时的号只多不少、
-        # 不会回退），无脑 +1 会留下一个已过期的缓存、把下一次 append 直接送进冲突分支。
+        # 写盘成功后才推进计数器——失败不消耗 seq。按**实际写入的号**前进：
+        # resync 重投会换号（上面的 `replace`），无脑 `+= 1` 会留下一个已过期的
+        # 缓存，把**下一次** append 直接送进冲突分支（#1024 的 AC3 并发用例实测：
+        # 改成 `+= 1` 后终态缺失率立刻从 0 变成非零）。
         #
         # 注意 resync 的**边界**（#1024 实测）：它只修活聚合自己的缓存，**不**替调用方
         # 吞掉冲突。服务层的 `change_model` / `change_permission_mode` / task 面有各自的
@@ -470,7 +495,7 @@ class Session:
         # 归因归它们 owner（BUG-011 的契约与用例按此钉住）。若在本层做无界重投，
         # 单一写者下的**结构性**冲突（如测试注入的冻结快照）会永远不再向上可见、
         # 那些上界从此不可测。
-        self._next_seq = max(self._next_seq, event.seq) + 1
+        self._next_seq = event.seq + 1
         if not notify:
             return event
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）

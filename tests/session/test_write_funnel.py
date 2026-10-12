@@ -72,7 +72,7 @@ def _self_funnel_calls(node: ast.AST) -> list[ast.Call]:
 
 
 def _seq_conflict_handler(node: ast.AST) -> ast.ExceptHandler | None:
-    """`try: ... except SeqConflict:` 的处理器子句（#1024 的 resync 重投落点）。"""
+    """`try: ... except SeqConflict:` 的处理器子句（#1024 的 resync 落点）。"""
     for candidate in ast.walk(node):
         if not isinstance(candidate, ast.Try):
             continue
@@ -81,6 +81,28 @@ def _seq_conflict_handler(node: ast.AST) -> ast.ExceptHandler | None:
             if isinstance(exception, ast.Name) and exception.id == "SeqConflict":
                 return handler
     return None
+
+
+def _attr_calls_in(node: ast.AST, name: str) -> list[ast.Call]:
+    """该子树里任何 `<...>.<name>(...)` 的调用（不看嵌套函数——漏斗里没有）。"""
+    return [
+        candidate
+        for candidate in ast.walk(node)
+        if isinstance(candidate, ast.Call)
+        and isinstance(candidate.func, ast.Attribute)
+        and candidate.func.attr == name
+    ]
+
+
+def _bare_calls_in(node: ast.AST, name: str) -> list[ast.Call]:
+    """该子树里对裸名 `name(...)`（import 进来的模块级函数）的调用。"""
+    return [
+        candidate
+        for candidate in ast.walk(node)
+        if isinstance(candidate, ast.Call)
+        and isinstance(candidate.func, ast.Name)
+        and candidate.func.id == name
+    ]
 
 
 def test_session_has_one_durable_store_writer() -> None:
@@ -106,13 +128,30 @@ def test_session_has_one_durable_store_writer() -> None:
     assert _self_store_append_calls(methods["append"]) == []
     assert _self_store_append_calls(methods["adopt_history"]) == []
 
+    # 漏斗内**一个**物理写点，包在「首次写 + 撞号 resync 后有界重投」的循环里
+    # （#1024）。形状锁死为：写点唯一、重投靠循环回边（不在 except 里再写一次）、
+    # resync 必须真的重读盘面并换号、循环在成功分支 break。
     funnel_appends = _self_store_append_calls(funnel)
-    assert len(funnel_appends) == 2, "漏斗内 = 首次写 + resync 重投一次"
+    assert len(funnel_appends) == 1, "物理写点必须唯一（重投靠循环回边，不另抄一次写）"
+
+    # 拿住写点所在的那个循环（漏斗里还有监听器回调循环，别误认成重投循环）。
+    loop = next(
+        (n for n in ast.walk(funnel)
+         if isinstance(n, ast.For) and funnel_appends[0] in list(ast.walk(n))),
+        None,
+    )
+    assert loop is not None, "写点必须包在重投循环内（重投靠循环回边）"
+    assert isinstance(loop.iter, ast.Call) and loop.iter.func.id == "range", (
+        "重投循环必须有界（range(_APPEND_MAX_TRIES)），不得无界 while True"
+    )
+
     handler = _seq_conflict_handler(funnel)
-    assert handler is not None, "resync 重投必须挂在 except SeqConflict 分支上"
-    assert len(_self_store_append_calls(handler)) == 1, "重投恰好一次（有界）"
-    assert len(funnel_appends) - len(_self_store_append_calls(handler)) == 1, (
-        "重投之外的物理写恰好一次"
+    assert handler is not None, "resync 必须挂在 except SeqConflict 分支上"
+    assert _self_store_append_calls(handler) == [], "except 里不得再抄一次物理写"
+    assert _attr_calls_in(handler, "read_events"), "resync 必须重读盘面"
+    assert _bare_calls_in(handler, "replace"), "resync 必须换号重投"
+    assert any(isinstance(n, ast.Break) for n in ast.walk(loop)), (
+        "写成功后必须 break（漏掉会把一次正常 append 变成自我冲突）"
     )
 
 
