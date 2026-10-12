@@ -112,7 +112,47 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 
 ## 5 验证读数
 
-（施工后回填：focused 测试、真机腿、门禁、审查）
+### 5.1 冻结与 blob（协议 §8.1 第 1 条）
+
+- 冻结 tip `4b704801aa58134c9cfc77e272e247c5d092bd05` / tree `80f8824fcc93a75e9cfa1308ce59e44f34ad1a0e`；base `239750b81bd1179e3057ad5a29280f46b81f8dcc`（= 当时的 `origin/main`）。
+- 改动面逐文件 blob（冻结 tip）：`installer-directories.nsh` `1105ebd1`、`installer.nsh` `64282635`、`build-windows-installer.mjs` `1b85235f`、`host-protocol.ts` `68557aed`、`host-protocol.test.ts` `f813e386`、`installer-scripts.test.mjs` `66a05c41`、`teeth-check-guards.mjs` `d37baa2b`、`process-gate-probe.nsi` `ba943b8a`、`run-process-gate-probe.ps1` `08d37cda`、`host_service.py` `aa3f6df7`、ADR-0053 `1e20ab47`、本证据文件 `bef8f82e`。
+
+### 5.2 focused / 单测 / 真机腿
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| desktop 全套（含 11 例闸门规则 + 守卫） | `npm test`（`desktop/`） | **286 tests / 284 passed / 2 skipped / 0 failed**；其中 `installer-scripts.test.mjs` 110 passed |
+| D2 钉子 | 同上（`host-protocol.test.ts`） | **5 passed**（跨端数值一致、单端递增必红、`version` 串不参与判据） |
+| 类型检查 | `npm run check`（`tsc --noEmit`） | 无输出、rc=0 |
+| 守卫牙齿（变异） | `node test/harness/teeth-check-guards.mjs` | 去掉 `@(` ⇒ 规则红（守卫基线 sha 一致） |
+| 真机四腿 | `run-process-gate-probe.ps1` | `none` exit 0 / `runtime` exit 0（PID gone）/ `client` exit 2（PID alive）/ `unknown` exit 2；**四腿 `stock=1`**；两轮逐字节一致（仅 PID 不同） |
+| 语义等价 | `scripts/check_semantic_equiv.py --a 5412461d --b aa3f6df7` | 「等价」，归一化摘要两侧同为 `fb336f2e011edbf8`；两条负控（注释外改字面量 / 删一条真语句）判「不等价」⇒ 非空转 |
+
+### 5.3 门禁
+
+- **Gate-0（冻结树 `4b704801`，隔离副本，02:27:14）**：收据 `docs/gate/4b704801aa58134c9cfc77e272e247c5d092bd05.json` —— 5/6，❌ 仅 `coverage`，其 ❌ 集合恰为本批三笔代码提交（`e88d7f00` / `b38c9195` / `90fdc90c`），台账行尚未落盘。
+- **Gate-0（记账树 `3bcd9f62`，隔离副本，03:16:12）**：收据 `docs/gate/3bcd9f62eba58ab12af5e1c3daefbe248931f27e.json` —— **6/6 PASS**（墙钟 38.5s；`worktree.tracked_matches_head=true`、`untracked_total=0`）。
+- **覆盖闸门**：`python scripts/check_review_coverage.py` → exit 0（`089524a~1..HEAD` 每条 commit 均有归属）。
+- **全量门禁（冻结树，隔离副本）**：后端 `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` → **7758 passed / 43 skipped / 51 deselected / 2 failed / 2586.92s（43:06）**（两条红见 §5.5）；web `vitest run` **119 files / 1681 passed**；`vite build` 成功；`playwright test --workers=2` **540 passed（19.8m，0 flaky）**；`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` 由 Gate-0 覆盖且绿。
+- **读数传递（协议 §8.1 第 3 条判据①）**：`git diff --name-status --no-renames 4b704801 HEAD` = **9 条**（冻结 → 交付提交：`reference-sources.md`、两份 `docs/gate/*.json` 收据、两行台账、本证据文件、`SDD_TICKET_TRACKER.md`、`PHASE_STATUS.md`、`phase_status/2026-10.md`），状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。
+
+### 5.4 Gate-0 为何在隔离副本里跑
+
+主工作树含另一条线的未提交改动（` M dev.sh`），`gate0.py` 的落盘前置（协议 §8.7 第 3 条：工作树不得偏离 `HEAD`）会 fail-closed 拒绝落盘，而它自己的处置建议明写「**不要** `git stash`」。故按 §8.1 第 6 条的隔离原则建了独立副本（`C:\ia-probe-914\gate-tree`：真仓 `git bundle` 克隆 + CI 同形依赖 `uv sync --frozen --all-extras` / `pnpm install --frozen-lockfile` / `npm ci --ignore-scripts`），两份收据都产自该副本；副本的 `.pth` 指向副本 `src`（§8.1 第 6 条的「混合解析」陷阱已核对）。**未触碰 `dev.sh`。**
+
+### 5.5 全量后端两条红的处置（如实记 2 failed，不写成「绿」）
+
+1. `tests/live_gate/test_deadline_scenario.py::test_uncertain_script_lands_its_side_effect_before_hanging` —— **负载型时序假红**。该例以 `sandbox.exec(…, timeout=1.0)` 给一个 Python 子进程 **1 秒**硬预算，要求它在被杀之前落盘 `uncertain.txt`（`evaluation/live_gate/scenarios/deadline.py` 的 `UNCERTAIN_SLEEP_SECONDS=8.0` 只约束脚本自身的挂起时长，不约束启动）。全量那次与 playwright、两个审查子代理并发（整轮 43:06，按 2026-09-30 的 911.51s / 4849 例外推常态约 24 min ⇒ 本次约 1.8×）。证据：**同一冻结树**上单例复跑 **1 passed（22.9s）**、整文件复跑 **43 passed（22.13s）**；空闲时该解释器启动实测 66–94 ms。已另开票登记为 issue #1069（复跑读数、机理与三条候选修法都在票面）。
+2. `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix` —— **本批记账顺序的机械瞬态**：该例断言「真实台账在真树上 exit 0」，而冻结树的台账**尚无本批两行** ⇒ 三笔代码提交无归属 ⇒ exit 1。台账行落盘后**同一例在记账树上 4 passed**（rc=0）。仓内既有先例同型（台账自身记有「唯一红 = 真实台账测试的预期瞬态——本行入库即消」，2026-10-01 与 2026-10-03 两处）。
+
+### 5.6 审查
+
+两轴独立只读子代理（非作者）。**首派两轴均因上游 `Model request failed` 未产出任何结论行**（基础设施故障，§8.3 第 4 条定义内），按该条重派 1 次后两轴都取到结论；未使用「替代」通道。
+
+- **Axis A（Correctness/Spec）FAIL，P0-P3 = 0/0/0/1**：唯一 P3 = 闸门落在 `${If} $iaProbeFound == "1"` 分支内 ⇒ 缺 app exe 而 bundled 运行时在跑的外部损坏安装不被分类（登记 #1066 + §6，本票不改）。
+- **Axis B（Standards/仓规）FAIL，P0-P3 = 0/0/2/4**：P2① 本文件 License 字段的 `THIRD_PARTY_NOTICES.md` 指针为假、P2② 仓库内无冻结树 Gate-0 收据；P3① `reference-sources.md` 误标「运行时依赖」、P3② §4-§6 占位（属「缺但已计划」）、P3③ 4 笔直接落在集成 clone 的 `main`、P3④ `reference-sources.md` 补录顺序偏差。逐条处置见两行台账。
+
+两轴**各自独立**复跑并确认：`check_semantic_equiv.py`（`host_service.py` 等价）、`host-protocol.test.ts` 5/5、`installer-scripts.test.mjs` 110/110、真机四腿读数、以及 `coverage` 的 ❌ 集合恰为本批三笔。
 
 ## 6 残余与后续
 
@@ -122,4 +162,5 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **安装路径含单引号**：分类脚本把 `$INSTDIR` 内插进 PowerShell 单引号字符串（**上游同形写法**），路径含 `'` 时分类不可证 ⇒ 中止（真机腿 `unknown` 实测 exit 2）。比 stock 的「静默判未运行」安全，但仍是用户可见限制；与 #1066 同族，一并记录。
 - **未做**：完整安装包构建。本机无 `desktop/node_modules`、无已构建安装器、无 staged 运行时 ⇒ 生产安装器跑不起来，故真机腿用 r1 驱动 + **生产函数原文注入**代替，与仓内既有约定一致（`desktop/test/harness/README.md`）。这条是环境限制，不是本票的选择。
 - **外部损坏的安装目录（Axis A 的 P3，本票不改，待用户裁决）**：闸门调用落在 `iaStageApplication` 的 `${If} $iaProbeFound == "1"` 分支内（`installer-directories.nsh:371-378`）。若 `$INSTDIR` 下的 bundled 运行时仍在跑、而 `${APP_EXECUTABLE_FILENAME}` 已缺失（杀软隔离未签名 exe、手工删除）且 `IaBackupDir` 为空（`iaRecoverInterruptedInstall` 因此不接管），整段 stage/rename 会被跳过、闸门从不分类，stock section 直接在 `$INSTDIR` 上就地安装——#914 症状的一条边角路径。**为何不在本票改**：把闸门移出该分支是**行为变更**（会改掉「缺 exe 的修复安装」语义），超出裁决 D1/D3 的最小方向，按协议 §9.1.1 交用户裁决；已登记为 issue #1066 的注释（连同其余三条残余）。
+- **同批发现的测试基建缺陷 → issue #1069**：§5.5 第 1 条那条负载型假红不是本票语义的问题，而是该用例把「Python 子进程启动 + 落盘」压在 1 秒硬预算里（预算按「脚本已在跑」估的）。按用户「查到问题就另开票」的常设指令开票，票面含全量 / 单例 / 整文件三组读数、机理与三条候选修法，留给独立一轮处理。
 - **外来改动**：工作树里的 ` M dev.sh` 是另一条线的未提交工作，本票未触碰、未纳入任何提交；它也是 Gate-0 读数改在隔离副本里取的原因（§5.4）。
