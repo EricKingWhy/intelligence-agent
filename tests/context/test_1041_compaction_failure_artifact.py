@@ -29,7 +29,9 @@
 
 ref 盖章范围：预检拒绝诊断（`preflight_request_exceeds_hard_limit`，非摘要失败）
 在本轮**另有摘要尝试失败**时**不**承载本轮 raw snapshot ref（ref 归摘要失败/降级
-诊断）；纯预检轮（无任何摘要尝试）里预检诊断是本轮唯一失败记录，ref 由它承载。
+诊断）；纯预检轮（无任何摘要尝试）里失败记录全部是预检诊断——全段预检失败后缩小段
+仍超限时该轮有两条（全段 + 缩小段，`narrowed` 分别 False/True），一条或两条都带 ref
+（ref 由预检诊断承载）。
 """
 
 from __future__ import annotations
@@ -293,7 +295,8 @@ async def test_preflight_reject_raise_saves_raw_artifact(tmp_path):
 
     failures = _failures(session)
     assert failures, "预检拒绝必须落 context/compaction_failed"
-    # 纯预检轮（无摘要尝试）里预检诊断是本轮唯一失败记录 ⇒ ref 由它承载。
+    # 纯预检轮（无摘要尝试）里失败记录全部是预检诊断（全段预检失败后缩小段仍超限时
+    # 可有两条）⇒ 一条或两条都带 ref。
     refs = {event.data.get("artifact_ref") for event in failures}
     assert None not in refs, f"预检拒绝 raise 出口必须回填 ref；got {refs}"
     assert refs == {expected_ref}, f"ref 必须 = sha256(early 原文)[:16]；got {refs}"
