@@ -736,7 +736,6 @@ async def test_summary_that_misses_auto_target_is_rejected():
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_huge_tool_call_args_and_summary_failure_hit_hard_guard():
     """摘要失败时降级截断丢掉放不进预算的超大原子块；会话不死（#1026 裁决 A）。
 

@@ -79,10 +79,11 @@ _PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
 #: timeout / transport_error 覆盖调用面；其余逐一对应校验闸门与各条拒绝。
-#: 以 `attempt=0` 标记的**非摘要尝试**记录有三条——T12h (#647) 的
+#: 以 `attempt=0` 标记的**非摘要尝试**记录有四条——T12h (#647) 的
 #: `source_range_unavailable`（**生成后**来源拒绝）、#639 的
 #: `preflight_request_exceeds_hard_limit`（**尝试前**预检拒绝：摘要请求本身超 hard）、
-#: #648 的 `no_compactable_early_turn`（**尝试前**预检拒绝：无可压缩完整早期轮）。
+#: #648 的 `no_compactable_early_turn`（**尝试前**预检拒绝：无可压缩完整早期轮）、
+#: #1026 修回的 `chunk_bound_released`（**尝试前**留痕：超界原子块如实放行）。
 _SUMMARY_ERROR_CLASSES = (
     "timeout",
     "transport_error",
@@ -108,6 +109,10 @@ _SUMMARY_ERROR_CLASSES = (
     # （attempt=0，非摘要尝试失败——截断是降级产物不是被拒尝试）。对标
     # #639/#648 的"只加诊断"纪律：词表有界、每项对应一条拒绝/降级面。
     "deterministic_truncation_fallback",
+    # #1026 修回（审查 P2）：content 已不可再裁的超界原子块被 `_clip_block_to_budget`
+    # 如实放行——「分块单请求 token 有界」（票面验收 3）的显式逃逸口，留痕使其
+    # 事后可观测（attempt=0，非摘要尝试；分块决策处逐放行块记一条）。
+    "chunk_bound_released",
     # #648 选项 B（用户 2026-10-06 批准）：无可压缩完整早期轮的预检拒绝
     # （尝试前，非摘要尝试失败）。此前该分支刻意"保持为空表"（见
     # ContextWindowExceededError 注释），本次是用户批准的刻意反转——只加诊断：
@@ -153,7 +158,9 @@ def _clip_block_to_budget(
     标记"迭代到入界。仓内同形先例：`_carrier_instruction_line` 的截断标记、
     `_PROG_SECTION_MAX_ENTRY_CHARS` 的有界投影。**不 mutate 原消息**（投影被
     调用方复用）；tool_call/tool_call_id 等结构字段保留（配对完整性不受影响）。
-    content 已不可再裁（空/非文本）而块仍超界时如实放行（结构面有界）。
+    content 已不可再裁（空/非文本/超短文本——替换串不再变短）而块仍超界时
+    如实放行（结构面有界）；放行经 `chunk_bound_released` 诊断留痕（见
+    `compact` 的分块决策处）。
     """
     clipped = [message.model_copy() for message in block]
     while estimate_message_tokens(clipped) > bound_tokens:
@@ -164,11 +171,18 @@ def _clip_block_to_budget(
         if (not isinstance(target.content, str) or len(target.content) < 4):
             break
         keep = len(target.content) // 4
-        target.content = (
+        replacement = (
             target.content[:keep]
             + "…［已截断：摘要输入超单块上限，head/tail 保留］…"
             + target.content[-keep:]
         )
+        if len(replacement) >= len(target.content):
+            # 修回（#1026 审查 P1）：content 落在 4~58 字符区间时 head/tail 加
+            # 截断标记反而**更长**，旧码会收敛到固定点后 while 恒真、永不退出
+            #（挂死而非报错，连降级路径都到不了）。替换串不再变短 ⇒ 已不可再裁，
+            # 与空/非文本同按「如实放行（结构面有界）」退出。
+            break
+        target.content = replacement
     return clipped
 
 
@@ -264,6 +278,25 @@ def _deterministic_truncation(
         kept = [*block, *kept]
         kept_tokens += block_tokens
     return [*prefix, *kept, *recent]
+
+
+def _fallback_message_budget(
+    auto_limit: int, reserved_tokens: int, token_estimate: int,
+    messages: list[AnyMessage],
+) -> int:
+    """#1026 修回（审查 P3）：降级截断的 messages 预算——非 messages 开销**单扣**。
+
+    reserved_tokens（builder 在构造点声明的加回份额：pf/sys/rt/plan/paths，见
+    builder.py 的 reserved_tokens 组装）与 overhead（调用方 token_estimate 的实测
+    非 messages 份额 = token_estimate − messages 估算）描述的是**同一笔**加回，
+    不是两笔——旧码 `auto − reserved − overhead` 把 sys/rt/plan/paths/pf 五项
+    扣了两次，方向保守（只多截不超窗）但会多丢 early 轮。取二者较大者扣一次：
+    两个口径任一成立时「截断产物 + 加回 ≤ auto_limit」都守得住，且保留 B1 修正
+    的防线（有效用量远超 auto 时预算为负 ⇒ 不可截断 ⇒ 落既有异常兜底，不会
+    假成功放行超窗请求）。
+    """
+    overhead = max(token_estimate - estimate_message_tokens(messages), 0)
+    return auto_limit - max(reserved_tokens, overhead)
 
 
 @dataclass(frozen=True)
@@ -527,7 +560,9 @@ class ContextCompactor:
         `summary_timeout_per_kilotoken_seconds`（默认 0.25s/kt）。锚点（阶段 A
         实测）：同路径 167k 请求 16.8s 成功、30s 恒败 ⇒ 167k → 71.75s（≈4.3×
         实测延迟）、30k → 37.5s。消融候选②（固定 90s）= slope 0 的配置形态：
-        对 30k 小请求也等 90s，真实失败重试成本翻三倍，落选（结论见 checkpoint）。
+        对 30k 小请求也等 90s，真实失败重试成本翻三倍，落选（#1026 消融记录；
+        两候选的公式/锚点断言锁定在 tests/context/test_1026_compaction_timeout.py
+        的 `test_timeout_formula_scales_with_request_size`）。
         每次摘要尝试用**当时**的请求规模取墙钟——两次 attempt / 分块逐块不再
         共用同一恒定值（票面修法①）。
         """
@@ -536,7 +571,7 @@ class ContextCompactor:
 
     async def _summarize_chunked(
         self, chunks: list[list[AnyMessage]], prompt: SystemMessage,
-        plan_block: str | None,
+        plan_block: str | None, *, request_sizes: list[int],
     ) -> AIMessage:
         """#1026：分块递进归并摘要（spike 验证的首选③变体，PORT DESIGN 依据见下）。
 
@@ -548,7 +583,8 @@ class ContextCompactor:
         槽位与按块规模的墙钟（`_summary_timeout_for`）——单请求 token 有界
         （验收 3）。中间块产物不进闸门，只做携带（≤ `_CHUNK_CARRY_CHAR_CAP`
         确定性截断）；中间块响应形状违规按单请求面同判（tool_calls / 非文本 /
-        空文本即拒，不把坏携带传染给后续块）。
+        空文本即拒，不把坏携带传染给后续块）。每次实际发起的块请求规模经
+        `request_sizes` 回传调用方（失败诊断的逐块口径，#1026 修回）。
 
         来源：aider `summarize_real`（Apache-2.0，`Aider-AI/aider` @
         `5dc9490b`，`aider/history.py:33-95`）的递归有界分块 + LangChain
@@ -571,6 +607,10 @@ class ContextCompactor:
                 ensure_ascii=False,
             )))
             chunk_request_tokens = estimate_message_tokens(parts)
+            # #1026 修回（审查 P4）：逐块请求的**实际**规模回传给调用方——失败
+            # 诊断的 request_token_estimate 在分块路径记逐块口径，不再记全 early
+            # 单请求估算（两口径可区分，见 attempt 循环处注释）。
+            request_sizes.append(chunk_request_tokens)
             async with self._slot(), asyncio.timeout(
                 self._summary_timeout_for(chunk_request_tokens),
             ):
@@ -768,9 +808,26 @@ class ContextCompactor:
                 chunks = candidate_chunks
                 chunked = True
                 plan_block = _plan_block_text(plan_items)
+                # #1026 修回（审查 P2）：`_clip_block_to_budget` 如实放行的超界
+                # 原子块在此逐条留痕（既有 failures 诊断通道，attempt=0）——
+                # 「单请求 token 有界」的逃逸口必须事后可观测，不新造事件类型。
+                for candidate_chunk in candidate_chunks:
+                    candidate_tokens = estimate_message_tokens(candidate_chunk)
+                    if candidate_tokens > self._chunk_max_tokens:
+                        failures.append(self._chunk_bound_release(
+                            chunk_tokens=candidate_tokens,
+                            token_estimate=token_estimate,
+                        ))
         for attempt in (1, 2):
             attempt_started_at = monotonic()
             attempt_model_id = _summary_model_id(self._model, None)
+            # #1026 修回（审查 P4）：本次 attempt 逐块请求的实际规模（分块路径由
+            # `_summarize_chunked` 回传）。失败诊断的 `request_token_estimate`
+            # 口径随之分道：单请求路径记全 early 单请求估算，分块路径记已发起
+            # 块请求的最大实际规模（≤ 单块预算 + 携带封顶，远小于全 early 转录
+            # ——两口径可区分）。尚未发起任何块请求就失败时无逐块读数，回落
+            # 全 early 估算。
+            chunk_request_sizes: list[int] = []
             try:
                 # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（墙钟是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
@@ -779,6 +836,7 @@ class ContextCompactor:
                 if chunks is not None:
                     response = await self._summarize_chunked(
                         chunks, prompt, plan_block,
+                        request_sizes=chunk_request_sizes,
                     )
                 else:
                     async with self._slot(), asyncio.timeout(
@@ -844,7 +902,13 @@ class ContextCompactor:
                     attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
                     summary_model_id=attempt_model_id,
                     duration_ms=max(round((monotonic() - attempt_started_at) * 1000), 0),
-                    request_token_estimate=request_token_estimate,
+                    # #1026 修回（审查 P4）：分块路径记逐块请求实际规模的最大值
+                    #（口径与单请求路径可区分，见循环顶部注释）；无逐块读数时
+                    # 回落全 early 估算。
+                    request_token_estimate=(
+                        max(chunk_request_sizes)
+                        if chunk_request_sizes else request_token_estimate
+                    ),
                     request_budget_tokens=int(self._hard_limit),
                 ))
                 logger.warning(
@@ -868,13 +932,15 @@ class ContextCompactor:
                 # 预算必须按**有效用量**收敛：调用方入参 token_estimate 含
                 # sys/rt/plan 等不在 messages 里的开销（builder 重建时会原样补回），
                 # 截断只缩 messages ⇒ 预算要扣掉这笔开销份额，否则"messages 压回
-                # 线内、有效用量仍超护栏"的假成功会把超窗请求放出去。
-                overhead = max(
-                    token_estimate - estimate_message_tokens(messages), 0,
-                )
+                # 线内、有效用量仍超护栏"的假成功会把超窗请求放出去。开销**单扣**
+                # （修回口径见 `_fallback_message_budget`）——reserved 与 overhead
+                # 是同一笔加回的两种计量，不叠加。
                 truncated = _deterministic_truncation(
                     messages, prefix_end, cut,
-                    self._auto_limit - reserved_tokens - overhead,
+                    _fallback_message_budget(
+                        self._auto_limit, reserved_tokens, token_estimate,
+                        messages,
+                    ),
                 )
                 if truncated is not None:
                     failures.append(CompactionFailure(
@@ -1042,6 +1108,32 @@ class ContextCompactor:
             request_token_estimate=request_token_estimate,
             request_budget_tokens=int(self._hard_limit),
             narrowed=narrowed,
+        )
+
+    def _chunk_bound_release(
+        self, *, chunk_tokens: int, token_estimate: int,
+    ) -> CompactionFailure:
+        """#1026 修回（审查 P2）：超界原子块如实放行的有界诊断记录。
+
+        `_clip_block_to_budget` 对 content 已不可再裁（非文本/超短）的原子块
+        「如实放行」——票面验收 3 的「分块单请求 token 有界」在此有逃逸口
+        （墙钟按实际规模缩放兜住超时面，但有界承诺破）。照搬 `_preflight_rejection`
+        结构使放行事后可观测：`attempt=0`（非摘要尝试）、error_class 收进既有
+        有界词表；`request_token_estimate` 取放行块自身 token 数（判别式左值
+        语义，同 `_no_early_turn_rejection` 的 atomic_tokens），`request_budget_tokens`
+        取单块预算——被放行突破的那条线，与单请求路径的 hard 口径可区分。
+        """
+        return CompactionFailure(
+            attempt=0,
+            error_class="chunk_bound_released",
+            message="Oversize atomic block released above the chunk bound",
+            auto_limit=int(self._auto_limit),
+            hard_limit=int(self._hard_limit),
+            token_estimate=token_estimate,
+            summary_model_id=None,
+            duration_ms=0,
+            request_token_estimate=chunk_tokens,
+            request_budget_tokens=int(self._chunk_max_tokens),
         )
 
 

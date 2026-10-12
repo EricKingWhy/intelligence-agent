@@ -18,9 +18,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent_harness.context.compactor import (
+    _CHUNK_CARRY_CHAR_CAP,
     ContextCompactor,
     ContextWindowExceededError,
     _chunk_early,
+    _clip_block_to_budget,
+    _fallback_message_budget,
 )
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -149,7 +152,7 @@ def test_settings_summary_timeout_reaches_builder():
     assert builder._summary_chunk_max_tokens == 12_000
 
 
-def test_builder_construction_site_passes_timeout_to_compactor(tmp_path):
+def test_builder_construction_site_passes_timeout_to_compactor(tmp_path, monkeypatch):
     """构造点把 builder 配置原样传给 ContextCompactor（compact_now 的透传）。"""
     from agent_harness.context import builder as builder_module
     from agent_harness.context.builder import ContextBuilder
@@ -157,23 +160,18 @@ def test_builder_construction_site_passes_timeout_to_compactor(tmp_path):
 
     captured: dict = {}
 
-    real_compactor = builder_module.ContextCompactor
-
-    class SpyCompactor(real_compactor):
+    class SpyCompactor(builder_module.ContextCompactor):
         def __init__(self, *args, **kwargs):
             captured.update(kwargs)
             super().__init__(*args, **kwargs)
 
-    builder_module.ContextCompactor = SpyCompactor
-    try:
-        builder = ContextBuilder(
-            object(), summary_timeout_seconds=77.0,
-            summary_timeout_per_kilotoken_seconds=0.5,
-            summary_chunk_request_ratio=0.6, summary_chunk_max_tokens=12_000,
-        )
-        asyncio.run(builder.compact_now(make_session(tmp_path)))
-    finally:
-        builder_module.ContextCompactor = real_compactor
+    monkeypatch.setattr(builder_module, "ContextCompactor", SpyCompactor)
+    builder = ContextBuilder(
+        object(), summary_timeout_seconds=77.0,
+        summary_timeout_per_kilotoken_seconds=0.5,
+        summary_chunk_request_ratio=0.6, summary_chunk_max_tokens=12_000,
+    )
+    asyncio.run(builder.compact_now(make_session(tmp_path)))
     assert captured.get("summary_timeout_seconds") == 77.0
     assert captured.get("summary_timeout_per_kilotoken_seconds") == 0.5
     assert captured.get("summary_chunk_request_ratio") == 0.6
@@ -464,3 +462,121 @@ async def test_chunked_final_request_carries_plan_items_verbatim(tmp_path):
     assert any("实现清单重注入" in snapshot.messages[-2].content
                for snapshot in model.snapshots), (
         "分块请求必须携带确定性计划块（逐字内容）")
+
+
+# ── 修回轮（独立双轴审查 2026-10-12 findings）─────────────────────────────
+
+
+def test_clip_block_to_budget_terminates_on_all_short_messages():
+    """审查 P1 回归：全短消息超预算原子块有限步返回、不越裁越长。
+
+    旧码在 content 长度 4~58 区间「越裁越长」（head/tail + 截断标记比原文
+    还长），收敛到 ~58 字符固定点后 while 恒真、break 不触发 ⇒ 挂死而非报错
+    （连降级路径都到不了）。本用例在旧码下永不返回。
+    """
+    from agent_harness.context.compactor import _validate_tool_blocks
+
+    block = [
+        AIMessage(content="", tool_calls=[
+            {"name": "t", "args": {}, "id": "c1", "type": "tool_call"},
+            {"name": "t", "args": {}, "id": "c2", "type": "tool_call"},
+        ]),
+        ToolMessage(content="r" * 10, tool_call_id="c1"),
+        ToolMessage(content="r" * 20, tool_call_id="c2"),
+    ]
+    # bound 远低于块估算 ⇒ 必然进入裁剪循环；块内全是 4~58 区间的短文本。
+    clipped = _clip_block_to_budget(block, 5)
+    assert [len(m.content) if isinstance(m.content, str) else -1
+            for m in clipped] == [0, 10, 20], (
+        "短文本不可再裁 ⇒ 原样放行（替换串不再变短即停，不越裁越长）")
+    assert estimate_message_tokens(clipped) > 5, (
+        "token 仍超界 ⇒ 如实放行（结构面有界；放行面由 "
+        "chunk_bound_released 诊断留痕，见下一用例）")
+    _validate_tool_blocks(clipped)  # 放行块结构完好（tool 配对不拆）
+
+
+@pytest.mark.asyncio
+async def test_unclipable_oversize_block_released_with_diagnostic():
+    """审查 P2：content 不可裁的超界原子块如实放行 ⇒ chunk_bound_released 留痕。
+
+    有界逃逸口（非文本/超短 content 放行）事后可观测：attempt=0 诊断记入
+    既有 failures 通道（不新造事件类型），request_budget_tokens 记被突破的
+    单块预算（与单请求路径的 hard 口径可区分）。
+    """
+    messages = [
+        HumanMessage(content="旧任务。" + "a" * 6000),
+        AIMessage(content="", tool_calls=[
+            {"id": "c1", "name": "write",
+             "args": {"path": "big.txt", "content": "y" * 20_000}},
+        ]),
+        ToolMessage(content="written", tool_call_id="c1"),
+        HumanMessage(content="current"),
+    ]
+    model = SlowSummaryModel(base_sleep=0.0, per_token_sleep=0.0)
+    compactor, _request_tokens = _sized_compactor(
+        messages, ratio=0.5, chunk_max=2000, base_timeout=5.0, per_kt=0.0,
+        model=model)
+    result = await compactor.compact(messages, estimate_message_tokens(messages))
+    assert result.summary is not None and result.chunked is True, (
+        f"分块路径应走通；failures={[f.error_class for f in result.failures]}")
+    released = [f for f in result.failures
+                if f.error_class == "chunk_bound_released"]
+    assert len(released) == 1 and released[0].attempt == 0, (
+        "超界放行必须有一条 attempt=0 诊断留痕")
+    assert released[0].request_budget_tokens == 2000
+    assert released[0].request_token_estimate > released[0].request_budget_tokens, (
+        "诊断读数：放行块自身规模 > 被突破的单块预算")
+
+
+def test_fallback_budget_deducts_non_message_overhead_once():
+    """审查 P3：降级预算对非 messages 开销**单扣**（reserved 与 overhead 是同一笔）。
+
+    旧码 `auto − reserved − overhead` 把 pf/sys/rt/plan/paths 五项扣两次
+    （方向保守但多丢 early 轮）；修后取两口径较大者扣一次。
+    """
+    messages = [HumanMessage(content="goal"), HumanMessage(content="next")]
+    messages_tokens = estimate_message_tokens(messages)
+    auto_limit = 30_000
+    # builder 场景：reserved（构造点声明的加回份额）== overhead（token_estimate
+    # 的实测非 messages 份额）——同一笔加回的两种计量。
+    reserved = 5_000
+    assert _fallback_message_budget(
+        auto_limit, reserved, messages_tokens + reserved, messages,
+    ) == 25_000, "同笔开销只扣一次（旧码会双扣成 20_000）"
+    # 两口径不一致时取大者（任一口径下「截断产物 + 加回 ≤ auto」都守得住）。
+    assert _fallback_message_budget(
+        auto_limit, reserved, messages_tokens + 7_000, messages,
+    ) == 23_000
+    # B1 防线保留：有效用量吃满预算 ⇒ 负预算 ⇒ 不可截断 ⇒ 落既有异常兜底，
+    # 不会假成功放行超窗请求（85001 边界用例的口径前提）。
+    assert _fallback_message_budget(
+        auto_limit, 0, messages_tokens + 40_000, messages,
+    ) < 0
+
+
+@pytest.mark.asyncio
+async def test_chunked_failure_diagnostic_records_per_chunk_scale():
+    """审查 P4：分块路径失败诊断的 request_token_estimate 记逐块实际规模。
+
+    单请求路径记全 early 单请求估算；分块路径记已发起块请求的最大实际规模
+    （≤ 单块预算 + 携带封顶 + prompt）——两口径可区分。
+    """
+    messages = _early_messages(analysis_chars=12000)
+    model = AlwaysTimeoutModel()
+    compactor, request_tokens = _sized_compactor(
+        messages, ratio=0.5, chunk_max=2000, base_timeout=0.2, per_kt=0.0,
+        model=model)
+    result = await compactor.compact(messages, estimate_message_tokens(messages))
+    attempts = [f for f in result.failures if f.attempt >= 1]
+    assert attempts, "分块 + 恒超时 ⇒ 两次 attempt 失败留痕"
+    prompt_tokens = estimate_message_tokens([SystemMessage(
+        content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text)])
+    carry_cap_tokens = estimate_message_tokens(
+        [HumanMessage(content="c" * _CHUNK_CARRY_CHAR_CAP)])
+    per_chunk_bound = 2000 * 1.3 + prompt_tokens + carry_cap_tokens
+    for failure in attempts:
+        assert 0 < failure.request_token_estimate <= per_chunk_bound, (
+            f"分块失败诊断须记逐块规模（≤ 单块预算 + 携带封顶 + prompt），"
+            f"实得 {failure.request_token_estimate}")
+        assert failure.request_token_estimate < request_tokens, (
+            f"逐块口径必须与单请求口径（全 early {request_tokens}）可区分")
