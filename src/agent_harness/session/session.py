@@ -70,8 +70,13 @@ logger = logging.getLogger("agent_harness.session")
 #:
 #: 为什么是 1.0s：稳态单次 append 含 fsync 约 1–5ms，1s 够活聚合在旁路写者的密集
 #: 抢号中抢到空档；对调用方也仍是一个可接受的上界——超出预算说明对方是**持续**占位
-#: （真故障形状），此时按 fail-loud 原样抛出，由调用方既有失败归因接手（绝不吞成
-#: 「写成功」）。1.0s 是工程取值而非实测下界（#1057：本机读数机器相关，不作为基线）。
+#: （真故障形状），此时按 fail-loud 原样抛出，绝不吞成「写成功」。
+#:
+#: **「抛出去由调用方失败归因接手」对在途 run 的终态不成立**（#1061 一手复核）：顶层
+#: 兜底 `except Exception` 只记一条 WARNING，durable 流照样停在悬空的 run/started 上、
+#: UI 永远「进行中」——这正是 #1024 事故的最后一环。终态因此另有保底通道，见
+#: `_persist_event` 的 `terminal` 分支。1.0s 是工程取值而非实测下界（#1057：本机读数
+#: 机器相关，不作为基线）。
 _APPEND_CONFLICT_DEADLINE_S: float = 1.0
 
 
@@ -255,6 +260,9 @@ class Session:
     ) -> SessionEvent:
         """只追加一条会话事实事件，**不触发 resume 副作用**。
 
+        本入口是**旁路写者**形状（加载一枚新聚合再追加）：它交给调用方自己的有界
+        重试，不打 `terminal`（#1061 的终态保底只给在途 runtime 的 `end_run`）。
+
         ``resume()`` 会修复 dangling tool_call 并 append ``session/resumed``——
         那是「恢复会话」的语义。写一条无关事实（排队消息 / 模型切换 / 取消排队 /
         中断标记）时套用它，会把 run 在途的 tool_call 判成悬空并注入合成
@@ -373,6 +381,7 @@ class Session:
         block_id: str | None = None,
         source_event_ids: list[str] | None = None,
         _mark_dangling: bool = False,
+        terminal: bool = False,
     ) -> SessionEvent:
         """追加一条事件：分配 seq、同步写 JSONL、更新内存。
 
@@ -423,7 +432,7 @@ class Session:
         # （`replace(event, seq=...)`），调用方（`end_run` 的返回值、流式镜像、测试
         # 断言）必须拿到与事件流一致的 event_id/seq 对，否则「返回的 seq」与「盘上的
         # seq」静默分叉。未交付的聚合不换号（撞号原样抛出）。
-        return self._persist_event(event, notify=True)
+        return self._persist_event(event, notify=True, terminal=terminal)
 
     def register_protected_fact(
         self,
@@ -459,7 +468,9 @@ class Session:
             return existing
         return self.append(TASK_PROTECTED_FACT, data)
 
-    def _persist_event(self, event: SessionEvent, *, notify: bool) -> SessionEvent:
+    def _persist_event(
+        self, event: SessionEvent, *, notify: bool, terminal: bool = False,
+    ) -> SessionEvent:
         """提交一条已构造事件，并在需要时通知实时观察者；返回**已落盘的那一枚**。
 
         Store 是 durable 写入 owner，Session 仍拥有内存投影与 seq 计数器。
@@ -475,15 +486,29 @@ class Session:
         run 的下一次 append 必炸，而失败终态又走同一枚过期计数器、必然再炸，
         run 永远拿不到终态（#1024 的真机事故形状）。
 
-        两条边界：**已交付 runtime 的聚合**才重投（`_delivered_to_runtime`；其余原样
+        三条边界：**已交付 runtime 的聚合**才重投（`_delivered_to_runtime`；其余原样
         抛出，把冲突交给其调用方的有界重试与失败归因）；重投受
         `_APPEND_CONFLICT_DEADLINE_S` 墙钟预算约束，撞满即 fail-loud——不把冲突吞成
-        「写成功」。
+        「写成功」；**终态写者**（`terminal=True`，只有 `end_run`）是唯一例外：它没有
+        「下次 append」可用，故撞满预算时把最后一次重投的**取号**交给 store 的锁内协商
+        （见 `JsonlSessionStore.append_event` 的 ``terminal`` 边界）。本层不改写点、也不
+        改重投形态（#1061）。
         """
         deadline = time.monotonic() + _APPEND_CONFLICT_DEADLINE_S
         while True:
             try:
-                self._store.append_event(self.session_id, event)
+                persisted = self._store.append_event(
+                    self.session_id, event,
+                    # 终态保底（#1061）：预算耗尽后，终态的这次写换成 store 的**锁内**
+                    # 协商（取号 + 判定 + 写盘同处一把会话写锁）。普通重投不受影响，
+                    # 写点仍是这一个（#252 的 len==1 判据不变）。
+                    terminal=terminal and time.monotonic() >= deadline,
+                )
+                # store 返回**实际落盘的那一枚**：终态协商会在锁内改号，不接住它就会
+                # 「内存/返回值是旧号、盘上是新号」——`_events`、`_next_seq` 与调用方
+                # （`end_run` 的返回值、流式镜像）三处一起分叉。老替身/第三方子类可能
+                # 不返回（签名原本是 `-> None`），故回落到本地事件。
+                event = persisted if persisted is not None else event
                 break
             except SeqConflict:
                 # 只认 ``SeqConflict``：其它 OSError / RuntimeError 是真故障，原契约
@@ -494,8 +519,10 @@ class Session:
                     # `_WRITE_CONFLICT_ATTEMPTS` / sink 的 `_SINK_ATTEMPTS`），在这一层
                     # 吞掉会让那些上界与失败归因不可观测（BUG-011）。
                     raise
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline and not terminal:
                     # 撞满预算仍被抢 ⇒ fail-loud。兜底吞掉才是 #1024 真正的静默失真源。
+                    # 终态（`terminal`）是唯一例外：它没有「下次 append」可用，故落到
+                    # 上面那个写点的协商模式（#1061）。
                     raise
                 # 盘面读数用 store 的 O(1) 入口（#1057）：撞号可能高频重放（持续竞争的
                 # 旁路写者会把这轮重投变成自旋），全量 read_events 解析在 1s 预算内
@@ -801,6 +828,13 @@ class Session:
         与上下文超限路径直接 append 的 reason+message 形状一致；只接受调用方
         **自己拼**的常量/模板，绝不透传 provider 回显原文
         （口径见 docs/adr/0033-run-failure-attribution-surface.md §2.1）。
+
+        **终态保底（#1061）**：本方法是唯一以 `terminal=True` 进漏斗的写者。撞满
+        `_APPEND_CONFLICT_DEADLINE_S` 预算时，普通写者 fail-loud，终态则把最后一次重投
+        的**取号**交给 store 的锁内协商（见 `JsonlSessionStore.append_event` 的
+        ``terminal`` 边界）——持续占位的写者没有可插入的窗口。终态是「这个 run 结束了
+        吗」的唯一 durable 事实，放它不落就等于 run 在盘上永远悬空。这**不是**无限重试：
+        协商只有一次，store 若仍判定不可写（如已硬删）异常照样抛出，绝不假成功。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
@@ -835,4 +869,5 @@ class Session:
             event_type,
             data,
             run_id=run_id,
+            terminal=True,
         )

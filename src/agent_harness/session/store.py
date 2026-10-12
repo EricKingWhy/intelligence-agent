@@ -25,7 +25,7 @@ import shutil
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -345,7 +345,9 @@ class JsonlSessionStore:
             self._last_seq[session_id] = (last, *stamp)
         return last
 
-    def append_event(self, session_id: str, event: SessionEvent) -> None:
+    def append_event(
+        self, session_id: str, event: SessionEvent, *, terminal: bool = False,
+    ) -> SessionEvent:
         """向 Session 的 JSONL 追加一条事件（整行 + flush + fsync）。
 
         fsync 是断电不丢的底线（用户拍板的耐久性决策）：flush 只把进程缓冲
@@ -359,6 +361,19 @@ class JsonlSessionStore:
         **硬删之后不得重建**（ADR-0036）：本进程删过的 id 一律拒写（``SessionNotFound``）。
         否则迟到的旁路写者会在这里把日志凭空重建，静默撤销用户那次不可逆的删除。
         抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
+
+        **终态协商**（``terminal=True``，#1061）：run 终态是「这个 run 结束了吗」的
+        唯一 durable 事实，它被持续占位的旁路写者挡住时，若照旧 fail-closed，盘上就
+        永远停在悬空的 ``run/started`` 上（#1024 事故的最后一环）。此时本方法**在
+        同一把会话写锁内**把事件改号到 ``last + 1`` 再落盘——取号、判定、写入三步
+        同临界区，持续占位的写者（即便它在锁外不停取胜）也没有可插入的窗口。
+
+        边界（不得夸大）：① 只对**已持有事件**的终态做改号，事件类型/信封/`data` 一律
+        不动，改的只是 seq；② 不会因为协商就丢失拒写语义——`SessionNotFound`（硬删）
+        等其它判定照旧先抛；③ **不是**通用写路径：普通写者仍 fail-closed，BUG-011 的
+        拒写契约与 `change_model` 一族的退避一律不变。
+
+        :returns: 实际落盘的那一枚（终态协商会改号，调用方必须据此对齐计数器）。
         """
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
         # #650：UTF-8 可编码性验证**前置于**一切目录/文件变更与 seq 状态提交。
@@ -387,9 +402,16 @@ class JsonlSessionStore:
             self._neutralize_torn_tail(path)
             last = self._last_seq_on_disk(session_id)
             if event.seq <= last:
-                raise SeqConflict(
-                    f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
-                    f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+                if not terminal:
+                    raise SeqConflict(
+                        f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
+                        f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+                    )
+                # 终态协商（#1061）：改号到本锁内读到的空档。行文本必须按**改号后**的
+                # 事件重渲染（上面的 dumps 用的是改号前的 seq）。
+                event = replace(event, seq=last + 1)
+                line = json.dumps(
+                    event.to_dict(), ensure_ascii=False, separators=(",", ":"),
                 )
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
@@ -400,6 +422,7 @@ class JsonlSessionStore:
                 self._last_seq[session_id] = (
                     event.seq, stat.st_size, stat.st_mtime_ns,
                 )
+        return event
 
     def _neutralize_torn_tail(self, path: Path) -> None:
         """append 前中立化「无换行撕裂尾段」（#565 双轴收敛 P2 加固）。

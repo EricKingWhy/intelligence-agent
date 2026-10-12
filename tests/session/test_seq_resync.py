@@ -118,7 +118,9 @@ class _SeqThiefStore(JsonlSessionStore):
         self.steals = steals
         self.stolen = 0
 
-    def append_event(self, session_id: str, event) -> None:
+    def append_event(self, session_id: str, event, *, terminal: bool = False):
+        # #1061：thief 是**对手**的形状，不参与协商；`terminal` 收下只用于转发，
+        # 抢号行为与真实写盘都保持原样（抢到的号仍走真实 store 的 fail-closed 判定）。
         if self.steals > 0:
             self.steals -= 1
             self.stolen += 1
@@ -131,7 +133,7 @@ class _SeqThiefStore(JsonlSessionStore):
                     data={"operation": "formation"},
                 ),
             )
-        super().append_event(session_id, event)
+        return super().append_event(session_id, event, terminal=terminal)
 
 
 class TestDeliveredAggregateResync:
@@ -317,9 +319,9 @@ class TestResyncReadsTheDiskInsteadOfWalkingUp:
                 super().__init__(root=root)
                 self.appends = 0
 
-            def append_event(self, session_id: str, event) -> None:
+            def append_event(self, session_id: str, event, *, terminal: bool = False):
                 self.appends += 1
-                super().append_event(session_id, event)
+                return super().append_event(session_id, event, terminal=terminal)
 
         counting = CountingStore(root=store._root)
         live = Session.start(counting, session_id="s-advance")
@@ -391,11 +393,11 @@ class TestConflictIsNotSwallowedForOtherFailures:
                 super().__init__(root=root)
                 self.calls = 0
 
-            def append_event(self, session_id, event):
+            def append_event(self, session_id, event, *, terminal: bool = False):
                 self.calls += 1
                 if self.calls > 1:
                     raise RuntimeError("磁盘故障（注入）")
-                super().append_event(session_id, event)
+                return super().append_event(session_id, event, terminal=terminal)
 
         boom = Boom(root=store._root)
         live = Session.start(boom, session_id="s-boom")
@@ -403,3 +405,62 @@ class TestConflictIsNotSwallowedForOtherFailures:
         with pytest.raises(RuntimeError, match="磁盘故障"):
             live.append(MODEL_REQUEST_STARTED, {"model": "m"})
         assert boom.calls == 2, "注入的故障必须真的发生在第 2 次写上"
+
+
+class TestTerminalGuaranteeUnderSustainedSteal:
+    """#1061：旁路写者**持续**占位（撞满墙钟预算）时，终态仍必须落进 durable 流。
+
+    #1024 的复现里，活聚合的**普通**写撞满预算会 fail-loud（既有契约，见
+    `TestConflictBoundIsFailLoud`），而失败终态走同一枚过期计数器、同样撞满 —— 于是
+    盘上永远停在悬空的 `run/started`，UI 显示「进行中」永久。终态保底把这次写的
+    **取号**交给 store 的锁内协商，「读空档 + 判定 + 写盘」同临界区，持续占位的写者
+    没有可插入的窗口。
+
+    确定性优先：thief 用**永不停手**的注入（不是线程赛跑），三构造入口各验一遍
+    （#1055 的教训：只测 `start` 会漏掉整条续聊路径）。
+    """
+
+    @pytest.mark.parametrize("entry", ENTRIES)
+    @pytest.mark.parametrize(
+        ("status", "terminal_type"),
+        [("completed", RUN_COMPLETED), ("failed", RUN_FAILED)],
+    )
+    def test_terminal_lands_while_thief_never_stops(self, store, entry, status, terminal_type):
+        thief = _SeqThiefStore(root=store._root, steals=0)
+        session_id = f"s-guard-{entry}-{status}"
+        live, run_id = _delivered_run(thief, session_id, entry)
+
+        thief.steals = 10**9  # 永不停手：普通写必然撞满预算
+        with pytest.raises(SeqConflict):
+            live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+        stolen_before = thief.stolen
+
+        # 终态：撞满预算后必须仍然落盘（这正是 #1061 的被测面）。
+        event = live.end_run(run_id, status=status, reason="boom", message="boom")
+
+        assert thief.stolen > stolen_before, "终态那次写必须真的撞过号（否则没压到保底通道）"
+        assert event.type == terminal_type
+        events = thief.read_events(session_id)
+        mine = [e for e in events if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES]
+        assert len(mine) == 1, f"该 run 的 durable 终态必须恰好一条，实际 {len(mine)}"
+        seqs = [e.seq for e in events]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "seq 不得重复/回退"
+        # 落盘的终态就是返回的那一枚（协商改号后必须同步给调用方/流式镜像）。
+        assert any(e.seq == event.seq and e.type == event.type for e in events)
+
+    @pytest.mark.parametrize("entry", ENTRIES)
+    def test_normal_write_still_fails_loud_while_thief_never_stops(self, store, entry):
+        """反向边界：保底**只给终态开**——普通写在同样的持续占位下仍 fail-loud。
+
+        否则「预算耗尽 ⇒ 静默改号成功」会把「持续占位是真故障形状」这个判据抹掉，
+        也让 BUG-011 的有界重试上界不可观测。
+        """
+        thief = _SeqThiefStore(root=store._root, steals=0)
+        live, run_id = _delivered_run(thief, f"s-guard-normal-{entry}", entry)
+        before = len(live._events)
+
+        thief.steals = 10**9
+        with pytest.raises(SeqConflict):
+            live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+
+        assert len(live._events) == before, "没落盘的普通事件不得进内存投影（不许假成功）"

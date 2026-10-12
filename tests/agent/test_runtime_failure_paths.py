@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
@@ -34,6 +35,8 @@ from agent_harness.session import (
     TOOL_RESULT,
     JsonlSessionStore,
 )
+from agent_harness.session.errors import SeqConflict
+from agent_harness.session.event import RUN_TERMINAL_TYPES
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -841,3 +844,92 @@ class TestUnclassifiedFailureDetail:
             error_type="InternalServerError",
         )
         assert "http_status" not in run_failed.data
+
+
+# ---------------------------------------------------------------------------
+# #1061：终态写入失败时的**归因面**——撞号与设备故障必须能分辨
+# ---------------------------------------------------------------------------
+
+
+class _RejectingTerminalStore(JsonlSessionStore):
+    """只拒**终态事件**（`run/completed|failed|interrupted`）的 store。
+
+    判据挂在**事件类型**上而不是 `terminal` 开关上：该开关只在「撞满墙钟预算」时
+    才为真（见 `Session._persist_event`），而本用例要构造的是「终态那一次写失败」，
+    与它是否走到协商无关。其余写照常落盘，run 正常推进到异常臂。
+    """
+
+    def __init__(self, root: Any, error: BaseException) -> None:
+        super().__init__(root=root)
+        self._error = error
+
+    def append_event(self, session_id, event, *, terminal=False):
+        if event.type in RUN_TERMINAL_TYPES:
+            raise self._error
+        return super().append_event(session_id, event, terminal=terminal)
+
+
+class TestTerminalWriteFailureAttribution:
+    """#1061：兜底日志必须按**真实异常类型**分流，并带上会话/run 标识。
+
+    修前这条日志只有一句「失败兜底事件写入失败（存储故障？）」：撞号写不进去与设备
+    故障被混成一句话，排障时认错方向；且不带会话/run，终态缺一条时无从定位。
+    """
+
+    @pytest.mark.asyncio
+    async def test_seq_conflict_names_conflict_not_storage_fault(self, tmp_path, caplog):
+        """撞号 ⇒ 日志说「撞号」，`error_type` 是真实的 `SeqConflict`。"""
+        session = make_session(tmp_path)
+        session._store = _RejectingTerminalStore(
+            tmp_path, SeqConflict("Session 'x' 事件 seq 冲突: seq=7 已被占用"),
+        )
+        runtime = _runtime(ExplodingModel())
+
+        with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+            result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED, "终态写不进去也必须返回失败结果（不向上抛）"
+        records = [
+            r for r in caplog.records
+            if getattr(r, "event_type", None) == "task_failed"
+            and getattr(r, "error_type", None) == "SeqConflict"
+        ]
+        assert records, (
+            "必须留下一条带真实异常类型的 task_failed 日志："
+            f"{[r.message for r in caplog.records]}"
+        )
+        record = records[0]
+        assert record.session_id == session.session_id
+        assert record.run_id, "日志必须能指认是哪个 run 的终态写失败"
+        assert "存储故障" not in record.getMessage(), "撞号不是存储故障，别混为一谈"
+        assert "撞号" in record.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_real_storage_fault_names_the_error_type(self, tmp_path, caplog):
+        """真故障（非撞号）⇒ 日志带**该异常的**类型名，且不被误标成撞号。"""
+        session = make_session(tmp_path)
+        session._store = _RejectingTerminalStore(
+            tmp_path, OSError("磁盘故障（注入）"),
+        )
+        runtime = _runtime(ExplodingModel())
+
+        with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+            result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        records = [
+            r for r in caplog.records
+            if getattr(r, "event_type", None) == "task_failed"
+            and getattr(r, "error_type", None) == "OSError"
+        ]
+        assert records, "真故障必须留下带真实类型名的日志"
+        record = records[0]
+        assert record.session_id == session.session_id
+        assert record.run_id
+        assert "撞号" not in record.getMessage(), "设备故障不得被误标成撞号"
+        # 也不得把失败写成「终态成功」：durable 流里该 run 不能凭空多出终态。
+        persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+        assert not [
+            e for e in persisted
+            if e.type in RUN_TERMINAL_TYPES and e.type != RUN_FAILED
+        ], "真故障下不得假造终态（尤其不得出现 run/completed）"
