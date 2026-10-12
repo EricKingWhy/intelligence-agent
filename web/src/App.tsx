@@ -950,6 +950,10 @@ export default function App() {
     // turns 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409；工具配额同理——
     // 它的点名单位是工具名（`resumeRequestTarget` 给出该维的 wire 形态）。
     const target = resumeRequestTarget(paused);
+    // `#1026`：context 硬护栏暂停没有"抬 ceiling"式恢复动作（`ceilingDraftValue` 对
+    // context 恒 null 已在此短路；面板只给引导文案、不渲染恢复按钮）。显式收窄让
+    // 请求体组装在类型层也不可达，而非靠联合类型的侥幸。
+    if (target.kind === 'context') return;
     void resumePausedRun(selectedId, {
       runId: paused.run_id,
       expectedVersion: paused.version,
