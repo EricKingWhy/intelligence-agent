@@ -3621,6 +3621,22 @@ def create_app(
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
+    @app.get("/api/sessions/{session_id}/recovery")
+    async def get_session_recovery(session_id: str) -> dict[str, Any]:
+        """待裁决清单（#1049，**只读**）：``{pending_decisions: [...]}``。
+
+        形状与 ``POST /recover`` 409 detail 的 ``pending_decisions`` 逐字段一致
+        （同一规则源 ``_reconcile_pending``，#596 / 前端 ``parsePendingDecisions``
+        直接复用）。零写入；会话有在途 run 时为空。非法 id → 422、不存在 → 404、
+        日志损坏 → 409（与 recover 同一前导）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            pending = await service.pending_decisions(session_id)
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
+            raise http_error(e) from e
+        return {"pending_decisions": pending}
+
     @app.get("/api/recovery/interrupted")
     async def list_interrupted_recoveries() -> dict[str, Any]:
         """恢复列表（#357 W-13 契约 5，**只读**）：启动扫描快照的四要素呈现。
