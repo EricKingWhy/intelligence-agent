@@ -271,6 +271,9 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
             failures.append({
                 "kind": "compaction_failed",
                 "error_class": data.get("error_class"),
+                # #1041：本轮失败保存的 raw artifact ref（无 ref 时为 None）——
+                # 经引用注册表进可达集，是人类可读的审计入口（否则只能回读原始事件流）。
+                "artifact_ref": data.get("artifact_ref"),
                 "source_seq": event.seq,
             })
         elif event.type == GUARD_STUCK:
@@ -479,7 +482,9 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
                 f"- Run 失败 run_id={_v(failure['run_id'])}，原因：{_v(failure['reason'])}"
             )
         elif failure["kind"] == "compaction_failed":
-            lines.append(f"- 压缩失败 error_class={_v(failure['error_class'])}"
+            ref = failure.get("artifact_ref")
+            raw_ref = f"，artifact_ref={_v(ref)}" if ref else ""
+            lines.append(f"- 压缩失败 error_class={_v(failure['error_class'])}{raw_ref}"
                          f"（来源 seq {failure['source_seq']}）")
         elif failure["kind"] == "guard_stuck":
             lines.append(f"- 循环护栏 level={_v(failure['level'])}"

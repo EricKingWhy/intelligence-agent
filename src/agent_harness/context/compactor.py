@@ -325,6 +325,11 @@ class CompactionFailure:
     #: #639 阶段 A：该诊断是否为**缩小段**判定（False = 全段预检）。仅预检拒绝
     #: （attempt=0）会置位；其余诊断/摘要尝试失败保持默认假值。有界布尔，不撑载荷。
     narrowed: bool = False
+    #: #1041（spec 06 §8）：本轮失败保存的**原始 early 窗口全文** raw artifact 的 ref
+    #: （内容寻址 `artifact_id` = sha256(content)[:16]）。**由调用方（builder）在落盘
+    #: 后回填**——compactor 纯变换、不接触 store，故 compactor 直调结果恒为 None；
+    #: store 缺席或未落盘时同样保持 None（绝不伪造 ref）。有界 16hex。
+    artifact_ref: str | None = None
 
 
 class _SummaryRejected(ValueError):
@@ -350,6 +355,7 @@ class ContextWindowExceededError(RuntimeError):
     def __init__(
         self, message: str, *,
         failures: list[CompactionFailure] | None = None,
+        raw_artifact_content: str | None = None,
     ) -> None:
         super().__init__(message)
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。
@@ -358,6 +364,14 @@ class ContextWindowExceededError(RuntimeError):
         #: failures 由调用方落任务可见状态。#648 之前"保持为空表"是刻意设计，
         #: 2026-10-06 用户批准选项 B 后刻意反转（只加诊断，判定与抛点不动）。
         self.failures = list(failures or [])
+        #: #1041（spec 06 §8）：摘要失败出口（双失败不可截断 / 预检拒绝无法缩小）时，
+        #: **原始 early 窗口 `messages[prefix_end:cut]` 的完整转录文本**（与摘要请求
+        #: 同形；含"截断保留 + 逐出"两部分，非仅被逐出集）。由 builder 落盘成 raw
+        #: artifact 并回填 ref（§8「摘要失败保存 raw artifact」）。**纯文本搬运**，
+        #: compactor 不接触 store；其余抛点保持 None（非"摘要失败"语义）。
+        #: 落盘另需**存在可存的 early 原文**：会话虽因失败受损、但 early 为空、无原文可存
+        #: 的出口（如 `no_compactable_early_turn`：无可压缩完整早期轮）同样保持 None、不落盘。
+        self.raw_artifact_content = raw_artifact_content
 
 
 class CompactionPostWriteError(ContextWindowExceededError):
@@ -411,10 +425,30 @@ class CompactionResult:
     #: #1026：本次摘要是否走分块路径（请求超分块阈值且可切 >1 块）。成功时置位，
     #: 经 `CONTEXT_COMPACTED` 事件持久化（验收 3 的事件可观测）；其余路径默认假值。
     chunked: bool = False
+    #: #1041（spec 06 §8，R1 裁决）：摘要双失败后走**确定性截断降级**（fallback_used
+    #: =True）时，**原始 early 窗口 `messages[prefix_end:cut]` 的完整转录文本**（与摘要
+    #: 请求同形；含"截断保留 + 逐出"两部分，是"逐出集"的超集）。由 builder 落盘成 raw
+    #: artifact 并回填 `CompactionFailure.artifact_ref`。**纯文本搬运**——compactor 不
+    #: 接触 store；成功压缩 / 低水位 / 安全继续等路径保持 None。
+    raw_artifact_content: str | None = None
 
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
 #: （section `aux:compaction`）——改文案开那一个文件。
+
+
+def _render_transcript(messages: list[AnyMessage]) -> str:
+    """把一段消息渲染成摘要请求 / 失败快照共用的 JSON 转录文本。
+
+    这是摘要请求与失败快照共用的**唯一**格式——摘要请求三处（单请求摘要
+    `compact`、缩小段重试、分块逐块）+ 失败快照两处（#1041 的预检拒绝抛出、
+    确定性截断降级），共 5 个调用点。抽成单点避免"同形靠复制"漂移（#1041 审查
+    P4-2）——任一处改格式必须全体一致，否则摘要与快照会静默分叉。
+    """
+    return json.dumps(
+        [message.model_dump(mode="json") for message in messages],
+        ensure_ascii=False,
+    )
 
 
 def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
@@ -602,10 +636,7 @@ class ContextCompactor:
                 )))
             if plan_block is not None:
                 parts.append(HumanMessage(content=plan_block))
-            parts.append(HumanMessage(content=json.dumps(
-                [message.model_dump(mode="json") for message in chunk],
-                ensure_ascii=False,
-            )))
+            parts.append(HumanMessage(content=_render_transcript(chunk)))
             chunk_request_tokens = estimate_message_tokens(parts)
             # #1026 修回（审查 P4）：逐块请求的**实际**规模回传给调用方——失败
             # 诊断的 request_token_estimate 在分块路径记逐块口径，不再记全 early
@@ -686,9 +717,7 @@ class ContextCompactor:
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
         )
-        transcript = HumanMessage(content=json.dumps(
-            [message.model_dump(mode="json") for message in early], ensure_ascii=False,
-        ))
+        transcript = HumanMessage(content=_render_transcript(early))
         request = [prompt, transcript]
         request_token_estimate = estimate_message_tokens(request)
         # 摘要尝试的失败记录（W-04 #348；成功尝试之前的都在内）。预检拒绝的诊断
@@ -716,10 +745,9 @@ class ContextCompactor:
             narrow_cut = narrow_early_window(messages, prefix_end, cut)
             if narrow_cut is not None:
                 narrowed_early = messages[prefix_end:narrow_cut]
-                narrowed_request = [prompt, HumanMessage(content=json.dumps(
-                    [message.model_dump(mode="json") for message in narrowed_early],
-                    ensure_ascii=False,
-                ))]
+                narrowed_request = [
+                    prompt, HumanMessage(content=_render_transcript(narrowed_early)),
+                ]
                 narrowed_token_estimate = estimate_message_tokens(narrowed_request)
                 if narrowed_token_estimate > self._hard_limit:
                     # 缩小后仍超限：补一条 narrowed 诊断，回落既有两条出口。
@@ -745,9 +773,15 @@ class ContextCompactor:
                     narrowed = True
             if not narrowed:
                 if token_estimate > self._hard_limit:
+                    # #1041（spec 06 §8，R1 裁决）：预检拒绝 + 无法缩小 + 有效用量仍
+                    # 超 hard ⇒ 本出口 raise（会话 run/paused、早期原文离开模型视野），
+                    # 与"双失败不可截断"同属失败面 ⇒ 同样带出**原始 early 窗口**全文，
+                    # 由 builder 落盘成 raw artifact 并回填 ref（F2 修回）。此处 `early`
+                    # 未被缩小（`narrowed` 为假）⇒ `messages[prefix_end:cut]` 即原始窗口。
                     raise ContextWindowExceededError(
                         "Summary validation failed and original context exceeds hard guard",
                         failures=failures,
+                        raw_artifact_content=_render_transcript(messages[prefix_end:cut]),
                     ) from None
                 # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
                 # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
@@ -935,6 +969,11 @@ class ContextCompactor:
                 # 线内、有效用量仍超护栏"的假成功会把超窗请求放出去。开销**单扣**
                 # （修回口径见 `_fallback_message_budget`）——reserved 与 overhead
                 # 是同一笔加回的两种计量，不叠加。
+                # #1041（spec 06 §8，R1 裁决）：**原始 early 窗口 `messages[prefix_end:cut]`
+                # 的完整转录文本**（含被截断保留与逐出两部分——是"逐出集"的超集），带
+                # 出给 builder 落盘成 raw artifact（截断降级成功分支同样保存）。用**原始**
+                # 窗口（不受缩小段/截断影响），保证快照完整、格式与摘要转录同形。
+                raw_early_text = _render_transcript(messages[prefix_end:cut])
                 truncated = _deterministic_truncation(
                     messages, prefix_end, cut,
                     _fallback_message_budget(
@@ -967,10 +1006,12 @@ class ContextCompactor:
                     return CompactionResult(
                         truncated, 0, estimate_message_tokens(truncated), True,
                         failures=failures,
+                        raw_artifact_content=raw_early_text,
                     )
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard",
                     failures=failures,
+                    raw_artifact_content=raw_early_text,
                 ) from None
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
