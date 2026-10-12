@@ -164,9 +164,10 @@ function TaskCreationForm({
     })),
   ];
 
-  const projectBackends = workspaceBackends?.path === project.path
+  const projectBackends = workspaceBackends?.path === project.path &&
+      workspaceBackends.entries.length > 0
     ? workspaceBackends.entries
-    : sandboxBackends;
+    : sandboxBackends.filter((b) => b.backend !== 'windows_psec');
   const workspaceProbePending = workspaceBackends?.path !== project.path;
   const sandboxOptions = [
     { value: 'auto', title: '默认', description: '部署默认（本机）' },
