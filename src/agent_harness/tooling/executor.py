@@ -152,8 +152,9 @@ def _stringified_json_object_fields(exc: ValidationError) -> list[str]:
 
     只读 `exc.errors()` 的证据、只产出字段名，不碰解析、不修参数：
     spec `04_TOOL_RUNTIME.md` §5 —— "Executor MUST NOT 偷偷替模型猜测/
-    修复参数"。指引写进 message 回模型自纠（Vision:172；LangGraph
-    `ToolInvocationError` 模式）。
+    修复参数"。探测结果写进 message：说明双重编码事实并指引以对象形态
+    重新发出该调用（#1025）——模型能否靠重发成功，取决于该字段是否已在
+    schema 声明 string 形态（如 #1025 的 `remember_this.payload`）。
     """
     fields: list[str] = []
     for err in exc.errors():
@@ -484,7 +485,7 @@ class ToolExecutor:
                 names = "、".join(f"'{f}'" for f in stringified_fields)
                 message = (
                     f"工具 '{name}' 参数校验失败：{details}。"
-                    f" {names} 收到的是 JSON 字符串（内容本身合法）——该参数被"
+                    f" {names} 收到的是 JSON 字符串（作为 JSON 文本内容合法）——该参数被"
                     "上游双重编码，以相同调用重试不会成功；请直接传对象、"
                     "不要转义成字符串后重新发出该调用。"
                 )

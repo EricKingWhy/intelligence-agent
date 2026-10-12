@@ -18,6 +18,8 @@ Tool Contract 的法定组成部分）。
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import jwt
@@ -119,7 +121,7 @@ class TestStringifiedPayloadCoercion:
             _RememberV2Args.model_validate(
                 {"content": "我喜欢喝美式", "kind": "semantic", "payload": bad}
             )
-        messages = "; ".join(str(err.get("msg", "")) for err in exc_info.value.errors())
+        messages = "; ".join(err["msg"] for err in exc_info.value.errors())
         assert "kind" in messages or "nonexistent" in messages
 
     def test_deep_nesting_does_not_bubble_recursionerror(self):
@@ -158,11 +160,34 @@ class TestStringifiedPayloadCoercion:
 
     def test_schema_export_declares_object_forms_only(self):
         """§5.3.11：args_schema 导出的 JSON Schema 不因 before-validator 而引入 string 分支
-        （schema 仍只声明对象形态——canonical 目标形态；str 容忍是运行时层，不误导模型面）。"""
+        （schema 仍只声明对象形态——canonical 目标形态；str 容忍是运行时层，不误导模型面）。
+
+        断言按结构而非子串匹配（不依赖 pydantic 序列化空格格式）：沿 payload 节点的
+        联合分支逐个解引用 `$defs` 内的定义，每个分支的顶层类型都必须是 object——
+        任何分支声明 type=string（含 type 列表变体）即失败。分支内的叶子字段
+        （subject/fact 等）合法声明 string，不在此判据内。
+        """
         schema = _RememberV2Args.model_json_schema()
-        payload_schema = schema["properties"]["payload"]
-        serialized = json.dumps(payload_schema, ensure_ascii=False)
-        assert '"type": "string"' not in serialized and '"type":"string"' not in serialized
+        payload_node = schema["properties"]["payload"]
+
+        def _iter_branches(node: dict) -> Iterator[dict]:
+            """产出 payload 声明里的每个联合分支（把 `$ref` 解引用到 `$defs`）。"""
+            if "$ref" in node:
+                ref = node["$ref"]
+                assert ref.startswith("#/$defs/"), ref
+                yield schema["$defs"][ref.rsplit("/", 1)[-1]]
+                return
+            sub = [b for key in ("oneOf", "anyOf", "allOf") for b in node.get(key, ())]
+            if sub:
+                for branch in sub:
+                    yield from _iter_branches(branch)
+            else:
+                yield node
+
+        branches = list(_iter_branches(payload_node))
+        assert len(branches) == 3  # semantic / episodic / procedural 三个对象形态
+        for branch in branches:
+            assert branch.get("type") == "object", branch
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +197,12 @@ class TestStringifiedPayloadCoercion:
 
 @pytest_asyncio.fixture
 async def memory_service(tmp_path):
+    """service + store 成对返回（index 不被任何用例直接使用，不再返回第三元）。"""
     store = SqliteMemoryV2Store(tmp_path / "memory-v2.db")
     await store.initialize()
     index = InMemoryMemoryV2Index()
     relay = MemoryV2IndexRelay(store, index)
-    return MemoryV2Service(store, index, relay=relay), store, index
+    return MemoryV2Service(store, index, relay=relay), store
 
 
 async def _write_user_turn(sessions: JsonlSessionStore, session_id: str, text: str) -> str:
@@ -205,20 +231,28 @@ class _ConsentHarness:
         return memory_session_var.set(self.session_id)
 
 
-@pytest.mark.asyncio
-async def test_string_payload_record_lands_in_store(memory_service, tmp_path):
-    """AC1 全链路：字符串 payload 经 tool.execute 落库（不再恒 INVALID_ARGUMENT）。"""
-    service, store, _index = memory_service
-    harness = _ConsentHarness(tmp_path)
-    event_id = await harness.open()
-    tool = RememberMemoryV2Tool(service, harness.sessions)
+@contextmanager
+def _identity_bound(harness: _ConsentHarness):
+    """identity + memory session 绑定的 try-finally 样板收敛（4 个 async 用例共用）：
+    进入时设 identity 上下文与 session 绑定，退出时按入栈逆序复位。"""
     identity_token = set_identity_context(IDENTITY)
     binding = harness.bind()
     try:
-        result = await tool.execute(_RememberV2Args.model_validate(STRING_ARGS))
+        yield
     finally:
         memory_session_var.reset(binding)
         identity_context_var.reset(identity_token)
+
+
+@pytest.mark.asyncio
+async def test_string_payload_record_lands_in_store(memory_service, tmp_path):
+    """AC1 全链路：字符串 payload 经 tool.execute 落库（不再恒 INVALID_ARGUMENT）。"""
+    service, store = memory_service
+    harness = _ConsentHarness(tmp_path)
+    event_id = await harness.open()
+    tool = RememberMemoryV2Tool(service, harness.sessions)
+    with _identity_bound(harness):
+        result = await tool.execute(_RememberV2Args.model_validate(STRING_ARGS))
 
     assert result.ok, result.message
     record = await store.get(result.data["memory_id"], TRUSTED)
@@ -229,17 +263,12 @@ async def test_string_payload_record_lands_in_store(memory_service, tmp_path):
 @pytest.mark.asyncio
 async def test_dict_payload_record_lands_in_store(memory_service, tmp_path):
     """AC1 后半全链路回归：dict payload 落库路径不变。"""
-    service, store, _index = memory_service
+    service, store = memory_service
     harness = _ConsentHarness(tmp_path)
     await harness.open()
     tool = RememberMemoryV2Tool(service, harness.sessions)
-    identity_token = set_identity_context(IDENTITY)
-    binding = harness.bind()
-    try:
+    with _identity_bound(harness):
         result = await tool.execute(_RememberV2Args.model_validate(DICT_ARGS))
-    finally:
-        memory_session_var.reset(binding)
-        identity_context_var.reset(identity_token)
 
     assert result.ok, result.message
     record = await store.get(result.data["memory_id"], TRUSTED)
@@ -335,24 +364,19 @@ async def test_stringified_remember_call_succeeds_on_first_attempt(memory_servic
     不再产生同 fingerprint 的重复失败流。常数依据：agent/guards.py 的
     STUCK_PATTERN_TOOL_FAILURE=3（soft 守卫阈值）——同类失败达 3 即熔断，
     本修复让该场景 1 次即收敛，远低于守卫线。"""
-    service, store, _index = memory_service
+    service, store = memory_service
     harness = _ConsentHarness(tmp_path)
     await harness.open()
     tool = RememberMemoryV2Tool(service, harness.sessions)
     reg = ToolRegistry()
     reg.register(tool)
     executor = ToolExecutor(reg)
-    identity_token = set_identity_context(IDENTITY)
-    binding = harness.bind()
-    try:
+    with _identity_bound(harness):
         execution = await executor.execute({
             "id": "call-1025-c",
             "name": "remember_this",
             "args": dict(STRING_ARGS),
         })
-    finally:
-        memory_session_var.reset(binding)
-        identity_context_var.reset(identity_token)
 
     assert execution.result.ok, execution.result.message
     assert await store.get(execution.result.data["memory_id"], TRUSTED)
@@ -405,17 +429,12 @@ async def test_string_payload_visible_through_web_memory_api(tmp_path, monkeypat
         reg = ToolRegistry()
         reg.register(tool)
         executor = ToolExecutor(reg)
-        identity_token = set_identity_context(IDENTITY)
-        binding = harness.bind()
-        try:
+        with _identity_bound(harness):
             execution = await executor.execute({
                 "id": "call-1025-d",
                 "name": "remember_this",
                 "args": dict(STRING_ARGS),
             })
-        finally:
-            memory_session_var.reset(binding)
-            identity_context_var.reset(identity_token)
         assert execution.result.ok, execution.result.message
 
         resp = client.get("/api/memories", headers=_bearer("user-a"))
