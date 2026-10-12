@@ -171,7 +171,7 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **Gate-0（冻结树 `0e42ae11`，隔离副本）**：收据 `docs/gate/0e42ae118211f48ed38e31045076ebd0464bdfe3.json` —— **5/6**，❌ 仅 `coverage`，且其 ❌ 集合**恰为本轮那一笔代码提交 `0e42ae11`**（台账行尚未落盘）。满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据，机械面清零后才派两轴。
 - **全量门禁（冻结树 `0e42ae11`，隔离副本，**不与任何重活并发**）**：后端 `PYTHONPATH= PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` ⇒ **7759 passed / 43 skipped / 51 deselected / 1 failed / 1412.74s（23:32）**；唯一红 = `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`，即**台账尚未落盘的机械瞬态**（与首轮 §5.5 第 2 条同型；台账行落盘后该例在记账树复跑转绿）；desktop `npm test` **287 / 285 passed / 2 skipped / 0 failed**；web `vitest run` **119 files / 1681 passed**；`vite build` 成功（10.33s）；`playwright test --workers=2` **540 passed（14.2m，0 flaky）**；`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` 由 Gate-0 覆盖且绿。
 - **首轮那条负载型假红未复现**：issue #1069 的 1 秒硬预算假红本轮**未出现** —— 本轮全量单跑、无并发重活，读数里没有它的签名。这与「负载诱发」的归因一致（首轮那次与 playwright、两个审查子代理并发）。
-- **读数传递（协议 §8.1 第 3 条判据①，修复轮）**：`git diff --name-status --no-renames 0e42ae11 <交付提交>` = **<TRANSFER_COUNT> 条**，状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。
+- **读数传递（协议 §8.1 第 3 条判据①，修复轮）**：`git diff --name-status --no-renames 0e42ae11 HEAD` = **8 条**（修复轮冻结 → 交付提交 `c5d48360` 与紧随其后的本笔：两行台账、两份 `docs/gate/*.json` 收据、本证据文件、`SDD_TICKET_TRACKER.md`、`PHASE_STATUS.md`、`phase_status/2026-10.md`），状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。该命令可复跑：在交付提交上执行即得同一条目集合。
 
 ### 5.8 修复轮审查（两轴修后重审，各 1 轮；范围 `4b704801..0e42ae11`）
 
