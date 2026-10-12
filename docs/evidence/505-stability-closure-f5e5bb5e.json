@@ -1,0 +1,130 @@
+{
+  "issue": 505,
+  "sha": "f5e5bb5ee2b0c1ec21fea010b3865c299dd69f1c",
+  "tree": "11f2ff4e88eaebac18eaeebc58a0f40889929e4f",
+  "branch": "claude/505-stability-closure",
+  "command": "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost PYTHONUTF8=1 PYTEST_EXTRA_ARGS=\"-q --no-header -p no:cacheprovider -p no:randomly -rfE --junitxml=<per-round>.junit.xml\" timeout -s ABRT 2400 bash scripts/run_tests_clean.sh",
+  "env": {
+    "python": "3.12.15",
+    "pytest": "9.1.1",
+    "HTTP_PROXY": "set",
+    "HTTPS_PROXY": "set",
+    "NO_PROXY": "127.0.0.1,localhost",
+    "no_proxy": "127.0.0.1,localhost",
+    "venv": "uv sync --frozen --all-extras"
+  },
+  "collected": 7439,
+  "deselected": 51,
+  "consecutive_green_rounds": 3,
+  "rounds": [
+    {
+      "round": 1,
+      "start": "2026-10-11T03:03:22+08:00",
+      "end": "2026-10-11T03:14:57+08:00",
+      "rc": 0,
+      "status_pre": "[]",
+      "status_post": "[]",
+      "pytest_summary": "7399 passed, 40 skipped, 51 deselected in 655.73s (0:10:55)",
+      "junit": {
+        "tests": 7439,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 40,
+        "time": 655.537
+      },
+      "wall_seconds_driver": 695.0,
+      "failed_nodes": [],
+      "targets": {
+        "#338": {
+          "node": "tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity",
+          "outcome": "passed",
+          "time_s": "0.098"
+        },
+        "#376": {
+          "node": "tests/web/test_memory_api.py::test_v2_bulk_confirmation_settings_and_session_recall_redaction",
+          "outcome": "passed",
+          "time_s": "0.748"
+        }
+      },
+      "junit_sha256": "8c534498d7b31436b3b52b2236a372bc19cc9cf2284af7661f84dd28cb678ea2",
+      "log_sha256": "3cea40d659d3dd3ce5a3ab8519bd1aa97321c87ae7a4bd6296331daa971b1653"
+    },
+    {
+      "round": 2,
+      "start": "2026-10-11T03:14:58+08:00",
+      "end": "2026-10-11T03:21:56+08:00",
+      "rc": 0,
+      "status_pre": "[]",
+      "status_post": "[]",
+      "pytest_summary": "7399 passed, 40 skipped, 51 deselected in 413.65s (0:06:53)",
+      "junit": {
+        "tests": 7439,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 40,
+        "time": 413.458
+      },
+      "wall_seconds_driver": 418.0,
+      "failed_nodes": [],
+      "targets": {
+        "#338": {
+          "node": "tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity",
+          "outcome": "passed",
+          "time_s": "0.112"
+        },
+        "#376": {
+          "node": "tests/web/test_memory_api.py::test_v2_bulk_confirmation_settings_and_session_recall_redaction",
+          "outcome": "passed",
+          "time_s": "0.100"
+        }
+      },
+      "junit_sha256": "ab57830053145adfd0fc30582985b03b23d38e05be6077dac2f0cecad56d8509",
+      "log_sha256": "d1d521fd3d5779ab13cd4631b5ece6eb22e3b74e910003ae1e3956d26c3b7e4e"
+    },
+    {
+      "round": 3,
+      "start": "2026-10-11T03:21:57+08:00",
+      "end": "2026-10-11T03:30:51+08:00",
+      "rc": 0,
+      "status_pre": "[]",
+      "status_post": "[]",
+      "pytest_summary": "7399 passed, 40 skipped, 51 deselected in 526.74s (0:08:46)",
+      "junit": {
+        "tests": 7439,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 40,
+        "time": 525.974
+      },
+      "wall_seconds_driver": 534.0,
+      "failed_nodes": [],
+      "targets": {
+        "#338": {
+          "node": "tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity",
+          "outcome": "passed",
+          "time_s": "0.118"
+        },
+        "#376": {
+          "node": "tests/web/test_memory_api.py::test_v2_bulk_confirmation_settings_and_session_recall_redaction",
+          "outcome": "passed",
+          "time_s": "0.107"
+        }
+      },
+      "junit_sha256": "af20fe487e947f43b7561d4c7a09b93806641a7b3d6d2a43b05218d85be8bc51",
+      "log_sha256": "8bc88718d71f35d59943cf3c5dc5011ff2e2490934ceb0fe66c47f54b9e3682b"
+    }
+  ],
+  "invalid_attempts": [
+    {
+      "what": "no NO_PROXY, round 1",
+      "outcome": "10 F then hang in tests/web/test_metrics.py, SIGABRT rc=134, no junit",
+      "classified": "environment (proxy without loopback bypass)"
+    },
+    {
+      "what": "NO_PROXY, round 1",
+      "outcome": "sandbox VM restarted at ~81%, 0 F/0 E printed, no junit/rc",
+      "classified": "infrastructure interruption; sequence restarted"
+    }
+  ],
+  "report": "docs/evidence/505-stability-closure-f5e5bb5e.md"
+}
