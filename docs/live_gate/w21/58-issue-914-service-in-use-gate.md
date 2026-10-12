@@ -72,7 +72,7 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
   - 不变量 21（Optional capability 故障不拖垮 Core）：闸门失败（查不清）时**中止安装器**而非放行，属安装器边界，不影响 Core；
   - 裁决 D1/D3 的「停服务 / 覆盖服务」= 复用 ① 的原语 + ② 的 fail-closed 与「不杀客户端」策略。
 - **判定**：`REUSE`（原语与消息）+ `ADAPT`（判据位置、`@()` cast、分隔符前缀、fail-closed 未知分支）+ `DEFER`（Restart Manager：需要新插件/内联 C#，且语义不匹配，本票不做）。
-- **License**：`app-builder-lib` MIT（本仓既有运行时依赖，`desktop/THIRD_PARTY_NOTICES.md` 已列）；DSH MIT（`installer-directories.nsh` 头部既有 provenance）；本票只复用两行谓词与既有 LangString，不整段复制文件，MIT 义务按既有台账满足。
+- **License**：`app-builder-lib` MIT——但它是**构建期工具，不是运行时依赖、也不是声明依赖**（`desktop/package.json` 无 `dependencies`，devDependencies 只有 `@types/node`/`electron`/`typescript`；CI 在 `windows-installer-smoke.yml:111` 以 `npm install --no-save … electron-builder@26.15.3` 临时装上，该处是版本唯一钉点）。**`desktop/THIRD_PARTY_NOTICES.md` 不含 app-builder-lib 条目（实测零命中）** ⇒ 本票的 MIT 义务不靠该台账，而靠：只复用两行谓词与既有 LangString、不整段复制文件。DSH MIT（`installer-directories.nsh` 头部既有 provenance）。
 
 ## 3 决策与范围
 
@@ -81,12 +81,34 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **D3**（裁决 3）：中止条件覆盖服务进程。
 - **D4**：交互客户端在场 ⇒ 中止并提示（保留腿①实测行为，也对齐 ②④ 的「不默认强关 GUI」）。
 - **D5**：闸门放在 `iaStageApplication` 的 `customInit` 路径上、**rename 与 `iaStashBackupDir` 之前**：所有中止都「旧版本原样」，无需依赖回滚（腿③的回滚链保持只服务中断场景）。
-- **非目标**：`.old-*` 目录里孤儿服务的生命周期（属 #904 / R3 的 leftover 域，另开票）；`iaRollbackApplication`（恢复页「还原旧版本」）路径的同类盲区（只在已中断安装后出现，且其自带 fail-closed 分支，另记）；两个安装树并存时上游 `KILL_PROCESS` 前缀偏宽的误杀（上游行为，本票仅记录）。
+- **非目标**：`.old-*` 目录里孤儿服务的生命周期（属 #904 / R3 的 leftover 域，另开票）；`iaRollbackApplication`（恢复页「还原旧版本」）路径的同类盲区（只在已中断安装后出现，且其自带 fail-closed 分支，另记）；两个安装树并存时上游 `KILL_PROCESS` 前缀偏宽的误杀（上游行为，本票仅记录）。这三条与 §6 的窄竞态已合并登记为 **issue #1066**（只登记不修）。
 - **已知窄竞态**：`customInit` 与安装 section 之间用户手动启动新客户端/服务（此时 rename 已完成、闸门已过）。触发需要用户在向导运行期间启动一个尚未落盘的 app，且后果可由下一次更新或用户重启消除 ⇒ 本票不引入 section 期二次闸门（另记 §6）。
 
 ## 4 实现
 
-（施工后回填最终改动清单与逐行依据）
+### 4.1 改动清单（4 笔提交，`239750b8..4b704801`；逐文件 blob 见 §5.1）
+
+| 提交 | 文件 | 做了什么 | 依据 |
+| --- | --- | --- | --- |
+| `e88d7f00` | `desktop/installer/installer-directories.nsh` | 新增 `iaClassifyRunningProduct`（115–119）与 `iaRequireNoRunningProduct`（131–176）；调用点落在 `!macro iaStageApplication` 内（378 行）、`iaStashBackupDir`/`iaReadBackupDir` 与 `Rename` **之前** | 裁决 D1/D3/D5；根因 A（§1.2） |
+| `e88d7f00` | `desktop/installer/installer.nsh` | 把闸门挂到 `customInit`；新增 LangString `$(iaAppRunning)` / `$(iaProcessCheckFailed)` | 裁决 D4；② 的 fail-closed 口径 |
+| `e88d7f00` | `desktop/scripts/build-windows-installer.mjs` | 构建期把**生产函数原文**注入 r1 探针（`@@PRODUCTION_IA_CLASSIFY@@` / `@@PRODUCTION_IA_REQUIRE@@`），让真机腿跑的是装机文本而非副本 | §9.4（假绿防线） |
+| `b38c9195` | `desktop/test/installer-scripts.test.mjs` | 11 例判据规则（`@()` cast、分隔符前缀、答案字母表、未知即 exit 2、调用点先于 rename） | 票面 AC「单测（判据逻辑）」 |
+| `b38c9195` | `desktop/test/harness/teeth-check-guards.mjs` | 变异检验：去掉 `@(` ⇒ 规则必须变红 | §9.4（守卫须有牙齿） |
+| `b38c9195` | `desktop/test/harness/r1-drivers/process-gate-probe.nsi` + `run-process-gate-probe.ps1` | 真机四腿驱动（none / runtime / client / unknown），**逐腿同时打印 stock 谓词的读数**作对照 | 票面 AC「真机腿」 |
+| `b38c9195` | `desktop/test/harness/README.md` | 登记两条驱动、可复制命令与两轮实测读数 | §16.1（进度落点） |
+| `90fdc90c` | `desktop/src/host-protocol.ts` + `src/agent_harness/host_service.py` | 常量处写死规则：`protocol_version` 是**唯一**兼容性判据；破坏协议必须两端同时递增；产品版本/构建号永不参与 | 裁决 D2 |
+| `90fdc90c` | `desktop/test/host-protocol.test.ts` | 5 例钉子：跨端数值一致、单端递增必红、`version` 串不参与判据、两端规则文本在位 | 裁决 D2「钉住这个不变量」 |
+| `90fdc90c` | `docs/adr/0053-protocol-version-sole-compatibility-gate.md` | ADR：为何是唯一判据、代价与边界 | AGENTS §5（重要架构决定写 ADR） |
+| `4b704801` | `docs/live_gate/w21/58-issue-914-service-in-use-gate.md`、`docs/agents/reference-sources.md` | 实测根因、方案依据块、决策与非目标；补录领域来源 | 协议 §1.3、AGENTS §6.1 |
+
+### 4.2 关键行 → 依据
+
+- `@(Get-CimInstance …).Count` ← 根因 A：`.Count` 是 PowerShell 的**合成属性**，在单个 `CimInstance` 上不存在 ⇒ 旧写法在「恰好一个匹配」时恒判「未运行」（§1.2 四腿实测）。
+- 前缀**带尾分隔符**（`$iaRoot` / `$iaRuntime` 各自以 `\` 结尾）← 上游 `StartsWith('$INSTDIR')` 会命中 `…Agent 2`、`…Agent.old-{guid}` 这类兄弟目录（§1.4）。
+- 闸门位置（`customInit`、rename 与备份指针之前）← 裁决 D5：所有中止都「旧版本原样」，不依赖回滚链。
+- 答案 `11` ⇒ 只停 bundled 运行时并**复问**（有界 8 次，每次 `Sleep 250`）；`12` ⇒ 弹窗中止；`0` ⇒ 放行；**其余任何答案 ⇒ `SetErrorLevel 2` + `Quit`** ← 裁决 D1/D3/D4 + ② 的 fail-closed。
+- `protocol_version` 唯一 ← 裁决 D2 + ADR-0053；产品版本串只在 payload 里透传、不参与判据（`host-protocol.test.ts` 用 `version: '0.0.1-older-than-the-shell'` 作正控钉住）。
 
 ## 5 验证读数
 
@@ -94,4 +116,10 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 
 ## 6 残余与后续
 
-（施工后回填）
+- **窄竞态 → issue #1066**：闸门通过之后、section `Rename` 之前用户手动启动服务/客户端时，rename 不拦 headless 服务 ⇒ 旧服务从 `.old-*` 继续应答。本票不做 section 期二次闸门（理由见 §3：触发需要用户在向导运行期间启动一个尚未落盘的 app，后果可由下一次更新或用户重启消除）。
+- **同源盲区 → issue #1066**：`iaRollbackApplication`（恢复页「还原旧版本」，439–524）反向搬回旧版本时没有「谁在跑」的判据；卸载器 sweep 没有「先尝试停掉 bundled 运行时」的动作；上游 `KILL_PROCESS` 前缀偏宽（本仓只记录，不改上游行为）。
+- **无 Windows PowerShell 的机器**：闸门解析不到 `$SYSDIR\WindowsPowerShell\v1.0\powershell.exe` 时分类不可证 ⇒ **中止更新**（exit 2），不再像 stock 那样退回 `tasklist` 并可能静默放行。这是有意的 fail-closed（② 的口径）；Windows PowerShell 5.1 自 Win7 SP1 起随系统预装，实际面很窄，但**语义变化是真的**，写在这里而不是留给用户去发现。
+- **安装路径含单引号**：分类脚本把 `$INSTDIR` 内插进 PowerShell 单引号字符串（**上游同形写法**），路径含 `'` 时分类不可证 ⇒ 中止（真机腿 `unknown` 实测 exit 2）。比 stock 的「静默判未运行」安全，但仍是用户可见限制；与 #1066 同族，一并记录。
+- **未做**：完整安装包构建。本机无 `desktop/node_modules`、无已构建安装器、无 staged 运行时 ⇒ 生产安装器跑不起来，故真机腿用 r1 驱动 + **生产函数原文注入**代替，与仓内既有约定一致（`desktop/test/harness/README.md`）。这条是环境限制，不是本票的选择。
+- **外部损坏的安装目录（Axis A 的 P3，本票不改，待用户裁决）**：闸门调用落在 `iaStageApplication` 的 `${If} $iaProbeFound == "1"` 分支内（`installer-directories.nsh:371-378`）。若 `$INSTDIR` 下的 bundled 运行时仍在跑、而 `${APP_EXECUTABLE_FILENAME}` 已缺失（杀软隔离未签名 exe、手工删除）且 `IaBackupDir` 为空（`iaRecoverInterruptedInstall` 因此不接管），整段 stage/rename 会被跳过、闸门从不分类，stock section 直接在 `$INSTDIR` 上就地安装——#914 症状的一条边角路径。**为何不在本票改**：把闸门移出该分支是**行为变更**（会改掉「缺 exe 的修复安装」语义），超出裁决 D1/D3 的最小方向，按协议 §9.1.1 交用户裁决；已登记为 issue #1066 的注释（连同其余三条残余）。
+- **外来改动**：工作树里的 ` M dev.sh` 是另一条线的未提交工作，本票未触碰、未纳入任何提交；它也是 Gate-0 读数改在隔离副本里取的原因（§5.4）。
