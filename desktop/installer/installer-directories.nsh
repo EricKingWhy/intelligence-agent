@@ -14,8 +14,12 @@
 ;                          $INSTDIR (iaRequireNoRunningProduct, #914: stop the
 ;                          bundled runtime, abort for anything else — the rename
 ;                          alone does not stop a headless service, see §1.3 of
-;                          docs/live_gate/w21/58-issue-914-service-in-use-gate.md),
-;                          then move the live $INSTDIR aside to $INSTDIR.old-{guid}
+;                          docs/live_gate/w21/58-issue-914-service-in-use-gate.md).
+;                          The gate runs whether or not the app executable is
+;                          still present: a damaged installation keeps its live
+;                          service, and the branch below would skip staging for
+;                          it entirely. Then move the live $INSTDIR aside to
+;                          $INSTDIR.old-{guid}
 ;                          (the braces are System::Call's "g" GUID form) and
 ;                          stash the backup path in the registry. A pointer
 ;                          an earlier run left behind is recorded as a leftover
@@ -98,8 +102,12 @@ Var iaRecoveryFreshButton
 ;     kill). The stock probe still runs in the section; it is the template's.
 ; So this gate asks with the cast forced (@(...)) and refuses the update for
 ; every answer it cannot prove clean (fail-closed) instead of inheriting that
-; failure mode. While a process from this directory exists, this installer
-; records nothing, stages nothing and renames nothing.
+; failure mode. It is called for every install, not only while the app
+; executable is still there: a damaged installation whose exe is gone
+; (quarantined or deleted by hand) can still hold the live bundled service, and
+; the stock section would install straight over that directory in place. While a
+; process from this directory survives the stop attempt, this installer records
+; nothing, stages nothing and renames nothing.
 ;
 ; iaClassifyRunningProduct — what runs from $iaFinalDirectory?
 ;   exit code 0  : nothing
@@ -369,13 +377,18 @@ FunctionEnd
   StrCpy $iaBackupDirectory ""
   StrCpy $iaPlainPath "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
   Call iaProbePath
+  ; #914: this directory is about to move, or to be written through, so nothing
+  ; may be running from it. The gate runs before the app-executable branch rather
+  ; than inside it: a damaged installation whose exe is gone still holds the
+  ; service that answers clients, and that branch skips staging for it entirely —
+  ; an in-branch call never classified it, so the stock section installed
+  ; straight over a live service in place.
+  ; It also runs before the backup pointer is read or armed and before the
+  ; rename. Every refusal it raises therefore leaves the installation exactly as
+  ; it was, and a non-empty IaBackupDir keeps meaning "the install section
+  ; started" for .onGUIEnd and iaRollbackApplication.
+  Call iaRequireNoRunningProduct
   ${If} $iaProbeFound == "1"
-    ; #914: this directory is about to move, so nothing may be running from it.
-    ; The gate runs before the backup pointer is read or armed and before the
-    ; rename. Every refusal it raises therefore leaves the installation exactly
-    ; as it was, and a non-empty IaBackupDir keeps meaning "the install section
-    ; started" for .onGUIEnd and iaRollbackApplication.
-    Call iaRequireNoRunningProduct
     ; #904 item 2: the pointer is a single slot, so the value below overwrites
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a

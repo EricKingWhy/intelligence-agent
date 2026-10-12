@@ -316,7 +316,7 @@ describe('process gate (#914)', () => {
   })
 
   it('refuses a stage that never calls the gate', () => {
-    const dir = withMutatedGate('    Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
     assert.throws(() => validateInstallerScripts(dir), /does not call the gate/)
   })
 
@@ -324,7 +324,7 @@ describe('process gate (#914)', () => {
     // The pointer must not be armed when the gate refuses: .onGUIEnd and
     // iaRollbackApplication read a non-empty IaBackupDir as "the install
     // section started" and would roll a good installation back.
-    const dir = withMutatedGate('    Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
     const before = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
     const moved = before.replace(
       '    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
@@ -333,6 +333,18 @@ describe('process gate (#914)', () => {
     assert.notEqual(moved, before, 'the call was not moved back')
     writeFileSync(join(dir, 'installer-directories.nsh'), moved.replace(/\n/g, eol))
     assert.throws(() => validateInstallerScripts(dir), /gate runs after the backup pointer/)
+  })
+
+  it('refuses a gate call that runs only when the app executable is present', () => {
+    // The damaged-install case (#914 review Axis A, ruled a must-fix): the
+    // `${If} $iaProbeFound == "1"` branch skips staging entirely when the app
+    // exe is gone, so a call placed inside it never classified a live bundled
+    // service — and the stock section installed straight over that directory.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  ${If} $iaProbeFound == "1"\n    Call iaRequireNoRunningProduct\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /inside the .*branch/)
   })
 
   it('refuses a refusal that neither exits nor keeps the unknown case apart', () => {
@@ -416,7 +428,21 @@ describe('long-path app executable detection (#1045)', () => {
 
       assert.ok(input >= 0, name + ' does not pass the app path to iaProbePath')
       assert.ok(call > input && call - input < 160, name + ' does not call iaProbePath for the app path')
-      assert.ok(guard > call && guard - call < 120, name + ' does not branch on the probe result')
+      assert.ok(guard > call, name + ' does not branch on the probe result')
+      // Nothing but the #914 process gate may sit between the probe and the
+      // branch. A character bound would have to be widened for the gate call
+      // (plus its prose), which would weaken the check for the two bodies that
+      // carry no call at all — so the distance is asserted as a statement list.
+      const between = body
+        .slice(call + 'Call iaProbePath'.length, guard)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith(';'))
+      assert.deepEqual(
+        between.filter((line) => line !== 'Call iaRequireNoRunningProduct'),
+        [],
+        name + ' runs something else between the probe and the branch: ' + between.join(' | '),
+      )
       assert.doesNotMatch(body, /FileExists.*APP_EXECUTABLE_FILENAME/)
     }
 

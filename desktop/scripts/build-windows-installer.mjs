@@ -2611,7 +2611,11 @@ export const DELETE_SITE_POLICIES = {
  *   - the gate is called in iaStageApplication before the backup pointer is
  *     armed and before `Rename $INSTDIR` (a refusal must leave the installation
  *     untouched and must not leave a pointer behind that .onGUIEnd and
- *     iaRollbackApplication read as "the install section started");
+ *     iaRollbackApplication read as "the install section started"), and it is
+ *     called BEFORE the `${If} $iaProbeFound == "1"` branch rather than inside
+ *     it — that branch skips staging entirely when the app executable is gone,
+ *     so an in-branch call never classified a damaged installation whose live
+ *     service is exactly what must not be updated over (#914 review Axis A);
  *   - the refusal keeps the unknown answer fail-closed: `$(iaAppRunning)` for
  *     the two known-occupied answers, `$(iaProcessCheckFailed)` for everything
  *     else, exit code 2, and only a proven `"0"` returns.
@@ -2674,11 +2678,20 @@ export function validateProcessGateGuards(source, filename) {
     const gateCall = stage.indexOf('Call iaRequireNoRunningProduct')
     const pointer = stage.indexOf('iaStashBackupDir')
     const rename = stage.indexOf('Rename $INSTDIR')
+    const appBranch = stage.indexOf('${If} $iaProbeFound == "1"')
     if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
     if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
     if (rename === -1) problems.push('iaStageApplication no longer renames the install directory')
+    if (appBranch === -1) {
+      problems.push('iaStageApplication no longer branches on the app executable')
+    }
     if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {
       problems.push('the gate runs after the backup pointer is armed or after the rename — a refusal would have to roll back')
+    }
+    if (gateCall !== -1 && appBranch !== -1 && gateCall > appBranch) {
+      problems.push(
+        'the gate runs inside the `${If} $iaProbeFound == "1"` branch — that branch skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
+      )
     }
   }
   if (problems.length > 0) {

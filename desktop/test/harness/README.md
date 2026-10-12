@@ -215,6 +215,8 @@ under `%TEMP%\ia-r1-drivers` unless `-EvidenceDir` / `-Keep` say otherwise.
 | `run-leftover-probe.ps1` | builds a >MAX_PATH tree, compiles the probe against the production cleanup helper, asserts the helper sees the existing directory while the unprefixed query does not, and removes the scratch tree |
 | `process-gate-probe.nsi` | probe template with markers for the production `iaClassifyRunningProduct` / `iaRequireNoRunningProduct` functions (#914); records the production answer, the stock app-builder-lib `FIND_PROCESS` answer on the same state, and whether the gate returned |
 | `run-process-gate-probe.ps1` | injects both production functions and drives four legs against real processes: `none` (empty tree — answer 0, gate returns), `runtime` (a headless image under `resources\python` — answer 11, gate stops it and the PID is gone), `client` (a live image in the install root — answer 12, gate exits 2 and the PID stays alive), `unknown` (an install path the query cannot parse — nothing proven clean, gate exits 2). Run with `powershell -File r1-drivers/run-process-gate-probe.ps1` |
+| `stage-damaged-probe.nsi` | probe template with markers for the production `iaStageApplication` macro plus everything it calls (`iaProbePath`, the two gate functions, the backup-pointer macros, the whole `installer-cleanup.nsh`); it runs the real macro and writes a result line only when the macro returns — a gate refusal `Quit`s first and leaves no file (#914 review Axis A) |
+| `run-stage-damaged-probe.ps1` | injects the production staging macro and drives four legs, three of which the pre-fix macro could not pass: `intact-clean` (app.exe present, nothing running — gate returns and the tree is renamed aside, the ordinary update path), `damaged-runtime` (no app.exe, headless image under `resources\python` running — the gate runs anyway, stops it and returns without staging), `damaged-rootproc` (no app.exe, live image in the install root — gate exits 2, PID alive, tree untouched), `damaged-unknown` (no app.exe, install path the query cannot parse — gate exits 2). `-DirectoriesSource <path>` points the legs at another revision of the include, which is how the red proof is produced. Run with `powershell -File r1-drivers/run-stage-damaged-probe.ps1` |
 
 ```powershell
 # test artifact first (prints the installer path it built):
@@ -222,6 +224,7 @@ node scripts/test-windows-installer.mjs --compile-only
 powershell -File r1-drivers/drive-r1-update.ps1 -Installer <installer-test.exe> -Tag t1 -Case success -Expect fixed
 powershell -File r1-drivers/run-leftover-probe.ps1
 powershell -File r1-drivers/run-process-gate-probe.ps1
+powershell -File r1-drivers/run-stage-damaged-probe.ps1
 ```
 
 `drive-r1-update.ps1` is the driver the #901 evidence logs came from (logs stay
@@ -245,3 +248,18 @@ answer_before=1 stock=1 gate_returned=0`. The stock `FIND_PROCESS` predicate
 answers `1` ("not running") on **all four** legs — the same reading it gives on
 an empty tree — which is the measured root cause of #914: at exactly one
 matching process the shipped guard cannot tell a live service from nothing.
+
+`run-stage-damaged-probe.ps1` (#914 review Axis A) was last run 2026-10-13 from
+the checkout, twice, identical readings: `intact-clean exit=0
+stage_returned=1 answer=0 probe=1` with the tree renamed to
+`<dir>.old-{guid}`; `damaged-runtime exit=0 stage_returned=1 answer=0 probe=0`
+with the probe process `gone` and no `.old-` sibling; `damaged-rootproc exit=2`
+with no result file, the process `alive` and the tree untouched;
+`damaged-unknown exit=2` with no result file. The red proof is the same driver
+against the pre-fix include
+(`-DirectoriesSource <pre-fix installer-directories.nsh>`): `intact-clean` still
+passes (the control), and the other three legs fail with `answer=` **empty** —
+the macro never called the gate at all on a tree without the app executable, and
+the live service was left running (`damaged-runtime`: exit 0, process survived;
+`damaged-rootproc` and `damaged-unknown`: exit 0 instead of 2). That empty
+reading is the defect the fix removes, measured rather than argued.
