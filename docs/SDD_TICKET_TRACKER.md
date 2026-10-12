@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**当前状态（2026-10-12，#915 Windows 安装器恢复批次）**：代码修复、真实 Windows R3/R1 验证、双轴复审与冻结树全量后端测试已完成。分支 codex/issue-915-crash-recovery 冻结 tip 641ad53ca251eb78c5caf377bcb233e11e42e678 / tree b3daa009a797e58997702ba8c3453d4e36e6ec52；scripts/run_tests_clean.sh tests/ 结果为 7721 passed / 43 skipped / 51 deselected / 0 failed。票据边界、其他车道读数及 Windows 证据见月档「#915 Windows 安装器恢复批次最终验证与发布准备」。本批含 #915/#1021/#1023/#1034/#1035/#1037/#1040；当前待 Gate-0、推送、PR、合并与关单。长路径 FileExists 的文件场景尚未证实，独立候选范围见月档。
+**当前状态（2026-10-12，#915 Windows 安装器恢复批次）**：代码修复、真实 Windows R3/R1 验证、双轴复审与冻结树全量后端测试已完成。分支 codex/issue-915-crash-recovery 冻结 tip 641ad53ca251eb78c5caf377bcb233e11e42e678 / tree b3daa009a797e58997702ba8c3453d4e36e6ec52；scripts/run_tests_clean.sh tests/ 结果为 7721 passed / 43 skipped / 51 deselected / 0 failed。最终 Gate-0 6/6 PASS，收据 docs/gate/91d247c9b35227e7c0f1d5957afb390405b10d70.json；--since origin/main 对 24 个改动文件（docs 13、desktop 11）再次 6/6 PASS。票据边界、其他车道读数及 Windows 证据见月档「#915 Windows 安装器恢复批次最终验证与发布准备」。本批含 #915/#1021/#1023/#1034/#1035/#1037/#1040；当前待 push、PR、merge 与关单。长路径 FileExists 的文件场景尚未证实，独立候选范围见月档。
 
 **冻结代码/测试 blob（git hash-object，冻结 tip 相对 origin/main 的改动面）**：
 
