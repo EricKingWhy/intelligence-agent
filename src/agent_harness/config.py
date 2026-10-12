@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    # #1026：摘要请求墙钟随请求规模线性缩放（base + kt × slope，消融候选①）。
+    # base 默认 30s 维持小请求的既有墙钟；slope 默认 0.25s/kt 使 ~167k 请求
+    # 得 ~71.75s（阶段 A 实测锚：同路径 16.8s 成功、30s 恒败 ⇒ ≥60s 需求）。
+    # slope=0 即固定墙钟（消融候选②的配置形态）。消费点：builder → compactor。
+    summary_timeout_seconds: float = Field(default=30.0, gt=0)
+    summary_timeout_per_kilotoken_seconds: float = Field(default=0.25, ge=0)
+    # #1026：分块摘要（票面修法②）。摘要请求估算超过 hard_guard × ratio 即走
+    # 分块（票面"如 > hard_limit 一半"）；summary_chunk_max_tokens 是单块输入
+    # 的 token 上限（块内超大原子消息确定性 head/tail 裁剪到界）。
+    summary_chunk_request_ratio: float = Field(default=0.5, gt=0, le=1)
+    summary_chunk_max_tokens: int = Field(default=24_000, gt=0)
     # W-29 (#383)：进度清单兜底重注入周期（每 N 条投影消息，PRD §4.6 的
     # Cline Focus Chain 默认值 6，可配置）。
     plan_reinject_every_messages: int = Field(default=6, gt=0)

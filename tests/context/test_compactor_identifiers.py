@@ -103,6 +103,9 @@ async def test_t12a_full_compact_shrinks_and_reaches_target():
     compactor = ContextCompactor(
         ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
         max_context_tokens=MAX_CONTEXT_TOKENS,
+        # #1026：本用例验证的是全量压缩的 shrink 语义（与分块正交）；单响应剧本
+        # 只够单请求路径，ratio=1 关闭分块。
+        summary_chunk_request_ratio=1,
     )
     before = estimate_message_tokens(messages)
 

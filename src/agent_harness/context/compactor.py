@@ -7,6 +7,7 @@ import re
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from itertools import pairwise
 from time import monotonic
 from typing import Any
 
@@ -103,6 +104,10 @@ _SUMMARY_ERROR_CLASSES = (
     # 此前该分支静默（零事件零状态）；对标 #647 的 attempt=0 纪律，把"为什么拒绝、
     # 差多少"（request_token_estimate vs hard_limit）落成任务可见诊断，不伪造摘要尝试。
     "preflight_request_exceeds_hard_limit",
+    # #1026 裁决 A：摘要双失败 + 有效用量超硬护栏时的确定性截断降级标记
+    # （attempt=0，非摘要尝试失败——截断是降级产物不是被拒尝试）。对标
+    # #639/#648 的"只加诊断"纪律：词表有界、每项对应一条拒绝/降级面。
+    "deterministic_truncation_fallback",
     # #648 选项 B（用户 2026-10-06 批准）：无可压缩完整早期轮的预检拒绝
     # （尝试前，非摘要尝试失败）。此前该分支刻意"保持为空表"（见
     # ContextWindowExceededError 注释），本次是用户批准的刻意反转——只加诊断：
@@ -131,6 +136,134 @@ _NO_EARLY_TURN_MESSAGE = (
     "② 调大 max_context_tokens（硬上限随之放宽）；"
     "③ 把任务转交 subagent 分段处理，避免单个原子工具块独占窗口。"
 )
+
+#: #1026：分块摘要的递进携带上限（字符）。中间块摘要在下一块请求里作为
+#: 「前段摘要」携带——不封顶则请求数增长时 final 请求退化成无界（spike
+#: 发现 5 的第二条界）。截断只影响携带参考文本，闸门只看 final 输出。
+_CHUNK_CARRY_CHAR_CAP = 4000
+
+
+def _clip_block_to_budget(
+    block: list[AnyMessage], bound_tokens: int,
+) -> list[AnyMessage]:
+    """#1026：单条超大原子消息的确定性 head/tail 裁剪（spike 发现 5）。
+
+    tool 原子块是消息级不可分单位（`_tool_block_boundaries`），块内单消息超过
+    单块预算时无法按块边界再切——按"裁最大 content、保留 head/tail 半长 + 截断
+    标记"迭代到入界。仓内同形先例：`_carrier_instruction_line` 的截断标记、
+    `_PROG_SECTION_MAX_ENTRY_CHARS` 的有界投影。**不 mutate 原消息**（投影被
+    调用方复用）；tool_call/tool_call_id 等结构字段保留（配对完整性不受影响）。
+    content 已不可再裁（空/非文本）而块仍超界时如实放行（结构面有界）。
+    """
+    clipped = [message.model_copy() for message in block]
+    while estimate_message_tokens(clipped) > bound_tokens:
+        target = max(
+            clipped,
+            key=lambda m: len(m.content) if isinstance(m.content, str) else 0,
+        )
+        if (not isinstance(target.content, str) or len(target.content) < 4):
+            break
+        keep = len(target.content) // 4
+        target.content = (
+            target.content[:keep]
+            + "…［已截断：摘要输入超单块上限，head/tail 保留］…"
+            + target.content[-keep:]
+        )
+    return clipped
+
+
+def _chunk_early(
+    early: list[AnyMessage], bound_tokens: int,
+) -> list[list[AnyMessage]]:
+    """#1026：early 段按 tool 原子块边界贪心分块（每块估算 ≤ bound）。
+
+    切分吸附 `_tool_block_boundaries` 的块起点（与 `narrow_early_window` 同一
+    完整性来源）：AI tool_call + ToolMessage 串永不跨块。单块自身超预算的
+    原子块走 `_clip_block_to_budget` 确定性裁剪。贪心从 early 头部向后累积，
+    保序（递进归并的块序 = 时间序）。
+    """
+    if not early:
+        return []
+    boundaries = _tool_block_boundaries(early, 0, len(early))
+    spans = [*pairwise(boundaries), (boundaries[-1], len(early))]
+    chunks: list[list[AnyMessage]] = []
+    current: list[AnyMessage] = []
+    current_tokens = 0
+    for start, end in spans:
+        block = early[start:end]
+        block_tokens = estimate_message_tokens(block)
+        if block_tokens > bound_tokens:
+            if current:
+                chunks.append(current)
+                current, current_tokens = [], 0
+            chunks.append(_clip_block_to_budget(block, bound_tokens))
+            continue
+        if current and current_tokens + block_tokens > bound_tokens:
+            chunks.append(current)
+            current, current_tokens = [], 0
+        current.extend(block)
+        current_tokens += block_tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _plan_block_text(plan_items: tuple[PlanItem, ...]) -> str | None:
+    """#1026：分块 final 请求的确定性计划块（spike 发现 2）。
+
+    W-29 #383 的计划闸要求第 5 节逐字包含 in_progress 项内容；分块递进携带
+    下中间转述不可靠（spike 变体 A/B/C 实证闸红），把 `derive_plan` 窗口产物
+    逐字注入 final 请求是确定性缓解。零未完成项不注入（prompt 语义：第 5 节
+    写 (none)，与 `_validate_plan_section` 的 A-sem 放宽一致）。
+    """
+    unfinished = [item for item in plan_items if item.status != "completed"]
+    if not unfinished:
+        return None
+    lines = "\n".join(
+        f"- [{item.status}] {item.content}（{item.active_form}）"
+        for item in unfinished
+    )
+    return (
+        "进行中计划项（摘要第 5 节必须逐字包含以下条目的 content 文本）：\n"
+        + lines
+    )
+
+
+def _deterministic_truncation(
+    messages: list[AnyMessage],
+    prefix_end: int,
+    cut: int,
+    budget_tokens: int,
+) -> list[AnyMessage] | None:
+    """#1026 裁决 A（修法③）：摘要彻底失败时的确定性截断降级。
+
+    规格依据：spec 06 §5 明文 deterministic fallback（ADR-0007 第 2 层原始
+    设计；#348 的"摘要失败 ≠ 压缩发生"冻结语义经用户 2026-10-12 裁决部分
+    回调）。语义：保留 recent（当前用户轮）与前导系统前缀**逐字**，early 段
+    按 tool 原子块**从尾部向前**尽量多保留（偏好最近），压回预算（auto_limit
+    − reserved）内；不发送超窗请求（spec 06 §8 hard guard 不违反）。截断
+    不产生摘要、不写 bracket（compacted_turn_count=0 + fallback_used=True），
+    失败面经 attempt=0 的 `deterministic_truncation_fallback` 诊断落任务可见。
+
+    prefix + recent 自身就超预算 ⇒ None（完全不可截断），调用方落既有
+    ContextWindowExceededError 兜底。
+    """
+    prefix, recent = messages[:prefix_end], messages[cut:]
+    base = [*prefix, *recent]
+    kept_tokens = estimate_message_tokens(base)
+    if kept_tokens >= budget_tokens:
+        return None
+    boundaries = _tool_block_boundaries(messages, prefix_end, cut)
+    spans = [*pairwise(boundaries), (boundaries[-1], cut)]
+    kept: list[AnyMessage] = []
+    for start, end in reversed(spans):
+        block = messages[start:end]
+        block_tokens = estimate_message_tokens(block)
+        if kept_tokens + block_tokens >= budget_tokens:
+            break
+        kept = [*block, *kept]
+        kept_tokens += block_tokens
+    return [*prefix, *kept, *recent]
 
 
 @dataclass(frozen=True)
@@ -242,6 +375,9 @@ class CompactionResult:
     #: 成功走缩小段时置位，并在 `CONTEXT_COMPACTED` 事件里持久化；其余路径默认假值，
     #: 逐字节等价。`source_seq_*` 与八节摘要此时只覆盖缩小段（非全 early 段）。
     narrowed: bool = False
+    #: #1026：本次摘要是否走分块路径（请求超分块阈值且可切 >1 块）。成功时置位，
+    #: 经 `CONTEXT_COMPACTED` 事件持久化（验收 3 的事件可观测）；其余路径默认假值。
+    chunked: bool = False
 
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
@@ -338,12 +474,22 @@ class ContextCompactor:
                  hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0,
+                 summary_timeout_per_kilotoken_seconds: float = 0.25,
+                 summary_chunk_request_ratio: float = 0.5,
+                 summary_chunk_max_tokens: int = 24_000,
                  summary_model: Any | None = None,
                  model_call_gate: ModelCallGate | None = None) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
             raise ValueError("summary_timeout_seconds must be positive")
+        # #1026：墙钟斜率（候选①线性缩放）——0 = 固定墙钟（候选②的退化形态）。
+        if summary_timeout_per_kilotoken_seconds < 0:
+            raise ValueError("summary_timeout_per_kilotoken_seconds must be non-negative")
+        if not 0 < summary_chunk_request_ratio <= 1:
+            raise ValueError("summary_chunk_request_ratio must be in (0, 1]")
+        if summary_chunk_max_tokens <= 0:
+            raise ValueError("summary_chunk_max_tokens must be positive")
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（装配前的既有行为逐字节
         # 等价）。便宜档选择本身留在配置面（后续票），本层只负责"用谁摘要"。
         self._model = summary_model if summary_model is not None else model_provider
@@ -357,6 +503,10 @@ class ContextCompactor:
         self._hard_limit = max_context_tokens * hard_guard_threshold
         self._auto_limit = max_context_tokens * auto_compact_threshold
         self._summary_timeout = summary_timeout_seconds
+        # #1026：墙钟缩放斜率与分块参数（Settings 透传链见 builder/assembly）。
+        self._timeout_per_kilotoken = summary_timeout_per_kilotoken_seconds
+        self._chunk_ratio = summary_chunk_request_ratio
+        self._chunk_max_tokens = summary_chunk_max_tokens
         self._max_context_tokens = max_context_tokens
         self.reserve = max(int(max_context_tokens * 0.15), 16384)
 
@@ -368,6 +518,81 @@ class ContextCompactor:
         由 slot 的 finally 归还 permit。
         """
         return self._gate.slot() if self._gate is not None else nullcontext(None)
+
+    def _summary_timeout_for(self, request_token_estimate: int) -> float:
+        """#1026：摘要请求的墙钟随**本次请求规模**线性缩放（消融候选①）。
+
+        `base + kt × slope`：base = `summary_timeout_seconds`（Settings，默认 30——
+        小请求维持既有墙钟，不因大请求的容忍而陪等）；slope =
+        `summary_timeout_per_kilotoken_seconds`（默认 0.25s/kt）。锚点（阶段 A
+        实测）：同路径 167k 请求 16.8s 成功、30s 恒败 ⇒ 167k → 71.75s（≈4.3×
+        实测延迟）、30k → 37.5s。消融候选②（固定 90s）= slope 0 的配置形态：
+        对 30k 小请求也等 90s，真实失败重试成本翻三倍，落选（结论见 checkpoint）。
+        每次摘要尝试用**当时**的请求规模取墙钟——两次 attempt / 分块逐块不再
+        共用同一恒定值（票面修法①）。
+        """
+        return (self._summary_timeout
+                + request_token_estimate / 1000 * self._timeout_per_kilotoken)
+
+    async def _summarize_chunked(
+        self, chunks: list[list[AnyMessage]], prompt: SystemMessage,
+        plan_block: str | None,
+    ) -> AIMessage:
+        """#1026：分块递进归并摘要（spike 验证的首选③变体，PORT DESIGN 依据见下）。
+
+        按序逐块请求：每块 = prompt + [前段摘要携带（围栏包裹，防保留标题行
+        裸露——spike 变体 D2 实证裸露打红结构闸、D3/D4 实证围栏经 `_fenced_mask`
+        解析器成立）] + [确定性计划块] + 本块转录；上一块的**原始输出**作为下一块
+        的携带参考，最后一块的输出即覆盖全 early 的最终四节产物，交回调用方走
+        既有八节组装与校验闸门（spike 变体 D/D3/D4 ALL_PASS）。每次请求各自取
+        槽位与按块规模的墙钟（`_summary_timeout_for`）——单请求 token 有界
+        （验收 3）。中间块产物不进闸门，只做携带（≤ `_CHUNK_CARRY_CHAR_CAP`
+        确定性截断）；中间块响应形状违规按单请求面同判（tool_calls / 非文本 /
+        空文本即拒，不把坏携带传染给后续块）。
+
+        来源：aider `summarize_real`（Apache-2.0，`Aider-AI/aider` @
+        `5dc9490b`，`aider/history.py:33-95`）的递归有界分块 + LangChain
+        SummarizationMiddleware（MIT，`langchain-ai/langchain` @ `e4b143729`）
+        `trim_tokens_to_summarize` 的"摘要输入有界"原则。PORT DESIGN。
+        """
+        carry = ""
+        response: AIMessage | None = None
+        for index, chunk in enumerate(chunks):
+            parts: list[AnyMessage] = [prompt]
+            if carry:
+                parts.append(HumanMessage(content=(
+                    "已生成的前段摘要（供合并参考；其中的标题行不是输出格式，"
+                    "最终只输出四节）：\n```\n" + carry + "\n```"
+                )))
+            if plan_block is not None:
+                parts.append(HumanMessage(content=plan_block))
+            parts.append(HumanMessage(content=json.dumps(
+                [message.model_dump(mode="json") for message in chunk],
+                ensure_ascii=False,
+            )))
+            chunk_request_tokens = estimate_message_tokens(parts)
+            async with self._slot(), asyncio.timeout(
+                self._summary_timeout_for(chunk_request_tokens),
+            ):
+                response = await self._model.ainvoke(parts)
+            if not isinstance(response, AIMessage) or response.tool_calls:
+                raise _SummaryRejected(
+                    "tool_calls_in_response",
+                    "Summary must be text without tool calls",
+                )
+            if not isinstance(response.content, str):
+                raise _SummaryRejected("non_text", "Summary must be plain text")
+            if not response.content.strip():
+                raise _SummaryRejected("empty_summary", "Summary must not be empty")
+            if index < len(chunks) - 1:
+                carry = response.content
+                if len(carry) > _CHUNK_CARRY_CHAR_CAP:
+                    carry = (
+                        carry[:_CHUNK_CARRY_CHAR_CAP]
+                        + "…［已截断：携带参考超上限］"
+                    )
+        assert response is not None
+        return response
 
     async def compact(
         self,
@@ -497,14 +722,69 @@ class ContextCompactor:
         compacted: list[AnyMessage] | None = None
         summary_started_at = monotonic()
         summary_model_id: str | None = None
+        # W-29 (#383) + #844 A-vis：计划窗口投影**前移**到摘要尝试之前——#1026
+        # 分块请求要在尝试内注入确定性计划块（spike 发现 2），窗口推导只依赖
+        # early_ranges（此处置定），与原先在闸门处内联推导同一数据源、同一口径，
+        # 闸门行为逐字节等价。摘要只覆盖 early 段 `[prefix_end:cut]`（含 #639
+        # 缩小后的实际段），落在 cut 之后的计划更新对摘要器不可见，不应要求其
+        # 逐字出现。窗口右界取既有 `early_ranges` 里**可用来源区间**的最大 seq
+        # （与成功路径 `source_seq_start/source_seq_end` 同一数据源；缩小路径下
+        # early_ranges 已被同步截断，天然一致）。单条消息没有来源区间（对齐失败／
+        # derive 注入的 synthetic dangling ToolMessage）时该条不参与取 max，但不
+        # 放弃整段——仅当**一条可用区间都没有**（early_ranges 为 None／为空／
+        # 全是 None）时才回落全量行为。
+        #
+        # 与下方成功路径的 source-seq 判据**故意分道**：那里决定能否持久化，要求
+        # 区间**完整**（有一条 None 即拒绝并给 source_range_unavailable 诊断）；
+        # 此处只决定比较基准，尽力取可用窗口即可。两处口径不同是有意的，勿强行
+        # 合并成一个 helper。
+        #
+        # 不变量（P4 复审提示）：计划更新只经 update_plan 工具调用写入，其事件
+        # 投影为一条真实消息、必然带来源区间，故「early 窗口内可见的计划更新 ⊆
+        # 本处 seq 过滤保留的集合」。若日后出现非投影式的计划更新写入口，需重新
+        # 核对本窗口推导。
+        plan_items: tuple[PlanItem, ...] = ()
+        if events is not None:
+            plan_events = events
+            window_ranges = (
+                [r for r in early_ranges if r is not None]
+                if early_ranges else []
+            )
+            if window_ranges:
+                window_end_seq = max(r[1] for r in window_ranges)
+                plan_events = [
+                    event for event in events if event.seq <= window_end_seq
+                ]
+            plan_items = derive_plan(plan_events).items
+        # #1026（票面修法②）：分块决策——摘要请求超阈值（hard × ratio，票面
+        # "如 > hard_limit 一半"）且可切出 **>1 块**才走分块；单块情形与单请求
+        # 等价，不值得多跳。阈值以内维持单请求（既有路径逐字节等价）。
+        chunks: list[list[AnyMessage]] | None = None
+        plan_block: str | None = None
+        chunked = False
+        if request_token_estimate > self._hard_limit * self._chunk_ratio:
+            candidate_chunks = _chunk_early(early, self._chunk_max_tokens)
+            if len(candidate_chunks) > 1:
+                chunks = candidate_chunks
+                chunked = True
+                plan_block = _plan_block_text(plan_items)
         for attempt in (1, 2):
             attempt_started_at = monotonic()
             attempt_model_id = _summary_model_id(self._model, None)
             try:
-                # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
+                # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（墙钟是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
-                async with self._slot(), asyncio.timeout(self._summary_timeout):
-                    response = await self._model.ainvoke(request)
+                # #1026：墙钟按**本次请求规模**取（`_summary_timeout_for`），两次
+                # attempt / 分块逐块不再共用同一恒定值（票面修法①）。
+                if chunks is not None:
+                    response = await self._summarize_chunked(
+                        chunks, prompt, plan_block,
+                    )
+                else:
+                    async with self._slot(), asyncio.timeout(
+                        self._summary_timeout_for(request_token_estimate),
+                    ):
+                        response = await self._model.ainvoke(request)
                 attempt_model_id = _summary_model_id(self._model, response)
                 summary_model_id = attempt_model_id
                 if not isinstance(response, AIMessage) or response.tool_calls:
@@ -529,42 +809,11 @@ class ContextCompactor:
                 )
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
-                # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
-                # 会话的行为逐字节等价。
+                # 既有调用面）或会话无清单时 plan_items 为空 ⇒ 闸门不启用——空接缝
+                # 语义保留，无清单会话的行为逐字节等价。窗口推导见尝试循环之前
+                # （#1026 前移：分块请求注入计划块与闸门共用同一投影）。
                 if events is not None:
-                    # #844 A-vis：比较基准对齐摘要器的**可见窗口**——摘要只覆盖
-                    # early 段 `[prefix_end:cut]`（含 #639 缩小后的实际段），落在
-                    # cut 之后的计划更新对摘要器不可见，不应要求其逐字出现。窗口
-                    # 右界取既有 `early_ranges` 里**可用来源区间**的最大 seq（与成功
-                    # 路径 `source_seq_start/source_seq_end` 同一数据源；缩小路径下
-                    # early_ranges 已被同步截断，天然一致）。单条消息没有来源区间
-                    # （对齐失败／derive 注入的 synthetic dangling ToolMessage）时该条
-                    # 不参与取 max，但不放弃整段——否则整段回落全量、误拒照旧复发
-                    # （P2 复审已复现）。仅当**一条可用区间都没有**（early_ranges 为
-                    # None／为空／全是 None）时才回落全量行为。
-                    #
-                    # 与下方成功路径的 source-seq 判据**故意分道**：那里决定能否
-                    # 持久化，要求区间**完整**（有一条 None 即拒绝并给
-                    # source_range_unavailable 诊断）；此处只决定比较基准，尽力取
-                    # 可用窗口即可。两处口径不同是有意的，勿强行合并成一个 helper。
-                    #
-                    # 不变量（P4 复审提示）：计划更新只经 update_plan 工具调用写入，
-                    # 其事件投影为一条真实消息、必然带来源区间，故「early 窗口内可见
-                    # 的计划更新 ⊆ 本处 seq 过滤保留的集合」。若日后出现非投影式的
-                    # 计划更新写入口，需重新核对本窗口推导。
-                    plan_events = events
-                    window_ranges = (
-                        [r for r in early_ranges if r is not None]
-                        if early_ranges else []
-                    )
-                    if window_ranges:
-                        window_end_seq = max(r[1] for r in window_ranges)
-                        plan_events = [
-                            event for event in events if event.seq <= window_end_seq
-                        ]
-                    _validate_plan_section(
-                        candidate_summary_text, derive_plan(plan_events).items,
-                    )
+                    _validate_plan_section(candidate_summary_text, plan_items)
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
                     content=candidate_summary_text,
@@ -604,12 +853,55 @@ class ContextCompactor:
                 )
         if compacted is None:
             # 两次尝试都失败：旧投影仍在硬护栏内则安全继续（下一稳定边界再评估）；
-            # 已达硬护栏而仍无核验过的上下文 ⇒ 停止，异常携带失败记录供暂停面引用。
+            # 已达硬护栏而仍无核验过的上下文 ⇒ 先走 #1026 裁决 A 的确定性截断
+            # 降级（spec 06 §5 deterministic fallback），截断也救不了才停止。
             logger.warning(
                 "Context compaction rejected; keeping original projection (%s)",
                 failures[-1].error_class if failures else "unknown",
             )
             if token_estimate > self._hard_limit:
+                # #1026 裁决 A（修法③）：分块/缩墙钟之后仍彻底失败 ⇒ 按 AIMessage
+                # 原子边界确定性截断（保留 recent 逐字 + 尽量多 early，压回
+                # auto_limit − reserved 内），带 fallback 标记产出 CompactionResult，
+                # 不再必然 run/paused。诊断经 attempt=0 的
+                # `deterministic_truncation_fallback` 落任务可见（既有 #348 通道）。
+                # 预算必须按**有效用量**收敛：调用方入参 token_estimate 含
+                # sys/rt/plan 等不在 messages 里的开销（builder 重建时会原样补回），
+                # 截断只缩 messages ⇒ 预算要扣掉这笔开销份额，否则"messages 压回
+                # 线内、有效用量仍超护栏"的假成功会把超窗请求放出去。
+                overhead = max(
+                    token_estimate - estimate_message_tokens(messages), 0,
+                )
+                truncated = _deterministic_truncation(
+                    messages, prefix_end, cut,
+                    self._auto_limit - reserved_tokens - overhead,
+                )
+                if truncated is not None:
+                    failures.append(CompactionFailure(
+                        attempt=0,
+                        error_class="deterministic_truncation_fallback",
+                        message=(
+                            "Summary failed twice; deterministically truncated "
+                            "early turns to fit the auto limit"
+                        ),
+                        auto_limit=int(self._auto_limit),
+                        hard_limit=int(self._hard_limit),
+                        token_estimate=token_estimate,
+                        summary_model_id=summary_model_id,
+                        duration_ms=max(
+                            round((monotonic() - summary_started_at) * 1000), 0),
+                        request_token_estimate=request_token_estimate,
+                        request_budget_tokens=int(self._hard_limit),
+                    ))
+                    logger.warning(
+                        "Context compaction fell back to deterministic "
+                        "truncation (%s -> %s tokens)",
+                        token_estimate, estimate_message_tokens(truncated),
+                    )
+                    return CompactionResult(
+                        truncated, 0, estimate_message_tokens(truncated), True,
+                        failures=failures,
+                    )
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard",
                     failures=failures,
@@ -702,6 +994,8 @@ class ContextCompactor:
             failures=failures,
             # #639 阶段 A：成功走缩小段时置位（marker 落 CONTEXT_COMPACTED 事件）。
             narrowed=narrowed,
+            # #1026：成功走分块路径时置位（marker 落 CONTEXT_COMPACTED 事件）。
+            chunked=chunked,
         )
 
     def _no_early_turn_rejection(
