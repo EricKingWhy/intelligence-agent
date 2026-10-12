@@ -208,7 +208,24 @@ FunctionEnd
 Function iaContinueInterruptedFresh
   ; Keep the old version discoverable before disarming the interrupted
   ; transaction. The uninstaller's shape sweep remains the full discovery path.
-  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+  ClearErrors
+  !ifdef IA_TEST_INJECT_RECOVERY_METADATA_FAILURES
+    ReadRegStr $0 HKCU "${INSTALL_REGISTRY_KEY}" "IaTestFailLeftoverRecord"
+    ${If} $0 == "1"
+      SetErrors
+    ${Else}
+      ClearErrors
+      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+    ${EndIf}
+  !else
+    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+  !endif
+  ${If} ${Errors}
+    DetailPrint "iaContinueInterruptedFresh: could not record backup directory"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaRecoveryMetadataFailed)" /SD IDOK
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
   ; Let the stock installer write the selected fresh version into $INSTDIR.
   ; Refuse a partial tree with reparse points or unreadable entries before
   ; allowing NSIS to write through it; the old backup stays armed on refusal.
@@ -276,13 +293,23 @@ FunctionEnd
     ; .onInit opened a handle on $INSTDIR via SetOutPath; release it first.
     SetOutPath $TEMP
     ClearErrors
+    !insertmacro iaStashBackupDir
+    ${If} ${Errors}
+      DetailPrint "iaStageApplication: could not record backup directory"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaRecoveryMetadataFailed)" /SD IDOK
+      SetErrorLevel 2
+      Quit
+    ${EndIf}
+    ClearErrors
     Rename $INSTDIR $iaBackupDirectory
     ${If} ${Errors}
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaAppRunning)" /SD IDOK
       SetErrorLevel 2
       Quit
     ${EndIf}
-    !insertmacro iaStashBackupDir
+    !ifdef IA_TEST_HARD_KILL_AFTER_STAGE_RENAME
+      Sleep 5000
+    !endif
     SetOutPath $INSTDIR
   ${EndIf}
 !macroend

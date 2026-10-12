@@ -80,6 +80,7 @@
   !ifdef LANG_ENGLISH
   LangString iaPerUserOnly ${LANG_ENGLISH} "This installer is per-user only. A per-machine installation of Intelligence Agent was found; uninstall it first, then run this installer again."
   LangString iaAppRunning ${LANG_ENGLISH} "Intelligence Agent (or one of its background processes) is still running. Close it and run the installer again — the previous version was left untouched."
+  LangString iaRecoveryMetadataFailed ${LANG_ENGLISH} "The installer could not record recovery information. The existing installation was left untouched."
   LangString iaUpdateFailed ${LANG_ENGLISH} "The update failed: the new files are incomplete. The previous version has been restored."
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
   LangString iaRecoveryTitle ${LANG_ENGLISH} "An earlier update was interrupted"
@@ -94,6 +95,7 @@
   !ifdef LANG_SIMPCHINESE
   LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
   LangString iaAppRunning ${LANG_SIMPCHINESE} "Intelligence Agent（或其后台进程）仍在运行。请关闭后重新运行安装程序——旧版本未被改动。"
+  LangString iaRecoveryMetadataFailed ${LANG_SIMPCHINESE} "安装程序无法记录恢复信息，现有安装未被改动。请检查注册表权限后重试。"
   LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
   LangString iaRecoveryTitle ${LANG_SIMPCHINESE} "上次更新已中断"

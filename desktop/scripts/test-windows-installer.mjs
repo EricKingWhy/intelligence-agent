@@ -83,6 +83,8 @@ SectionEnd
   const compiler = await getMakeNsisPath()
   await execute(compiler.path, ['/V2', payloadSource], { ...childOptions, env: { ...childOptions.env, ...compiler.env } })
   await writeFile(testInstallerInclude, [
+    '!define IA_TEST_HARD_KILL_AFTER_STAGE_RENAME',
+    '!define IA_TEST_INJECT_RECOVERY_METADATA_FAILURES',
     `!include "${join(appRoot, 'installer', 'installer.nsh')}"`,
     '',
     '!macro preInit',

@@ -10,6 +10,8 @@
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -AbsentInstallDirectory
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -BlockRollback
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -FailLeftoverRecord
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -FailLeftoverRecord -LeaveFailurePromptOpen
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice silent
 
   The test app uses a unique app id. It only installs under
@@ -23,7 +25,9 @@ param(
   [ValidateSet('restore', 'continue', 'silent')][string]$Choice = 'restore',
   [string]$EvidenceDir = '',
   [switch]$AbsentInstallDirectory,
-  [switch]$BlockRollback
+  [switch]$BlockRollback,
+  [switch]$FailLeftoverRecord,
+  [switch]$LeaveFailurePromptOpen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +45,12 @@ if (($AbsentInstallDirectory -or $BlockRollback) -and $Choice -ne 'restore') {
 }
 if ($AbsentInstallDirectory -and $BlockRollback) {
   throw 'choose only one restore fixture'
+}
+if ($FailLeftoverRecord -and $Choice -ne 'continue') {
+  throw '-FailLeftoverRecord requires -Choice continue'
+}
+if ($LeaveFailurePromptOpen -and -not $FailLeftoverRecord) {
+  throw '-LeaveFailurePromptOpen requires -FailLeftoverRecord'
 }
 $logPath = Join-Path $EvidenceDir ('recovery-{0}-{1}.log' -f $Choice, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $script:failures = 0
@@ -126,13 +136,27 @@ function Find-RecoveryPrompt([int]$processId) {
   return $null
 }
 
-function Find-RollbackFailurePrompt([int]$processId) {
+function Find-RecoveryFailurePrompt([int]$processId) {
   foreach ($window in Get-ProcessWindows $processId) {
-    if ($window.Text -match '(?is)(Could not restore the previous version automatically|\u65e0\u6cd5\u81ea\u52a8\u6062\u590d\u65e7\u7248\u672c)') {
+    if ($window.Text -match '(?is)(Could not restore the previous version automatically|\u65e0\u6cd5\u81ea\u52a8\u6062\u590d\u65e7\u7248\u672c|The installer could not record recovery information|\u5b89\u88c5\u7a0b\u5e8f\u65e0\u6cd5\u8bb0\u5f55\u6062\u590d\u4fe1\u606f)') {
       return $window
     }
   }
   return $null
+}
+
+function Wait-RecoveryFailurePrompt([System.Diagnostics.Process]$process, [datetime]$deadline) {
+  while ((Get-Date) -lt $deadline -and -not $process.HasExited) {
+    $prompt = Find-RecoveryFailurePrompt $process.Id
+    if ($null -ne $prompt) { return $prompt }
+    Start-Sleep -Milliseconds 100
+  }
+  return $null
+}
+
+function Acknowledge-RecoveryFailurePrompt($prompt, [string]$assertionName) {
+  $acknowledged = Invoke-Button $prompt '^(OK|\u786e\u5b9a)(\(.*\))?$'
+  Assert $assertionName ($null -ne $acknowledged) ('button={0}' -f $acknowledged)
 }
 
 function Get-RegistryValue([string]$path, [string]$name) {
@@ -238,6 +262,9 @@ try {
   if ($AbsentInstallDirectory) {
     New-ItemProperty -Path $appKeyPath -Name 'IaTestRemoveInstallDirectory' -PropertyType String -Value '1' -Force | Out-Null
   }
+  if ($FailLeftoverRecord) {
+    New-ItemProperty -Path $appKeyPath -Name 'IaTestFailLeftoverRecord' -PropertyType String -Value '1' -Force | Out-Null
+  }
 
   $prompt = $null
   if ($Choice -eq 'silent') {
@@ -263,21 +290,30 @@ try {
       Assert 'recovery_choice_accepted' ($null -ne $clicked) ('choice={0} button={1}' -f $Choice, $clicked)
 
       if ($BlockRollback -and $Choice -eq 'restore' -and $null -ne $clicked) {
-        $failurePrompt = $null
         $failureDeadline = (Get-Date).AddSeconds(8)
-        while ((Get-Date) -lt $failureDeadline -and -not $recoveryProcess.HasExited) {
-          $failurePrompt = Find-RollbackFailurePrompt $recoveryProcess.Id
-          if ($null -ne $failurePrompt) { break }
-          Start-Sleep -Milliseconds 100
-        }
+        $failurePrompt = Wait-RecoveryFailurePrompt $recoveryProcess $failureDeadline
         Assert 'rollback_failure_prompt_shown' ($null -ne $failurePrompt) ('prompt_found={0}' -f ($null -ne $failurePrompt))
         if ($null -ne $failurePrompt) {
-          $acknowledged = Invoke-Button $failurePrompt '^(OK|\u786e\u5b9a)(\(.*\))?$'
-          Assert 'rollback_failure_prompt_acknowledged' ($null -ne $acknowledged) ('button={0}' -f $acknowledged)
+          Acknowledge-RecoveryFailurePrompt $failurePrompt 'rollback_failure_prompt_acknowledged'
         }
       }
 
-      if ($Choice -eq 'continue' -and $null -ne $clicked) {
+      if ($Choice -eq 'continue' -and $FailLeftoverRecord -and $null -ne $clicked) {
+        $failureDeadline = (Get-Date).AddSeconds(8)
+        $failurePrompt = Wait-RecoveryFailurePrompt $recoveryProcess $failureDeadline
+        Assert 'leftover_record_failure_prompt_shown' ($null -ne $failurePrompt) ('prompt_found={0}' -f ($null -ne $failurePrompt))
+        if ($null -ne $failurePrompt) {
+          if ($LeaveFailurePromptOpen) {
+            Log 'leaving recovery failure prompt open to exercise the exit timeout'
+          } else {
+            Acknowledge-RecoveryFailurePrompt $failurePrompt 'leftover_record_failure_prompt_acknowledged'
+          }
+        }
+        $recoveryProcess.WaitForExit(15000)
+        $recoveryExited = $recoveryProcess.HasExited
+        $recoveryExitCode = if ($recoveryExited) { $recoveryProcess.ExitCode } else { 'still running' }
+        Assert 'leftover_record_failure_exit_2' ($recoveryExited -and $recoveryExitCode -eq 2) ('exited={0} rc={1}' -f $recoveryExited, $recoveryExitCode)
+      } elseif ($Choice -eq 'continue' -and $null -ne $clicked) {
         # The stock assisted installer uses Next, Install, and Finish buttons.
         # Drive those public wizard controls; wait through the progress page.
         $installDeadline = (Get-Date).AddSeconds(90)
@@ -326,6 +362,11 @@ try {
       Assert 'restore_backup_consumed' (-not $backupStillExists) ('backup_exists={0}' -f $backupStillExists)
       Assert 'restore_backup_pointer_cleared' ([string]::IsNullOrEmpty($backupPointer)) ('IaBackupDir={0}' -f $backupPointer)
     }
+  } elseif ($Choice -eq 'continue' -and $FailLeftoverRecord) {
+    Assert 'leftover_failure_app_remains_absent' (-not $appPresent) ('exists={0}' -f $appPresent)
+    Assert 'leftover_failure_backup_retained' $backupStillExists ('backup_exists={0}' -f $backupStillExists)
+    Assert 'leftover_failure_backup_pointer_preserved' ($backupPointer -ieq $backupDir) ('IaBackupDir={0}' -f $backupPointer)
+    Assert 'leftover_failure_leftover_not_written' ([string]::IsNullOrEmpty($leftoverPointer)) ('IaLeftoverDir={0}' -f $leftoverPointer)
   } elseif ($Choice -eq 'continue') {
     Assert 'fresh_app_present' $appPresent ('exists={0}' -f $appPresent)
     Assert 'fresh_backup_retained' $backupStillExists ('backup_exists={0}' -f $backupStillExists)
@@ -348,6 +389,7 @@ try {
   if ($null -ne $recoveryProcess -and -not $recoveryProcess.HasExited) { Stop-Process -Id $recoveryProcess.Id -Force }
   if ($appKeyPath -and (Test-Path -LiteralPath $appKeyPath)) {
     Remove-ItemProperty -Path $appKeyPath -Name 'IaTestRemoveInstallDirectory' -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $appKeyPath -Name 'IaTestFailLeftoverRecord' -ErrorAction SilentlyContinue
   }
 
   if ($rollbackBlockPath -and (Test-Path -LiteralPath $rollbackBlockPath)) {

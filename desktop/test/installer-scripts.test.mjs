@@ -288,6 +288,48 @@ describe('interrupted installer recovery choices (#915)', () => {
   })
 })
 
+describe('R3 recovery driver failure assertions (#1037)', () => {
+  it('shares failure-prompt acknowledgement and guards timed-out exit-code reads', () => {
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+
+    assert.equal((driver.match(/Acknowledge-RecoveryFailurePrompt \$failurePrompt/g) ?? []).length, 2)
+    assert.match(driver, /function Acknowledge-RecoveryFailurePrompt[\s\S]*?Invoke-Button \$prompt[\s\S]*?Assert \$assertionName/)
+    assert.match(
+      driver,
+      /WaitForExit\(15000\)\s*\$recoveryExited = \$recoveryProcess\.HasExited\s*\$recoveryExitCode = if \(\$recoveryExited\) \{ \$recoveryProcess\.ExitCode \} else \{ 'still running' \}/,
+    )
+    assert.match(driver, /\[switch\]\$LeaveFailurePromptOpen/)
+    assert.match(driver, /if \(\$LeaveFailurePromptOpen\) \{[\s\S]*?Log .*leaving recovery failure prompt open/)
+  })
+})
+
+describe('interrupted installer recovery journal (#1035)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('arms the backup pointer before moving the install and retains it if leftover recording fails', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const stage = source.match(/!macro iaStageApplication([\s\S]*?)!macroend/)?.[1] ?? ''
+    const arm = stage.indexOf('!insertmacro iaStashBackupDir')
+    const rename = stage.indexOf('Rename $INSTDIR $iaBackupDirectory')
+    const armError = stage.indexOf('${If} ${Errors}', arm)
+    assert.ok(arm >= 0 && arm < rename, 'backup recovery pointer must be written before the directory move')
+    assert.ok(armError > arm && armError < rename, 'a failed pointer write must stop before the directory move')
+    assert.match(stage.slice(armError, rename), /SetErrorLevel 2[\s\S]*?Quit/)
+
+    const continueFresh = source.match(/Function iaContinueInterruptedFresh([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const record = continueFresh.indexOf('WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory')
+    const recordError = continueFresh.indexOf('${If} ${Errors}', record)
+    const clear = continueFresh.indexOf('!insertmacro iaClearBackupDir')
+    assert.ok(record >= 0 && recordError > record && recordError < clear, 'leftover recording must be checked before disarming the recovery pointer')
+    assert.match(continueFresh.slice(recordError, clear), /SetErrorLevel 2[\s\S]*?Quit/)
+
+    const testBuild = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+    assert.match(testBuild, /IA_TEST_INJECT_RECOVERY_METADATA_FAILURES/)
+    assert.match(driver, /FailLeftoverRecord[\s\S]*?leftover_failure_backup_pointer_preserved/)
+  })
+})
+
 describe('Windows installer test shortcuts (#1034)', () => {
   it('disables desktop and Start Menu shortcuts for isolated test installs', () => {
     const source = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
