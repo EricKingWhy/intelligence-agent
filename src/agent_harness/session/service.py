@@ -5048,7 +5048,12 @@ class SessionService:
         ``recover`` 的前导逐条相同（422 / 404 / 损坏 409）。
         会话有在途 run ⇒ 空：其 RUNNING 行是正在执行，不是待裁决——拿它提交裁决
         只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
-        所以不能当裁决清单用）。
+        所以不能当裁决清单用）。在途按本会话**与委派树根会话**判（#1051）：子代理
+        跑在父 run 的 task 里，RunManager 只按根登记；读完 Ledger 后再判一次，
+        挡住判定与读取之间新启动的 run。
+        与 ``recover`` 的 409 **刻意不同**：``recover`` 不判在途，在途时同样的
+        RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
+        run 时逐字段一致——读面只报此刻可裁决的行。
         """
         self._validate_session_id(session_id)
         await self._ensure_stores()
@@ -5058,9 +5063,15 @@ class SessionService:
         if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
         self._raise_if_event_log_corrupt(session_id, integrity)
-        if self._run_manager.get_active(session_id) is not None:
+        owners = {session_id, session_budget_key(existing, session_id=session_id)}
+
+        def in_flight() -> bool:
+            return any(self._run_manager.get_active(sid) is not None for sid in owners)
+
+        if in_flight():
             return []
-        return await self._reconcile_pending(session_id, existing)
+        pending = await self._reconcile_pending(session_id, existing)
+        return [] if in_flight() else pending
 
     async def _reconcile_pending(self, session_id: str, events: list) -> list[dict]:
         """待人工裁决的 Operation 清单（#547 的机器可读 409 载荷）。
