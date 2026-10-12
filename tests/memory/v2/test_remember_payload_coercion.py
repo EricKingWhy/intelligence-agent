@@ -18,11 +18,15 @@ Tool Contract 的法定组成部分）。
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
+import jwt
 import pytest
 import pytest_asyncio
+from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 
+from agent_harness.config import Settings
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -42,6 +46,8 @@ from agent_harness.session import (
 )
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.web.app import create_app
+from tests.memory.v2._vector import FakeMemoryVectorClient
 
 IDENTITY = IdentityContext("tenant-a", "user-a", ["user"])
 TRUSTED = TrustedMemoryIdentity("tenant-a", "user-a")
@@ -350,3 +356,70 @@ async def test_stringified_remember_call_succeeds_on_first_attempt(memory_servic
 
     assert execution.result.ok, execution.result.message
     assert await store.get(execution.result.data["memory_id"], TRUSTED)
+
+
+# ---------------------------------------------------------------------------
+# AC3 等价集成证据（checkpoint §5.5：真机 MiMo E2E 条件不具备时的替代路径）
+# OpenAI 兼容网关形状：工具调用 args 含字符串 payload（双重编码）→ executor →
+# 落库（真实 SQLite + 真实 service）→ GET /api/memories 返回该条。
+# 全链路无 mock 冒充：网关层的字符串化用测试侧构造入参复现，其余全是真组件。
+# ---------------------------------------------------------------------------
+
+_JWT_SECRET = "memory-payload-coercion-signing-secret-at-least-32"
+
+
+def _bearer(user_id: str) -> dict[str, str]:
+    encoded = jwt.encode({
+        "tenant_id": "tenant-a", "user_id": user_id,
+        "scopes": ["user"],
+        "exp": int(datetime.now(UTC).timestamp()) + 600,
+    }, _JWT_SECRET)
+    return {"Authorization": f"Bearer {encoded}"}
+
+
+@pytest.mark.asyncio
+async def test_string_payload_visible_through_web_memory_api(tmp_path, monkeypatch):
+    # web 层走与 memory_app fixture 相同的真实装配（真 SQLite service + 假向量客户端）。
+    # 记忆写入与 GET 用的是**同一个** app 装配出的 service ⇒ 全链路无 mock 冒充。
+    monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", lambda _self: None)
+    monkeypatch.setattr(
+        "agent_harness.capability.factories.build_memory_vector_client",
+        lambda settings: FakeMemoryVectorClient(settings),
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+        jwt_secret=_JWT_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
+        milvus_uri="https://example.test", milvus_token="test-only",
+        milvus_collection="memory_test", embedding_model="test-embedding",
+        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
+    )
+    app = create_app(settings, enable_cors=False)
+    with TestClient(app) as client:
+        _registry, wiring = await client.app.state.agent.get_wiring()
+        service = wiring.memory_v2
+        assert service is not None
+
+        harness = _ConsentHarness(tmp_path)
+        await harness.open()
+        tool = RememberMemoryV2Tool(service, harness.sessions)
+        reg = ToolRegistry()
+        reg.register(tool)
+        executor = ToolExecutor(reg)
+        identity_token = set_identity_context(IDENTITY)
+        binding = harness.bind()
+        try:
+            execution = await executor.execute({
+                "id": "call-1025-d",
+                "name": "remember_this",
+                "args": dict(STRING_ARGS),
+            })
+        finally:
+            memory_session_var.reset(binding)
+            identity_context_var.reset(identity_token)
+        assert execution.result.ok, execution.result.message
+
+        resp = client.get("/api/memories", headers=_bearer("user-a"))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [item["content"] for item in body] == ["我喜欢喝美式"]
