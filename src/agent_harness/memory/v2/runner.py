@@ -254,6 +254,10 @@ class SessionEventSink:
         self._attempts = max(1, attempts)
 
     def emit(self, event_type: str, data: dict[str, Any], *, run_id: str | None = None) -> None:
+        # 构造方式刻意**不用** `Session.start` 的空列表形态：这里每次都从盘上重读，
+        # 号是按当前盘面推的，而不是「活聚合可以当场 resync」的那一类（#1024 的两类
+        # 语义见 `Session` 的类 docstring）。因此 `Session.append` 的 resync 分支对
+        # 本写者不生效，重试上界仍由本循环 owner——**不得**把它读成「活聚合」。
         for _ in range(self._attempts):
             try:
                 session = Session(

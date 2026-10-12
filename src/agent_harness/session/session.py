@@ -86,7 +86,20 @@ def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
 
 
 class Session:
-    """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。"""
+    """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。
+
+    **活聚合 vs 手持快照**（#1024）：`Session.append` 的 seq 是构造时从已加载事件
+    算出的乐观缓存。谁算的号并不都一样可靠：
+
+    * **活聚合**——`Session.start(store)`（空列表，号只可能被外力推进）与服务层
+      经 `_live_session()` 取回的那一枚（在途 run 持有、与 runtime 同一实例）。
+      它的号是「当下盘面」的读数，撞号只可能是**旁路写者刚抢走**，可以当场 resync 重投。
+    * **手持快照**——`Session(id, store, events=...)` / `load()` / `resume()` 这类
+      由调用方先读快照再构造的聚合。它的号可能是旧快照推出来的，撞号是**结构性**的
+      （并发写者落盘后这份快照就过期了），收口方式（换快照重试 / 报 409）归调用方
+      owner——服务层的 `change_model` 一族按 `_WRITE_CONFLICT_ATTEMPTS` 有界重试、
+      旁路写者 `SessionEventSink` 自带重读循环。本层**不**替它们吞掉冲突。
+    """
 
     def __init__(
         self,
@@ -101,6 +114,11 @@ class Session:
         # 增量 seq 计数器：构造时一次性从已加载事件重算（max+1），append 时 O(1) 分配，
         # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
         self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
+        # 本聚合是否**手持快照**构造（fork seed / 离线投影 / 旁路写者）：这类聚合的
+        # 号可能是旧快照推出来的，撞号是**结构性**的，得由调用方（服务层的 CAS /
+        # 重试循环）决定怎么收口——本层不做 resync，免得把调用方的重试上界变成
+        # 不可观测（#1024）。活聚合（runtime 在途 run 持有的那一枚）不受影响。
+        self._snapshot_in_hand: bool = events is not None
         self._sandbox: Sandbox | None = sandbox
         # 追加监听器（ADR-0016 §2.1）：事件持久化后同步回调——web 层据此实时
         # 广播 durable 事实（含工具执行期间追加的 output_delta）。回调异常被
@@ -367,8 +385,10 @@ class Session:
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
-        self._persist_event(event, notify=True)
-        return event
+        # 返回**实际落盘的那一枚**：resync 重投会换号（`replace(event, seq=...)`），
+        # 调用方（`end_run` 的返回值、流式镜像、测试断言）必须拿到与事件流一致的
+        # event_id/seq 对，否则「返回的 seq」与「盘上的 seq」静默分叉。
+        return self._persist_event(event, notify=True)
 
     def register_protected_fact(
         self,
@@ -404,19 +424,55 @@ class Session:
             return existing
         return self.append(TASK_PROTECTED_FACT, data)
 
-    def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
-        """提交一条已构造事件，并在需要时通知实时观察者。
+    def _persist_event(self, event: SessionEvent, *, notify: bool) -> SessionEvent:
+        """提交一条已构造事件，并在需要时通知实时观察者；返回**已落盘的那一枚**。
 
         Store 是 durable 写入 owner，Session 仍拥有内存投影与 seq 计数器。
         顺序不可交换：store 成功后才更新内存/seq，避免失败留下空洞；history
         adoption 通过 ``notify=False`` 保持离线 seed 语义。
+
+        **seq 冲突即 resync（#1024）**：本聚合的计数器只是「盘上最大 seq」的乐观
+        缓存，任何旁路写者（后台记忆作业的 ``SessionEventSink``、服务层的旁路追加）
+        都能在两次 append 之间把号占掉。撞号不是终局，而是协议的一部分：重读当前
+        盘上最大 seq、纠正 ``_next_seq``、用新号重投一次（EventStoreDB
+        ``WrongCurrentVersionError`` / Marten ``ConcurrencyException`` 同型协议——
+        存储层 fail-closed 拒写，读-改-写闭环在写者一侧完成）。没有这一步，受害
+        run 的下一次 append 必炸，而失败终态又走同一枚过期计数器、必然再炸，
+        run 永远拿不到终态（#1024 的真机事故形状）。
         """
-        self._store.append_event(self.session_id, event)
+        try:
+            self._store.append_event(self.session_id, event)
+        except SeqConflict:
+            if self._snapshot_in_hand:
+                # 手持快照 ⇒ 不做 resync，原样抛给调用方：它的号不是「被抢」而是
+                # 「按旧快照推的」，收口方式（换快照重试 / 报 409）由调用方 owner
+                # ——服务层的 `change_model` 一族按 `_WRITE_CONFLICT_ATTEMPTS` 有界
+                # 重试，把冲突在这一层吞掉会让那些上界与失败归因变成不可观测。
+                raise
+            # 只重读一次、只重投一次：上界取 1 而不是无界重试，是因为这里的冲突是
+            # 「谁的号新」的竞争、不是瞬态故障；重投前已按盘上 max 纠正，若仍被抢
+            # 说明该号又被占到（此时原样抛出去，由调用方既有的失败归因接手）。只认
+            # ``SeqConflict`` 这一个信号：其它 OSError / RuntimeError 是真故障，
+            # 仍按原契约向上抛（注入故障的既有用例不受影响）。
+            self._next_seq = max(
+                (e.seq for e in self._store.read_events(self.session_id)), default=-1,
+            ) + 1
+            event = replace(event, seq=self._next_seq)
+            self._store.append_event(self.session_id, event)
         self._events.append(event)
-        # 写盘成功后才推进计数器——失败不消耗 seq
-        self._next_seq += 1
+        # 写盘成功后才推进计数器——失败不消耗 seq。按**实际写入的号**前进（而不是
+        # 无脑 +1）：并发写者可能在本聚合取号之后替它前进过（此时的号只多不少、
+        # 不会回退），无脑 +1 会留下一个已过期的缓存、把下一次 append 直接送进冲突分支。
+        #
+        # 注意 resync 的**边界**（#1024 实测）：它只修活聚合自己的缓存，**不**替调用方
+        # 吞掉冲突。服务层的 `change_model` / `change_permission_mode` / task 面有各自的
+        # 「读快照 → 取号 → 重试」循环与 `_WRITE_CONFLICT_ATTEMPTS` 上界，上界与失败
+        # 归因归它们 owner（BUG-011 的契约与用例按此钉住）。若在本层做无界重投，
+        # 单一写者下的**结构性**冲突（如测试注入的冻结快照）会永远不再向上可见、
+        # 那些上界从此不可测。
+        self._next_seq = max(self._next_seq, event.seq) + 1
         if not notify:
-            return
+            return event
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
         for listener in self._listeners:
             try:
@@ -426,6 +482,7 @@ class Session:
                     "session listener 回调失败（session=%s, event=%s）",
                     self.session_id, event.type,
                 )
+        return event
 
     def adopt_history(
         self,
@@ -552,7 +609,7 @@ class Session:
                 data=moved_data,
                 source_event_ids=moved_sources,
             )
-            self._persist_event(moved, notify=False)
+            moved = self._persist_event(moved, notify=False)
             adopted.append(moved)
             adopted_by_id[moved.event_id] = moved
             if event.type in {USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED}:
