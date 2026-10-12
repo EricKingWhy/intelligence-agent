@@ -185,6 +185,12 @@ spec 06 §8 原文「Summary 失败：保存 raw artifact，走 fallback summary
 `compaction_failed:<seq>`），故该快照进入 retention 可达集、在清理预览里判 `referenced`
 （阻断删除），不被当作"未引用孤儿"误删。
 
+**生命周期（有意设计）**：该 raw 快照经引用注册表登记为 `referenced`，同时阻断
+`preview` / `execute` 两条清理路径，**既无 GC、也无显式人工覆盖/回收入口**——每个未被
+内容哈希去重的新失败窗口都会新增一个随 session 命名空间存续的不可清对象。这是有意的
+产品取舍（与上述发现入口同源）：快照供**事后审计与人工恢复**，宁可牺牲长期 session 的
+空间回收，也不让审计原件被自动清理误删。
+
 实现落点：`context/compactor.py`（失败分支带出原始早期窗口全文）、`context/builder.py`
 （builder-owned 落盘 + ref 回填，fail-open、绝不伪造）、`session/service.py`（引用注册表
 登记）。

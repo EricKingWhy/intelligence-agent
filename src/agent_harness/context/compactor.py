@@ -438,9 +438,10 @@ class CompactionResult:
 def _render_transcript(messages: list[AnyMessage]) -> str:
     """把一段消息渲染成摘要请求 / 失败快照共用的 JSON 转录文本。
 
-    这是三处共用的**唯一**格式：单请求摘要（`compact`）、缩小段重试、分块逐块，
-    以及 #1041 的失败快照。抽成单点避免"同形靠复制"漂移（#1041 审查 P4-2）——
-    任一处改格式必须全体一致，否则摘要与快照会静默分叉。
+    这是摘要请求与失败快照共用的**唯一**格式——摘要请求三处（单请求摘要
+    `compact`、缩小段重试、分块逐块）+ 失败快照两处（#1041 的预检拒绝抛出、
+    确定性截断降级），共 5 个调用点。抽成单点避免"同形靠复制"漂移（#1041 审查
+    P4-2）——任一处改格式必须全体一致，否则摘要与快照会静默分叉。
     """
     return json.dumps(
         [message.model_dump(mode="json") for message in messages],

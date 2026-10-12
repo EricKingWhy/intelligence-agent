@@ -431,8 +431,9 @@ def _with_artifact_ref(
     来源"的诊断——本轮发生了摘要尝试（`attempt>=1`）时，预检拒绝诊断（`attempt=0`
     的 `preflight_request_exceeds_hard_limit`，按 #639 语义**不是**摘要尝试）保持
     `None`，ref 归摘要尝试失败与截断降级诊断；纯预检轮（无任何摘要尝试：预检拒绝
-    + 无法缩小 ⇒ raise）里预检诊断是本轮唯一失败记录，ref 由它承载（否则落盘快照
-    无从发现）。
+    + 无法缩小 ⇒ raise）里失败记录**全部**是 `attempt=0` 的预检诊断——全段预检
+    失败后缩小段仍超限时该轮有**两条**（全段 + 缩小段，`narrowed` 分别 False/True），
+    一条或两条都带 ref（否则落盘快照无从发现）。
     """
     if artifact_ref is None:
         return failures

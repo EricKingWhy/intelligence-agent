@@ -936,8 +936,9 @@ def _blocking_reason(info: dict | None) -> str | None:
     """可达集条目 → 阻断原因；None 表示可清理。
 
     阻断集**只留真正的活引用**（#368 独立审查 P0-1）：未决 Operation、fork 子会话
-    引用、非出生证明的 tool/result 活引用（``referenced``）、以及 freshness 未 stale
-    的证据引用（``evidence``）。artifact 自身的 creation 事件与产生它的那条
+    引用、非出生证明的活引用（``referenced``：其他 tool/result，#1041 起还含
+    `context/compaction_failed.artifact_ref` 的 raw 恢复快照）、以及 freshness 未
+    stale 的证据引用（``evidence``）。artifact 自身的 creation 事件与产生它的那条
     tool/result 是"出生证明"（``birth_certificate``），stale 证据是 ``evidence_stale``
     ——两者都不阻断，只在 ``referenced_by`` 里如实告知用户"删掉会失去什么"。
     """
