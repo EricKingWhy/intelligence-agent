@@ -371,7 +371,11 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
 });
 
 test('AC8: pagination stops at the backend offset ceiling with an explicit boundary', async ({ page }) => {
-  test.setTimeout(90_000);
+  // 兜底防挂死（**不是**给慢用例的时长预算）：正常 <15s。阶段 A 极端基线（8 workers
+  // + 4 CPU burners、单文件 --repeat-each=15）插桩实测：慢实例 82s 才推到 170/200 次
+  // ⇒ 全程约 96–115s，旧 90s 总时限正是被它撞穿。取 ~2x 余量作**兜底**；真正的挂死
+  // 由下面的**无进展**护栏拦截（单轮点击 20s 不恢复即判死），不靠这个总时限兜。
+  test.setTimeout(240_000);
   const requestedOffsets: number[] = [];
   const memories = Array.from({ length: 50 }, (_, index) => semantic(`m-boundary-${index}`, `boundary fact ${index}`));
   await routeApi(page, {
@@ -391,37 +395,71 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   await openPanel(page);
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
 
-  // Drive the actual button handler in-page to avoid 200 Playwright round trips.
-  // The repeated page fixture keeps rendering bounded at 50 rows.
-  await page.evaluate(async () => {
-    const clickAndWaitForPage = async () => {
-      const button = document.querySelector<HTMLButtonElement>('.memory-more-btn');
-      const container = document.querySelector('.memory-panel');
-      if (!button || !container) throw new Error('pagination button disappeared before reaching the boundary');
+  // 分页到后端 offset 上限是产品语义决定的固定**工作量**：MEMORY_MAX_OFFSET /
+  // MEMORY_PAGE_SIZE = 200 次「加载更多」（web/src/lib/memory.ts:107-108）。旧写法把
+  // 这 200 次迭代全塞进**单次** page.evaluate，整条用例只有一个 90s 总时限——这是
+  // 「固定工作量 × 固定墙钟」：极端并行负载把每轮「点击→按钮恢复可用」的周期拉长后，
+  // 总时长线性膨胀、必然撞穿总时限（阶段 A 插桩实测：慢实例 82s 才推到 170/200）。
+  // 改成**按进度推进**（票面 ADAPT；Playwright 官方 Best Practices：用锚定应用状态的
+  // web-first 断言与条件等待，测试时长由进度决定，timeout 是防挂死的兜底而非慢用例的
+  // 预算）：1) 终止条件是**到达边界**（「加载更多」按钮消失），不是数满 200 次；
+  // 2) 每次 evaluate 只推进一个有界的块，块间由 Playwright 侧断言分页请求数单调前进
+  // ——真实进度条件，不随时钟走；3) 护栏是**无进展**：单轮点击若 NO_PROGRESS_MS 内不
+  // 恢复就判死（防真挂死），整块零进展且尚未到达边界即失败。它不随机器快慢变化。
+  const PAGE_SIZE = 50;
+  const MAX_OFFSET = 10_000;
+  const EXPECTED_PAGES = MAX_OFFSET / PAGE_SIZE; // 200：后端 offset 上限对应的页数（边界语义）
+  const NO_PROGRESS_MS = 20_000;
+  const PAGES_PER_EVALUATE = 20;
 
-      await new Promise<void>((resolve, reject) => {
-        const observer = new MutationObserver(() => {
-          const current = document.querySelector<HTMLButtonElement>('.memory-more-btn');
-          if (!current || !current.disabled) {
+  // 在页内驱动真实按钮 handler 推进至多 maxPages 页，到边界即提前停（返回实际推进页数）。
+  const advancePages = (maxPages: number) =>
+    page.evaluate(async ({ maxPages: pageBudget, noProgressMs }) => {
+      const clickAndWaitForPage = async () => {
+        const button = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+        const container = document.querySelector('.memory-panel');
+        if (!button || !container) throw new Error('pagination button disappeared before reaching the boundary');
+
+        await new Promise<void>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            const current = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+            if (!current || !current.disabled) {
+              observer.disconnect();
+              window.clearTimeout(timeout);
+              resolve();
+            }
+          });
+          const timeout = window.setTimeout(() => {
             observer.disconnect();
-            window.clearTimeout(timeout);
-            resolve();
-          }
+            reject(new Error('pagination request did not settle'));
+          }, noProgressMs);
+          observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+          button.click();
         });
-        const timeout = window.setTimeout(() => {
-          observer.disconnect();
-          reject(new Error('pagination request did not settle'));
-        }, 20_000);
-        observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
-        button.click();
-      });
-    };
+      };
 
-    for (let page = 0; page < 200; page += 1) await clickAndWaitForPage();
-  });
+      let advanced = 0;
+      for (let page = 0; page < pageBudget; page += 1) {
+        // 到达边界：按钮消失即唯一终止信号——不再有第 201 次点击。
+        if (!document.querySelector('.memory-more-btn')) break;
+        await clickAndWaitForPage();
+        advanced += 1;
+      }
+      return advanced;
+    }, { maxPages, noProgressMs: NO_PROGRESS_MS });
+
+  let pagesAdvanced = 0;
+  while (pagesAdvanced < EXPECTED_PAGES) {
+    const advanced = await advancePages(PAGES_PER_EVALUATE);
+    pagesAdvanced += advanced;
+    // 进度条件（真实断言）：本块结束时分页请求数必须与本块累计推进的页数一致——每一轮
+    // 点击都必须换来一次下一页请求；不推进就说明挂死在按钮/请求上，而不是机器慢。
+    expect(requestedOffsets.filter((offset) => offset > 0)).toHaveLength(pagesAdvanced);
+    if (advanced === 0) break; // 到达边界（按钮消失）——唯一合法终止
+  }
 
   const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
-  expect(pageOffsets).toEqual(Array.from({ length: 200 }, (_, index) => (index + 1) * 50));
+  expect(pageOffsets).toEqual(Array.from({ length: EXPECTED_PAGES }, (_, index) => (index + 1) * PAGE_SIZE));
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
   await expect(panel(page).locator('.memory-more-end')).toHaveAttribute('role', 'status');
   await expect(panel(page).locator('.memory-more-end')).toContainText('已达到查询上限');
