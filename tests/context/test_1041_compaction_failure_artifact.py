@@ -17,7 +17,9 @@
 - raw artifact 内容 = **原始 early 窗口** `messages[prefix_end:cut]`——含被截断保留
   与逐出两部分（是"被逐出集"的超集），不受缩小段/截断影响，保证快照完整。
 
-失败出口的落盘口径（判据 =「早期原文是否离开模型视野，或会话是否因失败受损」）：
+失败出口的落盘口径（判据 =「早期原文是否离开模型视野，或会话是否因失败受损」**且
+存在可存的 early 原文**；early 为空的出口如 `no_compactable_early_turn` 无原文可存，
+即便会话因失败受损也不落盘）：
 - 双失败 + 不可截断 ⇒ `ContextWindowExceededError`（会话 run/paused）⇒ **落盘**；
 - 双失败 + 可截断 ⇒ 截断降级成功（早期原文被压出模型视野）⇒ **落盘**；
 - 预检拒绝 + 无法缩小 + 有效用量仍超 hard ⇒ `ContextWindowExceededError`（会话

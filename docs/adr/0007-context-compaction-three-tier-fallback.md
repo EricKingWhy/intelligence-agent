@@ -161,7 +161,9 @@ spec 06 §8 原文「Summary 失败：保存 raw artifact，走 fallback summary
 的落盘面**存在字面歧义（"走 fallback summary"与 #1026 的确定性截断不产生摘要之间
 错配）。用户 **2026-10-12 17:48 裁决读法 = R1**：**摘要失败的三条出口中，"抛错停止"
 与"截断降级"两条落盘原始早期窗口全文的独立快照；"安全继续"出口不落盘。** 判据是
-"早期原文是否离开模型视野，或会话是否因失败受损"：
+"早期原文是否离开模型视野，或会话是否因失败受损"，**且存在可存的 early 原文**——
+early 为空的出口（如 `no_compactable_early_turn`：无可压缩完整早期轮、无原文可存）
+即便会话因失败受损也不落盘：
 
 1. **落盘（§8/R1 的独立快照前提成立）**：
    - ① 双失败且不可截断 ⇒ `ContextWindowExceededError`（hard guard，run/paused）；
@@ -171,9 +173,12 @@ spec 06 §8 原文「Summary 失败：保存 raw artifact，走 fallback summary
    三者都把**原始 early 窗口 `messages[prefix_end:cut]` 的完整转录文本**（含"截断
    保留 + 逐出"两部分，是"逐出集"的超集、非仅被逐出集）落成 raw artifact，ref 回填
    进 `context/compaction_failed.artifact_ref`。
-2. **不落盘（独立快照前提不成立）**：双失败但有效用量 ≤ hard 的**安全继续**出口——
-   旧投影逐字保留、早期原文仍在模型视野内、且仍在 append-only 事件流里可原样回放，
-   会话未受损 ⇒ 无需独立快照，落盘只是每轮触发的无界冗余写。
+2. **不落盘（独立快照前提不成立）**：
+   - 双失败但有效用量 ≤ hard 的**安全继续**出口——旧投影逐字保留、早期原文仍在模型
+     视野内、且仍在 append-only 事件流里可原样回放，会话未受损 ⇒ 无需独立快照，落盘
+     只是每轮触发的无界冗余写。
+   - 会话虽因失败受损、但 **early 为空、无原文可存**的出口（`no_compactable_early_turn`：
+     无可压缩完整早期轮）——"存在可存 early 原文"不成立 ⇒ 无原文可落盘。
 
 **背书**：Aider（raw 对话历史无条件追加落盘，独立于摘要）与 LangGraph checkpointer
 （完整状态历史持久化，摘要替换当前状态后原文仍可经 checkpoint 回溯）同证"raw 原文

@@ -1231,7 +1231,8 @@ class ContextBuilder:
         """#1041（spec 06 §8）：摘要失败分支带出的**原始 early 窗口全文**落盘成 raw
         artifact，返回其内容寻址 ref。
 
-        - `raw is None`（成功 / 安全继续 / 低水位 / 无早期窗口等无原文可存的路径）或
+        - `raw is None`（成功 / 安全继续 / 低水位 / 无早期窗口等**无原文可存**的路径，
+          含 `no_compactable_early_turn`——会话受损但 early 为空、无原文可存）或
           `self._artifact_store is None`（未装配 store）⇒ **不落盘、返回 None**
           （§8「上传失败不能伪造 artifact_ref」）。
         - 落盘失败同样 fail-open 返回 None 并记 warning：本方法在**既有的失败路径**上

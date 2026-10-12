@@ -369,6 +369,8 @@ class ContextWindowExceededError(RuntimeError):
         #: 同形；含"截断保留 + 逐出"两部分，非仅被逐出集）。由 builder 落盘成 raw
         #: artifact 并回填 ref（§8「摘要失败保存 raw artifact」）。**纯文本搬运**，
         #: compactor 不接触 store；其余抛点保持 None（非"摘要失败"语义）。
+        #: 落盘另需**存在可存的 early 原文**：会话虽因失败受损、但 early 为空、无原文可存
+        #: 的出口（如 `no_compactable_early_turn`：无可压缩完整早期轮）同样保持 None、不落盘。
         self.raw_artifact_content = raw_artifact_content
 
 
