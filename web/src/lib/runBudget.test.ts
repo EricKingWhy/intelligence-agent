@@ -594,3 +594,54 @@ describe('budgetBadgeFacts — 徽标同源取数（#537）', () => {
     expect(budgetBadgeFacts(null, CONSUMED)).toEqual([]);
   });
 });
+
+// ── #1026：context 维暂停（max_context_tokens）—— 不是 run ceiling，不给伪数字输入 ──
+
+describe('context 维暂停（#1026）—— max_context_tokens 不回落 turns（验收 5）', () => {
+  /** 真实载荷形状：context 硬护栏触发的 run/paused（W-04 #348）。 */
+  function contextPaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
+    return pausedInfo({
+      reason: 'budget_exhausted',
+      trigger_dimension: 'max_context_tokens',
+      consumed_dimensions: {
+        agent_turns: 5, model_requests: 9, total_tokens: 160_000, cost_usd: null,
+        tool_calls: 4, tool_attempts: 4,
+        tool_calls_by_tool: { read: 2 }, tool_attempts_by_tool: { read: 2 },
+      },
+      run_limits: {
+        max_agent_turns_total: 20,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: null,
+        tool_call_limits: {},
+      },
+      ...overrides,
+    });
+  }
+
+  it('恢复目标是 context 引导，不再回落 turns 维（不再渲染 max_agent_turns_total 输入）', () => {
+    const facts = pauseFacts(contextPaused());
+    expect(facts.resumeTarget).toEqual({ kind: 'context' });
+    expect(resumeTargetLabel(facts.resumeTarget)).toContain('max_context_tokens');
+  });
+
+  it('草稿校验放行（没有数字要填），提交值恒 null（不发伪 ceiling 恢复请求）', () => {
+    const p = contextPaused();
+    expect(ceilingDraftError(p, '')).toBeNull();
+    expect(ceilingDraftValue(p, '')).toBeNull();
+    expect(ceilingDraftValue(p, '999')).toBeNull();
+    expect(defaultResumeDraft(p)).toBeNull();
+  });
+
+  it('恢复提示是引导文案：指向手动压缩 / 调大上限，不点名任何 run ceiling 开关', () => {
+    const hint = resumeInputHint(pauseFacts(contextPaused()));
+    expect(hint).toContain('压缩');
+    expect(hint).not.toContain('--run-turns-total');
+    expect(hint).not.toContain('--run-total-tokens');
+  });
+
+  it('请求目标产出 context kind：App 组装不出 run/tool/deadline 的恢复体', () => {
+    expect(resumeRequestTarget(contextPaused())).toEqual({ kind: 'context' });
+  });
+});

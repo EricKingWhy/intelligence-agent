@@ -242,6 +242,163 @@ describe('installer.nsh LangString guards (#831)', () => {
   })
 })
 
+describe('rollback install-directory probe (#1023)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('uses the shared long-path helper before reading install-directory attributes', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const input = rollback.indexOf('StrCpy $iaPlainPath "$iaFinalDirectory"')
+    const helper = rollback.indexOf('Call iaBuildLongPath')
+    const target = rollback.indexOf('StrCpy $0 "$iaDeleteTarget"', helper)
+    const attributes = rollback.indexOf("System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'", target)
+
+    assert.ok(input >= 0, 'rollback must pass the install directory to iaBuildLongPath')
+    assert.ok(helper > input, 'rollback must build the long-path form before probing')
+    assert.ok(target > helper, 'GetFileAttributes must receive the path produced by the helper')
+    assert.ok(attributes > target, 'the attribute query must follow the helper output')
+  })
+})
+
+describe('long-path app executable detection (#1045)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('routes recovery, stage, and promote through the shared existence probe', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const bodyBetween = (start, end) => {
+      const startAt = source.indexOf(start)
+      assert.ok(startAt >= 0, 'missing block: ' + start)
+      const bodyStart = startAt + start.length
+      const endAt = source.indexOf(end, bodyStart)
+      assert.ok(endAt >= 0, 'missing block end: ' + end)
+      return source.slice(bodyStart, endAt)
+    }
+    const recovery = bodyBetween('!macro iaRecoverInterruptedInstall', '!macroend')
+    const stage = bodyBetween('!macro iaStageApplication', '!macroend')
+    const promote = bodyBetween('Function iaPromoteApplication', 'FunctionEnd')
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+
+    const assertProbe = (body, name, condition) => {
+      const input = body.indexOf(appPath)
+      const call = body.indexOf('Call iaProbePath', input)
+      const guard = body.indexOf('$' + '{If} $iaProbeFound ' + condition, call)
+
+      assert.ok(input >= 0, name + ' does not pass the app path to iaProbePath')
+      assert.ok(call > input && call - input < 160, name + ' does not call iaProbePath for the app path')
+      assert.ok(guard > call && guard - call < 120, name + ' does not branch on the probe result')
+      assert.doesNotMatch(body, /FileExists.*APP_EXECUTABLE_FILENAME/)
+    }
+
+    assertProbe(recovery, 'recovery', '!= "1"')
+    assertProbe(stage, 'stage', '== "1"')
+    assertProbe(promote, 'promote', '== "1"')
+  })
+})
+
+describe('interrupted installer recovery choices (#915)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('clears the consumed leftover pointer after rollback restores the backup (#1040)', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restored = rollback.match(/\$\{Else\}\s*StrCpy \$iaRollbackStatus "restored"([\s\S]*?)!insertmacro iaClearBackupDir/)?.[1] ?? ''
+
+    assert.match(
+      restored,
+      /!insertmacro iaReadLeftoverDir[\s\S]*?\$\{If\} \$iaLeftoverDirectory == \$iaBackupDirectory[\s\S]*?DeleteRegValue HKCU "\$\{INSTALL_REGISTRY_KEY\}" "IaLeftoverDir"[\s\S]*?\$\{EndIf\}/,
+    )
+  })
+
+  it('defers recovery to explicit buttons and keeps the backup armed on cancel', () => {
+    const installer = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+    const directories = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const recovery = directories.match(/!macro iaRecoverInterruptedInstall([\s\S]*?)!macroend/)?.[1] ?? ''
+    const page = directories.match(/Function iaRecoveryPageCreate([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const pageLeave = directories.match(/Function iaRecoveryPageLeave([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restoreClick = directories.match(/Function iaRecoveryRestoreClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const freshClick = directories.match(/Function iaRecoveryFreshClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const guiEnd = directories.match(/Function \.onGUIEnd([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+
+    assert.match(installer, /Page custom iaRecoveryPageCreate iaRecoveryPageLeave/)
+    assert.match(recovery, /StrCpy \$iaRecoveryPending "1"/)
+    assert.doesNotMatch(recovery, /MessageBox MB_YESNO/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaRestorePrevious\)/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaContinueFresh\)/)
+    assert.match(pageLeave, /StrCmp \$iaRecoveryChoice "continue"[\s\S]*?StrCmp \$iaRecoveryChoice "restore"[\s\S]*?Abort/)
+    assert.match(pageLeave, /Call iaContinueInterruptedFresh/)
+    assert.match(pageLeave, /Call iaRollbackApplication[\s\S]*?quitSuccess/)
+    assert.match(restoreClick, /StrCpy \$iaRecoveryChoice "restore"[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.match(freshClick, /StrCpy \$iaRecoveryChoice "continue"[\s\S]*?ShowWindow \$0 \$\{SW_SHOW\}[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.doesNotMatch(restoreClick + freshClick, /Call iaRollbackApplication|Call iaContinueInterruptedFresh|\bQuit\b|quitSuccess/)
+    assert.match(guiEnd, /iaRecoveryPending == "1"[\s\S]*?Return/)
+  })
+})
+
+describe('R3 recovery driver failure assertions (#1037)', () => {
+  it('shares failure-prompt acknowledgement and guards timed-out exit-code reads', () => {
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+
+    assert.equal((driver.match(/Acknowledge-RecoveryFailurePrompt \$failurePrompt/g) ?? []).length, 2)
+    assert.match(driver, /function Acknowledge-RecoveryFailurePrompt[\s\S]*?Invoke-Button \$prompt[\s\S]*?Assert \$assertionName/)
+    assert.match(
+      driver,
+      /WaitForExit\(15000\)\s*\$recoveryExited = \$recoveryProcess\.HasExited\s*\$recoveryExitCode = if \(\$recoveryExited\) \{ \$recoveryProcess\.ExitCode \} else \{ 'still running' \}/,
+    )
+    assert.match(driver, /\[switch\]\$LeaveFailurePromptOpen/)
+    assert.match(driver, /if \(\$LeaveFailurePromptOpen\) \{[\s\S]*?Log .*leaving recovery failure prompt open/)
+  })
+})
+
+describe('interrupted installer recovery journal (#1035)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('keeps the backup pointer armed through continued installation until promotion', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const stage = source.match(/!macro iaStageApplication([\s\S]*?)!macroend/)?.[1] ?? ''
+    const arm = stage.indexOf('!insertmacro iaStashBackupDir')
+    const rename = stage.indexOf('Rename $INSTDIR $iaBackupDirectory')
+    const armError = stage.indexOf('${If} ${Errors}', arm)
+    assert.ok(arm >= 0 && arm < rename, 'backup recovery pointer must be written before the directory move')
+    assert.ok(armError > arm && armError < rename, 'a failed pointer write must stop before the directory move')
+    assert.match(stage.slice(armError, rename), /SetErrorLevel 2[\s\S]*?Quit/)
+
+    const continueFresh = source.match(/Function iaContinueInterruptedFresh([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const record = continueFresh.indexOf('WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory')
+    const recordError = continueFresh.indexOf('${If} ${Errors}', record)
+    assert.ok(record >= 0 && recordError > record, 'leftover recording must be checked before continuing')
+    assert.match(continueFresh.slice(recordError), /SetErrorLevel 2[\s\S]*?Quit/)
+    assert.doesNotMatch(continueFresh, /iaClearBackupDir/, 'the old version stays recoverable until the fresh installation commits')
+
+    const promote = source.match(/Function iaPromoteApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+    const appProbe = promote.indexOf(appPath)
+    const appProbeCall = promote.indexOf('Call iaProbePath', appProbe)
+    const appGuard = promote.indexOf('$' + '{If} $iaProbeFound == "1"', appProbeCall)
+    const clearBackup = promote.indexOf('!insertmacro iaClearBackupDir', appProbeCall)
+    assert.ok(
+      appProbe >= 0 && appProbeCall > appProbe && appGuard > appProbeCall && appGuard < clearBackup,
+      'promote must decide whether the installed executable exists through iaProbePath before clearing the backup pointer',
+    )
+    assert.match(promote, /iaReadLeftoverDir\s+StrCmp \$iaLeftoverDirectory \$iaBackupDirectory iaPromoteBackupAlreadyLeftover/)
+    assert.match(promote, /iaPromoteBackupAlreadyLeftover:[\s\S]*?iaClearBackupDir/)
+
+    const testBuild = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+    assert.match(testBuild, /IA_TEST_INJECT_RECOVERY_METADATA_FAILURES/)
+    assert.match(driver, /FailLeftoverRecord[\s\S]*?leftover_failure_backup_pointer_preserved/)
+  })
+})
+
+describe('Windows installer test shortcuts (#1034)', () => {
+  it('disables desktop and Start Menu shortcuts for isolated test installs', () => {
+    const source = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const nsis = source.match(/nsis:\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? ''
+
+    assert.match(nsis, /createDesktopShortcut:\s*false/)
+    assert.match(nsis, /createStartMenuShortcut:\s*false/)
+  })
+})
+
 describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
   // The pre-#901 shape: "\\?" with no separator backslash. NSIS strings have no
@@ -1320,10 +1477,12 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
     const lines = body.map((line) => line.trim()).filter((line) => line !== '')
     const del = lines.findIndex((line) => /^RMDir\s+\/r\b/.test(line))
-    const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
+    const read = lines.findLastIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
     const plain = lines.findIndex((line) => /^StrCpy\s+\$iaPlainPath\s+"\$iaLeftoverDirectory"$/.test(line))
-    const probe = lines.findIndex((line) => /^Call\s+iaProbePath\b/.test(line))
-    const guarded = lines.findIndex((line) => /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line))
+    const probe = lines.findIndex((line, index) => index > plain && /^Call\s+iaProbePath\b/.test(line))
+    const guarded = lines.findIndex(
+      (line, index) => index > probe && /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line),
+    )
     const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
     const clear = lines.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
     for (const [name, index] of [
@@ -1381,7 +1540,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // Exactly one probe and one drop: a second probe site would be a second
     // guess about the same record, and a second drop a second guess about when
     // it is gone.
-    const probes = lines.filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
+    const probes = lines.slice(plain).filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
     assert.equal(probes, 1, 'the promote body probes the leftover record more than once')
     const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
     assert.equal(drops, 1)
