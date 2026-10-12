@@ -1576,6 +1576,20 @@ def _sse_response(
     )
 
 
+async def _truncated_sse_stream(session_id: str, after_seq: int, latest_seq: int):
+    """单帧 `stream/truncated` 控制帧后收流（续传两条分支共用）。
+
+    `stream_session` 的默认分支与 `follow=1` 分支都以「backlog 超阈值 → **同一**控制帧
+    后收流」收束；抽到一处让两条分支共用同一形状，避免各写一遍后漂移。帧本身仍来自
+    `serialization.build_truncated_control` 的单一构建点（`#208`）——这里只是外层 async
+    generator 包装的唯一实现。
+    """
+    control = build_truncated_control(
+        session_id, after_seq=after_seq, latest_seq=latest_seq,
+    )
+    yield {"data": json.dumps(control, ensure_ascii=False)}
+
+
 def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     """生效 local fuse 的**只读投影**：响应头形式（`#308` Must Do）。
 
@@ -2803,7 +2817,9 @@ def create_app(
         )
 
     @app.get("/api/sessions/{session_id}/stream")
-    async def stream_session(session_id: str, after_seq: int = -1):
+    async def stream_session(
+        session_id: str, after_seq: int = -1, follow: bool = False,
+    ):
         """重连续传（ADR-0016 §2.3，C4/C5）：重放 durable 事实 + 接上在途流。
 
         客户端维护 lastAppliedSeq，断线后带 after_seq 重连：
@@ -2816,8 +2832,61 @@ def create_app(
            无重复）；run 已终态/不在途 → 重放到 latest 后正常收尾
            （崩溃遗留的悬空 run 不伪造终态，修复走 POST /recover）。
         客户端对重放帧与 live 帧做同一 seq 幂等投影（C5）。
+
+        `follow=1`（`#1014` A-opt，**opt-in**）：第 4 步改为**会话级订阅**——idle
+        会话的连接**不收流**（消灭「idle 每秒建/收一次」的空转），改为经既有的
+        `Session.add_listener` 通道（`ManagedRun._fanout` 多扇出一路）推送该会话的
+        后续事件，run 收尾只是安静期、连接保持，之后（本客户端或**别的客户端**）起的
+        run 的帧实时到达。默认 `follow=0`（缺省）行为**逐字不变**（旧客户端/旧测试零影响）。
         """
         service = session_service(app.state.agent)
+        state = app.state.agent
+
+        if follow:
+            try:
+                follow_handle = await service.stream_follow(
+                    session_id=session_id, after_seq=after_seq,
+                )
+            except (InvalidSessionId, SessionNotFound) as e:
+                raise http_error(e) from e
+
+            events = follow_handle.events
+            latest_seq = follow_handle.latest_seq
+            follower = follow_handle.follower
+
+            if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+                # 与默认分支同判据、同纪律：截断即**先退订**再收流，队列不留孤儿。
+                state.run_manager.unsubscribe_session(session_id, follower)
+                return _sse_response(
+                    _truncated_sse_stream(session_id, after_seq, latest_seq)
+                )
+
+            async def follow_generator():
+                try:
+                    for event in events:
+                        if after_seq < event.seq <= latest_seq:
+                            yield _session_event_to_sse_dict(event, session_id)
+                    while True:
+                        item = await follower.queue.get()
+                        # 队列溢出（慢客户端）：丢帧对本连接不可自愈 ⇒ 收流，客户端
+                        # 走既有「ended → after_seq 重连」重放补洞（#1014）。
+                        if item is state.run_manager.RESYNC:
+                            return
+                        # 重放已覆盖订阅与读盘窗口内的入队（seq ≤ 读盘游标）；
+                        # 会话级订阅者**永不**收 DONE（run 收尾不是本条流的终点）。
+                        if item.seq is not None and item.seq <= latest_seq:
+                            continue
+                        # 无 seq 的 transient 帧（如 model/started）不参与序幂等：它若在
+                        # 「订阅-读盘」窗口内入队，会在整段 durable 重放之后才投递（相对
+                        # 自然时序滞后）。客户端一律不投影无 seq 的 transient 帧
+                        # （TUI: `SeqCursor` 对 seq=null 返回 skip），无可见影响；
+                        # 登记于 ADR-0016 §2.3 注记。
+                        yield _event_to_sse_dict(item, session_id)
+                finally:
+                    state.run_manager.unsubscribe_session(session_id, follower)
+
+            return _sse_response(follow_generator())
+
         try:
             handle = await service.stream_reconnect(
                 session_id=session_id,
@@ -2832,7 +2901,6 @@ def create_app(
         run = handle.run
         subscriber = handle.subscriber
         replay_upto = handle.replay_upto
-        state = app.state.agent
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
             # 截断分支必须**先退订**（与 WS 的 `_push_snapshot` 同一条纪律）：
@@ -2844,15 +2912,9 @@ def create_app(
             if subscriber is not None and run is not None:
                 run.unsubscribe(subscriber)
 
-            async def truncated_generator():
-                # 帧形状来自 serialization 的**单一构建点**（#208）：WS 快照
-                # 超限时发的是同一个函数产出的帧，两条通道一字不差。
-                control = build_truncated_control(
-                    session_id, after_seq=after_seq, latest_seq=latest_seq,
-                )
-                yield {"data": json.dumps(control, ensure_ascii=False)}
-
-            return _sse_response(truncated_generator())
+            return _sse_response(
+                _truncated_sse_stream(session_id, after_seq, latest_seq)
+            )
 
         async def event_generator():
             try:

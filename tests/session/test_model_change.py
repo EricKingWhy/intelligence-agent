@@ -328,6 +328,34 @@ class TestRuntimeReadsSessionModel:
             "permission_defaults_version": 2,
         }
 
+    def test_create_with_default_entry_name_records_no_override(self, tmp_path):
+        """#1016：选中默认条目 = 清覆盖；创建时不该把它落成一个具体 model_id。
+
+        默认条目 id = 默认链模型名（本夹具 ``deepseek-chat``）。若照 `amend.model`
+        原样落盘，会话事件里会写着一个"等于默认模型名"的假覆盖，续聊时它既不是
+        catalog 条目、又已是默认链，落成多余噪声。与 ``resolve_model_target`` /
+        ``resolve_selection`` 共用同一判据后，这里应**不写** provider / model_id。
+        """
+        state = _state(tmp_path)
+        with (
+            patch(
+                "agent_harness.session.service.build_runtime",
+                new_callable=AsyncMock,
+            ),
+            patch("agent_harness.session.service.Session") as mock_session_cls,
+        ):
+            mock_session_cls.start = MagicMock(return_value=MagicMock())
+            service = session_service(state)
+            asyncio.run(
+                service.create_and_launch(
+                    task="hello", amend=AmendOptions(model="deepseek-chat")
+                )
+            )
+
+        started_data = mock_session_cls.start.call_args.kwargs["started_data"]
+        assert "model_id" not in started_data
+        assert "provider" not in started_data
+
     def test_derived_model_gone_from_catalog_falls_back_to_default(self, tmp_path):
         """会话记录的模型已不在 catalog（配置漂移）→ 回落默认链，不 500。"""
         state = _state(tmp_path)

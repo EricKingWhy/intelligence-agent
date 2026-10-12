@@ -37,6 +37,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Cpu, Settings2 } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
 import { capabilityBadges, isUnavailable, providerAvailability, reasonLabel } from '../lib/modelAvailability';
+import { selectableModels } from '../lib/modelSelection';
 import { DEFAULT_VALUE, OptionRowContent } from './OptionPicker';
 import { ProviderManagerDialog } from './ProviderManagerDialog';
 
@@ -59,11 +60,12 @@ function groupByProvider(models: ModelCatalogEntry[]): { provider: string; items
   return Array.from(groups, ([provider, items]) => ({ provider, items }));
 }
 
-/** 二级行的次级文案：`默认` 是后端目录里的标记（有信息量），否则回退到真实 model id
- *  （仅当它和展示名不同才有信息量）。**不重复 provider 名**——二级本来就是某个
- *  provider 的展开，写它只占掉描述行。两项都没有 → 不渲染描述行（不填占位）。 */
+/** 二级行的次级文案：回落真实 model id（仅当它和展示名不同才有信息量）。
+ *  **不重复 provider 名**——二级本来就是某个 provider 的展开，写它只占掉描述行。
+ *  没有信息量 → 不渲染描述行（不填占位）。
+ *  （#1016 后默认条目不进二级列表——`selectableModels` 过滤——故不再有「默认」
+ *  这一支；「默认链」的标签属于一级入口。） */
 function modelMeta(m: ModelCatalogEntry): string | undefined {
-  if (m.default) return '默认';
   return m.model && m.model !== m.name ? m.model : undefined;
 }
 
@@ -73,7 +75,9 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   // #203：管理模型弹层（在菜单里点击入口后打开；菜单先关闭——两层浮层叠放
   // 会互相抢 Esc/焦点，先关菜单再开弹层）。
   const [manageOpen, setManageOpen] = useState(false);
-  const grouped = useMemo(() => groupByProvider(models), [models]);
+  // 二级列表**不含默认条目**（#1016）：默认是状态不是 id，一级「默认链」是它的
+  // 唯一入口。排除后只剩默认条目的 provider 组会因无项而整组不渲染。
+  const grouped = useMemo(() => groupByProvider(selectableModels(models)), [models]);
   const selectedEntry = useMemo(
     () => (selectedModel ? models.find((m) => m.name === selectedModel) ?? null : null),
     [models, selectedModel],
