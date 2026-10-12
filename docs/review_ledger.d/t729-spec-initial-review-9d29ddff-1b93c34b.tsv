@@ -1,0 +1,1 @@
+2026-10-13	#729 Spec 初始双轴发现审查：固定范围 `9d29ddff..1b93c34b`，PASS-WITH-FINDINGS；P3：workspace 能力选择未验证最终精确策略，可能把探针支持误当成当前策略可用。`1225da9c` 改为构造同一 workspace policy 并 probe，修后 AC 对账确认关闭。	9d29ddffab45b83ce2e467f49c19aa1ae4f1fb6f..1b93c34b5154afc70e0a4475499c8ac403798548
