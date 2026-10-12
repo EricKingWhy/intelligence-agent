@@ -213,12 +213,15 @@ under `%TEMP%\ia-r1-drivers` unless `-EvidenceDir` / `-Keep` say otherwise.
 | `run-fileexists-probe.ps1` | injects the production `iaProbePath` function and `iaBuildLongPathBody`, creates isolated long and short file controls, asserts `1 / 0 / 1`, and removes the scratch tree. Run with `powershell -File r1-drivers/run-fileexists-probe.ps1` |
 | `leftover-probe.nsi` | compiled with `/DPROBE_TARGET=<long dir>` / `/DPROBE_CONTROL=<short dir>`; reports both `${FileExists}` forms, raw `GetFileAttributes`, and the production `iaBuildLongPath` result on the same >MAX_PATH directory, plus the short control and a deep write attempt |
 | `run-leftover-probe.ps1` | builds a >MAX_PATH tree, compiles the probe against the production cleanup helper, asserts the helper sees the existing directory while the unprefixed query does not, and removes the scratch tree |
+| `process-gate-probe.nsi` | probe template with markers for the production `iaClassifyRunningProduct` / `iaRequireNoRunningProduct` functions (#914); records the production answer, the stock app-builder-lib `FIND_PROCESS` answer on the same state, and whether the gate returned |
+| `run-process-gate-probe.ps1` | injects both production functions and drives four legs against real processes: `none` (empty tree — answer 0, gate returns), `runtime` (a headless image under `resources\python` — answer 11, gate stops it and the PID is gone), `client` (a live image in the install root — answer 12, gate exits 2 and the PID stays alive), `unknown` (an install path the query cannot parse — nothing proven clean, gate exits 2). Run with `powershell -File r1-drivers/run-process-gate-probe.ps1` |
 
 ```powershell
 # test artifact first (prints the installer path it built):
 node scripts/test-windows-installer.mjs --compile-only
 powershell -File r1-drivers/drive-r1-update.ps1 -Installer <installer-test.exe> -Tag t1 -Case success -Expect fixed
 powershell -File r1-drivers/run-leftover-probe.ps1
+powershell -File r1-drivers/run-process-gate-probe.ps1
 ```
 
 `drive-r1-update.ps1` is the driver the #901 evidence logs came from (logs stay
@@ -232,3 +235,13 @@ destroyed). `run-leftover-probe.ps1` printed
 `target_len=327 unprefixed=[false] prefixed=[true] control_short=[true] deepwrite=[failed]`
 and removed its scratch tree. The `success` and `failure` cases were last run
 from the checkout on 2026-10-09 with the same driver.
+
+`run-process-gate-probe.ps1` (#914) was last run 2026-10-12 from the checkout
+(twice, identical readings): `none exit=0 answer_before=0 stock=1 gate_returned=1
+answer_after=0`; `runtime exit=0 answer_before=11 stock=1 gate_returned=1
+answer_after=0` with the probe process `gone`; `client exit=2 answer_before=12
+stock=1 gate_returned=0` with the probe process `alive`; `unknown exit=2
+answer_before=1 stock=1 gate_returned=0`. The stock `FIND_PROCESS` predicate
+answers `1` ("not running") on **all four** legs — the same reading it gives on
+an empty tree — which is the measured root cause of #914: at exactly one
+matching process the shipped guard cannot tell a live service from nothing.

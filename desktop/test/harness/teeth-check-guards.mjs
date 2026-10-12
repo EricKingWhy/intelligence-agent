@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = '3ea817b5099c84b9210d1dc2aa02dfd8ba57be73130d6f5f2fbe5105b8d973bc'
+const GUARD_BASELINE_SHA256 = '45af94aeaac51d843a06f40cd29dcde6b483ad6371b1ec6538f38044b9490497'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -718,6 +718,18 @@ const mutations = {
   'counter bump alphabet narrowed back to +1 (#919 review P1)': swap(
     "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*(?:[1-9]\\d*)\\s*$/i",
     "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*1\\s*$/i",
+  ),
+  // #914 [W-16 R2]: the process gate's two load-bearing rules. Reverting either
+  // one leaves the gate reading as clean while the product it describes goes
+  // blind — the fixture in test/installer-scripts.test.mjs ("process gate
+  // (#914)") is what holds each down.
+  'array cast rule dropped from the process gate (#914)': swap(
+    "    if (!classify.includes('@(Get-CimInstance')) {",
+    '    if (false) {',
+  ),
+  'gate ordering rule dropped from the process gate (#914)': swap(
+    '    if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {',
+    '    if (false) {',
   ),
 }
 
