@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { MEMORY_MAX_OFFSET, MEMORY_PAGE_SIZE } from '../src/lib/memory';
 import { T, routeApi, sessionRow, type FrameSpec, type MemoryFixture } from './fixtures';
 
 const semantic = (id: string, content: string, over: Partial<MemoryFixture> = {}): MemoryFixture => ({
@@ -371,9 +372,8 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
 });
 
 test('AC8: pagination stops at the backend offset ceiling with an explicit boundary', async ({ page }) => {
-  // 套件里唯一一处用例级时限（理由见下方块注释）：本用例按产品语义要串行做 ~200 次
-  // 「加载更多」，极端负载下整测可从正常 <15s 拉长到 ~115s（阶段 A 实测），全局 30s 不够，
-  // 故显式抬高；它只作**防挂死兜底**，真正的挂死由下面的无进展护栏拦截。
+  // 套件里唯一一处用例级时限：本用例按产品语义要串行做 ~200 次「加载更多」，耗时远超全局
+  // 30s（数字见下方块注释），故显式抬高；它只作**防挂死兜底**，真正挂死由无进展护栏拦截。
   test.setTimeout(240_000);
   const requestedOffsets: number[] = [];
   const memories = Array.from({ length: 50 }, (_, index) => semantic(`m-boundary-${index}`, `boundary fact ${index}`));
@@ -395,21 +395,21 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
 
   // 分页到后端 offset 上限是产品语义决定的固定**工作量**：MEMORY_MAX_OFFSET /
-  // MEMORY_PAGE_SIZE = 200 次「加载更多」（web/src/lib/memory.ts:105,108）。旧写法把
-  // 这 200 次迭代全塞进**单次** page.evaluate，整条用例只有一个 90s 总时限——这是
-  // 「固定工作量 × 固定墙钟」：极端并行负载把每轮「点击→按钮恢复可用」的周期拉长后，
-  // 总时长线性膨胀、必然撞穿总时限（阶段 A 插桩实测：慢实例 82s 才推到 170/200）。
+  // MEMORY_PAGE_SIZE = 200 次「加载更多」（两常量直接从 web/src/lib/memory.ts 导入，与
+  // 后端 offset 上限同源，杜绝手工复制的漂移）。旧写法把这 200 次迭代全塞进**单次**
+  // page.evaluate，整条用例只有一个 90s 总时限——这是「固定工作量 × 固定墙钟」：极端并行
+  // 负载把每轮「点击→按钮恢复可用」的周期拉长后，总时长线性膨胀、必然撞穿总时限。阶段 A
+  // 插桩（沙箱 8 workers + 4 CPU burners、整文件 repeat 15，见 issue #1064）实测本用例：
+  // 慢实例 82s 才推到 170/200 次 ⇒ 全程约 96–115s；正常负载则 <15s。
   // 改成**按进度推进**（票面 ADAPT；Playwright 官方 Best Practices：用锚定应用状态的
   // web-first 断言与条件等待，测试时长由进度决定）：唯一终止条件是**到达边界**（「加载
   // 更多」按钮消失），循环不再有固定 200 次的上界；每次 evaluate 只推进一个有界的块，
   // 块间由 Playwright 侧断言分页请求数单调前进——真实进度条件，不随时间窗走；护栏是
   // **无进展**：单轮点击若 NO_PROGRESS_MS 内不恢复就判死（防真挂死）。
-  // 残余风险（诚实标注）：200 次点击是**串行**的、总墙钟仍随单轮延迟线性增长。上面的
-  // 240s 兜底相对阶段 A 极端基线实测最坏 ~115s 留了 ~2x 余量；若负载再恶化 ~2x 仍可能
-  // 撞线——这是「200 次串行交互」这一产品语义的固有代价，非本 diff 可消除，故显式记录。
-  const PAGE_SIZE = 50; // 必须与 web/src/lib/memory.ts:105 MEMORY_PAGE_SIZE 同步
-  const MAX_OFFSET = 10_000; // 必须与 web/src/lib/memory.ts:108 MEMORY_MAX_OFFSET 同步
-  const EXPECTED_PAGES = MAX_OFFSET / PAGE_SIZE; // 200：后端 offset 上限对应的页数（边界语义）
+  // 残余风险（诚实标注）：那 200 次点击是**串行**的，总墙钟仍随单轮延迟线性增长；上面的
+  // 兜底时限相对上述实测最坏值只留 ~2x 余量，负载再恶化 ~2x 仍可能撞线——这是「200 次
+  // 串行交互」这一产品语义的固有代价，非本 diff 可消除，故显式记录。
+  const EXPECTED_PAGES = MEMORY_MAX_OFFSET / MEMORY_PAGE_SIZE; // 200：offset 上限对应的页数（边界语义）
   const NO_PROGRESS_MS = 20_000;
   const PAGES_PER_EVALUATE = 20;
 
@@ -464,7 +464,7 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   }
 
   const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
-  expect(pageOffsets).toEqual(Array.from({ length: EXPECTED_PAGES }, (_, index) => (index + 1) * PAGE_SIZE));
+  expect(pageOffsets).toEqual(Array.from({ length: EXPECTED_PAGES }, (_, index) => (index + 1) * MEMORY_PAGE_SIZE));
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
   await expect(panel(page).locator('.memory-more-end')).toHaveAttribute('role', 'status');
   await expect(panel(page).locator('.memory-more-end')).toContainText('已达到查询上限');
