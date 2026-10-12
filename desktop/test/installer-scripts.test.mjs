@@ -263,6 +263,17 @@ describe('rollback install-directory probe (#1023)', () => {
 describe('interrupted installer recovery choices (#915)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
 
+  it('clears the consumed leftover pointer after rollback restores the backup (#1040)', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restored = rollback.match(/\$\{Else\}\s*StrCpy \$iaRollbackStatus "restored"([\s\S]*?)!insertmacro iaClearBackupDir/)?.[1] ?? ''
+
+    assert.match(
+      restored,
+      /!insertmacro iaReadLeftoverDir[\s\S]*?\$\{If\} \$iaLeftoverDirectory == \$iaBackupDirectory[\s\S]*?DeleteRegValue HKCU "\$\{INSTALL_REGISTRY_KEY\}" "IaLeftoverDir"[\s\S]*?\$\{EndIf\}/,
+    )
+  })
+
   it('defers recovery to explicit buttons and keeps the backup armed on cancel', () => {
     const installer = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
     const directories = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')

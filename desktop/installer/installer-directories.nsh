@@ -381,6 +381,10 @@ iaRollbackRestoreBackup:
     ; version's value (only InstallLocation is restored) — cosmetic, and the
     ; next successful update rewrites the whole entry.
     WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "InstallLocation" $iaFinalDirectory
+    !insertmacro iaReadLeftoverDir
+    ${If} $iaLeftoverDirectory == $iaBackupDirectory
+      DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
+    ${EndIf}
   ${EndIf}
   !insertmacro iaClearBackupDir
   StrCpy $INSTDIR $iaFinalDirectory

@@ -449,6 +449,7 @@ try {
       Assert 'restore_app_present' $appPresent ('exists={0}' -f $appPresent)
       Assert 'restore_backup_consumed' (-not $backupStillExists) ('backup_exists={0}' -f $backupStillExists)
       Assert 'restore_backup_pointer_cleared' ([string]::IsNullOrEmpty($backupPointer)) ('IaBackupDir={0}' -f $backupPointer)
+      Assert 'restore_consumed_leftover_pointer_cleared' ([string]::IsNullOrEmpty($leftoverPointer)) ('IaLeftoverDir={0}' -f $leftoverPointer)
     }
   } elseif ($Choice -eq 'continue' -and $FailLeftoverRecord) {
     Assert 'leftover_failure_app_remains_absent' (-not $appPresent) ('exists={0}' -f $appPresent)
