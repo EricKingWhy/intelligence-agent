@@ -507,6 +507,9 @@ class InProcessSubagentProvider:
         # WS-1 #151：子会话的 cwd 与 fork 同一规则——显式继承父会话的会话侧锚。
         # 不写的话每个子代理都会作为"未分组"会话出现在会话列表里（它们与父同属
         # 一个项目）。父无锚（历史遗留 / 父会话日志不在）→ 不写该字段，与父一致。
+        # #1055：子会话同样**直接**交给 child_runtime.run_stream（下方），不经
+        # RunManager ⇒ 在此显式标记为交付态。
+        child_session.deliver_to_runtime()
         child_session.append(
             SESSION_STARTED,
             {

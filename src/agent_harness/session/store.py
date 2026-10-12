@@ -287,6 +287,20 @@ class JsonlSessionStore:
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
+    def last_event_seq(self, session_id: str) -> int:
+        """本会话已落盘最大 seq（空会话 = -1）。公开的 O(1) 盘面读数。
+
+        #1057：撞号重投的写者（`Session._persist_event`）只需要「盘上最大 seq」这
+        一个数，用 `read_events` 全量解析在持续竞争下会退化成自旋热循环。本入口直接
+        复用 `_last_seq_on_disk`（文件戳校验的缓存），不改语义、不新增私有耦合。
+
+        并发边界与 `append_event` 同一口径：读数在会话写锁外取，是**观测**而非判定；
+        真正的 fail-closed 判定仍在 `append_event` 的锁内（`seq <= last` 拒写）。
+        跨进程同时写入无文件锁（见 `__init__` 的边界说明），与既有限制一致。
+        """
+        with self._lock_for(session_id):
+            return self._last_seq_on_disk(session_id)
+
     def events_path(self, session_id: str) -> Path:
         """会话目录的 ``events.jsonl`` 路径（公开）。
 
