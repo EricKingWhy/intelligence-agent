@@ -6,7 +6,6 @@ import fnmatch
 import json
 import ntpath
 import os
-import stat
 import struct
 import subprocess
 import sys
@@ -43,6 +42,7 @@ _FILE_WRITE_ATTRIBUTES = 0x00000100
 _FILE_TRAVERSE = 0x00000020
 _FILE_LIST_DIRECTORY = 0x00000001
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_FILE_TYPE_DISK = 0x00000001
 _DELETE = 0x00010000
 _SYNCHRONIZE = 0x00100000
 _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
@@ -272,55 +272,134 @@ class WindowsPsecSandbox(LocalSubprocessSandbox):
                 _close_handles([entry])
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
-        source = Path(host_path)
-        source_info = source.lstat()
-        if stat.S_ISLNK(source_info.st_mode):
-            raise PermissionError("copy_in does not follow host reparse points")
-        if stat.S_ISDIR(source_info.st_mode):
-            parent, name, handles = self._open_parent(
-                workspace_path,
-                create=True,
-                access_extra=_FILE_ADD_SUBDIRECTORY | _FILE_ADD_FILE,
-            )
-            destination = None
-            try:
-                destination = _create_relative_directory(parent, name)
-                self._copy_host_directory(source, destination, workspace_path)
-            finally:
-                if destination is not None:
-                    _close_handles([destination])
-                _close_handles(handles)
-            return
-        if not stat.S_ISREG(source_info.st_mode):
+        source = ntpath.abspath(os.fspath(host_path))
+        parent_path = ntpath.dirname(source)
+        name = ntpath.basename(source)
+        if not name:
             raise PermissionError("copy_in accepts only regular files and directories")
-        with source.open("rb") as stream:
-            self._write_stream(workspace_path, stream)
-
-    def _copy_host_directory(
-        self,
-        source: Path,
-        destination: int,
-        workspace_path: str,
-    ) -> None:
-        with os.scandir(source) as entries:
-            for entry in entries:
-                _relative_components(entry.name)
-                if entry.is_symlink():
-                    raise PermissionError("copy_in does not follow host reparse points")
-                child_path = f"{workspace_path}/{entry.name}"
-                if entry.is_dir(follow_symlinks=False):
-                    child = _create_relative_directory(destination, entry.name)
-                    try:
-                        self._copy_host_directory(Path(entry.path), child, child_path)
-                    finally:
-                        _close_handles([child])
-                elif entry.is_file(follow_symlinks=False):
-                    with open(entry.path, "rb") as stream:
-                        self._write_stream_at(destination, entry.name, stream)
-                else:
+        source_handles = _open_directory_chain(
+            Path(parent_path),
+            create=False,
+            allow_unc=True,
+            allow_volume_root=True,
+            reject_reparse=True,
+        )
+        source_handle = None
+        try:
+            source_handle = _open_relative_entry(
+                source_handles[-1],
+                name,
+                desired_access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+                create_disposition=_FILE_OPEN,
+                create_options=_FILE_SYNCHRONOUS_IO_NONALERT
+                | _FILE_OPEN_FOR_BACKUP_INTENT,
+                share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                allow_reparse_leaf=True,
+            )
+            attributes = _file_attributes(source_handle)
+            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise PermissionError("copy_in does not follow host reparse points")
+            if _file_standard_info(source_handle).Directory:
+                parent, destination_name, destination_handles = self._open_parent(
+                    workspace_path,
+                    create=True,
+                    access_extra=_FILE_ADD_SUBDIRECTORY | _FILE_ADD_FILE,
+                )
+                destination = None
+                try:
+                    destination = _create_relative_directory(parent, destination_name)
+                    self._copy_host_directory(
+                        source_handle,
+                        destination,
+                        workspace_path,
+                    )
+                finally:
+                    if destination is not None:
+                        _close_handles([destination])
+                    _close_handles(destination_handles)
+            else:
+                if _file_type(source_handle) != _FILE_TYPE_DISK:
                     raise PermissionError(
                         "copy_in accepts only regular files and directories"
                     )
+                destination_parent, destination_name, destination_handles = (
+                    self._open_parent(
+                        workspace_path,
+                        create=True,
+                        access_extra=_FILE_ADD_SUBDIRECTORY | _FILE_ADD_FILE,
+                    )
+                )
+                try:
+                    handle, source_handle = source_handle, None
+                    self._copy_host_file(handle, destination_parent, destination_name)
+                finally:
+                    _close_handles(destination_handles)
+        finally:
+            if source_handle is not None:
+                _close_handles([source_handle])
+            _close_handles(source_handles)
+
+    def _copy_host_directory(
+        self,
+        source: int,
+        destination: int,
+        workspace_path: str,
+    ) -> None:
+        for name in _directory_entry_names(source):
+            _relative_components(name)
+            entry = _open_relative_entry(
+                source,
+                name,
+                desired_access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+                create_disposition=_FILE_OPEN,
+                create_options=_FILE_SYNCHRONOUS_IO_NONALERT
+                | _FILE_OPEN_FOR_BACKUP_INTENT,
+                share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                allow_reparse_leaf=True,
+            )
+            try:
+                if _file_attributes(entry) & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise PermissionError("copy_in does not follow host reparse points")
+                child_path = f"{workspace_path}/{name}"
+                if _file_standard_info(entry).Directory:
+                    child = _create_relative_directory(destination, name)
+                    try:
+                        self._copy_host_directory(entry, child, child_path)
+                    finally:
+                        _close_handles([child])
+                else:
+                    if _file_type(entry) != _FILE_TYPE_DISK:
+                        raise PermissionError(
+                            "copy_in accepts only regular files and directories"
+                        )
+                    handle, entry = entry, None
+                    self._copy_host_file(handle, destination, name)
+            finally:
+                if entry is not None:
+                    _close_handles([entry])
+
+    def _copy_host_file(
+        self,
+        source_handle: int,
+        destination_parent: int,
+        name: str,
+    ) -> None:
+        import msvcrt
+
+        fd = None
+        handle = source_handle
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+            handle = None
+            stream = os.fdopen(fd, "rb")
+            fd = None
+            with stream:
+                self._write_stream_at(destination_parent, name, stream)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if handle is not None:
+                _close_handles([handle])
 
     def read_text(self, path: str) -> str:
         import msvcrt
@@ -573,6 +652,28 @@ class WindowsPsecSandbox(LocalSubprocessSandbox):
         return paths
 
     def _ensure_psec_available(self) -> None:
+        caps = probe_windows_psec_capabilities(
+            executable=self._mxc_executable,
+            config=self._probe_configuration(),
+        )
+        require_available(
+            caps,
+            remediation="run on Windows with MXC BaseContainer/PSEC support",
+        )
+
+    @classmethod
+    def probe_configuration_for_workspace(
+        cls, workspace_root: str | os.PathLike[str]
+    ) -> dict[str, object]:
+        """Build the same no-DACL policy used at startup, without starting a sandbox."""
+        sandbox = cls(Path(workspace_root))
+        handles = _open_directory_chain(sandbox._workspace_root, create=False)
+        try:
+            return sandbox._probe_configuration()
+        finally:
+            _close_handles(handles)
+
+    def _probe_configuration(self) -> dict[str, object]:
         environment = self._container_environment(self._env)
         comspec = environment.get("COMSPEC") or ntpath.join(
             environment.get("SYSTEMROOT", r"C:\Windows"),
@@ -584,14 +685,7 @@ class WindowsPsecSandbox(LocalSubprocessSandbox):
             environment,
             self._workspace_root,
         )
-        caps = probe_windows_psec_capabilities(
-            executable=self._mxc_executable,
-            config=config,
-        )
-        require_available(
-            caps,
-            remediation="run on Windows with MXC BaseContainer/PSEC support",
-        )
+        return config
 
     @staticmethod
     def _create_windows_job() -> None:
@@ -637,7 +731,15 @@ def _open_volume_root(drive: str) -> int:
         wintypes.HANDLE,
     ]
     kernel32.CreateFileW.restype = wintypes.HANDLE
-    path = "\\\\?\\" + drive + "\\"
+    normalized_drive = drive.rstrip("\\")
+    if normalized_drive.lower().startswith("\\\\?\\unc\\"):
+        path = normalized_drive + "\\"
+    elif normalized_drive.startswith("\\\\"):
+        path = "\\\\?\\UNC\\" + normalized_drive.lstrip("\\") + "\\"
+    elif normalized_drive.lower().startswith("\\\\?\\"):
+        path = normalized_drive + "\\"
+    else:
+        path = "\\\\?\\" + normalized_drive + "\\"
     handle = kernel32.CreateFileW(
         path,
         _FILE_READ_ATTRIBUTES | _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _SYNCHRONIZE,
@@ -849,6 +951,13 @@ def _file_attributes(handle: int) -> int:
     return int(info.FileAttributes)
 
 
+def _file_type(handle: int) -> int:
+    kernel32 = _kernel32()
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    return int(kernel32.GetFileType(wintypes.HANDLE(handle)))
+
+
 def _directory_entry_names(handle: int) -> list[str]:
     ntdll = _ntdll()
     ntdll.NtQueryDirectoryFile.argtypes = [
@@ -1037,13 +1146,45 @@ def _rename_file_handle(handle: int, parent: int, name: str) -> None:
         _raise_ntstatus(status, name)
 
 
-def _open_directory_chain(root: Path, *, create: bool) -> list[int]:
+def _open_directory_chain(
+    root: Path,
+    *,
+    create: bool,
+    allow_unc: bool = False,
+    allow_volume_root: bool = False,
+    reject_reparse: bool = False,
+) -> list[int]:
     path = ntpath.normpath(os.fspath(root))
     drive, tail = ntpath.splitdrive(path)
-    if not drive or not tail.startswith("\\") or path.startswith("\\\\"):
+    is_extended_unc = drive.lower().startswith("\\\\?\\unc\\")
+    is_unc = drive.startswith("\\\\") and (
+        not drive.lower().startswith("\\\\?\\") or is_extended_unc
+    )
+    is_local_drive = (
+        len(drive) == 2
+        and drive[0].isascii()
+        and drive[0].isalpha()
+        and drive[1] == ":"
+    ) or (
+        len(drive) == 6
+        and drive[:4].lower() == "\\\\?\\"
+        and drive[4].isascii()
+        and drive[4].isalpha()
+        and drive[5] == ":"
+    )
+    if (
+        not drive
+        or not tail.startswith("\\")
+        or path.startswith("\\\\.\\")
+        or path.lower().startswith("\\\\?\\globalroot\\")
+        or (is_unc and not allow_unc)
+        or (not is_unc and not is_local_drive)
+        or (is_extended_unc and not allow_unc)
+        or (reject_reparse and create)
+    ):
         raise ValueError("windows_psec workspace must be a local drive path")
     components = [item for item in tail.split("\\") if item]
-    if not components:
+    if not components and not allow_volume_root:
         raise ValueError("windows_psec cannot use a volume root as workspace")
     handles = [_open_volume_root(drive)]
     try:
@@ -1052,12 +1193,35 @@ def _open_directory_chain(root: Path, *, create: bool) -> list[int]:
                 raise ValueError("invalid Windows workspace path component")
             final = index == len(components) - 1
             try:
-                child = _open_relative_directory(
-                    handles[-1],
-                    item,
-                    create=False,
-                    workspace_root=final,
-                )
+                if reject_reparse:
+                    child = _open_relative_entry(
+                        handles[-1],
+                        item,
+                        desired_access=(
+                            _FILE_READ_ATTRIBUTES
+                            | _FILE_LIST_DIRECTORY
+                            | _FILE_TRAVERSE
+                            | _SYNCHRONIZE
+                        ),
+                        create_disposition=_FILE_OPEN,
+                        create_options=_FILE_DIRECTORY_FILE
+                        | _FILE_SYNCHRONOUS_IO_NONALERT
+                        | _FILE_OPEN_FOR_BACKUP_INTENT,
+                        share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                        allow_reparse_leaf=True,
+                    )
+                    if _file_attributes(child) & _FILE_ATTRIBUTE_REPARSE_POINT:
+                        _close_handles([child])
+                        raise PermissionError(
+                            "copy_in does not follow host reparse points"
+                        )
+                else:
+                    child = _open_relative_directory(
+                        handles[-1],
+                        item,
+                        create=False,
+                        workspace_root=final,
+                    )
             except FileNotFoundError:
                 if not create:
                     raise

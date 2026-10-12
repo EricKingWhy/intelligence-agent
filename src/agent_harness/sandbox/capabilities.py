@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import ntpath
 import os
 import subprocess
 from collections.abc import Mapping
@@ -146,7 +147,7 @@ def probe_windows_psec_capabilities(
     config: Mapping[str, object] | None = None,
     run=None,
 ) -> SandboxCapabilities:
-    """Probe MXC's exact request and accept only its native BaseContainer tier."""
+    """Probe MXC's exact policy and accept only its native BaseContainer tier."""
     if os.name != "nt":
         return SandboxCapabilities(
             backend="windows_psec",
@@ -163,11 +164,20 @@ def probe_windows_psec_capabilities(
                 "remediation": "install the desktop runtime or set IA_MXC_EXECUTABLE",
             },
         )
+    if config is None:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="An exact PSEC policy is required to verify workspace isolation",
+            details={
+                "workspace_policy_required": "true",
+                "remediation": "probe the policy that will be used to create the sandbox",
+            },
+        )
 
     args = [path, "--probe"]
-    if config is not None:
-        payload = json.dumps(config, separators=(",", ":")).encode("utf-8")
-        args.extend(["--config-base64", base64.b64encode(payload).decode("ascii")])
+    payload = json.dumps(config, separators=(",", ":")).encode("utf-8")
+    args.extend(["--config-base64", base64.b64encode(payload).decode("ascii")])
     try:
         result = (run or subprocess.run)(
             args,
@@ -224,12 +234,39 @@ def probe_windows_psec_capabilities(
     return SandboxCapabilities(backend="windows_psec", available=True, details=details)
 
 
-def probe_all_capabilities(image: str = "python:3-slim") -> list[SandboxCapabilities]:
+def probe_all_capabilities(
+    image: str = "python:3-slim",
+    *,
+    windows_psec_workspace: str | None = None,
+) -> list[SandboxCapabilities]:
     """探针全部后端（给选择器 UI 用：展示能力 + 缺依赖原因）。"""
+    if windows_psec_workspace is None or os.name != "nt":
+        psec = probe_windows_psec_capabilities()
+    else:
+        workspace = ntpath.normpath(windows_psec_workspace)
+        if not ntpath.isabs(workspace):
+            psec = SandboxCapabilities(
+                backend="windows_psec",
+                available=False,
+                reason="PSEC requires an absolute path to an existing workspace",
+            )
+        else:
+            try:
+                from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+                config = WindowsPsecSandbox.probe_configuration_for_workspace(workspace)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                psec = SandboxCapabilities(
+                    backend="windows_psec",
+                    available=False,
+                    reason=f"Could not build the workspace PSEC policy: {exc}",
+                )
+            else:
+                psec = probe_windows_psec_capabilities(config=config)
     return [
         probe_local_capabilities(),
         probe_docker_capabilities(image=image),
-        probe_windows_psec_capabilities(),
+        psec,
     ]
 
 

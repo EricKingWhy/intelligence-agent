@@ -784,6 +784,146 @@ def test_copy_in_imports_host_files_and_directories(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
+def test_copy_in_rejects_host_directory_junction(tmp_path: Path) -> None:
+    import subprocess
+
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("external secret", encoding="utf-8")
+    source = tmp_path / "source-junction"
+    result = subprocess.run(
+        f'mklink /J "{source}" "{outside}"',
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"Windows junction creation unavailable: {result.stdout}{result.stderr}"
+        )
+
+    workspace = tmp_path / "workspace"
+    sandbox = WindowsPsecSandbox(workspace)
+    try:
+        with pytest.raises(PermissionError, match="reparse"):
+            sandbox.copy_in(source, "imported")
+        assert not (workspace / "imported" / "secret.txt").exists()
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
+    finally:
+        sandbox.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
+def test_copy_in_rejects_nested_host_directory_junction(tmp_path: Path) -> None:
+    import subprocess
+
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("external secret", encoding="utf-8")
+    link = source / "linked"
+    result = subprocess.run(
+        f'mklink /J "{link}" "{outside}"',
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"Windows junction creation unavailable: {result.stdout}{result.stderr}"
+        )
+
+    workspace = tmp_path / "workspace"
+    sandbox = WindowsPsecSandbox(workspace)
+    try:
+        with pytest.raises(PermissionError, match="reparse"):
+            sandbox.copy_in(source, "imported")
+        assert not (workspace / "imported" / "linked" / "secret.txt").exists()
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
+    finally:
+        sandbox.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
+def test_copy_in_rejects_host_file_under_directory_junction(tmp_path: Path) -> None:
+    import subprocess
+
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source_file = outside / "secret.txt"
+    source_file.write_text("external secret", encoding="utf-8")
+    source = tmp_path / "source-junction"
+    result = subprocess.run(
+        f'mklink /J "{source}" "{outside}"',
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"Windows junction creation unavailable: {result.stdout}{result.stderr}"
+        )
+
+    workspace = tmp_path / "workspace"
+    sandbox = WindowsPsecSandbox(workspace)
+    try:
+        with pytest.raises(PermissionError, match="reparse"):
+            sandbox.copy_in(source / source_file.name, "imported.txt")
+        assert not (workspace / "imported.txt").exists()
+        assert source_file.read_text(encoding="utf-8") == "external secret"
+    finally:
+        sandbox.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
+def test_copy_in_keeps_open_source_directory_during_junction_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_harness.sandbox import windows_psec
+
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (nested / "inside.txt").write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("external secret", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    sandbox = windows_psec.WindowsPsecSandbox(workspace)
+    create_directory = windows_psec._create_relative_directory
+    replacement_blocked = False
+
+    def create_and_replace(parent: int, name: str) -> int:
+        nonlocal replacement_blocked
+        handle = create_directory(parent, name)
+        if name == "nested":
+            with pytest.raises(PermissionError):
+                nested.rename(source / "nested-before-swap")
+            replacement_blocked = True
+        return handle
+
+    monkeypatch.setattr(windows_psec, "_create_relative_directory", create_and_replace)
+    try:
+        sandbox.copy_in(source, "imported")
+        assert replacement_blocked
+        assert not (workspace / "imported" / "nested" / "secret.txt").exists()
+        assert sandbox.read_text("imported/nested/inside.txt") == "inside"
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
+    finally:
+        sandbox.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
 def test_delete_removes_workspace_without_following_junction(tmp_path: Path) -> None:
     import subprocess
 

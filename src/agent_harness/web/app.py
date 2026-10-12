@@ -2268,7 +2268,7 @@ def create_app(
     # #367 / W-23 选项 A：sandbox 后端列表（`probe_all_capabilities` 明确标注
     # "给选择器 UI 用"；创建表单的"运行位置"选择器只显示探针真实结果，不画饼）
     @app.get("/api/sandbox-backends")
-    async def list_sandbox_backends() -> dict:
+    async def list_sandbox_backends(workspace_path: str | None = None) -> dict:
         """可用 sandbox 后端 + 探针结果（不可用带 reason，前端据此置灰）。"""
         return {
             "backends": [
@@ -2278,7 +2278,9 @@ def create_app(
                     "reason": c.reason,
                     "details": c.details,
                 }
-                for c in probe_all_capabilities()
+                for c in probe_all_capabilities(
+                    windows_psec_workspace=workspace_path
+                )
             ]
         }
 
@@ -2445,7 +2447,9 @@ def create_app(
     # ── 路由 ──
 
     @app.get("/api/sandbox/capabilities")
-    async def sandbox_capabilities() -> dict[str, object]:
+    async def sandbox_capabilities(
+        workspace_path: str | None = None,
+    ) -> dict[str, object]:
         """#363 / W-19：Sandbox 后端能力探针（给选择器 UI 用）。
 
         返回各后端可用性 + 不可用原因 + 修复提示。纯查询，无副作用
@@ -2461,7 +2465,9 @@ def create_app(
                     "reason": c.reason,
                     "details": c.details,
                 }
-                for c in probe_all_capabilities()
+                for c in probe_all_capabilities(
+                    windows_psec_workspace=workspace_path
+                )
             ],
         }
 
@@ -2780,7 +2786,9 @@ def create_app(
                     "remediation": e.remediation,
                     "available_backends": [
                         c.backend
-                        for c in probe_all_capabilities()
+                        for c in probe_all_capabilities(
+                            windows_psec_workspace=cwd
+                        )
                         if c.available
                     ],
                 },

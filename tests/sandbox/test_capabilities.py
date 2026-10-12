@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -117,6 +118,114 @@ class TestProbeDocker:
 
 
 class TestProbeWindowsPsec:
+    def test_probe_requires_exact_policy_before_reporting_available(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import agent_harness.sandbox.capabilities as cap_mod
+
+        monkeypatch.setattr(
+            cap_mod,
+            "os",
+            SimpleNamespace(name="nt", environ={}),
+        )
+        calls: list[list[str]] = []
+        probe = {
+            "tier": "base-container",
+            "needsDaclAugmentation": False,
+            "probes": {"baseContainerApiPresent": True},
+        }
+
+        caps = probe_windows_psec_capabilities(
+            executable=str(tmp_path / "wxc-exec.exe"),
+            run=lambda args, **_kwargs: (
+                calls.append(args)
+                or SimpleNamespace(returncode=0, stdout=json.dumps(probe), stderr="")
+            ),
+        )
+
+        assert caps.available is False
+        assert caps.reason is not None and "policy" in caps.reason.lower()
+        assert calls == []
+
+    @pytest.mark.skipif(os.name != "nt", reason="PSEC workspace policy is Windows-only")
+    def test_probe_all_checks_the_selected_workspace_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import agent_harness.sandbox.capabilities as cap_mod
+
+        observed: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            cap_mod,
+            "probe_docker_capabilities",
+            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
+        )
+
+        def probe_psec(**kwargs):
+            observed.append(kwargs["config"])
+            return SandboxCapabilities(backend="windows_psec", available=True)
+
+        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
+
+        capabilities = probe_all_capabilities(windows_psec_workspace=str(tmp_path))
+
+        assert next(c for c in capabilities if c.backend == "windows_psec").available
+        assert len(observed) == 1
+        filesystem = observed[0]["filesystem"]
+        assert filesystem["readwritePaths"] == [str(tmp_path)]
+        assert filesystem["deniedPaths"]
+        assert observed[0]["fallback"] == {"allowDaclMutation": False}
+
+    @pytest.mark.skipif(
+        os.name != "nt", reason="Windows PSEC workspace is Windows-only"
+    )
+    def test_probe_all_validates_workspace_with_handle_chain_before_probing_mxc(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import agent_harness.sandbox.capabilities as cap_mod
+        import agent_harness.sandbox.windows_psec as psec_mod
+
+        validated_roots: list[tuple[str, bool]] = []
+
+        def reject_reparse_root(path, *, create: bool, **_kwargs):
+            validated_roots.append((os.fspath(path), create))
+            raise PermissionError("reparse point rejected in workspace path")
+
+        monkeypatch.setattr(psec_mod, "_open_directory_chain", reject_reparse_root)
+
+        monkeypatch.setattr(
+            cap_mod,
+            "probe_local_capabilities",
+            lambda: SandboxCapabilities(backend="local", available=True),
+        )
+        monkeypatch.setattr(
+            cap_mod,
+            "probe_docker_capabilities",
+            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
+        )
+        psec_probe_called = False
+
+        def probe_psec(**_kwargs):
+            nonlocal psec_probe_called
+            psec_probe_called = True
+            return SandboxCapabilities(backend="windows_psec", available=True)
+
+        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
+
+        capabilities = cap_mod.probe_all_capabilities(
+            windows_psec_workspace=str(tmp_path),
+        )
+
+        psec = next(item for item in capabilities if item.backend == "windows_psec")
+        assert not psec.available
+        assert validated_roots == [(str(tmp_path), False)]
+        assert not psec_probe_called
+
     def test_probe_accepts_only_basecontainer_for_the_requested_policy(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -189,6 +298,7 @@ class TestProbeWindowsPsec:
         )
         caps = probe_windows_psec_capabilities(
             executable=str(tmp_path / "wxc-exec.exe"),
+            config={"fallback": {"allowDaclMutation": False}},
             run=lambda *_args, **_kwargs: SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(probe),
