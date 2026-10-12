@@ -1,0 +1,1 @@
+2026-10-12	#915/#1040 discovery: Standards NEEDS-FIX P0-P4=0/0/1/0/0 (IaBackupDir cleared before fresh-install commit, losing cancel rollback and restart recovery prompt); Spec PASS P0-P4=0/0/0/0/0. Fixed by #1040.	bd350011a7c86811b2a81d8dae0fe97b484e77aa..387948595940e6aac3e28ff42980d10e0f66a895

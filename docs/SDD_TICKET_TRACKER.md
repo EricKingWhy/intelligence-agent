@@ -1,5 +1,23 @@
 # SDD Ticket Tracker
 
+**已完成（2026-10-12，#915 Windows 安装器恢复批次）**：PR #1042 已按 merge commit 7d7b164e0661d1db148e0429133a152ef6a84ca7 合入 GitHub main；head 891655336defe85ba9018a559f496437465466a0。#915/#1021/#1023/#1034/#1035/#1037/#1040 均 CLOSED（completed），in-progress 已移除。冻结树后端全量结果和 Gate-0 收据 docs/gate/91d247c9b35227e7c0f1d5957afb390405b10d70.json；PR CI Gate-0、Windows installer smoke、Chromium E2E、gitleaks 全通过。完整票面、Windows 证据及读数传递见月档「#915 Windows 安装器恢复批次最终验证与集成」。独立 FileExists 长路径探针目前仅确认目录形态，文件场景未证实；单独候选及后续复现记录见月档。
+
+**冻结代码/测试 blob（git hash-object，冻结 tip 相对 origin/main 的改动面）**：
+
+| 路径 | blob |
+| --- | --- |
+| desktop/installer/installer-directories.nsh | 70172aa804c884cd8336758a0d184656c84249a7 |
+| desktop/installer/installer.nsh | a01df47864eeeebb01c1069d27b1b417f1488bb7 |
+| desktop/scripts/build-windows-installer.mjs | 08038a6415f82aacbed355c577ae44d64a6f3c63 |
+| desktop/scripts/test-windows-installer.mjs | 7cd4f5df37dee526e1a4fe3463245dc5e2eed315 |
+| desktop/test/harness/README.md | 88d3c258a463dfadffd9c781e88d773d6ca264c1 |
+| desktop/test/harness/r1-drivers/drive-r1-update.ps1 | 1dbeb1fea26702948d776c787cc0fe43118582b2 |
+| desktop/test/harness/r1-drivers/drive-r3-recovery.ps1 | c9fd057f6c7ac722e8971838170089bd75b281ea |
+| desktop/test/harness/r1-drivers/leftover-probe.nsi | 06e14da441e001a7071ef465e81dadf65cf87e88 |
+| desktop/test/harness/r1-drivers/run-leftover-probe.ps1 | 63ca5e3c51edfdc79eb5040cafb907e697818464 |
+| desktop/test/installer-nsis.test.mjs | 5c9c25dc62ab0268a2b1d51be4a8d7a832758b50 |
+| desktop/test/installer-scripts.test.mjs | 62893cfd689b582aaef3e334ec5c615566437012 |
+
 **当前状态（2026-10-12，#847）：Issue #847 CLOSED（completed），in-progress 已移除；PR [#1019](https://github.com/EricKingWhy/intelligence-agent/pull/1019) 已按 merge commit 合入 main：head 7ac4e0886b03ee98d769d1cbf7249bbbbbe7666c，merge 9e5832f4a82f91116fdaaf8157ee94530c569464。关单评论：https://github.com/EricKingWhy/intelligence-agent/issues/847#issuecomment-6111370481。本地与 CI Gate-0 均 6/6；PR Chromium smoke、Windows installer smoke、gitleaks 均通过。本地 pytest 标准/clean 两跑均 7,700 passed / 43 skipped / 51 deselected；TUI 244 passed / 3 skipped、Vitest 1,650 passed，Desktop tests、TUI check、Vite build 通过。Playwright 全量 539 passed / 1 failed，唯一失败与已登记 B-29 flake 同签名，隔离复跑 3/3；未将全量 E2E 表述为全绿。完整证据见 docs/phase_status/2026-10.md 的 #847 条目。**
 
 **最近完成（2026-10-11，#879）**：OAuth-only HTTP MCP server 授权兼容。Issue #879 CLOSED（completed），`in-progress` 已移除，保留 `enhancement`。PR #1011（head `4fdc614c9b4bc11aeaceb2a467ff6ac7e1461a19`）已合入 `main`，merge commit `40ac56db7684768013d201659f0bd9abe8764cc7`；关单评论 https://github.com/EricKingWhy/intelligence-agent/issues/879#issuecomment-6109359035。用户确认 logout 清本地凭据；仅发现 RFC 7009 endpoint 时尝试远端撤销；已启动 auth flow 可完成，logout 后新 flow 不得发送旧 token。MCP/W-30 focused 145 passed / 2 skipped；clean 全量 7,691 passed / 43 skipped / 51 deselected / 0 failed（1101.18s）；本地最终 Gate-0 6/6，PR CI Gate-0、Security 与 Chromium E2E 均成功；双轴审查 PASS、零 P0-P4。调研、合并同步、coverage 与各冻结树证据见 `docs/phase_status/2026-10.md` #879 条目。
