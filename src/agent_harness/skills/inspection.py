@@ -73,6 +73,10 @@ _MAX_PACKAGE_ENTRIES = 10_000
 _MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
 
+#: 描述文件嵌套超深时的固定文案（`DEPENDENCY_FILE_TOO_DEEP`；与 `DEPENDENCY_FILE_INVALID` 同档：
+#: 文件读得出（未超 1 MB 读上限），但内容解析不了）。
+_DEPENDENCY_TOO_DEEP_MESSAGE = "Dependency manifest nesting is too deep to parse statically."
+
 
 class _PackageReadBoundaryError(Exception):
     def __init__(self, code: str, message: str) -> None:
@@ -964,6 +968,12 @@ def _inspect_dependencies(
                             dependencies.extend(_dependency(str(name), "package.json") for name in values)
                         else:
                             _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", f"{section} must be a JSON object.")
+            except RecursionError:
+                # 预检契约是"绝不崩"：嵌套超过解析器递归上限的清单只能落成**明确失败**，
+                # 不能把 RecursionError 掀给 CLI / 安装闸门（同文件对 frontmatter 与
+                # plugins 预检已有同款兜底）。深度边界的唯一权威是解析器自己——
+                # 另写一份深度扫描器就是第二份会漂的真相。
+                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "package.json", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (json.JSONDecodeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
     pyproject = paths.get("pyproject.toml")
@@ -1087,6 +1097,9 @@ def _inspect_dependencies(
                                             requirements,
                                             errors,
                                         )
+            except RecursionError:
+                # 同上；tomllib 的递归上限比 json 低得多，故可达深度更小。
+                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "pyproject.toml", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
     dependencies.sort(key=lambda item: (item["source"], item["name"].lower()))
@@ -1314,14 +1327,45 @@ def _manual_requirement(
     }
 
 
-def _read_small_file(
-    root: Path, relative: str, errors: list[dict[str, str]]
+def read_package_text(
+    root: Path,
+    relative: str,
+    errors: list[dict[str, str]],
+    *,
+    max_bytes: int = _MAX_METADATA_SCAN_BYTES,
+    too_large_code: str = "PACKAGE_FILE_TOO_LARGE",
+    unreadable_code: str = "PACKAGE_FILE_UNREADABLE",
+    changed_code: str = "PACKAGE_FILE_CHANGED",
+    not_file_code: str = "PACKAGE_FILE_NOT_A_FILE",
+    outside_code: str = "PACKAGE_FILE_OUTSIDE_PACKAGE",
 ) -> str | None:
+    """按包内**相对路径**读一个文本文件的公共入口（越界 / 过大 / 读取中变化都记错误）。
+
+    边界读写只有一份实现（`_read_bounded_package_text`）：symlink 解析后必须仍在
+    包内、打开后再核对 inode、尺寸上限在 stat 与 read 两侧各拦一次。第二个消费者
+    （MCP 描述预检）需要同一套保证，只是错误码属于自己那套词表 ⇒ 在这里把码参数化，
+    而不是让调用方去 import 私有实现。`_read_small_file` 是本函数的一个旧码表绑定。
+    """
     return _read_bounded_package_text(
         root,
         root / relative,
         relative,
-        _MAX_METADATA_SCAN_BYTES,
+        max_bytes,
+        errors,
+        too_large_code=too_large_code,
+        unreadable_code=unreadable_code,
+        changed_code=changed_code,
+        not_file_code=not_file_code,
+        outside_code=outside_code,
+    )
+
+
+def _read_small_file(
+    root: Path, relative: str, errors: list[dict[str, str]]
+) -> str | None:
+    return read_package_text(
+        root,
+        relative,
         errors,
         too_large_code="DEPENDENCY_FILE_TOO_LARGE",
         unreadable_code="DEPENDENCY_FILE_UNREADABLE",

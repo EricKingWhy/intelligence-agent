@@ -26,7 +26,7 @@ from typing import Any
 from agent_harness.attachments.errors import AttachmentError
 from agent_harness.attachments.filenames import file_leaf_name
 from agent_harness.attachments.projection import ImageRef
-from agent_harness.attachments.types import EXTENSION_MEDIA_TYPES
+from agent_harness.attachments.validation import EXTENSION_MEDIA_TYPES
 
 #: 存储不可用（`artifact_dir` 置空且无对象存储）时的**唯一**文案。三个入口共用，
 #: 机读码由各自的错误通道给（HTTP 走 `web/attachments.py::ATTACHMENT_STORAGE_UNAVAILABLE`）。
@@ -72,11 +72,16 @@ def image_reference(
     size: int,
     width: int,
     height: int,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """构造 `user/message.data["attachments"]` 里一条图片引用的字典。
 
-    形状的**唯一**定义点：`ImageRef`（`name` 恒缺省——见 `ImageAttachmentRef` 的 MM-02
-    B6 说明）。CLI 与发送端点都经此构造，加字段时两处同时生效。
+    形状的**唯一**定义点：`ImageRef`。CLI 与发送端点都经此构造，加字段时两处同时生效。
+
+    `name` 是**可选**的展示名，消毒单点仍是 `file_leaf_name`（去掉本地路径信息）——
+    调用方给什么路径形态，这里都只留下叶子名。#939 M-27 之前它**恒缺省**：CLI 手上有
+    文件名却丢掉了，Web 发送端点则压根收不到（只收 id 列表，无回传信道，见
+    `web.app.SendMessageRequest.attachments`）。
     """
     return ImageRef(
         attachment_id=attachment_id,
@@ -84,6 +89,7 @@ def image_reference(
         bytes=size,
         width=width,
         height=height,
+        name=file_leaf_name(name) if name else None,
     ).model_dump(exclude_none=True)
 
 

@@ -373,3 +373,51 @@ def test_over_max_dimension_is_422_and_leaves_no_residue(tmp_path: Path) -> None
         [p for p in session_dir.rglob("*") if p.is_file()] if session_dir.exists() else []
     )
     assert leftovers == [], "超边长不得留下任何存储残留"
+
+
+class TestAttachmentLimitsEndpoint:
+    """#937 / M-08：`GET /api/attachments/limits` 服务端权威上限下发。
+
+    前端 `ImageIntakeLimits` 不再硬编码镜像，刷新页面即拿到部署者当前配置；
+    响应按 wire 惯例是 snake_case（同附件域 `attachment_id` / `media_type`，
+    前端 `api.ts::getAttachmentLimits` 自行映射），值来自
+    `resolve_image_limits`（单一解析点，本测试只验 HTTP 面）。
+    """
+
+    def test_default_settings_returns_builtin_defaults(self, tmp_path: Path) -> None:
+        client = _client(tmp_path)
+
+        resp = client.get("/api/attachments/limits")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "max_image_bytes": 20 * 1024 * 1024,
+            "max_images_per_message": 20,
+            "max_message_image_bytes": 200 * 1024 * 1024,
+            "allowed_media_types": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif",
+            ],
+        }
+
+    def test_custom_settings_are_served_verbatim(self, tmp_path: Path) -> None:
+        # 核心验收：部署者改服务端配置 → 下发跟着变（不经过任何前端硬编码）。
+        client = _client(
+            tmp_path,
+            attachment_max_image_bytes=1024,
+            attachment_max_images_per_message=3,
+            attachment_max_message_image_bytes=4096,
+            attachment_allowed_media_types="image/png,image/webp",
+        )
+
+        resp = client.get("/api/attachments/limits")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "max_image_bytes": 1024,
+            "max_images_per_message": 3,
+            "max_message_image_bytes": 4096,
+            "allowed_media_types": ["image/png", "image/webp"],
+        }

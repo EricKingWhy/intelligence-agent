@@ -277,6 +277,119 @@ def test_inspection_rejects_unrecognized_dependency_manifest_shapes(
     assert "DEPENDENCY_FILE_INVALID" in {error["code"] for error in report["errors"]}
 
 
+def _deep_json(depth: int = 20_000) -> str:
+    """深嵌套但**尺寸很小**的 package.json：深度是唯一的门槛。
+
+    20_000 层对象约 120 KB，远在 1 MB 读上限之内；`json.loads` 自带递归上限（具体层数随解释器
+    版本与栈大小漂移），先于任何尺寸上限炸——与 #875 的 MCP 描述同形状（同一文件里的
+    MCP_DESCRIPTION_TOO_DEEP 用例）。
+    """
+    return '{"dependencies":' + '{"a":' * depth + "1" + "}" * depth + "}"
+
+
+def _deep_toml(depth: int = 1_000) -> str:
+    """同形状的 pyproject.toml：`tomllib` 的递归上限比 `json` 低得多。"""
+    return (
+        "[project]\ndependencies = []\n[tool.poetry.dependencies]\nx = "
+        + "{a=" * depth
+        + "1"
+        + "}" * depth
+        + "\n"
+    )
+
+
+def test_inspection_reports_deeply_nested_package_json_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """预检契约是「读得出、判不了就明确失败」，不是把 RecursionError 掀给调用方。
+
+    深度边界的唯一权威是解析器自己，故守卫落在**解析点**（#875 同款做法），
+    不另写一份会漂的深度扫描器。
+    """
+    source = tmp_path / "deep-package-json"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-package-json\ndescription: Example.\n---\n",
+    )
+    _write(source / "package.json", _deep_json())
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+
+
+def test_inspection_reports_deeply_nested_pyproject_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """同一 `_inspect_dependencies` 里的第二个解析点，缺陷形状相同（票面只点了
+    package.json，实测 pyproject.toml 同样让 RecursionError 逃逸）。"""
+    source = tmp_path / "deep-pyproject"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-pyproject\ndescription: Example.\n---\n",
+    )
+    _write(source / "pyproject.toml", _deep_toml())
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+
+
+def test_cli_plugins_inspect_survives_a_deeply_nested_package_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`plugins inspect` 的**第一步**是 DSH 预检（`plugin_inspection.py`），它比 Skill
+    预检更早解析 package.json，且**先于**包名过滤 ⇒ 任意目录都能触发同形 RecursionError。
+
+    与 `inspection.py` 的两个解析点同属「预检绝不掀桌」这一条契约；不兜它，
+    票面的「不掀桌」在这个命令上就不成立（实测：CLI 抛裸 RecursionError）。
+    """
+    source = tmp_path / "deep-package-json-cli"
+    _write(
+        source / "SKILL.md",
+        "---\nname: deep-package-json-cli\ndescription: Example.\n---\n",
+    )
+    # 深度必须落在 `plugin_inspection` 的 64 KB 读上限**之内**，否则有界读先返回 None、
+    # `json.loads`（与该守卫）根本跑不到——那样这条用例就测不到 DSH 预检这一步（`_deep_json()`
+    # 默认 20_000 层 = 120 KB，会静默滑过 64 KB 门）。
+    _write(source / "package.json", _deep_json(10_000))
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    before = _snapshot(source, workspace, global_skills)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    # 治理形态 = 报告 + exit 1（受控的 unsupported 出口），**不是**裸 RecursionError 崩桌。
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_TOO_DEEP" in {error["code"] for error in report["errors"]}
+    assert _snapshot(source, workspace, global_skills) == before
+
+
+def test_inspection_still_reads_a_shallow_manifest_after_the_depth_guard(
+    tmp_path: Path,
+) -> None:
+    """消融对照的另一半：护栏不得把正常清单一起拦掉（否则"永不崩"变成"永不用"）。"""
+    source = tmp_path / "shallow-package-json"
+    _write(
+        source / "SKILL.md",
+        "---\nname: shallow-package-json\ndescription: Example.\n---\n",
+    )
+    _write(source / "package.json", '{"dependencies":{"left-pad":"^1.3.0"}}\n')
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert [item["name"] for item in report["dependencies"]] == ["left-pad"]
+
+
 @pytest.mark.parametrize(
     "include",
     ["-r base.txt", "--requirement base.txt", "-rbase.txt", "--requirement=base.txt"],
@@ -949,6 +1062,130 @@ def _snapshot(*roots: Path) -> dict[str, bytes | None]:
     }
 
 
+def _write_dsh_slider_package(
+    source: Path, *, version: str = "1.0.0", include_client: bool = True
+) -> None:
+    package = {
+        "name": "dsh-codex-effort-slider",
+        "version": version,
+        "license": "MIT",
+        "main": "./lib/index.js",
+        "exports": {".": "./lib/index.js", "./client": "./lib/client.js"},
+        "dsh": {
+            "bundle": {"patch": "./cordis.patch.yml"},
+            "client": {"platform": "web", "immediately": True},
+        },
+    }
+    _write(source / "package.json", json.dumps(package))
+    _write(source / "LICENSE", "MIT License\n")
+    _write(source / "cordis.patch.yml", "- name: dsh-codex-effort-slider\n")
+    _write(source / "install-profile.ps1", "# fixture only\n")
+    _write(source / "install.cmd", "rem fixture only\r\n")
+    _write(source / "pack-dist.ps1", "# fixture only\n")
+    _write(source / "lib" / "index.js", "throw new Error('must never run')\n")
+    if include_client:
+        _write(source / "lib" / "client.js", "throw new Error('must never run')\n")
+
+
+def test_cli_plugins_inspect_matches_pinned_dsh_effort_slider_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = Path(__file__).parent / "fixtures" / "dsh-codex-effort-slider"
+    before = _snapshot(source)
+    _configure_cli_inspect(
+        monkeypatch, source, tmp_path / "workspace", tmp_path / "global-skills"
+    )
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["source_pin"]["commit"] == "af723caf3387e64ae28aa69c4fd235b1b662e3ae"
+    assert report["checked_files_match"] is True
+    assert report["observed_checked_files_sha256"] == report["source_pin"][
+        "checked_files_sha256"
+    ]
+    assert report["findings"] == []
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert report["execution"]["package_code_run"] is False
+    assert report["implementation_summary"].startswith(
+        "The upstream DSH JavaScript is inspected as data only."
+    )
+    assert report["project_contract"]["supported_effort_ids"] == [
+        "minimal",
+        "standard",
+        "deep",
+    ]
+    assert report["project_contract"]["wire_mapping_examples"] == {
+        "minimal": "minimal",
+        "standard": "medium",
+        "deep": "high",
+    }
+    assert any(
+        "prefers-reduced-motion" in item
+        for contribution in report["contributions"]
+        for item in contribution["verification_evidence"]
+    )
+    assert _snapshot(source) == before
+
+
+def test_cli_plugins_inspect_maps_dsh_slider_candidate_without_executing_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "dsh-codex-effort-slider"
+    _write_dsh_slider_package(source)
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    marker = tmp_path / "must-not-exist"
+    _write(source / "lib" / "index.js", f"from pathlib import Path; Path({str(marker)!r}).touch()\n")
+    before = _snapshot(source)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["package"] == "dsh-codex-effort-slider"
+    assert report["source_pin"]["commit"] == "af723caf3387e64ae28aa69c4fd235b1b662e3ae"
+    assert report["license"] == "MIT"
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert report["checked_files_match"] is False
+    assert "SOURCE_CONTENT_DRIFT" in {item["code"] for item in report["findings"]}
+    assert any(
+        item["name"] == "off" and item["status"] == "unmapped"
+        for item in report["gaps"]
+    )
+    assert {item["name"] for item in report["dependencies"]} >= {"DSH", "Cordis"}
+    assert not marker.exists()
+    assert _snapshot(source) == before
+
+
+@pytest.mark.parametrize(
+    ("version", "include_client", "expected_gap"),
+    [("1.1.0", True, "SOURCE_VERSION_DRIFT"), ("1.0.0", False, "MISSING_CLIENT_ENTRY")],
+)
+def test_cli_plugins_inspect_never_marks_drifted_or_incomplete_dsh_source_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    version: str,
+    include_client: bool,
+    expected_gap: str,
+) -> None:
+    source = tmp_path / "dsh-codex-effort-slider"
+    _write_dsh_slider_package(source, version=version, include_client=include_client)
+    _configure_cli_inspect(
+        monkeypatch, source, tmp_path / "workspace", tmp_path / "global-skills"
+    )
+
+    cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "needs-adaptation"
+    assert report["activation_allowed"] is False
+    assert expected_gap in {item["code"] for item in report["findings"]}
+
+
 def test_cli_global_scope_is_shared_and_project_list_keeps_it_unselected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -1084,3 +1321,33 @@ def test_cli_global_git_update_rollback_and_remove_route_to_global_store(
     assert removed["removed"] is True
     assert run("list", "--scope", "global")["packages"] == []
     assert not (workspace / "plugin-installs.json").exists()
+
+
+def test_cli_plugins_inspect_reports_a_deeply_nested_description_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """修复轮 R2：真实 CLI 对 40 KB 深嵌套描述必须给明确失败，不能掀 RecursionError。
+
+    预检契约"绝不崩"在**用户入口**上同样成立——`inspect` 只是把报告打出来，深嵌套
+    描述落成 `MCP_DESCRIPTION_TOO_DEEP` 并照常 exit 1（unsupported），不是 traceback。
+    """
+    source = tmp_path / "deep-mcp"
+    _write(source / "SKILL.md", "---\nname: deep-mcp\ndescription: Deep MCP.\n---\nBody.\n")
+    _write(source / "mcp.json", '{"mcpServers": ' + "[" * 20_000 + "0" + "]" * 20_000 + "}")
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    _write(workspace / "plugin-installs.json", '{"project": []}\n')
+    _write(global_skills / "plugin-installs.json", '{"global": []}\n')
+    before = _snapshot(source, workspace, global_skills)
+    _configure_cli_inspect(monkeypatch, source, workspace, global_skills)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()  # RecursionError 会在这里穿出去，测试直接 error
+
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "unsupported"
+    assert "MCP_DESCRIPTION_TOO_DEEP" in {
+        error["code"] for error in report["mcp"]["errors"]
+    }
+    assert _snapshot(source, workspace, global_skills) == before

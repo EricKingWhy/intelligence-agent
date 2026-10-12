@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import io
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from PIL import Image
 
 from agent_harness.attachments.projection import (
     IMAGE_OMITTED_PLACEHOLDER,
@@ -14,6 +19,7 @@ from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
     image_data_url,
+    load_image_payloads,
     to_provider_messages,
 )
 
@@ -155,3 +161,84 @@ class TestDowngradeToNonVision:
         ])
         out = downgrade_to_non_vision([message])
         assert out[0].content == IMAGE_OMITTED_PLACEHOLDER
+
+
+# --- #939 M-12：载荷装配（取字节 + 归一化 + base64）住本模块，不住 ContextBuilder ---
+
+
+@pytest.mark.asyncio
+async def test_load_image_payloads_reads_normalizes_and_encodes(tmp_path) -> None:
+    """loader 的归属地是本模块：入参是「store + 被引用 id + 归一化目标」，出参是载荷表。
+
+    它此前长在 `ContextBuilder` 上（`_load_image_payloads`），但装配 adapter
+    （`to_provider_messages` / `ImageResolver`）在本模块——三处 docstring 都声称字节
+    在这里取回，实现却在别处（#939 M-12）。本用例把归属钉住：搬回去即 ImportError。
+    """
+    from agent_harness.storage.artifact import (
+        FakeArtifactStore,
+        compute_byte_artifact_id,
+    )
+
+    data = _png()
+    attachment_id = compute_byte_artifact_id(data)
+    store = FakeArtifactStore()
+    await store.save_bytes("sess-m12", data, mime_type="image/png")
+
+    resolved = await load_image_payloads(
+        store,
+        referenced=sorted({attachment_id}),
+        max_dimension=2048,
+        max_bytes=4 * 1024 * 1024,
+    )
+
+    assert resolved is not None
+    media_type, base64_data = resolved[attachment_id]
+    # 无 alpha 的 PNG 走归一化 = 重编码为 JPEG（PRD D2：有 alpha → WebP，否则 JPEG）
+    assert media_type == "image/jpeg"
+    decoded = base64.b64decode(base64_data)
+    with Image.open(io.BytesIO(decoded)) as reopened:
+        assert reopened.format == "JPEG"
+        assert reopened.size == (8, 6)
+
+
+@pytest.mark.asyncio
+async def test_load_image_payloads_is_none_without_a_store() -> None:
+    """没有字节存储 = 接缝不存在（`None`）——调用方据此跳过整条装配，不是空载荷表。"""
+    assert (
+        await load_image_payloads(
+            None, referenced=["sha256:" + "a" * 64], max_dimension=2048, max_bytes=1
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_image_payloads_degrades_per_image_without_bricking(tmp_path, caplog) -> None:
+    """单张取不回 / 解码失败 ⇒ 该 id 缺席，其余照常返回（run 不被一张图 brick）。"""
+    from agent_harness.storage.artifact import (
+        FakeArtifactStore,
+        compute_byte_artifact_id,
+    )
+
+    data = _png()
+    good = compute_byte_artifact_id(data)
+    missing = "sha256:" + "f" * 64
+    store = FakeArtifactStore()
+    await store.save_bytes("sess-m12", data, mime_type="image/png")
+
+    resolved = await load_image_payloads(
+        store,
+        referenced=[good, missing],
+        max_dimension=2048,
+        max_bytes=4 * 1024 * 1024,
+    )
+
+    assert resolved is not None
+    assert set(resolved) == {good}
+
+
+def _png(width: int = 8, height: int = 6) -> bytes:
+    """最小合法 PNG（与 `tests/context/test_builder_attachments.py` 同源构造）。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()

@@ -20,7 +20,7 @@ import {
   TerminalSquare, X,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
-import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatBytes, formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { allTools, summarizeEvent } from '../lib/projection';
 import { permissionView } from '../lib/permission';
@@ -1684,13 +1684,6 @@ function DetailEmpty() {
       <div className="detail-empty-hint">从左侧选择，或开始新任务。</div>
     </div>
   );
-}
-
-/** Format byte count as human-readable (KB / MB). */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ── Phase 13 委派钻取：child 会话视图（v2 PRD §10.5）──

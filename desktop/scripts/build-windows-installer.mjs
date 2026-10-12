@@ -2672,6 +2672,7 @@ export function validateCleanupHelpers(source, filename) {
 const KNOWN_INSTALLER_INCLUDES = new Set([
   'logiclib.nsh',
   'filefunc.nsh',
+  'nsdialogs.nsh',
   'installer-cleanup.nsh',
   'installer-directories.nsh',
 ])

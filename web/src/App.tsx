@@ -27,6 +27,7 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { StuckPausedPanel } from './components/StuckPausedPanel';
 import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
@@ -49,8 +50,9 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
-import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget } from './lib/runBudget';
+import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
+import { loadImageLimits } from './lib/attachments';
 import {
   describeSessionError,
   getAgentProfiles,
@@ -66,7 +68,7 @@ import {
   type StartSessionPayload,
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
-import { effectiveModelEntry, modelChangeTarget } from './lib/modelSelection';
+import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from './lib/modelSelection';
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
@@ -263,6 +265,9 @@ export default function App() {
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
         void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
         void fetchCapabilities(); // 能力 manifest 也走 apiFetch——补拉
+        // #937/M-08：附图上限是服务端权威配置，token 变更后补拉。首屏首拉由
+        // Composer 自己的挂载 effect 负责（App 层只补拉，不与它抢首拉）。
+        void loadImageLimits();
       }),
     [refreshSessions, fetchModels, fetchControlCatalogs, fetchCapabilities],
   );
@@ -489,7 +494,10 @@ export default function App() {
 
   const handleModelChange = useCallback(
     (name: string | null) => {
-      setSelectedModel(name);
+      // #1016：默认条目名 = 「清除会话级覆盖」的同义表达 ⇒ 本地状态归 null。否则
+      // `selectedModel` 会被固化成默认模型名，此后每次续聊都带着它 → 后端 422。
+      const selected = normalizeSelectedModel(name, models);
+      setSelectedModel(selected);
       // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
       // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
       //
@@ -511,9 +519,9 @@ export default function App() {
           void changeModel(selectedId, entry.provider, target)
             .then((result) => {
               // 用响应里的规范 model_id 更新本地状态（不回显请求值）。
-              // 例外：选「默认链」时保持 null——trigger 要显示「默认链」而不是被回填成
-              // 具体模型名（那会和用户刚点的选项不一致）。
-              if (name !== null) setSelectedModel(result.model_id);
+              // 例外：选「默认链」或默认条目时保持 null（#1016）——trigger 要显示
+              // 「默认链」而不是被回填成具体模型名（那会和用户刚点的选项不一致）。
+              if (selected !== null) setSelectedModel(result.model_id);
             })
             .catch(() => {
               // 切换失败静默——用户可重试；不阻塞主流程
@@ -942,6 +950,10 @@ export default function App() {
     // turns 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409；工具配额同理——
     // 它的点名单位是工具名（`resumeRequestTarget` 给出该维的 wire 形态）。
     const target = resumeRequestTarget(paused);
+    // `#1026`：context 硬护栏暂停没有"抬 ceiling"式恢复动作（`ceilingDraftValue` 对
+    // context 恒 null 已在此短路；面板只给引导文案、不渲染恢复按钮）。显式收窄让
+    // 请求体组装在类型层也不可达，而非靠联合类型的侥幸。
+    if (target.kind === 'context') return;
     void resumePausedRun(selectedId, {
       runId: paused.run_id,
       expectedVersion: paused.version,
@@ -1344,15 +1356,23 @@ export default function App() {
           )}
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
               出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
-              暂停有（抬高绝对 ceiling → 同 run 恢复）。 */}
+              预算暂停有（抬高绝对 ceiling → 同 run 恢复）。
+              #968：stuck 暂停没有这个动作——后端对 stuck 的 budget_increase 一律 409
+              （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
+              （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
+              输入通道照常可用。 */}
           {canResumePaused && paused && paused.reason !== 'user_input' && (
-            <PausedPanel
-              paused={paused}
-              ceilingDraft={pauseCeilingDraft}
-              onCeilingDraftChange={handlePauseCeilingChange}
-              onResume={handleResumePaused}
-              resuming={resumingRunId === paused.run_id}
-            />
+            paused.reason === PAUSE_REASON_STUCK ? (
+              <StuckPausedPanel paused={paused} />
+            ) : (
+              <PausedPanel
+                paused={paused}
+                ceilingDraft={pauseCeilingDraft}
+                onCeilingDraftChange={handlePauseCeilingChange}
+                onResume={handleResumePaused}
+                resuming={resumingRunId === paused.run_id}
+              />
+            )
           )}
           {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
           {selectedId !== null && (

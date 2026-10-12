@@ -29,11 +29,17 @@ BYTE_OBJECTS_DIRNAME = "objects"
 #: 旧字节 key 同形，升级兼容因此不需要额外分支）。
 SESSION_ATTACHMENTS_DIRNAME = "attachments"
 
+#: 全局根下放**写入暂存**的子目录（staging → fsync → 原子发布的中转位）。
+#: 必须是常量而不是裸 `"tmp"` 字面量（#939 M-14）：裸字面量逃逸一次，改布局时就会
+#: 写进 A、从 B 读而静默错配。
+BYTE_STAGING_DIRNAME = "tmp"
+
 #: 远端 Provider 的全局对象 key 前缀（`<prefix>/<sha[:2]>/<sha>`）。
 GLOBAL_BYTE_KEY_PREFIX = f"{GLOBAL_ATTACHMENT_DIRNAME}/{BYTE_OBJECTS_DIRNAME}"
 
 __all__ = [
     "BYTE_OBJECTS_DIRNAME",
+    "BYTE_STAGING_DIRNAME",
     "GLOBAL_ATTACHMENT_DIRNAME",
     "GLOBAL_BYTE_KEY_PREFIX",
     "SESSION_ATTACHMENTS_DIRNAME",

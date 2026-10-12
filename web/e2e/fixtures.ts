@@ -1321,6 +1321,11 @@ export const MODELS = [
   { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
 ];
 
+/** 目录里第一个**非默认**条目（#1016）。默认条目（`default: true`）表示「清除会话级
+ *  覆盖、回到默认链」，**不**进二级列表、也不是一个可选模型——所以"第一个可选模型"
+ *  是第一个非默认条目。 */
+export const FIRST_SELECTABLE_MODEL = MODELS.find((m) => !m.default)!;
+
 /** #199：可用性 + 能力位的**载荷形状**夹具（键名与真后端一致：`is_available` /
  *  `unavailable_reason` / `supports_*`，`getModels` 逐字段窄化）。
  *
@@ -1341,7 +1346,9 @@ export const MODELS = [
  *  （详见设计稿 §3 的"可达性前置"）。夹具的职责是把两边的分支都喂到，不是证伪后端。 */
 export const MODELS_WITH_AVAILABILITY = [
   {
-    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: true,
+    // #1016（AC1）：默认条目不进二级列表 ⇒ 这里不能标 default:true——标了 zhipu 组
+    // 二级就只剩 glm-4.6-air，「能力徽标按条不按 provider」的组内对照就没了载体。
+    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: false,
     is_available: true, unavailable_reason: null,
     supports_tools: true, supports_vision: true, supports_reasoning_summary: true,
   },
@@ -1557,7 +1564,8 @@ export async function pickControl(
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
-/** 选目录里的**第一个模型**（`MODELS[0]`，provider = `MODELS[0].provider`），
+/** 选二级列表里的**第一个可选模型**（`FIRST_SELECTABLE_MODEL`，#1016 后默认条目
+ *  不进二级列表——「选默认」走一级「默认链」入口，不属于本 helper 的语义），
  *  断言 trigger 文本变成该模型名（#199 两级飞出）。
  *
  * 与旧版的差别是**语义变了，不是断言变松**：一级只列 provider，模型在二级子菜单里，
@@ -1568,7 +1576,7 @@ export async function pickControl(
  * 关闭态的信号是 `[role="menu"]`（菜单语义），不再是 `[role="listbox"]`：两级飞出在
  * 平台上就是「菜单 + 子菜单」，见 `ModelPicker.tsx` 顶部对语义变更的说明。 */
 export async function pickFirstModel(page: Page): Promise<void> {
-  await pickModel(page, MODELS[0].provider, MODELS[0].name);
+  await pickModel(page, FIRST_SELECTABLE_MODEL.provider, FIRST_SELECTABLE_MODEL.name);
 }
 
 /** 「这个面板里没有搜索入口」的**可失败**口径：任何输入控件 / 搜索语义都算。

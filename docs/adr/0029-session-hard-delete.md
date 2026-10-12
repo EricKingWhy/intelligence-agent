@@ -175,7 +175,8 @@ guard，任何用过子 Agent 的会话（很常见）都将永远无法删除�
 
   > **2026-09-14 修订（#192 落地本地那一半）**：新增默认 Provider
   > `LocalArtifactStore`（spec 06 §3）时，会话硬删第 ⑦ 步**已连带丢弃
-  > `<artifact_dir>/<session_id>/`**（`storage/local_artifact.py::discard_local_artifacts`）。
+  > `<artifact_dir>/<session_id>/`**（`storage/readonly_fs.py::discard_local_artifacts`；
+  > #939 M-13 把这一簇"只读回执删除"语义从 `local_artifact.py` 拆出独立模块）。
   > 它严格遵守 D2 的形状：**不读映射**、只删 harness 用 `artifact_dir + session_id`
   > 自己拼出来的路径，所以**不是**本 D6 意义上的"级联删除"（不涉及查询索引、也没有
   > 跨对象图遍历）。仍然**没做**的两件事：① `ArtifactStore` ABC 仍**没有** delete，

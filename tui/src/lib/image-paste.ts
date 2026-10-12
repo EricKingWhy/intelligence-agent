@@ -9,7 +9,7 @@
  *
  * 与上游的四处差别（都在 NOTICE 里登记）：
  * 1. **砍掉 OpenTUI 依赖**：上游的 `PasteLikeEvent{bytes,metadata}` 来自 OpenTUI，
- *    `IMAGE_EXTENSIONS` 里的 bmp/svg 本仓服务端不收（`attachments/types.py::EXTENSION_MEDIA_TYPES`
+ *    `IMAGE_EXTENSIONS` 里的 bmp/svg 本仓服务端不收（`attachments/validation.py::EXTENSION_MEDIA_TYPES`
  *    只有 png/jpg/jpeg/webp/gif）=> 扩展名集与服务端 **逐字对齐**；
  * 2. 上游用 `resolveExistingFilePath`（`@cline/shared/storage`，本仓无此包）做
  *    macOS 文件名变体归位；本仓 TUI 的粘贴路径只做"剥引号 / CRLF 归一 / `file://` 转换"，
@@ -22,6 +22,10 @@
  *    冻住整个 TUI 事件循环（`openSync` 落在 FIFO 上同样会阻塞，故这条 `statSync` 筛查
  *    不能省）。同一 fd 上还做**大小上限**预检（与服务端 `attachment_max_image_bytes`
  *    同口径），超限直接拒，不把整文件读进内存。
+ *
+ * #938 / M-10：类型三表（IMAGE_EXTENSIONS / MEDIA_TYPE_BY_EXTENSION /
+ * CLIPBOARD_NAME_BY_MEDIA_TYPE）已 export，跨端快照守卫见
+ * tui/test/image-media-types-snapshot.test.ts（读服务端权威源的 canonical 快照对账）。
  */
 import { closeSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -30,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { detectSupportedImageMimeType } from "./mime.ts";
 import type { PendingImage } from "./pending-images.ts";
 
-/** 服务端 v1 接受的栅格图 media types（`attachments/types.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
+/** 服务端 v1 接受的栅格图 media types（`attachments/validation.py::SUPPORTED_IMAGE_MEDIA_TYPES`）。 */
 export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
   "image/png",
   "image/jpeg",
@@ -39,10 +43,10 @@ export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
 ];
 
 /** 扩展名 -> 是图片（与服务端 `EXTENSION_MEDIA_TYPES` 的键集逐字一致）。 */
-const IMAGE_EXTENSIONS: readonly string[] = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+export const IMAGE_EXTENSIONS: readonly string[] = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
 /** 扩展名 -> media type（镜像服务端 `EXTENSION_MEDIA_TYPES`，用于声明一致性判定）。 */
-const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
+export const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -51,7 +55,7 @@ const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
 };
 
 /** 剪贴板字节的展示名（没有本地文件名）：扩展名必须与 media type 一致。 */
-const CLIPBOARD_NAME_BY_MEDIA_TYPE: Record<string, string> = {
+export const CLIPBOARD_NAME_BY_MEDIA_TYPE: Record<string, string> = {
   "image/png": "clipboard.png",
   "image/jpeg": "clipboard.jpg",
   "image/webp": "clipboard.webp",
@@ -86,6 +90,48 @@ export type ReadImageFileResult =
  * 的上传，也不把超大文件读进内存。
  */
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * M-21：单条消息图片**数量**上限：镜像服务端 `config.py:167`
+ * `attachment_max_images_per_message` 默认 20（PRD D11「后端权威、前端镜像」；
+ * #824 明确不加 GET limits 端点，故无下发通道）。漂移的后果是「预检放行、服务端
+ * 413/422」-- 消息仍会被权威拒绝，不会静默出错。web 侧同一份值在
+ * `web/src/lib/attachments.ts::IMAGE_LIMITS`；改默认必须三处同步。
+ */
+export const MAX_IMAGES_PER_MESSAGE = 20;
+
+/**
+ * M-21：单条消息图片**总字节**上限：镜像服务端 `config.py:168`
+ * `attachment_max_message_image_bytes` 默认 200 MiB（口径同上）。
+ */
+export const MAX_MESSAGE_IMAGE_BYTES = 200 * 1024 * 1024;
+
+/**
+ * M-21：单条「数量 / 总字节」预检的纯判定（返回**拒绝原因**，`null` = 放行）。
+ *
+ * 第一性原理：预检是服务端规则的客户端礼貌副本 -- 判定口径单一来源是服务端
+ * `resolve_image_limits`（本文件两个镜像常量），这里只做「超没超」的比较与文案，
+ * 不另立数字。唯一调用点是 `app.addPendingImage`（全部图片入场的汇聚点）。
+ */
+export function checkMessageImageLimits(
+  existingCount: number,
+  existingBytes: number,
+  incomingBytes: number,
+): string | null {
+  if (existingCount >= MAX_IMAGES_PER_MESSAGE) {
+    return (
+      `最多 ${String(MAX_IMAGES_PER_MESSAGE)} 张图片/条（服务端上限）：` +
+      "先删掉正文里多余的 [Image #N] 标记再附图。"
+    );
+  }
+  if (existingBytes + incomingBytes > MAX_MESSAGE_IMAGE_BYTES) {
+    return (
+      `单条消息图片总字节超过 ${String(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MiB 上限` +
+      "（服务端 attachment_max_message_image_bytes 同口径）：请换更小的图或删掉已附的图。"
+    );
+  }
+  return null;
+}
 
 export function isImagePath(filePath: string): boolean {
   const normalized = filePath.toLowerCase();

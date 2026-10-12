@@ -17,18 +17,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { TuiApp } from "../src/app.ts";
+import { PNG_BYTES } from "./fixtures.ts";
 import type { ConversationState } from "../src/adapter.ts";
 import type { PendingImage } from "../src/lib/pending-images.ts";
 import type { ClipboardImage } from "../src/lib/clipboard-image.ts";
-
-/** 1x1 PNG（合法签名 + IHDR），足以让 magic-bytes 判成 image/png。 */
-const PNG_BYTES = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
-  0x1f, 0x15, 0xc4, 0x89,
-  0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0xae, 0x42, 0x60, 0x82,
-]);
 
 /** 仓库内的真图片 fixture（AC2/AC4 要真读盘）。 */
 // `URL.pathname` 在 Windows 上给 `/D:/...`（前导斜杠 + 正斜杠），`statSync` 解不出来
@@ -580,4 +572,32 @@ test("独立审查 P3/P4：超过 20 MiB 的 @path 参数给出上限提示，�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("B2-02/D8 特征（#984）：同一文件粘贴两次 ⇒ 逐份上传、两个 ref（客户端不做上传去重，服务端内容寻址兜底）", async () => {
+  // #984 B2-02 裁决为 DEFER：同一字节两次上传只浪费上行，数据正确性由服务端
+  // 内容寻址（sha256:<hex> id + refs 去重保序）承担；本用例把现状钉成契约，
+  // 将来若做客户端去重必须是有意识的行为变更，不是无意识漂移。
+  const harness = makeHarness({ models: VISION_MODELS });
+  const app = harness.app;
+  app.state.modelName = "m";
+  app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+  app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+  assert.equal(app.pendingImages.length, 2);
+  assert.equal(app.editor.getText(), "[Image #1][Image #2]");
+
+  await app.handleSubmit("[Image #1] 和 [Image #2] 都看看");
+
+  assert.equal(
+    harness.calls.filter((call) => call.url.includes("/attachments")).length,
+    2,
+    "同一文件两次粘贴 = 两次上传（不去重）",
+  );
+  assert.deepEqual(messageBodies(harness.calls), [
+    {
+      content: "[Image #1] 和 [Image #2] 都看看",
+      mode: "queue",
+      attachments: ["sha256:img1", "sha256:img2"],
+    },
+  ]);
 });

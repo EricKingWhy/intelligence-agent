@@ -490,7 +490,9 @@ test('AC6 and AC7: update content is fetched only on expansion and recall shows 
   expect(requested).toEqual([]);
   await notice.getByRole('button', { name: /查看更新/ }).click();
   await expect(notice).toContainText('fresh authorized memory content');
-  const recalled = page.locator('.memory-v2-activity-card').filter({ hasText: '记忆召回说明' });
+  // #1017：召回卡挂在所属轮次内（不再是尾部游离卡）
+  const recalled = page.locator('.turn .memory-v2-activity-card').filter({ hasText: '记忆召回说明' });
+  await expect(recalled).toHaveCount(1);
   await recalled.getByRole('button', { name: /查看原因/ }).click();
   await expect(recalled).toContainText('dense');
   await expect(recalled).toContainText('0.84');

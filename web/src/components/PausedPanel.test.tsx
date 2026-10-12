@@ -313,3 +313,41 @@ describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
     expect(html).toContain('disabled');
   });
 });
+
+// ── #1026：context 维暂停——恢复控件给引导，不给 turns 数字输入（验收 5） ──
+
+describe('PausedPanel — context 维暂停（#1026 裁决 A 恢复控件对齐）', () => {
+  function contextPaused(): RunPausedInfo {
+    return paused({
+      reason: 'budget_exhausted',
+      trigger_dimension: 'max_context_tokens',
+      consumed_dimensions: {
+        agent_turns: 5, model_requests: 9, total_tokens: 160_000, cost_usd: null,
+        tool_calls: 4, tool_attempts: 4,
+        tool_calls_by_tool: { read: 2 }, tool_attempts_by_tool: { read: 2 },
+      },
+      run_limits: {
+        max_agent_turns_total: 20,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: null,
+        tool_call_limits: {},
+      },
+    });
+  }
+
+  it('不渲染绝对 ceiling 数字输入（尤其不是 max_agent_turns_total）', () => {
+    const html = render(contextPaused());
+    // 输入框（id 与「绝对 ceiling（<字段名>）」标签形状）都不渲染；其余文案里的
+    // "绝对 ceiling" 字样（reasonLabel / 旧 continuation 文本）不是输入控件。
+    expect(html).not.toContain('pause-resume-ceiling');
+    expect(html).not.toContain('绝对 ceiling（');
+  });
+
+  it('渲染恢复引导：指向手动压缩 / 调大上下文上限', () => {
+    const html = render(contextPaused());
+    expect(html).toContain('压缩');
+    expect(html).toContain('max_context_tokens');
+  });
+});

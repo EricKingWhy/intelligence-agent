@@ -1,6 +1,5 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
-import base64
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
@@ -14,7 +13,6 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from agent_harness.attachments.normalize import (
     TARGET_MAX_BYTES,
     TARGET_MAX_DIMENSION,
-    normalize_image,
 )
 from agent_harness.context.compactor import (
     CompactionFailure,
@@ -30,6 +28,7 @@ from agent_harness.context.tokens import estimate_message_tokens, message_cost
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
+    load_image_payloads,
     to_provider_messages,
 )
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -437,6 +436,12 @@ class ContextBuilder:
         # 原样透传给 ToolResultPruner——校验在 pruner 构造处响亮失败，本层不重复。
         keep_recent_tool_results: int = 3,
         clear_at_least_tokens: int = 5000,
+        # #1026：摘要墙钟缩放与分块参数（Settings 透传链，原样传给
+        # ContextCompactor——校验在 compactor 构造处响亮失败，本层不重复）。
+        summary_timeout_seconds: float = 30.0,
+        summary_timeout_per_kilotoken_seconds: float = 0.25,
+        summary_chunk_request_ratio: float = 0.5,
+        summary_chunk_max_tokens: int = 24_000,
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
@@ -461,6 +466,12 @@ class ContextBuilder:
             # W-29 (#383)：0 会让兜底判据退化为"变更即恒注入"，配错必须响亮失败。
             raise ValueError("plan_reinject_every_messages must be positive")
         self.model_provider = model_provider
+        # #1026：摘要墙钟缩放与分块参数（原样透传给 compactor）。
+        self._summary_timeout_seconds = summary_timeout_seconds
+        self._summary_timeout_per_kilotoken_seconds = (
+            summary_timeout_per_kilotoken_seconds)
+        self._summary_chunk_request_ratio = summary_chunk_request_ratio
+        self._summary_chunk_max_tokens = summary_chunk_max_tokens
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
         # 档位选择留配置面（后续票），本层只透传给 compactor。
         self.summary_model = summary_model
@@ -657,7 +668,7 @@ class ContextBuilder:
         # 口径（#935 / M-03，替代 #824 的固定常量）：带图消息的 token 估算**已计入图片成本**
         # ——`_estimate_tokens_cached` 在结构 token 上按 `context/tokens.py` 的
         # **尺寸相关近似公式**（tile 制）追加每张图的开销。真正的 base64 载荷仍在
-        # `_load_image_payloads`/`_finalize` 装配请求时才注入；估算靠标准图片块携带的
+        # `model.multimodal.load_image_payloads`/`_finalize` 装配请求时才注入；估算靠标准图片块携带的
         # `width`/`height`（投影处即已知），**目的是防止"图不计费导致 hard guard 失守"**，
         # 不追求逐 Provider 精确。真实 usage 仍以 Provider 回执为权威
         # （`_usage_anchored_tokens` 只抬高）。
@@ -1018,6 +1029,12 @@ class ContextBuilder:
             hard_guard_threshold=self.hard_guard_threshold,
             summary_model=self.summary_model,
             model_call_gate=self.model_call_gate,
+            # #1026：摘要墙钟缩放与分块参数（Settings 透传链终点）。
+            summary_timeout_seconds=self._summary_timeout_seconds,
+            summary_timeout_per_kilotoken_seconds=(
+                self._summary_timeout_per_kilotoken_seconds),
+            summary_chunk_request_ratio=self._summary_chunk_request_ratio,
+            summary_chunk_max_tokens=self._summary_chunk_max_tokens,
         )
         try:
             result = await compactor.compact(
@@ -1046,6 +1063,12 @@ class ContextBuilder:
                     failures=result.failures,
                 )
             # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
+            # #1026 裁决 A：降级截断例外——compacted_turn_count==0 但 fallback_used
+            # 置位 ⇒ 返回截断投影供**本次请求**使用（无摘要、无 bracket，不持久化；
+            # 下次 build 面对同一投影会再做同一次确定性截断，天然收敛）。恢复依据
+            # 是"投影已压回 auto_limit 内"，不是"压缩已发生"。
+            if result.fallback_used:
+                return result
             return None
         # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
         self._preflight_rejection_streaks.pop(session.session_id, None)
@@ -1093,6 +1116,8 @@ class ContextBuilder:
                 # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
                 # 逐字节等价）。这是本次唯一新增的事件键。
                 "narrowed": result.narrowed,
+                # #1026：成功走分块摘要路径的 marker（验收 3 的事件可观测）。
+                "chunked": result.chunked,
                 "bracket_id": bracket_id,
                 "summary_model_id": result.summary_model_id,
                 "duration_ms": result.duration_ms,
@@ -1306,49 +1331,38 @@ class ContextBuilder:
         return [SystemMessage(content=self.system_prompt), *messages]
 
     async def _load_image_payloads(self, session: Session) -> dict[str, tuple[str, str]]:
-        """按事件引用过的附件 id 取回字节、归一化并 base64 编码（#823 / MM-02）。
+        """本会话被引用附件的载荷表（`attachment_id → (media_type, base64)`）。
 
-        只在 `model_supports_vision` 时执行。store 缺席、单个字节缺失或解码失败都
-        不抛出——该引用在装配 adapter 里降级为占位文本块（不静默丢弃、不 brick run）。
-        返回 `attachment_id → (media_type, base64)`，供 `_finalize` 的 adapter 使用。
+        接缝在 `model.multimodal.load_image_payloads`（#939 M-12：取字节 + 归一化 +
+        base64 与它的两个消费半边同处一模块）；本方法只做两件本层才知道的事——
+        ① 按**事件**取授权后的引用集（`referenced_attachment_ids`：未引用的 id 不得
+        读回，PRD D5）；② 走实例级缓存（#823 / MM-02 B3：内容寻址不可变，同一 builder
+        实例内同 id 终身可复用）。
+
+        `model_supports_vision=False` 或无 store ⇒ `{}`（无载荷 = 接缝不存在，与
+        `load_image_payloads` 的 `None` 同义，这里归一成空表让 `_finalize` 无需分支）。
         """
         if not self._supports_vision or self._artifact_store is None:
             return {}
-        payloads: dict[str, tuple[str, str]] = {}
-        for attachment_id in sorted(referenced_attachment_ids(session.events)):
-            # #823 / MM-02（B3）：命中实例级缓存即复用（内容寻址不可变，见
-            # `_image_payload_cache` 注释）——跳过整条 load/解码/编码/base64 链。
-            cached = self._image_payload_cache.get(attachment_id)
-            if cached is not None:
-                payloads[attachment_id] = cached
-                continue
-            try:
-                blob = await self._artifact_store.load_bytes(attachment_id)
-            except Exception:  # noqa: BLE001 —— 存储故障降级为占位符，不让一张图 brick run
-                logger.warning(
-                    "附件字节读取失败（%s）——投影降级为占位符", attachment_id,
-                )
-                continue
-            data = blob.content
-            if not data:
-                continue
-            try:
-                # B4：归一化目标从配置接线（默认 = 模块常量 DSH 一组）。
-                normalized = normalize_image(
-                    data,
-                    max_dimension=self._image_normalize_max_dimension,
-                    max_bytes=self._image_normalize_max_bytes,
-                )
-                media_type, raw = normalized.media_type, normalized.data
-            except Exception:  # noqa: BLE001 —— 解码失败回退原始字节（best-effort）
-                logger.warning(
-                    "附件归一化失败（%s）——按原始字节发送", attachment_id,
-                )
-                media_type, raw = blob.mime_type, data
-            payload = (media_type, base64.b64encode(raw).decode("ascii"))
-            self._image_payload_cache[attachment_id] = payload
-            payloads[attachment_id] = payload
-        return payloads
+        referenced = sorted(referenced_attachment_ids(session.events))
+        missing = [aid for aid in referenced if aid not in self._image_payload_cache]
+        if missing:
+            # 只让**未命中缓存**的 id 走接缝——命中即复用，跳过整条
+            # load/解码/编码/base64 链（缓存注释里的性能契约）。
+            fresh = await load_image_payloads(
+                self._artifact_store,
+                referenced=missing,
+                max_dimension=self._image_normalize_max_dimension,
+                max_bytes=self._image_normalize_max_bytes,
+            )
+            # 接缝的 per-image 降级语义（取不回 ⇒ 该 id 缺席）在此收窄：**失败不进缓存**，
+            # 暂态读取失败可在下一轮 build 重试。
+            self._image_payload_cache.update(fresh or {})
+        return {
+            aid: self._image_payload_cache[aid]
+            for aid in referenced
+            if aid in self._image_payload_cache
+        }
 
     def set_supports_vision(self, supports_vision: bool) -> None:
         """更新本次投影的视觉判定（#823 / MM-02 A2：跟随**当前请求模型**）。

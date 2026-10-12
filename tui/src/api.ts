@@ -143,6 +143,34 @@ export class ApiClient {
   }
 
   /**
+   * M-09：受控读回一张历史附图的原始字节（`web/src/lib/api.ts::getAttachmentBytes`
+   * 同款通道、同一条端点契约：只认本会话事件流引用过的 id，其余 404）。
+   * `request()` 会强制 JSON.parse，这里必须走原始 fetch（响应是字节流不是 JSON）。
+   */
+  async getAttachmentBytes(sessionId: string, attachmentId: string): Promise<Uint8Array> {
+    const response = await this.fetchFn(
+      this.url(
+        `/api/sessions/${encodeURIComponent(sessionId)}/attachments/` +
+          `${encodeURIComponent(attachmentId)}/content`,
+      ),
+    );
+    if (!response.ok) {
+      const text = await response.text();
+      let detail = text;
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed === "object" && parsed !== null && "detail" in parsed) {
+          detail = String((parsed as { detail: unknown }).detail);
+        }
+      } catch {
+        // 非 JSON 错误体：原样上抛
+      }
+      throw new ApiError(response.status, detail);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  /**
    * 模型目录（`GET /api/models`，AC8 的视觉能力来源）。响应外层是 `{"models": [...]}`；
    * 这里只收出 TUI 真正要的字段（id / model / is_default / supports_vision），
    * 其余字段（provider、display_name、不可用原因...）不引入本客户端。形状不对的条目

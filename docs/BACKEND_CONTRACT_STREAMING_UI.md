@@ -56,7 +56,7 @@
 | model/request-started | durable (#604) | {role, request_id} | Provider attempt 在 invoke / astream 前追加的持久化开始事实，用于在途观察和配对。不含 outcome / model / usage / cost，不计入 model_requests。若进程在开始与结算之间崩溃，保留未配对事实；恢复不重发请求或合成结果。 |
 | model/request | durable settlement；既有事件 (#604 增加 attempt 配对) | {role, outcome} + 可选 request_id / model / usage / cost_usd | 每个真实 Provider attempt 恰有一条结算账目，也是 model_requests 的唯一计数点。存在开始事件时，两者以相同 request_id 配对；旧事件缺 request_id 时继续按历史口径读取。model / usage / cost_usd 只挂在 outcome=completed 且实际产出响应的 attempt；失败 / 取消 attempt 不伪造这些值。cost_usd 为 Decimal 十进制字符串。 |
 | `run/started` | ✅ | `{turn_index, agent_profile, model?}` | `model` 是 **#226 的加法**：本轮**请求侧**模型标识（装配自 `ModelConfig.model_name`，即进请求体的那个 `model` 值）。**它是配置侧事实**——本轮若一次模型调用都没发生，它表示"打算用谁"、不代表已发出去（"实际用过谁"只有 `model/completed` 的回显能证明）。**缺键 = 旧版后端或调用方未给**（读作"未知"，不得拿上一轮的值顶替）。它与 `model/completed.data.model`（provider **回显**）是**两个独立事实**，任何一侧缺失都不许用另一侧冒充——口径见 `docs/adr/0034-request-side-model-identity.md`。 |
-| `run/failed` | ✅（载荷**新增可选键**，`#551`） | §4 既有载荷 + 可选 `primary_error` **或** `fallback_error` | 仅在**同一决策里 primary 与 fallback 两级都失败**时成对出现（`status != "completed"`），值是**异常类型名**（如 `RateLimitError`）、**不带正文**；消费方断连的 `GeneratorExit` / `CancelledError` **不算失败**、不落键（判据 `isinstance(x, Exception)`）。`reason` 的开集口径与三态呈现不变（见 §4）。 |
+| `run/failed` | ✅（载荷**新增可选键**，`#551`；`#996`） | §4 既有载荷 + 可选 `primary_error` **或** `fallback_error`；`#996` 起另有可选整数键 `http_status` | 仅在**同一决策里 primary 与 fallback 两级都失败**时成对出现（`status != "completed"`），值是**异常类型名**（如 `RateLimitError`）、**不带正文**；消费方断连的 `GeneratorExit` / `CancelledError` **不算失败**、不落键（判据 `isinstance(x, Exception)`）。`reason` 的开集口径与三态呈现不变（见 §4）。`http_status`（`#996`）：只在**未分类**且**模型调用在途**的失败、异常带 HTTP 状态码（100–599）时出现，与同一终态的 `reason` / `message` 描述同一个异常（两级都失败时即最后一次尝试）；缺键 = 无状态码或旧版后端，不得补 0；口径见 §4 与 ADR-0033 §2.4 边界 6。 |
 
 `source` 语义（02 §7.3/§15）：本轮生产者只有 `source:"model"`（provider 思考）；`"agent"` 词汇预留（agent 进度叙述）。emitted 即 user-visible，`visibility=internal` 的内容在本协议不产生事件（隐私硬边界在发射侧成立）。
 
@@ -78,6 +78,14 @@
   ```
   客户端应走 `GET /events` 全量重建，再带 `after_seq=latest_seq` 重连。
 - 推荐重连时机：连接异常关闭（非用户主动 abort）、seq gap 检测、页面恢复前台。
+- **`?follow=1`（opt-in，#1014，2026-10-11）**：默认 `follow=0`（缺省）时上述语义**逐字不变**。
+  `follow=1` 时重放 `(after_seq, latest_seq]` 后**不收流**，改为**会话级订阅**——推送该会话的
+  后续事件（含**别的客户端**起的 run 的帧），run 收尾不关流、跨 run 边界保持。收流两类触发：
+  ① backlog 超阈值 → 与默认同发单帧 `stream/truncated` 控制帧后收流；② 慢客户端队列溢出 →
+  **静默**收流（**不**发控制帧），客户端经既有「`ended` → `after_seq` 重连」补洞。用于 TUI 等
+  **常驻附着**客户端消灭 idle 空转（实测 idle 会话每 60s ≈54 轮建/收）；web 主通道
+  （`GET /api/ws`）不受影响。机制与边界（非 run 路径 append 的回收、无 seq transient 帧时序）
+  的正本见 `docs/adr/0016-streaming-ui-detached-run.md` §2.3 注记。
 
 ### GET /api/ws（**实时流主通道**，#205 起）— 多路复用 WebSocket
 
@@ -210,6 +218,9 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 - ~~`"max_steps_exceeded"`~~：**运行期已不可达**（`#312` 起本地保险丝撞线不再失败，改落**非终态**
   `run/paused`，见本节末）；只有 `#312` 之前写下的历史会话载荷里还会出现，读到按"失败"渲染即可；
 - **其余未分类失败**：`reason` = **异常类型名**（`RateLimitError` / `ProxyError` / `ConnectionError` …），`data.message` = 固定兜底句（`运行失败（<类型名>），未分类异常；完整原始信息见后端日志`）。
+  `#996` 起模型调用在途时兜底句按异常结构细化（连接失败 / 超时 / 请求被拒 4xx / 服务端错误 5xx，带 `HTTP <code>`），
+  并落**可选整数键** `data.http_status`（只在异常带 HTTP 状态码时出现；缺键 = 没有状态码或旧版后端，不得补 0）。
+  句子仍只由项目常量 + 类名 + 状态码拼成，不含供应商回显（口径见 ADR-0033 §2.4 边界 6）。
 
 ⚠ **`reason` 是开集，不是枚举**（#222 起）：运行期路径上它**总有值**，只对上面
 `"cancelled"` / `"orphaned"` 两个字面量做等值判断，其余一律当不透明字符串渲染/透传，

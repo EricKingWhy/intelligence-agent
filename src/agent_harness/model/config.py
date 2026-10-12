@@ -490,11 +490,31 @@ class ModelConfig:
         return resolved
 
     @classmethod
+    def is_default_entry(cls, settings: "Settings", name: str) -> bool:
+        """``name`` 是否为 ``GET /api/models`` 的默认条目 id（= 默认链模型名）。
+
+        第一性原理（#1016）：「默认 / 继承默认链」是取值空间之外的一个**状态**，
+        不是一个 id。``/api/models`` 把默认链广告成一条 ``is_default=true`` 的条目，
+        它的 id 恰好是默认链模型名——同一个字符串因此既像「目录条目 id」又像
+        「真实模型名」，两处各自解析就会分叉（切换路径接受、续聊 amend 拒绝 → 422）。
+
+        本判据是「默认条目」的**唯一**判定：切换路径（``resolve_model_target`` 经
+        ``is_default_selection``）与续聊 / 创建 amend（``resolve_selection``）都引用它。
+        默认链本身不可解析（缺 key 等）⇒ False，交由正常解析路径响亮失败。
+        """
+        try:
+            return name == cls.from_settings(settings).model_name
+        except ConfigError:
+            return False
+
+    @classmethod
     def resolve_selection(
         cls, settings: "Settings", name: str, store: Any | None = None,
     ) -> "ModelConfig":
-        """会话级模型选择的**统一解析点**（catalog 优先 + 自定义供应商 fallback）。
+        """会话级模型选择的**统一解析点**（默认链 + catalog + 自定义供应商）。
 
+        `name` 命中默认条目 id（= 默认链模型名，见 ``is_default_entry``）→ 默认链
+        （``from_settings``）：选中它 = 清除会话级覆盖，与切换路径的判定同源（#1016）。
         `name` 带冒号（`<provider>:<model_id>`，/api/models 自定义条目的命名空间，
         与 catalog 名不重叠）→ 走 from_custom_provider（store 必须在场，无凭据/被删
         provider 是确定性配置错误）；否则按 catalog 名解析（from_catalog）。
@@ -503,7 +523,11 @@ class ModelConfig:
         model 字段回传、解析走自定义分支"，而 create/resume/model 三道校验闸此前
         只认 from_catalog——UI 能选、一提交就 422（feature promise 断裂）。三道闸
         与 build_runtime 全部引用本函数后，广告的列表与真实可解析的集合同一。
+        #1016 补全：默认条目此前漏在同一承诺之外（它既非 catalog 名也非自定义
+        条目），续聊 amend 因此对它 422——现由 ``is_default_entry`` 收口。
         """
+        if cls.is_default_entry(settings, name):
+            return cls.from_settings(settings)
         if ":" in name:
             if store is None:
                 raise ConfigError(

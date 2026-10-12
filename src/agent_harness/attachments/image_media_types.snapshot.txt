@@ -1,0 +1,14 @@
+# #938 M-10：图片类型集的跨端快照（canonical text）。
+# 权威源：src/agent_harness/attachments/validation.py::SUPPORTED_IMAGE_MEDIA_TYPES / EXTENSION_MEDIA_TYPES。
+# 改权威源后重生成：python tests/attachments/test_image_media_types_snapshot.py --write
+[media_types]
+image/gif
+image/jpeg
+image/png
+image/webp
+[extension_media_types]
+.gif=image/gif
+.jpeg=image/jpeg
+.jpg=image/jpeg
+.png=image/png
+.webp=image/webp

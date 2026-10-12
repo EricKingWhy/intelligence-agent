@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { SeqCursor, consumeSseBody } from "../src/sse.ts";
+import { SeqCursor, consumeSseBody, openStream } from "../src/sse.ts";
 import type { EventEnvelope } from "../src/events.ts";
 
 function frame(seq: number | null, type = "text/delta") {
@@ -199,4 +199,34 @@ test("运行事实仍须带 time：缺 time 的普通事件照旧按坏帧丢弃
     "缺 time 的运行事实丢弃，带 time 的照常投影",
   );
   assert.equal(truncated, 0);
+});
+
+// ---------------------------------------------------------------------------
+// #1014（A-opt）：TUI 订阅走 opt-in 会话级订阅——请求 URL 必须带 follow=1。
+// 不带 follow 的默认语义（idle 重放后收流）保持不变，那是服务端的既有契约。
+// ---------------------------------------------------------------------------
+
+test("openStream 订阅 URL 带 follow=1（#1014 A-opt）", async () => {
+  const urls: string[] = [];
+  const fetchFn = (async (input: Parameters<typeof fetch>[0]) => {
+    urls.push(String(input));
+    return new Response("", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }) as typeof fetch;
+  const cursor = new SeqCursor();
+  cursor.markRebuilt(7);
+  await openStream(
+    "http://127.0.0.1:1",
+    "s1",
+    cursor,
+    { onFrame: () => {}, onTruncated: () => {}, onClosed: () => {} },
+    { fetchImpl: fetchFn },
+  );
+  assert.equal(urls.length, 1);
+  const url = new URL(urls[0] as string);
+  assert.equal(url.pathname, "/api/sessions/s1/stream");
+  assert.equal(url.searchParams.get("after_seq"), "7");
+  assert.equal(url.searchParams.get("follow"), "1");
 });

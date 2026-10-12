@@ -254,11 +254,9 @@ from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
     SessionToolLimitsPurge,
 )
-from agent_harness.storage.local_artifact import (
-    delete_local_artifacts,
-    discard_local_artifacts,
-)
+from agent_harness.storage.local_artifact import delete_local_artifacts
 from agent_harness.storage.operation import OperationState, needs_reconcile
+from agent_harness.storage.readonly_fs import discard_local_artifacts
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -284,7 +282,12 @@ if TYPE_CHECKING:
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
-    from agent_harness.session.runmanager import ManagedRun, RunManager, Subscriber
+    from agent_harness.session.runmanager import (
+        ManagedRun,
+        RunManager,
+        SessionFollower,
+        Subscriber,
+    )
     from agent_harness.storage.checkpoint import CheckpointStore
     from agent_harness.storage.operation import OperationLedger
     from agent_harness.storage.session_meta import SessionMetaStore
@@ -559,6 +562,15 @@ class StreamReconnectHandle:
     run: ManagedRun | None
     subscriber: Subscriber | None
     replay_upto: int
+    latest_seq: int
+
+
+@dataclass(frozen=True)
+class StreamFollowHandle:
+    """stream_follow 的返回束：重放事件 + **会话级**订阅句柄（`#1014` A-opt）。"""
+
+    events: list  # list[SessionEvent]
+    follower: SessionFollower
     latest_seq: int
 
 
@@ -1554,7 +1566,13 @@ class SessionService:
                 raise InvalidDecision(str(error)) from error
             if amend.reasoning_effort is not None:
                 initial_model.validate_reasoning_effort(amend.reasoning_effort)
-            if amend.model is not None:
+            # 默认条目名 = 「清除会话级覆盖」的同义表达（#1016）：与
+            # resolve_model_target / resolve_selection 共用同一判据，不把它落成
+            # 一个"等于默认模型名"的假覆盖（那会让会话事件里出现一个既非 catalog
+            # 条目、又是默认链的 model_id）。
+            if amend.model is not None and not ModelConfig.is_default_entry(
+                self._settings, amend.model
+            ):
                 initial_model_data = {
                     "provider": initial_model.provider,
                     "model_id": amend.model,
@@ -2753,6 +2771,37 @@ class SessionService:
             latest_seq=latest_seq,
         )
 
+    async def stream_follow(
+        self, *, session_id: str, after_seq: int = -1,
+    ) -> StreamFollowHandle:
+        """opt-in 会话级订阅（`GET /stream?follow=1`，`#1014` A-opt）。
+
+        与 `stream_reconnect` 的区别：**不**只接在途 run 的 live 流，而是注册一个
+        **跨 run 存活**的会话级订阅者（`RunManager.subscribe_session`）——run 起来时
+        经既有的 `Session.add_listener` 通道（`ManagedRun._fanout`）多扇出一路，run
+        收尾后连接保持，下一轮 run 的帧照常到达。调用方（Web 层）据此在重放后**不收流**。
+
+        先订阅后取游标（与 `stream_reconnect` 同一条纪律）：订阅先于读盘，保证
+        「订阅与读盘窗口内入队」的事件既在重放里、又在队列里（端点按 seq 幂等去重）。
+        读盘失败（会话不存在 / 非法 id）时**先退订**再抛，不留孤儿订阅者。
+        """
+        self._validate_session_id(session_id)
+        follower = self._run_manager.subscribe_session(session_id)
+        try:
+            events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id
+            )
+            if not events:
+                raise SessionNotFound(f"session '{session_id}' not found")
+        except BaseException:
+            self._run_manager.unsubscribe_session(session_id, follower)
+            raise
+        return StreamFollowHandle(
+            events=events,
+            follower=follower,
+            latest_seq=events[-1].seq,
+        )
+
     # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
 
     def _reconcile_workspace_binding(
@@ -2925,9 +2974,10 @@ class SessionService:
                     f"附件 {attachment_id!r} 字节无法解析为图片：{error}"
                 ) from error
             seen.add(attachment_id)
-            # #823 / MM-02（B6）：不写 `name`——发送端点只收 id 列表，上传回执的
-            # 展示名未持久化、也无回传信道，故事件引用数组的 `name` 结构性缺省
-            # （AC1 该字段可选）。展示名接线留待前端票 / MM-03。
+            # #823 / MM-02（B6）+ #939 M-27：不写 `name`——发送端点只收 id 列表，
+            # 上传回执的展示名未持久化，**没有回传信道**捎带过来（不是"字段恒缺省"，
+            # CLI `--image <path>` 走同一份 `image_reference` 时是真的带名字的）。
+            # 事件引用数组的 `name` 因此可选（AC1），前端据缺省回落显示。
             # 形状单源 = `attachments.admission.image_reference`（CLI `--image` 同一份）。
             refs.append(
                 image_reference(

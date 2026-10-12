@@ -1,0 +1,1 @@
+2026-10-11	#974 包边界两轴独立审查（fresh 会话，范围 fca3e759..625e6c82）：Correctness/Standards 双轴 PASS-WITH-FINDINGS，无 P0/P1/P2；P3×1（测试源码扫描只匹配绝对 import，相对 import 漏网）+ P4×1（中性模块 docstring 收紧），两条按「任何级别全部必修」已修回于 f7182cc0	fca3e759afe5277128ba778e1cb0cad5db7d99bb..f7182cc07bf11128c50c9ecb8807b97bcd81fdf8

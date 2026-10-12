@@ -1,0 +1,1 @@
+2026-10-12	#1021 exact Spec supplement; Standards had reviewed the wider 8af..387 range and reported no finding in this hunk. Spec P0-P4=0/0/0/1/0: driver checked app-key cleanup but omitted the distinct uninstall key. P3 closed by bf643b7b follow-up.	8af122204fabd16c8ae72bd15a2809bbef2c238f..eac25cd6c8e68d8d847e49eb113f1f407a5dce51

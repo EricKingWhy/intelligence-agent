@@ -458,3 +458,90 @@ class TestSkillWritePath:
             discovery.register(entry)
         assert not (tmp_path / "escape").exists()
         assert not (tmp_path / "project" / "escape").exists()
+
+
+# ── #981：frontmatter 深嵌套不得让 RecursionError 掀掉发现/装配/安装 ──
+
+
+def _deep_frontmatter(depth: int) -> str:
+    """构造 `a: [[[…]]]` 流式嵌套 frontmatter（本机实测 ~500 层即触发 yaml 递归上限）。"""
+    return f"name: deep\ndescription: d\na: {'[' * depth}{']' * depth}"
+
+
+def test_deeply_nested_frontmatter_is_error_not_crash(tmp_path):
+    """#981：深嵌套 frontmatter 只损失这一条，不进 errors 之外——绝不向上抛 RecursionError。
+
+    `yaml.safe_load` 对递归嵌套有上限且**先于** SKILL_FILE_MAX_BYTES 尺寸上限生效
+    （本机实测 500 层 ≈ 1 KB 即触发），原实现的 `except yaml.YAMLError` 兜不住
+    （RecursionError 是 RuntimeError 子类，不是 YAMLError/ValueError）；分模块
+    docstring 明写的契约「解析失败显式进 errors 列表，不静默跳过」在这条路径上是
+    反契约——RecursionError 会一路掀给装配期（wiring）与安装期（install）。
+    """
+    skills_dir = tmp_path / "skills"
+    bad = skills_dir / "deep"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text(
+        f"---\n{_deep_frontmatter(2000)}\n---\n\n正文\n", encoding="utf-8"
+    )
+    good = skills_dir / "good"
+    good.mkdir()
+    (good / "SKILL.md").write_text(f"---\n{_fm('good')}\n---\n正文\n", encoding="utf-8")
+
+    catalog = SkillDiscovery([skills_dir]).discover()
+
+    # 坏技能被单条拒绝（不中断扫描），兄弟技能照常发现。
+    assert [e.name for e in catalog.entries] == ["good"]
+    # 断言精确到消息，不是路径子串：路径里就有 "deep"，只查子串会让任何错误都算过。
+    assert any("nesting is too deep" in err for err in catalog.errors), catalog.errors
+
+
+def test_deeply_nested_frontmatter_single_file_returns_error(tmp_path):
+    """单文件入口 parse_skill_markdown 同样返回 (None, errors)，不抛。"""
+    skill_dir = tmp_path / "deep"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n{_deep_frontmatter(2000)}\n---\n\n正文\n", encoding="utf-8"
+    )
+
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+
+    assert entry is None
+    assert errors and "nesting is too deep" in errors[0], errors
+
+
+def test_shallow_frontmatter_still_parses_after_guard(tmp_path):
+    """消融对照：合法（浅）frontmatter 的解析行为不受本次守卫影响。"""
+    skill_dir = tmp_path / "ok"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: ok\ndescription: d\nversion: 2\n---\n\n正文\n", encoding="utf-8"
+    )
+
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+
+    assert errors == []
+    assert entry is not None and entry.name == "ok" and entry.meta.get("version") == 2
+
+
+def test_guard_does_not_swallow_unexpected_parser_errors(tmp_path, monkeypatch):
+    """守卫精度：只兜 `RecursionError`，不把解析器的任何故障都洗成「太深」。
+
+    「嵌套太深」是一条**可归因**的结论（会写进 catalog.errors 给人看）；若守卫宽到
+    吞掉一切异常，真正的解析器 bug 会被伪装成一条无关的深度告警、再也浮不出来。
+    变异实测：把 `except RecursionError` 放宽成 `BaseException` 时，本用例是唯一转红的。
+    """
+    import yaml as yaml_module
+
+    skill_dir = tmp_path / "x"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n{_fm('x')}\n---\n正文\n", encoding="utf-8"
+    )
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("unexpected loader failure")
+
+    monkeypatch.setattr(yaml_module, "safe_load", boom)
+
+    with pytest.raises(ValueError, match="unexpected loader failure"):
+        parse_skill_markdown(skill_dir / "SKILL.md")
