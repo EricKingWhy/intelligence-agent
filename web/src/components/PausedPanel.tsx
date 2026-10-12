@@ -72,6 +72,9 @@ export function PausedPanel({
   resuming,
 }: PausedPanelProps) {
   const facts = pauseFacts(paused);
+  // `#1026`：context 硬护栏暂停没有 run ceiling 可抬（恢复依据是手动压缩/调上限，
+  // 不是数字输入）——判别收拢成一个布尔，渲染块内各分派只读这一个变量。
+  const isContextPause = facts.resumeTarget.kind === 'context';
   const draftError = ceilingDraftError(paused, ceilingDraft);
   const continuation = paused.continuation;
   // 标题按**命中的那一维**报读数：命中 local fuse（非 run 维）或某个**工具配额**
@@ -160,7 +163,7 @@ export function PausedPanel({
         </div>
       )}
       <div className="pause-panel-resume">
-        {facts.resumeTarget.kind === 'context' ? (
+        {isContextPause ? (
           <>
             {/* `#1026`：context 硬护栏暂停——恢复依据是"换一个放得下的上下文"
                 （手动压缩 / 调大上限），不是抬高任何 run ceiling。数字输入对它是
@@ -197,7 +200,7 @@ export function PausedPanel({
             />
           </>
         )}
-        {facts.resumeTarget.kind !== 'context' && (
+        {!isContextPause && (
           <button
             className="pause-resume-btn"
             onClick={onResume}
@@ -208,10 +211,10 @@ export function PausedPanel({
             {resuming ? '恢复中…' : '恢复同一 run'}
           </button>
         )}
-        {facts.resumeTarget.kind !== 'context' && draftError !== null && !resuming && (
+        {!isContextPause && draftError !== null && !resuming && (
           <span className="pause-panel-error">{draftError}</span>
         )}
-        {facts.resumeTarget.kind !== 'context' && draftError === null && !resuming && (
+        {!isContextPause && draftError === null && !resuming && (
           <span className="pause-panel-hint">{resumeInputHint(facts)}</span>
         )}
       </div>
