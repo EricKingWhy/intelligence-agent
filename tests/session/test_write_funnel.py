@@ -128,30 +128,71 @@ def test_session_has_one_durable_store_writer() -> None:
     assert _self_store_append_calls(methods["append"]) == []
     assert _self_store_append_calls(methods["adopt_history"]) == []
 
-    # 漏斗内**一个**物理写点，包在「首次写 + 撞号 resync 后有界重投」的循环里
-    # （#1024）。形状锁死为：写点唯一、重投靠循环回边（不在 except 里再写一次）、
-    # resync 必须真的重读盘面并换号、循环在成功分支 break。
+    # 漏斗内**一个**物理写点，包在「有界撞号重投」循环里（#1024）。形状锁死为：
+    # 写点唯一；循环是 `while True`；成功分支 `break`；`except SeqConflict` 不另抄
+    # 一次写、必须重读盘面、撞满墙钟预算必须 `raise`（有界 fail-loud，不许吞成写成功）；
+    # 换号**必须先核对盘面**（`if event.seq <= last`）。
     funnel_appends = _self_store_append_calls(funnel)
     assert len(funnel_appends) == 1, "物理写点必须唯一（重投靠循环回边，不另抄一次写）"
 
-    # 拿住写点所在的那个循环（漏斗里还有监听器回调循环，别误认成重投循环）。
     loop = next(
-        (n for n in ast.walk(funnel)
-         if isinstance(n, ast.For) and funnel_appends[0] in list(ast.walk(n))),
+        (
+            n
+            for n in ast.walk(funnel)
+            if isinstance(n, ast.While) and funnel_appends[0] in list(ast.walk(n))
+        ),
         None,
     )
     assert loop is not None, "写点必须包在重投循环内（重投靠循环回边）"
-    assert isinstance(loop.iter, ast.Call) and loop.iter.func.id == "range", (
-        "重投循环必须有界（range(_APPEND_MAX_TRIES)），不得无界 while True"
+    assert any(isinstance(n, ast.Break) for n in ast.walk(loop)), (
+        "写成功后必须 break（漏掉会把一次正常 append 变成自我冲突）"
     )
 
     handler = _seq_conflict_handler(funnel)
     assert handler is not None, "resync 必须挂在 except SeqConflict 分支上"
     assert _self_store_append_calls(handler) == [], "except 里不得再抄一次物理写"
-    assert _attr_calls_in(handler, "read_events"), "resync 必须重读盘面"
-    assert _bare_calls_in(handler, "replace"), "resync 必须换号重投"
-    assert any(isinstance(n, ast.Break) for n in ast.walk(loop)), (
-        "写成功后必须 break（漏掉会把一次正常 append 变成自我冲突）"
+    assert _attr_calls_in(loop, "read_events"), "重投循环每轮必须先重读盘面核对 seq"
+    deadline_if = next(
+        (
+            n
+            for n in ast.walk(handler)
+            if isinstance(n, ast.If)
+            and any(
+                isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "monotonic"
+                for c in ast.walk(n.test)
+            )
+        ),
+        None,
+    )
+    assert deadline_if is not None, "撞满墙钟预算必须单独判定"
+    assert any(isinstance(n, ast.Raise) for n in ast.walk(deadline_if)), (
+        "撞满预算必须 raise（有界 fail-loud）——break/return 会把没落盘的事件当成写成"
+    )
+
+    # 有界性：预算必须是墙钟常量 + monotonic 时钟（不是无界 while True 死循环）。
+    names = {n.id for n in ast.walk(funnel) if isinstance(n, ast.Name)}
+    assert "_APPEND_CONFLICT_DEADLINE_S" in names, "重投必须有墙钟预算（有界）"
+    assert _attr_calls_in(funnel, "monotonic"), "预算必须按 monotonic 时钟判定"
+
+    # 换号必须**有条件**（盘面核对之下）。#1024 第三轮实测教训：无条件换号会让活聚合
+    # 永远追不上持续抢号的旁路写者（零延迟竞争下 22% 的 append 直接抛错）。
+    seq_check_ifs = [
+        n
+        for n in ast.walk(funnel)
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Compare)
+        and any(isinstance(op, ast.LtE) for op in n.test.ops)
+    ]
+    assert seq_check_ifs, "换号必须挂在「seq 已被占用」的盘面核对之下"
+    reassigns = _bare_calls_in(funnel, "replace")
+    assert reassigns, "resync 必须换号重投"
+    guarded = [
+        call
+        for call in reassigns
+        if any(call in list(ast.walk(node)) for node in seq_check_ifs)
+    ]
+    assert len(guarded) == len(reassigns), (
+        "不得有无条件的换号（#1024 第三轮：会永远追不上旁路写者）"
     )
 
 

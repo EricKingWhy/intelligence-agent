@@ -13,6 +13,7 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
@@ -60,20 +61,18 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
-#: `Session._persist_event` 写一次事件的**总尝试次数**（含首次；#1024）。
+#: `Session._persist_event` 撞号重投的**墙钟预算**（秒；#1024）。
 #:
-#: 语义按「总尝试」而不是「重试次数」命名：`range(_APPEND_MAX_TRIES)` 里
-#: `_APPEND_MAX_TRIES = 1` 就等于**不重投**，按「重试次数」命名会踩这个 off-by-one。
+#: 为什么是「限时」而不是「限次」：竞争者是活的旁路写者（后台记忆作业），它不是
+#: 固定几次就退场——限 N 次会在持续竞争下把冲突原样抛出去，而这条路径正是 run 的
+#: 在途事件/终态写入，抛出去等于复现事故。改成「在窗口内一直重投、撞满预算才抛」，
+#: 既保住了「必须写成」的保证，又用墙钟给出硬上界（不可能死锁/挂死）。
 #:
-#: 为什么是 **3**（= 首次 + 至多 2 次 resync 重投）而不是 2 或无界：
-#: 重投要盖住的是「取号与写盘之间被旁路写者抢号」的竞争窗口，每次重投前都按盘上
-#: max 纠正过缓存，单次被抢的概率本就很低；但竞争者在窗口内**再**抢一次是可能的
-#: ——#1024 的 AC3 并发用例实测：只给 1 次重投时终态偶发丢失（多次重跑里出现过
-#: 单一失败轮），给到 2 次重投后 20 次重跑全绿。再往上加没有实测收益，无界重投则
-#: 会在持续竞争下活锁。数值与服务层既有的 `service._WRITE_CONFLICT_ATTEMPTS`
-#: （= 3，BUG-011 的「读快照 → 取号 → 重试」循环）一致；超限即原样抛出、
-#: 由调用方的既有失败归因接手（绝不吞成「写成功」）。
-_APPEND_MAX_TRIES: int = 3
+#: 为什么是 1.0s：稳态单次 append 含 fsync 约 1–5ms，1s 足够让活聚合在旁路写者的
+#: 密集抢号中抢到空档（实测：零延迟强竞争下平均 <20 次重投即成功）；而对调用方
+#: 仍是一个可接受的上界——超出预算说明对方是**持续**占位（真故障形状），此时按
+#: fail-loud 原样抛出，由调用方既有失败归因接手（绝不吞成「写成功」）。
+_APPEND_CONFLICT_DEADLINE_S: float = 1.0
 
 
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
@@ -454,10 +453,16 @@ class Session:
         存储层 fail-closed 拒写，读-改-写闭环在写者一侧完成）。没有这一步，受害
         run 的下一次 append 必炸，而失败终态又走同一枚过期计数器、必然再炸，
         run 永远拿不到终态（#1024 的真机事故形状）。
+
+        两条边界：**活聚合**才重投（`_snapshot_in_hand` 的聚合原样抛出，把冲突交给
+        其调用方的有界重试与失败归因）；重投受 `_APPEND_CONFLICT_DEADLINE_S` 墙钟
+        预算约束，撞满即 fail-loud——不把冲突吞成「写成功」。
         """
-        for attempt in range(_APPEND_MAX_TRIES):
+        deadline = time.monotonic() + _APPEND_CONFLICT_DEADLINE_S
+        while True:
             try:
                 self._store.append_event(self.session_id, event)
+                break
             except SeqConflict:
                 if self._snapshot_in_hand:
                     # 手持快照 ⇒ 不做 resync，原样抛给调用方：它的号不是「被抢」而是
@@ -465,24 +470,34 @@ class Session:
                     # ——服务层的 `change_model` 一族按 `_WRITE_CONFLICT_ATTEMPTS` 有界
                     # 重试，把冲突在这一层吞掉会让那些上界与失败归因变成不可观测。
                     raise
-                if attempt == _APPEND_MAX_TRIES - 1:
-                    # 上界用尽仍被抢：原样抛出去（fail-loud）。**不**在这里兜底吞掉
+                if time.monotonic() >= deadline:
+                    # 预算撞满仍被抢：原样抛出去（fail-loud）。**不**在这里兜底吞掉
                     # ——调用方（runtime 的终结臂）已有自己的失败归因；把冲突吞成
                     # 「写成功」才是 #1024 事故里真正的静默失真源。
                     raise
-                # 重读当前盘上最大 seq、纠正缓存、用新号重投（EventStoreDB
-                # `WrongCurrentVersionError` / Marten `ConcurrencyException` 同型协议）。
                 # 只认 ``SeqConflict``：其它 OSError / RuntimeError 是真故障，原契约
                 # 向上抛（注入故障的既有用例不受影响）。
-                self._next_seq = max(
+                #
+                # 重投前**核对盘面、只在真的被占时才换号**——这是 #1024 第三轮的关键：
+                # 无脑「撞号即重读换号」会把一次本来就正确的取号也换掉（换完又被抢、
+                # 再换、再被抢），活聚合永远追不上持续抢号的旁路写者，实测零延迟竞争下
+                # 22% 的 append 直接抛错（run 因此在途事件/终态都拿不到）。带条件后
+                # 只要落到一个空档就成功。
+                #
+                # 放在失败路径里（而不是每次写之前）是刻意的：稳态每次 append 多做一次
+                # O(n) 全量读会把热路径拖垮（每个边界都 append），而「号被别人占了」
+                # 只会以撞号的形式暴露——所以核对只在撞号后做，代价只在冲突时付。
+                last = max(
                     (e.seq for e in self._store.read_events(self.session_id)),
                     default=-1,
-                ) + 1
-                event = replace(event, seq=self._next_seq)
-                continue
-            # 落盘成功 —— 跳出重投循环（**不可省**：漏掉它会拿同一枚事件再投一次，
-            # 把一次正常 append 变成一串「自己抢自己」的冲突）。
-            break
+                )
+                if event.seq <= last:
+                    self._next_seq = last + 1
+                    event = replace(event, seq=self._next_seq)
+                # 不 sleep 直接重投：竞争窗口是微秒级，CAS 重投本身就是最有效的
+                # 争抢；而 sleep 在高负载机上粒度会粗到几十毫秒（实测同样一次
+                # append 撞 50 次号时，带 sleep 的版本把 1s 预算耗光在睡眠上、
+                # 直接 fail-loud，纯自旋版本瞬间落地）。上界由墙钟预算兜住。
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq。按**实际写入的号**前进：
         # resync 重投会换号（上面的 `replace`），无脑 `+= 1` 会留下一个已过期的
