@@ -81,12 +81,13 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **D3**（裁决 3）：中止条件覆盖服务进程。
 - **D4**：交互客户端在场 ⇒ 中止并提示（保留腿①实测行为，也对齐 ②④ 的「不默认强关 GUI」）。
 - **D5**：闸门放在 `iaStageApplication` 的 `customInit` 路径上、**rename 与 `iaStashBackupDir` 之前**：所有中止都「旧版本原样」，无需依赖回滚（腿③的回滚链保持只服务中断场景）。
+- **D6**（用户裁决 2026-10-12，修复轮）：把闸门调用**移出** `${If} $iaProbeFound == "1"` 分支 —— 即首轮 Axis A 的 P3。**这是行为变更**：缺 app exe 的「修复安装」路径、以及**本机尚无安装的首次安装**路径，从此也会经过闸门。用户明示批准（原话：「我同意了#914 症状的一条边角路径。把闸门移出该分支是行为变更（会改掉「缺 exe 的修复安装」语义）」）。代价与新残余登记在 §6。
 - **非目标**：`.old-*` 目录里孤儿服务的生命周期（属 #904 / R3 的 leftover 域，另开票）；`iaRollbackApplication`（恢复页「还原旧版本」）路径的同类盲区（只在已中断安装后出现，且其自带 fail-closed 分支，另记）；两个安装树并存时上游 `KILL_PROCESS` 前缀偏宽的误杀（上游行为，本票仅记录）。这三条与 §6 的窄竞态已合并登记为 **issue #1066**（只登记不修）。
 - **已知窄竞态**：`customInit` 与安装 section 之间用户手动启动新客户端/服务（此时 rename 已完成、闸门已过）。触发需要用户在向导运行期间启动一个尚未落盘的 app，且后果可由下一次更新或用户重启消除 ⇒ 本票不引入 section 期二次闸门（另记 §6）。
 
 ## 4 实现
 
-### 4.1 改动清单（4 笔提交，`239750b8..4b704801`；逐文件 blob 见 §5.1）
+### 4.1 改动清单（首轮 4 笔 `239750b8..4b704801` + 修复轮 1 笔 `0e42ae11`；逐文件 blob 见 §5.1 / §5.7）
 
 | 提交 | 文件 | 做了什么 | 依据 |
 | --- | --- | --- | --- |
@@ -101,6 +102,12 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 | `90fdc90c` | `desktop/test/host-protocol.test.ts` | 5 例钉子：跨端数值一致、单端递增必红、`version` 串不参与判据、两端规则文本在位 | 裁决 D2「钉住这个不变量」 |
 | `90fdc90c` | `docs/adr/0053-protocol-version-sole-compatibility-gate.md` | ADR：为何是唯一判据、代价与边界 | AGENTS §5（重要架构决定写 ADR） |
 | `4b704801` | `docs/live_gate/w21/58-issue-914-service-in-use-gate.md`、`docs/agents/reference-sources.md` | 实测根因、方案依据块、决策与非目标；补录领域来源 | 协议 §1.3、AGENTS §6.1 |
+| `0e42ae11` | `desktop/installer/installer-directories.nsh` | 闸门调用从 `${If} $iaProbeFound == "1"` 分支**移出**，改到该分支之前（仍在 `iaProbePath` 之后、备份指针与 `Rename` 之前）；头部注释与闸门散文同步更正 | 裁决 D6；首轮 Axis A P3 |
+| `0e42ae11` | `desktop/scripts/build-windows-installer.mjs` | `validateProcessGateGuards` 新增 `appBranch` 规则：闸门调用落在该分支**之后**即构建期报错 | §9.4 编码成机制：让「移回分支内」无法静默复发 |
+| `0e42ae11` | `desktop/test/installer-scripts.test.mjs` | 新增变异用例（把调用移回分支内 ⇒ 必须红）；`assertProbe` 的 `guard - call < 120` 字符上界换成**语句表断言**（新增的注释与调用本身把该上界顶破） | §9.4（守卫须有牙齿） |
+| `0e42ae11` | `desktop/test/harness/teeth-check-guards.mjs` | 为新规则加一条变异；`GUARD_BASELINE_SHA256` 随守卫正文同笔更新 | 该 harness 自身注释要求「与守卫正文同笔更新」 |
+| `0e42ae11` | `desktop/test/harness/r1-drivers/stage-damaged-probe.nsi` + `run-stage-damaged-probe.ps1` | 新增真机驱动：1 条对照腿（完整安装仍正常 stage）+ 3 条损坏腿（缺 exe + 运行时在跑 / 缺 exe + 根进程在跑 / 缺 exe + 分类不可证） | 票面 AC「真机腿」；首轮 Axis A P3 的判别器 |
+| `0e42ae11` | `desktop/test/harness/README.md` | 登记新驱动、可复制命令与红/绿读数 | §16.1（进度落点） |
 
 ### 4.2 关键行 → 依据
 
@@ -121,7 +128,7 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 
 | 车道 | 命令 | 读数 |
 | --- | --- | --- |
-| desktop 全套（含 11 例闸门规则 + 守卫） | `npm test`（`desktop/`） | **286 tests / 284 passed / 2 skipped / 0 failed**；其中 `installer-scripts.test.mjs` 110 passed |
+| desktop 全套（含 11 例闸门规则 + 守卫） | `npm test`（`desktop/`） | **286 tests / 284 passed / 2 skipped / 0 failed**；其中 `installer-scripts.test.mjs` 110 passed（**首轮树 `4b704801` 读数**；修复轮 287 / 285P / 2S / 0F、`installer-scripts.test.mjs` 111 passed，见 §5.7） |
 | D2 钉子 | 同上（`host-protocol.test.ts`） | **5 passed**（跨端数值一致、单端递增必红、`version` 串不参与判据） |
 | 类型检查 | `npm run check`（`tsc --noEmit`） | 无输出、rc=0 |
 | 守卫牙齿（变异） | `node test/harness/teeth-check-guards.mjs` | 去掉 `@(` ⇒ 规则红（守卫基线 sha 一致） |
@@ -134,7 +141,7 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **Gate-0（记账树 `3bcd9f62`，隔离副本，03:16:12）**：收据 `docs/gate/3bcd9f62eba58ab12af5e1c3daefbe248931f27e.json` —— **6/6 PASS**（墙钟 38.5s；`worktree.tracked_matches_head=true`、`untracked_total=0`）。
 - **覆盖闸门**：`python scripts/check_review_coverage.py` → exit 0（`089524a~1..HEAD` 每条 commit 均有归属）。
 - **全量门禁（冻结树，隔离副本）**：后端 `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` → **7758 passed / 43 skipped / 51 deselected / 2 failed / 2586.92s（43:06）**（两条红见 §5.5）；web `vitest run` **119 files / 1681 passed**；`vite build` 成功；`playwright test --workers=2` **540 passed（19.8m，0 flaky）**；`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` 由 Gate-0 覆盖且绿。
-- **读数传递（协议 §8.1 第 3 条判据①）**：`git diff --name-status --no-renames 4b704801 HEAD` = **9 条**（冻结 → 交付提交：`reference-sources.md`、两份 `docs/gate/*.json` 收据、两行台账、本证据文件、`SDD_TICKET_TRACKER.md`、`PHASE_STATUS.md`、`phase_status/2026-10.md`），状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。
+- **读数传递（协议 §8.1 第 3 条判据①，首轮：冻结 `4b704801` → 记账树 `3bcd9f62`）**：`git diff --name-status --no-renames 4b704801 3bcd9f62` = **9 条**（冻结 → 交付提交：`reference-sources.md`、两份 `docs/gate/*.json` 收据、两行台账、本证据文件、`SDD_TICKET_TRACKER.md`、`PHASE_STATUS.md`、`phase_status/2026-10.md`），状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。
 
 ### 5.4 Gate-0 为何在隔离副本里跑
 
@@ -149,18 +156,46 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 
 两轴独立只读子代理（非作者）。**首派两轴均因上游 `Model request failed` 未产出任何结论行**（基础设施故障，§8.3 第 4 条定义内），按该条重派 1 次后两轴都取到结论；未使用「替代」通道。
 
-- **Axis A（Correctness/Spec）FAIL，P0-P3 = 0/0/0/1**：唯一 P3 = 闸门落在 `${If} $iaProbeFound == "1"` 分支内 ⇒ 缺 app exe 而 bundled 运行时在跑的外部损坏安装不被分类（登记 #1066 + §6，本票不改）。
+- **Axis A（Correctness/Spec）FAIL，P0-P3 = 0/0/0/1**：唯一 P3 = 闸门落在 `${If} $iaProbeFound == "1"` 分支内 ⇒ 缺 app exe 而 bundled 运行时在跑的外部损坏安装不被分类。**该 P3 已在修复轮（`0e42ae11`）按用户裁决 D6 修掉**（首轮「本票不改，待用户裁决」的表述由 §5.8 与 §6 取代）。
 - **Axis B（Standards/仓规）FAIL，P0-P3 = 0/0/2/4**：P2① 本文件 License 字段的 `THIRD_PARTY_NOTICES.md` 指针为假、P2② 仓库内无冻结树 Gate-0 收据；P3① `reference-sources.md` 误标「运行时依赖」、P3② §4-§6 占位（属「缺但已计划」）、P3③ 4 笔直接落在集成 clone 的 `main`、P3④ `reference-sources.md` 补录顺序偏差。逐条处置见两行台账。
 
 两轴**各自独立**复跑并确认：`check_semantic_equiv.py`（`host_service.py` 等价）、`host-protocol.test.ts` 5/5、`installer-scripts.test.mjs` 110/110、真机四腿读数、以及 `coverage` 的 ❌ 集合恰为本批三笔。
+
+### 5.7 修复轮：冻结、真机红证与全量门禁（`0e42ae11`）
+
+- **冻结**：tip `0e42ae118211f48ed38e31045076ebd0464bdfe3` / tree `b7c60bf10953ca4f58e30a63116ac0aa8bee6116`（修复轮唯一代码笔 `0e42ae11`，叠在首轮两笔文档提交 `3bcd9f62` / `261a3188` 之上 —— 实测 `git log`：`3bcd9f62` 02:57 → `261a3188` 03:24 → `0e42ae11` 06:08；其后的提交才是本轮文档笔）。逐文件 blob：`installer-directories.nsh` `9ccc0231`、`build-windows-installer.mjs` `4472ad0d`、`installer-scripts.test.mjs` `c2b68954`、`teeth-check-guards.mjs` `9dd6e382`、`stage-damaged-probe.nsi` `d28c37cf`、`run-stage-damaged-probe.ps1` `521f0a9c`、`README.md` `4ab298a4`。
+- **真机红证（`run-stage-damaged-probe.ps1`，生产宏原文注入）**：把驱动指向**修复前**的 include（`-DirectoriesSource`，blob `1105ebd1`）⇒ 对照腿 `intact-clean` 仍绿，三条损坏腿全红、**共 6 条断言失败**：`damaged-runtime` `exit=0` 而 `answer=` **为空**（闸门从未被调用）、`damaged-rootproc` `exit=0`（应为 2）、`damaged-unknown` `exit=0`（应为 2）。空的 `answer=` 是「宏没调用闸门」的直接证据。
+- **修复后两轮读数（逐字一致）**：`intact-clean exit=0 stage_returned=1 answer=0 probe=1`（目录被 rename 成 `<dir>.old-{guid}` ⇒ 对照腿证「普通更新路径不回归」）；`damaged-runtime exit=0 answer=0 probe=0`（运行时进程 `gone`）；`damaged-rootproc exit=2 <无读数>`（进程 `alive`）；`damaged-unknown exit=2 <无读数>`。
+- **单测 / 类型 / 牙齿**：`installer-scripts.test.mjs` **111 passed**（新增「把调用移回分支内 ⇒ 必须红」用例）；desktop 全套 **287 tests / 285 passed / 2 skipped / 0 failed**；`npm run check` rc=0；牙齿 harness **存活变异 = 0**，守卫逐字节还原（`restored sha256 = 143714f063906161b0b45c0a3ca0c1f988d913d262b8470f3adac14aa226feca`，`identical=true`）。
+- **生产安装器编译（修复轮补做，取代首轮 §6 的「未做」）**：`npm install --no-save --no-package-lock --no-audit --no-fund electron-builder@26.15.3` + `node scripts/test-windows-installer.mjs --compile-only` ⇒ en_US / zh_CN 两个生产安装器**编译成功**（`succeeded=true`，rc=0），即改动后的宏在真实 NSIS 构建链里可编译。`desktop/package-lock.json` 与 `package.json` 未被改动（`git status` 实测）。**仍未做**完整安装 / 卸载 smoke（需真机交互），由 PR 的 CI 作业 `windows-installer-smoke` 承担。
+- **Gate-0（冻结树 `0e42ae11`，隔离副本）**：收据 `docs/gate/0e42ae118211f48ed38e31045076ebd0464bdfe3.json` —— **5/6**，❌ 仅 `coverage`，且其 ❌ 集合**恰为本轮那一笔代码提交 `0e42ae11`**（台账行尚未落盘）。满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据，机械面清零后才派两轴。
+- **全量门禁（冻结树 `0e42ae11`，隔离副本，**不与任何重活并发**）**：后端 `PYTHONPATH= PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` ⇒ **7759 passed / 43 skipped / 51 deselected / 1 failed / 1412.74s（23:32）**；唯一红 = `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`，即**台账尚未落盘的机械瞬态**（与首轮 §5.5 第 2 条同型；台账行落盘后该例在记账树复跑转绿）；desktop `npm test` **287 / 285 passed / 2 skipped / 0 failed**；web `vitest run` **119 files / 1681 passed**；`vite build` 成功（10.33s）；`playwright test --workers=2` **540 passed（14.2m，0 flaky）**；`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` 由 Gate-0 覆盖且绿。
+- **首轮那条负载型假红未复现**：issue #1069 的 1 秒硬预算假红本轮**未出现** —— 本轮全量单跑、无并发重活，读数里没有它的签名。这与「负载诱发」的归因一致（首轮那次与 playwright、两个审查子代理并发）。
+- **读数传递（协议 §8.1 第 3 条判据①，修复轮）**：`git diff --name-status --no-renames 0e42ae11 <交付提交>` = **<TRANSFER_COUNT> 条**，状态仅 `A`/`M`、无 `D`/`R`/`C`/`T`，路径全命中 `DOC_PATTERN` ⇒ 冻结树读数对被交付的代码面有效。
+
+### 5.8 修复轮审查（两轴修后重审，各 1 轮；范围 `4b704801..0e42ae11`）
+
+按协议 §8.8.5：闭合既有 findings + **在新 diff 上至少一次有限发现**（不得零发现）。两轴各自独立只读、互不可见；自写变异都在主工作树**之外**的副本里做，两轴报回的冻结树 `git status --short` 都只有 Gate-0 收据那一个未跟踪文件（无人改动被测树）。
+
+- **Axis A（Correctness/Spec）：PASS，P0/P1/P2 = 0/0/0，P3×2 / P4×1**。首轮 P3 的闭合是**实测**（不是采信作者）：用作者驱动分别指向冻结 include 与修复前 include，得到 §5.7 的红 / 绿两组读数。**自写变异 3 条**，其中 M2（在闸门函数体内加 `StrCmp $iaProbeFound "0" 0 +2` / `Return`，即「被调用但在缺 exe 时立刻返回」）**活过全部 111 条构建期用例**，并可观测地重现首轮缺陷 ⇒ 非零发现。另外核对并确认：`IaBackupDir` 非空 = 「安装 section 已开始」的不变量**逐字保留**（闸门不写注册表，且先于 `iaReadBackupDir` / `iaStashBackupDir` / `Rename`；`iaProbeFound == "1"` 路径的顺序与修复前逐字节相同）；三条拒绝出口都不写记录、不 stage、不 rename；`GUARD_BASELINE_SHA256` 自算相符；`protocol_version` 仍是唯一兼容判据（修复 diff 里无版本 / 构建号判据）。
+- **Axis B（Standards/仓规）：APPROVE_WITH_FINDINGS，P0/P1/P2 = 0/0/1，P3×4 / P4×3**。P2 = **交付记录与已交付代码互相矛盾**：本文件 §5.6 / §6、`SDD_TICKET_TRACKER.md`、`PHASE_STATUS.md`、`phase_status/2026-10.md` 四处仍写「本票不改、待用户裁决」并只钉到 `4b704801`（`grep -c 0e42ae11` 四处皆 0）⇒ 本轮的文档笔即该 P2 的处置。**自写变异 3 条**：M1 与 A 轴 M2 同形、**独立复现**「活过 111 条用例」（两轴各自独立撞到同一条，鉴别力最强）；M2（把调用移回分支内）被杀（`111 / 107 passed / 4 failed`，含 `not ok 9 - refuses a gate call that runs only when the app executable is present`）⇒ 新用例不是空转；M3（把调用移到宏首行）红，但红因是 fixture 锚点失配而非规则本身（P4，诊断力问题）。另确认：`.gitattributes` 的实际形态（无目录级规则；`*.ps1 eol=crlf`，`.nsi` 无属性、blob 同为 CRLF，两个新文件与同目录兄弟一致；无 BOM；`worktree == index == HEAD`）；台账行 775 / 778 字符 ≤ 800、`PHASE_STATUS` 行 1199 ≤ 2000，均未超上限。首轮 B 轴 P2① / P2② 与 P3① / P3② 逐条实测 **CLOSED**，且 `0e42ae11` 未触碰这些面。
+- **残余处置**：A 轴 P3-1 与 B 轴 F4 是同一条（两轴各自独立复现）；与 A 轴 P3-2 / B 轴 F2（闸门无「目录归属」判据）、B 轴 F5（注释强于机制）、B 轴 P4（`appBranch` 可被改写分支条件绕过）一并登记为修复轮新残余（§6），**本票不修**：协议 §8.8.5 的修后重审预算（1 轮 / 轴）已用满，再改代码会产出**没有审查行覆盖**的代码提交，直接撞 §7 第 8 条的覆盖闸门 ⇒ 按用户「查到问题就另开票」的常设指令留给后续票处理（已开 **#1066** 注释承接同族）。P4 里两条（`.gitattributes` 前提更正、`#1045` 断言替换与失败模型差异）**无缺陷**，如实记为确认项。
+- **两轴都取到了结论行**，未使用 §8.3 第 4 / 5 条的「有界收口替代」通道（首轮那次基础设施故障重派不适用于本轮）。
 
 ## 6 残余与后续
 
 - **窄竞态 → issue #1066**：闸门通过之后、section `Rename` 之前用户手动启动服务/客户端时，rename 不拦 headless 服务 ⇒ 旧服务从 `.old-*` 继续应答。本票不做 section 期二次闸门（理由见 §3：触发需要用户在向导运行期间启动一个尚未落盘的 app，后果可由下一次更新或用户重启消除）。
 - **同源盲区 → issue #1066**：`iaRollbackApplication`（恢复页「还原旧版本」，439–524）反向搬回旧版本时没有「谁在跑」的判据；卸载器 sweep 没有「先尝试停掉 bundled 运行时」的动作；上游 `KILL_PROCESS` 前缀偏宽（本仓只记录，不改上游行为）。
-- **无 Windows PowerShell 的机器**：闸门解析不到 `$SYSDIR\WindowsPowerShell\v1.0\powershell.exe` 时分类不可证 ⇒ **中止更新**（exit 2），不再像 stock 那样退回 `tasklist` 并可能静默放行。这是有意的 fail-closed（② 的口径）；Windows PowerShell 5.1 自 Win7 SP1 起随系统预装，实际面很窄，但**语义变化是真的**，写在这里而不是留给用户去发现。
-- **安装路径含单引号**：分类脚本把 `$INSTDIR` 内插进 PowerShell 单引号字符串（**上游同形写法**），路径含 `'` 时分类不可证 ⇒ 中止（真机腿 `unknown` 实测 exit 2）。比 stock 的「静默判未运行」安全，但仍是用户可见限制；与 #1066 同族，一并记录。
-- **未做**：完整安装包构建。本机无 `desktop/node_modules`、无已构建安装器、无 staged 运行时 ⇒ 生产安装器跑不起来，故真机腿用 r1 驱动 + **生产函数原文注入**代替，与仓内既有约定一致（`desktop/test/harness/README.md`）。这条是环境限制，不是本票的选择。
-- **外部损坏的安装目录（Axis A 的 P3，本票不改，待用户裁决）**：闸门调用落在 `iaStageApplication` 的 `${If} $iaProbeFound == "1"` 分支内（`installer-directories.nsh:371-378`）。若 `$INSTDIR` 下的 bundled 运行时仍在跑、而 `${APP_EXECUTABLE_FILENAME}` 已缺失（杀软隔离未签名 exe、手工删除）且 `IaBackupDir` 为空（`iaRecoverInterruptedInstall` 因此不接管），整段 stage/rename 会被跳过、闸门从不分类，stock section 直接在 `$INSTDIR` 上就地安装——#914 症状的一条边角路径。**为何不在本票改**：把闸门移出该分支是**行为变更**（会改掉「缺 exe 的修复安装」语义），超出裁决 D1/D3 的最小方向，按协议 §9.1.1 交用户裁决；已登记为 issue #1066 的注释（连同其余三条残余）。
+- **无 Windows PowerShell 的机器**：闸门解析不到 `$SYSDIR\WindowsPowerShell\v1.0\powershell.exe` 时分类不可证 ⇒ **中止更新**（exit 2），不再像 stock 那样退回 `tasklist` 并可能静默放行。这是有意的 fail-closed（② 的口径）；Windows PowerShell 5.1 自 Win7 SP1 起随系统预装，实际面很窄，但**语义变化是真的**，写在这里而不是留给用户去发现。 **修复轮起覆盖面变宽（裁决 D6）**：闸门调用移出 `${If}` 分支后，**首次安装**（本机尚无安装、`$INSTDIR` 里没有 app exe）也会走闸门 ⇒ 同样的「分类不可证」现在也会**中止一次全新安装**，而那里没有任何东西需要保护。首轮本段只写了「中止更新」，口径偏窄，此处更正。四条新真机腿都在**已有安装树**上，**没有一条覆盖 `$INSTDIR` 不存在的路径**（登记为本轮残余）。
+- **安装路径含单引号**：分类脚本把 `$INSTDIR` 内插进 PowerShell 单引号字符串（**上游同形写法**），路径含 `'` 时分类不可证 ⇒ 中止（真机腿 `unknown` 实测 exit 2）。比 stock 的「静默判未运行」安全，但仍是用户可见限制；与 #1066 同族，一并记录。 同样地，修复轮起这条也覆盖**首次安装**：默认目录是 `%LOCALAPPDATA%\Programs\<product>`，Windows 用户名含 `'` 即命中。
+- **完整安装包**：首轮**未做**（当时本机无 `desktop/node_modules`、无已构建安装器、无 staged 运行时 ⇒ 生产安装器跑不起来，故真机腿用 r1 驱动 + **生产函数原文注入**代替，与仓内既有约定一致）。**修复轮补做了编译面**：装上 `electron-builder@26.15.3` 后 `node scripts/test-windows-installer.mjs --compile-only` ⇒ en_US / zh_CN 两个生产安装器**编译成功**（rc=0），见 §5.7。**仍未做**完整安装 / 卸载 smoke（需真机交互），由 PR 的 CI 作业 `windows-installer-smoke` 承担。
+- **外部损坏的安装目录（首轮 Axis A 的 P3）—— 已在修复轮修掉（裁决 D6）**：闸门调用原先落在 `iaStageApplication` 的 `${If} $iaProbeFound == "1"` 分支内（`installer-directories.nsh`），缺 exe 而 bundled 运行时在跑的损坏安装从不被分类，stock section 直接就地安装。`0e42ae11` 把调用移到该分支**之前**（仍在 `iaProbePath` 之后、备份指针与 `Rename` 之前），并补了构建期规则、变异用例与真机三腿。**行为变更已由用户明示批准**；它的代价与新残余见下。首轮「本票不改，待用户裁决」的表述由本条取代。
+- **修复轮引入的新残余（登记，本票不修，同族交 #1066 / 后续票）**：
+  ① **闸门没有「目录归属」判据**（A 轴 P3-2 / B 轴 F2）：`iaRequireNoRunningProduct` 只问「谁在 `$INSTDIR` 下跑」，不问「这个目录是不是本产品的安装」。调用点移出分支后，`iaProbeFound == "1"`（app exe 在位）曾是的唯一归属信号也没有了；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程。可达面窄（`RequestExecutionLevel user`，只及同用户进程、不提权），故 P3。
+  ② **构建期规则钉的是「调用位置」，不是「闸门有效」**（A 轴 P3-1 / B 轴 F4，**两轴各自独立复现**）：两轴各自写出的变异（在闸门函数体内加 `StrCmp $iaProbeFound "0" 0 +2` / `Return`，即「被调用但在缺 exe 时立刻返回」）**活过全部 111 条构建期用例**，同时可观测地重现首轮 Axis A 的缺陷。当前唯一能杀它的判别器是 `run-stage-damaged-probe.ps1`，而该驱动**不在任何 workflow 里**（`windows-installer-smoke.yml` 只跑 `test-windows-installer.mjs`，其 `paths` 甚至不含 `desktop/test/**`）⇒ 这一类回归只有人工、依赖环境的脚本在守。
+  ③ **注释强于机制**（B 轴 F5）：`installer-directories.nsh` 新增注释写「is called for every install」，而调用点在 `customInit` 的 `${If} $iaRecoveryPending != "1"` 之内（`installer.nsh:135-138`）⇒ 恢复挂起时既不 stage 也不调用闸门。读者 / 维护者口径问题，非运行期行为。
+  ④ **`appBranch` 规则可被改写分支条件绕过**（B 轴 P4）：规则只锚字面量 `${If} $iaProbeFound == "1"`；把该分支改写成 `StrCmp` 形式即绕过它（此时 #1045 的语句表断言兜住）。属纵深防御的第二道，规则自身注释的范围被高估。
+  ⑤ **首次安装路径无腿覆盖**（A 轴 P3-2 / B 轴 F3）：见上两条（PowerShell / 单引号）——「`$INSTDIR` 不存在」这一路径四条新腿一条都没盖。
+
 - **同批发现的测试基建缺陷 → issue #1069**：§5.5 第 1 条那条负载型假红不是本票语义的问题，而是该用例把「Python 子进程启动 + 落盘」压在 1 秒硬预算里（预算按「脚本已在跑」估的）。按用户「查到问题就另开票」的常设指令开票，票面含全量 / 单例 / 整文件三组读数、机理与三条候选修法，留给独立一轮处理。
 - **外来改动**：工作树里的 ` M dev.sh` 是另一条线的未提交工作，本票未触碰、未纳入任何提交；它也是 Gate-0 读数改在隔离副本里取的原因（§5.4）。
