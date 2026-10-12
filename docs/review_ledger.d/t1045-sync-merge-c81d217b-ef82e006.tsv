@@ -1,0 +1,1 @@
+2026-10-12	#1045 同步 origin/main（PR #1043/#1026）：merge ef82e006（父1=c81d217 本分支 tip；父2=5363007 origin/main；merge-base=94666bb）。ort 成功；双方自 merge-base 的改动路径交集为空、无冲突解决；来侧提交已有原 review ledger 覆盖。本行仅机械归属同步 merge，不是新审查，未改变 #1045 行为。	c81d217bbac2e31d415508aa11861956e0cdf190..ef82e006cbae89547154a65fe08a02292b1d69ad

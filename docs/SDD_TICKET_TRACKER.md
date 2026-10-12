@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**当前状态（2026-10-12，#1045）**：Issue #1045 CLOSED（bug/P2，EricKingWhy；in-progress 已移除）；PR #1046 已按 merge commit `2bffdb973c344ba2110bc9914047a35e749fd90b` 合入 GitHub main（head `6b24ee26dcf0bd5e36d57c10db90ee5d8628a619`）。三处分支复用 iaProbePath/iaBuildLongPath；双轴 PASS（P0-P4=0）。NSIS 文件探针 340 字符存在长路径、缺失长路径、短路径分别读数 1/0/1；生产安装器 en_US/zh_CN 编译、Windows 安装/卸载 smoke 通过。验证树 `874678ded64f7c8700249a9712fbbff0d75868c2`：后端全量 7738 passed/43 skipped/51 deselected/0 failed，Desktop test/check 通过，Web Vitest 1681、Playwright 540 通过，Vite build 成功；PR CI Gate-0 6/6、Chromium E2E、security 均通过；coverage、diff-check 通过。完整 >MAX_PATH 交互式安装/升级未运行；Spec 复审认为 helper 运行探针与生产安装器编译满足可行验收。详证见当月归档。
+
 **已完成（2026-10-12，#915 Windows 安装器恢复批次）**：PR #1042 已按 merge commit 7d7b164e0661d1db148e0429133a152ef6a84ca7 合入 GitHub main；head 891655336defe85ba9018a559f496437465466a0。#915/#1021/#1023/#1034/#1035/#1037/#1040 均 CLOSED（completed），in-progress 已移除。冻结树后端全量结果和 Gate-0 收据 docs/gate/91d247c9b35227e7c0f1d5957afb390405b10d70.json；PR CI Gate-0、Windows installer smoke、Chromium E2E、gitleaks 全通过。完整票面、Windows 证据及读数传递见月档「#915 Windows 安装器恢复批次最终验证与集成」。独立 FileExists 长路径探针目前仅确认目录形态，文件场景未证实；单独候选及后续复现记录见月档。
 
 **冻结代码/测试 blob（git hash-object，冻结 tip 相对 origin/main 的改动面）**：
