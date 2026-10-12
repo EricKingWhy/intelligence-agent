@@ -343,6 +343,7 @@ if ($Case -eq 'prior-pointer') {
   Assert 'prior_pointer_cleanup_install_dir_removed' (-not (Test-Path -LiteralPath $instDir)) ('exists={0}' -f (Test-Path -LiteralPath $instDir))
   Assert 'prior_pointer_cleanup_backup_removed' (-not (Test-Path -LiteralPath $priorBackup)) ('exists={0}' -f (Test-Path -LiteralPath $priorBackup))
   Assert 'prior_pointer_cleanup_registry_removed' (-not (Test-Path -LiteralPath $appKeyPath)) ('exists={0}' -f (Test-Path -LiteralPath $appKeyPath))
+  Assert 'prior_pointer_cleanup_uninstall_registry_removed' (-not (Test-Path -LiteralPath $keyPath)) ('exists={0}' -f (Test-Path -LiteralPath $keyPath))
   $realAfter = @(Get-ChildItem -LiteralPath $productsRoot -Directory |
     Where-Object { $_.Name -like 'Intelligence Agent*' } | ForEach-Object { $_.Name })
   Assert 'real_product_dirs_untouched' (($realBefore -join ',') -eq ($realAfter -join ',')) ('before=[{0}] after=[{1}]' -f ($realBefore -join ', '), ($realAfter -join ', '))
