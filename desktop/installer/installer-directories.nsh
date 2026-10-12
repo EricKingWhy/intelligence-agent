@@ -206,8 +206,9 @@ Function iaRecoveryFreshClick
 FunctionEnd
 
 Function iaContinueInterruptedFresh
-  ; Keep the old version discoverable before disarming the interrupted
-  ; transaction. The uninstaller's shape sweep remains the full discovery path.
+  ; Keep the old version discoverable while the new installation runs. Leave
+  ; IaBackupDir armed until iaPromoteApplication commits so cancel and restart
+  ; can still restore it. The uninstaller's shape sweep remains full discovery.
   ClearErrors
   !ifdef IA_TEST_INJECT_RECOVERY_METADATA_FAILURES
     ReadRegStr $0 HKCU "${INSTALL_REGISTRY_KEY}" "IaTestFailLeftoverRecord"
@@ -246,7 +247,6 @@ iaInterruptedFreshUnsafe:
     Quit
 iaInterruptedFreshSafeDone:
   ${EndIf}
-  !insertmacro iaClearBackupDir
   StrCpy $iaRecoveryPending "0"
   SetOutPath $iaFinalDirectory
 FunctionEnd
@@ -408,6 +408,8 @@ Function iaPromoteApplication
     Return
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+    !insertmacro iaReadLeftoverDir
+    StrCmp $iaLeftoverDirectory $iaBackupDirectory iaPromoteBackupAlreadyLeftover
     ; #904 item 6/5: the pointer has to pass the backup-shape check before it
     ; steers a recursive delete (it lives in HKCU), and the delete itself only
     ; runs on a tree without a reparse point. iaPrepareDelete builds the
@@ -465,6 +467,7 @@ iaPromoteDeleteSkipped:
         DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
       ${EndIf}
     ${EndIf}
+iaPromoteBackupAlreadyLeftover:
     !insertmacro iaClearBackupDir
   ${Else}
     Call iaRollbackApplication

@@ -10,6 +10,8 @@
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -AbsentInstallDirectory
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -BlockRollback
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -AfterContinue cancel
+    powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -AfterContinue hard-kill-restore
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -FailLeftoverRecord
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice continue -FailLeftoverRecord -LeaveFailurePromptOpen
     powershell -File drive-r3-recovery.ps1 -Installer <installer-test.exe> -Choice silent
@@ -23,6 +25,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$Installer,
   [ValidateSet('restore', 'continue', 'silent')][string]$Choice = 'restore',
+  [ValidateSet('complete', 'cancel', 'hard-kill-restore')][string]$AfterContinue = 'complete',
   [string]$EvidenceDir = '',
   [switch]$AbsentInstallDirectory,
   [switch]$BlockRollback,
@@ -42,6 +45,9 @@ $rollbackTarget = ''
 $rollbackMarker = ''
 if (($AbsentInstallDirectory -or $BlockRollback) -and $Choice -ne 'restore') {
   throw 'restore fixtures require -Choice restore'
+}
+if ($AfterContinue -ne 'complete' -and $Choice -ne 'continue') {
+  throw '-AfterContinue requires -Choice continue'
 }
 if ($AbsentInstallDirectory -and $BlockRollback) {
   throw 'choose only one restore fixture'
@@ -145,6 +151,28 @@ function Find-RecoveryFailurePrompt([int]$processId) {
   return $null
 }
 
+function Wait-StockWelcomePage([System.Diagnostics.Process]$process, [datetime]$deadline) {
+  while ((Get-Date) -lt $deadline -and -not $process.HasExited) {
+    foreach ($window in Get-ProcessWindows $process.Id) {
+      if ($window.Text -match '(?is)(welcome|\u6b22\u8fce)' -and
+          $window.Text -notmatch '(?is)(interrupted.*restore.*previous version.*fresh installation|\u4e0a\u6b21\u66f4\u65b0\u5df2\u4e2d\u65ad.*\u6062\u590d\u65e7\u7248\u672c.*\u7ee7\u7eed\u5168\u65b0\u5b89\u88c5)') {
+        return $window
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  return $null
+}
+
+function Find-CancelConfirmationPrompt([int]$processId) {
+  foreach ($window in Get-ProcessWindows $processId) {
+    if ($window.Text -match '(?is)(are you sure.*cancel|cancel.*installation|\u786e\u5b9a.*\u53d6\u6d88|\u53d6\u6d88.*\u5b89\u88c5)') {
+      return $window
+    }
+  }
+  return $null
+}
+
 function Wait-RecoveryFailurePrompt([System.Diagnostics.Process]$process, [datetime]$deadline) {
   while ((Get-Date) -lt $deadline -and -not $process.HasExited) {
     $prompt = Find-RecoveryFailurePrompt $process.Id
@@ -200,7 +228,8 @@ $appKeyPath = ''
 $backupDir = ''
 $stageProcess = $null
 $recoveryProcess = $null
-Log ('=== R3 hard-interruption recovery; choice={0} ===' -f $Choice)
+$finalChoice = $Choice
+Log ('=== R3 hard-interruption recovery; choice={0} after_continue={1} ===' -f $Choice, $AfterContinue)
 Log ('installer={0} product={1} app={2}' -f $installerPath, $productName, $payloadExe.Name)
 
 try {
@@ -298,7 +327,66 @@ try {
         }
       }
 
-      if ($Choice -eq 'continue' -and $FailLeftoverRecord -and $null -ne $clicked) {
+      if ($Choice -eq 'continue' -and $AfterContinue -ne 'complete' -and $null -ne $clicked) {
+        $continuedPointer = Get-RegistryValue $appKeyPath 'IaBackupDir'
+        Assert 'continue_choice_keeps_recovery_pointer_armed' ($continuedPointer -ieq $backupDir) ('IaBackupDir={0}' -f $continuedPointer)
+        $welcomePage = Wait-StockWelcomePage $recoveryProcess (Get-Date).AddSeconds(12)
+        Assert 'continue_choice_reaches_stock_welcome_page' ($null -ne $welcomePage) ('page_found={0}' -f ($null -ne $welcomePage))
+
+        if ($AfterContinue -eq 'cancel') {
+          if ($null -ne $welcomePage) {
+            $cancelled = Invoke-Button $welcomePage '^(Cancel|&Cancel|\u53d6\u6d88.*)$'
+            Assert 'continue_cancel_button_accepted' ($null -ne $cancelled) ('button={0}' -f $cancelled)
+          } else {
+            $cancelled = $null
+          }
+          if ($null -ne $cancelled) {
+            $cancelPromptDeadline = (Get-Date).AddSeconds(5)
+            $cancelPrompt = $null
+            while ((Get-Date) -lt $cancelPromptDeadline -and -not $recoveryProcess.HasExited) {
+              $cancelPrompt = Find-CancelConfirmationPrompt $recoveryProcess.Id
+              if ($null -ne $cancelPrompt) { break }
+              Start-Sleep -Milliseconds 100
+            }
+            if ($null -ne $cancelPrompt) {
+              $confirmed = Invoke-Button $cancelPrompt '^(Yes|\u662f.*)$'
+              Assert 'continue_cancel_confirmed' ($null -ne $confirmed) ('button={0}' -f $confirmed)
+            }
+            $recoveryProcess.WaitForExit(15000)
+          }
+          Assert 'continue_cancel_exits_installer' $recoveryProcess.HasExited ('process_exited={0}' -f $recoveryProcess.HasExited)
+          $finalChoice = 'restore'
+        } else {
+          Stop-Process -Id $recoveryProcess.Id -Force
+          $recoveryProcess.WaitForExit()
+          $pointerAfterContinueKill = Get-RegistryValue $appKeyPath 'IaBackupDir'
+          Assert 'continue_hard_kill_retains_backup_pointer' ($pointerAfterContinueKill -ieq $backupDir) ('IaBackupDir={0}' -f $pointerAfterContinueKill)
+          Assert 'continue_hard_kill_retains_backup_app' (Test-Path -LiteralPath (Join-Path $backupDir $payloadExe.Name)) ('backup={0}' -f $backupDir)
+          Assert 'continue_hard_kill_leaves_app_absent' (-not (Test-Path -LiteralPath $appPath)) ('app_exists={0}' -f (Test-Path -LiteralPath $appPath))
+
+          $recoveryProcess = Start-Process -FilePath $installerPath -PassThru
+          $retryPrompt = $null
+          $retryDeadline = (Get-Date).AddSeconds(12)
+          while ((Get-Date) -lt $retryDeadline -and -not $recoveryProcess.HasExited) {
+            $retryPrompt = Find-RecoveryPrompt $recoveryProcess.Id
+            if ($null -ne $retryPrompt) { break }
+            Start-Sleep -Milliseconds 150
+          }
+          Assert 'continue_hard_kill_recovery_prompt_shown' ($null -ne $retryPrompt) ('prompt_found={0}' -f ($null -ne $retryPrompt))
+          if ($null -ne $retryPrompt) {
+            $restoreClicked = Invoke-Button $retryPrompt '^(Restore previous version|\u6062\u590d\u65e7\u7248\u672c)$'
+            Assert 'continue_hard_kill_restore_choice_accepted' ($null -ne $restoreClicked) ('button={0}' -f $restoreClicked)
+            if ($null -ne $restoreClicked) {
+              $recoveryProcess.WaitForExit(15000)
+              Assert 'continue_hard_kill_restore_exits' $recoveryProcess.HasExited ('process_exited={0}' -f $recoveryProcess.HasExited)
+              if ($recoveryProcess.HasExited) {
+                Assert 'continue_hard_kill_restore_exit_0' ($recoveryProcess.ExitCode -eq 0) ('rc={0}' -f $recoveryProcess.ExitCode)
+              }
+            }
+          }
+          $finalChoice = 'restore'
+        }
+      } elseif ($Choice -eq 'continue' -and $FailLeftoverRecord -and $null -ne $clicked) {
         $failureDeadline = (Get-Date).AddSeconds(8)
         $failurePrompt = Wait-RecoveryFailurePrompt $recoveryProcess $failureDeadline
         Assert 'leftover_record_failure_prompt_shown' ($null -ne $failurePrompt) ('prompt_found={0}' -f ($null -ne $failurePrompt))
@@ -350,7 +438,7 @@ try {
   $backupPointer = Get-RegistryValue $appKeyPath 'IaBackupDir'
   $leftoverPointer = Get-RegistryValue $appKeyPath 'IaLeftoverDir'
   $appPresent = Test-Path -LiteralPath $appPath
-  if ($Choice -eq 'restore') {
+  if ($finalChoice -eq 'restore') {
     if ($BlockRollback) {
       Assert 'restore_refusal_app_absent' (-not $appPresent) ('exists={0}' -f $appPresent)
       Assert 'restore_refusal_backup_retained' $backupStillExists ('backup_exists={0}' -f $backupStillExists)

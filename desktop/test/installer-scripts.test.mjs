@@ -306,7 +306,7 @@ describe('R3 recovery driver failure assertions (#1037)', () => {
 describe('interrupted installer recovery journal (#1035)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
 
-  it('arms the backup pointer before moving the install and retains it if leftover recording fails', () => {
+  it('keeps the backup pointer armed through continued installation until promotion', () => {
     const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
     const stage = source.match(/!macro iaStageApplication([\s\S]*?)!macroend/)?.[1] ?? ''
     const arm = stage.indexOf('!insertmacro iaStashBackupDir')
@@ -319,9 +319,14 @@ describe('interrupted installer recovery journal (#1035)', () => {
     const continueFresh = source.match(/Function iaContinueInterruptedFresh([\s\S]*?)FunctionEnd/)?.[1] ?? ''
     const record = continueFresh.indexOf('WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory')
     const recordError = continueFresh.indexOf('${If} ${Errors}', record)
-    const clear = continueFresh.indexOf('!insertmacro iaClearBackupDir')
-    assert.ok(record >= 0 && recordError > record && recordError < clear, 'leftover recording must be checked before disarming the recovery pointer')
-    assert.match(continueFresh.slice(recordError, clear), /SetErrorLevel 2[\s\S]*?Quit/)
+    assert.ok(record >= 0 && recordError > record, 'leftover recording must be checked before continuing')
+    assert.match(continueFresh.slice(recordError), /SetErrorLevel 2[\s\S]*?Quit/)
+    assert.doesNotMatch(continueFresh, /iaClearBackupDir/, 'the old version stays recoverable until the fresh installation commits')
+
+    const promote = source.match(/Function iaPromoteApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    assert.match(promote, /FileExists.*APP_EXECUTABLE_FILENAME[\s\S]*?iaClearBackupDir/)
+    assert.match(promote, /iaReadLeftoverDir\s+StrCmp \$iaLeftoverDirectory \$iaBackupDirectory iaPromoteBackupAlreadyLeftover/)
+    assert.match(promote, /iaPromoteBackupAlreadyLeftover:[\s\S]*?iaClearBackupDir/)
 
     const testBuild = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
     const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
@@ -1418,7 +1423,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
     const lines = body.map((line) => line.trim()).filter((line) => line !== '')
     const del = lines.findIndex((line) => /^RMDir\s+\/r\b/.test(line))
-    const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
+    const read = lines.findLastIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
     const plain = lines.findIndex((line) => /^StrCpy\s+\$iaPlainPath\s+"\$iaLeftoverDirectory"$/.test(line))
     const probe = lines.findIndex((line) => /^Call\s+iaProbePath\b/.test(line))
     const guarded = lines.findIndex((line) => /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line))
