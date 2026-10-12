@@ -8255,3 +8255,12 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **覆盖闸门**：落台账行后 `python scripts/check_review_coverage.py` rc=0（区间 `09ca47a1..HEAD`，0 条 ❌；`526e3a93`/`ff0aa3e6` 由上述两行覆盖，`b67aab5a` 按 docs-only 自动归属）。
 - **发布前 Gate-0**：在本记账提交上裸跑，读数落盘于随后的 gate 提交（`docs/gate/<本记账提交 sha>.json`，路径见该提交信息与 PR 正文）；冻结树 `ff0aa3e6` 之后只追加 docs / 台账（§8.1 第 3 条判据 ①②）。**playwright e2e 沙箱跑不了**（preflight 无 netstat/lsof、无浏览器）⇒ 由 PR 上 CI 的 `e2e` 作业承担，以 CI 读数为准。
 - **发布授权**：用户 2026-10-12 18:36（两轴 PASS + 门禁 / Gate-0 / coverage / CI 全绿 ⇒ push、开 PR、merge、关单）。#1030 / #1029 仍未开工。
+- **合入与关单（2026-10-12）**：PR #1052（head `ee325e8e`）CI `gate0` / `e2e 冒烟集（Chromium，PR 级）` / `gitleaks` 均 success；merge commit `36b2ccbccb0fcf0af76ecb865c7fa62603579c2b`，合并树 `4d512a50` == `ee325e8e^{tree}`。#1049 已关闭（关单 comment：issuecomment-6123359785），in-progress 已摘。
+
+## #1051 子代理子会话在途 RUNNING 行被 GET /recovery 误列（2026-10-12 · 施工完成、**待两轴独立审查**）
+
+- **分支**：`claude/1051-recovery-child-session-guard`（基点 `origin/main` = `36b2ccbc`，worktree `work/wt1051`）；代码笔 `b187c4a0`。**冻结 tip `b187c4a0c819bcb82df984ac5b304b79000a201a` / tree `d9799445c63c1d5ceb0c8963e4d5695e55f3695a`**；hash-object：`src/agent_harness/session/service.py=2344b196`、`tests/web/test_session_recovery_api.py=6904a513`。
+- **改动**：`SessionService.pending_decisions()` 在途判定改为「本会话 ∪ 委派树根会话」（复用 `agent/run_budget.py:2920` `session_budget_key`，读 `session/started` 的 `delegation_root_session_id`），并在读 Ledger 前后各判一次；docstring 写明 GET 在途返回空与 `recover` 409 的刻意差异。测试：AC3 改为真实 `RunManager.launch` 的挂起 task（替换 monkeypatch 版）；新增子会话在途隐藏 / 父 run 结束后仍列出 / 读中启动 / 读中结束 / 日志损坏→409。
+- **验证**：focused（`test_session_recovery_api.py` + `test_domain_error_mapping.py`）33 passed；`ruff check .` 绿。纯净 src 红证 2 红（子会话在途隐藏、读中启动）；5 个消融失败集互不相同（明细见 `docs/phase_status/2026-10.md`「#1051」节）。Gate-0 裸全量 `docs/gate/b187c4a0c819bcb82df984ac5b304b79000a201a.json`（5/6，唯一红 = coverage，❌ = `b187c4a0`，⊆ 本批代码笔）。冻结树后端全量（`scripts/run_tests_clean.sh tests/`，脚本自取 `.venv/bin/python`；NO_PROXY / no_proxy = `127.0.0.1,localhost,::1`；`-p no:randomly`）1 failed / 7752 passed / 40 skipped / 51 deselected（700s），唯一红 = `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`（覆盖闸门自指，❌ = `b187c4a0`，同因）。首跑在 76% 处因沙箱重启中断、无读数（日志 `work/1051-full-pytest-aborted-reboot.log`），重跑一次得上述读数。本票不改 `web/**`；前端仅 Gate-0 的 oxlint / tsc 车道，vitest / build / playwright 未跑。
+- **审查**：未进行（施工代理无派子代理能力）⇒ 无台账行，coverage rc=1；待编排方对 `36b2ccbc..b187c4a0` 派两轴。未 push。
+- **新开**：#1053（续聊子会话的 run 在途时孙会话误列，P3，根会话判定覆盖不到的同族形态）。
