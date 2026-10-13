@@ -12,8 +12,8 @@
 ; The runner replaces the markers with production text taken verbatim from
 ; installer-directories.nsh and installer-cleanup.nsh, prepares a fake install
 ; tree with or without the app executable (or no tree at all, for the
-; first-install leg of #1074), leaves a real Windows process running under it
-; (or none), inserts the production macro, and reads what happened.
+; first-install leg of #1074), leaves one or two real Windows processes running
+; under it (or none), inserts the production macro, and reads what happened.
 ; The probe runs silent, so the gate's MessageBox (/SD IDOK) answers itself.
 ;
 ; Two readings: the exit code (2 = the gate refused, and then no result file is

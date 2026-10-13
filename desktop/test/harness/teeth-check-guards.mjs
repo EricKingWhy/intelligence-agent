@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = '11e9d28fe3361d79a664cd7767c7c2f4d4ccaea46dc6c74323323c0ab828b6a3'
+const GUARD_BASELINE_SHA256 = '8f7bbb0509f8630f77f05195062606ff7c1c80d6e49b19270d589e0f9969ec95'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,

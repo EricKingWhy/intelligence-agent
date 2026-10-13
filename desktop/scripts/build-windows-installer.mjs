@@ -2612,7 +2612,7 @@ export const DELETE_SITE_POLICIES = {
  *     armed and before `Rename $INSTDIR` (a refusal must leave the installation
  *     untouched and must not leave a pointer behind that .onGUIEnd and
  *     iaRollbackApplication read as "the install section started"), and it is
- *     called before anything reads `$iaProbeFound` rather than inside the
+ *     called before anything touches `$iaProbeFound` rather than inside the
  *     branch that read guards — that branch skips staging entirely when the app
  *     executable is gone, so an in-branch call never classified a damaged
  *     installation whose live service is exactly what must not be updated over
@@ -2626,15 +2626,23 @@ export const DELETE_SITE_POLICIES = {
  *
  * What this function does NOT cover, written down so no reader takes it for
  * more than it is: it reads text, so it pins where the call sits and which
- * statements the gate's own body has to keep. It cannot tell whether the callee
- * still classifies — a body-level early return inside the gate
- * (`StrCmp $iaProbeFound "0" 0 +2` / `Return`) satisfies every rule here and
- * restores the Axis A defect (measured: every build-time case stays green with
- * that mutation in place — 112 cases, #1074). That mutation is killed by the real-machine
- * legs in desktop/test/harness/r1-drivers/run-stage-damaged-probe.ps1, which
+ * statements the gate's own body has to keep — it cannot tell whether the callee
+ * still classifies, and it only sees placements that move the call across a
+ * token it knows. Three shapes satisfy every rule here:
+ *   1. a body-level early return inside the gate (`StrCmp $iaProbeFound "0" 0 +2`
+ *      / `Return`), which restores the Axis A defect while the call stays put;
+ *   2. a branch re-spelled so it never mentions `$iaProbeFound` at all (e.g.
+ *      `${If} ${FileExists} "$iaFinalDirectory\${APP_EXECUTABLE_FILENAME}"` with
+ *      the call moved inside it), which leaves this rule's first anchor untouched;
+ *   3. the call moved above the `StrCpy $iaFinalDirectory $INSTDIR` it depends on,
+ *      which classifies the wrong directory.
+ * (1) and (2) are killed by the real-machine legs in
+ * desktop/test/harness/r1-drivers/run-stage-damaged-probe.ps1 — which
  * .github/workflows/windows-installer-smoke.yml runs on a Windows runner
- * (#1074) — the discriminator has to be executed somewhere for this boundary to
- * be covered at all.
+ * (#1074) — and (2) additionally by the #1045 statement table; (3) by the same
+ * legs. Measured for (1): every build-time case stays green with that mutation in
+ * place. The discriminator has to be executed somewhere for this boundary to be
+ * covered at all; a text rule is not a substitute for running the installer.
  */
 export function validateProcessGateGuards(source, filename) {
   const code = stripNsisComments(source)
@@ -2697,9 +2705,12 @@ export function validateProcessGateGuards(source, filename) {
     // #1074: the anchor is the variable, not one spelling of the branch. Pinning
     // the literal `${If} $iaProbeFound == "1"` let the same defect through when
     // the branch was re-spelled as `StrCmp $iaProbeFound "1" …` (the #914 fix
-    // round's Axis B measured that). Every branch form on the probe result reads
-    // the variable, so requiring the call to precede the first read covers them
-    // all; the message names what the read guards, so the rule stays legible.
+    // round's Axis B measured that). This covers every branch form that mentions
+    // the variable — not every form that tests the app executable: a branch
+    // re-spelled as `${FileExists}` on the app path never names `$iaProbeFound`,
+    // and the #1045 statement table plus the real-machine legs are what hold that
+    // shape down (see the docstring's "does NOT cover" list). The message names
+    // what the read guards, so the rule stays legible.
     const probeUse = stage.indexOf('$iaProbeFound')
     if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
     if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
