@@ -182,6 +182,17 @@ exe 映像以 share-delete 打开，**headless 服务不阻止目录 rename**；
 - **残余处置**：A 轴 P3-1 与 B 轴 F4 是同一条（两轴各自独立复现）；与 A 轴 P3-2 / B 轴 F2（闸门无「目录归属」判据）、B 轴 F5（注释强于机制）、B 轴 P4（`appBranch` 可被改写分支条件绕过）一并登记为修复轮新残余（§6），**本票不修**：协议 §8.8.5 的修后重审预算（1 轮 / 轴）已用满，再改代码会产出**没有审查行覆盖**的代码提交，直接撞 §7 第 8 条的覆盖闸门 ⇒ 按用户「查到问题就另开票」的常设指令留给后续票处理（已开 **#1066** 注释承接同族）。P4 里两条（`.gitattributes` 前提更正、`#1045` 断言替换与失败模型差异）**无缺陷**，如实记为确认项。
 - **两轴都取到了结论行**，未使用 §8.3 第 4 / 5 条的「有界收口替代」通道（首轮那次基础设施故障重派不适用于本轮）。
 
+### 5.9 与 main 同步：合并树全量门禁与 CI（PR #1072，2026-10-13）
+
+- **分支 / PR**：`codex/issue-914-service-in-use-gate` → PR [#1072](https://github.com/EricKingWhy/intelligence-agent/pull/1072)。首推 head `5e2e0d3f` 时 PR 为 **CONFLICTING**；实测 `gh api repos/.../branches/main/protection` = `strict: true` + 必需检查 `gate0` + `enforce_admins: true` ⇒ 合并前必须与 `origin/main` 同步，且**冲突 PR 上 GitHub 连 `gate0` 都不启动**（`pull_request` 工作流依赖合成 merge ref，合不出来就没有事件）。
+- **合并提交 `711b40b0`**（父 `5e2e0d3f` + `0df5e0f1` = 当时的 `origin/main`，43 笔），合并树 `e194d313`。
+- **唯一冲突 `docs/SDD_TICKET_TRACKER.md`：both-added** —— 两侧都在第 3 行前各插一条「当前状态」bullet（main 侧 `#1025` Memory remember_this payload 双重编码；本线 `#914` 服务在场闸门）。按协议 §14.7 已上报九点报告（两侧各改了什么与目的、冲突原因、能否共存、推荐语义、Contract / Runtime / Test 影响、风险等级）。**解析 = 两条全保留，顺序 `#1025` → `#914` → 原有 `#1045` 不变**：纯附加，未删除任何一侧内容、未重排他线记录。另两份进度记录文件（`docs/PHASE_STATUS.md`、`docs/phase_status/2026-10.md`）自动合并。
+- **该解析同时是机械上安全的一种**：解析后的 tracker 与两个父提交都不同 ⇒ 合并提交的 `--cc` 文件表**非空**（恰为上述三份进度记录文件，全是 `docs/` 路径）⇒ 覆盖闸门走「docs-only 按路径自动归属」（实测 exit 0）。若取任一侧原文，`--cc` 会为空且树不等于任何父，`check_review_coverage.py::zero_content_parent` 会**刻意 fail-closed**（见该函数 docstring 的「已知残余」条）。
+- **代码面 blob 逐字未变**：`0e42ae11` 与 `711b40b0` 上 9 个文件 blob 完全相同 —— `installer-directories.nsh` `9ccc0231`、`build-windows-installer.mjs` `4472ad0d`、`installer-scripts.test.mjs` `c2b68954`、`teeth-check-guards.mjs` `9dd6e382`、`stage-damaged-probe.nsi` `d28c37cf`、`run-stage-damaged-probe.ps1` `521f0a9c`、`host-protocol.ts` `68557aed`、`host-protocol.test.ts` `f813e386`、`host_service.py` `aa3f6df7`。另实测 `git diff --name-status 239750b8 origin/main -- desktop/installer desktop/scripts desktop/test desktop/src src/agent_harness/host_service.py docs/adr` **为空** ⇒ main 的 43 笔不触碰本 PR 任何代码面，§5.1 / §5.7 的冻结树读数对合并树逐字节有效。
+- **§3.2「树不同 ⇒ 在集成树重跑完整门禁」**：合并树 `711b40b0`，隔离副本，单跑无并发（避开 #1069 的负载假红）。后端 `PYTHONPATH= PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` ⇒ **7776 passed / 43 skipped / 51 deselected / 0 failed / 1457.79s（24:17）**（首轮那条 `test_real_ledger_passes_after_the_431_fix` 机械瞬态已随台账落盘消失；#1069 的负载假红本轮未复现）；desktop `npm test` **287 tests / 285 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` **111 passed**、`host-protocol.test.ts` **5 passed**）；web `vitest run` **119 files / 1681 passed**（74.07s）；`vite build` 成功（10.5s）；`playwright test --workers=2` **540 passed（14.0m，0 flaky）**；**Gate-0 6/6 PASS**（墙钟 53.4s，`tracked_matches_head=true` / `untracked_total=0`），收据 `docs/gate/711b40b0610763c113be82335e8cce5623613571.json`。
+- **覆盖闸门**：`python scripts/check_review_coverage.py` **exit 0**（合并提交 `711b40b0` 按 docs-only 自动归属）。
+- **服务端 CI（PR #1072，head `711b40b0`）**：`gate0` **pass（38s）**、`e2e 冒烟集（Chromium，PR 级）` **pass（5m11s）**、`windows-installer-smoke` **pass（1m27s）**（= 改动后的宏在 GitHub runner 的真实 NSIS 构建链里也编译并通过冒烟作业）、`gitleaks` pass。**本地绿不代替 CI 绿**，此处两者都有。
+
 ## 6 残余与后续
 
 - **窄竞态 → issue #1066**：闸门通过之后、section `Rename` 之前用户手动启动服务/客户端时，rename 不拦 headless 服务 ⇒ 旧服务从 `.old-*` 继续应答。本票不做 section 期二次闸门（理由见 §3：触发需要用户在向导运行期间启动一个尚未落盘的 app，后果可由下一次更新或用户重启消除）。
