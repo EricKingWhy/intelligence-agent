@@ -396,3 +396,27 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 后端那轮首轮即全绿（此前冻结树唯一红 = 台账未落盘的机械瞬态，已随台账行落盘消失）。合并提交的 `--cc` 文件表恰为三份进度文档 ⇒ 覆盖闸门按 docs-only 归属，**无需新增台账行**。
 
 **备注**：`desktop` 的 `--test-reporter=dot` 每个 suite 也打一个字符，故「数点」得 360 ≠ 实际用例数；权威读数是 spec reporter 的 `# tests 297 / # pass 295 / # skipped 2`。
+
+## 9 第二次同步（`bad6c171`）与新树全量门禁
+
+**为什么再同步**：PR #1097 首推后 `mergeStateStatus: BEHIND`（main 保护 `strict: true`）。`origin/main` 已再前移到 `39b96de9d`（PR #1092 / #1028「通用新建会话继承选中项目 cwd」，19 文件 = `web/**` 16 + docs 3）。按 §14.6 再同步为 merge `bad6c171`（父一 `58ec85e5` = 本线 tip，父二 `39b96de9d`），**零冲突**（ort 策略），合并树 `9243bfdb`。两侧文件交集为空；本票 9 个代码 blob 在父一与 merge 上逐字相同。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 是**空表**（无冲突解析）⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `bad6c171`）。按既有先例补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-58ec85e5-bad6c171.tsv`（range `58ec85e5..bad6c171`，desc 403 字符，单行 3 字段），落行后 `check_review_coverage.py` **exit 0**。该行只做机械归属，**不是**对合并内容的审查主张。
+
+**§8.1 判据① 实测（读数可否传递）**：`git diff --name-status --no-renames 32ddedb9 HEAD` = **12 `A` + 13 `M`**，其中 **13 条非 docs 路径**（`web/e2e/project-context.spec.ts` + `web/src/**` 12 条）⇒ 按 §8.1 第 3 条「出现任何非 docs / 台账路径 ⇒ 必须在新树上重跑全量」，**读数不可传递**，故重跑。判据④自证：`git rev-parse --verify 32ddedb9^{commit}` 与 `HEAD^{commit}` 均 exit 0。
+
+**新树 `cb247e64`（tree `e227562a`）全量门禁（隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `scripts/run_tests_clean.sh` | **7823 passed / 43 skipped / 51 deselected / 0 failed**（2491.74s，41:31） |
+| desktop `node --test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **122 文件 / 1709 passed**（较上一树 +2 文件 / +18 用例 = main 侧 #1028） |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`，5173 空闲） | **552 passed（17.1m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**，收据 `docs/gate/cb247e64cde5b70af671059da7f2f8c4e6c1b421.json`（墙钟 159.1s；机器同期负载偏高，预算只是目标，不改变判定） |
+| `check_review_coverage.py` | **exit 0** |
+
+本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` 三处逐字相同。
+
+**同步轮次小结**：本票共两次与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报后获批按并集零删除解析）与 `bad6c171`（零冲突，但 `--cc` 空表需机械归属行）。两次的合并树都重跑了全量门禁，均全绿。
