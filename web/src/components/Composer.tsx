@@ -51,11 +51,15 @@ interface Props {
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
   onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
-  /** #825（MM-04）：**当前会话 id**——附图上传端点是 per-session 的
-   *  （`POST /api/sessions/{id}/attachments`），所以没有会话就没有附图入口
-   *  （`null` = 新建态 → 入口禁用并说明原因，而不是让用户传到一个不存在的会话下）。
-   *  会话切换时草稿清空并中止在途上传（见 `hooks/useDraftAttachments.ts`）。 */
+  /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
+   *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
+   *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
+   *  上传（见 `hooks/useDraftAttachments.ts`）。 */
   sessionId?: string | null;
+  /** #1015：新建态懒建会话的**唯一**入口（App 侧单例：in-flight 去重保证并发投喂
+   *  只建出一个会话）。resolve 会话 id；resolve `null` = 懒建失败，hook 经 AC3
+   *  通道给可见错误。Composer 只问"现在能不能附"，不问"会话从哪来"。 */
+  onEnsureSession: () => Promise<string | null>;
   /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
    *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
    *  本组件只渲染文案。`null`/缺省 = 不渲染 chip：**空白新建态**（无选中会话、无项目
@@ -128,6 +132,7 @@ export const Composer = memo(function Composer({
   onSubmit,
   onSteer,
   sessionId = null,
+  onEnsureSession,
   ownership = null,
   onCancel,
   presetTask,
@@ -171,7 +176,7 @@ export const Composer = memo(function Composer({
   // 把「已就绪」的引用交给提交通道。（#1027 修订：发送按钮的可用性除文本外，还看
   // 是否有**在途上传**——AC4「上传失败不得阻塞纯文本发送」保留，failed 仍不阻塞，
   // 但发送时被显式剔除并给一次性可见提示，绝不静默丢弃。）
-  const attachments = useDraftAttachments(sessionId);
+  const attachments = useDraftAttachments(sessionId, onEnsureSession);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** 整页拖拽计数：document 级 dragenter/dragleave 会成对触发，用计数判断"还在页面内"。 */
   const dragDepth = useRef(0);
@@ -183,7 +188,18 @@ export const Composer = memo(function Composer({
   // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
   // **不许裸加时长**：有在途上传时发送按钮禁用 + Ctrl+Enter 拦截，界面常驻阻断提示。
   const uploadingCount = attachments.items.filter((item) => item.status === 'uploading').length;
-  const sendBlocked = uploadingCount > 0;
+  // #1098：pre-intake 窗口（`ensureSession` 在途 / 字节探测未完成、草稿未入列）
+  // 同样阻断——只钉「已入列 uploading」，粘贴后立刻 Enter 会把图文静默拆散
+  // （图留在草稿栏跟下一条消息走）。AC4 不变：intake 失败（懒建失败/格式拒收）
+  // 走 hook 的 `finally` 清 pending，纯文本照发。
+  const intakePendingCount = attachments.intakePendingCount;
+  const sendBlocked = uploadingCount > 0 || intakePendingCount > 0;
+  /** 阻断原因文案（#1027 体系 + #1098 pre-intake）：界面常驻，键盘用户被拦截时
+   *  读到的就是它；`title` 与提示同源，不对着按钮猜。 */
+  const sendBlockedReason =
+    uploadingCount > 0
+      ? `${SEND_BLOCKED_REASON}${uploadingCount > 1 ? `（${uploadingCount} 张）` : ''}`
+      : `${SEND_BLOCKED_REASON}（${intakePendingCount} 张准备中）`;
 
   // #1027：换会话即清兜底提示——草稿随会话清空（hook 的换会话 effect），提示是
   // 上次发送的结论，不跟去新会话（否则在新会话里误报"附件未随消息发出"）。
@@ -396,17 +412,17 @@ export const Composer = memo(function Composer({
   };
 
   const currentModel = effectiveModelEntry(selectedModel, models);
-  // ── #825（MM-04）附图入口门禁（AC1/AC7）──
-  // 三条互斥原因，**都不许静默**：会话缺失、模型非视觉、等待审批/澄清。原因同时是
+  // ── #825（MM-04）附图入口门禁（AC1/AC7）；#1015 修订 ──
+  // 两条互斥原因，**都不许静默**：模型非视觉、等待审批/澄清。原因同时是
   // 拖放遮罩上的文案与按钮 title，用户不必对着禁止光标猜。
+  // 「会话缺失」不再是门禁：新建态首次投喂经 `onEnsureSession` 懒建会话（#1015），
+  // 入口常开——原来那句"三条互斥原因"随本票收口（issue #1015 待裁决 #4 的自述失真）。
   const visionUnsupported = currentModel?.supportsVision === false;
   const attachBlockedReason = locked
     ? lockHint
-    : sessionId === null
-      ? '图片需要先有会话：附图上传挂在会话上，请先新建或选中一个会话'
-      : visionUnsupported
-        ? `${NON_VISION_MODEL_REASON}，已禁用附图`
-        : '';
+    : visionUnsupported
+      ? `${NON_VISION_MODEL_REASON}，已禁用附图`
+      : '';
   const canAttach = attachBlockedReason === '';
   const pickFiles = () => {
     if (canAttach) fileInputRef.current?.click();
@@ -446,7 +462,8 @@ export const Composer = memo(function Composer({
   }, []);
   /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
    *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
-   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
+   *  [sessionId, commit, setIntakeError, startUpload, ensureSession]，App 的
+   *  `ensureSession` 是 useCallback 单例，同一会话内标识不变）：
    *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
    *  （hook 每次渲染返回新对象字面量）。
    *
@@ -689,9 +706,7 @@ export const Composer = memo(function Composer({
             常驻到上传落定——键盘用户按 Ctrl+Enter 被拦截时，读到的就是这一条。 */}
         {sendBlocked && (
           <div className="composer-send-blocked" role="status">
-            {uploadingCount > 1
-              ? `${SEND_BLOCKED_REASON}（${uploadingCount} 张）`
-              : SEND_BLOCKED_REASON}
+            {sendBlockedReason}
           </div>
         )}
         {/* #1027 兜底：发送时被剔除的未就绪附件，一次性可见提示（可关闭，不常驻）。 */}
@@ -920,7 +935,7 @@ export const Composer = memo(function Composer({
                 onClick={() => submit('queue')}
                 disabled={locked || !value.trim() || sendBlocked}
                 aria-label="发送"
-                title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
               >
                 <ArrowUp size={16} />
               </button>
@@ -934,7 +949,7 @@ export const Composer = memo(function Composer({
               onClick={() => submit('queue')}
               disabled={locked || !value.trim() || sendBlocked}
               aria-label="发送"
-              title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
             >
               <ArrowUp size={16} />
             </button>

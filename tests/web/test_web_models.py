@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -334,3 +336,67 @@ class TestSessionModelParam:
         assert "wire_mapping" in response.json()["detail"]
         workspace_root = tmp_path / "workspaces"
         assert not workspace_root.exists() or not any(workspace_root.iterdir())
+
+
+class TestStartupCatalogWarning:
+    """#1094：启动/装配期对「因 provider 与已知链不一致而不会被采纳」的
+    AGENT_MODELS 条目发 warning（只反馈，不改匹配语义、不阻断启动）。
+
+    注意：``setup_logging`` 会清空 root handlers，所以这里把捕获 handler 挂到
+    ``agent_harness.model`` logger 本身，而不是用 caplog（它挂在 root 上会被清掉）。
+    """
+
+    _EFFORT: ClassVar[dict[str, Any]] = {
+        "supported": ["minimal", "standard"],
+        "default": "standard",
+        "wire_mapping": {"minimal": "low", "standard": "medium"},
+    }
+
+    @staticmethod
+    def _settings(tmp_path, provider: str) -> Settings:
+        return Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="mimo", model_name="mimo-v2.6-flash",
+            agent_models=json.dumps([{
+                "name": "mimo-v2.6-flash", "provider": provider,
+                "model_name": "mimo-v2.6-flash",
+                "reasoning_effort": TestStartupCatalogWarning._EFFORT,
+            }]),
+        )
+
+    @staticmethod
+    def _capture_startup_messages(app) -> list[str]:
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _Capture()
+        model_logger = logging.getLogger("agent_harness.model")
+        model_logger.addHandler(handler)
+        try:
+            with TestClient(app):
+                pass
+        finally:
+            model_logger.removeHandler(handler)
+        return [r.getMessage() for r in records]
+
+    def test_startup_warns_when_provider_mismatches_default_chain(self, tmp_path):
+        app = create_app(self._settings(tmp_path, "qwen"), enable_cors=False)
+        messages = self._capture_startup_messages(app)
+        assert any(
+            "mimo-v2.6-flash" in m and "未被采纳" in m for m in messages
+        ), messages
+
+    def test_provider_match_is_silent_and_declaration_adopted(self, tmp_path):
+        app = create_app(self._settings(tmp_path, "mimo"), enable_cors=False)
+        messages = self._capture_startup_messages(app)
+        assert not any("未被采纳" in m for m in messages), messages
+
+        client = TestClient(app)
+        body = client.get("/api/models").json()
+        default = next(m for m in body["models"] if m["is_default"])
+        assert default["metadata_source"] == "agent_models"
+        assert default["reasoning_effort"] == self._EFFORT

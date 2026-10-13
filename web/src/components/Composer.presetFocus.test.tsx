@@ -34,6 +34,8 @@ const paint = (presetTask: { text: string; id: number } | null) =>
       onSubmit: () => {},
       onCancel: () => {},
       presetTask,
+      // #1015：必填 prop；本文件不涉及附图，给空实现。
+      onEnsureSession: async () => null,
     }));
   });
 
