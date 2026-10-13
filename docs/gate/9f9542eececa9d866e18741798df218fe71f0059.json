@@ -5,6 +5,7 @@
   "sha": "9f9542eececa9d866e18741798df218fe71f0059",
   "tree": "da743ec4277e0a0814a2400a447f685d521b9b4f",
   "argv": [],
+  "argv_note": "裸全量运行的实参就是空——本文件只在裸全量时落盘（`--since`/`--only`/`--affected` 一律不落盘，见 gate0.py 的 record_here）。故此字段为空是**结构必然**，不是漏记：看到本文件即可断定它是裸全量读数（六车道齐全，见 lanes）。字段值保持落盘当时原样，未回改（#1113 第 5 项按『注明』处置）。",
   "result": "FAIL",
   "passed": 5,
   "total": 6,

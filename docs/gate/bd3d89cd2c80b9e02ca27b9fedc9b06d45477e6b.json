@@ -5,6 +5,7 @@
   "sha": "bd3d89cd2c80b9e02ca27b9fedc9b06d45477e6b",
   "tree": "cb3c51c603610053fb38e6cefb6253de3026a95d",
   "argv": [],
+  "argv_note": "裸全量运行的实参就是空——本文件只在裸全量时落盘（`--since`/`--only`/`--affected` 一律不落盘，见 gate0.py 的 record_here）。故此字段为空是**结构必然**，不是漏记：看到本文件即可断定它是裸全量读数（六车道齐全，见 lanes）。字段值保持落盘当时原样，未回改（#1113 第 5 项按『注明』处置）。",
   "result": "FAIL",
   "passed": 5,
   "total": 6,
@@ -36,7 +37,8 @@
     "untracked": [
       "docs/gate/09d471a5bcb6e343acdc32cc9a5701e73d8ed11a.json"
     ],
-    "untracked_total": 1
+    "untracked_total": 1,
+    "untracked_note": "#1113 第 6 项：该指针**记录当时为真**（本读数产在 2026-10-13T12:09:25+00:00，round-8 的 09d471a5 读数当时确实以未跟踪件躺在工作树里），现已悬空——那份读数从未入库（`git log --all -- 'docs/gate/09d471a5*'` 空、`git ls-files` 无此路径）。按『读数如实、不回改观测值』的纪律，**保留原值**并在此注明；日后 grep 旧 tip 引用时需带这个例外。本 JSON 自本注记起新增了 argv_note / untracked_note 两个 additive 字段（沿用 #609 env_failures 的 additive-不-bump-schema 先例；消费面已核：`--replay` 只读 sha/tree/lanes）。"
   },
   "lanes": [
     {
