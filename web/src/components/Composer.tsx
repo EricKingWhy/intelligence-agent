@@ -178,6 +178,12 @@ export const Composer = memo(function Composer({
   const uploadingCount = attachments.items.filter((item) => item.status === 'uploading').length;
   const sendBlocked = uploadingCount > 0;
 
+  // #1027：换会话即清兜底提示——草稿随会话清空（hook 的换会话 effect），提示是
+  // 上次发送的结论，不跟去新会话（否则在新会话里误报"附件未随消息发出"）。
+  useEffect(() => {
+    setDroppedNotice(null);
+  }, [sessionId]);
+
   // ── #937 / M-08：附图上限从服务端下发 ──
   // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次落进本地 state，并
   // 订阅 token 变更补拉（P4-1：否则 token 换部署后显示与执行漂移）。预检文案
@@ -341,10 +347,11 @@ export const Composer = memo(function Composer({
     // 空文本 + 纯图片不是本票支持的路由。
     const attachmentIds = attachments.readyIds;
     // #1027 兜底：未就绪（失败/在途残留）的草稿没进请求——绝不静默丢弃，一次性可见提示。
+    // 提示是**本次发送**的结论：干净发送（无剥离）即清掉，不让过期文案误报下一次。
     const unreadyCount = attachments.items.filter(
       (item) => item.status !== 'ready' || !item.receipt,
     ).length;
-    if (unreadyCount > 0) setDroppedNotice(`${unreadyCount} 个附件未随消息发出`);
+    setDroppedNotice(unreadyCount > 0 ? `${unreadyCount} 个附件未随消息发出` : null);
     // steer 通道的**失败兜底不在这一层**（#219）：没有可打断的在途 run 时后端回 409
     // （session/service.py::SteerTargetNotFound），由交付层改投 queue 把消息送到
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当

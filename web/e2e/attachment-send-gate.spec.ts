@@ -188,7 +188,8 @@ test('#1027-2：上传失败（413）→ chip error 态；发送不被禁用，�
   await pastePng(page, 'too-big.png');
   const card = page.locator('.composer-attach-card');
   await expect(card).toHaveCount(1);
-  // chip 显式 error 态（#1027 修法 2：Discord/Slack 式状态机，ADAPT）。
+  // chip 显式 error 态（复用 #825 既有的三态：uploading/ready/failed，本票未新增
+  // 状态机，只把"失败不阻塞发送 + 显式剔除 + 可见提示"的语义钉死）。
   await expect(card).toHaveAttribute('data-status', 'failed');
   await expect(page.locator('.composer-attach-failed')).toContainText('AttachmentMessageTooLarge');
 

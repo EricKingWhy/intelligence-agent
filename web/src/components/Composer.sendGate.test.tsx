@@ -51,6 +51,11 @@ let root: Root;
 let onSubmit: Mock<(...args: SubmitArgs) => void>;
 let resolveUpload: ((value: AttachmentUploadReceipt) => void) | null;
 let rejectUpload: ((error: Error) => void) | null;
+/** 每次上传的 resolve/reject（按发起顺序；`resolveUpload`/`rejectUpload` 仍指向最近一次，兼容既有写法）。 */
+let pendingUploads: Array<{
+  resolve: (value: AttachmentUploadReceipt) => void;
+  reject: (error: Error) => void;
+}>;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -60,10 +65,12 @@ beforeEach(() => {
   onSubmit = vi.fn<(...args: SubmitArgs) => void>();
   resolveUpload = null;
   rejectUpload = null;
+  pendingUploads = [];
   vi.mocked(uploadAttachment).mockImplementation(() => ({
     promise: new Promise<AttachmentUploadReceipt>((resolve, reject) => {
       resolveUpload = resolve;
       rejectUpload = reject;
+      pendingUploads.push({ resolve, reject });
     }),
     abort: vi.fn(),
   }));
@@ -75,14 +82,14 @@ afterEach(() => {
   vi.mocked(uploadAttachment).mockReset();
 });
 
-function paint(): void {
+function paint(sessionId: string | null = 'sess-1'): void {
   act(() => {
     root.render(
       createElement(Composer, {
         streaming: false,
         onSubmit,
         onCancel: () => {},
-        sessionId: 'sess-1',
+        sessionId,
         models: [],
         selectedModel: null,
       }),
@@ -123,6 +130,18 @@ function ctrlEnter(): void {
   const event = new KeyboardEvent('keydown', {
     key: 'Enter',
     ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  act(() => {
+    textarea().dispatchEvent(event);
+  });
+}
+
+/** 纯 Enter（无修饰键）= queue 通道（§5.1 发送键语义）。 */
+function pressEnter(): void {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Enter',
     bubbles: true,
     cancelable: true,
   });
@@ -244,6 +263,108 @@ describe('Composer 发送兜底：#1027 失败附件显式剔除 + 可见提示'
         .querySelector<HTMLButtonElement>('.composer-attach-dropped button[aria-label="关闭附件未发出提示"]')!
         .click();
     });
+    expect(container.querySelector('.composer-attach-dropped')).toBeNull();
+  });
+});
+
+describe('Composer 发送门禁：#1027 复审补齐（Correctness P3 测试缺口）', () => {
+  it('纯 Enter（queue 通道）同样被拦截；落定后 Enter 正常发送', async () => {
+    paint();
+    expect(await pasteOneImage()).toBe(1);
+    await typeText('回车发送');
+
+    // queue 通道不走 disabled 按钮的 click，直达 submit——门禁必须同样拦住。
+    pressEnter();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveUpload?.(receipt('sha256:aaa'));
+    });
+    pressEnter();
+    expect(onSubmit).toHaveBeenCalledWith('回车发送', false, ['sha256:aaa']);
+  });
+
+  it('混合：1 张 ready + 1 张 uploading → 整单被拦截；落定后发送带两张', async () => {
+    paint();
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    setInputFiles(input, [imageFile('a.png')]);
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(pendingUploads).toHaveLength(1);
+    await act(async () => {
+      pendingUploads[0].resolve(receipt('sha256:a'));
+    });
+    expect(cards()[0].dataset.status).toBe('ready');
+
+    setInputFiles(input, [imageFile('b.png')]);
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(pendingUploads).toHaveLength(2);
+    expect(cards()[1].dataset.status).toBe('uploading');
+
+    await typeText('两张一起');
+    // 整单拦截：不许"先发就绪的那张、把在途的静默丢掉"——那正是 #1027 的形态。
+    expect(sendButton().disabled).toBe(true);
+    pressEnter();
+    expect(onSubmit).not.toHaveBeenCalled();
+    ctrlEnter();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingUploads[1].resolve(receipt('sha256:b'));
+    });
+    expect(sendButton().disabled).toBe(false);
+    await act(async () => {
+      sendButton().click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith('两张一起', false, ['sha256:a', 'sha256:b']);
+  });
+});
+
+describe('Composer 兜底提示：#1027 复审 P2（过期文案不清）', () => {
+  it('兜底提示是本次发送的结论：干净发送后清除，不误报下一次', async () => {
+    paint();
+    expect(await pasteOneImage('bad.png')).toBe(1);
+    await act(async () => {
+      rejectUpload?.(new Error('413 too large'));
+    });
+    await typeText('第一次');
+    await act(async () => {
+      sendButton().click();
+    });
+    expect(container.querySelector('.composer-attach-dropped')).not.toBeNull();
+
+    // 移除失败 chip 后再干净发送 → 旧提示必须清除（否则误报"附件未随消息发出"）。
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.composer-attach-remove')!.click();
+    });
+    await typeText('第二次');
+    await act(async () => {
+      sendButton().click();
+    });
+    expect(onSubmit).toHaveBeenLastCalledWith('第二次', false, []);
+    expect(container.querySelector('.composer-attach-dropped')).toBeNull();
+  });
+
+  it('换会话即清兜底提示（不跟去新会话）', async () => {
+    paint('sess-1');
+    expect(await pasteOneImage('bad.png')).toBe(1);
+    await act(async () => {
+      rejectUpload?.(new Error('413 too large'));
+    });
+    await typeText('在旧会话发');
+    await act(async () => {
+      sendButton().click();
+    });
+    expect(container.querySelector('.composer-attach-dropped')).not.toBeNull();
+
+    // 换会话：草稿被 hook 清空，提示也不得残留。
+    paint('sess-2');
+    expect(cards()).toHaveLength(0);
     expect(container.querySelector('.composer-attach-dropped')).toBeNull();
   });
 });
