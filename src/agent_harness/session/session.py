@@ -13,7 +13,6 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
@@ -61,25 +60,6 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
-#: `Session._persist_event` 撞号重投的**墙钟预算**（秒；#1024）。
-#:
-#: 为什么是「限时」而不是「限次」：竞争者是活的旁路写者（后台记忆作业），它不是
-#: 固定几次就退场——限 N 次会在持续竞争下把冲突原样抛出去，而这条路径正是 run 的
-#: 在途事件/终态写入，抛出去等于复现事故。改成「在窗口内一直重投、撞满预算才抛」，
-#: 既保住了「必须写成」的保证，又用墙钟给出硬上界（不可能死锁/挂死）。
-#:
-#: 为什么是 1.0s：稳态单次 append 含 fsync 约 1–5ms，1s 够活聚合在旁路写者的密集
-#: 抢号中抢到空档；对调用方也仍是一个可接受的上界——超出预算说明对方是**持续**占位
-#: （真故障形状），此时按 fail-loud 原样抛出，绝不吞成「写成功」。
-#:
-#: **「抛出去由调用方失败归因接手」对在途 run 的终态不成立**（#1061 一手复核）：顶层
-#: 兜底 `except Exception` 只记一条 WARNING，durable 流照样停在悬空的 run/started 上、
-#: UI 永远「进行中」——这正是 #1024 事故的最后一环。终态因此另有保底通道，见
-#: `_persist_event` 的 `terminal` 分支。1.0s 是工程取值而非实测下界（#1057：本机读数
-#: 机器相关，不作为基线）。
-_APPEND_CONFLICT_DEADLINE_S: float = 1.0
-
-
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
     """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
 
@@ -108,9 +88,9 @@ class Session:
     """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。
 
     **在途聚合 vs 其余聚合**（#1024 / #1055）：`Session.append` 的 seq 是构造时从已
-    加载事件算出的乐观缓存。撞号要不要当场 resync 重投，取决于这枚聚合**是否已被交给
-    一个正在跑它的 runtime**——只有那种聚合的撞号才是「旁路写者刚抢走一个空档」，
-    重投即可闭合；其余聚合的号可能是旧快照推出来的，撞号是**结构性**的。
+    加载事件算出的乐观缓存。撞号要不要在 store 锁内当场改号重落，取决于这枚聚合
+    **是否已被交给一个正在跑它的 runtime**——只有那种聚合的撞号才是「旁路写者刚抢走
+    一个空档」，改号即可闭合；其余聚合的号可能是旧快照推出来的，撞号是**结构性**的。
 
     判据只能在交付点**显式建立**，不能从构造参数推断（#1055：早先按
     ``events is not None`` 推断，把服务层 `load()` / `resume()` 造出、随后交给 runtime
@@ -118,7 +98,8 @@ class Session:
     并发用例换成 load/resume 交付的聚合即丢终态）：
 
     * `deliver_to_runtime()`——由**交付点**在把聚合交给 runtime 时调用。此后该聚合
-      撞号即 resync 重投（墙钟有界，见 `_persist_event`）。交付点仅三处：
+      撞号即在**同一把写锁内**改号重落（见 `_persist_event`／`store.append_event`
+      的 `allocate`——取号、判定、写盘同临界区，杜绝「核对→写」窗口）。交付点仅三处：
       `RunManager.launch`（服务层创建 / 续聊 / 暂停续跑三条腿共用）、CLI `run` 直接调
       `runtime.run_stream`、多代理子 runtime。
     * 未标记的聚合——撞号原样抛出，收口归调用方 owner（服务层 `change_model` 一族按
@@ -289,10 +270,11 @@ class Session:
         由**交付点**调用，仅三处：`RunManager.launch`（服务层创建 / 续聊 / 暂停续跑
         三条腿共用）、CLI `run` 的 `runtime.run_stream`、多代理子 runtime。
 
-        标记之后 `append` 撞号即 resync 重投（墙钟有界）：此时这枚聚合就是 runtime
-        正在写的那一枚，撞号只可能是旁路写者抢走了空档。未标记的聚合保持原样抛出，
-        收口归调用方——`change_model` 一族 / `SessionEventSink` 各有自己的有界重试
-        与失败归因（BUG-011），本层替它们吞掉会让那些上界不可观测。
+        标记之后 `append` 撞号即在 store **同一把写锁内**改号重落（#1062 裁决 A）：
+        此时这枚聚合就是 runtime 正在写的那一枚，撞号只可能是旁路写者抢走了空档。
+        未标记的聚合保持原样抛出，收口归调用方——`change_model` 一族 /
+        `SessionEventSink` 各有自己的有界重试与失败归因（BUG-011），本层替它们吞掉
+        会让那些上界不可观测。
         """
         self._delivered_to_runtime = True
 
@@ -428,10 +410,10 @@ class Session:
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
-        # 返回**实际落盘的那一枚**：已交付 runtime 的聚合撞号会 resync 重投并换号
-        # （`replace(event, seq=...)`），调用方（`end_run` 的返回值、流式镜像、测试
-        # 断言）必须拿到与事件流一致的 event_id/seq 对，否则「返回的 seq」与「盘上的
-        # seq」静默分叉。未交付的聚合不换号（撞号原样抛出）。
+        # 返回**实际落盘的那一枚**：已交付 runtime 的聚合撞号会在 store 锁内改号
+        # （#1062），调用方（`end_run` 的返回值、流式镜像、测试断言）必须拿到与事件流
+        # 一致的 event_id/seq 对，否则「返回的 seq」与「盘上的 seq」静默分叉。未交付的
+        # 聚合不换号（撞号原样抛出）。
         return self._persist_event(event, notify=True, terminal=terminal)
 
     def register_protected_fact(
@@ -477,71 +459,43 @@ class Session:
         顺序不可交换：store 成功后才更新内存/seq，避免失败留下空洞；history
         adoption 通过 ``notify=False`` 保持离线 seed 语义。
 
-        **seq 冲突即 resync（#1024）**：本聚合的计数器只是「盘上最大 seq」的乐观
-        缓存，任何旁路写者（后台记忆作业的 ``SessionEventSink``、服务层的旁路追加）
-        都能在两次 append 之间把号占掉。撞号不是终局，而是协议的一部分：重读当前
-        盘上最大 seq、纠正 ``_next_seq``、用新号有界重投（EventStoreDB
-        ``WrongCurrentVersionError`` / Marten ``ConcurrencyException`` 同型协议——
-        存储层 fail-closed 拒写，读-改-写闭环在写者一侧完成）。没有这一步，受害
-        run 的下一次 append 必炸，而失败终态又走同一枚过期计数器、必然再炸，
-        run 永远拿不到终态（#1024 的真机事故形状）。
+        **seq 分配在 store 写锁内（#1062 裁决 A）**：本聚合的计数器只是「盘上最大
+        seq」的乐观缓存，任何旁路写者（后台记忆作业的 ``SessionEventSink``、服务层
+        的旁路追加）都能在两次 append 之间把号占掉。旧实现（#1024 起）在会话侧
+        **自旋重投**（撞号 → 读盘面 → 换号 → 再 append），有两个残余：调用线程是
+        runtime 事件循环协程（``_drive``）时，持续占位下一次 append 可纯自旋最长 1.0s、
+        期间同 loop 的 SSE 心跳/其它会话全部停摆；对手不收手时事件一次都不前进。
 
-        三条边界：**已交付 runtime 的聚合**才重投（`_delivered_to_runtime`；其余原样
-        抛出，把冲突交给其调用方的有界重试与失败归因）；重投受
-        `_APPEND_CONFLICT_DEADLINE_S` 墙钟预算约束，撞满即 fail-loud——不把冲突吞成
-        「写成功」；**终态写者**（`terminal=True`，只有 `end_run`）是唯一例外：它没有
-        「下次 append」可用，故撞满预算时把最后一次重投的**取号**交给 store 的锁内协商
-        （见 `JsonlSessionStore.append_event` 的 ``terminal`` 边界）。本层不改写点、也不
-        改重投形态（#1061）。
+        裁决 A 把**取号、判定、写盘**收进 store 的**同一临界区**（会话写锁 + #1063 的
+        跨进程文件锁）：撞号不再是会话侧要处理的异常，而是 store 在锁内直接改号到
+        锁内读到的空档再落盘（``store.append_event`` 的 ``allocate``）。自旋与墙钟预算
+        随之删除——**没有可插入的窗口**，收敛由构造保证（Kafka 由 broker 在 append 时
+        分配 offset、SQLite WAL 单写者锁、EventStoreDB ``WrongExpectedVersion``／
+        Marten ``ConcurrencyException`` 的存储层 fail-closed 同型：分配必须在写锁内）。
+
+        触发条件（沿用 #1055 的快照门，A **不改**这条边界）：只有被**交付点**显式交给
+        在途 runtime 的聚合（``_delivered_to_runtime``）才在锁内改号；未交付的聚合
+        撞号仍原样抛 ``SeqConflict``，收口归调用方 owner（``change_model`` 一族的
+        ``_WRITE_CONFLICT_ATTEMPTS``、sink 的 ``_SINK_ATTEMPTS``），本层替它们吞掉会让
+        那些上界与失败归因不可观测（BUG-011）。**终态写者**（``terminal=True``，只有
+        ``end_run``）即使未交付也改号——它没有「下次 append」可用，放它不落等于 run 在
+        盘上永远悬空（#1061 的保底通道，A 是它的推广而非替换）。
         """
-        deadline = time.monotonic() + _APPEND_CONFLICT_DEADLINE_S
-        while True:
-            try:
-                persisted = self._store.append_event(
-                    self.session_id, event,
-                    # 终态保底（#1061）：预算耗尽后，终态的这次写换成 store 的**锁内**
-                    # 协商（取号 + 判定 + 写盘同处一把会话写锁）。普通重投不受影响，
-                    # 写点仍是这一个（#252 的 len==1 判据不变）。
-                    terminal=terminal and time.monotonic() >= deadline,
-                )
-                # store 返回**实际落盘的那一枚**：终态协商会在锁内改号，不接住它就会
-                # 「内存/返回值是旧号、盘上是新号」——`_events`、`_next_seq` 与调用方
-                # （`end_run` 的返回值、流式镜像）三处一起分叉。老替身/第三方子类可能
-                # 不返回（签名原本是 `-> None`），故回落到本地事件。
-                event = persisted if persisted is not None else event
-                break
-            except SeqConflict:
-                # 只认 ``SeqConflict``：其它 OSError / RuntimeError 是真故障，原契约
-                # 向上抛。
-                if not self._delivered_to_runtime:
-                    # 未交付 runtime ⇒ 不做 resync，原样抛给调用方：它的号可能是「按旧
-                    # 快照推的」，收口归调用方 owner（`change_model` 一族的
-                    # `_WRITE_CONFLICT_ATTEMPTS` / sink 的 `_SINK_ATTEMPTS`），在这一层
-                    # 吞掉会让那些上界与失败归因不可观测（BUG-011）。
-                    raise
-                if time.monotonic() >= deadline and not terminal:
-                    # 撞满预算仍被抢 ⇒ fail-loud。兜底吞掉才是 #1024 真正的静默失真源。
-                    # 终态（`terminal`）是唯一例外：它没有「下次 append」可用，故落到
-                    # 上面那个写点的协商模式（#1061）。
-                    raise
-                # 盘面读数用 store 的 O(1) 入口（#1057）：撞号可能高频重放（持续竞争的
-                # 旁路写者会把这轮重投变成自旋），全量 read_events 解析在 1s 预算内
-                # 会烧掉几万行 JSON。读数只在撞号路径上取，热路径仍是一次 append。
-                #
-                # 取下一条空号重投。**不**加「只在 `event.seq <= last` 时才换号」的判断：
-                # store 只在 `seq <= last` 时抛 `SeqConflict`（`store.py:389`，全仓唯一
-                # 的抛出点），所以那个条件恒为真——#1056 的变异矩阵实测「删掉它」等价
-                # （m2 全绿），是死代码。留着反而在「读数变小」时（撕裂尾中立化截断过
-                # 日志）不肯换号，白白留一个 seq 断层。
-                self._next_seq = self._store.last_event_seq(self.session_id) + 1
-                event = replace(event, seq=self._next_seq)
-                # 不 sleep 直接重投：竞争窗口是微秒级，CAS 自旋就是最有效的争抢；sleep
-                # 在高负载机上粒度可达几十毫秒，会把预算耗在睡眠上（实测）。上界由墙钟
-                # 预算兜住。
+        persisted = self._store.append_event(
+            self.session_id, event,
+            # `allocate`：撞号时在 store 锁内改号再落盘。已交付聚合 + 终态写者都吃
+            # 这条路径；未交付的非终态写者仍 fail-closed（快照门，BUG-011）。
+            allocate=self._delivered_to_runtime or terminal,
+        )
+        # store 返回**实际落盘的那一枚**：锁内分配会改号，不接住它就会「内存/返回值是
+        # 旧号、盘上是新号」——`_events`、`_next_seq` 与调用方（`end_run` 的返回值、
+        # 流式镜像）三处一起分叉。老替身/第三方子类可能不返回（签名原本是 `-> None`），
+        # 故回落到本地事件。
+        event = persisted if persisted is not None else event
         self._events.append(event)
-        # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：重投
-        # 换过号（上面的 `replace`），写成 `+= 1` 会留下过期缓存，把下一次 append 直接
-        # 送进冲突分支（#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。
+        # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：锁内分配
+        # 会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进冲突分支
+        # （#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。
         self._next_seq = event.seq + 1
         if not notify:
             return event
@@ -829,12 +783,12 @@ class Session:
         **自己拼**的常量/模板，绝不透传 provider 回显原文
         （口径见 docs/adr/0033-run-failure-attribution-surface.md §2.1）。
 
-        **终态保底（#1061）**：本方法是唯一以 `terminal=True` 进漏斗的写者。撞满
-        `_APPEND_CONFLICT_DEADLINE_S` 预算时，普通写者 fail-loud，终态则把最后一次重投
-        的**取号**交给 store 的锁内协商（见 `JsonlSessionStore.append_event` 的
-        ``terminal`` 边界）——持续占位的写者没有可插入的窗口。终态是「这个 run 结束了
-        吗」的唯一 durable 事实，放它不落就等于 run 在盘上永远悬空。这**不是**无限重试：
-        协商只有一次，store 若仍判定不可写（如已硬删）异常照样抛出，绝不假成功。
+        **终态保底（#1061，A 后是通用路径的子集）**：本方法是唯一以 `terminal=True`
+        进漏斗的写者。撞号时 store 在**锁内**改号再落盘（`allocate`，见
+        `JsonlSessionStore.append_event`）——持续占位的写者没有可插入的窗口。终态是
+        「这个 run 结束了吗」的唯一 durable 事实，放它不落就等于 run 在盘上永远悬空。
+        这**不是**无限重试：锁内改号只有一次，store 若仍判定不可写（如已硬删）异常照样
+        抛出，绝不假成功。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}

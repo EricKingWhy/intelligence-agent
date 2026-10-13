@@ -110,17 +110,20 @@ class _SeqThiefStore(JsonlSessionStore):
     可判定——线程版的命中率由调度决定（#1024 实测 30 次 append 时 3/8、200 次时
     0/6，不随规模单调），无法当守门用例。
 
-    ``stolen`` 记录真实抢号次数，供用例断言「resync 真的发生过」（#1056）。
+    ``stolen`` 记录真实抢号次数，供用例断言「撞号真的发生过」（#1056）；``calls``
+    记录**物理写调用次数**，供 A（#1062）断言「已交付写一次闭合、无自旋重投回边」。
     """
 
     def __init__(self, *, root: Path, steals: int) -> None:
         super().__init__(root=root)
         self.steals = steals
         self.stolen = 0
+        self.calls = 0
 
-    def append_event(self, session_id: str, event, *, terminal: bool = False):
-        # #1061：thief 是**对手**的形状，不参与协商；`terminal` 收下只用于转发，
-        # 抢号行为与真实写盘都保持原样（抢到的号仍走真实 store 的 fail-closed 判定）。
+    def append_event(self, session_id: str, event, *, allocate: bool = False):
+        # A（#1062）：thief 是**对手**的形状，不参与协商；`allocate` 收下只用于转发，
+        # 抢号行为与真实写盘都保持原样（抢到的号仍走真实 store 的锁内判定）。
+        self.calls += 1
         if self.steals > 0:
             self.steals -= 1
             self.stolen += 1
@@ -133,7 +136,7 @@ class _SeqThiefStore(JsonlSessionStore):
                     data={"operation": "formation"},
                 ),
             )
-        return super().append_event(session_id, event, terminal=terminal)
+        return super().append_event(session_id, event, allocate=allocate)
 
 
 class TestDeliveredAggregateResync:
@@ -262,53 +265,60 @@ class TestNoTerminalLossUnderInterleaving:
 
 
 class TestAppendProgressGuarantee:
-    def test_append_survives_more_steals_than_the_old_retry_bound(self, store):
-        """AC3（推进保证）：旁路写者**连续**抢号超过旧上界时，交付聚合仍必须落地。
+    def test_delivered_append_lands_in_one_store_call_under_sustained_steal(self, store):
+        """A（#1062）：已交付聚合在**永不停手**的对手下仍一次写落地——推进由构造保证。
 
-        线程序列化抓这个缺陷是碰运气（实测第二轮代码下命中率由调度决定），不能当
-        守门用例。这里改成**确定性注入**：thief store 在聚合每次落盘前先把它选中的号
-        占掉（写一条 memory/degraded），连抢 10 次（远超旧上界 3）。次数不能太大：
-        thief 每抢一次都要真落盘 fsync，抢到 50 次时它的 fsync 开销本身就把 1s 墙钟
-        预算耗光了，反而测不准。
+        旧实现（#1024）是会话侧**自旋重投**：撞号 → 读盘面 → 换号 → 再 append，直到
+        thief 收手才落地；对手不收手就撞满墙钟预算抛出。A 把「取号+判定+写盘」收进
+        store 的**同一临界区**，故撞号在锁内一次改号即闭合，**不需要重投**。
 
-        第二轮实现（撞号即无脑「重读 → 换号」，上界 3 次尝试）在第 3 次就抛
-        `SeqConflict` ⇒ 红；第三轮（撞号后核对盘面、只在真被占时换号、自旋重投 +
-        墙钟预算）会一直重投到 thief 收手，随即落地 ⇒ 绿。
+        判据换了形状但更硬：一次 `live.append` 只触发**一次** `store.append_event`
+        调用（`thief.calls == 1`），且事件确实落盘、seq 连续。thief 抢得再多，也只是
+        这一次写内部的对手——写锁在读 `last` 之前已把它挡在门外，故它抢到几次都不会
+        变成会话侧的多次重投。
         """
-        # 被测聚合**就是** thief 本身（同一棵树的同一实例，不是跨树旁路）。
         thief = _SeqThiefStore(root=store._root, steals=0)
         live = Session.start(thief, session_id="s-steal")
         live.append(USER_MESSAGE, {"content": "hi"})
         live.deliver_to_runtime()
         run_id, _ = live.begin_run()
 
-        # 开闸：接下来这**一次** append 会连续撞号 10 次（旧的 3 次上界必抛）。
+        # 开闸：对手在这一**次**写里抢号。A 之后它只能抢到**一次**——因为「取号+判定+
+        # 写盘」同在写锁内，锁在读 `last` 之前已把它挡在门外；它抢到的号当场被 skip 掉，
+        # 不存在「抢 10 次 = 会话侧重投 10 轮」的形状（那正是旧自旋的产物）。
+        calls_before = thief.calls
+        stolen_before = thief.stolen
         thief.steals = 10
-        live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+        event = live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
 
-        # #1056：断言 resync **真实发生**（撞号被注入且被消化），而不是「一路没冲突
-        # 直接成功」也能绿。
-        assert thief.stolen == 10, f"必须真的撞过 10 次号，实际 {thief.stolen}"
-        assert thief.steals == 0, "thief 必须被抢空（否则没压到旧上界就过了）"
+        # A 的硬判据：只发生**一次**物理写调用（没有自旋重投的回边）。
+        assert thief.calls - calls_before == 1, (
+            f"锁内分配应一次写闭合，实际 store 调用 {thief.calls - calls_before} 次"
+        )
+        # 对手至多抢到一次（写锁在它之后就不再放它进来）——这正是 A 消灭自旋的形状。
+        assert thief.stolen - stolen_before == 1, (
+            f"锁内分配下对手至多抢一次，实际 {thief.stolen - stolen_before} 次"
+        )
+        assert thief.steals == 9, "对手还剩 9 次没抢（因为一次写里只轮到它一次）"
         events = thief.read_events("s-steal")
         seqs = [e.seq for e in events]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "seq 不得重复/回退"
-        # 10 次抢号各留一条 degraded，加聚合自己的事件 ⇒ 总数可判
-        assert sum(1 for e in events if e.type == MEMORY_DEGRADED) == 10
+        # 落地的那枚就是返回的那枚（锁内改号后必须同步给调用方/内存投影）。
+        assert any(e.seq == event.seq and e.type == event.type for e in events)
+        # 对手那一次抢号留一条 degraded；加聚合自己的事件。
+        assert sum(1 for e in events if e.type == MEMORY_DEGRADED) == 1
 
 
 class TestResyncReadsTheDiskInsteadOfWalkingUp:
-    def test_retry_jumps_to_disk_max_when_bypass_writer_advanced_far(self, store):
-        """撞号后必须**按盘面读数**一次跳到空档，不能只把号 +1 一格一格爬。
+    def test_allocation_jumps_to_disk_max_when_bypass_writer_advanced_far(self, store):
+        """锁内分配必须**按盘面读数**一次跳到空档，不能只把号 +1 一格一格爬。
 
-        #1056：`TestAppendProgressGuarantee` 抓不到这个——那个 thief 是**连续**占号，
-        逐格 +1 恰好也能追上，所以「重投不读盘面、只把号 +1」的变体在它面前全绿（实测
-        m7）。真实形状是旁路写者**一次推进一大段**（`SessionEventSink` 落盘、或日志被
-        撕裂尾中立化截断），此时逐格爬要 O(距离) 次重投，距离一大会撞满墙钟预算
-        fail-loud，而读盘面只要一次。
+        #1056 的原始动机（会话侧重投期）在 A（#1062）后移到 store 锁内，但**判据不变**：
+        写者一次推进一大段（`SessionEventSink` 落盘、或日志被撕裂尾中立化截断）时，正确
+        实现要一次跳到 `盘面最大 + 1`；逐格 +1 要 O(距离) 次——旧实现在此撞满墙钟预算
+        fail-loud，A 实现则在锁内一次改号到位。
 
-        判据用**重投次数**（确定性）而不是耗时（机器相关，见 #1057）：正确实现撞号后
-        只需 1 次重投，逐格爬需要 K 次。
+        判据仍用**物理写次数**（确定性）而不是耗时（机器相关，见 #1057）。
         """
         advance = 50
 
@@ -319,9 +329,9 @@ class TestResyncReadsTheDiskInsteadOfWalkingUp:
                 super().__init__(root=root)
                 self.appends = 0
 
-            def append_event(self, session_id: str, event, *, terminal: bool = False):
+            def append_event(self, session_id: str, event, *, allocate: bool = False):
                 self.appends += 1
-                return super().append_event(session_id, event, terminal=terminal)
+                return super().append_event(session_id, event, allocate=allocate)
 
         counting = CountingStore(root=store._root)
         live = Session.start(counting, session_id="s-advance")
@@ -348,14 +358,19 @@ class TestResyncReadsTheDiskInsteadOfWalkingUp:
 
 
 class TestConflictBoundIsFailLoud:
-    def test_never_yielding_competitor_raises_instead_of_claiming_success(self, store):
-        """撞满墙钟预算必须 **fail-loud**：抛 `SeqConflict`，绝不把没落盘的事件当成写成。
+    """A（#1062）改写了这条边界，用例语义随之改写（不是 waive）。
 
-        `_persist_event` 成功路径后面紧跟着 `self._events.append(event)` 与
-        `_next_seq = event.seq + 1`。所以「预算耗尽时 `break` 而不是 `raise`」会让
-        内存投影声称一条盘上并不存在的事件、计数器也前进——正是 #1024 事故里真正的
-        静默失真源（比抛错危险得多）。本用例让 thief **永不停手**：聚合必须在预算内
-        抛错，且内存投影不得多出那条事件。
+    旧契约（#1024/#1061）：已交付聚合的**普通**写撞满墙钟预算 ⇒ fail-loud 抛
+    `SeqConflict`。A 把分配收进 store 写锁后，已交付的普通写改为**锁内改号成功**——
+    它不再有「预算」这个概念（没有自旋，一次写内闭合）。**未交付**聚合的快照门原样
+    保留（BUG-011）：撞号仍 fail-loud。
+    """
+
+    def test_delivered_write_lands_not_raises_under_never_stopping_competitor(self, store):
+        """已交付普通写：对手永不停手也**落地**（锁内改号），绝不抛。
+
+        这是 A 的核心效果面，也是旧用例的反面：旧实现要求此处抛 `SeqConflict`，A 之后
+        必须落地。内存投影只多出**落盘的那一枚**（不是「假成功」——盘上确有该 seq）。
         """
         thief = _SeqThiefStore(root=store._root, steals=0)
         live = Session.start(thief, session_id="s-never")
@@ -363,19 +378,33 @@ class TestConflictBoundIsFailLoud:
         live.deliver_to_runtime()
         run_id, _ = live.begin_run()
         before = len(live._events)
-        stolen_before = thief.stolen
 
-        thief.steals = 10**9  # 永不停手（每次撞号它都真落盘，聚合永远抢不到）
+        thief.steals = 10**9  # 永不停手
+        event = live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+
+        assert len(live._events) == before + 1, "落地的那一枚应进内存投影"
+        assert live._events[-1].seq == event.seq
+        # 盘上确实有这枚（不是「内存声称、盘上没有」的假成功）。
+        events = thief.read_events("s-never")
+        assert any(e.seq == event.seq and e.type == event.type for e in events)
+
+    def test_undelivered_write_still_fails_loud_under_never_stopping_competitor(self, store):
+        """未交付聚合的快照门（BUG-011）**不因 A 改变**：撞号仍 fail-loud。
+
+        收口归调用方 owner（`change_model` 一族的 `_WRITE_CONFLICT_ATTEMPTS`、sink 的
+        `_SINK_ATTEMPTS`）；本层替它们吞掉会让那些上界与失败归因不可观测。内存投影
+        不得多出没落盘的事件。
+        """
+        thief = _SeqThiefStore(root=store._root, steals=0)
+        live = Session.start(thief, session_id="s-nodeliver")
+        live.append(USER_MESSAGE, {"content": "hi"})
+        # 刻意**不**调用 deliver_to_runtime()
+        before = len(live._events)
+
+        thief.steals = 10**9
         with pytest.raises(SeqConflict):
-            live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
-
-        # #1056：确认真的走了「撞号 → 重投」路径（不是别的失败形状冒充）。
-        assert thief.stolen > stolen_before, "必须真的撞过号才谈得上预算耗尽"
-        # 内存投影不得多出那条事件——这是「假成功」的判据。
-        # （`next_seq` 在重投期被按盘面纠正过，它会前进到「盘上最大 + 1」，这是缓存
-        # 语义、不是写入成功的信号，故不对它下断言。）
+            live.append(MODEL_REQUEST_STARTED, {"model": "m"})
         assert len(live._events) == before, "没落盘的事件不得进内存投影（不许假成功）"
-        assert all(e.type != "model/request-started" for e in live._events)
 
 
 class TestConflictIsNotSwallowedForOtherFailures:
@@ -393,11 +422,11 @@ class TestConflictIsNotSwallowedForOtherFailures:
                 super().__init__(root=root)
                 self.calls = 0
 
-            def append_event(self, session_id, event, *, terminal: bool = False):
+            def append_event(self, session_id, event, *, allocate: bool = False):
                 self.calls += 1
                 if self.calls > 1:
                     raise RuntimeError("磁盘故障（注入）")
-                return super().append_event(session_id, event, terminal=terminal)
+                return super().append_event(session_id, event, allocate=allocate)
 
         boom = Boom(root=store._root)
         live = Session.start(boom, session_id="s-boom")
@@ -408,13 +437,12 @@ class TestConflictIsNotSwallowedForOtherFailures:
 
 
 class TestTerminalGuaranteeUnderSustainedSteal:
-    """#1061：旁路写者**持续**占位（撞满墙钟预算）时，终态仍必须落进 durable 流。
+    """终态在**持续占位**下仍必须落进 durable 流（#1061；A 后是通用路径的子集）。
 
-    #1024 的复现里，活聚合的**普通**写撞满预算会 fail-loud（既有契约，见
-    `TestConflictBoundIsFailLoud`），而失败终态走同一枚过期计数器、同样撞满 —— 于是
-    盘上永远停在悬空的 `run/started`，UI 显示「进行中」永久。终态保底把这次写的
-    **取号**交给 store 的锁内协商，「读空档 + 判定 + 写盘」同临界区，持续占位的写者
-    没有可插入的窗口。
+    #1024 的复现里，失败终态走同一枚过期计数器、撞满即抛，于是盘上永远停在悬空的
+    `run/started`，UI 显示「进行中」永久。#1061 给终态开了「锁内改号」保底；A（#1062）
+    把这条路径推广到**所有已交付写**——终态只是「即使未交付也要改号」的那一个特例。
+    本用例回归验证：推广没有把终态语义改坏（三构造入口 + 两个终态类型）。
 
     确定性优先：thief 用**永不停手**的注入（不是线程赛跑），三构造入口各验一遍
     （#1055 的教训：只测 `start` 会漏掉整条续聊路径）。
@@ -430,12 +458,11 @@ class TestTerminalGuaranteeUnderSustainedSteal:
         session_id = f"s-guard-{entry}-{status}"
         live, run_id = _delivered_run(thief, session_id, entry)
 
-        thief.steals = 10**9  # 永不停手：普通写必然撞满预算
-        with pytest.raises(SeqConflict):
-            live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+        thief.steals = 10**9  # 永不停手
+        # 前置：已交付普通写在 A 下也落地（不再抛）——见 TestConflictBoundIsFailLoud。
+        live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
         stolen_before = thief.stolen
 
-        # 终态：撞满预算后必须仍然落盘（这正是 #1061 的被测面）。
         event = live.end_run(run_id, status=status, reason="boom", message="boom")
 
         assert thief.stolen > stolen_before, "终态那次写必须真的撞过号（否则没压到保底通道）"
@@ -445,22 +472,25 @@ class TestTerminalGuaranteeUnderSustainedSteal:
         assert len(mine) == 1, f"该 run 的 durable 终态必须恰好一条，实际 {len(mine)}"
         seqs = [e.seq for e in events]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "seq 不得重复/回退"
-        # 落盘的终态就是返回的那一枚（协商改号后必须同步给调用方/流式镜像）。
+        # 落盘的终态就是返回的那一枚（锁内改号后必须同步给调用方/流式镜像）。
         assert any(e.seq == event.seq and e.type == event.type for e in events)
 
     @pytest.mark.parametrize("entry", ENTRIES)
-    def test_normal_write_still_fails_loud_while_thief_never_stops(self, store, entry):
-        """反向边界：保底**只给终态开**——普通写在同样的持续占位下仍 fail-loud。
+    def test_delivered_normal_write_also_lands_while_thief_never_stops(self, store, entry):
+        """A 的正面效果面：已交付的**普通**写（非终态）在持续占位下也落地。
 
-        否则「预算耗尽 ⇒ 静默改号成功」会把「持续占位是真故障形状」这个判据抹掉，
-        也让 BUG-011 的有界重试上界不可观测。
+        旧用例此处断言 fail-loud（`test_normal_write_still_fails_loud_...`）；A 之后该
+        契约被用户裁决改写为「锁内改号成功」，故断言随之反转——但**未交付**的普通写
+        仍 fail-loud，那条反面判据搬到了 `TestConflictBoundIsFailLoud`。
         """
         thief = _SeqThiefStore(root=store._root, steals=0)
         live, run_id = _delivered_run(thief, f"s-guard-normal-{entry}", entry)
         before = len(live._events)
 
         thief.steals = 10**9
-        with pytest.raises(SeqConflict):
-            live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
+        event = live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
 
-        assert len(live._events) == before, "没落盘的普通事件不得进内存投影（不许假成功）"
+        assert len(live._events) == before + 1, "落地的普通事件应进内存投影"
+        assert live._events[-1].seq == event.seq
+        events = thief.read_events(f"s-guard-normal-{entry}")
+        assert any(e.seq == event.seq and e.type == event.type for e in events)

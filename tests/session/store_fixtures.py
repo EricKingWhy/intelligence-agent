@@ -19,7 +19,7 @@ class RejectingStore(JsonlSessionStore):
         self._error_type = error_type
 
     def append_event(
-        self, session_id: str, event: SessionEvent, *, terminal: bool = False,
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
     ) -> SessionEvent:
         # #1061：`terminal` 是 store 的终态协商开关；本替身一律拒写，故协商也拒。
         raise self._error_type("拒写（注入）")
@@ -37,9 +37,9 @@ class FailingFromStore(JsonlSessionStore):
         self._fail_from = fail_from
 
     def append_event(
-        self, session_id: str, event: SessionEvent, *, terminal: bool = False,
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
     ) -> SessionEvent:
         self._calls += 1
         if self._calls >= self._fail_from:
             raise RuntimeError(f"磁盘故障（注入，第 {self._calls} 次写）")
-        return super().append_event(session_id, event, terminal=terminal)
+        return super().append_event(session_id, event, allocate=allocate)

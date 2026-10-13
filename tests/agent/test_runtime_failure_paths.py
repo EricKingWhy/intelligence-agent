@@ -863,10 +863,10 @@ class _RejectingTerminalStore(JsonlSessionStore):
         super().__init__(root=root)
         self._error = error
 
-    def append_event(self, session_id, event, *, terminal=False):
+    def append_event(self, session_id, event, *, allocate=False):
         if event.type in RUN_TERMINAL_TYPES:
             raise self._error
-        return super().append_event(session_id, event, terminal=terminal)
+        return super().append_event(session_id, event, allocate=allocate)
 
 
 class TestTerminalWriteFailureAttribution:

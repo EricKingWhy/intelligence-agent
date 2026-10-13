@@ -508,7 +508,7 @@ class TestConcurrentPermissionChange:
         _seed_session(state)
         attempts: list[int] = []
 
-        def always_conflict(session_id, event, *, terminal=False):
+        def always_conflict(session_id, event, *, allocate=False):
             # #1061：`append_event` 新增终态协商开关；本注入一律拒写，故照旧抛。
             attempts.append(1)
             raise SeqConflict("注入：持续冲突")

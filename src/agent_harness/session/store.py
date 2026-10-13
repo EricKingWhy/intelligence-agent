@@ -292,9 +292,13 @@ class JsonlSessionStore:
     def last_event_seq(self, session_id: str) -> int:
         """本会话已落盘最大 seq（空会话 = -1）。公开的 O(1) 盘面读数。
 
-        #1057：撞号重投的写者（`Session._persist_event`）只需要「盘上最大 seq」这
-        一个数，用 `read_events` 全量解析在持续竞争下会退化成自旋热循环。本入口直接
-        复用 `_last_seq_on_disk`（文件戳校验的缓存），不改语义、不新增私有耦合。
+        #1057：写者偶尔只需要「盘上最大 seq」这一个数，用 `read_events` 全量解析在
+        持续竞争下会退化成自旋热循环。本入口直接复用 `_last_seq_on_disk`（文件戳校验
+        的缓存），不改语义、不新增私有耦合。
+
+        注（#1062）：本方法是 #1057 为「会话侧自旋重投」加的 O(1) 读数；裁决 A 把分配
+        收进 store 写锁后**生产路径已不再调用它**，仅保留为公开 O(1) 读数（有测试与潜在
+        诊断用途）。是否随 A 一并删除属另一票的范围。
 
         并发边界与 `append_event` 同一口径：读数在会话写锁外取，是**观测**而非判定；
         真正的 fail-closed 判定仍在 `append_event` 的锁内（`seq <= last` 拒写）。
@@ -348,7 +352,7 @@ class JsonlSessionStore:
         return last
 
     def append_event(
-        self, session_id: str, event: SessionEvent, *, terminal: bool = False,
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
     ) -> SessionEvent:
         """向 Session 的 JSONL 追加一条事件（整行 + flush + fsync）。
 
@@ -364,18 +368,19 @@ class JsonlSessionStore:
         否则迟到的旁路写者会在这里把日志凭空重建，静默撤销用户那次不可逆的删除。
         抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
 
-        **终态协商**（``terminal=True``，#1061）：run 终态是「这个 run 结束了吗」的
-        唯一 durable 事实，它被持续占位的旁路写者挡住时，若照旧 fail-closed，盘上就
-        永远停在悬空的 ``run/started`` 上（#1024 事故的最后一环）。此时本方法**在
-        同一把会话写锁内**把事件改号到 ``last + 1`` 再落盘——取号、判定、写入三步
-        同临界区，持续占位的写者（即便它在锁外不停取胜）也没有可插入的窗口。
+        **锁内分配**（``allocate=True``，#1062 裁决 A；#1061 终态协商的推广）：seq 的
+        「取号 + 判定 + 写盘」三步同处**同一临界区**（会话写锁 + #1063 的跨进程文件
+        锁）。撞号不再回抛给写者去自旋重投，而是本方法在锁内把事件改号到 ``last + 1``
+        再落盘——持续占位的旁路写者（即便它在锁外不停取胜）也没有可插入的窗口。调用方
+        （`Session._persist_event`）对**已交付 runtime 的聚合并终态写者**打开它；普通
+        未交付写者仍 fail-closed（BUG-011 的快照门）。
 
-        边界（不得夸大）：① 只对**已持有事件**的终态做改号，事件类型/信封/`data` 一律
-        不动，改的只是 seq；② 不会因为协商就丢失拒写语义——`SessionNotFound`（硬删）
-        等其它判定照旧先抛；③ **不是**通用写路径：普通写者仍 fail-closed，BUG-011 的
-        拒写契约与 `change_model` 一族的退避一律不变。
+        边界（不得夸大）：① 只对**已持有事件**做改号，事件类型/信封/`data` 一律不动，
+        改的只是 seq；② 不会因为分配就丢失拒写语义——`SessionNotFound`（硬删）等其它
+        判定照旧先抛；③ **不是**无限重试：锁内改号只有一次，改号后落到锁内读到的空档即
+        返回。
 
-        :returns: 实际落盘的那一枚（终态协商会改号，调用方必须据此对齐计数器）。
+        :returns: 实际落盘的那一枚（锁内分配会改号，调用方必须据此对齐计数器）。
         """
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
         # #650：UTF-8 可编码性验证**前置于**一切目录/文件变更与 seq 状态提交。
@@ -411,7 +416,7 @@ class JsonlSessionStore:
                 self._neutralize_torn_tail(path)
                 last = self._last_seq_on_disk(session_id)
                 if event.seq <= last:
-                    if not terminal:
+                    if not allocate:
                         raise SeqConflict(
                             f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
                             f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
