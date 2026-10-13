@@ -7,15 +7,11 @@ agent；它们只需要"当前 run 是谁"。runtime 在 begin_run 之后设置�
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agent_harness.session.event import SESSION_STARTED
-
 if TYPE_CHECKING:
-    from agent_harness.session.event import SessionEvent
     from agent_harness.session.session import Session
 
 #: 当前 run 的 id（begin_run 之后有效）；None = 不在 run 上下文中。
@@ -56,24 +52,10 @@ class ConstraintToolContext:
     user_input_request_rejection_code: str | None = None
     #: 当前会话是否为委派子会话（#1085 兜底判据）。约束工具只属于直接服务
     #: 用户的根会话（#663 AC01）；恢复后的 child 不得获得有效入口。
+    #: ⚠ fail-open 默认（False）：当前唯一构造点（agent/runtime.py）恒传
+    #: `session_is_delegated_child(...)` 的计算值；新增构造点必须显式传入，
+    #: 不得依赖本默认值。
     is_delegated_child: bool = False
-
-
-def session_is_delegated_child(events: Sequence[SessionEvent]) -> bool:
-    """判定会话是否为委派子会话（#1085 执行期兜底用）。
-
-    标记定义与 `session/service.py::_delegated_child_agent_profile` 同源：
-    首事件为 session/started 且 data 带 `delegation_tree_id`。
-    与那边不同：标记存在但 agent_id 不可解析时不抛错，直接判 True
-    （fail-closed：无法重建授权就不放行）。
-    """
-    if not events:
-        return False
-    first = events[0]
-    return (
-        first.type == SESSION_STARTED
-        and "delegation_tree_id" in (first.data or {})
-    )
 
 
 current_constraint_tool_context_var: ContextVar[ConstraintToolContext | None] = (

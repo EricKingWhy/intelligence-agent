@@ -163,9 +163,11 @@ from agent_harness.session import (
 from agent_harness.session.context import (
     ConstraintToolContext,
     current_constraint_tool_context_var,
+)
+from agent_harness.session.derive import (
+    latest_direct_user_input_event,
     session_is_delegated_child,
 )
-from agent_harness.session.derive import latest_direct_user_input_event
 from agent_harness.session.event import (
     CONTEXT_PROTECTED_FACTS_EXCEEDED,
     STEER_APPLIED,

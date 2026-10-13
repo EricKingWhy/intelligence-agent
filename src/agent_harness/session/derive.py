@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 from bisect import bisect_left, bisect_right
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -1915,3 +1916,32 @@ def latest_direct_user_input_event(
             continue
         candidates.append(event)
     return max(candidates, key=lambda event: event.seq, default=None)
+
+
+# ── 委派子会话标记判据（#1085 / #1108） ────────────────────────────────
+
+def _has_delegation_marker(first_event: SessionEvent | None) -> bool:
+    """首事件是否带委派标记（`delegation_tree_id`）。
+
+    纯函数：`service._delegated_child_agent_profile`（响亮失败版）与
+    `session_is_delegated_child`（fail-closed 版）同源（#1085 修回 P3-2），
+    避免两处独立实现漂移。分歧语义保留在各自调用点：标记在而 agent_id
+    不可解析时，前者响亮 raise，后者判 True。
+    """
+    return (
+        first_event is not None
+        and first_event.type == SESSION_STARTED
+        and "delegation_tree_id" in (first_event.data or {})
+    )
+
+
+def session_is_delegated_child(events: Sequence[SessionEvent]) -> bool:
+    """判定会话是否为委派子会话（#1085 执行期兜底用）。
+
+    标记定义见 `_has_delegation_marker`。与
+    `service._delegated_child_agent_profile` 不同：标记存在但 agent_id
+    不可解析时不抛错，直接判 True（fail-closed：无法重建授权就不放行）。
+    """
+    if not events:
+        return False
+    return _has_delegation_marker(events[0])

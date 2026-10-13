@@ -123,6 +123,7 @@ from agent_harness.session.derive import (
     KIND_STEER,
     PROGRESS_CONFIRM_ORIGIN,
     UndeliveredInput,
+    _has_delegation_marker,
     collect_dangling,
     derive_protected_facts,
     detect_dangling,
@@ -435,9 +436,10 @@ def _delegated_child_agent_profile(events: list) -> str | None:
     （ADR-0048 残余 16 的红线：放开恢复入口必须与授权重建一起成立）。
     """
     first = events[0] if events else None
-    if first is None or first.type != SESSION_STARTED:
-        return None
-    if "delegation_tree_id" not in (first.data or {}):
+    # 委派标记判据与 `derive.session_is_delegated_child` 同源（#1085 修回 P3-2）；
+    # 分歧语义保留：标记在而 agent_id 不可解析时这里响亮失败（fail-closed 的
+    # 另一面：无法按子会话自己的 spec 重建授权，就不放行恢复）。
+    if first is None or not _has_delegation_marker(first):
         return None
     agent_id = first.agent_id
     if agent_id is None or agent_id == "main" or agent_id not in BUILTIN_PROFILES:
@@ -1932,6 +1934,8 @@ class SessionService:
                     session_id, child_profile, amend.agent_profile,
                 )
             amend = replace(amend or AmendOptions(), agent_profile=child_profile)
+        # #1085 修回（P4-2）：具名布尔——`child_profile` 非空即委派子会话。
+        is_delegated_child = child_profile is not None
         # local fuse（#308）：位置在只读前置检查之后、`Session.resume` 追加事件之前——
         # 被拒请求不写 session/resumed、不建目录。
         fuse = resolve_local_fuse(
@@ -2294,11 +2298,11 @@ class SessionService:
                 workspace=workspace,
                 max_agent_turns=fuse.max_agent_turns,
                 # #1085（#663 AC01）：委派子会话恢复时不重建约束工具入口。
-                # `child_profile` 非空即委派子会话（上游 #372 已按其 AgentSpec
-                # 重建收窄工具面）；约束工具只属于直接服务用户的根会话。
-                include_constraint_tools=child_profile is None,
+                # 约束工具只属于直接服务用户的根会话（上游 #372 已按子会话
+                # 自己的 AgentSpec 重建收窄工具面）。
+                include_constraint_tools=not is_delegated_child,
                 include_constraint_resolution_tool=(
-                    include_constraint_resolution_tool and child_profile is None
+                    include_constraint_resolution_tool and not is_delegated_child
                 ),
                 permission_mode=permission_mode,
                 approval_callback=approval_callback,
