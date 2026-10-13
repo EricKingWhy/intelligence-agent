@@ -19,6 +19,7 @@ import { onTokenChange } from '../lib/auth';
 import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
+import type { Ownership } from '../lib/ownership';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
@@ -46,8 +47,7 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
-  /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
+  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;  /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
   onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
   /** #825（MM-04）：**当前会话 id**——附图上传端点是 per-session 的
@@ -55,6 +55,10 @@ interface Props {
    *  （`null` = 新建态 → 入口禁用并说明原因，而不是让用户传到一个不存在的会话下）。
    *  会话切换时草稿清空并中止在途上传（见 `hooks/useDraftAttachments.ts`）。 */
   sessionId?: string | null;
+  /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
+   *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
+   *  本组件只渲染文案。`null`/缺省 = 不渲染 chip（无语境可显形，不编字面值）。 */
+  ownership?: Ownership | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
@@ -122,6 +126,7 @@ export const Composer = memo(function Composer({
   onSubmit,
   onSteer,
   sessionId = null,
+  ownership = null,
   onCancel,
   presetTask,
   models = [],
@@ -699,6 +704,18 @@ export const Composer = memo(function Composer({
             >
               <X size={12} />
             </button>
+          </div>
+        )}
+        {/* #1028 AC2：常驻归属 chip——把「当前会话在哪个项目 / 哪个 cwd」显形。
+            归属由后端按 cwd 精确相等判定（前端不比对，见 lib/ownership.ts）；未归属
+            时本 chip 就是那条「你不在任何项目里」的警示。 */}
+        {ownership !== null && (
+          <div
+            className={`composer-owner-chip composer-owner-chip-${ownership.kind}`}
+            role="note"
+            title={ownership.title}
+          >
+            {ownership.label}
           </div>
         )}
         <textarea

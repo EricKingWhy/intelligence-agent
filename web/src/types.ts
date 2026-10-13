@@ -716,6 +716,15 @@ export interface ConversationState {
    *  后端 POST，成功后**重载该会话事件**让本字段重投影（不做乐观本地态）；新会话时才把
    *  本地选择当创建意图发出去。 */
   session_permission_mode: string | null;
+  /** 本会话的 **cwd 锚**（`session/started.data.cwd`，与 `permission_mode` 同级；
+   *  WS-1 / #151 的写侧，本字段是 Web 侧的读侧）。
+   *
+   *  归属 chip（#1028）的数据源：会话 cwd 与项目路径 canonical 精确相等是成员规则，
+   *  把它显形出来，用户才知道当前会话是否落在某个已注册项目里。与
+   *  `session_permission_mode` 同一「**只认第一条带值的 `session/started`**」口径——
+   *  cwd 是创建期定值、写后不可变（`session/cwd.py`），重放/迟到重复投递不得改写。
+   *  未声明（老日志 / 事件窗口从中间开始）→ null = "未知"，不编字面值冒充。 */
+  session_cwd: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *

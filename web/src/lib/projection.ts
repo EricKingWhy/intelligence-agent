@@ -186,6 +186,7 @@ export function initConversation(session_id: string): ConversationState {
     approval_decisions: [],
     permission_policy: null,
     session_permission_mode: null,
+    session_cwd: null,
     events: [],
     // ADR-0037 D2：append 计数初值 0（与 projectHistory 的空历史产物一致）。
     eventsVersion: 0,
@@ -1141,24 +1142,36 @@ function projectOperationReconcileRequired(state: ConversationState, event: Agen
 }
 
 /** `session/started`（会话第一条事件）：`started_data` 是会话级初始配置的**加法槽**
- *  （T7 #137）。今天这里只取 F15 #234 落进来的权限档（`permission_mode`）。
+ *  （T7 #137）。今天这里取两个创建期定值：F15 #234 落进来的权限档
+ *  （`permission_mode`）与 WS-1 / #151 的 cwd 锚（`cwd`，#1028 的归属 chip 读侧）。
  *
- *  **只认第一个带值的 `session/started`**：started 只声明**创建时**那一档，会话内改档走
- *  `permission/changed`（F18-B #283 起，那边「最后一条胜」）——所以重放 /
+ *  **逐字段只认第一个带值的 `session/started`**：这些键都是**创建时**声明、写后不可变
+ *  （会话内改档走 `permission/changed`，F18-B #283 起那边「最后一条胜」）——所以重放 /
  *  迟到重复投递都不得让后来的值改写先到的（与后端 `approval.py::declared_permission_mode`
- *  同一规矩——那边也是在第一条 started 上取键，缺键即 None）。实现按"已非 null 即早退"
- *  达成这一点（"没带键"读作"没声明"，所以脏日志里**后**一条仍可声明：比后端"只在第一条
- *  上取键"宽一格，为这个不可达分支不再多存一个 seen 标志——判据由下方单测钉住）；
+ *  同一规矩——那边也是在第一条 started 上取键，缺键即 None）。实现按"该字段已非 null
+ *  即不再收"达成这一点（"没带键"读作"没声明"，所以脏日志里**后**一条仍可声明：比后端
+ *  "只在第一条上取键"宽一格，为这个不可达分支不再多存 seen 标志——判据由下方单测钉住）；
  *  今天每会话恰好一条 started（`session.py` 的 `Session.start` 只 append 一次），
  *  分叉 child 也是自带继承值而非复用父的 started。值不是非空字符串（老日志没有这个
- *  键、或日志被手改）→ 保持 null = "未声明"，不编默认档。
+ *  键、或日志被手改）→ 保持 null = "未声明"，不编默认值。
  *
- *  注意它**不是** `permission_policy`：后者是审批请求到达时 ToolExecutor 实际用的阈值，
- *  两者可以合法地不同（#236）。 */
+ *  注意 `permission_mode` 它**不是** `permission_policy`：后者是审批请求到达时
+ *  ToolExecutor 实际用的阈值，两者可以合法地不同（#236）。 */
 function projectSessionStarted(state: ConversationState, event: AgentEvent): void {
-  if (state.session_permission_mode !== null) return;
+  // 逐字段「只认第一条带值的 started」（不是整条事件早退）：两个键各自独立——
+  // 一条 started 声明了 permission_mode 却没带 cwd（或反之）时，不能因为其中一个
+  // 已定值就丢掉另一个键的首次声明。这也让下面 cwd 的「写后不可变」与 #236 的
+  // 「创建声明是定值」共用同一句判据，而不是各写一份。
   const mode = event.data.permission_mode;
-  if (typeof mode === 'string' && mode) state.session_permission_mode = mode;
+  if (state.session_permission_mode === null && typeof mode === 'string' && mode) {
+    state.session_permission_mode = mode;
+  }
+  // #1028：cwd 锚（归属 chip 的数据源，WS-1 / #151 的读侧）。非空字符串才收，
+  // 否则保持 null = "未声明"（老日志 / 脏值不制造假路径）。
+  const cwd = event.data.cwd;
+  if (state.session_cwd === null && typeof cwd === 'string' && cwd) {
+    state.session_cwd = cwd;
+  }
 }
 
 /** F18-B（#283）：`permission/changed` —— 会话内改档的 durable 事实（ADR-0041 D2）。

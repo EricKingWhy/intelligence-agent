@@ -654,6 +654,31 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   max-width: 100%;
   opacity: 0.85;
 }
+/* #1028：未归属会话的 cwd 标注（AC3 的归属警示载体）。用警告色与「未分组」区
+ * 一同说明"这个会话不属于任何已注册项目"——比 meta 更显眼，因为它是用户需要
+ * 据此判断"agent 知不知道项目在哪"的一条事实。长路径截断，完整值进 title。 */
+.session-item-owner {
+  display: block;
+  margin-top: 3px;
+  padding: 0 5px;
+  max-width: 100%;
+  border: 1px solid var(--color-warning, #d97706);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-warning, #d97706);
+  background: transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* #1028：被选中的项目行（= 通用「新建会话」会继承其 cwd 的项目语境）。
+ * 只加一层低对比底色——侧栏是 chrome 面，选中态不能比工作区更响。 */
+.rail-project-toggle.project-active {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--text-primary);
+}
 
 /* ═══ WS-5 / #155：项目 → 会话层级 + 未分组区 ═══
  *
@@ -8013,6 +8038,31 @@ button.json-row {
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
   color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
+}
+/* #1028 AC2：composer 区常驻归属 chip。归属某项目 → 中性/强调色；未归属 → 警告色
+ * （警示载体：用户据此知道当前会话不在任何项目里）。长路径截断，完整值进 title。 */
+.composer-owner-chip {
+  margin: var(--space-sm) var(--space-lg) 0;
+  padding: 1px var(--space-sm);
+  max-width: 100%;
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: var(--surface-2, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-owner-chip-project {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--border-subtle));
+  color: color-mix(in srgb, var(--color-accent) 55%, var(--text-primary));
+}
+.composer-owner-chip-ungrouped {
+  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--border-subtle));
+  color: color-mix(in srgb, var(--color-warning) 55%, var(--text-primary));
 }
 /* #1027 兜底提示的文本（与 .composer-attach-error-text 同一版式语言）。 */
 .composer-attach-dropped-text {
