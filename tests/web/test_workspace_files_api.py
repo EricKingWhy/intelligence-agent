@@ -152,6 +152,31 @@ def test_lists_files_as_sorted_relative_posix_paths(tmp_path: Path) -> None:
     assert body["truncated"] is False
 
 
+@pytest.fixture
+def windows_mxc_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.name != "nt":
+        return
+    configured = os.environ.get("IA_MXC_EXECUTABLE")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(__file__).resolve().parents[2]
+        / "desktop"
+        / "node_modules"
+        / "@microsoft"
+        / "mxc-sdk"
+        / "bin"
+        / "x64"
+        / "wxc-exec.exe",
+    ]
+    executable = next((path for path in candidates if path and path.is_file()), None)
+    if executable is None:
+        pytest.skip("install @microsoft/mxc-sdk or set IA_MXC_EXECUTABLE")
+    if not (executable.parent / "mxc_ffi.dll").is_file():
+        pytest.fail(f"MXC runtime DLL is missing beside {executable}")
+    monkeypatch.setenv("IA_MXC_EXECUTABLE", str(executable))
+
+
+@pytest.mark.usefixtures("windows_mxc_runtime")
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
 def test_workspace_file_routes_use_windows_psec_sandbox_handles(
     tmp_path: Path,
