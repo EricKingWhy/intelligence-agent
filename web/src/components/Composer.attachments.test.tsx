@@ -383,6 +383,23 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     expect(container.querySelector('.composer-attach-hint')).toBeNull();
   });
 
+  it('P4-2：无会话 × supports_vision=false——视觉门禁优先，懒建不触发', async () => {
+    const ensureSession = vi.fn(async () => 'sess-new');
+    paint({ sessionId: null, models: visionOff, onEnsureSession: ensureSession });
+    // 「会话缺失」不再是门禁（#1015），但模型不支持视觉仍是：入口禁用 + 可见原因。
+    expect(attachButton().disabled).toBe(true);
+    expect(container.querySelector('.composer-attach-hint')?.textContent).toContain(
+      'supports_vision=false',
+    );
+    // 粘贴不被接管（入口被门禁挡住时必须放行原生粘贴），懒建不触发、零上传。
+    const event = pasteFiles(textarea(), [imageFile('a.png')]);
+    expect(event.defaultPrevented).toBe(false);
+    await act(async () => {});
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(cards()).toHaveLength(0);
+  });
+
   it('无会话（新建态）：入口可用；首次投喂触发懒建会话并上传到新会话（#1015）', async () => {
     const ensureSession = vi.fn(async () => 'sess-new');
     paint({ sessionId: null, onEnsureSession: ensureSession });
@@ -411,7 +428,14 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
       dispatchDrag('drop', [imageFile('b.png')]);
     });
     await act(async () => {});
-    // 懒建是唯一充分原因：它失败，三条通道（粘贴/拖放）都零上传。
+    // F3：选择器通道同样——懒建失败 ⇒ 零上传（阴性读数三条通道全覆盖）。
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    setInputFiles(input, [imageFile('c.png')]);
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+    // 懒建是唯一充分原因：它失败，三条通道（粘贴/拖放/选择器）都零上传。
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(cards()).toHaveLength(0);
     // 失败可见（AC3 同一通道），不留"永远上传中"卡片。

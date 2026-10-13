@@ -649,19 +649,38 @@ export default function App() {
     if (selectedId === null) ensuredIdRef.current = null;
   }, [selectedId]);
 
-  /** 新建态首次投喂附件时懒建会话——会话身份**唯一**能变的地方
-   *  （与 `selectSession` / `submitTask` 并列）。resolve 会话 id；
+  /** 新建态首次投喂附件时懒建会话——懒建入口的**唯一收口**，与既有两条身份变更
+   *  路径（`selectSession` / `submitTask`）并列。resolve 会话 id；
    *  失败（非 2xx）resolve `null`，由调用方（hook）给用户可见反馈。
-   *  并发调用共享同一个在途 promise（in-flight 去重）。 */
+   *  并发调用共享同一个在途 promise（in-flight 去重）。
+   *
+   *  P3-1（已知代价，不修）：在途懒建撞上用户点「新建会话」/ 切到另一会话——
+   *  入口处只判一次 `selectedId`，POST 落定后无条件 `selectSession(新 id)`（无取
+   *  消路径）：用户会被带回这个刚建出的会话。自洽点（Correctness 审查结论）：
+   *  草稿始终跟随 `ensureSession` 返回的 sid 入列（不用闭包的 `sessionId`），
+   *  不会错挂到用户切去的会话上；代价是途中那次会话切换会被懒建落定「抢回」。
+   *  根治需要可取消的懒建（会话删除语义），超出本票 scope。 */
   const ensureSession = useCallback(async (): Promise<string | null> => {
     if (selectedId) return selectedId;
     if (ensuringRef.current) return ensuringRef.current;
     const pending = (async (): Promise<string | null> => {
       try {
-        // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形
-        // （`auto_approve: true` 恒送 + 项目 cwd），两种新建路径不造出不同语义的会话。
+        // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形——
+        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档 + 预算
+        // 草稿（F1：否则懒建出的会话静默回落到后端默认档，与发文本建出的会话
+        // 语义不同——权限档是 Runtime 边界（不变量 #11），不能静默丢）。空值丢
+        // 弃由 `api.ts buildBody` 单一执行（见 amend.ts 顶部契约说明）。
+        // `model` / `agent_profile` / `reasoning_effort` 不在这里：它们随随后
+        // 首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields`），懒建只
+        // 负责把会话身份先建出来。
         const created = await createEmptySession({
           auto_approve: true,
+          permission_mode: composerControls.permissionMode ?? undefined,
+          budget: toCreateBudget({
+            turns: budgetRunTurnsDraft,
+            totalTokens: budgetRunTokensDraft,
+            deadlineAt: budgetRunDeadlineDraft,
+          }),
           ...(activeProject ? { cwd: activeProject.path } : {}),
         });
         ensuredIdRef.current = created.sessionId;
@@ -676,7 +695,7 @@ export default function App() {
     })();
     ensuringRef.current = pending;
     return pending;
-  }, [selectedId, selectSession, refreshSessions, activeProject]);
+  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
 
   const handleSubmit = useCallback(
     (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {

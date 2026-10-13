@@ -76,6 +76,20 @@ function laterFrames(): FrameSpec[] {
   ];
 }
 
+/** 在页面里构造一次**真**拖放（`installDocumentDropEvents` 挂在 document 上；
+ *  手法同 `image-attachments.spec.ts::dragInPage` 的 drop 相，避免各自复制后漂移）。 */
+async function dropPng(page: Page, name: string): Promise<void> {
+  await page.evaluate((fileName) => {
+    // M-20 起前端按字节探测图片格式（fail-closed）：替身必须带真实 PNG 魔数。
+    const payload = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    const dt = new DataTransfer();
+    dt.items.add(new File([payload], fileName, { type: 'image/png' }));
+    document.dispatchEvent(
+      new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }),
+    );
+  }, name);
+}
+
 test('新建态粘贴 → 懒建恰好一个会话 → 上传打到新会话 → 图文同发 → 消息内渲染', async ({
   page,
 }) => {
@@ -245,4 +259,143 @@ test('懒建失败：可见错误、无上传、纯文本仍可发（#1015 消�
   // 新会话建出来、回答渲染出来 = 发送链路没被懒建失败卡死。
   await expect(page.locator('.session-item')).toHaveCount(1);
   await expect(page.getByText('收到')).toBeVisible({ timeout: 10_000 });
+});
+
+test('并发投喂（粘贴×2 + 拖放×1）：懒建 POST 恰好 1 次，三次上传同会话（F2/P3-2）', async ({
+  page,
+}) => {
+  const sessionPosts: string[] = [];
+  const uploadUrls: string[] = [];
+  // 闸住懒建 POST 的回执：三次投喂全部砸进同一个在途懒建，窗口确定性可控。
+  let releaseSession!: (sid: string) => void;
+  const sessionGate = new Promise<string>((resolve) => {
+    releaseSession = resolve;
+  });
+
+  const mock: ApiMock = {
+    sessions: [],
+    projects: [],
+    events: [],
+    onSessionPost: async (route) => {
+      sessionPosts.push(route.request().url());
+      const sid = await sessionGate;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ session_id: sid, permission_mode: 'workspace-write' }),
+      });
+    },
+    onAttachmentPost: async (route) => {
+      uploadUrls.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          attachment_id: ATTACHMENT_ID,
+          media_type: 'image/png',
+          bytes: PNG_3PX.length,
+          width: 3,
+          height: 3,
+          name: 'x.png',
+        }),
+      });
+    },
+  };
+  await routeApi(page, mock);
+  await page.goto('/');
+  await expect(page.locator('.empty-hero')).toContainText('暂无对话');
+
+  // 连粘贴 2 次 + 拖 1 次：不等待，全部进同一个在途懒建。
+  await pasteFiles(page, [{ name: 'a.png', type: 'image/png', bytes: PNG_3PX }]);
+  await pasteFiles(page, [{ name: 'b.png', type: 'image/png', bytes: PNG_3PX }]);
+  await dropPng(page, 'c.png');
+
+  // 会话 POST 仍只有 1 次在途（in-flight 去重），三次投喂共享它。
+  await expect.poll(() => sessionPosts.length).toBe(1);
+  releaseSession(SID);
+
+  // 三张都入栏并就绪；三次上传打到同一会话的 per-session 端点上。
+  await expect(page.locator('.composer-attach-card')).toHaveCount(3);
+  await expect(page.locator('.composer-attach-card[data-status="ready"]')).toHaveCount(3);
+  expect(sessionPosts).toHaveLength(1);
+  expect(uploadUrls).toHaveLength(3);
+  for (const url of uploadUrls) {
+    expect(url).toContain(`/api/sessions/${SID}/attachments`);
+  }
+});
+
+test('#1098：粘贴后立刻 Enter——pre-intake 窗口被拦截，不拆散；落定后图文同发', async ({
+  page,
+}) => {
+  const sessions: Record<string, unknown>[] = [];
+  const durableLog: FrameSpec[] = [];
+  const sessionPosts: string[] = [];
+  let messagesBody: Record<string, unknown> | null = null;
+  // 闸住懒建 POST：Enter 发生在草稿未入列的 pre-intake 窗口内，定时确定性可控。
+  let releaseSession!: (sid: string) => void;
+  const sessionGate = new Promise<string>((resolve) => {
+    releaseSession = resolve;
+  });
+
+  const mock: ApiMock = {
+    sessions,
+    projects: [],
+    events: durableLog,
+    onSessionPost: async (route) => {
+      sessionPosts.push(route.request().url());
+      const sid = await sessionGate;
+      sessions.unshift(sessionRow(sid, null, { event_count: 1, first_user_message: null }));
+      durableLog.push({ type: 'session/started', seq: 1, session_id: sid, time: T });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ session_id: sid, permission_mode: 'workspace-write' }),
+      });
+    },
+    onAttachmentPost: async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          attachment_id: ATTACHMENT_ID,
+          media_type: 'image/png',
+          bytes: PNG_3PX.length,
+          width: 3,
+          height: 3,
+          name: 'shot.png',
+        }),
+      });
+    },
+    onMessagesPost: (route) => {
+      messagesBody = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+      const later = laterFrames();
+      durableLog.push(...later);
+      return fulfillSse(route, later);
+    },
+  };
+  await routeApi(page, mock);
+  await page.goto('/');
+  await expect(page.locator('.empty-hero')).toContainText('暂无对话');
+
+  await pasteFiles(page, [{ name: 'shot.png', type: 'image/png', bytes: PNG_3PX }]);
+  // pre-intake 窗口：门禁可见（复用 #1027 的 SEND_BLOCKED_REASON 体系）。
+  const blocked = page.locator('.composer-send-blocked');
+  await expect(blocked).toContainText('附件上传中，请等待完成');
+
+  // 粘贴后立刻 Enter：被拦截——无 /messages 请求，文本留在输入框，不拆散。
+  await page.getByLabel('Agent 任务').fill('看这张图');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(800);
+  expect(messagesBody).toBeNull();
+  expect(sessionPosts).toHaveLength(1);
+  expect(await page.getByLabel('Agent 任务').inputValue()).toBe('看这张图');
+
+  // 放行懒建 → 上传就绪 → 门禁解除 → Enter 图文同发。
+  releaseSession(SID);
+  await expect(page.locator('.composer-attach-card[data-status="ready"]')).toHaveCount(1);
+  await expect(blocked).toHaveCount(0);
+  await page.keyboard.press('Enter');
+  await expect.poll(() => messagesBody, { timeout: 10_000 }).not.toBeNull();
+  expect(messagesBody?.['attachments']).toEqual([ATTACHMENT_ID]);
+  expect(sessionPosts).toHaveLength(1);
 });

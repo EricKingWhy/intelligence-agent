@@ -53,6 +53,10 @@ export interface DraftAttachmentsApi {
   items: DraftAttachment[];
   /** 可进发送请求的引用 id，顺序 = 附图顺序。 */
   readyIds: string[];
+  /** 已接受、尚未入列的 intake 文件数（pre-intake 窗口，#1098）：`ensureSession`
+   *  在途或字节探测未完成时草稿栏还是空的——发送门禁必须把这段窗口也钉住，
+   *  否则 Enter 会把图文静默拆散（#1027 的门禁只盖了「已入列 uploading」）。 */
+  intakePendingCount: number;
   /** 最近一次 intake 被拒的原因（AC3：常驻就地显示，直到用户关掉或下次 intake 成功）。 */
   intakeError: string | null;
   addFiles: (files: readonly File[], directories?: ReadonlySet<File>) => void;
@@ -76,6 +80,10 @@ export function useDraftAttachments(
   const itemsRef = useRef<DraftAttachment[]>([]);
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const errorRef = useRef<string | null>(null);
+  /** pre-intake 计数（#1098）：`addFiles` 的同步前缀里按投喂文件数累加，草稿入列
+   *  （或 intake 终止）时扣减。变更走 `bump()` 触发重渲染——`submit` 的 `sendBlocked`
+   *  读的就是这个值，Enter 事件到来前它一定是最新的。 */
+  const intakePendingRef = useRef(0);
   /** 在途上传句柄（按草稿 id）：移除草稿 / 换会话 / 卸载时中止，避免孤儿上传。 */
   const uploadsRef = useRef(new Map<string, AttachmentUpload>());
 
@@ -145,48 +153,60 @@ export function useDraftAttachments(
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
       void (async () => {
-        // #1015：`sessionId === null` 的旧静默守卫已移除，替换为懒建。
-        // 新建态首次投喂 → `ensureSession()` 建出真实会话（App 侧单例 + in-flight
-        // 去重），拿到 id 后草稿按新身份入列上传（DSH `rebindDraftFiles` 的 ADAPT，
-        // 见模块头）。并发投喂共享同一个在途懒建，不会建出两个会话。
-        let sid = sessionId;
-        if (sid === null) {
-          sid = await ensureSession();
+        // #1098：pre-intake 计数——同步前缀（首个 `await` 之前）在事件派发里同步
+        // 执行：先把投喂文件数记入，`bump()` 让 Composer 的 `sendBlocked` 在下
+        // 一个事件（如紧随的 Enter）到来前就看到它。`finally` 里扣减：与 `commit`
+        // 同一同步块（先入列再清 pending），无事件可交错——`sendBlocked` 不可能
+        // 读到「items 旧 + pending 0」的双零窗口。
+        intakePendingRef.current += files.length;
+        bump();
+        try {
+          // #1015：`sessionId === null` 的旧静默守卫已移除，替换为懒建。
+          // 新建态首次投喂 → `ensureSession()` 建出真实会话（App 侧单例 + in-flight
+          // 去重），拿到 id 后草稿按新身份入列上传（DSH `rebindDraftFiles` 的 ADAPT，
+          // 见模块头）。并发投喂共享同一个在途懒建，不会建出两个会话。
+          let sid = sessionId;
           if (sid === null) {
-            // 懒建失败（非 2xx）：用户可见反馈（AC3 同一通道），不入栏——
-            // 绝不留下"永远上传中"的卡片；纯文本仍可发（AC4）。
-            setIntakeError('会话创建失败，图片未能上传（可稍后重试，纯文本仍可发送）');
+            sid = await ensureSession();
+            if (sid === null) {
+              // 懒建失败（非 2xx）：用户可见反馈（AC3 同一通道），不入栏——
+              // 绝不留下"永远上传中"的卡片；纯文本仍可发（AC4）。
+              setIntakeError('会话创建失败，图片未能上传（可稍后重试，纯文本仍可发送）');
+              return;
+            }
+          }
+          // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
+          const candidates = files.filter((file) => !directories?.has(file));
+          if (candidates.length === 0) return;
+          // 字节探测先行（#937 / M-20）：`file.type` 可伪造，预检的「是不是图片」
+          // 以文件头魔数为准（对齐后端 `probe.py`）；探测后 `partitionIntake` 仍
+          // 用默认 limits（`getImageLimits()`，M-08 起权威在服务端下发）。
+          const probed = new Map(
+            await Promise.all(
+              candidates.map(async (file) => [file, await detectImageMediaType(file)] as const),
+            ),
+          );
+          const existing = itemsRef.current.map((item) => ({ bytes: item.file.size }));
+          const outcome = partitionIntake(candidates, existing, undefined, probed);
+          if (outcome.error !== null || outcome.accepted.length === 0) {
+            setIntakeError(outcome.error);
             return;
           }
+          setIntakeError(null);
+          const drafts: DraftAttachment[] = outcome.accepted.map((file) => ({
+            id: `draft-${++draftSeq}`,
+            file,
+            status: 'uploading' as const,
+            loaded: 0,
+            total: file.size,
+            thumb: null,
+          }));
+          commit([...itemsRef.current, ...drafts]);
+          for (const draft of drafts) startUpload(draft.id, draft.file, sid);
+        } finally {
+          intakePendingRef.current -= files.length;
+          bump();
         }
-        // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
-        const candidates = files.filter((file) => !directories?.has(file));
-        if (candidates.length === 0) return;
-        // 字节探测先行（#937 / M-20）：`file.type` 可伪造，预检的「是不是图片」
-        // 以文件头魔数为准（对齐后端 `probe.py`）；探测后 `partitionIntake` 仍
-        // 用默认 limits（`getImageLimits()`，M-08 起权威在服务端下发）。
-        const probed = new Map(
-          await Promise.all(
-            candidates.map(async (file) => [file, await detectImageMediaType(file)] as const),
-          ),
-        );
-        const existing = itemsRef.current.map((item) => ({ bytes: item.file.size }));
-        const outcome = partitionIntake(candidates, existing, undefined, probed);
-        if (outcome.error !== null || outcome.accepted.length === 0) {
-          setIntakeError(outcome.error);
-          return;
-        }
-        setIntakeError(null);
-        const drafts: DraftAttachment[] = outcome.accepted.map((file) => ({
-          id: `draft-${++draftSeq}`,
-          file,
-          status: 'uploading' as const,
-          loaded: 0,
-          total: file.size,
-          thumb: null,
-        }));
-        commit([...itemsRef.current, ...drafts]);
-        for (const draft of drafts) startUpload(draft.id, draft.file, sid);
       })();
     },
     [sessionId, commit, setIntakeError, startUpload, ensureSession],
@@ -232,6 +252,7 @@ export function useDraftAttachments(
     readyIds: items.flatMap((item) =>
       item.status === 'ready' && item.receipt ? [item.receipt.attachment_id] : [],
     ),
+    intakePendingCount: intakePendingRef.current,
     intakeError: errorRef.current,
     addFiles,
     remove,

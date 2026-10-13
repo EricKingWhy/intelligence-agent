@@ -188,7 +188,18 @@ export const Composer = memo(function Composer({
   // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
   // **不许裸加时长**：有在途上传时发送按钮禁用 + Ctrl+Enter 拦截，界面常驻阻断提示。
   const uploadingCount = attachments.items.filter((item) => item.status === 'uploading').length;
-  const sendBlocked = uploadingCount > 0;
+  // #1098：pre-intake 窗口（`ensureSession` 在途 / 字节探测未完成、草稿未入列）
+  // 同样阻断——只钉「已入列 uploading」，粘贴后立刻 Enter 会把图文静默拆散
+  // （图留在草稿栏跟下一条消息走）。AC4 不变：intake 失败（懒建失败/格式拒收）
+  // 走 hook 的 `finally` 清 pending，纯文本照发。
+  const intakePendingCount = attachments.intakePendingCount;
+  const sendBlocked = uploadingCount > 0 || intakePendingCount > 0;
+  /** 阻断原因文案（#1027 体系 + #1098 pre-intake）：界面常驻，键盘用户被拦截时
+   *  读到的就是它；`title` 与提示同源，不对着按钮猜。 */
+  const sendBlockedReason =
+    uploadingCount > 0
+      ? `${SEND_BLOCKED_REASON}${uploadingCount > 1 ? `（${uploadingCount} 张）` : ''}`
+      : `${SEND_BLOCKED_REASON}（${intakePendingCount} 张准备中）`;
 
   // #1027：换会话即清兜底提示——草稿随会话清空（hook 的换会话 effect），提示是
   // 上次发送的结论，不跟去新会话（否则在新会话里误报"附件未随消息发出"）。
@@ -695,9 +706,7 @@ export const Composer = memo(function Composer({
             常驻到上传落定——键盘用户按 Ctrl+Enter 被拦截时，读到的就是这一条。 */}
         {sendBlocked && (
           <div className="composer-send-blocked" role="status">
-            {uploadingCount > 1
-              ? `${SEND_BLOCKED_REASON}（${uploadingCount} 张）`
-              : SEND_BLOCKED_REASON}
+            {sendBlockedReason}
           </div>
         )}
         {/* #1027 兜底：发送时被剔除的未就绪附件，一次性可见提示（可关闭，不常驻）。 */}
@@ -926,7 +935,7 @@ export const Composer = memo(function Composer({
                 onClick={() => submit('queue')}
                 disabled={locked || !value.trim() || sendBlocked}
                 aria-label="发送"
-                title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
               >
                 <ArrowUp size={16} />
               </button>
@@ -940,7 +949,7 @@ export const Composer = memo(function Composer({
               onClick={() => submit('queue')}
               disabled={locked || !value.trim() || sendBlocked}
               aria-label="发送"
-              title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
             >
               <ArrowUp size={16} />
             </button>
