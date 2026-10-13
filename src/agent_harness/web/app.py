@@ -93,6 +93,7 @@ from agent_harness.model.config import (
     ConfigError,
     ModelConfig,
     UnsupportedReasoningEffort,
+    warn_unadopted_catalog_entries,
 )
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
@@ -2091,6 +2092,10 @@ def create_app(
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
+        # #1094：启动期反馈——AGENT_MODELS 中因 provider 与已知链不一致而不会被采纳的
+        # 条目发一条 warning（条目名 + 原因）。只反馈，不阻断启动；坏 catalog 由本函数
+        # 记 warning 后返回，既有响亮 ConfigError 仍发生在实际使用路径。
+        warn_unadopted_catalog_entries(settings)
         # ARCH-7（#150）：启动期单实例锁。同一 session root 的第二个进程必须
         # 响亮失败——跨进程同时 append 会话 JSONL 会产出重复 seq / 交错写，
         # RunManager 的 run 归属共识也只在进程内有效；CLI 与 Web 并发同样被
