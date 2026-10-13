@@ -22,7 +22,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AnyMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.assembly import build_runtime, initialize_stores, recovery_stores
