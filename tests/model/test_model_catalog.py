@@ -7,6 +7,8 @@ fallback 链语义不动（ADR-0014）；GET /api/models 列出可选模型（�
 from __future__ import annotations
 
 import json
+import logging
+from typing import Any, ClassVar
 
 import pytest
 
@@ -19,6 +21,8 @@ from agent_harness.model.config import (
     find_catalog_entry,
     model_supports_vision,
     parse_model_catalog,
+    unadopted_catalog_entries,
+    warn_unadopted_catalog_entries,
 )
 
 
@@ -254,3 +258,133 @@ class TestDefaultEntryResolution:
     def test_unknown_model_still_raises(self):
         with pytest.raises(ConfigError):
             ModelConfig.resolve_selection(self._settings(), "definitely-not-a-model")
+
+
+class TestUnadoptedCatalogWarning:
+    """#1094：AGENT_MODELS 条目因 provider 与已知链目标不一致，导致默认链的
+    ``find_catalog_entry`` 静默跳过它（其 reasoning_effort 等声明不生效）时，
+    启动/装配期给出 warning。只加反馈——匹配语义（按 provider 精确匹配）不改，
+    warning 不阻断启动，非法条目仍走既有 ConfigError 响亮失败。
+    """
+
+    _EFFORT: ClassVar[dict[str, Any]] = {
+        "supported": ["minimal", "standard", "deep"],
+        "default": "standard",
+        "wire_mapping": {"minimal": "low", "standard": "medium", "deep": "high"},
+    }
+
+    @staticmethod
+    def _settings(agent_models, **kwargs) -> Settings:
+        return Settings(
+            _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-default",
+            model_provider="mimo", model_name="mimo-v2.6-flash",
+            agent_models=json.dumps(agent_models), **kwargs,
+        )
+
+    def test_provider_mismatch_entry_is_reported(self):
+        """provider 与默认链不一致、但 name 撞上默认链模型名 ⇒ 主体条目被识别。"""
+        settings = self._settings([{
+            "name": "mimo-v2.6-flash", "provider": "qwen",
+            "model_name": "mimo-v2.6-flash", "reasoning_effort": self._EFFORT,
+        }])
+        assert [e.name for e in unadopted_catalog_entries(settings)] == [
+            "mimo-v2.6-flash"
+        ]
+
+    def test_provider_mismatch_entry_emits_warning(self, caplog):
+        settings = self._settings([{
+            "name": "mimo-v2.6-flash", "provider": "qwen",
+            "model_name": "mimo-v2.6-flash", "reasoning_effort": self._EFFORT,
+        }])
+        with caplog.at_level(logging.WARNING, logger="agent_harness.model"):
+            warn_unadopted_catalog_entries(settings)
+        records = [r for r in caplog.records if r.name == "agent_harness.model"]
+        assert any("mimo-v2.6-flash" in r.getMessage() for r in records), caplog.text
+        assert any("provider" in r.getMessage() for r in records)
+
+    def test_provider_match_is_silent(self, caplog):
+        """provider 改一致 ⇒ 条目被采纳，无 warning。"""
+        settings = self._settings([{
+            "name": "mimo-v2.6-flash", "provider": "mimo",
+            "model_name": "mimo-v2.6-flash", "reasoning_effort": self._EFFORT,
+        }])
+        assert unadopted_catalog_entries(settings) == []
+        with caplog.at_level(logging.WARNING, logger="agent_harness.model"):
+            warn_unadopted_catalog_entries(settings)
+        assert [r for r in caplog.records if r.name == "agent_harness.model"] == []
+
+    def test_provider_match_adopts_declaration(self):
+        """provider 一致 ⇒ find_catalog_entry 采纳声明（/api/models metadata_source 路径）。"""
+        settings = self._settings([{
+            "name": "mimo-v2.6-flash", "provider": "mimo",
+            "model_name": "mimo-v2.6-flash", "reasoning_effort": self._EFFORT,
+        }])
+        entry = find_catalog_entry(settings, "mimo", "mimo-v2.6-flash")
+        assert entry is not None
+        assert entry.declared_capabilities()["reasoning_effort"] == self._EFFORT
+
+    def test_unrelated_entries_are_not_flagged(self):
+        """不同 provider/model 的合法可选模型（非默认链影子）不误报。"""
+        settings = self._settings([
+            {"name": "qwen-plus", "provider": "qwen", "model_name": "qwen-plus"},
+            {"name": "glm-5.3-flash", "provider": "senseaudio",
+             "model_name": "glm-5.3-flash"},
+        ])
+        assert unadopted_catalog_entries(settings) == []
+
+    def test_shadow_by_upstream_model_name_is_reported(self):
+        """条目 id 与默认链模型名不同、但 model_name 撞上 ⇒ 同样识别。"""
+        settings = self._settings([{
+            "name": "my-mimo", "provider": "qwen",
+            "model_name": "mimo-v2.6-flash",
+        }])
+        assert [e.name for e in unadopted_catalog_entries(settings)] == ["my-mimo"]
+
+    def test_fallback_chain_target_is_guarded(self):
+        """已知链包含 fallback：影子命中 fallback 模型名时同样识别。"""
+        settings = self._settings(
+            [{"name": "cline-pass/x", "provider": "qwen", "model_name": "whatever"}],
+            fallback_model_provider="Cline", fallback_model_name="cline-pass/x",
+            fallback_model_api_key="sk-fb",
+        )
+        assert [e.name for e in unadopted_catalog_entries(settings)] == ["cline-pass/x"]
+
+    def test_entry_adopted_by_primary_is_not_flagged_for_fallback_shadow(self):
+        """条目已被 primary 链采纳（provider 与 primary 一致）时，即使它的名字同时
+        撞上 provider 不同的 fallback 目标，也不误报——否则警告会建议改 provider，
+        改了反而让 primary 链丢掉这条声明。"""
+        settings = self._settings(
+            [{
+                "name": "mimo-v2.6-flash", "provider": "mimo",
+                "model_name": "mimo-v2.6-flash", "reasoning_effort": self._EFFORT,
+            }],
+            fallback_model_provider="qwen", fallback_model_name="mimo-v2.6-flash",
+            fallback_model_api_key="sk-fb",
+        )
+        assert unadopted_catalog_entries(settings) == []
+
+    def test_illegal_entry_still_raises_configerror(self):
+        """回归：非法条目仍走既有响亮失败（不是被 warning 吞掉）。"""
+        settings = self._settings([{
+            "name": "bad", "provider": "qwen", "model_name": "bad",
+            "reasoning_effort": {
+                "supported": ["nope"], "default": "nope",
+                "wire_mapping": {"nope": "nope"},
+            },
+        }])
+        with pytest.raises(ConfigError):
+            unadopted_catalog_entries(settings)
+
+    def test_invalid_catalog_does_not_block_startup(self, caplog):
+        """启动期检查是 best-effort：坏 catalog 记 warning，不抛异常阻断启动。"""
+        settings = Settings(
+            _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-default",
+            model_provider="mimo", model_name="mimo-v2.6-flash",
+            agent_models="{not-json",
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_harness.model"):
+            warn_unadopted_catalog_entries(settings)  # not raising
+        assert any(
+            r.name == "agent_harness.model" and "AGENT_MODELS" in r.getMessage()
+            for r in caplog.records
+        )

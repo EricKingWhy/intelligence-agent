@@ -5,12 +5,15 @@ Provider 预设表是唯一允许出现厂商细节的地方。
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import SecretStr
 
 from agent_harness.config import Settings
+
+logger = logging.getLogger("agent_harness.model")
 
 
 class ConfigError(Exception):
@@ -338,6 +341,90 @@ def find_catalog_entry(
         if entry.provider == provider and entry.model_name == model_id:
             return entry
     return None
+
+
+def _known_chain_targets(settings: Settings) -> list[tuple[str, str]]:
+    """本进程会真实构造的「已知链」的 (provider, model_name) 目标（默认 primary + fallback）。
+
+    与 ``ModelConfig.from_settings`` / ``_fallback_from`` 的取用点同源：模型名缺省时
+    回落到 provider preset 的 ``model_name``；provider 未知或解析出的模型名为空则不构成
+    目标（该链本身会响亮失败，不在本反馈的责任域）。
+    """
+    targets: list[tuple[str, str]] = []
+
+    def _resolve(provider: str, model_name: str) -> tuple[str, str] | None:
+        if provider not in PROVIDER_PRESETS:
+            return None
+        resolved = model_name or PROVIDER_PRESETS[provider]["model_name"]
+        return (provider, resolved) if resolved else None
+
+    primary = _resolve(settings.model_provider, settings.model_name)
+    if primary is not None:
+        targets.append(primary)
+    fallback = _resolve(
+        settings.fallback_model_provider, settings.fallback_model_name
+    )
+    if fallback is not None:
+        targets.append(fallback)
+    return targets
+
+
+def _unadopted_catalog_entries(
+    settings: Settings,
+) -> list[tuple[ModelCatalogEntry, str, str]]:
+    """catalog 中「本会被某条链采纳、却因 provider 不一致被 find_catalog_entry 跳过」的条目。
+
+    判据与 ``find_catalog_entry`` 精确对齐：命中条件是 provider 相等且
+    ``entry.name == model_id`` 或 ``entry.model_name == model_id``（model_id 即链解析后的
+    模型名）。因此若某条目只差 provider 一项（名字 / 上游模型名与链目标相同）却被 provider
+    挡在门外，它的能力声明（如 ``reasoning_effort``）会静默失效——这正是本反馈要抓的
+    “未采纳”条目。仅 provider 或仅名字不同的合法可选模型（本来就不是该链模型）不在此列，
+    避免对正常的多模型 catalog 误报。已被任一已知链采纳的条目不在此列：例如条目
+    provider 与 primary 一致（声明已被 primary 链消费）时，即使它的名字同时撞上
+    provider 不同的 fallback 目标，也不算「未采纳」——否则会对该条目给出改 provider
+    的错误建议（改了反而丢掉 primary 链的采纳）。
+    """
+    targets = _known_chain_targets(settings)
+    unadopted: list[tuple[ModelCatalogEntry, str, str]] = []
+    for entry in parse_model_catalog(settings):
+        if any(
+            entry.provider == provider
+            and (entry.name == model_name or entry.model_name == model_name)
+            for provider, model_name in targets
+        ):
+            continue
+        for provider, model_name in targets:
+            if entry.name == model_name or entry.model_name == model_name:
+                unadopted.append((entry, provider, model_name))
+                break
+    return unadopted
+
+
+def unadopted_catalog_entries(settings: Settings) -> list[ModelCatalogEntry]:
+    """返回因 provider 与已知链不一致而未被采纳的 catalog 条目（#1094）。"""
+    return [entry for entry, _, _ in _unadopted_catalog_entries(settings)]
+
+
+def warn_unadopted_catalog_entries(settings: Settings) -> None:
+    """启动/装配期反馈：catalog 中声明了却不会被任何已知链采纳的条目发一条 warning。
+
+    只加反馈——匹配语义（按 (provider, name) 精确匹配）不改，warning 不阻断启动。
+    无效 catalog 在此记 warning 后返回（best-effort）：既有响亮 ``ConfigError`` 仍发生在
+    实际使用路径（``from_settings`` / ``/api/models`` / ``from_catalog``），启动不因此改变。
+    """
+    try:
+        unadopted = _unadopted_catalog_entries(settings)
+    except ConfigError as error:
+        logger.warning("AGENT_MODELS 未采纳条目检查跳过（配置无效）: %s", error)
+        return
+    for entry, provider, model_name in unadopted:
+        logger.warning(
+            "AGENT_MODELS 条目 %r 未被采纳：条目 provider=%r 与已知链目标 "
+            "(provider=%r, model_name=%r) 不一致——catalog 按 (provider, name) 精确匹配"
+            "会跳过该条目，其能力声明（如 reasoning_effort）不会生效。若要该链采纳它，"
+            "请把条目 provider 改为 %r。",
+            entry.name, entry.provider, provider, model_name, provider,
+        )
 
 
 class ModelConfig:
