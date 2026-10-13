@@ -277,7 +277,7 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
 | # | 残余 | 归属 | 状态 |
 | --- | --- | --- | --- |
 | ① | 闸门无「目录归属」判据：`iaProbeFound == "1"` 曾是唯一归属信号；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程 | #914 修复轮登记，**本票不动**（行为变更） | **待用户裁决（§9.1.1）** |
-| ② | `customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫：取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入 `installer-directories.nsh`） | 首轮 Axis A P3-2；**非本 diff 引入**（`installer.nsh:136-138` blame 到 `387948595`） | **另开票** |
+| ② | `customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫：取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入 `installer-directories.nsh`） | 首轮 Axis A P3-2；**非本 diff 引入**（`installer.nsh:136-138` blame 到 `387948595`） | **已另开票 [#1078](https://github.com/EricKingWhy/intelligence-agent/issues/1078)** |
 | ③ | 修后重审 F2（P4）：`windows-installer-smoke.yml` 保留一处硬编码「112」（读数记录） | 本轮修后重审 Axis A P4 / Axis B F2 | **登记不修**（理由见 §5.8 末段） |
 | ④ | 修后重审 F3（P4）：规则内联注释 / 错误信息未写明锚是「首次文本出现」 | 本轮修后重审 Axis B F3 | **登记不修**（同上） |
 
