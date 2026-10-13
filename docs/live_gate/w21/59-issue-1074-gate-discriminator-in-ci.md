@@ -152,6 +152,7 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
   收据 `docs/gate/ed9f1e0a75511f9ceae060e911b31c8d44420404.json`。
 - **收尾树（记账笔）6/6 PASS**——`7abac831`（证据 + 台账 4 行 + tracker / PHASE_STATUS / 月档）与 `fbda7108`（补 #1078 引用）各跑一次裸全量 Gate-0，均 **6/6**，`coverage` 随台账行落盘转绿；收据
   `docs/gate/7abac8310628b1670ac7d8f04a469eaf3acc80ce.json`（墙钟 50.9s）、`docs/gate/fbda71081e96bb6663852731370d01a4ca235322.json`（墙钟 27.9s），两份均 `tracked_matches_head=true`、`untracked_total=0`。
+- **同步合并树 `3b886bf3`（先回后正，§14.6）：6/6 PASS**；收据 `docs/gate/3b886bf3bc314e90480a1401cc22d44581ae752b.json`（墙钟 28.4s、`tracked_matches_head=true`）。详见 §5.9。
 - 满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据 ⇒ 机械面清零后才派两轴。
 - **为何在隔离副本里跑**：主工作树含另一条线的未提交改动（` M dev.sh`），`gate0.py` 的落盘前置会 fail-closed
   拒绝落盘（§8.7 第 3 条），而其处置建议明写「**不要** `git stash`」。副本为真仓 `git bundle` 克隆 + CI 同形依赖，
@@ -183,6 +184,20 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
   按 `#209` **拒绝复用**、e2e 未启动。端口无 env 覆盖 ⇒ 不能换端口。本批 `web/` 与 base
   **逐字节相同**（`git diff --stat 42bb109a..ed9f1e0a -- web/` 输出为空），该车道对本 diff 无信号；
   故如实记 NOT_RUN，不写成「绿」。
+
+**合并树（`3b886bf3`）重跑**（先回后正 merge `7f4222f6` 之后；同一隔离副本，单跑无并发）：
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 后端全量 | `.venv/Scripts/python.exe -m pytest -q -p no:randomly` | **7779 passed / 43 skipped / 51 deselected / 0 failed**（2012.39s） |
+| desktop | `npm test`（`node --test`） | **288 tests / 286 passed / 2 skipped / 0 failed** |
+| 前端单测 | `npx vitest run` | **119 files / 1681 passed / rc=0**（88.12s） |
+| 前端构建 | `npx vite build` | **rc=0** |
+| E2E | `npx playwright test --workers=2` | **540 passed / rc=0**（16.0m） |
+
+- 后端从冻结树的 7775P/1F 变为 **7779P/0F**：+4 = #1075 新增用例；唯一那条红（台账机械瞬态）随台账行落盘消失。
+- **E2E 这次真跑且全绿**（`540 passed / 16.0m / 0 flaky`）：合并时 5173 已空闲——冻结树那轮它被另一 clone 的常驻 dev server 占着（见上）。
+- desktop 的 dot 报告器把 62 个 suite 标记也画成字符（62 + 288 = 350 个点），**测试数**以 spec 报告器的 `tests 288 / pass 286 / skipped 2 / fail 0` 为准（本次实测复核）。
 
 ### 5.6 首轮独立审查（两轴，范围 `42bb109a..b352b106`）
 
@@ -271,6 +286,16 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
   必须由一次新审查归属（`scripts/check_review_coverage.py` 的 docs-only 只认 `docs/**` 等路径，`.github/workflows/*.yml`
   与 `desktop/**` 都不算），而 §8.3 第 4 条把修后重审封顶在每轴 1 轮 ⇒ 为两处 P4 文案花掉「一票一次」的发现阶段补审配额
   不合比例（§9.2）。故**如实登记、本票不改**；§4 / §5.7 的相关自述已改为逐处准确（两处已去、第三处保留为读数记录）。
+
+### 5.9 先回后正同步（§14.6，merge `7f4222f6`）
+
+派两轴审查与记账笔之后，`origin/main` 前移（`42bb109a` → `ba8d0bd3`，10 笔 = #1075）。按 §14.6「先回后正」在 PR 前同步：
+
+- **merge `7f4222f6`**（父一 `32743274` = 本线 tip，父二 `ba8d0bd3` = `origin/main`），**零冲突**（main 侧 10 笔未动 tracker / PHASE_STATUS / 月档，故未重演 #914 的 tracker both-added 冲突）。
+- **本票代码面零交集**：`git diff --name-only 32743274..7f4222f6 -- .github/workflows/windows-installer-smoke.yml desktop/installer/ desktop/scripts/ desktop/test/` 为空；7 个代码文件的 blob 在父一与 merge 上**逐字相同**（逐个 `git rev-parse <rev>:<path>` 对账）⇒ 此前冻结树读数对**本票代码面**仍逐字节有效。
+- main 侧带入的改动 = `src/agent_harness/session/service.py` + `tests/web/test_session_delete_api.py` + docs（3 份 gate 收据 / 3 行台账）——均为 main 上已合入并已过门禁的内容（#1075 自身记录「Gate-0 裸全量 6/6」）。
+- 合并提交自身按机械归属落台账：`docs/review_ledger.d/w21-1074-sync-merge-32743274-7f4222f6.tsv`（range `32743274..7f4222f6`）。
+- **合并树重跑**：Gate-0 **6/6**（§5.4，收据 `docs/gate/3b886bf3bc314e90480a1401cc22d44581ae752b.json`）；全量门禁在合并树上重跑，读数见 §5.5 末段。
 
 ## 6 残余与后续
 
