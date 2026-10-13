@@ -4977,15 +4977,15 @@ class SessionService:
             "恢复入口保持拒绝（本错误不可重试）"
         )
 
-    async def _read_events_precheck(self, session_id: str) -> list:
+    async def _read_events_precheck(self, session_id: str) -> list[SessionEvent]:
         """只读恢复预检（#1082）：`recover` 与 `pending_decisions` 共用的五步前导。
 
-        PORT DESIGN：DeepSeek Harness `session-format-catalog` 的单一
-        restore-current 严格校验（坏记录/seq gap 不伪装成可恢复历史）+
+        PORT DESIGN（#1082 票面依据）：DeepSeek Harness `session-format-catalog`
+        的单一 restore-current 严格校验（坏记录/seq gap 不伪装成可恢复历史）+
         Pi SQLite backend 的 no-create 只读打开边界（读面不隐藏创建）——
         两个恢复入口用同一个完整性判据，今后只改一个副本导致的漂移
-        （GET 把全坏日志报成 404、POST/GET 对同一日志给出不同错误）不可能发生。
-        上游均为 MIT；本仓复用既有 `read_events_report`，不引外部 codec。
+        （GET 把全坏日志报成 404、POST/GET 对同一日志给出不同错误）在机制上被消除。
+        本仓复用既有 `read_events_report`，不引外部 codec。
 
         五步：校验 session ID → 确保 store → `read_events_report` →
         404/409 映射。零写入：不追加 SessionEvent、不迁移 Ledger、不创建
@@ -5035,8 +5035,6 @@ class SessionService:
             RecoveryError,
         )
 
-        self._validate_session_id(session_id)
-        await self._ensure_stores()
         existing = await self._read_events_precheck(session_id)
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
@@ -5134,8 +5132,6 @@ class SessionService:
         RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
         run 时逐字段一致——读面只报此刻可裁决的行。
         """
-        self._validate_session_id(session_id)
-        await self._ensure_stores()
         existing = await self._read_events_precheck(session_id)
         run_owner_ids = {
             session_id,
