@@ -90,6 +90,8 @@ function paint(sessionId: string | null = 'sess-1'): void {
         onSubmit,
         onCancel: () => {},
         sessionId,
+        // #1015：必填 prop；本文件测发送门禁不涉及懒建，给空实现。
+        onEnsureSession: async () => null,
         models: [],
         selectedModel: null,
       }),

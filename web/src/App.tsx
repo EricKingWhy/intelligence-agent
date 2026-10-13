@@ -55,6 +55,7 @@ import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASO
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
 import {
+  createEmptySession,
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
@@ -637,6 +638,46 @@ export default function App() {
     [selectedId, changePermission, reloadConversation],
   );
 
+  // ── #1015：新建态懒建会话 ──
+  /** 在途的懒建 promise：连点按钮 / 连拖两次共享同一个，不建出两个会话。 */
+  const ensuringRef = useRef<Promise<string | null> | null>(null);
+  /** 最近一次懒建落定的会话 id：补 `selectSession` 状态尚未 flush 的极窄窗口
+   *  （贴图后同一 tick 内回车）——`handleSubmit` 用它避免另造会话。
+   *  用户点「新建会话」（`selectSession(null)`）时清掉，不让过期 id 复活。 */
+  const ensuredIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedId === null) ensuredIdRef.current = null;
+  }, [selectedId]);
+
+  /** 新建态首次投喂附件时懒建会话——会话身份**唯一**能变的地方
+   *  （与 `selectSession` / `submitTask` 并列）。resolve 会话 id；
+   *  失败（非 2xx）resolve `null`，由调用方（hook）给用户可见反馈。
+   *  并发调用共享同一个在途 promise（in-flight 去重）。 */
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (selectedId) return selectedId;
+    if (ensuringRef.current) return ensuringRef.current;
+    const pending = (async (): Promise<string | null> => {
+      try {
+        // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形
+        // （`auto_approve: true` 恒送 + 项目 cwd），两种新建路径不造出不同语义的会话。
+        const created = await createEmptySession({
+          auto_approve: true,
+          ...(activeProject ? { cwd: activeProject.path } : {}),
+        });
+        ensuredIdRef.current = created.sessionId;
+        selectSession(created.sessionId);
+        void refreshSessions();
+        return created.sessionId;
+      } catch {
+        return null;
+      } finally {
+        ensuringRef.current = null;
+      }
+    })();
+    ensuringRef.current = pending;
+    return pending;
+  }, [selectedId, selectSession, refreshSessions, activeProject]);
+
   const handleSubmit = useCallback(
     (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
       focusRun();
@@ -651,39 +692,50 @@ export default function App() {
       // 那会把「Enter = 排队」变成 submitTask（**另造一个会话**），追问与上下文
       // 一起被拆散；队列条与 /queue 系列接口随之永不产生条目。
       // 新会话：无 selectedId → startSession 创建新会话。
-      if (selectedId) {
-        void sendMessage(selectedId, task, {
-          amend: {
-            ...toAmendFields(composerControls),
-            ...ruleSignal,
-            // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
-            // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
-            ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
-          },
-        });
-        return;
-      }
-      // 新建会话（#825）：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
-      // 无 `attachments`），所以新建态**不给**附图入口（Composer 按 `sessionId === null`
-      // 禁用并说明原因）⇒ 这条分支上 `attachmentIds` 恒为空。此处不写丢弃逻辑：
-      // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-      void submitTask({
-        task,
-        auto_approve: true,
+      //
+      // #1015：路由是异步的——贴图后立刻回车时懒建可能在途（或刚落定、状态尚未
+      // flush），此时用懒建的会话发（`sendMessage`：空闲会话 → launched 直驱新
+      // run，ADR-0030 §5.1），绝不另造第二个会话。纯文本新建（无在途懒建）仍走
+      // 既有 submitTask 路径，行为逐字不变。
+      const amend = {
+        ...toAmendFields(composerControls),
         ...ruleSignal,
-        // #1028：选中的项目行 = 本次新建的项目语境——带上 `cwd: project.path`，
-        // 让会话直接诞生在项目目录里并自动入组（后端 cwd 契约，ADR-0027 D2）。
-        // 未选中项目时不发键（后端用自己的默认目录），与既有通用新建行为一致。
-        // 与 `workspace` 互斥（同为后端 422 判据）：本入口只可能发 `cwd`。
-        ...(activeProject ? { cwd: activeProject.path } : {}),
-        ...toCreateControls(composerControls),
-        // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
-        budget: toCreateBudget({
-          turns: budgetRunTurnsDraft,
-          totalTokens: budgetRunTokensDraft,
-          deadlineAt: budgetRunDeadlineDraft,
-        }),
-      });
+        // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
+        // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
+        ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+      };
+      void (async () => {
+        let sid: string | null = selectedId ?? ensuredIdRef.current;
+        const pending = ensuringRef.current;
+        if (sid === null && pending !== null) {
+          sid = await pending;
+        }
+        if (sid !== null) {
+          void sendMessage(sid, task, { amend });
+          return;
+        }
+        // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
+        // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
+        // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
+        // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
+        void submitTask({
+          task,
+          auto_approve: true,
+          ...ruleSignal,
+          // #1028：选中的项目行 = 本次新建的项目语境——带上 `cwd: project.path`，
+          // 让会话直接诞生在项目目录里并自动入组（后端 cwd 契约，ADR-0027 D2）。
+          // 未选中项目时不发键（后端用自己的默认目录），与既有通用新建行为一致。
+          // 与 `workspace` 互斥（同为后端 422 判据）：本入口只可能发 `cwd`。
+          ...(activeProject ? { cwd: activeProject.path } : {}),
+          ...toCreateControls(composerControls),
+          // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
+          budget: toCreateBudget({
+            turns: budgetRunTurnsDraft,
+            totalTokens: budgetRunTokensDraft,
+            deadlineAt: budgetRunDeadlineDraft,
+          }),
+        });
+      })();
     },
     [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
@@ -1513,8 +1565,10 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
-                    /* #825（MM-04）：附图上传挂会话——`null`（新建态）时入口禁用并说明。 */
+                    /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
+                       懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}
+                    onEnsureSession={ensureSession}
                     onCancel={cancelStream}
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
                     onSteerItem={handleSteerItem}

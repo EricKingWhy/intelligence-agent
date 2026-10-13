@@ -11,6 +11,12 @@
  *   Ctrl+Enter 拦截 + 常驻提示），failed 仍不阻塞、发送时被显式剔除并给一次性可见提示；
  * - 会话切换即清空并中止在途上传：草稿属于**某个会话**（上传端点 per-session），
  *   跟着 UI 换会话继续传只会得到另一个会话名下的孤儿字节。
+ * - #1015 懒建（ADAPT 自 DSH 的 `rebindDraftFiles`，来源：DeepSeek Harness
+ *   `packages/client/ui-conversation/src/client/service.ts:345-352` @ commit
+ *   `5badb150`，MIT）：上游在会话身份变化（workspace 切换）后把草稿附件重绑到
+ *   新身份并重传；本仓的身份变化是 `null → 真实 id`，且发生在上传开始**之前**——
+ *   拿到 id 后直接按新身份入列上传，不需要重传这一步。机制同构（「身份变化 ⇒
+ *   草稿跟随新身份」），实现按本仓 hook 重写（无 Cordis worker 池，见上）。
  *
  * 状态载体是 ref + 强制重渲染（而不是 `useState` 数组）：所有变更必须**同步**可见——
  * 预检的判据是"当前已附了几张、共几字节"，同一 tick 里的第二次 intake（粘贴 + 拖放）
@@ -60,9 +66,13 @@ export interface DraftAttachmentsApi {
 /** 草稿的本地 key（模块内单调递增：确定性、无 crypto 依赖，测试可直接断言顺序）。 */
 let draftSeq = 0;
 
-/** 附图草稿状态机。`sessionId` 为 null（尚无会话）时 `addFiles` 一律被拒——
- *  上传端点是 per-session 的（`POST /api/sessions/{id}/attachments`），没有会话就没有落点。 */
-export function useDraftAttachments(sessionId: string | null): DraftAttachmentsApi {
+/** 附图草稿状态机。`sessionId` 为 null（尚无会话）时，`addFiles` 经 `ensureSession`
+ *  懒建会话（#1015），拿到真实 id 后再入列上传；`ensureSession` 失败（resolve
+ *  null）时给**可见**的 intake 错误，绝不留下"永远上传中"的卡片。 */
+export function useDraftAttachments(
+  sessionId: string | null,
+  ensureSession: () => Promise<string | null>,
+): DraftAttachmentsApi {
   const itemsRef = useRef<DraftAttachment[]>([]);
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const errorRef = useRef<string | null>(null);
@@ -108,9 +118,10 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
   );
 
   const startUpload = useCallback(
-    (id: string, file: File) => {
-      if (sessionId === null) return;
-      const upload = uploadAttachment(sessionId, file, (loaded, total) => patch(id, { loaded, total }));
+    (id: string, file: File, sid: string) => {
+      // sid 由调用方在 intake 时刻解析（新建态 = 懒建落定的真实 id），不用闭包的
+      // sessionId——懒建期间它还是 null，闭包会读到旧值。
+      const upload = uploadAttachment(sid, file, (loaded, total) => patch(id, { loaded, total }));
       uploadsRef.current.set(id, upload);
       upload.promise
         .then((receipt) => {
@@ -125,7 +136,7 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
         if (thumb !== null) patch(id, { thumb });
       });
     },
-    [sessionId, patch],
+    [patch],
   );
 
   // 签名保持同步 `(files, directories?) => void`（调用方都是事件处理器里直接调用、
@@ -133,15 +144,24 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
   // `setIntakeError` 同一通道呈现（AC3），不新增第二条用户可见的错误路径。
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
-      // 会话缺失时**静默返回**，不给文案：用户可见的原因由 Composer 单点给出
-      // （`attachBlockedReason`：门禁 + 拖放遮罩文案 + 按钮 title 三处同源）。这里
-      // 再写一份只会漂移，而它是**结构性**守卫——上传端点 per-session，没有会话就
-      // 没有落点，放行会留下一排永远"上传中"的卡片。
-      if (sessionId === null) return;
-      // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
-      const candidates = files.filter((file) => !directories?.has(file));
-      if (candidates.length === 0) return;
       void (async () => {
+        // #1015：`sessionId === null` 的旧静默守卫已移除，替换为懒建。
+        // 新建态首次投喂 → `ensureSession()` 建出真实会话（App 侧单例 + in-flight
+        // 去重），拿到 id 后草稿按新身份入列上传（DSH `rebindDraftFiles` 的 ADAPT，
+        // 见模块头）。并发投喂共享同一个在途懒建，不会建出两个会话。
+        let sid = sessionId;
+        if (sid === null) {
+          sid = await ensureSession();
+          if (sid === null) {
+            // 懒建失败（非 2xx）：用户可见反馈（AC3 同一通道），不入栏——
+            // 绝不留下"永远上传中"的卡片；纯文本仍可发（AC4）。
+            setIntakeError('会话创建失败，图片未能上传（可稍后重试，纯文本仍可发送）');
+            return;
+          }
+        }
+        // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
+        const candidates = files.filter((file) => !directories?.has(file));
+        if (candidates.length === 0) return;
         // 字节探测先行（#937 / M-20）：`file.type` 可伪造，预检的「是不是图片」
         // 以文件头魔数为准（对齐后端 `probe.py`）；探测后 `partitionIntake` 仍
         // 用默认 limits（`getImageLimits()`，M-08 起权威在服务端下发）。
@@ -166,10 +186,10 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
           thumb: null,
         }));
         commit([...itemsRef.current, ...drafts]);
-        for (const draft of drafts) startUpload(draft.id, draft.file);
+        for (const draft of drafts) startUpload(draft.id, draft.file, sid);
       })();
     },
-    [sessionId, commit, setIntakeError, startUpload],
+    [sessionId, commit, setIntakeError, startUpload, ensureSession],
   );
 
   const remove = useCallback(
@@ -185,10 +205,12 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
     (id: string) => {
       const target = itemsRef.current.find((item) => item.id === id);
       if (!target || target.status !== 'failed') return;
+      // 草稿只活在真实会话下；`sessionId` 取闭包最新值（随 prop 变化刷新）。
+      if (sessionId === null) return;
       patch(id, { status: 'uploading', loaded: 0, error: undefined });
-      startUpload(id, target.file);
+      startUpload(id, target.file, sessionId);
     },
-    [patch, startUpload],
+    [patch, startUpload, sessionId],
   );
 
   const dismissIntakeError = useCallback(() => setIntakeError(null), [setIntakeError]);
