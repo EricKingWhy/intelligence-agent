@@ -145,6 +145,13 @@ class TestIsDeterministicProviderError:
         error.status_code = True
         assert is_deterministic_provider_error(error) is False
 
+    @pytest.mark.parametrize("status", [200, 302])
+    def test_a_non_error_http_status_is_not_deterministic(self, status):
+        """只认 4xx：一个 2xx/3xx 的 `status_code` 不是"端点拒绝"，不借道降级。"""
+        error = RuntimeError("odd")
+        error.status_code = status
+        assert is_deterministic_provider_error(error) is False
+
 
 # ---- 2. TwoLevelFallbackPolicy（决策 14：默认实现） ----
 

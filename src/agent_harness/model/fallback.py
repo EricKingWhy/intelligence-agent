@@ -122,8 +122,12 @@ def is_deterministic_provider_error(error: BaseException) -> bool:
     if isinstance(error, httpx.HTTPStatusError):
         return True
     status_code = getattr(error, "status_code", None)
-    # bool 是 int 的子类，先排掉（与瞬时判据同款防呆）。
-    return isinstance(status_code, int) and not isinstance(status_code, bool)
+    # 只认 4xx：5xx / 429 已被上面的瞬时判据吃掉；bool 是 int 的子类，一并排掉。
+    return (
+        isinstance(status_code, int)
+        and not isinstance(status_code, bool)
+        and 400 <= status_code < 500
+    )
 
 
 @dataclass(frozen=True)

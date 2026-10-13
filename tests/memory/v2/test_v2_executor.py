@@ -968,6 +968,24 @@ async def test_a_deterministic_provider_error_falls_back_across_a_distinct_endpo
 
 
 @pytest.mark.asyncio
+async def test_a_transient_fallback_failure_retries_on_the_ordinary_ladder(env: Env) -> None:
+    """#1039 / PRD §5.3 第 4 条：确定性 primary 错 ⇒ 切到 fallback **一次**；此后 fallback
+    走 R9 的既有重试阶梯（1+1）。本条钉住"切换一次"与"备用自己的重试预算"的边界，免得把
+    "switch once" 误读成"备用只能调用一次"。"""
+    invoker = FakeInvoker(
+        formation=[_Rejected("primary endpoint rejected"), TimeoutError(),
+                   _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())])
+    _job, result, _sink = await _run(env, invoker, _fallback=True)
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [
+        ("primary", 1), ("fallback", 1), ("fallback", 2)]
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert result.fallback_used is True
+
+
+@pytest.mark.asyncio
 async def test_a_schema_failure_gets_one_repair_retry_then_executes(env: Env) -> None:
     """R3 + R9(v2,#485)：解析失败是**失败尝试**（不是 abstention），允许一次修复重试。
 

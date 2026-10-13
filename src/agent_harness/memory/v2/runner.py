@@ -610,6 +610,14 @@ class MemoryJobRunner:
         degraded with no memory write"这条路，而一个可以永远不终结的 job 会让 AC6 的
         "收敛到一个正确终态"不成立。代价（一次瞬时存储抖动也会让这轮记忆作废）是
         显式权衡：收益侧是资源有界，理由记在 `DegradedReason.JOB_FAILED` 上。
+
+        例外（#1039）：每 job 读**该用户**的治理设置（`fallback_enabled`，同
+        `extraction_enabled` 一条链）是**附加输入**、不是执行的前提。若把它按上面的
+        "契约之外失败"处理，一次设置存储抖动就会把一轮记忆判成 `JOB_FAILED`——那既不是
+        模型失败也不是输入失败，只是拿不到一个默认值为"开"的偏好。故该读取单独
+        best-effort：读不到就退回**构造期默认**（= 面板默认开）并留痕。这不是覆盖用户
+        **已知**的选择——读取失败恰恰意味着"没有可观测的存储偏好"，退回默认与"该用户
+        从未改过这个开关"同义。
         """
         async with self._semaphore:
             try:

@@ -174,6 +174,19 @@ class MemorySettingsV2:
     fallback_enabled: bool = True
 
 
+async def _add_column_if_missing(
+    connection, table: str, column: str, definition: str,
+) -> None:
+    """幂等补列（旧库迁移）：`definition` 是完整列定义（含类型与 DEFAULT）。
+
+    `table` / `column` / `definition` 全部是本模块的字面量，不来自输入。
+    """
+    async with connection.execute(f"PRAGMA table_info({table})") as cursor:
+        columns = {row["name"] for row in await cursor.fetchall()}
+    if column not in columns:
+        await connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 class SqliteMemoryV2Store:
     """V2 权威记录存储。所有写方法都是"记录行 + outbox 意图"单事务。"""
 
@@ -189,21 +202,13 @@ class SqliteMemoryV2Store:
         async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.executescript(_SCHEMA)
-            async with connection.execute("PRAGMA table_info(memory_v2_tombstones)") as cursor:
-                tombstone_columns = {row["name"] for row in await cursor.fetchall()}
-            if "version" not in tombstone_columns:
-                # Existing content-free tombstones cannot recover their old version ordinal.
-                await connection.execute(
-                    "ALTER TABLE memory_v2_tombstones ADD COLUMN version INTEGER"
-                )
-            async with connection.execute("PRAGMA table_info(memory_v2_settings)") as cursor:
-                settings_columns = {row["name"] for row in await cursor.fetchall()}
-            if "fallback_enabled" not in settings_columns:
-                # #1039：旧行未表达过该开关 ⇒ 落在裁决的默认「开」（DEFAULT 1）。
-                await connection.execute(
-                    "ALTER TABLE memory_v2_settings ADD COLUMN "
-                    "fallback_enabled INTEGER NOT NULL DEFAULT 1"
-                )
+            # Existing content-free tombstones cannot recover their old version ordinal.
+            await _add_column_if_missing(
+                connection, "memory_v2_tombstones", "version", "INTEGER")
+            # #1039：旧行未表达过该开关 ⇒ 落在裁决的默认「开」（DEFAULT 1）。
+            await _add_column_if_missing(
+                connection, "memory_v2_settings", "fallback_enabled",
+                "INTEGER NOT NULL DEFAULT 1")
             await connection.commit()
 
     # ----------------------------------------------------------------------------------
