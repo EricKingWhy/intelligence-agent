@@ -1037,6 +1037,30 @@ def _stat_stamp(path: Path) -> list[int] | None:
     return [info.st_size, info.st_mtime_ns]
 
 
+def _run_status_snapshot(run_manager: RunManager, session_id: str) -> str:
+    """删除瞬间的运行状态标签（#1075 审计面）：`none` 或 `in-flight(<state>)`。
+
+    划分以 `RunManager.is_busy` 为准——与硬删的准入守卫 ③ 同一口径（"活没干完的
+    run"）。**不读 `_runs` 里有没有条目**：那条 ManagedRun 每会话终身保留（`_drive`
+    的收尾注释），终态后仍在，会把刚跑完的会话误报成在途。在途时再按 `ManagedRun`
+    的旗标补一个状态限定词，让日志能回答"删的那一刻它在跑、在暂停、还是在取消"。
+
+    快照为尽力而为的瞬时值（best-effort）：is_busy 与 get_active 两次查表非原子，
+    极端下可能把刚收尾的 run 记为 in-flight(settling)；仅影响观测面，不影响守卫。
+    """
+    if not run_manager.is_busy(session_id):
+        return "none"
+    run = run_manager.get_active(session_id)
+    if run is None:
+        # is_busy 为真但 get_active 为 None：terminal 已置位、task 未 done（收尾窗口）
+        return "in-flight(settling)"
+    if run.cancel_requested or run.reap_requested:
+        return "in-flight(cancelling)"
+    if run.paused:
+        return "in-flight(paused)"
+    return "in-flight(running)"
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -4178,20 +4202,35 @@ class SessionService:
             discard_local_artifacts, self._settings, session_id
         )
 
+        # ⑧-0 审计快照（#1075）：删除瞬间的运行 / 审批状态，必须读在下面 `pop` 之前
+        #      ——审批队列一旦弹出，再问就只剩一个等于 0 的假象（那个 0 是造的，不是
+        #      实读的）。值来自 RunManager / 审批队列的内存真实状态：守卫 ③④ 正常会
+        #      把在途 run / 挂起审批 409 掉，所以活下来的删除路径通常就是 none/0；
+        #      但守卫若变、或 run 恰在守卫与收口之间起步，这行日志仍如实反映当时状态。
+        run_snapshot = _run_status_snapshot(self._run_manager, session_id)
+        approval_queue = self._approval_queues.get(session_id)
+        pending_approvals = (
+            len(approval_queue.pending_ids()) if approval_queue is not None else 0
+        )
+
         # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到
         #    消费者，且会让同 id 重建的会话继承上一世的队列。
         await self._message_queues.cleanup(session_id)
         self._approval_queues.pop(session_id, None)
 
         # ⑨ 审计：领域数据里不留墓碑（D1/D7），"它存在过"只在结构化日志里可查。
-        #    只带 id 与计数——删除不可撤销，审计要能回答"谁在何时删了哪个会话"，
+        #    只带 id、计数与删除瞬间的运行状态快照（`run` / `pending_approvals`）——
+        #    删除不可撤销，审计要能回答"谁在何时删了哪个会话，删的时候有没有活"，
         #    但不需要（也不该）带走会话内容。`repaired_delegation_links` 是这次删除
         #    **动过的别人的行**（委派子会话的父链接），属于"删除的副作用"里最该被看见的一项。
         log_event(
             logger,
             "session_delete",
-            f"session hard-deleted: {session_id}",
+            f"session hard-deleted: {session_id}"
+            f" | run: {run_snapshot} | pending_approvals: {pending_approvals}",
             session_id=session_id,
+            run_state=run_snapshot,
+            pending_approvals=pending_approvals,
             events=summary.event_count,
             detached_from_projects=detached,
             repaired_delegation_links=repaired_links,
@@ -5042,15 +5081,22 @@ class SessionService:
         """待人工裁决清单的只读出口（#1049，``GET /api/sessions/{id}/recovery``）。
 
         与 ``recover`` 409 的 ``pending_decisions`` **同源**（同一个
-        ``_reconcile_pending``，逐字段一致）：前端打开会话即可主动得知要裁决什么，
-        不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
+        ``_reconcile_pending``，无在途 run 时逐字段一致）：前端打开会话即可主动得知
+        要裁决什么，不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
         **零写入**：不建协调器、不迁移 Ledger、不追加事件。存在性 / 损坏判据与
         ``recover`` 的前导逐条相同（422 / 404 / 损坏 409）。
         会话有在途 run ⇒ 空：其 RUNNING 行是正在执行，不是待裁决——拿它提交裁决
         只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
         所以不能当裁决清单用）。在途按本会话**与委派树根会话**判（#1051）：子代理
-        跑在父 run 的 task 里，RunManager 只按根登记；读完 Ledger 后再判一次，
-        挡住判定与读取之间新启动的 run。
+        跑在父 run 的 task 里，RunManager 按树根会话登记；用户直接续聊子会话时，run
+        按子会话自身 id 登记，故两个 id 都判。续聊中不会再派生孙会话（#1053 已实测
+        证伪），前提是当前子档位不带 delegate 且 ``main.max_depth=1``；放开任一条件
+        时须改按祖先链判，见 #1053。#318 之前的旧子会话 ``session/started`` 里没有
+        ``delegation_root_session_id`` 锚点，根会话 id 回退为自身 ⇒ 只按自身判定。
+        读完 Ledger 后再判一次，挡住判定与读取之间新启动的 run。
+        已接受的残余窗口：run 若在两次判定之间启动并完整跑完，两次都看不到它，读到的
+        在途快照会被误列一次；提交裁决时 ``recover`` 按当时 Ledger 重新校验，不是
+        待裁决的目标会被拒（422），不会误裁。
         与 ``recover`` 的 409 **刻意不同**：``recover`` 不判在途，在途时同样的
         RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
         run 时逐字段一致——读面只报此刻可裁决的行。
@@ -5063,10 +5109,15 @@ class SessionService:
         if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
         self._raise_if_event_log_corrupt(session_id, integrity)
-        owners = {session_id, session_budget_key(existing, session_id=session_id)}
+        run_owner_ids = {
+            session_id,
+            session_budget_key(existing, session_id=session_id),
+        }
 
         def in_flight() -> bool:
-            return any(self._run_manager.get_active(sid) is not None for sid in owners)
+            return any(
+                self._run_manager.get_active(sid) is not None for sid in run_owner_ids
+            )
 
         if in_flight():
             return []

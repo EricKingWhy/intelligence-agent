@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessageChunk
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.config import Settings
-from agent_harness.session import RUN_STARTED, TOOL_CALL, Session
+from agent_harness.session import TOOL_CALL, Session
 from agent_harness.session.event import RUN_INTERRUPTED, TOOL_RESULT
 from agent_harness.storage import Operation, OperationState
 from agent_harness.storage.operation import unproven_meta
@@ -166,6 +166,25 @@ async def _in_flight_run(state, session: Session):
             await run.task
 
 
+async def _seed_ledger_running(
+    ledger, session_id: str, run_id: str, call_id: str
+) -> None:
+    """Ledger 行 PENDING → RUNNING 两步链（与执行器落账的迁移顺序一致）。"""
+    await ledger.create(
+        Operation(
+            tool_call_id=call_id,
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=None,
+            tool_name="bash",
+            args_identity="{}",
+            state=OperationState.PENDING,
+            started_at="Mon 2026-10-12 8:00 AM CST (UTC+08:00)",
+        )
+    )
+    await ledger.update_state(session_id, call_id, OperationState.RUNNING)
+
+
 async def _seed_running_call(state, session: Session, call_id: str) -> None:
     """悬空 tool/call + Ledger RUNNING（PENDING → RUNNING 两步链）。"""
     ledger = state.stores.operation_ledger
@@ -176,19 +195,7 @@ async def _seed_running_call(state, session: Session, call_id: str) -> None:
         {"tool_call_id": call_id, "tool_name": "bash", "args": {}},
         run_id=run_id,
     )
-    await ledger.create(
-        Operation(
-            tool_call_id=call_id,
-            session_id=session.session_id,
-            run_id=run_id,
-            agent_id=None,
-            tool_name="bash",
-            args_identity="{}",
-            state=OperationState.PENDING,
-            started_at="Mon 2026-10-12 8:00 AM CST (UTC+08:00)",
-        )
-    )
-    await ledger.update_state(session.session_id, call_id, OperationState.RUNNING)
+    await _seed_ledger_running(ledger, session.session_id, run_id, call_id)
 
 
 async def _get_pending(app, session_id: str) -> list[dict]:
@@ -216,31 +223,19 @@ async def test_in_flight_run_running_rows_are_not_listed(client):
     session = Session.start(state.store)
     sid = session.session_id
 
-    async with _in_flight_run(state, session):
-        run_id = next(
-            e.run_id for e in state.store.read_events(sid) if e.type == RUN_STARTED
-        )
-        await ledger.create(
-            Operation(
-                tool_call_id="call-live",
-                session_id=sid,
-                run_id=run_id,
-                agent_id=None,
-                tool_name="bash",
-                args_identity="{}",
-                state=OperationState.PENDING,
-                started_at="Mon 2026-10-12 8:00 AM CST (UTC+08:00)",
-            )
-        )
-        await ledger.update_state(sid, "call-live", OperationState.RUNNING)
+    async with _in_flight_run(state, session) as run:
+        run_id = await run.wait_run_id()
+        assert run_id is not None
+        await _seed_ledger_running(ledger, sid, run_id, "call-live")
 
         assert await _get_pending(client.app, sid) == []
 
 
 @pytest.mark.asyncio
 async def test_child_session_rows_hidden_while_root_run_in_flight(client):
-    """#1051：子代理跑在父 run 的 task 里，RunManager 只按父会话登记 ⇒ 子会话的
-    在途判定要按委派树根会话做；父 run 在途时子会话的 RUNNING 行不是待裁决。"""
+    """#1051：子代理跑在父 run 的 task 里，不单独登记，RunManager 按委派树根会话
+    登记 ⇒ 子会话的在途判定也要按树根会话做；父 run 在途时子会话的 RUNNING 行
+    不是待裁决。"""
     state = client.app.state.agent
     root = Session.start(state.store)
     child = _child_of(state, root)
@@ -248,6 +243,25 @@ async def test_child_session_rows_hidden_while_root_run_in_flight(client):
 
     async with _in_flight_run(state, root):
         assert state.run_manager.get_active(child.session_id) is None
+        assert await _get_pending(client.app, child.session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_child_session_rows_hidden_while_own_run_in_flight(client):
+    """#1080：用户直接续聊子会话时，run 按子会话自身 id 登记（树根会话此时无在途）
+    ⇒ 子会话自身的在途 run 也要判；它的 RUNNING 行是正在执行，不是待裁决。"""
+    state = client.app.state.agent
+    ledger = state.stores.operation_ledger
+    await ledger.initialize()
+    root = Session.start(state.store)
+    child = _child_of(state, root)
+
+    async with _in_flight_run(state, child) as run:
+        run_id = await run.wait_run_id()
+        assert run_id is not None
+        await _seed_ledger_running(ledger, child.session_id, run_id, "call-own")
+        assert state.run_manager.get_active(root.session_id) is None
+
         assert await _get_pending(client.app, child.session_id) == []
 
 
@@ -298,7 +312,11 @@ async def test_rows_read_while_run_in_flight_are_not_listed_after_it_ends(
     client, monkeypatch
 ):
     """#1051：读 Ledger 时 run 还在途、读完它才结束 ⇒ 读到的是在途快照（其中的
-    RUNNING 行此刻已 SUCCEEDED），不能当待裁决返回——在途判定必须先于读取。"""
+    RUNNING 行此刻已 SUCCEEDED），不能当待裁决返回——在途判定必须先于读取。
+
+    本用例守的是**读前判定**：正确实现在读 Ledger 之前就因在途返回空，补丁
+    ``list_then_finish`` 根本走不到（调用计数 == 0）；撤掉读前判定后补丁才会被
+    调用，读到 RUNNING 行、读后复查时 run 已结束 ⇒ 误列。"""
     state = client.app.state.agent
     ledger = state.stores.operation_ledger
     await ledger.initialize()
@@ -307,25 +325,14 @@ async def test_rows_read_while_run_in_flight_are_not_listed_after_it_ends(
     real_list = ledger.list_for_session
 
     async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(_in_flight_run(state, session))
-        run_id = next(
-            e.run_id for e in state.store.read_events(sid) if e.type == RUN_STARTED
-        )
-        await ledger.create(
-            Operation(
-                tool_call_id="call-live",
-                session_id=sid,
-                run_id=run_id,
-                agent_id=None,
-                tool_name="bash",
-                args_identity="{}",
-                state=OperationState.PENDING,
-                started_at="Mon 2026-10-12 8:00 AM CST (UTC+08:00)",
-            )
-        )
-        await ledger.update_state(sid, "call-live", OperationState.RUNNING)
+        run = await stack.enter_async_context(_in_flight_run(state, session))
+        run_id = await run.wait_run_id()
+        assert run_id is not None
+        await _seed_ledger_running(ledger, sid, run_id, "call-live")
+        list_calls: list[str] = []
 
         async def list_then_finish(session_id):
+            list_calls.append(session_id)
             rows = await real_list(session_id)
             await ledger.update_state(
                 sid, "call-live", OperationState.SUCCEEDED, result_json="{}"
@@ -336,6 +343,7 @@ async def test_rows_read_while_run_in_flight_are_not_listed_after_it_ends(
         monkeypatch.setattr(ledger, "list_for_session", list_then_finish)
 
         assert await _get_pending(client.app, sid) == []
+        assert list_calls == []
 
 
 def test_corrupt_event_log_is_409(client):

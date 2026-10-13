@@ -58,9 +58,8 @@ from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRe
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
-    MEMORY_PRIMARY_PROVIDER,
     MemoryModelRoles,
-    resolve_memory_roles,
+    resolve_configured_memory_roles,
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -105,14 +104,18 @@ async def build_memory_formation(
     再按 `Path(settings.workspace_dir)/"sessions"` 建一份，就是路径约定抄了第二遍——
     一旦两处分叉，症状是"job 永远切片为空 ⇒ 每轮降级"，没有任何东西报路径不一致。
     """
-    roles = roles or resolve_memory_roles(settings)
+    if roles is None:
+        # #1039：角色映射可指向 #203 自定义供应商（`provider:model` 命名空间）⇒ 解析时
+        # 带 store。装配层通常由 wiring 显式传入 roles（同一入口解析），这一支是直调方
+        # 的便捷回退，与生产路径同一语义。
+        roles = resolve_configured_memory_roles(settings)
     if roles.primary is None:
-        # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与 provider 名是
-        # PRD §5.3.3 公开固定的映射，写出来是为了这句话可执行。
+        # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与**当前配置的** provider
+        # 名是诊断所需（#1039：运营者可改指别的 provider，打印常量会误导排查）。
         logger.warning(
             "记忆形成未装配：模型角色 %s 解析不出 provider '%s'。配 AGENT_MODELS 里一条该 "
             "provider 的条目、或把 MODEL_PROVIDER 设为它即可启用；本进程不会形成任何 V2 记忆。",
-            MEMORY_PRIMARY_ALIAS, MEMORY_PRIMARY_PROVIDER,
+            MEMORY_PRIMARY_ALIAS, settings.memory_primary_provider,
         )
         return None
 
@@ -129,8 +132,9 @@ async def build_memory_formation(
         session_store=sessions,
         observer=(observability.memory_observation if observability.enabled else None),
     )
-    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
-    # SQLite 读取可信用户的 extraction_enabled；设置由 #300 的治理 API 持久化。
+    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每个 job 执行时从
+    # SQLite 读取可信用户的 extraction_enabled（入队资格）与 fallback_enabled（#1039
+    # 降级开关）；两项设置都由 #300 的治理 API 持久化。
     runner = MemoryJobRunner(
         jobs=jobs, sessions=sessions, executor=executor, roles=roles,
         max_concurrency=settings.memory_v2_max_concurrency,

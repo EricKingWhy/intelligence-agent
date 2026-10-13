@@ -373,7 +373,7 @@ export interface ApiMock {
   /** GET /api/memories/{id}/versions 的拦截口（例如 content-free tombstone history）。 */
   onMemoryVersionsGet?: (route: Route, memoryId: string) => Promise<boolean> | boolean;
   /** MEM-V2-5: independently persisted setting fixture and optional mutation failure. */
-  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean };
+  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean; fallback_enabled: boolean };
   memorySettingsPatchError?: { status: number; detail: string };
   /** MEM-V2-5: current-session redacted recall explanation response. */
   memoryRecalls?: unknown[];
@@ -511,7 +511,10 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   }));
   /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
-  const memorySettings = { extraction_enabled: true, recall_enabled: true, ...mock.memorySettings };
+  const memorySettings = {
+    extraction_enabled: true, recall_enabled: true, fallback_enabled: true,
+    ...mock.memorySettings,
+  };
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
   /** #825（MM-04）：附件字节 + 引用关系（语义对齐 `web/attachments.py`）。
