@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -222,6 +223,111 @@ def test_events_count_reflects_what_was_actually_deleted(tmp_path: Path) -> None
     n = len(client.get(f"/api/sessions/{session_id}/events").json())
     assert n > 0
     assert client.delete(f"/api/sessions/{session_id}").json()["events"] == n
+
+
+# ── #1075：删除成功路径的审计快照（run / pending_approvals）──────────────
+
+
+def test_delete_success_log_records_run_and_approval_snapshot(
+    tmp_path: Path, caplog
+) -> None:
+    """删除成功的那条 `session_delete` 日志必须带上删除瞬间的运行状态快照。
+
+    「删的那一刻有没有活」是审计要能回答的问题（Docker daemon 删容器的日志记容器
+    状态、GitHub audit log 记资源状态）——只写 `session hard-deleted: {id}` 会让
+    事后对账失明。守卫 ③④ 把在途 run / 挂起审批都 409 掉了，所以正常删除路径的
+    快照就是 `run: none` / `pending_approvals: 0`；但值必须是**实读**内存状态写下的。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.session.service"):
+        assert client.delete(f"/api/sessions/{session_id}").status_code == 200
+
+    [record] = [
+        r for r in caplog.records if getattr(r, "event_type", None) == "session_delete"
+    ]
+    assert record.session_id == session_id
+    # 机器可读字段（结构化日志消费者读这两个）
+    assert record.run_state == "none"
+    assert record.pending_approvals == 0
+    # 人读的日志行同时带上两者，避免还要去猜 extra 字段名
+    message = record.getMessage()
+    assert "run: none" in message, message
+    assert "pending_approvals: 0" in message, message
+
+
+def test_run_status_snapshot_reads_inflight_state_not_hardcoded() -> None:
+    """快照必须来自 RunManager 的**真实内存状态**，不是硬编码的 "none"。
+
+    删除的准入守卫用 `is_busy`（活没干完的 run），所以快照也以它划分在途与否；
+    在途时再按 `ManagedRun` 的旗标给出状态限定词。这里用最小替身驱动四个分支——
+    走 HTTP 路径到不了在途分支（守卫会先 409），所以直接钉住取快照的那一句。
+    """
+    from agent_harness.session.service import _run_status_snapshot
+
+    rm = RunManager(disconnect_grace_seconds=1.0)
+    assert _run_status_snapshot(rm, "s") == "none"
+
+    run = SimpleNamespace(
+        terminal=False,
+        task=SimpleNamespace(done=lambda: False),
+        paused=False,
+        cancel_requested=False,
+        reap_requested=False,
+    )
+    rm._runs["s"] = run
+    assert _run_status_snapshot(rm, "s") == "in-flight(running)"
+
+    run.paused = True
+    assert _run_status_snapshot(rm, "s") == "in-flight(paused)"
+
+    run.paused = False
+    run.cancel_requested = True
+    assert _run_status_snapshot(rm, "s") == "in-flight(cancelling)"
+
+    # terminal 已置位、task 未 done（收尾窗口）：is_busy 说"忙"，get_active 却是 None
+    rm._runs["s"] = SimpleNamespace(
+        terminal=True,
+        task=SimpleNamespace(done=lambda: False),
+        paused=False,
+        cancel_requested=False,
+        reap_requested=False,
+    )
+    assert _run_status_snapshot(rm, "s") == "in-flight(settling)"
+
+
+def test_delete_path_wires_the_run_status_snapshot_call(
+    tmp_path: Path, caplog, monkeypatch
+) -> None:
+    """接线锁：删除路径必须**调用** `_run_status_snapshot`，值不许在调用点硬编码。
+
+    上一条只钉住 helper 自身的分支，`test_delete_success_log_records_run_and_approval_snapshot`
+    只钉住成功路径的字段值——而成功路径因守卫 ③④ 保证 `run_state == "none"`。两条
+    合起来仍杀不死「把 `delete_session` 的审计快照调用点
+    `run_snapshot = _run_status_snapshot(...)` 换成 `run_snapshot = "none"`」这一
+    票面明令禁止的硬编码（同值 ⇒ 两测都绿）。
+    这条用哨兵把「删除路径确实经过 helper」这一接线钉死：把 helper 换成返回哨兵的
+    替身，日志里的 `run_state` 就必须是这个哨兵，而非任何调用点常量。
+    """
+    sentinel = "SENTINEL-IN-FLIGHT"
+    monkeypatch.setattr(
+        "agent_harness.session.service._run_status_snapshot",
+        lambda run_manager, session_id: sentinel,
+    )
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.session.service"):
+        assert client.delete(f"/api/sessions/{session_id}").status_code == 200
+
+    [record] = [
+        r for r in caplog.records if getattr(r, "event_type", None) == "session_delete"
+    ]
+    assert record.session_id == session_id
+    # 结构化字段与人读消息串都取哨兵：任一处硬编码都会红
+    assert record.run_state == sentinel
+    assert sentinel in record.getMessage(), record.getMessage()
 
 
 # ── 安全红线：绝不碰用户的真实目录（ADR-0029 D2）────────────────────
