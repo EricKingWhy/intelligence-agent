@@ -1,0 +1,1 @@
+2026-10-13	#729 Standards/Security 初始双轴发现审查：固定范围 `9d29ddff..1b93c34b`；发现 P2：copy_in 按普通路径检查并打开宿主来源，junction/reparse 替换存在 TOCTOU 窗口。由 `1225da9c` 的句柄相对 no-reparse、持句柄防 delete/rename 实现修复；修后复审确认关闭。	9d29ddffab45b83ce2e467f49c19aa1ae4f1fb6f..1b93c34b5154afc70e0a4475499c8ac403798548

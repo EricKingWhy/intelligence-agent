@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   assertRuntimeProduct,
+  assertBundledMxcRuntime,
   assertStagedProductMatchesSource,
   createWindowsInstallerConfig,
   productCodeDigest,
@@ -145,6 +146,30 @@ describe('assertRuntimeProduct', () => {
 
   it('throws when the lockfile carries no product pin', () => {
     assert.throws(() => assertRuntimeProduct({ pythonExe: 'python.exe' }), /missing "product" pin/)
+  })
+})
+
+describe('assertBundledMxcRuntime', () => {
+  const resourcesDir = 'C:\\app\\resources'
+  const required = ['wxc-exec.exe', 'mxc_ffi.dll', 'LICENSE.md']
+
+  it('accepts the PSEC executable, native DLL and license as one runtime unit', () => {
+    const files = new Set(required.map((name) => join(resourcesDir, 'mxc', name)))
+    assertBundledMxcRuntime({ resourcesDir, existsSync: (path) => files.has(path) })
+  })
+
+  it('fails packaging when any required runtime asset is missing', () => {
+    for (const missing of required) {
+      const files = new Set(
+        required
+          .filter((name) => name !== missing)
+          .map((name) => join(resourcesDir, 'mxc', name)),
+      )
+      assert.throws(
+        () => assertBundledMxcRuntime({ resourcesDir, existsSync: (path) => files.has(path) }),
+        new RegExp(`bundled MXC PSEC runtime missing: .*${missing.replace('.', '\\\.')}`),
+      )
+    }
   })
 })
 

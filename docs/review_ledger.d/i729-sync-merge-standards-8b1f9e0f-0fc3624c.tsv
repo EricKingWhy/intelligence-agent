@@ -1,0 +1,1 @@
+2026-10-13	#729 同步合并 0fc3624c 的 app.py 组合 Standards 独立复审：APPROVE，P0-P4=0；#1094 启动 warning 与 #729 PSEC 路由位于独立调用路径，复用既有 probe 与指令 store；本轴未运行测试。	8b1f9e0f6b3b933277476318d1636ad141b030ef..0fc3624cd69d70a03e8521fb86adaf3acf68f6fb
