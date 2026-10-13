@@ -471,8 +471,29 @@ describe('process gate call site (#1078)', () => {
     )
     assert.throws(() => validateInstallerScripts(dir), /stages the application 2 times/)
   })
-})
 
+  it('accepts a nested block inside the frame, including its own divider', () => {
+    // The insert has to sit on the frame's positive branch; a nested `${If}`
+    // with its own `${Else}` divides that block, not the frame, and leaves the
+    // insert exactly where it belongs. The first cut of the rule scanned the
+    // span for any divider and rejected this (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n      DetailPrint "no previous install"\n    ${Else}\n      DetailPrint "previous install present"\n    ${EndIf}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('accepts a nested switch inside the frame', () => {
+    // `${Case}` divides a `${Switch}`, never an `${If}`: it must not read as the
+    // frame changing branches (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${Switch} $0\n      ${Case} "1"\n        DetailPrint "one"\n        ${Break}\n    ${EndSwitch}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
+  })
+})
 
 describe('rollback install-directory probe (#1023)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))

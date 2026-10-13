@@ -2748,6 +2748,31 @@ function logicLibCloseIndex(text, openIndex) {
 }
 
 /**
+ * True when the frame opened at `frame` reaches `call` from a branch other than
+ * its first — that is, a `${Else}`/`${ElseIf}` belonging to *this* frame sits
+ * in between. A nested block's own divider does not count: it divides that
+ * block, not the frame, and a `${Case}` divides a `${Switch}` and never an
+ * `${If}`. The first cut of this rule scanned the whole span for any divider and
+ * rejected every legitimate nested form (#1078 review, measured: a nested
+ * `${If}`/`${Else}` and a nested `${Switch}`/`${Case}` both turned the build
+ * red).
+ */
+function frameDividesBefore(text, frame, call) {
+  const token = new RegExp(`${LOGICLIB_OPENS}|${LOGICLIB_CLOSES}|\\$\\{(?:Else|ElseIf)\\}`, 'gi')
+  const isOpen = new RegExp(`^(?:${LOGICLIB_OPENS})$`, 'i')
+  const isClose = new RegExp(`^(?:${LOGICLIB_CLOSES})$`, 'i')
+  let depth = 0
+  for (let m = token.exec(text); m !== null; m = token.exec(text)) {
+    if (m.index < frame) continue
+    if (m.index >= call) return false
+    if (isOpen.test(m[0])) depth += 1
+    else if (isClose.test(m[0])) depth -= 1
+    else if (depth === 1) return true
+  }
+  return false
+}
+
+/**
  * Build-time assertion for the process gate call site (#1078).
  *
  * `validateProcessGateGuards` reads one file — the file the gate's own body
@@ -2766,15 +2791,15 @@ function logicLibCloseIndex(text, openIndex) {
  *
  * What this does NOT cover, and in the opposite direction from the #1074 rules:
  * those let a re-spelled *defect* through; this one fails closed on any
- * re-spelling at all. The frame is matched by its exact shipped text, so a
- * legitimate re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
+ * re-spelling of the frame at all. The frame is matched by its exact shipped
+ * text, so a legitimate re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
  * `StrCmp $iaRecoveryPending "1" …`, or the insert moved into a helper macro
  * that `customInit` inserts) turns the build red until this anchor is updated in
  * the same change. Still out of reach: a frame that keeps this text but sits
- * inside a false `!if`/`!ifdef`, and whether the insert's body still stages —
- * those are `validateProcessGateGuards` and the real-machine legs.
+ * inside a false `!if`/`!ifdef`; a second `!macro customInit` further down the
+ * file, which only the first is read of; and whether the insert's body still
+ * stages — those are `validateProcessGateGuards` and the real-machine legs.
  */
-
 export function validateProcessGateCallSite(source, filename) {
   const code = stripNsisComments(source)
   const problems = []
@@ -2782,7 +2807,12 @@ export function validateProcessGateCallSite(source, filename) {
   if (init === null) {
     problems.push('missing !macro customInit')
   } else {
-    const inserts = init.match(/!insertmacro\s+iaStageApplication\b/gi) ?? []
+    // Strings are blanked first — `outsideStrings` replaces every character of
+    // a string body with a space, so the indices still line up with `init`.
+    // `customInit` holds messages, and a quoted `!insertmacro` or `${Else}` is
+    // text, not code (#1078 review).
+    const codeOnly = init.split('\n').map(outsideStrings).join('\n')
+    const inserts = codeOnly.match(/!insertmacro\s+iaStageApplication\b/gi) ?? []
     if (inserts.length === 0) {
       problems.push('customInit no longer stages the application (`!insertmacro iaStageApplication`)')
     } else if (inserts.length > 1) {
@@ -2790,15 +2820,17 @@ export function validateProcessGateCallSite(source, filename) {
         `customInit stages the application ${inserts.length} times — the second one also runs on the recovery path, on top of what iaRecoverInterruptedInstall restored`,
       )
     } else {
-      const call = init.search(/!insertmacro\s+iaStageApplication\b/i)
+      const call = codeOnly.search(/!insertmacro\s+iaStageApplication\b/i)
       // The frame's own opening, then its matching close found by depth: the
       // first `${EndIf}` after the opening need not be this frame's (a nested
       // block before the insert supplies its own), and the insert has to sit on
       // the frame's *positive* branch — the recovery path is the `${Else}` side,
-      // so a call there is the #1078 defect inverted.
+      // so a call there is the #1078 defect inverted. The frame anchor keeps the
+      // quoted `"1"`, so it is read off `init`; the walks run on the blanked
+      // text, whose indices line up.
       const frame = init.lastIndexOf('${If} $iaRecoveryPending != "1"', call)
-      const close = frame === -1 ? -1 : logicLibCloseIndex(init, frame)
-      const divided = frame !== -1 && init.slice(frame, call).search(DIVIDES_BLOCK) !== -1
+      const close = frame === -1 ? -1 : logicLibCloseIndex(codeOnly, frame)
+      const divided = frame !== -1 && frameDividesBefore(codeOnly, frame, call)
       if (frame === -1 || close === -1 || close < call || divided) {
         problems.push(
           'customInit stages the application outside the positive branch of `${If} $iaRecoveryPending != "1"` — inverting that condition, dropping the frame, or moving the insert onto its `${Else}` side skips staging and the process gate on a normal install, while the previous installation is left in place and the stock section installs over it',

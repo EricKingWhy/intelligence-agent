@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = '752b4c29556a21411c848fb82d296148f9bd6cda0fc1254f60a5af57a493978c'
+const GUARD_BASELINE_SHA256 = '48bec00bfa44bee58fbc62b7b6370f461c4b99ccaa7e6132d3a3ddcf66cdf86f'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -749,6 +749,14 @@ const mutations = {
   'process gate call-site rule dropped (#1078)': swap(
     '      if (frame === -1 || close === -1 || close < call || divided) {',
     '      if (false) {',
+  ),
+  // #1078 review (both axes): the divider test has to count depth — the frame's
+  // own `${Else}`/`${ElseIf}`, not any divider in the span. Reverting it to the
+  // first cut's scan rejects the legitimate nested forms, which the two
+  // "accepts a nested …" fixtures hold down.
+  'call-site divider test reverted to depth-blind (#1078 review)': swap(
+    '      const divided = frame !== -1 && frameDividesBefore(codeOnly, frame, call)',
+    '      const divided = frame !== -1 && codeOnly.slice(frame, call).search(/\\$\\{(?:Else|ElseIf|Case|CaseElse)\\}/i) !== -1',
   ),
 }
 
