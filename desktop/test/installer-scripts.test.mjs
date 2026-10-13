@@ -442,7 +442,37 @@ describe('process gate call site (#1078)', () => {
     const dir = withMutatedInstallerNsh('  !insertmacro iaStageApplication\n', '')
     assert.throws(() => validateInstallerScripts(dir), /no longer stages the application/)
   })
+
+  it('accepts a nested conditional inside the frame (the close is found by depth)', () => {
+    // The first `${EndIf}` after the frame's opening is not necessarily the
+    // frame's own: a nested block before the insert supplies one, and reading it
+    // as the frame's close would reject a call that is plainly inside the frame.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n    ${EndIf}\n    !insertmacro iaStageApplication\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('refuses a customInit that stages only on the recovery branch', () => {
+    // The #1078 defect inverted: an insert on the frame's `${Else}` side runs
+    // staging — and the gate — only while a previous install is mid-recovery.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n  ${Else}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /positive branch/)
+  })
+
+  it('refuses a customInit that stages twice', () => {
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n  !insertmacro iaStageApplication\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /stages the application 2 times/)
+  })
 })
+
 
 describe('rollback install-directory probe (#1023)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))

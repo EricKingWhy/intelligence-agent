@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = 'e09d48025b7be69b9aa2db122cdef1c0cd4d96cbe982f924bcb84373be2abacf'
+const GUARD_BASELINE_SHA256 = '752b4c29556a21411c848fb82d296148f9bd6cda0fc1254f60a5af57a493978c'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -747,7 +747,7 @@ const mutations = {
   // unguarded again, and the fixtures in "process gate call site (#1078)" are
   // what hold it down.
   'process gate call-site rule dropped (#1078)': swap(
-    '      if (frame === -1 || close === -1 || close < call) {',
+    '      if (frame === -1 || close === -1 || close < call || divided) {',
     '      if (false) {',
   ),
 }

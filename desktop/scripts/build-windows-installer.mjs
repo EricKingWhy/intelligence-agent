@@ -2734,8 +2734,21 @@ export function validateProcessGateGuards(source, filename) {
   }
 }
 
+/** The index of the LogicLib token that closes the block opened at `openIndex`. */
+function logicLibCloseIndex(text, openIndex) {
+  const token = new RegExp(`${LOGICLIB_OPENS}|${LOGICLIB_CLOSES}`, 'gi')
+  const isOpen = new RegExp(`^(?:${LOGICLIB_OPENS})$`, 'i')
+  let depth = 0
+  for (let m = token.exec(text); m !== null; m = token.exec(text)) {
+    if (m.index < openIndex) continue
+    if (isOpen.test(m[0])) depth += 1
+    else if (--depth === 0) return m.index
+  }
+  return -1
+}
+
 /**
- * Call-site guard for the process gate (#1078).
+ * Build-time assertion for the process gate call site (#1078).
  *
  * `validateProcessGateGuards` reads one file — the file the gate's own body
  * lives in — so it cannot see the wrapper that decides whether the gate is
@@ -2748,14 +2761,20 @@ export function validateProcessGateGuards(source, filename) {
  * rules, the installer-nsis suite, and the real-machine probe, which injects
  * that one file).
  *
- * What this does NOT cover: it matches the frame's text. An equivalent
- * re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
+ * real-machine legs do not inject installer.nsh, so this rule is the only
+ * process-gate layer that reads this file at all.
+ *
+ * What this does NOT cover, and in the opposite direction from the #1074 rules:
+ * those let a re-spelled *defect* through; this one fails closed on any
+ * re-spelling at all. The frame is matched by its exact shipped text, so a
+ * legitimate re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
  * `StrCmp $iaRecoveryPending "1" …`, or the insert moved into a helper macro
- * that `customInit` inserts) is out of scope for the same reason the #1074 rules
- * are shape rules — this pins the form the shipped file uses, and the
- * real-machine legs do not inject installer.nsh, so this rule is the only layer
- * that reads this file at all.
+ * that `customInit` inserts) turns the build red until this anchor is updated in
+ * the same change. Still out of reach: a frame that keeps this text but sits
+ * inside a false `!if`/`!ifdef`, and whether the insert's body still stages —
+ * those are `validateProcessGateGuards` and the real-machine legs.
  */
+
 export function validateProcessGateCallSite(source, filename) {
   const code = stripNsisComments(source)
   const problems = []
@@ -2763,18 +2782,26 @@ export function validateProcessGateCallSite(source, filename) {
   if (init === null) {
     problems.push('missing !macro customInit')
   } else {
-    const call = init.indexOf('!insertmacro iaStageApplication')
-    if (call === -1) {
+    const inserts = init.match(/!insertmacro\s+iaStageApplication\b/gi) ?? []
+    if (inserts.length === 0) {
       problems.push('customInit no longer stages the application (`!insertmacro iaStageApplication`)')
+    } else if (inserts.length > 1) {
+      problems.push(
+        `customInit stages the application ${inserts.length} times — the second one also runs on the recovery path, on top of what iaRecoverInterruptedInstall restored`,
+      )
     } else {
-      // The frame is what keeps staging — and the gate inside it — off the
-      // recovery path. Anchored on the frame's own text and closed after the
-      // call, so a call outside the frame (or after its `${EndIf}`) fails.
+      const call = init.search(/!insertmacro\s+iaStageApplication\b/i)
+      // The frame's own opening, then its matching close found by depth: the
+      // first `${EndIf}` after the opening need not be this frame's (a nested
+      // block before the insert supplies its own), and the insert has to sit on
+      // the frame's *positive* branch — the recovery path is the `${Else}` side,
+      // so a call there is the #1078 defect inverted.
       const frame = init.lastIndexOf('${If} $iaRecoveryPending != "1"', call)
-      const close = frame === -1 ? -1 : init.indexOf('${EndIf}', frame)
-      if (frame === -1 || close === -1 || close < call) {
+      const close = frame === -1 ? -1 : logicLibCloseIndex(init, frame)
+      const divided = frame !== -1 && init.slice(frame, call).search(DIVIDES_BLOCK) !== -1
+      if (frame === -1 || close === -1 || close < call || divided) {
         problems.push(
-          'customInit stages the application outside `${If} $iaRecoveryPending != "1"` — inverting that condition (or dropping the frame) silently skips staging and the process gate on a normal install, while the previous installation is left in place and the stock section installs over it',
+          'customInit stages the application outside the positive branch of `${If} $iaRecoveryPending != "1"` — inverting that condition, dropping the frame, or moving the insert onto its `${Else}` side skips staging and the process gate on a normal install, while the previous installation is left in place and the stock section installs over it',
         )
       }
     }
