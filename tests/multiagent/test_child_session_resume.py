@@ -62,6 +62,12 @@ from agent_harness.session import (
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_PAUSED,
+    RUN_STARTED,
+    SESSION_STARTED,
+    TASK_PROTECTED_FACT,
+    TOOL_CALL,
+    TOOL_RESULT,
+    USER_MESSAGE,
     Session,
 )
 from agent_harness.session.amend import AmendOptions
@@ -764,3 +770,345 @@ async def test_parent_store_unreadable_delegation_fails_closed_loudly(
     assert result.ok is False
     assert "无法确认委派树预算" in result.message  # DelegateTool 对 reserve 拒绝的包装语
     assert provider_impl.last_child_sessions == []  # 无幽灵子会话
+
+
+# ── #1085：续聊委派 coding 子会话不得获得约束工具入口 ──────────────────
+
+CONSTRAINT_TOOL_NAMES = frozenset({"register_constraint", "request_constraint_resolution"})
+
+
+@pytest.mark.asyncio
+async def test_resumed_delegated_coding_child_has_no_constraint_tools(
+    tmp_path: Path, monkeypatch,
+):
+    """#1085 AC1：续聊委派 coding 子会话，runtime 工具面不含约束工具。
+
+    旧实现 resume 路径无条件 include_constraint_tools=True → 本用例变红。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    captured = _capture_resumed_runtime(monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+
+    await harness.service.resume_and_launch(session_id=child_id, task="继续")
+    await _wait_terminal(harness, child_id)
+
+    resumed_names = {t.name for t in captured[-1].registry.list()}
+    leaked = CONSTRAINT_TOOL_NAMES & resumed_names
+    assert not leaked, f"委派子会话恢复后不应获得约束工具入口: {sorted(leaked)}"
+
+
+@pytest.mark.asyncio
+async def test_resumed_delegated_coding_child_constraint_bypass_rejected(
+    tmp_path: Path, monkeypatch,
+):
+    """#1085 AC2：旁路直接执行 register_constraint → SCOPE_NOT_ALLOWED，不写 task/protected_fact。
+
+    旧实现执行期 scope 检查不含委派判据 → 旁路调用成功落盘 → 本用例变红。
+    """
+    from agent_harness.session.context import (
+        ConstraintToolContext,
+        current_constraint_tool_context_var,
+        current_session_var,
+        run_context_var,
+    )
+    from agent_harness.session.derive import session_is_delegated_child
+    from agent_harness.session.session import Session
+    from agent_harness.tools.register_constraint import (
+        RegisterConstraintArgs,
+        RegisterConstraintTool,
+    )
+
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+    await harness.service.resume_and_launch(
+        session_id=child_id, task="规则：不要推送到 main",
+    )
+    await _wait_terminal(harness, child_id)
+
+    session = Session.load(harness.state.store, child_id)
+    assert session_is_delegated_child(session.events)
+    events = list(session.events)
+    resumed_idx = max(
+        i for i, e in enumerate(events) if e.type == RUN_STARTED
+    )
+    resumed_run_id = events[resumed_idx].run_id
+    source = next(
+        e for e in reversed(events[:resumed_idx])
+        if e.type == USER_MESSAGE
+    )
+    # 按 runtime 装配口径构造执行期上下文（is_delegated_child 由会话事件判定）。
+    context = ConstraintToolContext(
+        session_id=session.session_id,
+        run_id=resumed_run_id,
+        agent_id="default",
+        agent_profile="coding",
+        source_event_id=source.event_id,
+        source_seq=source.seq,
+        source_content=source.data["content"],
+        protected_fact_token_budget=8192,
+        is_delegated_child=session_is_delegated_child(session.events),
+    )
+    tokens = (
+        current_session_var.set(session),
+        run_context_var.set(resumed_run_id),
+        current_constraint_tool_context_var.set(context),
+    )
+    try:
+        result = await RegisterConstraintTool().execute(
+            RegisterConstraintArgs(value="不要推送到 main")
+        )
+    finally:
+        current_constraint_tool_context_var.reset(tokens[2])
+        run_context_var.reset(tokens[1])
+        current_session_var.reset(tokens[0])
+
+    assert result.data["status"] == "rejected"
+    assert result.data["reason_code"] == "SCOPE_NOT_ALLOWED"
+    facts = [e for e in session.events if e.type == TASK_PROTECTED_FACT]
+    assert not facts, "旁路调用不应写 task/protected_fact"
+
+
+@pytest.mark.asyncio
+async def test_resumed_root_coding_session_keeps_constraint_tools(
+    tmp_path: Path, monkeypatch,
+):
+    """#1085 回归：根 coding 会话恢复后约束工具不受影响（#663 AC01 现有用例）。"""
+    harness = _build_harness(tmp_path, monkeypatch)
+    captured = _capture_resumed_runtime(monkeypatch)
+
+    root_id = "t1085-root-coding"
+    harness.state.workspace_registry.create(root_id, workspace_root=tmp_path / "ws")
+    Session.start(harness.state.store, session_id=root_id, cwd=tmp_path / "ws")
+    await harness.service.resume_and_launch(
+        session_id=root_id, task="继续",
+        amend=AmendOptions(agent_profile="coding"),
+    )
+    await _wait_terminal(harness, root_id)
+
+    resumed_names = {t.name for t in captured[-1].registry.list()}
+    assert CONSTRAINT_TOOL_NAMES <= resumed_names
+
+
+def _capture_resumed_runtime_with_forced_constraint_tools(monkeypatch) -> list[Any]:
+    """捕获恢复路径 build_runtime 产出的 runtime，并强制打开约束工具菜单门禁。
+
+    只模拟"菜单门禁被绕过"的纵深防御场景：`include_constraint_tools*` 两个
+    flag 强制为 True，其余透传。执行期兜底（`agent/runtime.py` 按真实会话事件
+    装配 `ConstraintToolContext.is_delegated_child`）走真实代码——删掉那两行
+    装配，本文件的端到端用例变红（P3-3 钉住装配线）。
+    """
+    import agent_harness.session.service as service_module
+
+    captured: list[Any] = []
+    real_build = service_module.build_runtime  # 补丁前取原函数（防自引用递归）
+
+    async def _spy(**kwargs):
+        kwargs["include_constraint_tools"] = True
+        kwargs["include_constraint_resolution_tool"] = True
+        runtime = await real_build(**kwargs)
+        captured.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(service_module, "build_runtime", _spy)
+    return captured
+
+
+def _register_constraint_call_script() -> ScriptedModel:
+    """续聊 run 的模型剧本：真实调用一次 register_constraint，然后收尾。"""
+    return ScriptedModel([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "call_rc_e2e_0001",
+                "name": "register_constraint",
+                "args": {"value": "不要推送到 main"},
+            }],
+        ),
+        AIMessage(content="done"),
+    ])
+
+
+@pytest.mark.asyncio
+async def test_resumed_delegated_child_tool_call_rejected_end_to_end(
+    tmp_path: Path, monkeypatch,
+):
+    """#1085 P2-2 / 修回 P3-3：真端到端——续聊委派 child 的 run 里模型实际调用
+    `register_constraint`，走完整 runtime 执行路径。
+
+    菜单门禁被测试夹具强制绕过（纵深防御场景）；执行期 `ConstraintToolContext`
+    由 `agent/runtime.py` 按真实会话事件装配（非手工组装）。断言 tool/result
+    为 SCOPE_NOT_ALLOWED 且无 `task/protected_fact` 落盘。撤回
+    `register_constraint.py` 执行期的 `or context.is_delegated_child`，本用例
+    变红（调用成功落盘）。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+
+    # 续聊 run 用"会调工具"的剧本（spawn 路径不受影响：它经自己的 AgentFactory）。
+    def _factory(config, **kwargs):
+        return _register_constraint_call_script()
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _factory)
+    _capture_resumed_runtime_with_forced_constraint_tools(monkeypatch)
+
+    await harness.service.resume_and_launch(
+        session_id=child_id, task="规则：不要推送到 main",
+    )
+    await _wait_terminal(harness, child_id)
+
+    events = harness.events(child_id)
+    calls = [
+        e for e in events
+        if e.type == TOOL_CALL and e.data.get("tool_name") == "register_constraint"
+    ]
+    assert calls, "模型应实际发起 register_constraint 调用"
+    results = {
+        e.data["tool_call_id"]: e
+        for e in events if e.type == TOOL_RESULT
+    }
+    for call in calls:
+        result_event = results.get(call.data["tool_call_id"])
+        assert result_event is not None, "每次调用都应有配对的 tool/result"
+        payload = json.loads(result_event.data["content"])
+        assert payload["data"]["status"] == "rejected"
+        assert payload["data"]["reason_code"] == "SCOPE_NOT_ALLOWED"
+    facts = [e for e in events if e.type == TASK_PROTECTED_FACT]
+    assert not facts, "执行期兜底应阻止 task/protected_fact 落盘"
+
+
+# ── #1108：fork 委派子会话不丢失 delegation_tree_id ────────────────────
+
+async def _fork_delegated_child(harness: _Harness, child_id: str) -> str:
+    """经生产 fork 路径（`SessionService.fork`）从委派子会话派生 fork 产物。"""
+    anchor = next(
+        e.seq for e in reversed(harness.events(child_id))
+        if e.type == USER_MESSAGE
+    )
+    return await harness.service.fork(session_id=child_id, from_seq=anchor)
+
+
+@pytest.mark.asyncio
+async def test_fork_of_delegated_child_carries_delegation_marker(
+    tmp_path: Path, monkeypatch,
+):
+    """#1108 AC1：fork 委派子会话后，fork 产物的首事件携带委派标记。
+
+    未修复时 fork 掉落 `delegation_tree_id`（且首事件 agent_id 回落为
+    "default"）→ 本用例变红。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+    parent_started = harness.events(child_id)[0]
+    assert parent_started.type == SESSION_STARTED
+    assert "delegation_tree_id" in (parent_started.data or {})
+
+    fork_id = await _fork_delegated_child(harness, child_id)
+
+    fork_started = harness.events(fork_id)[0]
+    assert fork_started.type == SESSION_STARTED
+    assert (
+        fork_started.data.get("delegation_tree_id")
+        == parent_started.data["delegation_tree_id"]
+    )
+    # `_delegated_child_agent_profile` 靠首事件 agent_id 重建 AgentSpec 收窄面：
+    # 标记在而 agent_id 不可解析会响亮失败，所以父的 spec 名必须一并继承。
+    assert fork_started.agent_id == parent_started.agent_id == "coding"
+
+
+@pytest.mark.asyncio
+async def test_resumed_fork_of_delegated_child_has_no_constraint_tools(
+    tmp_path: Path, monkeypatch,
+):
+    """#1108 AC2：fork 产物续聊，runtime 工具面不含约束工具。
+
+    未修复时 fork 产物被当成非委派会话 → 重新获得两工具 → 本用例变红。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    captured = _capture_resumed_runtime(monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+    fork_id = await _fork_delegated_child(harness, child_id)
+
+    await harness.service.resume_and_launch(session_id=fork_id, task="继续")
+    await _wait_terminal(harness, fork_id)
+
+    resumed_names = {t.name for t in captured[-1].registry.list()}
+    leaked = CONSTRAINT_TOOL_NAMES & resumed_names
+    assert not leaked, f"fork 产物恢复后不应获得约束工具入口: {sorted(leaked)}"
+
+
+@pytest.mark.asyncio
+async def test_fork_of_delegated_child_tool_call_rejected_end_to_end(
+    tmp_path: Path, monkeypatch,
+):
+    """#1108 AC3：fork 产物的续聊 run 里模型实际调用 `register_constraint` →
+    `SCOPE_NOT_ALLOWED`，无 `task/protected_fact` 落盘。
+
+    菜单门禁被测试夹具强制绕过（纵深防御场景）；执行期 `ConstraintToolContext`
+    由 `agent/runtime.py` 按 fork 产物的真实会话事件装配。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project", target="coding",
+    )
+    fork_id = await _fork_delegated_child(harness, child_id)
+
+    def _factory(config, **kwargs):
+        return _register_constraint_call_script()
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _factory)
+    _capture_resumed_runtime_with_forced_constraint_tools(monkeypatch)
+
+    await harness.service.resume_and_launch(
+        session_id=fork_id, task="规则：不要推送到 main",
+    )
+    await _wait_terminal(harness, fork_id)
+
+    events = harness.events(fork_id)
+    calls = [
+        e for e in events
+        if e.type == TOOL_CALL and e.data.get("tool_name") == "register_constraint"
+    ]
+    assert calls, "模型应实际发起 register_constraint 调用"
+    results = {
+        e.data["tool_call_id"]: e
+        for e in events if e.type == TOOL_RESULT
+    }
+    for call in calls:
+        result_event = results.get(call.data["tool_call_id"])
+        assert result_event is not None, "每次调用都应有配对的 tool/result"
+        payload = json.loads(result_event.data["content"])
+        assert payload["data"]["status"] == "rejected"
+        assert payload["data"]["reason_code"] == "SCOPE_NOT_ALLOWED"
+    facts = [e for e in events if e.type == TASK_PROTECTED_FACT]
+    assert not facts, "执行期兜底应阻止 task/protected_fact 落盘"
+
+
+@pytest.mark.asyncio
+async def test_fork_of_root_session_carries_no_delegation_marker(
+    tmp_path: Path, monkeypatch,
+):
+    """#1108 AC4：根会话 fork 不受影响——无标记则不写标记，行为零变化。"""
+    harness = _build_harness(tmp_path, monkeypatch)
+    root_id = "t1108-root"
+    harness.state.workspace_registry.create(root_id, workspace_root=tmp_path / "ws")
+    Session.start(harness.state.store, session_id=root_id, cwd=tmp_path / "ws")
+    Session.load(harness.state.store, root_id).append(
+        USER_MESSAGE, {"content": "hello"},
+    )
+
+    fork_id = await harness.service.fork(session_id=root_id, from_seq=1)
+
+    fork_started = harness.events(fork_id)[0]
+    assert fork_started.type == SESSION_STARTED
+    assert "delegation_tree_id" not in (fork_started.data or {})
+    assert fork_started.agent_id == "default"
