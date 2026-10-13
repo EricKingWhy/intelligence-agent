@@ -410,7 +410,9 @@ def _project_instruction_cwd(
     sandbox_root = workspace.workspace_root
     if isinstance(sandbox_root, Path):
         resolved_root = sandbox_root.resolve()
-        if not recorded_roots or str(resolved_root) in recorded_roots:
+        if not recorded_roots or any(
+            resolved_root == Path(recorded_root) for recorded_root in recorded_roots
+        ):
             return resolved_root
         raise ValueError(
             "sandbox workspace root does not match its recorded workspace roots"

@@ -212,6 +212,7 @@ async def test_runtime_builds_with_windows_psec_project_instructions(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / ".git").mkdir()
+    requested_workspace = workspace.with_name("WORKSPACE")
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path / "harness"),
@@ -228,7 +229,7 @@ async def test_runtime_builds_with_windows_psec_project_instructions(
         root=tmp_path / "harness", backend="local",
     )
     sandbox = workspace_registry.create(
-        session_id, workspace_root=workspace, backend="windows_psec",
+        session_id, workspace_root=requested_workspace, backend="windows_psec",
     )
 
     try:
