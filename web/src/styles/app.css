@@ -7965,8 +7965,12 @@ button.json-row {
   color: var(--color-accent);
   border-color: var(--color-accent);
 }
-/* AC3：整批被拒的原因**常驻**（不自动消失——自动消失的提示等于没提示）。 */
-.composer-attach-error {
+/* AC3：整批被拒的原因**常驻**（不自动消失——自动消失的提示等于没提示）。
+   #1027：`.composer-attach-dropped`（发送时被剔除的未就绪附件的一次性提示）与它
+   同一样式——选择器分组，不另起逐字节重复的声明块；关闭按钮复用
+   `.composer-attach-error-btn`。 */
+.composer-attach-error,
+.composer-attach-dropped {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -7997,8 +8001,11 @@ button.json-row {
   color: var(--color-accent);
   border-color: var(--color-accent);
 }
-/* AC7：非视觉模型的可见禁用说明（与 .composer-locked-hint 同一版式语言）。 */
-.composer-attach-hint {
+/* AC7：非视觉模型的可见禁用说明（与 .composer-locked-hint 同一版式语言）。
+   #1027：`.composer-send-blocked`（上传中发送阻断提示）与它同一样式——选择器
+   分组，不另起逐字节重复的声明块。 */
+.composer-attach-hint,
+.composer-send-blocked {
   margin: var(--space-sm) var(--space-lg) 0;
   padding: 2px var(--space-sm);
   width: fit-content;
@@ -8006,6 +8013,12 @@ button.json-row {
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
   color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
+}
+/* #1027 兜底提示的文本（与 .composer-attach-error-text 同一版式语言）。 */
+.composer-attach-dropped-text {
+  flex: 1;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
 }
 /* 附图入口按钮：与发送/停止按钮同高（32px），落在 .composer-actions 里。 */
 .composer-attach-trigger {
