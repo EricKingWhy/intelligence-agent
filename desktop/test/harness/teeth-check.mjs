@@ -103,7 +103,14 @@ const directoriesMutations = {
     // move one level down together, so every comparison between them still
     // holds. Only the block's absolute place (and the guard's absolute bound)
     // catches it.
-    const clearCall = '    !insertmacro iaClearBackupDir'
+    // The clear call is no longer adjacent to the probe block: #1040 put the
+    // `iaPromoteBackupAlreadyLeftover:` label in between (installer-
+    // directories.nsh), and a bare `clearCall` anchor then matched nothing, so
+    // this mutation silently stopped applying and was reported as a survivor.
+    // The label rides along inside the wrapped region on purpose: read, probe,
+    // drop and clear must all move down together, which is the shape only the
+    // absolute bound catches.
+    const clearCall = ['iaPromoteBackupAlreadyLeftover:', '    !insertmacro iaClearBackupDir'].join(lf)
     const anchor = ['    !insertmacro iaReadLeftoverDir', shippedProbeBlock, clearCall].join(lf)
     if (!source.includes(anchor)) throw new Error('record-handling anchor not found')
     return source.replace(anchor, `    \${If} 1 == 0${lf}${anchor}${lf}    \${EndIf}`)
