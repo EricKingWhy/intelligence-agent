@@ -2,7 +2,8 @@
 
 契约：`docs/integration/PRD_PHASE_MULTITURN_TOTAL.md` §2.3 / §2.4
 - `POST /api/sessions/{id}/model` body `{provider, model_id}`
-- `MODEL_CHANGED` 事件 data：`from_provider` / `from_model_id` / `to_provider` / `to_model_id`
+- `MODEL_CHANGED` 事件 data：`from_provider` / `from_model_id` / `to_provider` / `to_model_id`，
+  可选 `reasoning_effort`（#1107：切换时生效的推理档位，有值落键、无值缺键）
 - runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁定的模型）
 - `POST /api/sessions/{id}/forks` body `{from_seq}` → 新 session_id，复用 `fork.py`
 
