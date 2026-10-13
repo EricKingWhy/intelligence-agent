@@ -6908,6 +6908,19 @@ button.json-row {
   border-radius: 50%;
   flex-shrink: 0;
 }
+/* 「其他」桶细分子项（#1095）：缩进成行内小字列表，只列 token 数
+   （无新颜色/尺寸 token，沿用既有变量——§15 双份定义不涉及）。 */
+.ctx-usage-legend-sub {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-left: 10px;
+}
+.ctx-usage-legend-subitem {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
 /* 缓存命中率一行：大字百分比 + 口径副标题（设计稿 §5 下区）。 */
 .ctx-usage-cache {
   border-top: 1px solid var(--border-subtle);
