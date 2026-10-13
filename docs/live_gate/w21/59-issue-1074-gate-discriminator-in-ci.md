@@ -150,6 +150,8 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
   `docs/gate/b352b1060d2c1361f71f250e0c5b4d20daa1c070.json`（`tracked_matches_head=true`、`untracked_total=0`）。
 - 修复轮冻结树 `ed9f1e0a`：**5/6**，❌ 仅 `coverage`，❌ 集合 = `{b352b106, ed9f1e0a}`（**恰为本批两笔代码提交**）；
   收据 `docs/gate/ed9f1e0a75511f9ceae060e911b31c8d44420404.json`。
+- **收尾树 `7abac831`（记账笔：证据 + 台账 4 行 + tracker / PHASE_STATUS / 月档）：6/6 PASS**——`coverage` 随台账行落盘转绿；
+  收据 `docs/gate/7abac8310628b1670ac7d8f04a469eaf3acc80ce.json`（`tracked_matches_head=true`、`untracked_total=0`，墙钟 50.9s）。
 - 满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据 ⇒ 机械面清零后才派两轴。
 - **为何在隔离副本里跑**：主工作树含另一条线的未提交改动（` M dev.sh`），`gate0.py` 的落盘前置会 fail-closed
   拒绝落盘（§8.7 第 3 条），而其处置建议明写「**不要** `git stash`」。副本为真仓 `git bundle` 克隆 + CI 同形依赖，
