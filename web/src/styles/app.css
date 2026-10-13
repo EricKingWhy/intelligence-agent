@@ -3824,6 +3824,20 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* #1093：Inspector 头标的推理档位徽标（.detail-effort-badge）——与
+ * .detail-profile-badge 同族视觉；档位是事实标签，整段仅在 run/started 携带
+ * reasoning_effort 时渲染（未声明不铺空位，不伪造 "default"）。 */
+.detail-effort-badge {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 3px var(--space-sm);
+  border-radius: var(--radius-full);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 /* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。
    用户取消（run/failed.reason=cancelled）同色域：同一件事在分组头与顶栏
    不能一个说「失败」一个说「已取消」。 */

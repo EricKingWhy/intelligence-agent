@@ -659,6 +659,9 @@ async def build_runtime(
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
     fallback_model = None
+    # #1093：备用模型请求侧档位名（透传给 Runtime，落 model/fallback 事件）。
+    # 未配 fallback 时保持 None ⇒ 该键缺席（有值才落键）。
+    fallback_effort: str | None = None
     if config.fallback is not None:
         fallback_effort = (
             config.fallback.reasoning_effort.default
@@ -979,6 +982,10 @@ async def build_runtime(
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
+        # #1093：请求侧推理档位名透传给 Runtime——primary 落 run/started，
+        # fallback 落 model/fallback（装配点只透传；改请求体装配路径不在此列）。
+        reasoning_effort=reasoning_effort,
+        fallback_reasoning_effort=fallback_effort,
         observability_sink=get_observability_sink(settings),
         steer_source=steer_source,
         # `#312`：run 作用域账本（暂停/恢复）+ 生效 fuse 的来源标识。装配点只透传。

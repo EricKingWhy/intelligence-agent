@@ -149,6 +149,10 @@ class FallbackTransition:
     reason: str
     primary_content_chars: int = 0
     primary_finish_reason: str | None = None
+    #: `#1093`：切换后生效的**备用模型**推理档位名（harness 语义档位，如
+    #: "minimal"/"standard"/"deep"）。None = 备用模型无档位声明 ⇒ 不落键
+    #: （与 `model` 同一「不可得 ≠ 默认值」口径；见 `11 §6.1`）。
+    reasoning_effort: str | None = None
 
     def event_data(self) -> dict[str, Any]:
         """model/fallback 事件的共用载荷（成功路径与终态路径同源）。
@@ -165,6 +169,8 @@ class FallbackTransition:
             data["primary_content_chars"] = self.primary_content_chars
         if self.primary_finish_reason:
             data["primary_finish_reason"] = self.primary_finish_reason
+        if self.reasoning_effort is not None:
+            data["reasoning_effort"] = self.reasoning_effort
         return data
 
 
@@ -231,6 +237,7 @@ class ModelFallbackCoordinator:
         policy: FallbackPolicy | None = None,
         primary_name: str = "primary",
         fallback_name: str = "fallback",
+        fallback_reasoning_effort: str | None = None,
         idle_timeout: float = 0.0,
         total_timeout: float = 0.0,
         gate: ModelCallGate | None = None,
@@ -242,6 +249,9 @@ class ModelFallbackCoordinator:
         self._fallback = fallback
         self._primary_name = primary_name
         self._fallback_name = fallback_name
+        # #1093：备用模型请求侧档位名——切换事实（FallbackTransition）带上它，
+        # Runtime 落 model/fallback 事件。None = 备用模型无档位声明 ⇒ 不落键。
+        self._fallback_reasoning_effort = fallback_reasoning_effort
         # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
         # total = 整条流必须 N 秒内完成（慢滴漏，冒烟 10 分钟场景）。
         # 每次流式尝试（含 fallback 重试）都被包住，超时抛 ModelStallError
@@ -556,6 +566,8 @@ class ModelFallbackCoordinator:
             reason=type(error).__name__,
             primary_content_chars=primary_content_chars,
             primary_finish_reason=primary_finish_reason,
+            # #1093：切换后生效的备用模型档位（与 #226 model 口径同构）。
+            reasoning_effort=self._fallback_reasoning_effort,
         ))
         self.current = self._fallback
         return True

@@ -283,6 +283,27 @@ export function deriveAgentProfile(events: AgentEvent[]): string | null {
   return profile;
 }
 
+// ── #1093：请求侧推理档位（Inspector 展示） ──
+
+/**
+ * 最后一个 `run/started` 携带的 reasoning_effort——纯事件真值，无状态。
+ *
+ * 后端 #1093 起 run/started.data 在**有声明时**带 `reasoning_effort`（本轮请求侧
+ * 选中的 harness 档位名，如 "minimal"/"standard"/"deep"）；无声明（模型无能力 /
+ * web「默认」位置省略该字段）时**键缺席**——返回 null，调用方整段不渲染
+ * （不可得 ≠ 默认档，`11 §6.1`；绝不伪造 "default"）。多 run 会话取**最后一个**，
+ * 与"当前这轮的运行条件"同口径。
+ */
+export function deriveReasoningEffort(events: AgentEvent[]): string | null {
+  let effort: string | null = null;
+  for (const e of events) {
+    if (e.type !== EventType.RUN_STARTED) continue;
+    const value = (e.data as Record<string, unknown> | undefined)?.reasoning_effort;
+    if (typeof value === 'string' && value.length > 0) effort = value;
+  }
+  return effort;
+}
+
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──
 
 /**

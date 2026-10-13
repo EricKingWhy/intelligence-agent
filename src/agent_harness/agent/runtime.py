@@ -1229,6 +1229,11 @@ class AgentRuntime:
         fallback_policy: FallbackPolicy | None = None,
         primary_model_name: str = "primary",
         fallback_model_name: str = "fallback",
+        # #1093：请求侧推理档位名（harness 语义，非 provider wire 值）。primary 落
+        # run/started.data.reasoning_effort；fallback 落 model/fallback.data（切到
+        # 备用模型后生效的档位）。None = 未声明 ⇒ 两处都不落键（不可得 ≠ 默认值）。
+        reasoning_effort: str | None = None,
+        fallback_reasoning_effort: str | None = None,
         # #823 / MM-02（A2）：按调用角色（"primary"/"fallback"）给出的视觉能力，
         # 让投影跟随**当前请求模型**（PRD D6 "fallback 自动降级"）。None = 不介入
         # （既有调用方与测试的 builder 视觉位保持构造期值，行为逐字不变）。
@@ -1268,6 +1273,10 @@ class AgentRuntime:
         self._fallback_policy = fallback_policy or TwoLevelFallbackPolicy()
         self._primary_model_name = primary_model_name
         self._fallback_model_name = fallback_model_name
+        # #1093：请求侧推理档位名——run/started 与 model/fallback 事件的数据源。
+        # None = 未声明（模型无能力声明 / web「默认」位置省略该字段）⇒ 不落键。
+        self._reasoning_effort = reasoning_effort
+        self._fallback_reasoning_effort = fallback_reasoning_effort
         # #823 / MM-02（A2）：角色 → 视觉能力映射（仅装配层提供；None = 不介入）。
         # 每次 build 前按 coordinator 当前角色把它写进 context_builder，使投影、
         # 估算、压缩、请求装配全部跟随当前请求模型（PRD D6）。
@@ -1669,6 +1678,8 @@ class AgentRuntime:
                     # primary_model_name = ModelConfig.model_name = 发给 provider 的
                     # `model` 值（model/provider.py:107）。取值口径见 ADR-0034。
                     model=self._primary_model_name,
+                    # #1093：本轮请求侧推理档位名落 durable 事件（有值才落键）。
+                    reasoning_effort=self._reasoning_effort,
                     # `#312`：run 作用域 ceiling 在**开始时就 durable**（只在显式配了
                     # ceiling 时落键）——否则重启后投影不出"配置的绝对 ceiling"，
                     # 而 `03 §3.4` 要求 limits 可从事件重建成同样的值。
@@ -3878,6 +3889,8 @@ class AgentRuntime:
             policy=self._fallback_policy,
             primary_name=self._primary_model_name,
             fallback_name=self._fallback_model_name,
+            # #1093：切到备用模型后生效的档位名（另一条事实，落 model/fallback）。
+            fallback_reasoning_effort=self._fallback_reasoning_effort,
             idle_timeout=self._stream_idle_timeout,
             total_timeout=self._stream_total_timeout,
             gate=self._model_call_gate,
