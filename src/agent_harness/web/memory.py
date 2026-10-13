@@ -189,10 +189,13 @@ class MemorySettingsPatch(BaseModel):
 
     extraction_enabled: bool | None = None
     recall_enabled: bool | None = None
+    #: #1039：主端点确定性 provider 类错误是否允许落一次备用（默认开）。
+    fallback_enabled: bool | None = None
 
     @model_validator(mode="after")
     def _at_least_one(self) -> MemorySettingsPatch:
-        if self.extraction_enabled is None and self.recall_enabled is None:
+        if (self.extraction_enabled is None and self.recall_enabled is None
+                and self.fallback_enabled is None):
             raise ValueError("at least one setting must be provided")
         return self
 
@@ -200,6 +203,7 @@ class MemorySettingsPatch(BaseModel):
 class MemorySettingsResponse(BaseModel):
     extraction_enabled: bool
     recall_enabled: bool
+    fallback_enabled: bool
 
 
 class MemoryRecallExplanation(BaseModel):
@@ -486,6 +490,7 @@ def register_memory_routes(app: FastAPI) -> None:
         return MemorySettingsResponse(
             extraction_enabled=settings.extraction_enabled,
             recall_enabled=settings.recall_enabled,
+            fallback_enabled=settings.fallback_enabled,
         )
 
     @app.patch("/api/memory-settings")
@@ -499,6 +504,7 @@ def register_memory_routes(app: FastAPI) -> None:
             settings = await service.update_settings(
                 trusted, extraction_enabled=request.extraction_enabled,
                 recall_enabled=request.recall_enabled,
+                fallback_enabled=request.fallback_enabled,
             )
         except StorageBusyError as error:
             # #376 票面失败点（store.update_settings 的 BEGIN IMMEDIATE）走同一条 mapping。
@@ -509,6 +515,7 @@ def register_memory_routes(app: FastAPI) -> None:
         return MemorySettingsResponse(
             extraction_enabled=settings.extraction_enabled,
             recall_enabled=settings.recall_enabled,
+            fallback_enabled=settings.fallback_enabled,
         )
 
     @app.get("/api/sessions/{session_id}/memory-recalls")

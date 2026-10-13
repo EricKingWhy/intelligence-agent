@@ -93,6 +93,7 @@ CREATE INDEX IF NOT EXISTS memory_v2_tombstones_owner
 CREATE TABLE IF NOT EXISTS memory_v2_settings (
     tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
     extraction_enabled INTEGER NOT NULL, recall_enabled INTEGER NOT NULL,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, user_id)
 );
@@ -169,6 +170,8 @@ class MemoryDeletionReceiptV2:
 class MemorySettingsV2:
     extraction_enabled: bool = True
     recall_enabled: bool = True
+    #: #1039 / PRD §5.3 第 4 条修订：主端点确定性 provider 类错误是否允许落一次备用。
+    fallback_enabled: bool = True
 
 
 class SqliteMemoryV2Store:
@@ -192,6 +195,14 @@ class SqliteMemoryV2Store:
                 # Existing content-free tombstones cannot recover their old version ordinal.
                 await connection.execute(
                     "ALTER TABLE memory_v2_tombstones ADD COLUMN version INTEGER"
+                )
+            async with connection.execute("PRAGMA table_info(memory_v2_settings)") as cursor:
+                settings_columns = {row["name"] for row in await cursor.fetchall()}
+            if "fallback_enabled" not in settings_columns:
+                # #1039：旧行未表达过该开关 ⇒ 落在裁决的默认「开」（DEFAULT 1）。
+                await connection.execute(
+                    "ALTER TABLE memory_v2_settings ADD COLUMN "
+                    "fallback_enabled INTEGER NOT NULL DEFAULT 1"
                 )
             await connection.commit()
 
@@ -631,45 +642,57 @@ class SqliteMemoryV2Store:
         async with (
             connect(self.database_path) as connection,
             connection.execute(
-                "SELECT extraction_enabled, recall_enabled FROM memory_v2_settings "
+                "SELECT extraction_enabled, recall_enabled, fallback_enabled "
+                "FROM memory_v2_settings "
                 "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
             ) as cursor,
         ):
             row = await cursor.fetchone()
         if row is None:
             return MemorySettingsV2()
-        return MemorySettingsV2(bool(row["extraction_enabled"]), bool(row["recall_enabled"]))
+        return MemorySettingsV2(
+            bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
+            bool(row["fallback_enabled"]),
+        )
 
     @retry_on_busy
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
+        fallback_enabled: bool | None = None,
     ) -> MemorySettingsV2:
         async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             async with connection.execute(
-                "SELECT extraction_enabled, recall_enabled FROM memory_v2_settings "
+                "SELECT extraction_enabled, recall_enabled, fallback_enabled "
+                "FROM memory_v2_settings "
                 "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
             ) as cursor:
                 row = await cursor.fetchone()
             current = MemorySettingsV2() if row is None else MemorySettingsV2(
                 bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
+                bool(row["fallback_enabled"]),
             )
             extraction = (
                 current.extraction_enabled if extraction_enabled is None else extraction_enabled
             )
             recall = current.recall_enabled if recall_enabled is None else recall_enabled
+            fallback = (
+                current.fallback_enabled if fallback_enabled is None else fallback_enabled
+            )
             await connection.execute(
                 "INSERT INTO memory_v2_settings "
-                "(tenant_id, user_id, extraction_enabled, recall_enabled, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
+                "(tenant_id, user_id, extraction_enabled, recall_enabled, "
+                "fallback_enabled, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
                 "extraction_enabled=excluded.extraction_enabled, "
-                "recall_enabled=excluded.recall_enabled, updated_at=excluded.updated_at",
+                "recall_enabled=excluded.recall_enabled, "
+                "fallback_enabled=excluded.fallback_enabled, updated_at=excluded.updated_at",
                 (trusted.tenant_id, trusted.user_id, int(extraction), int(recall),
-                 self._now().isoformat()),
+                 int(fallback), self._now().isoformat()),
             )
             await connection.commit()
-        return MemorySettingsV2(extraction, recall)
+        return MemorySettingsV2(extraction, recall, fallback)
 
     @retry_on_busy
     async def purge_expired_tombstones(self, *, now: datetime | None = None) -> int:

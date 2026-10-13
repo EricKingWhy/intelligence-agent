@@ -600,7 +600,7 @@ class MemoryJobExecutor:
         self, job: MemoryFormationJob, *, worker_id: str,
         run_events: Sequence[SessionEvent], roles: MemoryModelRoles,
         history: Sequence[SessionEvent] = (), sink: MemoryJobEventSink | None = None,
-        explicit_remember: bool = False,
+        explicit_remember: bool = False, fallback_enabled: bool = True,
     ) -> MemoryJobResult | None:
         """执行作业；`None` = 竞争失败（属主不是我 / lease 过期 / 已终结）——无副作用。
 
@@ -673,7 +673,7 @@ class MemoryJobExecutor:
             formation_started = self._clock()
             formation, refs = await self._form(
                 job, run_events=run_events, history=history, roles=roles,
-                budget=budget, progress=progress)
+                budget=budget, progress=progress, fallback_enabled=fallback_enabled)
             state.candidates = len(formation.candidates)
             self._observe("formation", {
                 "job_id": job_id, "session_id": job.session_id, "run_id": run_id,
@@ -712,7 +712,7 @@ class MemoryJobExecutor:
             adjudication_started = self._clock()
             verdicts, relevant_memories = await self._adjudicate(
                 job, candidates=selection.accepted, roles=roles, budget=budget,
-                progress=progress)
+                progress=progress, fallback_enabled=fallback_enabled)
             self._observe("adjudication", {
                 "job_id": job_id, "stage": MemoryJobStage.ADJUDICATING.value,
                 "scope": scope, "candidates": len(selection.accepted),
@@ -915,7 +915,7 @@ class MemoryJobExecutor:
     async def _form(
         self, job: MemoryFormationJob, *, run_events: Sequence[SessionEvent],
         history: Sequence[SessionEvent], roles: MemoryModelRoles,
-        budget: MemoryJobBudget, progress: _Progress,
+        budget: MemoryJobBudget, progress: _Progress, fallback_enabled: bool = True,
     ) -> tuple[FormationResult, Mapping[str, str]]:
         """跑 formation，并把它**发给模型的别名对照表**一并交回调用方。
 
@@ -934,12 +934,13 @@ class MemoryJobExecutor:
         result = await self._invoke_parsed(
             MemoryModelStage.FORMATION, _FORMATION_PROMPT, payload,
             parse=parse_formation_result, job=job, roles=roles,
-            budget=budget, progress=progress)
+            budget=budget, progress=progress, fallback_enabled=fallback_enabled)
         return result, formation_input.refs
 
     async def _adjudicate(
         self, job: MemoryFormationJob, *, candidates: Sequence[FormationCandidate],
         roles: MemoryModelRoles, budget: MemoryJobBudget, progress: _Progress,
+        fallback_enabled: bool = True,
     ) -> tuple[list[AdjudicationResult], tuple[MemoryRecordV2, ...]]:
         memories = await self._relevant(
             "\n".join(candidate.content for candidate in candidates), job.trusted)
@@ -954,7 +955,7 @@ class MemoryJobExecutor:
         verdicts = await self._invoke_parsed(
             MemoryModelStage.ADJUDICATION, _ADJUDICATION_PROMPT, payload,
             parse=parse_adjudication_results, job=job, roles=roles,
-            budget=budget, progress=progress)
+            budget=budget, progress=progress, fallback_enabled=fallback_enabled)
         if len(verdicts) != len(candidates):
             self._observe("schema", {
                 "job_id": job.job_id, "model_stage": MemoryModelStage.ADJUDICATION.value,
@@ -980,7 +981,7 @@ class MemoryJobExecutor:
         self, stage: MemoryModelStage, system_prompt: str, payload: dict[str, Any], *,
         job: MemoryFormationJob,
         roles: MemoryModelRoles, budget: MemoryJobBudget, progress: _Progress,
-        repair: bool = False,
+        repair: bool = False, fallback_enabled: bool = True,
     ) -> str:
         """一次模型任务：按 R9 的尝试序列调用，失败分类后决定重试/切换/停。
 
@@ -988,7 +989,14 @@ class MemoryJobExecutor:
         共用一份，见 T5 的账本 docstring）。解析失败（schema）由 `_invoke_parsed` 处理
         （R9 修订 #485：每阶段一次修复重试）——它发生在"拿到响应之后"，不属于 provider
         错误的范畴。`repair=True` 只是把"这是修复调用"记进观测元数据，不改变尝试序列。
+
+        #1039：`fallback_enabled`（面板开关，默认开）为 True 且主备解析到**不同**目标时，
+        把 `deterministic_fallback=True` 交给 `next_attempt` —— 确定性 provider 类错误
+        （如 400）在 primary 上允许落**一次**备用。开关关时该参数为 False，`next_attempt`
+        逐字回到"非瞬时一次就停"。分类只认 provider 类错误（见 `is_deterministic_provider_error`），
+        解析错 / 内部错不经这条通道。
         """
+        deterministic_fallback = fallback_enabled and _roles_are_distinct_targets(roles)
         attempt = FIRST_ATTEMPT
         while True:
             model = roles.primary if attempt.role is MemoryModelRole.PRIMARY else roles.fallback
@@ -1067,17 +1075,23 @@ class MemoryJobExecutor:
                     if evidence:
                         metadata["evidence_sha256"] = _observation_hash(evidence)
                 self._observe("model", metadata)
-                if not transient:
-                    raise _Degraded(DegradedReason.PROVIDER_ERROR) from None
-                following = next_attempt(attempt, error, has_fallback=roles.has_fallback)
+                following = next_attempt(
+                    attempt, error, has_fallback=roles.has_fallback,
+                    deterministic_fallback=deterministic_fallback)
                 if following is None:
-                    raise _Degraded(DegradedReason.TRANSIENT_EXHAUSTED) from None
+                    # 瞬时耗尽 ⇒ TRANSIENT_EXHAUSTED；确定性 provider 错（开关关 / 无备用 /
+                    # 同目标）⇒ PROVIDER_ERROR（#1039：开关关时与旧行为逐字相同）。
+                    raise _Degraded(
+                        DegradedReason.TRANSIENT_EXHAUSTED if transient
+                        else DegradedReason.PROVIDER_ERROR
+                    ) from None
                 attempt = following
 
     async def _invoke_parsed(
         self, stage: MemoryModelStage, system_prompt: str, payload: dict[str, Any], *,
         parse: Callable[[str], Any], job: MemoryFormationJob,
         roles: MemoryModelRoles, budget: MemoryJobBudget, progress: _Progress,
+        fallback_enabled: bool = True,
     ) -> Any:
         """调用一次模型并按阶段契约解析；解析失败 ⇒ **一次**修复重试，再败降级。
 
@@ -1089,7 +1103,8 @@ class MemoryJobExecutor:
         不在修复范围内，维持即刻降级。
         """
         raw = await self._invoke(stage, system_prompt, payload, job=job, roles=roles,
-                                 budget=budget, progress=progress)
+                                 budget=budget, progress=progress,
+                                 fallback_enabled=fallback_enabled)
         try:
             parsed = parse(raw)
         except ModelOutputError as error:
@@ -1102,7 +1117,8 @@ class MemoryJobExecutor:
                             "不要输出契约外字段或非 JSON 内容。",
             }
             raw = await self._invoke(stage, system_prompt, feedback, job=job, roles=roles,
-                                     budget=budget, progress=progress, repair=True)
+                                     budget=budget, progress=progress, repair=True,
+                                     fallback_enabled=fallback_enabled)
             try:
                 parsed = parse(raw)
             except ModelOutputError as repair_error:
@@ -1346,6 +1362,21 @@ class _Progress:
 # --------------------------------------------------------------------------------------
 # 纯函数
 # --------------------------------------------------------------------------------------
+
+
+def _roles_are_distinct_targets(roles: MemoryModelRoles) -> bool:
+    """主/备是否解析到**不同**目标（provider + 端点 + 模型名）。
+
+    #1039：面板降级开关打开时，"确定性 provider 错 ⇒ 落一次备用"只在这两者**不是同一个
+    目标**时才有意义——落到同一个坏端点等于把一次 400 换成再一次 400。判据含 `base_url`：
+    #203 的同 id override 可以换端点而不换 provider 名，只比 provider 名会漏掉这种"其实
+    已经换了目标"的形态。
+    """
+    primary, fallback = roles.primary, roles.fallback
+    if primary is None or fallback is None:
+        return False
+    return (primary.provider, primary.base_url, primary.model_name) != (
+        fallback.provider, fallback.base_url, fallback.model_name)
 
 
 def _validate_adjudication_target(

@@ -105,7 +105,13 @@ async def build_memory_formation(
     再按 `Path(settings.workspace_dir)/"sessions"` 建一份，就是路径约定抄了第二遍——
     一旦两处分叉，症状是"job 永远切片为空 ⇒ 每轮降级"，没有任何东西报路径不一致。
     """
-    roles = roles or resolve_memory_roles(settings)
+    if roles is None:
+        # #1039：角色映射可指向 #203 自定义供应商（`provider:model` 命名空间）⇒ 解析时
+        # 要带上 store。装配层通常由 wiring 显式传入 roles（同样带 store），这一支是
+        # 直调方的便捷回退，与生产路径同一语义。
+        from agent_harness.model.provider_store import ProviderStore
+
+        roles = resolve_memory_roles(settings, store=ProviderStore.for_settings(settings))
     if roles.primary is None:
         # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与 provider 名是
         # PRD §5.3.3 公开固定的映射，写出来是为了这句话可执行。
@@ -129,8 +135,9 @@ async def build_memory_formation(
         session_store=sessions,
         observer=(observability.memory_observation if observability.enabled else None),
     )
-    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
-    # SQLite 读取可信用户的 extraction_enabled；设置由 #300 的治理 API 持久化。
+    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每个 job 执行时从
+    # SQLite 读取可信用户的 extraction_enabled（入队资格）与 fallback_enabled（#1039
+    # 降级开关）；两项设置都由 #300 的治理 API 持久化。
     runner = MemoryJobRunner(
         jobs=jobs, sessions=sessions, executor=executor, roles=roles,
         max_concurrency=settings.memory_v2_max_concurrency,

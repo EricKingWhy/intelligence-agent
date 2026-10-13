@@ -945,6 +945,46 @@ async def test_durable_extraction_setting_gates_each_subsequent_run(env: Env) ->
         identity_context_var.reset(token)
 
 
+@pytest.mark.asyncio
+async def test_durable_fallback_setting_is_read_per_job_and_reaches_the_executor(env: Env) -> None:
+    """#1039：降级开关同样是**每 job 运行时读**（不是构造期烘死），并透传给执行器。
+
+    与 `extraction_enabled` 同链（`memory_v2.get_settings`），但读点在**执行时**：
+    开关改变后，先入队后执行的 job 走的是新值——这正是"运行时生效"的含义。
+    """
+    identity = IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])
+    token = set_identity_context(identity)
+    try:
+        trusted = TrustedMemoryIdentity("local", "local")
+        await env.service.update_settings(trusted, fallback_enabled=False)
+
+        seen: list[bool] = []
+
+        class _RecordingExecutor:
+            async def run(self, job, *, worker_id, **kwargs):
+                seen.append(kwargs["fallback_enabled"])
+                # 终结本 job：按用户串行的认领锁要放掉，第二个 job 才跑得起来。
+                await env.jobs.transition(
+                    job_id=job.job_id, worker_id=worker_id,
+                    stage=MemoryJobStage.DEGRADED, state={"phase": "test"},
+                    reason="recording-only",
+                )
+
+        runner = _runner(env, executor=_RecordingExecutor(), memory_v2=env.service)
+        _seed_run(env, run_id="read-the-setting")
+        assert await _notify(runner, env, run_id="read-the-setting") is not None
+        await runner.drain()
+        assert seen == [False]
+
+        await env.service.update_settings(trusted, fallback_enabled=True)
+        _seed_run(env, run_id="re-read-the-setting")
+        await _notify(runner, env, run_id="re-read-the-setting")
+        await runner.drain()
+        assert seen == [False, True]
+    finally:
+        identity_context_var.reset(token)
+
+
 # --------------------------------------------------------------------------------------
 # 2. 新鲜路径：入队 → 服务循环 → 写盘 → 事件（R12 / AC10）
 # --------------------------------------------------------------------------------------

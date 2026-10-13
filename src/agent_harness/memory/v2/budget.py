@@ -46,7 +46,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from agent_harness.model.fallback import is_transient_model_error
+from agent_harness.model.fallback import (
+    is_deterministic_provider_error,
+    is_transient_model_error,
+)
 
 #: PRD §5.3 第 5 条：整作业墙钟上界（秒）。
 MEMORY_JOB_TIMEOUT_SECONDS = 120.0
@@ -199,18 +202,31 @@ FIRST_ATTEMPT = MemoryAttempt(MemoryModelRole.PRIMARY, 1)
 
 
 def next_attempt(
-    current: MemoryAttempt, error: BaseException, *, has_fallback: bool
+    current: MemoryAttempt, error: BaseException, *, has_fallback: bool,
+    deterministic_fallback: bool = False,
 ) -> MemoryAttempt | None:
     """R9 的下一次尝试；返回 `None` = 不再重试（终态 degraded、零写入）。
 
-    - **非瞬时**错误（认证 / 权限 / 内容策略 / 任何意外异常）一律返回 `None`：
-      换一个 provider 修不好一个认证错，也修不好一个 bug。
+    - **非瞬时**错误（认证 / 权限 / 内容策略 / 任何意外异常）默认一律返回 `None`：
+      换一个 provider 修不好一个认证错，也修不好一个 bug。**唯一例外**是
+      `deterministic_fallback=True`（#1039 的面板降级开关，默认开）**且**错误是
+      **确定性 provider 类**错（`is_deterministic_provider_error`：端点给了 4xx 响应）
+      **且**当前在 primary **且**配了备用 ⇒ 落**一次** fallback 尝试。这正是
+      "primary 端点确定性 400 / 额度耗尽"的真实场景；执行器只在主备解析到**不同**
+      目标时把该开关置 True。
     - 解析失败（schema）根本不进本函数：它在 `_invoke_parsed` 处理（R9 修订 #485，
       每阶段一次修复重试），不占用这里的尝试序列。
     - primary：第 1→2→3 次；第 3 次之后**且有备用**才切到 fallback 的初次。
     - fallback：第 1→2 次；之后停。**never 切回** primary。
     """
     if not is_transient_model_error(error):
+        if (
+            deterministic_fallback
+            and current.role is MemoryModelRole.PRIMARY
+            and has_fallback
+            and is_deterministic_provider_error(error)
+        ):
+            return MemoryAttempt(MemoryModelRole.FALLBACK, 1)
         return None
     if current.role is MemoryModelRole.PRIMARY:
         if current.number < PRIMARY_MAX_ATTEMPTS:

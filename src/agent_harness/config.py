@@ -94,6 +94,18 @@ class Settings(BaseSettings):
     # `gt=0` 不是形式约束：0 会让服务循环派不出任何 job，表现为"记忆永远不形成"——
     # 配错必须响亮失败。消费点唯一：`memory/v2/assembly.build_memory_formation`。
     memory_v2_max_concurrency: int = Field(default=4, gt=0)
+    # #1039：记忆作业的两个模型角色（PRD §5.3 第 3 条修订）——**运营者可配、默认不变**。
+    # 取值 = 内置 preset 名（如 `senseaudio`）或 #203 自定义供应商的 `provider:model`
+    # 命名空间（复用 `from_custom_provider` 的寻址，不另造一套）。映射是**应用级**
+    # （部署者改、重启生效）：装配层进程级解析一次（`memory/v2/roles.py`），与面板级
+    # per-user 降级开关（`memory_v2_settings.fallback_enabled`）分层——这正是 #1039 的
+    # 两条裁决各归其层的落点。默认字面量与 `roles.MEMORY_PRIMARY_PROVIDER` /
+    # `roles.MEMORY_FALLBACK_PROVIDER` 分列两处而刻意不 import（config 是依赖图最底层，
+    # roles 反向依赖它，import 会踩部分初始化循环）；两者相等由
+    # `tests/memory/v2/test_v2_roles.py::test_the_role_mapping_defaults_to_the_providers_the_prd_names`
+    # 钉住。
+    memory_primary_provider: str = "senseaudio"
+    memory_fallback_provider: str = "qwen"
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

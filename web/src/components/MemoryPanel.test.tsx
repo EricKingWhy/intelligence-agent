@@ -52,7 +52,7 @@ async function renderPanel(state: MemoriesState): Promise<void> {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     return Promise.resolve(response(url.includes('/api/memory-settings')
-      ? { extraction_enabled: true, recall_enabled: true }
+      ? { extraction_enabled: true, recall_enabled: true, fallback_enabled: true }
       : []));
   }));
   await act(async () => {
@@ -140,7 +140,7 @@ describe('MemoryPanel pagination boundary', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       return Promise.resolve(url.includes('/api/memory-settings')
-        ? response({ extraction_enabled: true, recall_enabled: true })
+        ? response({ extraction_enabled: true, recall_enabled: true, fallback_enabled: true })
         : response([]));
     }));
 
@@ -155,5 +155,43 @@ describe('MemoryPanel pagination boundary', () => {
     expect(footer?.textContent).toContain('已达到查询上限');
     expect(footer?.textContent).toContain('缩小筛选范围');
     expect(document.body.querySelector('.memory-more-btn')).toBeNull();
+  });
+});
+
+describe('MemoryPanel fallback switch', () => {
+  it('renders the fallback switch from the server and persists a toggle', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/memory-settings') && init?.method === 'PATCH') {
+        return Promise.resolve(response({
+          extraction_enabled: true, recall_enabled: true, fallback_enabled: true,
+        }));
+      }
+      if (url.includes('/api/memory-settings')) {
+        return Promise.resolve(response({
+          extraction_enabled: true, recall_enabled: true, fallback_enabled: false,
+        }));
+      }
+      return Promise.resolve(response([]));
+    });
+    vi.mocked(useMemories).mockReturnValue(memoriesState());
+    vi.stubGlobal('fetch', fetchMock);
+
+    await act(async () => {
+      root.render(<MemoryPanel open onOpenChange={() => {}} />);
+      await Promise.resolve();
+    });
+
+    const label = Array.from(document.body.querySelectorAll('label'))
+      .find((item) => item.textContent?.includes('允许降级到备用模型'));
+    const checkbox = label?.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+    expect(checkbox).not.toBeNull();
+    expect(checkbox?.checked).toBe(false);
+
+    await act(async () => { checkbox?.click(); await Promise.resolve(); });
+
+    const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(patchCall).toBeDefined();
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({ fallback_enabled: true });
   });
 });

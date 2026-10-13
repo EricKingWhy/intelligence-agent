@@ -357,6 +357,7 @@ class MemoryJobRunner:
         roles: MemoryModelRoles,
         sink: MemoryJobEventSink | None = None,
         extraction_enabled: bool = True,
+        fallback_enabled: bool = True,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         recovery_limit: int = DEFAULT_RECOVERY_LIMIT,
         worker_id: str | None = None,
@@ -375,6 +376,9 @@ class MemoryJobRunner:
         #: 允许注入是为了让用例能对着裸 list 断言事件，而不必去读会话日志。
         self._sink = sink
         self._extraction_enabled = extraction_enabled
+        #: #1039：降级开关的**构造期默认**（无 V2 service 时的回退）；生产路径每 job
+        #: 从 SQLite 读（见 `_run_one`），与 `extraction_enabled` 同一口井。
+        self._fallback_enabled = fallback_enabled
         self._recovery_limit = recovery_limit
         self._max_concurrency = max_concurrency
         # lease 属主：**进程内稳定**（同一个 runner 的所有认领都用它）。带 pid 是为了
@@ -621,9 +625,22 @@ class MemoryJobRunner:
                 # 显式命令路径的生产方属于 #300（governance API），它**不能**搭这条入队口
                 # ——那会让"用户要求记住"被静默降级成"自动形成"，而这一轮的候选带不带
                 # 同意是一条**持久事实**（写在 job 上没有，恢复后就不可知）。
+                #
+                # #1039：降级开关**每 job 运行时读**（与 `extraction_enabled` 同链），
+                # 让面板改动对随后执行的 job 立即生效；无 V2 service 时退回构造期默认。
+                fallback_enabled = self._fallback_enabled
+                if self.memory_v2 is not None:
+                    trusted = TrustedMemoryIdentity(
+                        tenant_id=job.tenant_id, user_id=job.user_id,
+                        project_id=job.project_id,
+                    )
+                    fallback_enabled = (
+                        await self.memory_v2.get_settings(trusted)
+                    ).fallback_enabled
                 return await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
+                    fallback_enabled=fallback_enabled,
                 )
             except Exception:
                 logger.exception("Memory V2 job %s failed outside the executor", job.job_id)

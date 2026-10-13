@@ -100,6 +100,32 @@ def is_transient_model_error(error: BaseException) -> bool:
     return transport_failure_kind(error) is not None
 
 
+def is_deterministic_provider_error(error: BaseException) -> bool:
+    """判断错误是否为**确定性 provider 类**错误（#1039 / PRD §5.3 第 4 条修订）。
+
+    "provider 类" = 端点给了 HTTP 响应且该响应不是瞬时的（4xx 认证/权限/参数/策略错，
+    含 400/401/403/404/422）。这些错在**同一端点**上重试无用，但换一个**不同** provider
+    可能正是出路——记忆作业的降级开关（默认开）据此允许落一次备用。
+
+    判据与 `is_transient_model_error` **互补且不重叠**：先排掉瞬时（5xx / 429 / 传输层），
+    再要求"拿到了 HTTP 状态码"。因此：
+
+    - 无状态码的确定性错（`formation.ModelOutputError` 的解析失败、执行器内部
+      `RuntimeError`）返回 **False**——它们不是 provider 说"不接受"，拿坏端点掩盖
+      parse/bug 是错误的兜底；
+    - 传输层失败（超时/连接）已被瞬时判据吃掉，返回 False。
+
+    与瞬时判据同一个家（本模块）是刻意的：两份分类放在两处必然漂移。
+    """
+    if is_transient_model_error(error):
+        return False
+    if isinstance(error, httpx.HTTPStatusError):
+        return True
+    status_code = getattr(error, "status_code", None)
+    # bool 是 int 的子类，先排掉（与瞬时判据同款防呆）。
+    return isinstance(status_code, int) and not isinstance(status_code, bool)
+
+
 @dataclass(frozen=True)
 class FallbackTransition:
     """一次成功的模型切换事实（Runtime 持久化为 model/fallback 事件）。

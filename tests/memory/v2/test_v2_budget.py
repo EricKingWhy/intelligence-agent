@@ -3,7 +3,9 @@
 两条 seam，都是纯对象、都不碰 I/O：
 
 - `MemoryJobBudget`：120 秒 / 7 次调用（瞬态 3+2 + 每阶段 1 次修复，R9 修订 #485）/ 32k 累计输入 token 的账本；
-- `next_attempt`：主 1+2、备 1+1，**非瞬时错误不重试也不切备**。
+- `next_attempt`：主 1+2、备 1+1，**非瞬时错误不重试也不切备**（#1039 新增的
+  `deterministic_fallback=True` 开关是唯一例外：确定性 provider 类错误允许落**一次**
+  备用；默认 False = 逐字回到旧行为）。
 
 时钟由构造方注入 ⇒ "已经过了 120 秒"在测试里是**手摇**的，不是真的等（Verification
 第 3 条要求确定性假模型下的预算判定）。
@@ -427,6 +429,66 @@ def test_the_schema_case_is_the_formation_contract_error() -> None:
     assert issubclass(ModelOutputError, ValueError)
     assert is_transient_model_error(ModelOutputError("x")) is False
     assert next_attempt(FIRST_ATTEMPT, ModelOutputError("x"), has_fallback=True) is None
+
+
+# --------------------------------------------------------------------------------------
+# 3b · 确定性 provider 错误的单次降级（#1039 / PRD §5.3 第 4 条修订）
+# --------------------------------------------------------------------------------------
+#
+# 面板开关（per-user，默认开）打开时，`memory.primary` 的**确定性 provider 类**错误
+# （如 400，不是瞬时/网络错）允许落**一次** fallback 尝试——这正是"主端点额度耗尽"
+# 这个真实场景。开关关闭时逐字回到 R9 旧行为（本文件其余用例仍钉着旧路径）。
+# 判据只认 provider 类错误：schema/解析错与执行器内部错**不能**借这条通道降级。
+
+
+@pytest.mark.parametrize(
+    "error",
+    [_StatusError(400), _StatusError(401), _StatusError(403), _StatusError(404),
+     _http_status_error(400)],
+    ids=["policy-400", "auth-401", "permission-403", "not-found-404", "httpx-400"],
+)
+def test_a_deterministic_provider_error_switches_when_the_switch_allows_it(
+    error: BaseException,
+) -> None:
+    assert next_attempt(FIRST_ATTEMPT, error, has_fallback=True,
+                        deterministic_fallback=True) == MemoryAttempt(
+        MemoryModelRole.FALLBACK, 1)
+
+
+def test_deterministic_fallback_is_off_by_default_and_then_matches_r9() -> None:
+    """开关关（默认）= R9 旧行为：非瞬时一次就停，不切备用。"""
+    assert next_attempt(FIRST_ATTEMPT, _StatusError(400), has_fallback=True) is None
+
+
+def test_deterministic_fallback_needs_a_fallback_role() -> None:
+    assert next_attempt(FIRST_ATTEMPT, _StatusError(400), has_fallback=False,
+                        deterministic_fallback=True) is None
+
+
+def test_deterministic_fallback_never_switches_back_from_the_fallback() -> None:
+    """备用阶段再遇确定性错 ⇒ 停（never 切回）。"""
+    assert next_attempt(MemoryAttempt(MemoryModelRole.FALLBACK, 1), _StatusError(400),
+                        has_fallback=True, deterministic_fallback=True) is None
+
+
+def test_deterministic_fallback_does_not_reroute_the_transient_ladder() -> None:
+    """瞬时错误走原有 1+2 阶梯：开关开着也不改成"直接切备用"。"""
+    assert next_attempt(FIRST_ATTEMPT, _StatusError(503), has_fallback=True,
+                        deterministic_fallback=True) == MemoryAttempt(
+        MemoryModelRole.PRIMARY, 2)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("unexpected internal error"), ModelOutputError("not json")],
+    ids=["unexpected-internal", "schema"],
+)
+def test_a_non_provider_deterministic_error_is_not_rerouted(
+    error: BaseException,
+) -> None:
+    """只有 **provider 类**错误可落 fallback：内部错/解析错借道降级 = 拿坏端点掩盖 bug。"""
+    assert next_attempt(FIRST_ATTEMPT, error, has_fallback=True,
+                        deterministic_fallback=True) is None
 
 
 def test_degraded_reasons_cover_every_budget_dimension() -> None:
