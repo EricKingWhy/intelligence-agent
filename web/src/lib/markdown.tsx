@@ -25,13 +25,19 @@ export function parseFenceLang(info: string): string | null {
   return id ? id : null;
 }
 
-/** 行内标记解析：把 **bold** / `code` / [text](url) / 裸 URL 切成 JSX 节点。 */
-const INLINE_SPLIT = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]*\]\([^)]*\)|https?:\/\/[^\s<>"`]+)/g;
+/** 行内标记解析：把 [text](url) / 裸 URL / **bold** / `code` 切成 JSX 节点。
+ *  链接放首位，label 内可再含 bold/code（下方递归渲染）。
+ *  裸 URL 终止于空白与中日韩标点——中文句子里 URL 与后文之间无空格，
+ *  不把全角标点算进终止符会吞掉后续正文（#1096 实测）。 */
+const INLINE_SPLIT = /(\[[^\]]*\]\((?:[^()\n]|\([^()]*\))*\)|\*\*[^*]+\*\*|`[^`]+`|https?:\/\/[^\s<>"`，。、；：！？（）【】《》「」『』]+)/gi;
 
-/** 链接 scheme 白名单：仅 http/https 可点（防 javascript:/data:/vbscript: 等注入）。
- *  沿用 StepDetail.tsx:686 的约定（ADR-0018 D7）：JSX 结构化渲染 + target/rel，
- *  不用 dangerouslySetInnerHTML。 */
-const SAFE_HREF = /^https?:\/\//i;
+/** markdown 链接 `[label](url)`；url 允许一层配对括号（如 wiki 词条 `Foo_(bar)`）。 */
+const MD_LINK = /^\[([^\]]*)\]\(((?:[^()\n]|\([^()]*\))*)\)$/;
+
+/** 链接 scheme 白名单：仅 http/https 且 `//` 后非空可点（防 javascript:/data:/
+ *  vbscript: 等注入，并挡退化的 `https://`）。沿用 StepDetail.tsx:686 约定
+ *  （ADR-0018 D7）：JSX 结构化渲染 + target/rel，不用 dangerouslySetInnerHTML。 */
+const SAFE_HREF = /^https?:\/\/\S/i;
 
 /** 裸 URL 的句末标点不属于链接（仿 GFM / Slack autolink）：剥离中英文句读与
  *  未配对的收尾括号（配对括号如 wiki 词条 `Foo_(bar)` 保留）。 */
@@ -52,7 +58,7 @@ function trimUrlTail(url: string): string {
 }
 
 /** 白名单 scheme 才产生结构化 <a>；危险/未知 scheme 返回 null，交回纯文本渲染。 */
-function renderAnchor(href: string, label: string, key: string): ReactNode | null {
+function renderAnchor(href: string, label: ReactNode, key: string): ReactNode | null {
   if (!SAFE_HREF.test(href)) return null;
   return (
     <a key={key} className="md-link" href={href} target="_blank" rel="noopener noreferrer">
@@ -65,19 +71,22 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const parts = text.split(INLINE_SPLIT);
   return parts.filter(Boolean).map((part, i) => {
     const key = `${keyPrefix}-${i}`;
+    const mdLink = MD_LINK.exec(part);
+    if (mdLink) {
+      // 空 label 或不安全 scheme：按原文纯文本呈现（内容不静默丢弃）
+      const anchor =
+        mdLink[1].trim() === ''
+          ? null
+          : renderAnchor(mdLink[2].trim(), renderInline(mdLink[1], `${key}-l`), key);
+      return anchor ?? <span key={key}>{part}</span>;
+    }
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return <strong key={key}>{part.slice(2, -2)}</strong>;
     }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return <code key={key}>{part.slice(1, -1)}</code>;
     }
-    const mdLink = /^\[([^\]]*)\]\(([^)]*)\)$/.exec(part);
-    if (mdLink) {
-      const anchor = renderAnchor(mdLink[2].trim(), mdLink[1], key);
-      // 不安全 scheme 的链接按原文纯文本呈现（内容不静默丢弃）
-      return anchor ?? <span key={key}>{part}</span>;
-    }
-    if (part.startsWith('http://') || part.startsWith('https://')) {
+    if (/^https?:\/\//i.test(part)) {
       const href = trimUrlTail(part);
       const anchor = renderAnchor(href, href, `${key}-a`);
       if (anchor && href.length < part.length) {
