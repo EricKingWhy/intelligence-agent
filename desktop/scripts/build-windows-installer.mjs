@@ -2617,9 +2617,10 @@ export const DELETE_SITE_POLICIES = {
  *     executable is gone, so an in-branch call never classified a damaged
  *     installation whose live service is exactly what must not be updated over
  *     (#914 review Axis A). The anchor is the *variable*, not one spelling of
- *     the branch: re-writing the same guard as `StrCmp $iaProbeFound "1" …`
- *     used to move it out of this rule's scope while the defect stayed put
- *     (#1074);
+ *     the branch — and it is that variable's *first textual occurrence* in the
+ *     macro, read or write, whichever comes first: re-writing the same guard as
+ *     `StrCmp $iaProbeFound "1" …` used to move it out of this rule's scope while
+ *     the defect stayed put (#1074);
  *   - the refusal keeps the unknown answer fail-closed: `$(iaAppRunning)` for
  *     the two known-occupied answers, `$(iaProcessCheckFailed)` for everything
  *     else, exit code 2, and only a proven `"0"` returns.
@@ -2705,12 +2706,13 @@ export function validateProcessGateGuards(source, filename) {
     // #1074: the anchor is the variable, not one spelling of the branch. Pinning
     // the literal `${If} $iaProbeFound == "1"` let the same defect through when
     // the branch was re-spelled as `StrCmp $iaProbeFound "1" …` (the #914 fix
-    // round's Axis B measured that). This covers every branch form that mentions
-    // the variable — not every form that tests the app executable: a branch
-    // re-spelled as `${FileExists}` on the app path never names `$iaProbeFound`,
-    // and the #1045 statement table plus the real-machine legs are what hold that
-    // shape down (see the docstring's "does NOT cover" list). The message names
-    // what the read guards, so the rule stays legible.
+    // round's Axis B measured that). `indexOf` is the variable's *first textual
+    // occurrence* — a read or a write, whichever comes first — so any earlier
+    // mention is what the call has to precede. This covers every branch form that
+    // mentions the variable — not every form that tests the app executable: a
+    // branch re-spelled as `${FileExists}` on the app path never names
+    // `$iaProbeFound`, and the #1045 statement table plus the real-machine legs
+    // are what hold that shape down (see the docstring's "does NOT cover" list).
     const probeUse = stage.indexOf('$iaProbeFound')
     if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
     if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
@@ -2723,12 +2725,62 @@ export function validateProcessGateGuards(source, filename) {
     }
     if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {
       problems.push(
-        'the gate runs after iaStageApplication reads $iaProbeFound — that read guards the staging branch, which skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
+        'the gate runs after the first mention of $iaProbeFound in iaStageApplication (a read or a write) — the staging branch reads it and skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
       )
     }
   }
   if (problems.length > 0) {
     throw new Error(`${filename}: process gate (#914) is not fail-closed — ${problems.join('; ')}`)
+  }
+}
+
+/**
+ * Call-site guard for the process gate (#1078).
+ *
+ * `validateProcessGateGuards` reads one file — the file the gate's own body
+ * lives in — so it cannot see the wrapper that decides whether the gate is
+ * reached at all. That wiring is in `installer.nsh`: `customInit` stages the
+ * application, and `iaStageApplication` is what calls the gate, only while no
+ * previous install is mid-recovery. Inverting that frame, or dropping it, skips
+ * staging and the gate together — a normal install then runs the stock section
+ * straight over a live installation — and every discriminator that reads only
+ * installer-directories.nsh stays green (measured in #1078: the build-time
+ * rules, the installer-nsis suite, and the real-machine probe, which injects
+ * that one file).
+ *
+ * What this does NOT cover: it matches the frame's text. An equivalent
+ * re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
+ * `StrCmp $iaRecoveryPending "1" …`, or the insert moved into a helper macro
+ * that `customInit` inserts) is out of scope for the same reason the #1074 rules
+ * are shape rules — this pins the form the shipped file uses, and the
+ * real-machine legs do not inject installer.nsh, so this rule is the only layer
+ * that reads this file at all.
+ */
+export function validateProcessGateCallSite(source, filename) {
+  const code = stripNsisComments(source)
+  const problems = []
+  const init = /!macro customInit\b([\s\S]*?)\n!macroend/.exec(code)?.[1] ?? null
+  if (init === null) {
+    problems.push('missing !macro customInit')
+  } else {
+    const call = init.indexOf('!insertmacro iaStageApplication')
+    if (call === -1) {
+      problems.push('customInit no longer stages the application (`!insertmacro iaStageApplication`)')
+    } else {
+      // The frame is what keeps staging — and the gate inside it — off the
+      // recovery path. Anchored on the frame's own text and closed after the
+      // call, so a call outside the frame (or after its `${EndIf}`) fails.
+      const frame = init.lastIndexOf('${If} $iaRecoveryPending != "1"', call)
+      const close = frame === -1 ? -1 : init.indexOf('${EndIf}', frame)
+      if (frame === -1 || close === -1 || close < call) {
+        problems.push(
+          'customInit stages the application outside `${If} $iaRecoveryPending != "1"` — inverting that condition (or dropping the frame) silently skips staging and the process gate on a normal install, while the previous installation is left in place and the stock section installs over it',
+        )
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`${filename}: process gate call site (#1078) is not fail-closed — ${problems.join('; ')}`)
   }
 }
 
@@ -2816,7 +2868,9 @@ export function validateCleanupHelpers(source, filename) {
  * long-path guard applies to all three. The backup-delete guard runs on the two
  * files that hold delete sites (installer-cleanup.nsh may not hold one at all),
  * with the #904 site policies applied, and the cleanup primitives themselves are
- * asserted separately.
+ * asserted separately. The process gate is checked twice: its own body in
+ * installer-directories.nsh (#914), and the wrapper that decides whether it is
+ * reached at all, in installer.nsh (#1078).
  */
 /** The `!include`s the three scanned installer scripts may carry. */
 const KNOWN_INSTALLER_INCLUDES = new Set([
@@ -2862,6 +2916,9 @@ export function validateInstallerScripts(installerDir) {
     readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
     'installer-directories.nsh',
   )
+  // #1078: the gate's own body is one file, the wiring that reaches it is
+  // another; a rule that reads only the first cannot see the second.
+  validateProcessGateCallSite(readFileSync(join(installerDir, 'installer.nsh'), 'utf8'), 'installer.nsh')
 }
 
 

@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = '8f7bbb0509f8630f77f05195062606ff7c1c80d6e49b19270d589e0f9969ec95'
+const GUARD_BASELINE_SHA256 = 'e09d48025b7be69b9aa2db122cdef1c0cd4d96cbe982f924bcb84373be2abacf'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -742,6 +742,13 @@ const mutations = {
   'app-branch placement rule dropped from the process gate (#914 review Axis A)': swap(
     '    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {',
     '    if (false) {',
+  ),
+  // #1078: the rule that reads installer.nsh. Reverting it leaves the wrapper
+  // unguarded again, and the fixtures in "process gate call site (#1078)" are
+  // what hold it down.
+  'process gate call-site rule dropped (#1078)': swap(
+    '      if (frame === -1 || close === -1 || close < call) {',
+    '      if (false) {',
   ),
 }
 
