@@ -265,9 +265,31 @@ async def fork_session(
     parent_auto = effective_auto_approve(boundary_events)
     if parent_auto is not None:
         inherited[SESSION_AUTO_APPROVE_KEY] = parent_auto
+    # #1108（#663 AC01）：委派子会话的 fork 产物仍是委派派生会话——传播委派
+    # 标记，否则续聊恢复会把它当成非委派会话，重新获得被收窄掉的约束工具入口
+    # （本文件"高风险权限不因 Fork 静默扩大"原则；LangChain deepagents 的
+    # subagent permissions 语义：权限收窄是子代理身份的一部分，fork 是血统
+    # 保持的派生，provenance 须传播）。
+    # 只传 `delegation_tree_id`：其余 delegation_* 字段是父会话的委派账行属性，
+    # fork = 新 SessionBudget 身份（#318），不继承。
+    child_agent_id = agent_id
+    parent_started = next(
+        (e for e in parent_events if e.type == SESSION_STARTED), None,
+    )
+    parent_tree_id = (
+        (parent_started.data or {}).get("delegation_tree_id")
+        if parent_started is not None else None
+    )
+    if isinstance(parent_tree_id, str) and parent_tree_id:
+        inherited["delegation_tree_id"] = parent_tree_id
+        # `_delegated_child_agent_profile` 靠首事件 agent_id 重建子会话的
+        # AgentSpec 收窄面：标记在而 agent_id 不可解析会响亮失败，所以父的
+        # spec 名一并继承。根会话 fork 不受影响：父首事件的 agent_id 本就是
+        # "default"（无生产调用点传非默认值），零变化。
+        child_agent_id = parent_started.agent_id or "default"
 
     child = Session.start(
-        store, agent_id=agent_id, session_id=child_session_id,
+        store, agent_id=child_agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
         started_data=inherited or None,
         cwd=session_cwd(parent_events),
@@ -420,7 +442,11 @@ async def fork_session(
         SessionMeta(
             session_id=child.session_id,
             created_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
-            agent_id=agent_id,
+            # #1111：meta 与 session/started 同口径——委派子会话 fork 时
+            # `child_agent_id` 继承父 spec 名，索引行不得再写 fork 参数
+            # `agent_id`（否则展示层 started=coding / meta=default 分歧）。
+            # 根 fork 时 child_agent_id == agent_id，行为零变化。
+            agent_id=child_agent_id,
             parent_session_id=parent_session_id,
             origin="fork",
             fork_point_seq=fork_point_seq,
