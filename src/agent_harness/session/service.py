@@ -5089,8 +5089,9 @@ class SessionService:
         只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
         所以不能当裁决清单用）。在途按本会话**与委派树根会话**判（#1051）：子代理
         跑在父 run 的 task 里，RunManager 按树根会话登记；用户直接续聊子会话时，run
-        按子会话自身 id 登记（续聊中不会再派生孙会话，#1053 已实测证伪），故两个 id
-        都判。#318 之前的旧子会话 ``session/started`` 里没有
+        按子会话自身 id 登记，故两个 id 都判。续聊中不会再派生孙会话（#1053 已实测
+        证伪），前提是当前子档位不带 delegate 且 ``main.max_depth=1``；放开任一条件
+        时须改按祖先链判，见 #1053。#318 之前的旧子会话 ``session/started`` 里没有
         ``delegation_root_session_id`` 锚点，根会话 id 回退为自身 ⇒ 只按自身判定。
         读完 Ledger 后再判一次，挡住判定与读取之间新启动的 run。
         已接受的残余窗口：run 若在两次判定之间启动并完整跑完，两次都看不到它，读到的
@@ -5108,7 +5109,10 @@ class SessionService:
         if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
         self._raise_if_event_log_corrupt(session_id, integrity)
-        run_owner_ids = {session_id, session_budget_key(existing, session_id=session_id)}
+        run_owner_ids = {
+            session_id,
+            session_budget_key(existing, session_id=session_id),
+        }
 
         def in_flight() -> bool:
             return any(

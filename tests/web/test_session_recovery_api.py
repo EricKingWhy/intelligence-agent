@@ -233,8 +233,9 @@ async def test_in_flight_run_running_rows_are_not_listed(client):
 
 @pytest.mark.asyncio
 async def test_child_session_rows_hidden_while_root_run_in_flight(client):
-    """#1051：子代理跑在父 run 的 task 里，RunManager 只按父会话登记 ⇒ 子会话的
-    在途判定要按委派树根会话做；父 run 在途时子会话的 RUNNING 行不是待裁决。"""
+    """#1051：子代理跑在父 run 的 task 里，不单独登记，RunManager 按委派树根会话
+    登记 ⇒ 子会话的在途判定也要按树根会话做；父 run 在途时子会话的 RUNNING 行
+    不是待裁决。"""
     state = client.app.state.agent
     root = Session.start(state.store)
     child = _child_of(state, root)
@@ -242,6 +243,25 @@ async def test_child_session_rows_hidden_while_root_run_in_flight(client):
 
     async with _in_flight_run(state, root):
         assert state.run_manager.get_active(child.session_id) is None
+        assert await _get_pending(client.app, child.session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_child_session_rows_hidden_while_own_run_in_flight(client):
+    """#1080：用户直接续聊子会话时，run 按子会话自身 id 登记（树根会话此时无在途）
+    ⇒ 子会话自身的在途 run 也要判；它的 RUNNING 行是正在执行，不是待裁决。"""
+    state = client.app.state.agent
+    ledger = state.stores.operation_ledger
+    await ledger.initialize()
+    root = Session.start(state.store)
+    child = _child_of(state, root)
+
+    async with _in_flight_run(state, child) as run:
+        run_id = await run.wait_run_id()
+        assert run_id is not None
+        await _seed_ledger_running(ledger, child.session_id, run_id, "call-own")
+        assert state.run_manager.get_active(root.session_id) is None
+
         assert await _get_pending(client.app, child.session_id) == []
 
 
