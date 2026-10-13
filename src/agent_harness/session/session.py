@@ -635,6 +635,7 @@ class Session:
     def begin_run(self, *, agent_id: str = "default",
                   agent_profile: str = "main",
                   model: str | None = None,
+                  reasoning_effort: str | None = None,
                   budget: dict[str, Any] | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
@@ -653,6 +654,14 @@ class Session:
         不能放在 ``model/started``（流式专属、永不持久化），见
         ``docs/adr/0034-request-side-model-identity.md``。
 
+        ``reasoning_effort``（`#1093`）：本轮**请求侧**选中的推理档位名（harness
+        语义档位，如 "minimal"/"standard"/"deep"；不是 provider wire 值）。`None`
+        时**不落该键**——与 ``model``/``budget`` 同一「不可得 ≠ 默认值」口径
+        （`11 §6.1`：账目缺失是 unavailable，不是默认档；web 的「默认」位置正是
+        「请求省略该字段」）。机制来源 LangSmith ``ls_invocation_params``（run
+        metadata 记录每次调用的 provider 参数供事后按配置过滤/对比），落点抄仓内
+        #198 ``agent_profile`` 写进 ``run/started.data`` 的加法模式。
+
         ``budget``（`#312` T4）：本逻辑 run 的 **run 作用域** 预算快照（ceiling 等）。
         `None` **不落键**——"没有配 ceiling"是"没有这条事实"，不是"ceiling=0"
         （`11 §6.1`：不可得 ≠ 0）。`run/paused` 的 limits 快照由它重建，
@@ -663,6 +672,8 @@ class Session:
         data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
         if model is not None:
             data["model"] = model
+        if reasoning_effort is not None:
+            data["reasoning_effort"] = reasoning_effort
         if budget is not None:
             data["budget"] = budget
         self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
