@@ -224,6 +224,65 @@ async def test_fork_writes_meta_index(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fork_of_delegated_child_meta_agent_id_matches_started_agent_id(
+    tmp_path,
+) -> None:
+    """#1111：委派子会话 fork 出的 child，meta.agent_id 与 started.agent_id 同口径。
+
+    fork 委派子会话时 `Session.start(agent_id=child_agent_id)` 让 child 的
+    session/started 继承父 spec 名（此例 "coding"）；meta 索引行必须同口径，
+    展示层不出现 "started=coding / meta=default" 的分歧。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="delegated-parent",
+        agent_id="coding",
+        started_data={"delegation_tree_id": "tree-1"},
+    )
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(RUN_STARTED, {})
+    parent.append(MODEL_COMPLETED, {"content": "好的"})
+    parent.append(RUN_COMPLETED, {})
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+    anchor = parent.events[-1].seq
+
+    child = await fork_session(
+        store, meta, "delegated-parent", boundary_user_message_seq=anchor,
+        child_session_id="delegated-child",
+    )
+
+    row = await meta.get("delegated-child")
+    assert row is not None
+    child_events = child.events
+    assert row.agent_id == child_events[0].agent_id == "coding"
+
+
+@pytest.mark.asyncio
+async def test_fork_of_root_session_meta_agent_id_uses_fork_param(tmp_path) -> None:
+    """#1111 回归：根会话 fork 的 meta.agent_id 仍是 fork 参数（默认 "default"）。
+
+    根会话首事件 agent_id 本就是 "default"，对齐 started 与 meta 口径后行为零变化。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _build_parent(store)
+    anchor = parent.events[-1].seq
+
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="root-child",
+    )
+
+    row = await meta.get("root-child")
+    assert row is not None
+    assert row.agent_id == child.events[0].agent_id == "default"
+
+
+@pytest.mark.asyncio
 async def test_failed_fork_leaves_no_child_artifacts(tmp_path) -> None:
     """fork 失败（boundary 非法）不得留下 child JSONL / meta 行（无孤儿）。"""
     store = _store(tmp_path)

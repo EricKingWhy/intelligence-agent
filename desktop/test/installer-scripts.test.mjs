@@ -361,7 +361,18 @@ describe('process gate (#914)', () => {
       '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
       '  ${If} $iaProbeFound == "1"\n    Call iaRequireNoRunningProduct\n',
     )
-    assert.throws(() => validateInstallerScripts(dir), /inside the .*branch/)
+    assert.throws(() => validateInstallerScripts(dir), /first mention of \$iaProbeFound/)
+  })
+
+  it('refuses a gate call that a re-spelled app-executable branch moves behind it', () => {
+    // #1074: the rule anchors the *variable*, not one spelling of the branch, so
+    // the same defect written as a raw `StrCmp` no longer slips past it. The
+    // literal anchor this replaces let the re-spelled branch through untouched.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  StrCmp $iaProbeFound "1" 0 +2\n  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /first mention of \$iaProbeFound/)
   })
 
   it('refuses a refusal that neither exits nor keeps the unknown case apart', () => {
@@ -399,6 +410,105 @@ describe('process gate (#914)', () => {
     // TypeScript source, so the separator is written twice in the literal.
     assert.match(paths, /resourcesPath\}\\\\python\\\\python\.exe/, 'shell runtime path moved')
     assert.ok(directoriesNsh.includes("'$iaFinalDirectory\\resources\\python\\'"), 'gate runtime prefix moved')
+  })
+})
+
+describe('process gate call site (#1078)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  const installerNsh = readFileSync(join(installerDir, 'installer.nsh'), 'utf8').replace(/\r\n/g, '\n')
+  const directoriesRaw = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+  const eol = directoriesRaw.includes('\r\n') ? '\r\n' : '\n'
+
+  /** The shipped installer directory with one replacement applied to installer.nsh. */
+  const withMutatedInstallerNsh = (from, to) => {
+    assert.ok(installerNsh.includes(from), `fixture anchor missing: ${from}`)
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-callsite-'))
+    writeFileSync(join(dir, 'installer-directories.nsh'), directoriesRaw)
+    writeFileSync(
+      join(dir, 'installer-cleanup.nsh'),
+      readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
+    )
+    writeFileSync(join(dir, 'installer.nsh'), installerNsh.replace(from, to).replace(/\n/g, eol))
+    return dir
+  }
+
+  it('accepts the shipped call site', () => {
+    validateInstallerScripts(installerDir)
+  })
+
+  it('refuses a customInit that inverts the recovery frame', () => {
+    // #1078: inverting the frame skips staging and the process gate together, so
+    // a normal install runs the stock section over a live installation — while
+    // every rule that reads installer-directories.nsh stays green.
+    const dir = withMutatedInstallerNsh(
+      '${If} $iaRecoveryPending != "1"',
+      '${If} $iaRecoveryPending == "1"',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /process gate call site/)
+  })
+
+  it('refuses a customInit that drops the recovery frame', () => {
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  !insertmacro iaStageApplication\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /process gate call site/)
+  })
+
+  it('refuses a customInit that no longer stages the application', () => {
+    const dir = withMutatedInstallerNsh('  !insertmacro iaStageApplication\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /no longer stages the application/)
+  })
+
+  it('accepts a nested conditional inside the frame (the close is found by depth)', () => {
+    // The first `${EndIf}` after the frame's opening is not necessarily the
+    // frame's own: a nested block before the insert supplies one, and reading it
+    // as the frame's close would reject a call that is plainly inside the frame.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n    ${EndIf}\n    !insertmacro iaStageApplication\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('refuses a customInit that stages only on the recovery branch', () => {
+    // The #1078 defect inverted: an insert on the frame's `${Else}` side runs
+    // staging — and the gate — only while a previous install is mid-recovery.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n  ${Else}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /positive branch/)
+  })
+
+  it('refuses a customInit that stages twice', () => {
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n  !insertmacro iaStageApplication\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /stages the application 2 times/)
+  })
+
+  it('accepts a nested block inside the frame, including its own divider', () => {
+    // The insert has to sit on the frame's positive branch; a nested `${If}`
+    // with its own `${Else}` divides that block, not the frame, and leaves the
+    // insert exactly where it belongs. The first cut of the rule scanned the
+    // span for any divider and rejected this (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n      DetailPrint "no previous install"\n    ${Else}\n      DetailPrint "previous install present"\n    ${EndIf}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('accepts a nested switch inside the frame', () => {
+    // `${Case}` divides a `${Switch}`, never an `${If}`: it must not read as the
+    // frame changing branches (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${Switch} $0\n      ${Case} "1"\n        DetailPrint "one"\n        ${Break}\n    ${EndSwitch}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
   })
 })
 

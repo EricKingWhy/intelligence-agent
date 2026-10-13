@@ -15,8 +15,9 @@
 ;                          bundled runtime, abort for anything else — the rename
 ;                          alone does not stop a headless service, see §1.3 of
 ;                          docs/live_gate/w21/58-issue-914-service-in-use-gate.md).
-;                          The gate runs whether or not the app executable is
-;                          still present: a damaged installation keeps its live
+;                          The gate runs on the same path as the move it guards,
+;                          and whether or not the app executable is still
+;                          present: a damaged installation keeps its live
 ;                          service, and the branch below would skip staging for
 ;                          it entirely. Then move the live $INSTDIR aside to
 ;                          $INSTDIR.old-{guid}
@@ -102,8 +103,11 @@ Var iaRecoveryFreshButton
 ;     kill). The stock probe still runs in the section; it is the template's.
 ; So this gate asks with the cast forced (@(...)) and refuses the update for
 ; every answer it cannot prove clean (fail-closed) instead of inheriting that
-; failure mode. It is called for every install, not only while the app
-; executable is still there: a damaged installation whose exe is gone
+; failure mode. It is called on every install that reaches staging, which is
+; the same path as the move it guards — customInit wraps both the call and the
+; staging in `${If} $iaRecoveryPending != "1"`, so a pending recovery skips
+; both together (installer.nsh) — and not only while the app executable is
+; still there: a damaged installation whose exe is gone
 ; (quarantined or deleted by hand) can still hold the live bundled service, and
 ; the stock section would install straight over that directory in place. While a
 ; process from this directory survives the stop attempt, this installer records
