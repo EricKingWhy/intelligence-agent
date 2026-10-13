@@ -567,3 +567,68 @@ describe('deriveReasoningEffort', () => {
     expect(deriveReasoningEffort([ev(EventType.USER_MESSAGE, { content: 'hi' })])).toBe(null);
   });
 });
+
+// ── #1106：聚焦 run 的档位（Inspector 头标徽标按当前聚焦 run 取值） ──
+//
+// 多 run 会话里头标取「最后一个 run/started」的档位，但头标描述的是全会话
+// 范围——聚焦早期 run 时用户会把末次 run 的档位误读成该 run 的运行条件
+// （LangSmith 惯例：聚焦/选中项的摘要栏反映选中项）。修法：derive 函数加
+// 可选 `focusedRunId`；无聚焦回退现有"取最后值"行为。
+
+/** 带**信封 run_id** 的事件夹具——聚焦归属按信封 run_id 对账（事件真值）。 */
+function evRun(type: string, data: Record<string, unknown>, run_id: string): AgentEvent {
+  return { type, data, seq: null, run_id, step_id: 1 };
+}
+
+describe('deriveAgentProfile / deriveReasoningEffort — #1106 聚焦 run 口径', () => {
+  const multiRun = [
+    evRun(EventType.RUN_STARTED, { agent_profile: 'research_review', reasoning_effort: 'minimal' }, 'run-a'),
+    evRun(EventType.RUN_COMPLETED, {}, 'run-a'),
+    evRun(EventType.RUN_STARTED, { agent_profile: 'coding', reasoning_effort: 'deep' }, 'run-b'),
+  ];
+
+  it('多 run 不同档位：聚焦 run A 显示 A 的档位，聚焦 run B 显示 B 的', () => {
+    expect(deriveReasoningEffort(multiRun, 'run-a')).toBe('minimal');
+    expect(deriveReasoningEffort(multiRun, 'run-b')).toBe('deep');
+    expect(deriveAgentProfile(multiRun, 'run-a')).toBe('research_review');
+    expect(deriveAgentProfile(multiRun, 'run-b')).toBe('coding');
+  });
+
+  it('无聚焦（缺省 / null）→ 回退「取最后值」（回归：单 run 会话展示不变）', () => {
+    expect(deriveReasoningEffort(multiRun)).toBe('deep');
+    expect(deriveReasoningEffort(multiRun, null)).toBe('deep');
+    expect(deriveAgentProfile(multiRun)).toBe('coding');
+    expect(deriveAgentProfile(multiRun, null)).toBe('coding');
+  });
+
+  it('单 run 会话：聚焦该 run 与不聚焦同值（回归）', () => {
+    const single = [evRun(EventType.RUN_STARTED, { agent_profile: 'main', reasoning_effort: 'standard' }, 'run-1')];
+    expect(deriveReasoningEffort(single, 'run-1')).toBe('standard');
+    expect(deriveReasoningEffort(single)).toBe('standard');
+    expect(deriveAgentProfile(single, 'run-1')).toBe('main');
+    expect(deriveAgentProfile(single)).toBe('main');
+  });
+
+  it('聚焦 run 的 run/started 未声明字段 → null（不拿别的 run 的值顶替）', () => {
+    const events = [
+      evRun(EventType.RUN_STARTED, { agent_profile: 'coding', reasoning_effort: 'deep' }, 'run-a'),
+      evRun(EventType.RUN_STARTED, {}, 'run-b'),
+    ];
+    expect(deriveReasoningEffort(events, 'run-b')).toBe(null);
+    expect(deriveAgentProfile(events, 'run-b')).toBe(null);
+  });
+
+  it('聚焦 run_id 匹配不到任何 run/started → null（不拿别的 run 的值顶替）', () => {
+    expect(deriveReasoningEffort(multiRun, 'run-ghost')).toBe(null);
+    expect(deriveAgentProfile(multiRun, 'run-ghost')).toBe(null);
+  });
+
+  it('聚焦归属按信封 run_id 对账：data.run_id 不参与（与 projection 同口径）', () => {
+    // 信封 run_id 是事件归属的权威（types.ts AgentEvent 注释）；data 里的
+    // 同名字段不是归属（旧字段/载荷字段混进来会把归属搞成两套口径）。
+    const events = [
+      { type: EventType.RUN_STARTED, data: { reasoning_effort: 'minimal' }, seq: null, run_id: null, step_id: 1 },
+    ];
+    expect(deriveReasoningEffort(events, 'run-a')).toBe(null);
+  });
+});
