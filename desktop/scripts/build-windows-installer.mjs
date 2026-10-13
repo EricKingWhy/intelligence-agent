@@ -2612,13 +2612,29 @@ export const DELETE_SITE_POLICIES = {
  *     armed and before `Rename $INSTDIR` (a refusal must leave the installation
  *     untouched and must not leave a pointer behind that .onGUIEnd and
  *     iaRollbackApplication read as "the install section started"), and it is
- *     called BEFORE the `${If} $iaProbeFound == "1"` branch rather than inside
- *     it — that branch skips staging entirely when the app executable is gone,
- *     so an in-branch call never classified a damaged installation whose live
- *     service is exactly what must not be updated over (#914 review Axis A);
+ *     called before anything reads `$iaProbeFound` rather than inside the
+ *     branch that read guards — that branch skips staging entirely when the app
+ *     executable is gone, so an in-branch call never classified a damaged
+ *     installation whose live service is exactly what must not be updated over
+ *     (#914 review Axis A). The anchor is the *variable*, not one spelling of
+ *     the branch: re-writing the same guard as `StrCmp $iaProbeFound "1" …`
+ *     used to move it out of this rule's scope while the defect stayed put
+ *     (#1074);
  *   - the refusal keeps the unknown answer fail-closed: `$(iaAppRunning)` for
  *     the two known-occupied answers, `$(iaProcessCheckFailed)` for everything
  *     else, exit code 2, and only a proven `"0"` returns.
+ *
+ * What this function does NOT cover, written down so no reader takes it for
+ * more than it is: it reads text, so it pins where the call sits and which
+ * statements the gate's own body has to keep. It cannot tell whether the callee
+ * still classifies — a body-level early return inside the gate
+ * (`StrCmp $iaProbeFound "0" 0 +2` / `Return`) satisfies every rule here and
+ * restores the Axis A defect (measured: every build-time case stays green with
+ * that mutation in place — 112 cases, #1074). That mutation is killed by the real-machine
+ * legs in desktop/test/harness/r1-drivers/run-stage-damaged-probe.ps1, which
+ * .github/workflows/windows-installer-smoke.yml runs on a Windows runner
+ * (#1074) — the discriminator has to be executed somewhere for this boundary to
+ * be covered at all.
  */
 export function validateProcessGateGuards(source, filename) {
   const code = stripNsisComments(source)
@@ -2678,19 +2694,25 @@ export function validateProcessGateGuards(source, filename) {
     const gateCall = stage.indexOf('Call iaRequireNoRunningProduct')
     const pointer = stage.indexOf('iaStashBackupDir')
     const rename = stage.indexOf('Rename $INSTDIR')
-    const appBranch = stage.indexOf('${If} $iaProbeFound == "1"')
+    // #1074: the anchor is the variable, not one spelling of the branch. Pinning
+    // the literal `${If} $iaProbeFound == "1"` let the same defect through when
+    // the branch was re-spelled as `StrCmp $iaProbeFound "1" …` (the #914 fix
+    // round's Axis B measured that). Every branch form on the probe result reads
+    // the variable, so requiring the call to precede the first read covers them
+    // all; the message names what the read guards, so the rule stays legible.
+    const probeUse = stage.indexOf('$iaProbeFound')
     if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
     if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
     if (rename === -1) problems.push('iaStageApplication no longer renames the install directory')
-    if (appBranch === -1) {
+    if (probeUse === -1) {
       problems.push('iaStageApplication no longer branches on the app executable')
     }
     if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {
       problems.push('the gate runs after the backup pointer is armed or after the rename — a refusal would have to roll back')
     }
-    if (gateCall !== -1 && appBranch !== -1 && gateCall > appBranch) {
+    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {
       problems.push(
-        'the gate runs inside the `${If} $iaProbeFound == "1"` branch — that branch skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
+        'the gate runs after iaStageApplication reads $iaProbeFound — that read guards the staging branch, which skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
       )
     }
   }

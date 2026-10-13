@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = 'f9d5de108df04d184ed692148010b30a2d73df7143125e48b5a8d95fd31b769d'
+const GUARD_BASELINE_SHA256 = '11e9d28fe3361d79a664cd7767c7c2f4d4ccaea46dc6c74323323c0ab828b6a3'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -732,13 +732,15 @@ const mutations = {
     '    if (false) {',
   ),
   // The #914 review's Axis A must-fix (user-ruled): the gate has to run before
-  // the `${If} $iaProbeFound == "1"` branch. That branch skips staging when the
+  // the branch that reads `$iaProbeFound` — that branch skips staging when the
   // app executable is gone, so a call inside it never classified a damaged
-  // installation — whose live bundled service is exactly what must not be
-  // updated over. The fixture "refuses a gate call that runs only when the app
-  // executable is present" is what holds it down.
+  // installation, whose live bundled service is exactly what must not be
+  // updated over. Two fixtures hold it down: "refuses a gate call that runs only
+  // when the app executable is present" and, since #1074 moved the anchor from
+  // the literal branch to the variable, "refuses a gate call that a re-spelled
+  // app-executable branch moves behind it".
   'app-branch placement rule dropped from the process gate (#914 review Axis A)': swap(
-    '    if (gateCall !== -1 && appBranch !== -1 && gateCall > appBranch) {',
+    '    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {',
     '    if (false) {',
   ),
 }

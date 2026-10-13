@@ -344,7 +344,18 @@ describe('process gate (#914)', () => {
       '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
       '  ${If} $iaProbeFound == "1"\n    Call iaRequireNoRunningProduct\n',
     )
-    assert.throws(() => validateInstallerScripts(dir), /inside the .*branch/)
+    assert.throws(() => validateInstallerScripts(dir), /reads \$iaProbeFound/)
+  })
+
+  it('refuses a gate call that a re-spelled app-executable branch moves behind it', () => {
+    // #1074: the rule anchors the *variable*, not one spelling of the branch, so
+    // the same defect written as a raw `StrCmp` no longer slips past it. The
+    // literal anchor this replaces let the re-spelled branch through untouched.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  StrCmp $iaProbeFound "1" 0 +2\n  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /reads \$iaProbeFound/)
   })
 
   it('refuses a refusal that neither exits nor keeps the unknown case apart', () => {

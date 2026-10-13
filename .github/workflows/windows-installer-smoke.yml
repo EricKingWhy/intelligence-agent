@@ -27,6 +27,25 @@
 # （lazy-require，故意不进 `desktop/package.json`，见 build-windows-installer.mjs 头注释），
 # 所以本工作流在 `npm ci` 之后按版本显式装它。
 #
+# 真机腿（#1074）
+#
+# 本工作流除两条 UI 断言外，还跑 `test/harness/r1-drivers/run-stage-damaged-probe.ps1`：它把
+# **生产的** `iaStageApplication` 宏原文注入一个临时 NSIS 脚本，在「有/无安装树、有/无进程」
+# 的几种组合上真编译、真运行，读退出码与结果文件。
+#
+# 为什么必须在 CI 里跑（#1074 残余 ②）：构建期规则 `validateProcessGateGuards()` 只读**文本**，
+# 它能钉住「调用出现在哪里」，钉不住「被调用的函数还在不在分类」。两轴审查各自独立写出的同一条
+# 变异——在 `iaRequireNoRunningProduct` 体内加 `StrCmp $iaProbeFound "0" 0 +2` / `Return`
+# （= 被调用，但缺 exe 时立刻返回）——**活过全部 112 条构建期用例**（实测），只有这条真机腿转红。
+# 在把这条腿接进来之前，判别器只存在于人工、依赖本机 NSIS 缓存的脚本里，没有任何 CI 会跑到它。
+#
+# 依赖：探针需要 electron-builder 缓存的 makensis（`%LOCALAPPDATA%\electron-builder\Cache\
+# nsis-3.0.4.1`，探针递归查找）与 PATH 上的 node —— 两者都由**上面已经跑过的烟测步骤**建立
+# （烟测真的用 electron-builder 构安装包）。所以这一步必须排在那两步**之后**。
+#
+# 边界：本工作流**不是** main 的必需状态检查（#885 明写），这条腿同样不是——它只在安装器相关
+# 文件变化时跑。覆盖边界如实写在这里，不假装它是一条全量守卫。
+#
 # checkout 的坑位（照 gate0.yml 的三个教训）
 #
 # ① `ref: github.event.pull_request.head.sha` —— `actions/checkout` 默认检出 `refs/pull/N/merge`
@@ -58,9 +77,11 @@ on:
     # 路径过滤：只在安装器相关文件变化时跑，不给每个 PR 增加 10–20 分钟负担。
     # 除票面点名的三条外，另加：两个被执行的 PowerShell 断言脚本（test-windows-installer.mjs
     # 直接 shell 它们）、build-windows-installer.mjs（烟测直接 import 它）、desktop 的依赖清单
-    # （本 job 跑 `npm ci` 构建安装包）与本工作流自身。
+    # （本 job 跑 `npm ci` 构建安装包）与本工作流自身。另加 `desktop/test/harness/r1-drivers/**`
+    # （#1074）：那条真机腿本身与其夹具的改动也要被它验证。
     paths:
       - 'desktop/installer/**'
+      - 'desktop/test/harness/r1-drivers/**'
       - 'desktop/scripts/test-windows-installer.mjs'
       - 'desktop/scripts/windows-installer-smoke.ps1'
       - 'desktop/scripts/windows-uninstall-smoke.ps1'
@@ -124,6 +145,15 @@ jobs:
         if: ${{ inputs.compile_only }}
         working-directory: desktop
         run: node scripts/test-windows-installer.mjs --compile-only
+
+      # #1074：构建期规则钉的是「调用位置」，钉不住「闸门是否真的分类」——在
+      # iaRequireNoRunningProduct 体内加一个提前返回（`StrCmp $iaProbeFound "0" 0 +2` /
+      # `Return`）活过全部 112 条构建期用例，只有这条真机腿转红。它必须排在烟测之后：
+      # 探针要 electron-builder 缓存里的 makensis，而那份缓存正是上面两步建立的。
+      - name: 真机腿 — 进程闸门对损坏安装与首次安装的分类（#1074）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File test/harness/r1-drivers/run-stage-damaged-probe.ps1
 
       - name: 上传安装器测试产物与日志（失败也上传）
         if: always()

@@ -21,16 +21,25 @@
 #   damaged-unknown  no app.exe, install path the query cannot parse -> the gate
 #                    runs anyway and aborts (exit 2) instead of reading the
 #                    failure as clean
+#   first-install    no install tree at all (the path does not exist yet) -> the
+#                    gate still classifies it, proves the empty directory clean
+#                    and returns, and staging is skipped because there is no app
+#                    executable to find: a fresh install proceeds (#1074)
 #
-# The last three are the discriminating legs: before the fix the macro never
-# called the gate on any of them (exit 0, service untouched).
+# The three damaged legs are the discriminating ones: before the fix the macro
+# never called the gate on any of them (exit 0, service untouched). The
+# first-install leg is coverage rather than discrimination — it pins that the
+# gate the #914 fix round widened to first installs does not block one (#1074).
 #
 # Usage (from desktop/): powershell -File test/harness/r1-drivers/run-stage-damaged-probe.ps1 [-Keep]
 #   -DirectoriesSource <path>  drive the legs against another revision of
 #                              installer-directories.nsh. Used for the red proof:
 #                              the same legs must FAIL on the pre-fix macro (the
 #                              three damaged legs), which is what shows they
-#                              discriminate rather than merely pass.
+#                              discriminate rather than merely pass. #1074 uses
+#                              the same switch to show that a body-level early
+#                              return inside the gate — which every build-time
+#                              rule accepts — turns these legs red.
 param([switch]$Keep, [string]$DirectoriesSource)
 $ErrorActionPreference = 'Stop'
 
@@ -98,11 +107,14 @@ if (-not $probeSource.Contains('@(Get-CimInstance')) { throw 'the injected class
 New-Item -ItemType Directory -Force -Path $scratchRoot | Out-Null
 
 function New-FakeInstall {
-  param([string]$Name, [switch]$WithAppExe)
+  param([string]$Name, [switch]$WithAppExe, [switch]$NoTree)
   $root = Join-Path $scratchRoot ("stage-$Name-$runId")
   if (-not [System.IO.Path]::GetFullPath($root).StartsWith($scratchRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "scratch path escapes the test root: $root"
   }
+  # A first install has no tree yet: the path must stay absent, so nothing is
+  # created for it (#1074).
+  if ($NoTree) { return $root }
   New-Item -ItemType Directory -Force -Path (Join-Path $root 'resources\python') | Out-Null
   if ($WithAppExe) {
     # Existence is all iaProbePath reads; a small placeholder keeps the leg fast.
@@ -173,6 +185,25 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $siblings[0].FullName 'resources\python'))) {
       $failures += '[intact-clean] the renamed tree lost its contents'
     }
+  }
+
+  # --- first-install: $INSTDIR does not exist yet ---------------------------
+  # #1074: the #914 fix round widened the gate to first installs (the call sits
+  # outside the app-executable branch, which a fresh install also fails to
+  # enter). Nothing runs from a directory that is not there, so this leg pins
+  # that a fresh install still proceeds: the gate classifies the absent
+  # directory, proves it clean, and the macro skips staging for want of an app
+  # executable — it must not refuse, stage, or create anything.
+  $installFresh = New-FakeInstall 'first-install' -NoTree
+  if (Test-Path -LiteralPath $installFresh) { throw "[first-install] the scratch path must not exist before the leg" }
+  $leg = Invoke-StageLeg -leg 'first-install' -install $installFresh
+  if ($leg.ExitCode -ne 0) { $failures += "[first-install] expected exit 0, got $($leg.ExitCode)" }
+  if ($leg.Reading -notmatch 'stage_returned=1 answer=0 probe=0') { $failures += "[first-install] $($leg.Reading)" }
+  if ((Get-OldSiblings -Root $installFresh).Count -ne 0) {
+    $failures += '[first-install] a fresh install must not be staged aside'
+  }
+  if (Test-Path -LiteralPath $installFresh) {
+    $failures += '[first-install] the run created the install directory; a fresh install must be left untouched'
   }
 
   # --- damaged-runtime: exe gone, the bundled service is what is running -----
@@ -250,4 +281,4 @@ if ($failures.Count -gt 0) {
   foreach ($failure in $failures) { Write-Host "FAIL $failure" }
   throw "$($failures.Count) stage-damaged leg assertion(s) failed"
 }
-Write-Host 'stage-damaged legs OK: intact-clean (staged), damaged-runtime (stopped), damaged-rootproc (refused, alive), damaged-unknown (refused)'
+Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), damaged-runtime (stopped), damaged-rootproc (refused, alive), damaged-unknown (refused)'
