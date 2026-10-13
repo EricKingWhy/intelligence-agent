@@ -62,6 +62,43 @@ def _workspace_dacl(path: Path) -> str:
             descriptor_path.unlink(missing_ok=True)
 
 
+def _workspace_integrity_label(path: Path) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    get_file_security = ctypes.WinDLL("advapi32", use_last_error=True).GetFileSecurityW
+    get_file_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_file_security.restype = wintypes.BOOL
+    label_security_information = 0x00000010
+    required = wintypes.DWORD()
+    get_file_security(
+        str(path),
+        label_security_information,
+        None,
+        0,
+        ctypes.byref(required),
+    )
+    if required.value == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    descriptor = ctypes.create_string_buffer(required.value)
+    if not get_file_security(
+        str(path),
+        label_security_information,
+        descriptor,
+        required.value,
+        ctypes.byref(required),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return descriptor.raw[: required.value]
+
+
 def _grant_everyone_full_control(path: Path) -> None:
     result = subprocess.run(
         ["icacls.exe", str(path), "/grant:r", "*S-1-1-0:(OI)(CI)F"],
@@ -155,17 +192,24 @@ def test_registry_recovery_rejects_replaced_workspace_root(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_starting_again_preserves_exact_workspace_dacl(tmp_path: Path) -> None:
+def test_starting_again_preserves_workspace_dacl_and_integrity_label(
+    tmp_path: Path,
+) -> None:
     from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
     sandbox = WindowsPsecSandbox(tmp_path / "workspace")
+    sandbox.write_text("seed.txt", "seed")
+    before_dacl = _workspace_dacl(sandbox.workspace_root)
+    before_label = _workspace_integrity_label(sandbox.workspace_root)
 
     try:
         sandbox.ensure_started()
-        before = _workspace_dacl(sandbox.workspace_root)
+        assert _workspace_dacl(sandbox.workspace_root) == before_dacl
+        assert _workspace_integrity_label(sandbox.workspace_root) == before_label
         sandbox.stop()
         sandbox.ensure_started()
-        assert _workspace_dacl(sandbox.workspace_root) == before
+        assert _workspace_dacl(sandbox.workspace_root) == before_dacl
+        assert _workspace_integrity_label(sandbox.workspace_root) == before_label
     finally:
         sandbox.stop()
 
