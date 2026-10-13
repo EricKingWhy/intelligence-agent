@@ -1164,12 +1164,7 @@ def test_chain_script_advances_only_with_the_current_token(tmp_path):
 
 
 def test_uncertain_script_lands_its_side_effect_before_hanging(tmp_path):
-    """`uncertain.py` 先落副作用、再挂着 ⇒ 超时收尾时世界状态**真的**未知。
-
-    杀伤预算取场景的生产超时（`UNCERTAIN_TOOL_TIMEOUT_SECONDS`，#1069），不是测试
-    魔法数字；`TIMEOUT < SLEEP` 由 `test_uncertain_timing_constants_are_ordered`
-    机检。负载只推高解释器启动（宿主性质），不改变「落盘先于杀伤」的顺序。
-    """
+    """`uncertain.py` 先落副作用、再挂着 ⇒ 超时收尾时世界状态**真的**未知。"""
     sandbox = LocalSubprocessSandbox(workspace_root=tmp_path / "workspace")
     ctx = _context(tmp_path, sandbox=sandbox)
     assert asyncio.run(SCENARIO.prepare(ctx)) == []
@@ -1179,8 +1174,9 @@ def test_uncertain_script_lands_its_side_effect_before_hanging(tmp_path):
     # （`deadline._uncertain_mutation`）杀同一个脚本用的就是这个预算；不再用测试
     # 专属的魔法数字（Playwright best-practices：超时取自配置/具名常量）。
     # `test_uncertain_timing_constants_are_ordered` 已机检 `TIMEOUT < SLEEP` ⇒
-    # 预算落在「哨兵落盘 → 挂起结束」窗口内（仅需 启动 < 预算；启动是宿主性质，
-    # #914 实测空闲 66–94ms，5.0s 约 50× 裕度；8.0s 是硬顶）。
+    # 只要启动 < 预算，杀伤就落在「哨兵落盘 → 挂起结束」窗口内。启动是宿主性质
+    # （空闲实测远小于预算，见 #1069 票面）；启动一旦超过预算，本测试按设计
+    # 正确地红，诊断见下。
     killed = sandbox.exec(
         f"python {UNCERTAIN_SCRIPT}", timeout=UNCERTAIN_TOOL_TIMEOUT_SECONDS
     )
