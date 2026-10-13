@@ -195,12 +195,11 @@ async def _wait_terminal(harness: _Harness, session_id: str,
 
     #1089：只认调用之后**新增**的终态事件。子会话 spawn 时已有 run/completed，
     旧的 `in` 判据下续聊轮尚未终态时就会立刻返回（spawn 的终态已在事件流里）。
-    基线在 helper 入口处一次性读取——其前无 await 点，且 `resume_and_launch`
-    在 `launch()` 之后到返回全是同步路径，故基线与 launch 之间无事件循环插队
-    窗口，不存在"续聊 run 在基线前终态"的竞态。
 
     调用约束：必须在 `resume_and_launch` 返回后**立刻**调用，中间不可先行
-    await——否则续聊轮可能在基线读取前终态并被静默吸收，导致永远超时。
+    await——基线在 helper 入口处一次性读取（其前无 await 点，且 launch 后到
+    返回为同步路径、无事件循环插队窗口），否则续聊轮可能在基线读取前终态并
+    被静默吸收，导致永远超时。
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -655,10 +654,7 @@ async def test_child_env_cell_lights_up_same_source_as_resume_side(
         expected_version=paused.version,
     )
     await resumed.run.task
-    # 注（#1089）：`_wait_terminal` 的语义已收紧为"等调用之后新增的终态事件"，
-    # 此处 run.task 已 await 到终态，再调它永远等不到新终态（必超时），故删去
-    # 这行冗余等待——终态性由上一行的 await 建立。保留一条显式终态断言，维持
-    # 本测试原有的"恢复 run 失败即红"判别力（Correctness P3）。
+    # 注：run.task 已 await 到终态，再调 `_wait_terminal` 会等不到"新增"终态而必然超时（#1089）。
     assert RUN_COMPLETED in harness.types(child_id)
 
 
