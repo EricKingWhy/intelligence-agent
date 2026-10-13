@@ -86,7 +86,7 @@ NSIS 缓存的脚本在守。
   并把规则的**覆盖边界**写进它自己的 docstring。
 - **非目标（本票不动）**：残余 **①**（闸门无「目录归属」判据）——`iaProbeFound == "1"` 曾是的唯一归属信号
   随裁决 D6 一起消失，在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，
-  答案 `11` 会 `Stop-Process -Force` 掉那些进程。这是**行为变更**，按 `AGENTS.md` §9.1.1 待用户裁决。
+  答案 `11` 会 `Stop-Process -Force` 掉那些进程。这是**行为变更**，按 `AGENTS.md` §9.1.1 提交用户裁决；**2026-10-12 用户裁决：不修**（依据见 §6 行 ① 后的说明段）。
 - **非目标（另开票）**：`customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身没有任何守卫（§6）。
 
 ## 4 实现
@@ -302,10 +302,12 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
 
 | # | 残余 | 归属 | 状态 |
 | --- | --- | --- | --- |
-| ① | 闸门无「目录归属」判据：`iaProbeFound == "1"` 曾是唯一归属信号；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程 | #914 修复轮登记，**本票不动**（行为变更） | **待用户裁决（§9.1.1）** |
+| ① | 闸门无「目录归属」判据：`iaProbeFound == "1"` 曾是唯一归属信号；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程 | #914 修复轮登记，**本票不动**（行为变更） | **已裁决：不修**（2026-10-12，对齐上游） |
 | ② | `customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫：取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入 `installer-directories.nsh`） | 首轮 Axis A P3-2；**非本 diff 引入**（`installer.nsh:136-138` blame 到 `387948595`） | **已另开票 [#1078](https://github.com/EricKingWhy/intelligence-agent/issues/1078)** |
 | ③ | 修后重审 F2（P4）：`windows-installer-smoke.yml` 保留一处硬编码「112」（读数记录） | 本轮修后重审 Axis A P4 / Axis B F2 | **登记不修**（理由见 §5.8 末段） |
 | ④ | 修后重审 F3（P4）：规则内联注释 / 错误信息未写明锚是「首次文本出现」 | 本轮修后重审 Axis B F3 | **登记不修**（同上） |
+
+**① 的裁决依据（2026-10-12 实测三源）**：三家都**没有**「目录归属」判据，但爆炸半径分档——`app-builder-lib@26.15.3` 与**本仓同档**（都按 `$INSTDIR` 前缀匹配、且都会升级到 force kill），本仓前缀**更严**（带尾分隔符，不会误伤 `…\Intelligence Agent 2` 这类兄弟目录）；DSH `5badb150` **更窄**——只按精确路径 `$INSTDIR\<app.exe>` 找（`window-frame.dll::InstallerFindProcess`，全文仅 2 处调用），且只 `SetErrorLevel 2` + `Quit` **中止、从不 kill**（它能这么做是因为它查的是用户看得见、关得掉的 app exe；本仓查的是用户看不见的 bundled python，故 #914 裁决 D1 选了「先停再问」）。⇒ 用户裁决**不修**：接受 `app-builder-lib` 今天就在出货的取舍。更严的唯一成熟路径是 MSI/WiX 的 Restart Manager（`RmRegisterResources` + `RmGetList`），NSIS 无原生绑定、生态无先例 ⇒ 若要做需单独立项，不在本票范围。
 
 E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev server 占用；本批 `web/` 与 base 逐字节相同，
 故该车道对本 diff 无信号。集成后由 CI 的 `windows-installer-smoke`（PR 上跑）覆盖真机腿。
