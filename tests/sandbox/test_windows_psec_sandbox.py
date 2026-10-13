@@ -197,8 +197,10 @@ def test_starting_again_preserves_workspace_dacl_and_integrity_label(
 ) -> None:
     from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
-    sandbox = WindowsPsecSandbox(tmp_path / "workspace")
-    sandbox.write_text("seed.txt", "seed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "seed.txt").write_text("seed", encoding="utf-8")
+    sandbox = WindowsPsecSandbox(workspace)
     before_dacl = _workspace_dacl(sandbox.workspace_root)
     before_label = _workspace_integrity_label(sandbox.workspace_root)
 
