@@ -420,3 +420,27 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` 三处逐字相同。
 
 **同步轮次小结**：本票共两次与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报后获批按并集零删除解析）与 `bad6c171`（零冲突，但 `--cc` 空表需机械归属行）。两次的合并树都重跑了全量门禁，均全绿。
+
+## 10 第三次同步（`94a162a3`）与新树全量门禁
+
+**为什么再同步**：PR #1097 在 `04f99c68` 上四车道 CI 全绿、`mergeStateStatus` 一度为 `CLEAN`，随后又转 `BEHIND`——`origin/main` **第三次**前移到 `2ca1dfa53`（PR #1100 / #1094「AGENT_MODELS 条目因 provider 与已知链不一致未被采纳时启动期 warning」）。main 保护 `strict: true`（`gh api repos/EricKingWhy/intelligence-agent/branches/main/protection` 实测 `required_status_checks.strict = true`，`contexts = ["gate0"]`），BEHIND 的 PR 不可合并，故按 §14.6 再同步为 merge `94a162a3`（父一 `04f99c68` = 本线 tip，父二 `2ca1dfa53` = `origin/main`），**零冲突**（ort 策略），合并树 `eadf7f95`。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 同样是**空表**（无冲突解析）⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `94a162a3`）。按既有先例补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-04f99c68-94a162a3.tsv`（range `04f99c68..94a162a3`，desc 611 字符，单行 3 字段，LF），落行后 `check_review_coverage.py` **exit 0**。该行只做机械归属，**不是**对合并内容的审查主张。
+
+**§8.1 判据① 实测（读数可否传递）**：`git diff --name-status --no-renames 04f99c68 3c52da5c` = **2 `A` + 6 `M`**，其中 **6 条非 docs 路径**（`src/agent_harness/cli.py`、`src/agent_harness/model/config.py`、`src/agent_harness/web/app.py`、`tests/model/test_model_catalog.py`、`tests/test_cli.py`、`tests/web/test_web_models.py`）⇒ 按 §8.1 第 3 条「出现任何非 docs / 台账路径 ⇒ 必须在新树上重跑全量」，**读数不可传递**，故重跑。判据④自证：`git rev-parse --verify 04f99c68^{commit}` 与 `3c52da5c^{commit}` 均 exit 0。
+
+**新树 `3c52da5c`（tree `9259de9a`）全量门禁（隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `pytest -q -p no:randomly` | **7838 passed / 43 skipped / 51 deselected / 0 failed**（2315.91s，38:35） |
+| desktop `node --test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **122 文件 / 1709 passed** |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`） | **552 passed（15.2m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 67.6s > 60s 预算目标；预算只是目标，不改变判定），收据 `docs/gate/3c52da5c8a3cf347664248cd0c55ae4dec536ecb.json` |
+| `check_review_coverage.py` | **exit 0** |
+
+后端 **+15 passed**（7823 → 7838）与来侧 #1094 新增的三个测试文件相符；desktop / vitest / e2e 与上一树同数，因来侧未触碰 `desktop/**` 与 `web/**`。本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` **四处逐字相同**。
+
+**同步轮次小结（更新）**：本票共**三次**与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报九项后获批、按并集零删除解析）、`bad6c171`（零冲突，`--cc` 空表 ⇒ 机械归属行）、`94a162a3`（零冲突，`--cc` 空表 ⇒ 机械归属行；来侧含 `src/**` 与 `tests/**` 非 docs 面）。三次的合并树都重跑了全量门禁，均全绿。
