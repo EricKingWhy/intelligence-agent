@@ -4977,6 +4977,38 @@ class SessionService:
             "恢复入口保持拒绝（本错误不可重试）"
         )
 
+    async def _read_events_precheck(self, session_id: str) -> list:
+        """只读恢复预检（#1082）：`recover` 与 `pending_decisions` 共用的五步前导。
+
+        PORT DESIGN：DeepSeek Harness `session-format-catalog` 的单一
+        restore-current 严格校验（坏记录/seq gap 不伪装成可恢复历史）+
+        Pi SQLite backend 的 no-create 只读打开边界（读面不隐藏创建）——
+        两个恢复入口用同一个完整性判据，今后只改一个副本导致的漂移
+        （GET 把全坏日志报成 404、POST/GET 对同一日志给出不同错误）不可能发生。
+        上游均为 MIT；本仓复用既有 `read_events_report`，不引外部 codec。
+
+        五步：校验 session ID → 确保 store → `read_events_report` →
+        404/409 映射。零写入：不追加 SessionEvent、不迁移 Ledger、不创建
+        协调器、不执行外部工具。不得用 `Session.load` 的"尽量可读"语义替换
+        `read_events_report` 的完整性报告。
+
+        边界：无文件或空文件且无损坏行 → SessionNotFound（404）；零可解析
+        事件但有损坏行 → EventLogCorruptError（409）；部分可解析且有损坏行
+        → 409；合法事件 → 返回已验证的事件列表。
+        """
+        self._validate_session_id(session_id)
+        await self._ensure_stores()
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
+        )
+        if not existing and not integrity.corrupt_lines:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
+        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
+        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
+        self._raise_if_event_log_corrupt(session_id, integrity)
+        return existing
+
     async def recover(
         self,
         session_id: str,
@@ -5005,15 +5037,7 @@ class SessionService:
 
         self._validate_session_id(session_id)
         await self._ensure_stores()
-        existing, integrity = await anyio.to_thread.run_sync(
-            self._store.read_events_report, session_id
-        )
-        if not existing and not integrity.corrupt_lines:
-            raise SessionNotFound(f"session '{session_id}' not found")
-        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
-        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
-        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
-        self._raise_if_event_log_corrupt(session_id, integrity)
+        existing = await self._read_events_precheck(session_id)
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
@@ -5112,12 +5136,7 @@ class SessionService:
         """
         self._validate_session_id(session_id)
         await self._ensure_stores()
-        existing, integrity = await anyio.to_thread.run_sync(
-            self._store.read_events_report, session_id
-        )
-        if not existing and not integrity.corrupt_lines:
-            raise SessionNotFound(f"session '{session_id}' not found")
-        self._raise_if_event_log_corrupt(session_id, integrity)
+        existing = await self._read_events_precheck(session_id)
         run_owner_ids = {
             session_id,
             session_budget_key(existing, session_id=session_id),
