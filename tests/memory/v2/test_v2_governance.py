@@ -253,6 +253,60 @@ async def test_tombstone_replay_window_and_independent_settings_survive_restart(
 
 
 @pytest.mark.asyncio
+async def test_fallback_enabled_defaults_on_and_round_trips(tmp_path):
+    """#1039：降级开关默认**开**（PRD §5.3 第 4 条修订），且与另两个开关相互独立。"""
+    store = SqliteMemoryV2Store(tmp_path / "memory-v2.db")
+    await store.initialize()
+
+    assert (await store.get_settings(TRUSTED)).fallback_enabled is True
+
+    await store.update_settings(TRUSTED, fallback_enabled=False)
+    settings = await store.get_settings(TRUSTED)
+    assert settings.fallback_enabled is False
+    # 改一个开关不牵动另两个（per-field patching 的既有语义）。
+    assert settings.extraction_enabled is True
+    assert settings.recall_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_initialize_adds_enabled_by_default_fallback_column_to_legacy_settings(tmp_path):
+    """旧库的 `memory_v2_settings` 无 `fallback_enabled` 列：迁移后旧行取默认**开**。
+
+    向后兼容：`ALTER TABLE ... ADD COLUMN fallback_enabled INTEGER NOT NULL DEFAULT 1`
+    ——旧行（未表达过该开关）落在裁决的默认「开」上，不是「关」。
+    """
+    database_path = tmp_path / "legacy-memory-v2.db"
+    async with connect(database_path) as connection:
+        await connection.execute(
+            "CREATE TABLE memory_v2_settings ("
+            "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+            "extraction_enabled INTEGER NOT NULL, recall_enabled INTEGER NOT NULL, "
+            "updated_at TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))"
+        )
+        await connection.execute(
+            "INSERT INTO memory_v2_settings VALUES (?, ?, ?, ?, ?)",
+            ("tenant-a", "user-a", 0, 1, "2026-09-25T00:00:00+00:00"),
+        )
+        await connection.commit()
+
+    store = SqliteMemoryV2Store(database_path)
+    await store.initialize()
+
+    async with connect(database_path) as connection:
+        columns = await connection.execute_fetchall("PRAGMA table_info(memory_v2_settings)")
+        row = await connection.execute_fetchall(
+            "SELECT fallback_enabled FROM memory_v2_settings WHERE tenant_id='tenant-a'")
+    assert "fallback_enabled" in {column["name"] for column in columns}
+    assert row[0]["fallback_enabled"] == 1
+
+    settings = await store.get_settings(TRUSTED)
+    assert settings.fallback_enabled is True
+    # 迁移不丢失既有列的值。
+    assert settings.extraction_enabled is False
+    assert settings.recall_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_durable_recall_setting_gates_the_existing_context_provider(governance):
     service, _store, _index = governance
 

@@ -268,6 +268,12 @@ class _AuthFailure(Exception):
     status_code = 401
 
 
+class _Rejected(Exception):
+    """400 语义的 provider 错误（#1039 的真实场景：端点确定性 400 / 额度耗尽）。"""
+
+    status_code = 400
+
+
 @dataclass
 class Env:
     store: SqliteMemoryV2Store
@@ -299,6 +305,21 @@ def _roles(*, fallback: bool = False) -> MemoryModelRoles:
         primary=_model_config("senseaudio"),
         fallback=_model_config("qwen") if fallback else None,
     )
+
+
+def _roles_same_target() -> MemoryModelRoles:
+    """主备解析到**同一个**目标（provider/model/base_url 全同）——落它没有意义。"""
+    primary = _model_config("senseaudio")
+    twin = _model_config("senseaudio")
+    return MemoryModelRoles(primary=primary, fallback=twin)
+
+
+def _roles_same_provider_distinct_endpoint() -> MemoryModelRoles:
+    """同 provider/model、仅端点不同——#203 同 id override 换端点的形态，**算**不同目标。"""
+    primary = _model_config("senseaudio")
+    twin = _model_config("senseaudio")
+    twin.base_url = "http://localhost:2"
+    return MemoryModelRoles(primary=primary, fallback=twin)
 
 
 def _run_events() -> list[SessionEvent]:
@@ -412,12 +433,15 @@ async def _run(env: Env, invoker, *, job: MemoryFormationJob | None = None, **kw
     `**kwargs` 会把剩下的键原样传给构造函数，多一个键就是一次 TypeError。
     """
     fallback = kwargs.pop("_fallback", False)
+    roles = kwargs.pop("_roles", None)
+    fallback_enabled = kwargs.pop("fallback_enabled", True)
     sink = kwargs.pop("sink", None)
     job = job if job is not None else await _claimed(env)
     sink = sink or RecordingSink()
     result = await _executor(env, invoker, **kwargs).run(
         job, worker_id="worker-1", run_events=_run_events(),
-        roles=_roles(fallback=fallback), sink=sink)
+        roles=roles if roles is not None else _roles(fallback=fallback),
+        sink=sink, fallback_enabled=fallback_enabled)
     return job, result, sink
 
 
@@ -844,10 +868,16 @@ async def test_without_a_fallback_three_primary_attempts_end_the_job(env: Env) -
 
 
 @pytest.mark.asyncio
-async def test_a_non_transient_failure_is_neither_retried_nor_switched(env: Env) -> None:
-    """AC5：401 一次就停——既不给 primary 重试，也不切 fallback。"""
+async def test_a_non_transient_failure_is_neither_retried_nor_switched_when_the_switch_is_off(
+    env: Env,
+) -> None:
+    """AC5 / 消融态 A：**开关关**时 401 一次就停——既不给 primary 重试，也不切 fallback。
+
+    #1039：确定性错误落 fallback 是**面板开关**控制的（默认开）；关闭时逐字回到
+    现行 R9 行为——本用例钉的就是这条"关 = 旧行为"的消融态。
+    """
     invoker = FakeInvoker(formation=[_AuthFailure("bad key")], adjudication=[])
-    _job, result, sink = await _run(env, invoker, _fallback=True)
+    _job, result, sink = await _run(env, invoker, _fallback=True, fallback_enabled=False)
 
     assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
     assert result is not None
@@ -855,6 +885,104 @@ async def test_a_non_transient_failure_is_neither_retried_nor_switched(env: Env)
     assert result.reason == DegradedReason.PROVIDER_ERROR.value
     assert result.written == ()
     assert sink.types() == [MEMORY_DEGRADED]
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_provider_error_falls_back_once_when_the_switch_is_on(
+    env: Env,
+) -> None:
+    """AC1 / 消融态 B：**开关开 + primary 确定性 400** ⇒ 落一次 fallback 并落库。
+
+    这正是 #1039 的真实场景：primary 端点确定性 400（额度耗尽），备用可用 ⇒
+    formation 不再每轮降级，记录落库，`fallback_used=true`、`attempts` 可从 job 判定。
+    """
+    invoker = FakeInvoker(
+        formation=[_Rejected("endpoint rejected"), _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())])
+    job, result, sink = await _run(env, invoker, _fallback=True)  # fallback_enabled 默认开
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1), ("fallback", 1)]
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert result.fallback_used is True
+    assert len(result.written) == 1
+    assert result.written[0].content == "用户偏好用 pnpm 安装依赖"
+    assert sink.types() == [MEMORY_UPDATED]
+    stored = await env.jobs.get(job.job_id)
+    assert stored.state["fallback_used"] is True
+    # 整作业的调用计数（formation primary 1 次 + fallback 1 次 + 裁决 1 次），与
+    # test_transient_primary_failures_exhaust_three_attempts_then_use_fallback 的口径一致。
+    assert stored.state["attempts"] == 3
+    assert len(await _active(env)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_provider_error_stays_terminal_when_the_switch_is_on_but_no_fallback(
+    env: Env,
+) -> None:
+    """AC2 / 消融态 C：开关开但**未配备用** ⇒ 结局不变（终态 provider_error、零写入）。"""
+    invoker = FakeInvoker(formation=[_Rejected("endpoint rejected")], adjudication=[])
+    _job, result, sink = await _run(env, invoker)  # 无 fallback
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
+    assert result is not None
+    assert result.reason == DegradedReason.PROVIDER_ERROR.value
+    assert result.fallback_used is False
+    assert result.written == ()
+    assert sink.types() == [MEMORY_DEGRADED]
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_provider_error_does_not_fall_back_to_the_same_target(
+    env: Env,
+) -> None:
+    """备用解析到**同一个**目标（同 provider/model/端点）⇒ 落它无意义，仍终态降级。"""
+    invoker = FakeInvoker(formation=[_Rejected("endpoint rejected")], adjudication=[])
+    _job, result, _sink = await _run(env, invoker, _roles=_roles_same_target())
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
+    assert result is not None
+    assert result.reason == DegradedReason.PROVIDER_ERROR.value
+    assert result.fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_provider_error_falls_back_across_a_distinct_endpoint(
+    env: Env,
+) -> None:
+    """同 provider/model、**仅端点不同**仍算不同目标 ⇒ 落一次备用（#203 同 id override）。
+
+    `MemoryModelRoles.targets_are_distinct` 的判据含 `base_url` 就是为了这条：只比 provider
+    名会把它误判成"同一目标"，从而在一个其实换了端点的备用上放弃救援。
+    """
+    invoker = FakeInvoker(
+        formation=[_Rejected("endpoint rejected"), _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())])
+    _job, result, _sink = await _run(
+        env, invoker, _roles=_roles_same_provider_distinct_endpoint())
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1), ("fallback", 1)]
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert result.fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_a_transient_fallback_failure_retries_on_the_ordinary_ladder(env: Env) -> None:
+    """#1039 / PRD §5.3 第 4 条：确定性 primary 错 ⇒ 切到 fallback **一次**；此后 fallback
+    走 R9 的既有重试阶梯（1+1）。本条钉住"切换一次"与"备用自己的重试预算"的边界，免得把
+    "switch once" 误读成"备用只能调用一次"。"""
+    invoker = FakeInvoker(
+        formation=[_Rejected("primary endpoint rejected"), TimeoutError(),
+                   _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())])
+    _job, result, _sink = await _run(env, invoker, _fallback=True)
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [
+        ("primary", 1), ("fallback", 1), ("fallback", 2)]
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert result.fallback_used is True
 
 
 @pytest.mark.asyncio
