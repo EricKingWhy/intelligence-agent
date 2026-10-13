@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_harness.instance_lock import session_append_lock
 from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
@@ -260,10 +261,11 @@ class JsonlSessionStore:
         # 的写者动过（另一 store 实例 / 另一进程，CLI 与 server 共用同一 sessions
         # 目录）→ 重新以磁盘为准。缓存与锁表的结构由 _state_guard 保护。
         #
-        # 边界（不得夸大为「跨进程安全」）：本层没有文件锁，跨进程**同时**追加仍可能
-        # 各自通过检查（检查与写入之间的窗口跨进程不互斥）。戳只能察觉「已经落盘」的
-        # 外部追加。同一进程内（真实缺陷 BUG-011 的现场：一个 server 的两个并发请求）
-        # 由 _lock_for + 本检查共同保证严格单调。
+        # 跨进程互斥（#1063）：`append_event` 的「读已落盘最大 seq → 判定 → 写盘」
+        # 临界区外再包一层 per-session advisory 文件锁（`instance_lock.session_append_lock`），
+        # 因此两个进程**同时**追加也不会各自通过检查。进程内由 `_lock_for` 串行；
+        # 文件锁补的是跨进程那一维。下面的戳缓存仍按原语义工作（且其更新已移进文件锁内，
+        # 见 `append_event`——放在锁外会用「自己的 seq + 别人刚写后的戳」污染缓存）。
         self._last_seq: dict[str, tuple[int, int, int]] = {}
         # 本进程硬删过的会话 id（ADR-0036）：`append_event` 据此拒写。不清除是有意的——
         # 生产 id 由 uuid4 生成（没有客户端可控入口），同一 id 再次出现只可能是迟到写者；
@@ -399,29 +401,41 @@ class JsonlSessionStore:
                     f"Session '{session_id}' 已被硬删，拒绝重建事件日志"
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._neutralize_torn_tail(path)
-            last = self._last_seq_on_disk(session_id)
-            if event.seq <= last:
-                if not terminal:
-                    raise SeqConflict(
-                        f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
-                        f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+            # 跨进程临界区（#1063）：把「读已落盘最大 seq → 判定 → 写盘」整段纳入
+            # per-session 文件锁。`_lock_for` 只串同进程线程；两个进程各自的读-判定-写
+            # 若不跨进程互斥，会各自读到同一 `last`、各自通过 `seq <= last` 检查、
+            # 各自把同一个号写下去 → 盘上重复 seq（实测两进程各写 120 条 → seq 2..120
+            # 全重复）。锁文件与 events.jsonl 同目录，列表页看不见它。
+            with session_append_lock(path):
+                # 撕裂尾中立化也是写，必须同在锁内（否则两进程可能同时改写同一尾段）。
+                self._neutralize_torn_tail(path)
+                last = self._last_seq_on_disk(session_id)
+                if event.seq <= last:
+                    if not terminal:
+                        raise SeqConflict(
+                            f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
+                            f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+                        )
+                    # 终态协商（#1061）：改号到本锁内读到的空档。行文本必须按**改号后**的
+                    # 事件重渲染（上面的 dumps 用的是改号前的 seq）。
+                    event = replace(event, seq=last + 1)
+                    line = json.dumps(
+                        event.to_dict(), ensure_ascii=False, separators=(",", ":"),
                     )
-                # 终态协商（#1061）：改号到本锁内读到的空档。行文本必须按**改号后**的
-                # 事件重渲染（上面的 dumps 用的是改号前的 seq）。
-                event = replace(event, seq=last + 1)
-                line = json.dumps(
-                    event.to_dict(), ensure_ascii=False, separators=(",", ":"),
-                )
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            stat = path.stat()
-            with self._state_guard:
-                self._last_seq[session_id] = (
-                    event.seq, stat.st_size, stat.st_mtime_ns,
-                )
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                # 文件戳/缓存更新必须**留在文件锁内**（#1063）：原实现放在
+                # `_lock_for` 内、`session_append_lock` 外，跨进程下会在「放锁 → stat」
+                # 之间被另一进程追加，于是把**自己**的 seq 配上**别人刚写后**的
+                # 文件戳入缓存 → 该条缓存「seq 偏小、戳偏新」，后续 stat 命中它 →
+                # 返回过期的 last → 重复落盘（实测 15 条重复全来自这里）。
+                stat = path.stat()
+                with self._state_guard:
+                    self._last_seq[session_id] = (
+                        event.seq, stat.st_size, stat.st_mtime_ns,
+                    )
         return event
 
     def _neutralize_torn_tail(self, path: Path) -> None:

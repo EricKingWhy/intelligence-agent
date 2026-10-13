@@ -48,6 +48,7 @@ __all__ = [
     "MEMORY_INDEX_REBUILD_FENCE_FILENAME",
     "InstanceLock",
     "InstanceLockError",
+    "session_append_lock",
 ]
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ ALLOW_SHARED_ROOT_ENV = "ALLOW_SHARED_ROOT"
 
 #: 锁文件名（位于 workspace root 下）。
 DEFAULT_LOCK_FILENAME = ".instance.lock"
+#: per-session 追加锁的锁文件名（#1063）：位于每个 session 目录内、与 events.jsonl 同级。
+_SESSION_LOCK_FILENAME = ".events.lock"
 CUTOVER_FENCE_FILENAME = ".memory-cutover-in-progress"
 MEMORY_INDEX_REBUILD_FENCE_FILENAME = ".memory-v2-index-rebuild-in-progress"
 
@@ -131,6 +134,63 @@ def _shared_root_registry_lock(root: Path) -> Iterator[None]:
     locked = False
     try:
         _take_os_lock(fd)
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                _release_os_lock(fd)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _take_os_lock_blocking(fd: int) -> None:
+    """**阻塞**取 OS 级排他锁（与 `_take_os_lock` 的 fail-fast 相对）。
+
+    session 追加的临界区是微秒级的，等对方让出比当场失败更合理；deadline 之外的
+    有界性由调用方的墙钟预算（#1024/#1061）负责，本原语不设超时。
+
+    平台差异（必须记账，不得夸大为「等价」）：POSIX `flock(LOCK_EX)` 无限等待；
+    Windows `msvcrt.LK_LOCK` 以 1 秒为间隔重试 **10 次**后抛 `OSError`——即 Windows
+    上单次等待上限约 10 秒。对微秒级临界区绰绰有余，但极端持有者下 Windows 会先
+    失败，这是平台语义，不是可消除的缺陷。
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+@contextmanager
+def session_append_lock(events_path: Path) -> Iterator[None]:
+    """跨进程 **per-session** 追加锁（#1063）——锁的是 `events.jsonl` 所在目录。
+
+    本模块开篇的边界声明点名的正是这个形状：「两个进程同时 append 会话 JSONL 会
+    产出重复 seq / 交错写」。instance 锁挡的是「两个进程启同一 root」，但逃生门
+    （`ALLOW_SHARED_ROOT`）或未取 instance 锁的直接 library 用法下，两个进程仍可能
+    写同一 session。本原语把 store 的「读已落盘最大 seq → 判定 → 写盘」临界区在
+    **跨进程**方向也串起来，复用同一套 OS 锁平台分支（Windows 的 mandatory 偏移陷阱
+    只此一处）。
+
+    锁文件与 events.jsonl 同目录、固定名 ``.events.lock``：不进列表页
+    （``list_session_ids`` 只认目录里有 ``events.jsonl``）；``delete_session`` 的
+    rmtree 会一并清掉它。
+
+    **非可重入**：同一进程内同一 session 不得嵌套取锁（`JsonlSessionStore` 的进程内
+    `_lock_for` 已保证同进程串行，本锁只补跨进程这一维）。
+    """
+    fd = os.open(
+        events_path.parent / _SESSION_LOCK_FILENAME, os.O_RDWR | os.O_CREAT, 0o600
+    )
+    locked = False
+    try:
+        _take_os_lock_blocking(fd)
         locked = True
         yield
     finally:
