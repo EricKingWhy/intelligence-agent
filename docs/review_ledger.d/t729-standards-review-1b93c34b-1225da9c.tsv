@@ -1,0 +1,1 @@
+2026-10-13	#729 Standards/Security 修后重审：固定范围 `1b93c34b..1225da9c`，核验 9 个改动文件；copy_in 句柄相对 no-reparse 与持句柄防 rename 修复通过。初报 P2（能力探针 mkdir）经调用链核实后撤回：子类构造器覆写父类，仅 `_initialize`，workspace 链以 create=False 打开。最终 APPROVE；本轴未运行测试。	1b93c34b5154afc70e0a4475499c8ac403798548..1225da9c1efb2fd4bed958ff5a4795a3cefaf514

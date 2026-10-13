@@ -73,6 +73,16 @@ export function resolvePythonPath(deps: PythonPathDeps): string {
   return deps.execPath.replace(/electron(.exe)?$/i, 'python')
 }
 
+/** Packaged Windows backend's bundled MXC PSEC launcher; dev uses IA_MXC_EXECUTABLE. */
+export function resolveMxcExecutablePath(deps: {
+  readonly platform: string
+  readonly packaged: boolean
+  readonly resourcesPath: string
+}): string | undefined {
+  if (deps.platform !== 'win32' || !deps.packaged) return undefined
+  return `${deps.resourcesPath}\\mxc\\wxc-exec.exe`
+}
+
 /**
  * Data root the shell gives the Python service (W-21 defect D4 / #813).
  *
