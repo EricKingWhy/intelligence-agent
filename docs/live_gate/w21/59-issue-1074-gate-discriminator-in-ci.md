@@ -103,7 +103,7 @@ NSIS 缓存的脚本在守。
 | `ed9f1e0a` | `desktop/scripts/build-windows-installer.mjs` | docstring 的「does NOT cover」列全三种规则接受、但会退回缺陷的形状，并写明各自被哪一层兜住；规则内联注释不再声称覆盖「每一种分支形式」 | 首轮 Axis A P4-1 / Axis B P4 |
 | `ed9f1e0a` | `stage-damaged-probe.nsi` | 头注释改为「one or two real Windows processes」（`damaged-mixed` 腿留下两个进程） | 首轮 Axis A P3-1 |
 | `ed9f1e0a` | `desktop/test/harness/teeth-check-guards.mjs` | `GUARD_BASELINE_SHA256` 随规则文本改而同步（`11e9d28f…` → `8f7bbb05…`） | 该 harness 自身要求（改了守卫文本就要同步基线） |
-| `ed9f1e0a` | `.github/workflows/windows-installer-smoke.yml` | 去掉硬编码的用例数（读数进本文件，注释不跟着漂） | 首轮 Axis B P4 |
+| `ed9f1e0a` | `.github/workflows/windows-installer-smoke.yml` | 去掉**两处**硬编码用例数（step 注释与 `paths` 注释）；**第三处**（「为什么必须在 CI 里跑」段里引 §1.2 消融读数的 `112/112 绿`）**保留**为读数记录——它是测量结果不是判据；该处的漂移风险按 §5.8 登记 | 首轮 Axis B P4 |
 
 ## 5 验证读数
 
@@ -207,7 +207,11 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
   （与 `installer.nsh:135-138` 一致）；`first-install` 腿**非空转**（结果文件缺失会失败，`answer=0` 只能来自
   `Pop $iaRunningProduct`）；CI step 不会静默跳过或错序；`main` 的保护只有 `gate0` 一项必需检查
   （`gh api .../branches/main/protection` 实测），故工作流头注释「不是必需状态检查」为真；
-  `r1-drivers/` 目录 worktree 为 LF 是**既有、统一**状态（同目录未改动的兄弟文件同样如此），非本笔引入。
+  （**§5.8 F4 更正**：本项首轮曾写「`r1-drivers/` worktree 为 LF、**统一**」，实测为混合）`r1-drivers/`
+  目录的 **index 全为 LF**（`git ls-files --eol` 实测 10 个文件全 `i/lf`），worktree 是**混合**
+  状态（6 个 `w/crlf` + 4 个 `w/lf`）——这是既有状态、非本笔引入（本笔改动的两个文件
+  `run-stage-damaged-probe.ps1`、`stage-damaged-probe.nsi` 在 base 与 tip 均为 `w/lf`，blob 均 LF，
+  无整文件 EOL 重写）。
 
 ### 5.7 修复轮（`ed9f1e0a`）：处置与红证
 
@@ -215,16 +219,65 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
 | --- | --- |
 | Axis A P3-1（12/11 分辨不出） | **加 `damaged-mixed` 腿**；M2/M3 实测：构建期 112/112 绿、**只有该腿**红（§5.2） |
 | Axis A P4-1（docstring 覆盖声明偏宽） | docstring 的「does NOT cover」列全三种形状 + 各自兜底层；规则内联注释不再声称覆盖「每一种分支形式」 |
-| Axis B P4（硬编码 112 / 「reads」措辞） | 去掉两处用例数；把「reads」改为「touches」，并在注释里写明锚是**首次文本出现** |
+| Axis B P4（硬编码 112 / 「reads」措辞） | 去掉**两处**用例数（第三处保留为读数记录，§4）；「reads」措辞**登记不修**——修它要引入修后重审之后的代码提交，需独立审查轮（§5.8 末段） |
 | Axis B P2 + Axis A P4-2（无方案依据块） | 本文件 §2 |
 | Axis B P3（交付记录） | 最终记账笔（台账行 + 收据 + tracker / PHASE_STATUS / 月档） |
 | Axis A P3-2（`customInit` 包装无守卫） | **本票不修**（非本 diff 引入、且要改 `installer.nsh`）；登记为残余并另开票（§6） |
 | 残余 ①（无目录归属判据） | **本票不动**（行为变更，待 §9.1.1 裁决） |
 
-### 5.8 修复轮修后重审（两轴，范围 `b352b106..ed9f1e0a`）
+### 5.8 修复轮修后重审（两轴，范围 `b352b106..46e150b0`）
 
-PENDING_REREVIEW
+按 §8.3 第 4 条：修后重审每轴 1 轮，两轴都必须关掉既有 finding、且不得零发现。派发预算（§8.3 第 1 条）：
+目标 tip `46e150b0`、树 `88d4ff3f…`、每轴报告上限 12 条、墙钟 60 min、变异上限 5 条/轴、**无论如何必须给结论行**。
+只读（§8.3 第 2 条）：变异一律在**主 worktree 之外**做副本，收尾报 `git status --short` + `git hash-object`。
+
+- **Axis A（正确性 / 规格一致）：`APPROVE_WITH_FINDINGS`，P0–P3 = 0/0/0/0 + P4×1**
+  - 四条首轮 finding 的处置**逐条实测复验成立**（不是采信自述）：
+    - **P3-1**（分类器分辨不出 12 与 11）：自写变异 M2（`-eq $iaAll.Count` → `-ge 1`）⇒ 构建期规则**绿**、
+      真机腿**只有 1 条红**（`[damaged-mixed]`），其余五腿全绿 ⇒ 生产后果（先杀运行时再拒绝）确被该腿唯一捕获，修复成立。
+    - **P4-1**（docstring 覆盖声明）：逐形状实测——shape2（分支改写成 `${FileExists}` 且调用移入）⇒ 规则**绿**、
+      `#1045` 语句表**红**、真机腿 **10 条红**；shape3（调用移到 `StrCpy $iaFinalDirectory` 之前）⇒ 规则**绿**、真机腿 **7 条红**。
+      两条「规则绿」的形状确被声明的兜底层兜住 ⇒ 声明准确。
+    - **P4-2 / Axis B P2**（方案依据）：§2 的 ≥2 来源**独立复核相符**（`app-builder-lib@26.15.3` 的
+      `allowOnlyOneInstallerInstance.nsh` 存在且 `templates/nsis` 下 test/spec = 0；DSH `5badb150` 的
+      `.github/workflows` 命中 `installer|makensis|nsis` = 0）。
+    - **P3-2**（`customInit` 包装无守卫）：「**非本 diff 引入**」成立——`git diff --name-only b352b106~1 46e150b0
+      -- desktop/installer/installer.nsh` 为空，`:136-138` blame 到 `387948595`（#915/#1023/#1034，早于本批）
+      ⇒ 登记为残余 + 另开票成立。
+  - 自写变异 4 条，**失败集合互不相同**（满足 §8.3 第 4 条「覆盖不同检查点且失败集合不同」）：M1 闸门体内提前返回
+    ⇒ 真机腿 **9 红**；M2 12→11 塌缩 ⇒ 仅 **1 红**；shape2 ⇒ 规则绿 / `#1045` 表红 / 腿 **10 红**；shape3 ⇒ 腿 **7 红**。
+  - 基线六腿全绿，与 §5.3 一致。
+  - **新 finding（P4）**：`windows-installer-smoke.yml` 的「为什么必须在 CI 里跑」段仍硬编码「112/112 绿」，
+    与本笔「去掉硬编码用例数」的自述不一致（同 Axis B F2）。
+- **Axis B（仓规 / 标准）：`APPROVE_WITH_FINDINGS`，P0–P3 = 0/0/0/1 + P4×3**
+  - **F1（P3，交付债、非缺陷）**：本 tip 尚无台账行 / tracker / PHASE_STATUS / 月档条目——已在 §4 / §5.7 声明为
+    「最终记账笔」，属已声明的顺序；台账未落盘前 `test_real_ledger_passes_after_the_431_fix` 仍红，与 §5.5 一致。
+    **本轮末尾的记账笔即其处置**。
+  - **F2（P4）**：`windows-installer-smoke.yml` 仍有一处硬编码「112」（基线共 3 处，修复只清 2 处）⇒ 与 §4 / §5.7 自述不一致。
+  - **F3（P4）**：规则内联注释未写明「锚是**首次文本出现**」；抛出的错误信息仍写 `reads $iaProbeFound`（机制是「首次文本出现（读或写）」）。
+  - **F4（P4）**：§5.6 的 EOL 断言不准确（首轮写「worktree 为 LF、统一」，实测混合）——**已就地更正**（§5.6 已加标记）。
+  - 自写变异 3 条：M1 把 `probeUse` 锚退回字面量 `${If} $iaProbeFound == "1"` ⇒ 套件 **111/112，唯一红是新用例**
+    「refuses a gate call that a re-spelled app-executable branch moves behind it」⇒ **新用例对锚点改动有鉴别力、
+    首轮所述 `StrCmp` 绕过已被堵住**；M2 在副本 `.nsh` 的函数体首行插入提前返回 ⇒ 构建期 **112/112 全绿**（独立复现 §1.2）；
+    M3 `teeth-check-guards.mjs` ⇒ 存活变异 0、`identical=true`。
+  - Scope Lock：本批仅动 7 个代码文件 + docs；`dev.sh` 未被本批触碰（`git log/diff 42bb109a..HEAD -- dev.sh` 为空）；无顺手重构。
+    EOL/BOM：全部改动文件 `i/lf`、无 BOM、无整文件 EOL 重写。`DOC_PATTERN`：新增 docs 仅 `.json` / `.md`。
+    License：未引入第三方代码；`app-builder-lib` 实测 `26.15.3` / MIT / 不在 `desktop/package.json`、不在 `THIRD_PARTY_NOTICES.md`
+    ⇒ §2 说法准确。提交卫生：`46e150b0` 如实记 e2e `NOT_RUN` 并留 §5.8 / §6 占位。
+- **两轴都取到结论行**，未使用 §8.3 第 4 / 5 条的替代通道（不自行判通过）。
+- **F2 / F3 的处置（登记不修）**：两条均为 P4（注释 / 文案）。修它们会引入**修后重审之后的代码提交**；该提交在覆盖闸门里
+  必须由一次新审查归属（`scripts/check_review_coverage.py` 的 docs-only 只认 `docs/**` 等路径，`.github/workflows/*.yml`
+  与 `desktop/**` 都不算），而 §8.3 第 4 条把修后重审封顶在每轴 1 轮 ⇒ 为两处 P4 文案花掉「一票一次」的发现阶段补审配额
+  不合比例（§9.2）。故**如实登记、本票不改**；§4 / §5.7 的相关自述已改为逐处准确（两处已去、第三处保留为读数记录）。
 
 ## 6 残余与后续
 
-PENDING_RESIDUALS
+| # | 残余 | 归属 | 状态 |
+| --- | --- | --- | --- |
+| ① | 闸门无「目录归属」判据：`iaProbeFound == "1"` 曾是唯一归属信号；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程 | #914 修复轮登记，**本票不动**（行为变更） | **待用户裁决（§9.1.1）** |
+| ② | `customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫：取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入 `installer-directories.nsh`） | 首轮 Axis A P3-2；**非本 diff 引入**（`installer.nsh:136-138` blame 到 `387948595`） | **另开票** |
+| ③ | 修后重审 F2（P4）：`windows-installer-smoke.yml` 保留一处硬编码「112」（读数记录） | 本轮修后重审 Axis A P4 / Axis B F2 | **登记不修**（理由见 §5.8 末段） |
+| ④ | 修后重审 F3（P4）：规则内联注释 / 错误信息未写明锚是「首次文本出现」 | 本轮修后重审 Axis B F3 | **登记不修**（同上） |
+
+E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev server 占用；本批 `web/` 与 base 逐字节相同，
+故该车道对本 diff 无信号。集成后由 CI 的 `windows-installer-smoke`（PR 上跑）覆盖真机腿。
