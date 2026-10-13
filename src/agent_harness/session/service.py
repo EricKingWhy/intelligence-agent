@@ -5081,15 +5081,21 @@ class SessionService:
         """待人工裁决清单的只读出口（#1049，``GET /api/sessions/{id}/recovery``）。
 
         与 ``recover`` 409 的 ``pending_decisions`` **同源**（同一个
-        ``_reconcile_pending``，逐字段一致）：前端打开会话即可主动得知要裁决什么，
-        不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
+        ``_reconcile_pending``，无在途 run 时逐字段一致）：前端打开会话即可主动得知
+        要裁决什么，不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
         **零写入**：不建协调器、不迁移 Ledger、不追加事件。存在性 / 损坏判据与
         ``recover`` 的前导逐条相同（422 / 404 / 损坏 409）。
         会话有在途 run ⇒ 空：其 RUNNING 行是正在执行，不是待裁决——拿它提交裁决
         只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
         所以不能当裁决清单用）。在途按本会话**与委派树根会话**判（#1051）：子代理
-        跑在父 run 的 task 里，RunManager 只按根登记；读完 Ledger 后再判一次，
-        挡住判定与读取之间新启动的 run。
+        跑在父 run 的 task 里，RunManager 按树根会话登记；用户直接续聊子会话时，run
+        按子会话自身 id 登记（续聊中不会再派生孙会话，#1053 已实测证伪），故两个 id
+        都判。#318 之前的旧子会话 ``session/started`` 里没有
+        ``delegation_root_session_id`` 锚点，根会话 id 回退为自身 ⇒ 只按自身判定。
+        读完 Ledger 后再判一次，挡住判定与读取之间新启动的 run。
+        已接受的残余窗口：run 若在两次判定之间启动并完整跑完，两次都看不到它，读到的
+        在途快照会被误列一次；提交裁决时 ``recover`` 按当时 Ledger 重新校验，不是
+        待裁决的目标会被拒（422），不会误裁。
         与 ``recover`` 的 409 **刻意不同**：``recover`` 不判在途，在途时同样的
         RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
         run 时逐字段一致——读面只报此刻可裁决的行。
@@ -5102,10 +5108,12 @@ class SessionService:
         if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
         self._raise_if_event_log_corrupt(session_id, integrity)
-        owners = {session_id, session_budget_key(existing, session_id=session_id)}
+        run_owner_ids = {session_id, session_budget_key(existing, session_id=session_id)}
 
         def in_flight() -> bool:
-            return any(self._run_manager.get_active(sid) is not None for sid in owners)
+            return any(
+                self._run_manager.get_active(sid) is not None for sid in run_owner_ids
+            )
 
         if in_flight():
             return []
