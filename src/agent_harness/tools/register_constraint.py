@@ -148,6 +148,8 @@ class RegisterConstraintTool(Tool):
             or context.run_id != run_id
             or context.agent_id != "default"
             or context.agent_profile not in (None, "main", "coding")
+            # #1085（#663 AC01）：委派子会话不得获得有效入口（执行期兜底）。
+            or context.is_delegated_child
         ):
             return self._rejected(
                 "SCOPE_NOT_ALLOWED",
