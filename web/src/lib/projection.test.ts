@@ -15,7 +15,8 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
-      permission_policy: null, session_permission_mode: null, events: [], unknown_events: [],
+      permission_policy: null, session_permission_mode: null, session_cwd: null,
+      events: [], unknown_events: [],
       // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
       eventsVersion: 0,
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
@@ -2412,6 +2413,56 @@ describe('session/started → session_permission_mode（#236）', () => {
     }));
     expect(s.session_permission_mode).toBe('read-only');
     expect(s.permission_policy).toBe('workspace-write');
+  });
+});
+
+// ── #1028：会话 cwd 锚（WS-1 / #151 的写侧）在 Web 侧的读侧投影 ──
+// 归属 chip 的数据源：`session/started.data.cwd`（与 permission_mode 同级，写后不可变）。
+// 与 permission_mode 同一「只认第一条带值的 started」口径——cwd 同样是会话创建期的定值，
+// 重放/迟到重复投递不得让后来的值改写先到的。
+
+describe('session/started → session_cwd（#1028）', () => {
+  const T = '2026-10-13T00:00:00Z';
+  const started = (data: Record<string, unknown>, seq = 1) =>
+    ev({ type: EventType.SESSION_STARTED, seq, session_id: 's', run_id: 'r', time: T, data });
+
+  it('事件带 cwd → 投影出该绝对路径', () => {
+    const s = applyEvent(initConversation('s'), started({ cwd: '/home/hatch/proj' }));
+    expect(s.session_cwd).toBe('/home/hatch/proj');
+  });
+
+  it('未声明（老日志）→ null，不编字面值冒充', () => {
+    const s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_cwd).toBeNull();
+  });
+
+  it('坏值（非字符串 / 空串）→ null', () => {
+    let s = applyEvent(initConversation('s'), started({ cwd: 7 }));
+    expect(s.session_cwd).toBeNull();
+    s = applyEvent(s, started({ cwd: '' }, 2));
+    expect(s.session_cwd).toBeNull();
+  });
+
+  it('只认第一条带值的 started：迟到的 started 不改写 cwd（写后不可变）', () => {
+    let s = applyEvent(initConversation('s'), started({ cwd: '/a' }));
+    s = applyEvent(s, started({ cwd: '/b' }, 2));
+    expect(s.session_cwd).toBe('/a');
+  });
+
+  it('第一条没带键、后一条带了 → 取后者（"没带键"= 没声明）', () => {
+    let s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_cwd).toBeNull();
+    s = applyEvent(s, started({ cwd: '/a' }, 2));
+    expect(s.session_cwd).toBe('/a');
+  });
+
+  it('与 permission_mode 同事件共存：两个字段各自独立投影', () => {
+    const s = applyEvent(
+      initConversation('s'),
+      started({ cwd: '/a', permission_mode: 'read-only' }),
+    );
+    expect(s.session_cwd).toBe('/a');
+    expect(s.session_permission_mode).toBe('read-only');
   });
 });
 
