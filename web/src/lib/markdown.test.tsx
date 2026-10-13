@@ -209,6 +209,15 @@ describe('链接渲染（#1096 — 对话区出处 URL 可点）', () => {
     expect(collectElements(anchors[1]).map((n) => n.type)).toContain('code');
   });
 
+  it('label 内裸 URL 不产生嵌套 <a>（P3 回归）', () => {
+    const anchors = anchorsOf(renderMarkdown('[https://x.com](https://y.com)'));
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://y.com');
+    expect(textOf(anchors[0])).toBe('https://x.com');
+    // label 含中英混合正文 + 裸 URL，仍只一个 <a>
+    expect(anchorsOf(renderMarkdown('[见 https://x.com 这里](https://y.com)'))).toHaveLength(1);
+  });
+
   it('普通文本不受影响（不产生 <a>，仍是纯文本 span）', () => {
     const nodes = renderMarkdown('这是一段普通文本，没有链接。');
     expect(anchorsOf(nodes)).toHaveLength(0);

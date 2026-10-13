@@ -67,17 +67,18 @@ function renderAnchor(href: string, label: ReactNode, key: string): ReactNode | 
   );
 }
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+function renderInline(text: string, keyPrefix: string, allowLinks = true): ReactNode[] {
   const parts = text.split(INLINE_SPLIT);
   return parts.filter(Boolean).map((part, i) => {
     const key = `${keyPrefix}-${i}`;
-    const mdLink = MD_LINK.exec(part);
+    const mdLink = allowLinks ? MD_LINK.exec(part) : null;
     if (mdLink) {
       // 空 label 或不安全 scheme：按原文纯文本呈现（内容不静默丢弃）
+      // label 递归时禁链接——label 内的裸 URL 不得再产生 <a>（否则嵌套 <a> 非法）。
       const anchor =
         mdLink[1].trim() === ''
           ? null
-          : renderAnchor(mdLink[2].trim(), renderInline(mdLink[1], `${key}-l`), key);
+          : renderAnchor(mdLink[2].trim(), renderInline(mdLink[1], `${key}-l`, false), key);
       return anchor ?? <span key={key}>{part}</span>;
     }
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
@@ -86,7 +87,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return <code key={key}>{part.slice(1, -1)}</code>;
     }
-    if (/^https?:\/\//i.test(part)) {
+    if (allowLinks && /^https?:\/\//i.test(part)) {
       const href = trimUrlTail(part);
       const anchor = renderAnchor(href, href, `${key}-a`);
       if (anchor && href.length < part.length) {
