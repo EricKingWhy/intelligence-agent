@@ -368,3 +368,31 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 - **判定**：`REUSE`（本仓既有的「构建期规则读 `installer.nsh`」形状 + 既有 LogicLib token 工具 + 既有变异 harness 判据）+ `BUILD`（最小：一条规则 + 4 条 fixture + 1 条变异）。不引入新 Provider / 依赖 / 框架。
 - **License**：不新增第三方代码；未复制上游源码，只做机制对照。`app-builder-lib` MIT（构建期工具，非声明依赖，见 #914 §2 的 License 段）。
 - **来源披露（§3.1）**：本领域已在 `docs/agents/reference-sources.md`「Windows 安装器 / 在占用进程处理」登记（#914 批次），本票不新增领域、不新增来源条目；本环境 `WebFetch` 不可用（实测 `Model request failed`），故未引任何网络来源，也不编造读取日期。
+
+## 8 与 origin/main 同步（§14.6 先回后正）与合并树全量门禁
+
+**同步**：`origin/main` 从 `ba8d0bd3` 前移到 `8821a9a8c`（含 #1091/#1069、#1087/#1039、#1088/#1080、#1086/#1027 等）。PR 前同步为 merge `32ddedb9`（父一 `ad90307e` = 本线 tip，父二 `8821a9a8c`），合并树 `471d9273`。
+
+**冲突与解析（§14.7）**：两份进度文档 both-added —— `docs/PHASE_STATUS.md`（两侧在同一锚点各插一条 2026-10-13 bullet）与 `docs/phase_status/2026-10.md`（两侧都在 EOF 追加整节）；`docs/SDD_TICKET_TRACKER.md` 自动合并（两侧 bullet 均在，无内容丢失）。按 §14.7 上报九项报告，获用户逐次批准后解析为**并集、零删除**：
+
+- `PHASE_STATUS.md`：vs ours `+1/-0`，vs theirs `+4/-0`。+4 里含 ours-only 的 #1074 bullet——它位于标记**之外**，由 git 自动合并，这也是 ours/theirs 从第 43 行起就不同的原因。
+- `2026-10.md`：vs ours `+44/-0`，vs theirs `+41/-0`；三节按日期单调排列（#1074 → #1078 → #1080），插入 1 行空行作节间分隔。
+- 解析实现方式 = 对 git 自己的合并输出做「**只删三行冲突标记**」的最小编辑，未重写任何一侧正文；两侧正文逐行断言仍在。未采用「按 ours/theirs 前缀后缀求并集」的启发式——该启发式会把两侧各自的插入点偏移误判为自动合并区，实测会重复约 120 行，已弃用。
+
+**代码面不变**：本批 9 个代码 blob 在验证 tip `ad90307e` 与合并 `32ddedb9` 上**逐字相同**（`git rev-parse <rev>:<path>` 逐文件比对）。`origin/main` 的 54 文件改动（memory v2 / model fallback / session service / `web/**`）与本批代码面零交集。
+
+**合并树全量门禁（§3.2 树不同 ⇒ 重跑；隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `scripts/run_tests_clean.sh` | **7823 passed / 43 skipped / 51 deselected / 0 failed**（1701.33s，28:21） |
+| desktop `npm test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **120 文件 / 1691 passed** |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`，5173 空闲） | **544 passed（17.8m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 24.4s），收据 `docs/gate/32ddedb9ee8f58c35c64e1f39e01183635a6d4bb.json` |
+| `check_review_coverage.py` | **exit 0** |
+
+后端那轮首轮即全绿（此前冻结树唯一红 = 台账未落盘的机械瞬态，已随台账行落盘消失）。合并提交的 `--cc` 文件表恰为三份进度文档 ⇒ 覆盖闸门按 docs-only 归属，**无需新增台账行**。
+
+**备注**：`desktop` 的 `--test-reporter=dot` 每个 suite 也打一个字符，故「数点」得 360 ≠ 实际用例数；权威读数是 spec reporter 的 `# tests 297 / # pass 295 / # skipped 2`。
