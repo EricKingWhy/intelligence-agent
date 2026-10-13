@@ -13,6 +13,7 @@ import {
   describeSessionError,
   detachSessionFromProject,
   getHostDirs,
+  getSandboxBackends,
   getModels,
   getAgentProfiles,
   getSessionEvents,
@@ -87,6 +88,25 @@ import {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('getSandboxBackends — workspace-specific PSEC probe', () => {
+  it('passes the selected workspace path to the capability probe', async () => {
+    const { calls } = captureFetch(200, {
+      backends: [
+        { backend: 'windows_psec', available: true, reason: null, details: {} },
+      ],
+    });
+
+    const result = await getSandboxBackends('C:\\Projects\\Demo');
+
+    expect(calls[0].url).toBe(
+      '/api/sandbox-backends?workspace_path=C%3A%5CProjects%5CDemo',
+    );
+    expect(result).toEqual([
+      { backend: 'windows_psec', available: true, reason: null, details: {} },
+    ]);
+  });
 });
 
 describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {

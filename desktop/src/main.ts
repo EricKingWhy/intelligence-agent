@@ -20,6 +20,7 @@ import {
   hostCredentialsEnvValue,
   resolveDesktopDataRoot,
   resolveHostCredentialPath,
+  resolveMxcExecutablePath,
   resolvePythonPath,
   resolveUserDataDir,
 } from './installer/paths.ts'
@@ -124,6 +125,11 @@ async function main(): Promise<void> {
   // reads back.
   const credentialPath = resolveHostCredentialPath(app.getPath('userData'))
   const dataRoot = resolveDesktopDataRoot(app.getPath('userData'))
+  const mxcExecutable = resolveMxcExecutablePath({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  })
   const backend = new DesktopBackendController(
     (onFailure) => new DesktopServiceHost({
       // W-21 D4 (#813): an absolute data root under user data, not process.cwd()
@@ -138,6 +144,7 @@ async function main(): Promise<void> {
       }),
       childEnv: {
         ...(webAssetsDir === undefined ? {} : { WEB_DIST_DIR: webAssetsDir }),
+        ...(mxcExecutable === undefined ? {} : { IA_MXC_EXECUTABLE: mxcExecutable }),
         AGENT_HARNESS_HOST_CREDENTIALS: hostCredentialsEnvValue(credentialPath),
       },
       onFailure,

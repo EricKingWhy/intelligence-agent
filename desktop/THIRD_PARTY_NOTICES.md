@@ -136,3 +136,11 @@ runtime is bundled offline per the lockfile).
 - **Version:** `3.12.14` (x86_64-pc-windows-msvc), pinned in
   `installer/python-runtime.lock.json`; the archive ships its own
   `LICENSE.txt`, staged alongside the interpreter.
+
+### MXC (`@microsoft/mxc-sdk`)
+
+- **Version:** `1.0.0` (win-x64); only `wxc-exec.exe` and `mxc_ffi.dll` are
+  shipped under `resources/mxc/` for the Python backend's PSEC process boundary.
+- **License:** MIT; the package's `LICENSE.md` ships as
+  `resources/mxc/LICENSE.md`. The SDK's JavaScript API and dependency tree are
+  not included in the app runtime.

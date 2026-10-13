@@ -4,12 +4,18 @@ import platform
 import shutil
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
-from agent_harness.assembly import build_runtime, initialize_stores, recovery_stores
+from agent_harness.assembly import (
+    _project_instruction_cwd,
+    build_runtime,
+    initialize_stores,
+    recovery_stores,
+)
 from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -32,6 +38,7 @@ async def _build(
     *,
     workspace_as_sandbox: bool = False,
     sandbox_workspace_root: Path | None = None,
+    sandbox_backend: str | None = None,
 ):
     settings = Settings(
         _env_file=None,
@@ -68,6 +75,7 @@ async def _build(
             session_id=session_id,
             workspace=runtime_workspace,
             max_agent_turns=10,
+            sandbox_backend=sandbox_backend,
         )
     return runtime, session
 
@@ -187,3 +195,138 @@ async def test_runtime_accepts_an_existing_sandbox_as_workspace_input(
     messages = await runtime._context_builder.build(session)
 
     assert "root instruction" in "\n".join(str(message.content) for message in messages)
+
+
+@pytest.mark.skipif(
+    platform.system() != "Windows",
+    reason="Windows PSEC sandbox is Windows-only",
+)
+@pytest.mark.asyncio
+async def test_runtime_builds_with_windows_psec_project_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_harness.sandbox.windows_psec as psec_module
+    from agent_harness.sandbox.capabilities import SandboxCapabilities
+
+    monkeypatch.setattr(
+        psec_module,
+        "probe_windows_psec_capabilities",
+        lambda *, executable, config: SandboxCapabilities(
+            backend="windows_psec", available=True,
+        ),
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    requested_workspace = workspace.with_name("WORKSPACE")
+    if not requested_workspace.exists() or not requested_workspace.samefile(workspace):
+        pytest.skip("temporary filesystem distinguishes case-only paths")
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "harness"),
+        artifact_dir="",
+        model_api_key="test-key",
+    )
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    session_id = "session-windows-psec-project-instructions"
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(session_store, session_id=session_id, cwd=workspace)
+    session.append(USER_MESSAGE, {"content": "inspect the source"})
+    workspace_registry = WorkspaceRegistry(
+        root=tmp_path / "harness", backend="local",
+    )
+    sandbox = workspace_registry.create(
+        session_id, workspace_root=requested_workspace, backend="windows_psec",
+    )
+
+    try:
+        sandbox.write_text("AGENTS.md", "PSEC workspace instruction")
+        sandbox.write_text("module.py", "value = 1")
+        with patch(
+            "agent_harness.assembly.create_chat_model",
+            return_value=_ModelFactory(),
+        ):
+            runtime = await build_runtime(
+                settings=settings,
+                wiring=CapabilityWiring(),
+                stores=stores,
+                workspace_registry=workspace_registry,
+                session_id=session_id,
+                workspace=sandbox,
+                max_agent_turns=10,
+            )
+
+        messages = await runtime._context_builder.build(session)
+        read_tool = next(tool for tool in runtime.registry.list() if tool.name == "read")
+        read_result = await read_tool.execute(read_tool.args_schema(path="module.py"))
+
+        assert "PSEC workspace instruction" in "\n".join(
+            str(message.content) for message in messages
+        )
+        assert read_result.ok
+        assert read_result.data["content"] == "value = 1"
+    finally:
+        sandbox.stop()
+
+
+@pytest.mark.skipif(
+    platform.system() != "Windows",
+    reason="Windows PSEC sandbox is Windows-only",
+)
+@pytest.mark.asyncio
+async def test_new_psec_runtime_loads_instructions_only_from_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_harness.sandbox.windows_psec as psec_module
+    from agent_harness.sandbox.capabilities import SandboxCapabilities
+
+    monkeypatch.setattr(
+        psec_module,
+        "probe_windows_psec_capabilities",
+        lambda *, executable, config: SandboxCapabilities(
+            backend="windows_psec", available=True,
+        ),
+    )
+
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    (repository / "AGENTS.md").write_text("parent-only instruction", encoding="utf-8")
+    workspace = repository / "workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text(
+        "workspace instruction", encoding="utf-8",
+    )
+
+    runtime, session = await _build(
+        tmp_path,
+        workspace,
+        "session-new-windows-psec-project-instructions",
+        sandbox_backend="windows_psec",
+    )
+    messages = await runtime._context_builder.build(session)
+    prompt_text = "\n".join(str(message.content) for message in messages)
+
+    assert "workspace instruction" in prompt_text
+    assert "parent-only instruction" not in prompt_text
+
+
+def test_project_instruction_root_requires_exact_recorded_path_spelling(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    requested_workspace = workspace.with_name("WORKSPACE")
+    if not requested_workspace.exists() or not requested_workspace.samefile(workspace):
+        pytest.skip("temporary filesystem distinguishes case-only paths")
+
+    registry = WorkspaceRegistry(root=tmp_path / "harness", backend="local")
+    session_id = "session-project-instruction-root-spelling"
+    registry.create(session_id, workspace_root=workspace)
+    sandbox = SimpleNamespace(workspace_root=requested_workspace)
+
+    with pytest.raises(ValueError, match="does not match its recorded workspace roots"):
+        _project_instruction_cwd(sandbox, registry, session_id)
