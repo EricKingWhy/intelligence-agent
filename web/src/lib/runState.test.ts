@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RUN_TERMINAL_TYPES, WAIT_HINT_IDLE_SEC, deriveAgentProfile, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, shouldShowWaitHint, unpairedToolCallIds, waitingHintText } from './runState';
+import { RUN_TERMINAL_TYPES, WAIT_HINT_IDLE_SEC, deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, shouldShowWaitHint, unpairedToolCallIds, waitingHintText } from './runState';
 import { initConversation, applyEvent } from './projection';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
@@ -535,5 +535,35 @@ describe('deriveAgentProfile', () => {
 
   it('无 run 的裸会话 → null', () => {
     expect(deriveAgentProfile([ev(EventType.USER_MESSAGE, { content: 'hi' })])).toBe(null);
+  });
+});
+
+// ── #1093：请求侧推理档位（Inspector 展示） ──
+
+describe('deriveReasoningEffort', () => {
+  it('取最后一个 run/started 携带的 reasoning_effort', () => {
+    const events = [
+      ev(EventType.RUN_STARTED, { reasoning_effort: 'minimal' }),
+      ev(EventType.RUN_COMPLETED, {}),
+      ev(EventType.RUN_STARTED, { reasoning_effort: 'deep' }),
+    ];
+    expect(deriveReasoningEffort(events)).toBe('deep');
+  });
+
+  it('未声明档位（键缺席）→ null，不伪造 "default"', () => {
+    const events = [ev(EventType.RUN_STARTED, {}), ev(EventType.RUN_STARTED, {})];
+    expect(deriveReasoningEffort(events)).toBe(null);
+  });
+
+  it('非字符串 / 空串视为缺席', () => {
+    const events = [
+      ev(EventType.RUN_STARTED, { reasoning_effort: 3 }),
+      ev(EventType.RUN_STARTED, { reasoning_effort: '' }),
+    ];
+    expect(deriveReasoningEffort(events)).toBe(null);
+  });
+
+  it('无 run 的裸会话 → null', () => {
+    expect(deriveReasoningEffort([ev(EventType.USER_MESSAGE, { content: 'hi' })])).toBe(null);
   });
 });

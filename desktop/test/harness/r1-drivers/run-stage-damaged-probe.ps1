@@ -10,27 +10,50 @@
 # run-process-gate-probe.ps1 drives the gate FUNCTION, so it cannot see where the
 # call sits. This driver compiles the real macro (taken verbatim from
 # installer-directories.nsh, with iaProbePath and the two cleanup helpers it
-# calls) and drives four legs:
+# calls) and drives six legs:
 #
 #   intact-clean     app.exe present, nothing running   -> gate returns, staging
 #                    proceeds: the tree is renamed to "<dir>.old-{guid}"
 #   damaged-runtime  no app.exe, headless image under resources\python running
 #                    -> the gate runs anyway, stops it, and returns (no staging)
+#   damaged-mixed    no app.exe, the headless image AND a client image in the
+#                    install root both running -> answer 12: the gate aborts
+#                    (exit 2) and stops NEITHER, so the client's live session
+#                    survives (#1074; the #914 adjudication D1/D4)
 #   damaged-rootproc no app.exe, live image in the install root -> the gate runs
 #                    anyway and aborts (exit 2), the process stays alive
 #   damaged-unknown  no app.exe, install path the query cannot parse -> the gate
 #                    runs anyway and aborts (exit 2) instead of reading the
 #                    failure as clean
+#   first-install    no install tree at all (the path does not exist yet) -> the
+#                    gate still classifies it, proves the empty directory clean
+#                    and returns, and staging is skipped because there is no app
+#                    executable to find: a fresh install proceeds (#1074)
 #
-# The last three are the discriminating legs: before the fix the macro never
-# called the gate on any of them (exit 0, service untouched).
+# The damaged legs are the discriminating ones: before the #914 fix the macro
+# never called the gate on any of them (exit 0, service untouched). The
+# first-install leg is coverage rather than discrimination — it pins that the
+# gate the #914 fix round widened to first installs does not block one (#1074).
+#
+# damaged-mixed and damaged-runtime are a pair on purpose. The classifier answers
+# 11 ("only the bundled runtime") or 12 ("anything else, or the runtime plus
+# anything else"), and the gate stops processes only on 11. A weakening that
+# collapses 12 into 11 — e.g. `$iaRuntimeProcs.Count -eq $iaAll.Count` rewritten
+# as `-ge 1`, or as `-ge 0` — therefore still ends in a refusal on every
+# single-process leg (the same exit code, so the leg cannot tell), but on this
+# pair it turns the refusal into one that first kills the bundled runtime. Only
+# the mixed leg has a non-runtime process in the root, so only it can see the
+# difference (#1074 review Axis A).
 #
 # Usage (from desktop/): powershell -File test/harness/r1-drivers/run-stage-damaged-probe.ps1 [-Keep]
 #   -DirectoriesSource <path>  drive the legs against another revision of
 #                              installer-directories.nsh. Used for the red proof:
 #                              the same legs must FAIL on the pre-fix macro (the
 #                              three damaged legs), which is what shows they
-#                              discriminate rather than merely pass.
+#                              discriminate rather than merely pass. #1074 uses
+#                              the same switch to show that a body-level early
+#                              return inside the gate — which every build-time
+#                              rule accepts — turns these legs red.
 param([switch]$Keep, [string]$DirectoriesSource)
 $ErrorActionPreference = 'Stop'
 
@@ -98,11 +121,14 @@ if (-not $probeSource.Contains('@(Get-CimInstance')) { throw 'the injected class
 New-Item -ItemType Directory -Force -Path $scratchRoot | Out-Null
 
 function New-FakeInstall {
-  param([string]$Name, [switch]$WithAppExe)
+  param([string]$Name, [switch]$WithAppExe, [switch]$NoTree)
   $root = Join-Path $scratchRoot ("stage-$Name-$runId")
   if (-not [System.IO.Path]::GetFullPath($root).StartsWith($scratchRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "scratch path escapes the test root: $root"
   }
+  # A first install has no tree yet: the path must stay absent, so nothing is
+  # created for it (#1074).
+  if ($NoTree) { return $root }
   New-Item -ItemType Directory -Force -Path (Join-Path $root 'resources\python') | Out-Null
   if ($WithAppExe) {
     # Existence is all iaProbePath reads; a small placeholder keeps the leg fast.
@@ -175,6 +201,25 @@ try {
     }
   }
 
+  # --- first-install: $INSTDIR does not exist yet ---------------------------
+  # #1074: the #914 fix round widened the gate to first installs (the call sits
+  # outside the app-executable branch, which a fresh install also fails to
+  # enter). Nothing runs from a directory that is not there, so this leg pins
+  # that a fresh install still proceeds: the gate classifies the absent
+  # directory, proves it clean, and the macro skips staging for want of an app
+  # executable — it must not refuse, stage, or create anything.
+  $installFresh = New-FakeInstall 'first-install' -NoTree
+  if (Test-Path -LiteralPath $installFresh) { throw "[first-install] the scratch path must not exist before the leg" }
+  $leg = Invoke-StageLeg -leg 'first-install' -install $installFresh
+  if ($leg.ExitCode -ne 0) { $failures += "[first-install] expected exit 0, got $($leg.ExitCode)" }
+  if ($leg.Reading -notmatch 'stage_returned=1 answer=0 probe=0') { $failures += "[first-install] $($leg.Reading)" }
+  if ((Get-OldSiblings -Root $installFresh).Count -ne 0) {
+    $failures += '[first-install] a fresh install must not be staged aside'
+  }
+  if (Test-Path -LiteralPath $installFresh) {
+    $failures += '[first-install] the run created the install directory; a fresh install must be left untouched'
+  }
+
   # --- damaged-runtime: exe gone, the bundled service is what is running -----
   $installRuntime = New-FakeInstall 'damaged-runtime'
   $runtimeExe = Join-Path $installRuntime 'resources\python\ia-probe-runtime.exe'
@@ -197,6 +242,40 @@ try {
   if (-not (Test-Path -LiteralPath (Join-Path $installRuntime 'resources\python'))) {
     $failures += '[damaged-runtime] the install tree was modified by the gate'
   }
+
+  # --- damaged-mixed: the bundled runtime AND a client image both running ----
+  # Answer 12 ("the runtime plus anything else"): the gate must abort and stop
+  # nothing. This is the only leg that can tell 12 from 11 — a classifier that
+  # collapses the two still refuses here, but it stops the bundled runtime on the
+  # way, which is the one thing a refusal must not do (#1074 review Axis A).
+  $installMixed = New-FakeInstall 'damaged-mixed'
+  $mixedRuntimeExe = Join-Path $installMixed 'resources\python\ia-probe-runtime.exe'
+  Copy-Item -LiteralPath $nodeExe -Destination $mixedRuntimeExe
+  $mixedClientExe = Join-Path $installMixed 'ia-probe-client.exe'
+  Copy-Item -LiteralPath $nodeExe -Destination $mixedClientExe
+  $mixedRuntime = Start-Process -FilePath $mixedRuntimeExe -ArgumentList @('-e', 'setTimeout(()=>{},120000)') -PassThru
+  $started += $mixedRuntime.Id
+  $mixedClient = Start-Process -FilePath $mixedClientExe -ArgumentList @('-e', 'setTimeout(()=>{},120000)') -PassThru
+  $started += $mixedClient.Id
+  foreach ($case in @(@($mixedRuntime, $mixedRuntimeExe), @($mixedClient, $mixedClientExe))) {
+    $probePath = (Get-Process -Id $case[0].Id -ErrorAction SilentlyContinue).Path
+    if ($probePath -ne $case[1]) { throw "[damaged-mixed] probe process image path is '$probePath', expected '$($case[1])'" }
+  }
+  $leg = Invoke-StageLeg -leg 'damaged-mixed' -install $installMixed
+  if ($leg.ExitCode -ne 2) { $failures += "[damaged-mixed] expected exit 2 (the gate's refusal), got $($leg.ExitCode)" }
+  if ($leg.Reading -ne '<no reading>') { $failures += "[damaged-mixed] the gate returned instead of refusing: $($leg.Reading)" }
+  if (-not (Test-ProcessAlive -ProcessId $mixedClient.Id)) {
+    $failures += "[damaged-mixed] the client process $($mixedClient.Id) is gone but the gate had to leave it running"
+  }
+  if (-not (Test-ProcessAlive -ProcessId $mixedRuntime.Id)) {
+    $failures += "[damaged-mixed] the bundled runtime $($mixedRuntime.Id) was stopped; with a client up the answer is 12 and a refusal stops nothing"
+  } else {
+    Write-Host ("[damaged-mixed] both processes after the refusal: alive (client {0}, runtime {1})" -f $mixedClient.Id, $mixedRuntime.Id)
+  }
+  if ((Get-OldSiblings -Root $installMixed).Count -ne 0) {
+    $failures += '[damaged-mixed] the refusal moved the install tree aside'
+  }
+  if (-not (Test-Path -LiteralPath $mixedRuntimeExe)) { $failures += '[damaged-mixed] the refusal modified the install tree' }
 
   # --- damaged-rootproc: exe gone, a live image in the install root ---------
   $installRoot = New-FakeInstall 'damaged-rootproc'
@@ -250,4 +329,4 @@ if ($failures.Count -gt 0) {
   foreach ($failure in $failures) { Write-Host "FAIL $failure" }
   throw "$($failures.Count) stage-damaged leg assertion(s) failed"
 }
-Write-Host 'stage-damaged legs OK: intact-clean (staged), damaged-runtime (stopped), damaged-rootproc (refused, alive), damaged-unknown (refused)'
+Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), damaged-runtime (stopped), damaged-mixed (refused, both alive), damaged-rootproc (refused, alive), damaged-unknown (refused)'
