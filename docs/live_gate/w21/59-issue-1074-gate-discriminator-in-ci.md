@@ -312,3 +312,45 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
 
 E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev server 占用；本批 `web/` 与 base 逐字节相同，
 故该车道对本 diff 无信号。集成后由 CI 的 `windows-installer-smoke`（PR 上跑）覆盖真机腿。
+---
+
+## 7 #1078 后续：`customInit` 包装的守卫 + #1090 兄弟 harness 修复
+
+### 7.1 票面与根因
+
+- **#1078**（bug/P3）：#1074 残余 ②——`customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫。取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与真机探针：三条判别器**都只读 `installer-directories.nsh`**，而包装在 `installer.nsh`。非本 diff 引入（`installer.nsh:136-138` blame 到 `387948595`）。
+- **#1090**（bug/P3）：#1040 把 `iaPromoteBackupAlreadyLeftover:` 标签插在 `teeth-check.mjs` F1 变异的锚（探针块 → `iaClearBackupDir`）中间 ⇒ 锚匹配不到，变异**静默不生效**却被报成存活。
+
+### 7.2 实现（`f7a3eec7` / `dec2c42f` / `48572ab4` / `11179ed7`）
+
+- 新增跨文件构建期规则 `validateProcessGateCallSite`（`desktop/scripts/build-windows-installer.mjs`），读 `installer.nsh` 的 `customInit`：帧锚 = `${If} $iaRecoveryPending != "1"` 的**首次文本出现**；帧的 `${EndIf}` 按 **LogicLib 深度**配对；`divided` 也按深度（帧与调用之间只有**帧自身那一层**的 `${Else}`/`${ElseIf}` 才算落在反面）；字符串体先由 `outsideStrings` 逐字符空白化（长度不变，索引仍对齐）。四条失败：无帧 / 帧被取反或丢弃 / insert 缺失或重复 / insert 落在 `${Else}`/`${ElseIf}` 侧。
+- 同步更新构建期测试（`desktop/test/installer-scripts.test.mjs`，121 例）、守卫变异 harness（`teeth-check-guards.mjs`，`GUARD_BASELINE_SHA256` 随文本更新）、兄弟 harness 的 F1 锚（`teeth-check.mjs`）。
+
+### 7.3 覆盖边界声明（#1078 AC 明列要求）
+
+规则读**位置**不读**可达性**。保持绿：帧正支上但不可达/条件化的 insert（嵌套常量假 `${If}`/`${Unless}`、`${Switch}`/`${Select}` 分支、假 `!if`/`!ifdef`——后两者是编译期指令，不是 LogicLib，深度游走看不见）；`!define` 载的 insert；帧被放在 `!insertmacro iaRecoverInterruptedInstall` **之前**（该宏才设 `$iaRecoveryPending`，于是恢复分支永不执行）；文件里第二个 `!macro customInit`（只读第一个）。**没有任何别的层读这个文件**——`validateProcessGateGuards` 读 `installer-directories.nsh`，真机驱动也只注入那一份——故这些形状由本规则自认边界，不是别的层兜底。**未放开的**：帧反面 insert、帧被丢、insert 缺失或重复，三者一律红。
+
+### 7.4 审查（四轮，两轴；各一独立只读子代理）
+
+| 轮 | range | 结论（P0/P1/P2/P3/P4） |
+| --- | --- | --- |
+| 发现 | `5550311f..f7a3eec7` | A `APPROVE_WITH_FINDINGS` 0/0/2/0/1；B 0/0/0/1/4 |
+| 修后重审 | `f7a3eec7..dec2c42f` | A 0/0/1/0/2；B 0/0/1/1/3 |
+| 补审（§8.3 #8） | `dec2c42f..11179ed7` | A P0/P1=0，P2=1 P3=3 P4=3；B P0/P1=0，P2=1 P3=2 |
+| 闭合复核 | `11179ed7..bfd91068` | A 0/0/0/0/1；B 0/0/0/1 |
+
+两轴全程 **P0/P1=0**。台账五行 `docs/review_ledger.d/w21-1078-gate-callsite-*.tsv`（发现 / 修后重审 / 补审 / 闭合 / 闭合处置）。补审与闭合两轮的 finding 逐条处置见 §7.6 与月档。
+
+### 7.5 读数
+
+- `node --test test/installer-scripts.test.mjs` → **121/121**。
+- `node test/harness/teeth-check.mjs` → exit 0、**12/12 红、0 存活**、还原逐字节相同（`1afc1a15…` / `131fb66c…`）。
+- `node test/harness/teeth-check-guards.mjs` → exit 0、**116/116 红、0 存活**、还原逐字节相同（`77745ea8…`）。
+- Gate-0：中途树 `bfd91068` **5/6**（❌ 仅 coverage，恰为本批 5 笔代码提交）；落台账行后 coverage 转绿。
+
+### 7.6 处置与残余
+
+- **补审 P2 已处置**：docstring 的「does NOT cover」改为点名 §7.3 的全部真实盲区，并删去对 `validateProcessGateGuards`/真机腿的**假委托**（两轴实测：两者都只读 `installer-directories.nsh`）。AC 要求的「明确的覆盖边界声明」即此。
+- **补审 P3 已处置**：`teeth-check.mjs` F1 变异注释与 harness README 的「only the absolute bound catches」改为实测结论（触发的是**相对界**与**常量假检测器**，绝对界看不见——被包区域起点在 `RMDir /r "$iaDeleteTarget"` 之下）；README 的日期句限定为 #919 处置自身那次运行。
+- **闭合复核新 P3 已处置**：`bfd91068` 新增的「digests … frozen tip recorded in docs/review_ledger.d/」不实（末列守卫 digest 是 `bfd91068` 的 CRLF sha，非冻结 tip `11179ed7` 的 `b156f67f…`）⇒ `b348c1f6` 改为直述「各 harness 在本 checkout 当前文本上打印的 digest」，属**删去断言**，未新增未证 claim。
+- **登记不修**：规则抛错消息无行号（其余 validator 有）；第二个 `!macro customInit`；`!define` 字面量载 insert；帧与 `iaRecoverInterruptedInstall` 的先后（已在 docstring 声明）。
