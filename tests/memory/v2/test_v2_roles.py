@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,7 @@ from agent_harness.memory.v2.roles import (
     resolve_memory_roles,
 )
 from agent_harness.model.config import PROVIDER_PRESETS, ConfigError
+from agent_harness.model.provider_store import MemoryCredentialStore, ProviderStore
 
 # --------------------------------------------------------------------------------------
 # fixtures
@@ -280,3 +282,79 @@ def test_the_roles_view_is_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         roles.primary = None  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------------------
+# 6 · 运营者自定义角色映射（#1039：应用级可配、默认不变）
+# --------------------------------------------------------------------------------------
+
+
+def _custom_store(tmp_path: Path, provider_id: str, *, base_url: str,
+                  model_id: str, key: str) -> ProviderStore:
+    """一个注册了自定义供应商的 store（非密配置落 JSON、密钥落凭据后端）。"""
+    store = ProviderStore(tmp_path / "model-providers.json", MemoryCredentialStore(),
+                          builtin_ids=frozenset(PROVIDER_PRESETS))
+    store.create({
+        "id": provider_id, "label": provider_id, "base_url": base_url,
+        "models": [{"model_id": model_id}], "api_key": key,
+    })
+    return store
+
+
+def test_the_role_mapping_defaults_to_the_providers_the_prd_names() -> None:
+    """裁决：provider 映射可配，但**默认不变** —— 仍是 PRD 的 senseaudio / qwen。"""
+    settings = _settings()
+
+    assert settings.memory_primary_provider == MEMORY_PRIMARY_PROVIDER
+    assert settings.memory_fallback_provider == MEMORY_FALLBACK_PROVIDER
+
+
+def test_an_operator_can_point_a_role_at_another_preset() -> None:
+    """运营者可把某个角色改指到另一个**内置 preset**（应用级配置、装配期生效）。"""
+    settings = _settings(
+        memory_primary_provider="deepseek",
+        agent_models=_catalog(_entry("mem-primary", "deepseek", "deepseek-chat")))
+    roles = resolve_memory_roles(settings)
+
+    assert roles.primary is not None
+    assert roles.primary.provider == "deepseek"
+    assert roles.primary.model_name == "deepseek-chat"
+
+
+def test_an_operator_can_point_a_role_at_a_registered_custom_provider(
+    tmp_path: Path,
+) -> None:
+    """运营者可把角色指向 #203 注册的**自定义供应商**（`provider:model` 命名空间）。
+
+    这条钉的是裁决里"built-in preset 或用户注册的 OpenAI 兼容供应商"的后半句：
+    映射值带冒号即命名空间，经 `from_custom_provider` 解析（复用既有寻址，不另造）。
+    """
+    store = _custom_store(tmp_path, "acme", base_url="https://acme.internal/v1",
+                          model_id="acme-large", key="sk-acme-not-real")
+    settings = _settings(memory_primary_provider="acme:acme-large")
+    roles = resolve_memory_roles(settings, store=store)
+
+    assert roles.primary is not None
+    assert roles.primary.provider == "acme"
+    assert roles.primary.model_name == "acme-large"
+    assert roles.primary.base_url == "https://acme.internal/v1"
+
+
+def test_a_custom_provider_role_mapping_without_a_store_fails_loudly() -> None:
+    """映射是 `provider:model` 命名空间但没有 store ⇒ 配错了，响亮失败（不静默成 None）。"""
+    settings = _settings(memory_fallback_provider="acme:acme-large")
+
+    with pytest.raises(ConfigError):
+        resolve_memory_roles(settings)
+
+
+def test_a_role_mapping_naming_no_known_provider_fails_loudly() -> None:
+    """映射既不是已知 preset、也不带命名空间 ⇒ 拼错了，响亮失败。
+
+    静默成 `None` 会让一个错别字表现为"记忆永远不形成"，而没有任何地方报错——
+    与模块 docstring「未配置 ≠ 配错了」一致。
+    """
+    settings = _settings(memory_primary_provider="sqwen")
+
+    with pytest.raises(ConfigError):
+        resolve_memory_roles(settings)

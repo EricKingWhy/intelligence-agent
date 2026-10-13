@@ -43,6 +43,7 @@ export interface MemoryFilters {
 export interface MemorySettings {
   extraction_enabled: boolean;
   recall_enabled: boolean;
+  fallback_enabled: boolean;
 }
 
 export interface MemoryRecallExplanation {
@@ -374,10 +375,12 @@ export async function countMemoryRoots(
 function parseSettings(raw: unknown): MemorySettings | null {
   if (!isObject(raw)
     || typeof raw.extraction_enabled !== 'boolean'
-    || typeof raw.recall_enabled !== 'boolean') return null;
+    || typeof raw.recall_enabled !== 'boolean'
+    || typeof raw.fallback_enabled !== 'boolean') return null;
   return {
     extraction_enabled: raw.extraction_enabled,
     recall_enabled: raw.recall_enabled,
+    fallback_enabled: raw.fallback_enabled,
   };
 }
 
