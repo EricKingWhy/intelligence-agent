@@ -178,7 +178,8 @@ async def test_v2_governance_api_works_without_session_store_and_closes_in_its_l
             )
 
         assert settings_response.status_code == 200, settings_response.text
-        assert set(settings_response.json()) == {"extraction_enabled", "recall_enabled"}
+        assert set(settings_response.json()) == {
+            "extraction_enabled", "recall_enabled", "fallback_enabled"}
         assert filtered_response.status_code == 200, filtered_response.text
         assert filtered_response.json() == []
 
@@ -895,6 +896,28 @@ async def test_memory_write_lock_exhaustion_maps_to_503(
 
 
 @pytest.mark.asyncio
+async def test_memory_settings_expose_and_patch_the_fallback_switch(memory_app):
+    """#1039：降级开关经既有 `GET/PATCH /api/memory-settings` 暴露，默认**开**。
+
+    只改这一个字段也必须满足「至少提供一个设置」的既有校验（PATCH 语义）。
+    """
+    client, _components = memory_app
+    headers = _auth(_ALICE)
+
+    initial = client.get("/api/memory-settings", headers=headers)
+    assert initial.status_code == 200
+    assert initial.json()["fallback_enabled"] is True
+
+    patched = client.patch(
+        "/api/memory-settings", headers=headers, json={"fallback_enabled": False},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json() == {
+        "extraction_enabled": True, "recall_enabled": True, "fallback_enabled": False}
+    assert client.get("/api/memory-settings", headers=headers).json() == patched.json()
+
+
+@pytest.mark.asyncio
 async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory_app):
     client, _components = memory_app
     first = await _seed_v2(client, _ALICE, "用户偏好第一条")
@@ -909,12 +932,14 @@ async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory
         "/api/memory-settings", headers=headers, json={"extraction_enabled": False},
     )
     assert settings1.status_code == 200
-    assert settings1.json() == {"extraction_enabled": False, "recall_enabled": True}
+    assert settings1.json() == {
+        "extraction_enabled": False, "recall_enabled": True, "fallback_enabled": True}
     settings2 = client.patch(
         "/api/memory-settings", headers=headers, json={"recall_enabled": False},
     )
     assert settings2.status_code == 200
-    assert settings2.json() == {"extraction_enabled": False, "recall_enabled": False}
+    assert settings2.json() == {
+        "extraction_enabled": False, "recall_enabled": False, "fallback_enabled": True}
     assert client.get("/api/memory-settings", headers=headers).json() == settings2.json()
     assert client.get(f"/api/memories/{first.id}", headers=headers).status_code == 200
     assert client.get(f"/api/memories/{second.id}", headers=headers).status_code == 200
