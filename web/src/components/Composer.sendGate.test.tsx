@@ -82,7 +82,12 @@ afterEach(() => {
   vi.mocked(uploadAttachment).mockReset();
 });
 
-function paint(sessionId: string | null = 'sess-1'): void {
+function paint(
+  sessionId: string | null = 'sess-1',
+  // #1098：pre-intake 测试需要可控的懒建（缺省 = 恒失败；pre-intake 窗口测的是
+  // 「在途」，失败形态另有 AC4 用例覆盖）。
+  onEnsureSession: () => Promise<string | null> = async () => null,
+): void {
   act(() => {
     root.render(
       createElement(Composer, {
@@ -90,6 +95,8 @@ function paint(sessionId: string | null = 'sess-1'): void {
         onSubmit,
         onCancel: () => {},
         sessionId,
+        // #1015：必填 prop；本文件测发送门禁不涉及懒建，给空实现。
+        onEnsureSession,
         models: [],
         selectedModel: null,
       }),
@@ -366,5 +373,60 @@ describe('Composer 兜底提示：#1027 复审 P2（过期文案不清）', () =
     paint('sess-2');
     expect(cards()).toHaveLength(0);
     expect(container.querySelector('.composer-attach-dropped')).toBeNull();
+  });
+});
+
+describe('Composer 发送门禁：#1098 pre-intake 窗口阻断（粘贴后立刻 Enter 不拆散）', () => {
+  it('ensureSession 在途（草稿未入列）：按钮禁用 + 可见原因；Enter/Ctrl+Enter 被拦截', async () => {
+    let resolveSession!: (id: string | null) => void;
+    const ensureSession = vi.fn(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveSession = resolve;
+        }),
+    );
+    paint(null, ensureSession);
+    // 新建态投喂：懒建被闸住 → 草稿未入列（pre-intake 窗口），栏里 0 张。
+    expect(await pasteOneImage()).toBe(0);
+    await typeText('看这张图');
+
+    // 门禁：按钮禁用 + 常驻可见原因（复用 #1027 的 SEND_BLOCKED_REASON 体系）。
+    expect(sendButton().disabled).toBe(true);
+    expect(container.querySelector('.composer-send-blocked')?.textContent).toContain(
+      '附件上传中，请等待完成',
+    );
+    pressEnter();
+    expect(onSubmit).not.toHaveBeenCalled();
+    ctrlEnter();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    // 懒建落定 + 上传就绪后门禁解除：Enter 图文同发，不拆散。
+    await act(async () => {
+      resolveSession('sess-new');
+    });
+    await act(async () => {});
+    expect(cards()).toHaveLength(1);
+    await act(async () => {
+      resolveUpload?.(receipt('sha256:aaa'));
+    });
+    expect(sendButton().disabled).toBe(false);
+    expect(container.querySelector('.composer-send-blocked')).toBeNull();
+    pressEnter();
+    expect(onSubmit).toHaveBeenCalledWith('看这张图', false, ['sha256:aaa']);
+  });
+
+  it('懒建失败：pre-intake 清零，纯文本仍可发（AC4 不变，#1098 不扩大阻断）', async () => {
+    paint(null, async () => null);
+    expect(await pasteOneImage()).toBe(0);
+    await typeText('纯文本');
+    // intake 失败走 hook 的 finally 清 pending：门禁不残留，文本照发。
+    expect(sendButton().disabled).toBe(false);
+    expect(container.querySelector('.composer-send-blocked')).toBeNull();
+    pressEnter();
+    expect(onSubmit).toHaveBeenCalledWith('纯文本', false, []);
+    // 失败可见（AC3 同一通道），不留"永远上传中"卡片。
+    expect(container.querySelector('.composer-attach-error[role="alert"]')?.textContent).toContain(
+      '会话创建失败',
+    );
   });
 });
