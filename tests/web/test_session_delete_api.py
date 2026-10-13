@@ -304,8 +304,9 @@ def test_delete_path_wires_the_run_status_snapshot_call(
 
     上一条只钉住 helper 自身的分支，`test_delete_success_log_records_run_and_approval_snapshot`
     只钉住成功路径的字段值——而成功路径因守卫 ③④ 保证 `run_state == "none"`。两条
-    合起来仍杀不死「把 `service.py:4207` 的 `run_snapshot = _run_status_snapshot(...)`
-    换成 `run_snapshot = "none"`」这一票面明令禁止的硬编码（同值 ⇒ 两测都绿）。
+    合起来仍杀不死「把 `delete_session` 的审计快照调用点
+    `run_snapshot = _run_status_snapshot(...)` 换成 `run_snapshot = "none"`」这一
+    票面明令禁止的硬编码（同值 ⇒ 两测都绿）。
     这条用哨兵把「删除路径确实经过 helper」这一接线钉死：把 helper 换成返回哨兵的
     替身，日志里的 `run_state` 就必须是这个哨兵，而非任何调用点常量。
     """
