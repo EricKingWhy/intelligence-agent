@@ -354,3 +354,17 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 - **补审 P3 已处置**：`teeth-check.mjs` F1 变异注释与 harness README 的「only the absolute bound catches」改为实测结论（触发的是**相对界**与**常量假检测器**，绝对界看不见——被包区域起点在 `RMDir /r "$iaDeleteTarget"` 之下）；README 的日期句限定为 #919 处置自身那次运行。
 - **闭合复核新 P3 已处置**：`bfd91068` 新增的「digests … frozen tip recorded in docs/review_ledger.d/」不实（末列守卫 digest 是 `bfd91068` 的 CRLF sha，非冻结 tip `11179ed7` 的 `b156f67f…`）⇒ `b348c1f6` 改为直述「各 harness 在本 checkout 当前文本上打印的 digest」，属**删去断言**，未新增未证 claim。
 - **登记不修**：规则抛错消息无行号（其余 validator 有）；第二个 `!macro customInit`；`!define` 字面量载 insert；帧与 `iaRecoverInterruptedInstall` 的先后（已在 docstring 声明）。
+
+### 7.7 方案依据（协议 §1.3 块；**收尾补录**）
+
+⚠ **时序如实登记**：本票 AC 的括注要求「施工前按 §1.3 先做方案依据调研并落「方案依据」块」。该块**未在施工前落**，是收尾时补录的——下面的来源与判定**全部可在当前树复核**，但「先调研、后施工」的次序**没有遵守**，登记为过程偏差，不粉饰为已遵守。
+
+- **来源**（≥2 独立；两条与 §2 同领域、同批次实测，本票不新增网络来源）
+  1. `app-builder-lib@26.15.3`（本仓构建固定版本，`desktop/node_modules/app-builder-lib` 实测 `"version": "26.15.3"`）——`templates/nsis/include/allowOnlyOneInstallerInstance.nsh`：进程判别与 stage 同在**一份 include**，调用点由该 include 自己拥有 ⇒ 上游**不存在「跨文件调用点」这个形状**，也就没有对应守卫；`find templates/nsis -name '*.test.*' -o -name '*.spec.*'` = **0**。
+  2. DeepSeek Harness `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（本地克隆，MIT）——`apps/desktop/scripts/installer.nsh` 自持 stage 与进程查找，同样**没有跨文件调用点守卫**；`.github/workflows` 里 `installer|makensis|nsis` 命中 **0**。
+  3. **本仓内先例（可复核）**：构建期规则**读 `installer.nsh`** 已是既有形状——`build-windows-installer.mjs:2975` 的 `for (const file of ['installer-directories.nsh', 'installer.nsh'])`（备份删除守卫）与 `:2956` 的三文件循环；`installer-scripts.test.mjs` 同样读该文件。本票的跨文件规则是这一既有形状的**同型复用**，不是新机制。
+- **机制摘要**：包装（`${If} $iaRecoveryPending != "1"`）与闸门调用分处两份 `.nsh`；只读单文件的规则看不见调用点，故本票补一条**读 `installer.nsh`** 的文本规则，钉住「调用点被该包装包住、未被取反、未被移位、不重复」。文本规则只能读**位置**、读不到**可达性**——这条边界按 AC 要求**写进规则自己的 docstring**（§7.3）。
+- **契合点（`AGENTS.md` §7）**：不变量 11（Sandbox / Permission 是 Runtime 边界，不靠 Prompt）——包装与闸门都在安装器 runtime 边界；不变量 21（Optional capability 故障不拖垮 Core）——判别器故障时构建**变红**而非放行；不新增依赖（纯文本规则，复用既有 `readFileSync` 与既有 LogicLib token 常量）。
+- **判定**：`REUSE`（本仓既有的「构建期规则读 `installer.nsh`」形状 + 既有 LogicLib token 工具 + 既有变异 harness 判据）+ `BUILD`（最小：一条规则 + 4 条 fixture + 1 条变异）。不引入新 Provider / 依赖 / 框架。
+- **License**：不新增第三方代码；未复制上游源码，只做机制对照。`app-builder-lib` MIT（构建期工具，非声明依赖，见 #914 §2 的 License 段）。
+- **来源披露（§3.1）**：本领域已在 `docs/agents/reference-sources.md`「Windows 安装器 / 在占用进程处理」登记（#914 批次），本票不新增领域、不新增来源条目；本环境 `WebFetch` 不可用（实测 `Model request failed`），故未引任何网络来源，也不编造读取日期。
