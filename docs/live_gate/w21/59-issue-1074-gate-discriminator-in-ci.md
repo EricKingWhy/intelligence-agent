@@ -496,3 +496,13 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 **本票代码面不变**：9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` / `53b961d0` **六处逐字相同**。
 
 **五次同步总览**：`32ddedb9`（§14.7 获批并集零删除）→ `bad6c171` → `94a162a3` → `1a539937` → `53b961d0`（后四次均零冲突、`--cc` 空表各补机械归属行）。前三次合并树跑**全量**门禁；第四、五次按用户授权跑**增量车道**。
+
+## 13 收口（合入与关单）
+
+**合入**：PR #1097（base `main`，**无 `Closes`**）于 2026-10-13 合入，merge commit `bb8f0b6e3f1db468e3303870cd6f55652ca7bbc5`。合入前 head `f91e7e15` 的 CI 四车道全绿：gate0 42s、e2e 冒烟集 6m22s、windows-installer-smoke 1m50s、gitleaks；`gh pr view` 实测 `mergeable = MERGEABLE`、`mergeStateStatus = CLEAN`。合入方式为 merge commit（未 squash、未 rebase，保留 #1078 的六笔与五次同步的完整历史）。
+
+**关单**：`#1074` CLOSED（`--reason completed`，comment `6148250598`，`in-progress` 标签已摘除，仅余 `bug`）；`#1078` 与 `#1090` 在本次收口前已是 CLOSED。
+
+**进度落点**：`docs/SDD_TICKET_TRACKER.md` 与 `docs/PHASE_STATUS.md` 的本票条目已由「待发布」更新为「已合入 main 并关闭」；当月明细见 `docs/phase_status/2026-10.md` 的 #1078 节（含收口 bullet）。
+
+**交付边界**：本次交付**不含**分支删除（`codex/issue-1074-gate-discriminator` 保留，删除需单独批准），也**不含**对合并后 `main` 的进一步验证（合并后 main 的验证由集成侧后续按协议进行）。
