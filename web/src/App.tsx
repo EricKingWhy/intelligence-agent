@@ -285,14 +285,23 @@ export default function App() {
     () => (selectedId ? sessions.find((s) => s.session_id === selectedId) ?? null : null),
     [sessions, selectedId],
   );
-  const sessionCwd = conversation?.session_cwd ?? null;
-  const ownership = useMemo(
-    () =>
-      selectedId !== null
-        ? describeOwnership(selectedSummary?.workspace?.title ?? null, sessionCwd)
-        : describeOwnership(activeProject?.title ?? null, activeProject?.path ?? null),
-    [selectedId, selectedSummary, sessionCwd, activeProject],
-  );
+  // 会话内的 cwd 必须过**身份闸**：切会话时 `conversation` 仍是**旧会话**的（history
+  // 正在加载，见 useSession.ts 的 `shouldShowHistoryLoading`），直接用会把「新会话的
+  // 项目名」与「旧会话的 cwd」拼在一起（跨会话残影 = 第二真相，不变量 #22）。身份不符 /
+  // 未加载 → null ⇒ chip 显「未指定目录」而非别人的路径（No fake values）。惯例同
+  // `lib/permission.ts:96` 的 `composerPermissionMode`（同款身份闸）。
+  const sessionCwd =
+    conversation !== null && conversation.session_id === selectedId ? conversation.session_cwd : null;
+  const ownership = useMemo(() => {
+    if (selectedId !== null) {
+      return describeOwnership(selectedSummary?.workspace?.title ?? null, sessionCwd);
+    }
+    // 新建态：仅在**已选中项目语境**时显形（预告"将在这个项目里新建"）。既无选中会话、
+    // 又无项目语境（首屏/空白新建）时返回 null = 不渲染 chip：此刻并无"会话"，
+    // 说它「未分组」语义悬空，且首屏即挂警告色与「警示载体」意图相反（P3-2/P4）。
+    if (activeProject === null) return null;
+    return describeOwnership(activeProject.title, activeProject.path);
+  }, [selectedId, selectedSummary, sessionCwd, activeProject]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -1272,7 +1281,8 @@ export default function App() {
           activeProjectId={activeProjectId}
           onSelectProject={handleSelectProject}
           /* #1028 AC3：选中会话的 cwd（来自 session/started 投影），列表里给未归属
-             会话就地标注归属；未加载会话时为 null（不编路径）。 */
+             会话就地标注归属。**同 sessionCwd 身份闸**：会话切换/未加载时为 null
+             （不拿旧会话的路径冒充新会话，不编路径）。 */
           selectedCwd={sessionCwd}
           projectActions={projectActions}
           onSessionsChanged={refreshSessions}

@@ -411,7 +411,10 @@ export const SessionList = memo(function SessionList({
                             // #1028：点中项目行 = 选中项目语境（通用新建据此继承 cwd）
                             // + 既有展开/收起。两个语义可以共存——"进入这个项目的视图"
                             // 正是用户表达"我要在这个项目里干活"的动作。
-                            onSelectProject(project.id);
+                            // **再次点击已 active 的行 = 取消语境**（onSelectProject(null)）：
+                            // 可逆语义——用户为浏览而点开项目后能显式退出，不会被动地为
+                            // 下一次通用新建武装 cwd（审查 P3）。
+                            onSelectProject(activeProjectId === project.id ? null : project.id);
                             toggle(project.id);
                           }}
                           aria-expanded={expanded}
@@ -624,9 +627,11 @@ export const SessionList = memo(function SessionList({
                 now={now}
                 projectId={null}
                 ledger={[]}
-                /* #1028 AC3：未归属且被选中的会话就地标注 cwd（归属警示载体）。
-                   其它行没有已加载的 cwd 可标（cwd 只有选中会话的事件流里有），
-                   不编路径——所以不是"每行都标"，而是"标得起的那一行才标"。 */
+                /* #1028 AC3（**部分满足**，已知收缩）：仅就**可得**的 cwd（= 选中会话的
+                   事件流）就地标注，历史未加载行不编路径——`SessionSummary` 本身不含
+                   cwd，未选中的行此刻没有真值可标。故不是"每行都标"，而是"标得起的那一
+                   行才标"；这是数据可得性自洽，不是缺陷，但如实登记在此以免被读成"每行
+                   都带 cwd 标注"。 */
                 ownerCwd={selectedId === s.session_id ? selectedCwd : null}
                 dragging={false}
                 dropEnabled={false}
@@ -762,6 +767,8 @@ function SessionRow({
 }: RowProps) {
   const inProject = projectId !== null;
   const index = ledger.indexOf(s.session_id);
+  // #1028：本行的归属标注文案（有选中会话的 cwd 才算；纯函数，算一次供 title/label 复用）。
+  const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
   return (
     <div
       className={`session-row${inProject ? ' session-row-in-project' : ''}${dragging ? ' dragging' : ''}`}
@@ -818,13 +825,13 @@ function SessionRow({
           {/* #1028 AC3：未归属会话的 cwd 就地标注（归属警示）。只有**选中**的行
              才有已加载的 cwd（后端 `session/started.cwd` 随该会话事件流到来），
              其它未加载的行不编路径——"标得起才标"。 */}
-          {ownerCwd != null && (
+          {owner != null && (
             <div
               className="session-item-owner"
               role="note"
-              title={describeOwnership(null, ownerCwd).title}
+              title={owner.title}
             >
-              {describeOwnership(null, ownerCwd).label}
+              {owner.label}
             </div>
           )}
           {s.staleProject && (

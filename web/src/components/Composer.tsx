@@ -47,7 +47,8 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;  /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
+  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
   onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
   /** #825（MM-04）：**当前会话 id**——附图上传端点是 per-session 的
@@ -57,7 +58,8 @@ interface Props {
   sessionId?: string | null;
   /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
    *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
-   *  本组件只渲染文案。`null`/缺省 = 不渲染 chip（无语境可显形，不编字面值）。 */
+   *  本组件只渲染文案。`null`/缺省 = 不渲染 chip：**空白新建态**（无选中会话、无项目
+   *  语境，含首屏）App 传 `null`——此刻并无"会话"，显「未分组」语义悬空，故不编字面值。 */
   ownership?: Ownership | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;

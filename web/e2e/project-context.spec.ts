@@ -140,3 +140,41 @@ test('AC3 未归属会话：composer 与列表行都明示「未分组（cwd: �
   // composer chip 同步显形
   await expect(page.locator('.composer-owner-chip')).toContainText('未分组（cwd: /home/hatch）');
 });
+
+test('P3 修回：再次点击已 active 的项目行取消语境 → 通用新建不再带 cwd（可逆）', async ({
+  page,
+}) => {
+  // 复用 AC1 对照的"不读 cwd"流，只为观察第二次点击取消后"发没发 cwd 键"。
+  const frames: FrameSpec[] = [
+    { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+    { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+    { type: 'user/message', data: { content: '随便问一句' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: RUN, time: T },
+  ];
+  const sessions = [sessionRow('s-seed', null)];
+  const mock: ApiMock = {
+    sessions,
+    projects: [{ id: 'p1', path: ALPHA, title: '项目 alpha', session_ids: [] }],
+    onSessionPost: (route) => {
+      sessions.unshift(sessionRow('cwd-cancel', null));
+      return fulfillSse(route, frames);
+    },
+  };
+  await routeApi(page, mock);
+  const posts = captureSessionPosts(page);
+  await page.goto('/');
+
+  const toggle = project(page, '项目 alpha').locator('.rail-project-toggle');
+  // 第一次点击 = 选中项目语境（通用新建将继承 cwd）
+  await toggle.click();
+  await expect(toggle).toHaveClass(/project-active/);
+  // 再次点击同一行 = 取消语境（可逆语义）
+  await toggle.click();
+  await expect(toggle).not.toHaveClass(/project-active/);
+
+  // 取消后走通用新建：不再带 cwd 键（回到"未选项目"基线）
+  await page.getByRole('button', { name: '新建会话' }).click();
+  await submitTask(page, '随便问一句');
+  await expect.poll(() => posts.length).toBe(1);
+  expect('cwd' in posts[0]).toBe(false);
+});
