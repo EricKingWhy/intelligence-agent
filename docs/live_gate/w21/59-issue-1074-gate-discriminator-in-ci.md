@@ -473,3 +473,26 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 **同步轮次小结（更新）**：本票共**四次**与 `origin/main` 同步 —— `32ddedb9`（§14.7 获批并集零删除）、`bad6c171`、`94a162a3`（两次零冲突 + `--cc` 空表 ⇒ 机械归属行）、`1a539937`（同上）。前三次的合并树都跑了**全量**门禁；第四次按用户授权只跑**增量车道**。9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` **五处逐字相同**。
 
 **⏱ 流程观察（供决策）**：本票的代码与审查在第一次同步前即已完成；此后 `origin/main` 在约 3 小时内前移四次，而每次同步因 `strict: true` 必须重做门禁。若 main 继续以该频率前移，逐次追赶无法收敛——**建议在 CI 于某一 head 变绿后尽快合并 PR #1097**，而不是继续等 main 稳定。
+
+## 12 第五次同步（`53b961d0`）与增量车道重跑（用户裁决：CI 绿即合并）
+
+**为什么再同步**：CI 在 `255d11a8` 上四车道全绿（gate0 40s / e2e 4m48s / windows-installer-smoke 1m57s / gitleaks）之后，`mergeStateStatus` 仍是 `BEHIND`——`origin/main` **第五次**前移到 `491ae829`（PR #1104 / #1093 `reasoning_effort` 落 run/started + model/fallback + PR #1105 / #1089 `_wait_terminal` 只认调用后新增的终态事件）。这是 3 小时内的第五次前移，其间另有 3 条线合并，**逐次追赶不收敛**。就此向用户列出三个收口选项（增量门禁 / 全量门禁 / 临时关 strict 直接合并），**用户裁决：`同步 + 增量门禁，CI 绿即合并`**。
+
+**合并**：`53b961d0`（父一 `255d11a8` = 本线 tip，父二 `491ae829` = `origin/main`），**零冲突**（ort 策略），合并树 `8e1a8e26`。覆盖闸门：`--cc` 空表 ⇒ 补机械归属行 `docs/review_ledger.d/w21-1078-sync-merge-255d11a8-53b961d0.tsv`（range `255d11a8..53b961d0`，desc 586 字符，三列合计 678 ≤ 800）。
+
+**§8.1 判据① 与本次裁决的偏离**：`git diff --name-status --no-renames 25acfdd6 491ae829` = **7 `A` + 17 `M`**，其中 **12 条非 docs 路径**：`src/agent_harness/{agent/runtime.py,assembly.py,model/fallback.py,session/event.py,session/session.py}`、`tests/{agent/test_reasoning_effort_audit.py,multiagent/test_child_session_resume.py}`、`web/src/{components/StepDetail.tsx,components/StepDetail.reasoningEffort.test.tsx,lib/runState.ts,lib/runState.test.ts,styles/app.css}`。按 §8.1 字面判据须重跑全量；按用户裁决改跑**增量车道**。
+
+**重跑的车道（树 `22c2b165`，tree `395dfed4`；隔离副本 `C:\ia-probe-914\gate-tree`）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 47.5s），收据 `docs/gate/22c2b1651199ba04dc99c1c95afcac5484e91300.json` |
+| web vitest | **123 文件 / 1723 passed**（+1 文件 / +6 用例 = #1093 的 `StepDetail.reasoningEffort.test.tsx`） |
+| focused desktop `installer-scripts.test.mjs` | **121/121** |
+| `check_review_coverage.py` | **exit 0** |
+
+**未重跑（本次偏离的核心，如实登记）**：后端全量（读数自 `3c52da5c` 传递 = **7838 passed / 43 skipped / 51 deselected / 0 failed**）、desktop 全量（**297/295P/2S/0F**）、e2e（由 PR CI 的「e2e 冒烟集」车道覆盖）。**接受的残余风险**：本次 main 增量含 `src/**` 与 `tests/**`，其在**合并树**上的后端全量本次**没有实测**；那些改动由各自来源线在各自树上自证，且与本票面（workflow + `desktop/**`）无文件交集。该风险经用户 2026-10-13 裁决接受。
+
+**本票代码面不变**：9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` / `53b961d0` **六处逐字相同**。
+
+**五次同步总览**：`32ddedb9`（§14.7 获批并集零删除）→ `bad6c171` → `94a162a3` → `1a539937` → `53b961d0`（后四次均零冲突、`--cc` 空表各补机械归属行）。前三次合并树跑**全量**门禁；第四、五次按用户授权跑**增量车道**。
