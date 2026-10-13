@@ -3,6 +3,7 @@
 纯领域函数集合，无功状态、不依赖 ``SessionService`` 实例：
 
 - ``current_model_selection`` —— 从事件流派生「当前模型」（append-only 确定性）。
+- ``current_reasoning_effort`` —— 从事件流派生切换时生效的推理档位（#1107）。
 - ``resolve_model_target`` —— (provider, model_id) → ``ModelTarget``。
 - ``append_model_change`` —— ``MODEL_CHANGED`` 的唯一写入口。
 - ``inherit_parent_model`` —— fork child 继承父会话当前模型。
@@ -22,6 +23,7 @@ from agent_harness.config import Settings
 from agent_harness.session.amend import AmendOptions
 from agent_harness.session.event import (
     MODEL_CHANGED,
+    RUN_STARTED,
     SESSION_STARTED,
     SessionEvent,
 )
@@ -44,6 +46,21 @@ def current_model_selection(events: list[SessionEvent]) -> tuple[str | None, str
         if event.type == SESSION_STARTED:
             return event.data.get("provider"), event.data.get("model_id")
     return None, None
+
+
+def current_reasoning_effort(events: list[SessionEvent]) -> str | None:
+    """从事件流派生切换时生效的推理档位（#1107）。
+
+    最近一条 ``run/started`` 的 ``reasoning_effort``（#1093 落键口径）。effort 是
+    **请求侧逐轮声明**、服务端不粘滞——最近一轮未声明（键缺席）即视为无档位，
+    返回 None：旧声明不外推、不伪造「当前档位」（与 ``current_model_selection``
+    同款 append-only 确定性推导，不变量 #3）。
+    """
+    for event in reversed(events):
+        if event.type == RUN_STARTED:
+            value = event.data.get("reasoning_effort")
+            return value if isinstance(value, str) else None
+    return None
 
 
 def amend_with_session_model(
@@ -203,13 +220,19 @@ def append_model_change(session: Session, target: ModelTarget) -> ModelChange:
 
     走 ``Session.append``（无 resume 副作用，不变量 #7）；``from_*`` 从事件流派生。
     service 与 CLI demo 共用，避免两处各自拼事件 data。
+
+    ``reasoning_effort``（#1107）：切换时生效的推理档位（``current_reasoning_effort``
+    从事件流推导），有值落键、无值缺键——与 #1093 的 ``run/started`` / ``model/fallback``
+    口径同构（LangSmith ``ls_invocation_params``：切换事实也要把参数快照带进可审计面）。
     """
     from_provider, from_model_id = current_model_selection(session.events)
+    effort = current_reasoning_effort(session.events)
     session.append(MODEL_CHANGED, {
         "from_provider": from_provider,
         "from_model_id": from_model_id,
         "to_provider": target.provider,
         "to_model_id": target.model_id,
+        **({"reasoning_effort": effort} if effort is not None else {}),
     })
     return ModelChange(
         from_provider=from_provider,
