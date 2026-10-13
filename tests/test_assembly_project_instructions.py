@@ -38,6 +38,7 @@ async def _build(
     *,
     workspace_as_sandbox: bool = False,
     sandbox_workspace_root: Path | None = None,
+    sandbox_backend: str | None = None,
 ):
     settings = Settings(
         _env_file=None,
@@ -74,6 +75,7 @@ async def _build(
             session_id=session_id,
             workspace=runtime_workspace,
             max_agent_turns=10,
+            sandbox_backend=sandbox_backend,
         )
     return runtime, session
 
@@ -268,6 +270,48 @@ async def test_runtime_builds_with_windows_psec_project_instructions(
         assert read_result.data["content"] == "value = 1"
     finally:
         sandbox.stop()
+
+
+@pytest.mark.skipif(
+    platform.system() != "Windows",
+    reason="Windows PSEC sandbox is Windows-only",
+)
+@pytest.mark.asyncio
+async def test_new_psec_runtime_loads_instructions_only_from_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_harness.sandbox.windows_psec as psec_module
+    from agent_harness.sandbox.capabilities import SandboxCapabilities
+
+    monkeypatch.setattr(
+        psec_module,
+        "probe_windows_psec_capabilities",
+        lambda *, executable, config: SandboxCapabilities(
+            backend="windows_psec", available=True,
+        ),
+    )
+
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    (repository / "AGENTS.md").write_text("parent-only instruction", encoding="utf-8")
+    workspace = repository / "workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text(
+        "workspace instruction", encoding="utf-8",
+    )
+
+    runtime, session = await _build(
+        tmp_path,
+        workspace,
+        "session-new-windows-psec-project-instructions",
+        sandbox_backend="windows_psec",
+    )
+    messages = await runtime._context_builder.build(session)
+    prompt_text = "\n".join(str(message.content) for message in messages)
+
+    assert "workspace instruction" in prompt_text
+    assert "parent-only instruction" not in prompt_text
 
 
 def test_project_instruction_root_requires_exact_recorded_path_spelling(

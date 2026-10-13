@@ -601,16 +601,6 @@ async def build_runtime(
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
-    if isinstance(instruction_workspace, WindowsPsecSandbox):
-        await asyncio.to_thread(
-            project_instructions.load_for_sandbox_session,
-            session_id,
-            instruction_workspace,
-        )
-    else:
-        await asyncio.to_thread(
-            project_instructions.load_for_session, session_id, instruction_cwd,
-        )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
     root_profile = _root_profile_spec(agent_profile)
@@ -703,6 +693,20 @@ async def build_runtime(
         # #363 / W-19：显式 sandbox 后端选择。
         sandbox_backend=sandbox_backend,
     )
+    instruction_workspace = workspace_registry.get(session_id)
+    instruction_cwd = _project_instruction_cwd(
+        instruction_workspace, workspace_registry, session_id,
+    )
+    if isinstance(instruction_workspace, WindowsPsecSandbox):
+        await asyncio.to_thread(
+            project_instructions.load_for_sandbox_session,
+            session_id,
+            instruction_workspace,
+        )
+    else:
+        await asyncio.to_thread(
+            project_instructions.load_for_session, session_id, instruction_cwd,
+        )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
     context_artifact_store = tooling.context_artifact_store
