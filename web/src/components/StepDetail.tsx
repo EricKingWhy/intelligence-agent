@@ -29,7 +29,7 @@ import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
   clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
 } from '../lib/inspectorPanel';
-import { deriveAgentProfile, deriveRunPulse, deriveRunSummary } from '../lib/runState';
+import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
 import { CopyButton } from './CopyButton';
@@ -166,6 +166,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     ]);
   // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
   const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events) : null),
+    [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  // #1093：请求侧推理档位（最后一个 run/started 携带的 reasoning_effort；未声明 → null）。
+  const reasoningEffort = useMemo(
+    () => (conversation ? deriveReasoningEffort(conversation.events) : null),
     [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
@@ -397,6 +401,17 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         <span className="detail-profile-badge mono num" title={`agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`}>
           {agentProfile ?? '档位未知'}
         </span>
+        {/* #1093：请求侧推理档位——读 run/started.data.reasoning_effort（后端
+            #1093 起有声明才写）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
+            不伪造 "default"）。 */}
+        {reasoningEffort !== null && (
+          <span
+            className="detail-effort-badge mono num"
+            title={`reasoning_effort: ${reasoningEffort}（本轮请求侧选中的推理档位）`}
+          >
+            推理 · {reasoningEffort}
+          </span>
+        )}
         {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
             （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
             （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与
