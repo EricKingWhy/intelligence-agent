@@ -2786,8 +2786,9 @@ function frameDividesBefore(text, frame, call) {
  * rules, the installer-nsis suite, and the real-machine probe, which injects
  * that one file).
  *
- * real-machine legs do not inject installer.nsh, so this rule is the only
- * process-gate layer that reads this file at all.
+ * `validateProcessGateGuards` and the real-machine legs do not inject
+ * installer.nsh, so this rule is the only process-gate layer that reads this
+ * file at all.
  *
  * What this does NOT cover, and in the opposite direction from the #1074 rules:
  * those let a re-spelled *defect* through; this one fails closed on any
@@ -2795,10 +2796,21 @@ function frameDividesBefore(text, frame, call) {
  * text, so a legitimate re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
  * `StrCmp $iaRecoveryPending "1" …`, or the insert moved into a helper macro
  * that `customInit` inserts) turns the build red until this anchor is updated in
- * the same change. Still out of reach: a frame that keeps this text but sits
- * inside a false `!if`/`!ifdef`; a second `!macro customInit` further down the
- * file, which only the first is read of; and whether the insert's body still
- * stages — those are `validateProcessGateGuards` and the real-machine legs.
+ * the same change.
+ *
+ * The rest of the boundary, measured (#1078 review, both axes): this rule reads
+ * *where* the insert sits, not whether it runs. It stays green for an insert on
+ * the frame’s positive branch that is unreachable or conditional — under a
+ * nested constant-false `${If}`/`${Unless}`, under a `${Switch}`/`${Select}`
+ * branch, or under a false `!if`/`!ifdef` (compile-time directives, not
+ * LogicLib, so the depth walk cannot see them). Also green: an insert carried by
+ * a `!define` body; a frame placed above `!insertmacro iaRecoverInterruptedInstall`
+ * (that macro sets `$iaRecoveryPending`, so the recovery branch then never runs);
+ * and a second `!macro customInit` further down the file, of which only the first
+ * is read. These shapes are this rule’s to name, not another layer’s to catch.
+ * What is *not* left open is the #1078 defect itself: an insert on the frame’s
+ * `${Else}`/`${ElseIf}` side, a dropped frame, and a missing or duplicated insert
+ * all turn the build red.
  */
 export function validateProcessGateCallSite(source, filename) {
   const code = stripNsisComments(source)

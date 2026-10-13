@@ -27,7 +27,7 @@ because the node-runtime lock rules (#919 Q11) live in the second one.
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
 | `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (5) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 12/12 red, 0 survivors, restores identical (sha256 `1afc1a15…`, `131fb66c…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names — and the disposal rounds: the failure leg read by the read's own form and the label-name alphabet, the depth-2 define token, the quoted-span operand set, the define-carried recursive delete and the `!include` set, the two messages, and the divider-less `${Switch}` body | 116/116 red, 0 survivors, restore identical (sha256 `b156f67f…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names — and the disposal rounds: the failure leg read by the read's own form and the label-name alphabet, the depth-2 define token, the quoted-span operand set, the define-carried recursive delete and the `!include` set, the two messages, and the divider-less `${Switch}` body | 116/116 red, 0 survivors, restore identical (sha256 `77745ea8…`) |
 
 The last column records what each harness printed on a CRLF worktree
 (`core.autocrlf=true`); `teeth-check-guards.mjs` pins the same file’s LF
@@ -60,7 +60,9 @@ round's new mutations share test-level failure sets (five single-test sets plus
 one that fails seven tests; the assertion diffs inside a shared test still
 differ, measured), so they are not cited as per-rule discrimination.
 Both were re-run from the checkout on 2026-10-10
-with 0 survivors and byte-identical restores. The disposition's first
+with 0 survivors and byte-identical restores — that is the #919 disposal’s own
+run. The digests in the last column are the ones measured for this batch, on the
+frozen tip recorded in `docs/review_ledger.d/`. The disposition's first
 `teeth-check-guards.mjs` run also caught a real gap in the disposition itself:
 the candidate-copy mutation survived (every fixture armed with `"1"`), which is
 why the exemption's four spellings are asserted with the flag off.
@@ -69,9 +71,10 @@ why the exemption's four spellings are asserted with the flag off.
 that commit added (`iaPromoteBackupAlreadyLeftover:`) sits between the probe
 block and the clear call, so a bare `clearCall` anchor matched nothing, the
 mutation stopped applying, and the harness reported it as a survivor. #1090
-carries the label inside the wrapped region — the mutation’s point is that
-read, probe, drop and clear all move down together, which only the absolute
-bound catches — and the measured run is back to 12/12 red, 0 survivors.
+carries the label inside the wrapped region, so read, probe, drop and clear move
+down together; the measured run is back to 12/12 red, 0 survivors. The rules
+that fire on it are the relative bound and the constant-false detector, not the
+absolute bound — the wrapped region starts below the delete.
 
 Run from `desktop/`:
 
