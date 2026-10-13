@@ -163,6 +163,7 @@ from agent_harness.session import (
 from agent_harness.session.context import (
     ConstraintToolContext,
     current_constraint_tool_context_var,
+    session_is_delegated_child,
 )
 from agent_harness.session.derive import latest_direct_user_input_event
 from agent_harness.session.event import (
@@ -1887,6 +1888,8 @@ class AgentRuntime:
                         protected_fact_token_budget=(
                             self._context_builder.protected_fact_token_budget
                         ),
+                        # #1085：委派子会话的约束工具执行期兜底（#663 AC01）。
+                        is_delegated_child=session_is_delegated_child(session.events),
                     )
                 new_events = list(session.since(context_event_start))
                 compaction = next(

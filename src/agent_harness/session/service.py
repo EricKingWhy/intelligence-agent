@@ -2293,8 +2293,13 @@ class SessionService:
                 session_id=session_id,
                 workspace=workspace,
                 max_agent_turns=fuse.max_agent_turns,
-                include_constraint_tools=True,
-                include_constraint_resolution_tool=include_constraint_resolution_tool,
+                # #1085（#663 AC01）：委派子会话恢复时不重建约束工具入口。
+                # `child_profile` 非空即委派子会话（上游 #372 已按其 AgentSpec
+                # 重建收窄工具面）；约束工具只属于直接服务用户的根会话。
+                include_constraint_tools=child_profile is None,
+                include_constraint_resolution_tool=(
+                    include_constraint_resolution_tool and child_profile is None
+                ),
                 permission_mode=permission_mode,
                 approval_callback=approval_callback,
                 session_store=self._store,
