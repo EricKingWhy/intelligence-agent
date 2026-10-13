@@ -183,7 +183,7 @@ describe('MemoryPanel fallback switch', () => {
     });
 
     const label = Array.from(document.body.querySelectorAll('label'))
-      .find((item) => item.textContent?.includes('允许降级到备用模型'));
+      .find((item) => item.textContent?.includes('确定性错误时允许降级到备用模型'));
     const checkbox = label?.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
     expect(checkbox).not.toBeNull();
     expect(checkbox?.checked).toBe(false);

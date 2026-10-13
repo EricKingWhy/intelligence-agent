@@ -211,7 +211,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
           <>
             <label><input type="checkbox" checked={settings.extraction_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('extraction_enabled', event.target.checked)} /> 自动提取</label>
             <label><input type="checkbox" checked={settings.recall_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('recall_enabled', event.target.checked)} /> 自动召回</label>
-            <label><input type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 允许降级到备用模型</label>
+            <label><input type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
           </>
         )}
         {settingsError && <span className="memory-v2-error" role="alert">{settingsError}<button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}

@@ -614,10 +614,11 @@ class MemoryJobRunner:
         例外（#1039）：每 job 读**该用户**的治理设置（`fallback_enabled`，同
         `extraction_enabled` 一条链）是**附加输入**、不是执行的前提。若把它按上面的
         "契约之外失败"处理，一次设置存储抖动就会把一轮记忆判成 `JOB_FAILED`——那既不是
-        模型失败也不是输入失败，只是拿不到一个默认值为"开"的偏好。故该读取单独
-        best-effort：读不到就退回**构造期默认**（= 面板默认开）并留痕。这不是覆盖用户
-        **已知**的选择——读取失败恰恰意味着"没有可观测的存储偏好"，退回默认与"该用户
-        从未改过这个开关"同义。
+        模型失败也不是输入失败。故该读取单独 best-effort：读不到**不失败 job**；但也
+        **不退回"默认开"**——在用户可能已明确关掉开关的前提下，一次读取抖动不得把治理
+        选择翻回开（那会让记忆内容可能外泄到备用 provider）。读不到即 fail-closed：本次
+        不尝试确定性 fallback（= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到
+        设置即恢复），并留痕。
         """
         async with self._semaphore:
             try:
@@ -648,13 +649,16 @@ class MemoryJobRunner:
                         ).fallback_enabled
                     except Exception:
                         # 读设置是本 job 的**附加**输入，不是执行的前提：设置存储抖一下不应把
-                        # 一轮记忆判成 JOB_FAILED（本票只针对 formation 的模型调用）。退回构造
-                        # 期默认（= 面板默认开）并留痕，让下一次 job 重试读取。
+                        # 一轮记忆判成 JOB_FAILED。但也**不能**退回"默认开"——在用户可能已明确
+                        # 关掉开关的前提下，一次读取抖动不得把治理选择翻回开（记忆内容可能随之
+                        # 外泄到备用 provider）。故 fail-closed：本次不尝试确定性 fallback
+                        # （= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到设置即恢复）。
                         logger.exception(
-                            "Memory V2 job %s: cannot read per-user settings; using "
-                            "construction-time fallback default %s",
-                            job.job_id, self._fallback_enabled,
+                            "Memory V2 job %s: cannot read per-user settings; treating the "
+                            "deterministic fallback switch as disabled for this job",
+                            job.job_id,
                         )
+                        fallback_enabled = False
                 return await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
