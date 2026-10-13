@@ -153,6 +153,7 @@ M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出
 - **收尾树（记账笔）6/6 PASS**——`7abac831`（证据 + 台账 4 行 + tracker / PHASE_STATUS / 月档）与 `fbda7108`（补 #1078 引用）各跑一次裸全量 Gate-0，均 **6/6**，`coverage` 随台账行落盘转绿；收据
   `docs/gate/7abac8310628b1670ac7d8f04a469eaf3acc80ce.json`（墙钟 50.9s）、`docs/gate/fbda71081e96bb6663852731370d01a4ca235322.json`（墙钟 27.9s），两份均 `tracked_matches_head=true`、`untracked_total=0`。
 - **同步合并树 `3b886bf3`（先回后正，§14.6）：6/6 PASS**；收据 `docs/gate/3b886bf3bc314e90480a1401cc22d44581ae752b.json`（墙钟 28.4s、`tracked_matches_head=true`）。详见 §5.9。
+- **交付 tip `021a2bea`（合并树记账笔收尾）：6/6 PASS**；收据 `docs/gate/021a2bea3c7e75979616568b42ec7288337c4c56.json`（墙钟 74.7s > 60s 预算目标——预算只是目标，不改变判定；`tracked_matches_head=true`）。
 - 满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据 ⇒ 机械面清零后才派两轴。
 - **为何在隔离副本里跑**：主工作树含另一条线的未提交改动（` M dev.sh`），`gate0.py` 的落盘前置会 fail-closed
   拒绝落盘（§8.7 第 3 条），而其处置建议明写「**不要** `git stash`」。副本为真仓 `git bundle` 克隆 + CI 同形依赖，
