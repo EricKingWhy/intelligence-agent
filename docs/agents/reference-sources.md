@@ -173,6 +173,17 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 按用户指定上游（ZCode 本机 bundle + 本地克隆 + 官方文档）直接开展，未先补本清单。机制摘要 / 契合点 /
 判定（PORT DESIGN + BUILD）/ License 见 `docs/tickets/workbench-2026-09-27/W-27-1-plan-list-window-fold.md` 方案依据块。
 
+### Windows 安装器 / 在占用进程处理（2026-10-12 新增，#914 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| `app-builder-lib`（本仓构建固定版本 `26.15.3`；`npm pack` 解包逐字对照） | 本仓 NSIS 安装器的模板来源（MIT；**构建期工具**，非运行时依赖、也非声明依赖——`desktop/package.json` 无 `electron-builder`，CI 以 `npm install --no-save electron-builder@26.15.3` 临时安装；本机无本地克隆） | `templates/nsis/include/allowOnlyOneInstallerInstance.nsh`：`IS_POWERSHELL_AVAILABLE`（可用性探测；进程级 `Restricted` 视为不可用）、`FIND_PROCESS` / `KILL_PROCESS`（`Get-CimInstance Win32_Process` + `$_.Path.StartsWith($INSTDIR)`，PowerShell 不可用时退到 `tasklist`+`findstr`）、`_CHECK_APP_RUNNING`（`${isUpdated}` ⇒ 宽限后静默 kill + 重试；交互 ⇒ `$(appRunning)` OK/Cancel 后 kill；杀不掉 ⇒ `$(appCannotBeClosed)` RETRY/CANCEL ⇒ 退出）；`include/installer.nsh:237`、`common.nsh:114/125` 的 `${isUpdated}` 分流 |
+| DeepSeek Harness（本地克隆 `D:\reference\deepseek-harness` @ `5badb150`，MIT） | 与本仓安装协议同源（`installer-directories.nsh` 即其 ADAPT，见 `desktop/installer/installer.nsh` 头） | `apps/desktop/scripts/installer.nsh:167-198`（`customCheckAppRunning` 覆盖：不用 PowerShell，改调自研插件；更新 ⇒ 10 s 宽限等待 ⇒ 仍在场即弹「正在运行」并 `exit 2`；插件返回负值 ⇒ 弹 UI 错误并 `exit 2` = **答案未知即 fail-closed**）、`apps/desktop/installer/window-frame.cpp:56-85`（`InstallerFindProcess`：头注释即 ABI「Returns 0 while running, 1 when absent, and -1 if the process list cannot be read」；`QueryFullProcessImageNameW` + `_wcsicmp(path, expected)` **全路径**精确匹配、`GetLongPathNameW` 归一化，注释明写「不匹配别的用户或目录的同名应用」） |
+| [Microsoft Restart Manager](https://learn.microsoft.com/en-us/windows/win32/rstmgr/about-restart-manager) | 官方文档（2026-10-12 读取） | 「Restart Manager enables all but the critical applications and services to be shut down and restarted」；停止顺序 = GUI → 控制台 → **Windows 服务** → explorer；「shuts down application or services only if the caller has permission」；应用与服务「should be prepared to be shut down … and save user data and state」⇒「更新前停掉在运行的实例」是平台级既有做法（MSI 4.0 自动走 RM） |
+| [Inno Setup: CloseApplications](https://jrsoftware.org/ishelp/topic_setup_closeapplications.htm) | 官方文档（2026-10-12 读取） | 「Setup uses Windows Restart Manager to detect, close, and restart applications」；按「将被更新/删除的文件」找占用者、只处理这些文件的使用者；强制关闭警告「may cause the user to lose unsaved work」⇒ 交互式 GUI 不默认强关 |
+
+**补录说明（§3.1 偏差披露）**：本领域在 #914 根因消融开始时未在清单中，属**事后补录**——消融阶段按本仓构建固定的 `app-builder-lib@26.15.3` 模板 + 自家 makensis 探针直接开展，未先补本清单。机制摘要 / 契合点 / 判定（REUSE + ADAPT + DEFER）/ License 见 `docs/live_gate/w21/58-issue-914-service-in-use-gate.md` §2。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；
