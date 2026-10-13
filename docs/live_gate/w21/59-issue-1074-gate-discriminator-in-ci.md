@@ -444,3 +444,32 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 后端 **+15 passed**（7823 → 7838）与来侧 #1094 新增的三个测试文件相符；desktop / vitest / e2e 与上一树同数，因来侧未触碰 `desktop/**` 与 `web/**`。本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` **四处逐字相同**。
 
 **同步轮次小结（更新）**：本票共**三次**与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报九项后获批、按并集零删除解析）、`bad6c171`（零冲突，`--cc` 空表 ⇒ 机械归属行）、`94a162a3`（零冲突，`--cc` 空表 ⇒ 机械归属行；来侧含 `src/**` 与 `tests/**` 非 docs 面）。三次的合并树都重跑了全量门禁，均全绿。
+
+## 11 第四次同步（`1a539937`）与**增量车道**重跑（用户授权的判据①偏离）
+
+**为什么再同步**：PR #1097 推到 `3e9e2bc4` 后 `mergeStateStatus` 又是 `BEHIND`——`origin/main` **第四次**前移到 `25acfdd6`（PR #1099 / #1015「前端懒建会话：新建态三通道可附图」）。main 保护 `strict: true`，故按 §14.6 再同步为 merge `1a539937`（父一 `3e9e2bc4` = 本线 tip，父二 `25acfdd6`），**零冲突**（ort 策略），合并树 `6617efda`。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 仍是**空表** ⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `1a539937`）。补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-3e9e2bc4-1a539937.tsv`（range `3e9e2bc4..1a539937`，desc 696 字符，三列合计 788 ≤ 800 上限，LF），落行后 `check_review_coverage.py` **exit 0**。
+
+**§8.1 判据① 实测与偏离（如实登记）**：`git diff --name-status --no-renames 2ca1dfa53 25acfdd6` = **5 `A` + 7 `M`**，其中 **8 条非 docs 路径，全部在 `web/**`**（`web/e2e/attach-new-session.spec.ts`、`web/src/App.tsx`、`web/src/components/Composer{,.attachments,.presetFocus,.sendGate}.test.tsx`、`web/src/components/Composer.tsx`、`web/src/hooks/useDraftAttachments.ts`）。按 §8.1 第 3 条的**字面**判据，出现非 docs 路径即须重跑全量；**本次没有重跑后端 38 分钟全量**，而是按「只重跑输入集变化的车道」执行。
+
+- **偏离依据**：用户 2026-10-13 指令「如果只是文件方面就没有必要全量测试了」。
+- **偏离的机械理由**：该增量不触碰 `src/**`、`tests/**`，也不触碰本票代码面（`.github/workflows/windows-installer-smoke.yml` + `desktop/**` 共 9 文件）；本票 9 个代码 blob 在 `3e9e2bc4` 与 `1a539937` 上逐字相同。后端套件的输入集未变，其读数自 `3c52da5c` 传递。
+- **未做的风险披露**：`web/**` 的改动理论上可能改变 e2e 所依赖的前端行为，故 web 三条车道**确实重跑了**；但「后端套件会不会被 `web/**` 间接影响」这一命题本次**没有用全量实测回答**，是接受的残余风险，登记在案。
+
+**重跑的车道（树 `efafa856`，tree `6cc00e6f`；隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 53.3s），收据 `docs/gate/efafa85676d0ad8196ce83c0f6430737abb78053.json` |
+| web vitest | **122 文件 / 1717 passed**（较上一树 +8 = #1015 新增组件用例） |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`） | **560 passed（15.9m，0 flaky）**（+8 = #1015 新增 `attach-new-session.spec.ts`） |
+| focused desktop `installer-scripts.test.mjs` | **121/121** |
+| `check_review_coverage.py` | **exit 0** |
+
+**未重跑**：后端全量（读数自 `3c52da5c` 传递：**7838 passed / 43 skipped / 51 deselected / 0 failed**）、desktop 全量（读数自 `3c52da5c` 传递：**297/295P/2S/0F**）。
+
+**同步轮次小结（更新）**：本票共**四次**与 `origin/main` 同步 —— `32ddedb9`（§14.7 获批并集零删除）、`bad6c171`、`94a162a3`（两次零冲突 + `--cc` 空表 ⇒ 机械归属行）、`1a539937`（同上）。前三次的合并树都跑了**全量**门禁；第四次按用户授权只跑**增量车道**。9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` **五处逐字相同**。
+
+**⏱ 流程观察（供决策）**：本票的代码与审查在第一次同步前即已完成；此后 `origin/main` 在约 3 小时内前移四次，而每次同步因 `strict: true` 必须重做门禁。若 main 继续以该频率前移，逐次追赶无法收敛——**建议在 CI 于某一 head 变绿后尽快合并 PR #1097**，而不是继续等 main 稳定。
