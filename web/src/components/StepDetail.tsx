@@ -177,7 +177,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
    * 「取最后值」（单 run 会话展示不变）。 */
   const focusedRunId: string | null =
     focus.kind === 'event'
-      ? focus.event.run_id ?? null
+      ? focus.event.run_id
+        ? focus.event.run_id
+        : null
       : focus.kind === 'tool'
         ? toolRunId(focus.tool)
         : null;
@@ -421,7 +423,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           title={
             focusedRunId !== null
               ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
-              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`
+              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一个 run 的生效档位）`
           }
         >
           {agentProfile ?? '档位未知'}

@@ -159,4 +159,58 @@ describe('StepDetail 头标徽标 — #1106 聚焦 run 接线', () => {
     expect(query('.detail-effort-badge')?.textContent).toContain('standard');
     expect(query('.detail-profile-badge')?.textContent).toContain('main');
   });
+
+  it('徽标 title 如实标注取值范围：聚焦→「聚焦 run 的生效档位」；无聚焦→「最近一个 run 的生效档位」', () => {
+    const { state, runAStarted } = buildMultiRunConversation();
+    render(
+      <StepDetail
+        conversation={state}
+        streaming={false}
+        focus={{ kind: 'event', event: runAStarted }}
+        onFocusRun={noop}
+        onFocusTool={noop}
+        onFocusEvent={noop}
+        onPanelAction={noop as (action: InspectorPanelAction) => void}
+        panel={PANEL}
+      />,
+    );
+    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('聚焦 run 的生效档位');
+    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('聚焦 run 请求侧选中的推理档位');
+
+    act(() => root!.render(
+      <StepDetail
+        conversation={state}
+        streaming={false}
+        focus={{ kind: 'run' }}
+        onFocusRun={noop}
+        onFocusTool={noop}
+        onFocusEvent={noop}
+        onPanelAction={noop as (action: InspectorPanelAction) => void}
+        panel={PANEL}
+      />,
+    ));
+    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('最近一个 run 的生效档位');
+    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('最近一个 run 请求侧选中的推理档位');
+  });
+
+  it('聚焦事件信封 run_id 为空串 → 视为无聚焦，回退「取最后值」（防御一致性，与 tool 路径同口径）', () => {
+    const { state, runAStarted } = buildMultiRunConversation();
+    // 信封 run_id='' 不指向任何 run：不得进入聚焦模式（否则匹配不到 → 档位未知），
+    // 应与 run 级视图一样回退末次 run（run-b: coding / deep）。
+    const ghost: AgentEvent = { ...runAStarted, run_id: '' };
+    render(
+      <StepDetail
+        conversation={state}
+        streaming={false}
+        focus={{ kind: 'event', event: ghost }}
+        onFocusRun={noop}
+        onFocusTool={noop}
+        onFocusEvent={noop}
+        onPanelAction={noop as (action: InspectorPanelAction) => void}
+        panel={PANEL}
+      />,
+    );
+    expect(query('.detail-effort-badge')?.textContent).toContain('deep');
+    expect(query('.detail-profile-badge')?.textContent).toContain('coding');
+  });
 });

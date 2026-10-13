@@ -286,7 +286,7 @@ function deriveRunStartedField(
   focusedRunId?: string | null,
 ): string | null {
   let last: string | null = null;
-  let focused: string | null | undefined; // undefined = 没找到聚焦 run 的 run/started
+  let focused: string | null = null; // null = 没找到聚焦 run 的 run/started（或该 run 未声明字段）
   for (const e of events) {
     if (e.type !== EventType.RUN_STARTED) continue;
     const value = (e.data as Record<string, unknown> | undefined)?.[field];
@@ -295,7 +295,7 @@ function deriveRunStartedField(
       focused = typeof value === 'string' && value.length > 0 ? value : null;
     }
   }
-  if (focusedRunId != null) return focused ?? null;
+  if (focusedRunId != null) return focused;
   return last;
 }
 
