@@ -2592,6 +2592,123 @@ export const DELETE_SITE_POLICIES = {
   customuninstall: 'sweep',
 }
 
+/**
+ * Build-time assertion for the #914 [W-16 R2] process gate
+ * (installer-directories.nsh).
+ *
+ * The gate is the only thing standing between an update and a live
+ * installation: the rename under it does not stop a headless process (an exe
+ * image is opened share-delete — measured: the rename succeeded with the
+ * bundled service running and the service kept serving new clients out of
+ * "<install dir>.old-{guid}"), and the stock CHECK_APP_RUNNING probe cannot
+ * cover it either (its predicate reads `.Count` on the pipeline result, and a
+ * SINGLE CimInstance has no synthetic Count, so `$null -gt 0` is false — the
+ * service-only case is exactly one match). Both readings, with the probe logs
+ * they come from, are in docs/live_gate/w21/58-issue-914-service-in-use-gate.md
+ * §1. Everything here is fail-closed, and each rule says what reading it
+ * protects:
+ *
+ *   - both gate functions exist, and the classification forces `@(...)` — the
+ *     cast is what makes a single match visible at all;
+ *   - the classification carries none of the stock predicate's `).Count -gt 0`
+ *     tail, and its answers are 0 / 11 / 12 and never 1: Windows PowerShell
+ *     itself exits 1 on a parse error or a missing interpreter, so a 1 answer
+ *     would read a failed probe as "only the runtime is up";
+ *   - both path prefixes end in a separator (a bare prefix also matches sibling
+ *     directories that only share the text), and every `Stop-Process` in the
+ *     file is scoped to the bundled runtime subdirectory — an interactive
+ *     client or the TUI is refused with a message, never killed;
+ *   - the gate is called in iaStageApplication before the backup pointer is
+ *     armed and before `Rename $INSTDIR` (a refusal must leave the installation
+ *     untouched and must not leave a pointer behind that .onGUIEnd and
+ *     iaRollbackApplication read as "the install section started"), and it is
+ *     called BEFORE the `${If} $iaProbeFound == "1"` branch rather than inside
+ *     it — that branch skips staging entirely when the app executable is gone,
+ *     so an in-branch call never classified a damaged installation whose live
+ *     service is exactly what must not be updated over (#914 review Axis A);
+ *   - the refusal keeps the unknown answer fail-closed: `$(iaAppRunning)` for
+ *     the two known-occupied answers, `$(iaProcessCheckFailed)` for everything
+ *     else, exit code 2, and only a proven `"0"` returns.
+ */
+export function validateProcessGateGuards(source, filename) {
+  const code = stripNsisComments(source)
+  const problems = []
+  const classify = /Function iaClassifyRunningProduct\b([\s\S]*?)\nFunctionEnd/.exec(code)?.[1] ?? null
+  const gate = /Function iaRequireNoRunningProduct\b([\s\S]*?)\nFunctionEnd/.exec(code)?.[1] ?? null
+  const stage = /!macro iaStageApplication\b([\s\S]*?)\n!macroend/.exec(code)?.[1] ?? null
+  if (classify === null) problems.push('missing Function iaClassifyRunningProduct')
+  if (gate === null) problems.push('missing Function iaRequireNoRunningProduct')
+  if (stage === null) problems.push('missing !macro iaStageApplication')
+  if (classify !== null) {
+    if (!classify.includes('@(Get-CimInstance')) {
+      problems.push(
+        'the classification does not force the array cast (`@(Get-CimInstance …`) — a single CimInstance carries no Count, which is how the stock guard answers "not running" for the one-process case',
+      )
+    }
+    if (/\)\.Count\s+-gt\s+0/i.test(classify)) {
+      problems.push('the stock predicate tail `).Count -gt 0` is back in the classification')
+    }
+    for (const answer of ['0', '11', '12']) {
+      if (!new RegExp(`\\bexit\\s+${answer}(?![0-9])`).test(classify)) {
+        problems.push(`the classification no longer answers exit ${answer}`)
+      }
+    }
+    if (/\bexit\s+1(?![0-9])/.test(classify)) {
+      problems.push(
+        'the classification answers `exit 1` again — Windows PowerShell exits 1 itself (parse error, no interpreter), so that answer reads a failed probe as "only the runtime is up"',
+      )
+    }
+    if (!classify.includes("'$iaFinalDirectory\\'")) {
+      problems.push('the install-directory prefix lost its trailing separator (sibling directories would match)')
+    }
+    if (!classify.includes("'$iaFinalDirectory\\resources\\python\\'")) {
+      problems.push('the bundled-runtime prefix lost its trailing separator')
+    }
+  }
+  if (gate !== null) {
+    if (!gate.includes("StartsWith('$iaFinalDirectory\\resources\\python\\','CurrentCultureIgnoreCase')")) {
+      problems.push('the stop call no longer matches the bundled runtime subdirectory by its exact prefix')
+    }
+    if (!gate.includes('$(iaAppRunning)') || !gate.includes('$(iaProcessCheckFailed)')) {
+      problems.push('the refusal no longer distinguishes a known-occupied install from a failed probe')
+    }
+    const clean = gate.search(/\$\{If\}\s+\$iaRunningProduct\s+==\s+"0"/)
+    const abort = gate.lastIndexOf('SetErrorLevel 2')
+    if (clean === -1) problems.push('the gate no longer returns on the proven-clean "0" answer')
+    if (abort === -1 || !/\bQuit\b/.test(gate.slice(abort))) {
+      problems.push('the refusal no longer exits with a non-zero error level')
+    }
+  }
+  for (const [index, line] of code.split(/\r?\n/).entries()) {
+    if (/Stop-Process/i.test(line) && !line.includes("StartsWith('$iaFinalDirectory\\resources\\python\\'")) {
+      problems.push(`line ${index + 1}: a Stop-Process is not scoped to the bundled runtime subdirectory`)
+    }
+  }
+  if (stage !== null) {
+    const gateCall = stage.indexOf('Call iaRequireNoRunningProduct')
+    const pointer = stage.indexOf('iaStashBackupDir')
+    const rename = stage.indexOf('Rename $INSTDIR')
+    const appBranch = stage.indexOf('${If} $iaProbeFound == "1"')
+    if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
+    if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
+    if (rename === -1) problems.push('iaStageApplication no longer renames the install directory')
+    if (appBranch === -1) {
+      problems.push('iaStageApplication no longer branches on the app executable')
+    }
+    if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {
+      problems.push('the gate runs after the backup pointer is armed or after the rename — a refusal would have to roll back')
+    }
+    if (gateCall !== -1 && appBranch !== -1 && gateCall > appBranch) {
+      problems.push(
+        'the gate runs inside the `${If} $iaProbeFound == "1"` branch — that branch skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
+      )
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`${filename}: process gate (#914) is not fail-closed — ${problems.join('; ')}`)
+  }
+}
+
 /** Build-time assertion for `unguardedBackupDelete` (#901 / R1, #904). */
 export function validateBackupDeleteGuards(source, filename, options = {}) {
   const problems = unguardedBackupDelete(source, options)
@@ -2717,6 +2834,10 @@ export function validateInstallerScripts(installerDir) {
   validateCleanupHelpers(
     readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
     'installer-cleanup.nsh',
+  )
+  validateProcessGateGuards(
+    readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
+    'installer-directories.nsh',
   )
 }
 

@@ -167,6 +167,7 @@ from agent_harness.session.errors import (
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
+    CONTEXT_COMPACTION_FAILED,
     EVIDENCE_RECORDED,
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
@@ -935,8 +936,9 @@ def _blocking_reason(info: dict | None) -> str | None:
     """可达集条目 → 阻断原因；None 表示可清理。
 
     阻断集**只留真正的活引用**（#368 独立审查 P0-1）：未决 Operation、fork 子会话
-    引用、非出生证明的 tool/result 活引用（``referenced``）、以及 freshness 未 stale
-    的证据引用（``evidence``）。artifact 自身的 creation 事件与产生它的那条
+    引用、非出生证明的活引用（``referenced``：其他 tool/result，#1041 起还含
+    `context/compaction_failed.artifact_ref` 的 raw 恢复快照）、以及 freshness 未
+    stale 的证据引用（``evidence``）。artifact 自身的 creation 事件与产生它的那条
     tool/result 是"出生证明"（``birth_certificate``），stale 证据是 ``evidence_stale``
     ——两者都不阻断，只在 ``referenced_by`` 里如实告知用户"删掉会失去什么"。
     """
@@ -964,7 +966,7 @@ def _tool_result_artifact_ref(content: object) -> str | None:
 
 
 def _artifact_refs_in_event(event: SessionEvent) -> list[tuple[str, str]]:
-    """一条事件里的 (artifact_ref, 定位标签) 列表（四类事件，见 #368 票面）。"""
+    """一条事件里的 (artifact_ref, 定位标签) 列表（五类事件，见 #368 票面 + #1041）。"""
     data = event.data if isinstance(event.data, dict) else {}
     if event.type == EVIDENCE_RECORDED:
         ref = data.get("artifact_ref")
@@ -982,6 +984,14 @@ def _artifact_refs_in_event(event: SessionEvent) -> list[tuple[str, str]]:
             ref = _tool_result_artifact_ref(data.get("content"))
         if isinstance(ref, str) and ref:
             return [(ref, f"tool_result:{data.get('tool_call_id')}")]
+    elif event.type == CONTEXT_COMPACTION_FAILED:
+        # #1041（spec 06 §8）：摘要失败保存的 raw artifact（独立恢复快照）只经
+        # `store.save` 落盘、**无** creation 事件，其 ref 只出现在本事件里——登记进
+        # 引用注册表，使该快照进入可达集（否则会被清理预览当"未引用孤儿"误列、可被
+        # 删除，审计快照丢失）。ref 缺失 / None（未落盘、不伪造）⇒ 不产出条目。
+        ref = data.get("artifact_ref")
+        if isinstance(ref, str) and ref:
+            return [(ref, f"compaction_failed:{event.seq}")]
     return []
 
 
@@ -4429,7 +4439,9 @@ class SessionService:
         - ``birth_certificate``：artifact 自身的 creation 事件、以及产生它的那条
           tool/result（``tool_call_id`` 与 artifact 元数据一致）——"出生证明"，
           不阻断（只剩出生证明的 artifact 正是本票要清的对象）；
-        - ``referenced``：其他引用该 artifact 的 tool/result——活引用，阻断；
+        - ``referenced``：其他引用该 artifact 的 tool/result——活引用，阻断；#1041
+          起 `context/compaction_failed.artifact_ref`（摘要失败保存的 raw 恢复快照，
+          无 creation 事件）同样归此类——删掉即失去审计原件，按活引用阻断；
         - ``evidence`` / ``evidence_stale``：证据引用的 freshness 未 stale / 已 stale
           ——前者是活引用（阻断），后者是"删掉会失去什么"的告知（不阻断）；
         - ``unreconciled_operation`` / ``fork_child_reference``：阻断。
@@ -4487,6 +4499,10 @@ class SessionService:
                 )
             elif event.type in (ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED):
                 reason = "birth_certificate"
+            elif event.type == CONTEXT_COMPACTION_FAILED:
+                # #1041（spec 06 §8）：摘要失败保存的 raw 恢复快照是 durable 审计引用
+                # ——删掉即失去"事后对账/人工恢复"的原件，按活引用阻断清理。
+                reason = "referenced"
             else:
                 continue
             for ref, tag in _artifact_refs_in_event(event):
@@ -5021,6 +5037,41 @@ class SessionService:
         except RecoveryError as error:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
+
+    async def pending_decisions(self, session_id: str) -> list[dict]:
+        """待人工裁决清单的只读出口（#1049，``GET /api/sessions/{id}/recovery``）。
+
+        与 ``recover`` 409 的 ``pending_decisions`` **同源**（同一个
+        ``_reconcile_pending``，逐字段一致）：前端打开会话即可主动得知要裁决什么，
+        不必先撞一次 409；重启扫描后事件流里没有待裁决信号时，这是唯一的读面。
+        **零写入**：不建协调器、不迁移 Ledger、不追加事件。存在性 / 损坏判据与
+        ``recover`` 的前导逐条相同（422 / 404 / 损坏 409）。
+        会话有在途 run ⇒ 空：其 RUNNING 行是正在执行，不是待裁决——拿它提交裁决
+        只会 422（``budget`` 投影的 ``reconcile.tool_call_ids`` 会把在途行算进去，
+        所以不能当裁决清单用）。在途按本会话**与委派树根会话**判（#1051）：子代理
+        跑在父 run 的 task 里，RunManager 只按根登记；读完 Ledger 后再判一次，
+        挡住判定与读取之间新启动的 run。
+        与 ``recover`` 的 409 **刻意不同**：``recover`` 不判在途，在途时同样的
+        RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
+        run 时逐字段一致——读面只报此刻可裁决的行。
+        """
+        self._validate_session_id(session_id)
+        await self._ensure_stores()
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
+        )
+        if not existing and not integrity.corrupt_lines:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        self._raise_if_event_log_corrupt(session_id, integrity)
+        owners = {session_id, session_budget_key(existing, session_id=session_id)}
+
+        def in_flight() -> bool:
+            return any(self._run_manager.get_active(sid) is not None for sid in owners)
+
+        if in_flight():
+            return []
+        pending = await self._reconcile_pending(session_id, existing)
+        return [] if in_flight() else pending
 
     async def _reconcile_pending(self, session_id: str, events: list) -> list[dict]:
         """待人工裁决的 Operation 清单（#547 的机器可读 409 载荷）。

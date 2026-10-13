@@ -3,7 +3,8 @@
 ; Hooks used (see app-builder-lib/templates/nsis):
 ;   customHeader    - compile-time: strings, per-user manifest, directory-swap
 ;   customInit      - installer startup: refuse per-machine installs, then
-;                     move any previous version aside (iaStageApplication)
+;                     refuse to run against a live installation and move any
+;                     previous version aside (iaStageApplication, #914)
 ;   customInstall   - end of the install section: verify the new files and
 ;                     either delete the backup or roll back (iaPromoteApplication)
 ;   customUnInstall - uninstall section: sweep the "<install dir>.old-{guid}"
@@ -16,10 +17,19 @@
 ;   - per-user install only (RequestExecutionLevel user comes from the
 ;     electron-builder `perMachine: false` config); a per-machine install of
 ;     the same app id refuses to continue instead of fighting it.
-;   - the running-app guard is the atomic rename itself: Windows cannot
-;     rename a directory containing a running executable, so iaStageApplication
-;     fails closed with a message instead of installing over a live process.
-;     (The stock CHECK_APP_RUNNING PowerShell probe still runs in the section.)
+;   - the running-app guard is the process gate in iaStageApplication
+;     (iaRequireNoRunningProduct, #914): it asks who runs from $INSTDIR before
+;     anything moves, stops the bundled runtime, and refuses the update for a
+;     client or for any answer it cannot prove clean. It is deliberately NOT the
+;     atomic rename: an exe image is opened share-delete, so a headless service
+;     does not block a directory rename — measured, and that is exactly how the
+;     old service came to keep serving the new client (docs/live_gate/w21/
+;     58-issue-914-service-in-use-gate.md §1.3). The Electron client's own
+;     handles are the only ones that block the rename (leg ①), so the client path
+;     fails closed twice: the gate refuses it first, the rename is the second
+;     line. (The stock CHECK_APP_RUNNING PowerShell probe still runs in the
+;     section; it is the template's, and its single-match blindness is why it
+;     never reported the service — §1.2.)
 ;   - rollback needs no cooperation from the previous version: the backup is
 ;     created by the NEW installer, so updating from a pre-#361 build still
 ;     rolls back correctly.
@@ -80,6 +90,7 @@
   !ifdef LANG_ENGLISH
   LangString iaPerUserOnly ${LANG_ENGLISH} "This installer is per-user only. A per-machine installation of Intelligence Agent was found; uninstall it first, then run this installer again."
   LangString iaAppRunning ${LANG_ENGLISH} "Intelligence Agent (or one of its background processes) is still running. Close it and run the installer again — the previous version was left untouched."
+  LangString iaProcessCheckFailed ${LANG_ENGLISH} "The installer could not tell whether Intelligence Agent is running, so the existing installation was left untouched. This check needs Windows PowerShell 5.1 with a working WMI/CIM service — repair it and run the installer again."
   LangString iaRecoveryMetadataFailed ${LANG_ENGLISH} "The installer could not record recovery information. The existing installation was left untouched."
   LangString iaUpdateFailed ${LANG_ENGLISH} "The update failed: the new files are incomplete. The previous version has been restored."
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
@@ -95,6 +106,7 @@
   !ifdef LANG_SIMPCHINESE
   LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
   LangString iaAppRunning ${LANG_SIMPCHINESE} "Intelligence Agent（或其后台进程）仍在运行。请关闭后重新运行安装程序——旧版本未被改动。"
+  LangString iaProcessCheckFailed ${LANG_SIMPCHINESE} "安装程序无法确认 Intelligence Agent 是否仍在运行，因此现有安装未被改动。此检查需要可用的 Windows PowerShell 5.1 与 WMI/CIM 服务——请修复后重新运行安装程序。"
   LangString iaRecoveryMetadataFailed ${LANG_SIMPCHINESE} "安装程序无法记录恢复信息，现有安装未被改动。请检查注册表权限后重试。"
   LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
@@ -117,8 +129,9 @@
     SetErrorLevel 2
     Quit
   ${EndIf}
-  ; Move any previous version aside; aborts (leaving it untouched) when the
-  ; rename fails, e.g. because the app is still running.
+  ; Move any previous version aside. The process gate inside aborts with the
+  ; previous version untouched while the product is running, and the rename fails
+  ; closed for the Electron client's own handles (the second line of defence).
   !insertmacro iaRecoverInterruptedInstall
   ${If} $iaRecoveryPending != "1"
     !insertmacro iaStageApplication

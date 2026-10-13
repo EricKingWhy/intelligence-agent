@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { MEMORY_MAX_OFFSET, MEMORY_PAGE_SIZE } from '../src/lib/memory';
 import { T, routeApi, sessionRow, type FrameSpec, type MemoryFixture } from './fixtures';
 
 const semantic = (id: string, content: string, over: Partial<MemoryFixture> = {}): MemoryFixture => ({
@@ -40,6 +41,15 @@ const episodic = (id: string, content: string): MemoryFixture => ({
 
 const panel = (page: Page) => page.locator('.memory-panel');
 const openPanel = async (page: Page) => {
+  // 就绪锚点（真实外壳渲染状态，非固定时长）：`.app-frame` 是 App 的根外壳
+  // （App.tsx:1191，单 return、无条件渲染），「记忆管理」入口就在它的顶栏
+  // （TopBar.tsx 里无条件渲染）。等它可见 = 应用外壳已渲染，再交互——把
+  // 「外壳是否已渲染」这条前置显式化，失败时指向就绪锚点，而不是泛化的
+  // click 超时。壳内当前没有「数据已加载」类标记（SessionList 的 showEmpty
+  // 不区分加载中/加载完），造一个需改产品代码，超出本票边界，故止于外壳锚点。
+  // 上限 15s 是给冷启动渲染的余量（正常 <1s；与仓库既有 15s 用例同量级），
+  // 且是条件等待（就绪即返回），非 sleep；click 自带 actionability 原样保留。
+  await expect(page.locator('.app-frame')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: '记忆管理' }).click();
   await expect(panel(page)).toBeVisible();
 };
@@ -362,7 +372,9 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
 });
 
 test('AC8: pagination stops at the backend offset ceiling with an explicit boundary', async ({ page }) => {
-  test.setTimeout(90_000);
+  // 套件里唯一一处用例级时限：本用例按产品语义要串行做 ~200 次「加载更多」，耗时远超全局
+  // 30s（数字见下方块注释），故显式抬高；它只作**防挂死兜底**，真正挂死由无进展护栏拦截。
+  test.setTimeout(240_000);
   const requestedOffsets: number[] = [];
   const memories = Array.from({ length: 50 }, (_, index) => semantic(`m-boundary-${index}`, `boundary fact ${index}`));
   await routeApi(page, {
@@ -382,37 +394,77 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   await openPanel(page);
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
 
-  // Drive the actual button handler in-page to avoid 200 Playwright round trips.
-  // The repeated page fixture keeps rendering bounded at 50 rows.
-  await page.evaluate(async () => {
-    const clickAndWaitForPage = async () => {
-      const button = document.querySelector<HTMLButtonElement>('.memory-more-btn');
-      const container = document.querySelector('.memory-panel');
-      if (!button || !container) throw new Error('pagination button disappeared before reaching the boundary');
+  // 分页到后端 offset 上限是产品语义决定的固定**工作量**：MEMORY_MAX_OFFSET /
+  // MEMORY_PAGE_SIZE = 200 次「加载更多」（两常量直接从 web/src/lib/memory.ts 导入，与
+  // 后端 offset 上限同源，杜绝手工复制的漂移）。旧写法把这 200 次迭代全塞进**单次**
+  // page.evaluate，整条用例只有一个 90s 总时限——这是「固定工作量 × 固定墙钟」：极端并行
+  // 负载把每轮「点击→按钮恢复可用」的周期拉长后，总时长线性膨胀、必然撞穿总时限。阶段 A
+  // 插桩（沙箱 8 workers + 4 CPU burners、整文件 repeat 15，见 issue #1064）实测本用例：
+  // 慢实例 82s 才推到 170/200 次 ⇒ 全程约 96–115s；正常负载则 <15s。
+  // 改成**按进度推进**（票面 ADAPT；Playwright 官方 Best Practices：用锚定应用状态的
+  // web-first 断言与条件等待，测试时长由进度决定）：唯一终止条件是**到达边界**（「加载
+  // 更多」按钮消失），循环不再有固定 200 次的上界；每次 evaluate 只推进一个有界的块，
+  // 块间由 Playwright 侧断言分页请求数单调前进——真实进度条件，不随时间窗走；护栏是
+  // **无进展**：单轮点击若 NO_PROGRESS_MS 内不恢复就判死（防真挂死）。
+  // 残余风险（诚实标注）：那 200 次点击是**串行**的，总墙钟仍随单轮延迟线性增长；上面的
+  // 兜底时限相对上述实测最坏值只留 ~2x 余量，负载再恶化 ~2x 仍可能撞线——这是「200 次
+  // 串行交互」这一产品语义的固有代价，非本 diff 可消除，故显式记录。
+  const EXPECTED_PAGES = MEMORY_MAX_OFFSET / MEMORY_PAGE_SIZE; // 200：offset 上限对应的页数（边界语义）
+  const NO_PROGRESS_MS = 20_000;
+  const PAGES_PER_EVALUATE = 20;
 
-      await new Promise<void>((resolve, reject) => {
-        const observer = new MutationObserver(() => {
-          const current = document.querySelector<HTMLButtonElement>('.memory-more-btn');
-          if (!current || !current.disabled) {
+  // 在页内驱动真实按钮 handler 推进至多 maxPages 页，到边界（按钮消失）即提前停；
+  // 返回实际推进页数（0 = 本轮开始时按钮已消失 = 已到达边界）。
+  const advancePages = (maxPages: number) =>
+    page.evaluate(async ({ maxPages: pageBudget, noProgressMs }) => {
+      const clickAndWaitForPage = async () => {
+        const button = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+        const container = document.querySelector('.memory-panel');
+        if (!button || !container) throw new Error('pagination button disappeared before reaching the boundary');
+
+        await new Promise<void>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            const current = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+            if (!current || !current.disabled) {
+              observer.disconnect();
+              window.clearTimeout(timeout);
+              resolve();
+            }
+          });
+          const timeout = window.setTimeout(() => {
             observer.disconnect();
-            window.clearTimeout(timeout);
-            resolve();
-          }
+            reject(new Error('pagination request did not settle'));
+          }, noProgressMs);
+          observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+          button.click();
         });
-        const timeout = window.setTimeout(() => {
-          observer.disconnect();
-          reject(new Error('pagination request did not settle'));
-        }, 20_000);
-        observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
-        button.click();
-      });
-    };
+      };
 
-    for (let page = 0; page < 200; page += 1) await clickAndWaitForPage();
-  });
+      let advanced = 0;
+      for (let step = 0; step < pageBudget; step += 1) {
+        // 到达边界：按钮消失即唯一终止信号——不再有第 201 次点击。
+        if (!document.querySelector('.memory-more-btn')) break;
+        await clickAndWaitForPage();
+        advanced += 1;
+      }
+      return advanced;
+    }, { maxPages, noProgressMs: NO_PROGRESS_MS });
+
+  let pagesAdvanced = 0;
+  for (;;) {
+    const advanced = await advancePages(PAGES_PER_EVALUATE);
+    // 唯一合法终止：到达边界（按钮消失）。先于进度断言判定，免得把「边界」误判成「没进展」。
+    if (advanced === 0) break;
+    pagesAdvanced += advanced;
+    // 进度条件（真实断言）：本块结束时分页请求数必须与本块累计推进的页数一致——每一轮
+    // 点击都必须换来一次下一页请求；不推进就说明挂死在按钮/请求上，而不是机器慢。
+    expect(requestedOffsets.filter((offset) => offset > 0)).toHaveLength(pagesAdvanced);
+    // 越过后端 offset 上限即产品缺陷（本夹具下不可达，防御未来夹具/产品改动使循环失控）。
+    expect(pagesAdvanced).toBeLessThanOrEqual(EXPECTED_PAGES);
+  }
 
   const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
-  expect(pageOffsets).toEqual(Array.from({ length: 200 }, (_, index) => (index + 1) * 50));
+  expect(pageOffsets).toEqual(Array.from({ length: EXPECTED_PAGES }, (_, index) => (index + 1) * MEMORY_PAGE_SIZE));
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
   await expect(panel(page).locator('.memory-more-end')).toHaveAttribute('role', 'status');
   await expect(panel(page).locator('.memory-more-end')).toContainText('已达到查询上限');

@@ -17,6 +17,7 @@ import {
   validateLongPathPrefixes,
   validateBackupDeleteGuards,
   validateCleanupHelpers,
+  validateProcessGateGuards,
   malformedLongPathPrefixes,
   unguardedBackupDelete,
   stripNsisComments,
@@ -252,10 +253,152 @@ describe('installer.nsh LangString guards (#831)', () => {
   })
 
   it('still declares both English and Chinese strings (no text regression)', () => {
-    for (const name of ['iaPerUserOnly', 'iaAppRunning', 'iaUpdateFailed', 'iaRollbackFailed', 'iaStaleBackup']) {
+    for (const name of [
+      'iaPerUserOnly',
+      'iaAppRunning',
+      'iaProcessCheckFailed',
+      'iaUpdateFailed',
+      'iaRollbackFailed',
+      'iaStaleBackup',
+    ]) {
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_ENGLISH\\}`))
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_SIMPCHINESE\\}`))
     }
+  })
+})
+
+describe('process gate (#914)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  const directoriesRaw = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+  // The working tree may carry CRLF (core.autocrlf=true, .gitattributes does not
+  // pin .nsh), so the anchors below are the LF form, like the teeth harnesses.
+  const eol = directoriesRaw.includes('\r\n') ? '\r\n' : '\n'
+  const directoriesNsh = directoriesRaw.replace(/\r\n/g, '\n')
+  const installerNsh = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+  const gateBody = directoriesNsh.match(/Function iaRequireNoRunningProduct([\s\S]*?)\nFunctionEnd/)?.[1] ?? ''
+
+  /** The shipped installer directory with one replacement applied to the gate. */
+  const withMutatedGate = (from, to) => {
+    assert.ok(directoriesNsh.includes(from), `fixture anchor missing: ${from}`)
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-gate-'))
+    writeFileSync(join(dir, 'installer.nsh'), installerNsh)
+    writeFileSync(
+      join(dir, 'installer-cleanup.nsh'),
+      readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
+    )
+    const mutated = directoriesNsh.replace(from, to).replace(/\n/g, eol)
+    writeFileSync(join(dir, 'installer-directories.nsh'), mutated)
+    return dir
+  }
+
+  it('accepts the shipped gate text', () => {
+    validateProcessGateGuards(directoriesNsh, 'installer-directories.nsh')
+  })
+
+  // The measured defect the cast repairs: a single CimInstance has no synthetic
+  // Count, so the stock predicate answers "not running" for the one-process case
+  // — which is exactly the service-only update (58-…-gate.md §1.2).
+  it('refuses a classification without the forced array cast', () => {
+    const dir = withMutatedGate('@(Get-CimInstance', '(Get-CimInstance')
+    assert.throws(() => validateInstallerScripts(dir), /does not force the array cast/)
+  })
+
+  it('refuses the stock predicate tail coming back', () => {
+    const dir = withMutatedGate(
+      'if ($$iaAll.Count -eq 0) { exit 0 }',
+      'if (($$iaAll).Count -gt 0) { exit 0 }',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /stock predicate tail/)
+  })
+
+  it('refuses exit 1 as an answer (PowerShell exits 1 on its own failures)', () => {
+    const dir = withMutatedGate('exit 11', 'exit 1')
+    assert.throws(() => validateInstallerScripts(dir), /exit 1/)
+  })
+
+  it('refuses a runtime prefix without its trailing separator', () => {
+    const dir = withMutatedGate(
+      "'$iaFinalDirectory\\resources\\python\\'",
+      "'$iaFinalDirectory\\resources\\python'",
+    )
+    assert.throws(() => validateInstallerScripts(dir), /trailing separator/)
+  })
+
+  it('refuses a stop call that is not scoped to the bundled runtime', () => {
+    const dir = withMutatedGate(
+      "StartsWith('$iaFinalDirectory\\resources\\python\\','CurrentCultureIgnoreCase') } | ForEach-Object { Stop-Process",
+      "StartsWith('$iaFinalDirectory\\','CurrentCultureIgnoreCase') } | ForEach-Object { Stop-Process",
+    )
+    assert.throws(() => validateInstallerScripts(dir), /bundled runtime subdirectory/)
+  })
+
+  it('refuses a stage that never calls the gate', () => {
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /does not call the gate/)
+  })
+
+  it('refuses a gate call that runs after the backup pointer or the rename', () => {
+    // The pointer must not be armed when the gate refuses: .onGUIEnd and
+    // iaRollbackApplication read a non-empty IaBackupDir as "the install
+    // section started" and would roll a good installation back.
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    const before = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
+    const moved = before.replace(
+      '    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
+      '    Call iaRequireNoRunningProduct\n    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
+    )
+    assert.notEqual(moved, before, 'the call was not moved back')
+    writeFileSync(join(dir, 'installer-directories.nsh'), moved.replace(/\n/g, eol))
+    assert.throws(() => validateInstallerScripts(dir), /gate runs after the backup pointer/)
+  })
+
+  it('refuses a gate call that runs only when the app executable is present', () => {
+    // The damaged-install case (#914 review Axis A, ruled a must-fix): the
+    // `${If} $iaProbeFound == "1"` branch skips staging entirely when the app
+    // exe is gone, so a call placed inside it never classified a live bundled
+    // service — and the stock section installed straight over that directory.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  ${If} $iaProbeFound == "1"\n    Call iaRequireNoRunningProduct\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /inside the .*branch/)
+  })
+
+  it('refuses a refusal that neither exits nor keeps the unknown case apart', () => {
+    const dir = withMutatedGate(
+      '  SetErrorLevel 2\n  Quit\nFunctionEnd\n\n; Existence probe for a path',
+      '  Return\nFunctionEnd\n\n; Existence probe for a path',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /no longer exits with a non-zero error level/)
+  })
+
+  it('keeps every answer but a proven "0" a refusal with a message (fail-closed)', () => {
+    assert.match(gateBody, /\$\{If\} \$iaRunningProduct == "0"[\s\S]{0,160}Return/)
+    assert.match(gateBody, /\$\(iaAppRunning\)/)
+    assert.match(gateBody, /\$\(iaProcessCheckFailed\)/)
+    const abort = gateBody.lastIndexOf('SetErrorLevel 2')
+    assert.ok(abort >= 0 && /\bQuit\b/.test(gateBody.slice(abort)), 'the refusal must exit non-zero')
+    // The client is refused, never killed: every Stop-Process in code (comments
+    // are not code — the gate's own prose says "Stop-Process" too) stays inside
+    // the bundled runtime subdirectory.
+    for (const line of stripNsisComments(gateBody).split('\n')) {
+      if (/Stop-Process/i.test(line)) {
+        assert.ok(
+          line.includes("StartsWith('$iaFinalDirectory\\resources\\python\\'"),
+          `unscoped Stop-Process: ${line.trim()}`,
+        )
+      }
+    }
+  })
+
+  it('stops the same runtime subdirectory the shell runs (installer/paths.ts)', () => {
+    // <install>\resources\python is Electron's <resourcesPath>\python; if either
+    // side moves the runtime, the installer would stop nothing (or the shell
+    // would run a directory the gate never clears).
+    const paths = readFileSync(join(installerDir, '..', 'src', 'installer', 'paths.ts'), 'utf8')
+    // TypeScript source, so the separator is written twice in the literal.
+    assert.match(paths, /resourcesPath\}\\\\python\\\\python\.exe/, 'shell runtime path moved')
+    assert.ok(directoriesNsh.includes("'$iaFinalDirectory\\resources\\python\\'"), 'gate runtime prefix moved')
   })
 })
 
@@ -302,7 +445,21 @@ describe('long-path app executable detection (#1045)', () => {
 
       assert.ok(input >= 0, name + ' does not pass the app path to iaProbePath')
       assert.ok(call > input && call - input < 160, name + ' does not call iaProbePath for the app path')
-      assert.ok(guard > call && guard - call < 120, name + ' does not branch on the probe result')
+      assert.ok(guard > call, name + ' does not branch on the probe result')
+      // Nothing but the #914 process gate may sit between the probe and the
+      // branch. A character bound would have to be widened for the gate call
+      // (plus its prose), which would weaken the check for the two bodies that
+      // carry no call at all — so the distance is asserted as a statement list.
+      const between = body
+        .slice(call + 'Call iaProbePath'.length, guard)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith(';'))
+      assert.deepEqual(
+        between.filter((line) => line !== 'Call iaRequireNoRunningProduct'),
+        [],
+        name + ' runs something else between the probe and the branch: ' + between.join(' | '),
+      )
       assert.doesNotMatch(body, /FileExists.*APP_EXECUTABLE_FILENAME/)
     }
 
