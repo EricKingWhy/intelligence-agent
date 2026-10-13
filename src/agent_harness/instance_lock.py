@@ -148,13 +148,18 @@ def _shared_root_registry_lock(root: Path) -> Iterator[None]:
 def _take_os_lock_blocking(fd: int) -> None:
     """**阻塞**取 OS 级排他锁（与 `_take_os_lock` 的 fail-fast 相对）。
 
-    session 追加的临界区是微秒级的，等对方让出比当场失败更合理；deadline 之外的
-    有界性由调用方的墙钟预算（#1024/#1061）负责，本原语不设超时。
+    本原语**无**超时。等待上界由「持锁者是某个进程的 `append_event` 临界区，该临界区
+    为微秒级（一次 `stat` + 一次 JSON 解析）、不含 I/O 阻塞」这一事实给出——微秒级的
+    等待上，等对方让出比当场失败更合理。**不再有兜底**：#1024/#1061 曾在**调用方**
+    放一个墙钟预算（`_APPEND_CONFLICT_DEADLINE_S`）当作本原语的有界性来源，该预算已
+    在 #1062-A 随「分配收进写锁」删除；今天的调用方 `store.append_event` 没有墙钟
+    预算，故**不要**据此认为「上面有人兜底」。
 
     平台差异（必须记账，不得夸大为「等价」）：POSIX `flock(LOCK_EX)` 无限等待；
     Windows `msvcrt.LK_LOCK` 以 1 秒为间隔重试 **10 次**后抛 `OSError`——即 Windows
-    上单次等待上限约 10 秒。对微秒级临界区绰绰有余，但极端持有者下 Windows 会先
-    失败，这是平台语义，不是可消除的缺陷。
+    上单次等待上限约 10 秒。⚠ 这段是**按 CPython 文档与实现**写下的平台断言，
+    **未在本机 Windows 核实**（本仓开发与 CI 都不跑 Windows）。对微秒级临界区
+    绰绰有余，但极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
     """
     if sys.platform == "win32":
         import msvcrt
@@ -181,6 +186,10 @@ def session_append_lock(events_path: Path) -> Iterator[None]:
     锁文件与 events.jsonl 同目录、固定名 ``.events.lock``：不进列表页
     （``list_session_ids`` 只认目录里有 ``events.jsonl``）；``delete_session`` 的
     rmtree 会一并清掉它。
+
+    **持锁者** = 本进程或其它进程里 `JsonlSessionStore.append_event` 的追加临界区
+    （「读已落盘最大 seq → 判定 → 写盘 → 更新文件戳缓存」），临界区为微秒级；本锁
+    本身不设超时（见 `_take_os_lock_blocking`）。
 
     **非可重入**：同一进程内同一 session 不得嵌套取锁（`JsonlSessionStore` 的进程内
     `_lock_for` 已保证同进程串行，本锁只补跨进程这一维）。

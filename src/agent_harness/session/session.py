@@ -60,6 +60,7 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
+
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
     """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
 
@@ -101,7 +102,10 @@ class Session:
       撞号即在**同一把写锁内**改号重落（见 `_persist_event`／`store.append_event`
       的 `allocate`——取号、判定、写盘同临界区，杜绝「核对→写」窗口）。交付点仅三处：
       `RunManager.launch`（服务层创建 / 续聊 / 暂停续跑三条腿共用）、CLI `run` 直接调
-      `runtime.run_stream`、多代理子 runtime。
+      `runtime.run_stream`、多代理子 runtime。⚠ 这是个**封闭集合**，但集合本身会随
+      生产入口增加而变——`AgentRuntime.run()`（非流式入口）目前**没有生产调用方**，
+      若将来出现，它同样必须在入口处标记 `deliver_to_runtime()`，否则那条路径上的
+      撞号会退化成 fail-loud（#1055 的 P0 就是「漏掉一个交付点」）。
     * 未标记的聚合——撞号原样抛出，收口归调用方 owner（服务层 `change_model` 一族按
       `_WRITE_CONFLICT_ATTEMPTS` 有界重试、旁路写者 `SessionEventSink` 自带
       `_SINK_ATTEMPTS` 重读循环）。本层**不**替它们吞冲突，否则那些上界与失败归因
@@ -489,9 +493,11 @@ class Session:
         )
         # store 返回**实际落盘的那一枚**：锁内分配会改号，不接住它就会「内存/返回值是
         # 旧号、盘上是新号」——`_events`、`_next_seq` 与调用方（`end_run` 的返回值、
-        # 流式镜像）三处一起分叉。老替身/第三方子类可能不返回（签名原本是 `-> None`），
-        # 故回落到本地事件。
-        event = persisted if persisted is not None else event
+        # 流式镜像）三处一起分叉。**不回落到本地事件**：`append_event` 的契约是
+        # `SessionEvent`（docstring 的「:returns: 实际落盘的那一枚」），全仓替换件
+        # （含测试替身）都返回它；`None` 只可能来自契约外的实现，那种情况下回落到
+        # 旧号反而会静默分叉（#1102 删掉了这条例外分支——它已无调用方可走）。
+        event = persisted
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：锁内分配
         # 会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进冲突分支

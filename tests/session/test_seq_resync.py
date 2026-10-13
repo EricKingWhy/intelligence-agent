@@ -369,12 +369,17 @@ class TestResyncReadsTheDiskInsteadOfWalkingUp:
         assert event.seq == ahead + 1, "必须落到盘面最大值之后的第一格"
         assert attempts <= 2, (
             f"撞号后应一次跳到空档（1 次重投），实际写了 {attempts} 次"
-            "——逐格 +1 的实现在这里要爬 50 次"
+            "——逐格 +1 在「盘面领先 N 格」的真实场景要爬 N 次；本夹具只制造"
+            "**1 次**撞号，故这里只判「一次跳到盘面空位」"
         )
 
 
-class TestConflictBoundIsFailLoud:
+class TestUndeliveredSnapshotGateKeepsFailingLoud:
     """A（#1062）改写了这条边界，用例语义随之改写（不是 waive）。
+
+    类名钉的是**今天仍然成立**的那一半：快照门（BUG-011）对**未交付**聚合原样
+    保留 fail-loud；「已交付普通写撞满预算即抛」那一半已被 A 改写为「锁内改号
+    落地」，若继续叫 `TestConflictBoundIsFailLoud` 就名不副实（#1102）。
 
     旧契约（#1024/#1061）：已交付聚合的**普通**写撞满墙钟预算 ⇒ fail-loud 抛
     `SeqConflict`。A 把分配收进 store 写锁后，已交付的普通写改为**锁内改号成功**——
@@ -475,7 +480,8 @@ class TestTerminalGuaranteeUnderSustainedSteal:
         live, run_id = _delivered_run(thief, session_id, entry)
 
         thief.steals = 10**9  # 永不停手
-        # 前置：已交付普通写在 A 下也落地（不再抛）——见 TestConflictBoundIsFailLoud。
+        # 前置：已交付普通写在 A 下也落地（不再抛）——见
+        # TestUndeliveredSnapshotGateKeepsFailingLoud。
         live.append(MODEL_REQUEST_STARTED, {"model": "m"}, run_id=run_id)
         stolen_before = thief.stolen
 
@@ -512,7 +518,8 @@ class TestTerminalGuaranteeUnderSustainedSteal:
         未交付聚合的终态撞号 → `SeqConflict` 抛出 → durable 流里该 run **0 条终态**，
         与 #1024 事故同型（run 在盘上永远悬空、UI 永久「进行中」）。
 
-        未交付的**普通**写仍 fail-loud（见 `TestConflictBoundIsFailLoud`），故本用例
+        未交付的**普通**写仍 fail-loud（见
+        `TestUndeliveredSnapshotGateKeepsFailingLoud`），故本用例
         只发终态那一次写——这正是保底通道的语义边界。
         """
         thief = _SeqThiefStore(root=store._root, steals=0)
@@ -538,7 +545,8 @@ class TestTerminalGuaranteeUnderSustainedSteal:
 
         旧用例此处断言 fail-loud（`test_normal_write_still_fails_loud_...`）；A 之后该
         契约被用户裁决改写为「锁内改号成功」，故断言随之反转——但**未交付**的普通写
-        仍 fail-loud，那条反面判据搬到了 `TestConflictBoundIsFailLoud`。
+        仍 fail-loud，那条反面判据搬到了
+        `TestUndeliveredSnapshotGateKeepsFailingLoud`。
         """
         thief = _SeqThiefStore(root=store._root, steals=0)
         live, run_id = _delivered_run(thief, f"s-guard-normal-{entry}", entry)

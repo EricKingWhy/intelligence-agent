@@ -302,7 +302,9 @@ class JsonlSessionStore:
 
         并发边界与 `append_event` 同一口径：读数在会话写锁外取，是**观测**而非判定；
         真正的 fail-closed 判定仍在 `append_event` 的锁内（`seq <= last` 拒写）。
-        跨进程同时写入无文件锁（见 `__init__` 的边界说明），与既有限制一致。
+        跨进程并发由 `session_append_lock` 串行（#1063，只在 `append_event` 的临界区
+        内）；本读数在文件锁**外**取，故同为观测——它读到的 `last` 随时可能被另一进程
+        的追加推后，调用方不得据此判定可写。
         """
         with self._lock_for(session_id):
             return self._last_seq_on_disk(session_id)
@@ -334,7 +336,9 @@ class JsonlSessionStore:
         """已落盘最大 seq（无文件 = -1）。带文件戳校验的缓存，必须在会话写锁内调用。
 
         戳变化即回读磁盘，因此外部（另一实例 / 另一进程）**已经落盘**的追加一定会被
-        看见；它不能防的是跨进程**同时**写入（无文件锁），见 ``__init__`` 的边界说明。
+        看见；它不能防的是跨进程**同时**写入——那一维由 ``session_append_lock`` 在
+        ``append_event`` 的临界区内串行（#1063），本方法刻意不取文件锁（取锁会让这个
+        O(1) 读数变成可能阻塞的热路径）。
         """
         path = self._events_path(session_id)
         try:
@@ -421,8 +425,12 @@ class JsonlSessionStore:
                             f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
                             f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
                         )
-                    # 终态协商（#1061）：改号到本锁内读到的空档。行文本必须按**改号后**的
-                    # 事件重渲染（上面的 dumps 用的是改号前的 seq）。
+                    # 锁内改号（#1061 终态协商 / #1062 通用路径）：改号到本锁内读到的
+                    # 空档。行文本必须按**改号后**的事件重渲染——上面那次 dumps 用的是改号
+                    # 前的 seq。**这一次重复渲染是有意保留的**：那次 dumps 同时承担 #650 的
+                    # UTF-8 前置校验（必须早于任何目录/文件变更），而热路径是
+                    # `allocate=False`（撞号才走到这里），故重复序列化的成本落在这条
+                    # 罕见分支上（一次 JSON 编码，相对一次 fsync 可忽略）。
                     event = replace(event, seq=last + 1)
                     line = json.dumps(
                         event.to_dict(), ensure_ascii=False, separators=(",", ":"),
