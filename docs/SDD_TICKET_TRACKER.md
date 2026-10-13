@@ -8284,3 +8284,11 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **发布前 Gate-0**：在本记账提交上裸跑，读数落盘于随后的 gate 提交（`docs/gate/<本记账提交 sha>.json`，路径见该提交信息与 PR 正文）；冻结树 `b187c4a0` 之后只追加 docs / 台账（§8.1 第 3 条判据 ①②）。playwright e2e 沙箱跑不了 ⇒ 由 PR 上 CI 的 `e2e` 作业承担，以 CI 读数为准。
 - **发布授权**：用户 2026-10-12 18:36（#1049/#1030/#1029 批：两轴 PASS + 门禁 / Gate-0 / coverage / CI 全绿 ⇒ push、开 PR、merge、关单）；#1051 为该批拆分票，编排方按同一授权派发布。
 - **新开**：#1053（续聊子会话的 run 在途时孙会话误列，P3，根会话判定覆盖不到的同族形态）。
+
+## #1080 #1051 审查 P3 收尾（2026-10-13 · 代码笔已冻结、待两轴审查）
+
+- **分支**：`claude/1080-recovery-p3-cleanup`（基点 `origin/main` = `ba8d0bd3`，worktree `work/wt1080`）；代码笔 `2d4865fc`。**冻结 tip `2d4865fc64d9b4edbfc0649c8c7ddcdc5ef7e6fc` / tree `8a4054102faa69146167100e8458fb4bb04575f5`**；hash-object：`src/agent_harness/session/service.py=bc6c649b3764fac7c74e9493a0617eba38a59305`、`tests/web/test_session_recovery_api.py=cfc6efe02fbd689e32b1769b76e5bcedc2f1d3f4`。
+- **改动**（行为不变）：`pending_decisions` docstring 四处精确化（无在途 run 时逐字段一致；子代理按树根、直接续聊子会话按自身 id 登记；两次判定之间完整跑完的 run 误列一次为已接受残余，`recover` 422 再校验；#318 前无锚点旧子会话只按自身判）；`owners` → `run_owner_ids`；测试抽 `_seed_ledger_running`（三处 PENDING→RUNNING 去重）、run_id 改 `ManagedRun.wait_run_id()`、`list_then_finish` 用例加 `list_calls == []` 计数断言并写明守读前判定。
+- **验证**：focused（`test_session_recovery_api.py` + `tests/test_web_api.py -k "recover or reconcile or pending"`）重构前后同组 26 passed；`ruff check .` 绿。#1051 消融 A1–A5 在副本重做（`PYTHONPATH=副本/src`，命中数 ==1）失败集合与 #1051 逐条相同、互不相同；计数断言独立鉴别力 C0/C1/C2 成立（明细见 `docs/phase_status/2026-10.md`「#1080」节）。Gate-0 裸全量 `docs/gate/2d4865fc64d9b4edbfc0649c8c7ddcdc5ef7e6fc.json`（5/6，唯一红 = coverage，❌ 恰 1 条 = `2d4865fc`，⊆ 本批代码笔）。冻结树后端全量（`scripts/run_tests_clean.sh`，`.venv/bin/python`）1 failed / 7781 passed / 40 skipped / 51 deselected（536.44s），唯一红 = `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`（覆盖闸门自指，❌ = `2d4865fc`，同因）。本票不改 `web/**`。
+- **审查**：待编排方派两轴（范围 `ba8d0bd3..2d4865fc`）。
+- **附加分诊**：续聊的委派 coding 子会话绑定且可执行约束工具 ⇒ 证实，新开 #1085（bug / needs-triage / P2，未打 in-progress，待排期）。
