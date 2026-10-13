@@ -441,7 +441,7 @@ test('AC4: bulk delete previews an exact server count and sends the confirmation
 test('AC5: a failed setting update leaves the last server-confirmed value checked', async ({ page }) => {
   await routeApi(page, {
     memories: [],
-    memorySettings: { extraction_enabled: true, recall_enabled: false },
+    memorySettings: { extraction_enabled: true, recall_enabled: false, fallback_enabled: true },
     memorySettingsPatchError: { status: 503, detail: 'settings temporarily unavailable' },
   });
   await page.goto('/');
