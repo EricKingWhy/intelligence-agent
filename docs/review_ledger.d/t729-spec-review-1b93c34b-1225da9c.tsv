@@ -1,0 +1,1 @@
+2026-10-13	#729 Spec 修后重审：固定范围 `1b93c34b..1225da9c`，AC 对账无 P0/P1/P2；P3：workspace-specific probe/API 失败时 UI 清空后端列表并隐藏本机/Docker 选项，偏离“其他 backend 行为不变”。结论未通过（P3=1）；本轴未运行测试。	1b93c34b5154afc70e0a4475499c8ac403798548..1225da9c1efb2fd4bed958ff5a4795a3cefaf514

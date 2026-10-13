@@ -96,13 +96,21 @@ class WorkspaceRegistry:
             Path(workspace_root) if workspace_root is not None
             else Path(mapping["workspace_root"])
         )
-        requested.mkdir(parents=True, exist_ok=True)
-        workspace_root = Path(canonical_workspace_path(requested))
-        workspace_root.mkdir(parents=True, exist_ok=True)
-        mapping["workspace_root"] = str(workspace_root)
+        if mapping["backend"] == "windows_psec":
+            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
-        sandbox = self._instantiate_sandbox(mapping)
-        sandbox.ensure_started()
+            raw_root = Path(os.path.abspath(requested))
+            mapping["workspace_root"] = str(raw_root)
+            sandbox = WindowsPsecSandbox(raw_root)
+            sandbox.ensure_started()
+            mapping["workspace_identity"] = sandbox.workspace_identity
+        else:
+            requested.mkdir(parents=True, exist_ok=True)
+            workspace_root = Path(canonical_workspace_path(requested))
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            mapping["workspace_root"] = str(workspace_root)
+            sandbox = self._instantiate_sandbox(mapping)
+            sandbox.ensure_started()
 
         self._write_mapping(session_id, mapping)
         self._cache[session_id] = sandbox
@@ -218,7 +226,10 @@ class WorkspaceRegistry:
             owner_session_id = session_id
         sandbox = self._cache.get(owner_session_id)
         if isinstance(sandbox, LocalSubprocessSandbox):
-            cached = canonical_workspace_path(sandbox.workspace_root)
+            if mapping and mapping.get("backend") == "windows_psec":
+                cached = str(sandbox.workspace_root)
+            else:
+                cached = canonical_workspace_path(sandbox.workspace_root)
             if cached not in roots:
                 roots.append(cached)
         return roots
@@ -352,6 +363,22 @@ class WorkspaceRegistry:
             return DockerSandbox(
                 container_name=container_name,
                 volume_name=volume_name,
+            )
+
+        if backend == "windows_psec":
+            from agent_harness.sandbox.windows_psec import (
+                WindowsPsecSandbox,
+                WorkspaceIdentityError,
+            )
+
+            identity = mapping.get("workspace_identity")
+            if not isinstance(identity, dict):
+                raise WorkspaceIdentityError(
+                    "Windows workspace mapping has no pinned directory identity."
+                )
+            return WindowsPsecSandbox(
+                workspace_root=workspace_root,
+                workspace_identity=identity,
             )
 
         raise ValueError(f"未知的 Sandbox 后端: {backend}")

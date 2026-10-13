@@ -192,6 +192,20 @@ class Sandbox(ABC):
             )
         return resolved
 
+    def path_kind(self, path: str) -> str | None:
+        """Return the workspace path's kind when the backend can inspect it."""
+        try:
+            resolved = self.resolve_within_workspace(path)
+        except OSError:
+            return None
+        if not isinstance(resolved, Path):
+            return None
+        if resolved.is_dir():
+            return "directory"
+        if resolved.is_file():
+            return "file"
+        return None
+
     @property
     @abstractmethod
     def workspace_root(self) -> Path:

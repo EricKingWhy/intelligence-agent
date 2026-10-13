@@ -1,0 +1,1 @@
+2026-10-14	#729 sync merge Standards review: APPROVE_WITH_FINDINGS; P0/P1/P2/P3/P4=0/0/0/0/1. Imported #1078 validation and #729 MXC packaging coexist; runtime scope is preserved. P4 is an optional duplication suggestion in token scans, not a confirmed defect; no scope change.	e38ba5e45540d0044548a6aeeca3ccaa0fe3da04..2e00b9622ab5c0cd4a79374cf9c6e77308a9c1e2
