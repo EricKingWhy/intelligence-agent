@@ -57,7 +57,13 @@ from agent_harness.model.config import ConfigError
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
-from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED, Session
+from agent_harness.session import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_INTERRUPTED,
+    RUN_PAUSED,
+    Session,
+)
 from agent_harness.session.amend import AmendOptions
 from agent_harness.session.model_switch import ModelTarget, append_model_change
 from agent_harness.session.service import WorkspaceBindingConflict
@@ -185,18 +191,107 @@ async def _spawn_child(
 
 async def _wait_terminal(harness: _Harness, session_id: str,
                          timeout: float = 15.0) -> None:
-    """等恢复起的 run 到终态（ScriptedModel 毫秒级完成；轮询避免猜时序）。"""
+    """等恢复起的 run 到终态（ScriptedModel 毫秒级完成；轮询避免猜时序）。
+
+    #1089：只认调用之后**新增**的终态事件。子会话 spawn 时已有 run/completed，
+    旧的 `in` 判据下续聊轮尚未终态时就会立刻返回（spawn 的终态已在事件流里）。
+
+    调用约束：必须在 `resume_and_launch` 返回后**立刻**调用，中间不可先行
+    await——基线在 helper 入口处一次性读取（其前无 await 点，且 launch 后到
+    返回为同步路径、无事件循环插队窗口），否则续聊轮可能在基线读取前终态并
+    被静默吸收，导致永远超时。
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    baseline = harness.types(session_id)
+    baseline_completed = baseline.count(RUN_COMPLETED)
+    baseline_failed = baseline.count(RUN_FAILED)
+    baseline_interrupted = baseline.count(RUN_INTERRUPTED)
     while True:
         types = harness.types(session_id)
-        if RUN_COMPLETED in types:
+        if types.count(RUN_COMPLETED) > baseline_completed:
             return
-        if RUN_FAILED in types:
+        if types.count(RUN_FAILED) > baseline_failed:
             raise AssertionError(f"run 意外失败：{types}")
+        if types.count(RUN_INTERRUPTED) > baseline_interrupted:
+            raise AssertionError(f"run 被中断：{types}")
         if loop.time() >= deadline:
             raise AssertionError(f"超时 {timeout}s：run 未到终态（{types[-6:]}）")
         await asyncio.sleep(0.02)
+
+
+# ── #1089：_wait_terminal 必须等续聊那一轮终态 ───────────────────────────
+
+
+class _GatedModel(ScriptedModel):
+    """门控剧本模型：ainvoke/astream 先等 gate，避免续聊 run 瞬时终态。"""
+
+    def __init__(self, responses: list[AIMessage], gate: asyncio.Event) -> None:
+        super().__init__(responses)
+        self._gate = gate
+
+    async def ainvoke(self, messages, **kwargs):  # type: ignore[override]
+        await self._gate.wait()
+        return await super().ainvoke(messages, **kwargs)
+
+    async def astream(self, messages, **kwargs):  # type: ignore[override]
+        await self._gate.wait()
+        async for chunk in super().astream(messages, **kwargs):
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_wait_terminal_waits_for_resumed_run_not_spawn_completion(
+    tmp_path: Path, monkeypatch,
+):
+    """#1089：已有 run/completed 的子会话续聊后，helper 等到续聊轮终态才返回。
+
+    旧实现只判 `RUN_COMPLETED in types`——spawn 的终态已在事件流里，
+    会立刻返回（红测：`pytest.raises` 拿不到超时异常）。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(harness, parent_cwd=tmp_path / "project")
+    assert harness.types(child_id).count(RUN_COMPLETED) == 1  # 前置：spawn 已终态
+
+    gate = asyncio.Event()
+
+    def _gated_factory(config, **kwargs):
+        return _GatedModel([AIMessage(content="child resumed fine")], gate)
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _gated_factory)
+
+    await harness.service.resume_and_launch(session_id=child_id, task="继续")
+    # 续聊 run 被门控卡住、尚未终态：旧实现立刻返回（bug），新实现应超时。
+    # timeout 取 5s 而非 0.5s：续聊 run 自然完成约 0.4–0.55s，0.5s 窗口下门控
+    # 失效时的判别只有 ~1.5x 裕量会抖；5s 下门控失效 ⇒ run 在窗口内终态 ⇒
+    # helper 正常返回 ⇒ pytest.raises 拿不到异常 ⇒ 稳定变红。
+    with pytest.raises(AssertionError, match="超时"):
+        await _wait_terminal(harness, child_id, timeout=5.0)
+    # 放行后续聊 run 跑到终态，helper 正常返回。
+    gate.set()
+    await _wait_terminal(harness, child_id, timeout=15.0)
+    assert harness.types(child_id).count(RUN_COMPLETED) == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_terminal_raises_on_new_run_failure(
+    tmp_path: Path, monkeypatch,
+):
+    """#1089 P3：续聊轮失败 ⇒ helper 抛"run 意外失败"，而非超时或静默返回。"""
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(harness, parent_cwd=tmp_path / "project")
+    assert harness.types(child_id).count(RUN_COMPLETED) == 1  # 前置：spawn 已终态
+
+    def _failing_factory(config, **kwargs):
+        return ScriptedModel(responses=[])  # 剧本耗尽 ⇒ 模型调用抛错 ⇒ run 失败
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _failing_factory)
+
+    await harness.service.resume_and_launch(session_id=child_id, task="继续")
+    with pytest.raises(AssertionError, match="run 意外失败"):
+        await _wait_terminal(harness, child_id, timeout=15.0)
+    # 失败是续聊轮新增的，不是 spawn 的历史失败。
+    assert harness.types(child_id).count(RUN_FAILED) == 1
 
 
 # ── AC1：恢复取回既有 alias 绑定，不改写 ──────────────────────────────
@@ -559,7 +654,8 @@ async def test_child_env_cell_lights_up_same_source_as_resume_side(
         expected_version=paused.version,
     )
     await resumed.run.task
-    await _wait_terminal(harness, child_id)
+    # 注：run.task 已 await 到终态，再调 `_wait_terminal` 会等不到"新增"终态而必然超时（#1089）。
+    assert RUN_COMPLETED in harness.types(child_id)
 
 
 @pytest.mark.asyncio
