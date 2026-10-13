@@ -6,6 +6,13 @@
    来源/安全函数——它们搬到了中性顶层模块 `agent_harness.package_source`。
 2. Skill 安装器与 MCP 包生命周期绑定的是**同一个**实现对象（不是各抄一份）：共用的
    安全校验只在 `package_source` 里存在一份，边界只是错误类型适配。
+3. 中性模块 `agent_harness.package_source` 与 MCP 车道**都不再**触碰 Skill 内部模块
+   （`skills.package_manager` / `skills.inspection`）的私有符号，也不以命名空间
+   import 绑定它们——中性化彻底，不留 `skills.inspection` 这类残留依赖（issue #1083 P3）。
+
+**已知局限**（P4，Correctness）：守卫是纯 AST 语法层判定，覆盖 `from ... import _x`
+与 `import ... [as ns]` 两种形状；对 `ns._x` 这类**属性访问**不做符号/类型解析，故
+不判定其是否真取到私有符号（见 `_namespace_imports` docstring），留待代码评审判定。
 """
 
 from __future__ import annotations
@@ -20,6 +27,18 @@ from agent_harness.skills import package_manager
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MCP_SOURCE = _ROOT / "src" / "agent_harness" / "plugins" / "mcp_package_manager.py"
+_PACKAGE_SOURCE = _ROOT / "src" / "agent_harness" / "package_source.py"
+
+#: 中性层与 MCP 车道**都不得**触碰的 Skill 内部模块（issue #1083）：既不许取它们的
+#: 下划线私有符号，也不许以命名空间 import（`import ... [as ns]`）绑定它们——绑定后
+#: `ns._foo` 就能绕过所有权边界。`skills.package_manager` 的**公开**符号
+#: （`SkillPackageError` / `SkillPackageManager`）MCP 仍可正当地 `from ... import`。
+_FORBIDDEN_SKILL_MODULES = frozenset(
+    {
+        "agent_harness.skills.package_manager",
+        "agent_harness.skills.inspection",
+    }
+)
 
 #: 迁移到 `agent_harness.package_source` 的共用私有来源/安全函数/常量（issue #1083）。
 _SHARED_PRIVATE = frozenset(
@@ -59,6 +78,23 @@ def _imported_from(text: str, module: str) -> set[str]:
     return names
 
 
+def _namespace_imports(text: str) -> set[str]:
+    """`import a.b [as c]` 形式的模块点分名（P4，Correctness）。
+
+    旧守卫只收集 `ast.ImportFrom`，`import agent_harness.skills.inspection as insp`
+    绑定后 `insp._foo` 即可触达私有符号而不被判红。这里把 `ast.Import` 也纳入，
+    凡命名空间 import 命中禁列模块即算违规。
+
+    **已知局限**：本判定是纯语法层，不解析属性访问——`ns._foo` 具体取哪个符号、
+    是否真为私有，需类型/符号解析才能定论，本守卫不做（留待代码评审兜底）。
+    """
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+    return modules
+
+
 def test_mcp_does_not_import_shared_source_primitives_from_skill_manager() -> None:
     """MCP 不得再从 `skills.package_manager` 导入共用的私有来源/安全符号。"""
     imported = _imported_from(
@@ -69,6 +105,29 @@ def test_mcp_does_not_import_shared_source_primitives_from_skill_manager() -> No
         "MCP 仍从 skills.package_manager 导入共用私有来源/安全函数，所有权未中立化"
         f"（issue #1083）：{leaked}"
     )
+
+
+def test_neutral_layer_and_mcp_never_reach_into_skill_internal_modules() -> None:
+    """中性模块与 MCP 车道都不触碰 `skills.package_manager` / `skills.inspection` 私有面。
+
+    覆盖两种 import 形状（issue #1083 P3 守卫扩展 + P4 Correctness）：
+    ① `from <skill-module> import _x`——任何下划线私有符号零命中；
+    ② `import <skill-module> [as ns]`——命名空间 import 一律判红（可 `ns._x` 绕过）。
+    """
+    for path in (_PACKAGE_SOURCE, _MCP_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        relative = path.relative_to(_ROOT)
+        for module in _FORBIDDEN_SKILL_MODULES:
+            private = sorted(
+                name for name in _imported_from(text, module) if name.startswith("_")
+            )
+            assert not private, (
+                f"{relative} 从 {module} 导入私有符号，中性化不彻底（issue #1083）：{private}"
+            )
+            assert module not in _namespace_imports(text), (
+                f"{relative} 以命名空间 import 绑定 {module}，可经属性访问触达其私有符号"
+                f"（issue #1083）：应改为 from ... import 具体公开符号"
+            )
 
 
 def test_mcp_imports_the_neutral_source_module() -> None:

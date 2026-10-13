@@ -28,12 +28,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from agent_harness.skills.inspection import _MAX_PACKAGE_ENTRIES, _is_junction
-
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SCP_GIT_URL_PATTERN = re.compile(r"(?:git@)?[A-Za-z0-9.-]+:[^\s:][^\s]*\Z")
 GIT_TIMEOUT_SECONDS = 120
+#: 单包允许的文件系统条目上限（`reject_junctions` 的兄弟原语；Skill 包快照与
+#: `skills.inspection` 的清单共用同一上限）。本模块是这两个符号的中立产权方，
+#: `skills.inspection` 反向从本模块导入（issue #1083），不再有 skills → 中性层的反向依赖。
+MAX_PACKAGE_ENTRIES = 10_000
 
 
 class PackageSourceError(ValueError):
@@ -303,7 +305,7 @@ def _extract_git_tree(
         entries[path] = (mode, object_id)
     if not entries:
         raise PackageSourceError("Git Skill subdirectory contains no tracked files")
-    if len(entries) > _MAX_PACKAGE_ENTRIES:
+    if len(entries) > MAX_PACKAGE_ENTRIES:
         raise PackageSourceError("Git Skill package exceeds the supported file count")
 
     expected_directories: set[str] = set()
@@ -454,8 +456,30 @@ def is_reparse_point(path: Path) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_point)
 
 
+def is_junction(path: Path) -> bool:
+    """目录项是否 Windows junction（区别于符号链接）。
+
+    优先用 Python 3.12+ 的 `Path.is_junction()`；符号链接**不算** junction
+    （符号链接由 `is_reparse_point` 覆盖），其余按 reparse 属性位判定。
+    """
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if path.is_symlink():
+        return False
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_attribute)
+
+
 def reject_junctions(directory: str, names: list[str]) -> list[str]:
-    junctions = [name for name in names if _is_junction(Path(directory) / name)]
+    junctions = [name for name in names if is_junction(Path(directory) / name)]
     if junctions:
         joined = ", ".join(sorted(junctions))
         raise PackageSourceError(
