@@ -2,7 +2,7 @@
 
 #1085 修回（P3-1/P3-2）：helper 从 `session/context.py`（ContextVar 管道层）
 搬到 derive（"事件流派生集散地"）；委派标记判据提为共享谓词
-`_has_delegation_marker`，`service._delegated_child_agent_profile` 与本函数
+`has_delegation_marker`，`service._delegated_child_agent_profile` 与本函数
 同源（分歧语义保留在各自调用点：响亮 raise vs fail-closed 判 True）。
 """
 

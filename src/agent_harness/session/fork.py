@@ -277,7 +277,7 @@ async def fork_session(
         (e for e in parent_events if e.type == SESSION_STARTED), None,
     )
     parent_tree_id = (
-        parent_started.data.get("delegation_tree_id")
+        (parent_started.data or {}).get("delegation_tree_id")
         if parent_started is not None else None
     )
     if isinstance(parent_tree_id, str) and parent_tree_id:
@@ -442,7 +442,11 @@ async def fork_session(
         SessionMeta(
             session_id=child.session_id,
             created_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
-            agent_id=agent_id,
+            # #1111：meta 与 session/started 同口径——委派子会话 fork 时
+            # `child_agent_id` 继承父 spec 名，索引行不得再写 fork 参数
+            # `agent_id`（否则展示层 started=coding / meta=default 分歧）。
+            # 根 fork 时 child_agent_id == agent_id，行为零变化。
+            agent_id=child_agent_id,
             parent_session_id=parent_session_id,
             origin="fork",
             fork_point_seq=fork_point_seq,

@@ -123,10 +123,10 @@ from agent_harness.session.derive import (
     KIND_STEER,
     PROGRESS_CONFIRM_ORIGIN,
     UndeliveredInput,
-    _has_delegation_marker,
     collect_dangling,
     derive_protected_facts,
     detect_dangling,
+    has_delegation_marker,
     is_direct_user_input_event,
     undelivered_inputs,
     validate_user_fact_links,
@@ -439,7 +439,7 @@ def _delegated_child_agent_profile(events: list) -> str | None:
     # 委派标记判据与 `derive.session_is_delegated_child` 同源（#1085 修回 P3-2）；
     # 分歧语义保留：标记在而 agent_id 不可解析时这里响亮失败（fail-closed 的
     # 另一面：无法按子会话自己的 spec 重建授权，就不放行恢复）。
-    if first is None or not _has_delegation_marker(first):
+    if first is None or not has_delegation_marker(first):
         return None
     agent_id = first.agent_id
     if agent_id is None or agent_id == "main" or agent_id not in BUILTIN_PROFILES:

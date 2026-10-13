@@ -1920,7 +1920,7 @@ def latest_direct_user_input_event(
 
 # ── 委派子会话标记判据（#1085 / #1108） ────────────────────────────────
 
-def _has_delegation_marker(first_event: SessionEvent | None) -> bool:
+def has_delegation_marker(first_event: SessionEvent | None) -> bool:
     """首事件是否带委派标记（`delegation_tree_id`）。
 
     纯函数：`service._delegated_child_agent_profile`（响亮失败版）与
@@ -1938,10 +1938,10 @@ def _has_delegation_marker(first_event: SessionEvent | None) -> bool:
 def session_is_delegated_child(events: Sequence[SessionEvent]) -> bool:
     """判定会话是否为委派子会话（#1085 执行期兜底用）。
 
-    标记定义见 `_has_delegation_marker`。与
+    标记定义见 `has_delegation_marker`。与
     `service._delegated_child_agent_profile` 不同：标记存在但 agent_id
     不可解析时不抛错，直接判 True（fail-closed：无法重建授权就不放行）。
     """
     if not events:
         return False
-    return _has_delegation_marker(events[0])
+    return has_delegation_marker(events[0])
