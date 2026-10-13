@@ -374,29 +374,36 @@ def _unadopted_catalog_entries(
 ) -> list[tuple[ModelCatalogEntry, str, str]]:
     """catalog 中「本会被某条链采纳、却因 provider 不一致被 find_catalog_entry 跳过」的条目。
 
-    判据与 ``find_catalog_entry`` 精确对齐：命中条件是 provider 相等且
-    ``entry.name == model_id`` 或 ``entry.model_name == model_id``（model_id 即链解析后的
-    模型名）。因此若某条目只差 provider 一项（名字 / 上游模型名与链目标相同）却被 provider
-    挡在门外，它的能力声明（如 ``reasoning_effort``）会静默失效——这正是本反馈要抓的
-    “未采纳”条目。仅 provider 或仅名字不同的合法可选模型（本来就不是该链模型）不在此列，
-    避免对正常的多模型 catalog 误报。已被任一已知链采纳的条目不在此列：例如条目
-    provider 与 primary 一致（声明已被 primary 链消费）时，即使它的名字同时撞上
-    provider 不同的 fallback 目标，也不算「未采纳」——否则会对该条目给出改 provider
-    的错误建议（改了反而丢掉 primary 链的采纳）。
+    「已被真实采纳」的判据复刻 ``find_catalog_entry`` 的两段式优先级（name 命中优先、
+    model_name 次之，各段全表首个命中生效）：先收集每个链目标的 name 命中者，再对未被
+    name 命中的目标补 model_name 命中——只有各目标的实际返回者才算已采纳。若坍缩成单轮
+    OR，被更高优先级命中掩盖的条目（自己的 model_name 撞上链模型名、但 name 已被另一条目
+    占住）会被误判成已采纳而漏报。命中链目标但未被真实采纳的条目，其能力声明（如
+    ``reasoning_effort``）不会进入该链——这正是本反馈要抓的“未采纳”条目。仅 provider 或
+    仅名字不同的合法可选模型（本来就不是该链模型）不在此列，避免对正常的多模型 catalog
+    误报。已被任一已知链真实采纳的条目不在此列：例如条目 provider 与 primary 一致
+    （声明已被 primary 链消费）时，即使它的名字同时撞上 provider 不同的 fallback 目标，
+    也不算「未采纳」——否则会对该条目给出改 provider 的错误建议（改了反而丢掉 primary
+    链的采纳）。
     """
+    entries = parse_model_catalog(settings)
     targets = _known_chain_targets(settings)
+    winners: dict[tuple[str, str], int] = {}
+    for attr in ("name", "model_name"):
+        for index, entry in enumerate(entries):
+            for target in targets:
+                if target in winners:
+                    continue
+                if entry.provider == target[0] and getattr(entry, attr) == target[1]:
+                    winners[target] = index
+    adopted = set(winners.values())
     unadopted: list[tuple[ModelCatalogEntry, str, str]] = []
-    for entry in parse_model_catalog(settings):
-        if any(
-            entry.provider == provider
-            and (entry.name == model_name or entry.model_name == model_name)
-            for provider, model_name in targets
-        ):
+    for index, entry in enumerate(entries):
+        if index in adopted:
             continue
-        for provider, model_name in targets:
+        for provider, model_name in dict.fromkeys(targets):
             if entry.name == model_name or entry.model_name == model_name:
                 unadopted.append((entry, provider, model_name))
-                break
     return unadopted
 
 
@@ -421,8 +428,10 @@ def warn_unadopted_catalog_entries(settings: Settings) -> None:
         logger.warning(
             "AGENT_MODELS 条目 %r 未被采纳：条目 provider=%r 与已知链目标 "
             "(provider=%r, model_name=%r) 不一致——catalog 按 (provider, name) 精确匹配"
-            "会跳过该条目，其能力声明（如 reasoning_effort）不会生效。若要该链采纳它，"
-            "请把条目 provider 改为 %r。",
+            "会跳过该条目，其能力声明（如 reasoning_effort）不会被已知链（默认链/fallback）"
+            "自动采纳；按条目名显式选择该模型时声明仍生效。若要该链采纳它，请把条目 "
+            "provider 改为 %r——注意这会同时把该名字作为可选模型的路由（base_url）静默"
+            "换成该 provider 的端点。",
             entry.name, entry.provider, provider, model_name, provider,
         )
 

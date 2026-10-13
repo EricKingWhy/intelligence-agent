@@ -18,6 +18,7 @@ from agent_harness.model.config import (
     ConfigError,
     ModelConfig,
     _pick_capabilities,
+    _unadopted_catalog_entries,
     find_catalog_entry,
     model_supports_vision,
     parse_model_catalog,
@@ -362,6 +363,42 @@ class TestUnadoptedCatalogWarning:
             fallback_model_api_key="sk-fb",
         )
         assert unadopted_catalog_entries(settings) == []
+
+    def test_entry_masked_by_name_winner_is_still_reported(self):
+        """反例（find_catalog_entry 两段式优先级）：条目 A{name=链模型名, provider=链}
+        与 B{name 不同, provider=链, model_name=链模型名} 并存时，链恒采纳 A（第一段
+        name 命中优先），B 的声明永不被链消费——B 不能因 model_name 撞目标而被单轮
+        OR 误判成「已采纳」（漏报窗口）。"""
+        settings = self._settings([
+            {"name": "mimo-v2.6-flash", "provider": "mimo", "model_name": "m1"},
+            {"name": "decoy", "provider": "mimo", "model_name": "mimo-v2.6-flash"},
+        ])
+        # 与真实采纳交叉验证：该目标链确实返回 A 而非 B。
+        assert find_catalog_entry(settings, "mimo", "mimo-v2.6-flash").name == (
+            "mimo-v2.6-flash"
+        )
+        assert [e.name for e in unadopted_catalog_entries(settings)] == ["decoy"]
+
+    def test_entry_matching_multiple_targets_reports_each(self, caplog):
+        """条目同时撞 primary 与 fallback 两个不同 provider 的目标 ⇒ 每个目标各报
+        一条，不只报第一个命中的目标。"""
+        settings = self._settings(
+            [{"name": "mimo-v2.6-flash", "provider": "qwen", "model_name": "shared"}],
+            fallback_model_provider="deepseek", fallback_model_name="shared",
+            fallback_model_api_key="sk-fb",
+        )
+        results = _unadopted_catalog_entries(settings)
+        assert [(p, m) for _, p, m in results] == [
+            ("mimo", "mimo-v2.6-flash"),
+            ("deepseek", "shared"),
+        ]
+        with caplog.at_level(logging.WARNING, logger="agent_harness.model"):
+            warn_unadopted_catalog_entries(settings)
+        messages = [
+            r.getMessage() for r in caplog.records if r.name == "agent_harness.model"
+        ]
+        assert len(messages) == 2, messages
+        assert all("mimo-v2.6-flash" in m and "未被采纳" in m for m in messages)
 
     def test_illegal_entry_still_raises_configerror(self):
         """回归：非法条目仍走既有响亮失败（不是被 warning 吞掉）。"""
