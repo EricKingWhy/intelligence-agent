@@ -1,0 +1,1 @@
+2026-10-14	#1106 sync merge 机械归属行：origin/main 911baa84..67f8997a（PR #1110，codebuddy/1085）合入本分支；merge commit 266d29f5（parents d2071277 + 67f8997a，三树互异）；重叠面：来侧 src/agent_harness/** + tests/**，本票 web/**，文件零重叠，ort 自动合并零冲突	d2071277..266d29f5
