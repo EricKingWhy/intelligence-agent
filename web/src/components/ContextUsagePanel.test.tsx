@@ -198,6 +198,31 @@ describe('ContextUsagePanel「其他」桶细分（#1095）', () => {
     expect(text).toContain('300');
   });
 
+  it('other_detail 缺某 key 时该子项跳过渲染（不伪造 0）', async () => {
+    vi.mocked(getContextUsage).mockResolvedValue(
+      usage({
+        breakdown: {
+          messages: 100, system_prompt: 50, skills: 10, other: 500,
+          tools: { system: 0, mcp: 0 },
+          // key 集演进：后端只带 2 个子项，其余 5 个 key 缺席。
+          other_detail: { provider_injected: 300, runtime_context: 200 },
+        },
+      }),
+    );
+    await renderPanel();
+
+    const text = document.body.querySelector('.ctx-usage-legend-sub')!.textContent ?? '';
+    // 在场的子项照常渲染。
+    expect(text).toContain('Provider 注入');
+    expect(text).toContain('运行期快照');
+    // 缺席的 key 不渲染「标签 0」（假零）。
+    expect(text).not.toContain('计划锚块');
+    expect(text).not.toContain('保护事实');
+    expect(text).not.toContain('修改路径');
+    expect(text).not.toContain('水位警告');
+    expect(text).not.toContain('进度核对');
+  });
+
   it('旧形状快照（无 other_detail）⇒ 不渲染子项，只显示整块「其他」', async () => {
     await renderPanel();
 

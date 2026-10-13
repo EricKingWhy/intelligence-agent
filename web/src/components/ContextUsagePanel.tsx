@@ -266,8 +266,11 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                     {s.label} {s.value.toLocaleString()}（{p.toFixed(1)}%）
                     {detail && (
                       <span className="ctx-usage-legend-sub">
-                        {OTHER_DETAIL_ITEMS.map((it) => {
-                          const v = detail[it.key] ?? 0;
+                        {/* 缺 key 的子项跳过（不渲染「标签 0」假零）：当前
+                            builder 恒发全部键，但 key 集演进后缺席即「后端
+                            这轮没有这笔」——与端点层不伪造子项 0 同口径。 */}
+                        {OTHER_DETAIL_ITEMS.filter((it) => detail[it.key] !== undefined).map((it) => {
+                          const v = detail[it.key] as number;
                           return (
                             <span key={it.key} className="ctx-usage-legend-subitem">
                               {it.label} {v.toLocaleString()}
