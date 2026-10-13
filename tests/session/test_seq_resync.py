@@ -73,20 +73,17 @@ def _seqs(store: JsonlSessionStore, session_id: str) -> list[int]:
     return [event.seq for event in store.read_events(session_id)]
 
 
-def _delivered_run(
-    store: JsonlSessionStore, session_id: str, entry: str
-) -> tuple[Session, str]:
-    """按 ``entry`` 构造一枚**已交付 runtime** 的聚合 + 一个在途 run。
+def _run(store: JsonlSessionStore, session_id: str, entry: str) -> tuple[Session, str]:
+    """按 ``entry`` **只构造**一枚聚合 + 一个在途 run（是否交付由调用方决定）。
 
     三个入口与真机一致：`start` = 首轮 run（`create_and_launch`）；`load` / `resume`
     = 续聊 run（`resume_and_launch` 两条腿）——后两者先造出历史再取回聚合。
-    交付点本身（`RunManager.launch` / CLI / 子 runtime）在所有入口上都是
-    `deliver_to_runtime()`，故这里统一显式调用。
+    构造与交付解耦，是为了让「交付点」这条判据**正反两面都有承重用例**（#1101）：
+    正例 `_delivered_run`、负例 `_undelivered_run`。
     """
     if entry == "start":
         live = Session.start(store, session_id=session_id)
         live.append(USER_MESSAGE, {"content": "hi"})
-        live.deliver_to_runtime()
         run_id, _ = live.begin_run()
         return live, run_id
 
@@ -99,9 +96,28 @@ def _delivered_run(
         if entry == "load"
         else Session.resume(store, session_id)
     )
-    live.deliver_to_runtime()
     run_id, _ = live.begin_run()
     return live, run_id
+
+
+def _delivered_run(
+    store: JsonlSessionStore, session_id: str, entry: str
+) -> tuple[Session, str]:
+    """``_run`` + 交付点——`RunManager.launch` / CLI / 子 runtime 三处做的是同一个动作。"""
+    live, run_id = _run(store, session_id, entry)
+    live.deliver_to_runtime()
+    return live, run_id
+
+
+def _undelivered_run(
+    store: JsonlSessionStore, session_id: str, entry: str
+) -> tuple[Session, str]:
+    """``_run`` **不**调 `deliver_to_runtime()`——快照门的负例面（#1101）。
+
+    钉住「终态保底与交付标记无关」：未交付聚合不许吃普通写的锁内改号（BUG-011），
+    但 `end_run` 那条终态仍必须落进 durable 流（#1061 的保底通道）。
+    """
+    return _run(store, session_id, entry)
 
 
 class _SeqThiefStore(JsonlSessionStore):
@@ -466,6 +482,47 @@ class TestTerminalGuaranteeUnderSustainedSteal:
         event = live.end_run(run_id, status=status, reason="boom", message="boom")
 
         assert thief.stolen > stolen_before, "终态那次写必须真的撞过号（否则没压到保底通道）"
+        assert event.type == terminal_type
+        events = thief.read_events(session_id)
+        mine = [e for e in events if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES]
+        assert len(mine) == 1, f"该 run 的 durable 终态必须恰好一条，实际 {len(mine)}"
+        seqs = [e.seq for e in events]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "seq 不得重复/回退"
+        # 落盘的终态就是返回的那一枚（锁内改号后必须同步给调用方/流式镜像）。
+        assert any(e.seq == event.seq and e.type == event.type for e in events)
+
+    @pytest.mark.parametrize("entry", ENTRIES)
+    @pytest.mark.parametrize(
+        ("status", "terminal_type"),
+        [("completed", RUN_COMPLETED), ("failed", RUN_FAILED)],
+    )
+    def test_undelivered_terminal_lands_while_thief_never_stops(
+        self, store, entry, status, terminal_type
+    ):
+        """#1101：**未交付**聚合的终态在持续抢号下仍必须落进 durable 流（#1061 保底通道）。
+
+        与上一条的差别只有交付标记：上一条走 `_delivered_to_runtime`（#1062 的通用
+        路径已覆盖它），这一条**刻意不交付**，压的正是 `_persist_event` 里
+        `or terminal` 那一侧——**唯一的鉴别力来源**。
+
+        为什么非要有这条：复审的变异实测（`1024-rereview-standards.log` m9 节）
+        删掉 `or terminal` 后**全绿 32 条**——所有既有交付相关用例都调了
+        `deliver_to_runtime()`，未交付用例又都只做非终态写。于是 #1061 的保底通道
+        变成「没有任何红灯保护的契约」，下次有人清理「冗余参数」就静默回退：
+        未交付聚合的终态撞号 → `SeqConflict` 抛出 → durable 流里该 run **0 条终态**，
+        与 #1024 事故同型（run 在盘上永远悬空、UI 永久「进行中」）。
+
+        未交付的**普通**写仍 fail-loud（见 `TestConflictBoundIsFailLoud`），故本用例
+        只发终态那一次写——这正是保底通道的语义边界。
+        """
+        thief = _SeqThiefStore(root=store._root, steals=0)
+        session_id = f"s-undeliv-{entry}-{status}"
+        live, run_id = _undelivered_run(thief, session_id, entry)
+
+        thief.steals = 10**9  # 永不停手
+        event = live.end_run(run_id, status=status, reason="boom", message="boom")
+
+        assert thief.stolen > 0, "终态那次写必须真的撞过号（否则没压到保底通道）"
         assert event.type == terminal_type
         events = thief.read_events(session_id)
         mine = [e for e in events if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES]
