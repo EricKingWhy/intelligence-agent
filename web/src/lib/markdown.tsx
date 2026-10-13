@@ -10,9 +10,10 @@
  *   - #/##/### 标题
  *   - -/* 无序列表（单层）
  *   - 行内 **bold** 与 `code`
+ *   - 链接 [text](url) 与裸 URL autolink（#1096）
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { CopyButton } from '../components/CopyButton';
 import { highlightCode, type HighlightedCode } from './highlight';
 
@@ -24,9 +25,44 @@ export function parseFenceLang(info: string): string | null {
   return id ? id : null;
 }
 
-/** 行内标记解析：把 **bold** / `code` 切成 JSX 节点。 */
+/** 行内标记解析：把 **bold** / `code` / [text](url) / 裸 URL 切成 JSX 节点。 */
+const INLINE_SPLIT = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]*\]\([^)]*\)|https?:\/\/[^\s<>"`]+)/g;
+
+/** 链接 scheme 白名单：仅 http/https 可点（防 javascript:/data:/vbscript: 等注入）。
+ *  沿用 StepDetail.tsx:686 的约定（ADR-0018 D7）：JSX 结构化渲染 + target/rel，
+ *  不用 dangerouslySetInnerHTML。 */
+const SAFE_HREF = /^https?:\/\//i;
+
+/** 裸 URL 的句末标点不属于链接（仿 GFM / Slack autolink）：剥离中英文句读与
+ *  未配对的收尾括号（配对括号如 wiki 词条 `Foo_(bar)` 保留）。 */
+const URL_TAIL_PUNCT = new Set(['.', ',', ';', ':', '!', '?', '。', '，', '、', '；', '：', '！', '？', '"', "'"]);
+const URL_CLOSING = new Set([')', '）', ']']);
+
+function trimUrlTail(url: string): string {
+  let end = url.length;
+  while (end > 0 && URL_TAIL_PUNCT.has(url[end - 1])) end--;
+  while (end > 0 && URL_CLOSING.has(url[end - 1])) {
+    const seg = url.slice(0, end - 1);
+    const opens = (seg.match(/[（(]/g) ?? []).length;
+    const closes = (seg.match(/[）)]/g) ?? []).length;
+    if (opens > closes) break;
+    end--;
+  }
+  return url.slice(0, end);
+}
+
+/** 白名单 scheme 才产生结构化 <a>；危险/未知 scheme 返回 null，交回纯文本渲染。 */
+function renderAnchor(href: string, label: string, key: string): ReactNode | null {
+  if (!SAFE_HREF.test(href)) return null;
+  return (
+    <a key={key} className="md-link" href={href} target="_blank" rel="noopener noreferrer">
+      {label}
+    </a>
+  );
+}
+
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const parts = text.split(INLINE_SPLIT);
   return parts.filter(Boolean).map((part, i) => {
     const key = `${keyPrefix}-${i}`;
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
@@ -34,6 +70,26 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return <code key={key}>{part.slice(1, -1)}</code>;
+    }
+    const mdLink = /^\[([^\]]*)\]\(([^)]*)\)$/.exec(part);
+    if (mdLink) {
+      const anchor = renderAnchor(mdLink[2].trim(), mdLink[1], key);
+      // 不安全 scheme 的链接按原文纯文本呈现（内容不静默丢弃）
+      return anchor ?? <span key={key}>{part}</span>;
+    }
+    if (part.startsWith('http://') || part.startsWith('https://')) {
+      const href = trimUrlTail(part);
+      const anchor = renderAnchor(href, href, `${key}-a`);
+      if (anchor && href.length < part.length) {
+        // 句末标点留在链接外，作为普通文本
+        return (
+          <Fragment key={key}>
+            {anchor}
+            {part.slice(href.length)}
+          </Fragment>
+        );
+      }
+      if (anchor) return anchor;
     }
     return <span key={key}>{part}</span>;
   });
