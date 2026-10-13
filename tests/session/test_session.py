@@ -238,6 +238,45 @@ class TestRunLifecycle:
         assert last.type == RUN_FAILED
         assert last.run_id == run_id
 
+    # ── 终态幂等（#1103） ──
+
+    def test_end_run_twice_lands_exactly_one_terminal(self, store: JsonlSessionStore):
+        """#1103：同一 run 的第二次 `end_run` 不落第二条终态。
+
+        终态是「这个 run 结束了吗」的唯一 durable 事实。旧实现两次 `end_run` 会落
+        `run/completed` **和** `run/failed` 两条（durable 真相层被污染：消费方按
+        `RUN_TERMINAL_TYPES` 投影会看到自相矛盾的历史）。生产侧原先只有
+        `AgentRuntime._terminal_written` 这层护栏，Session 层自己没有守卫。
+
+        判据与 `run/resumed` 的 `expected_version` 同族（CAS）：该 run 已有终态 ⇒
+        拒写并返回**既存的那一枚**（幂等返回，不是抛错——同一 run 重入到底不该炸）。
+        """
+        session = Session.start(store)
+        run_id, _ = session.begin_run()
+        first = session.end_run(run_id, status="completed", final_text="done")
+        second = session.end_run(run_id, status="failed", reason="boom")
+
+        assert second.event_id == first.event_id, "第二次必须返回既存终态，而不是新事件"
+        mine = [
+            e
+            for e in store.read_events(session.session_id)
+            if e.run_id == run_id and e.type in (RUN_COMPLETED, RUN_FAILED)
+        ]
+        assert [e.type for e in mine] == [RUN_COMPLETED], (
+            f"该 run 的 durable 终态必须恰好一条，实际 {[e.type for e in mine]}"
+        )
+        # 内存投影与盘面一致（不得只拦住盘、却往 _events 里再塞一枚）。
+        assert session.events[-1].event_id == first.event_id
+
+    def test_end_run_second_call_does_not_advance_seq(self, store: JsonlSessionStore):
+        """幂等返回不得消耗 seq：被拒的那次不能留下空洞（否则下次 append 的形状变了）。"""
+        session = Session.start(store)
+        run_id, _ = session.begin_run()
+        session.end_run(run_id, status="completed", final_text="done")
+        seqs_after_first = [e.seq for e in store.read_events(session.session_id)]
+        session.end_run(run_id, status="failed", reason="boom")
+        assert [e.seq for e in store.read_events(session.session_id)] == seqs_after_first
+
     # ── trace_id / trace_url 契约（trace_url 契约：并列字段，对称终态） ──
 
     def test_end_run_completed_persists_trace_id_and_trace_url(self, store: JsonlSessionStore):

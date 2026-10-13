@@ -47,6 +47,7 @@ from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
+    RUN_TERMINAL_TYPES,
     SESSION_RESUMED,
     SESSION_STARTED,
     STEER_REQUESTED,
@@ -796,6 +797,25 @@ class Session:
         这**不是**无限重试：锁内改号只有一次，store 若仍判定不可写（如已硬删）异常照样
         抛出，绝不假成功。
         """
+        # 终态幂等（#1103，CAS）：该 run 已有终态 ⇒ 拒写并**返回既存的那一枚**。
+        # 同一 run 的两次 `end_run`（重入的失败臂 / 取消臂）此前会落下
+        # `run/completed` 与 `run/failed` 两条，durable 真相层自相矛盾——所有按
+        # `RUN_TERMINAL_TYPES` 投影终态的下游（progress / interrupt / fork / task）
+        # 都会看到两条。判据与 `run/resumed` 的 `expected_version` 同族：写前核对
+        # 当前状态，不符即拒（EventStoreDB 的 expected-revision / Marten 的
+        # `FetchForWriting` 同型）。生产侧 `AgentRuntime._terminal_written` 只护住
+        # 它自己的调用链，不是 Session 层的契约——真相层的守卫要落在真相层。
+        # 返回既存而非抛错：同一 run 重复收口是**幂等**语义，不是调用方犯错。
+        existing = next(
+            (
+                e
+                for e in self._events
+                if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
         if usage_total:
