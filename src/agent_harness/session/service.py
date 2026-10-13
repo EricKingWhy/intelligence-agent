@@ -1037,6 +1037,27 @@ def _stat_stamp(path: Path) -> list[int] | None:
     return [info.st_size, info.st_mtime_ns]
 
 
+def _run_status_snapshot(run_manager: RunManager, session_id: str) -> str:
+    """删除瞬间的运行状态标签（#1075 审计面）：`none` 或 `in-flight(<state>)`。
+
+    划分以 `RunManager.is_busy` 为准——与硬删的准入守卫 ③ 同一口径（"活没干完的
+    run"）。**不读 `_runs` 里有没有条目**：那条 ManagedRun 每会话终身保留（`_drive`
+    的收尾注释），终态后仍在，会把刚跑完的会话误报成在途。在途时再按 `ManagedRun`
+    的旗标补一个状态限定词，让日志能回答"删的那一刻它在跑、在暂停、还是在取消"。
+    """
+    if not run_manager.is_busy(session_id):
+        return "none"
+    run = run_manager.get_active(session_id)
+    if run is None:
+        # is_busy 为真但 get_active 为 None：terminal 已置位、task 未 done（收尾窗口）
+        return "in-flight(settling)"
+    if run.cancel_requested or run.reap_requested:
+        return "in-flight(cancelling)"
+    if run.paused:
+        return "in-flight(paused)"
+    return "in-flight(running)"
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -4178,20 +4199,35 @@ class SessionService:
             discard_local_artifacts, self._settings, session_id
         )
 
+        # ⑧-0 审计快照（#1075）：删除瞬间的运行 / 审批状态，必须读在下面 `pop` 之前
+        #      ——审批队列一旦弹出，再问就只剩一个等于 0 的假象（那个 0 是造的，不是
+        #      实读的）。值来自 RunManager / 审批队列的内存真实状态：守卫 ③④ 正常会
+        #      把在途 run / 挂起审批 409 掉，所以活下来的删除路径通常就是 none/0；
+        #      但守卫若变、或 run 恰在守卫与收口之间起步，这行日志仍如实反映当时状态。
+        run_snapshot = _run_status_snapshot(self._run_manager, session_id)
+        approval_queue = self._approval_queues.get(session_id)
+        pending_approvals = (
+            len(approval_queue.pending_ids()) if approval_queue is not None else 0
+        )
+
         # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到
         #    消费者，且会让同 id 重建的会话继承上一世的队列。
         await self._message_queues.cleanup(session_id)
         self._approval_queues.pop(session_id, None)
 
         # ⑨ 审计：领域数据里不留墓碑（D1/D7），"它存在过"只在结构化日志里可查。
-        #    只带 id 与计数——删除不可撤销，审计要能回答"谁在何时删了哪个会话"，
+        #    只带 id、计数与删除瞬间的运行状态快照（`run` / `pending_approvals`）——
+        #    删除不可撤销，审计要能回答"谁在何时删了哪个会话，删的时候有没有活"，
         #    但不需要（也不该）带走会话内容。`repaired_delegation_links` 是这次删除
         #    **动过的别人的行**（委派子会话的父链接），属于"删除的副作用"里最该被看见的一项。
         log_event(
             logger,
             "session_delete",
-            f"session hard-deleted: {session_id}",
+            f"session hard-deleted: {session_id}"
+            f" | run: {run_snapshot} | pending_approvals: {pending_approvals}",
             session_id=session_id,
+            run_state=run_snapshot,
+            pending_approvals=pending_approvals,
             events=summary.event_count,
             detached_from_projects=detached,
             repaired_delegation_links=repaired_links,
