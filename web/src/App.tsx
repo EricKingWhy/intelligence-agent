@@ -50,6 +50,7 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
+import { describeOwnership } from './lib/ownership';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
@@ -169,6 +170,25 @@ export default function App() {
     void refreshSessions();
   }, [refreshProjects, refreshSessions]);
 
+  // ── #1028：选中项目行 = 为「通用新建会话」预设项目语境 ──
+  //
+  // 缺陷：通用「新建会话」不带 cwd，会话落服务进程目录 ⇒ 与项目路径精确相等判据
+  // 不匹配 ⇒ 不入项目、且全程零归属提示（用户以为选中了项目，agent 却不知项目在哪）。
+  // 修法（PORT DESIGN，来源 VS Code 工作区上下文自动继承）：点中项目行即把它记为
+  // 当前项目语境，随后的通用新建默认带 `cwd: project.path`。
+  //
+  // 这是**视图意图**、不是会话事实（不变量 #22）：它只决定"下一次新建带什么 cwd"，
+  // 不参与归属判定（归属永远由后端按 cwd 精确相等算）。选中具体会话时清空——
+  // 打开某个会话意味着离开"准备在某项目里新建"的状态。
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === activeProjectId) ?? null,
+    [projects, activeProjectId],
+  );
+  const handleSelectProject = useCallback((projectId: string | null) => {
+    setActiveProjectId(projectId);
+  }, []);
+
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
   // 自动清横幅并重试会话列表（onTokenChange），无需整页刷新。
@@ -255,6 +275,33 @@ export default function App() {
      本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
      `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
   const sessionId = conversation?.session_id;
+
+  // ── #1028：归属 chip 的数据源 ──
+  // 当前会话：项目名来自后端 `SessionSummary.workspace`（成员资格真相），cwd 来自
+  // `session/started.data.cwd` 的投影（`conversation.session_cwd`）。新建态（无选中
+  // 会话）：用选中的项目语境（activeProject）作为"将要在哪新建"。两处都只喂给
+  // `describeOwnership` 文案层——前端不做路径比对（见 lib/ownership.ts 文件头）。
+  const selectedSummary = useMemo(
+    () => (selectedId ? sessions.find((s) => s.session_id === selectedId) ?? null : null),
+    [sessions, selectedId],
+  );
+  // 会话内的 cwd 必须过**身份闸**：切会话时 `conversation` 仍是**旧会话**的（history
+  // 正在加载，见 useSession.ts 的 `shouldShowHistoryLoading`），直接用会把「新会话的
+  // 项目名」与「旧会话的 cwd」拼在一起（跨会话残影 = 第二真相，不变量 #22）。身份不符 /
+  // 未加载 → null ⇒ chip 显「未指定目录」而非别人的路径（No fake values）。惯例同
+  // `lib/permission.ts:96` 的 `composerPermissionMode`（同款身份闸）。
+  const sessionCwd =
+    conversation !== null && conversation.session_id === selectedId ? conversation.session_cwd : null;
+  const ownership = useMemo(() => {
+    if (selectedId !== null) {
+      return describeOwnership(selectedSummary?.workspace?.title ?? null, sessionCwd);
+    }
+    // 新建态：仅在**已选中项目语境**时显形（预告"将在这个项目里新建"）。既无选中会话、
+    // 又无项目语境（首屏/空白新建）时返回 null = 不渲染 chip：此刻并无"会话"，
+    // 说它「未分组」语义悬空，且首屏即挂警告色与「警示载体」意图相反（P3-2/P4）。
+    if (activeProject === null) return null;
+    return describeOwnership(activeProject.title, activeProject.path);
+  }, [selectedId, selectedSummary, sessionCwd, activeProject]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -479,6 +526,8 @@ export default function App() {
     const leaving = selectedId !== null && selectedId !== id;
     selectedIdRef.current = id;
     selectSession(id);
+    // #1028：打开一个具体会话 = 离开「准备在某项目里新建」的语境（清空预设项目）。
+    setActiveProjectId(null);
     // 选中项属于它所在的会话：换会话必须清选中（否则面板会拿着 A 会话的事件
     // 站在 B 会话里——跨会话的"第二真相"，不变量 #22）。
     focusRun();
@@ -622,6 +671,11 @@ export default function App() {
         task,
         auto_approve: true,
         ...ruleSignal,
+        // #1028：选中的项目行 = 本次新建的项目语境——带上 `cwd: project.path`，
+        // 让会话直接诞生在项目目录里并自动入组（后端 cwd 契约，ADR-0027 D2）。
+        // 未选中项目时不发键（后端用自己的默认目录），与既有通用新建行为一致。
+        // 与 `workspace` 互斥（同为后端 422 判据）：本入口只可能发 `cwd`。
+        ...(activeProject ? { cwd: activeProject.path } : {}),
         ...toCreateControls(composerControls),
         // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
         budget: toCreateBudget({
@@ -631,7 +685,7 @@ export default function App() {
         }),
       });
     },
-    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft],
+    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
@@ -1223,6 +1277,13 @@ export default function App() {
           titlesById={titlesById}
           onSelect={handleSelect}
           onNew={handleNew}
+          /* #1028：选中项目行即预设"下一次通用新建"的项目语境（cwd 继承）。 */
+          activeProjectId={activeProjectId}
+          onSelectProject={handleSelectProject}
+          /* #1028 AC3：选中会话的 cwd（来自 session/started 投影），列表里给未归属
+             会话就地标注归属。**同 sessionCwd 身份闸**：会话切换/未加载时为 null
+             （不拿旧会话的路径冒充新会话，不编路径）。 */
+          selectedCwd={sessionCwd}
           projectActions={projectActions}
           onSessionsChanged={refreshSessions}
           projectsError={projectsError}
@@ -1439,6 +1500,8 @@ export default function App() {
                   />
                   <Composer
                     streaming={streaming}
+                    /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
+                    ownership={ownership}
                     constraintInputPending={constraintInputPending}
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
