@@ -148,9 +148,15 @@ def _shared_root_registry_lock(root: Path) -> Iterator[None]:
 def _take_os_lock_blocking(fd: int) -> None:
     """**阻塞**取 OS 级排他锁（与 `_take_os_lock` 的 fail-fast 相对）。
 
-    本原语**无**超时。等待上界由「持锁者是某个进程的 `append_event` 临界区，该临界区
-    为微秒级（一次 `stat` + 一次 JSON 解析）、不含 I/O 阻塞」这一事实给出——微秒级的
-    等待上，等对方让出比当场失败更合理。**不再有兜底**：#1024/#1061 曾在**调用方**
+    本原语**无**超时，也**不提供**时间上界：等待上界只能表述为「与并发写者数 × 单次
+    临界区同阶」。持锁者是 `store.append_event` 的追加临界区
+    （`with session_append_lock(path)` 起的那个块），该临界区**含 I/O 阻塞**——每次
+    append 一次 `os.fsync`，且在文件戳缓存未命中时 `_last_seq_on_disk` 会全量回读整个
+    日志（O(n)）。本机 btrfs 实测（3000 事件 / 841 KB 会话，`append_event` 端到端墙钟
+    n=30）：戳命中时单次临界区 p50 ≈ 20 ms / p90 ≈ 23 ms；戳未命中时 p50 ≈ 70 ms /
+    p90 ≈ 100 ms，max 抖动大（两次实测 152 ms / 192 ms）——量级随介质与负载浮动，
+    **不是**微秒级。不设超时是有意的取舍：等对方让出仍比当场失败更合理。
+    **不再有兜底**：#1024/#1061 曾在**调用方**
     放一个墙钟预算（`_APPEND_CONFLICT_DEADLINE_S`）当作本原语的有界性来源，该预算已
     在 #1062-A 随「分配收进写锁」删除；今天的调用方 `store.append_event` 没有墙钟
     预算，故**不要**据此认为「上面有人兜底」。
@@ -158,8 +164,17 @@ def _take_os_lock_blocking(fd: int) -> None:
     平台差异（必须记账，不得夸大为「等价」）：POSIX `flock(LOCK_EX)` 无限等待；
     Windows `msvcrt.LK_LOCK` 以 1 秒为间隔重试 **10 次**后抛 `OSError`——即 Windows
     上单次等待上限约 10 秒。⚠ 这段是**按 CPython 文档与实现**写下的平台断言，
-    **未在本机 Windows 核实**（本仓开发与 CI 都不跑 Windows）。对微秒级临界区
-    绰绰有余，但极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
+    **未在本机 Windows 核实**（本机是 Linux）。本仓 CI **有** Windows 车道
+    （`mm08-d2d3-windows-verify.yml` / `mm08-windows-verify.yml` /
+    `windows-installer-smoke.yml` 共 5 个 `runs-on: windows-latest` job，另有
+    `gate-nightly.yml` 的 `os: [ubuntu-latest, windows-latest]` 矩阵），但**没有一条**
+    在 Windows 上执行过本原语：全仓 Python 全量套件（`tests/`——`append_event` 无条件走
+    `session_append_lock`，故每条落盘用例都间接执行本原语，含
+    `tests/session/test_store_cross_process_seq.py`）只跑在 ubuntu 的
+    `gate1.yml` / `gate-nightly.yml`；Windows 车道只跑前端套件与三个具名 pytest 文件
+    （`test_cli_image.py` / `test_local_byte_store.py` / `test_instance_lock.py`），而
+    `test_instance_lock.py` 只调 fail-fast 的 `_take_os_lock`。⇒ 这条断言没有任何车道
+    看得见。极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
     """
     if sys.platform == "win32":
         import msvcrt
@@ -188,8 +203,10 @@ def session_append_lock(events_path: Path) -> Iterator[None]:
     rmtree 会一并清掉它。
 
     **持锁者** = 本进程或其它进程里 `JsonlSessionStore.append_event` 的追加临界区
-    （「读已落盘最大 seq → 判定 → 写盘 → 更新文件戳缓存」），临界区为微秒级；本锁
-    本身不设超时（见 `_take_os_lock_blocking`）。
+    （「读已落盘最大 seq → 判定 → 写盘 → 更新文件戳缓存」），该临界区含一次 `os.fsync`
+    与（戳缓存未命中时）一次全量日志回读，**不是**微秒级（本机 btrfs 实测 p50 ≈ 20 ms，
+    见 `_take_os_lock_blocking` 的读数）；本锁本身不设超时
+    （见 `_take_os_lock_blocking`）。
 
     **非可重入**：同一进程内同一 session 不得嵌套取锁（`JsonlSessionStore` 的进程内
     `_lock_for` 已保证同进程串行，本锁只补跨进程这一维）。

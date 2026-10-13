@@ -277,6 +277,44 @@ class TestRunLifecycle:
         session.end_run(run_id, status="failed", reason="boom")
         assert [e.seq for e in store.read_events(session.session_id)] == seqs_after_first
 
+    def test_end_run_idempotent_under_interleaved_writes(self, store: JsonlSessionStore):
+        """#1113 第 8 项：幂等判据必须按 run 定界，且不受中途交错写入影响。
+
+        上面两条用例只发**顺序**的第二次 `end_run`（CAS 检查与写盘之间没有任何
+        交错）。本用例把两种交错叠起来：同聚合上**另一个 run 的终态**，以及夹在
+        两次 `end_run(run_a)` 之间的**无关 append**。判据若退化成「末条事件是不是
+        终态」或「有没有任何终态」，都会在这里露出来——前者会把 run B 的终态误当
+        run A 的既存，后者会让 run A 落第二条。
+
+        变异实证（改动后的树 + 破坏实现，隔离副本）：删掉 CAS ⇒ 2 条终态；CAS 忽略
+        `run_id`、或 CAS 只看末条事件 ⇒ 本用例红而上面两条顺序用例**仍绿**
+        （失败集合不同 ⇒ 本用例有独立鉴别力，不是前两条的复读）。
+
+        未覆盖（如实登记）：同实例多线程**真并发**、或另一 Session 实例（各自
+        `_events` 都没有终态）仍可各落一条——本机实测该形状非确定（30 次里 26 次
+        落 2 条），断言恒 1 条会变成 flaky 红；它要把判据移进 store 写锁才能根治，
+        属另一票的范围。
+        """
+        session = Session.start(store)
+        run_a, _ = session.begin_run()
+        run_b, _ = session.begin_run()
+        first_a = session.end_run(run_a, status="completed", final_text="a")
+        # 交错 1：无关写者（模型事件）落在 run A 的终态之后。
+        session.append(MODEL_COMPLETED, {"interleaved": True}, run_id=run_a)
+        # 交错 2：另一个 run 的终态落在两次 `end_run(run_a)` 之间。
+        session.end_run(run_b, status="failed", reason="b")
+        again_a = session.end_run(run_a, status="failed", reason="again")
+
+        assert again_a.event_id == first_a.event_id, "run A 第二次必须返回既存终态"
+        assert again_a.run_id == run_a, "返回的既存终态必须属于被调用的那个 run"
+        events = store.read_events(session.session_id)
+        mine = [e.type for e in events
+                if e.run_id == run_a and e.type in (RUN_COMPLETED, RUN_FAILED)]
+        other = [e.type for e in events
+                 if e.run_id == run_b and e.type in (RUN_COMPLETED, RUN_FAILED)]
+        assert mine == [RUN_COMPLETED], f"run A 的 durable 终态必须恰好一条，实际 {mine}"
+        assert other == [RUN_FAILED], f"run B 的 durable 终态必须恰好一条，实际 {other}"
+
     # ── trace_id / trace_url 契约（trace_url 契约：并列字段，对称终态） ──
 
     def test_end_run_completed_persists_trace_id_and_trace_url(self, store: JsonlSessionStore):

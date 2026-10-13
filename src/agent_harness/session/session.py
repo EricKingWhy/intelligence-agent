@@ -800,10 +800,24 @@ class Session:
         # 终态幂等（#1103，CAS）：该 run 已有终态 ⇒ 拒写并**返回既存的那一枚**。
         # 同一 run 的两次 `end_run`（重入的失败臂 / 取消臂）此前会落下
         # `run/completed` 与 `run/failed` 两条，durable 真相层自相矛盾——所有按
-        # `RUN_TERMINAL_TYPES` 投影终态的下游（progress / interrupt / fork / task）
-        # 都会看到两条。判据与 `run/resumed` 的 `expected_version` 同族：写前核对
-        # 当前状态，不符即拒（EventStoreDB 的 expected-revision / Marten 的
-        # `FetchForWriting` 同型）。生产侧 `AgentRuntime._terminal_written` 只护住
+        # 按 `RUN_TERMINAL_TYPES` 投影终态的下游看到**自相矛盾的终态集合**。
+        # 逐下游实读（口径不一，不得写成「都会看到两条」）：`progress.py` 两条
+        # 都发（`run_completed` 里程碑 + `run_failed` 失败项）；`interrupt.py` /
+        # `task.py` 是 pop / discard（第二条 no-op）；`multiagent/provider.py`
+        # 取 `next(reversed(...))`（last-wins）。
+        # 判据与 `run/resumed` 的 `expected_version` 同族：写前核对
+        # 当前状态，不符即拒（EventStoreDB 的 expected-revision /
+        # Marten 的 `FetchForWriting` 同型）。⚠ 「同族」只指**判据形状**
+        # （写前核对当前状态、不符即拒），**不指**持久层保证：
+        # `run/resumed` 的 `expected_version` 比对的是**从事件流重放的**
+        # `PausedRun.version`（`run_budget.py` 的 `validate_resume`），
+        # 本 CAS 读的却是本实例的**内存投影** `self._events`——而 `end_run`
+        # 的 CAS 与写盘之间不持任何锁，投影更新（`_persist_event` 的
+        # `self._events.append`）在 store 写锁**之外** ⇒ 只覆盖「同实例内、
+        # CAS 与写盘之间无交错」的形状；同实例多线程并发、或另一实例
+        # （各自 `_events` 都没有终态）仍可各落一条——本条注释即其登记处；
+        # 根治要把判据移进 store 写锁，不属本票范围。
+        # 生产侧 `AgentRuntime._terminal_written` 只护住
         # 它自己的调用链，不是 Session 层的契约——真相层的守卫要落在真相层。
         # 返回既存而非抛错：同一 run 重复收口是**幂等**语义，不是调用方犯错。
         existing = next(
