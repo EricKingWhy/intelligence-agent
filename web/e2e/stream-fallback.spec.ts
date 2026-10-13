@@ -62,6 +62,13 @@ test('WS 被拒（零服务帧）→ 自动降级 GET /stream，接流照样建�
 
   await openStoredSession(page);
 
+  // 就绪锚点（真实状态，非固定时长）：fallback 流以 run/completed 收尾 → finalizeRun
+  // 把 streaming 段 settle 为 done（projection.ts），`.model-output` 的 streaming→done
+  // 类切换只可能发生在降级通道补完 batch 全部帧之后（batch 内 delta 先于终态到达，
+  // 见上面的 onStreamGet）。用它承载接流完成的等待，取代纯文本断言隐含的固定 5s 窗
+  // （#1060 同族）；文本内容断言强度不变（自带 retry 仍在）。15s 为初值，沿 #1060
+  // 口径（条件等待、就绪即返回），待压力轮实测单例耗时分布后校准。
+  await expect(page.locator('.model-output').last()).toHaveClass(/done/, { timeout: 15_000 });
   // 降级真的接上了：这一帧只可能来自 GET /stream
   await expect(page.locator('.model-output').last()).toContainText('降级通道补进来的。');
   expect(sseCalls).toBe(1);
@@ -97,6 +104,13 @@ test('降级流收到 stream/truncated → 先 GET /events 全量重建，再以
 
   await openStoredSession(page);
 
+  // 就绪锚点（真实状态，非固定时长）：续传 batch 以 run/completed 收尾 → finalizeRun
+  // 把 streaming 段 settle 为 done（projection.ts）；两段文本（重建 delta seq5 + 续传
+  // delta seq6）都先于终态 seq7 到达，故 `.model-output` 切到 done 时二者已在投影里。
+  // 取代纯文本断言隐含的固定 5s 窗（#1060 同族）；下方两条文本内容断言强度不变
+  // （自带 retry 仍在）。15s 为初值，沿 #1060 口径（条件等待、就绪即返回），待压力
+  // 轮实测单例耗时分布后校准。
+  await expect(page.locator('.model-output').last()).toHaveClass(/done/, { timeout: 15_000 });
   // 只有走完「重建 → 续传」两跳，这两段文本才可能同时在场
   await expect(page.locator('.model-output').last()).toContainText('全量重建补回的。');
   await expect(page.locator('.model-output').last()).toContainText('续传补上的。');
