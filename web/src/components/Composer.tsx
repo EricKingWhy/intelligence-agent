@@ -35,6 +35,10 @@ const DANGER_PERMISSION_MODE = 'danger-full-access';
 /** 非视觉模型禁用附图的原因前缀（#937 / M-24 收口：title 与可见提示两处同源，改一处即两处）。 */
 const NON_VISION_MODEL_REASON = '当前模型不支持视觉（supports_vision=false）';
 
+/** #1027 发送门禁的阻断文案（Gmail 式阻断，PORT DESIGN）：界面提示与发送按钮
+ *  title 两处同源（#937 / M-24 同款手法），改一处即两处。 */
+const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
+
 interface Props {
   streaming: boolean;
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
@@ -157,13 +161,22 @@ export const Composer = memo(function Composer({
 
   // ── #825（MM-04）附图草稿 ──
   // 状态机在 hook 里（上传/缩略图/失败重试/换会话清理），这里只做**入口门禁**与
-  // 把「已就绪」的引用交给提交通道。（纯文本发送不依赖任何草稿状态：发送按钮的
-  // 可用性只看文本——AC4「上传失败不得阻塞纯文本发送」的落点。）
+  // 把「已就绪」的引用交给提交通道。（#1027 修订：发送按钮的可用性除文本外，还看
+  // 是否有**在途上传**——AC4「上传失败不得阻塞纯文本发送」保留，failed 仍不阻塞，
+  // 但发送时被显式剔除并给一次性可见提示，绝不静默丢弃。）
   const attachments = useDraftAttachments(sessionId);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** 整页拖拽计数：document 级 dragenter/dragleave 会成对触发，用计数判断"还在页面内"。 */
   const dragDepth = useRef(0);
   const [dragActive, setDragActive] = useState(false);
+  /** #1027 兜底提示：发送时被剔除的未就绪附件数（一次性可见提示，可关闭）。 */
+  const [droppedNotice, setDroppedNotice] = useState<string | null>(null);
+
+  // ── #1027 发送门禁（Gmail 式阻断，PORT DESIGN）──
+  // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
+  // **不许裸加时长**：有在途上传时发送按钮禁用 + Ctrl+Enter 拦截，界面常驻阻断提示。
+  const uploadingCount = attachments.items.filter((item) => item.status === 'uploading').length;
+  const sendBlocked = uploadingCount > 0;
 
   // ── #937 / M-08：附图上限从服务端下发 ──
   // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次落进本地 state，并
@@ -319,10 +332,19 @@ export const Composer = memo(function Composer({
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    // #1027 门禁：上传中时拦截发送（按钮 disabled 只挡点击，Ctrl+Enter 走这里）。
+    // 阻断提示是界面常驻的 `.composer-send-blocked`——这里只需拦下请求；不拦就会
+    // 复现 #1027（readyIds 为空时请求体无 attachments 键，图被静默丢弃）。
+    if (sendBlocked) return;
     // #825（MM-04）：只带**已就绪**的引用（在途/失败的草稿不参与本次发送——AC4：
     // 上传失败不阻塞纯文本发送）。文本仍必填：`POST /messages` 的 `content` 是必填项，
     // 空文本 + 纯图片不是本票支持的路由。
     const attachmentIds = attachments.readyIds;
+    // #1027 兜底：未就绪（失败/在途残留）的草稿没进请求——绝不静默丢弃，一次性可见提示。
+    const unreadyCount = attachments.items.filter(
+      (item) => item.status !== 'ready' || !item.receipt,
+    ).length;
+    if (unreadyCount > 0) setDroppedNotice(`${unreadyCount} 个附件未随消息发出`);
     // steer 通道的**失败兜底不在这一层**（#219）：没有可打断的在途 run 时后端回 409
     // （session/service.py::SteerTargetNotFound），由交付层改投 queue 把消息送到
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
@@ -649,6 +671,29 @@ export const Composer = memo(function Composer({
             {NON_VISION_MODEL_REASON}：已禁用附图；历史附图会被省略为文本占位
           </div>
         )}
+        {/* #1027：上传中时的发送阻断提示（与 .composer-attach-hint 同一版式语言）。
+            常驻到上传落定——键盘用户按 Ctrl+Enter 被拦截时，读到的就是这一条。 */}
+        {sendBlocked && (
+          <div className="composer-send-blocked" role="status">
+            {uploadingCount > 1
+              ? `${SEND_BLOCKED_REASON}（${uploadingCount} 张）`
+              : SEND_BLOCKED_REASON}
+          </div>
+        )}
+        {/* #1027 兜底：发送时被剔除的未就绪附件，一次性可见提示（可关闭，不常驻）。 */}
+        {droppedNotice !== null && (
+          <div className="composer-attach-dropped" role="alert">
+            <span className="composer-attach-dropped-text">{droppedNotice}</span>
+            <button
+              type="button"
+              className="composer-attach-error-btn"
+              onClick={() => setDroppedNotice(null)}
+              aria-label="关闭附件未发出提示"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
         <textarea
           ref={inputRef}
           id="composer-input"
@@ -847,9 +892,9 @@ export const Composer = memo(function Composer({
               <button
                 className="composer-send"
                 onClick={() => submit('queue')}
-                disabled={locked || !value.trim()}
+                disabled={locked || !value.trim() || sendBlocked}
                 aria-label="发送"
-                title={`发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
               >
                 <ArrowUp size={16} />
               </button>
@@ -861,9 +906,9 @@ export const Composer = memo(function Composer({
             <button
               className="composer-send"
               onClick={() => submit('queue')}
-              disabled={locked || !value.trim()}
+              disabled={locked || !value.trim() || sendBlocked}
               aria-label="发送"
-              title={`发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              title={sendBlocked ? SEND_BLOCKED_REASON : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
             >
               <ArrowUp size={16} />
             </button>

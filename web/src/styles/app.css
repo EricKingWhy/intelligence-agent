@@ -8007,6 +8007,33 @@ button.json-row {
   color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
 }
+/* #1027：上传中时的发送阻断提示（与 .composer-attach-hint 同一版式语言，warning 色）。 */
+.composer-send-blocked {
+  margin: var(--space-sm) var(--space-lg) 0;
+  padding: 2px var(--space-sm);
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
+  font-size: var(--text-xs);
+}
+/* #1027 兜底：发送时被剔除的未就绪附件（与 .composer-attach-error 同一版式语言，
+   danger 色；可关闭的一次性提示，关闭按钮复用 .composer-attach-error-btn）。 */
+.composer-attach-dropped {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-sm) var(--space-md) 0;
+  padding: var(--space-xs) var(--space-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+}
+.composer-attach-dropped-text {
+  flex: 1;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+}
 /* 附图入口按钮：与发送/停止按钮同高（32px），落在 .composer-actions 里。 */
 .composer-attach-trigger {
   width: 32px;
