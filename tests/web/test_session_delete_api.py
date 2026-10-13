@@ -297,6 +297,38 @@ def test_run_status_snapshot_reads_inflight_state_not_hardcoded() -> None:
     assert _run_status_snapshot(rm, "s") == "in-flight(settling)"
 
 
+def test_delete_path_wires_the_run_status_snapshot_call(
+    tmp_path: Path, caplog, monkeypatch
+) -> None:
+    """接线锁：删除路径必须**调用** `_run_status_snapshot`，值不许在调用点硬编码。
+
+    上一条只钉住 helper 自身的分支，`test_delete_success_log_records_run_and_approval_snapshot`
+    只钉住成功路径的字段值——而成功路径因守卫 ③④ 保证 `run_state == "none"`。两条
+    合起来仍杀不死「把 `service.py:4207` 的 `run_snapshot = _run_status_snapshot(...)`
+    换成 `run_snapshot = "none"`」这一票面明令禁止的硬编码（同值 ⇒ 两测都绿）。
+    这条用哨兵把「删除路径确实经过 helper」这一接线钉死：把 helper 换成返回哨兵的
+    替身，日志里的 `run_state` 就必须是这个哨兵，而非任何调用点常量。
+    """
+    sentinel = "SENTINEL-IN-FLIGHT"
+    monkeypatch.setattr(
+        "agent_harness.session.service._run_status_snapshot",
+        lambda run_manager, session_id: sentinel,
+    )
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.session.service"):
+        assert client.delete(f"/api/sessions/{session_id}").status_code == 200
+
+    [record] = [
+        r for r in caplog.records if getattr(r, "event_type", None) == "session_delete"
+    ]
+    assert record.session_id == session_id
+    # 结构化字段与人读消息串都取哨兵：任一处硬编码都会红
+    assert record.run_state == sentinel
+    assert sentinel in record.getMessage(), record.getMessage()
+
+
 # ── 安全红线：绝不碰用户的真实目录（ADR-0029 D2）────────────────────
 
 

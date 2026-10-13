@@ -1044,6 +1044,9 @@ def _run_status_snapshot(run_manager: RunManager, session_id: str) -> str:
     run"）。**不读 `_runs` 里有没有条目**：那条 ManagedRun 每会话终身保留（`_drive`
     的收尾注释），终态后仍在，会把刚跑完的会话误报成在途。在途时再按 `ManagedRun`
     的旗标补一个状态限定词，让日志能回答"删的那一刻它在跑、在暂停、还是在取消"。
+
+    快照为尽力而为的瞬时值（best-effort）：is_busy 与 get_active 两次查表非原子，
+    极端下可能把刚收尾的 run 记为 in-flight(settling)；仅影响观测面，不影响守卫。
     """
     if not run_manager.is_busy(session_id):
         return "none"
