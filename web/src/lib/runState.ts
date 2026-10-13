@@ -263,45 +263,67 @@ export function deriveRunSummary(conversation: ConversationState): {
   return { label, startedAt: start, duration: formatDuration(start, end) };
 }
 
-// ── #198：生效档位（Inspector 头标） ──
+// ── #198：生效档位（Inspector 头标）──
+// ── #1093：请求侧推理档位（Inspector 展示）──
+
+/** #1106：run/started 档位的共享 derive——`agent_profile` 与 `reasoning_effort`
+ *  **一个**口径（两处各写一遍就会漂移成两套真相）。
+ *
+ *  - `focusedRunId == null`：取**最后一个** `run/started` 携带的值——与"当前
+ *    这轮的运行条件"同口径（#198/#1093 既有行为，单 run 会话展示不变）。
+ *  - `focusedRunId != null`：取**信封 `run_id` === focusedRunId** 的那个
+ *    `run/started` 的值（#1106：聚焦早期 run 时徽标反映该 run 自己的档位，
+ *    而不是末次 run 的——聚焦/选中项的摘要栏反映选中项）。信封 `run_id`
+ *    是事件归属的权威（与 projection 同口径），`data.run_id` 不参与。
+ *    匹配不到任何 `run/started`、或该 run 未声明字段 → null——**不拿别的
+ *    run 的值顶替**（那正是本票要修的误读）。
+ *
+ *  字段缺失（旧数据 / 未声明）返回 null，调用方按"不可得"处理（不伪造
+ *  "main" / "default"）。 */
+function deriveRunStartedField(
+  events: AgentEvent[],
+  field: 'agent_profile' | 'reasoning_effort',
+  focusedRunId?: string | null,
+): string | null {
+  let last: string | null = null;
+  let focused: string | null | undefined; // undefined = 没找到聚焦 run 的 run/started
+  for (const e of events) {
+    if (e.type !== EventType.RUN_STARTED) continue;
+    const value = (e.data as Record<string, unknown> | undefined)?.[field];
+    if (typeof value === 'string' && value.length > 0) last = value;
+    if (focusedRunId != null && e.run_id === focusedRunId) {
+      focused = typeof value === 'string' && value.length > 0 ? value : null;
+    }
+  }
+  if (focusedRunId != null) return focused ?? null;
+  return last;
+}
 
 /**
- * 最后一个 `run/started` 携带的 agent_profile——纯事件真值，无状态。
+ * 生效 agent_profile——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
  *
  * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
  * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
- * 编造运行条件，正是本票要修的不可回溯根因）。多 run 会话取**最后一个**：
- * 与"当前这轮的运行条件"同口径。
+ * 编造运行条件，正是 #198 要修的不可回溯根因）。
+ *
+ * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
  */
-export function deriveAgentProfile(events: AgentEvent[]): string | null {
-  let profile: string | null = null;
-  for (const e of events) {
-    if (e.type !== EventType.RUN_STARTED) continue;
-    const value = (e.data as Record<string, unknown> | undefined)?.agent_profile;
-    if (typeof value === 'string' && value.length > 0) profile = value;
-  }
-  return profile;
+export function deriveAgentProfile(events: AgentEvent[], focusedRunId?: string | null): string | null {
+  return deriveRunStartedField(events, 'agent_profile', focusedRunId);
 }
 
-// ── #1093：请求侧推理档位（Inspector 展示） ──
-
 /**
- * 最后一个 `run/started` 携带的 reasoning_effort——纯事件真值，无状态。
+ * 请求侧 reasoning_effort——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
  *
  * 后端 #1093 起 run/started.data 在**有声明时**带 `reasoning_effort`（本轮请求侧
  * 选中的 harness 档位名，如 "minimal"/"standard"/"deep"）；无声明（模型无能力 /
  * web「默认」位置省略该字段）时**键缺席**——返回 null，调用方整段不渲染
- * （不可得 ≠ 默认档，`11 §6.1`；绝不伪造 "default"）。多 run 会话取**最后一个**，
- * 与"当前这轮的运行条件"同口径。
+ * （不可得 ≠ 默认档，`11 §6.1`；绝不伪造 "default"）。
+ *
+ * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
  */
-export function deriveReasoningEffort(events: AgentEvent[]): string | null {
-  let effort: string | null = null;
-  for (const e of events) {
-    if (e.type !== EventType.RUN_STARTED) continue;
-    const value = (e.data as Record<string, unknown> | undefined)?.reasoning_effort;
-    if (typeof value === 'string' && value.length > 0) effort = value;
-  }
-  return effort;
+export function deriveReasoningEffort(events: AgentEvent[], focusedRunId?: string | null): string | null {
+  return deriveRunStartedField(events, 'reasoning_effort', focusedRunId);
 }
 
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──

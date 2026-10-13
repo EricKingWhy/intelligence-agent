@@ -78,6 +78,14 @@ const TIP_TOP_MARGIN = 16;
 const EMPTY_TOOLS: ToolCall[] = [];
 const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
 
+/** #1106：工具行的 run 归属——projection 存的 `raw_call` 是 tool/call 事件的
+ *  **verbatim 整信封拷贝**（含 run_id），归属以它对账（事件真值，与 projection
+ *  同口径）；缺失（旧数据）→ null，不猜。 */
+function toolRunId(tool: ToolCall): string | null {
+  const v = tool.raw_call?.run_id;
+  return typeof v === 'string' && v ? v : null;
+}
+
 interface Props {
   conversation: ConversationState | null;
   streaming: boolean;
@@ -164,13 +172,22 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       conversation?.run_interrupted, conversation?.run_status, conversation?.run_cancelled,
       conversation?.active_step_id, conversation?.turns, streaming,
     ]);
-  // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
-  const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events) : null),
-    [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-  // #1093：请求侧推理档位（最后一个 run/started 携带的 reasoning_effort；未声明 → null）。
+  /* #1106：当前聚焦 run 的归属——选中项（事件 / 工具行）自己的信封 run_id。
+   * run 级视图（无选中项）与子会话视图没有聚焦 run → null → 头标徽标回退
+   * 「取最后值」（单 run 会话展示不变）。 */
+  const focusedRunId: string | null =
+    focus.kind === 'event'
+      ? focus.event.run_id ?? null
+      : focus.kind === 'tool'
+        ? toolRunId(focus.tool)
+        : null;
+  // #198：生效档位（聚焦 run 携带；无聚焦 → 最后一个 run/started；旧数据 → null →「档位未知」）。
+  const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events, focusedRunId) : null),
+    [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // #1093：请求侧推理档位（聚焦 run 携带；未声明 → null，整段不渲染）。
   const reasoningEffort = useMemo(
-    () => (conversation ? deriveReasoningEffort(conversation.events) : null),
-    [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+    () => (conversation ? deriveReasoningEffort(conversation.events, focusedRunId) : null),
+    [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
    * filter 逐字一致——收敛成三张表后 tab 计数与列表内容同源，也顺手消掉了每次提交三次
@@ -396,18 +413,30 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* #198：生效档位徽标——读 run/started.data.agent_profile（后端 #198 起
-            总是写）；旧数据无字段时显示「档位未知」（不伪造 "main"）。 */}
-        <span className="detail-profile-badge mono num" title={`agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`}>
+        {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
+            run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
+            「档位未知」（不伪造 "main"）。title 如实标注取值范围。 */}
+        <span
+          className="detail-profile-badge mono num"
+          title={
+            focusedRunId !== null
+              ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
+              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`
+          }
+        >
           {agentProfile ?? '档位未知'}
         </span>
-        {/* #1093：请求侧推理档位——读 run/started.data.reasoning_effort（后端
-            #1093 起有声明才写）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
-            不伪造 "default"）。 */}
+        {/* #1093：请求侧推理档位——#1106 起按**当前聚焦 run** 取值（无聚焦回退
+            最后一个 run/started）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
+            不伪造 "default"）。title 如实标注取值范围。 */}
         {reasoningEffort !== null && (
           <span
             className="detail-effort-badge mono num"
-            title={`reasoning_effort: ${reasoningEffort}（本轮请求侧选中的推理档位）`}
+            title={
+              focusedRunId !== null
+                ? `reasoning_effort: ${reasoningEffort}（聚焦 run 请求侧选中的推理档位）`
+                : `reasoning_effort: ${reasoningEffort}（最近一个 run 请求侧选中的推理档位）`
+            }
           >
             推理 · {reasoningEffort}
           </span>
