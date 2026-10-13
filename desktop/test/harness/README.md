@@ -61,8 +61,8 @@ one that fails seven tests; the assertion diffs inside a shared test still
 differ, measured), so they are not cited as per-rule discrimination.
 Both were re-run from the checkout on 2026-10-10
 with 0 survivors and byte-identical restores — that is the #919 disposal’s own
-run. The digests in the last column are the ones measured for this batch, on the
-frozen tip recorded in `docs/review_ledger.d/`. The disposition's first
+run. The digests in the last column are what each harness printed on this
+checkout's current text. The disposition's first
 `teeth-check-guards.mjs` run also caught a real gap in the disposition itself:
 the candidate-copy mutation survived (every fixture armed with `"1"`), which is
 why the exemption's four spellings are asserted with the flag off.
