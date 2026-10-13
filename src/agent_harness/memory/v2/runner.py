@@ -634,9 +634,19 @@ class MemoryJobRunner:
                         tenant_id=job.tenant_id, user_id=job.user_id,
                         project_id=job.project_id,
                     )
-                    fallback_enabled = (
-                        await self.memory_v2.get_settings(trusted)
-                    ).fallback_enabled
+                    try:
+                        fallback_enabled = (
+                            await self.memory_v2.get_settings(trusted)
+                        ).fallback_enabled
+                    except Exception:
+                        # 读设置是本 job 的**附加**输入，不是执行的前提：设置存储抖一下不应把
+                        # 一轮记忆判成 JOB_FAILED（本票只针对 formation 的模型调用）。退回构造
+                        # 期默认（= 面板默认开）并留痕，让下一次 job 重试读取。
+                        logger.exception(
+                            "Memory V2 job %s: cannot read per-user settings; using "
+                            "construction-time fallback default %s",
+                            job.job_id, self._fallback_enabled,
+                        )
                 return await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),

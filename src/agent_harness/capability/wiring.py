@@ -176,7 +176,7 @@ async def _wire_memory_v2(
             build_memory_v2_service,
         )
         from agent_harness.memory.v2.recall import MemoryV2ContextProvider
-        from agent_harness.memory.v2.roles import resolve_memory_roles
+        from agent_harness.memory.v2.roles import resolve_configured_memory_roles
         from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
 
         service = await build_memory_v2_service(settings, vector_store=vectors)
@@ -184,10 +184,8 @@ async def _wire_memory_v2(
             runner = None
         else:
             # #1039：角色映射可指向 #203 自定义供应商（`provider:model` 命名空间）
-            # ⇒ 需把 store 传进角色解析。store 构造零 I/O，仅命名空间形态才被消费。
-            from agent_harness.model.provider_store import ProviderStore
-
-            roles = resolve_memory_roles(settings, store=ProviderStore.for_settings(settings))
+            # ⇒ 经 `resolve_configured_memory_roles` 带上 store 解析（store 构造零 I/O）。
+            roles = resolve_configured_memory_roles(settings)
             runner = await build_memory_formation(
                 settings, sessions=sessions, memory_v2=service,
                 vector_store=vectors, workspace_index=workspace_index, roles=roles,

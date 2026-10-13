@@ -55,7 +55,7 @@ provider 名非法、provider 命中但缺 `MODEL_API_KEY`，都按既有约定�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 
 from agent_harness.config import Settings
 from agent_harness.model.config import (
@@ -64,6 +64,9 @@ from agent_harness.model.config import (
     ModelConfig,
     parse_model_catalog,
 )
+
+if TYPE_CHECKING:
+    from agent_harness.model.provider_store import ProviderStore
 
 #: PRD §5.3 第 3 条固定的两个别名（对外名字，会出现在配置与文档里）。
 MEMORY_PRIMARY_ALIAS = "memory.primary"
@@ -85,8 +88,37 @@ class MemoryModelRoles:
         """是否配了备用角色——`budget.next_attempt` 的 `has_fallback` 输入就是它。"""
         return self.fallback is not None
 
+    def targets_are_distinct(self) -> bool:
+        """主/备是否解析到**不同**目标（provider + 端点 + 模型名）。
 
-def resolve_memory_roles(settings: Settings, store: Any | None = None) -> MemoryModelRoles:
+        #1039：面板降级开关打开时，"确定性 provider 错 ⇒ 落一次备用"只在这两者**不是
+        同一个目标**时才有意义——落到同一个坏端点等于把一次 400 换成再一次 400。判据含
+        `base_url`：#203 的同 id override 可以换端点而不换 provider 名，只比 provider 名
+        会漏掉这种"其实已经换了目标"的形态。
+        """
+        primary, fallback = self.primary, self.fallback
+        if primary is None or fallback is None:
+            return False
+        return (primary.provider, primary.base_url, primary.model_name) != (
+            fallback.provider, fallback.base_url, fallback.model_name)
+
+
+def resolve_configured_memory_roles(settings: Settings) -> MemoryModelRoles:
+    """按设置解析记忆角色，并带上 #203 自定义供应商 store（便捷入口）。
+
+    `provider:model` 命名空间的映射解析需要 store；store 构造零 I/O
+    （`ProviderStore.for_settings`），只有命名空间形态才真正消费它。生产装配
+    （`capability/wiring.py`）与 `assembly.build_memory_formation` 的直调回退共用本入口，
+    避免"造 store 再解析"的样板各写一遍。
+    """
+    from agent_harness.model.provider_store import ProviderStore
+
+    return resolve_memory_roles(settings, store=ProviderStore.for_settings(settings))
+
+
+def resolve_memory_roles(
+    settings: Settings, store: ProviderStore | None = None,
+) -> MemoryModelRoles:
     """按 PRD §5.3 的别名解析记忆作业的两个模型（顺序见模块 docstring）。
 
     `store`：#203 自定义供应商存储。仅当某个角色映射是 `provider:model` 命名空间时才需要；
@@ -101,7 +133,7 @@ def resolve_memory_roles(settings: Settings, store: Any | None = None) -> Memory
 
 
 def _resolve_role(
-    settings: Settings, mapping: str, *, main_chain: bool, store: Any | None,
+    settings: Settings, mapping: str, *, main_chain: bool, store: ProviderStore | None,
 ) -> ModelConfig | None:
     """找一个角色。`mapping` = 内置 preset 名或 `provider:model` 命名空间。
 
@@ -134,7 +166,9 @@ def _resolve_role(
     return resolved
 
 
-def _resolve_custom_role(settings: Settings, mapping: str, *, store: Any | None) -> ModelConfig:
+def _resolve_custom_role(
+    settings: Settings, mapping: str, *, store: ProviderStore | None,
+) -> ModelConfig:
     """`provider:model` 命名空间的角色映射（#203 自定义供应商）。"""
     if store is None:
         raise ConfigError(

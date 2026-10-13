@@ -991,12 +991,12 @@ class MemoryJobExecutor:
         错误的范畴。`repair=True` 只是把"这是修复调用"记进观测元数据，不改变尝试序列。
 
         #1039：`fallback_enabled`（面板开关，默认开）为 True 且主备解析到**不同**目标时，
-        把 `deterministic_fallback=True` 交给 `next_attempt` —— 确定性 provider 类错误
-        （如 400）在 primary 上允许落**一次**备用。开关关时该参数为 False，`next_attempt`
-        逐字回到"非瞬时一次就停"。分类只认 provider 类错误（见 `is_deterministic_provider_error`），
-        解析错 / 内部错不经这条通道。
+        把 `allow_deterministic_fallback=True` 交给 `next_attempt` —— 确定性 provider 类
+        错误（如 400）在 primary 上允许落**一次**备用。开关关时该参数为 False，
+        `next_attempt` 逐字回到"非瞬时一次就停"。分类只认 provider 类错误
+        （见 `is_deterministic_provider_error`），解析错 / 内部错不经这条通道。
         """
-        deterministic_fallback = fallback_enabled and _roles_are_distinct_targets(roles)
+        allow_deterministic_fallback = fallback_enabled and roles.targets_are_distinct()
         attempt = FIRST_ATTEMPT
         while True:
             model = roles.primary if attempt.role is MemoryModelRole.PRIMARY else roles.fallback
@@ -1077,7 +1077,7 @@ class MemoryJobExecutor:
                 self._observe("model", metadata)
                 following = next_attempt(
                     attempt, error, has_fallback=roles.has_fallback,
-                    deterministic_fallback=deterministic_fallback)
+                    allow_deterministic_fallback=allow_deterministic_fallback)
                 if following is None:
                     # 瞬时耗尽 ⇒ TRANSIENT_EXHAUSTED；确定性 provider 错（开关关 / 无备用 /
                     # 同目标）⇒ PROVIDER_ERROR（#1039：开关关时与旧行为逐字相同）。
@@ -1362,21 +1362,6 @@ class _Progress:
 # --------------------------------------------------------------------------------------
 # 纯函数
 # --------------------------------------------------------------------------------------
-
-
-def _roles_are_distinct_targets(roles: MemoryModelRoles) -> bool:
-    """主/备是否解析到**不同**目标（provider + 端点 + 模型名）。
-
-    #1039：面板降级开关打开时，"确定性 provider 错 ⇒ 落一次备用"只在这两者**不是同一个
-    目标**时才有意义——落到同一个坏端点等于把一次 400 换成再一次 400。判据含 `base_url`：
-    #203 的同 id override 可以换端点而不换 provider 名，只比 provider 名会漏掉这种"其实
-    已经换了目标"的形态。
-    """
-    primary, fallback = roles.primary, roles.fallback
-    if primary is None or fallback is None:
-        return False
-    return (primary.provider, primary.base_url, primary.model_name) != (
-        fallback.provider, fallback.base_url, fallback.model_name)
 
 
 def _validate_adjudication_target(

@@ -58,9 +58,8 @@ from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRe
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
-    MEMORY_PRIMARY_PROVIDER,
     MemoryModelRoles,
-    resolve_memory_roles,
+    resolve_configured_memory_roles,
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -107,18 +106,16 @@ async def build_memory_formation(
     """
     if roles is None:
         # #1039：角色映射可指向 #203 自定义供应商（`provider:model` 命名空间）⇒ 解析时
-        # 要带上 store。装配层通常由 wiring 显式传入 roles（同样带 store），这一支是
-        # 直调方的便捷回退，与生产路径同一语义。
-        from agent_harness.model.provider_store import ProviderStore
-
-        roles = resolve_memory_roles(settings, store=ProviderStore.for_settings(settings))
+        # 带 store。装配层通常由 wiring 显式传入 roles（同一入口解析），这一支是直调方
+        # 的便捷回退，与生产路径同一语义。
+        roles = resolve_configured_memory_roles(settings)
     if roles.primary is None:
-        # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与 provider 名是
-        # PRD §5.3.3 公开固定的映射，写出来是为了这句话可执行。
+        # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与**当前配置的** provider
+        # 名是诊断所需（#1039：运营者可改指别的 provider，打印常量会误导排查）。
         logger.warning(
             "记忆形成未装配：模型角色 %s 解析不出 provider '%s'。配 AGENT_MODELS 里一条该 "
             "provider 的条目、或把 MODEL_PROVIDER 设为它即可启用；本进程不会形成任何 V2 记忆。",
-            MEMORY_PRIMARY_ALIAS, MEMORY_PRIMARY_PROVIDER,
+            MEMORY_PRIMARY_ALIAS, settings.memory_primary_provider,
         )
         return None
 

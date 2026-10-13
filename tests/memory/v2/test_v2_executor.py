@@ -314,6 +314,14 @@ def _roles_same_target() -> MemoryModelRoles:
     return MemoryModelRoles(primary=primary, fallback=twin)
 
 
+def _roles_same_provider_distinct_endpoint() -> MemoryModelRoles:
+    """同 provider/model、仅端点不同——#203 同 id override 换端点的形态，**算**不同目标。"""
+    primary = _model_config("senseaudio")
+    twin = _model_config("senseaudio")
+    twin.base_url = "http://localhost:2"
+    return MemoryModelRoles(primary=primary, fallback=twin)
+
+
 def _run_events() -> list[SessionEvent]:
     """本轮事件：投影会给它们发别名 `e1`（用户消息）/ `e2`（助手回复）。
 
@@ -936,6 +944,27 @@ async def test_a_deterministic_provider_error_does_not_fall_back_to_the_same_tar
     assert result is not None
     assert result.reason == DegradedReason.PROVIDER_ERROR.value
     assert result.fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_provider_error_falls_back_across_a_distinct_endpoint(
+    env: Env,
+) -> None:
+    """同 provider/model、**仅端点不同**仍算不同目标 ⇒ 落一次备用（#203 同 id override）。
+
+    `MemoryModelRoles.targets_are_distinct` 的判据含 `base_url` 就是为了这条：只比 provider
+    名会把它误判成"同一目标"，从而在一个其实换了端点的备用上放弃救援。
+    """
+    invoker = FakeInvoker(
+        formation=[_Rejected("endpoint rejected"), _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())])
+    _job, result, _sink = await _run(
+        env, invoker, _roles=_roles_same_provider_distinct_endpoint())
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1), ("fallback", 1)]
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert result.fallback_used is True
 
 
 @pytest.mark.asyncio
