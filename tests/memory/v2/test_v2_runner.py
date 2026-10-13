@@ -945,6 +945,96 @@ async def test_durable_extraction_setting_gates_each_subsequent_run(env: Env) ->
         identity_context_var.reset(token)
 
 
+@pytest.mark.asyncio
+async def test_durable_fallback_setting_is_read_per_job_and_reaches_the_executor(env: Env) -> None:
+    """#1039：降级开关同样是**每 job 运行时读**（不是构造期烘死），并透传给执行器。
+
+    与 `extraction_enabled` 同链（`memory_v2.get_settings`），但读点在**执行时**：
+    开关改变后，先入队后执行的 job 走的是新值——这正是"运行时生效"的含义。
+    """
+    identity = IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])
+    token = set_identity_context(identity)
+    try:
+        trusted = TrustedMemoryIdentity("local", "local")
+        await env.service.update_settings(trusted, fallback_enabled=False)
+
+        seen: list[bool] = []
+
+        class _RecordingExecutor:
+            async def run(self, job, *, worker_id, **kwargs):
+                seen.append(kwargs["fallback_enabled"])
+                # 终结本 job：按用户串行的认领锁要放掉，第二个 job 才跑得起来。
+                await env.jobs.transition(
+                    job_id=job.job_id, worker_id=worker_id,
+                    stage=MemoryJobStage.DEGRADED, state={"phase": "test"},
+                    reason="recording-only",
+                )
+
+        runner = _runner(env, executor=_RecordingExecutor(), memory_v2=env.service)
+        _seed_run(env, run_id="read-the-setting")
+        assert await _notify(runner, env, run_id="read-the-setting") is not None
+        await runner.drain()
+        assert seen == [False]
+
+        await env.service.update_settings(trusted, fallback_enabled=True)
+        _seed_run(env, run_id="re-read-the-setting")
+        await _notify(runner, env, run_id="re-read-the-setting")
+        await runner.drain()
+        assert seen == [False, True]
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_settings_store_fails_closed_without_failing_the_job(
+    env: Env,
+) -> None:
+    """#1039：读每 job 设置失败 ⇒ fail-closed（本次按"关"处理）+ **不**把 job 判成失败。
+
+    治理口径：读取失败意味着没有可确认的存储偏好；在用户可能已明确关掉开关的前提下，一次
+    读取抖动**不得**把开关翻回开（记忆内容可能因此外泄到备用 provider）。故按"关"处理——这
+    正是 #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到设置即恢复。
+
+    桩按调用序号分派：入队资格那次读（`notify_run_finished` 里读 `extraction_enabled`）成功，
+    执行期那次读失败。`seen == [False]` 同时证明两件事——执行器被调到（未 JOB_FAILED）且
+    拿到 fail-closed 的 False。
+    """
+    identity = IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])
+    token = set_identity_context(identity)
+    try:
+        seen: list[bool] = []
+
+        class _RecordingExecutor:
+            async def run(self, job, *, worker_id, **kwargs):
+                seen.append(kwargs["fallback_enabled"])
+                await env.jobs.transition(
+                    job_id=job.job_id, worker_id=worker_id,
+                    stage=MemoryJobStage.DEGRADED, state={"phase": "test"},
+                    reason="recording-only",
+                )
+
+        class _FlakySettings:
+            """第 1 次读（入队资格）成功；此后（执行期）失败。"""
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_settings(self, trusted):
+                self.calls += 1
+                if self.calls == 1:
+                    return await env.service.get_settings(trusted)
+                raise RuntimeError("settings store unavailable")
+
+        runner = _runner(env, executor=_RecordingExecutor(), memory_v2=_FlakySettings())
+        _seed_run(env, run_id="unreadable-settings")
+        assert await _notify(runner, env, run_id="unreadable-settings") is not None
+        await runner.drain()
+
+        assert seen == [False]
+    finally:
+        identity_context_var.reset(token)
+
+
 # --------------------------------------------------------------------------------------
 # 2. 新鲜路径：入队 → 服务循环 → 写盘 → 事件（R12 / AC10）
 # --------------------------------------------------------------------------------------

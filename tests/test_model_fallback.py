@@ -20,6 +20,7 @@ from agent_harness.model.fallback import (
     FallbackTransition,
     ModelFallbackCoordinator,
     TwoLevelFallbackPolicy,
+    is_deterministic_provider_error,
     is_transient_model_error,
 )
 from agent_harness.model.multimodal import downgrade_to_non_vision
@@ -101,6 +102,55 @@ class TestIsTransientModelError:
     ])
     def test_unclassified_errors_are_not_transient(self, exc):
         assert is_transient_model_error(exc) is False
+
+
+class TestIsDeterministicProviderError:
+    """#1039：确定性 provider 类错误的判据（`is_transient_model_error` 的补集，且**必须**
+    带 HTTP 状态码——内部错 / 解析错不算 provider 错，不许借这条通道落备用，否则等于拿一个
+    坏端点掩盖一个 bug）。真实 `ReasoningChatOpenAI` 抛的 openai `APIStatusError` 带
+    `status_code`，本判据即由它命中。"""
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_a_non_transient_http_status_is_a_deterministic_provider_error(self, status):
+        request = httpx.Request("POST", "https://api.example.com/v1/chat")
+        response = httpx.Response(status, request=request)
+        assert is_deterministic_provider_error(httpx.HTTPStatusError(
+            "client error", request=request, response=response,
+        )) is True
+        assert is_deterministic_provider_error(_OpenAIStyleError(status)) is True
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 504, 429])
+    def test_transient_http_statuses_are_not_deterministic(self, status):
+        request = httpx.Request("POST", "https://api.example.com/v1/chat")
+        response = httpx.Response(status, request=request)
+        assert is_deterministic_provider_error(httpx.HTTPStatusError(
+            "server error", request=request, response=response,
+        )) is False
+        assert is_deterministic_provider_error(_OpenAIStyleError(status)) is False
+
+    def test_transport_failures_are_not_deterministic(self):
+        assert is_deterministic_provider_error(httpx.ConnectError("refused")) is False
+
+    @pytest.mark.parametrize("exc", [
+        ValueError("bad args"),
+        KeyError("missing"),
+        RuntimeError("unknown"),
+    ])
+    def test_errors_without_an_http_status_are_not_deterministic(self, exc):
+        assert is_deterministic_provider_error(exc) is False
+
+    def test_a_boolean_status_code_is_not_an_http_status(self):
+        """`bool` 是 `int` 的子类——一个布尔 `status_code` 是坏属性，不是 HTTP 状态码。"""
+        error = RuntimeError("flag")
+        error.status_code = True
+        assert is_deterministic_provider_error(error) is False
+
+    @pytest.mark.parametrize("status", [200, 302])
+    def test_a_non_error_http_status_is_not_deterministic(self, status):
+        """只认 4xx：一个 2xx/3xx 的 `status_code` 不是"端点拒绝"，不借道降级。"""
+        error = RuntimeError("odd")
+        error.status_code = status
+        assert is_deterministic_provider_error(error) is False
 
 
 # ---- 2. TwoLevelFallbackPolicy（决策 14：默认实现） ----
