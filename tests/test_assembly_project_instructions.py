@@ -187,3 +187,75 @@ async def test_runtime_accepts_an_existing_sandbox_as_workspace_input(
     messages = await runtime._context_builder.build(session)
 
     assert "root instruction" in "\n".join(str(message.content) for message in messages)
+
+
+@pytest.mark.skipif(
+    platform.system() != "Windows",
+    reason="Windows PSEC sandbox is Windows-only",
+)
+@pytest.mark.asyncio
+async def test_runtime_builds_with_windows_psec_project_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_harness.sandbox.windows_psec as psec_module
+    from agent_harness.sandbox.capabilities import SandboxCapabilities
+
+    monkeypatch.setattr(
+        psec_module,
+        "probe_windows_psec_capabilities",
+        lambda *, executable, config: SandboxCapabilities(
+            backend="windows_psec", available=True,
+        ),
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "harness"),
+        artifact_dir="",
+        model_api_key="test-key",
+    )
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    session_id = "session-windows-psec-project-instructions"
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(session_store, session_id=session_id, cwd=workspace)
+    session.append(USER_MESSAGE, {"content": "inspect the source"})
+    workspace_registry = WorkspaceRegistry(
+        root=tmp_path / "harness", backend="local",
+    )
+    sandbox = workspace_registry.create(
+        session_id, workspace_root=workspace, backend="windows_psec",
+    )
+
+    try:
+        sandbox.write_text("AGENTS.md", "PSEC workspace instruction")
+        sandbox.write_text("module.py", "value = 1")
+        with patch(
+            "agent_harness.assembly.create_chat_model",
+            return_value=_ModelFactory(),
+        ):
+            runtime = await build_runtime(
+                settings=settings,
+                wiring=CapabilityWiring(),
+                stores=stores,
+                workspace_registry=workspace_registry,
+                session_id=session_id,
+                workspace=sandbox,
+                max_agent_turns=10,
+            )
+
+        messages = await runtime._context_builder.build(session)
+        read_tool = next(tool for tool in runtime.registry.list() if tool.name == "read")
+        read_result = await read_tool.execute(read_tool.args_schema(path="module.py"))
+
+        assert "PSEC workspace instruction" in "\n".join(
+            str(message.content) for message in messages
+        )
+        assert read_result.ok
+        assert read_result.data["content"] == "value = 1"
+    finally:
+        sandbox.stop()

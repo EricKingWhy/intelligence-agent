@@ -599,6 +599,9 @@ async def build_runtime(
     project_instructions = project_instruction_store(settings)
     from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
+    instruction_cwd = _project_instruction_cwd(
+        instruction_workspace, workspace_registry, session_id,
+    )
     if isinstance(instruction_workspace, WindowsPsecSandbox):
         await asyncio.to_thread(
             project_instructions.load_for_sandbox_session,
@@ -606,9 +609,6 @@ async def build_runtime(
             instruction_workspace,
         )
     else:
-        instruction_cwd = _project_instruction_cwd(
-            instruction_workspace, workspace_registry, session_id,
-        )
         await asyncio.to_thread(
             project_instructions.load_for_session, session_id, instruction_cwd,
         )
