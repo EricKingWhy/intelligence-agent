@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.capabilities import (
+    LEGACY_BACKENDS,
     SUPPORTED_BACKENDS,
     probe_docker_capabilities,
     require_available,
@@ -36,9 +37,21 @@ from agent_harness.sandbox.paths import canonical_workspace_path
 
 logger = logging.getLogger(__name__)
 
+#: Docker 工作区「快照导入已完成」标记（容器内 /workspace 下）。#1048 AC3：
+#: 会话在标记存在前不可运行；已持标记的持久化 volume 恢复时不重导入。
+_IMPORT_COMPLETE_MARKER = ".harness-import-complete"
+
 
 class WorkspaceBindingError(RuntimeError):
     """A persisted workspace owner/alias binding is invalid or immutable."""
+
+
+class WorkspaceImportError(RuntimeError):
+    """宿主工作区快照导入失败——工作区未完成初始化，禁止当作已就绪。"""
+
+
+class WorkspaceImportIncompleteError(RuntimeError):
+    """Docker 工作区缺少导入完成标记——拒绝运行（不把半份 workspace 当已初始化）。"""
 
 
 class WorkspaceRegistry:
@@ -111,6 +124,11 @@ class WorkspaceRegistry:
             mapping["workspace_root"] = str(workspace_root)
             sandbox = self._instantiate_sandbox(mapping)
             sandbox.ensure_started()
+            if mapping["backend"] == "docker":
+                # #1048 AC1/AC3：宿主源 → 私有 named volume 的显式快照导入。
+                # 导入（含完成标记）成功后才落映射；失败则不写映射、不返回，
+                # 绝不把半份 workspace 当作已初始化。
+                self._import_snapshot(sandbox, workspace_root)
 
         self._write_mapping(session_id, mapping)
         self._cache[session_id] = sandbox
@@ -160,6 +178,16 @@ class WorkspaceRegistry:
             )
 
         owner_session_id, owner_mapping = self._resolve_workspace_owner(session_id)
+
+        # #1048 AC2：legacy PSEC 映射在恢复时迁移到私有 Docker volume——
+        # 先快照导入、成功后才原子改 mapping 并返回 DockerSandbox；任一步失败
+        # 即抛错（保留旧 mapping 与宿主文件），绝不返回 PSEC/半成品。
+        if owner_mapping.get("backend") in LEGACY_BACKENDS:
+            sandbox = self._migrate_legacy_mapping(owner_session_id, owner_mapping)
+            self._cache[owner_session_id] = sandbox
+            self._cache[session_id] = sandbox
+            return sandbox
+
         if owner_session_id in self._cache:
             sandbox = self._cache[owner_session_id]
             self._cache[session_id] = sandbox
@@ -167,6 +195,9 @@ class WorkspaceRegistry:
 
         sandbox = self._instantiate_sandbox(owner_mapping)
         sandbox.ensure_started()
+        if owner_mapping.get("backend") == "docker":
+            # #1048 AC3：无完成标记（半份/中断的导入）时拒绝运行。
+            self._assert_import_complete(sandbox, session_id)
 
         self._cache[owner_session_id] = sandbox
         self._cache[session_id] = sandbox
@@ -325,6 +356,12 @@ class WorkspaceRegistry:
         """构造新 session 的映射字典。"""
         # #363 / W-19：显式选择 > 部署默认；未知名响亮失败。
         resolved = backend if backend is not None else self._backend
+        if resolved in LEGACY_BACKENDS:
+            # #1048 AC2：legacy 后端不可用于新建会话（只用于解析既有映射）。
+            raise ValueError(
+                f"Sandbox 后端 {resolved!r} 已降级为 legacy，仅用于恢复既有映射，"
+                f"不可用于新会话（可选：{', '.join(SUPPORTED_BACKENDS)}）"
+            )
         if resolved not in SUPPORTED_BACKENDS:
             raise ValueError(
                 f"未知的 Sandbox 后端: {resolved!r}（支持：{', '.join(SUPPORTED_BACKENDS)}）"
@@ -382,6 +419,72 @@ class WorkspaceRegistry:
             )
 
         raise ValueError(f"未知的 Sandbox 后端: {backend}")
+
+    def _import_snapshot(self, sandbox: Sandbox, host_root: Path) -> None:
+        """宿主源目录 → sandbox 工作区的显式快照导入（#1048 AC1/AC2/AC3）。
+
+        - 逐项导入（副本语义）：容器内对象与宿主源**不同 inode**，切断 NTFS
+          hard link 的对象身份直连。同一 (host, workspace_path) 传给各后端
+          `copy_in`，Docker 侧即 tar 内容复制（复用 docker.py:copy_in）。
+        - 拒绝会逃出源根的符号链接（对齐 #1135 的 reparse 泄漏语义），越界即
+          fail-closed，不静默跳过。
+        - **最后**写完成标记；中断/失败时目标无标记，恢复路径据此拒绝运行。
+        """
+        source = Path(host_root)
+        if not source.is_dir():
+            raise WorkspaceImportError(f"导入源不是目录：{source}")
+        root_resolved = source.resolve()
+        workspace_root = sandbox.workspace_root
+        for entry in sorted(source.iterdir(), key=lambda p: p.name):
+            if entry.is_symlink():
+                try:
+                    target = entry.resolve()
+                except OSError as exc:
+                    raise WorkspaceImportError(
+                        f"导入源含无法解析的符号链接：{entry.name}"
+                    ) from exc
+                if not target.is_relative_to(root_resolved):
+                    raise WorkspaceImportError(
+                        f"导入源含指向工作区外的符号链接，拒绝导入：{entry.name}"
+                    )
+            sandbox.copy_in(entry, str(workspace_root / entry.name))
+        sandbox.write_text(_IMPORT_COMPLETE_MARKER, "")
+
+    def _assert_import_complete(self, sandbox: Sandbox, session_id: str) -> None:
+        """确认 Docker 工作区已完成导入（#1048 AC3）；无标记即拒绝运行。"""
+        try:
+            sandbox.read_text(_IMPORT_COMPLETE_MARKER)
+        except (FileNotFoundError, KeyError, OSError) as exc:
+            raise WorkspaceImportIncompleteError(
+                f"Session '{session_id}' 的 Docker 工作区缺少导入完成标记 "
+                f"（{_IMPORT_COMPLETE_MARKER}），拒绝运行以免把半份 workspace "
+                "当作已初始化。"
+            ) from exc
+
+    def _migrate_legacy_mapping(self, session_id: str, mapping: dict) -> Sandbox:
+        """把 legacy PSEC 映射迁移到私有 Docker volume（#1048 AC2）。
+
+        顺序固定为「探针 → 快照导入 → 原子改映射」：导入（含完成标记）成功前
+        **绝不**改写 mapping、也不返回 DockerSandbox；失败即抛错，旧 mapping 与
+        宿主文件原样保留（fail-closed，不回落 PSEC）。
+        """
+        require_available(probe_docker_capabilities())
+        host_root = Path(mapping["workspace_root"])
+        migrated = {
+            "session_id": session_id,
+            "backend": "docker",
+            "workspace_root": str(host_root),
+            "container_name": f"agent-harness-{session_id}",
+            "volume_name": f"agent-harness-{session_id}",
+            "created_at": mapping.get("created_at") or datetime.now(UTC).isoformat(),
+            "migrated_from": "windows_psec",
+            "migrated_at": datetime.now(UTC).isoformat(),
+        }
+        sandbox = self._instantiate_sandbox(migrated)
+        sandbox.ensure_started()
+        self._import_snapshot(sandbox, host_root)
+        self._write_mapping(session_id, migrated)
+        return sandbox
 
     def _mapping_path(self, session_id: str) -> Path:
         return self._workspaces_dir / f"{session_id}.json"

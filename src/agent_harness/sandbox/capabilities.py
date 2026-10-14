@@ -23,7 +23,23 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("agent_harness.sandbox.capabilities")
 
 #: 支持的后端名（DSH：非法值在加载时响亮拒绝，不静默改策略）。
-SUPPORTED_BACKENDS = ("local", "docker", "windows_psec")
+#: #1048：`windows_psec` 已降级为 **legacy-only**——NTFS hard link 的对象身份边界
+#: 靠 ACL/路径授权解决不了，受影响工作区改用每会话私有 Docker named volume。
+#: 它不再可作为新会话后端，只保留用于解析**既有** mapping 的恢复路径。
+SUPPORTED_BACKENDS = ("local", "docker")
+
+#: 仅用于恢复既有映射、不可用于新建会话的后端名（#1048）。
+LEGACY_BACKENDS = ("windows_psec",)
+
+
+def default_backend_for_platform(name: str = os.name) -> str:
+    """平台默认后端（#1048）。
+
+    受影响（Windows/NTFS）平台上工作区的对象身份边界只能靠换文件系统切断，
+    故平台默认落 `docker`（不可用即 fail-closed，绝不回落 local/PSEC）。
+    其余平台默认 `local`（无 NTFS hard link 对象身份问题）。
+    """
+    return "docker" if name == "nt" else "local"
 
 
 @dataclass(frozen=True)
