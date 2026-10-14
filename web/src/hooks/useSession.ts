@@ -1155,6 +1155,9 @@ export function useSession() {
         // 精确得多，捕获下来供认领失败时报出去；同时也接住 rejection，不让它
         // 变成 unhandled rejection。（用属性承载而不是普通局部变量：TS 会把
         // 「初值 null 且只在本作用域读」的 let 收窄成 null，异步写入看不见。）
+        // ⚠ 分工（#1148 双轴审查 P2）：`late.failure` **只**供下面 `discoverNewSessionId`
+        // 抛错时取用（认领超时的兜底原因）；认领**成功**之后的 POST 失败不走它，走
+        // 下方 `started.catch` 的回填通道。两条通道互斥，别把 `late.failure` 当活代码读。
         const late = { failure: null as Error | null };
         started.catch((e) => {
           late.failure = e instanceof Error ? e : new Error(String(e));
