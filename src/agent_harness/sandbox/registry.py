@@ -423,18 +423,20 @@ class WorkspaceRegistry:
     def _import_snapshot(self, sandbox: Sandbox, host_root: Path) -> None:
         """宿主源目录 → sandbox 工作区的显式快照导入（#1048 AC1/AC2/AC3）。
 
-        - 逐项导入（副本语义）：容器内对象与宿主源**不同 inode**，切断 NTFS
-          hard link 的对象身份直连。同一 (host, workspace_path) 传给各后端
-          `copy_in`，Docker 侧即 tar 内容复制（复用 docker.py:copy_in）。
+        - 整树一次性导入（副本语义）：容器内对象与宿主源**不同 inode**，切断
+          NTFS hard link 的对象身份直连。整棵树交给后端一次 `copy_in`（Docker
+          侧即**单个** tar 内容复制）：同一 tar 内按 inode 记录 hard link，故
+          「完全位于 workspace 内的 hard-link pair」导入后仍是同一对象（AC4）；
+          指向源根外的外链因宿主文件未被收录而只能按内容复制，容器内副本与宿主
+          源不同 inode（切断对象身份）。
         - 拒绝会逃出源根的符号链接（对齐 #1135 的 reparse 泄漏语义），越界即
-          fail-closed，不静默跳过。
+          fail-closed，不静默跳过。校验在导入前对整棵树完成。
         - **最后**写完成标记；中断/失败时目标无标记，恢复路径据此拒绝运行。
         """
         source = Path(host_root)
         if not source.is_dir():
             raise WorkspaceImportError(f"导入源不是目录：{source}")
         root_resolved = source.resolve()
-        workspace_root = sandbox.workspace_root
         for entry in sorted(source.iterdir(), key=lambda p: p.name):
             if entry.is_symlink():
                 try:
@@ -447,7 +449,7 @@ class WorkspaceRegistry:
                     raise WorkspaceImportError(
                         f"导入源含指向工作区外的符号链接，拒绝导入：{entry.name}"
                     )
-            sandbox.copy_in(entry, str(workspace_root / entry.name))
+        sandbox.copy_in(source, str(sandbox.workspace_root))
         sandbox.write_text(_IMPORT_COMPLETE_MARKER, "")
 
     def _assert_import_complete(self, sandbox: Sandbox, session_id: str) -> None:

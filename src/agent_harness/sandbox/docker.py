@@ -9,7 +9,9 @@ import logging
 import posixpath
 import queue
 import shlex
+import shutil
 import tarfile
+import tempfile
 import threading
 import weakref
 from concurrent.futures import Future
@@ -858,13 +860,31 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(f"无法创建 Workspace 目录 '{target.parent}'")
 
         payload = content.encode("utf-8")
+        # 容器内就地覆盖：先 put_archive 落一个临时文件，再 `cat 临时文件 > 目标`
+        # 截断写已有 inode。直接 put_archive 到目标会 unlink 旧 inode——对**完全
+        # 位于 workspace 内**的 hard-link pair 会拆散链接，与宿主目录/POSIX 语义
+        # 不一致（#1048 AC4/AC8：内部 pair 保持可用）。
+        tmp_name = f".harness-write-{uuid4().hex}.tmp"
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as archive:
-            member = tarfile.TarInfo(name=target.name)
+            member = tarfile.TarInfo(name=tmp_name)
             member.size = len(payload)
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(payload))
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
+            raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
+        command = (
+            f"cat {shlex.quote(tmp_name)} > {shlex.quote(target.name)} "
+            f"&& rm -f {shlex.quote(tmp_name)}"
+        )
+        result = self._container.exec_run(
+            ["/bin/sh", "-c", command], workdir=str(target.parent)
+        )
+        if result.exit_code != 0:
+            self._container.exec_run(
+                ["/bin/sh", "-c", f"rm -f {shlex.quote(tmp_name)}"],
+                workdir=str(target.parent),
+            )
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
@@ -888,16 +908,26 @@ class DockerSandbox(Sandbox):
         """把容器工作区**副本**导出到全新宿主目录（#1048 AC5/AC6/AC7）。
 
         用 `get_archive` 取 `/workspace` 的 tar 快照并安全解包（`filter="data"`：
-        拒绝绝对路径 / `..` 穿越 / 越界链接）。导出的是**副本**——容器内对象与
-        宿主目标各自独立，不共享 inode/canary。绝不把宿主 `/workspace` 当直连路径。
+        拒绝绝对路径 / `..` 穿越 / 越界链接）。Docker `get_archive` 归档的顶层是
+        被取路径的 basename（`workspace/`），而导出语义是「工作区**内容**副本」，
+        故剥掉该顶层目录、把内容直接落在 `dest` 根——否则导出目标会平白多出一层
+        `workspace/`，docker fork 的子 volume 也会被多套一层目录（子会话按
+        `/workspace/<file>` 读不到父文件）。导出的是**副本**：容器内对象与宿主目标
+        各自独立，不共享 inode/canary；绝不把宿主 `/workspace` 当直连路径。
         """
         out = Path(dest)
         out.mkdir(parents=True, exist_ok=True)
         self.ensure_started()
         stream, _ = self._container.get_archive(str(self.workspace_root))
         payload = b"".join(stream)
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
-            archive.extractall(path=out, filter="data")
+        with tempfile.TemporaryDirectory() as raw_dir:
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+                archive.extractall(path=raw_dir, filter="data")
+            raw = Path(raw_dir)
+            extracted = list(raw.iterdir())
+            source = extracted[0] if len(extracted) == 1 and extracted[0].is_dir() else raw
+            for item in source.iterdir():
+                shutil.move(str(item), str(out / item.name))
 
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""
