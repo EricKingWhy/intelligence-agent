@@ -1,0 +1,1 @@
+2026-10-14	#1138/#1140 修后 Correctness/Spec review：#1138 固定句柄导入、reparse 检查、创建/legacy 恢复竞态及内部 hardlink 契约符合；#1140 测试 helper 命名常量并复用 windows_psec 常量，P3 闭合；无 P0-P4 finding；审查者未运行测试，见月档。	0cbb1ab8a6e8f8a5df282df2ff31eb0b2c9f0516..602fb8537ceafc3242fb3e316bee959b55416c38
