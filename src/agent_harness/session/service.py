@@ -209,6 +209,7 @@ from agent_harness.session.model_switch import (
     append_model_change,
     assert_model_resolvable,
     current_model_selection,
+    current_reasoning_effort,
     inherit_parent_model,
     resolve_model_target,
 )
@@ -6255,6 +6256,7 @@ __all__ = [
     "append_model_change",
     "assert_model_resolvable",
     "current_model_selection",
+    "current_reasoning_effort",
     "inherit_parent_model",
     "resolve_model_target",
     "validate_session_id",
