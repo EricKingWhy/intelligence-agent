@@ -141,12 +141,14 @@ describe('#1029 残余 — submitTask 窗外认领成功后吞掉迟到失败', 
     expect(result).toContain('网络中断');
   });
 
-  it('同序列去重：认领成功但 POST 已失败 ⇒ 只报一次，不重复计数', async () => {
+  it('两次独立投递各自如实回报，互不吞并（不是"去重"，也不断言计数）', async () => {
     await mount();
     const first = await driveClaimThenReject('第一条');
     const second = await driveClaimThenReject('第二条');
 
-    // 两次独立投递各自如实回报（各自的失败不互相吞掉）。
+    // ⚠ 本用例**不**声称任何去重/计数语义：两笔是各自独立的投递，这里只证明
+    // 一次失败不会被另一次掩盖（前一版的标题写"只报一次、不重复计数"属名实不副，
+    // 由独立审查 Standards 轴 B-R2 指出）。
     expect(first.result).toContain('网络中断');
     expect(second.result).toContain('网络中断');
   });

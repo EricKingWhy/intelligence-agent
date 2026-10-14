@@ -1098,8 +1098,17 @@ export function useSession() {
          *
          *  为什么这不算"认领成功即已提交"：会话确实建出来了，但**用户的这条消息
          *  有没有随 POST 送出去**是另一回事，而 POST 已明确 reject ⇒ 没送出去。
-         *  诚实回报"未受理"让 Composer 留住草稿；用户重发会走 `sendFollowUp`
-         *  （会话已在 `liveSidRef`，是既存会话的续聊），不会另造第二个会话。
+         *  诚实回报"未受理"让 Composer 留住草稿。
+         *
+         *  ⚠ **不要**在这里写"重发会走 `sendFollowUp` 续聊、不会另造会话"——实测不成立
+         *  （独立审查 Standards 轴 B-R1 指出，实读复核成立）：`liveSidRef.current = sid`
+         *  在下面 **L1114**，位于本 throw 之后；而本函数开头已把 `liveSidRef` 置 null，
+         *  catch 块（L1117-1126）只 `setMode(idle)` + `setError`，**既不写 `liveSidRef`
+         *  也不刷新会话列表**。⇒ 走这条 throw 时该会话**从未锚定**，`selectedId` 仍为
+         *  null，用户重发会**再走一次 `submitTask`**（即另一个会话）。
+         *  这是本路径的既有行为，**不在本票范围**（Scope Lock）：本票只负责 AC3 的
+         *  「失败要如实回报、草稿不能丢」，而那个目标实测已达成（返回
+         *  `提交失败：…`、`selectedId` 保持 null、mode 落回 idle）。
          *
          *  判据用 `late.failure` 的**当前值**（不是 await）：此刻若 POST 已经 reject，
          *  我们就把真实原因报上去；若它还没落定，说明 POST 仍在途（正常流式的响应头
