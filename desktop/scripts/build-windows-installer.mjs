@@ -322,6 +322,16 @@ export function assertBundledWebAssets({ resourcesDir, existsSync: exists = exis
   return index
 }
 
+/** Fail the Windows package build unless the PSEC executable, DLL and license ship together. */
+export function assertBundledMxcRuntime({ resourcesDir, existsSync: exists = existsSync }) {
+  for (const file of ['wxc-exec.exe', 'mxc_ffi.dll', 'LICENSE.md']) {
+    const path = join(resourcesDir, 'mxc', file)
+    if (!exists(path)) {
+      throw new Error(`bundled MXC PSEC runtime missing: ${path} — run npm ci in desktop/`)
+    }
+  }
+}
+
 /**
  * Assert the NSIS custom include's placement rules (#816 / W-21 D1).
  *
@@ -3013,6 +3023,14 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
     // `from` is relative to the project dir (desktop/).
     extraResources: [
       { from: `${installerDir}/staging/python/`, to: 'python/', filter: ['**/*'] },
+      // #729: ship only the MXC PSEC launcher and native runtime needed by the
+      // Windows backend; the SDK's JavaScript package is not part of the app.
+      {
+        from: 'node_modules/@microsoft/mxc-sdk/bin/x64/',
+        to: 'mxc/',
+        filter: ['wxc-exec.exe', 'mxc_ffi.dll'],
+      },
+      { from: 'node_modules/@microsoft/mxc-sdk/LICENSE.md', to: 'mxc/LICENSE.md' },
       // W-21 D5 (#817): the terminal client's runtime. The app's own Electron
       // binary cannot host a raw-mode TUI (measured: no TTY in node mode), so
       // the artifact carries its own node.exe (node-runtime.lock.json).
@@ -3064,6 +3082,9 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
       // W-21 D2: a staged runtime holding only the dependency closure imports
       // nothing; fail the build instead of shipping an installer that cannot start.
       assertRuntimeProduct({ pythonExe, product: runtimeProduct })
+      if (context.electronPlatformName === 'win32') {
+        assertBundledMxcRuntime({ resourcesDir })
+      }
       // W-21 D5: the terminal client runs on the bundled node runtime.
       assertNodeRuntime({ nodeExe: join(resourcesDir, 'node', 'node.exe'), version: nodeVersion })
       // W-21 D3: the window loads the packaged renderer build from the service.

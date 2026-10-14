@@ -17,10 +17,11 @@
  *  挂载即初始化，关闭即丢弃）。
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Cpu, HardDrive, TriangleAlert, X } from 'lucide-react';
 import type { ModelCatalogEntry, SandboxBackendEntry } from '../lib/api';
+import { getSandboxBackends } from '../lib/api';
 import type { Project } from '../types';
 import type { StartSessionPayload } from '../lib/api';
 import { OptionPicker } from './OptionPicker';
@@ -105,8 +106,27 @@ function TaskCreationForm({
   const [model, setModel] = useState<string>('auto');
   // 运行位置：'auto' = 不发 sandbox_backend 键（部署默认）；其余为后端名
   const [sandbox, setSandbox] = useState<string>('auto');
+  const [workspaceBackends, setWorkspaceBackends] = useState<{
+    path: string;
+    entries: SandboxBackendEntry[];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    let current = true;
+    void getSandboxBackends(project.path).then(
+      (entries) => {
+        if (current) setWorkspaceBackends({ path: project.path, entries });
+      },
+      () => {
+        if (current) setWorkspaceBackends({ path: project.path, entries: [] });
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [project.path]);
 
   const promptValid = prompt.trim().length > 0;
 
@@ -144,18 +164,33 @@ function TaskCreationForm({
     })),
   ];
 
+  const projectBackends = workspaceBackends?.path === project.path &&
+      workspaceBackends.entries.length > 0
+    ? workspaceBackends.entries
+    : sandboxBackends.filter((b) => b.backend !== 'windows_psec');
+  const workspaceProbePending = workspaceBackends?.path !== project.path;
   const sandboxOptions = [
     { value: 'auto', title: '默认', description: '部署默认（本机）' },
-    ...sandboxBackends
+    ...projectBackends
       .filter((b) => b.available)
       .map((b) => ({
         value: b.backend,
-        title: b.backend === 'local' ? '本机' : b.backend === 'docker' ? 'Docker' : b.backend,
+        title: b.backend === 'local'
+          ? '本机'
+          : b.backend === 'docker'
+            ? 'Docker'
+            : b.backend === 'windows_psec'
+              ? 'Windows PSEC'
+              : b.backend,
         description: undefined,
       })),
   ];
   // 不可用的后端不进选项（不画饼）；但若之前选过已变不可用的，后端会 409 结构化报错
-  const unavailableBackends = sandboxBackends.filter((b) => !b.available);
+  const unavailableBackends = projectBackends.filter(
+    (b) =>
+      !b.available &&
+      !(workspaceProbePending && b.details.workspace_policy_required === 'true'),
+  );
 
   return (
     <Dialog.Content className="project-dialog" aria-label="新建任务">
@@ -265,7 +300,7 @@ function TaskCreationForm({
       )}
 
       {/* 运行位置 */}
-      {sandboxBackends.length > 0 && (
+      {(projectBackends.length > 0 || workspaceProbePending) && (
         <div className="project-field">
           <span className="project-field-label">运行位置</span>
           <OptionPicker
@@ -282,6 +317,11 @@ function TaskCreationForm({
             <span className="project-field-hint">
               不可用：{unavailableBackends.map((b) =>
                 `${b.backend}（${b.reason ?? '未知原因'}）`).join('、')}
+            </span>
+          )}
+          {workspaceProbePending && (
+            <span className="project-field-hint">
+              正在按当前项目路径核验 Windows PSEC 策略。
             </span>
           )}
           <span className="project-field-hint">
