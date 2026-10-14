@@ -163,7 +163,8 @@ class TestImportCompletionGate:
     def test_session_not_runnable_until_import_complete_marker(
         self, tmp_path: Path, docker_env
     ) -> None:
-        """AC3：无完成标记时取 sandbox → 拒绝（不把半份当已初始化）。"""
+        """AC3：快照导入映射（`snapshot_import`）无完成标记时取 sandbox → 拒绝
+        （不把半份当已初始化）。"""
         from agent_harness.sandbox.registry import WorkspaceImportIncompleteError
 
         registry = WorkspaceRegistry(root=tmp_path / "reg4", backend="docker")
@@ -177,6 +178,7 @@ class TestImportCompletionGate:
                     "workspace_root": str(tmp_path / "nowhere"),
                     "container_name": "agent-harness-sess_half",
                     "volume_name": "agent-harness-sess_half",
+                    "snapshot_import": True,
                 }
             ),
             encoding="utf-8",
@@ -184,3 +186,28 @@ class TestImportCompletionGate:
 
         with pytest.raises(WorkspaceImportIncompleteError):
             registry.get("sess_half")
+
+    def test_pre_snapshot_docker_mapping_recovers_without_marker(
+        self, tmp_path: Path, docker_env
+    ) -> None:
+        """#1048：pre-#1048 的 docker 映射（无 `snapshot_import` 字段、无完成标记）其
+        volume 从未经过快照导入，恢复时**不得**被误判为半份导入而永久卡死。"""
+        registry = WorkspaceRegistry(root=tmp_path / "reg5", backend="docker")
+        ws_dir = tmp_path / "reg5" / "workspaces"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "sess_legacy.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "sess_legacy",
+                    "backend": "docker",
+                    "workspace_root": str(tmp_path / "nowhere"),
+                    "container_name": "agent-harness-sess_legacy",
+                    "volume_name": "agent-harness-sess_legacy",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        sandbox = registry.get("sess_legacy")
+
+        assert sandbox.volume_name == "agent-harness-sess_legacy"

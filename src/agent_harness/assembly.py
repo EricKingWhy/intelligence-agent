@@ -906,9 +906,19 @@ async def build_runtime(
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
-        return project_instructions.load_for_session(
-            session_id, instruction_cwd,
-        ).with_runtime_context(runtime_context)
+        # #1048 AC8：与 build_runtime 的指令加载分支**同源**（`uses_sandbox_path_semantics`）：
+        # 容器（Docker）工作区经 `load_for_sandbox_session` 用 sandbox 根（如 /workspace）缓存，
+        # 这里若改用宿主 `instruction_cwd` 会与缓存 cwd 不一致 ⇒ `ValueError: session cwd
+        # changed`，每个 Docker 会话首个 context build 就炸。PSEC 时代两者恰好都等于宿主
+        # 路径故未暴露；Docker 的容器内根 ≠ 宿主源路径，必须走同一加载器。
+        snapshot = (
+            project_instructions.load_for_sandbox_session(
+                session_id, instruction_workspace
+            )
+            if uses_sandbox_path_semantics(instruction_workspace)
+            else project_instructions.load_for_session(session_id, instruction_cwd)
+        )
+        return snapshot.with_runtime_context(runtime_context)
 
     # #823 / MM-02（A2）：视觉能力按**当前请求模型**判定（PRD D6——"fallback 自动
     # 降级"）。主/备两级各自解析声明；运行时在每次 build 前按 coordinator 的当前角色

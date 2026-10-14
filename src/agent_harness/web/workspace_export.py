@@ -23,13 +23,14 @@ import shutil
 import stat
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import anyio
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from agent_harness.sandbox.paths import is_absolute_path
+from agent_harness.sandbox.registry import IMPORT_COMPLETE_MARKER
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
@@ -112,31 +113,10 @@ def build_export_archive(source_root: Path, dest: Path) -> None:
             raise ValueError(f"含不安全特殊项，拒绝：{rel}")
 
 
-def _materialize_sandbox_workspace(sandbox: Any, staging: Path) -> None:
-    """把 sandbox 工作区物化到宿主暂存目录（导出源），不走宿主 /workspace 直连。
-
-    复用 `Sandbox.export_to_host`（契约方法，各后端自带实现）：Docker 走容器内 tar
-    快照，其余后端走 workspace_root 目录复制——导出侧不再按后端类型分叉。
-    """
-    sandbox.export_to_host(staging)
-
-
 def register_workspace_export_routes(
     app: FastAPI, *, validate_session_id: Callable[[str], str]
 ) -> None:
     """把工作区导出路由挂到既有 app（`create_app` 里一行调用的接入面）。"""
-
-    async def _maybe_sandbox(session_id: str) -> Any:
-        from agent_harness.web.workspace_files import session_sandbox
-
-        try:
-            return await session_sandbox(
-                app.state.agent, session_id, validate_session_id
-            )
-        except HTTPException as exc:
-            if exc.status_code == 404:
-                return None
-            raise
 
     @app.post("/api/sessions/{session_id}/workspace/export")
     async def export_workspace(
@@ -147,9 +127,12 @@ def register_workspace_export_routes(
         """显式导出工作区到全新宿主目录（AC5/AC6）。
 
         错误矩阵：缺 `host_target` → 422（Pydantic）/ 非绝对路径 → 422 /
-        目标已存在 → 409 / 导出树含不安全成员 → 422。
+        目标已存在 → 409 / 会话不存在或无 workspace 映射 → 404（复用
+        `workspace_files.session_sandbox` 的既有语义）/ 导出树含不安全成员 → 422。
         """
         from tempfile import mkdtemp
+
+        from agent_harness.web.workspace_files import session_sandbox
 
         target = Path(body.host_target)
         _require_absolute_target(body.host_target)
@@ -158,13 +141,15 @@ def register_workspace_export_routes(
                 status_code=409,
                 detail=f"导出目标已存在，拒绝覆盖：{target}",
             )
-        sandbox = await _maybe_sandbox(session_id)
+        # 会话不存在 / 无 workspace 映射 → 404（不吞成"导出空目录"），只导出真实工作区。
+        sandbox = await session_sandbox(
+            app.state.agent, session_id, validate_session_id
+        )
         staging = Path(mkdtemp(prefix="export-staging-"))
         try:
-            if sandbox is not None:
-                await anyio.to_thread.run_sync(
-                    _materialize_sandbox_workspace, sandbox, staging
-                )
+            await anyio.to_thread.run_sync(sandbox.export_to_host, staging)
+            # harness 内部簿记（导入完成标记）不是用户工作产物，不进导出树。
+            (staging / IMPORT_COMPLETE_MARKER).unlink(missing_ok=True)
             try:
                 await anyio.to_thread.run_sync(build_export_archive, staging, target)
             except ValueError as error:

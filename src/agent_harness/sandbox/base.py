@@ -212,8 +212,9 @@ class Sandbox(ABC):
 
         非抽象（**不并入 ADR-0001 冻结的 6 个抽象方法契约**，同 `path_kind` /
         `shell_environment`）：基类给保守的「`workspace_root` 目录复制」默认，
-        容器后端（`DockerSandbox`）覆写为容器内 tar 快照。导出与跨会话工作区复制
-        一律经本方法——调用方不按后端类型分叉，也不靠 `getattr` 嗅探能力。
+        容器后端（`DockerSandbox`）覆写为容器内 tar 快照。**容器内工作区**的导出与
+        跨会话复制经本方法（调用方不靠 `getattr` 嗅探后端能力）；宿主目录语义的
+        local 后端 fork 仍走 `shutil.copytree` + 同卷 rename 的既有发布路径。
 
         `dest` 被当作**内容副本的目标目录**（已存在则并入，不覆盖 `dest` 本身），
         与源各自独立、不共享 inode。

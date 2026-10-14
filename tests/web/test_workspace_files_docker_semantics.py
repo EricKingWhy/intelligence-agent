@@ -42,8 +42,10 @@ class TestDockerWorkspaceUsesSandboxSemantics:
         local = LocalSubprocessSandbox(workspace_root=tmp_path)
         assert uses_sandbox_path_semantics(local) is False
 
-    def test_workspace_files_route_resolves_docker_paths_via_sandbox(self) -> None:
-        """AC8：web workspace 文件路由对 docker 走 Sandbox 边界（不把 /workspace 当宿主路径）。"""
+    def test_workspace_semantics_helper_maps_docker_like_sandbox(self) -> None:
+        """AC8 语义锚点：`workspace_semantics_for_sandbox` 委托 assembly 判据，对容器内
+        工作区返回 "sandbox"。（web 文件路由本身经 Sandbox 抽象读写，不按后端分叉；本
+        测试只钉住这个被保留的语义锚点的判据。）"""
         from agent_harness.web.workspace_files import workspace_semantics_for_sandbox
 
         assert workspace_semantics_for_sandbox(_DockerLikeSandbox()) == "sandbox"

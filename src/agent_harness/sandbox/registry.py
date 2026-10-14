@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 #: Docker 工作区「快照导入已完成」标记（容器内 /workspace 下）。#1048 AC3：
 #: 会话在标记存在前不可运行；已持标记的持久化 volume 恢复时不重导入。
-_IMPORT_COMPLETE_MARKER = ".harness-import-complete"
+#: **公开**：harness 内部状态文件，web 层（文件浏览 / 导出）据此把它从用户可见面
+#: 过滤掉——它是 bookkeeping，不是用户工作产物（同 `_list_files` 过滤进度目录的取向）。
+IMPORT_COMPLETE_MARKER = ".harness-import-complete"
 
 
 class WorkspaceBindingError(RuntimeError):
@@ -213,8 +215,10 @@ class WorkspaceRegistry:
 
         sandbox = self._instantiate_sandbox(owner_mapping)
         sandbox.ensure_started()
-        if owner_mapping.get("backend") == "docker":
-            # #1048 AC3：无完成标记（半份/中断的导入）时拒绝运行。
+        if owner_mapping.get("snapshot_import"):
+            # #1048 AC3：**快照导入**路径建立的映射，无完成标记（半份/中断的导入）
+            # 时拒绝运行。pre-#1048 的 docker 映射没有该字段（也无标记），其 volume
+            # 从未经过快照导入，不适用该闸门——照常恢复，不误判为半份。
             self._assert_import_complete(sandbox, session_id)
 
         self._cache[owner_session_id] = sandbox
@@ -400,6 +404,11 @@ class WorkspaceRegistry:
             # 确定性命名：基于 session_id，进程重启后能按名字找回容器/volume。
             mapping["container_name"] = f"agent-harness-{session_id}"
             mapping["volume_name"] = f"agent-harness-{session_id}"
+            # #1048 AC3：本映射由**快照导入**路径建立。_build_mapping 只在新导入
+            # 成功后才落盘映射，故该字段等价于"导入完成"的持久证据；它同时让
+            # **pre-#1048** 的 docker 映射（无此字段、其 volume 是空的或仅 agent 自写）
+            # 走恢复时不被误判为"半份导入"（见 get() 的完成标记闸门）。
+            mapping["snapshot_import"] = True
         return mapping
 
     def _instantiate_sandbox(self, mapping: dict) -> Sandbox:
@@ -456,16 +465,16 @@ class WorkspaceRegistry:
             raise WorkspaceImportError(f"导入源不是目录：{source}")
         _reject_escaping_symlinks(source)
         sandbox.copy_in(source, str(sandbox.workspace_root))
-        sandbox.write_text(_IMPORT_COMPLETE_MARKER, "")
+        sandbox.write_text(IMPORT_COMPLETE_MARKER, "")
 
     def _assert_import_complete(self, sandbox: Sandbox, session_id: str) -> None:
         """确认 Docker 工作区已完成导入（#1048 AC3）；无标记即拒绝运行。"""
         try:
-            sandbox.read_text(_IMPORT_COMPLETE_MARKER)
+            sandbox.read_text(IMPORT_COMPLETE_MARKER)
         except (FileNotFoundError, KeyError, OSError) as exc:
             raise WorkspaceImportIncompleteError(
                 f"Session '{session_id}' 的 Docker 工作区缺少导入完成标记 "
-                f"（{_IMPORT_COMPLETE_MARKER}），拒绝运行以免把半份 workspace "
+                f"（{IMPORT_COMPLETE_MARKER}），拒绝运行以免把半份 workspace "
                 "当作已初始化。"
             ) from exc
 
