@@ -40,14 +40,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    ClassVar,
-    Protocol,
-    TypeVar,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, runtime_checkable
 from uuid import uuid4
 
 import anyio
@@ -342,10 +335,6 @@ _SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 #: 此时 store 的 seq 守卫拒写。重读快照即可拿到新号——3 次足够覆盖真实并发度
 #: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
 _WRITE_CONFLICT_ATTEMPTS = 3
-
-#: ``_apply_write_with_conflict_retry`` 的返回值类型（写路径 callback 各自返回
-#: ``ModelChange`` / ``PermissionChange`` / ``TaskOutcome`` / ``object``）。
-T = TypeVar("T")
 
 #: #516 列表路径专用的 to_thread 限流器（模块级单例：SessionService 每次调用现造，
 #: 实例字段挂不住跨请求状态）。anyio 默认 40 线程会把 100 并发突发切成 ~3 波——
@@ -1073,6 +1062,11 @@ def _run_status_snapshot(run_manager: RunManager, session_id: str) -> str:
     if run.paused:
         return "in-flight(paused)"
     return "in-flight(running)"
+
+
+#: ``_apply_write_with_conflict_retry`` 的返回值类型：透传 callback 的领域结果
+#: （``ModelChange`` / ``PermissionChange`` / ``TaskOutcome``）。
+T = TypeVar("T")
 
 
 class SessionService:
@@ -2967,6 +2961,14 @@ class SessionService:
         业务前置检查（模型可解析、权限档合法、挂起审批、TaskOutcome 与成功后的
         progress 刷新）留在各命令原处——本方法只管「在正确的聚合上执行 callback，
         撞号就有界重跑」，不替调用方决定写什么。
+
+        与 #1024 的两层重试**不叠加**：本方法构造的聚合从未 ``deliver_to_runtime()``
+        ⇒ store 的 ``allocate`` 快照门保持关闭、撞号仍 fail-closed 拒写，这里的
+        3 次重试不会被 store 的锁内改号静默吞掉（两层覆盖不同面：store 管「同号
+        拒写」，本方法管「调用方在自己的命令边界重读重算」）。
+
+        调用面是**四条**路径：上面三条命令 + ``progress_resolve_external_edit``
+        （经 ``_apply_task_handler`` 落地，自动共享本编排点）。
         """
         attempts_left = _WRITE_CONFLICT_ATTEMPTS
         while True:
@@ -5572,7 +5574,8 @@ class SessionService:
     # 校验与落盘判据住在 `session/task.py`（handler 硬校验，拒绝零事件；接受/
     # 释放走 expected_version CAS）；本类只做它职责内的两件事：会话存在性 +
     # store 写入路径（在途 run 挂 live 聚合，否则读快照 + seq 冲突重试——
-    # 与 change_model/change_permission_mode 同款，语义单点见 BUG-011 注释）。
+    # 与 change_model/change_permission_mode 同款，编排单点见
+    # ``_apply_write_with_conflict_retry`` 的 docstring）。
     # 错误以 TaskOutcome 返回（error_kind: shape/conflict），不抛领域异常——
     # HTTP 翻译在 web 层按 kind 走 422/409（spec 11 §6.1 口径）。
 
