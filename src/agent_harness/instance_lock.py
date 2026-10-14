@@ -164,17 +164,29 @@ def _take_os_lock_blocking(fd: int) -> None:
     平台差异（必须记账，不得夸大为「等价」）：POSIX `flock(LOCK_EX)` 无限等待；
     Windows `msvcrt.LK_LOCK` 以 1 秒为间隔重试 **10 次**后抛 `OSError`——即 Windows
     上单次等待上限约 10 秒。⚠ 这段是**按 CPython 文档与实现**写下的平台断言，
-    **未在本机 Windows 核实**（本机是 Linux）。本仓 CI **有** Windows 车道
-    （`mm08-d2d3-windows-verify.yml` / `mm08-windows-verify.yml` /
-    `windows-installer-smoke.yml` 共 5 个 `runs-on: windows-latest` job，另有
-    `gate-nightly.yml` 的 `os: [ubuntu-latest, windows-latest]` 矩阵），但**没有一条**
-    在 Windows 上执行过本原语：全仓 Python 全量套件（`tests/`——`append_event` 无条件走
-    `session_append_lock`，故每条落盘用例都间接执行本原语，含
-    `tests/session/test_store_cross_process_seq.py`）只跑在 ubuntu 的
-    `gate1.yml` / `gate-nightly.yml`；Windows 车道只跑前端套件与三个具名 pytest 文件
-    （`test_cli_image.py` / `test_local_byte_store.py` / `test_instance_lock.py`），而
-    `test_instance_lock.py` 只调 fail-fast 的 `_take_os_lock`。⇒ 这条断言没有任何车道
-    看得见。极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
+    **未在本机 Windows 核实**（本机是 Linux）。
+
+    **覆盖现状（逐句一手证据；别把它读成「没有一条车道看得见」）**：
+    ① `grep -rn "runs-on: windows" .github/workflows/` 命中 5 个 job，分布在 3 个工作流
+    ——`mm08-d2d3-windows-verify.yml` 2 个、`mm08-windows-verify.yml` 2 个、
+    `windows-installer-smoke.yml` 1 个；另有 `gate-nightly.yml` 的
+    `os: [ubuntu-latest, windows-latest]` 矩阵，但那是 **tui** job（`npm test`），与 Python 无关。
+    ② 这 5 个 job 里只有 2 个跑 pytest（`grep -rln pytest .github/workflows/` 命中 5 个文件，
+    其中 Windows 的只有 `mm08-d2d3-windows-verify.yml` 的 `cli` job 与
+    `mm08-windows-verify.yml` 的 `cli` job）：前者跑
+    `pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py
+    tests/test_instance_lock.py`，后者只跑 `tests/test_cli_image.py`。
+    ③ 前者**看得见**这条断言：插桩实测（隔离副本，逐用例计数）`tests/test_cli_image.py`
+    的 4 个用例各进入 `_take_os_lock_blocking` 8 次，合计 **32 次**；同一探针在 `store.py`
+    与 `instance_lock` 两个命名空间上包 `session_append_lock`，实测两者是**同一个函数
+    对象**（`is` 为真）⇒ 32 次归该对象。该文件唯一的 `sys.platform` 判据属
+    `test_unreadable_image_path_is_reported_cleanly` 那条用例，上述 4 例不带平台守卫 ⇒
+    在 win32 上这 32 次会真走 `msvcrt.locking` 分支。
+    ④ 但**没有 Windows 实测读数**：这两条车道都靠 `push` 特性分支触发、非常驻，
+    GitHub 上各自最后一次运行都在 2026-10-09，而本原语 2026-10-13（#1063，`2829216f`）
+    才落地 ⇒ 迄今没有一次 Windows 运行跑过本原语。常驻的 `gate1.yml` / `gate-nightly.yml`
+    后端 job 是 `runs-on: ubuntu-latest`。极端持有者下 Windows 会先失败，这是平台语义，
+    不是可消除的缺陷。
     """
     if sys.platform == "win32":
         import msvcrt

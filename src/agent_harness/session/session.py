@@ -799,12 +799,18 @@ class Session:
         """
         # 终态幂等（#1103，CAS）：该 run 已有终态 ⇒ 拒写并**返回既存的那一枚**。
         # 同一 run 的两次 `end_run`（重入的失败臂 / 取消臂）此前会落下
-        # `run/completed` 与 `run/failed` 两条，durable 真相层自相矛盾——所有按
-        # 按 `RUN_TERMINAL_TYPES` 投影终态的下游看到**自相矛盾的终态集合**。
-        # 逐下游实读（口径不一，不得写成「都会看到两条」）：`progress.py` 两条
-        # 都发（`run_completed` 里程碑 + `run_failed` 失败项）；`interrupt.py` /
-        # `task.py` 是 pop / discard（第二条 no-op）；`multiagent/provider.py`
-        # 取 `next(reversed(...))`（last-wins）。
+        # `run/completed` 与 `run/failed` 两条，durable 真相层自相矛盾——按
+        # `RUN_TERMINAL_TYPES` 投影终态的下游会看到**自相矛盾的终态集合**。
+        # 逐下游实读（口径不一，不得写成「都会看到两条」；本清单非穷举）：
+        # `progress.py` 两条都发（`run_completed` 里程碑 + `run_failed` 失败项）；
+        # `interrupt.py` / `task.py` 是 pop / discard（第二条 no-op）；
+        # `multiagent/provider.py` 取 `next(reversed(...))`、`store.py` 的
+        # `_terminal_trace_field` 只看末条事件（两者都 last-wins，取到哪条看落盘顺序）。
+        # ⚠ `fork.py` 是**后果最重**的一个：`_run_open_delta` 是**累计计数器**
+        # （`run/started` +1、终态 −1），同一 run 落两条终态 ⇒ 净 −1 ⇒
+        # `find_fork_boundaries` 丢掉该点之后的锚点、`_validate_run_complete`
+        # 直接抛「负计数」（本机实测：单终态 `[1, 4]`，补一条多余的 `run/failed`
+        # 后变 `[1]` + `ForkBoundaryError`）。
         # 判据与 `run/resumed` 的 `expected_version` 同族：写前核对
         # 当前状态，不符即拒（EventStoreDB 的 expected-revision /
         # Marten 的 `FetchForWriting` 同型）。⚠ 「同族」只指**判据形状**
