@@ -125,6 +125,7 @@ export default function App() {
     sessionsError,
     titlesById,
     recoverState,
+    failedDraft,
     selectSession,
     submitTask,
     sendMessage,
@@ -1625,6 +1626,10 @@ export default function App() {
                     /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
                     ownership={ownership}
                     constraintInputPending={constraintInputPending}
+                    /* #1148：分离投递（窗外落定）迟到的失败原文——hook 把没送出去的
+                       草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
+                       用户（绝不覆盖他已打的新草稿）。 */
+                    failedDraft={failedDraft}
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */

@@ -168,6 +168,7 @@ from agent_harness.session.derive import (
     latest_direct_user_input_event,
     session_is_delegated_child,
 )
+from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import (
     CONTEXT_PROTECTED_FACTS_EXCEEDED,
     STEER_APPLIED,
@@ -2721,10 +2722,22 @@ class AgentRuntime:
                 async for streamed in self._terminal_exception(arms, steps=steps, error=error):
                     yield streamed
             except Exception as terminal_error:  # noqa: BLE001
-                self._log("task_failed", "失败兜底事件写入失败（存储故障？）",
-                          span_id=run_span, outcome="error",
-                          error=str(terminal_error),
-                          error_type=type(terminal_error).__name__, exc_info=True)
+                # 按异常类型分流 + 补会话/run 标识（#1061）：撞号写不进去
+                # （SeqConflict）与设备故障是两回事，一律叫「存储故障？」会让排障认错
+                # 方向；终态缺一条时 durable 流只剩悬空的 run/started，定位全靠这条
+                # 日志指认是哪个会话的哪个 run（`run_span` 就在本作用域内）。
+                if isinstance(terminal_error, SeqConflict):
+                    self._log("task_failed", "失败终态写入撞号（终态协商也未能写入）",
+                              span_id=run_span, outcome="error",
+                              session_id=session.session_id, run_id=arms.run_id,
+                              error=str(terminal_error),
+                              error_type="SeqConflict", exc_info=True)
+                else:
+                    self._log("task_failed", "失败兜底事件写入失败（存储故障）",
+                              span_id=run_span, outcome="error",
+                              session_id=session.session_id, run_id=arms.run_id,
+                              error=str(terminal_error),
+                              error_type=type(terminal_error).__name__, exc_info=True)
             arms.result_holder.append(
                 AgentRunResult(status=STATUS_FAILED, final_text="", steps=steps),
             )

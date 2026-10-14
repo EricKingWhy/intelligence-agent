@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
+import type { AgentEvent, ConversationState, FailedDraft, SessionDeleted, SessionMode, SessionSummary } from '../types';
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
@@ -500,6 +500,34 @@ export function useSession() {
      「effect 又跑了一次」，只有比对前后两个 mode 才分得开。渲染期写入（与
      `conversationRef` 同款）保证 effect 看到的是**这一拍**的值。 */
   const prevModeRef = useRef<SessionMode>(mode);
+
+  /** #1148：**分离投递**（detached delivery）迟到的失败——要把草稿还给用户。
+   *
+   *  两条路径的结局都来得比判定窗口（`EARLY_RESPONSE_WINDOW_MS` = 1200ms）晚，
+   *  而窗口只量「响应头到没到」（两条路径各自的成因见两个调用点的注释）：
+   *   - `sendFollowUp` 窗外落定；
+   *   - `submitTask` 认领成功之后 POST 才 reject。
+   *  两条路都无从 await（正常流式的响应头要等 run 结束才下发），于是先按已受理
+   *  返回、失败时经这份状态把原文投影回输入框（App → Composer 的既有投影方式，
+   *  与 `PresetTask` 同款：载荷对象引用变化即触发一次注入）。
+   *
+   *  ⚠ 这份状态在**下一次投递时清掉**（见 `sendFollowUp` 开头）。理由不是"切页签会
+   *  卸载 Composer"——实读 `App.tsx`，非激活面是用 `hidden` 藏、**不卸载**。真正的
+   *  理由是**回执的生命周期**：它只对触发它的那次投递有意义，已兑现（用户拿到过那段
+   *  原文）之后就该作废，否则任何一次 Composer 重挂都会把旧原文再注入一次——而那条
+   *  消息可能早已重发成功。 */
+  const [failedDraft, setFailedDraft] = useState<FailedDraft | null>(null);
+  /** 把一次分离投递的失败交回 Composer（#1148）。
+   *
+   *  只记"文本"：清空 / 回填的决策仍归 Composer（它才知道输入框里现在是不是有更新的
+   *  草稿）。每次都是新对象 ⇒ 同一段文本连续失败两次也各算一次注入（承重理由见
+   *  `FailedDraft`）。
+   *
+   *  会话归属不必另立字段：调用点都先过 `streamGenRef` 代际闸，而 `selectSession`
+   *  必然推进代际，所以"用户已切走"的失败在到达这里之前就被挡掉了。 */
+  const reportDetachedFailure = useCallback((text: string) => {
+    setFailedDraft({ text });
+  }, []);
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -1127,6 +1155,9 @@ export function useSession() {
         // 精确得多，捕获下来供认领失败时报出去；同时也接住 rejection，不让它
         // 变成 unhandled rejection。（用属性承载而不是普通局部变量：TS 会把
         // 「初值 null 且只在本作用域读」的 let 收窄成 null，异步写入看不见。）
+        // ⚠ 分工（#1148 双轴审查 P2）：`late.failure` **只**供下面 `discoverNewSessionId`
+        // 抛错时取用（认领超时的兜底原因）；认领**成功**之后的 POST 失败不走它，走
+        // 下方 `started.catch` 的回填通道。两条通道互斥，别把 `late.failure` 当活代码读。
         const late = { failure: null as Error | null };
         started.catch((e) => {
           late.failure = e instanceof Error ? e : new Error(String(e));
@@ -1138,6 +1169,33 @@ export function useSession() {
           throw late.failure ?? e; // POST 的真实失败原因优先于「认领超时」
         }
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
+        /* #1148：**认领成功之后** POST 才失败的话，也必须把原文交回用户。
+         *
+         *  原先这条 promise 的结局只写进上面的 `late` 对象，而它**只在认领抛错时**
+         *  被读一次 ⇒「会话已创建、响应未收全时断网 / 401 / 中途 5xx」这个序列里，
+         *  失败写进去却无人读：`submitTask` 返回 null（= 成功）⇒ `handleSubmit`
+         *  返回 true ⇒ Composer 清空输入框。文本消失，而且**不是以失败的形式**。
+         *
+         *  修法不是"再读一次快照"：快照只看得到**与认领同一微任务刻度**落定的
+         *  reject，晚一个微任务就 MISS——一个只在一个微任务窗口里生效的守卫比没有
+         *  守卫更坏（#1144 第一版被独立审查 Correctness 轴打红过）。
+         *
+         *  正确形态 = 把"已认领"之后的 POST 当成**分离投递**（与 `sendFollowUp`
+         *  窗外路径同款，也是 DSH `settleDetachedFailure` 的做法）：不能 await 它
+         *  （响应头要等 run 结束），但它的迟到失败必须并入**同一条**失败通道——
+         *  挂 `.catch`，把原文经 `reportDetachedFailure` 交回 Composer。
+         *
+         *  两个守卫：
+         *   - 代际已换代（`streamGenRef.current !== gen`）⇒ 这是过期会话的事，不污染新会话；
+         *   - `opts?.ownError`（TaskCreationDialog 的「在此项目中新建任务」）⇒ 失败文案
+         *     回浮层里显示，原文在**弹窗的输入框**里而不在 Composer；照抄这条通道会让
+         *     用户在对话输入框里看到一段凭空冒出来的任务文本。 */
+        started.catch((e: unknown) => {
+          if (streamGenRef.current !== gen) return;
+          if (opts?.ownError) return;
+          reportDetachedFailure(payload.task);
+          setError(`提交失败：${(e as Error).message}`);
+        });
         // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
         // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
@@ -1155,7 +1213,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream, markStreamFrame],
+    [refreshSessions, attachLiveStream, markStreamFrame, reportDetachedFailure],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
@@ -1374,6 +1432,10 @@ export function useSession() {
       },
     ): Promise<boolean> => {
       setError(null);
+      // 上一次的失败回执到此作废（#1148）：它只对触发它的那次投递有意义，已经兑现过
+      // （用户拿到过那段原文）就该清掉——否则任何一次 Composer 重挂都会把这段旧原文
+      // 再注入一次，而那条消息可能早已重发成功。
+      setFailedDraft(null);
       // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
       liveSidRef.current = sessionId;
       setReconnecting(false);
@@ -1510,8 +1572,40 @@ export function useSession() {
         // 窗外 = 判为 launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
         // 悬挂的 promise 有两条通道都要消费：rejection，以及**迟到的落定**（#221）。
         // 两条都先挂上——后面的代际守卫可能提前 return，先挂才不会有 unhandled rejection。
+        /* #1148：这条迟到的纠正**必须把失败交回调用方**，不能只设横幅。
+           原先的推理是"真实的失败（4xx）是完整且极短的响应，必在窗内落定"，于是
+           窗外这一支只 `setError` 就咽下结局。那句话把**响应体的长度**当成了**响应头
+           的到达时间**：待裁决 409 要先在后端把 pending 裁决查出来（`resume_and_launch`
+           → `recover`），冷启动 / 慢盘上越过 1200ms 完全正常。一旦越窗，用户看到的是
+           "横幅说失败、输入框却是空的"（`settle` 的窗外支回 `true` ⇒ Composer 当已
+           受理清掉草稿）——正是 #1029 要消灭的丢文本，只是换到了更慢的网络上。
+           成熟产品同款：DSH 对分离投递（detached）的失败专门走 `settleDetachedFailure`
+           （`packages/client/ui-conversation/src/client/input/facade.ts:765-775`）——
+           恢复草稿，并把失败经**同一条** sink-settled 通道交回；oh-my-pi
+           `restoreDetachedDraft`（`.../slash-commands/helpers/draft.ts:16-30`）同义。
+           为什么仍然不 await 它：正常流式的响应头会被压到 run 结束才下发，await 就把
+           一次正常发送的返回值挂到整场 run 结束。于是改用**投影通道**：先返回"已受理"
+           （Composer 乐观清空），迟到的失败经 `reportDetachedFailure` 把原文还回输入框。 */
         void pending
-          .then((settled) => (streamGenRef.current === myGen ? settle(settled, true) : undefined))
+          .then(async (settled) => {
+            if (streamGenRef.current !== myGen) return;
+            let accepted: boolean;
+            try {
+              accepted = await settle(settled, true);
+            } catch (e) {
+              if (streamGenRef.current !== myGen) return;
+              myGen = ++streamGenRef.current;
+              setMode({ kind: 'viewing', sessionId });
+              setError(`续聊失败：${(e as Error).message}`);
+              reportDetachedFailure(content);
+              return;
+            }
+            /* 窗外落定的**未受理**（`settle` 的 recovery-conflict 支就地 resolve
+               `false`，不 throw）：这条结局同样回不到调用方——`sendFollowUp` 早已按
+               "已受理"返回，那个 `false` 没有任何人去接。所以必须在这里把它接上，
+               否则「慢网络下的待裁决 409」依旧丢文本（票面的第一条路径）。 */
+            if (accepted === false) reportDetachedFailure(content);
+          })
           .catch((e) => {
             if (streamGenRef.current !== myGen) return;
             /* 迟到的失败：当初判 launched 判错了，这条 WS 流与本次投递无关 ⇒
@@ -1522,6 +1616,7 @@ export function useSession() {
             myGen = ++streamGenRef.current;
             setMode({ kind: 'viewing', sessionId });
             setError(`续聊失败：${(e as Error).message}`);
+            reportDetachedFailure(content);
           });
         // await 期间已被取代（切会话 / 取消 / 又发了一条）⇒ 到此为止：下面两行会
         // **无条件覆写**会话级游标与流引用，把一条失效的流挂到新会话身上（submitTask
@@ -1567,7 +1662,7 @@ export function useSession() {
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
-    [attachLiveStream, markStreamFrame],
+    [attachLiveStream, markStreamFrame, reportDetachedFailure],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -2140,6 +2235,7 @@ export function useSession() {
     sessionsError,
     titlesById,
     recoverState,
+    failedDraft,
     selectSession,
     submitTask,
     sendMessage: sendFollowUp,

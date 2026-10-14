@@ -983,8 +983,10 @@ async def test_failed_arm_classifies_only_while_the_model_call_is_open(
     assert run_failed.step_id is None
     assert kit.since(mark)[-2].run_id == RUN_ID, "model/failed 与终态挂同一个 run"
 
-    # 同类文本但不在途：退回类型名，不误标 provider 归因
-    other = _kit(session)
+    # 同类文本但不在途：退回类型名，不误标 provider 归因。**换一个 run_id**：
+    # 终态按 run 幂等（#1103），同一个 run 上的第二次 `end_run` 会被拒写并返回
+    # 既存终态——本段要的是「同一枚聚合上**另一个 run** 的归因窗口未开」。
+    other = _kit(session, run_id="run-2")
     mark = len(session.events)
     await _drain(
         other.runtime._terminal_exception(
