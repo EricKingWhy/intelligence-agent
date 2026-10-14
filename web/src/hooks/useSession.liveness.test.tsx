@@ -134,9 +134,11 @@ async function mount(): Promise<void> {
   });
 }
 
-/** 走完「判别窗口」驱动一次不落地的投递（悬挂 = 判 launched ⇒ 直驱 WS 接流）。 */
-async function driveLaunched(action: () => Promise<void>): Promise<void> {
-  let pending: Promise<void> | undefined;
+/** 走完「判别窗口」驱动一次不落地的投递（悬挂 = 判 launched ⇒ 直驱 WS 接流）。
+ *  返回值放宽到 `unknown`：#1029 之后 `sendMessage` 回报**投递是否被受理**
+ *  （`Promise<boolean>`），而 `flushQueue` / `resumePausedRun` 仍是 `Promise<void>`。 */
+async function driveLaunched(action: () => Promise<unknown>): Promise<void> {
+  let pending: Promise<unknown> | undefined;
   await act(async () => {
     pending = action();
     await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);

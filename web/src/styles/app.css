@@ -5117,6 +5117,27 @@ button.json-row {
   white-space: nowrap;
   max-width: 100%;
 }
+/* #1029 AC1：「去裁决」引导——错误横幅内联的可执行动作。视觉与 .recover-btn 同族
+   （同为"待人工裁决"语境），足迹更小：横幅是单行条，按钮不得把它撑高。用内联流
+   （不把 .app-error 改成 flex）——横幅是共享的通用错误条，别为这一处改它的版式。 */
+.app-error-action {
+  margin-left: var(--space-sm);
+  padding: 1px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.app-error-action:hover {
+  background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+.app-error-action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
 /* 恢复成功状态条——与 interrupt-banner 同族（状态条，非错误）。复用既有
    --success（index.css 暗/亮两套都有定义），不引入新 token（§15）。 */
 .recover-done {

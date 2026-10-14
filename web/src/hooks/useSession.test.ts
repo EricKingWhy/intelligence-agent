@@ -383,3 +383,58 @@ describe('decideFollowUpOutcome — /messages 结局的单一分派表（#221）
       .toEqual({ kind: 'fail', text: 'Send failed: 500' });
   });
 });
+
+// ── #1029 AC1/AC2：发送撞上「待人工裁决」时的专门分支 ──
+// 后端 RecoveryConflict 的 detail 已结构化（#596：`{message, pending_decisions}`），
+// 但发送路径原先只读 message，把结构化的 pending_decisions 丢在读出的那一刻——于是
+// 用户拿到的是一句照着做不了的协议原文（内嵌 POST /recover + decisions=[…]），
+// 裁决面板也不会被唤起。
+describe('decideFollowUpOutcome — RecoveryConflict 409 消费结构化 pending_decisions（#1029）', () => {
+  const base = {
+    status: 409, hasBody: true, contentType: 'application/json',
+    mode: 'steer', detail: '存在需要人工裁决的 UNKNOWN Operation（bash）：先 POST /api/sessions/s-1/recover 携带 decisions=[{tool_call_id, verdict}] 结清',
+    hasQueueId: false,
+  } as const;
+  const DECISIONS = [
+    {
+      tool_call_id: 'call_1', tool_name: 'bash', state: 'UNKNOWN' as const,
+      default_action: 'RETRY' as const, risk_level: 'high' as const,
+      probe: { verifiable: false, suggested_action: '先核查该调用的外部事实' },
+    },
+  ];
+
+  it('409 + pending_decisions → 裁决支：带上面板要用的清单，文案不照抄协议原文', () => {
+    const outcome = decideFollowUpOutcome({ ...base, pendingDecisions: DECISIONS });
+    expect(outcome.kind).toBe('recovery-conflict');
+    // 清单原样透传（后端是唯一真相；hook/分派表都不发明值——不变量 #22）。
+    expect(outcome).toMatchObject({ pendingDecisions: DECISIONS });
+    // 文案必须是给人看的：不得内嵌 `decisions=[{tool_call_id, verdict}]` 这类协议原文。
+    const text = (outcome as { text: string }).text;
+    expect(text).toContain('裁决');
+    expect(text).not.toContain('tool_call_id');
+    expect(text).not.toContain('POST /api/sessions');
+  });
+
+  it('409 但清单缺席/为空 → 逐字退回原有 fail 支（不假装有可裁决项）', () => {
+    // 这是**向后兼容的判据**：发送路径之外的 409（形状非法、旧版后端）行为不变。
+    expect(decideFollowUpOutcome(base))
+      .toEqual({ kind: 'fail', text: base.detail });
+    expect(decideFollowUpOutcome({ ...base, pendingDecisions: undefined }))
+      .toEqual({ kind: 'fail', text: base.detail });
+    expect(decideFollowUpOutcome({ ...base, pendingDecisions: [] }))
+      .toEqual({ kind: 'fail', text: base.detail });
+  });
+
+  it('steer 打空标记仍优先于裁决支（同码不同因：别把"没 run"报成"要裁决"）', () => {
+    expect(decideFollowUpOutcome({
+      ...base,
+      detail: "steer requires an active run; use mode='queue' to enqueue",
+      pendingDecisions: DECISIONS,
+    })).toEqual({ kind: 'retry-queue' });
+  });
+
+  it('queue 模式的裁决 409 同样进裁决支（两条投递通道都要引导）', () => {
+    expect(decideFollowUpOutcome({ ...base, mode: 'queue', pendingDecisions: DECISIONS }).kind)
+      .toBe('recovery-conflict');
+  });
+});

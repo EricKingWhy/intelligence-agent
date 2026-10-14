@@ -47,10 +47,21 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** 提交回调的**结局**（#1029）：`true`/`void` = 已受理（清空草稿），`false` = 未受理
+   *  （原样留住）。返回 Promise 时以它落定的值为准；返回非 Promise（既有同步调用方）
+   *  视为已受理，行为与 #1029 之前逐字一致。 */
+  onSubmit: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => Promise<boolean> | boolean | void;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  onSteer?: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => Promise<boolean> | boolean | void;
   /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
    *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
    *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
@@ -358,6 +369,31 @@ export const Composer = memo(function Composer({
     inputRef.current?.focus();
   }, [presetTask]);
 
+  /** 清空"本次提交仍然拥有"的那段文本（#1029）。
+   *
+   *  提交后用户可能已经接着打字：此时输入框里是**新草稿**，整段清空就会把用户新打的
+   *  字一起吞掉（同一类数据丢失）。只认"当前内容仍以本次提交的快照开头"这一种情况，
+   *  剥掉前缀、留下后缀；否则原样不动。语义与 DSH 输入状态机的
+   *  `commit-draft{retainSuffixOf: draftSnapshot}`（packages/client/ui-conversation/src/
+   *  client/input/machine.ts:141,200）及 oh-my-pi `clearSubmittedText`（"Clear only text
+   *  still owned by this submission, never a newer detached draft"）一致。 */
+  const clearSubmittedText = (snapshot: string): void => {
+    setValue((current) => {
+      if (current === snapshot) return '';
+      if (snapshot !== '' && current.startsWith(snapshot)) return current.slice(snapshot.length);
+      return current;
+    });
+  };
+
+  /** 发送失败后把草稿还回输入框（#1029 AC1/AC3）。
+   *
+   *  只在输入框**为空**时回填：用户若已经打了新内容，那是更新的意图，绝不用旧文本覆盖它
+   *  ——成熟产品同款纪律（DSH `restoreFailedDrafts` 只在编辑器空时重建，
+   *  facade.ts:771,778；Slack/Discord 的"发送失败不消费用户输入"）。 */
+  const restoreFailedDraft = (snapshot: string): void => {
+    setValue((current) => (current.trim() === '' ? snapshot : current));
+  };
+
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
@@ -380,18 +416,40 @@ export const Composer = memo(function Composer({
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
-    if (mode === 'steer' && onSteer) {
-      onSteer(trimmed, rememberAsProceduralRule, attachmentIds);
-    } else {
-      onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+    //
+    // #1029：清空**推迟到投递落定之后**。原先在这里无条件 setValue('') + clearSent，
+    // 于是任何发送失败（断网、429、待裁决 409……）都把用户唯一的不可再生资产丢掉，
+    // 且没有任何回填。现在按回调的结局分派：受理才清，未受理就原样留住。
+    const snapshot = value;
+    const sent = mode === 'steer' && onSteer
+      ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
+      : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+    const commit = (): void => {
+      clearSubmittedText(snapshot);
+      setRememberAsProceduralRule(false);
+      // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的草稿
+      // 没进请求，因此仍留在栏里，等用户重试或下一轮再带（#1027 语义不变）。失败时
+      // **不**清：那些图还在栏里，正是失败后一键重发的凭据（#1029 AC2）。
+      attachments.clearSent(attachmentIds);
+    };
+    const pendingOutcome =
+      sent !== null && typeof sent === 'object' && typeof sent.then === 'function'
+        ? sent
+        : null;
+    if (pendingOutcome === null) {
+      // 同步通道 / 不返回结局的既有调用方：没有可等的落定信号，保持 #1029 之前的
+      // 提交即清空语义（调用方不回报结局时，等也等不到）。显式 `false` = 未受理，留住。
+      if (sent !== false) commit();
+      return;
     }
-    setValue('');
-    setRememberAsProceduralRule(false);
-    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
-    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
-    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
-    // 或下一轮再带。
-    attachments.clearSent(attachmentIds);
+    void pendingOutcome.then(
+      (accepted) => {
+        if (accepted === false) restoreFailedDraft(snapshot);
+        else commit();
+      },
+      // 回调自身抛出/拒绝：投递没有落定成"已受理"，按未受理处理——文本留在框里。
+      () => restoreFailedDraft(snapshot),
+    );
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。

@@ -132,6 +132,23 @@ export async function readErrorDetail(res: Response): Promise<string> {
   return (await readErrorBody(res)).message;
 }
 
+/** 409 的**结构化**读取（#1029）：同一次读取里拿到给人看的 `message` 与给裁决面板
+ *  用的 `pendingDecisions`。
+ *
+ *  为什么必须是一次专门的读取：响应体只能读一次。发送路径原先只调
+ *  `readErrorDetail`，于是 `pending_decisions`（#596 特意结构化交付的字段）在读出的
+ *  那一刻就被丢掉——后端已经明说"要裁决什么"，前端却只会转述一句协议原文（#1029
+ *  根因 ②）。两者必须出自同一次读取，不能再读第二遍。
+ *
+ *  `pendingDecisions` 为 `undefined` = 这条 409 不是恢复冲突（或载荷形状非法）：调用
+ *  方据此走原有分支，不得凭空造清单（不变量 #22）。 */
+export async function readErrorConflict(
+  res: Response,
+): Promise<{ message: string; pendingDecisions?: PendingDecision[] }> {
+  const { message, pendingDecisions } = await readErrorBody(res);
+  return pendingDecisions === undefined ? { message } : { message, pendingDecisions };
+}
+
 /**
  * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
  * 这次读取）。

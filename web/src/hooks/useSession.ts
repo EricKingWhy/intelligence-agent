@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorConflict, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -275,12 +275,26 @@ export const QUEUE_ITEM_GONE_ERROR_TEXT = '排队项已不存在（可能已被�
  *  `sendFollowUp` 里的回退分支：用户的消息会被判成"需人工裁决"而丢掉。 */
 const STEER_TARGET_MISSING_MARKER = 'steer requires an active run';
 
-/** 一次 `/messages` 投递的结局分派结果。 */
+/** 一次 `/messages` 投递的结局分派结果。
+ *
+ *  `recovery-conflict`（#1029）= 后端 409 明说「存在需人工裁决的高风险操作」**且**带了
+ *  结构化的 `pending_decisions`。它与 `fail` 分开，是因为两者对用户要做的事不同：
+ *  `fail` 只需要一句可读的原因，`recovery-conflict` 还要把裁决面板唤起来（把清单交给
+ *  `recoverState.pendingDecisions`），否则用户被留在一句照着做不了的协议原文前。 */
 export type FollowUpOutcome =
   | { kind: 'stream' }
   | { kind: 'ack' }
   | { kind: 'retry-queue' }
+  | { kind: 'recovery-conflict'; text: string; pendingDecisions: PendingDecision[] }
   | { kind: 'fail'; text: string };
+
+/** 待裁决 409 的用户可见文案（#1029 AC1「人话失败提示」）。
+ *
+ *  为什么不转述后端 `message`：那句话是**协议原文**（内嵌 `POST /api/sessions/{id}/recover`
+ *  与 `decisions=[{tool_call_id, verdict}]`），普通用户照着做不了事，等于对用户静默
+ *  （issue #1029 原文）。后端已结构化的那部分（`pending_decisions`）走面板呈现，
+ *  文案只负责说清「发生了什么、接下来做什么」。 */
+const RECOVERY_CONFLICT_ERROR_TEXT = '会话待人工裁决：有高风险操作的结果未知，请先完成裁决再重发这条消息';
 
 /** 把一条已落定的 `/messages` 响应映射成「接下来做什么」。**纯函数**，窗内窗外共用
  *  （单一分派表，理由见 `docs/adr/0030-…md` §13）。 */
@@ -295,8 +309,12 @@ export function decideFollowUpOutcome(input: {
   detail: string;
   /** 请求是否带 queue_id——决定 404 说的是哪一件事（见 QUEUE_ITEM_GONE_ERROR_TEXT）。 */
   hasQueueId: boolean;
+  /** #596 的结构化 `pending_decisions`（#1029）：**只有**从 409 detail 里读出来的
+   *  那份清单。缺省/空数组 = 这条 409 不是恢复冲突，或载荷形状非法 ⇒ 走原有 fail 支
+   *  （不凭空造可裁决项，不变量 #22）。可选字段，既有调用点的输出逐字节不变。 */
+  pendingDecisions?: readonly PendingDecision[];
 }): FollowUpOutcome {
-  const { status, hasBody, contentType, mode, detail, hasQueueId } = input;
+  const { status, hasBody, contentType, mode, detail, hasQueueId, pendingDecisions } = input;
   const ok = status >= 200 && status < 300; // `Response.ok` 的定义，不必让调用方再传一遍
   if (ok && hasBody) {
     // 事件流 = launched（新 run 直驱，接流消费）；JSON = queued/steered 收据
@@ -305,9 +323,20 @@ export function decideFollowUpOutcome(input: {
   if (status === 409) {
     // 409 同码不同因（detail 是唯一能分开它们的东西）：
     //  - steer 打空（此刻没有可打断的 run）⇒ 后端自己要求改投 queue；
-    //  - T8 #138「存在需人工裁决的 UNKNOWN 操作」⇒ 如实转述后端 detail，不代它编话。
+    //  - T8 #138「存在需人工裁决的 UNKNOWN 操作」+ 带 pending_decisions ⇒ 裁决支，
+    //    把清单交给面板（#1029：后端早已结构化，前端消费侧此前把这段丢了）；
+    //  - 其余（含带裁决语义但载荷缺失/非法）⇒ 如实转述后端 detail，不代它编话。
+    // steer 打空标记**优先**：它是"此刻没有可打断的 run"，与"要裁决"是两回事，
+    // 先认标记才不会把一条本可送达的消息报成待裁决（回退链见 sendFollowUp）。
     if (mode === 'steer' && detail.includes(STEER_TARGET_MISSING_MARKER)) {
       return { kind: 'retry-queue' };
+    }
+    if (pendingDecisions !== undefined && pendingDecisions.length > 0) {
+      return {
+        kind: 'recovery-conflict',
+        text: RECOVERY_CONFLICT_ERROR_TEXT,
+        pendingDecisions: [...pendingDecisions],
+      };
     }
     return { kind: 'fail', text: detail || '存在需要人工裁决的高风险操作' };
   }
@@ -454,6 +483,9 @@ export function useSession() {
   // → error。409 是"需人工裁决"（conflict=true），本期只展示原因，不做裁决
   // 交互（不变量 #14：不伪造、不盲跑）。
   const [recoverState, setRecoverState] = useState<RecoverState>(RECOVER_IDLE);
+  /** 上面这份恢复态**属于哪个会话**（#1029）。恢复/裁决结论只对产生它的会话成立，
+   *  所以判据是"会话有没有变"，不是"mode 有没有变"。 */
+  const recoverScopeRef = useRef<string | null>(null);
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -512,8 +544,16 @@ export function useSession() {
   // stream paint (a stale/partial disk read would overwrite in-flight state);
   // idle owns no conversation.
   useEffect(() => {
-    // 任何 mode 迁移都重置 recover 三态（恢复状态不跨会话/流存活）。
-    setRecoverState(RECOVER_IDLE);
+    // 恢复态**不跨会话存活**——但判据是会话有没有变，不是 mode 有没有变（#1029）。
+    // mode 在同一个会话内会自迁移（viewing→live→viewing：提交、流终态、续聊失败、
+    // 重连放弃），而发送撞上"待人工裁决"时发布的裁决报告（pendingDecisions）正是在
+    // 这条自迁移上发出的：原先"任何 mode 迁移都重置"会把刚接到的清单在同一批次抹掉，
+    // 面板永远不出现（AC2 失败的形态）。与下面错误横幅同一条理由。
+    const scope = mode.kind === 'idle' ? null : mode.sessionId;
+    if (recoverScopeRef.current !== scope) {
+      recoverScopeRef.current = scope;
+      setRecoverState(RECOVER_IDLE);
+    }
     if (mode.kind === 'idle') {
       setConversation(null);
       return;
@@ -1243,8 +1283,13 @@ export function useSession() {
       setMode({ kind: 'live', sessionId });
 
       /** 投递一次：发请求 → 按结局分派。窗内与窗外**必须同一张表、同一套错误呈现**
-       *  （都抛 Error，由「续聊失败：」收口）——原因见 `docs/adr/0030-…md` §13。 */
-      const deliver = async (payload: SendMessagePayload): Promise<void> => {
+       *  （都抛 Error，由「续聊失败：」收口）——原因见 `docs/adr/0030-…md` §13。
+       *
+       *  返回**投递是否被受理**（#1029 AC3）：`true` = 已受理（launched / ack），`false`
+       *  或抛出 = 未受理。Composer 据此决定清空还是保留草稿——原先这条信息在函数内部
+       *  就被吞掉了（catch 只设横幅、不向上传），调用方无从知道消息到底送出去没有，
+       *  于是"清空"只能提前到提交瞬间，失败即丢文本。 */
+      const deliver = async (payload: SendMessagePayload): Promise<boolean> => {
         /* 本次**投递尝试**的代际：纠正「接错流」时会推进它（见下面 outOfWindow 支），
            于是回退重投在新代际下继续，而被纠正那条流彻底失效。按投递计而不是按一次
            sendFollowUp 计，是因为重投必须活着——`settle` 与迟到链的守卫都读它。 */
@@ -1252,23 +1297,28 @@ export function useSession() {
 
         /** 分派一条**已落定**的响应。@param outOfWindow 响应是在判定「正常流式」
          *  之后才落定的（此时已按 launched 接过一条流）。 */
-        const settle = async (res: Response, outOfWindow: boolean): Promise<void> => {
-          // 只有 409 需要 detail：它是「同码不同因」的唯一区分依据，也是人工裁决支要
-          // 转述的那句话；404/422/其余状态各有固定文案，不必为不读的 body 等一次 I/O。
-          const detail = res.status === 409 ? await readErrorDetail(res) : '';
-          if (streamGenRef.current !== myGen) return; // 读 detail 期间已换代际
+        const settle = async (res: Response, outOfWindow: boolean): Promise<boolean> => {
+          // 只有 409 需要读 body：它是「同码不同因」的唯一区分依据。读的是**结构化**
+          // 的那次（#1029）：`message` 给人看，`pending_decisions` 给裁决面板用——响应体
+          // 只能读一次，只用 readErrorDetail 就等于在读出的那一刻把清单丢掉，用户于是
+          // 只拿到一句照着做不了的协议原文。404/422/其余状态各有固定文案，不读 body。
+          const conflict = res.status === 409 ? await readErrorConflict(res) : null;
+          if (streamGenRef.current !== myGen) return true; // 读 body 期间已换代际：不当作失败回填
           const outcome = decideFollowUpOutcome({
             status: res.status,
             hasBody: res.body !== null,
             contentType: res.headers.get('content-type') ?? '',
             mode: payload.mode,
-            detail,
+            detail: conflict?.message ?? '',
             hasQueueId: Boolean(payload.queue_id),
+            ...(conflict?.pendingDecisions === undefined
+              ? {}
+              : { pendingDecisions: conflict.pendingDecisions }),
           });
           if (outcome.kind === 'stream') {
             // 窗外的「事件流」= 当初判 launched 是对的，WS 已在收，不重复接。
             if (!outOfWindow) attachLiveStream(res, myGen, conversationRef.current);
-            return;
+            return true;
           }
           if (outOfWindow) {
             /* 迟到的落定不是事件流 ⇒ 当初判 launched 判错了，那条 WS 流与本次投递的
@@ -1300,7 +1350,7 @@ export function useSession() {
             const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
             lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
             attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
-            return;
+            return true;
           }
           if (outcome.kind === 'retry-queue') {
             /* 用户此时的处境是**消息已被拒**，而 Composer 早已清空输入框（它的
@@ -1315,8 +1365,27 @@ export function useSession() {
                重投同样不会重复投递。重投不会再回退：改投后 mode=queue，而这张表只在
                mode=steer 时给出 retry-queue ⇒ 递归深度恒为 1。 */
             const { queue_id: _alreadyCancelled, ...rest } = payload;
-            await deliver({ ...rest, mode: 'queue' });
-            return;
+            return await deliver({ ...rest, mode: 'queue' });
+          }
+          if (outcome.kind === 'recovery-conflict') {
+            /* #1029 AC1/AC2：把后端已结构化的 `pending_decisions` 交给裁决面板
+               （`recoverState.pendingDecisions` 是**唯一**的裁决真相，不变量 #22），并把
+               人话文案摆到横幅上。做成**报告态**而不是恢复尝试态：这不是"恢复失败了"，
+               是"这次发送被闸门挡住、且有一条可执行的出路"——面板会随即自动出现
+               （App 的 showDecisionPanel 只看清单非空）。 */
+            setRecoverState({
+              status: 'error',
+              message: outcome.text,
+              conflict: true,
+              repaired: 0,
+              terminalRepaired: false,
+              stillUnterminated: false,
+              stillDangling: false,
+              pendingDecisions: outcome.pendingDecisions,
+            });
+            // 仍按失败交回调用方（外层收口负责模式迁移与横幅）：文本必须留在输入框里
+            // （AC1），裁决完成后一键重发。
+            throw new Error(outcome.text);
           }
           throw new Error(outcome.text);
         };
@@ -1324,14 +1393,29 @@ export function useSession() {
         const pending = apiSendMessage(sessionId, payload);
         const res = await raceEarlyResponse(pending);
         if (res !== null) {
-          await settle(res, false);
-          return;
+          return await settle(res, false);
         }
         // 窗外 = 判为 launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
         // 悬挂的 promise 有两条通道都要消费：rejection，以及**迟到的落定**（#221）。
         // 两条都先挂上——后面的代际守卫可能提前 return，先挂才不会有 unhandled rejection。
+        //
+        // 为什么这条链**不**把结局交回调用方：#1029 AC3 要的是"失败别丢文本"，而窗外
+        // 意味着响应头根本没在 1200ms 内到达（正常流式的响应头会被压到 run 结束才下发），
+        // 此处无从等待——等它就把一次正常发送的返回值挂到 run 结束。真实的失败（4xx）
+        // 是"完整且极短的响应"，必在窗内落定，走上面的 settle；网络级失败则立即 reject。
+        // 这条迟到的纠正只负责把真原因显示出来（横幅），不冒充投递结局。
         void pending
-          .then((settled) => (streamGenRef.current === myGen ? settle(settled, true) : undefined))
+          .then(async (settled) => {
+            if (streamGenRef.current !== myGen) return;
+            try {
+              await settle(settled, true);
+            } catch (e) {
+              if (streamGenRef.current !== myGen) return;
+              myGen = ++streamGenRef.current;
+              setMode({ kind: 'viewing', sessionId });
+              setError(`续聊失败：${(e as Error).message}`);
+            }
+          })
           .catch((e) => {
             if (streamGenRef.current !== myGen) return;
             myGen = ++streamGenRef.current;
@@ -1341,7 +1425,7 @@ export function useSession() {
         // await 期间已被取代（切会话 / 取消 / 又发了一条）⇒ 到此为止：下面两行会
         // **无条件覆写**会话级游标与流引用，把一条失效的流挂到新会话身上（submitTask
         // 与 resumeLiveStream 在同一位置都有这道闸，本函数此前漏了）。
-        if (streamGenRef.current !== myGen) return;
+        if (streamGenRef.current !== myGen) return true;
         // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
         // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
         // **之前**，重放的旧终态照样算数）。于是新 run 还没跑完，本地就认为
@@ -1355,20 +1439,24 @@ export function useSession() {
         const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
         lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
         attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
+        return true;
       };
 
       try {
         const amend = opts?.amend ?? {};
-        await deliver({
+        return await deliver({
           content,
           ...amend,
           mode: amend.mode === 'steer' ? 'steer' : 'queue',
         });
       } catch (e) {
-        if (streamGenRef.current !== gen) return; // 过期请求迟到失败：丢弃，不污染新会话
+        // 过期请求的迟到失败：丢弃结局（不污染新会话），当作已受理——调用方是旧会话的
+        // Composer，它的草稿归属已经变了，回填只会把文本塞进别的会话。
+        if (streamGenRef.current !== gen) return true;
         streamGenRef.current += 1;
         setMode({ kind: 'viewing', sessionId });
         setError(`续聊失败：${(e as Error).message}`);
+        return false;
       }
     },
     [attachLiveStream, markStreamFrame],
@@ -1781,7 +1869,7 @@ export function useSession() {
       /** #825（MM-04）：附图引用（已就绪的那些）。空 = 纯文本，请求体逐字不变。 */
       attachmentIds: readonly string[] = [],
     ) => {
-      await sendFollowUp(sessionId, content, {
+      return await sendFollowUp(sessionId, content, {
         amend: {
           mode: 'steer',
           ...(rememberAsProceduralRule ? { remember_as_procedural_rule: true } : {}),

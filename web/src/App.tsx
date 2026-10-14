@@ -723,21 +723,23 @@ export default function App() {
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
       };
-      void (async () => {
+      // #1029：把**投递结局**交回 Composer（`true` = 已受理 ⇒ 清空；`false`/抛出 ⇒
+      // 草稿留在输入框）。原先这里 `void` 掉一切，Composer 无从知道消息送出去没有。
+      return (async (): Promise<boolean> => {
         let sid: string | null = selectedId ?? ensuredIdRef.current;
         const pending = ensuringRef.current;
         if (sid === null && pending !== null) {
           sid = await pending;
         }
         if (sid !== null) {
-          void sendMessage(sid, task, { amend });
-          return;
+          return await sendMessage(sid, task, { amend });
         }
         // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
         // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
         // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-        void submitTask({
+        // `submitTask` 以返回值（而非抛出）报错：非 null = 失败原因，此时同样要留住草稿。
+        const failure = await submitTask({
           task,
           auto_approve: true,
           ...ruleSignal,
@@ -754,6 +756,7 @@ export default function App() {
             deadlineAt: budgetRunDeadlineDraft,
           }),
         });
+        return failure === null;
       })();
     },
     [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
@@ -847,10 +850,9 @@ export default function App() {
   const handleSteer = useCallback(
     (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
       if (!selectedId) {
-        handleSubmit(task, rememberAsProceduralRule, attachmentIds);
-        return;
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
       }
-      void sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
+      return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
     [sendSteer, selectedId, handleSubmit],
   );
@@ -1387,7 +1389,25 @@ export default function App() {
               </button>
             </div>
           )}
-          {error && <div className="app-error">{error}</div>}
+          {error && (
+            <div className="app-error">
+              <span>{error}</span>
+              {/* #1029 AC1/AC2：「去裁决」引导。文案只说"发生了什么"（待裁决），
+                  可点的这一步才是出路——点击把裁决面板唤到眼前（清单是后端 409 给的
+                  那一份，`setDismissedDecisions(null)` 只是撤销用户的收起态，不造数据）。
+                  面板本身也会随清单发布自动弹出；这里的按钮是用户收起它之后回去的路，
+                  也是"失败提示旁边有可执行动作"的显式承诺。 */}
+              {pendingDecisions !== null && pendingDecisions.length > 0 && (
+                <button
+                  type="button"
+                  className="app-error-action"
+                  onClick={() => setDismissedDecisions(null)}
+                >
+                  去裁决
+                </button>
+              )}
+            </div>
+          )}
           {/* #367 P3：worktree 自动创建的一次性提示（信息级，可关闭）。 */}
           {worktreeNotice && (
             <div className="app-notice" role="status">
