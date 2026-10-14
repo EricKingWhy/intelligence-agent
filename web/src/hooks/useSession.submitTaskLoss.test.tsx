@@ -7,20 +7,22 @@
  *    A) `sendMessage(sid, ...)`  —— 已覆盖；
  *    B) `submitTask({...})`      —— 新建会话，**漏洞在这里**。
  *
- *  `submitTask` 窗外分支的形状（useSession.ts:1070-1091）：
+ *  `submitTask` 窗外分支的形状：
  *    1. `startSession(payload)` 发出但不 await（交付层攒包，响应头 ≈ run 结束才到）；
  *    2. `started.catch(e => { late.failure = e })` 接住 rejection；
  *    3. `await discoverNewSessionId(baseline)` 拿差分认领新会话；
  *    4. 认领成功 ⇒ `return null`（= 成功）。
- *  而 `late.failure` **只在第 3 步抛错时**才被读（L1083 `throw late.failure ?? e`）。
- *  于是「认领成功 *之后* POST 才 reject」这个序列里，`late.failure` 被写进去却
- *  没有任何人读 ⇒ `submitTask` 返回 null（成功）⇒ `handleSubmit` 返回 true ⇒
- *  Composer 清空输入框。用户的文本没了，而且**不是**因为发送失败被通知——
- *  它被当成了成功。
+ *  而 `late.failure` **只在第 3 步抛错时**才被读（认领 catch 里的
+ *  `throw late.failure ?? e`）。于是「认领成功 *之后* POST 才 reject」这个序列里，
+ *  `late.failure` 被写进去却没有任何人读 ⇒ `submitTask` 返回 null（成功）⇒
+ *  `handleSubmit` 返回 true ⇒ Composer 清空输入框。用户的文本没了，而且**不是**
+ *  因为发送失败被通知——它被当成了成功。
  *
  *  实测可达序列：网络在会话已创建、响应未收全时断开 / 401 / 后端 5xx。
  *
- *  本文件只锁这条路径的**结局如实**（剩余处置策略 = 交用户裁决，见 tracker 残余项）。
+ *  ⚠ 本文件刻意**不写 `useSession.ts` 的行号区间**：写死过（"1070-1091"/"L1083"），
+ *  随后几笔插入就让它们指向无关代码——独立审查连续两轮抓到同一类"可证伪断言
+ *  不成立"。指代一律用标识符与函数名。
  */
 
 import { act, createElement, useEffect } from 'react';
@@ -39,7 +41,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 });
 
 // ⚠ `sessionIdBaseline` / `discoverNewSessionId` 在 `lib/wsStream`，**不在** `lib/api`
-// （useSession.ts:28 的 import 就是判据）。挂到 api 上会把真实导出抹成 undefined。
+// （`useSession.ts` 顶部那句 import 就是判据，别写行号）。挂到 api 上会把真实导出抹成 undefined。
 vi.mock('../lib/wsStream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/wsStream')>();
   return {
