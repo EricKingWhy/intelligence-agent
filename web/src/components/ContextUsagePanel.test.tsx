@@ -162,3 +162,89 @@ describe('ContextUsagePanel 手动压缩', () => {
     );
   });
 });
+
+describe('ContextUsagePanel「其他」桶细分（#1095）', () => {
+  const OTHER_DETAIL = {
+    provider_injected: 300,
+    runtime_context: 120,
+    plan_anchor: 50,
+    protected_facts: 20,
+    modified_paths: 10,
+    pressure_warning: 0,
+    progress: 0,
+  };
+
+  it('ok 态且后端带 other_detail 时，图例列出全部子项（含 0 子项，不隐藏）', async () => {
+    vi.mocked(getContextUsage).mockResolvedValue(
+      usage({
+        breakdown: {
+          messages: 100, system_prompt: 50, skills: 10, other: 500,
+          tools: { system: 0, mcp: 0 },
+          other_detail: OTHER_DETAIL,
+        },
+      }),
+    );
+    await renderPanel();
+
+    const sub = document.body.querySelector('.ctx-usage-legend-sub');
+    expect(sub).not.toBeNull();
+    const text = sub!.textContent ?? '';
+    // 全部子项加法列出（后端 key 对齐：provider 注入/运行期快照/计划锚块/
+    // 保护事实/修改路径/水位警告/进度核对），0 子项也显示。
+    for (const label of ['Provider 注入', '运行期快照', '计划锚块', '保护事实',
+      '修改路径', '水位警告', '进度核对']) {
+      expect(text).toContain(label);
+    }
+    expect(text).toContain('300');
+  });
+
+  it('other_detail 缺某 key 时该子项跳过渲染（不伪造 0）', async () => {
+    vi.mocked(getContextUsage).mockResolvedValue(
+      usage({
+        breakdown: {
+          messages: 100, system_prompt: 50, skills: 10, other: 500,
+          tools: { system: 0, mcp: 0 },
+          // key 集演进：后端只带 2 个子项，其余 5 个 key 缺席。
+          other_detail: { provider_injected: 300, runtime_context: 200 },
+        },
+      }),
+    );
+    await renderPanel();
+
+    const text = document.body.querySelector('.ctx-usage-legend-sub')!.textContent ?? '';
+    // 在场的子项照常渲染。
+    expect(text).toContain('Provider 注入');
+    expect(text).toContain('运行期快照');
+    // 缺席的 key 不渲染「标签 0」（假零）。
+    expect(text).not.toContain('计划锚块');
+    expect(text).not.toContain('保护事实');
+    expect(text).not.toContain('修改路径');
+    expect(text).not.toContain('水位警告');
+    expect(text).not.toContain('进度核对');
+  });
+
+  it('旧形状快照（无 other_detail）⇒ 不渲染子项，只显示整块「其他」', async () => {
+    await renderPanel();
+
+    expect(document.body.querySelector('.ctx-usage-legend-sub')).toBeNull();
+    expect(document.body.querySelector('.ctx-usage-legend')?.textContent).toContain('其他');
+  });
+
+  it('usage_only 态不渲染子项（无 other_detail 可言）', async () => {
+    vi.mocked(getContextUsage).mockResolvedValue(
+      usage({
+        state: 'usage_only',
+        used_tokens: 54_841,
+        usage_source: {
+          kind: 'last_call_prompt_tokens',
+          calls_with_usage: 1,
+          last_prompt_tokens: 54_841,
+          last_total_tokens: 61_342,
+        },
+      }),
+    );
+    await renderPanel();
+
+    expect(document.body.querySelector('.ctx-usage-legend-sub')).toBeNull();
+  });
+});

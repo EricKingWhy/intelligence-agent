@@ -31,6 +31,21 @@ const BUCKETS: Array<{
   { key: 'other', label: '其他', colorVar: 'var(--text-tertiary)', value: (u) => u.breakdown.other },
 ];
 
+/** 「其他」桶细分子项（#1095）：key 与后端 `other_detail`（builder
+ *  `other_breakdown`）对齐，顺序即展示顺序。仅 `state: 'ok'` 且后端带了
+ *  `other_detail` 时渲染（旧形状快照无此键 ⇒ 只显示整块「其他」，不伪造
+ *  子项 0——与端点层的诚实口径一致）。子项只列 token 数：它们全在「其他」
+ *  里，再加一层百分比会让图例出现两套分母口径。 */
+const OTHER_DETAIL_ITEMS: Array<{ key: string; label: string }> = [
+  { key: 'provider_injected', label: 'Provider 注入' },
+  { key: 'runtime_context', label: '运行期快照' },
+  { key: 'plan_anchor', label: '计划锚块' },
+  { key: 'protected_facts', label: '保护事实' },
+  { key: 'modified_paths', label: '修改路径' },
+  { key: 'pressure_warning', label: '水位警告' },
+  { key: 'progress', label: '进度核对' },
+];
+
 /** 段宽度重标定（opencode 的做法）：小于 MIN_SEGMENT_PCT 的桶显示为最小宽度，
  *  图例仍列出全部桶（不隐藏数据）。 */
 const MIN_SEGMENT_PCT = 1.5;
@@ -241,10 +256,29 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
             <div className="ctx-usage-legend">
               {segments.map((s) => {
                 const p = pctOf(s.value, usage.used_tokens);
+                const detail =
+                  s.key === 'other' && usage.state === 'ok'
+                    ? usage.breakdown.other_detail
+                    : undefined;
                 return (
                   <span key={s.key} className="ctx-usage-legend-item">
                     <span className="ctx-usage-dot" style={{ background: s.colorVar }} />
                     {s.label} {s.value.toLocaleString()}（{p.toFixed(1)}%）
+                    {detail && (
+                      <span className="ctx-usage-legend-sub">
+                        {/* 缺 key 的子项跳过（不渲染「标签 0」假零）：当前
+                            builder 恒发全部键，但 key 集演进后缺席即「后端
+                            这轮没有这笔」——与端点层不伪造子项 0 同口径。 */}
+                        {OTHER_DETAIL_ITEMS.filter((it) => detail[it.key] !== undefined).map((it) => {
+                          const v = detail[it.key] as number;
+                          return (
+                            <span key={it.key} className="ctx-usage-legend-subitem">
+                              {it.label} {v.toLocaleString()}
+                            </span>
+                          );
+                        })}
+                      </span>
+                    )}
                   </span>
                 );
               })}

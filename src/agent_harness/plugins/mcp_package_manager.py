@@ -7,6 +7,7 @@ tool calls stay in the existing MCP capability and ToolExecutor path.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import os
 import shutil
@@ -17,22 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from agent_harness import package_source
 from agent_harness.mcp_precheck import inspect_mcp_servers, load_mcp_servers
 from agent_harness.skills.package_lock import registry_lock
-from agent_harness.skills.package_manager import (
-    _COMMIT_PATTERN,
-    _DIGEST_PATTERN,
-    SkillPackageError,
-    SkillPackageManager,
-    _fetch_git_skill,
-    _git_tree_sha256,
-    _is_reparse_point,
-    _reject_junctions,
-    _tree_sha256,
-    _validate_git_ref,
-    _validate_git_subdirectory,
-    _validate_git_url,
-)
+from agent_harness.skills.package_manager import SkillPackageError, SkillPackageManager
 
 MCP_MANIFEST_FILENAME = "mcp-plugin-installs.json"
 MCP_MANIFEST_VERSION = 1
@@ -40,6 +29,37 @@ MCP_MANIFEST_VERSION = 1
 
 class MCPPackageError(ValueError):
     """An MCP package operation cannot be completed safely."""
+
+
+def _mcp_source(func: Any) -> Any:
+    """把中性来源原语的 `PackageSourceError` 在 MCP 边界翻译成 `MCPPackageError`。
+
+    共用实现住在 `agent_harness.package_source`（issue #1083）；这里只做错误类型
+    适配，行为（消息、摘要算法、校验时机）与迁移前逐字一致。
+    """
+
+    @functools.wraps(func)
+    def boundary(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except package_source.PackageSourceError as error:
+            raise MCPPackageError(str(error)) from error
+
+    return boundary
+
+
+# 共用来源/快照原语（原样实现见 `agent_harness.package_source`）。不抛错的直接绑定，
+# 会抛 `PackageSourceError` 的走 `_mcp_source` 翻译成 `MCPPackageError`。
+_COMMIT_PATTERN = package_source.COMMIT_PATTERN
+_DIGEST_PATTERN = package_source.DIGEST_PATTERN
+_is_reparse_point = package_source.is_reparse_point
+_validate_git_url = _mcp_source(package_source.validate_git_url)
+_validate_git_ref = _mcp_source(package_source.validate_git_ref)
+_validate_git_subdirectory = _mcp_source(package_source.validate_git_subdirectory)
+_fetch_git_skill = _mcp_source(package_source.fetch_git_source)
+_tree_sha256 = _mcp_source(package_source.tree_sha256)
+_git_tree_sha256 = _mcp_source(package_source.git_tree_sha256)
+_reject_junctions = _mcp_source(package_source.reject_junctions)
 
 
 class MCPPackageManager:
