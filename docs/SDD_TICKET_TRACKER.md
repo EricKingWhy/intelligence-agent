@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**当前施工（2026-10-14，#1129）**：本地实现与独立 Standards/Spec 审查完成，Issue OPEN + bug/P2/in-progress，EricKingWhy 指派。分支 codex/issue-1129-docker-hard-delete，代码提交 d0f6543c271f6ad9ab57b41804f7294f732aa969；定向测试 48 passed，Ruff 与 diff-check 通过；Gate-0 待运行。当前仅本地交付，尚未 push、开 PR、merge 或关单。详见 docs/phase_status/2026-10.md #1129。
+**当前施工（2026-10-14，#1129）**：本地实现与独立 Standards/Spec 审查完成，Issue OPEN + bug/P2/in-progress，EricKingWhy 指派。分支 codex/issue-1129-docker-hard-delete，代码提交 d0f6543c271f6ad9ab57b41804f7294f732aa969；定向测试 48 passed，Ruff 与 diff-check 通过；Gate-0 6/6 PASS（收据 docs/gate/2cb6b2fa11d25fe099592398bbbc4f2fcd9beed4.json）。当前仅本地交付，尚未 push、开 PR、merge 或关单。详见 docs/phase_status/2026-10.md #1129。
 
 **最近集成（2026-10-14，#729）**：GitHub #729 CLOSED，标签仅保留 `enhancement`，`in-progress` 已移除。PR [#1118](https://github.com/EricKingWhy/intelligence-agent/pull/1118) head `f36083f6e73d8e9e2eca212cc4359e7646697d6d` 按 merge commit `7b609c27e68cf23bbe62e0976a5beb7f8cb4ed98` 合入 main。必需 PR CI 的 gate0、Chromium PR smoke、Windows installer smoke、gitleaks 均 SUCCESS；OpenSSF Scorecard 按工作流跳过。Gate-0 收据 `docs/gate/5fb9a67c5cac17e17c1f873e7ef658f3d3c3630d.json`（6/6）；同步后定向验证后端 35 passed / 1 skipped、UI 74 passed、coverage 回归 1 passed。最新同步树未重跑全量 pytest/Playwright；全量历史读数与单一 coverage 自检失败已在下方月档记录，补齐台账后该用例和 coverage 检查通过。残余：SACL 无法由缺少 `SeSecurityPrivilege` 的当前 token 直接读取，结论依据固定 MXC 路径审计；一项 installer LogicLib 扫描建议为未确认的非阻塞 P4。详见 `docs/phase_status/2026-10.md` #729 closeout。
 
