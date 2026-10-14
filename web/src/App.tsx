@@ -698,7 +698,17 @@ export default function App() {
   }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
 
   const handleSubmit = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
+     *  **显式 `false`** ⇒ 它保留输入框里的文本与草稿（`11 §6.1` 第 164 行的 MUST）；
+     *  `true` / `undefined`（旧签名）⇒ 按旧行为清空。
+     *  续聊路径（`sendMessage`）不抛——网络故障在 hook 内部收口成 `false`；**新建会话
+     *  路径会抛**（`submitTask` 的 422 / Start failed 文案），Composer 把抛错同样归到
+     *  「未受理」侧（保留输入）⇒ 异常路径也不会吞掉用户文本。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -723,21 +733,20 @@ export default function App() {
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
       };
-      void (async () => {
+      return (async (): Promise<boolean> => {
         let sid: string | null = selectedId ?? ensuredIdRef.current;
         const pending = ensuringRef.current;
         if (sid === null && pending !== null) {
           sid = await pending;
         }
         if (sid !== null) {
-          void sendMessage(sid, task, { amend });
-          return;
+          return await sendMessage(sid, task, { amend });
         }
         // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
         // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
         // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-        void submitTask({
+        const failure = await submitTask({
           task,
           auto_approve: true,
           ...ruleSignal,
@@ -754,6 +763,9 @@ export default function App() {
             deadlineAt: budgetRunDeadlineDraft,
           }),
         });
+        // 新会话创建失败 ⇒ 未受理（`submitTask` 返回失败文案；成功返回 null）
+        // ——同一条「失败不清空」契约，不因走的是创建路径就丢文本。
+        return failure === null;
       })();
     },
     [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
@@ -845,12 +857,16 @@ export default function App() {
   // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
   // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值语义同 `handleSubmit`（#1029）：透传「是否已被受理」。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       if (!selectedId) {
-        handleSubmit(task, rememberAsProceduralRule, attachmentIds);
-        return;
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
       }
-      void sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
+      return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
     [sendSteer, selectedId, handleSubmit],
   );
