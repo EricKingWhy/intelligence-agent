@@ -45,3 +45,34 @@ def is_absolute_path(value: str) -> bool:
     if os.name == "nt":
         return PureWindowsPath(value).is_absolute()
     return os.path.isabs(value)
+
+
+_WINDOWS_RESERVED_DEVICE_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CONIN$",
+    "CONOUT$",
+    *(f"COM{digit}" for digit in "123456789¹²³"),
+    *(f"LPT{digit}" for digit in "123456789¹²³"),
+}
+
+
+def validate_windows_path_component(part: str, *, allow_glob: bool = False) -> None:
+    """Reject a component Windows normalizes, reserves, or cannot represent."""
+    if part.endswith((" ", ".")):
+        raise PermissionError("invalid Windows path component")
+    if any(ord(char) < 32 or char in '<>"|' for char in part):
+        raise PermissionError("invalid Windows path component")
+    if not allow_glob and any(char in "*?" for char in part):
+        raise PermissionError("wildcards are not valid in workspace paths")
+    stem = part.split(".", 1)[0].rstrip(" .").upper()
+    if allow_glob and any(char in stem for char in "*?[]"):
+        return
+    if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+        raise PermissionError("Windows device path rejected")
+    try:
+        part.encode("utf-16-le")
+    except UnicodeEncodeError as error:
+        raise PermissionError("invalid Windows path component") from error

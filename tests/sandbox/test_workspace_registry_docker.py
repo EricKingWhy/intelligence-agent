@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import importlib
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -69,6 +72,242 @@ class TestDockerRegistryDeterministicNaming:
         mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
         assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
         assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
+
+    def test_create_imports_project_as_private_volume_copy(
+        self, registry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Importing a project must sever NTFS hard-link identity before execution."""
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        source = tmp_path / "project"
+        source.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host-original", encoding="utf-8")
+        try:
+            os.link(outside, source / "outside-alias.txt")
+        except OSError as exc:
+            pytest.skip(f"host hard-link creation unavailable: {exc}")
+
+        internal = source / "internal-a.txt"
+        internal.write_text("internal-original", encoding="utf-8")
+        os.link(internal, source / "internal-b.txt")
+
+        entering_import = threading.Event()
+        release_import = threading.Event()
+        copy_in = DockerSandbox.copy_in
+
+        def paused_copy_in(sandbox, host_path, workspace_path):
+            if Path(host_path) == source:
+                entering_import.set()
+                if not release_import.wait(10):
+                    raise TimeoutError("test did not release the workspace import")
+            return copy_in(sandbox, host_path, workspace_path)
+
+        monkeypatch.setattr(DockerSandbox, "copy_in", paused_copy_in)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                registry.create, SESSION_ID, workspace_root=source, backend="docker",
+            )
+            assert entering_import.wait(30), "workspace import did not reach the barrier"
+            try:
+                os.link(outside, source / "racing-alias.txt")
+            except OSError as exc:
+                release_import.set()
+                future.result(timeout=30)
+                pytest.skip(f"host hard-link creation unavailable: {exc}")
+            release_import.set()
+            sandbox = future.result(timeout=30)
+
+        result = sandbox.exec(
+            "python -c \"from pathlib import Path; "
+            "Path('outside-alias.txt').write_text('guest-write'); "
+            "Path('racing-alias.txt').write_text('race-write'); "
+            "Path('internal-b.txt').write_text('internal-update'); "
+            "print(Path('internal-a.txt').samefile(Path('internal-b.txt')))\""
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == "True"
+        assert sandbox.read_text("outside-alias.txt") == "race-write"
+        assert sandbox.read_text("racing-alias.txt") == "race-write"
+        assert outside.read_text(encoding="utf-8") == "host-original"
+        assert (source / "outside-alias.txt").read_text(encoding="utf-8") == "host-original"
+        assert internal.read_text(encoding="utf-8") == "internal-original"
+
+        workspace_mounts = [
+            mount for mount in sandbox._container.attrs["Mounts"]
+            if mount.get("Destination") == "/workspace"
+        ]
+        assert len(workspace_mounts) == 1
+        assert workspace_mounts[0]["Type"] == "volume"
+        assert workspace_mounts[0]["RW"] is True
+        assert not any(
+            mount.get("Type") == "bind" and mount.get("RW")
+            for mount in sandbox._container.attrs["Mounts"]
+        )
+
+    def test_get_migrates_legacy_psec_mapping_after_private_import(
+        self, registry, tmp_path: Path,
+    ):
+        from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+        source = tmp_path / "legacy-project"
+        source.mkdir()
+        outside = tmp_path / "legacy-outside.txt"
+        outside.write_text("host-original", encoding="utf-8")
+        try:
+            os.link(outside, source / "outside-alias.txt")
+        except OSError as exc:
+            pytest.skip(f"host hard-link creation unavailable: {exc}")
+
+        identity = WindowsPsecSandbox.validate_workspace_identity(source)
+        legacy_mapping = {
+            "session_id": SESSION_ID,
+            "backend": "windows_psec",
+            "workspace_root": str(source),
+            "workspace_identity": identity,
+            "container_name": None,
+            "volume_name": None,
+            "created_at": "legacy-created-at",
+        }
+        registry._write_mapping(SESSION_ID, legacy_mapping)
+
+        sandbox = registry.get(SESSION_ID)
+
+        mapping = registry._read_mapping(SESSION_ID)
+        assert mapping is not None
+        assert mapping["backend"] == "docker"
+        assert mapping["workspace_root"] == str(source)
+        assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
+        assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
+        assert "workspace_identity" not in mapping
+        result = sandbox.exec(
+            "python -c \"from pathlib import Path; "
+            "Path('outside-alias.txt').write_text('guest-write')\""
+        )
+        assert result.exit_code == 0, result.stderr
+        assert sandbox.read_text("outside-alias.txt") == "guest-write"
+        assert outside.read_text(encoding="utf-8") == "host-original"
+        assert (source / "outside-alias.txt").read_text(encoding="utf-8") == "host-original"
+
+    def test_failed_legacy_import_keeps_psec_mapping_and_source_retryable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import docker
+
+        from agent_harness.sandbox.docker import DockerSandbox
+        from agent_harness.sandbox.registry import WorkspaceRegistry
+        from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+        source = tmp_path / "legacy-project"
+        source.mkdir()
+        (source / "project.txt").write_text("legacy source", encoding="utf-8")
+        outside = tmp_path / "legacy-outside.txt"
+        outside.write_text("host-original", encoding="utf-8")
+        try:
+            os.link(outside, source / "outside-alias.txt")
+        except OSError as exc:
+            pytest.skip(f"host hard-link creation unavailable: {exc}")
+
+        docker_client = docker.from_env(use_context=False)
+        try:
+            docker_client.ping()
+            docker_client.images.get("python:3-slim")
+        except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+            docker_client.close()
+            pytest.skip(f"Docker daemon or python:3-slim image is unavailable: {exc}")
+
+        registry = WorkspaceRegistry(root=tmp_path / "registry")
+        identity = WindowsPsecSandbox.validate_workspace_identity(source)
+        legacy_mapping = {
+            "session_id": SESSION_ID,
+            "backend": "windows_psec",
+            "workspace_root": str(source),
+            "workspace_identity": identity,
+            "container_name": None,
+            "volume_name": None,
+            "created_at": "legacy-created-at",
+        }
+        registry._write_mapping(SESSION_ID, legacy_mapping)
+        mapping_path = registry._mapping_path(SESSION_ID)
+        original_mapping_bytes = mapping_path.read_bytes()
+        original_copy_in = DockerSandbox.copy_in
+
+        def copy_then_fail(sandbox, host_path, workspace_path):
+            original_copy_in(sandbox, host_path, workspace_path)
+            raise RuntimeError("injected legacy import failure")
+
+        monkeypatch.setattr(DockerSandbox, "copy_in", copy_then_fail)
+        try:
+            with pytest.raises(RuntimeError, match="injected legacy import failure"):
+                registry.get(SESSION_ID)
+
+            assert mapping_path.read_bytes() == original_mapping_bytes
+            assert registry._read_mapping(SESSION_ID)["backend"] == "windows_psec"
+            assert (source / "project.txt").read_text(encoding="utf-8") == "legacy source"
+            assert outside.read_text(encoding="utf-8") == "host-original"
+            assert (source / "outside-alias.txt").read_text(encoding="utf-8") == "host-original"
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.containers.get(f"agent-harness-{SESSION_ID}")
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(f"agent-harness-{SESSION_ID}")
+
+            monkeypatch.setattr(DockerSandbox, "copy_in", original_copy_in)
+            sandbox = registry.get(SESSION_ID)
+            mapping = registry._read_mapping(SESSION_ID)
+            assert mapping is not None and mapping["backend"] == "docker"
+            assert sandbox.read_text("project.txt") == "legacy source"
+            assert outside.read_text(encoding="utf-8") == "host-original"
+        finally:
+            monkeypatch.setattr(DockerSandbox, "copy_in", original_copy_in)
+            mapping = registry._read_mapping(SESSION_ID)
+            if mapping is not None and mapping.get("backend") == "docker":
+                registry.delete(SESSION_ID)
+            else:
+                mapping_path.unlink(missing_ok=True)
+            docker_client.close()
+
+    def test_export_materializes_internal_hardlinks_and_refuses_existing_target(
+        self, registry, tmp_path: Path,
+    ):
+        source = tmp_path / "export-source"
+        source.mkdir()
+        first = source / "first.txt"
+        first.write_text("initial", encoding="utf-8")
+        try:
+            os.link(first, source / "second.txt")
+        except OSError as exc:
+            pytest.skip(f"host hard-link creation unavailable: {exc}")
+        sandbox = registry.create(SESSION_ID, workspace_root=source, backend="docker")
+
+        destination = tmp_path / "exported"
+        sandbox.copy_out(destination)
+
+        exported_first = destination / "first.txt"
+        exported_second = destination / "second.txt"
+        assert exported_first.read_text(encoding="utf-8") == "initial"
+        assert exported_second.read_text(encoding="utf-8") == "initial"
+        assert not exported_first.samefile(exported_second)
+        with pytest.raises(FileExistsError):
+            sandbox.copy_out(destination)
+        assert exported_first.read_text(encoding="utf-8") == "initial"
+
+    def test_export_rejects_symlinks_and_removes_partial_destination(
+        self, registry, tmp_path: Path,
+    ):
+        source = tmp_path / "symlink-source"
+        source.mkdir()
+        (source / "safe.txt").write_text("safe", encoding="utf-8")
+        sandbox = registry.create(
+            SESSION_ID, workspace_root=source, backend="docker",
+        )
+        result = sandbox.exec("ln -s /tmp/private-canary unsafe-link")
+        assert result.exit_code == 0, result.stderr
+
+        destination = tmp_path / "rejected-export"
+        with pytest.raises(ValueError, match="unsafe entry"):
+            sandbox.copy_out(destination)
+        assert not destination.exists()
 
 
 @docker_required

@@ -6,10 +6,14 @@ import fnmatch
 import importlib
 import io
 import logging
+import os
 import posixpath
 import queue
 import shlex
+import shutil
+import stat
 import tarfile
+import tempfile
 import threading
 import weakref
 from concurrent.futures import Future
@@ -27,8 +31,21 @@ from agent_harness.sandbox.base import (
 )
 from agent_harness.sandbox.decoding import StreamDecoder
 from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT, _CappedCapture
+from agent_harness.sandbox.paths import validate_windows_path_component
 
 logger = logging.getLogger("agent_harness.sandbox.docker")
+
+
+def _remove_readonly(function, path: str, error_info: tuple) -> None:
+    error = error_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    mode = os.stat(path, follow_symlinks=False).st_mode
+    writable_mode = stat.S_IWRITE
+    if stat.S_ISDIR(mode):
+        writable_mode |= stat.S_IXUSR
+    os.chmod(path, mode | writable_mode, follow_symlinks=False)
+    function(path)
 
 
 class _ContainerExecState:
@@ -81,6 +98,7 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        self._deleted = False
         self._exec_state = self._state_for_container(self._container_name)
         self._exec_lock = self._exec_state.lock
 
@@ -106,6 +124,8 @@ class DockerSandbox(Sandbox):
         return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
+        if self._deleted:
+            raise RuntimeError("DockerSandbox was deleted and cannot be restarted")
         if self._container is not None:
             self._container.reload()
             if self._container.status == "running":
@@ -140,6 +160,15 @@ class DockerSandbox(Sandbox):
                 }
             },
         )
+
+    def workspace_volume_exists(self) -> bool:
+        """Return whether this sandbox's persisted named volume still exists."""
+        docker = importlib.import_module("docker")
+        try:
+            self._client.volumes.get(self._volume_name)
+        except docker.errors.NotFound:
+            return False
+        return True
 
     def exec(self, command: str, *, timeout: float | None = None,
              deadline: float | None = None,
@@ -850,6 +879,37 @@ class DockerSandbox(Sandbox):
                 raise FileNotFoundError(path)
             return extracted.read().decode("utf-8")
 
+    def path_kind(self, path: str) -> str | None:
+        """Inspect a workspace path with Linux ``lstat`` semantics."""
+        target = self.resolve_within_workspace(path)
+        self.ensure_started()
+        result = self._container.exec_run([
+            "python",
+            "-c",
+            (
+                "import os, stat, sys\n"
+                "try:\n"
+                " mode = os.lstat(sys.argv[1]).st_mode\n"
+                "except FileNotFoundError:\n"
+                " print('missing')\n"
+                "else:\n"
+                " print('directory' if stat.S_ISDIR(mode) else "
+                "'file' if stat.S_ISREG(mode) else 'other')"
+            ),
+            str(target),
+        ])
+        output = result.output
+        if isinstance(output, bytes):
+            output = output.decode("ascii", errors="replace")
+        if result.exit_code != 0:
+            raise OSError(f"无法检查 Workspace 路径 '{target}'：{output.strip()}")
+        kind = output.strip()
+        if kind == "missing":
+            return None
+        if kind not in {"directory", "file", "other"}:
+            raise RuntimeError(f"无法识别 Workspace 路径类型：{kind!r}")
+        return kind
+
     def write_text(self, path: str, content: str) -> None:
         target = self.resolve_within_workspace(path)
         self.ensure_started()
@@ -884,6 +944,112 @@ class DockerSandbox(Sandbox):
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 
+    def copy_out(self, host_path: Path) -> None:
+        """Copy `/workspace` to a new host directory without trusting its tar paths."""
+        destination = Path(host_path)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(destination)
+        destination.mkdir()
+        try:
+            self.ensure_started()
+            stream, _ = self._container.get_archive(str(self.workspace_root))
+            with tempfile.TemporaryFile() as archive_file:
+                for chunk in stream:
+                    archive_file.write(chunk)
+                archive_file.seek(0)
+                with tarfile.open(fileobj=archive_file, mode="r:") as archive:
+                    self._extract_workspace_archive(archive, destination)
+        except Exception:
+            try:
+                shutil.rmtree(destination, onerror=_remove_readonly)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "Workspace export failed and partial destination cleanup failed: "
+                    f"{cleanup_error}"
+                ) from cleanup_error
+            raise
+
+    @classmethod
+    def _extract_workspace_archive(
+        cls, archive: tarfile.TarFile, destination: Path,
+    ) -> None:
+        """Extract only regular files/directories; materialize internal hard links."""
+        entries: dict[tuple[str, ...], tuple[tarfile.TarInfo, tuple[str, ...] | None]] = {}
+        root_seen = False
+        for member in archive.getmembers():
+            relative = cls._workspace_archive_parts(member.name)
+            if not relative:
+                if not member.isdir() or root_seen:
+                    raise ValueError("Workspace archive has an invalid root entry")
+                root_seen = True
+                continue
+            if relative in entries:
+                raise ValueError(f"Workspace archive repeats path '{member.name}'")
+            if member.isdir() or member.isreg():
+                entries[relative] = (member, None)
+            elif member.islnk():
+                link_target = cls._workspace_archive_parts(member.linkname)
+                if not link_target:
+                    raise ValueError("Workspace archive has an invalid hard-link target")
+                entries[relative] = (member, link_target)
+            else:
+                raise ValueError(
+                    f"Workspace archive contains an unsafe entry '{member.name}'"
+                )
+
+        if not root_seen:
+            raise ValueError("Workspace archive has no root directory entry")
+        for name, (_, link_target) in entries.items():
+            if link_target is None:
+                continue
+            target = entries.get(link_target)
+            if target is None or not target[0].isreg():
+                raise ValueError(
+                    f"Workspace archive hard link '{'/'.join(name)}' "
+                    "does not point to an archived regular file"
+                )
+
+        for relative, (member, link_target) in entries.items():
+            target = destination.joinpath(*relative)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            content_member = member
+            if link_target is not None:
+                content_member = entries[link_target][0]
+            extracted = archive.extractfile(content_member)
+            if extracted is None:
+                raise ValueError(
+                    f"Workspace archive cannot read '{member.name}'"
+                )
+            with extracted, target.open("xb") as output:
+                shutil.copyfileobj(extracted, output)
+            mode = content_member.mode & 0o777
+            if mode:
+                target.chmod(mode)
+
+    @staticmethod
+    def _workspace_archive_parts(name: str) -> tuple[str, ...]:
+        if "\\" in name:
+            raise ValueError("Workspace archive paths must use POSIX separators")
+        path = PurePosixPath(name)
+        if path.is_absolute() or not path.parts or path.parts[0] != "workspace":
+            raise ValueError(f"Workspace archive path '{name}' escapes /workspace")
+        relative = path.parts[1:]
+        if any(part == ".." or ":" in part for part in relative):
+            raise ValueError(f"Workspace archive path '{name}' is unsafe")
+        if os.name == "nt":
+            try:
+                for part in relative:
+                    validate_windows_path_component(part)
+            except PermissionError as error:
+                raise ValueError(
+                    f"Workspace archive path '{name}' is not valid on Windows"
+                ) from error
+        return relative
+
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""
         root = self.workspace_root
@@ -912,6 +1078,8 @@ class DockerSandbox(Sandbox):
 
     def delete(self) -> None:
         """彻底清理：移除容器 + 删除 Volume。幂等。"""
+        if self._deleted:
+            return
         docker = importlib.import_module("docker")
         if self._container is not None:
             try:
@@ -932,6 +1100,7 @@ class DockerSandbox(Sandbox):
             self._client.volumes.get(self._volume_name).remove(force=True)
         except docker.errors.NotFound:
             pass
+        self._deleted = True
         state = getattr(self, "_exec_state", None)
         if state is not None:
             cls = type(self)

@@ -8,7 +8,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from agent_harness.config import Settings
-from agent_harness.sandbox.capabilities import SandboxCapabilities
 from agent_harness.web.app import create_app
 
 
@@ -25,13 +24,17 @@ def client(tmp_path):
 
 
 class TestGetSandboxBackends:
-    def test_lists_backends(self, client):
-        r = client.get("/api/sandbox-backends")
+    @pytest.mark.parametrize(
+        "path", ["/api/sandbox-backends", "/api/sandbox/capabilities"]
+    )
+    def test_lists_only_selectable_backends(self, client, path):
+        r = client.get(path)
         assert r.status_code == 200, r.text
         body = r.json()
         assert "backends" in body
         backends = {b["backend"]: b for b in body["backends"]}
         # local 恒可用（本机）；docker 按探针结果如实报告
+        assert set(backends) == {"local", "docker"}
         assert "local" in backends
         assert backends["local"]["available"] is True
         assert "docker" in backends
@@ -41,21 +44,11 @@ class TestGetSandboxBackends:
             if not b["available"]:
                 assert b.get("reason"), f"{b['backend']} 不可用却无 reason"
 
-    def test_passes_selected_workspace_to_psec_probe(self, client, monkeypatch):
-        import agent_harness.web.app as app_module
-
-        observed: list[str | None] = []
-
-        def probe_all(*, windows_psec_workspace: str | None = None):
-            observed.append(windows_psec_workspace)
-            return [SandboxCapabilities(backend="local", available=True)]
-
-        monkeypatch.setattr(app_module, "probe_all_capabilities", probe_all)
-
-        response = client.get(
-            "/api/sandbox-backends",
-            params={"workspace_path": r"C:\projects\selected"},
+    def test_new_session_cannot_request_legacy_windows_psec(self, client):
+        response = client.post(
+            "/api/sessions",
+            json={"task": "test", "sandbox_backend": "windows_psec"},
         )
 
-        assert response.status_code == 200
-        assert observed == [r"C:\projects\selected"]
+        assert response.status_code == 422
+        assert "sandbox_backend must be one of: local, docker" in response.text

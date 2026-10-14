@@ -1,5 +1,7 @@
+import importlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
@@ -90,3 +92,56 @@ def test_reload_exposes_missing_and_unreadable_instruction_files(
     assert status.status_code == 200
     assert status.json()["status"] == "unreadable"
     assert status.json()["unreadable_sources"][0]["path"] == str(bad_instruction)
+
+
+def test_docker_reload_reads_private_workspace_instructions(tmp_path: Path) -> None:
+    try:
+        docker = importlib.import_module("docker")
+        docker_client = docker.from_env(use_context=False)
+        docker_client.ping()
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        pytest.skip(f"Docker SDK or daemon is unavailable: {exc}")
+    else:
+        docker_client.close()
+
+    from agent_harness.web.app import session_service
+
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    host_instruction = repository / "AGENTS.md"
+    host_instruction.write_text("host initial", encoding="utf-8")
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "harness"),
+        artifact_dir="",
+        model_api_key="test-key",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/sessions",
+            params={"launch": "false"},
+            json={"cwd": str(repository), "sandbox_backend": "docker"},
+        )
+        assert created.status_code == 200, created.text
+        session_id = created.json()["session_id"]
+        service = session_service(app.state.agent)
+        sandbox = service.workspace_registry.get(session_id)
+
+        private_content = "private snapshot after edit"
+        host_content = "host-only change outside the private snapshot"
+        sandbox.write_text("AGENTS.md", private_content)
+        host_instruction.write_text(host_content, encoding="utf-8")
+        reloaded = client.post(
+            f"/api/sessions/{session_id}/project-instructions/reload",
+        )
+
+        try:
+            assert reloaded.status_code == 200, reloaded.text
+            status = reloaded.json()
+            assert status["source_paths"] == ["/workspace/AGENTS.md"]
+            assert status["total_included_bytes"] == len(
+                private_content.encode("utf-8")
+            )
+        finally:
+            service.workspace_registry.delete(session_id)

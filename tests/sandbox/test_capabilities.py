@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +16,7 @@ import pytest
 
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.sandbox.capabilities import (
+    SUPPORTED_BACKENDS,
     SandboxCapabilities,
     SandboxUnavailableError,
     probe_all_capabilities,
@@ -51,6 +51,18 @@ class TestSandboxBackendSelection:
         with pytest.raises(ValidationError) as exc_info:
             CreateSessionRequest(task="t", sandbox_backend="windows-sandbox")
         assert "sandbox_backend must be one of" in str(exc_info.value)
+
+    def test_request_rejects_legacy_windows_psec_for_new_sessions(self):
+        """Legacy mappings may restore PSEC, but new sessions cannot request it."""
+        from pydantic import ValidationError
+
+        from agent_harness.sandbox.capabilities import SELECTABLE_BACKENDS
+        from agent_harness.web.app import CreateSessionRequest
+
+        assert "windows_psec" in SUPPORTED_BACKENDS
+        assert SELECTABLE_BACKENDS == ("local", "docker")
+        with pytest.raises(ValidationError, match="sandbox_backend must be one of"):
+            CreateSessionRequest(task="t", sandbox_backend="windows_psec")
 
     def test_request_rejects_unknown_field_still(self):
         """#363：extra=forbid 不变，未知字段仍响亮 422。"""
@@ -109,11 +121,32 @@ class TestProbeDocker:
         assert caps.available is False
         assert caps.reason is not None and "daemon" in caps.reason.lower()
 
-    def test_probe_all_returns_available_backend_families(self):
-        """probe_all 展示 local、docker 与 Windows PSEC 能力。"""
+    def test_probe_all_returns_available_backend_families(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """选择器只探测并展示仍可选择的 local 与 Docker 后端。"""
+        import agent_harness.sandbox.capabilities as cap_mod
+
+        monkeypatch.setattr(
+            cap_mod,
+            "probe_local_capabilities",
+            lambda: SandboxCapabilities(backend="local", available=True),
+        )
+        monkeypatch.setattr(
+            cap_mod,
+            "probe_docker_capabilities",
+            lambda **_kwargs: SandboxCapabilities(backend="docker", available=True),
+        )
+
+        def psec_must_not_be_probed(**_kwargs):
+            pytest.fail("legacy PSEC backend must not be advertised or probed")
+
+        monkeypatch.setattr(
+            cap_mod, "probe_windows_psec_capabilities", psec_must_not_be_probed
+        )
         caps = probe_all_capabilities()
         backends = {c.backend for c in caps}
-        assert backends == {"local", "docker", "windows_psec"}
+        assert backends == {"local", "docker"}
         assert all(isinstance(c, SandboxCapabilities) for c in caps)
 
 
@@ -148,83 +181,6 @@ class TestProbeWindowsPsec:
         assert caps.available is False
         assert caps.reason is not None and "policy" in caps.reason.lower()
         assert calls == []
-
-    @pytest.mark.skipif(os.name != "nt", reason="PSEC workspace policy is Windows-only")
-    def test_probe_all_checks_the_selected_workspace_policy(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        import agent_harness.sandbox.capabilities as cap_mod
-
-        observed: list[dict[str, object]] = []
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_docker_capabilities",
-            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
-        )
-
-        def probe_psec(**kwargs):
-            observed.append(kwargs["config"])
-            return SandboxCapabilities(backend="windows_psec", available=True)
-
-        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
-
-        capabilities = probe_all_capabilities(windows_psec_workspace=str(tmp_path))
-
-        assert next(c for c in capabilities if c.backend == "windows_psec").available
-        assert len(observed) == 1
-        filesystem = observed[0]["filesystem"]
-        assert filesystem["readwritePaths"] == [str(tmp_path)]
-        assert filesystem["deniedPaths"]
-        assert observed[0]["fallback"] == {"allowDaclMutation": False}
-
-    @pytest.mark.skipif(
-        os.name != "nt", reason="Windows PSEC workspace is Windows-only"
-    )
-    def test_probe_all_validates_workspace_with_handle_chain_before_probing_mxc(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        import agent_harness.sandbox.capabilities as cap_mod
-        import agent_harness.sandbox.windows_psec as psec_mod
-
-        validated_roots: list[tuple[str, bool]] = []
-
-        def reject_reparse_root(path, *, create: bool, **_kwargs):
-            validated_roots.append((os.fspath(path), create))
-            raise PermissionError("reparse point rejected in workspace path")
-
-        monkeypatch.setattr(psec_mod, "_open_directory_chain", reject_reparse_root)
-
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_local_capabilities",
-            lambda: SandboxCapabilities(backend="local", available=True),
-        )
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_docker_capabilities",
-            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
-        )
-        psec_probe_called = False
-
-        def probe_psec(**_kwargs):
-            nonlocal psec_probe_called
-            psec_probe_called = True
-            return SandboxCapabilities(backend="windows_psec", available=True)
-
-        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
-
-        capabilities = cap_mod.probe_all_capabilities(
-            windows_psec_workspace=str(tmp_path),
-        )
-
-        psec = next(item for item in capabilities if item.backend == "windows_psec")
-        assert not psec.available
-        assert validated_roots == [(str(tmp_path), False)]
-        assert not psec_probe_called
 
     def test_probe_accepts_only_basecontainer_for_the_requested_policy(
         self,
@@ -330,6 +286,15 @@ class TestRegistryBackendSelection:
         """未知后端名响亮失败（抄 DSH：typo 不静默改策略）。"""
         with pytest.raises(ValueError, match="未知"):
             registry.create("sess_3", backend="k8s")
+
+    def test_legacy_windows_psec_cannot_be_selected_for_new_workspace(
+        self, registry: WorkspaceRegistry
+    ):
+        """PSEC remains recoverable for old mappings but cannot create new sessions."""
+        with pytest.raises(ValueError, match="支持：local, docker"):
+            registry.create("sess_legacy", backend="windows_psec")
+
+        assert not registry.exists("sess_legacy")
 
     def test_docker_unavailable_raises_no_silent_fallback(
         self, registry: WorkspaceRegistry

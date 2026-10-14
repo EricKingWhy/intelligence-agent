@@ -112,8 +112,8 @@ def _os_error(canonical: str, error: OSError) -> HTTPException:
     return workspace_http_error(error, path=canonical)
 
 
-def _directory_listing(path: str) -> DirListing:
-    """给定目录的一层列举（同步 I/O；由 handler 卸载到 worker 线程）。"""
+def canonical_existing_directory(path: str) -> str:
+    """Validate an absolute host directory and return its canonical path."""
     if not is_absolute_path(path):
         # 与 `POST /api/projects` 的 `_require_absolute_path` 同款：必须在 realpath
         # **之前**挡住形态——`realpath(".")` 会解析成进程当前工作目录，把一次笔误
@@ -131,6 +131,12 @@ def _directory_listing(path: str) -> DirListing:
         raise _os_error(canonical, error) from error
     if not stat.S_ISDIR(mode):
         raise HTTPException(status_code=422, detail=f"不是目录：{canonical}")
+    return canonical
+
+
+def _directory_listing(path: str) -> DirListing:
+    """给定目录的一层列举（同步 I/O；由 handler 卸载到 worker 线程）。"""
+    canonical = canonical_existing_directory(path)
 
     try:
         names = os.listdir(canonical)
@@ -193,5 +199,6 @@ __all__ = [
     "DirEntry",
     "DirListing",
     "RootLister",
+    "canonical_existing_directory",
     "register_host_dir_routes",
 ]

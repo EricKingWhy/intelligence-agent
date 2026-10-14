@@ -15,6 +15,7 @@ from agent_harness.sandbox.base import (
     ShellFamily,
 )
 from agent_harness.sandbox.capabilities import (
+    SELECTABLE_BACKENDS,
     SUPPORTED_BACKENDS,
     SandboxCapabilities,
     SandboxUnavailableError,
@@ -28,6 +29,7 @@ from agent_harness.sandbox.paths import canonical_workspace_path
 from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 
 __all__ = [
+    "SELECTABLE_BACKENDS",
     "SUPPORTED_BACKENDS",
     "DockerSandbox",
     "ExecResult",

@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import ntpath
 import os
 import subprocess
 from collections.abc import Mapping
@@ -22,8 +21,10 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("agent_harness.sandbox.capabilities")
 
-#: 支持的后端名（DSH：非法值在加载时响亮拒绝，不静默改策略）。
+#: Registry 可恢复的后端名；windows_psec 仅为既有映射兼容保留。
 SUPPORTED_BACKENDS = ("local", "docker", "windows_psec")
+#: 新会话公开可选的后端。Windows PSEC 已由私有-volume 方案取代。
+SELECTABLE_BACKENDS = ("local", "docker")
 
 
 @dataclass(frozen=True)
@@ -236,37 +237,11 @@ def probe_windows_psec_capabilities(
 
 def probe_all_capabilities(
     image: str = "python:3-slim",
-    *,
-    windows_psec_workspace: str | None = None,
 ) -> list[SandboxCapabilities]:
-    """探针全部后端（给选择器 UI 用：展示能力 + 缺依赖原因）。"""
-    if windows_psec_workspace is None or os.name != "nt":
-        psec = probe_windows_psec_capabilities()
-    else:
-        workspace = ntpath.normpath(windows_psec_workspace)
-        if not ntpath.isabs(workspace):
-            psec = SandboxCapabilities(
-                backend="windows_psec",
-                available=False,
-                reason="PSEC requires an absolute path to an existing workspace",
-            )
-        else:
-            try:
-                from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-                config = WindowsPsecSandbox.probe_configuration_for_workspace(workspace)
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                psec = SandboxCapabilities(
-                    backend="windows_psec",
-                    available=False,
-                    reason=f"Could not build the workspace PSEC policy: {exc}",
-                )
-            else:
-                psec = probe_windows_psec_capabilities(config=config)
+    """探针新会话可选择的后端（不触碰仅用于恢复旧映射的 PSEC）。"""
     return [
         probe_local_capabilities(),
         probe_docker_capabilities(image=image),
-        psec,
     ]
 
 

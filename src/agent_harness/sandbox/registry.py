@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+import weakref
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +29,7 @@ from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.capabilities import (
-    SUPPORTED_BACKENDS,
+    SELECTABLE_BACKENDS,
     probe_docker_capabilities,
     require_available,
 )
@@ -44,6 +46,9 @@ class WorkspaceBindingError(RuntimeError):
 class WorkspaceRegistry:
     """Session ↔ Sandbox 映射表的持久化管理器。"""
 
+    _workspace_locks = weakref.WeakValueDictionary()
+    _workspace_locks_guard = threading.Lock()
+
     def __init__(self, root: Path, backend: str = "local") -> None:
         """root 是映射表和 workspace 的根目录。backend='local'|'docker'。"""
         self._root = Path(root).resolve()
@@ -52,6 +57,17 @@ class WorkspaceRegistry:
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
+        self._legacy_migration_lock = threading.Lock()
+
+    def _workspace_lock(self, owner_session_id: str) -> threading.RLock:
+        """Return a process-wide lock shared by every registry for this workspace."""
+        key = (str(self._root), owner_session_id)
+        with self._workspace_locks_guard:
+            lock = self._workspace_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._workspace_locks[key] = lock
+            return lock
 
     def create(
         self,
@@ -109,10 +125,19 @@ class WorkspaceRegistry:
             workspace_root = Path(canonical_workspace_path(requested))
             workspace_root.mkdir(parents=True, exist_ok=True)
             mapping["workspace_root"] = str(workspace_root)
-            sandbox = self._instantiate_sandbox(mapping)
-            sandbox.ensure_started()
+            if mapping["backend"] == "docker":
+                sandbox = self._create_private_volume(mapping, workspace_root)
+            else:
+                sandbox = self._instantiate_sandbox(mapping)
+                sandbox.ensure_started()
 
-        self._write_mapping(session_id, mapping)
+        try:
+            self._write_mapping(session_id, mapping)
+        except Exception:
+            if mapping["backend"] == "docker":
+                with suppress(Exception):
+                    sandbox.delete()
+            raise
         self._cache[session_id] = sandbox
         return sandbox
 
@@ -160,16 +185,131 @@ class WorkspaceRegistry:
             )
 
         owner_session_id, owner_mapping = self._resolve_workspace_owner(session_id)
+        if owner_mapping.get("fork_workspace_reclaimed"):
+            raise WorkspaceBindingError(
+                f"Session '{session_id}' 的工作区已因未完成的 fork 回收；"
+                "请删除该会话并从父会话重新 fork。"
+            )
+        if owner_mapping.get("backend") == "docker":
+            from agent_harness.sandbox.docker import DockerSandbox
+
+            with self._workspace_lock(owner_session_id):
+                mapping = self._read_mapping(session_id)
+                if mapping is None:
+                    raise KeyError(
+                        f"Session '{session_id}' 没有对应的 workspace 映射记录。"
+                    )
+                current_owner_id, owner_mapping = self._resolve_workspace_owner(session_id)
+                if current_owner_id != owner_session_id:
+                    raise WorkspaceBindingError(
+                        f"Session '{session_id}' 的 workspace owner 在恢复期间发生变化。"
+                    )
+                if owner_mapping.get("fork_workspace_reclaimed"):
+                    raise WorkspaceBindingError(
+                        f"Session '{session_id}' 的工作区已因未完成的 fork 回收；"
+                        "请删除该会话并从父会话重新 fork。"
+                    )
+                if owner_mapping.get("backend") != "docker":
+                    return self.get(session_id)
+
+                sandbox = self._cache.get(owner_session_id)
+                if sandbox is None:
+                    sandbox = self._instantiate_sandbox(owner_mapping)
+                if not isinstance(sandbox, DockerSandbox):
+                    raise WorkspaceBindingError(
+                        f"Session '{session_id}' has a Docker mapping but no Docker sandbox."
+                    )
+                if not sandbox.workspace_volume_exists():
+                    raise WorkspaceBindingError(
+                        f"Session '{session_id}' 的 Docker 持久卷不存在；拒绝创建空工作区。"
+                    )
+                if owner_session_id in self._cache:
+                    self._cache[session_id] = sandbox
+                    return sandbox
+                sandbox.ensure_started()
+                self._cache[owner_session_id] = sandbox
+                self._cache[session_id] = sandbox
+                return sandbox
+
         if owner_session_id in self._cache:
             sandbox = self._cache[owner_session_id]
             self._cache[session_id] = sandbox
             return sandbox
+
+        if owner_mapping.get("backend") == "windows_psec":
+            with self._legacy_migration_lock:
+                if owner_session_id in self._cache:
+                    sandbox = self._cache[owner_session_id]
+                else:
+                    current_mapping = self._read_mapping(owner_session_id)
+                    if current_mapping is None:
+                        raise KeyError(
+                            f"Session '{owner_session_id}' 没有对应的 workspace 映射记录。"
+                        )
+                    if current_mapping.get("backend") == "windows_psec":
+                        sandbox = self._migrate_legacy_psec(
+                            owner_session_id, current_mapping,
+                        )
+                    else:
+                        sandbox = self._instantiate_sandbox(current_mapping)
+                        sandbox.ensure_started()
+                self._cache[owner_session_id] = sandbox
+                self._cache[session_id] = sandbox
+                return sandbox
 
         sandbox = self._instantiate_sandbox(owner_mapping)
         sandbox.ensure_started()
 
         self._cache[owner_session_id] = sandbox
         self._cache[session_id] = sandbox
+        return sandbox
+
+    def _create_private_volume(self, mapping: dict, source_root: Path) -> Sandbox:
+        """Create a fresh Docker volume and import a host snapshot before it is usable."""
+        sandbox = self._instantiate_sandbox(mapping)
+        try:
+            # A mapping-less deterministic volume can only be a crashed, incomplete
+            # create. Delete it before retrying so partial files are never treated as
+            # a complete workspace snapshot.
+            sandbox.delete()
+            sandbox = self._instantiate_sandbox(mapping)
+            sandbox.ensure_started()
+            sandbox.copy_in(source_root, ".")
+        except Exception:
+            with suppress(Exception):
+                sandbox.delete()
+            raise
+        return sandbox
+
+    def _migrate_legacy_psec(
+        self, session_id: str, legacy_mapping: dict,
+    ) -> Sandbox:
+        from agent_harness.sandbox.windows_psec import (
+            WindowsPsecSandbox,
+            WorkspaceIdentityError,
+        )
+
+        source_root = Path(legacy_mapping["workspace_root"])
+        identity = legacy_mapping.get("workspace_identity")
+        if not isinstance(identity, dict):
+            raise WorkspaceIdentityError(
+                "Windows workspace mapping has no pinned directory identity."
+            )
+        WindowsPsecSandbox.validate_workspace_identity(source_root, identity)
+
+        mapping = self._build_mapping(session_id, backend="docker")
+        mapping["workspace_root"] = str(source_root)
+        mapping["created_at"] = legacy_mapping.get(
+            "created_at", mapping["created_at"],
+        )
+        sandbox = self._create_private_volume(mapping, source_root)
+        try:
+            # Publish the Docker backend only after the full snapshot is imported.
+            self._write_mapping(session_id, mapping)
+        except Exception:
+            with suppress(Exception):
+                sandbox.delete()
+            raise
         return sandbox
 
     def exists(self, session_id: str) -> bool:
@@ -293,38 +433,44 @@ class WorkspaceRegistry:
         retry while the session and its mapping still exist. Local and PSEC
         workspaces are deliberately outside this operation.
         """
-        mapping = self._read_mapping(session_id)
-        if mapping is None or "workspace_owner_session_id" in mapping:
-            return False
-        if mapping.get("session_id") != session_id:
-            raise WorkspaceBindingError(
-                f"Workspace mapping identity mismatch for session '{session_id}'."
-            )
-        if mapping.get("backend") != "docker":
-            return False
+        with self._workspace_lock(session_id):
+            mapping = self._read_mapping(session_id)
+            if mapping is None or "workspace_owner_session_id" in mapping:
+                return False
+            if mapping.get("session_id") != session_id:
+                raise WorkspaceBindingError(
+                    f"Workspace mapping identity mismatch for session '{session_id}'."
+                )
+            if mapping.get("backend") != "docker":
+                return False
 
-        expected_name = f"agent-harness-{session_id}"
-        if (
-            mapping.get("container_name") != expected_name
-            or mapping.get("volume_name") != expected_name
-        ):
-            raise WorkspaceBindingError(
-                f"Docker workspace resources for session '{session_id}' do not "
-                "match their deterministic ownership names."
-            )
+            expected_name = f"agent-harness-{session_id}"
+            if (
+                mapping.get("container_name") != expected_name
+                or mapping.get("volume_name") != expected_name
+            ):
+                raise WorkspaceBindingError(
+                    f"Docker workspace resources for session '{session_id}' do not "
+                    "match their deterministic ownership names."
+                )
 
-        from agent_harness.sandbox.docker import DockerSandbox
+            from agent_harness.sandbox.docker import DockerSandbox
 
-        sandbox = self._cache.get(session_id)
-        if sandbox is None:
-            sandbox = self._instantiate_sandbox(mapping)
-        if not isinstance(sandbox, DockerSandbox):
-            raise WorkspaceBindingError(
-                f"Session '{session_id}' has Docker ownership metadata but no "
-                "Docker sandbox instance."
-            )
-        sandbox.delete()
-        return True
+            sandbox = self._cache.get(session_id)
+            if sandbox is None:
+                sandbox = self._instantiate_sandbox(mapping)
+            if not isinstance(sandbox, DockerSandbox):
+                raise WorkspaceBindingError(
+                    f"Session '{session_id}' has Docker ownership metadata but no "
+                    "Docker sandbox instance."
+                )
+            try:
+                sandbox.delete()
+            finally:
+                for cached_session_id, cached_sandbox in tuple(self._cache.items()):
+                    if cached_sandbox is sandbox:
+                        self._cache.pop(cached_session_id, None)
+            return True
 
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
@@ -360,15 +506,44 @@ class WorkspaceRegistry:
             shutil.rmtree(default_workspace, ignore_errors=True)
         self._cache.pop(session_id, None)
 
+    def reclaim_incomplete_fork_workspace(self, session_id: str) -> bool:
+        """Delete only an incomplete Docker fork's resources while retaining its mapping.
+
+        The durable fork marker and workspace binding remain available to recovery
+        diagnostics. The tombstone prevents a later ``get()`` from recreating an
+        empty named volume after the partial snapshot has been removed.
+        """
+        mapping = self._read_mapping(session_id)
+        if mapping is None or mapping.get("backend") != "docker":
+            return False
+        if "workspace_owner_session_id" in mapping:
+            raise WorkspaceBindingError(
+                f"Incomplete fork '{session_id}' cannot own an aliased Docker workspace."
+            )
+
+        if not mapping.get("fork_workspace_reclaimed"):
+            mapping["fork_workspace_reclaimed"] = True
+            self._write_mapping(session_id, mapping)
+
+        sandbox = self._cache.get(session_id)
+        if sandbox is None:
+            sandbox = self._instantiate_sandbox(mapping)
+        sandbox.delete()
+        self._cache.pop(session_id, None)
+        for alias_id in self._alias_ids_for_owner(session_id):
+            self._cache.pop(alias_id, None)
+        return True
+
     # —— 内部方法 ——
 
     def _build_mapping(self, session_id: str, backend: str | None = None) -> dict:
         """构造新 session 的映射字典。"""
         # #363 / W-19：显式选择 > 部署默认；未知名响亮失败。
         resolved = backend if backend is not None else self._backend
-        if resolved not in SUPPORTED_BACKENDS:
+        if resolved not in SELECTABLE_BACKENDS:
             raise ValueError(
-                f"未知的 Sandbox 后端: {resolved!r}（支持：{', '.join(SUPPORTED_BACKENDS)}）"
+                f"未知或不可用于新会话的 Sandbox 后端: {resolved!r}"
+                f"（支持：{', '.join(SELECTABLE_BACKENDS)}）"
             )
         if resolved == "docker":
             # 探针先行：不可用就地阻断，绝不静默回落 local。

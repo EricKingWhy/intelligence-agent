@@ -21,11 +21,12 @@ DSH 宁可 fail-closed 也不做字符串过滤）。破坏性命令分类器**�
 
 from __future__ import annotations
 
+import posixpath
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 __all__ = [
     "PermissionRule",
@@ -90,7 +91,7 @@ class PermissionRuleSet:
         tool_name: str,
         args: dict,
         *,
-        workspace_root: Path | None = None,
+        workspace_root: PurePath | None = None,
     ) -> tuple[RuleVerdict, str, str | None]:
         """求一条调用的裁决；返回 ``(verdict, reason, rule_name)``。
 
@@ -112,7 +113,7 @@ class PermissionRuleSet:
 
     @staticmethod
     def _matches(
-        rule: PermissionRule, args: dict, workspace_root: Path | None,
+        rule: PermissionRule, args: dict, workspace_root: PurePath | None,
     ) -> tuple[bool, str | None]:
         """规则是否命中；第二个返回值为格式化 reason 用的 ``resolved``（无则 None）。"""
         if rule.match is not None and not rule.match(args):
@@ -129,7 +130,7 @@ class PermissionRuleSet:
         return True, resolved
 
 
-def _resolve_outside(raw_path: str, workspace_root: Path) -> str | None:
+def _resolve_outside(raw_path: str, workspace_root: PurePath) -> str | None:
     """路径是否解析到 workspace **之外**；是则返回解析后的绝对路径，否则 None。
 
     复用 ``sandbox/base.py::resolve_within_workspace`` 的同款语义（``Path.resolve()`` +
@@ -138,9 +139,17 @@ def _resolve_outside(raw_path: str, workspace_root: Path) -> str | None:
     打成崩溃。
     """
     try:
-        root = Path(workspace_root).resolve()
-        path = Path(raw_path)
-        resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+        if isinstance(workspace_root, PurePosixPath):
+            # Docker paths exist in the guest namespace. Resolving them with the
+            # host Path class would turn /workspace into a Windows drive path.
+            root = PurePosixPath(posixpath.normpath(str(workspace_root)))
+            path = PurePosixPath(raw_path.replace("\\", "/"))
+            candidate = path if path.is_absolute() else root / path
+            resolved = PurePosixPath(posixpath.normpath(str(candidate)))
+        else:
+            root = Path(workspace_root).resolve()
+            path = Path(raw_path)
+            resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
     except (OSError, RuntimeError, ValueError):
         return None
     if resolved.is_relative_to(root):

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import io
+import os
+import tarfile
 import threading
 import time
 from collections.abc import Iterator
@@ -28,6 +31,154 @@ docker_required = pytest.mark.skipif(
     not _docker_available(),
     reason="Docker SDK or daemon is unavailable",
 )
+
+
+@pytest.mark.parametrize(
+    ("member_name", "member_type", "linkname"),
+    [
+        ("workspace/../canary.txt", tarfile.REGTYPE, ""),
+        ("/workspace/canary.txt", tarfile.REGTYPE, ""),
+        ("workspace/external-link", tarfile.LNKTYPE, "../../canary.txt"),
+        ("workspace/external-link", tarfile.SYMTYPE, "../../canary.txt"),
+        ("workspace/fifo", tarfile.FIFOTYPE, ""),
+    ],
+)
+def test_copy_out_rejects_unsafe_archive_entries_without_touching_canary(
+    tmp_path, member_name: str, member_type: bytes, linkname: str,
+) -> None:
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        root = tarfile.TarInfo("workspace")
+        root.type = tarfile.DIRTYPE
+        archive.addfile(root)
+        safe = tarfile.TarInfo("workspace/safe.txt")
+        safe.size = 4
+        archive.addfile(safe, io.BytesIO(b"safe"))
+        unsafe = tarfile.TarInfo(member_name)
+        unsafe.type = member_type
+        unsafe.linkname = linkname
+        archive.addfile(unsafe, io.BytesIO(b"bad") if member_type == tarfile.REGTYPE else None)
+
+    class Container:
+        def get_archive(self, path: str):
+            assert path == "/workspace"
+            return iter((archive_bytes.getvalue(),)), {}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Container()
+    sandbox.ensure_started = lambda: None
+    destination = tmp_path / "export"
+    canary = tmp_path / "canary.txt"
+    canary.write_text("safe", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        sandbox.copy_out(destination)
+
+    assert not destination.exists()
+    assert canary.read_text(encoding="utf-8") == "safe"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows host filename rules apply only on Windows")
+@pytest.mark.parametrize("filename", ["config.", "NUL.txt", "COM¹.log"])
+def test_copy_out_rejects_windows_alias_and_device_names(
+    tmp_path, filename: str,
+) -> None:
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        root = tarfile.TarInfo("workspace")
+        root.type = tarfile.DIRTYPE
+        archive.addfile(root)
+        member = tarfile.TarInfo(f"workspace/{filename}")
+        member.size = 4
+        archive.addfile(member, io.BytesIO(b"data"))
+
+    class Container:
+        def get_archive(self, path: str):
+            assert path == "/workspace"
+            return iter((archive_bytes.getvalue(),)), {}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Container()
+    sandbox.ensure_started = lambda: None
+    destination = tmp_path / "export"
+
+    with pytest.raises(ValueError, match="Windows"):
+        sandbox.copy_out(destination)
+
+    assert not destination.exists()
+
+
+def test_copy_out_removes_readonly_partial_export_after_extraction_failure(
+    tmp_path,
+) -> None:
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        root = tarfile.TarInfo("workspace")
+        root.type = tarfile.DIRTYPE
+        archive.addfile(root)
+        readonly = tarfile.TarInfo("workspace/blocked")
+        readonly.mode = 0o444
+        readonly.size = 4
+        archive.addfile(readonly, io.BytesIO(b"data"))
+        child = tarfile.TarInfo("workspace/blocked/child.txt")
+        child.size = 4
+        archive.addfile(child, io.BytesIO(b"data"))
+
+    class Container:
+        def get_archive(self, path: str):
+            assert path == "/workspace"
+            return iter((archive_bytes.getvalue(),)), {}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Container()
+    sandbox.ensure_started = lambda: None
+    destination = tmp_path / "export"
+
+    with pytest.raises(FileExistsError):
+        sandbox.copy_out(destination)
+
+    assert not destination.exists()
+
+
+def test_copy_out_surfaces_partial_export_cleanup_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_harness.sandbox.docker as docker_module
+
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        root = tarfile.TarInfo("workspace")
+        root.type = tarfile.DIRTYPE
+        archive.addfile(root)
+        readonly = tarfile.TarInfo("workspace/blocked")
+        readonly.size = 4
+        archive.addfile(readonly, io.BytesIO(b"data"))
+        child = tarfile.TarInfo("workspace/blocked/child.txt")
+        child.size = 4
+        archive.addfile(child, io.BytesIO(b"data"))
+
+    class Container:
+        def get_archive(self, path: str):
+            assert path == "/workspace"
+            return iter((archive_bytes.getvalue(),)), {}
+
+    sandbox = object.__new__(docker_module.DockerSandbox)
+    sandbox._container = Container()
+    sandbox.ensure_started = lambda: None
+    destination = tmp_path / "export"
+
+    def fail_cleanup(*args, **kwargs):
+        raise PermissionError("injected cleanup failure")
+
+    monkeypatch.setattr(docker_module.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        sandbox.copy_out(destination)
 
 
 @pytest.fixture

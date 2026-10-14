@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import platform
 import shutil
 from datetime import date
@@ -29,6 +30,24 @@ class _ModelFactory:
 
     async def astream(self, messages, **kwargs):
         yield AIMessageChunk(content="ok")
+
+
+def _docker_available() -> bool:
+    try:
+        docker = importlib.import_module("docker")
+        client = docker.from_env(use_context=False)
+        client.ping()
+        client.images.get("python:3-slim")
+        client.close()
+    except Exception:  # noqa: BLE001 - integration-test preflight
+        return False
+    return True
+
+
+docker_required = pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker daemon or python:3-slim image is unavailable",
+)
 
 
 async def _build(
@@ -197,32 +216,62 @@ async def test_runtime_accepts_an_existing_sandbox_as_workspace_input(
     assert "root instruction" in "\n".join(str(message.content) for message in messages)
 
 
-@pytest.mark.skipif(
-    platform.system() != "Windows",
-    reason="Windows PSEC sandbox is Windows-only",
-)
 @pytest.mark.asyncio
-async def test_runtime_builds_with_windows_psec_project_instructions(
+async def test_docker_runtime_reads_project_instructions_from_private_workspace(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import agent_harness.sandbox.windows_psec as psec_module
-    from agent_harness.sandbox.capabilities import SandboxCapabilities
+    try:
+        docker = importlib.import_module("docker")
+        client = docker.from_env(use_context=False)
+        client.ping()
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        pytest.skip(f"Docker SDK or daemon is unavailable: {exc}")
+    else:
+        client.close()
 
-    monkeypatch.setattr(
-        psec_module,
-        "probe_windows_psec_capabilities",
-        lambda *, executable, config: SandboxCapabilities(
-            backend="windows_psec", available=True,
-        ),
-    )
+    workspace = tmp_path / "repository" / "workspace"
+    nested = workspace / "src"
+    nested.mkdir(parents=True)
+    (workspace / "AGENTS.md").write_text("copied root instruction", encoding="utf-8")
+    (nested / "CLAUDE.md").write_text("copied nested instruction", encoding="utf-8")
+    (nested / "module.py").write_text("value = 1", encoding="utf-8")
+    session_id = "session-docker-project-instructions"
+    try:
+        runtime, session = await _build(
+            tmp_path, workspace, session_id, sandbox_backend="docker",
+        )
+        (workspace / "AGENTS.md").write_text("changed host root", encoding="utf-8")
+        (nested / "CLAUDE.md").write_text("changed host nested", encoding="utf-8")
 
+        first = await runtime._context_builder.build(session)
+        read_tool = next(tool for tool in runtime.registry.list() if tool.name == "read")
+        read_result = await read_tool.execute(
+            read_tool.args_schema(path="src/module.py")
+        )
+        second = await runtime._context_builder.build(session)
+        first_text = "\n".join(str(message.content) for message in first)
+        second_text = "\n".join(str(message.content) for message in second)
+
+        assert "copied root instruction" in first_text
+        assert "changed host root" not in first_text
+        assert read_result.ok
+        assert "copied nested instruction" in second_text
+        assert "changed host nested" not in second_text
+    finally:
+        registry = WorkspaceRegistry(root=tmp_path / "harness", backend="local")
+        try:
+            registry.delete(session_id)
+        except KeyError:
+            pass
+
+
+@docker_required
+@pytest.mark.asyncio
+async def test_runtime_builds_with_docker_project_instructions(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / ".git").mkdir()
-    requested_workspace = workspace.with_name("WORKSPACE")
-    if not requested_workspace.exists() or not requested_workspace.samefile(workspace):
-        pytest.skip("temporary filesystem distinguishes case-only paths")
+    (workspace / ".git").mkdir(parents=True)
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path / "harness"),
@@ -231,19 +280,17 @@ async def test_runtime_builds_with_windows_psec_project_instructions(
     )
     stores = recovery_stores(tmp_path / "harness.db")
     await initialize_stores(stores)
-    session_id = "session-windows-psec-project-instructions"
+    session_id = "session-docker-project-instructions-read-tool"
     session_store = JsonlSessionStore(root=tmp_path / "sessions")
     session = Session.start(session_store, session_id=session_id, cwd=workspace)
     session.append(USER_MESSAGE, {"content": "inspect the source"})
-    workspace_registry = WorkspaceRegistry(
-        root=tmp_path / "harness", backend="local",
-    )
+    workspace_registry = WorkspaceRegistry(root=tmp_path / "harness", backend="local")
     sandbox = workspace_registry.create(
-        session_id, workspace_root=requested_workspace, backend="windows_psec",
+        session_id, workspace_root=workspace, backend="docker",
     )
 
     try:
-        sandbox.write_text("AGENTS.md", "PSEC workspace instruction")
+        sandbox.write_text("AGENTS.md", "Docker workspace instruction")
         sandbox.write_text("module.py", "value = 1")
         with patch(
             "agent_harness.assembly.create_chat_model",
@@ -263,35 +310,20 @@ async def test_runtime_builds_with_windows_psec_project_instructions(
         read_tool = next(tool for tool in runtime.registry.list() if tool.name == "read")
         read_result = await read_tool.execute(read_tool.args_schema(path="module.py"))
 
-        assert "PSEC workspace instruction" in "\n".join(
+        assert "Docker workspace instruction" in "\n".join(
             str(message.content) for message in messages
         )
         assert read_result.ok
         assert read_result.data["content"] == "value = 1"
     finally:
-        sandbox.stop()
+        workspace_registry.delete(session_id)
 
 
-@pytest.mark.skipif(
-    platform.system() != "Windows",
-    reason="Windows PSEC sandbox is Windows-only",
-)
+@docker_required
 @pytest.mark.asyncio
-async def test_new_psec_runtime_loads_instructions_only_from_workspace_root(
+async def test_docker_runtime_loads_instructions_only_from_workspace_root(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import agent_harness.sandbox.windows_psec as psec_module
-    from agent_harness.sandbox.capabilities import SandboxCapabilities
-
-    monkeypatch.setattr(
-        psec_module,
-        "probe_windows_psec_capabilities",
-        lambda *, executable, config: SandboxCapabilities(
-            backend="windows_psec", available=True,
-        ),
-    )
-
     repository = tmp_path / "repository"
     (repository / ".git").mkdir(parents=True)
     (repository / "AGENTS.md").write_text("parent-only instruction", encoding="utf-8")
@@ -304,14 +336,19 @@ async def test_new_psec_runtime_loads_instructions_only_from_workspace_root(
     runtime, session = await _build(
         tmp_path,
         workspace,
-        "session-new-windows-psec-project-instructions",
-        sandbox_backend="windows_psec",
+        "session-docker-project-instructions",
+        sandbox_backend="docker",
     )
-    messages = await runtime._context_builder.build(session)
-    prompt_text = "\n".join(str(message.content) for message in messages)
+    try:
+        messages = await runtime._context_builder.build(session)
+        prompt_text = "\n".join(str(message.content) for message in messages)
 
-    assert "workspace instruction" in prompt_text
-    assert "parent-only instruction" not in prompt_text
+        assert "workspace instruction" in prompt_text
+        assert "parent-only instruction" not in prompt_text
+    finally:
+        WorkspaceRegistry(root=tmp_path / "harness").delete(
+            "session-docker-project-instructions",
+        )
 
 
 def test_project_instruction_root_requires_exact_recorded_path_spelling(

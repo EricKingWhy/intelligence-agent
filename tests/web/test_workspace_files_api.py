@@ -1,4 +1,4 @@
-"""#191：会话工作区的只读浏览 API（列文件 / 读文件 / git 状态 / 单文件 diff）。
+"""#191/#1048：会话工作区浏览 API 与宿主副本导出。
 
 票面（`docs/WORKSPACE_PANEL_PRD.md` §3.3 / §6 票 8，`WORKSPACE_PANEL_TICKETS.md` T8）：
 「文件/改动」面当前只显示**本次会话改过的文件**（由事件推导）；本票补上"**看工作区的
@@ -35,11 +35,13 @@
 | 目标是目录（POSIX 路径） | 422 `不是文件：<path>` |
 | 内容不是 UTF-8 文本 | 415（不支持该媒体类型，不伪造文本） |
 | git 命令退出码非零（如不是 git 仓库） | 200 + 如实 `exit_code`/`stderr`（ADR-0002） |
+| 导出 Docker workspace | 200 + 新宿主目录副本；目标已存在 → 409 |
 | 来源不可信（跨源 Origin） | 403（`require_trusted_origin`，ADR-0028 D2 同一份） |
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
@@ -61,7 +63,7 @@ if TYPE_CHECKING:
 
 _DATA_PREFIX = "data:"
 
-#: 四个路由的公共前缀（会话工作区）。
+#: 会话工作区路由的公共前缀。
 _PREFIX = "/api/sessions/{sid}/workspace"
 
 
@@ -75,17 +77,20 @@ def _client(tmp_path: Path, **overrides: object) -> TestClient:
     return TestClient(create_app(settings, enable_cors=False))
 
 
-def _create_session(client: TestClient) -> str:
+def _create_session(client: TestClient, *, sandbox_backend: str | None = None) -> str:
     """建一个真会话（真 runtime + 替身模型），返回 session_id。
 
     与 `test_artifacts_api.py` 同一口径：会话是**真建**的，于是 workspace 映射也是真的
     ——边界用例才有意义（对着替身 workspace 断言越界，测不出任何东西）。
     """
+    payload = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
+    if sandbox_backend is not None:
+        payload["sandbox_backend"] = sandbox_backend
     with patch(
         "agent_harness.assembly.create_chat_model",
         return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
     ):
-        resp = client.post("/api/sessions", json={"task": "hi", "budget": {"local": {"max_agent_turns": 1}}})
+        resp = client.post("/api/sessions", json=payload)
     assert resp.status_code == 200, resp.text
     frames = [
         json.loads(line[len(_DATA_PREFIX):].strip())
@@ -152,55 +157,94 @@ def test_lists_files_as_sorted_relative_posix_paths(tmp_path: Path) -> None:
     assert body["truncated"] is False
 
 
-@pytest.fixture
-def windows_mxc_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    if os.name != "nt":
-        return
-    configured = os.environ.get("IA_MXC_EXECUTABLE")
-    candidates = [
-        Path(configured) if configured else None,
-        Path(__file__).resolve().parents[2]
-        / "desktop"
-        / "node_modules"
-        / "@microsoft"
-        / "mxc-sdk"
-        / "bin"
-        / "x64"
-        / "wxc-exec.exe",
-    ]
-    executable = next((path for path in candidates if path and path.is_file()), None)
-    if executable is None:
-        pytest.skip("install @microsoft/mxc-sdk or set IA_MXC_EXECUTABLE")
-    if not (executable.parent / "mxc_ffi.dll").is_file():
-        pytest.fail(f"MXC runtime DLL is missing beside {executable}")
-    monkeypatch.setenv("IA_MXC_EXECUTABLE", str(executable))
+def test_workspace_file_routes_use_docker_posix_paths(tmp_path: Path) -> None:
+    try:
+        docker = importlib.import_module("docker")
+        client = docker.from_env(use_context=False)
+        client.ping()
+        client.images.get("python:3-slim")
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+    else:
+        client.close()
+
+    client = _client(tmp_path)
+    sid = _create_session(client, sandbox_backend="docker")
+    registry = client.app.state.agent.workspace_registry
+    try:
+        sandbox = _sandbox(client, sid)
+        assert sandbox.workspace_root.as_posix() == "/workspace"
+        sandbox.write_text("nested/file.txt", "docker route")
+
+        listing = client.get(_url(sid, "/files"))
+        file_response = client.get(
+            _url(sid, "/file"), params={"path": "nested/file.txt"},
+        )
+
+        assert listing.status_code == 200, listing.text
+        assert listing.json()["files"] == ["nested/file.txt"]
+        assert file_response.status_code == 200, file_response.text
+        assert "docker route" in file_response.text
+    finally:
+        registry.delete(sid)
 
 
-@pytest.mark.usefixtures("windows_mxc_runtime")
-@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_workspace_file_routes_use_windows_psec_sandbox_handles(
+def test_workspace_export_copies_docker_workspace_to_new_host_directory(
     tmp_path: Path,
 ) -> None:
+    try:
+        docker = importlib.import_module("docker")
+        docker_client = docker.from_env(use_context=False)
+        docker_client.ping()
+        docker_client.images.get("python:3-slim")
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+    else:
+        docker_client.close()
+
+    project = tmp_path / "project"
+    project.mkdir()
+    export_parent = tmp_path / "exports"
+    export_parent.mkdir()
     client = _client(tmp_path)
-    sid = _create_session(client)
+    created = client.post(
+        "/api/sessions?launch=false",
+        json={"cwd": str(project), "sandbox_backend": "docker"},
+    )
+    assert created.status_code == 200, created.text
+    sid = created.json()["session_id"]
     registry = client.app.state.agent.workspace_registry
-    registry.delete(sid)
-    sandbox = registry.create(
-        sid,
-        workspace_root=tmp_path / "windows-workspace",
-        backend="windows_psec",
-    )
-    sandbox.write_text("nested/file.txt", "handle-safe route")
+    try:
+        sandbox = registry.get(sid)
+        sandbox.write_text("nested/result.txt", "private volume data")
+        destination = export_parent / "snapshot"
+        url = _url(sid, "/export")
+        payload = {"destination_path": str(destination)}
 
-    listing = client.get(_url(sid, "/files"))
-    file_response = client.get(
-        _url(sid, "/file"), params={"path": "nested/file.txt"},
-    )
+        blocked = client.post(
+            url, json=payload, headers={"Origin": "http://evil.example"},
+        )
+        assert blocked.status_code == 403, blocked.text
+        assert not destination.exists()
 
-    assert listing.status_code == 200, listing.text
-    assert listing.json()["files"] == ["nested/file.txt"]
-    assert file_response.status_code == 200, file_response.text
-    assert "handle-safe route" in file_response.text
+        invalid = client.post(url, json={"destination_path": "relative-export"})
+        assert invalid.status_code == 422, invalid.text
+        assert not destination.exists()
+
+        exported = client.post(url, json=payload)
+        assert exported.status_code == 200, exported.text
+        assert exported.json() == {"destination_path": str(destination.resolve())}
+        assert (destination / "nested" / "result.txt").read_text(encoding="utf-8") == (
+            "private volume data"
+        )
+
+        keep = destination / "keep.txt"
+        keep.write_text("existing destination must survive", encoding="utf-8")
+        conflict = client.post(url, json=payload)
+        assert conflict.status_code == 409, conflict.text
+        assert keep.read_text(encoding="utf-8") == "existing destination must survive"
+    finally:
+        registry.delete(sid)
 
 
 def test_pattern_filters_and_total_counts_matches(tmp_path: Path) -> None:

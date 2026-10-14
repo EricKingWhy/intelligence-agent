@@ -24,12 +24,16 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import queue
 import re
 import sqlite3
+import threading
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
@@ -755,6 +759,184 @@ def test_hard_delete_reclaims_docker_resources_and_can_retry(
         if unrelated_volume_name is not None:
             try:
                 docker_client.volumes.get(unrelated_volume_name).remove(force=True)
+            except docker.errors.NotFound:
+                pass
+        docker_client.close()
+
+
+def test_hard_delete_serializes_cold_docker_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold restore cannot recreate a private volume after hard-delete."""
+    try:
+        docker = importlib.import_module("docker")
+        docker_client = docker.from_env(use_context=False)
+        docker_client.ping()
+        docker_client.images.get("python:3-slim")
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    host_canary = tmp_path / "external-canary.txt"
+    host_canary.write_text("host data survives", encoding="utf-8")
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "harness"),
+        artifact_dir="",
+        model_api_key="sk-test",
+    )
+    app = create_app(settings, enable_cors=False)
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    session_id: str | None = None
+    restore_thread: threading.Thread | None = None
+    delete_thread: threading.Thread | None = None
+    try:
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/sessions",
+                params={"launch": "false"},
+                json={"cwd": str(project), "sandbox_backend": "docker"},
+            )
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+            service = session_service(app.state.agent)
+            registry = service.workspace_registry
+            mapping = registry._read_mapping(session_id)
+            assert mapping is not None and mapping["backend"] == "docker"
+            container_name = mapping["container_name"]
+            volume_name = mapping["volume_name"]
+
+            sandbox = registry.get(session_id)
+            sandbox.write_text("restore-marker.txt", "original workspace")
+            registry._cache.clear()  # Force the next lookup through cold recovery.
+
+            volume_checked = threading.Event()
+            release_restore = threading.Event()
+            phase: queue.Queue[str] = queue.Queue()
+            delete_context = threading.local()
+            original_exists = DockerSandbox.workspace_volume_exists
+            original_ensure_started = DockerSandbox.ensure_started
+            original_cleanup = registry.cleanup_docker_workspace_resources
+            original_workspace_lock = getattr(registry, "_workspace_lock", None)
+            restored_marker: dict[str, str] = {}
+
+            def pause_after_volume_check(instance: DockerSandbox) -> bool:
+                exists = original_exists(instance)
+                if threading.current_thread().name == "workspace-restore":
+                    volume_checked.set()
+                    if not release_restore.wait(20):
+                        raise TimeoutError("test did not release cold workspace restore")
+                return exists
+
+            @contextmanager
+            def observe_workspace_lock(owner_id: str):
+                lock = original_workspace_lock(owner_id)
+                if getattr(delete_context, "active", False):
+                    acquired = lock.acquire(blocking=False)
+                    phase.put("delete-lock-unblocked" if acquired else "delete-lock-blocked")
+                    if acquired:
+                        lock.release()
+                with lock:
+                    yield
+
+            def observe_restored_workspace(instance: DockerSandbox) -> None:
+                original_ensure_started(instance)
+                if (
+                    threading.current_thread().name == "workspace-restore"
+                    and "contents" not in restored_marker
+                ):
+                    restored_marker["contents"] = "checking"
+                    restored_marker["contents"] = instance.read_text("restore-marker.txt")
+
+            def tracked_cleanup(target_session_id: str) -> bool:
+                delete_context.active = True
+                try:
+                    return original_cleanup(target_session_id)
+                finally:
+                    delete_context.active = False
+
+            def restore() -> None:
+                try:
+                    restore_result["sandbox"] = registry.get(session_id)
+                except BaseException as exc:  # noqa: BLE001 — propagate worker failures
+                    restore_result["error"] = exc
+
+            def hard_delete() -> None:
+                try:
+                    delete_result["value"] = anyio.run(service.delete_session, session_id)
+                except BaseException as exc:  # noqa: BLE001 — propagate worker failures
+                    delete_result["error"] = exc
+                finally:
+                    phase.put("delete-done")
+
+            monkeypatch.setattr(
+                DockerSandbox, "workspace_volume_exists", pause_after_volume_check,
+            )
+            monkeypatch.setattr(DockerSandbox, "ensure_started", observe_restored_workspace)
+            monkeypatch.setattr(registry, "_workspace_lock", observe_workspace_lock, raising=False)
+            monkeypatch.setattr(
+                registry, "cleanup_docker_workspace_resources", tracked_cleanup,
+            )
+            restore_result: dict[str, object] = {}
+            delete_result: dict[str, object] = {}
+            restore_thread = threading.Thread(
+                target=restore, name="workspace-restore", daemon=True,
+            )
+            delete_thread = threading.Thread(
+                target=hard_delete, name="session-hard-delete", daemon=True,
+            )
+            restore_thread.start()
+            assert volume_checked.wait(20), "cold restore did not check the volume"
+            delete_thread.start()
+
+            signal = phase.get(timeout=20)
+            assert signal == "delete-lock-blocked", (
+                "hard-delete did not block on the workspace lock held by cold recovery"
+            )
+            release_restore.set()
+            restore_thread.join(timeout=30)
+            delete_thread.join(timeout=30)
+            assert not restore_thread.is_alive(), "cold restore did not finish"
+            assert not delete_thread.is_alive(), "hard-delete did not finish"
+            assert "error" not in restore_result, restore_result.get("error")
+            assert "error" not in delete_result, delete_result.get("error")
+            assert restored_marker.get("contents") == "original workspace"
+            assert not registry.exists(session_id)
+            with pytest.raises(KeyError, match="workspace"):
+                registry.get(session_id)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.containers.get(container_name)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+
+            restored_sandbox = restore_result["sandbox"]
+            with pytest.raises(RuntimeError, match="deleted"):
+                restored_sandbox.ensure_started()
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+            assert host_canary.read_text(encoding="utf-8") == "host data survives"
+            assert project.is_dir()
+    finally:
+        if restore_thread is not None:
+            release_restore.set()
+            restore_thread.join(timeout=30)
+        if delete_thread is not None:
+            delete_thread.join(timeout=30)
+        if session_id is not None:
+            registry = session_service(app.state.agent).workspace_registry
+            with suppress(Exception):
+                registry.delete(session_id)
+            for resource, getter in (
+                (f"agent-harness-{session_id}", docker_client.volumes.get),
+            ):
+                try:
+                    getter(resource).remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+            try:
+                docker_client.containers.get(f"agent-harness-{session_id}").remove(force=True)
             except docker.errors.NotFound:
                 pass
         docker_client.close()

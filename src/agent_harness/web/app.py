@@ -99,7 +99,7 @@ from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import (
-    SUPPORTED_BACKENDS,
+    SELECTABLE_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
     probe_all_capabilities,
@@ -223,8 +223,8 @@ class _AmendValueValidators(BaseModel):
     def _validate_sandbox_backend(cls, v: str | None) -> str | None:
         # #363 / W-19：未知后端名在请求层响亮 422（registry 层 ValueError 是
         # 第二道防线）。None = 未显式选择 ⇒ 部署默认。
-        if v is not None and v not in SUPPORTED_BACKENDS:
-            valid = ", ".join(SUPPORTED_BACKENDS)
+        if v is not None and v not in SELECTABLE_BACKENDS:
+            valid = ", ".join(SELECTABLE_BACKENDS)
             raise ValueError(f"sandbox_backend must be one of: {valid}")
         return v
 
@@ -2270,10 +2270,9 @@ def create_app(
 
     register_worktree_routes(app)
 
-    # #367 / W-23 选项 A：sandbox 后端列表（`probe_all_capabilities` 明确标注
-    # "给选择器 UI 用"；创建表单的"运行位置"选择器只显示探针真实结果，不画饼）
+    # #367 / W-23：sandbox 后端列表只展示新会话可选择的后端。
     @app.get("/api/sandbox-backends")
-    async def list_sandbox_backends(workspace_path: str | None = None) -> dict:
+    async def list_sandbox_backends() -> dict:
         """可用 sandbox 后端 + 探针结果（不可用带 reason，前端据此置灰）。"""
         return {
             "backends": [
@@ -2283,9 +2282,7 @@ def create_app(
                     "reason": c.reason,
                     "details": c.details,
                 }
-                for c in probe_all_capabilities(
-                    windows_psec_workspace=workspace_path
-                )
+                for c in probe_all_capabilities()
             ]
         }
 
@@ -2384,9 +2381,9 @@ def create_app(
 
     register_host_dir_routes(app)
 
-    # #191 会话工作区只读浏览（列文件 / 读文件 / git status / 单文件 diff）。
-    # 同样是独立 router + 一行接入：路径边界与来源闸都用既有的那一份（Sandbox /
-    # `require_trusted_origin`），本模块不新造校验。
+    # #191/#1048 会话工作区浏览与显式副本导出。
+    # 同样是独立 router + 一行接入：workspace 走 Sandbox，宿主来源闸复用
+    # `require_trusted_origin`，本模块不新造校验。
     from agent_harness.web.workspace_files import register_workspace_file_routes
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
@@ -2452,15 +2449,11 @@ def create_app(
     # ── 路由 ──
 
     @app.get("/api/sandbox/capabilities")
-    async def sandbox_capabilities(
-        workspace_path: str | None = None,
-    ) -> dict[str, object]:
+    async def sandbox_capabilities() -> dict[str, object]:
         """#363 / W-19：Sandbox 后端能力探针（给选择器 UI 用）。
 
-        返回各后端可用性 + 不可用原因 + 修复提示。纯查询，无副作用
-        （不创建容器、不拉镜像）。前端据此渲染选择器：可用项可选，
-        不可用项**置灰保留并显示原因**（抄 Cline "rather than silently
-        disappearing"，不隐藏）。
+        返回新会话可选择后端的可用性 + 不可用原因 + 修复提示。纯查询，
+        无副作用（不创建容器、不拉镜像）。不可用项置灰并显示原因。
         """
         return {
             "backends": [
@@ -2470,9 +2463,7 @@ def create_app(
                     "reason": c.reason,
                     "details": c.details,
                 }
-                for c in probe_all_capabilities(
-                    windows_psec_workspace=workspace_path
-                )
+                for c in probe_all_capabilities()
             ],
         }
 
@@ -2624,10 +2615,11 @@ def create_app(
         store = project_instruction_store(app.state.agent.settings)
         registry = service.workspace_registry
         if registry.exists(session_id):
+            from agent_harness.sandbox.docker import DockerSandbox
             from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
             sandbox = registry.get(session_id)
-            if isinstance(sandbox, WindowsPsecSandbox):
+            if isinstance(sandbox, (DockerSandbox, WindowsPsecSandbox)):
                 await asyncio.to_thread(
                     store.reload_for_sandbox_session, session_id, sandbox,
                 )
@@ -2791,9 +2783,7 @@ def create_app(
                     "remediation": e.remediation,
                     "available_backends": [
                         c.backend
-                        for c in probe_all_capabilities(
-                            windows_psec_workspace=cwd
-                        )
+                        for c in probe_all_capabilities()
                         if c.available
                     ],
                 },

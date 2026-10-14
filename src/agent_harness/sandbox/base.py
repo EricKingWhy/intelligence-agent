@@ -156,6 +156,16 @@ class Sandbox(ABC):
         workspace_path 越界抛 PermissionError。
         """
 
+    def copy_out(self, host_path: Path) -> None:
+        """Copy the complete workspace to a new host directory when supported.
+
+        Backends that do not provide a safe whole-workspace export keep the default
+        fail-closed behavior. The destination must not already exist.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support workspace export"
+        )
+
     @abstractmethod
     def stop(self) -> None:
         """停止 Sandbox（保留持久状态以便 resume）。幂等：多次调用不报错。

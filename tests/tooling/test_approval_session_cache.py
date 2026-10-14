@@ -184,3 +184,18 @@ def test_path_traversal_rejected_before_key(sandbox: LocalSubprocessSandbox):
 
     with pytest.raises(ValueError):
         approval_identity(tool, args, sandbox)
+
+
+def test_approval_identity_uses_docker_posix_path_resolution():
+    """Approval keys follow the container path API, not host Windows drive rules."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    # Path resolution is pure and needs neither the optional Docker SDK nor a daemon.
+    sandbox = object.__new__(DockerSandbox)
+    tool = WriteTool(sandbox)
+    args = tool.args_schema(path=r"C:\workspace\entry.py", content="x")
+
+    identity = approval_identity(tool, args, sandbox)
+
+    assert identity is not None
+    assert identity.canonical == "C:/workspace/entry.py"

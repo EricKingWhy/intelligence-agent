@@ -285,9 +285,10 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
+    from agent_harness.sandbox.docker import DockerSandbox
     from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
-    windows_psec_sandbox = isinstance(sandbox, WindowsPsecSandbox)
+    sandbox_native_paths = isinstance(sandbox, (DockerSandbox, WindowsPsecSandbox))
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -296,7 +297,7 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            if windows_psec_sandbox:
+            if sandbox_native_paths:
                 kwargs["project_instructions_loader"] = (
                     lambda relative_path: project_instructions.load_for_sandbox_path(
                         session_id, sandbox, relative_path,
@@ -596,8 +597,6 @@ async def build_runtime(
         else workspace
     )
     project_instructions = project_instruction_store(settings)
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
@@ -697,7 +696,10 @@ async def build_runtime(
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
-    if isinstance(instruction_workspace, WindowsPsecSandbox):
+    from agent_harness.sandbox.docker import DockerSandbox
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    if isinstance(instruction_workspace, (DockerSandbox, WindowsPsecSandbox)):
         await asyncio.to_thread(
             project_instructions.load_for_sandbox_session,
             session_id,
@@ -707,6 +709,7 @@ async def build_runtime(
         await asyncio.to_thread(
             project_instructions.load_for_session, session_id, instruction_cwd,
         )
+    runtime_workspace_root = instruction_workspace.workspace_root
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
     context_artifact_store = tooling.context_artifact_store
@@ -836,7 +839,7 @@ async def build_runtime(
                 # #358 / W-14：子执行器与父同一审批面（决策 11 权限传递）——
                 # 显式注入产品级默认权限矩阵（规则引擎本体默认 None = 不启用）。
                 permission_rules=default_rule_set(),
-                workspace_root=instruction_cwd,
+                workspace_root=runtime_workspace_root,
             )
 
         runtime_multiagent_provider.activate(
@@ -892,9 +895,13 @@ async def build_runtime(
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
-        return project_instructions.load_for_session(
-            session_id, instruction_cwd,
-        ).with_runtime_context(runtime_context)
+        if isinstance(instruction_workspace, (DockerSandbox, WindowsPsecSandbox)):
+            snapshot = project_instructions.load_for_sandbox_session(
+                session_id, instruction_workspace,
+            )
+        else:
+            snapshot = project_instructions.load_for_session(session_id, instruction_cwd)
+        return snapshot.with_runtime_context(runtime_context)
 
     # #823 / MM-02（A2）：视觉能力按**当前请求模型**判定（PRD D6——"fallback 自动
     # 降级"）。主/备两级各自解析声明；运行时在每次 build 前按 coordinator 的当前角色
@@ -914,7 +921,7 @@ async def build_runtime(
                               # #358 / W-14：主执行器注入产品级默认权限矩阵
                               # （规则引擎本体默认 None = 不启用；矩阵归 composition root）。
                               permission_rules=default_rule_set(),
-                              workspace_root=instruction_cwd),
+                              workspace_root=runtime_workspace_root),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
