@@ -41,7 +41,7 @@ class TestGetSandboxBackends:
             if not b["available"]:
                 assert b.get("reason"), f"{b['backend']} 不可用却无 reason"
 
-    def test_passes_selected_workspace_to_psec_probe(self, client, monkeypatch):
+    def test_forwards_selected_workspace_to_the_probe(self, client, monkeypatch):
         import agent_harness.web.app as app_module
 
         observed: list[str | None] = []

@@ -102,6 +102,7 @@ from agent_harness.sandbox import (
     SUPPORTED_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
+    default_backend_for_platform,
     probe_all_capabilities,
 )
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -1166,7 +1167,12 @@ class AppState:
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
         self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
-            root=Path(settings.workspace_dir), backend="local"
+            root=Path(settings.workspace_dir),
+            # #1048 AC1：部署默认按平台解析——受影响（Windows/NTFS）平台默认
+            # docker（不可用即 409 fail-closed，绝不回落 local/PSEC）；其余平台
+            # 默认 local（无 NTFS hard link 对象身份问题）。显式 `sandbox_backend`
+            # 仍优先于本默认（registry 的「显式 > 部署默认」）。
+            backend=default_backend_for_platform(),
         )
         # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
         # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。

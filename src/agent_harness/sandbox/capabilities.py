@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import ntpath
 import os
 import subprocess
 from collections.abc import Mapping
@@ -255,34 +254,19 @@ def probe_all_capabilities(
     *,
     windows_psec_workspace: str | None = None,
 ) -> list[SandboxCapabilities]:
-    """探针全部后端（给选择器 UI 用：展示能力 + 缺依赖原因）。"""
-    if windows_psec_workspace is None or os.name != "nt":
-        psec = probe_windows_psec_capabilities()
-    else:
-        workspace = ntpath.normpath(windows_psec_workspace)
-        if not ntpath.isabs(workspace):
-            psec = SandboxCapabilities(
-                backend="windows_psec",
-                available=False,
-                reason="PSEC requires an absolute path to an existing workspace",
-            )
-        else:
-            try:
-                from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+    """探针全部**新会话可选**后端（给选择器 UI 用：展示能力 + 缺依赖原因）。
 
-                config = WindowsPsecSandbox.probe_configuration_for_workspace(workspace)
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                psec = SandboxCapabilities(
-                    backend="windows_psec",
-                    available=False,
-                    reason=f"Could not build the workspace PSEC policy: {exc}",
-                )
-            else:
-                psec = probe_windows_psec_capabilities(config=config)
+    #1048 AC2：`windows_psec` 已降级为 **legacy-only**（见 `LEGACY_BACKENDS`），
+    不再作为新会话可选后端，故不在此列出。`probe_windows_psec_capabilities`
+    仍保留——仅用于 legacy PSEC sandbox 启动时的自检，不再进选择器。
+
+    `windows_psec_workspace` 参数保留仅为兼容既有 HTTP 调用面
+    （`/api/sandbox-backends?workspace_path=...`）：PSEC 退出选择器后，它不再
+    影响探针结果。
+    """
     return [
         probe_local_capabilities(),
         probe_docker_capabilities(image=image),
-        psec,
     ]
 
 

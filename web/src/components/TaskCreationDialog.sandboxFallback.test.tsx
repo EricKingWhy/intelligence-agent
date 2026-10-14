@@ -143,8 +143,12 @@ describe('TaskCreationDialog sandbox options (#1071)', () => {
     });
   });
 
-  it('shows PSEC only from a successful workspace-specific probe', async () => {
-    vi.mocked(getSandboxBackends).mockResolvedValue([backend('windows_psec')]);
+  it('never offers PSEC even from a successful workspace-specific probe', async () => {
+    // #1048 AC2：windows_psec 降级为 legacy-only，任何来源的探针都不再进下拉。
+    vi.mocked(getSandboxBackends).mockResolvedValue([
+      backend('windows_psec'),
+      backend('docker'),
+    ]);
 
     await act(async () => {
       render(dialog());
@@ -152,8 +156,7 @@ describe('TaskCreationDialog sandbox options (#1071)', () => {
     });
 
     const options = openOptions();
-    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(true);
-    expect(options.some((title) => title.trim() === '\u672c\u673a')).toBe(false);
-    expect(options.some((title) => title.includes('Docker'))).toBe(false);
+    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
+    expect(options.some((title) => title.includes('Docker'))).toBe(true);
   });
 });

@@ -164,10 +164,12 @@ function TaskCreationForm({
     })),
   ];
 
-  const projectBackends = workspaceBackends?.path === project.path &&
+  // #1048 AC2：`windows_psec` 已降级为 legacy-only，不再是新会话可选后端——
+  // 无论全局探针还是 workspace-specific 探针，下拉都不再展示它。
+  const projectBackends = (workspaceBackends?.path === project.path &&
       workspaceBackends.entries.length > 0
     ? workspaceBackends.entries
-    : sandboxBackends.filter((b) => b.backend !== 'windows_psec');
+    : sandboxBackends).filter((b) => b.backend !== 'windows_psec');
   const workspaceProbePending = workspaceBackends?.path !== project.path;
   const sandboxOptions = [
     { value: 'auto', title: '默认', description: '部署默认（本机）' },
@@ -179,9 +181,7 @@ function TaskCreationForm({
           ? '本机'
           : b.backend === 'docker'
             ? 'Docker'
-            : b.backend === 'windows_psec'
-              ? 'Windows PSEC'
-              : b.backend,
+            : b.backend,
         description: undefined,
       })),
   ];
