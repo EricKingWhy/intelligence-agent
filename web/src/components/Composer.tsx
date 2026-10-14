@@ -47,11 +47,13 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  /** 返回值 = 这次发送**是否已被受理**（#1029）：
+  /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
    *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
    *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
    *    状态并保留用户未发送的输入」）；
-   *  - `true` / `undefined`（旧签名）⇒ 已受理，照旧清空——既有调用零回归。
+   *  - `true` / `undefined`（旧签名）⇒ 按旧行为清空——既有调用零回归。
+   *  发送口**抛错**同样按未受理处理（保留输入，见 submit 的 `.then(_, onRejected)`）
+   *  ——它绝不能被读成"已受理"。
    *  Promise 形态由 App 的 `handleSubmit` 返回（回执在途期间同样不清空）。 */
   onSubmit: (
     task: string,
@@ -183,11 +185,14 @@ export const Composer = memo(function Composer({
   /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
    *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。
    *
-   *  ponytail: 已知限制（P3 二选一里未选的那一半）——在途期间按 Enter 会被这里
-   *  静默吞掉（没有可见反馈）。代价换的是「不重复发送」；升级路径 = 在途时给发送键
-   *  一个忙态（禁用 + 提示），而不是靠静默丢弃。窗口 = 一次 ack（`raceEarlyResponse`
-   *  1200ms 窗内 + WS attach），不是整场 run。 */
+   *  在途期间按 Enter 被这里挡下时**不再是静默的**：`sending` 让发送键可见地进入
+   *  忙态（#1139，原先只是注释里的已知限制）。窗口 = 一次 ack
+   *  （`raceEarlyResponse` 1200ms 窗内 + WS attach），不是整场 run。 */
   const sendingRef = useRef(false);
+  /** #1139：忙态的**可见**那一半。`sendingRef` 是同步闸（同一 tick 的第二次按键读不到
+   *  刚 set 的 state），这个 state 只负责让用户看见「上一条还在飞」——此前在途按键
+   *  被静默吞掉，用户读到的是"按键没反应"。 */
+  const [sending, setSending] = useState(false);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -410,32 +415,54 @@ export const Composer = memo(function Composer({
     /* 清空**只在确认受理之后**发生（#1029）。此前是「提交瞬间无条件清空、失败不
        还原」——任何发送失败（待裁决 409 / 网络断 / 429…）用户文本都无声消失，而
        它既没进队列也没落日志，事后完全不可恢复。
-       判据是发送口的返回值（不是猜的）：`false` = 未受理 ⇒ 文本与草稿原样留在
-       输入框，用户处理完（如先做恢复裁决）再发；`true`/`undefined` = 受理 ⇒ 照旧
-       清空。未落定期间（Promise 未 settle）同样**不清**——清空只发生在 ack 之后。 */
+       判据是发送口的返回值（不是猜的）：**显式 `false`** = 未受理 ⇒ 文本与草稿原样
+       留在输入框，用户处理完（如先做恢复裁决）再发；`true`/`undefined`（旧签名）
+       = 受理 ⇒ 按旧行为清空。发送口**抛错**同样按未受理处理（保留），不冒充受理。
+       未落定期间（Promise 未 settle）同样**不清**——清空只发生在 ack 之后。 */
     const accepted =
       mode === 'steer' && onSteer
         ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
         : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
     sendingRef.current = true;
+    setSending(true);
+    /** 受理落定后的清空。**只在受理侧调用**（`false` 与抛错都不调）。 */
+    const accept = () => {
+      /* 只清**本次提交的那段**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间输入框是
+         活的，用户接着打的字不能被这一刀连带抹掉。
+         判据是**定位后切除**，不是前缀比对：提交的是 `trimmed`，而框里是**原始**
+         文本——首尾带空白 / 多行（粘贴任务、先回车再打字）时 `startsWith` 必假，
+         受理成功后输入框永不清空（独立审查探针实证的回归）。`trimStart` 对齐后
+         `indexOf` 定位，切掉那一段、原样保留两侧。
+         定位不到（在途期间用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不
+         清掉用户没提交的内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
+      setValue((v) => {
+        const lead = v.length - v.trimStart().length;
+        const at = v.trimStart().indexOf(trimmed);
+        if (at === -1) return v;
+        const rest = v.slice(0, lead + at) + v.slice(lead + at + trimmed.length);
+        // 剩下的只有空白（首尾空白 / 多行粘贴的常态）⇒ 就是「清空」，不留残渣。
+        return rest.trim() === '' ? '' : rest;
+      });
+      setRememberAsProceduralRule(false);
+      // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
+      // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
+      attachments.clearSent(attachmentIds);
+    };
     void Promise.resolve(accepted)
-      .then((ok) => {
-        // `undefined`（旧签名）/ `true` = 已受理；只有显式 `false` 才保留。
-        if (ok === false) return;
-        /* 只清**本次提交的那段前缀**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间
-           输入框是活的，用户接着打的字不能被这一刀连带抹掉。前缀不匹配（在途期间
-           用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不清掉用户没提交的
-           内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
-        setValue((v) => (v.startsWith(trimmed) ? v.slice(trimmed.length) : v));
-        setRememberAsProceduralRule(false);
-        // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
-        // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
-        attachments.clearSent(attachmentIds);
-      })
-      // 发送口自己抛错 = 未受理（正常路径由 App 收口成 `false`，不重复报错）。
-      .catch(() => {})
+      .then(
+        (ok) => {
+          // `undefined`（旧签名）/ `true` = 受理；只有显式 `false` 才保留。
+          if (ok !== false) accept();
+        },
+        /* 发送口自己抛错 = **未受理**（正常路径由 App 收口成 `false`，不重复报错）。
+           显式写成分支而不是 `.catch(() => {})`：后者读起来像"吞掉"，且把"抛错"
+           归进了受理侧（清空）——那会让异常路径留下 `sendingRef=false` + 文本不清，
+           用户再按 Enter 就重发一条**已经成功**的消息。 */
+        () => {},
+      )
       .finally(() => {
         sendingRef.current = false;
+        setSending(false);
       });
   };
 
@@ -978,9 +1005,16 @@ export const Composer = memo(function Composer({
               <button
                 className="composer-send"
                 onClick={() => submit('queue')}
-                disabled={locked || !value.trim() || sendBlocked}
+                disabled={locked || !value.trim() || sendBlocked || sending}
                 aria-label="发送"
-                title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                aria-busy={sending}
+                title={
+                  sendBlocked
+                    ? sendBlockedReason
+                    : sending
+                      ? '上一条消息还在发送中…'
+                      : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+                }
               >
                 <ArrowUp size={16} />
               </button>
@@ -992,9 +1026,16 @@ export const Composer = memo(function Composer({
             <button
               className="composer-send"
               onClick={() => submit('queue')}
-              disabled={locked || !value.trim() || sendBlocked}
+              disabled={locked || !value.trim() || sendBlocked || sending}
               aria-label="发送"
-              title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              aria-busy={sending}
+              title={
+                sendBlocked
+                  ? sendBlockedReason
+                  : sending
+                    ? '上一条消息还在发送中…'
+                    : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+              }
             >
               <ArrowUp size={16} />
             </button>

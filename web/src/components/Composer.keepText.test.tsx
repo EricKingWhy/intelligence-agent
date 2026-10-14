@@ -50,6 +50,7 @@ let onSubmit: Mock<(...args: SubmitArgs) => SubmitResult>;
 let onSteer: Mock<(...args: SubmitArgs) => SubmitResult>;
 
 const textarea = (): HTMLTextAreaElement => container.querySelector('#composer-input')!;
+const sendButton = (): HTMLButtonElement => container.querySelector('.composer-send')!;
 const cards = (): NodeListOf<HTMLElement> => container.querySelectorAll('.composer-attach-card');
 
 async function mount(): Promise<void> {
@@ -187,6 +188,36 @@ describe('#1029 composer 发送失败保留文本', () => {
     expect(textarea().value).toBe(' 接着打的新内容');
   });
 
+  /* P0-2（独立审查探针实证的真实回归）：提交的是 `trimmed = value.trim()`，而框里是
+     **原始**文本 ⇒ `v.startsWith(trimmed)` 在首尾带空白（粘贴多行任务、先回车再打字）
+     时必假 ⇒ 走 else 原样返回，**受理成功后输入框永不清空**。基线 `dc09b1be` 是
+     无条件 `setValue('')`，没有这个洞。 */
+  it('粘贴带首尾空白/多行文本：受理成功后照样清空（不是只有纯文本才清）', async () => {
+    onSubmit.mockReturnValue(true);
+    await typeText('\n  粘贴来的多行任务  \n');
+    pressEnter();
+    await act(async () => {});
+
+    // 发出去的是 trim 后的正文（既有契约不变）
+    expect(onSubmit).toHaveBeenCalledWith('粘贴来的多行任务', false, []);
+    // 受理 ⇒ 清空（修复前：前缀比对假 ⇒ 原文留在框里）
+    expect(textarea().value).toBe('');
+  });
+
+  /* P2-1 的另一半：发送口**抛错**同样是"未受理"。若把 `ok !== false` 一律当受理，
+     异常路径（如 `App.handleSubmit` 里 `await pending` 的懒建 rejection）会留下
+     `sendingRef=false` + 文本不清 ⇒ 用户再按 Enter 重发一条**已成功**的消息。 */
+  it('发送口抛错：按未受理处理，文本保留（不冒充受理）', async () => {
+    // mockImplementation（不是 mockReturnValue）：拒绝在**调用时**才造出来，与
+    // Composer 的 `.catch` 同 tick 挂上，不跨 act 边界留 unhandled rejection。
+    onSubmit.mockImplementation(() => Promise.reject(new Error('boom')) as unknown as SubmitResult);
+    await typeText('抛错的发送');
+    pressEnter();
+    await act(async () => {});
+
+    expect(textarea().value).toBe('抛错的发送');
+  });
+
   it('旧签名（onSubmit 返回 undefined）：照旧清空——既有调用零回归', async () => {
     onSubmit.mockReturnValue(undefined);
     await typeText('既有调用');
@@ -240,5 +271,29 @@ describe('#1029 composer 发送失败保留文本', () => {
     pressEnter();
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
+    // #1139：挡住的同时**可见**——发送键进入忙态（此前是静默吞键，用户读到"没反应"）
+    expect(sendButton().disabled).toBe(true);
+    expect(sendButton().getAttribute('aria-busy')).toBe('true');
+  });
+
+  it('#1139 回执落定后忙态退场：发送键恢复可用、aria-busy 撤下', async () => {
+    let settle: ((ok: boolean) => void) | null = null;
+    onSubmit.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }) as unknown as SubmitResult,
+    );
+    await typeText('回执还没来');
+    pressEnter();
+    expect(sendButton().disabled).toBe(true);
+
+    await act(async () => {
+      settle!(false);
+    });
+
+    // 未受理 ⇒ 文本留着，但忙态必须退场（否则用户永远发不出第二条）
+    expect(textarea().value).toBe('回执还没来');
+    expect(sendButton().disabled).toBe(false);
+    expect(sendButton().getAttribute('aria-busy')).toBe('false');
   });
 });

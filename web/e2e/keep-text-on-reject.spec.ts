@@ -14,9 +14,9 @@
  *  夹具形状与 `recovery-w13.spec.ts` 同源（`pending_decisions` 逐字段对齐后端
  *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。
  *
- *  ⚠ 本文件是 **2 条** `test()`（上面三件事由第一条一并断言）；Playwright 每例跑
- *  两个视口 ⇒ 报告里是 4 个 run。别把「4」读成 4 条用例（独立审查 P4 记录过这处
- *  口径混淆）。 */
+ *  ⚠ 本文件是 **3 条** `test()`（第一条一并断言上面三件事；第二条锁「裁决能落定」；
+ *  第三条是对照组「受理成功才清空」）；Playwright 每例跑两个视口 ⇒ 报告里是
+ *  **6 个 run**。别把「6」读成 6 条用例（独立审查两次记录过这处口径混淆）。 */
 
 import { expect, test, type Page } from '@playwright/test';
 import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';

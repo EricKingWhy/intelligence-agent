@@ -699,7 +699,11 @@ export default function App() {
 
   const handleSubmit = useCallback(
     /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
-     *  `false` ⇒ 它保留输入框里的文本与草稿（`11 §6.1` 第 164 行的 MUST）。 */
+     *  **显式 `false`** ⇒ 它保留输入框里的文本与草稿（`11 §6.1` 第 164 行的 MUST）；
+     *  `true` / `undefined`（旧签名）⇒ 按旧行为清空。
+     *  续聊路径（`sendMessage`）不抛——网络故障在 hook 内部收口成 `false`；**新建会话
+     *  路径会抛**（`submitTask` 的 422 / Start failed 文案），Composer 把抛错同样归到
+     *  「未受理」侧（保留输入）⇒ 异常路径也不会吞掉用户文本。 */
     (
       task: string,
       rememberAsProceduralRule = false,

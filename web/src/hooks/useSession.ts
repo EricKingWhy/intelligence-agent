@@ -1273,11 +1273,19 @@ export function useSession() {
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
    *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。
    *
-   *  #1029：失败路径**不得**改动 `mode`/代际/`recoverState`。用户在待裁决会话里
-   *  发送被拒后，界面必须还是他刚才那个会话、composer 里还是他那段文本、裁决面板
-   *  已被点亮——所以这里只写横幅（App 在 `app-error` 渲染）并 resolve `false`，
-   *  让 composer 保留输入。此前那三行是**相反**的行为（打回 viewing + 清空清单），
-   *  在待裁决路径上与 `settle` 的 `setRecoverState` 直接打架。
+   *  #1029：失败路径**不改代际**。用户在待裁决会话里发送被拒后，界面必须还是他刚才
+   *  那个会话、composer 里还是他那段文本、裁决面板已被点亮——所以这里只写横幅
+   *  （App 在 `app-error` 渲染）并 resolve `false`，让 composer 保留输入。此前那三行
+   *  是**相反**的行为（打回 viewing + 清空清单），在待裁决路径上与 `settle` 的
+   *  `setRecoverState` 直接打架。
+   *
+   *  唯一例外是 recovery-conflict 支**必须**落回 `viewing(sid)`（理由见该支注释：
+   *  `recover` 的落地守护只认 `viewing`，留在 `live` 会让人工裁决的结果被整段丢弃）。
+   *  `live(sid) → viewing(sid)` 是同会话自迁移，不触发历史装载 effect，故「保留输入」
+   *  不受影响——被拿掉的那三行里，真正致命的是**清空清单**，不是改 mode 本身。
+   *  另有**迟到失败**那一支也 `setMode(viewing)`，但依据不同（见该处注释）：它属
+   *  **过期/纠正**路径，回 `true` 而非 `false`，本就不在「保留输入」这条契约上——
+   *  那次投递的结局与用户**当前**看到的会话无关，代际守卫已经把它判出局。
    *
    *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 的三项档位
    *  （model / agent_profile / reasoning_effort；**不含 `permission_mode`**——
@@ -1288,7 +1296,9 @@ export function useSession() {
   const sendFollowUp = useCallback(
     /** 返回值 = 这次发送**是否已被后端受理**（#1029）。`false` 是 composer
      *  「保留用户未发送的输入」的唯一信号：文本既没进队列、也没落日志，清空即丢失。
-     *  被拒（409/422/404/网络失败）恒为 `false`；受理（stream/ack）为 `true`。 */
+     *  被拒（409/422/404/网络失败）恒为 `false`；受理（stream/ack）为 `true`。
+     *  过期分支（代际守卫判出局的投递）恒为 `true`——那条路径不在这份契约上，见
+     *  函数头注释。 */
     async (
       sessionId: string,
       content: string,
@@ -1329,7 +1339,10 @@ export function useSession() {
              `readErrorDetail` 只取 `.message` 会把清单丢掉——那正是本票要修的形态。
              404/422/其余状态各有固定文案，不必为不读的 body 等一次 I/O。 */
           const body = res.status === 409 ? await readErrorBody(res) : null;
-          if (streamGenRef.current !== myGen) return true; // 读 detail 期间已换代际（过期请求不复活文本）
+          // 读 detail 期间已换代际 ⇒ 这条投递的结局已作废。回 `true`（不是 `false`）：
+          // 它不在「失败保留输入」契约上（那条只覆盖**当前**这次投递），回填只会把
+          // 上一代的文本复活进新会话的 composer。
+          if (streamGenRef.current !== myGen) return true;
           const outcome = decideFollowUpOutcome({
             status: res.status,
             hasBody: res.body !== null,
@@ -1399,8 +1412,9 @@ export function useSession() {
                 路径此前从不写它，所以面板对发送路径**永不可达**；
              ② 横幅写**人话**文案（后端协议原文只在裁决面板里作细节，用户照它
                 行动不了：`tool_call_id` / `verdict` 词表不是给最终用户看的）；
-             ③ **就地** resolve `false`，不 throw —— 失败路径不碰 mode/代际，
-                composer 据此保留文本，界面留在原会话。清单逐字来自后端载荷
+             ③ **就地** resolve `false`，不 throw —— 失败路径不改代际（唯一的
+                mode 例外见下方 `setMode(viewing)` 处），composer 据此保留文本，
+                界面留在原会话。清单逐字来自后端载荷
                 （不变量 #22：本 hook 不合成、不缓存裁决事实）。 */
           if (outcome.kind === 'recovery-conflict') {
             setRecoverState({
@@ -1417,9 +1431,9 @@ export function useSession() {
                `recover` 的落地守护只认 `viewing`（`shouldApplyRecoverResult`）⇒
                留在 `live` 的话，用户提交裁决后 `POST /recover` 的 200 结果被整段
                丢弃，面板永久停在「提交中」、按钮禁用——点不动也走不掉，只剩刷新
-               页面。与其余失败分支（catch 的 `setMode(viewing)`、submitTask）
-               同一口径。`live(sid) → viewing(sid)` 是自迁移，上面 effect 的判据
-               不会因此清掉同批点亮的清单。 */
+               页面。与迟到失败那一支（代际纠正后收流回 viewing）同一手法。
+               `live(sid) → viewing(sid)` 是自迁移，上面 effect 的判据不会因此
+               清掉同批点亮的清单。 */
             setMode({ kind: 'viewing', sessionId });
             setError(outcome.text);
             return false;
@@ -1439,6 +1453,11 @@ export function useSession() {
           .then((settled) => (streamGenRef.current === myGen ? settle(settled, true) : undefined))
           .catch((e) => {
             if (streamGenRef.current !== myGen) return;
+            /* 迟到的失败：当初判 launched 判错了，这条 WS 流与本次投递无关 ⇒
+               **推进代际**收掉它，并把 mode 落回 `viewing`。这里的 `setMode` 是
+               「投递已被代际纠正、流作废」的收尾，**不是**「失败保留输入」那条契约
+               （函数头注释）的例外——它属**过期/纠正**路径，而契约只覆盖**当前**
+               这次投递。 */
             myGen = ++streamGenRef.current;
             setMode({ kind: 'viewing', sessionId });
             setError(`续聊失败：${(e as Error).message}`);
@@ -1474,11 +1493,15 @@ export function useSession() {
       } catch (e) {
         // 过期请求迟到失败：丢弃，不污染新会话。回 `true`（不是 `false`）——这次
         // 投递的结局与用户**当前**看到的会话无关，回填只会把 A 会话的文本复活进
-        // B 会话的 composer（比丢失更糟：发错地方）。
+        // B 会话的 composer（比丢失更糟：发错地方）。这条**代际过期**分支回 `true`
+        // ⇒ 不在「失败保留输入」契约上（那条只覆盖**当前**这次投递），故它的收尾
+        // 与 mode 无关；真正会 `setMode(viewing)` 的是上面那条迟到失败的 `.catch`
+        // （另见那里的依据）。
         if (streamGenRef.current !== gen) return true;
-        /* #1029：这里**不动** mode / 代际（见函数头注释）。改 mode 会触发历史装载
-           effect：它整表重建 conversation，并把还没进事件流的用户文本从界面上抹掉
-           ——「保留输入」这个契约当场自相矛盾。 */
+        /* #1029：**本支**不动 mode / 代际（见函数头注释；这里回 `false`，正是
+           「保留输入」契约覆盖的那一支）。改 mode 会触发历史装载 effect：它整表重建
+           conversation，并把还没进事件流的用户文本从界面上抹掉——「保留输入」这个
+           契约当场自相矛盾。 */
         setError(`续聊失败：${(e as Error).message}`);
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
