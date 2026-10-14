@@ -4,7 +4,7 @@
 512px 方块，长边按 `IMAGE_MAX_DIMENSION` 等比缩小——与发送前 `normalize` 的
 `frame.thumbnail` 同语义）。本文件钉住：
 
-1. 标准图片块（`{"type":"image",...,"width","height"}`）按尺寸计费，随尺寸**单调**增长；
+1. 标准图片块（`{"type":"image",...,"width","height"}`）按尺寸计费，随尺寸增长（对角线/正方形采样**单调**；任意尺寸对不保证单调，见 `test_documents_bounded_fallback_at_rounding_boundaries`）；
 2. provider 块（`image_url`，无尺寸字段）走 `IMAGE_TOKENS_UNKNOWN_SIZE` 保守回退；
 3. 无附件的纯文本消息口径逐字不变（AC9）；
 4. ContextBuilder 的增量估算（`_estimate_tokens_cached`）在视觉口径下真的多算图片；
