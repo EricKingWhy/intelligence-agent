@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { KeyRound, RotateCcw, X } from 'lucide-react';
+import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
@@ -50,6 +50,8 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
+import { adjudicationHeadline } from './lib/recovery';
+import { AdjudicationTechDetail } from './components/AdjudicationTechDetail';
 import { describeOwnership } from './lib/ownership';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
@@ -698,7 +700,17 @@ export default function App() {
   }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
 
   const handleSubmit = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
+     *  **显式 `false`** ⇒ 它保留输入框里的文本与草稿（`11 §6.1` 第 164 行的 MUST）；
+     *  `true` / `undefined`（旧签名）⇒ 按旧行为清空。
+     *  续聊路径（`sendMessage`）不抛——网络故障在 hook 内部收口成 `false`；**新建会话
+     *  路径会抛**（`submitTask` 的 422 / Start failed 文案），Composer 把抛错同样归到
+     *  「未受理」侧（保留输入）⇒ 异常路径也不会吞掉用户文本。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -723,21 +735,20 @@ export default function App() {
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
       };
-      void (async () => {
+      return (async (): Promise<boolean> => {
         let sid: string | null = selectedId ?? ensuredIdRef.current;
         const pending = ensuringRef.current;
         if (sid === null && pending !== null) {
           sid = await pending;
         }
         if (sid !== null) {
-          void sendMessage(sid, task, { amend });
-          return;
+          return await sendMessage(sid, task, { amend });
         }
         // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
         // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
         // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-        void submitTask({
+        const failure = await submitTask({
           task,
           auto_approve: true,
           ...ruleSignal,
@@ -754,6 +765,9 @@ export default function App() {
             deadlineAt: budgetRunDeadlineDraft,
           }),
         });
+        // 新会话创建失败 ⇒ 未受理（`submitTask` 返回失败文案；成功返回 null）
+        // ——同一条「失败不清空」契约，不因走的是创建路径就丢文本。
+        return failure === null;
       })();
     },
     [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
@@ -845,12 +859,16 @@ export default function App() {
   // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
   // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值语义同 `handleSubmit`（#1029）：透传「是否已被受理」。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       if (!selectedId) {
-        handleSubmit(task, rememberAsProceduralRule, attachmentIds);
-        return;
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
       }
-      void sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
+      return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
     [sendSteer, selectedId, handleSubmit],
   );
@@ -1114,11 +1132,17 @@ export default function App() {
   /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
    *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
   const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
-  // #357 W-13：裁决面板的可见性——只由后端 409 载荷驱动（不变量 #22）。用户 Esc/关闭
-  // 只收起**当前这一份**清单（按引用判等），新的 409 会带来新数组而重新弹出。
+  // #357 W-13：裁决面板的可见性——由后端待裁决清单驱动（不变量 #22）。两个同源读面：
+  // 带 `pending_decisions` 的 409（#596），以及打开会话时主动拉的
+  // `GET /api/sessions/{id}/recovery`（#1030 缺陷②）。用户 Esc/关闭只收起**当前这一份**
+  // 清单（按引用判等），新的清单会带来新数组而重新弹出。
   const pendingDecisions = recoverState.pendingDecisions;
-  const showDecisionPanel =
-    pendingDecisions !== null && pendingDecisions.length > 0 && pendingDecisions !== dismissedDecisions;
+  /** 有待裁决 = 有一份非空清单。`null`（未知）与 `[]`（后端说没有）都不算。
+   *  注意：重读失败时这份清单是**上一个已知值**（可能 stale），不是"后端此刻这么说"
+   *  ——见 `useSession.ts` 的 recover 200 分支（`prev.pendingDecisions`）。界面上宁可
+   *  多报"仍被封"，也不谎报"没事"（PRODUCT 原则 3；本票 AC1 要消灭的就是谎报方向）。 */
+  const hasPendingDecisions = pendingDecisions !== null && pendingDecisions.length > 0;
+  const showDecisionPanel = hasPendingDecisions && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1329,6 +1353,7 @@ export default function App() {
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
+        awaitingDecision={hasPendingDecisions}
       />
 
       <main
@@ -1430,9 +1455,10 @@ export default function App() {
                 <span className="recover-error">{recoverState.message}</span>
               )}
               {recoverState.status === 'error' && recoverState.conflict && (
-                <span className="recover-conflict" title={recoverState.message ?? ''}>
-                  需人工裁决：{recoverState.message}
-                </span>
+                <div className="recover-conflict">
+                  {adjudicationHeadline(pendingDecisions?.length ?? null)}
+                  <AdjudicationTechDetail message={recoverState.message} />
+                </div>
               )}
               {recoverState.status === 'idle' && (
                 <span className="recover-hint">该会话缺少 run 终态或有未配对工具调用——可尝试恢复</span>
@@ -1471,6 +1497,31 @@ export default function App() {
               }}
               onClose={() => setDismissedDecisions(pendingDecisions)}
             />
+          )}
+          {/* #1030（缺陷②/③，AC2/AC3）：待裁决横幅——**主动**出现，两层文案。
+              挂在与 canRecover 无关的位置：裁决与「恢复会话」是两件事，前者不需要
+              用户先点后者、也不需要先撞一次 409。清单来自后端只读端点（#22）。
+
+              第一层人话（adjudicationHeadline）+ 一个真正的动作（去裁决）；
+              协议原文（tool_call_id / POST /recover / verdict 枚举）只进 <details>
+              折叠层——这是 Kubernetes reason/message 双层的 ADAPT：默认给人话，
+              要排查的人展开仍有原文，两者都不丢（AC2 要求"只在折叠层出现"）。
+              「去裁决」与面板自身同为展开入口：用户关掉面板后仍能重新打开
+              （dismissedDecisions 只收起当前这一份，横幅不会跟着消失）。 */}
+          {hasPendingDecisions && pendingDecisions && !showDecisionPanel && (
+            <div className="adjudication-banner" role="status" aria-live="polite">
+              <span className="adjudication-headline">
+                {adjudicationHeadline(pendingDecisions.length)}
+              </span>
+              <button
+                className="adjudication-open-btn"
+                onClick={() => setDismissedDecisions(null)}
+              >
+                <Gavel size={14} />
+                去裁决
+              </button>
+              <AdjudicationTechDetail message={recoverState.message} />
+            </div>
           )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
@@ -1644,6 +1695,7 @@ export default function App() {
           onJumpToApproval={jumpToApproval}
           panel={panel}
           onPanelAction={onPanelAction}
+          awaitingDecision={hasPendingDecisions}
         />
       </main>
 

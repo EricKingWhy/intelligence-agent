@@ -435,6 +435,10 @@ class RunManager:
         # 生命周期地拖死（与 `_notify_run_terminal` 的 `_closing` 跳同一口径）。
         if self._closing:
             raise RuntimeError("RunManager is shutting down")
+        # #1055：**交付点**——从这里起这枚聚合就是在途 run 持有的那一枚，runtime 的
+        # 每条 append / end_run 都打在它上面。显式标记，撞号才在 store 锁内改号重落
+        # （#1062；服务层的创建 / 续聊 / 暂停续跑三条腿都经这里，故只需一处）。
+        session.deliver_to_runtime()
         run = ManagedRun(session, self)
         # #200：runtime 引用存到 ManagedRun——context-usage 端点从在途 run 的
         # builder 读最近一次 build 快照（launch 时刻 builder 还没 build 过，

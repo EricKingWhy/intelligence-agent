@@ -1,0 +1,1 @@
+2026-10-13	#1083 sync merge 机械归属（无独立内容）：parents=1b7721c8(ours)+e36b8d5e(origin/main)，merge-base=bd78412f，git show --cc 空表，树 a8c61a526d32194c19eb6ee856e29114e4b9520e 与两父树 631edcda/8dc0ab42 互不相等 ⇒ 非零新增；来侧为已审 origin/main 历史，按 #863/#885 机械归属	1b7721c856cca7c4a000210dd59005313d2a8c4e..6d23f1732bcf34a57399d1d954233aeeb385bedb

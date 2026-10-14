@@ -254,6 +254,9 @@ class SessionEventSink:
         self._attempts = max(1, attempts)
 
     def emit(self, event_type: str, data: dict[str, Any], *, run_id: str | None = None) -> None:
+        # 本写者不调用 `Session.deliver_to_runtime()`（#1055 的判据：只有交给在途
+        # runtime 的聚合才吃 resync），因此 `Session.append` 的重投分支对本写者不
+        # 生效，重试上界仍由本循环 owner——**不得**给它加上交付标记。
         for _ in range(self._attempts):
             try:
                 session = Session(

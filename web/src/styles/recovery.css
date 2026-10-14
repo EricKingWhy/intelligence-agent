@@ -50,12 +50,6 @@
   background: var(--surface-hover);
 }
 
-.recovery-decision-message {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
 .recovery-cards {
   list-style: none;
   margin: 0;

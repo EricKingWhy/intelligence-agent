@@ -661,18 +661,6 @@ class WindowsPsecSandbox(LocalSubprocessSandbox):
             remediation="run on Windows with MXC BaseContainer/PSEC support",
         )
 
-    @classmethod
-    def probe_configuration_for_workspace(
-        cls, workspace_root: str | os.PathLike[str]
-    ) -> dict[str, object]:
-        """Build the same no-DACL policy used at startup, without starting a sandbox."""
-        sandbox = cls(Path(workspace_root))
-        handles = _open_directory_chain(sandbox._workspace_root, create=False)
-        try:
-            return sandbox._probe_configuration()
-        finally:
-            _close_handles(handles)
-
     def _probe_configuration(self) -> dict[str, object]:
         environment = self._container_environment(self._env)
         comspec = environment.get("COMSPEC") or ntpath.join(
