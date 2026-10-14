@@ -14,9 +14,10 @@
  *  夹具形状与 `recovery-w13.spec.ts` 同源（`pending_decisions` 逐字段对齐后端
  *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。
  *
- *  ⚠ 本文件是 **3 条** `test()`（第一条一并断言上面三件事；第二条锁「裁决能落定」；
- *  第三条是对照组「受理成功才清空」）；Playwright 每例跑两个视口 ⇒ 报告里是
- *  **6 个 run**。别把「6」读成 6 条用例（独立审查两次记录过这处口径混淆）。 */
+ *  ⚠ 本文件是 **4 条** `test()`（前三条：一并断言上面三件事 / 锁「裁决能落定」/
+ *  对照组「受理成功才清空」；第四条是 #1148 的窗外迟到失败回填）；Playwright 每例跑
+ *  两个视口 ⇒ 报告里是 **8 个 run**。别把「8」读成 8 条用例（独立审查两次记录过这处
+ *  口径混淆）。 */
 
 import { expect, test, type Page } from '@playwright/test';
 import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';
@@ -163,4 +164,38 @@ test('对照：受理成功（JSON 收据）后 composer 才清空', async ({ pa
 
   await expect(composer).toHaveValue('');
   await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
+});
+
+test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文回到输入框', async ({ page }) => {
+  /* 判定窗口（1200ms）量的是"响应头到没到"，而待裁决 409 在吐响应头之前要先在后端把
+     pending 裁决查出来（`resume_and_launch` → `recover`）——冷启动/慢盘越过 1200ms
+     完全正常。一旦越窗，hook 已按"已受理"返回 ⇒ composer 乐观清空；此时若没有回填
+     通道，用户看到的就是「横幅说失败、输入框却是空的」。
+     这条 e2e 锁的就是这条接缝：迟到失败必须经 `failedDraft` 把原文还回输入框。 */
+  await openCrashed(page, {
+    sessions: [ROW],
+    events: crashedEvents(),
+    onMessagesPost: async (route) => {
+      // 越过判定窗口（1200ms）才吐响应头——真机慢网络/慢盘的同形时序。
+      await new Promise((resolve) => setTimeout(resolve, 1800));
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
+      });
+    },
+  });
+
+  const composer = page.getByLabel('Agent 任务');
+  await composer.fill(DRAFT);
+  await page.getByLabel('发送').click();
+
+  // ① 窗外 = 无从等待结局 ⇒ 先按已受理清空（乐观）。
+  await expect(composer).toHaveValue('');
+  // ② 迟到的 409 落定 ⇒ 原文回到输入框（修复前：只剩一条横幅，文本永久丢失）。
+  await expect(composer).toHaveValue(DRAFT, { timeout: 10_000 });
+  // ③ 失败呈现照旧（人话横幅，不透传协议原文）——回填是**附加**通道，不取代横幅。
+  const banner = page.locator('.app-error');
+  await expect(banner).toContainText('待人工裁决');
+  await expect(banner).not.toContainText('tool_call_id');
 });
