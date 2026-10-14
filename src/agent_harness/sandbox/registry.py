@@ -285,6 +285,47 @@ class WorkspaceRegistry:
         if mapping_file.exists():
             mapping_file.unlink()
 
+    def cleanup_docker_workspace_resources(self, session_id: str) -> bool:
+        """Delete only this session's owned Docker container and private volume.
+
+        The mapping remains until the hard-delete path reaches
+        ``discard_session_artifacts``. If Docker cleanup fails, the caller can
+        retry while the session and its mapping still exist. Local and PSEC
+        workspaces are deliberately outside this operation.
+        """
+        mapping = self._read_mapping(session_id)
+        if mapping is None or "workspace_owner_session_id" in mapping:
+            return False
+        if mapping.get("session_id") != session_id:
+            raise WorkspaceBindingError(
+                f"Workspace mapping identity mismatch for session '{session_id}'."
+            )
+        if mapping.get("backend") != "docker":
+            return False
+
+        expected_name = f"agent-harness-{session_id}"
+        if (
+            mapping.get("container_name") != expected_name
+            or mapping.get("volume_name") != expected_name
+        ):
+            raise WorkspaceBindingError(
+                f"Docker workspace resources for session '{session_id}' do not "
+                "match their deterministic ownership names."
+            )
+
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        sandbox = self._cache.get(session_id)
+        if sandbox is None:
+            sandbox = self._instantiate_sandbox(mapping)
+        if not isinstance(sandbox, DockerSandbox):
+            raise WorkspaceBindingError(
+                f"Session '{session_id}' has Docker ownership metadata but no "
+                "Docker sandbox instance."
+            )
+        sandbox.delete()
+        return True
+
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
 
