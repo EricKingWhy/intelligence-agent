@@ -218,6 +218,16 @@ export interface PresetTask {
   id: number;
 }
 
+/** 分离投递（窗外落定）迟到的失败：把没送出去的原文还给 Composer（#1029 P2）。
+ *
+ *  **对象包装是承重的**，不是装饰：状态若直接是裸 `string`，同一段文本连续失败两次
+ *  时 `Object.is(同一段, 同一段)` 相等 ⇒ React 跳过重渲染 ⇒ 回填 effect 不触发，
+ *  第二次的草稿就被吞掉——而"重发一次、又失败一次"正是这条路径的常态。每次
+ *  `{ text }` 都是新引用，故每次都算一次注入。 */
+export interface FailedDraft {
+  text: string;
+}
+
 /** 会话呈现模式——conversation 永远属于 mode 指向的会话（编译期保证）。
  *
  * - idle：无选中会话（空状态）。

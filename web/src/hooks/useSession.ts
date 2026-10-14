@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
+import type { AgentEvent, ConversationState, FailedDraft, SessionDeleted, SessionMode, SessionSummary } from '../types';
 import { listSessions, getSessionEvents, readErrorConflict, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
@@ -486,6 +486,34 @@ export function useSession() {
   /** 上面这份恢复态**属于哪个会话**（#1029）。恢复/裁决结论只对产生它的会话成立，
    *  所以判据是"会话有没有变"，不是"mode 有没有变"。 */
   const recoverScopeRef = useRef<string | null>(null);
+
+  /** #1029 P2：**分离投递**（窗外落定）迟到的失败——要把草稿还给用户。
+   *
+   *  窗外投递的结局来得比窗口晚（实测响应头 ≈ run 结束才到，见 `lib/wsStream.ts`
+   *  的 44.158s / 41.551s），`sendFollowUp` 不能 await 它：await 就等于把一次正常
+   *  发送的返回值挂到整场 run 结束，且草稿在输入框里滞留整场 run——用户再按一次
+   *  Enter 就是重复投递。所以窗外路径**先按已受理清空**（乐观），失败时再回填。
+   *
+   *  回填走 hook 状态 → App → Composer 的既有投影方式（与 `PresetTask` 同款：
+   *  载荷对象引用变化即触发一次注入），不是让 Composer 反向注册回调——组件不该
+   *  被 hook 持有引用，且状态放在这里，Composer 挂载晚于失败也能补上。
+   *
+   *  ⚠ 这份状态**必须在下一次投递时清掉**（见 `sendFollowUp` 开头）：Composer 挂在
+   *  `tab.key === 'chat'` 分支下，切到别的 workspace 页签就会**卸载**；不清的话回到
+   *  对话页签时 effect 重新挂载、把上一轮的失败原文又注入一次——那条消息可能早已
+   *  重发成功，用户于是看到一段"凭空冒出来"的草稿，再按 Enter 就是重复投递。 */
+  const [failedDraft, setFailedDraft] = useState<FailedDraft | null>(null);
+  /** 把一次分离投递的失败交回 Composer（#1029 P2）。
+   *
+   *  只记"文本"：清空/回填的决策仍归 Composer（它才知道输入框里现在是不是有更新的
+   *  草稿），这里只负责把事实送上去。每次都是新对象 ⇒ 同一段文本连续失败两次也各
+   *  算一次注入（裸 string 会被 React 的 `Object.is` 挡掉第二次，见 `FailedDraft`）。
+   *
+   *  会话归属不必另立字段：两条迟到链都先过 `streamGenRef` 代际闸，而 `selectSession`
+   *  必然推进代际（见其实现），所以"用户已切走"的失败在到达这里之前就被挡掉了。 */
+  const reportDetachedFailure = useCallback((text: string) => {
+    setFailedDraft({ text });
+  }, []);
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -1272,6 +1300,9 @@ export function useSession() {
       },
     ) => {
       setError(null);
+      // 上一次的失败回执到此作废（#1029 P2）：它已经兑现过（用户拿到过那段原文），
+      // 留着只会在 Composer 重新挂载时再注入一次，变成重复投递的隐患。
+      setFailedDraft(null);
       // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
       liveSidRef.current = sessionId;
       setReconnecting(false);
@@ -1285,10 +1316,16 @@ export function useSession() {
       /** 投递一次：发请求 → 按结局分派。窗内与窗外**必须同一张表、同一套错误呈现**
        *  （都抛 Error，由「续聊失败：」收口）——原因见 `docs/adr/0030-…md` §13。
        *
-       *  返回**投递是否被受理**（#1029 AC3）：`true` = 已受理（launched / ack），`false`
-       *  或抛出 = 未受理。Composer 据此决定清空还是保留草稿——原先这条信息在函数内部
+       *  返回值的**完整语义**（#1029 AC3，P4-1 澄清）：`true` = **本次投递已被受理、
+       *  或它已被取代而不再是当前会话的事**（launched / ack / 过期代际）；`false` 或
+       *  抛出 = 未受理。Composer 据此决定清空还是保留草稿——原先这条信息在函数内部
        *  就被吞掉了（catch 只设横幅、不向上传），调用方无从知道消息到底送出去没有，
-       *  于是"清空"只能提前到提交瞬间，失败即丢文本。 */
+       *  于是"清空"只能提前到提交瞬间，失败即丢文本。
+       *
+       *  为什么过期代际也算 `true` 而不是 `false`：那时代际已经换代（用户切了会话 /
+       *  又发了一条），这条投递的**草稿归属**已经变了。回 `false` 会让 Composer 把
+       *  旧会话的原文回填进**新会话**的输入框——那不是"别丢文本"，是制造另一种数据
+       *  错位。所以这里返回的不是"成功"，而是"调用方**无需**再为这次投递做什么"。 */
       const deliver = async (payload: SendMessagePayload): Promise<boolean> => {
         /* 本次**投递尝试**的代际：纠正「接错流」时会推进它（见下面 outOfWindow 支），
            于是回退重投在新代际下继续，而被纠正那条流彻底失效。按投递计而不是按一次
@@ -1303,7 +1340,7 @@ export function useSession() {
           // 只能读一次，只用 readErrorDetail 就等于在读出的那一刻把清单丢掉，用户于是
           // 只拿到一句照着做不了的协议原文。404/422/其余状态各有固定文案，不读 body。
           const conflict = res.status === 409 ? await readErrorConflict(res) : null;
-          if (streamGenRef.current !== myGen) return true; // 读 body 期间已换代际：不当作失败回填
+          if (streamGenRef.current !== myGen) return true; // 读 body 期间已换代际：调用方无需再做什么（见 deliver 的返回值语义）
           const outcome = decideFollowUpOutcome({
             status: res.status,
             hasBody: res.body !== null,
@@ -1399,11 +1436,25 @@ export function useSession() {
         // 悬挂的 promise 有两条通道都要消费：rejection，以及**迟到的落定**（#221）。
         // 两条都先挂上——后面的代际守卫可能提前 return，先挂才不会有 unhandled rejection。
         //
-        // 为什么这条链**不**把结局交回调用方：#1029 AC3 要的是"失败别丢文本"，而窗外
-        // 意味着响应头根本没在 1200ms 内到达（正常流式的响应头会被压到 run 结束才下发），
-        // 此处无从等待——等它就把一次正常发送的返回值挂到 run 结束。真实的失败（4xx）
-        // 是"完整且极短的响应"，必在窗内落定，走上面的 settle；网络级失败则立即 reject。
-        // 这条迟到的纠正只负责把真原因显示出来（横幅），不冒充投递结局。
+        // #1029 P2：这条迟到的纠正**必须把失败交回调用方**，不能只设横幅。
+        //  原先的推理是"真实的失败（4xx）是完整且极短的响应，必在窗内落定"，于是这里
+        //  只 `setError` 并 return true。那句话把**响应体的长度**当成了**响应头的到达
+        //  时间**：待裁决 409 这条路在 `service.py:5061` 之前要先把 pending 裁决查出来
+        //  （`resume_and_launch` → `recover`），冷启动/慢盘上越过 1200ms 完全正常；窗内
+        //  判据只量"响应头到没到"，量不到这个。一旦越窗，用户看到的是：横幅说失败、
+        //  输入框却是空的（return true ⇒ Composer 当已受理清掉草稿）——正是本票要消灭
+        //  的丢文本，只是换到了更慢的网络上。
+        //  成熟产品同款：DSH 对**分离投递**（detached）的失败专门走
+        //  `settleDetachedFailure`（packages/client/ui-conversation/src/client/input/
+        //  facade.ts:765-775）——恢复草稿、并把失败经**同一条** sink-settled 通道交回，
+        //  而不是另开一条只显示不恢复的旁路；oh-my-pi `restoreDetachedDraft`
+        //  （packages/coding-agent/src/slash-commands/helpers/draft.ts:16-30）同义。
+        //  这里同样把结局交回：迟到的失败经 `reportDetachedFailure` 交回原文（Composer
+        //  据此回填草稿），而不是只留一条横幅。
+        //  为什么仍然不 await 它：正常流式的响应头会被压到 run 结束才下发，await 就把
+        //  一次正常发送的返回值挂到整场 run 结束（上面那条推理在这一半上是对的）。
+        //  于是改用**投影通道**：sendFollowUp 立刻返回"已受理"（Composer 乐观清空），
+        //  而迟到的失败经 `failedDraft` 状态把原文还回输入框。
         void pending
           .then(async (settled) => {
             if (streamGenRef.current !== myGen) return;
@@ -1414,6 +1465,7 @@ export function useSession() {
               myGen = ++streamGenRef.current;
               setMode({ kind: 'viewing', sessionId });
               setError(`续聊失败：${(e as Error).message}`);
+              reportDetachedFailure(content);
             }
           })
           .catch((e) => {
@@ -1421,10 +1473,12 @@ export function useSession() {
             myGen = ++streamGenRef.current;
             setMode({ kind: 'viewing', sessionId });
             setError(`续聊失败：${(e as Error).message}`);
+            reportDetachedFailure(content);
           });
         // await 期间已被取代（切会话 / 取消 / 又发了一条）⇒ 到此为止：下面两行会
         // **无条件覆写**会话级游标与流引用，把一条失效的流挂到新会话身上（submitTask
         // 与 resumeLiveStream 在同一位置都有这道闸，本函数此前漏了）。
+        // 返回 true = 调用方**无需**再为这次投递做什么（不是"投递成功"，见 deliver 语义）。
         if (streamGenRef.current !== myGen) return true;
         // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
         // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
@@ -1450,8 +1504,9 @@ export function useSession() {
           mode: amend.mode === 'steer' ? 'steer' : 'queue',
         });
       } catch (e) {
-        // 过期请求的迟到失败：丢弃结局（不污染新会话），当作已受理——调用方是旧会话的
-        // Composer，它的草稿归属已经变了，回填只会把文本塞进别的会话。
+        // 过期请求的迟到失败：丢弃结局（不污染新会话），按"调用方无需再做什么"返回——
+        // 调用方是旧会话的 Composer，它的草稿归属已经变了，回填只会把文本塞进别的会话
+        // （见 deliver 的返回值语义）。
         if (streamGenRef.current !== gen) return true;
         streamGenRef.current += 1;
         setMode({ kind: 'viewing', sessionId });
@@ -1459,7 +1514,7 @@ export function useSession() {
         return false;
       }
     },
-    [attachLiveStream, markStreamFrame],
+    [attachLiveStream, markStreamFrame, reportDetachedFailure],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -2010,6 +2065,7 @@ export function useSession() {
     sessionsError,
     titlesById,
     recoverState,
+    failedDraft,
     selectSession,
     submitTask,
     sendMessage: sendFollowUp,

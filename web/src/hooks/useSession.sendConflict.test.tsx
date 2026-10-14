@@ -31,7 +31,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 });
 
 import { getSessionEvents, sendMessage, type PendingDecision } from '../lib/api';
-import { useSession } from './useSession';
+import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
 
 const SID = 's-1';
 
@@ -259,5 +259,180 @@ describe('#1029 AC1/AC2 — 发送撞待裁决 409：结局如实 + 清单交给
     expect(vi.mocked(sendMessage).mock.calls[1][1]).toMatchObject({ mode: 'queue' });
     expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
     expect(captured.hook!.error).toContain('裁决');
+  });
+});
+
+/** #1029 P2（独立审查 Correctness P2-1）：**窗外**落定的失败同样不许吞掉文本。
+ *
+ *  缺陷形态：判定窗口（1200ms）内响应头没到 ⇒ 判为"正常流式"、先按已受理返回 `true`
+ *  ⇒ Composer 清空草稿；随后那条响应其实**是 409 失败**，原实现只 `setError` 设了
+ *  一条横幅就咽下结局。用户看到的是"横幅说失败、输入框却空了"——正是本票要消灭的
+ *  丢文本，只是换到了更慢的网络上。
+ *
+ *  为什么这条路径真实存在（不是理论构造）：待裁决 409 在 `service.py:5061` 之前要先
+ *  把 pending 裁决查出来（`resume_and_launch` → `recover`），冷启动/慢盘越过 1200ms
+ *  完全正常；而窗内判据只量"响应头到没到"，量不到这个。更极端的是部署交付层攒包：
+ *  实测 `POST /api/sessions` 的响应头 **44.158s** 才到（`lib/wsStream.ts` 的实测表），
+ *  那一档下**每一次**失败都落在窗外。
+ *
+ *  成熟产品同款（本票的方案依据）：DSH 对分离投递（detached）的失败专门走
+ *  `settleDetachedFailure`（packages/client/ui-conversation/src/client/input/facade.ts:765-775）
+ *  ——恢复草稿，并把失败经**同一条** sink-settled 通道交回，而不是另开一条只显示不
+ *  恢复的旁路；oh-my-pi `restoreDetachedDraft`（.../slash-commands/helpers/draft.ts:16-30）
+ *  同义。这里同样把结局经 `failedDraft` 交回 Composer。
+ */
+describe('#1029 P2 — 窗外落定的失败：草稿必须回到用户手里', () => {
+  /** 一个"响应头晚到"的响应：promise 由测试决定何时 resolve（越过判定窗口）。 */
+  function lateResponse(): { promise: Promise<Response>; settle: (r: Response) => void } {
+    let settle!: (r: Response) => void;
+    const promise = new Promise<Response>((resolve) => { settle = resolve; });
+    return { promise, settle };
+  }
+
+  /** 推过判定窗口（1200ms）：此后 sendFollowUp 已按"已受理"返回，不再等这条响应。
+   *  必须显式推进——本文件用 fake timers，窗口不会自己走。
+   *
+   *  **顺序是承重的**（与 `useSession.liveness.test.tsx` 的 `driveLaunched` 同款）：
+   *  先起请求、再推进计时器、最后才 await。反过来先 `await action()` 会死锁——那条
+   *  promise 要等窗口计时器落定，而计时器只在我们 await 之后才被推进。 */
+  async function driveOutOfWindow(action: () => Promise<unknown>): Promise<unknown> {
+    let pending: Promise<unknown> | undefined;
+    let outcome: unknown;
+    await act(async () => {
+      pending = action();
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      outcome = await pending;
+    });
+    return outcome;
+  }
+
+  it('窗外落定的 409 → failedDraft 拿到原文（不是只设一条横幅）', async () => {
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    const late = lateResponse();
+    vi.mocked(sendMessage).mockReturnValue(late.promise);
+    await mount();
+    await enterViewing();
+
+    // 发出后推进到窗口之外：此刻 sendFollowUp 已按"已受理"返回（无法 await 结局）。
+    const accepted = await driveOutOfWindow(
+      () => captured.hook!.sendMessage(SID, '窗外失败也必须留住'),
+    );
+    expect(accepted).toBe(true);
+    // 还没落定 ⇒ 还没有失败回执（不能预先报错）。
+    expect(captured.hook!.failedDraft).toBeNull();
+
+    // 迟到落定：其实是 409 待裁决。
+    await act(async () => { late.settle(conflictResponse()); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft?.text).toBe('窗外失败也必须留住');
+    // 同时仍是人话横幅 + 清单进面板（两条通道各司其职，AC1/AC2 不变）。
+    expect(captured.hook!.error).toContain('裁决');
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
+  });
+
+  it('窗外被拒绝（网络级失败）→ 同样交出原文', async () => {
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    let reject!: (e: Error) => void;
+    const promise = new Promise<Response>((_res, rej) => { reject = rej; });
+    vi.mocked(sendMessage).mockReturnValue(promise);
+    await mount();
+    await enterViewing();
+
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '断网也要留住'));
+    await act(async () => { reject(new Error('network down')); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft?.text).toBe('断网也要留住');
+    expect(captured.hook!.error).toContain('续聊失败');
+  });
+
+  it('同一段文本连续失败两次 → 每次都是新的回执对象（否则第二次不回填）', async () => {
+    // 裸 string 会被 React 的 Object.is 挡掉：状态相等 ⇒ 不重渲染 ⇒ effect 不触发。
+    // "重发一次、又失败一次"正是这条路径的常态，必须各算一次注入。
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    const first = lateResponse();
+    vi.mocked(sendMessage).mockReturnValueOnce(first.promise);
+    await mount();
+    await enterViewing();
+
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '同一段'));
+    await act(async () => { first.settle(conflictResponse()); });
+    await act(async () => { await Promise.resolve(); });
+    const firstReceipt = captured.hook!.failedDraft;
+    expect(firstReceipt?.text).toBe('同一段');
+
+    const second = lateResponse();
+    vi.mocked(sendMessage).mockReturnValueOnce(second.promise);
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '同一段'));
+    await act(async () => { second.settle(conflictResponse()); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft?.text).toBe('同一段');
+    expect(captured.hook!.failedDraft).not.toBe(firstReceipt);
+  });
+
+  it('窗外落定的是**成功**（queued 确认）→ 不产生失败回执（不误报）', async () => {
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    const late = lateResponse();
+    vi.mocked(sendMessage).mockReturnValue(late.promise);
+    await mount();
+    await enterViewing();
+
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '其实成功了'));
+    await act(async () => {
+      late.settle(new Response(JSON.stringify({ status: 'queued', queue_id: 'q-9' }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft).toBeNull();
+  });
+
+  it('用户在迟到落定前切走会话 → 不把旧会话的原文倒进新会话（代际闸）', async () => {
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    const late = lateResponse();
+    vi.mocked(sendMessage).mockReturnValue(late.promise);
+    await mount();
+    await enterViewing();
+
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '属于旧会话的文本'));
+    await act(async () => { captured.hook!.selectSession('s-2'); });
+    await act(async () => {});
+    await act(async () => { late.settle(conflictResponse()); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft).toBeNull();
+  });
+
+  it('下一次投递清掉旧回执 → Composer 重新挂载（切页签）不会复活已重发的原文', async () => {
+    // 缺陷形态：Composer 挂在 `tab.key === 'chat'` 分支下，切页签会卸载它。
+    // 若失败回执留在 hook 里不清，回到对话页签时 effect 重新挂载、把上一轮的原文
+    // 又注入一次——而那条消息多半早已重发成功，用户看到"凭空冒出来的草稿"，
+    // 再按 Enter 就是重复投递。
+    vi.mocked(getSessionEvents).mockResolvedValue(danglingHistory(SID));
+    const late = lateResponse();
+    vi.mocked(sendMessage).mockReturnValueOnce(late.promise);
+    await mount();
+    await enterViewing();
+
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '失败过一次的原文'));
+    await act(async () => { late.settle(conflictResponse()); });
+    await act(async () => { await Promise.resolve(); });
+    expect(captured.hook!.failedDraft?.text).toBe('失败过一次的原文');
+
+    // 用户重发（这一次成功）：回执必须随之作废。
+    const ok = lateResponse();
+    vi.mocked(sendMessage).mockReturnValueOnce(ok.promise);
+    await driveOutOfWindow(() => captured.hook!.sendMessage(SID, '失败过一次的原文'));
+    await act(async () => {
+      ok.settle(new Response(JSON.stringify({ status: 'queued', queue_id: 'q-1' }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured.hook!.failedDraft).toBeNull();
   });
 });

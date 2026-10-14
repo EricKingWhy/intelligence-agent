@@ -123,6 +123,7 @@ export default function App() {
     sessionsError,
     titlesById,
     recoverState,
+    failedDraft,
     selectSession,
     submitTask,
     sendMessage,
@@ -1604,6 +1605,9 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
+                    /* #1029 P2：分离投递（窗外落定）迟到的失败原文——按
+                       `restoreFailedDraft` 纪律回填（只在输入框为空时）。 */
+                    failedDraft={failedDraft}
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}

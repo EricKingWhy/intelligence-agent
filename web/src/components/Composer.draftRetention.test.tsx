@@ -100,6 +100,23 @@ function paint(): void {
   });
 }
 
+/** 带 `failedDraft` 的渲染（#1029 P2：hook 把窗外迟到的失败经这条 prop 送回）。 */
+function paintWith(failedDraft: { text: string } | null): void {
+  act(() => {
+    root.render(createElement(Composer, {
+      streaming: false,
+      onSubmit,
+      onSteer,
+      onCancel: () => {},
+      sessionId: 'sess-1',
+      onEnsureSession: async () => null,
+      models: [],
+      selectedModel: null,
+      failedDraft,
+    }));
+  });
+}
+
 const textarea = (): HTMLTextAreaElement => container.querySelector('#composer-input')!;
 const cards = (): NodeListOf<HTMLElement> => container.querySelectorAll('.composer-attach-card');
 const sendButton = (): HTMLButtonElement =>
@@ -264,5 +281,56 @@ describe('#1029 — 清空与回填都不许吞掉更新的输入', () => {
     await act(async () => { await submitted; });
 
     expect(textarea().value).toBe('被拒的原文');
+  });
+});
+
+/** #1029 P2（独立审查 Correctness P2-1）：**窗外**落定的失败经 `failedDraft` 回到输入框。
+ *
+ *  这一档的时机与上面全不同：提交时按"已受理"清空了（窗外无从等待结局），失败是
+ *  **几十秒后**才迟到的。所以回填不能走 `submit()` 的返回值，只能靠这条 prop。
+ *  数据层的证明在 `useSession.sendConflict.test.tsx` 的「#1029 P2」组；这里锁的是
+ *  组件侧的最后一跳：prop 到手 ⇒ 文本真的出现在 textarea 里。 */
+describe('#1029 P2 — 窗外迟到失败：failedDraft 把原文还回输入框', () => {
+  it('输入框为空时：迟到的失败原文出现在输入框里', async () => {
+    paintWith(null);
+    await typeText('');
+    expect(textarea().value).toBe('');
+
+    await act(async () => { paintWith({ text: '窗外迟到的失败原文' }); });
+
+    expect(textarea().value).toBe('窗外迟到的失败原文');
+  });
+
+  it('用户已在打新草稿：迟到的回填**不得**覆盖它（与失败回填同一纪律）', async () => {
+    paintWith(null);
+    await typeText('我正在写新的');
+
+    await act(async () => { paintWith({ text: '窗外迟到的失败原文' }); });
+
+    expect(textarea().value).toBe('我正在写新的');
+  });
+
+  it('同一段文本连续失败两次：第二次仍是新对象 ⇒ 输入框再次拿到原文', async () => {
+    // 裸 string 状态会被 Object.is 挡掉第二次；这条钉住"每次失败各算一次注入"。
+    paintWith(null);
+    await typeText('');
+
+    await act(async () => { paintWith({ text: '同一段' }); });
+    expect(textarea().value).toBe('同一段');
+
+    // 用户把它清掉（例如手动删空），第二次失败必须还能还回来。
+    await typeText('');
+    await act(async () => { paintWith({ text: '同一段' }); });
+
+    expect(textarea().value).toBe('同一段');
+  });
+
+  it('failedDraft 为 null（没有失败）时不注入任何东西', async () => {
+    paintWith(null);
+    await typeText('');
+
+    await act(async () => { paintWith(null); });
+
+    expect(textarea().value).toBe('');
   });
 });

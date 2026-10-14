@@ -5119,12 +5119,22 @@ button.json-row {
 }
 /* #1029 AC1：「去裁决」引导——错误横幅内联的可执行动作。视觉与 .recover-btn 同族
    （同为"待人工裁决"语境），足迹更小：横幅是单行条，按钮不得把它撑高。用内联流
-   （不把 .app-error 改成 flex）——横幅是共享的通用错误条，别为这一处改它的版式。 */
+   （不把 .app-error 改成 flex）——横幅是共享的通用错误条，别为这一处改它的版式。
+
+   字色用 `--text-primary` 而**不是** `--warning`（独立审查 Standards P3-1 的修复）：
+   亮色下 `--warning`(#b07a10) 压在这条按钮底上只有 **2.58:1**（hover 22% 底 **2.38:1**），
+   远低于 `web/PRODUCT.md` 的 12px 正文 ≥4.5 门槛；暗色下 6.74/5.55 才达标。根因是
+   **字色本身**而不是底色透明度——`--warning` 在白底上也只到 3.73:1，调 alpha 永远够不到
+   4.5。`--text-primary` 两主题都过（亮 11.01/10.24、暗 11.08/9.21），且是既有 token，
+   与 `.project-btn-primary`（accent-soft 底 + text-primary 字）同一套既有配对，
+   不新增 token（§15）。底色/描边保留 warning 族：那是装饰，不承载文字可读性。
+   注：同族的 `.recover-btn` 有同一缺陷（亮色 2.97:1），但属既有组件，不在本票范围
+   （Scope Lock），已登记为残余。 */
 .app-error-action {
   margin-left: var(--space-sm);
   padding: 1px var(--space-sm);
   font: 550 var(--text-xs) var(--font-ui);
-  color: var(--warning);
+  color: var(--text-primary);
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   border-radius: var(--radius-full);

@@ -8,7 +8,7 @@
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
-import type { PresetTask, UndeliveredInput } from '../types';
+import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
@@ -78,6 +78,13 @@ interface Props {
   ownership?: Ownership | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;
+  /** #1029 P2：**分离投递**（窗外落定）迟到的失败原文——把没送出去的草稿还给用户。
+   *
+   *  窗外投递的结局来得比判定窗口晚（实测响应头 ≈ run 结束才到），提交时无从等待，
+   *  于是先按已受理清空；真失败时由 hook 经这条 props 把原文送回来，这里按
+   *  `restoreFailedDraft` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
+   *  对象引用变化即触发一次注入（裸 string 会被 `Object.is` 挡掉第二次，见 `FailedDraft`）。 */
+  failedDraft?: FailedDraft | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
    *  降级隐藏（不伪造列表）。条目即目录真相，零硬编码模型名。 */
   models?: ModelCatalogEntry[];
@@ -147,6 +154,7 @@ export const Composer = memo(function Composer({
   ownership = null,
   onCancel,
   presetTask,
+  failedDraft = null,
   models = [],
   selectedModel = null,
   onModelChange,
@@ -393,6 +401,28 @@ export const Composer = memo(function Composer({
   const restoreFailedDraft = (snapshot: string): void => {
     setValue((current) => (current.trim() === '' ? snapshot : current));
   };
+
+  /** #1029 P2：**分离投递**（窗外落定）迟到的失败——把没送出去的原文还回输入框。
+   *
+   *  为什么不能像 presetTask 那样直接 `setValue(注入值)`：那条通道是"用户点了示例
+   *  任务 chip"，覆盖输入是用户此刻的明确意图；这里是失败回填，注入时用户可能已经
+   *  在同一会话里打了新草稿，覆盖它就是另一种数据丢失。故走 `restoreFailedDraft`
+   *  的同一纪律（只在输入框为空时回填），与提交回调里的 `accepted === false` 分支
+   *  完全同一条语义——这正是 DSH `settleDetachedFailure` 的做法：分离投递的失败
+   *  并入**同一条**失败呈现，而不是另开一条只显示不恢复的旁路
+   *  （packages/client/ui-conversation/src/client/input/facade.ts:765-775）。
+   *
+   *  依赖对象引用即可：每次失败都是新的 `{ text }`，同一段文本连续失败两次也各算
+   *  一次注入（裸 string 会被 React 的 `Object.is` 挡掉第二次，见 `FailedDraft`）。
+   *  StrictMode 下 effect 双跑是安全的：`restoreFailedDraft` 是幂等的 setValue
+   *  （第二跑时输入框已非空 → 原样返回，不会出现两份文本）。
+   *  **刻意不抢焦点**：这条回执可能迟到几十秒，届时用户多半在别处（另一个输入框、
+   *  排队项的就地编辑）——抢过来会让他的下一次按键落进输入框。presetTask 那条通道
+   *  抢焦点是因为它由用户点击触发，与这里不是同一种时机。 */
+  useEffect(() => {
+    if (!failedDraft) return;
+    restoreFailedDraft(failedDraft.text);
+  }, [failedDraft]);
 
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
