@@ -1667,23 +1667,33 @@ class ContextBuilder:
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
+        # "其他"的细分记账（#1095）：每个子项都是**独立记账口的真实成本**（见
+        # __init__ 各 _last_*_tokens 字段的注释），不是"总量减各项"的残差倒推。
+        # provider_injected = 非 skills 的 provider 注入（记忆等，匿名 provider
+        # 也在这里——_with_providers 把匿名归入 "other" 键）。细分之和恒等于
+        # other（同一批数字求和，只是分组呈现）；旧快照无此键，端点层省略，
+        # 不伪造子项 0。
+        other_breakdown = {
+            "provider_injected": sum(v for k, v in by_name.items() if k != "skills"),
+            "runtime_context": self._last_runtime_context_tokens,
+            "plan_anchor": self._last_plan_tokens,
+            "protected_facts": self._last_protected_fact_tokens,
+            "modified_paths": self._last_modified_paths_tokens,
+            "pressure_warning": self._last_pressure_warning_tokens,
+            "progress": self._last_progress_tokens,
+        }
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
         # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
         # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
-        other = (sum(v for k, v in by_name.items() if k != "skills")
-                 + self._last_runtime_context_tokens
-                 + self._last_plan_tokens
-                 + self._last_protected_fact_tokens
-                 + self._last_modified_paths_tokens
-                 + self._last_pressure_warning_tokens
-                 + self._last_progress_tokens)
+        other = sum(other_breakdown.values())
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,
             "skills": skills_tokens,
             "other": other,
+            "other_breakdown": other_breakdown,
             # 总量 = 各桶之和（端点层再加工具两组）。与 _token_estimate_total 的差别
             # 是刻意的：后者只含投影 messages，不能当作"已用总量"（那是漏报的根源）。
             "used_tokens": messages_tokens + system_prompt_tokens + skills_tokens + other,
