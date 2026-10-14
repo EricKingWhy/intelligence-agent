@@ -29,9 +29,33 @@ def test_majority_all_true():
         task="t", criteria="c", actual="a",
         judge_fn=_seq_fn(['{"verdict": true, "reason": "r1"}'] * 3),
     )
-    assert result.ok and result.majority and result.valid_votes == 3
+    assert result.ok and result.valid_votes == 3
     assert result.flip is False
     assert len(result.votes) == 3
+
+
+def test_judge_tokens_accumulated_from_usage_attribute():
+    """judge_fn 自报 last_usage ⇒ 各票 token 之和进 JudgeResult.judge_tokens。"""
+    pending = ['{"verdict": true, "reason": "r"}'] * 3
+
+    class _Client:
+        def __init__(self) -> None:
+            self.last_usage: dict = {}
+
+        def __call__(self, _prompt: str) -> str:
+            self.last_usage = {"total_tokens": 7}
+            return pending.pop(0)
+
+    result = majority_judge(task="t", criteria="c", actual="a", judge_fn=_Client())
+    assert result.judge_tokens == 21  # 3 票 × 7
+
+
+def test_judge_tokens_zero_for_plain_function():
+    result = majority_judge(
+        task="t", criteria="c", actual="a",
+        judge_fn=_seq_fn(['{"verdict": true, "reason": "r"}'] * 3),
+    )
+    assert result.judge_tokens == 0
 
 
 def test_majority_two_of_three_is_flip():

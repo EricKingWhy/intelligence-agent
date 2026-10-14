@@ -332,7 +332,7 @@
   ],
   "deviations": [
     "recovery 注入工具由票面的 FlakyAddTool 改为 ModeledFailureAddTool（原因见 excluded_or_replaced）",
-    "baseline B 用 deepseek-v4.1-flash（kunyou 网关）作可复跑对照；baseline A 为票面 glm-5.3-flash",
+    "baseline B 用 mimo-v2.6-flash（小米 xiaomimimo 网关）作可复跑对照；baseline A 为票面 glm-5.3-flash（kunyou 网关）",
     "SUT 固定 max_tokens（RunConfig.max_tokens，默认 1024）、temperature=0、不设 fallback、不注册 websearch"
   ],
   "failure_class_overrides": {}

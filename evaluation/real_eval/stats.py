@@ -5,7 +5,12 @@
 - **infra 不计入通过率分母**（provider 连接/5xx/限流等环境故障不归咎模型），
   infra 率单独报告；
 - per-question / 分组通过率的分母同为「非 infra 的重复次数」；
+- **逐题指标只对 `split=="train"` 计算**（Test 只出聚合，守住 holdout 纪律）；
+- **无有效样本**（全 infra）时 `pass_rate` 返回 `None`（不伪造 0）；
 - 所有随机量（bootstrap）固定 seed，保证可复现。
+
+**头条指标 = `summarize()["overall_pass_rate"]`**（按记录池化的 ok/非-infra 计数）；
+`question_pass_ci95.mean` 是题级**未加权**均值，仅作参照。
 """
 
 from __future__ import annotations
@@ -27,6 +32,13 @@ FAILURE_CLASSES = frozenset(
 BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 20261011
 
+#: MDE 的两侧 z 值（双侧 α=0.05、power=0.8）：MDE = (z_{α/2} + z_β) · SE。
+_Z_ALPHA_HALF = 1.959963984540054
+_Z_BETA = 0.8416212335729143
+
+#: 逐题指标默认只看的 split（Test 只出聚合）。
+DETAIL_SPLIT = "train"
+
 
 def _outcome(record: Record) -> str:
     return str(record.get("outcome", "fail"))
@@ -40,11 +52,11 @@ def _ok(record: Record) -> bool:
     return bool(record.get("ok"))
 
 
-def pass_rate(records: Iterable[Record]) -> float:
-    """通过率 = ok / 非 infra 计数（无有效样本返回 0.0）。"""
+def pass_rate(records: Iterable[Record]) -> float | None:
+    """通过率 = ok / 非 infra 计数；**无有效样本返回 None**（不伪造 0.0）。"""
     scored = [r for r in records if not _is_infra(r)]
     if not scored:
-        return 0.0
+        return None
     return sum(1 for r in scored if _ok(r)) / len(scored)
 
 
@@ -55,10 +67,17 @@ def infra_rate(records: Sequence[Record]) -> float:
     return sum(1 for r in records if _is_infra(r)) / len(records)
 
 
-def per_question_pass(records: Sequence[Record]) -> dict[str, float | None]:
-    """每题通过率（分母 = 该题非 infra 的重复次数；全 infra → None）。"""
+def per_question_pass(
+    records: Sequence[Record], *, split: str | None = DETAIL_SPLIT
+) -> dict[str, float | None]:
+    """每题通过率（分母 = 该题非 infra 的重复次数；全 infra → None）。
+
+    默认只统计 `split=="train"`（Test 只出聚合）；`split=None` 统计全部。
+    """
     grouped: dict[str, list[Record]] = defaultdict(list)
     for record in records:
+        if split is not None and str(record.get("split", "train")) != split:
+            continue
         grouped[str(record.get("case_name"))].append(record)
     result: dict[str, float | None] = {}
     for name, group in grouped.items():
@@ -98,10 +117,12 @@ def bootstrap_ci(
 
 
 def question_pass_ci(
-    records: Sequence[Record], **kwargs: Any
+    records: Sequence[Record], *, split: str | None = DETAIL_SPLIT, **kwargs: Any
 ) -> dict[str, Any]:
     """按题 bootstrap：对 per-question 通过率做重采样，返回 mean + 95% CI。"""
-    rates = [v for v in per_question_pass(records).values() if v is not None]
+    rates = [
+        v for v in per_question_pass(records, split=split).values() if v is not None
+    ]
     lo, hi = bootstrap_ci(rates, **kwargs)
     mean = sum(rates) / len(rates) if rates else 0.0
     return {"mean": mean, "ci95_low": lo, "ci95_high": hi, "n_questions": len(rates)}
@@ -109,7 +130,7 @@ def question_pass_ci(
 
 def group_pass_rate(
     records: Sequence[Record], key: Callable[[Record], Iterable[str] | None]
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """按 key 抽取的分组标签分别算通过率（无标签的记录跳过）。"""
     grouped: dict[str, list[Record]] = defaultdict(list)
     for record in records:
@@ -121,7 +142,7 @@ def group_pass_rate(
     return {label: pass_rate(group) for label, group in grouped.items()}
 
 
-def group_pass_rates(records: Sequence[Record]) -> dict[str, float]:
+def group_pass_rates(records: Sequence[Record]) -> dict[str, float | None]:
     """按 case_type 与 tags 两个维度分别算分组通过率（键带维度前缀）。"""
 
     def by_case_type(record: Record) -> Iterable[str]:
@@ -136,9 +157,16 @@ def group_pass_rates(records: Sequence[Record]) -> dict[str, float]:
     return groups
 
 
-def repeat_sd(records: Sequence[Record]) -> float:
-    """各题重复通过率的总体标准差（population SD，分母 N）。无题返回 0.0。"""
-    rates = [v for v in per_question_pass(records).values() if v is not None]
+def question_pass_sd(
+    records: Sequence[Record], *, split: str | None = DETAIL_SPLIT
+) -> float:
+    """**题间 SD**：各题通过率的总体标准差（异质性，不是重复噪声）。
+
+    无题（或仅 1 题）返回 0.0。
+    """
+    rates = [
+        v for v in per_question_pass(records, split=split).values() if v is not None
+    ]
     if not rates:
         return 0.0
     mean = sum(rates) / len(rates)
@@ -146,13 +174,41 @@ def repeat_sd(records: Sequence[Record]) -> float:
     return math.sqrt(variance)
 
 
-def mde(records: Sequence[Record]) -> float:
-    """最小可检测效应 MDE = 2 × 重复 SD。"""
-    return 2.0 * repeat_sd(records)
+def repeat_sd(
+    records: Sequence[Record], *, split: str | None = DETAIL_SPLIT
+) -> float:
+    """**题内重复 SD**：各题在 rep 上的通过与否的合并（pooled）总体标准差。
+
+    每题 p_q = 该题非 infra 的通过率；题内二元总体方差 = p_q·(1-p_q)。
+    取各题方差的均值再开方——这是**同题跨 rep 的重复噪声**，不是题间异质性
+    （后者见 `question_pass_sd`）。无题返回 0.0。
+    """
+    rates = per_question_pass(records, split=split)
+    variances = [p * (1.0 - p) for p in rates.values() if p is not None]
+    if not variances:
+        return 0.0
+    return math.sqrt(sum(variances) / len(variances))
 
 
-def train_vs_test(records: Sequence[Record]) -> dict[str, float]:
-    """按 split 分层通过率。"""
+def mde(records: Sequence[Record], *, split: str | None = DETAIL_SPLIT) -> float:
+    """最小可检测效应 MDE = (z_{α/2} + z_β) · SE。
+
+    SE 取**题级标准误** = 题间 SD / sqrt(题数)——把每题当独立观测时的均值标准误，
+    即配对设计下「同一批题两次运行之差」的题级 SE。不是把题间异质性当噪声的
+    `2×SD`。题数 < 2（SE 无定义）返回 0.0。
+    """
+    rates = [
+        v for v in per_question_pass(records, split=split).values() if v is not None
+    ]
+    n = len(rates)
+    if n < 2:
+        return 0.0
+    se = question_pass_sd(records, split=split) / math.sqrt(n)
+    return (_Z_ALPHA_HALF + _Z_BETA) * se
+
+
+def train_vs_test(records: Sequence[Record]) -> dict[str, float | None]:
+    """按 split 分层通过率（仅聚合，不出逐题明细）。"""
     grouped: dict[str, list[Record]] = defaultdict(list)
     for record in records:
         grouped[str(record.get("split", "train"))].append(record)
@@ -243,16 +299,29 @@ def failure_breakdown(
 def summarize(
     records: Sequence[Record], overrides: dict[str, str] | None = None
 ) -> dict[str, Any]:
-    """汇总全部指标（report.py 的统计段）。"""
+    """汇总全部指标（report.py 的统计段）。
+
+    **口径（头条 vs 参照）**：头条指标是 `overall_pass_rate`——把全部非 infra
+    记录池化后算 ok 比例；`question_pass_ci95.mean` 是题级**未加权**均值，各题
+    有效 rep 数不等时会与头条分叉，只作参照。逐题指标（`per_question_pass` /
+    `question_pass_ci95` / `question_pass_sd` / `repeat_sd` / `mde`）只对
+    `split=="train"` 计算：**Test 只出聚合**（守住 holdout 纪律）。
+    全 infra（无有效样本）时 `overall_pass_rate` 为 `None` 且 `no_valid_samples`
+    为 True——不把「这次根本没测到」伪装成「通过率 0%」。
+    """
     latencies = latency_percentiles(records)
+    overall = pass_rate(records)
     return {
         "n_records": len(records),
         "n_questions": len({str(r.get("case_name")) for r in records}),
-        "overall_pass_rate": pass_rate(records),
+        "n_scored": sum(1 for r in records if not _is_infra(r)),
+        "overall_pass_rate": overall,
+        "no_valid_samples": overall is None,
         "infra_rate": infra_rate(records),
         "per_question_pass": per_question_pass(records),
         "question_pass_ci95": question_pass_ci(records),
         "group_pass_rate": group_pass_rates(records),
+        "question_pass_sd": question_pass_sd(records),
         "repeat_sd": repeat_sd(records),
         "mde": mde(records),
         "train_vs_test": train_vs_test(records),

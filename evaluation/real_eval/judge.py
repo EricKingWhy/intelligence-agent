@@ -39,9 +39,10 @@ class JudgeResult(BaseModel):
     ok: bool
     votes: list[dict[str, Any]] = Field(default_factory=list)
     valid_votes: int = 0
-    majority: bool = False
     flip: bool = False
     error: str | None = None
+    #: 本次判定消耗的 judge token（各票 usage 之和）；judge 侧无 usage 时为 0。
+    judge_tokens: int = 0
 
 
 def build_judge_prompt(task: str, criteria: str, actual: str) -> str:
@@ -87,6 +88,19 @@ def extract_verdict(text: str | None) -> tuple[bool | None, str]:
     return (None, "")
 
 
+def _vote_tokens(judge_fn: JudgeFn) -> int:
+    """取一次调用后 judge_fn 自报的 token 用量（无则 0）。
+
+    真实 judge_fn（`build_judge_fn` 返回的可调用对象）把最近一次调用的
+    `usage_metadata.total_tokens` 挂在 `last_usage`；测试用的裸函数没有该属性 ⇒ 0。
+    """
+    usage = getattr(judge_fn, "last_usage", None)
+    if not isinstance(usage, dict):
+        return 0
+    tokens = usage.get("total_tokens")
+    return int(tokens) if isinstance(tokens, (int, float)) else 0
+
+
 def majority_judge(
     *,
     task: str,
@@ -95,10 +109,11 @@ def majority_judge(
     judge_fn: JudgeFn,
     votes: int = 3,
 ) -> JudgeResult:
-    """调 judge_fn `votes` 次，多数票定 ok；记录逐票 reason 与 flip。"""
+    """调 judge_fn `votes` 次，多数票定 ok；记录逐票 reason、flip 与 judge token。"""
     prompt = build_judge_prompt(task, criteria, actual)
     vote_records: list[dict[str, Any]] = []
     verdicts: list[bool] = []
+    judge_tokens = 0
     for _ in range(votes):
         error: str | None = None
         raw: str | None = None
@@ -106,6 +121,7 @@ def majority_judge(
             raw = judge_fn(prompt)
         except Exception as exc:  # noqa: BLE001 - 单票失败不炸整条判定
             error = f"{type(exc).__name__}: {exc}"
+        judge_tokens += _vote_tokens(judge_fn)
         verdict, reason = extract_verdict(raw) if raw is not None else (None, "")
         if verdict is None and error is None:
             error = "unparseable verdict"
@@ -122,9 +138,9 @@ def majority_judge(
         ok=majority,
         votes=vote_records,
         valid_votes=len(verdicts),
-        majority=majority,
         flip=flip,
         error=error,
+        judge_tokens=judge_tokens,
     )
 
 
@@ -137,6 +153,9 @@ def build_judge_fn(
     """真实 judge_fn：调 kunyou deepseek（temperature 0）。key 只从环境变量读。
 
     仅在真实基线运行时调用；单元测试用 fake judge_fn 注入（不触网）。
+
+    返回值是一个可调用**对象**，额外暴露 `last_usage`（最近一次调用的
+    `usage_metadata`），供 `majority_judge` 累计 judge token（预算护栏）。
     """
     from agent_harness.model.config import ModelConfig
     from agent_harness.model.provider import create_chat_model
@@ -145,7 +164,9 @@ def build_judge_fn(
     if not api_key:
         raise RuntimeError(f"judge 需要环境变量 {api_key_env}（未设置）")
     config = ModelConfig(
-        provider="kunyoun",
+        # provider 只是**描述性标签**：create_chat_model 不按 provider 分发，
+        # 建连只吃 model_name/base_url/api_key/temperature（与 SUT 侧同口径）。
+        provider="kunyou",
         model_name=model,
         api_key=api_key,
         base_url=base_url,
@@ -153,9 +174,17 @@ def build_judge_fn(
     )
     chat = create_chat_model(config, request_timeout=300.0)
 
-    def judge_fn(prompt: str) -> str:
-        message = chat.invoke(prompt)
-        content = message.content
-        return content if isinstance(content, str) else str(content)
+    class _JudgeClient:
+        """可调用的 judge 客户端；`last_usage` 供 token 记账。"""
 
-    return judge_fn
+        def __init__(self) -> None:
+            self.last_usage: dict[str, Any] = {}
+
+        def __call__(self, prompt: str) -> str:
+            message = chat.invoke(prompt)
+            usage = getattr(message, "usage_metadata", None)
+            self.last_usage = dict(usage) if isinstance(usage, dict) else {}
+            content = message.content
+            return content if isinstance(content, str) else str(content)
+
+    return _JudgeClient()

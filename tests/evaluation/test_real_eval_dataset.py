@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from evaluation.real_eval.dataset import CASE_TYPES, load_cases, load_manifest
+import json
+from pathlib import Path
+
+import pytest
+
+from evaluation.real_eval.dataset import (
+    CASE_TYPES,
+    RealEvalCase,
+    dataset_digest,
+    load_cases,
+    load_manifest,
+)
 
 
 def test_dataset_shape_and_counts():
@@ -43,3 +54,52 @@ def test_manifest_documents_deviation():
     assert any(
         "FlakyAddTool" in item["what"] for item in manifest["excluded_or_replaced"]
     )
+
+
+def _write(dataset_dir: Path, rows: list[dict]) -> None:
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    (dataset_dir / "train.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_load_cases_rejects_duplicate_names(tmp_path: Path):
+    row = {"name": "dup", "task": "t", "case_type": "tool_selection",
+           "assertion": {"kind": "D"}, "expected": {}, "split": "train",
+           "tags": [], "source": "s"}
+    _write(tmp_path, [row, {**row, "task": "t2"}])
+    with pytest.raises(ValueError, match="重名"):
+        load_cases(tmp_path)
+
+
+def test_validate_row_requires_kind(tmp_path: Path):
+    # 缺 assertion.kind ⇒ 加载期 raise（不静默回落 D）
+    row = {"name": "n", "task": "t", "case_type": "tool_selection",
+           "expected": {}, "split": "train", "tags": [], "source": "s"}
+    _write(tmp_path, [row])
+    with pytest.raises(ValueError, match="assertion.kind"):
+        load_cases(tmp_path)
+
+
+def test_validate_row_rejects_kind_case_type_mismatch():
+    # open_qa 必须 J；标成 D ⇒ 不匹配即 raise
+    case = RealEvalCase(name="n", task="t", case_type="open_qa",
+                        assertion={"kind": "D"}, split="train")
+    with pytest.raises(ValueError, match="不匹配"):
+        case.validate_row()
+    # tool_selection 必须 D；标成 J ⇒ 同样 raise
+    bad = RealEvalCase(name="m", task="t", case_type="tool_selection",
+                       assertion={"kind": "J"}, split="train")
+    with pytest.raises(ValueError, match="不匹配"):
+        bad.validate_row()
+
+
+def test_dataset_digest_changes_with_content(tmp_path: Path):
+    row = {"name": "n", "task": "t", "case_type": "tool_selection",
+           "assertion": {"kind": "D"}, "expected": {}, "split": "train",
+           "tags": [], "source": "s"}
+    _write(tmp_path, [row])
+    first = dataset_digest(tmp_path)
+    _write(tmp_path, [{**row, "task": "changed"}])
+    assert dataset_digest(tmp_path) != first
