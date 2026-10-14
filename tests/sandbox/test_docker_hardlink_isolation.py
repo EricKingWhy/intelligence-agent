@@ -38,6 +38,40 @@ def _registry(tmp_path: Path) -> WorkspaceRegistry:
     return WorkspaceRegistry(root=tmp_path / "registry", backend="docker")
 
 
+@pytest.fixture(autouse=True)
+def _clean_deterministic_volume():
+    """用例前后清理确定性命名 volume/容器（#1048 AC4）。
+
+    本文件用模块级常量 SESSION_ID ⇒ volume 名跨 run 确定；用例自身会向容器内
+    写文件（如 late-alias.bin），残留会污染下一次 run 的"快照边界"断言（导入是
+    增量 copy_in，不删旧文件）。CI 新环境恒过、共享 Engine 上跨 run 必红。
+    用例前清（防上一次崩溃残留）、用例后清（不污染下一次），保证 volume 恒为
+    pristine。
+    """
+
+    def _clean() -> None:
+        try:
+            import docker
+
+            client = docker.from_env()
+            try:
+                client.containers.get(f"agent-harness-{SESSION_ID}").remove(
+                    force=True
+                )
+            except Exception:  # noqa: BLE001, S110 — 最佳努力清理
+                pass
+            try:
+                client.volumes.get(f"agent-harness-{SESSION_ID}").remove(force=True)
+            except Exception:  # noqa: BLE001, S110 — 最佳努力清理
+                pass
+        except Exception:  # noqa: BLE001, S110 — 无 Engine 时静默跳过
+            pass
+
+    _clean()
+    yield
+    _clean()
+
+
 class TestNewSessionVolumeOnlyMounts:
     def test_new_session_mounts_only_private_volume_at_workspace(
         self, tmp_path: Path
