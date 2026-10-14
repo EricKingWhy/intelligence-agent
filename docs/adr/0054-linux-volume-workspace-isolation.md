@@ -34,6 +34,20 @@ NTFS **hard link** 是同一卷上**同一文件对象的多个名称**（同一
    文件路由对 Docker workspace 一律走 **Sandbox/POSIX 语义**；宿主源路径**仅**作项目
    身份与导入来源。`local` 子进程后端仍是宿主目录语义。
 
+## 写入语义：docker 就地截断写 vs local 原子替换（协调员裁决 2026-10-14）
+
+AC4 要求**完全位于 workspace 内**的 hard-link pair 在导入后**仍保持可用**。docker
+导入按单个 tar 记录 inode，pair 导入后同 inode；但若 `write_text` 用
+`put_archive` 直接落目标，会 **unlink 旧 inode**、把 pair 拆成两个独立对象（实测
+`a.txt`→新 inode）。因此 `DockerSandbox.write_text` 改为**容器内就地覆盖**：
+先落临时文件，再 `cat 临时文件 > 目标`（截断写保留 inode），docker-only。
+
+**代价**：docker 侧**放弃了** `local` 后端那样的 temp + `os.replace` 原子替换。
+**裁决（协调员 2026-10-14）**：**接受**，不改回。理由：① AC4「内部 pair 仍保持可用」
+是硬要求；② POSIX 就地截断写即标准写语义；③ 本 ADR §5 明定 docker 走 **Sandbox/
+POSIX 语义**（而非宿主目录语义），`local` 仍是宿主目录语义故保留原子替换；④ 无既有
+测试要求 docker 写入必须原子。docker 与 local 的这一差异是**有意的**、已在此登记。
+
 ## legacy（PSEC）迁移与失败语义
 
 Windows PSEC **不再作为新会话可选/可请求后端**（只用于解析既有映射，属 legacy）。
