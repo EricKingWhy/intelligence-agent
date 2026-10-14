@@ -95,85 +95,93 @@ afterEach(async () => {
 });
 
 describe('#1029 残余 — submitTask 窗外认领成功后吞掉迟到失败', () => {
-  /** 造出「认领在途、POST 已 reject」的那一刻：认领（`discoverNewSessionId`）由测试
-   *  决定何时 resolve，POST 由测试决定何时 reject。两者都受控，才能精确制造
-   *  「认领成功 *之后* POST 才失败」这个序列。
+  /** 造出「认领成功、随后 POST 才 reject」的序列，且 reject 相对认领的**微任务偏移**
+   *  可调（`offset` ≥ 0 表示 reject 比认领晚 offset 个微任务）。
+   *
+   *  ⚠ 这个 offset 维度是承重的，不是花活：第一版修复用「读一次 `late.failure` 快照」
+   *  判定，只在 offset ≤ 0 时命中（独立审查 Correctness 轴 F1 的发现，我用扫档复现：
+   *  offset=-2/-1/0 → CAUGHT，offset=+1..+4 → MISS）。只测 offset=0 的用例会给人
+   *  "已守住"的错觉，所以这里显式按 offset 驱动并逐个断言。
    *
    *  顺序承重（与 `useSession.sendConflict.test.tsx` 的 `driveOutOfWindow` 同款）：
-   *  先起 action → 让 POST reject → 再放行认领 → 最后 await。反过来先 await action
-   *  会死锁，因为认领的 promise 还没被放行。 */
+   *  先起 action → 推过窗口 → 放行认领 → 按 offset 插微任务 → reject → 最后 await。 */
   async function driveClaimThenReject(
     task: string,
-  ): Promise<{ result: string | null }> {
+    offset = 0,
+    deferClaim = false,
+    settlePost = true,
+  ): Promise<{ result: string | null; postUnsettled: boolean }> {
     let rejectPost!: (e: Error) => void;
-    const post = new Promise<Response>((_resolve, reject) => { rejectPost = reject; });
+    let postUnsettled = true;
+    const post = new Promise<Response>((_resolve, reject) => {
+      rejectPost = (e: Error) => { postUnsettled = false; reject(e); };
+    });
     vi.mocked(startSession).mockReturnValue(post as never);
 
     let releaseClaim!: () => void;
     const claimGate = new Promise<void>((resolve) => { releaseClaim = resolve; });
     vi.mocked(discoverNewSessionId).mockImplementation(async () => {
-      await claimGate;
+      if (deferClaim) await claimGate;
       return 's-new';
     });
 
     let result: string | null = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task });
-      // 先让窗口过去 + 让 POST 落定（此刻认领还卡在闸门上）。
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
-      rejectPost(new Error('网络中断：POST /api/sessions'));
-      await vi.advanceTimersByTimeAsync(0);
-      // 现在放行认领：submitTask 走到"认领成功"那一步时，POST 已经是失败的了。
-      releaseClaim();
+      if (deferClaim) releaseClaim();
+      if (settlePost) {
+        // 认领已放行；按 offset 决定 reject 落在认领之后第几个微任务。
+        for (let i = 0; i < offset; i++) await Promise.resolve();
+        rejectPost(new Error('网络中断：POST /api/sessions'));
+      }
       await vi.advanceTimersByTimeAsync(0);
       result = await p;
     });
-    return { result };
+    return { result, postUnsettled };
   }
 
-  it('POST 在认领成功之前/同时已失败 ⇒ 结局必须是"未受理"（否则 Composer 清空 = 丢文本）', async () => {
+  it('POST 在认领当刻已失败（offset=0）⇒ 草稿必须回到用户手里', async () => {
     await mount();
-    const { result } = await driveClaimThenReject('新建会话里也要留住的文本');
+    const { result } = await driveClaimThenReject('新建会话里也要留住的文本', 0, true);
 
-    // 期望：结局如实 = 失败原因（Composer 据此保留草稿）。
-    // 修复前：null（成功）⇒ Composer 清空 ⇒ 文本消失。
-    expect(result).not.toBeNull();
-    expect(result).toContain('网络中断');
+    // Composer 保持草稿有**两条**合法出路（见修复注释）：
+    //   ① 返回失败原因 ⇒ handleSubmit 给 false ⇒ Composer 不清空；
+    //   ② 返回 null（已接管）但把失败经 failedDraft 交回 ⇒ Composer 回填。
+    // 不论走哪条，用户都必须拿到原文。
+    expect(result !== null || captured.hook!.failedDraft !== null).toBe(true);
+    if (captured.hook!.failedDraft !== null) {
+      expect(captured.hook!.failedDraft.text).toBe('新建会话里也要留住的文本');
+    } else {
+      expect(result).toContain('网络中断');
+    }
   });
 
-  it('两次独立投递各自如实回报，互不吞并（不是"去重"，也不断言计数）', async () => {
-    await mount();
-    const first = await driveClaimThenReject('第一条');
-    const second = await driveClaimThenReject('第二条');
+  it('**承重**：reject 比认领晚 1..4 个微任务也绝不能丢文本（快照写法在此全漏）', async () => {
+    for (const offset of [1, 2, 3, 4]) {
+      await mount();
+      const { result } = await driveClaimThenReject(`迟到失败 offset=${offset}`, offset, true);
 
-    // ⚠ 本用例**不**声称任何去重/计数语义：两笔是各自独立的投递，这里只证明
-    // 一次失败不会被另一次掩盖（前一版的标题写"只报一次、不重复计数"属名实不副，
-    // 由独立审查 Standards 轴 B-R2 指出）。
-    expect(first.result).toContain('网络中断');
-    expect(second.result).toContain('网络中断');
-  });
+      // 这是 F1 的正面锁：offset ≥ 1 时快照判定会返回 null 且不发任何回执，
+      // 于是 result === null 且 failedDraft === null ⇒ 这就是静默丢文本。
+      const recovered = result !== null || captured.hook!.failedDraft !== null;
+      expect(recovered, `offset=${offset} 必须有一条失败出路，实测 result=${String(result)} / failedDraft=${JSON.stringify(captured.hook!.failedDraft)}`).toBe(true);
+      // 且回执里的原文与提交内容一致（不能回填成别的会话/别的文本）。
+      const text = result !== null ? result : captured.hook!.failedDraft!.text;
+      expect(text).toContain(`offset=${offset}`);
+      await act(async () => { root!.unmount(); });
+      container?.remove(); root = null; container = null; captured.hook = null;
+    }
+  }, 30000);
 
   it('反证：POST 仍在途（未 reject）时认领成功 ⇒ 仍按"已接管"返回 null，不误报失败', async () => {
-    // 这是那道守卫最容易过头的方向：正常流式的响应头要等 run 结束才到，
-    // 认领成功时 POST 必然还悬着。若把"还悬着"也当失败，用户的每次新建会话
-    // 都会被误报成失败、草稿永远留在输入框。
-    let rejectPost!: (e: Error) => void;
-    const post = new Promise<Response>((_resolve, reject) => { rejectPost = reject; });
-    vi.mocked(startSession).mockReturnValue(post as never);
-    vi.mocked(discoverNewSessionId).mockResolvedValue('s-new');
-
+    // 这是守卫最容易过头的方向：正常流式的响应头要等 run 结束才到，认领成功时
+    // POST 必然还悬着。若把"还悬着"也当失败，用户每次新建会话都会被误报成失败。
     await mount();
-    let result: string | null = 'unset';
-    await act(async () => {
-      const p = captured.hook!.submitTask({ task: '正常新建' });
-      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
-      result = await p;
-    });
+    const { result, postUnsettled } = await driveClaimThenReject('正常新建', 0, false, false);
 
-    // 认领成功且 POST 未失败 ⇒ 视为已接管（null），不是失败原因。
-    expect(result).toBeNull();
-    // 收尾：把悬挂的 promise 落定，避免 unhandled rejection 污染其它用例。
-    rejectPost(new Error('teardown'));
-    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(postUnsettled).toBe(true);   // 前提：POST 确实没落定
+    expect(result).toBeNull();          // 视为已接管
+    expect(captured.hook!.failedDraft).toBeNull(); // 且不得发失败回执
   });
 });

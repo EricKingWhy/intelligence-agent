@@ -1094,29 +1094,35 @@ export function useSession() {
          *  这个序列落进来时，失败被写进 `late.failure` 却无人读：`submitTask`
          *  返回 null ⇒ `handleSubmit` 返回 true ⇒ Composer 清空输入框。用户文本
          *  消失，而且**不是以失败的形式**——它被当成了成功。票面 AC3 要的正是
-         *  「发送成功之后才清空」，故这条静态成功判定必须让位给已知的失败事实。
+         *  「发送成功之后才清空」。
+         *
+         *  ⚠ **不要退回"读一次 `late.failure` 快照"的写法**（我第一版就是这么写的，
+         *  被独立审查 Correctness 轴 F1 打红并复现）：快照只看得到**与认领同一微任务
+         *  刻度**落定的 reject。实测扫档（认领放行后插入 n 个微任务再 reject）：
+         *    n ≤ 0 ⇒ CAUGHT；n ≥ +1 ⇒ 返回 null（MISS）
+         *  ⇒ 只要 reject 晚一个微任务，守卫就形同不存在，文本照样静默丢失且零提示。
+         *  一个只在一个微任务窗口里生效的守卫，比没有守卫更坏——它让测试看起来是绿的。
+         *
+         *  正确形态 = 把"已认领"之后的 POST 当成**分离投递**（与 `sendFollowUp` 窗外
+         *  路径同款，也是 DSH `settleDetachedFailure` 的做法）：不能 await 它（响应头
+         *  要等 run 结束），但它的**迟到失败必须并入同一条失败通道**，而不是写进一个
+         *  再没人读的局部对象。所以这里挂一条 `.catch`，把失败经 `reportDetachedFailure`
+         *  交回 Composer —— 与 #1029 的路径 A 完全同一条出路，用户拿到原文 + 横幅。
          *
          *  为什么这不算"认领成功即已提交"：会话确实建出来了，但**用户的这条消息
          *  有没有随 POST 送出去**是另一回事，而 POST 已明确 reject ⇒ 没送出去。
-         *  诚实回报"未受理"让 Composer 留住草稿。
          *
-         *  ⚠ **不要**在这里写"重发会走 `sendFollowUp` 续聊、不会另造会话"——实测不成立
-         *  （独立审查 Standards 轴 B-R1 指出，实读复核成立）：`liveSidRef.current = sid`
-         *  在下面 **L1114**，位于本 throw 之后；而本函数开头已把 `liveSidRef` 置 null，
-         *  catch 块（L1117-1126）只 `setMode(idle)` + `setError`，**既不写 `liveSidRef`
-         *  也不刷新会话列表**。⇒ 走这条 throw 时该会话**从未锚定**，`selectedId` 仍为
-         *  null，用户重发会**再走一次 `submitTask`**（即另一个会话）。
-         *  这是本路径的既有行为，**不在本票范围**（Scope Lock）：本票只负责 AC3 的
-         *  「失败要如实回报、草稿不能丢」，而那个目标实测已达成（返回
-         *  `提交失败：…`、`selectedId` 保持 null、mode 落回 idle）。
-         *
-         *  判据用 `late.failure` 的**当前值**（不是 await）：此刻若 POST 已经 reject，
-         *  我们就把真实原因报上去；若它还没落定，说明 POST 仍在途（正常流式的响应头
-         *  本来就要等 run 结束），此时按"已接管"返回是正确且必需的——await 它等于
-         *  把返回值挂到整场 run 结束。 */
-        if (late.failure !== null) {
-          throw late.failure;
-        }
+         *  ⚠ 注意 `liveSidRef` 的时序（独立审查 Standards 轴 B-R1 指出）：赋值在下面
+         *  **L1123**，位于本段之后。走这条失败通路时该会话**从未锚定**，`selectedId`
+         *  仍为 null，用户重发会**再走一次 `submitTask`**（即另一个会话）。这是本路径
+         *  的既有行为，**不在本票范围**（Scope Lock）：本票只负责 AC3 的「失败要如实
+         *  回报、草稿不能丢」。 */
+        started.catch((e: unknown) => {
+          // 已认领后的迟到失败：代际已换代说明是过期会话的事，不污染新会话。
+          if (streamGenRef.current !== gen) return;
+          reportDetachedFailure(payload.task);
+          if (!opts?.ownError) setError(`提交失败：${(e as Error).message}`);
+        });
         // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
         // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
@@ -1134,7 +1140,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream, markStreamFrame],
+    [refreshSessions, attachLiveStream, markStreamFrame, reportDetachedFailure],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
