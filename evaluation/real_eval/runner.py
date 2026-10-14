@@ -89,10 +89,10 @@ BASELINES: dict[str, dict[str, Any]] = {
         "api_key_env": "KUNYOU_API_KEY",
     },
     "B": {
-        "provider": "kunyou",
-        "model": "deepseek-v4.1-flash",
-        "base_url": "https://api.kunyou.asia/v1",
-        "api_key_env": "KUNYOU_API_KEY",
+        "provider": "mimo",
+        "model": "mimo-v2.6-flash",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "api_key_env": "MIMO_API_KEY",
     },
 }
 
