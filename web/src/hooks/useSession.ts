@@ -1120,8 +1120,14 @@ export function useSession() {
         started.catch((e: unknown) => {
           // 已认领后的迟到失败：代际已换代说明是过期会话的事，不污染新会话。
           if (streamGenRef.current !== gen) return;
+          /* `ownError` = 调用方声明「这次提交的失败由我自己就地展示」，全仓只有
+           * `handleStartTaskInProject`（TaskCreationDialog 的「在此项目中新建任务」，
+           * App.tsx:774-784）传它，失败文案回到浮层里显示（AC12）。那种提交的原文在
+           * **弹窗的输入框**里，不在 Composer——若照样 `reportDetachedFailure`，用户
+           * 会在对话输入框里看到一段凭空冒出来的任务文本（他没在那儿打过字）。 */
+          if (opts?.ownError) return;
           reportDetachedFailure(payload.task);
-          if (!opts?.ownError) setError(`提交失败：${(e as Error).message}`);
+          setError(`提交失败：${(e as Error).message}`);
         });
         // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为

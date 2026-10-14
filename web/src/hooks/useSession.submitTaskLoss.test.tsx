@@ -184,4 +184,31 @@ describe('#1029 残余 — submitTask 窗外认领成功后吞掉迟到失败', 
     expect(result).toBeNull();          // 视为已接管
     expect(captured.hook!.failedDraft).toBeNull(); // 且不得发失败回执
   });
+
+  it('ownError 提交（TaskCreationDialog）迟到失败 ⇒ **不得**把弹窗文本灌进 Composer', async () => {
+    // App.handleStartTaskInProject（App.tsx:774-784）用 ownError 声明"失败由我
+    // 在浮层里就地显示"。那种提交的原文在**弹窗的输入框**里，不在 Composer；
+    // 若照样 reportDetachedFailure，用户会在对话输入框里看到一段凭空冒出来的
+    // 任务文本（他没在那儿打过字）——那是本票要消灭的"输入框内容不可预期"。
+    let rejectPost!: (e: Error) => void;
+    const post = new Promise<Response>((_r, reject) => { rejectPost = reject; });
+    vi.mocked(startSession).mockReturnValue(post as never);
+    vi.mocked(discoverNewSessionId).mockResolvedValue('s-new');
+
+    await mount();
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '弹窗里的任务文本' }, { ownError: true });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      await p;
+    });
+    await act(async () => {
+      rejectPost(new Error('网络中断'));
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve(); await Promise.resolve();
+    });
+
+    // 既不能灌草稿，也不能打全局横幅（横幅由调用方就地展示）。
+    expect(captured.hook!.failedDraft).toBeNull();
+    expect(captured.hook!.error).toBeNull();
+  });
 });
