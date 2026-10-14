@@ -285,9 +285,9 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-    windows_psec_sandbox = isinstance(sandbox, WindowsPsecSandbox)
+    # #1048 AC8：Docker 与 PSEC 一样对工作区走 Sandbox/POSIX 语义；只有 local
+    # 子进程后端是宿主目录语义。宿主源路径仅作项目身份与导入来源。
+    sandbox_path_semantics = uses_sandbox_path_semantics(sandbox)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -296,7 +296,7 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            if windows_psec_sandbox:
+            if sandbox_path_semantics:
                 kwargs["project_instructions_loader"] = (
                     lambda relative_path: project_instructions.load_for_sandbox_path(
                         session_id, sandbox, relative_path,
@@ -419,6 +419,22 @@ def _project_instruction_cwd(
     raise ValueError(
         "cannot resolve a host workspace path for project instructions"
     )
+
+
+def uses_sandbox_path_semantics(sandbox: object) -> bool:
+    """该 sandbox 的工作区是否走 Sandbox/POSIX 路径语义（#1048 AC8）。
+
+    - Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端 ⇒ `True`
+      （路径解析、指令读取、审批身份都用 Sandbox 抽象，宿主源路径仅作项目身份
+      与导入来源）；
+    - `local` 子进程后端直接以宿主目录为工作区 ⇒ `False`。
+
+    判据单一来源：**只有 `LocalSubprocessSandbox` 是宿主目录语义**，其余后端
+    （含容器内 `/workspace`）一律 Sandbox/POSIX 语义。
+    """
+    from agent_harness.sandbox.local import LocalSubprocessSandbox
+
+    return not isinstance(sandbox, LocalSubprocessSandbox)
 
 
 def root_registry_tool_names(
@@ -596,8 +612,6 @@ async def build_runtime(
         else workspace
     )
     project_instructions = project_instruction_store(settings)
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
@@ -697,7 +711,7 @@ async def build_runtime(
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
-    if isinstance(instruction_workspace, WindowsPsecSandbox):
+    if uses_sandbox_path_semantics(instruction_workspace):
         await asyncio.to_thread(
             project_instructions.load_for_sandbox_session,
             session_id,

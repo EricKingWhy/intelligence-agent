@@ -26,9 +26,10 @@ import errno
 import logging
 import os
 import shutil
+import tempfile
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
@@ -469,6 +470,34 @@ async def fork_session(
     return child
 
 
+def _is_container_workspace(sandbox: object) -> bool:
+    """该 sandbox 的工作区是否在容器内（POSIX 路径，非宿主目录）——#1048 AC7。
+
+    容器后端（Docker）的 `workspace_root` 是 `PurePosixPath`（如 `/workspace`），
+    宿主上并不存在；local 后端是宿主 `Path`。判据与 `assembly` 的
+    `uses_sandbox_path_semantics` 同源（此处只需区分"是否容器内"）。
+    """
+    root = getattr(sandbox, "workspace_root", None)
+    return isinstance(root, PurePosixPath) and not isinstance(root, Path)
+
+
+def _copy_container_workspace(parent_sandbox: object, child_sandbox: object) -> None:
+    """父容器工作区 → 子独立 volume 的**副本**复制（#1048 AC7）。
+
+    绝不走宿主 `Path`/`shutil.copytree`：父 volume 先物化到一次性宿主暂存目录
+    （`export_to_host`），再经 `copy_in` 导入子 volume；子得独立对象集，与父互不
+    共享写入。完成标记随之复制，子会话沿用 Docker 后端且已"导入完成"。
+    """
+    staging = Path(tempfile.mkdtemp(prefix="fork-workspace-"))
+    try:
+        exporter = getattr(parent_sandbox, "export_to_host", None)
+        if exporter is not None:
+            exporter(staging)
+        child_sandbox.copy_in(staging, ".")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _copy_workspace(
     registry, parent_session_id: str, child: Session
 ) -> None:
@@ -492,10 +521,16 @@ def _copy_workspace(
     """
     if not registry.exists(parent_session_id):
         return
-    parent_root = registry.get(parent_session_id).workspace_root
+    parent_sandbox = registry.get(parent_session_id)
     child_sandbox = child.sandbox
     if child_sandbox is None:
         return
+    # #1048 AC7：Docker（及任何容器内工作区）后端**不得**对宿主 `/workspace`
+    # 走 `Path`/`shutil.copytree`——父 volume 以副本形式导入子独立 volume。
+    if _is_container_workspace(parent_sandbox) or _is_container_workspace(child_sandbox):
+        _copy_container_workspace(parent_sandbox, child_sandbox)
+        return
+    parent_root = parent_sandbox.workspace_root
     if not parent_root.is_dir():
         return
     child_root = registry.default_workspace_root(child.session_id)

@@ -884,6 +884,21 @@ class DockerSandbox(Sandbox):
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 
+    def export_to_host(self, dest: Path) -> None:
+        """把容器工作区**副本**导出到全新宿主目录（#1048 AC5/AC6/AC7）。
+
+        用 `get_archive` 取 `/workspace` 的 tar 快照并安全解包（`filter="data"`：
+        拒绝绝对路径 / `..` 穿越 / 越界链接）。导出的是**副本**——容器内对象与
+        宿主目标各自独立，不共享 inode/canary。绝不把宿主 `/workspace` 当直连路径。
+        """
+        out = Path(dest)
+        out.mkdir(parents=True, exist_ok=True)
+        self.ensure_started()
+        stream, _ = self._container.get_archive(str(self.workspace_root))
+        payload = b"".join(stream)
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            archive.extractall(path=out, filter="data")
+
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""
         root = self.workspace_root

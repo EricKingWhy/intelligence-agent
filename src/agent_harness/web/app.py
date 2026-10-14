@@ -2391,6 +2391,11 @@ def create_app(
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
 
+    # #1048 AC5/AC6：本地 REST 显式导出工作区（副本 → 全新宿主目录；独立 router）。
+    from agent_harness.web.workspace_export import register_workspace_export_routes
+
+    register_workspace_export_routes(app, validate_session_id=validate_session_id)
+
     # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
     # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
     from agent_harness.web.model_providers import register_model_provider_routes

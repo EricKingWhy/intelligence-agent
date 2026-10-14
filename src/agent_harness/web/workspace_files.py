@@ -592,6 +592,19 @@ def register_workspace_file_routes(
         )
 
 
+def workspace_semantics_for_sandbox(sandbox: object) -> str:
+    """该 sandbox 的工作区路径语义（AC8）：`"sandbox"`（容器/POSIX）或 `"host"`。
+
+    Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端返回 `"sandbox"`
+    ——文件路由只经 Sandbox 抽象（`read_text`/`list_files`），宿主源路径仅作项目
+    身份与导入来源。local 子进程后端返回 `"host"`。判据单一来源见
+    `agent_harness.assembly.uses_sandbox_path_semantics`。
+    """
+    from agent_harness.assembly import uses_sandbox_path_semantics
+
+    return "sandbox" if uses_sandbox_path_semantics(sandbox) else "host"
+
+
 __all__ = [
     "MAX_CHARS_PER_LINE",
     "MAX_FILE_ENTRIES",
@@ -600,4 +613,5 @@ __all__ = [
     "WorkspaceFileList",
     "WorkspaceFileSlice",
     "register_workspace_file_routes",
+    "workspace_semantics_for_sandbox",
 ]
