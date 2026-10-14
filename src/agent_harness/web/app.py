@@ -615,7 +615,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # （按平台：Windows ⇒ docker，否则 local，见 `create_app` 的
+    # `default_backend_for_platform()`）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort

@@ -112,23 +112,36 @@ class TestHardLinkObjectIdentityIsolation:
         sandbox.write_text("a.txt", "changed-in-container")
         assert sandbox.read_text("b.txt") == "changed-in-container"
 
-    def test_external_hardlink_added_during_import_is_not_shared(
+    def test_external_hardlink_added_after_snapshot_is_not_shared(
         self, tmp_path: Path
     ) -> None:
-        """AC4：初始化期间并发新增外链，导入完成后容器与宿主不共享该对象。"""
+        """AC4：快照边界**冻结**对象身份——导入完成后宿主工作区新增的名称（含外链）
+        不进容器；容器内写同名文件不触达宿主源与外部 canary。
+
+        导入在 `create()` 内同步完成，故「导入期间并发新增」的确定性等价形态是
+        「快照已取定后新增」：其可验证判据是**容器看不到该名**（若后端是宿主 bind
+        挂载/懒读，则该名可见、写它会改宿主 ⇒ 本用例失败）。这比在导入后新增再无脑
+        写同名文件强：后者在不绑定挂载的副本实现下也恒真，测不出边界。
+        """
         _require_docker_engine()
-        host_root = tmp_path / "host_ws_race"
+        host_root = tmp_path / "host_ws_late"
         host_root.mkdir()
         (host_root / "seed.txt").write_text("seed")
-        outside = tmp_path / "outside_race"
+        outside = tmp_path / "outside_late"
         outside.mkdir()
         canary = outside / "late.bin"
         canary.write_bytes(b"LATE-EXTERNAL")
 
         registry = _registry(tmp_path)
-        # 导入编排必须在快照边界上冻结对象身份；导入完成后新增外链不写穿。
         sandbox = registry.create(SESSION_ID, workspace_root=host_root)
+        # create() 返回时快照已冻结；此后在宿主工作区新增硬链接别名。
         os.link(canary, host_root / "late-alias.bin")
-        sandbox.write_text("late-alias.bin", "CONTAINER-WROTE")
+        assert (host_root / "late-alias.bin").stat().st_ino == canary.stat().st_ino
 
+        # 容器工作区有冻结快照，看不到导入后新增的名字。
+        with pytest.raises(FileNotFoundError):
+            sandbox.read_text("late-alias.bin")
+        # 即便在容器内写同名文件，宿主源与外部 canary 逐字节不变。
+        sandbox.write_text("late-alias.bin", "CONTAINER-WROTE")
         assert canary.read_bytes() == b"LATE-EXTERNAL"
+        assert (host_root / "late-alias.bin").read_bytes() == b"LATE-EXTERNAL"

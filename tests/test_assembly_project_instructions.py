@@ -3,7 +3,7 @@ from __future__ import annotations
 import platform
 import shutil
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -197,12 +197,103 @@ async def test_runtime_accepts_an_existing_sandbox_as_workspace_input(
     assert "root instruction" in "\n".join(str(message.content) for message in messages)
 
 
+@pytest.mark.asyncio
+async def test_container_workspace_first_context_build_uses_sandbox_loader(
+    tmp_path: Path,
+) -> None:
+    """#1048 P1 回归：容器（sandbox 语义）工作区会话的**首次 context build** 必须
+    用与 `build_runtime` **同源**的 sandbox 指令加载器。
+
+    `build_runtime` 在构建期用 `load_for_sandbox_session` 把会话 cwd 缓存成容器根
+    （`/workspace`）；若 `_render_runtime_context` 改用宿主 `instruction_cwd` 加载，
+    二者不一致，`ProjectInstructionStore` 会抛 `ValueError: session cwd changed`——
+    每个 Docker 会话第一个请求就炸。本用例用不依赖 daemon 的容器替身复现该路径。
+    """
+    from agent_harness.context.project_instructions import project_instruction_store
+    from agent_harness.sandbox.base import ShellEnvironment, ShellFamily
+
+    host_source = tmp_path / "host_source"
+    host_source.mkdir()
+
+    class _ContainerSandbox:
+        """容器语义面：workspace_root 是容器内 POSIX 路径（非宿主 Path）。"""
+
+        @property
+        def workspace_root(self) -> PurePosixPath:
+            return PurePosixPath("/workspace")
+
+        @property
+        def shell_environment(self) -> ShellEnvironment:
+            # 与 DockerSandbox 同款：容器内固定 /bin/sh（OBS-012）。
+            return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
+
+        def path_kind(self, path: str) -> None:
+            return None  # 快照为空 ⇒ 无项目指令（本用例只验加载器一致性）
+
+        def resolve_within_workspace(self, path: str) -> PurePosixPath:
+            return self.workspace_root / path
+
+    sandbox = _ContainerSandbox()
+
+    class _ContainerRegistry:
+        """把会话解析到容器替身（真实注册表在无 daemon 时不可构造 docker 后端）。"""
+
+        def __init__(self, inner: WorkspaceRegistry) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        def exists(self, session_id: str) -> bool:
+            return True
+
+        def get(self, session_id: str) -> _ContainerSandbox:
+            return sandbox
+
+        def recorded_workspace_roots(self, session_id: str) -> list[str]:
+            return [str(host_source)]
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "harness"),
+        artifact_dir="",
+        model_api_key="test-key",
+    )
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    session_id = "session-container-runtime-context"
+    session = Session.start(session_store, session_id=session_id, cwd=host_source)
+    session.append(USER_MESSAGE, {"content": "inspect the source"})
+    registry = _ContainerRegistry(
+        WorkspaceRegistry(root=tmp_path / "harness", backend="local")
+    )
+
+    with patch("agent_harness.assembly.create_chat_model", return_value=_ModelFactory()):
+        runtime = await build_runtime(
+            settings=settings,
+            wiring=CapabilityWiring(),
+            stores=stores,
+            workspace_registry=registry,  # type: ignore[arg-type]
+            session_id=session_id,
+            workspace=sandbox,  # type: ignore[arg-type]
+            max_agent_turns=10,
+        )
+    # 修复前：这一次 build 抛 ValueError("session cwd changed")。
+    messages = await runtime._context_builder.build(session)
+    assert messages
+    # 指令缓存以**容器根**为 cwd（证明走的是 sandbox 加载器，而非宿主 instruction_cwd）。
+    status = project_instruction_store(settings).status_for_session(session_id)
+    assert status["session_cwd"] == "/workspace", status
+
+
 # #1048 AC2：`windows_psec` 不再是新会话可选后端（`registry.create` 对它响亮
 # ValueError），故无法再经 registry 新建 PSEC 会话、再把该 sandbox 交给
 # `build_runtime`。原先两条 Windows-only 用例正是在这条已移除的路径上验证
 # 「sandbox 工作区按 POSIX 语义加载项目指令 / ReadTool 读文件」。容器工作区的同类
 # 语义现由 `uses_sandbox_path_semantics`（只有 LocalSubprocessSandbox 为宿主语义）
-# 统一裁决，并被 `tests/web/test_workspace_files_docker_semantics.py` 等跨平台用例覆盖。
+# 统一裁决，并被本文件上面的 `test_container_workspace_first_context_build_uses_sandbox_loader`
+# 与 `tests/web/test_workspace_files_docker_semantics.py` 等跨平台用例覆盖。
 
 
 def test_project_instruction_root_requires_exact_recorded_path_spelling(

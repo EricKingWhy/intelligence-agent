@@ -108,7 +108,9 @@ class WorkspaceRegistry:
         RecoveryCoordinator 据此恢复（R8-1）。
 
         backend（#363 / W-19）：本次创建显式选择的后端（"local" | "docker"）；
-        None ⇒ 沿用 registry 构造时的默认（`self._backend`，当前 web 层为 "local"）。
+        None ⇒ 沿用 registry 构造时的默认（`self._backend`）——web 层按平台取
+        部署默认（`capabilities.default_backend_for_platform`：Windows ⇒ docker，
+        否则 local，见 `web/app.py` 的 `create_app`）。
         解析优先级抄 DSH：显式选择 > 部署默认。
         - 未知后端名：响亮 ValueError（DSH：typo 不静默改策略）。
         - 选 docker 但探针不可用：抛 SandboxUnavailableError，**绝不静默回落

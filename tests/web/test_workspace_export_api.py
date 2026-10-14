@@ -67,6 +67,12 @@ def _export(client: TestClient, session_id: str, body: dict) -> object:
     )
 
 
+def _workspace_root(client: TestClient, session_id: str) -> Path:
+    return Path(
+        client.app.state.agent.workspace_registry.get(session_id).workspace_root
+    )
+
+
 class TestWorkspaceExportApi:
     def test_export_requires_host_target_path(self, tmp_path: Path) -> None:
         """AC5：缺 host_target → 422（显式导出，必须给宿主目标路径）。"""
@@ -95,9 +101,7 @@ class TestWorkspaceExportApi:
         `Settings.workspace_dir` 下也被接受（与既有 host-directory API 口径一致）。"""
         client = _client(tmp_path)
         sid = _create_session(client)
-        root = Path(
-            client.app.state.agent.workspace_registry.get(sid).workspace_root
-        )
+        root = _workspace_root(client, sid)
         (root / "hello.txt").write_text("EXPORT-ME\n", encoding="utf-8")
 
         outside = tmp_path.parent / f"{tmp_path.name}-outside-export"
@@ -178,3 +182,48 @@ class TestWorkspaceExportApi:
         alias = dest / "alias.txt"
         assert alias.is_symlink(), "导出把符号链接解析成了实体文件"
         assert os.readlink(alias) == "real.txt"
+
+    def test_export_local_backend_does_not_dereference_escaping_symlink(
+        self, tmp_path: Path
+    ) -> None:
+        """AC6：local 后端导出经 `Sandbox.export_to_host`，其默认复制**不得解引用**
+        逃逸符号链接（否则会把外部文件内容实体复制进导出树——既泄漏又绕过成员校验）。
+
+        工作区含一个指向宿主任意绝对路径的符号链接：导出必须 fail-closed 拒绝（422），
+        且不得把该链接解引用成实体文件发布出去。"""
+        client = _client(tmp_path)
+        sid = _create_session(client)
+        root = _workspace_root(client, sid)
+        (root / "escape").symlink_to("/etc/passwd")
+
+        target = tmp_path.parent / f"{tmp_path.name}-escape-export"
+        try:
+            resp = _export(client, sid, {"host_target": str(target)})
+            assert resp.status_code == 422, resp.text
+            # 逃逸链接绝不能被解引用成实体文件发布到导出树。
+            if target.exists():
+                leaked = target / "escape"
+                assert not leaked.is_file(), "逃逸符号链接被解引用成了实体文件"
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_export_maps_member_safety_error_to_422(
+        self, tmp_path: Path
+    ) -> None:
+        """AC6：后端导出 `export_to_host` 抛成员安全错误（Docker 侧为
+        `tarfile.TarError`）→ 422，不是 500。"""
+        import tarfile
+
+        from agent_harness.sandbox.base import Sandbox
+
+        client = _client(tmp_path)
+        sid = _create_session(client)
+        target = tmp_path.parent / f"{tmp_path.name}-tarerror-export"
+
+        def _unsafe(self: object, dest: object) -> None:
+            raise tarfile.TarError("member escapes destination")
+
+        with patch.object(Sandbox, "export_to_host", _unsafe):
+            resp = _export(client, sid, {"host_target": str(target)})
+        assert resp.status_code == 422, resp.text
+        assert not target.exists(), "成员安全失败却创建了导出目标目录"

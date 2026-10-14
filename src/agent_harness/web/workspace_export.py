@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -147,12 +148,21 @@ def register_workspace_export_routes(
         )
         staging = Path(mkdtemp(prefix="export-staging-"))
         try:
-            await anyio.to_thread.run_sync(sandbox.export_to_host, staging)
-            # harness 内部簿记（导入完成标记）不是用户工作产物，不进导出树。
-            (staging / IMPORT_COMPLETE_MARKER).unlink(missing_ok=True)
+            # 成员安全在**两个**后端都成立：Docker 的 `extractall(filter="data")` 对
+            # 逃逸链接抛 `tarfile.TarError`，local 的 copytree 对特殊项抛
+            # `shutil.Error`/`SpecialFileError`，导出树构建对 `..`/绝对/空名抛
+            # `ValueError`——统一映射为 422（成员不安全是请求问题，不是 500）。
             try:
+                await anyio.to_thread.run_sync(sandbox.export_to_host, staging)
+                # harness 内部簿记（导入完成标记）不是用户工作产物，不进导出树。
+                (staging / IMPORT_COMPLETE_MARKER).unlink(missing_ok=True)
                 await anyio.to_thread.run_sync(build_export_archive, staging, target)
-            except ValueError as error:
+            except (
+                ValueError,
+                tarfile.TarError,
+                shutil.Error,
+                shutil.SpecialFileError,
+            ) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
         finally:
             shutil.rmtree(staging, ignore_errors=True)

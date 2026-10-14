@@ -218,8 +218,16 @@ class Sandbox(ABC):
 
         `dest` 被当作**内容副本的目标目录**（已存在则并入，不覆盖 `dest` 本身），
         与源各自独立、不共享 inode。
+
+        成员安全（#1048 AC6）：复制用 `symlinks=True`——符号链接**原样重建**，绝不
+        解析、不写穿。默认的 `symlinks=False` 会把逃逸链接解引用成外部内容的实体
+        副本，既泄漏又绕过导出树的成员校验；`symlinks=True` 让链接文本保留到由
+        `build_export_archive` 统一 fail-closed 拒绝。不安全特殊项（设备/FIFO/socket）
+        仍由 `shutil.copytree` 抛 `SpecialFileError`（`shutil.Error`）拒绝。
         """
-        shutil.copytree(self.workspace_root, Path(dest), dirs_exist_ok=True)
+        shutil.copytree(
+            self.workspace_root, Path(dest), dirs_exist_ok=True, symlinks=True
+        )
 
     @property
     @abstractmethod

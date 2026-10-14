@@ -519,10 +519,11 @@ def _copy_workspace(
     根 ⇒ 同卷）到位。**跨卷降级（#527）时发布为非原子直拷**：`os.replace`
     抛 EXDEV 则 `copytree(staging, child_root)`，此时观察者可能看到半份
     child_root；失败由内层清理 + `_reclaim_failed_fork` 兜底。
-    其余形态（docker 容器内路径、命名 workspace 指向的
-    用户目录）保持原位 copytree——rename 无法跨边界，其残余语义不变（由
-    映射与事件层对账兜底）。拷贝失败 = 基础设施故障，暂存现场回收后原样
-    上抛（fork 不带残缺快照继续）。
+    **容器内工作区（Docker）不走本函数**：`_is_container_workspace` 命中即
+    早返回，交给 `_copy_container_workspace` 以父 volume 副本导入子独立 volume
+    （#1048 AC7）。故本函数余下的形态只有「命名 workspace 指向的用户目录」——
+    保持原位 copytree（rename 无法跨边界，残余语义不变，由映射与事件层对账兜底）。
+    拷贝失败 = 基础设施故障，暂存现场回收后原样上抛（fork 不带残缺快照继续）。
     """
     if not registry.exists(parent_session_id):
         return
