@@ -1,0 +1,339 @@
+{
+  "dataset": "real_eval",
+  "seed": 20261011,
+  "created": "2026-10-11",
+  "source": "intelligence-agent Eval 设计 v0（34 题 × 5 次）；open_qa 为本票新增",
+  "counts": {
+    "total": 34,
+    "train": 22,
+    "test": 12,
+    "D": 26,
+    "J": 8,
+    "by_case_type": {
+      "tool_selection": 12,
+      "recovery": 8,
+      "kill_resume": 6,
+      "open_qa": 8
+    }
+  },
+  "cases": [
+    {
+      "name": "ts_train_01",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_02",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_03",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_04",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_05",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_06",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_07",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_train_08",
+      "split": "train",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_train_01",
+      "split": "train",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_train_02",
+      "split": "train",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_train_03",
+      "split": "train",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_train_04",
+      "split": "train",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_train_05",
+      "split": "train",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_train_01",
+      "split": "train",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_train_02",
+      "split": "train",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_train_03",
+      "split": "train",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_train_04",
+      "split": "train",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_train_01",
+      "split": "train",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_train_02",
+      "split": "train",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_train_03",
+      "split": "train",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_train_04",
+      "split": "train",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_train_05",
+      "split": "train",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_test_01",
+      "split": "test",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_test_02",
+      "split": "test",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_test_03",
+      "split": "test",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "ts_test_04",
+      "split": "test",
+      "case_type": "tool_selection",
+      "assertion_kind": "D",
+      "source": "设计 v0 tool_selection 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_test_01",
+      "split": "test",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_test_02",
+      "split": "test",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "rec_test_03",
+      "split": "test",
+      "case_type": "recovery",
+      "assertion_kind": "D",
+      "source": "设计 v0 recovery 模板（工具替换见 manifest deviation）",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_test_01",
+      "split": "test",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "kr_test_02",
+      "split": "test",
+      "case_type": "kill_resume",
+      "assertion_kind": "D",
+      "source": "设计 v0 kill_resume 模板，本票另写题面",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_test_01",
+      "split": "test",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_test_02",
+      "split": "test",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    },
+    {
+      "name": "oa_test_03",
+      "split": "test",
+      "case_type": "open_qa",
+      "assertion_kind": "J",
+      "source": "本票新增 open_qa",
+      "replace_reason": null,
+      "exclude_reason": null
+    }
+  ],
+  "excluded_or_replaced": [
+    {
+      "what": "FlakyAddTool 作为 recovery 的注入工具",
+      "why": "FlakyAddTool 的失败 retryable=True，会被 ToolExecutor 在同一次调用内重试到成功（MAX_ATTEMPTS=3），事件流里从不出现模型可见的失败，recovery_guard_ok 恒 False；改用同模块的 ModeledFailureAddTool（按参数指纹确定性、不可重试失败）"
+    }
+  ],
+  "deviations": [
+    "recovery 注入工具由票面的 FlakyAddTool 改为 ModeledFailureAddTool（原因见 excluded_or_replaced）",
+    "baseline B 用 deepseek-v4.1-flash（kunyou 网关）作可复跑对照；baseline A 为票面 glm-5.3-flash",
+    "SUT 固定 max_tokens（RunConfig.max_tokens，默认 1024）、temperature=0、不设 fallback、不注册 websearch"
+  ],
+  "failure_class_overrides": {}
+}
