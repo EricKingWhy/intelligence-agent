@@ -75,8 +75,13 @@ test('停顿提示锚的是「空闲」而非「流龄」：阈值前不出现�
   await expect(page.locator('.model-output').last()).toContainText('又吐了一点。');
   await expect(page.locator('.wait-hint')).toHaveCount(0);
 
-  // 再推进 31s（虚拟 ~52s）：距最后一次新事件只过了 ~31s → 才刚过阈值
-  await page.clock.fastForward(31_000);
+  // 给 React 的进度 effect 一个逐步执行的时钟窗口，确保 seq 5 已重置空闲锚点；
+  // fastForward 会跳到终点且只触发到期回调一次，满载时可能抢在 effect 前推进。
+  await page.clock.runFor(1_000);
+  await expect(page.locator('.wait-hint')).toHaveCount(0);
+
+  // 再跳 30s（虚拟 ~52s）：新事件后累计空闲 ~31s，刚过提示阈值。
+  await page.clock.fastForward(30_000);
   const hint = page.locator('.wait-hint');
   await expect(hint).toBeVisible();
   await expect(hint).toContainText('没有新进展');
