@@ -40,9 +40,14 @@ interface Props {
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
   onOpenContextUsage: (sessionId: string) => void;
+  /** #1030：后端待裁决清单非空（`GET /api/sessions/{id}/recovery` 或 409 载荷）。
+   *  可选 + 缺省 false——既有测试夹具零迁移（同 `onOpenRecoveryList` 的先例）。
+   *  为真时徽标显示一等态「待裁决」而非「思考中」：坏死 run 的 `run_status` 停在
+   *  'running'，只看事件流必然推出「思考中」（本票缺陷①）。 */
+  awaitingDecision?: boolean;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, awaitingDecision = false }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -79,8 +84,13 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     setAuthPanelOpen(false);
   };
 
-  const pulse = deriveRunPulse(conversation, streaming);
+  // #1030：`awaitingDecision` 是唯一不来自 `conversation` 的输入——坏死 run 的
+  // run_status 停在 'running'，事件流里根本没有「卡在等人裁决」这个事实（唯一读面
+  // 是后端只读端点）。所以它只能由 App 传进来，不能在这里派生。
+  const pulse = deriveRunPulse(conversation, streaming, awaitingDecision);
   const PulseIcon = pulse.Icon;
+  // 「待裁决」**不是** active：它没在跑（active 驱动 spinner 与耗时秒数，把它算进去
+  // 就会给一个死掉的 run 计秒——正是本票要修的谎报）。
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
 
   // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里

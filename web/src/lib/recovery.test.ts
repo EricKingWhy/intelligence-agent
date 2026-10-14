@@ -47,9 +47,45 @@ describe('humanizeToolName — 最小可读化，不建第二套工具注册表'
   });
 });
 
-describe('DECISION_OPTIONS — 三选一，默认项由后端 default_action 决定', () => {
-  it('恰好三个选项，verdict 与后端词表一致', () => {
-    expect(DECISION_OPTIONS.map((o) => o.verdict)).toEqual(['CONFIRM_SUCCESS', 'RETRY', 'DEFER']);
+describe('DECISION_OPTIONS — 四选一，默认项由后端 default_action 决定', () => {
+  it('恰好四个选项，verdict 与后端 ReconcileVerdict 词表一致', () => {
+    // #1030：《可验收标准》点名 CONFIRM / RETRY / **ABANDON** —— DEFER 按后端契约
+    // 不解封（Ledger 保持 NEED_RECONCILE，仍出现在后续 pending_decisions），
+    // 缺了 ABANDON 用户想"这事我不做了"时无路可走。
+    expect(DECISION_OPTIONS.map((o) => o.verdict)).toEqual([
+      'CONFIRM_SUCCESS', 'RETRY', 'ABANDON', 'DEFER',
+    ]);
+  });
+
+  it('ABANDON 与 DEFER 在文案上分得开（一个是结束这件事，一个是先不动它）', () => {
+    const abandon = DECISION_OPTIONS.find((o) => o.verdict === 'ABANDON');
+    const defer = DECISION_OPTIONS.find((o) => o.verdict === 'DEFER');
+    // 修前这里断言 `toContain('解开')`，而那正是审查（修复轮轴 B）P2 指出的**假话**：
+    // 「选它这条会话才会解开」在用户可见文案里宣称独占性，而后端五值枚举里
+    // 除 DEFER 外四者都结清账本（coordinator.py:1065-1136；ABANDON 是兜底 return，
+    // 在 1128-1136，别只引到 1120）。改为断言
+    // 「本档会结清这次调用」这个**只关于自己**的事实。
+    expect(abandon?.help).toContain('结清');
+    expect(abandon?.help).not.toContain('才会解开');
+    expect(abandon?.help).not.toBe(defer?.help);
+    expect(defer?.help).toContain('稍后');
+  });
+
+  it('默认项只取后端 default_action，永不预选 CONFIRM_SUCCESS / ABANDON（#14 安全侧）', () => {
+    // 后端 `default_action` 的取值域就是 RETRY/DEFER 两值（`PendingDecision` 的
+    // 联合类型钉住）。CONFIRM_SUCCESS 断言"副作用已生效"（最危险），ABANDON 断言
+    // "放弃且不重跑"（不可逆）——两者都必须由用户主动改选。
+    // 断言打在**真实生产者** `initialDrafts` 上（而不是拿两个字面量与一个字面量
+    // 数组互比：那种写法不碰任何产品代码，改坏实现也不会红——审查 P2-1）。
+    const cards = [
+      decision({ tool_call_id: 'c1', default_action: 'RETRY', risk_level: 'low' }),
+      decision({ tool_call_id: 'c2', default_action: 'DEFER', risk_level: 'high' }),
+    ];
+    const drafts = initialDrafts(cards);
+    expect([drafts.c1.verdict, drafts.c2.verdict]).toEqual(['RETRY', 'DEFER']);
+    for (const d of Object.values(drafts)) {
+      expect(['CONFIRM_SUCCESS', 'ABANDON']).not.toContain(d.verdict);
+    }
   });
 
   it('每项都有非空 label 与 help（后果语言，无开放技术问答）', () => {
