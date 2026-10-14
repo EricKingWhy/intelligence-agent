@@ -286,3 +286,99 @@ async def test_cross_volume_fallback_failure_cleans_up(tmp_path, monkeypatch) ->
     assert not staging.exists() or not any(staging.iterdir())
     # 父侧不变
     assert _snapshot(registry.default_workspace_root("parent")) == parent_snapshot
+
+
+# ── #1048 AC7：Docker 后端 fork 不经过宿主 shutil.copytree ──────────────────
+
+
+class _FakeDockerSandbox:
+    """代表 DockerSandbox 的语义面（供无 daemon 的 AC7 编排测试）。"""
+
+    def __init__(self, *, container_name=None, volume_name=None, image=None):
+        self.container_name = container_name
+        self.volume_name = volume_name
+        self.files: dict[str, str] = {}
+        self.copied: list[tuple[str, str]] = []
+        self.started = False
+
+    @property
+    def workspace_root(self):
+        from pathlib import PurePosixPath
+
+        return PurePosixPath("/workspace")
+
+    def ensure_started(self) -> None:
+        self.started = True
+
+    def write_text(self, path: str, content: str) -> None:
+        self.files[path] = content
+
+    def read_text(self, path: str) -> str:
+        return self.files[path]
+
+    def copy_in(self, host_path, workspace_path: str) -> None:
+        self.copied.append((str(host_path), str(workspace_path)))
+
+
+def _docker_registry(tmp_path, monkeypatch) -> WorkspaceRegistry:
+    import agent_harness.sandbox.registry as registry_mod
+    from agent_harness.sandbox.capabilities import SandboxCapabilities
+
+    monkeypatch.setattr(
+        registry_mod,
+        "probe_docker_capabilities",
+        lambda **_k: SandboxCapabilities(backend="docker", available=True),
+    )
+    monkeypatch.setattr(registry_mod, "require_available", lambda caps: None)
+    monkeypatch.setattr(
+        "agent_harness.sandbox.docker.DockerSandbox", _FakeDockerSandbox
+    )
+    return WorkspaceRegistry(root=tmp_path / "docker_reg", backend="docker")
+
+
+def test_docker_fork_copies_volume_without_host_copytree(tmp_path, monkeypatch) -> None:
+    """AC7：docker fork 不得对 /workspace 走宿主 shutil.copytree；子得独立 volume。"""
+    from types import SimpleNamespace
+
+    from agent_harness.session.fork import _copy_workspace
+
+    registry = _docker_registry(tmp_path, monkeypatch)
+    parent = registry.create("parent")
+    parent.write_text("keep.txt", "parent-asset")
+    child_sandbox = registry.create("child")
+
+    copied_to: list[tuple[str, str]] = []
+    real_copytree = shutil.copytree
+
+    def _record(src, dst, *args, **kwargs):
+        copied_to.append((str(src), str(dst)))
+        return real_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copytree", _record)
+
+    child = SimpleNamespace(session_id="child", sandbox=child_sandbox)
+    _copy_workspace(registry, "parent", child)
+
+    assert not any(
+        src == "/workspace" or dst == "/workspace" for src, dst in copied_to
+    ), "docker fork 仍在对宿主 /workspace 走 shutil.copytree"
+    assert child_sandbox.volume_name != parent.volume_name
+    assert child_sandbox.copied, "子 volume 未收到父 workspace 复制"
+
+
+def test_docker_child_write_isolated_from_parent(tmp_path, monkeypatch) -> None:
+    """AC7：子会话沿用 docker；子写不影响父 workspace。"""
+    from types import SimpleNamespace
+
+    from agent_harness.session.fork import _copy_workspace
+
+    registry = _docker_registry(tmp_path, monkeypatch)
+    parent = registry.create("parent")
+    parent.write_text("shared.txt", "parent-content")
+    child_sandbox = registry.create("child")
+
+    child = SimpleNamespace(session_id="child", sandbox=child_sandbox)
+    _copy_workspace(registry, "parent", child)
+
+    child_sandbox.write_text("shared.txt", "child-content")
+    assert parent.read_text("shared.txt") == "parent-content"
