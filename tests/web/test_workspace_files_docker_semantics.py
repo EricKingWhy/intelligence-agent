@@ -1,10 +1,10 @@
 """#1048 AC8：项目指令读取 / 文件工具路径解析 / 审批身份 / web workspace 文件路由
 对 Docker workspace 一律走 Sandbox/POSIX 语义。
 
-红阶段（TDD）：当前 `agent_harness.assembly` 只对 `WindowsPsecSandbox` 走
-sandbox 语义分支（assembly.py:288-302、:599-601、:701-706）；`DockerSandbox`
-落到「宿主路径」分支。AC8 要求 docker workspace 与 PSEC 一样走 Sandbox 语义，
-宿主源路径仅作项目身份与导入来源。
+现状：`agent_harness.assembly` 与 web workspace 文件路由经
+`uses_sandbox_path_semantics` 统一裁决（AC8）——`DockerSandbox` 与
+`WindowsPsecSandbox` 均走 Sandbox/POSIX 语义，不再是红阶段的
+「只对 WindowsPsecSandbox 走 sandbox 语义」。
 
 本文件用一个最小「Docker-like」替身钉住「按 Sandbox 语义处理」的判据，
 不依赖真实 daemon。

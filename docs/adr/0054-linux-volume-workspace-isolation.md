@@ -25,12 +25,15 @@ NTFS **hard link** 是同一卷上**同一文件对象的多个名称**（同一
    运行；导入失败/中断重试不把半份 workspace 当已初始化；已持久化 volume 恢复不重导入、
    不覆盖 agent 后续修改。导入拒绝会逃出源根的符号链接（fail-closed）。
 3. **导出 = 显式副本到全新宿主目录**：本地 REST `POST /api/sessions/{id}/workspace/export`
-   显式触发，请求带**绝对**宿主目标路径（非绝对即 422）；路径授权沿用既有
-   host-directory 来源闸（`web.projects.require_trusted_origin`，ADR-0025 D1(b)/ADR-0028
-   D2，与 `GET /api/host/dirs` 同一份）——**不设** `Settings.workspace_dir` 根限制，与
-   既有 host-directory API 接受任意绝对路径的口径一致（协调员裁决 2026-10-14）。目标
-   **已存在即拒绝**（不覆盖）；导出树拒绝绝对路径 / `..` 穿越 / 不安全特殊项；符号链接
-   不写穿新目标、硬链接按内容复制（不保留对象身份），外部 canary 不受影响。
+   显式触发，请求带**绝对**宿主目标路径（非绝对即 422）；来源可信闸沿用既有
+   host-directory API 口径（`web.projects.require_trusted_origin`，ADR-0025 D1(b)/ADR-0028
+   D2，与 `GET /api/host/dirs` 同一份）——注意它只判定**请求来源**（本机/可信
+   Origin），**不是路径级授权**；接受任意绝对路径与既有 host-directory API 口径一致
+   （协调员裁决 2026-10-14），故**不设** `Settings.workspace_dir` 根限制。目标
+   **已存在即拒绝**（不覆盖；并发建同一目标后到者亦 409）；导出树**先全量校验成员**
+   再建目标目录（成员不安全即整体拒绝，不留半个/空目录）；拒绝绝对路径 / `..`
+   穿越 / 不安全特殊项；符号链接不写穿新目标、硬链接按内容复制（不保留对象身份），
+   外部 canary 不受影响。成员不安全 → 422，服务端故障（磁盘/权限）→ 500。
 4. **Docker-backed fork**：父 volume 复制到**独立子 volume**，不对 `/workspace` 用
    宿主 `Path`/`shutil.copytree`；子会话沿用 Docker 后端，父子写互不共享。
 5. **语义（backends）**：项目指令读取、文件工具路径解析、审批身份计算、web workspace
@@ -57,6 +60,16 @@ Windows PSEC **不再作为新会话可选/可请求后端**（只用于解析�
 旧 PSEC 映射在**下次恢复**时自动迁移：顺序固定为「探针 → 快照导入私有 volume →
 完整导入成功后才**原子**改映射并返回 `DockerSandbox`」。任一步失败即抛错——**不继续
 返回 PSEC、不丢弃旧映射、不动宿主文件**（fail-closed，不回落）。
+
+**已知残余风险（`snapshot_import` 闸门取舍）**：导入完成标记的检查只对**快照导入
+路径建立**的映射（`mapping.snapshot_import=true`）生效——pre-#1048 的 Docker
+映射没有该字段，其 volume 从未经过快照导入，故恢复时**跳过**标记检查、直接放行
+（否则这些 legacy volume 会被误判为"半份导入"而 brick）。取舍：没有任何正记录
+能区分"legacy volume 正常"与"legacy volume 被清空"，若 legacy volume 实际为空/
+内容丢失，恢复后会话会在**空工作区**上静默运行（AC3"不把半份当已初始化"在此角落
+降级为"不阻断 legacy 恢复"）。该取舍是解 P2 brick 的必要代价，已如实登记；
+`test_pre_snapshot_docker_mapping_recovers_without_marker` 只覆盖"能恢复"，不覆盖
+空 volume 判定。
 
 ## 关于 Windows NTFS 的如实登记
 

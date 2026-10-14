@@ -3,11 +3,11 @@
 设计（见 ADR-0054）：
 
 - **AC5**：`POST /api/sessions/{id}/workspace/export` 显式触发；请求必须带
-  `host_target`（**绝对**宿主目标路径，非绝对即 422）。路径授权沿用既有
-  host-directory 边界语义——`web.projects.require_trusted_origin` 来源闸
-  （ADR-0025 D1(b) / ADR-0028 D2），与 `web.host_dirs` 同一份。**不设**
-  `Settings.workspace_dir` 根限制：既有 host-directory API 同样接受任意绝对
-  路径，只靠来源闸约束（协调员裁决 2026-10-14）。不新增 UI。
+  `host_target`（**绝对**宿主目标路径，非绝对即 422）。来源可信闸沿用既有
+  host-directory API 口径——`web.projects.require_trusted_origin` 只判定请求
+  来源（本机/可信 Origin，ADR-0025 D1(b) / ADR-0028 D2），**不是路径级授权**；
+  接受任意绝对路径与 `GET /api/host/dirs` 一致（协调员裁决 2026-10-14），故
+  **不设** `Settings.workspace_dir` 根限制。不新增 UI。
 - **AC6**：导出是**显式副本**，只能发布到**全新**宿主目标目录——已存在即拒绝，
   绝不覆盖。导出树拒绝绝对路径 / `..` 穿越 / 不安全特殊项（设备、FIFO、socket），
   符号链接不写穿新目标、硬链接按内容复制（不保留对象身份）——外部 canary 不受影响。
@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox.paths import is_absolute_path
 from agent_harness.sandbox.registry import IMPORT_COMPLETE_MARKER
 from agent_harness.web.projects import require_trusted_origin
+from agent_harness.web.workspace_files import session_sandbox
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -74,11 +75,35 @@ def _reject_unsafe_path(name: str) -> None:
             raise ValueError(f"路径含穿越，拒绝：{name!r}")
 
 
+def _iter_export_members(source: Path):
+    """产出 `(rel, entry)` 供"先全量校验、再物化"两阶段共用（AC6）。"""
+    for entry in sorted(source.rglob("*"), key=lambda p: p.as_posix()):
+        yield entry.relative_to(source).as_posix(), entry
+
+
+def _validate_export_members(source: Path) -> None:
+    """AC6：先校验**全部**成员再建目标目录。
+
+    任一成员不安全（绝对/`..`/逃逸链接文本/特殊项）即整体拒绝，且此时目标目录
+    尚未创建——不会留下半个/空的 `dest` 让用户重试时撞 409（"全新目录"语义）。
+    """
+    for rel, entry in _iter_export_members(source):
+        _reject_unsafe_path(rel)
+        if entry.is_symlink():
+            # 链接文本同样是待物化的路径串：绝对/穿越即写穿新目标。
+            _reject_unsafe_path(os.readlink(entry))
+            continue
+        mode = entry.lstat().st_mode
+        if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+            continue
+        raise ValueError(f"含不安全特殊项，拒绝：{rel}")
+
+
 def build_export_archive(source_root: Path, dest: Path) -> None:
     """把 `source_root` 的**副本**发布到全新目录 `dest`（AC6）。
 
     - `dest` 必须不存在（已存在即拒绝，绝不覆盖/合并）；
-    - 遍历源树，逐项校验成员路径（绝对 / `..` / 特殊项拒绝）；
+    - **先全量校验**成员路径（绝对 / `..` / 特殊项拒绝），通过后才建目录；
     - 符号链接按**链接文本**原样重建（不解析、不写穿目标）；硬链接按**内容**复制
       成独立 inode（不保留对象身份，故与源/外部 canary 无共享）；
     - 设备 / FIFO / socket 等不安全特殊项拒绝。
@@ -91,16 +116,13 @@ def build_export_archive(source_root: Path, dest: Path) -> None:
         # 无源（如会话尚无工作区）⇒ 空导出目录，语义仍是"全新目录副本"。
         target.mkdir(parents=True)
         return
+    _validate_export_members(source)
     target.mkdir(parents=True)
-    for entry in sorted(source.rglob("*"), key=lambda p: p.as_posix()):
-        rel = entry.relative_to(source).as_posix()
-        _reject_unsafe_path(rel)
+    for rel, entry in _iter_export_members(source):
         if entry.is_symlink():
-            link = os.readlink(entry)
-            _reject_unsafe_path(link)
             out = target / rel
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.symlink_to(link)
+            out.symlink_to(os.readlink(entry))
             continue
         mode = entry.lstat().st_mode
         if stat.S_ISDIR(mode):
@@ -110,7 +132,7 @@ def build_export_archive(source_root: Path, dest: Path) -> None:
             out.parent.mkdir(parents=True, exist_ok=True)
             # 按内容复制成独立对象：不保留硬链接身份，外部 canary 不受写穿。
             shutil.copyfile(entry, out)
-        else:
+        else:  # pragma: no cover —— 已在 _validate_export_members 拦下
             raise ValueError(f"含不安全特殊项，拒绝：{rel}")
 
 
@@ -128,12 +150,11 @@ def register_workspace_export_routes(
         """显式导出工作区到全新宿主目录（AC5/AC6）。
 
         错误矩阵：缺 `host_target` → 422（Pydantic）/ 非绝对路径 → 422 /
-        目标已存在 → 409 / 会话不存在或无 workspace 映射 → 404（复用
-        `workspace_files.session_sandbox` 的既有语义）/ 导出树含不安全成员 → 422。
+        目标已存在 → 409（纯请求校验，不依赖会话存在）/ 会话不存在或无 workspace
+        映射 → 404（复用 `session_sandbox` 既有语义）/ 并发建同一目标 → 409 /
+        导出树含不安全成员 → 422 / 服务端故障（磁盘/权限）→ 500。
         """
         from tempfile import mkdtemp
-
-        from agent_harness.web.workspace_files import session_sandbox
 
         target = Path(body.host_target)
         _require_absolute_target(body.host_target)
@@ -148,21 +169,21 @@ def register_workspace_export_routes(
         )
         staging = Path(mkdtemp(prefix="export-staging-"))
         try:
-            # 成员安全在**两个**后端都成立：Docker 的 `extractall(filter="data")` 对
-            # 逃逸链接抛 `tarfile.TarError`，local 的 copytree 对特殊项抛
-            # `shutil.Error`/`SpecialFileError`，导出树构建对 `..`/绝对/空名抛
-            # `ValueError`——统一映射为 422（成员不安全是请求问题，不是 500）。
+            # 错误映射刻意**精确**，不宽泛：
+            # - `ValueError` → 422：导出树成员不安全（绝对/`..`/特殊项）是请求问题；
+            # - `tarfile.TarError` → 422：Docker 归档 `extractall(filter="data")`
+            #   拒收逃逸成员；
+            # - `FileExistsError` → 409：与 exists() 快检竞态的并发建同一目标；
+            # - 其余（`shutil.Error` 含 ENOSPC/权限、`OSError` 等）→ 500：
+            #   服务端故障不是请求问题，不吞成 422。
             try:
                 await anyio.to_thread.run_sync(sandbox.export_to_host, staging)
                 # harness 内部簿记（导入完成标记）不是用户工作产物，不进导出树。
                 (staging / IMPORT_COMPLETE_MARKER).unlink(missing_ok=True)
                 await anyio.to_thread.run_sync(build_export_archive, staging, target)
-            except (
-                ValueError,
-                tarfile.TarError,
-                shutil.Error,
-                shutil.SpecialFileError,
-            ) as error:
+            except FileExistsError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except (ValueError, tarfile.TarError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
         finally:
             shutil.rmtree(staging, ignore_errors=True)

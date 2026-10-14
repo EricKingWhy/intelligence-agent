@@ -185,7 +185,6 @@ def probe_windows_psec_capabilities(
             available=False,
             reason="An exact PSEC policy is required to verify workspace isolation",
             details={
-                "workspace_policy_required": "true",
                 "remediation": "probe the policy that will be used to create the sandbox",
             },
         )

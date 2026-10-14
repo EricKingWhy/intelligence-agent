@@ -223,7 +223,9 @@ class Sandbox(ABC):
         解析、不写穿。默认的 `symlinks=False` 会把逃逸链接解引用成外部内容的实体
         副本，既泄漏又绕过导出树的成员校验；`symlinks=True` 让链接文本保留到由
         `build_export_archive` 统一 fail-closed 拒绝。不安全特殊项（设备/FIFO/socket）
-        仍由 `shutil.copytree` 抛 `SpecialFileError`（`shutil.Error`）拒绝。
+        仍由 `shutil.copytree` 抛 `shutil.Error`（通用复制失败）或
+        `shutil.SpecialFileError`（FIFO 等特殊文件；与 `shutil.Error` 为兄弟类，
+        同继承 `OSError`）拒绝。
         """
         shutil.copytree(
             self.workspace_root, Path(dest), dirs_exist_ok=True, symlinks=True

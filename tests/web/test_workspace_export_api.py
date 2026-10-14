@@ -2,11 +2,11 @@
 
 契约（见 ADR-0054）：
 
-- AC5：POST 显式触发导出，请求带宿主目标路径（**绝对**，非绝对即 422）；路径授权
-  沿用现有 host-directory 来源闸（projects.py `require_trusted_origin`，
-  ADR-0025 D1(b)/ADR-0028 D2）——**不设** `Settings.workspace_dir` 根限制，与既有
-  host-directory API 口径一致（协调员裁决 2026-10-14）。会话不存在 / 无 workspace
-  映射 → 404。
+- AC5：POST 显式触发导出，请求带宿主目标路径（**绝对**，非绝对即 422）；来源可信
+  闸沿用既有 host-directory API 口径（projects.py `require_trusted_origin` 只判定
+  请求来源、**不是路径级授权**，ADR-0025 D1(b)/ADR-0028 D2）——**不设**
+  `Settings.workspace_dir` 根限制，与既有 host-directory API 接受任意绝对路径的
+  口径一致（协调员裁决 2026-10-14）。会话不存在 / 无 workspace 映射 → 404。
 - AC6：导出是显式副本，只能发布到**全新**宿主目标目录，已存在拒绝；
   导出树拒绝路径穿越/绝对路径/不安全特殊项；hardlink/symlink 不写穿新目标、
   不改外部 canary。
@@ -200,10 +200,9 @@ class TestWorkspaceExportApi:
         try:
             resp = _export(client, sid, {"host_target": str(target)})
             assert resp.status_code == 422, resp.text
-            # 逃逸链接绝不能被解引用成实体文件发布到导出树。
-            if target.exists():
-                leaked = target / "escape"
-                assert not leaked.is_file(), "逃逸符号链接被解引用成了实体文件"
+            # 逃逸链接绝不能被解引用成实体文件发布到导出树；且成员校验失败时
+            # 不得留下半个/空的目标目录（否则用户修好工作区后重试会撞 409）。
+            assert not target.exists(), "成员安全失败却留下了导出目标目录"
         finally:
             shutil.rmtree(target, ignore_errors=True)
 
@@ -227,3 +226,49 @@ class TestWorkspaceExportApi:
             resp = _export(client, sid, {"host_target": str(target)})
         assert resp.status_code == 422, resp.text
         assert not target.exists(), "成员安全失败却创建了导出目标目录"
+
+    def test_export_concurrent_target_creation_returns_409(
+        self, tmp_path: Path
+    ) -> None:
+        """AC6：并发导出建同一目标时，后到者应得 409（目标已存在），不是 500。
+
+        路由的 exists() 快检与 build_export_archive 的 mkdir 之间有竞态窗口；
+        build 抛 FileExistsError 时必须映射为 409。
+        """
+        import pytest
+
+        from agent_harness.web import workspace_export
+
+        client = _client(tmp_path)
+        sid = _create_session(client)
+        target = tmp_path.parent / f"{tmp_path.name}-race-export"
+
+        def _race(_source: object, _dest: object) -> None:
+            raise FileExistsError("导出目标已存在，拒绝覆盖")
+
+        with patch.object(workspace_export, "build_export_archive", _race):
+            try:
+                resp = _export(client, sid, {"host_target": str(target)})
+            except FileExistsError:
+                pytest.fail("并发建目标应映射为 409，不应以未处理异常 500 逃逸")
+        assert resp.status_code == 409, resp.text
+
+    def test_export_backend_io_failure_is_not_swallowed_as_422(
+        self, tmp_path: Path
+    ) -> None:
+        """AC6：后端导出抛服务端故障（磁盘满/权限拒绝，shutil.Error）时，
+        必须**不**被吞成 422——422 只留给成员不安全这类请求问题，服务端故障走 500。
+        """
+        from agent_harness.sandbox.base import Sandbox
+
+        client = _client(tmp_path)
+        sid = _create_session(client)
+        target = tmp_path.parent / f"{tmp_path.name}-iofail-export"
+
+        def _iofail(self: object, dest: object) -> None:
+            raise shutil.Error("disk full while staging export")
+
+        with patch.object(Sandbox, "export_to_host", _iofail):
+            resp = _export(client, sid, {"host_target": str(target)})
+        assert resp.status_code == 500, resp.text
+        assert not target.exists(), "服务端故障却创建了导出目标目录"
