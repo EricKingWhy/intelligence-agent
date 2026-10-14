@@ -1,0 +1,1 @@
+2026-10-14	#1119 worktrees fixture xdist 隔离：client fixture 注入 Settings(workspace_dir=tmp_path/ws)，消除 -n4 fcntl.flock 锁争抢；独立双轴审查待补	7b609c27..fa2c993e

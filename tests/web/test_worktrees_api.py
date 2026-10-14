@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
+from agent_harness.config import Settings
 from agent_harness.web.app import create_app
 
 
@@ -30,8 +31,13 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client():
-    app = create_app()
+def client(tmp_path: Path):
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "ws"),
+        model_api_key="sk-test",
+    )
+    app = create_app(settings)
     with TestClient(app) as c:
         yield c
 
