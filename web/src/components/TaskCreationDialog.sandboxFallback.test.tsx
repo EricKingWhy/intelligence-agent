@@ -3,12 +3,7 @@ import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../lib/api')>();
-  return { ...actual, getSandboxBackends: vi.fn() };
-});
-
-import { getSandboxBackends, type SandboxBackendEntry } from '../lib/api';
+import type { SandboxBackendEntry } from '../lib/api';
 import { TaskCreationDialog } from './TaskCreationDialog';
 import type { Project } from '../types';
 
@@ -25,7 +20,7 @@ const project: Project = {
 const backend = (name: string, available = true): SandboxBackendEntry => ({
   backend: name,
   available,
-  reason: null,
+  reason: available ? null : '不可用原因',
   details: {},
 });
 
@@ -52,12 +47,12 @@ function openOptions(): string[] {
     .map((item) => item.textContent ?? '');
 }
 
-function dialog() {
+function dialog(backends: SandboxBackendEntry[]) {
   return (
     <TaskCreationDialog
       project={project}
       models={[]}
-      sandboxBackends={globalBackends}
+      sandboxBackends={backends}
       onOpenChange={() => {}}
       onCreateTask={async () => null}
     />
@@ -82,7 +77,6 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
-  vi.mocked(getSandboxBackends).mockReset();
   vi.unstubAllGlobals();
   if (originalScrollIntoView) {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -94,12 +88,11 @@ afterEach(() => {
   }
 });
 
-describe('TaskCreationDialog sandbox options (#1071)', () => {
-  it('keeps generic choices when the workspace probe returns no entries', async () => {
-    vi.mocked(getSandboxBackends).mockResolvedValue([]);
-
+describe('TaskCreationDialog sandbox options (#1071/#1048)', () => {
+  it('shows available backends and never offers windows_psec', async () => {
+    // #1048 AC2：windows_psec 降级为 legacy-only，探针结果里的它不再进下拉。
     await act(async () => {
-      render(dialog());
+      render(dialog(globalBackends));
       await Promise.resolve();
     });
 
@@ -109,54 +102,12 @@ describe('TaskCreationDialog sandbox options (#1071)', () => {
     expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
   });
 
-  it('keeps generic choices when the workspace probe rejects', async () => {
-    vi.mocked(getSandboxBackends).mockRejectedValue(new Error('probe failed'));
-
+  it('hides the 运行位置 field when the probe returns no backends', async () => {
     await act(async () => {
-      render(dialog());
+      render(dialog([]));
       await Promise.resolve();
     });
 
-    const options = openOptions();
-    expect(options.some((title) => title.trim() === '\u672c\u673a')).toBe(true);
-    expect(options.some((title) => title.includes('Docker'))).toBe(true);
-    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
-  });
-
-  it('does not offer PSEC while the workspace-specific probe is pending', async () => {
-    let resolveProbe!: (entries: SandboxBackendEntry[]) => void;
-    const probe = new Promise<SandboxBackendEntry[]>((resolve) => {
-      resolveProbe = resolve;
-    });
-    vi.mocked(getSandboxBackends).mockReturnValue(probe);
-
-    render(dialog());
-
-    const options = openOptions();
-    expect(options.some((title) => title.trim() === '\u672c\u673a')).toBe(true);
-    expect(options.some((title) => title.trim() === 'Docker')).toBe(true);
-    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
-
-    await act(async () => {
-      resolveProbe([]);
-      await probe;
-    });
-  });
-
-  it('never offers PSEC even from a successful workspace-specific probe', async () => {
-    // #1048 AC2：windows_psec 降级为 legacy-only，任何来源的探针都不再进下拉。
-    vi.mocked(getSandboxBackends).mockResolvedValue([
-      backend('windows_psec'),
-      backend('docker'),
-    ]);
-
-    await act(async () => {
-      render(dialog());
-      await Promise.resolve();
-    });
-
-    const options = openOptions();
-    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
-    expect(options.some((title) => title.includes('Docker'))).toBe(true);
+    expect(query('[aria-label="\u8fd0\u884c\u4f4d\u7f6e"]')).toBeNull();
   });
 });

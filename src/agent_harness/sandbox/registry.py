@@ -134,26 +134,19 @@ class WorkspaceRegistry:
             Path(workspace_root) if workspace_root is not None
             else Path(mapping["workspace_root"])
         )
-        if mapping["backend"] == "windows_psec":
-            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-            raw_root = Path(os.path.abspath(requested))
-            mapping["workspace_root"] = str(raw_root)
-            sandbox = WindowsPsecSandbox(raw_root)
-            sandbox.ensure_started()
-            mapping["workspace_identity"] = sandbox.workspace_identity
-        else:
-            requested.mkdir(parents=True, exist_ok=True)
-            workspace_root = Path(canonical_workspace_path(requested))
-            workspace_root.mkdir(parents=True, exist_ok=True)
-            mapping["workspace_root"] = str(workspace_root)
-            sandbox = self._instantiate_sandbox(mapping)
-            sandbox.ensure_started()
-            if mapping["backend"] == "docker":
-                # #1048 AC1/AC3：宿主源 → 私有 named volume 的显式快照导入。
-                # 导入（含完成标记）成功后才落映射；失败则不写映射、不返回，
-                # 绝不把半份 workspace 当作已初始化。
-                self._import_snapshot(sandbox, workspace_root)
+        # #1048 AC2：`_build_mapping` 已对 legacy 后端（含 windows_psec）响亮拒绝，
+        # 故新会话映射只可能是 local/docker——这里不再有 PSEC 分叉。
+        requested.mkdir(parents=True, exist_ok=True)
+        workspace_root = Path(canonical_workspace_path(requested))
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        mapping["workspace_root"] = str(workspace_root)
+        sandbox = self._instantiate_sandbox(mapping)
+        sandbox.ensure_started()
+        if mapping["backend"] == "docker":
+            # #1048 AC1/AC3：宿主源 → 私有 named volume 的显式快照导入。
+            # 导入（含完成标记）成功后才落映射；失败则不写映射、不返回，
+            # 绝不把半份 workspace 当作已初始化。
+            self._import_snapshot(sandbox, workspace_root)
 
         self._write_mapping(session_id, mapping)
         self._cache[session_id] = sandbox
@@ -483,18 +476,14 @@ class WorkspaceRegistry:
         **绝不**改写 mapping、也不返回 DockerSandbox；失败即抛错，旧 mapping 与
         宿主文件原样保留（fail-closed，不回落 PSEC）。
         """
-        require_available(probe_docker_capabilities())
         host_root = Path(mapping["workspace_root"])
-        migrated = {
-            "session_id": session_id,
-            "backend": "docker",
-            "workspace_root": str(host_root),
-            "container_name": f"agent-harness-{session_id}",
-            "volume_name": f"agent-harness-{session_id}",
-            "created_at": mapping.get("created_at") or datetime.now(UTC).isoformat(),
-            "migrated_from": "windows_psec",
-            "migrated_at": datetime.now(UTC).isoformat(),
-        }
+        # 复用新会话的 docker 映射构造（含探针先行 + 确定性 container/volume 名），
+        # 只把 workspace_root 覆写成 legacy 宿主源、并记迁移溯源。
+        migrated = self._build_mapping(session_id, backend="docker")
+        migrated["workspace_root"] = str(host_root)
+        migrated["created_at"] = mapping.get("created_at") or migrated["created_at"]
+        migrated["migrated_from"] = mapping.get("backend")
+        migrated["migrated_at"] = datetime.now(UTC).isoformat()
         sandbox = self._instantiate_sandbox(migrated)
         sandbox.ensure_started()
         self._import_snapshot(sandbox, host_root)

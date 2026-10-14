@@ -25,9 +25,12 @@ NTFS **hard link** 是同一卷上**同一文件对象的多个名称**（同一
    运行；导入失败/中断重试不把半份 workspace 当已初始化；已持久化 volume 恢复不重导入、
    不覆盖 agent 后续修改。导入拒绝会逃出源根的符号链接（fail-closed）。
 3. **导出 = 显式副本到全新宿主目录**：本地 REST `POST /api/sessions/{id}/workspace/export`
-   显式触发，请求带宿主目标路径；路径授权沿用既有 host-directory 边界（越界 403）；
-   目标**已存在即拒绝**（不覆盖）；归档拒绝绝对路径 / `..` 穿越 / 不安全特殊项；
-   符号链接不写穿新目标、硬链接按内容复制（不保留对象身份），外部 canary 不受影响。
+   显式触发，请求带**绝对**宿主目标路径（非绝对即 422）；路径授权沿用既有
+   host-directory 来源闸（`web.projects.require_trusted_origin`，ADR-0025 D1(b)/ADR-0028
+   D2，与 `GET /api/host/dirs` 同一份）——**不设** `Settings.workspace_dir` 根限制，与
+   既有 host-directory API 接受任意绝对路径的口径一致（协调员裁决 2026-10-14）。目标
+   **已存在即拒绝**（不覆盖）；导出树拒绝绝对路径 / `..` 穿越 / 不安全特殊项；符号链接
+   不写穿新目标、硬链接按内容复制（不保留对象身份），外部 canary 不受影响。
 4. **Docker-backed fork**：父 volume 复制到**独立子 volume**，不对 `/workspace` 用
    宿主 `Path`/`shutil.copytree`；子会话沿用 Docker 后端，父子写互不共享。
 5. **语义（backends）**：项目指令读取、文件工具路径解析、审批身份计算、web workspace

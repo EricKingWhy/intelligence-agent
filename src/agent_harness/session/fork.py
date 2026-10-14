@@ -488,21 +488,16 @@ def _copy_container_workspace(parent_sandbox: object, child_sandbox: object) -> 
     """父容器工作区 → 子独立 volume 的**副本**复制（#1048 AC7）。
 
     绝不走宿主 `Path`/`shutil.copytree`：父 volume 先物化到一次性宿主暂存目录
-    （`export_to_host`），再经 `copy_in` 导入子 volume；子得独立对象集，与父互不
-    共享写入。完成标记随之复制，子会话沿用 Docker 后端且已"导入完成"。
+    （`Sandbox.export_to_host` 契约方法），再经 `copy_in` 导入子 volume；子得独立
+    对象集，与父互不共享写入。完成标记随之复制，子会话沿用 Docker 后端且已"导入完成"。
 
-    父后端**必须**提供 `export_to_host`：否则无法取到父工作区快照，此时静默继续
-    只会给子会话一个空工作区（数据丢失）——故 fail-closed 抛错，绝不产出空子卷。
+    父后端经基类契约提供 `export_to_host`（Docker 覆写为容器内 tar 快照）：父工作区
+    取不到内容时会**响亮抛错**（容器内 `/workspace` 在宿主上不存在 ⇒ 基类默认复制
+    失败），绝不静默产出空子工作区。
     """
-    exporter = getattr(parent_sandbox, "export_to_host", None)
-    if exporter is None:
-        raise RuntimeError(
-            "父工作区在容器内但后端未提供 export_to_host，无法以副本复制到子 "
-            "volume；拒绝静默产出空子工作区（fail-closed）。"
-        )
     staging = Path(tempfile.mkdtemp(prefix="fork-workspace-"))
     try:
-        exporter(staging)
+        parent_sandbox.export_to_host(staging)
         child_sandbox.copy_in(staging, ".")
     finally:
         shutil.rmtree(staging, ignore_errors=True)

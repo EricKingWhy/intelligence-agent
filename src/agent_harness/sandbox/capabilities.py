@@ -251,18 +251,12 @@ def probe_windows_psec_capabilities(
 
 def probe_all_capabilities(
     image: str = "python:3-slim",
-    *,
-    windows_psec_workspace: str | None = None,
 ) -> list[SandboxCapabilities]:
     """探针全部**新会话可选**后端（给选择器 UI 用：展示能力 + 缺依赖原因）。
 
     #1048 AC2：`windows_psec` 已降级为 **legacy-only**（见 `LEGACY_BACKENDS`），
     不再作为新会话可选后端，故不在此列出。`probe_windows_psec_capabilities`
     仍保留——仅用于 legacy PSEC sandbox 启动时的自检，不再进选择器。
-
-    `windows_psec_workspace` 参数保留仅为兼容既有 HTTP 调用面
-    （`/api/sandbox-backends?workspace_path=...`）：PSEC 退出选择器后，它不再
-    影响探针结果。
     """
     return [
         probe_local_capabilities(),

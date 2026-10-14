@@ -3,15 +3,18 @@
 红阶段（TDD）：当前**无任何工作区导出端点**（checkpoint §4 第 5 条）。
 本文件钉住契约（端点缺失时全部返回 404 → 断言失败 = 红）：
 
-- AC5：POST 显式触发导出，请求带宿主目标路径；路径授权复用现有
-  host-directory 边界（projects.py 来源闸，ADR-0025 D1(b)/ADR-0028 D2）。
+- AC5：POST 显式触发导出，请求带宿主目标路径（**绝对**，非绝对即 422）；路径授权
+  沿用现有 host-directory 来源闸（projects.py `require_trusted_origin`，
+  ADR-0025 D1(b)/ADR-0028 D2）——**不设** `Settings.workspace_dir` 根限制，与既有
+  host-directory API 口径一致（协调员裁决 2026-10-14）。
 - AC6：导出是显式副本，只能发布到**全新**宿主目标目录，已存在拒绝；
-  归档拒绝路径穿越/绝对路径/不安全特殊项；hardlink/symlink 不写穿新目标、
+  导出树拒绝路径穿越/绝对路径/不安全特殊项；hardlink/symlink 不写穿新目标、
   不改外部 canary。
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -43,11 +46,25 @@ class TestWorkspaceExportApi:
         resp = _export(client, {})
         assert resp.status_code == 422, resp.text
 
-    def test_export_target_outside_host_boundary_rejected(self, tmp_path: Path) -> None:
-        """AC5：目标越出既有 host-directory 边界 → 403（复用来源闸）。"""
+    def test_export_requires_absolute_host_target(self, tmp_path: Path) -> None:
+        """AC5：host_target 必须是绝对路径（相对路径 → 422）。"""
         client = _client(tmp_path)
-        resp = _export(client, {"host_target": "/etc/agent-harness-export-1048"})
-        assert resp.status_code == 403, resp.text
+        resp = _export(client, {"host_target": "relative/dir"})
+        assert resp.status_code == 422, resp.text
+
+    def test_export_accepts_absolute_target_outside_workspace_root(
+        self, tmp_path: Path
+    ) -> None:
+        """AC5：**不设** workspace_dir 根限制（协调员裁决）——绝对目标即使不在
+        `Settings.workspace_dir` 下也被接受（与既有 host-directory API 口径一致）。"""
+        client = _client(tmp_path)  # workspace_dir = tmp_path
+        outside = tmp_path.parent / f"{tmp_path.name}-outside-export"
+        try:
+            resp = _export(client, {"host_target": str(outside)})
+            assert resp.status_code == 200, resp.text
+            assert outside.is_dir()
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
 
     def test_export_refuses_existing_target(self, tmp_path: Path) -> None:
         """AC6：目标已存在 → 拒绝，不覆盖。"""

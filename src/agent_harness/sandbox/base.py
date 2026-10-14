@@ -9,6 +9,7 @@ ExecResult 是 Sandbox 层的原生返回，不感知 ToolResult——Tool 层�
 
 from __future__ import annotations
 
+import shutil
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -205,6 +206,19 @@ class Sandbox(ABC):
         if resolved.is_file():
             return "file"
         return None
+
+    def export_to_host(self, dest: Path) -> None:
+        """把 workspace 的**副本**物化到宿主目录 `dest`（#1048 AC5/AC7）。
+
+        非抽象（**不并入 ADR-0001 冻结的 6 个抽象方法契约**，同 `path_kind` /
+        `shell_environment`）：基类给保守的「`workspace_root` 目录复制」默认，
+        容器后端（`DockerSandbox`）覆写为容器内 tar 快照。导出与跨会话工作区复制
+        一律经本方法——调用方不按后端类型分叉，也不靠 `getattr` 嗅探能力。
+
+        `dest` 被当作**内容副本的目标目录**（已存在则并入，不覆盖 `dest` 本身），
+        与源各自独立、不共享 inode。
+        """
+        shutil.copytree(self.workspace_root, Path(dest), dirs_exist_ok=True)
 
     @property
     @abstractmethod

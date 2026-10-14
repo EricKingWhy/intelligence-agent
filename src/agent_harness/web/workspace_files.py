@@ -189,10 +189,14 @@ class GitCommandResult(BaseModel):
     artifact_ref: str | None = None
 
 
-async def _session_sandbox(
+async def session_sandbox(
     state: AppState, session_id: str, validate_session_id: Callable[[str], str]
 ) -> Sandbox:
     """会话 → 它的 workspace sandbox（三件事：会话形态合法、会话存在、映射存在）。
+
+    公开（原 `_session_sandbox`，#1048）：`web.workspace_export` 的导出端点同样需要
+    "session_id → sandbox" 这一动作——与其在新模块里复制一份取 sandbox 的逻辑（多一个
+    漂移面），不如把它作为本模块的公开入口。
 
     `validate_session_id` 由调用方传入（app 侧那一份）：形态校验只有一处实现，这里
     只负责把它的 `InvalidSessionId` 翻成 422——漏了这一步就会以 500 冒出去（与既有
@@ -464,7 +468,7 @@ def register_workspace_file_routes(
 
     async def _sandbox_for(session_id: str) -> Sandbox:
         """本模块四条路由统一的会话解析入口（形态 / 存在性 / 映射三件事只写一遍）。"""
-        return await _session_sandbox(app.state.agent, session_id, validate_session_id)
+        return await session_sandbox(app.state.agent, session_id, validate_session_id)
 
     @app.get("/api/sessions/{session_id}/workspace/files")
     async def list_workspace_files(
@@ -613,5 +617,6 @@ __all__ = [
     "WorkspaceFileList",
     "WorkspaceFileSlice",
     "register_workspace_file_routes",
+    "session_sandbox",
     "workspace_semantics_for_sandbox",
 ]
