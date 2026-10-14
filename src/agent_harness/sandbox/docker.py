@@ -941,12 +941,56 @@ class DockerSandbox(Sandbox):
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w", dereference=False) as archive:
             if os.name == "nt":
+                import msvcrt
+                from types import SimpleNamespace
+
                 from agent_harness.sandbox.windows_psec import (
                     _pin_host_path_tree_for_archive,
                 )
 
-                with _pin_host_path_tree_for_archive(source):
-                    archive.add(source, arcname=target.name, recursive=True)
+                with _pin_host_path_tree_for_archive(source) as (entries, transferred):
+                    for relative_path, handle, is_directory in entries:
+                        member_name = (
+                            f"{target.name}/{relative_path}"
+                            if relative_path
+                            else target.name
+                        )
+                        fd = msvcrt.open_osfhandle(
+                            handle, os.O_RDONLY | os.O_BINARY,
+                        )
+                        transferred.add(handle)
+                        try:
+                            if is_directory:
+                                fileobj = SimpleNamespace(
+                                    name="", fileno=lambda fd=fd: fd,
+                                )
+                                member = archive.gettarinfo(
+                                    arcname=member_name, fileobj=fileobj,
+                                )
+                                if member is None or not member.isdir():
+                                    raise PermissionError(
+                                        "copy_in source changed during archive"
+                                    )
+                                archive.addfile(member)
+                            else:
+                                with os.fdopen(fd, "rb") as stream:
+                                    fd = None
+                                    fileobj = SimpleNamespace(
+                                        name="", fileno=stream.fileno,
+                                    )
+                                    member = archive.gettarinfo(
+                                        arcname=member_name, fileobj=fileobj,
+                                    )
+                                    if member is None or not (
+                                        member.isreg() or member.islnk()
+                                    ):
+                                        raise PermissionError(
+                                            "copy_in source changed during archive"
+                                        )
+                                    archive.addfile(member, stream)
+                        finally:
+                            if fd is not None:
+                                os.close(fd)
             else:
                 archive.add(source, arcname=target.name, recursive=True)
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):

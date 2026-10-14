@@ -1294,6 +1294,9 @@ def _pin_host_path_tree_for_archive(host_path: Path):
         reject_reparse=True,
     )
 
+    entries: list[tuple[str, int, bool]] = []
+    transferred: set[int] = set()
+
     def open_entry(parent: int, entry_name: str) -> int:
         _relative_components(entry_name)
         entry = _open_relative_entry(
@@ -1344,19 +1347,30 @@ def _pin_host_path_tree_for_archive(host_path: Path):
     try:
         root = open_entry(handles[-1], name)
         handles.append(root)
+        root_is_directory = bool(_file_standard_info(root).Directory)
+        entries.append(("", root, root_is_directory))
 
-        def pin_children(directory: int) -> None:
+        def pin_children(directory: int, relative_path: str) -> None:
             if not _file_standard_info(directory).Directory:
                 return
-            for child_name in _directory_entry_names(directory):
+            for child_name in sorted(_directory_entry_names(directory)):
                 child = open_entry(directory, child_name)
                 handles.append(child)
-                pin_children(child)
+                child_path = (
+                    f"{relative_path}/{child_name}"
+                    if relative_path
+                    else child_name
+                )
+                child_is_directory = bool(_file_standard_info(child).Directory)
+                entries.append((child_path, child, child_is_directory))
+                if child_is_directory:
+                    pin_children(child, child_path)
 
-        pin_children(root)
-        yield
+        if root_is_directory:
+            pin_children(root, "")
+        yield entries, transferred
     finally:
-        _close_handles(handles)
+        _close_handles([handle for handle in handles if handle not in transferred])
 
 
 def _raise_ntstatus(status: int, name: str) -> None:
