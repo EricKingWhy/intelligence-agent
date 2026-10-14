@@ -1606,7 +1606,9 @@ export default function App() {
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
                     /* #1029 P2：分离投递（窗外落定）迟到的失败原文——按
-                       `restoreFailedDraft` 纪律回填（只在输入框为空时）。 */
+                       `restoreFailedDraft` 纪律回填（只在输入框为空时）。
+                       本面板不随页签切换卸载（见上面 `hidden` 的取舍），所以
+                       这条 props 变化是 Composer 收到回执的唯一时机。 */
                     failedDraft={failedDraft}
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */

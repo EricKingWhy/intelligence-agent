@@ -414,6 +414,10 @@ export const Composer = memo(function Composer({
    *
    *  依赖对象引用即可：每次失败都是新的 `{ text }`，同一段文本连续失败两次也各算
    *  一次注入（裸 string 会被 React 的 `Object.is` 挡掉第二次，见 `FailedDraft`）。
+   *  本组件**不会因切 workspace 页签而卸载**（`App.tsx:1557-1569`：非激活面用
+   *  `hidden` 藏、不卸载），所以这条 effect 只在 `failedDraft` 引用真的变化时跑；
+   *  hook 在下一次投递时置 null 会让它空跑一次（`!failedDraft` 直接 return），
+   *  不注入任何东西。
    *  StrictMode 下 effect 双跑是安全的：`restoreFailedDraft` 是幂等的 setValue
    *  （第二跑时输入框已非空 → 原样返回，不会出现两份文本）。
    *  **刻意不抢焦点**：这条回执可能迟到几十秒，届时用户多半在别处（另一个输入框、

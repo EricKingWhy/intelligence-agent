@@ -498,10 +498,14 @@ export function useSession() {
    *  载荷对象引用变化即触发一次注入），不是让 Composer 反向注册回调——组件不该
    *  被 hook 持有引用，且状态放在这里，Composer 挂载晚于失败也能补上。
    *
-   *  ⚠ 这份状态**必须在下一次投递时清掉**（见 `sendFollowUp` 开头）：Composer 挂在
-   *  `tab.key === 'chat'` 分支下，切到别的 workspace 页签就会**卸载**；不清的话回到
-   *  对话页签时 effect 重新挂载、把上一轮的失败原文又注入一次——那条消息可能早已
-   *  重发成功，用户于是看到一段"凭空冒出来"的草稿，再按 Enter 就是重复投递。 */
+   *  ⚠ 这份状态在**下一次投递时清掉**（见 `sendFollowUp` 开头）。注意理由：**不是**
+   *  「切 workspace 页签会卸载 Composer」——实读 `App.tsx:1557-1569`，非激活面是用
+   *  `hidden` 藏起来、**不卸载**（该文件注释自己写明了这一取舍），`chat` 还是
+   *  `capabilities.ts` 里 `always: true` 的恒存在面，所以 Composer 始终挂载。
+   *  真正的作用是**回执的生命周期**：它只对「触发它的那次投递」有意义，已兑现
+   *  （用户拿到过那段原文）之后就该作废——否则任何一次 Composer 重挂（App 整体
+   *  重挂 / 热更新）都会把这段旧原文再注入一次，而那条消息可能早已重发成功。
+   *  清空是显式声明这条边界，不依赖「effect 只在引用变化时跑」这种隐式巧合。 */
   const [failedDraft, setFailedDraft] = useState<FailedDraft | null>(null);
   /** 把一次分离投递的失败交回 Composer（#1029 P2）。
    *
@@ -1300,8 +1304,10 @@ export function useSession() {
       },
     ) => {
       setError(null);
-      // 上一次的失败回执到此作废（#1029 P2）：它已经兑现过（用户拿到过那段原文），
-      // 留着只会在 Composer 重新挂载时再注入一次，变成重复投递的隐患。
+      // 上一次的失败回执到此作废（#1029 P2）：它只对触发它的那次投递有意义，已经
+      // 兑现过（用户拿到过那段原文）就该清掉，否则任何一次 Composer 重挂都会把这段
+      // 旧原文再注入一次——而那条消息可能早已重发成功。理由**不是**"切页签会卸载
+      // Composer"（实为 `hidden` 隐藏、不卸载，见 `failedDraft` 的声明处注释）。
       setFailedDraft(null);
       // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
       liveSidRef.current = sessionId;
