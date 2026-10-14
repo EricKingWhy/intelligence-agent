@@ -10,4 +10,9 @@
 `agent_harness.mcp_precheck`，由 Skill 安装闸门与 MCP 包生命周期各自 import；
 把折 MCP 段的逻辑直接写进 `skills/package_manager.py` 会让
 `skills → plugins → skills` 成环（#875 Standards 轴 P1）。
+
+同类地，两车道共用的**来源/快照安全原语**（URL/ref/subdir 校验、固定 commit 获取、
+Git 文件模式与树摘要、local 树摘要、reparse/junction 拒绝）住在中性顶层模块
+`agent_harness.package_source`（issue #1083），Skill 安装器与 MCP 包生命周期各自
+import 并在**边界处**把 `PackageSourceError` 翻译成自己的产品异常。
 """
