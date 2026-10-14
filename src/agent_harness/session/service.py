@@ -2967,8 +2967,10 @@ class SessionService:
         3 次重试不会被 store 的锁内改号静默吞掉（两层覆盖不同面：store 管「同号
         拒写」，本方法管「调用方在自己的命令边界重读重算」）。
 
-        调用面是**四条**路径：上面三条命令 + ``progress_resolve_external_edit``
-        （经 ``_apply_task_handler`` 落地，自动共享本编排点）。
+        调用面：**直接**调用它的是上面三条命令；另有 ``progress_resolve_external_edit`` /
+        ``record_evidence`` / ``task_definition`` / ``task_acceptance`` /
+        ``task_acceptance_revision`` / ``task_acceptance_release`` / ``task_verification``
+        经 ``_apply_task_handler`` 落到同一编排点（公开命令共 9 条）。
         """
         attempts_left = _WRITE_CONFLICT_ATTEMPTS
         while True:
@@ -5518,8 +5520,8 @@ class SessionService:
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
         #
         # 冲突重试（BUG-011）走 _apply_write_with_conflict_retry——404 / 409 /
-        # 重试上界的判据与理由见该方法的 docstring（三条非 live
-        # 命令写路径共用）。
+        # 重试上界的判据与理由见该方法的 docstring（三条非 live 命令写路径
+        # 直接调用它；另有 task 族公开命令经 _apply_task_handler 共享）。
         return await self._apply_write_with_conflict_retry(
             session_id,
             existing,
@@ -5740,7 +5742,8 @@ class SessionService:
         因重试而放松）。live 路径由事件循环串行化，不重试。
 
         编排本体是 ``_apply_write_with_conflict_retry``（回退 404 / 409 与重试上界
-        的判据与理由见该方法的 docstring）——三条非 live 命令写路径共用它。
+        的判据与理由见该方法的 docstring）——直接调用点三条，经本方法共享的
+        公开命令共九条。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)

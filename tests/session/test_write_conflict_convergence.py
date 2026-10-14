@@ -25,19 +25,25 @@ Kurrent/EventStoreDB 官方 append 文档的 expected version /
 已承担拒写，本文件只钉「三个入口经同一编排点」这条可观察行为。
 
 **红证**：本文件在收敛前的树上必红——``SessionService`` 没有
-``_apply_write_with_conflict_retry`` 这个属性，spy 的 ``setattr`` 直接
-``AttributeError``；实测 9 failed / 12 passed（``TestSingleOrchestrationPoint``
-与 ``TestConflictRetrySemantics`` 的 3 个用例 × 3 个入口）。
+``_apply_write_with_conflict_retry`` 这个属性，任何 spy ``setattr`` 都直接
+``AttributeError``。实测 **16 failed / 25 passed**（4 个用例 × 4 个入口）：
+``test_entry_routes_through_one_orchestration_point``、
+``test_live_path_writes_through_active_aggregate``、
+``test_happy_path_uses_callers_snapshot_without_reread``、
+``test_retry_reruns_callback_on_a_fresh_snapshot``。
+其余用例在收敛前树上**全绿**（只 patch ``store.append_event``、不碰私有属性），
+故它们不承红证、只承变异鉴别力。
 
-**调用面**：票面点名三条命令；实际是**四条**——``progress_resolve_external_edit``
-经 ``_apply_task_handler`` 落到同一编排点（本文件只参数化票面那三条）。
+**调用面**：**直接**调用编排点的是三条命令（票面点名的那三条）；
+``progress_resolve_external_edit`` / ``record_evidence`` / ``task_definition`` /
+``task_acceptance`` / ``task_acceptance_revision`` / ``task_acceptance_release`` /
+``task_verification`` 经 ``_apply_task_handler`` 落到同一编排点（公开命令共 9 条）。
+本文件的行为用例参数化票面三条 + ``record_evidence``。
 """
 
 from __future__ import annotations
 
-import ast
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -49,7 +55,7 @@ from agent_harness.session.model_switch import ModelChange
 from agent_harness.session.service import SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
-from agent_harness.session.task import apply_task_definition
+from agent_harness.session.task import apply_task_definition, derive_task_state
 from tests.session.ledger_doubles import idle_operation_ledger
 
 _CATALOG = (
@@ -57,8 +63,10 @@ _CATALOG = (
     ' {"name": "mimo-v2.6-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
 
-#: 三条非 live 命令写路径。收敛前它们各自持有一份逐字相同的重试循环。
-ENTRIES = ["model", "permission", "task"]
+#: 行为面覆盖的入口。前三条是票面点名的非 live 命令写路径（收敛前各自持有一份
+#: 逐字相同的重试循环）；``evidence`` 是**登记过的第四条**——它经
+#: ``_apply_task_handler`` 落到同一编排点，若不参数化就没人能发现它被旁路。
+ENTRIES = ["model", "permission", "task", "evidence"]
 
 
 def _state(tmp_path) -> MagicMock:
@@ -103,8 +111,10 @@ def _seed(state, entry: str) -> Session:
         session_id="sid",
         started_data={"provider": "deepseek", "model_id": "gpt-4o"},
     )
-    if entry == "task":
+    if entry in ("task", "evidence"):
         assert apply_task_definition(session, task_text="T", criteria=[{"text": "A"}]).ok
+        # 内存事件投影取 criterion_id，避免 _call 侧再读一次盘（读盘计数用例要准）。
+        state.criterion_id = derive_task_state(session.events).criteria[0].item_id
     return session
 
 
@@ -119,9 +129,35 @@ def _call(entry: str, state):
         return service.change_permission_mode(
             session_id="sid", permission_mode="read-only", auto_approve=True
         )
+    if entry == "evidence":
+        return service.record_evidence(session_id="sid", evidence=_evidence_dto(state))
     return service.task_acceptance(
         session_id="sid", decision="accepted", expected_version=0
     )
+
+
+def _evidence_dto(state) -> dict:
+    """14 字段证据 DTO 的合法基线（形状判据见 ``session/evidence.py``）。"""
+    return {
+        "evidence_id": "ev-001",
+        "task_session_id": "sid",
+        "run_id": "run-1",
+        "criterion_id": state.criterion_id,
+        "kind": "test",
+        "source_event_seq": 7,
+        "tool_call_id": None,
+        "captured_at": "2026-10-06T15:00:00.000+00:00",
+        "result": "pass",
+        "command_or_action": "pytest -q",
+        "exit_code_or_observation": 0,
+        "artifact_ref": None,
+        "base_head": "a" * 40,
+        "workspace_manifest": {
+            "files": [{"path": "src/a.py", "sha256": "b" * 64}],
+            "manifest_hash": "c" * 64,
+            "progress_md_sha256": "d" * 64,
+        },
+    }
 
 
 def _spy_on_orchestration_point(monkeypatch) -> list[tuple]:
@@ -269,54 +305,43 @@ class TestLivePathIsNotRetried:
         assert len(real_read("sid")) == before + 1, f"{entry} 应恰追加一条事件"
         assert reads == [], f"{entry} live 分支不应重读快照，实际读了 {reads}"
 
+    @pytest.mark.parametrize("entry", ENTRIES)
+    def test_live_is_checked_on_every_round_not_just_the_first(
+        self, tmp_path, monkeypatch, entry
+    ):
+        """顺序第 1 条的「**每轮**」：重试轮顶也要重查 live，不得只在首轮查一次。
 
-_SERVICE_SOURCE = (
-    Path(__file__).parents[2] / "src" / "agent_harness" / "session" / "service.py"
-)
+        在途聚合在**重试窗口内**注册（首轮 append 撞号后、重读前）——聚合一旦在册，
+        第二轮的 ``Session`` 必须由它给出（事件落进它的内存计数器），而不是继续用
+        磁盘快照新起一个聚合写。
+        """
+        state = _state(tmp_path)
+        live = _seed(state, entry)
+        state.run_manager.get_active = MagicMock(return_value=None)  # 首轮：无在途聚合
+        # 重试窗口内注册的在途聚合（与磁盘快照同源，故首轮 seq 一致）。
+        registered = Session("sid", state.store, events=live.events)
 
+        real_append = state.store.append_event
+        rounds: list[int] = []
 
-def _session_service_methods() -> dict[str, ast.AST]:
-    tree = ast.parse(_SERVICE_SOURCE.read_text(encoding="utf-8"))
-    service = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "SessionService"
-    )
-    return {
-        node.name: node
-        for node in service.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+        def conflict_once(session_id, event, *, allocate=False):
+            rounds.append(1)
+            if len(rounds) == 1:
+                # 首轮撞号，并在此刻把在途聚合注册进 run_manager（重试窗口内）。
+                state.run_manager.get_active = MagicMock(
+                    return_value=MagicMock(session=registered)
+                )
+                raise SeqConflict("注入：首轮撞号，迫使重试")
+            return real_append(session_id, event, allocate=allocate)
 
+        monkeypatch.setattr(state.store, "append_event", conflict_once)
 
-def test_retry_loop_lives_only_in_the_orchestration_point() -> None:
-    """重试循环（``attempts_left`` / ``_WRITE_CONFLICT_ATTEMPTS``）只许住在编排点里。
+        asyncio.run(_call(entry, state))
 
-    这是「副本已删干净」的**结构**判据（同 ``tests/session/test_write_funnel.py``
-    守「物理写点只能住在漏斗里」的手法）：某个入口若还留着自己的重试循环，它的
-    方法体里必然重新出现这两个名字。行为面（重试次数 / 失败集合）由本文件其它
-    用例承重，本守卫只钉「没有第二份循环」。
-    """
-    methods = _session_service_methods()
-    helper = "_apply_write_with_conflict_retry"
-    assert helper in methods, "编排点方法必须存在"
-
-    def _retry_names(node: ast.AST) -> set[str]:
-        return {
-            sub.id
-            for sub in ast.walk(node)
-            if isinstance(sub, ast.Name)
-            and sub.id in {"attempts_left", "_WRITE_CONFLICT_ATTEMPTS"}
-        }
-
-    offenders = {
-        name for name, node in methods.items() if name != helper and _retry_names(node)
-    }
-    assert not offenders, f"重试循环副本残留在：{sorted(offenders)}"
-    assert _retry_names(methods[helper]) == {
-        "attempts_left",
-        "_WRITE_CONFLICT_ATTEMPTS",
-    }, "编排点自身必须持有重试循环"
+        assert len(registered.events) == len(live.events) + 1, (
+            f"{entry} 第二轮未重查 live：事件应落在重试窗口内注册的在途聚合上，"
+            f"实际在途聚合 {len(registered.events)} 条 / 磁盘 {len(live.events)} 条"
+        )
 
 
 class TestOrderContract:
@@ -403,8 +428,9 @@ class TestOrderContract:
         """顺序第 1 条：每轮**先查 live**——磁盘快照为空但有在途聚合时命令仍成功。
 
         变异「把 live 检查挪到 ``if not existing`` 之后」（M6）下本用例转红（误报 404）。
-        只有 ``_apply_task_handler`` 这条入口能把该顺序单独暴露出来：``change_model`` /
-        ``change_permission_mode`` 在调用方侧另有一道首读 404，会先把空快照拦下。
+        只有经 ``_apply_task_handler`` 的入口（``task`` / ``evidence``）能把该顺序单独
+        暴露出来：``change_model`` / ``change_permission_mode`` 在调用方侧另有一道首读
+        404，会先把空快照拦下。
         """
         state = _state(tmp_path)
         live = _seed(state, "task")
