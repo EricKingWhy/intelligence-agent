@@ -148,7 +148,7 @@ describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
 
     const error = captured.hook!.error ?? '';
     expect(error).toContain('待人工裁决');
-    expect(error).toContain('去裁决');
+    expect(error).toContain('裁决面板');
     // 协议原文（POST /recover、tool_call_id、verdict 词表）不进用户层横幅
     expect(error).not.toContain('POST /api/sessions');
     expect(error).not.toContain('tool_call_id=');
