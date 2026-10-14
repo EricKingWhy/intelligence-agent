@@ -47,10 +47,24 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** 返回值 = 这次发送**是否已被受理**（#1029）：
+   *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
+   *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
+   *    状态并保留用户未发送的输入」）；
+   *  - `true` / `undefined`（旧签名）⇒ 已受理，照旧清空——既有调用零回归。
+   *  Promise 形态由 App 的 `handleSubmit` 返回（回执在途期间同样不清空）。 */
+  onSubmit: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  onSteer?: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
    *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
    *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
@@ -166,6 +180,9 @@ export const Composer = memo(function Composer({
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
+   *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。 */
+  const sendingRef = useRef(false);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -361,6 +378,11 @@ export const Composer = memo(function Composer({
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    /* #1029：回执在途期间不许再提交。清空挪到回执之后（见下），文本框不再在提交
+       瞬间变空 ⇒ 连按 Enter / 点发送不再被 `!value.trim()` 自然挡住，**必须**显式
+       闸一次，否则一次输入会发出去 N 次。ref 同步判（不是 state）：同一 tick 里的
+       第二次按键读不到刚 set 的 state。 */
+    if (sendingRef.current) return;
     // #1027 门禁：上传中时拦截发送（按钮 disabled 只挡点击，Ctrl+Enter 走这里）。
     // 阻断提示是界面常驻的 `.composer-send-blocked`——这里只需拦下请求；不拦就会
     // 复现 #1027（readyIds 为空时请求体无 attachments 键，图被静默丢弃）。
@@ -380,18 +402,32 @@ export const Composer = memo(function Composer({
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
-    if (mode === 'steer' && onSteer) {
-      onSteer(trimmed, rememberAsProceduralRule, attachmentIds);
-    } else {
-      onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
-    }
-    setValue('');
-    setRememberAsProceduralRule(false);
-    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
-    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
-    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
-    // 或下一轮再带。
-    attachments.clearSent(attachmentIds);
+    /* 清空**只在确认受理之后**发生（#1029）。此前是「提交瞬间无条件清空、失败不
+       还原」——任何发送失败（待裁决 409 / 网络断 / 429…）用户文本都无声消失，而
+       它既没进队列也没落日志，事后完全不可恢复。
+       判据是发送口的返回值（不是猜的）：`false` = 未受理 ⇒ 文本与草稿原样留在
+       输入框，用户处理完（如先做恢复裁决）再发；`true`/`undefined` = 受理 ⇒ 照旧
+       清空。未落定期间（Promise 未 settle）同样**不清**——清空只发生在 ack 之后。 */
+    const accepted =
+      mode === 'steer' && onSteer
+        ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
+        : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+    sendingRef.current = true;
+    void Promise.resolve(accepted)
+      .then((ok) => {
+        // `undefined`（旧签名）/ `true` = 已受理；只有显式 `false` 才保留。
+        if (ok === false) return;
+        setValue('');
+        setRememberAsProceduralRule(false);
+        // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
+        // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
+        attachments.clearSent(attachmentIds);
+      })
+      // 发送口自己抛错 = 未受理（正常路径由 App 收口成 `false`，不重复报错）。
+      .catch(() => {})
+      .finally(() => {
+        sendingRef.current = false;
+      });
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
