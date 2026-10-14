@@ -182,11 +182,17 @@ def _take_os_lock_blocking(fd: int) -> None:
     对象**（`is` 为真）⇒ 32 次归该对象。该文件唯一的 `sys.platform` 判据属
     `test_unreadable_image_path_is_reported_cleanly` 那条用例，上述 4 例不带平台守卫 ⇒
     在 win32 上这 32 次会真走 `msvcrt.locking` 分支。
-    ④ 但**没有 Windows 实测读数**：这两条车道都靠 `push` 特性分支触发、非常驻，
-    GitHub 上各自最后一次运行都在 2026-10-09，而本原语 2026-10-13（#1063，`2829216f`）
-    才落地 ⇒ 迄今没有一次 Windows 运行跑过本原语。常驻的 `gate1.yml` / `gate-nightly.yml`
-    后端 job 是 `runs-on: ubuntu-latest`。极端持有者下 Windows 会先失败，这是平台语义，
-    不是可消除的缺陷。
+    ④ **已有 Windows 实测读数**：2026-10-14 在本分支 `0f07879c` 上手动派单
+    `mm08-d2d3-windows-verify`（run `38535545364`，`event=workflow_dispatch`、
+    `headSha=0f07879c`），其 `cli` job（`runs-on: windows-latest`）`conclusion=success`，
+    证据物 `mm08-d2d3-cli-pytest.log` = `71 passed, 6 skipped in 11.68s`、退出码 0。该 job
+    跑的就是 ③ 点名的三个文件（含 `tests/test_cli_image.py`）⇒ ③ 那 4 例不带平台守卫、
+    在真 win32 上真跑过，那 32 次进入走的是 `msvcrt.locking` 分支。⚠ 该 run **整体**为
+    `failure`（另一条 `tui` job 1 例红：`ia-tui.cmd --check`），别把「run 成功」读进本句。
+    这两条车道都**非常驻**：`push` 只挂各自票的特性分支（`omp/fix-mm08-d2-d3-windows` /
+    `omp/830-mm08-cross-client-verify`），另各挂 `workflow_dispatch`（手动、任意 ref——
+    本条 run 即其手动实例）。常驻的 `gate1.yml` / `gate-nightly.yml` 后端 job 仍是
+    `runs-on: ubuntu-latest`。极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
     """
     if sys.platform == "win32":
         import msvcrt
