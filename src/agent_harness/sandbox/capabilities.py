@@ -11,13 +11,19 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import ntpath
+import os
+import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("agent_harness.sandbox.capabilities")
 
 #: 支持的后端名（DSH：非法值在加载时响亮拒绝，不静默改策略）。
-SUPPORTED_BACKENDS = ("local", "docker")
+SUPPORTED_BACKENDS = ("local", "docker", "windows_psec")
 
 
 @dataclass(frozen=True)
@@ -135,9 +141,133 @@ def probe_docker_capabilities(image: str = "python:3-slim") -> SandboxCapabiliti
     return SandboxCapabilities(backend="docker", available=True, details=details)
 
 
-def probe_all_capabilities(image: str = "python:3-slim") -> list[SandboxCapabilities]:
+def probe_windows_psec_capabilities(
+    *,
+    executable: str | None = None,
+    config: Mapping[str, object] | None = None,
+    run=None,
+) -> SandboxCapabilities:
+    """Probe MXC's exact policy and accept only its native BaseContainer tier."""
+    if os.name != "nt":
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="Windows PSEC sandbox requires Windows",
+        )
+    path = executable or os.environ.get("IA_MXC_EXECUTABLE")
+    if not path:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="MXC wxc-exec.exe is not configured",
+            details={
+                "remediation": "install the desktop runtime or set IA_MXC_EXECUTABLE",
+            },
+        )
+    if config is None:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason="An exact PSEC policy is required to verify workspace isolation",
+            details={
+                "workspace_policy_required": "true",
+                "remediation": "probe the policy that will be used to create the sandbox",
+            },
+        )
+
+    args = [path, "--probe"]
+    payload = json.dumps(config, separators=(",", ":")).encode("utf-8")
+    args.extend(["--config-base64", base64.b64encode(payload).decode("ascii")])
+    try:
+        result = (run or subprocess.run)(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe failed: {exc}",
+        )
+    if result.returncode != 0:
+        detail = str(result.stderr or result.stdout or "").strip()
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe exited {result.returncode}: {detail}",
+        )
+    try:
+        report = json.loads(result.stdout)
+        probes = report["probes"]
+        tier = report["tier"]
+        dacl_augmentation = report["needsDaclAugmentation"]
+        base_container_present = probes["baseContainerApiPresent"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=f"MXC capability probe returned invalid JSON: {exc}",
+        )
+
+    details = {
+        "tier": str(tier),
+        "needs_dacl_augmentation": str(dacl_augmentation).lower(),
+        "base_container_api": str(base_container_present).lower(),
+    }
+    if (
+        tier != "base-container"
+        or dacl_augmentation is not False
+        or base_container_present is not True
+    ):
+        return SandboxCapabilities(
+            backend="windows_psec",
+            available=False,
+            reason=(
+                "MXC did not select BaseContainer/PSEC without DACL mutation "
+                f"(tier={tier}, needsDaclAugmentation={dacl_augmentation})"
+            ),
+            details=details,
+        )
+    return SandboxCapabilities(backend="windows_psec", available=True, details=details)
+
+
+def probe_all_capabilities(
+    image: str = "python:3-slim",
+    *,
+    windows_psec_workspace: str | None = None,
+) -> list[SandboxCapabilities]:
     """探针全部后端（给选择器 UI 用：展示能力 + 缺依赖原因）。"""
-    return [probe_local_capabilities(), probe_docker_capabilities(image=image)]
+    if windows_psec_workspace is None or os.name != "nt":
+        psec = probe_windows_psec_capabilities()
+    else:
+        workspace = ntpath.normpath(windows_psec_workspace)
+        if not ntpath.isabs(workspace):
+            psec = SandboxCapabilities(
+                backend="windows_psec",
+                available=False,
+                reason="PSEC requires an absolute path to an existing workspace",
+            )
+        else:
+            try:
+                from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+                config = WindowsPsecSandbox.probe_configuration_for_workspace(workspace)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                psec = SandboxCapabilities(
+                    backend="windows_psec",
+                    available=False,
+                    reason=f"Could not build the workspace PSEC policy: {exc}",
+                )
+            else:
+                psec = probe_windows_psec_capabilities(config=config)
+    return [
+        probe_local_capabilities(),
+        probe_docker_capabilities(image=image),
+        psec,
+    ]
 
 
 def require_available(
