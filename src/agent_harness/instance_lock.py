@@ -48,6 +48,7 @@ __all__ = [
     "MEMORY_INDEX_REBUILD_FENCE_FILENAME",
     "InstanceLock",
     "InstanceLockError",
+    "session_append_lock",
 ]
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ ALLOW_SHARED_ROOT_ENV = "ALLOW_SHARED_ROOT"
 
 #: 锁文件名（位于 workspace root 下）。
 DEFAULT_LOCK_FILENAME = ".instance.lock"
+#: per-session 追加锁的锁文件名（#1063）：位于每个 session 目录内、与 events.jsonl 同级。
+_SESSION_LOCK_FILENAME = ".events.lock"
 CUTOVER_FENCE_FILENAME = ".memory-cutover-in-progress"
 MEMORY_INDEX_REBUILD_FENCE_FILENAME = ".memory-v2-index-rebuild-in-progress"
 
@@ -131,6 +134,107 @@ def _shared_root_registry_lock(root: Path) -> Iterator[None]:
     locked = False
     try:
         _take_os_lock(fd)
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                _release_os_lock(fd)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _take_os_lock_blocking(fd: int) -> None:
+    """**阻塞**取 OS 级排他锁（与 `_take_os_lock` 的 fail-fast 相对）。
+
+    本原语**无**超时，也**不提供**时间上界：等待上界只能表述为「与并发写者数 × 单次
+    临界区同阶」。持锁者是 `store.append_event` 的追加临界区
+    （`with session_append_lock(path)` 起的那个块），该临界区**含 I/O 阻塞**——每次
+    append 一次 `os.fsync`，且在文件戳缓存未命中时 `_last_seq_on_disk` 会全量回读整个
+    日志（O(n)）。本机 btrfs 实测（3000 事件 / 841 KB 会话，`append_event` 端到端墙钟
+    n=30）：戳命中时单次临界区 p50 ≈ 20 ms / p90 ≈ 23 ms；戳未命中时 p50 ≈ 70 ms /
+    p90 ≈ 100 ms，max 抖动大（两次实测 152 ms / 192 ms）——量级随介质与负载浮动，
+    **不是**微秒级。不设超时是有意的取舍：等对方让出仍比当场失败更合理。
+    **不再有兜底**：#1024/#1061 曾在**调用方**
+    放一个墙钟预算（`_APPEND_CONFLICT_DEADLINE_S`）当作本原语的有界性来源，该预算已
+    在 #1062-A 随「分配收进写锁」删除；今天的调用方 `store.append_event` 没有墙钟
+    预算，故**不要**据此认为「上面有人兜底」。
+
+    平台差异（必须记账，不得夸大为「等价」）：POSIX `flock(LOCK_EX)` 无限等待；
+    Windows `msvcrt.LK_LOCK` 以 1 秒为间隔重试 **10 次**后抛 `OSError`——即 Windows
+    上单次等待上限约 10 秒。⚠ 这段是**按 CPython 文档与实现**写下的平台断言，
+    **未在本机 Windows 核实**（本机是 Linux）。
+
+    **覆盖现状（逐句一手证据；别把它读成「没有一条车道看得见」）**：
+    ① `grep -rn "runs-on: windows" .github/workflows/` 命中 5 个 job，分布在 3 个工作流
+    ——`mm08-d2d3-windows-verify.yml` 2 个、`mm08-windows-verify.yml` 2 个、
+    `windows-installer-smoke.yml` 1 个；另有 `gate-nightly.yml` 的
+    `os: [ubuntu-latest, windows-latest]` 矩阵，但那是 **tui** job（`npm test`），与 Python 无关。
+    ② 这 5 个 job 里只有 2 个跑 pytest（`grep -rln pytest .github/workflows/` 命中 5 个文件，
+    其中 Windows 的只有 `mm08-d2d3-windows-verify.yml` 的 `cli` job 与
+    `mm08-windows-verify.yml` 的 `cli` job）：前者跑
+    `pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py
+    tests/test_instance_lock.py`，后者只跑 `tests/test_cli_image.py`。
+    ③ 前者**看得见**这条断言：插桩实测（隔离副本，逐用例计数）`tests/test_cli_image.py`
+    的 4 个用例各进入 `_take_os_lock_blocking` 8 次，合计 **32 次**；同一探针在 `store.py`
+    与 `instance_lock` 两个命名空间上包 `session_append_lock`，实测两者是**同一个函数
+    对象**（`is` 为真）⇒ 32 次归该对象。该文件唯一的 `sys.platform` 判据属
+    `test_unreadable_image_path_is_reported_cleanly` 那条用例，上述 4 例不带平台守卫 ⇒
+    在 win32 上这 32 次会真走 `msvcrt.locking` 分支。
+    ④ **已有 Windows 实测读数**：2026-10-14 在本分支 `0f07879c` 上手动派单
+    `mm08-d2d3-windows-verify`（run `38535545364`，`event=workflow_dispatch`、
+    `headSha=0f07879c`），其 `cli` job（`runs-on: windows-latest`）`conclusion=success`，
+    证据物 `mm08-d2d3-cli-pytest.log` = `71 passed, 6 skipped in 11.68s`、退出码 0。该 job
+    跑的就是 ③ 点名的三个文件（含 `tests/test_cli_image.py`）⇒ ③ 那 4 例不带平台守卫、
+    在真 win32 上真跑过，那 32 次进入走的是 `msvcrt.locking` 分支。⚠ 该 run **整体**为
+    `failure`（另一条 `tui` job 1 例红：`ia-tui.cmd --check`），别把「run 成功」读进本句。
+    这两条车道都**非常驻**：`push` 只挂各自票的特性分支（`omp/fix-mm08-d2-d3-windows` /
+    `omp/830-mm08-cross-client-verify`），另各挂 `workflow_dispatch`（手动、任意 ref——
+    本条 run 即其手动实例）。常驻的 `gate1.yml` / `gate-nightly.yml` 后端 job 仍是
+    `runs-on: ubuntu-latest`。极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+@contextmanager
+def session_append_lock(events_path: Path) -> Iterator[None]:
+    """跨进程 **per-session** 追加锁（#1063）——锁的是 `events.jsonl` 所在目录。
+
+    本模块开篇的边界声明点名的正是这个形状：「两个进程同时 append 会话 JSONL 会
+    产出重复 seq / 交错写」。instance 锁挡的是「两个进程启同一 root」，但逃生门
+    （`ALLOW_SHARED_ROOT`）或未取 instance 锁的直接 library 用法下，两个进程仍可能
+    写同一 session。本原语把 store 的「读已落盘最大 seq → 判定 → 写盘」临界区在
+    **跨进程**方向也串起来，复用同一套 OS 锁平台分支（Windows 的 mandatory 偏移陷阱
+    只此一处）。
+
+    锁文件与 events.jsonl 同目录、固定名 ``.events.lock``：不进列表页
+    （``list_session_ids`` 只认目录里有 ``events.jsonl``）；``delete_session`` 的
+    rmtree 会一并清掉它。
+
+    **持锁者** = 本进程或其它进程里 `JsonlSessionStore.append_event` 的追加临界区
+    （「读已落盘最大 seq → 判定 → 写盘 → 更新文件戳缓存」），该临界区含一次 `os.fsync`
+    与（戳缓存未命中时）一次全量日志回读，**不是**微秒级（本机 btrfs 实测 p50 ≈ 20 ms，
+    见 `_take_os_lock_blocking` 的读数）；本锁本身不设超时
+    （见 `_take_os_lock_blocking`）。
+
+    **非可重入**：同一进程内同一 session 不得嵌套取锁（`JsonlSessionStore` 的进程内
+    `_lock_for` 已保证同进程串行，本锁只补跨进程这一维）。
+    """
+    fd = os.open(
+        events_path.parent / _SESSION_LOCK_FILENAME, os.O_RDWR | os.O_CREAT, 0o600
+    )
+    locked = False
+    try:
+        _take_os_lock_blocking(fd)
         locked = True
         yield
     finally:
