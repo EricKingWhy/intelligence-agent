@@ -285,6 +285,9 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+    windows_psec_sandbox = isinstance(sandbox, WindowsPsecSandbox)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -293,11 +296,18 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            kwargs["project_instructions_loader"] = (
-                lambda relative_path: project_instructions.load_for_path(
-                    session_id, workspace, workspace / relative_path,
+            if windows_psec_sandbox:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_sandbox_path(
+                        session_id, sandbox, relative_path,
+                    )
                 )
-            )
+            else:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_path(
+                        session_id, workspace, workspace / relative_path,
+                    )
+                )
         registry.register(tool_cls(sandbox, **kwargs))
 
     # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
@@ -399,9 +409,8 @@ def _project_instruction_cwd(
     recorded_roots = workspace_registry.recorded_workspace_roots(session_id)
     sandbox_root = workspace.workspace_root
     if isinstance(sandbox_root, Path):
-        resolved_root = sandbox_root.resolve()
-        if not recorded_roots or str(resolved_root) in recorded_roots:
-            return resolved_root
+        if not recorded_roots or str(sandbox_root) in recorded_roots:
+            return sandbox_root
         raise ValueError(
             "sandbox workspace root does not match its recorded workspace roots"
         )
@@ -586,12 +595,11 @@ async def build_runtime(
         if workspace_registry.exists(session_id)
         else workspace
     )
+    project_instructions = project_instruction_store(settings)
+    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
-    )
-    project_instructions = project_instruction_store(settings)
-    await asyncio.to_thread(
-        project_instructions.load_for_session, session_id, instruction_cwd,
     )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
@@ -685,6 +693,20 @@ async def build_runtime(
         # #363 / W-19：显式 sandbox 后端选择。
         sandbox_backend=sandbox_backend,
     )
+    instruction_workspace = workspace_registry.get(session_id)
+    instruction_cwd = _project_instruction_cwd(
+        instruction_workspace, workspace_registry, session_id,
+    )
+    if isinstance(instruction_workspace, WindowsPsecSandbox):
+        await asyncio.to_thread(
+            project_instructions.load_for_sandbox_session,
+            session_id,
+            instruction_workspace,
+        )
+    else:
+        await asyncio.to_thread(
+            project_instructions.load_for_session, session_id, instruction_cwd,
+        )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
     context_artifact_store = tooling.context_artifact_store

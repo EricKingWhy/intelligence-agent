@@ -365,8 +365,13 @@ export interface SandboxBackendEntry {
   details: Record<string, string>;
 }
 
-export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
-  const res = await apiFetch('/api/sandbox-backends');
+export async function getSandboxBackends(
+  workspacePath?: string,
+): Promise<SandboxBackendEntry[]> {
+  const query = workspacePath
+    ? `?workspace_path=${encodeURIComponent(workspacePath)}`
+    : '';
+  const res = await apiFetch(`/api/sandbox-backends${query}`);
   if (!res.ok) return [];
   const body: unknown = await res.json();
   const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
@@ -2547,6 +2552,12 @@ export interface ContextUsage {
     skills: number;
     other: number;
     tools: { system: number; mcp: number };
+    /** 仅 `state: 'ok'` 且 builder 快照为新形状时下发（#1095）：「其他」桶的
+     *  细分（provider 注入 / 运行期快照 / 计划锚块 / 保护事实 / 修改路径 /
+     *  水位警告 / 进度核对）。每个子项都是 builder 独立记账口的真实成本，
+     *  **细分之和 == other**。旧形状快照无此键 ⇒ 字段省略（前端只显示整块
+     *  「其他」，不伪造子项 0）。 */
+    other_detail?: Record<string, number>;
   };
   cache: {
     state: 'ok' | 'partial' | 'not_collected';

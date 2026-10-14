@@ -15,6 +15,7 @@ import {
   defaultInstallDir,
   uninstallRegistryKey,
   resolvePythonPath,
+  resolveMxcExecutablePath,
 } from '../src/installer/paths.ts'
 
 describe('installer identity', () => {
@@ -97,6 +98,30 @@ describe('resolvePythonPath', () => {
     assert.equal(
       resolvePythonPath(dev('/home/u/repo/node_modules/electron/dist/electron')),
       '/home/u/repo/node_modules/electron/dist/python',
+    )
+  })
+})
+
+describe('resolveMxcExecutablePath', () => {
+  it('uses the packaged Windows PSEC runtime', () => {
+    assert.equal(
+      resolveMxcExecutablePath({
+        platform: 'win32',
+        packaged: true,
+        resourcesPath: 'C:\\Program Files\\Intelligence Agent\\resources',
+      }),
+      'C:\\Program Files\\Intelligence Agent\\resources\\mxc\\wxc-exec.exe',
+    )
+  })
+
+  it('leaves development and non-Windows runtime selection to the environment', () => {
+    assert.equal(
+      resolveMxcExecutablePath({ platform: 'win32', packaged: false, resourcesPath: 'C:\\r' }),
+      undefined,
+    )
+    assert.equal(
+      resolveMxcExecutablePath({ platform: 'linux', packaged: true, resourcesPath: '/r' }),
+      undefined,
     )
   })
 })
