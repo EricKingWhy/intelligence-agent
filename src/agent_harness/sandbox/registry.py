@@ -54,6 +54,31 @@ class WorkspaceImportIncompleteError(RuntimeError):
     """Docker 工作区缺少导入完成标记——拒绝运行（不把半份 workspace 当已初始化）。"""
 
 
+def _reject_escaping_symlinks(source: Path) -> None:
+    """整棵树扫描符号链接，凡解析后逃出 `source` 根即 fail-closed（#1048 #1135）。
+
+    递归到**任意深度**（`os.walk(followlinks=False)` 不跟进符号链接目录，逐项显式
+    检查），对齐 ADR-0054 的「导入拒绝会逃出源根的符号链接」声明；不静默跳过。
+    符号链接成环（`resolve()` 抛 `RuntimeError`）同样按无法解析拒绝。
+    """
+    root_resolved = source.resolve()
+    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        for name in sorted([*dirnames, *filenames]):
+            entry = Path(dirpath) / name
+            if not entry.is_symlink():
+                continue
+            try:
+                target = entry.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise WorkspaceImportError(
+                    f"导入源含无法解析的符号链接：{entry}"
+                ) from exc
+            if not target.is_relative_to(root_resolved):
+                raise WorkspaceImportError(
+                    f"导入源含指向工作区外的符号链接，拒绝导入：{entry}"
+                )
+
+
 class WorkspaceRegistry:
     """Session ↔ Sandbox 映射表的持久化管理器。"""
 
@@ -436,19 +461,7 @@ class WorkspaceRegistry:
         source = Path(host_root)
         if not source.is_dir():
             raise WorkspaceImportError(f"导入源不是目录：{source}")
-        root_resolved = source.resolve()
-        for entry in sorted(source.iterdir(), key=lambda p: p.name):
-            if entry.is_symlink():
-                try:
-                    target = entry.resolve()
-                except OSError as exc:
-                    raise WorkspaceImportError(
-                        f"导入源含无法解析的符号链接：{entry.name}"
-                    ) from exc
-                if not target.is_relative_to(root_resolved):
-                    raise WorkspaceImportError(
-                        f"导入源含指向工作区外的符号链接，拒绝导入：{entry.name}"
-                    )
+        _reject_escaping_symlinks(source)
         sandbox.copy_in(source, str(sandbox.workspace_root))
         sandbox.write_text(_IMPORT_COMPLETE_MARKER, "")
 

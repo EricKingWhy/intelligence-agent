@@ -473,9 +473,12 @@ async def fork_session(
 def _is_container_workspace(sandbox: object) -> bool:
     """该 sandbox 的工作区是否在容器内（POSIX 路径，非宿主目录）——#1048 AC7。
 
-    容器后端（Docker）的 `workspace_root` 是 `PurePosixPath`（如 `/workspace`），
-    宿主上并不存在；local 后端是宿主 `Path`。判据与 `assembly` 的
-    `uses_sandbox_path_semantics` 同源（此处只需区分"是否容器内"）。
+    这里只判「工作区根是否是容器内的 POSIX 路径」：Docker 后端 `workspace_root`
+    是 `PurePosixPath`（如 `/workspace`），宿主上并不存在，故对宿主
+    `Path`/`shutil.copytree` 无效；local 后端是宿主 `Path`。这是比
+    `assembly.uses_sandbox_path_semantics`（"是否走 Sandbox/POSIX 语义"，非 local
+    即真）**更窄**的判据——fork 只在"宿主 copytree 会读到不存在/错误的路径"时才
+    必须换容器内复制，故按工作区根的形态判定，不共用那个谓词。
     """
     root = getattr(sandbox, "workspace_root", None)
     return isinstance(root, PurePosixPath) and not isinstance(root, Path)
@@ -487,12 +490,19 @@ def _copy_container_workspace(parent_sandbox: object, child_sandbox: object) -> 
     绝不走宿主 `Path`/`shutil.copytree`：父 volume 先物化到一次性宿主暂存目录
     （`export_to_host`），再经 `copy_in` 导入子 volume；子得独立对象集，与父互不
     共享写入。完成标记随之复制，子会话沿用 Docker 后端且已"导入完成"。
+
+    父后端**必须**提供 `export_to_host`：否则无法取到父工作区快照，此时静默继续
+    只会给子会话一个空工作区（数据丢失）——故 fail-closed 抛错，绝不产出空子卷。
     """
+    exporter = getattr(parent_sandbox, "export_to_host", None)
+    if exporter is None:
+        raise RuntimeError(
+            "父工作区在容器内但后端未提供 export_to_host，无法以副本复制到子 "
+            "volume；拒绝静默产出空子工作区（fail-closed）。"
+        )
     staging = Path(tempfile.mkdtemp(prefix="fork-workspace-"))
     try:
-        exporter = getattr(parent_sandbox, "export_to_host", None)
-        if exporter is not None:
-            exporter(staging)
+        exporter(staging)
         child_sandbox.copy_in(staging, ".")
     finally:
         shutil.rmtree(staging, ignore_errors=True)

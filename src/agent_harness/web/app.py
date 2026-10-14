@@ -2635,10 +2635,14 @@ def create_app(
         store = project_instruction_store(app.state.agent.settings)
         registry = service.workspace_registry
         if registry.exists(session_id):
-            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+            # #1048 AC8：Docker（及任何非 local 子进程）后端的工作区不在宿主项目
+            # 目录上，指令必须经 Sandbox/POSIX 语义读取；宿主 `cwd` 是宿主路径，
+            # 只有 local 后端才可用。判据与 assembly 同源
+            # （`uses_sandbox_path_semantics`：只有 `LocalSubprocessSandbox` 为宿主语义）。
+            from agent_harness.assembly import uses_sandbox_path_semantics
 
             sandbox = registry.get(session_id)
-            if isinstance(sandbox, WindowsPsecSandbox):
+            if uses_sandbox_path_semantics(sandbox):
                 await asyncio.to_thread(
                     store.reload_for_sandbox_session, session_id, sandbox,
                 )

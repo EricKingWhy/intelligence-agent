@@ -318,6 +318,22 @@ class _FakeDockerSandbox:
 
     def copy_in(self, host_path, workspace_path: str) -> None:
         self.copied.append((str(host_path), str(workspace_path)))
+        # 真实导入：把宿主源内容读进容器内（否则测试无法验证"复制了什么"）。
+        src = Path(host_path)
+        if src.is_dir():
+            for item in src.rglob("*"):
+                if item.is_file():
+                    rel = item.relative_to(src).as_posix()
+                    self.files[rel] = item.read_text(encoding="utf-8")
+
+    def export_to_host(self, dest) -> None:
+        # 真实导出：把容器内文件物化到宿主暂存目录（AC7 副本复制的父侧）。
+        out = Path(dest)
+        out.mkdir(parents=True, exist_ok=True)
+        for rel, content in self.files.items():
+            target = out / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
 
 
 def _docker_registry(tmp_path, monkeypatch) -> WorkspaceRegistry:
@@ -364,6 +380,10 @@ def test_docker_fork_copies_volume_without_host_copytree(tmp_path, monkeypatch) 
     ), "docker fork 仍在对宿主 /workspace 走 shutil.copytree"
     assert child_sandbox.volume_name != parent.volume_name
     assert child_sandbox.copied, "子 volume 未收到父 workspace 复制"
+    # 复制必须是**有内容**的副本，不是空目录（否则 fork 静默丢数据）。
+    assert child_sandbox.read_text("keep.txt") == "parent-asset", (
+        "子 volume 未真正收到父文件内容（空复制）"
+    )
 
 
 def test_docker_child_write_isolated_from_parent(tmp_path, monkeypatch) -> None:
