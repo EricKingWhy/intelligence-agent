@@ -286,6 +286,31 @@ describe('#1030 审查修复：裁决 200 之后必须重读清单（DEFER 不�
     expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
   });
 
+  it('上一次已知值是"未知"（读面一直失败）时，重读失败**不得把它坐实成"没事"**', async () => {
+    // 补审（#1030）P3：上面那条只覆盖 prev=非空。若 prev 本来就是 `null`（主动读面
+    // 从没成功过），200 分支的保留语义必须让字段**继续是 `null`**——`null` 与 `[]` 在
+    // 呈现层同形（`App.tsx` 判据 `!== null && length > 0`），所以把它写成 `[]` 就等于
+    // 替后端宣布"没有待裁决"：这正是本票 AC1 要消灭的**谎报类别**，只是方向从"误显思考中"
+    // 变成"误显没事"。变异实证：`prev.pendingDecisions` → `prev.pendingDecisions ?? []`
+    // 在本条缺席时是 0 红。
+    vi.mocked(getSessionRecovery).mockRejectedValue(new Error('read face down'));
+    await mount();
+    await enterViewing();
+    expect(captured.hook!.recoverState.pendingDecisions).toBeNull();
+
+    vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
+    await act(async () => {
+      await captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'DEFER' }]);
+    });
+
+    expect(captured.hook!.recoverState.status).toBe('done');
+    expect(
+      captured.hook!.recoverState.pendingDecisions,
+      '未知被坐实成了"后端说没有"',
+    ).toBeNull();
+    expect(captured.hook!.recoverState.pendingDecisions).not.toEqual([]);
+  });
+
   it('切走会话后晚到的重读结果不写进新会话（stale-write 守护）', async () => {
     vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
     await mount();

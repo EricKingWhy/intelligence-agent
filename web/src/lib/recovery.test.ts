@@ -62,7 +62,8 @@ describe('DECISION_OPTIONS — 四选一，默认项由后端 default_action 决
     const defer = DECISION_OPTIONS.find((o) => o.verdict === 'DEFER');
     // 修前这里断言 `toContain('解开')`，而那正是审查（修复轮轴 B）P2 指出的**假话**：
     // 「选它这条会话才会解开」在用户可见文案里宣称独占性，而后端五值枚举里
-    // 除 DEFER 外四者都结清账本（coordinator.py:1065-1120）。改为断言
+    // 除 DEFER 外四者都结清账本（coordinator.py:1065-1136；ABANDON 是兜底 return，
+    // 在 1128-1136，别只引到 1120）。改为断言
     // 「本档会结清这次调用」这个**只关于自己**的事实。
     expect(abandon?.help).toContain('结清');
     expect(abandon?.help).not.toContain('才会解开');

@@ -1121,7 +1121,10 @@ export default function App() {
   // `GET /api/sessions/{id}/recovery`（#1030 缺陷②）。用户 Esc/关闭只收起**当前这一份**
   // 清单（按引用判等），新的清单会带来新数组而重新弹出。
   const pendingDecisions = recoverState.pendingDecisions;
-  /** 有待裁决 = 后端明确给出非空清单。`null`（未知）与 `[]`（后端说没有）都不算。 */
+  /** 有待裁决 = 有一份非空清单。`null`（未知）与 `[]`（后端说没有）都不算。
+   *  注意：重读失败时这份清单是**上一个已知值**（可能 stale），不是"后端此刻这么说"
+   *  ——见 `useSession.ts` 的 recover 200 分支（`prev.pendingDecisions`）。界面上宁可
+   *  多报"仍被封"，也不谎报"没事"（PRODUCT 原则 3；本票 AC1 要消灭的就是谎报方向）。 */
   const hasPendingDecisions = pendingDecisions !== null && pendingDecisions.length > 0;
   const showDecisionPanel = hasPendingDecisions && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。

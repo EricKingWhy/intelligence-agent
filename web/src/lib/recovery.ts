@@ -40,8 +40,11 @@ export interface DecisionOption {
  *
  *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 五值枚举里排在 `DEFER` 之前的第 4 项
  *  （顺序 CONFIRM_SUCCESS / CONFIRM_FAILURE / RETRY / ABANDON / DEFER；界面只给四项，
- *   `CONFIRM_FAILURE` 不在其中——别读成"一共四项"），也是**"不重跑"里唯一能结清
- *  账本的那一档**——`DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
+ *   `CONFIRM_FAILURE` 不在其中——别读成"一共四项"），也是在**"当作没生效"的两档
+ *  （`ABANDON` / `RETRY`）里唯一能结清账本的那一档**——注意 `RETRY` 也结清，但它
+ *  会取消原调用并请模型重发起（重做）；只说"不重跑里唯一"会漏掉同样不重跑且结清
+ *  账本的 `CONFIRM_SUCCESS`，故此处把"唯一"限定在"当作没生效"的范围内。
+ *  `DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
  *  `NEED_RECONCILE`，该调用**仍出现在后续 pending_decisions 里**（`recovery/reconcile.py`
  *  逐字如此，`tests/test_web_api.py::test_recover_with_defer_is_accepted_and_keeps_pending`
  *  锁的就是"200 之后 op 仍挂"）；`ABANDON` 则把 Operation 收成 `CANCELLED`，账本结清。
@@ -65,8 +68,9 @@ export const DECISION_OPTIONS: readonly DecisionOption[] = [
     label: '当作没生效，就此打住',
     // 审查（修复轮轴 B）P2：这里原写「选它这条会话才会解开」——**按字面为假**。
     // 后端 `ReconcileVerdict` 是五值枚举，除 `DEFER` 外**四者都会结清账本**
-    // （`recovery/coordinator.py:1065-1120`：CONFIRM_SUCCESS→SUCCEEDED、
-    // CONFIRM_FAILURE→FAILED、RETRY→CANCELLED、ABANDON→CANCELLED），
+    // （`recovery/coordinator.py:1065-1136`：CONFIRM_SUCCESS→SUCCEEDED(1071/1077)、
+    // CONFIRM_FAILURE→FAILED(1085/1094)、RETRY→CANCELLED(1106)、ABANDON→CANCELLED(1136)；
+    // 区间必须到 1136——ABANDON 是 `if` 链之后的兜底 `return`，落在 1128-1136），
     // 而本面板给用户的四项里就有三项属于"会解开"。用户可见文案不得说这种假话
     // （PRODUCT 原则 3「真实优先于好看」），故改为只陈述**本档自己的**事实。
     help: '显式取消这次调用，不再重做——它会结清这次调用；操作本身不撤销。',

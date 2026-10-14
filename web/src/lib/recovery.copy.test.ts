@@ -51,14 +51,24 @@ describe('#1030 待裁决文案 · 第一层人话（AC2）', () => {
 
   /* 审查（修复轮轴 B）P2：用户可见文案里曾有「选它这条会话才会解开」——**按字面为假**。
      后端 `ReconcileVerdict` 五值枚举里除 `DEFER` 外四者都结清账本
-     （`recovery/coordinator.py:1065-1120`：CONFIRM_SUCCESS→SUCCEEDED、
-     CONFIRM_FAILURE→FAILED、RETRY→CANCELLED、ABANDON→CANCELLED），
+     （`recovery/coordinator.py:1065-1136`：CONFIRM_SUCCESS→SUCCEEDED(1071/1077)、
+     CONFIRM_FAILURE→FAILED(1085/1094)、RETRY→CANCELLED(1106)、ABANDON→CANCELLED(1136)；
+     区间到 1136——ABANDON 是兜底 `return`，在 1128-1136），
      而本面板给用户的四项里就有三项属于"会解开"。
-     这条断言把"不得在用户可见文案里宣称独占性"钉死（PRODUCT 原则 3 真实优先）。 */
+     这条断言把"不得在用户可见文案里宣称独占性"这一类话钉住（PRODUCT 原则 3 真实优先）。
+
+     补审（#1030 §8.3 #8）P3：初版正则 `/才会解开|唯一能|只有它|仅它才/` 只认这四个字面
+     子串，可被最自然的同义句绕过——实测「…选它**才能**解开这条会话…」与「…且**唯有本档**
+     能让这条会话继续…」都是 **0 红**。故改为量词/独占类写法，并同时扫 `label`
+     （label 同样是用户可见文案，初版只扫 `help`）。 */
+  const EXCLUSIVITY_CLAIM =
+    /才会解(开|锁)|才能解(开|锁)|唯一|唯有|只(有|此|要)|仅(它|此|有)|其他(都|全)?不|本档才|其他三档/;
   it('选项文案不得宣称"只有它才能解开"（除 DEFER 外四档都会结清账本）', () => {
     for (const option of DECISION_OPTIONS) {
-      expect(option.help, `${option.verdict} 的文案宣称了独占性`)
-        .not.toMatch(/才会解开|唯一能|只有它|仅它才/);
+      for (const text of [option.label, option.help]) {
+        expect(text, `${option.verdict} 的文案宣称了独占性：${text}`)
+          .not.toMatch(EXCLUSIVITY_CLAIM);
+      }
     }
   });
 });
