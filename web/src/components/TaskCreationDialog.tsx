@@ -144,18 +144,27 @@ function TaskCreationForm({
     })),
   ];
 
+  // #1048 AC2：`windows_psec` 已降级为 legacy-only，不再是新会话可选后端——
+  // 探针结果（props.sandboxBackends）里的它一律不在下拉展示。
+  const projectBackends = sandboxBackends.filter(
+    (b) => b.backend !== 'windows_psec',
+  );
   const sandboxOptions = [
     { value: 'auto', title: '默认', description: '部署默认（本机）' },
-    ...sandboxBackends
+    ...projectBackends
       .filter((b) => b.available)
       .map((b) => ({
         value: b.backend,
-        title: b.backend === 'local' ? '本机' : b.backend === 'docker' ? 'Docker' : b.backend,
+        title: b.backend === 'local'
+          ? '本机'
+          : b.backend === 'docker'
+            ? 'Docker'
+            : b.backend,
         description: undefined,
       })),
   ];
   // 不可用的后端不进选项（不画饼）；但若之前选过已变不可用的，后端会 409 结构化报错
-  const unavailableBackends = sandboxBackends.filter((b) => !b.available);
+  const unavailableBackends = projectBackends.filter((b) => !b.available);
 
   return (
     <Dialog.Content className="project-dialog" aria-label="新建任务">
@@ -265,7 +274,7 @@ function TaskCreationForm({
       )}
 
       {/* 运行位置 */}
-      {sandboxBackends.length > 0 && (
+      {projectBackends.length > 0 && (
         <div className="project-field">
           <span className="project-field-label">运行位置</span>
           <OptionPicker

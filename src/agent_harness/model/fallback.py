@@ -100,6 +100,36 @@ def is_transient_model_error(error: BaseException) -> bool:
     return transport_failure_kind(error) is not None
 
 
+def is_deterministic_provider_error(error: BaseException) -> bool:
+    """判断错误是否为**确定性 provider 类**错误（#1039 / PRD §5.3 第 4 条修订）。
+
+    "provider 类" = 端点给了 HTTP 响应且该响应不是瞬时的（4xx 认证/权限/参数/策略错，
+    含 400/401/403/404/422）。这些错在**同一端点**上重试无用，但换一个**不同** provider
+    可能正是出路——记忆作业的降级开关（默认开）据此允许落一次备用。
+
+    判据与 `is_transient_model_error` **互补且不重叠**：先排掉瞬时（5xx / 429 / 传输层），
+    再要求"拿到了 HTTP 状态码"。因此：
+
+    - 无状态码的确定性错（`formation.ModelOutputError` 的解析失败、执行器内部
+      `RuntimeError`）返回 **False**——它们不是 provider 说"不接受"，拿坏端点掩盖
+      parse/bug 是错误的兜底；
+    - 传输层失败（超时/连接）已被瞬时判据吃掉，返回 False。
+
+    与瞬时判据同一个家（本模块）是刻意的：两份分类放在两处必然漂移。
+    """
+    if is_transient_model_error(error):
+        return False
+    if isinstance(error, httpx.HTTPStatusError):
+        return True
+    status_code = getattr(error, "status_code", None)
+    # 只认 4xx：5xx / 429 已被上面的瞬时判据吃掉；bool 是 int 的子类，一并排掉。
+    return (
+        isinstance(status_code, int)
+        and not isinstance(status_code, bool)
+        and 400 <= status_code < 500
+    )
+
+
 @dataclass(frozen=True)
 class FallbackTransition:
     """一次成功的模型切换事实（Runtime 持久化为 model/fallback 事件）。
@@ -119,6 +149,10 @@ class FallbackTransition:
     reason: str
     primary_content_chars: int = 0
     primary_finish_reason: str | None = None
+    #: `#1093`：切换后生效的**备用模型**推理档位名（harness 语义档位，如
+    #: "minimal"/"standard"/"deep"）。None = 备用模型无档位声明 ⇒ 不落键
+    #: （与 `model` 同一「不可得 ≠ 默认值」口径；见 `11 §6.1`）。
+    reasoning_effort: str | None = None
 
     def event_data(self) -> dict[str, Any]:
         """model/fallback 事件的共用载荷（成功路径与终态路径同源）。
@@ -135,6 +169,8 @@ class FallbackTransition:
             data["primary_content_chars"] = self.primary_content_chars
         if self.primary_finish_reason:
             data["primary_finish_reason"] = self.primary_finish_reason
+        if self.reasoning_effort is not None:
+            data["reasoning_effort"] = self.reasoning_effort
         return data
 
 
@@ -201,6 +237,7 @@ class ModelFallbackCoordinator:
         policy: FallbackPolicy | None = None,
         primary_name: str = "primary",
         fallback_name: str = "fallback",
+        fallback_reasoning_effort: str | None = None,
         idle_timeout: float = 0.0,
         total_timeout: float = 0.0,
         gate: ModelCallGate | None = None,
@@ -212,6 +249,9 @@ class ModelFallbackCoordinator:
         self._fallback = fallback
         self._primary_name = primary_name
         self._fallback_name = fallback_name
+        # #1093：备用模型请求侧档位名——切换事实（FallbackTransition）带上它，
+        # Runtime 落 model/fallback 事件。None = 备用模型无档位声明 ⇒ 不落键。
+        self._fallback_reasoning_effort = fallback_reasoning_effort
         # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
         # total = 整条流必须 N 秒内完成（慢滴漏，冒烟 10 分钟场景）。
         # 每次流式尝试（含 fallback 重试）都被包住，超时抛 ModelStallError
@@ -526,6 +566,8 @@ class ModelFallbackCoordinator:
             reason=type(error).__name__,
             primary_content_chars=primary_content_chars,
             primary_finish_reason=primary_finish_reason,
+            # #1093：切换后生效的备用模型档位（与 #226 model 口径同构）。
+            reasoning_effort=self._fallback_reasoning_effort,
         ))
         self.current = self._fallback
         return True

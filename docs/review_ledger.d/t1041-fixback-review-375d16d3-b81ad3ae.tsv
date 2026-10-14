@@ -1,0 +1,1 @@
+2026-10-12	#1041 修回单元双轴复审（49052347 fix F2/F5+P4-2 / 4e3bc7cb test F2/F5/F6/F7+注册表可达 / b81ad3ae docs ADR-0007 R1 修订注）：fresh 会话逐条核验，Correctness F1–F7 全 CLOSED、Standards 6/6 CLOSED；两轴 APPROVE-WITH-FINDINGS，仅余新 P4（C-N1 progress 未展示 ref / C-N2 ADR 生命周期 / C-N3 措辞）。	375d16d3..b81ad3ae

@@ -25,6 +25,9 @@ SESSION_FORKED = "session/forked"
 # 续聊对账（service._reconcile_workspace_binding）给 fork 专属提示。种子排除集必须含它
 # （会话级状态不进孙代种子，与 session/started 同理）。
 FORK_IN_PROGRESS = "fork/in-progress"
+# data：turn_index / agent_profile / model / reasoning_effort / budget（后三者与
+# reasoning_effort 均为「有值才落键」：不可得 ≠ 默认值，`11 §6.1`；#1093 新增
+# reasoning_effort = 本轮请求侧选中的 harness 推理档位名）。
 RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
@@ -156,6 +159,9 @@ GUARD_STUCK = "guard/stuck"
 # data：policy / reason（稳定串，rule_id 载于 reason 内；无主张原文、无参数值
 # ——ADR-0047 D3 纪律：诊断面不是泄漏通道）。
 COMPLETION_EVIDENCE_BLOCKED = "completion/evidence-blocked"
+# data：from_model / to_model / reason（+ 可选的 primary_content_chars /
+# primary_finish_reason；#1093 新增 reasoning_effort = 切换后生效的**备用模型**
+# 档位名，无声明则缺键）。
 MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
@@ -216,7 +222,9 @@ MESSAGE_SUPERSEDED = "message/superseded"
 
 # ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
 # 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
-# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
+# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id；
+# #1107 新增 reasoning_effort = 切换时生效的推理档位（最近一条 run/started 的
+# 声明；有值落键、无值缺键，与 #1093 口径同构）。
 MODEL_CHANGED = "model/changed"
 
 # ── F18-A（#282）：同 session 内改权限档 ──────────────────────────────────

@@ -1,0 +1,1 @@
+2026-10-12	#1041 同步 origin/main（来侧 #1045 desktop/installer + docs）机械归属：merge af8030b0（父1=5363007e 本分支 tip；父2=9d29ddff origin/main；merge-base=5363007e）。ort 零冲突；来侧改动路径与本票 scope（src/agent_harness/context/、tests/context、builder）交集为空；合并树 b2715647 与父二树逐字相等 = 零新增内容（覆盖闸门本可自动归属），本行仅机械归属、不是对内容的审查主张；来侧提交各有其原 review ledger 行覆盖；git show --cc 空表。	5363007e..af8030b0

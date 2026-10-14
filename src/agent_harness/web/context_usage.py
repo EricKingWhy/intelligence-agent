@@ -209,18 +209,28 @@ def build_context_usage_payload(
     tools_total = tools["system"] + tools["mcp"]
     used_tokens = messages + system_prompt + skills + other + tools_total
 
+    # 「其他」桶细分（#1095）：builder 快照带 other_breakdown 时原样透传为
+    # other_detail（每个子项都是 builder 独立记账口的真实成本，非残差倒推）。
+    # 细分之和 == other（同一批数字分组呈现）——求和不变式不受影响。旧形状
+    # 快照（部署切换窗口的进程内缓存）无此键 ⇒ **省略**，不伪造子项 0；
+    # 前端据此只显示整块「其他」。
+    breakdown: dict[str, Any] = {
+        "messages": messages,
+        "system_prompt": system_prompt,
+        "skills": skills,
+        "other": other,
+        "tools": tools,
+    }
+    other_breakdown = builder_snapshot.get("other_breakdown")
+    if isinstance(other_breakdown, dict):
+        breakdown["other_detail"] = dict(other_breakdown)
+
     return {
         "estimated": True,
         "window_tokens": window_tokens,
         "used_tokens": used_tokens,
         "thresholds": thresholds,
-        "breakdown": {
-            "messages": messages,
-            "system_prompt": system_prompt,
-            "skills": skills,
-            "other": other,
-            "tools": tools,
-        },
+        "breakdown": breakdown,
         "cache": cache_summary(events),
         "state": "ok",
     }

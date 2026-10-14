@@ -274,6 +274,15 @@ export interface ApiMock {
   /** POST /api/sessions/{id}/recover（T8 #138 恢复；缺省 200 → 返回 mock.events）。
    *  真实语义：响应是与 GET events 同构的全量事件数组。 */
   onRecoverPost?: (route: Route) => Promise<void> | void;
+  /** GET /api/sessions/{id}/recovery（#1049 只读端点；#1030 前端主动发现路径）。
+   *  缺省 = `{pending_decisions: mock.pendingDecisions ?? []}`（空清单 = 后端说
+   *  此刻没有待裁决）。注入此回调即可伪造读失败（非 2xx）——**读不到 ≠ 没事**，
+   *  前端必须保持"未知"而不是点亮"已结清"。 */
+  onRecoveryGet?: (route: Route) => Promise<void> | void;
+  /** 缺省待裁决清单（形状 = 后端 `_reconcile_pending` 的行，见
+   *  `web/src/lib/api.ts::PendingDecision`）。非空时前端**无需任何 409**
+   *  就会亮出「待裁决」徽标与裁决面板（#1030 AC3）。 */
+  pendingDecisions?: unknown;
   /** GET /api/recovery/interrupted（#357 W-13 契约 5）——只读恢复列表快照。
    *  缺省 = `{snapshot_available:true, items:[]}`（无中断会话）。
    *  真实形状见 `web/src/lib/api.ts::InterruptedRecoveries`；spec 直接传后端
@@ -373,7 +382,7 @@ export interface ApiMock {
   /** GET /api/memories/{id}/versions 的拦截口（例如 content-free tombstone history）。 */
   onMemoryVersionsGet?: (route: Route, memoryId: string) => Promise<boolean> | boolean;
   /** MEM-V2-5: independently persisted setting fixture and optional mutation failure. */
-  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean };
+  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean; fallback_enabled: boolean };
   memorySettingsPatchError?: { status: number; detail: string };
   /** MEM-V2-5: current-session redacted recall explanation response. */
   memoryRecalls?: unknown[];
@@ -511,7 +520,10 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   }));
   /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
-  const memorySettings = { extraction_enabled: true, recall_enabled: true, ...mock.memorySettings };
+  const memorySettings = {
+    extraction_enabled: true, recall_enabled: true, fallback_enabled: true,
+    ...mock.memorySettings,
+  };
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
   /** #825（MM-04）：附件字节 + 引用关系（语义对齐 `web/attachments.py`）。
@@ -942,6 +954,18 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     if (/^\/api\/sessions\/[^/]+\/recover$/.test(path) && req.method() === 'POST') {
       if (mock.onRecoverPost) return mock.onRecoverPost(route);
       return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
+    }
+    /* #1030：打开会话时前端会**主动**拉待裁决清单（#1049 的只读端点）。
+       默认给空清单——多数用例的会话根本不需要裁决，不该被这条读面干扰；
+       需要"打开即有待裁决"的用例用 `onRecoveryGet` 或 `pendingDecisions` 覆盖。
+       注意：**空清单是事实**（后端说此刻没有待裁决），与"读不到"必须分开——
+       这里刻意不提供 5xx 兜底，要测读失败就显式 fulfill 非 2xx。 */
+    if (/^\/api\/sessions\/[^/]+\/recovery$/.test(path) && req.method() === 'GET') {
+      if (mock.onRecoveryGet) {
+        await mock.onRecoveryGet(route);
+        return;
+      }
+      return json(route, { pending_decisions: mock.pendingDecisions ?? [] });
     }
     if (/^\/api\/sessions\/[^/]+\/approve$/.test(path) && req.method() === 'POST') {
       if (mock.onApprovePost) return mock.onApprovePost(route);

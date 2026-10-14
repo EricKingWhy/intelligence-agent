@@ -35,6 +35,9 @@
                   in ../nsis-probes/launch-form-probe) must do the same and
                   return rc 2 on the fixed artifact, rc 0 on the pre-#904 one,
                   which has no sweep at all.
+  Case prior-pointer: (#1021) plants a real name-shaped prior backup and sets
+                  IaBackupDir while the current app exe is present. The update
+                  must record and keep that backup without returning rc 2.
 
   The junction-bearing cases plant their target in a scratch directory under
   %TEMP% ("ia-r1-junction-<tag>") and remove it at the end; nothing else outside
@@ -47,7 +50,9 @@
   success/failure (its delete used a broken long-path prefix and never removed
   the backup) and pre-#904 for junction/sweep (its delete works, follows the
   junction into the target, and its uninstaller has no sweep at all). The
-  baseline values are the measured defect, not a tolerance.
+  prior-pointer baseline is the current defect (rc 2 and no leftover record);
+  the fixed artifact returns 0 and records the old backup. Baseline values are
+  measured defects, not tolerances.
 
   Usage (build the test artifact first: `node scripts/test-windows-installer.mjs
   --compile-only`, then pass the printed installer path):
@@ -62,7 +67,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$Installer,
   [Parameter(Mandatory = $true)][string]$Tag,
-  [Parameter(Mandatory = $true)][ValidateSet('success', 'failure', 'junction', 'sweep')][string]$Case,
+  [Parameter(Mandatory = $true)][ValidateSet('success', 'failure', 'junction', 'sweep', 'prior-pointer')][string]$Case,
   [Parameter(Mandatory = $true)][ValidateSet('baseline', 'fixed')][string]$Expect,
   [int]$DeepLevels = 12,
   [string]$EvidenceDir = ''
@@ -294,6 +299,58 @@ $appKeyPath = 'HKCU:\Software\' + $appKey.PSChildName
 Log ('app registry key = {0}' -f $appKeyPath)
 Log ('registry before update: IaBackupDir={0} IaLeftoverDir={1} InstallLocation={2}' -f `
     (RegVal $appKeyPath 'IaBackupDir'), (RegVal $appKeyPath 'IaLeftoverDir'), (RegVal $appKeyPath 'InstallLocation'))
+
+# --------------------------------------------- case prior-pointer (#1021)
+if ($Case -eq 'prior-pointer') {
+  $priorBackup = $instDir + '.old-' + ([guid]::NewGuid().ToString('B').ToUpperInvariant())
+  Copy-Item -LiteralPath $instDir -Destination $priorBackup -Recurse
+  $priorExePath = Join-Path $priorBackup $exe.Name
+  $priorExeExistsBefore = Test-Path -LiteralPath $priorExePath
+  Assert 'prior_backup_payload_seeded' $priorExeExistsBefore ('exe={0}' -f $priorExePath)
+  Set-ItemProperty -Path $appKeyPath -Name 'IaBackupDir' -Value $priorBackup
+  Log ('seeded prior backup pointer = {0}' -f $priorBackup)
+
+  $expectedRc = if ($Expect -eq 'fixed') { 0 } else { 2 }
+  $rc = RunInstaller $installerPath
+  $leftover = RegVal $appKeyPath 'IaLeftoverDir'
+  $pointer = RegVal $appKeyPath 'IaBackupDir'
+  $oldBackupExists = Test-Path -LiteralPath $priorBackup
+  $priorExeExistsAfter = Test-Path -LiteralPath $priorExePath
+  $exeStillThere = Test-Path -LiteralPath $exe.FullName
+  Log ('prior-pointer update rc={0} IaLeftoverDir={1} IaBackupDir={2} prior_backup_exists={3}' -f `
+      $rc, $leftover, $pointer, $oldBackupExists)
+  Assert 'prior_pointer_update_rc' ($rc -eq $expectedRc) ('rc={0} expected={1}' -f $rc, $expectedRc)
+  Assert 'prior_backup_kept' $oldBackupExists ('backup_exists={0}' -f $oldBackupExists)
+  Assert 'prior_backup_payload_preserved' ($priorExeExistsBefore -and $priorExeExistsAfter) ('exe_exists_before={0} after={1}' -f $priorExeExistsBefore, $priorExeExistsAfter)
+  Assert 'prior_backup_recorded' (($leftover -ieq $priorBackup) -eq ($Expect -eq 'fixed')) `
+      ('IaLeftoverDir={0} expected={1}' -f $leftover, $(if ($Expect -eq 'fixed') { $priorBackup } else { '<empty>' }))
+  Assert 'current_backup_pointer_cleared' ([string]::IsNullOrEmpty($pointer)) ('IaBackupDir={0}' -f $pointer)
+  Assert 'prior_pointer_update_payload_present' $exeStillThere ('exe_exists={0}' -f $exeStillThere)
+
+  if ($exeStillThere) {
+    $appRun = Start-Process -FilePath $exe.FullName -Wait -PassThru
+    Assert 'prior_pointer_updated_app_runs' (($appRun.ExitCode -eq 0) -and (Test-Path -LiteralPath (Join-Path $instDir 'launched.txt'))) `
+        ('rc={0} launch_marker={1}' -f $appRun.ExitCode, (Test-Path -LiteralPath (Join-Path $instDir 'launched.txt')))
+  }
+
+  $uninstaller = @(Get-ChildItem -LiteralPath $instDir -Filter 'Uninstall*.exe' -ErrorAction SilentlyContinue)[0]
+  Assert 'prior_pointer_uninstaller_found' ($null -ne $uninstaller) ('exe={0}' -f $(if ($uninstaller) { $uninstaller.Name } else { '<none>' }))
+  if ($uninstaller) {
+    $cleanupRc = RunInstaller $uninstaller.FullName
+    Log ('prior-pointer cleanup rc = {0}' -f $cleanupRc)
+    Assert 'prior_pointer_cleanup_rc0' ($cleanupRc -eq 0) ('rc={0}' -f $cleanupRc)
+  }
+  Assert 'prior_pointer_cleanup_install_dir_removed' (-not (Test-Path -LiteralPath $instDir)) ('exists={0}' -f (Test-Path -LiteralPath $instDir))
+  Assert 'prior_pointer_cleanup_backup_removed' (-not (Test-Path -LiteralPath $priorBackup)) ('exists={0}' -f (Test-Path -LiteralPath $priorBackup))
+  Assert 'prior_pointer_cleanup_registry_removed' (-not (Test-Path -LiteralPath $appKeyPath)) ('exists={0}' -f (Test-Path -LiteralPath $appKeyPath))
+  Assert 'prior_pointer_cleanup_uninstall_registry_removed' (-not (Test-Path -LiteralPath $keyPath)) ('exists={0}' -f (Test-Path -LiteralPath $keyPath))
+  $realAfter = @(Get-ChildItem -LiteralPath $productsRoot -Directory |
+    Where-Object { $_.Name -like 'Intelligence Agent*' } | ForEach-Object { $_.Name })
+  Assert 'real_product_dirs_untouched' (($realBefore -join ',') -eq ($realAfter -join ',')) ('before=[{0}] after=[{1}]' -f ($realBefore -join ', '), ($realAfter -join ', '))
+  Log ('DONE assertions_failed={0}' -f $script:failures)
+  if ($script:failures -gt 0) { exit 1 }
+  exit 0
+}
 
 # ------------------------------------------------------ case sweep (#904 item 4)
 # The uninstaller's name-shape sweep is the authoritative discovery path for

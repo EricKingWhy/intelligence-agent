@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { KeyRound, RotateCcw, X } from 'lucide-react';
+import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
@@ -50,10 +50,14 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
+import { adjudicationHeadline } from './lib/recovery';
+import { AdjudicationTechDetail } from './components/AdjudicationTechDetail';
+import { describeOwnership } from './lib/ownership';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
 import {
+  createEmptySession,
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
@@ -169,6 +173,25 @@ export default function App() {
     void refreshSessions();
   }, [refreshProjects, refreshSessions]);
 
+  // ── #1028：选中项目行 = 为「通用新建会话」预设项目语境 ──
+  //
+  // 缺陷：通用「新建会话」不带 cwd，会话落服务进程目录 ⇒ 与项目路径精确相等判据
+  // 不匹配 ⇒ 不入项目、且全程零归属提示（用户以为选中了项目，agent 却不知项目在哪）。
+  // 修法（PORT DESIGN，来源 VS Code 工作区上下文自动继承）：点中项目行即把它记为
+  // 当前项目语境，随后的通用新建默认带 `cwd: project.path`。
+  //
+  // 这是**视图意图**、不是会话事实（不变量 #22）：它只决定"下一次新建带什么 cwd"，
+  // 不参与归属判定（归属永远由后端按 cwd 精确相等算）。选中具体会话时清空——
+  // 打开某个会话意味着离开"准备在某项目里新建"的状态。
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === activeProjectId) ?? null,
+    [projects, activeProjectId],
+  );
+  const handleSelectProject = useCallback((projectId: string | null) => {
+    setActiveProjectId(projectId);
+  }, []);
+
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
   // 自动清横幅并重试会话列表（onTokenChange），无需整页刷新。
@@ -255,6 +278,33 @@ export default function App() {
      本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
      `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
   const sessionId = conversation?.session_id;
+
+  // ── #1028：归属 chip 的数据源 ──
+  // 当前会话：项目名来自后端 `SessionSummary.workspace`（成员资格真相），cwd 来自
+  // `session/started.data.cwd` 的投影（`conversation.session_cwd`）。新建态（无选中
+  // 会话）：用选中的项目语境（activeProject）作为"将要在哪新建"。两处都只喂给
+  // `describeOwnership` 文案层——前端不做路径比对（见 lib/ownership.ts 文件头）。
+  const selectedSummary = useMemo(
+    () => (selectedId ? sessions.find((s) => s.session_id === selectedId) ?? null : null),
+    [sessions, selectedId],
+  );
+  // 会话内的 cwd 必须过**身份闸**：切会话时 `conversation` 仍是**旧会话**的（history
+  // 正在加载，见 useSession.ts 的 `shouldShowHistoryLoading`），直接用会把「新会话的
+  // 项目名」与「旧会话的 cwd」拼在一起（跨会话残影 = 第二真相，不变量 #22）。身份不符 /
+  // 未加载 → null ⇒ chip 显「未指定目录」而非别人的路径（No fake values）。惯例同
+  // `lib/permission.ts:96` 的 `composerPermissionMode`（同款身份闸）。
+  const sessionCwd =
+    conversation !== null && conversation.session_id === selectedId ? conversation.session_cwd : null;
+  const ownership = useMemo(() => {
+    if (selectedId !== null) {
+      return describeOwnership(selectedSummary?.workspace?.title ?? null, sessionCwd);
+    }
+    // 新建态：仅在**已选中项目语境**时显形（预告"将在这个项目里新建"）。既无选中会话、
+    // 又无项目语境（首屏/空白新建）时返回 null = 不渲染 chip：此刻并无"会话"，
+    // 说它「未分组」语义悬空，且首屏即挂警告色与「警示载体」意图相反（P3-2/P4）。
+    if (activeProject === null) return null;
+    return describeOwnership(activeProject.title, activeProject.path);
+  }, [selectedId, selectedSummary, sessionCwd, activeProject]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -479,6 +529,8 @@ export default function App() {
     const leaving = selectedId !== null && selectedId !== id;
     selectedIdRef.current = id;
     selectSession(id);
+    // #1028：打开一个具体会话 = 离开「准备在某项目里新建」的语境（清空预设项目）。
+    setActiveProjectId(null);
     // 选中项属于它所在的会话：换会话必须清选中（否则面板会拿着 A 会话的事件
     // 站在 B 会话里——跨会话的"第二真相"，不变量 #22）。
     focusRun();
@@ -588,8 +640,77 @@ export default function App() {
     [selectedId, changePermission, reloadConversation],
   );
 
+  // ── #1015：新建态懒建会话 ──
+  /** 在途的懒建 promise：连点按钮 / 连拖两次共享同一个，不建出两个会话。 */
+  const ensuringRef = useRef<Promise<string | null> | null>(null);
+  /** 最近一次懒建落定的会话 id：补 `selectSession` 状态尚未 flush 的极窄窗口
+   *  （贴图后同一 tick 内回车）——`handleSubmit` 用它避免另造会话。
+   *  用户点「新建会话」（`selectSession(null)`）时清掉，不让过期 id 复活。 */
+  const ensuredIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedId === null) ensuredIdRef.current = null;
+  }, [selectedId]);
+
+  /** 新建态首次投喂附件时懒建会话——懒建入口的**唯一收口**，与既有两条身份变更
+   *  路径（`selectSession` / `submitTask`）并列。resolve 会话 id；
+   *  失败（非 2xx）resolve `null`，由调用方（hook）给用户可见反馈。
+   *  并发调用共享同一个在途 promise（in-flight 去重）。
+   *
+   *  P3-1（已知代价，不修）：在途懒建撞上用户点「新建会话」/ 切到另一会话——
+   *  入口处只判一次 `selectedId`，POST 落定后无条件 `selectSession(新 id)`（无取
+   *  消路径）：用户会被带回这个刚建出的会话。自洽点（Correctness 审查结论）：
+   *  草稿始终跟随 `ensureSession` 返回的 sid 入列（不用闭包的 `sessionId`），
+   *  不会错挂到用户切去的会话上；代价是途中那次会话切换会被懒建落定「抢回」。
+   *  根治需要可取消的懒建（会话删除语义），超出本票 scope。 */
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (selectedId) return selectedId;
+    if (ensuringRef.current) return ensuringRef.current;
+    const pending = (async (): Promise<string | null> => {
+      try {
+        // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形——
+        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档 + 预算
+        // 草稿（F1：否则懒建出的会话静默回落到后端默认档，与发文本建出的会话
+        // 语义不同——权限档是 Runtime 边界（不变量 #11），不能静默丢）。空值丢
+        // 弃由 `api.ts buildBody` 单一执行（见 amend.ts 顶部契约说明）。
+        // `model` / `agent_profile` / `reasoning_effort` 不在这里：它们随随后
+        // 首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields`），懒建只
+        // 负责把会话身份先建出来。
+        const created = await createEmptySession({
+          auto_approve: true,
+          permission_mode: composerControls.permissionMode ?? undefined,
+          budget: toCreateBudget({
+            turns: budgetRunTurnsDraft,
+            totalTokens: budgetRunTokensDraft,
+            deadlineAt: budgetRunDeadlineDraft,
+          }),
+          ...(activeProject ? { cwd: activeProject.path } : {}),
+        });
+        ensuredIdRef.current = created.sessionId;
+        selectSession(created.sessionId);
+        void refreshSessions();
+        return created.sessionId;
+      } catch {
+        return null;
+      } finally {
+        ensuringRef.current = null;
+      }
+    })();
+    ensuringRef.current = pending;
+    return pending;
+  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
+
   const handleSubmit = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
+     *  **显式 `false`** ⇒ 它保留输入框里的文本与草稿（`11 §6.1` 第 164 行的 MUST）；
+     *  `true` / `undefined`（旧签名）⇒ 按旧行为清空。
+     *  续聊路径（`sendMessage`）不抛——网络故障在 hook 内部收口成 `false`；**新建会话
+     *  路径会抛**（`submitTask` 的 422 / Start failed 文案），Composer 把抛错同样归到
+     *  「未受理」侧（保留输入）⇒ 异常路径也不会吞掉用户文本。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -602,36 +723,54 @@ export default function App() {
       // 那会把「Enter = 排队」变成 submitTask（**另造一个会话**），追问与上下文
       // 一起被拆散；队列条与 /queue 系列接口随之永不产生条目。
       // 新会话：无 selectedId → startSession 创建新会话。
-      if (selectedId) {
-        void sendMessage(selectedId, task, {
-          amend: {
-            ...toAmendFields(composerControls),
-            ...ruleSignal,
-            // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
-            // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
-            ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
-          },
-        });
-        return;
-      }
-      // 新建会话（#825）：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
-      // 无 `attachments`），所以新建态**不给**附图入口（Composer 按 `sessionId === null`
-      // 禁用并说明原因）⇒ 这条分支上 `attachmentIds` 恒为空。此处不写丢弃逻辑：
-      // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-      void submitTask({
-        task,
-        auto_approve: true,
+      //
+      // #1015：路由是异步的——贴图后立刻回车时懒建可能在途（或刚落定、状态尚未
+      // flush），此时用懒建的会话发（`sendMessage`：空闲会话 → launched 直驱新
+      // run，ADR-0030 §5.1），绝不另造第二个会话。纯文本新建（无在途懒建）仍走
+      // 既有 submitTask 路径，行为逐字不变。
+      const amend = {
+        ...toAmendFields(composerControls),
         ...ruleSignal,
-        ...toCreateControls(composerControls),
-        // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
-        budget: toCreateBudget({
-          turns: budgetRunTurnsDraft,
-          totalTokens: budgetRunTokensDraft,
-          deadlineAt: budgetRunDeadlineDraft,
-        }),
-      });
+        // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
+        // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
+        ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+      };
+      return (async (): Promise<boolean> => {
+        let sid: string | null = selectedId ?? ensuredIdRef.current;
+        const pending = ensuringRef.current;
+        if (sid === null && pending !== null) {
+          sid = await pending;
+        }
+        if (sid !== null) {
+          return await sendMessage(sid, task, { amend });
+        }
+        // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
+        // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
+        // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
+        // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
+        const failure = await submitTask({
+          task,
+          auto_approve: true,
+          ...ruleSignal,
+          // #1028：选中的项目行 = 本次新建的项目语境——带上 `cwd: project.path`，
+          // 让会话直接诞生在项目目录里并自动入组（后端 cwd 契约，ADR-0027 D2）。
+          // 未选中项目时不发键（后端用自己的默认目录），与既有通用新建行为一致。
+          // 与 `workspace` 互斥（同为后端 422 判据）：本入口只可能发 `cwd`。
+          ...(activeProject ? { cwd: activeProject.path } : {}),
+          ...toCreateControls(composerControls),
+          // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
+          budget: toCreateBudget({
+            turns: budgetRunTurnsDraft,
+            totalTokens: budgetRunTokensDraft,
+            deadlineAt: budgetRunDeadlineDraft,
+          }),
+        });
+        // 新会话创建失败 ⇒ 未受理（`submitTask` 返回失败文案；成功返回 null）
+        // ——同一条「失败不清空」契约，不因走的是创建路径就丢文本。
+        return failure === null;
+      })();
     },
-    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft],
+    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
@@ -720,12 +859,16 @@ export default function App() {
   // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
   // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
-    (task: string, rememberAsProceduralRule = false, attachmentIds: string[] = []) => {
+    /** 返回值语义同 `handleSubmit`（#1029）：透传「是否已被受理」。 */
+    (
+      task: string,
+      rememberAsProceduralRule = false,
+      attachmentIds: string[] = [],
+    ): Promise<boolean> | void => {
       if (!selectedId) {
-        handleSubmit(task, rememberAsProceduralRule, attachmentIds);
-        return;
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
       }
-      void sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
+      return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
     [sendSteer, selectedId, handleSubmit],
   );
@@ -950,6 +1093,10 @@ export default function App() {
     // turns 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409；工具配额同理——
     // 它的点名单位是工具名（`resumeRequestTarget` 给出该维的 wire 形态）。
     const target = resumeRequestTarget(paused);
+    // `#1026`：context 硬护栏暂停没有"抬 ceiling"式恢复动作（`ceilingDraftValue` 对
+    // context 恒 null 已在此短路；面板只给引导文案、不渲染恢复按钮）。显式收窄让
+    // 请求体组装在类型层也不可达，而非靠联合类型的侥幸。
+    if (target.kind === 'context') return;
     void resumePausedRun(selectedId, {
       runId: paused.run_id,
       expectedVersion: paused.version,
@@ -985,11 +1132,17 @@ export default function App() {
   /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
    *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
   const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
-  // #357 W-13：裁决面板的可见性——只由后端 409 载荷驱动（不变量 #22）。用户 Esc/关闭
-  // 只收起**当前这一份**清单（按引用判等），新的 409 会带来新数组而重新弹出。
+  // #357 W-13：裁决面板的可见性——由后端待裁决清单驱动（不变量 #22）。两个同源读面：
+  // 带 `pending_decisions` 的 409（#596），以及打开会话时主动拉的
+  // `GET /api/sessions/{id}/recovery`（#1030 缺陷②）。用户 Esc/关闭只收起**当前这一份**
+  // 清单（按引用判等），新的清单会带来新数组而重新弹出。
   const pendingDecisions = recoverState.pendingDecisions;
-  const showDecisionPanel =
-    pendingDecisions !== null && pendingDecisions.length > 0 && pendingDecisions !== dismissedDecisions;
+  /** 有待裁决 = 有一份非空清单。`null`（未知）与 `[]`（后端说没有）都不算。
+   *  注意：重读失败时这份清单是**上一个已知值**（可能 stale），不是"后端此刻这么说"
+   *  ——见 `useSession.ts` 的 recover 200 分支（`prev.pendingDecisions`）。界面上宁可
+   *  多报"仍被封"，也不谎报"没事"（PRODUCT 原则 3；本票 AC1 要消灭的就是谎报方向）。 */
+  const hasPendingDecisions = pendingDecisions !== null && pendingDecisions.length > 0;
+  const showDecisionPanel = hasPendingDecisions && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1200,6 +1353,7 @@ export default function App() {
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
+        awaitingDecision={hasPendingDecisions}
       />
 
       <main
@@ -1219,6 +1373,13 @@ export default function App() {
           titlesById={titlesById}
           onSelect={handleSelect}
           onNew={handleNew}
+          /* #1028：选中项目行即预设"下一次通用新建"的项目语境（cwd 继承）。 */
+          activeProjectId={activeProjectId}
+          onSelectProject={handleSelectProject}
+          /* #1028 AC3：选中会话的 cwd（来自 session/started 投影），列表里给未归属
+             会话就地标注归属。**同 sessionCwd 身份闸**：会话切换/未加载时为 null
+             （不拿旧会话的路径冒充新会话，不编路径）。 */
+          selectedCwd={sessionCwd}
           projectActions={projectActions}
           onSessionsChanged={refreshSessions}
           projectsError={projectsError}
@@ -1294,9 +1455,10 @@ export default function App() {
                 <span className="recover-error">{recoverState.message}</span>
               )}
               {recoverState.status === 'error' && recoverState.conflict && (
-                <span className="recover-conflict" title={recoverState.message ?? ''}>
-                  需人工裁决：{recoverState.message}
-                </span>
+                <div className="recover-conflict">
+                  {adjudicationHeadline(pendingDecisions?.length ?? null)}
+                  <AdjudicationTechDetail message={recoverState.message} />
+                </div>
               )}
               {recoverState.status === 'idle' && (
                 <span className="recover-hint">该会话缺少 run 终态或有未配对工具调用——可尝试恢复</span>
@@ -1335,6 +1497,31 @@ export default function App() {
               }}
               onClose={() => setDismissedDecisions(pendingDecisions)}
             />
+          )}
+          {/* #1030（缺陷②/③，AC2/AC3）：待裁决横幅——**主动**出现，两层文案。
+              挂在与 canRecover 无关的位置：裁决与「恢复会话」是两件事，前者不需要
+              用户先点后者、也不需要先撞一次 409。清单来自后端只读端点（#22）。
+
+              第一层人话（adjudicationHeadline）+ 一个真正的动作（去裁决）；
+              协议原文（tool_call_id / POST /recover / verdict 枚举）只进 <details>
+              折叠层——这是 Kubernetes reason/message 双层的 ADAPT：默认给人话，
+              要排查的人展开仍有原文，两者都不丢（AC2 要求"只在折叠层出现"）。
+              「去裁决」与面板自身同为展开入口：用户关掉面板后仍能重新打开
+              （dismissedDecisions 只收起当前这一份，横幅不会跟着消失）。 */}
+          {hasPendingDecisions && pendingDecisions && !showDecisionPanel && (
+            <div className="adjudication-banner" role="status" aria-live="polite">
+              <span className="adjudication-headline">
+                {adjudicationHeadline(pendingDecisions.length)}
+              </span>
+              <button
+                className="adjudication-open-btn"
+                onClick={() => setDismissedDecisions(null)}
+              >
+                <Gavel size={14} />
+                去裁决
+              </button>
+              <AdjudicationTechDetail message={recoverState.message} />
+            </div>
           )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
@@ -1435,6 +1622,8 @@ export default function App() {
                   />
                   <Composer
                     streaming={streaming}
+                    /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
+                    ownership={ownership}
                     constraintInputPending={constraintInputPending}
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
@@ -1446,8 +1635,10 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
-                    /* #825（MM-04）：附图上传挂会话——`null`（新建态）时入口禁用并说明。 */
+                    /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
+                       懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}
+                    onEnsureSession={ensureSession}
                     onCancel={cancelStream}
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
                     onSteerItem={handleSteerItem}
@@ -1504,6 +1695,7 @@ export default function App() {
           onJumpToApproval={jumpToApproval}
           panel={panel}
           onPanelAction={onPanelAction}
+          awaitingDecision={hasPendingDecisions}
         />
       </main>
 

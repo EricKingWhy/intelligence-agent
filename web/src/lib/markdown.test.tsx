@@ -110,3 +110,127 @@ describe('T6 — 围栏语言提取与代码块控件（#99）', () => {
     expect(html).not.toContain('md-code md-code-wrap');
   });
 });
+
+/** 遍历渲染树收集所有元素节点（结构断言用；不依赖 DOM）。 */
+function collectElements(nodes: unknown, out: AnyEl[] = []): AnyEl[] {
+  if (Array.isArray(nodes)) {
+    nodes.forEach((n) => collectElements(n, out));
+    return out;
+  }
+  if (nodes && typeof nodes === 'object' && 'type' in nodes) {
+    out.push(nodes as AnyEl);
+    collectElements((nodes as AnyEl).props?.children, out);
+  }
+  return out;
+}
+
+function anchorsOf(nodes: ReturnType<typeof renderMarkdown>): AnyEl[] {
+  return collectElements(nodes).filter((n) => n.type === 'a');
+}
+
+/** 取元素（含嵌套）的纯文本内容。 */
+function textOf(node: unknown): string {
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (node && typeof node === 'object' && 'props' in node) return textOf((node as AnyEl).props?.children);
+  return '';
+}
+
+describe('链接渲染（#1096 — 对话区出处 URL 可点）', () => {
+  it('[text](https://…) 渲染为可点 <a>：新标签页 + rel=noopener noreferrer', () => {
+    const nodes = renderMarkdown('见 [文档](https://example.com/docs)。');
+    const anchors = anchorsOf(nodes);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://example.com/docs');
+    expect(anchors[0].props.target).toBe('_blank');
+    expect(anchors[0].props.rel).toBe('noopener noreferrer');
+    expect(textOf(anchors[0])).toBe('文档');
+  });
+
+  it('裸 https://… 自动链接化（Slack 式 autolink）', () => {
+    const nodes = renderMarkdown('来源 https://example.com/a/b');
+    const anchors = anchorsOf(nodes);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://example.com/a/b');
+    expect(anchors[0].props.target).toBe('_blank');
+    expect(anchors[0].props.children).toBe('https://example.com/a/b');
+  });
+
+  it('裸 URL 后的句末标点/中文正文不被吞进链接（中英文标点）', () => {
+    const en = anchorsOf(renderMarkdown('详见 https://example.com/a, 再见'));
+    expect(en).toHaveLength(1);
+    expect(en[0].props.href).toBe('https://example.com/a');
+    const zh = anchorsOf(renderMarkdown('详见 https://example.com/a。'));
+    expect(zh).toHaveLength(1);
+    expect(zh[0].props.href).toBe('https://example.com/a');
+    // 中文无空格：URL 后紧跟全角逗号+正文，链接须止于全角标点
+    const cjk = anchorsOf(renderMarkdown('见 https://example.com/raw，危险链接'));
+    expect(cjk).toHaveLength(1);
+    expect(cjk[0].props.href).toBe('https://example.com/raw');
+  });
+
+  it('url 含配对括号不被截断（P3 回归）', () => {
+    const anchors = anchorsOf(renderMarkdown('见 [词条](https://en.wikipedia.org/wiki/Foo_(bar))。'));
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://en.wikipedia.org/wiki/Foo_(bar)');
+    expect(textOf(anchors[0])).toBe('词条');
+  });
+
+  it('javascript: / data: / 相对 / 退化 scheme 不链接化（安全回归）', () => {
+    expect(anchorsOf(renderMarkdown('[点我](javascript:alert(1))'))).toHaveLength(0);
+    expect(anchorsOf(renderMarkdown('[点我](JavaScript:alert(1))'))).toHaveLength(0);
+    expect(anchorsOf(renderMarkdown('[x](data:text/html,<b>1</b>)'))).toHaveLength(0);
+    expect(anchorsOf(renderMarkdown('[x](//evil.example.com)'))).toHaveLength(0);
+    expect(anchorsOf(renderMarkdown('[x](https://)'))).toHaveLength(0);
+    expect(anchorsOf(renderMarkdown('[](https://example.com)'))).toHaveLength(0);
+    // 危险 markdown 链接按原文纯文本呈现，内容不被静默丢弃
+    const html = renderToStaticMarkup(
+      createElement('div', null, ...renderMarkdown('[点我](javascript:alert(1))')),
+    );
+    expect(html).toContain('javascript:alert(1)');
+    expect(html).not.toContain('href=');
+  });
+
+  it('大写 scheme 一致识别（P4 回归）', () => {
+    const bare = anchorsOf(renderMarkdown('见 HTTPS://example.com/x'));
+    expect(bare).toHaveLength(1);
+    expect(bare[0].props.href).toBe('HTTPS://example.com/x');
+    const md = anchorsOf(renderMarkdown('[x](HTTP://example.com)'));
+    expect(md).toHaveLength(1);
+    expect(md[0].props.href).toBe('HTTP://example.com');
+  });
+
+  it('链接 label 内可含 **bold** / `code`（P4 回归）', () => {
+    const anchors = anchorsOf(renderMarkdown('见 [**文档**](https://example.com) 与 [`code`](https://b.co)'));
+    expect(anchors).toHaveLength(2);
+    expect(anchors[0].props.href).toBe('https://example.com');
+    expect(collectElements(anchors[0]).map((n) => n.type)).toContain('strong');
+    expect(textOf(anchors[0])).toBe('文档');
+    expect(collectElements(anchors[1]).map((n) => n.type)).toContain('code');
+  });
+
+  it('label 内裸 URL 不产生嵌套 <a>（P3 回归）', () => {
+    const anchors = anchorsOf(renderMarkdown('[https://x.com](https://y.com)'));
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://y.com');
+    expect(textOf(anchors[0])).toBe('https://x.com');
+    // label 含中英混合正文 + 裸 URL，仍只一个 <a>
+    expect(anchorsOf(renderMarkdown('[见 https://x.com 这里](https://y.com)'))).toHaveLength(1);
+  });
+
+  it('普通文本不受影响（不产生 <a>，仍是纯文本 span）', () => {
+    const nodes = renderMarkdown('这是一段普通文本，没有链接。');
+    expect(anchorsOf(nodes)).toHaveLength(0);
+    expect((nodes[0] as AnyEl).props.children[0].props.children).toBe('这是一段普通文本，没有链接。');
+  });
+
+  it('行内 **bold** / `code` 与链接共存时各自渲染', () => {
+    const nodes = renderMarkdown('**重点**：`code` 见 [文档](https://example.com)');
+    const anchors = anchorsOf(nodes);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].props.href).toBe('https://example.com');
+    const types = collectElements(nodes).map((n) => n.type);
+    expect(types).toContain('strong');
+    expect(types).toContain('code');
+  });
+});

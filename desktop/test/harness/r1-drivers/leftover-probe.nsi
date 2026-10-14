@@ -15,12 +15,19 @@ SilentInstall silent
 ShowInstDetails hide
 
 !include "LogicLib.nsh"
+!ifndef PROBE_CLEANUP
+  !error "PROBE_CLEANUP is required"
+!endif
+!include "${PROBE_CLEANUP}"
 
 !ifndef PROBE_TARGET
   !error "PROBE_TARGET is required"
 !endif
 !ifndef PROBE_CONTROL
   !error "PROBE_CONTROL is required"
+!endif
+!ifndef PROBE_RESULT
+  !error "PROBE_RESULT is required"
 !endif
 
 Section
@@ -54,9 +61,21 @@ Section
     StrCpy $6 "ok"
     FileClose $8
   ${EndIf}
-  FileOpen $9 "$TEMP\leftover-probe-result.txt" w
+  StrCpy $iaPlainPath "$0"
+  StrCpy $R5 "$iaPlainPath"
+  Call iaBuildLongPath
+  StrCpy $0 "$iaPlainPath"
+  System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'
+  Pop $R2
+  StrCpy $R1 "$1"
+  StrCpy $0 "$iaDeleteTarget"
+  System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'
+  Pop $R3
+  StrCpy $R4 "$1"
+  FileOpen $9 "${PROBE_RESULT}" w
   FileWrite $9 "target_len=$4 unprefixed=[$2] prefixed=[$3] control_short=[$5] deepwrite=[$6]$\r$\n"
-  FileWrite $9 "target=[$0]$\r$\n"
+  FileWrite $9 "attrs_raw=$R1 error_raw=$R2 attrs_helper=$R4 error_helper=$R3 helper_path=[$iaDeleteTarget]$\r$\n"
+  FileWrite $9 "target=[$R5]$\r$\n"
   FileClose $9
   DeleteRegKey HKCU "Software\IA901Probe"
 SectionEnd

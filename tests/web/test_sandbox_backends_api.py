@@ -3,6 +3,7 @@
 `probe_all_capabilities` 明确标注"给选择器 UI 用"——选项 A 的"运行位置"
 选择器需要真实可用性数据（不画饼：只显示实际探针结果）。
 """
+
 import pytest
 from starlette.testclient import TestClient
 

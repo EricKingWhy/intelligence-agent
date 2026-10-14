@@ -93,6 +93,7 @@ from agent_harness.model.config import (
     ConfigError,
     ModelConfig,
     UnsupportedReasoningEffort,
+    warn_unadopted_catalog_entries,
 )
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
@@ -101,6 +102,7 @@ from agent_harness.sandbox import (
     SUPPORTED_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
+    default_backend_for_platform,
     probe_all_capabilities,
 )
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -613,7 +615,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # （按平台：Windows ⇒ docker，否则 local，见 `create_app` 的
+    # `default_backend_for_platform()`）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
@@ -1165,7 +1168,12 @@ class AppState:
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
         self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
-            root=Path(settings.workspace_dir), backend="local"
+            root=Path(settings.workspace_dir),
+            # #1048 AC1：部署默认按平台解析——受影响（Windows/NTFS）平台默认
+            # docker（不可用即 409 fail-closed，绝不回落 local/PSEC）；其余平台
+            # 默认 local（无 NTFS hard link 对象身份问题）。显式 `sandbox_backend`
+            # 仍优先于本默认（registry 的「显式 > 部署默认」）。
+            backend=default_backend_for_platform(),
         )
         # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
         # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。
@@ -2091,6 +2099,10 @@ def create_app(
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
+        # #1094：启动期反馈——AGENT_MODELS 中因 provider 与已知链不一致而不会被采纳的
+        # 条目发一条 warning（条目名 + 原因）。只反馈，不阻断启动；坏 catalog 由本函数
+        # 记 warning 后返回，既有响亮 ConfigError 仍发生在实际使用路径。
+        warn_unadopted_catalog_entries(settings)
         # ARCH-7（#150）：启动期单实例锁。同一 session root 的第二个进程必须
         # 响亮失败——跨进程同时 append 会话 JSONL 会产出重复 seq / 交错写，
         # RunManager 的 run 归属共识也只在进程内有效；CLI 与 Web 并发同样被
@@ -2384,6 +2396,11 @@ def create_app(
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
 
+    # #1048 AC5/AC6：本地 REST 显式导出工作区（副本 → 全新宿主目录；独立 router）。
+    from agent_harness.web.workspace_export import register_workspace_export_routes
+
+    register_workspace_export_routes(app, validate_session_id=validate_session_id)
+
     # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
     # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
     from agent_harness.web.model_providers import register_model_provider_routes
@@ -2611,6 +2628,20 @@ def create_app(
         if cwd is None:
             return empty_project_instruction_status("no_cwd")
         store = project_instruction_store(app.state.agent.settings)
+        registry = service.workspace_registry
+        if registry.exists(session_id):
+            # #1048 AC8：Docker（及任何非 local 子进程）后端的工作区不在宿主项目
+            # 目录上，指令必须经 Sandbox/POSIX 语义读取；宿主 `cwd` 是宿主路径，
+            # 只有 local 后端才可用。判据与 assembly 同源
+            # （`uses_sandbox_path_semantics`：只有 `LocalSubprocessSandbox` 为宿主语义）。
+            from agent_harness.assembly import uses_sandbox_path_semantics
+
+            sandbox = registry.get(session_id)
+            if uses_sandbox_path_semantics(sandbox):
+                await asyncio.to_thread(
+                    store.reload_for_sandbox_session, session_id, sandbox,
+                )
+                return store.status_for_session(session_id)
         await asyncio.to_thread(store.reload_for_session, session_id, cwd)
         return store.status_for_session(session_id)
 
@@ -3620,6 +3651,22 @@ def create_app(
             # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/sessions/{session_id}/recovery")
+    async def get_session_recovery(session_id: str) -> dict[str, Any]:
+        """待裁决清单（#1049，**只读**）：``{pending_decisions: [...]}``。
+
+        形状与 ``POST /recover`` 409 detail 的 ``pending_decisions`` 逐字段一致
+        （同一规则源 ``_reconcile_pending``，#596 / 前端 ``parsePendingDecisions``
+        直接复用）。零写入；会话有在途 run 时为空。非法 id → 422、不存在 → 404、
+        日志损坏 → 409（与 recover 同一前导）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            pending = await service.pending_decisions(session_id)
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
+            raise http_error(e) from e
+        return {"pending_decisions": pending}
 
     @app.get("/api/recovery/interrupted")
     async def list_interrupted_recoveries() -> dict[str, Any]:

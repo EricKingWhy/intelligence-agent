@@ -1,0 +1,1 @@
+2026-10-14	#1082 recover/pending_decisions 共用只读恢复预检的独立双轴审查（fresh 会话；Correctness/Standards 双轴并行、实现者不自审）：P2（两调用方残留与 helper 重复的 validate+ensure，共 4 行删除，行为等价）+ 3×P4（docstring"不可能发生"→"在机制上被消除"、返回注解 list→list[SessionEvent]、PORT DESIGN 改按"#1082 票面依据"表述）全部修回；审查 verdict REQUEST_CHANGES→修回后通过。范围 = 2 笔（af8416af 实现 + 4c9e4cc8 修回）。	bd78412f..4c9e4cc8

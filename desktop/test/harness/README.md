@@ -26,8 +26,12 @@ because the node-runtime lock rules (#919 Q11) live in the second one.
 
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
-| `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (5) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 12/12 red, 0 survivors, restores identical (sha256 `edbf02d4…`, `f99f887a…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names — and the disposal rounds: the failure leg read by the read's own form and the label-name alphabet, the depth-2 define token, the quoted-span operand set, the define-carried recursive delete and the `!include` set, the two messages, and the divider-less `${Switch}` body | 111/111 red, 0 survivors, restore identical (sha256 `482a65e0…`) |
+| `teeth-check.mjs` | `installer/installer-directories.nsh` (7 mutations) and `installer.nsh` (5) | the promote site's leftover record (#904): long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch — plus the #919 rules: the failed delete's exit code (Q6) and the sweep's arming, declined branch, prompt and ask-before-delete (Q8) | 12/12 red, 0 survivors, restores identical (sha256 `1afc1a15…`, `131fb66c…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule — among them the #919 rules: the backup-site arming requirement (Q1/Q2/Q3), the sweep exit-code and prompt rules (Q3/Q8), the rollback record's place on the failure branch (Q7), the prepared-target delete options and the stray scan reading code (Q4), and the node engines minor floor (Q11) — plus the #919 review dispositions: the candidate/arming quote spellings and the fail-closed reads (F1), the `!insertmacro` in the arming window (F1/A4), the declined branch's reach to the delete pass (F3), the unclosed restore window (F2), the declined exit in the dead-branch scan (S2), and the engines floor anchor and patch (S4) — the disposition review's rules: the window's insert/define/include/other-statement readings (R1/R2), the whole-window candidate source (N1), and the delete loop's tail as part of the pass (R3) — and the fix round's review: the loop span read from any label reference, the hop chase into the pass, and the `${...}` token taking dotted names — and the disposal rounds: the failure leg read by the read's own form and the label-name alphabet, the depth-2 define token, the quoted-span operand set, the define-carried recursive delete and the `!include` set, the two messages, and the divider-less `${Switch}` body | 116/116 red, 0 survivors, restore identical (sha256 `77745ea8…`) |
+
+The last column records what each harness printed on a CRLF worktree
+(`core.autocrlf=true`); `teeth-check-guards.mjs` pins the same file’s LF
+form in `GUARD_BASELINE_SHA256`.
 
 The #919 batch added five mutations to `teeth-check.mjs` (the failed delete's
 exit code plus the four installer.nsh sweep rules — the first entries that do
@@ -49,15 +53,28 @@ scripts, and its own two fix rounds added fourteen and then seven (the
 failure-leg forms and the label-name alphabet; the depth-2 define token, the
 quoted-span operand set, the define-carried delete, the `!include` set, the two
 messages, the `${Switch}` body and the baseline digest) — the harnesses now walk
-111 guard mutations and 12 installer ones. Per protocol §8.3 #4 the disposal
+116 guard mutations and 12 installer ones. The round-by-round numbers above are
+as each round recorded them; this batch added two more (the call-site rule, and
+this round's review the reverted depth-aware divider). Per protocol §8.3 #4 the disposal
 round's new mutations share test-level failure sets (five single-test sets plus
 one that fails seven tests; the assertion diffs inside a shared test still
 differ, measured), so they are not cited as per-rule discrimination.
 Both were re-run from the checkout on 2026-10-10
-with 0 survivors and byte-identical restores. The disposition's first
+with 0 survivors and byte-identical restores — that is the #919 disposal’s own
+run. The digests in the last column are what each harness printed on this
+checkout's current text. The disposition's first
 `teeth-check-guards.mjs` run also caught a real gap in the disposition itself:
 the candidate-copy mutation survived (every fixture armed with `"1"`), which is
 why the exemption's four spellings are asserted with the flag off.
+
+`teeth-check.mjs`'s F1 mutation had to keep its anchor across #1040: the label
+that commit added (`iaPromoteBackupAlreadyLeftover:`) sits between the probe
+block and the clear call, so a bare `clearCall` anchor matched nothing, the
+mutation stopped applying, and the harness reported it as a survivor. #1090
+carries the label inside the wrapped region, so read, probe, drop and clear move
+down together; the measured run is back to 12/12 red, 0 survivors. The rules
+that fire on it are the relative bound and the constant-false detector, not the
+absolute bound — the wrapped region starts below the delete.
 
 Run from `desktop/`:
 
@@ -207,15 +224,24 @@ under `%TEMP%\ia-r1-drivers` unless `-EvidenceDir` / `-Keep` say otherwise.
 
 | file | role |
 | --- | --- |
-| `drive-r1-update.ps1` | end-to-end update driver: install #1 → plant payload → install #2 → assert. `-Case success` plants a >MAX_PATH tree (only a working long-path prefix can remove it); `-Case failure` plants a DELETE-denied child (promote must record the leftover instead of orphaning it); `-Case junction` (#904 item 5) plants a junction and asserts promote refuses the backup, records it and leaves the link and its target intact; `-Case sweep` (#904 item 4) drives the uninstaller with four hand-built siblings (deletable / junction-bearing / unbraced / shape-invalid) through two launches: a plain launch (rc 0 for every artifact) and an in-place launch (rc 2 with the sweep on the fixed artifact, rc 0 with no sweep on the pre-#904 one). Installs only under `%LOCALAPPDATA%\Programs\IA Installer Test*` and asserts the real product dirs are untouched |
-| `leftover-probe.nsi` | compiled with `/DPROBE_TARGET=<long dir>` / `/DPROBE_CONTROL=<short dir>`; reports both `${FileExists}` forms on the long target, the short control, and a deep write attempt |
-| `run-leftover-probe.ps1` | builds the >MAX_PATH tree, compiles and runs the probe from it, prints the reading, removes the scratch tree |
+| `drive-r1-update.ps1` | end-to-end update driver: install #1 → plant payload → install #2 → assert. `-Case success` plants a >MAX_PATH tree (only a working long-path prefix can remove it); `-Case failure` plants a DELETE-denied child (promote must record the leftover instead of orphaning it); `-Case junction` (#904 item 5) plants a junction and asserts promote refuses the backup, records it and leaves the link and its target intact; `-Case sweep` (#904 item 4) drives the uninstaller with four hand-built siblings (deletable / junction-bearing / unbraced / shape-invalid) through two launches: a plain launch (rc 0 for every artifact) and an in-place launch (rc 2 with the sweep on the fixed artifact, rc 0 with no sweep on the pre-#904 one); `-Case prior-pointer` (#1021) seeds a real shape-valid backup pointer while the app exe is present, then asserts the update records and retains the old backup without returning a false failure. Installs only under `%LOCALAPPDATA%\Programs\IA Installer Test*` and asserts the real product dirs are untouched |
+| `drive-r3-recovery.ps1` | real Windows recovery driver for #915/#1040: interrupts after the app directory swap, then tests `-Choice restore`, `continue`, and `silent` against the production installer configuration. `-Choice continue -AfterContinue cancel` verifies the old app is restored when the user cancels; `-AfterContinue hard-kill-restore` kills after choosing fresh and verifies the next run can restore. `-AbsentInstallDirectory` covers the pre-`SetOutPath` state; `-BlockRollback` proves refusal keeps the backup; `-FailLeftoverRecord` proves a failed recovery-journal write stops with rc 2 and preserves the backup pointer; adding `-LeaveFailurePromptOpen` exercises the bounded exit timeout and continued state checks. Verifies exit codes, app launch, backup/pointer state, test registry and shortcut cleanup, and real product directories |
+| `fileexists-probe.nsi` | probe template with a marker for the current production `iaProbePath` function; reports results for an existing >MAX_PATH executable path, a missing long path and an existing short path |
+| `run-fileexists-probe.ps1` | injects the production `iaProbePath` function and `iaBuildLongPathBody`, creates isolated long and short file controls, asserts `1 / 0 / 1`, and removes the scratch tree. Run with `powershell -File r1-drivers/run-fileexists-probe.ps1` |
+| `leftover-probe.nsi` | compiled with `/DPROBE_TARGET=<long dir>` / `/DPROBE_CONTROL=<short dir>`; reports both `${FileExists}` forms, raw `GetFileAttributes`, and the production `iaBuildLongPath` result on the same >MAX_PATH directory, plus the short control and a deep write attempt |
+| `run-leftover-probe.ps1` | builds a >MAX_PATH tree, compiles the probe against the production cleanup helper, asserts the helper sees the existing directory while the unprefixed query does not, and removes the scratch tree |
+| `process-gate-probe.nsi` | probe template with markers for the production `iaClassifyRunningProduct` / `iaRequireNoRunningProduct` functions (#914); records the production answer, the stock app-builder-lib `FIND_PROCESS` answer on the same state, and whether the gate returned |
+| `run-process-gate-probe.ps1` | injects both production functions and drives four legs against real processes: `none` (empty tree — answer 0, gate returns), `runtime` (a headless image under `resources\python` — answer 11, gate stops it and the PID is gone), `client` (a live image in the install root — answer 12, gate exits 2 and the PID stays alive), `unknown` (an install path the query cannot parse — nothing proven clean, gate exits 2). Run with `powershell -File r1-drivers/run-process-gate-probe.ps1` |
+| `stage-damaged-probe.nsi` | probe template with markers for the production `iaStageApplication` macro plus everything it calls (`iaProbePath`, the two gate functions, the backup-pointer macros, the whole `installer-cleanup.nsh`); it runs the real macro and writes a result line only when the macro returns — a gate refusal `Quit`s first and leaves no file (#914 review Axis A) |
+| `run-stage-damaged-probe.ps1` | injects the production staging macro and drives four legs, three of which the pre-fix macro could not pass: `intact-clean` (app.exe present, nothing running — gate returns and the tree is renamed aside, the ordinary update path), `damaged-runtime` (no app.exe, headless image under `resources\python` running — the gate runs anyway, stops it and returns without staging), `damaged-rootproc` (no app.exe, live image in the install root — gate exits 2, PID alive, tree untouched), `damaged-unknown` (no app.exe, install path the query cannot parse — gate exits 2). `-DirectoriesSource <path>` points the legs at another revision of the include, which is how the red proof is produced. Run with `powershell -File r1-drivers/run-stage-damaged-probe.ps1` |
 
 ```powershell
 # test artifact first (prints the installer path it built):
 node scripts/test-windows-installer.mjs --compile-only
 powershell -File r1-drivers/drive-r1-update.ps1 -Installer <installer-test.exe> -Tag t1 -Case success -Expect fixed
 powershell -File r1-drivers/run-leftover-probe.ps1
+powershell -File r1-drivers/run-process-gate-probe.ps1
+powershell -File r1-drivers/run-stage-damaged-probe.ps1
 ```
 
 `drive-r1-update.ps1` is the driver the #901 evidence logs came from (logs stay
@@ -229,3 +255,28 @@ destroyed). `run-leftover-probe.ps1` printed
 `target_len=327 unprefixed=[false] prefixed=[true] control_short=[true] deepwrite=[failed]`
 and removed its scratch tree. The `success` and `failure` cases were last run
 from the checkout on 2026-10-09 with the same driver.
+
+`run-process-gate-probe.ps1` (#914) was last run 2026-10-12 from the checkout
+(twice, identical readings): `none exit=0 answer_before=0 stock=1 gate_returned=1
+answer_after=0`; `runtime exit=0 answer_before=11 stock=1 gate_returned=1
+answer_after=0` with the probe process `gone`; `client exit=2 answer_before=12
+stock=1 gate_returned=0` with the probe process `alive`; `unknown exit=2
+answer_before=1 stock=1 gate_returned=0`. The stock `FIND_PROCESS` predicate
+answers `1` ("not running") on **all four** legs — the same reading it gives on
+an empty tree — which is the measured root cause of #914: at exactly one
+matching process the shipped guard cannot tell a live service from nothing.
+
+`run-stage-damaged-probe.ps1` (#914 review Axis A) was last run 2026-10-13 from
+the checkout, twice, identical readings: `intact-clean exit=0
+stage_returned=1 answer=0 probe=1` with the tree renamed to
+`<dir>.old-{guid}`; `damaged-runtime exit=0 stage_returned=1 answer=0 probe=0`
+with the probe process `gone` and no `.old-` sibling; `damaged-rootproc exit=2`
+with no result file, the process `alive` and the tree untouched;
+`damaged-unknown exit=2` with no result file. The red proof is the same driver
+against the pre-fix include
+(`-DirectoriesSource <pre-fix installer-directories.nsh>`): `intact-clean` still
+passes (the control), and the other three legs fail with `answer=` **empty** —
+the macro never called the gate at all on a tree without the app executable, and
+the live service was left running (`damaged-runtime`: exit 0, process survived;
+`damaged-rootproc` and `damaged-unknown`: exit 0 instead of 2). That empty
+reading is the defect the fix removes, measured rather than argued.

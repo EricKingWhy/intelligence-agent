@@ -13,7 +13,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getSessionRecovery,
   listInterruptedRecoveries,
+  NotFoundError,
   recoverSession,
   RecoverError,
   type PendingDecision,
@@ -368,5 +370,73 @@ describe('#357 listInterruptedRecoveries（契约 5，只读列表）', () => {
   it('非 2xx ⇒ 抛错（不静默当空列表）', async () => {
     captureFetch(500, { detail: 'boom' });
     await expect(listInterruptedRecoveries()).rejects.toThrow(/500/);
+  });
+});
+
+// ── #1049 只读端点 / #1030 主动发现路径 ──
+//
+// `GET /api/sessions/{id}/recovery` → `{pending_decisions: [...]}`，与 POST /recover
+// 409 detail 的清单**逐字段同源**（同一后端 `_reconcile_pending`），因此形状防御直接
+// 复用 `parsePendingDecisions`——本组用例正是在锁这条"同源"契约：同一个解析器、
+// 同一套整组回落纪律，不在这里长出第二份。
+
+describe('getSessionRecovery — 待裁决清单只读读面（#1049 / #1030）', () => {
+  it('打对端点且 GET、无 body（只读，零写入）', async () => {
+    const { calls } = captureFetch(200, { pending_decisions: [] });
+    await getSessionRecovery('s-1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('/api/sessions/s-1/recovery');
+    expect(calls[0].init?.method ?? 'GET').toBe('GET');
+    expect(calls[0].init?.body).toBeUndefined();
+  });
+
+  it('session id 必须 URL 编码（会话 id 不是我们的输入法）', async () => {
+    const { calls } = captureFetch(200, { pending_decisions: [] });
+    await getSessionRecovery('a/b c');
+    expect(calls[0].url).toContain('/api/sessions/a%2Fb%20c/recovery');
+  });
+
+  it('富化条目按后端原样承载（与 409 detail 同一解析器）', async () => {
+    captureFetch(200, { pending_decisions: RICH_PENDING });
+    await expect(getSessionRecovery('s-1')).resolves.toEqual(RICH_PENDING);
+  });
+
+  it('空清单是**事实**（后端说此刻没有待裁决），返回 []，不抛错', async () => {
+    captureFetch(200, { pending_decisions: [] });
+    await expect(getSessionRecovery('s-1')).resolves.toEqual([]);
+  });
+
+  it('404 ⇒ NotFoundError（会话不存在），不是"没有待裁决"', async () => {
+    captureFetch(404, { detail: 'session not found' });
+    await expect(getSessionRecovery('s-1')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('422（非法 id）/ 409（日志损坏）⇒ 抛错，不回落空清单', async () => {
+    // 关键区分：`[]` 是"后端明确说没有待裁决"，"读不到"必须与它分开——
+    // 把读不到说成没事，正是 #1030 要消灭的谎报。
+    for (const status of [422, 409]) {
+      captureFetch(status, { detail: 'nope' });
+      await expect(getSessionRecovery('s-1')).rejects.toThrow();
+    }
+  });
+
+  it('信封/条目脏形状 ⇒ 抛错（不复用"整组回落 undefined"这条通道当空清单）', async () => {
+    // `parsePendingDecisions` 对脏形状返回 undefined。上层若把它当 `[]` 处理，
+    // 就等于用"解析失败"点亮"没事"——所以这里必须抛，调用方据此保持"未知"。
+    captureFetch(200, { pending_decisions: [{ tool_call_id: 'x' }] });
+    await expect(getSessionRecovery('s-1')).rejects.toThrow(/malformed/);
+
+    captureFetch(200, {});
+    await expect(getSessionRecovery('s-1')).rejects.toThrow(/malformed/);
+
+    captureFetch(200, null);
+    await expect(getSessionRecovery('s-1')).rejects.toThrow(/malformed/);
+  });
+
+  it('default_action 越出枚举（ABANDON）⇒ 整组抛错，不返回半真半假的清单', async () => {
+    captureFetch(200, {
+      pending_decisions: [{ ...RICH_PENDING[0], default_action: 'ABANDON' }],
+    });
+    await expect(getSessionRecovery('s-1')).rejects.toThrow(/malformed/);
   });
 });

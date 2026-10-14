@@ -265,4 +265,147 @@ for (const theme of ['dark', 'light'] as const) {
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
   });
+
+  /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
+     （看不清就没人去裁决，会话永远卡着）。这里**真量**而不是信注释里的算术：
+     `.pulse-awaiting-decision` 的文字色是 `color-mix(--warning 45%, --text-primary)`
+     压在 12% warning 底上。纯 `--warning` 在这个底上亮色实测 **2.91:1**（不达 AA），
+     混入 ink 后才够——本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --warning，
+     「≥4.5」那条立刻变红；谁把注释里的数字写成别的值，「<4.5」那条会替我们说话。 */
+  test(`[${theme}] #1030 待裁决徽标对比度 ≥4.5（亮/暗两主题）`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      // 坏死 run：run/started 之后没有终态 → 徽标落回运行族，再由待裁决压过。
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'user/message', data: { content: '待裁决对比度' }, seq: 3, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+        {
+          type: 'tool/call',
+          data: { tool_call_id: 'tc-aw', tool_name: 'bash', args: { command: 'find /' } },
+          seq: 4, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T,
+        },
+      ],
+      pendingDecisions: [
+        {
+          tool_call_id: 'tc-aw', tool_name: 'bash', state: 'UNKNOWN',
+          default_action: 'RETRY', risk_level: 'high',
+          probe: { verifiable: false, suggested_action: null },
+        },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+
+    const pulse = page.locator('.run-pulse');
+    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
+
+    const m = await measure(page, '.run-pulse.pulse-awaiting-decision');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] pulse-awaiting-decision color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.pulse-awaiting-decision contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // 注释里引用的"纯 --warning 不达标"那个读数也在这里**实测**，不靠算术：克隆同一个
+    // 真实节点、只把文字色改回纯 --warning，仍用**同一个 measure 解析器**量它在同一个
+    // 底上的比值（不能拿 getComputedStyle 的原始串直接喂 contrast——color-mix 的计算值
+    // 可能是 color(srgb …) 形式，只有 measure 内部的解析器认它，直接喂会得到 NaN）。
+    // 这样注释里的数字与代码、测试三者同源（审查 P2-2：此前三处写了 2.96 / 3.26 / ~2.8）。
+    // 只在亮色主题断言——暗色下 --warning 本身就够亮，那正是"为什么暗色看不出问题、
+    // 而 ink-mix 是亮色必需"的对照臂。
+    if (theme === 'light') {
+      await page.evaluate(() => {
+        const src = document.querySelector('.run-pulse.pulse-awaiting-decision') as HTMLElement;
+        const probe = src.cloneNode(true) as HTMLElement;
+        probe.id = 'tmp-plain-warning';
+        probe.style.color = 'var(--warning)';
+        src.parentElement!.appendChild(probe);
+      });
+      const pm = await measure(page, '#tmp-plain-warning');
+      const plainRatio = contrast(pm.color, pm.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[light] plain --warning on same tint ratio=${plainRatio.toFixed(4)}`);
+      expect(
+        plainRatio,
+        '纯 --warning 在亮色下必须不达 AA（这正是 ink-mix 的理由）',
+      ).toBeLessThan(4.5);
+    }
+
+    // 同色域的另两处：#1030 新增的横幅人话层与「去裁决」按钮用的是**同一条**
+    // color-mix 公式，但它们的底不是胶囊体而是页面底——底色不同则比值不同，必须
+    // 各量各的（不能靠"公式一样"外推）。两处都是 12px 正文，同样受 AA 约束。
+    // 横幅与面板互斥（面板在场时横幅让位，避免同一句话说两遍）⇒ 先关掉面板。
+    await page.locator('.recovery-decision-close').click();
+    await page.locator('.adjudication-banner').waitFor();
+    for (const sel of ['.adjudication-headline', '.adjudication-open-btn']) {
+      const mm = await measure(page, sel);
+      expect(contrast(mm.color, mm.bg), `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
+
+    // 审查 P2-4：Inspector 头标那一处必须量**真实节点**，不能拿 createElement 造的
+    // 影子元素顶替——影子只证明 CSS 规则存在，证明不了 `StepDetail` 真的把这个 class
+    // 挂上去了（`run-badge-${pulse.state}` 的拼装就是漏点）。Inspector 在 ≥1200px
+    // 默认展开（本用例 1440），故直接量 `.detail-header` 里那个真徽标。
+    const realBadge = page.locator('.detail-header .run-badge-awaiting-decision');
+    await expect(realBadge).toBeVisible();
+    const bm = await measure(page, '.detail-header .run-badge-awaiting-decision');
+    expect(contrast(bm.color, bm.bg), `.run-badge-awaiting-decision contrast (${theme})`)
+      .toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* 审查 P2-3：`.recover-conflict` 的文字色在同一次改动里从纯 `--warning` 换成了
+     ink-mix，却没进任何对比度守卫——它恰恰是新代码里唯一没被量过的 ink-mix 使用点。
+     这里把它纳入（同 `.adjudication-tech-body` 一起），否则"换回纯 --warning"不会有
+     任何测试变红。 */
+  test(`[${theme}] #1030 恢复冲突条与技术详情层对比度 ≥4.5`, async ({ page }) => {
+    // 需要 `isRecoverableRun` 为真才亮出「恢复会话」按钮（同 d-recover.spec.ts 的
+    // 崩溃夹具：run 无终态 + 一条未配对 tool/call），才能撞出带 detail 的 409。
+    await routeApi(page, {
+      sessions: [ROW],
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'user/message', data: { content: '崩溃前的问题' }, seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'model/completed', data: { content: '开始执行。' }, seq: 4, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+        {
+          type: 'tool/call',
+          data: { tool_call_id: 'call-1', tool_name: 'bash', args: { command: 'ls' } },
+          seq: 5, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T,
+        },
+      ],
+      onRecoverPost: async (route) => {
+        await route.fulfill({
+          status: 409,
+          body: JSON.stringify({ detail: '存在需要人工裁决的 UNKNOWN Operation（bash(tool_call_id=tc-x)）：先 POST /api/sessions/{id}/recover 携带 decisions=[{tool_call_id, verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / …）' }),
+          contentType: 'application/json',
+        });
+      },
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await page.locator('.recover-btn').click();
+    await expect(page.locator('.recover-conflict')).toBeVisible();
+
+    // 展开折叠层：技术详情是 12px 等宽正文，同样受 AA 约束（它承载协议原文）。
+    await page.locator('.recover-conflict details.adjudication-tech > summary').click();
+    await expect(page.locator('.recover-conflict .adjudication-tech-body')).toBeVisible();
+
+    for (const sel of ['.recover-conflict', '.recover-conflict .adjudication-tech-body']) {
+      const mm = await measure(page, sel);
+      expect(contrast(mm.color, mm.bg), `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 }

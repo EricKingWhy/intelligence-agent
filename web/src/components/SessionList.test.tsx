@@ -50,16 +50,22 @@ function render(props: {
   projects?: Project[];
   projectsError?: string | null;
   sessionsError?: string | null;
+  activeProjectId?: string | null;
+  selectedId?: string | null;
+  selectedCwd?: string | null;
 }): string {
   return renderToString(
     createElement(SessionList, {
       sessions: props.sessions ?? [],
       projects: props.projects ?? [],
-      selectedId: null,
+      selectedId: props.selectedId ?? null,
       liveSessionId: null,
       titlesById: {},
       onSelect: noop,
       onNew: noop,
+      activeProjectId: props.activeProjectId ?? null,
+      onSelectProject: noop,
+      selectedCwd: props.selectedCwd ?? null,
       projectActions: {
         create: noopAsync as never,
         rename: noopAsync as never,
@@ -146,5 +152,44 @@ describe('会话列表加载失败（F9）', () => {
     expect(html).toContain('s-2');
     expect(html).toContain('已损坏');
     expect(html).toContain('session-item-corrupted');
+  });
+});
+
+/** #1028：会话与选中项目脱钩 + 零归属提示。 */
+describe('归属提示（#1028）', () => {
+  const project = (id: string, title: string): Project => ({
+    id,
+    path: `/srv/${id}`,
+    title,
+    status: 'ok',
+    session_ids: [],
+    created_at: '2026-10-13T00:00:00+08:00',
+    updated_at: '2026-10-13T00:00:00+08:00',
+  });
+
+  it('选中的未归属会话就地标注「未分组（cwd: …）」（AC3）', () => {
+    const html = plain(render({ sessions: [session('s-1')], selectedId: 's-1', selectedCwd: '/home/hatch' }));
+
+    expect(html).toContain('session-item-owner');
+    expect(html).toContain('未分组（cwd: /home/hatch）');
+  });
+
+  it('未选中的会话不标 cwd（没有已加载的 cwd，不编路径）', () => {
+    const html = plain(render({ sessions: [session('s-1')], selectedId: 's-2', selectedCwd: '/home/hatch' }));
+
+    expect(html).not.toContain('session-item-owner');
+    expect(html).not.toContain('/home/hatch');
+  });
+
+  it('选中的项目行带 project-active（= 通用新建将继承其 cwd）', () => {
+    const html = render({ projects: [project('p1', '项目 alpha')], activeProjectId: 'p1' });
+
+    expect(html).toContain('project-active');
+  });
+
+  it('未选中的项目行不带 project-active', () => {
+    const html = render({ projects: [project('p1', '项目 alpha')], activeProjectId: null });
+
+    expect(html).not.toContain('project-active');
   });
 });

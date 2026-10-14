@@ -13,6 +13,7 @@ import {
   describeSessionError,
   detachSessionFromProject,
   getHostDirs,
+  getSandboxBackends,
   getModels,
   getAgentProfiles,
   getSessionEvents,
@@ -87,6 +88,23 @@ import {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('getSandboxBackends — capability probe', () => {
+  it('fetches the backend list without a workspace-specific query', async () => {
+    const { calls } = captureFetch(200, {
+      backends: [
+        { backend: 'docker', available: true, reason: null, details: {} },
+      ],
+    });
+
+    const result = await getSandboxBackends();
+
+    expect(calls[0].url).toBe('/api/sandbox-backends');
+    expect(result).toEqual([
+      { backend: 'docker', available: true, reason: null, details: {} },
+    ]);
+  });
 });
 
 describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {

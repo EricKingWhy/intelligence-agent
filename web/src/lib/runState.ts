@@ -10,7 +10,7 @@
  * that themselves come from events — no fabrication (zero-fake-metrics rule).
  */
 
-import { Activity, CircleDashed, CircleSlash, Loader2, PauseCircle, SquareCheckBig, SquareX } from 'lucide-react';
+import { Activity, CircleDashed, CircleSlash, Gavel, Loader2, PauseCircle, SquareCheckBig, SquareX } from 'lucide-react';
 import { EventType, type AgentEvent, type ConversationState } from '../types';
 import { formatDuration } from './format';
 
@@ -42,6 +42,7 @@ export type RunPulseState =
   | 'interrupted' // 最近一个 run 被进程重启打断（run/interrupted）——终态但非完成
   | 'cancelled' // run/failed.data.reason === 'cancelled'（客户端断连，中断 ≠ 错误）
   | 'paused' // #312：预算到顶的**非终态**暂停，等抬高绝对 ceiling 后同 run 恢复
+  | 'awaiting-decision' // #1030：有 Operation 等人工裁决——不裁决就永远走不动
   | 'failed';
 
 export interface RunPulseDescriptor {
@@ -72,20 +73,58 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   // 已暂停（#312）：预算到顶，**等着被恢复**——中性色 + 暂停图标。不能用
   // 「已完成」的绿对勾（那是"这场跑完了"），也不能用失败的红叉（没有失败）。
   paused: { label: '已暂停', className: 'pulse-paused', Icon: PauseCircle },
+  // 待裁决（#1030）：坏死 run（run_status 停在 'running'）与重启后的中断 run
+  // 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。这是与
+  // 「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --warning（"需要人
+  // 动手"，同 .interrupt-banner），**刻意不用 --info**：info 在本仓是"中性提示"，
+  // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色实测
+  // 2.91:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
+  // 等待是静止态，闪动会读成"还在跑"。
+  'awaiting-decision': { label: '待裁决', className: 'pulse-awaiting-decision', Icon: Gavel },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };
 
 /** Derive the run pulse for a conversation.
  *  `streaming` = useSession live mode (SSE attached). A conversation whose run
  *  hasn't emitted run/completed|failed but is no longer receiving frames is
- *  still 'running-family' — decided by run_status, not by client timers. */
+ *  still 'running-family' — decided by run_status, not by client timers.
+ *
+ *  `awaitingDecision`（#1030）= 后端 `GET /api/sessions/{id}/recovery` 报了非空
+ *  待裁决清单。**它是本函数唯一不来自 `conversation` 的输入**，而且必须如此：
+ *  坏死 run 的 `run_status` 停在 'running'（`projectRunInterrupted` 只改终态
+ *  会话），`run/interrupted` 也只说"上次怎么结束的"——两者都不含"现在卡在
+ *  等人裁决"这个事实。事件流里根本没有这个信号，唯一的读面就是那个只读端点
+ *  （不变量 #22：界面不自己造第二套真相，只投影后端给的事实）。 */
 export function deriveRunPulse(
   conversation: ConversationState | null,
   streaming: boolean,
+  awaitingDecision = false,
 ): RunPulseDescriptor {
   if (!conversation) {
     const r = PULSE_TABLE.idle;
     return { state: 'idle', label: r.label, className: r.className, Icon: r.Icon };
+  }
+
+  /* 待裁决**优先于** run_status 与中断标记（#1030 AC1/AC4）：它描述的是"现在
+     为什么走不动"（可行动、未收口），而 run_status / run_interrupted 描述的是
+     "上次跑到哪"（历史）。两者同时成立时让历史赢，用户看到的是一个读起来像
+     "已经结束、没事了"的中性态（已中断），而会话其实卡死——这正是 #1030 报的
+     最误导状态：横幅消失、根因仍在，发消息照样 409。
+
+     `awaitingDecision` 的来源限定（**不要读成"永远不会盖掉思考中"**）：调用方传的是
+     `recoverState.pendingDecisions` 非空，而那个字段有**两个**写入者——
+     ① 主动读面 `GET /api/sessions/{id}/recovery`（#1049）：在途 run 时后端返回 `[]`，
+        所以这一路**不会**把正在跑的会话说成待裁决；
+     ② `POST /recover` 的 409 载荷：`recover` **不判在途**（`session/service.py`：
+        "在途时同样的 RUNNING 行会进它的 409 pending_decisions"），所以这一路
+        **可能**带着 RUNNING 行进来。
+     即：本分支的"不会误报在途"只对 ① 成立。② 是既有的 409 路径（本票未改），
+     它把清单写进同一字段后，界面会按"有待裁决"呈现——这是刻意的保守取舍：
+     后端在 409 里明确说了"需人工裁决"，界面宁可如实转述后端，也不自行过滤
+     （过滤＝前端维护第二套裁决真相，不变量 #22）。登记为已知边界，见 #1030 交付报告。 */
+  if (awaitingDecision) {
+    const r = PULSE_TABLE['awaiting-decision'];
+    return { state: 'awaiting-decision', label: r.label, className: r.className, Icon: r.Icon };
   }
 
   // 中断优先于 run_status（BUG/OBS-007）——`projectRunInterrupted` 把 run_status
@@ -224,6 +263,11 @@ function coarsenPulseState(state: RunPulseState): string {
       // 粗化成「运行中」（那会让 Inspector 说"还在跑"而顶栏说"已暂停"）
       // 也不许并进「已完成」（它会诱发"任务完成了"的误读）。
       return '已暂停';
+    case 'awaiting-decision':
+      // #1030：同 #312 的理由——「待裁决」既不是「运行中」（它没在跑）也不是
+      // 「已中断」（它没结束，只是在等人）。粗化成任何一档都会让 Inspector 与
+      // 顶栏对同一会话各说一套。
+      return '待裁决';
     case 'interrupted':
       return '已中断';
     case 'cancelled':
@@ -248,7 +292,7 @@ function coarsenPulseState(state: RunPulseState): string {
  *  「首个 `run/started` 之后的第一个终态」属于首个 run。已对 8 个多 run 会话实测确认；
  *  若出现违反该不变量的旧日志（run1 未落终态就起了 run2），起止会配到两个 run 上——
  *  要修得先有真实反例，故仍用全表 `find`（这是**假设**，不是代码保证）。 */
-export function deriveRunSummary(conversation: ConversationState): {
+export function deriveRunSummary(conversation: ConversationState, awaitingDecision = false): {
   label: string;
   /** 首个 run 的绝对开始时间（ISO）。**缺失为 undefined**（没有 run/started 的裸会话）
    *  ——Inspector「开始」行要用，与 duration 同源，免得调用方再自己 find 一次。 */
@@ -257,30 +301,73 @@ export function deriveRunSummary(conversation: ConversationState): {
    *  运行中的 run 同样没有终态，也是 null。要区分请看 label。 */
   duration: string | null;
 } {
-  const label = coarsenPulseState(deriveRunPulse(conversation, false).state);
+  const label = coarsenPulseState(deriveRunPulse(conversation, false, awaitingDecision).state);
   const start = conversation.events.find((e) => e.type === EventType.RUN_STARTED)?.time;
   const end = conversation.events.find((e) => RUN_TERMINAL_TYPES.has(e.type))?.time;
   return { label, startedAt: start, duration: formatDuration(start, end) };
 }
 
-// ── #198：生效档位（Inspector 头标） ──
+// ── #198：生效档位（Inspector 头标）──
+// ── #1093：请求侧推理档位（Inspector 展示）──
+
+/** #1106：run/started 档位的共享 derive——`agent_profile` 与 `reasoning_effort`
+ *  **一个**口径（两处各写一遍就会漂移成两套真相）。
+ *
+ *  - `focusedRunId == null`：取**最后一个** `run/started` 携带的值——与"当前
+ *    这轮的运行条件"同口径（#198/#1093 既有行为，单 run 会话展示不变）。
+ *  - `focusedRunId != null`：取**信封 `run_id` === focusedRunId** 的那个
+ *    `run/started` 的值（#1106：聚焦早期 run 时徽标反映该 run 自己的档位，
+ *    而不是末次 run 的——聚焦/选中项的摘要栏反映选中项）。信封 `run_id`
+ *    是事件归属的权威（与 projection 同口径），`data.run_id` 不参与。
+ *    匹配不到任何 `run/started`、或该 run 未声明字段 → null——**不拿别的
+ *    run 的值顶替**（那正是本票要修的误读）。
+ *
+ *  字段缺失（旧数据 / 未声明）返回 null，调用方按"不可得"处理（不伪造
+ *  "main" / "default"）。 */
+function deriveRunStartedField(
+  events: AgentEvent[],
+  field: 'agent_profile' | 'reasoning_effort',
+  focusedRunId?: string | null,
+): string | null {
+  let last: string | null = null;
+  let focused: string | null = null; // null = 没找到聚焦 run 的 run/started（或该 run 未声明字段）
+  for (const e of events) {
+    if (e.type !== EventType.RUN_STARTED) continue;
+    const value = (e.data as Record<string, unknown> | undefined)?.[field];
+    if (typeof value === 'string' && value.length > 0) last = value;
+    if (focusedRunId != null && e.run_id === focusedRunId) {
+      focused = typeof value === 'string' && value.length > 0 ? value : null;
+    }
+  }
+  if (focusedRunId != null) return focused;
+  return last;
+}
 
 /**
- * 最后一个 `run/started` 携带的 agent_profile——纯事件真值，无状态。
+ * 生效 agent_profile——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
  *
  * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
  * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
- * 编造运行条件，正是本票要修的不可回溯根因）。多 run 会话取**最后一个**：
- * 与"当前这轮的运行条件"同口径。
+ * 编造运行条件，正是 #198 要修的不可回溯根因）。
+ *
+ * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
  */
-export function deriveAgentProfile(events: AgentEvent[]): string | null {
-  let profile: string | null = null;
-  for (const e of events) {
-    if (e.type !== EventType.RUN_STARTED) continue;
-    const value = (e.data as Record<string, unknown> | undefined)?.agent_profile;
-    if (typeof value === 'string' && value.length > 0) profile = value;
-  }
-  return profile;
+export function deriveAgentProfile(events: AgentEvent[], focusedRunId?: string | null): string | null {
+  return deriveRunStartedField(events, 'agent_profile', focusedRunId);
+}
+
+/**
+ * 请求侧 reasoning_effort——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
+ *
+ * 后端 #1093 起 run/started.data 在**有声明时**带 `reasoning_effort`（本轮请求侧
+ * 选中的 harness 档位名，如 "minimal"/"standard"/"deep"）；无声明（模型无能力 /
+ * web「默认」位置省略该字段）时**键缺席**——返回 null，调用方整段不渲染
+ * （不可得 ≠ 默认档，`11 §6.1`；绝不伪造 "default"）。
+ *
+ * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
+ */
+export function deriveReasoningEffort(events: AgentEvent[], focusedRunId?: string | null): string | null {
+  return deriveRunStartedField(events, 'reasoning_effort', focusedRunId);
 }
 
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──

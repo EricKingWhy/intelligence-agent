@@ -1,0 +1,1 @@
+2026-10-14	#729 initial integrity-label test review (Standards): PASS; P0/P1/P2/P3/P4=0/0/0/0/0. Change is confined to the Windows PSEC regression test; no production behavior changed. Evidence: docs/phase_status/2026-10.md #729 validation.	2e00b9622ab5c0cd4a79374cf9c6e77308a9c1e2..56cf3330d394c0a60a046b79d2a50360058446f1

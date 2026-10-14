@@ -74,7 +74,11 @@ from agent_harness.instance_lock import (
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+    warn_unadopted_catalog_entries,
+)
 from agent_harness.model.failure import PROVIDER_FAILURE_MESSAGES
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
@@ -1469,6 +1473,9 @@ def main() -> None:
     # 先配日志再取锁：逃生门降级时那条 WARNING 才落得进 agent.jsonl（AC7）。
     # setup_logging 幂等（子命令内重复调用只清一次 handlers）。
     setup_logging(settings.log_level, settings.workspace_dir)
+    # #1094：启动期反馈——AGENT_MODELS 中因 provider 与已知链不一致而不会被采纳的
+    # 条目发一条 warning。只反馈、不阻断启动（坏 catalog 由本函数记 warning 后返回）。
+    warn_unadopted_catalog_entries(settings)
     try:
         lock = InstanceLock(settings.workspace_dir).acquire()
     except InstanceLockError as error:
