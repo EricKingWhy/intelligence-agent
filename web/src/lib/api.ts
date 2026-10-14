@@ -365,13 +365,8 @@ export interface SandboxBackendEntry {
   details: Record<string, string>;
 }
 
-export async function getSandboxBackends(
-  workspacePath?: string,
-): Promise<SandboxBackendEntry[]> {
-  const query = workspacePath
-    ? `?workspace_path=${encodeURIComponent(workspacePath)}`
-    : '';
-  const res = await apiFetch(`/api/sandbox-backends${query}`);
+export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
+  const res = await apiFetch(`/api/sandbox-backends`);
   if (!res.ok) return [];
   const body: unknown = await res.json();
   const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;

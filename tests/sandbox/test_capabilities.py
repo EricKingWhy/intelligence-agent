@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -110,10 +109,13 @@ class TestProbeDocker:
         assert caps.reason is not None and "daemon" in caps.reason.lower()
 
     def test_probe_all_returns_available_backend_families(self):
-        """probe_all 展示 local、docker 与 Windows PSEC 能力。"""
+        """#1048 AC2：probe_all 只列**新会话可选**后端（local/docker）。
+
+        `windows_psec` 已降级为 legacy-only，不再进选择器。
+        """
         caps = probe_all_capabilities()
         backends = {c.backend for c in caps}
-        assert backends == {"local", "docker", "windows_psec"}
+        assert backends == {"local", "docker"}
         assert all(isinstance(c, SandboxCapabilities) for c in caps)
 
 
@@ -149,82 +151,10 @@ class TestProbeWindowsPsec:
         assert caps.reason is not None and "policy" in caps.reason.lower()
         assert calls == []
 
-    @pytest.mark.skipif(os.name != "nt", reason="PSEC workspace policy is Windows-only")
-    def test_probe_all_checks_the_selected_workspace_policy(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        import agent_harness.sandbox.capabilities as cap_mod
-
-        observed: list[dict[str, object]] = []
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_docker_capabilities",
-            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
-        )
-
-        def probe_psec(**kwargs):
-            observed.append(kwargs["config"])
-            return SandboxCapabilities(backend="windows_psec", available=True)
-
-        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
-
-        capabilities = probe_all_capabilities(windows_psec_workspace=str(tmp_path))
-
-        assert next(c for c in capabilities if c.backend == "windows_psec").available
-        assert len(observed) == 1
-        filesystem = observed[0]["filesystem"]
-        assert filesystem["readwritePaths"] == [str(tmp_path)]
-        assert filesystem["deniedPaths"]
-        assert observed[0]["fallback"] == {"allowDaclMutation": False}
-
-    @pytest.mark.skipif(
-        os.name != "nt", reason="Windows PSEC workspace is Windows-only"
-    )
-    def test_probe_all_validates_workspace_with_handle_chain_before_probing_mxc(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        import agent_harness.sandbox.capabilities as cap_mod
-        import agent_harness.sandbox.windows_psec as psec_mod
-
-        validated_roots: list[tuple[str, bool]] = []
-
-        def reject_reparse_root(path, *, create: bool, **_kwargs):
-            validated_roots.append((os.fspath(path), create))
-            raise PermissionError("reparse point rejected in workspace path")
-
-        monkeypatch.setattr(psec_mod, "_open_directory_chain", reject_reparse_root)
-
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_local_capabilities",
-            lambda: SandboxCapabilities(backend="local", available=True),
-        )
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_docker_capabilities",
-            lambda **_kwargs: SandboxCapabilities(backend="docker", available=False),
-        )
-        psec_probe_called = False
-
-        def probe_psec(**_kwargs):
-            nonlocal psec_probe_called
-            psec_probe_called = True
-            return SandboxCapabilities(backend="windows_psec", available=True)
-
-        monkeypatch.setattr(cap_mod, "probe_windows_psec_capabilities", probe_psec)
-
-        capabilities = cap_mod.probe_all_capabilities(
-            windows_psec_workspace=str(tmp_path),
-        )
-
-        psec = next(item for item in capabilities if item.backend == "windows_psec")
-        assert not psec.available
-        assert validated_roots == [(str(tmp_path), False)]
-        assert not psec_probe_called
+    # #1048 AC2：`probe_all_capabilities` 不再探测 / 列出 windows_psec（它已降级为
+    # legacy-only，仅用于恢复既有映射）。原先经由 probe_all 走 PSEC workspace 策略
+    # 报文校验的两条 Windows-only 用例随之退役；`probe_windows_psec_capabilities`
+    # 本身仍由本类下列用例直接覆盖。
 
     def test_probe_accepts_only_basecontainer_for_the_requested_policy(
         self,
