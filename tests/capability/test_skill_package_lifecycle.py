@@ -312,6 +312,47 @@ def test_install_snapshots_complete_package_and_enables_only_after_explicit_sele
     ) == "Guide content.\n"
 
 
+def test_install_rejects_junction_in_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """包内子目录是 Windows junction 时，共用的 reject_junctions 在复制前拦下。
+
+    与 MCP 侧 `tests/plugins/test_mcp_package_manager.py::test_install_rejects_junction_in_source`
+    同构：Linux 无真 junction，用 monkeypatch 把某个子目录标记为 junction。
+
+    与 MCP 的差异来自预检：MCP 的 `inspect_mcp_servers` 不扫 junction，junction 由复制期的
+    `ignore=_reject_junctions` 首次拦下；而 Skill 的 `inspect_skill_package` 会扫整棵树，若
+    junction 在预检时就可见，预检会先以 `UNSUPPORTED_JUNCTION` 拒绝，`reject_junctions` 永不触发。
+    因此这里让 junction 在**预检之后**才出现——这正是 `ignore=_reject_junctions` 这条复制期
+    防线要挡的 TOCTOU 窗口（预检看干净树，复制时源里已出现 junction）。
+    """
+    source = _complete_package(tmp_path / "source")
+    linked = source / "linked"
+    linked.mkdir()
+
+    junction_active = False
+
+    def fake_is_junction(path: Path) -> bool:
+        return junction_active and path == linked
+
+    monkeypatch.setattr(Path, "is_junction", fake_is_junction, raising=False)
+
+    real_inspected = package_manager._inspected
+
+    def inspected_then_arm_junction(*args: object, **kwargs: object) -> object:
+        nonlocal junction_active
+        report = real_inspected(*args, **kwargs)
+        # 预检已用干净树算完报告，再让 junction 出现（模拟预检与复制之间的窗口）。
+        junction_active = True
+        return report
+
+    monkeypatch.setattr(package_manager, "_inspected", inspected_then_arm_junction)
+
+    manager = SkillPackageManager(tmp_path / "workspace")
+    with pytest.raises(SkillPackageError, match="cannot be copied safely"):
+        manager.install(source)
+
+
 def test_install_rejects_name_change_between_preflight_and_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

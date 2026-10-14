@@ -418,6 +418,49 @@ def _inject_modified_paths(
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class _PlanAndPathsInjection:
+    """清单锚 / 最近修改文件块的选择与 token 预留（W-29 #383 / W-31.5 #417）。
+
+    #1084：`build()` 阈值前置决策与 `compact_now()` 预算预留必须得到**逐字相同**
+    的 plan/paths 文本与成本——此前两处各写一份同式代码，任一侧改动都会让自动/
+    手动压缩的预算分叉。值对象只承载纯决策；`token_estimate` 累加与
+    `_last_*_tokens` 记账仍由调用方执行（不把副作用复制进共享函数）。
+    """
+
+    plan_text: str | None
+    plan_tokens: int
+    paths_text: str | None
+    paths_tokens: int
+
+
+def _plan_and_paths_injection(
+    events: list[SessionEvent], fallback_period: int,
+) -> _PlanAndPathsInjection:
+    """纯事件推导：清单块 + 最近修改文件块的选择与各自 token 成本（两入口同源）。
+
+    选择规则见 `_should_inject_plan`（事件驱动 + 周期兜底；压缩后恒注入）与
+    `_render_modified_paths_block`（块跟着清单锚走）；两处 token 都在阈值判定前
+    计入估算（先计入再注入——注入了就计数，不计数 = 系统性低估）。
+    """
+    plan_state = _should_inject_plan(events, fallback_period)
+    plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+    plan_tokens = (
+        estimate_message_tokens([SystemMessage(content=plan_text)])
+        if plan_text is not None else 0
+    )
+    modified_paths = derive_modified_file_paths(events)
+    paths_text = (
+        _render_modified_paths_block(modified_paths)
+        if plan_text is not None and modified_paths else None
+    )
+    paths_tokens = (
+        estimate_message_tokens([SystemMessage(content=paths_text)])
+        if paths_text is not None else 0
+    )
+    return _PlanAndPathsInjection(plan_text, plan_tokens, paths_text, paths_tokens)
+
+
 def _with_artifact_ref(
     failures: list[CompactionFailure], artifact_ref: str | None,
 ) -> list[CompactionFailure]:
@@ -753,34 +796,22 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
-        # W-29 (#383)：清单重注入决策与成本（两条路径共用同一份决策）。决策是
-        # 纯事件推导（见 _should_inject_plan）；token 成本**先计入**本次估算再走
-        # 阈值判定——清单块确实会发给模型，不计数就是系统性低估（看板漏报同源
-        # 教训）。注入动作在各路径装配末段执行（压缩路径在重投影确认**之后**，
-        # 见 build 尾部）；压缩落 bracket 后会重估一次（进入"恒注入"状态）。
-        plan_state = _should_inject_plan(
+        # W-29 (#383) / W-31.5 (#417)：清单锚 + 最近修改文件块的**选择与 token 预留**
+        # 走同一个纯决策 owner（`_plan_and_paths_injection`）——与 `compact_now` 的预算
+        # 预留同源，两侧不再内联同式选择（#1084）。决策是纯事件推导（见
+        # `_should_inject_plan`）；token 成本**先计入**本次估算再走阈值判定——清单块
+        # 确实会发给模型，不计数就是系统性低估（看板漏报同源教训）。注入动作在各路径
+        # 装配末段执行（压缩路径在重投影确认**之后**，见 build 尾部）；压缩落 bracket
+        # 后会重估一次（进入"恒注入"状态）。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        plan_tokens = (
-            estimate_message_tokens([SystemMessage(content=plan_text)])
-            if plan_text is not None else 0
-        )
-        token_estimate += plan_tokens
+        plan_text = injection.plan_text
+        plan_tokens = injection.plan_tokens
+        paths_text = injection.paths_text
+        paths_tokens = injection.paths_tokens
+        token_estimate += plan_tokens + paths_tokens
         self._last_plan_tokens = plan_tokens
-        # W-31.5 (#417)：最近修改文件派生（纯函数，一次派生、两条路径共用）。
-        # 注入前提与清单锚绑定（块跟着清单锚走）；token 成本同清单块口径——
-        # 先计入再走阈值判定，注入了就计数（不计数 = 系统性低估，同 :326 教训）。
-        modified_paths = derive_modified_file_paths(session.events)
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
-        token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
         # W-06（#350）：进度核对块决策与成本（先计入再走阈值判定——注入了就
         # 计数，不计数 = 系统性低估，同清单块教训）。
@@ -820,25 +851,18 @@ class ContextBuilder:
         # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
         # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
         # 状态（判据①：压缩后模型输入含完整清单）。
-        plan_state = _should_inject_plan(
+        # W-31.5 (#417)：落 bracket 后重估路径块——`derive_modified_file_paths` 是
+        # 纯 TOOL_CALL 推导（含被 bracket shadow 的事件，bracket 只 shadow 不删，
+        # 结果不变），故与清单决策同走共享 helper；「是否注入」随 plan_text 重估：
+        # 压缩后恒注入清单 ⇒ 路径块可能从无到有，成本随之计入（同清单块记账口径）。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        if plan_text is not None:
-            plan_tokens = estimate_message_tokens([SystemMessage(content=plan_text)])
+        plan_text = injection.plan_text
+        plan_tokens = injection.plan_tokens
+        paths_text = injection.paths_text
+        paths_tokens = injection.paths_tokens
         self._last_plan_tokens = plan_tokens
-        # W-31.5 (#417)：落 bracket 后重估路径块——派生结果复用 pre-branch 的
-        # `modified_paths`（纯 TOOL_CALL 推导，bracket 只 shadow 不删事件，结果
-        # 不变），但「是否注入」随 plan_text 重估：压缩后恒注入清单 ⇒ 路径块
-        # 可能从无到有，成本随之计入（同清单块的记账口径）。
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
         self._last_modified_paths_tokens = paths_tokens
         # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
         # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
@@ -946,29 +970,12 @@ class ContextBuilder:
         else:
             messages, source_ranges = await self._prune_projection(session, pairs)
             anchor_ranges = source_ranges
-        # ── 保护事实（与 build 同一口径：只留最近一条 work_boundary）────────
-        all_protected_facts = derive_protected_facts(session.events)
-        latest_work_boundary = max(
-            (
-                fact for fact in all_protected_facts
-                if fact.type == "work_boundary"
-            ),
-            key=lambda fact: fact.source_seq,
-            default=None,
-        )
-        protected_facts = [
-            fact for fact in all_protected_facts
-            if fact.type != "work_boundary"
-            or fact.fact_id == (
-                latest_work_boundary.fact_id if latest_work_boundary else None
-            )
-        ]
-        protected_facts_messages = self._protected_facts_messages(protected_facts)
-        protected_facts_tokens = (
-            estimate_message_tokens(protected_facts_messages)
-            if protected_facts_messages
-            else 0
-        )
+        # ── 保护事实（复用 build 的共享选择器：只留最近一条 work_boundary）────
+        # #1084：不再自写"最新 work_boundary"筛选——与 `build` 共用
+        # `protected_facts_for_context`（单一 owner），避免手动/自动压缩在事实
+        # 选择上分叉。token 成本同 `build` 走 `protected_fact_token_count` 口径。
+        protected_facts = protected_facts_for_context(session.events)
+        protected_facts_tokens = protected_fact_token_count(protected_facts)
         self._last_protected_fact_tokens = protected_facts_tokens
         if protected_facts_tokens > self.protected_fact_token_budget:
             active_facts = [
@@ -993,8 +1000,11 @@ class ContextBuilder:
                 ],
             )
         # ── token 估算（与 build 同序同式；口径见 build 内注释）────────────
-        # ⚠ 同 build：图片 base64 载荷**不计入**本估算（#823 / MM-02，A4 / PRD D3
-        # 口径显式记录；「图片预算计入」为 MM-03 必做，登记见 #824）。
+        # #935 / M-03（替代 #824 的固定常量，对齐 build）：带图消息的估算**已计入**
+        # 图片的尺寸相关近似成本——`_estimate_tokens_cached` 在结构 token 上按
+        # `context/tokens.py` 的 tile 制公式（读标准图片块携带的 `width`/`height`）
+        # 追加；真正的 base64 载荷仍在 `_finalize` 装配请求时才注入，估算只求不低估
+        # （防"图不计费导致 hard guard 失守"），真实 usage 以 Provider 回执为权威。
         token_estimate = self._estimate_tokens_cached(session, messages)
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
@@ -1025,26 +1035,16 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
-        plan_state = _should_inject_plan(
+        # 清单锚 + 最近修改文件块的选择与 token 预留：与 `build` 共用同一纯决策
+        # owner（#1084）——两侧不再内联同式选择，自动/手动压缩的预算口径一致。
+        # 仅取 token 成本：文本注入在 build 尾部执行，compact_now 只做预算预留。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        plan_tokens = (
-            estimate_message_tokens([SystemMessage(content=plan_text)])
-            if plan_text is not None else 0
-        )
-        token_estimate += plan_tokens
+        plan_tokens = injection.plan_tokens
+        paths_tokens = injection.paths_tokens
+        token_estimate += plan_tokens + paths_tokens
         self._last_plan_tokens = plan_tokens
-        modified_paths = derive_modified_file_paths(session.events)
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
-        token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
         reserved_tokens = (
             protected_facts_tokens
@@ -1667,23 +1667,33 @@ class ContextBuilder:
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
+        # "其他"的细分记账（#1095）：每个子项都是**独立记账口的真实成本**（见
+        # __init__ 各 _last_*_tokens 字段的注释），不是"总量减各项"的残差倒推。
+        # provider_injected = 非 skills 的 provider 注入（记忆等，匿名 provider
+        # 也在这里——_with_providers 把匿名归入 "other" 键）。细分之和恒等于
+        # other（同一批数字求和，只是分组呈现）；旧快照无此键，端点层省略，
+        # 不伪造子项 0。
+        other_breakdown = {
+            "provider_injected": sum(v for k, v in by_name.items() if k != "skills"),
+            "runtime_context": self._last_runtime_context_tokens,
+            "plan_anchor": self._last_plan_tokens,
+            "protected_facts": self._last_protected_fact_tokens,
+            "modified_paths": self._last_modified_paths_tokens,
+            "pressure_warning": self._last_pressure_warning_tokens,
+            "progress": self._last_progress_tokens,
+        }
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
         # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
         # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
-        other = (sum(v for k, v in by_name.items() if k != "skills")
-                 + self._last_runtime_context_tokens
-                 + self._last_plan_tokens
-                 + self._last_protected_fact_tokens
-                 + self._last_modified_paths_tokens
-                 + self._last_pressure_warning_tokens
-                 + self._last_progress_tokens)
+        other = sum(other_breakdown.values())
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,
             "skills": skills_tokens,
             "other": other,
+            "other_breakdown": other_breakdown,
             # 总量 = 各桶之和（端点层再加工具两组）。与 _token_estimate_total 的差别
             # 是刻意的：后者只含投影 messages，不能当作"已用总量"（那是漏报的根源）。
             "used_tokens": messages_tokens + system_prompt_tokens + skills_tokens + other,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 
 import agent_harness.observability as observability_module
+from agent_harness.config import Settings
 from agent_harness.observability import LangfuseSink, flush_process_sink
 from tests.observability.test_tracer import FakeRecorder
 
@@ -63,7 +64,7 @@ def test_cli_main_flushes_on_normal_exit(monkeypatch):
     observability_module._process_sink = None
 
 
-def test_web_lifespan_flushes_on_shutdown():
+def test_web_lifespan_flushes_on_shutdown(tmp_path):
     fake = _RecordingSink(enabled=True)
     observability_module._process_sink = fake
 
@@ -71,7 +72,12 @@ def test_web_lifespan_flushes_on_shutdown():
 
     from agent_harness.web.app import create_app
 
-    app = create_app()
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path / "ws"),
+        model_api_key="sk-test",
+    )
+    app = create_app(settings)
     with TestClient(app):  # 进入+退出 lifespan（startup+shutdown）
         pass
     assert fake.flush_calls == 1
