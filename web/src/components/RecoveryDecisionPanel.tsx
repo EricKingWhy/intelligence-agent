@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import type { PendingDecision, RecoverDecisionInput } from '../lib/api';
 import {
+  adjudicationTechDetail,
   assembleDecisions,
   DECISION_OPTIONS,
   humanizeToolName,
@@ -89,7 +90,17 @@ export function RecoveryDecisionPanel({ decisions, submitting, message, onSubmit
         </button>
       </header>
 
-      {message && <p className="recovery-decision-message">{message}</p>}
+      {/* #1030 缺陷③ / AC2：这里原先把后端 detail 逐字上屏，而 detail 是**协议原文**
+          （内嵌 POST /api/sessions/{id}/recover、tool_call_id、verdict 枚举）——
+          写给调用方的文本，不是写给用户的。标题已经用后果语言说清"有几个操作结果
+          不确定"，这里不再重复计数；后端原文一律进折叠层（要排查的人展开仍有全文，
+          两者都不丢——AC2 要求"只在折叠层出现"，不是"消失"）。 */}
+      {adjudicationTechDetail(message) && (
+        <details className="adjudication-tech">
+          <summary>技术详情</summary>
+          <p className="adjudication-tech-body">{adjudicationTechDetail(message)}</p>
+        </details>
+      )}
 
       <ol className="recovery-cards">
         {decisions.map((decision) => {

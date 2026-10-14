@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, getSessionRecovery, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -75,10 +75,14 @@ export interface RecoverState {
    *  runState.recoverDoneMessage——压成一个布尔会把原因说错）。 */
   stillUnterminated: boolean;
   stillDangling: boolean;
-  /** 409（conflict）时携带的后端 `pending_decisions` 清单（#357 W-13 契约 2/4）；
-   *  非 409 恒为 null。**只来自后端**（不变量 #22：hook 不维护第二套裁决真相）——
-   *  每条默认 verdict 由 `defaultDecisionDrafts` 从后端 `default_action` 派生，
-   *  hook 不发明值。 */
+  /** 待裁决的后端 `pending_decisions` 清单（#357 W-13 契约 2/4；#1030 起有**两个**
+   *  同源读面：①带 `pending_decisions` 的 409；②打开会话时主动拉
+   *  `GET /api/sessions/{id}/recovery`）。两者都由同一个后端 `_reconcile_pending`
+   *  产出，前端不区分来源、不合并、不缓存（不变量 #22）。
+   *
+   *  `null` = **未知**（还没读到 / 读失败），`[]` = 后端明确说"此刻没有待裁决"。
+   *  两者不可互换：把读不到写成 `[]` 就是把"不知道"说成"没事"。每条默认 verdict
+   *  由 `defaultDecisionDrafts` 从后端 `default_action` 派生，hook 不发明值。 */
   pendingDecisions: PendingDecision[] | null;
 }
 
@@ -572,6 +576,38 @@ export function useSession() {
       })
       .finally(() => {
         if (!cancelled) setLoadingHistory(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode]);
+
+  // #1030（缺陷②）：待裁决清单的**主动**读面（`GET /api/sessions/{id}/recovery`，只读）。
+  //
+  // 此前 `recoverState.pendingDecisions` 只来自一次带 `pending_decisions` 的 409，且前置
+  // 还得先点「恢复会话」——把安全机制藏在错误路径里，等于没有。打开会话就拉一次，裁决
+  // 入口才可能主动出现（AC3）。这也是重启扫描后事件流里没有待裁决信号时的唯一读面。
+  //
+  // 依赖 `mode`（**不是** `selectedId`）：上面那条 effect 在任何 mode 迁移时把
+  // recoverState 重置为 RECOVER_IDLE，而 `resumeLiveStream` 会用 `setMode({kind:'live'})`
+  // 重新挂流（上方 `hasUnterminatedRun` 分支）。只依赖 selectedId 的话，那次迁移会把刚
+  // 拉到的清单清掉且**不会重拉**——"看起来正常、发什么都失败"正是本票要修的那个态。
+  // 跟着 mode 重拉：live 期间后端按契约返回空（在途 run 不算待裁决），流收口回到
+  // viewing 时再拉一次，坏死的 UNKNOWN 会重新浮出来。
+  useEffect(() => {
+    if (mode.kind === 'idle') return; // 上面已重置为 RECOVER_IDLE，无会话可查
+    const sid = mode.sessionId;
+    if (!sid) return; // live(null)：首帧还没带 sid，无从查起（等它到）
+    let cancelled = false;
+    void getSessionRecovery(sid)
+      .then((list) => {
+        if (cancelled) return;
+        setRecoverState((prev) => ({ ...prev, pendingDecisions: list }));
+      })
+      .catch(() => {
+        /* 清单不可得（404 / 422 / 409 日志损坏 / 网络）：保持"未知"（不写）。
+           **绝不**回落空清单——`[]` 是"后端明确说没有待裁决"这个事实，与"读不到"
+           必须分开（不变量 #22）；把读不到说成没事，正是本票要消灭的谎报。 */
       });
     return () => {
       cancelled = true;

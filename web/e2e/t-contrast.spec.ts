@@ -265,4 +265,78 @@ for (const theme of ['dark', 'light'] as const) {
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
   });
+
+  /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
+     （看不清就没人去裁决，会话永远卡着）。这里**真量**而不是信注释里的算术：
+     `.pulse-awaiting-decision` 的文字色是 `color-mix(--warning 45%, --text-primary)`
+     压在 12% warning 底上。纯 `--warning` 在这个底上亮色只有 3.26:1（不达 AA），
+     混入 ink 后才够——本用例就是那条结论的回归锁：谁把 ink-mix 改回纯 --warning，
+     这里立刻变红。 */
+  test(`[${theme}] #1030 待裁决徽标对比度 ≥4.5（亮/暗两主题）`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      // 坏死 run：run/started 之后没有终态 → 徽标落回运行族，再由待裁决压过。
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'user/message', data: { content: '待裁决对比度' }, seq: 3, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+        {
+          type: 'tool/call',
+          data: { tool_call_id: 'tc-aw', tool_name: 'bash', args: { command: 'find /' } },
+          seq: 4, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T,
+        },
+      ],
+      pendingDecisions: [
+        {
+          tool_call_id: 'tc-aw', tool_name: 'bash', state: 'UNKNOWN',
+          default_action: 'RETRY', risk_level: 'high',
+          probe: { verifiable: false, suggested_action: null },
+        },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+
+    const pulse = page.locator('.run-pulse');
+    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
+
+    const m = await measure(page, '.run-pulse.pulse-awaiting-decision');
+    const ratio = contrast(m.color, m.bg);
+    expect(ratio, `.pulse-awaiting-decision contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // 同色域的第二处（Inspector 头标）：它不在本夹具的 DOM 里（Inspector 未展开），
+    // 故注入一个同 class 的元素，用**同一个** measure 解析器量它自己的比值——防止
+    // 有人只改一处、两处徽标各说一套。（不比逐通道等值：两者底色不同，harness 的
+    // alpha 合成会让末位漂移，逐位相等是伪精确。）
+    await page.evaluate(() => {
+      const el = document.createElement('span');
+      el.id = 'tmp-awaiting-badge';
+      el.className = 'run-badge run-badge-awaiting-decision';
+      el.textContent = '待裁决';
+      document.body.appendChild(el);
+    });
+    const badge = await measure(page, '#tmp-awaiting-badge');
+    expect(
+      contrast(badge.color, badge.bg),
+      `.run-badge-awaiting-decision contrast (${theme})`,
+    ).toBeGreaterThanOrEqual(4.5);
+
+    // 同色域的另两处：#1030 新增的横幅人话层与「去裁决」按钮用的是**同一条**
+    // color-mix 公式，但它们的底不是胶囊体而是页面底——底色不同则比值不同，必须
+    // 各量各的（不能靠"公式一样"外推）。两处都是 12px 正文，同样受 AA 约束。
+    // 横幅与面板互斥（面板在场时横幅让位，避免同一句话说两遍）⇒ 先关掉面板。
+    await page.locator('.recovery-decision-close').click();
+    await page.locator('.adjudication-banner').waitFor();
+    for (const sel of ['.adjudication-headline', '.adjudication-open-btn']) {
+      const mm = await measure(page, sel);
+      expect(contrast(mm.color, mm.bg), `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 }

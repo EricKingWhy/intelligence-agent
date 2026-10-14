@@ -30,13 +30,21 @@ export interface DecisionOption {
   help: string;
 }
 
-/** 三选一（顺序固定：确认成功 → 安全重做 → 先跳过）。`CONFIRM_SUCCESS` 永远
- *  不是默认项（默认恒为后端给的 `RETRY`/`DEFER`，即 #14 安全侧），因此这里只是
- *  把用户**主动改选**时才可能用到的第三项列出来。
+/** 四选一（顺序固定：确认成功 → 安全重做 → 就此打住 → 先跳过）。`CONFIRM_SUCCESS`
+ *  永远不是默认项（默认恒为后端给的 `RETRY`/`DEFER`，即 #14 安全侧），因此这里只是
+ *  把用户**主动改选**时才可能用到的项列出来。
  *
  *  `RETRY` 的文案必须写明「服务端取消原调用、由模型安全重发起，永不盲跑」；
  *  `DEFER` 必须写明「保持待裁决，稍后可重裁」——两者都是产品合同（修订 A §9.4-3），
- *  不能简写成「重试」「跳过」。 */
+ *  不能简写成「重试」「跳过」。
+ *
+ *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 的第四项，也是**唯一能真正解封会话的
+ *  "不重跑"选项**——`DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
+ *  `NEED_RECONCILE`，该调用**仍出现在后续 pending_decisions 里**（裁决不结清 ⇒ 会话
+ *  照旧发不出消息）。此前界面只给三选一，用户想"这事我不做了"时只能选 `DEFER`，
+ *  于是会话永远卡着，且界面上没有任何一处说明这是为什么。
+ *  它必须与 `DEFER` 在文案上分得开：一个是**结束这件事**（显式取消，不重跑），
+ *  一个是**现在先不动它**。 */
 export const DECISION_OPTIONS: readonly DecisionOption[] = [
   {
     verdict: 'CONFIRM_SUCCESS',
@@ -47,6 +55,11 @@ export const DECISION_OPTIONS: readonly DecisionOption[] = [
     verdict: 'RETRY',
     label: '当作没生效，安全重做',
     help: '服务端会取消原调用，由模型安全重发起——永不盲跑原操作。',
+  },
+  {
+    verdict: 'ABANDON',
+    label: '当作没生效，就此打住',
+    help: '显式取消这次调用，不再重做——选它这条会话才会解开；操作本身不撤销。',
   },
   {
     verdict: 'DEFER',
@@ -124,6 +137,32 @@ export function assembleDecisions(
     }
     return { tool_call_id: decision.tool_call_id, verdict: draft.verdict, source };
   });
+}
+
+/** 待裁决横幅的**第一层：人话**（#1030 缺陷③ / AC2，Kubernetes reason/message 双层的 ADAPT）。
+ *
+ *  后端 `RecoveryConflict` 的 message 内嵌 `POST /api/sessions/{id}/recover`、
+ *  `tool_call_id`、`verdict ∈ …` 等协议原文（`session/service.py:5061-5065`）——它是写给
+ *  调用方的，不是写给用户的。此前前端把 detail 逐字当文案（`useSession.ts` 的 409
+ *  分支 → `.app-error`），最终用户既不知道什么是 tool_call_id，也无法手写 POST。
+ *
+ *  这里给的是**可行动的**那一句：说清"有几个操作结果不确定"（用户能对照卡片数），
+ *  并明确下一步是裁决。协议原文不放这里——它进折叠层（`techDetail`），需要的人仍看得到。
+ *
+ *  `count` 为 `null` = 只知道"有待裁决"但拿不到条数（例如 409 的 detail 是纯文本、
+ *  没带结构化清单）。此时**不编造数字**，说"有操作"而不是"有 1 个操作"。 */
+export function adjudicationHeadline(count: number | null): string {
+  if (count === null) return '这个会话有操作的结果不确定——需要你裁决后才能继续。';
+  if (count === 1) return '这个会话有 1 个操作的结果不确定——需要你裁决后才能继续。';
+  return `这个会话有 ${count} 个操作的结果不确定——需要你裁决后才能继续。`;
+}
+
+/** 技术详情（折叠层）。后端原文**逐字保留**：它包含 tool_call_id / 端点 / verdict 枚举，
+ *  是排查与手工结清的唯一依据——翻译掉就等于把它藏起来（AC2 要求"只在折叠层出现"，
+ *  不是"消失"）。`message` 为空时不渲染折叠层（没有可展开的内容）。 */
+export function adjudicationTechDetail(message: string | null): string | null {
+  const text = (message ?? '').trim();
+  return text === '' ? null : text;
 }
 
 /** 进度文件版本的诚实文案。可读 → 版本 + 事件序号；缺失/不可读/不匹配各自

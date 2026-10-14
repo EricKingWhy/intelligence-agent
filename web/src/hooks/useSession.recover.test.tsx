@@ -26,6 +26,10 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => apiState.events),
+    // #1030：打开会话会主动拉一次待裁决清单。默认「后端明确说没有」（`[]`）——
+    // 本文件的既有用例全部聚焦 409/recover 自己那条路径，主动读面不该干扰它们；
+    // 主动读面本身的行为由 useSession.pendingDecisions.test.tsx 覆盖。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     recoverSession: vi.fn(),
   };

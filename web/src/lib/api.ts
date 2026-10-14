@@ -1819,6 +1819,37 @@ export async function recoverSession(
   return res.json();
 }
 
+// ── 待裁决清单（#1049 只读端点 / #1030 前端主动发现）──
+
+/** GET /api/sessions/{id}/recovery — 待裁决清单（**只读**，零写入）。
+ *
+ *  与 `POST /recover` 409 的 `pending_decisions` **逐字段同源**（后端
+ *  `_reconcile_pending`），所以形状防御直接复用 `parsePendingDecisions`——同一个
+ *  解析器、同一套 fail-closed 纪律，不在这里再写一份（§9.5 第 2 级：库里已有）。
+ *
+ *  这是打开会话时**主动**得知"要裁决什么"的唯一读面（#1030 缺陷②：此前只能先点
+ *  「恢复会话」撞一次 409 才看得到面板）。也是重启扫描后事件流里没有待裁决信号时
+ *  唯一的事实来源。
+ *
+ *  **`[]` 不等于「不需要裁决」**：会话有在途 run 时后端按契约返回空清单（in-flight
+ *  判定见 `SessionService.pending_decisions`）。调用方不得据此缓存"已结清"结论。
+ *
+ *  错误分支与 `getSessionEvents` 同款：404 → `NotFoundError`（会话不存在），
+ *  422 / 409（日志损坏）→ 抛错，由调用方按"清单不可得"降级——**绝不**当成空清单
+ *  （那会把"读不到"说成"没事"，正是本票要消灭的谎报）。 */
+export async function getSessionRecovery(sessionId: string): Promise<PendingDecision[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/recovery`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+  if (!res.ok) throw new Error(`get session recovery ${res.status}`);
+  const parsed = parsePendingDecisions(
+    ((await res.json()) as { pending_decisions?: unknown } | null)?.pending_decisions,
+  );
+  // 形状不合法 ⇒ 抛错而不是回落 `[]`：`[]` 是"后端明确说没有待裁决"这个**事实**，
+  // 不能与"解析不出来"共用一个值（#22 的可对账性依赖这个区分）。
+  if (parsed === undefined) throw new Error('get session recovery: malformed pending_decisions');
+  return parsed;
+}
+
 // ── 恢复列表（#357 W-13 契约 5，只读端点）──
 
 /** GET /api/recovery/interrupted 的一行（后端 `interrupted_recovery_rows` 形状）。

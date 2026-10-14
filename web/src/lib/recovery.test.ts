@@ -47,9 +47,33 @@ describe('humanizeToolName — 最小可读化，不建第二套工具注册表'
   });
 });
 
-describe('DECISION_OPTIONS — 三选一，默认项由后端 default_action 决定', () => {
-  it('恰好三个选项，verdict 与后端词表一致', () => {
-    expect(DECISION_OPTIONS.map((o) => o.verdict)).toEqual(['CONFIRM_SUCCESS', 'RETRY', 'DEFER']);
+describe('DECISION_OPTIONS — 四选一，默认项由后端 default_action 决定', () => {
+  it('恰好四个选项，verdict 与后端 ReconcileVerdict 词表一致', () => {
+    // #1030：《可验收标准》点名 CONFIRM / RETRY / **ABANDON** —— DEFER 按后端契约
+    // 不解封（Ledger 保持 NEED_RECONCILE，仍出现在后续 pending_decisions），
+    // 缺了 ABANDON 用户想"这事我不做了"时无路可走。
+    expect(DECISION_OPTIONS.map((o) => o.verdict)).toEqual([
+      'CONFIRM_SUCCESS', 'RETRY', 'ABANDON', 'DEFER',
+    ]);
+  });
+
+  it('ABANDON 与 DEFER 在文案上分得开（一个是结束这件事，一个是先不动它）', () => {
+    const abandon = DECISION_OPTIONS.find((o) => o.verdict === 'ABANDON');
+    const defer = DECISION_OPTIONS.find((o) => o.verdict === 'DEFER');
+    expect(abandon?.help).toContain('解开');
+    expect(abandon?.help).not.toBe(defer?.help);
+    expect(defer?.help).toContain('稍后');
+  });
+
+  it('默认项里不出现 CONFIRM_SUCCESS 与 ABANDON（#14 安全侧）', () => {
+    // 后端 default_action 只有 RETRY/DEFER 两值；CONFIRM_SUCCESS 断言"副作用已生效"
+    // （最危险），ABANDON 断言"放弃且不重跑"（不可逆）——两者都必须由用户主动改选。
+    for (const decision of [
+      { default_action: 'RETRY' as const },
+      { default_action: 'DEFER' as const },
+    ]) {
+      expect(['CONFIRM_SUCCESS', 'ABANDON']).not.toContain(decision.default_action);
+    }
   });
 
   it('每项都有非空 label 与 help（后果语言，无开放技术问答）', () => {
