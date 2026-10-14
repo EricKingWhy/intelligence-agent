@@ -73,6 +73,56 @@ class TestDockerRegistryDeterministicNaming:
         assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
         assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
 
+    @pytest.mark.skipif(os.name != "nt", reason="Windows junction import is Windows-only")
+    @pytest.mark.parametrize("legacy_mapping", [False, True], ids=["new", "psec-migration"])
+    def test_private_import_does_not_follow_external_directory_junction(
+        self, registry, tmp_path: Path, legacy_mapping: bool,
+    ):
+        """Neither new workspaces nor PSEC migration may import outside a junction."""
+        import subprocess
+
+        source = tmp_path / "project"
+        source.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("external secret", encoding="utf-8")
+        junction = source / "external"
+        result = subprocess.run(
+            f'mklink /J "{junction}" "{outside}"',
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=True,
+        )
+        if result.returncode != 0:
+            pytest.skip(
+                f"Windows junction creation unavailable: {result.stdout}{result.stderr}"
+            )
+
+        if legacy_mapping:
+            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+
+            identity = WindowsPsecSandbox.validate_workspace_identity(source)
+            registry._write_mapping(SESSION_ID, {
+                "session_id": SESSION_ID,
+                "backend": "windows_psec",
+                "workspace_root": str(source),
+                "workspace_identity": identity,
+                "container_name": None,
+                "volume_name": None,
+                "created_at": "legacy-created-at",
+            })
+            with pytest.raises(PermissionError, match="reparse"):
+                registry.get(SESSION_ID)
+            mapping = registry._read_mapping(SESSION_ID)
+            assert mapping is not None
+            assert mapping["backend"] == "windows_psec"
+        else:
+            with pytest.raises(PermissionError, match="reparse"):
+                registry.create(SESSION_ID, workspace_root=source, backend="docker")
+            assert registry._read_mapping(SESSION_ID) is None
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
+
     def test_create_imports_project_as_private_volume_copy(
         self, registry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):

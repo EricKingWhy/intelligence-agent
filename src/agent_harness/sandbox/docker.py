@@ -940,7 +940,15 @@ class DockerSandbox(Sandbox):
 
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w", dereference=False) as archive:
-            archive.add(source, arcname=target.name, recursive=True)
+            if os.name == "nt":
+                from agent_harness.sandbox.windows_psec import (
+                    _pin_host_path_tree_for_archive,
+                )
+
+                with _pin_host_path_tree_for_archive(source):
+                    archive.add(source, arcname=target.name, recursive=True)
+            else:
+                archive.add(source, arcname=target.name, recursive=True)
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 

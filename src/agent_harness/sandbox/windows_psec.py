@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 from uuid import uuid4
@@ -1271,6 +1272,91 @@ def _open_directory_chain(
     except BaseException:
         _close_handles(handles)
         raise
+
+
+@contextmanager
+def _pin_host_path_tree_for_archive(host_path: Path):
+    """Validate and pin a Windows source tree while a caller archives its paths."""
+    if os.name != "nt":
+        raise RuntimeError("Windows host path pinning is available only on Windows")
+
+    source = ntpath.abspath(os.fspath(host_path))
+    parent_path = ntpath.dirname(source)
+    name = ntpath.basename(source)
+    if not name:
+        raise PermissionError("copy_in accepts only regular files and directories")
+
+    handles = _open_directory_chain(
+        Path(parent_path),
+        create=False,
+        allow_unc=True,
+        allow_volume_root=True,
+        reject_reparse=True,
+    )
+
+    def open_entry(parent: int, entry_name: str) -> int:
+        _relative_components(entry_name)
+        entry = _open_relative_entry(
+            parent,
+            entry_name,
+            desired_access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+            create_disposition=_FILE_OPEN,
+            create_options=_FILE_SYNCHRONOUS_IO_NONALERT
+            | _FILE_OPEN_FOR_BACKUP_INTENT,
+            share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            allow_reparse_leaf=True,
+        )
+        try:
+            if _file_attributes(entry) & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise PermissionError("copy_in does not follow host reparse points")
+            if _file_type(entry) != _FILE_TYPE_DISK:
+                raise PermissionError(
+                    "copy_in accepts only regular files and directories"
+                )
+            if not _file_standard_info(entry).Directory:
+                handle, entry = entry, None
+                return handle
+
+            locked = _open_relative_entry(
+                parent,
+                entry_name,
+                desired_access=(
+                    _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+                ),
+                create_disposition=_FILE_OPEN,
+                create_options=_FILE_DIRECTORY_FILE
+                | _FILE_SYNCHRONOUS_IO_NONALERT
+                | _FILE_OPEN_FOR_BACKUP_INTENT,
+                share_access=_FILE_SHARE_READ,
+                allow_reparse_leaf=True,
+            )
+            if (
+                _file_attributes(locked) & _FILE_ATTRIBUTE_REPARSE_POINT
+                or not _file_standard_info(locked).Directory
+            ):
+                _close_handles([locked])
+                raise PermissionError("copy_in source changed during validation")
+            return locked
+        finally:
+            if entry is not None:
+                _close_handles([entry])
+
+    try:
+        root = open_entry(handles[-1], name)
+        handles.append(root)
+
+        def pin_children(directory: int) -> None:
+            if not _file_standard_info(directory).Directory:
+                return
+            for child_name in _directory_entry_names(directory):
+                child = open_entry(directory, child_name)
+                handles.append(child)
+                pin_children(child)
+
+        pin_children(root)
+        yield
+    finally:
+        _close_handles(handles)
 
 
 def _raise_ntstatus(status: int, name: str) -> None:
