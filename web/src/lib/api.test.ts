@@ -90,21 +90,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('getSandboxBackends — workspace-specific PSEC probe', () => {
-  it('passes the selected workspace path to the capability probe', async () => {
+describe('getSandboxBackends — capability probe', () => {
+  it('fetches the backend list without a workspace-specific query', async () => {
     const { calls } = captureFetch(200, {
       backends: [
-        { backend: 'windows_psec', available: true, reason: null, details: {} },
+        { backend: 'docker', available: true, reason: null, details: {} },
       ],
     });
 
-    const result = await getSandboxBackends('C:\\Projects\\Demo');
+    const result = await getSandboxBackends();
 
-    expect(calls[0].url).toBe(
-      '/api/sandbox-backends?workspace_path=C%3A%5CProjects%5CDemo',
-    );
+    expect(calls[0].url).toBe('/api/sandbox-backends');
     expect(result).toEqual([
-      { backend: 'windows_psec', available: true, reason: null, details: {} },
+      { backend: 'docker', available: true, reason: null, details: {} },
     ]);
   });
 });

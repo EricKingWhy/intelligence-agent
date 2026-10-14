@@ -142,7 +142,7 @@ export async function readErrorDetail(res: Response): Promise<string> {
  * "码是不是 null"，于是会把"新版形状却没给码"误读成旧版行为——那正是本批要消灭的
  * "按缺席猜原因"（错误码只按码判：`docs/adr/0035-machine-readable-error-codes-for-503-families.md`）。
  */
-async function readErrorBody(
+export async function readErrorBody(
   res: Response,
 ): Promise<{ message: string; code: string | null; objectDetail: boolean; pendingDecisions?: PendingDecision[] }> {
   try {
@@ -365,13 +365,8 @@ export interface SandboxBackendEntry {
   details: Record<string, string>;
 }
 
-export async function getSandboxBackends(
-  workspacePath?: string,
-): Promise<SandboxBackendEntry[]> {
-  const query = workspacePath
-    ? `?workspace_path=${encodeURIComponent(workspacePath)}`
-    : '';
-  const res = await apiFetch(`/api/sandbox-backends${query}`);
+export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
+  const res = await apiFetch(`/api/sandbox-backends`);
   if (!res.ok) return [];
   const body: unknown = await res.json();
   const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;

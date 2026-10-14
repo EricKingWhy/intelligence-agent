@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import ntpath
 import os
 import shutil
@@ -11,8 +10,6 @@ import time
 from pathlib import Path
 
 import pytest
-
-from agent_harness.sandbox.registry import WorkspaceRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -141,54 +138,11 @@ def test_startup_probe_requires_mxc_native_deny_policy(
         sandbox.stop()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_registry_selects_windows_psec_and_persists_workspace_identity(
-    tmp_path: Path,
-) -> None:
-    registry_root = tmp_path / "registry"
-    workspace_root = tmp_path / "workspace"
-    registry = WorkspaceRegistry(root=registry_root, backend="local")
-
-    registry.create(
-        "windows-session",
-        workspace_root=workspace_root,
-        backend="windows_psec",
-    )
-
-    mapping = json.loads(
-        (registry_root / "workspaces" / "windows-session.json").read_text(
-            encoding="utf-8",
-        )
-    )
-    assert mapping["backend"] == "windows_psec"
-    identity = mapping["workspace_identity"]
-    assert set(identity) == {"volume_serial", "file_id"}
-    assert all(isinstance(value, str) and value for value in identity.values())
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_registry_recovery_rejects_replaced_workspace_root(tmp_path: Path) -> None:
-    from agent_harness.sandbox.windows_psec import WorkspaceIdentityError
-
-    workspace = tmp_path / "workspace"
-    registry = WorkspaceRegistry(root=tmp_path / "registry", backend="local")
-    registry.create(
-        "replaced-session",
-        workspace_root=workspace,
-        backend="windows_psec",
-    )
-    registry.stop("replaced-session")
-    workspace.rename(tmp_path / "original-workspace")
-    workspace.mkdir()
-    canary = workspace / "replacement.txt"
-    canary.write_text("replacement root", encoding="utf-8")
-    before_dacl = _workspace_dacl(workspace)
-
-    with pytest.raises(WorkspaceIdentityError):
-        registry.get("replaced-session")
-
-    assert canary.read_text(encoding="utf-8") == "replacement root"
-    assert _workspace_dacl(workspace) == before_dacl
+# #1048 AC2：`windows_psec` 不再是新会话可选后端（`WorkspaceRegistry.create` 对它
+# 响亮 ValueError），原先经 registry 新建 PSEC 会话并断言 workspace_identity 的两条
+# Windows-only 用例随之退役——那条「新会话选 PSEC」的行为已被 AC2 移除。既有 PSEC
+# 映射改由 `registry.get()` 走 legacy 快照迁移到私有 Docker volume，该路径由
+# `tests/sandbox/test_docker_snapshot_import.py` 跨平台覆盖。
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
