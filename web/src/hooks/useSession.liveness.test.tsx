@@ -77,6 +77,9 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => []),
+    // #1030：主动待裁决读面。默认空清单——本文件测的是活性/重连，读面自身行为
+    // 见 useSession.pendingDecisions.test.tsx。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     sendMessage: vi.fn(),
     resumeSession: vi.fn(),

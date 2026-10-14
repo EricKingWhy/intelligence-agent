@@ -246,7 +246,13 @@ describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
     const st = captured.hook!.recoverState;
     expect(st.status).toBe('done');
     expect(st.conflict).toBe(false);
-    expect(st.pendingDecisions).toBeNull();
+    /* #1030 合并后语义（sync merge 1a18f705 上实测）：本用例的世界没有配置
+       `getSessionRecovery` mock（写作时该读面尚不存在）⇒ 200 分支的重读失败，
+       按 #1030 的 stale-but-known 语义**保留上一个已知清单**而非写 null。
+       这也是后端契约的要求：DEFER 不解封（reconcile.py：Ledger 保持
+       NEED_RECONCILE），裁决后权威重读本就该回非空清单——旧断言 `toBeNull()`
+       恰是 #1030 轴 A P1 指认的那个谎报（"后端说没事"），本行随合并语义更新。 */
+    expect(st.pendingDecisions).toEqual(PENDING);
   });
 
   /* P4（独立审查发现）：待裁决 409 之后再发一条**成功**的消息，陈旧的 conflict
