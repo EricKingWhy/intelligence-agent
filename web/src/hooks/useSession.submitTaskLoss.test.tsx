@@ -150,4 +150,28 @@ describe('#1029 残余 — submitTask 窗外认领成功后吞掉迟到失败', 
     expect(first.result).toContain('网络中断');
     expect(second.result).toContain('网络中断');
   });
+
+  it('反证：POST 仍在途（未 reject）时认领成功 ⇒ 仍按"已接管"返回 null，不误报失败', async () => {
+    // 这是那道守卫最容易过头的方向：正常流式的响应头要等 run 结束才到，
+    // 认领成功时 POST 必然还悬着。若把"还悬着"也当失败，用户的每次新建会话
+    // 都会被误报成失败、草稿永远留在输入框。
+    let rejectPost!: (e: Error) => void;
+    const post = new Promise<Response>((_resolve, reject) => { rejectPost = reject; });
+    vi.mocked(startSession).mockReturnValue(post as never);
+    vi.mocked(discoverNewSessionId).mockResolvedValue('s-new');
+
+    await mount();
+    let result: string | null = 'unset';
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '正常新建' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      result = await p;
+    });
+
+    // 认领成功且 POST 未失败 ⇒ 视为已接管（null），不是失败原因。
+    expect(result).toBeNull();
+    // 收尾：把悬挂的 promise 落定，避免 unhandled rejection 污染其它用例。
+    rejectPost(new Error('teardown'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  });
 });
