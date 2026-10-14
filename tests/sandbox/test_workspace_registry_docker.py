@@ -33,11 +33,18 @@ docker_required = pytest.mark.skipif(
 
 SESSION_ID = "test-registry-docker-session"
 CHILD_SESSION_ID = "test-registry-docker-child"
+_WIN32_OPEN_EXISTING = 3
+_WIN32_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WIN32_FSCTL_SET_REPARSE_POINT = 0x000900A4
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+_REPARSE_DATA_BUFFER_HEADER_SIZE = 8
 
 
 def _open_directory_write_attributes(path: Path):
     import ctypes
     from ctypes import wintypes
+
+    from agent_harness.sandbox import windows_psec
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
@@ -53,8 +60,15 @@ def _open_directory_write_attributes(path: Path):
     kernel32.DeviceIoControl.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel32.CreateFileW(
-        str(path), 0x100, 0x1 | 0x2 | 0x4, None, 3,
-        0x02000000 | 0x00200000, None,
+        str(path),
+        windows_psec._FILE_WRITE_ATTRIBUTES,
+        (windows_psec._FILE_SHARE_READ | windows_psec._FILE_SHARE_WRITE
+         | windows_psec._FILE_SHARE_DELETE),
+        None,
+        _WIN32_OPEN_EXISTING,
+        (_WIN32_FILE_FLAG_BACKUP_SEMANTICS
+         | windows_psec._FILE_OPEN_REPARSE_POINT),
+        None,
     )
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -73,13 +87,14 @@ def _set_directory_junction(kernel32, handle, target: Path) -> None:
         substitute_bytes + b"\x00\x00" + print_bytes + b"\x00\x00"
     )
     data = struct.pack(
-        "<IHHHHHH", 0xA0000003, 8 + len(path_buffer), 0,
+        "<IHHHHHH", _IO_REPARSE_TAG_MOUNT_POINT,
+        _REPARSE_DATA_BUFFER_HEADER_SIZE + len(path_buffer), 0,
         0, len(substitute_bytes), len(substitute_bytes) + 2, len(print_bytes),
     ) + path_buffer
     payload = ctypes.create_string_buffer(data)
     returned = ctypes.c_ulong()
     if not kernel32.DeviceIoControl(
-        handle, 0x000900A4, payload, len(data), None, 0,
+        handle, _WIN32_FSCTL_SET_REPARSE_POINT, payload, len(data), None, 0,
         ctypes.byref(returned), None,
     ):
         raise ctypes.WinError(ctypes.get_last_error())
