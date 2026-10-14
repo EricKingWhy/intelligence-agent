@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import re
@@ -36,7 +37,7 @@ from langchain_core.messages import AIMessage
 from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceBindingError
 from agent_harness.session.runmanager import RunManager
-from agent_harness.web.app import create_app
+from agent_harness.web.app import create_app, session_service
 from tests.scripted_model import ScriptedModel
 
 _DATA_PREFIX = "data:"
@@ -664,3 +665,132 @@ def test_hard_delete_without_artifacts_is_noop(tmp_path: Path) -> None:
     session_id = _create_session(client)
     resp = client.delete(f"/api/sessions/{session_id}")
     assert resp.status_code == 200, resp.text
+
+
+def test_hard_delete_reclaims_owned_docker_resources_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker_client = None
+    try:
+        docker = importlib.import_module("docker")
+        docker_client = docker.from_env(use_context=False)
+        docker_client.ping()
+        docker_client.images.get("python:3-slim")
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        if docker_client is not None:
+            docker_client.close()
+        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project_file = project / "keep.txt"
+    project_file.write_text("project data", encoding="utf-8")
+    host_canary = tmp_path / "external-canary.txt"
+    host_canary.write_text("host data survives", encoding="utf-8")
+    app = create_app(
+        Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path / "harness"),
+            artifact_dir="",
+            model_api_key="sk-test",
+        ),
+        enable_cors=False,
+    )
+
+    session_id: str | None = None
+    registry = None
+    unrelated_volume_name: str | None = None
+    original_volume_remove = docker.models.volumes.Volume.remove
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            created = client.post(
+                "/api/sessions",
+                params={"launch": "false"},
+                json={"cwd": str(project), "sandbox_backend": "docker"},
+            )
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+            registry = session_service(app.state.agent).workspace_registry
+            mapping = registry._read_mapping(session_id)
+            assert mapping is not None
+            assert mapping["session_id"] == session_id
+            assert mapping["backend"] == "docker"
+            container_name = mapping["container_name"]
+            volume_name = mapping["volume_name"]
+            assert container_name == f"agent-harness-{session_id}"
+            assert volume_name == f"agent-harness-{session_id}"
+
+            unrelated_volume_name = f"unrelated-{session_id}"
+            docker_client.volumes.create(name=unrelated_volume_name)
+            sandbox = registry.get(session_id)
+            sandbox.write_text("delete-marker.txt", "private workspace data")
+            assert sandbox.read_text("delete-marker.txt") == "private workspace data"
+            registry._cache.pop(session_id)
+
+            original_container = docker_client.containers.get(container_name)
+            assert original_container is not None
+            docker_client.volumes.get(volume_name)
+
+            failed_once = False
+
+            def fail_first_volume_remove(volume, force: bool = False) -> None:
+                nonlocal failed_once
+                if (
+                    volume.attrs.get("Name") == volume_name
+                    and not failed_once
+                ):
+                    failed_once = True
+                    raise RuntimeError("injected private-volume cleanup failure")
+                original_volume_remove(volume, force=force)
+
+            monkeypatch.setattr(
+                docker.models.volumes.Volume,
+                "remove",
+                fail_first_volume_remove,
+            )
+            failed = client.delete(f"/api/sessions/{session_id}")
+
+            assert failed.status_code == 500
+            assert failed_once
+            assert client.get(
+                f"/api/sessions/{session_id}/events"
+            ).status_code == 200
+            assert registry.exists(session_id)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.containers.get(container_name)
+            docker_client.volumes.get(volume_name)
+            assert project_file.read_text(encoding="utf-8") == "project data"
+            assert host_canary.read_text(encoding="utf-8") == "host data survives"
+
+            monkeypatch.setattr(
+                docker.models.volumes.Volume,
+                "remove",
+                original_volume_remove,
+            )
+            retried = client.delete(f"/api/sessions/{session_id}")
+
+            assert retried.status_code == 200, retried.text
+            assert not registry.exists(session_id)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.containers.get(container_name)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+            docker_client.volumes.get(unrelated_volume_name)
+            assert project_file.read_text(encoding="utf-8") == "project data"
+            assert host_canary.read_text(encoding="utf-8") == "host data survives"
+    finally:
+        monkeypatch.setattr(
+            docker.models.volumes.Volume,
+            "remove",
+            original_volume_remove,
+        )
+        try:
+            if session_id is not None and registry is not None:
+                registry.delete(session_id)
+        finally:
+            if unrelated_volume_name is not None:
+                try:
+                    docker_client.volumes.get(unrelated_volume_name).remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+            docker_client.close()
