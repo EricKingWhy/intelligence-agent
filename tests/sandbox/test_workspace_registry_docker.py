@@ -77,9 +77,28 @@ class TestDockerRegistryDeterministicNaming:
     @pytest.mark.parametrize("legacy_mapping", [False, True], ids=["new", "psec-migration"])
     def test_private_import_does_not_follow_external_directory_junction(
         self, registry, tmp_path: Path, legacy_mapping: bool,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """Neither new workspaces nor PSEC migration may import outside a junction."""
         import subprocess
+
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        copy_in = DockerSandbox.copy_in
+        volume_checks: list[tuple[int, str]] = []
+
+        def check_volume_after_rejected_import(sandbox, host_path, workspace_path):
+            try:
+                return copy_in(sandbox, host_path, workspace_path)
+            except PermissionError:
+                result = sandbox.exec(
+                    "python -c \"from pathlib import Path; "
+                    "print(Path('/workspace/external/secret.txt').exists())\""
+                )
+                volume_checks.append((result.exit_code, result.stdout.strip()))
+                raise
+
+        monkeypatch.setattr(DockerSandbox, "copy_in", check_volume_after_rejected_import)
 
         source = tmp_path / "project"
         source.mkdir()
@@ -121,6 +140,7 @@ class TestDockerRegistryDeterministicNaming:
             with pytest.raises(PermissionError, match="reparse"):
                 registry.create(SESSION_ID, workspace_root=source, backend="docker")
             assert registry._read_mapping(SESSION_ID) is None
+        assert volume_checks == [(0, "False")]
         assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
 
     def test_create_imports_project_as_private_volume_copy(
