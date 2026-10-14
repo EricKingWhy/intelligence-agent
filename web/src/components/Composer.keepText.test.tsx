@@ -163,6 +163,30 @@ describe('#1029 composer 发送失败保留文本', () => {
     expect(textarea().value).toBe('');
   });
 
+  /* P3（独立审查发现）：清空挪到 ack 之后 ⇒ 在途期间输入框是**活的**（未禁用），
+     用户接着打的字会在回执到达时被无条件 `setValue('')` 一起抹掉——与
+     `sendingRef` 挡住的「重复提交」是同一个窗口的两种表现。
+     取代价小的那个修法：只清**本次提交的那段前缀**，新打的字留下。 */
+  it('ack 在途期间继续输入：只清本次提交的那段，新打的字不被抹掉', async () => {
+    let settle: ((ok: boolean) => void) | null = null;
+    onSubmit.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }) as unknown as SubmitResult,
+    );
+    await typeText('第一段');
+    pressEnter();
+    // 回执未落定，用户接着往后打（输入框此时没有被禁用）
+    await typeText('第一段 接着打的新内容');
+
+    await act(async () => {
+      settle!(true);
+    });
+
+    // 本次提交的那段清掉，在途期间新打的字留下（修复前：整框被清成 ''）
+    expect(textarea().value).toBe(' 接着打的新内容');
+  });
+
   it('旧签名（onSubmit 返回 undefined）：照旧清空——既有调用零回归', async () => {
     onSubmit.mockReturnValue(undefined);
     await typeText('既有调用');

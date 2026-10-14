@@ -555,14 +555,17 @@ export function useSession() {
   // idle owns no conversation.
   useEffect(() => {
     // 任何 mode 迁移都重置 recover 三态（恢复状态不跨会话/流存活）。
-    // #1029 例外：**自迁移不重置**（`live(sid) → viewing(sid)`，即发送失败 / 流终态 /
-    // 重连放弃那几条，用户没换会话）。此前无条件重置，于是「发送被拒 ⇒ 面板刚点亮
-    // 就被同帧清掉」——面板与文本一起消失，正是本票要修的死胡同。
-    // 判据取「前后两个 mode 指向同一会话」：**`live` 也是那条会话**，不能只认
-    // `viewing`。发送路径第一句就 `setMode(live(sid))`（它要立刻成为这条流的权威
-    // 消费者），被拒后并不会退回 `viewing`——只认 `viewing` 的话，发送这一跳就被
-    // 判成「换会话」，`setRecoverState(RECOVER_IDLE)` 照样把刚点亮的清单清掉，
-    // 面板与文本一起消失。真换会话 / 进 `idle` / `live(null)` 认领期间一律照旧重置。
+    // #1029 例外：**自迁移不重置**——`live(sid) → viewing(sid)`（发送被拒 / 流终态 /
+    // 重连放弃那几条，用户没换会话）必须保留刚点亮的待裁决清单。
+    // 判据取「前后两个 mode 指向同一会话」（**`live` 也是那条会话**）：只认
+    // `viewing` 是错的——待裁决 409 那一支在**同一批**里既点亮清单、又把 mode 从
+    // 发送时的 `live(sid)` 打回 `viewing(sid)`（`recover` 的落地守护
+    // `shouldApplyRecoverResult` 只认 `viewing`，见 settle 的 recovery-conflict 支），
+    // 只认 `viewing` 会把这一跳判成「换会话」，`setRecoverState(RECOVER_IDLE)` 于是
+    // 把同批点亮的清单清掉——面板与文本一起消失。
+    // （首版注释断言「被拒后并不会退回 viewing」，那是**修复前**的事实；P1 修复让这
+    // 条路径真的退回 viewing 之后，本判据才成为承重件。实测见 out 文件的变异读数。）
+    // 真换会话 / 进 `idle` / `live(null)` 认领期间一律照旧重置。
     const prev = prevModeRef.current;
     const selfTransition =
       prev.kind !== 'idle' && mode.kind !== 'idle' && prev.sessionId === mode.sessionId;
@@ -1339,6 +1342,7 @@ export function useSession() {
           if (outcome.kind === 'stream') {
             // 窗外的「事件流」= 当初判 launched 是对的，WS 已在收，不重复接。
             if (!outOfWindow) attachLiveStream(res, myGen, conversationRef.current);
+            setRecoverState(RECOVER_IDLE); // #1029 P4：受理成功 ⇒ 上次失败留下的陈旧裁决态退场
             return true;
           }
           if (outOfWindow) {
@@ -1371,6 +1375,7 @@ export function useSession() {
             const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
             lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
             attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
+            setRecoverState(RECOVER_IDLE); // #1029 P4：queued/steered 收据 = 已受理 ⇒ 陈旧裁决态退场
             return true;
           }
           if (outcome.kind === 'retry-queue') {
@@ -1408,6 +1413,14 @@ export function useSession() {
               stillDangling: false,
               pendingDecisions: outcome.pendingDecisions,
             });
+            /* 失败路径不碰代际，但**必须**把 mode 落回 `viewing(sid)`（P1）：
+               `recover` 的落地守护只认 `viewing`（`shouldApplyRecoverResult`）⇒
+               留在 `live` 的话，用户提交裁决后 `POST /recover` 的 200 结果被整段
+               丢弃，面板永久停在「提交中」、按钮禁用——点不动也走不掉，只剩刷新
+               页面。与其余失败分支（catch 的 `setMode(viewing)`、submitTask）
+               同一口径。`live(sid) → viewing(sid)` 是自迁移，上面 effect 的判据
+               不会因此清掉同批点亮的清单。 */
+            setMode({ kind: 'viewing', sessionId });
             setError(outcome.text);
             return false;
           }
@@ -1447,6 +1460,7 @@ export function useSession() {
         const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
         lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
         attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
+        setRecoverState(RECOVER_IDLE); // #1029 P4：窗外判 launched 同样是受理成功 ⇒ 陈旧裁决态退场
         return true; // 窗外 = 判定为正常流式：请求已被受理，composer 可以清空
       };
 

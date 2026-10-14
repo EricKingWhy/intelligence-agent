@@ -181,7 +181,12 @@ export const Composer = memo(function Composer({
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
-   *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。 */
+   *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。
+   *
+   *  ponytail: 已知限制（P3 二选一里未选的那一半）——在途期间按 Enter 会被这里
+   *  静默吞掉（没有可见反馈）。代价换的是「不重复发送」；升级路径 = 在途时给发送键
+   *  一个忙态（禁用 + 提示），而不是靠静默丢弃。窗口 = 一次 ack（`raceEarlyResponse`
+   *  1200ms 窗内 + WS attach），不是整场 run。 */
   const sendingRef = useRef(false);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
@@ -417,7 +422,11 @@ export const Composer = memo(function Composer({
       .then((ok) => {
         // `undefined`（旧签名）/ `true` = 已受理；只有显式 `false` 才保留。
         if (ok === false) return;
-        setValue('');
+        /* 只清**本次提交的那段前缀**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间
+           输入框是活的，用户接着打的字不能被这一刀连带抹掉。前缀不匹配（在途期间
+           用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不清掉用户没提交的
+           内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
+        setValue((v) => (v.startsWith(trimmed) ? v.slice(trimmed.length) : v));
         setRememberAsProceduralRule(false);
         // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
         // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。

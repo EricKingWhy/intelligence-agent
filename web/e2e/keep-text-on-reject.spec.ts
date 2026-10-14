@@ -12,7 +12,11 @@
  *  ③ 裁决面板被这条发送路径唤起（此前只由恢复路径 409 触发，发送路径永不可达）。
  *
  *  夹具形状与 `recovery-w13.spec.ts` 同源（`pending_decisions` 逐字段对齐后端
- *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。 */
+ *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。
+ *
+ *  ⚠ 本文件是 **2 条** `test()`（上面三件事由第一条一并断言）；Playwright 每例跑
+ *  两个视口 ⇒ 报告里是 4 个 run。别把「4」读成 4 条用例（独立审查 P4 记录过这处
+ *  口径混淆）。 */
 
 import { expect, test, type Page } from '@playwright/test';
 import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';
@@ -97,6 +101,47 @@ test('待裁决 409：composer 文本仍在 + 人话横幅 + 裁决面板被唤�
   await expect(banner).toContainText('待人工裁决');
   await expect(banner).not.toContainText('tool_call_id');
   await expect(banner).not.toContainText('POST /api/sessions');
+});
+
+test('待裁决 409 后提交裁决：面板能落定（不永久停在「提交中」）', async ({ page }) => {
+  /* P1 的端到端盲区（独立审查记录）：此前只验到「面板渲染出来」，没验「能提交」。
+     修复前 mode 留在 `live` ⇒ `recover` 的落地守护 `shouldApplyRecoverResult`（只认
+     `viewing`）把 200 结果整段丢弃 ⇒ 面板永久「提交中…」、按钮禁用、用户点不动。 */
+  await openCrashed(page, {
+    sessions: [ROW],
+    events: crashedEvents(),
+    onMessagesPost: async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
+      });
+    },
+    // 裁决 200 = 后端返回**已结清**的事件流（run 有终态、无悬空 tool_call）。
+    onRecoverPost: async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          ...crashedEvents(),
+          { type: 'tool/result', data: { tool_call_id: 'call-1', content: 'ok' }, seq: 6, session_id: SID, step_id: 1, run_id: RUN, time: T },
+          { type: 'run/completed', data: {}, seq: 7, session_id: SID, run_id: RUN, time: T },
+        ]),
+      });
+    },
+  });
+
+  const composer = page.getByLabel('Agent 任务');
+  await composer.fill(DRAFT);
+  await page.getByLabel('发送').click();
+  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
+
+  await page.locator('.recovery-submit-btn').click();
+
+  // 裁决落定：面板退场（修复前 `submitting` 恒真 ⇒ 面板挂着、按钮永远禁用）
+  await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
+  // 结清后会话不再可恢复 ⇒ 恢复入口随之消失
+  await expect(page.locator('.recover-btn')).toHaveCount(0);
 });
 
 test('对照：受理成功（JSON 收据）后 composer 才清空', async ({ page }) => {
