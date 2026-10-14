@@ -47,12 +47,19 @@ async function openStoredSession(page: Page): Promise<void> {
 
 test('WS 被拒（零服务帧）→ 自动降级 GET /stream，接流照样建立（不静默卡住）', async ({ page }) => {
   let sseCalls = 0;
+  // 可变 durable log：降级流送出的 seq5/6 在 fulfill 前 push 进来，模拟真后端「流送出的帧一定进 durable log」；否则 run/completed 后的 history reload 会读到缺帧历史把视图覆盖回旧态。
+  const log: FrameSpec[] = [...IN_FLIGHT];
+
   await routeApi(page, {
     sessions: [ROW],
-    events: IN_FLIGHT,
+    events: log,
     onWs: () => ({ closeNow: true }), // 代理拒掉 Upgrade：一个服务帧都没有
     onStreamGet: (route) => {
       sseCalls += 1;
+      log.push(
+        { type: 'text/delta', data: { delta: '降级通道补进来的。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
+        { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
+      );
       return fulfillSse(route, [
         { type: 'text/delta', data: { delta: '降级通道补进来的。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
         { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
@@ -94,7 +101,12 @@ test('降级流收到 stream/truncated → 先 GET /events 全量重建，再以
         log.push({ type: 'text/delta', data: { delta: '全量重建补回的。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T });
         return fulfillSse(route, [{ type: 'stream/truncated', data: { after_seq: 4, latest_seq: 5 }, seq: null, session_id: SID, time: T }]);
       }
-      // 续传：游标必须是重建后的真实 max seq（5），所以这里从 6 起
+      // 续传：游标必须是重建后的真实 max seq（5），所以这里从 6 起。
+      // 同测试1：续传送出的帧也要进 durable log，否则 run/completed 后的 history reload 缺帧会重新置真 hasUnterminatedRun。
+      log.push(
+        { type: 'text/delta', data: { delta: '续传补上的。' }, seq: 6, session_id: SID, run_id: RUN, step_id: 1, time: T },
+        { type: 'run/completed', data: {}, seq: 7, session_id: SID, run_id: RUN, time: T },
+      );
       return fulfillSse(route, [
         { type: 'text/delta', data: { delta: '续传补上的。' }, seq: 6, session_id: SID, run_id: RUN, step_id: 1, time: T },
         { type: 'run/completed', data: {}, seq: 7, session_id: SID, run_id: RUN, time: T },
