@@ -260,6 +260,15 @@ describe('#1029 AC1/AC2 — 发送撞待裁决 409：结局如实 + 清单交给
     expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
     expect(captured.hook!.error).toContain('裁决');
   });
+
+  /* AC2 后半（「完成裁决后该文本可一键重发」）**刻意不在这里加用例**：
+   * 我写过一版「409 未受理 → submitDecisions → 同一段文本重发被受理」的闭环用例，
+   * 但把它跑在**修复前**的实现（fe0e8847）上**照样全绿** —— 因为数据层原本就
+   * 如实回报 false、也原本就把 pendingDecisions 落进 recoverState（那两条由上面
+   * L125/L234 两例覆盖）。#1029 的缺陷在**清空与呈现层**（Composer 无条件清空、
+   * 横幅没有「去裁决」入口），而"裁决后重发"的成立条件是**文本还在输入框里** ——
+   * 那由 `Composer.draftRetention.test.tsx` 的 AC3 组与 P2 组锁住（它们在修复前
+   * 确实是红的）。在这里再写一遍只会得到一个**不会因本票缺陷变红**的装饰性用例。 */
 });
 
 /** #1029 P2（独立审查 Correctness P2-1）：**窗外**落定的失败同样不许吞掉文本。
