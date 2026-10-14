@@ -11,7 +11,7 @@
  *  默认给人话摘要，要排查的人展开仍看到原始 message，两者都不丢。
  */
 import { describe, expect, it } from 'vitest';
-import { adjudicationHeadline, adjudicationTechDetail } from './recovery';
+import { adjudicationHeadline, adjudicationTechDetail, DECISION_OPTIONS } from './recovery';
 
 /** 后端真原文（`session/service.py:5061-5065` 逐字）。 */
 const PROTOCOL_MESSAGE =
@@ -47,6 +47,19 @@ describe('#1030 待裁决文案 · 第一层人话（AC2）', () => {
 
   it('人话层给出可行动的下一步（"裁决"，而不是"联系管理员"式的空话）', () => {
     expect(adjudicationHeadline(1)).toContain('裁决');
+  });
+
+  /* 审查（修复轮轴 B）P2：用户可见文案里曾有「选它这条会话才会解开」——**按字面为假**。
+     后端 `ReconcileVerdict` 五值枚举里除 `DEFER` 外四者都结清账本
+     （`recovery/coordinator.py:1065-1120`：CONFIRM_SUCCESS→SUCCEEDED、
+     CONFIRM_FAILURE→FAILED、RETRY→CANCELLED、ABANDON→CANCELLED），
+     而本面板给用户的四项里就有三项属于"会解开"。
+     这条断言把"不得在用户可见文案里宣称独占性"钉死（PRODUCT 原则 3 真实优先）。 */
+  it('选项文案不得宣称"只有它才能解开"（除 DEFER 外四档都会结清账本）', () => {
+    for (const option of DECISION_OPTIONS) {
+      expect(option.help, `${option.verdict} 的文案宣称了独占性`)
+        .not.toMatch(/才会解开|唯一能|只有它|仅它才/);
+    }
   });
 });
 

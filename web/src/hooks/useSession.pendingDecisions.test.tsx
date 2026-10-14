@@ -263,11 +263,16 @@ describe('#1030 审查修复：裁决 200 之后必须重读清单（DEFER 不�
     expect(captured.hook!.recoverState.pendingDecisions).toEqual([]);
   });
 
-  it('重读失败时保持"未知"（null），不回落空清单——"读不到"仍 ≠ "没事"', async () => {
+  it('重读失败时**保留上一个已知清单**，不回落到"未知"（审查轴 A P2）', async () => {
+    // 修前：200 分支先写 `pendingDecisions: null`，重读失败时字段就停在那里。
+    // 而呈现层判据是 `pendingDecisions !== null && length > 0` ⇒ `null` 与 `[]`
+    // 在屏幕上**同形** ⇒ 用户刚提交完 DEFER（会话仍被封），面板与横幅双双消失、
+    // 徽标落「已中断」——P1 的伤害类别，只是触发条件收窄成"重读失败时"。
+    // 修后：保留"后端上次说还有 N 条"这个**确实知道**的最后事实（stale-but-known）。
     vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
     await mount();
     await enterViewing();
-    const readsBefore = vi.mocked(getSessionRecovery).mock.calls.length;
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
 
     vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
     vi.mocked(getSessionRecovery).mockRejectedValue(new Error('boom'));
@@ -275,12 +280,10 @@ describe('#1030 审查修复：裁决 200 之后必须重读清单（DEFER 不�
       await captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'DEFER' }]);
     });
 
-    // 先断言"确实重读了"——否则本用例在修前修后都得 null，证明不了任何事。
-    expect(
-      vi.mocked(getSessionRecovery).mock.calls.length,
-      'DEFER 200 之后没有重读清单',
-    ).toBeGreaterThan(readsBefore);
-    expect(captured.hook!.recoverState.pendingDecisions).toBeNull();
+    // 提交本身是成功的……
+    expect(captured.hook!.recoverState.status).toBe('done');
+    // ……且清单没有被清掉：界面必须继续如实说"还有待裁决"。
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
   });
 
   it('切走会话后晚到的重读结果不写进新会话（stale-write 守护）', async () => {

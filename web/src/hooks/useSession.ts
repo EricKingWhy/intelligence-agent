@@ -1635,15 +1635,21 @@ export function useSession() {
         // （默认 False）⇒ 票面现场那个 bash 调用的默认档就是 DEFER，用户"照默认走"
         // 一次即复现。故 200 之后一律重读后端事实，不推断。
         // 先落 status/计数（用户要立刻看到"提交成功"），清单由重读结果覆盖。
-        setRecoverState({
+        // 清单**保留上一个已知值**（不是写 `null`）：审查（修复轮轴 A）P2 指出，
+        // 若这次重读失败，写 `null` 会让字段停在"未知"，而呈现层的判据是
+        // `pendingDecisions !== null && length > 0` ⇒ `null` 与 `[]` 在屏幕上**同形**
+        // ⇒ 用户刚提交完 DEFER（会话仍被封），面板与横幅却双双消失、徽标落「已中断」。
+        // 那是 P1 的伤害类别，只是触发条件从"必然"收窄成"重读失败时"。
+        // 保留旧值语义更诚实：重读回来之前，"后端上次告诉我还有 N 条待裁决"是
+        // 我们**确实知道**的最后事实（stale-but-known），优于谎称"不知道"；
+        // 而重读成功时立刻被权威值覆盖。
+        setRecoverState((prev) => ({
           status: 'done', message: null, conflict: false, repaired, terminalRepaired,
           // 原因分开算：isRecoverableRun 是 OR，压回一个布尔就会把原因说错。
           stillUnterminated: hasUnterminatedRun(events),
           stillDangling: unpairedAfter.size > 0,
-          // 读面回来之前保持"未知"——`null` 是诚实的（我们确实还不知道），
-          // `[]` 才是"后端说结清了"，而那一刻我们还没问。
-          pendingDecisions: null,
-        });
+          pendingDecisions: prev.pendingDecisions,
+        }));
         await refreshPendingDecisions(sid);
       } catch (e) {
         if (!shouldApplyRecoverResult(modeRef.current, sid)) return;

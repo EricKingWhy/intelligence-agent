@@ -38,7 +38,9 @@ export interface DecisionOption {
  *  `DEFER` 必须写明「保持待裁决，稍后可重裁」——两者都是产品合同（修订 A §9.4-3），
  *  不能简写成「重试」「跳过」。
  *
- *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 的第四项，也是**"不重跑"里唯一能结清
+ *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 五值枚举里排在 `DEFER` 之前的第 4 项
+ *  （顺序 CONFIRM_SUCCESS / CONFIRM_FAILURE / RETRY / ABANDON / DEFER；界面只给四项，
+ *   `CONFIRM_FAILURE` 不在其中——别读成"一共四项"），也是**"不重跑"里唯一能结清
  *  账本的那一档**——`DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
  *  `NEED_RECONCILE`，该调用**仍出现在后续 pending_decisions 里**（`recovery/reconcile.py`
  *  逐字如此，`tests/test_web_api.py::test_recover_with_defer_is_accepted_and_keeps_pending`
@@ -61,7 +63,13 @@ export const DECISION_OPTIONS: readonly DecisionOption[] = [
   {
     verdict: 'ABANDON',
     label: '当作没生效，就此打住',
-    help: '显式取消这次调用，不再重做——选它这条会话才会解开；操作本身不撤销。',
+    // 审查（修复轮轴 B）P2：这里原写「选它这条会话才会解开」——**按字面为假**。
+    // 后端 `ReconcileVerdict` 是五值枚举，除 `DEFER` 外**四者都会结清账本**
+    // （`recovery/coordinator.py:1065-1120`：CONFIRM_SUCCESS→SUCCEEDED、
+    // CONFIRM_FAILURE→FAILED、RETRY→CANCELLED、ABANDON→CANCELLED），
+    // 而本面板给用户的四项里就有三项属于"会解开"。用户可见文案不得说这种假话
+    // （PRODUCT 原则 3「真实优先于好看」），故改为只陈述**本档自己的**事实。
+    help: '显式取消这次调用，不再重做——它会结清这次调用；操作本身不撤销。',
   },
   {
     verdict: 'DEFER',
