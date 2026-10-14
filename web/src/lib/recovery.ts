@@ -38,11 +38,13 @@ export interface DecisionOption {
  *  `DEFER` 必须写明「保持待裁决，稍后可重裁」——两者都是产品合同（修订 A §9.4-3），
  *  不能简写成「重试」「跳过」。
  *
- *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 的第四项，也是**唯一能真正解封会话的
- *  "不重跑"选项**——`DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
- *  `NEED_RECONCILE`，该调用**仍出现在后续 pending_decisions 里**（裁决不结清 ⇒ 会话
- *  照旧发不出消息）。此前界面只给三选一，用户想"这事我不做了"时只能选 `DEFER`，
- *  于是会话永远卡着，且界面上没有任何一处说明这是为什么。
+ *  `ABANDON`（#1030）：后端 `ReconcileVerdict` 的第四项，也是**"不重跑"里唯一能结清
+ *  账本的那一档**——`DEFER` 按后端契约只落 `reconcile_meta` 审计、Ledger 保持
+ *  `NEED_RECONCILE`，该调用**仍出现在后续 pending_decisions 里**（`recovery/reconcile.py`
+ *  逐字如此，`tests/test_web_api.py::test_recover_with_defer_is_accepted_and_keeps_pending`
+ *  锁的就是"200 之后 op 仍挂"）；`ABANDON` 则把 Operation 收成 `CANCELLED`，账本结清。
+ *  此前界面只给三选一，用户想"这事我不做了"时只能选 `DEFER`，于是会话永远卡着，
+ *  且界面上没有任何一处说明这是为什么。
  *  它必须与 `DEFER` 在文案上分得开：一个是**结束这件事**（显式取消，不重跑），
  *  一个是**现在先不动它**。 */
 export const DECISION_OPTIONS: readonly DecisionOption[] = [

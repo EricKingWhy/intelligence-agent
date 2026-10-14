@@ -50,7 +50,8 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
-import { adjudicationHeadline, adjudicationTechDetail } from './lib/recovery';
+import { adjudicationHeadline } from './lib/recovery';
+import { AdjudicationTechDetail } from './components/AdjudicationTechDetail';
 import { describeOwnership } from './lib/ownership';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
@@ -1437,14 +1438,7 @@ export default function App() {
               {recoverState.status === 'error' && recoverState.conflict && (
                 <div className="recover-conflict">
                   {adjudicationHeadline(pendingDecisions?.length ?? null)}
-                  {adjudicationTechDetail(recoverState.message) && (
-                    <details className="adjudication-tech">
-                      <summary>技术详情</summary>
-                      <p className="adjudication-tech-body">
-                        {adjudicationTechDetail(recoverState.message)}
-                      </p>
-                    </details>
-                  )}
+                  <AdjudicationTechDetail message={recoverState.message} />
                 </div>
               )}
               {recoverState.status === 'idle' && (
@@ -1507,14 +1501,7 @@ export default function App() {
                 <Gavel size={14} />
                 去裁决
               </button>
-              {adjudicationTechDetail(recoverState.message) && (
-                <details className="adjudication-tech">
-                  <summary>技术详情</summary>
-                  <p className="adjudication-tech-body">
-                    {adjudicationTechDetail(recoverState.message)}
-                  </p>
-                </details>
-              )}
+              <AdjudicationTechDetail message={recoverState.message} />
             </div>
           )}
           {conversation?.run_interrupted && !streaming && (

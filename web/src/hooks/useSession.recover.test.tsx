@@ -187,8 +187,12 @@ describe('#357 useSession · submitDecisions 提交续跑（契约 4）', () => 
     expect(vi.mocked(recoverSession)).toHaveBeenCalledWith(SID, decisions);
     const st = captured.hook!.recoverState;
     expect(st.status).toBe('done');
-    // 成功落地后不再携带待裁决清单
-    expect(st.pendingDecisions).toBeNull();
+    // #1030 审查 P1：**不再**由"POST 成功"推断清单已结清——200 只证明请求被接受
+    // （DEFER 按后端契约不解封）。这里断言的是**重读后的事实**：本文件的
+    // `getSessionRecovery` mock 返回 `[]`（后端说没有待裁决）⇒ `[]` 是正确读数；
+    // `null`（"不知道"）反而是修前那个谎报的形状。真正的 DEFER 不解封语义由
+    // `useSession.pendingDecisions.test.tsx` 的「裁决 200 之后必须重读清单」逐条锁住。
+    expect(st.pendingDecisions).toEqual([]);
     // 200 走同一 projectHistory 重建管线（tool/result 进入视图）
     expect(captured.hook!.conversation?.events.some((e) => e.type === 'tool/result')).toBe(true);
   });

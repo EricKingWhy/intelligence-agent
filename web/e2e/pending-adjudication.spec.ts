@@ -113,15 +113,28 @@ test.describe('#1030 待裁决呈现', () => {
 
   test('AC3：无需任何 409，打开会话即可看到裁决入口并完成裁决', async ({ page }) => {
     let submitted: { decisions?: { tool_call_id: string; verdict: string }[] } | null = null;
+    // #1030 审查 P1 之后，提交成功会**重读**只读端点来决定"还挂不挂着"——
+    // 所以夹具必须跟着变：ABANDON 真的解封（后端把 Operation 收成 CANCELLED），
+    // 重读就该拿到空清单。若这里仍恒回 PENDING，测的就不是产品行为而是夹具自相矛盾
+    // （修前之所以"过"，恰恰是因为前端从不重读——那正是 P1）。
+    let adjudicated = false;
     await openSession(page, {
       sessions: [ROW],
       events: zombieEvents(),
       pendingDecisions: PENDING,
+      onRecoveryGet: async (route) => {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ pending_decisions: adjudicated ? [] : PENDING }),
+          contentType: 'application/json',
+        });
+      },
       onRecoverPost: async (route) => {
         const body = route.request().postDataJSON() as typeof submitted;
         // 前端**主动**发现裁决需求后，用户提交才第一次打 POST /recover——
         // 此前必须先点「恢复会话」撞一次 409 才可能走到这里。
         submitted = body;
+        adjudicated = true;
         await route.fulfill({
           status: 200,
           body: JSON.stringify([
@@ -149,6 +162,53 @@ test.describe('#1030 待裁决呈现', () => {
     await page.locator('.recovery-submit-btn').click();
     await expect.poll(() => submitted?.decisions?.[0]?.verdict).toBe('ABANDON');
     await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
+  });
+
+  /* #1030 审查 P1（轴 A）：**DEFER 不解封**，所以提交成功后界面必须重读后端事实，
+     而不是凭"POST 200"推断裁决已结清。
+     后端契约（`recovery/reconcile.py` + `tests/test_web_api.py::
+     test_recover_with_defer_is_accepted_and_keeps_pending`）：DEFER 只落
+     `reconcile_meta` 审计、Ledger 保持 NEED_RECONCILE，该 op **仍出现在后续
+     pending_decisions 里**。
+     修前：200 分支无条件写 `pendingDecisions: null` ⇒ 面板与横幅双双消失、徽标回到
+     「思考中」，而会话其实仍被封着——**正是本票 AC1/AC4 要消灭的那个谎报**。
+     加重因素：`default_action` 由 `replay_safe` 决定，`bash` 未覆写（默认 False）
+     ⇒ 票面现场那个 bash 调用的默认档就是 DEFER，用户"照默认走"一次即复现。 */
+  test('DEFER 不解封：提交成功后徽标与入口**仍在**（不谎报已结清）', async ({ page }) => {
+    await openSession(page, {
+      sessions: [ROW],
+      events: zombieEvents(),
+      pendingDecisions: PENDING,
+      // 后端对 DEFER 的如实回应：200，且该 op 仍在 pending。
+      onRecoveryGet: async (route) => {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ pending_decisions: PENDING }),
+          contentType: 'application/json',
+        });
+      },
+      onRecoverPost: async (route) => {
+        await route.fulfill({ status: 200, body: JSON.stringify(zombieEvents()), contentType: 'application/json' });
+      },
+    });
+
+    const panel = page.locator('.recovery-decision-panel');
+    await expect(panel).toBeVisible();
+    // 本夹具的 default_action 是 RETRY，但 RETRY 与 DEFER 并不等价：RETRY 会让模型
+    // 重新发起调用并落新结果（账本结清），DEFER 才是"只落审计、账本仍挂"那一档。
+    // 所以这里显式改选 DEFER——测的正是"提交成功但账本仍挂"。
+    const card = page.locator('.recovery-card').first();
+    await card.getByRole('radio', { name: /先不动它|稍后/ }).check();
+    await page.locator('.recovery-submit-btn').click();
+
+    // 提交确实被接受了（后端 200、无错误提示）……
+    await expect(page.locator('.recovery-decision-error')).toHaveCount(0);
+    // ……但会话仍被封着：重读拿到的事实仍是有待裁决 ⇒ **徽标必须如实说「待裁决」**，
+    // 这正是 AC1 的原话（"顶栏徽标不再显示「思考中」"）。修前这里会变回「思考中」。
+    await expect(page.locator('.run-pulse')).toContainText('待裁决');
+    // 入口也仍在场：后端契约明确允许"稍后重新裁决"，界面不该把这条出路收掉。
+    await expect(panel).toBeVisible();
+    await expect(panel.locator('.recovery-submit-btn')).toBeEnabled();
   });
 
   test('AC2：面向用户的文案不含协议词汇；技术详情只在折叠层', async ({ page }) => {

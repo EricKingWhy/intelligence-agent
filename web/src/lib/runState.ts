@@ -77,8 +77,8 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   // 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。这是与
   // 「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --warning（"需要人
   // 动手"，同 .interrupt-banner），**刻意不用 --info**：info 在本仓是"中性提示"，
-  // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色只有
-  // 2.96:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
+  // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色实测
+  // 2.91:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
   // 等待是静止态，闪动会读成"还在跑"。
   'awaiting-decision': { label: '待裁决', className: 'pulse-awaiting-decision', Icon: Gavel },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
@@ -110,7 +110,18 @@ export function deriveRunPulse(
      "上次跑到哪"（历史）。两者同时成立时让历史赢，用户看到的是一个读起来像
      "已经结束、没事了"的中性态（已中断），而会话其实卡死——这正是 #1030 报的
      最误导状态：横幅消失、根因仍在，发消息照样 409。
-     在途 run 时后端按契约返回空清单，所以这条分支不会盖掉真实的「思考中」。 */
+
+     `awaitingDecision` 的来源限定（**不要读成"永远不会盖掉思考中"**）：调用方传的是
+     `recoverState.pendingDecisions` 非空，而那个字段有**两个**写入者——
+     ① 主动读面 `GET /api/sessions/{id}/recovery`（#1049）：在途 run 时后端返回 `[]`，
+        所以这一路**不会**把正在跑的会话说成待裁决；
+     ② `POST /recover` 的 409 载荷：`recover` **不判在途**（`session/service.py`：
+        "在途时同样的 RUNNING 行会进它的 409 pending_decisions"），所以这一路
+        **可能**带着 RUNNING 行进来。
+     即：本分支的"不会误报在途"只对 ① 成立。② 是既有的 409 路径（本票未改），
+     它把清单写进同一字段后，界面会按"有待裁决"呈现——这是刻意的保守取舍：
+     后端在 409 里明确说了"需人工裁决"，界面宁可如实转述后端，也不自行过滤
+     （过滤＝前端维护第二套裁决真相，不变量 #22）。登记为已知边界，见 #1030 交付报告。 */
   if (awaitingDecision) {
     const r = PULSE_TABLE['awaiting-decision'];
     return { state: 'awaiting-decision', label: r.label, className: r.className, Icon: r.Icon };

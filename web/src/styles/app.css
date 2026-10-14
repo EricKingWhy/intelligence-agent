@@ -334,9 +334,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    读成"等一会儿就好"，而那正是本票要消灭的误读。区分同时靠图标（Gavel）与文字
    （待裁决 / 已暂停）两个通道——胶囊体永不 color-only。
    文字色走 ink-mix（同 .approval-chip 既有做法）：纯 --warning 文字压在 12% 的
-   warning 底色上，亮色主题**实测 2.96:1**（Chromium 量值，见 e2e/t-contrast.spec.ts
-   的「#1030 待裁决徽标对比度」用例），**不达 AA 4.5**；混入 45% 的 --text-primary
-   后实测亮色 6.53:1 / 暗色 10.66:1，两个主题都过（§15 无需新增 token）。
+   warning 底色上，亮色主题**实测 2.91:1**（Chromium 量值，见 e2e/t-contrast.spec.ts
+   的「#1030 待裁决徽标对比度」用例——它把同一个真实节点改成纯 --warning 现量，
+   所以这个数字与代码同源、不会随底色漂移而失真），**不达 AA 4.5**；混入 45% 的
+   --text-primary 后实测亮色 6.53:1 / 暗色 10.65:1，两个主题都过（§15 无需新增 token）。
    无动画：等待是静止态，闪动会被读成"还在跑"，而本态的全部要点恰恰是"它没在跑"。 */
 .run-pulse.pulse-awaiting-decision {
   color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
@@ -6175,8 +6176,11 @@ button.json-row {
 /* 待裁决横幅（#1030 缺陷②/③）：与 interrupt-banner 同族，但**带一个动作**。
    --warning 色域与「中断」同族是刻意的：两者都在说"这个会话没在正常推进"，
    而本条的区分点是**可行动**（有「去裁决」按钮）与文案层次，不是颜色。
-   亮色下 --warning 文字压在 8% 同色底上只有 ~2.8:1（.approval-chip 实测），
-   所以正文用 ink-mix 提对比（同 .approval-chip 的既有做法，不新增 token）。 */
+   正文用 ink-mix 提对比（同 .approval-chip 的既有做法，不新增 token）：纯 --warning
+   压在本条的 8% 同色底上亮色不达 AA——该读数由 e2e/t-contrast.spec.ts 的
+   「#1030 待裁决徽标对比度」用例现量（同一公式、同一底色家族），此处不复述具体
+   数字，免得两处漂移（审查 P3-2：此前这里引的是 .approval-chip 的 **14%** 底色
+   读数，与本条的 8% 不是同一个底，属于把别处的证据挪来描述本条）。 */
 .adjudication-banner {
   display: flex;
   align-items: center;

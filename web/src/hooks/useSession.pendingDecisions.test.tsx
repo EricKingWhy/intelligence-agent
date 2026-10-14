@@ -33,7 +33,7 @@ vi.mock('../lib/api', async (importOriginal) => {
   };
 });
 
-import { getSessionRecovery, NotFoundError, type PendingDecision } from '../lib/api';
+import { getSessionRecovery, NotFoundError, recoverSession, type PendingDecision } from '../lib/api';
 import { useSession } from './useSession';
 
 const SID = 's-1';
@@ -100,6 +100,7 @@ beforeEach(() => {
   apiState.events = idleHistory(SID);
   vi.mocked(getSessionRecovery).mockReset();
   vi.mocked(getSessionRecovery).mockResolvedValue([]);
+  vi.mocked(recoverSession).mockReset();
 });
 
 afterEach(async () => {
@@ -198,5 +199,111 @@ describe('#1030 useSession · 打开会话主动读待裁决清单（AC3/AC4）'
     await enterViewing();
     expect(captured.hook!.recoverState.status).toBe('idle');
     expect(captured.hook!.recoverState.conflict).toBe(false);
+  });
+});
+
+// ── #1030 审查 P1（轴 A）：DEFER 裁决后徽标回落成「思考中」──
+//
+// 后端契约（`recovery/reconcile.py:71-74` + `tests/test_web_api.py::test_recover_with_defer_is_accepted_and_keeps_pending`）：
+// `DEFER` **不解封**——Ledger 保持 NEED_RECONCILE，该调用"仍出现在后续
+// pending_decisions 里"。所以 POST /recover 的 **200 只证明请求被接受，不证明裁决已结清**。
+//
+// 修前：200 分支无条件写 `pendingDecisions: null`，而主动读面只依赖 `[mode]`、提交成功
+// 不改 mode ⇒ 没有任何东西重读 ⇒ `hasPendingDecisions` 转假 ⇒ 面板与横幅双双消失、
+// 徽标回到「思考中」，而会话其实仍被封着。这正是本票（AC1/AC4）要消灭的谎报。
+//
+// 加重因素：`default_action` 由工具的 `replay_safe` 决定，`bash` 未覆写（默认 False）
+// ⇒ 票面现场那个 bash 调用的默认档**就是 DEFER**。用户"照默认走"一次即复现。
+
+describe('#1030 审查修复：裁决 200 之后必须重读清单（DEFER 不解封）', () => {
+  /** 200 返回：与 GET events 同构的全量事件（recover 的成功载荷）。 */
+  const okEvents = (sid = SID): AgentEvent[] =>
+    [
+      { type: 'session/started', seq: 1, session_id: sid, data: {}, run_id: null, step_id: null },
+      { type: 'run/started', seq: 2, session_id: sid, data: {}, run_id: 'r-1', step_id: null },
+      { type: 'tool/call', seq: 3, session_id: sid, data: { tool_call_id: 'call_1', tool_name: 'bash' }, run_id: 'r-1', step_id: 1 },
+      { type: 'run/interrupted', seq: 4, session_id: sid, data: { reason: 'process_restart' }, run_id: 'r-1', step_id: null },
+    ] as AgentEvent[];
+
+  it('DEFER 提交成功（200）后清单必须**重读**，不得凭"POST 成功"推断已结清', async () => {
+    vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
+    await mount();
+    await enterViewing();
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
+    const readsBefore = vi.mocked(getSessionRecovery).mock.calls.length;
+
+    // 后端对 DEFER 的回应：200 + 该 op 仍在 pending（不解封）。
+    vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
+    await act(async () => {
+      await captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'DEFER' }]);
+    });
+
+    // 关键：200 之后必须再读一次——否则界面会把"还没结清"说成"没事了"。
+    expect(
+      vi.mocked(getSessionRecovery).mock.calls.length,
+      'DEFER 200 之后没有重读清单',
+    ).toBeGreaterThan(readsBefore);
+    // 重读拿到的事实仍是"有待裁决" ⇒ 清单不得被清成 null/[]。
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
+  });
+
+  it('ABANDON 提交成功（200）后重读拿到空清单 ⇒ 如实转为"已结清"', async () => {
+    // 与上一条成对：修复不能变成"永远不清"——ABANDON 真的解封（后端映射
+    // OperationState.CANCELLED），此时重读会拿到 []，界面必须如实收口。
+    vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
+    await mount();
+    await enterViewing();
+
+    vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
+    vi.mocked(getSessionRecovery).mockResolvedValue([]);
+    await act(async () => {
+      await captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'ABANDON' }]);
+    });
+
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual([]);
+  });
+
+  it('重读失败时保持"未知"（null），不回落空清单——"读不到"仍 ≠ "没事"', async () => {
+    vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
+    await mount();
+    await enterViewing();
+    const readsBefore = vi.mocked(getSessionRecovery).mock.calls.length;
+
+    vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
+    vi.mocked(getSessionRecovery).mockRejectedValue(new Error('boom'));
+    await act(async () => {
+      await captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'DEFER' }]);
+    });
+
+    // 先断言"确实重读了"——否则本用例在修前修后都得 null，证明不了任何事。
+    expect(
+      vi.mocked(getSessionRecovery).mock.calls.length,
+      'DEFER 200 之后没有重读清单',
+    ).toBeGreaterThan(readsBefore);
+    expect(captured.hook!.recoverState.pendingDecisions).toBeNull();
+  });
+
+  it('切走会话后晚到的重读结果不写进新会话（stale-write 守护）', async () => {
+    vi.mocked(getSessionRecovery).mockResolvedValue(PENDING);
+    await mount();
+    await enterViewing();
+
+    // 让裁决之后那次重读悬停（不 resolve），才能在它落地前切走。
+    let release: ((v: PendingDecision[]) => void) | null = null;
+    vi.mocked(getSessionRecovery).mockImplementationOnce(
+      () => new Promise<PendingDecision[]>((resolve) => { release = resolve; }),
+    );
+    vi.mocked(recoverSession).mockResolvedValueOnce(okEvents());
+    // 不 await：`recover` 的 200 分支会 await 这次重读，等它就死锁了。
+    await act(async () => {
+      void captured.hook!.submitDecisions(SID, [{ tool_call_id: 'call_1', verdict: 'DEFER' }]);
+    });
+
+    // 重读在途时切到别的会话 → 旧结果落地时不得污染新会话的态。
+    apiState.events = idleHistory('s-2');
+    vi.mocked(getSessionRecovery).mockResolvedValue([]);
+    await enterViewing('s-2');
+    await act(async () => { release?.(PENDING); });
+    expect(captured.hook!.recoverState.pendingDecisions).toEqual([]);
   });
 });

@@ -14,7 +14,6 @@ import { useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import type { PendingDecision, RecoverDecisionInput } from '../lib/api';
 import {
-  adjudicationTechDetail,
   assembleDecisions,
   DECISION_OPTIONS,
   humanizeToolName,
@@ -24,6 +23,7 @@ import {
   SOURCE_PRESETS,
   type DecisionDraft,
 } from '../lib/recovery';
+import { AdjudicationTechDetail } from './AdjudicationTechDetail';
 import '../styles/recovery.css';
 
 interface Props {
@@ -95,12 +95,7 @@ export function RecoveryDecisionPanel({ decisions, submitting, message, onSubmit
           写给调用方的文本，不是写给用户的。标题已经用后果语言说清"有几个操作结果
           不确定"，这里不再重复计数；后端原文一律进折叠层（要排查的人展开仍有全文，
           两者都不丢——AC2 要求"只在折叠层出现"，不是"消失"）。 */}
-      {adjudicationTechDetail(message) && (
-        <details className="adjudication-tech">
-          <summary>技术详情</summary>
-          <p className="adjudication-tech-body">{adjudicationTechDetail(message)}</p>
-        </details>
-      )}
+      <AdjudicationTechDetail message={message} />
 
       <ol className="recovery-cards">
         {decisions.map((decision) => {

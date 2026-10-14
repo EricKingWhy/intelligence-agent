@@ -65,14 +65,20 @@ describe('DECISION_OPTIONS — 四选一，默认项由后端 default_action 决
     expect(defer?.help).toContain('稍后');
   });
 
-  it('默认项里不出现 CONFIRM_SUCCESS 与 ABANDON（#14 安全侧）', () => {
-    // 后端 default_action 只有 RETRY/DEFER 两值；CONFIRM_SUCCESS 断言"副作用已生效"
-    // （最危险），ABANDON 断言"放弃且不重跑"（不可逆）——两者都必须由用户主动改选。
-    for (const decision of [
-      { default_action: 'RETRY' as const },
-      { default_action: 'DEFER' as const },
-    ]) {
-      expect(['CONFIRM_SUCCESS', 'ABANDON']).not.toContain(decision.default_action);
+  it('默认项只取后端 default_action，永不预选 CONFIRM_SUCCESS / ABANDON（#14 安全侧）', () => {
+    // 后端 `default_action` 的取值域就是 RETRY/DEFER 两值（`PendingDecision` 的
+    // 联合类型钉住）。CONFIRM_SUCCESS 断言"副作用已生效"（最危险），ABANDON 断言
+    // "放弃且不重跑"（不可逆）——两者都必须由用户主动改选。
+    // 断言打在**真实生产者** `initialDrafts` 上（而不是拿两个字面量与一个字面量
+    // 数组互比：那种写法不碰任何产品代码，改坏实现也不会红——审查 P2-1）。
+    const cards = [
+      decision({ tool_call_id: 'c1', default_action: 'RETRY', risk_level: 'low' }),
+      decision({ tool_call_id: 'c2', default_action: 'DEFER', risk_level: 'high' }),
+    ];
+    const drafts = initialDrafts(cards);
+    expect([drafts.c1.verdict, drafts.c2.verdict]).toEqual(['RETRY', 'DEFER']);
+    for (const d of Object.values(drafts)) {
+      expect(['CONFIRM_SUCCESS', 'ABANDON']).not.toContain(d.verdict);
     }
   });
 
