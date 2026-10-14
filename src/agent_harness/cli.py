@@ -1375,6 +1375,9 @@ async def run(
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
         # （ingest_document 的 sandbox 解析）需要可信 session id。
         session_token = memory_session_var.set(session.session_id)
+        # #1055：**交付点**——CLI `run` 不经 RunManager，直接把下面这枚聚合交给
+        # `runtime.run_stream`，故在此显式标记，撞号才吃 resync 重投。
+        session.deliver_to_runtime()
         emit = write if write is not None else sys.stdout.write
         renderer = StreamRenderer(emit)
         final_text = ""
