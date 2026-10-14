@@ -506,3 +506,48 @@ E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev ser
 **进度落点**：`docs/SDD_TICKET_TRACKER.md` 与 `docs/PHASE_STATUS.md` 的本票条目已由「待发布」更新为「已合入 main 并关闭」；当月明细见 `docs/phase_status/2026-10.md` 的 #1078 节（含收口 bullet）。
 
 **交付边界**：本次交付**不含**分支删除（`codex/issue-1074-gate-discriminator` 保留，删除需单独批准），也**不含**对合并后 `main` 的进一步验证（合并后 main 的验证由集成侧后续按协议进行）。
+
+## 14 补跑后端全量（关闭残余风险，2026-10-14）
+
+**要关闭的命题（§11 末段 / §12 末段原文登记）**：第 4、5 次同步的 `main` 增量含 `src/**` 与 `tests/**`（来自 #1093 / #1089 / #1015），其在**合并树**上的**后端全量本次没有实测**；当时按用户裁决只跑增量车道（Gate-0 / vitest / focused desktop，e2e 由 PR CI 覆盖），后端读数自更早的 `3c52da5c` **传递**。用户 2026-10-13 已同意补跑，由接手 Agent 执行。
+
+**范围边界（不放大）**：本票自己的面（`.github/workflows/windows-installer-smoke.yml` + `desktop/**`）每一轮都跑了，且每个 PR head 上 CI 的 `windows-installer-smoke` 都跑过 ⇒ **那部分不是风险**。本次只回答「别人的 `src/**` 改动与本仓合并后是否互相影响」这一条。
+
+### 14.1 被测树
+
+跑**开跑时最新的** `origin/main` 最新树（不跑 `44321545`）：`main` 已包含全部五次同步与两个 PR，跑最新 `main` 等于一次性覆盖所有遗留。
+
+| 项 | 值 |
+| --- | --- |
+| sha | `67f8997a1a3dc293d24daa05c840aef8248daf10` |
+| tree | `edc624eeaf6ba81efc001004f8dc7024ae1d2932` |
+| 取得方式 | `git fetch origin --prune` 后 `git rev-parse origin/main`（与集成 clone `D:\intelligence-agent` 的 `origin/main` 逐字一致） |
+| 跑在哪 | 隔离副本 `C:\ia-probe-914\gate-tree`（**主工作树之外**，§8.1 第 6 条 / §8.3 第 2 条），detached HEAD |
+| 依赖清单 | `git diff --name-only HEAD 67f8997a -- pyproject.toml uv.lock` **无输出** ⇒ 未跑 `uv sync --frozen` |
+
+### 14.2 命令与读数（单跑无并发）
+
+后端套件**不得**与 playwright 同跑（#1069 记录过负载导致的假红）——本次单飞顺序跑。
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 后端全量 | `PYTHONPATH= PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest -q -p no:randomly` | **7870 passed / 43 skipped / 51 deselected / 0 failed**（1440.18s，rc=0） |
+| Gate-0 裸全量 | `.venv/Scripts/python.exe scripts/gate0.py` | **6/6 PASS**（墙钟 44.6s），收据 `docs/gate/67f8997a1a3dc293d24daa05c840aef8248daf10.json` |
+
+- 日志：`C:\ia-probe-914\logs\backend-full-67f8997a.log`（旁证 `.meta.txt` 记 sha / tree / 起止时刻 / 墙钟 / exit）；Gate-0 日志 `C:\ia-probe-914\logs\gate0-67f8997a.log`。
+- **环境前置已核实**：本机**无** safe-delete shim（`sitecustomize` 探针返回 `None`、`PYTHONPATH` 为空）⇒ 手册的直接跑法成立，未触发 §8.6 的 `run_tests_clean.sh` 例外通道（该通道属例外且必须标注）。
+- **收据自证**：`tracked_matches_head = true`、`untracked_total = 0`、`env_failures = []`（§8.6 要求区分环境项与真实红）。
+- **隔离前提**：全量运行窗口内主工作树 `D:\intelligence-agent` 未做任何改动（本票改动全部落在隔离副本与随后的 docs 落点）。
+
+### 14.3 判定
+
+`0 failed` ⇒ **§11 / §12 登记的那条残余风险关闭**。
+
+- 它同时回答了 §11 登记的另一半：那次只跑增量车道时，「后端套件会不会被 `web/**` 间接影响」也**没有用全量实测回答**；本次被测树 `67f8997a` **已包含** #1015 的 `web/**` 改动，故该命题一并由实测回答。
+- **与历史基线对照**（会话内实测，供比较）：`3c52da5c` 树 **7838P/43S/51D/0F**（38:35）、`cb247e64` 树 **7823P/43S/51D/0F**（41:31）。本次 **7870P**（较 `3c52da5c` **+32**）与 `main` 继续前移相符，`skipped` / `deselected` 同数，**无新增红**。**归因（机械核对，非推测）**：该区间后端测试面 = 新增 `tests/agent/test_reasoning_effort_audit.py`（#1093）+ `tests/session/test_derive_delegation_marker.py`（#1085 / #1108）、修改 `tests/multiagent/test_child_session_resume.py`（#1085 / #1089）与 `tests/session/test_fork.py`（#1111）；`git diff -U0 3c52da5c 67f8997a -- tests/` 计**新增 `def test_*` 28 条、删除 0 条**（+32 的差额含参数化展开）。⚠ `#1096`（markdown 链接化）**是纯 `web/**` 面**，与后端用例数无关，不参与本归因。
+
+### 14.4 未覆盖（如实登记，不写成绿）
+
+- **desktop 全量**（`297/295P/2S/0F`）与 **e2e**：本次未重跑（e2e 由 PR CI 的冒烟集车道覆盖）。
+- **`web/**` 的 vitest / build**：本次命题是「后端全量在合并树上是否成立」，不含前端车道；前端车道在 §11 / §12 已按当时裁决单独重跑并登记。
+- 本次交付为 **docs-only**（按用户 2026-10-13 指令「如果只是文件方面就没有必要全量测试了」），故未重跑完整门禁。
