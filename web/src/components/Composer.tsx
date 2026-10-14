@@ -87,7 +87,7 @@ interface Props {
    *
    *  窗外投递的结局来得比判定窗口晚（响应头要等 run 结束才下发），提交时无从等待，
    *  于是先按已受理清空；真失败时由 hook 经这条 props 把原文送回来，这里按
-   *  `restoreFailedDraft` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
+   *  `restoreFailedDrafts` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
    *  对象引用变化即触发一次注入（裸 string 会被 `Object.is` 挡掉第二次，见 `FailedDraft`）。 */
   failedDraft?: FailedDraft | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
@@ -405,8 +405,8 @@ export const Composer = memo(function Composer({
    *  `accepted === false` 那一支走**同一条**语义（DSH `settleDetachedFailure`：分离
    *  投递的失败并入同一条失败呈现，而不是另开一条只显示不恢复的旁路）。
    *
-   *  依赖对象引用即可：每次失败都是新的 `{ text }`，同一段文本连续失败两次也各算一次
-   *  注入（裸 string 会被 React 的 `Object.is` 挡掉第二次，见 `FailedDraft`）。
+   *  依赖对象引用即可：每次失败都是新的 `{ text }`（承重理由见 `FailedDraft`），同一段
+   *  文本连续失败两次也各算一次注入。
    *  StrictMode 下 effect 双跑是安全的：回填是幂等的 setValue（第二跑时输入框已非空
    *  ⇒ 原样返回，不会出现两份文本）。
    *  **刻意不抢焦点**：这条回执可能迟到几十秒，届时用户多半在别处（另一个输入框、

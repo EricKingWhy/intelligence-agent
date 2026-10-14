@@ -504,11 +504,9 @@ export function useSession() {
   /** #1148：**分离投递**（detached delivery）迟到的失败——要把草稿还给用户。
    *
    *  两条路径的结局都来得比判定窗口（`EARLY_RESPONSE_WINDOW_MS` = 1200ms）晚，
-   *  而窗口只量「响应头到没到」：
-   *   - `sendFollowUp` 窗外落定：待裁决 409 在吐响应头之前要先把 pending 裁决查出来
-   *     （`resume_and_launch` → `recover`），冷启动 / 慢盘越过 1200ms 完全正常；
-   *   - `submitTask` 认领成功之后 POST 才 reject：会话建出来了，但这条消息有没有
-   *     随 POST 送出去是另一回事。
+   *  而窗口只量「响应头到没到」（两条路径各自的成因见两个调用点的注释）：
+   *   - `sendFollowUp` 窗外落定；
+   *   - `submitTask` 认领成功之后 POST 才 reject。
    *  两条路都无从 await（正常流式的响应头要等 run 结束才下发），于是先按已受理
    *  返回、失败时经这份状态把原文投影回输入框（App → Composer 的既有投影方式，
    *  与 `PresetTask` 同款：载荷对象引用变化即触发一次注入）。
@@ -522,8 +520,8 @@ export function useSession() {
   /** 把一次分离投递的失败交回 Composer（#1148）。
    *
    *  只记"文本"：清空 / 回填的决策仍归 Composer（它才知道输入框里现在是不是有更新的
-   *  草稿）。每次都是新对象 ⇒ 同一段文本连续失败两次也各算一次注入（裸 string 会被
-   *  React 的 `Object.is` 挡掉第二次，见 `FailedDraft`）。
+   *  草稿）。每次都是新对象 ⇒ 同一段文本连续失败两次也各算一次注入（承重理由见
+   *  `FailedDraft`）。
    *
    *  会话归属不必另立字段：调用点都先过 `streamGenRef` 代际闸，而 `selectSession`
    *  必然推进代际，所以"用户已切走"的失败在到达这里之前就被挡掉了。 */
@@ -1429,7 +1427,7 @@ export function useSession() {
          *  数字，缺省由后端按 Deployment/AgentProfile 解析（默认 500）。 */
         amend?: Omit<SendMessagePayload, 'content' | 'budget'>;
       },
-    ) => {
+    ): Promise<boolean> => {
       setError(null);
       // 上一次的失败回执到此作废（#1148）：它只对触发它的那次投递有意义，已经兑现过
       // （用户拿到过那段原文）就该清掉——否则任何一次 Composer 重挂都会把这段旧原文
