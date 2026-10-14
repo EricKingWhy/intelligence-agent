@@ -4196,9 +4196,10 @@ class SessionService:
            构造，且边由父日志承载、只是被 lineage 索引进 `session_meta`（下面的补偿步
            读的就是那份索引）——若也拒绝，任何用过子 Agent 的会话将永远删不掉。
 
-        **删除顺序**（D3）：先 DB 行、后文件，每步幂等。列表是**文件系统驱动**的
-        （`list_session_ids` 扫 `<root>/<sid>/events.jsonl`），所以"DB 已删、文件还在"是
-        唯一可自愈的崩溃窗口——用户再删一次即收敛；反过来（文件先删）会留下无法自愈的
+        **删除顺序**（ADR-0029 D3）：Docker 私有资源先清，失败时保留 session 事件和映射，
+        让同一 DELETE 可重试；此步成功后再按 D3 先 DB 行、后文件，每步幂等。列表是
+        **文件系统驱动**的（`list_session_ids` 扫 `<root>/<sid>/events.jsonl`），所以
+        "DB 已删、文件还在"仍是可自愈的崩溃窗口；反过来（文件先删）会留下无法自愈的
         孤儿 `session_meta` 行（lineage 里的幽灵父节点）。
 
         其中 DB 段多一步**跨会话的补偿**（D5）：`clear_delegation_parent` 会把"父是被删
@@ -4249,6 +4250,13 @@ class SessionService:
                 f"session '{session_id}' is the fork parent of {len(children)} "
                 f"session(s): delete the child session(s) first"
             )
+
+        # Docker 容器与私有卷是该会话的外部资源。先清理并保留映射到后续工件步骤；
+        # 任何 Docker 错误向上传播，DB、事件和映射都留着，供同一 DELETE 安全重试。
+        await anyio.to_thread.run_sync(
+            self._workspace_registry.cleanup_docker_workspace_resources,
+            session_id,
+        )
 
         # ⑥ DB 行（先）——四张含 session_id 的表各自清自己的行。跨 Store 级联由调用方
         #    编排，不让任一 Store 隐式拥有别人的写语义（`SessionMetaStore.cleanup` 的原话）。

@@ -340,6 +340,52 @@ class WorkspaceRegistry:
         if mapping_file.exists():
             mapping_file.unlink()
 
+    def cleanup_docker_workspace_resources(self, session_id: str) -> None:
+        """Delete only the owning session's Docker container and private volume.
+
+        Ownership comes from the session mapping identity plus the deterministic
+        resource names. The workspace_root is never used as a deletion target.
+        Keep the mapping until discard_session_artifacts runs so failures can be
+        retried through the same hard-delete request.
+        """
+        mapping = self._read_mapping(session_id)
+        if mapping is None:
+            return
+        if mapping.get("backend") != "docker":
+            return
+        if mapping.get("session_id") != session_id:
+            raise WorkspaceBindingError(
+                f"Workspace mapping identity mismatch for session '{session_id}'."
+            )
+        if "workspace_owner_session_id" in mapping:
+            return
+
+        expected_name = f"agent-harness-{session_id}"
+        if (
+            mapping.get("container_name") != expected_name
+            or mapping.get("volume_name") != expected_name
+        ):
+            raise WorkspaceBindingError(
+                f"Docker workspace resources for session '{session_id}' do not "
+                "match their deterministic ownership names."
+            )
+
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        sandbox = self._cache.get(session_id)
+        if sandbox is None:
+            sandbox = self._instantiate_sandbox(mapping)
+        if (
+            not isinstance(sandbox, DockerSandbox)
+            or sandbox._container_name != expected_name
+            or sandbox._volume_name != expected_name
+        ):
+            raise WorkspaceBindingError(
+                f"Session '{session_id}' has Docker ownership metadata but no "
+                "matching Docker sandbox instance."
+            )
+        sandbox.delete()
+
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
 
