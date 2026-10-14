@@ -1087,6 +1087,27 @@ export function useSession() {
           throw late.failure ?? e; // POST 的真实失败原因优先于「认领超时」
         }
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
+        /* #1029 AC3 补口：**认领成功之后** POST 才失败的话，也必须如实回报"未受理"。
+         *
+         *  原先这里直接 `return null`（= 成功），于是 `late.failure` 只在上面的
+         *  catch 里被读过一次——「会话已创建、响应未收全时断网 / 401 / 中途 5xx」
+         *  这个序列落进来时，失败被写进 `late.failure` 却无人读：`submitTask`
+         *  返回 null ⇒ `handleSubmit` 返回 true ⇒ Composer 清空输入框。用户文本
+         *  消失，而且**不是以失败的形式**——它被当成了成功。票面 AC3 要的正是
+         *  「发送成功之后才清空」，故这条静态成功判定必须让位给已知的失败事实。
+         *
+         *  为什么这不算"认领成功即已提交"：会话确实建出来了，但**用户的这条消息
+         *  有没有随 POST 送出去**是另一回事，而 POST 已明确 reject ⇒ 没送出去。
+         *  诚实回报"未受理"让 Composer 留住草稿；用户重发会走 `sendFollowUp`
+         *  （会话已在 `liveSidRef`，是既存会话的续聊），不会另造第二个会话。
+         *
+         *  判据用 `late.failure` 的**当前值**（不是 await）：此刻若 POST 已经 reject，
+         *  我们就把真实原因报上去；若它还没落定，说明 POST 仍在途（正常流式的响应头
+         *  本来就要等 run 结束），此时按"已接管"返回是正确且必需的——await 它等于
+         *  把返回值挂到整场 run 结束。 */
+        if (late.failure !== null) {
+          throw late.failure;
+        }
         // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
         // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
