@@ -1019,7 +1019,8 @@ const RD_ROW = {
 /** 裁决面板错误态夹具：坏死 run（run/started 无终态）+ 一条待裁决 UNKNOWN。
  *  面板随 `pending_decisions` 在场；选「当作已生效」并填超过上限的来源 → 点提交触发
  *  `assembleDecisions` 的来源长度校验抛错 → `setError` → `.recovery-decision-error`
- *  （role=alert）落屏。上限 `RECOVER_DECISION_SOURCE_MAX = 2000`（lib/api.ts）。 */
+ *  （role=alert）落屏。上限 `RECOVERY_SOURCE_MAX = 2000`（抛错点 lib/recovery.ts:148；
+ *  与 lib/api.ts 的 `RECOVER_DECISION_SOURCE_MAX` 同值，recovery.test.ts:103 断言二者相等）。 */
 test(`[${theme}] #1208 .recovery-decision-error（裁决来源校验失败条）对比度 ≥4.5`, async ({ page }) => {
   await routeApi(page, {
     sessions: [RD_ROW],
