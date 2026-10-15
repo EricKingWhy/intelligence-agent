@@ -177,3 +177,30 @@ def test_copy_in_imports_host_file(
     docker_sandbox.copy_in(source, "imports/copied.txt")
 
     assert docker_sandbox.read_text("imports/copied.txt") == "from Host"
+
+
+@docker_required
+class TestDockerPathKind:
+    """#1167：`path_kind` 必须能探测容器内路径（基类实现对 `PurePosixPath`
+    工作区根恒返回 `None`，曾导致 Docker 会话的项目指令加载/重载恒为 missing）。"""
+
+    def test_file_directory_and_missing(self, docker_sandbox: object) -> None:
+        docker_sandbox.write_text("kind-probe.txt", "probe")
+        docker_sandbox.write_text("subdir/nested.txt", "nested")
+
+        assert docker_sandbox.path_kind("kind-probe.txt") == "file"
+        assert docker_sandbox.path_kind("subdir") == "directory"
+        assert docker_sandbox.path_kind("subdir/nested.txt") == "file"
+        assert docker_sandbox.path_kind("does-not-exist.txt") is None
+
+    def test_symlink_is_not_a_regular_file(self, docker_sandbox: object) -> None:
+        docker_sandbox.write_text("real.txt", "real")
+        result = docker_sandbox.exec("ln -s real.txt link.txt")
+        assert result.exit_code == 0, result.stderr
+
+        assert docker_sandbox.path_kind("link.txt") == "symlink"
+
+    def test_escaping_path_is_not_inspectable(
+        self, docker_sandbox: object,
+    ) -> None:
+        assert docker_sandbox.path_kind("../../etc/passwd") is None
