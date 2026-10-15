@@ -155,8 +155,8 @@ class WorkspaceRegistry:
                     "create() cannot replace its owner binding."
                 )
             return self.get(session_id)
-        if session_id in self._cache:
-            return self._cache[session_id]
+        # Cache entries are valid only while their persisted owner mapping exists.
+        self._cache.pop(session_id, None)
 
         mapping = self._build_mapping(session_id, backend=backend)
         requested = (
