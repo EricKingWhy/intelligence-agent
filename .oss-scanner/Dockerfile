@@ -33,7 +33,10 @@ RUN pip install --no-cache-dir "uv==${UV_VERSION}" \
 WORKDIR /src
 
 # --- Python dependencies first (best layer cache hit) ---
+# NOTE: src/ must be present before `uv sync`: the project itself is installed
+# editable (uv_build), and the build backend requires src/agent_harness/ to exist.
 COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
 RUN uv sync --locked --all-extras
 
 # --- Frontend dependencies ---
