@@ -795,6 +795,75 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio, `.task-review-evidence-unavailable contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
+  /* #1136 P3-1 穷尽：task-review 族里余下 7 处「语义色当正文色用」——.task-review-error（--danger）、
+     .task-review-result-tag.r-fail（--danger）/.r-blocked（--warning）、.task-review-freshness.f-stale
+     （--warning）、.task-review-freshness-reasons（--warning）、.task-review-diff .diff-del（--danger）
+     /.diff-hunk（--info）。同族同根因同手法（ink-mix），本用例逐个量**真实节点**；改回纯 `var(--X)`
+     必红。.r-pass/.diff-add/.verification.v-passed（--success）与 .run-axis.running（--info）已达标，
+     不在本用例内（不为了凑数改动达标的处）。 */
+  test(`[${theme}] #1136 task-review 语义色正文（result-tag/freshness/diff）对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: '穷尽对比度', read_write_intent: null, cwd: '/repo',
+        criteria: [criterion('c1', '失败项'), criterion('c2', '受阻项'), criterion('c3', '通过项')],
+        verification: { c1: verification('failed'), c2: verification('blocked'), c3: verification('passed') },
+        acceptance: null, version: 1, open_run_ids: [], product_state: 'deliverable',
+      },
+      evidence: {
+        // c1 result=fail + stale(带 reasons) → r-fail / f-stale / freshness-reasons 三处同时在真实路径上
+        c1: [evidenceRecord({ evidence_id: 'ev-c1', criterion_id: 'c1', result: 'fail', freshness: { status: 'stale', reasons: ['覆盖文件已变动：src/a.py'] } })],
+        c2: [evidenceRecord({ evidence_id: 'ev-c2', criterion_id: 'c2', result: 'blocked', freshness: { status: 'fresh', reasons: [] } })],
+        c3: [evidenceRecord({ evidence_id: 'ev-c3', criterion_id: 'c3', result: 'pass' })],
+      },
+      // diff 正文含 `@@`（diff-hunk）与 `-`（diff-del）行；`+++`/`---` 头不算（见 UnifiedDiffText）。
+      gitDiff: { exit_code: 0, stdout: '@@ -1,2 +1,2 @@\n context line\n-removed line\n+added line', stderr: '', artifact_ref: null },
+    };
+    await openTaskReview(page, theme, state);
+    const panel = page.getByRole('dialog', { name: '任务审阅' });
+    const SELECTORS = [
+      '.task-review-result-tag.r-fail',
+      '.task-review-result-tag.r-blocked',
+      '.task-review-freshness.f-stale',
+      '.task-review-freshness-reasons',
+      '.task-review-diff .diff-del',
+      '.task-review-diff .diff-hunk',
+    ];
+    // 每选择器先 toBeVisible 预检（缺席必须 throw，不许静默假绿）
+    for (const sel of SELECTORS) {
+      await expect(panel.locator(sel).first()).toBeVisible();
+    }
+    for (const sel of SELECTORS) {
+      const m = await measure(page, sel);
+      const ratio = contrast(m.color, m.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[${theme}] ${sel} color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+      expect(ratio, `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /* #1136 P3-1 穷尽：`.task-review-error`（--danger 压 12% 底）。走「任务拉取失败」真实渲染路径
+     （GET /task 非 404 报错 → review.error → 面板渲染「加载失败：…」；与 review.error 分支同源），
+     同 ink-mix 手法，改回纯 --danger 必红。 */
+  test(`[${theme}] #1136 task-review 加载失败条（.task-review-error）对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: 'x', read_write_intent: null, cwd: '/repo',
+        criteria: [], verification: {}, acceptance: null, version: 1, open_run_ids: [], product_state: 'deliverable',
+      },
+      evidence: {},
+      taskError: { status: 500, detail: '任务状态服务暂不可用' },
+    };
+    await openTaskReview(page, theme, state);
+    const el = page.locator('.task-review-error');
+    await expect(el).toBeVisible();
+    await expect(el).toContainText('加载失败');
+    const m = await measure(page, '.task-review-error');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.task-review-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
   /* #1136 P3-2：`.auth-banner`（后端 401 引导横幅）把 --warning 当正文色，压在 10% 底上。
      渲染条件是 `authRequired=true`（App.tsx:1401，后端 401 广播触发）——夹具同
      l-auth-banner.spec.ts（共享 mockAuthRequired）。 */

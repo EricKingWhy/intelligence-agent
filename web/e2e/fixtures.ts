@@ -1686,6 +1686,8 @@ export interface TaskReviewFixture {
   leaseReleased?: boolean;
   /** #1136：`GET /evidence` 直接失败 → 面板渲染「证据不可得」（≠缺证据）。 */
   evidenceError?: { status: number; detail: string } | null;
+  /** #1136：`GET /task` 直接失败（非 404）→ 面板渲染「加载失败：…」（`.task-review-error`）。 */
+  taskError?: { status: number; detail: string } | null;
 }
 
 export function criterion(item_id: string, text: string, origin: 'user' | 'agent' = 'user') {
@@ -1749,6 +1751,9 @@ export async function mockTaskReviewApi(page: Page, state: TaskReviewFixture): P
       return jsonFulfill(route, { released: state.leaseReleased ?? false, promoted_to: null });
     }
     if (path.endsWith('/task') && method === 'GET') {
+      if (state.taskError) {
+        return jsonFulfill(route, { detail: state.taskError.detail }, state.taskError.status);
+      }
       return jsonFulfill(route, { task: state.task });
     }
     if (path.endsWith('/evidence') && method === 'GET') {
