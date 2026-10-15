@@ -1,0 +1,1 @@
+2026-10-14	#1135 import review Correctness/Spec；range 03b81f681622f3309a4b4398ebea50c449d8d6e2..b5f92e8c1885db0adb20804e4dab236bd633b63f；finding：拒绝后未直接断言 volume 内 canary 缺席，reviewer 未评级；已由 0cbb1ab8 修复。	03b81f681622f3309a4b4398ebea50c449d8d6e2..b5f92e8c1885db0adb20804e4dab236bd633b63f

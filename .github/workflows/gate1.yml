@@ -61,6 +61,8 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: 装后端依赖（dev 组 + 全部 extras，对齐本地 .venv）
         run: uv sync --locked --all-extras
+      - name: 准备 workspace 隔离测试所需的 Docker 镜像
+        run: docker pull python:3-slim
       - name: 全量后端测试 + 覆盖率
         run: |
           mkdir -p artifacts

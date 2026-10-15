@@ -6,6 +6,7 @@ import fnmatch
 import importlib
 import io
 import logging
+import os
 import posixpath
 import queue
 import shlex
@@ -14,8 +15,10 @@ import tarfile
 import tempfile
 import threading
 import weakref
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
 from typing import ClassVar
@@ -83,6 +86,9 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        self._workspace_restore_guard: Callable[
+            [], AbstractContextManager[None]
+        ] | None = None
         self._exec_state = self._state_for_container(self._container_name)
         self._exec_lock = self._exec_state.lock
 
@@ -108,6 +114,14 @@ class DockerSandbox(Sandbox):
         return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
+        restore_guard = getattr(self, "_workspace_restore_guard", None)
+        if restore_guard is None:
+            self._ensure_started()
+            return
+        with restore_guard():
+            self._ensure_started()
+
+    def _ensure_started(self) -> None:
         if self._container is not None:
             self._container.reload()
             if self._container.status == "running":
@@ -958,7 +972,59 @@ class DockerSandbox(Sandbox):
 
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w", dereference=False) as archive:
-            archive.add(source, arcname=target.name, recursive=True)
+            if os.name == "nt":
+                import msvcrt
+                from types import SimpleNamespace
+
+                from agent_harness.sandbox.windows_psec import (
+                    _pin_host_path_tree_for_archive,
+                )
+
+                with _pin_host_path_tree_for_archive(source) as (entries, transferred):
+                    for relative_path, handle, is_directory in entries:
+                        member_name = (
+                            f"{target.name}/{relative_path}"
+                            if relative_path
+                            else target.name
+                        )
+                        fd = msvcrt.open_osfhandle(
+                            handle, os.O_RDONLY | os.O_BINARY,
+                        )
+                        transferred.add(handle)
+                        try:
+                            if is_directory:
+                                fileobj = SimpleNamespace(
+                                    name="", fileno=lambda fd=fd: fd,
+                                )
+                                member = archive.gettarinfo(
+                                    arcname=member_name, fileobj=fileobj,
+                                )
+                                if member is None or not member.isdir():
+                                    raise PermissionError(
+                                        "copy_in source changed during archive"
+                                    )
+                                archive.addfile(member)
+                            else:
+                                with os.fdopen(fd, "rb") as stream:
+                                    fd = None
+                                    fileobj = SimpleNamespace(
+                                        name="", fileno=stream.fileno,
+                                    )
+                                    member = archive.gettarinfo(
+                                        arcname=member_name, fileobj=fileobj,
+                                    )
+                                    if member is None or not (
+                                        member.isreg() or member.islnk()
+                                    ):
+                                        raise PermissionError(
+                                            "copy_in source changed during archive"
+                                        )
+                                    archive.addfile(member, stream)
+                        finally:
+                            if fd is not None:
+                                os.close(fd)
+            else:
+                archive.add(source, arcname=target.name, recursive=True)
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 

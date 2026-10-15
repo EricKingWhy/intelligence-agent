@@ -1,0 +1,1 @@
+2026-10-15	#1157 Spec review PASS; closes archive handle exactly once on validation/query failures; preserves success ownership transfer; focused error and success regressions. P0-P4=0.	671b03ff72eaeadf1f9624a7ee920c2af50da6de..31ea5c25301f2c4f1643aaff47965b8beb4de540

@@ -1,10 +1,56 @@
 # SDD Ticket Tracker
 
-**当前施工（2026-10-15，#1132）**：Issue OPEN + bug/P2/in-progress；worktree `~/workspace/intelligence-agent-1132`，分支 `claude/1132-docker-restore-race`，基线 `4994caff`（= `origin/main`）。代码笔 `f6f3075c`（tree `5d80a46a6d7ca4a22eb36e3b0df8a2abf36e7bec`）：`registry.py` 增 per-workspace `RLock`（类级 `WeakValueDictionary`，同 root 多注册表实例共用）+ 卷存在性 fail-closed 闸门；`docker.py` 增 `workspace_volume_exists()`；ADR-0055。**真 Docker 复现（沙箱 1132-race，Docker 29.8.1）**：基线在「恢复先、删除在窗口内完成」交错下 `volume_recreated_empty=true`，legacy 形状恢复静默成功于空 workspace（读 `marker.txt` → `FileNotFoundError`），竞态后容器+卷成孤儿且重试无法回收（`orphan_after_second_delete_attempt=true`）。**消融（真 Docker）**：仅 per-method 锁 ≡ 基线（临界区是方法级的，窗口在方法之间）；仅卷检查无锁 ⇒ 复现原症状；锁+锁内检查 ⇒ 闭合（两个机制都承重）。**红证**：两条鉴别用例在未改 `src` 的树上分别红于「删除未被锁挡住」与「DID NOT RAISE WorkspaceBindingError」。聚焦（沙箱）：`tests/web/test_session_delete_api.py` 25 passed；`tests/sandbox` 185 passed / 45 skipped；两条新 Docker 用例连跑 3× 全绿。⚠ 票面 §9.1.1 修订的两条事实主张与当前 `origin/main` 不符（`cleanup_docker_workspace_resources` 已由 d0f6543c/#1129 经 PR #1143 并入；main 的 `get()` 无「named-volume check」窗口）——按 §9.1.1 **只报不改票面**，待协调员裁决。push / PR 待批（§14.4）；本线不 merge。
+**W-31 / PR #1178 Gate-1 验收（2026-10-15）**：#1180/#1181/#1182 均已关闭；PR #1178 的代码验证 head 为 `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9`。Gate-1 run [38748617682](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38748617682) 成功：后端 8154 passed / 61 skipped / 51 deselected，前端 Vitest 与 Vite build 成功；`test_docker_hardlink_isolation.py` 显示 `.... [52%]`，四个真实 Docker 用例均执行通过。镜像准备步骤成功。相同代码 head 的 PR Gate-0、Chromium E2E smoke、gitleaks 均成功。Standards APPROVE；Correctness/Spec follow-up APPROVE，原 P2 已解除，P0–P4=0。后续仅补记进度与审查证据；PR #1178 是集成记录。详见月档 W-31 Gate-1 验收记录。
 
-**当前施工（2026-10-15，#1129）**：Issue OPEN + bug/P2/in-progress，EricKingWhy 指派；分支 codex/issue-1129-docker-hard-delete 已 push，实现提交 d0f6543c，文档证据提交 0ab87db4、37d5f97f。真实删除入口定向测试 48 passed，Ruff 通过；代码树 dcfbf5a6 Gate-0 6/6 PASS（42.69s）。候选全量 pytest 7926 passed / 33 failed / 59 skipped / 51 deselected（2771.09s）；pristine origin/main d34ddf00 为 7755 passed / 202 failed / 59 skipped / 51 deselected（3822.51s）。两边使用相同全量命令与 runner 参数、各自 tracked 测试树；候选多 2 个测试函数，收集数 8018 对 8016。基线用 `PYTHONPATH=pristine-main/src` 选择 main 源码。候选 33 个失败 node IDs 均在基线失败集合内；84 条非空规范化诊断逐行相同，SHA-256 d47f692129694090548a816a47c5a7f2b5078487924428e8892f02e672e1c1cd。全量均非全绿，33 项仍待分诊。用户已明确要求确认的问题另开 issue、标 in-progress 后修复；确认属产品问题的部分在 #1129 交接后另票处理。最终 Spec 文档增量复审 APPROVE、Standards/closeout PASS，P0–P4=0。PR #1153 OPEN；本线不 merge，集成冲突与 merge 由专门 agent 负责。详见月档 #1129。
+**W-31 同步与门禁传递（2026-10-15）**：Gate-1 成功产品代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 之后，分支先后同步 #1179/#1185/#1186，当前同步点为 `6a7da97d85c0`，对应 merge `e7f47c02`、`9d8efa48`、`cb348c0d`，基线 `origin/main=1f3c1d11`。`git diff --name-status ee76d794..6a7da97d` 仅含 docs/UX mockup 文件，没有产品代码、测试或工作流变化。该同步点的分支范围 Gate-0（`scripts/gate0.py --since origin/main..HEAD`）6/6 PASS、19.1s，review coverage PASS。其后手动 Gate-1 runs [38752898846](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38752898846) 与 [38753380809](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38753380809) 均因 main 更新触发并发而取消，不计通过或失败；成功的完整 Gate-1 仍覆盖相同产品代码树。后续以本次推送的 PR head CI 为合并门禁。
 
-**当前施工（2026-10-15，#1158）**：Issue OPEN + bug/in-progress；worktree `~/workspace/intelligence-agent-1158`，分支 `claude/1158-dead-code`，基线 `18980144`（= `origin/main`）。代码笔 `2c4370af`（删 `last_event_seq` 20 行 + 测试锚点 1 行）。两轴独立审查：Correctness/Spec APPROVE（P0–P3=0）、Standards APPROVE_WITH_FINDINGS（P0–P2=0，P3×2 已随台账行与 Gate-0 收据闭合）。沙箱（真仓 bundle clone，树 2c4370af / 219a6e4d92ec）：`tests/session` 978 passed / 1 skipped；全量 8108 passed / 1 failed / 56 skipped / 51 deselected（唯一红 = 覆盖闸门自指，非回归）；Gate-0 裸全量 5/6（`docs/gate/2c4370af….json`，❌ = coverage 恰 1 条 = 本笔）。消融：方法加回后 `tests/session` 仍 978 passed / 1 skipped。**push / PR 待批**（§14.4）；本线不 merge。详见月档 #1158。
+**W-31 #1188 续同步与验证（2026-10-15）**：main 后续合入 PR #1188（`4d4f3499`），分支以无冲突 merge `d9359f88` 同步。该主线提交新增 `.provider-link-btn.danger`、`.provider-test-msg`、`.notice-strip-hard` 的对比度修正及 `t-contrast.spec.ts` 用例；它们不属于此前 Gate-1 head `ee76d794` 的覆盖范围。同步后的前端 Vitest **133 files / 1840 tests passed**，`pnpm run build`（tsc + Vite）成功。定向 E2E 在本机被端口预检阻止：5173 属于 `D:\intelligence-agent` Vite（PID 21312），未复用或结束；最新 PR CI 的 E2E 与 Gate-0 通过前不合并。
+
+**已完成（2026-10-15，#1180 Docker fork fake）**：Issue CLOSED（`bug` / `testing` / `P3`；`in-progress` 已移除）；提交 `9718ee082699ab6f981070df27bd16e57c34950b` 为测试 fake 增加 `workspace_volume_exists()` 且默认卷存在。单票测试 8 passed；本轮与 #1181 合跑 42 passed，Ruff 与 `git diff --check` 通过。关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1180#issuecomment-6193505868)。
+
+**已完成（2026-10-15，#1181 持久 Session 测试）**：Issue CLOSED（`bug` / `testing` / `P3`；`in-progress` 已移除）；提交 `1c98a3b5a90337c3545fca5b21eac508f20738c4` 让两个模型创建用例通过现有 seam 调用真实 `Session.start()`，并核对持久化的 `session/started`。单票测试文件 34 passed；本轮两测试文件合跑 42 passed，Ruff 与 `git diff --check` 通过。生产创建完成校验未改。关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1181#issuecomment-6193570457)。
+
+**已完成（2026-10-15，#1182 Gate-1 Docker 镜像准备）**：Issue CLOSED（`bug` / `github_actions` / `testing` / `P2`；`in-progress` 已移除）；修复提交 `fe3a61bf0044a83e4b4e8f9da116b525592baec6` 在后端全量 pytest 前执行 `docker pull python:3-slim`，保留真实 Docker hardlink 测试。PR 分支代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 上 Gate-1 成功：8154 passed / 61 skipped / 51 deselected；hardlink 测试四例实际执行通过；前端 Vitest/build 成功。审查 follow-up 解除唯一 P2，P0–P4=0。关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1182#issuecomment-6194377786)。
+
+**已完成（2026-10-15，#1173）**：Issue CLOSED（bug/P3；`in-progress` 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1173#issuecomment-6191447123)。修复提交 `7f1d9852`，仅修测试 fakes，使其保留生产 `build_runtime()` 在 `Session.start()` 前建立的 workspace mapping；同步提交 `f965c88a` 已纳入最新 `origin/main`。聚焦：5 个 API/workspace 文件 79 passed（测试进程 local-backend override）、multiturn 26 passed、hard-delete/owner-lock 17 passed；全仓 Ruff 与 `git diff --check` 通过。Correctness/Spec、Standards APPROVE（P0–P4=0）；覆盖闸门 exit 0；Gate-0 6/6 PASS（tip `449039a1acd347c62dd8c1adb763856facac5120` / tree `b311151fb396f8d31ee6e617be7b7fc85a58b674`，收据 `docs/gate/449039a1acd347c62dd8c1adb763856facac5120.json`）。Windows 全量 pytest 415 failed / 7640 passed / 138 skipped / 51 deselected；Docker 服务停止且当前权限无法启动，另有 symlink 权限失败。全量未通过，需远端完整验证后再合入；PR 待开，集成负责人 EricKingWhy。详见月档 #1173。
+
+**已完成（2026-10-15，#1163）**：Issue CLOSED（bug/P3；in-progress 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1163#issuecomment-6189441247)。修复 commit `359f6a31`，分支 `codex/1048-ntfs-hardlinks`；双 Registry 红证 1 failed→1 passed，两个 Registry 测试文件 41 passed，Ruff/diff-check 通过。Correctness/Spec 与 Standards 双轴 APPROVE、P0–P4=0，审查范围 `1241e3d2..85a1ce94`。Gate-0 6/6 PASS（tip `a7f5f2ab` / tree `12ff185c`，收据 `docs/gate/a7f5f2ab346e34961d617b94ed3b0729d9501ee2.json`）。覆盖闸门首轮行格式失败，修正后 exit 0。全量后端 pytest 未运行；未 push/PR/merge，集成负责人 EricKingWhy。详见月档 #1163。
+
+**已完成（2026-10-15，#1135）**：Issue CLOSED（bug/P1，`in-progress` 已移除）；完成评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1135#issuecomment-6184627969)。未 push、未开 PR、未 merge；集成负责人 EricKingWhy。junction 复现、验证与用户裁定见月档 #1135。
+
+
+**已完成（2026-10-15，#1159）**：Issue CLOSED（bug/P2，`in-progress` 已移除）；代码提交 `6787476d`，Gate-0 6/6 收据 `docs/gate/bf283e0137b37c6c94280a2e657c85ebbee04ccc.json`；41 个聚焦用例通过、`tests/sandbox` 249 passed / 3 skipped。独立 stale-cache 缺陷另列 #1163。关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1159#issuecomment-6188320136)。详见月档 #1159。
+
+**已完成（2026-10-15，#1162）**：Issue CLOSED（bug/P2，`in-progress` 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1162#issuecomment-6188997136)。分支 `codex/1048-ntfs-hardlinks`，代码提交 `09e8e41f`、`01ba3adc`；共享 session lock 内的无条件活动 run 检查覆盖 `launch=True/False`。聚焦竞态/删除用例 5 passed；完整 `test_multiturn_delivery.py` 在 Windows local-backend override 下 26 passed；Ruff 与 diff-check 通过。Correctness/Spec、Standards 对 `bf283e0137b37c6c94280a2e657c85ebbee04ccc..01ba3adc736feb50f998ad2ac85557e004ae5752` 均 APPROVE、P0–P4=0。代码树初次 Gate-0 仅 coverage 未入账；审查行落账后 Gate-0 6/6 PASS，收据 `docs/gate/f99457b56e601b6f842f4745a854095365d24eb1.json`。全量后端 pytest 未运行；未 push、未开 PR、未 merge，集成负责人 EricKingWhy。详见月档 #1162。
+
+**#1162 Gate-0 文档传递证据**（冻结 Gate 树 `f99457b56e601b6f842f4745a854095365d24eb1` → 收尾树 `bc8ee39ff251d01bafbc07dc5c505c1038beb21d`）：
+
+命令 `git diff --name-status --no-renames f99457b56e601b6f842f4745a854095365d24eb1 HEAD` 的原始输出：
+
+```text
+M	docs/PHASE_STATUS.md
+M	docs/SDD_TICKET_TRACKER.md
+A	docs/gate/01ba3adc736feb50f998ad2ac85557e004ae5752.json
+A	docs/gate/f99457b56e601b6f842f4745a854095365d24eb1.json
+M	docs/phase_status/2026-10.md
+```
+
+仅有文档路径，状态均为 `A` / `M`。
+
+`git status --short` 的原始输出：
+
+```text
+ M docs/SDD_TICKET_TRACKER.md
+?? docs/gate/6787476d6e0a6c0f91e8c3f7b10b600249a954ec.json
+?? docs/gate/ae7b42d6d928f748dfc33a3c5a19e6a92ac76f22.json
+?? docs/gate/bf283e0137b37c6c94280a2e657c85ebbee04ccc.json
+```
+
+工作树检查只出现文档文件；提交本传递记录后只会移除已提交的 `docs/SDD_TICKET_TRACKER.md` 修改项。
+
+**已集成（2026-10-14，#1129）**：Issue CLOSED（bug/P2，`in-progress` 已移除）；PR [#1153](https://github.com/EricKingWhy/intelligence-agent/pull/1153) 于 2026-10-14 合入 main，merge commit `680bba261fd2c52cdd8f7005e09901d65c277ed4`。实现提交 `d0f6543c`；真实删除入口定向测试 48 passed，代码树 `dcfbf5a6` Gate-0 6/6 PASS。候选全量 7926 passed / 33 failed / 59 skipped / 51 deselected，基线 7755 passed / 202 failed / 59 skipped / 51 deselected；候选 33 个失败均属基线失败集合。详见月档 #1129。
+
+**已集成（2026-10-15，#1158）**：Issue CLOSED；PR [#1161](https://github.com/EricKingWhy/intelligence-agent/pull/1161) 于 2026-10-15 合入 main，merge commit `7a3538cb0bc59aa21cdb389252ff6bc5937e80b4`。实现提交 `2c4370af`；`tests/session` 978 passed / 1 skipped。全量 8108 passed / 1 failed / 56 skipped / 51 deselected，唯一失败为覆盖闸门自指且基线同签名；Gate-0 裸全量 5/6（coverage 未入审查行时的中间读数）。详见月档 #1158。
 
 **#1056 验证完成（2026-10-15）**：Issue CLOSED，`in-progress` 已移除；PR [#1155](https://github.com/EricKingWhy/intelligence-agent/pull/1155) OPEN，gate0/Chromium E2E 运行中、gitleaks 通过，尚未合并。隔离变异关闭 delivered 聚合的 `allocate` 后，AC1 六个参数用例全部因 `SeqConflict` 失败；变异恢复后源码 SHA-256 与基线一致。`c1a0acf9` 上完整测试文件连跑 10 次、每次 38 passed；同型 `Boom`/thief 用例均在同一 Store 实例与 root。无产品代码改动；分支 `codex/issue-1056-seq-resync`，提交 `8d86f592`。命令、哈希与逐轮读数见月档 #1056。
 
