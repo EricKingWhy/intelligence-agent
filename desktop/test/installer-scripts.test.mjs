@@ -292,9 +292,10 @@ describe('process gate (#914)', () => {
   }
 
   /**
-   * The include with both gate calls removed: `String.replace` takes the first
+   * Drops the in-window call from an include whose early call the caller has
+   * already removed with `withMutatedGate`: `String.replace` takes the first
    * occurrence only, so a case that has to see the late call alone (or none at
-   * all) needs the in-window one gone too.
+   * all) has to take this one out on top of that mutation.
    */
   const withoutStagingWindowCall = (dir) => {
     const text = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
