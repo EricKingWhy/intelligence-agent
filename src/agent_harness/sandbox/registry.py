@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+import weakref
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,6 +86,13 @@ def _reject_escaping_symlinks(source: Path) -> None:
 class WorkspaceRegistry:
     """Session ↔ Sandbox 映射表的持久化管理器。"""
 
+    #: 进程内、跨注册表实例共享的 per-workspace 锁（#1132）：同一 workspace 的
+    #: 恢复与硬删除必须串行化。键是 (registry root, owner session id)——同一 root
+    #: 下的多个注册表实例（web app 与 capability wiring 各建一个）必须共用同一把锁，
+    #: 否则锁形同虚设。弱引用持有：无持有者时自动回收，不按会话数累积。
+    _workspace_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    _workspace_locks_guard = threading.Lock()
+
     def __init__(self, root: Path, backend: str = "local") -> None:
         """root 是映射表和 workspace 的根目录。backend='local'|'docker'。"""
         self._root = Path(root).resolve()
@@ -92,6 +101,20 @@ class WorkspaceRegistry:
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
+
+    def _workspace_lock(self, owner_session_id: str) -> threading.RLock:
+        """该 workspace 的进程内串行化锁（#1132）。同一 root 下的注册表实例共享。
+
+        用 `RLock` 而非 `Lock`：`get()` 的临界区内仍可能再进入同一会话的加锁路径，
+        可重入才不会自锁。
+        """
+        key = (str(self._root), owner_session_id)
+        with self._workspace_locks_guard:
+            lock = self._workspace_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._workspace_locks[key] = lock
+            return lock
 
     def create(
         self,
@@ -131,7 +154,9 @@ class WorkspaceRegistry:
                 )
             return self.get(session_id)
         if session_id in self._cache:
-            return self._cache[session_id]
+            # 映射已不在（硬删除摘掉 / 并发删除窗口）却还有缓存项：这是"删了之后
+            # 又被交出去"的形状，先摘掉再按新建走，绝不把已删会话的实例返回。
+            self._cache.pop(session_id, None)
 
         mapping = self._build_mapping(session_id, backend=backend)
         requested = (
@@ -201,9 +226,39 @@ class WorkspaceRegistry:
 
         owner_session_id, owner_mapping = self._resolve_workspace_owner(session_id)
 
+        # #1132：冷恢复（重建 Sandbox + ensure_started）与硬删除必须串行化。
+        # 不串行化时的实测后果：删除删掉容器与私有卷之后，恢复的
+        # `containers.run(volumes=...)` 会**静默重建一个空卷**，恢复"成功"在空
+        # workspace 上（原文件不可达），且删除已摘掉映射 ⇒ 空卷成为无法回收的孤儿。
+        # 锁按 owner 取（别名与 owner 共用同一把），删除路径取同一把。
+        with self._workspace_lock(owner_session_id):
+            return self._restore_locked(
+                session_id, owner_session_id, owner_mapping,
+            )
+
+    def _restore_locked(
+        self, session_id: str, owner_session_id: str, owner_mapping: dict,
+    ) -> Sandbox:
+        """`get()` 的临界区（调用方须已持有该 workspace 的锁）。"""
         # #1048 AC2：legacy PSEC 映射在恢复时迁移到私有 Docker volume——
         # 先快照导入、成功后才原子改 mapping 并返回 DockerSandbox；任一步失败
         # 即抛错（保留旧 mapping 与宿主文件），绝不返回 PSEC/半成品。
+        # 锁内重读映射并**以它为准**：等锁期间硬删除可能已摘掉它（此时不得拿
+        # 锁外读到的旧映射去重建——那正是"删除后把资源建回来"的形状，fail-closed），
+        # 也可能被别的恢复线程改写过（legacy 迁移落盘），旧副本同样不能用。
+        #
+        # 这一读必须在**所有**分支之前：legacy 分支此前用的是 `get()` 锁外读到的
+        # `owner_mapping`（红证：等锁期间硬删掉映射后，它照样 `_migrate_legacy_mapping`
+        # → `ensure_started` → `_import_snapshot` → `_write_mapping`，把已删会话的
+        # 映射与容器/卷**重建回来**）；cache 分支此前无卷存在性检查，会把一个
+        # 卷已被删除的 sandbox 交出去，下一次 `read_text` 即重建空卷。
+        current_mapping = self._read_mapping(owner_session_id)
+        if current_mapping is None:
+            raise KeyError(
+                f"Session '{owner_session_id}' 没有对应的 workspace 映射记录。"
+            )
+        owner_mapping = current_mapping
+
         if owner_mapping.get("backend") in LEGACY_BACKENDS:
             sandbox = self._migrate_legacy_mapping(owner_session_id, owner_mapping)
             self._cache[owner_session_id] = sandbox
@@ -212,10 +267,20 @@ class WorkspaceRegistry:
 
         if owner_session_id in self._cache:
             sandbox = self._cache[owner_session_id]
+            # 缓存里的实例同样要过卷存在性闸门：`cleanup_docker_workspace_resources`
+            # 删掉卷后到 `discard_session_artifacts` 摘映射之间，缓存仍持有那个
+            # sandbox；直接交出去，调用方下一次 `read_text`/`write_text`/`exec`
+            # 就会 `ensure_started()` 把空卷建回来（与冷路径同一个失效形状）。
+            if owner_mapping.get("backend") == "docker":
+                self._assert_volume_present(sandbox, session_id)
             self._cache[session_id] = sandbox
             return sandbox
 
         sandbox = self._instantiate_sandbox(owner_mapping)
+        if owner_mapping.get("backend") == "docker":
+            # #1132：具名卷已被删除时拒绝恢复。必须在 `ensure_started()` **之前**
+            # 且与它同处一个临界区——`containers.run` 会把缺失的具名卷重建为空卷。
+            self._assert_volume_present(sandbox, session_id)
         sandbox.ensure_started()
         if owner_mapping.get("snapshot_import"):
             # #1048 AC3：**快照导入**路径建立的映射，无完成标记（半份/中断的导入）
@@ -347,44 +412,53 @@ class WorkspaceRegistry:
         resource names. The workspace_root is never used as a deletion target.
         Keep the mapping until discard_session_artifacts runs so failures can be
         retried through the same hard-delete request.
+
+        #1132：与 `get()` 的冷恢复共用同一把 per-workspace 锁——删除一开始
+        （容器与卷已删）就不许再有恢复把空卷建回来。
         """
-        mapping = self._read_mapping(session_id)
-        if mapping is None:
-            return
-        if mapping.get("backend") != "docker":
-            return
-        if mapping.get("session_id") != session_id:
-            raise WorkspaceBindingError(
-                f"Workspace mapping identity mismatch for session '{session_id}'."
-            )
-        if "workspace_owner_session_id" in mapping:
-            return
+        with self._workspace_lock(self._owner_lock_key(session_id)):
+            mapping = self._read_mapping(session_id)
+            if mapping is None:
+                return
+            if mapping.get("backend") != "docker":
+                return
+            if mapping.get("session_id") != session_id:
+                raise WorkspaceBindingError(
+                    f"Workspace mapping identity mismatch for session '{session_id}'."
+                )
+            if "workspace_owner_session_id" in mapping:
+                return
 
-        expected_name = f"agent-harness-{session_id}"
-        if (
-            mapping.get("container_name") != expected_name
-            or mapping.get("volume_name") != expected_name
-        ):
-            raise WorkspaceBindingError(
-                f"Docker workspace resources for session '{session_id}' do not "
-                "match their deterministic ownership names."
-            )
+            expected_name = f"agent-harness-{session_id}"
+            if (
+                mapping.get("container_name") != expected_name
+                or mapping.get("volume_name") != expected_name
+            ):
+                raise WorkspaceBindingError(
+                    f"Docker workspace resources for session '{session_id}' do not "
+                    "match their deterministic ownership names."
+                )
 
-        from agent_harness.sandbox.docker import DockerSandbox
+            from agent_harness.sandbox.docker import DockerSandbox
 
-        sandbox = self._cache.get(session_id)
-        if sandbox is None:
-            sandbox = self._instantiate_sandbox(mapping)
-        if (
-            not isinstance(sandbox, DockerSandbox)
-            or sandbox._container_name != expected_name
-            or sandbox._volume_name != expected_name
-        ):
-            raise WorkspaceBindingError(
-                f"Session '{session_id}' has Docker ownership metadata but no "
-                "matching Docker sandbox instance."
-            )
-        sandbox.delete()
+            sandbox = self._cache.get(session_id)
+            if sandbox is None:
+                sandbox = self._instantiate_sandbox(mapping)
+            if (
+                not isinstance(sandbox, DockerSandbox)
+                or sandbox._container_name != expected_name
+                or sandbox._volume_name != expected_name
+            ):
+                raise WorkspaceBindingError(
+                    f"Session '{session_id}' has Docker ownership metadata but no "
+                    "matching Docker sandbox instance."
+                )
+            sandbox.delete()
+            # 删完即摘缓存：留着的话，删除窗口内（到 `discard_session_artifacts`
+            # 摘映射为止）的 `get()` 会把这个卷已不存在的实例直接交出去，调用方
+            # 下一次读写即 `ensure_started()` 重建空卷。摘掉后该窗口内的 `get()`
+            # 走冷路径，由卷存在性闸门 fail-closed。
+            self._cache.pop(session_id, None)
 
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
@@ -413,14 +487,52 @@ class WorkspaceRegistry:
         其他 session 的 alias mapping 不属于本方法的删除白名单，因此父会话被硬删后
         这些记录可能留在磁盘；由于 owner mapping 已不存在，`get()` 会拒绝恢复并失败关闭。
         """
-        mapping_file = self._mapping_path(session_id)
-        mapping_file.unlink(missing_ok=True)
-        default_workspace = self._workspaces_dir / session_id
-        if default_workspace.is_dir():
-            shutil.rmtree(default_workspace, ignore_errors=True)
-        self._cache.pop(session_id, None)
+        # #1132：与 `get()` 的冷恢复共用同一把锁——映射的摘除不得与在途恢复
+        # 交错（否则恢复会在删除之后把缓存/资源重建回来）。
+        with self._workspace_lock(self._owner_lock_key(session_id)):
+            mapping_file = self._mapping_path(session_id)
+            mapping_file.unlink(missing_ok=True)
+            default_workspace = self._workspaces_dir / session_id
+            if default_workspace.is_dir():
+                shutil.rmtree(default_workspace, ignore_errors=True)
+            self._cache.pop(session_id, None)
 
     # —— 内部方法 ——
+
+    def _owner_lock_key(self, session_id: str) -> str:
+        """删除路径取锁用的键：能解析到 owner 就用 owner id（别名与 owner 共用同一把）。
+
+        解析失败（映射缺失 / 损坏 / 别名链断）时退回自身——**绝不因此抛错**：
+        删除路径必须保持幂等，锁键解析不是它的语义。此时另一侧（`get()`）也已
+        因映射不可解析而 fail-closed。
+        """
+        try:
+            owner_session_id, _ = self._resolve_workspace_owner(session_id)
+        except (KeyError, WorkspaceBindingError):
+            return session_id
+        return owner_session_id
+
+    def _assert_volume_present(self, sandbox: Sandbox, session_id: str) -> None:
+        """恢复前确认 Docker 具名卷仍在；缺失即 fail-closed（#1132）。
+
+        缺失只可能来自外部删除或硬删除——两种情况都不该由恢复"重建一个空的"。
+        `containers.run(volumes=...)` 会静默重建缺失的具名卷，故这个检查必须
+        发生在 `ensure_started()` **之前**，且与它同处一个临界区。
+        """
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        if not isinstance(sandbox, DockerSandbox):
+            return
+        if sandbox.workspace_volume_exists():
+            return
+        logger.error(
+            "Docker workspace volume is missing; refusing to recreate it empty",
+            extra={"workspace_session_id": session_id},
+        )
+        raise WorkspaceBindingError(
+            f"Session '{session_id}' 的 Docker 持久卷不存在；拒绝以空工作区恢复"
+            "（避免把已删除的工作区重建为空卷）。"
+        )
 
     def _build_mapping(self, session_id: str, backend: str | None = None) -> dict:
         """构造新 session 的映射字典。"""

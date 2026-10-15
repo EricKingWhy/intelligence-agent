@@ -21,11 +21,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import logging
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -670,16 +672,10 @@ def test_hard_delete_without_artifacts_is_noop(tmp_path: Path) -> None:
 def test_hard_delete_reclaims_owned_docker_resources_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    docker_client = None
-    try:
-        docker = importlib.import_module("docker")
-        docker_client = docker.from_env(use_context=False)
-        docker_client.ping()
-        docker_client.images.get("python:3-slim")
-    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
-        if docker_client is not None:
-            docker_client.close()
-        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+    docker_client = _docker_or_skip()
+    # 下面要按名引用 `docker.errors` / `docker.models`（探针抽成 _docker_or_skip 后
+    # 本作用域不再绑定该名字）。
+    docker = importlib.import_module("docker")
 
     project = tmp_path / "project"
     project.mkdir()
@@ -794,3 +790,262 @@ def test_hard_delete_reclaims_owned_docker_resources_and_retries(
                 except docker.errors.NotFound:
                     pass
             docker_client.close()
+
+
+def _docker_or_skip() -> object:
+    """真 Docker 客户端；SDK / daemon / 镜像任一缺失即 skip（与既有用例同款）。"""
+    docker_client = None
+    try:
+        docker = importlib.import_module("docker")
+        docker_client = docker.from_env(use_context=False)
+        docker_client.ping()
+        docker_client.images.get("python:3-slim")
+    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
+        if docker_client is not None:
+            docker_client.close()
+        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+    return docker_client
+
+
+def test_restore_and_hard_delete_are_serialized_on_the_workspace_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1132 AC-1/AC-2：冷恢复与硬删除被同一把 per-workspace 锁串行化。
+
+    判据（可机械分辨修复前后）：
+      ① 恢复持锁期间，硬删除**必须阻塞**（未修复时它立刻跑完——消融实测 V0/V1 都跑完）；
+      ② 恢复读到的是**原数据**，不是"成功于空 workspace"（未修复时读 marker 报 FileNotFoundError）；
+      ③ 删除最终仍然成功（幂等语义不变）。
+    """
+    docker_client = _docker_or_skip()
+    project = tmp_path / "project"
+    project.mkdir()
+    app = create_app(
+        Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path / "harness"),
+            artifact_dir="",
+            model_api_key="sk-test",
+        ),
+        enable_cors=False,
+    )
+
+    session_id: str | None = None
+    registry = None
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            created = client.post(
+                "/api/sessions",
+                params={"launch": "false"},
+                json={"cwd": str(project), "sandbox_backend": "docker"},
+            )
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+            service = session_service(app.state.agent)
+            registry = service.workspace_registry
+            mapping = registry._read_mapping(session_id)
+            assert mapping is not None and mapping["backend"] == "docker"
+            volume_name = mapping["volume_name"]
+
+            sandbox = registry.get(session_id)
+            sandbox.write_text("marker.txt", "ORIGINAL DATA")
+            # 强制下一次 get() 走冷恢复（不命中缓存）。
+            registry._cache.clear()
+
+            from agent_harness.sandbox.docker import DockerSandbox
+
+            paused = threading.Event()
+            release = threading.Event()
+            original_ensure_started = DockerSandbox.ensure_started
+            # read_text() 内部会再调 ensure_started() ⇒ 必须用**未打桩**的原版读，
+            # 否则打桩函数 → read_text → 打桩函数 无限递归。
+            original_read_text = DockerSandbox.read_text
+            observed: dict[str, str] = {}
+
+            def paused_ensure_started(instance: DockerSandbox) -> None:
+                # 只在恢复线程里暂停：删除路径不调用 ensure_started。
+                is_restore = threading.current_thread().name == "1132-restore"
+                if is_restore:
+                    paused.set()
+                    if not release.wait(30):
+                        raise TimeoutError("test never released the cold restore")
+                original_ensure_started(instance)
+                # 只读一次：read_text() 内部会**再进** ensure_started()。守卫必须在
+                # 读**之前**置位——读完再置位的话，嵌套那一层看到的仍是"还没读过"，
+                # 于是无限递归（实测 RecursionError）。
+                if is_restore and not observed.get("reading"):
+                    observed["reading"] = "1"
+                    observed["marker"] = original_read_text(instance, "marker.txt")
+
+            monkeypatch.setattr(DockerSandbox, "ensure_started", paused_ensure_started)
+
+            restore_result: dict[str, object] = {}
+            delete_result: dict[str, object] = {}
+            delete_done = threading.Event()
+
+            def restore() -> None:
+                try:
+                    restore_result["sandbox"] = registry.get(session_id)
+                except BaseException as exc:  # noqa: BLE001 — 传播工作线程失败
+                    restore_result["error"] = exc
+
+            def hard_delete() -> None:
+                try:
+                    import anyio
+
+                    delete_result["value"] = anyio.run(service.delete_session, session_id)
+                except BaseException as exc:  # noqa: BLE001 — 传播工作线程失败
+                    delete_result["error"] = exc
+                finally:
+                    delete_done.set()
+
+            # 删除线程**到达取锁点**的信号。有了它，下面那条断言就不是"等 2 秒看看"
+            # 的时序猜测（那会假绿：删除线程还没跑到清理点，断言照样成立），而是
+            # "删除已经在锁上被挡住"的确定性判据。
+            delete_at_lock = threading.Event()
+            original_cleanup = registry.cleanup_docker_workspace_resources
+
+            def signalled_cleanup(target_session_id: str) -> None:
+                delete_at_lock.set()
+                original_cleanup(target_session_id)
+
+            monkeypatch.setattr(
+                registry, "cleanup_docker_workspace_resources", signalled_cleanup,
+            )
+
+            restore_thread = threading.Thread(target=restore, name="1132-restore", daemon=True)
+            restore_thread.start()
+            assert paused.wait(30), "cold restore never reached ensure_started"
+
+            delete_thread = threading.Thread(target=hard_delete, name="1132-delete", daemon=True)
+            delete_thread.start()
+            assert delete_at_lock.wait(30), "hard-delete never reached the workspace lock"
+            # ① 恢复持锁 ⇒ 删除必须被挡住（这是本票要买的那条串行化）。
+            assert not delete_done.wait(2.0), (
+                "hard-delete ran to completion while cold restore held the workspace lock"
+            )
+
+            release.set()
+            restore_thread.join(timeout=60)
+            delete_thread.join(timeout=60)
+
+            assert "error" not in restore_result, restore_result.get("error")
+            # ② 恢复看到的是原数据，而不是"空 workspace 上成功"。
+            assert observed.get("marker") == "ORIGINAL DATA", observed
+            # ③ 删除最终仍然成功且幂等。
+            assert "error" not in delete_result, delete_result.get("error")
+            # delete_session 返回 SessionDeletionStats（不是布尔）。
+            assert delete_result["value"].session_id == session_id
+            assert not registry.exists(session_id)
+
+            import docker
+
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+    finally:
+        try:
+            if session_id is not None and registry is not None:
+                registry.delete(session_id)
+        finally:
+            docker_client.close()
+
+
+def test_restore_after_hard_delete_fails_closed_without_recreating_the_volume(
+    tmp_path: Path,
+) -> None:
+    """#1132 AC-1/AC-2：删除**先**完成后，恢复必须 fail-closed，且不得重建空卷。
+
+    未修复时：`containers.run(volumes=...)` 把已删除的具名卷**重建为空卷**，
+    恢复"成功"在一个空 workspace 上（原文件不可达）。
+    """
+    docker_client = _docker_or_skip()
+    project = tmp_path / "project"
+    project.mkdir()
+    app = create_app(
+        Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path / "harness"),
+            artifact_dir="",
+            model_api_key="sk-test",
+        ),
+        enable_cors=False,
+    )
+
+    session_id: str | None = None
+    registry = None
+    volume_name: str | None = None
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            created = client.post(
+                "/api/sessions",
+                params={"launch": "false"},
+                json={"cwd": str(project), "sandbox_backend": "docker"},
+            )
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+            registry = session_service(app.state.agent).workspace_registry
+            mapping = registry._read_mapping(session_id)
+            assert mapping is not None
+            volume_name = mapping["volume_name"]
+
+            registry.get(session_id).write_text("marker.txt", "ORIGINAL DATA")
+            registry._cache.clear()
+
+            deleted = client.delete(f"/api/sessions/{session_id}")
+            assert deleted.status_code == 200, deleted.text
+            assert not registry.exists(session_id)
+
+            import docker
+
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+
+            # 恢复必须 fail-closed，且**不得**把卷建回来。删除**完整跑完**后，第一道
+            # 生效的闸门是"映射已摘除"（KeyError）——卷存在性闸门覆盖的是映射尚在、
+            # 卷已被删的那个窗口（`cleanup_docker_workspace_resources` 到
+            # `discard_session_artifacts` 之间），由
+            # `tests/sandbox/test_docker_snapshot_import.py::TestRestoreRefusesMissingVolume`
+            # 单独钉住。这里断言具体类型，不写成 `(KeyError, WorkspaceBindingError)`
+            # 那种"两条路都算过"的松口径。
+            with pytest.raises(KeyError):
+                registry.get(session_id)
+            with pytest.raises(docker.errors.NotFound):
+                docker_client.volumes.get(volume_name)
+    finally:
+        try:
+            if session_id is not None and registry is not None:
+                registry.delete(session_id)
+        finally:
+            if volume_name is not None:
+                with contextlib.suppress(Exception):
+                    docker_client.volumes.get(volume_name).remove(force=True)
+            docker_client.close()
+
+
+def test_workspace_lock_key_resolution_never_breaks_hard_delete_idempotency(
+    tmp_path: Path,
+) -> None:
+    """#1132 AC-3：锁键解析失败（映射缺失 / 损坏）不得让删除路径抛错或失去幂等。
+
+    纯本地（无 Docker）：`_owner_lock_key` 是删除路径取锁的入口，它必须对
+    "映射已不存在"与"映射不可解析"都退回自身 id，而不是把 KeyError /
+    WorkspaceBindingError 抛给硬删调用方。
+    """
+    from agent_harness.sandbox.registry import WorkspaceRegistry
+
+    registry = WorkspaceRegistry(root=tmp_path, backend="local")
+    # 无映射：退回自身。
+    assert registry._owner_lock_key("ghost") == "ghost"
+    registry.discard_session_artifacts("ghost")  # 幂等 no-op，不抛错
+
+    # 损坏映射：解析抛 WorkspaceBindingError，仍须退回自身。
+    ws_dir = tmp_path / "workspaces"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    (ws_dir / "broken.json").write_text("{ not json", encoding="utf-8")
+    assert registry._owner_lock_key("broken") == "broken"
+    registry.discard_session_artifacts("broken")
+    assert not registry.exists("broken")
+
+    # 正常映射：解析到 owner 自身。
+    registry.create("owned")
+    assert registry._owner_lock_key("owned") == "owned"

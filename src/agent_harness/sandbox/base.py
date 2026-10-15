@@ -194,7 +194,17 @@ class Sandbox(ABC):
         return resolved
 
     def path_kind(self, path: str) -> str | None:
-        """Return the workspace path's kind when the backend can inspect it."""
+        """Return the workspace path's kind when the backend can inspect it.
+
+        kind 词表（调用方只依赖以下取值，见 #1167）：
+        - `"file"`：普通文件；
+        - `"directory"`：目录；
+        - `"symlink"`：符号链接（Docker 等非宿主语义后端；宿主语义后端
+          的 `resolve_within_workspace` 会跟随链接故一般不返回此值）；
+        - `"special"`：其他已存在但非文件/目录/链接的类型（FIFO、socket、
+          device 等；Docker 后端）；
+        - `None`：路径不存在，或后端无法检查（如越界路径）。
+        """
         try:
             resolved = self.resolve_within_workspace(path)
         except OSError:

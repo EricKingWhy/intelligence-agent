@@ -1,0 +1,1 @@
+2026-10-15	#1132 sync merge：main(dd2cc12a) 并入本分支(c44369f8)，merge-base 4994caff；来侧改动：#1167 path_kind（docker.py 新方法，加法）/#1130 台账/docs；与本票 RLock+卷检查无文本冲突，ort 自动合并，--cc 空表，三树互异。	dd2cc12a5fe8225e53db80478ea4f3c5b8d5e839..c44369f8d414c371e88692e1ab1dda29ab0fd89c
