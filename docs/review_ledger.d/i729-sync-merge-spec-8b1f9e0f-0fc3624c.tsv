@@ -1,0 +1,1 @@
+2026-10-13	#729 同步合并 0fc3624c 的 app.py 组合 Spec 独立复审：APPROVE，P0-P4=0；AC2 workspace probe 与 AC6 项目指令路由保留，#1094 warning 不改变模型匹配语义；静态审查未运行测试。	8b1f9e0f6b3b933277476318d1636ad141b030ef..0fc3624cd69d70a03e8521fb86adaf3acf68f6fb

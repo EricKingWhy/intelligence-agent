@@ -169,7 +169,9 @@ describe('Memory V2 API adapter', () => {
   it('sends confirmed bulk deletes and settings updates using backend contract shapes', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ affected_count: 3, deleted_version_count: 5 }))
-      .mockResolvedValueOnce(jsonResponse({ extraction_enabled: false, recall_enabled: true }));
+      .mockResolvedValueOnce(jsonResponse({
+        extraction_enabled: false, recall_enabled: true, fallback_enabled: true,
+      }));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(bulkDeleteMemoryRecords(null)).resolves.toEqual({
@@ -179,6 +181,7 @@ describe('Memory V2 API adapter', () => {
     await expect(updateMemorySettings({ extraction_enabled: false })).resolves.toEqual({
       extraction_enabled: false,
       recall_enabled: true,
+      fallback_enabled: true,
     });
 
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' });
@@ -189,6 +192,22 @@ describe('Memory V2 API adapter', () => {
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'PATCH' });
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
       extraction_enabled: false,
+    });
+  });
+
+  it('exposes the fallback switch through the same settings contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      extraction_enabled: true, recall_enabled: true, fallback_enabled: false,
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(updateMemorySettings({ fallback_enabled: false })).resolves.toEqual({
+      extraction_enabled: true,
+      recall_enabled: true,
+      fallback_enabled: false,
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      fallback_enabled: false,
     });
   });
 

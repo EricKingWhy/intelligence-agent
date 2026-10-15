@@ -151,6 +151,13 @@ def test_lists_files_as_sorted_relative_posix_paths(tmp_path: Path) -> None:
     assert body["truncated"] is False
 
 
+# #1048 AC2：`windows_psec` 不再是新会话可选后端，workspace 文件路由无从再解析出
+# PSEC sandbox（`registry.get` 对既有 PSEC 映射走 legacy 快照迁移到 Docker volume）。
+# 原先断言「路由经 PSEC sandbox handles 读文件」的 Windows-only 用例随之退役；
+# 容器工作区的 POSIX 路径语义由 `tests/web/test_workspace_files_docker_semantics.py`
+# 跨平台覆盖。
+
+
 def test_pattern_filters_and_total_counts_matches(tmp_path: Path) -> None:
     """`pattern` 是 glob 过滤（对相对路径整体或文件名匹配，`**` 支持递归）。"""
     client = _client(tmp_path)

@@ -19,6 +19,7 @@
 
 import { expect, test } from '@playwright/test';
 import {
+  FIRST_SELECTABLE_MODEL,
   MODELS,
   MODELS_WITH_AVAILABILITY,
   SEARCHABLE_MODELS,
@@ -42,10 +43,11 @@ test('#199：两级结构 + 鼠标悬停展开 + 选中回写 trigger', async ({
   await expect(rootMenu).toBeVisible();
   await expect(page.locator('[role="menuitem"][aria-haspopup="menu"]')).toHaveCount(2);
   await expect(page.locator('[role="menuitemradio"]')).toHaveCount(0);
-  // 一级的 provider 行带上该组的模型数（信息密度：不堆数据，只给条数）
+  // 一级的 provider 行带上该组的模型数（信息密度：不堆数据，只给条数）。
+  // #1016：默认条目不进二级列表 ⇒ senseaudio 组只剩 qwen-max 一条。
   await expect(
     page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: 'senseaudio' }),
-  ).toContainText('2 个模型');
+  ).toContainText('1 个模型');
 
   // 悬停展开二级（迟滞由 Radix 的 pointer-grace + 内部定时器负责），二级里是这个 provider 的模型
   const providerRow = page
@@ -53,11 +55,14 @@ test('#199：两级结构 + 鼠标悬停展开 + 选中回写 trigger', async ({
     .first();
   await providerRow.hover();
   const subRows = page.locator('[role="menuitemradio"]');
-  await expect(subRows).toHaveCount(2);
-  await expect(subRows.first()).toContainText(MODELS[0].name);
+  await expect(subRows).toHaveCount(1);
+  // #1016 AC1（e2e 锁）：二级列表不含默认条目——「默认」是一级「默认链」入口的状态，
+  // 不是一个可点选的 id（点它会把选中态固化成默认模型名，续聊恒 422）。
+  await expect(subRows).not.toContainText(MODELS[0].name);
+  await expect(subRows.first()).toContainText(FIRST_SELECTABLE_MODEL.name);
 
-  // 选中第二个模型 → 菜单关闭 + trigger 回写
-  await subRows.nth(1).click();
+  // 选中唯一模型 → 菜单关闭 + trigger 回写
+  await subRows.first().click();
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
   await expect(trigger).toContainText('qwen-max');
 });
@@ -86,25 +91,25 @@ test('#199：键盘 `→` 进二级、Esc 逐级退出；选中项带 aria-check
   // 再 `→` 进二级，这次 Enter 选中
   await pressMenuItemKey(page, 'ArrowRight', 'menuitemradio|-|');
 
-  // Enter 选中它 → 菜单关闭、trigger 回写为该模型名
+  // Enter 选中它 → 菜单关闭、trigger 回写为该模型名（#1016 后二级首项 = 第一个可选模型）
   await page.keyboard.press('Enter');
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
-  await expect(trigger).toContainText(MODELS[0].name);
+  await expect(trigger).toContainText(FIRST_SELECTABLE_MODEL.name);
 
   // 再打开：一级把当前模型所在的 provider 标成 data-current，二级里该项 aria-checked=true
   await openModelMenu(page);
   const currentProvider = page.locator('[role="menuitem"][data-current="true"]');
   await expect(currentProvider).toHaveCount(1);
-  await expect(currentProvider).toContainText(MODELS[0].provider);
+  await expect(currentProvider).toContainText(FIRST_SELECTABLE_MODEL.provider);
   await currentProvider.hover();
   await expect(page.locator('[role="menuitemradio"][aria-checked="true"]')).toContainText(
-    MODELS[0].name,
+    FIRST_SELECTABLE_MODEL.name,
   );
 
   // Esc 关掉整个菜单，选择不变
   await page.keyboard.press('Escape');
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
-  await expect(trigger).toContainText(MODELS[0].name);
+  await expect(trigger).toContainText(FIRST_SELECTABLE_MODEL.name);
 });
 
 test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → trigger 不变）', async ({ page }) => {
@@ -130,7 +135,7 @@ test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → tri
 });
 
 test('#199：长目录不再需要搜索框——provider 分组就是导航', async ({ page }) => {
-  // SEARCHABLE_MODELS：5 个模型 / 4 个 provider。
+  // SEARCHABLE_MODELS：5 条（1 条默认）/ 4 个 provider；#1016 后对账分母是可选的 4 条。
   await routeApi(page, { sessions: [], events: [], models: SEARCHABLE_MODELS });
   await page.goto('/');
 
@@ -142,12 +147,16 @@ test('#199：长目录不再需要搜索框——provider 分组就是导航', a
   // 旧模型选择器用的是 `.model-picker-search-wrap`——数它永远是 0，等于断言了个 vacuous truth）。
   await expect(noSearchInputIn(page, '[role="menu"]')).toHaveCount(0);
 
-  // 一级必须逐字给出每组条数（不堆数据，但也不藏），且各组合计 = 目录长度：
-  // 否则"分组"可能只是画面上分了、实际漏掉了模型。
+  // 一级必须逐字给出每组条数（不堆数据，但也不藏），且各组合计 = **可选条目数**：
+  // 否则"分组"可能只是画面上分了、实际漏掉了模型。#1016（AC1）后默认条目不进二级
+  // 列表（它的唯一入口是一级「默认链」，由上面两条用例锁住），所以这里对账的分母
+  // 是去掉默认条目后的目录长度，不是 SEARCHABLE_MODELS.length。
   const counts = await providers.evaluateAll((els) =>
     els.map((el) => Number(el.textContent?.match(/(\d+) 个模型/)?.[1] ?? 0)),
   );
-  expect(counts.reduce((a, b) => a + b, 0)).toBe(SEARCHABLE_MODELS.length);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(
+    SEARCHABLE_MODELS.filter((m) => !m.default).length,
+  );
 });
 
 test('#199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽标', async ({ page }) => {

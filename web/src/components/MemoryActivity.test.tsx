@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryActivity } from './MemoryActivity';
+import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { applyEvent, initConversation } from '../lib/projection';
 import type { AgentEvent, ConversationState } from '../types';
 
@@ -92,7 +92,14 @@ describe('MemoryActivity disclosure', () => {
     expect(host.textContent).toContain('project memory');
   });
 
-  it('loads recall details only when expanded and renders allowlisted redacted ranking fields', async () => {
+  it('does not render recalled events in the tail block (#1017: recalls live in their turns)', () => {
+    const conversation = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {}));
+    render(conversation);
+    expect(host.textContent).not.toContain('记忆召回说明');
+    expect(host.querySelector('.memory-v2-activity')).toBeNull();
+  });
+
+  it('RecallNotice loads recall details only when expanded and renders allowlisted redacted ranking fields', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response([{
       run_id: 'run-1', seq: 2, time: '2026-09-25T10:00:00Z', memories: [{
         memory_id: 'm-1', kind: 'semantic', scope: 'user_global', source_type: 'automatic',
@@ -102,9 +109,15 @@ describe('MemoryActivity disclosure', () => {
       }],
     }]));
     vi.stubGlobal('fetch', fetchMock);
-    const conversation = applyEvent(initConversation('s-1'), event('memory/recalled', 2, {}));
+    // 被测前提（投影已归位）必须成立——先建轮再发 recalled，不用假事件兜底（审查 P4）
+    let conversation = applyEvent(initConversation('s-1'), event('user/message', 0, { content: 'hi' }));
+    conversation = applyEvent(conversation, event('run/started', 1, { turn_index: 1 }));
+    conversation = applyEvent(conversation, event('memory/recalled', 2, {}));
+    const recalledTurn = conversation.turns[0];
+    expect(recalledTurn?.recalls).toBeDefined();
+    const recalled = recalledTurn!.recalls![0];
 
-    render(conversation);
+    act(() => root.render(<RecallNotice event={recalled} sessionId="s-1" />));
 
     expect(host.textContent).toContain('记忆召回说明');
     expect(fetchMock).not.toHaveBeenCalled();

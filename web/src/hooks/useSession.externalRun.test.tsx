@@ -41,6 +41,8 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => apiState.events),
+    // #1030：主动待裁决读面（空清单）——本文件测的是外部 run 接管。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     sendMessage: vi.fn(),
     resumeSession: vi.fn(),

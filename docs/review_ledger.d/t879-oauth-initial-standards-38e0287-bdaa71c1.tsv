@@ -1,0 +1,1 @@
+2026-10-11	#879 OAuth-only MCP initial implementation: Standards PASS-WITH-FINDINGS (P2=1, P3=2); storage lost-update and expected-error findings fixed later, SDK private _initialize P3 remains; 38e0287..bdaa71c1	38e0287c0c331ba93f7ec03f2327eb621606a37d..bdaa71c10f6aadb73c82e11ea1d85332a1f64237

@@ -20,7 +20,7 @@ README 或脚本里的命令（ADR-0052 D2、AC1）。
   里没有对应字段，必须明确失败而不是静默降级成 http。
 - MCP 2025-11-25 Authorization：OAuth 对实现**可选**；HTTP transport SHOULD 遵从，
   stdio SHOULD NOT 而改为从环境取凭据；客户端在 401/403 上才发起授权。⇒ 需要登录的
-  server 在本仓无法以匿名方式使用，只能显式标 `oauth_required_unsupported`（AC4）。
+  HTTP OAuth 通过 agent-harness plugins mcp login 显式授权；常规连接缺少凭据时本地拒绝，不静默匿名回退。
 - Claude Code MCP 文档（code.claude.com/docs/en/mcp）：`.mcp.json` 的
   `{"mcpServers": {name: {...}}}` 形状、stdio 的 `type`/`command`/`args`/`env`、
   http 的 `type`/`url`/`headers`、`streamable-http` 是 `http` 的别名、`sse` 已弃用
@@ -45,7 +45,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
-from agent_harness.mcp.config import ConfigError, MCPServerConfig, parse_mcp_servers
+from agent_harness.mcp.config import (
+    ConfigError,
+    MCPServerConfig,
+    MCPServerOAuthConfig,
+    has_static_authorization_header,
+    parse_mcp_servers,
+)
 from agent_harness.skills.inspection import _add_error, read_package_text
 from agent_harness.tooling.contract import ToolPermission
 
@@ -272,7 +278,6 @@ def load_mcp_servers(source: Path | str) -> list[MCPServerConfig]:
                 raise ConfigError("MCP package transport is unsupported")
             config = dict(body)
             config.pop("type", None)
-            config.pop("oauth", None)
             if "timeout" in config:
                 config["timeout_seconds"] = config.pop("timeout") / 1000
         else:
@@ -524,8 +529,7 @@ def _inspect_entry(
         _check_stdio(package_root, entry, name, fail, report, relative)
     else:
         _check_http(entry, name, fail, gap, report)
-        if claude_shape:
-            _check_oauth(entry, name, gap)
+        _check_oauth(entry, name, fail)
         _check_headers(entry, name, fail, gap, report)
 
     _check_capability_gaps(entry, name, gap)
@@ -680,17 +684,18 @@ def _check_http(entry, server, fail, gap, report) -> None:
         )
 
 
-def _check_oauth(entry, server, gap) -> None:
-    """Claude Code 形状的 `oauth` 对象 = 该 server 需要登录（`claude mcp login`）。"""
-    if "oauth" not in entry:
+def _check_oauth(entry, server, fail) -> None:
+    """Validate HTTP OAuth settings without echoing client secrets into inspection output."""
+    oauth = entry.get("oauth")
+    if oauth is None:
         return
-    gap(
-        "oauth_required_unsupported",
-        "unsupported",
-        server,
-        "该 server 声明需要 OAuth 凭据；本仓首版不实现 OAuth 登录，不能以完整兼容启用"
-        "（spec 09 §1.1、ADR-0052 D2）。",
-    )
+    try:
+        MCPServerOAuthConfig.model_validate(oauth)
+    except (TypeError, ValueError):
+        fail("MCP_OAUTH_INVALID", "oauth", f"server {server!r} has invalid OAuth settings")
+        return
+    if has_static_authorization_header(entry.get("headers")):
+        fail("MCP_OAUTH_INVALID", "oauth", f"server {server!r} cannot combine OAuth with a static Authorization header")
 
 
 def _check_headers(entry, server, fail, gap, report) -> None:

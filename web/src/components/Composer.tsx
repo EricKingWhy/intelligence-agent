@@ -8,7 +8,7 @@
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
-import type { PresetTask, UndeliveredInput } from '../types';
+import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
@@ -19,6 +19,7 @@ import { onTokenChange } from '../lib/auth';
 import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
+import type { Ownership } from '../lib/ownership';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
@@ -35,6 +36,10 @@ const DANGER_PERMISSION_MODE = 'danger-full-access';
 /** 非视觉模型禁用附图的原因前缀（#937 / M-24 收口：title 与可见提示两处同源，改一处即两处）。 */
 const NON_VISION_MODEL_REASON = '当前模型不支持视觉（supports_vision=false）';
 
+/** #1027 发送门禁的阻断文案（Gmail 式阻断，PORT DESIGN）：界面提示与发送按钮
+ *  title 两处同源（#937 / M-24 同款手法），改一处即两处。 */
+const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
+
 interface Props {
   streaming: boolean;
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
@@ -42,17 +47,49 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
+   *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
+   *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
+   *    状态并保留用户未发送的输入」）；
+   *  - `true` / `undefined`（旧签名）⇒ 按旧行为清空——既有调用零回归。
+   *  发送口**抛错**同样按未受理处理（保留输入，见 submit 的 `.then(_, onRejected)`）
+   *  ——它绝不能被读成"已受理"。
+   *  Promise 形态由 App 的 `handleSubmit` 返回（回执在途期间同样不清空）。 */
+  onSubmit: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
-  /** #825（MM-04）：**当前会话 id**——附图上传端点是 per-session 的
-   *  （`POST /api/sessions/{id}/attachments`），所以没有会话就没有附图入口
-   *  （`null` = 新建态 → 入口禁用并说明原因，而不是让用户传到一个不存在的会话下）。
-   *  会话切换时草稿清空并中止在途上传（见 `hooks/useDraftAttachments.ts`）。 */
+  onSteer?: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
+  /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
+   *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
+   *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
+   *  上传（见 `hooks/useDraftAttachments.ts`）。 */
   sessionId?: string | null;
+  /** #1015：新建态懒建会话的**唯一**入口（App 侧单例：in-flight 去重保证并发投喂
+   *  只建出一个会话）。resolve 会话 id；resolve `null` = 懒建失败，hook 经 AC3
+   *  通道给可见错误。Composer 只问"现在能不能附"，不问"会话从哪来"。 */
+  onEnsureSession: () => Promise<string | null>;
+  /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
+   *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
+   *  本组件只渲染文案。`null`/缺省 = 不渲染 chip：**空白新建态**（无选中会话、无项目
+   *  语境，含首屏）App 传 `null`——此刻并无"会话"，显「未分组」语义悬空，故不编字面值。 */
+  ownership?: Ownership | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;
+  /** #1148：**分离投递**（窗外落定）迟到的失败原文——把没送出去的草稿还给用户。
+   *
+   *  窗外投递的结局来得比判定窗口晚（响应头要等 run 结束才下发），提交时无从等待，
+   *  于是先按已受理清空；真失败时由 hook 经这条 props 把原文送回来，这里按
+   *  `restoreFailedDrafts` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
+   *  对象引用变化即触发一次注入（裸 string 会被 `Object.is` 挡掉第二次，见 `FailedDraft`）。 */
+  failedDraft?: FailedDraft | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
    *  降级隐藏（不伪造列表）。条目即目录真相，零硬编码模型名。 */
   models?: ModelCatalogEntry[];
@@ -118,8 +155,11 @@ export const Composer = memo(function Composer({
   onSubmit,
   onSteer,
   sessionId = null,
+  onEnsureSession,
+  ownership = null,
   onCancel,
   presetTask,
+  failedDraft = null,
   models = [],
   selectedModel = null,
   onModelChange,
@@ -150,6 +190,17 @@ export const Composer = memo(function Composer({
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
+   *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。
+   *
+   *  在途期间按 Enter 被这里挡下时**不再是静默的**：`sending` 让发送键可见地进入
+   *  忙态（#1139，原先只是注释里的已知限制）。窗口 = 一次 ack
+   *  （`raceEarlyResponse` 1200ms 窗内 + WS attach），不是整场 run。 */
+  const sendingRef = useRef(false);
+  /** #1139：忙态的**可见**那一半。`sendingRef` 是同步闸（同一 tick 的第二次按键读不到
+   *  刚 set 的 state），这个 state 只负责让用户看见「上一条还在飞」——此前在途按键
+   *  被静默吞掉，用户读到的是"按键没反应"。 */
+  const [sending, setSending] = useState(false);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -157,13 +208,39 @@ export const Composer = memo(function Composer({
 
   // ── #825（MM-04）附图草稿 ──
   // 状态机在 hook 里（上传/缩略图/失败重试/换会话清理），这里只做**入口门禁**与
-  // 把「已就绪」的引用交给提交通道。（纯文本发送不依赖任何草稿状态：发送按钮的
-  // 可用性只看文本——AC4「上传失败不得阻塞纯文本发送」的落点。）
-  const attachments = useDraftAttachments(sessionId);
+  // 把「已就绪」的引用交给提交通道。（#1027 修订：发送按钮的可用性除文本外，还看
+  // 是否有**在途上传**——AC4「上传失败不得阻塞纯文本发送」保留，failed 仍不阻塞，
+  // 但发送时被显式剔除并给一次性可见提示，绝不静默丢弃。）
+  const attachments = useDraftAttachments(sessionId, onEnsureSession);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** 整页拖拽计数：document 级 dragenter/dragleave 会成对触发，用计数判断"还在页面内"。 */
   const dragDepth = useRef(0);
   const [dragActive, setDragActive] = useState(false);
+  /** #1027 兜底提示：发送时被剔除的未就绪附件数（一次性可见提示，可关闭）。 */
+  const [droppedNotice, setDroppedNotice] = useState<string | null>(null);
+
+  // ── #1027 发送门禁（Gmail 式阻断，PORT DESIGN）──
+  // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
+  // **不许裸加时长**：有在途上传时发送按钮禁用 + Ctrl+Enter 拦截，界面常驻阻断提示。
+  const uploadingCount = attachments.items.filter((item) => item.status === 'uploading').length;
+  // #1098：pre-intake 窗口（`ensureSession` 在途 / 字节探测未完成、草稿未入列）
+  // 同样阻断——只钉「已入列 uploading」，粘贴后立刻 Enter 会把图文静默拆散
+  // （图留在草稿栏跟下一条消息走）。AC4 不变：intake 失败（懒建失败/格式拒收）
+  // 走 hook 的 `finally` 清 pending，纯文本照发。
+  const intakePendingCount = attachments.intakePendingCount;
+  const sendBlocked = uploadingCount > 0 || intakePendingCount > 0;
+  /** 阻断原因文案（#1027 体系 + #1098 pre-intake）：界面常驻，键盘用户被拦截时
+   *  读到的就是它；`title` 与提示同源，不对着按钮猜。 */
+  const sendBlockedReason =
+    uploadingCount > 0
+      ? `${SEND_BLOCKED_REASON}${uploadingCount > 1 ? `（${uploadingCount} 张）` : ''}`
+      : `${SEND_BLOCKED_REASON}（${intakePendingCount} 张准备中）`;
+
+  // #1027：换会话即清兜底提示——草稿随会话清空（hook 的换会话 effect），提示是
+  // 上次发送的结论，不跟去新会话（否则在新会话里误报"附件未随消息发出"）。
+  useEffect(() => {
+    setDroppedNotice(null);
+  }, [sessionId]);
 
   // ── #937 / M-08：附图上限从服务端下发 ──
   // 初始值取模块当前值（可能已被 App 层拉到）；挂载后拉一次落进本地 state，并
@@ -316,30 +393,109 @@ export const Composer = memo(function Composer({
     inputRef.current?.focus();
   }, [presetTask]);
 
+  /** #1148：**分离投递**（窗外落定）迟到的失败——把没送出去的原文还回输入框。
+   *
+   *  只在输入框**为空**时回填：用户若已经打了新内容，那是更新的意图，绝不用旧文本
+   *  覆盖它——成熟产品同款纪律（DSH `restoreFailedDrafts` 只在编辑器空时重建，
+   *  `facade.ts:771,778`；Slack/Discord 的"发送失败不消费用户输入"）。
+   *
+   *  为什么不能像 presetTask 那样直接 `setValue(注入值)`：那条通道是"用户点了示例
+   *  任务 chip"，覆盖输入是用户此刻的明确意图；这里是失败回填，注入时用户可能已经
+   *  在同一会话里打了新草稿，覆盖它就是另一种数据丢失。故与提交回调里
+   *  `accepted === false` 那一支走**同一条**语义（DSH `settleDetachedFailure`：分离
+   *  投递的失败并入同一条失败呈现，而不是另开一条只显示不恢复的旁路）。
+   *
+   *  依赖对象引用即可：每次失败都是新的 `{ text }`（承重理由见 `FailedDraft`），同一段
+   *  文本连续失败两次也各算一次注入。
+   *  StrictMode 下 effect 双跑是安全的：回填是幂等的 setValue（第二跑时输入框已非空
+   *  ⇒ 原样返回，不会出现两份文本）。
+   *  **刻意不抢焦点**：这条回执可能迟到几十秒，届时用户多半在别处（另一个输入框、
+   *  排队项的就地编辑）——抢过来会让他的下一次按键落进输入框。presetTask 那条通道
+   *  抢焦点是因为它由用户点击触发，与这里不是同一种时机。 */
+  useEffect(() => {
+    if (!failedDraft) return;
+    setValue((current) => (current.trim() === '' ? failedDraft.text : current));
+  }, [failedDraft]);
+
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    /* #1029：回执在途期间不许再提交。清空挪到回执之后（见下），文本框不再在提交
+       瞬间变空 ⇒ 连按 Enter / 点发送不再被 `!value.trim()` 自然挡住，**必须**显式
+       闸一次，否则一次输入会发出去 N 次。ref 同步判（不是 state）：同一 tick 里的
+       第二次按键读不到刚 set 的 state。 */
+    if (sendingRef.current) return;
+    // #1027 门禁：上传中时拦截发送（按钮 disabled 只挡点击，Ctrl+Enter 走这里）。
+    // 阻断提示是界面常驻的 `.composer-send-blocked`——这里只需拦下请求；不拦就会
+    // 复现 #1027（readyIds 为空时请求体无 attachments 键，图被静默丢弃）。
+    if (sendBlocked) return;
     // #825（MM-04）：只带**已就绪**的引用（在途/失败的草稿不参与本次发送——AC4：
     // 上传失败不阻塞纯文本发送）。文本仍必填：`POST /messages` 的 `content` 是必填项，
     // 空文本 + 纯图片不是本票支持的路由。
     const attachmentIds = attachments.readyIds;
+    // #1027 兜底：未就绪（失败/在途残留）的草稿没进请求——绝不静默丢弃，一次性可见提示。
+    // 提示是**本次发送**的结论：干净发送（无剥离）即清掉，不让过期文案误报下一次。
+    const unreadyCount = attachments.items.filter(
+      (item) => item.status !== 'ready' || !item.receipt,
+    ).length;
+    setDroppedNotice(unreadyCount > 0 ? `${unreadyCount} 个附件未随消息发出` : null);
     // steer 通道的**失败兜底不在这一层**（#219）：没有可打断的在途 run 时后端回 409
     // （session/service.py::SteerTargetNotFound），由交付层改投 queue 把消息送到
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
-    if (mode === 'steer' && onSteer) {
-      onSteer(trimmed, rememberAsProceduralRule, attachmentIds);
-    } else {
-      onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
-    }
-    setValue('');
-    setRememberAsProceduralRule(false);
-    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
-    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
-    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
-    // 或下一轮再带。
-    attachments.clearSent(attachmentIds);
+    /* 清空**只在确认受理之后**发生（#1029）。此前是「提交瞬间无条件清空、失败不
+       还原」——任何发送失败（待裁决 409 / 网络断 / 429…）用户文本都无声消失，而
+       它既没进队列也没落日志，事后完全不可恢复。
+       判据是发送口的返回值（不是猜的）：**显式 `false`** = 未受理 ⇒ 文本与草稿原样
+       留在输入框，用户处理完（如先做恢复裁决）再发；`true`/`undefined`（旧签名）
+       = 受理 ⇒ 按旧行为清空。发送口**抛错**同样按未受理处理（保留），不冒充受理。
+       未落定期间（Promise 未 settle）同样**不清**——清空只发生在 ack 之后。 */
+    const accepted =
+      mode === 'steer' && onSteer
+        ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
+        : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+    sendingRef.current = true;
+    setSending(true);
+    /** 受理落定后的清空。**只在受理侧调用**（`false` 与抛错都不调）。 */
+    const accept = () => {
+      /* 只清**本次提交的那段**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间输入框是
+         活的，用户接着打的字不能被这一刀连带抹掉。
+         判据是**定位后切除**，不是前缀比对：提交的是 `trimmed`，而框里是**原始**
+         文本——首尾带空白 / 多行（粘贴任务、先回车再打字）时 `startsWith` 必假，
+         受理成功后输入框永不清空（独立审查探针实证的回归）。`trimStart` 对齐后
+         `indexOf` 定位，切掉那一段、原样保留两侧。
+         定位不到（在途期间用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不
+         清掉用户没提交的内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
+      setValue((v) => {
+        const lead = v.length - v.trimStart().length;
+        const at = v.trimStart().indexOf(trimmed);
+        if (at === -1) return v;
+        const rest = v.slice(0, lead + at) + v.slice(lead + at + trimmed.length);
+        // 剩下的只有空白（首尾空白 / 多行粘贴的常态）⇒ 就是「清空」，不留残渣。
+        return rest.trim() === '' ? '' : rest;
+      });
+      setRememberAsProceduralRule(false);
+      // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
+      // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
+      attachments.clearSent(attachmentIds);
+    };
+    void Promise.resolve(accepted)
+      .then(
+        (ok) => {
+          // `undefined`（旧签名）/ `true` = 受理；只有显式 `false` 才保留。
+          if (ok !== false) accept();
+        },
+        /* 发送口自己抛错 = **未受理**（正常路径由 App 收口成 `false`，不重复报错）。
+           显式写成分支而不是 `.catch(() => {})`：后者读起来像"吞掉"，且把"抛错"
+           归进了受理侧（清空）——那会让异常路径留下 `sendingRef=false` + 文本不清，
+           用户再按 Enter 就重发一条**已经成功**的消息。 */
+        () => {},
+      )
+      .finally(() => {
+        sendingRef.current = false;
+        setSending(false);
+      });
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
@@ -360,17 +516,17 @@ export const Composer = memo(function Composer({
   };
 
   const currentModel = effectiveModelEntry(selectedModel, models);
-  // ── #825（MM-04）附图入口门禁（AC1/AC7）──
-  // 三条互斥原因，**都不许静默**：会话缺失、模型非视觉、等待审批/澄清。原因同时是
+  // ── #825（MM-04）附图入口门禁（AC1/AC7）；#1015 修订 ──
+  // 两条互斥原因，**都不许静默**：模型非视觉、等待审批/澄清。原因同时是
   // 拖放遮罩上的文案与按钮 title，用户不必对着禁止光标猜。
+  // 「会话缺失」不再是门禁：新建态首次投喂经 `onEnsureSession` 懒建会话（#1015），
+  // 入口常开——原来那句"三条互斥原因"随本票收口（issue #1015 待裁决 #4 的自述失真）。
   const visionUnsupported = currentModel?.supportsVision === false;
   const attachBlockedReason = locked
     ? lockHint
-    : sessionId === null
-      ? '图片需要先有会话：附图上传挂在会话上，请先新建或选中一个会话'
-      : visionUnsupported
-        ? `${NON_VISION_MODEL_REASON}，已禁用附图`
-        : '';
+    : visionUnsupported
+      ? `${NON_VISION_MODEL_REASON}，已禁用附图`
+      : '';
   const canAttach = attachBlockedReason === '';
   const pickFiles = () => {
     if (canAttach) fileInputRef.current?.click();
@@ -410,7 +566,8 @@ export const Composer = memo(function Composer({
   }, []);
   /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
    *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
-   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
+   *  [sessionId, commit, setIntakeError, startUpload, ensureSession]，App 的
+   *  `ensureSession` 是 useCallback 单例，同一会话内标识不变）：
    *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
    *  （hook 每次渲染返回新对象字面量）。
    *
@@ -649,6 +806,39 @@ export const Composer = memo(function Composer({
             {NON_VISION_MODEL_REASON}：已禁用附图；历史附图会被省略为文本占位
           </div>
         )}
+        {/* #1027：上传中时的发送阻断提示（与 .composer-attach-hint 同一版式语言）。
+            常驻到上传落定——键盘用户按 Ctrl+Enter 被拦截时，读到的就是这一条。 */}
+        {sendBlocked && (
+          <div className="composer-send-blocked" role="status">
+            {sendBlockedReason}
+          </div>
+        )}
+        {/* #1027 兜底：发送时被剔除的未就绪附件，一次性可见提示（可关闭，不常驻）。 */}
+        {droppedNotice !== null && (
+          <div className="composer-attach-dropped" role="alert">
+            <span className="composer-attach-dropped-text">{droppedNotice}</span>
+            <button
+              type="button"
+              className="composer-attach-error-btn"
+              onClick={() => setDroppedNotice(null)}
+              aria-label="关闭附件未发出提示"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
+        {/* #1028 AC2：常驻归属 chip——把「当前会话在哪个项目 / 哪个 cwd」显形。
+            归属由后端按 cwd 精确相等判定（前端不比对，见 lib/ownership.ts）；未归属
+            时本 chip 就是那条「你不在任何项目里」的警示。 */}
+        {ownership !== null && (
+          <div
+            className={`composer-owner-chip composer-owner-chip-${ownership.kind}`}
+            role="note"
+            title={ownership.title}
+          >
+            {ownership.label}
+          </div>
+        )}
         <textarea
           ref={inputRef}
           id="composer-input"
@@ -847,9 +1037,16 @@ export const Composer = memo(function Composer({
               <button
                 className="composer-send"
                 onClick={() => submit('queue')}
-                disabled={locked || !value.trim()}
+                disabled={locked || !value.trim() || sendBlocked || sending}
                 aria-label="发送"
-                title={`发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                aria-busy={sending}
+                title={
+                  sendBlocked
+                    ? sendBlockedReason
+                    : sending
+                      ? '上一条消息还在发送中…'
+                      : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+                }
               >
                 <ArrowUp size={16} />
               </button>
@@ -861,9 +1058,16 @@ export const Composer = memo(function Composer({
             <button
               className="composer-send"
               onClick={() => submit('queue')}
-              disabled={locked || !value.trim()}
+              disabled={locked || !value.trim() || sendBlocked || sending}
               aria-label="发送"
-              title={`发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              aria-busy={sending}
+              title={
+                sendBlocked
+                  ? sendBlockedReason
+                  : sending
+                    ? '上一条消息还在发送中…'
+                    : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+              }
             >
               <ArrowUp size={16} />
             </button>

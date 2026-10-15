@@ -277,6 +277,27 @@ def test_discarding_artifacts_cleans_corrupt_mapping_without_reading_it(
     assert not default_workspace.exists()
 
 
+def test_docker_cleanup_rejects_mapping_with_unowned_resource_names(
+    tmp_path: Path,
+):
+    registry = WorkspaceRegistry(root=tmp_path, backend="local")
+    registry._write_mapping(
+        "session",
+        {
+            "session_id": "session",
+            "backend": "docker",
+            "workspace_root": str(tmp_path / "workspace"),
+            "container_name": "unrelated-container",
+            "volume_name": "unrelated-volume",
+        },
+    )
+
+    with pytest.raises(WorkspaceBindingError, match="deterministic ownership names"):
+        registry.cleanup_docker_workspace_resources("session")
+
+    assert registry.exists("session")
+
+
 class TestExists:
     def test_nonexistent_returns_false(self, registry: WorkspaceRegistry):
         assert registry.exists("sess_no") is False

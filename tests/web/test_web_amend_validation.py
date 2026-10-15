@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
+from agent_harness.session.model_switch import default_model_id
 from agent_harness.session.service import (
     AmendOptions,
     SendMessageResult,
@@ -42,6 +43,9 @@ def bare_client(tmp_path):
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", agent_models=_CATALOG_JSON,
+        # #786 密封守卫：本文件经 ``resolve_selection``（默认条目解析）触达内容
+        # 敏感面 ⇒ 钉 provider_store_path，避免宿主 HOME 的自定义 provider 泄进断言。
+        provider_store_path=str(tmp_path / "model-providers.json"),
         enable_cors=False,
     )
     return TestClient(create_app(settings, enable_cors=False))
@@ -52,7 +56,9 @@ def wired_client(tmp_path):
     """预注入一个 provider（memory）的 app——用于合法 id 的正向用例。"""
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path),
-        model_api_key="sk-test", enable_cors=False,
+        model_api_key="sk-test",
+        provider_store_path=str(tmp_path / "model-providers.json"),
+        enable_cors=False,
     )
     app = create_app(settings, enable_cors=False)
     wiring = CapabilityWiring()
@@ -275,3 +281,35 @@ class TestResumeAmendValidation:
             json={"task": "go", "model": "gpt-4o"},
         )
         assert resp.status_code == 404
+
+
+# ── #1016：默认条目 id 在续聊 amend 路径上被接受为「清覆盖」 ──────────────
+
+
+class TestDefaultEntryModelAccepted:
+    """AC4 回归锁：amend 校验对 ``default_model_id(settings)`` 的返回值，必须与
+    切换路径（``resolve_model_target``）判定一致——接受为「清除会话级覆盖」，
+    而不是 422。
+
+    此前这里用的是**裸** ``resolve_selection``，它只认 catalog 名 / 自定义供应商，
+    不认默认条目（id = 默认链模型名）⇒ 用户点了那条「默认」，``POST /model`` 接受、
+    ``POST /messages`` 却 422，会话被卡死（本票症状）。修复后两条路径共用同一
+    事实源（``ModelConfig.is_default_entry``）。
+    """
+
+    def test_messages_default_entry_model_not_422(self, bare_client):
+        default_id = default_model_id(bare_client.app.state.agent.settings)
+        resp = bare_client.post(
+            "/api/sessions/sid-1/messages",
+            json={"content": "hi", "model": default_id},
+        )
+        # 通过 amend 校验 → 走到 service（session 不存在 ⇒ 404，而不是 422）
+        assert resp.status_code == 404, resp.text
+
+    def test_resume_default_entry_model_not_422(self, bare_client):
+        default_id = default_model_id(bare_client.app.state.agent.settings)
+        resp = bare_client.post(
+            "/api/sessions/sid-1/resume",
+            json={"task": "go", "model": default_id},
+        )
+        assert resp.status_code == 404, resp.text

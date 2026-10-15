@@ -1,0 +1,1 @@
+2026-10-12	#1025 阶段 E 同步 origin/main：merge 638578b1（父1=e0e03338 本分支 tip（含 P4-N1 台账改名笔）；父2=9d29ddff origin/main；merge-base=5ae3882c）。ort 成功、双方自 merge-base 的改动路径交集为空、无冲突解决（来侧新增 #1026 compaction timeout / #1045 installer / #915 recovery 批次）。本行仅机械归属同步 merge commit，不是新审查，未改变 #1025 行为。	e0e033389056e2328363eca02edca1adc201dde3..638578b1a34fe6661ee7eb6afe09958e1fb2098d

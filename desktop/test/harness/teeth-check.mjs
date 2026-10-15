@@ -99,11 +99,18 @@ const directoriesMutations = {
     )
   },
   'whole record handling parked in a never-taken branch (F1)': (source) => {
-    // What relative-depth assertions cannot see: read, probe, drop and clear all
-    // move one level down together, so every comparison between them still
-    // holds. Only the block's absolute place (and the guard's absolute bound)
-    // catches it.
-    const clearCall = '    !insertmacro iaClearBackupDir'
+    // The clear call is no longer adjacent to the probe block: #1040 put the
+    // `iaPromoteBackupAlreadyLeftover:` label in between (installer-
+    // directories.nsh), and a bare `clearCall` anchor then matched nothing, so
+    // this mutation silently stopped applying and was reported as a survivor.
+    // The label rides along inside the wrapped region, so read, probe, drop and
+    // clear move down together and the comparisons between them still hold.
+    // ⚠ Measured (#1078 review Axis B): the rules that fire on this mutation are
+    // the relative bound (`iaClearBackupDir sits 1 LogicLib level(s) deeper than
+    // the delete`) and the constant-false detector — NOT the absolute bound,
+    // which cannot see it because the wrapped region starts below
+    // `RMDir /r "$iaDeleteTarget"`. The note here claimed the opposite before.
+    const clearCall = ['iaPromoteBackupAlreadyLeftover:', '    !insertmacro iaClearBackupDir'].join(lf)
     const anchor = ['    !insertmacro iaReadLeftoverDir', shippedProbeBlock, clearCall].join(lf)
     if (!source.includes(anchor)) throw new Error('record-handling anchor not found')
     return source.replace(anchor, `    \${If} 1 == 0${lf}${anchor}${lf}    \${EndIf}`)

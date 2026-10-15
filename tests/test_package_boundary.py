@@ -32,6 +32,7 @@ attach_mcp_section`，于是 `skills → plugins` 与既有的 `plugins → skil
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -43,12 +44,15 @@ _PLUGINS_PACKAGE = "agent_harness.plugins"
 
 
 def _run(code: str) -> subprocess.CompletedProcess[str]:
+    env = {"PYTHONPATH": _SRC, "PATH": "/usr/bin:/bin"}
+    if os.name == "nt":
+        env["SystemRoot"] = os.environ.get("SystemRoot", "")
     return subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         cwd=_SRC,
-        env={"PYTHONPATH": _SRC, "PATH": "/usr/bin:/bin"},
+        env=env,
         timeout=60,
         check=False,
     )

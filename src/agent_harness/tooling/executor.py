@@ -152,8 +152,9 @@ def _stringified_json_object_fields(exc: ValidationError) -> list[str]:
 
     只读 `exc.errors()` 的证据、只产出字段名，不碰解析、不修参数：
     spec `04_TOOL_RUNTIME.md` §5 —— "Executor MUST NOT 偷偷替模型猜测/
-    修复参数"。指引写进 message 回模型自纠（Vision:172；LangGraph
-    `ToolInvocationError` 模式）。
+    修复参数"。探测结果写进 message：说明双重编码事实并指引以对象形态
+    重新发出该调用（#1025）——模型能否靠重发成功，取决于该字段是否已在
+    schema 声明 string 形态（如 #1025 的 `remember_this.payload`）。
     """
     fields: list[str] = []
     for err in exc.errors():
@@ -474,21 +475,26 @@ class ToolExecutor:
             # #767 方案 A：对象型字段收到 JSON 字符串时追加可操作指引。
             # 只改 message 层（不修参数，spec 04 §5 禁止偷偷修复）；保持
             # retryable=False（spec §6：INVALID_ARGUMENT 默认不重试）。
-            guidance = ""
+            # #1025：stringified 命中时不再说「请修正参数后重新调用」——
+            # 这类错误模型无法自修正（双重编码不在其可控范围），邀请重试
+            # 只会喂出 10 次注定失败的重试循环；改确定性表述（重试同调用
+            # 不会成功、应以对象形态重新发出）。非 stringified 的普通参数
+            # 错误文案逐字不变。
             stringified_fields = _stringified_json_object_fields(e)
             if stringified_fields:
                 names = "、".join(f"'{f}'" for f in stringified_fields)
-                guidance = (
-                    f" {names} 收到的是 JSON 字符串（内容本身合法），"
-                    "请直接传对象、不要转义成字符串后重试。"
+                message = (
+                    f"工具 '{name}' 参数校验失败：{details}。"
+                    f" {names} 收到的是 JSON 字符串（作为 JSON 文本内容合法）——该参数被"
+                    "上游双重编码，以相同调用重试不会成功；请直接传对象、"
+                    "不要转义成字符串后重新发出该调用。"
                 )
+            else:
+                message = f"工具 '{name}' 参数校验失败：{details}。请修正参数后重新调用。"
             return ToolExecution(
                 tool_call_id=tool_call_id,
                 result=ToolResult.failure(
-                    message=(
-                        f"工具 '{name}' 参数校验失败：{details}。"
-                        f"请修正参数后重新调用。{guidance}"
-                    ),
+                    message=message,
                     error_code=ErrorCode.INVALID_ARGUMENT,
                     retryable=False,  # 参数错是确定性的，重试也是同样的错
                 ),

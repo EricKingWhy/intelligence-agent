@@ -125,11 +125,15 @@ test('409 裁决卡片：后果语言标题、每卡默认选中最安全项', a
   const cards = page.locator('.recovery-card');
   await expect(cards).toHaveCount(2);
   // call-1：replay_safe 工具 → 默认「安全重做」
-  await expect(cards.nth(0).getByRole('radio', { name: /当作没生效，安全重做/ })).toBeChecked();
+  // #1030：ABANDON 的文案同样以「当作没生效」开头，两个 `当作没生效` 前缀会撞上
+  // strict mode（`.check()`/`toBeChecked()` 都要求定位唯一）——故这里按**完整**
+  // 标签定位，不靠前缀。
+  await expect(cards.nth(0).getByRole('radio', { name: /安全重做/ })).toBeChecked();
   await expect(cards.nth(0).getByRole('radio', { name: /当作已生效/ })).not.toBeChecked();
   // call-2：unsafe → 默认「先跳过」
   await expect(cards.nth(1).getByRole('radio', { name: /先跳过，稍后再说/ })).toBeChecked();
-  await expect(cards.nth(1).getByRole('radio', { name: /当作没生效/ })).not.toBeChecked();
+  await expect(cards.nth(1).getByRole('radio', { name: /安全重做/ })).not.toBeChecked();
+  await expect(cards.nth(1).getByRole('radio', { name: /就此打住/ })).not.toBeChecked();
 });
 
 test('批量「全部按默认安全动作处理」：各卡回到默认项，提交载荷取默认 verdict', async ({ page }) => {
@@ -140,7 +144,7 @@ test('批量「全部按默认安全动作处理」：各卡回到默认项，�
   const firstCard = page.locator('.recovery-card').nth(0);
   await firstCard.getByRole('radio', { name: /当作已生效/ }).check();
   await page.locator('.recovery-batch-btn').click();
-  await expect(firstCard.getByRole('radio', { name: /当作没生效/ })).toBeChecked();
+  await expect(firstCard.getByRole('radio', { name: /安全重做/ })).toBeChecked();
 
   await page.locator('.recovery-submit-btn').click();
   await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);

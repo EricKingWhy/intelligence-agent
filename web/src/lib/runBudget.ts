@@ -151,6 +151,17 @@ export const PAUSE_REASON_STUCK = 'stuck';
  *  `dimensionFact` 编出一个 `unavailable / unlimited` 的读数行。 */
 export const DEADLINE_DIMENSION = 'run.deadline_at';
 
+/** #1026：context 维（`max_context_tokens`）——`trigger_dimension` 的取值
+ *  （后端 `run_budget.TRIGGER_MAX_CONTEXT_TOKENS`）。
+ *
+ *  与 deadline 同理**不在** `RUN_DIMENSIONS`：它是派生阈值（模型窗口 × 阈值比），
+ *  不是 run 计数预算维——没有 consumed/ceiling 读数行，恢复也不是"抬高某个
+ *  ceiling"（后端 `validate_resume` 对该触发维有窄豁免：不要求点名 run ceiling；
+ *  恢复依据是换窗口更大的模型 / 压缩后的会话面）。旧实现把它落进
+ *  `RUN_DIMENSIONS[0]` 回落，让用户对着 `max_agent_turns_total` 旋钮修上下文
+ *  问题——那正是票面修法④要除掉的错配。 */
+export const CONTEXT_TRIGGER_DIMENSION = 'max_context_tokens';
+
 /** deadline 维在恢复请求里的字段名（后端 `budget.run.deadline_at`）。 */
 export const DEADLINE_RESUME_FIELD = 'deadline_at';
 
@@ -533,22 +544,32 @@ export type ResumeTarget =
   /** `#315`：deadline 暂停——恢复给的是**新的绝对时刻**，不是任何 ceiling 的数字。
    *  它与 run 维是同一类动作（给绝对值、不重置 counter），但值域不同（时刻文本），
    *  所以在这里分开：草稿校验、提示文案、请求体的键都由这个 kind 决定。 */
-  | { kind: 'deadline' };
+  | { kind: 'deadline' }
+  /** `#1026`：context 硬护栏暂停——恢复依据是**换窗口 / 压缩会话面**，不是抬高
+   *  任何 ceiling（后端 `validate_resume` 对该触发维窄豁免"必须点名 run ceiling"）。
+   *  面板对它渲染引导文案、不渲染数字输入；恢复请求体不会为它组装（无键可点）。 */
+  | { kind: 'context' };
 
 /** 恢复输入框那一行显示的目标名：与恢复请求的键路径同一形态
  *  （`max_model_requests` / `tool_call_limits.glob`）。 */
 export function resumeTargetLabel(target: ResumeTarget): string {
   if (target.kind === 'run') return target.spec.resumeField;
   if (target.kind === 'tool') return `tool_call_limits.${target.quota.name}`;
+  if (target.kind === 'context') return '上下文窗口（max_context_tokens）';
   return DEADLINE_RESUME_FIELD;
 }
 
 /** 抬高这一维的 CLI 开关（提示文案用；后端 `cli._RESUME_FLAGS` / `_resume_command_tail`
  *  的镜像）。工具配额给的是**真实 argv 形状**（`NAME=N` 在同一个参数里），与 CLI 的
- *  `resume_hint` 逐字一致——提示必须是一条能照抄执行的命令，不是示意。 */
+ *  `resume_hint` 逐字一致——提示必须是一条能照抄执行的命令，不是示意。
+ *  `#1026`：context 维没有可抬的 run ceiling（窄豁免），如实给处置指引而不是编一个
+ *  不存在的开关。 */
 export function resumeTargetCliFlag(target: ResumeTarget): string {
   if (target.kind === 'run') return `${target.spec.resumeFlag} N`;
   if (target.kind === 'tool') return `--run-tool-limit ${target.quota.name}=N`;
+  if (target.kind === 'context') {
+    return '/compact（或调大 max_context_tokens）后恢复，无需 ceiling';
+  }
   return `${DEADLINE_RESUME_FLAG} ${DEADLINE_EXAMPLE}`;
 }
 
@@ -625,6 +646,16 @@ export function minResumeValue(
  *  可数的，且最小值就是"已接纳调用数 + 1"（不留 closeout 预留）。 */
 export function resumeInputHint(facts: PauseFacts): string {
   const target = facts.resumeTarget;
+  if (target.kind === 'context') {
+    // `#1026`：context 暂停的处置是"换一个放得下的上下文"——手动压缩或调大上限，
+    // 不是抬高某个 run ceiling（后端对该触发维窄豁免"必须点名 ceiling"）。
+    // 恢复入口按引导走（先 /compact 再恢复），数字输入对它是错配的旋钮。
+    return (
+      '上下文超限不是 run 预算维：抬任何 ceiling 都改变不了「投影放不进窗口」。' +
+      '先手动执行 /compact 压缩会话上下文（或调大 max_context_tokens 后新开会话），' +
+      '再以同一 run_id 恢复——恢复本身无需 ceiling'
+    );
+  }
   if (target.kind === 'deadline') {
     // deadline 维的判据是**严格在未来**（`resume_headroom_ok`）：给不出"至少到多少"，
     // 只能点名"必须晚于现在"以及原来那个已到点的时刻（好让用户看出这是**换时刻**，
@@ -740,12 +771,14 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
     ? { kind: 'deadline' }
     : trippedTool !== null
       ? { kind: 'tool', quota: trippedTool }
-      : {
-          kind: 'run',
-          spec:
-            RUN_DIMENSIONS.find((spec) => spec.dimension === paused.trigger_dimension) ??
-            RUN_DIMENSIONS[0],
-        };
+      : paused.trigger_dimension === CONTEXT_TRIGGER_DIMENSION
+        ? { kind: 'context' }
+        : {
+            kind: 'run',
+            spec:
+              RUN_DIMENSIONS.find((spec) => spec.dimension === paused.trigger_dimension) ??
+              RUN_DIMENSIONS[0],
+          };
   return {
     consumed: typeof turnsFact.consumed === 'number' ? turnsFact.consumed : 0,
     ceiling: typeof turnsFact.ceiling === 'number' ? turnsFact.ceiling : null,
@@ -795,12 +828,17 @@ export type ResumeRequestTarget =
   | { kind: 'run'; field: RunLimitField }
   | { kind: 'tool'; tool: string }
   /** `#315`：deadline 暂停——请求体里点名的是 `budget.run.deadline_at`（时刻文本）。 */
-  | { kind: 'deadline'; field: typeof DEADLINE_RESUME_FIELD };
+  | { kind: 'deadline'; field: typeof DEADLINE_RESUME_FIELD }
+  /** `#1026`：context 暂停——**不组装恢复请求体**（没有可点名的键；面板也不渲染
+   *  恢复按钮）。这个成员只为类型穷尽存在，`ceilingDraftValue` 对它恒返回 null，
+   *  App 在取值处就短路，走不到请求体组装。 */
+  | { kind: 'context' };
 
 export function resumeRequestTarget(paused: RunPausedInfo): ResumeRequestTarget {
   const target = pauseFacts(paused).resumeTarget;
   if (target.kind === 'run') return { kind: 'run', field: target.spec.resumeField };
   if (target.kind === 'tool') return { kind: 'tool', tool: target.quota.name };
+  if (target.kind === 'context') return { kind: 'context' };
   return { kind: 'deadline', field: DEADLINE_RESUME_FIELD };
 }
 
@@ -812,6 +850,10 @@ export function defaultResumeDraft(paused: RunPausedInfo): string | null {
   if (target.kind === 'deadline') {
     // **不**编一个"现在 + N 分钟"：那是策略（跑多久算合适），不是本地能算出来的事实。
     // 后端要的是"客户端点名的未来时刻"，替用户填一个数字会让这次恢复看起来是系统的决定。
+    return null;
+  }
+  if (target.kind === 'context') {
+    // `#1026`：没有"默认 ceiling"可填（恢复不是抬 ceiling），给空串走引导文案。
     return null;
   }
   if (target.kind === 'tool') {
@@ -842,6 +884,9 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
   // `#315`：deadline 的目标是**时刻**（文本），与任何 ceiling 的"够不够"判据都不同，
   // 分派到它自己的那一份校验（形状 + 严格在未来）。
   if (target.kind === 'deadline') return deadlineDraftError(paused, draft);
+  // `#1026`：context 暂停没有数字要填（恢复依据不是 ceiling），恒放行——
+  // 面板对它渲染引导、不渲染输入框，这条分支只是让预校验不挡路。
+  if (target.kind === 'context') return null;
   // `#314`：工具配额的判据与 run 维不同（严格大于已接纳调用数，且 wire 形状是整数），
   // 所以分派到它自己的那一份校验里。
   if (target.kind === 'tool') return toolDraftError(target.quota, draft);
@@ -896,6 +941,9 @@ export function ceilingDraftValue(
   // deadline 维在 wire 上就是**文本**（后端 `parse_deadline_at` 只收带时区的时刻），
   // 不做任何数值化——`Number('2026-09-26T04:30:00Z')` 是 NaN。
   if (target.kind === 'deadline') return text;
+  // `#1026`：context 暂停不提交数值（恢复不是抬 ceiling）；恒 null 让 App 在
+  // 取值处短路，请求体组装不可达。
+  if (target.kind === 'context') return null;
   if (target.kind === 'tool') return Number(text);
   return target.spec.decimal ? text : Number(text);
 }

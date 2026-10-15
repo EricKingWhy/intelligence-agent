@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = '3ea817b5099c84b9210d1dc2aa02dfd8ba57be73130d6f5f2fbe5105b8d973bc'
+const GUARD_BASELINE_SHA256 = 'c1f8a24851001429d989d617ab93edb0f244065cd2439ec7125d120138357ffd'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -718,6 +718,45 @@ const mutations = {
   'counter bump alphabet narrowed back to +1 (#919 review P1)': swap(
     "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*(?:[1-9]\\d*)\\s*$/i",
     "        const countBump = /^\\s*IntOp\\s+(\\$\\S+)\\s+\\1\\s*\\+\\s*1\\s*$/i",
+  ),
+  // #914 [W-16 R2]: the process gate's two load-bearing rules. Reverting either
+  // one leaves the gate reading as clean while the product it describes goes
+  // blind — the fixture in test/installer-scripts.test.mjs ("process gate
+  // (#914)") is what holds each down.
+  'array cast rule dropped from the process gate (#914)': swap(
+    "    if (!classify.includes('@(Get-CimInstance')) {",
+    '    if (false) {',
+  ),
+  'gate ordering rule dropped from the process gate (#914)': swap(
+    '    if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {',
+    '    if (false) {',
+  ),
+  // The #914 review's Axis A must-fix (user-ruled): the gate has to run before
+  // the branch that reads `$iaProbeFound` — that branch skips staging when the
+  // app executable is gone, so a call inside it never classified a damaged
+  // installation, whose live bundled service is exactly what must not be
+  // updated over. Two fixtures hold it down: "refuses a gate call that runs only
+  // when the app executable is present" and, since #1074 moved the anchor from
+  // the literal branch to the variable, "refuses a gate call that a re-spelled
+  // app-executable branch moves behind it".
+  'app-branch placement rule dropped from the process gate (#914 review Axis A)': swap(
+    '    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {',
+    '    if (false) {',
+  ),
+  // #1078: the rule that reads installer.nsh. Reverting it leaves the wrapper
+  // unguarded again, and the fixtures in "process gate call site (#1078)" are
+  // what hold it down.
+  'process gate call-site rule dropped (#1078)': swap(
+    '      if (frame === -1 || close === -1 || close < call || divided) {',
+    '      if (false) {',
+  ),
+  // #1078 review (both axes): the divider test has to count depth — the frame's
+  // own `${Else}`/`${ElseIf}`, not any divider in the span. Reverting it to the
+  // first cut's scan rejects the legitimate nested forms, which the two
+  // "accepts a nested …" fixtures hold down.
+  'call-site divider test reverted to depth-blind (#1078 review)': swap(
+    '      const divided = frame !== -1 && frameDividesBefore(codeOnly, frame, call)',
+    '      const divided = frame !== -1 && codeOnly.slice(frame, call).search(/\\$\\{(?:Else|ElseIf|Case|CaseElse)\\}/i) !== -1',
   ),
 }
 
