@@ -1,0 +1,1 @@
+2026-10-15	OSS Scanner Dockerfile 修一轮：云端沙箱首轮构建在 uv sync 挂（editable 安装要求 src/agent_harness/ 已存在）；修为先 COPY src/ 再 sync。构建修回、无产品代码改动	6db9ad09e61b9b992ac04704f8f23694f8211851..f8144cc6d09a3f318f5ee7e15d7ae882c18c8f97
