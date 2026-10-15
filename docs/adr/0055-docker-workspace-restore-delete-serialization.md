@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-10-15
-- 相关：issue #1132（W-31 follow-up）、ADR-0029（会话硬删除）、
+- 相关：issue #1132、ADR-0029（会话硬删除）、
   ADR-0054（私有 Docker named volume 隔离）、ADR-0001（Sandbox 抽象）
 
 ## 背景
@@ -37,8 +37,12 @@ Docker 后端的 `containers.run(volumes=...)` 对**不存在的具名卷**的�
      （别名与 owner 共用一把）；解析失败退回自身 id，**绝不因此抛错**（删除必须幂等）。
 2. **卷缺失即 fail-closed**。`DockerSandbox.workspace_volume_exists()` 检查具名卷；
    `get()` 在**同一临界区内、`ensure_started()` 之前**校验，缺失即抛
-   `WorkspaceBindingError`，绝不"重建一个空的"。锁内同时**重读映射**并以它为准：
-   等锁期间映射可能已被删除（fail-closed）或被改写（legacy 迁移落盘）。
+   `WorkspaceBindingError`，绝不"重建一个空的"。锁内**先重读映射并以它为准**——
+   这一读在**所有**分支（legacy 迁移 / 缓存命中 / 冷恢复）之前，且三条分支都必须过
+   卷存在性闸门：等锁期间映射可能已被删除（此时不得拿锁外旧副本去重建，fail-closed），
+   也可能被改写（legacy 迁移落盘）；缓存里那个实例的卷也可能已被
+   `cleanup_docker_workspace_resources` 删掉。删除路径在 `sandbox.delete()` 之后
+   立即摘掉缓存项，使删除窗口内的 `get()` 一律走冷路径受闸门约束。
 
 **两个机制都承重，缺一不可**（消融实测，真 Docker）：
 
@@ -55,7 +59,9 @@ Docker 后端的 `containers.run(volumes=...)` 对**不存在的具名卷**的�
 ## 边界与代价
 
 - **进程内**锁。跨进程（两个进程同 root）不在本票范围：本仓 `instance_lock`
-  （#150）已规定同一 `workspace_dir` 同时只允许一个进程，CLI 与 Web 并发被拒。
+  （#150）默认规定同一 `workspace_dir` 同时只允许一个进程，CLI 与 Web 并发被拒。
+  **残余风险**：`ALLOW_SHARED_ROOT=1` 是该约束的显式逃生舱（见
+  `instance_lock.py`），启用时同 root 可有两个进程，本锁不覆盖那种配置。
 - **不改变** ADR-0029 D3 的删除顺序与幂等语义：锁只在方法级串行，各步语义不变；
   删除仍然可重试（映射保留到 `discard_session_artifacts`）。
 - **不引入**新依赖、不改 Sandbox 路径边界（ADR-0001 不变）。

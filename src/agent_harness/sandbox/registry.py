@@ -154,7 +154,9 @@ class WorkspaceRegistry:
                 )
             return self.get(session_id)
         if session_id in self._cache:
-            return self._cache[session_id]
+            # 映射已不在（硬删除摘掉 / 并发删除窗口）却还有缓存项：这是"删了之后
+            # 又被交出去"的形状，先摘掉再按新建走，绝不把已删会话的实例返回。
+            self._cache.pop(session_id, None)
 
         mapping = self._build_mapping(session_id, backend=backend)
         requested = (
@@ -241,6 +243,22 @@ class WorkspaceRegistry:
         # #1048 AC2：legacy PSEC 映射在恢复时迁移到私有 Docker volume——
         # 先快照导入、成功后才原子改 mapping 并返回 DockerSandbox；任一步失败
         # 即抛错（保留旧 mapping 与宿主文件），绝不返回 PSEC/半成品。
+        # 锁内重读映射并**以它为准**：等锁期间硬删除可能已摘掉它（此时不得拿
+        # 锁外读到的旧映射去重建——那正是"删除后把资源建回来"的形状，fail-closed），
+        # 也可能被别的恢复线程改写过（legacy 迁移落盘），旧副本同样不能用。
+        #
+        # 这一读必须在**所有**分支之前：legacy 分支此前用的是 `get()` 锁外读到的
+        # `owner_mapping`（红证：等锁期间硬删掉映射后，它照样 `_migrate_legacy_mapping`
+        # → `ensure_started` → `_import_snapshot` → `_write_mapping`，把已删会话的
+        # 映射与容器/卷**重建回来**）；cache 分支此前无卷存在性检查，会把一个
+        # 卷已被删除的 sandbox 交出去，下一次 `read_text` 即重建空卷。
+        current_mapping = self._read_mapping(owner_session_id)
+        if current_mapping is None:
+            raise KeyError(
+                f"Session '{owner_session_id}' 没有对应的 workspace 映射记录。"
+            )
+        owner_mapping = current_mapping
+
         if owner_mapping.get("backend") in LEGACY_BACKENDS:
             sandbox = self._migrate_legacy_mapping(owner_session_id, owner_mapping)
             self._cache[owner_session_id] = sandbox
@@ -249,18 +267,15 @@ class WorkspaceRegistry:
 
         if owner_session_id in self._cache:
             sandbox = self._cache[owner_session_id]
+            # 缓存里的实例同样要过卷存在性闸门：`cleanup_docker_workspace_resources`
+            # 删掉卷后到 `discard_session_artifacts` 摘映射之间，缓存仍持有那个
+            # sandbox；直接交出去，调用方下一次 `read_text`/`write_text`/`exec`
+            # 就会 `ensure_started()` 把空卷建回来（与冷路径同一个失效形状）。
+            if owner_mapping.get("backend") == "docker":
+                self._assert_volume_present(sandbox, session_id)
             self._cache[session_id] = sandbox
             return sandbox
 
-        # 锁内重读映射并**以它为准**：等锁期间硬删除可能已摘掉它（此时不得拿
-        # 锁外读到的旧映射去重建——那正是"删除后把资源建回来"的形状，fail-closed），
-        # 也可能被别的恢复线程改写过（legacy 迁移落盘），旧副本同样不能用。
-        current_mapping = self._read_mapping(owner_session_id)
-        if current_mapping is None:
-            raise KeyError(
-                f"Session '{owner_session_id}' 没有对应的 workspace 映射记录。"
-            )
-        owner_mapping = current_mapping
         sandbox = self._instantiate_sandbox(owner_mapping)
         if owner_mapping.get("backend") == "docker":
             # #1132：具名卷已被删除时拒绝恢复。必须在 `ensure_started()` **之前**
@@ -439,6 +454,11 @@ class WorkspaceRegistry:
                     "matching Docker sandbox instance."
                 )
             sandbox.delete()
+            # 删完即摘缓存：留着的话，删除窗口内（到 `discard_session_artifacts`
+            # 摘映射为止）的 `get()` 会把这个卷已不存在的实例直接交出去，调用方
+            # 下一次读写即 `ensure_started()` 重建空卷。摘掉后该窗口内的 `get()`
+            # 走冷路径，由卷存在性闸门 fail-closed。
+            self._cache.pop(session_id, None)
 
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。

@@ -672,16 +672,10 @@ def test_hard_delete_without_artifacts_is_noop(tmp_path: Path) -> None:
 def test_hard_delete_reclaims_owned_docker_resources_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    docker_client = None
-    try:
-        docker = importlib.import_module("docker")
-        docker_client = docker.from_env(use_context=False)
-        docker_client.ping()
-        docker_client.images.get("python:3-slim")
-    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
-        if docker_client is not None:
-            docker_client.close()
-        pytest.skip(f"Docker SDK, daemon, or python:3-slim image is unavailable: {exc}")
+    docker_client = _docker_or_skip()
+    # 下面要按名引用 `docker.errors` / `docker.models`（探针抽成 _docker_or_skip 后
+    # 本作用域不再绑定该名字）。
+    docker = importlib.import_module("docker")
 
     project = tmp_path / "project"
     project.mkdir()
@@ -905,12 +899,27 @@ def test_restore_and_hard_delete_are_serialized_on_the_workspace_lock(
                 finally:
                     delete_done.set()
 
+            # 删除线程**到达取锁点**的信号。有了它，下面那条断言就不是"等 2 秒看看"
+            # 的时序猜测（那会假绿：删除线程还没跑到清理点，断言照样成立），而是
+            # "删除已经在锁上被挡住"的确定性判据。
+            delete_at_lock = threading.Event()
+            original_cleanup = registry.cleanup_docker_workspace_resources
+
+            def signalled_cleanup(target_session_id: str) -> None:
+                delete_at_lock.set()
+                original_cleanup(target_session_id)
+
+            monkeypatch.setattr(
+                registry, "cleanup_docker_workspace_resources", signalled_cleanup,
+            )
+
             restore_thread = threading.Thread(target=restore, name="1132-restore", daemon=True)
             restore_thread.start()
             assert paused.wait(30), "cold restore never reached ensure_started"
 
             delete_thread = threading.Thread(target=hard_delete, name="1132-delete", daemon=True)
             delete_thread.start()
+            assert delete_at_lock.wait(30), "hard-delete never reached the workspace lock"
             # ① 恢复持锁 ⇒ 删除必须被挡住（这是本票要买的那条串行化）。
             assert not delete_done.wait(2.0), (
                 "hard-delete ran to completion while cold restore held the workspace lock"
@@ -991,8 +1000,14 @@ def test_restore_after_hard_delete_fails_closed_without_recreating_the_volume(
             with pytest.raises(docker.errors.NotFound):
                 docker_client.volumes.get(volume_name)
 
-            # 恢复必须 fail-closed（映射已删），且**不得**把卷建回来。
-            with pytest.raises((KeyError, WorkspaceBindingError)):
+            # 恢复必须 fail-closed，且**不得**把卷建回来。删除**完整跑完**后，第一道
+            # 生效的闸门是"映射已摘除"（KeyError）——卷存在性闸门覆盖的是映射尚在、
+            # 卷已被删的那个窗口（`cleanup_docker_workspace_resources` 到
+            # `discard_session_artifacts` 之间），由
+            # `tests/sandbox/test_docker_snapshot_import.py::TestRestoreRefusesMissingVolume`
+            # 单独钉住。这里断言具体类型，不写成 `(KeyError, WorkspaceBindingError)`
+            # 那种"两条路都算过"的松口径。
+            with pytest.raises(KeyError):
                 registry.get(session_id)
             with pytest.raises(docker.errors.NotFound):
                 docker_client.volumes.get(volume_name)
