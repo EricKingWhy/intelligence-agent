@@ -129,6 +129,20 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # #1166：六套守卫套件此前在 CI 里没有任何入口——改 desktop/test/** 不触发任何
+      # workflow，gate0 与 pre-push 也没有 `node --test`，它们只在本机跑过。六套纯 node、
+      # 共约 3 秒（本机实测 2.9 s / 2.7 s）、不编译安装包、连 electron-builder 都不需要
+      # （本机在**没有 desktop/node_modules** 的检出上跑通），所以排在装 electron-builder
+      # 与三条烟测腿之前：最便宜的信号先失败。两个用例按 existsSync 跳过——它们要的
+      # desktop/dist 与 installer/staging 是 `npm run build` / `prepare_python_runtime.py`
+      # 的产物，本 workflow 都不产出（烟测腿给 electron-builder 传 prepackaged，
+      # app-builder-lib 的 doPack 在 prepackaged != null 时直接返回，afterPack 与
+      # extraResources 都不执行），所以这两个用例在 CI 里仍然是跳过，不是真跑。
+      - name: 守卫套件 — 安装器脚本 / node 运行时 / NSIS 结构 / 运行时产品 / TUI / Web 资产（#1166）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        run: node --test test/installer-scripts.test.mjs test/installer-node-runtime.test.mjs test/installer-nsis.test.mjs test/installer-runtime-product.test.mjs test/installer-tui.test.mjs test/installer-web-assets.test.mjs
+
       - name: 装 electron-builder（脚本 lazy-require，未进 desktop/package.json）
         working-directory: desktop
         # electron-builder 不在 desktop 依赖里（脚本 lazy-require；见 build-windows-installer.mjs
@@ -150,17 +164,8 @@ jobs:
         working-directory: desktop
         run: node scripts/test-windows-installer.mjs --compile-only
 
-      # #1166：六套守卫套件此前在 CI 里没有任何入口——改 desktop/test/** 不触发任何
-      # workflow，gate0 与 pre-push 也没有 `node --test`，它们只在本机跑过。六套纯 node、
-      # 共约 4 秒、不编译安装包（两个用例按 existsSync 跳过，符号链接在 EPERM/EXDEV 时
-      # 退化为复制），所以排在真机腿之前：最便宜的信号先失败。
-      - name: 守卫套件 — 安装器脚本 / node 运行时 / NSIS 结构 / 运行时产品 / TUI / Web 资产（#1166）
-        if: ${{ !inputs.compile_only }}
-        working-directory: desktop
-        run: node --test test/installer-scripts.test.mjs test/installer-node-runtime.test.mjs test/installer-nsis.test.mjs test/installer-runtime-product.test.mjs test/installer-tui.test.mjs test/installer-web-assets.test.mjs
-
       # #1166：守卫规则自身的牙齿检查——按规则逐条原地变异 build-windows-installer.mjs 并各自
-      # execFile 两套套件，本机实测 385 s（比真机腿的 81 s 更贵，但不需要 makensis）。排在守卫
+      # execFile 两套套件，本机实测 250 s（复核 235 s；比真机腿的 81 s 更贵，但不需要 makensis）。排在守卫
       # 套件之后：套件全绿只有在守卫本身有牙齿时才成立；排在真机腿之前：规则坏掉时先别花掉 8 次编译。
       - name: 牙齿检查 — 守卫规则自身（#1166）
         if: ${{ !inputs.compile_only }}
