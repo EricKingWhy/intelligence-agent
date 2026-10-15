@@ -181,7 +181,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    Chromium 真机实测（web/e2e/t-contrast.spec.ts 的 #1136 用例，取值见其 stdout）：
    修前亮色 .app-error 3.67 / .app-notice 3.86 / .recover-btn 2.94 / task-review 族 3.18–4.10；
    修后亮色 .recover-btn:hover 6.05（最紧）、.recover-btn 6.58、task-review 族 7.08–9.22、
-   .app-error/.app-notice ≈7.71、.auth-banner 7.18；修后暗色 7.49–12.29（较修前 5.66–8.12 只升）。 */
+   .app-error/.app-notice ≈7.71、.auth-banner 7.18；修后暗色 ≥6.86（族内最紧 .task-review-error 6.86；
+   其余 7.49–12.29，较修前 5.66–8.12 只升）。 */
 .app-error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
@@ -7506,10 +7507,12 @@ button.json-row {
   background: color-mix(in srgb, var(--success) 12%, transparent);
   border-radius: var(--radius-sm);
 }
-/* #1136 P3-1 穷尽：task-review 族里同为「语义色当正文色用」的 7 处（本块 + .task-review-result-tag
-   .r-fail/.r-blocked + .task-review-freshness.f-stale/-reasons + .task-review-diff .diff-del/.diff-hunk）
-   一并改 ink-mix（同 .app-error 族，见 app.css:175 注释）；装饰（底/描边）不动。
-   .r-pass/.diff-add/.verification.v-passed（--success）与 .run-axis.running（--info）实测达标，不改。 */
+/* #1136 P3-1 穷尽：task-review 族里同为「语义色当正文色用」的 7 处（本块 + .task-review-result-tag.r-fail
+   /.task-review-result-tag.r-blocked + .task-review-freshness.f-stale/-reasons + .task-review-diff
+   .diff-del/.diff-hunk）一并改 ink-mix（同 .app-error 族，见 app.css:175 注释）；装饰（底/描边）不动。
+   .r-pass/.diff-add/.verification.v-passed（--success）、.task-review-notice（7505 --success）、
+   .task-review-tag.ok（7532 --success）、.task-review-chip.state-deliverable（7554 --success）
+   与 .run-axis.running（--info）实测达标，不改。 */
 .task-review-error {
   padding: var(--space-sm);
   font-size: var(--text-xs);

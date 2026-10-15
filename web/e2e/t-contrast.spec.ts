@@ -798,8 +798,9 @@ for (const theme of ['dark', 'light'] as const) {
   /* #1136 P3-1 穷尽：task-review 族里余下 7 处「语义色当正文色用」——.task-review-error（--danger）、
      .task-review-result-tag.r-fail（--danger）/.r-blocked（--warning）、.task-review-freshness.f-stale
      （--warning）、.task-review-freshness-reasons（--warning）、.task-review-diff .diff-del（--danger）
-     /.diff-hunk（--info）。同族同根因同手法（ink-mix），本用例逐个量**真实节点**；改回纯 `var(--X)`
-     必红。.r-pass/.diff-add/.verification.v-passed（--success）与 .run-axis.running（--info）已达标，
+     /.diff-hunk（--info）。同族同根因同手法（ink-mix）；本用例量其中 6 处，.task-review-error 由紧随
+     其后的「加载失败条」用例单独量（本族净覆盖仍 7/7），改回纯 `var(--X)` 必红。
+     .r-pass/.diff-add/.verification.v-passed（--success）与 .run-axis.running（--info）已达标，
      不在本用例内（不为了凑数改动达标的处）。 */
   test(`[${theme}] #1136 task-review 语义色正文（result-tag/freshness/diff）对比度 ≥4.5`, async ({ page }) => {
     const state: TaskReviewFixture = {
