@@ -12,11 +12,20 @@
  *  锁六件事里的界面侧：六态逐项结果、缺证据、服务端 freshness 消歧（chip 文案不被
  *  前端"修正"）、两轴分区、三操作各自后果、刷新后状态同源。 */
 
-import { expect, test, type Page, type Route } from '@playwright/test';
-import { SID, T, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
-
-const json = (route: Route, body: unknown, status = 200) =>
-  route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
+import { expect, test, type Page } from '@playwright/test';
+import {
+  SID,
+  T,
+  criterion,
+  evidenceRecord,
+  fulfillSse,
+  mockTaskReviewApi,
+  routeApi,
+  submitTask,
+  verification,
+  type FrameSpec,
+  type TaskReviewFixture,
+} from './fixtures';
 
 const FRAMES: FrameSpec[] = [
   { type: 'session/started', seq: 1, session_id: SID, run_id: 'run-1', time: T },
@@ -25,89 +34,7 @@ const FRAMES: FrameSpec[] = [
   { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: 'run-1', time: T },
 ];
 
-interface TaskFixture {
-  task: Record<string, unknown>;
-  evidence: Record<string, unknown[]>;
-  gitStatus?: Record<string, unknown>;
-  gitDiff?: Record<string, unknown>;
-  leaseReleased?: boolean;
-}
-
-function criterion(item_id: string, text: string, origin: 'user' | 'agent' = 'user') {
-  return { item_id, text, origin, confirmed: origin === 'user' };
-}
-
-function verification(value: string) {
-  return { value, evidence: null };
-}
-
-function evidenceRecord(over: Record<string, unknown> = {}) {
-  return {
-    evidence_id: 'ev-1',
-    task_session_id: SID,
-    run_id: 'run-1',
-    criterion_id: 'c3',
-    kind: 'test',
-    source_event_seq: 3,
-    tool_call_id: null,
-    captured_at: T,
-    result: 'pass',
-    command_or_action: 'pytest tests/x.py',
-    exit_code_or_observation: 0,
-    artifact_ref: null,
-    base_head: null,
-    workspace_manifest: { files: [{ path: 'src/a.py', sha256: 'a'.repeat(64) }], manifest_hash: 'b'.repeat(64), progress_md_sha256: null },
-    freshness: { status: 'fresh', reasons: [] },
-    ...over,
-  };
-}
-
-/** 安装 task/evidence/lease/workspace-git 路由（叠加在 routeApi 之上；其余走 fallback）。 */
-async function mockTaskApi(page: Page, state: TaskFixture): Promise<void> {
-  await page.route('**/api/**', async (route) => {
-    const req = route.request();
-    const path = new URL(req.url()).pathname;
-    const method = req.method();
-    if (path.endsWith('/task/acceptance/release') && method === 'POST') {
-      state.task = { ...state.task, acceptance: null, version: (state.task.version as number) + 1, product_state: 'deliverable' };
-      return json(route, { status: 'applied', task: state.task });
-    }
-    if (path.endsWith('/task/acceptance') && method === 'POST') {
-      const body = (req.postDataJSON() ?? {}) as { decision?: string; reason?: string; expected_version?: number };
-      if (body.expected_version !== state.task.version) {
-        return json(route, { detail: `版本冲突：expected_version=${body.expected_version}，当前 version=${state.task.version}` }, 409);
-      }
-      if (state.task.acceptance) {
-        return json(route, { detail: '已存在接受事实（不能双写）' }, 409);
-      }
-      state.task = {
-        ...state.task,
-        acceptance: { decision: body.decision ?? 'accepted', reason: body.reason ?? null },
-        version: (state.task.version as number) + 1,
-        product_state: 'accepted',
-      };
-      return json(route, { status: 'applied', task: state.task });
-    }
-    if (path.endsWith('/task/lease/release') && method === 'POST') {
-      return json(route, { released: state.leaseReleased ?? false, promoted_to: null });
-    }
-    if (path.endsWith('/task') && method === 'GET') {
-      return json(route, { task: state.task });
-    }
-    if (path.endsWith('/evidence') && method === 'GET') {
-      return json(route, { evidence: state.evidence });
-    }
-    if (path.endsWith('/workspace/git/status') && method === 'GET') {
-      return json(route, state.gitStatus ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
-    }
-    if (path.endsWith('/workspace/git/diff') && method === 'GET') {
-      return json(route, state.gitDiff ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
-    }
-    return route.fallback();
-  });
-}
-
-async function openReview(page: Page, state: TaskFixture): Promise<void> {
+async function openReview(page: Page, state: TaskReviewFixture): Promise<void> {
   await routeApi(page, {
     sessions: [{
       session_id: SID, event_count: FRAMES.length, first_event_time: T, last_event_time: T,
@@ -116,7 +43,7 @@ async function openReview(page: Page, state: TaskFixture): Promise<void> {
     events: FRAMES,
     onSessionPost: (route) => fulfillSse(route, FRAMES),
   });
-  await mockTaskApi(page, state);
+  await mockTaskReviewApi(page, state);
   await page.goto('/');
   await submitTask(page, '审阅这个任务');
   await page.getByRole('button', { name: '任务审阅' }).click();
@@ -126,7 +53,7 @@ async function openReview(page: Page, state: TaskFixture): Promise<void> {
 test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }) => {
   const values = ['not_started', 'in_progress', 'passed', 'failed', 'blocked', 'incomplete'];
   const criteria = values.map((v, i) => criterion(`c${i + 1}`, `验收项 ${v}`));
-  const state: TaskFixture = {
+  const state: TaskReviewFixture = {
     task: {
       defined: true, task_text: '把 CSV 导入写对', read_write_intent: '拟写入', cwd: '/repo',
       criteria,
@@ -159,7 +86,7 @@ test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }
 });
 
 test('可交付 + 证据已过期并存：chip 文案不被前端修正，仅叠加消歧警示', async ({ page }) => {
-  const state: TaskFixture = {
+  const state: TaskReviewFixture = {
     task: {
       defined: true, task_text: 'x', read_write_intent: null, cwd: '/repo',
       criteria: [criterion('c1', '导入去重')],
@@ -181,7 +108,7 @@ test('接受 → 交付态变已接受；刷新后同源（状态来自服务端
   // 比同页交互重得多；30s 默认预算在负载机上会让「刷新后同源」这条断言没机会重试到
   // 终态（实测：同一断言在放宽预算后稳定通过）。`slow()` 只放宽上限、不放宽断言。
   test.slow();
-  const state: TaskFixture = {
+  const state: TaskReviewFixture = {
     task: {
       defined: true, task_text: 'x', read_write_intent: null, cwd: '/repo',
       criteria: [criterion('c1', '导入去重')],
@@ -203,7 +130,7 @@ test('接受 → 交付态变已接受；刷新后同源（状态来自服务端
 });
 
 test('带原因接受 reason 为空 → 客户端先校验（不发请求）；释放目录 released:false 如实显示', async ({ page }) => {
-  const state: TaskFixture = {
+  const state: TaskReviewFixture = {
     task: {
       defined: true, task_text: 'x', read_write_intent: null, cwd: '/repo',
       criteria: [criterion('c1', '导入去重')],
@@ -227,7 +154,7 @@ test('带原因接受 reason 为空 → 客户端先校验（不发请求）；�
 });
 
 test('文件/diff/快照：git status 文件列表 + unified diff + 快照清单 + 一致性 reasons', async ({ page }) => {
-  const state: TaskFixture = {
+  const state: TaskReviewFixture = {
     task: {
       defined: true, task_text: 'x', read_write_intent: '拟写入', cwd: '/repo',
       criteria: [criterion('c1', '导入去重')],
