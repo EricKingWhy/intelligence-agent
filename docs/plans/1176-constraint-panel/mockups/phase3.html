@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase 3 · Subagent 约束继承（Linear 风格重制）</title>
+<style>
+  :root{
+    --canvas:#010102; --s1:#0f1011; --s2:#141516;
+    --hairline:#23252a; --hairline-strong:#34343a;
+    --ink:#f7f8f8; --ink-muted:#d0d6e0; --ink-subtle:#8a8f98; --ink-tertiary:#62666d;
+    --primary:#5e6ad2; --on-primary:#ffffff;
+    --success:#27a644; --danger:#e5484d;
+    --sans:'Inter',-apple-system,'SF Pro Display','Segoe UI',Roboto,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 32px 80px}
+  .eyebrow{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle);margin-bottom:12px}
+  .eyebrow .tag{border:1px dashed var(--hairline-strong);border-radius:4px;padding:1px 7px;font-size:11px;margin-left:8px;letter-spacing:.02em}
+  h1{font-size:28px;font-weight:600;letter-spacing:-.6px;line-height:1.25;max-width:640px}
+  .lede{margin-top:10px;font-size:14px;color:var(--ink-subtle);max-width:640px}
+  h2{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle);margin:40px 0 4px}
+  h2 .tag{border:1px dashed var(--hairline-strong);border-radius:4px;padding:1px 7px;font-size:11px;margin-left:8px;letter-spacing:.02em}
+  /* flow */
+  .flow{display:flex;align-items:stretch;gap:0;margin:28px 0 8px}
+  .node{flex:1;background:var(--s1);border:1px solid var(--hairline);border-top:1px solid rgba(255,255,255,.07);border-radius:12px;padding:20px 22px}
+  .node .k{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle);margin-bottom:8px}
+  .node .t{font-size:16px;font-weight:500;letter-spacing:-.1px}
+  .node .d{font-size:12px;color:var(--ink-tertiary);margin-top:6px}
+  .arrow{display:flex;align-items:center;padding:0 16px;color:var(--ink-tertiary);font-size:18px}
+  /* rows */
+  .row{padding:18px 4px;border-bottom:1px solid var(--hairline);display:flex;gap:14px;align-items:flex-start}
+  .rows .row:first-child{border-top:1px solid var(--hairline)}
+  .row.skip{opacity:.5}
+  .main{flex:1;min-width:0}
+  .scope{font-size:11px;font-weight:500;letter-spacing:.06em;color:var(--ink-subtle);margin-bottom:6px}
+  .val{font-size:14px;letter-spacing:-.05px}
+  .val .tagtype{color:var(--ink-tertiary);font-size:12px;margin-right:8px}
+  .why{margin-top:6px;font-size:12px;color:var(--ink-tertiary)}
+  .st{font-size:12px;color:var(--ink-subtle);display:flex;align-items:center;gap:6px;white-space:nowrap;padding-top:2px}
+  .st .d{width:6px;height:6px;border-radius:50%;background:var(--success)}
+  .row.skip .st .d{background:var(--ink-tertiary)}
+  /* omit */
+  .omit{margin-top:32px;background:var(--s1);border:1px solid var(--hairline);border-top:1px solid rgba(255,255,255,.07);border-radius:12px;padding:20px 22px;display:flex;align-items:center;gap:16px}
+  .omit .t{font-size:14px;font-weight:500}
+  .omit .d{font-size:12px;color:var(--ink-subtle);margin-top:4px;max-width:520px}
+  .switch{margin-left:auto;width:44px;height:25px;border-radius:999px;background:var(--s2);border:1px solid var(--hairline-strong);cursor:pointer;position:relative;transition:background .18s;flex-shrink:0}
+  .switch::after{content:'';position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;background:var(--ink-subtle);transition:left .18s,background .18s}
+  .switch.on{background:rgba(94,106,210,.4);border-color:var(--primary)}
+  .switch.on::after{left:21px;background:var(--primary)}
+  body.clean #inheritRows{opacity:.35;pointer-events:none}
+  .cleanmsg{display:none;margin-top:12px;padding:14px 4px;border-bottom:1px solid var(--hairline);font-size:13px;color:var(--ink-subtle)}
+  body.clean .cleanmsg{display:block}
+  .src{margin-top:36px;padding:14px 0;border-top:1px solid var(--hairline);font-size:12px;color:var(--ink-tertiary)}
+  .src code{font-family:var(--mono);font-size:12px;color:var(--ink-subtle)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">INHERITANCE <span class="tag">Phase 3 · 效果图</span></div>
+  <h1>子 agent 默认继承持续约束，会话态由父显式传递</h1>
+  <p class="lede">会话 A 派了一个 subagent 去跑测试 —— 子 agent 详情里可以看到它继承了什么、没继承什么。</p>
+
+  <div class="flow">
+    <div class="node"><div class="k">PARENT</div><div class="t">会话 A</div><div class="d">2 条会话事实 · 2 条项目约束 · 1 条全局约束</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="k">CHILD</div><div class="t">subagent · test-runner</div><div class="d">独立会话，启动时注入继承集</div></div>
+  </div>
+
+  <h2>INHERITED <span class="tag">项目 + 全局 active，默认注入</span></h2>
+  <div class="rows" id="inheritRows">
+    <div class="row">
+      <div class="main">
+        <div class="scope">PROJECT · 本项目</div>
+        <div class="val"><span class="tagtype">constraint</span>所有 Python 改动必须先写 failing test（TDD 红→绿），不许先写实现。</div>
+        <div class="why">项目约束随子 agent 走 —— 跑测试的子 agent 也得遵守 TDD。</div>
+      </div>
+      <div class="st"><span class="d"></span>已注入</div>
+    </div>
+    <div class="row">
+      <div class="main">
+        <div class="scope">GLOBAL · 我的全局</div>
+        <div class="val"><span class="tagtype">constraint</span>和我说话温柔一点，真诚体贴，不油腻。</div>
+        <div class="why">全局约束随子 agent 走。</div>
+      </div>
+      <div class="st"><span class="d"></span>已注入</div>
+    </div>
+    <div class="row">
+      <div class="main">
+        <div class="scope">SESSION · 本会话授权</div>
+        <div class="val"><span class="tagtype">authorization</span>允许读写 ~/workspace/intelligence-agent（当前有效授权）。</div>
+        <div class="why">有效授权必须继承 —— 不能出现"父被允许、子被拦"的错位。</div>
+      </div>
+      <div class="st"><span class="d"></span>已注入</div>
+    </div>
+  </div>
+  <div class="cleanmsg">干净启动已开启 —— 子 agent 不继承任何约束，只按任务描述工作。</div>
+
+  <h2>NOT INHERITED <span class="tag">会话专属事实，父按需转述</span></h2>
+  <div class="rows">
+    <div class="row skip">
+      <div class="main">
+        <div class="scope">SESSION · 本会话</div>
+        <div class="val"><span class="tagtype">constraint</span>回复代码审查意见时，先给结论再列细节。</div>
+        <div class="why">会话级事实与父的上下文绑定，不自动灌给子 agent。如需遵守，父在委派任务描述里写一句即可。</div>
+      </div>
+      <div class="st"><span class="d"></span>未注入</div>
+    </div>
+  </div>
+
+  <div class="omit">
+    <div>
+      <div class="t">干净启动：不继承任何约束</div>
+      <div class="d">给"研究 / 探索型"轻量 subagent 用 —— 只按任务描述工作，不带入任何持续约束与授权。</div>
+    </div>
+    <div class="switch" id="sw" onclick="this.classList.toggle('on');document.body.classList.toggle('clean',this.classList.contains('on'))"></div>
+  </div>
+
+  <div class="src">设计来源 —— Claude Code 的 subagent 默认继承 CLAUDE.md 全层级（持续约束），不继承对话历史与 auto memory，另有 <code>omitClaudeMd</code> 逃生门。我们照抄这个模型。</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase 2 · 作用域选择 + 三组面板（Linear 风格重制）</title>
+<style>
+  :root{
+    --canvas:#010102; --s1:#0f1011; --s2:#141516;
+    --hairline:#23252a; --hairline-strong:#34343a;
+    --ink:#f7f8f8; --ink-muted:#d0d6e0; --ink-subtle:#8a8f98; --ink-tertiary:#62666d;
+    --primary:#5e6ad2; --primary-hover:#828fff; --on-primary:#ffffff;
+    --success:#27a644; --danger:#e5484d;
+    --sans:'Inter',-apple-system,'SF Pro Display','Segoe UI',Roboto,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 32px 80px}
+  .eyebrow{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle);margin-bottom:12px}
+  .eyebrow .tag{border:1px dashed var(--hairline-strong);border-radius:4px;padding:1px 7px;font-size:11px;margin-left:8px;letter-spacing:.02em}
+  h1{font-size:28px;font-weight:600;letter-spacing:-.6px;line-height:1.2}
+  .lede{margin-top:10px;font-size:14px;color:var(--ink-subtle);max-width:640px}
+  h2{font-size:20px;font-weight:500;letter-spacing:-.2px;margin:48px 0 6px}
+  .hsub{font-size:13px;color:var(--ink-subtle);margin-bottom:20px}
+  /* composer */
+  .composer{background:var(--s1);border:1px solid var(--hairline);border-top:1px solid rgba(255,255,255,.07);border-radius:12px;padding:20px 22px}
+  .composer textarea{width:100%;background:none;border:none;color:var(--ink);font:400 14px var(--sans);resize:none;outline:none;min-height:44px}
+  .composer textarea::placeholder{color:var(--ink-tertiary)}
+  .ruleline{display:flex;align-items:center;gap:14px;margin-top:14px;flex-wrap:wrap}
+  .chk{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--ink-muted);cursor:pointer;user-select:none}
+  .chk input{width:15px;height:15px;accent-color:var(--primary);cursor:pointer}
+  .scopes{display:none;gap:4px;border:1px solid var(--hairline);border-radius:999px;padding:3px}
+  .scopes.show{display:flex}
+  .scopes button{border:none;background:none;color:var(--ink-subtle);font:500 13px var(--sans);padding:6px 14px;border-radius:999px;cursor:pointer}
+  .scopes button.on{background:var(--s2);color:var(--ink)}
+  .scopehint{display:none;margin-top:12px;font-size:13px;color:var(--ink-subtle)}
+  .scopehint.show{display:block}
+  .scopehint b{color:var(--ink);font-weight:500}
+  /* priority note */
+  .prio{margin:20px 0 8px;padding:14px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);font-size:13px;color:var(--ink-subtle);display:flex;gap:10px;align-items:baseline}
+  .prio b{color:var(--ink);font-weight:500}
+  /* groups */
+  .group{margin-top:32px}
+  .ghead{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+  .ghead .en{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle)}
+  .ghead .zh{font-size:14px;font-weight:500;color:var(--ink)}
+  .ghead .cnt{margin-left:auto;font-size:12px;color:var(--ink-tertiary)}
+  .ghead .key{font-family:var(--mono);font-size:11px;color:var(--ink-tertiary)}
+  .row{padding:18px 4px;border-bottom:1px solid var(--hairline);display:flex;gap:16px;align-items:flex-start}
+  .group .row:first-of-type{border-top:1px solid var(--hairline)}
+  .main{flex:1;min-width:0}
+  .type{font-size:12px;font-weight:500;color:var(--ink-subtle);display:flex;align-items:center;gap:7px;margin-bottom:6px}
+  .tdot{width:6px;height:6px;border-radius:50%}
+  .t-constraint .tdot{background:#8a7ff0}.t-user_goal .tdot{background:#4cc38a}.t-authorization .tdot{background:#e5a13d}
+  .val{font-size:14px;letter-spacing:-.05px}
+  .meta{margin-top:8px;font-size:12px;color:var(--ink-tertiary);display:flex;gap:14px;flex-wrap:wrap}
+  .meta code{font-family:var(--mono);font-size:12px;color:var(--ink-subtle)}
+  .side{display:flex;align-items:center;gap:12px;flex-shrink:0}
+  .pill{background:var(--s2);color:var(--ink-muted);font-size:12px;border-radius:999px;padding:2px 10px;display:inline-flex;align-items:center;gap:6px}
+  .pill .d{width:6px;height:6px;border-radius:50%;background:var(--success)}
+  .ov{font-size:11px;color:var(--ink-subtle);border:1px solid var(--hairline-strong);border-radius:4px;padding:2px 8px}
+  .revoke{background:none;border:none;color:var(--ink-tertiary);font:500 13px var(--sans);cursor:pointer;padding:6px 4px}
+  .revoke:hover{color:var(--danger)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">SCOPES <span class="tag">Phase 2 · 效果图</span></div>
+  <h1>作用域：登记时选，面板按层看</h1>
+  <p class="lede">默认只在当前会话生效 —— 想让它在整个项目通用，登记时升一级；想所有项目都用，再升一级。</p>
+
+  <h2>登记入口</h2>
+  <p class="hsub">勾选后出现三选一，默认停在"本会话"</p>
+  <div class="composer">
+    <textarea placeholder="描述一个任务…"></textarea>
+    <div class="ruleline">
+      <label class="chk"><input type="checkbox" id="ck" onchange="document.getElementById('sc').classList.toggle('show',this.checked);document.getElementById('sh').classList.toggle('show',this.checked)"> 将这条消息作为可复用规则</label>
+      <div class="scopes" id="sc">
+        <button class="on" onclick="pick(this,'sess')">本会话</button>
+        <button onclick="pick(this,'proj')">本项目</button>
+        <button onclick="pick(this,'glob')">我的全局</button>
+      </div>
+    </div>
+    <div class="scopehint" id="sh"></div>
+  </div>
+
+  <h2>约束面板</h2>
+  <p class="hsub">打开即看到本会话实际生效的全部约束 —— 会话事实 + 本项目约束 + 全局约束</p>
+  <div class="prio"><span>生效优先级</span><b>本会话 ＞ 本项目 ＞ 全局</b><span>冲突时更具体的优先 · 撤销走历史保留链</span></div>
+
+  <div class="group">
+    <div class="ghead"><span class="en">SESSION</span><span class="zh">本会话</span><span class="cnt">2 条生效中</span></div>
+    <div class="row">
+      <div class="main">
+        <div class="type t-constraint"><span class="tdot"></span>constraint</div>
+        <div class="val">回复代码审查意见时，先给结论再列细节。</div>
+        <div class="meta"><code>fct_8a3f2c1d</code><span>10-15 21:03 · 事件 #seq 42</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke">撤销</button></div>
+    </div>
+    <div class="row">
+      <div class="main">
+        <div class="type t-authorization"><span class="tdot"></span>authorization</div>
+        <div class="val">允许读写 ~/workspace/intelligence-agent，删文件前先列清单确认。</div>
+        <div class="meta"><code>fct_c27e44ab</code><span>10-14 23:41 · 事件 #seq 7</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke">撤销</button></div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="ghead"><span class="en">PROJECT</span><span class="zh">本项目</span><span class="key">git 根 · EricKingWhy/intelligence-agent</span><span class="cnt">2 条生效中</span></div>
+    <div class="row">
+      <div class="main">
+        <div class="type t-constraint"><span class="tdot"></span>constraint</div>
+        <div class="val">所有 Python 改动必须先写 failing test（TDD 红→绿），不许先写实现。</div>
+        <div class="meta"><code>prj_2f7c91aa</code><span>10-11 14:22 登记 · 本仓库所有会话生效</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke">撤销</button></div>
+    </div>
+    <div class="row">
+      <div class="main">
+        <div class="type t-user_goal"><span class="tdot"></span>user_goal</div>
+        <div class="val">提交信息用英文，格式为类型前缀 + 简述。</div>
+        <div class="meta"><code>prj_77d0b3e5</code><span>10-10 09:15 登记 · 本仓库所有会话生效</span></div>
+      </div>
+      <div class="side"><span class="ov">被本会话覆盖</span><span class="pill"><span class="d"></span>生效中</span><button class="revoke">撤销</button></div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="ghead"><span class="en">GLOBAL</span><span class="zh">我的全局</span><span class="cnt">1 条生效中</span></div>
+    <div class="row">
+      <div class="main">
+        <div class="type t-constraint"><span class="tdot"></span>constraint</div>
+        <div class="val">和我说话温柔一点，真诚体贴，不油腻。</div>
+        <div class="meta"><code>glb_01aa9f04</code><span>10-01 20:00 登记 · 全部项目生效</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke">撤销</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const hints={
+  sess:'<b>本会话</b> —— 只在当前会话生效，随会话结束自然失效。适合一次性的要求。',
+  proj:'<b>本项目</b> —— 写入项目级存储，<b>本仓库</b>开的所有会话都生效，别的项目不受影响。',
+  glob:'<b>我的全局</b> —— 写入用户级存储，<b>所有项目</b>的新会话都生效。适合长期习惯。'
+};
+function pick(b,k){b.parentElement.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');document.getElementById('sh').innerHTML=hints[k];}
+document.getElementById('sh').innerHTML=hints.sess;
+</script>
+</body>
+</html>

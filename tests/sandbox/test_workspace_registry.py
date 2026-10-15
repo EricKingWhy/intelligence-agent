@@ -36,6 +36,26 @@ def test_create_signature_pinned_for_doubles() -> None:
 
 
 class TestCreate:
+    def test_create_reuses_owner_id_after_delete_without_stale_cache(
+        self, registry: WorkspaceRegistry, tmp_path: Path
+    ) -> None:
+        session_id = "reused-owner"
+        old_root = tmp_path / "old-owner"
+        new_root = tmp_path / "new-owner"
+        old_sandbox = registry.create(session_id, workspace_root=old_root)
+        delete_registry = WorkspaceRegistry(root=tmp_path, backend="local")
+
+        delete_registry.cleanup_docker_workspace_resources(session_id)
+        delete_registry.discard_session_artifacts(session_id)
+
+        new_sandbox = registry.create(session_id, workspace_root=new_root)
+
+        assert new_sandbox is not old_sandbox
+        assert Path(new_sandbox.workspace_root) == new_root.resolve()
+        mapping = registry._read_mapping(session_id)
+        assert mapping is not None
+        assert mapping["workspace_root"] == str(new_root.resolve())
+
     def test_returns_ensure_started_sandbox(self, registry: WorkspaceRegistry):
         """create → 返回已 ensure_started 的 Sandbox（LocalSubprocess 是 no-op）。"""
         sandbox = registry.create("sess_1")
