@@ -1,0 +1,1 @@
+2026-10-15	#1135 merged-main Correctness/Spec review; AC2 ordinary imports covered via new Docker and PSEC migration paths; Python 3.13.5 tarfile inode tracking disproves hard-link concern; no remaining in-scope finding.	1898014490a9ca677c18599919004fc7795bd785..a7b0b6405f2eb4ed4992cc5f2a20cd5434ba932e

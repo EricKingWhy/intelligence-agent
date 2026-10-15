@@ -34,8 +34,8 @@ import os
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Mapping
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
@@ -1732,76 +1732,110 @@ class SessionService:
             sandbox_backend=sandbox_backend,
         )
 
-        # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
-        # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
-        # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
-        # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
-        # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
-        task_outcome = apply_task_definition(session, task_text=task)
-        if not task_outcome.ok:
-            logger.warning(
-                "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"
-                "跳过任务定义，会话照常启动",
-                task_outcome.reason,
+        return await self._finish_initial_creation(
+            session=session,
+            runtime=runtime,
+            task=task,
+            workspace=workspace,
+            workspace_name=workspace_name,
+            cwd=cwd,
+            session_limits=session_limits,
+            interactive=interactive,
+            approval_callback=approval_callback,
+            launch=launch,
+            fuse=fuse,
+            launch_budget=launch_budget,
+            remember_as_procedural_rule=remember_as_procedural_rule,
+        )
+
+    async def _finish_initial_creation(
+        self,
+        *,
+        session: Session,
+        runtime: Any,
+        task: str,
+        workspace: Path,
+        workspace_name: str | None,
+        cwd: str | None,
+        session_limits: SessionLimits,
+        interactive: bool,
+        approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
+        launch: bool,
+        fuse: LocalFuse,
+        launch_budget: LaunchRunBudget,
+        remember_as_procedural_rule: bool,
+    ) -> LaunchResult:
+        """Finish persisted creation under the same lock used by hard-delete."""
+        session_id = session.session_id
+        async with self._run_manager.session_lock(session_id):
+            locked_events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id,
             )
-        else:
-            # W-05（#349）：目标/约束确认后首次创建进度文件（票面工作指令 1）。
-            # 不预判 cwd 形态：refresh 内部按 session_cwd 单源锚解析，无锚静默
-            # 跳过——workspace_name 会话与显式 cwd 会话同口径收敛（审查 P3-3）。
-            await self.refresh_progress_file(session_id)
-        # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
-        # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
-        # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
-        # 给每个未命名会话凭空造出一个项目（ADR-0025 D6）。
-        # 项目实体由 create 幂等建立（同路径的多会话共享同一项目）。
-        # #169：`cwd` 走同一条路（title=None → `Workspace.default_title` 取目录末段名）。
-        explicit_dir = workspace_name is not None or cwd is not None
-        if explicit_dir and self._workspace_index is not None:
-            await self._workspace_index.create(workspace, title=workspace_name)
-            await self._workspace_index.attach_session(session_id)
+            if not locked_events:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            if self._run_manager.get_active(session_id) is not None:
+                raise ActiveRunConflict("session has an active run")
 
-        # 交互式审批：把真实 session 注入 callback 闭包
-        if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
-            approval_callback.bind_session(session)
-
-        if not launch:
-            # #204：只建会话。session/started 与元数据已照常落盘（上面的路径
-            # 完全共享）；不调 RunManager.launch——没有 run 就没有订阅句柄，
-            # None 是诚实的"不存在"，调用方据此不组 SSE。
-            # `#518` BUG-11：session 预算声明显式存在 ⇒ **当场建行钉死**。修复前
-            # 声明只活在本次请求的 handle 里（行等首 run 惰性建出），而只建会话
-            # 没有 run，下一个 run 的 handle 拿不到创建时声明，建行落成全 None
-            # ——「200 但丢弃」。行不存在 = 首次钉死，无版本可竞争（与 resume
-            # 路径同款）；未声明时保持 #318 的惰性语义不变（行等首 run）。
-            if session_limits.configured:
-                await self._stores.delegation_tree_ledger.ensure_session_budget(
-                    session_id, root_session_id=session_id, limits=session_limits,
+            # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
+            # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
+            # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
+            # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
+            # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
+            task_outcome = apply_task_definition(session, task_text=task)
+            if not task_outcome.ok:
+                logger.warning(
+                    "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"
+                    "跳过任务定义，会话照常启动",
+                    task_outcome.reason,
                 )
-            # review 修复：interactive 路径在 _build_approval_callback 里已把
-            # 队列登记进 approval_queues，而没有 run 就没有终结回调来 GC 它
-            # （登记点永远等不到 pop）——只建路径当场撤掉登记，队列不泄漏。
+            else:
+                # W-05（#349）：目标/约束确认后首次创建进度文件（工作指令 1）。
+                # 不预判 cwd 形态：refresh 内部按 session_cwd 单源锚解析，无锚静默
+                # 跳过——workspace_name 会话与显式 cwd 会话同口径收敛（审查 P3-3）。
+                await self.refresh_progress_file(session_id)
+            # WS-2 / #152 AC5/AC6/AC16：会话落盘之后才 attach 到项目；只对显式
+            # 选定的目录做，未命名会话不因此凭空注册成项目。
+            explicit_dir = workspace_name is not None or cwd is not None
+            if explicit_dir and self._workspace_index is not None:
+                await self._workspace_index.create(workspace, title=workspace_name)
+                await self._workspace_index.attach_session(session_id)
+
+            if interactive and isinstance(
+                approval_callback, _InteractiveCallbackHolder
+            ):
+                approval_callback.bind_session(session)
+
+            if not launch:
+                # #204：只建会话，不调 RunManager.launch，也不创建订阅者。
+                # 显式 session ceiling 在这里钉入账本；未声明时保持惰性建账。
+                if session_limits.configured:
+                    await self._stores.delegation_tree_ledger.ensure_session_budget(
+                        session_id, root_session_id=session_id, limits=session_limits,
+                    )
+                # 没有 run 的路径没有终结回调，立即回收交互审批队列。
+                if interactive:
+                    self._approval_queues.pop(session_id, None)
+                return LaunchResult(
+                    session=session, run=None, subscriber=None, local_fuse=fuse,
+                )
+
+            with self._workspace_launch_guard(session_id):
+                run, subscriber = self._run_manager.launch(
+                    session, runtime, task,
+                    user_input_metadata=(
+                        {"remember_as_procedural_rule": True}
+                        if remember_as_procedural_rule else None
+                    ),
+                )
+
+            # run 终结时 GC approval_queue（防泄漏）
             if interactive:
-                self._approval_queues.pop(session_id, None)
+                self._attach_approval_queue_gc(run, session_id)
+
             return LaunchResult(
-                session=session, run=None, subscriber=None, local_fuse=fuse,
+                session=session, run=run, subscriber=subscriber, local_fuse=fuse,
+                run_budget=launch_budget,
             )
-
-        run, subscriber = self._run_manager.launch(
-            session, runtime, task,
-            user_input_metadata=(
-                {"remember_as_procedural_rule": True}
-                if remember_as_procedural_rule else None
-            ),
-        )
-
-        # run 终结时 GC approval_queue（防泄漏）
-        if interactive:
-            self._attach_approval_queue_gc(run, session_id)
-
-        return LaunchResult(
-            session=session, run=run, subscriber=subscriber, local_fuse=fuse,
-            run_budget=launch_budget,
-        )
 
     async def resume_and_launch(
         self,
@@ -2357,17 +2391,25 @@ class SessionService:
                 port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
-            # W-06（#350）：服务重启/同 run 恢复的重读点——从磁盘重读并对账后
-            # 把文件刷成当前投影（外部编辑在场时 writer 守卫拒绝覆写，冲突经
-            # progress_file_status 呈现，绝不静默覆盖用户手改）。
-            await self.refresh_progress_file(session_id)
-            return self._bind_and_launch(
-                session=session, runtime=runtime, task=task,
-                user_input_metadata=user_input_metadata,
-                interactive=interactive, approval_callback=approval_callback,
-                fuse=fuse, launch_budget=launch_budget,
-                warnings=resume_warnings, legacy_migration=legacy_unmigrated,
-            )
+            # 与硬删共享 session lock：commit 与 launch 之间若删除先完成，重读会
+            # 发现会话已消失；删除若后到，则看到新 run 并由在途守卫拒绝。
+            async with self._resume_lock(session_id):
+                locked_events = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id,
+                )
+                if not locked_events:
+                    raise SessionNotFound(f"session '{session_id}' not found")
+                # W-06（#350）：服务重启/同 run 恢复的重读点——从磁盘重读并对账后
+                # 把文件刷成当前投影（外部编辑在场时 writer 守卫拒绝覆写，冲突经
+                # progress_file_status 呈现，绝不静默覆盖用户手改）。
+                await self.refresh_progress_file(session_id)
+                return self._bind_and_launch(
+                    session=session, runtime=runtime, task=task,
+                    user_input_metadata=user_input_metadata,
+                    interactive=interactive, approval_callback=approval_callback,
+                    fuse=fuse, launch_budget=launch_budget,
+                    warnings=resume_warnings, legacy_migration=legacy_unmigrated,
+                )
         # #560-B：新任务 launch 的 CAS 临界区（锁 owner = RunManager，跨请求共存）。
         # "判 idle → 启动"必须是**一个**原子判定：上方那次 get_active 只是快速
         # 预检，锁内复查才是唯一权威 CAS 点——输家在这里拿 ActiveRunConflict
@@ -2381,14 +2423,18 @@ class SessionService:
         async with self._resume_lock(session_id):
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
-            if task is not None:
-                locked_events = await anyio.to_thread.run_sync(
-                    self._store.read_events, session_id,
+            locked_events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id,
+            )
+            if not locked_events:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            if (
+                task is not None
+                and _latest_pending_user_input_request(locked_events) is not None
+            ):
+                raise BudgetConflict(
+                    "当前有待回答的约束澄清；请先提交答案，再发送新任务"
                 )
-                if _latest_pending_user_input_request(locked_events) is not None:
-                    raise BudgetConflict(
-                        "当前有待回答的约束澄清；请先提交答案，再发送新任务"
-                    )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -2428,13 +2474,17 @@ class SessionService:
         `permission/changed` 迁移事件（复用 §3.6 的三面之一）。放在 launch 前是为了让
         本次 run 的 `effective_*` 与落盘事实一致。
         """
-        if legacy_migration:
-            append_legacy_defaults_migration(session)
-        if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
-            approval_callback.bind_session(session)
-        run, subscriber = self._run_manager.launch(
-            session, runtime, task, user_input_metadata=user_input_metadata
-        )
+        with self._workspace_launch_guard(session.session_id):
+            if legacy_migration:
+                append_legacy_defaults_migration(session)
+            if (
+                interactive
+                and isinstance(approval_callback, _InteractiveCallbackHolder)
+            ):
+                approval_callback.bind_session(session)
+            run, subscriber = self._run_manager.launch(
+                session, runtime, task, user_input_metadata=user_input_metadata
+            )
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
             self._attach_approval_queue_gc(run, session.session_id)
@@ -2443,6 +2493,29 @@ class SessionService:
             run_budget=launch_budget,
             warnings=list(warnings) if warnings else [],
         )
+
+    @contextmanager
+    def _workspace_launch_guard(self, session_id: str) -> Iterator[None]:
+        """Check and hold the workspace deletion fence through the launch commit."""
+        registry_guard = getattr(
+            type(self._workspace_registry), "workspace_restore_guard", None
+        )
+        if registry_guard is None:
+            yield
+            return
+
+        from agent_harness.sandbox.registry import WorkspaceBindingError
+
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(
+                    registry_guard(self._workspace_registry, session_id)
+                )
+            except (KeyError, WorkspaceBindingError) as error:
+                raise ActiveRunConflict(
+                    "session workspace is being hard-deleted; refusing to launch"
+                ) from error
+            yield
 
     # ── 暂停 run 的同 run 恢复（`#312`）──────────────────────────────
 
@@ -4172,6 +4245,12 @@ class SessionService:
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
     async def delete_session(self, session_id: str) -> SessionDeletionStats:
+        """Serialize hard deletion with resume/launch for the same session."""
+        self._validate_session_id(session_id)
+        async with self._run_manager.session_lock(session_id):
+            return await self._delete_session_locked(session_id)
+
+    async def _delete_session_locked(self, session_id: str) -> SessionDeletionStats:
         """用户显式硬删会话：事件日志 + 辅助 DB 行 + harness 自造的沙箱工件。
 
         与项目**软删除**口径的对照：删会话就是删会话（ADR-0029 D1——无墓碑、无回收站、
@@ -4215,9 +4294,10 @@ class SessionService:
         `resume_and_launch` 把 cwd 会话的映射改写成默认目录（见 ADR-0029 D2 末段）：
         删除目标是由 id 算出来的，与映射此刻写着什么无关。
 
-        **并发**：本方法不加锁。每一步都幂等，删除面又是由 id 唯一确定的固定三条路径，
-        所以并发的两次删除最坏也只是各自删掉同一批字节的一部分，永远碰不到白名单之外的
-        东西；随后再删一次是 404（文件已不在，`test_second_delete_after_success_is_404`）。
+        **并发**：持有 `RunManager.session_lock` 到硬删完成，和恢复的 launch 临界区
+        共用同一把锁。删除先完成时，排队的恢复会在锁内重读发现 session 已不存在；
+        恢复先 launch 时，硬删仅在删除检查时仍有在途 run 才拒绝。并发的两次删除仍按原有幂等顺序
+        串行执行，后一次在首步得到 404。
         """
         # ①② 形态 + 存在性（要删多少，在删之前就必须知道——删完就只能编了；
         #     这两步与归档共用 `_require_existing_session`）

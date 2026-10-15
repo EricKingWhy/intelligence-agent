@@ -40,6 +40,7 @@ from agent_harness.storage.checkpoint import (
     reset_checkpoint_save_failure_count,
 )
 from agent_harness.web.app import create_app
+from tests.conftest import register_workspace_from_build_kwargs
 from tests.scripted_model import ScriptedModel
 
 
@@ -629,6 +630,13 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
 
+    def _build_stub(runtime):
+        async def _build(**kwargs):
+            register_workspace_from_build_kwargs(kwargs)
+            return runtime
+
+        return _build
+
     scope = {
         "type": "http",
         "method": "POST",
@@ -641,11 +649,16 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
     # 冷启动**算进去——能力装配是惰性的，首个请求才 import 记忆能力（langmem 等）
     # 并建 wiring。实测冷 6.2s / 同进程第二次 0.009s，于是同一 commit 会随机器
     # 磁盘缓存冷热时绿时红。这里用宽预算把一次性成本付掉，测量请求才谈得上 5s 锐度。
-    with patch("agent_harness.session.service.build_runtime", return_value=_ImmediateRuntime()):
+    with patch(
+        "agent_harness.session.service.build_runtime",
+        side_effect=_build_stub(_ImmediateRuntime()),
+    ):
         await _DisconnectingASGI(app, budget_s=60.0)(scope)
 
     hanging = HangingRuntime()
-    with patch("agent_harness.session.service.build_runtime", return_value=hanging):
+    with patch(
+        "agent_harness.session.service.build_runtime", side_effect=_build_stub(hanging)
+    ):
         transport = _DisconnectingASGI(app)
         await transport(scope)
 

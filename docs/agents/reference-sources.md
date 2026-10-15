@@ -187,6 +187,15 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 
 **补录说明（§3.1 偏差披露）**：本领域在 #914 根因消融开始时未在清单中，属**事后补录**——消融阶段按本仓构建固定的 `app-builder-lib@26.15.3` 模板 + 自家 makensis 探针直接开展，未先补本清单。机制摘要 / 契合点 / 判定（REUSE + ADAPT + DEFER）/ License 见 `docs/live_gate/w21/58-issue-914-service-in-use-gate.md` §2。
 
+### 配色 / 设计系统语义 token（#1136/#1171 已核实来源，2026-10-15）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| GitHub Primer（`primer/primitives@66e78d332cc536e471bcaeb3f8ad08dc16cfbb8a`） | GitHub 设计系统；语义 token 按用途分槽 | `src/tokens/functional/color/fgColor.json5`（正文色，如 danger `#d1242f` 配白底 5.24）、`bgColor.json5`（`danger.muted`/`danger.emphasis`，白字压 emphasis 档） |
+| Ant Design（`ant-design/ant-design@41c5918c20beab96a02db175a3ab4c4655056595`） | 蚂蚁设计系统；语义 token 分文本/背景/描边 | `components/theme/interface/maps/colors.ts`（`ColorErrorMapToken`：`colorErrorText`「错误色的文本默认态」vs `colorErrorBg`/`colorErrorBorder`） |
+
+**引用纪律**：两条均为上游实拉核实（HTTP 200），附 commit，符合本清单「引用时按纪律记 commit」（§1）要求。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；

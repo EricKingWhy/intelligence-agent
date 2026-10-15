@@ -1,70 +1,38 @@
-# ADR-0055：Docker workspace 的恢复与硬删除串行化（卷缺失即 fail-closed）
+# ADR-0055：Docker workspace 恢复与硬删除并发控制（缺卷失败关闭）
 
 - 状态：已接受
 - 日期：2026-10-15
-- 相关：issue #1132、ADR-0029（会话硬删除）、
-  ADR-0054（私有 Docker named volume 隔离）、ADR-0001（Sandbox 抽象）
+- 相关：issue #1132、issue #1159、ADR-0029（会话硬删除）、ADR-0054（私有 Docker named volume 隔离）、ADR-0001（Sandbox 抽象）
 
 ## 背景
 
-`WorkspaceRegistry.get()` 在缓存未命中时会重建 Sandbox 并 `ensure_started()`；
-Docker 后端的 `containers.run(volumes=...)` 对**不存在的具名卷**的语义是
-**创建并挂载一个空卷**（Docker 官方 Volumes 行为，不报错）。
+Docker containers.run(volumes=...) 在目标具名卷不存在时会创建并挂载新空卷，见 [Docker 官方 Volumes 文档](https://docs.docker.com/engine/storage/volumes/)。如果恢复已读到旧映射，硬删除随后移除卷，恢复再执行 ensure_started()，表面上会成功，但 workspace 内容丢失；缓存实例也可能在卷被删后仍被返回。
 
-会话硬删除（`SessionService.delete_session` → `cleanup_docker_workspace_resources`
-→ `discard_session_artifacts`）会删掉该会话的容器、私有卷与映射。两者并发时：
-
-1. 恢复读到映射、构造好 Sandbox（尚未 `ensure_started`）；
-2. 删除在窗口内跑完（容器与卷已删、映射已摘）；
-3. 恢复继续 `ensure_started()` ⇒ **重建一个空卷**，"成功"返回一个空 workspace；
-4. 原文件不可达，且映射已被摘除 ⇒ 空卷/容器成为**无法回收的孤儿**（再删一次也
-   不会碰它们，因为 `cleanup_docker_workspace_resources` 依赖映射定位所有权）。
-
-真 Docker 实测（Docker 29.8.1）：legacy 形状的映射在该交错下恢复**静默成功**，
-读原 `marker.txt` 抛 `FileNotFoundError`；post-#1048 形状则被导入完成标记门拦成
-`WorkspaceImportIncompleteError`——**但空卷与孤儿容器照样被建出来了**（闸门只是
-挡住了"返回"，没挡住"重建"）。
+真 Docker 复现（Docker 29.8.1）观察到 legacy 映射恢复静默返回空 workspace，读取原 marker.txt 得到 FileNotFoundError；导入完成标记只能阻止部分恢复返回，不能阻止空卷与孤儿容器被创建。
 
 ## 决策
 
-1. **per-workspace 进程内串行化锁**。`WorkspaceRegistry._workspace_lock(owner_id)`
-   返回 `(registry root, owner session id)` 维度的 `threading.RLock`，由
-   **类级 `WeakValueDictionary`** 持有 ⇒ 同一 root 下的多个注册表实例（web app 与
-   capability wiring 各建一个）**共用同一把锁**；无持有者时自动回收，不按会话数累积。
-   用 `RLock` 而非 `Lock`：`get()` 临界区内可能再进入同一会话的加锁路径。
-   - 取锁方：`get()` 的冷恢复临界区、`cleanup_docker_workspace_resources`、
-     `discard_session_artifacts`。删除路径的键经 `_owner_lock_key()` 解析到 owner
-     （别名与 owner 共用一把）；解析失败退回自身 id，**绝不因此抛错**（删除必须幂等）。
-2. **卷缺失即 fail-closed**。`DockerSandbox.workspace_volume_exists()` 检查具名卷；
-   `get()` 在**同一临界区内、`ensure_started()` 之前**校验，缺失即抛
-   `WorkspaceBindingError`，绝不"重建一个空的"。锁内**先重读映射并以它为准**——
-   这一读在**所有**分支（legacy 迁移 / 缓存命中 / 冷恢复）之前，且三条分支都必须过
-   卷存在性闸门：等锁期间映射可能已被删除（此时不得拿锁外旧副本去重建，fail-closed），
-   也可能被改写（legacy 迁移落盘）；缓存里那个实例的卷也可能已被
-   `cleanup_docker_workspace_resources` 删掉。删除路径在 `sandbox.delete()` 之后
-   立即摘掉缓存项，使删除窗口内的 `get()` 一律走冷路径受闸门约束。
+1. WorkspaceRegistry 使用进程内 per-workspace RLock。锁键为规范化 registry root 与 canonical owner id；类级 WeakValueDictionary 让同一 root 下的多个注册表实例共享锁，且不按历史会话数累积。创建、恢复、资源清理和工件摘除都在对应 owner 锁内运行。
+2. get() 在锁内重读 session 与 owner 映射，并以当前映射为准。Docker 冷恢复在 ensure_started() 前检查 named volume；缓存命中也检查同一卷。缺卷时抛 WorkspaceBindingError，绝不把卷重建为空。
+3. cleanup_docker_workspace_resources() 与 discard_session_artifacts() 通过 _owner_lock_key() 解析到 canonical owner，使 alias 与 owner 使用同一把锁。映射缺失或损坏时退回 session id，不让锁键解析破坏硬删除幂等性。
+4. 完整硬删除窗口由 ADR-0054 的持久 workspace_delete_in_progress 标记与 RunManager.session_lock 共同保护：标记在 Docker 清理前写入，保留至映射移除；创建或恢复的 launch 提交也受 session lock 和 workspace restore guard 保护。这里记录的 registry 锁与卷检查补强底层恢复安全，不替代或缩窄该完整窗口决策。
+5. 卷缺失时失败关闭；Docker API 的其他错误照常传播。已有 snapshot_import 完成标记语义不变。
 
-**两个机制都承重，缺一不可**（消融实测，真 Docker）：
+## 证据与消融
+
+原始 #1132 真 Docker 消融隔离了 registry 恢复竞态：
 
 | 变体 | 结果 |
 | --- | --- |
-| 无锁、无检查（基线） | 空卷重建 + 孤儿（`empty_volume_orphan=true`） |
-| **仅** per-method 锁 | **与基线逐项相同**（临界区是方法级的，窗口在方法之间） |
-| **仅**卷检查、无锁 | **复现原症状**：检查通过 → 删除删卷 → `ensure_started` 重建空卷、恢复静默成功于空 workspace |
-| 锁 + 锁内检查 | 闭合：卷不被重建、恢复 fail-closed、无孤儿 |
+| 无锁、无卷检查 | 空卷重建并留下无法回收的容器 / 卷孤儿 |
+| 只有分段持锁，没有完整删除标记 | 清理与映射摘除之间仍能复现空卷重建 |
+| 只有卷检查，没有检查到启动的共同锁 | 检查通过后仍可被删除插入，随后重建空卷 |
+| owner 锁与卷检查组合 | 恢复与资源清理串行，缺卷时失败关闭 |
 
-⇒ 锁把"检查 → `ensure_started`"变成**不可被打断的临界区**；检查让"卷已没"**失败关闭**
-而不是重建空卷。任缺其一，本缺陷都仍然成立。
+ADR-0054 进一步覆盖清理后的异步 DB / event / file 删除窗口及 launch 提交；当前实现同时保留这层持久标记和 session lock。
 
 ## 边界与代价
 
-- **进程内**锁。跨进程（两个进程同 root）不在本票范围：本仓 `instance_lock`
-  （#150）默认规定同一 `workspace_dir` 同时只允许一个进程，CLI 与 Web 并发被拒。
-  **残余风险**：`ALLOW_SHARED_ROOT=1` 是该约束的显式逃生舱（见
-  `instance_lock.py`），启用时同 root 可有两个进程，本锁不覆盖那种配置。
-- **不改变** ADR-0029 D3 的删除顺序与幂等语义：锁只在方法级串行，各步语义不变；
-  删除仍然可重试（映射保留到 `discard_session_artifacts`）。
-- **不引入**新依赖、不改 Sandbox 路径边界（ADR-0001 不变）。
-- 锁表弱引用，稳态开销与活跃 workspace 数同阶，不随历史会话数增长。
-- 外部（非本进程）删除具名卷后恢复同样 fail-closed——这是**有意**的：卷没了就是
-  没了，恢复不该悄悄给一个空的。
+- 锁是进程内机制；同一 sessions root 只支持一个服务进程。多进程协调边界见 ADR-0054。
+- 外部移除具名卷后，恢复会明确失败并要求修复持久 workspace；系统不会用空卷代替丢失数据。
+- 不新增依赖，不改变 Sandbox 路径边界或硬删除的工件所有权规则。

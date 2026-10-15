@@ -16,10 +16,12 @@ import pytest
 
 from agent_harness.assembly import initialize_stores, recovery_stores
 from agent_harness.config import Settings
+from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import USER_MESSAGE, Session
 from agent_harness.session.event import RUN_COMPLETED, RUN_STARTED
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.web.app import AppState, session_service
+from tests.conftest import register_workspace_from_build_kwargs
 
 
 def _state(tmp_path: Path, *, model: MagicMock | None = None) -> AppState:
@@ -28,6 +30,7 @@ def _state(tmp_path: Path, *, model: MagicMock | None = None) -> AppState:
         enable_cors=False,
     )
     state = AppState(settings)
+    state.workspace_registry = WorkspaceRegistry(root=tmp_path, backend="local")
     state.run_manager = MagicMock()
     state.run_manager.get_active = MagicMock(return_value=None)
     state.run_manager.launch = MagicMock(return_value=(MagicMock(), MagicMock()))
@@ -39,7 +42,12 @@ def _launch(state: AppState, **kwargs) -> object:
     with patch(
         "agent_harness.session.service.build_runtime", new_callable=AsyncMock
     ) as build:
-        build.return_value = MagicMock()
+        async def _fake_build(**kwargs):
+            register_workspace_from_build_kwargs(kwargs)
+            return MagicMock()
+
+        kwargs.setdefault("sandbox_backend", "local")
+        build.side_effect = _fake_build
         return asyncio.run(session_service(state).create_and_launch(
             task="hello", local_max_agent_turns=1, **kwargs
         ))
