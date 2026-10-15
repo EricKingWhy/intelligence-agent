@@ -2738,6 +2738,32 @@ export function validateProcessGateGuards(source, filename) {
         'the gate runs after the first mention of $iaProbeFound in iaStageApplication (a read or a write) — the staging branch reads it and skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
       )
     }
+    // #1066: the call above sits at the top of the macro, so everything between it
+    // and the rename is a window in which the bundled runtime can restart or the
+    // user can open a client. A headless service does not block the directory
+    // rename (#914 section 1.3), so the update would land and leave the old
+    // process answering clients out of the "<dir>.old-{guid}" tree (ADR-0053).
+    // The last call must therefore sit inside that window: after the working
+    // directory was released and before the pointer is armed, where a refusal
+    // still leaves the installation byte-identical and needs no rollback.
+    const lastGateCall = stage.lastIndexOf('Call iaRequireNoRunningProduct')
+    const released = stage.indexOf('SetOutPath $TEMP')
+    if (gateCall !== -1 && pointer !== -1 && (released === -1 || lastGateCall < released || lastGateCall > pointer)) {
+      problems.push(
+        'the gate is never re-checked inside the staging window (#1066) — the last call must run after SetOutPath $TEMP and before !insertmacro iaStashBackupDir, or a process that starts after the first check is never classified and the rename lands under it',
+      )
+    }
+    // #1066: holding the window open is a test affordance, so it must stay inside
+    // its !ifdef — an unconditional write would ship a registry value that no
+    // production install ever needs.
+    const hookOpen = stage.indexOf('!ifdef IA_TEST_HOLD_STAGE_WINDOW')
+    const hookClose = hookOpen === -1 ? -1 : stage.indexOf('!endif', hookOpen)
+    const hookWrite = stage.indexOf('IaTestStageWindowOpen')
+    if (hookWrite !== -1 && (hookOpen === -1 || hookClose === -1 || hookWrite < hookOpen || hookWrite > hookClose)) {
+      problems.push(
+        'a staging-window test hook is not compiled out — the shipped installer must not write IaTestStageWindowOpen (#1066)',
+      )
+    }
   }
   if (problems.length > 0) {
     throw new Error(`${filename}: process gate (#914) is not fail-closed — ${problems.join('; ')}`)
