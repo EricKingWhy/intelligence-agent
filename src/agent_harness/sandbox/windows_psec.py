@@ -1320,12 +1320,17 @@ def _pin_host_path_tree_for_archive(host_path: Path):
                 share_access=_FILE_SHARE_READ,
                 allow_reparse_leaf=True,
             )
-            if (
-                _file_attributes(locked) & _FILE_ATTRIBUTE_REPARSE_POINT
-                or not _file_standard_info(locked).Directory
-            ):
+            try:
+                if (
+                    _file_attributes(locked) & _FILE_ATTRIBUTE_REPARSE_POINT
+                    or not _file_standard_info(locked).Directory
+                ):
+                    raise PermissionError(
+                        "copy_in source changed during validation"
+                    )
+            except BaseException:
                 _close_handles([locked])
-                raise PermissionError("copy_in source changed during validation")
+                raise
             return locked
         finally:
             if entry is not None:
