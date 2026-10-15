@@ -1,7 +1,11 @@
 # SDD Ticket Tracker
 
-**本任务施工（2026-10-15，#1135）**：Issue OPEN + bug/P1/in-progress，指派 EricKingWhy。已同步 `origin/main` `1898014`，主线语义冲突按最新实现处理。junction 拒绝/竞态用例 4 passed；新建与 PSEC migration 的普通文件及嵌套目录导入用例 2 passed；沙箱注册/PSEC/workspace-registry 集 61 passed / 1 skipped，`test_docker_sandbox.py` 10 passed；Ruff 与 `git diff --check` 通过。Gate-0 收据 `docs/gate/0c5b026c5266c377630da39a0d6f0a009170f630.json`；双轴审查范围见 review ledger。更宽集 54 passed / 7 failed；同 7 项在干净 `origin/main` 基线重现，未归因于本次补丁。用户裁定：#1135 限定为 junction 快照导入防护；ADR-0054 owner-lock 缺口另开票，排在本票完成后处理。当前继续后续问题分票。未 push、未开 PR、未关单；明细见月档 #1135。
+**已完成（2026-10-15，#1135）**：Issue CLOSED（bug/P1，`in-progress` 已移除）；完成评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1135#issuecomment-6184627969)。未 push、未开 PR、未 merge；集成负责人 EricKingWhy。junction 复现、验证与用户裁定见月档 #1135。
 
+
+**已完成（2026-10-15，#1159）**：Issue CLOSED（bug/P2，`in-progress` 已移除）；代码提交 `6787476d`，Gate-0 6/6 收据 `docs/gate/bf283e0137b37c6c94280a2e657c85ebbee04ccc.json`；41 个聚焦用例通过、`tests/sandbox` 249 passed / 3 skipped。独立 stale-cache 缺陷另列 #1163。关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1159#issuecomment-6188320136)。详见月档 #1159。
+
+**当前施工（2026-10-15，#1162）**：Issue OPEN + bug/P2/in-progress；分支 `codex/1048-ntfs-hardlinks`，提交 `09e8e41f` 与 `01ba3adc`。共享 session lock 内重读事件后无条件检查活跃 run；`launch=True/False` 两种创建都在 resume 先启动时失败关闭。聚焦集 5 passed；完整 `test_multiturn_delivery.py` 在 Windows local-backend override 下 26 passed；Ruff 与 `git diff --check` 通过。Correctness/Spec 与 Standards 最终审查范围 `bf283e0137b37c6c94280a2e657c85ebbee04ccc..01ba3adc736feb50f998ad2ac85557e004ae5752` 均 APPROVE、P0–P4=0。首轮 Gate-0 的 coverage 尚未包含审查行，收据 `docs/gate/01ba3adc736feb50f998ad2ac85557e004ae5752.json`；补齐台账后的终态门禁待记录。详见月档 #1162。
 
 **当前施工（2026-10-15，#1129）**：Issue OPEN + bug/P2/in-progress，EricKingWhy 指派；分支 codex/issue-1129-docker-hard-delete 已 push，实现提交 d0f6543c，文档证据提交 0ab87db4、37d5f97f。真实删除入口定向测试 48 passed，Ruff 通过；代码树 dcfbf5a6 Gate-0 6/6 PASS（42.69s）。候选全量 pytest 7926 passed / 33 failed / 59 skipped / 51 deselected（2771.09s）；pristine origin/main d34ddf00 为 7755 passed / 202 failed / 59 skipped / 51 deselected（3822.51s）。两边使用相同全量命令与 runner 参数、各自 tracked 测试树；候选多 2 个测试函数，收集数 8018 对 8016。基线用 `PYTHONPATH=pristine-main/src` 选择 main 源码。候选 33 个失败 node IDs 均在基线失败集合内；84 条非空规范化诊断逐行相同，SHA-256 d47f692129694090548a816a47c5a7f2b5078487924428e8892f02e672e1c1cd。全量均非全绿，33 项仍待分诊。用户已明确要求确认的问题另开 issue、标 in-progress 后修复；确认属产品问题的部分在 #1129 交接后另票处理。最终 Spec 文档增量复审 APPROVE、Standards/closeout PASS，P0–P4=0。PR #1153 OPEN；本线不 merge，集成冲突与 merge 由专门 agent 负责。详见月档 #1129。
 
