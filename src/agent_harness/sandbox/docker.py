@@ -832,6 +832,42 @@ class DockerSandbox(Sandbox):
         matched.sort()
         return matched
 
+    def path_kind(self, path: str) -> str | None:
+        """容器内路径的类型探测（#1167）。
+
+        基类 `Sandbox.path_kind` 要求 `resolve_within_workspace` 返回宿主 `Path`，
+        Docker 后端返回容器内 `PurePosixPath` ⇒ 基类实现恒返回 `None`
+        （项目指令加载/重载在 Docker 会话上恒为 `missing`、
+        WriteTool 的目录甄别失效）。本覆写用与 `read_text` 同源的
+        `get_archive` + tar 成员类型判断实现。
+        """
+        try:
+            target = self.resolve_within_workspace(path)
+        except OSError:
+            return None
+        self.ensure_started()
+        docker = importlib.import_module("docker")
+        try:
+            stream, _ = self._container.get_archive(str(target))
+        except docker.errors.NotFound:
+            return None
+        with tarfile.open(fileobj=io.BytesIO(b"".join(stream)), mode="r:") as archive:
+            members = archive.getmembers()
+        member = next(
+            (item for item in members if item.name == target.name),
+            members[0] if members else None,
+        )
+        if member is None:
+            return None
+        if member.isfile():
+            return "file"
+        if member.isdir():
+            return "directory"
+        if member.issym() or member.islnk():
+            # 与宿主侧一致：符号链接指令文件不跟随——报不可读 kind，而非"缺失"。
+            return "symlink"
+        return None
+
     def read_text(self, path: str) -> str:
         target = self.resolve_within_workspace(path)
         self.ensure_started()
