@@ -7,6 +7,31 @@
 
 **已完成（2026-10-15，#1162）**：Issue CLOSED（bug/P2，`in-progress` 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1162#issuecomment-6188997136)。分支 `codex/1048-ntfs-hardlinks`，代码提交 `09e8e41f`、`01ba3adc`；共享 session lock 内的无条件活动 run 检查覆盖 `launch=True/False`。聚焦竞态/删除用例 5 passed；完整 `test_multiturn_delivery.py` 在 Windows local-backend override 下 26 passed；Ruff 与 diff-check 通过。Correctness/Spec、Standards 对 `bf283e0137b37c6c94280a2e657c85ebbee04ccc..01ba3adc736feb50f998ad2ac85557e004ae5752` 均 APPROVE、P0–P4=0。代码树初次 Gate-0 仅 coverage 未入账；审查行落账后 Gate-0 6/6 PASS，收据 `docs/gate/f99457b56e601b6f842f4745a854095365d24eb1.json`。全量后端 pytest 未运行；未 push、未开 PR、未 merge，集成负责人 EricKingWhy。详见月档 #1162。
 
+**#1162 Gate-0 文档传递证据**（冻结 Gate 树 `f99457b56e601b6f842f4745a854095365d24eb1` → 收尾树 `bc8ee39ff251d01bafbc07dc5c505c1038beb21d`）：
+
+命令 `git diff --name-status --no-renames f99457b56e601b6f842f4745a854095365d24eb1 HEAD` 的原始输出：
+
+```text
+M	docs/PHASE_STATUS.md
+M	docs/SDD_TICKET_TRACKER.md
+A	docs/gate/01ba3adc736feb50f998ad2ac85557e004ae5752.json
+A	docs/gate/f99457b56e601b6f842f4745a854095365d24eb1.json
+M	docs/phase_status/2026-10.md
+```
+
+仅有文档路径，状态均为 `A` / `M`。
+
+`git status --short` 的原始输出：
+
+```text
+ M docs/SDD_TICKET_TRACKER.md
+?? docs/gate/6787476d6e0a6c0f91e8c3f7b10b600249a954ec.json
+?? docs/gate/ae7b42d6d928f748dfc33a3c5a19e6a92ac76f22.json
+?? docs/gate/bf283e0137b37c6c94280a2e657c85ebbee04ccc.json
+```
+
+工作树检查只出现文档文件；提交本传递记录后只会移除已提交的 `docs/SDD_TICKET_TRACKER.md` 修改项。
+
 **当前施工（2026-10-15，#1129）**：Issue OPEN + bug/P2/in-progress，EricKingWhy 指派；分支 codex/issue-1129-docker-hard-delete 已 push，实现提交 d0f6543c，文档证据提交 0ab87db4、37d5f97f。真实删除入口定向测试 48 passed，Ruff 通过；代码树 dcfbf5a6 Gate-0 6/6 PASS（42.69s）。候选全量 pytest 7926 passed / 33 failed / 59 skipped / 51 deselected（2771.09s）；pristine origin/main d34ddf00 为 7755 passed / 202 failed / 59 skipped / 51 deselected（3822.51s）。两边使用相同全量命令与 runner 参数、各自 tracked 测试树；候选多 2 个测试函数，收集数 8018 对 8016。基线用 `PYTHONPATH=pristine-main/src` 选择 main 源码。候选 33 个失败 node IDs 均在基线失败集合内；84 条非空规范化诊断逐行相同，SHA-256 d47f692129694090548a816a47c5a7f2b5078487924428e8892f02e672e1c1cd。全量均非全绿，33 项仍待分诊。用户已明确要求确认的问题另开 issue、标 in-progress 后修复；确认属产品问题的部分在 #1129 交接后另票处理。最终 Spec 文档增量复审 APPROVE、Standards/closeout PASS，P0–P4=0。PR #1153 OPEN；本线不 merge，集成冲突与 merge 由专门 agent 负责。详见月档 #1129。
 
 **#1056 验证完成（2026-10-15）**：Issue CLOSED，`in-progress` 已移除；PR [#1155](https://github.com/EricKingWhy/intelligence-agent/pull/1155) OPEN，gate0/Chromium E2E 运行中、gitleaks 通过，尚未合并。隔离变异关闭 delivered 聚合的 `allocate` 后，AC1 六个参数用例全部因 `SeqConflict` 失败；变异恢复后源码 SHA-256 与基线一致。`c1a0acf9` 上完整测试文件连跑 10 次、每次 38 passed；同型 `Boom`/thief 用例均在同一 Store 实例与 root。无产品代码改动；分支 `codex/issue-1056-seq-resync`，提交 `8d86f592`。命令、哈希与逐轮读数见月档 #1056。
