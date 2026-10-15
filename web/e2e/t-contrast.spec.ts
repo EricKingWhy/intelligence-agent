@@ -992,6 +992,105 @@ for (const theme of ['dark', 'light'] as const) {
     console.log(`[${theme}] .notice-strip-hard .notice-strip-badge color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
     expect(ratio, `.notice-strip-hard .notice-strip-badge contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
+
+/* ── #1208：recovery.css 两处语义色正文收口（#1175 独立审查 Axis B F1 残余）──
+ *
+ *  `.recovery-decision-error` 与 `.recovery-list-error` 把 `--danger` 直接当**正文色**用，
+ *  亮色下压在 `--surface-elevated` 底上只有 4.4482 < 4.5（这就是 #1175 F1 报告值里的
+ *  4.448；报告另给的 4.301 是同一 token `#cf4a46` 压 `--surface-workspace`(#fbfbfc) 的
+ *  理论值——本仓两处的真实底都是 --surface-elevated）。修法同 #1136/#1171/#1175 的
+ *  ink-mix：`color-mix(in srgb, var(--danger) 45%, var(--text-primary))`（亮色压深、
+ *  暗色提亮，只升不降）；图标（.recovery-decision-icon，--warning）与描边/底等装饰
+ *  继续引原 token（#1164 P2-3）。
+ *  两处各走**真实渲染路径**（裁决面板提交校验失败 / 恢复列表拉取 500），不是造影子
+ *  元素，故把字色改回纯 --danger 时对应用例必然变红。 */
+
+const RD_SID = 's-contrast-recovery';
+const RD_ROW = {
+  session_id: RD_SID,
+  event_count: 4,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '待裁决对比度',
+  trace_id: null,
+  trace_url: null,
+};
+
+/** 裁决面板错误态夹具：坏死 run（run/started 无终态）+ 一条待裁决 UNKNOWN。
+ *  面板随 `pending_decisions` 在场；选「当作已生效」并填超过上限的来源 → 点提交触发
+ *  `assembleDecisions` 的来源长度校验抛错 → `setError` → `.recovery-decision-error`
+ *  （role=alert）落屏。上限 `RECOVERY_SOURCE_MAX = 2000`（抛错点 lib/recovery.ts:148；
+ *  与 lib/api.ts 的 `RECOVER_DECISION_SOURCE_MAX` 同值，recovery.test.ts:103 断言二者相等）。 */
+test(`[${theme}] #1208 .recovery-decision-error（裁决来源校验失败条）对比度 ≥4.5`, async ({ page }) => {
+  await routeApi(page, {
+    sessions: [RD_ROW],
+    events: [
+      { type: 'session/started', seq: 1, session_id: RD_SID, run_id: 'rd', time: T },
+      { type: 'run/started', seq: 2, session_id: RD_SID, run_id: 'rd', time: T },
+      { type: 'user/message', data: { content: '待裁决对比度' }, seq: 3, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T },
+      {
+        type: 'tool/call',
+        data: { tool_call_id: 'tc-rd', tool_name: 'bash', args: { command: 'rm -rf /tmp/x' } },
+        seq: 4, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T,
+      },
+    ],
+    pendingDecisions: [
+      {
+        tool_call_id: 'tc-rd', tool_name: 'bash', state: 'UNKNOWN',
+        default_action: 'RETRY', risk_level: 'high',
+        probe: { verifiable: false, suggested_action: null },
+      },
+    ],
+    models: MODELS,
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
+
+  // 选「当作已生效」→ 出现来源输入；填超上限文本 → 提交触发校验失败。
+  await page.locator('.recovery-option input[value="CONFIRM_SUCCESS"]').check();
+  await page.locator('.recovery-source-custom').fill('x'.repeat(2001));
+  await page.locator('.recovery-submit-btn').click();
+
+  const err = page.locator('.recovery-decision-error');
+  await expect(err).toBeVisible();
+  await expect(err).toContainText('裁决来源过长');
+  const m = await measure(page, '.recovery-decision-error');
+  const ratio = contrast(m.color, m.bg);
+  // eslint-disable-next-line no-console
+  console.log(`[${theme}] .recovery-decision-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+  expect(ratio, `.recovery-decision-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+});
+
+/** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
+ *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
+ *  入口是顶栏「恢复列表」按钮（TopBar aria-label="恢复列表"）。 */
+test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对比度 ≥4.5`, async ({ page }) => {
+  await routeApi(page, {
+    sessions: [], events: [], models: MODELS,
+    permissionModes: PERMISSION_MODES, agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+  });
+  // 后注册的 route 优先匹配（Playwright 逆序）——覆盖 routeApi 的默认 200 空快照。
+  await page.route('**/api/recovery/interrupted', (route) =>
+    route.fulfill({ status: 500, body: JSON.stringify({ detail: 'snapshot 不可读' }), contentType: 'application/json' }));
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.getByRole('button', { name: '恢复列表' }).click();
+
+  const err = page.locator('.recovery-list-error');
+  await expect(err).toBeVisible();
+  const m = await measure(page, '.recovery-list-error');
+  const ratio = contrast(m.color, m.bg);
+  // eslint-disable-next-line no-console
+  console.log(`[${theme}] .recovery-list-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+  expect(ratio, `.recovery-list-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+});
 }
 
 /* ── #1175：语义色「当正文色用」的余量收口（40+ 处）──
