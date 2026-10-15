@@ -185,12 +185,16 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
 
 /* ── #1136：亮色主题语义色「当正文色用」的对比度回归锁 ──
  *
- *  票面症状：亮色下 `.app-error`（--danger）3.53:1、`.app-notice`（--info）3.71:1、
- *  `.recover-btn`（--warning）2.97:1（hover 22% 底 2.71:1）全部 <4.5，而暗色同三项
- *  达标（5.66 / 6.50 / 8.12）——根因是**字色 token 本身**（在纯白底上限就 <4.5），
- *  调染色底 alpha 无解。修法同 #1029 的 ink-mix：`color-mix(in srgb, <sem> 45%,
- *  var(--text-primary))`（亮色 --text-primary 是深墨、混入即压深；暗色是近白、混入
- *  即提亮、对比度只升不降），装饰（描边/底/图标）继续引用原 token。
+ *  票面症状：亮色下 `.app-error`（--danger）、`.app-notice`（--info）、`.recover-btn`
+ *  （--warning，hover 22% 底更低）全部 <4.5，而暗色同三项达标——根因是**字色 token
+ *  本身**（在纯白底上限就 <4.5），调染色底 alpha 无解。修法同 #1029 的 ink-mix：
+ *  `color-mix(in srgb, <sem> 45%, var(--text-primary))`（亮色 --text-primary 是深墨、
+ *  混入即压深；暗色是近白、混入即提亮、对比度只升不降），装饰（描边/底/图标）继续
+ *  引用原 token。
+ *  浏览器实测（本文件 stdout，Chromium）：修前亮色 .app-error 3.6740 / .app-notice
+ *  3.8574 / .recover-btn 2.9375（票面给的 3.53/3.71/2.97 是 12%/14% 染色底的理论复算，
+ *  真机略高——以真机为准）；修后亮色 ≥6.05（最紧 .recover-btn:hover）、暗色 ≥7.49。
+ *  （注：修前纯白底上限 warning 3.73 / danger 4.45；修后数值见 GREEN 日志。）
  *  三个夹具各自走一条**真实渲染路径**（不是 createElement 影子元素），因此把字色
  *  改回纯 --danger #cf4a46 / --info #4a6fd6 / --warning #b07a10 时对应用例必然变红。 */
 
@@ -284,7 +288,9 @@ function crashedEvents(): FrameSpec[] {
 /* ── #1136 P3-1/P3-2：task-review 族与 .auth-banner 的语义色正文对比度回归锁 ──
  *
  *  同 `.app-error` / `.app-notice` / `.recover-btn` 同一根因：这些组件把 `--warning`/
- *  `--danger`/`--info` 直接当**正文色**用，亮色下压在各自染色底上 <4.5（实测 2.9–4.1）。
+ *  `--danger`/`--info` 直接当**正文色**用，亮色下压在各自染色底上 <4.5（Chromium 实测
+ *  3.1817–4.1042：tag.warn 3.18 / auth-banner 3.23 / evidence-unavailable 3.79 /
+ *  chip.executing 4.10）。
  *  修法同 #1029 的 ink-mix（`color-mix(in srgb, <sem> 45%, var(--text-primary))`）——
  *  把语义色与 `--text-primary` 混深，装饰（描边/底/图标）继续引用原 token。
  *  本夹具走**真实渲染路径**（打开「任务审阅」面板 / 触发 401），不是造影子元素，
