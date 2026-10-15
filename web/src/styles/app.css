@@ -7506,10 +7506,14 @@ button.json-row {
   background: color-mix(in srgb, var(--success) 12%, transparent);
   border-radius: var(--radius-sm);
 }
+/* #1136 P3-1 穷尽：task-review 族里同为「语义色当正文色用」的 7 处（本块 + .task-review-result-tag
+   .r-fail/.r-blocked + .task-review-freshness.f-stale/-reasons + .task-review-diff .diff-del/.diff-hunk）
+   一并改 ink-mix（同 .app-error 族，见 app.css:175 注释）；装饰（底/描边）不动。
+   .r-pass/.diff-add/.verification.v-passed（--success）与 .run-axis.running（--info）实测达标，不改。 */
 .task-review-error {
   padding: var(--space-sm);
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-radius: var(--radius-sm);
 }
@@ -7603,12 +7607,12 @@ button.json-row {
 }
 .task-review-evidence-seq:hover { opacity: 0.8; }
 .task-review-result-tag.r-pass { color: var(--success); }
-.task-review-result-tag.r-fail { color: var(--danger); }
-.task-review-result-tag.r-blocked { color: var(--warning); }
+.task-review-result-tag.r-fail { color: color-mix(in srgb, var(--danger) 45%, var(--text-primary)); }
+.task-review-result-tag.r-blocked { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); }
 .task-review-freshness { color: var(--text-secondary); }
-.task-review-freshness.f-stale { color: var(--warning); }
+.task-review-freshness.f-stale { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); }
 .task-review-evidence-action { color: var(--text-tertiary); word-break: break-all; }
-.task-review-freshness-reasons { list-style: none; margin: 0; padding: 0 0 0 var(--space-md); display: flex; flex-direction: column; gap: 2px; color: var(--warning); font-size: var(--text-xs); }
+.task-review-freshness-reasons { list-style: none; margin: 0; padding: 0 0 0 var(--space-md); display: flex; flex-direction: column; gap: 2px; color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); font-size: var(--text-xs); }
 
 .task-review-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--text-xs); color: var(--text-secondary); }
 .task-review-files code { color: var(--text-primary); word-break: break-all; }
@@ -7625,8 +7629,8 @@ button.json-row {
   white-space: pre;
 }
 .task-review-diff .diff-add { color: var(--success); }
-.task-review-diff .diff-del { color: var(--danger); }
-.task-review-diff .diff-hunk { color: var(--info); }
+.task-review-diff .diff-del { color: color-mix(in srgb, var(--danger) 45%, var(--text-primary)); }
+.task-review-diff .diff-hunk { color: color-mix(in srgb, var(--info) 45%, var(--text-primary)); }
 .task-review-snapshot { display: flex; gap: var(--space-lg); flex-wrap: wrap; }
 .task-review-snapshot-col { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 4px; }
 .task-review-sha { margin-left: var(--space-sm); color: var(--text-tertiary); font-family: var(--font-mono); }
