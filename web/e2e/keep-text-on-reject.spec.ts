@@ -69,18 +69,16 @@ const PROTOCOL_MESSAGE =
 
 const DRAFT = '这段文本不能丢';
 
-/** #1151：权威读面（`GET /recovery`）必须与用例伪造的事件说**同一件事**，
- *  所以它得**有状态**：409 之前答空（那一刻后端**确实**没有待裁决事实），409 之后
- *  答**同一份** `PENDING`，裁决落定（`POST /recover` 200）之后再回到空。
+/** #1151：权威读面（`GET /recovery`）必须与用例伪造的事件说**同一件事** ⇒ 它得**有状态**：
+ *  409 前答空、409 后答**同一份** `PENDING`、裁决 200 后再回空。
  *
- *  为什么不能只把夹具缺省值改成非空常量：那是用新假象换掉旧假象——「对照组（受理
- *  成功才清空）」与「#1148 窗外迟到失败」两条已通过用例在那些时刻后端真的没有待裁决
- *  事实，恒回非空会让它们同时失真。读面必须跟着用例的事件顺序走。
+ *  刻意**不**只把夹具缺省值改成非空常量：那是用新假象换旧假象——「对照：受理成功才
+ *  清空」与「#1148 窗外迟到失败」两条用例在那些时刻后端真的没有待裁决事实。
  *
- *  修前形状（本票的红）：本文件只传 `onMessagesPost`（409 + 清单），`GET /recovery`
- *  走夹具缺省 `[]`，而 `useSession.ts:1553-1559` 为 P1 会把 mode 落回 `viewing(sid)`
- *  ⇒ 主动读面 effect（依赖 `mode`）立刻重跑，**空数组覆盖了刚被 409 点亮的非空清单**
- *  ⇒ `hasPendingDecisions`（`App.tsx:1145`）转假、面板根本不挂载。 */
+ *  修前形状（本票的红）：本文件只传 `onMessagesPost`（409 + 清单），读面走夹具缺省
+ *  `[]`，而 `useSession.ts:1553-1560` 为 P1 会把 mode 落回 `viewing(sid)` ⇒ 依赖 `mode`
+ *  的主动读面 effect（`:718-730`）立刻重跑，**空数组覆盖了刚被 409 点亮的非空清单**
+ *  ⇒ `hasPendingDecisions`（`App.tsx:1145`）转假、面板不挂载。 */
 type PendingState = {
   /** 本用例伪造的那次 409 是否已经落定。 */
   conflicted: boolean;
@@ -98,7 +96,7 @@ function pendingReadFace(state: PendingState): (route: Route) => Promise<void> {
   };
 }
 
-/** 打开会话并停在「可恢复」态；返回 `state` 供用例里的 409 分支置位。 */
+/** 造一份「本次 409 尚未发生、尚未裁决」的读面状态（打开会话由 `openCrashed` 负责）。 */
 function scenario(): PendingState {
   return { conflicted: false, adjudicated: false };
 }
@@ -247,24 +245,27 @@ test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文�
 });
 
 test('#1151 读失败 ≠ 没事：权威读面 5xx 不得抹掉已知的待裁决清单', async ({ page }) => {
-  /* 本票（#1151）的裁决要求第 2 条：夹具改成有状态之后，「读失败 ≠ 没事」这条意图
-     仍必须**可测**。这是本类缺陷的真正防线（不变量 #22 在 UI 侧的表达）：读不到是
-     「未知」，与后端明确说「没有待裁决」是两件事。
+  /* 本票（#1151）裁决的第 2 条：夹具改成有状态之后，「读失败 ≠ 没事」这条意图仍必须
+     **可测**。这是本类缺陷的真正防线（不变量 #22 在 UI 侧的表达）：读不到是「未知」，
+     与后端明确说「没有待裁决」是两件事。
 
-     消融对照（三臂，同一会话、同一 ROW/events）：
-       A 臂 = 读面答非空     ⇒ 面板在场（`pending-adjudication.spec.ts` 已锁，不在本文件重复）
-       B 臂 = 读面答空清单   ⇒ 面板不在场（本节）
-       C 臂 = 读面 5xx       ⇒ **同样**不在场，且**不得**出现任何「已结清 / 已中断」式的
-                              谎报——`fetchPendingDecisions` 读失败回 `null`（"未知"，
-                               `useSession.ts:696-699`），该路径下 409 已经点亮的清单
-                               不会被抹掉（`refreshPendingDecisions` 只在 `list !== null`
-                               时写入）。
-     本臂守住的是 C 与「409 点亮的清单」的关系：读面坏了，界面**保留**已知事实。 */
+     「未知」与「空」在屏幕上的差别（同一会话、同一 409 载荷）：
+       - 读面答**空清单**（后端说没事）      ⇒ 清单被覆盖 ⇒ 面板**不在场**。
+         这就是本文件修前的红形状，由本文件第 1 条用例反向覆盖（它要求面板在场）。
+       - 读面 **5xx**（读不到 ⇒ `fetchPendingDecisions` 回 `null`，`useSession.ts:692-701`）
+                                            ⇒ 409 点亮的清单**保留** ⇒ 面板**在场**（本节）。
+     本臂守的就是后者：读面坏了，界面**保留**已知事实，既不抹掉、也不谎报"已结清"。
+
+     ⚠ 见证不可少：只断言"面板在场"挡不住「主动读面 effect 被短路/删掉」这类回归
+     （那时面板仍因 409 而点亮，用例照样绿，而它宣称守的读面已经没人读了）⇒ 末条断言
+     把「读面真的被请求过」钉住。 */
+  let recoveryReads = 0;
   await openCrashed(page, {
     sessions: [ROW],
     events: crashedEvents(),
     // 读面整体不可用（500）：前端必须保持"未知"，绝不回落空清单。
     onRecoveryGet: async (route) => {
+      recoveryReads += 1;
       await route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -290,4 +291,6 @@ test('#1151 读失败 ≠ 没事：权威读面 5xx 不得抹掉已知的待裁�
   await expect(page.locator('.recovery-decision-panel')).toBeVisible();
   // ③ 也不得反向谎报"已结清"——横幅仍如实说明需要人工裁决。
   await expect(page.locator('.app-error')).toContainText('待人工裁决');
+  // ④ 见证：权威读面**真的被读过**。缺了它，「读面被短路」这类回归仍会让上面两条全绿。
+  expect(recoveryReads).toBeGreaterThan(0);
 });
