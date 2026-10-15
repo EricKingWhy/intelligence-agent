@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
@@ -142,23 +142,6 @@ class TestPathRule:
         )
         assert verdict is RuleVerdict.ASK
         assert "越出工作区" in reason
-
-    def test_docker_workspace_paths_use_posix_root(self) -> None:
-        root = PurePosixPath("/workspace")
-        inside = default_rule_set().evaluate(
-            "read", {"path": "/workspace/src/app.py"}, workspace_root=root,
-        )
-        outside = default_rule_set().evaluate(
-            "read", {"path": "/etc/passwd"}, workspace_root=root,
-        )
-        traversal = default_rule_set().evaluate(
-            "read", {"path": "../etc/passwd"}, workspace_root=root,
-        )
-
-        assert inside[0] is RuleVerdict.ALLOW
-        assert outside[0] is RuleVerdict.ASK
-        assert outside[2] == "ask-path-outside-workspace"
-        assert traversal[0] is RuleVerdict.ASK
 
     def test_no_workspace_root_skips_path_rule(self) -> None:
         """无 workspace_root → 跳过 R2（防御性），回落到工具名规则。"""

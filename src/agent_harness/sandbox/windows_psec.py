@@ -20,7 +20,6 @@ from agent_harness.sandbox.capabilities import (
     require_available,
 )
 from agent_harness.sandbox.local import LocalSubprocessSandbox
-from agent_harness.sandbox.paths import validate_windows_path_component
 
 _FILE_OPEN = 1
 _FILE_CREATE = 2
@@ -682,18 +681,6 @@ class WindowsPsecSandbox(LocalSubprocessSandbox):
             caps,
             remediation="run on Windows with MXC BaseContainer/PSEC support",
         )
-
-    @classmethod
-    def probe_configuration_for_workspace(
-        cls, workspace_root: str | os.PathLike[str]
-    ) -> dict[str, object]:
-        """Build the same no-DACL policy used at startup, without starting a sandbox."""
-        sandbox = cls(Path(workspace_root))
-        handles = _open_directory_chain(sandbox._workspace_root, create=False)
-        try:
-            return sandbox._probe_configuration()
-        finally:
-            _close_handles(handles)
 
     def _probe_configuration(self) -> dict[str, object]:
         environment = self._container_environment(self._env)
@@ -1444,6 +1431,30 @@ def _relative_components(
         return []
     if any(part in {"", ".", ".."} for part in parts):
         raise PermissionError("workspace path traversal rejected")
+    reserved_names = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{digit}" for digit in "123456789¹²³"),
+        *(f"LPT{digit}" for digit in "123456789¹²³"),
+    }
     for part in parts:
-        validate_windows_path_component(part, allow_glob=allow_glob)
+        if part.endswith((" ", ".")):
+            raise PermissionError("invalid Windows path component")
+        if any(ord(char) < 32 or char in '<>"|' for char in part):
+            raise PermissionError("invalid Windows path component")
+        if not allow_glob and any(char in "*?" for char in part):
+            raise PermissionError("wildcards are not valid in workspace paths")
+        stem = part.split(".", 1)[0].rstrip(" .").upper()
+        if allow_glob and any(char in stem for char in "*?[]"):
+            continue
+        if stem in reserved_names:
+            raise PermissionError("Windows device path rejected")
+        try:
+            part.encode("utf-16-le")
+        except UnicodeEncodeError as error:
+            raise PermissionError("invalid Windows path component") from error
     return parts

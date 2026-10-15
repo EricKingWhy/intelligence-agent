@@ -222,7 +222,9 @@ MESSAGE_SUPERSEDED = "message/superseded"
 
 # ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
 # 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
-# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
+# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id；
+# #1107 新增 reasoning_effort = 切换时生效的推理档位（最近一条 run/started 的
+# 声明；有值落键、无值缺键，与 #1093 口径同构）。
 MODEL_CHANGED = "model/changed"
 
 # ── F18-A（#282）：同 session 内改权限档 ──────────────────────────────────

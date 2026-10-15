@@ -256,10 +256,11 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
     original_events = list(session.events)
     append_event = session._store.append_event
 
-    def fail_before_end(session_id, event):
+    def fail_before_end(session_id, event, *, allocate=False):
+        # #1061：`append_event` 新增终态协商开关；本注入只关心事件类型，开关转发即可。
         if event.type == COMPACTION_END:
             raise OSError("injected append failure")
-        append_event(session_id, event)
+        return append_event(session_id, event, allocate=allocate)
 
     monkeypatch.setattr(session._store, "append_event", fail_before_end)
     builder = ContextBuilder(

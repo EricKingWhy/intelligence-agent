@@ -20,8 +20,6 @@ import json
 import logging
 import os
 import shutil
-import threading
-import weakref
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +27,8 @@ from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.capabilities import (
-    SELECTABLE_BACKENDS,
+    LEGACY_BACKENDS,
+    SUPPORTED_BACKENDS,
     probe_docker_capabilities,
     require_available,
 )
@@ -38,16 +37,52 @@ from agent_harness.sandbox.paths import canonical_workspace_path
 
 logger = logging.getLogger(__name__)
 
+#: Docker 工作区「快照导入已完成」标记（容器内 /workspace 下）。#1048 AC3：
+#: 会话在标记存在前不可运行；已持标记的持久化 volume 恢复时不重导入。
+#: **公开**：harness 内部状态文件，web 层（文件浏览 / 导出）据此把它从用户可见面
+#: 过滤掉——它是 bookkeeping，不是用户工作产物（同 `_list_files` 过滤进度目录的取向）。
+IMPORT_COMPLETE_MARKER = ".harness-import-complete"
+
 
 class WorkspaceBindingError(RuntimeError):
     """A persisted workspace owner/alias binding is invalid or immutable."""
 
 
+class WorkspaceImportError(RuntimeError):
+    """宿主工作区快照导入失败——工作区未完成初始化，禁止当作已就绪。"""
+
+
+class WorkspaceImportIncompleteError(RuntimeError):
+    """Docker 工作区缺少导入完成标记——拒绝运行（不把半份 workspace 当已初始化）。"""
+
+
+def _reject_escaping_symlinks(source: Path) -> None:
+    """整棵树扫描符号链接，凡解析后逃出 `source` 根即 fail-closed（#1048 #1135）。
+
+    递归到**任意深度**（`os.walk(followlinks=False)` 不跟进符号链接目录，逐项显式
+    检查），对齐 ADR-0054 的「导入拒绝会逃出源根的符号链接」声明；不静默跳过。
+    符号链接成环（`resolve()` 抛 `RuntimeError`）同样按无法解析拒绝。
+    """
+    root_resolved = source.resolve()
+    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        for name in sorted([*dirnames, *filenames]):
+            entry = Path(dirpath) / name
+            if not entry.is_symlink():
+                continue
+            try:
+                target = entry.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise WorkspaceImportError(
+                    f"导入源含无法解析的符号链接：{entry}"
+                ) from exc
+            if not target.is_relative_to(root_resolved):
+                raise WorkspaceImportError(
+                    f"导入源含指向工作区外的符号链接，拒绝导入：{entry}"
+                )
+
+
 class WorkspaceRegistry:
     """Session ↔ Sandbox 映射表的持久化管理器。"""
-
-    _workspace_locks = weakref.WeakValueDictionary()
-    _workspace_locks_guard = threading.Lock()
 
     def __init__(self, root: Path, backend: str = "local") -> None:
         """root 是映射表和 workspace 的根目录。backend='local'|'docker'。"""
@@ -57,17 +92,6 @@ class WorkspaceRegistry:
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
-        self._legacy_migration_lock = threading.Lock()
-
-    def _workspace_lock(self, owner_session_id: str) -> threading.RLock:
-        """Return a process-wide lock shared by every registry for this workspace."""
-        key = (str(self._root), owner_session_id)
-        with self._workspace_locks_guard:
-            lock = self._workspace_locks.get(key)
-            if lock is None:
-                lock = threading.RLock()
-                self._workspace_locks[key] = lock
-            return lock
 
     def create(
         self,
@@ -84,7 +108,9 @@ class WorkspaceRegistry:
         RecoveryCoordinator 据此恢复（R8-1）。
 
         backend（#363 / W-19）：本次创建显式选择的后端（"local" | "docker"）；
-        None ⇒ 沿用 registry 构造时的默认（`self._backend`，当前 web 层为 "local"）。
+        None ⇒ 沿用 registry 构造时的默认（`self._backend`）——web 层按平台取
+        部署默认（`capabilities.default_backend_for_platform`：Windows ⇒ docker，
+        否则 local，见 `web/app.py` 的 `create_app`）。
         解析优先级抄 DSH：显式选择 > 部署默认。
         - 未知后端名：响亮 ValueError（DSH：typo 不静默改策略）。
         - 选 docker 但探针不可用：抛 SandboxUnavailableError，**绝不静默回落
@@ -112,32 +138,21 @@ class WorkspaceRegistry:
             Path(workspace_root) if workspace_root is not None
             else Path(mapping["workspace_root"])
         )
-        if mapping["backend"] == "windows_psec":
-            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+        # #1048 AC2：`_build_mapping` 已对 legacy 后端（含 windows_psec）响亮拒绝，
+        # 故新会话映射只可能是 local/docker——这里不再有 PSEC 分叉。
+        requested.mkdir(parents=True, exist_ok=True)
+        workspace_root = Path(canonical_workspace_path(requested))
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        mapping["workspace_root"] = str(workspace_root)
+        sandbox = self._instantiate_sandbox(mapping)
+        sandbox.ensure_started()
+        if mapping["backend"] == "docker":
+            # #1048 AC1/AC3：宿主源 → 私有 named volume 的显式快照导入。
+            # 导入（含完成标记）成功后才落映射；失败则不写映射、不返回，
+            # 绝不把半份 workspace 当作已初始化。
+            self._import_snapshot(sandbox, workspace_root)
 
-            raw_root = Path(os.path.abspath(requested))
-            mapping["workspace_root"] = str(raw_root)
-            sandbox = WindowsPsecSandbox(raw_root)
-            sandbox.ensure_started()
-            mapping["workspace_identity"] = sandbox.workspace_identity
-        else:
-            requested.mkdir(parents=True, exist_ok=True)
-            workspace_root = Path(canonical_workspace_path(requested))
-            workspace_root.mkdir(parents=True, exist_ok=True)
-            mapping["workspace_root"] = str(workspace_root)
-            if mapping["backend"] == "docker":
-                sandbox = self._create_private_volume(mapping, workspace_root)
-            else:
-                sandbox = self._instantiate_sandbox(mapping)
-                sandbox.ensure_started()
-
-        try:
-            self._write_mapping(session_id, mapping)
-        except Exception:
-            if mapping["backend"] == "docker":
-                with suppress(Exception):
-                    sandbox.delete()
-            raise
+        self._write_mapping(session_id, mapping)
         self._cache[session_id] = sandbox
         return sandbox
 
@@ -185,131 +200,31 @@ class WorkspaceRegistry:
             )
 
         owner_session_id, owner_mapping = self._resolve_workspace_owner(session_id)
-        if owner_mapping.get("fork_workspace_reclaimed"):
-            raise WorkspaceBindingError(
-                f"Session '{session_id}' 的工作区已因未完成的 fork 回收；"
-                "请删除该会话并从父会话重新 fork。"
-            )
-        if owner_mapping.get("backend") == "docker":
-            from agent_harness.sandbox.docker import DockerSandbox
 
-            with self._workspace_lock(owner_session_id):
-                mapping = self._read_mapping(session_id)
-                if mapping is None:
-                    raise KeyError(
-                        f"Session '{session_id}' 没有对应的 workspace 映射记录。"
-                    )
-                current_owner_id, owner_mapping = self._resolve_workspace_owner(session_id)
-                if current_owner_id != owner_session_id:
-                    raise WorkspaceBindingError(
-                        f"Session '{session_id}' 的 workspace owner 在恢复期间发生变化。"
-                    )
-                if owner_mapping.get("fork_workspace_reclaimed"):
-                    raise WorkspaceBindingError(
-                        f"Session '{session_id}' 的工作区已因未完成的 fork 回收；"
-                        "请删除该会话并从父会话重新 fork。"
-                    )
-                if owner_mapping.get("backend") != "docker":
-                    return self.get(session_id)
-
-                sandbox = self._cache.get(owner_session_id)
-                if sandbox is None:
-                    sandbox = self._instantiate_sandbox(owner_mapping)
-                if not isinstance(sandbox, DockerSandbox):
-                    raise WorkspaceBindingError(
-                        f"Session '{session_id}' has a Docker mapping but no Docker sandbox."
-                    )
-                if not sandbox.workspace_volume_exists():
-                    raise WorkspaceBindingError(
-                        f"Session '{session_id}' 的 Docker 持久卷不存在；拒绝创建空工作区。"
-                    )
-                if owner_session_id in self._cache:
-                    self._cache[session_id] = sandbox
-                    return sandbox
-                sandbox.ensure_started()
-                self._cache[owner_session_id] = sandbox
-                self._cache[session_id] = sandbox
-                return sandbox
+        # #1048 AC2：legacy PSEC 映射在恢复时迁移到私有 Docker volume——
+        # 先快照导入、成功后才原子改 mapping 并返回 DockerSandbox；任一步失败
+        # 即抛错（保留旧 mapping 与宿主文件），绝不返回 PSEC/半成品。
+        if owner_mapping.get("backend") in LEGACY_BACKENDS:
+            sandbox = self._migrate_legacy_mapping(owner_session_id, owner_mapping)
+            self._cache[owner_session_id] = sandbox
+            self._cache[session_id] = sandbox
+            return sandbox
 
         if owner_session_id in self._cache:
             sandbox = self._cache[owner_session_id]
             self._cache[session_id] = sandbox
             return sandbox
 
-        if owner_mapping.get("backend") == "windows_psec":
-            with self._legacy_migration_lock:
-                if owner_session_id in self._cache:
-                    sandbox = self._cache[owner_session_id]
-                else:
-                    current_mapping = self._read_mapping(owner_session_id)
-                    if current_mapping is None:
-                        raise KeyError(
-                            f"Session '{owner_session_id}' 没有对应的 workspace 映射记录。"
-                        )
-                    if current_mapping.get("backend") == "windows_psec":
-                        sandbox = self._migrate_legacy_psec(
-                            owner_session_id, current_mapping,
-                        )
-                    else:
-                        sandbox = self._instantiate_sandbox(current_mapping)
-                        sandbox.ensure_started()
-                self._cache[owner_session_id] = sandbox
-                self._cache[session_id] = sandbox
-                return sandbox
-
         sandbox = self._instantiate_sandbox(owner_mapping)
         sandbox.ensure_started()
+        if owner_mapping.get("snapshot_import"):
+            # #1048 AC3：**快照导入**路径建立的映射，无完成标记（半份/中断的导入）
+            # 时拒绝运行。pre-#1048 的 docker 映射没有该字段（也无标记），其 volume
+            # 从未经过快照导入，不适用该闸门——照常恢复，不误判为半份。
+            self._assert_import_complete(sandbox, session_id)
 
         self._cache[owner_session_id] = sandbox
         self._cache[session_id] = sandbox
-        return sandbox
-
-    def _create_private_volume(self, mapping: dict, source_root: Path) -> Sandbox:
-        """Create a fresh Docker volume and import a host snapshot before it is usable."""
-        sandbox = self._instantiate_sandbox(mapping)
-        try:
-            # A mapping-less deterministic volume can only be a crashed, incomplete
-            # create. Delete it before retrying so partial files are never treated as
-            # a complete workspace snapshot.
-            sandbox.delete()
-            sandbox = self._instantiate_sandbox(mapping)
-            sandbox.ensure_started()
-            sandbox.copy_in(source_root, ".")
-        except Exception:
-            with suppress(Exception):
-                sandbox.delete()
-            raise
-        return sandbox
-
-    def _migrate_legacy_psec(
-        self, session_id: str, legacy_mapping: dict,
-    ) -> Sandbox:
-        from agent_harness.sandbox.windows_psec import (
-            WindowsPsecSandbox,
-            WorkspaceIdentityError,
-        )
-
-        source_root = Path(legacy_mapping["workspace_root"])
-        identity = legacy_mapping.get("workspace_identity")
-        if not isinstance(identity, dict):
-            raise WorkspaceIdentityError(
-                "Windows workspace mapping has no pinned directory identity."
-            )
-        WindowsPsecSandbox.validate_workspace_identity(source_root, identity)
-
-        mapping = self._build_mapping(session_id, backend="docker")
-        mapping["workspace_root"] = str(source_root)
-        mapping["created_at"] = legacy_mapping.get(
-            "created_at", mapping["created_at"],
-        )
-        sandbox = self._create_private_volume(mapping, source_root)
-        try:
-            # Publish the Docker backend only after the full snapshot is imported.
-            self._write_mapping(session_id, mapping)
-        except Exception:
-            with suppress(Exception):
-                sandbox.delete()
-            raise
         return sandbox
 
     def exists(self, session_id: str) -> bool:
@@ -425,52 +340,51 @@ class WorkspaceRegistry:
         if mapping_file.exists():
             mapping_file.unlink()
 
-    def cleanup_docker_workspace_resources(self, session_id: str) -> bool:
-        """Delete only this session's owned Docker container and private volume.
+    def cleanup_docker_workspace_resources(self, session_id: str) -> None:
+        """Delete only the owning session's Docker container and private volume.
 
-        The mapping remains until the hard-delete path reaches
-        ``discard_session_artifacts``. If Docker cleanup fails, the caller can
-        retry while the session and its mapping still exist. Local and PSEC
-        workspaces are deliberately outside this operation.
+        Ownership comes from the session mapping identity plus the deterministic
+        resource names. The workspace_root is never used as a deletion target.
+        Keep the mapping until discard_session_artifacts runs so failures can be
+        retried through the same hard-delete request.
         """
-        with self._workspace_lock(session_id):
-            mapping = self._read_mapping(session_id)
-            if mapping is None or "workspace_owner_session_id" in mapping:
-                return False
-            if mapping.get("session_id") != session_id:
-                raise WorkspaceBindingError(
-                    f"Workspace mapping identity mismatch for session '{session_id}'."
-                )
-            if mapping.get("backend") != "docker":
-                return False
+        mapping = self._read_mapping(session_id)
+        if mapping is None:
+            return
+        if mapping.get("backend") != "docker":
+            return
+        if mapping.get("session_id") != session_id:
+            raise WorkspaceBindingError(
+                f"Workspace mapping identity mismatch for session '{session_id}'."
+            )
+        if "workspace_owner_session_id" in mapping:
+            return
 
-            expected_name = f"agent-harness-{session_id}"
-            if (
-                mapping.get("container_name") != expected_name
-                or mapping.get("volume_name") != expected_name
-            ):
-                raise WorkspaceBindingError(
-                    f"Docker workspace resources for session '{session_id}' do not "
-                    "match their deterministic ownership names."
-                )
+        expected_name = f"agent-harness-{session_id}"
+        if (
+            mapping.get("container_name") != expected_name
+            or mapping.get("volume_name") != expected_name
+        ):
+            raise WorkspaceBindingError(
+                f"Docker workspace resources for session '{session_id}' do not "
+                "match their deterministic ownership names."
+            )
 
-            from agent_harness.sandbox.docker import DockerSandbox
+        from agent_harness.sandbox.docker import DockerSandbox
 
-            sandbox = self._cache.get(session_id)
-            if sandbox is None:
-                sandbox = self._instantiate_sandbox(mapping)
-            if not isinstance(sandbox, DockerSandbox):
-                raise WorkspaceBindingError(
-                    f"Session '{session_id}' has Docker ownership metadata but no "
-                    "Docker sandbox instance."
-                )
-            try:
-                sandbox.delete()
-            finally:
-                for cached_session_id, cached_sandbox in tuple(self._cache.items()):
-                    if cached_sandbox is sandbox:
-                        self._cache.pop(cached_session_id, None)
-            return True
+        sandbox = self._cache.get(session_id)
+        if sandbox is None:
+            sandbox = self._instantiate_sandbox(mapping)
+        if (
+            not isinstance(sandbox, DockerSandbox)
+            or sandbox._container_name != expected_name
+            or sandbox._volume_name != expected_name
+        ):
+            raise WorkspaceBindingError(
+                f"Session '{session_id}' has Docker ownership metadata but no "
+                "matching Docker sandbox instance."
+            )
+        sandbox.delete()
 
     def discard_session_artifacts(self, session_id: str) -> None:
         """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
@@ -506,44 +420,21 @@ class WorkspaceRegistry:
             shutil.rmtree(default_workspace, ignore_errors=True)
         self._cache.pop(session_id, None)
 
-    def reclaim_incomplete_fork_workspace(self, session_id: str) -> bool:
-        """Delete only an incomplete Docker fork's resources while retaining its mapping.
-
-        The durable fork marker and workspace binding remain available to recovery
-        diagnostics. The tombstone prevents a later ``get()`` from recreating an
-        empty named volume after the partial snapshot has been removed.
-        """
-        mapping = self._read_mapping(session_id)
-        if mapping is None or mapping.get("backend") != "docker":
-            return False
-        if "workspace_owner_session_id" in mapping:
-            raise WorkspaceBindingError(
-                f"Incomplete fork '{session_id}' cannot own an aliased Docker workspace."
-            )
-
-        if not mapping.get("fork_workspace_reclaimed"):
-            mapping["fork_workspace_reclaimed"] = True
-            self._write_mapping(session_id, mapping)
-
-        sandbox = self._cache.get(session_id)
-        if sandbox is None:
-            sandbox = self._instantiate_sandbox(mapping)
-        sandbox.delete()
-        self._cache.pop(session_id, None)
-        for alias_id in self._alias_ids_for_owner(session_id):
-            self._cache.pop(alias_id, None)
-        return True
-
     # —— 内部方法 ——
 
     def _build_mapping(self, session_id: str, backend: str | None = None) -> dict:
         """构造新 session 的映射字典。"""
         # #363 / W-19：显式选择 > 部署默认；未知名响亮失败。
         resolved = backend if backend is not None else self._backend
-        if resolved not in SELECTABLE_BACKENDS:
+        if resolved in LEGACY_BACKENDS:
+            # #1048 AC2：legacy 后端不可用于新建会话（只用于解析既有映射）。
             raise ValueError(
-                f"未知或不可用于新会话的 Sandbox 后端: {resolved!r}"
-                f"（支持：{', '.join(SELECTABLE_BACKENDS)}）"
+                f"Sandbox 后端 {resolved!r} 已降级为 legacy，仅用于恢复既有映射，"
+                f"不可用于新会话（可选：{', '.join(SUPPORTED_BACKENDS)}）"
+            )
+        if resolved not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"未知的 Sandbox 后端: {resolved!r}（支持：{', '.join(SUPPORTED_BACKENDS)}）"
             )
         if resolved == "docker":
             # 探针先行：不可用就地阻断，绝不静默回落 local。
@@ -561,6 +452,11 @@ class WorkspaceRegistry:
             # 确定性命名：基于 session_id，进程重启后能按名字找回容器/volume。
             mapping["container_name"] = f"agent-harness-{session_id}"
             mapping["volume_name"] = f"agent-harness-{session_id}"
+            # #1048 AC3：本映射由**快照导入**路径建立。_build_mapping 只在新导入
+            # 成功后才落盘映射，故该字段等价于"导入完成"的持久证据；它同时让
+            # **pre-#1048** 的 docker 映射（无此字段、其 volume 是空的或仅 agent 自写）
+            # 走恢复时不被误判为"半份导入"（见 get() 的完成标记闸门）。
+            mapping["snapshot_import"] = True
         return mapping
 
     def _instantiate_sandbox(self, mapping: dict) -> Sandbox:
@@ -598,6 +494,58 @@ class WorkspaceRegistry:
             )
 
         raise ValueError(f"未知的 Sandbox 后端: {backend}")
+
+    def _import_snapshot(self, sandbox: Sandbox, host_root: Path) -> None:
+        """宿主源目录 → sandbox 工作区的显式快照导入（#1048 AC1/AC2/AC3）。
+
+        - 整树一次性导入（副本语义）：容器内对象与宿主源**不同 inode**，切断
+          NTFS hard link 的对象身份直连。整棵树交给后端一次 `copy_in`（Docker
+          侧即**单个** tar 内容复制）：同一 tar 内按 inode 记录 hard link，故
+          「完全位于 workspace 内的 hard-link pair」导入后仍是同一对象（AC4）；
+          指向源根外的外链因宿主文件未被收录而只能按内容复制，容器内副本与宿主
+          源不同 inode（切断对象身份）。
+        - 拒绝会逃出源根的符号链接（对齐 #1135 的 reparse 泄漏语义），越界即
+          fail-closed，不静默跳过。校验在导入前对整棵树完成。
+        - **最后**写完成标记；中断/失败时目标无标记，恢复路径据此拒绝运行。
+        """
+        source = Path(host_root)
+        if not source.is_dir():
+            raise WorkspaceImportError(f"导入源不是目录：{source}")
+        _reject_escaping_symlinks(source)
+        sandbox.copy_in(source, str(sandbox.workspace_root))
+        sandbox.write_text(IMPORT_COMPLETE_MARKER, "")
+
+    def _assert_import_complete(self, sandbox: Sandbox, session_id: str) -> None:
+        """确认 Docker 工作区已完成导入（#1048 AC3）；无标记即拒绝运行。"""
+        try:
+            sandbox.read_text(IMPORT_COMPLETE_MARKER)
+        except (FileNotFoundError, KeyError, OSError) as exc:
+            raise WorkspaceImportIncompleteError(
+                f"Session '{session_id}' 的 Docker 工作区缺少导入完成标记 "
+                f"（{IMPORT_COMPLETE_MARKER}），拒绝运行以免把半份 workspace "
+                "当作已初始化。"
+            ) from exc
+
+    def _migrate_legacy_mapping(self, session_id: str, mapping: dict) -> Sandbox:
+        """把 legacy PSEC 映射迁移到私有 Docker volume（#1048 AC2）。
+
+        顺序固定为「探针 → 快照导入 → 原子改映射」：导入（含完成标记）成功前
+        **绝不**改写 mapping、也不返回 DockerSandbox；失败即抛错，旧 mapping 与
+        宿主文件原样保留（fail-closed，不回落 PSEC）。
+        """
+        host_root = Path(mapping["workspace_root"])
+        # 复用新会话的 docker 映射构造（含探针先行 + 确定性 container/volume 名），
+        # 只把 workspace_root 覆写成 legacy 宿主源、并记迁移溯源。
+        migrated = self._build_mapping(session_id, backend="docker")
+        migrated["workspace_root"] = str(host_root)
+        migrated["created_at"] = mapping.get("created_at") or migrated["created_at"]
+        migrated["migrated_from"] = mapping.get("backend")
+        migrated["migrated_at"] = datetime.now(UTC).isoformat()
+        sandbox = self._instantiate_sandbox(migrated)
+        sandbox.ensure_started()
+        self._import_snapshot(sandbox, host_root)
+        self._write_mapping(session_id, migrated)
+        return sandbox
 
     def _mapping_path(self, session_id: str) -> Path:
         return self._workspaces_dir / f"{session_id}.json"

@@ -43,7 +43,7 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePath
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -337,7 +337,7 @@ class ToolExecutor:
         # `default_rule_set()`；裸构造（兜底 / 单测 / READ_ONLY 端点）不启用。
         # `workspace_root` 供路径规则（R2）判越界；None ⇒ 跳过路径规则（防御性）。
         permission_rules: PermissionRuleSet | None = None,
-        workspace_root: PurePath | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy

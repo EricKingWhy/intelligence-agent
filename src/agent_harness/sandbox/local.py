@@ -698,18 +698,6 @@ class LocalSubprocessSandbox(Sandbox):
         else:
             shutil.copy2(host, resolved)
 
-    def copy_out(self, host_path: Path) -> None:
-        """Copy the workspace into a new host directory without preserving hard links."""
-        destination = Path(host_path)
-        if destination.exists() or destination.is_symlink():
-            raise FileExistsError(destination)
-        shutil.copytree(
-            self._workspace_root,
-            destination,
-            symlinks=True,
-            copy_function=shutil.copy2,
-        )
-
     def stop(self) -> None:
         """no-op：本机进程不需要清理。幂等。"""
 

@@ -99,9 +99,10 @@ from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import (
-    SELECTABLE_BACKENDS,
+    SUPPORTED_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
+    default_backend_for_platform,
     probe_all_capabilities,
 )
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -223,8 +224,8 @@ class _AmendValueValidators(BaseModel):
     def _validate_sandbox_backend(cls, v: str | None) -> str | None:
         # #363 / W-19：未知后端名在请求层响亮 422（registry 层 ValueError 是
         # 第二道防线）。None = 未显式选择 ⇒ 部署默认。
-        if v is not None and v not in SELECTABLE_BACKENDS:
-            valid = ", ".join(SELECTABLE_BACKENDS)
+        if v is not None and v not in SUPPORTED_BACKENDS:
+            valid = ", ".join(SUPPORTED_BACKENDS)
             raise ValueError(f"sandbox_backend must be one of: {valid}")
         return v
 
@@ -614,7 +615,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # （按平台：Windows ⇒ docker，否则 local，见 `create_app` 的
+    # `default_backend_for_platform()`）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
@@ -1166,7 +1168,12 @@ class AppState:
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
         self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
-            root=Path(settings.workspace_dir), backend="local"
+            root=Path(settings.workspace_dir),
+            # #1048 AC1：部署默认按平台解析——受影响（Windows/NTFS）平台默认
+            # docker（不可用即 409 fail-closed，绝不回落 local/PSEC）；其余平台
+            # 默认 local（无 NTFS hard link 对象身份问题）。显式 `sandbox_backend`
+            # 仍优先于本默认（registry 的「显式 > 部署默认」）。
+            backend=default_backend_for_platform(),
         )
         # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
         # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。
@@ -2270,7 +2277,8 @@ def create_app(
 
     register_worktree_routes(app)
 
-    # #367 / W-23：sandbox 后端列表只展示新会话可选择的后端。
+    # #367 / W-23 选项 A：sandbox 后端列表（`probe_all_capabilities` 明确标注
+    # "给选择器 UI 用"；创建表单的"运行位置"选择器只显示探针真实结果，不画饼）
     @app.get("/api/sandbox-backends")
     async def list_sandbox_backends() -> dict:
         """可用 sandbox 后端 + 探针结果（不可用带 reason，前端据此置灰）。"""
@@ -2381,12 +2389,17 @@ def create_app(
 
     register_host_dir_routes(app)
 
-    # #191/#1048 会话工作区浏览与显式副本导出。
-    # 同样是独立 router + 一行接入：workspace 走 Sandbox，宿主来源闸复用
-    # `require_trusted_origin`，本模块不新造校验。
+    # #191 会话工作区只读浏览（列文件 / 读文件 / git status / 单文件 diff）。
+    # 同样是独立 router + 一行接入：路径边界与来源闸都用既有的那一份（Sandbox /
+    # `require_trusted_origin`），本模块不新造校验。
     from agent_harness.web.workspace_files import register_workspace_file_routes
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
+
+    # #1048 AC5/AC6：本地 REST 显式导出工作区（副本 → 全新宿主目录；独立 router）。
+    from agent_harness.web.workspace_export import register_workspace_export_routes
+
+    register_workspace_export_routes(app, validate_session_id=validate_session_id)
 
     # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
     # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
@@ -2452,8 +2465,10 @@ def create_app(
     async def sandbox_capabilities() -> dict[str, object]:
         """#363 / W-19：Sandbox 后端能力探针（给选择器 UI 用）。
 
-        返回新会话可选择后端的可用性 + 不可用原因 + 修复提示。纯查询，
-        无副作用（不创建容器、不拉镜像）。不可用项置灰并显示原因。
+        返回各后端可用性 + 不可用原因 + 修复提示。纯查询，无副作用
+        （不创建容器、不拉镜像）。前端据此渲染选择器：可用项可选，
+        不可用项**置灰保留并显示原因**（抄 Cline "rather than silently
+        disappearing"，不隐藏）。
         """
         return {
             "backends": [
@@ -2615,11 +2630,14 @@ def create_app(
         store = project_instruction_store(app.state.agent.settings)
         registry = service.workspace_registry
         if registry.exists(session_id):
-            from agent_harness.sandbox.docker import DockerSandbox
-            from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
+            # #1048 AC8：Docker（及任何非 local 子进程）后端的工作区不在宿主项目
+            # 目录上，指令必须经 Sandbox/POSIX 语义读取；宿主 `cwd` 是宿主路径，
+            # 只有 local 后端才可用。判据与 assembly 同源
+            # （`uses_sandbox_path_semantics`：只有 `LocalSubprocessSandbox` 为宿主语义）。
+            from agent_harness.assembly import uses_sandbox_path_semantics
 
             sandbox = registry.get(session_id)
-            if isinstance(sandbox, (DockerSandbox, WindowsPsecSandbox)):
+            if uses_sandbox_path_semantics(sandbox):
                 await asyncio.to_thread(
                     store.reload_for_sandbox_session, session_id, sandbox,
                 )

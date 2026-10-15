@@ -212,7 +212,12 @@ describe('RecoveryDecisionPanel', () => {
     for (const group of groups) {
       expect(group.getAttribute('role')).toBe('radiogroup');
       // 原生 radio：Tab 进组、方向键切换、aria-checked 隐式如实
-      expect(group.querySelectorAll('input[type="radio"]')).toHaveLength(3);
+      // #1030：四选一（多了 ABANDON）——它必须与其余三项同在一个 radiogroup 里，
+      // 否则键盘用户到不了"就此打住"这一档。
+      expect(group.querySelectorAll('input[type="radio"]')).toHaveLength(4);
+      expect(
+        [...group.querySelectorAll('input[type="radio"]')].map((i) => (i as HTMLInputElement).value),
+      ).toContain('ABANDON');
     }
   });
 });

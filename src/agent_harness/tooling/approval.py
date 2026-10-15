@@ -269,14 +269,15 @@ def approval_identity(
         canonical = str(args["command"]).strip()
         kind = "COMMAND"
     elif name == "write":
+        from pathlib import Path
+
         path = str(args["path"])
-        try:
-            target = sandbox.resolve_within_workspace(path)
-            relative = target.relative_to(sandbox.workspace_root)
-        except (PermissionError, ValueError) as error:
-            raise ValueError("path escapes workspace") from error
+        root = Path(sandbox.workspace_root).resolve()
+        target = (root / path).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("path escapes workspace")
         # canonical = workspace-relative posix path (traversal rejected above).
-        canonical = relative.as_posix()
+        canonical = target.relative_to(root).as_posix()
         kind = "PATH"
     else:
         return None

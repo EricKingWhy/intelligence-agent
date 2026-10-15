@@ -8,7 +8,7 @@
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
-import type { PresetTask, UndeliveredInput } from '../types';
+import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
@@ -47,10 +47,26 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
-  onSubmit: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
+   *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
+   *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
+   *    状态并保留用户未发送的输入」）；
+   *  - `true` / `undefined`（旧签名）⇒ 按旧行为清空——既有调用零回归。
+   *  发送口**抛错**同样按未受理处理（保留输入，见 submit 的 `.then(_, onRejected)`）
+   *  ——它绝不能被读成"已受理"。
+   *  Promise 形态由 App 的 `handleSubmit` 返回（回执在途期间同样不清空）。 */
+  onSubmit: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]) => void;
+  onSteer?: (
+    task: string,
+    rememberAsProceduralRule: boolean,
+    attachmentIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
    *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
    *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
@@ -67,6 +83,13 @@ interface Props {
   ownership?: Ownership | null;
   onCancel: () => void;
   presetTask?: PresetTask | null;
+  /** #1148：**分离投递**（窗外落定）迟到的失败原文——把没送出去的草稿还给用户。
+   *
+   *  窗外投递的结局来得比判定窗口晚（响应头要等 run 结束才下发），提交时无从等待，
+   *  于是先按已受理清空；真失败时由 hook 经这条 props 把原文送回来，这里按
+   *  `restoreFailedDrafts` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
+   *  对象引用变化即触发一次注入（裸 string 会被 `Object.is` 挡掉第二次，见 `FailedDraft`）。 */
+  failedDraft?: FailedDraft | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
    *  降级隐藏（不伪造列表）。条目即目录真相，零硬编码模型名。 */
   models?: ModelCatalogEntry[];
@@ -136,6 +159,7 @@ export const Composer = memo(function Composer({
   ownership = null,
   onCancel,
   presetTask,
+  failedDraft = null,
   models = [],
   selectedModel = null,
   onModelChange,
@@ -166,6 +190,17 @@ export const Composer = memo(function Composer({
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
+   *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。
+   *
+   *  在途期间按 Enter 被这里挡下时**不再是静默的**：`sending` 让发送键可见地进入
+   *  忙态（#1139，原先只是注释里的已知限制）。窗口 = 一次 ack
+   *  （`raceEarlyResponse` 1200ms 窗内 + WS attach），不是整场 run。 */
+  const sendingRef = useRef(false);
+  /** #1139：忙态的**可见**那一半。`sendingRef` 是同步闸（同一 tick 的第二次按键读不到
+   *  刚 set 的 state），这个 state 只负责让用户看见「上一条还在飞」——此前在途按键
+   *  被静默吞掉，用户读到的是"按键没反应"。 */
+  const [sending, setSending] = useState(false);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -358,9 +393,38 @@ export const Composer = memo(function Composer({
     inputRef.current?.focus();
   }, [presetTask]);
 
+  /** #1148：**分离投递**（窗外落定）迟到的失败——把没送出去的原文还回输入框。
+   *
+   *  只在输入框**为空**时回填：用户若已经打了新内容，那是更新的意图，绝不用旧文本
+   *  覆盖它——成熟产品同款纪律（DSH `restoreFailedDrafts` 只在编辑器空时重建，
+   *  `facade.ts:771,778`；Slack/Discord 的"发送失败不消费用户输入"）。
+   *
+   *  为什么不能像 presetTask 那样直接 `setValue(注入值)`：那条通道是"用户点了示例
+   *  任务 chip"，覆盖输入是用户此刻的明确意图；这里是失败回填，注入时用户可能已经
+   *  在同一会话里打了新草稿，覆盖它就是另一种数据丢失。故与提交回调里
+   *  `accepted === false` 那一支走**同一条**语义（DSH `settleDetachedFailure`：分离
+   *  投递的失败并入同一条失败呈现，而不是另开一条只显示不恢复的旁路）。
+   *
+   *  依赖对象引用即可：每次失败都是新的 `{ text }`（承重理由见 `FailedDraft`），同一段
+   *  文本连续失败两次也各算一次注入。
+   *  StrictMode 下 effect 双跑是安全的：回填是幂等的 setValue（第二跑时输入框已非空
+   *  ⇒ 原样返回，不会出现两份文本）。
+   *  **刻意不抢焦点**：这条回执可能迟到几十秒，届时用户多半在别处（另一个输入框、
+   *  排队项的就地编辑）——抢过来会让他的下一次按键落进输入框。presetTask 那条通道
+   *  抢焦点是因为它由用户点击触发，与这里不是同一种时机。 */
+  useEffect(() => {
+    if (!failedDraft) return;
+    setValue((current) => (current.trim() === '' ? failedDraft.text : current));
+  }, [failedDraft]);
+
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    /* #1029：回执在途期间不许再提交。清空挪到回执之后（见下），文本框不再在提交
+       瞬间变空 ⇒ 连按 Enter / 点发送不再被 `!value.trim()` 自然挡住，**必须**显式
+       闸一次，否则一次输入会发出去 N 次。ref 同步判（不是 state）：同一 tick 里的
+       第二次按键读不到刚 set 的 state。 */
+    if (sendingRef.current) return;
     // #1027 门禁：上传中时拦截发送（按钮 disabled 只挡点击，Ctrl+Enter 走这里）。
     // 阻断提示是界面常驻的 `.composer-send-blocked`——这里只需拦下请求；不拦就会
     // 复现 #1027（readyIds 为空时请求体无 attachments 键，图被静默丢弃）。
@@ -380,18 +444,58 @@ export const Composer = memo(function Composer({
     // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
-    if (mode === 'steer' && onSteer) {
-      onSteer(trimmed, rememberAsProceduralRule, attachmentIds);
-    } else {
-      onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
-    }
-    setValue('');
-    setRememberAsProceduralRule(false);
-    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
-    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
-    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
-    // 或下一轮再带。
-    attachments.clearSent(attachmentIds);
+    /* 清空**只在确认受理之后**发生（#1029）。此前是「提交瞬间无条件清空、失败不
+       还原」——任何发送失败（待裁决 409 / 网络断 / 429…）用户文本都无声消失，而
+       它既没进队列也没落日志，事后完全不可恢复。
+       判据是发送口的返回值（不是猜的）：**显式 `false`** = 未受理 ⇒ 文本与草稿原样
+       留在输入框，用户处理完（如先做恢复裁决）再发；`true`/`undefined`（旧签名）
+       = 受理 ⇒ 按旧行为清空。发送口**抛错**同样按未受理处理（保留），不冒充受理。
+       未落定期间（Promise 未 settle）同样**不清**——清空只发生在 ack 之后。 */
+    const accepted =
+      mode === 'steer' && onSteer
+        ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
+        : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+    sendingRef.current = true;
+    setSending(true);
+    /** 受理落定后的清空。**只在受理侧调用**（`false` 与抛错都不调）。 */
+    const accept = () => {
+      /* 只清**本次提交的那段**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间输入框是
+         活的，用户接着打的字不能被这一刀连带抹掉。
+         判据是**定位后切除**，不是前缀比对：提交的是 `trimmed`，而框里是**原始**
+         文本——首尾带空白 / 多行（粘贴任务、先回车再打字）时 `startsWith` 必假，
+         受理成功后输入框永不清空（独立审查探针实证的回归）。`trimStart` 对齐后
+         `indexOf` 定位，切掉那一段、原样保留两侧。
+         定位不到（在途期间用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不
+         清掉用户没提交的内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
+      setValue((v) => {
+        const lead = v.length - v.trimStart().length;
+        const at = v.trimStart().indexOf(trimmed);
+        if (at === -1) return v;
+        const rest = v.slice(0, lead + at) + v.slice(lead + at + trimmed.length);
+        // 剩下的只有空白（首尾空白 / 多行粘贴的常态）⇒ 就是「清空」，不留残渣。
+        return rest.trim() === '' ? '' : rest;
+      });
+      setRememberAsProceduralRule(false);
+      // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
+      // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
+      attachments.clearSent(attachmentIds);
+    };
+    void Promise.resolve(accepted)
+      .then(
+        (ok) => {
+          // `undefined`（旧签名）/ `true` = 受理；只有显式 `false` 才保留。
+          if (ok !== false) accept();
+        },
+        /* 发送口自己抛错 = **未受理**（正常路径由 App 收口成 `false`，不重复报错）。
+           显式写成分支而不是 `.catch(() => {})`：后者读起来像"吞掉"，且把"抛错"
+           归进了受理侧（清空）——那会让异常路径留下 `sendingRef=false` + 文本不清，
+           用户再按 Enter 就重发一条**已经成功**的消息。 */
+        () => {},
+      )
+      .finally(() => {
+        sendingRef.current = false;
+        setSending(false);
+      });
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
@@ -933,9 +1037,16 @@ export const Composer = memo(function Composer({
               <button
                 className="composer-send"
                 onClick={() => submit('queue')}
-                disabled={locked || !value.trim() || sendBlocked}
+                disabled={locked || !value.trim() || sendBlocked || sending}
                 aria-label="发送"
-                title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+                aria-busy={sending}
+                title={
+                  sendBlocked
+                    ? sendBlockedReason
+                    : sending
+                      ? '上一条消息还在发送中…'
+                      : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+                }
               >
                 <ArrowUp size={16} />
               </button>
@@ -947,9 +1058,16 @@ export const Composer = memo(function Composer({
             <button
               className="composer-send"
               onClick={() => submit('queue')}
-              disabled={locked || !value.trim() || sendBlocked}
+              disabled={locked || !value.trim() || sendBlocked || sending}
               aria-label="发送"
-              title={sendBlocked ? sendBlockedReason : `发送（Enter 排队 · ${modKey()}+Enter 立即）`}
+              aria-busy={sending}
+              title={
+                sendBlocked
+                  ? sendBlockedReason
+                  : sending
+                    ? '上一条消息还在发送中…'
+                    : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+              }
             >
               <ArrowUp size={16} />
             </button>

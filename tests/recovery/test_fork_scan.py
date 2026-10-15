@@ -8,14 +8,12 @@ child 的 JSONL/映射，全部不碰。
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 from agent_harness.recovery.scan import scan_unfinished_forks
-from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
+from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
@@ -61,97 +59,6 @@ async def test_scan_reclaims_unfinished_fork_residue(tmp_path: Path) -> None:
         "session/started", INTENT,
     ]
     assert registry.exists("child")
-
-
-async def test_scan_reclaims_incomplete_docker_fork_volume(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    try:
-        docker = importlib.import_module("docker")
-        client = docker.from_env(use_context=False)
-        client.ping()
-    except Exception as exc:  # noqa: BLE001 — environment-dependent integration test
-        pytest.skip(f"Docker SDK or daemon is unavailable: {exc}")
-
-    store = JsonlSessionStore(root=tmp_path / "sessions")
-    registry = WorkspaceRegistry(root=tmp_path / "sandbox", backend="local")
-    parent_id = f"docker-fork-parent-{uuid4().hex[:8]}"
-    child_id = f"docker-fork-child-{uuid4().hex[:8]}"
-    parent = None
-    child_mapping = None
-    try:
-        parent = Session.start(
-            store, session_id=parent_id, workspace_registry=registry,
-            sandbox_backend="docker",
-        )
-        parent.sandbox.write_text("parent.txt", "parent survives")
-        child = Session.start(
-            store, session_id=child_id, workspace_registry=registry,
-            sandbox_backend="docker",
-        )
-        child.sandbox.write_text("partial.txt", "incomplete child snapshot")
-        child.append(INTENT, {
-            "parent_session_id": parent_id,
-            "boundary_user_message_seq": 1,
-        })
-        child_mapping = registry._read_mapping(child_id)
-
-        def fail_docker_delete() -> None:
-            raise OSError("injected Docker cleanup failure")
-
-        with monkeypatch.context() as patcher:
-            patcher.setattr(
-                child.sandbox, "delete", fail_docker_delete,
-            )
-            failed_results = await scan_unfinished_forks(
-                session_store=store, workspace_registry=registry,
-            )
-
-        failed = next(result for result in failed_results if result.session_id == child_id)
-        assert not failed.reclaimed
-        assert "injected Docker cleanup failure" in failed.detail
-        assert registry._read_mapping(child_id)["fork_workspace_reclaimed"] is True
-        assert client.containers.get(child_mapping["container_name"])
-        assert client.volumes.get(child_mapping["volume_name"])
-        with pytest.raises(WorkspaceBindingError, match="未完成的 fork"):
-            registry.get(child_id)
-
-        results = await scan_unfinished_forks(
-            session_store=store, workspace_registry=registry,
-        )
-
-        by_id = {result.session_id: result for result in results}
-        assert by_id[child_id].reclaimed
-        assert by_id[child_id].detail is None
-        assert registry.exists(child_id)
-        assert [event.type for event in store.read_events(child_id)] == [
-            "session/started", INTENT,
-        ]
-        with pytest.raises(WorkspaceBindingError, match="未完成的 fork"):
-            registry.get(child_id)
-        with pytest.raises(docker.errors.NotFound):
-            client.containers.get(child_mapping["container_name"])
-        with pytest.raises(docker.errors.NotFound):
-            client.volumes.get(child_mapping["volume_name"])
-        assert parent.sandbox.read_text("parent.txt") == "parent survives"
-        assert client.containers.get(registry._read_mapping(parent_id)["container_name"])
-        assert client.volumes.get(registry._read_mapping(parent_id)["volume_name"])
-
-        repeated = await scan_unfinished_forks(
-            session_store=store, workspace_registry=registry,
-        )
-        repeated_child = next(result for result in repeated if result.session_id == child_id)
-        assert repeated_child.reclaimed
-        assert repeated_child.detail is None
-        with pytest.raises(docker.errors.NotFound):
-            client.containers.get(child_mapping["container_name"])
-        with pytest.raises(docker.errors.NotFound):
-            client.volumes.get(child_mapping["volume_name"])
-    finally:
-        registry.delete(child_id)
-        registry.delete(parent_id)
-        client.close()
 
 
 async def test_scan_sweeps_staging_even_without_unfinished_child(

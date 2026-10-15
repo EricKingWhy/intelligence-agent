@@ -29,7 +29,7 @@ import shutil
 import tempfile
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
@@ -289,21 +289,11 @@ async def fork_session(
         # "default"（无生产调用点传非默认值），零变化。
         child_agent_id = parent_started.agent_id or "default"
 
-    parent_sandbox = None
-    child_sandbox_backend = None
-    if workspace_registry is not None and workspace_registry.exists(parent_session_id):
-        parent_sandbox = workspace_registry.get(parent_session_id)
-        from agent_harness.sandbox.docker import DockerSandbox
-
-        if isinstance(parent_sandbox, DockerSandbox):
-            child_sandbox_backend = "docker"
-
     child = Session.start(
         store, agent_id=child_agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
         started_data=inherited or None,
         cwd=session_cwd(parent_events),
-        sandbox_backend=child_sandbox_backend,
     )
     # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
@@ -381,10 +371,7 @@ async def fork_session(
             agent_id=agent_id,
         )
         if workspace_registry is not None:
-            _copy_workspace(
-                workspace_registry, parent_session_id, child,
-                parent_sandbox=parent_sandbox,
-            )
+            _copy_workspace(workspace_registry, parent_session_id, child)
         child.adopt_history(
             seed,
             event_id_remap=event_id_remap,
@@ -449,9 +436,7 @@ async def fork_session(
                 )
             else:
                 if not completed:
-                    _reclaim_failed_fork(
-                        workspace_registry, child.session_id, sandbox=child.sandbox,
-                    )
+                    _reclaim_failed_fork(workspace_registry, child.session_id)
         raise
 
     await meta_store.upsert(
@@ -485,8 +470,41 @@ async def fork_session(
     return child
 
 
+def _is_container_workspace(sandbox: object) -> bool:
+    """该 sandbox 的工作区是否在容器内（POSIX 路径，非宿主目录）——#1048 AC7。
+
+    这里只判「工作区根是否是容器内的 POSIX 路径」：Docker 后端 `workspace_root`
+    是 `PurePosixPath`（如 `/workspace`），宿主上并不存在，故对宿主
+    `Path`/`shutil.copytree` 无效；local 后端是宿主 `Path`。这是比
+    `assembly.uses_sandbox_path_semantics`（"是否走 Sandbox/POSIX 语义"，非 local
+    即真）**更窄**的判据——fork 只在"宿主 copytree 会读到不存在/错误的路径"时才
+    必须换容器内复制，故按工作区根的形态判定，不共用那个谓词。
+    """
+    root = getattr(sandbox, "workspace_root", None)
+    return isinstance(root, PurePosixPath) and not isinstance(root, Path)
+
+
+def _copy_container_workspace(parent_sandbox: object, child_sandbox: object) -> None:
+    """父容器工作区 → 子独立 volume 的**副本**复制（#1048 AC7）。
+
+    绝不走宿主 `Path`/`shutil.copytree`：父 volume 先物化到一次性宿主暂存目录
+    （`Sandbox.export_to_host` 契约方法），再经 `copy_in` 导入子 volume；子得独立
+    对象集，与父互不共享写入。完成标记随之复制，子会话沿用 Docker 后端且已"导入完成"。
+
+    父后端经基类契约提供 `export_to_host`（Docker 覆写为容器内 tar 快照）：父工作区
+    取不到内容时会**响亮抛错**（容器内 `/workspace` 在宿主上不存在 ⇒ 基类默认复制
+    失败），绝不静默产出空子工作区。
+    """
+    staging = Path(tempfile.mkdtemp(prefix="fork-workspace-"))
+    try:
+        parent_sandbox.export_to_host(staging)
+        child_sandbox.copy_in(staging, ".")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _copy_workspace(
-    registry, parent_session_id: str, child: Session, *, parent_sandbox=None,
+    registry, parent_session_id: str, child: Session
 ) -> None:
     """copy-on-fork（ADR-0017 决策 5）：父 workspace 整目录复制为 child 的。
 
@@ -501,35 +519,24 @@ def _copy_workspace(
     根 ⇒ 同卷）到位。**跨卷降级（#527）时发布为非原子直拷**：`os.replace`
     抛 EXDEV 则 `copytree(staging, child_root)`，此时观察者可能看到半份
     child_root；失败由内层清理 + `_reclaim_failed_fork` 兜底。
-    Docker 以 Sandbox `copy_out` / `copy_in` 在宿主临时目录中转，子会话创建独立
-    named volume；不把 `/workspace` 解释成宿主路径。拷贝失败 = 基础设施故障，
-    暂存现场回收后原样上抛（fork 不带残缺快照继续）。
+    **容器内工作区（Docker）不走本函数**：`_is_container_workspace` 命中即
+    早返回，交给 `_copy_container_workspace` 以父 volume 副本导入子独立 volume
+    （#1048 AC7）。故本函数余下的形态只有「命名 workspace 指向的用户目录」——
+    保持原位 copytree（rename 无法跨边界，残余语义不变，由映射与事件层对账兜底）。
+    拷贝失败 = 基础设施故障，暂存现场回收后原样上抛（fork 不带残缺快照继续）。
     """
-    if parent_sandbox is None and not registry.exists(parent_session_id):
+    if not registry.exists(parent_session_id):
         return
-    if parent_sandbox is None:
-        parent_sandbox = registry.get(parent_session_id)
+    parent_sandbox = registry.get(parent_session_id)
     child_sandbox = child.sandbox
     if child_sandbox is None:
         return
-
-    from agent_harness.sandbox.docker import DockerSandbox
-
-    if isinstance(child_sandbox, DockerSandbox):
-        if isinstance(parent_sandbox, DockerSandbox):
-            with tempfile.TemporaryDirectory(prefix="agent-harness-fork-") as temporary:
-                staged_workspace = Path(temporary) / "workspace"
-                parent_sandbox.copy_out(staged_workspace)
-                child_sandbox.copy_in(staged_workspace, ".")
-        else:
-            parent_root = Path(parent_sandbox.workspace_root)
-            if parent_root.is_dir():
-                child_sandbox.copy_in(parent_root, ".")
+    # #1048 AC7：Docker（及任何容器内工作区）后端**不得**对宿主 `/workspace`
+    # 走 `Path`/`shutil.copytree`——父 volume 以副本形式导入子独立 volume。
+    if _is_container_workspace(parent_sandbox) or _is_container_workspace(child_sandbox):
+        _copy_container_workspace(parent_sandbox, child_sandbox)
         return
-
-    if isinstance(parent_sandbox, DockerSandbox):
-        raise TypeError("A Docker parent fork must use an independent Docker workspace")
-    parent_root = Path(parent_sandbox.workspace_root)
+    parent_root = parent_sandbox.workspace_root
     if not parent_root.is_dir():
         return
     child_root = registry.default_workspace_root(child.session_id)
@@ -566,7 +573,7 @@ def _copy_workspace(
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def _reclaim_failed_fork(registry, child_session_id: str, *, sandbox=None) -> None:
+def _reclaim_failed_fork(registry, child_session_id: str) -> None:
     """fork 失败（未落 session/forked）后的幂等补偿：只回收 harness 自建工件。
 
     - `<root>/.fork-tmp/<child_id>-*`（本 child 的暂存目录——带 uuid 后缀，
@@ -578,17 +585,6 @@ def _reclaim_failed_fork(registry, child_session_id: str, *, sandbox=None) -> No
     「fork 未完成」的 durable 可见性事实，启动扫描与续聊对账按它给诚实提示，
     不静默抹掉。每步失败只记日志——补偿绝不掩盖原始错误。
     """
-    from agent_harness.sandbox.docker import DockerSandbox
-
-    if isinstance(sandbox, DockerSandbox):
-        try:
-            if not registry.reclaim_incomplete_fork_workspace(child_session_id):
-                sandbox.delete()
-        except Exception:
-            logger.warning(
-                "fork 补偿：child=%s Docker workspace 回收失败",
-                child_session_id, exc_info=True,
-            )
     try:
         staging_root = registry.fork_staging_root()
         if staging_root.is_dir():

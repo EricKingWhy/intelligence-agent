@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, runtime_checkable
 from uuid import uuid4
 
 import anyio
@@ -209,6 +209,7 @@ from agent_harness.session.model_switch import (
     append_model_change,
     assert_model_resolvable,
     current_model_selection,
+    current_reasoning_effort,
     inherit_parent_model,
     resolve_model_target,
 )
@@ -1063,6 +1064,11 @@ def _run_status_snapshot(run_manager: RunManager, session_id: str) -> str:
     return "in-flight(running)"
 
 
+#: ``_apply_write_with_conflict_retry`` 的返回值类型：透传 callback 的领域结果
+#: （``ModelChange`` / ``PermissionChange`` / ``TaskOutcome``）。
+T = TypeVar("T")
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -1482,7 +1488,8 @@ class SessionService:
         session_tool_call_limits: Mapping[str, Any] | None = None,
         session_max_delegations: int | None = None,
         # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒
-        # 部署默认（当前 "local"）。docker 不可用时 registry.create 抛
+        # 部署默认（按平台解析：Windows ⇒ docker，否则 local，见 web 层
+        # `default_backend_for_platform`）。docker 不可用时 registry.create 抛
         # SandboxUnavailableError（fail-fast，零副作用），绝不静默回落。
         sandbox_backend: str | None = None,
     ) -> LaunchResult:
@@ -2924,6 +2931,65 @@ class SessionService:
             return
         Session.append_event(self._store, session_id, event_type, dict(data))
 
+    async def _apply_write_with_conflict_retry(
+        self,
+        session_id: str,
+        existing: list[SessionEvent],
+        callback: Callable[[Session], T],
+    ) -> T:
+        """非 live 写路径的统一 seq 冲突编排（BUG-011 语义单点）。
+
+        三个非 live 命令写路径（``change_model`` / ``change_permission_mode`` /
+        ``_apply_task_handler``）曾逐字复制过这一段：优先用**在途 run 持有的聚合**
+        （seq 计数器与 listener 都是活的，见 ``_live_session``）；没有在途 run 就
+        「读快照 → 取号 → append」，而这一步不是原子的——并发写者（真机现场是模型项
+        被双击的两个请求）可能在本请求读完之后落盘同号，此时 store 的 seq
+        守卫拒写。重读快照并**重跑整个 callback** 即可拿到新号：``from_*`` 与
+        handler 的 version/CAS 判定随之基于新快照重算，不会只重试最后一条
+        append（Marten ``FetchForWriting`` 同款：命令以新流版本重建待追加结果）。
+
+        ``existing`` 是**调用方读好的当前快照**（三个命令的业务前置检查本就要它），
+        重试时由本方法重读。顺序即契约，三条都不是实现细节：
+
+        1. **每轮先查 live**——在途聚合由事件循环串行化、且该聚合不可重建，不重试；
+        2. 非 live 下**空快照是 404**（``SessionNotFound``）——重试期间会话可能消失；
+        3. ``validate_event_seq`` 在写入 ``try`` **之外**：读时损坏是**终态** 409
+           （日志已坏、重读同一文件无用），不能被下面的 ``except`` 当成可重试的写时
+           冲突吞掉（Kurrent/EventStoreDB 的 ``WrongExpectedVersionException`` 只
+           覆盖写时冲突，损坏日志走它自己的 fail-closed 出口）。
+
+        业务前置检查（模型可解析、权限档合法、挂起审批、TaskOutcome 与成功后的
+        progress 刷新）留在各命令原处——本方法只管「在正确的聚合上执行 callback，
+        撞号就有界重跑」，不替调用方决定写什么。
+
+        与 #1024 的两层重试**不叠加**：本方法构造的聚合从未 ``deliver_to_runtime()``
+        ⇒ store 的 ``allocate`` 快照门保持关闭、撞号仍 fail-closed 拒写，这里的
+        3 次重试不会被 store 的锁内改号静默吞掉（两层覆盖不同面：store 管「同号
+        拒写」，本方法管「调用方在自己的命令边界重读重算」）。
+
+        调用面：**直接**调用它的是上面三条命令；另有 ``progress_resolve_external_edit`` /
+        ``record_evidence`` / ``task_definition`` / ``task_acceptance`` /
+        ``task_acceptance_revision`` / ``task_acceptance_release`` / ``task_verification``
+        经 ``_apply_task_handler`` 落到同一编排点（公开命令共 9 条）。
+        """
+        attempts_left = _WRITE_CONFLICT_ATTEMPTS
+        while True:
+            attempts_left -= 1
+            live = self._live_session(session_id)
+            if live is not None:
+                return callback(live)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
+            try:
+                return callback(Session(session_id, self._store, existing))
+            except SeqConflict:
+                if attempts_left <= 0:
+                    raise
+                existing = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id
+                )
+
     async def _queue_incoming_message(
         self, *, session_id: str, content: str,
         revoke_fact_id: str | None,
@@ -4130,9 +4196,10 @@ class SessionService:
            构造，且边由父日志承载、只是被 lineage 索引进 `session_meta`（下面的补偿步
            读的就是那份索引）——若也拒绝，任何用过子 Agent 的会话将永远删不掉。
 
-        **删除顺序**（D3）：Docker 后端先清本会话容器和私有卷；随后先 DB 行、后文件，每步幂等。列表是**文件系统驱动**的
-        （`list_session_ids` 扫 `<root>/<sid>/events.jsonl`），所以"DB 已删、文件还在"是
-        唯一可自愈的存储崩溃窗口——用户再删一次即收敛；反过来（文件先删）会留下无法自愈的
+        **删除顺序**（ADR-0029 D3）：Docker 私有资源先清，失败时保留 session 事件和映射，
+        让同一 DELETE 可重试；此步成功后再按 D3 先 DB 行、后文件，每步幂等。列表是
+        **文件系统驱动**的（`list_session_ids` 扫 `<root>/<sid>/events.jsonl`），所以
+        "DB 已删、文件还在"仍是可自愈的崩溃窗口；反过来（文件先删）会留下无法自愈的
         孤儿 `session_meta` 行（lineage 里的幽灵父节点）。
 
         其中 DB 段多一步**跨会话的补偿**（D5）：`clear_delegation_parent` 会把"父是被删
@@ -4184,7 +4251,8 @@ class SessionService:
                 f"session(s): delete the child session(s) first"
             )
 
-        # Reclaim owned Docker resources before session data so failures remain retryable.
+        # Docker 容器与私有卷是该会话的外部资源。先清理并保留映射到后续工件步骤；
+        # 任何 Docker 错误向上传播，DB、事件和映射都留着，供同一 DELETE 安全重试。
         await anyio.to_thread.run_sync(
             self._workspace_registry.cleanup_docker_workspace_resources,
             session_id,
@@ -4983,6 +5051,38 @@ class SessionService:
             "恢复入口保持拒绝（本错误不可重试）"
         )
 
+    async def _read_events_precheck(self, session_id: str) -> list[SessionEvent]:
+        """只读恢复预检（#1082）：`recover` 与 `pending_decisions` 共用的五步前导。
+
+        PORT DESIGN（#1082 票面依据）：DeepSeek Harness `session-format-catalog`
+        的单一 restore-current 严格校验（坏记录/seq gap 不伪装成可恢复历史）+
+        Pi SQLite backend 的 no-create 只读打开边界（读面不隐藏创建）——
+        两个恢复入口用同一个完整性判据，今后只改一个副本导致的漂移
+        （GET 把全坏日志报成 404、POST/GET 对同一日志给出不同错误）在机制上被消除。
+        本仓复用既有 `read_events_report`，不引外部 codec。
+
+        五步：校验 session ID → 确保 store → `read_events_report` →
+        404/409 映射。零写入：不追加 SessionEvent、不迁移 Ledger、不创建
+        协调器、不执行外部工具。不得用 `Session.load` 的"尽量可读"语义替换
+        `read_events_report` 的完整性报告。
+
+        边界：无文件或空文件且无损坏行 → SessionNotFound（404）；零可解析
+        事件但有损坏行 → EventLogCorruptError（409）；部分可解析且有损坏行
+        → 409；合法事件 → 返回已验证的事件列表。
+        """
+        self._validate_session_id(session_id)
+        await self._ensure_stores()
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
+        )
+        if not existing and not integrity.corrupt_lines:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
+        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
+        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
+        self._raise_if_event_log_corrupt(session_id, integrity)
+        return existing
+
     async def recover(
         self,
         session_id: str,
@@ -5009,17 +5109,7 @@ class SessionService:
             RecoveryError,
         )
 
-        self._validate_session_id(session_id)
-        await self._ensure_stores()
-        existing, integrity = await anyio.to_thread.run_sync(
-            self._store.read_events_report, session_id
-        )
-        if not existing and not integrity.corrupt_lines:
-            raise SessionNotFound(f"session '{session_id}' not found")
-        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
-        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
-        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
-        self._raise_if_event_log_corrupt(session_id, integrity)
+        existing = await self._read_events_precheck(session_id)
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
@@ -5116,14 +5206,7 @@ class SessionService:
         RUNNING 行会进它的 409 ``pending_decisions``；这里返回空。两者只在无在途
         run 时逐字段一致——读面只报此刻可裁决的行。
         """
-        self._validate_session_id(session_id)
-        await self._ensure_stores()
-        existing, integrity = await anyio.to_thread.run_sync(
-            self._store.read_events_report, session_id
-        )
-        if not existing and not integrity.corrupt_lines:
-            raise SessionNotFound(f"session '{session_id}' not found")
-        self._raise_if_event_log_corrupt(session_id, integrity)
+        existing = await self._read_events_precheck(session_id)
         run_owner_ids = {
             session_id,
             session_budget_key(existing, session_id=session_id),
@@ -5444,33 +5527,14 @@ class SessionService:
         # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
         #
-        # 冲突重试（BUG-011）：非 live 路径的「读快照 → 取号 → append」不是原子的
-        # ——并发写者（真机现场是模型项被双击的两个请求）可能在本请求读完之后落盘
-        # 同号，此时 store 的 seq 守卫拒写。重新读快照再试即可拿到新号，from_* 也
-        # 随之从新快照重算。live 路径由事件循环串行化、且该聚合不可重建，不重试。
-        #
-        # 存在性与 seq 校验放在**循环内**、append 的 try 之外：重试期间会话可能消失
-        # （→404）或日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已
-        # 损坏、重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
-        attempts_left = _WRITE_CONFLICT_ATTEMPTS
-        while True:
-            attempts_left -= 1
-            live = self._live_session(session_id)
-            if live is not None:
-                return append_model_change(live, target)
-            if not existing:
-                raise SessionNotFound(f"session '{session_id}' not found")
-            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
-            try:
-                return append_model_change(
-                    Session(session_id, self._store, existing), target
-                )
-            except SeqConflict:
-                if attempts_left <= 0:
-                    raise
-                existing = await anyio.to_thread.run_sync(
-                    self._store.read_events, session_id
-                )
+        # 冲突重试（BUG-011）走 _apply_write_with_conflict_retry——404 / 409 /
+        # 重试上界的判据与理由见该方法的 docstring（三条非 live 命令写路径
+        # 直接调用它；另有 task 族公开命令经 _apply_task_handler 共享）。
+        return await self._apply_write_with_conflict_retry(
+            session_id,
+            existing,
+            lambda session: append_model_change(session, target),
+        )
 
     async def change_permission_mode(
         self, *, session_id: str, permission_mode: str, auto_approve: bool
@@ -5509,32 +5573,19 @@ class SessionService:
             )
 
         change = PermissionChange(permission_mode=mode, auto_approve=auto_approve)
-        # 与 change_model 同款 seq 重试循环（BUG-011 的语义单点在该方法注释）。
-        attempts_left = _WRITE_CONFLICT_ATTEMPTS
-        while True:
-            attempts_left -= 1
-            live = self._live_session(session_id)
-            if live is not None:
-                return append_permission_change(live, change)
-            if not existing:
-                raise SessionNotFound(f"session '{session_id}' not found")
-            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
-            try:
-                return append_permission_change(
-                    Session(session_id, self._store, existing), change
-                )
-            except SeqConflict:
-                if attempts_left <= 0:
-                    raise
-                existing = await anyio.to_thread.run_sync(
-                    self._store.read_events, session_id
-                )
+        # seq 重试循环与 change_model 共用 _apply_write_with_conflict_retry。
+        return await self._apply_write_with_conflict_retry(
+            session_id,
+            existing,
+            lambda session: append_permission_change(session, change),
+        )
 
     # ── W-07（#351）：Task 交付状态命令/查询面 ─────────────────────────────
     # 校验与落盘判据住在 `session/task.py`（handler 硬校验，拒绝零事件；接受/
     # 释放走 expected_version CAS）；本类只做它职责内的两件事：会话存在性 +
     # store 写入路径（在途 run 挂 live 聚合，否则读快照 + seq 冲突重试——
-    # 与 change_model/change_permission_mode 同款，语义单点见 BUG-011 注释）。
+    # 与 change_model/change_permission_mode 同款，编排单点见
+    # ``_apply_write_with_conflict_retry`` 的 docstring）。
     # 错误以 TaskOutcome 返回（error_kind: shape/conflict），不抛领域异常——
     # HTTP 翻译在 web 层按 kind 走 422/409（spec 11 §6.1 口径）。
 
@@ -5698,30 +5749,15 @@ class SessionService:
         重读快照重跑整个 handler（derive + 版本判定随之基于新快照，CAS 语义不
         因重试而放松）。live 路径由事件循环串行化，不重试。
 
-        存在性校验放在**循环内**、append 的 try 之外（与 change_model
-        / change_permission_mode 逐字同款）：重试期间会话可能消失（→404）或
-        日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已损坏、
-        重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
+        编排本体是 ``_apply_write_with_conflict_retry``（回退 404 / 409 与重试上界
+        的判据与理由见该方法的 docstring）——直接调用点三条，经本方法共享的
+        公开命令共九条。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-        attempts_left = _WRITE_CONFLICT_ATTEMPTS
-        while True:
-            attempts_left -= 1
-            live = self._live_session(session_id)
-            if live is not None:
-                return handler(live, **kwargs)
-            if not existing:
-                raise SessionNotFound(f"session '{session_id}' not found")
-            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
-            try:
-                return handler(Session(session_id, self._store, existing), **kwargs)
-            except SeqConflict:
-                if attempts_left <= 0:
-                    raise
-                existing = await anyio.to_thread.run_sync(
-                    self._store.read_events, session_id
-                )
+        return await self._apply_write_with_conflict_retry(
+            session_id, existing, lambda session: handler(session, **kwargs)
+        )
 
     async def _apply_task_and_refresh(
         self, session_id: str, handler: Callable[..., TaskOutcome], **kwargs
@@ -6261,6 +6297,7 @@ __all__ = [
     "append_model_change",
     "assert_model_resolvable",
     "current_model_selection",
+    "current_reasoning_effort",
     "inherit_parent_model",
     "resolve_model_target",
     "validate_session_id",

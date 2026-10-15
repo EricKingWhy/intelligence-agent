@@ -69,7 +69,7 @@ def delete(self) -> None:
 **"这个会话曾经存在过"只在结构化日志里可查**（D7），不在领域数据里留痕——刻意不与"真相源是文件系统"
 的口径打架。
 
-### D2：宿主路径按白名单删除，Docker 资源按所有权删除（本 ADR 的安全核心）
+### D2：宿主路径按白名单删除，Docker 资源按映射所有权删除（本 ADR 的安全核心）
 
 只允许删除**用 `workspace_dir + session_id` 自己拼出来**的三条路径：
 
@@ -79,9 +79,7 @@ def delete(self) -> None:
 | `<workspace_dir>/workspaces/<sid>.json` | 沙箱映射记录 |
 | `<workspace_dir>/workspaces/<sid>/` | 默认形态的会话工作区目录（harness 自建） |
 
-**禁止**把映射里的 `workspace_root` 当作宿主目录删除目标（它可能指向用户仓库）。本地与 PSEC 后端仍只调用 `discard_session_artifacts()` 删除固定白名单，且不解引用 `workspace_root`。Docker 私有工作区另由 `cleanup_docker_workspace_resources()` 清理：它只接受 `session_id` 与后端匹配、容器名和卷名均为 `agent-harness-<session_id>` 的映射，不读取映射路径，不调用通用的 `WorkspaceRegistry.delete()`。映射保留到最终工件清理步骤，使 Docker 失败时硬删请求可重试。若清理结果不确定且私有卷已不存在，`get()` 会失败关闭，不让 Docker 以同名空卷恢复会话。
-
-`WorkspaceRegistry.delete()` 继续没有生产调用方；会话 id 必须先过 `validate_session_id`（`[A-Za-z0-9_-]+`，路径穿越防护），否则 `../../` 这类输入会让固定路径白名单失效。
+**禁止**把映射里的 `workspace_root` 当作宿主目录删除目标（它可能指向用户仓库）。本地与 legacy PSEC 后端仍只调用 `discard_session_artifacts()` 删除固定白名单，不使用 `workspace_root`。Docker 私有工作区另由 `cleanup_docker_workspace_resources()` 清理：它校验映射的 session 身份、后端和确定性容器/卷名，只按这些名字删除资源，不把映射路径作为删除目标；映射保留到最终工件清理步骤，使 Docker 失败时硬删请求可重试。会话 id 必须先过 `validate_session_id`（`[A-Za-z0-9_-]+`，路径穿越防护），否则 `../../` 这类输入会让固定路径白名单失效。
 
 回归锁（**必须有**）：造一个 cwd 会话指向一个临时真实目录（内含文件）→ 硬删 → 断言该目录
 **仍然存在且内容逐字节不变**（`tests/web/test_session_delete_api.py`）。
@@ -100,10 +98,9 @@ def delete(self) -> None:
 用户的真实目录两种形态下都不会被引用。（该坑本身**不在本票修**：它不影响删除的正确性，
 改它属于会话工作区语义，另开票。）
 
-### D3：Docker 资源先清，随后先 DB、后文件；删除可重试
+### D3：Docker 资源先清，随后先 DB、后文件；每一步幂等，重跑即自愈
 
-- Docker 后端先清本会话拥有的容器和私有卷，再改 DB 行或会话文件。清理失败时会话日志和映射仍在，调用方可重试；若 Docker 已删除资源但响应失败，缺失卷检查会阻止恢复时创建空工作区。
-- **DB 行先删**（`session_meta` / `checkpoints` / `operations` / `workspace_sessions`），**文件后删**。
+- Docker 后端先清该会话拥有的容器和私有卷；若清理失败，事件日志与映射仍在，调用方可重试。随后 **DB 行先删**（`session_meta` / `checkpoints` / `operations` / `workspace_sessions`），**文件后删**。
 - 理由：崩溃窗口的后果不对称。
   - "DB 已删、文件还在" → 会话**仍可见**（列表是 FS 驱动）但丢了恢复辅助数据；**重跑 `DELETE` 可自愈**（每步幂等）。
   - "文件已删、DB 行还在" → 会话从列表消失，但 `session_meta` 残留会让 lineage **冒出幽灵父节点**

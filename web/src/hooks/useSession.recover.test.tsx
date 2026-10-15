@@ -26,6 +26,10 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => apiState.events),
+    // #1030：打开会话会主动拉一次待裁决清单。默认「后端明确说没有」（`[]`）——
+    // 本文件的既有用例全部聚焦 409/recover 自己那条路径，主动读面不该干扰它们；
+    // 主动读面本身的行为由 useSession.pendingDecisions.test.tsx 覆盖。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     recoverSession: vi.fn(),
   };
@@ -33,6 +37,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 
 import {
   RecoverError,
+  getSessionRecovery,
   recoverSession,
   type PendingDecision,
   type RecoverDecisionInput,
@@ -169,6 +174,7 @@ describe('#357 useSession · submitDecisions 提交续跑（契约 4）', () => 
   it('提交后重调 recover：同一 decisions 载荷 + 200 走既有 done 重建', async () => {
     await mount();
     await enterViewing(SID);
+    const readsBeforeSubmit = vi.mocked(getSessionRecovery).mock.calls.length;
 
     const decisions: RecoverDecisionInput[] = [
       { tool_call_id: 'call_1', verdict: 'RETRY' },
@@ -183,8 +189,19 @@ describe('#357 useSession · submitDecisions 提交续跑（契约 4）', () => 
     expect(vi.mocked(recoverSession)).toHaveBeenCalledWith(SID, decisions);
     const st = captured.hook!.recoverState;
     expect(st.status).toBe('done');
-    // 成功落地后不再携带待裁决清单
-    expect(st.pendingDecisions).toBeNull();
+    // #1030 审查 P1：**不再**由"POST 成功"推断清单已结清——200 只证明请求被接受
+    // （DEFER 按后端契约不解封）。这里断言的是**重读后的事实**：本文件的
+    // `getSessionRecovery` mock 返回 `[]`（后端说没有待裁决）⇒ `[]` 是正确读数；
+    // `null`（"不知道"）反而是修前那个谎报的形状。真正的 DEFER 不解封语义由
+    // `useSession.pendingDecisions.test.tsx` 的「裁决 200 之后必须重读清单」逐条锁住。
+    expect(st.pendingDecisions).toEqual([]);
+    // 补审（#1030）P3：上面那句 `toEqual([])` 已**不再鉴别"重读"**——本文件的 mock
+    // 初读就返回 `[]`，于是保留 `prev` 的修复让它在"从不重读"（P1 原形）下也绿。
+    // 重读这件事本身在这里补一次计数断言，别名实归地盯着它。
+    expect(
+      vi.mocked(getSessionRecovery).mock.calls.length,
+      '200 之后没有重读清单',
+    ).toBeGreaterThan(readsBeforeSubmit);
     // 200 走同一 projectHistory 重建管线（tool/result 进入视图）
     expect(captured.hook!.conversation?.events.some((e) => e.type === 'tool/result')).toBe(true);
   });

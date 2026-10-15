@@ -448,7 +448,7 @@ def test_dsh_git_record_carries_modes_and_detects_chmod_drift(
     if os.name == "nt":
         pytest.skip("Windows does not expose Git executable-bit changes for mode-drift checks")
 
-    from agent_harness.skills.package_manager import _git_modes_sha256_from_package
+    from agent_harness.package_source import _git_modes_sha256_from_package
 
     workspace = tmp_path / "workspace"
     global_skills = tmp_path / "global-skills"

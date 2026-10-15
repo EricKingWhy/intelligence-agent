@@ -16,7 +16,6 @@ import pytest
 
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.sandbox.capabilities import (
-    SUPPORTED_BACKENDS,
     SandboxCapabilities,
     SandboxUnavailableError,
     probe_all_capabilities,
@@ -51,18 +50,6 @@ class TestSandboxBackendSelection:
         with pytest.raises(ValidationError) as exc_info:
             CreateSessionRequest(task="t", sandbox_backend="windows-sandbox")
         assert "sandbox_backend must be one of" in str(exc_info.value)
-
-    def test_request_rejects_legacy_windows_psec_for_new_sessions(self):
-        """Legacy mappings may restore PSEC, but new sessions cannot request it."""
-        from pydantic import ValidationError
-
-        from agent_harness.sandbox.capabilities import SELECTABLE_BACKENDS
-        from agent_harness.web.app import CreateSessionRequest
-
-        assert "windows_psec" in SUPPORTED_BACKENDS
-        assert SELECTABLE_BACKENDS == ("local", "docker")
-        with pytest.raises(ValidationError, match="sandbox_backend must be one of"):
-            CreateSessionRequest(task="t", sandbox_backend="windows_psec")
 
     def test_request_rejects_unknown_field_still(self):
         """#363：extra=forbid 不变，未知字段仍响亮 422。"""
@@ -121,29 +108,11 @@ class TestProbeDocker:
         assert caps.available is False
         assert caps.reason is not None and "daemon" in caps.reason.lower()
 
-    def test_probe_all_returns_available_backend_families(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        """选择器只探测并展示仍可选择的 local 与 Docker 后端。"""
-        import agent_harness.sandbox.capabilities as cap_mod
+    def test_probe_all_returns_available_backend_families(self):
+        """#1048 AC2：probe_all 只列**新会话可选**后端（local/docker）。
 
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_local_capabilities",
-            lambda: SandboxCapabilities(backend="local", available=True),
-        )
-        monkeypatch.setattr(
-            cap_mod,
-            "probe_docker_capabilities",
-            lambda **_kwargs: SandboxCapabilities(backend="docker", available=True),
-        )
-
-        def psec_must_not_be_probed(**_kwargs):
-            pytest.fail("legacy PSEC backend must not be advertised or probed")
-
-        monkeypatch.setattr(
-            cap_mod, "probe_windows_psec_capabilities", psec_must_not_be_probed
-        )
+        `windows_psec` 已降级为 legacy-only，不再进选择器。
+        """
         caps = probe_all_capabilities()
         backends = {c.backend for c in caps}
         assert backends == {"local", "docker"}
@@ -181,6 +150,11 @@ class TestProbeWindowsPsec:
         assert caps.available is False
         assert caps.reason is not None and "policy" in caps.reason.lower()
         assert calls == []
+
+    # #1048 AC2：`probe_all_capabilities` 不再探测 / 列出 windows_psec（它已降级为
+    # legacy-only，仅用于恢复既有映射）。原先经由 probe_all 走 PSEC workspace 策略
+    # 报文校验的两条 Windows-only 用例随之退役；`probe_windows_psec_capabilities`
+    # 本身仍由本类下列用例直接覆盖。
 
     def test_probe_accepts_only_basecontainer_for_the_requested_policy(
         self,
@@ -286,15 +260,6 @@ class TestRegistryBackendSelection:
         """未知后端名响亮失败（抄 DSH：typo 不静默改策略）。"""
         with pytest.raises(ValueError, match="未知"):
             registry.create("sess_3", backend="k8s")
-
-    def test_legacy_windows_psec_cannot_be_selected_for_new_workspace(
-        self, registry: WorkspaceRegistry
-    ):
-        """PSEC remains recoverable for old mappings but cannot create new sessions."""
-        with pytest.raises(ValueError, match="支持：local, docker"):
-            registry.create("sess_legacy", backend="windows_psec")
-
-        assert not registry.exists("sess_legacy")
 
     def test_docker_unavailable_raises_no_silent_fallback(
         self, registry: WorkspaceRegistry

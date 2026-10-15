@@ -36,13 +36,6 @@ from agent_harness.tools.bash import _BashArgs
 _SCHED_GRACE_SECONDS = 10
 
 
-def _new_docker_sandbox(docker_sandbox_type):
-    """Create the low-level fake expected by tests that bypass DockerSandbox.__init__."""
-    sandbox = object.__new__(docker_sandbox_type)
-    sandbox._deleted = False
-    return sandbox
-
-
 def test_local_exec_caps_captured_output(tmp_path):
     """输出超过捕获上限：子进程正常结束，超限部分丢弃且带截断标记。"""
     (tmp_path / "gen.py").write_text("print('x' * 5000)", encoding="utf-8")
@@ -644,7 +637,7 @@ def _docker_sandbox_with_slow_exec(delay: float) -> object:
     """构造统一 low-level Docker exec fake，不需要 Docker daemon。"""
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     api = _SlowDockerExec(delay)
     container = Mock(id="container-1", status="running")
 
@@ -692,7 +685,7 @@ def test_docker_exec_create_exception_is_not_timeout_result():
     """Docker API failure must remain an exception, not a successful Bash result."""
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     container = Mock(id="container-1", status="running")
     container.kill = Mock()
     api = Mock()
@@ -726,7 +719,7 @@ def test_docker_exec_create_late_result_is_reaped_after_cancel():
     """A late exec_create result must trigger container cleanup after cancel."""
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     api = _BlockingDockerExecCreate()
     container = Mock(id="container-1", status="running")
     container.kill = Mock()
@@ -790,7 +783,7 @@ def _sandbox_with_production_exec_state(api, container):
     """
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = container
     sandbox._client = Mock(api=api)
     # 唯一名字：避免命中类级 WeakValueDictionary / poisoned 状态
@@ -856,7 +849,7 @@ def test_docker_exec_start_exception_kills_container():
     """A stream-start failure must stop a possibly running exec/container."""
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     container = Mock(id="container-1", status="running")
     api = Mock()
     api.exec_create.return_value = {"Id": "exec-error"}
@@ -904,7 +897,7 @@ def test_docker_exec_closes_stream_after_successful_read():
     api.exec_start.return_value = stream
     api.exec_inspect.return_value = {"ExitCode": 0}
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = Mock(id="container-1", status="running")
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
@@ -982,7 +975,7 @@ def test_docker_exec_closes_response_before_failed_stream(failure_mode):
     )
     if failure_mode == "late_stream":
         container.kill = Mock(side_effect=read_release.set)
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = container
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
@@ -1021,7 +1014,7 @@ def test_docker_exec_fails_closed_when_response_close_fails():
     api.exec_create.return_value = {"Id": "exec-close-failure"}
     api.exec_start.return_value = _Stream()
     api.exec_inspect.return_value = {"ExitCode": 0}
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = Mock(id="container-1", status="running")
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
@@ -1093,7 +1086,7 @@ def test_docker_exec_finishes_response_close_before_unblocking_reader(late_clean
 
     worker = threading.Thread(target=lambda: reader_release.wait(5))
     worker.start()
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     stream = _Stream()
     holder = {"stream": stream}
     if late_cleanup:
@@ -1164,7 +1157,7 @@ def test_docker_exec_reports_reader_thread_after_container_stop_failure():
     container = Mock(id="container-1", status="running")
     container.kill = Mock(side_effect=RuntimeError("kill unavailable"))
     container.wait = Mock(side_effect=RuntimeError("wait unavailable"))
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = container
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
@@ -1230,7 +1223,7 @@ class _StreamingDockerExec:
 def _docker_sandbox_with_streaming_exec(*, ignore_term: bool = False):
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     api = _StreamingDockerExec()
     container = Mock(id="container-1", status="running")
 
@@ -1278,7 +1271,7 @@ class _ConcurrentDockerExec:
 def _docker_sandbox_with_concurrent_exec():
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     api = _ConcurrentDockerExec()
     container = Mock(id="container-1", status="running")
     sandbox._container_name = "container-exec-lock-test"
@@ -1302,7 +1295,7 @@ def test_docker_timeout_does_not_kill_a_concurrent_exec():
     sandbox, api = _docker_sandbox_with_concurrent_exec()
     from agent_harness.sandbox.docker import DockerSandbox
 
-    other_sandbox = _new_docker_sandbox(DockerSandbox)
+    other_sandbox = object.__new__(DockerSandbox)
     other_sandbox._container_name = sandbox._container_name
     other_sandbox._exec_state = DockerSandbox._state_for_container(other_sandbox._container_name)
     other_sandbox._exec_lock = other_sandbox._exec_state.lock
@@ -1357,7 +1350,7 @@ class _LargeDockerExec:
 def _docker_sandbox_with_large_output():
     from agent_harness.sandbox.docker import DockerSandbox
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = Mock(id="container-1", status="running")
     sandbox._container.exec_run = Mock(return_value=Mock(exit_code=0, output=b""))
     sandbox._client = Mock(api=_LargeDockerExec())
@@ -1389,7 +1382,7 @@ def test_docker_incomplete_pid_marker_keeps_stderr():
         def exec_inspect(self, exec_id):
             return {"ExitCode": 0}
 
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container = Mock(id="container-1", status="running")
     sandbox._client = Mock(api=_MissingMarkerExec())
     sandbox._exec_lock = threading.Lock()
@@ -1447,7 +1440,7 @@ def test_docker_cleanup_failure_guard_survives_sandbox_collection():
     from agent_harness.sandbox.docker import DockerSandbox
 
     container_name = f"cleanup-failed-{time.monotonic_ns()}"
-    sandbox = _new_docker_sandbox(DockerSandbox)
+    sandbox = object.__new__(DockerSandbox)
     sandbox._container_name = container_name
     sandbox._exec_state = DockerSandbox._state_for_container(container_name)
     sandbox._mark_exec_cleanup_failed()
@@ -1456,7 +1449,7 @@ def test_docker_cleanup_failure_guard_survives_sandbox_collection():
     del sandbox
     assert sandbox_ref() is None
 
-    recovered = _new_docker_sandbox(DockerSandbox)
+    recovered = object.__new__(DockerSandbox)
     recovered._container_name = container_name
     recovered._exec_state = DockerSandbox._state_for_container(container_name)
     recovered._exec_lock = recovered._exec_state.lock

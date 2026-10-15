@@ -1,0 +1,1 @@
+2026-10-13	#1107 P4-a 修回笔（审查 findings P4-a）：tests/session/test_model_change.py 模块级 docstring 的 MODEL_CHANGED data 契约枚举补可选 `reasoning_effort` 键（注明可选、有值落键/无值缺键，口径与类级 docstring 同源），消除陈旧枚举；纯 docstring 改动不改行为，冒烟测试 34 passed。P4-b（PRD 枚举）与 Correctness 2 条 P4 为票面边界外备忘，按任务书不动。	6834d9e306d73a6032b7226be1d0e32bd3bf8f95..f7ca5f4e27db7739cda5ecd67657ccc96c1201ed

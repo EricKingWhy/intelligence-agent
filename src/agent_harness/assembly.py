@@ -285,10 +285,9 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
-    from agent_harness.sandbox.docker import DockerSandbox
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-    sandbox_native_paths = isinstance(sandbox, (DockerSandbox, WindowsPsecSandbox))
+    # #1048 AC8：Docker 与 PSEC 一样对工作区走 Sandbox/POSIX 语义；只有 local
+    # 子进程后端是宿主目录语义。宿主源路径仅作项目身份与导入来源。
+    sandbox_path_semantics = uses_sandbox_path_semantics(sandbox)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -297,7 +296,7 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            if sandbox_native_paths:
+            if sandbox_path_semantics:
                 kwargs["project_instructions_loader"] = (
                     lambda relative_path: project_instructions.load_for_sandbox_path(
                         session_id, sandbox, relative_path,
@@ -420,6 +419,22 @@ def _project_instruction_cwd(
     raise ValueError(
         "cannot resolve a host workspace path for project instructions"
     )
+
+
+def uses_sandbox_path_semantics(sandbox: object) -> bool:
+    """该 sandbox 的工作区是否走 Sandbox/POSIX 路径语义（#1048 AC8）。
+
+    - Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端 ⇒ `True`
+      （路径解析、指令读取、审批身份都用 Sandbox 抽象，宿主源路径仅作项目身份
+      与导入来源）；
+    - `local` 子进程后端直接以宿主目录为工作区 ⇒ `False`。
+
+    判据单一来源：**只有 `LocalSubprocessSandbox` 是宿主目录语义**，其余后端
+    （含容器内 `/workspace`）一律 Sandbox/POSIX 语义。
+    """
+    from agent_harness.sandbox.local import LocalSubprocessSandbox
+
+    return not isinstance(sandbox, LocalSubprocessSandbox)
 
 
 def root_registry_tool_names(
@@ -696,10 +711,7 @@ async def build_runtime(
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
     )
-    from agent_harness.sandbox.docker import DockerSandbox
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-    if isinstance(instruction_workspace, (DockerSandbox, WindowsPsecSandbox)):
+    if uses_sandbox_path_semantics(instruction_workspace):
         await asyncio.to_thread(
             project_instructions.load_for_sandbox_session,
             session_id,
@@ -709,7 +721,6 @@ async def build_runtime(
         await asyncio.to_thread(
             project_instructions.load_for_session, session_id, instruction_cwd,
         )
-    runtime_workspace_root = instruction_workspace.workspace_root
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
     context_artifact_store = tooling.context_artifact_store
@@ -839,7 +850,7 @@ async def build_runtime(
                 # #358 / W-14：子执行器与父同一审批面（决策 11 权限传递）——
                 # 显式注入产品级默认权限矩阵（规则引擎本体默认 None = 不启用）。
                 permission_rules=default_rule_set(),
-                workspace_root=runtime_workspace_root,
+                workspace_root=instruction_cwd,
             )
 
         runtime_multiagent_provider.activate(
@@ -895,12 +906,18 @@ async def build_runtime(
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
-        if isinstance(instruction_workspace, (DockerSandbox, WindowsPsecSandbox)):
-            snapshot = project_instructions.load_for_sandbox_session(
-                session_id, instruction_workspace,
+        # #1048 AC8：与 build_runtime 的指令加载分支**同源**（`uses_sandbox_path_semantics`）：
+        # 容器（Docker）工作区经 `load_for_sandbox_session` 用 sandbox 根（如 /workspace）缓存，
+        # 这里若改用宿主 `instruction_cwd` 会与缓存 cwd 不一致 ⇒ `ValueError: session cwd
+        # changed`，每个 Docker 会话首个 context build 就炸。PSEC 时代两者恰好都等于宿主
+        # 路径故未暴露；Docker 的容器内根 ≠ 宿主源路径，必须走同一加载器。
+        snapshot = (
+            project_instructions.load_for_sandbox_session(
+                session_id, instruction_workspace
             )
-        else:
-            snapshot = project_instructions.load_for_session(session_id, instruction_cwd)
+            if uses_sandbox_path_semantics(instruction_workspace)
+            else project_instructions.load_for_session(session_id, instruction_cwd)
+        )
         return snapshot.with_runtime_context(runtime_context)
 
     # #823 / MM-02（A2）：视觉能力按**当前请求模型**判定（PRD D6——"fallback 自动
@@ -921,7 +938,7 @@ async def build_runtime(
                               # #358 / W-14：主执行器注入产品级默认权限矩阵
                               # （规则引擎本体默认 None = 不启用；矩阵归 composition root）。
                               permission_rules=default_rule_set(),
-                              workspace_root=runtime_workspace_root),
+                              workspace_root=instruction_cwd),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,

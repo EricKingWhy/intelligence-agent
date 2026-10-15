@@ -1,4 +1,4 @@
-"""会话工作区的只读浏览面与显式副本导出（#191 / #1048）。
+"""会话工作区的**只读**浏览面（#191 / `WORKSPACE_PANEL_PRD.md` §3.3 + §6 票 8）。
 
 PRD 的「文件/改动」面（#189）回答的是"**这次 agent 改过哪些文件**"——那份数据来自事件流
 （工具结果的 `before`/`after` + `changed_files`），是**会话真相**。本模块补的是另一个问题：
@@ -8,7 +8,7 @@ PRD 的「文件/改动」面（#189）回答的是"**这次 agent 改过哪些�
 本模块**不**参与"哪些文件是 agent 改的"的判断，它只如实反映工作区当前的样子。
 前端若要标"这是本会话改过的文件"，那份标记只能来自事件投影，不能拿这里的内容反推。
 
-五条路由（全部挂在会话下；浏览与 git 查询只读，导出单独复制到宿主新目录）
+四条路由（全部只读、全部挂在会话下）
 ------------------------------------
 
 | 方法 | 路径 | 做什么 |
@@ -17,11 +17,10 @@ PRD 的「文件/改动」面（#189）回答的是"**这次 agent 改过哪些�
 | GET | `/api/sessions/{id}/workspace/file` | 读一个文件的**行切片**（可从第 N 行续读） |
 | GET | `/api/sessions/{id}/workspace/git/status` | `git status --porcelain=v1` |
 | GET | `/api/sessions/{id}/workspace/git/diff` | `git diff [--staged] [path]` |
-| POST | `/api/sessions/{id}/workspace/export` | 将当前快照复制到宿主上的新目录 |
 
 ## 访问控制（本票的主要风险面，AGENTS.md §4.3）
 
-四道闸，一道都不新造：
+三道闸，一道都不新造：
 
 1. **来源闸**：`require_trusted_origin`（ADR-0028 D2）——与项目 / 目录列举 / 记忆端点
    **同一份实现**。宿主侧读写能力只接受本机来源（配了 JWT 则由认证层接管）。
@@ -32,8 +31,6 @@ PRD 的「文件/改动」面（#189）回答的是"**这次 agent 改过哪些�
    忘了调，边界就没了。越界表现为 `PermissionError` → 403（与目录浏览同一句策展文案）。
 3. **会话归属**：路由挂在 `/api/sessions/{session_id}/workspace/...` 下，workspace 由
    **该会话的映射**解析（`WorkspaceRegistry.get`），不接客户端给的任意根目录。
-4. **导出目标**：复用 `require_trusted_origin` 来源闸与宿主目录规范化；目标父目录必须存在，
-   目标目录必须是新路径。实际文件传输只调用 Sandbox 的 `copy_out`。
 
 ### git 路由为什么要额外做两件事（#191 code-review 的 P0）
 
@@ -58,9 +55,8 @@ git 的操作范围是**仓库**，不是 workspace——而仓库可能比 work
 两条都不可省：只做第 2 条挡不住穿越（见上表第三行）；而第 2 条里"围栏与过滤各给一个
 pathspec"也不行——多个 pathspec 取**并集**，`-- . "a.py"` 会退化成整个子树（过滤器失效）。
 
-**浏览响应不含宿主绝对路径**：`files` / `lines` 里只有相对 POSIX 路径；越界拒绝的文案只用
+**响应不含宿主绝对路径**：`files` / `lines` 里只有相对 POSIX 路径；越界拒绝的文案只用
 调用方给的那个相对路径（`os_error_detail(path=...)` 优先用它，而不是异常自带的绝对路径）。
-导出成功响应回显规范化后的目标路径，因为它是调用方显式指定的本机写入位置。
 **例外如实说明**：git 的 `stdout` / `stderr` 是**原样透传**的——`git diff` 的 `a/`、`b/`
 前缀是**仓库相对**路径，工作区嵌在仓库里时可能带上级目录名（如 `workspaces/<sid>/x`），
 `git status` 的 porcelain 路径同样相对仓库根。那是 git 自己的输出契约，改写它就是伪造
@@ -79,8 +75,9 @@ local 的 `newline=""` 字节透传（CRLF 不被折叠）与 docker 的容器�
 
 ## 已知不做（如实划界）
 
-- **不原地修改**：没有 workspace 内文件的写入 / 删除 / git 暂存入口。导出只创建宿主副本；git
-  只跑 `status` / `diff`，命令由 `tools/git.py` 的共享构造器生成。
+- **不写**：没有写文件 / 删文件 / 暂存的入口（票面只要求只读）。git 只跑 `status`/`diff`
+  两种读查询，命令由 `tools/git.py` 的 `git_status_command` / `git_diff_command` 构造
+  ——白名单（挡 shell 元字符）也只有那一份。
 - **不做内容搜索**：没有 grep/glob 检索面（工作区全量枚举由 `files` 的 `pattern` 过滤覆盖）。
 - **不做大文件的分块续传**：`file` 是行切片 + 续读指针；超大文件会被完整读进内存再切片
   （与 artifact 的 `inspect` 同一取舍——那条路径也是 `load()` 全量后再切）。要按字节
@@ -96,7 +93,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -107,6 +103,7 @@ from pydantic import BaseModel
 
 from agent_harness.observability import get_observability_sink
 from agent_harness.observability.tracer import RunTracer
+from agent_harness.sandbox.registry import IMPORT_COMPLETE_MARKER
 from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.progress import PROGRESS_DIRNAME
@@ -133,8 +130,7 @@ from agent_harness.transport import (
 from agent_harness.web.app import session_service
 from agent_harness.web.artifacts import MAX_CHARS_PER_LINE_CAP, MAX_LINES_CAP
 from agent_harness.web.domain_errors import http_error, workspace_http_error
-from agent_harness.web.host_dirs import canonical_existing_directory
-from agent_harness.web.projects import _require_absolute_path, require_trusted_origin
+from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -194,30 +190,14 @@ class GitCommandResult(BaseModel):
     artifact_ref: str | None = None
 
 
-class WorkspaceExportRequest(BaseModel):
-    destination_path: str
-
-
-class WorkspaceExportResponse(BaseModel):
-    destination_path: str
-
-
-def _new_export_destination(value: str) -> Path:
-    try:
-        raw_path = _require_absolute_path(value)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    requested = Path(raw_path)
-    if requested.name in {"", ".", ".."}:
-        raise HTTPException(status_code=422, detail="导出目标必须包含新目录名")
-    parent = Path(canonical_existing_directory(str(requested.parent)))
-    return parent / requested.name
-
-
-async def _session_sandbox(
+async def session_sandbox(
     state: AppState, session_id: str, validate_session_id: Callable[[str], str]
 ) -> Sandbox:
     """会话 → 它的 workspace sandbox（三件事：会话形态合法、会话存在、映射存在）。
+
+    公开（原 `_session_sandbox`，#1048）：`web.workspace_export` 的导出端点同样需要
+    "session_id → sandbox" 这一动作——与其在新模块里复制一份取 sandbox 的逻辑（多一个
+    漂移面），不如把它作为本模块的公开入口。
 
     `validate_session_id` 由调用方传入（app 侧那一份）：形态校验只有一处实现，这里
     只负责把它的 `InvalidSessionId` 翻成 422——漏了这一步就会以 500 冒出去（与既有
@@ -252,14 +232,16 @@ def _list_files(sandbox: Sandbox, pattern: str, limit: int) -> WorkspaceFileList
     `total` 是匹配总数、`truncated` 是"有没被 limit 截掉"——两者都来自同一份匹配结果，
     不存在"报 500 条其实有 300 条"的可能。
 
-    harness 内部状态目录（W-05 进度文件投影 `agent-progress/<session-id>/`）不出现在
-    浏览面：它是派生物不是用户工作产物，混进文件清单既是噪音也诱导经 Web 编辑出
-    第二真相。文件本身仍在工作区里（git 可见、模型可读），这里只过滤**浏览**口径，
-    在 API 层做而不是 Sandbox 层——两种 Sandbox 后端共用同一过滤，且不动模型侧视野。
+    harness 内部状态不出现在浏览面：W-05 进度文件投影目录（`agent-progress/<sid>/`）
+    与 #1048 的容器工作区「导入完成」标记（`IMPORT_COMPLETE_MARKER`）都是派生物/簿记，
+    不是用户工作产物；混进文件清单既是噪音也诱导经 Web 编辑出第二真相。两者本身仍在
+    工作区里（git 可见、模型可读），这里只过滤**浏览**口径，在 API 层做而不是 Sandbox
+    层——两种 Sandbox 后端共用同一过滤，且不动模型侧视野。
     """
     matched = [
         rel for rel in sandbox.list_files(pattern)
         if rel.split("/", 1)[0] != PROGRESS_DIRNAME
+        and rel != IMPORT_COMPLETE_MARKER
     ]
     return WorkspaceFileList(
         files=matched[:limit],
@@ -489,7 +471,7 @@ def register_workspace_file_routes(
 
     async def _sandbox_for(session_id: str) -> Sandbox:
         """本模块四条路由统一的会话解析入口（形态 / 存在性 / 映射三件事只写一遍）。"""
-        return await _session_sandbox(app.state.agent, session_id, validate_session_id)
+        return await session_sandbox(app.state.agent, session_id, validate_session_id)
 
     @app.get("/api/sessions/{session_id}/workspace/files")
     async def list_workspace_files(
@@ -616,32 +598,18 @@ def register_workspace_file_routes(
             scope=_scope_for(checked),
         )
 
-    @app.post("/api/sessions/{session_id}/workspace/export")
-    async def export_workspace_copy(
-        session_id: str,
-        req: WorkspaceExportRequest,
-        _: None = Depends(require_trusted_origin),
-    ) -> WorkspaceExportResponse:
-        """Copy the current session workspace into a new host directory."""
-        destination = _new_export_destination(req.destination_path)
-        sandbox = await _sandbox_for(session_id)
-        try:
-            await anyio.to_thread.run_sync(sandbox.copy_out, destination)
-        except FileExistsError as error:
-            raise HTTPException(
-                status_code=409, detail=f"导出目标已存在：{destination}"
-            ) from error
-        except NotImplementedError as error:
-            raise HTTPException(
-                status_code=501, detail="当前 Sandbox 后端不支持工作区导出"
-            ) from error
-        except OSError as error:
-            raise workspace_http_error(error, path=str(destination)) from error
-        except ValueError as error:
-            raise HTTPException(
-                status_code=500, detail="工作区内容无法安全导出"
-            ) from error
-        return WorkspaceExportResponse(destination_path=str(destination))
+
+def workspace_semantics_for_sandbox(sandbox: object) -> str:
+    """该 sandbox 的工作区路径语义（AC8）：`"sandbox"`（容器/POSIX）或 `"host"`。
+
+    Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端返回 `"sandbox"`
+    ——文件路由只经 Sandbox 抽象（`read_text`/`list_files`），宿主源路径仅作项目
+    身份与导入来源。local 子进程后端返回 `"host"`。判据单一来源见
+    `agent_harness.assembly.uses_sandbox_path_semantics`。
+    """
+    from agent_harness.assembly import uses_sandbox_path_semantics
+
+    return "sandbox" if uses_sandbox_path_semantics(sandbox) else "host"
 
 
 __all__ = [
@@ -652,4 +620,6 @@ __all__ = [
     "WorkspaceFileList",
     "WorkspaceFileSlice",
     "register_workspace_file_routes",
+    "session_sandbox",
+    "workspace_semantics_for_sandbox",
 ]

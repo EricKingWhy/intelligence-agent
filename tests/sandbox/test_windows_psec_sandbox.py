@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from agent_harness.sandbox.registry import WorkspaceRegistry
-
 
 @pytest.fixture(autouse=True)
 def configure_mxc_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,39 +138,11 @@ def test_startup_probe_requires_mxc_native_deny_policy(
         sandbox.stop()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_registry_recovery_rejects_replaced_workspace_root(tmp_path: Path) -> None:
-    from agent_harness.sandbox.windows_psec import (
-        WindowsPsecSandbox,
-        WorkspaceIdentityError,
-    )
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    registry = WorkspaceRegistry(root=tmp_path / "registry", backend="local")
-    registry._write_mapping(
-        "replaced-session",
-        {
-            "session_id": "replaced-session",
-            "backend": "windows_psec",
-            "workspace_root": str(workspace),
-            "workspace_identity": WindowsPsecSandbox.validate_workspace_identity(
-                workspace,
-            ),
-            "created_at": "legacy-created-at",
-        },
-    )
-    workspace.rename(tmp_path / "original-workspace")
-    workspace.mkdir()
-    canary = workspace / "replacement.txt"
-    canary.write_text("replacement root", encoding="utf-8")
-    before_dacl = _workspace_dacl(workspace)
-
-    with pytest.raises(WorkspaceIdentityError):
-        registry.get("replaced-session")
-
-    assert canary.read_text(encoding="utf-8") == "replacement root"
-    assert _workspace_dacl(workspace) == before_dacl
+# #1048 AC2：`windows_psec` 不再是新会话可选后端（`WorkspaceRegistry.create` 对它
+# 响亮 ValueError），原先经 registry 新建 PSEC 会话并断言 workspace_identity 的两条
+# Windows-only 用例随之退役——那条「新会话选 PSEC」的行为已被 AC2 移除。既有 PSEC
+# 映射改由 `registry.get()` 走 legacy 快照迁移到私有 Docker volume，该路径由
+# `tests/sandbox/test_docker_snapshot_import.py` 跨平台覆盖。
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
@@ -218,39 +188,6 @@ def test_exec_allows_workspace_write_and_denies_sibling_write(tmp_path: Path) ->
     assert not outside.exists()
     assert result.exit_code != 0
     sandbox.stop()
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")
-def test_exec_preserves_internal_only_hard_link_writes(tmp_path: Path) -> None:
-    from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    original = workspace / "original.txt"
-    alias = workspace / "alias.txt"
-    original.write_text("before", encoding="utf-8")
-    try:
-        os.link(original, alias)
-    except OSError as exc:
-        pytest.skip(f"Windows hard-link creation unavailable: {exc}")
-    assert os.path.samefile(original, alias)
-    assert original.stat().st_nlink == 2
-
-    script = workspace / "internal_hard_link_probe.py"
-    script.write_text(
-        "from pathlib import Path\n"
-        "Path('alias.txt').write_text('updated', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    sandbox = WindowsPsecSandbox(workspace)
-    try:
-        result = sandbox.exec(f"python {script.name}", timeout=15)
-
-        assert result.exit_code == 0, result.stderr
-        assert original.read_text(encoding="utf-8") == "updated"
-        assert alias.read_text(encoding="utf-8") == "updated"
-    finally:
-        sandbox.stop()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PSEC sandbox is Windows-only")

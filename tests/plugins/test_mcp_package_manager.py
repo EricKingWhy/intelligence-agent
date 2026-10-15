@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -270,3 +271,100 @@ def test_git_source_is_pinned_staged_and_rolled_back_by_full_commit(
     )
     manager.rollback("weather-tools")
     assert manager.selected_servers()[0].command == "weather-v1"
+
+
+def _git_repo_with_subdir(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    _package(repo / "servers" / "weather", command="weather-v1", token="")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "server")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def test_git_install_rejects_unsafe_subdirectory(tmp_path: Path) -> None:
+    """越界 subdir 在获取/激活前被共用的来源校验拒绝。"""
+    repo, commit = _git_repo_with_subdir(tmp_path)
+    manager = MCPPackageManager(tmp_path / "workspace")
+    with pytest.raises(MCPPackageError, match="normalized relative path"):
+        manager.install_git(
+            repo.as_uri(),
+            ref=commit,
+            subdirectory="../../outside",
+            package_id="weather-tools",
+        )
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows does not expose Git executable bits in st_mode"
+)
+def test_git_snapshot_rejects_executable_mode_drift(tmp_path: Path) -> None:
+    """安装后对 Git 快照 chmod 的篡改在激活/复核时被共用的树摘要复核拒绝。"""
+    repo = tmp_path / "repo"
+    source = _package(repo / "servers" / "weather", command="./bin/weather-server", token="")
+    executable = source / "bin" / "weather-server"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "update-index", "--chmod=+x", "servers/weather/bin/weather-server")
+    _git(repo, "commit", "-qm", "executable server")
+    commit = _git(repo, "rev-parse", "HEAD")
+
+    manager = MCPPackageManager(tmp_path / "workspace")
+    manager.install_git(
+        repo.as_uri(), ref=commit, subdirectory="servers/weather", package_id="weather-tools"
+    )
+    manager.trust("weather-tools")
+    snapshot = (
+        manager.versions_root
+        / "weather-tools"
+        / manager.list_packages()["weather-tools"]["current_version"]["sha256"]
+    )
+    installed = snapshot / "bin" / "weather-server"
+    assert installed.stat().st_mode & 0o111
+
+    installed.chmod(0o644)
+    with pytest.raises(MCPPackageError, match="changed after installation"):
+        manager.trust("weather-tools")
+
+
+def test_install_rejects_junction_in_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源目录含 Windows junction 时，共用 reparse/junction 拒绝在快照前拦下。"""
+    source = _package(tmp_path / "source", token="")
+    linked = source / "linked"
+    linked.mkdir()
+    monkeypatch.setattr(Path, "is_junction", lambda path: path == linked, raising=False)
+
+    manager = MCPPackageManager(tmp_path / "workspace")
+    with pytest.raises(MCPPackageError, match="junction"):
+        manager.install(source, package_id="weather-tools")
+
+
+def test_install_rejects_reparse_point_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源路径本身是 reparse point 时，共用 reparse 拒绝在快照前拦下。"""
+    source = _package(tmp_path / "source", token="")
+    real_lstat = Path.lstat
+
+    class _ReparseStat:
+        st_mode = 0o040000
+        st_file_attributes = 0x400
+
+    def lstat(path: Path):
+        if path == source:
+            return _ReparseStat()
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    manager = MCPPackageManager(tmp_path / "workspace")
+    with pytest.raises(MCPPackageError, match="regular directory"):
+        manager.install(source, package_id="weather-tools")

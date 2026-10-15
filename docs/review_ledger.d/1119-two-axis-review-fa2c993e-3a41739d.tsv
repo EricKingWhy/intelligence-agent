@@ -1,0 +1,1 @@
+2026-10-14	#1119 双轴独立审查（Correctness/Standards，fresh CodeBuddy deepseek 会话）：Correctness P3x2——P3-1 tests/observability/test_flush_lifecycle.py:74 裸 create_app 残留入口已修（3a41739d）；P3-2 provider_store_path/artifact_dir 默认全局属 pre-existing、对本票无影响记观察。Standards 零问题（P4x4 信息性）。修后双文件 -n4 全过	fa2c993e..3a41739d

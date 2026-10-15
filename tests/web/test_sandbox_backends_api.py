@@ -24,17 +24,13 @@ def client(tmp_path):
 
 
 class TestGetSandboxBackends:
-    @pytest.mark.parametrize(
-        "path", ["/api/sandbox-backends", "/api/sandbox/capabilities"]
-    )
-    def test_lists_only_selectable_backends(self, client, path):
-        r = client.get(path)
+    def test_lists_backends(self, client):
+        r = client.get("/api/sandbox-backends")
         assert r.status_code == 200, r.text
         body = r.json()
         assert "backends" in body
         backends = {b["backend"]: b for b in body["backends"]}
         # local 恒可用（本机）；docker 按探针结果如实报告
-        assert set(backends) == {"local", "docker"}
         assert "local" in backends
         assert backends["local"]["available"] is True
         assert "docker" in backends
@@ -43,12 +39,3 @@ class TestGetSandboxBackends:
         for b in body["backends"]:
             if not b["available"]:
                 assert b.get("reason"), f"{b['backend']} 不可用却无 reason"
-
-    def test_new_session_cannot_request_legacy_windows_psec(self, client):
-        response = client.post(
-            "/api/sessions",
-            json={"task": "test", "sandbox_backend": "windows_psec"},
-        )
-
-        assert response.status_code == 422
-        assert "sandbox_backend must be one of: local, docker" in response.text

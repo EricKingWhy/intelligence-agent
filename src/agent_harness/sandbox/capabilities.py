@@ -21,10 +21,24 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("agent_harness.sandbox.capabilities")
 
-#: Registry 可恢复的后端名；windows_psec 仅为既有映射兼容保留。
-SUPPORTED_BACKENDS = ("local", "docker", "windows_psec")
-#: 新会话公开可选的后端。Windows PSEC 已由私有-volume 方案取代。
-SELECTABLE_BACKENDS = ("local", "docker")
+#: 支持的后端名（DSH：非法值在加载时响亮拒绝，不静默改策略）。
+#: #1048：`windows_psec` 已降级为 **legacy-only**——NTFS hard link 的对象身份边界
+#: 靠 ACL/路径授权解决不了，受影响工作区改用每会话私有 Docker named volume。
+#: 它不再可作为新会话后端，只保留用于解析**既有** mapping 的恢复路径。
+SUPPORTED_BACKENDS = ("local", "docker")
+
+#: 仅用于恢复既有映射、不可用于新建会话的后端名（#1048）。
+LEGACY_BACKENDS = ("windows_psec",)
+
+
+def default_backend_for_platform(name: str = os.name) -> str:
+    """平台默认后端（#1048）。
+
+    受影响（Windows/NTFS）平台上工作区的对象身份边界只能靠换文件系统切断，
+    故平台默认落 `docker`（不可用即 fail-closed，绝不回落 local/PSEC）。
+    其余平台默认 `local`（无 NTFS hard link 对象身份问题）。
+    """
+    return "docker" if name == "nt" else "local"
 
 
 @dataclass(frozen=True)
@@ -171,7 +185,6 @@ def probe_windows_psec_capabilities(
             available=False,
             reason="An exact PSEC policy is required to verify workspace isolation",
             details={
-                "workspace_policy_required": "true",
                 "remediation": "probe the policy that will be used to create the sandbox",
             },
         )
@@ -238,7 +251,12 @@ def probe_windows_psec_capabilities(
 def probe_all_capabilities(
     image: str = "python:3-slim",
 ) -> list[SandboxCapabilities]:
-    """探针新会话可选择的后端（不触碰仅用于恢复旧映射的 PSEC）。"""
+    """探针全部**新会话可选**后端（给选择器 UI 用：展示能力 + 缺依赖原因）。
+
+    #1048 AC2：`windows_psec` 已降级为 **legacy-only**（见 `LEGACY_BACKENDS`），
+    不再作为新会话可选后端，故不在此列出。`probe_windows_psec_capabilities`
+    仍保留——仅用于 legacy PSEC sandbox 启动时的自检，不再进选择器。
+    """
     return [
         probe_local_capabilities(),
         probe_docker_capabilities(image=image),
