@@ -6315,6 +6315,10 @@ button.json-row {
   color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
   font-weight: 550;
 }
+.pause-panel-head svg {
+  /* #1175：只压正文，<PauseCircle> 图标钉回原 token（#1164 P2-3）——与 .run-pulse.pulse-* 同法。 */
+  color: var(--info);
+}
 
 .pause-panel-facts {
   margin-top: var(--space-xs);
@@ -6367,6 +6371,10 @@ button.json-row {
   border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
   border-radius: var(--radius-full);
   cursor: pointer;
+}
+.pause-resume-btn svg {
+  /* #1175：只压正文，<PauseCircle> 图标钉回原 token（#1164 P2-3）。 */
+  color: var(--info);
 }
 
 .pause-resume-btn:hover:not(:disabled) {
