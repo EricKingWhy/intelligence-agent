@@ -319,7 +319,10 @@ async function openTaskReview(
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
   await submitTask(page, '对比度任务审阅');
-  await page.getByRole('button', { name: '任务审阅' }).click();
+  // exact:true 是必须的：本用例的任务文案含「任务审阅」子串，`getByRole('button',
+  // {name:'任务审阅'})` 走子串匹配会同时命中会话项按钮（其 accessible name 含首条
+  // 用户消息）与时间线行（"user/message 对比度任务审阅"）→ strict mode 违规。
+  await page.getByRole('button', { name: '任务审阅', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
 }
 
