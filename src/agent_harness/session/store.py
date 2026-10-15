@@ -291,26 +291,6 @@ class JsonlSessionStore:
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
-    def last_event_seq(self, session_id: str) -> int:
-        """本会话已落盘最大 seq（空会话 = -1）。公开的 O(1) 盘面读数。
-
-        #1057：写者偶尔只需要「盘上最大 seq」这一个数，用 `read_events` 全量解析在
-        持续竞争下会退化成自旋热循环。本入口直接复用 `_last_seq_on_disk`（文件戳校验
-        的缓存），不改语义、不新增私有耦合。
-
-        注（#1062）：本方法是 #1057 为「会话侧自旋重投」加的 O(1) 读数；裁决 A 把分配
-        收进 store 写锁后**生产路径已不再调用它**，仅保留为公开 O(1) 读数（有测试与潜在
-        诊断用途）。是否随 A 一并删除属另一票的范围。
-
-        并发边界与 `append_event` 同一口径：读数在会话写锁外取，是**观测**而非判定；
-        真正的 fail-closed 判定仍在 `append_event` 的锁内（`seq <= last` 拒写）。
-        跨进程并发由 `session_append_lock` 串行（#1063，只在 `append_event` 的临界区
-        内）；本读数在文件锁**外**取，故同为观测——它读到的 `last` 随时可能被另一进程
-        的追加推后，调用方不得据此判定可写。
-        """
-        with self._lock_for(session_id):
-            return self._last_seq_on_disk(session_id)
-
     def events_path(self, session_id: str) -> Path:
         """会话目录的 ``events.jsonl`` 路径（公开）。
 
