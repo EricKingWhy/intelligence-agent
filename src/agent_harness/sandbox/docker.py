@@ -856,11 +856,13 @@ class DockerSandbox(Sandbox):
             [
                 "/bin/sh",
                 "-c",
-                f"if test -L {quoted}; then echo symlink;"
-                f" elif test -d {quoted}; then echo directory;"
-                f" elif test -f {quoted}; then echo file;"
-                f" elif test -e {quoted}; then echo special;"
-                " else echo missing; fi",
+                (
+                    f"if test -L {quoted}; then echo symlink;"
+                    f" elif test -d {quoted}; then echo directory;"
+                    f" elif test -f {quoted}; then echo file;"
+                    f" elif test -e {quoted}; then echo special;"
+                    " else echo missing; fi"
+                ),
             ],
         )
         if result.exit_code != 0:
