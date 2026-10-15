@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase 1 · 约束管理（Linear 风格重制）</title>
+<style>
+  :root{
+    --canvas:#010102; --s1:#0f1011; --s2:#141516; --s3:#18191a;
+    --hairline:#23252a; --hairline-strong:#34343a;
+    --ink:#f7f8f8; --ink-muted:#d0d6e0; --ink-subtle:#8a8f98; --ink-tertiary:#62666d;
+    --primary:#5e6ad2; --primary-hover:#828fff; --on-primary:#ffffff;
+    --success:#27a644; --danger:#e5484d;
+    --sans:'Inter',-apple-system,'SF Pro Display','Segoe UI',Roboto,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 32px 80px}
+  .eyebrow{font-size:13px;font-weight:500;letter-spacing:.4px;color:var(--ink-subtle);margin-bottom:12px}
+  .eyebrow .tag{border:1px dashed var(--hairline-strong);border-radius:4px;padding:1px 7px;font-size:11px;letter-spacing:.02em;margin-left:8px}
+  h1{font-size:28px;font-weight:600;letter-spacing:-.6px;line-height:1.2}
+  .sessline{margin-top:10px;font-size:12px;color:var(--ink-subtle);display:flex;align-items:center;gap:8px}
+  .sessline code{font-family:var(--mono);font-size:12px;color:var(--ink-muted);background:var(--s1);border:1px solid var(--hairline);border-radius:4px;padding:1px 8px}
+  .livedot{width:6px;height:6px;border-radius:50%;background:var(--success);display:inline-block}
+  /* toolbar */
+  .toolbar{display:flex;align-items:center;gap:12px;margin:32px 0 8px}
+  .tabs{display:flex;gap:4px;background:var(--canvas);border:1px solid var(--hairline);border-radius:999px;padding:3px}
+  .tabs button{border:none;background:none;color:var(--ink-subtle);font:500 13px var(--sans);padding:6px 14px;border-radius:999px;cursor:pointer}
+  .tabs button.on{background:var(--s2);color:var(--ink)}
+  .tabs button .n{opacity:.55;margin-left:4px;font-size:12px}
+  .toolbar select{margin-left:auto;background:var(--s1);border:1px solid var(--hairline);color:var(--ink-muted);font:400 13px var(--sans);border-radius:8px;padding:7px 10px;outline:none}
+  /* rows: linear changelog-row idiom */
+  .row{padding:20px 4px;border-bottom:1px solid var(--hairline);display:flex;gap:16px;align-items:flex-start}
+  .row:first-of-type{border-top:1px solid var(--hairline);margin-top:8px}
+  .row.revoked{opacity:.55}
+  .main{flex:1;min-width:0}
+  .kicker{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .type{font-size:12px;font-weight:500;color:var(--ink-subtle);display:flex;align-items:center;gap:7px}
+  .tdot{width:6px;height:6px;border-radius:50%}
+  .t-constraint .tdot{background:#8a7ff0}.t-user_goal .tdot{background:#4cc38a}.t-authorization .tdot{background:#e5a13d}.t-work_boundary .tdot{background:#6b9cf5}
+  .val{font-size:14px;color:var(--ink);letter-spacing:-.05px}
+  .meta{margin-top:8px;font-size:12px;color:var(--ink-tertiary);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .meta code{font-family:var(--mono);font-size:12px;color:var(--ink-subtle)}
+  .side{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex-shrink:0}
+  .pill{background:var(--s2);color:var(--ink-muted);font-size:12px;border-radius:999px;padding:2px 10px;display:inline-flex;align-items:center;gap:6px}
+  .pill .d{width:6px;height:6px;border-radius:50%;background:var(--success)}
+  .row.revoked .pill .d{background:var(--ink-tertiary)}
+  .revoke{background:none;border:none;color:var(--ink-tertiary);font:500 13px var(--sans);cursor:pointer;padding:6px 4px}
+  .revoke:hover{color:var(--danger)}
+  .revoke:disabled{cursor:default;opacity:.5}.revoke:disabled:hover{color:var(--ink-tertiary)}
+  .empty{display:none;padding:48px 0;text-align:center;color:var(--ink-tertiary);font-size:13px;border-bottom:1px solid var(--hairline)}
+  .foot{margin-top:20px;font-size:12px;color:var(--ink-tertiary)}
+  /* modal */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:50}
+  .mask.show{display:flex}
+  .modal{background:var(--s1);border:1px solid var(--hairline);border-top:1px solid rgba(255,255,255,.09);border-radius:12px;padding:28px;width:440px}
+  .modal h3{font-size:20px;font-weight:500;letter-spacing:-.2px;margin-bottom:10px}
+  .modal p{font-size:14px;color:var(--ink-muted);margin-bottom:14px}
+  .modal .q{font-size:13px;color:var(--ink);background:var(--s2);border:1px solid var(--hairline);border-radius:8px;padding:10px 14px;margin-bottom:24px}
+  .modal .q code{font-family:var(--mono);font-size:12px;color:var(--ink-subtle)}
+  .mrow{display:flex;justify-content:flex-end;gap:10px}
+  .btn{font:500 14px var(--sans);border-radius:8px;padding:8px 16px;cursor:pointer;border:1px solid var(--hairline);background:var(--s1);color:var(--ink)}
+  .btn.primary{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">CONSTRAINTS <span class="tag">Phase 1 · 效果图</span></div>
+  <h1>约束管理</h1>
+  <div class="sessline"><span class="livedot"></span> 当前会话 <code>sess_9f2k…41ad</code> · 数据来自后端实时查询，前端不存第二份状态</div>
+
+  <div class="toolbar">
+    <div class="tabs" id="tabs">
+      <button data-f="all" class="on">全部<span class="n">4</span></button>
+      <button data-f="active">生效中<span class="n">3</span></button>
+      <button data-f="revoked">已撤销<span class="n">1</span></button>
+    </div>
+    <select id="typeSel">
+      <option value="">全部类型</option>
+      <option>constraint</option><option>user_goal</option><option>authorization</option><option>work_boundary</option>
+    </select>
+  </div>
+
+  <div id="list">
+    <div class="row" data-status="active" data-type="constraint">
+      <div class="main">
+        <div class="kicker"><span class="type t-constraint"><span class="tdot"></span>constraint</span></div>
+        <div class="val">回复代码审查意见时，先给结论再列细节，不要长篇铺垫。</div>
+        <div class="meta"><code>fct_8a3f2c1d</code><span>10-15 21:03 登记</span><span>来源事件 #seq 42</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke" onclick="ask(this,'fct_8a3f2c1d','回复代码审查意见时，先给结论再列细节，不要长篇铺垫。')">撤销</button></div>
+    </div>
+    <div class="row" data-status="active" data-type="user_goal">
+      <div class="main">
+        <div class="kicker"><span class="type t-user_goal"><span class="tdot"></span>user_goal</span></div>
+        <div class="val">秋招每天投 20 份简历，重点看后端和 AI 应用岗位，base 优先北京。</div>
+        <div class="meta"><code>fct_51bd09e7</code><span>10-15 20:17 登记</span><span>来源事件 #seq 18</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke" onclick="ask(this,'fct_51bd09e7','秋招每天投 20 份简历，重点看后端和 AI 应用岗位。')">撤销</button></div>
+    </div>
+    <div class="row" data-status="active" data-type="authorization">
+      <div class="main">
+        <div class="kicker"><span class="type t-authorization"><span class="tdot"></span>authorization</span></div>
+        <div class="val">允许读写 ~/workspace/intelligence-agent，删文件前先列清单确认。</div>
+        <div class="meta"><code>fct_c27e44ab</code><span>10-14 23:41 登记</span><span>来源事件 #seq 7</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>生效中</span><button class="revoke" onclick="ask(this,'fct_c27e44ab','允许读写 ~/workspace/intelligence-agent…')">撤销</button></div>
+    </div>
+    <div class="row revoked" data-status="revoked" data-type="work_boundary">
+      <div class="main">
+        <div class="kicker"><span class="type t-work_boundary"><span class="tdot"></span>work_boundary</span></div>
+        <div class="val">不要在周末给我推送早报。</div>
+        <div class="meta"><code>fct_90af1d33</code><span>10-12 09:20 登记</span><span>来源事件 #seq 3</span><span>10-13 18:02 撤销 · 本人操作</span></div>
+      </div>
+      <div class="side"><span class="pill"><span class="d"></span>已撤销</span><button class="revoke" disabled>已撤销</button></div>
+    </div>
+  </div>
+  <div class="empty" id="empty">没有符合条件的约束</div>
+  <div class="foot">撤销走 superseded 历史链 —— 来源记录保留，可审计、可追溯。</div>
+</div>
+
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3>撤销这条约束？</h3>
+    <p>撤销后，新的会话将不再注入该条约束。来源记录保留，可审计。</p>
+    <div class="q"><span id="qtext"></span><br><code id="qid"></code></div>
+    <div class="mrow">
+      <button class="btn" onclick="closeM()">取消</button>
+      <button class="btn primary" onclick="doRevoke()">确认撤销</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let cur=null;
+function ask(btn,id,text){cur=btn;document.getElementById('qtext').textContent='“'+text+'”';document.getElementById('qid').textContent=id;document.getElementById('mask').classList.add('show');}
+function closeM(){document.getElementById('mask').classList.remove('show');}
+function doRevoke(){
+  const r=cur.closest('.row');r.classList.add('revoked');r.dataset.status='revoked';
+  r.querySelector('.pill').innerHTML='<span class="d"></span>已撤销';
+  const m=r.querySelector('.meta'),s=document.createElement('span');s.textContent='刚刚撤销 · 本人操作';m.appendChild(s);
+  cur.disabled=true;cur.textContent='已撤销';closeM();apply();
+}
+const tabs=document.getElementById('tabs'),ts=document.getElementById('typeSel');
+tabs.addEventListener('click',e=>{if(e.target.tagName!=='BUTTON')return;tabs.querySelectorAll('button').forEach(b=>b.classList.remove('on'));e.target.classList.add('on');apply();});
+ts.onchange=apply;
+function apply(){
+  const f=tabs.querySelector('.on').dataset.f,t=ts.value;let n=0;
+  document.querySelectorAll('#list .row').forEach(r=>{
+    const ok=(f==='all'||r.dataset.status===f)&&(!t||r.dataset.type===t);
+    r.style.display=ok?'':'none';if(ok)n++;
+  });
+  document.getElementById('empty').style.display=n?'none':'block';
+}
+document.getElementById('mask').addEventListener('click',e=>{if(e.target.id==='mask')closeM();});
+</script>
+</body>
+</html>
