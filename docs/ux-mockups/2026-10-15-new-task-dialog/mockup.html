@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>新建任务交互效果图</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --page: #f7f7f5;
+        --surface: #ffffff;
+        --surface-soft: #f7f7f5;
+        --ink: #000000;
+        --muted: #555555;
+        --hairline: #e6e6e6;
+        --hairline-soft: #f1f1f1;
+        --pink: #ff3d8b;
+        --pink-deep: #d72770;
+        --pink-soft: #efd4d4;
+        --pink-wash: #fff3f7;
+        --warning: #fff8dc;
+        --warning-border: #ead58d;
+        --danger: #c92e3d;
+        --shadow: 0 18px 48px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+        --shadow-soft: 0 4px 16px rgba(0, 0, 0, 0.06);
+        --radius-xs: 2px;
+        --radius-sm: 6px;
+        --radius-md: 8px;
+        --radius-lg: 24px;
+        --radius-pill: 50px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --page: #151516;
+          --surface: #202022;
+          --surface-soft: #29292c;
+          --ink: #f7f7f5;
+          --muted: #c3c3c5;
+          --hairline: #3b3b3f;
+          --hairline-soft: #303034;
+          --pink: #ff5c9d;
+          --pink-deep: #ff7eb2;
+          --pink-soft: #51303d;
+          --pink-wash: #3a222c;
+          --warning: #3a3320;
+          --warning-border: #6e6032;
+          --danger: #ff7b88;
+          --shadow: 0 18px 48px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
+          --shadow-soft: 0 4px 16px rgba(0, 0, 0, 0.24);
+        }
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--page);
+        color: var(--ink);
+        font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+        font-feature-settings: "kern";
+      }
+
+      button, input, textarea, select { font: inherit; }
+      button { color: inherit; }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 32px 0 56px;
+      }
+
+      .change-notes {
+        display: grid;
+        grid-template-columns: minmax(180px, 0.72fr) minmax(0, 2fr);
+        gap: 28px;
+        padding: 26px 30px;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-lg);
+      }
+
+      .change-notes h1 {
+        margin: 0;
+        font-size: clamp(22px, 2.2vw, 30px);
+        line-height: 1.25;
+        letter-spacing: -0.3px;
+        font-weight: 700;
+      }
+
+      .change-notes p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .notes-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .notes-list li {
+        min-height: 84px;
+        padding: 15px 16px;
+        background: var(--surface-soft);
+        border-radius: var(--radius-md);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .note-number {
+        display: inline-grid;
+        place-items: center;
+        width: 22px;
+        height: 22px;
+        margin-right: 8px;
+        border-radius: 50%;
+        background: var(--pink-soft);
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 700;
+        vertical-align: -1px;
+      }
+
+      .switcher {
+        display: flex;
+        justify-content: center;
+        margin: 24px 0;
+      }
+
+      .tabs {
+        display: inline-flex;
+        gap: 4px;
+        padding: 4px;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-pill);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .tab {
+        min-height: 44px;
+        padding: 8px 21px;
+        border: 0;
+        border-radius: var(--radius-pill);
+        background: transparent;
+        cursor: pointer;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .tab[aria-selected="true"] {
+        background: var(--ink);
+        color: var(--surface);
+      }
+
+      .tab:focus-visible,
+      .menu-item:focus-visible,
+      .advanced-toggle:focus-visible,
+      .button:focus-visible,
+      textarea:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      .segment button:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--pink) 38%, transparent);
+        outline-offset: 2px;
+      }
+
+      .stage {
+        position: relative;
+        min-height: 590px;
+        padding: 38px;
+        overflow: hidden;
+        background:
+          linear-gradient(var(--hairline-soft) 1px, transparent 1px),
+          linear-gradient(90deg, var(--hairline-soft) 1px, transparent 1px),
+          var(--surface-soft);
+        background-size: 24px 24px;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-lg);
+      }
+
+      .view[hidden] { display: none; }
+
+      .menu-view {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+        gap: 56px;
+        align-items: center;
+        min-height: 512px;
+      }
+
+      .fake-app {
+        width: min(100%, 620px);
+        margin-inline: auto;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow);
+      }
+
+      .app-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 52px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--hairline);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .traffic {
+        display: inline-flex;
+        gap: 6px;
+      }
+
+      .traffic i {
+        display: block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--hairline);
+      }
+
+      .project-area {
+        min-height: 385px;
+        padding: 22px;
+        background: var(--surface-soft);
+      }
+
+      .project-row {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: min(100%, 460px);
+        min-height: 48px;
+        padding: 0 12px;
+        background: var(--surface);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-soft);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .folder-icon,
+      .item-icon {
+        width: 18px;
+        height: 18px;
+        flex: 0 0 18px;
+      }
+
+      .more {
+        margin-left: auto;
+        width: 30px;
+        height: 30px;
+        border: 0;
+        background: var(--surface-soft);
+        border-radius: 50%;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .project-menu {
+        width: min(430px, calc(100vw - 96px));
+        margin-top: 8px;
+        padding: 7px;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow);
+      }
+
+      .menu-item {
+        width: 100%;
+        min-height: 48px;
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border: 0;
+        background: transparent;
+        border-radius: var(--radius-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .menu-item:hover { background: var(--surface-soft); }
+      .menu-item.featured { background: var(--pink-wash); }
+      .menu-item.danger { color: var(--danger); }
+
+      .menu-label {
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .menu-note {
+        color: var(--pink-deep);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .menu-divider {
+        height: 1px;
+        margin: 6px 8px;
+        background: var(--hairline);
+      }
+
+      .annotation {
+        max-width: 310px;
+        padding: 24px;
+        background: var(--pink-soft);
+        border-radius: var(--radius-lg);
+      }
+
+      .annotation h2 {
+        margin: 0 0 14px;
+        font-size: 22px;
+        line-height: 1.3;
+      }
+
+      .annotation ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      .annotation li {
+        padding: 11px 0;
+        border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .annotation li:first-child { border-top: 0; }
+      .annotation strong { font-weight: 700; }
+
+      .dialog-view {
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+        gap: 48px;
+        align-items: center;
+        min-height: 512px;
+      }
+
+      .dialog {
+        width: min(100%, 680px);
+        margin-inline: auto;
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow);
+      }
+
+      .dialog-head {
+        padding: 22px 24px 16px;
+        border-bottom: 1px solid var(--hairline);
+      }
+
+      .dialog-head h2 {
+        margin: 0;
+        font-size: 22px;
+        line-height: 1.35;
+      }
+
+      .dialog-head p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .dialog-body { padding: 18px 24px 16px; }
+
+      .warning {
+        display: flex;
+        align-items: center;
+        min-height: 38px;
+        padding: 8px 11px;
+        background: var(--warning);
+        border: 1px solid var(--warning-border);
+        border-radius: var(--radius-sm);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .field { margin-top: 17px; }
+      .field label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .required { color: var(--pink-deep); }
+
+      textarea,
+      input,
+      select {
+        width: 100%;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      textarea {
+        min-height: 128px;
+        padding: 13px 14px;
+        resize: vertical;
+        line-height: 1.55;
+      }
+
+      input,
+      select {
+        min-height: 44px;
+        padding: 10px 12px;
+      }
+
+      textarea::placeholder,
+      input::placeholder { color: var(--muted); opacity: 0.8; }
+
+      .advanced {
+        margin-top: 14px;
+        border-top: 1px solid var(--hairline);
+      }
+
+      .advanced-toggle {
+        width: 100%;
+        min-height: 46px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 2px 4px;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+        text-align: left;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .chevron {
+        display: inline-block;
+        transition: transform 160ms ease;
+      }
+
+      .advanced-toggle[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+
+      .advanced-content {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 14px;
+        padding: 7px 0 4px;
+      }
+
+      .advanced-content[hidden] { display: none; }
+      .advanced-content .field { margin-top: 0; }
+      .advanced-content .goal { grid-column: 1 / -1; }
+
+      .segment {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        min-height: 44px;
+        padding: 3px;
+        background: var(--surface-soft);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-md);
+      }
+
+      .segment button {
+        border: 0;
+        background: transparent;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        font-size: 12px;
+      }
+
+      .segment button.active {
+        background: var(--surface);
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        font-weight: 700;
+      }
+
+      .dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        padding: 14px 24px 20px;
+      }
+
+      .button {
+        min-height: 44px;
+        padding: 9px 19px;
+        border-radius: var(--radius-pill);
+        border: 1px solid var(--hairline);
+        background: var(--surface);
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .button.primary {
+        border-color: var(--pink);
+        background: var(--pink);
+        color: #ffffff;
+      }
+
+      .button.primary:hover { background: var(--pink-deep); border-color: var(--pink-deep); }
+
+      .toast {
+        position: fixed;
+        z-index: 20;
+        left: 50%;
+        bottom: max(28px, env(safe-area-inset-bottom));
+        width: max-content;
+        max-width: calc(100% - 32px);
+        padding: 12px 18px;
+        border-radius: var(--radius-pill);
+        background: var(--ink);
+        color: var(--surface);
+        box-shadow: var(--shadow);
+        font-size: 13px;
+        line-height: 1.45;
+        text-align: center;
+        opacity: 0;
+        transform: translate(-50%, 12px);
+        pointer-events: none;
+        transition: opacity 180ms ease, transform 180ms ease;
+      }
+
+      .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+      @media (max-width: 840px) {
+        .page { width: min(100% - 24px, 720px); padding-top: 18px; }
+        .change-notes { grid-template-columns: 1fr; padding: 22px; gap: 18px; }
+        .notes-list { grid-template-columns: 1fr; }
+        .notes-list li { min-height: auto; }
+        .stage { min-height: 0; padding: 22px; }
+        .menu-view,
+        .dialog-view { grid-template-columns: 1fr; gap: 24px; min-height: 0; }
+        .annotation { max-width: none; }
+      }
+
+      @media (max-width: 560px) {
+        .page { width: min(100% - 16px, 520px); padding-bottom: 28px; }
+        .change-notes { border-radius: var(--radius-md); padding: 18px; }
+        .switcher { margin: 16px 0; }
+        .tabs { width: 100%; }
+        .tab { flex: 1; padding-inline: 10px; }
+        .stage { margin-inline: -8px; padding: 12px; border-radius: 0; }
+        .project-area { padding: 12px; min-height: 360px; }
+        .project-menu { width: 100%; }
+        .menu-item { grid-template-columns: 20px minmax(0, 1fr); }
+        .menu-note { grid-column: 2; white-space: normal; margin-top: -5px; }
+        .annotation { padding: 20px; border-radius: var(--radius-md); }
+        .dialog-head { padding: 18px 18px 14px; }
+        .dialog-body { padding: 15px 18px 12px; }
+        .warning { align-items: flex-start; }
+        .advanced-content { grid-template-columns: 1fr; }
+        .advanced-content .goal { grid-column: auto; }
+        .dialog-actions { padding: 12px 18px 18px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="change-notes" aria-labelledby="notes-title">
+        <div>
+          <h1 id="notes-title">改动说明</h1>
+          <p>目标：既保留自由会话，也保留可配置任务；两条路径在入口处明确分开。</p>
+        </div>
+        <ol class="notes-list">
+          <li><span class="note-number">1</span><strong>新增「新建会话」</strong><br />直接进入项目内空会话，不经过表单。</li>
+          <li><span class="note-number">2</span><strong>入口改名为「新建任务…」</strong><br />省略号明确表示下一步会弹出设置窗口。</li>
+          <li><span class="note-number">3</span><strong>任务表单化简</strong><br />任务描述优先，其余设置默认折叠。</li>
+        </ol>
+      </section>
+
+      <div class="switcher">
+        <div class="tabs" role="tablist" aria-label="效果图切换">
+          <button class="tab" id="tab-menu" role="tab" aria-selected="true" aria-controls="view-menu">项目菜单</button>
+          <button class="tab" id="tab-dialog" role="tab" aria-selected="false" aria-controls="view-dialog">新建任务对话框</button>
+        </div>
+      </div>
+
+      <section class="stage" aria-live="polite">
+        <div class="view menu-view" id="view-menu" role="tabpanel" aria-labelledby="tab-menu">
+          <div class="fake-app" aria-label="项目菜单效果图">
+            <div class="app-toolbar">
+              <span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span>项目</span>
+            </div>
+            <div class="project-area">
+              <div class="project-row">
+                <svg class="folder-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 6.7c0-1.1.9-2 2-2h4l2 2h7c1.1 0 2 .9 2 2v8.8c0 1.1-.9 2-2 2h-13c-1.1 0-2-.9-2-2V6.7Z" stroke="currentColor" stroke-width="1.6"/></svg>
+                <span>数据蛙录屏软件</span>
+                <button class="more" aria-label="项目菜单">···</button>
+              </div>
+              <div class="project-menu" role="menu" aria-label="数据蛙录屏软件项目菜单">
+                <button class="menu-item featured" id="new-chat" role="menuitem">
+                  <svg class="item-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5.4 3v-3H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.6"/><path d="M8 11h8M12 7v8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                  <span class="menu-label">新建会话</span>
+                  <span class="menu-note">新增：直接进入空会话</span>
+                </button>
+                <button class="menu-item" id="new-task" role="menuitem">
+                  <svg class="item-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 3.5h10a2 2 0 0 1 2 2v15H5v-15a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.6"/><path d="m8 12 2.2 2.2L16 8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span class="menu-label">新建任务…</span>
+                  <span class="menu-note">改名：省略号 = 点击会弹窗</span>
+                </button>
+                <div class="menu-divider" role="separator"></div>
+                <button class="menu-item" role="menuitem">
+                  <svg class="item-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 16.5-.5 4 4-.5L19 8.5 15.5 5 4 16.5Z" stroke="currentColor" stroke-width="1.6"/><path d="m13.8 6.7 3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+                  <span class="menu-label">重命名项目</span>
+                </button>
+                <button class="menu-item danger" role="menuitem">
+                  <svg class="item-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span class="menu-label">删除项目…</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <aside class="annotation">
+            <h2>入口层级更清楚</h2>
+            <ul>
+              <li><strong>自由度：</strong>「新建会话」一步直达，不要求先定义任务。</li>
+              <li><strong>自定义化：</strong>「新建任务…」保留创建即启动的配置流程。</li>
+              <li><strong>语义提示：</strong>省略号沿用桌面端惯例，表示后续还有设置。</li>
+            </ul>
+          </aside>
+        </div>
+
+        <div class="view dialog-view" id="view-dialog" role="tabpanel" aria-labelledby="tab-dialog" hidden>
+          <form class="dialog" id="task-form" aria-label="新建任务对话框">
+            <div class="dialog-head">
+              <h2>新建任务</h2>
+              <p>在项目「数据蛙录屏软件」里开一个新任务，创建即启动。</p>
+            </div>
+            <div class="dialog-body">
+              <div class="warning">⚠ Agent 将直接读写该目录：D:\数据蛙录屏软件</div>
+              <div class="field">
+                <label for="task-description">任务描述 <span class="required">*</span></label>
+                <textarea id="task-description" placeholder="让 agent 做什么？（例如：给登录接口加上限流，顺手补个测试）" required></textarea>
+              </div>
+
+              <div class="advanced">
+                <button class="advanced-toggle" type="button" id="advanced-toggle" aria-expanded="false" aria-controls="advanced-content">
+                  <span class="chevron" aria-hidden="true">▸</span>
+                  <span>高级设置</span>
+                </button>
+                <div class="advanced-content" id="advanced-content" hidden>
+                  <div class="field goal">
+                    <label for="goal">完成目标（可选）</label>
+                    <input id="goal" type="text" placeholder="什么结果算完成？" />
+                  </div>
+                  <div class="field">
+                    <label>自主度</label>
+                    <div class="segment" role="group" aria-label="选择自主度">
+                      <button type="button" data-mode="问">问</button>
+                      <button type="button" class="active" data-mode="计划">计划</button>
+                      <button type="button" data-mode="自动">自动</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="model">模型</label>
+                    <select id="model"><option>Auto</option></select>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="dialog-actions">
+              <button class="button" type="button" id="cancel-button">取消</button>
+              <button class="button primary" type="submit">创建并启动</button>
+            </div>
+          </form>
+
+          <aside class="annotation">
+            <h2>表单只强调一件事</h2>
+            <ul>
+              <li><strong>任务描述是唯一主角：</strong>更大的输入区，打开就能写。</li>
+              <li><strong>设置后置：</strong>完成目标、自主度、模型收进「高级设置」。</li>
+              <li><strong>安全提示保留：</strong>目录读写范围压缩成单行，不抢正文注意力。</li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script>
+      (function () {
+        var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+        var views = {
+          'tab-menu': document.getElementById('view-menu'),
+          'tab-dialog': document.getElementById('view-dialog')
+        };
+        var toast = document.getElementById('toast');
+        var toastTimer;
+
+        function showToast(message) {
+          toast.textContent = message;
+          toast.classList.add('show');
+          window.clearTimeout(toastTimer);
+          toastTimer = window.setTimeout(function () {
+            toast.classList.remove('show');
+          }, 2800);
+        }
+
+        function activateTab(tab) {
+          tabs.forEach(function (item) {
+            var selected = item === tab;
+            item.setAttribute('aria-selected', selected ? 'true' : 'false');
+            views[item.id].hidden = !selected;
+          });
+        }
+
+        tabs.forEach(function (tab) {
+          tab.addEventListener('click', function () { activateTab(tab); });
+          tab.addEventListener('keydown', function (event) {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            var index = tabs.indexOf(tab);
+            var next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : (index - 1 + tabs.length) % tabs.length;
+            tabs[next].focus();
+            activateTab(tabs[next]);
+          });
+        });
+
+        document.getElementById('new-chat').addEventListener('click', function () {
+          showToast('直接进入空会话（锚定项目目录，首条消息提交才创建）');
+        });
+
+        document.getElementById('new-task').addEventListener('click', function () {
+          showToast('弹出右侧的新建任务对话框（创建即启动）');
+        });
+
+        var advancedToggle = document.getElementById('advanced-toggle');
+        var advancedContent = document.getElementById('advanced-content');
+        advancedToggle.addEventListener('click', function () {
+          var expanded = advancedToggle.getAttribute('aria-expanded') === 'true';
+          advancedToggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+          advancedContent.hidden = expanded;
+        });
+
+        Array.prototype.slice.call(document.querySelectorAll('.segment button')).forEach(function (button) {
+          button.addEventListener('click', function () {
+            Array.prototype.slice.call(button.parentNode.children).forEach(function (item) {
+              item.classList.toggle('active', item === button);
+            });
+          });
+        });
+
+        document.getElementById('cancel-button').addEventListener('click', function () {
+          showToast('关闭对话框，返回项目');
+        });
+
+        document.getElementById('task-form').addEventListener('submit', function (event) {
+          event.preventDefault();
+          var description = document.getElementById('task-description');
+          if (!description.value.trim()) {
+            description.focus();
+            showToast('请先填写任务描述');
+            return;
+          }
+          showToast('创建任务并立即启动');
+        });
+      }());
+    </script>
+  </body>
+</html>
