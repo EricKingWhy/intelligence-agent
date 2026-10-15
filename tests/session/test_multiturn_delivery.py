@@ -1327,3 +1327,83 @@ async def test_resume_fails_closed_if_hard_delete_wins_before_launch(
     with pytest.raises(SessionNotFound):
         await resume
     assert launch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_fails_if_resume_launches_first(
+    tmp_path, monkeypatch
+):
+    """A delayed initial create must not replace a run committed by resume."""
+    model_gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [AIMessage(content="恢复完成")], gate=model_gate,
+    )
+    service = harness.service
+    run_manager = harness.state.run_manager
+    create_paused = asyncio.Event()
+    allow_create = asyncio.Event()
+    created_sessions: list[Session] = []
+    launch_calls: list[str] = []
+    original_finish = service._finish_initial_creation
+    original_launch = run_manager.launch
+
+    async def pause_create_before_finish(**kwargs):
+        created_sessions.append(kwargs["session"])
+        create_paused.set()
+        await allow_create.wait()
+        return await original_finish(**kwargs)
+
+    def record_launch(session, *args, **kwargs):
+        launch_calls.append(session.session_id)
+        return original_launch(session, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_finish_initial_creation", pause_create_before_finish)
+    monkeypatch.setattr(run_manager, "launch", record_launch)
+    create_task = asyncio.create_task(
+        service.create_and_launch(
+            # 空白任务按现有服务契约仍启动；不会先因 task/defined 的 seq 冲突退出。
+            task=" ",
+            auto_approve=True,
+            auto_approve_explicit=True,
+            sandbox_backend="local",
+        )
+    )
+    resumed = None
+    create_result = None
+    try:
+        await asyncio.wait_for(create_paused.wait(), timeout=10)
+        session_id = created_sessions[0].session_id
+        resumed = await service.resume_and_launch(
+            session_id=session_id, task="先完成恢复启动",
+        )
+        await harness.wait_for(
+            lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
+            what="恢复 run 起跑",
+        )
+        assert run_manager.get_active(session_id) is resumed.run
+        assert resumed.run.task is not None and not resumed.run.task.done()
+
+        allow_create.set()
+        create_result = await asyncio.gather(create_task, return_exceptions=True)
+
+        assert isinstance(create_result[0], ActiveRunConflict)
+        assert launch_calls == [session_id]
+        assert run_manager.get_active(session_id) is resumed.run
+        assert resumed.run.task is not None and not resumed.run.task.done()
+    finally:
+        allow_create.set()
+        model_gate.set()
+        if not create_task.done():
+            create_result = await asyncio.gather(create_task, return_exceptions=True)
+        runs = [resumed] if resumed is not None else []
+        if (
+            create_result
+            and not isinstance(create_result[0], BaseException)
+            and getattr(create_result[0], "run", None) is not None
+        ):
+            runs.append(create_result[0])
+        tasks = [run.run.task for run in runs if run.run.task is not None]
+        if tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=10,
+            )

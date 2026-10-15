@@ -1773,6 +1773,8 @@ class SessionService:
             )
             if not locked_events:
                 raise SessionNotFound(f"session '{session_id}' not found")
+            if launch and self._run_manager.get_active(session_id) is not None:
+                raise ActiveRunConflict("session has an active run")
 
             # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
             # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
