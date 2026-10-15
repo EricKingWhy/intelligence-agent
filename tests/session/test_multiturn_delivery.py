@@ -33,6 +33,7 @@ from agent_harness.session import (
     derive_messages,
 )
 from agent_harness.session.derive import derive_protected_facts
+from agent_harness.session.errors import ActiveRunConflict, SessionNotFound
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
     MODEL_REQUEST_STARTED,
@@ -69,6 +70,21 @@ class GateScriptedModel(ScriptedModel):
             await self._gate.wait()
         async for chunk in super().astream(messages, **kwargs):
             yield chunk
+
+
+class _ObservedAsyncLock:
+    def __init__(self, lock: asyncio.Lock, contended: asyncio.Event) -> None:
+        self._lock = lock
+        self._contended = contended
+
+    async def __aenter__(self):
+        if self._lock.locked():
+            self._contended.set()
+        await self._lock.acquire()
+        return self
+
+    async def __aexit__(self, *_exc_info) -> None:
+        self._lock.release()
 
 
 class _Harness:
@@ -981,3 +997,333 @@ async def test_burst_queue_on_idle_session_keeps_every_input(tmp_path, monkeypat
     # seq 全程唯一（双聚合撞号的 fail-closed 底线没被踩到）、没有任何 run 被炸。
     validate_event_seq(session_id, events)
     assert not harness.of_type(session_id, RUN_FAILED)
+
+
+@pytest.mark.parametrize("launch", [True, False], ids=["run", "no-run"])
+@pytest.mark.asyncio
+async def test_create_fails_if_hard_delete_wins_before_completion(
+    tmp_path, monkeypatch, launch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [])
+    service = harness.service
+    session_started = asyncio.Event()
+    allow_create_to_continue = asyncio.Event()
+    session_id_holder: list[str] = []
+    launch_calls: list[str] = []
+    original_finish = service._finish_initial_creation
+
+    async def pause_before_finish(**kwargs):
+        session_id_holder.append(kwargs["session"].session_id)
+        session_started.set()
+        await allow_create_to_continue.wait()
+        return await original_finish(**kwargs)
+
+    def record_launch(session, *_args, **_kwargs):
+        launch_calls.append(session.session_id)
+        return object(), object()
+
+    monkeypatch.setattr(service, "_finish_initial_creation", pause_before_finish)
+    monkeypatch.setattr(harness.state.run_manager, "launch", record_launch)
+    create_task = asyncio.create_task(
+        service.create_and_launch(
+            task="创建与硬删并发",
+            launch=launch,
+            auto_approve=True,
+            auto_approve_explicit=True,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(session_started.wait(), timeout=10)
+        await service.delete_session(session_id_holder[0])
+    finally:
+        allow_create_to_continue.set()
+        result = await asyncio.gather(create_task, return_exceptions=True)
+
+    assert isinstance(result[0], SessionNotFound)
+    assert launch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_launch_holds_session_lock_through_post_start_work(
+    tmp_path, monkeypatch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [])
+    service = harness.service
+    run_manager = harness.state.run_manager
+    session_started = asyncio.Event()
+    allow_create_to_continue = asyncio.Event()
+    delete_lock_contended = asyncio.Event()
+    session_id_holder: list[str] = []
+    active_sessions: set[str] = set()
+    launch_calls: list[str] = []
+    original_session_lock = run_manager.session_lock
+
+    async def pause_after_session_start(session_id: str) -> None:
+        session_id_holder.append(session_id)
+        session_started.set()
+        await allow_create_to_continue.wait()
+
+    def observe_session_lock(session_id: str) -> _ObservedAsyncLock:
+        return _ObservedAsyncLock(
+            original_session_lock(session_id), delete_lock_contended
+        )
+
+    def record_launch(session, *_args, **_kwargs):
+        launch_calls.append(session.session_id)
+        active_sessions.add(session.session_id)
+        return object(), object()
+
+    monkeypatch.setattr(service, "refresh_progress_file", pause_after_session_start)
+    monkeypatch.setattr(run_manager, "session_lock", observe_session_lock)
+    monkeypatch.setattr(run_manager, "launch", record_launch)
+    monkeypatch.setattr(run_manager, "is_busy", lambda sid: sid in active_sessions)
+    create_task = asyncio.create_task(
+        service.create_and_launch(
+            task="创建与硬删并发",
+            auto_approve=True,
+            auto_approve_explicit=True,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(session_started.wait(), timeout=10)
+        delete_task = asyncio.create_task(
+            service.delete_session(session_id_holder[0])
+        )
+        await asyncio.wait_for(delete_lock_contended.wait(), timeout=10)
+        assert not delete_task.done()
+    finally:
+        allow_create_to_continue.set()
+
+    created = await create_task
+    assert created.session.session_id == session_id_holder[0]
+    assert launch_calls == [session_id_holder[0]]
+    with pytest.raises(ActiveRunConflict):
+        await delete_task
+
+
+@pytest.mark.asyncio
+async def test_create_without_launch_serializes_delete_after_completion(
+    tmp_path, monkeypatch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [])
+    service = harness.service
+    run_manager = harness.state.run_manager
+    session_started = asyncio.Event()
+    allow_create_to_continue = asyncio.Event()
+    delete_lock_contended = asyncio.Event()
+    session_id_holder: list[str] = []
+    original_session_lock = run_manager.session_lock
+
+    async def pause_after_session_start(session_id: str) -> None:
+        session_id_holder.append(session_id)
+        session_started.set()
+        await allow_create_to_continue.wait()
+
+    def observe_session_lock(session_id: str) -> _ObservedAsyncLock:
+        return _ObservedAsyncLock(
+            original_session_lock(session_id), delete_lock_contended
+        )
+
+    monkeypatch.setattr(service, "refresh_progress_file", pause_after_session_start)
+    monkeypatch.setattr(run_manager, "session_lock", observe_session_lock)
+    create_task = asyncio.create_task(
+        service.create_and_launch(
+            task="只创建与硬删并发",
+            launch=False,
+            auto_approve=True,
+            auto_approve_explicit=True,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(session_started.wait(), timeout=10)
+        delete_task = asyncio.create_task(
+            service.delete_session(session_id_holder[0])
+        )
+        await asyncio.wait_for(delete_lock_contended.wait(), timeout=10)
+        assert not delete_task.done()
+    finally:
+        allow_create_to_continue.set()
+
+    created = await create_task
+    assert created.session.session_id == session_id_holder[0]
+    assert created.run is None
+    await delete_task
+    assert not await service.has_session(session_id_holder[0])
+
+
+@pytest.mark.asyncio
+async def test_create_launch_commits_under_session_lock_before_delete(
+    tmp_path, monkeypatch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [])
+    service = harness.service
+    active_sessions: set[str] = set()
+    lock_held_at_launch: list[bool] = []
+
+    def record_launch(session, *_args, **_kwargs):
+        lock_held_at_launch.append(
+            harness.state.run_manager.session_lock(session.session_id).locked()
+        )
+        active_sessions.add(session.session_id)
+        return object(), object()
+
+    def is_busy(session_id: str) -> bool:
+        return session_id in active_sessions
+
+    monkeypatch.setattr(harness.state.run_manager, "launch", record_launch)
+    monkeypatch.setattr(harness.state.run_manager, "is_busy", is_busy)
+
+    result = await service.create_and_launch(
+        task="创建提交与硬删串行化",
+        auto_approve=True,
+        auto_approve_explicit=True,
+    )
+
+    assert lock_held_at_launch == [True]
+    with pytest.raises(ActiveRunConflict):
+        await service.delete_session(result.session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_launch_commits_under_session_lock_before_delete(
+    tmp_path, monkeypatch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [AIMessage(content="完成")])
+    service = harness.service
+    run_manager = harness.state.run_manager
+    initial = await service.create_and_launch(
+        task="创建恢复测试会话",
+        auto_approve=True,
+        auto_approve_explicit=True,
+    )
+    session_id = initial.session.session_id
+    await harness.wait_for(
+        lambda: (
+            run_manager.get_active(session_id) is None
+            and bool(harness.of_type(session_id, RUN_COMPLETED))
+        ),
+        what="初始 run 结束",
+    )
+    await harness.wait_for(
+        lambda: not run_manager.is_busy(session_id),
+        what="初始 run finalize 完成",
+    )
+
+    resume_entered = asyncio.Event()
+    allow_resume = asyncio.Event()
+    delete_lock_contended = asyncio.Event()
+    launch_calls: list[str] = []
+    launch_lock_held: list[bool] = []
+    active_sessions: set[str] = set()
+
+    async def pause_progress_refresh(_session_id: str) -> None:
+        resume_entered.set()
+        await allow_resume.wait()
+
+    original_session_lock = run_manager.session_lock
+
+    def observe_session_lock(target_session_id: str) -> _ObservedAsyncLock:
+        return _ObservedAsyncLock(
+            original_session_lock(target_session_id), delete_lock_contended
+        )
+
+    def record_launch(session, *_args, **_kwargs):
+        launch_calls.append(session.session_id)
+        launch_lock_held.append(original_session_lock(session.session_id).locked())
+        active_sessions.add(session.session_id)
+        return object(), object()
+
+    monkeypatch.setattr(service, "refresh_progress_file", pause_progress_refresh)
+    monkeypatch.setattr(run_manager, "session_lock", observe_session_lock)
+    monkeypatch.setattr(run_manager, "launch", record_launch)
+    monkeypatch.setattr(
+        run_manager, "is_busy", lambda target: target in active_sessions
+    )
+
+    resume = asyncio.create_task(
+        service.resume_and_launch(session_id=session_id, task="恢复提交")
+    )
+    await asyncio.wait_for(resume_entered.wait(), timeout=10)
+    delete = asyncio.create_task(service.delete_session(session_id))
+    try:
+        await asyncio.wait_for(delete_lock_contended.wait(), timeout=10)
+        assert not delete.done()
+    finally:
+        allow_resume.set()
+
+    resumed = await resume
+    assert resumed.session.session_id == session_id
+    assert launch_calls == [session_id]
+    assert launch_lock_held == [True]
+    with pytest.raises(ActiveRunConflict):
+        await delete
+
+
+@pytest.mark.asyncio
+async def test_resume_fails_closed_if_hard_delete_wins_before_launch(
+    tmp_path, monkeypatch
+):
+    harness = _build_harness(tmp_path, monkeypatch, [AIMessage(content="完成")])
+    service = harness.service
+    run_manager = harness.state.run_manager
+    initial = await service.create_and_launch(
+        task="创建恢复删除测试会话",
+        auto_approve=True,
+        auto_approve_explicit=True,
+    )
+    session_id = initial.session.session_id
+    await harness.wait_for(
+        lambda: (
+            run_manager.get_active(session_id) is None
+            and bool(harness.of_type(session_id, RUN_COMPLETED))
+        ),
+        what="初始 run 结束",
+    )
+    await harness.wait_for(
+        lambda: not run_manager.is_busy(session_id),
+        what="初始 run finalize 完成",
+    )
+
+    delete_entered = asyncio.Event()
+    allow_delete = asyncio.Event()
+    resume_lock_contended = asyncio.Event()
+    launch_calls: list[str] = []
+    original_delete = service._delete_session_locked
+    original_session_lock = run_manager.session_lock
+
+    async def pause_delete(target_session_id: str):
+        delete_entered.set()
+        await allow_delete.wait()
+        return await original_delete(target_session_id)
+
+    def observe_session_lock(target_session_id: str) -> _ObservedAsyncLock:
+        return _ObservedAsyncLock(
+            original_session_lock(target_session_id), resume_lock_contended
+        )
+
+    def record_launch(session, *_args, **_kwargs):
+        launch_calls.append(session.session_id)
+        return object(), object()
+
+    monkeypatch.setattr(service, "_delete_session_locked", pause_delete)
+    delete = asyncio.create_task(service.delete_session(session_id))
+    await asyncio.wait_for(delete_entered.wait(), timeout=10)
+    monkeypatch.setattr(run_manager, "session_lock", observe_session_lock)
+    monkeypatch.setattr(run_manager, "launch", record_launch)
+
+    resume = asyncio.create_task(
+        service.resume_and_launch(session_id=session_id, task="删除后的恢复")
+    )
+    try:
+        await asyncio.wait_for(resume_lock_contended.wait(), timeout=10)
+        assert not resume.done()
+    finally:
+        allow_delete.set()
+
+    await delete
+    with pytest.raises(SessionNotFound):
+        await resume
+    assert launch_calls == []

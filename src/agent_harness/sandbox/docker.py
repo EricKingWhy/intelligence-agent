@@ -15,8 +15,10 @@ import tarfile
 import tempfile
 import threading
 import weakref
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
 from typing import ClassVar
@@ -84,6 +86,9 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        self._workspace_restore_guard: Callable[
+            [], AbstractContextManager[None]
+        ] | None = None
         self._exec_state = self._state_for_container(self._container_name)
         self._exec_lock = self._exec_state.lock
 
@@ -109,6 +114,14 @@ class DockerSandbox(Sandbox):
         return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
+        restore_guard = getattr(self, "_workspace_restore_guard", None)
+        if restore_guard is None:
+            self._ensure_started()
+            return
+        with restore_guard():
+            self._ensure_started()
+
+    def _ensure_started(self) -> None:
         if self._container is not None:
             self._container.reload()
             if self._container.status == "running":
