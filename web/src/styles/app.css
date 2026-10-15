@@ -2149,8 +2149,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: color-mix(in srgb, var(--warning) 18%, transparent);
   color: var(--warning);
 }
+/* #1172：白字压 var(--danger) 实心底——亮 4.45 / 暗 3.01，双主题都不达 AA。
+   根因：--danger 在本仓是「正文/装饰两用」的偏亮色，当白字的底本来就不够深。
+   做法同成熟产品的「徽标白字配深色档」：Primer 把实底单列一档
+   --bgColor-danger-emphasis（比 --bgColor-danger-muted 深），并规定配
+   --fgColor-onEmphasis 使用（primer/primitives bgColor.json5 @66e78d33；
+   见 #1171/#1172 提交信息的方案依据块）。
+   本仓同形配方已有两处：`.composer-send`（accent 82% + #000）、
+   `.approval-approve`（success 80% + #000）。取 75% 而非 80%：暗色是卡线项
+   （--danger 暗色本身偏亮），80% 只剩 0.001 余量、75% 给到 0.51；
+   亮色同时从 6.36 升到 6.99。实测：亮 6.99 / 暗 5.01。 */
 .notice-strip-hard .notice-strip-badge {
-  background: var(--danger);
+  background: color-mix(in srgb, var(--danger) 75%, #000);
   color: #fff;
 }
 .notice-strip-text {
@@ -7297,7 +7307,10 @@ button.json-row {
   text-underline-offset: 3px;
 }
 .provider-link-btn:hover { color: var(--text-primary); }
-.provider-link-btn.danger { color: var(--danger); }
+/* #1171：语义色当正文色用，同 .app-error 族（app.css:175 注释）改 ink-mix。
+   .provider-dialog 的底是 --surface-1（亮 #fff / 暗 #17171d），本元素自身无底。
+   修前亮色 4.45（票面值，本机复算 4.448）不达 AA；ink-mix 后真机亮 9.2214 / 暗 10.0202。 */
+.provider-link-btn.danger { color: color-mix(in srgb, var(--danger) 45%, var(--text-primary)); }
 .provider-confirm-row {
   display: flex;
   align-items: center;
@@ -7331,7 +7344,9 @@ button.json-row {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
-.provider-test-msg { color: var(--danger); }
+/* #1171：同上。底是 .provider-test-result.fail 的 10% danger 染底压 --surface-1，
+   修前亮 3.90 / 暗 5.20；ink-mix 后真机亮 8.1421 / 暗 8.8479。 */
+.provider-test-msg { color: color-mix(in srgb, var(--danger) 45%, var(--text-primary)); }
 .provider-test-detail { margin-top: 4px; color: var(--text-tertiary); }
 .provider-test-detail code {
   display: block;

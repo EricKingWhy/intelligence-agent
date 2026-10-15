@@ -882,3 +882,114 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio, `.auth-banner contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 }
+
+/* ── #1171 / #1172：语义色「当正文色用」的余量收口 ──
+ *
+ *  三处都是 #1136 ink-mix 方案（`color-mix(in srgb, <sem> 45%, var(--text-primary))`）
+ *  与 #1029 先例的同类，票面点名时仍 <4.5：
+ *  - `.provider-link-btn.danger`：亮 4.45（纯 --danger 压 --surface-1，无自身底）
+ *  - `.provider-test-msg`：亮 3.90（纯 --danger 压 10% danger 染底）
+ *  - `.notice-strip-hard .notice-strip-badge`：白字压 --danger **实底**，亮 4.45 / 暗 3.01
+ *  前两处改 ink-mix；第三处是白字压实底、方向相反（要压深的是底不是字），
+ *  按 Primer `--bgColor-danger-emphasis` 的「白字配深色档」做法取
+ *  `color-mix(in srgb, var(--danger) 75%, #000)`。
+ *  本夹具走真实渲染路径（打开供应商弹层 / 触发 provider 测试失败 / failure-guard 事件条），
+ *  把任一处改回原值，对应用例必然变红。 */
+
+/** 供应商弹层夹具（`.provider-dialog`）。`/api/model-providers` 不在 routeApi 的
+ *  覆盖清单里（它落到末尾的 404 fallback），所以这里叠加一层 mock。 */
+const PROVIDER_ENTRY = {
+  id: 'e2e-provider',
+  label: '对比度供应商',
+  base_url: 'https://example.invalid/v1',
+  models: [{ model_id: 'e2e-model', label: 'e2e 模型' }],
+  kind: 'custom' as const,
+  has_api_key: true,
+  is_available: true,
+  unavailable_reason: null,
+  last_test: null,
+};
+
+/** 打开供应商管理弹层并选中唯一条目（右侧表单在场 → 危险区按钮在场）。 */
+async function openProviderDialog(page: Page, theme: 'dark' | 'light'): Promise<void> {
+  await routeApi(page, {
+    sessions: [], events: [], models: MODELS,
+    permissionModes: PERMISSION_MODES, agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.route('**/api/model-providers**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/model-providers' && route.request().method() === 'GET') {
+      return route.fulfill({ status: 200, body: JSON.stringify({ providers: [PROVIDER_ENTRY] }), contentType: 'application/json' });
+    }
+    if (path.endsWith('/test') && route.request().method() === 'POST') {
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ ok: false, message: '连接失败：401 未授权', reason: 'auth', duration_ms: 12 }),
+        contentType: 'application/json',
+      });
+    }
+    return route.fulfill({ status: 404, body: '{"detail":"not mocked"}', contentType: 'application/json' });
+  });
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await page.locator('.picker-item', { hasText: '管理模型' }).first().click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.locator('.provider-list button').first().click();
+  await expect(page.locator('.provider-danger-zone')).toBeVisible();
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`[${theme}] #1171 供应商弹层两处语义色正文对比度 ≥4.5`, async ({ page }) => {
+    await openProviderDialog(page, theme);
+
+    const link = await measure(page, '.provider-link-btn.danger');
+    const linkRatio = contrast(link.color, link.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .provider-link-btn.danger color=${link.color} bg=${link.bg} ratio=${linkRatio.toFixed(4)}`);
+    expect(linkRatio, `.provider-link-btn.danger contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // 触发「测试连接」失败 → .provider-test-msg 落进 .provider-test-result.fail 的染底里。
+    await page.getByRole('button', { name: '测试连接' }).click();
+    const msg = page.locator('.provider-test-msg');
+    await expect(msg).toBeVisible();
+    const m = await measure(page, '.provider-test-msg');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .provider-test-msg color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.provider-test-msg contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1172：白字压 --danger 实心底。与上面两处方向相反——要压深的是**底**。
+     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:735），真渲染路径。 */
+  test(`[${theme}] #1172 .notice-strip-hard 徽标（白字压实底）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-guard';
+    const events: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rg', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rg', time: T },
+      { type: 'user/message', data: { content: '熔断对比度' }, seq: 3, session_id: sid, run_id: 'rg', step_id: 1, time: T },
+      { type: 'tool/failure-guard', data: { level: 'hard', tool_name: 'bash', consecutive_failures: 5 }, seq: 4, session_id: sid, run_id: 'rg', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rg', time: T },
+    ];
+    await routeApi(page, {
+      sessions: [{ session_id: sid, event_count: 5, first_event_time: T, last_event_time: T,
+        first_user_message: '熔断对比度', trace_id: null, trace_url: null }],
+      events, models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    const badge = page.locator('.notice-strip-hard .notice-strip-badge');
+    await expect(badge).toBeVisible();
+    const m = await measure(page, '.notice-strip-hard .notice-strip-badge');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .notice-strip-hard .notice-strip-badge color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.notice-strip-hard .notice-strip-badge contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+}
