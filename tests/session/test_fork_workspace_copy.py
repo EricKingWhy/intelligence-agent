@@ -300,6 +300,7 @@ class _FakeDockerSandbox:
         self.files: dict[str, str] = {}
         self.copied: list[tuple[str, str]] = []
         self.started = False
+        self.volume_present = True
 
     @property
     def workspace_root(self):
@@ -309,6 +310,9 @@ class _FakeDockerSandbox:
 
     def ensure_started(self) -> None:
         self.started = True
+
+    def workspace_volume_exists(self) -> bool:
+        return self.volume_present
 
     def write_text(self, path: str, content: str) -> None:
         self.files[path] = content

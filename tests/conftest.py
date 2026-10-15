@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agent_harness.config import Settings
 from agent_harness.session import JsonlSessionStore, Session
+
+
+def register_workspace_from_build_kwargs(kwargs: Mapping[str, Any]) -> None:
+    """Keep mocked runtime builders' workspace precondition consistent with production."""
+    kwargs["workspace_registry"].create(
+        kwargs["session_id"],
+        workspace_root=kwargs["workspace"],
+        backend=kwargs.get("sandbox_backend") or "local",
+    )
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

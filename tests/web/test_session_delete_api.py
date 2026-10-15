@@ -899,36 +899,96 @@ def test_restore_and_hard_delete_are_serialized_on_the_workspace_lock(
                 finally:
                     delete_done.set()
 
-            # 删除线程**到达取锁点**的信号。有了它，下面那条断言就不是"等 2 秒看看"
-            # 的时序猜测（那会假绿：删除线程还没跑到清理点，断言照样成立），而是
-            # "删除已经在锁上被挡住"的确定性判据。
-            delete_at_lock = threading.Event()
+            # 只在删除清理 worker 对恢复线程持有的同一把真实 RLock 做非阻塞
+            # acquire 失败时发信号。这样信号表示已经观察到锁竞争，不依赖
+            # 清理入口已运行或固定等待时长。
+            delete_lock_contended = threading.Event()
+            delete_cleanup_active = threading.Event()
+            delete_cleanup_finished = threading.Event()
+            delete_lock_thread_id: int | None = None
+            original_workspace_lock = registry._workspace_lock
             original_cleanup = registry.cleanup_docker_workspace_resources
 
-            def signalled_cleanup(target_session_id: str) -> None:
-                delete_at_lock.set()
-                original_cleanup(target_session_id)
+            def identify_delete_lock_thread(target_session_id: str) -> None:
+                nonlocal delete_lock_thread_id
+                # delete_session 将此同步清理函数交给 AnyIO worker thread；
+                # 在清理入口记录身份，供下面的锁探针识别真正取锁的线程。
+                delete_lock_thread_id = threading.get_ident()
+                delete_cleanup_active.set()
+                try:
+                    original_cleanup(target_session_id)
+                finally:
+                    delete_cleanup_active.clear()
+                    delete_cleanup_finished.set()
 
             monkeypatch.setattr(
-                registry, "cleanup_docker_workspace_resources", signalled_cleanup,
+                registry, "cleanup_docker_workspace_resources", identify_delete_lock_thread,
             )
+
+            def observed_workspace_lock(target_owner_id: str) -> object:
+                lock = original_workspace_lock(target_owner_id)
+
+                @contextlib.contextmanager
+                def observe_contention():
+                    if (
+                        threading.get_ident() == delete_lock_thread_id
+                        and delete_cleanup_active.is_set()
+                    ):
+                        acquired = lock.acquire(blocking=False)
+                        if not acquired:
+                            delete_lock_contended.set()
+                            lock.acquire()
+                    else:
+                        lock.acquire()
+                    try:
+                        yield lock
+                    finally:
+                        lock.release()
+
+                return observe_contention()
+
+            monkeypatch.setattr(registry, "_workspace_lock", observed_workspace_lock)
 
             restore_thread = threading.Thread(target=restore, name="1132-restore", daemon=True)
+            delete_thread: threading.Thread | None = None
             restore_thread.start()
-            assert paused.wait(30), "cold restore never reached ensure_started"
+            try:
+                assert paused.wait(30), "cold restore never reached ensure_started"
 
-            delete_thread = threading.Thread(target=hard_delete, name="1132-delete", daemon=True)
-            delete_thread.start()
-            assert delete_at_lock.wait(30), "hard-delete never reached the workspace lock"
-            # ① 恢复持锁 ⇒ 删除必须被挡住（这是本票要买的那条串行化）。
-            assert not delete_done.wait(2.0), (
-                "hard-delete ran to completion while cold restore held the workspace lock"
-            )
+                delete_thread = threading.Thread(
+                    target=hard_delete, name="1132-delete", daemon=True,
+                )
+                delete_thread.start()
+                for _ in range(600):
+                    if (
+                        delete_lock_contended.is_set()
+                        or delete_cleanup_finished.is_set()
+                        or delete_done.is_set()
+                    ):
+                        break
+                    delete_lock_contended.wait(0.05)
+                assert delete_lock_contended.is_set(), (
+                    "hard-delete completed or failed without contending on the cold "
+                    "restore's workspace lock"
+                )
+                # ① 上面的失败 try-acquire 证明恢复确实持锁，删除在该锁上等待。
+                assert docker_client.volumes.get(volume_name).name == volume_name, (
+                    "hard-delete removed the workspace volume before acquiring "
+                    "the contended lock"
+                )
+                assert not delete_done.is_set(), (
+                    "hard-delete completed despite observed lock contention"
+                )
+            finally:
+                release.set()
+                restore_thread.join(timeout=60)
+                if delete_thread is not None:
+                    delete_thread.join(timeout=60)
 
-            release.set()
-            restore_thread.join(timeout=60)
-            delete_thread.join(timeout=60)
-
+            assert not restore_thread.is_alive(), "cold restore thread did not finish"
+            assert delete_thread is not None
+            assert not delete_thread.is_alive(), "hard-delete thread did not finish"
+            assert "sandbox" in restore_result, restore_result
             assert "error" not in restore_result, restore_result.get("error")
             # ② 恢复看到的是原数据，而不是"空 workspace 上成功"。
             assert observed.get("marker") == "ORIGINAL DATA", observed
@@ -1049,3 +1109,5 @@ def test_workspace_lock_key_resolution_never_breaks_hard_delete_idempotency(
     # 正常映射：解析到 owner 自身。
     registry.create("owned")
     assert registry._owner_lock_key("owned") == "owned"
+    registry.bind_alias("owned-alias", "owned")
+    assert registry._owner_lock_key("owned-alias") == "owned"

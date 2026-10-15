@@ -19,11 +19,13 @@ from fastapi.testclient import TestClient
 from agent_harness.config import Settings
 from agent_harness.session import service as service_module
 from agent_harness.web.app import create_app
+from tests.conftest import register_workspace_from_build_kwargs
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     async def _fake_build(**kwargs):
+        register_workspace_from_build_kwargs(kwargs)
         return object()
 
     monkeypatch.setattr(service_module, "build_runtime", _fake_build)

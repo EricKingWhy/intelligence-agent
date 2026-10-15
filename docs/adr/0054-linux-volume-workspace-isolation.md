@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-10-14
-- 相关：issue #1048、ADR-0025（宿主侧来源闸）、ADR-0028（host-directory 边界）、
+- 相关：issue #1048、ADR-0025（宿主侧来源闸）、ADR-0028（host-directory 边界）、ADR-0055（Docker workspace 恢复与硬删除并发）、
   `docs/spec` 冻结规格 `05_SANDBOX_CODING_TOOLS.md` §3-4（**不回写**）
 
 ## 背景
@@ -78,6 +78,17 @@ Windows PSEC **不再作为新会话可选/可请求后端**（只用于解析�
 - 真实 Windows NTFS + MXC PSEC 的端到端硬链接验收**部分登记未完成**（本环境无
   Windows），不虚构结论。
 
+## 并发与部署边界
+
+`WorkspaceRegistry.create()`、local workspace restore、Docker restore、legacy PSEC migration、registry-owned `DockerSandbox.ensure_started()` 与恢复 launch commit point，共同遵守按规范化 sessions root 和 canonical owner 分区的进程级 owner lock；同一进程的所有 `WorkspaceRegistry` 实例共享这把锁。get/restore 与 migration 在锁内重读并校验映射；launch 在锁内检查删除标记并提交。缓存实例也必须在每次启动前检查该标记，因此已装配但尚未 launch 的 runtime 不能在删除后重建卷。
+
+`SessionService.delete_session()` 持有 `RunManager.session_lock` 直到硬删完成。初始创建在 `session/started` 落盘后立即取得同一把锁，并持有到进度、项目索引、预算等后续工作完成，以及 `launch=True` 提交或 `launch=False` 返回；恢复也在提交 launch 的临界区使用该锁，并在锁内重读持久化事件状态。创建或恢复先提交 launch 时，硬删不会仅因 launch 先发生而拒绝；若删除检查时仍有在途 run，则按现有守卫拒绝。删除先完成时，等待中的创建或恢复发现 session 不存在并失败关闭。`launch=False` 的创建与删除同样串行，删除不能在创建仍写入会话关联或预算时越过它。同 owner 的 alias 恢复也由 owner lock 和删除标记保护。
+
+硬删对每个 owner 映射都在 owner lock 内原子写入 `workspace_delete_in_progress`，然后才删除 Docker 资源；无映射时写入 marker-only 映射。local workspace 与 legacy PSEC 宿主工作区不会在这一步被删除。标记保留到 `discard_session_artifacts()` 删除映射为止；标记存在时，owner、alias、任意 registry 缓存恢复、旧 sandbox 启动与 launch 提交都失败关闭。清理失败时保留标记与映射，以便同一 hard-delete 重试；重试可以继续清理。这覆盖资源清理后的异步 DB / 文件删除窗口，也避免进程重启后重新创建已删除的 volume。
+
+当前支持每个 sessions root 运行一个服务进程。多进程 / 多 worker 共享该 root 不受支持，因为 run ownership 与 active-session 状态同样为进程内状态；跨进程支持前须先实现协调式 session ownership 与 workspace locking。
+
+ADR-0055 补充 Docker named volume 存在性检查与删除锁 owner-key 解析；本 ADR 的删除标记、RunManager session lock 和 launch 提交点仍定义完整删除窗口，ADR-0055 不缩窄这些语义。
 ## 后果
 
 - 冻结 Engineering Specification **不回写**；本 ADR 与操作说明是唯一新增语义面。

@@ -314,7 +314,7 @@ class TestRuntimeReadsSessionModel:
             ),
             patch("agent_harness.session.service.Session") as mock_session_cls,
         ):
-            mock_session_cls.start = MagicMock(return_value=MagicMock())
+            mock_session_cls.start = MagicMock(side_effect=Session.start)
             service = session_service(state)
             asyncio.run(
                 service.create_and_launch(
@@ -322,12 +322,14 @@ class TestRuntimeReadsSessionModel:
                 )
             )
 
-        assert mock_session_cls.start.call_args.kwargs["started_data"] == {
-            "provider": "deepseek",
-            "model_id": "gpt-4o",
-            # #358：新会话恒写默认权限矩阵版本。
-            "permission_defaults_version": 2,
-        }
+        session_id = mock_session_cls.start.call_args.kwargs["session_id"]
+        events = state.store.read_events(session_id)
+        assert events[0].type == SESSION_STARTED
+        started_data = events[0].data
+        assert started_data["provider"] == "deepseek"
+        assert started_data["model_id"] == "gpt-4o"
+        # #358：新会话恒写默认权限矩阵版本。
+        assert started_data["permission_defaults_version"] == 2
 
     def test_create_with_default_entry_name_records_no_override(self, tmp_path):
         """#1016：选中默认条目 = 清覆盖；创建时不该把它落成一个具体 model_id。
@@ -345,7 +347,7 @@ class TestRuntimeReadsSessionModel:
             ),
             patch("agent_harness.session.service.Session") as mock_session_cls,
         ):
-            mock_session_cls.start = MagicMock(return_value=MagicMock())
+            mock_session_cls.start = MagicMock(side_effect=Session.start)
             service = session_service(state)
             asyncio.run(
                 service.create_and_launch(
@@ -353,7 +355,10 @@ class TestRuntimeReadsSessionModel:
                 )
             )
 
-        started_data = mock_session_cls.start.call_args.kwargs["started_data"]
+        session_id = mock_session_cls.start.call_args.kwargs["session_id"]
+        events = state.store.read_events(session_id)
+        assert events[0].type == SESSION_STARTED
+        started_data = events[0].data
         assert "model_id" not in started_data
         assert "provider" not in started_data
 

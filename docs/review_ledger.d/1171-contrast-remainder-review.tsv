@@ -1,0 +1,1 @@
+2026-10-15	#1171/#1172 1 笔（f02a5ecb：3 处语义色正文 ink-mix 收口 + 方案依据块；由 d9116d8e amend 而来，只改提交信息/注释/文档，代码逻辑零变化）fresh 双轴独立审查（CodeBuddy deepseek-v4.1-flash）：Correctness APPROVE（独立 WCAG 复算逐位吻合，零 P0-P3）；Standards CHANGES_REQUIRED（P2-1：45% 子表 7.25 误标实测，真值 ~6.04、上界 ~64%）→ #1187 修后数字已按复审期望值落盘。终态零 P0-P3。	4994caff..f02a5ecb
