@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**本线当前施工（2026-10-15，#1163）**：Issue OPEN，标签 `bug`/`P3`/`in-progress`，指派 EricKingWhy。复现：Registry A 缓存 owner Sandbox；Registry B 完成 cleanup 与 artifact discard 后，A 再以同一 ID 调用 `create()` 返回旧实例且没有新映射。新增回归在修复前 1 failed、修复后 1 passed；修复提交 `359f6a3166ab9d6a75709bac73d6403d2b2bca4c` 仅在映射缺失时淘汰本实例同 ID 缓存，再走现有创建流程。Registry 两测试文件 41 passed，目标 Ruff 与 diff-check 通过。冻结代码树：tip `359f6a3166ab9d6a75709bac73d6403d2b2bca4c`，tree `9f8d1c0f263cd107f1f2f5ea964c3877d7262ae0`；源码 blob `532f1b3336cc12767ef384380bd4ba00a48c67f5`，测试 blob `6af3bdab29f7505f679cd1f581e4ad34b2737c97`。Gate-0 与双轴独立审查待执行；不 push、不 PR、不 merge。
+**已完成（2026-10-15，#1163）**：Issue CLOSED（bug/P3；in-progress 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1163#issuecomment-6189441247)。修复 commit `359f6a31`，分支 `codex/1048-ntfs-hardlinks`；双 Registry 红证 1 failed→1 passed，两个 Registry 测试文件 41 passed，Ruff/diff-check 通过。Correctness/Spec 与 Standards 双轴 APPROVE、P0–P4=0，审查范围 `1241e3d2..85a1ce94`。Gate-0 6/6 PASS（tip `a7f5f2ab` / tree `12ff185c`，收据 `docs/gate/a7f5f2ab346e34961d617b94ed3b0729d9501ee2.json`）。覆盖闸门首轮行格式失败，修正后 exit 0。全量后端 pytest 未运行；未 push/PR/merge，集成负责人 EricKingWhy。详见月档 #1163。
 
 **已完成（2026-10-15，#1135）**：Issue CLOSED（bug/P1，`in-progress` 已移除）；完成评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1135#issuecomment-6184627969)。未 push、未开 PR、未 merge；集成负责人 EricKingWhy。junction 复现、验证与用户裁定见月档 #1135。
 
