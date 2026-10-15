@@ -64,7 +64,7 @@ def _glob_match_posix(rel_path: str, pattern: str) -> bool:
 
 
 def _validate_windows_archive_members(members: list[tarfile.TarInfo]) -> None:
-    reserved_names = {"con", "prn", "aux", "nul"} | {
+    reserved_names = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
         f"{prefix}{number}"
         for prefix in ("com", "lpt")
         for number in (*range(1, 10), "¹", "²", "³")

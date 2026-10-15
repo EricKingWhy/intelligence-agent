@@ -68,7 +68,13 @@ def docker_sandbox() -> Iterator[DockerSandbox]:
 @pytest.mark.skipif(os.name != "nt", reason="Windows filename semantics")
 @pytest.mark.parametrize(
     "member_name",
-    ["workspace/config.", "workspace/NUL.txt", "workspace/subdir./file.txt"],
+    [
+        "workspace/config.",
+        "workspace/NUL.txt",
+        "workspace/CONIN$",
+        "workspace/CONOUT$",
+        "workspace/subdir./file.txt",
+    ],
 )
 def test_export_rejects_windows_aliases_before_extracting(
     monkeypatch: pytest.MonkeyPatch,
