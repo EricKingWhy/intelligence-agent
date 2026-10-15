@@ -1330,10 +1330,11 @@ async def test_resume_fails_closed_if_hard_delete_wins_before_launch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("launch", [True, False], ids=["launch", "no-launch"])
 async def test_create_fails_if_resume_launches_first(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, launch
 ):
-    """A delayed initial create must not replace a run committed by resume."""
+    """A delayed initial create must not complete over a run committed by resume."""
     model_gate = asyncio.Event()
     harness = _build_harness(
         tmp_path, monkeypatch, [AIMessage(content="恢复完成")], gate=model_gate,
@@ -1361,10 +1362,11 @@ async def test_create_fails_if_resume_launches_first(
     monkeypatch.setattr(run_manager, "launch", record_launch)
     create_task = asyncio.create_task(
         service.create_and_launch(
-            # 空白任务按现有服务契约仍启动；不会先因 task/defined 的 seq 冲突退出。
+            # Whitespace preserves this service contract without an earlier task event.
             task=" ",
             auto_approve=True,
             auto_approve_explicit=True,
+            launch=launch,
             sandbox_backend="local",
         )
     )
@@ -1393,8 +1395,7 @@ async def test_create_fails_if_resume_launches_first(
     finally:
         allow_create.set()
         model_gate.set()
-        if not create_task.done():
-            create_result = await asyncio.gather(create_task, return_exceptions=True)
+        create_result = await asyncio.gather(create_task, return_exceptions=True)
         runs = [resumed] if resumed is not None else []
         if (
             create_result

@@ -1773,7 +1773,7 @@ class SessionService:
             )
             if not locked_events:
                 raise SessionNotFound(f"session '{session_id}' not found")
-            if launch and self._run_manager.get_active(session_id) is not None:
+            if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
 
             # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
