@@ -1,0 +1,25 @@
+# Enrollment for the OSS Scanner: https://github.com/anthropics/oss-scanner
+#
+# Draft only — lives on branch codebuddy/oss-scanner-application.
+# DO NOT submit to anthropics/oss-scanner without the maintainer's approval.
+#
+# Field reference: anthropics/oss-scanner templates/project.yaml
+# (repo / primary_contact required; dockerfile required unless the Dockerfile
+# sits next to project.yaml; threat_model optional but strongly recommended).
+
+# REQUIRED. The git repository to scan (https URL).
+repo: https://github.com/EricKingWhy/intelligence-agent
+
+# REQUIRED. Reports and build problems go here (one address).
+# Public alias provided by the maintainer. This address is public.
+primary_contact: hoeyw@outlook.com
+
+# Optional. Project home page.
+homepage: https://github.com/EricKingWhy/intelligence-agent
+
+# REQUIRED (in-repo option): Dockerfile lives in our own repository, so we can
+# update the build without a pull request to anthropics/oss-scanner.
+dockerfile: .oss-scanner/Dockerfile
+
+# Optional but strongly recommended: threat model lives in our repository too.
+threat_model: .oss-scanner/threat_model.md
