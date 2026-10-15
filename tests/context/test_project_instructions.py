@@ -1,9 +1,10 @@
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
 
+from agent_harness.assembly import uses_sandbox_path_semantics
 from agent_harness.config import Settings
 from agent_harness.context import project_instructions as project_instructions_module
 from agent_harness.context.project_instructions import (
@@ -301,3 +302,87 @@ def test_instruction_size_limits_reject_zero_and_unsafe_values() -> None:
         Settings(_env_file=None, project_instructions_file_max_bytes=0)
     with pytest.raises(ValueError):
         Settings(_env_file=None, project_instructions_total_max_bytes=5_000_000)
+
+
+class _FakeContainerSandbox:
+    """Docker 语义替身（#1130 AC-4）：容器内 POSIX 工作区根，指令读写一律经
+    Sandbox API；宿主文件系统对它不可见。"""
+
+    def __init__(self, backing: Path) -> None:
+        self._backing = backing
+
+    @property
+    def workspace_root(self) -> PurePosixPath:
+        return PurePosixPath("/workspace")
+
+    def path_kind(self, relative_path: str) -> str | None:
+        target = self._backing / relative_path
+        if target.is_file():
+            return "file"
+        if target.is_dir():
+            return "directory"
+        return None
+
+    def read_text(self, relative_path: str) -> str:
+        return (self._backing / relative_path).read_text(encoding="utf-8")
+
+    def write_text(self, relative_path: str, content: str) -> None:
+        (self._backing / relative_path).write_text(content, encoding="utf-8")
+
+
+def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) -> None:
+    """#1130 AC-4（确定性回归，docker-free）：重载走 Sandbox workspace API——
+    会话创建后对宿主的指令改动不出现在隔离会话中；私有 workspace 内的改动出现。
+
+    若重载路由退回 `reload_for_session(session_id, host_cwd)`（#1130 症状），
+    本用例在 web 层的 Docker 兄弟用例里会以宿主路径/宿主内容变红；
+    本用例把 store 侧的分支语义钉死（`uses_sandbox_path_semantics` 判据本身）。
+    """
+    host_project = tmp_path / "host-project"
+    host_project.mkdir()
+    host_file = host_project / "AGENTS.md"
+    host_file.write_text("host version one", encoding="utf-8")
+
+    container_backing = tmp_path / "container-backing"
+    container_backing.mkdir()
+    sandbox = _FakeContainerSandbox(container_backing)
+    assert uses_sandbox_path_semantics(sandbox) is True
+
+    store = ProjectInstructionStore()
+    # 会话创建时的快照导入：私有 workspace 与宿主同内容起步。
+    sandbox.write_text("AGENTS.md", "host version one")
+    initial = store.load_for_sandbox_session("session-sandbox-reload", sandbox)
+    assert initial.source_paths == (Path("/workspace/AGENTS.md"),)
+    assert "host version one" in (initial.prompt_text or "")
+
+    # 会话创建后：宿主改动（隔离会话不应看到）+ 私有 workspace 改动（应当看到）。
+    host_file.write_text("host version two", encoding="utf-8")
+    sandbox.write_text("AGENTS.md", "private workspace version")
+
+    reloaded = store.reload_for_sandbox_session("session-sandbox-reload", sandbox)
+
+    assert reloaded.source_paths == (Path("/workspace/AGENTS.md"),)
+    prompt = reloaded.prompt_text or ""
+    assert "private workspace version" in prompt
+    assert "host version two" not in prompt
+    assert "host version one" not in prompt
+
+
+def test_reload_for_sandbox_session_keeps_host_cwd_untouched(tmp_path: Path) -> None:
+    """#1130 AC-4：沙箱语义重载从不读取宿主 cwd——宿主目录里根本没有
+    指令文件时，重载结果是 `missing` 而不是把宿主路径拼进来源。"""
+    host_project = tmp_path / "host-project"
+    host_project.mkdir()
+    container_backing = tmp_path / "container-backing"
+    container_backing.mkdir()
+    sandbox = _FakeContainerSandbox(container_backing)
+
+    store = ProjectInstructionStore()
+    initial = store.load_for_sandbox_session("session-sandbox-missing", sandbox)
+    assert initial.status == "missing"
+    reloaded = store.reload_for_sandbox_session("session-sandbox-missing", sandbox)
+    assert reloaded.status == "missing"
+    assert reloaded.source_paths == ()
+    assert not any(
+        str(path).startswith(str(host_project)) for path in reloaded.source_paths
+    )
