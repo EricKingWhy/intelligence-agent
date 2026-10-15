@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-- **当前（2026-10-15 · W-31 / PR #1178）**：分支 `codex/1048-ntfs-hardlinks` 本地 head `fe3a61bf` 有三笔 Gate-1 修复待推；旧 head `0c69c366` 的手动 Gate-1 后端失败 8 例，前端成功。#1180/#1181 已修复并关闭，相关测试合跑 42 passed；#1182 保持 `in-progress`，等待推送后重跑完整 Gate-1。双轴审查：Standards APPROVE，Correctness/Spec 有一项 P2（更新树 Gate-1 证据待补）。PR #1178 的 merge 仍待新 head 全部 CI 成功。详见 `docs/SDD_TICKET_TRACKER.md` 与月档 W-31 Gate-1 修复记录。
+- **已完成验证（2026-10-15 · W-31 / PR #1178）**：#1180/#1181/#1182 均 CLOSED；PR #1178 代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 的 Gate-1 后端 8154 passed / 61 skipped / 51 deselected，四个真实 Docker hardlink 用例执行通过；前端 Vitest/build、PR Gate-0、Chromium E2E smoke、gitleaks 成功。Standards 与 Correctness/Spec follow-up 均 APPROVE，原 P2 已解除。PR #1178 承载本轮集成，详见 Tracker、月档与关单评论。
 
 - **已完成（2026-10-15 · #1173 session 创建测试先决条件）**：Issue CLOSED（bug/P3，`in-progress` 已移除）；修复提交 `7f1d9852`，post-sync HEAD `f965c88a`；79 个 API/workspace 聚焦用例、26 个 multiturn 用例、17 个 delete/owner-lock 用例通过（前两组使用 test-process local-backend override）；全仓 Ruff、diff-check、review coverage 通过；Gate-0 6/6 PASS，收据 `docs/gate/449039a1acd347c62dd8c1adb763856facac5120.json`；双轴 review APPROVE（零 finding）。本机全量 pytest 415 failed，主因 Docker Desktop 服务停止且启动被权限拒绝；另有 Windows symlink privilege failures。需在 PR 分支远端跑完整 `gate1` 后再合入。详见月档 #1173。
 - **已完成（2026-10-15 · #1163 stale workspace cache）**：Issue CLOSED（bug/P3；in-progress 已移除），代码提交 `359f6a31`；双 Registry 红证 1 failed→1 passed、两个 Registry 测试文件 41 passed、Ruff/diff-check 通过；双轴 review APPROVE（P0–P4=0）；Gate-0 6/6 PASS，收据 `docs/gate/a7f5f2ab346e34961d617b94ed3b0729d9501ee2.json`。未 push/PR/merge，集成负责人 EricKingWhy。详见月档 #1163。
