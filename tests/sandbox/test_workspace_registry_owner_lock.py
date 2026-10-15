@@ -32,6 +32,9 @@ class _FakeDockerSandbox:
     def ensure_started(self) -> None:
         pass
 
+    def workspace_volume_exists(self) -> bool:
+        return True
+
     def copy_in(self, _source: Path, _destination: str) -> None:
         pass
 

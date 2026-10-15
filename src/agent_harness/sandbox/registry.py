@@ -286,6 +286,7 @@ class WorkspaceRegistry:
                             f"Session '{session_id}' has a Docker mapping but no Docker sandbox."
                         )
                 self._attach_workspace_restore_guard(sandbox, owner_session_id)
+                self._assert_volume_present(sandbox, session_id)
                 if owner_session_id not in self._cache:
                     sandbox.ensure_started()
                     if owner_mapping.get("snapshot_import"):
@@ -348,6 +349,29 @@ class WorkspaceRegistry:
                 lock = threading.RLock()
                 self._workspace_locks[key] = lock
             return lock
+
+    def _owner_lock_key(self, session_id: str) -> str:
+        """Resolve delete-path locks to the canonical owner when possible."""
+        try:
+            owner_session_id, _ = self._resolve_workspace_owner(session_id)
+        except (KeyError, WorkspaceBindingError):
+            return session_id
+        return owner_session_id
+
+    def _assert_volume_present(self, sandbox: Sandbox, session_id: str) -> None:
+        """Fail closed if a Docker workspace's persistent named volume is gone."""
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        if not isinstance(sandbox, DockerSandbox) or sandbox.workspace_volume_exists():
+            return
+        logger.error(
+            "Docker workspace volume is missing; refusing to recreate it empty",
+            extra={"workspace_session_id": session_id},
+        )
+        raise WorkspaceBindingError(
+            f"Session '{session_id}' Docker workspace volume is missing "
+            "(\u6301\u4e45\u5377\u4e0d\u5b58\u5728); refusing empty workspace recovery."
+        )
 
     def _evict_cached_sandbox(self, sandbox: Sandbox) -> None:
         for cached_session_id, cached_sandbox in tuple(self._cache.items()):
@@ -513,7 +537,7 @@ class WorkspaceRegistry:
         Docker resources are deleted here. Never delete workspace_root. Keeping the
         mapping also lets failed Docker cleanup retry through the same DELETE.
         """
-        with self._workspace_lock(session_id):
+        with self._workspace_lock(self._owner_lock_key(session_id)):
             mapping = self._read_mapping(session_id)
             if mapping is None:
                 self._write_mapping(session_id, {
@@ -604,7 +628,7 @@ class WorkspaceRegistry:
         其他 session 的 alias mapping 不属于本方法的删除白名单，因此父会话被硬删后
         这些记录可能留在磁盘；由于 owner mapping 已不存在，`get()` 会拒绝恢复并失败关闭。
         """
-        with self._workspace_lock(session_id):
+        with self._workspace_lock(self._owner_lock_key(session_id)):
             mapping_file = self._mapping_path(session_id)
             mapping_file.unlink(missing_ok=True)
             default_workspace = self._workspaces_dir / session_id

@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-10-14
-- 相关：issue #1048、ADR-0025（宿主侧来源闸）、ADR-0028（host-directory 边界）、
+- 相关：issue #1048、ADR-0025（宿主侧来源闸）、ADR-0028（host-directory 边界）、ADR-0055（Docker workspace 恢复与硬删除并发）、
   `docs/spec` 冻结规格 `05_SANDBOX_CODING_TOOLS.md` §3-4（**不回写**）
 
 ## 背景
@@ -87,6 +87,8 @@ Windows PSEC **不再作为新会话可选/可请求后端**（只用于解析�
 硬删对每个 owner 映射都在 owner lock 内原子写入 `workspace_delete_in_progress`，然后才删除 Docker 资源；无映射时写入 marker-only 映射。local workspace 与 legacy PSEC 宿主工作区不会在这一步被删除。标记保留到 `discard_session_artifacts()` 删除映射为止；标记存在时，owner、alias、任意 registry 缓存恢复、旧 sandbox 启动与 launch 提交都失败关闭。清理失败时保留标记与映射，以便同一 hard-delete 重试；重试可以继续清理。这覆盖资源清理后的异步 DB / 文件删除窗口，也避免进程重启后重新创建已删除的 volume。
 
 当前支持每个 sessions root 运行一个服务进程。多进程 / 多 worker 共享该 root 不受支持，因为 run ownership 与 active-session 状态同样为进程内状态；跨进程支持前须先实现协调式 session ownership 与 workspace locking。
+
+ADR-0055 补充 Docker named volume 存在性检查与删除锁 owner-key 解析；本 ADR 的删除标记、RunManager session lock 和 launch 提交点仍定义完整删除窗口，ADR-0055 不缩窄这些语义。
 ## 后果
 
 - 冻结 Engineering Specification **不回写**；本 ADR 与操作说明是唯一新增语义面。
