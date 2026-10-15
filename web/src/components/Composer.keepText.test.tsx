@@ -147,6 +147,49 @@ describe('#1029 composer 发送失败保留文本', () => {
     expect(textarea().value).toBe('网络断了也不能丢');
   });
 
+  /* #1205：发送在途期间用户**手动清空**了输入框，随后这次发送被判未受理 ——
+     「保留文本」不能只靠"没人动过它"：框已经空了，不回填就等于用户唯一不可再生的
+     原文两处都不在（框空 + 未受理不回填）。纪律与 `failedDraft` 的回填同一条：
+     **只在输入框为空时**回填，绝不覆盖在途期间新打的草稿。 */
+  it('在途期间用户手动清空输入框，随后未受理：把原文还回输入框（#1205）', async () => {
+    let settle: ((ok: boolean) => void) | null = null;
+    onSubmit.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }) as unknown as SubmitResult,
+    );
+    await typeText('被拒的原文');
+    pressEnter();
+    // 在途期间用户自己把框清空（此前只在"文本还在框里"时才算保留住）
+    await typeText('');
+
+    await act(async () => {
+      settle!(false);
+    });
+
+    expect(textarea().value).toBe('被拒的原文');
+  });
+
+  /* #1205 的另一半：回填**不得**覆盖在途期间新打的草稿——与 `failedDraft` 的回填
+     是同一条纪律（只在空框时回填）。条件写反成"一律回填"时这里必红。 */
+  it('在途期间用户改了草稿，随后未受理：不得用旧原文覆盖新草稿（#1205）', async () => {
+    let settle: ((ok: boolean) => void) | null = null;
+    onSubmit.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }) as unknown as SubmitResult,
+    );
+    await typeText('被拒的原文');
+    pressEnter();
+    await typeText('我后来写的');
+
+    await act(async () => {
+      settle!(false);
+    });
+
+    expect(textarea().value).toBe('我后来写的');
+  });
+
   it('已受理（异步 resolve true）：ack 之后才清空', async () => {
     let settle: ((ok: boolean) => void) | null = null;
     onSubmit.mockReturnValue(
@@ -216,6 +259,29 @@ describe('#1029 composer 发送失败保留文本', () => {
     await act(async () => {});
 
     expect(textarea().value).toBe('抛错的发送');
+  });
+
+  /* #1205 的另一条通道（A 轴审查 A1）：发送口**拒绝**（Promise 拒绝）与 `false` 同属
+     未受理 ⇒ 在途清空后同样必须回填。这条是判别性用例：把拒绝侧的 `restoreSubmitted()`
+     改回 `() => {}`，只有它变红——上面那条既有抛错用例里框内仍有原文，回填是 no-op
+     （变异存活，实测过）。 */
+  it('在途期间用户手动清空输入框，随后发送口拒绝：把原文还回输入框（#1205）', async () => {
+    let rejectIt: ((reason: Error) => void) | null = null;
+    onSubmit.mockImplementation(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectIt = reject;
+        }) as unknown as SubmitResult,
+    );
+    await typeText('被拒的原文');
+    pressEnter();
+    await typeText('');
+
+    await act(async () => {
+      rejectIt!(new Error('boom'));
+    });
+
+    expect(textarea().value).toBe('被拒的原文');
   });
 
   it('旧签名（onSubmit 返回 undefined）：照旧清空——既有调用零回归', async () => {
