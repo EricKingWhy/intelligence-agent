@@ -359,7 +359,7 @@ class TestResyncReadsTheDiskInsteadOfWalkingUp:
         bypass = Session("s-advance", counting, events=counting.read_events("s-advance"))
         for index in range(advance):
             bypass.append(MEMORY_DEGRADED, {"operation": "formation", "n": index}, run_id="bg")
-        ahead = counting.last_event_seq("s-advance")
+        ahead = max(e.seq for e in counting.read_events("s-advance"))
         assert ahead >= live.next_seq + advance - 1, "盘面必须真的越到前面去"
 
         before = counting.appends
