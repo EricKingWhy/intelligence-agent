@@ -131,7 +131,7 @@ jobs:
 
       # #1166：六套守卫套件此前在 CI 里没有任何入口——改 desktop/test/** 不触发任何
       # workflow，gate0 与 pre-push 也没有 `node --test`，它们只在本机跑过。六套纯 node、
-      # 共约 3 秒（本机实测 2.9 s / 2.7 s）、不编译安装包、连 electron-builder 都不需要
+      # 共约 3 秒（本机四次实测 2882 / 2657 / 2595 ms；另一次在并行任务下 7673 ms）、不编译安装包、连 electron-builder 都不需要
       # （本机在**没有 desktop/node_modules** 的检出上跑通），所以排在装 electron-builder
       # 与三条烟测腿之前：最便宜的信号先失败。两个用例按 existsSync 跳过——它们要的
       # desktop/dist 与 installer/staging 是 `npm run build` / `prepare_python_runtime.py`
@@ -141,7 +141,22 @@ jobs:
       - name: 守卫套件 — 安装器脚本 / node 运行时 / NSIS 结构 / 运行时产品 / TUI / Web 资产（#1166）
         if: ${{ !inputs.compile_only }}
         working-directory: desktop
-        run: node --test test/installer-scripts.test.mjs test/installer-node-runtime.test.mjs test/installer-nsis.test.mjs test/installer-runtime-product.test.mjs test/installer-tui.test.mjs test/installer-web-assets.test.mjs
+        shell: pwsh
+        # 六个名字必须与磁盘一致：`node --test` 只要拿到**至少一个**有效路径，对不存在的路径就
+        # 静默跳过、exit 0（2026-10-15 实测；六个全不存在才 exit 1）⇒ 一次改名或笔误会让整套
+        # 静默消失，CI 照样绿。所以先逐个 Test-Path，缺一个就红，不让绿掩盖「套件没跑」。
+        run: |
+          $suites = @(
+            'test/installer-scripts.test.mjs'
+            'test/installer-node-runtime.test.mjs'
+            'test/installer-nsis.test.mjs'
+            'test/installer-runtime-product.test.mjs'
+            'test/installer-tui.test.mjs'
+            'test/installer-web-assets.test.mjs'
+          )
+          $missing = $suites | Where-Object { -not (Test-Path -LiteralPath $_) }
+          if ($missing) { throw "missing test file(s): $($missing -join ', ')" }
+          node --test @suites
 
       - name: 装 electron-builder（脚本 lazy-require，未进 desktop/package.json）
         working-directory: desktop
