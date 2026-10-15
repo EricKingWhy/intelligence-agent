@@ -37,7 +37,7 @@ process.stdout.write(`guard sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 // the worktree the same way). The recorded digest of the committed text makes
 // that state loud instead of vacuous. Update it in the same change that edits
 // the guard's text.
-const GUARD_BASELINE_SHA256 = 'c1f8a24851001429d989d617ab93edb0f244065cd2439ec7125d120138357ffd'
+const GUARD_BASELINE_SHA256 = '3b49527e6a181a5ea736d845e0e8318bd96a7572993013a8300a91e4798b121a'
 if (sha(original) !== GUARD_BASELINE_SHA256) {
   process.stderr.write(
     `guard baseline mismatch: ${sha(original)} != ${GUARD_BASELINE_SHA256} — the file is not the text this list was written against (a left-behind mutation?); restore it and re-run\n`,
@@ -741,6 +741,24 @@ const mutations = {
   // app-executable branch moves behind it".
   'app-branch placement rule dropped from the process gate (#914 review Axis A)': swap(
     '    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {',
+    '    if (false) {',
+  ),
+  // #1066: the staging window between the first gate call and the directory
+  // rename. A runtime that starts in that window is never classified, and a
+  // headless service does not block the rename (#914 section 1.3), so the
+  // update lands and leaves the old process answering clients out of the
+  // `<dir>.old-<guid>` tree (ADR-0053). Reverting either rule leaves the
+  // window unguarded while the file still reads as clean; the fixtures
+  // "refuses a stage that never re-checks for a running product in the staging
+  // window", "refuses a staging window whose working directory is never
+  // released" and "refuses a staging-window test hook that is not compiled
+  // out" hold them down.
+  'staging-window re-check rule dropped (#1066)': swap(
+    '    if (gateCall !== -1 && pointer !== -1 && (released === -1 || lastGateCall < released || lastGateCall > pointer)) {',
+    '    if (false) {',
+  ),
+  'staging-window hook rule dropped (#1066)': swap(
+    '    if (hookWrite !== -1 && (hookOpen === -1 || hookClose === -1 || hookWrite < hookOpen || hookWrite > hookClose)) {',
     '    if (false) {',
   ),
   // #1078: the rule that reads installer.nsh. Reverting it leaves the wrapper

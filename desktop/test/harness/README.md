@@ -233,7 +233,7 @@ under `%TEMP%\ia-r1-drivers` unless `-EvidenceDir` / `-Keep` say otherwise.
 | `process-gate-probe.nsi` | probe template with markers for the production `iaClassifyRunningProduct` / `iaRequireNoRunningProduct` functions (#914); records the production answer, the stock app-builder-lib `FIND_PROCESS` answer on the same state, and whether the gate returned |
 | `run-process-gate-probe.ps1` | injects both production functions and drives four legs against real processes: `none` (empty tree — answer 0, gate returns), `runtime` (a headless image under `resources\python` — answer 11, gate stops it and the PID is gone), `client` (a live image in the install root — answer 12, gate exits 2 and the PID stays alive), `unknown` (an install path the query cannot parse — nothing proven clean, gate exits 2). Run with `powershell -File r1-drivers/run-process-gate-probe.ps1` |
 | `stage-damaged-probe.nsi` | probe template with markers for the production `iaStageApplication` macro plus everything it calls (`iaProbePath`, the two gate functions, the backup-pointer macros, the whole `installer-cleanup.nsh`); it runs the real macro and writes a result line only when the macro returns — a gate refusal `Quit`s first and leaves no file (#914 review Axis A) |
-| `run-stage-damaged-probe.ps1` | injects the production staging macro and drives four legs, three of which the pre-fix macro could not pass: `intact-clean` (app.exe present, nothing running — gate returns and the tree is renamed aside, the ordinary update path), `damaged-runtime` (no app.exe, headless image under `resources\python` running — the gate runs anyway, stops it and returns without staging), `damaged-rootproc` (no app.exe, live image in the install root — gate exits 2, PID alive, tree untouched), `damaged-unknown` (no app.exe, install path the query cannot parse — gate exits 2). `-DirectoriesSource <path>` points the legs at another revision of the include, which is how the red proof is produced. Run with `powershell -File r1-drivers/run-stage-damaged-probe.ps1` |
+| `run-stage-damaged-probe.ps1` | injects the production staging macro and drives eight legs: `intact-clean` (app.exe present, nothing running — gate returns and the tree is renamed aside, the ordinary update path), `first-install` (clean tree, nothing staged — the macro returns and writes its result), `damaged-runtime` (no app.exe, headless image under `resources\python` running — the gate runs anyway, stops it and returns without staging), `damaged-rootproc` (no app.exe, live image in the install root — gate exits 2, PID alive, tree untouched), `damaged-unknown` (no app.exe, install path the query cannot parse — gate exits 2), `damaged-mixed` (no app.exe, a client in the install root and a runtime under `resources\python` — gate exits 2 with both processes alive and the tree untouched), `window-runtime` and `window-client` (#1066: the process starts *after* the gate returned, inside the staging window, so the in-window re-check is the only thing that sees it — the runtime is stopped and the leg stages, the client is refused and stays alive). Two of the eight (`window-runtime`, `window-client`) are the ones the pre-#1066 include cannot pass; the red proof is below. `-DirectoriesSource <path>` points the legs at another revision of the include, which is how the red proof is produced. `-Keep` leaves the scratch tree in place. Run with `powershell -File r1-drivers/run-stage-damaged-probe.ps1` |
 
 ```powershell
 # test artifact first (prints the installer path it built):
@@ -280,3 +280,21 @@ the macro never called the gate at all on a tree without the app executable, and
 the live service was left running (`damaged-runtime`: exit 0, process survived;
 `damaged-rootproc` and `damaged-unknown`: exit 0 instead of 2). That empty
 reading is the defect the fix removes, measured rather than argued.
+
+`run-stage-damaged-probe.ps1` was last run 2026-10-15 from the #1066 branch.
+Green, all eight legs `rc=0`: `intact-clean exit=0 stage_returned=1 answer=0
+probe=1` with the tree renamed to `<dir>.old-{guid}`; `first-install exit=0
+answer=0 probe=0`; `damaged-runtime exit=0` with the probe process `gone`;
+`damaged-mixed exit=2` with both processes `alive`; `damaged-rootproc exit=2`
+with the process `alive`; `damaged-unknown exit=2` with no result file;
+`window-runtime` — a headless runtime started inside the window, i.e. after
+the gate returned and before the rename — `exit=0 stage_returned=1 answer=0
+probe=1` with that process stopped by the in-window re-check; `window-client`
+— an interactive client started in the same window — `exit=2` with the client
+`alive` and the tree untouched. Red, the same driver against a copy of the
+include with only the in-window `Call iaRequireNoRunningProduct` removed
+(`-DirectoriesSource`): every non-window leg unchanged, `window-runtime
+exit=0` with the service surviving the update into the renamed tree,
+`window-client exit=0` with the client alive, `5 stage-damaged leg
+assertion(s) failed` — all five on the two window legs. One removed call,
+five failures, zero movement elsewhere: the re-check is the guard.

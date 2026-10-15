@@ -291,6 +291,19 @@ describe('process gate (#914)', () => {
     return dir
   }
 
+  /**
+   * Drops the in-window gate call: the four leading spaces in the literal below
+   * match that call only, never the two-space-indented one at the top of the
+   * macro. Cases that need the late call alone, or none at all, call this on
+   * top of `withMutatedGate`.
+   */
+  const withoutStagingWindowCall = (dir) => {
+    const text = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
+    const without = text.replace('    Call iaRequireNoRunningProduct\n', '')
+    assert.notEqual(without, text, 'the staging-window call was not removed')
+    return without
+  }
+
   it('accepts the shipped gate text', () => {
     validateProcessGateGuards(directoriesNsh, 'installer-directories.nsh')
   })
@@ -334,6 +347,10 @@ describe('process gate (#914)', () => {
 
   it('refuses a stage that never calls the gate', () => {
     const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    // #1066 gave the macro a second, in-window call: both call sites have to go
+    // for this case to mean what its name says.
+    const both = withoutStagingWindowCall(dir)
+    writeFileSync(join(dir, 'installer-directories.nsh'), both.replace(/\n/g, eol))
     assert.throws(() => validateInstallerScripts(dir), /does not call the gate/)
   })
 
@@ -342,14 +359,42 @@ describe('process gate (#914)', () => {
     // iaRollbackApplication read a non-empty IaBackupDir as "the install
     // section started" and would roll a good installation back.
     const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
-    const before = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
-    const moved = before.replace(
+    // Both call sites go (#1066 added the in-window one): this case pins the
+    // placement rule, so the late call has to be the only one left.
+    const withoutCalls = withoutStagingWindowCall(dir)
+    const moved = withoutCalls.replace(
       '    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
       '    Call iaRequireNoRunningProduct\n    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
     )
-    assert.notEqual(moved, before, 'the call was not moved back')
+    assert.notEqual(moved, withoutCalls, 'the call was not moved back')
     writeFileSync(join(dir, 'installer-directories.nsh'), moved.replace(/\n/g, eol))
     assert.throws(() => validateInstallerScripts(dir), /gate runs after the backup pointer/)
+  })
+
+  it('refuses a stage that never re-checks for a running product in the staging window', () => {
+    // #1066: the call at the top of the macro runs before the staging branch,
+    // so a runtime that starts while the installer is staging is never
+    // classified. A headless service does not block the directory rename
+    // (#914 section 1.3), so the update lands and leaves the old process
+    // answering clients out of the `<dir>.old-<guid>` tree (ADR-0053).
+    const dir = withMutatedGate('    Call iaRequireNoRunningProduct\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /never re-checked inside the staging window/)
+  })
+
+  it('refuses a staging window whose working directory is never released', () => {
+    // The re-check spawns a child that inherits the current directory, so the
+    // anchor is load-bearing: without it the call could run while $INSTDIR is
+    // still the working directory.
+    const dir = withMutatedGate('    SetOutPath $TEMP\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /never releases the working directory/)
+  })
+
+  it('refuses a staging-window test hook that is not compiled out', () => {
+    // The hold is a test affordance, so it must stay inside its !ifdef — an
+    // unconditional write would ship a registry value that no production
+    // install ever reads.
+    const dir = withMutatedGate('    !ifdef IA_TEST_HOLD_STAGE_WINDOW\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /not compiled out/)
   })
 
   it('refuses a gate call that runs only when the app executable is present', () => {
