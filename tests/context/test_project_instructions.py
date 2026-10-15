@@ -346,6 +346,9 @@ def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) ->
     container_backing = tmp_path / "container-backing"
     container_backing.mkdir()
     sandbox = _FakeContainerSandbox(container_backing)
+    # 前置条件：替身须走沙箱语义。注意本断言不覆盖 web 路由的分流本身——
+    # "Docker 会话重载走 sandbox 分支"由 docker-gated 的公共端点用例覆盖
+    #（tests/web/test_project_instructions_docker_reload.py）。
     assert uses_sandbox_path_semantics(sandbox) is True
 
     store = ProjectInstructionStore()

@@ -838,35 +838,40 @@ class DockerSandbox(Sandbox):
         基类 `Sandbox.path_kind` 要求 `resolve_within_workspace` 返回宿主 `Path`，
         Docker 后端返回容器内 `PurePosixPath` ⇒ 基类实现恒返回 `None`
         （项目指令加载/重载在 Docker 会话上恒为 `missing`、
-        WriteTool 的目录甄别失效）。本覆写用与 `read_text` 同源的
-        `get_archive` + tar 成员类型判断实现。
+        WriteTool 的目录甄别失效）。
+
+        实现用容器内 `/bin/sh` 的 `test` 内建做廉价探测——**不**用 `get_archive`：
+        后者对目录会返回整棵子树的递归归档并全量驻留内存（P2），而这里只需要
+        类型。`test -L` 优先于 `-d`/`-f`（不跟随末级符号链接，与宿主侧
+        "符号链接指令文件不跟随"一致）；`-e` 兜底特殊文件（FIFO/socket/device，
+        报不可读 kind 而非"缺失"，与宿主侧对齐）。
         """
         try:
             target = self.resolve_within_workspace(path)
         except OSError:
             return None
         self.ensure_started()
-        docker = importlib.import_module("docker")
-        try:
-            stream, _ = self._container.get_archive(str(target))
-        except docker.errors.NotFound:
-            return None
-        with tarfile.open(fileobj=io.BytesIO(b"".join(stream)), mode="r:") as archive:
-            members = archive.getmembers()
-        member = next(
-            (item for item in members if item.name == target.name),
-            members[0] if members else None,
+        quoted = shlex.quote(str(target))
+        result = self._container.exec_run(
+            [
+                "/bin/sh",
+                "-c",
+                f"if test -L {quoted}; then echo symlink;"
+                f" elif test -d {quoted}; then echo directory;"
+                f" elif test -f {quoted}; then echo file;"
+                f" elif test -e {quoted}; then echo special;"
+                " else echo missing; fi",
+            ],
         )
-        if member is None:
+        if result.exit_code != 0:
             return None
-        if member.isfile():
-            return "file"
-        if member.isdir():
-            return "directory"
-        if member.issym() or member.islnk():
-            # 与宿主侧一致：符号链接指令文件不跟随——报不可读 kind，而非"缺失"。
-            return "symlink"
-        return None
+        lines = result.output.decode("utf-8", errors="ignore").strip().splitlines()
+        return {
+            "symlink": "symlink",
+            "directory": "directory",
+            "file": "file",
+            "special": "special",
+        }.get(lines[-1] if lines else "")
 
     def read_text(self, path: str) -> str:
         target = self.resolve_within_workspace(path)
