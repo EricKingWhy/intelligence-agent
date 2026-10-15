@@ -703,6 +703,7 @@ async def scan_unfinished_forks(
     - 每个未完成 child 的**默认形态**工作区（``<root>/workspaces/<sid>``——
       构造规则白名单，与 ``discard_session_artifacts`` 同源，映射指向用户
       目录时绝不碰）。
+    - Docker-backed child 的容器与命名卷（经 WorkspaceRegistry 的 owner lock 与确定性名称校验回收，仅处理该 child 的 harness 自有资源，不碰父会话或其他 owner 的资源）。
 
     child 的 JSONL（含标记）与映射文件**保留**——「fork 未完成」是可读事实，
     续聊对账（``_reconcile_workspace_binding``）按它给 fork 专属提示；父会话
