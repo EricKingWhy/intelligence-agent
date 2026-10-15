@@ -30,6 +30,10 @@ class FakeDockerSandbox:
         self.copied: list[tuple[str, str]] = []
         self.started = False
         self.import_fails = False
+        # #1132：恢复路径会先查具名卷是否仍在（缺失即 fail-closed，不重建空卷）。
+        # 替身默认"卷在"，由用例显式翻转来钉住缺失那一支。
+        self.volume_present = True
+        self.ensure_started_calls = 0
 
     @property
     def workspace_root(self) -> PurePosixPath:
@@ -37,6 +41,10 @@ class FakeDockerSandbox:
 
     def ensure_started(self) -> None:
         self.started = True
+        self.ensure_started_calls += 1
+
+    def workspace_volume_exists(self) -> bool:
+        return self.volume_present
 
     def write_text(self, path: str, content: str) -> None:
         self.files[path] = content
@@ -211,3 +219,79 @@ class TestImportCompletionGate:
         sandbox = registry.get("sess_legacy")
 
         assert sandbox.volume_name == "agent-harness-sess_legacy"
+
+
+class TestRestoreRefusesMissingVolume:
+    """#1132：具名卷已不存在时，恢复必须 fail-closed，**绝不**重建空卷。
+
+    动机（真 Docker 实测）：`containers.run(volumes=...)` 在具名卷缺失时会静默
+    重建一个空卷，于是恢复"成功"在空 workspace 上、原文件不可达。
+    """
+
+    def _mapping(
+        self, root: Path, session_id: str, *, snapshot_import: bool = True,
+    ) -> Path:
+        ws_dir = root / "workspaces"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        path = ws_dir / f"{session_id}.json"
+        mapping = {
+            "session_id": session_id,
+            "backend": "docker",
+            "workspace_root": str(root / "nowhere"),
+            "container_name": f"agent-harness-{session_id}",
+            "volume_name": f"agent-harness-{session_id}",
+        }
+        if snapshot_import:
+            mapping["snapshot_import"] = True
+        path.write_text(json.dumps(mapping), encoding="utf-8")
+        return path
+
+    def test_missing_volume_fails_closed_before_starting_the_container(
+        self, tmp_path: Path, docker_env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_harness.sandbox.registry import WorkspaceBindingError
+
+        registry = WorkspaceRegistry(root=tmp_path / "reg_vol", backend="docker")
+        # 不带 snapshot_import：让本用例**只**能被「卷存在性检查」判红。
+        # 带上它的话，未修复的树会先撞上 #1048 的导入完成标记门而失败——那是**另一个**
+        # 闸门，红得不是本用例要钉的那件事（红证签名必须指向被测机制）。
+        self._mapping(tmp_path / "reg_vol", "sess_novol", snapshot_import=False)
+
+        created: list[FakeDockerSandbox] = []
+
+        class MissingVolumeDockerSandbox(FakeDockerSandbox):
+            """具名卷已被删（外部删除 / 硬删除）的替身。"""
+
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.volume_present = False
+                created.append(self)
+
+        # 必须是**类**而不是工厂函数：恢复路径里 `_assert_volume_present` 会对它做
+        # `isinstance(..., DockerSandbox)`；打桩成函数会让 isinstance 直接 TypeError。
+        # 又因为 `from agent_harness.sandbox.docker import DockerSandbox` 在**函数体内**
+        # 解析 ⇒ 打桩**源模块**的属性（打 registry 模块的属性没有效果）。
+        monkeypatch.setattr(
+            "agent_harness.sandbox.docker.DockerSandbox", MissingVolumeDockerSandbox,
+        )
+
+        with pytest.raises(WorkspaceBindingError, match="持久卷不存在"):
+            registry.get("sess_novol")
+
+        assert created, "恢复路径没有构造 sandbox"
+        assert created[0].ensure_started_calls == 0, (
+            "卷缺失时**不得**调用 ensure_started——那会重建空卷"
+        )
+
+    def test_present_volume_recovers_normally(
+        self, tmp_path: Path, docker_env,
+    ) -> None:
+        registry = WorkspaceRegistry(root=tmp_path / "reg_ok", backend="docker")
+        # 不带 snapshot_import：本用例只钉「卷在 ⇒ 照常恢复」，导入完成标记门
+        # 由上面 TestImportCompletionGate 的用例单独覆盖。
+        self._mapping(tmp_path / "reg_ok", "sess_ok", snapshot_import=False)
+
+        sandbox = registry.get("sess_ok")
+
+        assert isinstance(sandbox, FakeDockerSandbox)
+        assert sandbox.ensure_started_calls == 1
