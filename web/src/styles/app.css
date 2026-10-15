@@ -177,7 +177,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    它是深墨 rgba(18,18,24,.92)、混入即压深；暗色主题它是近白、混入即提亮、对比度只升
    不降），纯语义色在亮色染色底上实测 <4.5（--warning 在纯白底上限就 3.73、--danger 4.45），
    调染色底 alpha 无解。装饰（底/描边）继续引用原 --danger/--info/--warning token。
-   与 #1029 的 .run-pulse.pulse-awaiting-decision（app.css:343）同法。
+   与 #1030 的 .run-pulse.pulse-awaiting-decision（app.css:352）同法。
    Chromium 真机实测（web/e2e/t-contrast.spec.ts 的 #1136 用例，取值见其 stdout）：
    修前亮色 .app-error 3.67 / .app-notice 3.86 / .recover-btn 2.94 / task-review 族 3.18–4.10；
    修后亮色 .recover-btn:hover 6.05（最紧）、.recover-btn 6.58、task-review 族 7.08–9.22、
