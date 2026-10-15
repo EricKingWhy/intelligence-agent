@@ -10,7 +10,7 @@
 # run-process-gate-probe.ps1 drives the gate FUNCTION, so it cannot see where the
 # call sits. This driver compiles the real macro (taken verbatim from
 # installer-directories.nsh, with iaProbePath and the two cleanup helpers it
-# calls) and drives six legs:
+# calls) and drives eight legs:
 #
 #   intact-clean     app.exe present, nothing running   -> gate returns, staging
 #                    proceeds: the tree is renamed to "<dir>.old-{guid}"
@@ -30,6 +30,15 @@
 #                    and returns, and staging is skipped because there is no app
 #                    executable to find: a fresh install proceeds (#1074)
 #
+#   window-runtime   app.exe present and the gate already returned, then the
+#                    bundled service starts inside the staging window -> the
+#                    last-moment re-check stops it and the update proceeds
+#   window-client    the same window, but a client image starts in the install
+#                    root -> the re-check refuses (exit 2), the client keeps
+#                    running and the installation is left exactly as it was
+#                    (#1066: a client in the install root is never killed, #914
+#                    adjudication D4)
+#
 # The damaged legs are the discriminating ones: before the #914 fix the macro
 # never called the gate on any of them (exit 0, service untouched). The
 # first-install leg is coverage rather than discrimination — it pins that the
@@ -44,6 +53,20 @@
 # pair it turns the refusal into one that first kills the bundled runtime. Only
 # the mixed leg has a non-runtime process in the root, so only it can see the
 # difference (#1074 review Axis A).
+#
+# window-runtime and window-client pin the second call site (#1066). The gate at
+# the top of the macro runs before the staging branch, so everything up to the
+# rename is a window in which the user can start the service. A headless service
+# does not block the rename (measured, #914 section 1.3), so before the fix the
+# update landed and left the old service answering clients out of the
+# "<dir>.old-{guid}" tree. -DirectoriesSource with the second call deleted is
+# the red proof: window-runtime then reports the service still alive.
+#
+# Every leg clears the probe registry key before it runs: the shipped installer
+# clears its backup pointer in iaPromoteApplication, which these legs never
+# reach, and a pointer left behind by an earlier leg makes the #904 item 2 shape
+# check set the error level without quitting, which would contaminate the exit
+# code the window legs assert on.
 #
 # Usage (from desktop/): powershell -File test/harness/r1-drivers/run-stage-damaged-probe.ps1 [-Keep]
 #   -DirectoriesSource <path>  drive the legs against another revision of
@@ -160,8 +183,29 @@ function Test-ProcessAlive {
   return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+function Reset-ProbeState {
+  # The shipped installer clears IaBackupDir in iaPromoteApplication, which these
+  # legs never reach, so a staging leg would hand its pointer to the next one. A
+  # pointer that names another leg's tree makes the #904 item 2 shape check
+  # refuse, and that branch sets the error level WITHOUT quitting, so the leg
+  # would report exit 2 while the staging it is asserting on succeeded (#1066).
+  # Every leg therefore starts from the state a first install has: no values.
+  Remove-Item -LiteralPath $probeRegistryKey -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Wait-StageWindow {
+  param([string]$Leg, [int]$Seconds = 30)
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $marker = (Get-ItemProperty -Path $probeRegistryKey -Name 'IaTestStageWindowOpen' -ErrorAction SilentlyContinue).IaTestStageWindowOpen
+    if ($marker -eq '1') { return }
+    Start-Sleep -Milliseconds 100
+  }
+  throw "[$Leg] the installer never opened the stage window (IaTestStageWindowOpen under $probeRegistryKey)"
+}
+
 function Invoke-StageLeg {
-  param([string]$Leg, [string]$Install)
+  param([string]$Leg, [string]$Install, [switch]$HoldWindow, [string]$WindowExe)
   $buildDir = Join-Path $scratchRoot ("stage-$Leg-build-$runId")
   $result = Join-Path $scratchRoot ("stage-$Leg-result-$runId.txt")
   New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
@@ -171,16 +215,37 @@ function Invoke-StageLeg {
   # and makensis reads a BOM-less UTF-8 script as ANSI ("Bad text encoding"), so
   # this file is written with a BOM.
   [System.IO.File]::WriteAllText($script, $probeSource, [System.Text.UTF8Encoding]::new($true))
-  & $makensis /V2 "/DPROBE_INSTALL=$Install" "/DPROBE_LEG=$Leg" "/DPROBE_RESULT=$result" $script
+  $defines = if ($HoldWindow) { @('/DIA_TEST_HOLD_STAGE_WINDOW=1') } else { @() }
+  $arguments = @('/V2', "/DPROBE_INSTALL=$Install", "/DPROBE_LEG=$Leg", "/DPROBE_RESULT=$result") + $defines + @($script)
+  & $makensis @arguments
   if ($LASTEXITCODE -ne 0) { throw "[$Leg] makensis failed with exit code $LASTEXITCODE" }
   if (-not (Test-Path -LiteralPath $exe)) { throw "[$Leg] probe exe missing: $exe" }
 
   Remove-Item -LiteralPath $result -ErrorAction SilentlyContinue
-  $process = Start-Process -FilePath $exe -Wait -PassThru
+  Reset-ProbeState
+  $windowProcess = $null
+  if (-not $HoldWindow) {
+    $process = Start-Process -FilePath $exe -Wait -PassThru
+  } else {
+    # #1066: the installer holds a window open between the gate at the top of the
+    # staging macro and the last-moment re-check, so the driver has to act while
+    # the installer is still running.
+    $process = Start-Process -FilePath $exe -PassThru
+    $script:started += $process.Id
+    Wait-StageWindow -Leg $Leg
+    if (-not [string]::IsNullOrEmpty($WindowExe)) {
+      $windowProcess = Start-Process -FilePath $WindowExe -ArgumentList @('-e', 'setTimeout(()=>{},120000)') -PassThru
+      $script:started += $windowProcess.Id
+      $probePath = (Get-Process -Id $windowProcess.Id -ErrorAction SilentlyContinue).Path
+      if ($probePath -ne $WindowExe) { throw "[$Leg] the process started inside the window reports image path '$probePath', expected '$WindowExe'" }
+      Write-Host ("[{0}] started {1} inside the window" -f $Leg, $windowProcess.Id)
+    }
+    $process.WaitForExit()
+  }
   $exitCode = $process.ExitCode
   $reading = if (Test-Path -LiteralPath $result) { (Get-Content -LiteralPath $result -Raw).Trim() } else { '<no reading>' }
   Write-Host ("[{0}] exit={1} {2}" -f $Leg, $exitCode, $reading)
-  return [pscustomobject]@{ Leg = $Leg; ExitCode = $exitCode; Reading = $reading; Install = $Install }
+  return [pscustomobject]@{ Leg = $Leg; ExitCode = $exitCode; Reading = $reading; Install = $Install; WindowProcess = $windowProcess }
 }
 
 $started = @()
@@ -310,6 +375,44 @@ try {
   if ((Get-OldSiblings -Root $installUnknown).Count -ne 0) {
     $failures += '[damaged-unknown] the refusal moved the install tree aside'
   }
+  # --- window-runtime: the bundled service starts after the gate returned -----
+  $installWindowRuntime = New-FakeInstall 'window-runtime' -WithAppExe
+  $windowRuntimeExe = Join-Path $installWindowRuntime 'resources\python\ia-probe-runtime.exe'
+  Copy-Item -LiteralPath $nodeExe -Destination $windowRuntimeExe
+  $leg = Invoke-StageLeg -leg 'window-runtime' -install $installWindowRuntime -HoldWindow -WindowExe $windowRuntimeExe
+  if ($leg.ExitCode -ne 0) { $failures += "[window-runtime] expected exit 0 (the re-check stops the bundled runtime and the update proceeds), got $($leg.ExitCode)" }
+  if ($leg.Reading -notmatch 'stage_returned=1 answer=0 probe=1') { $failures += "[window-runtime] the update did not complete: $($leg.Reading)" }
+  if ($null -eq $leg.WindowProcess) {
+    $failures += '[window-runtime] the leg never started its process inside the window'
+  } elseif (-not (Wait-ProcessGone -ProcessId $leg.WindowProcess.Id)) {
+    $failures += "[window-runtime] the service $($leg.WindowProcess.Id) started inside the window survived the update"
+  } else {
+    Write-Host ("[window-runtime] service {0} started inside the window: stopped by the re-check" -f $leg.WindowProcess.Id)
+  }
+  if ((Get-OldSiblings -Root $installWindowRuntime).Count -ne 1) {
+    $failures += '[window-runtime] the update did not stage the install tree aside'
+  }
+
+  # --- window-client: a client image starts after the gate returned -----------
+  $installWindowClient = New-FakeInstall 'window-client' -WithAppExe
+  $windowClientExe = Join-Path $installWindowClient 'ia-probe-client.exe'
+  Copy-Item -LiteralPath $nodeExe -Destination $windowClientExe
+  $leg = Invoke-StageLeg -leg 'window-client' -install $installWindowClient -HoldWindow -WindowExe $windowClientExe
+  if ($leg.ExitCode -ne 2) { $failures += "[window-client] expected exit 2 (the re-check's refusal), got $($leg.ExitCode)" }
+  if ($leg.Reading -ne '<no reading>') { $failures += "[window-client] the re-check returned instead of refusing: $($leg.Reading)" }
+  if ($null -eq $leg.WindowProcess) {
+    $failures += '[window-client] the leg never started its process inside the window'
+  } elseif (-not (Test-ProcessAlive -ProcessId $leg.WindowProcess.Id)) {
+    $failures += "[window-client] the client $($leg.WindowProcess.Id) was killed; a client in the install root is never stopped"
+  } else {
+    Write-Host ("[window-client] client {0} after the refusal: alive" -f $leg.WindowProcess.Id)
+  }
+  if ((Get-OldSiblings -Root $installWindowClient).Count -ne 0) {
+    $failures += '[window-client] the refusal moved the install tree aside'
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $installWindowClient 'app.exe'))) {
+    $failures += '[window-client] the refusal modified the install tree'
+  }
 } finally {
   foreach ($processId in $started) {
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
@@ -329,4 +432,4 @@ if ($failures.Count -gt 0) {
   foreach ($failure in $failures) { Write-Host "FAIL $failure" }
   throw "$($failures.Count) stage-damaged leg assertion(s) failed"
 }
-Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), damaged-runtime (stopped), damaged-mixed (refused, both alive), damaged-rootproc (refused, alive), damaged-unknown (refused)'
+Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), damaged-runtime (stopped), damaged-mixed (refused, both alive), damaged-rootproc (refused, alive), damaged-unknown (refused), window-runtime (stopped by the re-check), window-client (refused, alive)'
