@@ -172,9 +172,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-right: none;
 }
 
+/* #1136：语义色「当正文色用」的一族（.app-error/.app-notice/.recover-btn/.auth-banner/
+   .task-review-* 族）统一改用 ink-mix 压深字色——混入 45% 的 --text-primary（亮色主题
+   它是深墨 rgba(18,18,24,.92)、混入即压深；暗色主题它是近白、混入即提亮、对比度只升
+   不降），纯语义色在亮色染色底上实测 <4.5（--warning 在纯白底上限就 3.73、--danger 4.45），
+   调染色底 alpha 无解。装饰（底/描边）继续引用原 --danger/--info/--warning token。
+   与 #1029 的 .run-pulse.pulse-awaiting-decision（app.css:343）同法；两主题实测数见
+   web/e2e/t-contrast.spec.ts 的 #1136 用例（真机 Chromium 量值）。 */
 .app-error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger-text);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
   border-bottom: 1px solid var(--border-subtle);
@@ -187,7 +194,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   justify-content: space-between;
   gap: var(--space-md);
   background: color-mix(in srgb, var(--info) 12%, transparent);
-  color: var(--info-text);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
   border-bottom: 1px solid var(--border-subtle);
@@ -5068,13 +5075,17 @@ button.json-row {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
+/* #1136：字色 ink-mix（同 .app-error 族，见 app.css:175 注释）；10% 染色底。
+   P4-2：本横幅内的 <KeyRound> 与 .auth-banner-close 的 <X> 都走 currentColor /
+   color:inherit——「图标随字色一起压深」是**期望**行为（它们是同一横幅的内联图形，
+   若维持原浅色会与压深后的深色文案割裂），故不为图标单独隔离 color。 */
 .auth-banner {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 10%, transparent);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -5104,13 +5115,16 @@ button.json-row {
   border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--warning) 5%, transparent);
 }
+/* #1136：字色 ink-mix（同 .app-error 族，见 app.css:175 注释）；14% 底、hover 升 22%。
+   P4-2：按钮内的 <RotateCcw> 走 currentColor，随字色一起压深是期望（图标与按钮文案
+   同属一个控件标签）。 */
 .recover-btn {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
   padding: 3px var(--space-sm);
   font: 550 var(--text-xs) var(--font-ui);
-  color: var(--warning-text);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   border-radius: var(--radius-full);
@@ -7509,7 +7523,9 @@ button.json-row {
   white-space: nowrap;
 }
 .task-review-tag.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
-.task-review-tag.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+/* #1136 P3-1：task-review 族把语义色当正文色用，同 .app-error 族改 ink-mix
+   （app.css:175 注释）。14% 染色底。 */
+.task-review-tag.warn { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); background: color-mix(in srgb, var(--warning) 14%, transparent); }
 
 .task-review-axes { display: flex; gap: var(--space-lg); flex-wrap: wrap; }
 .task-review-axis { display: flex; flex-direction: column; gap: 4px; min-width: 200px; flex: 1; }
@@ -7530,8 +7546,8 @@ button.json-row {
 }
 .task-review-chip.state-deliverable { color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
 .task-review-chip.state-accepted { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.task-review-chip.state-executing { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
-.task-review-chip.state-pending_verification { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+.task-review-chip.state-executing { color: color-mix(in srgb, var(--info) 45%, var(--text-primary)); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
+.task-review-chip.state-pending_verification { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
 
 .task-review-disambiguation {
   display: flex;
@@ -7539,7 +7555,7 @@ button.json-row {
   gap: 2px;
   padding: var(--space-sm);
   font-size: var(--text-xs);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   border-left: 3px solid var(--warning);
   border-radius: var(--radius-sm);
@@ -7551,12 +7567,12 @@ button.json-row {
 .task-review-result-head { display: flex; align-items: baseline; gap: var(--space-sm); justify-content: space-between; }
 .task-review-verification { font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .task-review-verification.v-passed { color: var(--success); }
-.task-review-verification.v-failed { color: var(--danger); }
-.task-review-verification.v-blocked { color: var(--warning); }
+.task-review-verification.v-failed { color: color-mix(in srgb, var(--danger) 45%, var(--text-primary)); }
+.task-review-verification.v-blocked { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); }
 .task-review-missing-evidence {
   align-self: flex-start;
   font-size: var(--text-xs);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   padding: 1px 8px;
   border-radius: var(--radius-full);
@@ -7566,7 +7582,7 @@ button.json-row {
 /* P1-1：证据不可得（≠缺证据），如实呈现。 */
 .task-review-evidence-unavailable {
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   padding: 6px 10px;
   border-radius: var(--radius-md);
