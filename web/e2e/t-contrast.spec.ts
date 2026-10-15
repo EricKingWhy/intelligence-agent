@@ -1054,7 +1054,10 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'session/started', seq: 1, session_id: sid, run_id: 'rt', time: T },
       { type: 'run/started', seq: 2, session_id: sid, run_id: 'rt', step_id: 1, time: T },
       { type: 'user/message', data: { content: '跑一个工具' }, seq: 3, session_id: sid, run_id: 'rt', step_id: 1, time: T },
-      { type: 'tool/call', data: { tool_call_id: 'tc-t', tool_name: 'bash', args: { command: 'sleep 1' } }, seq: 4, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+      /* model/started 是关键：deriveRunPulse 在 run_status==='running' 时靠
+         active_step_id 定位当轮，才把「末个 tool 未收口」判成 pulse-tool（缺它落到 thinking）。 */
+      { type: 'model/started', seq: 4, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+      { type: 'tool/call', data: { tool_call_id: 'tc-t', tool_name: 'bash', args: { command: 'sleep 1' } }, seq: 5, session_id: sid, run_id: 'rt', step_id: 1, time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '跑一个工具');
     await expectEachContrast(page, theme, ['.run-pulse.pulse-tool', '.detail-header .run-badge-tool']);
@@ -1132,7 +1135,10 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'user/message', data: { content: '跑失败的工具' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'tool/call', data: { tool_call_id: 'tc-e', tool_name: 'bash', args: { command: 'false' } }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
-      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, error_code: 'TIMEOUT', message: '命令超时' }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
+      /* 错误信封要嵌在 data 里：投影把 tool.result 落成 parsed.data（projection.ts
+         `tool.result = parsedData ?? message`），而 ToolCard 的 parseErrorShape 只认
+         {ok:false,error_code} 对象——扁平放顶层会被落成 message 字符串、摘要行不渲染。 */
+      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', data: { ok: false, error_code: 'TIMEOUT', message: '命令超时' } }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'run/completed', data: {}, seq: 6, session_id: sid, run_id: 're', time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '跑失败的工具');
@@ -1150,6 +1156,9 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rfb', time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '触发回退');
+    /* .model-fallback-val 在 Inspector 的 Overview（id=chat）页 MODEL 区块里；默认 tab 是
+       timeline，先切页再量（否则元素不在 DOM，属夹具问题而非样式问题）。 */
+    await page.getByRole('tablist', { name: 'Inspector 视图' }).getByRole('tab', { name: 'Overview' }).click();
     await expectEachContrast(page, theme, ['.model-fallback-val']);
   });
 
