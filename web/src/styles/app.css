@@ -174,7 +174,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 .app-error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
+  color: var(--danger-text);
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
   border-bottom: 1px solid var(--border-subtle);
@@ -187,7 +187,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   justify-content: space-between;
   gap: var(--space-md);
   background: color-mix(in srgb, var(--info) 12%, transparent);
-  color: var(--info);
+  color: var(--info-text);
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
   border-bottom: 1px solid var(--border-subtle);
@@ -5110,7 +5110,7 @@ button.json-row {
   gap: var(--space-xs);
   padding: 3px var(--space-sm);
   font: 550 var(--text-xs) var(--font-ui);
-  color: var(--warning);
+  color: var(--warning-text);
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   border-radius: var(--radius-full);

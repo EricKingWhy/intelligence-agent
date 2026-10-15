@@ -142,6 +142,13 @@
   --danger: #e5726f;
   --info: #7c9eff;
 
+  /* 语义色「当正文色用」的 ink（#1136）。上面三个 token 仍作装饰（描边/底/图标）；
+   * .app-error/.app-notice/.recover-btn 的字色改用下列 ink。暗色旧值已达标（5.67/6.48/8.10），
+   * ink 沿用旧值不回归；亮色在下方亮色块覆盖为更深的实测达标值。 */
+  --danger-text:  #e5726f;
+  --info-text:    #7c9eff;
+  --warning-text: #e3b565;
+
   /* State tint for hover / selected washes */
   --color-hover: var(--surface-hover);
 
@@ -224,6 +231,14 @@
   --warning: #b07a10;
   --danger: #cf4a46;
   --info: #4a6fd6;
+
+  /* #1136 语义色 ink：装饰（描边/底/图标）继续用上面的 --warning/--danger/--info，
+   * 但「当正文色用」的三个组件改用下列更深的 ink。亮色旧值在纯白底上限就 <4.5
+   * （warning 3.73 / danger 4.45），调染色底 alpha 无解，只能压深字色本身。
+   * 实测（压各自 12%/14% 染色底）：danger 5.20 / info 4.94 / warning 6.64（hover 6.07）。 */
+  --danger-text:  #a03c38;
+  --info-text:    #3a5cb8;
+  --warning-text: #6b4700;
 
   --color-hover: var(--surface-hover);
 
