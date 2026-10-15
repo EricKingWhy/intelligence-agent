@@ -757,7 +757,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.task-review-panel .ctx-usage-close').click();
     await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeHidden();
     state.task.product_state = 'pending_verification';
-    await page.getByRole('button', { name: '任务审阅' }).click();
+    await page.getByRole('button', { name: '任务审阅', exact: true }).click();
     const pending = page.locator('.task-review-chip.state-pending_verification');
     await expect(pending).toBeVisible();
     const pm = await measure(page, '.task-review-chip.state-pending_verification');
