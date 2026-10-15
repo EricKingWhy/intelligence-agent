@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**已完成（2026-10-15，#1173）**：Issue CLOSED（bug/P3；`in-progress` 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1173#issuecomment-6191447123)。修复提交 `7f1d9852`，仅修测试 fakes，使其保留生产 `build_runtime()` 在 `Session.start()` 前建立的 workspace mapping；同步提交 `f965c88a` 已纳入最新 `origin/main`。聚焦：5 个 API/workspace 文件 79 passed（测试进程 local-backend override）、multiturn 26 passed、hard-delete/owner-lock 17 passed；全仓 Ruff 与 `git diff --check` 通过。Correctness/Spec、Standards APPROVE（P0–P4=0）；覆盖闸门 exit 0。Windows 全量 pytest 415 failed / 7640 passed / 138 skipped / 51 deselected；Docker 服务停止且当前权限无法启动，另有 symlink 权限失败。全量未通过，需远端完整验证后再合入；PR 待开，集成负责人 EricKingWhy。详见月档 #1173。
+
 **已完成（2026-10-15，#1163）**：Issue CLOSED（bug/P3；in-progress 已移除）；关单评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1163#issuecomment-6189441247)。修复 commit `359f6a31`，分支 `codex/1048-ntfs-hardlinks`；双 Registry 红证 1 failed→1 passed，两个 Registry 测试文件 41 passed，Ruff/diff-check 通过。Correctness/Spec 与 Standards 双轴 APPROVE、P0–P4=0，审查范围 `1241e3d2..85a1ce94`。Gate-0 6/6 PASS（tip `a7f5f2ab` / tree `12ff185c`，收据 `docs/gate/a7f5f2ab346e34961d617b94ed3b0729d9501ee2.json`）。覆盖闸门首轮行格式失败，修正后 exit 0。全量后端 pytest 未运行；未 push/PR/merge，集成负责人 EricKingWhy。详见月档 #1163。
 
 **已完成（2026-10-15，#1135）**：Issue CLOSED（bug/P1，`in-progress` 已移除）；完成评论 [记录](https://github.com/EricKingWhy/intelligence-agent/issues/1135#issuecomment-6184627969)。未 push、未开 PR、未 merge；集成负责人 EricKingWhy。junction 复现、验证与用户裁定见月档 #1135。
