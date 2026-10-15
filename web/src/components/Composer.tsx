@@ -418,6 +418,9 @@ export const Composer = memo(function Composer({
   }, [failedDraft]);
 
   const submit = (mode: 'queue' | 'steer') => {
+    /* 提交那一刻的**原始**文本（含首尾空白 / 多行缩进）：未受理时的回填用它，
+       逐字还给用户；`trimmed` 只用于上线内容与受理侧的切除定位（#1205）。 */
+    const raw = value;
     const trimmed = value.trim();
     if (!trimmed || locked) return;
     /* #1029：回执在途期间不许再提交。清空挪到回执之后（见下），文本框不再在提交
@@ -483,14 +486,16 @@ export const Composer = memo(function Composer({
       // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
       attachments.clearSent(attachmentIds);
     };
-    /** 未受理时的回填（#1205）。**只在输入框为空时**回填本次提交的正文：
+    /** 未受理时的回填（#1205）。**只在输入框为空时**回填本次提交的**原文**（`raw`，
+        不是 `trimmed`——首尾空白/多行缩进在"用户已清空"这条路上同样不可再生，而框没被
+        清空那条路本来就是逐字原文，两条恢复路径的保真度必须一致）：
         正常路径下未受理时框里本来就有原文（`accept` 没跑），这条只在「在途期间用户
         自己清空/删掉」时才真正生效；用户已经打了新草稿就原样不动——与 `failedDraft`
         的回填、DSH `restoreFailedDrafts`"只在编辑器为空时重建"是同一条纪律。
         判据用 `trim()`：只剩空白（用户把内容删干净）同样算空，否则原文会被判成
         "用户还有草稿"而丢掉。 */
     const restoreSubmitted = () => {
-      setValue((current) => (current.trim() === '' ? trimmed : current));
+      setValue((current) => (current.trim() === '' ? raw : current));
     };
     void Promise.resolve(accepted)
       .then(
@@ -503,7 +508,11 @@ export const Composer = memo(function Composer({
            显式写成分支而不是 `.catch(() => {})`：后者读起来像"吞掉"，且把"抛错"
            归进了受理侧（清空）——那会让异常路径留下 `sendingRef=false` + 文本不清，
            用户再按 Enter 就重发一条**已经成功**的消息。
-           抛错与 `false` 同属未受理 ⇒ 同样走回填（#1205）：用户若已清空，原文回到框里。 */
+           这里指的是 **Promise 拒绝**（异步抛错）；发送口**同步** throw 会在本链挂上
+           之前逸出 `submit`，既不走这里也不置忙态——但那时框里仍是原文（从未起飞），
+           文本不丢，故不为它加一条 try/catch（现有两个调用方都返回 Promise）。
+           Promise 拒绝与 `false` 同属未受理 ⇒ 同样走回填（#1205）：用户若已清空，
+           原文回到框里。 */
         () => restoreSubmitted(),
       )
       .finally(() => {

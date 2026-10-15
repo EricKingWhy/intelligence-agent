@@ -261,6 +261,29 @@ describe('#1029 composer 发送失败保留文本', () => {
     expect(textarea().value).toBe('抛错的发送');
   });
 
+  /* #1205 的另一条通道（A 轴审查 A1）：发送口**拒绝**（Promise 拒绝）与 `false` 同属
+     未受理 ⇒ 在途清空后同样必须回填。这条是判别性用例：把拒绝侧的 `restoreSubmitted()`
+     改回 `() => {}`，只有它变红——上面那条既有抛错用例里框内仍有原文，回填是 no-op
+     （变异存活，实测过）。 */
+  it('在途期间用户手动清空输入框，随后发送口拒绝：把原文还回输入框（#1205）', async () => {
+    let rejectIt: ((reason: Error) => void) | null = null;
+    onSubmit.mockImplementation(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectIt = reject;
+        }) as unknown as SubmitResult,
+    );
+    await typeText('被拒的原文');
+    pressEnter();
+    await typeText('');
+
+    await act(async () => {
+      rejectIt!(new Error('boom'));
+    });
+
+    expect(textarea().value).toBe('被拒的原文');
+  });
+
   it('旧签名（onSubmit 返回 undefined）：照旧清空——既有调用零回归', async () => {
     onSubmit.mockReturnValue(undefined);
     await typeText('既有调用');
