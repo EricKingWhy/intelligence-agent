@@ -1671,3 +1671,117 @@ async function pickModel(page: Page, provider: string, modelName: string): Promi
   // 退出动画走完再交还控制权——否则下一次交互会撞上正在关闭的菜单
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
 }
+
+/* ── #1136：任务审阅面板 mock（`task-review.spec.ts` 与 `t-contrast.spec.ts` 共用）──
+ *
+ *  叠加在 `routeApi` 之上（其余走 fallback），逐字段镜像真实 FastAPI 投影形状
+ *  （取自 `session/task.py::TaskState.to_payload`、`session/evidence.py`、
+ *  `web/task_delivery.py`、`web/workspace_files.py::GitCommandResult`）。抽到 fixtures
+ *  是为避免两个 spec 各抄一份——抄歪时两边同时错、还测不出来（#155 轮栽过同款）。 */
+export interface TaskReviewFixture {
+  task: Record<string, unknown>;
+  evidence: Record<string, unknown[]>;
+  gitStatus?: Record<string, unknown>;
+  gitDiff?: Record<string, unknown>;
+  leaseReleased?: boolean;
+  /** #1136：`GET /evidence` 直接失败 → 面板渲染「证据不可得」（≠缺证据）。 */
+  evidenceError?: { status: number; detail: string } | null;
+}
+
+export function criterion(item_id: string, text: string, origin: 'user' | 'agent' = 'user') {
+  return { item_id, text, origin, confirmed: origin === 'user' };
+}
+
+export function verification(value: string) {
+  return { value, evidence: null };
+}
+
+export function evidenceRecord(over: Record<string, unknown> = {}) {
+  return {
+    evidence_id: 'ev-1',
+    task_session_id: SID,
+    run_id: 'run-1',
+    criterion_id: 'c3',
+    kind: 'test',
+    source_event_seq: 3,
+    tool_call_id: null,
+    captured_at: T,
+    result: 'pass',
+    command_or_action: 'pytest tests/x.py',
+    exit_code_or_observation: 0,
+    artifact_ref: null,
+    base_head: null,
+    workspace_manifest: { files: [{ path: 'src/a.py', sha256: 'a'.repeat(64) }], manifest_hash: 'b'.repeat(64), progress_md_sha256: null },
+    freshness: { status: 'fresh', reasons: [] },
+    ...over,
+  };
+}
+
+/** 安装 task / evidence / lease / workspace-git 路由（叠加在 routeApi 之上；其余 fallback）。 */
+export async function mockTaskReviewApi(page: Page, state: TaskReviewFixture): Promise<void> {
+  const jsonFulfill = (route: Route, body: unknown, status = 200) =>
+    route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
+  await page.route('**/api/**', async (route) => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname;
+    const method = req.method();
+    if (path.endsWith('/task/acceptance/release') && method === 'POST') {
+      state.task = { ...state.task, acceptance: null, version: (state.task.version as number) + 1, product_state: 'deliverable' };
+      return jsonFulfill(route, { status: 'applied', task: state.task });
+    }
+    if (path.endsWith('/task/acceptance') && method === 'POST') {
+      const body = (req.postDataJSON() ?? {}) as { decision?: string; reason?: string; expected_version?: number };
+      if (body.expected_version !== state.task.version) {
+        return jsonFulfill(route, { detail: `版本冲突：expected_version=${body.expected_version}，当前 version=${state.task.version}` }, 409);
+      }
+      if (state.task.acceptance) {
+        return jsonFulfill(route, { detail: '已存在接受事实（不能双写）' }, 409);
+      }
+      state.task = {
+        ...state.task,
+        acceptance: { decision: body.decision ?? 'accepted', reason: body.reason ?? null },
+        version: (state.task.version as number) + 1,
+        product_state: 'accepted',
+      };
+      return jsonFulfill(route, { status: 'applied', task: state.task });
+    }
+    if (path.endsWith('/task/lease/release') && method === 'POST') {
+      return jsonFulfill(route, { released: state.leaseReleased ?? false, promoted_to: null });
+    }
+    if (path.endsWith('/task') && method === 'GET') {
+      return jsonFulfill(route, { task: state.task });
+    }
+    if (path.endsWith('/evidence') && method === 'GET') {
+      if (state.evidenceError) {
+        return jsonFulfill(route, { detail: state.evidenceError.detail }, state.evidenceError.status);
+      }
+      return jsonFulfill(route, { evidence: state.evidence });
+    }
+    if (path.endsWith('/workspace/git/status') && method === 'GET') {
+      return jsonFulfill(route, state.gitStatus ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
+    }
+    if (path.endsWith('/workspace/git/diff') && method === 'GET') {
+      return jsonFulfill(route, state.gitDiff ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
+    }
+    return route.fallback();
+  });
+}
+
+/** #1136 / 场景 L：后端 401（要求身份令牌）→ `.auth-banner` 渲染。
+ *  `l-auth-banner.spec.ts` 与 `t-contrast.spec.ts` 共用。
+ *
+ *  会话列表**始终** 401，复现「后端要求令牌」的持续状态（不搞「先 401 后 200」的
+ *  开关——那会让「关闭后不再复现」变成空断言）。路由 glob 尾部的 `*` 不是可有可无：
+ *  Playwright 的 glob 是**整串**匹配，少了它匹配不了带查询串的会话列表 URL，而列表
+ *  请求自 #171 起恒带 `?include_archived=true` ——少了它本会静默走 200 分支 →
+ *  横幅永不出现。`*` 展开为 `[^/]*`，只多吃查询串，不会吞会话详情端点。 */
+export async function mockAuthRequired(page: Page): Promise<void> {
+  await routeApi(page, { sessions: [] });
+  await page.route('**/api/sessions*', (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Missing identity token' }),
+    }),
+  );
+}

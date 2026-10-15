@@ -7,6 +7,9 @@
  *  4. 时间线事件类型名（.tl-type）== 解析后的 --color-muted-foreground（R1，等值断言）
  *  5. U-1 review 新增 ink 元素：.approval-chip / .approval-deny .approval-kbd /
  *     .composer-locked-hint 对比度 ≥4.5:1（写 UI 时新立的三处，不许回退）
+ *  6. #1030 / #1136 的 ink-mix 使用点：.run-pulse.pulse-awaiting-decision、恢复冲突条，
+ *     以及 .app-error / .app-notice / .recover-btn / .auth-banner / .task-review-* 族
+ *     （语义色当正文色用，亮色下靠 `color-mix(<sem> 45%, --text-primary)` 压到达标）
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -23,11 +26,20 @@ import {
   MODELS,
   PERMISSION_MODES,
   REASONING_EFFORTS,
+  SID,
+  criterion,
+  evidenceRecord,
+  fulfillSse,
+  mockAuthRequired,
+  mockTaskReviewApi,
   routeApi,
   sessionRow,
   sseFrame,
+  submitTask,
+  verification,
   T,
   type FrameSpec,
+  type TaskReviewFixture,
 } from './fixtures';
 
 const ROW = {
@@ -176,9 +188,11 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
  *  票面症状：亮色下 `.app-error`（--danger）3.53:1、`.app-notice`（--info）3.71:1、
  *  `.recover-btn`（--warning）2.97:1（hover 22% 底 2.71:1）全部 <4.5，而暗色同三项
  *  达标（5.66 / 6.50 / 8.12）——根因是**字色 token 本身**（在纯白底上限就 <4.5），
- *  调染色底 alpha 无解。三个夹具各自走一条**真实渲染路径**（不是 createElement
- *  影子元素），因此把 token 改回旧值（--danger #cf4a46 / --info #4a6fd6 /
- *  --warning #b07a10）时对应用例必然变红。 */
+ *  调染色底 alpha 无解。修法同 #1029 的 ink-mix：`color-mix(in srgb, <sem> 45%,
+ *  var(--text-primary))`（亮色 --text-primary 是深墨、混入即压深；暗色是近白、混入
+ *  即提亮、对比度只升不降），装饰（描边/底/图标）继续引用原 token。
+ *  三个夹具各自走一条**真实渲染路径**（不是 createElement 影子元素），因此把字色
+ *  改回纯 --danger #cf4a46 / --info #4a6fd6 / --warning #b07a10 时对应用例必然变红。 */
 
 /** `.app-error`（分叉失败横幅，App.tsx:1433 forkError）夹具：两轮已完成会话。
  *  为什么是这个夹具：只有「第 2 轮的 .fork-btn + 后端 422」才经 handleFork 的
@@ -265,6 +279,48 @@ function crashedEvents(): FrameSpec[] {
       seq: 5, session_id: CRASH_SID, step_id: 1, run_id: 'rc', time: T,
     },
   ];
+}
+
+/* ── #1136 P3-1/P3-2：task-review 族与 .auth-banner 的语义色正文对比度回归锁 ──
+ *
+ *  同 `.app-error` / `.app-notice` / `.recover-btn` 同一根因：这些组件把 `--warning`/
+ *  `--danger`/`--info` 直接当**正文色**用，亮色下压在各自染色底上 <4.5（实测 2.9–4.1）。
+ *  修法同 #1029 的 ink-mix（`color-mix(in srgb, <sem> 45%, var(--text-primary))`）——
+ *  把语义色与 `--text-primary` 混深，装饰（描边/底/图标）继续引用原 token。
+ *  本夹具走**真实渲染路径**（打开「任务审阅」面板 / 触发 401），不是造影子元素，
+ *  所以把字色改回纯 `--warning`/`--danger`/`--info` 时对应用例必然变红。 */
+
+/** 任务审阅面板的会话帧（与 `task-review.spec.ts` 的 FRAMES 同形）。 */
+const TR_ROW = {
+  session_id: SID,
+  event_count: 4,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '对比度任务审阅',
+  trace_id: null,
+  trace_url: null,
+};
+const TR_FRAMES: FrameSpec[] = [
+  { type: 'session/started', seq: 1, session_id: SID, run_id: 'run-1', time: T },
+  { type: 'run/started', seq: 2, session_id: SID, run_id: 'run-1', time: T },
+  { type: 'user/message', data: { content: '对比度任务审阅' }, seq: 3, session_id: SID, run_id: 'run-1', step_id: 1, time: T },
+  { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: 'run-1', time: T },
+];
+
+/** 起会话 → 打开「任务审阅」面板（数据走共享的 mockTaskReviewApi，见 fixtures.ts）。 */
+async function openTaskReview(
+  page: Page,
+  theme: 'dark' | 'light',
+  state: TaskReviewFixture,
+): Promise<void> {
+  await routeApi(page, { sessions: [TR_ROW], events: TR_FRAMES, onSessionPost: (route) => fulfillSse(route, TR_FRAMES) });
+  await mockTaskReviewApi(page, state);
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await submitTask(page, '对比度任务审阅');
+  await page.getByRole('button', { name: '任务审阅' }).click();
+  await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
 }
 
 for (const theme of ['dark', 'light'] as const) {
@@ -508,9 +564,9 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
-  /* #1136 AC-3①：`.app-error`（分叉失败横幅）字色 --danger 压在 12% 染色底上。
-     亮色实测 3.53:1 < 4.5 ⇒ 本用例在旧 token 下必红；把 --danger 改回 #cf4a46
-     也会立刻变红。 */
+  /* #1136 AC-3①：`.app-error`（分叉失败横幅）字色 = ink-mix(--danger 45%, --text-primary)，
+     压在 12% 染色底上。旧值纯 --danger 亮色实测 3.53:1 < 4.5 ⇒ 本用例在旧 token 下必红；
+     把字色改回纯 --danger（#cf4a46）也会立刻变红。 */
   test(`[${theme}] #1136 .app-error（分叉失败横幅）对比度 ≥4.5`, async ({ page }) => {
     await routeApi(page, {
       sessions: [FORK_ROW],
@@ -544,9 +600,9 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio, `.app-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
-  /* #1136 AC-3②：`.app-notice`（worktree 隔离横幅）字色 --info 压在 12% 染色底上。
-     亮色实测 3.71:1 < 4.5 ⇒ 本用例在旧 token 下必红；把 --info 改回 #4a6fd6
-     也会立刻变红。 */
+  /* #1136 AC-3②：`.app-notice`（worktree 隔离横幅）字色 = ink-mix(--info 45%, --text-primary)，
+     压在 12% 染色底上。旧值纯 --info 亮色实测 3.71:1 < 4.5 ⇒ 本用例在旧 token 下必红；
+     把字色改回纯 --info（#4a6fd6）也会立刻变红。 */
   test(`[${theme}] #1136 .app-notice（worktree 隔离横幅）对比度 ≥4.5`, async ({ page }) => {
     await routeApi(page, {
       sessions: [sessionRow('s3', { id: 'p2', title: '项目 beta' })],
@@ -589,9 +645,10 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio, `.app-notice contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
-  /* #1136 AC-3③：`.recover-btn`（「恢复会话」按钮）字色 --warning 压在 14% 染色底上，
-     hover 时升到 22%（更浓的底 = 更低的对比度）。亮色实测 2.97:1、hover 2.71:1，
-     均 < 4.5 ⇒ 本用例在旧 token 下必红；hover 态是票面点名的第二个读数，单独量。 */
+  /* #1136 AC-3③：`.recover-btn`（「恢复会话」按钮）字色 = ink-mix(--warning 45%, --text-primary)，
+     压在 14% 染色底上，hover 时升到 22%（更浓的底 = 更低的对比度）。旧值纯 --warning 亮色实测
+     2.97:1、hover 2.71:1，均 < 4.5 ⇒ 本用例在旧 token 下必红；hover 态是票面点名的第二个读数，
+     单独量。 */
   test(`[${theme}] #1136 .recover-btn（含 hover 态）对比度 ≥4.5`, async ({ page }) => {
     await routeApi(page, {
       sessions: [CRASH_ROW],
@@ -623,5 +680,126 @@ for (const theme of ['dark', 'light'] as const) {
     // eslint-disable-next-line no-console
     console.log(`[${theme}] .recover-btn:hover color=${hm.color} bg=${hm.bg} ratio=${hRatio.toFixed(4)}`);
     expect(hRatio, `.recover-btn:hover contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1136 P3-1①：`.task-review-*` 族把语义色当正文色用，亮色下压在各自染色底上
+     <4.5（tag.warn 14% 底 / disambiguation 14% 底 / v-failed·v-blocked 无染色底 /
+     missing-evidence 14% 底）。这些用例在旧 token（纯 --warning/--danger/--info）下
+     必红——改回旧值也会立刻变红。 */
+  test(`[${theme}] #1136 task-review 语义色正文（tag/disambiguation/verification/missing）对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: '对比度审阅', read_write_intent: null, cwd: '/repo',
+        criteria: [
+          criterion('c1', '未确认项', 'agent'), // origin=agent → confirmed=false → .task-review-tag.warn
+          criterion('c2', '失败项'), // v-failed + 无证据 → missing-evidence
+          criterion('c3', '受阻项'), // v-blocked
+        ],
+        verification: { c1: verification('passed'), c2: verification('failed'), c3: verification('blocked') },
+        acceptance: null, version: 1, open_run_ids: [], product_state: 'deliverable',
+      },
+      // c1 有 stale 证据 → 触发 disambiguation（deliverable + stale）；c2 无证据；c3 有证据。
+      evidence: {
+        c1: [evidenceRecord({ criterion_id: 'c1', freshness: { status: 'stale', reasons: ['覆盖文件已变动：src/a.py'] } })],
+        c3: [evidenceRecord({ criterion_id: 'c3', result: 'blocked' })],
+      },
+    };
+    await openTaskReview(page, theme, state);
+    const panel = page.getByRole('dialog', { name: '任务审阅' });
+    // 先确认各选择器都在场（缺席会让 measure throw 而不是静默假绿）
+    await expect(panel.locator('.task-review-tag.warn').first()).toBeVisible();
+    await expect(panel.locator('.task-review-disambiguation')).toBeVisible();
+    await expect(panel.locator('.task-review-verification.v-failed')).toBeVisible();
+    await expect(panel.locator('.task-review-verification.v-blocked')).toBeVisible();
+    await expect(panel.locator('.task-review-missing-evidence').first()).toBeVisible();
+
+    for (const sel of [
+      '.task-review-tag.warn',
+      '.task-review-disambiguation',
+      '.task-review-verification.v-failed',
+      '.task-review-verification.v-blocked',
+      '.task-review-missing-evidence',
+    ]) {
+      const m = await measure(page, sel);
+      const ratio = contrast(m.color, m.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[${theme}] ${sel} color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+      expect(ratio, `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /* #1136 P3-1②：交付态 chip 两态（executing=--info / pending_verification=--warning）。
+     chip 底是 `--surface-2`（不染色），但字色本身在亮色下仍 <4.5。product_state 单值，
+     故关面板（hook 置 null 清态）改状态后再开重拉，一个用例量两态。 */
+  test(`[${theme}] #1136 task-review 交付态 chip（executing / pending_verification）对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: 'chip 对比度', read_write_intent: null, cwd: '/repo',
+        criteria: [criterion('c1', 'x')], verification: { c1: verification('passed') },
+        acceptance: null, version: 1, open_run_ids: ['r1'], product_state: 'executing',
+      },
+      evidence: { c1: [evidenceRecord({ criterion_id: 'c1' })] },
+    };
+    await openTaskReview(page, theme, state);
+
+    const exec = page.locator('.task-review-chip.state-executing');
+    await expect(exec).toBeVisible();
+    const em = await measure(page, '.task-review-chip.state-executing');
+    const er = contrast(em.color, em.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-chip.state-executing color=${em.color} bg=${em.bg} ratio=${er.toFixed(4)}`);
+    expect(er, `.task-review-chip.state-executing contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // 关面板 → 改投影态 → 重开（useTaskReview 以 sessionId 为键，重开即重拉服务端投影）。
+    await page.locator('.task-review-panel .ctx-usage-close').click();
+    await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeHidden();
+    state.task.product_state = 'pending_verification';
+    await page.getByRole('button', { name: '任务审阅' }).click();
+    const pending = page.locator('.task-review-chip.state-pending_verification');
+    await expect(pending).toBeVisible();
+    const pm = await measure(page, '.task-review-chip.state-pending_verification');
+    const pr = contrast(pm.color, pm.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-chip.state-pending_verification color=${pm.color} bg=${pm.bg} ratio=${pr.toFixed(4)}`);
+    expect(pr, `.task-review-chip.state-pending_verification contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1136 P3-1③：`.task-review-evidence-unavailable`（证据不可得条，--danger 压 12% 底）。
+     GET /evidence 失败即渲染——`证据不可得 ≠ 缺证据`（P1-1），走独立分支。 */
+  test(`[${theme}] #1136 task-review 证据不可得条对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: 'x', read_write_intent: null, cwd: '/repo',
+        criteria: [criterion('c1', 'x')], verification: { c1: verification('passed') },
+        acceptance: null, version: 1, open_run_ids: [], product_state: 'deliverable',
+      },
+      evidence: {},
+      evidenceError: { status: 500, detail: '证据服务暂不可用' },
+    };
+    await openTaskReview(page, theme, state);
+    const el = page.locator('.task-review-evidence-unavailable');
+    await expect(el).toBeVisible();
+    const m = await measure(page, '.task-review-evidence-unavailable');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-evidence-unavailable color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.task-review-evidence-unavailable contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1136 P3-2：`.auth-banner`（后端 401 引导横幅）把 --warning 当正文色，压在 10% 底上。
+     渲染条件是 `authRequired=true`（App.tsx:1401，后端 401 广播触发）——夹具同
+     l-auth-banner.spec.ts（共享 mockAuthRequired）。 */
+  test(`[${theme}] #1136 .auth-banner（401 引导横幅）对比度 ≥4.5`, async ({ page }) => {
+    await mockAuthRequired(page);
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const banner = page.locator('.auth-banner');
+    await expect(banner).toBeVisible();
+    const m = await measure(page, '.auth-banner');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .auth-banner color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.auth-banner contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 }
