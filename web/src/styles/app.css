@@ -296,13 +296,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .run-pulse.pulse-thinking svg {
   animation: spin 2.2s linear infinite;
 }
+/* #1175：语义色当**正文色**用、亮色下 <4.5 的余量收口（同 #1171 ink-mix）。
+   胶囊是「图 + 字」两通道：只把**文字**压深（`color-mix(<sem> 45%, --text-primary)`），
+   图标按 #1164 P2-3「装饰=保留原 token」显式钉回原 token——svg 走 currentColor，
+   不钉会被载体色连带改掉。底/描边等装饰不动，零新增 token。 */
 .run-pulse.pulse-tool {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-color: color-mix(in srgb, var(--warning) 30%, transparent);
   animation: pulse-glow 1.4s ease-in-out infinite;
 }
 .run-pulse.pulse-tool svg {
+  color: var(--warning);
   animation: spin 1.4s linear infinite;
 }
 .run-pulse.pulse-completed {
@@ -311,9 +316,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 .run-pulse.pulse-failed {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.run-pulse.pulse-failed svg {
+  /* #1175：只压正文，图标钉回原 token（#1164 P2-3）。 */
+  color: var(--danger);
 }
 /* 取消 ≠ 失败：中性色（同 bash stopped 语义域），无动画——tint 保持克制 */
 .run-pulse.pulse-cancelled {
@@ -334,9 +343,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    会话上，颜色相同就把它们说成一回事了。用既有的 --info（含亮色覆盖，§15 无需新增
    token），无动画：暂停是静止态，闪动会读成"还在跑"。 */
 .run-pulse.pulse-paused {
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--info) 12%, transparent);
   border-color: color-mix(in srgb, var(--info) 30%, transparent);
+}
+.run-pulse.pulse-paused svg {
+  /* #1175：只压正文，图标钉回原 token（#1164 P2-3）。 */
+  color: var(--info);
 }
 
 /* 待裁决（#1030）：有 UNKNOWN Operation 等人裁决——不裁决这条会话永远走不动。
@@ -897,7 +910,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .rail-project-missing {
   padding: 2px var(--space-sm) 4px;
   font-size: var(--text-xs);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 
 /* ── 行：主按钮 + 操作菜单（未分组与项目内共用） ── */
@@ -993,7 +1006,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: none;
   padding: 0 2px;
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   cursor: pointer;
 }
 .rail-error-close {
@@ -1080,7 +1093,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   pointer-events: none;
 }
 .rail-menu-item-danger {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .rail-menu-item-danger[data-highlighted] {
   background: var(--surface-danger);
@@ -1160,7 +1173,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-primary);
 }
 .project-dialog-title-danger {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .project-dialog-close {
   flex-shrink: 0;
@@ -1304,11 +1317,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .project-btn-danger {
   background: var(--surface-danger);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .project-btn-danger:hover {
   background: color-mix(in srgb, var(--danger) 18%, transparent);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .project-btn:disabled {
   opacity: 0.55;
@@ -1691,7 +1704,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .memory-scope.scope-session {
   background: color-mix(in srgb, var(--info) 12%, transparent);
   border-color: color-mix(in srgb, var(--info) 45%, transparent);
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
 }
 .memory-delete {
   display: inline-flex;
@@ -1711,7 +1724,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     background var(--dur-out) var(--ease-apple);
 }
 .memory-delete:hover:not(:disabled) {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: var(--surface-danger);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
@@ -1743,7 +1756,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--danger);
 }
 .memory-confirm-warn strong {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   font-weight: 600;
 }
 .memory-confirm-actions {
@@ -1764,7 +1777,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .memory-degraded-title {
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 .memory-degraded-detail {
   font-size: var(--text-xs);
@@ -2146,8 +2159,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-weight: 600;
 }
 .notice-strip-soft .notice-strip-badge {
+  /* #1175：soft 徽标是 **warning 字压 warning 淡底**（≠ hard 的白字压实底，方向相反）；
+     亮色 2.731 → 压深正文到 ink-mix，底不动（soft/hard 的明暗区分必须保住）。 */
   background: color-mix(in srgb, var(--warning) 18%, transparent);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 /* #1172：白字压 var(--danger) 实心底——亮 4.45 / 暗 3.01，双主题都不达 AA。
    根因：--danger 在本仓是「正文/装饰两用」的偏亮色，当白字的底本来就不够深。
@@ -2394,7 +2409,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-error-code {
   font-family: var(--font-mono);
   font-weight: 550;
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   letter-spacing: 0.02em;
 }
 .act-error-msg {
@@ -2460,7 +2475,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 3px 7px;
   border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--warning) 14%, transparent);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 .deleg-summary {
   margin-left: var(--act-content-indent);
@@ -3301,7 +3316,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--success);
 }
 .approval-echo.deny .approval-echo-title {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .approval-echo-tool {
   font-size: var(--text-xs);
@@ -3831,7 +3846,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .run-badge-tool {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-color: color-mix(in srgb, var(--warning) 30%, transparent);
 }
@@ -3841,7 +3856,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 .run-badge-failed {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--danger) 32%, transparent);
 }
@@ -4458,7 +4473,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .permission-verdict-deny {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .tool-status-dot {
   width: 6px;
@@ -4517,7 +4532,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 /* model/fallback「已切换」值——信息性事件用 info 色（非错误），等宽呈现 from → to */
 .model-fallback-val {
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
 }
 /* #220 失败原因值：后端文案是完整句子，「请到供应商控制台检查计费与配额」这类可操作尾巴
  * 正好被 `.detail-val` 的 nowrap+ellipsis 切掉——这一行允许换行，并按左对齐读整段
@@ -5161,7 +5176,7 @@ button.json-row {
 }
 .recover-error {
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 /* #1030 缺陷③：这里原先是 `需人工裁决：{后端 detail}`——detail 是**协议原文**
    （内嵌 POST /api/sessions/{id}/recover 与 verdict 枚举），最终用户照着做不了。
@@ -5319,7 +5334,7 @@ button.json-row {
 }
 .output-item-status {
   flex: none;
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
 }
 .output-item-empty {
@@ -5432,7 +5447,7 @@ button.json-row {
   color: var(--success);
 }
 .changes-removed {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .changes-stat-limited {
   color: var(--text-tertiary);
@@ -5517,7 +5532,7 @@ button.json-row {
   font-style: italic;
 }
 .read-line-trunc {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 .read-content {
   margin: 0;
@@ -5691,8 +5706,9 @@ button.json-row {
 .artifact-line-cut {
   margin-left: 4px;
   /* 用原始 token：`--color-warning` 是 index.css 里标注
-     "legacy aliases … do not use in new code" 的旧别名。 */
-  color: var(--warning);
+     "legacy aliases … do not use in new code" 的旧别名。
+     #1175：正文压深（ink-mix），token 本身不改。 */
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
 }
 .artifact-content-loading,
@@ -5974,8 +5990,12 @@ button.json-row {
   transform: rotate(180deg);
 }
 
-/* 中断态：中性警示（中断 ≠ 错误，DSH stopped 语义域） */
-.reasoning-interrupted .reasoning-label,
+/* 中断态：中性警示（中断 ≠ 错误，DSH stopped 语义域）。
+ * #1175：`.reasoning-label` 是正文，压深；`.reasoning-icon` 是图标（装饰），按
+ * #1164 P2-3 保留原 token——两条选择器因此拆成两条规则。 */
+.reasoning-interrupted .reasoning-label {
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
+}
 .reasoning-interrupted .reasoning-icon {
   color: var(--warning);
 }
@@ -6185,7 +6205,7 @@ button.json-row {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 8%, transparent);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -6196,7 +6216,7 @@ button.json-row {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-lg);
   font-size: var(--text-sm);
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 8%, transparent);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -6292,8 +6312,12 @@ button.json-row {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
   font-weight: 550;
+}
+.pause-panel-head svg {
+  /* #1175：只压正文，<PauseCircle> 图标钉回原 token（#1164 P2-3）——与 .run-pulse.pulse-* 同法。 */
+  color: var(--info);
 }
 
 .pause-panel-facts {
@@ -6342,11 +6366,15 @@ button.json-row {
   gap: var(--space-xs);
   padding: 3px var(--space-sm);
   font: 550 var(--text-xs) var(--font-ui);
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--info) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
   border-radius: var(--radius-full);
   cursor: pointer;
+}
+.pause-resume-btn svg {
+  /* #1175：只压正文，<PauseCircle> 图标钉回原 token（#1164 P2-3）。 */
+  color: var(--info);
 }
 
 .pause-resume-btn:hover:not(:disabled) {
@@ -6370,7 +6398,7 @@ button.json-row {
 
 .pause-panel-error {
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 
 /* 进度清单（#381 W-27，PRD 长任务 §7.5 四件套）：钉在会话滚动区上方的常驻面板。
@@ -6644,14 +6672,14 @@ button.json-row {
   user-select: none;
 }
 .composer-budget-preview--danger {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 /* ── #537：TopBar run 预算徽标 ──
  *   常态沿用 .num（与相邻的用量计数同视觉）；≥80% 转静止预警色——**只换色**
  *   不加框不闪烁（它是持续状态不是警报，且色之外仍有文本可读，不违反
  *   "never color-only"）。--warning 在暗/亮两块 :root 均已定义，零新增 token。 */
 .budget-badge--warning {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 /* ── Picker 浮层（Radix portal，客户端渲染）──
  *   #201 正名：这层壳原本叫 `model-picker-*`，却同时被权限/档位/深度三个控件共用
@@ -6996,7 +7024,7 @@ button.json-row {
   padding: var(--space-md) 0;
 }
 .ctx-usage-error {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .ctx-usage-total {
   font-size: var(--text-lg);
@@ -7130,7 +7158,7 @@ button.json-row {
 }
 .ctx-usage-compact-error {
   font-size: var(--text-sm);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .ctx-usage-compact-result {
   font-size: var(--text-sm);
@@ -7340,7 +7368,7 @@ button.json-row {
   border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 .provider-test-result.fail {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
@@ -7392,7 +7420,7 @@ button.json-row {
 }
 .approve-policy-danger {
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .approve-policy-danger:disabled {
   opacity: 0.6;
@@ -7400,7 +7428,7 @@ button.json-row {
 }
 .approve-policy-error {
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .approve-policy-notice {
   font-size: var(--text-xs);
@@ -7556,7 +7584,7 @@ button.json-row {
 .task-review-axis { display: flex; flex-direction: column; gap: 4px; min-width: 200px; flex: 1; }
 .task-review-axis-label { font-size: var(--text-xs); color: var(--text-tertiary); }
 .task-review-run-axis { font-size: var(--text-sm); color: var(--text-primary); }
-.task-review-run-axis.running { color: var(--info); }
+.task-review-run-axis.running { color: color-mix(in srgb, var(--info) 45%, var(--text-primary)); }
 .task-review-run-axis.idle { color: var(--text-secondary); }
 .task-review-chip {
   display: inline-block;
@@ -8153,7 +8181,7 @@ button.json-row {
   gap: 2px;
   max-width: 150px;
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .composer-attach-failed-text {
   overflow: hidden;
@@ -8437,5 +8465,5 @@ button.json-row {
 .image-lightbox-error {
   margin: 0;
   font-size: var(--text-xs);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
