@@ -24,7 +24,10 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   routeApi,
+  sessionRow,
+  sseFrame,
   T,
+  type FrameSpec,
 } from './fixtures';
 
 const ROW = {
@@ -166,6 +169,102 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
   const bgLum = lum(bg);
   const [hi, lo] = fgLum >= bgLum ? [fgLum, bgLum] : [bgLum, fgLum];
   return (hi + 0.05) / (lo + 0.05);
+}
+
+/* ── #1136：亮色主题语义色「当正文色用」的对比度回归锁 ──
+ *
+ *  票面症状：亮色下 `.app-error`（--danger）3.53:1、`.app-notice`（--info）3.71:1、
+ *  `.recover-btn`（--warning）2.97:1（hover 22% 底 2.71:1）全部 <4.5，而暗色同三项
+ *  达标（5.66 / 6.50 / 8.12）——根因是**字色 token 本身**（在纯白底上限就 <4.5），
+ *  调染色底 alpha 无解。三个夹具各自走一条**真实渲染路径**（不是 createElement
+ *  影子元素），因此把 token 改回旧值（--danger #cf4a46 / --info #4a6fd6 /
+ *  --warning #b07a10）时对应用例必然变红。 */
+
+/** `.app-error`（分叉失败横幅，App.tsx:1433 forkError）夹具：两轮已完成会话。
+ *  为什么是这个夹具：只有「第 2 轮的 .fork-btn + 后端 422」才经 handleFork 的
+ *  catch 走到 `setForkError`，渲染出 className="app-error" role="alert"
+ *  （App.tsx:1434）——真实路径。user/message 的 seq 与 turn 序号刻意错开
+ *  （2 / 30，照 b-fork.spec.ts 同型夹具），避免「锚点误用 turn 序号」的回归把
+ *  本用例干扰成另一种失败。 */
+const FORK_SID = 's-contrast-fork';
+const FORK_ROW = {
+  session_id: FORK_SID,
+  event_count: 11,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '第一轮问题',
+  trace_id: null,
+  trace_url: null,
+};
+function forkTwoTurnEvents(): FrameSpec[] {
+  return [
+    { type: 'session/started', seq: 1, session_id: FORK_SID, time: T },
+    { type: 'user/message', data: { content: '第一轮问题' }, seq: 2, session_id: FORK_SID, time: T },
+    { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: FORK_SID, run_id: 'rf-1', time: T },
+    { type: 'text/delta', data: { delta: '第一轮回答。' }, seq: 4, session_id: FORK_SID, step_id: 1, run_id: 'rf-1', time: T },
+    { type: 'model/completed', data: { content: '第一轮回答。' }, seq: 5, session_id: FORK_SID, step_id: 1, run_id: 'rf-1', time: T },
+    { type: 'run/completed', data: {}, seq: 6, session_id: FORK_SID, run_id: 'rf-1', time: T },
+    { type: 'user/message', data: { content: '第二轮问题' }, seq: 30, session_id: FORK_SID, time: T },
+    { type: 'run/started', data: { turn_index: 2 }, seq: 31, session_id: FORK_SID, run_id: 'rf-2', time: T },
+    { type: 'text/delta', data: { delta: '第二轮回答。' }, seq: 32, session_id: FORK_SID, step_id: 2, run_id: 'rf-2', time: T },
+    { type: 'model/completed', data: { content: '第二轮回答。' }, seq: 33, session_id: FORK_SID, step_id: 2, run_id: 'rf-2', time: T },
+    { type: 'run/completed', data: {}, seq: 34, session_id: FORK_SID, run_id: 'rf-2', time: T },
+  ];
+}
+
+/** `.app-notice`（worktree 隔离横幅，App.tsx:1419 worktreeNotice）夹具：
+ *  alpha 空项目 + beta 一条会话（照 u-project-task.spec.ts 的 baseMock），创建会话
+ *  的响应带 `X-Worktree-Path` 头。为什么是这个夹具：只有「项目内新建任务」这条
+ *  路径经 handleStartTaskInProject 传 onWorktreeCreated 回调，才把该横幅
+ *  （role="status"，正文色 --info）渲染出来。响应体必须是**合法 SSE 帧序**：
+ *  raceEarlyResponse 在响应头到达时即消费 X-Worktree-Path
+ *  （worktreePathFromResponse），随后 attachLiveStream 再消费 body——帧序照默认
+ *  mock 的 task 流（session/started → run/started → user/message → model/started
+ *  → text/delta → model/completed → run/completed）。 */
+const WT_ALPHA = 'D:/repos/alpha';
+const WT_BETA = 'D:/repos/beta';
+const WT_SID = 's-contrast-worktree';
+const WT_TASK = '给登录接口加上限流';
+const WT_PATH = '/tmp/e2e-worktree-1';
+function worktreeStartFrames(task: string): FrameSpec[] {
+  return [
+    { type: 'session/started', data: { cwd: WT_ALPHA }, seq: 1, session_id: WT_SID, run_id: 'rw', time: T },
+    { type: 'run/started', seq: 2, session_id: WT_SID, run_id: 'rw', time: T },
+    { type: 'user/message', data: { content: task }, seq: 3, session_id: WT_SID, run_id: 'rw', step_id: 1, time: T },
+    { type: 'model/started', data: { model: 'e2e-model' }, seq: 4, session_id: WT_SID, run_id: 'rw', step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '好，我先看看这个目录。' }, seq: 5, session_id: WT_SID, run_id: 'rw', step_id: 1, time: T },
+    { type: 'model/completed', data: { model: 'e2e-model' }, seq: 6, session_id: WT_SID, run_id: 'rw', step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 7, session_id: WT_SID, run_id: 'rw', time: T },
+  ];
+}
+
+/** `.recover-btn`（App.tsx:1447「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
+ *  一条未配对 tool/call，isRecoverableRun 为真），照 recovery-w13.spec.ts 的
+ *  crashedEvents 同型。为什么是这个夹具：只有 canRecover 为真才渲染该按钮，
+ *  它的正文色是 --warning、底色 14% 染色（hover 22%）——两个态都要量，因为 hover
+ *  底更浓、对比度更低（票面实测 2.97 → 2.71）。 */
+const CRASH_SID = 's-contrast-crash';
+const CRASH_ROW = {
+  session_id: CRASH_SID,
+  event_count: 5,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '崩溃前的问题',
+  trace_id: null,
+  trace_url: null,
+};
+function crashedEvents(): FrameSpec[] {
+  return [
+    { type: 'session/started', seq: 1, session_id: CRASH_SID, time: T },
+    { type: 'user/message', data: { content: '崩溃前的问题' }, seq: 2, session_id: CRASH_SID, time: T },
+    { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: CRASH_SID, run_id: 'rc', time: T },
+    { type: 'model/completed', data: { content: '开始执行。' }, seq: 4, session_id: CRASH_SID, step_id: 1, run_id: 'rc', time: T },
+    {
+      type: 'tool/call',
+      data: { tool_call_id: 'call-1', tool_name: 'bash', args: { command: 'ls' } },
+      seq: 5, session_id: CRASH_SID, step_id: 1, run_id: 'rc', time: T,
+    },
+  ];
 }
 
 for (const theme of ['dark', 'light'] as const) {
@@ -407,5 +506,122 @@ for (const theme of ['dark', 'light'] as const) {
       const mm = await measure(page, sel);
       expect(contrast(mm.color, mm.bg), `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
     }
+  });
+
+  /* #1136 AC-3①：`.app-error`（分叉失败横幅）字色 --danger 压在 12% 染色底上。
+     亮色实测 3.53:1 < 4.5 ⇒ 本用例在旧 token 下必红；把 --danger 改回 #cf4a46
+     也会立刻变红。 */
+  test(`[${theme}] #1136 .app-error（分叉失败横幅）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [FORK_ROW],
+      events: forkTwoTurnEvents(),
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+      onForkPost: async (route) => {
+        await route.fulfill({
+          status: 422,
+          body: JSON.stringify({ detail: 'from_seq 不是合法分叉锚点；可用边界: [2, 30]' }),
+          contentType: 'application/json',
+        });
+      },
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await expect(page.locator('.turn')).toHaveCount(2);
+    await page.locator('.turn').nth(1).locator('.fork-btn').click();
+
+    const banner = page.locator('.app-error[role="alert"]');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('分叉失败');
+    const m = await measure(page, '.app-error[role="alert"]');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .app-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.app-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1136 AC-3②：`.app-notice`（worktree 隔离横幅）字色 --info 压在 12% 染色底上。
+     亮色实测 3.71:1 < 4.5 ⇒ 本用例在旧 token 下必红；把 --info 改回 #4a6fd6
+     也会立刻变红。 */
+  test(`[${theme}] #1136 .app-notice（worktree 隔离横幅）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [sessionRow('s3', { id: 'p2', title: '项目 beta' })],
+      projects: [
+        { id: 'p1', path: WT_ALPHA, title: '项目 alpha', session_ids: [] },
+        { id: 'p2', path: WT_BETA, title: '项目 beta', session_ids: ['s3'] },
+      ],
+      permissionModes: PERMISSION_MODES,
+      models: MODELS,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+      onSessionPost: async (route) => {
+        await route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream', 'X-Worktree-Path': WT_PATH },
+          body: worktreeStartFrames(WT_TASK).map(sseFrame).join(''),
+        });
+      },
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+
+    // 项目 alpha 的 kebab →「在此项目中新建任务」→ 弹窗填任务 → 创建任务。
+    const alpha = page.locator('.rail-project').filter({ hasText: '项目 alpha' });
+    await alpha.locator('.rail-project-head .rail-menu-btn').click();
+    await page.getByRole('menuitem', { name: '在此项目中新建任务' }).click();
+    const box = page.locator('.project-dialog[aria-label="新建任务"]');
+    await expect(box).toBeVisible();
+    await box.getByLabel('任务描述').fill(WT_TASK);
+    await box.getByRole('button', { name: '创建任务' }).click();
+
+    const notice = page.locator('.app-notice');
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText('已自动创建隔离 worktree');
+    const m = await measure(page, '.app-notice');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .app-notice color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.app-notice contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1136 AC-3③：`.recover-btn`（「恢复会话」按钮）字色 --warning 压在 14% 染色底上，
+     hover 时升到 22%（更浓的底 = 更低的对比度）。亮色实测 2.97:1、hover 2.71:1，
+     均 < 4.5 ⇒ 本用例在旧 token 下必红；hover 态是票面点名的第二个读数，单独量。 */
+  test(`[${theme}] #1136 .recover-btn（含 hover 态）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [CRASH_ROW],
+      events: crashedEvents(),
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+
+    const btn = page.locator('.recover-btn');
+    await expect(btn).toBeVisible();
+
+    const m = await measure(page, '.recover-btn');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .recover-btn color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.recover-btn contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // hover（底色 14% → 22%）：measure 读的是**当前** computed backgroundColor，
+    // 移到按钮上再量一次即覆盖 hover 态。
+    await btn.hover();
+    const hm = await measure(page, '.recover-btn');
+    const hRatio = contrast(hm.color, hm.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .recover-btn:hover color=${hm.color} bg=${hm.bg} ratio=${hRatio.toFixed(4)}`);
+    expect(hRatio, `.recover-btn:hover contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 }
