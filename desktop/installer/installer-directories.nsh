@@ -27,6 +27,17 @@
 ;                          first (#904): the pointer is a single slot, and a
 ;                          live backup must not vanish from every record when
 ;                          the slot is overwritten.
+;                          The move needs no lock, so a process that starts
+;                          while the installer is staging is never classified
+;                          by the first call; the gate is therefore called a
+;                          second time inside that window, after the working
+;                          directory is released and before the backup pointer
+;                          is armed (#1066): a runtime that appeared in
+;                          between is stopped there, and any other answer
+;                          leaves the installation byte-identical, so the
+;                          refusal needs no rollback. A damaged installation
+;                          returns before that second call, so only the first
+;                          one runs on that path.
 ;   iaPromoteApplication (customInstall, end of the install section):
 ;                          if the new files are in place, delete the backup;
 ;                          otherwise roll back. The delete runs only on a

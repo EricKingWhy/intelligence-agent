@@ -291,6 +291,18 @@ describe('process gate (#914)', () => {
     return dir
   }
 
+  /**
+   * The include with both gate calls removed: `String.replace` takes the first
+   * occurrence only, so a case that has to see the late call alone (or none at
+   * all) needs the in-window one gone too.
+   */
+  const withoutStagingWindowCall = (dir) => {
+    const text = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
+    const without = text.replace('    Call iaRequireNoRunningProduct\n', '')
+    assert.notEqual(without, text, 'the staging-window call was not removed')
+    return without
+  }
+
   it('accepts the shipped gate text', () => {
     validateProcessGateGuards(directoriesNsh, 'installer-directories.nsh')
   })
@@ -334,12 +346,9 @@ describe('process gate (#914)', () => {
 
   it('refuses a stage that never calls the gate', () => {
     const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
-    // #1066 gave the macro a second, in-window call, and `String.replace`
-    // takes the first occurrence only: both call sites have to go for this
-    // case to mean what its name says.
-    const once = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
-    const both = once.replace('    Call iaRequireNoRunningProduct\n', '')
-    assert.notEqual(both, once, 'the staging-window call was not removed')
+    // #1066 gave the macro a second, in-window call: both call sites have to go
+    // for this case to mean what its name says.
+    const both = withoutStagingWindowCall(dir)
     writeFileSync(join(dir, 'installer-directories.nsh'), both.replace(/\n/g, eol))
     assert.throws(() => validateInstallerScripts(dir), /does not call the gate/)
   })
@@ -349,11 +358,9 @@ describe('process gate (#914)', () => {
     // iaRollbackApplication read a non-empty IaBackupDir as "the install
     // section started" and would roll a good installation back.
     const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
-    const once = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
     // Both call sites go (#1066 added the in-window one): this case pins the
     // placement rule, so the late call has to be the only one left.
-    const withoutCalls = once.replace('    Call iaRequireNoRunningProduct\n', '')
-    assert.notEqual(withoutCalls, once, 'the staging-window call was not removed')
+    const withoutCalls = withoutStagingWindowCall(dir)
     const moved = withoutCalls.replace(
       '    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
       '    Call iaRequireNoRunningProduct\n    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
@@ -378,7 +385,7 @@ describe('process gate (#914)', () => {
     // anchor is load-bearing: without it the call could run while $INSTDIR is
     // still the working directory.
     const dir = withMutatedGate('    SetOutPath $TEMP\n', '')
-    assert.throws(() => validateInstallerScripts(dir), /never re-checked inside the staging window/)
+    assert.throws(() => validateInstallerScripts(dir), /never releases the working directory/)
   })
 
   it('refuses a staging-window test hook that is not compiled out', () => {

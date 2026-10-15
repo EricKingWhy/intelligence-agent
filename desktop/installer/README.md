@@ -46,9 +46,11 @@ src/installer/
 - **Atomic update + rollback** (DSH `installer-directories.nsh` protocol,
   adapted to stock electron-builder hooks): the new installer's `customInit`
   renames the live dir to `$INSTDIR.old-{guid}` before the install section,
-  after #914's process gate has checked twice that no product process is
-  running: once at the top of the staging macro and again after the working
-  directory is released and before the backup pointer is armed. The rename is
+  after #914's process gate has checked that no product process is running:
+  once at the top of the staging macro, and again inside the staging window,
+  after the working directory is released and before the backup pointer is
+  armed (#1066). A damaged installation returns before that second check, so
+  only the first one runs on that path. The rename is
   not the guard — a directory rename needs no lock, so a headless bundled
   runtime keeps answering clients out of the renamed tree (#914 measured
   `rename_errors=0` with a live service inside the directory); the braces are

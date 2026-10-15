@@ -2750,7 +2750,9 @@ export function validateProcessGateGuards(source, filename) {
     const released = stage.indexOf('SetOutPath $TEMP')
     if (gateCall !== -1 && pointer !== -1 && (released === -1 || lastGateCall < released || lastGateCall > pointer)) {
       problems.push(
-        'the gate is never re-checked inside the staging window (#1066) — the last call must run after SetOutPath $TEMP and before !insertmacro iaStashBackupDir, or a process that starts after the first check is never classified and the rename lands under it',
+        released === -1
+          ? 'the staging window never releases the working directory (#1066) — .onInit opens a handle on $INSTDIR via SetOutPath, so the in-window re-check must follow the SetOutPath $TEMP that releases it; without that line the child it spawns inherits $INSTDIR as its working directory and the rename that follows cannot succeed'
+          : 'the gate is never re-checked inside the staging window (#1066) — the last call must run after SetOutPath $TEMP and before !insertmacro iaStashBackupDir, or a process that starts after the first check is never classified and the rename lands under it',
       )
     }
     // #1066: holding the window open is a test affordance, so it must stay inside
