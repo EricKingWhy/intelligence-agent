@@ -143,6 +143,21 @@ class DockerSandbox(Sandbox):
             },
         )
 
+    def workspace_volume_exists(self) -> bool:
+        """具名私有卷是否仍存在（#1132）。
+
+        恢复路径据此 fail-closed：`containers.run(volumes=...)` 在具名卷缺失时
+        会**静默重建一个空卷**，于是恢复会"成功"在一个空 workspace 上，而原文件
+        已经不可达。调用方必须在**同一临界区**内完成"检查 → ensure_started"，
+        否则检查与启动之间仍可被删除插入（消融实测：无锁时该窗口复现原症状）。
+        """
+        docker = importlib.import_module("docker")
+        try:
+            self._client.volumes.get(self._volume_name)
+        except docker.errors.NotFound:
+            return False
+        return True
+
     def exec(self, command: str, *, timeout: float | None = None,
              deadline: float | None = None,
              cancel_event=None, on_output=None) -> ExecResult:
