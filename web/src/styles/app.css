@@ -834,6 +834,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 5px;
   text-align: center;
 }
+/* #1269：项目语境武装（#1028 toggle）的显式状态提示——「新建会话目标」。
+ * 只在行被选中为通用新建的 cwd 继承来源时出现；与 `.project-active` 高亮一同把
+ * "这行是一个可再点取消的 toggle"讲清楚（用户 2026-10-17 反馈：这个状态此前只隐含在
+ * 低对比高亮里）。复用 `.project-active` 的 accent 淡底 + `--text-primary`，但保持 chrome 面的克制。
+ * 不新增主题 token（`--color-accent` / `--text-primary` 已双主题定义，§15 无涉）。 */
+.rail-project-armed-hint {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
 .rail-project-rows {
   /* 导轨 + 缩进 = 层级；比嵌套卡片轻，比纯缩进清楚。 */
   margin: 1px 0 2px 15px;
@@ -1375,32 +1390,83 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 
 /* ── WS-6 / #169：在此项目中新建任务（确认面）──
- *  路径明示行是这个浮层的主角：它承担"你正在把哪个目录交给 agent"的确认责任，
- *  所以用 accent 色调 + 等宽路径，比正文更重（而不是一条普通 hint 文本）。 */
+ *  路径明示行承担"你正在把哪个目录交给 agent"的确认责任（敏感操作知情），
+ *  #1177 §B 起**收窄为单行**：任务描述才是唯一主视觉，这条不再抢正文注意力。
+ *  路径动态取项目 cwd；过长时整行省略，完整值进 `title`。 */
 .project-path-callout {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   padding: 7px var(--space-sm);
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 .project-path-callout > svg {
   flex-shrink: 0;
-  margin-top: 2px;
   color: var(--accent);
 }
+/* 单行文本载体：flex 子项必须 `min-width: 0`，省略号才会在单元格内生效。 */
+.project-path-callout-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .project-path-callout-path {
-  display: block;
-  margin-top: 2px;
-  font-size: var(--text-xs);
+  margin-left: 2px;
   font-weight: 600;
   color: var(--text-primary);
-  word-break: break-all; /* 长路径换行而不是被裁掉：路径就是这条 AC 的正文 */
+}
+
+/* ── #1177 §B：新建任务对话框「高级设置」折叠区（默认折叠）──
+ *  任务描述是唯一主视觉；完成目标 / 自主度 / 模型 / 运行位置收进这里。用 button +
+ *  `aria-expanded` 控制一个 `hidden` 容器（键盘可达、状态可断言），不引入新依赖。 */
+.project-advanced {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-sm);
+}
+.project-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.project-advanced-toggle:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+.project-advanced-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.project-advanced-chevron {
+  /* #1177：与同类披露控件（`.rail-project-chevron`，`:801`）统一用 `--dur-expand`
+     （180ms）——两者都是"展开披露"语义的旋转箭头，不该一个 150ms 一个 180ms。 */
+  transition: transform var(--dur-expand) var(--ease-apple);
+}
+.project-advanced-chevron.open {
+  transform: rotate(90deg);
+}
+.project-advanced-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+}
+.project-advanced-content[hidden] {
+  display: none;
 }
 .project-textarea {
   background: var(--surface-2);
@@ -5172,6 +5238,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .rail-project-chevron,
   .rail-project-title,
+  .rail-project-armed-hint,
   .rail-project-count {
     display: none;
   }

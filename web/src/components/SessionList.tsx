@@ -85,8 +85,8 @@ interface Props {
    *  真机实测过：见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。 */
   sessionsError: string | null;
   onRetryProjects: () => void;
-  /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口，
-   *  prompt 唯一必填 + 三档自主度 + 模型 + 运行位置，创建即启动。
+  /** 「新建任务…」（#367 [W-23] 选项 A；#1177 §A.3 改名，原「在此项目中新建任务」）：
+   *  统一创建入口，prompt 唯一必填 + 三档自主度 + 模型 + 运行位置，创建即启动。
    *  resolve `null` = 已创建；否则为**给用户看的原因**（留在确认面里）。 */
   onStartTask: (payload: StartSessionPayload) => Promise<string | null>;
   /** 模型目录（GET /api/models）——创建表单模型选择器的数据源。 */
@@ -152,21 +152,25 @@ export const SessionList = memo(function SessionList({
    *  文案都不同（一个只摘注册记录，一个不可恢复），共用会让"点错了哪一类"没法表达。 */
   const [deletingSession, setDeletingSession] = useState<DeleteSessionTarget | null>(null);
   const [attachFor, setAttachFor] = useState<string | null>(null);
-  /** 「在此项目中新建任务」的目标项目（null = 确认面关闭）。 */
+  /** 「新建任务…」的目标项目（null = 确认面关闭）。 */
   const [startTaskFor, setStartTaskFor] = useState<Project | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  /** #945：这一次菜单关闭是不是因为选中了「重命名项目」。选中它时我们把焦点**主动**
-   *  交给就地挂载的 InlineRename 输入框（`autoFocus`）⇒ 菜单关闭时**不该**再把焦点
-   *  归还给 trigger。Radix 默认的归还是一个 `setTimeout` 里的 `trigger.focus()`
-   *  （`@radix-ui/react-dropdown-menu` 的 `onCloseAutoFocus`），它与输入框的
-   *  `autoFocus` 竞态：晚到就 blur 掉输入框，`InlineRename.onBlur` 会把它当成
-   *  "用户离开了"并取消编辑态（含刚显示的空白名错误提示）——表现为 e2e 里
-   *  `getByLabel('项目名')` 在两个断言之间凭空消失。只此一处跳过归还，其余菜单项
-   *  （开对话框 / 纯动作）保持默认的焦点归还。
+  /** #945 / #1177：这一次菜单关闭是否要**跳过** Radix 默认的"归还 trigger 焦点"。
+   *
+   *  两种菜单项会把焦点**主动**移到别处，晚到的归还（Radix `onCloseAutoFocus` 在
+   *  `setTimeout` 里的 `trigger.focus()`）会把它偷回来：
+   *   - #945「重命名项目」：焦点交给就地挂载的 InlineRename 输入框（`autoFocus`），
+   *     晚到的归还会在输入框挂载后立刻 blur 它，`InlineRename.onBlur` 遂把编辑态
+   *     取消（含刚显示的空白名错误提示）——e2e 里表现为 `getByLabel('项目名')` 在
+   *     两个断言之间凭空消失。
+   *   - #1177「新建会话」：焦点交给 composer（`onNew` → `handleNew` 里的
+   *     `#composer-input` focus），晚到的归还会
+   *     把光标从"马上要打字"的输入框拽回 kebab 按钮——直达入口的意义就没了。
+   *  其余菜单项（开对话框 / 纯动作）保持默认的焦点归还。
    *
    *  不变量：同一时刻只有一个项目菜单能开着，且 Radix 每次关闭都会触发一次
    *  `onCloseAutoFocus` ⇒ 置位后必在紧接着的那次关闭里被消费复位，标志不跨关闭残留。 */
-  const focusMovedIntoRename = useRef(false);
+  const suppressMenuAutoFocus = useRef(false);
   const [opError, setOpError] = useState<string | null>(null);
   // 拖拽重排（HTML5 DnD）：记**来源项目**而不只是被拖的会话 id——跨项目拖动
   // 不是重排（那是 attach，有 cwd 校验），落点提示只能在来源项目内亮。
@@ -378,6 +382,8 @@ export const SessionList = memo(function SessionList({
                 const expanded = isExpanded(project);
                 const listId = `rail-project-${project.id}`;
                 const renaming = renamingId === project.id;
+                // #1269：本行是否是「通用新建会话」当前继承 cwd 的项目语境（#1028 的 toggle）。
+                const contextArmed = activeProjectId === project.id;
                 // 落点提示只在本项目内亮：跨项目拖动不是重排（见 handleDrop）。
                 const dropEnabled = drag?.projectId === project.id;
                 return (
@@ -405,7 +411,7 @@ export const SessionList = memo(function SessionList({
                       ) : (
                         <button
                           className={`rail-project-toggle${
-                            activeProjectId === project.id ? ' project-active' : ''
+                            contextArmed ? ' project-active' : ''
                           }`}
                           onClick={() => {
                             // #1028：点中项目行 = 选中项目语境（通用新建据此继承 cwd）
@@ -414,7 +420,10 @@ export const SessionList = memo(function SessionList({
                             // **再次点击已 active 的行 = 取消语境**（onSelectProject(null)）：
                             // 可逆语义——用户为浏览而点开项目后能显式退出，不会被动地为
                             // 下一次通用新建武装 cwd（审查 P3）。
-                            onSelectProject(activeProjectId === project.id ? null : project.id);
+                            // #1269：这**是一个 toggle**——展开/收起与语境武装共用同一次点击，
+                            // 故在行上给出显式状态提示（下方 `rail-project-armed-hint` +
+                            // title/aria-label），让用户一眼看出当前是「新建会话目标」、可再点取消。
+                            onSelectProject(contextArmed ? null : project.id);
                             toggle(project.id);
                           }}
                           aria-expanded={expanded}
@@ -422,8 +431,18 @@ export const SessionList = memo(function SessionList({
                           // 窄屏（≤820px）标题与计数被 CSS 收起，而 display:none 会把
                           // 它们从可访问性树里摘掉——不补 aria-label 这个按钮在窄屏
                           // 就是无名控件（#179）。
-                          aria-label={`${project.title}：${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}`}
-                          title={expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}
+                          // #1269：武装态语义也进可访问名称。**刻意不写「新建会话」四字**——
+                          // 那是侧栏「新建会话」按钮的 a11y 名称，而 `getByRole('button',
+                          // { name: '新建会话' })` 默认**按子串匹配**，本行名称一旦含它就会与
+                          // 侧栏按钮双命中（strict mode 违例，实测把 e2e `project-context` AC1
+                          // 打红）。改说「新会话」既传达同一状态，又不与那个入口撞名。
+                          // 武装态文案共三处（本 aria-label / 下方 title / 可见 chip），改动须同步。
+                          aria-label={`${project.title}：${
+                            expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`
+                          }${contextArmed ? '；已选中为新会话的目标目录，再点一次取消' : ''}`}
+                          title={`${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}${
+                            contextArmed ? ' · 已选中为「新建会话」目标目录（再点一次取消）' : ''
+                          }`}
                         >
                           <ChevronRight
                             size={12}
@@ -438,6 +457,13 @@ export const SessionList = memo(function SessionList({
                           <span className="rail-project-title" title={project.path}>
                             {project.title}
                           </span>
+                          {/* #1269：语境武装的显式状态提示——标出"这是通用新建会话的目标"。
+                              `aria-hidden`：同义已进上方 `aria-label`，避免读屏重复播报。 */}
+                          {contextArmed && (
+                            <span className="rail-project-armed-hint" aria-hidden="true">
+                              新建会话目标
+                            </span>
+                          )}
                           {project.status === 'missing-dir' && (
                             <TriangleAlert
                               size={12}
@@ -463,29 +489,51 @@ export const SessionList = memo(function SessionList({
                             className="rail-menu"
                             align="end"
                             sideOffset={4}
-                            // #945：选中「重命名项目」时焦点已被交给行内输入框，
-                            // 别再让关闭时默认的"归还 trigger 焦点"把它 blur 掉（见
-                            // `focusMovedIntoRename` 注释）。其余情况保持 Radix 默认。
+                            // #945 / #1177：选中「重命名项目」/「新建会话」时焦点已被主动
+                            // 移到别处，别再让关闭时默认的"归还 trigger 焦点"偷回来（见
+                            // `suppressMenuAutoFocus` 注释）。其余情况保持 Radix 默认。
                             onCloseAutoFocus={(event) => {
-                              if (focusMovedIntoRename.current) {
-                                focusMovedIntoRename.current = false;
+                              if (suppressMenuAutoFocus.current) {
+                                suppressMenuAutoFocus.current = false;
                                 event.preventDefault();
                               }
                             }}
                           >
-                            {/* 第一项：本票的主入口（AC9）。放在最前是因为它是这个项目
-                                行最常用、也最不容易误伤的操作——重命名/删除在它下面。 */}
+                            {/* #1177 §A：项目菜单两项分开——「新建会话」直达空会话（不经
+                                表单，复用侧栏「+」的惰性创建链路）；「新建任务…」弹化简
+                                后的对话框（创建即启动）。省略号 = 点击会弹窗（Apple HIG /
+                                GNOME 惯例），与"直接进"一眼区分。
+                                都放最前：它们是这个项目行最常用、也最不容易误伤的操作——
+                                重命名 / 删除在下面。 */}
+                            <DropdownMenu.Item
+                              className="rail-menu-item"
+                              onSelect={() => {
+                                // 「新建会话」= 复用通用新建链路，唯一差异是先用 #1028 的
+                                // 预设项目语境机制把项目 cwd 记成语境（onSelectProject）：
+                                // 首条消息提交时才真正创建会话、并带 `cwd: project.path`
+                                // 直接诞生在项目目录里并自动入组（不弹任何表单）。
+                                // 不得照搬后丢失 cwd 锚定——这条就是锚定的接缝。
+                                // 焦点归 composer（`onNew` → `handleNew` focus
+                                // `#composer-input`）：跳过 Radix 关闭时的 trigger
+                                // 归还，否则光标会被拽回 kebab（见 ref 注释）。
+                                suppressMenuAutoFocus.current = true;
+                                onSelectProject(project.id);
+                                onNew();
+                              }}
+                            >
+                              新建会话
+                            </DropdownMenu.Item>
                             <DropdownMenu.Item
                               className="rail-menu-item"
                               onSelect={() => setStartTaskFor(project)}
                             >
-                              在此项目中新建任务
+                              新建任务…
                             </DropdownMenu.Item>
                             <DropdownMenu.Separator className="rail-menu-sep" />
                             <DropdownMenu.Item
                               className="rail-menu-item"
                               onSelect={() => {
-                                focusMovedIntoRename.current = true;
+                                suppressMenuAutoFocus.current = true;
                                 setRenamingId(project.id);
                               }}
                             >
@@ -508,13 +556,15 @@ export const SessionList = memo(function SessionList({
                           // 空项目不再引导用户"去未分组找 cwd 匹配的会话"——WS-6 之后
                           // 在项目里直接开任务就是最短路径，旧文案的语义已被本入口取代
                           // （AC10：占位区替换为该入口按钮）。
+                          // #1177 §A.3：入口随菜单一项改名（「在此项目中新建任务」→
+                          // 「新建任务…」），两处表面用同一文案。
                           <div className="rail-project-empty">
                             这个项目还没有会话。
                             <button
                               className="rail-empty-action"
                               onClick={() => setStartTaskFor(project)}
                             >
-                              在此项目中新建任务 →
+                              新建任务…
                             </button>
                           </div>
                         )}
