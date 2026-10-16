@@ -72,6 +72,9 @@ class TestSessionEventDTO:
             # #430（W-02.1）：保护事实独立预算超限的诊断事件（fail-closed 暂停
             # 语义不变；载荷只装预算读数 + fact 的 id/type/尺寸，不装 value）。
             "context/protected_facts_exceeded",
+            # #1197 项 1：会话级上下文窗口挡位（状态事件，不投影成消息；
+            # 投影见 context/window.py derive，倒序 last-wins）。
+            "context/window-changed",
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",
@@ -87,6 +90,8 @@ class TestSessionEventDTO:
             "model/fallback",
             "agent/delegation-started",
             "agent/delegation-finished",
+            # #1192：委派约束继承快照（独立审计事件，落子会话事件流）
+            "agent/constraint-inheritance",
             "reasoning/started",
             "reasoning/delta",
             "reasoning/completed",

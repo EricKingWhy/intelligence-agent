@@ -89,6 +89,7 @@ from agent_harness.agent.run_budget import (
     validate_resume,
 )
 from agent_harness.assembly import build_runtime
+from agent_harness.context.window import append_context_window_change
 from agent_harness.logging import log_event
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -155,6 +156,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProjectKeyUnavailable,
     ProtectedFactNotFound,
@@ -4278,6 +4280,20 @@ class SessionService:
                     dry_run=True,
                 )
 
+            # ⑥' #1197 项 3：无可压缩早期轮 ⇒ **类型化拒绝**（409
+            # `{reason: "no_early_turns"}`），不再吞成 200 + `compacted_turn_count=0`
+            # 的"水位过低"。判据与 compactor 的 `early` 窗口**同源**
+            # （`compactable_early_window`，经 `_has_compactable_early_turn`），
+            # 且判定在任何 LLM 装配 / 任何写入之前——被拒路径**零写入**。
+            #
+            # 放在 dry_run 之后：dry_run 是**预览**（自己的 DTO 契约，"将压缩 / 不
+            # 会压缩"），不是用户的压缩动作，不适用"被拒"语义。
+            if not self._has_compactable_early_turn(session):
+                raise NoCompactableEarlyTurn(
+                    f"session '{session_id}' has no compactable early turn; "
+                    "there is nothing to summarize yet"
+                )
+
             # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
             from agent_harness.context.compactor import (
                 CompactionPostWriteError,
@@ -4533,19 +4549,31 @@ class SessionService:
 
     @staticmethod
     def _has_compactable_early_turn(session: Session) -> bool:
-        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+        """dry_run 预览：是否存在可压缩的早期轮（与 compactor 闸门**一致**的判据）。
 
         前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
         `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
         函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
 
-        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
-        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        判据与 `compact` 的 `compacted_turn_count` 计算式**完全一致**：early 窗口内
+        非摘要 `HumanMessage` 数 > 0 才算可压（P2-1 #1197 修回——旧实现只判窗口
+        非空，early 恰好只含上一轮压缩摘要 HumanMessage 时会误判为可压，真实管线
+        以 0 计数走 below-floor 200 分支，绕过 409 `NoCompactableEarlyTurn`）。
         """
-        from agent_harness.context.compactor import compactable_early_window
+        from langchain_core.messages import HumanMessage
 
-        prefix_end, cut = compactable_early_window(session.derive_messages())
-        return cut > prefix_end
+        from agent_harness.context.compactor import (
+            _is_compaction_summary,
+            compactable_early_window,
+        )
+
+        messages = session.derive_messages()
+        prefix_end, cut = compactable_early_window(messages)
+        return any(
+            isinstance(message, HumanMessage)
+            and not _is_compaction_summary(message)
+            for message in messages[prefix_end:cut]
+        )
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
@@ -6628,6 +6656,27 @@ class SessionService:
         append_approval_revoke(session, approval_key)
         return {"id": session_id, "approval_key": approval_key, "revoked": existed}
 
+    async def set_context_window(
+        self, session_id: str, context_window: int
+    ) -> dict[str, Any]:
+        """切换会话上下文窗口挡位（#1197 项 1），**per-session 独立**。
+
+        守卫复用 `_require_existing_session`（422 先于 404）；写入走
+        `append_context_window_change`（**唯一**写入口，白名单在此再拦一道：
+        即便调用方绕过 HTTP 的 pydantic 校验也写不进非法挡位）。追加
+        `context/window-changed`（append-only，last-wins）；`ContextBuilder` 每次
+        `build()` / `compact_now()` 现派生，**下一轮上下文构建即生效**，无需重建
+        （与 `set_workflow_mode` 同款生效语义）。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        append_context_window_change(session, context_window)
+        return {"id": session_id, "context_window": context_window}
+
     async def set_workflow_mode(
         self, session_id: str, mode: WorkflowMode
     ) -> dict[str, Any]:
@@ -6959,6 +7008,7 @@ __all__ = [
     "LaunchResult",
     "ModelChange",
     "ModelTarget",
+    "NoCompactableEarlyTurn",
     "PendingApprovalConflict",
     "PermissionChange",
     "QueueItemNotFound",

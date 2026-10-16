@@ -175,6 +175,10 @@ MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
 AGENT_DELEGATION_FINISHED = "agent/delegation-finished"
+# ── + #1192（#1176 Phase 3）：子 agent 约束继承集快照（独立事件，非 fact 来源事件）──
+# data: {omit_constraints: bool, inherited: [...], not_inherited: [...]}。
+# 只做审计/展示——注入子 agent 上下文的是同一份快照（票面 §四.3：不改写事实来源）。
+AGENT_CONSTRAINT_INHERITANCE = "agent/constraint-inheritance"
 # ── + Streaming UI 生产级改造（reasoning 事件族 + 工具输出流，ADR-0016） ──
 # 协作约束（Phase 14 并行开发约定）：session/event.py 双方只做加法改动——
 # 合帧文本增量启用新类型 text/delta（规格 02 §7.4 text 事件族命名），
@@ -196,6 +200,9 @@ PERMISSION_GRANTED = "permission/approval-granted"
 PERMISSION_REVOKED = "permission/approval-revoked"
 # ── #526 B1：工作流档切换（normal/plan），Runtime 只读门禁的 durable 真相。
 WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
+# ── #1197 项 1：会话级上下文窗口（五挡位之一），per-session 独立；
+# 内存投影见 context/window.py derive（倒序 last-wins）。
+CONTEXT_WINDOW_CHANGED = "context/window-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -334,6 +341,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,
         AGENT_DELEGATION_FINISHED,
+        # #1192：子 agent 约束继承集快照（状态事件，不投影成消息）
+        AGENT_CONSTRAINT_INHERITANCE,
         REASONING_STARTED,
         REASONING_DELTA,
         REASONING_COMPLETED,
@@ -362,6 +371,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # #1193：run 致命异常的明确错误信号（plan 档 + 计划从未生成；durable 的
         # 理由与判定条件见上方 ERROR 定义处）
         ERROR,
+        # #1197 项 1：会话级上下文窗口挡位
+        CONTEXT_WINDOW_CHANGED,
     }
 )
 
