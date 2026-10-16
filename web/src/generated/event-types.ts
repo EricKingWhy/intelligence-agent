@@ -30,6 +30,7 @@ export const EventType = {
   ARTIFACT_EXTERNALIZED: 'artifact/externalized',
   CONTEXT_COMPACTED: 'context/compacted',
   TASK_PROTECTED_FACT: 'task/protected_fact',
+  TASK_FACT_REVOCATION: 'task/fact_revocation',
   CONTEXT_COMPACTION_FAILED: 'context/compaction_failed',
   CONTEXT_PROTECTED_FACTS_EXCEEDED: 'context/protected_facts_exceeded',
   TASK_PLAN_UPDATED: 'task/plan_updated',

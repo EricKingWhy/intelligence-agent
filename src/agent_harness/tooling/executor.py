@@ -101,6 +101,7 @@ from agent_harness.tooling.quota import ToolQuotaWindow
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 
 logger = logging.getLogger("agent_harness.tooling.executor")
 
@@ -728,7 +729,7 @@ class ToolExecutor:
             if (
                 session is not None
                 and self._operation_ledger is not None
-                and name == "request_constraint_resolution"
+                and name in USER_INPUT_TOOL_NAMES
                 and result.ok
                 and isinstance(result.data, dict)
                 and result.data.get("status") == "requested"

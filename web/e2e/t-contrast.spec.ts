@@ -10,6 +10,8 @@
  *  6. #1030 / #1136 的 ink-mix 使用点：.run-pulse.pulse-awaiting-decision、恢复冲突条，
  *     以及 .app-error / .app-notice / .recover-btn / .auth-banner / .task-review-* 族
  *     （语义色当正文色用，亮色下靠 `color-mix(<sem> 45%, --text-primary)` 压到达标）
+ *  7. #1190 约束管理页的 `--cn-*` 墨面：.cn-value / .cn-type / .cn-meta / .cn-pill /
+ *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -1305,5 +1307,120 @@ for (const theme of ['dark', 'light'] as const) {
     };
     await openTaskReview(page, theme, state);
     await expectEachContrast(page, theme, ['.task-review-run-axis.running']);
+  });
+
+  /* #1190 约束管理页：新墨面（值 14px / 类型名 / 12px 元信息 / 状态 pill / 撤销按钮）
+   * 的对比度与 12px 地板。元信息刻意用 ink-subtle 而非票面 #62666d（对比度取舍，见
+   * constraints.css 头注释）——本用例把那句口头承诺变成机械守卫（PRODUCT.md:59/72）。 */
+  test(`[${theme}] #1190 约束管理（值/类型/元信息/状态 pill/撤销）对比度 ≥4.5 且 12px 地板`, async ({ page }) => {
+    const sid = 's-contrast-cn';
+    const facts = [{
+      fact_id: 'f-cn', type: 'constraint', value: '不要改动生产环境配置', status: 'active',
+      source_event_id: 'ev-3', source_seq: 3, registered_at: T, revoked_at: null, revoked_by: null,
+    }];
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rcn', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '约束对比度' }, seq: 3, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'model/completed', data: { text: '好' }, seq: 4, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rcn', time: T },
+    ];
+    await routeApi(page, {
+      sessions: [{
+        session_id: sid, event_count: frames.length, first_event_time: T, last_event_time: T,
+        first_user_message: '约束对比度', trace_id: null, trace_url: null,
+      }],
+      events: frames,
+      models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+      protectedFacts: facts,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await page
+      .getByRole('tablist', { name: 'Inspector 视图' })
+      .getByRole('tab', { name: 'Constraints' })
+      .click();
+    await expect(page.getByTestId('constraints-panel')).toBeVisible();
+    await expectEachContrast(page, theme, ['.cn-value', '.cn-type', '.cn-meta', '.cn-pill', '.cn-revoke']);
+    // 12px 地板：元信息行是面板里最小的字（效果图给 12px）。
+    for (const sel of ['.cn-type', '.cn-meta', '.cn-pill']) {
+      const m = await measure(page, sel);
+      expect(m.fontSize, `${sel} font-size (${theme})`).toBe('12px');
+    }
+  });
+}
+
+/* ── #1204：`.ask-user-error`（提问卡片恢复失败条）语义色正文对比度回归锁 ──
+ *
+ *  内嵌 `AskUserCard` 的恢复失败条把 `--danger` 直接当**正文色**用，压在
+ *  `--surface-danger`（8% 染底）上——亮色实测 4.0020 < 4.5（不达 AA）。修法同
+ *  #1175/#1208 的 ink-mix：`color-mix(in srgb, var(--danger) 45%, var(--text-primary))`
+ *  （亮色压深、暗色提亮，只升不降）；本元素仅纯文字，无图标需钉回原 token。
+ *  夹具走**真实渲染路径**：耐久事件里 `user/input-requested(kind=ask_user)` 与
+ *  `run/paused(reason=user_input)` 对齐 ⇒ 卡片落屏；点「提交」→ resume POST 落 404
+ *  fallback ⇒ App 会话错误 ⇒ `.ask-user-error`。把字色改回纯 `--danger` 时本用例必红。 */
+const AU_SID = 's-contrast-ask-user';
+const AU_REQ = 'au-contrast-req';
+const AU_ROW = {
+  session_id: AU_SID,
+  event_count: 5,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '对比度提问',
+  trace_id: null,
+  trace_url: null,
+};
+function askUserContrastEvents(): FrameSpec[] {
+  return [
+    { type: 'session/started', seq: 1, session_id: AU_SID, run_id: 'ru', time: T },
+    { type: 'run/started', seq: 2, session_id: AU_SID, run_id: 'ru', time: T },
+    { type: 'user/message', data: { content: '对比度提问' }, seq: 3, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T },
+    {
+      type: 'user/input-requested',
+      data: {
+        request_id: AU_REQ, kind: 'ask_user', run_id: 'ru',
+        questions: [{
+          question: '什么时候出发？', header: '出发',
+          options: [{ label: '今晚' }, { label: '明早' }],
+        }],
+      },
+      seq: 4, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T,
+    },
+    {
+      type: 'run/paused',
+      data: { reason: 'user_input', input_request_id: AU_REQ, budget_version: 1 },
+      seq: 5, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T,
+    },
+  ];
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`[${theme}] #1204 .ask-user-error（提问卡片恢复失败条）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [AU_ROW],
+      events: askUserContrastEvents(),
+      models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+
+    const card = page.locator('.ask-user-card');
+    await expect(card).toBeVisible();
+    // 提交 → resume POST 落 404 fallback（fixtures 默认）→ App 会话错误 → 失败条落屏。
+    await page.locator('.ask-user-submit').click();
+
+    const err = page.locator('.ask-user-error');
+    await expect(err).toBeVisible();
+    const m = await measure(page, '.ask-user-error');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .ask-user-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.ask-user-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 }
