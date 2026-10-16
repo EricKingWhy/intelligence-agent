@@ -1,7 +1,7 @@
 /* 约束管理面板（#1190 / #1176 Phase 1）——Session Inspector 内一页。
  *
- * 视觉 token 逐字取自 issue §三/§四（效果图定稿 v2）：深黑底 #010102、四级 surface
- * （#0f1011/#141516/#18191a/#191a1b）、hairline #23252a、主操作薰衣草紫 #5e6ad2、
+ * 视觉 token 逐字取自 issue §三/§四（效果图定稿 v2）：深黑底 #010102、两级 surface
+ * （#0f1011/#141516）、hairline #23252a、主操作薰衣草紫 #5e6ad2、
  * 6 类圆点固定色。这些值由**已批准的 issue 明文给定**（AGENTS.md §1.1 优先级第 7 条），
  * 且任务书要求「按效果图逐元素实现」——故此处**刻意另立 `--cn-*` 命名空间**而非复用
  * `index.css` 的 `--surface-*`（两者取值不同：仓内 surface-1 是 #101014，效果图是 #0f1011）。
@@ -13,11 +13,11 @@
  * `document.body`，在 `.cn-panel` 作用域**之外**——若 token 只定义在 `.cn-panel`，弹窗
  * 在亮色主题下会回退到暗色字面量（实测问题）。放 `:root` 后弹窗与面板共享同一组变量。
  *
- * 亮色覆盖见文件末尾 `:root[data-theme='light']`（覆盖**全部** `--cn-*`，含四级 surface
+ * 亮色覆盖见文件末尾 `:root[data-theme='light']`（覆盖**全部** `--cn-*`，含两级 surface
  * 与 6 类圆点色），遵守 AGENTS.md §15 / PRODUCT.md「新增 token 必须检查暗亮两块」。
  *
  * 另一处刻意偏离效果图：元信息行效果图用 ink-tertiary #62666d，在暗底上实测 ≈3.3:1 < 4.5，
- * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（≈5.7:1）。同一条
+ * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（在 surface-1 上 ≈5.9:1）。同一条
  * 「用户指令 vs 产品文档」的取舍，已列入待裁决。
  */
 
@@ -287,6 +287,9 @@
 
 .cn-revoke:disabled {
   cursor: default;
+  /* 禁用控件按 WCAG 1.4.3 豁免对比度门槛（"inactive UI component"）——这里压暗是
+   * 承载"不可撤销"的语义；与上面 `.cn-row.revoked` 不同：那条压暗的是**仍可读**的
+   * 元信息（用户要读的内容），故必须保 4.5:1。 */
   opacity: 0.5;
 }
 
@@ -341,7 +344,9 @@
   border-radius: 12px;
   padding: 28px;
   width: min(440px, calc(100vw - 32px));
-  z-index: 201;
+  /* 与 `.palette-overlay`(50) 配对成仓内浮层「50/51」层族（app.css:3184 明文）；
+   * 内容必须**高于**遮罩，否则 inset:0 的遮罩会接走指针事件（#203 的教训）。 */
+  z-index: 51;
   color: var(--cn-ink);
 }
 
@@ -419,11 +424,12 @@
 
 .cn-btn:disabled {
   cursor: default;
+  /* 同上：禁用控件（WCAG 1.4.3 豁免），压暗仅承载不可交互语义。 */
   opacity: 0.6;
 }
 
 /* ── 亮色主题覆盖（AGENTS §15：新增 token 必须检查两块）──
- * 覆盖**全部** `--cn-*`（含四级 surface 与 6 类圆点色）：漏一个该 token 在亮色下
+ * 覆盖**全部** `--cn-*`（含两级 surface 与 6 类圆点色）：漏一个该 token 在亮色下
  * 仍用暗色值。圆点在亮色底上取更深一档，保证 12px 名称旁的辨识度。 */
 :root[data-theme='light'] {
   --cn-surface-1: #ffffff;

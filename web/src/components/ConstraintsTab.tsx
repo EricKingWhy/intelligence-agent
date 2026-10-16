@@ -92,7 +92,7 @@ function CollapsibleValue({ text }: { text: string }) {
     setOverflows(el.scrollHeight > el.clientHeight + 1);
   }, [text]);
   return (
-    <div className="cn-value-wrap">
+    <div>
       <div ref={ref} className={`cn-value${expanded ? ' expanded' : ''}`}>
         {text}
       </div>
@@ -195,7 +195,7 @@ export function ConstraintsView({
   let body;
   if (forbidden) {
     body = (
-      <div className="cn-state cn-forbidden" role="alert">
+      <div className="cn-state" role="alert">
         无权限查看约束
       </div>
     );
@@ -210,9 +210,9 @@ export function ConstraintsView({
       </div>
     );
   } else if (loading && facts.length === 0) {
-    body = <div className="cn-state cn-loading">正在加载约束…</div>;
+    body = <div className="cn-state">正在加载约束…</div>;
   } else if (visible.length === 0) {
-    body = <div className="cn-state cn-empty">没有符合条件的约束</div>;
+    body = <div className="cn-state">没有符合条件的约束</div>;
   } else {
     body = visible.map((fact) => (
       <FactRow key={fact.fact_id} fact={fact} onRequestRevoke={onRequestRevoke} />
@@ -226,7 +226,7 @@ export function ConstraintsView({
       <div className="cn-session-line">
         <span className="cn-livedot" aria-hidden="true" />
         当前会话 <code className="cn-session-id">{sessionId}</code>
-        <span className="cn-session-hint">数据来自后端实时查询，前端不存第二份状态</span>
+        <span>数据来自后端实时查询，前端不存第二份状态</span>
       </div>
 
       <div className="cn-toolbar">
@@ -288,6 +288,9 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
       setForbidden(false);
     } catch (err) {
       if (err instanceof UnauthorizedError || (err instanceof SessionError && err.status === 403)) {
+        // 清空旧数据：渲染分支已互斥（forbidden > error > facts），但内存里不该留着
+        // 上一会话的行——不让任何路径出现「缓存冒充真相」的可能。
+        setFacts([]);
         setForbidden(true);
         setError(null);
       } else {

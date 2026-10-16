@@ -294,6 +294,22 @@ describe('ConstraintsTab（状态外壳）', () => {
     expect(document.body.textContent).not.toContain('不要改动生产环境配置');
   });
 
+  it('AC4：先有数据、后 403 → 同样清空旧数据（内存态不留上一会话行）', async () => {
+    vi.mocked(listProtectedFacts).mockImplementation(async (sid: string) => {
+      if (sid === 's-ok') return [ACTIVE];
+      throw new SessionError(403, '非本机来源');
+    });
+    render(<ConstraintsTab sessionId="s-ok" />);
+    await act(async () => {});
+    expect(document.body.textContent).toContain('不要改动生产环境配置');
+
+    await act(async () => {
+      root!.render(<ConstraintsTab sessionId="s-forbidden" />);
+    });
+    expect(document.body.textContent).toContain('无权限查看约束');
+    expect(document.body.textContent).not.toContain('不要改动生产环境配置');
+  });
+
   it('加载失败 → 错误态 + 重试可重拉', async () => {
     vi.mocked(listProtectedFacts)
       .mockRejectedValueOnce(new Error('boom'))

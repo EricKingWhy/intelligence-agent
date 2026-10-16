@@ -12,14 +12,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.session import TASK_FACT_REVOCATION, USER_MESSAGE
+from agent_harness.session.errors import SeqConflict
 from agent_harness.session.service import SessionService
 from agent_harness.session.session import Session
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.app import session_service
 from tests.web.test_budget_local_fuse_api import _web
 
@@ -170,10 +173,11 @@ class TestRevokeProtectedFact:
         两个 `SessionService` 实例（模拟 Web 层每请求各建一个）**共享同一 RunManager**，
         故会话锁把它们串行化：第二个请求在锁内重读到 `revoked` 走幂等分支，不重复落事件。
 
-        ⚠ 必须给读阶段**注入一个 await 让点**：真实的 `get_events` 在本环境不产生
-        挂起点，`asyncio.gather` 的两个协程会一前一后跑完（race 窗口不出现）——那样的
-        断言恒真、测不到锁。这里把 `get_events` 包一层 `sleep(0)`，让两个请求都先读到
-        `active` 再各自写：**去掉锁这条会红**（已验证）。
+        **确定性构造**（不靠 sleep 抖调度）：把 `get_events` 包一层——每进一个读者，
+        计数 +1；等**两个**读者都到齐才放行返回。无锁时两个协程都进得来 ⇒ 各自读到
+        `active` ⇒ 各写一条 = 2 条事件（确定性红）；有锁时第二个读者被锁挡在门外，
+        `readers_arrived` 永远到不了 2 ⇒ 由 `wait_for` 超时兜底放行，只有一条事件。
+        （超时只影响「有锁」这一正确分支的速度，不改变任何分支的判定结果。）
         """
         app, _client = _web(tmp_path)
         state = app.state.agent
@@ -185,13 +189,32 @@ class TestRevokeProtectedFact:
         ).data["fact_id"]
 
         real_get_events = SessionService.get_events
+        readers = 0
+        both_read = asyncio.Event()
+        release = asyncio.Event()
 
-        async def _slow_get_events(self: SessionService, session_id: str, *args: object, **kwargs: object):
-            await asyncio.sleep(0)  # 撑开读-判-写窗口
-            return await real_get_events(self, session_id, *args, **kwargs)  # type: ignore[arg-type]
+        async def _gated_get_events(
+            self: SessionService, session_id: str, *args: object, **kwargs: object,
+        ):
+            nonlocal readers
+            # 先真读（拿快照），再挂到闸门上——保证两个读者持的是「写之前」的同一份快照。
+            events = await real_get_events(self, session_id, *args, **kwargs)  # type: ignore[arg-type]
+            readers += 1
+            if readers >= 2:
+                both_read.set()
+            # 两个读者到齐才放行（无锁时成立）；有锁时第二个进不来，wait_for 超时兜底。
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(release.wait(), 1.0)
+            return events
 
-        monkeypatch.setattr(SessionService, "get_events", _slow_get_events)
+        monkeypatch.setattr(SessionService, "get_events", _gated_get_events)
 
+        async def _release_when_both_read() -> None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(both_read.wait(), 1.0)
+            release.set()
+
+        asyncio.ensure_future(_release_when_both_read())
         results = await asyncio.gather(
             session_service(state).revoke_protected_fact(sid, fact_id, revoked_by="local"),
             session_service(state).revoke_protected_fact(sid, fact_id, revoked_by="local"),
@@ -199,3 +222,50 @@ class TestRevokeProtectedFact:
         assert all(r["status"] == "revoked" for r in results)
         events = await real_get_events(session_service(state), sid)
         assert sum(1 for e in events if e.type == TASK_FACT_REVOCATION) == 1
+
+    def test_revoke_seq_conflict_409(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """写号与在途 run 竞态（`SeqConflict`）→ 409（与 `/resume` 等写端点同码）。"""
+        app, client = _web(tmp_path)
+        sid = "s-seq"
+        session = Session.start(app.state.agent.store, session_id=sid)
+        e1 = session.append(USER_MESSAGE, {"content": "回复时先给结论。"})
+        fact_id = session.register_protected_fact(
+            fact_type="constraint", value="回复时先给结论。", source_event_id=e1.event_id,
+        ).data["fact_id"]
+
+        async def _conflict(self: SessionService, *args: object, **kwargs: object):
+            raise SeqConflict("write seq raced with an in-flight run")
+
+        monkeypatch.setattr(SessionService, "revoke_protected_fact", _conflict)
+        resp = client.post(f"/api/sessions/{sid}/protected-facts/{fact_id}/revoke")
+        assert resp.status_code == 409, resp.text
+
+    def test_list_storage_busy_503(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """存储暂忙（`StorageBusyError`，磁盘满/锁冲突）→ 503（可重试），不是 500。"""
+        app, client = _web(tmp_path)
+        sid = "s-busy"
+        Session.start(app.state.agent.store, session_id=sid)
+
+        async def _busy(self: SessionService, *args: object, **kwargs: object):
+            raise StorageBusyError("shared harness.db write lock contended")
+
+        monkeypatch.setattr(SessionService, "list_protected_facts", _busy)
+        resp = client.get(f"/api/sessions/{sid}/protected-facts")
+        assert resp.status_code == 503, resp.text
+
+    def test_revoke_storage_busy_503(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """撤销路径的存储暂忙 → 503（POST 侧同样分型）。"""
+        app, client = _web(tmp_path)
+        sid = "s-busy-revoke"
+        session = Session.start(app.state.agent.store, session_id=sid)
+        e1 = session.append(USER_MESSAGE, {"content": "回复时先给结论。"})
+        fact_id = session.register_protected_fact(
+            fact_type="constraint", value="回复时先给结论。", source_event_id=e1.event_id,
+        ).data["fact_id"]
+
+        async def _busy(self: SessionService, *args: object, **kwargs: object):
+            raise StorageBusyError("shared harness.db write lock contended")
+
+        monkeypatch.setattr(SessionService, "revoke_protected_fact", _busy)
+        resp = client.post(f"/api/sessions/{sid}/protected-facts/{fact_id}/revoke")
+        assert resp.status_code == 503, resp.text
