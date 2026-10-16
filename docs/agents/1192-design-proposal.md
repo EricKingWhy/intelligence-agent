@@ -40,8 +40,8 @@ authorization（含父会话 session 级 active 授权与项目/全局级 active
 | 继承父 session 级 active 授权 | `[f for f in parent_facts if f.type=="authorization" and f.status=="active"]`（会话事件流投影） |
 | 不继承会话专属事实 | parent session 级**非 authorization** active facts → 只进快照的 `not_inherited`（展示用），不注入 |
 | `omit_constraints` 干净启动 | `delegate` 工具参数 → provider.run → 继承计算短路（inherited=[]，denied=[]） |
-| 拒绝随继承传播（D4=A） | 不继承任何 approval 授权（子会话无 grant）；父的 denied 操作身份记入快照 `denied_operations`；子遇到 Y 走**子父共享的**审批/拒绝路径，不静默放行 |
-| 快照持久化 + 展示 | 新事件 `agent/constraint-inheritance`（含 injected fact 列表 + `omit_constraints` 取值）；展示层按 `subagent_id` 取数 |
+| 拒绝随继承传播（D4=A） | **结构性成立，不经快照承载**：不继承任何 approval 授权（子会话无 grant；审批 Ledger 从不投影成 protected fact），子与父共享同一 executor 审批面（`assembly.py` `_child_executor_factory` 捕获父 `policy`/`approval_callback`/`permission_rules`），父被 deny 的操作子同样被拦，不静默放行。快照**不记** `denied_operations`（初版设计曾声称该字段，实现未做、按本行口径修正文档）。 |
+| 快照持久化 + 展示 | 新事件 `agent/constraint-inheritance`（含 injected fact 列表 + `omit_constraints` 取值）；展示层（子详情「约束继承」区）**直读子会话事件流**取数（`StepDetail.tsx` 的 `ChildSessionView`），无独立查找键 |
 | 注入点 | 子 agent ContextBuilder 组装处（`AgentRuntime` 默认 builder 的 `scoped_fact_provider`） |
 
 ## 4. 不做（票面 §七）
@@ -49,3 +49,6 @@ authorization（含父会话 session 级 active 授权与项目/全局级 active
 - 不改变 fork 语义（fork 本就继承全部 protected facts + 授权重映射 `session/fork.py:317`）。
 - 不给子 agent 自动继承会话专属事实。
 - 不设条数上限（上下文压力另开票）。
+- `omit_constraints` 的**用户侧设置入口**（PRD §6.1「委派时可勾选」的产品面）本票不落：
+  开关当前只存在于 delegate 工具参数（模型侧）与子详情只读展示；委派确认 UI 入口
+  属后续票（需用户批准后另开），不无声丢失。

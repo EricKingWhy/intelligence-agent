@@ -193,7 +193,7 @@ class InProcessSubagentProvider:
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
         # #1192（#1176 Phase 3）：约束继承集供给器（装配层注入）。
-        # 签名 (parent_events, child_session_id, omit_constraints) -> InheritanceSnapshot | None。
+        # 签名 (parent_events, omit_constraints) -> InheritanceSnapshot | None。
         # None = 未装配（既有委派行为逐字不变：不注入也不落快照）。
         self._inheritance_provider = None
         # 大产物治理（#86）：summary 超限且未配 overflow store 时截断 +

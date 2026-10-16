@@ -154,6 +154,58 @@ def test_inherited_protected_facts_source_and_session_id(tmp_path: Path) -> None
     assert auth.source_event_id == parent_events[0].event_id
 
 
+def test_inherited_protected_facts_bad_data_tolerance() -> None:
+    """坏数据容错（审查 Finding-3/5）：空 fact_id 行跳过不注入；会话级条目缺
+    来源指针时以 unresolved: 前缀显式标记，不伪装成真实事件 id。"""
+    snap = InheritanceSnapshot(
+        omit_constraints=False,
+        inherited=(
+            {"fact_id": "", "type": "constraint", "value": "无 id", "scope": "project"},
+            {"fact_id": "p1", "type": "constraint", "value": "v1", "scope": "project"},
+            {"fact_id": "s1", "type": "authorization", "value": "v2", "scope": "session"},
+        ),
+        not_inherited=(),
+    )
+    facts = inherited_protected_facts(snap, session_id="child-1")
+    by_id = {f.fact_id: f for f in facts}
+    assert len(facts) == 2 and "" not in by_id
+    assert by_id["p1"].source_event_id == "scoped:p1"
+    assert by_id["s1"].source_event_id == "unresolved:s1"
+
+
+def test_compute_inheritance_session_shadow_does_not_hole_project(
+    tmp_path: Path,
+) -> None:
+    """同文覆盖空洞（审查 Correctness Finding-1）：会话级非授权同文行不进覆盖
+    候选——否则项目行被覆盖跳过、session 行又不继承，子上下文两头落空。"""
+    store = ScopedConstraintStore(tmp_path / "c")
+    project = store.register(
+        "project", project_key="/repos/demo", fact_type="constraint",
+        value="同文X。", registered_at=_REGISTERED_AT,
+    )
+    parent_events = [
+        _started("parent-0"),
+        SessionEvent(
+            type="user/message", session_id="parent-0",
+            data={
+                "content": "同文X。",
+                "protected_facts": [
+                    {"fact_type": "constraint", "value": "同文X。", "scope": "session"},
+                ],
+            },
+        ),
+    ]
+    snap = compute_inheritance(
+        parent_events, store=store, project_key="/repos/demo", session_id="parent-0",
+    )
+    inherited_ids = {row["fact_id"] for row in snap.inherited}
+    assert project.fact_id in inherited_ids
+    # 会话级行仍如实进 not_inherited（展示组），但不再吞掉项目行。
+    assert ("constraint", "同文X。") in {
+        (row["type"], row["value"]) for row in snap.not_inherited
+    }
+
+
 # ── Runtime 注入缝（AC1）──────────────────────────────────────────────────
 
 

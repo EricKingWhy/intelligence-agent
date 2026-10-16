@@ -81,7 +81,8 @@ class InheritanceSnapshot:
         inherited = data.get("inherited")
         not_inherited = data.get("not_inherited")
         return cls(
-            omit_constraints=bool(data.get("omit_constraints", False)),
+            # 严格 is True：非 bool 真值（如字符串）不当作开启，防坏数据静默放大
+            omit_constraints=data.get("omit_constraints") is True,
             inherited=tuple(
                 row for row in inherited if isinstance(row, dict)
             ) if isinstance(inherited, list) else (),
@@ -104,6 +105,12 @@ def compute_inheritance(
     只投影 **active** facts（`serialize_protected_facts` 同口径）。`omit_constraints=True`
     时 `inherited` 为空（干净启动：不继承任何约束与授权）；`not_inherited` 仍如实列出父会话
     专属事实（展示层据它渲染 NOT INHERITED 组）。
+
+    覆盖候选只取**会被继承**的会话行（authorization）：#1191 的同文覆盖是会话＞项目＞
+    全局，若让「不会随继承传播的会话级非授权行」当覆盖候选，会出现父上下文有该文本
+    （session 版）、子上下文却两头落空——项目行被覆盖跳过、session 行又不继承（审查
+    Correctness Finding-1 的同文覆盖空洞）。会话授权行会被继承，覆盖它对应的项目/全局
+    行仍成立。
     """
     parent_facts = derive_protected_facts(parent_events)
     active = [fact for fact in parent_facts if fact.status == "active"]
@@ -117,7 +124,7 @@ def compute_inheritance(
         )
 
     scoped = scoped_context_facts(
-        store, parent_facts, session_id=session_id, project_key=project_key,
+        store, session_authorizations, session_id=session_id, project_key=project_key,
     )
     inherited = tuple(
         [_row(fact, fact.scope) for fact in scoped]
@@ -136,17 +143,24 @@ def inherited_protected_facts(
     `session_id` = **子会话** id（注入体的归属会话，与 #1191 注入口径一致）。项目/全局级
     条目用合成来源（`source_event_id="scoped:<fact_id>"`、`source_seq=0`，与 #1191
     `scoped_context_facts` 同款"无会话来源事件"表达）；会话级授权保留父会话的真实来源 id
-    （审计可回溯到父会话哪条事件）。
+    （审计可回溯到父会话哪条事件）。坏数据容错：缺 `fact_id` 的行跳过（与 web 解析器
+    `parseRow` 同口径，不注入来源不可辨的条目）；会话级条目缺来源指针时以
+    `unresolved:<fact_id>` 显式标记不可回溯（**不**伪装成真实事件 id——`fact_id` 是内容
+    寻址哈希，不是事件 id）。
     """
     facts: list[ProtectedFact] = []
     for row in snapshot.inherited:
         scope = str(row.get("scope", "session"))
         fact_id = str(row.get("fact_id", ""))
+        if not fact_id:
+            continue  # 来源不可辨的行不注入（web parseRow 同口径跳过）
         source_event_id = row.get("source_event_id")
         if not isinstance(source_event_id, str) or not source_event_id:
-            # 容错：坏数据/旧快照缺来源指针时按 #1191 口径合成。
+            # 容错：坏数据/旧快照缺来源指针时按 scope 显式合成——项目/全局走 #1191
+            # 口径；会话级无既有口径，用 unresolved: 前缀如实表达"不可回溯"。
             source_event_id = (
-                f"scoped:{fact_id}" if scope in ("project", "global") else fact_id
+                f"scoped:{fact_id}" if scope in ("project", "global")
+                else f"unresolved:{fact_id}"
             )
         source_seq = row.get("source_seq", 0)
         if not isinstance(source_seq, int) or isinstance(source_seq, bool):
@@ -166,14 +180,9 @@ def inherited_protected_facts(
     return facts
 
 
-def is_inheritance_event(event: Any) -> bool:
-    return getattr(event, "type", None) == CONSTRAINT_INHERITANCE_EVENT
-
-
 __all__ = [
     "CONSTRAINT_INHERITANCE_EVENT",
     "InheritanceSnapshot",
     "compute_inheritance",
     "inherited_protected_facts",
-    "is_inheritance_event",
 ]
