@@ -1265,7 +1265,7 @@ describe('applyEvent — df4f7d8 新形状', () => {
   it('#1197 项 5A 接线后：COMPACTION_START/END 不再落 unknown_events（本条曾钉「未投影」）', () => {
     // 这两条此前是**显式登记**的「未接线」类型（上面的注册表注释说明其用意：让接线
     // 成为一次显式决定）。#1197 项 5A 做了那个决定——`compaction/start` 投影成
-    // 「正在压缩上下文…」的进行中 flag（见 projection.compactionProgress.test.ts），
+    // 进行中 flag（见 projection.compactionProgress.test.ts），
     // 于是这里反过来钉住新行为：它们必须**不**再进 unknown_events。
     for (const type of [
       EventType.COMPACTION_START,

@@ -4533,19 +4533,31 @@ class SessionService:
 
     @staticmethod
     def _has_compactable_early_turn(session: Session) -> bool:
-        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+        """dry_run 预览：是否存在可压缩的早期轮（与 compactor 闸门**一致**的判据）。
 
         前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
         `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
         函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
 
-        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
-        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        判据与 `compact` 的 `compacted_turn_count` 计算式**完全一致**：early 窗口内
+        非摘要 `HumanMessage` 数 > 0 才算可压（P2-1 #1197 修回——旧实现只判窗口
+        非空，early 恰好只含上一轮压缩摘要 HumanMessage 时会误判为可压，真实管线
+        以 0 计数走 below-floor 200 分支，绕过 409 `NoCompactableEarlyTurn`）。
         """
-        from agent_harness.context.compactor import compactable_early_window
+        from langchain_core.messages import HumanMessage
 
-        prefix_end, cut = compactable_early_window(session.derive_messages())
-        return cut > prefix_end
+        from agent_harness.context.compactor import (
+            _is_compaction_summary,
+            compactable_early_window,
+        )
+
+        messages = session.derive_messages()
+        prefix_end, cut = compactable_early_window(messages)
+        return any(
+            isinstance(message, HumanMessage)
+            and not _is_compaction_summary(message)
+            for message in messages[prefix_end:cut]
+        )
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 

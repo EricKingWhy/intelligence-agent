@@ -211,12 +211,32 @@ def test_missing_session_is_404_on_both_verbs(tmp_path):
     assert _patch(client, missing, {"context_window": 100_000}).status_code == 404
 
 
-@pytest.mark.parametrize("bad_id", ["../etc/passwd", "not-a-session-id", ""])
+@pytest.mark.parametrize("bad_id", ["has space", "bang!", "dot.dot", "a" * 129])
 def test_invalid_session_id_is_422_on_patch(tmp_path, bad_id):
-    """id 形态校验**先于** 404（路径穿越防线，与 workflow-mode 同序）。"""
+    """id 形态校验**先于** 404（`_require_existing_session` 的顺序即契约）。
+
+    用例 id 都是"形态非法但可路由"（空格/`!`/点/超长 129）：它们能到达端点，
+    必须被形态校验拦成 422，而不是落到"不存在"的 404——精确 `== 422` 才能抓住
+    顺序回归（旧 `in (404, 422)` 对两者都放行）。
+    `""` / `"../etc/passwd"` 走不到校验器（路由层直接 404），不属于本断言面，
+    见 `test_path_traversal_id_is_404_on_patch`。
+    """
     client = _client(tmp_path)
 
     resp = client.patch(f"/api/sessions/{bad_id}/context-settings",
                         json={"context_window": 100_000})
 
-    assert resp.status_code in (404, 422), resp.text
+    assert resp.status_code == 422, resp.text
+
+
+def test_path_traversal_id_is_404_on_patch(tmp_path):
+    """路径穿越 id 在路由层即 404：`..` 段形不成合法路由，绝不逃逸到文件系统。
+
+    注意这是传输层行为，不是形态校验器的 422——两者断言面不同，故独立成例。
+    """
+    client = _client(tmp_path)
+
+    resp = client.patch("/api/sessions/../etc/passwd/context-settings",
+                        json={"context_window": 100_000})
+
+    assert resp.status_code == 404, resp.text
