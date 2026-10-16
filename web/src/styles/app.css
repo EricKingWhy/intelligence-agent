@@ -7775,6 +7775,137 @@ button.json-row {
   animation: spin 0.8s linear infinite;
 }
 
+/* ── #1197 项 5B：上下文窗口挡位选择器（效果图 01）─────────────────────
+   外壳复用 .ctx-usage-overlay / .ctx-usage-popover（先例 TaskReviewPanel），
+   只覆盖尺寸与内部排版；全部颜色走既有双主题 token（未新增 token ⇒ §15 双块
+   同步规则自动成立）。字号地板 12px（--text-xs）。 */
+.ctx-window-panel {
+  width: min(440px, calc(100vw - 48px));
+  gap: var(--space-md);
+}
+.ctx-window-desc,
+.ctx-window-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.ctx-window-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  align-self: flex-start;
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+/* 生效点：与选择器的选中态同一件事的第二个说法，用绿点对齐"已在生效"。 */
+.ctx-window-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.ctx-window-choices {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.ctx-window-choice {
+  min-width: 0;
+  min-height: 40px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+}
+.ctx-window-choice:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--color-hover);
+}
+.ctx-window-choice:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.ctx-window-choice.sel {
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: var(--edge-light), var(--shadow-overlay);
+}
+.ctx-window-choice:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.ctx-window-thresholds {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-sm);
+}
+.ctx-window-threshold {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.ctx-window-threshold strong {
+  margin-left: auto;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-primary);
+}
+.ctx-window-threshold-pct {
+  color: var(--text-tertiary);
+}
+.ctx-window-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+.ctx-window-reset {
+  min-height: 40px;
+  padding: 0 var(--space-md);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.ctx-window-reset:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--color-hover);
+}
+.ctx-window-reset:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.ctx-window-error {
+  font-size: var(--text-sm);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+}
+/* 窄屏（≤560px）：两列阈值会挤成一团，改单列；挡位仍五列（100K…500K 都短）。 */
+@media (max-width: 560px) {
+  .ctx-window-thresholds {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── #203：自定义供应商管理弹层（provider-dialog / 列表 / 表单）──
  *  全部语义 token（AGENTS §15：新增 token 必须双份——本块只复用既有 token，
  *  无新 token，无需 :root[data-theme='light'] 同步）。 */

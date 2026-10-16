@@ -12,6 +12,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.session import MODEL_COMPLETED, MODEL_FALLBACK
+from agent_harness.session.event import CONTEXT_WINDOW_CHANGED
 from agent_harness.web.context_usage import (
     build_context_usage_payload,
     cache_summary,
@@ -617,7 +618,12 @@ async def test_t5_endpoint_no_data_404(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_t5_endpoint_shape_with_run(tmp_path, monkeypatch):
-    """有 run ⇒ state=ok、window_tokens==200000（回归：用户裁定不要每模型窗口）。"""
+    """有 run ⇒ state=ok、window_tokens==200000。
+
+    200_000 是**部署默认**（`Settings.max_context_tokens`）——本会话没切过挡位，
+    `#1249` 之后分母跟随会话生效窗口、默认只做回退，故此处仍是 200K。
+    分母跟随挡位的那一面在 `test_1249_endpoint_window_tokens_follows_patched_tier`。
+    """
     server, serve_task, port = await _start_server(tmp_path, monkeypatch)
     try:
         sid = await _completed_session(port)
@@ -823,5 +829,80 @@ async def test_t6_endpoint_survives_snapshot_loss(tmp_path, monkeypatch):
         # 缓存事实来自事件流，与 used_tokens 同源
         assert payload["cache"]["state"] == "ok"
         assert payload["cache"]["avg_hit_rate"] == pytest.approx(50000 / 54841)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+# ── #1249：window_tokens 必须跟随 per-session 挡位（不是部署默认）─────────────
+#
+# 症状：切了挡位（`PATCH /api/sessions/{id}/context-settings`）之后容量看板的分母
+# 不动——`window_tokens` 取的是 `settings.max_context_tokens`（部署默认），于是
+# 70%/85% 标记（前端按 `used/window_tokens` 定位）落在一个用户没选过的位置上。
+# 修法：走 `effective_context_window`（**唯一**派生入口，与 `ContextBuilder` 同源），
+# 部署默认只做回退——两处各算一遍就会出现「面板显示 500K、实际按 200K 压」。
+
+
+def test_1249_window_tokens_follows_the_session_window_event():
+    """纯函数面：`context/window-changed` 在场 ⇒ window_tokens 取该挡位。"""
+    events = [_FakeEvent({"context_window": 500_000}, type=CONTEXT_WINDOW_CHANGED)]
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=events,
+    )
+    assert payload["window_tokens"] == 500_000
+
+
+def test_1249_window_tokens_fall_back_to_the_deployment_default():
+    """无事件 ⇒ 部署默认（**回退**，不是写死 200K：部署设了 300K 就该是 300K）。"""
+    settings = type("S", (), {"max_context_tokens": 300_000,
+                              "auto_compact_threshold": 0.70,
+                              "hard_guard_threshold": 0.85})()
+    payload = build_context_usage_payload(
+        settings=settings, builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=[],
+    )
+    assert payload["window_tokens"] == 300_000
+
+
+def test_1249_window_tokens_takes_the_last_window_event():
+    """last-wins：多次切换取最后一条（同 `effective_context_window` 的投影范式）。"""
+    events = [
+        _FakeEvent({"context_window": 100_000}, type=CONTEXT_WINDOW_CHANGED),
+        _FakeEvent({"context_window": 256_000}, type=CONTEXT_WINDOW_CHANGED),
+    ]
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=events,
+    )
+    assert payload["window_tokens"] == 256_000
+
+
+@pytest.mark.asyncio
+async def test_1249_endpoint_window_tokens_follows_patched_tier(tmp_path, monkeypatch):
+    """HTTP 面（票面症状的端到端复现）：切挡位后 `GET /context-usage` 的分母跟随。
+
+    黑盒：只经 HTTP（PATCH 挡位 → GET 看板），不碰 service 内部。
+    """
+    import httpx2
+
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        sid = await _completed_session(port)
+        before = await _wait_context_snapshot(port, sid)
+        assert before["window_tokens"] == 200_000
+
+        async with httpx2.AsyncClient(timeout=30) as client:
+            resp = await client.patch(
+                f"http://127.0.0.1:{port}/api/sessions/{sid}/context-settings",
+                json={"context_window": 500_000},
+            )
+        assert resp.status_code == 200, resp.text
+
+        status, payload = await _get(port, f"/api/sessions/{sid}/context-usage")
+        assert status == 200
+        assert payload["window_tokens"] == 500_000
+        # 阈值仍是**比率**（形状不动）：前端按 used/window_tokens 定位标记，
+        # 分母跟随后标记自然落在新窗口的 70%/85% 上。
+        assert payload["thresholds"] == {"auto_compact": 0.70, "hard_guard": 0.85}
     finally:
         await _shutdown(server, serve_task)

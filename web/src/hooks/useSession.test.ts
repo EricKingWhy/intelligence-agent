@@ -165,6 +165,8 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     // #537：run 预算镜像初值（同上：字面量构造点跟着必填字段长）。
     run_budget_ceilings: null,
     run_budget_consumed: null,
+    // #1197 项 5A：新增必填字段（同上：本夹具是 ConversationState 字面量构造点）。
+    compaction_in_progress: false,
     // #1204：通用提问卡片状态（同上：ConversationState 字面量构造点跟着必填字段长）。
     pending_ask_user: null,
   });
