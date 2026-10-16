@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：同步 origin/main e481ca60，merge d279c317（父一 da6f39ce=本线 tip；父二 e481ca60=origin/main；merge-base 8a0ddbba）。相对父一仅引入 #1231 的 docs/live_gate/** 与 docs/review_ledger.d/** 证据（9 个 docs 路径，含 PNG），无代码差异；本线已有实现与 review 覆盖沿用。本行只归属该 sync merge，不声称新增内容审查。	da6f39ce0c3e80cf3fc8ee07f9d5fc199aa5431a..d279c3171d759478eb28549f22d03c1b657309af
