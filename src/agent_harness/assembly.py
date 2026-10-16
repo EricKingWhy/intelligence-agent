@@ -1053,28 +1053,34 @@ async def build_runtime(
 def _build_scoped_fact_provider(settings: Settings) -> Any:
     """#1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（闭包）。
 
-    每次 build 现读规则层文件（**精确取用不检索**）；按会话 cwd 现场解析项目键。
+    每次 build 现读规则层文件（**精确取用不检索**）。项目键走**同一取用口径**
+    （`effective_project_key`）：先读会话元数据里持久化的 key（同步只读，
+    `read_session_project_key`），缺失再按 cwd 现场解析——与面板 / 登记 / 撤销
+    同源，避免"面板列着、注入侧却按另一个键取不到"的分裂（重审 finding C1）。
     独立于 memory v2（用户裁决 Fork 2 = A）。
     """
     from agent_harness.session.cwd import session_cwd
     from agent_harness.session.derive import derive_protected_facts
     from agent_harness.session.scoped_constraints import (
         ScopedConstraintStore,
-        resolve_project_key,
+        effective_project_key,
         scoped_context_facts,
     )
+    from agent_harness.storage.sqlite import read_session_project_key
 
     store = ScopedConstraintStore(Path(settings.workspace_dir) / "constraints")
+    db_path = Path(settings.workspace_dir) / "harness.db"
 
     def provider(events: list[Any]) -> list[Any]:
         if not events:
             return []
-        cwd = session_cwd(events)
-        project_key = resolve_project_key(cwd) if cwd is not None else None
+        session_id = events[0].session_id
+        persisted = read_session_project_key(db_path, session_id)
+        project_key = effective_project_key(persisted, session_cwd(events))
         return scoped_context_facts(
             store,
             derive_protected_facts(events),
-            session_id=events[0].session_id,
+            session_id=session_id,
             project_key=project_key,
         )
 

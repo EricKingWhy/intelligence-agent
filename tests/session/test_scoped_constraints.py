@@ -16,7 +16,8 @@ from agent_harness.session.scoped_constraints import (
     ConstraintScope,
     ScopeConstraintError,
     ScopedConstraintStore,
-    project_label,
+    effective_project_key,
+    project_label_for_key,
     resolve_project_key,
 )
 
@@ -133,16 +134,33 @@ def test_resolve_project_key_non_git_returns_none(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
     assert resolve_project_key(plain) is None
-    assert project_label(plain) is None
+
+
+def test_effective_project_key_prefers_persisted_then_cwd(tmp_path: Path) -> None:
+    """单一取用口径（审查 finding C1）：持久化键优先；缺失才按 cwd 现场解析。"""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+    resolved = resolve_project_key(repo)
+    assert resolved is not None
+    # 持久化键在手 → 用它（不理会 cwd，哪怕 cwd 是另一个仓库）。
+    assert effective_project_key("/persisted/key", str(repo)) == "/persisted/key"
+    # 无持久化键 → 按 cwd 现场解析。
+    assert effective_project_key(None, str(repo)) == resolved
+    # 两者皆无 → None。
+    assert effective_project_key(None, None) is None
+    assert effective_project_key(None, str(tmp_path / "nope")) is None
 
 
 def test_project_label_prefers_owner_repo_then_dirname(tmp_path: Path) -> None:
     repo = tmp_path / "myrepo"
     repo.mkdir()
     _git_init(repo)
-    assert project_label(repo) == "myrepo"
+    assert project_label_for_key(resolve_project_key(repo)) == "myrepo"
     subprocess.run(
         ["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:EricKingWhy/intelligence-agent.git"],
         check=True,
     )
-    assert project_label(repo) == "EricKingWhy/intelligence-agent"
+    assert project_label_for_key(resolve_project_key(repo)) == (
+        "EricKingWhy/intelligence-agent"
+    )

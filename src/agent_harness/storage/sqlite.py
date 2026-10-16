@@ -44,6 +44,32 @@ async def _connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
         await connection.close()
 
 
+def read_session_project_key(
+    database_path: str | Path, session_id: str,
+) -> str | None:
+    """**同步**、只读地取一条会话的 `project_key`（#1191 §三.3）。
+
+    给不跑事件循环的同步消费者用：`context/builder` 的注入供给器是 sync 闭包
+    （每轮 build 现读规则层文件），拿不到异步 `SessionMetaStore`。库 / 表 / 行缺失
+    或文件不可读一律返回 None ⇒ 读取侧按 `effective_project_key` 的「持久化优先、
+    现场 cwd 兜底」回落（与面板同一口径，避免两侧分组漂移）。
+
+    只读 URI 打开，不写、不升级锁；WAL 下与写连接互不阻塞。
+    """
+    path = Path(database_path)
+    if not path.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            row = connection.execute(
+                "SELECT project_key FROM session_meta WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row is not None else None
+
+
 #: 写路径锁竞争重试（#515 BUG-01）。busy_timeout 只让单次等锁等 `_BUSY_TIMEOUT_MS`，
 #: 持续写竞争下仍会以 OperationalError("database is locked") 超时——三个 Store 共享
 #: 同一文件，HTTP 元数据写端点（archive / unarchive / 硬删 / permission）在 soak 实测

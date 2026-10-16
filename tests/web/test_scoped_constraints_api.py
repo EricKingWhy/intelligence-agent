@@ -6,14 +6,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_harness.session import Session
 from agent_harness.session.event import USER_MESSAGE
-from agent_harness.session.scoped_constraints import project_label, resolve_project_key
+from agent_harness.session.scoped_constraints import (
+    ConstraintScope,
+    project_label_for_key,
+    resolve_project_key,
+)
+from agent_harness.storage.session_meta import SessionMeta
 from tests.web.test_budget_local_fuse_api import _web
 
 
@@ -24,7 +31,7 @@ def _git_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
 
 
-def _seed(tmp_path: Path, *, cwd: Path | None) -> tuple[object, TestClient, str, str]:
+def _seed(tmp_path: Path, *, cwd: Path | None) -> tuple[FastAPI, TestClient, str, str]:
     """播种一个会话（可选 cwd）；返回 (app, client, sid, 会话级 fact_id)。"""
     app, client = _web(tmp_path)
     store = app.state.agent.store
@@ -72,8 +79,10 @@ def test_effective_constraints_groups_three_scopes(tmp_path: Path) -> None:
     assert by_id[session_fact]["scope"] == "session"
     assert by_id[project.fact_id]["scope"] == "project"
     assert by_id[glob.fact_id]["scope"] == "global"
-    # 项目元数据：键 + 标注（无 remote → 目录名）。
-    assert body["project"] == {"label": project_label(repo)}
+    # 项目元数据：标注（无 remote → 目录名）。
+    assert body["project"] == {
+        "label": project_label_for_key(resolve_project_key(repo))
+    }
     # 无覆盖时 overridden_by 为 None。
     assert by_id[glob.fact_id]["overridden_by"] is None
     # 同一 fact_id 至多一次。
@@ -165,8 +174,6 @@ def test_register_project_scope_without_git_is_422(tmp_path: Path) -> None:
     assert "不在 git 仓库内" in resp.text
     # 零副作用（审查 finding C4 的回归锚）：登记挪到"所有写成功之后"，被拒请求
     # 不落规则层任何行——旧实现先写规则层再 launch，被拒时项目/全局级约束已生效。
-    from agent_harness.session.scoped_constraints import ConstraintScope
-
     store = _app.state.agent.scoped_constraint_store
     assert store.list(ConstraintScope.GLOBAL) == []
 
@@ -179,8 +186,6 @@ def test_effective_constraints_backfills_project_key_into_session_meta(
     存量会话（元数据行存在但 `project_key` 为 NULL）首次打开面板即以 cwd 解析出的
     项目键**补写一次**；此后不再重解析（读回持久值）。
     """
-    import asyncio
-
     repo = tmp_path / "repo"
     _git_repo(repo)
     app, client, sid, _fact = _seed(tmp_path, cwd=repo)
@@ -190,17 +195,17 @@ def test_effective_constraints_backfills_project_key_into_session_meta(
 
     # 建表 + 播一条 project_key 为 NULL 的存量元数据行。
     asyncio.run(_seed_null_project_key_meta(app, sid))
-    assert asyncio.run(store.get(sid)).project_key is None  # type: ignore[union-attr]
+    loaded = asyncio.run(store.get(sid))
+    assert loaded is not None and loaded.project_key is None
 
     _get(client, sid)
 
-    assert asyncio.run(store.get(sid)).project_key == project_key  # type: ignore[union-attr]
+    backfilled = asyncio.run(store.get(sid))
+    assert backfilled is not None and backfilled.project_key == project_key
 
 
-async def _seed_null_project_key_meta(app: object, sid: str) -> None:
-    from agent_harness.storage.session_meta import SessionMeta
-
-    await app.state.agent.ensure_stores()  # type: ignore[attr-defined]
-    await app.state.agent.session_meta_store.upsert(  # type: ignore[attr-defined]
+async def _seed_null_project_key_meta(app: FastAPI, sid: str) -> None:
+    await app.state.agent.ensure_stores()
+    await app.state.agent.session_meta_store.upsert(
         SessionMeta(session_id=sid, created_at="2026-10-16T00:00:00Z")
     )

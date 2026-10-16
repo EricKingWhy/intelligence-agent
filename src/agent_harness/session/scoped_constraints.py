@@ -143,22 +143,25 @@ def resolve_project_key(cwd: str | Path) -> str | None:
     return str(root)
 
 
-def project_label(cwd: str | Path) -> str | None:
-    """面板 PROJECT 组右上的 mono 标注：`owner/repo`；无 remote 回落目录名。
+def effective_project_key(persisted: str | None, cwd: str | None) -> str | None:
+    """会话项目键的**单一取用口径**（#1191 §三.3）：持久化键优先，缺失再按 cwd 现场解析。
 
-    票面 §五.2："无 remote 的仓库显示 git 根目录名"。非 git 目录返回 None。
+    面板 / 登记 / 撤销 / 注入四条路径**共用本函数**——否则会出现"有的读元数据、有的
+    读现场 cwd"的分裂：同一会话在面板里列着项目级条目、注入侧却按另一个键（或 None）
+    取不到，面板等于在说谎（重审 finding C1）。非 git 目录且无持久化键 → None。
     """
-    key = resolve_project_key(cwd)
-    if key is None:
-        return None
-    return project_label_for_key(key)
+    if persisted is not None:
+        return persisted
+    return resolve_project_key(cwd) if cwd is not None else None
 
 
 def project_label_for_key(key: str) -> str:
-    """已归一化项目键 → 面板标注（不再二次解析 cwd）。
+    """已归一化项目键 → 面板 PROJECT 组右上的 mono 标注：`owner/repo`；无 remote 回落目录名。
 
-    与 `project_label` 拆开：会话 `project_key` 可能来自**持久化元数据**而非现场
-    cwd（#1191 §三.3），此时标注必须由同一个 key 推出，否则两边会漂移。
+    票面 §五.2："无 remote 的仓库显示 git 根目录名"。
+
+    按**键**而非 cwd 取标注：会话 `project_key` 可能来自持久化元数据（#1191 §三.3），
+    标注必须由同一条键推出，否则与键所在的项目分组漂移。
     """
     try:
         remote = subprocess.run(
@@ -454,8 +457,8 @@ __all__ = [
     "ScopedConstraint",
     "ScopedConstraintStore",
     "covering_fact_id",
+    "effective_project_key",
     "normalized_fact_value",
-    "project_label",
     "project_label_for_key",
     "resolve_project_key",
     "scoped_context_facts",

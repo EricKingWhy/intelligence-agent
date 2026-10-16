@@ -238,12 +238,13 @@ from agent_harness.session.progress import (
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.scoped_constraints import (
+    ConstraintScope,
     ScopedConstraint,
     ScopedConstraintStore,
     covering_fact_id,
+    effective_project_key,
     normalized_fact_value,
     project_label_for_key,
-    resolve_project_key,
 )
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
@@ -350,6 +351,12 @@ _SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 #: 此时 store 的 seq 守卫拒写。重读快照即可拿到新号——3 次足够覆盖真实并发度
 #: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
 _WRITE_CONFLICT_ATTEMPTS = 3
+
+#: #1191（Phase 2）：非会话级（规则层）作用域词表 = 注解 `scope` 里落在规则层的取值。
+#: 从 `ConstraintScope` 派生而不是再写一遍字面量——词表只此一处（审查 finding S-b2）。
+_SCOPED_SCOPE_VALUES = frozenset(
+    (ConstraintScope.PROJECT.value, ConstraintScope.GLOBAL.value)
+)
 
 #: #516 列表路径专用的 to_thread 限流器（模块级单例：SessionService 每次调用现造，
 #: 实例字段挂不住跨请求状态）。anyio 默认 40 线程会把 100 并发突发切成 ~3 波——
@@ -3568,13 +3575,19 @@ class SessionService:
         scoped_annotations = [
             annotation
             for annotation in normalized_protected_facts
-            if annotation.get("scope") in ("project", "global")
+            if annotation.get("scope") in _SCOPED_SCOPE_VALUES
         ]
         scoped_project_key: str | None = None
         if scoped_annotations:
-            scoped_project_key = await self._session_project_key(session_id, current_events)
+            # 装配检查是纯读的：放在写之前，避免"消息事件/steer 已落盘、规则层却因
+            # 未装配而 500"的半成功（重审 finding：写后失败的残余面尽量收窄）。
+            self._require_scoped_store()
+            # 写前校验用**纯读**口径：被拒（如 SteerTargetNotFound）不留任何写。
+            scoped_project_key = await self._session_project_key(
+                session_id, current_events, persist=False
+            )
             if (
-                any(a["scope"] == "project" for a in scoped_annotations)
+                any(a["scope"] == ConstraintScope.PROJECT.value for a in scoped_annotations)
                 and scoped_project_key is None
             ):
                 raise ProjectKeyUnavailable(
@@ -3687,13 +3700,18 @@ class SessionService:
         # steer）成功后才走到这里 ⇒ 被拒请求零副作用（审查 finding C4）。
         if scoped_annotations:
             store = self._require_scoped_store()
+            # 写成功之后才走到这里：这一遍 `persist=True` 的解析负责**惰性补写**元数据
+            # 里的 project_key（写前那次是纯读）；登记用的键与面板/注入同一条口径。
+            registered_project_key = await self._session_project_key(
+                session_id, current_events
+            )
             registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
             for annotation in scoped_annotations:
                 store.register(
                     annotation["scope"],
                     project_key=(
-                        scoped_project_key
-                        if annotation["scope"] == "project"
+                        registered_project_key
+                        if annotation["scope"] == ConstraintScope.PROJECT.value
                         else None
                     ),
                     fact_type=annotation["fact_type"],
@@ -6621,13 +6639,14 @@ class SessionService:
         return store
 
     async def _session_project_key(
-        self, session_id: str, events: list[SessionEvent],
+        self, session_id: str, events: list[SessionEvent], *, persist: bool = True,
     ) -> str | None:
-        """会话的 `project_key`（#1191 §三.3）。
+        """会话项目键（#1191 §三.3）；取值口径见 `effective_project_key`（持久化优先）。
 
-        优先读会话元数据里已记录的 `project_key`（记录后**不再重解析**）；没有则按
-        cwd **现场解析**（票面 §三.3 允许的兜底，不影响展示），并在元数据行存在时
-        **惰性补写**一次（存量会话首次被打开时的补写通道）。非 git 目录 → None。
+        没有持久化键时按 cwd 现场解析（票面 §三.3 允许的兜底）；`persist=True` 且在
+        元数据行存在时**惰性补写**一次（存量会话首次被打开时的补写通道）。
+        `persist=False` 用于**写前纯读校验**（`send_message` 的 422 判定）——一次注定
+        被拒的请求不得在元数据上留下任何写（重审 finding：写前校验越权写）。
 
         补写走 `set_project_key` 单列更新——不用 `upsert`，避免既有全行 upsert
         调用方把已补写的值静默抹成 NULL。元数据行缺失（直构 service 的调用方）
@@ -6638,16 +6657,14 @@ class SessionService:
         # 无额外开销）。不确保则直构 service / 直播种会话的路径会 500。
         await self._ensure_stores()
         meta = await self._session_meta_store.get(session_id)
-        if meta is not None and meta.project_key is not None:
-            return meta.project_key
-        cwd = session_cwd(events)
-        resolved = resolve_project_key(cwd) if cwd is not None else None
-        if resolved is not None and meta is not None:
+        persisted = meta.project_key if meta is not None else None
+        key = effective_project_key(persisted, session_cwd(events))
+        if persist and key is not None and persisted is None and meta is not None:
             try:
-                await self._session_meta_store.set_project_key(session_id, resolved)
+                await self._session_meta_store.set_project_key(session_id, key)
             except KeyError:  # pragma: no cover —— get 命中过，补写时行被删的极窄竞态
                 pass
-        return resolved
+        return key
 
     async def effective_constraints(self, session_id: str) -> dict[str, Any]:
         """返回本会话实际可见的约束全集（三 scope 合流），附 scope 与覆盖关系（#1191）。
@@ -6674,7 +6691,7 @@ class SessionService:
                 "registered_at": time_by_event_id.get(fact.source_event_id),
                 "revoked_at": fact.revoked_at,
                 "revoked_by": fact.revoked_by,
-                "scope": "session",
+                "scope": ConstraintScope.SESSION.value,
             }
             for fact in derive_protected_facts(events)
         ]
@@ -6684,10 +6701,12 @@ class SessionService:
         global_rows: list[dict[str, Any]] = []
         if project_key is not None:
             for constraint in self._require_scoped_store().list(
-                "project", project_key=project_key
+                ConstraintScope.PROJECT.value, project_key=project_key
             ):
                 project_rows.append(_scoped_constraint_row(constraint))
-        for constraint in self._require_scoped_store().list("global"):
+        for constraint in self._require_scoped_store().list(
+            ConstraintScope.GLOBAL.value
+        ):
             global_rows.append(_scoped_constraint_row(constraint))
 
         rows = _merge_effective_rows(session_rows, project_rows, global_rows)
@@ -6708,16 +6727,19 @@ class SessionService:
         （防伪，与 `TrustedMemoryIdentity` 同立场）。目标不存在 → `ProtectedFactNotFound`
         （404）；会话没有项目键却要撤项目级 → 404（该会话看不到项目级约束）。
         """
-        if scope not in ("project", "global"):
+        if scope not in _SCOPED_SCOPE_VALUES:
             raise ProtectedFactReferenceInvalid(
                 f"unsupported revoke scope: {scope!r}"
             )
         await self._require_existing_session(session_id)
         store = self._require_scoped_store()
         project_key: str | None = None
-        if scope == "project":
+        if scope == ConstraintScope.PROJECT.value:
             events = await self.get_events(session_id)
-            project_key = await self._session_project_key(session_id, events)
+            # 纯读口径：撤销自身失败（404）时不在元数据上留下写。
+            project_key = await self._session_project_key(
+                session_id, events, persist=False
+            )
             if project_key is None:
                 raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
         existing = store.get(scope, fact_id, project_key=project_key)
