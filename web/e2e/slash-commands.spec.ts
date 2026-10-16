@@ -100,6 +100,17 @@ test('触发与渲染：`/` 出菜单 5 条齐全；全角不触发；未知命�
     await expect(menu.locator(`[data-slash-name="${name}"]`)).toBeVisible();
   }
 
+  // A-P1-2 回归断言（jsdom 查不出，只有真浏览器算得出）：菜单 absolute bottom:100%
+  // 必须以 .composer-wrap 为定位锚——wrap 缺 position:relative 时祖先
+  // .workspace-panel（container-type: inline-size）接管 containing block，
+  // 菜单几何位会跑到工作面板顶缘。
+  expect(await page.locator('.composer-wrap').evaluate((el) => getComputedStyle(el).position)).toBe('relative');
+  const menuBox = await menu.boundingBox();
+  const composerBox = await page.getByLabel('Agent 任务').boundingBox();
+  expect(menuBox).toBeTruthy();
+  expect(composerBox).toBeTruthy();
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(composerBox!.y + 1);
+
   // 全角 `／` 不触发（票面 §3.1：半角限定）
   await page.getByLabel('Agent 任务').fill('／');
   await expect(menu).toHaveCount(0);
@@ -198,7 +209,7 @@ test('/goal 带参：POST task/definition {task_text}，不当聊天发给 agent
   expect(calls.compact).toBe(0);
 });
 
-test('/compact：POST context/compact（复用既有压缩端点）', async ({ page }) => {
+test('/compact：POST context/compact（复用既有压缩端点）；被拒走中性信息面（#1197 三态）', async ({ page }) => {
   const calls: SlashCalls = { workflowMode: [], taskDefinition: [], compact: 0 };
   await routeApi(page, { sessions: [sessionRow(SID)], events: IDLE_FRAMES });
   await mockSlashEndpoints(page, calls);
@@ -212,4 +223,8 @@ test('/compact：POST context/compact（复用既有压缩端点）', async ({ p
   await compactPost;
   expect(calls.compact).toBe(1);
   expect(calls.workflowMode).toHaveLength(0);
+  // mock 回执 compacted_turn_count=0（零写入被拒）⇒ #1197 三态契约的中性信息面，
+  // 不是红色错误面（A-P1-3）。
+  await expect(page.getByTestId('slash-info')).toHaveText('没有可压缩的早期内容');
+  await expect(page.getByTestId('slash-error')).toHaveCount(0);
 });

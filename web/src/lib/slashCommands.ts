@@ -7,21 +7,24 @@
  *  - `/plan` 的当前 mode 从事件流投影派生（last-wins，与后端
  *    `effective_workflow_mode` 同语义），前端不记布尔值（票面 §4.2 硬性规定）。
  *    projection.ts 对 mode-changed 是 noop（审计事件），折叠逻辑落在本文件。
- *  - workflow-mode / task-definition 的 fetch 落在本文件（api.ts 不在 Scope Lock）：
- *    复用已 export 的 `getToken`（鉴权注入语义与 apiFetch 一致）与 `readErrorDetail`
- *    （错误文案与后端 detail 形状解耦）。
- *  - `/compact` `/goal 查看` 复用既有 client（compactSession / getTaskState）。
+ *  - workflow-mode / task-definition 的传输收编进 api.ts 的
+ *    `postSessionCommand`（审查 B-S-5：鉴权注入与错误映射复用 apiFetch 同一条
+ *    链路，不在本文件复刻第二份 Bearer 拼装——两处一漂移，401 语义就分叉）。
+ *  - `/compact` 执行反馈对齐 #1197 三态契约（压缩中/被拒/失败）：状态机宿主是
+ *    `hooks/useCompactSession`（与 ContextUsagePanel 同一份），本文件只经
+ *    `ctx.runCompact` 触发——不在 slash 路径另起一套压缩状态（审查 A-P1-3）。
+ *  - `/goal 查看` 走 `ctx.reportInfo`（中性信息面），只有真失败才 reportError
+ *    （审查 B-S-4/A-P3-2：查看结果不是错误，不该染红）。
  */
 import { fuzzyScore } from './commands';
 import { EventType, type AgentEvent } from '../types';
 import {
-  compactSession,
   getTaskState,
-  readErrorDetail,
+  postSessionCommand,
   describeSessionError,
   SessionError,
+  TaskNotDefinedError,
 } from './api';
-import { getToken } from './auth';
 
 export type SlashCommandGroup = 'add' | 'command';
 
@@ -32,6 +35,11 @@ export interface SlashCommandContext {
   openModelPicker: () => void;
   /** 错误上报口（Composer 呈现为可见提示，不静默吞——票面 §4.1）。 */
   reportError: (message: string) => void;
+  /** 中性信息上报口（查看结果 / 执行回执——不是错误，不染红；审查 B-S-4）。 */
+  reportInfo: (message: string) => void;
+  /** `/compact` 触发：由 Composer 驱动 `useCompactSession` 三态宿主（#1197 契约）。
+   *  状态机（压缩中/被拒/失败/成功对比）归宿主，本文件不持有压缩状态。 */
+  runCompact: () => Promise<void>;
   /** mode 投影的数据源（App 已持有 conversation；零新端点——票面 §4.2）。 */
   getSessionEvents: (sessionId: string) => Promise<AgentEvent[]>;
 }
@@ -45,26 +53,14 @@ export interface SlashCommand {
   run: (args: string | undefined, ctx: SlashCommandContext) => Promise<void>;
 }
 
-/** 会话级 fetch 封装：与 apiFetch 同语义（Bearer 注入 + detail 透出），
- *  但留在本文件——api.ts 不在 Scope Lock，为两个调用改它不值（奥卡姆）。 */
-async function sessionFetch(path: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
-  const token = getToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  return fetch(path, { ...init, headers });
-}
-
-async function sessionPostJson(sessionId: string, path: string, body: unknown): Promise<void> {
-  const res = await sessionFetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}${path}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-  );
-  if (!res.ok) throw new SessionError(res.status, await readErrorDetail(res));
-}
-
 /** mode 投影：倒序扫 `workflow/mode-changed`，last-wins；坏值跳过继续向前
  *  （后端 `effective_workflow_mode` 的 warning-continue 语义，逐字对齐）；
- *  无事件回落 normal。 */
+ *  无事件回落 normal。
+ *
+ *  开销注记（审查 A-P4）：每次 `/plan` 都全量拉一遍 `GET /events`。这是**刻意**
+ *  的：会话事件流是唯一真相（不变量 #22），前端不缓存 mode 副本（缓存就会与
+ *  事件流分叉——票面 §4.2 明文禁止），而 /plan 是低频手动动作，一次全量拉取
+ *  可接受；若未来成为热点，正确做法是订阅增量投影，不是加本地缓存。 */
 export async function currentWorkflowMode(ctx: SlashCommandContext): Promise<'normal' | 'plan'> {
   const events = await ctx.getSessionEvents(ctx.sessionId);
   for (let i = events.length - 1; i >= 0; i--) {
@@ -79,28 +75,46 @@ export async function currentWorkflowMode(ctx: SlashCommandContext): Promise<'no
 async function runPlan(_args: string | undefined, ctx: SlashCommandContext): Promise<void> {
   const current = await currentWorkflowMode(ctx);
   const next = current === 'plan' ? 'normal' : 'plan';
-  await sessionPostJson(ctx.sessionId, '/workflow-mode', { mode: next });
+  await postSessionCommand(ctx.sessionId, '/workflow-mode', { mode: next });
 }
 
 async function runGoal(args: string | undefined, ctx: SlashCommandContext): Promise<void> {
   const text = args?.trim();
   if (text) {
-    // 带参 = 设置（票面 §4.2：请求体 `{task_text}`；409=已定义、422/404 由 reportError 透出）。
-    await sessionPostJson(ctx.sessionId, '/task/definition', { task_text: text });
+    // 带参 = 设置（票面 §4.2：请求体 `{task_text}`；422/404 由 reportError 透出）。
+    try {
+      await postSessionCommand(ctx.sessionId, '/task/definition', { task_text: text });
+    } catch (e) {
+      if (e instanceof SessionError && e.status === 409) {
+        // 二次设置必 409（后端语义：task/defined 全流至多一条，不覆盖）。裸 409
+        // detail 只说"已定义"不给下一步（审查 A-P2-2）——补一条可操作的引导。
+        ctx.reportError(
+          `${e.message}。已有目标时 /goal 不再覆盖；输入 /goal（无参数）可查看当前目标`,
+        );
+        return;
+      }
+      throw e;
+    }
     return;
   }
-  // 无参 = 查看：404（未定义任务）不算错，如实展示「未定义」。
+  // 无参 = 查看：结果与「未定义」（404，TaskNotDefinedError）都是中性信息——
+  // 不是错误，走 reportInfo（审查 B-S-4/A-P3-2）；其余失败才 reportError。
   try {
     const state = await getTaskState(ctx.sessionId);
-    ctx.reportError(state.task_text ? `当前目标：${state.task_text}` : '当前会话未定义目标');
+    ctx.reportInfo(state.task_text ? `当前目标：${state.task_text}` : '当前会话未定义目标');
   } catch (e) {
+    if (e instanceof TaskNotDefinedError) {
+      ctx.reportInfo('当前会话未定义目标');
+      return;
+    }
     ctx.reportError(describeSessionError(e, '查看目标失败'));
   }
 }
 
 async function runCompact(_args: string | undefined, ctx: SlashCommandContext): Promise<void> {
-  // 复用既有 client（180s 超时 / 409=在途 run 语义都在里面）。
-  await compactSession(ctx.sessionId);
+  // 三态宿主在 Composer（useCompactSession）：压缩中 spinner+禁用、被拒就地说明、
+  // 失败显示后端原因、成功展示前后对比（#1197 契约；审查 A-P1-3）。
+  await ctx.runCompact();
 }
 
 /** `/permission` `/model`：只拉起现有 UI（值的选择在 picker 里，本命令不改）。 */
@@ -156,13 +170,16 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 
 export interface SlashTriggerMatch {
   query: string;
+  /** 匹配段在输入串里的起点（含作为分隔符的前导空白）。菜单 Enter / 点选执行后
+   *  用它做**定位切除**：只删命令 token，保留命令前的前缀文本（审查 B-S-3）。 */
+  start: number;
 }
 
 /** 触发判定（票面正则 `/(^|\s)\/(\w*)$/`）：行首或空格后半角 `/` 开尾。
  *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。 */
 export function slashTriggerMatch(value: string): SlashTriggerMatch | null {
   const m = /(?:^|\s)\/(\w*)$/.exec(value);
-  return m ? { query: m[1] } : null;
+  return m ? { query: m[1], start: m.index } : null;
 }
 
 export interface SlashSubmitMatch {
@@ -172,7 +189,9 @@ export interface SlashSubmitMatch {
 
 /** 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`）：
  *  整条输入是一个命令调用且命令名在注册表 ⇒ preventDefault 本地执行，
- *  不走「原发送逻辑」（防止 `/goal <文本>` 被当聊天发给 agent）。 */
+ *  不走「原发送逻辑」（防止 `/goal <文本>` 被当聊天发给 agent）。
+ *  调用方传 **trim 后**的整条输入（审查 A-P2-1：`/goal␣` 尾随空格同样落到
+ *  命令路径——trim 后命中纯命令形态，args 为空 ⇒ 走 §4.2「无参数则查看」）。 */
 export function slashSubmitMatch(
   value: string,
   knownNames: readonly string[],

@@ -8,15 +8,26 @@
  *  - mode 投影 last-wins（与后端 `effective_workflow_mode` 同语义）。
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   SLASH_COMMANDS,
   slashTriggerMatch,
   slashSubmitMatch,
   filterSlashCommands,
   currentWorkflowMode,
+  type SlashCommand,
   type SlashCommandContext,
 } from './slashCommands';
+import { postSessionCommand, SessionError, type TaskState } from './api';
+
+vi.mock('./api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api')>();
+  return {
+    ...actual,
+    postSessionCommand: vi.fn(),
+    getTaskState: vi.fn(),
+  };
+});
 
 describe('#1195 注册表 — 5 条定稿命令', () => {
   it('恰好 5 条、名字与分组与票面一致', () => {
@@ -58,14 +69,14 @@ describe('#1195 注册表 — 5 条定稿命令', () => {
 });
 
 describe('#1195 触发正则 slashTriggerMatch', () => {
-  it('行首 / 触发（query 为其余部分）', () => {
-    expect(slashTriggerMatch('/')).toEqual({ query: '' });
-    expect(slashTriggerMatch('/pl')).toEqual({ query: 'pl' });
+  it('行首 / 触发（query 为其余部分；start=0）', () => {
+    expect(slashTriggerMatch('/')).toEqual({ query: '', start: 0 });
+    expect(slashTriggerMatch('/pl')).toEqual({ query: 'pl', start: 0 });
   });
 
-  it('空格后 / 触发', () => {
-    expect(slashTriggerMatch('hello /')).toEqual({ query: '' });
-    expect(slashTriggerMatch('  /co')).toEqual({ query: 'co' });
+  it('空格后 / 触发（start = 匹配段起点，含分隔空白）', () => {
+    expect(slashTriggerMatch('hello /')).toEqual({ query: '', start: 5 });
+    expect(slashTriggerMatch('  /co')).toEqual({ query: 'co', start: 1 });
   });
 
   it('全角 ／ 不触发（\\w 不含全角）', () => {
@@ -142,6 +153,77 @@ describe('#1195 fuzzy 过滤 — 复用 fuzzyScore', () => {
     const snapshot = [...src];
     filterSlashCommands(src, 'pl');
     expect(src).toEqual(snapshot);
+  });
+});
+
+describe('#1195 命令执行层（run 语义，findings 修回）', () => {
+  const cmd = (name: string): SlashCommand => SLASH_COMMANDS.find((c) => c.name === name)!;
+
+  const makeCtx = () => ({
+    sessionId: 's-1',
+    openPermissionPicker: vi.fn(),
+    openModelPicker: vi.fn(),
+    reportError: vi.fn(),
+    reportInfo: vi.fn(),
+    runCompact: vi.fn(async () => {}),
+    getSessionEvents: vi.fn(async () => []),
+  });
+  type CtxMock = ReturnType<typeof makeCtx>;
+  const asCtx = (c: CtxMock): SlashCommandContext => c as unknown as SlashCommandContext;
+
+  it('/goal 查看（无参）走 reportInfo 中性面，不 reportError（B-S-4/A-P3-2）', async () => {
+    vi.mocked(await import('./api')).getTaskState.mockResolvedValue({
+      defined: true,
+      task_text: '每天投20份简历',
+    } as TaskState);
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.reportInfo).toHaveBeenCalledWith('当前目标：每天投20份简历');
+    expect(c.reportError).not.toHaveBeenCalled();
+  });
+
+  it('/goal 二次设置 409 → 后端 detail + 可操作引导（A-P2-2）', async () => {
+    vi.mocked(await import('./api')).postSessionCommand.mockRejectedValue(
+      new SessionError(409, '任务已定义（task/defined 全流至多一条）'),
+    );
+    const c = makeCtx();
+    await cmd('goal').run('再设一个', asCtx(c));
+    expect(c.reportError).toHaveBeenCalledTimes(1);
+    const msg = c.reportError.mock.calls[0][0] as string;
+    expect(msg).toContain('任务已定义');
+    expect(msg).toContain('/goal（无参数）可查看当前目标');
+  });
+
+  it('/goal 其他错误（422）原样上抛（Composer 统一呈现），不加引导', async () => {
+    vi.mocked(await import('./api')).postSessionCommand.mockRejectedValue(
+      new SessionError(422, 'task_text 必须是非空字符串'),
+    );
+    const c = makeCtx();
+    await expect(cmd('goal').run('目标文本', asCtx(c))).rejects.toThrow(
+      'task_text 必须是非空字符串',
+    );
+    expect(c.reportError).not.toHaveBeenCalled();
+  });
+
+  it('/compact 只经 ctx.runCompact 触发三态宿主，不自持压缩状态（A-P1-3）', async () => {
+    const c = makeCtx();
+    await cmd('compact').run(undefined, asCtx(c));
+    expect(c.runCompact).toHaveBeenCalledTimes(1);
+    expect(postSessionCommand).not.toHaveBeenCalled();
+  });
+
+  it('/goal 查看未定义 → reportInfo「未定义」，不是错误', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getTaskState).mockRejectedValue(new mod.TaskNotDefinedError('未定义任务'));
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.reportInfo).toHaveBeenCalledWith('当前会话未定义目标');
+    expect(c.reportError).not.toHaveBeenCalled();
+  });
+
+  it('slashSubmitMatch 对 trim 后整条输入匹配（A-P2-1：尾随空格由调用方 trim 兜住）', () => {
+    expect(slashSubmitMatch('/goal ', ['goal'])).toBeNull();
+    expect(slashSubmitMatch('/goal', ['goal'])).toEqual({ name: 'goal', args: undefined });
   });
 });
 

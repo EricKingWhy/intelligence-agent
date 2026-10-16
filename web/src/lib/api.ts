@@ -1592,6 +1592,25 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+/** 会话级命令 JSON POST（#1195 slash 命令：`/workflow-mode`、`/task/definition`）。
+ *
+ *  鉴权注入、BASE 前缀、401 处理与错误映射**复用 apiFetch/sessionError 同一条
+ *  链路**——审查 B-S-5：不在调用侧复刻第二份 Bearer 拼装（两处一漂移，401 语义
+ *  就分叉）。非 2xx 抛 `SessionError`（message = 后端 detail，status 供调用方
+ *  按码分流，如 task/definition 的 409 = 已定义）。 */
+export async function postSessionCommand(
+  sessionId: string,
+  subPath: string,
+  body: unknown,
+): Promise<void> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}${subPath}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await sessionError(res, '命令执行失败');
+}
+
 // ── 会话级约束管理面板（#1190 / #1176 Phase 1）──
 
 /** 受保护事实状态值域（钉死三值；`pending_approval` 是请求级状态，永不进入此值域）。 */

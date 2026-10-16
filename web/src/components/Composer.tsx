@@ -22,6 +22,7 @@ import { effectiveModelEntry } from '../lib/modelSelection';
 import type { Ownership } from '../lib/ownership';
 import { SCOPE_LABELS } from '../lib/constraints';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
+import { useCompactSession } from '../hooks/useCompactSession';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
@@ -269,12 +270,29 @@ export const Composer = memo(function Composer({
   /** #1027 兜底提示：发送时被剔除的未就绪附件数（一次性可见提示，可关闭）。 */
   const [droppedNotice, setDroppedNotice] = useState<string | null>(null);
   // #1195 内联 `/` 命令菜单：触发态由输入值派生（不另记布尔，避免与文本分叉）；
-  // 高亮 index 与错误面是真正的 UI 状态。
+  // 高亮 index 与错误面是真正的 UI 状态。info 面是**中性**信息（查看结果 / 执行
+  // 回执——不是错误，不染红；审查 B-S-4/A-P3-2）。
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashError, setSlashError] = useState<string | null>(null);
+  const [slashInfo, setSlashInfo] = useState<string | null>(null);
   // Esc 关闭后 value 不变 ⇒ 派生匹配仍成立，菜单会立刻重开——需要显式 dismissed。
   // value 一变（继续打字 / 清空）即解除，重新进入触发态。
   const [slashDismissed, setSlashDismissed] = useState(false);
+  // A-P3-3：outside-click 关闭——document mousedown 落在菜单与输入框之外即视为关闭。
+  const slashMenuRef = useRef<HTMLDivElement | null>(null);
+  // S-7（P4）：textarea ↔ 菜单的 ARIA 关联（listbox 所有权 + 展开态 + 高亮项）。
+  const slashMenuId = useId();
+  // A-P4：错误/信息面自动消退——上一条命令的结论不该常驻到下一次会话结束。
+  useEffect(() => {
+    if (slashError === null) return;
+    const t = setTimeout(() => setSlashError(null), 8000);
+    return () => clearTimeout(t);
+  }, [slashError]);
+  useEffect(() => {
+    if (slashInfo === null) return;
+    const t = setTimeout(() => setSlashInfo(null), 8000);
+    return () => clearTimeout(t);
+  }, [slashInfo]);
 
   // ── #1027 发送门禁（Gmail 式阻断，PORT DESIGN）──
   // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
@@ -492,6 +510,29 @@ export const Composer = memo(function Composer({
     const raw = value;
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    /* #1195 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`，审查 A-P1-1）：
+       挂在 submit() 入口——Enter / Ctrl+Enter / 发送按钮**所有发送路径的唯一
+       汇合点**，不再只 hook 无修饰 Enter 分支（否则 Ctrl+Enter 与按钮都会把
+       `/goal <文本>` 当聊天发给 agent，违反票面 §4.1「一律 preventDefault 本地
+       执行」与 AC6）。匹配对 **trim 后**的整条输入做（审查 A-P2-1）：`/goal␣`
+       尾随空格同样落进命令路径，args 为空 ⇒ 走 §4.2「无参数则查看」。
+       受 `locked` 门控（审查 A-P2-3）：与菜单触发同把锁——锁定态命令不执行，
+       也不会被当成聊天发出。 */
+    const submitHit = slashSubmitMatch(trimmed, SLASH_COMMANDS.map((c) => c.name));
+    if (submitHit) {
+      if (sessionId == null) {
+        /* 无会话不可执行（审查 A-P3-1）：给可见反馈且**不清输入**——静默 return
+           加清空等于把用户的命令文本无声丢掉。 */
+        setSlashError('当前没有会话，命令暂不可用');
+        return;
+      }
+      const cmd = SLASH_COMMANDS.find((c) => c.name === submitHit.name)!;
+      void runSlashCommand(cmd, submitHit.args);
+      setValue('');
+      setSlashIndex(0);
+      setSlashDismissed(false);
+      return;
+    }
     /* #1029：回执在途期间不许再提交。清空挪到回执之后（见下），文本框不再在提交
        瞬间变空 ⇒ 连按 Enter / 点发送不再被 `!value.trim()` 自然挡住，**必须**显式
        闸一次，否则一次输入会发出去 N 次。ref 同步判（不是 state）：同一 tick 里的
@@ -599,12 +640,36 @@ export const Composer = memo(function Composer({
     sessionId != null && !locked ? slashTriggerMatch(value) : null;
   const slashItems = slashMatch ? filterSlashCommands(SLASH_COMMANDS, slashMatch.query) : [];
   const slashOpen = slashMatch !== null && !slashDismissed;
+  // 定位切除的统一起点（B-S-3）：菜单开着时 = 命令 token（含分隔空白）在 value 里的起点。
+  const slashCutStart = slashOpen && slashMatch !== null ? slashMatch.start : null;
+  // S-8（P4）：高亮 index 的唯一钳制点（原先 onKeyDown / 渲染各写一遍 Math.min）。
+  const selectedSlashIndex = Math.min(slashIndex, Math.max(slashItems.length - 1, 0));
 
+  // A-P1-3：/compact 的三态宿主（#1197 契约，与 ContextUsagePanel 共用同一份
+  // useCompactSession 状态机）——压缩中 spinner+禁用、被拒/成功回执走 info 面、
+  // 失败走错误面。渲染见下方 slash 反馈区。
+  const compact = useCompactSession(sessionId);
+
+  // A-P3-3：outside-click 关闭——mousedown 落在菜单与输入框之外即关闭（与 Esc
+  // 同一条 dismissed 通道：value 不变 ⇒ 派生匹配仍成立，必须显式 dismissed 才关得住）。
+  useEffect(() => {
+    if (!slashOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const target = e.target instanceof Node ? e.target : null;
+      if (target === null) return;
+      if (slashMenuRef.current?.contains(target)) return;
+      if (inputRef.current?.contains(target)) return;
+      setSlashDismissed(true);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [slashOpen]);
 
   const runSlashCommand = useCallback(
     async (cmd: SlashCommand, args: string | undefined) => {
       if (!sessionId) return;
       setSlashError(null);
+      setSlashInfo(null);
       try {
         await cmd.run(args, {
           sessionId,
@@ -617,14 +682,42 @@ export const Composer = memo(function Composer({
               ?.querySelector<HTMLButtonElement>('button[aria-label="模型选择"]')
               ?.click(),
           reportError: (message) => setSlashError(message),
+          reportInfo: (message) => setSlashInfo(message),
+          // A-P1-3：压缩走共享三态宿主；成功回执（含被拒=零写入）落中性 info 面，
+          // 失败由 hook 的 compactError 面呈现（后端 detail 原样）。
+          runCompact: () =>
+            compact.run({
+              onSuccess: (r) =>
+                setSlashInfo(
+                  r.compacted_turn_count > 0
+                    ? `压缩完成：${r.tokens_before.toLocaleString()} → ${r.tokens_after.toLocaleString()} tok`
+                    : '没有可压缩的早期内容',
+                ),
+            }),
           getSessionEvents,
         });
       } catch (e) {
         setSlashError(e instanceof Error && e.message ? e.message : '命令执行失败');
       }
     },
-    [sessionId],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- compact.run 按 sessionId 稳定（useCallback）
+    [sessionId, compact.run],
   );
+
+  /** 命令受理（执行 + 输入切除）的唯一入口：菜单 Enter、菜单点选、submit 拦截
+   *  三条路都走这里。`cutFrom` = 定位切除的起点（审查 B-S-3：只删命令 token，
+   *  保留命令前的前缀文本，如 `hello /compact` 执行后剩 `hello`）；`null` =
+   *  整条输入就是命令调用（submit 拦截路径），全清。 */
+  const acceptSlashCommand = (
+    cmd: SlashCommand,
+    args: string | undefined,
+    cutFrom: number | null,
+  ) => {
+    void runSlashCommand(cmd, args);
+    setValue((v) => (cutFrom === null ? '' : v.slice(0, cutFrom)));
+    setSlashIndex(0);
+    setSlashDismissed(false);
+  };
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
   // IME composition 守卫（审查 P1）：中文输入法按 Enter 确认拼音时
   // `isComposing` 为真——此时不提交，否则半截拼音会被当成任务发出。
@@ -650,28 +743,14 @@ export const Composer = memo(function Composer({
       return;
     }
     // Enter（无修饰键）= queue。Shift+Enter 保留换行（真实用户习惯）。
+    // 带参提交拦截已收编进 submit() 入口（审查 A-P1-1：所有发送路径的唯一汇合点
+    // ——Enter / Ctrl+Enter / 发送按钮都经它，不再只在无修饰 Enter 分支 hook）。
     if (e.key === 'Enter' && !e.shiftKey) {
-      // 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`）：整条输入是注册表
-      // 内的命令调用 ⇒ 本地执行，绝不当聊天发给 agent。参数为空（`/goal␣␣`）时
-      // 拦截的正则不命中（`\w+` 后必须有空白 + 参数），自然落到查看分支——与 §4.2 的
-      // 「无参数则查看」一致。
-      const submitHit = slashSubmitMatch(
-        value,
-        SLASH_COMMANDS.map((c) => c.name),
-      );
-      if (submitHit) {
-        e.preventDefault();
-        const cmd = SLASH_COMMANDS.find((c) => c.name === submitHit.name)!;
-        void runSlashCommand(cmd, submitHit.args);
-        setValue('');
-        return;
-      }
       // 菜单开着且有可见命中 → Enter 执行高亮项（票面 §3.1；唯一命中时高亮必是唯一项）。
+      // 定位切除只删命令 token（slashCutStart），不丢命令前的前缀（审查 B-S-3）。
       if (slashOpen && slashItems.length > 0) {
         e.preventDefault();
-        const cmd = slashItems[Math.min(slashIndex, slashItems.length - 1)];
-        void runSlashCommand(cmd, undefined);
-        setValue('');
+        acceptSlashCommand(slashItems[selectedSlashIndex], undefined, slashCutStart);
         return;
       }
       e.preventDefault();
@@ -933,87 +1012,49 @@ export const Composer = memo(function Composer({
       )}
       {/* #1195：内联 `/` 菜单——输入框正上方（composer-wrap 的直接子节点、dock 之前；
           absolute 定位锚在 wrap 上，bottom:100% 相对 dock 视觉位）。非 Dialog 中央浮层
-          （票面 §3.1）。样式 inline 引既有语义 token（app.css 不在 Scope Lock）。 */}
+          （票面 §3.1）。样式收进 app.css 的 .slash-menu 族（审查 B-S-6：~90 行 inline
+          style 偏离 §9.3）；**定位前提**是 .composer-wrap 有 position（A-P1-2，
+          见 app.css 该规则旁的注释与 slash 测试的 CSS 回归断言）。 */}
       {slashOpen && (
         <div
+          ref={slashMenuRef}
+          id={slashMenuId}
           data-testid="slash-menu"
           role="listbox"
           aria-label="斜杠命令"
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: '100%',
-            marginBottom: 4,
-            background: 'var(--surface-overlay)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 10,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-            padding: 4,
-            zIndex: 40,
-            maxHeight: 260,
-            overflowY: 'auto',
-          }}
+          className="slash-menu"
         >
           {slashItems.length === 0 ? (
-            <div style={{ padding: '6px 10px', color: 'var(--text-tertiary)', fontSize: 12 }}>
-              无匹配命令
-            </div>
+            <div className="slash-menu-empty">无匹配命令</div>
           ) : (
             ['add', 'command'].map((group) => {
               const groupItems = slashItems.filter((c) => c.group === group);
               if (groupItems.length === 0) return null;
               return (
                 <div key={group}>
-                  <div
-                    style={{
-                      padding: '4px 10px 2px',
-                      color: 'var(--text-tertiary)',
-                      fontSize: 11,
-                    }}
-                  >
-                    {group === 'add' ? '添加' : '指令'}
-                  </div>
+                  <div className="slash-menu-group">{group === 'add' ? '添加' : '指令'}</div>
                   {groupItems.map((cmd) => {
                     const index = slashItems.indexOf(cmd);
-                    const selected = index === Math.min(slashIndex, slashItems.length - 1);
+                    const selected = index === selectedSlashIndex;
                     return (
                       <div
                         key={cmd.name}
+                        id={`slash-opt-${cmd.name}`}
                         role="option"
                         aria-selected={selected}
                         data-slash-name={cmd.name}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'baseline',
-                          gap: 8,
-                          padding: '6px 10px',
-                          borderRadius: 6,
-                          cursor: 'default',
-                          background: selected ? 'var(--surface-selected)' : 'transparent',
-                        }}
+                        className={`slash-menu-item${selected ? ' selected' : ''}`}
                         onMouseDown={(e) => {
                           // mousedown 而非 click：textarea 的 blur 会在 click 之前到，
-                          // blur 不关菜单（唯一关闭路径是 Esc/执行），但 mousedown 先选中。
+                          // blur 不关菜单（关闭路径是 Esc/执行/outside-click），但 mousedown 先选中。
                           e.preventDefault();
                           setSlashIndex(index);
                         }}
-                        onClick={() => {
-                          void runSlashCommand(cmd, undefined);
-                          setValue('');
-                        }}
+                        onClick={() => acceptSlashCommand(cmd, undefined, slashCutStart)}
                       >
-                        <span style={{ color: 'var(--text-primary)', fontSize: 12 }}>
-                          {cmd.labelCN}
-                        </span>
-                        <span
-                          style={{ color: 'var(--text-tertiary)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
-                        >
-                          /{cmd.name}
-                        </span>
-                        <span style={{ color: 'var(--text-tertiary)', fontSize: 12, marginLeft: 'auto' }}>
-                          {cmd.description}
-                        </span>
+                        <span className="slash-menu-label">{cmd.labelCN}</span>
+                        <span className="slash-menu-name">/{cmd.name}</span>
+                        <span className="slash-menu-desc">{cmd.description}</span>
                       </div>
                     );
                   })}
@@ -1023,17 +1064,23 @@ export const Composer = memo(function Composer({
           )}
         </div>
       )}
-      {slashError !== null && (
-        <div
-          data-testid="slash-error"
-          role="alert"
-          style={{
-            padding: '4px 10px',
-            color: 'var(--danger)',
-            fontSize: 12,
-          }}
-        >
-          {slashError}
+      {/* 反馈区：错误（红）/ 信息（中性，B-S-4）/ 压缩中 spinner（A-P1-3）。
+          slashError 与 compact.compactError 实际互斥（runSlashCommand 入口各清各面，
+          压缩错误只落 hook），但渲染合并成同一错误面避免两块同貌红条。 */}
+      {(slashError !== null || compact.compactError !== null) && (
+        <div data-testid="slash-error" role="alert" className="slash-error">
+          {slashError ?? compact.compactError}
+        </div>
+      )}
+      {slashInfo !== null && (
+        <div data-testid="slash-info" role="status" className="slash-status">
+          {slashInfo}
+        </div>
+      )}
+      {compact.compacting && (
+        <div data-testid="slash-compacting" role="status" className="slash-status">
+          <span className="ctx-usage-spinner" aria-hidden="true" />
+          正在压缩上下文…
         </div>
       )}
       <div className="composer-dock surface-floating">
@@ -1115,6 +1162,15 @@ export const Composer = memo(function Composer({
           className="composer"
           placeholder={showLock ? lockedPlaceholder : `描述一个任务…（${modKey()}+Enter 发送）`}
           value={value}
+          /* S-7（P4）：菜单 = 本 textarea 拥有的 listbox——ARIA 关联三件套
+              （展开态 / 所有权 / 当前高亮项），屏幕阅读器读得到"列表开着、选中谁"。 */
+          aria-expanded={slashOpen}
+          aria-controls={slashOpen ? slashMenuId : undefined}
+          aria-activedescendant={
+            slashOpen && slashItems.length > 0
+              ? `slash-opt-${slashItems[selectedSlashIndex].name}`
+              : undefined
+          }
           onChange={(e) => {
             // #1195：输入变化 = 可见命令列表身份变化 ⇒ 高亮收回第一项；Esc 关闭态解除。
             setSlashIndex(0);

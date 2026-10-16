@@ -3677,8 +3677,83 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline-offset: 2px;
 }
 
+/* #1195 A-P1-2：内联 `/` 菜单（.slash-menu，absolute bottom:100%）以本元素为
+   定位锚——它**必须**有 position，否则最近的 positioned 祖先（祖先链上
+   .workspace-panel 的 container-type: inline-size 也会成为 containing block）
+   接管定位，菜单渲染到工作面板顶缘；inspector 模式 overflow:hidden 会整裁。
+   jsdom/e2e 查不出像素 ⇒ 回归断言见 Composer.slash.test.tsx 的 CSS 断言。 */
 .composer-wrap {
+  position: relative;
   padding: var(--space-sm) var(--space-lg) var(--space-lg);
+}
+
+/* ── #1195 内联 `/` 命令菜单（审查 B-S-6：自组件 inline style 收编成 class，
+   值逐项等值搬运，全部既有语义 token——无新 token，无需亮色块同步）── */
+.slash-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 4px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 40;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.slash-menu-group {
+  padding: 4px 10px 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.slash-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: default;
+  background: transparent;
+}
+.slash-menu-item.selected {
+  background: var(--surface-selected);
+}
+.slash-menu-label {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.slash-menu-name {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.slash-menu-desc {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  margin-left: auto;
+}
+.slash-menu-empty {
+  padding: 6px 10px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+/* 命令反馈区：错误（红，role=alert）/ 信息（中性，role=status——B-S-4：
+   查看结果与执行回执不是错误，不染红）。 */
+.slash-error {
+  padding: 4px 10px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.slash-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 /* UI-01：审批待决时的锁定提示——置灰不是隐形，要给出原因与恢复条件。 */
 .composer-locked-hint {

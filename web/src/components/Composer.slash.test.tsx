@@ -31,7 +31,7 @@ vi.mock('../lib/auth', async (importOriginal) => {
   return { ...actual, getToken: vi.fn(() => null) };
 });
 
-import { compactSession, getTaskState, type TaskState } from '../lib/api';
+import { compactSession, getTaskState, type SessionContextCompacted, type TaskState } from '../lib/api';
 import { Composer } from './Composer';
 
 type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
@@ -39,6 +39,7 @@ type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentId
 let container: HTMLDivElement;
 let root: Root;
 let onSubmit: Mock<(...args: SubmitArgs) => void>;
+let onSteer: Mock<(...args: SubmitArgs) => void>;
 let fetchMock: Mock;
 
 const taskState = (text: string | null): TaskState => ({
@@ -61,19 +62,25 @@ const menuItems = (): NodeListOf<HTMLElement> =>
   container.querySelectorAll('[data-testid=slash-menu] [role=option]');
 const slashError = (): string | null =>
   container.querySelector('[data-testid=slash-error]')?.textContent ?? null;
+const slashInfo = (): string | null =>
+  container.querySelector('[data-testid=slash-info]')?.textContent ?? null;
 
-async function mount(sessionId: string | null = 's-1'): Promise<void> {
+async function mount(
+  sessionId: string | null = 's-1',
+  extra: Partial<Parameters<typeof Composer>[0]> = {},
+): Promise<void> {
   await act(async () => {
     root.render(
       createElement(Composer, {
         streaming: false,
         onSubmit,
-        onSteer: vi.fn(),
+        onSteer,
         onCancel: () => {},
         onEnsureSession: async () => sessionId ?? 'auto',
         sessionId,
         models: [],
         selectedModel: null,
+        ...extra,
       }),
     );
   });
@@ -131,6 +138,7 @@ beforeEach(async () => {
   document.body.appendChild(container);
   root = createRoot(container);
   onSubmit = vi.fn();
+  onSteer = vi.fn();
   vi.mocked(compactSession).mockReset();
   vi.mocked(getTaskState).mockReset();
   fetchMock = vi.fn();
@@ -287,22 +295,24 @@ describe('#1195 错误可见', () => {
 });
 
 describe('#1195 /goal 无参查看', () => {
-  it('已定义 → 展示当前目标', async () => {
+  it('已定义 → 中性 info 面展示当前目标', async () => {
     vi.mocked(getTaskState).mockResolvedValue(taskState('每天投20份简历'));
     await typeText('/goal');
     press('Enter');
     await act(async () => {});
     expect(getTaskState).toHaveBeenCalledWith('s-1');
-    expect(slashError()).toContain('当前目标：每天投20份简历');
+    expect(slashInfo()).toContain('当前目标：每天投20份简历');
+    expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 
-  it('未定义（TaskNotDefinedError）→ 如实展示', async () => {
+  it('未定义（TaskNotDefinedError）→ 中性 info 如实展示', async () => {
     const mod = await import('../lib/api');
     vi.mocked(getTaskState).mockRejectedValue(new mod.TaskNotDefinedError('未定义任务'));
     await typeText('/goal');
     press('Enter');
     await act(async () => {});
-    expect(slashError()).toContain('未定义');
+    expect(slashInfo()).toContain('未定义');
+    expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 });
 
@@ -340,5 +350,227 @@ describe('#1195 /permission /model 拉起现有 UI', () => {
     await act(async () => {});
     // Radix trigger 在 jsdom 下由 click 冒泡触发——验证我们确实 click 了它。
     expect(clickSpy).toHaveBeenCalled();
+  });
+
+  /** /permission 拉起断言体（独立的宿主 stub 作用域内执行，见下方 it）。 */
+  const runPermissionPullUp = async (): Promise<void> => {
+    await act(async () => {
+      root.render(
+        createElement(Composer, {
+          streaming: false,
+          onSubmit,
+          onSteer,
+          onCancel: () => {},
+          onEnsureSession: async () => 's-1',
+          sessionId: 's-1',
+          permissionModes: [
+            { id: 'default', display_name: '默认', description: '默认档' },
+            { id: 'danger-full-access', display_name: '完全访问', description: '危险档' },
+          ] as never,
+          selectedPermissionMode: 'default',
+        }),
+      );
+    });
+    const trigger = container.querySelector('button[aria-label="权限模式"]');
+    expect(trigger).not.toBeNull();
+    const clickSpy = vi.fn();
+    (trigger as HTMLButtonElement).addEventListener('click', clickSpy);
+    await typeText('/permission');
+    press('Enter');
+    await act(async () => {});
+    expect(clickSpy).toHaveBeenCalled();
+    // 挂载时的 /api/attachments/limits 预拉是既有 effect，与命令无关——只看命令面。
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => !String(c[0]).includes('/api/attachments/limits')),
+    ).toHaveLength(0);
+    expect(onSubmit).not.toHaveBeenCalled();
+  };
+
+  it('/permission 触发权限 picker 按钮点击（B-S-2：拉起路径有测试钉住）', async () => {
+    // OptionPicker 内部 cmdk 依赖 ResizeObserver 与 scrollIntoView（jsdom 都没有）——只 stub 本测试，收尾还原。
+    const hadScrollIntoView = 'scrollIntoView' in Element.prototype;
+    const originalScrollIntoView = (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    );
+    (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView = vi.fn();
+    try {
+      await runPermissionPullUp();
+    } finally {
+      if (hadScrollIntoView) {
+        (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView = originalScrollIntoView;
+      } else {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+      vi.unstubAllGlobals();
+    }
+    // 恢复全局 fetch stub（上面 unstubAllGlobals 连带撤了 beforeEach 的 fetch stub）。
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+});
+
+describe('#1195 findings 修回 — 提交拦截汇合点（A-P1-1/A-P2-1/A-P2-3）', () => {
+  it('Ctrl+Enter 对 /goal 带参同样拦截：本地执行，不 steer（A-P1-1）', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    await typeText('/goal 每天投20份简历');
+    press('Enter', { ctrlKey: true });
+    await act(async () => {});
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition'));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse((calls[0][1] as RequestInit).body as string)).toEqual({
+      task_text: '每天投20份简历',
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSteer).not.toHaveBeenCalled();
+    expect(textarea().value).toBe('');
+  });
+
+  it('发送按钮点击对 /goal 带参同样拦截（A-P1-1）', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    await typeText('/goal 另一个目标');
+    await act(async () => {
+      (container.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click();
+    });
+    await act(async () => {});
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition'));
+    expect(calls).toHaveLength(1);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(textarea().value).toBe('');
+  });
+
+  it('尾随空格 /goal␣ + Enter 落查看分支（A-P2-1）', async () => {
+    vi.mocked(getTaskState).mockResolvedValue(taskState('已有目标'));
+    await typeText('/goal ');
+    press('Enter');
+    await act(async () => {});
+    expect(getTaskState).toHaveBeenCalledWith('s-1');
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition')),
+    ).toHaveLength(0);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(slashInfo()).toContain('当前目标：已有目标');
+  });
+
+  it('locked（审批待决）时命令不执行、也不当聊天发（A-P2-3）', async () => {
+    await mount('s-1', { approvalPending: true });
+    await typeText('/plan');
+    press('Enter');
+    await act(async () => {});
+    // 挂载时的 /api/attachments/limits 预拉是既有 effect，与命令无关——只看命令/发送面。
+    const cmdCalls = fetchMock.mock.calls.filter(
+      (c: unknown[]) => !String(c[0]).includes('/api/attachments/limits'),
+    );
+    expect(cmdCalls).toHaveLength(0);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSteer).not.toHaveBeenCalled();
+  });
+});
+
+describe('#1195 findings 修回 — 菜单与反馈面', () => {
+  it('菜单 Enter 只切除命令 token，保留前缀（B-S-3）', async () => {
+    vi.mocked(compactSession).mockResolvedValue({} as never);
+    await typeText('hello /compact');
+    expect(menu()).not.toBeNull();
+    press('Enter');
+    await act(async () => {});
+    expect(compactSession).toHaveBeenCalledWith('s-1');
+    expect(textarea().value).toBe('hello');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('/goal 查看结果走中性 info 面（role=status），不是红色 alert（B-S-4/A-P3-2）', async () => {
+    vi.mocked(getTaskState).mockResolvedValue(taskState('每天投20份简历'));
+    await typeText('/goal');
+    press('Enter');
+    await act(async () => {});
+    const info = container.querySelector('[data-testid=slash-info]');
+    expect(info?.getAttribute('role')).toBe('status');
+    expect(info?.textContent).toContain('当前目标：每天投20份简历');
+    expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
+  });
+
+  it('/goal 二次设置 409 → detail + 可操作引导（A-P2-2）', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ detail: '任务已定义（task/defined 全流至多一条）' }), { status: 409 }),
+    );
+    await typeText('/goal 换个目标');
+    press('Enter');
+    await act(async () => {});
+    expect(slashError()).toContain('任务已定义');
+    expect(slashError()).toContain('/goal（无参数）可查看当前目标');
+  });
+
+  it('无会话时带参命令给可见反馈且不清输入（A-P3-1）', async () => {
+    await mount(null);
+    await typeText('/goal 每天投20份简历');
+    press('Enter');
+    await act(async () => {});
+    expect(slashError()).toContain('没有会话');
+    expect(textarea().value).toBe('/goal 每天投20份简历');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('outside-click 关闭菜单（A-P3-3）', async () => {
+    await typeText('/pl');
+    expect(menu()).not.toBeNull();
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(menu()).toBeNull();
+    // 输入原样保留（关闭 ≠ 清输入）。
+    expect(textarea().value).toBe('/pl');
+  });
+
+  it('菜单开时 textarea 带 ARIA 关联（S-7）：expanded/controls/activedescendant', async () => {
+    await typeText('/pl');
+    const ta = textarea();
+    expect(ta.getAttribute('aria-expanded')).toBe('true');
+    const menuId = ta.getAttribute('aria-controls');
+    expect(menuId).toBeTruthy();
+    expect(document.getElementById(menuId!)).not.toBeNull();
+    expect(ta.getAttribute('aria-activedescendant')).toBe('slash-opt-plan');
+  });
+});
+
+describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）', () => {
+  it('压缩中：spinner 面可见（正在压缩上下文…），在途重复触发不重复请求', async () => {
+    let resolveCompact!: (v: SessionContextCompacted) => void;
+    vi.mocked(compactSession).mockImplementation(
+      () => new Promise((res) => { resolveCompact = res; }),
+    );
+    await typeText('/compact');
+    press('Enter');
+    await act(async () => {});
+    const compacting = container.querySelector('[data-testid=slash-compacting]');
+    expect(compacting?.getAttribute('role')).toBe('status');
+    expect(compacting?.textContent).toContain('正在压缩上下文');
+    press('Enter');
+    await act(async () => {});
+    expect(compactSession).toHaveBeenCalledTimes(1);
+    resolveCompact({
+      bracket_id: 'b1', source_seq_start: 0, source_seq_end: 9,
+      tokens_before: 100000, tokens_after: 40000, compacted_turn_count: 3, summary_model: 'm',
+    });
+    await act(async () => {});
+    expect(container.querySelector('[data-testid=slash-compacting]')).toBeNull();
+    expect(slashInfo()).toContain('压缩完成：100,000 → 40,000 tok');
+  });
+
+  it('被拒（compacted_turn_count=0 零写入）：中性信息「没有可压缩的早期内容」，不是错误', async () => {
+    vi.mocked(compactSession).mockResolvedValue({
+      bracket_id: null, source_seq_start: null, source_seq_end: null,
+      tokens_before: 500, tokens_after: 500, compacted_turn_count: 0, summary_model: null,
+    } as never);
+    await typeText('/compact');
+    press('Enter');
+    await act(async () => {});
+    expect(slashInfo()).toBe('没有可压缩的早期内容');
+    expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 });

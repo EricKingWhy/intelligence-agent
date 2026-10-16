@@ -1,0 +1,54 @@
+/** useCompactSession — 手动压缩的三态状态机（#635 / #1197 契约的唯一宿主）。
+ *
+ *  #1197 三态契约（供 ContextUsagePanel 与 #1195 slash `/compact` 共用——审查
+ *  A-P1-3：两条入口必须同一份逻辑，不许各写一套漂移）：
+ *   - 压缩中 = 流程已启动未终态（宿主渲染"正在压缩上下文…"+ spinner，并以此
+ *     禁用再次触发——本 hook 的 `run` 单飞：在途重复调用直接忽略）；
+ *   - 被拒   = 200 但 `compacted_turn_count == 0`（零写入，"没有可压缩的早期
+ *     内容"不是错误——文案归宿主）；
+ *   - 失败   = 传输/服务端异常（`compactError` 为后端 detail，宿主就地展示）。
+ *  成功回执（`compactResult`）携带 tokens_before/after 供宿主做前后对比；水位
+ *  刷新由宿主经 `onSuccess` 自行决定（面板重拉水位；slash 路径无水位面可刷）。
+ */
+
+import { useCallback, useRef, useState } from 'react';
+import {
+  compactSession,
+  describeSessionError,
+  type SessionContextCompacted,
+} from '../lib/api';
+
+export interface CompactRunOptions {
+  /** 成功回执（含被拒=零写入）后的宿主钩子；抛错不影响三态本身。 */
+  onSuccess?: (result: SessionContextCompacted) => void;
+}
+
+export function useCompactSession(sessionId: string | null) {
+  const [compacting, setCompacting] = useState(false);
+  const [compactResult, setCompactResult] = useState<SessionContextCompacted | null>(null);
+  const [compactError, setCompactError] = useState<string | null>(null);
+  // 单飞闸用 ref 同步判：同一 tick 的第二次触发读不到刚 set 的 state。
+  const inFlight = useRef(false);
+
+  const run = useCallback(
+    async (opts?: CompactRunOptions): Promise<void> => {
+      if (sessionId === null || inFlight.current) return;
+      inFlight.current = true;
+      setCompacting(true);
+      setCompactError(null);
+      try {
+        const result = await compactSession(sessionId);
+        setCompactResult(result);
+        opts?.onSuccess?.(result);
+      } catch (e) {
+        setCompactError(describeSessionError(e, '压缩失败'));
+      } finally {
+        inFlight.current = false;
+        setCompacting(false);
+      }
+    },
+    [sessionId],
+  );
+
+  return { compacting, compactResult, compactError, run };
+}
