@@ -1,0 +1,1 @@
+2026-10-16	机械归属（非内容审查主张）：#1165 分支同步 origin/main 的 merge afe93bd3；父一 dc0360ec（本线 tip），父二 211bfe48（origin/main），merge-base 5497abdd。`git merge-tree --write-tree` 结果 fdbb678c 与 merge tree 完全一致；`git show --cc --name-only` 为空，证明 ort 无冲突自动并入。来侧 commits 各自已有审查/覆盖，本线代码仍由既有 #1165 review 覆盖。	dc0360ec52d8694004baba1cd7274126ae78f38e..afe93bd32594f7845b83685ee80f0e50b8707389
