@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 #: 所以剩余深度为 0 时必须从可授予集合里摘掉。将来出现第二个编排工具，加进这里。
 DISPATCH_TOOL_NAMES = frozenset({"delegate"})
 ROOT_ONLY_TOOL_NAMES = frozenset({
-    "register_constraint", "request_constraint_resolution",
+    "register_constraint", "request_constraint_resolution", "ask_user",
 })
 
 

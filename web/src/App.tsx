@@ -76,7 +76,7 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
+import type { AskUserAnswer, ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
@@ -1026,6 +1026,8 @@ export default function App() {
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
   const [dismissedConstraintRequestId, setDismissedConstraintRequestId] = useState<string | null>(null);
   const [resumingConstraintRequestId, setResumingConstraintRequestId] = useState<string | null>(null);
+  /** #1204：在途恢复的 ask_user 请求 id（null = 无在途）。与约束澄清同款按请求记账。 */
+  const [resumingAskUserRequestId, setResumingAskUserRequestId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
   const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
@@ -1038,6 +1040,18 @@ export default function App() {
     paused.input_request_id === pendingConstraintInput.request_id &&
     paused.run_id === pendingConstraintInput.run_id
       ? pendingConstraintInput
+      : null;
+  /** #1204：`kind=ask_user` 的待回答请求——挂载内嵌卡片的**唯一**判据，与约束澄清
+   *  完全同形地要求「暂停 run 与请求 id 对齐」，两条管线互不冒充（分流在投影的
+   *  `data.kind` 处已经发生，这里只是同一条对齐检查）。 */
+  const pendingAskUser = conversation?.pending_ask_user ?? null;
+  const askUserRequest =
+    paused !== null &&
+    pendingAskUser !== null &&
+    paused.reason === 'user_input' &&
+    paused.input_request_id === pendingAskUser.request_id &&
+    paused.run_id === pendingAskUser.run_id
+      ? pendingAskUser
       : null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
@@ -1076,6 +1090,21 @@ export default function App() {
       inputRequest: answer,
     }).finally(() => setResumingConstraintRequestId(null));
   }, [constraintRequest, paused, selectedId, resumePausedRun]);
+
+  /** #1204：`ask_user` 内嵌卡片的作答提交——复用与约束澄清**同一条**恢复通道
+   *  （`resume_basis: 'user_input'` + `input_request`），答案 wire 形态是通用的
+   *  `{request_id, questions:[{question, answer}]}`。失败路径由 `resumePausedRun`
+   *  统一处理（刷新权威日志 + 显示原因），这里只管在途记账。 */
+  const handleAskUserAnswer = useCallback((answer: AskUserAnswer) => {
+    if (!askUserRequest || !paused || selectedId === null) return;
+    setResumingAskUserRequestId(askUserRequest.request_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      kind: 'user_input',
+      inputRequest: answer,
+    }).finally(() => setResumingAskUserRequestId(null));
+  }, [askUserRequest, paused, selectedId, resumePausedRun]);
 
   const handleConstraintDialogOpenChange = useCallback((open: boolean) => {
     if (open) {
@@ -1616,6 +1645,15 @@ export default function App() {
                     onEditTurn={handleEditTurn}
                     goneApprovalIds={goneApprovalIds}
                     onApprovalGone={onApprovalGone}
+                    /* #1204：`kind=ask_user` 的提问卡片内嵌在对话流尾部（与约束澄清
+                       的模态挂载区刻意分开）；三个 prop 的身份都稳定（derive 自
+                       conversation / useCallback / 原语），不破坏 Conversation 的 memo。 */
+                    askUserRequest={askUserRequest}
+                    askUserResuming={
+                      askUserRequest !== null && resumingAskUserRequestId === askUserRequest.request_id
+                    }
+                    askUserError={error}
+                    onAskUserAnswer={handleAskUserAnswer}
                     /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
