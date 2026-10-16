@@ -3568,7 +3568,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-sm);
   background: var(--surface-danger);
-  color: var(--danger);
+  /* #1204 审查 P2-1：--danger 当正文色压 --surface-danger 染底，亮色 < AA。
+     沿用 #1175/#1164 ink-mix 约定（见上方 319-326）压深；本元素仅纯文字、无图标。 */
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   font-size: var(--text-xs);
 }
 .ask-user-closed {
