@@ -110,7 +110,7 @@ const GLOBAL_ROW: EffectiveConstraintRow = {
   overridden_by: null,
 };
 
-const PROJECT_META: EffectiveProjectMeta = { key: '/repo', label: 'EricKingWhy/intelligence-agent' };
+const PROJECT_META: EffectiveProjectMeta = { label: 'EricKingWhy/intelligence-agent' };
 
 const viewBase = {
   sessionId: 's-1',
@@ -249,14 +249,19 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).toContain('GLOBAL');
   });
 
-  it('#1191：被覆盖条目加「被本会话覆盖」（项目/全局组）', () => {
+  it('#1191：被覆盖条目加「被本会话覆盖」且**不计入**「N 条生效中」', () => {
     const overridden: EffectiveConstraintRow = {
       ...PROJECT_ROW,
       fact_id: 'prj-covered',
       overridden_by: 'f-active',
     };
-    const html = ssr({ facts: [ACTIVE, overridden], project: PROJECT_META });
+    const html = ssr({ facts: [ACTIVE, overridden, GLOBAL_ROW], project: PROJECT_META });
     expect(html).toContain('被本会话覆盖');
+    // 被覆盖 ⇒ 不注入 ⇒ 不算「生效中」（审查 finding C7：旧实现按 status==='active'
+    // 计数会把这条算进去，与优先级条「overridden_by 非 null 的条目不注入」自相矛盾）。
+    // SESSION 1 + GLOBAL 1 生效；PROJECT 只剩那条被覆盖的 ⇒ 0。
+    const text = plain(html);
+    expect((text.match(/0 条生效中/g) ?? []).length).toBe(1); // PROJECT：被覆盖不计
   });
 });
 

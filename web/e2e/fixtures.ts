@@ -273,7 +273,7 @@ export interface ApiMock {
   // ── #1191 Phase 2：约束作用域三层 ──
   /** `GET /api/sessions/{id}/effective-constraints` 的项目元信息（`git 根 · label`）。
    *  缺省 `null` = 非 git 目录（面板不渲染 PROJECT 组）。 */
-  effectiveProject?: { key: string; label: string | null } | null;
+  effectiveProject?: { label: string | null } | null;
   /** effective-constraints GET 拦截口（计数 / 伪造 403·500）。返回 true = 已处理。 */
   onEffectiveConstraintsGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
   /** `POST /api/memory/constraints/{fact_id}/revoke` 的拦截口（计数 / 断言请求体）。

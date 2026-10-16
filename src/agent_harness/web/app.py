@@ -111,7 +111,10 @@ from agent_harness.session.derive import validate_user_protected_fact_annotation
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
-from agent_harness.session.scoped_constraints import ScopedConstraintStore
+from agent_harness.session.scoped_constraints import (
+    ScopeConstraintError,
+    ScopedConstraintStore,
+)
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
     COMPACT_ENTRY_API,
@@ -3886,6 +3889,7 @@ def create_app(
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
             ProjectKeyUnavailable,
+            ScopeConstraintError,
             AttachmentReferenceInvalid,
             TooManyAttachments,
             AttachmentMessageTooLarge,

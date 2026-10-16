@@ -152,6 +152,7 @@ from agent_harness.session.errors import (
     WorkspaceNotFound,
     WorkspacePathInvalid,
 )
+from agent_harness.session.scoped_constraints import ScopeConstraintError
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.workspace import UnknownLedgerEntry, UnknownWorkspace
 
@@ -248,6 +249,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
     # 脱敏定位记录人工修复；文案里已带该指引。
     EventLogCorruptError: 409,
+    # #1191（Phase 2）审查 C6：项目/全局约束规则层存储读写失败（IO / 损坏文件）——
+    # 与 EventLogCorruptError 同立场：存储损坏属"状态对不上且不可重试"，409。
+    # 此前该异常是裸 RuntimeError，逃出规则层端点只能落 FastAPI 默认 500。
+    ScopeConstraintError: 409,
     # 413：单条消息引用的图片总字节超部署上限（#824 / MM-03）。与上传端点单张图
     # 超限同码（HTTP `Content Too Large`）——都是"载荷太大"，客户端可缩小后重试。
     AttachmentMessageTooLarge: 413,

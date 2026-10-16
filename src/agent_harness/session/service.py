@@ -239,6 +239,8 @@ from agent_harness.session.progress import (
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.scoped_constraints import (
     ScopedConstraintStore,
+    covering_fact_id,
+    normalized_fact_value,
     project_label,
     resolve_project_key,
 )
@@ -3551,35 +3553,31 @@ class SessionService:
             request=local_max_agent_turns,
         )
 
-        # #1191（Phase 2）：非会话级注解在这里**登记进独立规则层**（project/global）。
-        # 位置在**全部纯读校验之后、任何落盘之前**：project scope 解析不出项目键即
-        # 422（票面 §六.2 逐字文案），零副作用。会话级注解不在此处落任何东西——
-        # 它仍由消息事件承载（`user_input_metadata["protected_facts"]`），行为逐字不变。
+        # #1191（Phase 2）：非会话级注解（project/global）在这里**纯读校验**——
+        # 位置在全部纯读校验之后、任何落盘之前：project scope 解析不出项目键即
+        # 422（票面 §六.2 逐字文案），零副作用。真正的登记挪到**所有写成功之后**
+        # （见方法尾部）：先落消息事件（= 审计留痕，`user_input_metadata["protected_facts"]`），
+        # 事件写成功才登记规则层——否则一个被拒的 launch/steer 会把项目/全局级约束
+        # 静默写进**所有**会话（审查 finding C4）。会话级注解不在此处落任何东西——
+        # 它仍由消息事件承载，行为逐字不变。
+        #
+        # `mode` 不再是登记门槛（审查 finding C5）：`mode=="steer"` 带 scope 同样登记，
+        # 否则会出现"200 steered 却什么也没登记"的静默假受理。登记时机（写成功之后）
+        # 天然排除 steer 目标不存在等被拒分支。
         scoped_annotations = [
             annotation
             for annotation in normalized_protected_facts
             if annotation.get("scope") in ("project", "global")
-        ] if mode == "queue" else []
+        ]
+        scoped_project_key: str | None = None
         if scoped_annotations:
-            project_key = self._project_key_for(current_events)
+            scoped_project_key = self._project_key_for(current_events)
             if (
                 any(a["scope"] == "project" for a in scoped_annotations)
-                and project_key is None
+                and scoped_project_key is None
             ):
                 raise ProjectKeyUnavailable(
                     "当前会话不在 git 仓库内，无法登记项目级约束"
-                )
-            store = self._require_scoped_store()
-            registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
-            for annotation in scoped_annotations:
-                store.register(
-                    annotation["scope"],
-                    project_key=(
-                        project_key if annotation["scope"] == "project" else None
-                    ),
-                    fact_type=annotation["fact_type"],
-                    value=annotation["value"],
-                    registered_at=registered_at,
                 )
 
         if queue_id is not None:
@@ -3682,6 +3680,25 @@ class SessionService:
                 superseded_seq=supersedes_seq,
                 carrier=mode,
             )
+
+        # 第 4 步（#1191）：消息事件已落盘（= 审计留痕）之后，才把非会话级约束登记进
+        # 独立规则层（与注入侧 `scoped_context_facts` 同源）。任一分支（launch / queue /
+        # steer）成功后才走到这里 ⇒ 被拒请求零副作用（审查 finding C4）。
+        if scoped_annotations:
+            store = self._require_scoped_store()
+            registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
+            for annotation in scoped_annotations:
+                store.register(
+                    annotation["scope"],
+                    project_key=(
+                        scoped_project_key
+                        if annotation["scope"] == "project"
+                        else None
+                    ),
+                    fact_type=annotation["fact_type"],
+                    value=annotation["value"],
+                    registered_at=registered_at,
+                )
         return result
 
     async def _assert_supersedable(self, session_id: str, superseded_seq: int) -> None:
@@ -6653,9 +6670,7 @@ class SessionService:
 
         rows = _merge_effective_rows(session_rows, project_rows, global_rows)
         project_meta = (
-            {"key": project_key, "label": project_label(cwd)}
-            if project_key is not None
-            else None
+            {"label": project_label(cwd)} if project_key is not None else None
         )
         return {"facts": rows, "project": project_meta}
 
@@ -6714,11 +6729,6 @@ def _scoped_constraint_row(constraint: Any) -> dict[str, Any]:
     }
 
 
-def _normalized_fact_value(value: Any) -> Any:
-    """覆盖判据的值归一：字符串去首尾空白，其余原样（票面 §五.4）。"""
-    return value.strip() if isinstance(value, str) else value
-
-
 def _merge_effective_rows(
     session_rows: list[dict[str, Any]],
     project_rows: list[dict[str, Any]],
@@ -6729,23 +6739,19 @@ def _merge_effective_rows(
     - 去重：同一 `fact_id` 只留第一条（防装配异常导致的重复）。
     - `overridden_by`：非会话级 active 条目，被更高优先级 scope 里 type 相同且
       normalized value 相等的 **active** 条目覆盖时填其 fact_id；否则 None。
+    - 覆盖判据（归一 + 匹配）走 `scoped_constraints` 的**单一 owner**
+      （`normalized_fact_value` / `covering_fact_id`），与注入侧同源（审查 finding S-b1）。
     """
     active_session = [
-        (row["type"], _normalized_fact_value(row["value"]), row["fact_id"])
+        (row["type"], normalized_fact_value(row["value"]), row["fact_id"])
         for row in session_rows
         if row["status"] == "active"
     ]
     active_project = [
-        (row["type"], _normalized_fact_value(row["value"]), row["fact_id"])
+        (row["type"], normalized_fact_value(row["value"]), row["fact_id"])
         for row in project_rows
         if row["status"] == "active"
     ]
-
-    def covering(type_: str, value: Any, candidates: list[tuple[str, Any, str]]) -> str | None:
-        for candidate_type, candidate_value, candidate_id in candidates:
-            if candidate_type == type_ and candidate_value == value:
-                return candidate_id
-        return None
 
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -6760,14 +6766,15 @@ def _merge_effective_rows(
         # 会话级不被任何东西覆盖（最高优先级）。
         emit(row, None)
     for row in project_rows:
-        numeric = _normalized_fact_value(row["value"])
-        covering_id = covering(row["type"], numeric, active_session)
+        covering_id = covering_fact_id(
+            row["type"], normalized_fact_value(row["value"]), active_session
+        )
         emit(row, covering_id)
     for row in global_rows:
-        numeric = _normalized_fact_value(row["value"])
-        covering_id = covering(row["type"], numeric, active_session) or covering(
-            row["type"], numeric, active_project
-        )
+        numeric = normalized_fact_value(row["value"])
+        covering_id = covering_fact_id(
+            row["type"], numeric, active_session
+        ) or covering_fact_id(row["type"], numeric, active_project)
         emit(row, covering_id)
     return merged
 

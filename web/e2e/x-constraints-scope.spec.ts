@@ -62,7 +62,7 @@ const GLOBAL_ROW = {
   scope: 'global',
 };
 
-const PROJECT_META = { key: '/repo', label: 'EricKingWhy/intelligence-agent' };
+const PROJECT_META = { label: 'EricKingWhy/intelligence-agent' };
 const panel = (page: Page) => page.getByTestId('constraints-panel');
 
 async function openConstraints(page: Page, mock: Record<string, unknown>): Promise<void> {

@@ -1688,7 +1688,6 @@ export interface EffectiveConstraintRow {
 
 /** 当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 null。 */
 export interface EffectiveProjectMeta {
-  key: string;
   label: string | null;
 }
 

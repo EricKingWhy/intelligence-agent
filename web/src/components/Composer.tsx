@@ -20,6 +20,7 @@ import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
 import type { Ownership } from '../lib/ownership';
+import { SCOPE_LABELS } from '../lib/constraints';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
@@ -45,17 +46,17 @@ const SCOPE_OPTIONS: readonly {
 }[] = [
   {
     id: 'session',
-    label: '本会话',
+    label: SCOPE_LABELS.session,
     hint: '只在当前会话生效，随会话结束自然失效。适合一次性的要求。',
   },
   {
     id: 'project',
-    label: '本项目',
+    label: SCOPE_LABELS.project,
     hint: '写入项目级存储，本仓库开的所有会话都生效，别的项目不受影响。',
   },
   {
     id: 'global',
-    label: '我的全局',
+    label: SCOPE_LABELS.global,
     hint: '写入用户级存储，所有项目的新会话都生效。适合长期习惯。',
   },
 ];

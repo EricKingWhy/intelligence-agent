@@ -112,6 +112,9 @@ def test_status_map_is_the_audited_contract():
         # SeqConflict 同为 409 但**不可重试**（损坏不因重试消失，detail 带脱敏定位
         # 记录引导人工修复）；沿用 BUG-011 同一逻辑：损坏不是「不存在」，404 会掩盖。
         "EventLogCorruptError": 409,
+        # #1191（Phase 2）：项目/全局约束规则层存储读写失败（IO / 损坏文件）——与
+        # EventLogCorruptError 同立场（存储损坏 = 状态对不上且不可重试）→ 409。
+        "ScopeConstraintError": 409,
         # #172 / ADR-0029：会话是别的会话的 fork 父——不级联（删掉用户没选中的子会话）、
         # 不 orphan（留悬空来源链接），所以只有 409 诚实：请求形态没错、父也确实存在。
         "SessionHasChildren": 409,

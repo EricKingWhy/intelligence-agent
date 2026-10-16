@@ -1050,7 +1050,6 @@ async def build_runtime(
     )
 
 
-
 def _build_scoped_fact_provider(settings: Settings) -> Any:
     """#1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（闭包）。
 

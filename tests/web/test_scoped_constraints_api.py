@@ -73,7 +73,7 @@ def test_effective_constraints_groups_three_scopes(tmp_path: Path) -> None:
     assert by_id[project.fact_id]["scope"] == "project"
     assert by_id[glob.fact_id]["scope"] == "global"
     # 项目元数据：键 + 标注（无 remote → 目录名）。
-    assert body["project"] == {"key": project_key, "label": project_label(repo)}
+    assert body["project"] == {"label": project_label(repo)}
     # 无覆盖时 overridden_by 为 None。
     assert by_id[glob.fact_id]["overridden_by"] is None
     # 同一 fact_id 至多一次。
@@ -163,3 +163,9 @@ def test_register_project_scope_without_git_is_422(tmp_path: Path) -> None:
     )
     assert resp.status_code == 422, resp.text
     assert "不在 git 仓库内" in resp.text
+    # 零副作用（审查 finding C4 的回归锚）：登记挪到"所有写成功之后"，被拒请求
+    # 不落规则层任何行——旧实现先写规则层再 launch，被拒时项目/全局级约束已生效。
+    from agent_harness.session.scoped_constraints import ConstraintScope
+
+    store = _app.state.agent.scoped_constraint_store
+    assert store.list(ConstraintScope.GLOBAL) == []

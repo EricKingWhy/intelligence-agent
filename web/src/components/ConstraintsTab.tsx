@@ -31,7 +31,7 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { formatFactTime, operatorLabel } from '../lib/constraints';
+import { SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
@@ -75,9 +75,9 @@ const GROUPS: readonly {
   en: string;
   zh: string;
 }[] = [
-  { scope: 'session', en: 'SESSION', zh: '本会话' },
-  { scope: 'project', en: 'PROJECT', zh: '本项目' },
-  { scope: 'global', en: 'GLOBAL', zh: '我的全局' },
+  { scope: 'session', en: 'SESSION', zh: SCOPE_LABELS.session },
+  { scope: 'project', en: 'PROJECT', zh: SCOPE_LABELS.project },
+  { scope: 'global', en: 'GLOBAL', zh: SCOPE_LABELS.global },
 ];
 
 function statusLabel(status: EffectiveConstraintRow['status']): string {
@@ -251,9 +251,15 @@ export function ConstraintsView({
   );
   const countFor = (filter: StatusFilter) =>
     facts.filter((fact) => matchesStatus(fact.status, filter)).length;
-  /** 组计数 = 该组**生效中**（active）条数（票面 §五.2 的「N 条生效中」）。 */
+  /** 组计数 = 该组**生效中**条数（票面 §五.2 的「N 条生效中」）。
+   *
+   *  生效判据与注入侧同源（§五.1）：`status==='active'` **且** `overridden_by===null`
+   *  ——被更高优先级同文约束覆盖的条目不注入，也就不是「生效中」（审查 finding C7：
+   *  旧实现把它计入，导致同一行同时挂「生效中」与「被本会话覆盖」、计数与优先级条自相矛盾）。 */
   const activeCount = (scope: ConstraintScope) =>
-    facts.filter((fact) => fact.scope === scope && fact.status === 'active').length;
+    facts.filter(
+      (fact) => fact.scope === scope && fact.status === 'active' && fact.overridden_by === null,
+    ).length;
 
   let body;
   if (forbidden) {

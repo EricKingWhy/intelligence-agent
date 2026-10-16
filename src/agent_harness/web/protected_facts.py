@@ -44,6 +44,7 @@ from agent_harness.session.errors import (
     SeqConflict,
     SessionNotFound,
 )
+from agent_harness.session.scoped_constraints import ScopeConstraintError
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.domain_errors import http_error, storage_http_error
 from agent_harness.web.projects import require_trusted_origin
@@ -126,11 +127,15 @@ class EffectiveConstraintRow(BaseModel):
 
 
 class EffectiveProjectMeta(BaseModel):
-    """当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 None。"""
+    """当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 None。
+
+    只带展示用的 `label`（`owner/repo` 或 git 根目录名）——`key`（归一化 git 根路径）
+    是服务端内部定位键，客户端只用 `project !== null` 判是否渲染 PROJECT 组，不再外传
+    （审查 finding S-b4：没人读的字段属推断性泛化）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    key: str
     label: str | None
 
 
@@ -238,7 +243,12 @@ def register_protected_fact_routes(app: FastAPI) -> None:
         service = session_service(app.state.agent)
         try:
             payload = await service.effective_constraints(session_id)
-        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as error:
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            EventLogCorruptError,
+            ScopeConstraintError,
+        ) as error:
             raise http_error(error) from error
         except StorageBusyError as error:
             raise storage_http_error(error) from error
@@ -284,6 +294,7 @@ def register_protected_fact_routes(app: FastAPI) -> None:
             SessionNotFound,
             ProtectedFactNotFound,
             EventLogCorruptError,
+            ScopeConstraintError,
         ) as error:
             raise http_error(error) from error
         except StorageBusyError as error:

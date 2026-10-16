@@ -36,10 +36,13 @@ import os
 import subprocess
 import threading
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from agent_harness.session.errors import SessionServiceError
 
 
 class ConstraintScope(str, Enum):
@@ -64,8 +67,13 @@ def _lock_for(root: Path) -> threading.RLock:
         return lock
 
 
-class ScopeConstraintError(RuntimeError):
-    """规则层存储读写失败（IO / 损坏文件）。"""
+class ScopeConstraintError(SessionServiceError):
+    """规则层存储读写失败（IO / 损坏文件）。
+
+    继承 `SessionServiceError` 才能进 `_DOMAIN_ERROR_STATUS` 单一映射（与同类的
+    `EventLogCorruptError` 同立场：存储损坏 → 409，不可重试）。此前是裸
+    `RuntimeError`，从规则层端点逃出去只能落 FastAPI 默认 500（审查 finding C6）。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,15 +353,28 @@ class ScopedConstraintStore:
         return None
 
 
-__all__ = [
-    "ConstraintScope",
-    "ScopeConstraintError",
-    "ScopedConstraint",
-    "ScopedConstraintStore",
-    "project_label",
-    "resolve_project_key",
-    "scoped_context_facts",
-]
+def normalized_fact_value(value: Any) -> Any:
+    """覆盖判据的值归一：字符串去首尾空白，其余原样（票面 §五.4）。
+
+    **单一 owner**（#1191 审查 finding S-b1）：注入侧（`scoped_context_facts`）与
+    面板侧（`SessionService._merge_effective_rows`）共用这一条判据——两处各写一份
+    会让「同文」的定义分叉（本仓先例：`context/builder.py` 的"单一 owner"注释）。
+    """
+    return value.strip() if isinstance(value, str) else value
+
+
+def covering_fact_id(
+    type_: str, value: Any, candidates: Iterable[tuple[str, Any, str]],
+) -> str | None:
+    """返回覆盖 `(type_, value)` 的候选 `fact_id`；无则 None。
+
+    候选顺序即优先级（会话＞项目＞全局）——由调用方按该顺序拼 `candidates`。
+    `value` 须已过 `normalized_fact_value`。
+    """
+    for candidate_type, candidate_value, candidate_id in candidates:
+        if candidate_type == type_ and candidate_value == value:
+            return candidate_id
+    return None
 
 
 def scoped_context_facts(
@@ -375,9 +396,6 @@ def scoped_context_facts(
     """
     from agent_harness.session.derive import ProtectedFact  # 局部导入避免模块加载环
 
-    def norm(value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
-
     project_rows = (
         store.list(ConstraintScope.PROJECT, project_key=project_key)
         if project_key is not None
@@ -385,23 +403,26 @@ def scoped_context_facts(
     )
     global_rows = store.list(ConstraintScope.GLOBAL)
     active_session = [
-        (fact.type, norm(fact.value))
+        (fact.type, normalized_fact_value(fact.value), fact.fact_id)
         for fact in session_facts
         if getattr(fact, "status", "active") == "active"
     ]
     active_project = [
-        (row.type, norm(row.value)) for row in project_rows if row.status == "active"
+        (row.type, normalized_fact_value(row.value), row.fact_id)
+        for row in project_rows
+        if row.status == "active"
     ]
 
     out: list[Any] = []
     for row in [*project_rows, *global_rows]:
         if row.status != "active":
             continue
-        candidates = active_session if row.scope == "project" else [
-            *active_session,
-            *active_project,
-        ]
-        if any(type_ == row.type and value == norm(row.value) for type_, value in candidates):
+        candidates = (
+            active_session
+            if row.scope == ConstraintScope.PROJECT.value
+            else [*active_session, *active_project]
+        )
+        if covering_fact_id(row.type, normalized_fact_value(row.value), candidates):
             continue  # 已被更高优先级同文约束覆盖 → 不注入
         out.append(
             ProtectedFact(
@@ -416,3 +437,16 @@ def scoped_context_facts(
             )
         )
     return out
+
+
+__all__ = [
+    "ConstraintScope",
+    "ScopeConstraintError",
+    "ScopedConstraint",
+    "ScopedConstraintStore",
+    "covering_fact_id",
+    "normalized_fact_value",
+    "project_label",
+    "resolve_project_key",
+    "scoped_context_facts",
+]
