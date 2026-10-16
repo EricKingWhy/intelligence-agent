@@ -10,6 +10,7 @@ import（父进程抄一份 exit code）。
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import shutil
@@ -22,6 +23,9 @@ CRASH_EXIT_CODE = 9
 def main() -> None:
     payload = json.loads(sys.argv[1])
     root = Path(payload["root"])
+    backend = payload.get("backend", "local")
+    parent_id = payload.get("parent_id", "parent")
+    child_id = payload.get("child_id", "child")
 
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session import Session
@@ -36,22 +40,18 @@ def main() -> None:
     from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
     store = JsonlSessionStore(root=root / "sessions")
-    registry = WorkspaceRegistry(root=root / "sandbox", backend="local")
+    registry = WorkspaceRegistry(root=root / "sandbox", backend=backend)
     meta = SqliteSessionMetaStore(root / "harness.db")
 
     async def scenario() -> None:
         await meta.initialize()
-        parent = Session.start(
-            store, session_id="parent", workspace_registry=registry
-        )
+        parent = Session.start(store, session_id=parent_id, workspace_registry=registry)
         parent.append(USER_MESSAGE, {"content": "第一条"})
         parent.append(RUN_STARTED, {})
         parent.append(MODEL_COMPLETED, {"content": "好的"})
         parent.append(RUN_COMPLETED, {})
         parent.append(USER_MESSAGE, {"content": "第二条"})
-        (registry.default_workspace_root("parent") / "keep.txt").write_text(
-            "父资产", encoding="utf-8"
-        )
+        registry.get(parent_id).write_text("keep.txt", "父资产")
 
         def _crash_mid_copy(src, dst, **kwargs):
             # 拷出半份内容后硬杀：无补偿、无清理，磁盘只留 fsync 过的现场
@@ -63,11 +63,20 @@ def main() -> None:
                 os.fsync(handle.fileno())
             os._exit(CRASH_EXIT_CODE)
 
-        shutil.copytree = _crash_mid_copy
+        if backend == "docker":
+            fork_module = importlib.import_module("agent_harness.session.fork")
+            fork_module._copy_container_workspace = lambda *_args: os._exit(
+                CRASH_EXIT_CODE
+            )
+        else:
+            shutil.copytree = _crash_mid_copy
         await fork_session(
-            store, meta, "parent",
+            store,
+            meta,
+            parent_id,
             boundary_user_message_seq=parent.events[-1].seq,
-            child_session_id="child", workspace_registry=registry,
+            child_session_id=child_id,
+            workspace_registry=registry,
         )
 
     asyncio.run(scenario())

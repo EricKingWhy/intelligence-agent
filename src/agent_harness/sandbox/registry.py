@@ -530,16 +530,25 @@ class WorkspaceRegistry:
         if mapping_file.exists():
             mapping_file.unlink()
 
-    def cleanup_docker_workspace_resources(self, session_id: str) -> None:
-        """Fence hard-delete restores and delete only owned Docker resources.
+    def cleanup_docker_workspace_resources(
+        self,
+        session_id: str,
+        *,
+        fork_recovery: bool = False,
+    ) -> None:
+        """Delete only owned Docker resources, optionally without a hard-delete fence.
 
-        Every owning mapping retains a delete marker until artifact discard; only
+        Hard-delete mappings retain a delete marker until artifact discard; only
         Docker resources are deleted here. Never delete workspace_root. Keeping the
-        mapping also lets failed Docker cleanup retry through the same DELETE.
+        mapping also lets failed Docker cleanup retry through the same DELETE. Fork
+        recovery skips non-Docker mappings and relies on its durable
+        ``fork/in-progress`` event instead of the hard-delete marker.
         """
         with self._workspace_lock(self._owner_lock_key(session_id)):
             mapping = self._read_mapping(session_id)
             if mapping is None:
+                if fork_recovery:
+                    return
                 self._write_mapping(session_id, {
                     "session_id": session_id,
                     "workspace_delete_in_progress": True,
@@ -557,9 +566,12 @@ class WorkspaceRegistry:
             # Older local mappings omitted backend; recovery treats them as local.
             backend = mapping.get("backend", "local")
             sandbox = self._cache.get(session_id)
+            if fork_recovery and backend != "docker":
+                return
             if backend not in {"local", "docker", *LEGACY_BACKENDS}:
-                mapping["workspace_delete_in_progress"] = True
-                self._write_mapping(session_id, mapping)
+                if not fork_recovery:
+                    mapping["workspace_delete_in_progress"] = True
+                    self._write_mapping(session_id, mapping)
                 if sandbox is not None:
                     self._evict_cached_sandbox(sandbox)
                 return
@@ -588,10 +600,12 @@ class WorkspaceRegistry:
                         f"Session '{session_id}' has Docker ownership metadata but no "
                         "matching Docker sandbox instance."
                     )
-            # The marker also blocks local workspace recreation during the
-            # session DB/file deletion window; local host paths are never deleted here.
-            mapping["workspace_delete_in_progress"] = True
-            self._write_mapping(session_id, mapping)
+            # Hard-delete uses the marker to block workspace recreation during the
+            # session DB/file deletion window. Fork recovery keeps its mapping
+            # retryable through the durable fork/in-progress event instead.
+            if not fork_recovery:
+                mapping["workspace_delete_in_progress"] = True
+                self._write_mapping(session_id, mapping)
             if backend == "docker":
                 try:
                     sandbox.delete()

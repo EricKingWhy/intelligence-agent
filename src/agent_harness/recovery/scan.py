@@ -703,6 +703,7 @@ async def scan_unfinished_forks(
     - 每个未完成 child 的**默认形态**工作区（``<root>/workspaces/<sid>``——
       构造规则白名单，与 ``discard_session_artifacts`` 同源，映射指向用户
       目录时绝不碰）。
+    - Docker-backed child 的容器与命名卷（经 WorkspaceRegistry 的 owner lock 与确定性名称校验回收，仅处理该 child 的 harness 自有资源，不碰父会话或其他 owner 的资源）。
 
     child 的 JSONL（含标记）与映射文件**保留**——「fork 未完成」是可读事实，
     续聊对账（``_reconcile_workspace_binding``）按它给 fork 专属提示；父会话
@@ -726,17 +727,23 @@ async def scan_unfinished_forks(
             sid,
         )
     if workspace_registry is not None:
-        reclaimed = await anyio.to_thread.run_sync(
+        failures_by_child = await anyio.to_thread.run_sync(
             _reclaim_fork_residue, workspace_registry, unfinished
         )
         for sid in unfinished:
-            if reclaimed:
+            detail = failures_by_child.get(sid)
+            if detail is None:
                 logger.warning(
                     "启动扫描：未完成 fork child=%s 的暂存/工作区残留已回收", sid
                 )
                 results.append(ForkScanResult(session_id=sid, reclaimed=True))
             else:
-                results.append(ForkScanResult(session_id=sid, reclaimed=False))
+                logger.warning(
+                    "启动扫描：未完成 fork child=%s 的残留回收失败：%s", sid, detail
+                )
+                results.append(
+                    ForkScanResult(session_id=sid, reclaimed=False, detail=detail)
+                )
     else:
         # 无注册表（纯事件层部署）：只报告可见性，无工件可回收。
         results.extend(ForkScanResult(session_id=sid) for sid in unfinished)
@@ -772,25 +779,38 @@ def _detect_unfinished_forks(
 
 def _reclaim_fork_residue(
     registry: WorkspaceRegistry, unfinished: list[str]
-) -> bool:
-    """同步块：清空暂存根 + 回收未完成 child 的默认形态工作区（幂等，best-effort）。
+) -> dict[str, str]:
+    """Clear staging and reclaim each unfinished child's harness-owned resources.
 
     任一步失败只记日志不抛——启动路径的回收失败留给下一次启动重试（标记仍在）。
-    返回是否至少尝试了回收。
+    返回逐 child 的失败详情；Docker mapping 与 fork intent 保留供下次重试。
     """
+    failures: dict[str, list[str]] = {sid: [] for sid in unfinished}
     try:
         staging_root = registry.fork_staging_root()
         if staging_root.is_dir():
-            shutil.rmtree(staging_root, ignore_errors=True)
-    except Exception:
+            shutil.rmtree(staging_root)
+    except Exception as error:
         logger.warning("启动扫描：fork 暂存根清空失败", exc_info=True)
+        for details in failures.values():
+            details.append(f"fork staging cleanup failed: {error}")
     for sid in unfinished:
+        try:
+            registry.cleanup_docker_workspace_resources(sid, fork_recovery=True)
+        except Exception as error:
+            logger.warning(
+                "启动扫描：未完成 fork child=%s Docker 工作区回收失败",
+                sid,
+                exc_info=True,
+            )
+            failures[sid].append(f"Docker workspace cleanup failed: {error}")
         try:
             default_workspace = registry.default_workspace_root(sid)
             if default_workspace.is_dir():
-                shutil.rmtree(default_workspace, ignore_errors=True)
-        except Exception:
+                shutil.rmtree(default_workspace)
+        except Exception as error:
             logger.warning(
                 "启动扫描：未完成 fork child=%s 工作区回收失败", sid, exc_info=True
             )
-    return True
+            failures[sid].append(f"default workspace cleanup failed: {error}")
+    return {sid: "; ".join(details) for sid, details in failures.items() if details}
