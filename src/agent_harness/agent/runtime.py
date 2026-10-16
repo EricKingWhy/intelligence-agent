@@ -1257,6 +1257,10 @@ class AgentRuntime:
         completion_policy: CompletionPolicy | None = None,
         stuck_evidence: StuckEvidencePort | None = None,
         session_budget: SessionBudgetPort | None = None,
+        # #1192：继承的约束/授权（#1176 Phase 3）。仅在该 Runtime 走**默认** ContextBuilder
+        # 时生效（child 路径：factory 不传 context_builder）——作为 scoped_fact_provider
+        # 注入，与 #1191 父会话的项目/全局约束走**同一注入缝**。None = 不注入（既有行为逐字不变）。
+        inherited_facts: list[Any] | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -1353,6 +1357,11 @@ class AgentRuntime:
             # 走同一进程级闸（child 路径 factory 只传 gate 不传 builder，漏这行
             # 会让 child 摘要绕过「进程级在飞 ≤N」）。
             model_call_gate=model_call_gate,
+            # #1192：继承的约束/授权作为"本会话可见的额外事实"注入（#1191 同一缝）。
+            # 冻结列表：每次 build 返回同一份（继承集在子会话构建时已定）。
+            scoped_fact_provider=(
+                (lambda _events: list(inherited_facts)) if inherited_facts else None
+            ),
         )
         if context_builder is not None and context_providers:
             # 双入口注入按身份去重：同一 provider 实例已在 builder 列表里时跳过

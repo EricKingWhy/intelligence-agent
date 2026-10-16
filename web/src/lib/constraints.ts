@@ -15,6 +15,18 @@ export const SCOPE_LABELS: Record<ConstraintScope, string> = {
   global: '我的全局',
 };
 
+/** 事实类型圆点固定色（#1190 issue §四.4）；未知类型回落到 ink-subtle 灰。
+ *  单一 owner 放 `lib/`——`ConstraintsTab` 与 #1192 子详情「约束继承」区共用，
+ *  避免同一份类型色板两处漂移。 */
+export const FACT_TYPE_DOTS: Record<string, string> = {
+  constraint: 'var(--cn-type-constraint)',
+  user_goal: 'var(--cn-type-user-goal)',
+  authorization: 'var(--cn-type-authorization)',
+  work_boundary: 'var(--cn-type-work-boundary)',
+  failed_approach: 'var(--cn-type-failed-approach)',
+  evidence_ref: 'var(--cn-type-evidence-ref)',
+};
+
 /** ISO 时间 → `MM-DD HH:mm`（本地时区）；坏值原样返回，不猜。 */
 export function formatFactTime(iso: string | null): string {
   if (!iso) return '';

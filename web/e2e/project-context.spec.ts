@@ -31,6 +31,11 @@ const ALPHA = 'D:/repos/alpha';
 const project = (page: Page, title: string) =>
   page.locator('.rail-project').filter({ hasText: title });
 
+/** 打开某个项目行的 kebab 操作菜单（#1177 §A：菜单第一项是「新建会话」）。 */
+async function openProjectMenu(page: Page, title: string) {
+  await project(page, title).locator('.rail-project-head .rail-menu-btn').click();
+}
+
 /** 捕获 POST /api/sessions 的请求体（AC1 断言用）。 */
 function captureSessionPosts(page: Page): Record<string, unknown>[] {
   const posts: Record<string, unknown>[] = [];
@@ -177,4 +182,35 @@ test('P3 修回：再次点击已 active 的项目行取消语境 → 通用新�
   await submitTask(page, '随便问一句');
   await expect.poll(() => posts.length).toBe(1);
   expect('cwd' in posts[0]).toBe(false);
+});
+
+test('#1269 武装态显式提示：菜单「新建会话」武装 → 行上出现「新建会话目标」；再点行取消后消失', async ({
+  page,
+}) => {
+  await routeApi(page, {
+    sessions: [],
+    projects: [{ id: 'p1', path: ALPHA, title: '项目 alpha', session_ids: [] }],
+  });
+  await page.goto('/');
+
+  const alpha = project(page, '项目 alpha');
+  const toggle = alpha.locator('.rail-project-toggle');
+
+  // 初始未武装：无提示（新加的元素不能常显）。
+  await expect(alpha.locator('.rail-project-armed-hint')).toHaveCount(0);
+
+  // 菜单「新建会话」= 显式武装项目语境（#1028 的锚定入口）。
+  await openProjectMenu(page, '项目 alpha');
+  await page.getByRole('menuitem', { name: '新建会话' }).click();
+  await expect(toggle).toHaveClass(/project-active/);
+  // #1269：武装不再只隐含在低对比高亮里——行上给出显式「新建会话目标」提示。
+  await expect(alpha.locator('.rail-project-armed-hint')).toBeVisible();
+  await expect(alpha.locator('.rail-project-armed-hint')).toHaveText('新建会话目标');
+  // 可访问名称把 toggle 的可逆性讲清（否则用户看不出"再点一次取消"）。
+  await expect(toggle).toHaveAttribute('aria-label', /再点一次取消/);
+
+  // 再点项目行 = 取消语境（#1028 P3 可逆语义）；提示随之消失。
+  await toggle.click();
+  await expect(toggle).not.toHaveClass(/project-active/);
+  await expect(alpha.locator('.rail-project-armed-hint')).toHaveCount(0);
 });

@@ -39,6 +39,8 @@
 ---
 
 ## 当前工作焦点
+- **施工中（2026-10-17 · #1198）**：PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) 开放。Gate-0、PR smoke、全量 pytest、Vitest/build、双平台 TUI 已通过；全量 E2E 的 AC3 高度差 65.1875px（允许 8px），已加显式 420px 高度约束，等待 Actions 复验。详见 Tracker/月档。
+
 
 - **已集成（2026-10-16 · #1165）**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) 以 merge commit `76bab688136c16e94474bee4397bc19ad803e861` 合入 main；Issue #1165 CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。Gate-0、PR Chromium smoke、gitleaks、Windows installer smoke 和完整 nightly 全绿；Windows TUI 首轮 EBUSY 在重跑后通过。详见 Tracker/月档。
 - **已集成（2026-10-16 · #1241）**：Issue #1241 CLOSED，保留 testing/P3 并移除 in-progress；PR #1245 于 2026-10-16 合入 main（merge 9f93054ec2cee45a3169154fc9246ce3583f1c82，tree 9d90a705a6a8f558d0ff50bf3029853760c139fc）。测试辅助器修复 Uvicorn serve 与独立 ASGI lifespan task 在启动失败/超时时的回收，并修复施工中发现的 P2。聚焦测试 7 passed；Gate-1 云端 8226 passed / 69 skipped / 51 deselected、90% coverage，Vitest/build 通过；PR Gate-0、Chromium E2E smoke、gitleaks 通过。Spec/Standards 修复复审 PASS，P0–P4=0。详见 Tracker 与月档。

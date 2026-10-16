@@ -141,7 +141,7 @@ describe('ContextUsagePanel 手动压缩', () => {
 
     expect(button().disabled).toBe(true);
     expect(document.body.querySelector('.ctx-usage-compact-note')?.textContent).toContain(
-      '水位过低无需压缩',
+      '没有可压缩的早期内容',
     );
     expect(compactSession).not.toHaveBeenCalled();
   });
@@ -158,7 +158,7 @@ describe('ContextUsagePanel 手动压缩', () => {
     });
 
     expect(document.body.querySelector('.ctx-usage-compact-result')?.textContent).toContain(
-      '水位过低，无需压缩',
+      '没有可压缩的早期内容（未改动）',
     );
   });
 });
