@@ -26,7 +26,7 @@ import { uploadAttachment, type AttachmentUploadReceipt } from '../lib/api';
 import { Composer } from './Composer';
 
 /** 提交口签名：`false` = 未受理（保留输入）；`undefined`/`true` = 已受理（清空）。 */
-type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]];
+type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
 type SubmitResult = void | boolean;
 
 const receipt = (id: string): AttachmentUploadReceipt => ({
@@ -124,7 +124,7 @@ describe('#1029 composer 发送失败保留文本', () => {
     await typeText('待裁决会话的文本不能丢');
     pressEnter();
 
-    expect(onSubmit).toHaveBeenCalledWith('待裁决会话的文本不能丢', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('待裁决会话的文本不能丢', false, [], 'session');
     expect(textarea().value).toBe('待裁决会话的文本不能丢');
   });
 
@@ -242,7 +242,7 @@ describe('#1029 composer 发送失败保留文本', () => {
     await act(async () => {});
 
     // 发出去的是 trim 后的正文（既有契约不变）
-    expect(onSubmit).toHaveBeenCalledWith('粘贴来的多行任务', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('粘贴来的多行任务', false, [], 'session');
     // 受理 ⇒ 清空（修复前：前缀比对假 ⇒ 原文留在框里）
     expect(textarea().value).toBe('');
   });
@@ -302,7 +302,7 @@ describe('#1029 composer 发送失败保留文本', () => {
     await typeText('Ctrl+Enter 那条路');
     ctrlEnter();
 
-    expect(onSteer).toHaveBeenCalledWith('Ctrl+Enter 那条路', false, []);
+    expect(onSteer).toHaveBeenCalledWith('Ctrl+Enter 那条路', false, [], 'session');
     expect(textarea().value).toBe('Ctrl+Enter 那条路');
   });
 
@@ -319,7 +319,7 @@ describe('#1029 composer 发送失败保留文本', () => {
     await typeText('带图的失败发送');
     pressEnter();
 
-    expect(onSubmit).toHaveBeenCalledWith('带图的失败发送', false, ['sha256:aa']);
+    expect(onSubmit).toHaveBeenCalledWith('带图的失败发送', false, ['sha256:aa'], 'session');
     // 文本与草稿都还在（草稿没被 clearSent 摘掉）
     expect(textarea().value).toBe('带图的失败发送');
     expect(cards().length).toBe(1);

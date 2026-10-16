@@ -24,7 +24,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 import { uploadAttachment, type AttachmentUploadReceipt } from '../lib/api';
 import { Composer } from './Composer';
 
-type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]];
+type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
 
 const receipt = (id: string): AttachmentUploadReceipt => ({
   attachment_id: id,
@@ -201,7 +201,7 @@ describe('Composer 发送门禁：#1027 上传中阻断', () => {
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith('看图说话', false, ['sha256:aaa']);
+    expect(onSubmit).toHaveBeenCalledWith('看图说话', false, ['sha256:aaa'], 'session');
     // 全就绪发送 ⇒ 没有被剥离的附件 ⇒ 兜底提示不得出现。
     expect(container.querySelector('.composer-attach-dropped')).toBeNull();
     expect(cards()).toHaveLength(0);
@@ -223,7 +223,7 @@ describe('Composer 发送门禁：#1027 上传中阻断', () => {
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith('只发文本', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('只发文本', false, [], 'session');
   });
 });
 
@@ -254,7 +254,7 @@ describe('Composer 发送兜底：#1027 失败附件显式剔除 + 可见提示'
     });
 
     // 只有就绪的进了请求；失败的那张被显式剔除。
-    expect(onSubmit).toHaveBeenCalledWith('带一张能用的发', false, ['sha256:ok']);
+    expect(onSubmit).toHaveBeenCalledWith('带一张能用的发', false, ['sha256:ok'], 'session');
     // 兜底：一次性可见提示——绝不静默丢弃。
     const dropped = container.querySelector('.composer-attach-dropped');
     expect(dropped).not.toBeNull();
@@ -288,7 +288,7 @@ describe('Composer 发送门禁：#1027 复审补齐（Correctness P3 测试缺�
       resolveUpload?.(receipt('sha256:aaa'));
     });
     pressEnter();
-    expect(onSubmit).toHaveBeenCalledWith('回车发送', false, ['sha256:aaa']);
+    expect(onSubmit).toHaveBeenCalledWith('回车发送', false, ['sha256:aaa'], 'session');
   });
 
   it('混合：1 张 ready + 1 张 uploading → 整单被拦截；落定后发送带两张', async () => {
@@ -328,7 +328,7 @@ describe('Composer 发送门禁：#1027 复审补齐（Correctness P3 测试缺�
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith('两张一起', false, ['sha256:a', 'sha256:b']);
+    expect(onSubmit).toHaveBeenCalledWith('两张一起', false, ['sha256:a', 'sha256:b'], 'session');
   });
 });
 
@@ -353,7 +353,7 @@ describe('Composer 兜底提示：#1027 复审 P2（过期文案不清）', () =
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenLastCalledWith('第二次', false, []);
+    expect(onSubmit).toHaveBeenLastCalledWith('第二次', false, [], 'session');
     expect(container.querySelector('.composer-attach-dropped')).toBeNull();
   });
 
@@ -412,7 +412,7 @@ describe('Composer 发送门禁：#1098 pre-intake 窗口阻断（粘贴后立�
     expect(sendButton().disabled).toBe(false);
     expect(container.querySelector('.composer-send-blocked')).toBeNull();
     pressEnter();
-    expect(onSubmit).toHaveBeenCalledWith('看这张图', false, ['sha256:aaa']);
+    expect(onSubmit).toHaveBeenCalledWith('看这张图', false, ['sha256:aaa'], 'session');
   });
 
   it('懒建失败：pre-intake 清零，纯文本仍可发（AC4 不变，#1098 不扩大阻断）', async () => {
@@ -423,7 +423,7 @@ describe('Composer 发送门禁：#1098 pre-intake 窗口阻断（粘贴后立�
     expect(sendButton().disabled).toBe(false);
     expect(container.querySelector('.composer-send-blocked')).toBeNull();
     pressEnter();
-    expect(onSubmit).toHaveBeenCalledWith('纯文本', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('纯文本', false, [], 'session');
     // 失败可见（AC3 同一通道），不留"永远上传中"卡片。
     expect(container.querySelector('.composer-attach-error[role="alert"]')?.textContent).toContain(
       '会话创建失败',
