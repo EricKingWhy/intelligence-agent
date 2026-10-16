@@ -47,6 +47,7 @@ from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
+    RUN_TERMINAL_TYPES,
     SESSION_RESUMED,
     SESSION_STARTED,
     STEER_REQUESTED,
@@ -86,7 +87,31 @@ def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
 
 
 class Session:
-    """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。"""
+    """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。
+
+    **在途聚合 vs 其余聚合**（#1024 / #1055）：`Session.append` 的 seq 是构造时从已
+    加载事件算出的乐观缓存。撞号要不要在 store 锁内当场改号重落，取决于这枚聚合
+    **是否已被交给一个正在跑它的 runtime**——只有那种聚合的撞号才是「旁路写者刚抢走
+    一个空档」，改号即可闭合；其余聚合的号可能是旧快照推出来的，撞号是**结构性**的。
+
+    判据只能在交付点**显式建立**，不能从构造参数推断（#1055：早先按
+    ``events is not None`` 推断，把服务层 `load()` / `resume()` 造出、随后交给 runtime
+    的那一枚误判为非在途，使 #1024 的修复在真实续聊路径上完全失效——同一份 12 轮
+    并发用例换成 load/resume 交付的聚合即丢终态）：
+
+    * `deliver_to_runtime()`——由**交付点**在把聚合交给 runtime 时调用。此后该聚合
+      撞号即在**同一把写锁内**改号重落（见 `_persist_event`／`store.append_event`
+      的 `allocate`——取号、判定、写盘同临界区，杜绝「核对→写」窗口）。交付点仅三处：
+      `RunManager.launch`（服务层创建 / 续聊 / 暂停续跑三条腿共用）、CLI `run` 直接调
+      `runtime.run_stream`、多代理子 runtime。⚠ 这是个**封闭集合**，但集合本身会随
+      生产入口增加而变——`AgentRuntime.run()`（非流式入口）目前**没有生产调用方**，
+      若将来出现，它同样必须在入口处标记 `deliver_to_runtime()`，否则那条路径上的
+      撞号会退化成 fail-loud（#1055 的 P0 就是「漏掉一个交付点」）。
+    * 未标记的聚合——撞号原样抛出，收口归调用方 owner（服务层 `change_model` 一族按
+      `_WRITE_CONFLICT_ATTEMPTS` 有界重试、旁路写者 `SessionEventSink` 自带
+      `_SINK_ATTEMPTS` 重读循环）。本层**不**替它们吞冲突，否则那些上界与失败归因
+      会变成不可观测（BUG-011）。
+    """
 
     def __init__(
         self,
@@ -101,6 +126,11 @@ class Session:
         # 增量 seq 计数器：构造时一次性从已加载事件重算（max+1），append 时 O(1) 分配，
         # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
         self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
+        # 本聚合是否已被**交付点**交给在途 runtime（#1055）。默认关：撞号原样抛出，
+        # 把结构性冲突交给调用方的有界重试与失败归因（BUG-011）。交付点显式调
+        # `deliver_to_runtime()` 打开它——**不从构造参数推断**：服务层 `load()` /
+        # `resume()` 造出的聚合同样会被交给 runtime（#1055 的 P0 就是这么漏掉的）。
+        self._delivered_to_runtime: bool = False
         self._sandbox: Sandbox | None = sandbox
         # 追加监听器（ADR-0016 §2.1）：事件持久化后同步回调——web 层据此实时
         # 广播 durable 事实（含工具执行期间追加的 output_delta）。回调异常被
@@ -216,6 +246,9 @@ class Session:
     ) -> SessionEvent:
         """只追加一条会话事实事件，**不触发 resume 副作用**。
 
+        本入口是**旁路写者**形状（加载一枚新聚合再追加）：它交给调用方自己的有界
+        重试，不打 `terminal`（#1061 的终态保底只给在途 runtime 的 `end_run`）。
+
         ``resume()`` 会修复 dangling tool_call 并 append ``session/resumed``——
         那是「恢复会话」的语义。写一条无关事实（排队消息 / 模型切换 / 取消排队 /
         中断标记）时套用它，会把 run 在途的 tool_call 判成悬空并注入合成
@@ -235,6 +268,20 @@ class Session:
             event_type, dict(data),
             run_id=run_id, agent_id=agent_id, step_id=step_id,
         )
+
+    def deliver_to_runtime(self) -> None:
+        """把本聚合标记为「已交给在途 runtime」（#1055）。
+
+        由**交付点**调用，仅三处：`RunManager.launch`（服务层创建 / 续聊 / 暂停续跑
+        三条腿共用）、CLI `run` 的 `runtime.run_stream`、多代理子 runtime。
+
+        标记之后 `append` 撞号即在 store **同一把写锁内**改号重落（#1062 裁决 A）：
+        此时这枚聚合就是 runtime 正在写的那一枚，撞号只可能是旁路写者抢走了空档。
+        未标记的聚合保持原样抛出，收口归调用方——`change_model` 一族 /
+        `SessionEventSink` 各有自己的有界重试与失败归因（BUG-011），本层替它们吞掉
+        会让那些上界不可观测。
+        """
+        self._delivered_to_runtime = True
 
     @classmethod
     def load(
@@ -321,6 +368,7 @@ class Session:
         block_id: str | None = None,
         source_event_ids: list[str] | None = None,
         _mark_dangling: bool = False,
+        terminal: bool = False,
     ) -> SessionEvent:
         """追加一条事件：分配 seq、同步写 JSONL、更新内存。
 
@@ -367,8 +415,11 @@ class Session:
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
-        self._persist_event(event, notify=True)
-        return event
+        # 返回**实际落盘的那一枚**：已交付 runtime 的聚合撞号会在 store 锁内改号
+        # （#1062），调用方（`end_run` 的返回值、流式镜像、测试断言）必须拿到与事件流
+        # 一致的 event_id/seq 对，否则「返回的 seq」与「盘上的 seq」静默分叉。未交付的
+        # 聚合不换号（撞号原样抛出）。
+        return self._persist_event(event, notify=True, terminal=terminal)
 
     def register_protected_fact(
         self,
@@ -404,19 +455,57 @@ class Session:
             return existing
         return self.append(TASK_PROTECTED_FACT, data)
 
-    def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
-        """提交一条已构造事件，并在需要时通知实时观察者。
+    def _persist_event(
+        self, event: SessionEvent, *, notify: bool, terminal: bool = False,
+    ) -> SessionEvent:
+        """提交一条已构造事件，并在需要时通知实时观察者；返回**已落盘的那一枚**。
 
         Store 是 durable 写入 owner，Session 仍拥有内存投影与 seq 计数器。
         顺序不可交换：store 成功后才更新内存/seq，避免失败留下空洞；history
         adoption 通过 ``notify=False`` 保持离线 seed 语义。
+
+        **seq 分配在 store 写锁内（#1062 裁决 A）**：本聚合的计数器只是「盘上最大
+        seq」的乐观缓存，任何旁路写者（后台记忆作业的 ``SessionEventSink``、服务层
+        的旁路追加）都能在两次 append 之间把号占掉。旧实现（#1024 起）在会话侧
+        **自旋重投**（撞号 → 读盘面 → 换号 → 再 append），有两个残余：调用线程是
+        runtime 事件循环协程（``_drive``）时，持续占位下一次 append 可纯自旋最长 1.0s、
+        期间同 loop 的 SSE 心跳/其它会话全部停摆；对手不收手时事件一次都不前进。
+
+        裁决 A 把**取号、判定、写盘**收进 store 的**同一临界区**（会话写锁 + #1063 的
+        跨进程文件锁）：撞号不再是会话侧要处理的异常，而是 store 在锁内直接改号到
+        锁内读到的空档再落盘（``store.append_event`` 的 ``allocate``）。自旋与墙钟预算
+        随之删除——**没有可插入的窗口**，收敛由构造保证（Kafka 由 broker 在 append 时
+        分配 offset、SQLite WAL 单写者锁、EventStoreDB ``WrongExpectedVersion``／
+        Marten ``ConcurrencyException`` 的存储层 fail-closed 同型：分配必须在写锁内）。
+
+        触发条件（沿用 #1055 的快照门，A **不改**这条边界）：只有被**交付点**显式交给
+        在途 runtime 的聚合（``_delivered_to_runtime``）才在锁内改号；未交付的聚合
+        撞号仍原样抛 ``SeqConflict``，收口归调用方 owner（``change_model`` 一族的
+        ``_WRITE_CONFLICT_ATTEMPTS``、sink 的 ``_SINK_ATTEMPTS``），本层替它们吞掉会让
+        那些上界与失败归因不可观测（BUG-011）。**终态写者**（``terminal=True``，只有
+        ``end_run``）即使未交付也改号——它没有「下次 append」可用，放它不落等于 run 在
+        盘上永远悬空（#1061 的保底通道，A 是它的推广而非替换）。
         """
-        self._store.append_event(self.session_id, event)
+        persisted = self._store.append_event(
+            self.session_id, event,
+            # `allocate`：撞号时在 store 锁内改号再落盘。已交付聚合 + 终态写者都吃
+            # 这条路径；未交付的非终态写者仍 fail-closed（快照门，BUG-011）。
+            allocate=self._delivered_to_runtime or terminal,
+        )
+        # store 返回**实际落盘的那一枚**：锁内分配会改号，不接住它就会「内存/返回值是
+        # 旧号、盘上是新号」——`_events`、`_next_seq` 与调用方（`end_run` 的返回值、
+        # 流式镜像）三处一起分叉。**不回落到本地事件**：`append_event` 的契约是
+        # `SessionEvent`（docstring 的「:returns: 实际落盘的那一枚」），全仓替换件
+        # （含测试替身）都返回它；`None` 只可能来自契约外的实现，那种情况下回落到
+        # 旧号反而会静默分叉（#1102 删掉了这条例外分支——它已无调用方可走）。
+        event = persisted
         self._events.append(event)
-        # 写盘成功后才推进计数器——失败不消耗 seq
-        self._next_seq += 1
+        # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：锁内分配
+        # 会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进冲突分支
+        # （#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。
+        self._next_seq = event.seq + 1
         if not notify:
-            return
+            return event
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
         for listener in self._listeners:
             try:
@@ -426,6 +515,7 @@ class Session:
                     "session listener 回调失败（session=%s, event=%s）",
                     self.session_id, event.type,
                 )
+        return event
 
     def adopt_history(
         self,
@@ -552,7 +642,7 @@ class Session:
                 data=moved_data,
                 source_event_ids=moved_sources,
             )
-            self._persist_event(moved, notify=False)
+            moved = self._persist_event(moved, notify=False)
             adopted.append(moved)
             adopted_by_id[moved.event_id] = moved
             if event.type in {USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED}:
@@ -635,6 +725,7 @@ class Session:
     def begin_run(self, *, agent_id: str = "default",
                   agent_profile: str = "main",
                   model: str | None = None,
+                  reasoning_effort: str | None = None,
                   budget: dict[str, Any] | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
@@ -653,6 +744,14 @@ class Session:
         不能放在 ``model/started``（流式专属、永不持久化），见
         ``docs/adr/0034-request-side-model-identity.md``。
 
+        ``reasoning_effort``（`#1093`）：本轮**请求侧**选中的推理档位名（harness
+        语义档位，如 "minimal"/"standard"/"deep"；不是 provider wire 值）。`None`
+        时**不落该键**——与 ``model``/``budget`` 同一「不可得 ≠ 默认值」口径
+        （`11 §6.1`：账目缺失是 unavailable，不是默认档；web 的「默认」位置正是
+        「请求省略该字段」）。机制来源 LangSmith ``ls_invocation_params``（run
+        metadata 记录每次调用的 provider 参数供事后按配置过滤/对比），落点抄仓内
+        #198 ``agent_profile`` 写进 ``run/started.data`` 的加法模式。
+
         ``budget``（`#312` T4）：本逻辑 run 的 **run 作用域** 预算快照（ceiling 等）。
         `None` **不落键**——"没有配 ceiling"是"没有这条事实"，不是"ceiling=0"
         （`11 §6.1`：不可得 ≠ 0）。`run/paused` 的 limits 快照由它重建，
@@ -663,6 +762,8 @@ class Session:
         data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
         if model is not None:
             data["model"] = model
+        if reasoning_effort is not None:
+            data["reasoning_effort"] = reasoning_effort
         if budget is not None:
             data["budget"] = budget
         self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
@@ -699,7 +800,53 @@ class Session:
         与上下文超限路径直接 append 的 reason+message 形状一致；只接受调用方
         **自己拼**的常量/模板，绝不透传 provider 回显原文
         （口径见 docs/adr/0033-run-failure-attribution-surface.md §2.1）。
+
+        **终态保底（#1061，A 后是通用路径的子集）**：本方法是唯一以 `terminal=True`
+        进漏斗的写者。撞号时 store 在**锁内**改号再落盘（`allocate`，见
+        `JsonlSessionStore.append_event`）——持续占位的写者没有可插入的窗口。终态是
+        「这个 run 结束了吗」的唯一 durable 事实，放它不落就等于 run 在盘上永远悬空。
+        这**不是**无限重试：锁内改号只有一次，store 若仍判定不可写（如已硬删）异常照样
+        抛出，绝不假成功。
         """
+        # 终态幂等（#1103，CAS）：该 run 已有终态 ⇒ 拒写并**返回既存的那一枚**。
+        # 同一 run 的两次 `end_run`（重入的失败臂 / 取消臂）此前会落下
+        # `run/completed` 与 `run/failed` 两条，durable 真相层自相矛盾——按
+        # `RUN_TERMINAL_TYPES` 投影终态的下游会看到**自相矛盾的终态集合**。
+        # 逐下游实读（口径不一，不得写成「都会看到两条」；本清单非穷举）：
+        # `progress.py` 两条都发（`run_completed` 里程碑 + `run_failed` 失败项）；
+        # `interrupt.py` / `task.py` 是 pop / discard（第二条 no-op）；
+        # `multiagent/provider.py` 取 `next(reversed(...))`、`store.py` 的
+        # `_terminal_trace_field` 只看末条事件（两者都 last-wins，取到哪条看落盘顺序）。
+        # ⚠ `fork.py` 是**后果最重**的一个：`_run_open_delta` 是**累计计数器**
+        # （`run/started` +1、终态 −1），同一 run 落两条终态 ⇒ 净 −1 ⇒
+        # `find_fork_boundaries` 丢掉该点之后的锚点、`_validate_run_complete`
+        # 直接抛「负计数」（本机实测：单终态 `[1, 4]`，补一条多余的 `run/failed`
+        # 后变 `[1]` + `ForkBoundaryError`）。
+        # 判据与 `run/resumed` 的 `expected_version` 同族：写前核对
+        # 当前状态，不符即拒（EventStoreDB 的 expected-revision /
+        # Marten 的 `FetchForWriting` 同型）。⚠ 「同族」只指**判据形状**
+        # （写前核对当前状态、不符即拒），**不指**持久层保证：
+        # `run/resumed` 的 `expected_version` 比对的是**从事件流重放的**
+        # `PausedRun.version`（`run_budget.py` 的 `validate_resume`），
+        # 本 CAS 读的却是本实例的**内存投影** `self._events`——而 `end_run`
+        # 的 CAS 与写盘之间不持任何锁，投影更新（`_persist_event` 的
+        # `self._events.append`）在 store 写锁**之外** ⇒ 只覆盖「同实例内、
+        # CAS 与写盘之间无交错」的形状；同实例多线程并发、或另一实例
+        # （各自 `_events` 都没有终态）仍可各落一条——本条注释即其登记处；
+        # 根治要把判据移进 store 写锁，不属本票范围。
+        # 生产侧 `AgentRuntime._terminal_written` 只护住
+        # 它自己的调用链，不是 Session 层的契约——真相层的守卫要落在真相层。
+        # 返回既存而非抛错：同一 run 重复收口是**幂等**语义，不是调用方犯错。
+        existing = next(
+            (
+                e
+                for e in self._events
+                if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
         if usage_total:
@@ -733,4 +880,5 @@ class Session:
             event_type,
             data,
             run_id=run_id,
+            terminal=True,
         )

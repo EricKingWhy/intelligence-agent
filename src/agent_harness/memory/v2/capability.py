@@ -243,9 +243,11 @@ class MemoryV2Service:
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
+        fallback_enabled: bool | None = None,
     ) -> MemorySettingsV2:
         return await self._store.update_settings(
             trusted, extraction_enabled=extraction_enabled, recall_enabled=recall_enabled,
+            fallback_enabled=fallback_enabled,
         )
 
     async def purge_expired_tombstones(self) -> int:

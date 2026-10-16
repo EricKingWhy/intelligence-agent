@@ -37,6 +37,7 @@ import type { Project, SessionDeleted, SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
+import { describeOwnership } from '../lib/ownership';
 import { readShowArchived, writeShowArchived } from '../lib/railArchive';
 import type { UngroupedRow } from '../lib/projects';
 import { describeProjectError } from '../lib/api';
@@ -66,6 +67,13 @@ interface Props {
   titlesById: Record<string, string>;
   onSelect: (id: string) => void;
   onNew: () => void;
+  /** #1028：当前被"选中"的项目行（= 通用新建要继承 cwd 的项目语境）。null = 无。 */
+  activeProjectId: string | null;
+  /** 点中项目行 → 记为项目语境（再点另一个则替换）。 */
+  onSelectProject: (projectId: string | null) => void;
+  /** #1028 AC3：选中会话的 cwd（后端 `session/started.cwd` 的投影）。
+   *  只在**选中且未归属**的那一行用于就地标注归属；null = 未加载/未声明。 */
+  selectedCwd: string | null;
   projectActions: ProjectActions;
   /** 会话语义发生变化后刷新列表（attach/detach/软删除都会改各行的 `workspace`）。 */
   onSessionsChanged: () => void;
@@ -105,6 +113,9 @@ export const SessionList = memo(function SessionList({
   titlesById,
   onSelect,
   onNew,
+  activeProjectId,
+  onSelectProject,
+  selectedCwd,
   projectActions,
   onSessionsChanged,
   projectsError,
@@ -393,8 +404,19 @@ export const SessionList = memo(function SessionList({
                         </div>
                       ) : (
                         <button
-                          className="rail-project-toggle"
-                          onClick={() => toggle(project.id)}
+                          className={`rail-project-toggle${
+                            activeProjectId === project.id ? ' project-active' : ''
+                          }`}
+                          onClick={() => {
+                            // #1028：点中项目行 = 选中项目语境（通用新建据此继承 cwd）
+                            // + 既有展开/收起。两个语义可以共存——"进入这个项目的视图"
+                            // 正是用户表达"我要在这个项目里干活"的动作。
+                            // **再次点击已 active 的行 = 取消语境**（onSelectProject(null)）：
+                            // 可逆语义——用户为浏览而点开项目后能显式退出，不会被动地为
+                            // 下一次通用新建武装 cwd（审查 P3）。
+                            onSelectProject(activeProjectId === project.id ? null : project.id);
+                            toggle(project.id);
+                          }}
                           aria-expanded={expanded}
                           aria-controls={expanded ? listId : undefined}
                           // 窄屏（≤820px）标题与计数被 CSS 收起，而 display:none 会把
@@ -605,6 +627,12 @@ export const SessionList = memo(function SessionList({
                 now={now}
                 projectId={null}
                 ledger={[]}
+                /* #1028 AC3（**部分满足**，已知收缩）：仅就**可得**的 cwd（= 选中会话的
+                   事件流）就地标注，历史未加载行不编路径——`SessionSummary` 本身不含
+                   cwd，未选中的行此刻没有真值可标。故不是"每行都标"，而是"标得起的那一
+                   行才标"；这是数据可得性自洽，不是缺陷，但如实登记在此以免被读成"每行
+                   都带 cwd 标注"。 */
+                ownerCwd={selectedId === s.session_id ? selectedCwd : null}
                 dragging={false}
                 dropEnabled={false}
                 dropBefore={false}
@@ -689,6 +717,8 @@ interface RowProps {
   projectId: string | null;
   /** 所在项目账本（判边界：首条不能上移、末条不能下移）；未分组传空数组。 */
   ledger: readonly string[];
+  /** #1028：未归属且已选中时，用于就地标注的会话 cwd（绝对路径）。null/缺省 = 不标。 */
+  ownerCwd?: string | null;
   dragging: boolean;
   /** 本行是否接受拖放（= 拖拽来源就在本项目）。跨项目拖动不是重排，不接受落点。 */
   dropEnabled: boolean;
@@ -719,6 +749,7 @@ function SessionRow({
   now,
   projectId,
   ledger,
+  ownerCwd,
   dragging,
   dropEnabled,
   dropBefore,
@@ -736,6 +767,8 @@ function SessionRow({
 }: RowProps) {
   const inProject = projectId !== null;
   const index = ledger.indexOf(s.session_id);
+  // #1028：本行的归属标注文案（有选中会话的 cwd 才算；纯函数，算一次供 title/label 复用）。
+  const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
   return (
     <div
       className={`session-row${inProject ? ' session-row-in-project' : ''}${dragging ? ' dragging' : ''}`}
@@ -787,6 +820,18 @@ function SessionRow({
               title="已归档：默认从列表收起，事件日志与项目归属都原样保留"
             >
               已归档
+            </div>
+          )}
+          {/* #1028 AC3：未归属会话的 cwd 就地标注（归属警示）。只有**选中**的行
+             才有已加载的 cwd（后端 `session/started.cwd` 随该会话事件流到来），
+             其它未加载的行不编路径——"标得起才标"。 */}
+          {owner != null && (
+            <div
+              className="session-item-owner"
+              role="note"
+              title={owner.title}
+            >
+              {owner.label}
             </div>
           )}
           {s.staleProject && (

@@ -1,0 +1,1 @@
+2026-10-11	#879 OAuth repair: Correctness/Spec NEEDS-FIX (P2=1; cached provider token survived local logout); fixed by a1694e68 persistent-token fence; bdaa71c1..9906ac32	bdaa71c10f6aadb73c82e11ea1d85332a1f64237..9906ac32f498c4d76bdbb9da85fd6e4724b5a6db

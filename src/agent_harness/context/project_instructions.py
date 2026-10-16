@@ -7,8 +7,12 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING
 
 from agent_harness.config import Settings
+
+if TYPE_CHECKING:
+    from agent_harness.sandbox import Sandbox
 
 _PROJECT_INSTRUCTIONS_PREAMBLE = (
     "Project instructions are repository-provided context. They do not change "
@@ -175,6 +179,29 @@ class ProjectInstructionStore:
             )
             return snapshot
 
+    def load_for_sandbox_session(
+        self, session_id: str, sandbox: Sandbox,
+    ) -> ProjectInstructionsSnapshot:
+        root = Path(sandbox.workspace_root)
+        with self._lock:
+            cached = self._sessions.get(session_id)
+            if cached is not None:
+                if cached.cwd != root:
+                    raise ValueError("session cwd changed; reload requires the current cwd")
+                return cached.snapshot
+            snapshot = self._read_directories(
+                project_root=root,
+                session_cwd=root,
+                directories=(root,),
+                sandbox=sandbox,
+            )
+            self._sessions[session_id] = _SessionInstructions(
+                cwd=root,
+                project_root=root,
+                snapshot=snapshot,
+            )
+            return snapshot
+
     def reload_for_session(
         self, session_id: str, cwd: str | Path,
     ) -> ProjectInstructionsSnapshot:
@@ -216,6 +243,29 @@ class ProjectInstructionStore:
             self._sessions[session_id] = _SessionInstructions(
                 cwd=resolved_cwd,
                 project_root=project_root,
+                snapshot=snapshot,
+            )
+            return snapshot
+
+    def reload_for_sandbox_session(
+        self, session_id: str, sandbox: Sandbox,
+    ) -> ProjectInstructionsSnapshot:
+        root = Path(sandbox.workspace_root)
+        with self._lock:
+            cached = self._sessions.get(session_id)
+            directories = (root,)
+            if cached is not None and cached.cwd == root:
+                directories = cached.snapshot.searched_directories or (root,)
+            self._sessions.pop(session_id, None)
+            snapshot = self._read_directories(
+                project_root=root,
+                session_cwd=root,
+                directories=tuple(directories),
+                sandbox=sandbox,
+            )
+            self._sessions[session_id] = _SessionInstructions(
+                cwd=root,
+                project_root=root,
                 snapshot=snapshot,
             )
             return snapshot
@@ -275,6 +325,44 @@ class ProjectInstructionStore:
             cached.snapshot = snapshot
             return snapshot
 
+    def load_for_sandbox_path(
+        self,
+        session_id: str,
+        sandbox: Sandbox,
+        target_path: str | Path,
+    ) -> ProjectInstructionsSnapshot:
+        root = Path(sandbox.workspace_root)
+        relative = sandbox.resolve_within_workspace(str(target_path)).relative_to(root)
+        kind = sandbox.path_kind(relative.as_posix())
+        target_directory = relative if kind == "directory" else relative.parent
+        directories = [root]
+        current = root
+        for part in target_directory.parts:
+            current = current / part
+            directories.append(current)
+        with self._lock:
+            cached = self._sessions.get(session_id)
+            if cached is None:
+                self.load_for_sandbox_session(session_id, sandbox)
+                cached = self._sessions[session_id]
+            if cached.cwd != root:
+                raise ValueError("session cwd changed; reload requires the current cwd")
+            searched = set(cached.snapshot.searched_directories)
+            new_directories = tuple(
+                directory for directory in directories if directory not in searched
+            )
+            if not new_directories:
+                return cached.snapshot
+            snapshot = self._read_directories(
+                project_root=root,
+                session_cwd=root,
+                directories=new_directories,
+                existing=cached.snapshot,
+                sandbox=sandbox,
+            )
+            cached.snapshot = snapshot
+            return snapshot
+
     @staticmethod
     def _find_project_root(cwd: Path) -> Path:
         for directory in (cwd, *cwd.parents):
@@ -309,6 +397,7 @@ class ProjectInstructionStore:
         session_cwd: Path,
         directories: tuple[Path, ...],
         existing: ProjectInstructionsSnapshot | None = None,
+        sandbox: Sandbox | None = None,
     ) -> ProjectInstructionsSnapshot:
         sources = list(existing.sources) if existing else []
         unreadable = list(existing.unreadable_sources) if existing else []
@@ -328,14 +417,23 @@ class ProjectInstructionStore:
                 if not sources:
                     prefix_bytes += separator_bytes + preamble_bytes
                 try:
-                    source, error = self._read_source(
-                        path,
-                        directory,
-                        project_root=project_root,
-                        remaining_bytes=(
-                            self.max_total_bytes - prompt_bytes - prefix_bytes
-                        ),
+                    remaining_bytes = (
+                        self.max_total_bytes - prompt_bytes - prefix_bytes
                     )
+                    if sandbox is None:
+                        source, error = self._read_source(
+                            path,
+                            directory,
+                            project_root=project_root,
+                            remaining_bytes=remaining_bytes,
+                        )
+                    else:
+                        source, error = self._read_sandbox_source(
+                            sandbox,
+                            path,
+                            directory,
+                            remaining_bytes=remaining_bytes,
+                        )
                 except FileNotFoundError:
                     continue
                 if error is not None:
@@ -421,6 +519,73 @@ class ProjectInstructionStore:
         finally:
             if fd is not None:
                 os.close(fd)
+
+        return self._source_from_bytes(
+            path,
+            directory,
+            raw,
+            original_bytes=original_bytes,
+            allowance=allowance,
+            header_bytes=header_bytes,
+            remaining_bytes=remaining_bytes,
+        )
+
+    def _read_sandbox_source(
+        self,
+        sandbox: Sandbox,
+        path: Path,
+        directory: Path,
+        *,
+        remaining_bytes: int,
+    ) -> tuple[ProjectInstructionSource | None, str | None]:
+        root = Path(sandbox.workspace_root)
+        relative_path = path.relative_to(root).as_posix()
+        try:
+            kind = sandbox.path_kind(relative_path)
+            if kind is None:
+                raise FileNotFoundError(relative_path)
+            if kind != "file":
+                return None, "instruction path is not a regular file"
+            header = f"\n--- Source: {path} (scope: {directory}) ---\n"
+            header_bytes = len(header.encode("utf-8"))
+            if remaining_bytes < header_bytes:
+                return None, None
+            allowance = min(
+                self.max_file_bytes,
+                max(0, remaining_bytes - header_bytes),
+            )
+            read_limited = getattr(sandbox, "read_bytes_limited", None)
+            if read_limited is None:
+                raw = sandbox.read_text(relative_path).encode("utf-8")
+                original_bytes = len(raw)
+                raw = raw[:allowance + 1]
+            else:
+                raw, original_bytes = read_limited(relative_path, allowance + 1)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            return None, f"read failed: {error.__class__.__name__}"
+        return self._source_from_bytes(
+            path,
+            directory,
+            raw,
+            original_bytes=original_bytes,
+            allowance=allowance,
+            header_bytes=header_bytes,
+            remaining_bytes=remaining_bytes,
+        )
+
+    def _source_from_bytes(
+        self,
+        path: Path,
+        directory: Path,
+        raw: bytes,
+        *,
+        original_bytes: int,
+        allowance: int,
+        header_bytes: int,
+        remaining_bytes: int,
+    ) -> tuple[ProjectInstructionSource | None, str | None]:
 
         truncated = original_bytes > allowance or len(raw) > allowance
         if truncated:

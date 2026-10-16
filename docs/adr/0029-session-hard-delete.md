@@ -69,7 +69,7 @@ def delete(self) -> None:
 **"这个会话曾经存在过"只在结构化日志里可查**（D7），不在领域数据里留痕——刻意不与"真相源是文件系统"
 的口径打架。
 
-### D2：删除面是**白名单**，且**永不读映射**（本 ADR 的安全核心）
+### D2：宿主路径按白名单删除，Docker 资源按映射所有权删除（本 ADR 的安全核心）
 
 只允许删除**用 `workspace_dir + session_id` 自己拼出来**的三条路径：
 
@@ -79,10 +79,7 @@ def delete(self) -> None:
 | `<workspace_dir>/workspaces/<sid>.json` | 沙箱映射记录 |
 | `<workspace_dir>/workspaces/<sid>/` | 默认形态的会话工作区目录（harness 自建） |
 
-**禁止**把映射里的 `workspace_root` 当作删除目标（它可能指向用户仓库）。因此**不调用**
-`WorkspaceRegistry.delete()`；改为新增一个**不读映射**的窄方法（`discard_session_artifacts`），
-并保留 `delete()` 的"无生产调用方"状态。会话 id 必须先过 `validate_session_id`
-（`[A-Za-z0-9_-]+`，路径穿越防护），否则 `../../` 这类输入会让"只删自己拼的路径"这条保证失效。
+**禁止**把映射里的 `workspace_root` 当作宿主目录删除目标（它可能指向用户仓库）。本地与 legacy PSEC 后端仍只调用 `discard_session_artifacts()` 删除固定白名单，不使用 `workspace_root`。Docker 私有工作区另由 `cleanup_docker_workspace_resources()` 清理：它校验映射的 session 身份、后端和确定性容器/卷名，只按这些名字删除资源，不把映射路径作为删除目标；映射保留到最终工件清理步骤，使 Docker 失败时硬删请求可重试。会话 id 必须先过 `validate_session_id`（`[A-Za-z0-9_-]+`，路径穿越防护），否则 `../../` 这类输入会让固定路径白名单失效。
 
 回归锁（**必须有**）：造一个 cwd 会话指向一个临时真实目录（内含文件）→ 硬删 → 断言该目录
 **仍然存在且内容逐字节不变**（`tests/web/test_session_delete_api.py`）。
@@ -101,9 +98,9 @@ def delete(self) -> None:
 用户的真实目录两种形态下都不会被引用。（该坑本身**不在本票修**：它不影响删除的正确性，
 改它属于会话工作区语义，另开票。）
 
-### D3：顺序 = 先 DB、后文件；每一步幂等，重跑即自愈
+### D3：Docker 资源先清，随后先 DB、后文件；每一步幂等，重跑即自愈
 
-- **DB 行先删**（`session_meta` / `checkpoints` / `operations` / `workspace_sessions`），**文件后删**。
+- Docker 后端先清该会话拥有的容器和私有卷；若清理失败，事件日志与映射仍在，调用方可重试。随后 **DB 行先删**（`session_meta` / `checkpoints` / `operations` / `workspace_sessions`），**文件后删**。
 - 理由：崩溃窗口的后果不对称。
   - "DB 已删、文件还在" → 会话**仍可见**（列表是 FS 驱动）但丢了恢复辅助数据；**重跑 `DELETE` 可自愈**（每步幂等）。
   - "文件已删、DB 行还在" → 会话从列表消失，但 `session_meta` 残留会让 lineage **冒出幽灵父节点**
@@ -214,7 +211,7 @@ guard，任何用过子 Agent 的会话（很常见）都将永远无法删除�
 - **误删不可逆**，且没有任何技术兜底（无墓碑/无回收站）。风险全部由**入口层的显式确认**承担——
   这是本 ADR 记下的**依赖**，不是"以后再补"的待办：前端半必须实现不可恢复的二次确认（#172 前端 AC）。
 - 与 ADR-0025 的 Non-Goals 冲突条目（「会话硬删除」）随之作废。
-- `WorkspaceRegistry.delete()` 继续**没有**生产调用方；本 ADR 新增的安全替代是 `discard_session_artifacts()`。
+- `WorkspaceRegistry.delete()` 继续**没有**生产调用方；本地/PSEC 的安全清理入口是 `discard_session_artifacts()`，Docker 私有资源由 `cleanup_docker_workspace_resources()` 按确定性所有权名清理。
 - 删除后 lineage 中若存在委派子会话，它们会显示为根（D5）；SESSION 记忆成为不可达残留（D6）。
 - 可观测性：删除是**结构化日志**里的一条事实，不是会话事件；`GET /api/sessions` 不再返回它。
 

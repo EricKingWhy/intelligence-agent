@@ -9,6 +9,7 @@ ExecResult 是 Sandbox 层的原生返回，不感知 ToolResult——Tool 层�
 
 from __future__ import annotations
 
+import shutil
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -191,6 +192,54 @@ class Sandbox(ABC):
                 f"路径 '{path}' 解析为 '{resolved}'，越出 workspace '{workspace}' 边界，拒绝访问"
             )
         return resolved
+
+    def path_kind(self, path: str) -> str | None:
+        """Return the workspace path's kind when the backend can inspect it.
+
+        kind 词表（调用方只依赖以下取值，见 #1167）：
+        - `"file"`：普通文件；
+        - `"directory"`：目录；
+        - `"symlink"`：符号链接（Docker 等非宿主语义后端；宿主语义后端
+          的 `resolve_within_workspace` 会跟随链接故一般不返回此值）；
+        - `"special"`：其他已存在但非文件/目录/链接的类型（FIFO、socket、
+          device 等；Docker 后端）；
+        - `None`：路径不存在，或后端无法检查（如越界路径）。
+        """
+        try:
+            resolved = self.resolve_within_workspace(path)
+        except OSError:
+            return None
+        if not isinstance(resolved, Path):
+            return None
+        if resolved.is_dir():
+            return "directory"
+        if resolved.is_file():
+            return "file"
+        return None
+
+    def export_to_host(self, dest: Path) -> None:
+        """把 workspace 的**副本**物化到宿主目录 `dest`（#1048 AC5/AC7）。
+
+        非抽象（**不并入 ADR-0001 冻结的 6 个抽象方法契约**，同 `path_kind` /
+        `shell_environment`）：基类给保守的「`workspace_root` 目录复制」默认，
+        容器后端（`DockerSandbox`）覆写为容器内 tar 快照。**容器内工作区**的导出与
+        跨会话复制经本方法（调用方不靠 `getattr` 嗅探后端能力）；宿主目录语义的
+        local 后端 fork 仍走 `shutil.copytree` + 同卷 rename 的既有发布路径。
+
+        `dest` 被当作**内容副本的目标目录**（已存在则并入，不覆盖 `dest` 本身），
+        与源各自独立、不共享 inode。
+
+        成员安全（#1048 AC6）：复制用 `symlinks=True`——符号链接**原样重建**，绝不
+        解析、不写穿。默认的 `symlinks=False` 会把逃逸链接解引用成外部内容的实体
+        副本，既泄漏又绕过导出树的成员校验；`symlinks=True` 让链接文本保留到由
+        `build_export_archive` 统一 fail-closed 拒绝。不安全特殊项（设备/FIFO/socket）
+        仍由 `shutil.copytree` 抛 `shutil.Error`（通用复制失败）或
+        `shutil.SpecialFileError`（FIFO 等特殊文件；与 `shutil.Error` 为兄弟类，
+        同继承 `OSError`）拒绝。
+        """
+        shutil.copytree(
+            self.workspace_root, Path(dest), dirs_exist_ok=True, symlinks=True
+        )
 
     @property
     @abstractmethod

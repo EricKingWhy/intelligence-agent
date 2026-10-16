@@ -1,0 +1,1 @@
+2026-10-13	#1106 memo 守卫随聚焦口径更新：StepDetail.memo.test.tsx「点 Timeline 行」用例改判——#1106 起聚焦带信封 run_id 的事件时 focusedRunId 变化 ⇒ agentProfile 派生重算是新语义（徽标跟随聚焦 run），allTools/脉冲仍不重算（focus 不是它们的键）。沙箱第一轮 vitest 1742/1743 红证（旧断言 profile 不重算）→ 改后 1743/1743。本行只做机械归属。	c36e69fcf13626a73e0f8d4dff44e43b06448a6c..9e5101868b84ec8c29c222a97471d304b6c26c70

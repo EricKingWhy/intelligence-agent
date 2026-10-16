@@ -12,7 +12,8 @@ import type { ModelCatalogEntry } from '../lib/api';
 import { Composer } from './Composer';
 
 const noop = () => {};
-const base = { streaming: false, onSubmit: noop, onCancel: noop };
+// #1015：懒建入口是 Composer 的必填 prop；这些 SSR 契约测试不涉及附图，给空实现。
+const base = { streaming: false, onSubmit: noop, onCancel: noop, onEnsureSession: async () => null };
 
 const CATALOG: ModelCatalogEntry[] = [
   { name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true },

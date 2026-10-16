@@ -1133,6 +1133,7 @@ def test_docker_exec_reports_reader_thread_after_container_stop_failure():
     """A stop exception must not skip the final reader-thread liveness check."""
     from agent_harness.sandbox.docker import DockerSandbox
 
+    reader_started = threading.Event()
     release_reader = threading.Event()
     reader_done = threading.Event()
 
@@ -1141,8 +1142,9 @@ def test_docker_exec_reports_reader_thread_after_container_stop_failure():
 
         def __iter__(self):
             yield (b"ready", None)
+            reader_started.set()
             try:
-                release_reader.wait(5)
+                release_reader.wait()
             finally:
                 reader_done.set()
 
@@ -1159,14 +1161,37 @@ def test_docker_exec_reports_reader_thread_after_container_stop_failure():
     sandbox._container = container
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
+    cancel_event = threading.Event()
+    outcome = {}
+
+    def execute():
+        try:
+            outcome["result"] = sandbox.exec(
+                "sleep forever", timeout=30, cancel_event=cancel_event,
+            )
+        except Exception as error:  # noqa: BLE001
+            outcome["error"] = error
+
+    exec_thread = threading.Thread(target=execute)
+    reader_finished = False
 
     try:
-        with pytest.raises(RuntimeError, match="output stream worker did not stop"):
-            sandbox.exec("sleep forever", timeout=0.05)
+        exec_thread.start()
+        assert reader_started.wait(_SCHED_GRACE_SECONDS)
+        cancel_event.set()
+        exec_thread.join(_SCHED_GRACE_SECONDS)
+        assert not exec_thread.is_alive()
+        assert isinstance(outcome.get("error"), RuntimeError)
+        assert "output stream worker did not stop" in str(outcome["error"])
+        container.kill.assert_called_once_with()
+        container.wait.assert_called_once_with()
     finally:
+        cancel_event.set()
         release_reader.set()
+        exec_thread.join(_SCHED_GRACE_SECONDS)
+        reader_finished = reader_done.wait(1)
 
-    assert reader_done.wait(1)
+    assert reader_finished
 
 
 class _StreamingDockerExec:

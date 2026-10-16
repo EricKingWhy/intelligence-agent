@@ -1,0 +1,553 @@
+# #1074 闸门有效性的守卫盲区：把真机判别器接进 CI
+
+> 承接 #914 修复轮登记的残余 ②③④⑤（`docs/live_gate/w21/58-issue-914-service-in-use-gate.md` §6）。
+> 本票只处理**不需要用户裁决**的四条；残余 ①（闸门无「目录归属」判据）是行为变更，按 `AGENTS.md`
+> §9.1.1 仍待裁决，本票不动。
+
+## 1 现状与实测根因
+
+### 1.1 票面（#1074，`bug`，2026-10-12 由 #914 修复轮开）
+
+五条残余，本票处理 ②③④⑤：
+
+- **②（主）**：构建期规则 `validateProcessGateGuards()` 钉的是「调用出现在哪里」，不是「闸门有效」。
+- **③**：`installer-directories.nsh` 的注释写「is called for every install」，而调用点在 `customInit`
+  的 `${If} $iaRecoveryPending != "1"` 之内（`installer.nsh:135-138`）⇒ 恢复挂起时既不 stage 也不调用闸门。
+- **④**：`appBranch` 规则锚字面量 `${If} $iaProbeFound == "1"`，改写成 `StrCmp` 形式即绕过。
+- **⑤**：真机腿都在**已有安装树**上，**没有一条**覆盖 `$INSTDIR` 不存在（首次安装）的路径。
+- **①**：闸门无「目录归属」判据（**本票不动**，见 §3）。
+
+### 1.2 根因（消融实测，2026-10-13）
+
+两轴审查各自独立写出的**同一条**变异：在 `iaRequireNoRunningProduct` 函数体首行加
+
+```
+StrCmp $iaProbeFound "0" 0 +2
+Return
+```
+
+即「闸门**被调用**了，但缺 app exe 时**立刻返回**」——首轮 Axis A 的缺陷原地复活。实测：
+
+| 判别器 | 变异在位 | 说明 |
+| --- | --- | --- |
+| `validateProcessGateGuards()`（构建期） | **绿** | 只读文本，看不到函数体语义 |
+| `installer-scripts.test.mjs` 全部用例 | **112/112 绿** | 同上 |
+| `run-stage-damaged-probe.ps1`（真机腿） | **红（9 条断言）** | 唯一判别器 |
+
+而这条唯一的判别器**不在任何 workflow 里**：`windows-installer-smoke.yml` 只跑
+`test-windows-installer.mjs`，其 `paths` 甚至不含 `desktop/test/**` ⇒ 这类回归只有人工、依赖本机
+NSIS 缓存的脚本在守。
+
+### 1.3 上游对照（2026-10-13 实测）
+
+| 上游 | 有驱动？ | CI 里跑？ |
+| --- | --- | --- |
+| `app-builder-lib@26.15.3`（本仓构建固定版本） | 有（`templates/nsis/include/allowOnlyOneInstallerInstance.nsh`） | **无测试**：`templates/nsis/**` 下 test/spec 文件数 = **0** |
+| DeepSeek Harness `5badb150` | 有（`apps/desktop/scripts/installer.nsh` + `window-frame.cpp`，6 模式） | **无接线**：`.github/workflows/` 命中 `installer|makensis|nsis` 的文件数 = **0** |
+
+两条独立来源一致：**没有上游在 CI 里跑安装器判别器** ⇒ 本仓 #885 的 `windows-installer-smoke.yml`
+已在上游之前；判别器部分**没有可抄的接线**。
+
+## 2 方案依据（协议 §1.3 块）
+
+- **来源**（≥2 独立，均为**本地实测**而非笔记转述）
+  1. `app-builder-lib@26.15.3`（本仓构建固定版本；`desktop/node_modules/app-builder-lib` 实测
+     `"version": "26.15.3"`）——`templates/nsis/include/allowOnlyOneInstallerInstance.nsh` 的
+     `IS_POWERSHELL_AVAILABLE` / `FIND_PROCESS` / `KILL_PROCESS` / `_CHECK_APP_RUNNING`；
+     `find templates/nsis -name '*.test.*' -o -name '*.spec.*'` = **0**。
+  2. DeepSeek Harness `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（本地克隆 `D:\reference\deepseek-harness`，MIT）——
+     `apps/desktop/scripts/installer.nsh` 与 `apps/desktop/installer/window-frame.cpp:56-85` 的自研插件驱动；
+     `grep -rln -i 'installer|makensis|nsis' .github/workflows/` = **0 个文件**。
+  3. **本仓既有机制**（非外部来源，作判定对齐）：`desktop/test/harness/teeth-check.mjs` /
+     `teeth-check-guards.mjs`（#901/#905/#919 建立）——「变异守卫 + 要求守卫测试变红」已是本仓既有约定。
+- **机制摘要**
+  - 静态规则 `validateProcessGateGuards()` 读的是**文本**，最多钉住「调用出现在哪里」；「被调用的函数还在不在分类」
+    是**语义**，文本规则看不到（消融实测：变异在位 ⇒ 112/112 构建期用例绿，§1.2）。
+  - 所以本票**不新造静态规则**，而是把**已经存在、已被 #914 审查过**的真机判别器
+    `run-stage-damaged-probe.ps1` 接进 CI，让它**真的被执行**；并把它覆盖不到的地方**写进守卫自己的
+    docstring**（与残余 ④ 的「规则范围被高估」同型）。
+  - 两条上游都没有 CI 接线 ⇒ 接线部分无上游可抄，取最小实现：一条 step + 一条 `paths` 过滤项。
+- **契合点**（`AGENTS.md` §7）
+  - 不变量 11（Sandbox / Permission 是 Runtime 边界，不靠 Prompt）：闸门与判别器都在安装器 runtime 边界，不改产品协议；
+  - 不变量 21（Optional capability 故障不拖垮 Core）：闸门查不清时**中止安装器**而非放行；
+  - 不新增依赖：探针要的 makensis（electron-builder 缓存）与 node 由**既有烟测步骤**建立，step 只排在其后。
+- **判定**：`REUSE`（探针脚本、真机腿机制、变异判据全部复用 #914 已审查过的资产）+ `BUILD`（最小：一条 CI step
+  + 一条 path 过滤项）。不引入新 Provider / 依赖 / 框架。
+- **License**：不新增第三方代码。`app-builder-lib` MIT（**构建期工具**，非声明依赖，见 #914 §2 的 License 段）。
+- **来源披露（§3.1）**：本领域已在 `docs/agents/reference-sources.md`「Windows 安装器 / 在占用进程处理」
+  补录（#914 批次），本票不新增领域、不新增来源条目；两条来源与 #914 同源（同一领域）。本环境
+  `WebFetch` 不可用（实测三次 `Model request failed`），故**未引任何网络来源**，也不编造读取日期。
+
+## 3 决策与范围
+
+- **D1**：采用**候选①（把真机判别器接进 CI）**，不采用候选②（再加一条静态规则）：静态规则本质是形状匹配，
+  加规则只能覆盖它看得见的形状；而消融已证明「语义」这一类它看不见（§1.2）。
+- **D2**：**不新增静态规则**；只把既有规则的锚从「分支的一种拼写」改成「变量本身」（残余 ④），
+  并把规则的**覆盖边界**写进它自己的 docstring。
+- **非目标（本票不动）**：残余 **①**（闸门无「目录归属」判据）——`iaProbeFound == "1"` 曾是的唯一归属信号
+  随裁决 D6 一起消失，在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，
+  答案 `11` 会 `Stop-Process -Force` 掉那些进程。这是**行为变更**，按 `AGENTS.md` §9.1.1 提交用户裁决；**2026-10-12 用户裁决：不修**（依据见 §6 行 ① 后的说明段）。
+- **非目标（另开票）**：`customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身没有任何守卫（§6）。
+
+## 4 实现
+
+| 提交 | 文件 | 做了什么 | 依据 |
+| --- | --- | --- | --- |
+| `b352b106` | `.github/workflows/windows-installer-smoke.yml` | 新增真机腿 step（排在两条烟测之后，`if: !inputs.compile_only`）+ `paths` 增加 `desktop/test/harness/r1-drivers/**` | 残余 ②；§2 判定 |
+| `b352b106` | `desktop/scripts/build-windows-installer.mjs` | `appBranch` 锚从字面量分支改为变量 `$iaProbeFound`；docstring 写明规则**看不见**什么 | 残余 ④ |
+| `b352b106` | `desktop/test/installer-scripts.test.mjs` | 新增 Failure 用例：`StrCmp` 形式重拼的分支把调用移到其后 ⇒ 必须红 | 残余 ④ |
+| `b352b106` | `desktop/test/harness/teeth-check-guards.mjs` | 变异锚随规则改；`GUARD_BASELINE_SHA256` 同笔更新 | 该 harness 自身要求 |
+| `b352b106` | `desktop/installer/installer-directories.nsh` | 注释更正：闸门跑在**与它守的 move 同一条路径**上（`customInit` 的 `${If}` 同时跳过两者） | 残余 ③ |
+| `b352b106` | `run-stage-damaged-probe.ps1` + `stage-damaged-probe.nsi` | 新增 `first-install` 腿（`$INSTDIR` 不存在） | 残余 ⑤ |
+| `ed9f1e0a` | `run-stage-damaged-probe.ps1` | 新增 `damaged-mixed` 腿：**运行时 + 客户端同时在跑** ⇒ 必须拒绝且**一个都不杀** | 首轮 Axis A P3-1（§5.6） |
+| `ed9f1e0a` | `desktop/scripts/build-windows-installer.mjs` | docstring 的「does NOT cover」列全三种规则接受、但会退回缺陷的形状，并写明各自被哪一层兜住；规则内联注释不再声称覆盖「每一种分支形式」 | 首轮 Axis A P4-1 / Axis B P4 |
+| `ed9f1e0a` | `stage-damaged-probe.nsi` | 头注释改为「one or two real Windows processes」（`damaged-mixed` 腿留下两个进程） | 首轮 Axis A P3-1 |
+| `ed9f1e0a` | `desktop/test/harness/teeth-check-guards.mjs` | `GUARD_BASELINE_SHA256` 随规则文本改而同步（`11e9d28f…` → `8f7bbb05…`） | 该 harness 自身要求（改了守卫文本就要同步基线） |
+| `ed9f1e0a` | `.github/workflows/windows-installer-smoke.yml` | 去掉**两处**硬编码用例数（step 注释与 `paths` 注释）；**第三处**（「为什么必须在 CI 里跑」段里引 §1.2 消融读数的 `112/112 绿`）**保留**为读数记录——它是测量结果不是判据；该处的漂移风险按 §5.8 登记 | 首轮 Axis B P4 |
+
+## 5 验证读数
+
+### 5.1 冻结与 blob（协议 §8.1 第 1 条）
+
+- base `42bb109ae91d9352c047f51dda834568bb1e826d`（tree `d514e1359a9f33b4d8694ec8e36f249ccb605a60`，= 当时的 `origin/main`）。
+- 首轮冻结 tip `b352b1060d2c1361f71f250e0c5b4d20daa1c070` / tree `b0beba482ea2304121ff45f667729d0a306e2d2a`。
+- 修复轮冻结 tip `ed9f1e0a75511f9ceae060e911b31c8d44420404` / tree `5ff56b5e5fbdfc6d2e8e6fb32e5a19787d3b9e7d`。
+- 逐文件 blob（修复轮 tip；首轮与之不同的标在括号里）：
+  `.github/workflows/windows-installer-smoke.yml` `c480a100`（首轮 `0bdc7872`）、
+  `desktop/installer/installer-directories.nsh` `fc7fc0cf`、
+  `desktop/scripts/build-windows-installer.mjs` `19332cfa`（首轮 `35d93450`）、
+  `run-stage-damaged-probe.ps1` `73c1913e`（首轮 `8869c5d7`）、
+  `stage-damaged-probe.nsi` `2558e601`（首轮 `24ac59ab`）、
+  `teeth-check-guards.mjs` `66da5b47`（首轮 `cc976480`）、
+  `installer-scripts.test.mjs` `5714bd72`。
+
+### 5.2 消融红证 / 变异（`run-stage-damaged-probe.ps1 -DirectoriesSource`，生产宏原文注入）
+
+在**主工作树之外**的副本（`C:\ia-probe-1074\abl`，`git clone --no-hardlinks`）里造变异，
+用 `-DirectoriesSource` 指向副本的 `installer-directories.nsh`；主工作树的 `.nsh` 全程未被改动。
+
+| 变异 | 构建期套件 | 真机腿（6 腿） |
+| --- | --- | --- |
+| M1 闸门体内提前返回（残余 ②） | **112/112 绿** | **红 9 条**（含 `damaged-mixed`、`damaged-runtime` 进程存活、三条 `answer=` 为空） |
+| M2 分类器 12→11 塌缩（`-eq $iaAll.Count` → `-ge 1`） | **112/112 绿** | **红 1 条**：仅 `[damaged-mixed] the bundled runtime … was stopped` |
+| M3 同上取恒真的 `-ge 0` | **112/112 绿** | **红 1 条**：同上 |
+
+M2/M3 只有 `damaged-mixed` 腿看得见——单进程腿两种答案的退出码相同（都拒绝），分辨不出来。
+这正是否掉首轮 Axis A P3-1 的读数（§5.7）。修复前（5 腿）M1 是 **7 条**断言红；加 `damaged-mixed` 后 **9 条**。
+
+### 5.3 focused / 单测 / 真机腿
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 构建期规则套件 | `node --test test/installer-scripts.test.mjs`（`desktop/`） | **112 tests / 112 passed / 0 failed** |
+| 守卫牙齿（变异） | `node test/harness/teeth-check-guards.mjs` | **存活变异 = 0**，逐字节还原 `identical=true` |
+| 真机腿（装机文本） | `run-stage-damaged-probe.ps1` | 六腿全绿：`intact-clean exit=0 answer=0 probe=1`（被 rename 成 `.old-{guid}`）、`first-install exit=0 answer=0 probe=0`（不 stage、不建目录）、`damaged-runtime exit=0 answer=0 probe=0`（进程 `gone`）、`damaged-mixed exit=2`（两进程 `alive`）、`damaged-rootproc exit=2`（进程 `alive`）、`damaged-unknown exit=2` |
+| 工作流语法 | `yaml.safe_load(...)` | 解析成功；`jobs.installer-smoke.steps` = 9；**制表符 0 个** |
+
+### 5.4 Gate-0（隔离副本 `C:\ia-probe-914\gate-tree`）
+
+- 首轮冻结树 `b352b106`：**5/6**，❌ 仅 `coverage`，其 ❌ 集合**恰为该笔**；收据
+  `docs/gate/b352b1060d2c1361f71f250e0c5b4d20daa1c070.json`（`tracked_matches_head=true`、`untracked_total=0`）。
+- 修复轮冻结树 `ed9f1e0a`：**5/6**，❌ 仅 `coverage`，❌ 集合 = `{b352b106, ed9f1e0a}`（**恰为本批两笔代码提交**）；
+  收据 `docs/gate/ed9f1e0a75511f9ceae060e911b31c8d44420404.json`。
+- **收尾树（记账笔）6/6 PASS**——`7abac831`（证据 + 台账 4 行 + tracker / PHASE_STATUS / 月档）与 `fbda7108`（补 #1078 引用）各跑一次裸全量 Gate-0，均 **6/6**，`coverage` 随台账行落盘转绿；收据
+  `docs/gate/7abac8310628b1670ac7d8f04a469eaf3acc80ce.json`（墙钟 50.9s）、`docs/gate/fbda71081e96bb6663852731370d01a4ca235322.json`（墙钟 27.9s），两份均 `tracked_matches_head=true`、`untracked_total=0`。
+- **同步合并树 `3b886bf3`（先回后正，§14.6）：6/6 PASS**；收据 `docs/gate/3b886bf3bc314e90480a1401cc22d44581ae752b.json`（墙钟 28.4s、`tracked_matches_head=true`）。详见 §5.9。
+- **`021a2bea`（合并树记账笔；收据由其后一笔 `015c5f5f` 记录）：6/6 PASS**；收据 `docs/gate/021a2bea3c7e75979616568b42ec7288337c4c56.json`（墙钟 74.7s > 60s 预算目标——预算只是目标，不改变判定；`tracked_matches_head=true`）。
+- **裁决笔 `ef04c592`（残余 ① 记账，docs-only）：6/6 PASS**；收据 `docs/gate/ef04c59299774e9db5012b7b5737927680ec835c.json`（墙钟 43.9s、`tracked_matches_head=true`、`untracked_total=0`）。
+- 满足协议 §8.2 第 4 条的「除 `coverage` 外全绿 + ❌ 集合 ⊆ 本批代码笔」判据 ⇒ 机械面清零后才派两轴。
+- **为何在隔离副本里跑**：主工作树含另一条线的未提交改动（` M dev.sh`），`gate0.py` 的落盘前置会 fail-closed
+  拒绝落盘（§8.7 第 3 条），而其处置建议明写「**不要** `git stash`」。副本为真仓 `git bundle` 克隆 + CI 同形依赖，
+  `.pth` 指向副本自己的 `src`。**未触碰 `dev.sh`。**
+
+### 5.5 全量门禁（冻结树 `ed9f1e0a`，隔离副本，单跑无并发）
+
+单飞顺序跑（不并发：`#1069` 记录过后端套件与 playwright 同机并跑造成负载型假红）。
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 后端全量 | `.venv/Scripts/python.exe -m pytest -q -p no:randomly` | **7775 passed / 43 skipped / 51 deselected / 1 failed**（2037.90s） |
+| desktop | `npm test`（`node --test`） | **288 tests / 286 passed / 2 skipped / 0 failed** |
+| 前端单测 | `npx vitest run` | **119 files / 1681 passed / rc=0**（隔离复跑） |
+| 前端构建 | `npx vite build` | **rc=0**，`✓ built in 47.11s`（只有 chunk > 500 kB 的既有告警） |
+| E2E | `npx playwright test --workers=2` | **NOT_RUN**（见下） |
+
+- **后端唯一红 = 台账机械瞬态**：`tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`
+  —— 该用例断言「**真实台账**跑覆盖闸门 exit 0」，本批台账行落盘前必然红（其 docstring 自述
+  「修复笔钉死 431 行后，闸门必须绿」）。**与 `#914` 同一形状**（「唯一红 = 台账未落盘的机械瞬态」）。
+  本批台账行落盘后此例转绿（§5.4 的 ❌ 集合 = `{b352b106, ed9f1e0a}`，恰为本批两笔代码提交）。
+- **前端单测首轮 rc=1 是负载型假红**：首轮 84 files / 1442 passed + **35 个 `Unhandled Error`**，
+  全部是 `[vitest-pool]: Failed to start forks worker … Timeout waiting for worker to respond`
+  —— 即 **35 个测试文件根本没起来**（84 + 35 = 119）。隔离复跑 **119 files / 1681 passed / rc=0**，
+  与 `#914` / `#1025` 记录的 1681/119 基线一致 ⇒ 首轮红是 worker 启动超时，不是用例失败。
+- **E2E 为何 NOT_RUN**：`playwright.config.ts` 的端口是**单一字面量** `const PORT = 5173`
+  且 `reuseExistingServer: false`；`preflight-port.mjs` 实测 5173 被**另一个 clone 的常驻
+  vite dev server** 占用（PID 9620，仓库根 `…\.codex\worktrees\issue-729-windows-sandbox\intelligence-agent`），
+  按 `#209` **拒绝复用**、e2e 未启动。端口无 env 覆盖 ⇒ 不能换端口。本批 `web/` 与 base
+  **逐字节相同**（`git diff --stat 42bb109a..ed9f1e0a -- web/` 输出为空），该车道对本 diff 无信号；
+  故如实记 NOT_RUN，不写成「绿」。
+
+**合并树（`3b886bf3`）重跑**（先回后正 merge `7f4222f6` 之后；同一隔离副本，单跑无并发）：
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 后端全量 | `.venv/Scripts/python.exe -m pytest -q -p no:randomly` | **7779 passed / 43 skipped / 51 deselected / 0 failed**（2012.39s） |
+| desktop | `npm test`（`node --test`） | **288 tests / 286 passed / 2 skipped / 0 failed** |
+| 前端单测 | `npx vitest run` | **119 files / 1681 passed / rc=0**（88.12s） |
+| 前端构建 | `npx vite build` | **rc=0** |
+| E2E | `npx playwright test --workers=2` | **540 passed / rc=0**（16.0m） |
+
+- 后端从冻结树的 7775P/1F 变为 **7779P/0F**：+4 = #1075 新增用例；唯一那条红（台账机械瞬态）随台账行落盘消失。
+- **E2E 这次真跑且全绿**（`540 passed / 16.0m / 0 flaky`）：合并时 5173 已空闲——冻结树那轮它被另一 clone 的常驻 dev server 占着（见上）。
+- desktop 的 dot 报告器把 62 个 suite 标记也画成字符（62 + 288 = 350 个点），**测试数**以 spec 报告器的 `tests 288 / pass 286 / skipped 2 / fail 0` 为准（本次实测复核）。
+
+### 5.6 首轮独立审查（两轴，范围 `42bb109a..b352b106`）
+
+两轴均为**非作者只读**子代理，各自独立、互不可见；自写变异都在主工作树**之外**的副本里做。
+
+- **Axis A（Correctness/Spec）：FAIL，P0-P3 = 0/0/0/2 + P4×2**
+  - **P3-1**：修复轮声称的判别器**仍分辨不出**分类器答案 12 与 11——五条腿里每条至多一个进程在安装根下，
+    两种答案都以「拒绝」收场 ⇒ 把 12 弱化成 11 的变异（`-eq $iaAll.Count` → `-ge 1` / `-ge 0`）活过
+    构建期规则、全部 112 条用例**和**五腿探针；生产上它的后果是「客户端 + 运行时同时在跑」时**先杀掉 bundled
+    运行时再拒绝**，而设计是**拒绝且一个都不杀**（裁决 D1/D4）。
+  - **P3-2**：`customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身**没有任何守卫**——把它取反
+    （正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入
+    `installer-directories.nsh`）。**属既有缺口，非本 diff 引入**；登记为新残余（§6）。
+  - **P4-1**：规则 docstring 的覆盖声明仍偏宽：实测两条「规则绿」的放置变异（把调用移到
+    `StrCpy $iaFinalDirectory $INSTDIR` 之前；把分支改写成 `${FileExists}` 形式并把调用移进去）。
+  - **P4-2**：无「方案依据」块（票面 AC 点名要求）。
+- **Axis B（Standards/仓规）：FAIL，P0-P3 = 0/0/1/1 + P4×2**
+  - **P2**：无「方案依据」块（票面 AC 明写「施工前按 §1.3 先做方案依据调研并落『方案依据』块」）。
+  - **P3**：本 tip 尚无交付/覆盖记录（台账行、`docs/gate/<sha>.json`、tracker / PHASE_STATUS / 月档）——
+    **属交付债，非缺陷**；并实测该 tip 的状态**如实**（提交信息未声称任何门禁 / 审查结论）。
+  - **P4**：硬编码「112」两处会漂；docstring 写「reads」而机制是「首次文本出现（读或写）」。
+- **两轴都取到结论行**，未使用 §8.3 第 4 / 5 条的替代通道。
+- 两轴独立复核并确认：`GUARD_BASELINE_SHA256` 与守卫文本相符；首轮 `.nsh` 注释更正**逐字准确**
+  （与 `installer.nsh:135-138` 一致）；`first-install` 腿**非空转**（结果文件缺失会失败，`answer=0` 只能来自
+  `Pop $iaRunningProduct`）；CI step 不会静默跳过或错序；`main` 的保护只有 `gate0` 一项必需检查
+  （`gh api .../branches/main/protection` 实测），故工作流头注释「不是必需状态检查」为真；
+  （**§5.8 F4 更正**：本项首轮曾写「`r1-drivers/` worktree 为 LF、**统一**」，实测为混合）`r1-drivers/`
+  目录的 **index 全为 LF**（`git ls-files --eol` 实测 10 个文件全 `i/lf`），worktree 是**混合**
+  状态（6 个 `w/crlf` + 4 个 `w/lf`）——这是既有状态、非本笔引入（本笔改动的两个文件
+  `run-stage-damaged-probe.ps1`、`stage-damaged-probe.nsi` 在 base 与 tip 均为 `w/lf`，blob 均 LF，
+  无整文件 EOL 重写）。
+
+### 5.7 修复轮（`ed9f1e0a`）：处置与红证
+
+| 首轮 finding | 处置 |
+| --- | --- |
+| Axis A P3-1（12/11 分辨不出） | **加 `damaged-mixed` 腿**；M2/M3 实测：构建期 112/112 绿、**只有该腿**红（§5.2） |
+| Axis A P4-1（docstring 覆盖声明偏宽） | docstring 的「does NOT cover」列全三种形状 + 各自兜底层；规则内联注释不再声称覆盖「每一种分支形式」 |
+| Axis B P4（硬编码 112 / 「reads」措辞） | 去掉**两处**用例数（第三处保留为读数记录，§4）；「reads」措辞**登记不修**——修它要引入修后重审之后的代码提交，需独立审查轮（§5.8 末段） |
+| Axis B P2 + Axis A P4-2（无方案依据块） | 本文件 §2 |
+| Axis B P3（交付记录） | 最终记账笔（台账行 + 收据 + tracker / PHASE_STATUS / 月档） |
+| Axis A P3-2（`customInit` 包装无守卫） | **本票不修**（非本 diff 引入、且要改 `installer.nsh`）；登记为残余并另开票（§6） |
+| 残余 ①（无目录归属判据） | **本票不动**（行为变更，待 §9.1.1 裁决） |
+
+### 5.8 修复轮修后重审（两轴，范围 `b352b106..46e150b0`）
+
+按 §8.3 第 4 条：修后重审每轴 1 轮，两轴都必须关掉既有 finding、且不得零发现。派发预算（§8.3 第 1 条）：
+目标 tip `46e150b0`、树 `88d4ff3f…`、每轴报告上限 12 条、墙钟 60 min、变异上限 5 条/轴、**无论如何必须给结论行**。
+只读（§8.3 第 2 条）：变异一律在**主 worktree 之外**做副本，收尾报 `git status --short` + `git hash-object`。
+
+- **Axis A（正确性 / 规格一致）：`APPROVE_WITH_FINDINGS`，P0–P3 = 0/0/0/0 + P4×1**
+  - 四条首轮 finding 的处置**逐条实测复验成立**（不是采信自述）：
+    - **P3-1**（分类器分辨不出 12 与 11）：自写变异 M2（`-eq $iaAll.Count` → `-ge 1`）⇒ 构建期规则**绿**、
+      真机腿**只有 1 条红**（`[damaged-mixed]`），其余五腿全绿 ⇒ 生产后果（先杀运行时再拒绝）确被该腿唯一捕获，修复成立。
+    - **P4-1**（docstring 覆盖声明）：逐形状实测——shape2（分支改写成 `${FileExists}` 且调用移入）⇒ 规则**绿**、
+      `#1045` 语句表**红**、真机腿 **10 条红**；shape3（调用移到 `StrCpy $iaFinalDirectory` 之前）⇒ 规则**绿**、真机腿 **7 条红**。
+      两条「规则绿」的形状确被声明的兜底层兜住 ⇒ 声明准确。
+    - **P4-2 / Axis B P2**（方案依据）：§2 的 ≥2 来源**独立复核相符**（`app-builder-lib@26.15.3` 的
+      `allowOnlyOneInstallerInstance.nsh` 存在且 `templates/nsis` 下 test/spec = 0；DSH `5badb150` 的
+      `.github/workflows` 命中 `installer|makensis|nsis` = 0）。
+    - **P3-2**（`customInit` 包装无守卫）：「**非本 diff 引入**」成立——`git diff --name-only b352b106~1 46e150b0
+      -- desktop/installer/installer.nsh` 为空，`:136-138` blame 到 `387948595`（#915/#1023/#1034，早于本批）
+      ⇒ 登记为残余 + 另开票成立。
+  - 自写变异 4 条，**失败集合互不相同**（满足 §8.3 第 4 条「覆盖不同检查点且失败集合不同」）：M1 闸门体内提前返回
+    ⇒ 真机腿 **9 红**；M2 12→11 塌缩 ⇒ 仅 **1 红**；shape2 ⇒ 规则绿 / `#1045` 表红 / 腿 **10 红**；shape3 ⇒ 腿 **7 红**。
+  - 基线六腿全绿，与 §5.3 一致。
+  - **新 finding（P4）**：`windows-installer-smoke.yml` 的「为什么必须在 CI 里跑」段仍硬编码「112/112 绿」，
+    与本笔「去掉硬编码用例数」的自述不一致（同 Axis B F2）。
+- **Axis B（仓规 / 标准）：`APPROVE_WITH_FINDINGS`，P0–P3 = 0/0/0/1 + P4×3**
+  - **F1（P3，交付债、非缺陷）**：本 tip 尚无台账行 / tracker / PHASE_STATUS / 月档条目——已在 §4 / §5.7 声明为
+    「最终记账笔」，属已声明的顺序；台账未落盘前 `test_real_ledger_passes_after_the_431_fix` 仍红，与 §5.5 一致。
+    **本轮末尾的记账笔即其处置**。
+  - **F2（P4）**：`windows-installer-smoke.yml` 仍有一处硬编码「112」（基线共 3 处，修复只清 2 处）⇒ 与 §4 / §5.7 自述不一致。
+  - **F3（P4）**：规则内联注释未写明「锚是**首次文本出现**」；抛出的错误信息仍写 `reads $iaProbeFound`（机制是「首次文本出现（读或写）」）。
+  - **F4（P4）**：§5.6 的 EOL 断言不准确（首轮写「worktree 为 LF、统一」，实测混合）——**已就地更正**（§5.6 已加标记）。
+  - 自写变异 3 条：M1 把 `probeUse` 锚退回字面量 `${If} $iaProbeFound == "1"` ⇒ 套件 **111/112，唯一红是新用例**
+    「refuses a gate call that a re-spelled app-executable branch moves behind it」⇒ **新用例对锚点改动有鉴别力、
+    首轮所述 `StrCmp` 绕过已被堵住**；M2 在副本 `.nsh` 的函数体首行插入提前返回 ⇒ 构建期 **112/112 全绿**（独立复现 §1.2）；
+    M3 `teeth-check-guards.mjs` ⇒ 存活变异 0、`identical=true`。
+  - Scope Lock：本批仅动 7 个代码文件 + docs；`dev.sh` 未被本批触碰（`git log/diff 42bb109a..HEAD -- dev.sh` 为空）；无顺手重构。
+    EOL/BOM：全部改动文件 `i/lf`、无 BOM、无整文件 EOL 重写。`DOC_PATTERN`：新增 docs 仅 `.json` / `.md`。
+    License：未引入第三方代码；`app-builder-lib` 实测 `26.15.3` / MIT / 不在 `desktop/package.json`、不在 `THIRD_PARTY_NOTICES.md`
+    ⇒ §2 说法准确。提交卫生：`46e150b0` 如实记 e2e `NOT_RUN` 并留 §5.8 / §6 占位。
+- **两轴都取到结论行**，未使用 §8.3 第 4 / 5 条的替代通道（不自行判通过）。
+- **F2 / F3 的处置（登记不修）**：两条均为 P4（注释 / 文案）。修它们会引入**修后重审之后的代码提交**；该提交在覆盖闸门里
+  必须由一次新审查归属（`scripts/check_review_coverage.py` 的 docs-only 只认 `docs/**` 等路径，`.github/workflows/*.yml`
+  与 `desktop/**` 都不算），而 §8.3 第 4 条把修后重审封顶在每轴 1 轮 ⇒ 为两处 P4 文案花掉「一票一次」的发现阶段补审配额
+  不合比例（§9.2）。故**如实登记、本票不改**；§4 / §5.7 的相关自述已改为逐处准确（两处已去、第三处保留为读数记录）。
+
+### 5.9 先回后正同步（§14.6，merge `7f4222f6`）
+
+派两轴审查与记账笔之后，`origin/main` 前移（`42bb109a` → `ba8d0bd3`，10 笔 = #1075）。按 §14.6「先回后正」在 PR 前同步：
+
+- **merge `7f4222f6`**（父一 `32743274` = 本线 tip，父二 `ba8d0bd3` = `origin/main`），**零冲突**（main 侧 10 笔未动 tracker / PHASE_STATUS / 月档，故未重演 #914 的 tracker both-added 冲突）。
+- **本票代码面零交集**：`git diff --name-only 32743274..7f4222f6 -- .github/workflows/windows-installer-smoke.yml desktop/installer/ desktop/scripts/ desktop/test/` 为空；7 个代码文件的 blob 在父一与 merge 上**逐字相同**（逐个 `git rev-parse <rev>:<path>` 对账）⇒ 此前冻结树读数对**本票代码面**仍逐字节有效。
+- main 侧带入的改动 = `src/agent_harness/session/service.py` + `tests/web/test_session_delete_api.py` + docs（3 份 gate 收据 / 3 行台账）——均为 main 上已合入并已过门禁的内容（#1075 自身记录「Gate-0 裸全量 6/6」）。
+- 合并提交自身按机械归属落台账：`docs/review_ledger.d/w21-1074-sync-merge-32743274-7f4222f6.tsv`（range `32743274..7f4222f6`）。
+- **合并树重跑**：Gate-0 **6/6**（§5.4，收据 `docs/gate/3b886bf3bc314e90480a1401cc22d44581ae752b.json`）；全量门禁在合并树上重跑，读数见 §5.5 末段。
+
+## 6 残余与后续
+
+| # | 残余 | 归属 | 状态 |
+| --- | --- | --- | --- |
+| ① | 闸门无「目录归属」判据：`iaProbeFound == "1"` 曾是唯一归属信号；在一台「本机无安装、但 `$INSTDIR` 下恰好有 `resources\python\` 布局且有进程在跑」的机器上，答案 `11` 会 `Stop-Process -Force` 掉那些进程 | #914 修复轮登记，**本票不动**（行为变更） | **已裁决：不修**（2026-10-12，对齐上游） |
+| ② | `customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫：取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与探针（探针只注入 `installer-directories.nsh`） | 首轮 Axis A P3-2；**非本 diff 引入**（`installer.nsh:136-138` blame 到 `387948595`） | **已另开票 [#1078](https://github.com/EricKingWhy/intelligence-agent/issues/1078)** |
+| ③ | 修后重审 F2（P4）：`windows-installer-smoke.yml` 保留一处硬编码「112」（读数记录） | 本轮修后重审 Axis A P4 / Axis B F2 | **登记不修**（理由见 §5.8 末段） |
+| ④ | 修后重审 F3（P4）：规则内联注释 / 错误信息未写明锚是「首次文本出现」 | 本轮修后重审 Axis B F3 | **登记不修**（同上） |
+
+**① 的裁决依据（2026-10-12 实测三源）**：三家都**没有**「目录归属」判据，但爆炸半径分档——`app-builder-lib@26.15.3` 与**本仓同档**（都按 `$INSTDIR` 前缀匹配、且都会升级到 force kill），本仓前缀**更严**（带尾分隔符，不会误伤 `…\Intelligence Agent 2` 这类兄弟目录）；DSH `5badb150` **更窄**——只按精确路径 `$INSTDIR\<app.exe>` 找（`window-frame.dll::InstallerFindProcess`，全文仅 2 处调用），且只 `SetErrorLevel 2` + `Quit` **中止、从不 kill**（它能这么做是因为它查的是用户看得见、关得掉的 app exe；本仓查的是用户看不见的 bundled python，故 #914 裁决 D1 选了「先停再问」）。⇒ 用户裁决**不修**：接受 `app-builder-lib` 今天就在出货的取舍。更严的唯一成熟路径是 MSI/WiX 的 Restart Manager（`RmRegisterResources` + `RmGetList`），NSIS 无原生绑定、生态无先例 ⇒ 若要做需单独立项，不在本票范围。
+
+E2E 车道 NOT_RUN（§5.5）——端口 5173 被另一 clone 的常驻 dev server 占用；本批 `web/` 与 base 逐字节相同，
+故该车道对本 diff 无信号。集成后由 CI 的 `windows-installer-smoke`（PR 上跑）覆盖真机腿。
+---
+
+## 7 #1078 后续：`customInit` 包装的守卫 + #1090 兄弟 harness 修复
+
+### 7.1 票面与根因
+
+- **#1078**（bug/P3）：#1074 残余 ②——`customInit` 的 `${If} $iaRecoveryPending != "1"` 包装本身无守卫。取反它（正常安装从此不 stage、不调闸门）能通过构建期规则、`installer-nsis.test.mjs` 与真机探针：三条判别器**都只读 `installer-directories.nsh`**，而包装在 `installer.nsh`。非本 diff 引入（`installer.nsh:136-138` blame 到 `387948595`）。
+- **#1090**（bug/P3）：#1040 把 `iaPromoteBackupAlreadyLeftover:` 标签插在 `teeth-check.mjs` F1 变异的锚（探针块 → `iaClearBackupDir`）中间 ⇒ 锚匹配不到，变异**静默不生效**却被报成存活。
+
+### 7.2 实现（`f7a3eec7` / `dec2c42f` / `48572ab4` / `11179ed7`）
+
+- 新增跨文件构建期规则 `validateProcessGateCallSite`（`desktop/scripts/build-windows-installer.mjs`），读 `installer.nsh` 的 `customInit`：帧锚 = `${If} $iaRecoveryPending != "1"` 的**首次文本出现**；帧的 `${EndIf}` 按 **LogicLib 深度**配对；`divided` 也按深度（帧与调用之间只有**帧自身那一层**的 `${Else}`/`${ElseIf}` 才算落在反面）；字符串体先由 `outsideStrings` 逐字符空白化（长度不变，索引仍对齐）。四条失败：无帧 / 帧被取反或丢弃 / insert 缺失或重复 / insert 落在 `${Else}`/`${ElseIf}` 侧。
+- 同步更新构建期测试（`desktop/test/installer-scripts.test.mjs`，121 例）、守卫变异 harness（`teeth-check-guards.mjs`，`GUARD_BASELINE_SHA256` 随文本更新）、兄弟 harness 的 F1 锚（`teeth-check.mjs`）。
+
+### 7.3 覆盖边界声明（#1078 AC 明列要求）
+
+规则读**位置**不读**可达性**。保持绿：帧正支上但不可达/条件化的 insert（嵌套常量假 `${If}`/`${Unless}`、`${Switch}`/`${Select}` 分支、假 `!if`/`!ifdef`——后两者是编译期指令，不是 LogicLib，深度游走看不见）；`!define` 载的 insert；帧被放在 `!insertmacro iaRecoverInterruptedInstall` **之前**（该宏才设 `$iaRecoveryPending`，于是恢复分支永不执行）；文件里第二个 `!macro customInit`（只读第一个）。**没有任何别的层读这个文件**——`validateProcessGateGuards` 读 `installer-directories.nsh`，真机驱动也只注入那一份——故这些形状由本规则自认边界，不是别的层兜底。**未放开的**：帧反面 insert、帧被丢、insert 缺失或重复，三者一律红。
+
+### 7.4 审查（四轮，两轴；各一独立只读子代理）
+
+| 轮 | range | 结论（P0/P1/P2/P3/P4） |
+| --- | --- | --- |
+| 发现 | `5550311f..f7a3eec7` | A `APPROVE_WITH_FINDINGS` 0/0/2/0/1；B 0/0/0/1/4 |
+| 修后重审 | `f7a3eec7..dec2c42f` | A 0/0/1/0/2；B 0/0/1/1/3 |
+| 补审（§8.3 #8） | `dec2c42f..11179ed7` | A P0/P1=0，P2=1 P3=3 P4=3；B P0/P1=0，P2=1 P3=2 |
+| 闭合复核 | `11179ed7..bfd91068` | A 0/0/0/0/1；B 0/0/0/1 |
+
+两轴全程 **P0/P1=0**。台账五行 `docs/review_ledger.d/w21-1078-gate-callsite-*.tsv`（发现 / 修后重审 / 补审 / 闭合 / 闭合处置）。补审与闭合两轮的 finding 逐条处置见 §7.6 与月档。
+
+### 7.5 读数
+
+- `node --test test/installer-scripts.test.mjs` → **121/121**。
+- `node test/harness/teeth-check.mjs` → exit 0、**12/12 红、0 存活**、还原逐字节相同（`1afc1a15…` / `131fb66c…`）。
+- `node test/harness/teeth-check-guards.mjs` → exit 0、**116/116 红、0 存活**、还原逐字节相同（`77745ea8…`）。
+- Gate-0：中途树 `bfd91068` **5/6**（❌ 仅 coverage，恰为本批 5 笔代码提交）；落台账行后 coverage 转绿。
+
+### 7.6 处置与残余
+
+- **补审 P2 已处置**：docstring 的「does NOT cover」改为点名 §7.3 的全部真实盲区，并删去对 `validateProcessGateGuards`/真机腿的**假委托**（两轴实测：两者都只读 `installer-directories.nsh`）。AC 要求的「明确的覆盖边界声明」即此。
+- **补审 P3 已处置**：`teeth-check.mjs` F1 变异注释与 harness README 的「only the absolute bound catches」改为实测结论（触发的是**相对界**与**常量假检测器**，绝对界看不见——被包区域起点在 `RMDir /r "$iaDeleteTarget"` 之下）；README 的日期句限定为 #919 处置自身那次运行。
+- **闭合复核新 P3 已处置**：`bfd91068` 新增的「digests … frozen tip recorded in docs/review_ledger.d/」不实（末列守卫 digest 是 `bfd91068` 的 CRLF sha，非冻结 tip `11179ed7` 的 `b156f67f…`）⇒ `b348c1f6` 改为直述「各 harness 在本 checkout 当前文本上打印的 digest」，属**删去断言**，未新增未证 claim。
+- **登记不修**：规则抛错消息无行号（其余 validator 有）；第二个 `!macro customInit`；`!define` 字面量载 insert；帧与 `iaRecoverInterruptedInstall` 的先后（已在 docstring 声明）。
+
+### 7.7 方案依据（协议 §1.3 块；**收尾补录**）
+
+⚠ **时序如实登记**：本票 AC 的括注要求「施工前按 §1.3 先做方案依据调研并落「方案依据」块」。该块**未在施工前落**，是收尾时补录的——下面的来源与判定**全部可在当前树复核**，但「先调研、后施工」的次序**没有遵守**，登记为过程偏差，不粉饰为已遵守。
+
+- **来源**（≥2 独立；两条与 §2 同领域、同批次实测，本票不新增网络来源）
+  1. `app-builder-lib@26.15.3`（本仓构建固定版本，`desktop/node_modules/app-builder-lib` 实测 `"version": "26.15.3"`）——`templates/nsis/include/allowOnlyOneInstallerInstance.nsh`：进程判别与 stage 同在**一份 include**，调用点由该 include 自己拥有 ⇒ 上游**不存在「跨文件调用点」这个形状**，也就没有对应守卫；`find templates/nsis -name '*.test.*' -o -name '*.spec.*'` = **0**。
+  2. DeepSeek Harness `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（本地克隆，MIT）——`apps/desktop/scripts/installer.nsh` 自持 stage 与进程查找，同样**没有跨文件调用点守卫**；`.github/workflows` 里 `installer|makensis|nsis` 命中 **0**。
+  3. **本仓内先例（可复核）**：构建期规则**读 `installer.nsh`** 已是既有形状——`build-windows-installer.mjs:2975` 的 `for (const file of ['installer-directories.nsh', 'installer.nsh'])`（备份删除守卫）与 `:2956` 的三文件循环；`installer-scripts.test.mjs` 同样读该文件。本票的跨文件规则是这一既有形状的**同型复用**，不是新机制。
+- **机制摘要**：包装（`${If} $iaRecoveryPending != "1"`）与闸门调用分处两份 `.nsh`；只读单文件的规则看不见调用点，故本票补一条**读 `installer.nsh`** 的文本规则，钉住「调用点被该包装包住、未被取反、未被移位、不重复」。文本规则只能读**位置**、读不到**可达性**——这条边界按 AC 要求**写进规则自己的 docstring**（§7.3）。
+- **契合点（`AGENTS.md` §7）**：不变量 11（Sandbox / Permission 是 Runtime 边界，不靠 Prompt）——包装与闸门都在安装器 runtime 边界；不变量 21（Optional capability 故障不拖垮 Core）——判别器故障时构建**变红**而非放行；不新增依赖（纯文本规则，复用既有 `readFileSync` 与既有 LogicLib token 常量）。
+- **判定**：`REUSE`（本仓既有的「构建期规则读 `installer.nsh`」形状 + 既有 LogicLib token 工具 + 既有变异 harness 判据）+ `BUILD`（最小：一条规则 + 4 条 fixture + 1 条变异）。不引入新 Provider / 依赖 / 框架。
+- **License**：不新增第三方代码；未复制上游源码，只做机制对照。`app-builder-lib` MIT（构建期工具，非声明依赖，见 #914 §2 的 License 段）。
+- **来源披露（§3.1）**：本领域已在 `docs/agents/reference-sources.md`「Windows 安装器 / 在占用进程处理」登记（#914 批次），本票不新增领域、不新增来源条目；本环境 `WebFetch` 不可用（实测 `Model request failed`），故未引任何网络来源，也不编造读取日期。
+
+## 8 与 origin/main 同步（§14.6 先回后正）与合并树全量门禁
+
+**同步**：`origin/main` 从 `ba8d0bd3` 前移到 `8821a9a8c`（含 #1091/#1069、#1087/#1039、#1088/#1080、#1086/#1027 等）。PR 前同步为 merge `32ddedb9`（父一 `ad90307e` = 本线 tip，父二 `8821a9a8c`），合并树 `471d9273`。
+
+**冲突与解析（§14.7）**：两份进度文档 both-added —— `docs/PHASE_STATUS.md`（两侧在同一锚点各插一条 2026-10-13 bullet）与 `docs/phase_status/2026-10.md`（两侧都在 EOF 追加整节）；`docs/SDD_TICKET_TRACKER.md` 自动合并（两侧 bullet 均在，无内容丢失）。按 §14.7 上报九项报告，获用户逐次批准后解析为**并集、零删除**：
+
+- `PHASE_STATUS.md`：vs ours `+1/-0`，vs theirs `+4/-0`。+4 里含 ours-only 的 #1074 bullet——它位于标记**之外**，由 git 自动合并，这也是 ours/theirs 从第 43 行起就不同的原因。
+- `2026-10.md`：vs ours `+44/-0`，vs theirs `+41/-0`；三节按日期单调排列（#1074 → #1078 → #1080），插入 1 行空行作节间分隔。
+- 解析实现方式 = 对 git 自己的合并输出做「**只删三行冲突标记**」的最小编辑，未重写任何一侧正文；两侧正文逐行断言仍在。未采用「按 ours/theirs 前缀后缀求并集」的启发式——该启发式会把两侧各自的插入点偏移误判为自动合并区，实测会重复约 120 行，已弃用。
+
+**代码面不变**：本批 9 个代码 blob 在验证 tip `ad90307e` 与合并 `32ddedb9` 上**逐字相同**（`git rev-parse <rev>:<path>` 逐文件比对）。`origin/main` 的 54 文件改动（memory v2 / model fallback / session service / `web/**`）与本批代码面零交集。
+
+**合并树全量门禁（§3.2 树不同 ⇒ 重跑；隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `scripts/run_tests_clean.sh` | **7823 passed / 43 skipped / 51 deselected / 0 failed**（1701.33s，28:21） |
+| desktop `npm test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **120 文件 / 1691 passed** |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`，5173 空闲） | **544 passed（17.8m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 24.4s），收据 `docs/gate/32ddedb9ee8f58c35c64e1f39e01183635a6d4bb.json` |
+| `check_review_coverage.py` | **exit 0** |
+
+后端那轮首轮即全绿（此前冻结树唯一红 = 台账未落盘的机械瞬态，已随台账行落盘消失）。合并提交的 `--cc` 文件表恰为三份进度文档 ⇒ 覆盖闸门按 docs-only 归属，**无需新增台账行**。
+
+**备注**：`desktop` 的 `--test-reporter=dot` 每个 suite 也打一个字符，故「数点」得 360 ≠ 实际用例数；权威读数是 spec reporter 的 `# tests 297 / # pass 295 / # skipped 2`。
+
+## 9 第二次同步（`bad6c171`）与新树全量门禁
+
+**为什么再同步**：PR #1097 首推后 `mergeStateStatus: BEHIND`（main 保护 `strict: true`）。`origin/main` 已再前移到 `39b96de9d`（PR #1092 / #1028「通用新建会话继承选中项目 cwd」，19 文件 = `web/**` 16 + docs 3）。按 §14.6 再同步为 merge `bad6c171`（父一 `58ec85e5` = 本线 tip，父二 `39b96de9d`），**零冲突**（ort 策略），合并树 `9243bfdb`。两侧文件交集为空；本票 9 个代码 blob 在父一与 merge 上逐字相同。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 是**空表**（无冲突解析）⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `bad6c171`）。按既有先例补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-58ec85e5-bad6c171.tsv`（range `58ec85e5..bad6c171`，desc 403 字符，单行 3 字段），落行后 `check_review_coverage.py` **exit 0**。该行只做机械归属，**不是**对合并内容的审查主张。
+
+**§8.1 判据① 实测（读数可否传递）**：`git diff --name-status --no-renames 32ddedb9 HEAD` = **12 `A` + 13 `M`**，其中 **13 条非 docs 路径**（`web/e2e/project-context.spec.ts` + `web/src/**` 12 条）⇒ 按 §8.1 第 3 条「出现任何非 docs / 台账路径 ⇒ 必须在新树上重跑全量」，**读数不可传递**，故重跑。判据④自证：`git rev-parse --verify 32ddedb9^{commit}` 与 `HEAD^{commit}` 均 exit 0。
+
+**新树 `cb247e64`（tree `e227562a`）全量门禁（隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `scripts/run_tests_clean.sh` | **7823 passed / 43 skipped / 51 deselected / 0 failed**（2491.74s，41:31） |
+| desktop `node --test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **122 文件 / 1709 passed**（较上一树 +2 文件 / +18 用例 = main 侧 #1028） |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`，5173 空闲） | **552 passed（17.1m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**，收据 `docs/gate/cb247e64cde5b70af671059da7f2f8c4e6c1b421.json`（墙钟 159.1s；机器同期负载偏高，预算只是目标，不改变判定） |
+| `check_review_coverage.py` | **exit 0** |
+
+本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` 三处逐字相同。
+
+**同步轮次小结**：本票共两次与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报后获批按并集零删除解析）与 `bad6c171`（零冲突，但 `--cc` 空表需机械归属行）。两次的合并树都重跑了全量门禁，均全绿。
+
+## 10 第三次同步（`94a162a3`）与新树全量门禁
+
+**为什么再同步**：PR #1097 在 `04f99c68` 上四车道 CI 全绿、`mergeStateStatus` 一度为 `CLEAN`，随后又转 `BEHIND`——`origin/main` **第三次**前移到 `2ca1dfa53`（PR #1100 / #1094「AGENT_MODELS 条目因 provider 与已知链不一致未被采纳时启动期 warning」）。main 保护 `strict: true`（`gh api repos/EricKingWhy/intelligence-agent/branches/main/protection` 实测 `required_status_checks.strict = true`，`contexts = ["gate0"]`），BEHIND 的 PR 不可合并，故按 §14.6 再同步为 merge `94a162a3`（父一 `04f99c68` = 本线 tip，父二 `2ca1dfa53` = `origin/main`），**零冲突**（ort 策略），合并树 `eadf7f95`。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 同样是**空表**（无冲突解析）⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `94a162a3`）。按既有先例补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-04f99c68-94a162a3.tsv`（range `04f99c68..94a162a3`，desc 611 字符，单行 3 字段，LF），落行后 `check_review_coverage.py` **exit 0**。该行只做机械归属，**不是**对合并内容的审查主张。
+
+**§8.1 判据① 实测（读数可否传递）**：`git diff --name-status --no-renames 04f99c68 3c52da5c` = **2 `A` + 6 `M`**，其中 **6 条非 docs 路径**（`src/agent_harness/cli.py`、`src/agent_harness/model/config.py`、`src/agent_harness/web/app.py`、`tests/model/test_model_catalog.py`、`tests/test_cli.py`、`tests/web/test_web_models.py`）⇒ 按 §8.1 第 3 条「出现任何非 docs / 台账路径 ⇒ 必须在新树上重跑全量」，**读数不可传递**，故重跑。判据④自证：`git rev-parse --verify 04f99c68^{commit}` 与 `3c52da5c^{commit}` 均 exit 0。
+
+**新树 `3c52da5c`（tree `9259de9a`）全量门禁（隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| 后端 `pytest -q -p no:randomly` | **7838 passed / 43 skipped / 51 deselected / 0 failed**（2315.91s，38:35） |
+| desktop `node --test` | **297 tests / 295 passed / 2 skipped / 0 failed**（`installer-scripts.test.mjs` 121/121） |
+| web vitest | **122 文件 / 1709 passed** |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`） | **552 passed（15.2m，0 flaky）** |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 67.6s > 60s 预算目标；预算只是目标，不改变判定），收据 `docs/gate/3c52da5c8a3cf347664248cd0c55ae4dec536ecb.json` |
+| `check_review_coverage.py` | **exit 0** |
+
+后端 **+15 passed**（7823 → 7838）与来侧 #1094 新增的三个测试文件相符；desktop / vitest / e2e 与上一树同数，因来侧未触碰 `desktop/**` 与 `web/**`。本票 9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` **四处逐字相同**。
+
+**同步轮次小结（更新）**：本票共**三次**与 `origin/main` 同步 —— `32ddedb9`（两份进度文档 both-added，§14.7 上报九项后获批、按并集零删除解析）、`bad6c171`（零冲突，`--cc` 空表 ⇒ 机械归属行）、`94a162a3`（零冲突，`--cc` 空表 ⇒ 机械归属行；来侧含 `src/**` 与 `tests/**` 非 docs 面）。三次的合并树都重跑了全量门禁，均全绿。
+
+## 11 第四次同步（`1a539937`）与**增量车道**重跑（用户授权的判据①偏离）
+
+**为什么再同步**：PR #1097 推到 `3e9e2bc4` 后 `mergeStateStatus` 又是 `BEHIND`——`origin/main` **第四次**前移到 `25acfdd6`（PR #1099 / #1015「前端懒建会话：新建态三通道可附图」）。main 保护 `strict: true`，故按 §14.6 再同步为 merge `1a539937`（父一 `3e9e2bc4` = 本线 tip，父二 `25acfdd6`），**零冲突**（ort 策略），合并树 `6617efda`。
+
+**覆盖闸门**：该 merge 的 `git show --cc` 仍是**空表** ⇒ 覆盖闸门刻意 fail-closed（唯一 ❌ 即 `1a539937`）。补**机械归属行** `docs/review_ledger.d/w21-1078-sync-merge-3e9e2bc4-1a539937.tsv`（range `3e9e2bc4..1a539937`，desc 696 字符，三列合计 788 ≤ 800 上限，LF），落行后 `check_review_coverage.py` **exit 0**。
+
+**§8.1 判据① 实测与偏离（如实登记）**：`git diff --name-status --no-renames 2ca1dfa53 25acfdd6` = **5 `A` + 7 `M`**，其中 **8 条非 docs 路径，全部在 `web/**`**（`web/e2e/attach-new-session.spec.ts`、`web/src/App.tsx`、`web/src/components/Composer{,.attachments,.presetFocus,.sendGate}.test.tsx`、`web/src/components/Composer.tsx`、`web/src/hooks/useDraftAttachments.ts`）。按 §8.1 第 3 条的**字面**判据，出现非 docs 路径即须重跑全量；**本次没有重跑后端 38 分钟全量**，而是按「只重跑输入集变化的车道」执行。
+
+- **偏离依据**：用户 2026-10-13 指令「如果只是文件方面就没有必要全量测试了」。
+- **偏离的机械理由**：该增量不触碰 `src/**`、`tests/**`，也不触碰本票代码面（`.github/workflows/windows-installer-smoke.yml` + `desktop/**` 共 9 文件）；本票 9 个代码 blob 在 `3e9e2bc4` 与 `1a539937` 上逐字相同。后端套件的输入集未变，其读数自 `3c52da5c` 传递。
+- **未做的风险披露**：`web/**` 的改动理论上可能改变 e2e 所依赖的前端行为，故 web 三条车道**确实重跑了**；但「后端套件会不会被 `web/**` 间接影响」这一命题本次**没有用全量实测回答**，是接受的残余风险，登记在案。
+
+**重跑的车道（树 `efafa856`，tree `6cc00e6f`；隔离副本 `C:\ia-probe-914\gate-tree`，单跑无并发）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 53.3s），收据 `docs/gate/efafa85676d0ad8196ce83c0f6430737abb78053.json` |
+| web vitest | **122 文件 / 1717 passed**（较上一树 +8 = #1015 新增组件用例） |
+| `vite build` | rc=0 |
+| e2e（playwright，`workers: 2`） | **560 passed（15.9m，0 flaky）**（+8 = #1015 新增 `attach-new-session.spec.ts`） |
+| focused desktop `installer-scripts.test.mjs` | **121/121** |
+| `check_review_coverage.py` | **exit 0** |
+
+**未重跑**：后端全量（读数自 `3c52da5c` 传递：**7838 passed / 43 skipped / 51 deselected / 0 failed**）、desktop 全量（读数自 `3c52da5c` 传递：**297/295P/2S/0F**）。
+
+**同步轮次小结（更新）**：本票共**四次**与 `origin/main` 同步 —— `32ddedb9`（§14.7 获批并集零删除）、`bad6c171`、`94a162a3`（两次零冲突 + `--cc` 空表 ⇒ 机械归属行）、`1a539937`（同上）。前三次的合并树都跑了**全量**门禁；第四次按用户授权只跑**增量车道**。9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` **五处逐字相同**。
+
+**⏱ 流程观察（供决策）**：本票的代码与审查在第一次同步前即已完成；此后 `origin/main` 在约 3 小时内前移四次，而每次同步因 `strict: true` 必须重做门禁。若 main 继续以该频率前移，逐次追赶无法收敛——**建议在 CI 于某一 head 变绿后尽快合并 PR #1097**，而不是继续等 main 稳定。
+
+## 12 第五次同步（`53b961d0`）与增量车道重跑（用户裁决：CI 绿即合并）
+
+**为什么再同步**：CI 在 `255d11a8` 上四车道全绿（gate0 40s / e2e 4m48s / windows-installer-smoke 1m57s / gitleaks）之后，`mergeStateStatus` 仍是 `BEHIND`——`origin/main` **第五次**前移到 `491ae829`（PR #1104 / #1093 `reasoning_effort` 落 run/started + model/fallback + PR #1105 / #1089 `_wait_terminal` 只认调用后新增的终态事件）。这是 3 小时内的第五次前移，其间另有 3 条线合并，**逐次追赶不收敛**。就此向用户列出三个收口选项（增量门禁 / 全量门禁 / 临时关 strict 直接合并），**用户裁决：`同步 + 增量门禁，CI 绿即合并`**。
+
+**合并**：`53b961d0`（父一 `255d11a8` = 本线 tip，父二 `491ae829` = `origin/main`），**零冲突**（ort 策略），合并树 `8e1a8e26`。覆盖闸门：`--cc` 空表 ⇒ 补机械归属行 `docs/review_ledger.d/w21-1078-sync-merge-255d11a8-53b961d0.tsv`（range `255d11a8..53b961d0`，desc 586 字符，三列合计 678 ≤ 800）。
+
+**§8.1 判据① 与本次裁决的偏离**：`git diff --name-status --no-renames 25acfdd6 491ae829` = **7 `A` + 17 `M`**，其中 **12 条非 docs 路径**：`src/agent_harness/{agent/runtime.py,assembly.py,model/fallback.py,session/event.py,session/session.py}`、`tests/{agent/test_reasoning_effort_audit.py,multiagent/test_child_session_resume.py}`、`web/src/{components/StepDetail.tsx,components/StepDetail.reasoningEffort.test.tsx,lib/runState.ts,lib/runState.test.ts,styles/app.css}`。按 §8.1 字面判据须重跑全量；按用户裁决改跑**增量车道**。
+
+**重跑的车道（树 `22c2b165`，tree `395dfed4`；隔离副本 `C:\ia-probe-914\gate-tree`）**：
+
+| 车道 | 读数 |
+| --- | --- |
+| Gate-0 裸全量 | **6/6 PASS**（墙钟 47.5s），收据 `docs/gate/22c2b1651199ba04dc99c1c95afcac5484e91300.json` |
+| web vitest | **123 文件 / 1723 passed**（+1 文件 / +6 用例 = #1093 的 `StepDetail.reasoningEffort.test.tsx`） |
+| focused desktop `installer-scripts.test.mjs` | **121/121** |
+| `check_review_coverage.py` | **exit 0** |
+
+**未重跑（本次偏离的核心，如实登记）**：后端全量（读数自 `3c52da5c` 传递 = **7838 passed / 43 skipped / 51 deselected / 0 failed**）、desktop 全量（**297/295P/2S/0F**）、e2e（由 PR CI 的「e2e 冒烟集」车道覆盖）。**接受的残余风险**：本次 main 增量含 `src/**` 与 `tests/**`，其在**合并树**上的后端全量本次**没有实测**；那些改动由各自来源线在各自树上自证，且与本票面（workflow + `desktop/**`）无文件交集。该风险经用户 2026-10-13 裁决接受。
+
+**本票代码面不变**：9 个代码 blob 在 `ad90307e` / `bad6c171` / `cb247e64` / `3c52da5c` / `1a539937` / `53b961d0` **六处逐字相同**。
+
+**五次同步总览**：`32ddedb9`（§14.7 获批并集零删除）→ `bad6c171` → `94a162a3` → `1a539937` → `53b961d0`（后四次均零冲突、`--cc` 空表各补机械归属行）。前三次合并树跑**全量**门禁；第四、五次按用户授权跑**增量车道**。
+
+## 13 收口（合入与关单）
+
+**合入**：PR #1097（base `main`，**无 `Closes`**）于 2026-10-13 合入，merge commit `bb8f0b6e3f1db468e3303870cd6f55652ca7bbc5`。合入前 head `f91e7e15` 的 CI 四车道全绿：gate0 42s、e2e 冒烟集 6m22s、windows-installer-smoke 1m50s、gitleaks；`gh pr view` 实测 `mergeable = MERGEABLE`、`mergeStateStatus = CLEAN`。合入方式为 merge commit（未 squash、未 rebase，保留 #1078 的六笔与五次同步的完整历史）。
+
+**关单**：`#1074` CLOSED（`--reason completed`，comment `6148250598`，`in-progress` 标签已摘除，仅余 `bug`）；`#1078` 与 `#1090` 在本次收口前已是 CLOSED。
+
+**进度落点**：`docs/SDD_TICKET_TRACKER.md` 与 `docs/PHASE_STATUS.md` 的本票条目已由「待发布」更新为「已合入 main 并关闭」；当月明细见 `docs/phase_status/2026-10.md` 的 #1078 节（含收口 bullet）。
+
+**交付边界**：本次交付**不含**分支删除（`codex/issue-1074-gate-discriminator` 保留，删除需单独批准），也**不含**对合并后 `main` 的进一步验证（合并后 main 的验证由集成侧后续按协议进行）。
+
+## 14 补跑后端全量（关闭残余风险，2026-10-14）
+
+**要关闭的命题（§11 末段 / §12 末段原文登记）**：第 4、5 次同步的 `main` 增量含 `src/**` 与 `tests/**`（来自 #1093 / #1089 / #1015），其在**合并树**上的**后端全量本次没有实测**；当时按用户裁决只跑增量车道（Gate-0 / vitest / focused desktop，e2e 由 PR CI 覆盖），后端读数自更早的 `3c52da5c` **传递**。用户 2026-10-13 已同意补跑，由接手 Agent 执行。
+
+**范围边界（不放大）**：本票自己的面（`.github/workflows/windows-installer-smoke.yml` + `desktop/**`）每一轮都跑了，且每个 PR head 上 CI 的 `windows-installer-smoke` 都跑过 ⇒ **那部分不是风险**。本次只回答「别人的 `src/**` 改动与本仓合并后是否互相影响」这一条。
+
+### 14.1 被测树
+
+跑**开跑时最新的** `origin/main` 最新树（不跑 `44321545`）：`main` 已包含全部五次同步与两个 PR，跑最新 `main` 等于一次性覆盖所有遗留。
+
+| 项 | 值 |
+| --- | --- |
+| sha | `67f8997a1a3dc293d24daa05c840aef8248daf10` |
+| tree | `edc624eeaf6ba81efc001004f8dc7024ae1d2932` |
+| 取得方式 | `git fetch origin --prune` 后 `git rev-parse origin/main`（与集成 clone `D:\intelligence-agent` 的 `origin/main` 逐字一致） |
+| 跑在哪 | 隔离副本 `C:\ia-probe-914\gate-tree`（**主工作树之外**，§8.1 第 6 条 / §8.3 第 2 条），detached HEAD |
+| 依赖清单 | `git diff --name-only HEAD 67f8997a -- pyproject.toml uv.lock` **无输出** ⇒ 未跑 `uv sync --frozen` |
+
+### 14.2 命令与读数（单跑无并发）
+
+后端套件**不得**与 playwright 同跑（#1069 记录过负载导致的假红）——本次单飞顺序跑。
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| 后端全量 | `PYTHONPATH= PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest -q -p no:randomly` | **7870 passed / 43 skipped / 51 deselected / 0 failed**（1440.18s，rc=0） |
+| Gate-0 裸全量 | `.venv/Scripts/python.exe scripts/gate0.py` | **6/6 PASS**（墙钟 44.6s），收据 `docs/gate/67f8997a1a3dc293d24daa05c840aef8248daf10.json` |
+
+- 日志：`C:\ia-probe-914\logs\backend-full-67f8997a.log`（旁证 `.meta.txt` 记 sha / tree / 起止时刻 / 墙钟 / exit）；Gate-0 日志 `C:\ia-probe-914\logs\gate0-67f8997a.log`。
+- **环境前置已核实**：本机**无** safe-delete shim（`sitecustomize` 探针返回 `None`、`PYTHONPATH` 为空）⇒ 手册的直接跑法成立，未触发 §8.6 的 `run_tests_clean.sh` 例外通道（该通道属例外且必须标注）。
+- **收据自证**：`tracked_matches_head = true`、`untracked_total = 0`、`env_failures = []`（§8.6 要求区分环境项与真实红）。
+- **隔离前提**：全量运行窗口内主工作树 `D:\intelligence-agent` 未做任何改动（本票改动全部落在隔离副本与随后的 docs 落点）。
+
+### 14.3 判定
+
+`0 failed` ⇒ **§11 / §12 登记的那条残余风险关闭**。
+
+- 它同时回答了 §11 登记的另一半：那次只跑增量车道时，「后端套件会不会被 `web/**` 间接影响」也**没有用全量实测回答**；本次被测树 `67f8997a` **已包含** #1015 的 `web/**` 改动，故该命题一并由实测回答。
+- **与历史基线对照**（会话内实测，供比较）：`3c52da5c` 树 **7838P/43S/51D/0F**（38:35）、`cb247e64` 树 **7823P/43S/51D/0F**（41:31）。本次 **7870P**（较 `3c52da5c` **+32**）与 `main` 继续前移相符，`skipped` / `deselected` 同数，**无新增红**。**归因（机械核对，非推测）**：该区间后端测试面 = 新增 `tests/agent/test_reasoning_effort_audit.py`（#1093）+ `tests/session/test_derive_delegation_marker.py`（#1085 / #1108）、修改 `tests/multiagent/test_child_session_resume.py`（#1085 / #1089）与 `tests/session/test_fork.py`（#1111）；`git diff -U0 3c52da5c 67f8997a -- tests/` 计**新增 `def test_*` 28 条、删除 0 条**（+32 的差额含参数化展开）。⚠ `#1096`（markdown 链接化）**是纯 `web/**` 面**，与后端用例数无关，不参与本归因。
+
+### 14.4 未覆盖（如实登记，不写成绿）
+
+- **desktop 全量**（`297/295P/2S/0F`）与 **e2e**：本次未重跑（e2e 由 PR CI 的冒烟集车道覆盖）。
+- **`web/**` 的 vitest / build**：本次命题是「后端全量在合并树上是否成立」，不含前端车道；前端车道在 §11 / §12 已按当时裁决单独重跑并登记。
+- 本次交付为 **docs-only**（按用户 2026-10-13 指令「如果只是文件方面就没有必要全量测试了」），故未重跑完整门禁。

@@ -7,10 +7,13 @@
 """
 
 import json
+import logging
+import sys
 
 import pytest
 from langchain_core.messages import AIMessage
 
+from agent_harness import cli
 from agent_harness.agent import AgentEvent
 from agent_harness.cli import (
     StreamRenderer,
@@ -22,6 +25,7 @@ from agent_harness.cli import (
     run,
 )
 from agent_harness.cli_theme import Theme
+from agent_harness.config import Settings
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
@@ -401,3 +405,44 @@ async def test_cli_create_rejects_unregistered_session_tool_name_before_any_work
     assert "nope_tool" in str(exc_info.value)
     store = JsonlSessionStore(root=tmp_path / "sessions")
     assert store.list_session_ids() == [], "被拒请求零工作：不得落任何会话"
+
+
+def test_main_warns_for_unadopted_catalog_entry(tmp_path, monkeypatch):
+    """#1094：CLI 启动期对「因 provider 与默认链不一致而不会被采纳」的
+    AGENT_MODELS 条目发 warning（与 web 同源反馈，只反馈不阻断启动）。"""
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path / "ws"), model_api_key="sk-x",
+        model_provider="mimo", model_name="mimo-v2.6-flash",
+        agent_models=json.dumps([{
+            "name": "mimo-v2.6-flash", "provider": "qwen",
+            "model_name": "mimo-v2.6-flash",
+        }]),
+    )
+    monkeypatch.setattr("agent_harness.cli.Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.cli.InstanceLock",
+        lambda _path: type("_L", (), {"acquire": lambda self: self,
+                                      "release": lambda self: None})(),
+    )
+    monkeypatch.setattr("agent_harness.cli._main_dispatch", lambda: None)
+    monkeypatch.setattr("agent_harness.cli.flush_process_sink", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["agent-harness"])
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    model_logger = logging.getLogger("agent_harness.model")
+    model_logger.addHandler(handler)
+    try:
+        cli.main()
+    finally:
+        model_logger.removeHandler(handler)
+
+    assert any(
+        "未被采纳" in r.getMessage() and "mimo-v2.6-flash" in r.getMessage()
+        for r in records
+    ), [r.getMessage() for r in records]

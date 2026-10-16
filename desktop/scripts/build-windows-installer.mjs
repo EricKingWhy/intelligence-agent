@@ -322,6 +322,16 @@ export function assertBundledWebAssets({ resourcesDir, existsSync: exists = exis
   return index
 }
 
+/** Fail the Windows package build unless the PSEC executable, DLL and license ship together. */
+export function assertBundledMxcRuntime({ resourcesDir, existsSync: exists = existsSync }) {
+  for (const file of ['wxc-exec.exe', 'mxc_ffi.dll', 'LICENSE.md']) {
+    const path = join(resourcesDir, 'mxc', file)
+    if (!exists(path)) {
+      throw new Error(`bundled MXC PSEC runtime missing: ${path} — run npm ci in desktop/`)
+    }
+  }
+}
+
 /**
  * Assert the NSIS custom include's placement rules (#816 / W-21 D1).
  *
@@ -2582,6 +2592,307 @@ export const DELETE_SITE_POLICIES = {
   customuninstall: 'sweep',
 }
 
+/**
+ * Build-time assertion for the #914 [W-16 R2] process gate
+ * (installer-directories.nsh).
+ *
+ * The gate is the only thing standing between an update and a live
+ * installation: the rename under it does not stop a headless process (an exe
+ * image is opened share-delete — measured: the rename succeeded with the
+ * bundled service running and the service kept serving new clients out of
+ * "<install dir>.old-{guid}"), and the stock CHECK_APP_RUNNING probe cannot
+ * cover it either (its predicate reads `.Count` on the pipeline result, and a
+ * SINGLE CimInstance has no synthetic Count, so `$null -gt 0` is false — the
+ * service-only case is exactly one match). Both readings, with the probe logs
+ * they come from, are in docs/live_gate/w21/58-issue-914-service-in-use-gate.md
+ * §1. Everything here is fail-closed, and each rule says what reading it
+ * protects:
+ *
+ *   - both gate functions exist, and the classification forces `@(...)` — the
+ *     cast is what makes a single match visible at all;
+ *   - the classification carries none of the stock predicate's `).Count -gt 0`
+ *     tail, and its answers are 0 / 11 / 12 and never 1: Windows PowerShell
+ *     itself exits 1 on a parse error or a missing interpreter, so a 1 answer
+ *     would read a failed probe as "only the runtime is up";
+ *   - both path prefixes end in a separator (a bare prefix also matches sibling
+ *     directories that only share the text), and every `Stop-Process` in the
+ *     file is scoped to the bundled runtime subdirectory — an interactive
+ *     client or the TUI is refused with a message, never killed;
+ *   - the gate is called in iaStageApplication before the backup pointer is
+ *     armed and before `Rename $INSTDIR` (a refusal must leave the installation
+ *     untouched and must not leave a pointer behind that .onGUIEnd and
+ *     iaRollbackApplication read as "the install section started"), and it is
+ *     called before anything touches `$iaProbeFound` rather than inside the
+ *     branch that read guards — that branch skips staging entirely when the app
+ *     executable is gone, so an in-branch call never classified a damaged
+ *     installation whose live service is exactly what must not be updated over
+ *     (#914 review Axis A). The anchor is the *variable*, not one spelling of
+ *     the branch — and it is that variable's *first textual occurrence* in the
+ *     macro, read or write, whichever comes first: re-writing the same guard as
+ *     `StrCmp $iaProbeFound "1" …` used to move it out of this rule's scope while
+ *     the defect stayed put (#1074);
+ *   - the refusal keeps the unknown answer fail-closed: `$(iaAppRunning)` for
+ *     the two known-occupied answers, `$(iaProcessCheckFailed)` for everything
+ *     else, exit code 2, and only a proven `"0"` returns.
+ *
+ * What this function does NOT cover, written down so no reader takes it for
+ * more than it is: it reads text, so it pins where the call sits and which
+ * statements the gate's own body has to keep — it cannot tell whether the callee
+ * still classifies, and it only sees placements that move the call across a
+ * token it knows. Three shapes satisfy every rule here:
+ *   1. a body-level early return inside the gate (`StrCmp $iaProbeFound "0" 0 +2`
+ *      / `Return`), which restores the Axis A defect while the call stays put;
+ *   2. a branch re-spelled so it never mentions `$iaProbeFound` at all (e.g.
+ *      `${If} ${FileExists} "$iaFinalDirectory\${APP_EXECUTABLE_FILENAME}"` with
+ *      the call moved inside it), which leaves this rule's first anchor untouched;
+ *   3. the call moved above the `StrCpy $iaFinalDirectory $INSTDIR` it depends on,
+ *      which classifies the wrong directory.
+ * (1) and (2) are killed by the real-machine legs in
+ * desktop/test/harness/r1-drivers/run-stage-damaged-probe.ps1 — which
+ * .github/workflows/windows-installer-smoke.yml runs on a Windows runner
+ * (#1074) — and (2) additionally by the #1045 statement table; (3) by the same
+ * legs. Measured for (1): every build-time case stays green with that mutation in
+ * place. The discriminator has to be executed somewhere for this boundary to be
+ * covered at all; a text rule is not a substitute for running the installer.
+ */
+export function validateProcessGateGuards(source, filename) {
+  const code = stripNsisComments(source)
+  const problems = []
+  const classify = /Function iaClassifyRunningProduct\b([\s\S]*?)\nFunctionEnd/.exec(code)?.[1] ?? null
+  const gate = /Function iaRequireNoRunningProduct\b([\s\S]*?)\nFunctionEnd/.exec(code)?.[1] ?? null
+  const stage = /!macro iaStageApplication\b([\s\S]*?)\n!macroend/.exec(code)?.[1] ?? null
+  if (classify === null) problems.push('missing Function iaClassifyRunningProduct')
+  if (gate === null) problems.push('missing Function iaRequireNoRunningProduct')
+  if (stage === null) problems.push('missing !macro iaStageApplication')
+  if (classify !== null) {
+    if (!classify.includes('@(Get-CimInstance')) {
+      problems.push(
+        'the classification does not force the array cast (`@(Get-CimInstance …`) — a single CimInstance carries no Count, which is how the stock guard answers "not running" for the one-process case',
+      )
+    }
+    if (/\)\.Count\s+-gt\s+0/i.test(classify)) {
+      problems.push('the stock predicate tail `).Count -gt 0` is back in the classification')
+    }
+    for (const answer of ['0', '11', '12']) {
+      if (!new RegExp(`\\bexit\\s+${answer}(?![0-9])`).test(classify)) {
+        problems.push(`the classification no longer answers exit ${answer}`)
+      }
+    }
+    if (/\bexit\s+1(?![0-9])/.test(classify)) {
+      problems.push(
+        'the classification answers `exit 1` again — Windows PowerShell exits 1 itself (parse error, no interpreter), so that answer reads a failed probe as "only the runtime is up"',
+      )
+    }
+    if (!classify.includes("'$iaFinalDirectory\\'")) {
+      problems.push('the install-directory prefix lost its trailing separator (sibling directories would match)')
+    }
+    if (!classify.includes("'$iaFinalDirectory\\resources\\python\\'")) {
+      problems.push('the bundled-runtime prefix lost its trailing separator')
+    }
+  }
+  if (gate !== null) {
+    if (!gate.includes("StartsWith('$iaFinalDirectory\\resources\\python\\','CurrentCultureIgnoreCase')")) {
+      problems.push('the stop call no longer matches the bundled runtime subdirectory by its exact prefix')
+    }
+    if (!gate.includes('$(iaAppRunning)') || !gate.includes('$(iaProcessCheckFailed)')) {
+      problems.push('the refusal no longer distinguishes a known-occupied install from a failed probe')
+    }
+    const clean = gate.search(/\$\{If\}\s+\$iaRunningProduct\s+==\s+"0"/)
+    const abort = gate.lastIndexOf('SetErrorLevel 2')
+    if (clean === -1) problems.push('the gate no longer returns on the proven-clean "0" answer')
+    if (abort === -1 || !/\bQuit\b/.test(gate.slice(abort))) {
+      problems.push('the refusal no longer exits with a non-zero error level')
+    }
+  }
+  for (const [index, line] of code.split(/\r?\n/).entries()) {
+    if (/Stop-Process/i.test(line) && !line.includes("StartsWith('$iaFinalDirectory\\resources\\python\\'")) {
+      problems.push(`line ${index + 1}: a Stop-Process is not scoped to the bundled runtime subdirectory`)
+    }
+  }
+  if (stage !== null) {
+    const gateCall = stage.indexOf('Call iaRequireNoRunningProduct')
+    const pointer = stage.indexOf('iaStashBackupDir')
+    const rename = stage.indexOf('Rename $INSTDIR')
+    // #1074: the anchor is the variable, not one spelling of the branch. Pinning
+    // the literal `${If} $iaProbeFound == "1"` let the same defect through when
+    // the branch was re-spelled as `StrCmp $iaProbeFound "1" …` (the #914 fix
+    // round's Axis B measured that). `indexOf` is the variable's *first textual
+    // occurrence* — a read or a write, whichever comes first — so any earlier
+    // mention is what the call has to precede. This covers every branch form that
+    // mentions the variable — not every form that tests the app executable: a
+    // branch re-spelled as `${FileExists}` on the app path never names
+    // `$iaProbeFound`, and the #1045 statement table plus the real-machine legs
+    // are what hold that shape down (see the docstring's "does NOT cover" list).
+    const probeUse = stage.indexOf('$iaProbeFound')
+    if (gateCall === -1) problems.push('iaStageApplication does not call the gate')
+    if (pointer === -1) problems.push('iaStageApplication no longer arms the backup pointer')
+    if (rename === -1) problems.push('iaStageApplication no longer renames the install directory')
+    if (probeUse === -1) {
+      problems.push('iaStageApplication no longer branches on the app executable')
+    }
+    if (gateCall !== -1 && ((pointer !== -1 && gateCall > pointer) || (rename !== -1 && gateCall > rename))) {
+      problems.push('the gate runs after the backup pointer is armed or after the rename — a refusal would have to roll back')
+    }
+    if (gateCall !== -1 && probeUse !== -1 && gateCall > probeUse) {
+      problems.push(
+        'the gate runs after the first mention of $iaProbeFound in iaStageApplication (a read or a write) — the staging branch reads it and skips staging when the app executable is gone, so a damaged installation (exe removed, bundled service still running) would never be classified and the stock section would install over the live service',
+      )
+    }
+    // #1066: the call above sits at the top of the macro, so everything between it
+    // and the rename is a window in which the bundled runtime can restart or the
+    // user can open a client. A headless service does not block the directory
+    // rename (#914 section 1.3), so the update would land and leave the old
+    // process answering clients out of the "<dir>.old-{guid}" tree (ADR-0053).
+    // The last call must therefore sit inside that window: after the working
+    // directory was released and before the pointer is armed, where a refusal
+    // still leaves the installation byte-identical and needs no rollback.
+    const lastGateCall = stage.lastIndexOf('Call iaRequireNoRunningProduct')
+    const released = stage.indexOf('SetOutPath $TEMP')
+    if (gateCall !== -1 && pointer !== -1 && (released === -1 || lastGateCall < released || lastGateCall > pointer)) {
+      problems.push(
+        released === -1
+          ? 'the staging window never releases the working directory (#1066) — .onInit opens a handle on $INSTDIR via SetOutPath, so the in-window re-check must follow the SetOutPath $TEMP that releases it; without that line the child it spawns inherits $INSTDIR as its working directory and the rename that follows cannot succeed'
+          : 'the gate is never re-checked inside the staging window (#1066) — the last call must run after SetOutPath $TEMP and before !insertmacro iaStashBackupDir, or a process that starts after the first check is never classified and the rename lands under it',
+      )
+    }
+    // #1066: holding the window open is a test affordance, so it must stay inside
+    // its !ifdef — an unconditional write would ship a registry value that no
+    // production install ever needs.
+    const hookOpen = stage.indexOf('!ifdef IA_TEST_HOLD_STAGE_WINDOW')
+    const hookClose = hookOpen === -1 ? -1 : stage.indexOf('!endif', hookOpen)
+    const hookWrite = stage.indexOf('IaTestStageWindowOpen')
+    if (hookWrite !== -1 && (hookOpen === -1 || hookClose === -1 || hookWrite < hookOpen || hookWrite > hookClose)) {
+      problems.push(
+        'a staging-window test hook is not compiled out — the shipped installer must not write IaTestStageWindowOpen (#1066)',
+      )
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`${filename}: process gate (#914) is not fail-closed — ${problems.join('; ')}`)
+  }
+}
+
+/** The index of the LogicLib token that closes the block opened at `openIndex`. */
+function logicLibCloseIndex(text, openIndex) {
+  const token = new RegExp(`${LOGICLIB_OPENS}|${LOGICLIB_CLOSES}`, 'gi')
+  const isOpen = new RegExp(`^(?:${LOGICLIB_OPENS})$`, 'i')
+  let depth = 0
+  for (let m = token.exec(text); m !== null; m = token.exec(text)) {
+    if (m.index < openIndex) continue
+    if (isOpen.test(m[0])) depth += 1
+    else if (--depth === 0) return m.index
+  }
+  return -1
+}
+
+/**
+ * True when the frame opened at `frame` reaches `call` from a branch other than
+ * its first — that is, a `${Else}`/`${ElseIf}` belonging to *this* frame sits
+ * in between. A nested block's own divider does not count: it divides that
+ * block, not the frame, and a `${Case}` divides a `${Switch}` and never an
+ * `${If}`. The first cut of this rule scanned the whole span for any divider and
+ * rejected every legitimate nested form (#1078 review, measured: a nested
+ * `${If}`/`${Else}` and a nested `${Switch}`/`${Case}` both turned the build
+ * red).
+ */
+function frameDividesBefore(text, frame, call) {
+  const token = new RegExp(`${LOGICLIB_OPENS}|${LOGICLIB_CLOSES}|\\$\\{(?:Else|ElseIf)\\}`, 'gi')
+  const isOpen = new RegExp(`^(?:${LOGICLIB_OPENS})$`, 'i')
+  const isClose = new RegExp(`^(?:${LOGICLIB_CLOSES})$`, 'i')
+  let depth = 0
+  for (let m = token.exec(text); m !== null; m = token.exec(text)) {
+    if (m.index < frame) continue
+    if (m.index >= call) return false
+    if (isOpen.test(m[0])) depth += 1
+    else if (isClose.test(m[0])) depth -= 1
+    else if (depth === 1) return true
+  }
+  return false
+}
+
+/**
+ * Build-time assertion for the process gate call site (#1078).
+ *
+ * `validateProcessGateGuards` reads one file — the file the gate's own body
+ * lives in — so it cannot see the wrapper that decides whether the gate is
+ * reached at all. That wiring is in `installer.nsh`: `customInit` stages the
+ * application, and `iaStageApplication` is what calls the gate, only while no
+ * previous install is mid-recovery. Inverting that frame, or dropping it, skips
+ * staging and the gate together — a normal install then runs the stock section
+ * straight over a live installation — and every discriminator that reads only
+ * installer-directories.nsh stays green (measured in #1078: the build-time
+ * rules, the installer-nsis suite, and the real-machine probe, which injects
+ * that one file).
+ *
+ * `validateProcessGateGuards` and the real-machine legs do not inject
+ * installer.nsh, so this rule is the only process-gate layer that reads this
+ * file at all.
+ *
+ * What this does NOT cover, and in the opposite direction from the #1074 rules:
+ * those let a re-spelled *defect* through; this one fails closed on any
+ * re-spelling of the frame at all. The frame is matched by its exact shipped
+ * text, so a legitimate re-spelling (`${If} $iaRecoveryPending == "0"`, a raw
+ * `StrCmp $iaRecoveryPending "1" …`, or the insert moved into a helper macro
+ * that `customInit` inserts) turns the build red until this anchor is updated in
+ * the same change.
+ *
+ * The rest of the boundary, measured (#1078 review, both axes): this rule reads
+ * *where* the insert sits, not whether it runs. It stays green for an insert on
+ * the frame’s positive branch that is unreachable or conditional — under a
+ * nested constant-false `${If}`/`${Unless}`, under a `${Switch}`/`${Select}`
+ * branch, or under a false `!if`/`!ifdef` (compile-time directives, not
+ * LogicLib, so the depth walk cannot see them). Also green: an insert carried by
+ * a `!define` body; a frame placed above `!insertmacro iaRecoverInterruptedInstall`
+ * (that macro sets `$iaRecoveryPending`, so the recovery branch then never runs);
+ * and a second `!macro customInit` further down the file, of which only the first
+ * is read. These shapes are this rule’s to name, not another layer’s to catch.
+ * What is *not* left open is the #1078 defect itself: an insert on the frame’s
+ * `${Else}`/`${ElseIf}` side, a dropped frame, and a missing or duplicated insert
+ * all turn the build red.
+ */
+export function validateProcessGateCallSite(source, filename) {
+  const code = stripNsisComments(source)
+  const problems = []
+  const init = /!macro customInit\b([\s\S]*?)\n!macroend/.exec(code)?.[1] ?? null
+  if (init === null) {
+    problems.push('missing !macro customInit')
+  } else {
+    // Strings are blanked first — `outsideStrings` replaces every character of
+    // a string body with a space, so the indices still line up with `init`.
+    // `customInit` holds messages, and a quoted `!insertmacro` or `${Else}` is
+    // text, not code (#1078 review).
+    const codeOnly = init.split('\n').map(outsideStrings).join('\n')
+    const inserts = codeOnly.match(/!insertmacro\s+iaStageApplication\b/gi) ?? []
+    if (inserts.length === 0) {
+      problems.push('customInit no longer stages the application (`!insertmacro iaStageApplication`)')
+    } else if (inserts.length > 1) {
+      problems.push(
+        `customInit stages the application ${inserts.length} times — the second one also runs on the recovery path, on top of what iaRecoverInterruptedInstall restored`,
+      )
+    } else {
+      const call = codeOnly.search(/!insertmacro\s+iaStageApplication\b/i)
+      // The frame's own opening, then its matching close found by depth: the
+      // first `${EndIf}` after the opening need not be this frame's (a nested
+      // block before the insert supplies its own), and the insert has to sit on
+      // the frame's *positive* branch — the recovery path is the `${Else}` side,
+      // so a call there is the #1078 defect inverted. The frame anchor keeps the
+      // quoted `"1"`, so it is read off `init`; the walks run on the blanked
+      // text, whose indices line up.
+      const frame = init.lastIndexOf('${If} $iaRecoveryPending != "1"', call)
+      const close = frame === -1 ? -1 : logicLibCloseIndex(codeOnly, frame)
+      const divided = frame !== -1 && frameDividesBefore(codeOnly, frame, call)
+      if (frame === -1 || close === -1 || close < call || divided) {
+        problems.push(
+          'customInit stages the application outside the positive branch of `${If} $iaRecoveryPending != "1"` — inverting that condition, dropping the frame, or moving the insert onto its `${Else}` side skips staging and the process gate on a normal install, while the previous installation is left in place and the stock section installs over it',
+        )
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`${filename}: process gate call site (#1078) is not fail-closed — ${problems.join('; ')}`)
+  }
+}
+
 /** Build-time assertion for `unguardedBackupDelete` (#901 / R1, #904). */
 export function validateBackupDeleteGuards(source, filename, options = {}) {
   const problems = unguardedBackupDelete(source, options)
@@ -2666,12 +2977,15 @@ export function validateCleanupHelpers(source, filename) {
  * long-path guard applies to all three. The backup-delete guard runs on the two
  * files that hold delete sites (installer-cleanup.nsh may not hold one at all),
  * with the #904 site policies applied, and the cleanup primitives themselves are
- * asserted separately.
+ * asserted separately. The process gate is checked twice: its own body in
+ * installer-directories.nsh (#914), and the wrapper that decides whether it is
+ * reached at all, in installer.nsh (#1078).
  */
 /** The `!include`s the three scanned installer scripts may carry. */
 const KNOWN_INSTALLER_INCLUDES = new Set([
   'logiclib.nsh',
   'filefunc.nsh',
+  'nsdialogs.nsh',
   'installer-cleanup.nsh',
   'installer-directories.nsh',
 ])
@@ -2707,6 +3021,13 @@ export function validateInstallerScripts(installerDir) {
     readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
     'installer-cleanup.nsh',
   )
+  validateProcessGateGuards(
+    readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
+    'installer-directories.nsh',
+  )
+  // #1078: the gate's own body is one file, the wiring that reaches it is
+  // another; a rule that reads only the first cannot see the second.
+  validateProcessGateCallSite(readFileSync(join(installerDir, 'installer.nsh'), 'utf8'), 'installer.nsh')
 }
 
 
@@ -2730,6 +3051,14 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
     // `from` is relative to the project dir (desktop/).
     extraResources: [
       { from: `${installerDir}/staging/python/`, to: 'python/', filter: ['**/*'] },
+      // #729: ship only the MXC PSEC launcher and native runtime needed by the
+      // Windows backend; the SDK's JavaScript package is not part of the app.
+      {
+        from: 'node_modules/@microsoft/mxc-sdk/bin/x64/',
+        to: 'mxc/',
+        filter: ['wxc-exec.exe', 'mxc_ffi.dll'],
+      },
+      { from: 'node_modules/@microsoft/mxc-sdk/LICENSE.md', to: 'mxc/LICENSE.md' },
       // W-21 D5 (#817): the terminal client's runtime. The app's own Electron
       // binary cannot host a raw-mode TUI (measured: no TTY in node mode), so
       // the artifact carries its own node.exe (node-runtime.lock.json).
@@ -2781,6 +3110,9 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
       // W-21 D2: a staged runtime holding only the dependency closure imports
       // nothing; fail the build instead of shipping an installer that cannot start.
       assertRuntimeProduct({ pythonExe, product: runtimeProduct })
+      if (context.electronPlatformName === 'win32') {
+        assertBundledMxcRuntime({ resourcesDir })
+      }
       // W-21 D5: the terminal client runs on the bundled node runtime.
       assertNodeRuntime({ nodeExe: join(resourcesDir, 'node', 'node.exe'), version: nodeVersion })
       // W-21 D3: the window loads the packaged renderer build from the service.

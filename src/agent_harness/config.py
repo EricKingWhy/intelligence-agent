@@ -94,10 +94,33 @@ class Settings(BaseSettings):
     # `gt=0` 不是形式约束：0 会让服务循环派不出任何 job，表现为"记忆永远不形成"——
     # 配错必须响亮失败。消费点唯一：`memory/v2/assembly.build_memory_formation`。
     memory_v2_max_concurrency: int = Field(default=4, gt=0)
+    # #1039：记忆作业的两个模型角色（PRD §5.3 第 3 条修订）——**运营者可配、默认不变**。
+    # 取值 = 内置 preset 名（如 `senseaudio`）或 #203 自定义供应商的 `provider:model`
+    # 命名空间（复用 `from_custom_provider` 的寻址，不另造一套）。映射是**应用级**
+    # （部署者改、重启生效）：装配层进程级解析一次（`memory/v2/roles.py`），与面板级
+    # per-user 降级开关（`memory_v2_settings.fallback_enabled`）分层——这正是 #1039 的
+    # 两条裁决各归其层的落点。默认字面量与 `roles.MEMORY_PRIMARY_PROVIDER` /
+    # `roles.MEMORY_FALLBACK_PROVIDER` 分列两处而刻意不 import（config 是依赖图最底层，
+    # roles 反向依赖它，import 会踩部分初始化循环）；两者相等由
+    # `tests/memory/v2/test_v2_roles.py::test_the_role_mapping_defaults_to_the_providers_the_prd_names`
+    # 钉住。
+    memory_primary_provider: str = "senseaudio"
+    memory_fallback_provider: str = "qwen"
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    # #1026：摘要请求墙钟随请求规模线性缩放（base + kt × slope，消融候选①）。
+    # base 默认 30s 维持小请求的既有墙钟；slope 默认 0.25s/kt 使 ~167k 请求
+    # 得 ~71.75s（阶段 A 实测锚：同路径 16.8s 成功、30s 恒败 ⇒ ≥60s 需求）。
+    # slope=0 即固定墙钟（消融候选②的配置形态）。消费点：builder → compactor。
+    summary_timeout_seconds: float = Field(default=30.0, gt=0)
+    summary_timeout_per_kilotoken_seconds: float = Field(default=0.25, ge=0)
+    # #1026：分块摘要（票面修法②）。摘要请求估算超过 hard_guard × ratio 即走
+    # 分块（票面"如 > hard_limit 一半"）；summary_chunk_max_tokens 是单块输入
+    # 的 token 上限（块内超大原子消息确定性 head/tail 裁剪到界）。
+    summary_chunk_request_ratio: float = Field(default=0.5, gt=0, le=1)
+    summary_chunk_max_tokens: int = Field(default=24_000, gt=0)
     # W-29 (#383)：进度清单兜底重注入周期（每 N 条投影消息，PRD §4.6 的
     # Cline Focus Chain 默认值 6，可配置）。
     plan_reinject_every_messages: int = Field(default=6, gt=0)

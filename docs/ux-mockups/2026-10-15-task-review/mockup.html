@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:," />
+  <title>任务审阅轻量化效果图</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f6f8;
+      --paper: #ffffff;
+      --paper-raised: #ffffff;
+      --text: #18202a;
+      --muted: #66717f;
+      --faint: #8a94a1;
+      --line: #dde2e8;
+      --line-strong: #cbd2da;
+      --soft: #f3f5f7;
+      --blue: #1769e0;
+      --blue-hover: #0f59c6;
+      --blue-soft: #eaf2ff;
+      --green: #1f7a52;
+      --green-soft: #eaf7f0;
+      --amber: #9a5c00;
+      --amber-soft: #fff5dc;
+      --danger: #c53c36;
+      --danger-soft: #fff0ef;
+      --shadow: 0 18px 56px rgba(18, 27, 39, .12), 0 2px 8px rgba(18, 27, 39, .05);
+      --radius: 12px;
+      --font: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101317;
+        --paper: #171b20;
+        --paper-raised: #1c2127;
+        --text: #edf1f6;
+        --muted: #a7b0bc;
+        --faint: #7f8a97;
+        --line: #2d343d;
+        --line-strong: #3a434e;
+        --soft: #20262d;
+        --blue: #6ca7ff;
+        --blue-hover: #8ab8ff;
+        --blue-soft: #172a46;
+        --green: #6dc79a;
+        --green-soft: #183329;
+        --amber: #e7b76b;
+        --amber-soft: #392e1a;
+        --danger: #ff8a82;
+        --danger-soft: #3a2121;
+        --shadow: 0 18px 56px rgba(0, 0, 0, .34), 0 2px 8px rgba(0, 0, 0, .22);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background: var(--bg);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; }
+    .page { width: min(1160px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 56px; }
+    .brief {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 14px;
+      padding: 17px 19px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 1px 2px rgba(18,27,39,.03);
+    }
+    .brief-icon {
+      width: 30px; height: 30px; border-radius: 8px;
+      display: grid; place-items: center;
+      color: var(--blue); background: var(--blue-soft);
+    }
+    .brief h1 { font-size: 15px; margin: 0 0 5px; letter-spacing: .01em; }
+    .brief p { margin: 0; color: var(--muted); }
+    .brief strong { color: var(--text); font-weight: 600; }
+    .tabs {
+      display: flex; align-items: flex-end; gap: 4px;
+      margin: 24px 0 0;
+      border-bottom: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .tab {
+      appearance: none; border: 0; background: transparent; color: var(--muted);
+      padding: 12px 16px 11px; cursor: pointer; border-bottom: 2px solid transparent;
+      font-weight: 500; white-space: nowrap;
+    }
+    .tab:hover { color: var(--text); background: var(--soft); }
+    .tab[aria-selected="true"] { color: var(--blue); border-bottom-color: var(--blue); font-weight: 600; }
+    .panel { display: none; padding-top: 24px; }
+    .panel.active { display: block; }
+    .canvas {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      min-height: 560px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+    .canvas-bar {
+      height: 48px; display: flex; align-items: center; gap: 8px;
+      padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--soft);
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); }
+    .canvas-title { margin-left: 8px; color: var(--muted); font-size: 13px; }
+    .workspace { display: grid; grid-template-columns: 220px 1fr; min-height: 510px; }
+    .side { border-right: 1px solid var(--line); padding: 18px 12px; background: color-mix(in srgb, var(--paper) 90%, var(--soft)); }
+    .side-label { color: var(--faint); font-size: 12px; margin: 0 8px 8px; }
+    .side-item { height: 35px; display: flex; align-items: center; gap: 9px; padding: 0 10px; color: var(--muted); border-radius: 7px; }
+    .side-item.active { color: var(--text); background: var(--soft); font-weight: 500; }
+    .side svg, .view-title svg { flex: none; }
+    .work { min-width: 0; padding: 22px 26px 32px; }
+    .view-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+    .view-title { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 600; }
+    .file-count { color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+    .review-strip {
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center; gap: 12px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+      padding: 11px 13px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .status-check {
+      width: 23px; height: 23px; border-radius: 6px; background: var(--paper); color: var(--muted);
+      border: 1px solid var(--line-strong);
+      display: grid; place-items: center;
+    }
+    .strip-copy { min-width: 0; color: var(--text); font-weight: 500; }
+    .strip-actions { display: flex; gap: 10px; align-items: center; }
+    .link-button {
+      appearance: none; border: 0; background: transparent; padding: 5px 3px;
+      color: var(--blue); cursor: pointer; font-weight: 500; white-space: nowrap;
+    }
+    .link-button:hover { text-decoration: underline; }
+    .link-button.subtle { color: var(--muted); }
+    .annotation {
+      display: inline-flex; align-items: flex-start; gap: 8px;
+      color: var(--amber); background: var(--amber-soft); border-radius: 8px;
+      padding: 8px 10px; font-size: 12px; line-height: 1.45;
+    }
+    .annotation svg { margin-top: 1px; flex: none; }
+    .annotation.full { display: flex; margin: 16px 0 18px; }
+    .annotation.side-note { margin-top: 14px; }
+    .diff-file { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; margin-top: 12px; }
+    .diff-head { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 13px; background: var(--soft); border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 500; }
+    .diff-body { padding: 12px 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.7; }
+    .code-row { display: grid; grid-template-columns: 42px 42px 1fr; padding: 0 12px; white-space: pre-wrap; }
+    .ln { color: var(--faint); text-align: right; padding-right: 12px; user-select: none; }
+    .add { background: color-mix(in srgb, var(--green-soft) 75%, transparent); }
+    .add .code { color: var(--green); }
+
+    .stage { min-height: 630px; display: grid; place-items: start center; padding: 36px 20px 48px; background: linear-gradient(180deg, var(--soft), var(--bg)); }
+    .dialog { width: min(680px, 100%); background: var(--paper-raised); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+    .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 15px; border-bottom: 1px solid var(--line); }
+    .dialog-head h2 { margin: 0; font-size: 17px; }
+    .close-btn { border: 0; background: transparent; color: var(--muted); width: 30px; height: 30px; border-radius: 7px; cursor: pointer; display: grid; place-items: center; }
+    .close-btn:hover { background: var(--soft); color: var(--text); }
+    .dialog-body { padding: 19px 20px 20px; }
+    .meta-grid { display: grid; grid-template-columns: 96px minmax(0,1fr); gap: 12px 16px; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
+    .meta-label { color: var(--muted); }
+    .meta-value { min-width: 0; color: var(--text); }
+    .path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .done { color: var(--green); font-weight: 600; }
+    .section { padding: 17px 0; border-bottom: 1px solid var(--line); }
+    .section:last-child { border-bottom: 0; }
+    .section-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 10px; }
+    .section h3 { margin: 0; font-size: 14px; }
+    .section-note { font-size: 12px; color: var(--muted); }
+    .file-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+    .file-list li { display: flex; align-items: center; gap: 9px; padding: 7px 9px; background: var(--soft); border-radius: 7px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .file-badge { color: var(--green); font-family: var(--font); font-size: 11px; font-weight: 700; }
+    .switch-row { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
+    .switch { position: relative; width: 36px; height: 20px; border: 0; padding: 0; border-radius: 10px; background: var(--line-strong); cursor: pointer; transition: .18s ease; }
+    .switch::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: white; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: .18s ease; }
+    .switch[aria-checked="true"] { background: var(--blue); }
+    .switch[aria-checked="true"]::after { transform: translateX(16px); }
+    .acceptance { display: none; padding: 10px 11px; margin-top: 10px; background: var(--blue-soft); border-radius: 8px; }
+    .acceptance.show { display: block; }
+    .check-item { display: flex; gap: 9px; align-items: flex-start; padding: 4px 0; }
+    .check-box { width: 16px; height: 16px; margin-top: 2px; border: 1px solid var(--blue); border-radius: 4px; color: var(--blue); display: grid; place-items: center; }
+    .action-zone { padding-top: 18px; }
+    .primary-row { display: flex; align-items: center; gap: 12px; }
+    .primary {
+      border: 1px solid var(--blue); background: var(--blue); color: white;
+      border-radius: 8px; padding: 8px 17px; cursor: pointer; font-weight: 600;
+    }
+    .primary:hover { background: var(--blue-hover); }
+    .help { color: var(--muted); font-size: 12px; }
+    .more-toggle, .diagnostic-toggle {
+      width: 100%; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+      padding: 14px 0 7px; display: flex; align-items: center; gap: 6px; text-align: left;
+    }
+    .more-toggle:hover, .diagnostic-toggle:hover { color: var(--text); }
+    .chevron { transition: transform .18s ease; }
+    [aria-expanded="true"] .chevron { transform: rotate(90deg); }
+    .more-content, .diagnostic { display: none; }
+    .more-content.show, .diagnostic.show { display: block; }
+    .secondary-action { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 0; border-top: 1px solid var(--line); }
+    .secondary-action:first-child { border-top: 0; }
+    .secondary-action strong { display: block; font-size: 13px; }
+    .secondary-action small { color: var(--muted); display: block; margin-top: 2px; }
+    .small-btn { flex: none; border: 1px solid var(--line-strong); background: var(--paper); color: var(--text); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+    .small-btn:hover { background: var(--soft); }
+    .small-btn.danger { color: var(--danger); }
+    .reason-box { display: none; padding: 10px 0 2px; }
+    .reason-box.show { display: flex; gap: 8px; }
+    .reason-box input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); background: var(--paper); color: var(--text); border-radius: 7px; padding: 7px 9px; outline: 0; }
+    .reason-box input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-soft); }
+    .diagnostic { background: var(--soft); border-radius: 8px; padding: 10px 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+    .diagnostic div + div { margin-top: 5px; }
+    .hidden-note { margin-top: 14px; text-align: center; }
+
+    .table-wrap { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+    .table-intro { padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    .table-intro h2 { margin: 0 0 4px; font-size: 17px; }
+    .table-intro p { margin: 0; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { text-align: left; padding: 11px 18px; color: var(--muted); background: var(--soft); font-size: 12px; font-weight: 600; }
+    td { padding: 15px 18px; vertical-align: top; border-top: 1px solid var(--line); word-break: break-word; }
+    tbody tr:first-child td { border-top: 0; }
+    td:first-child { color: var(--muted); }
+    .arrow-cell { width: 44px; text-align: center; color: var(--faint); }
+    .new-copy { font-weight: 600; color: var(--text); }
+    .new-copy.delete { color: var(--danger); text-decoration: line-through; text-decoration-thickness: 1px; }
+    .subcopy { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; font-weight: 400; }
+    .toast {
+      position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translate(-50%, 16px);
+      background: #20252c; color: #fff; border-radius: 8px; padding: 9px 13px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.24); opacity: 0; pointer-events: none;
+      transition: .2s ease; z-index: 20; font-size: 13px;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 24px, 1160px); padding-top: 14px; }
+      .brief { padding: 14px; gap: 11px; }
+      .tabs { flex-wrap: wrap; align-items: stretch; gap: 0; }
+      .tab { flex: 1 1 50%; padding: 10px 8px; white-space: normal; text-align: center; }
+      .tab:last-child { flex-basis: 100%; }
+      .canvas { min-height: 0; }
+      .workspace { display: block; min-height: 0; }
+      .side { display: none; }
+      .work { padding: 18px 14px 24px; }
+      .view-head { align-items: flex-start; }
+      .review-strip { grid-template-columns: auto 1fr; }
+      .strip-actions { grid-column: 1 / -1; padding-left: 35px; flex-wrap: wrap; }
+      .stage { padding: 16px 8px 28px; }
+      .dialog-head, .dialog-body { padding-left: 15px; padding-right: 15px; }
+      .meta-grid { grid-template-columns: 78px minmax(0,1fr); gap: 10px 12px; }
+      .section-head { align-items: flex-start; flex-direction: column; }
+      .primary-row { align-items: flex-start; flex-direction: column; }
+      .secondary-action { align-items: flex-start; }
+      .reason-box.show { flex-direction: column; }
+      .table-wrap { background: transparent; border: 0; box-shadow: none; overflow: visible; }
+      .table-intro { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
+      table, tbody, tr, td { display: block; width: 100%; }
+      thead { display: none; }
+      tbody { display: grid; gap: 10px; }
+      tr { background: var(--paper); border: 1px solid var(--line); border-radius: 11px; padding: 13px 14px; }
+      td { border: 0; padding: 0; }
+      td:first-child::before { content: "原来"; display: block; color: var(--faint); font-size: 11px; margin-bottom: 4px; }
+      .arrow-cell { text-align: left; height: 27px; display: flex; align-items: center; }
+      .arrow-cell::after { content: "现在"; margin-left: 8px; color: var(--faint); font-size: 11px; }
+      .new-copy { display: block; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="brief" aria-labelledby="brief-title">
+      <div class="brief-icon" aria-hidden="true">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/><path d="M12 7v5l3 2"/><path d="M15.5 3.5h5v5"/></svg>
+      </div>
+      <div>
+        <h1 id="brief-title">改动说明</h1>
+        <p><strong>常态任务把审阅放回 diff，详细面板降级为按需入口。</strong>用户先看到结果，不再先理解状态机；排障术语保留，但只放进「诊断信息」。</p>
+      </div>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="效果图场景">
+      <button class="tab" role="tab" aria-selected="true" aria-controls="panel-normal" id="tab-normal">常态：diff 内轻量横条</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-detail" id="tab-detail">按需：详细审阅（简化版）</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-copy" id="tab-copy">文案对照表</button>
+    </nav>
+
+    <section class="panel active" id="panel-normal" role="tabpanel" aria-labelledby="tab-normal">
+      <div class="canvas">
+        <div class="canvas-bar" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="canvas-title">任务结果 · 文件与改动</span></div>
+        <div class="workspace">
+          <aside class="side" aria-label="模拟侧栏">
+            <p class="side-label">本次任务</p>
+            <div class="side-item"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>对话</div>
+            <div class="side-item active"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3h8l5 5v13H3V3z"/><path d="M8 3v6h8V3"/></svg>文件 / 改动</div>
+            <div class="side-item"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18"/></svg>运行记录</div>
+          </aside>
+          <div class="work">
+            <div class="view-head">
+              <div class="view-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3h8l5 5v13H3V3z"/><path d="M8 3v6h8V3"/></svg>文件与改动 <span class="file-count">3 个文件</span></div>
+            </div>
+            <div class="review-strip">
+              <div class="status-check" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3h8l5 5v13H3V3z"/><path d="M8 3v6h8V3"/></svg></div>
+              <div class="strip-copy">本次改动 3 个文件，请查看 diff</div>
+              <div class="strip-actions">
+                <button class="link-button" data-go-detail>详细审阅</button>
+                <button class="link-button subtle" data-toast="已标记为已读，不会阻断后续操作">标记已读</button>
+              </div>
+            </div>
+            <div class="annotation full"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 10v6M12 7h.01"/></svg><span>没有「待验证」压迫态；继续对话或开始新任务后视为接受。右侧「详细审阅」平时保持弱入口，只在长任务、中断或异常场景强调显示。</span></div>
+            <div class="diff-file">
+              <div class="diff-head"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3h8l5 5v13H3V3z"/></svg>TaskReviewPanel.tsx</div>
+              <div class="diff-body" aria-label="示例代码改动">
+                <div class="code-row"><span class="ln">47</span><span class="ln">47</span><span class="code">return (</span></div>
+                <div class="code-row add"><span class="ln"></span><span class="ln">48</span><span class="code">+  &lt;ReviewSummary files={changedFiles} /&gt;</span></div>
+                <div class="code-row add"><span class="ln"></span><span class="ln">49</span><span class="code">+  &lt;DiffView changes={changes} /&gt;</span></div>
+                <div class="code-row"><span class="ln">48</span><span class="ln">50</span><span class="code">);</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-detail" role="tabpanel" aria-labelledby="tab-detail" hidden>
+      <div class="stage">
+        <article class="dialog" aria-labelledby="dialog-title">
+          <header class="dialog-head"><h2 id="dialog-title">详细审阅</h2><button class="close-btn" aria-label="关闭" data-toast="效果图中不关闭面板"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+          <div class="dialog-body">
+            <div class="meta-grid">
+              <div class="meta-label">原目标</div><div class="meta-value">我叫什么名字？我的猫咪叫什么？</div>
+              <div class="meta-label">工作目录</div><div class="meta-value path" title="D:\intelligence-agent\.agent\workspace\workspaces\a9a12992-…">D:\intelligence-agent\.agent\workspace\workspaces\a9a12992-…</div>
+              <div class="meta-label">状态</div><div class="meta-value done">任务已完成 · 无在途操作</div>
+            </div>
+
+            <section class="section">
+              <div class="section-head"><h3>改了哪些文件</h3><span class="section-note">3 个文件</span></div>
+              <ul class="file-list">
+                <li><span class="file-badge">M</span> src/components/TaskReviewPanel.tsx</li>
+                <li><span class="file-badge">M</span> src/components/TaskReviewPanel.test.tsx</li>
+                <li><span class="file-badge">A</span> src/styles/task-review.css</li>
+              </ul>
+            </section>
+
+            <section class="section" id="acceptance-section">
+              <div class="section-head">
+                <div><h3>验收项</h3><div class="section-note">真实界面中，为空时整块隐藏</div></div>
+                <label class="switch-row"><span>模拟有验收项时</span><button class="switch" id="acceptance-switch" role="switch" aria-checked="false"><span class="sr-only">切换验收项演示</span></button></label>
+              </div>
+              <div class="acceptance" id="acceptance-list">
+                <div class="check-item"><span class="check-box"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m5 12 4 4 10-10"/></svg></span><span>回答中准确说明用户姓名</span></div>
+                <div class="check-item"><span class="check-box"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m5 12 4 4 10-10"/></svg></span><span>回答中准确说明猫咪名字</span></div>
+              </div>
+            </section>
+
+            <div class="action-zone">
+              <div class="primary-row"><button class="primary" data-toast="已接受：当前版本已锁定">接受</button><span class="help">接受后锁定当前版本</span></div>
+              <button class="more-toggle" id="more-toggle" aria-expanded="false" aria-controls="more-content"><svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>更多操作</button>
+              <div class="more-content" id="more-content">
+                <div class="secondary-action"><div><strong>带原因接受</strong><small>留下这次例外的原因</small></div><button class="small-btn" id="reason-toggle">填写原因</button></div>
+                <div class="reason-box" id="reason-box"><input id="reason-input" type="text" placeholder="请输入原因（必填）" aria-label="接受原因" /><button class="small-btn" id="reason-submit">确认接受</button></div>
+                <div class="secondary-action"><div><strong>释放工作目录</strong><small>让其他任务可以使用这个目录</small></div><button class="small-btn" data-toast="工作目录已释放（效果演示）">释放</button></div>
+                <div class="secondary-action"><div><strong>清理预览…</strong><small>会删除选中原件，不可恢复</small></div><button class="small-btn danger" data-toast="效果图不会执行删除">选择原件</button></div>
+                <button class="diagnostic-toggle" id="diagnostic-toggle" aria-expanded="false" aria-controls="diagnostic"><svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>诊断信息 <span class="section-note">仅供排查</span></button>
+                <div class="diagnostic" id="diagnostic">
+                  <div>open_run_ids: []</div>
+                  <div>reconcile: Operation Ledger</div>
+                  <div>accept_strategy: CAS · current projection</div>
+                </div>
+              </div>
+              <div class="annotation full hidden-note"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 10v6M12 7h.01"/></svg><span>「下一步」没有建议时不展示；不会再出现“服务端未提供”这类实现说明。</span></div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-copy" role="tabpanel" aria-labelledby="tab-copy" hidden>
+      <div class="table-wrap">
+        <div class="table-intro"><h2>文案对照</h2><p>普通界面只说用户需要做什么；内部状态退到诊断区。</p></div>
+        <table>
+          <colgroup><col style="width:45%"><col style="width:6%"><col style="width:49%"></colgroup>
+          <thead><tr><th>原来</th><th class="arrow-cell"></th><th>现在</th></tr></thead>
+          <tbody>
+            <tr><td>在途 run 来自交付投影 open_run_ids；run 终态属事件流事实</td><td class="arrow-cell">→</td><td><span class="new-copy delete">删除</span><span class="subcopy">普通用户不需要理解内部投影。</span></td></tr>
+            <tr><td>reconcile 属 Operation Ledger 域，本票不接入也不推断</td><td class="arrow-cell">→</td><td><span class="new-copy">移入「诊断信息」折叠区</span><span class="subcopy">仅供排查，默认不展开。</span></td></tr>
+            <tr><td>后果：服务端交付态变为「已接受」（CAS；版本取自当前投影）</td><td class="arrow-cell">→</td><td><span class="new-copy">接受后锁定当前版本</span></td></tr>
+            <tr><td>释放目录</td><td class="arrow-cell">→</td><td><span class="new-copy">释放工作目录</span><span class="subcopy">让其他任务可以使用这个目录。</span></td></tr>
+            <tr><td>验收项（0）尚无验收项（Agent 可稍后提出清单）</td><td class="arrow-cell">→</td><td><span class="new-copy">为空时整块隐藏</span></td></tr>
+            <tr><td>暂无下一步建议（服务端未提供）</td><td class="arrow-cell">→</td><td><span class="new-copy">无建议时不展示该区块</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script>
+    (function () {
+      var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+      var panels = Array.prototype.slice.call(document.querySelectorAll('.panel'));
+      var toast = document.getElementById('toast');
+      var toastTimer;
+
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2200);
+      }
+
+      function activateTab(tab) {
+        tabs.forEach(function (item) {
+          var active = item === tab;
+          item.setAttribute('aria-selected', active ? 'true' : 'false');
+          item.tabIndex = active ? 0 : -1;
+        });
+        panels.forEach(function (panel) {
+          var active = panel.id === tab.getAttribute('aria-controls');
+          panel.classList.toggle('active', active);
+          panel.hidden = !active;
+        });
+      }
+
+      tabs.forEach(function (tab, index) {
+        tab.addEventListener('click', function () { activateTab(tab); });
+        tab.addEventListener('keydown', function (event) {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+          event.preventDefault();
+          var next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : (index - 1 + tabs.length) % tabs.length;
+          tabs[next].focus(); activateTab(tabs[next]);
+        });
+      });
+
+      document.querySelectorAll('[data-go-detail]').forEach(function (button) {
+        button.addEventListener('click', function () { activateTab(document.getElementById('tab-detail')); document.getElementById('tab-detail').focus(); });
+      });
+      document.querySelectorAll('[data-toast]').forEach(function (button) {
+        button.addEventListener('click', function () { showToast(button.getAttribute('data-toast')); });
+      });
+
+      function bindDisclosure(toggleId, contentId) {
+        var toggle = document.getElementById(toggleId);
+        var content = document.getElementById(contentId);
+        toggle.addEventListener('click', function () {
+          var open = toggle.getAttribute('aria-expanded') === 'true';
+          toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+          content.classList.toggle('show', !open);
+        });
+      }
+      bindDisclosure('more-toggle', 'more-content');
+      bindDisclosure('diagnostic-toggle', 'diagnostic');
+
+      var acceptanceSwitch = document.getElementById('acceptance-switch');
+      var acceptanceList = document.getElementById('acceptance-list');
+      acceptanceSwitch.addEventListener('click', function () {
+        var on = acceptanceSwitch.getAttribute('aria-checked') === 'true';
+        acceptanceSwitch.setAttribute('aria-checked', on ? 'false' : 'true');
+        acceptanceList.classList.toggle('show', !on);
+        showToast(on ? '验收项已隐藏' : '正在演示“有验收项”的状态');
+      });
+
+      var reasonToggle = document.getElementById('reason-toggle');
+      var reasonBox = document.getElementById('reason-box');
+      var reasonInput = document.getElementById('reason-input');
+      reasonToggle.addEventListener('click', function () {
+        reasonBox.classList.toggle('show');
+        if (reasonBox.classList.contains('show')) reasonInput.focus();
+      });
+      document.getElementById('reason-submit').addEventListener('click', function () {
+        if (!reasonInput.value.trim()) {
+          showToast('请先填写接受原因');
+          reasonInput.focus();
+          return;
+        }
+        showToast('已带原因接受：当前版本已锁定');
+      });
+    }());
+  </script>
+</body>
+</html>

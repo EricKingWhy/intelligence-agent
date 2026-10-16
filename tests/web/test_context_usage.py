@@ -449,6 +449,158 @@ async def test_t4_snapshot_attributes_skills_separately(tmp_path):
 
 
 
+# ── #1095：「其他」桶细分（other_detail）──────────────────────────────
+
+
+def _snapshot_with_other_breakdown() -> dict:
+    """带 other_breakdown 的 builder 快照（#1095 新形状；各子项 >= 0，和 == other）。"""
+    return {"messages": 100, "system_prompt": 50, "skills": 10, "other": 5,
+            "used_tokens": 165,
+            "other_breakdown": {"provider_injected": 3, "runtime_context": 2,
+                                "plan_anchor": 0, "protected_facts": 0,
+                                "modified_paths": 0, "pressure_warning": 0,
+                                "progress": 0}}
+
+
+def test_1095_other_detail_passthrough_sums_to_other():
+    """细分透传：breakdown.other_detail 原样出现，且**细分之和 == 原 other**（不变式）。"""
+    snapshot = _snapshot_with_other_breakdown()
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=snapshot,
+        tool_definitions=[], estimate_tokens=_estimate, events=[],
+    )
+    detail = payload["breakdown"]["other_detail"]
+    assert detail == snapshot["other_breakdown"]
+    assert sum(detail.values()) == payload["breakdown"]["other"]
+    # 六桶求和不变式不受影响（#1095 不改 T4）。
+    b = payload["breakdown"]
+    total = (b["messages"] + b["system_prompt"] + b["skills"] + b["other"]
+             + b["tools"]["system"] + b["tools"]["mcp"])
+    assert total == payload["used_tokens"]
+    assert payload["state"] == "ok"
+
+
+def test_1095_other_detail_absent_legacy_snapshot():
+    """旧形状快照（无 other_breakdown）⇒ other_detail 键**省略**，其余不变。
+
+    进程内缓存快照在部署切换窗口可能仍是旧形状——端点不伪造子项 0，
+    前端据此只显示整块「其他」。
+    """
+    snapshot = {"messages": 100, "system_prompt": 50, "skills": 10, "other": 5,
+                "used_tokens": 165}
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=snapshot,
+        tool_definitions=[], estimate_tokens=_estimate, events=[],
+    )
+    assert "other_detail" not in payload["breakdown"]
+    assert payload["breakdown"]["other"] == 5
+    assert payload["used_tokens"] == 165
+
+
+def test_1095_usage_only_and_no_data_have_no_other_detail():
+    """usage_only / no_data 诚实口径不动：六桶如实为 0，无 other_detail。"""
+    usage_payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate,
+        events=[_usage_event(1000, 100)],
+    )
+    assert usage_payload["state"] == "usage_only"
+    assert "other_detail" not in usage_payload["breakdown"]
+
+    no_data_payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=[],
+    )
+    assert no_data_payload["state"] == "no_data"
+    assert "other_detail" not in no_data_payload["breakdown"]
+
+
+@pytest.mark.asyncio
+async def test_1095_usage_snapshot_other_breakdown_sums_to_other(tmp_path):
+    """builder 快照的 other_breakdown：各子项有真实来源，和 == other。
+
+    provider 注入（memory）与运行期快照都必须能在子项里归因到。"""
+    from langchain_core.messages import SystemMessage
+
+    from agent_harness.context.builder import ContextBuilder
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.session import JsonlSessionStore, Session
+    from agent_harness.session.event import USER_MESSAGE
+
+    class _InjectingProvider:
+        name = "memory"
+
+        async def select(self, session, token_budget):
+            return [SystemMessage(content="RECALLED " * 200)]
+
+    store = JsonlSessionStore(root=tmp_path / "sessions-1095")
+    session = Session("usage-probe-1095", store)
+    session.append(USER_MESSAGE, {"content": "hello " * 20})
+    builder = ContextBuilder(
+        model_provider=object(), max_context_tokens=200_000,
+        context_providers=[_InjectingProvider()],
+        system_prompt="SYSTEM " * 50,
+        runtime_context_provider=lambda: "RUNTIME " * 30,
+    )
+    await builder.build(session)
+    snap = builder.usage_snapshot(session)
+
+    detail = snap["other_breakdown"]
+    assert sum(detail.values()) == snap["other"]
+    assert detail["provider_injected"] >= estimate_message_tokens(
+        [SystemMessage(content="RECALLED " * 200)])
+    assert detail["runtime_context"] > 0
+
+
+@pytest.mark.asyncio
+async def test_1095_compacted_session_summary_attributed_to_messages_not_other(tmp_path):
+    """压缩后会话的归因锚（#1095 票面修正的一手证据锁）：
+
+    阶段 A 票面假设「压缩摘要落进 other 残差桶」——实际投影层把摘要作为
+    HumanMessage 投进 messages 桶（`derive.py` bracket 投影；设计稿 §3.2
+    「消息桶含压缩摘要」同口径）。本测试钉住：压缩摘要可在 **messages** 桶
+    归因（messages >= 摘要自身估算），other 细分之和不变式在压缩后会话上
+    仍成立，other_breakdown 不伪造「压缩摘要」子项。
+    """
+    from langchain_core.messages import HumanMessage
+
+    from agent_harness.context.builder import ContextBuilder
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.session import (
+        COMPACTION_END,
+        COMPACTION_START,
+        CONTEXT_COMPACTED,
+        JsonlSessionStore,
+        Session,
+    )
+    from agent_harness.session.event import USER_MESSAGE
+
+    summary_text = "SUMMARY OF EARLY WORK " * 50
+    store = JsonlSessionStore(root=tmp_path / "sessions-1095-compact")
+    session = Session("usage-probe-1095-compact", store)
+    session.append(USER_MESSAGE, {"content": "early question"})
+    session.append(USER_MESSAGE, {"content": "follow-up question"})
+    session.append(COMPACTION_START, {"bracket_id": "b1",
+                                      "source_seq_start": 0, "source_seq_end": 1})
+    session.append(CONTEXT_COMPACTED, {"bracket_id": "b1",
+                                       "summary": summary_text,
+                                       "source_seq_start": 0, "source_seq_end": 1})
+    session.append(COMPACTION_END, {"bracket_id": "b1"})
+
+    builder = ContextBuilder(model_provider=object(), max_context_tokens=200_000)
+    snap = builder.usage_snapshot(session)
+
+    # 摘要归因于 messages 桶（投影 HumanMessage），不在 other。
+    assert snap["messages"] >= estimate_message_tokens(
+        [HumanMessage(content=summary_text)])
+    # 细分之和 == other；子项键集固定（后端 key 与前端图例对齐的面）。
+    detail = snap["other_breakdown"]
+    assert sum(detail.values()) == snap["other"]
+    assert set(detail) == {"provider_injected", "runtime_context", "plan_anchor",
+                           "protected_facts", "modified_paths",
+                           "pressure_warning", "progress"}
+
+
 # ── T5：端点形状（HTTP）───────────────────────────────────────────────
 
 

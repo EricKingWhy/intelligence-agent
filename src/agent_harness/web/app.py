@@ -93,6 +93,7 @@ from agent_harness.model.config import (
     ConfigError,
     ModelConfig,
     UnsupportedReasoningEffort,
+    warn_unadopted_catalog_entries,
 )
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
@@ -101,6 +102,7 @@ from agent_harness.sandbox import (
     SUPPORTED_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
+    default_backend_for_platform,
     probe_all_capabilities,
 )
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -613,7 +615,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # （按平台：Windows ⇒ docker，否则 local，见 `create_app` 的
+    # `default_backend_for_platform()`）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
@@ -1165,7 +1168,12 @@ class AppState:
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
         self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
-            root=Path(settings.workspace_dir), backend="local"
+            root=Path(settings.workspace_dir),
+            # #1048 AC1：部署默认按平台解析——受影响（Windows/NTFS）平台默认
+            # docker（不可用即 409 fail-closed，绝不回落 local/PSEC）；其余平台
+            # 默认 local（无 NTFS hard link 对象身份问题）。显式 `sandbox_backend`
+            # 仍优先于本默认（registry 的「显式 > 部署默认」）。
+            backend=default_backend_for_platform(),
         )
         # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
         # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。
@@ -1574,6 +1582,20 @@ def _sse_response(
     return EventSourceResponse(
         generator, headers=headers, ping=SSE_PING_INTERVAL_SECONDS,
     )
+
+
+async def _truncated_sse_stream(session_id: str, after_seq: int, latest_seq: int):
+    """单帧 `stream/truncated` 控制帧后收流（续传两条分支共用）。
+
+    `stream_session` 的默认分支与 `follow=1` 分支都以「backlog 超阈值 → **同一**控制帧
+    后收流」收束；抽到一处让两条分支共用同一形状，避免各写一遍后漂移。帧本身仍来自
+    `serialization.build_truncated_control` 的单一构建点（`#208`）——这里只是外层 async
+    generator 包装的唯一实现。
+    """
+    control = build_truncated_control(
+        session_id, after_seq=after_seq, latest_seq=latest_seq,
+    )
+    yield {"data": json.dumps(control, ensure_ascii=False)}
 
 
 def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
@@ -2077,6 +2099,10 @@ def create_app(
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
+        # #1094：启动期反馈——AGENT_MODELS 中因 provider 与已知链不一致而不会被采纳的
+        # 条目发一条 warning（条目名 + 原因）。只反馈，不阻断启动；坏 catalog 由本函数
+        # 记 warning 后返回，既有响亮 ConfigError 仍发生在实际使用路径。
+        warn_unadopted_catalog_entries(settings)
         # ARCH-7（#150）：启动期单实例锁。同一 session root 的第二个进程必须
         # 响亮失败——跨进程同时 append 会话 JSONL 会产出重复 seq / 交错写，
         # RunManager 的 run 归属共识也只在进程内有效；CLI 与 Web 并发同样被
@@ -2370,6 +2396,11 @@ def create_app(
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
 
+    # #1048 AC5/AC6：本地 REST 显式导出工作区（副本 → 全新宿主目录；独立 router）。
+    from agent_harness.web.workspace_export import register_workspace_export_routes
+
+    register_workspace_export_routes(app, validate_session_id=validate_session_id)
+
     # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
     # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
     from agent_harness.web.model_providers import register_model_provider_routes
@@ -2597,6 +2628,20 @@ def create_app(
         if cwd is None:
             return empty_project_instruction_status("no_cwd")
         store = project_instruction_store(app.state.agent.settings)
+        registry = service.workspace_registry
+        if registry.exists(session_id):
+            # #1048 AC8：Docker（及任何非 local 子进程）后端的工作区不在宿主项目
+            # 目录上，指令必须经 Sandbox/POSIX 语义读取；宿主 `cwd` 是宿主路径，
+            # 只有 local 后端才可用。判据与 assembly 同源
+            # （`uses_sandbox_path_semantics`：只有 `LocalSubprocessSandbox` 为宿主语义）。
+            from agent_harness.assembly import uses_sandbox_path_semantics
+
+            sandbox = registry.get(session_id)
+            if uses_sandbox_path_semantics(sandbox):
+                await asyncio.to_thread(
+                    store.reload_for_sandbox_session, session_id, sandbox,
+                )
+                return store.status_for_session(session_id)
         await asyncio.to_thread(store.reload_for_session, session_id, cwd)
         return store.status_for_session(session_id)
 
@@ -2803,7 +2848,9 @@ def create_app(
         )
 
     @app.get("/api/sessions/{session_id}/stream")
-    async def stream_session(session_id: str, after_seq: int = -1):
+    async def stream_session(
+        session_id: str, after_seq: int = -1, follow: bool = False,
+    ):
         """重连续传（ADR-0016 §2.3，C4/C5）：重放 durable 事实 + 接上在途流。
 
         客户端维护 lastAppliedSeq，断线后带 after_seq 重连：
@@ -2816,8 +2863,61 @@ def create_app(
            无重复）；run 已终态/不在途 → 重放到 latest 后正常收尾
            （崩溃遗留的悬空 run 不伪造终态，修复走 POST /recover）。
         客户端对重放帧与 live 帧做同一 seq 幂等投影（C5）。
+
+        `follow=1`（`#1014` A-opt，**opt-in**）：第 4 步改为**会话级订阅**——idle
+        会话的连接**不收流**（消灭「idle 每秒建/收一次」的空转），改为经既有的
+        `Session.add_listener` 通道（`ManagedRun._fanout` 多扇出一路）推送该会话的
+        后续事件，run 收尾只是安静期、连接保持，之后（本客户端或**别的客户端**）起的
+        run 的帧实时到达。默认 `follow=0`（缺省）行为**逐字不变**（旧客户端/旧测试零影响）。
         """
         service = session_service(app.state.agent)
+        state = app.state.agent
+
+        if follow:
+            try:
+                follow_handle = await service.stream_follow(
+                    session_id=session_id, after_seq=after_seq,
+                )
+            except (InvalidSessionId, SessionNotFound) as e:
+                raise http_error(e) from e
+
+            events = follow_handle.events
+            latest_seq = follow_handle.latest_seq
+            follower = follow_handle.follower
+
+            if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+                # 与默认分支同判据、同纪律：截断即**先退订**再收流，队列不留孤儿。
+                state.run_manager.unsubscribe_session(session_id, follower)
+                return _sse_response(
+                    _truncated_sse_stream(session_id, after_seq, latest_seq)
+                )
+
+            async def follow_generator():
+                try:
+                    for event in events:
+                        if after_seq < event.seq <= latest_seq:
+                            yield _session_event_to_sse_dict(event, session_id)
+                    while True:
+                        item = await follower.queue.get()
+                        # 队列溢出（慢客户端）：丢帧对本连接不可自愈 ⇒ 收流，客户端
+                        # 走既有「ended → after_seq 重连」重放补洞（#1014）。
+                        if item is state.run_manager.RESYNC:
+                            return
+                        # 重放已覆盖订阅与读盘窗口内的入队（seq ≤ 读盘游标）；
+                        # 会话级订阅者**永不**收 DONE（run 收尾不是本条流的终点）。
+                        if item.seq is not None and item.seq <= latest_seq:
+                            continue
+                        # 无 seq 的 transient 帧（如 model/started）不参与序幂等：它若在
+                        # 「订阅-读盘」窗口内入队，会在整段 durable 重放之后才投递（相对
+                        # 自然时序滞后）。客户端一律不投影无 seq 的 transient 帧
+                        # （TUI: `SeqCursor` 对 seq=null 返回 skip），无可见影响；
+                        # 登记于 ADR-0016 §2.3 注记。
+                        yield _event_to_sse_dict(item, session_id)
+                finally:
+                    state.run_manager.unsubscribe_session(session_id, follower)
+
+            return _sse_response(follow_generator())
+
         try:
             handle = await service.stream_reconnect(
                 session_id=session_id,
@@ -2832,7 +2932,6 @@ def create_app(
         run = handle.run
         subscriber = handle.subscriber
         replay_upto = handle.replay_upto
-        state = app.state.agent
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
             # 截断分支必须**先退订**（与 WS 的 `_push_snapshot` 同一条纪律）：
@@ -2844,15 +2943,9 @@ def create_app(
             if subscriber is not None and run is not None:
                 run.unsubscribe(subscriber)
 
-            async def truncated_generator():
-                # 帧形状来自 serialization 的**单一构建点**（#208）：WS 快照
-                # 超限时发的是同一个函数产出的帧，两条通道一字不差。
-                control = build_truncated_control(
-                    session_id, after_seq=after_seq, latest_seq=latest_seq,
-                )
-                yield {"data": json.dumps(control, ensure_ascii=False)}
-
-            return _sse_response(truncated_generator())
+            return _sse_response(
+                _truncated_sse_stream(session_id, after_seq, latest_seq)
+            )
 
         async def event_generator():
             try:
@@ -3558,6 +3651,22 @@ def create_app(
             # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/sessions/{session_id}/recovery")
+    async def get_session_recovery(session_id: str) -> dict[str, Any]:
+        """待裁决清单（#1049，**只读**）：``{pending_decisions: [...]}``。
+
+        形状与 ``POST /recover`` 409 detail 的 ``pending_decisions`` 逐字段一致
+        （同一规则源 ``_reconcile_pending``，#596 / 前端 ``parsePendingDecisions``
+        直接复用）。零写入；会话有在途 run 时为空。非法 id → 422、不存在 → 404、
+        日志损坏 → 409（与 recover 同一前导）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            pending = await service.pending_decisions(session_id)
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
+            raise http_error(e) from e
+        return {"pending_decisions": pending}
 
     @app.get("/api/recovery/interrupted")
     async def list_interrupted_recoveries() -> dict[str, Any]:

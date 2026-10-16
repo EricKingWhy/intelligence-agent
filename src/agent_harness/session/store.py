@@ -8,7 +8,9 @@
 seq **分配**仍是 Session 聚合根的职责（``_next_seq``）；本层负责把每会话的
 「读已落盘最大 seq → 判定 → 写」串成临界区，并拒写违反单调性的 seq
 （写者跨线程：事件循环的 ``Session.append`` 与恢复扫描的工作线程都会进来）。
-保证范围是**同一进程内**——跨进程没有文件锁，见 ``__init__`` 的边界说明。
+保证范围是**跨进程**：进程内由 ``_lock_for`` 串行，跨进程由 ``#1063`` 的
+per-session 文件锁（``instance_lock.session_append_lock``）串行，见 ``__init__``
+的边界说明。
 
 另有一条护栏（ADR-0036）：本进程硬删过的会话 id 不再接受追加——``delete_session``
 与 ``append_event`` 共用一把会话写锁，迟到的旁路写者（run 收尾后的记忆写回任务）
@@ -25,10 +27,11 @@ import shutil
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_harness.instance_lock import session_append_lock
 from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
@@ -260,10 +263,11 @@ class JsonlSessionStore:
         # 的写者动过（另一 store 实例 / 另一进程，CLI 与 server 共用同一 sessions
         # 目录）→ 重新以磁盘为准。缓存与锁表的结构由 _state_guard 保护。
         #
-        # 边界（不得夸大为「跨进程安全」）：本层没有文件锁，跨进程**同时**追加仍可能
-        # 各自通过检查（检查与写入之间的窗口跨进程不互斥）。戳只能察觉「已经落盘」的
-        # 外部追加。同一进程内（真实缺陷 BUG-011 的现场：一个 server 的两个并发请求）
-        # 由 _lock_for + 本检查共同保证严格单调。
+        # 跨进程互斥（#1063）：`append_event` 的「读已落盘最大 seq → 判定 → 写盘」
+        # 临界区外再包一层 per-session advisory 文件锁（`instance_lock.session_append_lock`），
+        # 因此两个进程**同时**追加也不会各自通过检查。进程内由 `_lock_for` 串行；
+        # 文件锁补的是跨进程那一维。下面的戳缓存仍按原语义工作（且其更新已移进文件锁内，
+        # 见 `append_event`——放在锁外会用「自己的 seq + 别人刚写后的戳」污染缓存）。
         self._last_seq: dict[str, tuple[int, int, int]] = {}
         # 本进程硬删过的会话 id（ADR-0036）：`append_event` 据此拒写。不清除是有意的——
         # 生产 id 由 uuid4 生成（没有客户端可控入口），同一 id 再次出现只可能是迟到写者；
@@ -314,7 +318,9 @@ class JsonlSessionStore:
         """已落盘最大 seq（无文件 = -1）。带文件戳校验的缓存，必须在会话写锁内调用。
 
         戳变化即回读磁盘，因此外部（另一实例 / 另一进程）**已经落盘**的追加一定会被
-        看见；它不能防的是跨进程**同时**写入（无文件锁），见 ``__init__`` 的边界说明。
+        看见；它不能防的是跨进程**同时**写入——那一维由 ``session_append_lock`` 在
+        ``append_event`` 的临界区内串行（#1063），本方法刻意不取文件锁（取锁会让这个
+        O(1) 读数变成可能阻塞的热路径）。
         """
         path = self._events_path(session_id)
         try:
@@ -331,7 +337,9 @@ class JsonlSessionStore:
             self._last_seq[session_id] = (last, *stamp)
         return last
 
-    def append_event(self, session_id: str, event: SessionEvent) -> None:
+    def append_event(
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
+    ) -> SessionEvent:
         """向 Session 的 JSONL 追加一条事件（整行 + flush + fsync）。
 
         fsync 是断电不丢的底线（用户拍板的耐久性决策）：flush 只把进程缓冲
@@ -345,6 +353,20 @@ class JsonlSessionStore:
         **硬删之后不得重建**（ADR-0036）：本进程删过的 id 一律拒写（``SessionNotFound``）。
         否则迟到的旁路写者会在这里把日志凭空重建，静默撤销用户那次不可逆的删除。
         抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
+
+        **锁内分配**（``allocate=True``，#1062 裁决 A；#1061 终态协商的推广）：seq 的
+        「取号 + 判定 + 写盘」三步同处**同一临界区**（会话写锁 + #1063 的跨进程文件
+        锁）。撞号不再回抛给写者去自旋重投，而是本方法在锁内把事件改号到 ``last + 1``
+        再落盘——持续占位的旁路写者（即便它在锁外不停取胜）也没有可插入的窗口。调用方
+        （`Session._persist_event`）对**已交付 runtime 的聚合并终态写者**打开它；普通
+        未交付写者仍 fail-closed（BUG-011 的快照门）。
+
+        边界（不得夸大）：① 只对**已持有事件**做改号，事件类型/信封/`data` 一律不动，
+        改的只是 seq；② 不会因为分配就丢失拒写语义——`SessionNotFound`（硬删）等其它
+        判定照旧先抛；③ **不是**无限重试：锁内改号只有一次，改号后落到锁内读到的空档即
+        返回。
+
+        :returns: 实际落盘的那一枚（锁内分配会改号，调用方必须据此对齐计数器）。
         """
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
         # #650：UTF-8 可编码性验证**前置于**一切目录/文件变更与 seq 状态提交。
@@ -370,22 +392,46 @@ class JsonlSessionStore:
                     f"Session '{session_id}' 已被硬删，拒绝重建事件日志"
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._neutralize_torn_tail(path)
-            last = self._last_seq_on_disk(session_id)
-            if event.seq <= last:
-                raise SeqConflict(
-                    f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
-                    f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
-                )
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            stat = path.stat()
-            with self._state_guard:
-                self._last_seq[session_id] = (
-                    event.seq, stat.st_size, stat.st_mtime_ns,
-                )
+            # 跨进程临界区（#1063）：把「读已落盘最大 seq → 判定 → 写盘」整段纳入
+            # per-session 文件锁。`_lock_for` 只串同进程线程；两个进程各自的读-判定-写
+            # 若不跨进程互斥，会各自读到同一 `last`、各自通过 `seq <= last` 检查、
+            # 各自把同一个号写下去 → 盘上重复 seq（实测两进程各写 120 条 → seq 2..120
+            # 全重复）。锁文件与 events.jsonl 同目录，列表页看不见它。
+            with session_append_lock(path):
+                # 撕裂尾中立化也是写，必须同在锁内（否则两进程可能同时改写同一尾段）。
+                self._neutralize_torn_tail(path)
+                last = self._last_seq_on_disk(session_id)
+                if event.seq <= last:
+                    if not allocate:
+                        raise SeqConflict(
+                            f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
+                            f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+                        )
+                    # 锁内改号（#1061 终态协商 / #1062 通用路径）：改号到本锁内读到的
+                    # 空档。行文本必须按**改号后**的事件重渲染——上面那次 dumps 用的是改号
+                    # 前的 seq。**这一次重复渲染是有意保留的**：那次 dumps 同时承担 #650 的
+                    # UTF-8 前置校验（必须早于任何目录/文件变更），而热路径是
+                    # `allocate=False`（撞号才走到这里），故重复序列化的成本落在这条
+                    # 罕见分支上（一次 JSON 编码，相对一次 fsync 可忽略）。
+                    event = replace(event, seq=last + 1)
+                    line = json.dumps(
+                        event.to_dict(), ensure_ascii=False, separators=(",", ":"),
+                    )
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                # 文件戳/缓存更新必须**留在文件锁内**（#1063）：原实现放在
+                # `_lock_for` 内、`session_append_lock` 外，跨进程下会在「放锁 → stat」
+                # 之间被另一进程追加，于是把**自己**的 seq 配上**别人刚写后**的
+                # 文件戳入缓存 → 该条缓存「seq 偏小、戳偏新」，后续 stat 命中它 →
+                # 返回过期的 last → 重复落盘（实测 15 条重复全来自这里）。
+                stat = path.stat()
+                with self._state_guard:
+                    self._last_seq[session_id] = (
+                        event.seq, stat.st_size, stat.st_mtime_ns,
+                    )
+        return event
 
     def _neutralize_torn_tail(self, path: Path) -> None:
         """append 前中立化「无换行撕裂尾段」（#565 双轴收敛 P2 加固）。
@@ -417,11 +463,13 @@ class JsonlSessionStore:
         日志（保留撕裂形状的正是本修复要消除的故障面，四来源同），脱敏
         指纹（offset/len/sha256，不含内容）进诊断日志供事后对账。
 
-        必须在会话写锁内调用（并发 append 各自先中立化会互相打架）。跨进程
-        边界见 ``__init__``：无文件锁下两个进程同时 append 仍可能各自通过
-        检查；本方法的截断支在该边界内多了一个「按陈旧 boundary 截掉另一
-        进程刚落盘完整行」的主动删除面（前置条件罕见：撕裂尾段存在 + 跨
-        进程同时 append），这是对既有声明的忠实披露而非新增安全声明。
+        必须在会话写锁内调用（并发 append 各自先中立化会互相打架）。它跑在
+        ``append_event`` 的**同一个**临界区里（会话写锁 + #1063 的 per-session
+        文件锁），故跨进程也互斥；本方法的截断支因此多了一个需如实披露的面：
+        「按**陈旧** boundary 截掉另一进程刚落盘的完整行」——它的前置条件是
+        「撕裂尾段存在 + 跨进程同时 append」，而文件锁已把两者挡在临界区外
+        （本中立化在锁内、锁内读的是锁内最新的文件状态）。这是对既有声明的
+        忠实披露而非新增安全声明。
 
         稳态成本 O(1)——常数次 syscall，不随文件大小增长：空文件 = seek+tell
         零字节读；\\n 结尾 = 2 次 seek + 1 次 tell + 1 字节读。仅尾字节非 \\n

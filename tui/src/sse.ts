@@ -102,7 +102,11 @@ export async function consumeSseBody(
   }
 }
 
-/** 打开一条重连续传流；resolve 于流收束（终态 / 断开 / truncated 后）。 */
+/** 打开一条重连续传流；resolve 于流收束（终态 / 断开 / truncated 后）。
+ *
+ *  `follow=1`（#1014 A-opt）：TUI 是**常驻附着**客户端，用 opt-in 会话级订阅：idle
+ *  会话的连接由服务端保持（不再 idle 收流，客户端每秒重连的空转消失），run 起来后
+ *  帧实时到达。默认语义（不带 follow）不变；真断线仍按游标重连（seq 幂等）。 */
 export async function openStream(
   baseUrl: string,
   sessionId: string,
@@ -110,7 +114,7 @@ export async function openStream(
   handlers: StreamHandlers,
   options: StreamOptions = {},
 ): Promise<void> {
-  const url = `${baseUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${cursor.lastSeq}`;
+  const url = `${baseUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${cursor.lastSeq}&follow=1`;
   let response: Response;
   try {
     response = await (options.fetchImpl ?? fetch)(url, {

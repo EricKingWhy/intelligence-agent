@@ -6,7 +6,18 @@
  * and validate the health payload without inventing a second protocol.
  */
 
-/** Must equal `agent_harness.host_service.HOST_PROTOCOL_VERSION`. */
+/**
+ * Must equal `agent_harness.host_service.HOST_PROTOCOL_VERSION`; the parity is
+ * pinned in `test/host-protocol.test.ts`.
+ *
+ * This is the shell's **only** compatibility gate with the service (#914 ruling
+ * D2): a matching value means both ends speak the same wire contract even when
+ * the product versions differ — an older service answering a newer client is
+ * designed behaviour, not a defect. Any change that breaks that contract
+ * (renames, removals, changed semantics of an existing field or route) MUST bump
+ * this number on both ends; the product version string is never a gate
+ * (ADR-0053).
+ */
 export const HOST_PROTOCOL_VERSION = 1
 
 /** Endpoint state file written by `agent-harness serve` into the workspace dir. */

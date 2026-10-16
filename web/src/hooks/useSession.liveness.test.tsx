@@ -77,6 +77,9 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => []),
+    // #1030：主动待裁决读面。默认空清单——本文件测的是活性/重连，读面自身行为
+    // 见 useSession.pendingDecisions.test.tsx。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     sendMessage: vi.fn(),
     resumeSession: vi.fn(),
@@ -134,9 +137,16 @@ async function mount(): Promise<void> {
   });
 }
 
-/** 走完「判别窗口」驱动一次不落地的投递（悬挂 = 判 launched ⇒ 直驱 WS 接流）。 */
-async function driveLaunched(action: () => Promise<void>): Promise<void> {
-  let pending: Promise<void> | undefined;
+/** 走完「判别窗口」驱动一次不落地的投递（悬挂 = 判 launched ⇒ 直驱 WS 接流）。
+ *
+ *  形参放宽成 `Promise<unknown>`（原 `Promise<void>`）是 #1029 的连带类型收敛：
+ *  `sendMessage` 的返回值从 `void` 变成 `Promise<boolean>`，而 `Promise<boolean>`
+ *  不可赋给 `Promise<void>`。**本夹具不覆盖 ack 语义**（`false` = 未受理 ⇒ composer
+ *  保留文本）：三条用例走的是「launched ⇒ 受理」这一支，返回值恒 `true`，断言它只会
+ *  把夹具钉死在一条与用例主题（活性/停摆）无关的分支上。ack 契约由
+ *  `Composer.keepText` 与 `useSession.followUpRecovery` 两个专门文件覆盖。 */
+async function driveLaunched(action: () => Promise<unknown>): Promise<void> {
+  let pending: Promise<unknown> | undefined;
   await act(async () => {
     pending = action();
     await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);

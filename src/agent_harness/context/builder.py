@@ -418,6 +418,80 @@ def _inject_modified_paths(
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class _PlanAndPathsInjection:
+    """清单锚 / 最近修改文件块的选择与 token 预留（W-29 #383 / W-31.5 #417）。
+
+    #1084：`build()` 阈值前置决策与 `compact_now()` 预算预留必须得到**逐字相同**
+    的 plan/paths 文本与成本——此前两处各写一份同式代码，任一侧改动都会让自动/
+    手动压缩的预算分叉。值对象只承载纯决策；`token_estimate` 累加与
+    `_last_*_tokens` 记账仍由调用方执行（不把副作用复制进共享函数）。
+    """
+
+    plan_text: str | None
+    plan_tokens: int
+    paths_text: str | None
+    paths_tokens: int
+
+
+def _plan_and_paths_injection(
+    events: list[SessionEvent], fallback_period: int,
+) -> _PlanAndPathsInjection:
+    """纯事件推导：清单块 + 最近修改文件块的选择与各自 token 成本（两入口同源）。
+
+    选择规则见 `_should_inject_plan`（事件驱动 + 周期兜底；压缩后恒注入）与
+    `_render_modified_paths_block`（块跟着清单锚走）；两处 token 都在阈值判定前
+    计入估算（先计入再注入——注入了就计数，不计数 = 系统性低估）。
+    """
+    plan_state = _should_inject_plan(events, fallback_period)
+    plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+    plan_tokens = (
+        estimate_message_tokens([SystemMessage(content=plan_text)])
+        if plan_text is not None else 0
+    )
+    modified_paths = derive_modified_file_paths(events)
+    paths_text = (
+        _render_modified_paths_block(modified_paths)
+        if plan_text is not None and modified_paths else None
+    )
+    paths_tokens = (
+        estimate_message_tokens([SystemMessage(content=paths_text)])
+        if paths_text is not None else 0
+    )
+    return _PlanAndPathsInjection(plan_text, plan_tokens, paths_text, paths_tokens)
+
+
+def _with_artifact_ref(
+    failures: list[CompactionFailure], artifact_ref: str | None,
+) -> list[CompactionFailure]:
+    """#1041（spec 06 §8）：把本轮落盘的 raw artifact ref 回填进失败记录。
+
+    ref 为 None（store 缺席 / 未落盘）时原样返回（失败记录默认 `artifact_ref=None`，
+    绝不伪造）；否则用 `dataclasses.replace` 产出带同一 ref 的副本——`CompactionFailure`
+    是 frozen，不回改 compactor 造出的原始记录。
+
+    回填面（#1041 修回 F5）：ref 是**本轮级**的 raw snapshot 指针，只归属"摘要失败
+    来源"的诊断——本轮发生了摘要尝试（`attempt>=1`）时，预检拒绝诊断（`attempt=0`
+    的 `preflight_request_exceeds_hard_limit`，按 #639 语义**不是**摘要尝试）保持
+    `None`，ref 归摘要尝试失败与截断降级诊断；纯预检轮（无任何摘要尝试：预检拒绝
+    + 无法缩小 ⇒ raise）里失败记录**全部**是 `attempt=0` 的预检诊断——全段预检
+    失败后缩小段仍超限时该轮有**两条**（全段 + 缩小段，`narrowed` 分别 False/True），
+    一条或两条都带 ref（否则落盘快照无从发现）。
+    """
+    if artifact_ref is None:
+        return failures
+    has_summary_attempt = any(failure.attempt >= 1 for failure in failures)
+    return [
+        failure
+        if (
+            has_summary_attempt
+            and failure.error_class == _PREFLIGHT_REJECTION_ERROR_CLASS
+        )
+        else replace(failure, artifact_ref=artifact_ref)
+        for failure in failures
+    ]
+
+
 class ContextBuilder:
     """按预算压缩投影与选择 Provider 内容，不修改历史。"""
 
@@ -436,6 +510,12 @@ class ContextBuilder:
         # 原样透传给 ToolResultPruner——校验在 pruner 构造处响亮失败，本层不重复。
         keep_recent_tool_results: int = 3,
         clear_at_least_tokens: int = 5000,
+        # #1026：摘要墙钟缩放与分块参数（Settings 透传链，原样传给
+        # ContextCompactor——校验在 compactor 构造处响亮失败，本层不重复）。
+        summary_timeout_seconds: float = 30.0,
+        summary_timeout_per_kilotoken_seconds: float = 0.25,
+        summary_chunk_request_ratio: float = 0.5,
+        summary_chunk_max_tokens: int = 24_000,
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
@@ -460,6 +540,12 @@ class ContextBuilder:
             # W-29 (#383)：0 会让兜底判据退化为"变更即恒注入"，配错必须响亮失败。
             raise ValueError("plan_reinject_every_messages must be positive")
         self.model_provider = model_provider
+        # #1026：摘要墙钟缩放与分块参数（原样透传给 compactor）。
+        self._summary_timeout_seconds = summary_timeout_seconds
+        self._summary_timeout_per_kilotoken_seconds = (
+            summary_timeout_per_kilotoken_seconds)
+        self._summary_chunk_request_ratio = summary_chunk_request_ratio
+        self._summary_chunk_max_tokens = summary_chunk_max_tokens
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
         # 档位选择留配置面（后续票），本层只透传给 compactor。
         self.summary_model = summary_model
@@ -710,34 +796,22 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
-        # W-29 (#383)：清单重注入决策与成本（两条路径共用同一份决策）。决策是
-        # 纯事件推导（见 _should_inject_plan）；token 成本**先计入**本次估算再走
-        # 阈值判定——清单块确实会发给模型，不计数就是系统性低估（看板漏报同源
-        # 教训）。注入动作在各路径装配末段执行（压缩路径在重投影确认**之后**，
-        # 见 build 尾部）；压缩落 bracket 后会重估一次（进入"恒注入"状态）。
-        plan_state = _should_inject_plan(
+        # W-29 (#383) / W-31.5 (#417)：清单锚 + 最近修改文件块的**选择与 token 预留**
+        # 走同一个纯决策 owner（`_plan_and_paths_injection`）——与 `compact_now` 的预算
+        # 预留同源，两侧不再内联同式选择（#1084）。决策是纯事件推导（见
+        # `_should_inject_plan`）；token 成本**先计入**本次估算再走阈值判定——清单块
+        # 确实会发给模型，不计数就是系统性低估（看板漏报同源教训）。注入动作在各路径
+        # 装配末段执行（压缩路径在重投影确认**之后**，见 build 尾部）；压缩落 bracket
+        # 后会重估一次（进入"恒注入"状态）。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        plan_tokens = (
-            estimate_message_tokens([SystemMessage(content=plan_text)])
-            if plan_text is not None else 0
-        )
-        token_estimate += plan_tokens
+        plan_text = injection.plan_text
+        plan_tokens = injection.plan_tokens
+        paths_text = injection.paths_text
+        paths_tokens = injection.paths_tokens
+        token_estimate += plan_tokens + paths_tokens
         self._last_plan_tokens = plan_tokens
-        # W-31.5 (#417)：最近修改文件派生（纯函数，一次派生、两条路径共用）。
-        # 注入前提与清单锚绑定（块跟着清单锚走）；token 成本同清单块口径——
-        # 先计入再走阈值判定，注入了就计数（不计数 = 系统性低估，同 :326 教训）。
-        modified_paths = derive_modified_file_paths(session.events)
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
-        token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
         # W-06（#350）：进度核对块决策与成本（先计入再走阈值判定——注入了就
         # 计数，不计数 = 系统性低估，同清单块教训）。
@@ -777,25 +851,18 @@ class ContextBuilder:
         # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
         # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
         # 状态（判据①：压缩后模型输入含完整清单）。
-        plan_state = _should_inject_plan(
+        # W-31.5 (#417)：落 bracket 后重估路径块——`derive_modified_file_paths` 是
+        # 纯 TOOL_CALL 推导（含被 bracket shadow 的事件，bracket 只 shadow 不删，
+        # 结果不变），故与清单决策同走共享 helper；「是否注入」随 plan_text 重估：
+        # 压缩后恒注入清单 ⇒ 路径块可能从无到有，成本随之计入（同清单块记账口径）。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        if plan_text is not None:
-            plan_tokens = estimate_message_tokens([SystemMessage(content=plan_text)])
+        plan_text = injection.plan_text
+        plan_tokens = injection.plan_tokens
+        paths_text = injection.paths_text
+        paths_tokens = injection.paths_tokens
         self._last_plan_tokens = plan_tokens
-        # W-31.5 (#417)：落 bracket 后重估路径块——派生结果复用 pre-branch 的
-        # `modified_paths`（纯 TOOL_CALL 推导，bracket 只 shadow 不删事件，结果
-        # 不变），但「是否注入」随 plan_text 重估：压缩后恒注入清单 ⇒ 路径块
-        # 可能从无到有，成本随之计入（同清单块的记账口径）。
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
         self._last_modified_paths_tokens = paths_tokens
         # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
         # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
@@ -903,29 +970,12 @@ class ContextBuilder:
         else:
             messages, source_ranges = await self._prune_projection(session, pairs)
             anchor_ranges = source_ranges
-        # ── 保护事实（与 build 同一口径：只留最近一条 work_boundary）────────
-        all_protected_facts = derive_protected_facts(session.events)
-        latest_work_boundary = max(
-            (
-                fact for fact in all_protected_facts
-                if fact.type == "work_boundary"
-            ),
-            key=lambda fact: fact.source_seq,
-            default=None,
-        )
-        protected_facts = [
-            fact for fact in all_protected_facts
-            if fact.type != "work_boundary"
-            or fact.fact_id == (
-                latest_work_boundary.fact_id if latest_work_boundary else None
-            )
-        ]
-        protected_facts_messages = self._protected_facts_messages(protected_facts)
-        protected_facts_tokens = (
-            estimate_message_tokens(protected_facts_messages)
-            if protected_facts_messages
-            else 0
-        )
+        # ── 保护事实（复用 build 的共享选择器：只留最近一条 work_boundary）────
+        # #1084：不再自写"最新 work_boundary"筛选——与 `build` 共用
+        # `protected_facts_for_context`（单一 owner），避免手动/自动压缩在事实
+        # 选择上分叉。token 成本同 `build` 走 `protected_fact_token_count` 口径。
+        protected_facts = protected_facts_for_context(session.events)
+        protected_facts_tokens = protected_fact_token_count(protected_facts)
         self._last_protected_fact_tokens = protected_facts_tokens
         if protected_facts_tokens > self.protected_fact_token_budget:
             active_facts = [
@@ -950,8 +1000,11 @@ class ContextBuilder:
                 ],
             )
         # ── token 估算（与 build 同序同式；口径见 build 内注释）────────────
-        # ⚠ 同 build：图片 base64 载荷**不计入**本估算（#823 / MM-02，A4 / PRD D3
-        # 口径显式记录；「图片预算计入」为 MM-03 必做，登记见 #824）。
+        # #935 / M-03（替代 #824 的固定常量，对齐 build）：带图消息的估算**已计入**
+        # 图片的尺寸相关近似成本——`_estimate_tokens_cached` 在结构 token 上按
+        # `context/tokens.py` 的 tile 制公式（读标准图片块携带的 `width`/`height`）
+        # 追加；真正的 base64 载荷仍在 `_finalize` 装配请求时才注入，估算只求不低估
+        # （防"图不计费导致 hard guard 失守"），真实 usage 以 Provider 回执为权威。
         token_estimate = self._estimate_tokens_cached(session, messages)
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
@@ -982,26 +1035,16 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
-        plan_state = _should_inject_plan(
+        # 清单锚 + 最近修改文件块的选择与 token 预留：与 `build` 共用同一纯决策
+        # owner（#1084）——两侧不再内联同式选择，自动/手动压缩的预算口径一致。
+        # 仅取 token 成本：文本注入在 build 尾部执行，compact_now 只做预算预留。
+        injection = _plan_and_paths_injection(
             session.events, self.plan_reinject_every_messages,
         )
-        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
-        plan_tokens = (
-            estimate_message_tokens([SystemMessage(content=plan_text)])
-            if plan_text is not None else 0
-        )
-        token_estimate += plan_tokens
+        plan_tokens = injection.plan_tokens
+        paths_tokens = injection.paths_tokens
+        token_estimate += plan_tokens + paths_tokens
         self._last_plan_tokens = plan_tokens
-        modified_paths = derive_modified_file_paths(session.events)
-        paths_text = (
-            _render_modified_paths_block(modified_paths)
-            if plan_text is not None and modified_paths else None
-        )
-        paths_tokens = (
-            estimate_message_tokens([SystemMessage(content=paths_text)])
-            if paths_text is not None else 0
-        )
-        token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
         reserved_tokens = (
             protected_facts_tokens
@@ -1017,6 +1060,12 @@ class ContextBuilder:
             hard_guard_threshold=self.hard_guard_threshold,
             summary_model=self.summary_model,
             model_call_gate=self.model_call_gate,
+            # #1026：摘要墙钟缩放与分块参数（Settings 透传链终点）。
+            summary_timeout_seconds=self._summary_timeout_seconds,
+            summary_timeout_per_kilotoken_seconds=(
+                self._summary_timeout_per_kilotoken_seconds),
+            summary_chunk_request_ratio=self._summary_chunk_request_ratio,
+            summary_chunk_max_tokens=self._summary_chunk_max_tokens,
         )
         try:
             result = await compactor.compact(
@@ -1032,9 +1081,20 @@ class ContextBuilder:
                 supports_vision=self._supports_vision,
             )
         except ContextWindowExceededError as error:
-            self._record_compaction_failures(session, error.failures)
+            # #1041（spec 06 §8）：失败面 raise（双失败不可截断 / 预检拒绝无法缩小）
+            # ⇒ 先把早期原文落盘成 raw artifact，把 ref 回填进本轮失败记录，再抛。
+            artifact_ref = await self._save_failure_raw_artifact(
+                session, error.raw_artifact_content)
+            self._record_compaction_failures(
+                session, _with_artifact_ref(error.failures, artifact_ref))
             raise
-        self._record_compaction_failures(session, result.failures)
+        # #1041（spec 06 §8，R1 裁决）：截断降级**成功**分支同样落盘**原始 early 窗口
+        # 全文**，事件/诊断回填 artifact_ref。成功压缩 / 低水位 / 安全继续路径
+        # raw_artifact_content 为 None ⇒ 不落盘、ref 保持 None（不伪造）。
+        artifact_ref = await self._save_failure_raw_artifact(
+            session, result.raw_artifact_content)
+        self._record_compaction_failures(
+            session, _with_artifact_ref(result.failures, artifact_ref))
         if not result.compacted_turn_count:
             # #639 阶段 B：连续预检拒绝达阈值 ⇒ 不再静默保留旧投影，经 #348 既有
             # 通道显式失败（failures 已由上一行落盘），run 走非终态暂停。未达阈值
@@ -1045,6 +1105,12 @@ class ContextBuilder:
                     failures=result.failures,
                 )
             # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
+            # #1026 裁决 A：降级截断例外——compacted_turn_count==0 但 fallback_used
+            # 置位 ⇒ 返回截断投影供**本次请求**使用（无摘要、无 bracket，不持久化；
+            # 下次 build 面对同一投影会再做同一次确定性截断，天然收敛）。恢复依据
+            # 是"投影已压回 auto_limit 内"，不是"压缩已发生"。
+            if result.fallback_used:
+                return result
             return None
         # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
         self._preflight_rejection_streaks.pop(session.session_id, None)
@@ -1092,6 +1158,8 @@ class ContextBuilder:
                 # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
                 # 逐字节等价）。这是本次唯一新增的事件键。
                 "narrowed": result.narrowed,
+                # #1026：成功走分块摘要路径的 marker（验收 3 的事件可观测）。
+                "chunked": result.chunked,
                 "bracket_id": bracket_id,
                 "summary_model_id": result.summary_model_id,
                 "duration_ms": result.duration_ms,
@@ -1157,6 +1225,37 @@ class ContextBuilder:
             insertion += 1
         return [facts_messages[0], *messages[:insertion], *facts_messages[1:], *messages[insertion:]]
 
+    async def _save_failure_raw_artifact(
+        self, session: Session, raw: str | None,
+    ) -> str | None:
+        """#1041（spec 06 §8）：摘要失败分支带出的**原始 early 窗口全文**落盘成 raw
+        artifact，返回其内容寻址 ref。
+
+        - `raw is None`（成功 / 安全继续 / 低水位 / 无早期窗口等**无原文可存**的路径，
+          含 `no_compactable_early_turn`——会话受损但 early 为空、无原文可存）或
+          `self._artifact_store is None`（未装配 store）⇒ **不落盘、返回 None**
+          （§8「上传失败不能伪造 artifact_ref」）。
+        - 落盘失败同样 fail-open 返回 None 并记 warning：本方法在**既有的失败路径**上
+          调用，不得把受控的压缩失败升级成未捕获异常（对标 `tooling/overflow.py` 的
+          fail-open 先例）。content-hash 寻址 ⇒ 重复落盘天然去重。
+        """
+        if raw is None or self._artifact_store is None:
+            return None
+        try:
+            artifact = await self._artifact_store.save(
+                session.session_id, raw,
+                mime_type="application/json",
+                source_tool="context_compactor",
+                tool_call_id="compaction_failure_raw",
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "Artifact store unavailable; compaction raw artifact not saved: %s",
+                error,
+            )
+            return None
+        return artifact.artifact_id
+
     def _record_compaction_failures(
         self, session: Session, failures: list[CompactionFailure],
     ) -> None:
@@ -1166,6 +1265,12 @@ class ContextBuilder:
         summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
         `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
+
+        #1041（spec 06 §8）：`artifact_ref` 是本轮**原始 early 窗口全文** raw artifact
+        的内容寻址 id（由调用方在落盘后回填进失败记录）。它是**本轮级**指针：只落在
+        "摘要失败来源"的诊断上——预检拒绝诊断（`attempt=0`，非摘要尝试）在本轮另有
+        摘要尝试失败时保持 None（纯预检轮则例外，见 `_with_artifact_ref`）。store 缺席 /
+        未落盘时为 None（additive 键，绝不伪造）。
         """
         for failure in failures:
             session.append(CONTEXT_COMPACTION_FAILED, {
@@ -1181,6 +1286,8 @@ class ContextBuilder:
                 "request_budget_tokens": failure.request_budget_tokens,
                 # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
                 "narrowed": failure.narrowed,
+                # #1041：本轮失败保存的 raw artifact ref（None = 未落盘）。
+                "artifact_ref": failure.artifact_ref,
             })
 
     def _note_preflight_rejection(
@@ -1560,23 +1667,33 @@ class ContextBuilder:
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
+        # "其他"的细分记账（#1095）：每个子项都是**独立记账口的真实成本**（见
+        # __init__ 各 _last_*_tokens 字段的注释），不是"总量减各项"的残差倒推。
+        # provider_injected = 非 skills 的 provider 注入（记忆等，匿名 provider
+        # 也在这里——_with_providers 把匿名归入 "other" 键）。细分之和恒等于
+        # other（同一批数字求和，只是分组呈现）；旧快照无此键，端点层省略，
+        # 不伪造子项 0。
+        other_breakdown = {
+            "provider_injected": sum(v for k, v in by_name.items() if k != "skills"),
+            "runtime_context": self._last_runtime_context_tokens,
+            "plan_anchor": self._last_plan_tokens,
+            "protected_facts": self._last_protected_fact_tokens,
+            "modified_paths": self._last_modified_paths_tokens,
+            "pressure_warning": self._last_pressure_warning_tokens,
+            "progress": self._last_progress_tokens,
+        }
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
         # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
         # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
-        other = (sum(v for k, v in by_name.items() if k != "skills")
-                 + self._last_runtime_context_tokens
-                 + self._last_plan_tokens
-                 + self._last_protected_fact_tokens
-                 + self._last_modified_paths_tokens
-                 + self._last_pressure_warning_tokens
-                 + self._last_progress_tokens)
+        other = sum(other_breakdown.values())
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,
             "skills": skills_tokens,
             "other": other,
+            "other_breakdown": other_breakdown,
             # 总量 = 各桶之和（端点层再加工具两组）。与 _token_estimate_total 的差别
             # 是刻意的：后者只含投影 messages，不能当作"已用总量"（那是漏报的根源）。
             "used_tokens": messages_tokens + system_prompt_tokens + skills_tokens + other,

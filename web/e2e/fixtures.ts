@@ -274,6 +274,15 @@ export interface ApiMock {
   /** POST /api/sessions/{id}/recover（T8 #138 恢复；缺省 200 → 返回 mock.events）。
    *  真实语义：响应是与 GET events 同构的全量事件数组。 */
   onRecoverPost?: (route: Route) => Promise<void> | void;
+  /** GET /api/sessions/{id}/recovery（#1049 只读端点；#1030 前端主动发现路径）。
+   *  缺省 = `{pending_decisions: mock.pendingDecisions ?? []}`（空清单 = 后端说
+   *  此刻没有待裁决）。注入此回调即可伪造读失败（非 2xx）——**读不到 ≠ 没事**，
+   *  前端必须保持"未知"而不是点亮"已结清"。 */
+  onRecoveryGet?: (route: Route) => Promise<void> | void;
+  /** 缺省待裁决清单（形状 = 后端 `_reconcile_pending` 的行，见
+   *  `web/src/lib/api.ts::PendingDecision`）。非空时前端**无需任何 409**
+   *  就会亮出「待裁决」徽标与裁决面板（#1030 AC3）。 */
+  pendingDecisions?: unknown;
   /** GET /api/recovery/interrupted（#357 W-13 契约 5）——只读恢复列表快照。
    *  缺省 = `{snapshot_available:true, items:[]}`（无中断会话）。
    *  真实形状见 `web/src/lib/api.ts::InterruptedRecoveries`；spec 直接传后端
@@ -373,7 +382,7 @@ export interface ApiMock {
   /** GET /api/memories/{id}/versions 的拦截口（例如 content-free tombstone history）。 */
   onMemoryVersionsGet?: (route: Route, memoryId: string) => Promise<boolean> | boolean;
   /** MEM-V2-5: independently persisted setting fixture and optional mutation failure. */
-  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean };
+  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean; fallback_enabled: boolean };
   memorySettingsPatchError?: { status: number; detail: string };
   /** MEM-V2-5: current-session redacted recall explanation response. */
   memoryRecalls?: unknown[];
@@ -511,7 +520,10 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   }));
   /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
-  const memorySettings = { extraction_enabled: true, recall_enabled: true, ...mock.memorySettings };
+  const memorySettings = {
+    extraction_enabled: true, recall_enabled: true, fallback_enabled: true,
+    ...mock.memorySettings,
+  };
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
   /** #825（MM-04）：附件字节 + 引用关系（语义对齐 `web/attachments.py`）。
@@ -943,6 +955,18 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       if (mock.onRecoverPost) return mock.onRecoverPost(route);
       return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
     }
+    /* #1030：打开会话时前端会**主动**拉待裁决清单（#1049 的只读端点）。
+       默认给空清单——多数用例的会话根本不需要裁决，不该被这条读面干扰；
+       需要"打开即有待裁决"的用例用 `onRecoveryGet` 或 `pendingDecisions` 覆盖。
+       注意：**空清单是事实**（后端说此刻没有待裁决），与"读不到"必须分开——
+       这里刻意不提供 5xx 兜底，要测读失败就显式 fulfill 非 2xx。 */
+    if (/^\/api\/sessions\/[^/]+\/recovery$/.test(path) && req.method() === 'GET') {
+      if (mock.onRecoveryGet) {
+        await mock.onRecoveryGet(route);
+        return;
+      }
+      return json(route, { pending_decisions: mock.pendingDecisions ?? [] });
+    }
     if (/^\/api\/sessions\/[^/]+\/approve$/.test(path) && req.method() === 'POST') {
       if (mock.onApprovePost) return mock.onApprovePost(route);
       const body = (req.postDataJSON() ?? {}) as { approval_id?: string; decision?: string };
@@ -1321,6 +1345,11 @@ export const MODELS = [
   { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
 ];
 
+/** 目录里第一个**非默认**条目（#1016）。默认条目（`default: true`）表示「清除会话级
+ *  覆盖、回到默认链」，**不**进二级列表、也不是一个可选模型——所以"第一个可选模型"
+ *  是第一个非默认条目。 */
+export const FIRST_SELECTABLE_MODEL = MODELS.find((m) => !m.default)!;
+
 /** #199：可用性 + 能力位的**载荷形状**夹具（键名与真后端一致：`is_available` /
  *  `unavailable_reason` / `supports_*`，`getModels` 逐字段窄化）。
  *
@@ -1341,7 +1370,9 @@ export const MODELS = [
  *  （详见设计稿 §3 的"可达性前置"）。夹具的职责是把两边的分支都喂到，不是证伪后端。 */
 export const MODELS_WITH_AVAILABILITY = [
   {
-    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: true,
+    // #1016（AC1）：默认条目不进二级列表 ⇒ 这里不能标 default:true——标了 zhipu 组
+    // 二级就只剩 glm-4.6-air，「能力徽标按条不按 provider」的组内对照就没了载体。
+    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: false,
     is_available: true, unavailable_reason: null,
     supports_tools: true, supports_vision: true, supports_reasoning_summary: true,
   },
@@ -1557,7 +1588,8 @@ export async function pickControl(
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
-/** 选目录里的**第一个模型**（`MODELS[0]`，provider = `MODELS[0].provider`），
+/** 选二级列表里的**第一个可选模型**（`FIRST_SELECTABLE_MODEL`，#1016 后默认条目
+ *  不进二级列表——「选默认」走一级「默认链」入口，不属于本 helper 的语义），
  *  断言 trigger 文本变成该模型名（#199 两级飞出）。
  *
  * 与旧版的差别是**语义变了，不是断言变松**：一级只列 provider，模型在二级子菜单里，
@@ -1568,7 +1600,7 @@ export async function pickControl(
  * 关闭态的信号是 `[role="menu"]`（菜单语义），不再是 `[role="listbox"]`：两级飞出在
  * 平台上就是「菜单 + 子菜单」，见 `ModelPicker.tsx` 顶部对语义变更的说明。 */
 export async function pickFirstModel(page: Page): Promise<void> {
-  await pickModel(page, MODELS[0].provider, MODELS[0].name);
+  await pickModel(page, FIRST_SELECTABLE_MODEL.provider, FIRST_SELECTABLE_MODEL.name);
 }
 
 /** 「这个面板里没有搜索入口」的**可失败**口径：任何输入控件 / 搜索语义都算。
@@ -1638,4 +1670,123 @@ async function pickModel(page: Page, provider: string, modelName: string): Promi
   await expect(trigger).toContainText(modelName);
   // 退出动画走完再交还控制权——否则下一次交互会撞上正在关闭的菜单
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
+}
+
+/* ── #1136：任务审阅面板 mock（`task-review.spec.ts` 与 `t-contrast.spec.ts` 共用）──
+ *
+ *  叠加在 `routeApi` 之上（其余走 fallback），逐字段镜像真实 FastAPI 投影形状
+ *  （取自 `session/task.py::TaskState.to_payload`、`session/evidence.py`、
+ *  `web/task_delivery.py`、`web/workspace_files.py::GitCommandResult`）。抽到 fixtures
+ *  是为避免两个 spec 各抄一份——抄歪时两边同时错、还测不出来（#155 轮栽过同款）。 */
+export interface TaskReviewFixture {
+  task: Record<string, unknown>;
+  evidence: Record<string, unknown[]>;
+  gitStatus?: Record<string, unknown>;
+  gitDiff?: Record<string, unknown>;
+  leaseReleased?: boolean;
+  /** #1136：`GET /evidence` 直接失败 → 面板渲染「证据不可得」（≠缺证据）。 */
+  evidenceError?: { status: number; detail: string } | null;
+  /** #1136：`GET /task` 直接失败（非 404）→ 面板渲染「加载失败：…」（`.task-review-error`）。 */
+  taskError?: { status: number; detail: string } | null;
+}
+
+export function criterion(item_id: string, text: string, origin: 'user' | 'agent' = 'user') {
+  return { item_id, text, origin, confirmed: origin === 'user' };
+}
+
+export function verification(value: string) {
+  return { value, evidence: null };
+}
+
+export function evidenceRecord(over: Record<string, unknown> = {}) {
+  return {
+    evidence_id: 'ev-1',
+    task_session_id: SID,
+    run_id: 'run-1',
+    criterion_id: 'c3',
+    kind: 'test',
+    source_event_seq: 3,
+    tool_call_id: null,
+    captured_at: T,
+    result: 'pass',
+    command_or_action: 'pytest tests/x.py',
+    exit_code_or_observation: 0,
+    artifact_ref: null,
+    base_head: null,
+    workspace_manifest: { files: [{ path: 'src/a.py', sha256: 'a'.repeat(64) }], manifest_hash: 'b'.repeat(64), progress_md_sha256: null },
+    freshness: { status: 'fresh', reasons: [] },
+    ...over,
+  };
+}
+
+/** 安装 task / evidence / lease / workspace-git 路由（叠加在 routeApi 之上；其余 fallback）。 */
+export async function mockTaskReviewApi(page: Page, state: TaskReviewFixture): Promise<void> {
+  const jsonFulfill = (route: Route, body: unknown, status = 200) =>
+    route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
+  await page.route('**/api/**', async (route) => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname;
+    const method = req.method();
+    if (path.endsWith('/task/acceptance/release') && method === 'POST') {
+      state.task = { ...state.task, acceptance: null, version: (state.task.version as number) + 1, product_state: 'deliverable' };
+      return jsonFulfill(route, { status: 'applied', task: state.task });
+    }
+    if (path.endsWith('/task/acceptance') && method === 'POST') {
+      const body = (req.postDataJSON() ?? {}) as { decision?: string; reason?: string; expected_version?: number };
+      if (body.expected_version !== state.task.version) {
+        return jsonFulfill(route, { detail: `版本冲突：expected_version=${body.expected_version}，当前 version=${state.task.version}` }, 409);
+      }
+      if (state.task.acceptance) {
+        return jsonFulfill(route, { detail: '已存在接受事实（不能双写）' }, 409);
+      }
+      state.task = {
+        ...state.task,
+        acceptance: { decision: body.decision ?? 'accepted', reason: body.reason ?? null },
+        version: (state.task.version as number) + 1,
+        product_state: 'accepted',
+      };
+      return jsonFulfill(route, { status: 'applied', task: state.task });
+    }
+    if (path.endsWith('/task/lease/release') && method === 'POST') {
+      return jsonFulfill(route, { released: state.leaseReleased ?? false, promoted_to: null });
+    }
+    if (path.endsWith('/task') && method === 'GET') {
+      if (state.taskError) {
+        return jsonFulfill(route, { detail: state.taskError.detail }, state.taskError.status);
+      }
+      return jsonFulfill(route, { task: state.task });
+    }
+    if (path.endsWith('/evidence') && method === 'GET') {
+      if (state.evidenceError) {
+        return jsonFulfill(route, { detail: state.evidenceError.detail }, state.evidenceError.status);
+      }
+      return jsonFulfill(route, { evidence: state.evidence });
+    }
+    if (path.endsWith('/workspace/git/status') && method === 'GET') {
+      return jsonFulfill(route, state.gitStatus ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
+    }
+    if (path.endsWith('/workspace/git/diff') && method === 'GET') {
+      return jsonFulfill(route, state.gitDiff ?? { exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
+    }
+    return route.fallback();
+  });
+}
+
+/** #1136 / 场景 L：后端 401（要求身份令牌）→ `.auth-banner` 渲染。
+ *  `l-auth-banner.spec.ts` 与 `t-contrast.spec.ts` 共用。
+ *
+ *  会话列表**始终** 401，复现「后端要求令牌」的持续状态（不搞「先 401 后 200」的
+ *  开关——那会让「关闭后不再复现」变成空断言）。路由 glob 尾部的 `*` 不是可有可无：
+ *  Playwright 的 glob 是**整串**匹配，少了它匹配不了带查询串的会话列表 URL，而列表
+ *  请求自 #171 起恒带 `?include_archived=true` ——少了它本会静默走 200 分支 →
+ *  横幅永不出现。`*` 展开为 `[^/]*`，只多吃查询串，不会吞会话详情端点。 */
+export async function mockAuthRequired(page: Page): Promise<void> {
+  await routeApi(page, { sessions: [] });
+  await page.route('**/api/sessions*', (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Missing identity token' }),
+    }),
+  );
 }

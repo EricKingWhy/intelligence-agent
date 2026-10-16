@@ -1,0 +1,1 @@
+2026-10-12	#1040 consumed-leftover-pointer repair: independent Standards PASS and Spec PASS; P0-P4=0/0/0/0/0; R3 asserts cleared pointer after rollback. Red proof against parent passed.	8bab96f59bfdf89e1f338411264bbb0e28d3c883..fdbeef531d419a6264636d280aad80ce6beabeec

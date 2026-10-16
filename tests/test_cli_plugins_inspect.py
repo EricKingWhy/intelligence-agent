@@ -477,7 +477,7 @@ def test_inspection_bounds_empty_directory_inventory(
     )
     (source / "empty-one").mkdir(parents=True)
     (source / "empty-two").mkdir()
-    monkeypatch.setattr(inspection, "_MAX_PACKAGE_ENTRIES", 2)
+    monkeypatch.setattr(inspection, "MAX_PACKAGE_ENTRIES", 2)
 
     report = inspect_skill_package(source, scope="project")
 

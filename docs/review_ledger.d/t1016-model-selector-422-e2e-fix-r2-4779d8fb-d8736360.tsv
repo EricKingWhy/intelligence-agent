@@ -1,0 +1,1 @@
+2026-10-12	#1016 修后重审（双轴 fresh 会话，范围=处置笔 d8736360 单行注释）：两轴均 CLEAN——有限发现为变异式核对（注释三项声称与 fixtures.ts SEARCHABLE_MODELS 定义逐字一致：5 条/1 默认/4 provider，与分母 filter(!default).length=4 吻合，无新误导）；上一轮 P3/P4（:138 注释 5/4 歧义）闭合。	4779d8fb..d8736360

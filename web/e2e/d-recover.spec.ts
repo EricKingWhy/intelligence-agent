@@ -144,7 +144,8 @@ test('只补上 run 终态（无工具回填）时如实说「补齐 run 终态�
   await expect(page.locator('.recover-btn')).toHaveCount(0);
 });
 
-test('恢复遇 409：需人工裁决单独成形，不混同普通失败', async ({ page }) => {  await openCrashedSession(page, {
+test('恢复遇 409：需人工裁决单独成形，不混同普通失败', async ({ page }) => {
+  await openCrashedSession(page, {
     sessions: [ROW],
     events: crashedEvents(),
     onRecoverPost: async (route) => {
@@ -158,9 +159,17 @@ test('恢复遇 409：需人工裁决单独成形，不混同普通失败', asyn
 
   await page.locator('.recover-btn').click();
 
+  // #1030 缺陷③ / AC2：这里原先把后端 detail 逐字当用户文案（协议原文，含
+  // tool_call_id 与 POST /recover 端点）。现在第一层是**人话**（说清要裁决、可行动），
+  // 后端原文只在折叠的技术详情层——要排查的人展开仍有全文。
   const conflict = page.locator('.recover-conflict');
-  await expect(conflict).toContainText('需人工裁决');
-  await expect(conflict).toContainText('高风险工具调用');
+  await expect(conflict).toContainText('需要你裁决');
+  await expect(conflict).not.toContainText('POST /api/sessions');
+  await expect(conflict).not.toContainText('tool_call_id');
+
+  const tech = conflict.locator('details.adjudication-tech');
+  await expect(tech).not.toHaveAttribute('open', '');
+  await expect(tech.locator('.adjudication-tech-body')).toContainText('存在 UNKNOWN 状态的高风险工具调用');
   await expect(page.locator('.recover-done')).toHaveCount(0);
 });
 

@@ -103,6 +103,7 @@ from pydantic import BaseModel
 
 from agent_harness.observability import get_observability_sink
 from agent_harness.observability.tracer import RunTracer
+from agent_harness.sandbox.registry import IMPORT_COMPLETE_MARKER
 from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.progress import PROGRESS_DIRNAME
@@ -189,10 +190,14 @@ class GitCommandResult(BaseModel):
     artifact_ref: str | None = None
 
 
-async def _session_sandbox(
+async def session_sandbox(
     state: AppState, session_id: str, validate_session_id: Callable[[str], str]
 ) -> Sandbox:
     """会话 → 它的 workspace sandbox（三件事：会话形态合法、会话存在、映射存在）。
+
+    公开（原 `_session_sandbox`，#1048）：`web.workspace_export` 的导出端点同样需要
+    "session_id → sandbox" 这一动作——与其在新模块里复制一份取 sandbox 的逻辑（多一个
+    漂移面），不如把它作为本模块的公开入口。
 
     `validate_session_id` 由调用方传入（app 侧那一份）：形态校验只有一处实现，这里
     只负责把它的 `InvalidSessionId` 翻成 422——漏了这一步就会以 500 冒出去（与既有
@@ -227,14 +232,16 @@ def _list_files(sandbox: Sandbox, pattern: str, limit: int) -> WorkspaceFileList
     `total` 是匹配总数、`truncated` 是"有没被 limit 截掉"——两者都来自同一份匹配结果，
     不存在"报 500 条其实有 300 条"的可能。
 
-    harness 内部状态目录（W-05 进度文件投影 `agent-progress/<session-id>/`）不出现在
-    浏览面：它是派生物不是用户工作产物，混进文件清单既是噪音也诱导经 Web 编辑出
-    第二真相。文件本身仍在工作区里（git 可见、模型可读），这里只过滤**浏览**口径，
-    在 API 层做而不是 Sandbox 层——两种 Sandbox 后端共用同一过滤，且不动模型侧视野。
+    harness 内部状态不出现在浏览面：W-05 进度文件投影目录（`agent-progress/<sid>/`）
+    与 #1048 的容器工作区「导入完成」标记（`IMPORT_COMPLETE_MARKER`）都是派生物/簿记，
+    不是用户工作产物；混进文件清单既是噪音也诱导经 Web 编辑出第二真相。两者本身仍在
+    工作区里（git 可见、模型可读），这里只过滤**浏览**口径，在 API 层做而不是 Sandbox
+    层——两种 Sandbox 后端共用同一过滤，且不动模型侧视野。
     """
     matched = [
         rel for rel in sandbox.list_files(pattern)
         if rel.split("/", 1)[0] != PROGRESS_DIRNAME
+        and rel != IMPORT_COMPLETE_MARKER
     ]
     return WorkspaceFileList(
         files=matched[:limit],
@@ -464,7 +471,7 @@ def register_workspace_file_routes(
 
     async def _sandbox_for(session_id: str) -> Sandbox:
         """本模块四条路由统一的会话解析入口（形态 / 存在性 / 映射三件事只写一遍）。"""
-        return await _session_sandbox(app.state.agent, session_id, validate_session_id)
+        return await session_sandbox(app.state.agent, session_id, validate_session_id)
 
     @app.get("/api/sessions/{session_id}/workspace/files")
     async def list_workspace_files(
@@ -592,6 +599,19 @@ def register_workspace_file_routes(
         )
 
 
+def workspace_semantics_for_sandbox(sandbox: object) -> str:
+    """该 sandbox 的工作区路径语义（AC8）：`"sandbox"`（容器/POSIX）或 `"host"`。
+
+    Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端返回 `"sandbox"`
+    ——文件路由只经 Sandbox 抽象（`read_text`/`list_files`），宿主源路径仅作项目
+    身份与导入来源。local 子进程后端返回 `"host"`。判据单一来源见
+    `agent_harness.assembly.uses_sandbox_path_semantics`。
+    """
+    from agent_harness.assembly import uses_sandbox_path_semantics
+
+    return "sandbox" if uses_sandbox_path_semantics(sandbox) else "host"
+
+
 __all__ = [
     "MAX_CHARS_PER_LINE",
     "MAX_FILE_ENTRIES",
@@ -600,4 +620,6 @@ __all__ = [
     "WorkspaceFileList",
     "WorkspaceFileSlice",
     "register_workspace_file_routes",
+    "session_sandbox",
+    "workspace_semantics_for_sandbox",
 ]

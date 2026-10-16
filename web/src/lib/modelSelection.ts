@@ -33,6 +33,39 @@ export function modelChangeTarget(
   return models.find((m) => m.default)?.name ?? null;
 }
 
+/** 选择器的值 → Composer 的 `model` 状态：默认条目名归一为 `null`（#1016）。
+ *
+ *  `modelChangeTarget` 做的是**反向**（`null` → 默认条目名，供 `POST /model` 清覆盖）；
+ *  本函数做**正向**（默认条目名 → `null`）。缺了这一层，选中二级那条「默认」会把
+ *  `selectedModel` 固化成默认模型名（`App.handleModelChange` 的 `if (name !== null)`
+ *  判据漏了"name 其实是默认条目"这一层），此后每次续聊都带着这个名字去后端 → 422。
+ *
+ *  第一性原理：「默认 / 继承默认链」是取值空间之外的状态，不是一个 id。一级
+ *  「默认链」已是它的唯一入口（提交 `null`），二级不再渲染默认条目（见
+ *  `selectableModels`）；本函数是"万一拿到默认条目名也归零"的兜底。 */
+export function normalizeSelectedModel(
+  selected: string | null,
+  models: readonly ModelCatalogEntry[],
+): string | null {
+  if (selected === null) return null;
+  // 目录未加载（空）时无法判「默认性」——原样返回。乱归零一个可能真实的模型名，
+  // 比漏归零一个暂不可判的名字更危险（后者等目录加载后再次 changeModel 即纠正）。
+  if (models.length === 0) return selected;
+  return models.find((m) => m.name === selected)?.default ? null : selected;
+}
+
+/** 二级列表**可选项**：排除默认条目（#1016）。
+ *
+ *  默认条目不是一个真实模型，而是"清除会话级覆盖"的状态；把它留在二级列表里，
+ *  用户点它就会把 `selectedModel` 固化成默认模型名（见 `normalizeSelectedModel`），
+ *  且与一级「默认链」入口语义重复。一级「默认链」是默认的唯一入口。
+ *  过滤掉默认条目后，只剩默认条目的 provider 组会因 `groupByProvider` 无项而不渲染。 */
+export function selectableModels(
+  models: readonly ModelCatalogEntry[],
+): ModelCatalogEntry[] {
+  return models.filter((m) => !m.default);
+}
+
 /** **当前生效的目录条目**：显式选中项；未选（默认链）则目录里 `default` 那条；
  *  目录为空 / 名字不在目录里 → undefined（不认识就说不认识，不猜一条）。
  *
