@@ -657,6 +657,10 @@ export interface ProtectedFactAnnotationPayload {
     | 'task_progress';
   value: string;
   supersedes_fact_id?: string;
+  /** #1191（Phase 2）：登记作用域三选一（票面 §六.2）。缺省（不发键）= 会话级，
+   *  既有行为逐字不变；`project` / `global` 时后端把真值写入独立规则层，会话事件流
+   *  只留审计痕。「缺省不发键」由 `SEND_MESSAGE_FIELDS` 的构造器执行。 */
+  scope?: 'session' | 'project' | 'global';
 }
 
 export interface SendMessagePayload {
@@ -1645,6 +1649,95 @@ export async function revokeProtectedFact(
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts/${encodeURIComponent(factId)}/revoke`,
     { method: 'POST' },
+  );
+  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
+  if (body.status !== 'revoked') {
+    throw new Error('撤销回执缺少 revoked 状态');
+  }
+  return {
+    fact_id: typeof body.fact_id === 'string' ? body.fact_id : factId,
+    status: 'revoked',
+    revoked_at: typeof body.revoked_at === 'string' ? body.revoked_at : null,
+  };
+}
+
+// ── 约束作用域三层（#1191 / #1176 Phase 2）──
+
+/** 登记作用域三选一（票面 §六.1）。 */
+export type ConstraintScope = 'session' | 'project' | 'global';
+
+/** `GET .../effective-constraints` 的单条（票面 §六.1）——`#1190` §5.1 行字段的超集，
+ *  附带 `scope` 与 `overridden_by`。`source_event_id` / `source_seq` 对**项目/全局级**
+ *  为 `null`：它们不在本会话事件流里（真值在独立规则层，会话流只留审计痕）。 */
+export interface EffectiveConstraintRow {
+  fact_id: string;
+  type: string;
+  value: unknown;
+  status: ProtectedFactStatus;
+  source_event_id: string | null;
+  source_seq: number | null;
+  registered_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  scope: ConstraintScope;
+  /** 被更高优先级 scope 覆盖时填覆盖方的 fact_id，否则 null（票面 §六.1）。 */
+  overridden_by: string | null;
+}
+
+/** 当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 null。 */
+export interface EffectiveProjectMeta {
+  key: string;
+  label: string | null;
+}
+
+export interface EffectiveConstraintsResponse {
+  facts: EffectiveConstraintRow[];
+  project: EffectiveProjectMeta | null;
+}
+
+/** 列本会话实际可见的约束全集 = 会话投影 + 本项目 + 全局，附 scope 与覆盖关系
+ *  （#1191 §六.1）。
+ *
+ *  数据是**后端实时投影**（前端不维护第二套状态）：每次调用都重拉，绝不缓存。
+ *  错误矩阵与 `listProtectedFacts` 同口径：422 / 404 / 409 / 503 / 403 / 401。 */
+export async function listEffectiveConstraints(
+  sessionId: string,
+): Promise<EffectiveConstraintsResponse> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/effective-constraints`,
+  );
+  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : null;
+  const facts = obj?.facts;
+  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  const project =
+    typeof obj?.project === 'object' && obj.project !== null
+      ? (obj.project as EffectiveProjectMeta)
+      : null;
+  return { facts: facts as EffectiveConstraintRow[], project };
+}
+
+/** 撤销一条**项目/全局级**约束（#1191 §六.3，走独立规则层的历史保留链；幂等）。
+ *
+ *  `session_id` 让服务端**权威解析**项目键（不让请求体自带 project_key）。影响面：
+ *  项目级撤销影响本仓库所有会话，全局级撤销影响所有项目的新会话——面板二次确认文案
+ *  据此。语义与 `revokeProtectedFact` 同：200 → `{fact_id, status:"revoked", revoked_at}`；
+ *  422 / 404 / 409 / 503 / 403 / 401 同口径。走到 200 即"后端已落撤销"——调用方据此
+ *  **重拉 GET** 对齐，不做乐观本地更新。 */
+export async function revokeScopedConstraint(
+  factId: string,
+  opts: { scope: 'project' | 'global'; sessionId: string },
+): Promise<ProtectedFactRevokeReceipt> {
+  const res = await apiFetch(
+    `/api/memory/constraints/${encodeURIComponent(factId)}/revoke`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: opts.scope, session_id: opts.sessionId }),
+    },
   );
   if (!res.ok) throw await sessionError(res, '撤销约束失败');
   const raw: unknown = await res.json().catch(() => null);

@@ -3835,6 +3835,48 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer-rule-signal input:disabled {
   cursor: not-allowed;
 }
+/* #1191（Phase 2）：登记入口——勾选「作为可复用规则」后，右侧出现作用域三选一，
+ * 选中项下方一行 hint。视觉对照 mockups/phase2.html 上半。 */
+.composer-rule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+.composer-scope-pills {
+  display: inline-flex;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 3px;
+}
+.composer-scope-pill {
+  border: none;
+  background: none;
+  color: var(--color-muted-foreground);
+  font: 500 var(--text-xs) var(--font-ui);
+  padding: 5px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.composer-scope-pill.on {
+  background: var(--color-accent);
+  color: #fff;
+}
+.composer-scope-pill:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.composer-scope-hint {
+  padding: 0 var(--space-lg) var(--space-sm);
+  font: 400 var(--text-xs) var(--font-ui);
+  color: var(--color-subtle-foreground);
+}
+.composer-scope-hint b {
+  margin-right: 6px;
+  font-weight: 600;
+  color: var(--color-muted-foreground);
+}
 .composer:focus {
   outline: none;
 }

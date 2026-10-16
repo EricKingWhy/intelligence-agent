@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
-/** ConstraintsTab / ConstraintsView（#1190 / #1176 Phase 1）—— 约束管理页。
+/** ConstraintsTab / ConstraintsView（#1190 Phase 1 / #1191 Phase 2）—— 约束管理页。
  *
- *  锁的是 issue §四与不变量 #22（UI 不做第二真相）：
+ *  锁的是 issue §四/§五与不变量 #22（UI 不做第二真相）：
  *  ① 纯展示视图 `ConstraintsView` 由数据 props 驱动——状态筛选默认「生效中」、
  *     revoked/superseded 归「已撤销」页、类型下拉纯展示层过滤；
  *  ② 有状态外壳 `ConstraintsTab` 挂载即拉后端投影，**撤销后重拉对齐**（不做乐观
  *     本地更新）——真相在后端；
  *  ③ 空态 / 无权限（403）如实说，不冒充空列表；
- *  ④ 时间/操作人展示：坏值原样、本地哨兵 `local` → 「本人操作」。 */
+ *  ④ 时间/操作人展示：坏值原样、本地哨兵 `local` → 「本人操作」。
+ *
+ *  #1191 增量：三组按 `scope` 分组（SESSION/PROJECT/GLOBAL）+ 顶部优先级条；
+ *  项目组带 `git 根 · label`；被更高优先级覆盖的条目加「被本会话覆盖」；
+ *  非 git（`project === null`）不渲染 PROJECT 组；撤销按 scope 分派端点。 */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactElement } from 'react';
@@ -15,21 +19,28 @@ import { createRoot, type Root } from 'react-dom/client';
 import { renderToString } from 'react-dom/server';
 import {
   SessionError,
-  listProtectedFacts,
+  listEffectiveConstraints,
   revokeProtectedFact,
-  type ProtectedFact,
+  revokeScopedConstraint,
+  type EffectiveConstraintRow,
+  type EffectiveProjectMeta,
 } from '../lib/api';
 import { formatFactTime, operatorLabel } from '../lib/constraints';
 import { ConstraintsTab, ConstraintsView } from './ConstraintsTab';
 
 vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>();
-  return { ...actual, listProtectedFacts: vi.fn(), revokeProtectedFact: vi.fn() };
+  return {
+    ...actual,
+    listEffectiveConstraints: vi.fn(),
+    revokeProtectedFact: vi.fn(),
+    revokeScopedConstraint: vi.fn(),
+  };
 });
 
 const T = '2026-09-07T00:00:00Z';
 
-const ACTIVE: ProtectedFact = {
+const ACTIVE: EffectiveConstraintRow = {
   fact_id: 'f-active',
   type: 'constraint',
   value: '不要改动生产环境配置',
@@ -39,9 +50,11 @@ const ACTIVE: ProtectedFact = {
   registered_at: T,
   revoked_at: null,
   revoked_by: null,
+  scope: 'session',
+  overridden_by: null,
 };
 
-const REVOKED: ProtectedFact = {
+const REVOKED: EffectiveConstraintRow = {
   fact_id: 'f-revoked',
   type: 'user_goal',
   value: '先修好登录页对比度',
@@ -51,9 +64,11 @@ const REVOKED: ProtectedFact = {
   registered_at: T,
   revoked_at: T,
   revoked_by: 'local',
+  scope: 'session',
+  overridden_by: null,
 };
 
-const SUPERSEDED: ProtectedFact = {
+const SUPERSEDED: EffectiveConstraintRow = {
   fact_id: 'f-superseded',
   type: 'authorization',
   value: '允许写 workspace',
@@ -63,11 +78,44 @@ const SUPERSEDED: ProtectedFact = {
   registered_at: T,
   revoked_at: null,
   revoked_by: null,
+  scope: 'session',
+  overridden_by: null,
 };
+
+const PROJECT_ROW: EffectiveConstraintRow = {
+  fact_id: 'prj-1',
+  type: 'constraint',
+  value: '所有 Python 改动先写 failing test',
+  status: 'active',
+  source_event_id: null,
+  source_seq: null,
+  registered_at: T,
+  revoked_at: null,
+  revoked_by: null,
+  scope: 'project',
+  overridden_by: null,
+};
+
+const GLOBAL_ROW: EffectiveConstraintRow = {
+  fact_id: 'glb-1',
+  type: 'constraint',
+  value: '和我说话温柔一点',
+  status: 'active',
+  source_event_id: null,
+  source_seq: null,
+  registered_at: T,
+  revoked_at: null,
+  revoked_by: null,
+  scope: 'global',
+  overridden_by: null,
+};
+
+const PROJECT_META: EffectiveProjectMeta = { key: '/repo', label: 'EricKingWhy/intelligence-agent' };
 
 const viewBase = {
   sessionId: 's-1',
-  facts: [] as ProtectedFact[],
+  facts: [] as EffectiveConstraintRow[],
+  project: null as EffectiveProjectMeta | null,
   loading: false,
   error: null as string | null,
   forbidden: false,
@@ -83,12 +131,23 @@ function ssr(over: Partial<Parameters<typeof ConstraintsView>[0]> = {}): string 
   return renderToString(<ConstraintsView {...viewBase} {...over} />);
 }
 
+/** SSR 会在相邻文本节点间插 `<!-- -->`（如 `1<!-- --> 条生效中`）：跨节点断言前先剥掉，
+ *  否则按整句匹配必假红。 */
+const plain = (html: string): string => html.replace(/<!-- -->/g, '');
+
 describe('ConstraintsView（纯展示，SSR）', () => {
   it('页眉与标题常驻（不因空/错而消失）', () => {
     const html = ssr();
     expect(html).toContain('CONSTRAINTS');
     expect(html).toContain('约束管理');
     expect(html).toContain('s-1');
+  });
+
+  it('#1191：顶部优先级条逐字在场', () => {
+    const html = ssr();
+    expect(html).toContain('同文约束生效优先级：会话＞项目＞全局');
+    expect(html).toContain('不同内容全部注入，由模型裁决。');
+    expect(html).toContain('非 null 的条目不注入。撤销走历史保留链。');
   });
 
   it('默认「生效中」只渲染 active 行', () => {
@@ -161,6 +220,44 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).toContain('加载失败，请重试');
     expect(html).not.toContain('不要改动生产环境配置');
   });
+
+  it('#1191：三组眉标 + 计数（SESSION/PROJECT/GLOBAL）', () => {
+    const html = ssr({
+      facts: [ACTIVE, PROJECT_ROW, GLOBAL_ROW],
+      project: PROJECT_META,
+    });
+    expect(html).toContain('SESSION');
+    expect(html).toContain('本会话');
+    expect(html).toContain('PROJECT');
+    expect(html).toContain('本项目');
+    expect(html).toContain('GLOBAL');
+    expect(html).toContain('我的全局');
+    // 每组 1 条生效中。
+    expect((plain(html).match(/1 条生效中/g) ?? []).length).toBe(3);
+  });
+
+  it('#1191：PROJECT 组带 `git 根 · owner/repo`', () => {
+    const html = ssr({ facts: [PROJECT_ROW], project: PROJECT_META });
+    expect(plain(html)).toContain('git 根 · EricKingWhy/intelligence-agent');
+  });
+
+  it('#1191：非 git（project=null）不渲染 PROJECT 组', () => {
+    const html = ssr({ facts: [ACTIVE, GLOBAL_ROW], project: null });
+    expect(html).not.toContain('PROJECT');
+    expect(html).not.toContain('本项目');
+    expect(html).toContain('SESSION');
+    expect(html).toContain('GLOBAL');
+  });
+
+  it('#1191：被覆盖条目加「被本会话覆盖」（项目/全局组）', () => {
+    const overridden: EffectiveConstraintRow = {
+      ...PROJECT_ROW,
+      fact_id: 'prj-covered',
+      overridden_by: 'f-active',
+    };
+    const html = ssr({ facts: [ACTIVE, overridden], project: PROJECT_META });
+    expect(html).toContain('被本会话覆盖');
+  });
 });
 
 describe('formatFactTime / operatorLabel', () => {
@@ -213,10 +310,16 @@ const tabByLabel = (label: string): HTMLButtonElement => {
 const tabCount = (label: string): string =>
   (tabByLabel(label).querySelector('.cn-tab-count')?.textContent ?? '').trim();
 
+const page = (facts: EffectiveConstraintRow[], project: EffectiveProjectMeta | null = null) => ({
+  facts,
+  project,
+});
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  vi.mocked(listProtectedFacts).mockReset();
+  vi.mocked(listEffectiveConstraints).mockReset();
   vi.mocked(revokeProtectedFact).mockReset();
+  vi.mocked(revokeScopedConstraint).mockReset();
 });
 
 afterEach(() => {
@@ -229,8 +332,8 @@ afterEach(() => {
 
 describe('ConstraintsTab（状态外壳）', () => {
   it('挂载即拉后端投影；撤销走确认 → 重拉对齐（不乐观本地更新）', async () => {
-    let current: ProtectedFact[] = [ACTIVE];
-    vi.mocked(listProtectedFacts).mockImplementation(async () => current);
+    let current: EffectiveConstraintRow[] = [ACTIVE];
+    vi.mocked(listEffectiveConstraints).mockImplementation(async () => page(current));
     vi.mocked(revokeProtectedFact).mockImplementation(async () => {
       current = [{ ...ACTIVE, status: 'revoked', revoked_at: T, revoked_by: 'local' }];
       return { fact_id: ACTIVE.fact_id, status: 'revoked', revoked_at: T };
@@ -239,7 +342,7 @@ describe('ConstraintsTab（状态外壳）', () => {
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
 
-    expect(listProtectedFacts).toHaveBeenCalledWith('s-1');
+    expect(listEffectiveConstraints).toHaveBeenCalledWith('s-1');
     expect(document.body.textContent).toContain('不要改动生产环境配置');
 
     // 点「撤销」→ 二次确认框（不立刻发请求）。
@@ -252,7 +355,7 @@ describe('ConstraintsTab（状态外壳）', () => {
       buttonByText('确认撤销').click();
     });
     expect(revokeProtectedFact).toHaveBeenCalledWith('s-1', 'f-active');
-    expect(listProtectedFacts).toHaveBeenCalledTimes(2);
+    expect(listEffectiveConstraints).toHaveBeenCalledTimes(2);
 
     // 重拉后（默认「生效中」页）这条消失；「已撤销」页能看到且按钮 disabled。
     expect(document.body.textContent).not.toContain('不要改动生产环境配置');
@@ -261,8 +364,34 @@ describe('ConstraintsTab（状态外壳）', () => {
     expect(buttonByText('已撤销').disabled).toBe(true);
   });
 
+  it('#1191：项目级撤销走规则层端点（revokeScopedConstraint），确认框明示影响面', async () => {
+    vi.mocked(listEffectiveConstraints).mockResolvedValue(
+      page([PROJECT_ROW], PROJECT_META),
+    );
+    vi.mocked(revokeScopedConstraint).mockResolvedValue({
+      fact_id: PROJECT_ROW.fact_id,
+      status: 'revoked',
+      revoked_at: T,
+    });
+
+    render(<ConstraintsTab sessionId="s-1" />);
+    await act(async () => {});
+
+    act(() => buttonByText('撤销').click());
+    // 二次确认必须明示影响面（票面 §六.3）。
+    expect(document.body.textContent).toContain('将影响本仓库所有会话');
+    await act(async () => {
+      buttonByText('确认撤销').click();
+    });
+    expect(revokeScopedConstraint).toHaveBeenCalledWith('prj-1', {
+      scope: 'project',
+      sessionId: 's-1',
+    });
+    expect(revokeProtectedFact).not.toHaveBeenCalled();
+  });
+
   it('取消确认框：不发请求、不重拉', async () => {
-    vi.mocked(listProtectedFacts).mockResolvedValue([ACTIVE]);
+    vi.mocked(listEffectiveConstraints).mockResolvedValue(page([ACTIVE]));
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
 
@@ -272,20 +401,20 @@ describe('ConstraintsTab（状态外壳）', () => {
       buttonByText('取消').click();
     });
     expect(revokeProtectedFact).not.toHaveBeenCalled();
-    expect(listProtectedFacts).toHaveBeenCalledTimes(1);
+    expect(listEffectiveConstraints).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).not.toContain('撤销这条约束？');
   });
 
   it('403 → 「无权限查看约束」', async () => {
-    vi.mocked(listProtectedFacts).mockRejectedValue(new SessionError(403, '非本机来源'));
+    vi.mocked(listEffectiveConstraints).mockRejectedValue(new SessionError(403, '非本机来源'));
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('无权限查看约束');
   });
 
   it('AC4：先有数据、后拉取失败 → 清空旧数据不说谎', async () => {
-    vi.mocked(listProtectedFacts).mockImplementation(async (sid: string) => {
-      if (sid === 's-ok') return [ACTIVE];
+    vi.mocked(listEffectiveConstraints).mockImplementation(async (sid: string) => {
+      if (sid === 's-ok') return page([ACTIVE]);
       throw new Error('boom');
     });
     render(<ConstraintsTab sessionId="s-ok" />);
@@ -305,8 +434,8 @@ describe('ConstraintsTab（状态外壳）', () => {
   });
 
   it('AC4：先有数据、后 403 → 同样清空旧数据（内存态不留上一会话行）', async () => {
-    vi.mocked(listProtectedFacts).mockImplementation(async (sid: string) => {
-      if (sid === 's-ok') return [ACTIVE];
+    vi.mocked(listEffectiveConstraints).mockImplementation(async (sid: string) => {
+      if (sid === 's-ok') return page([ACTIVE]);
       throw new SessionError(403, '非本机来源');
     });
     render(<ConstraintsTab sessionId="s-ok" />);
@@ -323,9 +452,9 @@ describe('ConstraintsTab（状态外壳）', () => {
   });
 
   it('加载失败 → 错误态 + 重试可重拉', async () => {
-    vi.mocked(listProtectedFacts)
+    vi.mocked(listEffectiveConstraints)
       .mockRejectedValueOnce(new Error('boom'))
-      .mockResolvedValueOnce([ACTIVE]);
+      .mockResolvedValueOnce(page([ACTIVE]));
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('加载失败，请重试');
@@ -333,15 +462,15 @@ describe('ConstraintsTab（状态外壳）', () => {
     await act(async () => {
       buttonByText('重试').click();
     });
-    expect(listProtectedFacts).toHaveBeenCalledTimes(2);
+    expect(listEffectiveConstraints).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).toContain('不要改动生产环境配置');
   });
 
   it('AC4：切换会话 → 新 GET 落定前不显示上一会话的旧行（无陈旧窗口）', async () => {
-    let resolveSecond: ((rows: ProtectedFact[]) => void) | null = null;
-    vi.mocked(listProtectedFacts).mockImplementation((sid: string) => {
-      if (sid === 's-old') return Promise.resolve([ACTIVE]);
-      return new Promise<ProtectedFact[]>((res) => {
+    let resolveSecond: ((rows: ReturnType<typeof page>) => void) | null = null;
+    vi.mocked(listEffectiveConstraints).mockImplementation((sid: string) => {
+      if (sid === 's-old') return Promise.resolve(page([ACTIVE]));
+      return new Promise((res) => {
         resolveSecond = res;
       });
     });
@@ -358,14 +487,14 @@ describe('ConstraintsTab（状态外壳）', () => {
 
     // 收尾：让挂起的请求落定。
     await act(async () => {
-      resolveSecond?.([ACTIVE]);
+      resolveSecond?.(page([ACTIVE]));
     });
   });
 
   it('重试：错误文案在重试开始时即清除（不残留上一次错误）', async () => {
-    vi.mocked(listProtectedFacts)
+    vi.mocked(listEffectiveConstraints)
       .mockRejectedValueOnce(new Error('boom'))
-      .mockImplementation(() => new Promise<ProtectedFact[]>(() => {}));
+      .mockImplementation(() => new Promise(() => {}));
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('加载失败，请重试');

@@ -27,7 +27,7 @@ import {
 import { Composer } from './Composer';
 
 /** 提交口的最小签名（`Composer` 的 `onSubmit`），显式命名以便断言实参。 */
-type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]];
+type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
 
 const receipt = (id: string): AttachmentUploadReceipt => ({
   attachment_id: id,
@@ -288,7 +288,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith('看这张图', false, ['sha256:aaa']);
+    expect(onSubmit).toHaveBeenCalledWith('看这张图', false, ['sha256:aaa'], 'session');
     // 已发送的草稿离开栏（下一轮发送不会重复带同一张图）。
     expect(cards()).toHaveLength(0);
   });
@@ -311,7 +311,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith('没有图也照发', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('没有图也照发', false, [], 'session');
     // 失败的草稿留在栏里（它没进请求），供重试。
     expect(cards()).toHaveLength(1);
 
@@ -328,7 +328,7 @@ describe('Composer 附图：#825 AC4 上传状态、失败与重试', () => {
     await act(async () => {
       sendButton().click();
     });
-    expect(onSubmit).toHaveBeenLastCalledWith('再试一次', false, ['sha256:bbb']);
+    expect(onSubmit).toHaveBeenLastCalledWith('再试一次', false, ['sha256:bbb'], 'session');
   });
 
   it('移除草稿：中止在途上传并离开栏', async () => {
