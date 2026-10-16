@@ -39,7 +39,7 @@ from agent_harness.session.event import (
 #: 逻辑 run 的终态事件——一旦出现，最新 run 上就不该再有"待回答"。
 _TERMINAL_RUN_EVENTS = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
 
-#: 超时注入消息的正文模板（#1204 用户裁决逐字）。`minutes` = 配置秒数 / 60。
+#: 超时注入消息的正文模板（#1204 用户裁决逐字）。`minutes` = max(1, 配置秒数 // 60)。
 ASK_USER_TIMEOUT_MESSAGE_TEMPLATE = (
     "用户在 {minutes} 分钟内未回答，可能不在，请按你的判断继续"
 )
@@ -75,7 +75,8 @@ def pending_input_request(
     口径等价；`kind=None` 的 409 闸门历来用前者，此处统一之。
 
     这是服务 409 闸门与驱动 / 超时复查**共用的一份**扫描（#1220 复审 B1）：两份拷贝
-    迟早会漂。注：`agent/runtime.py` 另有一份同构扫描，早于本分支、不在本票收口范围。
+    迟早会漂。注：同构扫描在本仓另有多处（`tools/user_input_common.py::pending_user_input_request`、
+    `agent/runtime.py`），均早于本分支、不在本票收口范围（本票只收口 service↔driver 两处）。
     """
     events = list(events)
     answered = {

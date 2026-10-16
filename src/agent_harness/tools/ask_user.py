@@ -229,7 +229,7 @@ class AskUserTool(Tool):
             "run_id": run_id,
             "questions": questions,
             # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。数值与后端注入
-            # 消息同源（`minutes = timeout_seconds / 60`）。
+            # 消息同源（`minutes = max(1, timeout_seconds // 60)`，见 :131）。
             "timeout_seconds": self._timeout_seconds,
         }
         return ToolResult.success(

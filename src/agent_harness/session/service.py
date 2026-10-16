@@ -723,8 +723,8 @@ def _pending_user_input_request(
 ) -> SessionEvent | None:
     """某 run 上最新未答复的 `USER_INPUT_REQUESTED`。
 
-    #1220 复审 B1：扫描逻辑收口到 `ask_user_timeout.pending_input_request` 唯一一份
-    （超时守卫与 409 闸门共用），此处只做转发，不再各写一遍。
+    #1220 复审 B1：扫描逻辑收口到 `ask_user_timeout.pending_input_request`（超时守卫与
+    409 闸门共用同一份），此处只做转发，不再各写一遍。
     """
     return pending_input_request(events, run_id=run_id)
 
