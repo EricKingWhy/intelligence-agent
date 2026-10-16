@@ -1239,6 +1239,7 @@ class ContextBuilder:
             return []
         return provider(events)
 
+    @staticmethod
     def _inject_protected_facts(
         messages: list[AnyMessage],
         facts_messages: list[AnyMessage],
