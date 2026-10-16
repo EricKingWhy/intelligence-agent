@@ -217,6 +217,28 @@ iaSweepLoop:
   StrCpy $iaDeleteCandidate "$2\$1"
   StrCpy $iaDeleteBase "$INSTDIR"
   StrCpy $iaDeleteShapeCheck "1"
+  ; #1201 item 2: the sweep's delete ran on trees a live process was running
+  ; from. RMDir /r on such a tree is measured to partially delete it (every
+  ; file the process does not hold open is gone, the locked one survives), so
+  ; what is left behind is a mangled tree and a process running from it — the
+  ; worst of both readings. The gate's precedent is "try to stop, refuse only
+  ; when it will not stop"; the user adjudicated this site differently: an
+  ; uninstall sweep is space reclamation the user already asked for, not an
+  ; update that must proceed, so nothing is stopped — a tree with a live
+  ; process in it is kept whole and reported like every other kept leftover.
+  ; The read is the classifier's WMI form scoped to the candidate, without the
+  ; classification, and a query that cannot answer is fail-closed (refuse the
+  ; delete) for the same reason answer 13 refuses on the installer side: a
+  ; sweep that cannot see processes cannot prove a tree safe to delete.
+  ; Uninstaller code: only un.-prefixed functions can be called here. The
+  ; directory travels on the stack as the FindFirst pieces this loop already
+  ; holds ($2 = the parent cut off $INSTDIR, $1 = the leaf) — the same input
+  ; the candidate copy below is built from, and not a third read of the
+  ; tracked candidate, which the delete-site guard's arming window would
+  ; refuse to follow (fail-closed).
+  Push "$2\$1"
+  Call un.iaScanLiveProcesses
+  StrCmp $iaLiveAnswer "0" 0 iaSweepKept
   ; This body only ever compiles inside the uninstaller build (the installer
   ; build never inserts customUnInstall, and NSIS compiles a macro body only
   ; where it is inserted -- measured: an invalid instruction in this body was
