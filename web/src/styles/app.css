@@ -7032,6 +7032,7 @@ button.json-row {
   width: 720px;
   min-width: min(720px, calc(100vw - 24px));
   max-width: min(720px, calc(100vw - 24px));
+  height: min(420px, calc(100vh - 24px));
   max-height: min(420px, calc(100vh - 24px));
   padding: 0;
   gap: 0;
