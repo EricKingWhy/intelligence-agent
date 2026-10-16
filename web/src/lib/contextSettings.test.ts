@@ -1,6 +1,6 @@
 /** #1197 项 5B：`context-settings` 客户端契约（GET 读 / PATCH 写）。
  *
- *  形状与状态码语义照后端 `web/app.py:3524/3545` 的 docstring：
+ *  形状与状态码语义照后端 `web/app.py:3613/3634` 的 docstring：
  *  200 → 生效后的完整设置（幂等）；404 → 没有这个会话；422 → 挡位非法（零写入）。
  *  错误一律走 `SessionError`（带 status），调用方据此分开讲——同
  *  `changeSessionPermission` 的既有口径。

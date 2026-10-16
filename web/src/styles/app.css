@@ -3645,57 +3645,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 挂在 .conversation 上（相对定位），悬浮于滚动区与 composer 交界。 */
 .conversation {
   position: relative;
-/* #1197 项 5A：自动压缩进行中的进度条（效果图 02）。
- * 只用既有语义 token（surface-overlay / border-subtle / text-primary /
- * text-tertiary / accent / space-* / text-*）⇒ AGENTS §15 的双份定义不涉及；
- * spinner 复用全局 @keyframes spin（index.css 的 Motion safety 在
- * prefers-reduced-motion 下已把 animation-duration 压到 0.01ms，无需重复关）。
- * 与 .follow-pill 同层（.conversation 是 position: relative），不在滚动区内
- * ——不参与虚拟化行测高，也不干扰 follow-mode 的贴底读数。 */
-.compaction-progress {
-  position: absolute;
-  left: var(--space-xl);
-  right: var(--space-xl);
-  bottom: var(--space-lg);
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  min-height: 52px;
-  padding: var(--space-md) var(--space-lg);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-overlay);
-  color: var(--text-primary);
-  font-size: var(--text-base);
-  animation: tip-in var(--dur-fast) var(--ease-apple);
-}
-.compaction-progress-spinner {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--border-subtle);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-/* 副文案右贴（效果图 02 的 margin-left: auto）——窄屏隐藏，条本身保留。 */
-.compaction-progress small {
-  display: block;
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-}
-@media (max-width: 560px) {
-  .compaction-progress {
-    left: var(--space-md);
-    right: var(--space-md);
-    bottom: var(--space-md);
-  }
-  .compaction-progress small {
-    display: none;
-  }
-}
 }
 .follow-pill {
   position: absolute;

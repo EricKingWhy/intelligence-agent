@@ -1,14 +1,13 @@
 /** #1197 项 5A：自动压缩**进行中**的投影事实。
  *
- *  票面契约：`COMPACTION_START` 已发出、`COMPACTION_END` 未到 ⇒ 前端必须显示
- *  「正在压缩上下文…」，不许静默；`COMPACTION_END` 到达后自动消失恢复常态。
- *  本文件钉**投影面**（flag），组件面钉 `Conversation.compactionProgress.test.tsx`。
+ *  5A UI（"正在压缩上下文…"渲染）按 2026-10-16 20:45 二次证伪裁决 A 已从本票移除。
+ *  此处仅保留投影面接线（flag）：`COMPACTION_START` 置 true、`COMPACTION_END` 置 false，
+ *  供未来后端语义调整后直接生效。当前无渲染消费者。
  *
  *  ⚠ 已知局限（如实登记）：后端 bracket 三事件是在压缩工作**做完之后**才背靠背落盘
  *  （`builder.py::compact_now` 同一个 `async with guard:` 块），真机上本 flag 的可见
  *  窗口只有两次队列投递之间的微秒级，而 10–60s 的真实等待发生在 START **之前**。
- *  票面「不许改 COMPACTION_START/END 后端事件语义」把修法限制在前端，故此处按票面
- *  字面实现，并把局限留在报告里。
+ *  详见 #1252。
  */
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';

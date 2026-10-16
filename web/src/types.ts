@@ -745,9 +745,10 @@ export interface ConversationState {
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
   /** #1197 项 5A：自动压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
-   *  「正在压缩上下文…」进度条的唯一数据源（不变量 #22：界面是投影）。
+   *  5A UI 已按 2026-10-16 20:45 二次证伪裁决 A 移除；本字段仅保留作接线（不变量 #22：
+   *  界面是投影），供未来后端语义调整后直接生效。当前无渲染消费者。
    *  后端 bracket 三事件背靠背落盘（`builder.py::compact_now`），故真机上本字段的
-   *  可见窗口很短——票面禁止改后端事件语义，局限已如实登记在报告里。 */
+   *  可见窗口很短。详见 #1252。 */
   compaction_in_progress: boolean;
   /** Pending interactive approvals (#37, PRD §2.2).
    *  tool/approval-requested adds to this list; permission/resolved removes.

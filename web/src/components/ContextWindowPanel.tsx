@@ -119,7 +119,10 @@ export function ContextWindowPanel({
 
         {!loadError && settings && (
           <>
-            <p className="ctx-window-desc">窗口越大，压缩越晚；单次运行也会更慢、成本更高。</p>
+            {/* 文案以票面正文（方案 1）审批的提示语为准；效果图 01（mockup.html）
+                写的是「窗口越大，压缩越晚；单次运行也会更慢、成本更高。」，两者同义
+                不同文，这里按票面。 */}
+            <p className="ctx-window-desc">窗口越大，可保留的上下文越多；耗时和成本取决于实际使用量。</p>
             <span className="ctx-window-badge">{fmtTier(settings.context_window)} 当前生效</span>
 
             <div className="ctx-window-choices" role="radiogroup" aria-label="上下文窗口">

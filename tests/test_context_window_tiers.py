@@ -70,9 +70,9 @@ def test_derived_thresholds_are_exact_decimal_integers_for_every_tier() -> None:
 
 
 def test_builder_constructor_default_is_pinned_to_the_settings_default() -> None:
-    """`builder.py:502` 的 ctor 默认 `200_000` 与 config 默认**机械钉住**。
+    """`builder.py:515` 的 ctor 默认 `200_000` 与 config 默认**机械钉住**。
 
-    票面：「`:502` ctor 默认 `200_000` 与 config 默认构造期机械钉住；其余零改动」。
+    票面：「`:515` ctor 默认 `200_000` 与 config 默认构造期机械钉住；其余零改动」。
     两处字面量分列（config 是依赖图底层，builder 不该反向依赖它），相等靠本用例
     钉住——同 `memory_primary_provider` 与 `roles.MEMORY_PRIMARY_PROVIDER` 的先例。
     """

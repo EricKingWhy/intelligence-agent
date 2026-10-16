@@ -2154,8 +2154,8 @@ function finalizeRun(
   status: 'completed' | 'failed' | 'paused',
   time?: string,
 ): void {
-  // #1197 项 5A：bracket 中途夭折（run 在 START 与 END 之间终结）时进度条必须
-  // 跟着收口——否则它会永久钉在屏幕上，且没有任何后续事件能再把它摘掉。
+  // #1197 项 5A：bracket 中途夭折（run 在 START 与 END 之间终结）时 flag 必须
+  // 跟着收口——否则它会永久为 true，且没有任何后续事件能再把它摘掉。
   state.compaction_in_progress = false;
   state.run_status = status;
   state.active_step_id = null;

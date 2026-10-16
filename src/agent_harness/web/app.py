@@ -1571,7 +1571,9 @@ def _context_settings_payload(
     所以这里读到的值必然就是下一轮 `build()` 会用的值——两处各算一遍就会出现
     「面板显示 500K、实际按 200K 压」的错位。
 
-    70%/85% 线**按生效窗口现算**（`int(window * ratio)`，与 builder.py:911 同一算式）。
+    70%/85% 线**按生效窗口现算**（`int(window * ratio)`，与 `ContextBuilder` 的
+    `self.max_context_tokens * self.auto_compact_threshold` /
+    `* self.hard_guard_threshold` 同一算式）。
     五挡位下两式恒为十进制整数（`window * 70 // 100 == int(window * 0.70)` 逐挡位
     实测成立，见 `tests/test_context_window_tiers.py`），故不需要取整策略。
     """

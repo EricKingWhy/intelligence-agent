@@ -403,21 +403,6 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
 
   return (
     <div className="conversation">
-      {/* #1197 项 5A：按 2026-10-16 20:45 二次证伪裁决 A 从本票移除，此接线保留待后端语义调整。
-          ① 投影面：`compaction/start` 已到、`compaction/end` 未到
-             （`conversation.compaction_in_progress`，接线保留不动——它是对事件的
-             正确解释，只是后端 bracket 三事件背靠背落盘，可见窗口极短）。
-          效果图 02：`role=status` + `aria-live=polite`（读屏可播报，不许静默）+ 16px
-          spinner + 「运行会自动继续」副文案（<560px 隐藏副文案，条本身保留）。
-          与 `.follow-pill` 同层（`.conversation` 是 position: relative），不在滚动区内
-          ——不参与虚拟化行测高，也不干扰 follow-mode 的贴底读数。 */}
-      {conversation.compaction_in_progress && (
-        <div className="compaction-progress" role="status" aria-live="polite">
-          <span className="compaction-progress-spinner" aria-hidden="true" />
-          <span>正在压缩上下文…</span>
-          <small>运行会自动继续</small>
-        </div>
-      )}
       {/* #381（W-27）：进度清单钉在滚动区上方、虚拟化行之外——虚拟器只量 turn 行，
           外挂块不参与 measureElement（PRD 长任务 §7.5；无清单会话不渲染）。 */}
       {conversation.plan !== null && conversation.plan.length > 0 && (

@@ -717,8 +717,8 @@ class ContextBuilder:
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         # #1197 项 1：每轮从会话事件现派生窗口（per-session 挡位，改后下一轮生效）。
-        # 必须在读 `self.max_context_tokens` 之前——本方法内 :825 的自动压缩判定、
-        # :886 的重投影复核、:1592 的 provider 剩余预算都读它。
+        # 必须在读 `self.max_context_tokens` 之前——本方法内的自动压缩判定、
+        # `_reproject` 的重投影复核、`_with_providers` 的 provider 剩余预算都读它。
         self._sync_session_context_window(session)
         # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
         # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
@@ -1493,8 +1493,9 @@ class ContextBuilder:
 
         票面「per-session 独立、会话内下一轮上下文构建即生效」：窗口是会话级配置，
         可在 run 跑到一半时改，所以每次 `build` / `compact_now` 都从事件流现派生
-        一次。此后投影、自动压缩判定（:825）、硬护栏（:886/:1201）、
-        `_with_providers` 的剩余预算（:1592）与透传给 compactor 的预算全部读同一个
+        一次。此后投影、自动压缩判定（`build` 内的 `auto_compact_threshold`）、
+        硬护栏（`_reproject` / `compact_now` 的 `hard_guard_threshold` 判定）、
+        `_with_providers` 的剩余预算与透传给 compactor 的预算全部读同一个
         `self.max_context_tokens`，一次更新即全局同口径。
 
         为什么放在 builder 内部而不是 runtime 的 `_sync_context_vision` 那样的外部
