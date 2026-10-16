@@ -80,11 +80,12 @@ on:
     # 路径过滤：只在安装器相关文件变化时跑，不给每个 PR 增加 10–20 分钟负担。
     # 除票面点名的三条外，另加：两个被执行的 PowerShell 断言脚本（test-windows-installer.mjs
     # 直接 shell 它们）、build-windows-installer.mjs（烟测直接 import 它）、desktop 的依赖清单
-    # （本 job 跑 `npm ci` 构建安装包）与本工作流自身。另加 `desktop/test/harness/r1-drivers/**`
-    # （#1074）：那条真机腿本身与其夹具的改动也要被它验证。
+    # （本 job 跑 `npm ci` 构建安装包）与本工作流自身。另加 `desktop/test/**`（#1074 的
+    # r1-drivers 真机腿与夹具、#1166 的六套守卫套件与探针夹具都在其中）：凡是本 job 执行的
+    # 测试资产，改动都要被它验证。
     paths:
       - 'desktop/installer/**'
-      - 'desktop/test/harness/r1-drivers/**'
+      - 'desktop/test/**'
       - 'desktop/scripts/test-windows-installer.mjs'
       - 'desktop/scripts/windows-installer-smoke.ps1'
       - 'desktop/scripts/windows-uninstall-smoke.ps1'
@@ -128,6 +129,35 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # #1166：六套守卫套件此前在 CI 里没有任何入口——改 desktop/test/** 不触发任何
+      # workflow，gate0 与 pre-push 也没有 `node --test`，它们只在本机跑过。六套纯 node、
+      # 共约 3 秒（本机四次实测 2882 / 2657 / 2595 ms；另一次在并行任务下 7673 ms）、不编译安装包、连 electron-builder 都不需要
+      # （本机在**没有 desktop/node_modules** 的检出上跑通），所以排在装 electron-builder
+      # 与三条烟测腿之前：最便宜的信号先失败。两个用例按 existsSync 跳过——它们要的
+      # desktop/dist 与 installer/staging 是 `npm run build` / `prepare_python_runtime.py`
+      # 的产物，本 workflow 都不产出（烟测腿给 electron-builder 传 prepackaged，
+      # app-builder-lib 的 doPack 在 prepackaged != null 时直接返回，afterPack 与
+      # extraResources 都不执行），所以这两个用例在 CI 里仍然是跳过，不是真跑。
+      - name: 守卫套件 — 安装器脚本 / node 运行时 / NSIS 结构 / 运行时产品 / TUI / Web 资产（#1166）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        shell: pwsh
+        # 六个名字必须与磁盘一致：`node --test` 只要拿到**至少一个**有效路径，对不存在的路径就
+        # 静默跳过、exit 0（2026-10-15 实测；六个全不存在才 exit 1）⇒ 一次改名或笔误会让整套
+        # 静默消失，CI 照样绿。所以先逐个 Test-Path，缺一个就红，不让绿掩盖「套件没跑」。
+        run: |
+          $suites = @(
+            'test/installer-scripts.test.mjs'
+            'test/installer-node-runtime.test.mjs'
+            'test/installer-nsis.test.mjs'
+            'test/installer-runtime-product.test.mjs'
+            'test/installer-tui.test.mjs'
+            'test/installer-web-assets.test.mjs'
+          )
+          $missing = $suites | Where-Object { -not (Test-Path -LiteralPath $_) }
+          if ($missing) { throw "missing test file(s): $($missing -join ', ')" }
+          node --test @suites
+
       - name: 装 electron-builder（脚本 lazy-require，未进 desktop/package.json）
         working-directory: desktop
         # electron-builder 不在 desktop 依赖里（脚本 lazy-require；见 build-windows-installer.mjs
@@ -148,6 +178,14 @@ jobs:
         if: ${{ inputs.compile_only }}
         working-directory: desktop
         run: node scripts/test-windows-installer.mjs --compile-only
+
+      # #1166：守卫规则自身的牙齿检查——按规则逐条原地变异 build-windows-installer.mjs 并各自
+      # execFile 两套套件，本机实测 250 s（复核 235 s；比真机腿的 81 s 更贵，但不需要 makensis）。排在守卫
+      # 套件之后：套件全绿只有在守卫本身有牙齿时才成立；排在真机腿之前：规则坏掉时先别花掉 8 次编译。
+      - name: 牙齿检查 — 守卫规则自身（#1166）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        run: node test/harness/teeth-check-guards.mjs
 
       # #1074：构建期规则钉的是「调用位置」，钉不住「闸门是否真的分类」——在
       # iaRequireNoRunningProduct 体内加一个提前返回（`StrCmp $iaProbeFound "0" 0 +2` /

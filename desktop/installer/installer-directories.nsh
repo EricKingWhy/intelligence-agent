@@ -27,6 +27,17 @@
 ;                          first (#904): the pointer is a single slot, and a
 ;                          live backup must not vanish from every record when
 ;                          the slot is overwritten.
+;                          The move needs no lock, so a process that starts
+;                          while the installer is staging is never classified
+;                          by the first call; the gate is therefore called a
+;                          second time inside that window, after the working
+;                          directory is released and before the backup pointer
+;                          is armed (#1066): a runtime that appeared in
+;                          between is stopped there, and any other answer
+;                          leaves the installation byte-identical, so the
+;                          refusal needs no rollback. A damaged installation
+;                          returns before that second call, so only the first
+;                          one runs on that path.
 ;   iaPromoteApplication (customInstall, end of the install section):
 ;                          if the new files are in place, delete the backup;
 ;                          otherwise roll back. The delete runs only on a
@@ -393,6 +404,15 @@ FunctionEnd
   ; started" for .onGUIEnd and iaRollbackApplication.
   Call iaRequireNoRunningProduct
   ${If} $iaProbeFound == "1"
+    ; #1066 test hook: hold the window between the gate above and the last-moment
+    ; re-check below open, so a driver can start a process inside it. Compiled only
+    ; when the probe defines IA_TEST_HOLD_STAGE_WINDOW; the shipped installer does
+    ; not define it, so the product binary never carries this block.
+    !ifdef IA_TEST_HOLD_STAGE_WINDOW
+      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaTestStageWindowOpen" "1"
+      Sleep 5000
+      DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaTestStageWindowOpen"
+    !endif
     ; #904 item 2: the pointer is a single slot, so the value below overwrites
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a
@@ -428,6 +448,14 @@ FunctionEnd
     StrCpy $iaBackupDirectory "$INSTDIR.old-$0"
     ; .onInit opened a handle on $INSTDIR via SetOutPath; release it first.
     SetOutPath $TEMP
+    ; #1066: the gate above runs at the top of this macro, so everything between it
+    ; and the rename is a window in which the bundled runtime or a client can start.
+    ; Re-check here, after the working directory was released and before the backup
+    ; pointer is armed: a refusal then leaves the installation exactly as it was and
+    ; needs no rollback. A headless service does not block the rename (#914 section
+    ; 1.3), so without this call the update lands and leaves the old process answering
+    ; clients out of the "<dir>.old-{guid}" tree.
+    Call iaRequireNoRunningProduct
     ClearErrors
     !insertmacro iaStashBackupDir
     ${If} ${Errors}
