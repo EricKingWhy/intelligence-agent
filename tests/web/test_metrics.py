@@ -33,6 +33,7 @@ EXPECTED_METRICS = {
     "agent_process_start_time_seconds",
     "agent_process_uptime_seconds",
 }
+_SERVER_START_TIMEOUT_SECONDS = 30.0
 
 
 async def _start_server(tmp_path, monkeypatch):
@@ -53,11 +54,24 @@ async def _start_server(tmp_path, monkeypatch):
                             log_level="error", lifespan="on")
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started
+    startup_timeout = asyncio.timeout(_SERVER_START_TIMEOUT_SECONDS)
+    try:
+        async with startup_timeout:
+            while not server.started:
+                if serve_task.done():
+                    await serve_task
+                    raise RuntimeError("Uvicorn exited before startup completed")
+                await asyncio.sleep(0.05)
+    except (Exception, asyncio.CancelledError) as exc:
+        server.should_exit = True
+        if not serve_task.done():
+            serve_task.cancel()
+        await asyncio.gather(serve_task, return_exceptions=True)
+        if startup_timeout.expired():
+            raise TimeoutError(
+                f"Uvicorn did not start within {_SERVER_START_TIMEOUT_SECONDS:g}s"
+            ) from exc
+        raise
     port = server.servers[0].sockets[0].getsockname()[1]
     return server, serve_task, port
 
@@ -69,6 +83,61 @@ async def _shutdown(server, serve_task) -> None:
         await serve_task
     except asyncio.CancelledError:
         pass
+
+
+@pytest.mark.asyncio
+async def test_start_server_propagates_startup_failure(tmp_path, monkeypatch):
+    import uvicorn
+
+    class _EarlyExitServer:
+        def __init__(self, _config):
+            self.started = False
+            self.servers = []
+            self.should_exit = False
+
+        async def serve(self):
+            raise RuntimeError("startup failed before listening")
+
+    monkeypatch.setattr(uvicorn, "Server", _EarlyExitServer)
+
+    with pytest.raises(RuntimeError, match="startup failed before listening"):
+        await _start_server(tmp_path, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_start_server_reaps_task_after_startup_timeout(tmp_path, monkeypatch):
+    import uvicorn
+
+    servers = []
+
+    class _StalledServer:
+        def __init__(self, _config):
+            self.started = False
+            self.servers = []
+            self.should_exit = False
+            self.task = None
+            self.cleaned_up = False
+            servers.append(self)
+
+        async def serve(self):
+            self.task = asyncio.current_task()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cleaned_up = True
+
+    monkeypatch.setattr(uvicorn, "Server", _StalledServer)
+    monkeypatch.setattr(
+        sys.modules[__name__], "_SERVER_START_TIMEOUT_SECONDS", 0.01, raising=False
+    )
+
+    with pytest.raises(TimeoutError, match="Uvicorn did not start"):
+        await _start_server(tmp_path, monkeypatch)
+
+    server = servers[0]
+    assert server.should_exit
+    assert server.cleaned_up
+    assert server.task.done()
 
 
 async def _get_raw(port: int, path: str):
