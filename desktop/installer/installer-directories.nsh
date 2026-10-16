@@ -268,9 +268,21 @@ FunctionEnd
       StrCpy $iaRecoveryPending "1"
       Goto iaInterruptedDone
 iaInterruptedSilent:
-      DetailPrint "iaRecoverInterruptedInstall: rerun interactively to restore or continue fresh"
-      SetErrorLevel 2
-      Quit
+      ; #1251: silent mode auto-recovers instead of requiring interactive
+      ; recovery. Roll back to the backup, then fall through so
+      ; iaStageApplication does a fresh install. Only fail closed when the
+      ; rollback itself cannot be proven safe (backup shape/missing already
+      ; checked above; iaRollbackApplication refuses the rest).
+      DetailPrint "iaRecoverInterruptedInstall: silent auto-rollback to $iaBackupDirectory"
+      Call iaRollbackApplication
+      ${If} $iaRollbackStatus != "restored"
+        DetailPrint "iaRecoverInterruptedInstall: silent auto-rollback failed"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      ; Rollback succeeded: backup cleared, $INSTDIR points at the restored
+      ; directory. Fall through to iaStageApplication for a fresh install.
+      Goto iaInterruptedDone
 iaInterruptedDone:
     ${EndIf}
   ${EndIf}
