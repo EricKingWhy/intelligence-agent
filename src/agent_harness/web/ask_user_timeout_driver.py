@@ -97,6 +97,10 @@ class AskUserTimeoutDriver:
             return
         tracker.set_connected(False)
         # 冻结条目保留"已累计"供重连续计；仅以宽松上限兜住被放弃会话的无界增长。
+        self._freeze(session_id)
+
+    def _freeze(self, session_id: str) -> None:
+        """登记一个**无连接**的计时器；超 `_MAX_FROZEN_TRACKERS` 按最早冻结者淘汰。"""
         self._frozen[session_id] = None
         while len(self._frozen) > _MAX_FROZEN_TRACKERS:
             oldest = next(iter(self._frozen))
@@ -126,6 +130,10 @@ class AskUserTimeoutDriver:
         if self._connections.get(session_id, 0) > 0:
             tracker.set_connected(True)
             self._frozen.pop(session_id, None)
+        else:
+            # 无连接时装臂的计时器同样计入冻结账（否则它既不被扫描、也不受上限约束，
+            # 成无界残留——#1220 复审 A-F2）。
+            self._freeze(session_id)
         self._trackers[session_id] = tracker
         self._armed_request[session_id] = request_id
 
@@ -172,12 +180,17 @@ class AskUserTimeoutDriver:
                     session_id, request_id,
                 )
                 outcome = ExpireOutcome.RETRY
+            if outcome is ExpireOutcome.RESUMED:
+                fired.append(session_id)
+            # 收口/RETRY 仅在仍装配着**同一** request 时进行：`await on_expire` 期间 relay /
+            # `note_session_state` 可能已为同一会话装了**新的** request，误拆会丢掉它的超时
+            # （#1220 复审 A-F1，TOCTOU）。
+            if self._armed_request.get(session_id) != request_id:
+                continue
             if outcome is ExpireOutcome.RETRY:
                 # 保留在场、重置累计：下个超时窗口再试（见本方法 docstring）。
                 self.disarm(session_id)
                 self.arm(session_id, request_id=request_id)
-                continue
-            self.disarm(session_id)
-            if outcome is ExpireOutcome.RESUMED:
-                fired.append(session_id)
+            else:
+                self.disarm(session_id)
         return fired

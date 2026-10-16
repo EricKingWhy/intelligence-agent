@@ -129,3 +129,42 @@ def test_pending_request_id_none_when_run_terminal(terminal: str):
 def test_pending_request_id_ignores_other_kinds():
     # 窄场景 protected_fact_conflict 不属于 ask_user 超时闸。
     assert pending_ask_user_request_id(_events(kind="protected_fact_conflict")) is None
+
+
+# ── #1220 复审 B1/N1：多请求流的统一口径（跳过已答复者再往前找）─────────
+
+
+def _multi_request(second_answered: bool) -> list[SessionEvent]:
+    events = [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(type=USER_MESSAGE, run_id="r1", seq=1,
+                     data={"input_request_id": "req-1"}),
+        SessionEvent(type=USER_INPUT_REQUESTED, run_id="r1", seq=2,
+                     data={"request_id": "req-2", "kind": "ask_user"}),
+    ]
+    if second_answered:
+        events.append(SessionEvent(type=USER_MESSAGE, run_id="r1", seq=3,
+                                   data={"input_request_id": "req-2"}))
+    return events
+
+
+def test_pending_request_id_returns_latest_unanswered_in_multi_request_run():
+    assert pending_ask_user_request_id(_multi_request(second_answered=False)) == "req-2"
+
+
+def test_pending_request_id_skips_answered_searches_earlier():
+    """最新一条已答复、更早一条未答复 ⇒ 返回更早那条（与 409 闸门统一的"跳过已答复"口径）。
+
+    良构事件流里不可达（产生新 `USER_INPUT_REQUESTED` 必先给旧请求写答复）；此处钉住
+    统一后的判据，避免两处口径再漂（#1220 复审 B1/N1）。
+    """
+    events = [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+                     data={"request_id": "req-1", "kind": "ask_user"}),
+        SessionEvent(type=USER_INPUT_REQUESTED, run_id="r1", seq=2,
+                     data={"request_id": "req-2", "kind": "ask_user"}),
+        SessionEvent(type=USER_MESSAGE, run_id="r1", seq=3,
+                     data={"input_request_id": "req-2"}),
+    ]
+    assert pending_ask_user_request_id(events) == "req-1"

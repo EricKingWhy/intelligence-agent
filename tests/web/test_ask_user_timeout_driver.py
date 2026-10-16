@@ -205,3 +205,44 @@ async def test_frozen_trackers_are_capped():
     # 最早的被淘汰（重连后重头计时，属可接受降级）。
     assert driver.is_armed("s0") is False
     assert driver.is_armed(f"s{total - 1}") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [ExpireOutcome.RESUMED, ExpireOutcome.RESOLVED, ExpireOutcome.RETRY],
+)
+async def test_expiry_does_not_clobber_request_armed_during_await(outcome):
+    """`await on_expire` 期间同一会话装了**新** request ⇒ 收尾不得误拆它（复审 A-F1）。"""
+    clock = FakeClock()
+    driver: AskUserTimeoutDriver | None = None
+
+    async def on_expire(session_id: str, request_id: str) -> ExpireOutcome:
+        assert driver is not None
+        driver.arm(session_id, request_id="req-2")  # 模拟 await 期间的新装臂
+        return outcome
+
+    driver = AskUserTimeoutDriver(
+        timeout_seconds=60.0, on_expire=on_expire, clock=clock,
+    )
+    driver.connection_subscribed("s1")
+    driver.note_session_state("s1", _events())
+    clock.advance(60)
+
+    fired = await driver.check_expiries()
+    assert driver.is_armed("s1") is True  # 新请求的计时器未被连坐拆掉
+    assert driver._armed_request.get("s1") == "req-2"
+    assert ("s1" in fired) is (outcome is ExpireOutcome.RESUMED)
+
+
+@pytest.mark.asyncio
+async def test_arm_without_connection_is_accounted_as_frozen():
+    """无连接时装臂的计时器须计入冻结账（否则既不被扫描、也不受上限约束；复审 A-F2）。"""
+    clock = FakeClock()
+    driver, _fired = _driver(clock)
+    driver.arm("s1", request_id="req-1")  # 无连接
+
+    assert driver.is_armed("s1") is True
+    assert "s1" in driver._frozen
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []  # 无连接 ⇒ 不触发

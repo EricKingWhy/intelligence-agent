@@ -6,8 +6,8 @@
 时不启动（抄 Claude Code）。
 
 本模块只承载**确定性计时**这一件事，挂钟可注入（测试不实等）；另含"待回答用户输入"
-的**唯一一份**事件流扫描（`pending_input_request` / `latest_pending_input_request`，服务
-409 闸门与超时守卫共用）与超时恢复的出口结果 `ExpireOutcome`。谁在连接进出时调用
+的事件流扫描（`pending_input_request` / `latest_pending_input_request`，服务 409 闸门与
+超时守卫共用同一份）与超时恢复的出口结果 `ExpireOutcome`。谁在连接进出时调用
 `set_connected`、谁在 `expired()` 后触发恢复，是上层（web 层）的接线——这一层不 import
 web / session service，保持可单测（也是 web↔service 共用的低层家）。
 
@@ -69,10 +69,13 @@ def pending_input_request(
 
     `kind` 非空时只认该 kind（`ask_user` 超时闸用），为空则认任意 kind（服务端 409
     闸门用）。"未答复"= 该请求 id 不在任一带 `input_request_id` 的 `USER_MESSAGE` 答复
-    集里（含整卡跳过的 `answer=null` 与超时 `{timeout:true}` 形态）。
+    集里（含整卡跳过的 `answer=null` 与超时 `{timeout:true}` 形态）。谓词是"逐条跳过
+    已答复者再往前找"（非"取最新一条、已答复即 `None`"）——良构事件流里同一 run 同一
+    时刻至多一个未答复请求（产生新 `USER_INPUT_REQUESTED` 必先给旧请求写答复），两种
+    口径等价；`kind=None` 的 409 闸门历来用前者，此处统一之。
 
-    这是**唯一一份**扫描（#1220 复审 B1）：服务 409 闸门与驱动/超时复查共用同一份判据，
-    不各写一遍——两份拷贝迟早会漂。
+    这是服务 409 闸门与驱动 / 超时复查**共用的一份**扫描（#1220 复审 B1）：两份拷贝
+    迟早会漂。注：`agent/runtime.py` 另有一份同构扫描，早于本分支、不在本票收口范围。
     """
     events = list(events)
     answered = {
