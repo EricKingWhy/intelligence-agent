@@ -285,6 +285,9 @@ def _build_tooling(
         )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
+    # #1048 AC8：Docker 与 PSEC 一样对工作区走 Sandbox/POSIX 语义；只有 local
+    # 子进程后端是宿主目录语义。宿主源路径仅作项目身份与导入来源。
+    sandbox_path_semantics = uses_sandbox_path_semantics(sandbox)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
@@ -293,11 +296,18 @@ def _build_tooling(
         if tool_cls is BashTool:
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
-            kwargs["project_instructions_loader"] = (
-                lambda relative_path: project_instructions.load_for_path(
-                    session_id, workspace, workspace / relative_path,
+            if sandbox_path_semantics:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_sandbox_path(
+                        session_id, sandbox, relative_path,
+                    )
                 )
-            )
+            else:
+                kwargs["project_instructions_loader"] = (
+                    lambda relative_path: project_instructions.load_for_path(
+                        session_id, workspace, workspace / relative_path,
+                    )
+                )
         registry.register(tool_cls(sandbox, **kwargs))
 
     # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
@@ -399,9 +409,8 @@ def _project_instruction_cwd(
     recorded_roots = workspace_registry.recorded_workspace_roots(session_id)
     sandbox_root = workspace.workspace_root
     if isinstance(sandbox_root, Path):
-        resolved_root = sandbox_root.resolve()
-        if not recorded_roots or str(resolved_root) in recorded_roots:
-            return resolved_root
+        if not recorded_roots or str(sandbox_root) in recorded_roots:
+            return sandbox_root
         raise ValueError(
             "sandbox workspace root does not match its recorded workspace roots"
         )
@@ -410,6 +419,22 @@ def _project_instruction_cwd(
     raise ValueError(
         "cannot resolve a host workspace path for project instructions"
     )
+
+
+def uses_sandbox_path_semantics(sandbox: object) -> bool:
+    """该 sandbox 的工作区是否走 Sandbox/POSIX 路径语义（#1048 AC8）。
+
+    - Docker / Windows PSEC 等工作区**不在宿主项目目录**上的后端 ⇒ `True`
+      （路径解析、指令读取、审批身份都用 Sandbox 抽象，宿主源路径仅作项目身份
+      与导入来源）；
+    - `local` 子进程后端直接以宿主目录为工作区 ⇒ `False`。
+
+    判据单一来源：**只有 `LocalSubprocessSandbox` 是宿主目录语义**，其余后端
+    （含容器内 `/workspace`）一律 Sandbox/POSIX 语义。
+    """
+    from agent_harness.sandbox.local import LocalSubprocessSandbox
+
+    return not isinstance(sandbox, LocalSubprocessSandbox)
 
 
 def root_registry_tool_names(
@@ -586,12 +611,9 @@ async def build_runtime(
         if workspace_registry.exists(session_id)
         else workspace
     )
+    project_instructions = project_instruction_store(settings)
     instruction_cwd = _project_instruction_cwd(
         instruction_workspace, workspace_registry, session_id,
-    )
-    project_instructions = project_instruction_store(settings)
-    await asyncio.to_thread(
-        project_instructions.load_for_session, session_id, instruction_cwd,
     )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
@@ -640,6 +662,9 @@ async def build_runtime(
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
     fallback_model = None
+    # #1093：备用模型请求侧档位名（透传给 Runtime，落 model/fallback 事件）。
+    # 未配 fallback 时保持 None ⇒ 该键缺席（有值才落键）。
+    fallback_effort: str | None = None
     if config.fallback is not None:
         fallback_effort = (
             config.fallback.reasoning_effort.default
@@ -682,6 +707,20 @@ async def build_runtime(
         # #363 / W-19：显式 sandbox 后端选择。
         sandbox_backend=sandbox_backend,
     )
+    instruction_workspace = workspace_registry.get(session_id)
+    instruction_cwd = _project_instruction_cwd(
+        instruction_workspace, workspace_registry, session_id,
+    )
+    if uses_sandbox_path_semantics(instruction_workspace):
+        await asyncio.to_thread(
+            project_instructions.load_for_sandbox_session,
+            session_id,
+            instruction_workspace,
+        )
+    else:
+        await asyncio.to_thread(
+            project_instructions.load_for_session, session_id, instruction_cwd,
+        )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
     context_artifact_store = tooling.context_artifact_store
@@ -867,9 +906,19 @@ async def build_runtime(
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
-        return project_instructions.load_for_session(
-            session_id, instruction_cwd,
-        ).with_runtime_context(runtime_context)
+        # #1048 AC8：与 build_runtime 的指令加载分支**同源**（`uses_sandbox_path_semantics`）：
+        # 容器（Docker）工作区经 `load_for_sandbox_session` 用 sandbox 根（如 /workspace）缓存，
+        # 这里若改用宿主 `instruction_cwd` 会与缓存 cwd 不一致 ⇒ `ValueError: session cwd
+        # changed`，每个 Docker 会话首个 context build 就炸。PSEC 时代两者恰好都等于宿主
+        # 路径故未暴露；Docker 的容器内根 ≠ 宿主源路径，必须走同一加载器。
+        snapshot = (
+            project_instructions.load_for_sandbox_session(
+                session_id, instruction_workspace
+            )
+            if uses_sandbox_path_semantics(instruction_workspace)
+            else project_instructions.load_for_session(session_id, instruction_cwd)
+        )
+        return snapshot.with_runtime_context(runtime_context)
 
     # #823 / MM-02（A2）：视觉能力按**当前请求模型**判定（PRD D6——"fallback 自动
     # 降级"）。主/备两级各自解析声明；运行时在每次 build 前按 coordinator 的当前角色
@@ -902,6 +951,12 @@ async def build_runtime(
             model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
             plan_reinject_every_messages=settings.plan_reinject_every_messages,
+            # #1026：摘要墙钟缩放与分块参数（Settings 透传链起点，原样下传）。
+            summary_timeout_seconds=settings.summary_timeout_seconds,
+            summary_timeout_per_kilotoken_seconds=(
+                settings.summary_timeout_per_kilotoken_seconds),
+            summary_chunk_request_ratio=settings.summary_chunk_request_ratio,
+            summary_chunk_max_tokens=settings.summary_chunk_max_tokens,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
             # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
             context_providers=_select_context_providers(
@@ -954,6 +1009,10 @@ async def build_runtime(
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
+        # #1093：请求侧推理档位名透传给 Runtime——primary 落 run/started，
+        # fallback 落 model/fallback（装配点只透传；改请求体装配路径不在此列）。
+        reasoning_effort=reasoning_effort,
+        fallback_reasoning_effort=fallback_effort,
         observability_sink=get_observability_sink(settings),
         steer_source=steer_source,
         # `#312`：run 作用域账本（暂停/恢复）+ 生效 fuse 的来源标识。装配点只透传。

@@ -53,6 +53,7 @@ await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
 const payload = join(output, 'payload')
 await mkdir(join(payload, 'resources'), { recursive: true })
+const testInstallerInclude = join(output, 'installer-test.nsh')
 
 const { createWindowsInstallerConfig, validateInstallerScripts } = await import('./build-windows-installer.mjs')
 const childOptions = { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
@@ -81,6 +82,21 @@ SectionEnd
 `)
   const compiler = await getMakeNsisPath()
   await execute(compiler.path, ['/V2', payloadSource], { ...childOptions, env: { ...childOptions.env, ...compiler.env } })
+  await writeFile(testInstallerInclude, [
+    '!define IA_TEST_HARD_KILL_AFTER_STAGE_RENAME',
+    '!define IA_TEST_INJECT_RECOVERY_METADATA_FAILURES',
+    `!include "${join(appRoot, 'installer', 'installer.nsh')}"`,
+    '',
+    '!macro preInit',
+    '  ReadRegStr $0 HKCU "${INSTALL_REGISTRY_KEY}" "IaTestRemoveInstallDirectory"',
+    '  StrCmp $0 "1" 0 iaTestPreInitDone',
+    '  DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaTestRemoveInstallDirectory"',
+    '  SetOutPath $TEMP',
+    '  RMDir "$INSTDIR"',
+    'iaTestPreInitDone:',
+    '!macroend',
+    '',
+  ].join('\n'))
 
   for (const language of ['en_US', 'zh_CN']) {
     const languageOutput = join(output, language)
@@ -106,9 +122,16 @@ SectionEnd
         // script below is handed `installer-test.exe` and never runs (#831).
         nsis: {
           ...baseConfig.nsis,
+          include: testInstallerInclude,
           guid,
           installerLanguages: [language],
           artifactName: 'installer-test.exe',
+          // The driver launches and checks the app directly; test installs must
+          // not leave shortcuts in the user's Start Menu or Desktop.
+          createDesktopShortcut: false,
+          createStartMenuShortcut: false,
+          // Keep the wizard from launching the app before the driver checks it.
+          runAfterFinish: false,
         },
       },
     })

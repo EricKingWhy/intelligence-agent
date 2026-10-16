@@ -1,0 +1,1 @@
+2026-10-15	W-31 post-main-sync Correctness/Spec review: APPROVE; P0/P1/P2/P3/P4=0/0/0/0/0; reviewed approved #1159+#1132 merge combination and deterministic cleanup-lock regression; see docs/phase_status/2026-10.md#2026-10-15-·-w31-主线冲突合并与硬删除竞态回归	b694c1584eb9c181d4fc7845dd18345f0a37d381..0b76d6b00929d66ecc808428d2ade0d95687f02b

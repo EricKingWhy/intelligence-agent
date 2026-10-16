@@ -254,6 +254,9 @@ class SessionEventSink:
         self._attempts = max(1, attempts)
 
     def emit(self, event_type: str, data: dict[str, Any], *, run_id: str | None = None) -> None:
+        # 本写者不调用 `Session.deliver_to_runtime()`（#1055 的判据：只有交给在途
+        # runtime 的聚合才吃 resync），因此 `Session.append` 的重投分支对本写者不
+        # 生效，重试上界仍由本循环 owner——**不得**给它加上交付标记。
         for _ in range(self._attempts):
             try:
                 session = Session(
@@ -357,6 +360,7 @@ class MemoryJobRunner:
         roles: MemoryModelRoles,
         sink: MemoryJobEventSink | None = None,
         extraction_enabled: bool = True,
+        fallback_enabled: bool = True,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         recovery_limit: int = DEFAULT_RECOVERY_LIMIT,
         worker_id: str | None = None,
@@ -375,6 +379,9 @@ class MemoryJobRunner:
         #: 允许注入是为了让用例能对着裸 list 断言事件，而不必去读会话日志。
         self._sink = sink
         self._extraction_enabled = extraction_enabled
+        #: #1039：降级开关的**构造期默认**（无 V2 service 时的回退）；生产路径每 job
+        #: 从 SQLite 读（见 `_run_one`），与 `extraction_enabled` 同一口井。
+        self._fallback_enabled = fallback_enabled
         self._recovery_limit = recovery_limit
         self._max_concurrency = max_concurrency
         # lease 属主：**进程内稳定**（同一个 runner 的所有认领都用它）。带 pid 是为了
@@ -606,6 +613,15 @@ class MemoryJobRunner:
         degraded with no memory write"这条路，而一个可以永远不终结的 job 会让 AC6 的
         "收敛到一个正确终态"不成立。代价（一次瞬时存储抖动也会让这轮记忆作废）是
         显式权衡：收益侧是资源有界，理由记在 `DegradedReason.JOB_FAILED` 上。
+
+        例外（#1039）：每 job 读**该用户**的治理设置（`fallback_enabled`，同
+        `extraction_enabled` 一条链）是**附加输入**、不是执行的前提。若把它按上面的
+        "契约之外失败"处理，一次设置存储抖动就会把一轮记忆判成 `JOB_FAILED`——那既不是
+        模型失败也不是输入失败。故该读取单独 best-effort：读不到**不失败 job**；但也
+        **不退回"默认开"**——在用户可能已明确关掉开关的前提下，一次读取抖动不得把治理
+        选择翻回开（那会让记忆内容可能外泄到备用 provider）。读不到即 fail-closed：本次
+        不尝试确定性 fallback（= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到
+        设置即恢复），并留痕。
         """
         async with self._semaphore:
             try:
@@ -621,9 +637,35 @@ class MemoryJobRunner:
                 # 显式命令路径的生产方属于 #300（governance API），它**不能**搭这条入队口
                 # ——那会让"用户要求记住"被静默降级成"自动形成"，而这一轮的候选带不带
                 # 同意是一条**持久事实**（写在 job 上没有，恢复后就不可知）。
+                #
+                # #1039：降级开关**每 job 运行时读**（与 `extraction_enabled` 同链），
+                # 让面板改动对随后执行的 job 立即生效；无 V2 service 时退回构造期默认。
+                fallback_enabled = self._fallback_enabled
+                if self.memory_v2 is not None:
+                    trusted = TrustedMemoryIdentity(
+                        tenant_id=job.tenant_id, user_id=job.user_id,
+                        project_id=job.project_id,
+                    )
+                    try:
+                        fallback_enabled = (
+                            await self.memory_v2.get_settings(trusted)
+                        ).fallback_enabled
+                    except Exception:
+                        # 读设置是本 job 的**附加**输入，不是执行的前提：设置存储抖一下不应把
+                        # 一轮记忆判成 JOB_FAILED。但也**不能**退回"默认开"——在用户可能已明确
+                        # 关掉开关的前提下，一次读取抖动不得把治理选择翻回开（记忆内容可能随之
+                        # 外泄到备用 provider）。故 fail-closed：本次不尝试确定性 fallback
+                        # （= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到设置即恢复）。
+                        logger.exception(
+                            "Memory V2 job %s: cannot read per-user settings; treating the "
+                            "deterministic fallback switch as disabled for this job",
+                            job.job_id,
+                        )
+                        fallback_enabled = False
                 return await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
+                    fallback_enabled=fallback_enabled,
                 )
             except Exception:
                 logger.exception("Memory V2 job %s failed outside the executor", job.job_id)

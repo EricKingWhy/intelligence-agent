@@ -45,12 +45,19 @@ src/installer/
   per-machine install of the same app id is refused with a message.
 - **Atomic update + rollback** (DSH `installer-directories.nsh` protocol,
   adapted to stock electron-builder hooks): the new installer's `customInit`
-  renames the live dir to `$INSTDIR.old-{guid}` before the install section
-  (a running app locks its directory, so the rename also guards against
-  updating over a live process; the braces are `System::Call`'s `g` GUID form,
-  and #904's delete path and leftover sweep match that name shape — a name
-  without the braces is not touched; the compare is case-insensitive, which is
-  StrCmp's default and matches NTFS's own); `customInstall` verifies the new
+  renames the live dir to `$INSTDIR.old-{guid}` before the install section,
+  after #914's process gate has checked that no product process is running:
+  once at the top of the staging macro, and again inside the staging window,
+  after the working directory is released and before the backup pointer is
+  armed (#1066). A damaged installation returns before that second check, so
+  only the first one runs on that path. The rename is
+  not the guard — a directory rename needs no lock, so a headless bundled
+  runtime keeps answering clients out of the renamed tree (#914 measured
+  `rename_errors=0` with a live service inside the directory); the braces are
+  `System::Call`'s `g` GUID form, and #904's delete path and leftover sweep
+  match that name shape — a name without the braces is not touched; the
+  compare is case-insensitive, which is StrCmp's default and matches NTFS's
+  own); `customInstall` verifies the new
   files and
   then deletes the backup, records it, or rolls back. A delete that fails
   because a child cannot be removed (#901) leaves the install finished, the

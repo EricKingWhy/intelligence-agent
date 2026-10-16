@@ -54,6 +54,12 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: 装后端依赖
         run: uv sync --locked --all-extras
+      # #1213：与 gate1.yml:64-65 逐字同形。本作业的口径就是"与 gate1 相同命令，
+      # 刻意重复"（见文件头），所以 gate1 预置的镜像这里也必须预置——否则
+      # tests/sandbox/test_docker_hardlink_isolation.py 的 4 例（刻意"Engine 不可用
+      # 即真实失败、不静默跳过"）每晚恒红，把这条车道的差集读数淹掉。
+      - name: 准备 workspace 隔离测试所需的 Docker 镜像
+        run: docker pull python:3-slim
       - name: 全量后端测试 + 覆盖率
         run: |
           mkdir -p artifacts

@@ -2,7 +2,10 @@
  *
  * 只用既有主题 token（`index.css` 的 :root 与 :root[data-theme='light'] 两组都
  * 已定义）——本文件不新增 token，因此无需双块同步（AGENTS.md §15）。文字一律
- * ≥ --text-xs(12px)、用 AA 达标的 --text-* / --accent / --danger / --warning。 */
+ * ≥ --text-xs(12px)、用 AA 达标的 --text-* / --accent。语义色当**正文色**用时按
+ * #1136/#1175 的 ink-mix 压深（亮色 --danger 压纯白底上限就 4.448 < 4.5）：
+ * `color-mix(in srgb, var(--danger) 45%, var(--text-primary))`；语义色当装饰
+ * （图标/描边/底）时仍引原 token（#1164 P2-3）。 */
 
 .recovery-decision-panel {
   border: 1px solid var(--border-strong);
@@ -48,12 +51,6 @@
 .recovery-decision-close:hover {
   color: var(--text-primary);
   background: var(--surface-hover);
-}
-
-.recovery-decision-message {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
 }
 
 .recovery-cards {
@@ -203,7 +200,9 @@
 .recovery-decision-error {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--danger);
+  /* #1208：语义色当正文色用——亮色下纯 --danger 压 --surface-elevated 仅 4.448 < 4.5，
+     混入 --text-primary 压深（同 #1136/#1171/#1175 的 ink-mix）。 */
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 
 .recovery-actions {
@@ -277,7 +276,8 @@
 }
 
 .recovery-list-error {
-  color: var(--danger);
+  /* #1208：同 .recovery-decision-error——语义色当正文色用，ink-mix 压深。 */
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 
 .recovery-list {

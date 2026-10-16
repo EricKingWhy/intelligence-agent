@@ -218,6 +218,16 @@ export interface PresetTask {
   id: number;
 }
 
+/** 分离投递（窗外落定）迟到的失败：把没送出去的原文还给 Composer（#1148）。
+ *
+ *  **对象包装是承重的**，不是装饰：状态若直接是裸 `string`，同一段文本连续失败两次
+ *  时 `Object.is(同一段, 同一段)` 相等 ⇒ React 跳过重渲染 ⇒ 回填 effect 不触发，
+ *  第二次的草稿就被吞掉——而"重发一次、又失败一次"正是这条路径的常态。每次
+ *  `{ text }` 都是新引用，故每次都算一次注入。 */
+export interface FailedDraft {
+  text: string;
+}
+
 /** 会话呈现模式——conversation 永远属于 mode 指向的会话（编译期保证）。
  *
  * - idle：无选中会话（空状态）。
@@ -396,6 +406,17 @@ export interface Turn {
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;
+  /** #1017：本轮收到的 `memory/recalled` 事件（verbatim 引用——事件流仍是唯一
+   *  真相，展开详情由 RecallNotice 按 seq/run_id 对账 /memory-recalls）。
+   *  后端每 run 至多 append 一条（recall.py 的 context select）；投影按「事件
+   *  到达时的最后一轮」归属（append-only 流里 user/message 建轮 → run/started
+   *  → recalled 的顺序恒成立）。copy-on-write 契约与 notices/delegations 同：
+   *  cloneTurn 浅拷贝数组，变更必须整体 reassign。 */
+  recalls?: AgentEvent[];
+  /** #1017 审查 P3：本轮 run 的归属戳（run/started 信封携带的 run_id）——
+   *  memory/recalled 归位时的 run_id 校验锚（两侧都在且不等 = 乱序回跳，
+   *  弃挂防静默错挂）。缺省 = 该轮尚未收到 run/started（防御）。 */
+  run_id?: string | null;
 }
 
 /** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。
@@ -705,6 +726,15 @@ export interface ConversationState {
    *  后端 POST，成功后**重载该会话事件**让本字段重投影（不做乐观本地态）；新会话时才把
    *  本地选择当创建意图发出去。 */
   session_permission_mode: string | null;
+  /** 本会话的 **cwd 锚**（`session/started.data.cwd`，与 `permission_mode` 同级；
+   *  WS-1 / #151 的写侧，本字段是 Web 侧的读侧）。
+   *
+   *  归属 chip（#1028）的数据源：会话 cwd 与项目路径 canonical 精确相等是成员规则，
+   *  把它显形出来，用户才知道当前会话是否落在某个已注册项目里。与
+   *  `session_permission_mode` 同一「**只认第一条带值的 `session/started`**」口径——
+   *  cwd 是创建期定值、写后不可变（`session/cwd.py`），重放/迟到重复投递不得改写。
+   *  未声明（老日志 / 事件窗口从中间开始）→ null = "未知"，不编字面值冒充。 */
+  session_cwd: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *

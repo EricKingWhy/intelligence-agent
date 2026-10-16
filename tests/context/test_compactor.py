@@ -256,15 +256,19 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
     original_events = list(session.events)
     append_event = session._store.append_event
 
-    def fail_before_end(session_id, event):
+    def fail_before_end(session_id, event, *, allocate=False):
+        # #1061：`append_event` 新增终态协商开关；本注入只关心事件类型，开关转发即可。
         if event.type == COMPACTION_END:
             raise OSError("injected append failure")
-        append_event(session_id, event)
+        return append_event(session_id, event, allocate=allocate)
 
     monkeypatch.setattr(session._store, "append_event", fail_before_end)
     builder = ContextBuilder(
         ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
         max_context_tokens=100_000, auto_compact_threshold=0.05,
+        # #1026：本用例验证 bracket 落盘失败不 shadow 原上下文（与分块正交）；
+        # 单响应剧本只够单请求路径，ratio=1 关闭分块。
+        summary_chunk_request_ratio=1,
     )
     with pytest.raises(OSError, match="injected append failure"):
         await builder.build(session)
@@ -734,7 +738,13 @@ async def test_summary_that_misses_auto_target_is_rejected():
 
 @pytest.mark.asyncio
 async def test_huge_tool_call_args_and_summary_failure_hit_hard_guard():
-    """不安全摘要不能替代原始工具上下文；原文超护栏时必须停止。"""
+    """摘要失败时降级截断丢掉放不进预算的超大原子块；会话不死（#1026 裁决 A）。
+
+    旧契约（裁决 A 之前）：原文超护栏 + 摘要双败 ⇒ 必然停止。#1026 裁决 A 改为
+    确定性截断降级：huge tool 块（≈25k tok）装不进 auto 预算 ⇒ 从尾部保留、
+    该块与其更早内容一并截除，recent 逐字保留，不再抛错；完全不可截断（recent
+    自身超预算）才落异常兜底（见 test_1026_compaction_timeout.py 的不可截断用例）。
+    """
     class FailingModel:
         async def ainvoke(self, messages):
             raise ConnectionError("offline")
@@ -746,10 +756,19 @@ async def test_huge_tool_call_args_and_summary_failure_hit_hard_guard():
         ToolMessage(content="written", tool_call_id="c1"),
         HumanMessage(content="current"),
     ]
-    with pytest.raises(ContextWindowExceededError):
-        await ContextCompactor(FailingModel(), max_context_tokens=8000).compact(
-            messages, estimate_message_tokens(messages),
-        )
+    result = await ContextCompactor(
+        FailingModel(), max_context_tokens=8000,
+        summary_chunk_request_ratio=1,
+    ).compact(messages, estimate_message_tokens(messages))
+    assert result.fallback_used is True, "降级截断带 fallback 标记（裁决 A）"
+    assert result.summary is None and result.compacted_turn_count == 0
+    assert result.messages[-1].content == "current", "recent 逐字保留"
+    assert not any(
+        isinstance(m, AIMessage) and m.tool_calls for m in result.messages
+    ), "装不进预算的 huge 原子块被截除"
+    assert [f.error_class for f in result.failures][-1] == (
+        "deterministic_truncation_fallback"
+    )
 
 
 @pytest.mark.asyncio

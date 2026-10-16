@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agent_harness.config import Settings
 from agent_harness.session import JsonlSessionStore, Session
+
+
+def register_workspace_from_build_kwargs(kwargs: Mapping[str, Any]) -> None:
+    """Keep mocked runtime builders' workspace precondition consistent with production."""
+    kwargs["workspace_registry"].create(
+        kwargs["session_id"],
+        workspace_root=kwargs["workspace"],
+        backend=kwargs.get("sandbox_backend") or "local",
+    )
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -141,6 +151,102 @@ def _reset_sse_shutdown_latch() -> Iterator[None]:
     _reset()
     yield
     _reset()
+
+
+#: loopback 主机名白名单：发往这些主机的请求必须绕过任何代理。
+#: 裸 `::1` 是唯一正确写法——方括号 `[::1]` 会让 httpx2 在**客户端构造期**抛
+#: `InvalidURL: Invalid port: ':1]'`（`httpx2/_utils.py::get_environment_proxies`
+#: 对 `[::1]` 走 `all://*[::1]` 分支，`URLPattern` 构造即炸）。
+_LOOPBACK_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _normalize_no_proxy_entry(entry: str) -> str:
+    """去掉方括号 IPv6 字面量的方括号：`[::1]` → `::1`、`[::1]/128` → `::1/128`。
+
+    方括号与裸形式语义等价（指同一地址），但 httpx2 `get_environment_proxies` 只把
+    **裸** ipv6 认成 ipv6（走 `all://[addr]` 分支），方括号会落进 else 分支生成
+    `all://*[::1]`、`URLPattern` 构造期炸 `InvalidURL`。故统一去方括号（保留可选的
+    `/前缀`）。
+    """
+    if entry.startswith("[") and "]" in entry:
+        inner, _, tail = entry[1:].partition("]")
+        return inner + tail
+    return entry
+
+
+def ensure_loopback_proxy_exemption(env: MutableMapping[str, str]) -> None:
+    """**就地**规范化 `NO_PROXY`/`no_proxy` 并补进 loopback 三项（返回 None）。
+
+    不是纯函数：直接改写传入的 mapping 并返回 `None`（`os.environ` 本身就是
+    MutableMapping，无法用"返回新 dict"的方式替换，故不用返回式签名）。
+
+    豁免语义是 urllib → requests → httpx 一脉的成熟约定（来源：httpx 官方
+    `docs/environment_variables.md`；httpx2 `_utils.py::get_environment_proxies`
+    同构）：`NO_PROXY` 是逗号分隔的 hostname 列表，命中即绕过代理。大小写两个键都写
+    且值一致——httpx2 经 `urllib.request.getproxies()` 读代理 env，而
+    `getproxies_environment` 对变量名做 case-fold 并按"优先小写"归并（`NO_PROXY` 与
+    `no_proxy` 都映射到同一个 `no` 键，小写拼写胜出）；两键值不一致时小写键会覆盖
+    大写键，故必须写同样的值。驱动者是 httpx2（经 urllib），不是"urllib 对大写敏感"。
+
+    写回前按 `get_environment_proxies` 的实际解析行为做三步规范化（均本机实证）：
+    ① 去方括号（见 `_normalize_no_proxy_entry`，否则构造期炸）；
+    ② 去重且大小写不敏感（httpx2 主机匹配大小写不敏感：URL host 归一化成小写、
+    `localhost` 比较前 `.lower()`，故 `LOCALHOST` 与 `localhost` 是同一条；保留首次
+    出现的原拼写）；
+    ③ 去空白（条目 `strip()` 后按逗号重连）。
+
+    已在的条目保留不重复追加；值恰为 `*`（`get_environment_proxies` 见 `*` 即返回
+    全豁免）时不再追加 loopback，但仍做上述规范化去掉方括号。
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = env.get(key)
+        if raw is None or not raw.strip():
+            env[key] = ",".join(_LOOPBACK_PROXY_HOSTS)
+            continue
+        entries: list[str] = []
+        seen: set[str] = set()
+        for host in raw.split(","):
+            host = _normalize_no_proxy_entry(host.strip())
+            if not host:
+                continue
+            folded = host.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            entries.append(host)
+        if "*" not in seen:
+            for host in _LOOPBACK_PROXY_HOSTS:
+                if host.casefold() not in seen:
+                    seen.add(host.casefold())
+                    entries.append(host)
+        env[key] = ",".join(entries)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_loopback_proxy_exemption() -> Iterator[None]:
+    """#963：把 loopback 补进代理豁免（含规范化宿主已有的方括号条目），用例后恢复原值。
+
+    宿主设了 `HTTP_PROXY`/`HTTPS_PROXY` 却没给 loopback 豁免时，httpx/httpx2 默认
+    `trust_env=True` 会把发往 `127.0.0.1` 的请求送进代理 → 一切走真实本机 HTTP 服务
+    的用例假红（issue #963 点名的 `test_http_transport_round_trip` 等）。在 conftest
+    统一修，不逐个改用例。
+
+    夹具名用 `ensure`（补进/规范化）而非 `seal`（摘掉/屏蔽）：它**追加**豁免，语义与
+    公开函数 `ensure_loopback_proxy_exemption` 对齐。
+
+    豁免只动 loopback 与宿主 `NO_PROXY` 里的方括号条目，不影响 `qiniu`/`live_services`
+    等真实外部端点，故无需跳过；机制对齐 httpx 一脉的成熟语义（见
+    `ensure_loopback_proxy_exemption` docstring）。save/restore 用 try/finally，避免
+    污染同进程内后续用例。
+    """
+    saved = {key: os.environ[key] for key in ("NO_PROXY", "no_proxy") if key in os.environ}
+    try:
+        ensure_loopback_proxy_exemption(os.environ)
+        yield
+    finally:
+        for key in ("NO_PROXY", "no_proxy"):
+            os.environ.pop(key, None)
+        os.environ.update(saved)
 
 
 @pytest.fixture(scope="session")

@@ -20,6 +20,7 @@ from agent_harness.session import service as service_module
 from agent_harness.session.approval import InteractiveCallbackHolder
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.web.app import create_app
+from tests.conftest import register_workspace_from_build_kwargs
 
 
 @pytest.fixture
@@ -34,6 +35,7 @@ def captured_build(monkeypatch, tmp_path):
 
     async def _fake_build(**kwargs):
         calls.append(kwargs)
+        register_workspace_from_build_kwargs(kwargs)
         # 返回一个占位对象；后续 Session.start + launch 会被另一处 patch 拦掉
         return object()
 

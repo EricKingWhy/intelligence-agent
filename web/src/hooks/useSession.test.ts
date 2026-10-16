@@ -147,6 +147,8 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
     run_cancelled: false, compactions: [], reconcile_queue: [], pending_approvals: [],
     approval_decisions: [], permission_policy: null, session_permission_mode: null,
+    // #1028：会话 cwd 锚（ConversationState 另一个必填字段，字面量构造点跟着长）。
+    session_cwd: null,
     events: [], unknown_events: [], model: null, usage_total: null, cost_usd: null,
     // N2（#271）：新增必填字段（本夹具是 ConversationState 的字面量构造点，编译器指出的）。
     eventsVersion: 0,

@@ -157,13 +157,29 @@ class LocalSubprocessSandbox(Sandbox):
         passthrough_env: bool = False,
         fallback_encoding: str | None = None,
     ) -> None:
-        self._workspace_root = Path(workspace_root).resolve()
-        self._workspace_root.mkdir(parents=True, exist_ok=True)
+        resolved_root = Path(workspace_root).resolve()
+        resolved_root.mkdir(parents=True, exist_ok=True)
+        self._initialize(
+            resolved_root,
+            max_capture_chars=max_capture_chars,
+            env_allowlist=env_allowlist,
+            passthrough_env=passthrough_env,
+            fallback_encoding=fallback_encoding,
+        )
+
+    def _initialize(
+        self,
+        workspace_root: Path,
+        *,
+        max_capture_chars: int = 2_000_000,
+        env_allowlist: tuple[str, ...] | None = None,
+        passthrough_env: bool = False,
+        fallback_encoding: str | None = None,
+    ) -> None:
+        """Initialize shared process-capture state after the caller secures its root."""
+        self._workspace_root = Path(workspace_root)
         self._max_capture_chars = max_capture_chars
-        # 输出解码的兜底编码（UTF-8 试探失败时用）：缺省取宿主控制台代码页。
-        # 显式传参是测试缝——让 GBK 回退路径可以在任何平台上被测（OBS-011）。
         self._fallback_encoding = fallback_encoding or platform_fallback_encoding()
-        # passthrough_env=True 是显式逃生门（本地调试）；默认过滤。
         if passthrough_env:
             self._env: dict[str, str] | None = None
         else:
@@ -253,19 +269,20 @@ class LocalSubprocessSandbox(Sandbox):
         # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀。
         # Windows：CREATE_SUSPENDED + Job Object 让后代自动继承同一终止域。
         windows_job = self._create_windows_job() if os.name == "nt" else None
+        if os.name == "nt" and windows_job is None and self._windows_job_required():
+            raise RuntimeError("无法创建 Windows Job Object；拒绝启动未受约束的进程")
         popen_kwargs: dict[str, object] = (
             {"start_new_session": True} if os.name == "posix" else {}
         )
         if windows_job is not None:
             popen_kwargs["creationflags"] = _WINDOWS_CREATE_SUSPENDED
         try:
-            process = subprocess.Popen(
+            process = self._spawn_process(
                 command,
-                shell=True,
                 cwd=self._workspace_root,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False,  # 字节流：解码由 StreamDecoder 负责（见上）
+                text=False,
                 env=self._env,
                 **popen_kwargs,
             )
@@ -275,9 +292,15 @@ class LocalSubprocessSandbox(Sandbox):
             raise
         if windows_job is not None:
             if not self._attach_windows_job(process, windows_job):
-                # 进程仍处于挂起态：关闭不可用的 Job 后恢复，回到既有 taskkill /T 路径。
                 self._close_windows_handle(windows_job)
                 windows_job = None
+                if self._windows_job_required():
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.debug("无法清理未接入 Job 的挂起进程")
+                    raise RuntimeError("无法把受限进程加入 Windows Job Object")
                 if not self._resume_windows_process(process):
                     process.kill()
                     try:
@@ -397,6 +420,13 @@ class LocalSubprocessSandbox(Sandbox):
             cancelled=cancelled,
             timed_out=timed_out,
         )
+
+    def _spawn_process(self, command: str, **kwargs):
+        """Start a local shell process; WindowsPsecSandbox overrides this seam."""
+        return subprocess.Popen(command, shell=True, **kwargs)
+
+    def _windows_job_required(self) -> bool:
+        return False
 
     @staticmethod
     def _create_windows_job() -> int | None:

@@ -131,6 +131,8 @@ function paint(props: {
   sessionId?: string | null;
   models?: ModelCatalogEntry[];
   selectedModel?: string | null;
+  /** #1015：新建态懒建会话的入口。缺省 = 总是成功建出 'sess-new'。 */
+  onEnsureSession?: () => Promise<string | null>;
 }): void {
   act(() => {
     root.render(
@@ -139,6 +141,7 @@ function paint(props: {
         onSubmit,
         onCancel: () => {},
         sessionId: props.sessionId === undefined ? 'sess-1' : props.sessionId,
+        onEnsureSession: props.onEnsureSession ?? (async () => 'sess-new'),
         models: props.models ?? [],
         selectedModel: props.selectedModel ?? null,
       }),
@@ -380,12 +383,138 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     expect(container.querySelector('.composer-attach-hint')).toBeNull();
   });
 
-  it('无会话（新建态）：入口禁用并说明原因（上传端点挂在会话上）', () => {
-    paint({ sessionId: null });
+  it('P4-2：无会话 × supports_vision=false——视觉门禁优先，懒建不触发', async () => {
+    const ensureSession = vi.fn(async () => 'sess-new');
+    paint({ sessionId: null, models: visionOff, onEnsureSession: ensureSession });
+    // 「会话缺失」不再是门禁（#1015），但模型不支持视觉仍是：入口禁用 + 可见原因。
     expect(attachButton().disabled).toBe(true);
-    expect(attachButton().title).toContain('需要先有会话');
-    // 同样不得吞掉粘贴：新建态下用户往往是"粘一段文字顺便带张截图"。
-    expect(pasteFiles(textarea(), [imageFile('a.png')]).defaultPrevented).toBe(false);
+    expect(container.querySelector('.composer-attach-hint')?.textContent).toContain(
+      'supports_vision=false',
+    );
+    // 粘贴不被接管（入口被门禁挡住时必须放行原生粘贴），懒建不触发、零上传。
+    const event = pasteFiles(textarea(), [imageFile('a.png')]);
+    expect(event.defaultPrevented).toBe(false);
+    await act(async () => {});
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(uploadAttachment).not.toHaveBeenCalled();
     expect(cards()).toHaveLength(0);
+  });
+
+  it('无会话（新建态）：入口可用；首次投喂触发懒建会话并上传到新会话（#1015）', async () => {
+    const ensureSession = vi.fn(async () => 'sess-new');
+    paint({ sessionId: null, onEnsureSession: ensureSession });
+    // #1015 新语义：新建态不再禁用入口——首次投喂时懒建会话。
+    expect(attachButton().disabled).toBe(false);
+    const event = pasteFiles(textarea(), [imageFile('a.png')]);
+    // 有文件 ⇒ 接管事件（图要入栏），与旧语义的"不接管"相反。
+    expect(event.defaultPrevented).toBe(true);
+    await act(async () => {});
+    // 懒建恰好一次；上传打到新会话的 per-session 端点上。
+    expect(ensureSession).toHaveBeenCalledTimes(1);
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(uploadAttachment).mock.calls[0][0]).toBe('sess-new');
+    expect(cards()).toHaveLength(1);
+    await act(async () => {
+      resolveUpload?.(receipt('att-1'));
+    });
+    expect(cards()).toHaveLength(1);
+  });
+
+  it('阴性对照（消融 #1）：懒建失败 ⇒ 零上传、无卡片、可见错误（#1015）', async () => {
+    paint({ sessionId: null, onEnsureSession: async () => null });
+    pasteFiles(textarea(), [imageFile('a.png')]);
+    await act(async () => {});
+    await act(async () => {
+      dispatchDrag('drop', [imageFile('b.png')]);
+    });
+    await act(async () => {});
+    // F3：选择器通道同样——懒建失败 ⇒ 零上传（阴性读数三条通道全覆盖）。
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    setInputFiles(input, [imageFile('c.png')]);
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+    // 懒建是唯一充分原因：它失败，三条通道（粘贴/拖放/选择器）都零上传。
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(cards()).toHaveLength(0);
+    // 失败可见（AC3 同一通道），不留"永远上传中"卡片。
+    const alert = container.querySelector('.composer-attach-error[role="alert"]');
+    expect(alert?.textContent).toContain('会话创建失败');
+  });
+
+  it('懒建失败不阻塞纯文本发送（守住 AC4，#1015）', async () => {
+    paint({ sessionId: null, onEnsureSession: async () => null });
+    pasteFiles(textarea(), [imageFile('a.png')]);
+    await act(async () => {});
+    await typeText('纯文本');
+    await act(async () => {
+      sendButton().click();
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0]).toBe('纯文本');
+    expect(onSubmit.mock.calls[0][2] ?? []).toEqual([]);
+  });
+
+  it('并发投喂（消融 #3）：在途时两次粘贴共享同一次懒建，两次上传同 sid', async () => {
+    // App.ensureSession 的契约替身：并发调用共享同一个在途 promise（in-flight 去重）。
+    let inflight: Promise<string | null> | null = null;
+    let creations = 0;
+    let resolveCreate!: (id: string | null) => void;
+    const ensureSession = vi.fn((): Promise<string | null> => {
+      if (inflight) return inflight;
+      creations += 1;
+      inflight = new Promise<string | null>((resolve) => {
+        resolveCreate = resolve;
+      });
+      void inflight.finally(() => {
+        inflight = null;
+      });
+      return inflight;
+    });
+    paint({ sessionId: null, onEnsureSession: ensureSession });
+    pasteFiles(textarea(), [imageFile('a.png')]);
+    pasteFiles(textarea(), [imageFile('b.png')]);
+    await act(async () => {
+      resolveCreate('sess-new');
+    });
+    await act(async () => {});
+    // hook 层每次 intake 都会问一次；但底下只建出一个会话。
+    expect(ensureSession).toHaveBeenCalledTimes(2);
+    expect(creations).toBe(1);
+    expect(uploadAttachment).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(uploadAttachment).mock.calls) {
+      expect(call[0]).toBe('sess-new');
+    }
+    expect(cards()).toHaveLength(2);
+  });
+
+  it('三通道在新建态都走懒建：选择器与拖放同样建出会话再上传', async () => {
+    const ensureSession = vi.fn(async () => 'sess-new');
+    paint({ sessionId: null, onEnsureSession: ensureSession });
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    setInputFiles(input, [imageFile('c.png')]);
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {
+      dispatchDrag('drop', [imageFile('d.png')]);
+    });
+    await act(async () => {});
+    expect(ensureSession).toHaveBeenCalledTimes(2);
+    expect(uploadAttachment).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(uploadAttachment).mock.calls) {
+      expect(call[0]).toBe('sess-new');
+    }
+    expect(cards()).toHaveLength(2);
+  });
+
+  it('已有会话：不触发懒建，原行为逐字不变（消融 #6）', async () => {
+    const ensureSession = vi.fn(async () => 'sess-new');
+    paint({ sessionId: 'sess-1', onEnsureSession: ensureSession });
+    pasteFiles(textarea(), [imageFile('a.png')]);
+    await act(async () => {});
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(vi.mocked(uploadAttachment).mock.calls[0][0]).toBe('sess-1');
   });
 });

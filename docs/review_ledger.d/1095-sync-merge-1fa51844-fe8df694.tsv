@@ -1,0 +1,1 @@
+2026-10-14	#1095 sync merge 机械归属行（coordinator）：merge fe8df694 = 1fa51844（本票终态：实现 b6b74210 + 修回 424d1886 + 台账/读数）+ bd78412f（origin/main 来侧：#1106 PR #1115 badge-focused-run 及其 sync merge）。ort 自动合并零冲突；来侧与本票文件（context_usage.py / builder.py / ContextUsagePanel.tsx / api.ts / 相关测试）零交集；三树互异。本行仅记录合并机械事实。	1fa51844..fe8df694

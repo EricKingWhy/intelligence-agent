@@ -1,0 +1,1 @@
+2026-10-14	#1068 stream-fallback E2E flake 加固（方案A：mock 可变 durable log 保真；89ec0517 两处 done 锚点；双轴 fresh 审查 APPROVE；E2E 全量3轮562P×3+压力轮40/40 0红；沙箱 pytest 7889P/63S/1F=预期台账红；tsc/oxlint clean）	e36b8d5e43827267938aca796d8814234a1c7117..ae896efc66b8fd8f1665b5177919f85f133fc168

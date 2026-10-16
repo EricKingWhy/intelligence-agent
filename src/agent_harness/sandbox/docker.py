@@ -6,14 +6,19 @@ import fnmatch
 import importlib
 import io
 import logging
+import os
 import posixpath
 import queue
 import shlex
+import shutil
 import tarfile
+import tempfile
 import threading
 import weakref
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
 from typing import ClassVar
@@ -81,6 +86,9 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        self._workspace_restore_guard: Callable[
+            [], AbstractContextManager[None]
+        ] | None = None
         self._exec_state = self._state_for_container(self._container_name)
         self._exec_lock = self._exec_state.lock
 
@@ -106,6 +114,14 @@ class DockerSandbox(Sandbox):
         return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
+        restore_guard = getattr(self, "_workspace_restore_guard", None)
+        if restore_guard is None:
+            self._ensure_started()
+            return
+        with restore_guard():
+            self._ensure_started()
+
+    def _ensure_started(self) -> None:
         if self._container is not None:
             self._container.reload()
             if self._container.status == "running":
@@ -140,6 +156,21 @@ class DockerSandbox(Sandbox):
                 }
             },
         )
+
+    def workspace_volume_exists(self) -> bool:
+        """具名私有卷是否仍存在（#1132）。
+
+        恢复路径据此 fail-closed：`containers.run(volumes=...)` 在具名卷缺失时
+        会**静默重建一个空卷**，于是恢复会"成功"在一个空 workspace 上，而原文件
+        已经不可达。调用方必须在**同一临界区**内完成"检查 → ensure_started"，
+        否则检查与启动之间仍可被删除插入（消融实测：无锁时该窗口复现原症状）。
+        """
+        docker = importlib.import_module("docker")
+        try:
+            self._client.volumes.get(self._volume_name)
+        except docker.errors.NotFound:
+            return False
+        return True
 
     def exec(self, command: str, *, timeout: float | None = None,
              deadline: float | None = None,
@@ -830,6 +861,49 @@ class DockerSandbox(Sandbox):
         matched.sort()
         return matched
 
+    def path_kind(self, path: str) -> str | None:
+        """容器内路径的类型探测（#1167）。
+
+        基类 `Sandbox.path_kind` 要求 `resolve_within_workspace` 返回宿主 `Path`，
+        Docker 后端返回容器内 `PurePosixPath` ⇒ 基类实现恒返回 `None`
+        （项目指令加载/重载在 Docker 会话上恒为 `missing`、
+        WriteTool 的目录甄别失效）。
+
+        实现用容器内 `/bin/sh` 的 `test` 内建做廉价探测——**不**用 `get_archive`：
+        后者对目录会返回整棵子树的递归归档并全量驻留内存（P2），而这里只需要
+        类型。`test -L` 优先于 `-d`/`-f`（不跟随末级符号链接，与宿主侧
+        "符号链接指令文件不跟随"一致）；`-e` 兜底特殊文件（FIFO/socket/device，
+        报不可读 kind 而非"缺失"，与宿主侧对齐）。
+        """
+        try:
+            target = self.resolve_within_workspace(path)
+        except OSError:
+            return None
+        self.ensure_started()
+        quoted = shlex.quote(str(target))
+        result = self._container.exec_run(
+            [
+                "/bin/sh",
+                "-c",
+                (
+                    f"if test -L {quoted}; then echo symlink;"
+                    f" elif test -d {quoted}; then echo directory;"
+                    f" elif test -f {quoted}; then echo file;"
+                    f" elif test -e {quoted}; then echo special;"
+                    " else echo missing; fi"
+                ),
+            ],
+        )
+        if result.exit_code != 0:
+            return None
+        lines = result.output.decode("utf-8", errors="ignore").strip().splitlines()
+        return {
+            "symlink": "symlink",
+            "directory": "directory",
+            "file": "file",
+            "special": "special",
+        }.get(lines[-1] if lines else "")
+
     def read_text(self, path: str) -> str:
         target = self.resolve_within_workspace(path)
         self.ensure_started()
@@ -858,13 +932,31 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(f"无法创建 Workspace 目录 '{target.parent}'")
 
         payload = content.encode("utf-8")
+        # 容器内就地覆盖：先 put_archive 落一个临时文件，再 `cat 临时文件 > 目标`
+        # 截断写已有 inode。直接 put_archive 到目标会 unlink 旧 inode——对**完全
+        # 位于 workspace 内**的 hard-link pair 会拆散链接，与宿主目录/POSIX 语义
+        # 不一致（#1048 AC4/AC8：内部 pair 保持可用）。
+        tmp_name = f".harness-write-{uuid4().hex}.tmp"
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as archive:
-            member = tarfile.TarInfo(name=target.name)
+            member = tarfile.TarInfo(name=tmp_name)
             member.size = len(payload)
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(payload))
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
+            raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
+        command = (
+            f"cat {shlex.quote(tmp_name)} > {shlex.quote(target.name)} "
+            f"&& rm -f {shlex.quote(tmp_name)}"
+        )
+        result = self._container.exec_run(
+            ["/bin/sh", "-c", command], workdir=str(target.parent)
+        )
+        if result.exit_code != 0:
+            self._container.exec_run(
+                ["/bin/sh", "-c", f"rm -f {shlex.quote(tmp_name)}"],
+                workdir=str(target.parent),
+            )
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
@@ -880,9 +972,86 @@ class DockerSandbox(Sandbox):
 
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w", dereference=False) as archive:
-            archive.add(source, arcname=target.name, recursive=True)
+            if os.name == "nt":
+                import msvcrt
+                from types import SimpleNamespace
+
+                from agent_harness.sandbox.windows_psec import (
+                    _pin_host_path_tree_for_archive,
+                )
+
+                with _pin_host_path_tree_for_archive(source) as (entries, transferred):
+                    for relative_path, handle, is_directory in entries:
+                        member_name = (
+                            f"{target.name}/{relative_path}"
+                            if relative_path
+                            else target.name
+                        )
+                        fd = msvcrt.open_osfhandle(
+                            handle, os.O_RDONLY | os.O_BINARY,
+                        )
+                        transferred.add(handle)
+                        try:
+                            if is_directory:
+                                fileobj = SimpleNamespace(
+                                    name="", fileno=lambda fd=fd: fd,
+                                )
+                                member = archive.gettarinfo(
+                                    arcname=member_name, fileobj=fileobj,
+                                )
+                                if member is None or not member.isdir():
+                                    raise PermissionError(
+                                        "copy_in source changed during archive"
+                                    )
+                                archive.addfile(member)
+                            else:
+                                with os.fdopen(fd, "rb") as stream:
+                                    fd = None
+                                    fileobj = SimpleNamespace(
+                                        name="", fileno=stream.fileno,
+                                    )
+                                    member = archive.gettarinfo(
+                                        arcname=member_name, fileobj=fileobj,
+                                    )
+                                    if member is None or not (
+                                        member.isreg() or member.islnk()
+                                    ):
+                                        raise PermissionError(
+                                            "copy_in source changed during archive"
+                                        )
+                                    archive.addfile(member, stream)
+                        finally:
+                            if fd is not None:
+                                os.close(fd)
+            else:
+                archive.add(source, arcname=target.name, recursive=True)
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
+
+    def export_to_host(self, dest: Path) -> None:
+        """把容器工作区**副本**导出到全新宿主目录（#1048 AC5/AC6/AC7）。
+
+        用 `get_archive` 取 `/workspace` 的 tar 快照并安全解包（`filter="data"`：
+        拒绝绝对路径 / `..` 穿越 / 越界链接）。Docker `get_archive` 归档的顶层是
+        被取路径的 basename（`workspace/`），而导出语义是「工作区**内容**副本」，
+        故剥掉该顶层目录、把内容直接落在 `dest` 根——否则导出目标会平白多出一层
+        `workspace/`，docker fork 的子 volume 也会被多套一层目录（子会话按
+        `/workspace/<file>` 读不到父文件）。导出的是**副本**：容器内对象与宿主目标
+        各自独立，不共享 inode/canary；绝不把宿主 `/workspace` 当直连路径。
+        """
+        out = Path(dest)
+        out.mkdir(parents=True, exist_ok=True)
+        self.ensure_started()
+        stream, _ = self._container.get_archive(str(self.workspace_root))
+        payload = b"".join(stream)
+        with tempfile.TemporaryDirectory() as raw_dir:
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+                archive.extractall(path=raw_dir, filter="data")
+            raw = Path(raw_dir)
+            extracted = list(raw.iterdir())
+            source = extracted[0] if len(extracted) == 1 and extracted[0].is_dir() else raw
+            for item in source.iterdir():
+                shutil.move(str(item), str(out / item.name))
 
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""

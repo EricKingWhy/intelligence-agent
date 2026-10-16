@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>通用提问 · 对话流内嵌卡片（可交互）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #010102; color: #f7f8f8;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 40px 20px;
+  }
+  .eyebrow { font-size: 12px; letter-spacing: .4px; color: #8a8f98; margin-bottom: 6px; }
+  .title { font-size: 22px; font-weight: 600; letter-spacing: -.4px; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #8a8f98; margin-bottom: 28px; text-align: center; line-height: 1.7; }
+  .sub code { font-family: ui-monospace, monospace; background: #141516; border: 1px solid #23252a; border-radius: 5px; padding: 0 6px; font-size: 12px; color: #d0d4d9; }
+
+  .stage { width: 620px; max-width: 100%; }
+  .caption { font-size: 12px; color: #62666d; margin: 0 0 10px; }
+  .caption b { color: #8a8f98; font-weight: 500; }
+
+  /* ── 对话流 ── */
+  .stream { display: flex; flex-direction: column; gap: 14px; }
+  .msg {
+    max-width: 82%; padding: 11px 15px; border-radius: 13px; font-size: 13.5px; line-height: 1.65;
+  }
+  .msg.user { align-self: flex-end; background: #1b1d24; border: 1px solid #26282f; }
+  .msg.agent { align-self: flex-start; background: transparent; color: #9aa0a8; padding-left: 2px; font-size: 13px; }
+  .status-pill {
+    align-self: flex-start; display: flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: #c6c9f5;
+  }
+  .status-pill .q-ico {
+    width: 17px; height: 17px; border-radius: 50%; border: 1.5px solid #8b93e8;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; font-style: normal; flex: none;
+  }
+  .pulse { width: 6px; height: 6px; border-radius: 50%; background: #8b93e8; animation: pl 1.6s ease-in-out infinite; }
+  @keyframes pl { 50% { opacity: .35; } }
+
+  /* ── 提问卡片 ── */
+  .qcard {
+    background: #0e0f10; border: 1px solid #22242a; border-radius: 14px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.5);
+    overflow: hidden; transition: all .2s;
+  }
+  .qcard-top {
+    display: flex; align-items: center; gap: 10px; padding: 14px 18px 0;
+  }
+  .scope {
+    font-size: 11.5px; color: #9aa0a8; background: #17181b;
+    border: 1px solid #26282f; border-radius: 6px; padding: 3px 9px;
+  }
+  .qcard-tools { margin-left: auto; display: flex; gap: 4px; }
+  .icon-btn {
+    width: 26px; height: 26px; border-radius: 7px; border: none; background: transparent;
+    color: #62666d; cursor: pointer; font-size: 14px; display: flex;
+    align-items: center; justify-content: center; transition: all .12s;
+  }
+  .icon-btn:hover { background: #1a1c20; color: #b9bdc4; }
+  .qbody { padding: 10px 18px 0; }
+  .qcard.collapsed .qbody, .qcard.collapsed .qfoot { display: none; }
+  .q-title { font-size: 17px; font-weight: 600; letter-spacing: -.2px; line-height: 1.5; }
+  .q-anim { transition: opacity .16s ease, transform .16s ease; }
+  .q-anim.out { opacity: 0; transform: translateX(18px); }
+  .q-anim.out-back { opacity: 0; transform: translateX(-18px); }
+
+  .opt {
+    display: flex; gap: 12px; align-items: flex-start;
+    border: 1px solid #22242a; border-radius: 11px; padding: 12px 14px;
+    margin-top: 9px; cursor: pointer; transition: border-color .13s, background .13s;
+  }
+  .opt:hover { border-color: #34373f; }
+  .opt.selected { border-color: #5e6ad2; background: rgba(94,106,210,.06); }
+  .num {
+    width: 22px; height: 22px; border-radius: 7px; flex: none;
+    background: #17181b; border: 1px solid #2b2e36; color: #8a8f98;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; transition: all .13s;
+  }
+  .opt.selected .num { background: #5e6ad2; border-color: #5e6ad2; color: #fff; }
+  .opt-body { flex: 1; min-width: 0; }
+  .opt-label { font-size: 13.5px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  .rec {
+    font-size: 10.5px; color: #8b93e8; border: 1px solid rgba(139,147,232,.45);
+    border-radius: 4px; padding: 1px 6px; font-weight: 500; flex: none;
+  }
+  .opt-desc { font-size: 12.5px; color: #7a7f87; margin-top: 4px; line-height: 1.65; }
+  .custom-row {
+    display: flex; align-items: center; gap: 10px;
+    border: 1px dashed #2b2e36; border-radius: 11px; padding: 12px 14px;
+    margin-top: 9px; cursor: pointer; color: #62666d; font-size: 13px;
+    transition: all .13s;
+  }
+  .custom-row:hover { border-color: #3a3d46; color: #8a8f98; }
+  .custom-row.selected { border-style: solid; border-color: #5e6ad2; color: #c6c9f5; background: rgba(94,106,210,.06); }
+  .custom-input {
+    display: none; margin-top: 9px; width: 100%;
+    background: #121316; border: 1px solid #2b2e36; border-radius: 10px;
+    padding: 10px 13px; font-size: 13px; color: #f7f8f8; outline: none; font-family: inherit;
+    line-height: 1.6; resize: vertical; min-height: 64px;
+  }
+  .custom-input:focus { border-color: #5e6ad2; }
+  .custom-input.show { display: block; }
+
+  .qfoot {
+    display: flex; align-items: center; gap: 8px; padding: 14px 18px 16px; margin-top: 6px;
+  }
+  .page { font-size: 12.5px; color: #62666d; font-variant-numeric: tabular-nums; }
+  .nav-btn {
+    width: 28px; height: 28px; border-radius: 8px; border: 1px solid #2b2e36;
+    background: transparent; color: #8a8f98; cursor: pointer; font-size: 13px;
+    display: flex; align-items: center; justify-content: center; transition: all .12s;
+    font-family: inherit;
+  }
+  .nav-btn:hover:not(:disabled) { border-color: #3a3d46; color: #e2e4e8; }
+  .nav-btn:disabled { opacity: .3; cursor: not-allowed; }
+  .foot-spacer { flex: 1; }
+  .timeout-tip { font-size: 11px; color: #4a4e57; }
+  .btn {
+    font-size: 13px; padding: 8px 18px; border-radius: 9px; cursor: pointer;
+    background: transparent; border: 1px solid #2b2e36; color: #b9bdc4;
+    font-family: inherit; transition: all .12s;
+  }
+  .btn:hover:not(:disabled) { border-color: #3a3d46; color: #e2e4e8; }
+  .btn.primary { background: #e8e9ee; border-color: #e8e9ee; color: #101114; font-weight: 500; }
+  .btn.primary:hover:not(:disabled) { background: #fff; }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%) translateY(8px);
+    background: #17181b; border: 1px solid #2b2e36; border-radius: 9px;
+    padding: 10px 18px; font-size: 13px; color: #d0d4d9; max-width: 92vw;
+    opacity: 0; pointer-events: none; transition: all .25s; text-align: center; line-height: 1.6;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .note { margin-top: 18px; font-size: 12px; color: #52565e; line-height: 1.9; }
+  .note b { color: #8a8f98; font-weight: 500; }
+  .note code { font-family: ui-monospace, monospace; background: #141516; border: 1px solid #23252a; border-radius: 4px; padding: 0 5px; font-size: 11px; color: #9aa0a8; }
+</style>
+</head>
+<body>
+  <div class="eyebrow">效果图 · 通用提问（对话流内嵌卡片 · 可交互）</div>
+  <div class="title">运行中向用户提问</div>
+  <div class="sub">问题卡片直接长在对话流里（对标 dsh，但更干净）：<code>ask_user</code> 一次最多 4 题，<code>1/4</code> 翻页，前后可跳；超时档 60s / 5m / 10m</div>
+
+  <div class="stage">
+    <div class="caption"><b>可交互演示</b> — 点选项作答；点 <code>‹</code> <code>›</code> 或底部页码前后翻；"输入你的答案"可写自定义</div>
+    <div class="stream">
+      <div class="msg user">帮我把这次的版本发了，顺便把测试环境也同步一下</div>
+      <div class="msg agent">正在检查发布前置条件…</div>
+      <div class="status-pill"><span class="pulse"></span><i class="q-ico">?</i>提问 · 等待回答</div>
+
+      <div class="qcard" id="qcard">
+        <div class="qcard-top">
+          <span class="scope" id="scope">发布决策</span>
+          <div class="qcard-tools">
+            <button class="icon-btn" id="collapse" title="收起">⌄</button>
+            <button class="icon-btn" id="close" title="关闭">✕</button>
+          </div>
+        </div>
+        <div class="qbody"><div class="q-anim" id="qanim">
+          <div class="q-title" id="qtitle"></div>
+          <div id="opts"></div>
+          <div class="custom-row" id="customRow"><span>✎</span>输入你的答案</div>
+          <textarea class="custom-input" id="customInput" placeholder="写下你的决定…"></textarea>
+        </div></div>
+        <div class="qfoot">
+          <button class="nav-btn" id="prev">‹</button>
+          <span class="page" id="page">1 / 4</span>
+          <button class="nav-btn" id="fwd">›</button>
+          <span class="foot-spacer"></span>
+          <span class="timeout-tip">5 分钟无回答自动继续</span>
+          <button class="btn" id="skip">跳过</button>
+          <button class="btn primary" id="submit" disabled>提交</button>
+        </div>
+      </div>
+
+      <div class="msg agent" id="afterMsg" style="display:none"></div>
+    </div>
+
+    <div class="note">
+      <b>相对 dsh 的改进</b>：① 更紧凑的卡片（dsh 的选项卡留白过大）；② 选中态用编号块高亮而非整卡描边，一眼看清选了哪个；③ <code>推荐</code> 标签弱化為描边小标，不抢标题；④ 步骤翻页 <code>‹ ›</code> + 页码，跳回前面重选无压力；⑤ 超时提示收进底部一行小字。<br>
+      设计来源：dsh 对话流内嵌卡片形态 + Claude Code <code>AskUserQuestion</code> 参数（1–4 题 / 2–4 选项 / 超时档）；管线复用 <code>USER_INPUT_REQUESTED</code>。
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+<script>
+  const QUESTIONS = [
+    {
+      scope: '发布决策', title: '新版本什么时候发布？',
+      options: [
+        { label: '今晚低峰期', desc: '23:00 后流量最低，出问题影响面最小；发布窗口约 40 分钟。', rec: true },
+        { label: '明早 9 点', desc: '团队都在工位，有问题能立刻响应；但早高峰前必须完成验证。' },
+        { label: '等测试全绿再定', desc: '先不锁时间，测试流水线全绿后我再来问你一遍。' },
+      ],
+    },
+    {
+      scope: '发布决策', title: '这次发版走哪套部署流程？',
+      options: [
+        { label: '蓝绿部署', desc: '零停机切换；回滚只需切回旧版本，1 分钟内完成。', rec: true },
+        { label: '滚动更新', desc: '逐台替换，资源省一半；过程中会有短暂的新旧版本混合。' },
+        { label: '金丝雀发布', desc: '先放 5% 流量观察 30 分钟，没问题再全量；最慢但最稳。' },
+      ],
+    },
+    {
+      scope: '发布决策', title: '发布后出现异常怎么回滚？',
+      options: [
+        { label: '自动回滚', desc: '错误率超阈值 1 分钟内自动切回旧版本，无需你守着。', rec: true },
+        { label: '手动确认', desc: '先电话告警，等你确认后再回滚；适合你想亲自看一眼的场景。' },
+      ],
+    },
+    {
+      scope: '发布决策', title: '发版后通知哪些人？',
+      options: [
+        { label: '仅通知我', desc: '成功 / 失败只推送给你，不打扰别人。', rec: true },
+        { label: '通知全组', desc: '在群里同步发版结果和变更摘要。' },
+      ],
+    },
+  ];
+
+  const answers = new Array(QUESTIONS.length).fill(null);
+  let cur = 0, maxReached = 0;
+
+  const $ = id => document.getElementById(id);
+  const qcard = $('qcard'), qanim = $('qanim');
+
+  function render(dir) {
+    const q = QUESTIONS[cur];
+    const apply = () => {
+      $('scope').textContent = q.scope;
+      $('qtitle').textContent = q.title;
+      $('opts').innerHTML = q.options.map((o, i) => `
+        <div class="opt${answers[cur]?.idx === i ? ' selected' : ''}" data-i="${i}">
+          <span class="num">${i + 1}</span>
+          <div class="opt-body">
+            <div class="opt-label">${o.label}${o.rec ? '<span class="rec">推荐</span>' : ''}</div>
+            <div class="opt-desc">${o.desc}</div>
+          </div>
+        </div>`).join('');
+      $('opts').querySelectorAll('.opt').forEach(el =>
+        el.addEventListener('click', () => select(+el.dataset.i)));
+      const a = answers[cur];
+      const isCustom = a && a.idx === -1;
+      $('customRow').classList.toggle('selected', !!isCustom);
+      $('customInput').classList.toggle('show', !!isCustom);
+      if (isCustom) $('customInput').value = a.text || '';
+      $('page').textContent = `${cur + 1} / ${QUESTIONS.length}`;
+      $('prev').disabled = cur === 0;
+      $('fwd').disabled = cur >= maxReached;
+      $('submit').disabled = !valid(cur);
+      $('skip').textContent = cur === QUESTIONS.length - 1 ? '跳过' : '跳过';
+    };
+    if (dir === 0) { apply(); return; }
+    qanim.classList.add(dir > 0 ? 'out' : 'out-back');
+    setTimeout(() => {
+      apply();
+      qanim.classList.remove('out', 'out-back');
+    }, 150);
+  }
+
+  function valid(i) {
+    const a = answers[i];
+    if (!a) return false;
+    if (a.idx === -1) return (a.text || '').trim().length > 0;
+    return true;
+  }
+
+  function select(i) {
+    answers[cur] = { idx: i, text: null };
+    if (cur === maxReached && cur < QUESTIONS.length - 1) maxReached = cur + 1;
+    render(0);
+  }
+
+  $('customRow').addEventListener('click', () => {
+    answers[cur] = { idx: -1, text: $('customInput').value };
+    if (cur === maxReached && cur < QUESTIONS.length - 1) maxReached = cur + 1;
+    render(0);
+    $('customInput').focus();
+  });
+  $('customInput').addEventListener('input', e => {
+    answers[cur] = { idx: -1, text: e.target.value };
+    $('submit').disabled = !valid(cur);
+  });
+
+  $('prev').addEventListener('click', () => { if (cur > 0) { cur--; render(-1); } });
+  $('fwd').addEventListener('click', () => { if (cur < maxReached) { cur++; render(1); } });
+  $('skip').addEventListener('click', () => {
+    answers[cur] = { idx: -2, text: null }; // 跳过也算"已处理"，可继续往后
+    if (cur === maxReached && cur < QUESTIONS.length - 1) maxReached = cur + 1;
+    if (cur < QUESTIONS.length - 1) { cur++; render(1); }
+    else finish();
+  });
+  $('submit').addEventListener('click', finish);
+
+  function finish() {
+    const s = answers.map((a, i) => {
+      if (!a || a.idx === -2) return `${QUESTIONS[i].title}：跳过`;
+      if (a.idx === -1) return `${QUESTIONS[i].title}：${a.text.trim()}（自定义）`;
+      return `${QUESTIONS[i].title}：${QUESTIONS[i].options[a.idx].label}`;
+    }).join('\n');
+    toast('已提交 4 个决定，run 继续');
+    const m = $('afterMsg');
+    m.style.display = '';
+    m.textContent = '收到，按你的决定继续发布…';
+  }
+
+  $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));
+  $('close').addEventListener('click', () => toast('已关闭卡片，run 保持暂停等待回答'));
+
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), 3000);
+  }
+
+  render(0);
+</script>
+</body>
+</html>

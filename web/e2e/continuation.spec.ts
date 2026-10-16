@@ -10,6 +10,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   AGENT_PROFILES,
+  FIRST_SELECTABLE_MODEL,
   MODELS,
   REASONING_EFFORTS,
   fulfillSse,
@@ -19,16 +20,18 @@ import {
   submitTask,
 } from './fixtures';
 
+// #1016：默认条目（原 MODELS[0]）不进二级列表、不可被 pickFirstModel 选中——
+// reasoning_effort 夹具挂到第一个**可选**条目上，pickFirstModel 选中的就是它。
 const MODELS_WITH_REASONING = [
   {
-    ...MODELS[0],
+    ...FIRST_SELECTABLE_MODEL,
     reasoning_effort: {
       supported: ['minimal', 'deep'],
       default: 'minimal',
       wire_mapping: { minimal: 'low', deep: 'high' },
     },
   },
-  ...MODELS.slice(1),
+  ...MODELS.slice(2), // slice(2)：跳过默认条目 + 已带 reasoning 的首个可选条目，避免重复
 ];
 
 const FIRST_FRAMES = [
@@ -118,7 +121,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
 
   const body = JSON.parse(messagesBody!);
   expect(body.content).toBe('第二条消息');
-  expect(body.model).toBe(MODELS[0].name);
+  expect(body.model).toBe(FIRST_SELECTABLE_MODEL.name); // #1016：pickFirstModel 选的是首个可选条目
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
   // #201：UI 已无该键的入口 → 必然不发（后端默认全集）；契约面由 web/src/lib/api.test.ts 锁
@@ -159,7 +162,7 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
   await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();
 
-  expect(JSON.parse(messagesBody!).model).toBe(MODELS[0].name);
+  expect(JSON.parse(messagesBody!).model).toBe(FIRST_SELECTABLE_MODEL.name);
   // queued ≠ 新 run：不弹错误、不进入流式（Composer 保持可用）
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.getByLabel('Agent 任务')).toBeEnabled();

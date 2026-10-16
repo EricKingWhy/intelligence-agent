@@ -2,7 +2,8 @@
 
 契约：`docs/integration/PRD_PHASE_MULTITURN_TOTAL.md` §2.3 / §2.4
 - `POST /api/sessions/{id}/model` body `{provider, model_id}`
-- `MODEL_CHANGED` 事件 data：`from_provider` / `from_model_id` / `to_provider` / `to_model_id`
+- `MODEL_CHANGED` 事件 data：`from_provider` / `from_model_id` / `to_provider` / `to_model_id`，
+  可选 `reasoning_effort`（#1107：切换时生效的推理档位，有值落键、无值缺键）
 - runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁定的模型）
 - `POST /api/sessions/{id}/forks` body `{from_seq}` → 新 session_id，复用 `fork.py`
 
@@ -313,7 +314,7 @@ class TestRuntimeReadsSessionModel:
             ),
             patch("agent_harness.session.service.Session") as mock_session_cls,
         ):
-            mock_session_cls.start = MagicMock(return_value=MagicMock())
+            mock_session_cls.start = MagicMock(side_effect=Session.start)
             service = session_service(state)
             asyncio.run(
                 service.create_and_launch(
@@ -321,12 +322,45 @@ class TestRuntimeReadsSessionModel:
                 )
             )
 
-        assert mock_session_cls.start.call_args.kwargs["started_data"] == {
-            "provider": "deepseek",
-            "model_id": "gpt-4o",
-            # #358：新会话恒写默认权限矩阵版本。
-            "permission_defaults_version": 2,
-        }
+        session_id = mock_session_cls.start.call_args.kwargs["session_id"]
+        events = state.store.read_events(session_id)
+        assert events[0].type == SESSION_STARTED
+        started_data = events[0].data
+        assert started_data["provider"] == "deepseek"
+        assert started_data["model_id"] == "gpt-4o"
+        # #358：新会话恒写默认权限矩阵版本。
+        assert started_data["permission_defaults_version"] == 2
+
+    def test_create_with_default_entry_name_records_no_override(self, tmp_path):
+        """#1016：选中默认条目 = 清覆盖；创建时不该把它落成一个具体 model_id。
+
+        默认条目 id = 默认链模型名（本夹具 ``deepseek-chat``）。若照 `amend.model`
+        原样落盘，会话事件里会写着一个"等于默认模型名"的假覆盖，续聊时它既不是
+        catalog 条目、又已是默认链，落成多余噪声。与 ``resolve_model_target`` /
+        ``resolve_selection`` 共用同一判据后，这里应**不写** provider / model_id。
+        """
+        state = _state(tmp_path)
+        with (
+            patch(
+                "agent_harness.session.service.build_runtime",
+                new_callable=AsyncMock,
+            ),
+            patch("agent_harness.session.service.Session") as mock_session_cls,
+        ):
+            mock_session_cls.start = MagicMock(side_effect=Session.start)
+            service = session_service(state)
+            asyncio.run(
+                service.create_and_launch(
+                    task="hello", amend=AmendOptions(model="deepseek-chat")
+                )
+            )
+
+        session_id = mock_session_cls.start.call_args.kwargs["session_id"]
+        events = state.store.read_events(session_id)
+        assert events[0].type == SESSION_STARTED
+        started_data = events[0].data
+        assert "model_id" not in started_data
+        assert "provider" not in started_data
 
     def test_derived_model_gone_from_catalog_falls_back_to_default(self, tmp_path):
         """会话记录的模型已不在 catalog（配置漂移）→ 回落默认链，不 500。"""
@@ -584,7 +618,8 @@ class TestConcurrentModelChange:
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
         attempts: list[int] = []
 
-        def always_conflict(session_id: str, event):
+        def always_conflict(session_id, event, *, allocate=False):
+            # #1061：`append_event` 新增终态协商开关；本注入一律拒写，故照旧抛。
             attempts.append(1)
             raise SeqConflict("注入：持续冲突")
 
@@ -598,6 +633,92 @@ class TestConcurrentModelChange:
             )
 
         assert len(attempts) == 3, f"重试次数应为 3（有界），实际 {len(attempts)}"
+
+
+class TestChangeModelRecordsReasoningEffort:
+    """#1107：``model/changed`` 记录切换时生效的推理档位。
+
+    #1093 把所选 reasoning_effort 落进了 ``run/started`` 与 ``model/fallback``，
+    但会话中途换模型的 ``model/changed`` 仍不记档位——审计链在新模型的档位上有空洞。
+    口径与 #1093 同构：**有值落键、无值缺键**（不可得 ≠ 默认值，`11 §6.1`）。
+    「当时档位」= 最近一条 ``run/started`` 的声明：effort 请求侧逐轮声明、服务端
+    不粘滞，最近一轮未声明即视为无档位（旧声明不外推、不伪造）。
+    """
+
+    def test_change_records_latest_declared_effort(self, tmp_path):
+        state = _state(tmp_path)
+        session = _seed_session(state, provider="deepseek", model_id="gpt-4o")
+        session.append(RUN_STARTED, {"reasoning_effort": "deep"})
+        session.append(RUN_COMPLETED, {})
+
+        asyncio.run(
+            session_service(state).change_model(
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
+            )
+        )
+
+        event = state.store.read_events("sid")[-1]
+        assert event.type == MODEL_CHANGED
+        assert event.data["reasoning_effort"] == "deep"
+
+    def test_change_without_declared_effort_omits_key(self, tmp_path):
+        """无声明 ⇒ 键缺席（不是 null / "default"），且旧 data 形状逐字不变。"""
+        state = _state(tmp_path)
+        _seed_session(state, provider="deepseek", model_id="gpt-4o")
+
+        asyncio.run(
+            session_service(state).change_model(
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
+            )
+        )
+
+        event = state.store.read_events("sid")[-1]
+        assert event.type == MODEL_CHANGED
+        assert event.data == {
+            "from_provider": "deepseek",
+            "from_model_id": "gpt-4o",
+            "to_provider": "mimo",
+            "to_model_id": "mimo-v2.6-flash",
+        }
+
+    def test_latest_run_without_effort_does_not_resurrect_old_declaration(self, tmp_path):
+        """最近一轮未声明 ⇒ 键缺席——档位不粘滞，旧声明不外推。"""
+        state = _state(tmp_path)
+        session = _seed_session(state, provider="deepseek", model_id="gpt-4o")
+        session.append(RUN_STARTED, {"reasoning_effort": "deep"})
+        session.append(RUN_COMPLETED, {})
+        session.append(RUN_STARTED, {})
+        session.append(RUN_COMPLETED, {})
+
+        asyncio.run(
+            session_service(state).change_model(
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
+            )
+        )
+
+        event = state.store.read_events("sid")[-1]
+        assert event.type == MODEL_CHANGED
+        assert "reasoning_effort" not in event.data
+
+    def test_fork_child_change_records_parent_effort_context(self, tmp_path):
+        """``inherit_parent_model`` 走同一写入口：child 的 model/changed 同样带父会话
+        最近一轮声明的档位（fork 后审计链不断档）。"""
+        state = _state(tmp_path)
+        state.session_meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
+        asyncio.run(state.session_meta_store.initialize())
+        parent = _seed_session(state, "parent", provider="deepseek", model_id="gpt-4o")
+        parent.append(USER_MESSAGE, {"content": "first"})
+        parent.append(RUN_STARTED, {"reasoning_effort": "minimal"})
+        parent.append(RUN_COMPLETED, {})
+        parent.append(USER_MESSAGE, {"content": "second"})  # fork 边界
+
+        child_id = asyncio.run(
+            session_service(state).fork(session_id="parent", from_seq=4)
+        )
+
+        event = state.store.read_events(child_id)[-1]
+        assert event.type == MODEL_CHANGED
+        assert event.data["reasoning_effort"] == "minimal"
 
 
 class TestFork:

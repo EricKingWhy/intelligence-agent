@@ -5,12 +5,15 @@ Provider 预设表是唯一允许出现厂商细节的地方。
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import SecretStr
 
 from agent_harness.config import Settings
+
+logger = logging.getLogger("agent_harness.model")
 
 
 class ConfigError(Exception):
@@ -340,6 +343,99 @@ def find_catalog_entry(
     return None
 
 
+def _known_chain_targets(settings: Settings) -> list[tuple[str, str]]:
+    """本进程会真实构造的「已知链」的 (provider, model_name) 目标（默认 primary + fallback）。
+
+    与 ``ModelConfig.from_settings`` / ``_fallback_from`` 的取用点同源：模型名缺省时
+    回落到 provider preset 的 ``model_name``；provider 未知或解析出的模型名为空则不构成
+    目标（该链本身会响亮失败，不在本反馈的责任域）。
+    """
+    targets: list[tuple[str, str]] = []
+
+    def _resolve(provider: str, model_name: str) -> tuple[str, str] | None:
+        if provider not in PROVIDER_PRESETS:
+            return None
+        resolved = model_name or PROVIDER_PRESETS[provider]["model_name"]
+        return (provider, resolved) if resolved else None
+
+    primary = _resolve(settings.model_provider, settings.model_name)
+    if primary is not None:
+        targets.append(primary)
+    fallback = _resolve(
+        settings.fallback_model_provider, settings.fallback_model_name
+    )
+    if fallback is not None:
+        targets.append(fallback)
+    return targets
+
+
+def _unadopted_catalog_entries(
+    settings: Settings,
+) -> list[tuple[ModelCatalogEntry, str, str]]:
+    """catalog 中「本会被某条链采纳、却因 provider 不一致被 find_catalog_entry 跳过」的条目。
+
+    「已被真实采纳」的判据复刻 ``find_catalog_entry`` 的两段式优先级（name 命中优先、
+    model_name 次之，各段全表首个命中生效）：先收集每个链目标的 name 命中者，再对未被
+    name 命中的目标补 model_name 命中——只有各目标的实际返回者才算已采纳。若坍缩成单轮
+    OR，被更高优先级命中掩盖的条目（自己的 model_name 撞上链模型名、但 name 已被另一条目
+    占住）会被误判成已采纳而漏报。命中链目标但未被真实采纳的条目，其能力声明（如
+    ``reasoning_effort``）不会进入该链——这正是本反馈要抓的“未采纳”条目。仅 provider 或
+    仅名字不同的合法可选模型（本来就不是该链模型）不在此列，避免对正常的多模型 catalog
+    误报。已被任一已知链真实采纳的条目不在此列：例如条目 provider 与 primary 一致
+    （声明已被 primary 链消费）时，即使它的名字同时撞上 provider 不同的 fallback 目标，
+    也不算「未采纳」——否则会对该条目给出改 provider 的错误建议（改了反而丢掉 primary
+    链的采纳）。
+    """
+    entries = parse_model_catalog(settings)
+    targets = _known_chain_targets(settings)
+    winners: dict[tuple[str, str], int] = {}
+    for attr in ("name", "model_name"):
+        for index, entry in enumerate(entries):
+            for target in targets:
+                if target in winners:
+                    continue
+                if entry.provider == target[0] and getattr(entry, attr) == target[1]:
+                    winners[target] = index
+    adopted = set(winners.values())
+    unadopted: list[tuple[ModelCatalogEntry, str, str]] = []
+    for index, entry in enumerate(entries):
+        if index in adopted:
+            continue
+        for provider, model_name in dict.fromkeys(targets):
+            if entry.name == model_name or entry.model_name == model_name:
+                unadopted.append((entry, provider, model_name))
+    return unadopted
+
+
+def unadopted_catalog_entries(settings: Settings) -> list[ModelCatalogEntry]:
+    """返回因 provider 与已知链不一致而未被采纳的 catalog 条目（#1094）。"""
+    return [entry for entry, _, _ in _unadopted_catalog_entries(settings)]
+
+
+def warn_unadopted_catalog_entries(settings: Settings) -> None:
+    """启动/装配期反馈：catalog 中声明了却不会被任何已知链采纳的条目发一条 warning。
+
+    只加反馈——匹配语义（按 (provider, name) 精确匹配）不改，warning 不阻断启动。
+    无效 catalog 在此记 warning 后返回（best-effort）：既有响亮 ``ConfigError`` 仍发生在
+    实际使用路径（``from_settings`` / ``/api/models`` / ``from_catalog``），启动不因此改变。
+    """
+    try:
+        unadopted = _unadopted_catalog_entries(settings)
+    except ConfigError as error:
+        logger.warning("AGENT_MODELS 未采纳条目检查跳过（配置无效）: %s", error)
+        return
+    for entry, provider, model_name in unadopted:
+        logger.warning(
+            "AGENT_MODELS 条目 %r 未被采纳：条目 provider=%r 与已知链目标 "
+            "(provider=%r, model_name=%r) 不一致——catalog 按 (provider, name) 精确匹配"
+            "会跳过该条目，其能力声明（如 reasoning_effort）不会被已知链（默认链/fallback）"
+            "自动采纳；按条目名显式选择该模型时声明仍生效。若要该链采纳它，请把条目 "
+            "provider 改为 %r——注意这会同时把该名字作为可选模型的路由（base_url）静默"
+            "换成该 provider 的端点。",
+            entry.name, entry.provider, provider, model_name, provider,
+        )
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -490,11 +586,31 @@ class ModelConfig:
         return resolved
 
     @classmethod
+    def is_default_entry(cls, settings: "Settings", name: str) -> bool:
+        """``name`` 是否为 ``GET /api/models`` 的默认条目 id（= 默认链模型名）。
+
+        第一性原理（#1016）：「默认 / 继承默认链」是取值空间之外的一个**状态**，
+        不是一个 id。``/api/models`` 把默认链广告成一条 ``is_default=true`` 的条目，
+        它的 id 恰好是默认链模型名——同一个字符串因此既像「目录条目 id」又像
+        「真实模型名」，两处各自解析就会分叉（切换路径接受、续聊 amend 拒绝 → 422）。
+
+        本判据是「默认条目」的**唯一**判定：切换路径（``resolve_model_target`` 经
+        ``is_default_selection``）与续聊 / 创建 amend（``resolve_selection``）都引用它。
+        默认链本身不可解析（缺 key 等）⇒ False，交由正常解析路径响亮失败。
+        """
+        try:
+            return name == cls.from_settings(settings).model_name
+        except ConfigError:
+            return False
+
+    @classmethod
     def resolve_selection(
         cls, settings: "Settings", name: str, store: Any | None = None,
     ) -> "ModelConfig":
-        """会话级模型选择的**统一解析点**（catalog 优先 + 自定义供应商 fallback）。
+        """会话级模型选择的**统一解析点**（默认链 + catalog + 自定义供应商）。
 
+        `name` 命中默认条目 id（= 默认链模型名，见 ``is_default_entry``）→ 默认链
+        （``from_settings``）：选中它 = 清除会话级覆盖，与切换路径的判定同源（#1016）。
         `name` 带冒号（`<provider>:<model_id>`，/api/models 自定义条目的命名空间，
         与 catalog 名不重叠）→ 走 from_custom_provider（store 必须在场，无凭据/被删
         provider 是确定性配置错误）；否则按 catalog 名解析（from_catalog）。
@@ -503,7 +619,11 @@ class ModelConfig:
         model 字段回传、解析走自定义分支"，而 create/resume/model 三道校验闸此前
         只认 from_catalog——UI 能选、一提交就 422（feature promise 断裂）。三道闸
         与 build_runtime 全部引用本函数后，广告的列表与真实可解析的集合同一。
+        #1016 补全：默认条目此前漏在同一承诺之外（它既非 catalog 名也非自定义
+        条目），续聊 amend 因此对它 422——现由 ``is_default_entry`` 收口。
         """
+        if cls.is_default_entry(settings, name):
+            return cls.from_settings(settings)
         if ":" in name:
             if store is None:
                 raise ConfigError(

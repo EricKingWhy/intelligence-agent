@@ -1,0 +1,1 @@
+2026-10-13	#1079 final two-axis review: Standards + Spec APPROVE; P0/P1/P2/P3/P4=0/0/0/0/0. Checked deterministic reader cancellation, stop-call assertions, finally cleanup and test-only scope; bounded isolated mutations failed as expected.	a42a213d9abdfa036d69cff2cc446c9c03c750f3..7dd4faeb1118df142116d13e94fef1ddbeef9e59

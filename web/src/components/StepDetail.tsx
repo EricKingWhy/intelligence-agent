@@ -29,7 +29,7 @@ import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
   clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
 } from '../lib/inspectorPanel';
-import { deriveAgentProfile, deriveRunPulse, deriveRunSummary } from '../lib/runState';
+import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
 import { CopyButton } from './CopyButton';
@@ -78,6 +78,14 @@ const TIP_TOP_MARGIN = 16;
 const EMPTY_TOOLS: ToolCall[] = [];
 const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
 
+/** #1106：工具行的 run 归属——projection 存的 `raw_call` 是 tool/call 事件的
+ *  **verbatim 整信封拷贝**（含 run_id），归属以它对账（事件真值，与 projection
+ *  同口径）；缺失（旧数据）→ null，不猜。 */
+function toolRunId(tool: ToolCall): string | null {
+  const v = tool.raw_call?.run_id;
+  return typeof v === 'string' && v ? v : null;
+}
+
 interface Props {
   conversation: ConversationState | null;
   streaming: boolean;
@@ -95,6 +103,10 @@ interface Props {
   /** #183 面板动作。**显式动作而不是 toggle**：Esc 要的是"退出整页"而非"翻转整页"，
    *  用一个 `toggle` 表达两件事会让"连按两次 = 回到原点"这类事故无法从类型上排除。 */
   onPanelAction: (action: InspectorPanelAction) => void;
+  /** #1030：后端待裁决清单非空。与 TopBar 同源（App 的 `hasPendingDecisions`），
+   *  让 Inspector 头标与顶栏对同一会话说同一个态——#312 的先例：一个独立态不许在
+   *  一侧被粗化。**必须是稳定的原语**（memo 有效性依赖 prop 身份，见上方操作约束）。 */
+  awaitingDecision?: boolean;
 }
 
 /** #183 面板视图状态（全部**不持久化**，不变量 #22）。 */
@@ -130,7 +142,7 @@ export type InspectorPanelAction =
  * 逐项稳定性核对表、否决 `areEqual` 的理由，见
  * `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction }: Props) {
+export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction, awaitingDecision = false }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——`useMemo` 不许出现在
    * 下方任何 early-return 之后（Rules of Hooks：两次渲染的 hook 数必须一致）。
@@ -159,14 +171,29 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   // 单一走法（#190）：与中心列「输出」面共用 projection.allTools——不在本文件内再造一份。
   const tools = useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS),
     [conversation?.turns]); // eslint-disable-line react-hooks/exhaustive-deps
-  const pulse = useMemo(() => deriveRunPulse(conversation, streaming),
+  const pulse = useMemo(() => deriveRunPulse(conversation, streaming, awaitingDecision),
     [ // eslint-disable-line react-hooks/exhaustive-deps
       conversation?.run_interrupted, conversation?.run_status, conversation?.run_cancelled,
-      conversation?.active_step_id, conversation?.turns, streaming,
+      conversation?.active_step_id, conversation?.turns, streaming, awaitingDecision,
     ]);
-  // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
-  const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events) : null),
-    [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* #1106：当前聚焦 run 的归属——选中项（事件 / 工具行）自己的信封 run_id。
+   * run 级视图（无选中项）与子会话视图没有聚焦 run → null → 头标徽标回退
+   * 「取最后值」（单 run 会话展示不变）。 */
+  const focusedRunId: string | null =
+    focus.kind === 'event'
+      ? focus.event.run_id
+        ? focus.event.run_id
+        : null
+      : focus.kind === 'tool'
+        ? toolRunId(focus.tool)
+        : null;
+  // #198：生效档位（聚焦 run 携带；无聚焦 → 最后一个 run/started；旧数据 → null →「档位未知」）。
+  const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events, focusedRunId) : null),
+    [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // #1093：请求侧推理档位（聚焦 run 携带；未声明 → null，整段不渲染）。
+  const reasoningEffort = useMemo(
+    () => (conversation ? deriveReasoningEffort(conversation.events, focusedRunId) : null),
+    [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
    * filter 逐字一致——收敛成三张表后 tab 计数与列表内容同源，也顺手消掉了每次提交三次
@@ -392,11 +419,34 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* #198：生效档位徽标——读 run/started.data.agent_profile（后端 #198 起
-            总是写）；旧数据无字段时显示「档位未知」（不伪造 "main"）。 */}
-        <span className="detail-profile-badge mono num" title={`agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`}>
+        {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
+            run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
+            「档位未知」（不伪造 "main"）。title 如实标注取值范围。 */}
+        <span
+          className="detail-profile-badge mono num"
+          title={
+            focusedRunId !== null
+              ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
+              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一个 run 的生效档位）`
+          }
+        >
           {agentProfile ?? '档位未知'}
         </span>
+        {/* #1093：请求侧推理档位——#1106 起按**当前聚焦 run** 取值（无聚焦回退
+            最后一个 run/started）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
+            不伪造 "default"）。title 如实标注取值范围。 */}
+        {reasoningEffort !== null && (
+          <span
+            className="detail-effort-badge mono num"
+            title={
+              focusedRunId !== null
+                ? `reasoning_effort: ${reasoningEffort}（聚焦 run 请求侧选中的推理档位）`
+                : `reasoning_effort: ${reasoningEffort}（最近一个 run 请求侧选中的推理档位）`
+            }
+          >
+            推理 · {reasoningEffort}
+          </span>
+        )}
         {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
             （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
             （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与
@@ -495,6 +545,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onFocusTool={onFocusTool}
               onJumpToApproval={onJumpToApproval}
               selectedKey={selectedKey}
+              awaitingDecision={awaitingDecision}
             />
           )}
           {tab === 'timeline' && (
@@ -567,7 +618,7 @@ export const TOOLS_WINDOW_DEFAULT = 50;
 export const TOOLS_WINDOW_STEP = 200;
 
 export function ChatTab({
-  conversation, tools, onFocusTool, onJumpToApproval, selectedKey,
+  conversation, tools, onFocusTool, onJumpToApproval, selectedKey, awaitingDecision = false,
 }: {
   conversation: ConversationState;
   tools: ToolCall[];
@@ -579,12 +630,14 @@ export function ChatTab({
   /** #183：当前选中项身份——工具行据此标 `aria-current`（清单与详情同框后，
    *  "哪一条被选中"必须在列表里可读，否则右下方详情与列表对不上号）。 */
   selectedKey?: string | null;
+  /** #1030：与顶栏/Inspector 头标同源的待裁决事实（见 Props 同名注释）。 */
+  awaitingDecision?: boolean;
 }) {
   // Run 状态 + 时长由 lib/runState 的 deriveRunSummary 单一提供：粗标签的
   // 「取消 ≠ 失败」语义、以及「终态集合必须含 run/interrupted」这条与顶栏脉冲
   // 共用同一份判据（此处原先自己再分支一次 run_cancelled/run_status，规则一变
   // Inspector 就会与顶栏说法不一致——T8 加 run/interrupted 时正是三处集体漂移）。
-  const { label: runStatusLabel, startedAt: runStart, duration: runDuration } = deriveRunSummary(conversation);
+  const { label: runStatusLabel, startedAt: runStart, duration: runDuration } = deriveRunSummary(conversation, awaitingDecision);
   /* F2（#272）：TOOLS 段两个计数此前每次渲染各扫一遍工具表；键 = `tools`（调用方已
    * memo）。本 tab 只在 `tab === 'chat'` 时挂载，这一层省的是驻留期间的重渲染。 */
   const runningToolCount = useMemo(() => tools.filter((t) => t.status === 'running').length, [tools]);

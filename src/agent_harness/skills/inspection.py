@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from agent_harness.package_source import MAX_PACKAGE_ENTRIES, is_junction
 from agent_harness.skills.discovery import (
     SKILL_FILE_MAX_BYTES,
     parse_skill_markdown_text,
@@ -69,7 +70,6 @@ _COMMAND_EXECUTION_CONTEXT = re.compile(
     r"\b(?:run|execute|invoke|launch|install)(?:\s+the)?\s*[:=]?\s*\Z",
     re.IGNORECASE,
 )
-_MAX_PACKAGE_ENTRIES = 10_000
 _MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
 
@@ -568,24 +568,7 @@ def _within(path: Path, root: Path) -> bool:
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or _is_junction(path)
-
-
-def _is_junction(path: Path) -> bool:
-    is_junction = getattr(path, "is_junction", None)
-    if is_junction is not None and is_junction():
-        return True
-    if path.is_symlink():
-        return False
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    attributes = getattr(info, "st_file_attributes", 0)
-    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & reparse_attribute)
+    return path.is_symlink() or is_junction(path)
 
 
 def _inventory(
@@ -604,12 +587,12 @@ def _inventory(
                 entries = []
                 for entry in scan:
                     entry_count += 1
-                    if entry_count > _MAX_PACKAGE_ENTRIES:
+                    if entry_count > MAX_PACKAGE_ENTRIES:
                         _add_error(
                             errors,
                             "PACKAGE_TOO_MANY_ENTRIES",
                             ".",
-                            f"Package exceeds {_MAX_PACKAGE_ENTRIES} filesystem entries.",
+                            f"Package exceeds {MAX_PACKAGE_ENTRIES} filesystem entries.",
                         )
                         too_many_entries = True
                         break
@@ -622,7 +605,7 @@ def _inventory(
             path = Path(entry.path)
             relative = _relative(path, root)
             try:
-                if _is_junction(path):
+                if is_junction(path):
                     symlinks.append(relative)
                     _add_error(
                         errors,

@@ -196,6 +196,31 @@ class TestDeriveProgressDocument:
                    for f in doc.failures)
         assert any(f["kind"] == "guard_stuck" for f in doc.failures)
 
+    def test_compaction_failed_artifact_ref_projected_and_rendered(self, tmp_path) -> None:
+        session = _session(tmp_path)
+        session.append(
+            CONTEXT_COMPACTION_FAILED,
+            {"error_class": "provider_timeout", "artifact_ref": "art-sha-9f3a"},
+        )
+        doc = derive_progress_document(session.events, session_id=session.session_id)
+        entry = next(f for f in doc.failures if f["kind"] == "compaction_failed")
+        assert entry["artifact_ref"] == "art-sha-9f3a", "raw snapshot ref 进投影"
+        body = render_progress_markdown(
+            doc, generated_at="2026-10-04T12:00:00+00:00"
+        )
+        assert "artifact_ref=art-sha-9f3a" in body, "有 ref 时渲染出审计入口"
+
+    def test_compaction_failed_without_ref_hides_artifact_ref(self, tmp_path) -> None:
+        session = _session(tmp_path)
+        session.append(CONTEXT_COMPACTION_FAILED, {"error_class": "provider_timeout"})
+        doc = derive_progress_document(session.events, session_id=session.session_id)
+        entry = next(f for f in doc.failures if f["kind"] == "compaction_failed")
+        assert entry["artifact_ref"] is None, "无 ref 时不伪造"
+        body = render_progress_markdown(
+            doc, generated_at="2026-10-04T12:00:00+00:00"
+        )
+        assert "artifact_ref" not in body, "无 ref 时不展示该字段"
+
     def test_pending_operations_exclude_reconciled(self, tmp_path) -> None:
         session = _session(tmp_path)
         session.append(

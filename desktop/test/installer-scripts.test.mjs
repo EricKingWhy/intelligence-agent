@@ -17,6 +17,7 @@ import {
   validateLongPathPrefixes,
   validateBackupDeleteGuards,
   validateCleanupHelpers,
+  validateProcessGateGuards,
   malformedLongPathPrefixes,
   unguardedBackupDelete,
   stripNsisComments,
@@ -117,6 +118,23 @@ describe('createWindowsInstallerConfig', () => {
     const python = config.extraResources.find((r) => r.to === 'python/')
     assert.ok(python)
     assert.equal(python.from, '/tmp/fake-installer/staging/python/')
+  })
+
+  it('bundles only the MXC PSEC executable, native DLL and license', () => {
+    assert.deepEqual(
+      config.extraResources.filter((resource) => resource.to.startsWith('mxc/')),
+      [
+        {
+          from: 'node_modules/@microsoft/mxc-sdk/bin/x64/',
+          to: 'mxc/',
+          filter: ['wxc-exec.exe', 'mxc_ffi.dll'],
+        },
+        {
+          from: 'node_modules/@microsoft/mxc-sdk/LICENSE.md',
+          to: 'mxc/LICENSE.md',
+        },
+      ],
+    )
   })
 
   it('ships a space-free artifact name with version macro', () => {
@@ -235,10 +253,478 @@ describe('installer.nsh LangString guards (#831)', () => {
   })
 
   it('still declares both English and Chinese strings (no text regression)', () => {
-    for (const name of ['iaPerUserOnly', 'iaAppRunning', 'iaUpdateFailed', 'iaRollbackFailed', 'iaStaleBackup']) {
+    for (const name of [
+      'iaPerUserOnly',
+      'iaAppRunning',
+      'iaProcessCheckFailed',
+      'iaUpdateFailed',
+      'iaRollbackFailed',
+      'iaStaleBackup',
+    ]) {
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_ENGLISH\\}`))
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_SIMPCHINESE\\}`))
     }
+  })
+})
+
+describe('process gate (#914)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  const directoriesRaw = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+  // The working tree may carry CRLF (core.autocrlf=true, .gitattributes does not
+  // pin .nsh), so the anchors below are the LF form, like the teeth harnesses.
+  const eol = directoriesRaw.includes('\r\n') ? '\r\n' : '\n'
+  const directoriesNsh = directoriesRaw.replace(/\r\n/g, '\n')
+  const installerNsh = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+  const gateBody = directoriesNsh.match(/Function iaRequireNoRunningProduct([\s\S]*?)\nFunctionEnd/)?.[1] ?? ''
+
+  /** The shipped installer directory with one replacement applied to the gate. */
+  const withMutatedGate = (from, to) => {
+    assert.ok(directoriesNsh.includes(from), `fixture anchor missing: ${from}`)
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-gate-'))
+    writeFileSync(join(dir, 'installer.nsh'), installerNsh)
+    writeFileSync(
+      join(dir, 'installer-cleanup.nsh'),
+      readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
+    )
+    const mutated = directoriesNsh.replace(from, to).replace(/\n/g, eol)
+    writeFileSync(join(dir, 'installer-directories.nsh'), mutated)
+    return dir
+  }
+
+  /**
+   * Drops the in-window gate call: the four leading spaces in the literal below
+   * match that call only, never the two-space-indented one at the top of the
+   * macro. Cases that need the late call alone, or none at all, call this on
+   * top of `withMutatedGate`.
+   */
+  const withoutStagingWindowCall = (dir) => {
+    const text = readFileSync(join(dir, 'installer-directories.nsh'), 'utf8').replace(/\r\n/g, '\n')
+    const without = text.replace('    Call iaRequireNoRunningProduct\n', '')
+    assert.notEqual(without, text, 'the staging-window call was not removed')
+    return without
+  }
+
+  it('accepts the shipped gate text', () => {
+    validateProcessGateGuards(directoriesNsh, 'installer-directories.nsh')
+  })
+
+  // The measured defect the cast repairs: a single CimInstance has no synthetic
+  // Count, so the stock predicate answers "not running" for the one-process case
+  // — which is exactly the service-only update (58-…-gate.md §1.2).
+  it('refuses a classification without the forced array cast', () => {
+    const dir = withMutatedGate('@(Get-CimInstance', '(Get-CimInstance')
+    assert.throws(() => validateInstallerScripts(dir), /does not force the array cast/)
+  })
+
+  it('refuses the stock predicate tail coming back', () => {
+    const dir = withMutatedGate(
+      'if ($$iaAll.Count -eq 0) { exit 0 }',
+      'if (($$iaAll).Count -gt 0) { exit 0 }',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /stock predicate tail/)
+  })
+
+  it('refuses exit 1 as an answer (PowerShell exits 1 on its own failures)', () => {
+    const dir = withMutatedGate('exit 11', 'exit 1')
+    assert.throws(() => validateInstallerScripts(dir), /exit 1/)
+  })
+
+  it('refuses a runtime prefix without its trailing separator', () => {
+    const dir = withMutatedGate(
+      "'$iaFinalDirectory\\resources\\python\\'",
+      "'$iaFinalDirectory\\resources\\python'",
+    )
+    assert.throws(() => validateInstallerScripts(dir), /trailing separator/)
+  })
+
+  it('refuses a stop call that is not scoped to the bundled runtime', () => {
+    const dir = withMutatedGate(
+      "StartsWith('$iaFinalDirectory\\resources\\python\\','CurrentCultureIgnoreCase') } | ForEach-Object { Stop-Process",
+      "StartsWith('$iaFinalDirectory\\','CurrentCultureIgnoreCase') } | ForEach-Object { Stop-Process",
+    )
+    assert.throws(() => validateInstallerScripts(dir), /bundled runtime subdirectory/)
+  })
+
+  it('refuses a stage that never calls the gate', () => {
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    // #1066 gave the macro a second, in-window call: both call sites have to go
+    // for this case to mean what its name says.
+    const both = withoutStagingWindowCall(dir)
+    writeFileSync(join(dir, 'installer-directories.nsh'), both.replace(/\n/g, eol))
+    assert.throws(() => validateInstallerScripts(dir), /does not call the gate/)
+  })
+
+  it('refuses a gate call that runs after the backup pointer or the rename', () => {
+    // The pointer must not be armed when the gate refuses: .onGUIEnd and
+    // iaRollbackApplication read a non-empty IaBackupDir as "the install
+    // section started" and would roll a good installation back.
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    // Both call sites go (#1066 added the in-window one): this case pins the
+    // placement rule, so the late call has to be the only one left.
+    const withoutCalls = withoutStagingWindowCall(dir)
+    const moved = withoutCalls.replace(
+      '    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
+      '    Call iaRequireNoRunningProduct\n    ClearErrors\n    Rename $INSTDIR $iaBackupDirectory',
+    )
+    assert.notEqual(moved, withoutCalls, 'the call was not moved back')
+    writeFileSync(join(dir, 'installer-directories.nsh'), moved.replace(/\n/g, eol))
+    assert.throws(() => validateInstallerScripts(dir), /gate runs after the backup pointer/)
+  })
+
+  it('refuses a stage that never re-checks for a running product in the staging window', () => {
+    // #1066: the call at the top of the macro runs before the staging branch,
+    // so a runtime that starts while the installer is staging is never
+    // classified. A headless service does not block the directory rename
+    // (#914 section 1.3), so the update lands and leaves the old process
+    // answering clients out of the `<dir>.old-<guid>` tree (ADR-0053).
+    const dir = withMutatedGate('    Call iaRequireNoRunningProduct\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /never re-checked inside the staging window/)
+  })
+
+  it('refuses a staging window whose working directory is never released', () => {
+    // The re-check spawns a child that inherits the current directory, so the
+    // anchor is load-bearing: without it the call could run while $INSTDIR is
+    // still the working directory.
+    const dir = withMutatedGate('    SetOutPath $TEMP\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /never releases the working directory/)
+  })
+
+  it('refuses a staging-window test hook that is not compiled out', () => {
+    // The hold is a test affordance, so it must stay inside its !ifdef — an
+    // unconditional write would ship a registry value that no production
+    // install ever reads.
+    const dir = withMutatedGate('    !ifdef IA_TEST_HOLD_STAGE_WINDOW\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /not compiled out/)
+  })
+
+  it('refuses a gate call that runs only when the app executable is present', () => {
+    // The damaged-install case (#914 review Axis A, ruled a must-fix): the
+    // `${If} $iaProbeFound == "1"` branch skips staging entirely when the app
+    // exe is gone, so a call placed inside it never classified a live bundled
+    // service — and the stock section installed straight over that directory.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  ${If} $iaProbeFound == "1"\n    Call iaRequireNoRunningProduct\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /first mention of \$iaProbeFound/)
+  })
+
+  it('refuses a gate call that a re-spelled app-executable branch moves behind it', () => {
+    // #1074: the rule anchors the *variable*, not one spelling of the branch, so
+    // the same defect written as a raw `StrCmp` no longer slips past it. The
+    // literal anchor this replaces let the re-spelled branch through untouched.
+    const dir = withMutatedGate(
+      '  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+      '  StrCmp $iaProbeFound "1" 0 +2\n  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /first mention of \$iaProbeFound/)
+  })
+
+  it('refuses a refusal that neither exits nor keeps the unknown case apart', () => {
+    const dir = withMutatedGate(
+      '  SetErrorLevel 2\n  Quit\nFunctionEnd\n\n; Existence probe for a path',
+      '  Return\nFunctionEnd\n\n; Existence probe for a path',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /no longer exits with a non-zero error level/)
+  })
+
+  it('keeps every answer but a proven "0" a refusal with a message (fail-closed)', () => {
+    assert.match(gateBody, /\$\{If\} \$iaRunningProduct == "0"[\s\S]{0,160}Return/)
+    assert.match(gateBody, /\$\(iaAppRunning\)/)
+    assert.match(gateBody, /\$\(iaProcessCheckFailed\)/)
+    const abort = gateBody.lastIndexOf('SetErrorLevel 2')
+    assert.ok(abort >= 0 && /\bQuit\b/.test(gateBody.slice(abort)), 'the refusal must exit non-zero')
+    // The client is refused, never killed: every Stop-Process in code (comments
+    // are not code — the gate's own prose says "Stop-Process" too) stays inside
+    // the bundled runtime subdirectory.
+    for (const line of stripNsisComments(gateBody).split('\n')) {
+      if (/Stop-Process/i.test(line)) {
+        assert.ok(
+          line.includes("StartsWith('$iaFinalDirectory\\resources\\python\\'"),
+          `unscoped Stop-Process: ${line.trim()}`,
+        )
+      }
+    }
+  })
+
+  it('stops the same runtime subdirectory the shell runs (installer/paths.ts)', () => {
+    // <install>\resources\python is Electron's <resourcesPath>\python; if either
+    // side moves the runtime, the installer would stop nothing (or the shell
+    // would run a directory the gate never clears).
+    const paths = readFileSync(join(installerDir, '..', 'src', 'installer', 'paths.ts'), 'utf8')
+    // TypeScript source, so the separator is written twice in the literal.
+    assert.match(paths, /resourcesPath\}\\\\python\\\\python\.exe/, 'shell runtime path moved')
+    assert.ok(directoriesNsh.includes("'$iaFinalDirectory\\resources\\python\\'"), 'gate runtime prefix moved')
+  })
+})
+
+describe('process gate call site (#1078)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  const installerNsh = readFileSync(join(installerDir, 'installer.nsh'), 'utf8').replace(/\r\n/g, '\n')
+  const directoriesRaw = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+  const eol = directoriesRaw.includes('\r\n') ? '\r\n' : '\n'
+
+  /** The shipped installer directory with one replacement applied to installer.nsh. */
+  const withMutatedInstallerNsh = (from, to) => {
+    assert.ok(installerNsh.includes(from), `fixture anchor missing: ${from}`)
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-callsite-'))
+    writeFileSync(join(dir, 'installer-directories.nsh'), directoriesRaw)
+    writeFileSync(
+      join(dir, 'installer-cleanup.nsh'),
+      readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
+    )
+    writeFileSync(join(dir, 'installer.nsh'), installerNsh.replace(from, to).replace(/\n/g, eol))
+    return dir
+  }
+
+  it('accepts the shipped call site', () => {
+    validateInstallerScripts(installerDir)
+  })
+
+  it('refuses a customInit that inverts the recovery frame', () => {
+    // #1078: inverting the frame skips staging and the process gate together, so
+    // a normal install runs the stock section over a live installation — while
+    // every rule that reads installer-directories.nsh stays green.
+    const dir = withMutatedInstallerNsh(
+      '${If} $iaRecoveryPending != "1"',
+      '${If} $iaRecoveryPending == "1"',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /process gate call site/)
+  })
+
+  it('refuses a customInit that drops the recovery frame', () => {
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  !insertmacro iaStageApplication\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /process gate call site/)
+  })
+
+  it('refuses a customInit that no longer stages the application', () => {
+    const dir = withMutatedInstallerNsh('  !insertmacro iaStageApplication\n', '')
+    assert.throws(() => validateInstallerScripts(dir), /no longer stages the application/)
+  })
+
+  it('accepts a nested conditional inside the frame (the close is found by depth)', () => {
+    // The first `${EndIf}` after the frame's opening is not necessarily the
+    // frame's own: a nested block before the insert supplies one, and reading it
+    // as the frame's close would reject a call that is plainly inside the frame.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n    ${EndIf}\n    !insertmacro iaStageApplication\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('refuses a customInit that stages only on the recovery branch', () => {
+    // The #1078 defect inverted: an insert on the frame's `${Else}` side runs
+    // staging — and the gate — only while a previous install is mid-recovery.
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n  ${Else}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /positive branch/)
+  })
+
+  it('refuses a customInit that stages twice', () => {
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n  !insertmacro iaStageApplication\n',
+    )
+    assert.throws(() => validateInstallerScripts(dir), /stages the application 2 times/)
+  })
+
+  it('accepts a nested block inside the frame, including its own divider', () => {
+    // The insert has to sit on the frame's positive branch; a nested `${If}`
+    // with its own `${Else}` divides that block, not the frame, and leaves the
+    // insert exactly where it belongs. The first cut of the rule scanned the
+    // span for any divider and rejected this (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${If} $0 == ""\n      DetailPrint "no previous install"\n    ${Else}\n      DetailPrint "previous install present"\n    ${EndIf}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
+  })
+
+  it('accepts a nested switch inside the frame', () => {
+    // `${Case}` divides a `${Switch}`, never an `${If}`: it must not read as the
+    // frame changing branches (#1078 review, measured).
+    const dir = withMutatedInstallerNsh(
+      '  ${If} $iaRecoveryPending != "1"\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+      '  ${If} $iaRecoveryPending != "1"\n    ${Switch} $0\n      ${Case} "1"\n        DetailPrint "one"\n        ${Break}\n    ${EndSwitch}\n    !insertmacro iaStageApplication\n  ${EndIf}\n',
+    )
+    validateInstallerScripts(dir)
+  })
+})
+
+describe('rollback install-directory probe (#1023)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('uses the shared long-path helper before reading install-directory attributes', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const input = rollback.indexOf('StrCpy $iaPlainPath "$iaFinalDirectory"')
+    const helper = rollback.indexOf('Call iaBuildLongPath')
+    const target = rollback.indexOf('StrCpy $0 "$iaDeleteTarget"', helper)
+    const attributes = rollback.indexOf("System::Call 'kernel32::GetFileAttributes(t r0)i.r1 ?e'", target)
+
+    assert.ok(input >= 0, 'rollback must pass the install directory to iaBuildLongPath')
+    assert.ok(helper > input, 'rollback must build the long-path form before probing')
+    assert.ok(target > helper, 'GetFileAttributes must receive the path produced by the helper')
+    assert.ok(attributes > target, 'the attribute query must follow the helper output')
+  })
+})
+
+describe('long-path app executable detection (#1045)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('routes recovery, stage, and promote through the shared existence probe', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const bodyBetween = (start, end) => {
+      const startAt = source.indexOf(start)
+      assert.ok(startAt >= 0, 'missing block: ' + start)
+      const bodyStart = startAt + start.length
+      const endAt = source.indexOf(end, bodyStart)
+      assert.ok(endAt >= 0, 'missing block end: ' + end)
+      return source.slice(bodyStart, endAt)
+    }
+    const recovery = bodyBetween('!macro iaRecoverInterruptedInstall', '!macroend')
+    const stage = bodyBetween('!macro iaStageApplication', '!macroend')
+    const promote = bodyBetween('Function iaPromoteApplication', 'FunctionEnd')
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+
+    const assertProbe = (body, name, condition) => {
+      const input = body.indexOf(appPath)
+      const call = body.indexOf('Call iaProbePath', input)
+      const guard = body.indexOf('$' + '{If} $iaProbeFound ' + condition, call)
+
+      assert.ok(input >= 0, name + ' does not pass the app path to iaProbePath')
+      assert.ok(call > input && call - input < 160, name + ' does not call iaProbePath for the app path')
+      assert.ok(guard > call, name + ' does not branch on the probe result')
+      // Nothing but the #914 process gate may sit between the probe and the
+      // branch. A character bound would have to be widened for the gate call
+      // (plus its prose), which would weaken the check for the two bodies that
+      // carry no call at all — so the distance is asserted as a statement list.
+      const between = body
+        .slice(call + 'Call iaProbePath'.length, guard)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith(';'))
+      assert.deepEqual(
+        between.filter((line) => line !== 'Call iaRequireNoRunningProduct'),
+        [],
+        name + ' runs something else between the probe and the branch: ' + between.join(' | '),
+      )
+      assert.doesNotMatch(body, /FileExists.*APP_EXECUTABLE_FILENAME/)
+    }
+
+    assertProbe(recovery, 'recovery', '!= "1"')
+    assertProbe(stage, 'stage', '== "1"')
+    assertProbe(promote, 'promote', '== "1"')
+  })
+})
+
+describe('interrupted installer recovery choices (#915)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('clears the consumed leftover pointer after rollback restores the backup (#1040)', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restored = rollback.match(/\$\{Else\}\s*StrCpy \$iaRollbackStatus "restored"([\s\S]*?)!insertmacro iaClearBackupDir/)?.[1] ?? ''
+
+    assert.match(
+      restored,
+      /!insertmacro iaReadLeftoverDir[\s\S]*?\$\{If\} \$iaLeftoverDirectory == \$iaBackupDirectory[\s\S]*?DeleteRegValue HKCU "\$\{INSTALL_REGISTRY_KEY\}" "IaLeftoverDir"[\s\S]*?\$\{EndIf\}/,
+    )
+  })
+
+  it('defers recovery to explicit buttons and keeps the backup armed on cancel', () => {
+    const installer = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+    const directories = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const recovery = directories.match(/!macro iaRecoverInterruptedInstall([\s\S]*?)!macroend/)?.[1] ?? ''
+    const page = directories.match(/Function iaRecoveryPageCreate([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const pageLeave = directories.match(/Function iaRecoveryPageLeave([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const restoreClick = directories.match(/Function iaRecoveryRestoreClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const freshClick = directories.match(/Function iaRecoveryFreshClick([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const guiEnd = directories.match(/Function \.onGUIEnd([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+
+    assert.match(installer, /Page custom iaRecoveryPageCreate iaRecoveryPageLeave/)
+    assert.match(recovery, /StrCpy \$iaRecoveryPending "1"/)
+    assert.doesNotMatch(recovery, /MessageBox MB_YESNO/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaRestorePrevious\)/)
+    assert.match(page, /NSD_CreateButton[^\r\n]*\$\(iaContinueFresh\)/)
+    assert.match(pageLeave, /StrCmp \$iaRecoveryChoice "continue"[\s\S]*?StrCmp \$iaRecoveryChoice "restore"[\s\S]*?Abort/)
+    assert.match(pageLeave, /Call iaContinueInterruptedFresh/)
+    assert.match(pageLeave, /Call iaRollbackApplication[\s\S]*?quitSuccess/)
+    assert.match(restoreClick, /StrCpy \$iaRecoveryChoice "restore"[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.match(freshClick, /StrCpy \$iaRecoveryChoice "continue"[\s\S]*?ShowWindow \$0 \$\{SW_SHOW\}[\s\S]*?SendMessage \$0 \$\{BM_CLICK\}/)
+    assert.doesNotMatch(restoreClick + freshClick, /Call iaRollbackApplication|Call iaContinueInterruptedFresh|\bQuit\b|quitSuccess/)
+    assert.match(guiEnd, /iaRecoveryPending == "1"[\s\S]*?Return/)
+  })
+})
+
+describe('R3 recovery driver failure assertions (#1037)', () => {
+  it('shares failure-prompt acknowledgement and guards timed-out exit-code reads', () => {
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+
+    assert.equal((driver.match(/Acknowledge-RecoveryFailurePrompt \$failurePrompt/g) ?? []).length, 2)
+    assert.match(driver, /function Acknowledge-RecoveryFailurePrompt[\s\S]*?Invoke-Button \$prompt[\s\S]*?Assert \$assertionName/)
+    assert.match(
+      driver,
+      /WaitForExit\(15000\)\s*\$recoveryExited = \$recoveryProcess\.HasExited\s*\$recoveryExitCode = if \(\$recoveryExited\) \{ \$recoveryProcess\.ExitCode \} else \{ 'still running' \}/,
+    )
+    assert.match(driver, /\[switch\]\$LeaveFailurePromptOpen/)
+    assert.match(driver, /if \(\$LeaveFailurePromptOpen\) \{[\s\S]*?Log .*leaving recovery failure prompt open/)
+  })
+})
+
+describe('interrupted installer recovery journal (#1035)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('keeps the backup pointer armed through continued installation until promotion', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const stage = source.match(/!macro iaStageApplication([\s\S]*?)!macroend/)?.[1] ?? ''
+    const arm = stage.indexOf('!insertmacro iaStashBackupDir')
+    const rename = stage.indexOf('Rename $INSTDIR $iaBackupDirectory')
+    const armError = stage.indexOf('${If} ${Errors}', arm)
+    assert.ok(arm >= 0 && arm < rename, 'backup recovery pointer must be written before the directory move')
+    assert.ok(armError > arm && armError < rename, 'a failed pointer write must stop before the directory move')
+    assert.match(stage.slice(armError, rename), /SetErrorLevel 2[\s\S]*?Quit/)
+
+    const continueFresh = source.match(/Function iaContinueInterruptedFresh([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const record = continueFresh.indexOf('WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory')
+    const recordError = continueFresh.indexOf('${If} ${Errors}', record)
+    assert.ok(record >= 0 && recordError > record, 'leftover recording must be checked before continuing')
+    assert.match(continueFresh.slice(recordError), /SetErrorLevel 2[\s\S]*?Quit/)
+    assert.doesNotMatch(continueFresh, /iaClearBackupDir/, 'the old version stays recoverable until the fresh installation commits')
+
+    const promote = source.match(/Function iaPromoteApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    const appPath = 'StrCpy $iaPlainPath "$INSTDIR\\' + '$' + '{APP_EXECUTABLE_FILENAME}"'
+    const appProbe = promote.indexOf(appPath)
+    const appProbeCall = promote.indexOf('Call iaProbePath', appProbe)
+    const appGuard = promote.indexOf('$' + '{If} $iaProbeFound == "1"', appProbeCall)
+    const clearBackup = promote.indexOf('!insertmacro iaClearBackupDir', appProbeCall)
+    assert.ok(
+      appProbe >= 0 && appProbeCall > appProbe && appGuard > appProbeCall && appGuard < clearBackup,
+      'promote must decide whether the installed executable exists through iaProbePath before clearing the backup pointer',
+    )
+    assert.match(promote, /iaReadLeftoverDir\s+StrCmp \$iaLeftoverDirectory \$iaBackupDirectory iaPromoteBackupAlreadyLeftover/)
+    assert.match(promote, /iaPromoteBackupAlreadyLeftover:[\s\S]*?iaClearBackupDir/)
+
+    const testBuild = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const driver = readFileSync(new URL('./harness/r1-drivers/drive-r3-recovery.ps1', import.meta.url), 'utf8')
+    assert.match(testBuild, /IA_TEST_INJECT_RECOVERY_METADATA_FAILURES/)
+    assert.match(driver, /FailLeftoverRecord[\s\S]*?leftover_failure_backup_pointer_preserved/)
+  })
+})
+
+describe('Windows installer test shortcuts (#1034)', () => {
+  it('disables desktop and Start Menu shortcuts for isolated test installs', () => {
+    const source = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
+    const nsis = source.match(/nsis:\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? ''
+
+    assert.match(nsis, /createDesktopShortcut:\s*false/)
+    assert.match(nsis, /createStartMenuShortcut:\s*false/)
   })
 })
 
@@ -1320,10 +1806,12 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     )
     const lines = body.map((line) => line.trim()).filter((line) => line !== '')
     const del = lines.findIndex((line) => /^RMDir\s+\/r\b/.test(line))
-    const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
+    const read = lines.findLastIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
     const plain = lines.findIndex((line) => /^StrCpy\s+\$iaPlainPath\s+"\$iaLeftoverDirectory"$/.test(line))
-    const probe = lines.findIndex((line) => /^Call\s+iaProbePath\b/.test(line))
-    const guarded = lines.findIndex((line) => /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line))
+    const probe = lines.findIndex((line, index) => index > plain && /^Call\s+iaProbePath\b/.test(line))
+    const guarded = lines.findIndex(
+      (line, index) => index > probe && /^\$\{If\}\s+\$iaProbeFound\s+!=\s+"1"$/.test(line),
+    )
     const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
     const clear = lines.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
     for (const [name, index] of [
@@ -1381,7 +1869,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // Exactly one probe and one drop: a second probe site would be a second
     // guess about the same record, and a second drop a second guess about when
     // it is gone.
-    const probes = lines.filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
+    const probes = lines.slice(plain).filter((line) => /^Call\s+iaProbePath\b/.test(line)).length
     assert.equal(probes, 1, 'the promote body probes the leftover record more than once')
     const drops = lines.filter((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line)).length
     assert.equal(drops, 1)

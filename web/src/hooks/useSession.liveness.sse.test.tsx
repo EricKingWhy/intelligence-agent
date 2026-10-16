@@ -30,6 +30,8 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     listSessions: vi.fn(async () => []),
     getSessionEvents: vi.fn(async () => []),
+    // #1030：主动待裁决读面（空清单）——本文件测的是接流/审批等待。
+    getSessionRecovery: vi.fn(async () => []),
     listSessionQueue: vi.fn(async () => ({ items: [], steers: [] })),
     // 排队回执（2xx + JSON）⇒ ack 分支接流——审批等待期的入口场景。
     sendMessage: vi.fn(async () =>

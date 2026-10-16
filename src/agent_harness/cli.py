@@ -25,11 +25,13 @@ import os
 import re
 import sys
 import threading
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from agent_harness.agent import AgentEvent
@@ -72,7 +74,11 @@ from agent_harness.instance_lock import (
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+    warn_unadopted_catalog_entries,
+)
 from agent_harness.model.failure import PROVIDER_FAILURE_MESSAGES
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
@@ -1369,6 +1375,9 @@ async def run(
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
         # （ingest_document 的 sandbox 解析）需要可信 session id。
         session_token = memory_session_var.set(session.session_id)
+        # #1055：**交付点**——CLI `run` 不经 RunManager，直接把下面这枚聚合交给
+        # `runtime.run_stream`，故在此显式标记，撞号才吃 resync 重投。
+        session.deliver_to_runtime()
         emit = write if write is not None else sys.stdout.write
         renderer = StreamRenderer(emit)
         final_text = ""
@@ -1464,6 +1473,9 @@ def main() -> None:
     # 先配日志再取锁：逃生门降级时那条 WARNING 才落得进 agent.jsonl（AC7）。
     # setup_logging 幂等（子命令内重复调用只清一次 handlers）。
     setup_logging(settings.log_level, settings.workspace_dir)
+    # #1094：启动期反馈——AGENT_MODELS 中因 provider 与已知链不一致而不会被采纳的
+    # 条目发一条 warning。只反馈、不阻断启动（坏 catalog 由本函数记 warning 后返回）。
+    warn_unadopted_catalog_entries(settings)
     try:
         lock = InstanceLock(settings.workspace_dir).acquire()
     except InstanceLockError as error:
@@ -1820,6 +1832,15 @@ def _main_plugins(argv: list[str]) -> None:
 
     mcp_list = mcp_commands.add_parser("list", help="list installed, selected, and pending MCP packages")
     add_mcp_scope(mcp_list)
+
+    for command, help_text in (
+        ("login", "authorize an OAuth-enabled HTTP MCP server"),
+        ("logout", "clear local OAuth credentials and try remote revocation"),
+        ("status", "show OAuth credential state for an MCP server"),
+    ):
+        auth_parser = mcp_commands.add_parser(command, help=help_text)
+        auth_parser.add_argument("server_name")
+        auth_parser.add_argument("--project", help="project workspace (default: this one)")
     args = parser.parse_args(argv)
 
     settings = Settings()
@@ -1976,7 +1997,57 @@ def _main_plugins(argv: list[str]) -> None:
         raise SystemExit(2) from error
 
 
+def _resolve_mcp_oauth_server(
+    settings: Settings,
+    server_name: str,
+    *,
+    parse_capabilities_config: Callable[..., Any],
+    parse_mcp_servers: Callable[..., Any],
+    manager_factory: Callable[[str], Any],
+) -> Any:
+    from agent_harness.plugins.mcp_package_manager import MCPPackageError
+
+    capabilities = parse_capabilities_config(getattr(settings, "capabilities", None))
+    mcp_config = capabilities.get("mcp")
+    configured = (
+        parse_mcp_servers(mcp_config.options)
+        if mcp_config is not None and mcp_config.enabled
+        else []
+    )
+    matches = [server for server in configured if server.name == server_name and server.enabled]
+    if matches:
+        server = matches[0]
+        if server.transport != "http" or server.oauth is None:
+            raise MCPPackageError(f"MCP server {server_name!r} does not declare HTTP OAuth settings")
+        return server
+
+    project_manager = manager_factory("project")
+    packaged = project_manager.selected_servers(
+        apply_pending=False,
+        reserved_server_names={server.name for server in configured},
+    )
+    matches = [server for server in packaged if server.name == server_name and server.enabled]
+    if not matches:
+        raise MCPPackageError(f"MCP server {server_name!r} is not configured or selected for this project")
+    if len(matches) > 1:
+        raise MCPPackageError(f"MCP server name {server_name!r} is ambiguous")
+    server = matches[0]
+    if server.transport != "http" or server.oauth is None:
+        raise MCPPackageError(f"MCP server {server_name!r} does not declare HTTP OAuth settings")
+    return server
+
+
 def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
+    from agent_harness.capability.base import CapabilityError
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.mcp.client import MCPServerConnection, MCPServerDownError
+    from agent_harness.mcp.config import ConfigError, parse_mcp_servers
+    from agent_harness.mcp.oauth import (
+        OAuthCredentialError,
+        logout_mcp_oauth,
+        make_oauth_token_storage,
+        oauth_redirect_uri,
+    )
     from agent_harness.plugins.mcp_package_manager import (
         MCPPackageError,
         MCPPackageManager,
@@ -1994,6 +2065,90 @@ def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
         )
 
     try:
+        if args.mcp_command in {"login", "logout", "status"}:
+            server = _resolve_mcp_oauth_server(
+                settings,
+                args.server_name,
+                parse_capabilities_config=parse_capabilities_config,
+                parse_mcp_servers=parse_mcp_servers,
+                manager_factory=manager_for,
+            )
+            storage = make_oauth_token_storage(server)
+            if args.mcp_command == "status":
+                tokens = asyncio.run(storage.get_tokens())
+                if tokens is None:
+                    status = "needs_login"
+                elif tokens.expires_in is not None and tokens.expires_in <= 0 and tokens.refresh_token:
+                    status = "refresh_needed"
+                elif tokens.expires_in is not None and tokens.expires_in <= 0:
+                    status = "expired"
+                else:
+                    status = "token_stored"
+                print(json.dumps({
+                    "server": server.name,
+                    "status": status,
+                    "scope": tokens.scope if tokens is not None else None,
+                    "expires_in": tokens.expires_in if tokens is not None else None,
+                }, ensure_ascii=False))
+                return
+            if args.mcp_command == "logout":
+                result = asyncio.run(logout_mcp_oauth(storage))
+                print(json.dumps({"server": server.name, **result}, ensure_ascii=False))
+                if result["remote_revoke"] == "failed":
+                    raise SystemExit(1)
+                return
+
+            async def open_authorization(url: str) -> None:
+                try:
+                    opened = webbrowser.open(url)
+                except (webbrowser.Error, OSError):
+                    opened = False
+                if not opened:
+                    print(f"Open this authorization URL in a browser:\n{url}")
+                else:
+                    print("Complete authorization in the browser. If it cannot reach localhost, paste its final redirect URL here.")
+
+            async def read_callback():
+                from mcp.client.auth.exceptions import OAuthFlowError
+                from mcp.shared.auth import AuthorizationCodeResult
+
+                pasted = await asyncio.to_thread(input, "Paste the full OAuth callback URL: ")
+                expected = urlsplit(oauth_redirect_uri(server))
+                actual = urlsplit(pasted.strip())
+                if (actual.scheme, actual.hostname, actual.port, actual.path) != (
+                    expected.scheme, expected.hostname, expected.port, expected.path
+                ):
+                    raise OAuthFlowError("OAuth callback URL does not match the configured loopback redirect")
+                query = parse_qs(actual.query, keep_blank_values=True)
+
+                def one(name: str) -> str | None:
+                    values = query.get(name, [])
+                    if len(values) > 1:
+                        raise OAuthFlowError(f"OAuth callback has duplicate {name} values")
+                    return values[0] if values else None
+
+                if one("error") is not None:
+                    raise OAuthFlowError("Authorization was denied or failed at the authorization server")
+                code = one("code")
+                if not code:
+                    raise OAuthFlowError("OAuth callback did not contain an authorization code")
+                return AuthorizationCodeResult(code=code, state=one("state"), iss=one("iss"))
+
+            connection = MCPServerConnection(
+                server,
+                oauth_redirect_handler=open_authorization,
+                oauth_callback_handler=read_callback,
+            )
+
+            async def login() -> None:
+                try:
+                    await connection.connect()
+                finally:
+                    await connection.aclose()
+
+            asyncio.run(login())
+            print(json.dumps({"server": server.name, "status": "connected"}, ensure_ascii=False))
+            return
         if args.mcp_command == "install":
             record = manager_for(args.scope).install(args.source, package_id=args.package_id)
             print(json.dumps({"package_id": args.package_id or Path(args.source).name, **record},
@@ -2069,7 +2224,8 @@ def _main_mcp_plugins(args: argparse.Namespace, settings: Settings) -> None:
                     ),
                 }, ensure_ascii=False, indent=2))
             return
-    except (MCPPackageError, SkillPackageError, OSError) as error:
+    except (CapabilityError, ConfigError, MCPPackageError, OAuthCredentialError,
+            MCPServerDownError, SkillPackageError, OSError, ValueError) as error:
         _emit_stderr(str(error))
         raise SystemExit(2) from error
 

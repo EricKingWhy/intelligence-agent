@@ -16,6 +16,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
 | `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
+| `GET /api/sessions/{id}/recovery`（#1049 追加，只读） | InvalidSessionId, SessionNotFound, EventLogCorruptError |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
 | `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |

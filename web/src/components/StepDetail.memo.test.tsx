@@ -320,7 +320,7 @@ describe('F2 — 反例守卫（记忆化的键是输入，不是"永不重渲�
     expect(counts().all).toBeGreaterThan(before);
   });
 
-  it('点 Timeline 行：`focus` 换引用 ⇒ 重渲染并渲染出选中详情；轮次派生不重算', () => {
+  it('点 Timeline 行：`focus` 换引用 ⇒ 重渲染并渲染出选中详情；聚焦带 run_id 的事件时 profile 派生重算（#1106）、轮次派生不重算', () => {
     render(<InspectorHost conversation={seed()} tick={0} />);
     const before = counts();
     expect(container!.querySelector('.detail-peek')).toBeNull(); // 未选中 ⇒ 无详情区
@@ -332,8 +332,12 @@ describe('F2 — 反例守卫（记忆化的键是输入，不是"永不重渲�
     expect(peek).not.toBeNull();
     expect(peek!.getAttribute('data-peek')).toBe('on'); // 详情真的可见（"点了有反应"）
     expect(peek!.textContent).toContain('选中项详情');
-    // 而轮次派生一次都没重算：`focus` 不是它们的键（这是收窄 AC3 想要的那层收益）。
-    expect(counts()).toEqual(before);
+    // #1106：聚焦事件带信封 run_id ⇒ focusedRunId 变化 ⇒ 头标档位徽标必须重算
+    // （徽标跟随聚焦 run，这正是本票要的行为）；allTools / 脉冲仍不重算——
+    // focus 不是它们的键（收窄 AC3 的那层收益对它们依然成立）。
+    expect(counts().all).toBe(before.all);
+    expect(counts().pulse).toBe(before.pulse);
+    expect(counts().profile).toBe(before.profile + 1);
   });
 
   it('面板动作换 `panel` 引用 ⇒ 重渲染并反映到 DOM；轮次派生不重算', () => {
