@@ -897,6 +897,9 @@ async def build_runtime(
             max_depth=root_max_depth,
             max_delegations=root_max_delegations,
             delegation_ledger=stores.delegation_tree_ledger,
+            # #1192（#1176 Phase 3）：子会话约束继承集供给器（项目/全局 active +
+            # 会话级 active 授权）。独立于 memory v2（同 #1191）。
+            constraint_inheritance=_build_constraint_inheritance_provider(settings),
         )
 
     def _render_runtime_context() -> str:
@@ -1088,6 +1091,39 @@ def _build_scoped_fact_provider(settings: Settings) -> Any:
             derive_protected_facts(events),
             session_id=session_id,
             project_key=project_key,
+        )
+
+    return provider
+
+
+def _build_constraint_inheritance_provider(settings: Settings) -> Any:
+    """#1192（#1176 Phase 3）：子会话约束继承集供给器（闭包）。
+
+    给定**父会话事件** + `omit_constraints`，返回继承集快照（项目/全局 active +
+    会话级 active 授权 + 未继承的会话专属事实）。项目键与 #1191 同一取用口径
+    （`effective_project_key`：持久化键优先、缺失回落现场 cwd），避免"面板/注入"
+    之间出现第二把尺子。独立于 memory v2（用户裁决 Fork 2 = A）。
+    """
+    from agent_harness.multiagent.constraint_inheritance import compute_inheritance
+    from agent_harness.session.cwd import session_cwd
+    from agent_harness.session.scoped_constraints import (
+        ScopedConstraintStore,
+        effective_project_key,
+    )
+    from agent_harness.storage.sqlite import read_session_project_key
+
+    store = ScopedConstraintStore(Path(settings.workspace_dir) / "constraints")
+    db_path = Path(settings.workspace_dir) / "harness.db"
+
+    def provider(events: list[Any], omit_constraints: bool) -> Any:
+        if not events:
+            return None
+        session_id = events[0].session_id
+        persisted = read_session_project_key(db_path, session_id)
+        project_key = effective_project_key(persisted, session_cwd(events))
+        return compute_inheritance(
+            events, store=store, project_key=project_key,
+            session_id=session_id, omit_constraints=omit_constraints,
         )
 
     return provider

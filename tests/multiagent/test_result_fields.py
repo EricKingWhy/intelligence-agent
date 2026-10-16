@@ -171,6 +171,7 @@ class TestResultFieldsEndToEnd:
         result = await tool.execute(type("_A", (), {
             "target": "coding", "task": "写文件", "constraints": [],
             "output_schema": None,
+            "omit_constraints": False,
         })())
 
         payload = json.loads(result.data["output"])
@@ -208,6 +209,7 @@ class TestSummaryOverflow:
         result = await tool.execute(type("_A", (), {
             "target": "coding", "task": "x", "constraints": [],
             "output_schema": None,
+            "omit_constraints": False,
         })())
         payload = json.loads(result.data["output"])
         assert len(payload["summary"]) < 500, "未配 store：截断控制上下文成本"
@@ -226,6 +228,7 @@ class TestSummaryOverflow:
         result = await tool.execute(type("_A", (), {
             "target": "coding", "task": "x", "constraints": [],
             "output_schema": None,
+            "omit_constraints": False,
         })())
         payload = json.loads(result.data["output"])
         assert len(payload["summary"]) == 500, "全文交由父侧 artifact 管线"
@@ -236,6 +239,7 @@ class TestSummaryOverflow:
         result = await tool.execute(type("_A", (), {
             "target": "coding", "task": "x", "constraints": [],
             "output_schema": None,
+            "omit_constraints": False,
         })())
         payload = json.loads(result.data["output"])
         assert payload["summary"] == "短摘要"

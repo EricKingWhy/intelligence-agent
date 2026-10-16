@@ -90,6 +90,7 @@ class AgentFactory:
         grantable: frozenset[str] | set[str],
         session_budget: SessionBudgetPort | None = None,
         workspace: str | None = None,
+        inherited_facts: list[Any] | None = None,
     ) -> AgentRuntime:
         """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。
 
@@ -169,4 +170,7 @@ class AgentFactory:
             stuck_evidence=delegated_child_evidence_port(spec.name, workspace=workspace),
             # `#524`：子与父同一完成门策略面（不变量 #19 的同一 Loop 语义）。
             completion_policy=self._completion_policy,
+            # #1192：继承的约束/授权（#1176 Phase 3）——子 agent 的 ContextBuilder
+            # 经它注入（scoped_fact_provider），不动子事件流（票面 §四.3）。
+            inherited_facts=inherited_facts,
         )

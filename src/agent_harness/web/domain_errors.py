@@ -129,6 +129,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProjectKeyUnavailable,
     ProtectedFactNotFound,
@@ -207,6 +208,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # handler 的 `except ActiveRunConflict` 天然覆盖，无需改动端点。
     CompactionInProgress: 409,
     CompactionConcurrentWrite: 409,
+    # #1197 项 3：会话里没有可压缩的早期内容——压缩的**类型化拒绝**。同为 409
+    # 但成因与上面两条相反：那两条是"有人同时在动"，这条是"确实没东西可压"
+    # （故刻意不继承 ActiveRunConflict）。三态契约（压缩中 / 被拒 / 失败）要求
+    # 它与"摘要校验失败"可区分：前端据 `reason="no_early_turns"` 显示
+    # "没有可压缩的早期内容"，而不是把它当成一次压缩失败。
+    NoCompactableEarlyTurn: 409,
     # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
     # 过期、run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗。请求形状
     # 合法（那是 422 的 T3 档），是**状态对不上**，且判定在任何落盘之前发生。
