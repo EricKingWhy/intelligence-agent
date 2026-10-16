@@ -14,12 +14,12 @@
  *  夹具形状与 `recovery-w13.spec.ts` 同源（`pending_decisions` 逐字段对齐后端
  *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。
  *
- *  ⚠ 本文件是 **4 条** `test()`（前三条：一并断言上面三件事 / 锁「裁决能落定」/
- *  对照组「受理成功才清空」；第四条是 #1148 的窗外迟到失败回填）；Playwright 每例跑
- *  两个视口 ⇒ 报告里是 **8 个 run**。别把「8」读成 8 条用例（独立审查两次记录过这处
- *  口径混淆）。 */
+ *  ⚠ 本文件是 **5 条** `test()`（前三条：一并断言上面三件事 / 锁「裁决能落定」/
+ *  对照组「受理成功才清空」；第四条是 #1148 的窗外迟到失败回填；第五条是 #1151 加的
+ *  「读失败 ≠ 没事」）；Playwright 每例跑两个视口 ⇒ 报告里是 **10 个 run**。别把
+ *  「10」读成 10 条用例（独立审查两次记录过这处口径混淆）。 */
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';
 
 const ROW = {
@@ -69,6 +69,38 @@ const PROTOCOL_MESSAGE =
 
 const DRAFT = '这段文本不能丢';
 
+/** #1151：权威读面（`GET /recovery`）必须与用例伪造的事件说**同一件事** ⇒ 它得**有状态**：
+ *  409 前答空、409 后答**同一份** `PENDING`、裁决 200 后再回空。
+ *
+ *  刻意**不**只把夹具缺省值改成非空常量：那是用新假象换旧假象——「对照：受理成功才
+ *  清空」与「#1148 窗外迟到失败」两条用例在那些时刻后端真的没有待裁决事实。
+ *
+ *  修前形状（本票的红）：本文件只传 `onMessagesPost`（409 + 清单），读面走夹具缺省
+ *  `[]`，而 `useSession.ts:1553-1560` 为 P1 会把 mode 落回 `viewing(sid)` ⇒ 依赖 `mode`
+ *  的主动读面 effect（`:718-730`）立刻重跑，**空数组覆盖了刚被 409 点亮的非空清单**
+ *  ⇒ `hasPendingDecisions`（`App.tsx:1145`）转假、面板不挂载。 */
+type PendingState = {
+  /** 本用例伪造的那次 409 是否已经落定。 */
+  conflicted: boolean;
+  /** 裁决（`POST /recover` 200）是否已经落定——后端结清后读面自然回空。 */
+  adjudicated: boolean;
+};
+
+function pendingReadFace(state: PendingState): (route: Route) => Promise<void> {
+  return async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ pending_decisions: state.conflicted && !state.adjudicated ? PENDING : [] }),
+    });
+  };
+}
+
+/** 造一份「本次 409 尚未发生、尚未裁决」的读面状态（打开会话由 `openCrashed` 负责）。 */
+function scenario(): PendingState {
+  return { conflicted: false, adjudicated: false };
+}
+
 async function openCrashed(page: Page, mock: ApiMock): Promise<void> {
   await routeApi(page, mock);
   await page.goto('/');
@@ -77,10 +109,14 @@ async function openCrashed(page: Page, mock: ApiMock): Promise<void> {
 }
 
 test('待裁决 409：composer 文本仍在 + 人话横幅 + 裁决面板被唤起', async ({ page }) => {
+  // #1151：权威读面与这次 409 说同一件事（见 pendingReadFace 注释）。
+  const state = scenario();
   await openCrashed(page, {
     sessions: [ROW],
     events: crashedEvents(),
+    onRecoveryGet: pendingReadFace(state),
     onMessagesPost: async (route) => {
+      state.conflicted = true;
       await route.fulfill({
         status: 409,
         contentType: 'application/json',
@@ -108,10 +144,13 @@ test('待裁决 409 后提交裁决：面板能落定（不永久停在「提交
   /* P1 的端到端盲区（独立审查记录）：此前只验到「面板渲染出来」，没验「能提交」。
      修复前 mode 留在 `live` ⇒ `recover` 的落地守护 `shouldApplyRecoverResult`（只认
      `viewing`）把 200 结果整段丢弃 ⇒ 面板永久「提交中…」、按钮禁用、用户点不动。 */
+  const state = scenario();
   await openCrashed(page, {
     sessions: [ROW],
     events: crashedEvents(),
+    onRecoveryGet: pendingReadFace(state),
     onMessagesPost: async (route) => {
+      state.conflicted = true;
       await route.fulfill({
         status: 409,
         contentType: 'application/json',
@@ -120,6 +159,7 @@ test('待裁决 409 后提交裁决：面板能落定（不永久停在「提交
     },
     // 裁决 200 = 后端返回**已结清**的事件流（run 有终态、无悬空 tool_call）。
     onRecoverPost: async (route) => {
+      state.adjudicated = true;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -172,12 +212,16 @@ test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文�
      完全正常。一旦越窗，hook 已按"已受理"返回 ⇒ composer 乐观清空；此时若没有回填
      通道，用户看到的就是「横幅说失败、输入框却是空的」。
      这条 e2e 锁的就是这条接缝：迟到失败必须经 `failedDraft` 把原文还回输入框。 */
+  // #1151：这条也伪造了 409（同样带清单），权威读面照样必须与它自洽。
+  const state = scenario();
   await openCrashed(page, {
     sessions: [ROW],
     events: crashedEvents(),
+    onRecoveryGet: pendingReadFace(state),
     onMessagesPost: async (route) => {
       // 越过判定窗口（1200ms）才吐响应头——真机慢网络/慢盘的同形时序。
       await new Promise((resolve) => setTimeout(resolve, 1800));
+      state.conflicted = true;
       await route.fulfill({
         status: 409,
         contentType: 'application/json',
@@ -198,4 +242,55 @@ test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文�
   const banner = page.locator('.app-error');
   await expect(banner).toContainText('待人工裁决');
   await expect(banner).not.toContainText('tool_call_id');
+});
+
+test('#1151 读失败 ≠ 没事：权威读面 5xx 不得抹掉已知的待裁决清单', async ({ page }) => {
+  /* 本票（#1151）裁决的第 2 条：夹具改成有状态之后，「读失败 ≠ 没事」这条意图仍必须
+     **可测**。这是本类缺陷的真正防线（不变量 #22 在 UI 侧的表达）：读不到是「未知」，
+     与后端明确说「没有待裁决」是两件事。
+
+     「未知」与「空」在屏幕上的差别（同一会话、同一 409 载荷）：
+       - 读面答**空清单**（后端说没事）      ⇒ 清单被覆盖 ⇒ 面板**不在场**。
+         这就是本文件修前的红形状，由本文件第 1 条用例反向覆盖（它要求面板在场）。
+       - 读面 **5xx**（读不到 ⇒ `fetchPendingDecisions` 回 `null`，`useSession.ts:692-701`）
+                                            ⇒ 409 点亮的清单**保留** ⇒ 面板**在场**（本节）。
+     本臂守的就是后者：读面坏了，界面**保留**已知事实，既不抹掉、也不谎报"已结清"。
+
+     ⚠ 见证不可少：只断言"面板在场"挡不住「主动读面 effect 被短路/删掉」这类回归
+     （那时面板仍因 409 而点亮，用例照样绿，而它宣称守的读面已经没人读了）⇒ 末条断言
+     把「读面真的被请求过」钉住。 */
+  let recoveryReads = 0;
+  await openCrashed(page, {
+    sessions: [ROW],
+    events: crashedEvents(),
+    // 读面整体不可用（500）：前端必须保持"未知"，绝不回落空清单。
+    onRecoveryGet: async (route) => {
+      recoveryReads += 1;
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'boom' }),
+      });
+    },
+    onMessagesPost: async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
+      });
+    },
+  });
+
+  const composer = page.getByLabel('Agent 任务');
+  await composer.fill(DRAFT);
+  await page.getByLabel('发送').click();
+
+  // ① 数据不丢这条契约不因读面故障而变。
+  await expect(composer).toHaveValue(DRAFT);
+  // ② 读面坏了 ≠ 没事：409 已点亮的清单必须仍在（面板在场，不是空态）。
+  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
+  // ③ 也不得反向谎报"已结清"——横幅仍如实说明需要人工裁决。
+  await expect(page.locator('.app-error')).toContainText('待人工裁决');
+  // ④ 见证：权威读面**真的被读过**。缺了它，「读面被短路」这类回归仍会让上面两条全绿。
+  expect(recoveryReads).toBeGreaterThan(0);
 });
