@@ -51,6 +51,17 @@ Var iaScanDir
 Var iaScanDepth
 Var iaScanReparse
 
+; #1201 item 2: the sweep-side live-process read. No process is ever killed
+; here — the user adjudicated that a leftover tree under uninstall is space
+; reclamation, not an update, so a live process is a reason to keep the tree
+; whole, not to stop anything. The read is WMI's answer for one directory.
+; Uninstaller-only, like the helper that uses them: an unreferenced Var is a
+; fatal warning (6001) in the installer pass.
+!ifdef BUILD_UNINSTALLER
+  Var iaLiveDir
+  Var iaLiveAnswer
+!endif
+
 ; $iaShapeCandidate must be exactly "$iaShapeBase.old-$0", where $0 is the GUID
 ; iaStageApplication gets from CoCreateGuid through System::Call's "g" type --
 ; and that type formats the GUID WITH BRACES ("{8-4-4-4-12}"). The braces are
@@ -238,6 +249,56 @@ iaPrepareDone:
   Pop $0
 !macroend
 
+; #1201 item 2: answers "is any process running from inside the directory on
+; the stack" for the uninstaller's leftover sweep, and nothing else. It is a
+; read, not the #914 gate: the sweep is space reclamation the user already
+; asked for, so a live process here is a reason to keep that tree whole rather
+; than a service to stop — the user adjudicated that (the gate's own policy of
+; never killing an interactive client extends to never killing anything from a
+; leftover tree). The query is the classifier's WMI form minus the
+; classification: the image path has to exist and to start with the directory
+; in question, matched the same case-insensitive way. One answer, and a failed
+; query is fail-closed — "nothing proven clean" refuses the delete, exactly
+; like answer 13 does on the installer side, because a sweep that cannot see
+; processes cannot prove the tree is safe to half-delete.
+;   in:  the directory to read, on the stack (Push before the call). The stack
+;        is the file's own parameter channel and keeps the delete-site guard's
+;        arming window free of a third read of $iaDeleteCandidate.
+;   out: $iaLiveAnswer — "0" nothing running | "1" a process runs from it |
+;        "broken" the query itself failed
+; nsExec's exit code is the whole answer: the payload exits 1 on a hit, 0 on a
+; clean tree and 3 on a catch, so a broken WMI or a blocked PowerShell is
+; distinguishable from a clean tree. Clobbers $0 through nsExec's Pop, which is
+; why the answer lives in its own Var.
+; The launcher path repeats the gate's "$SYSDIR\WindowsPowerShell..." literal
+; (installer-directories.nsh) rather than reusing its $iaPowerShellPath: that
+; Var's assignment lives in a file which is NOT compiled into the uninstaller
+; build at all (installer.nsh !ifdef BUILD_UNINSTALLER), so this macro can only
+; see its own literal. Two copies of a constant, kept honest by the guard tests
+; that run the payload through this exact text.
+!macro iaScanLiveProcessesBody
+  Pop $iaLiveDir
+  StrCpy $iaLiveAnswer "broken"
+  StrCmp $iaLiveDir "" iaLiveDone
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "try { $$iaFound = @(Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Path -and $$_.Path.StartsWith('$iaLiveDir\','CurrentCultureIgnoreCase') }); if ($$iaFound.Count -gt 0) { exit 1 } else { exit 0 } } catch { exit 3 }"`
+  Pop $0
+  ; nsExec's exit code is the payload's own answer: 0 nothing runs, 1 a process
+  ; runs from the directory, anything else the query itself failed.
+  IntCmp $0 1 iaLiveHit iaLiveJudge iaLiveBroken
+  Goto iaLiveBroken
+iaLiveJudge:
+  IntCmp $0 0 iaLiveNone iaLiveBroken iaLiveBroken
+iaLiveHit:
+  StrCpy $iaLiveAnswer "1"
+  Goto iaLiveDone
+iaLiveNone:
+  StrCpy $iaLiveAnswer "0"
+  Goto iaLiveDone
+iaLiveBroken:
+  StrCpy $iaLiveAnswer "broken"
+iaLiveDone:
+!macroend
+
 ; One instantiation per name space. The plain names are the ones the installer
 ; protocol calls; the un. names are the ones the uninstaller's sweep can call.
 !ifdef BUILD_UNINSTALLER
@@ -253,6 +314,9 @@ iaPrepareDone:
   Function un.iaPrepareDelete
     !insertmacro iaPrepareDeleteBody un.iaCheckBackupShape un.iaBuildLongPath un.iaScanReparsePoints
   FunctionEnd
+  Function un.iaScanLiveProcesses
+    !insertmacro iaScanLiveProcessesBody
+  FunctionEnd
 !else
   Function iaCheckBackupShape
     !insertmacro iaCheckBackupShapeBody
@@ -266,4 +330,9 @@ iaPrepareDone:
   Function iaPrepareDelete
     !insertmacro iaPrepareDeleteBody iaCheckBackupShape iaBuildLongPath iaScanReparsePoints
   FunctionEnd
+  ; No plain-name iaScanLiveProcesses here: nothing in the installer protocol
+  ; sweeps leftovers, so the plain instantiation would have no caller — and an
+  ; unreferenced function is a fatal warning (6010) in that build. This is the
+  ; file's one asymmetric helper, the same shape as installer-directories.nsh's
+  ; installer-only iaProbePath (the mirror image: that one is installer-only).
 !endif
