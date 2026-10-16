@@ -11,7 +11,7 @@
  *  刷新由宿主经 `onSuccess` 自行决定（面板重拉水位；slash 路径无水位面可刷）。
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   compactSession,
   describeSessionError,
@@ -29,6 +29,16 @@ export function useCompactSession(sessionId: string | null) {
   const [compactError, setCompactError] = useState<string | null>(null);
   // 单飞闸用 ref 同步判：同一 tick 的第二次触发读不到刚 set 的 state。
   const inFlight = useRef(false);
+
+  // A-P2（复审）：压缩失败与 slash 反馈面同一条 A-P4 纪律——上一条结论不该常驻到
+  // 下一次会话结束。8s 自动消退（与 Composer 的 slashError/slashInfo 同款时长）；
+  // 挂在 hook 里而不是宿主，ContextUsagePanel 与 slash 两条入口共享同一份行为，
+  // 不各写一套计时器漂移。
+  useEffect(() => {
+    if (compactError === null) return;
+    const t = setTimeout(() => setCompactError(null), 8000);
+    return () => clearTimeout(t);
+  }, [compactError]);
 
   const run = useCallback(
     async (opts?: CompactRunOptions): Promise<void> => {

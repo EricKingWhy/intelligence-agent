@@ -573,4 +573,48 @@ describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）',
     expect(slashInfo()).toBe('没有可压缩的早期内容');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
+
+  it('压缩失败错误面 8s 自动消退（1195-FIX2 A-P2：不常驻到下一次会话结束）', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(compactSession).mockRejectedValue(
+        new (await import('../lib/api')).SessionError(409, '有 run 在途，稍后再压缩'),
+      );
+      await typeText('/compact');
+      press('Enter');
+      await act(async () => {});
+      expect(slashError()).toContain('有 run 在途');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      expect(slashError()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('#1195 复审修回（1195-FIX2）', () => {
+  it('streaming 中 /permission：disabled 的 pill 不被程序化点击，给可见反馈（A-P2）', async () => {
+    await mount('s-1', {
+      streaming: true,
+      permissionModes: [
+        { id: 'default', display_name: '默认', description: '默认档' },
+      ] as never,
+      selectedPermissionMode: 'default',
+    });
+    const trigger = container.querySelector('button[aria-label="权限模式"]') as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    // 前提确认：pill 此刻确实 disabled（locked||streaming 的 streaming 半边）
+    expect(trigger.disabled).toBe(true);
+    const clickSpy = vi.fn();
+    trigger.addEventListener('click', clickSpy);
+    await typeText('/permission');
+    press('Enter');
+    await act(async () => {});
+    // 静默失效被消灭：click 没发生（disabled 按钮）+ 与 pill disabledHint 同源的可见反馈
+    expect(clickSpy).not.toHaveBeenCalled();
+    expect(slashInfo()).toContain('本轮进行中');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });

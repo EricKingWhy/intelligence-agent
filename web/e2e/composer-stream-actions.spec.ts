@@ -181,3 +181,34 @@ test('#194：提示只是提示——真实中断仍由 Esc 与停止按钮触�
   await page.keyboard.press('Escape');
   await expect.poll(() => cancels, { message: 'Esc 必须发出 POST /cancel' }).toBe(2);
 });
+
+test('#1195 复审：streaming 中 Esc 关 slash 菜单不连带打断在途 run（组合用例）', async ({ page }) => {
+  let cancels = 0;
+  await routeStreaming(page);
+  await page.route('**/api/sessions/*/cancel', async (route) => {
+    cancels += 1;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"ok"}' });
+  });
+
+  await page.goto('/');
+  await submitTask(page, '跑一下');
+  await expect(page.locator('.composer-esc-hint')).toBeVisible();
+
+  const composer = page.getByLabel('Agent 任务');
+  const menu = page.getByTestId('slash-menu');
+
+  // 流式中输入不禁用（ADR-0030 §5.1 D10）⇒ 菜单可开；Esc 只关菜单、输入原样保留，
+  // 且**不得**连带 cancel 在途 run（Composer 的合成 handler 只 preventDefault 不
+  // stopPropagation，App 的 window 监听靠 defaultPrevented 守卫让路）。
+  await composer.fill('/');
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(composer).toHaveValue('/');
+  await expect.poll(() => cancels, { message: '关菜单的 Esc 不得打断在途 run' }).toBe(0);
+
+  // 判别面：菜单已关，同一个键此时必须回到「中断」语义——守卫只是让路，不是把
+  // Esc 中断整个一刀切掉。
+  await page.keyboard.press('Escape');
+  await expect.poll(() => cancels, { message: '菜单已关的 Esc 必须照常 POST /cancel' }).toBe(1);
+});

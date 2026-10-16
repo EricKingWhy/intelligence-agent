@@ -673,10 +673,18 @@ export const Composer = memo(function Composer({
       try {
         await cmd.run(args, {
           sessionId,
-          openPermissionPicker: () =>
+          /* A-P2（复审）：pill 在审批待决/本轮进行中是 disabled——程序化 click 打在
+             disabled 按钮上等于无效果且零反馈（浏览器不给 disabled 按钮派 click）。
+             与 pill 的 disabledHint **同源**给一条可见反馈（中性 info 面），不静默。 */
+          openPermissionPicker: () => {
+            if (permissionDisabledHint !== undefined) {
+              setSlashInfo(permissionDisabledHint);
+              return;
+            }
             permissionPickerRef.current
               ?.querySelector<HTMLButtonElement>('button[aria-label="权限模式"]')
-              ?.click(),
+              ?.click();
+          },
           openModelPicker: () =>
             modelPickerRef.current
               ?.querySelector<HTMLButtonElement>('button[aria-label="模型选择"]')
@@ -700,8 +708,8 @@ export const Composer = memo(function Composer({
         setSlashError(e instanceof Error && e.message ? e.message : '命令执行失败');
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- compact.run 按 sessionId 稳定（useCallback）
-    [sessionId, compact.run],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- compact.run 按 sessionId 稳定（useCallback）；permissionDisabledHint 是门禁真值，必须跟进刷新闭包
+    [sessionId, compact.run, permissionDisabledHint],
   );
 
   /** 命令受理（执行 + 输入切除）的唯一入口：菜单 Enter、菜单点选、submit 拦截
@@ -1065,8 +1073,10 @@ export const Composer = memo(function Composer({
         </div>
       )}
       {/* 反馈区：错误（红）/ 信息（中性，B-S-4）/ 压缩中 spinner（A-P1-3）。
-          slashError 与 compact.compactError 实际互斥（runSlashCommand 入口各清各面，
-          压缩错误只落 hook），但渲染合并成同一错误面避免两块同貌红条。 */}
+          两类错误**可同时在场**（修正复审 P3 的旧说法"实际互斥"：runSlashCommand
+          入口只清 slash 面、不清 hook 的 compactError——先 /compact 失败、再跑
+          /goal 撞错，两条都在），`??` 让 slashError 优先、compactError 稍后由
+          hook 的 8s 消退自行退场；合并成同一错误面是为避免两块同貌红条。 */}
       {(slashError !== null || compact.compactError !== null) && (
         <div data-testid="slash-error" role="alert" className="slash-error">
           {slashError ?? compact.compactError}
