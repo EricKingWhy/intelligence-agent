@@ -212,6 +212,7 @@ test('#1198 visual: light/dark panel matches the pinned mockup', async ({ page }
 
     const panel = page.locator('.budget-picker-content--v2');
     await expect(panel).toBeVisible();
+    await expect(panel).toHaveCSS('opacity', '1');
     const layout = await panel.evaluate((element) => {
       const box = element.getBoundingClientRect();
       return {
