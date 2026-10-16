@@ -1307,3 +1307,75 @@ for (const theme of ['dark', 'light'] as const) {
     await expectEachContrast(page, theme, ['.task-review-run-axis.running']);
   });
 }
+
+/* ── #1204：`.ask-user-error`（提问卡片恢复失败条）语义色正文对比度回归锁 ──
+ *
+ *  内嵌 `AskUserCard` 的恢复失败条把 `--danger` 直接当**正文色**用，压在
+ *  `--surface-danger`（8% 染底）上——亮色实测 4.0020 < 4.5（不达 AA）。修法同
+ *  #1175/#1208 的 ink-mix：`color-mix(in srgb, var(--danger) 45%, var(--text-primary))`
+ *  （亮色压深、暗色提亮，只升不降）；本元素仅纯文字，无图标需钉回原 token。
+ *  夹具走**真实渲染路径**：耐久事件里 `user/input-requested(kind=ask_user)` 与
+ *  `run/paused(reason=user_input)` 对齐 ⇒ 卡片落屏；点「提交」→ resume POST 落 404
+ *  fallback ⇒ App 会话错误 ⇒ `.ask-user-error`。把字色改回纯 `--danger` 时本用例必红。 */
+const AU_SID = 's-contrast-ask-user';
+const AU_REQ = 'au-contrast-req';
+const AU_ROW = {
+  session_id: AU_SID,
+  event_count: 5,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '对比度提问',
+  trace_id: null,
+  trace_url: null,
+};
+function askUserContrastEvents(): FrameSpec[] {
+  return [
+    { type: 'session/started', seq: 1, session_id: AU_SID, run_id: 'ru', time: T },
+    { type: 'run/started', seq: 2, session_id: AU_SID, run_id: 'ru', time: T },
+    { type: 'user/message', data: { content: '对比度提问' }, seq: 3, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T },
+    {
+      type: 'user/input-requested',
+      data: {
+        request_id: AU_REQ, kind: 'ask_user', run_id: 'ru',
+        questions: [{
+          question: '什么时候出发？', header: '出发',
+          options: [{ label: '今晚' }, { label: '明早' }],
+        }],
+      },
+      seq: 4, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T,
+    },
+    {
+      type: 'run/paused',
+      data: { reason: 'user_input', input_request_id: AU_REQ, budget_version: 1 },
+      seq: 5, session_id: AU_SID, run_id: 'ru', step_id: 1, time: T,
+    },
+  ];
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`[${theme}] #1204 .ask-user-error（提问卡片恢复失败条）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [AU_ROW],
+      events: askUserContrastEvents(),
+      models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+
+    const card = page.locator('.ask-user-card');
+    await expect(card).toBeVisible();
+    // 提交 → resume POST 落 404 fallback（fixtures 默认）→ App 会话错误 → 失败条落屏。
+    await page.locator('.ask-user-submit').click();
+
+    const err = page.locator('.ask-user-error');
+    await expect(err).toBeVisible();
+    const m = await measure(page, '.ask-user-error');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .ask-user-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.ask-user-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+}

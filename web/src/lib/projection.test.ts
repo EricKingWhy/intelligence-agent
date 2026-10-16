@@ -25,6 +25,8 @@ describe('initConversation', () => {
       // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
       run_paused: null,
       pending_constraint_input: null,
+      // #1204：通用提问（kind=ask_user）的初值——同一投影的必填字段，形状断言跟着长。
+      pending_ask_user: null,
       requested_model: null,
       model_run_id: null,
       seenSeqs: new Set(),
@@ -105,6 +107,86 @@ describe('applyEvent — 折叠语义', () => {
     expect(state.run_paused).toBeNull();
     expect(state.pending_constraint_input).toBeNull();
     expect(projectHistory('s', [request, pause, answer, resumed]).pending_constraint_input).toBeNull();
+  });
+
+  it('#1204：kind=ask_user 分流到 pending_ask_user（不碰窄场景状态），答案与恢复同链折叠', () => {
+    const request = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'ask-1',
+        kind: 'ask_user',
+        run_id: 'run-1',
+        questions: [
+          {
+            question: 'Ship tonight?',
+            header: 'Release',
+            recommended: 0,
+            options: [
+              { label: 'Tonight', description: 'Low traffic.' },
+              { label: 'Tomorrow' },
+            ],
+          },
+          { question: 'Which flow?', header: 'Release', options: [{ label: 'Blue-green' }, { label: 'Rolling' }] },
+        ],
+      },
+    });
+    const pause = ev({
+      type: EventType.RUN_PAUSED,
+      seq: 2,
+      run_id: 'run-1',
+      data: { reason: 'user_input', input_request_id: 'ask-1' },
+    });
+    const answer = ev({
+      type: EventType.USER_MESSAGE,
+      seq: 3,
+      run_id: 'run-1',
+      data: {
+        step: 1,
+        content: 'answered',
+        input_request_id: 'ask-1',
+        input_request_answer: {
+          request_id: 'ask-1',
+          questions: [
+            { question: 'Ship tonight?', answer: { label: 'Tonight' } },
+            { question: 'Which flow?', answer: null },
+          ],
+        },
+      },
+    });
+    const resumed = ev({
+      type: EventType.RUN_RESUMED, seq: 4, run_id: 'run-1', data: { resume_basis: 'user_input' },
+    });
+
+    let state = projectHistory('s', [request, pause]);
+    // 分流：进 ask_user 状态，窄场景状态保持 null。
+    expect(state.pending_constraint_input).toBeNull();
+    expect(state.pending_ask_user).toMatchObject({
+      request_id: 'ask-1',
+      run_id: 'run-1',
+      answer: null,
+    });
+    expect(state.pending_ask_user?.questions).toHaveLength(2);
+    expect(state.pending_ask_user?.questions[0].recommended).toBe(0);
+
+    state = applyEvent(state, answer);
+    expect(state.pending_ask_user?.answer?.questions).toEqual([
+      { question: 'Ship tonight?', answer: { label: 'Tonight' } },
+      { question: 'Which flow?', answer: null },
+    ]);
+    state = applyEvent(state, resumed);
+    expect(state.pending_ask_user).toBeNull();
+  });
+
+  it('#1204：畸形 ask_user 载荷不投影（不伪造空卡片）', () => {
+    const bad = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: { request_id: 'ask-1', kind: 'ask_user', run_id: 'run-1', questions: [] },
+    });
+    expect(projectHistory('s', [bad]).pending_ask_user).toBeNull();
   });
 
   it('USER_MESSAGE 按 data.step 创建轮次并写入用户消息', () => {

@@ -1,0 +1,1 @@
+2026-10-16	机械归属（非内容审查主张）：#1225 分支 `win/1225-windows-lane-rerun` 与 `origin/main` `471857d1` 的 sync merge `e2bde87b`（父一 `4632a104`=本线 tip，父二 `471857d1`=origin/main）。自动合并完成、零冲突；与双亲 diff 交集为空（`--cc` 空表），故按 fail-closed 规则显式归属。相对父一仅加入 main 已有提交（#1219/#1233 等），无本线代码变更；来侧提交已有各自归属。本行只记机械 sync。	4632a104a62f46d6226bd4faa1ccb60086524847..e2bde87be2e09912d6968d96765fa3e895b43d59

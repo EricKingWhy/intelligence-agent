@@ -193,6 +193,14 @@ def _take_os_lock_blocking(fd: int) -> None:
     `omp/830-mm08-cross-client-verify`），另各挂 `workflow_dispatch`（手动、任意 ref——
     本条 run 即其手动实例）。常驻的 `gate1.yml` / `gate-nightly.yml` 后端 job 仍是
     `runs-on: ubuntu-latest`。极端持有者下 Windows 会先失败，这是平台语义，不是可消除的缺陷。
+    ⑤ **2026-10-16 新读数（#1225，专用云真机，非 GitHub-hosted runner）**：在
+    `origin/main` `41c9da6f` 上等价手工执行 `mm08-d2d3-windows-verify.yml` 两 job。
+    `cli` job：`1 failed, 70 passed, 6 skipped`——`tests/test_cli_image.py` 0 failed
+   （D2 判据达成）；唯一红为 `test_lock_is_auto_released_when_holder_process_dies`
+    的时序 flake（kill 后立刻 acquire，约 13% 撞 OS 锁释放延迟窗口；产品"死亡自动
+    释放、无残留锁"契约成立，另开票修测试）。`tui` job：`tsc --noEmit` exit 0，
+    `npm test` `246 passed / 0 failed / 2 skipped`（D3 判据 `fail 0` 达成）。
+    证据：`docs/live_gate/w21/60-issue-1225-*`。
     """
     if sys.platform == "win32":
         import msvcrt

@@ -23,7 +23,7 @@ import {
   wheelDeltaPixels, type FollowState,
 } from '../lib/followLatest';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
-import type { ConversationState, ToolCall, Turn } from '../types';
+import type { ConversationState, AskUserAnswer, PendingAskUserRequest, ToolCall, Turn } from '../types';
 import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -37,6 +37,7 @@ import { ApprovalModal } from './ApprovalModal';
 import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho';
 import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { MessageImages } from './MessageImages';
+import { AskUserCard } from './AskUserCard';
 
 interface Props {
   conversation: ConversationState | null;
@@ -75,6 +76,15 @@ interface Props {
    *  「图已被省略」——因为此时后端投影确实把图换成了文本占位符（PRD D6 双保险的界面侧）。
    *  非 `false`（true / 缺失）一律不标注：把"后端没说"当成"不支持"是伪造。 */
   supportsVision?: boolean | null;
+  /** #1204：`kind=ask_user` 的待回答请求——非 null 时在对话流尾部内嵌 `AskUserCard`。
+   *  挂载判据在 App（暂停 run 与请求 id 对齐后给值），本组件只渲染。 */
+  askUserRequest?: PendingAskUserRequest | null;
+  /** 该提问的恢复是否在途（禁用提交，同 ConstraintResolutionDialog 的 resuming）。 */
+  askUserResuming?: boolean;
+  /** 恢复失败原文（App 的会话错误）；null = 无错误。 */
+  askUserError?: string | null;
+  /** 提交 `ask_user` 答案（App 侧走 resume 通道）。 */
+  onAskUserAnswer?: (answer: AskUserAnswer) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -96,7 +106,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -437,6 +447,18 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
           ))}
         </div>
         <MemoryActivity key={conversation.session_id} conversation={conversation} />
+        {/* #1204：`ask_user` 通用提问的内嵌卡片——长在对话流尾部（虚拟化行之外，
+            同 MemoryActivity / 内联审批卡的做法），不参与 measureElement 测高。
+            `key` 按 request_id：换请求即重挂，卡片本地草稿不串题。 */}
+        {askUserRequest !== null && onAskUserAnswer && (
+          <AskUserCard
+            key={askUserRequest.request_id}
+            request={askUserRequest}
+            resuming={askUserResuming}
+            errorMessage={askUserError}
+            onSubmit={onAskUserAnswer}
+          />
+        )}
         {/* #37 交互式审批 + #421 模态承载。
          *
          *  R5-B3 的根因是审批卡与虚拟化行抢同一块画布：行是 absolute 定位的绘制层，
