@@ -406,7 +406,13 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
       {/* #381（W-27）：进度清单钉在滚动区上方、虚拟化行之外——虚拟器只量 turn 行，
           外挂块不参与 measureElement（PRD 长任务 §7.5；无清单会话不渲染）。 */}
       {conversation.plan !== null && conversation.plan.length > 0 && (
-        <PlanList items={conversation.plan} />
+        <PlanList
+          key={`plan-${conversation.session_id}`}
+          items={conversation.plan}
+          runStatus={conversation.run_status}
+          runCancelled={conversation.run_cancelled}
+          runInterrupted={conversation.run_interrupted !== null}
+        />
       )}
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={setScrollNode}>

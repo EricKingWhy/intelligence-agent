@@ -28,6 +28,7 @@ const item = (id: string, status: string): PlanItem => ({
 });
 
 const threeState: PlanItem[] = [item('a', 'completed'), item('b', 'in_progress'), item('c', 'pending')];
+const completedThree: PlanItem[] = threeState.map((entry) => ({ ...entry, status: 'completed' }));
 
 /** AC5 黄金夹具：17 项（11×completed, 1×pending, 1×in_progress, 4×pending）。 */
 const golden17 = (): PlanItem[] => [
@@ -60,18 +61,114 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     container.remove();
   });
 
+  const renderExpanded = (items: PlanItem[]) => {
+    act(() => root.render(createElement(PlanList, { items })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    if (toggle?.getAttribute('aria-expanded') === 'false') act(() => fireClick(toggle));
+  };
+
   it('空清单不渲染（无清单会话不留空壳）', () => {
     act(() => root.render(createElement(PlanList, { items: [] })));
     expect(container.innerHTML).toBe('');
   });
 
-  it('四件套①计数：标题区「进程 M 项 · 已完成 N 项」（票面逐字）', () => {
+  it('默认只显示摘要，按钮可展开并再次收起清单', () => {
     act(() => root.render(createElement(PlanList, { items: threeState })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    const details = container.querySelector<HTMLElement>('.plan-list-details');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.textContent).toContain('进程 3 项 · 已完成 1 项');
+    expect(toggle?.textContent).toContain('正在执行 b');
+    expect(details?.hasAttribute('hidden')).toBe(true);
+
+    act(() => fireClick(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(details?.hasAttribute('hidden')).toBe(false);
+
+    act(() => fireClick(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(details?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('成功终态收成 M/M，并保留用户展开；新运行时恢复进行态', () => {
+    act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'running' })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle')!;
+    act(() => fireClick(toggle));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => root.render(createElement(PlanList, { items: completedThree, runStatus: 'completed' })));
+    expect(toggle.textContent).toContain('✓ 任务完成 3/3');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => root.render(createElement(PlanList, { items: completedThree, runStatus: 'running' })));
+    expect(toggle.textContent).toContain('进程 3 项 · 已完成 3 项');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('运行正常结束但清单未全完时显示实际计数', () => {
+    act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'completed' })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    expect(toggle?.textContent).toContain('✓ 本次运行结束 1/3');
+    expect(toggle?.textContent).not.toContain('任务完成');
+  });
+
+  it.each([
+    ['失败', 'failed', false, false],
+    ['取消', 'failed', true, false],
+    ['进程中断', 'completed', false, true],
+  ] as const)('%s 显示中断摘要', (_label, runStatus, runCancelled, runInterrupted) => {
+    act(() =>
+      root.render(
+        createElement(PlanList, {
+          items: threeState,
+          runStatus,
+          runCancelled,
+          runInterrupted,
+        }),
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    expect(toggle?.textContent).toContain('✖ 任务中断 1/3');
+  });
+
+  it('暂停保持进行态，因为 paused 不是终态', () => {
+    act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'paused' })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    expect(toggle?.textContent).toContain('进程 3 项 · 已完成 1 项');
+    expect(toggle?.textContent).not.toContain('任务中断');
+    expect(toggle?.textContent).not.toContain('任务完成');
+  });
+
+  it('Escape 收起清单并把焦点还给摘要按钮', () => {
+    renderExpanded(threeState);
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.plan-list-details')?.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('展开清单的关闭按钮收起并将焦点还给摘要', () => {
+    renderExpanded(threeState);
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle')!;
+    const close = container.querySelector<HTMLButtonElement>('.plan-list-close')!;
+    act(() => fireClick(close));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('四件套①计数：标题区「进程 M 项 · 已完成 N 项」（票面逐字）', () => {
+    renderExpanded(threeState);
     expect(container.textContent).toContain('进程 3 项 · 已完成 1 项');
   });
 
   it('四件套②当前项高亮：in_progress 显示 activeForm（非 content）+ → 标记', () => {
-    act(() => root.render(createElement(PlanList, { items: threeState })));
+    renderExpanded(threeState);
     const current = container.querySelector('[data-plan-id="b"]');
     expect(current?.className).toContain('plan-list-item-current');
     expect(current?.textContent).toContain('正在执行 b');
@@ -79,8 +176,8 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     expect(current?.textContent).toContain('→');
   });
 
-  it('AC1 阈值：≤6 项全量展示（完成项划线 + ✓，不再恒收起），无折叠行', () => {
-    act(() => root.render(createElement(PlanList, { items: threeState })));
+  it('AC1 阈值：≤6 项全量展示（完成项 ✓，不再恒收起），无折叠行', () => {
+    renderExpanded(threeState);
     const done = container.querySelector('[data-plan-id="a"]');
     // #864 改变 #381 行为：≤6 项时完成项照常展示（hidden=false、无内联 display:none）。
     expect(done?.hasAttribute('hidden')).toBe(false);
@@ -96,7 +193,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it('AC2/AC5 黄金夹具：>6 项 → 前面 12 项 + 3 项窗口（in_progress + 2×pending）+ 待处理 2 项', () => {
-    act(() => root.render(createElement(PlanList, { items: golden17() })));
+    renderExpanded(golden17());
     expect(container.textContent).toContain('进程 17 项 · 已完成 11 项');
     const toggles = container.querySelectorAll<HTMLButtonElement>('.plan-list-fold-toggle');
     expect(toggles).toHaveLength(2);
@@ -117,7 +214,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it('AC4 后组折叠行排在后组各项之前：展开时折叠行不位移（悬浮不因位移丢焦收起）', () => {
-    act(() => root.render(createElement(PlanList, { items: golden17() })));
+    renderExpanded(golden17());
     const toggle = container.querySelector('.plan-list-fold-after .plan-list-fold-toggle')!;
     const p15 = container.querySelector('[data-plan-id="p15"]')!;
     // p15 在 toggle 之后（DOCUMENT_POSITION_FOLLOWING = 4）⇒ 展开后组时新增行落在折叠行下方。
@@ -125,7 +222,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it('AC4 点击切换 + 固定：click → 展开并被悬浮离开/再点收起，aria-expanded 同步', () => {
-    act(() => root.render(createElement(PlanList, { items: golden17() })));
+    renderExpanded(golden17());
     const after = container.querySelector<HTMLButtonElement>('.plan-list-fold-after .plan-list-fold-toggle')!;
     act(() => fireClick(after));
     expect(after.getAttribute('aria-expanded')).toBe('true');
@@ -146,7 +243,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   it('AC4 悬浮延迟开合（openDelay≈120ms / closeDelay≈80ms）', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      renderExpanded(golden17());
       const after = container.querySelector<HTMLButtonElement>(
         '.plan-list-fold-after .plan-list-fold-toggle',
       )!;
@@ -172,7 +269,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it('AC4 互斥：打开一组自动收起另一组', () => {
-    act(() => root.render(createElement(PlanList, { items: golden17() })));
+    renderExpanded(golden17());
     const before = container.querySelector<HTMLButtonElement>('.plan-list-fold-before .plan-list-fold-toggle')!;
     const after = container.querySelector<HTMLButtonElement>('.plan-list-fold-after .plan-list-fold-toggle')!;
     act(() => fireClick(before));
@@ -191,7 +288,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   it('AC4 点击可见的悬浮展开组 → 收起（按展开态切换，而非无脑固定）', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      renderExpanded(golden17());
       const after = container.querySelector<HTMLButtonElement>(
         '.plan-list-fold-after .plan-list-fold-toggle',
       )!;
@@ -210,7 +307,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   it('AC4 固定态不被悬浮静默解除：悬浮他组后离开，回落到固定组', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      renderExpanded(golden17());
       const before = container.querySelector<HTMLButtonElement>(
         '.plan-list-fold-before .plan-list-fold-toggle',
       )!;
@@ -269,7 +366,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     window.matchMedia = (() => ({ matches: true })) as unknown as typeof window.matchMedia;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      renderExpanded(golden17());
       const after = container.querySelector<HTMLButtonElement>(
         '.plan-list-fold-after .plan-list-fold-toggle',
       )!;
@@ -289,7 +386,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   it('AC4 悬浮快速穿过别组不留悬停孤儿（A 开 → 离开 A → 进 B → 未到延迟即离开 B）', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      renderExpanded(golden17());
       const before = container.querySelector<HTMLButtonElement>(
         '.plan-list-fold-before .plan-list-fold-toggle',
       )!;
@@ -315,16 +412,14 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it('AC6 脏数据容错：双 in_progress 只高亮第一个，不崩', () => {
-    act(() =>
-      root.render(createElement(PlanList, { items: [item('a', 'in_progress'), item('b', 'in_progress')] })),
-    );
+    renderExpanded([item('a', 'in_progress'), item('b', 'in_progress')]);
     const currents = container.querySelectorAll('.plan-list-item-current');
     expect(currents.length).toBe(1);
     expect(currents[0].getAttribute('data-plan-id')).toBe('a');
   });
 
   it('AC6 脏数据容错：未知 status 按未完成渲染（○），不崩', () => {
-    act(() => root.render(createElement(PlanList, { items: [item('x', 'cancelled' as unknown as string)] })));
+    renderExpanded([item('x', 'cancelled' as unknown as string)]);
     const row = container.querySelector('[data-plan-id="x"]');
     expect(row?.className).not.toContain('plan-list-item-done');
     expect(row?.textContent).toContain('○');
@@ -332,7 +427,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
 
   it('AC6 reconcile：状态翻转整表替换后，全部行 DOM 节点身份不变（已完成项不重新挂载）', () => {
     const next: PlanItem[] = [item('a', 'completed'), item('b', 'completed'), item('c', 'in_progress')];
-    act(() => root.render(createElement(PlanList, { items: threeState })));
+    renderExpanded(threeState);
     const before = new Map(
       ['a', 'b', 'c'].map((id) => [id, container.querySelector(`[data-plan-id="${id}"]`)]),
     );
@@ -344,7 +439,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
 
   it('AC6 reconcile：>6 项折叠态下整表替换，行节点身份仍存续（key={item.id} 保结构）', () => {
     const first = golden17();
-    act(() => root.render(createElement(PlanList, { items: first })));
+    renderExpanded(first);
     const nodes = new Map(
       first.map((it) => [it.id, container.querySelector(`[data-plan-id="${it.id}"]`)]),
     );
