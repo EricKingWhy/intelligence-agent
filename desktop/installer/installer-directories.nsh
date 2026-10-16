@@ -255,6 +255,7 @@ FunctionEnd
       ${If} $iaShapeOk != "1"
         DetailPrint "iaRecoverInterruptedInstall: refusing backup shape: $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
         Quit
       ${EndIf}
       StrCpy $iaPlainPath "$iaBackupDirectory"
@@ -262,6 +263,7 @@ FunctionEnd
       ${If} $iaProbeFound != "1"
         DetailPrint "iaRecoverInterruptedInstall: backup is missing: $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
         Quit
       ${EndIf}
       IfSilent iaInterruptedSilent
@@ -377,6 +379,23 @@ Function iaContinueInterruptedFresh
   ; Refuse a partial tree with reparse points or unreadable entries before
   ; allowing NSIS to write through it; the old backup stays armed on refusal.
   SetOutPath $TEMP
+  ; #1201 item 1: "continue fresh" is the other half of the recovery protocol and
+  ; it is the one that bypasses the staging gate entirely — .onInit skips
+  ; !insertmacro iaStageApplication while $iaRecoveryPending is "1", and this
+  ; function only clears that flag after the user pressed the button here, so
+  ; neither of the gate's two call sites runs on this path. The stock section's
+  ; own CHECK_APP_RUNNING then guards the write, and its predicate is the
+  ; one-process blind spot #914 documents (`$null -gt 0`, so a single matching
+  ; process reads as "not running"). Asking here, before the flag is cleared and
+  ; before the section can write, is what makes the recovery choices share one
+  ; predicate. Same placement rule as the rollback call and for the same measured
+  ; reason: after SetOutPath $TEMP, so the PowerShell child does not inherit a
+  ; working directory inside the tree.
+  ; The refusal below keeps IaBackupDir armed, exactly like the two refusals
+  ; further down that already say so: the backup has not been decided about, the
+  ; recovery page comes back on the next run, and a cleared pointer would leave
+  ; the backup on disk with nothing naming it.
+  Call iaRequireNoRunningProduct
   StrCpy $iaPlainPath "$iaFinalDirectory"
   Call iaProbePath
   ${If} $iaProbeFound == "1"
@@ -429,10 +448,9 @@ FunctionEnd
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a
     ; leftover first, so losing the slot never loses the directory from every
-    ; record; a value that names nothing is only noted, and a value without the
-    ; backup shape is refused and signalled in the exit code — it is not
-    ; something this installer ever writes, and publishing a foreign path as a
-    ; "leftover to delete" would be worse than dropping the hint.
+    ; record; a value that names nothing is only noted. A value without the
+    ; backup shape is foreign state: refuse it and clear the slot before any
+    ; success path can overwrite the refusal or replace that value.
     !insertmacro iaReadBackupDir
     ${If} $iaBackupDirectory != ""
       StrCpy $iaShapeCandidate "$iaBackupDirectory"
@@ -450,6 +468,8 @@ FunctionEnd
       ${Else}
         DetailPrint "iaStageApplication: earlier backup pointer refused (shape): $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
+        Quit
       ${EndIf}
     ${EndIf}
     System::Call 'ole32::CoCreateGuid(g .r0) i .r1'
@@ -474,6 +494,7 @@ FunctionEnd
       DetailPrint "iaStageApplication: could not record backup directory"
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaRecoveryMetadataFailed)" /SD IDOK
       SetErrorLevel 2
+      !insertmacro iaClearBackupDir
       Quit
     ${EndIf}
     ClearErrors
@@ -481,6 +502,7 @@ FunctionEnd
     ${If} ${Errors}
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaAppRunning)" /SD IDOK
       SetErrorLevel 2
+      !insertmacro iaClearBackupDir
       Quit
     ${EndIf}
     !ifdef IA_TEST_HARD_KILL_AFTER_STAGE_RENAME
@@ -513,6 +535,28 @@ Function iaRollbackApplication
     Return
   ${EndIf}
   SetOutPath $TEMP
+  ; #1201 item 1: everything below removes $iaFinalDirectory recursively and
+  ; renames the backup back over it, and a process running from that directory
+  ; turns the pair into a partial delete plus a rename that fails on a
+  ; non-empty directory — the recorded, non-zero case the restore below reports
+  ; (that step deliberately does not read the delete's own error and lets the
+  ; rename fail instead).
+  ; The staging path refuses exactly this conflict before it moves anything
+  ; (#914); the rollback path had no predicate at all, so the process that made
+  ; the update fail could make the recovery fail too. The gate is reused, not
+  ; re-derived: the bundled runtime is stopped and re-asked (bounded), anything
+  ; else refuses. It sits after SetOutPath $TEMP for the reason #1066 measured —
+  ; the PowerShell child it spawns must not inherit a current directory inside
+  ; the tree this function is about to remove.
+  ; A refusal here deliberately does NOT clear IaBackupDir. #1165's convention
+  ; ("a terminal path always clears") covers a value that is unusable (the shape
+  ; refusal above) or one that has reached a decision about the backup (the
+  ; restore below, the refused delete); this refusal is not terminal — the user
+  ; closes the product and runs the installer again, and the recovery page must
+  ; come back with the pointer intact. Clearing it here would leave the backup on
+  ; disk with no record naming it, which is the one outcome the recovery
+  ; protocol exists to prevent.
+  Call iaRequireNoRunningProduct
   DetailPrint "Rolling back to $iaBackupDirectory"
   ; #904 item 5: the partial install is removed through the shared prepare step,
   ; which refuses a tree containing a reparse point — RMDir /r deletes THROUGH
