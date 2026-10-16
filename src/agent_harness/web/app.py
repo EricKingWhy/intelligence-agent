@@ -111,6 +111,10 @@ from agent_harness.session.derive import validate_user_protected_fact_annotation
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
+from agent_harness.session.scoped_constraints import (
+    ScopeConstraintError,
+    ScopedConstraintStore,
+)
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
     COMPACT_ENTRY_API,
@@ -127,6 +131,7 @@ from agent_harness.session.service import (
     InvalidSessionId,
     ModelDoesNotSupportImages,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     ReconcileDecision,
@@ -160,6 +165,7 @@ from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
+from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
@@ -884,6 +890,11 @@ class ProtectedFactAnnotation(BaseModel):
     ]
     value: str = Field(min_length=1, max_length=10_000)
     supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1191（Phase 2）：登记作用域三选一（票面 §四.1）。默认 None = 会话级（既有行为
+    # 逐字不变）；`project` / `global` 时服务端把真值写入独立规则层，会话事件流里只留
+    # 审计痕（投影跳过）。`None` 而非 `"session"` 是为让 `exclude_none` 下**缺省完全不
+    # 发键**——会话路径的请求体逐字节不变。
+    scope: Literal["session", "project", "global"] | None = None
 
 
 #: `attachments` 的静态兜底上限（#823 / MM-02，A3/B7）。取部署上限键
@@ -1177,6 +1188,11 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # #1191（Phase 2）：项目/全局级约束的独立规则层（用户裁决 Fork 2 = A：
+        # 不碰 memory v2）。只构造一次（持有进程内写锁）；根目录同在 workspace_dir 下。
+        self.scoped_constraint_store = ScopedConstraintStore(
+            Path(settings.workspace_dir) / "constraints"
+        )
         # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
         # 必须在 RunManager **之前**建：下面的 on_run_terminal 回调要用它（闭包按
         # 引用捕获 self，顺序其实无妨，但先建可读性更好）。
@@ -1197,6 +1213,19 @@ class AppState:
             # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
             # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
             on_context_snapshot=self._cache_context_snapshot,
+        )
+        # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
+        # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
+        # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
+        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
+        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        self.ask_user_timeout_driver = AskUserTimeoutDriver(
+            timeout_seconds=settings.ask_user_question_timeout,
+            on_expire=lambda session_id, request_id: (
+                session_service(self).resume_ask_user_timeout(
+                    session_id, request_id=request_id,
+                )
+            ),
         )
         # #200：会话 → (builder 快照, 工具定义)。工具定义与快照在**同一次收口**
         # 时取（registry 与 builder 属于同一个 runtime，分开取会得到两个真相）。
@@ -1508,6 +1537,7 @@ def session_service(state: AppState) -> SessionService:
         budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
         reconcile_info=state.reconcile_info,
+        scoped_constraint_store=state.scoped_constraint_store,
     )
 
 
@@ -3872,6 +3902,8 @@ def create_app(
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
+            ProjectKeyUnavailable,
+            ScopeConstraintError,
             AttachmentReferenceInvalid,
             TooManyAttachments,
             AttachmentMessageTooLarge,

@@ -226,6 +226,71 @@ async def test_ws_send_message_reports_workspace_binding_conflict(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_ws_send_message_reports_pending_user_input_conflict(tmp_path, monkeypatch):
+    """#1240（#1223 发现）：WS `send_message` 撞上「有待回答的用户输入」这道 409
+    （`BudgetConflict`）也必须回一条 error 帧，不能静默断连。
+
+    修复前 `BudgetConflict` 不在 `websocket.py` 该分支的 except 元组里 ⇒ 逃到外层
+    `except Exception`（只 `logger.debug`）⇒ 连接直接死掉，用户看不到任何原因。
+    与同文件 `test_ws_send_message_reports_workspace_binding_conflict`（#266）同形态。
+    """
+    from agent_harness.session.event import (
+        RUN_PAUSED,
+        RUN_STARTED,
+        USER_INPUT_REQUESTED,
+    )
+    from agent_harness.session.session import Session
+
+    server, serve_task, port, app = await _start_server(tmp_path, monkeypatch)
+    try:
+        sid = await _create_session(port, "任务")
+        store = app.state.agent.store
+        # 直接落一条"待回答提问"的暂停现场（真实工具路径昂贵，这里只要闸门状态）。
+        Session.append_event(
+            store, sid, RUN_STARTED,
+            {"turn_index": 1, "agent_profile": "main"}, run_id="pending-run",
+        )
+        Session.append_event(
+            store, sid, USER_INPUT_REQUESTED,
+            {
+                "request_id": "pending-req", "kind": "ask_user",
+                "questions": [
+                    {
+                        "question": "Which database?",
+                        "header": "Storage",
+                        "options": [{"label": "SQLite"}, {"label": "Postgres"}],
+                    },
+                ],
+            },
+            run_id="pending-run",
+        )
+        Session.append_event(
+            store, sid, RUN_PAUSED,
+            {
+                "reason": "user_input", "input_request_id": "pending-req",
+                "budget_version": 0, "version": 0,
+            },
+            run_id="pending-run",
+        )
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "send_message", "session_id": sid, "content": "继续"}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "error" for f in fs),
+                timeout=5.0)
+            errors = [f for f in frames if f.get("type") == "error"]
+            assert errors, f"应收到 error 帧，实际帧：{frames}"
+            assert "提问" in errors[0]["message"]
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_ws_live_event_relay(tmp_path, monkeypatch):
     """Q4d.2 live event relay：subscribe 一个有 active run 的 session，
     验证增量事件通过 WS 推送。

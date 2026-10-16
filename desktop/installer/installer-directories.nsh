@@ -255,6 +255,7 @@ FunctionEnd
       ${If} $iaShapeOk != "1"
         DetailPrint "iaRecoverInterruptedInstall: refusing backup shape: $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
         Quit
       ${EndIf}
       StrCpy $iaPlainPath "$iaBackupDirectory"
@@ -262,6 +263,7 @@ FunctionEnd
       ${If} $iaProbeFound != "1"
         DetailPrint "iaRecoverInterruptedInstall: backup is missing: $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
         Quit
       ${EndIf}
       IfSilent iaInterruptedSilent
@@ -434,10 +436,9 @@ FunctionEnd
     ; whatever an earlier run left there. A value that still names a directory
     ; (the app was killed between the rename and promote) is recorded as a
     ; leftover first, so losing the slot never loses the directory from every
-    ; record; a value that names nothing is only noted, and a value without the
-    ; backup shape is refused and signalled in the exit code — it is not
-    ; something this installer ever writes, and publishing a foreign path as a
-    ; "leftover to delete" would be worse than dropping the hint.
+    ; record; a value that names nothing is only noted. A value without the
+    ; backup shape is foreign state: refuse it and clear the slot before any
+    ; success path can overwrite the refusal or replace that value.
     !insertmacro iaReadBackupDir
     ${If} $iaBackupDirectory != ""
       StrCpy $iaShapeCandidate "$iaBackupDirectory"
@@ -455,6 +456,8 @@ FunctionEnd
       ${Else}
         DetailPrint "iaStageApplication: earlier backup pointer refused (shape): $iaBackupDirectory"
         SetErrorLevel 2
+        !insertmacro iaClearBackupDir
+        Quit
       ${EndIf}
     ${EndIf}
     System::Call 'ole32::CoCreateGuid(g .r0) i .r1'
@@ -479,6 +482,7 @@ FunctionEnd
       DetailPrint "iaStageApplication: could not record backup directory"
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaRecoveryMetadataFailed)" /SD IDOK
       SetErrorLevel 2
+      !insertmacro iaClearBackupDir
       Quit
     ${EndIf}
     ClearErrors
@@ -486,6 +490,7 @@ FunctionEnd
     ${If} ${Errors}
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaAppRunning)" /SD IDOK
       SetErrorLevel 2
+      !insertmacro iaClearBackupDir
       Quit
     ${EndIf}
     !ifdef IA_TEST_HARD_KILL_AFTER_STAGE_RENAME

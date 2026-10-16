@@ -74,6 +74,8 @@ def test_ask_user_pauses_and_resume_continues_the_same_run(tmp_path):
         pause = next(e for e in before if e["type"] == RUN_PAUSED)
         assert request["data"]["kind"] == "ask_user"
         assert request["data"]["questions"][0]["question"] == "Which database should we use?"
+        # #1224：超时档随请求落盘（默认 300s），前端据此渲染与后端注入消息一致的数字。
+        assert request["data"]["timeout_seconds"] == 300
         assert pause["data"]["reason"] == "user_input"
         assert pause["data"]["input_request_id"] == request["data"]["request_id"]
         assert len(probe.models[0].snapshots) == 1
@@ -256,3 +258,41 @@ def test_ask_user_pause_rejects_constraint_shaped_answer(tmp_path):
     assert rejected.status_code == 422, rejected.text
     after = client.get(f"/api/sessions/{session_id}/events").json()
     assert after == before
+
+
+def test_new_message_while_ask_user_pending_reports_neutral_conflict(tmp_path):
+    """#1223：`ask_user` 待回答时发新消息 → 409，文案**中性**（不得写死"约束澄清"）。
+
+    约束澄清（`protected_fact_conflict`）与通用提问（`ask_user`）共用同一道
+    `_latest_pending_user_input_request` 闸门，但 kind 不同：文案必须按 kind 分流，
+    否则通用提问会被误报成"约束澄清"，把用户引导到不存在的约束冲突上。
+    """
+    _app, client, session_id = _web_run(tmp_path)
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {
+                    "run": {"max_agent_turns_total": 8, "max_model_requests": 8},
+                    "session": {"max_agent_turns_total": 12, "max_model_requests": 12},
+                },
+            },
+        )
+        assert started.status_code == 200, started.text
+        before = client.get(f"/api/sessions/{session_id}/events").json()
+        assert any(e["type"] == USER_INPUT_REQUESTED for e in before)
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Another task before I answer."},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]
+    assert "约束澄清" not in detail, detail
+    assert "提问" in detail, detail
+    # 零副作用：拒绝不落任何新事件。
+    assert client.get(f"/api/sessions/{session_id}/events").json() == before

@@ -54,6 +54,7 @@ SESSION_SERVICE_COLLABORATORS = frozenset({
     "budget_recovery_failed_sessions",
     "registered_tool_names",
     "reconcile_info",
+    "scoped_constraint_store",
 })
 
 PROJECT_SERVICE_COLLABORATORS = frozenset({
