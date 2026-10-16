@@ -93,7 +93,8 @@ def _activated_tool(tmp_path: Path, child_model: ScriptedModel | None = None,
 
 def _args(target: str, task: str) -> object:
     return type("_Args", (), {"target": target, "task": task,
-                              "constraints": [], "output_schema": None})()
+                              "constraints": [], "output_schema": None,
+                              "omit_constraints": False})()
 
 
 class TestDelegateTool:
@@ -512,7 +513,7 @@ class TestSummaryRefExternalization:
 
         tool, _, _, _ = _activated_tool(tmp_path)
         assert set(tool.args_schema.model_fields) == {
-            "target", "task", "constraints", "output_schema",
+            "target", "task", "constraints", "output_schema", "omit_constraints",
         }
         assert tool.side_effect is ToolSideEffect.MUTATING
         assert tool.permission is ToolPermission.WORKSPACE_WRITE
@@ -700,7 +701,8 @@ class TestSummaryRefExternalization:
                 return SimpleNamespace(accepted=True, used=0, limit=max_delegations)
 
             async def run(self, *, target: str, task: str,
-                          constraints: list[str]) -> SubAgentResult:
+                          constraints: list[str],
+                          omit_constraints: bool = False) -> SubAgentResult:
                 return self._result
 
             async def observe_delegation_result(

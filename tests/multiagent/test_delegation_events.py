@@ -81,7 +81,8 @@ def _activated_tool(tmp_path: Path, child_model=None):
 
 def _args(target: str, task: str) -> object:
     return type("_Args", (), {"target": target, "task": task,
-                              "constraints": [], "output_schema": None})()
+                              "constraints": [], "output_schema": None,
+                              "omit_constraints": False})()
 
 
 class TestDelegationEventVocabulary:
