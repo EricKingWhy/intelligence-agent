@@ -235,6 +235,18 @@ class ProtectedFactReferenceInvalid(SessionServiceError):
     """A user-supplied protected-fact link is stale or does not match its target."""
 
 
+class ProtectedFactNotFound(SessionServiceError):
+    """#1190：撤销目标 fact_id 在本会话投影里不存在（已被删/从未登记/跨会话）。"""
+
+
+class ProtectedFactNotRevocable(SessionServiceError):
+    """#1190：目标 fact 存在但非 active（已被取代）——当前状态不允许主动撤销。
+
+    与 `ProtectedFactNotFound` 分开：会话与 fact 都在，是这次动作按当前状态不成立
+    （同 `SupersedeTargetInvalid` 的 409 立场）。
+    """
+
+
 class SupersedeTargetInvalid(SessionServiceError):
     """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
 
