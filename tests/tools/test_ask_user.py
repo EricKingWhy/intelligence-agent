@@ -287,3 +287,21 @@ async def test_request_does_not_require_direct_user_source(tmp_path):
 
     assert result.ok
     assert result.data["status"] == "requested"
+
+
+@pytest.mark.asyncio
+async def test_payload_carries_configured_timeout_seconds(tmp_path):
+    """#1224：`USER_INPUT_REQUESTED` 载荷带上配置的超时档（前端据此渲染一致数字）。"""
+    session = _session(tmp_path)
+    tokens = _bind(session)
+    try:
+        result = await AskUserTool(timeout_seconds=600).execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.pending_events is not None
+    _event_type, payload = result.pending_events[0]
+    assert payload["timeout_seconds"] == 600

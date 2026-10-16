@@ -1,0 +1,1 @@
+2026-10-16	#1224 ask_user 请求载荷带 timeout_seconds（随请求落盘，前端直接读），AskUserCard 底部超时提示渲染真实档位、与后端注入消息数值一致（依据：Claude askUserQuestionTimeout 为会话可配项，UI 应反映配置值）。独立双轴审查同 #1223 行。	07012cc449a61f5f39dc73410642fff07e7ca29f..0b0d3a111e4ba57d7b4695dcc010a56b991a0ae2

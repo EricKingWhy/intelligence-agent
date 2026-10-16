@@ -137,6 +137,79 @@ describe('Composer pending constraint input lock', () => {
   });
 });
 
+// ── #1223：`ask_user` 通用提问也参与 composer 锁定，文案**中性**（ask_user 不是约束澄清）──
+describe('Composer pending ask_user lock (#1223)', () => {
+  it('待回答的 ask_user 提问 → 锁定输入框，提示中性（绝不出现「约束澄清」字样）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      askUserPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toMatch(/<textarea[^>]*disabled=""/);
+    expect(html).toContain('请先回答当前提问，再发送新消息');
+    expect(html).toContain('等待回答…');
+    expect(html).not.toContain('约束澄清');
+  });
+
+  it('约束澄清在场时其锁文案**保持不动**（没有被中性的 ask_user 文案顶掉）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      constraintInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
+    expect(html).toContain('等待约束澄清回答…');
+  });
+});
+
+// ── #1223：排队条的 steer/flush 也是"开新消息"路径，与输入框同一把锁管到底 ──
+describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
+  const queue = [
+    { kind: 'queue' as const, id: 'q-1', content: '排队的问题', seq: 1, created_at: '' },
+  ];
+  // 拿出按钮开标签（disabled/aria-label/title 都在同一开标签里）。
+  const buttonTag = (html: string, ariaLabel: string) =>
+    html.match(new RegExp(`<button[^>]*aria-label="${ariaLabel}"[^>]*>`))?.[0] ?? '';
+
+  it('ask_user 待回答 ⇒ 两个队列条按钮均禁用，提示中性（不写「约束澄清」）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      undelivered: queue,
+      onSteerItem: noop,
+      onFlush: noop,
+      askUserPending: true,
+    })).replaceAll('<!-- -->', '');
+    const steer = buttonTag(html, '立即发送');
+    const flush = buttonTag(html, '立即发送全部');
+    expect(steer).toContain('disabled=""');
+    expect(flush).toContain('disabled=""');
+    expect(steer).toContain('请先回答当前提问');
+    expect(flush).toContain('请先回答当前提问');
+    expect(steer).not.toContain('约束澄清');
+  });
+
+  it('约束澄清待回答 ⇒ 两个队列条按钮同样禁用（原有行为不回归）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      undelivered: queue,
+      onSteerItem: noop,
+      onFlush: noop,
+      constraintInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(buttonTag(html, '立即发送')).toContain('请先回答当前约束澄清');
+    expect(buttonTag(html, '立即发送全部')).toContain('disabled=""');
+  });
+
+  it('无待回答输入 ⇒ 队列条按钮可用（锁解除，反证锁不常驻）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      undelivered: queue,
+      onSteerItem: noop,
+      onFlush: noop,
+    })).replaceAll('<!-- -->', '');
+    expect(buttonTag(html, '立即发送')).not.toContain('disabled');
+    expect(buttonTag(html, '立即发送全部')).not.toContain('disabled');
+  });
+});
+
 describe('Composer procedural rule signal (#298 R5)', () => {
   it('offers an explicit opt-in for reusable rules', () => {
     const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');

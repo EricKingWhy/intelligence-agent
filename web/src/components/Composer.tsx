@@ -47,6 +47,10 @@ interface Props {
   approvalPending?: boolean;
   /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
   constraintInputPending?: boolean;
+  /** #1223：待回答的 `ask_user` 通用提问时同样锁住新消息——与约束澄清**同一条**锁定
+   *  语义（把用户引向对话流里的待回答卡片，而不是让他发新消息撞后端 409）。
+   *  文案必须**中性**：ask_user 是通用提问、不是约束澄清，见下方 `lockHint`。 */
+  askUserPending?: boolean;
   /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
    *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
    *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
@@ -152,6 +156,7 @@ export const Composer = memo(function Composer({
   streaming,
   approvalPending = false,
   constraintInputPending = false,
+  askUserPending = false,
   onSubmit,
   onSteer,
   sessionId = null,
@@ -269,15 +274,27 @@ export const Composer = memo(function Composer({
   // 「streaming 表示本页有活流」被当成「服务端有在途 run」：跨客户端场景下
   // 输入框可用、消息却走 queue 分支静默丢失。现在流式期间发消息 = 显式选择
   // queue（Enter）/ steer（Ctrl/Cmd+Enter），两条通道都有后端消费。
-  const locked = approvalPending || constraintInputPending;
+  // #1223：`ask_user` 通用提问与约束澄清**共用同一条锁定语义**（都是"有待回答的
+  // 用户输入"），差别只在文案——ask_user 不是约束澄清，故走中性措辞。
+  const locked = approvalPending || constraintInputPending || askUserPending;
   // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = locked && !streaming;
   const lockHint = constraintInputPending
     ? '请先回答当前约束澄清，再发送新消息'
-    : '等待审批决策后再继续';
+    : askUserPending
+      ? '请先回答当前提问，再发送新消息'
+      : '等待审批决策后再继续';
   const lockedPlaceholder = constraintInputPending
     ? '等待约束澄清回答…'
-    : '等待审批决策…';
+    : askUserPending
+      ? '等待回答…'
+      : '等待审批决策…';
+  /** #1223：排队条的 steer/flush 也是"开新消息"路径，与输入框同一把锁管到底——
+   *  否则输入框锁了、队列条还能点，用户照样撞后端 409。标题按具体待答项中性化。 */
+  const pendingUserInputLocked = constraintInputPending || askUserPending;
+  const pendingUserInputHint = constraintInputPending
+    ? '请先回答当前约束澄清'
+    : '请先回答当前提问';
 
   // ── #283 权限 pill：会话内可改 + 升档确认 ──
   // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
@@ -748,10 +765,10 @@ export const Composer = memo(function Composer({
                 <button
                   className="queue-item-btn"
                   onClick={() => onSteerItem?.(item)}
-                  disabled={!onSteerItem || constraintInputPending}
+                  disabled={!onSteerItem || pendingUserInputLocked}
                   aria-label="立即发送"
-                  title={constraintInputPending
-                    ? '请先回答当前约束澄清'
+                  title={pendingUserInputLocked
+                    ? pendingUserInputHint
                     : '立即发送（注入当前运行）'}
                 >
                   <Zap size={13} />
@@ -778,10 +795,10 @@ export const Composer = memo(function Composer({
             <button
               className="queue-item-btn queue-flush-btn"
               onClick={onFlush}
-              disabled={constraintInputPending}
+              disabled={pendingUserInputLocked}
               aria-label="立即发送全部"
-              title={constraintInputPending
-                ? '请先回答当前约束澄清'
+              title={pendingUserInputLocked
+                ? pendingUserInputHint
                 : '立刻投递待发送输入（POST /queue/flush）'}
             >
               <Play size={13} />

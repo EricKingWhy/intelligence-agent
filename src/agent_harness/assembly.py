@@ -337,7 +337,10 @@ def _build_tooling(
         registry.register(RequestConstraintResolutionTool())
         # #1204：通用提问 `ask_user` 与澄清工具共用**回答通道**（都靠前端提交
         # `input_request`），故与它同一道开关——没有回答通道的入口（CLI）不注册。
-        registry.register(AskUserTool())
+        # #1224：把配置的超时档注入工具，随 `USER_INPUT_REQUESTED` 载荷落盘。
+        registry.register(
+            AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
+        )
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
@@ -779,8 +782,11 @@ async def build_runtime(
         if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
             registry.register(RequestConstraintResolutionTool())
         # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
+        # #1224：同源注入配置的超时档（与 `_build_tooling` 逐字一致）。
         if include_resolution_tool and AskUserTool().name not in registered_names:
-            registry.register(AskUserTool())
+            registry.register(
+                AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
+            )
 
     # 曝光级别接线（#528 / IMP-11）：Registry 定型（含上面的收窄）后，存在
     # deferred 工具才注册内置 tool_search 并建立定义集控制器——全 direct
