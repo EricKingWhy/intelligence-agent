@@ -117,7 +117,10 @@ from agent_harness.session.approval import (
 from agent_harness.session.approval import (
     effective_permission_mode as _effective_permission_mode,
 )
-from agent_harness.session.ask_user_timeout import ask_user_timeout_message
+from agent_harness.session.ask_user_timeout import (
+    ask_user_timeout_message,
+    pending_ask_user_request_id,
+)
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -3033,6 +3036,50 @@ class SessionService:
             raise BudgetConflict(
                 "Shared session budget no longer has room for same-run continuation."
             )
+
+    async def resume_ask_user_timeout(self, session_id: str, *, request_id: str) -> bool:
+        """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
+
+        到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
+        是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
+        未答复 `ask_user` 上才恢复（已答复 / 整卡跳过 / 已终结 / 请求已变 ⇒ 返回 False，
+        零副作用）。恢复走既有 `resume_and_launch`
+        （`resume_basis='user_input'` + `{request_id, timeout:true}`），由它注入
+        "用户在 N 分钟内未回答…"到底层消息且**不写任何 answer**。
+
+        并发（多个连接同时到点）由 `resume_and_launch` 的会话锁 + CAS 串行化：输家拿到
+        冲突/拒绝，这里吞掉返回 False（不是错误）。
+        """
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if pending_ask_user_request_id(events) != request_id:
+            return False
+        paused = latest_paused_run(events)
+        if paused is None:
+            run_id = latest_run_id(events)
+            if run_id is not None:
+                paused = _pending_user_input_pause(events, run_id=run_id)
+        if (
+            paused is None
+            or paused.reason != REASON_USER_INPUT
+            or paused.input_request_id != request_id
+        ):
+            return False
+        try:
+            await self.resume_and_launch(
+                session_id=session_id,
+                resume_run_id=paused.run_id,
+                expected_version=paused.version,
+                resume_basis=RESUME_BASIS_USER_INPUT,
+                input_request={"request_id": request_id, "timeout": True},
+            )
+        except (
+            BudgetConflict,
+            BudgetRejection,
+            ActiveRunConflict,
+            SessionNotFound,
+        ):
+            return False
+        return True
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 
