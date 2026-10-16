@@ -33,9 +33,8 @@ from agent_harness.session.errors import (
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     AGENT_DELEGATION_STARTED,
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_INTERRUPTED,
+    RUN_PAUSED,
+    RUN_TERMINAL_TYPES,
 )
 from agent_harness.web.app import session_service
 from agent_harness.web.context_usage import build_context_usage_payload
@@ -46,8 +45,13 @@ if TYPE_CHECKING:
 
     from agent_harness.web.app import AppState
 
-# run 终态（= 前端投影触发「未回填委派翻 stopped」的那组，projection.ts:2139-2170）。
-_RUN_TERMINAL = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
+# 「把在途委派翻 stopped」的触发事件集 = run 终态（RUN_TERMINAL_TYPES，单一事实源，§9.5）
+# ∪ run/paused。paused **不是** run 终态（event.py:40-42 明示），但前端投影
+# projectRunPaused（projection.ts:1159）同样走 finalizeRun（:2168-2215）把 running
+# 委派一并翻 stopped（:2204-2208）⇒ roster 判据必须与投影同源。仓库既有同构先例：
+# session/interrupt.py:83 与 session/fork.py:156 的
+# ``event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED``。
+_STOPPED_RUN_TRIGGERS = RUN_TERMINAL_TYPES | {RUN_PAUSED}
 
 
 def register_delegation_routes(
@@ -82,8 +86,10 @@ def _project_delegations(events: list[Any]) -> list[dict]:
     """父事件流 → 委派条目列表（真事件序）。``_start_pos`` 仅用于判 stopped，出口剔除。"""
     entries: list[dict] = []
     by_child: dict[str, dict] = {}
-    terminal_positions = [
-        pos for pos, event in enumerate(events) if event.type in _RUN_TERMINAL
+    # 停止触发事件（run 终态 ∪ paused）的**位置**：供尾部判「在途委派是否被其收口」，
+    # 并按其 time 结算 completed_at。
+    stopped_trigger_positions = [
+        pos for pos, event in enumerate(events) if event.type in _STOPPED_RUN_TRIGGERS
     ]
 
     for pos, event in enumerate(events):
@@ -129,14 +135,19 @@ def _project_delegations(events: list[Any]) -> list[dict]:
             if isinstance(summary, str) and summary:
                 entry["summary"] = summary
 
-    # 未回填的 running：父 run 在 started **之后**到达终态 ⇒ stopped（中断 ≠ 失败，
-    # 与投影同一四态语言；阻塞串行模型下不常见，但 kill/崩溃路径真实存在）。
+    # 未回填的 running：父 run 在 started **之后**到达停止触发（终态或暂停）⇒ stopped
+    # （中断 ≠ 失败，与投影同一四态语言；阻塞串行模型下不常见，但 kill/崩溃/预算暂停
+    # 路径真实存在）。completed_at 冻结在**第一条**触发事件的 time——函数契约「其余用
+    # 起点→终点」要求终态条目有真终点，且与前端 finalizeRun settle 同源（不是 return null）。
     for entry in entries:
-        if (
-            entry["status"] == "running"
-            and any(tp > entry["_start_pos"] for tp in terminal_positions)
-        ):
-            entry["status"] = "stopped"
+        if entry["status"] == "running":
+            trigger_pos = next(
+                (tp for tp in stopped_trigger_positions if tp > entry["_start_pos"]),
+                None,
+            )
+            if trigger_pos is not None:
+                entry["status"] = "stopped"
+                entry["completed_at"] = events[trigger_pos].time
         entry.pop("_start_pos", None)
     return entries
 

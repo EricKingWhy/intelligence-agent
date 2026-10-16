@@ -37,6 +37,8 @@ export function useDelegations(
       return;
     }
     let alive = true;
+    // 切会话先清旧行：新响应 resolve 前旧行仍属上一个会话，是短暂的跨会话第二真相。
+    setEntries([]);
     getSessionDelegations(sessionId)
       .then((rows) => {
         // 非数组形态（老后端 / 代理回整块对象 / 测试桩回 `{}`）= 拿不到 roster ⇒
