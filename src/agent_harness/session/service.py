@@ -354,8 +354,8 @@ _WRITE_CONFLICT_ATTEMPTS = 3
 
 #: #1191（Phase 2）：非会话级（规则层）作用域词表 = 注解 `scope` 里落在规则层的取值。
 #: 从 `ConstraintScope` 派生而不是再写一遍字面量——本文件内规则层作用域词表只此一处
-#: （审查 finding S-b2）。注意 DTO 侧另有 `web/protected_facts.py` 的 `Literal[...]`
-#: 字面量，属该层独立校验，不在此口径内。
+#: （审查 finding S-b2）。注意 DTO 侧（`agent_harness.web.protected_facts`）另有
+#: `Literal[...]` 字面量，属该层独立校验，不在此口径内。
 _SCOPED_SCOPE_VALUES = frozenset(
     (ConstraintScope.PROJECT.value, ConstraintScope.GLOBAL.value)
 )

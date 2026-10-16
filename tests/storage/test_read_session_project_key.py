@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Self
+
+import pytest
 
 from agent_harness.storage.sqlite import read_session_project_key
 
@@ -59,3 +62,41 @@ def test_missing_table_returns_none(tmp_path: Path) -> None:
 
 def test_missing_file_returns_none(tmp_path: Path) -> None:
     assert read_session_project_key(tmp_path / "gone.db", "s1") is None
+
+
+def test_connection_is_closed_after_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F2 回归钉：sqlite3 连接的 `with` 只提交/回滚、**不关连接**，此读取每轮 build 都跑，
+    # 必须显式关闭。用代理连接记录 `close()`——直接钉契约，不依赖 GC/ResourceWarning。
+    db = _make_db(tmp_path / "harness.db")
+    closed: list[bool] = []
+    real_connect = sqlite3.connect
+
+    class _SpyConnection:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self._inner = inner
+
+        def execute(self, *args: object) -> sqlite3.Cursor:
+            return self._inner.execute(*args)  # type: ignore[arg-type]
+
+        # 复刻 sqlite3 连接的语境管理器语义：`__exit__` 只提交/回滚、**不关连接**——
+        # 这样"退回裸 `with`"的变异会让 `close()` 不被调用（红在 `closed == []`），
+        # 而不是红在协议缺失上。
+        def __enter__(self) -> Self:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc: object) -> object:
+            return self._inner.__exit__(*exc)  # type: ignore[arg-type]
+
+        def close(self) -> None:
+            closed.append(True)
+            self._inner.close()
+
+    def _spy_connect(*args: object, **kwargs: object) -> _SpyConnection:
+        return _SpyConnection(real_connect(*args, **kwargs))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
+    assert read_session_project_key(db, "s1") == "/repo/x"
+    assert closed == [True]
