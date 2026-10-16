@@ -21,12 +21,12 @@
  * 显式中断唯一入口是 cancelStream 的 POST /cancel（decideCancel 决策）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, FailedDraft, SessionDeleted, SessionMode, SessionSummary } from '../types';
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
-import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
+import { initConversation, applyEvent, projectHistory, deriveSessionTitle, deriveRunFailedBeforePlan, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
@@ -404,16 +404,6 @@ export function useSession() {
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** #1193：run 致命异常且**计划从未生成**（后端 `error` 事件
-   *  `code=run-failed-before-plan`）——服务端刻意不回滚 mode（fail-closed），
-   *  会话停在 plan 档（只读、无计划），写工具全被拦。非 null 时主区渲染
-   *  带「退出 plan 模式」动作的错误横幅；重连链由 onEvent 按终态收口，
-   *  不再走「连接中断」静默重试（重试永远不会成功）。 */
-  const [runFailedBeforePlan, setRunFailedBeforePlan] = useState<{
-    sessionId: string;
-    message: string;
-    hint: string;
-  } | null>(null);
   /** 会话**列表**加载失败原因（F9 / 真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。
    *
    *  为什么是独立一条通道、而不是复用上面的 `error`：`error` 是**单槽**主区横幅，
@@ -633,12 +623,9 @@ export function useSession() {
     // ⚠ 顺序不能动：这句在下面 `setError('续聊失败：…')` 之前跑，判的是**上一拍**
     // 的 `mode`（即「发送前就是 viewing」）——正是 `switchingSession` 的定义。
     if (switchingSession) setError(null);
-    // #1193：plan-stuck 横幅同属「不跨会话存活」的一组——切到别的会话即清。
-    // 触发它的 error 事件是 stream-only（不落盘）：刷新后横幅不重现，这是
-    // 刻意的——「run 失败且计划从未生成」依赖当次流里的失败信号，重放历史
-    // 给不出它；而「处于 plan 档、无计划」本身是新 plan 会话的正常状态，
-    // 不能单独拿来当失败证据（不猜）。
-    if (switchingSession) setRunFailedBeforePlan(null);
+    // #1193：plan-stuck 横幅**不需要**在这里清——它是 `conversation.events` 的
+    // 投影，切会话即随新会话的事件重建（旧会话的记录不跨会话存活；切回来时
+    // 事件仍在，横幅照旧在场——这正是它该有的样子）。
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
@@ -870,22 +857,12 @@ export function useSession() {
           // （fail-closed），会话停在 plan 档（只读）；把它当**终态**处理：
           // terminalSeen 置真 ⇒ 后端随后收流时 onStreamEnd 走干净迁移
           // （finishLive），不再进入「连接中断」重试链——重试永远不会成功
-          // （每轮新 run 都派生 PLAN、写工具全被拦）。横幅带「退出 plan 模式」
-          // 动作（显式操作，非自动回滚）。
+          // （每轮新 run 都派生 PLAN、写工具全被拦）。横幅本身是事件流投影
+          // （`deriveRunFailedBeforePlan`），这里只做流终态判定。
           if (event.type === 'error' && event.data?.code === 'run-failed-before-plan') {
             terminalSeenRef.current = true;
-            const sid = event.session_id ?? liveSidRef.current;
-            if (sid) {
-              const message = event.data.message;
-              const hint = event.data.hint;
-              setRunFailedBeforePlan({
-                sessionId: sid,
-                message: typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
-                hint: typeof hint === 'string' ? hint : '',
-              });
-            }
             // 不 return：继续走通用投影（类型已登记为 no-op）与游标语义——
-            // 这条分支只改「终态判定 + 横幅」，不改帧序。
+            // 这条分支只改「终态判定」，不改帧序。
           }
           if (RUN_TERMINAL_TYPES.has(event.type)) {
             terminalSeenRef.current = true;
@@ -2111,12 +2088,12 @@ export function useSession() {
    *  服务端刻意不自动回滚（fail-closed），恢复只能由用户发起——本函数是那个
    *  动作的唯一入口。成功 = `workflow/mode-changed`（normal）已 durable 落盘
    *  → 就地重读事件重投影（档位真相在事件流，不用回执写本地状态，同
-   *  `changePermission` 的约定）→ 清掉 plan-stuck 横幅。
+   *  `changePermission` 的约定）→ 横幅随投影自行消失（新的 mode-changed 标记
+   *  取代失败标记，见 `deriveRunFailedBeforePlan`），无需在此清状态。
    *  失败向上抛：横幅就地展示错误、保持在场，不静默吞。 */
   const exitPlanMode = useCallback(
     async (sessionId: string) => {
       await changeWorkflowMode(sessionId, 'normal');
-      setRunFailedBeforePlan((cur) => (cur?.sessionId === sessionId ? null : cur));
       reloadConversation(sessionId);
     },
     [reloadConversation],
@@ -2276,6 +2253,21 @@ export function useSession() {
     },
     [],
   );
+
+  /** #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode（fail-closed），
+   *  会话停在 plan 档（只读、无计划），写工具全被拦。非 null 时主区渲染带
+   *  「退出 plan 模式」动作的错误横幅。
+   *
+   *  **投影派生，不另存状态**（不变量 #22）：live 帧、WS 快照、刷新后的
+   *  GET /events 走的是同一份 `conversation.events`，判定规则单点在
+   *  `deriveRunFailedBeforePlan`（最新生命周期标记 = 该 error 事件）。因此迟到
+   *  接流（审查 F2）与刷新/切回（F3）下横幅都在场；用户退出 plan 或重试成功后
+   *  自动消失（新的 mode-changed / run/started 取代该标记）。 */
+  const runFailedBeforePlan = useMemo(() => {
+    if (!conversation) return null;
+    const derived = deriveRunFailedBeforePlan(conversation.events);
+    return derived ? { sessionId: conversation.session_id, ...derived } : null;
+  }, [conversation]);
 
   return {
     sessions,

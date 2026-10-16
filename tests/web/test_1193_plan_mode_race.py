@@ -262,9 +262,12 @@ class TestRunFailedBeforePlanSurface:
         assert data["workflow_mode"] == "plan"
         assert "手动退出" in data["hint"]
         assert data["message"], "message 必须带可读原因"
-        # stream-only：不落盘（有 seq 的才是 durable 事实）。
-        assert errors[0]["seq"] is None
-        assert errors[0]["durability"] == "transient"
+        # durable（#1193 独立审查 F2）：致命启动失败发生在 run 起点，前端接流总晚
+        # 一步（认领轮询 ≥150ms / 交付层攒包更晚）——瞬时帧发出时没有订阅者，必丢，
+        # 前端照样退回「连接中断」重试。落盘后迟到接流的 WS 快照与刷新后的
+        # GET /events 都能读到，前端横幅成为事件流投影。
+        assert isinstance(errors[0]["seq"], int), f"必须落盘（带 seq）：{errors[0]}"
+        assert errors[0]["durability"] == "durable"
 
         events = _events(client, sid)
         types = [e["type"] for e in events]
@@ -272,6 +275,11 @@ class TestRunFailedBeforePlanSurface:
         assert "task/plan_updated" not in types
         # 不自动回滚：mode 保持 plan，没有 normal 事件。
         assert _mode_values(events) == ["plan"]
+        # 同一事实在 durable 读面上可见——这正是 F2 的判据（无订阅者在场时帧必丢）。
+        durable_errors = [e for e in events if e["type"] == "error"]
+        assert len(durable_errors) == 1, f"durable log 必须含该事件：{types}"
+        assert durable_errors[0]["data"]["code"] == "run-failed-before-plan"
+        assert durable_errors[0]["seq"] == errors[0]["seq"]
 
     def test_manual_exit_plan_restores_write_tools(self, tmp_path: Path):
         """用户显式退出 plan 后，写操作工具恢复可用（端到端恢复路径）。"""

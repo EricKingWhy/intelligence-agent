@@ -80,7 +80,6 @@ export type EventTypeValue = (typeof EventType)[keyof typeof EventType];
 
 /** Ephemeral streaming signals — never persisted (invariant #4: Event ≠ Diagnostic Log). */
 export const STREAM_ONLY_TYPES = [
-  'error',
   'model/delta',
   'model/started',
 ] as const;

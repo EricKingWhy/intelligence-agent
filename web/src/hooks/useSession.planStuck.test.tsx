@@ -8,13 +8,19 @@
  * 「连接中断（stream ended unexpectedly）：重试 3 次未成功」——重试永远不会
  * 成功（每轮新 run 都派生 PLAN、写工具全被拦），用户也没有恢复入口。
  *
- * ── 修复契约（票面 schema）───────────────────────────────────────────────
- * 后端异常臂推 `error` 事件（stream-only）：`data.code=run-failed-before-plan`
- * + 可读 message + `hint`（可手动退出 plan 模式）。前端收到即：
- *   1. 当**终态**收口（terminalSeen）⇒ 后端随后收流走干净迁移，不进重连链；
- *   2. 横幅 `runFailedBeforePlan`（可读原因 + hint）+ 退出动作；
+ * ── 修复契约（票面 schema + 独立审查 F2/F3）───────────────────────────────
+ * 后端异常臂落盘 `error` 事件（**durable**）：`data.code=run-failed-before-plan`
+ * + 可读 message + `hint`（可手动退出 plan 模式）。前端：
+ *   1. 收到该帧当**终态**收口（terminalSeen）⇒ 后端随后收流走干净迁移，
+ *      不进重连链（重试永远不会成功）；
+ *   2. 横幅 `runFailedBeforePlan` = **事件流投影**（`deriveRunFailedBeforePlan`：
+ *      最新生命周期标记 = 该 error）——迟到接流的 WS 快照与刷新后的
+ *      GET /events 走同一份事件列表，因此横幅在刷新/切回后照样在场
+ *      （stream-only 的瞬时帧做不到这件事：致命启动失败发生在 run 起点，
+ *      前端接流总晚一步，帧发出时没有订阅者，必丢）；
  *   3. 退出 = `POST /workflow-mode {mode:'normal'}`（显式、幂等）→ 重读事件
- *      重投影（档位真相在事件流，不用回执写本地状态）→ 清横幅。
+ *      重投影（档位真相在事件流，不用回执写本地状态）→ 新的 mode-changed
+ *      取代失败标记，横幅随投影自行消失。
  *
  * ── 手法 ─────────────────────────────────────────────────────────────────
  * 与 useSession.externalRun.test.tsx 同款夹具：mock api 层与 wsStream 层
@@ -28,7 +34,8 @@ import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../types';
-import { EXTERNAL_RUN_POLL_INTERVAL_MS, useSession } from './useSession';
+import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
+import { deriveRunFailedBeforePlan } from '../lib/projection';
 
 // ── api mock：getSessionEvents 读可换装的 holder；workflow-mode 记录调用 ──────
 const apiState = vi.hoisted(() => ({
@@ -47,6 +54,8 @@ vi.mock('../lib/api', async (importOriginal) => {
     sendMessage: vi.fn(),
     resumeSession: vi.fn(),
     flushSessionQueue: vi.fn(),
+    // 创建路径（F2 的真实入口）：POST 永不 resolve = 交付层攒包（响应头等 run 结束）。
+    startSession: vi.fn(() => new Promise<Response>(() => {})),
     changeWorkflowMode: vi.fn(async (sessionId: string, mode: string) => {
       apiState.workflowModeCalls.push({ sessionId, mode });
       return { id: sessionId, mode };
@@ -64,6 +73,9 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/wsStream')>();
   return {
     ...actual,
+    // 创建路径的「基线 + 差分」认领：基线给空集、差分直接给 SID（#1148 同款夹具）。
+    sessionIdBaseline: vi.fn(async () => new Set<string>()),
+    discoverNewSessionId: vi.fn(async () => SID),
     wsStreamResponse: (sessionId: string, afterSeq?: number) => {
       wsMock.calls.push({ sessionId, afterSeq: afterSeq ?? -1 });
       return new Response(
@@ -81,6 +93,7 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
 import { changeWorkflowMode, getSessionEvents } from '../lib/api';
 
 const SID = 's-1';
+const SID2 = 's-2';
 const RUN = 'r-1';
 const T = '2026-10-17T00:00:00Z';
 
@@ -88,22 +101,24 @@ function frame(
   seq: number,
   type: string,
   data?: Record<string, unknown>,
+  sid = SID,
 ): AgentEvent {
   return {
     type,
     seq,
-    session_id: SID,
+    session_id: sid,
     run_id: RUN,
     ...(data !== undefined ? { data } : {}),
     time: T,
   } as AgentEvent;
 }
 
-/** 后端异常臂的 error 帧（#1193 票面 schema）：stream-only（seq=null）。 */
-function planStuckFrame(): AgentEvent {
+/** 后端异常臂的 error 事件（#1193 票面 schema）：**durable**——落盘后迟到接流
+ *  的 WS 快照与刷新后的 GET /events 都读得到（审查 F2/F3 的判据）。 */
+function planStuckFrame(seq = 5): AgentEvent {
   return {
     type: 'error',
-    seq: null,
+    seq,
     session_id: SID,
     run_id: null,
     data: {
@@ -122,11 +137,11 @@ const idleHistory = (): AgentEvent[] => [
   frame(2, 'run/completed', {}),
 ];
 
-/** 外部启动且仍在途的 run（进入 live 的入口，走既有轮询接管路径）。 */
-const inFlightRun = (): AgentEvent[] => [
-  ...idleHistory(),
-  frame(3, 'run/started'),
-  frame(4, 'user/message', { content: '先出计划' }),
+/** 失败已落盘的 plan 会话（plan 档 + durable error；没有 run/started）。 */
+const stuckHistory = (): AgentEvent[] => [
+  frame(1, 'session/started'),
+  frame(2, 'workflow/mode-changed', { mode: 'plan' }),
+  planStuckFrame(3),
 ];
 
 const enc = new TextEncoder();
@@ -169,16 +184,19 @@ async function enterViewing(sid = SID): Promise<void> {
   expect(captured.hook!.conversation?.session_id).toBe(sid);
 }
 
-/** 经既有轮询接管路径进入 live（wsMock.calls[0] = 本条流）。 */
-async function enterLive(): Promise<void> {
+/** 经创建路径进入 live（F2 的真实入口）：submitTask → 认领 SID → WS 接流。
+ *  POST 永不 resolve = 交付层攒包；帧时机归测试驱动。 */
+async function enterLiveViaSubmit(): Promise<void> {
   await mount();
-  await enterViewing(SID);
-  apiState.events = inFlightRun();
+  let pending: Promise<unknown> | undefined;
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(EXTERNAL_RUN_POLL_INTERVAL_MS);
+    pending = captured.hook!.submitTask({ task: '先出计划' });
+    await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+    await pending;
   });
   expect(captured.hook!.streaming).toBe(true);
   expect(wsMock.calls).toHaveLength(1);
+  expect(wsMock.calls[0]).toMatchObject({ sessionId: SID, afterSeq: -1 });
 }
 
 beforeEach(() => {
@@ -209,18 +227,30 @@ afterEach(async () => {
 });
 
 describe('#1193 — run 致命异常且计划从未生成（前端半）', () => {
-  it('收到 error 帧：亮出 plan-stuck 横幅；收流不进重连链（终态收口，无「连接中断」）', async () => {
-    await enterLive();
+  it('刷新/迟到接流：durable 历史里就有该事件 → 横幅在场（不依赖当次流里的瞬时帧）', async () => {
+    await mount();
+    // 打开一个「失败已落盘」的会话：没有实时流、没有 error 帧经过 onEvent——
+    // 横幅只能来自事件流投影（修复前这里恒为 null：横幅只活在流里）。
+    apiState.events = stuckHistory();
+    await enterViewing(SID);
 
-    await act(async () => {
-      feedStream(planStuckFrame());
-    });
     expect(captured.hook!.runFailedBeforePlan).toMatchObject({
       sessionId: SID,
       hint: expect.stringContaining('手动退出 plan 模式'),
     });
     expect(captured.hook!.runFailedBeforePlan?.message).toContain('运行失败');
+    expect(wsMock.calls).toHaveLength(0); // 没有在途 run：不开流
+  });
 
+  it('收到 error 帧：终态收口，收流不进重连链（无「连接中断」静默重试）', async () => {
+    await enterLiveViaSubmit();
+
+    await act(async () => {
+      // durable 的同一事实：先落盘（GET /events 读面）再广播（帧）。此例的形态
+      // 正是票面场景——run 在 begin_run 前就死了，日志里没有 run/started。
+      apiState.events = stuckHistory();
+      feedStream(planStuckFrame(3));
+    });
     // 后端异常臂随后收流：终态已见 ⇒ 干净迁移 viewing，**不**调度重连。
     await act(async () => {
       closeStream();
@@ -232,19 +262,26 @@ describe('#1193 — run 致命异常且计划从未生成（前端半）', () =>
     // 判别断言：没有第二次接流（修复前这里会重连，最终 give-up 报「连接中断」）。
     expect(wsMock.calls).toHaveLength(1);
     expect(captured.hook!.error).toBeNull();
+    // 迁移到 viewing 会重读 durable 历史重建对话——横幅仍在（这正是 durable
+    // 的意义：瞬时帧在这一次重读里就没了）。
+    expect(captured.hook!.runFailedBeforePlan?.sessionId).toBe(SID);
   });
 
-  it('退出 plan 模式：显式调用 workflow-mode(normal) → 重读事件 → 清横幅', async () => {
-    await enterLive();
-    await act(async () => {
-      feedStream(planStuckFrame());
-    });
-    await act(async () => {
-      closeStream();
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
+  it('退出 plan 模式：显式调用 workflow-mode(normal) → 重读事件 → 横幅随投影消失', async () => {
+    await mount();
+    apiState.events = stuckHistory();
+    await enterViewing(SID);
+    expect(captured.hook!.runFailedBeforePlan).not.toBeNull();
     const readsBefore = vi.mocked(getSessionEvents).mock.calls.length;
 
+    // 退出的 durable 效果：事件流里多一条 mode-changed(normal)。
+    vi.mocked(changeWorkflowMode).mockImplementationOnce(
+      async (sessionId: string, mode: string) => {
+        apiState.workflowModeCalls.push({ sessionId, mode });
+        apiState.events = [...stuckHistory(), frame(4, 'workflow/mode-changed', { mode: 'normal' })];
+        return { id: sessionId, mode };
+      },
+    );
     await act(async () => {
       await captured.hook!.exitPlanMode(SID);
     });
@@ -256,14 +293,9 @@ describe('#1193 — run 致命异常且计划从未生成（前端半）', () =>
   });
 
   it('退出失败：横幅保持在场、错误向上抛（由横幅就地回显，不静默吞）', async () => {
-    await enterLive();
-    await act(async () => {
-      feedStream(planStuckFrame());
-    });
-    await act(async () => {
-      closeStream();
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
+    await mount();
+    apiState.events = stuckHistory();
+    await enterViewing(SID);
 
     vi.mocked(changeWorkflowMode).mockRejectedValueOnce(
       Object.assign(new Error('存储写锁耗尽'), { status: 503 }),
@@ -276,25 +308,61 @@ describe('#1193 — run 致命异常且计划从未生成（前端半）', () =>
     expect(captured.hook!.runFailedBeforePlan?.sessionId).toBe(SID);
   });
 
-  it('切到别的会话：横幅不跨会话存活', async () => {
-    await enterLive();
-    await act(async () => {
-      feedStream(planStuckFrame());
-    });
-    await act(async () => {
-      closeStream();
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
+  it('切到别的会话再切回：横幅不跨会话存活，但本会话的记录仍在（投影语义）', async () => {
+    await mount();
+    apiState.events = stuckHistory();
+    await enterViewing(SID);
     expect(captured.hook!.runFailedBeforePlan).not.toBeNull();
 
-    apiState.events = [frame(1, 'session/started'), frame(2, 'run/completed', {})].map(
-      (e) => ({ ...e, session_id: 's-2' }) as AgentEvent,
-    );
+    apiState.events = [frame(1, 'session/started', undefined, SID2), frame(2, 'run/completed', {}, SID2)];
     await act(async () => {
-      captured.hook!.selectSession('s-2');
+      captured.hook!.selectSession(SID2);
     });
     await act(async () => {});
-
     expect(captured.hook!.runFailedBeforePlan).toBeNull();
+
+    apiState.events = stuckHistory();
+    await act(async () => {
+      captured.hook!.selectSession(SID);
+    });
+    await act(async () => {});
+    expect(captured.hook!.runFailedBeforePlan?.sessionId).toBe(SID);
+  });
+});
+
+describe('#1193 — 横幅派生规则表（deriveRunFailedBeforePlan）', () => {
+  const err = planStuckFrame(3);
+  const modePlan = frame(1, 'workflow/mode-changed', { mode: 'plan' });
+  const modeNormal = frame(4, 'workflow/mode-changed', { mode: 'normal' });
+  const started = frame(5, 'run/started');
+
+  it('空流 / 只有 plan 档：无横幅（新 plan 会话不是失败证据，不猜）', () => {
+    expect(deriveRunFailedBeforePlan([])).toBeNull();
+    expect(deriveRunFailedBeforePlan([modePlan])).toBeNull();
+  });
+
+  it('error 是最新标记 → 横幅；message/hint 原样取出', () => {
+    const hit = deriveRunFailedBeforePlan([modePlan, err]);
+    expect(hit?.message).toContain('运行失败');
+    expect(hit?.hint).toContain('手动退出 plan 模式');
+  });
+
+  it('其后有 mode-changed（用户退出/改档）→ 无横幅', () => {
+    expect(deriveRunFailedBeforePlan([err, modeNormal])).toBeNull();
+  });
+
+  it('其后有 run/started（用户重试且已启动）→ 无横幅', () => {
+    expect(deriveRunFailedBeforePlan([err, started])).toBeNull();
+  });
+
+  it('重试再次失败（error 又出现）→ 横幅重现', () => {
+    const again = { ...planStuckFrame(7), data: { ...err.data, message: '第二次失败' } } as AgentEvent;
+    expect(deriveRunFailedBeforePlan([err, started, again])?.message).toBe('第二次失败');
+  });
+
+  it('message 缺失时给可读兜底（不显示空白横幅）', () => {
+    const bare = { ...planStuckFrame(9), data: { code: 'run-failed-before-plan' } } as AgentEvent;
+    expect(deriveRunFailedBeforePlan([bare])?.message).toContain('运行失败');
+    expect(deriveRunFailedBeforePlan([bare])?.hint).toBe('');
   });
 });

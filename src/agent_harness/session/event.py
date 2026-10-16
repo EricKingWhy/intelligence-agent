@@ -199,11 +199,18 @@ WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
-# ── #1193：run 致命异常的**明确错误信号**（stream-only，不落盘）──────────────
+# ── #1193：run 致命异常的**明确错误信号**（durable，落盘）────────────────────
 # 缺陷背景：run 启动期致命异常（如 begin_run SeqConflict）既无 run/started 也无
 # run/failed，前端只看到「连接中断（stream ended unexpectedly）」并静默重试；而
 # 会话仍停在 plan 档（只读、无计划）——写工具全被拦，重试永远不会成功。
 # 本事件把「为什么失败 + 会话仍在 plan 档 + 手动退出」明确推给前端，替代静默重试。
+#
+# **为什么 durable（#1193 独立审查 F2/F3 实测）**：致命启动失败发生在 run 起点，
+# 而前端接流总晚一步（POST /sessions 路径先轮询认领会话 id 再接 WS，实测 ≥150ms；
+# 交付层攒包路径更晚）——失败帧发出时没有订阅者在场，瞬时帧必丢，前端照样退回
+# 「连接中断」重试。durable 之后，迟到接流的 WS 快照（websocket.py `_push_snapshot`
+# 无论有无在途 run 都补 after_seq 之后的一截）与刷新后的 GET /events 都能读到它，
+# 前端横幅成为事件流的投影（不变量 #22），而非只活在流里的一次性信号。
 #
 # 判定条件（精确，不猜）：run 异常收尾 ∧ `effective_workflow_mode` == plan ∧
 # 事件流中不存在任何 `task/plan_updated`（含前序 run——计划一旦生成过就不是
@@ -352,6 +359,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_CHANGED,
         # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
         PERMISSION_CHANGED,
+        # #1193：run 致命异常的明确错误信号（plan 档 + 计划从未生成；durable 的
+        # 理由与判定条件见上方 ERROR 定义处）
+        ERROR,
     }
 )
 
@@ -359,9 +369,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
 # appended to the durable log. Listed here so the full event vocabulary is in one
 # place; NOT part of EVENT_TYPES, and Session.append must reject them.
 # ADR-0016：model/delta 词汇保留但运行时不再发射（由 text/delta 承接，见上）。
-# #1193：ERROR 是运行期错误信号（致命异常臂发射），不落盘——它描述"这一次
-# 流里发生了什么"，会话状态真相仍由 durable 事件派生。
-STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA, ERROR})
+STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA})
 
 
 def _utc_now_iso() -> str:
