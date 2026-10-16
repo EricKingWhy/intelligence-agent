@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>插件管理 · 效果图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #010102; color: #f7f8f8;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 48px 24px;
+  }
+  .eyebrow { font-size: 13px; font-weight: 500; letter-spacing: .4px; color: #8a8f98; margin-bottom: 6px; }
+  .title { font-size: 28px; font-weight: 600; letter-spacing: -.6px; margin-bottom: 8px; }
+  .sub { font-size: 14px; color: #8a8f98; margin-bottom: 40px; max-width: 680px; text-align: center; line-height: 1.7; }
+  .sub code { font-family: ui-monospace, monospace; background: #141516; border: 1px solid #23252a; border-radius: 6px; padding: 1px 7px; font-size: 13px; color: #d0d4d9; }
+
+  .stage { width: 860px; max-width: 100%; }
+  .caption { font-size: 13px; color: #62666d; margin: 36px 0 12px; }
+  .caption b { color: #8a8f98; font-weight: 500; }
+
+  /* ── 插件管理窗口 ── */
+  .pw {
+    background: #0f1011; border: 1px solid #23252a; border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    display: flex; height: 480px; overflow: hidden;
+  }
+  .pw-side {
+    width: 300px; flex: none; border-right: 1px solid #23252a;
+    display: flex; flex-direction: column;
+  }
+  .pw-title { padding: 18px 18px 10px; font-size: 16px; font-weight: 600; }
+  .pw-search {
+    margin: 0 14px 10px; background: #141516; border: 1px solid #23252a;
+    border-radius: 8px; padding: 8px 12px; font-size: 13px; color: #62666d;
+  }
+  .pw-list { flex: 1; overflow: hidden; padding: 0 8px 12px; }
+  .pw-group {
+    font-size: 12px; font-weight: 500; letter-spacing: .4px; color: #62666d;
+    padding: 12px 10px 6px;
+  }
+  .pw-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 8px; cursor: default;
+  }
+  .pw-row.selected { background: #1c1d1f; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.green { background: #4caf7d; } .dot.amber { background: #d9a13b; } .dot.gray { background: #4a4d54; }
+  .pw-name { font-size: 14px; font-weight: 500; }
+  .pw-meta { font-size: 12px; color: #62666d; margin-top: 2px; }
+  .pw-tag {
+    margin-left: auto; flex: none; font-size: 11px; color: #8a8f98;
+    background: #141516; border: 1px solid #23252a; border-radius: 5px; padding: 2px 7px;
+  }
+
+  .pw-detail { flex: 1; padding: 22px 26px; overflow: hidden; }
+  .pd-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .pd-name { font-size: 18px; font-weight: 600; }
+  .pill {
+    font-size: 12px; padding: 3px 10px; border-radius: 20px; flex: none;
+    background: rgba(76,175,125,.12); color: #4caf7d; border: 1px solid rgba(76,175,125,.3);
+  }
+  .pill.amber { background: rgba(217,161,59,.12); color: #d9a13b; border-color: rgba(217,161,59,.3); }
+  .pd-actions { margin-left: auto; display: flex; gap: 8px; }
+  .btn {
+    font-size: 13px; padding: 7px 14px; border-radius: 8px; cursor: default;
+    background: #1c1d1f; border: 1px solid #2e3138; color: #d0d4d9;
+  }
+  .btn.primary { background: #5e6ad2; border-color: #5e6ad2; color: #fff; }
+  .pd-sec { margin-top: 22px; }
+  .pd-sec-title { font-size: 13px; font-weight: 500; color: #8a8f98; margin-bottom: 10px; }
+  .tool-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tool-chip {
+    font-family: ui-monospace, monospace; font-size: 12px; color: #c7cbd1;
+    background: #141516; border: 1px solid #23252a; border-radius: 7px; padding: 5px 10px;
+  }
+  .tool-chip.off { color: #4a4d54; text-decoration: line-through; }
+  .cfg { font-size: 13px; color: #8a8f98; line-height: 2; }
+  .cfg code { font-family: ui-monospace, monospace; color: #d0d4d9; background: #141516; border: 1px solid #23252a; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+  .switch-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #c7cbd1; margin-top: 10px; }
+  .switch { width: 36px; height: 20px; border-radius: 12px; background: #5e6ad2; position: relative; flex: none; }
+  .switch::after { content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #fff; top: 3px; right: 3px; }
+  .switch.off { background: #2e3138; }
+  .switch.off::after { right: auto; left: 3px; }
+
+  /* ── slash 菜单（复用既有风格） ── */
+  .menu {
+    background: #0f1011; border: 1px solid #23252a; border-radius: 12px;
+    padding: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }
+  .group-label {
+    font-size: 13px; font-weight: 500; letter-spacing: .4px; color: #62666d;
+    padding: 10px 12px 6px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 12px; border-radius: 8px; cursor: default;
+  }
+  .row + .row { margin-top: 2px; }
+  .row.selected { background: #1c1d1f; }
+  .icon {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: #141516; border: 1px solid #23252a;
+    display: flex; align-items: center; justify-content: center;
+    color: #8a8f98; font-size: 14px; font-weight: 600;
+    font-family: ui-monospace, monospace;
+  }
+  .row.selected .icon { color: #c7cbd1; border-color: #2e3138; }
+  .name { font-size: 14px; color: #f7f8f8; font-weight: 500; font-family: ui-monospace, monospace; }
+  .name .hint { font-size: 12px; color: #5e6ad2; font-weight: 400; margin-left: 8px; font-family: -apple-system, "PingFang SC", sans-serif; }
+  .desc { margin-left: auto; font-size: 13px; color: #62666d; text-align: right; flex: none; }
+  .row.selected .desc { color: #8a8f98; }
+  .divider { height: 1px; background: #23252a; margin: 8px 4px; }
+  .composer {
+    margin-top: 10px; background: #0f1011; border: 1px solid #23252a;
+    border-radius: 16px; padding: 16px 18px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .composer .slash { font-size: 17px; color: #f7f8f8; font-family: ui-monospace, monospace; }
+  .composer .caret { width: 2px; height: 20px; background: #5e6ad2; }
+  .note {
+    margin-top: 18px; font-size: 13px; color: #62666d; line-height: 1.8;
+    background: #0f1011; border: 1px dashed #2e3138; border-radius: 10px; padding: 14px 18px;
+  }
+  .note b { color: #8a8f98; font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="eyebrow">效果图 · 插件管理</div>
+  <div class="title">插件</div>
+  <div class="sub">MCP Servers 与 Skills 统一收进「插件」窗口：左列表 + 右详情 + 开关启用 / 禁用。<br>Skills 并入 <code>/</code> 菜单手动调用；MCP 工具不进 <code>/</code>，由模型自动路由（成熟产品共识）。</div>
+
+  <div class="stage">
+    <div class="caption"><b>场景一</b> — 插件管理窗口（选中 playwright，展示工具清单与连接操作）</div>
+    <div class="pw">
+      <div class="pw-side">
+        <div class="pw-title">插件</div>
+        <div class="pw-search">搜索插件…</div>
+        <div class="pw-list">
+          <div class="pw-group">MCP SERVERS · 4</div>
+          <div class="pw-row selected">
+            <span class="dot green"></span>
+            <div><div class="pw-name">playwright</div><div class="pw-meta">已连接 · 12 个工具</div></div>
+          </div>
+          <div class="pw-row">
+            <span class="dot green"></span>
+            <div><div class="pw-name">context7</div><div class="pw-meta">已连接 · 8 个工具</div></div>
+          </div>
+          <div class="pw-row">
+            <span class="dot amber"></span>
+            <div><div class="pw-name">github</div><div class="pw-meta">需要认证</div></div>
+            <span class="pw-tag">OAuth</span>
+          </div>
+          <div class="pw-row">
+            <span class="dot gray"></span>
+            <div><div class="pw-name">filesystem</div><div class="pw-meta">已禁用</div></div>
+          </div>
+          <div class="pw-group">SKILLS · 4</div>
+          <div class="pw-row">
+            <span class="dot green"></span>
+            <div><div class="pw-name">api-design</div><div class="pw-meta">REST API 设计审查</div></div>
+            <span class="pw-tag">Personal</span>
+          </div>
+          <div class="pw-row">
+            <span class="dot green"></span>
+            <div><div class="pw-name">ask-matt</div><div class="pw-meta">工程决策问答</div></div>
+            <span class="pw-tag">Personal</span>
+          </div>
+          <div class="pw-row">
+            <span class="dot gray"></span>
+            <div><div class="pw-name">code-review</div><div class="pw-meta">双轴代码审查</div></div>
+            <span class="pw-tag">Project</span>
+          </div>
+        </div>
+      </div>
+      <div class="pw-detail">
+        <div class="pd-head">
+          <span class="pd-name">playwright</span>
+          <span class="pill">已连接</span>
+          <div class="pd-actions">
+            <span class="btn">重新连接</span>
+            <span class="btn">禁用</span>
+          </div>
+        </div>
+        <div class="pd-sec">
+          <div class="pd-sec-title">工具（12）— 由模型自动调用，不进 / 菜单</div>
+          <div class="tool-grid">
+            <span class="tool-chip">browser_navigate</span>
+            <span class="tool-chip">browser_click</span>
+            <span class="tool-chip">browser_snapshot</span>
+            <span class="tool-chip">browser_type</span>
+            <span class="tool-chip off">browser_upload</span>
+            <span class="tool-chip">+ 7</span>
+          </div>
+        </div>
+        <div class="pd-sec">
+          <div class="pd-sec-title">配置</div>
+          <div class="cfg">transport <code>stdio</code> · command <code>npx @playwright/mcp</code><br>密钥经 <code>${VAR}</code> 环境变量引用，不入库</div>
+        </div>
+        <div class="pd-sec">
+          <div class="pd-sec-title">行为</div>
+          <div class="switch-row"><span class="switch"></span>启用此 server</div>
+          <div class="switch-row"><span class="switch off"></span>调用工具前需要我确认</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="caption"><b>场景二</b> — <code>/</code> 菜单：内置命令与 Skills 合并为一个列表（选中 deep-research，展示参数提示）</div>
+    <div class="menu">
+      <div class="group-label">内置命令</div>
+      <div class="row"><span class="icon">⌘</span><span class="name">/compact</span><span class="desc">压缩上下文</span></div>
+      <div class="row"><span class="icon">⌘</span><span class="name">/plan</span><span class="desc">切换计划模式</span></div>
+      <div class="row"><span class="icon">⌘</span><span class="name">/goal</span><span class="desc">查看本轮目标</span></div>
+      <div class="divider"></div>
+      <div class="group-label">Skills</div>
+      <div class="row selected">
+        <span class="icon">✦</span>
+        <span class="name">/deep-research<span class="hint">主题…</span></span>
+        <span class="desc">深度调研</span>
+      </div>
+      <div class="row"><span class="icon">✦</span><span class="name">/api-design</span><span class="desc">REST API 设计审查</span></div>
+      <div class="row"><span class="icon">✦</span><span class="name">/ask-matt</span><span class="desc">工程决策问答</span></div>
+      <div class="row"><span class="icon">✦</span><span class="name">/plugin:code-review</span><span class="desc">双轴代码审查（插件）</span></div>
+    </div>
+    <div class="composer"><span class="slash">/deep</span><span class="caret"></span></div>
+    <div class="note">
+      <b>设计要点</b>（来源：Claude Code / Cursor / Windsurf 官方文档）<br>
+      ① 禁用≠删除，禁用态仍列出并标记；② MCP 列表显示工具数量 + 连接状态（已连接 / 需认证 / 失败 / 已禁用）；③ 工具级禁用（<s>browser_upload</s>）对应 Windsurf 的 disabledTools 双层粒度；④ skill 命令名取 SKILL.md 目录名，插件 skill 加 <code>plugin:</code> 前缀消歧；⑤ 参数提示来自 frontmatter 的 argument-hint；⑥ Cursor 式双意图可后续加：<code>/</code> 直接执行、<code>@</code> 仅挂载上下文。
+    </div>
+  </div>
+</body>
+</html>

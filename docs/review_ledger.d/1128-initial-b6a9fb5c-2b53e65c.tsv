@@ -1,0 +1,1 @@
+2026-10-16	#1128 initial review, fixed point origin/main b6a9fb5c. Standards PASS-WITH-FINDINGS P0-P2=0 P3=1 (scan.py cleanup scope doc omitted child Docker container/named volume); Spec PASS P0-P4=0. Finding fixed in 0f8ff3eb; evidence: tracker #1128.	b6a9fb5cf8f5a6cfa4adfefbbfcf9c6d49964b25..2b53e65c794e5dfb559e30fc5c33c39ff1395dc8
