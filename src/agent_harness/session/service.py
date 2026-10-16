@@ -6368,33 +6368,39 @@ class SessionService:
         `{fact_id, status: "revoked", revoked_at}`。幂等：已 revoked → 原样回执
         （不重复落事件）。目标不存在 → `ProtectedFactNotFound`（404）；非 active
         （已被取代）→ `ProtectedFactNotRevocable`（409）。
+
+        「读投影 → 判状态 → 追加事件」是**读-判-写**序列，须原子：否则同一 fact 的
+        两个并发撤销请求会各自读到 `active`、各落一条 `task/fact_revocation`。用
+        `RunManager` 的**每会话锁**取临界区（进程内互斥，同 `_resume_lock` 的既有
+        口径；Web 层每请求新建服务实例，锁不能挂在本实例上）。
         """
         await self._require_existing_session(session_id)
-        events = await self.get_events(session_id)
-        fact = next(
-            (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
-            None,
-        )
-        if fact is None:
-            raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
-        if fact.status == "revoked":
-            # 幂等：真值已是 revoked，不重复落事件。
+        async with self._resume_lock(session_id):
+            events = await self.get_events(session_id)
+            fact = next(
+                (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
+                None,
+            )
+            if fact is None:
+                raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+            if fact.status == "revoked":
+                # 幂等：真值已是 revoked，不重复落事件。
+                return {
+                    "fact_id": fact_id,
+                    "status": "revoked",
+                    "revoked_at": fact.revoked_at,
+                }
+            if fact.status != "active":
+                raise ProtectedFactNotRevocable(
+                    f"protected fact '{fact_id}' is {fact.status}, not revocable"
+                )
+            session = Session.load(self._store, session_id)
+            event = append_fact_revocation(session, fact_id, revoked_by=revoked_by)
             return {
                 "fact_id": fact_id,
                 "status": "revoked",
-                "revoked_at": fact.revoked_at,
+                "revoked_at": event.data.get("revoked_at") or event.time,
             }
-        if fact.status != "active":
-            raise ProtectedFactNotRevocable(
-                f"protected fact '{fact_id}' is {fact.status}, not revocable"
-            )
-        session = Session.load(self._store, session_id)
-        event = append_fact_revocation(session, fact_id, revoked_by=revoked_by)
-        return {
-            "fact_id": fact_id,
-            "status": "revoked",
-            "revoked_at": event.data.get("revoked_at") or event.time,
-        }
 
 
 def project_protected_fact_rows(events: list[SessionEvent]) -> list[dict[str, Any]]:

@@ -37,7 +37,8 @@ const TYPE_DOT: Record<string, string> = {
   evidence_ref: 'var(--cn-type-evidence-ref)',
 };
 
-/** 类型下拉 7 值（全部类型 + 6 类）。 */
+/** 类型下拉的 6 个具体类型（issue §四.3）；「全部类型」是另立的空值 option，
+ *  两者合计 = 票面所称的「下拉 7 值」。 */
 const TYPE_OPTIONS: readonly string[] = [
   'constraint',
   'user_goal',

@@ -11,12 +11,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.session import TASK_FACT_REVOCATION, USER_MESSAGE
+from agent_harness.session.service import SessionService
 from agent_harness.session.session import Session
+from agent_harness.web.app import session_service
 from tests.web.test_budget_local_fuse_api import _web
 
 
@@ -156,3 +160,42 @@ class TestRevokeProtectedFact:
             headers={"Origin": "https://evil.example"},
         )
         assert resp.status_code == 403, resp.text
+
+    @pytest.mark.asyncio
+    async def test_concurrent_revoke_appends_single_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """并发撤销同一 fact → 只落一条 `task/fact_revocation`（读-判-写原子）。
+
+        两个 `SessionService` 实例（模拟 Web 层每请求各建一个）**共享同一 RunManager**，
+        故会话锁把它们串行化：第二个请求在锁内重读到 `revoked` 走幂等分支，不重复落事件。
+
+        ⚠ 必须给读阶段**注入一个 await 让点**：真实的 `get_events` 在本环境不产生
+        挂起点，`asyncio.gather` 的两个协程会一前一后跑完（race 窗口不出现）——那样的
+        断言恒真、测不到锁。这里把 `get_events` 包一层 `sleep(0)`，让两个请求都先读到
+        `active` 再各自写：**去掉锁这条会红**（已验证）。
+        """
+        app, _client = _web(tmp_path)
+        state = app.state.agent
+        sid = "s-race"
+        session = Session.start(state.store, session_id=sid)
+        e1 = session.append(USER_MESSAGE, {"content": "回复时先给结论。"})
+        fact_id = session.register_protected_fact(
+            fact_type="constraint", value="回复时先给结论。", source_event_id=e1.event_id,
+        ).data["fact_id"]
+
+        real_get_events = SessionService.get_events
+
+        async def _slow_get_events(self: SessionService, session_id: str, *args: object, **kwargs: object):
+            await asyncio.sleep(0)  # 撑开读-判-写窗口
+            return await real_get_events(self, session_id, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SessionService, "get_events", _slow_get_events)
+
+        results = await asyncio.gather(
+            session_service(state).revoke_protected_fact(sid, fact_id, revoked_by="local"),
+            session_service(state).revoke_protected_fact(sid, fact_id, revoked_by="local"),
+        )
+        assert all(r["status"] == "revoked" for r in results)
+        events = await real_get_events(session_service(state), sid)
+        assert sum(1 for e in events if e.type == TASK_FACT_REVOCATION) == 1

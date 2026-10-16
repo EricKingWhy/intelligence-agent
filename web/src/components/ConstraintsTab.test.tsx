@@ -124,6 +124,21 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).toContain('已撤销');
   });
 
+  it('已撤销行的元信息行含撤销时间与操作人（AC3：记录可审计）', () => {
+    const html = ssr({ facts: [REVOKED], statusFilter: 'revoked' });
+    // revoked_by='local'（哨兵 → 「本人操作」）。SSR 会在相邻文本节点间插 <!-- -->，
+    // 故按**单个文本节点**断言（不跨注释边界）。
+    expect(html).toContain('本人操作');
+    expect(html).toContain('撤销');
+    expect(html).toContain('f-revoked');
+  });
+
+  it('已被取代行文案区分「已被取代」，且无撤销时间', () => {
+    const html = ssr({ facts: [SUPERSEDED], statusFilter: 'revoked' });
+    expect(html).toContain('已被取代');
+    expect(html).not.toContain('· 本人操作');
+  });
+
   it('零约束 → 显式「没有符合条件的约束」', () => {
     expect(ssr()).toContain('没有符合条件的约束');
   });

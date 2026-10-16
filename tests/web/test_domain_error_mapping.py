@@ -121,6 +121,11 @@ def test_status_map_is_the_audited_contract():
         # 不存在」会让前端显示错误的失败原因。
         "SupersedeTargetInvalid": 409,
         "ProtectedFactReferenceInvalid": 409,
+        # #1190：约束管理面板的撤销入口——目标 fact 不存在 → 404；目标已被取代
+        # （非 active、不可主动撤销）→ 409。与 404 的「不存在」刻意分开（状态冲突，
+        # 请求形态合法）。本表是精确类型索引，两个新类型各自登记。
+        "ProtectedFactNotFound": 404,
+        "ProtectedFactNotRevocable": 409,
         # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
         # 两侧目录可能都在，是**归属事实**矛盾（不是 404 的"目录没了"，也不是 422 的
         # "请求写错"）。续聊拒绝静默选边。

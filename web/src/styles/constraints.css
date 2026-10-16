@@ -1,17 +1,27 @@
 /* 约束管理面板（#1190 / #1176 Phase 1）——Session Inspector 内一页。
  *
- * 视觉对照 issue §四 + 效果图 v2（Linear 风格）。默认深色 token 定义在 .cn-panel
- * 作用域内（不污染全局主题）；亮色覆盖见文件末尾 `:root[data-theme='light'] .cn-panel`，
- * 遵守 AGENTS.md §15 / web/PRODUCT.md 的「暗亮两主题都要检查」纪律。
+ * 视觉 token 逐字取自 issue §三/§四（效果图定稿 v2）：深黑底 #010102、四级 surface
+ * （#0f1011/#141516/#18191a/#191a1b）、hairline #23252a、主操作薰衣草紫 #5e6ad2、
+ * 6 类圆点固定色。这些值由**已批准的 issue 明文给定**（AGENTS.md §1.1 优先级第 7 条），
+ * 且任务书要求「按效果图逐元素实现」——故此处**刻意另立 `--cn-*` 命名空间**而非复用
+ * `index.css` 的 `--surface-*`（两者取值不同：仓内 surface-1 是 #101014，效果图是 #0f1011）。
+ * ⚠ 已知与 `web/PRODUCT.md`「不复制 Linear 品牌…抄外观不行」存在张力：本票的配色是
+ * 用户自己在该 issue 里给定的，属「用户明确指令 > 仓库产品文档」的取舍，已在交付报告
+ * 「待裁决」中列出，供用户终裁。
  *
- * 两处刻意偏离效果图（均为可达性/产品纪律，见 PR #1190 说明）：
- *  - 效果图元信息用 ink-tertiary #62666d，在 12px 下对比度约 3.6:1 < 4.5，
- *    本实现改用 ink-subtle #8a8f98（≈5.7:1，达标 PRODUCT.md 的 12px 元信息门槛）；
- *  - 面板不铺效果图的整页画布底色（Inspector 已有自身 surface），避免屏幕内出现
- *    两层画布的接缝；其余表面/描边/强调色沿用效果图取值。
+ * token 定义在 **`:root`**（不是 `.cn-panel`）：撤销确认框经 `Dialog.Portal` 挂到
+ * `document.body`，在 `.cn-panel` 作用域**之外**——若 token 只定义在 `.cn-panel`，弹窗
+ * 在亮色主题下会回退到暗色字面量（实测问题）。放 `:root` 后弹窗与面板共享同一组变量。
+ *
+ * 亮色覆盖见文件末尾 `:root[data-theme='light']`（覆盖**全部** `--cn-*`，含四级 surface
+ * 与 6 类圆点色），遵守 AGENTS.md §15 / PRODUCT.md「新增 token 必须检查暗亮两块」。
+ *
+ * 另一处刻意偏离效果图：元信息行效果图用 ink-tertiary #62666d，在暗底上实测 ≈3.3:1 < 4.5，
+ * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（≈5.7:1）。同一条
+ * 「用户指令 vs 产品文档」的取舍，已列入待裁决。
  */
 
-.cn-panel {
+:root {
   --cn-surface-1: #0f1011;
   --cn-surface-2: #141516;
   --cn-hairline: #23252a;
@@ -33,7 +43,9 @@
   --cn-type-default: #8a8f98;
   --cn-dot-active: #27a644;
   --cn-dot-inactive: #8a8f98;
+}
 
+.cn-panel {
   padding: 20px 16px 28px;
   color: var(--cn-ink);
 }
@@ -103,7 +115,9 @@
   border: none;
   background: none;
   color: var(--cn-ink-subtle);
-  font: 500 13px inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
   padding: 6px 14px;
   border-radius: 999px;
   cursor: pointer;
@@ -125,7 +139,8 @@
   background: var(--cn-surface-1);
   border: 1px solid var(--cn-hairline);
   color: var(--cn-ink-muted);
-  font: 400 13px inherit;
+  font: inherit;
+  font-size: 13px;
   border-radius: 8px;
   padding: 7px 10px;
 }
@@ -253,7 +268,9 @@
   background: none;
   border: none;
   color: var(--cn-ink-subtle);
-  font: 500 13px inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
   padding: 6px 4px;
 }
@@ -304,7 +321,8 @@
   color: var(--cn-ink-subtle);
 }
 
-/* ── 撤销二次确认弹窗（Linear modal 样式）── */
+/* ── 撤销二次确认弹窗（效果图 modal 样式）──
+ * 经 Radix Portal 挂到 body：只用 `:root` 上的 `--cn-*`（勿回退字面量）。 */
 .cn-modal-overlay {
   position: fixed;
   inset: 0;
@@ -317,13 +335,13 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--cn-surface-1, #0f1011);
-  border: 1px solid var(--cn-hairline, #23252a);
+  background: var(--cn-surface-1);
+  border: 1px solid var(--cn-hairline);
   border-radius: 12px;
   padding: 28px;
   width: min(440px, calc(100vw - 32px));
   z-index: 201;
-  color: var(--cn-ink, #f7f8f8);
+  color: var(--cn-ink);
 }
 
 .cn-modal-title {
@@ -335,13 +353,13 @@
 
 .cn-modal-desc {
   font-size: 14px;
-  color: var(--cn-ink-muted, #d0d6e0);
+  color: var(--cn-ink-muted);
   margin: 0 0 14px;
 }
 
 .cn-modal-quote {
-  background: var(--cn-surface-2, #141516);
-  border: 1px solid var(--cn-hairline, #23252a);
+  background: var(--cn-surface-2);
+  border: 1px solid var(--cn-hairline);
   border-radius: 8px;
   padding: 10px 14px;
   margin-bottom: 20px;
@@ -352,7 +370,7 @@
 
 .cn-modal-value {
   font-size: 13px;
-  color: var(--cn-ink, #f7f8f8);
+  color: var(--cn-ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -360,11 +378,11 @@
 .cn-modal-factid {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: var(--cn-ink-subtle, #8a8f98);
+  color: var(--cn-ink-subtle);
 }
 
 .cn-modal-error {
-  color: var(--cn-danger, #e5484d);
+  color: var(--cn-danger);
   font-size: 13px;
   margin-bottom: 14px;
 }
@@ -376,24 +394,26 @@
 }
 
 .cn-btn {
-  font: 500 14px inherit;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
   border-radius: 8px;
   padding: 8px 16px;
   cursor: pointer;
-  border: 1px solid var(--cn-hairline, #23252a);
-  background: var(--cn-surface-1, #0f1011);
-  color: var(--cn-ink, #f7f8f8);
+  border: 1px solid var(--cn-hairline);
+  background: var(--cn-surface-1);
+  color: var(--cn-ink);
 }
 
 .cn-btn-primary {
-  background: var(--cn-primary, #5e6ad2);
-  border-color: var(--cn-primary, #5e6ad2);
-  color: var(--cn-on-primary, #ffffff);
+  background: var(--cn-primary);
+  border-color: var(--cn-primary);
+  color: var(--cn-on-primary);
 }
 
 .cn-btn-primary:hover:not(:disabled) {
-  background: var(--cn-primary-hover, #828fff);
-  border-color: var(--cn-primary-hover, #828fff);
+  background: var(--cn-primary-hover);
+  border-color: var(--cn-primary-hover);
 }
 
 .cn-btn:disabled {
@@ -401,8 +421,10 @@
   opacity: 0.6;
 }
 
-/* ── 亮色主题覆盖（AGENTS §15：新增 token 必须检查两块）── */
-:root[data-theme='light'] .cn-panel {
+/* ── 亮色主题覆盖（AGENTS §15：新增 token 必须检查两块）──
+ * 覆盖**全部** `--cn-*`（含四级 surface 与 6 类圆点色）：漏一个该 token 在亮色下
+ * 仍用暗色值。圆点在亮色底上取更深一档，保证 12px 名称旁的辨识度。 */
+:root[data-theme='light'] {
   --cn-surface-1: #ffffff;
   --cn-surface-2: #f4f4f5;
   --cn-hairline: rgba(0, 0, 0, 0.1);
@@ -415,8 +437,13 @@
   --cn-on-primary: #ffffff;
   --cn-success: #1a7f37;
   --cn-danger: #cf222e;
+  --cn-type-constraint: #6b5ce0;
+  --cn-type-user-goal: #1a7f37;
+  --cn-type-authorization: #b06a00;
+  --cn-type-work-boundary: #2f6fdb;
+  --cn-type-failed-approach: #cf222e;
+  --cn-type-evidence-ref: #52525b;
+  --cn-type-default: #52525b;
   --cn-dot-active: #1a7f37;
   --cn-dot-inactive: #52525b;
-  --cn-type-default: #52525b;
-  --cn-type-evidence-ref: #52525b;
 }

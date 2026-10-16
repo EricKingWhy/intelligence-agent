@@ -155,13 +155,16 @@ test('AC3：撤销走二次确认 → 重拉对齐（行变已撤销、按钮 di
   // #1190 AC：撤销后重拉对齐 —— 真相在后端，前端不做乐观本地更新。
   // mock 的 revoke 真的翻行状态（见 fixtures `protectedFactsFor`），GET 重拉读到
   // 已撤销 → 默认「生效中」页里这条消失（不是本地隐藏，是后端说它没了）。
-  expect(revokeCalls).toBe(1);
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(panel(page)).toContainText('没有符合条件的约束');
+  // 计数断言放在 UI 落定**之后**，避免点击后同步读计数的轻抖。
+  expect(revokeCalls).toBe(1);
 
   // 「已撤销」页能看到它 + 撤销按钮 disabled（终态不可再撤销）。
   await panel(page).getByRole('tab', { name: /已撤销/ }).click();
   await expect(panel(page)).toContainText('不要改动生产环境配置');
+  // AC3：元信息行可见撤销时间 · 操作人（fixtures revoke 写 revoked_by='local'）。
+  await expect(panel(page)).toContainText('本人操作');
   await expect(panel(page).getByRole('button', { name: '已撤销' })).toBeDisabled();
 });
 
