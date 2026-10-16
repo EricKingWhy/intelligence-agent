@@ -140,6 +140,25 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
     expect(advanced().hidden).toBe(true);
   });
 
+  it('完成目标：单行 input[type=text] + placeholder「什么结果算完成？」（#1177 效果图 03）', async () => {
+    await act(async () => {
+      render(dialog());
+      await Promise.resolve();
+    });
+    await act(async () => {
+      advancedToggle().click();
+    });
+
+    // #1177 §B 效果图 03 / 用户 2026-10-17 裁决 1A：完成目标是**单行** input，
+    // 不是多行 textarea（对照 `mockup.html:669` 的 `<input id="goal" type="text">`）。
+    const goal = document.body.querySelector('#task-acceptance')!;
+    expect(goal.tagName).toBe('INPUT');
+    expect(goal.getAttribute('type')).toBe('text');
+    expect(goal.getAttribute('placeholder')).toBe('什么结果算完成？');
+    // a11y 不退：label 仍按 for/id 关联到这个单行输入（键盘可达、可访问名称不变）。
+    expect(document.body.querySelector('label[for="task-acceptance"]')).not.toBeNull();
+  });
+
   it('底部按钮是 取消 / 创建并启动；空描述时创建并启动禁用', async () => {
     await act(async () => {
       render(dialog());
@@ -178,11 +197,12 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
     });
 
     const prompt = document.body.querySelector<HTMLTextAreaElement>('#task-prompt')!;
-    const setValue = (el: HTMLTextAreaElement, v: string) => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        'value',
-      )!.set!;
+    // 受控输入的 value setter 在各自原型上：任务描述是 textarea，完成目标是单行 input。
+    const setValue = (el: HTMLInputElement | HTMLTextAreaElement, v: string) => {
+      const proto = el.tagName === 'TEXTAREA'
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')!.set!;
       setter.call(el, v);
       el.dispatchEvent(new Event('input', { bubbles: true }));
     };
@@ -191,7 +211,7 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
       setValue(prompt, '跑一遍回归测试');
       advancedToggle().click();
     });
-    const acceptance = document.body.querySelector<HTMLTextAreaElement>('#task-acceptance')!;
+    const acceptance = document.body.querySelector<HTMLInputElement>('#task-acceptance')!;
     await act(async () => {
       setValue(acceptance, 'pytest 全绿');
     });

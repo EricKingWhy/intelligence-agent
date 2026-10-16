@@ -4,7 +4,7 @@
  *  prompt 优先、无多步向导、无结构化验收项、无任务级排队、三档自主度。
  *  本弹窗即按此共识的信息架构：
  *  - prompt 是**唯一必填项**（顶置大输入框）
- *  - 验收项降级为可选文本框，内容拼进首条 prompt（零服务端契约变更，
+ *  - 验收项降级为可选**单行**输入框，内容拼进首条 prompt（零服务端契约变更，
  *    对标 Codex `/goal` 自然语言三要素）
  *  - 三档自主度抄 Copilot Interactive / Plan / Autopilot
  *    （≈ Codex 三档 ≈ Claude Code modes）
@@ -105,7 +105,7 @@ function TaskCreationForm({
 }: Props & { project: Project }) {
   // prompt 是唯一必填项
   const [prompt, setPrompt] = useState('');
-  // 验收项：可选文本框，提交时拼进首条 prompt（零服务端契约变更）
+  // 验收项：可选单行输入框，提交时拼进首条 prompt（零服务端契约变更）
   const [acceptance, setAcceptance] = useState('');
   const [autonomy, setAutonomy] = useState<AutonomyId>('ask');
   // 模型：'auto' = 不发 model 键（后端默认链）；其余为目录 name
@@ -238,18 +238,19 @@ function TaskCreationForm({
         </button>
 
         <div id="task-advanced" className="project-advanced-content" hidden={!advancedOpen}>
-          {/* 验收项：可选文本框，拼进首条 prompt */}
+          {/* 完成目标：可选**单行**输入，拼进首条 prompt（#1177 §B 效果图 03：单行
+              input，非多行 textarea；用户 2026-10-17 裁决 1A）。 */}
           <div className="project-field">
             <label className="project-field-label" htmlFor="task-acceptance">
               完成目标 <span className="project-field-optional">（可选）</span>
             </label>
-            <textarea
+            <input
               id="task-acceptance"
-              className="project-textarea"
+              type="text"
+              className="project-input"
               value={acceptance}
               onChange={(e) => setAcceptance(e.target.value)}
-              placeholder="怎么算做完？（例如：pytest 全绿，覆盖率不下降）"
-              rows={2}
+              placeholder="什么结果算完成？"
               disabled={pending}
             />
             <span className="project-field-hint">
