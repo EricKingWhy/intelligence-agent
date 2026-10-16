@@ -14,9 +14,11 @@
  * `shouldShowWaitHint` 的单测里锁。它在本车道要精确编排事件序才构造得出，
  * 收益不抵成本（相位本身的真相在纯函数那一层）。
  *
- * 车道能力：WS 接流 mock 能**保持连接**（`ending: 'keep'`）——于是「长连接 + 停摆 →
- * 重连补一帧 → 继续长连接」这个真机形状在本车道能被如实构造（旧 `route.fulfill`
- * 给不出长连接：帧一次性到齐、包体立刻结束）。
+ * 车道能力：WS 接流 mock 能**保持连接**（`ending: 'keep'`），且 `frameGate` 让用例
+ * 掌握「新事件」到达的**虚拟时刻**——于是「长连接 + 用例扣住一帧 → 放行 → 继续长连接」
+ * 这个形状能在本车道确定性地构造（旧 `route.fulfill` 给不出长连接：帧一次性到齐、
+ * 包体立刻结束）。**不构造停摆重连**：虚拟时钟一跳与真实定时器的到点无法编排先后，
+ * 依赖重连的编排是不确定的（#1214 实测）。
  */
 
 import { expect, test } from '@playwright/test';
@@ -30,9 +32,9 @@ const LIVE_FRAMES: FrameSpec[] = [
   { type: 'text/delta', data: { delta: '开了个头…' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
 
-/** 停摆重连时补进来的**一条新事件**（seq 5）：它把「空闲基准」重置一次，
- *  之后的幂等重放（同 seq）会被按 seq 去重，不再算进展——也正因此，重连额度
- *  不会耗尽（真进展会 `observeProgress` 复位额度），live 态得以保持。 */
+/** 闸门放行后补进来的**一条新事件**（seq 5）：它把「空闲基准」重置一次。
+ *  （此前注释称它由「停摆重连」补进——**不属实**：它随首次接流到达，只是被
+ *  `frameGate` 扣住；虚拟时钟下无法编排重连时序，见文件头。） */
 const MID_FRAMES: FrameSpec[] = [
   { type: 'text/delta', data: { delta: '又吐了一点。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
