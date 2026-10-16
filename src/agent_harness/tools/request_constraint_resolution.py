@@ -150,12 +150,12 @@ class RequestConstraintResolutionTool(Tool):
         context = current_constraint_tool_context_var.get()
         scope_code = scope_rejection_code(session, run_id, context)
         if scope_code == SCOPE_REJECTION_SOURCE_UNAVAILABLE:
-            return self._rejected(
+            return rejected_result(
                 scope_code,
                 "当前模型输入中没有可核实的直接用户原文，未发起问题。",
             )
         if scope_code == SCOPE_REJECTION_NOT_ALLOWED:
-            return self._rejected(
+            return rejected_result(
                 scope_code, "当前执行范围不能发起约束澄清。",
             )
         assert context is not None
@@ -170,11 +170,11 @@ class RequestConstraintResolutionTool(Tool):
             or source.data.get("content") != context.source_content
             or not is_direct_user_input_event(session.events, context.source_event_id)
         ):
-            return self._rejected(
+            return rejected_result(
                 "SOURCE_NOT_ACTIVE", "本轮用户原文已不再有效，未发起问题。",
             )
         if args.candidate not in context.source_content:
-            return self._rejected(
+            return rejected_result(
                 "VALUE_NOT_FROM_CURRENT_USER",
                 "新约束必须是本轮直接用户原文中的完整连续片段。",
             )
@@ -189,12 +189,12 @@ class RequestConstraintResolutionTool(Tool):
             None,
         )
         if fact is None or not isinstance(fact.value, str):
-            return self._rejected(
+            return rejected_result(
                 "FACT_NOT_ACTIVE", "指定的旧约束不再生效，未发起问题。",
             )
         if context.user_input_request_rejection_code is not None:
             code = context.user_input_request_rejection_code
-            return self._rejected(code, admission_rejection_message(code))
+            return rejected_result(code, admission_rejection_message(code))
 
         pending = pending_user_input_request(session.events, run_id=run_id)
         if pending is not None:
@@ -231,7 +231,3 @@ class RequestConstraintResolutionTool(Tool):
             },
             pending_events=[(USER_INPUT_REQUESTED, payload)],
         )
-
-    @staticmethod
-    def _rejected(reason_code: str, reason: str) -> ToolResult:
-        return rejected_result(reason_code, reason)

@@ -133,14 +133,16 @@ def _try_parse_result_json(result_json: str, tool_name: str) -> ToolResult | Non
         return None
 
 
-def _constraint_request_result(
+def _user_input_request_result(
     operation: Operation, events: list[SessionEvent],
 ) -> ToolResult | None:
     """Rebuild the known successful result from its matching durable request event.
 
     两个用户输入工具（`request_constraint_resolution` / `ask_user`）共用同一份 durable
-    证据：一条带 `tool_call_id` 的 `USER_INPUT_REQUESTED`，且尚无回答。证据成立即
-    确定性重建成功结果，避免恢复期把这条已落盘的问句误判成"副作用未证"转人工裁决。
+    证据（共享 `user_input` 抽象）：一条带 `tool_call_id` 的 `USER_INPUT_REQUESTED`，且尚无
+    回答。证据成立即确定性重建成功结果，避免恢复期把这条已落盘的问句误判成"副作用未证"转
+    人工裁决。本函数按 `data.kind` 分派到窄场景 / 通用提问两条重建路径（历史名
+    `_constraint_request_result` 已半改，故改名为不再误导）。
     """
     args = _args_from_identity(operation.args_identity)
     if (
@@ -184,7 +186,12 @@ def _constraint_request_result(
 def _ask_user_request_result(
     *, request_id: str, data: dict, args: dict,
 ) -> ToolResult | None:
-    """`ask_user` 的确定性成功重建：durable 问句的 questions 与调用参数一致。"""
+    """`ask_user` 的确定性成功重建：durable 问句与调用参数的 questions **数量一致且都非空**。
+
+    只做这一条存活校验，**不逐题比对**问题文本 / 选项内容——durable 记录与 `args` 本就是
+    同一份参数落地的（工具端参数校验另有一层），恢复期只需确认"这条问句是真发出去的、
+    与本次调用对应"。任一条件不满足即判不确定（返回 None，转人工裁决）。
+    """
     questions = data.get("questions")
     arg_questions = args.get("questions")
     if (
@@ -476,7 +483,7 @@ class RecoveryCoordinator:
                     or operation.tool_name not in USER_INPUT_TOOL_NAMES
                 ):
                     continue
-                recovered = _constraint_request_result(operation, session.events)
+                recovered = _user_input_request_result(operation, session.events)
                 if recovered is None:
                     continue
                 request_repairs[operation.tool_call_id] = recovered

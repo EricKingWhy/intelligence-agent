@@ -8,6 +8,12 @@
 本模块只承载**确定性计时**这一件事，挂钟可注入（测试不实等）。谁在连接进出时调用
 `set_connected`、谁在 `expired()` 后触发恢复，是上层（web 层）的接线——这一层不 import
 web / session service，保持可单测。
+
+⚠ **在线驱动当前未接线（issue #1220）**：`AskUserTimeoutTracker` 目前只在测试里被实例化，
+生产装配中**没有**任何连接进出 / 超时恢复的调用方——故本模块交付的是**确定性的计时语义**，
+不是端到端的在线超时。其"前端是否在场"的信号源是产品客户端在场协议
+（`agent/client_presence.py::ClientPresenceGate`，W-22/#366；该协议生产无 `enroll()`），
+接线归属 #1220。
 """
 
 from __future__ import annotations

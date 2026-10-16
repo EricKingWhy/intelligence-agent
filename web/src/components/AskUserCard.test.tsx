@@ -166,6 +166,31 @@ describe('AskUserCard', () => {
     });
   });
 
+  // 审查 P4-4：末题「跳过此题」的用户可见分支（`index < lastIndex` 为假 ⇒ 不再前进）。
+  it('skipping the last question clears it and stays on the last page', () => {
+    const onSubmit = vi.fn();
+    render(<AskUserCard request={request()} onSubmit={onSubmit} />);
+
+    click('.ask-user-opt', 0); // 第 1 题作答 → 解锁下一页
+    click('[aria-label="下一题"]');
+    expect(el('.ask-user-title').textContent).toBe('这次发版走哪套部署流程？');
+
+    click('.ask-user-skip-question'); // 末题跳过：页码与题干都不动
+    expect(el('.ask-user-title').textContent).toBe('这次发版走哪套部署流程？');
+    expect(el('.ask-user-page').textContent).toBe('2 / 2');
+
+    submit();
+    const answer = onSubmit.mock.calls[0][0] as AskUserAnswer;
+    expect(answer.questions[0]).toEqual({
+      question: '新版本什么时候发布？',
+      answer: { label: '今晚低峰期' },
+    });
+    expect(answer.questions[1]).toEqual({
+      question: '这次发版走哪套部署流程？',
+      answer: null,
+    });
+  });
+
   it('submits all-null answers when the whole card is skipped', () => {
     const onSubmit = vi.fn();
     render(<AskUserCard request={request()} onSubmit={onSubmit} />);
@@ -213,6 +238,25 @@ describe('AskUserCard', () => {
     expect(el('.ask-user-scope').textContent).toBe('发布决策');
     expect(el('.ask-user-body').hasAttribute('hidden')).toBe(true);
     expect(el('.ask-user-foot').hasAttribute('hidden')).toBe(true);
+  });
+
+  // 审查 P4-4：整卡收起（`closed`）的用户可见分支与「展开提问」恢复路径。
+  it('closes the whole card and restores it via 展开提问', () => {
+    render(<AskUserCard request={request()} onSubmit={vi.fn()} />);
+    expect(document.querySelector('.ask-user-closed')).toBeNull();
+
+    click('[aria-label="关闭"]');
+    // 收起态：状态行仍在，但题干 / 选项 / 提交行都不再渲染。
+    expect(el('.ask-user-status').textContent).toContain('提问 · 等待回答');
+    expect(el('.ask-user-closed').textContent).toContain('提问卡片已收起');
+    expect(document.querySelector('.ask-user-title')).toBeNull();
+    expect(all('.ask-user-opt')).toHaveLength(0);
+    expect(document.querySelector('.ask-user-submit')).toBeNull();
+
+    click('.ask-user-closed .ask-user-btn'); // 展开提问
+    expect(document.querySelector('.ask-user-closed')).toBeNull();
+    expect(el('.ask-user-title').textContent).toBe('新版本什么时候发布？');
+    expect(all('.ask-user-opt')).toHaveLength(3);
   });
 
   it('surfaces a resume error message', () => {
