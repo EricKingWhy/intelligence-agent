@@ -82,15 +82,37 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   // ① 纯 UI 设置预算三维（#536 单入口 popover——设计稿 §2.3，替换 #426 三平铺）。
   //    面板内三维控件的 aria-label 沿用 #426 旧名（turns / tokens 自定义 / datetime）。
   await page.locator('.composer-budget-trigger[aria-label="预算"]').click();
-  await page.getByLabel('预算上限（Agent turns，留空为默认）').fill('3');
+  const turnsInput = page.getByLabel('预算上限（Agent turns，留空为默认）');
+  const resetButton = page.getByRole('button', { name: '恢复默认' });
+  await expect(resetButton).not.toBeVisible();
+  await turnsInput.fill('3');
   // tokens 走「自定义」档：点开档位 → 点自定义行（onChange 返回 false，面板不关，
   // 数值输入框出现在 footer）→ 填自定义值。
   await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
   await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
   await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
   // deadline 走高级路径（datetime-local 直填，#536 §2.2 保留项）。
+  const deadlineDetails = page.locator('.budget-picker-advanced');
+  const deadlineInput = page.getByLabel('预算截止时间（留空为不设）');
+  await expect(deadlineInput).not.toBeVisible();
+  await deadlineDetails.locator('summary').click();
+  await expect(deadlineInput).toBeVisible();
   const deadlineLocal = '2026-10-01T12:30';
-  await page.getByLabel('预算截止时间（留空为不设）').fill(deadlineLocal);
+  await deadlineInput.fill(deadlineLocal);
+  await expect(resetButton).toBeVisible();
+  await resetButton.click();
+  await expect(turnsInput).toHaveValue('');
+  await expect(page.getByLabel('预算上限（总 tokens，留空为默认）')).not.toBeVisible();
+  await expect(deadlineInput).toHaveValue('');
+  await expect(resetButton).not.toBeVisible();
+  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('默认');
+  await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（后端默认，全不设限）');
+
+  await turnsInput.fill('3');
+  await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
+  await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
+  await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
+  await deadlineInput.fill(deadlineLocal);
   await submitTask(page, '跑一个长任务');
 
   // ② 创建请求体：budget.run 三维逐字对齐 RunBudgetRequest（deadline = UTC 瞬时文本）。

@@ -20,8 +20,8 @@
  *  `now` 由壳层每次渲染传入（draft 变化即刷新；分钟级新鲜度足够，不引入定时器）。 */
 
 import * as Popover from '@radix-ui/react-popover';
-import { useState } from 'react';
-import { ChevronDown, Coins, Timer, Wallet } from 'lucide-react';
+import { useId, useState } from 'react';
+import { ChevronDown, ChevronRight, Coins, RotateCw, Timer, Wallet } from 'lucide-react';
 import { OptionPicker } from './OptionPicker';
 import { parseDurationToken } from '../lib/amend';
 import {
@@ -72,143 +72,231 @@ export function BudgetPickerPanel({
   // 「自定义」档展开态：draft 已是自定义值（重开面板）或本轮刚点了哨兵行。
   const [customTokensPicked, setCustomTokensPicked] = useState(false);
   const [customDurationPicked, setCustomDurationPicked] = useState(false);
+  const turnsInputId = useId();
+  const deadlineInputId = useId();
   const tokensCustom = tokensTierId(tokens) === TOKEN_CUSTOM_ID || customTokensPicked;
   const durationCustom = durationTierId(deadline) === DURATION_CUSTOM_ID || customDurationPicked;
   // 预览只跟随被接线的维（面板里没有的那一维不产生预览行）。
   const preview = onDeadlineChange !== undefined ? deadlinePreview(deadline, now) : null;
+  const summary = budgetSummary(turns, tokens, deadline);
+  const hasBudgetOverrides = turns.trim() !== '' || tokens.trim() !== '' || deadline.trim() !== '';
+
+  const resetBudget = () => {
+    setCustomTokensPicked(false);
+    setCustomDurationPicked(false);
+    onTurnsChange?.('');
+    onTokensChange?.('');
+    onDeadlineChange?.('');
+  };
 
   return (
     <>
       {onTurnsChange !== undefined && (
-        <label className="composer-budget" title="本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。">
-          <span className="composer-budget-label">turns 上限</span>
-          <input
-            type="number"
-            min={1}
-            inputMode="numeric"
-            className="composer-budget-input"
-            value={turns}
-            onChange={(e) => onTurnsChange(e.target.value)}
-            placeholder="默认"
-            disabled={disabled}
-            aria-label="预算上限（Agent turns，留空为默认）"
-          />
-        </label>
+        <section className="budget-picker-dimension">
+          <div className="budget-picker-dimension-row">
+            <span className="budget-picker-dimension-icon" aria-hidden="true">
+              <RotateCw size={14} />
+            </span>
+            <label
+              className="budget-picker-dimension-copy"
+              htmlFor={turnsInputId}
+            >
+              <span className="budget-picker-dimension-name">turns 上限</span>
+              <span className="budget-picker-dimension-hint">
+                本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。
+              </span>
+            </label>
+            <span className="budget-picker-dimension-control">
+              <input
+                id={turnsInputId}
+                type="number"
+                min={1}
+                inputMode="numeric"
+                className="composer-budget-input"
+                value={turns}
+                onChange={(e) => onTurnsChange(e.target.value)}
+                placeholder="默认"
+                disabled={disabled}
+                aria-label="预算上限（Agent turns，留空为默认）"
+              />
+              <span className="budget-picker-unit">轮</span>
+            </span>
+          </div>
+        </section>
       )}
       {onTokensChange !== undefined && (
-        <div className="composer-budget">
-          <OptionPicker
-            ariaLabel="预算 tokens 档位"
-            title="本次 run 的总 token 上限？"
-            icon={Coins}
-            options={TOKEN_OPTIONS}
-            value={tokensTierId(tokens)}
-            placeholder="tokens 上限"
-            disabled={disabled}
-            onChange={(value) => {
-              if (value === null) {
-                setCustomTokensPicked(false);
-                onTokensChange('');
-                return true;
-              }
-              if (value === TOKEN_CUSTOM_ID) {
-                // 不关闭：自定义数值输入框就在 footer，先把面板留着。
-                setCustomTokensPicked(true);
-                return false;
-              }
-              setCustomTokensPicked(false);
-              onTokensChange(value);
-              return true;
-            }}
-            footer={
-              tokensCustom ? (
-                <label className="composer-budget" title="自定义总 token 绝对上限；留空 = 不设。">
-                  <span className="composer-budget-label">自定义 tokens</span>
-                  <input
-                    type="number"
-                    min={1}
-                    inputMode="numeric"
-                    className="composer-budget-input"
-                    value={tokens}
-                    onChange={(e) => onTokensChange(e.target.value)}
-                    placeholder="默认"
-                    disabled={disabled}
-                    aria-label="预算上限（总 tokens，留空为默认）"
-                  />
-                </label>
-              ) : undefined
-            }
-          />
-        </div>
+        <section className="budget-picker-dimension">
+          <div className="budget-picker-dimension-row">
+            <span className="budget-picker-dimension-icon" aria-hidden="true">
+              <Coins size={14} />
+            </span>
+            <span className="budget-picker-dimension-copy">
+              <span className="budget-picker-dimension-name">tokens 上限</span>
+              <span className="budget-picker-dimension-hint">
+                本次 run 的总 token 上限？
+              </span>
+            </span>
+            <div className="composer-budget budget-picker-dimension-control">
+              <OptionPicker
+                ariaLabel="预算 tokens 档位"
+                icon={Coins}
+                options={TOKEN_OPTIONS}
+                value={tokensTierId(tokens)}
+                placeholder="tokens 上限"
+                disabled={disabled}
+                onChange={(value) => {
+                  if (value === null) {
+                    setCustomTokensPicked(false);
+                    onTokensChange('');
+                    return true;
+                  }
+                  if (value === TOKEN_CUSTOM_ID) {
+                    // 不关闭：自定义数值输入框就在 footer，先把面板留着。
+                    setCustomTokensPicked(true);
+                    return false;
+                  }
+                  setCustomTokensPicked(false);
+                  onTokensChange(value);
+                  return true;
+                }}
+                footer={
+                  tokensCustom ? (
+                    <label className="composer-budget" title="自定义总 token 绝对上限；留空 = 不设。">
+                      <span className="composer-budget-label">自定义 tokens</span>
+                      <input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        className="composer-budget-input"
+                        value={tokens}
+                        onChange={(e) => onTokensChange(e.target.value)}
+                        placeholder="默认"
+                        disabled={disabled}
+                        aria-label="预算上限（总 tokens，留空为默认）"
+                      />
+                    </label>
+                  ) : undefined
+                }
+              />
+            </div>
+          </div>
+        </section>
       )}
       {onDeadlineChange !== undefined && (
         <>
-          <div className="composer-budget">
-            <OptionPicker
-              ariaLabel="预算截止时长档位"
-              title="本次 run 距截止还有多久？"
-              icon={Timer}
-              options={DURATION_OPTIONS}
-              value={durationTierId(deadline)}
-              placeholder="截止时长"
-              disabled={disabled}
-              onChange={(value) => {
-                if (value === null) {
-                  setCustomDurationPicked(false);
-                  onDeadlineChange('');
-                  return true;
-                }
-                if (value === DURATION_CUSTOM_ID) {
-                  setCustomDurationPicked(true);
-                  return false;
-                }
-                setCustomDurationPicked(false);
-                // 档位 id 即时长 token（'30m' / '2h'），draft 原样收。
-                onDeadlineChange(value);
-                return true;
-              }}
-              footer={
-                durationCustom ? (
-                  <label className="composer-budget" title="自定义时长（分钟），提交时换算为绝对截止时刻。">
-                    <span className="composer-budget-label">自定义时长（分钟）</span>
-                    <input
-                      type="number"
-                      min={1}
-                      inputMode="numeric"
-                      className="composer-budget-input"
-                      value={String(parseDurationToken(deadline) ?? '')}
-                      onChange={(e) => onDeadlineChange(e.target.value ? `${e.target.value}m` : '')}
-                      placeholder="默认"
-                      disabled={disabled}
-                      aria-label="预算截止时长（分钟，自定义档）"
-                    />
-                  </label>
-                ) : undefined
-              }
-            />
-          </div>
-          {/* 高级路径（§2.2 保留项）：绝对时刻直填。时长档激活时显示空——在
-              datetime 里输入即覆盖时长 token（单 draft 字符串，天然互斥）。 */}
-          <label className="composer-budget" title="高级：按本机时区直接指定绝对截止时刻（提交换算为 UTC）；与时长档二选一。">
-            <span className="composer-budget-label">截止时刻（高级）</span>
-            <input
-              type="datetime-local"
-              className="composer-budget-input composer-budget-input--datetime"
-              value={durationTierId(deadline) !== null ? '' : deadline}
-              onChange={(e) => onDeadlineChange(e.target.value)}
-              disabled={disabled}
-              aria-label="预算截止时间（留空为不设）"
-            />
-          </label>
+          <section className="budget-picker-dimension">
+            <div className="budget-picker-dimension-row">
+              <span className="budget-picker-dimension-icon" aria-hidden="true">
+                <Timer size={14} />
+              </span>
+              <span className="budget-picker-dimension-copy">
+                <span className="budget-picker-dimension-name">截止时长</span>
+                <span className="budget-picker-dimension-hint">
+                  本次 run 距截止还有多久？
+                </span>
+              </span>
+              <div className="composer-budget budget-picker-dimension-control">
+                <OptionPicker
+                  ariaLabel="预算截止时长档位"
+                  icon={Timer}
+                  options={DURATION_OPTIONS}
+                  value={durationTierId(deadline)}
+                  placeholder="截止时长"
+                  disabled={disabled}
+                  onChange={(value) => {
+                    if (value === null) {
+                      setCustomDurationPicked(false);
+                      onDeadlineChange('');
+                      return true;
+                    }
+                    if (value === DURATION_CUSTOM_ID) {
+                      setCustomDurationPicked(true);
+                      return false;
+                    }
+                    setCustomDurationPicked(false);
+                    // 档位 id 即时长 token（'30m' / '2h'），draft 原样收。
+                    onDeadlineChange(value);
+                    return true;
+                  }}
+                  footer={
+                    durationCustom ? (
+                      <label className="composer-budget" title="自定义时长（分钟），提交时换算为绝对截止时刻。">
+                        <span className="composer-budget-label">自定义时长（分钟）</span>
+                        <input
+                          type="number"
+                          min={1}
+                          inputMode="numeric"
+                          className="composer-budget-input"
+                          value={String(parseDurationToken(deadline) ?? '')}
+                          onChange={(e) => onDeadlineChange(e.target.value ? `${e.target.value}m` : '')}
+                          placeholder="默认"
+                          disabled={disabled}
+                          aria-label="预算截止时长（分钟，自定义档）"
+                        />
+                      </label>
+                    ) : undefined
+                  }
+                />
+              </div>
+            </div>
+          </section>
+          {/* 高级路径保留绝对时刻输入；同一 draft 字符串继续保证与时长档互斥。 */}
+          <details className="budget-picker-advanced">
+            <summary className="budget-picker-advanced-summary">
+              <ChevronRight size={10} aria-hidden="true" />
+              <span>高级：直接指定绝对时刻</span>
+            </summary>
+            <div className="budget-picker-advanced-content">
+              <label
+                className="budget-picker-advanced-label"
+                htmlFor={deadlineInputId}
+              >
+                截止时刻（高级）
+              </label>
+              <input
+                id={deadlineInputId}
+                type="datetime-local"
+                className="composer-budget-input composer-budget-input--datetime"
+                value={durationTierId(deadline) !== null ? '' : deadline}
+                onChange={(e) => onDeadlineChange(e.target.value)}
+                disabled={disabled}
+                aria-label="预算截止时间（留空为不设）"
+              />
+              <span className="budget-picker-advanced-note">
+                按本机时区直接指定绝对截止时刻（提交换算为 UTC）；与时长档二选一。
+              </span>
+            </div>
+          </details>
           {preview && (
             <span
-              className={`composer-budget-preview${preview.expired ? ' composer-budget-preview--danger' : ''}`}
+              className={
+                'composer-budget-preview' + (preview.expired ? ' composer-budget-preview--danger' : '')
+              }
             >
-              {preview.text}
+              <Timer size={13} aria-hidden="true" />
+              <span>{preview.text}</span>
             </span>
           )}
         </>
       )}
+      <div className="budget-picker-footer">
+        <span className="budget-picker-status">
+          <span className="budget-picker-status-dot" aria-hidden="true" />
+          <span className="budget-picker-status-text">
+            {summary === '默认' ? '当前：默认（后端默认，全不设限）' : '当前：' + summary}
+          </span>
+        </span>
+        {hasBudgetOverrides && (
+          <button
+            type="button"
+            className="budget-picker-reset"
+            onClick={resetBudget}
+            disabled={disabled}
+          >
+            恢复默认
+          </button>
+        )}
+      </div>
     </>
   );
 }
@@ -250,8 +338,24 @@ export function BudgetPicker({
         </button>
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content className="picker-content budget-picker-content" side="top" align="start" sideOffset={6}>
-          <div className="picker-head">本次 run 的预算（留空 = 后端默认）</div>
+        <Popover.Content
+          className="picker-content budget-picker-content budget-picker-content--v2"
+          side="top"
+          align="start"
+          sideOffset={6}
+        >
+          <div className="picker-head budget-picker-head">
+            <span className="budget-picker-head-icon" aria-hidden="true">
+              <Wallet size={15} />
+            </span>
+            <span className="budget-picker-head-copy">
+              <span className="budget-picker-head-title">本次 run 的预算</span>
+              <span className="budget-picker-head-subtitle">
+                <span className="budget-picker-head-highlight">留空 = 无限制（后端默认）</span>
+                {' · 到顶自动暂停，可在恢复时上调'}
+              </span>
+            </span>
+          </div>
           <BudgetPickerPanel
             turns={turns}
             onTurnsChange={onTurnsChange}
