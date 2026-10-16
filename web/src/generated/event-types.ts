@@ -52,6 +52,7 @@ export const EventType = {
   MODEL_FALLBACK: 'model/fallback',
   AGENT_DELEGATION_STARTED: 'agent/delegation-started',
   AGENT_DELEGATION_FINISHED: 'agent/delegation-finished',
+  AGENT_CONSTRAINT_INHERITANCE: 'agent/constraint-inheritance',
   REASONING_STARTED: 'reasoning/started',
   REASONING_DELTA: 'reasoning/delta',
   REASONING_COMPLETED: 'reasoning/completed',

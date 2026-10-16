@@ -31,21 +31,11 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
+import { FACT_TYPE_DOTS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
 type StatusFilter = 'all' | 'active' | 'revoked';
-
-/** 类型圆点固定色（issue §四.4）；未知类型回落到 ink-subtle 灰。 */
-const TYPE_DOT: Record<string, string> = {
-  constraint: 'var(--cn-type-constraint)',
-  user_goal: 'var(--cn-type-user-goal)',
-  authorization: 'var(--cn-type-authorization)',
-  work_boundary: 'var(--cn-type-work-boundary)',
-  failed_approach: 'var(--cn-type-failed-approach)',
-  evidence_ref: 'var(--cn-type-evidence-ref)',
-};
 
 /** 类型下拉的 6 个具体类型（issue §四.3）；「全部类型」是另立的空值 option，
  *  两者合计 = 票面所称的「下拉 7 值」。 */
@@ -145,7 +135,7 @@ function FactRow({
   const revoked = fact.status === 'revoked';
   const superseded = fact.status === 'superseded';
   const inactive = revoked || superseded;
-  const dot = TYPE_DOT[fact.type] ?? 'var(--cn-type-default)';
+  const dot = FACT_TYPE_DOTS[fact.type] ?? 'var(--cn-type-default)';
   return (
     <div className={`cn-row${inactive ? ' revoked' : ''}`} data-status={fact.status}>
       <div className="cn-row-main">

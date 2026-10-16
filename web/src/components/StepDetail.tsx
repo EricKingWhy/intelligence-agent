@@ -32,6 +32,7 @@ import {
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
+import { ConstraintInheritance } from './ConstraintInheritance';
 import { ConstraintsTab } from './ConstraintsTab';
 import { CopyButton } from './CopyButton';
 import { DiffBlock } from './DiffBlock';
@@ -1759,6 +1760,9 @@ function ChildSessionView({ childSessionId }: { childSessionId: string }) {
   }
   return (
     <>
+      {/* #1192：约束继承快照事件在子会话自己的事件流里——子详情视图顶部
+       *  只读展示（无快照事件则整区不渲染，不伪造）。 */}
+      <ConstraintInheritance events={conversation.events} />
       <ChatTab conversation={conversation} tools={allTools(conversation)} />
       <ChildTimeline events={conversation.events} />
     </>

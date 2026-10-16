@@ -131,7 +131,8 @@ def _capture_resumed_runtime(monkeypatch) -> list[Any]:
 
 def _args(target: str, task: str) -> object:
     return type("_Args", (), {"target": target, "task": task,
-                              "constraints": [], "output_schema": None})()
+                              "constraints": [], "output_schema": None,
+                              "omit_constraints": False})()
 
 
 async def _spawn_child(
