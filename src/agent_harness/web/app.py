@@ -128,6 +128,7 @@ from agent_harness.session.service import (
     InvalidDecision,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
@@ -3270,7 +3271,10 @@ def create_app(
         状态码（顺序即服务层的校验顺序）：422 → id 形态非法（先于 404，路径穿越防线）；
         404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run（`ActiveRunConflict`，
         零写入）/ 该会话已有压缩在途（`CompactionInProgress`，零写入）/ 落盘窗口并发
-        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）；
+        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）/
+        **无可压缩的早期内容**（`NoCompactableEarlyTurn`，零写入；#1197 项 3 的"被拒"
+        态，`detail` 是 `{"message", "reason": "no_early_turns"}` 对象——三态契约要求
+        前端能与"摘要校验失败"区分）；
         500 → bracket 已写入但复核未通过
         （`CompactionPostWriteError`，fail-closed；历史已多出 bracket，不谎报"未改动"）。
 
@@ -3288,6 +3292,17 @@ def create_app(
             )
         except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
             raise http_error(e) from e
+        except NoCompactableEarlyTurn as e:
+            # #1197 项 3 的"被拒"态：会话里**确实没东西可压**，不是压缩失败。
+            # 刻意不走 `http_error`——那会把 detail 压成纯字符串，前端拿不到
+            # `reason`（#1195 要据它与"摘要校验失败"区分三态）。形状照本文件
+            # `SandboxUnavailableError` 的结构化 409 先例：`detail` 是对象，
+            # 机器可读字段与给人看的文案分列。状态码仍与 `web/domain_errors.py`
+            # 的登记一致（409）。
+            raise HTTPException(
+                status_code=409,
+                detail={"message": str(e), "reason": e.reason},
+            ) from e
         except ConfigError as e:
             # 非法摘要模型名（统一解析点抛出）：请求形状非法 → 422，detail 原样上抛。
             raise HTTPException(status_code=422, detail=str(e)) from e

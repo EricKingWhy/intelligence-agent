@@ -64,6 +64,25 @@ class CompactionConcurrentWrite(ActiveRunConflict):
         self.reason = reason
 
 
+class NoCompactableEarlyTurn(SessionServiceError):
+    """会话里没有可压缩的早期内容——压缩的**类型化拒绝**（#1197 项 3）。
+
+    "没得压"与"压坏了"此前共用同一个 below-floor DTO（`compacted_turn_count=0`），
+    前端无法区分。三态契约（压缩中 / 被拒 / 失败）要求这条路径类型化拒绝：
+    被拒 = 409 `{reason: "no_early_turns"}`，且**零写入**（不落失败事件、不落 bracket）。
+
+    与 `CompactionInProgress` / `CompactionConcurrentWrite` 同为 409，但成因相反：
+    那两条是"有人同时在动"，这条是"确实没东西可压"。因此刻意**不继承**
+    `ActiveRunConflict`（此刻没有任何 run 或压缩在途），HTTP 层在
+    `web/domain_errors.py` 独立登记 409。
+
+    `reason` 是**类属性**而非构造入参：本类型只有一种成因，可变 reason 只会诱导
+    调用方去猜。它是 #1195 三态契约的机器可读字段。
+    """
+
+    reason: Literal["no_early_turns"] = "no_early_turns"
+
+
 class SessionHasChildren(SessionServiceError):
     """会话是别的会话的 fork 父，不能删（ADR-0029 D4）。
 

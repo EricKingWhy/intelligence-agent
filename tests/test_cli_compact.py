@@ -11,8 +11,9 @@ CLI 是同一个 `SessionService.compact_session_context` 方法的**瘦触发�
 - 成功：`压缩完成` + 前后 token 对比 + source 区间；
 - 低水位（`compacted_turn_count == 0` 且非 dry-run）：`水位过低，无需压缩（未改动）。`；
 - `--dry-run`：零 LLM / 零写入，渲染"将压缩"预览；
-- 错误映射：无会话 / id 非法 → exit 1；在途 run / 压缩进行中 → exit 1（明确文案）；
-  非法 `--model` → exit 1；用法错 → exit 2。
+- 错误映射：无会话 / id 非法 → exit 1；在途 run / 压缩进行中 / 无可压缩早期轮
+  （#1197 项 3 的"被拒"态）→ exit 1（明确文案，不吐 traceback）；非法 `--model`
+  → exit 1；用法错 → exit 2。
 
 为避免在 CLI 单测里重建整条运行时，本文件用替身服务注入 `_cli_session_service`：
 渲染/退出码是 T4 的接缝，真实压缩语义的契约在 `tests/session/test_compact_session_context.py`。
@@ -34,6 +35,7 @@ from agent_harness.session.errors import (
     CompactionConcurrentWrite,
     CompactionInProgress,
     InvalidSessionId,
+    NoCompactableEarlyTurn,
     SessionNotFound,
 )
 from agent_harness.session.service import SessionContextCompaction
@@ -204,6 +206,10 @@ def test_dry_run_without_compactable_window(monkeypatch, tmp_path):
             "并发改动",
         ),
         (ConfigError("未知模型 'nope'"), "压缩失败"),
+        (
+            NoCompactableEarlyTurn("session 'x' has no compactable early turn"),
+            "没有可压缩的早期内容",
+        ),
     ],
 )
 def test_error_matrix_exits_1_with_clear_message(

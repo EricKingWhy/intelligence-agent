@@ -1,6 +1,6 @@
 """#635 T3：`SessionService.compact_session_context` 的行为契约。
 
-覆盖：拒绝路径（404/422/在途 run/空 transcript 零写入）、低水位手动成功产出合法
+覆盖：拒绝路径（404/422/在途 run/空 transcript/无可压缩早期轮，均零写入）、低水位手动成功产出合法
 bracket、append-only、in-flight 防重与 finally 释放、token 计数、失败上报、
 `--model` 优先级与非法模型零副作用、dry_run 零 LLM 零写入。
 """
@@ -31,6 +31,7 @@ from agent_harness.session.errors import (
     CompactionConcurrentWrite,
     CompactionInProgress,
     InvalidSessionId,
+    NoCompactableEarlyTurn,
     SessionNotFound,
 )
 from agent_harness.session.runmanager import RunManager
@@ -139,7 +140,14 @@ async def test_busy_run_is_rejected_with_zero_event_writes(make_session_service,
 
 
 @pytest.mark.asyncio
-async def test_empty_transcript_is_below_floor_with_zero_writes(make_session_service, tmp_path):
+async def test_empty_transcript_is_rejected_with_zero_writes(make_session_service, tmp_path):
+    """空 transcript（只有 session/started）同样落"无可压缩早期轮"这一档。
+
+    #1197 项 3 前这里是 below-floor DTO（200 + `compacted_turn_count=0`）；三态契约
+    把"没得压"与"压坏了"拆开，所以本条与 `test_no_early_turns_rejected_with_409_reason`
+    走同一路径、同一断言面——保留独立用例是因为"一条消息都没有"与"只有当前一条
+    user 消息"是两个不同的输入形态，判据（`compactable_early_window`）对两者都要成立。
+    """
     store = JsonlSessionStore(root=tmp_path)
     session = make_session(tmp_path)  # 只有 session/started
     before = _events(store, session.session_id)
@@ -148,10 +156,10 @@ async def test_empty_transcript_is_below_floor_with_zero_writes(make_session_ser
     )
     service._compact_context_builder = _builder_factory(responses=[])
 
-    outcome = await service.compact_session_context(session.session_id, entry_point="api")
+    with pytest.raises(NoCompactableEarlyTurn) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="api")
 
-    assert outcome.compacted_turn_count == 0
-    assert outcome.bracket_id is None
+    assert excinfo.value.reason == "no_early_turns"
     assert _events(store, session.session_id) == before, "空 transcript 必须零写入"
 
 
@@ -695,3 +703,30 @@ async def test_dry_run_reports_below_floor_when_no_early_turn(make_session_servi
 
     assert outcome.dry_run is True
     assert outcome.compacted_turn_count == 0
+
+
+# ── #1197 项 3：无可压缩早期轮 → 409（被拒，不是"水位过低"）─────────────
+
+
+@pytest.mark.asyncio
+async def test_no_early_turns_rejected_with_409_reason(make_session_service, tmp_path):
+    """#1197 项 3：没有可压缩的早期内容 ⇒ **被拒**（409 `{reason: no_early_turns}`）。
+
+    旧行为把这条路径吞成 200 + `compacted_turn_count=0`（"水位过低，无需压缩"），
+    与"摘要校验失败"共用一个 DTO，前端无法区分"没得压"和"压坏了"——三态契约
+    （压缩中 / 被拒 / 失败）要求这条路径**类型化拒绝**，且零写入。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = _events(store, session.session_id)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+    service._compact_context_builder = _builder_factory(responses=[])
+
+    with pytest.raises(NoCompactableEarlyTurn) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="api")
+
+    assert excinfo.value.reason == "no_early_turns"
+    assert _events(store, session.session_id) == before, "被拒必须零写入"

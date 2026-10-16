@@ -146,6 +146,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
@@ -3974,6 +3975,20 @@ class SessionService:
                     dry_run=True,
                 )
 
+            # ⑥' #1197 项 3：无可压缩早期轮 ⇒ **类型化拒绝**（409
+            # `{reason: "no_early_turns"}`），不再吞成 200 + `compacted_turn_count=0`
+            # 的"水位过低"。判据与 compactor 的 `early` 窗口**同源**
+            # （`compactable_early_window`，经 `_has_compactable_early_turn`），
+            # 且判定在任何 LLM 装配 / 任何写入之前——被拒路径**零写入**。
+            #
+            # 放在 dry_run 之后：dry_run 是**预览**（自己的 DTO 契约，"将压缩 / 不
+            # 会压缩"），不是用户的压缩动作，不适用"被拒"语义。
+            if not self._has_compactable_early_turn(session):
+                raise NoCompactableEarlyTurn(
+                    f"session '{session_id}' has no compactable early turn; "
+                    "there is nothing to summarize yet"
+                )
+
             # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
             from agent_harness.context.compactor import (
                 CompactionPostWriteError,
@@ -6383,6 +6398,7 @@ __all__ = [
     "LaunchResult",
     "ModelChange",
     "ModelTarget",
+    "NoCompactableEarlyTurn",
     "PendingApprovalConflict",
     "PermissionChange",
     "QueueItemNotFound",

@@ -88,6 +88,10 @@ def test_status_map_is_the_audited_contract():
         # 映射文案，不再靠错误字符串子串）。子类必须自己登记（精确类型索引）。
         "CompactionInProgress": 409,
         "CompactionConcurrentWrite": 409,
+        # #1197 项 3：无可压缩早期轮的类型化拒绝——同为 409，但成因与上面两条
+        # 相反（"没东西可压" vs "有人同时在动"），故独立成类而非 ActiveRunConflict
+        # 子类；前端据 `reason="no_early_turns"` 与"摘要校验失败"区分开。
+        "NoCompactableEarlyTurn": 409,
         "RecoveryConflict": 409,
         "ApprovalAlreadyResolved": 409,
         "SteerTargetNotFound": 409,

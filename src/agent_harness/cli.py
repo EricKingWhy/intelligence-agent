@@ -112,6 +112,7 @@ from agent_harness.session.errors import (
     CompactionConcurrentWrite,
     CompactionInProgress,
     InvalidSessionId,
+    NoCompactableEarlyTurn,
     SessionNotFound,
 )
 from agent_harness.session.fork import (
@@ -3402,6 +3403,12 @@ def _main_compact(argv: list[str]) -> None:
         else:
             message = "压缩被拒绝：压缩期间会话被并发改动，请重试"
         _emit_stderr(message)
+        raise SystemExit(1) from None
+    except NoCompactableEarlyTurn:
+        # #1197 项 3 的"被拒"态：类型化拒绝，不是失败——文案对齐 #1195 三态契约
+        # 的"没有可压缩的早期内容"（不再说"水位过低"，那与面板显示的百分比自相矛盾）。
+        # 判定在任何 LLM 装配 / 任何写入之前，故确实零改动。
+        _emit_stderr("压缩被拒绝：没有可压缩的早期内容（零改动）")
         raise SystemExit(1) from None
     except ActiveRunConflict:
         # 在途 run（子类已在上方分别处理，这里是基类语义）。

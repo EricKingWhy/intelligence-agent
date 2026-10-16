@@ -2618,7 +2618,9 @@ const COMPACT_TIMEOUT_MS = 180_000;
  *
  *  错误矩阵（后端 `web/app.py::compact_session_context`）：
  *    404 —— 没有这个会话；
- *    409 —— 在途 run 或该会话已有压缩在途（`detail` 原样上抛，不自己编文案）；
+ *    409 —— 在途 run / 该会话已有压缩在途（`detail` 原样上抛，不自己编文案）/
+ *           无可压缩的早期内容（#1197 项 3 的"被拒"态，`detail` 是
+ *           `{message, reason: 'no_early_turns'}` 对象——`reason` 是机器可读字段）；
  *    422 —— id 形态非法 / 非法 `?model=`（`detail` 原样上抛）；
  *    403 —— 非本机来源（宿主侧管理动作只接受本机来源，ADR-0025 D1）。
  *  超时 → 明确的 Error（前端不再无限等待）。 */
