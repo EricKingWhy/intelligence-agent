@@ -187,6 +187,9 @@ PERMISSION_GRANTED = "permission/approval-granted"
 PERMISSION_REVOKED = "permission/approval-revoked"
 # ── #526 B1：工作流档切换（normal/plan），Runtime 只读门禁的 durable 真相。
 WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
+# ── #1197 项 1：会话级上下文窗口（五挡位之一），per-session 独立；
+# 内存投影见 context/window.py derive（倒序 last-wins）。
+CONTEXT_WINDOW_CHANGED = "context/window-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -326,6 +329,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_CHANGED,
         # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
         PERMISSION_CHANGED,
+        # #1197 项 1：会话级上下文窗口挡位
+        CONTEXT_WINDOW_CHANGED,
     }
 )
 

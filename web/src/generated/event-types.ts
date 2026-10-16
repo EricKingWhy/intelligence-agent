@@ -60,6 +60,7 @@ export const EventType = {
   PERMISSION_GRANTED: 'permission/approval-granted',
   PERMISSION_REVOKED: 'permission/approval-revoked',
   WORKFLOW_MODE_CHANGED: 'workflow/mode-changed',
+  CONTEXT_WINDOW_CHANGED: 'context/window-changed',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
   COMPACTION_START: 'compaction/start',

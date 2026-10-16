@@ -252,6 +252,7 @@ from agent_harness.session.workflow import (
     WorkflowMode,
     append_workflow_mode_change,
 )
+from agent_harness.context.window import append_context_window_change
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
@@ -6322,6 +6323,27 @@ class SessionService:
         existed = approval_key in grants
         append_approval_revoke(session, approval_key)
         return {"id": session_id, "approval_key": approval_key, "revoked": existed}
+
+    async def set_context_window(
+        self, session_id: str, context_window: int
+    ) -> dict[str, Any]:
+        """切换会话上下文窗口挡位（#1197 项 1），**per-session 独立**。
+
+        守卫复用 `_require_existing_session`（422 先于 404）；写入走
+        `append_context_window_change`（**唯一**写入口，白名单在此再拦一道：
+        即便调用方绕过 HTTP 的 pydantic 校验也写不进非法挡位）。追加
+        `context/window-changed`（append-only，last-wins）；`ContextBuilder` 每次
+        `build()` / `compact_now()` 现派生，**下一轮上下文构建即生效**，无需重建
+        （与 `set_workflow_mode` 同款生效语义）。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        append_context_window_change(session, context_window)
+        return {"id": session_id, "context_window": context_window}
 
     async def set_workflow_mode(
         self, session_id: str, mode: WorkflowMode
