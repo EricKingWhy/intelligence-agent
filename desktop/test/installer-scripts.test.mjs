@@ -346,7 +346,7 @@ describe('process gate (#914)', () => {
   })
 
   it('refuses a stage that never calls the gate', () => {
-    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n', '  ${If} $iaProbeFound == "1"\n')
     // #1066 gave the macro a second, in-window call: both call sites have to go
     // for this case to mean what its name says.
     const both = withoutStagingWindowCall(dir)
@@ -358,7 +358,7 @@ describe('process gate (#914)', () => {
     // The pointer must not be armed when the gate refuses: .onGUIEnd and
     // iaRollbackApplication read a non-empty IaBackupDir as "the install
     // section started" and would roll a good installation back.
-    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n', '  ${If} $iaProbeFound == "1"\n')
     // Both call sites go (#1066 added the in-window one): this case pins the
     // placement rule, so the late call has to be the only one left.
     const withoutCalls = withoutStagingWindowCall(dir)
@@ -626,6 +626,45 @@ describe('long-path app executable detection (#1045)', () => {
 
 describe('interrupted installer recovery choices (#915)', () => {
   const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+
+  it('gates the rollback and continue-fresh paths on running processes (#1201)', () => {
+    // CI witness for the two #1201 gate calls: the live-process red/green leg
+    // runs on a real machine (r1-drivers/run-rollback-gate-probe.ps1) and
+    // cannot run here, so these static assertions are what keeps the calls
+    // from being silently removed. Both recovery paths delete or rename the
+    // install directory before any "who is running" classification exists
+    // (the .onInit recovery-pending skip leaves iaStageApplication's two gate
+    // calls unreached), and the gate must run after SetOutPath $TEMP — the
+    // #1066 measured rule (a PowerShell child must not inherit a to-be-deleted
+    // working directory).
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    const gateCall = 'Call iaRequireNoRunningProduct'
+    const rollback = source.match(/Function iaRollbackApplication([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    assert.ok(rollback.includes(gateCall), 'rollback must call the running-product gate')
+    assert.ok(rollback.includes('SetOutPath $TEMP'), 'rollback must release the working directory first')
+    assert.ok(
+      rollback.indexOf('SetOutPath $TEMP') < rollback.indexOf(gateCall),
+      'the rollback gate call must follow SetOutPath $TEMP',
+    )
+    const fresh = source.match(/Function iaContinueInterruptedFresh([\s\S]*?)FunctionEnd/)?.[1] ?? ''
+    assert.ok(fresh.includes(gateCall), 'continue-fresh must call the running-product gate')
+    assert.ok(fresh.includes('SetOutPath $TEMP'), 'continue-fresh must release the working directory first')
+    assert.ok(
+      fresh.indexOf('SetOutPath $TEMP') < fresh.indexOf(gateCall),
+      'the continue-fresh gate call must follow SetOutPath $TEMP',
+    )
+    // Neither refusal may clear the backup pointer: the refusal is non-terminal
+    // and the recovery page must come back with IaBackupDir armed (#1165 keeps
+    // the opposite, terminal, side of that line — a shape-refused value in the
+    // shape-rejection block IS cleared, and must stay so). The witness is
+    // scoped to the gate-call region of each function, not the whole body:
+    // iaRollbackApplication clears a refused pointer later (its own #904 item 6
+    // convention), which is not this rule.
+    const rollbackGate = rollback.slice(rollback.indexOf('SetOutPath $TEMP'))
+    const freshGate = fresh.slice(fresh.indexOf('SetOutPath $TEMP'))
+    assert.doesNotMatch(rollbackGate.slice(0, rollbackGate.indexOf('DetailPrint')), /iaClearBackupDir/)
+    assert.doesNotMatch(freshGate, /iaClearBackupDir/)
+  })
 
   it('clears the consumed leftover pointer after rollback restores the backup (#1040)', () => {
     const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
