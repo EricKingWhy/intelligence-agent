@@ -694,6 +694,11 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
+  /** #1197 项 5A：自动压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
+   *  「正在压缩上下文…」进度条的唯一数据源（不变量 #22：界面是投影）。
+   *  后端 bracket 三事件背靠背落盘（`builder.py::compact_now`），故真机上本字段的
+   *  可见窗口很短——票面禁止改后端事件语义，局限已如实登记在报告里。 */
+  compaction_in_progress: boolean;
   /** Pending interactive approvals (#37, PRD §2.2).
    *  tool/approval-requested adds to this list; permission/resolved removes.
    *  Empty array = no pending approval (auto-approve or already resolved). */

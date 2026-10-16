@@ -2592,6 +2592,64 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+/** 上下文窗口挡位设置（`GET/PATCH /api/sessions/{id}/context-settings`，后端
+ *  `web/app.py:3524/3545`）。**形状是后端 DTO 原样透传**——挡位清单以后端为准，
+ *  前端不硬编码副本：`tiers` 就是权威列表，选择器只按它渲染。
+ *
+ *  两处与 `/context-usage` 的**口径差异**（本票实测，调用方必须知道）：
+ *  - `context_window` 是**本会话生效**的窗口（后端 `effective_context_window`
+ *    逆扫最后一条 `context/window-changed`），而 `/context-usage` 的 `window_tokens`
+ *    是**部署默认**（`context_usage.py:159` 的 `settings.max_context_tokens`）——
+ *    改完挡位看板不会跟着变。
+ *  - `thresholds` 在这里是**绝对 token 数**（后端 `int(window * ratio)`），
+ *    而 `/context-usage` 的 `thresholds` 是 0.70/0.85 的**比例**。同名不同义。 */
+export interface ContextSettings {
+  session_id: string;
+  /** 本会话生效窗口（token）。 */
+  context_window: number;
+  /** 部署默认挡位——「恢复默认」的锚点（不硬编码 200_000）。 */
+  configured_default: number;
+  /** 合法挡位清单（后端 `CONTEXT_WINDOW_TIERS`），选择器的唯一数据源。 */
+  tiers: number[];
+  /** **绝对 token 数**（不是比例，见上）。 */
+  thresholds: { auto_compact: number; hard_guard: number };
+}
+
+/** GET /api/sessions/{id}/context-settings —— 读本会话窗口挡位（只读，无副作用）。 */
+export async function getContextSettings(sessionId: string): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`);
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `context-settings ${res.status}`);
+  }
+  return res.json();
+}
+
+/** PATCH /api/sessions/{id}/context-settings —— 改挡位，回执是**生效后**的完整设置。
+ *
+ *  状态码语义（照后端路由 docstring，前端不合并它们）：
+ *    200 幂等（同值再写一次仍 200，回执不变）
+ *    404 会话不存在
+ *    422 挡位非法（**零写入**——调用方据此说"没改"，不说"改了一半"）
+ *    503 存储忙（StorageBusyError）
+ *  一律走 `SessionError`（带 status）；文案直接用后端 detail——它已写清合法取值，
+ *  前端再编一句只会更差。 */
+export async function setContextWindow(
+  sessionId: string,
+  contextWindow: number,
+): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context_window: contextWindow }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `set context window ${res.status}`);
+  }
+  return res.json();
+}
+
 /** 手动压缩回执（后端 `POST /api/sessions/{id}/context/compact`，`#635`）。
  *
  *  形状是服务层 DTO 的字段透传。`bracket_id` 指向新落的 bracket；低水位

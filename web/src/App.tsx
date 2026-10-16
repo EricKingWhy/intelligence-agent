@@ -25,6 +25,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
+import { ContextWindowPanel } from './components/ContextWindowPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
 import { ContextFullDialog } from './components/ContextFullDialog';
@@ -333,6 +334,9 @@ export default function App() {
 
   // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
   const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
+  // #1197 项 5B：上下文窗口挡位选择器（open 的 sid；null = 关闭）。同因在 Esc
+  // 中断 effect 之前声明。
+  const [contextWindowOpen, setContextWindowOpen] = useState<string | null>(null);
   // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
   // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
   const [taskReviewOpen, setTaskReviewOpen] = useState(false);
@@ -355,12 +359,13 @@ export default function App() {
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
+      if (contextWindowOpen !== null) return; // 挡位选择器同因（非 Radix，closest 不命中）
       if (taskReviewOpen) return; // #353：审阅浮层在场，Esc 归浮层（非 Radix，closest 不命中）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream, contextUsageOpen, taskReviewOpen]);
+  }, [streaming, cancelStream, contextUsageOpen, contextWindowOpen, taskReviewOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -1374,6 +1379,7 @@ export default function App() {
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
+        onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
       />
 
@@ -1770,6 +1776,12 @@ export default function App() {
         sessionId={contextUsageOpen ?? ''}
         open={contextUsageOpen !== null}
         onClose={() => setContextUsageOpen(null)}
+      />
+      {/* #1197 项 5B：上下文窗口挡位选择器（TopBar Sliders 入口）。 */}
+      <ContextWindowPanel
+        sessionId={contextWindowOpen ?? ''}
+        open={contextWindowOpen !== null}
+        onClose={() => setContextWindowOpen(null)}
       />
       {/* #353 W-09：任务审阅浮层（服务端 Task/Evidence 投影驱动；会话切走即关闭）。 */}
       {taskReviewOpen && selectedId !== null && (

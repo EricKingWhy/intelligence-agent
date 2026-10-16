@@ -165,6 +165,8 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     // #537：run 预算镜像初值（同上：字面量构造点跟着必填字段长）。
     run_budget_ceilings: null,
     run_budget_consumed: null,
+    // #1197 项 5A：新增必填字段（同上：本夹具是 ConversationState 字面量构造点）。
+    compaction_in_progress: false,
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {
