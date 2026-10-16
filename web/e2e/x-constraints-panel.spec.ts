@@ -176,7 +176,7 @@ test('AC4：零约束 → 空态说出「没有符合条件的约束」（整页
 
 test('AC5：403 → 「无权限查看约束」（不冒充空列表）', async ({ page }) => {
   await openConstraints(page, {
-    onProtectedFactsGet: async (route: import('@playwright/test').Route) => {
+    onEffectiveConstraintsGet: async (route: import('@playwright/test').Route) => {
       await route.fulfill({
         status: 403,
         contentType: 'application/json',

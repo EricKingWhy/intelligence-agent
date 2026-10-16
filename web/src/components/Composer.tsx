@@ -12,7 +12,7 @@ import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
-import { getSessionEvents, type CatalogEntry, type ModelCatalogEntry } from '../lib/api';
+import { getSessionEvents, type CatalogEntry, type ConstraintScope, type ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { onTokenChange } from '../lib/auth';
@@ -20,6 +20,7 @@ import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
 import type { Ownership } from '../lib/ownership';
+import { SCOPE_LABELS } from '../lib/constraints';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ModelPicker } from './ModelPicker';
@@ -42,6 +43,30 @@ const DANGER_PERMISSION_MODE = 'danger-full-access';
 
 /** 非视觉模型禁用附图的原因前缀（#937 / M-24 收口：title 与可见提示两处同源，改一处即两处）。 */
 const NON_VISION_MODEL_REASON = '当前模型不支持视觉（supports_vision=false）';
+
+/** #1191（Phase 2）：登记作用域三选一 + 逐字 hint 文案（票面 §四.2）。
+ *  顺序即渲染顺序；`session` 是默认项（票面 §四.1「默认选中"本会话"」）。 */
+const SCOPE_OPTIONS: readonly {
+  id: ConstraintScope;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    id: 'session',
+    label: SCOPE_LABELS.session,
+    hint: '只在当前会话生效，随会话结束自然失效。适合一次性的要求。',
+  },
+  {
+    id: 'project',
+    label: SCOPE_LABELS.project,
+    hint: '写入项目级存储，本仓库开的所有会话都生效，别的项目不受影响。',
+  },
+  {
+    id: 'global',
+    label: SCOPE_LABELS.global,
+    hint: '写入用户级存储，所有项目的新会话都生效。适合长期习惯。',
+  },
+];
 
 /** #1027 发送门禁的阻断文案（Gmail 式阻断，PORT DESIGN）：界面提示与发送按钮
  *  title 两处同源（#937 / M-24 同款手法），改一处即两处。 */
@@ -70,6 +95,7 @@ interface Props {
     task: string,
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
+    scope?: ConstraintScope,
   ) => void | boolean | Promise<void | boolean>;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
@@ -77,7 +103,12 @@ interface Props {
     task: string,
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
+    scope?: ConstraintScope,
   ) => void | boolean | Promise<void | boolean>;
+  /** #1191（Phase 2）：当前会话是否落在 git 仓库内（项目级登记可选）。
+   *  `null`/缺省 = 未知（新建态、或尚未取得项目信息）⇒ 不置灰，交由后端 422 兜底；
+   *  `false` = 已确知非 git 目录 ⇒ 「本项目」置灰不可选（票面 §七.4）。 */
+  projectAvailable?: boolean | null;
   /** #825（MM-04）；#1015 修订：**当前会话 id**——附图上传端点是 per-session 的
    *  （`POST /api/sessions/{id}/attachments`）。`null` = 新建态：入口**不再禁用**，
    *  首次投喂经 `onEnsureSession` 懒建会话后再上传。会话切换时草稿清空并中止在途
@@ -166,6 +197,7 @@ export const Composer = memo(function Composer({
   askUserPending = false,
   onSubmit,
   onSteer,
+  projectAvailable = null,
   sessionId = null,
   onEnsureSession,
   ownership = null,
@@ -200,6 +232,8 @@ export const Composer = memo(function Composer({
 }: Props) {
   const [value, setValue] = useState('');
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
+  /** #1191：登记作用域（勾选「作为可复用规则」后可选；默认本会话）。 */
+  const [scope, setScope] = useState<ConstraintScope>('session');
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // #1195：`/permission` `/model` 拉起现有 picker——两组件的 open 都是内部 state
@@ -494,8 +528,8 @@ export const Composer = memo(function Composer({
        就绝不覆盖（与下面 `failedDraft` 的回填是同一条纪律）。 */
     const accepted =
       mode === 'steer' && onSteer
-        ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds)
-        : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds);
+        ? onSteer(trimmed, rememberAsProceduralRule, attachmentIds, scope)
+        : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds, scope);
     sendingRef.current = true;
     setSending(true);
     /** 受理落定后的清空。**只在受理侧调用**（`false` 与抛错都不调）。 */
@@ -517,6 +551,8 @@ export const Composer = memo(function Composer({
         return rest.trim() === '' ? '' : rest;
       });
       setRememberAsProceduralRule(false);
+      // #1191：受理后复位作用域选择，下一次登记从默认「本会话」起。
+      setScope('session');
       // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
       // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
       attachments.clearSent(attachmentIds);
@@ -1109,18 +1145,54 @@ export const Composer = memo(function Composer({
           disabled={locked}
           aria-label="Agent 任务"
         />
-        <label className="composer-rule-signal" htmlFor="remember-as-procedural-rule">
-          <input
-            id="remember-as-procedural-rule"
-            type="checkbox"
-            checked={rememberAsProceduralRule}
-            onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
-            disabled={locked}
-          />
-          <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
-            将这条消息作为可复用规则
-          </span>
-        </label>
+        <div className="composer-rule-row">
+          <label className="composer-rule-signal" htmlFor="remember-as-procedural-rule">
+            <input
+              id="remember-as-procedural-rule"
+              type="checkbox"
+              checked={rememberAsProceduralRule}
+              onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
+              disabled={locked}
+            />
+            <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
+              将这条消息作为可复用规则
+            </span>
+          </label>
+          {/* #1191：勾选后出现作用域三选一（默认「本会话」，票面 §四.1）。 */}
+          {rememberAsProceduralRule && (
+            <div className="composer-scope-pills" role="group" aria-label="登记作用域">
+              {SCOPE_OPTIONS.map((option) => {
+                const projectDisabled = option.id === 'project' && projectAvailable === false;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
+                    aria-pressed={scope === option.id}
+                    disabled={projectDisabled || locked}
+                    title={
+                      projectDisabled
+                        ? '当前会话不在 git 仓库内，无法登记项目级约束'
+                        : option.hint
+                    }
+                    onClick={() => setScope(option.id)}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {/* 选中项下方的 hint 文案——逐字取自票面 §四.2（句子单独成节点，便于逐字核对）。 */}
+        {rememberAsProceduralRule && (
+          <div className="composer-scope-hint">
+            <b>{SCOPE_OPTIONS.find((option) => option.id === scope)?.label}</b>
+            <span className="composer-scope-hint-text">
+              {SCOPE_OPTIONS.find((option) => option.id === scope)?.hint}
+            </span>
+          </div>
+        )}
         {hasControls && (
           <div className="composer-controls">
             <div ref={modelPickerRef}>

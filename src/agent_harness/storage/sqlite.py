@@ -10,9 +10,10 @@ import asyncio
 import functools
 import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import aiosqlite
 
@@ -42,6 +43,38 @@ async def _connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
         yield connection
     finally:
         await connection.close()
+
+
+def read_session_project_key(
+    database_path: str | Path, session_id: str,
+) -> str | None:
+    """**同步**、只读地取一条会话的 `project_key`（#1191 §三.3）。
+
+    给不跑事件循环的同步消费者用：`assembly._build_scoped_fact_provider` 造的注入供给器
+    是 sync 闭包（`context/builder` 每轮 build 现读规则层文件），拿不到异步
+    `SessionMetaStore`。库 / 表 / 行缺失或文件不可读一律返回 None ⇒ 读取侧按
+    `effective_project_key` 的「持久化优先、现场 cwd 兜底」回落（与面板同一口径，
+    避免两侧分组漂移）。
+
+    只读 URI 打开，不写、不升级锁；WAL 下与写连接互不阻塞。
+    """
+    path = Path(database_path)
+    if not path.exists():
+        return None
+    # 路径必须 percent-encode：裸拼进 `file:` URI 时 `?`/`%`/`#` 会被 URI 解析吃掉，
+    # 令 `mode=ro` 失效（甚至指向别处）并静默回落——正是重审 finding F1 的复查点。
+    uri = f"file:{quote(str(path))}?mode=ro"
+    try:
+        # `closing` 而非裸 `with`：sqlite3 连接的 `__exit__` 只提交/回滚，**不关连接**
+        # （重审 finding F2）；此读取每轮 build 都跑，句柄不能靠 refcount GC 回收。
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            row = connection.execute(
+                "SELECT project_key FROM session_meta WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row is not None else None
 
 
 #: 写路径锁竞争重试（#515 BUG-01）。busy_timeout 只让单次等锁等 `_BUSY_TIMEOUT_MS`，
@@ -373,17 +406,20 @@ CREATE TABLE IF NOT EXISTS session_meta (
     archived            BOOLEAN DEFAULT 0,
     parent_session_id   TEXT,
     origin              TEXT,
-    fork_point_seq      INTEGER
+    fork_point_seq      INTEGER,
+    project_key         TEXT
 )
 """
 
-#: lineage 三列（Phase 14 T1, ADR-0017 决策 7）：存量库加列迁移用。
+#: 存量库加列迁移用（lineage 三列 Phase 14 / T1、`project_key` #1191 Phase 2）。
 #: CREATE TABLE IF NOT EXISTS 只惠及新库——旧 schema 的库靠这里逐列补齐，
-#: 按列名判存（幂等），旧行三列 NULL = root 语义。
-_LINEAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+#: 按列名判存（幂等），旧行新列 NULL。旧 lineage 行 NULL = root 语义；
+#: 旧 `project_key` NULL = 未补写（读取侧回退到按 cwd 现场解析，票面 §三.3）。
+_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parent_session_id", "TEXT"),
     ("origin", "TEXT"),
     ("fork_point_seq", "INTEGER"),
+    ("project_key", "TEXT"),
 )
 
 
@@ -486,15 +522,15 @@ class SqliteSessionMetaStore(SessionMetaStore):
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
-            await self._ensure_lineage_columns(connection)
+            await self._ensure_extra_columns(connection)
             await connection.commit()
 
     @staticmethod
-    async def _ensure_lineage_columns(connection: aiosqlite.Connection) -> None:
-        """存量库加列迁移（幂等）：缺哪列补哪列，旧行 NULL = root。"""
+    async def _ensure_extra_columns(connection: aiosqlite.Connection) -> None:
+        """存量库加列迁移（幂等）：缺哪列补哪列，旧行 NULL。"""
         cursor = await connection.execute("PRAGMA table_info(session_meta)")
         existing = {row[1] for row in await cursor.fetchall()}
-        for name, col_type in _LINEAGE_COLUMNS:
+        for name, col_type in _EXTRA_COLUMNS:
             if name not in existing:
                 await connection.execute(
                     f"ALTER TABLE session_meta ADD COLUMN {name} {col_type}"
@@ -507,8 +543,8 @@ class SqliteSessionMetaStore(SessionMetaStore):
                 """
                 INSERT INTO session_meta (
                     session_id, created_at, agent_id, last_checkpoint_seq, archived,
-                    parent_session_id, origin, fork_point_seq
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_session_id, origin, fork_point_seq, project_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     last_checkpoint_seq = excluded.last_checkpoint_seq,
@@ -526,6 +562,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     meta.parent_session_id,
                     meta.origin,
                     meta.fork_point_seq,
+                    meta.project_key,
                 ),
             )
             await connection.commit()
@@ -574,6 +611,21 @@ class SqliteSessionMetaStore(SessionMetaStore):
             cursor = await connection.execute(
                 "UPDATE session_meta SET last_checkpoint_seq = ? WHERE session_id = ?",
                 (event_seq, session_id),
+            )
+            await connection.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(f"SessionMeta '{session_id}' does not exist")
+        loaded = await self.get(session_id)
+        assert loaded is not None
+        return loaded
+
+    @retry_on_busy
+    async def set_project_key(self, session_id: str, project_key: str) -> SessionMeta:
+        """见 `SessionMetaStore.set_project_key`（#1191 §三.3）。"""
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE session_meta SET project_key = ? WHERE session_id = ?",
+                (project_key, session_id),
             )
             await connection.commit()
             if cursor.rowcount != 1:

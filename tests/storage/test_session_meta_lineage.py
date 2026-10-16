@@ -156,3 +156,81 @@ async def test_legacy_schema_auto_migrates_and_is_idempotent(tmp_path: Path) -> 
     fresh = await store.get("new-1")
     assert fresh is not None
     assert fresh.parent_session_id == "old-1"
+
+
+# ── #1191（Phase 2）`project_key` 列（票面 §三.3）──────────────────────────
+
+
+async def test_project_key_defaults_null_then_written_via_set(tmp_path: Path) -> None:
+    """新会话 `project_key` 默认 NULL（未补写）；经 `set_project_key` 写入后可读回。"""
+    store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await store.initialize()
+    await store.upsert(_meta())
+    loaded = await store.get("s1")
+    assert loaded is not None and loaded.project_key is None
+
+    written = await store.set_project_key("s1", "/repos/demo")
+    assert written.project_key == "/repos/demo"
+    reloaded = await store.get("s1")
+    assert reloaded is not None and reloaded.project_key == "/repos/demo"
+
+
+async def test_set_project_key_writes_only_that_column(tmp_path: Path) -> None:
+    """惰性补写走单列更新；不存在抛 KeyError（不静默建行）。"""
+    store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await store.initialize()
+    await store.upsert(_meta(last_checkpoint_seq=11))
+    written = await store.set_project_key("s1", "/repos/demo")
+    assert written.project_key == "/repos/demo"
+    # 别的列不被这次补写碰到。
+    assert written.last_checkpoint_seq == 11
+    with pytest.raises(KeyError):
+        await store.set_project_key("missing", "/repos/demo")
+
+
+async def test_upsert_insert_honors_project_key(tmp_path: Path) -> None:
+    """首次插入即可带上 `project_key`（INSERT 列含它），无需二次补写。"""
+    store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await store.initialize()
+    await store.upsert(_meta(project_key="/repos/demo"))
+    loaded = await store.get("s1")
+    assert loaded is not None and loaded.project_key == "/repos/demo"
+
+
+async def test_upsert_conflict_preserves_backfilled_project_key(tmp_path: Path) -> None:
+    """全行 `upsert`（不带 `project_key`）不得抹掉已补写的值（#1191 §三.3）。
+
+    这是 `set_project_key` 单独成方法的原因：既有 `upsert` 调用方（改 agent_id /
+    归档 / checkpoint 等）传的是默认 `project_key=None`，若 `ON CONFLICT` 分支一
+    并刷新这一列，补写过的键会被静默清空。
+    """
+    store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await store.initialize()
+    await store.upsert(_meta())
+    await store.set_project_key("s1", "/repos/demo")
+    # 既有调用方路径：全行 upsert，project_key 缺省 None。
+    await store.upsert(_meta(last_checkpoint_seq=3, agent_id="default"))
+    loaded = await store.get("s1")
+    assert loaded is not None
+    assert loaded.project_key == "/repos/demo"
+    assert loaded.last_checkpoint_seq == 3
+
+
+async def test_legacy_schema_migration_adds_project_key_column(tmp_path: Path) -> None:
+    """存量库迁移把 `project_key` 一并加上（旧行 NULL = 未补写）。"""
+    db = tmp_path / "harness.db"
+    async with aiosqlite.connect(db) as connection:
+        await connection.execute(_LEGACY_DDL)
+        await connection.execute(
+            "INSERT INTO session_meta (session_id, created_at, agent_id,"
+            " last_checkpoint_seq, archived) VALUES ('old-1', '2026-09-01T00:00:00Z',"
+            " 'default', 5, 0)"
+        )
+        await connection.commit()
+
+    store = SqliteSessionMetaStore(db)
+    await store.initialize()
+    legacy = await store.get("old-1")
+    assert legacy is not None and legacy.project_key is None
+    written = await store.set_project_key("old-1", "/repos/demo")
+    assert written.project_key == "/repos/demo"
