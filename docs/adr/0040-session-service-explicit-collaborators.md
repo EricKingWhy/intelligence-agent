@@ -122,6 +122,7 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 | 18 | `registered_tool_names: RegisteredToolNamesProvider \| None`（领域端口，`#616` 2026-10-05 增补） | 构造注入 | 陈旧账行名清除通道 `purge_stale_session_tool_limits` 的根 registry 名字集判据：`session_budgets.tool_call_limits` 里 ∉ 名字集的键 = 陈旧名。实现 = 组合根用 `assembly.root_registry_tool_names`（与 #17 同源、同一条 P2-1 零副作用取舍）计算；`None`（直构 service 的调用方）⇒ 清除通道 **fail-closed** 抛 `RuntimeError`——绝不拿空集把全部 ceiling 误判为陈旧；web / CLI 组合根两条路径都注入 | 1 |
 | 19 | `reconcile_info: ToolReconcileInfoProvider \| None`（领域端口，`#357` 2026-10-06 增补） | 构造注入 | 恢复裁决 409 载荷只读展示字段（`default_action/risk_level/probe`）的根 registry 元数据判据：`_reconcile_pending` 按工具 `replay_safe` / `reconcile_hint` 逐字产出。实现 = 组合根用 `assembly.root_registry_reconcile_info`（与 #17/#18 逐分支同构、同一条 P2-1 零副作用取舍，`tests/test_assembly_root_registry_names.py` 同型对账钉住）；`None`（直构 service 的调用方）⇒ 展示字段 **fail-closed**（未知工具 = DEFER/high + verifiable=false），绝不把未知工具渲染成可安全重试（#14 同向）；web 组合根注入 | 1 |
 | 20 | `budget_recovery_failed_sessions: set[str] \| None` | 组合根持有的进程内集合 | 标记启动时约束澄清工具预算重放失败的会话；新 run 前重放 durable tool/result，恢复失败时拒绝启动；成功后清除标记，启动扫描按结果重建集合 | 7 |
+| 21 | `scoped_constraint_store: ScopedConstraintStore \| None`（领域端口，`#1191` 2026-10-16 增补） | `scoped_constraint_store` 属性（`#1191` 新增） | 项目/全局级约束的**独立规则层**存储（不碰 memory v2）：登记（`send_message` 的 project/global scope 落点）、枚举本会话生效约束（`effective_constraints`）、历史保留链撤销（`revoke_scoped_constraint`）；`None`（直构 service 的调用方）= 未装配，上述端点与登记 **fail-closed 响亮失败**（`ProjectKeyUnavailable` / `ProtectedFactNotFound`），绝不静默丢件 | 2 |
 
 `ProjectService`（`session/projects.py`，计数命令同形）：`store`=2、`workspace_index`=2、
 `ensure_stores`=2——`store.read_started_header` 读会话头部、索引做项目 CRUD、`ensure_stores()`
@@ -400,7 +401,7 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 
 | AC | 结论 | 证据 |
 | --- | --- | --- |
-| AC1 文档列出每个 AppState 字段与使用方法 | **满足** | §3 表格 18 行（每行含用途与实测引用数）+ 紧随其后的 `ProjectService` 3 项（散文，非表格行）；测试 `test_session_service_takes_exactly_the_documented_collaborators` / `test_project_service_takes_exactly_the_documented_collaborators` 把两份清单钉在代码上，漂移即红 |
+| AC1 文档列出每个 AppState 字段与使用方法 | **满足** | §3 表格 21 行（含 `#564` / `#616` / `#357` / `#1191` 各期增补行；每行含用途与实测引用数）+ 紧随其后的 `ProjectService` 3 项（散文，非表格行）；测试 `test_session_service_takes_exactly_the_documented_collaborators` / `test_project_service_takes_exactly_the_documented_collaborators` 把两份清单钉在代码上，漂移即红 |
 | AC2 新 interface 不引用 `web`，且比 AppState 明显更窄 | **满足**（2026-09-22 闭合） | 容器类型与 18 个 collaborator 均已无 web 引用：`RunManager` 的家搬到 `agent_harness/session/`（§4 R1），`stores` 改注解为领域自建端口 `RecoveryStoreBundle`（§4 R2）；三份域文件的 `EXPECTED_TYPE_ONLY_WEB_IMPORTS` 全为空集 ⇒ 领域层（代码 + 注解）对 `web` 的引用数为 **0**。"明显更窄"的判据见 §3 末段（18 个参数全被使用、容器 24 个公开成员中 6 个永不触碰）。原"部分满足"的唯一未闭合项（R1）已由用户裁决并落地 |
 | AC3 transport composition root 负责适配 | **满足** | §2 D2；守卫 `test_services_are_constructed_only_in_the_composition_root`（`src` 全树唯一构造点 = `web/app.py`）；红证 1 |
 | AC4 构造测试不再依赖魔法属性，运行行为不变 | **满足** | `tests/session/test_service_collaborators.py`：普通 duck-typed 对象即可构造、18 个字段逐个 identity 可证、缺字段 `AttributeError`、调用时现取属性；`tests/session/conftest.py::make_session_service` 提供无容器构造夹具；全量门禁不变（tracker B-26） |

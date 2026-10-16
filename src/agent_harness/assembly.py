@@ -943,6 +943,7 @@ async def build_runtime(
         model_supports_vision(settings, config.fallback)
         if config.fallback is not None else False
     )
+    scoped_fact_provider = _build_scoped_fact_provider(settings)
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -1005,6 +1006,8 @@ async def build_runtime(
             # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
             image_normalize_max_dimension=settings.image_normalize_max_dimension,
             image_normalize_max_bytes=settings.image_normalize_max_bytes,
+            # #1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（独立规则层）。
+            scoped_fact_provider=scoped_fact_provider,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
@@ -1051,3 +1054,40 @@ async def build_runtime(
         # CLI / 既有单测路径行为零变化）。
         completion_policy=completion_policy,
     )
+
+
+def _build_scoped_fact_provider(settings: Settings) -> Any:
+    """#1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（闭包）。
+
+    每次 build 现读规则层文件（**精确取用不检索**）。项目键走**同一取用口径**
+    （`effective_project_key`）：先读会话元数据里持久化的 key（同步只读，
+    `read_session_project_key`），缺失再按 cwd 现场解析——与面板 / 登记 / 撤销
+    同源，避免"面板列着、注入侧却按另一个键取不到"的分裂（重审 finding C1）。
+    独立于 memory v2（用户裁决 Fork 2 = A）。
+    """
+    from agent_harness.session.cwd import session_cwd
+    from agent_harness.session.derive import derive_protected_facts
+    from agent_harness.session.scoped_constraints import (
+        ScopedConstraintStore,
+        effective_project_key,
+        scoped_context_facts,
+    )
+    from agent_harness.storage.sqlite import read_session_project_key
+
+    store = ScopedConstraintStore(Path(settings.workspace_dir) / "constraints")
+    db_path = Path(settings.workspace_dir) / "harness.db"
+
+    def provider(events: list[Any]) -> list[Any]:
+        if not events:
+            return []
+        session_id = events[0].session_id
+        persisted = read_session_project_key(db_path, session_id)
+        project_key = effective_project_key(persisted, session_cwd(events))
+        return scoped_context_facts(
+            store,
+            derive_protected_facts(events),
+            session_id=session_id,
+            project_key=project_key,
+        )
+
+    return provider

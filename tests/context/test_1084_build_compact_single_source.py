@@ -172,7 +172,7 @@ async def test_compact_now_fact_selection_flows_through_shared_selector(tmp_path
     就会忽略这次替换、在摘要 §2 里照常吐出全部事实 ⇒ base 红、改后绿。这直接钉住
     票面「compact_now 复用已有 protected_facts_for_context」。
     """
-    monkeypatch.setattr(builder_mod, "protected_facts_for_context", lambda events: [])
+    monkeypatch.setattr(builder_mod, "protected_facts_for_context", lambda events, **kwargs: [])
     session, _boundaries, _grant = _facts_session(tmp_path)
 
     built = await ContextBuilder(ScriptedModel([]), max_context_tokens=200_000).build(session)

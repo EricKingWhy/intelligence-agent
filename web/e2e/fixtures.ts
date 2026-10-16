@@ -270,6 +270,19 @@ export interface ApiMock {
     sessionId: string,
     factId: string,
   ) => Promise<void> | void;
+  // ── #1191 Phase 2：约束作用域三层 ──
+  /** `GET /api/sessions/{id}/effective-constraints` 的项目元信息（`git 根 · label`）。
+   *  缺省 `null` = 非 git 目录（面板不渲染 PROJECT 组）。 */
+  effectiveProject?: { label: string | null } | null;
+  /** effective-constraints GET 拦截口（计数 / 伪造 403·500）。返回 true = 已处理。 */
+  onEffectiveConstraintsGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
+  /** `POST /api/memory/constraints/{fact_id}/revoke` 的拦截口（计数 / 断言请求体）。
+   *  返回 true = 已处理。缺省按真后端语义**成功**并把该行翻成 revoked（跨会话账面）。 */
+  onScopedRevokePost?: (
+    route: Route,
+    factId: string,
+    body: Record<string, unknown>,
+  ) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
    *  为什么要这个口子：**"端点没被调用"这类回归不会改变 tab 集**（缺省 payload 与
    *  "拿到真 payload" 都会渲染出面），所以只断言 tab 集会漏掉"前端压根没调这个端点"
@@ -576,6 +589,27 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     }
     return rows;
   };
+  /** #1191：effective-constraints 的行 = 受保护事实 + scope/overridden_by（缺省会话级）。
+   *  fixture 里若某行自带 `scope`/`overridden_by`（Phase 2 用例）则原样透传。 */
+  const effectiveFactsFor = (sid: string): Array<Record<string, unknown>> =>
+    protectedFactsFor(sid).map((r) => ({
+      scope: 'session',
+      overridden_by: null,
+      ...r,
+    }));
+  /** #1191：项目/全局级撤销——跨会话账面按 fact_id 翻行（真后端走独立规则层）。 */
+  const revokeScopedFact = (factId: string): boolean => {
+    for (const rows of protectedFactState.values()) {
+      const row = rows.find((r) => r['fact_id'] === factId);
+      if (row) {
+        row['status'] = 'revoked';
+        row['revoked_at'] = row['revoked_at'] ?? T;
+        row['revoked_by'] = row['revoked_by'] ?? 'local';
+        return true;
+      }
+    }
+    return false;
+  };
   /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
   let listCalls = 0;
 
@@ -784,6 +818,34 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       row['revoked_at'] = row['revoked_at'] ?? T;
       row['revoked_by'] = row['revoked_by'] ?? 'local';
       return json(route, { fact_id: fid, status: 'revoked', revoked_at: row['revoked_at'] });
+    }
+    // ── #1191 Phase 2：三作用域合流 + 项目/全局级撤销 ──
+    const effectiveMatch = /^\/api\/sessions\/([^/]+)\/effective-constraints$/.exec(path);
+    if (effectiveMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(effectiveMatch[1]);
+      if (mock.onEffectiveConstraintsGet && (await mock.onEffectiveConstraintsGet(route, sid))) {
+        return undefined;
+      }
+      return json(route, {
+        facts: effectiveFactsFor(sid),
+        project: mock.effectiveProject ?? null,
+      });
+    }
+    const scopedRevokeMatch = /^\/api\/memory\/constraints\/([^/]+)\/revoke$/.exec(path);
+    if (scopedRevokeMatch && req.method() === 'POST') {
+      const fid = decodeURIComponent(scopedRevokeMatch[1]);
+      let body: Record<string, unknown> = {};
+      try {
+        body = (req.postDataJSON() as Record<string, unknown>) ?? {};
+      } catch {
+        body = {};
+      }
+      if (mock.onScopedRevokePost && (await mock.onScopedRevokePost(route, fid, body))) {
+        return undefined;
+      }
+      const ok = revokeScopedFact(fid);
+      if (!ok) return json(route, { detail: `约束 '${fid}' 不存在` }, 404);
+      return json(route, { fact_id: fid, status: 'revoked', revoked_at: T });
     }
     // ── #171 会话归档（有状态 mock：语义对齐 `web/app.py::archive_session`）──
     const sessionArchiveMatch = /^\/api\/sessions\/([^/]+)\/archive$/.exec(path);

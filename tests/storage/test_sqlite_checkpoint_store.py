@@ -50,6 +50,7 @@ async def test_session_meta_schema_matches_frozen_columns(tmp_path: Path) -> Non
 
     # ADR-0017 决策 7（Phase 14 T1）：lineage 三列并入冻结 schema
     # （NULL = root；origin ∈ {fork, delegation} 封闭词汇）。
+    # #1191（Phase 2）：project_key 并入（NULL = 未补写；见 session_meta.py）。
     assert set(columns) == {
         "session_id",
         "created_at",
@@ -59,6 +60,7 @@ async def test_session_meta_schema_matches_frozen_columns(tmp_path: Path) -> Non
         "parent_session_id",
         "origin",
         "fork_point_seq",
+        "project_key",
     }
     pk = await _primary_key_of(database_path, "session_meta")
     assert pk == ["session_id"]

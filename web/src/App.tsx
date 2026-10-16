@@ -65,7 +65,9 @@ import {
   getPermissionModes,
   getReasoningEfforts,
   getSandboxBackends,
+  listEffectiveConstraints,
   type CatalogEntry,
+  type ConstraintScope,
   type ModelCatalogEntry,
   type PendingDecision,
   type SandboxBackendEntry,
@@ -306,6 +308,33 @@ export default function App() {
     if (activeProject === null) return null;
     return describeOwnership(activeProject.title, activeProject.path);
   }, [selectedId, selectedSummary, sessionCwd, activeProject]);
+
+  // ── #1191（Phase 2）：当前会话是否落在 git 仓库内 ──
+  // 「登记作用域」里「本项目」是否可选（票面 §七.4）依赖它。真值只有后端知道
+  // （`effective-constraints` 的 `project` 字段——git 根由 `git rev-parse --git-common-dir`
+  // 解析）；前端不猜路径（不变量 #22：成员资格/项目归属是后端真相）。`null` = 未知
+  // （新建态 / 尚未取到 / 取失败）⇒ 不置灰，交由后端 422 兜底。会话切换先清空，
+  // 不让上一会话的判定冒充本会话（同 sessionCwd 的身份闸纪律）。
+  const [projectAvailable, setProjectAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (selectedId === null) {
+      setProjectAvailable(null);
+      return;
+    }
+    let alive = true;
+    setProjectAvailable(null);
+    listEffectiveConstraints(selectedId)
+      .then((res) => {
+        if (alive) setProjectAvailable(res.project !== null);
+      })
+      .catch(() => {
+        // 取不到项目信息 ≠ 非 git：保持「未知」不置灰，避免误锁「本项目」。
+        if (alive) setProjectAvailable(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedId]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -711,11 +740,22 @@ export default function App() {
       task: string,
       rememberAsProceduralRule = false,
       attachmentIds: string[] = [],
+      scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
         : {};
+      // #1191（Phase 2）：非会话级登记——把「作为可复用规则」的这条消息同时登记进
+      // 项目/全局规则层。注解 `value` 必须命中消息正文（后端
+      // `validate_user_protected_fact_annotations` 的 `value in content` 判据），故取
+      // 本次正文 `task`；`fact_type='constraint'`（一条可复用规则即一条约束）。
+      // 会话级（缺省）**不发注解**——行为逐字不变，仍只由 `remember_as_procedural_rule`
+      // 承载（票面裁定 Fork 1）。
+      const scopedFacts =
+        scope !== 'session'
+          ? { protected_facts: [{ fact_type: 'constraint' as const, value: task, scope }] }
+          : {};
       // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
       // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
       // 续聊：已有会话 → 发消息到现有会话（PRD §5.3 续聊入口）。
@@ -732,6 +772,7 @@ export default function App() {
       const amend = {
         ...toAmendFields(composerControls),
         ...ruleSignal,
+        ...scopedFacts,
         // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
@@ -744,6 +785,15 @@ export default function App() {
         }
         if (sid !== null) {
           return await sendMessage(sid, task, { amend });
+        }
+        // #1191：非会话级登记必须落在一个**真实会话**上（`protected_facts` 只在
+        // `/messages` 契约里，创建路径没有）。新建态先懒建出会话身份
+        // （`ensureSession`：只建会话、不启动 run），再走续聊路径——同一次用户动作，
+        // 用户无感；否则注解会被创建路径静默丢弃（假受理）。
+        if (scope !== 'session') {
+          const created = await ensureSession();
+          if (created === null) return false; // 懒建失败 ⇒ 未受理（保留输入）
+          return await sendMessage(created, task, { amend });
         }
         // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
@@ -771,7 +821,7 @@ export default function App() {
         return failure === null;
       })();
     },
-    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
+    [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
@@ -865,9 +915,13 @@ export default function App() {
       task: string,
       rememberAsProceduralRule = false,
       attachmentIds: string[] = [],
+      scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
-      if (!selectedId) {
-        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
+      // #1191：非会话级登记只在 queue 投递路径上完成（后端 `send_message` 的规则层
+      // 登记门是 `mode == "queue"`；steer 是瞬态投递，不承载持久登记）。用户用 steer
+      // 键位登记项目/全局约束时回落 queue——**绝不静默丢弃**那次登记。
+      if (!selectedId || scope !== 'session') {
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds, scope);
       }
       return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
@@ -1686,6 +1740,9 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
+                    /* #1191：项目级登记是否可选——真值来自后端（见上方 effect），
+                       未知（新建态 / 取失败）传 null 不置灰。 */
+                    projectAvailable={projectAvailable}
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}
