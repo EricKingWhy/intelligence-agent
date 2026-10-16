@@ -1,0 +1,1 @@
+2026-10-16	#1195 合并 main 后测试适配修回：Composer.slash.test.tsx 补 onSubmit 第4参 scope（对照 Composer.tsx:94-99 新签名），沙箱 vitest 全量 1945 passed/0 failed（ia-test, caa5de0b）	feee43e194dc33d20b7e7d837332015c416a99d5..caa5de0b5614fbec7b19430281e65a12585b24db
