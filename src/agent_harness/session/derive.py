@@ -62,6 +62,7 @@ from agent_harness.session.event import (
     SESSION_STARTED,
     STEER_APPLIED,
     STEER_REQUESTED,
+    TASK_FACT_REVOCATION,
     TASK_PROTECTED_FACT,
     TOOL_CALL,
     TOOL_RESULT,
@@ -252,6 +253,12 @@ class ProtectedFact:
     evidence_event_id: str | None = None
     evidence_seq: int | None = None
     superseded_by_fact_id: str | None = None
+    #: #1190：被 `task/fact_revocation` 主动撤销时，从该事件派生（无则 None）。
+    #: **不进 `to_dict()`**——注入体（`serialize_protected_facts`）只投影 active，
+    #: 而 revoked 恒非 active；且改注入序列化会牵动既有摘要跨代比对与预算口径。
+    #: 面板 HTTP 面（`web/protected_facts.py`）另组 DTO 消费这两个字段。
+    revoked_at: str | None = None
+    revoked_by: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", deepcopy(self.value))
@@ -814,6 +821,10 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     prior_event_by_id: dict[str, SessionEvent] = {}
     prior_fact_by_id: dict[str, tuple[int, str]] = {}
     superseded_by: dict[str, str] = {}
+    #: #1190：被 `task/fact_revocation` 主动撤销的 fact_id →
+    #: `(撤销身份, revoked_at, revoked_by)`。与 `superseded_by` 分开：撤销产
+    #: `status="revoked"`，被动取代产 `"superseded"`（值域刻意区分）。
+    revoked: dict[str, tuple[str, str | None, str | None]] = {}
     latest_permission_fact_id: str | None = None
 
     # 形状有效的用户来源只有一份判据（`user_source_events`，Call 3 P4-1）——
@@ -1098,17 +1109,62 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 else:
                     superseded_by[fact_id] = successor_id
 
+        elif event.type == TASK_FACT_REVOCATION:
+            # #1190：通用主动撤销。独立分支——既不复用 `user/message` 的
+            # `revoke_fact_id` 校验路径（那条只撤销 authorization），也不经
+            # `validate_protected_fact_data`（本事件不是"注册"）。只撤销**已存在**
+            # 的 fact（`prior_fact_by_id` 只含更早的事实）；引用未知 fact 的事件
+            # 静默忽略（坏数据只损失该条，与全模块纪律一致）。同一 fact 的重复
+            # 撤销 first-wins（真正的幂等在写侧 `SessionService`）。
+            revoke_id = data.get("revoke_fact_id")
+            if (
+                isinstance(revoke_id, str)
+                and revoke_id
+                and revoke_id in prior_fact_by_id
+                and revoke_id not in revoked
+            ):
+                revoked_at = data.get("revoked_at")
+                revoked_by = data.get("revoked_by")
+                revoked[revoke_id] = (
+                    _fact_revocation_id(event.event_id),
+                    revoked_at
+                    if isinstance(revoked_at, str) and revoked_at
+                    else event.time,
+                    revoked_by
+                    if isinstance(revoked_by, str) and revoked_by
+                    else None,
+                )
+
         prior_event_by_id[event.event_id] = event
 
     for index, fact in enumerate(facts):
         successor_id = superseded_by.get(fact.fact_id)
-        if fact.source_event_id in superseded_sources or successor_id is not None:
+        revocation = revoked.get(fact.fact_id)
+        if revocation is not None:
+            # 主动撤销优先于被动取代：撤销是用户的显式动作，语义更强。
+            facts[index] = replace(
+                fact,
+                status="revoked",
+                superseded_by_fact_id=revocation[0],
+                revoked_at=revocation[1],
+                revoked_by=revocation[2],
+            )
+        elif fact.source_event_id in superseded_sources or successor_id is not None:
             facts[index] = replace(
                 fact,
                 status="superseded",
                 superseded_by_fact_id=successor_id or fact.superseded_by_fact_id,
             )
     return facts
+
+
+def _fact_revocation_id(event_id: str) -> str:
+    """`task/fact_revocation` 事件的撤销身份（沿用系统事实的 `type:event_id` 形状）。
+
+    被撤销 fact 的 `superseded_by_fact_id` 指向它——撤销事实**不进**事实表（既不
+    投影成条目、也不注入），只作为 supersede 链上后继的身份标识（#1190）。
+    """
+    return f"fact_revocation:{event_id}"
 
 
 def _fact_from_system_event(
