@@ -44,7 +44,7 @@ STREAM_HEADING = "## 仅广播"
 # 格式契约的行形状：``| `CONST` | `domain/name` |``。写入端是 `format_row()`，
 # 读取端是这条正则；两者必须一致——守卫测试的 `test_row_format_round_trips` 拿
 # `format_row()` 的输出喂 `ROW_RE`，所以「改了写入忘了改读取」会红，而不是静默解析不到。
-# #1193：值形状放宽为「裸小写词 或 域/子域」——error 事件（stream-only）的
+# #1193：值形状放宽为「裸小写词 或 域/子域」——error 事件（durable）的
 # wire type 是裸词 "error"（票面 schema 指定，见 event.py 的 ERROR 注释）。
 ROW_RE = re.compile(r"^\| `(?P<const>[A-Z][A-Z0-9_]*)` \| `(?P<value>[a-z][a-z0-9_]*(?:/[a-z0-9_-]+)*)` \|$")
 
