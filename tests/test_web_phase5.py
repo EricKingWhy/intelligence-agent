@@ -58,10 +58,16 @@ def test_web_applies_context_budget_before_calling_model(tmp_path, monkeypatch):
     max_context_tokens），不再有 `context_window_exceeded` 终态帧。"""
     model = ScriptedModel([])
     monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config, **kw: model)
+    # #1197 起 Settings 在构造期校验窗口白名单，旧的 `max_context_tokens=100` 被拒。
+    # 窗口取真实挡位 100K，改用**护栏比例**把线压下来：`task` 受 app.py:592 的
+    # max_length=100_000 码点封顶，单条 task 最多 ~16667 token，够不到 85K 硬护栏。
+    # 载荷 `"large " * 16_000` ≈ 16001 token；硬护栏 0.15 × 100K = 15_000 < 16001
+    # ⇒ 与旧的 100-token 窗口判定同形（仍在调模型之前收口）。
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
-                        model_api_key="sk-test-placeholder", max_context_tokens=100)
+                        model_api_key="sk-test-placeholder", max_context_tokens=100_000,
+                        auto_compact_threshold=0.10, hard_guard_threshold=0.15)
     with TestClient(create_app(settings)) as client:
-        response = client.post("/api/sessions", json={"task": "large " * 200})
+        response = client.post("/api/sessions", json={"task": "large " * 16_000})
         live = [json.loads(line[5:]) for line in response.text.splitlines()
                 if line.startswith("data:")]
         paused = next(e for e in live if e["type"] == "run/paused")

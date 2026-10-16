@@ -30,6 +30,11 @@ from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import BUILTIN_PROFILES, AgentSpec
 from agent_harness.agent.run_budget import SessionBudgetPort, SessionLimits
 from agent_harness.agent.runtime import AgentRunResult
+from agent_harness.multiagent.constraint_inheritance import (
+    CONSTRAINT_INHERITANCE_EVENT,
+    InheritanceSnapshot,
+    inherited_protected_facts,
+)
 from agent_harness.multiagent.depth import (
     SpawnScope,
     bind_scope,
@@ -160,7 +165,8 @@ class SubagentProvider(Protocol):
     """spawn 执行器接缝：换 subprocess/remote 实现 = 换本 Protocol 的实现。"""
 
     async def run(self, *, target: str, task: str,
-                  constraints: list[str]) -> SubAgentResult: ...
+                  constraints: list[str],
+                  omit_constraints: bool = False) -> SubAgentResult: ...
 
     def profile(self, target: str) -> AgentSpec: ...
 
@@ -186,6 +192,10 @@ class InProcessSubagentProvider:
         self._session_store: JsonlSessionStore | None = None
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
+        # #1192（#1176 Phase 3）：约束继承集供给器（装配层注入）。
+        # 签名 (parent_events, omit_constraints) -> InheritanceSnapshot | None。
+        # None = 未装配（既有委派行为逐字不变：不注入也不落快照）。
+        self._inheritance_provider = None
         # 大产物治理（#86）：summary 超限且未配 overflow store 时截断 +
         # child session 指针（全文在 child JSONL，不丢数据）；store 已配时
         # 全文交父侧 artifact 管线（tool result 携带 artifact_ref）。
@@ -228,6 +238,7 @@ class InProcessSubagentProvider:
         max_depth: int = 1,
         max_delegations: int = 8,
         delegation_ledger=None,
+        constraint_inheritance=None,
     ) -> None:
         """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。
 
@@ -253,6 +264,8 @@ class InProcessSubagentProvider:
         self._tree_metadata_error = False
         self._parent_cwd_cache = None
         self._parent_cwd_loaded = False
+        # #1192：约束继承集供给器（装配层注入；None = 未装配 ⇒ 旧行为）。
+        self._inheritance_provider = constraint_inheritance
         try:
             events = session_store.read_events(parent_session_id)
             self._parent_cwd_cache = session_cwd(events)
@@ -361,6 +374,25 @@ class InProcessSubagentProvider:
             logger.warning("读取父会话 cwd 失败，子会话按未分组处理", exc_info=True)
             return None, True
 
+    def _inherit_constraints(self, omit_constraints: bool) -> InheritanceSnapshot | None:
+        """算子会话的约束继承集快照（#1192 / #1176 Phase 3）。
+
+        供给器由装配层注入（持有规则层 store + 会话元数据），签名
+        `(parent_events, omit_constraints) -> InheritanceSnapshot | None`。未装配 /
+        读父事件失败 ⇒ None（不注入、不落快照）——与 `_parent_cwd` 同一条纪律：
+        继承集算不出来不该拖垮委派（父事件读失败已由 `_tree_metadata_error` 单独兜住）。
+        """
+        provider = self._inheritance_provider
+        if (provider is None or self._session_store is None
+                or self._parent_session_id is None):
+            return None
+        try:
+            events = self._session_store.read_events(self._parent_session_id)
+            return provider(events, omit_constraints)
+        except Exception:  # 继承集算不出来 ⇒ 不注入，绝不静默伪装成"已注入空集"
+            logger.warning("计算子会话约束继承集失败，本次委派不注入约束", exc_info=True)
+            return None
+
     def profile(self, target: str) -> AgentSpec:
         try:
             return self._profiles[target]
@@ -436,7 +468,8 @@ class InProcessSubagentProvider:
         )
 
     async def run(self, *, target: str, task: str,
-                  constraints: list[str]) -> SubAgentResult:
+                  constraints: list[str],
+                  omit_constraints: bool = False) -> SubAgentResult:
         if not self._activated:
             raise RuntimeError(
                 "multiagent provider 未激活（build_runtime 未完成依赖注入），"
@@ -455,7 +488,7 @@ class InProcessSubagentProvider:
             scope = await self._root_scope(tree_id)
         # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
         async with (self._active_children or nullcontext(None)):
-            return await self._run_child(spec, full_task, scope, tree_id)
+            return await self._run_child(spec, full_task, scope, tree_id, omit_constraints)
 
     async def _root_scope(self, tree_id: str) -> SpawnScope:
         """根 scope 不得超过当前 delegation tree 已持久化的深度上限。"""
@@ -472,12 +505,22 @@ class InProcessSubagentProvider:
 
     async def _run_child(
         self, spec: AgentSpec, full_task: str, scope: SpawnScope, tree_id: str,
+        omit_constraints: bool,
     ) -> SubAgentResult:
         # 配额与可授予集合在**开 session 之前**算：越权/超深度的 spawn 要显式
         # 失败，且不该在 session 列表里留下一个只有 session/started 的幽灵子会话。
         # #286 把这条路径从「罕见」（只有越权申请才走）变成「模型每次撞深度上限
         # 都会走」，所以顺序本身现在是可观测性的一部分。
         allowance = child_allowance(scope, spec)
+        # #1192：子会话 id 先于 runtime 构造——继承集快照要按**子会话** id 注入/落盘。
+        child_session_id = str(uuid4())
+        # #1192（#1176 Phase 3）：约束继承集快照——项目+全局 active + 会话级 active 授权。
+        # 供给器由装配层注入（持有规则层 store + 会话元数据）；未装配 ⇒ None（既有行为逐字不变）。
+        inheritance = self._inherit_constraints(omit_constraints)
+        inherited_facts = (
+            inherited_protected_facts(inheritance, session_id=child_session_id)
+            if inheritance is not None else None
+        )
         child_runtime = self._factory.create(
             spec,
             source_registry=scope.registry,
@@ -492,11 +535,13 @@ class InProcessSubagentProvider:
             # 仍落在会话上——两侧缺口方向都是 fail-closed（环境格缺席 ⇒ 不做变更判定）。
             # 父无锚 ⇒ None ⇒ 环境格如实缺席（fail-closed）。
             workspace=self._parent_cwd(),
+            # #1192：继承的项目/全局约束 + 会话级授权经子 agent 上下文组装处注入
+            # （ContextBuilder 的 scoped_fact_provider），非改写子事件流（票面 §四.3）。
+            inherited_facts=inherited_facts,
         )
         # child workspace = 父的同一 canonical owner（spec §9：coding 的改动
         # review 直接可见）；先 durable bind，保证 child Session 一旦落盘，恢复
         # 就能按 child_session_id 重新解析该 workspace。
-        child_session_id = str(uuid4())
         child_sandbox = self._workspace_registry.bind_alias(
             child_session_id, self._parent_session_id,
         )
@@ -522,6 +567,14 @@ class InProcessSubagentProvider:
             },
             agent_id=spec.name,
         )
+        # #1192（票面 §五.5）：继承集快照落子会话事件流——展示/审计的单一数据源。
+        # 独立事件类型（非 fact 来源事件），注入体与它同源同一次计算。
+        if inheritance is not None:
+            child_session.append(
+                CONSTRAINT_INHERITANCE_EVENT,
+                inheritance.to_event_data(),
+                agent_id=spec.name,
+            )
         # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
         self.last_child_sessions.append(child_session)
 
