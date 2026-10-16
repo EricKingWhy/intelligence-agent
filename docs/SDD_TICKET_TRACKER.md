@@ -1,5 +1,9 @@
 # SDD Ticket Tracker
 
+**当前状态（2026-10-17，#1183）**：UI-only 第一阶段实现已提交，分支 `codex/issue-1183-task-review`，代码提交 `71a982ae957ca6a412eb720319103afedbd08225`；已无冲突同步 `origin/main` `60e167fcf309dd4439bcfe04422811b356fd6474`（merge `8ba995b8b7a57e50d92aed0c4e4ac1c62a48df0f`）。issue 保持 OPEN / `in-progress`；审查覆盖与 PR 待收口。
+- **实现/验证**：复用 ChangesPanel / DiffBlock / changedFiles 等既有 UI；详情按需展开，横条按 run 终态给出准确提醒，详情文案去内部术语；未改接受与租约后端语义。合并后聚焦 Vitest 47/47、`pnpm build` 通过；`pnpm lint` exit 0（仓库既存 warnings）。
+- **审查/待办**：Correctness 与 Standards 独立复审均 PASS、P0–P4=0；明细见 `docs/phase_status/2026-10.md` #1183 与 review ledger。Issue 要求的全量 E2E/Vitest/Gate-0 须在云端 `shell/ia-test`，当前会话无该入口，本机未跑重车道；后续推送、开 PR、按流程更新 issue 标签与状态。
+
 **已完成（2026-10-16，#1165）**：Issue [#1165](https://github.com/EricKingWhy/intelligence-agent/issues/1165) CLOSED，保留 `bug`/`P2`，移除 `in-progress`/`ready-for-agent`；[关闭记录](https://github.com/EricKingWhy/intelligence-agent/issues/1165#issuecomment-6217213093)。PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) 已以 merge commit `76bab688136c16e94474bee4397bc19ad803e861` 合入 main（tree `1b15371db6864c0b1122ab286c68cbcea9bb3806`），PR head `edb39a2e61c22a780aca6f5a8b9febe8f2cbe444`，基线 `211bfe48621c05e72383ce2093c628502369c31a`。
 - **实现**：提交 `efd68fa1f251ed201b67075bc2bb54fb161776bb` 在五条拒绝路径 Quit 前清除 `IaBackupDir`；外来 stage 形状保留 exit 2 → 清槽 → Quit。未扩展到分类器、升级/卸载或 rollback。
 - **验证**：Docker 沙箱回归 5/5、118 个 guard mutation 存活 0；六套 installer suites 194 passed / 5 failed / 3 skipped，五个 Windows 路径失败在 pristine main 同样复现。Windows [installer smoke](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38907897380) 修前红证与修后 NSIS 探针通过。PR head `edb39a2e` 的 Gate-0、Chromium PR smoke、gitleaks、Windows installer smoke 均通过；完整 nightly [run 38908717488](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38908717488) 在代码 head `340bb388` 全绿，Windows TUI 首轮 EBUSY 后重跑 job `117005270221` 成功。Gate-0 收据：`docs/gate/340bb38823d0aa83ead11e36aad7e21269839ed3.json`。
