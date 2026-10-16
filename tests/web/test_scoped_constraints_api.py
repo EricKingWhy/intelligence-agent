@@ -169,3 +169,38 @@ def test_register_project_scope_without_git_is_422(tmp_path: Path) -> None:
 
     store = _app.state.agent.scoped_constraint_store
     assert store.list(ConstraintScope.GLOBAL) == []
+
+
+def test_effective_constraints_backfills_project_key_into_session_meta(
+    tmp_path: Path,
+) -> None:
+    """会话元数据惰性补写（#1191 §三.3，审查 finding C1）。
+
+    存量会话（元数据行存在但 `project_key` 为 NULL）首次打开面板即以 cwd 解析出的
+    项目键**补写一次**；此后不再重解析（读回持久值）。
+    """
+    import asyncio
+
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    app, client, sid, _fact = _seed(tmp_path, cwd=repo)
+    project_key = resolve_project_key(repo)
+    assert project_key is not None
+    store = app.state.agent.session_meta_store
+
+    # 建表 + 播一条 project_key 为 NULL 的存量元数据行。
+    asyncio.run(_seed_null_project_key_meta(app, sid))
+    assert asyncio.run(store.get(sid)).project_key is None  # type: ignore[union-attr]
+
+    _get(client, sid)
+
+    assert asyncio.run(store.get(sid)).project_key == project_key  # type: ignore[union-attr]
+
+
+async def _seed_null_project_key_meta(app: object, sid: str) -> None:
+    from agent_harness.storage.session_meta import SessionMeta
+
+    await app.state.agent.ensure_stores()  # type: ignore[attr-defined]
+    await app.state.agent.session_meta_store.upsert(  # type: ignore[attr-defined]
+        SessionMeta(session_id=sid, created_at="2026-10-16T00:00:00Z")
+    )

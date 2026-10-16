@@ -241,7 +241,7 @@ from agent_harness.session.scoped_constraints import (
     ScopedConstraintStore,
     covering_fact_id,
     normalized_fact_value,
-    project_label,
+    project_label_for_key,
     resolve_project_key,
 )
 from agent_harness.session.session import Session, validate_event_seq
@@ -3571,7 +3571,7 @@ class SessionService:
         ]
         scoped_project_key: str | None = None
         if scoped_annotations:
-            scoped_project_key = self._project_key_for(current_events)
+            scoped_project_key = await self._session_project_key(session_id, current_events)
             if (
                 any(a["scope"] == "project" for a in scoped_annotations)
                 and scoped_project_key is None
@@ -6619,12 +6619,34 @@ class SessionService:
             raise RuntimeError("当前装配没有项目/全局约束规则层存储")
         return store
 
-    @staticmethod
-    def _project_key_for(events: list[SessionEvent]) -> str | None:
+    async def _session_project_key(
+        self, session_id: str, events: list[SessionEvent],
+    ) -> str | None:
+        """会话的 `project_key`（#1191 §三.3）。
+
+        优先读会话元数据里已记录的 `project_key`（记录后**不再重解析**）；没有则按
+        cwd **现场解析**（票面 §三.3 允许的兜底，不影响展示），并在元数据行存在时
+        **惰性补写**一次（存量会话首次被打开时的补写通道）。非 git 目录 → None。
+
+        补写走 `set_project_key` 单列更新——不用 `upsert`，避免既有全行 upsert
+        调用方把已补写的值静默抹成 NULL。元数据行缺失（直构 service 的调用方）
+        只现场解析、不补写（无行可写）。
+        """
+        # 本读取依赖 `session_meta` 表存在；`send_message` 路径不像
+        # `_require_existing_session` 那样已经确保过（幂等 no-op，不走 scoped 注解时
+        # 无额外开销）。不确保则直构 service / 直播种会话的路径会 500。
+        await self._ensure_stores()
+        meta = await self._session_meta_store.get(session_id)
+        if meta is not None and meta.project_key is not None:
+            return meta.project_key
         cwd = session_cwd(events)
-        if cwd is None:
-            return None
-        return resolve_project_key(cwd)
+        resolved = resolve_project_key(cwd) if cwd is not None else None
+        if resolved is not None and meta is not None:
+            try:
+                await self._session_meta_store.set_project_key(session_id, resolved)
+            except KeyError:  # pragma: no cover —— get 命中过，补写时行被删的极窄竞态
+                pass
+        return resolved
 
     async def effective_constraints(self, session_id: str) -> dict[str, Any]:
         """返回本会话实际可见的约束全集（三 scope 合流），附 scope 与覆盖关系（#1191）。
@@ -6656,8 +6678,7 @@ class SessionService:
             for fact in derive_protected_facts(events)
         ]
 
-        cwd = session_cwd(events)
-        project_key = resolve_project_key(cwd) if cwd is not None else None
+        project_key = await self._session_project_key(session_id, events)
         project_rows: list[dict[str, Any]] = []
         global_rows: list[dict[str, Any]] = []
         if project_key is not None:
@@ -6670,7 +6691,9 @@ class SessionService:
 
         rows = _merge_effective_rows(session_rows, project_rows, global_rows)
         project_meta = (
-            {"label": project_label(cwd)} if project_key is not None else None
+            {"label": project_label_for_key(project_key)}
+            if project_key is not None
+            else None
         )
         return {"facts": rows, "project": project_meta}
 
@@ -6693,7 +6716,7 @@ class SessionService:
         project_key: str | None = None
         if scope == "project":
             events = await self.get_events(session_id)
-            project_key = self._project_key_for(events)
+            project_key = await self._session_project_key(session_id, events)
             if project_key is None:
                 raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
         existing = store.get(scope, fact_id, project_key=project_key)

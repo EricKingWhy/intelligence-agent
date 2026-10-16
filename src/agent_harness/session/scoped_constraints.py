@@ -151,6 +151,15 @@ def project_label(cwd: str | Path) -> str | None:
     key = resolve_project_key(cwd)
     if key is None:
         return None
+    return project_label_for_key(key)
+
+
+def project_label_for_key(key: str) -> str:
+    """已归一化项目键 → 面板标注（不再二次解析 cwd）。
+
+    与 `project_label` 拆开：会话 `project_key` 可能来自**持久化元数据**而非现场
+    cwd（#1191 §三.3），此时标注必须由同一个 key 推出，否则两边会漂移。
+    """
     try:
         remote = subprocess.run(
             ["git", "-C", key, "config", "--get", "remote.origin.url"],
@@ -447,6 +456,7 @@ __all__ = [
     "covering_fact_id",
     "normalized_fact_value",
     "project_label",
+    "project_label_for_key",
     "resolve_project_key",
     "scoped_context_facts",
 ]

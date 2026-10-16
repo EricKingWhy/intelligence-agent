@@ -373,17 +373,20 @@ CREATE TABLE IF NOT EXISTS session_meta (
     archived            BOOLEAN DEFAULT 0,
     parent_session_id   TEXT,
     origin              TEXT,
-    fork_point_seq      INTEGER
+    fork_point_seq      INTEGER,
+    project_key         TEXT
 )
 """
 
-#: lineage 三列（Phase 14 T1, ADR-0017 决策 7）：存量库加列迁移用。
+#: 存量库加列迁移用（lineage 三列 Phase 14 / T1、`project_key` #1191 Phase 2）。
 #: CREATE TABLE IF NOT EXISTS 只惠及新库——旧 schema 的库靠这里逐列补齐，
-#: 按列名判存（幂等），旧行三列 NULL = root 语义。
-_LINEAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+#: 按列名判存（幂等），旧行新列 NULL。旧 lineage 行 NULL = root 语义；
+#: 旧 `project_key` NULL = 未补写（读取侧回退到按 cwd 现场解析，票面 §三.3）。
+_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parent_session_id", "TEXT"),
     ("origin", "TEXT"),
     ("fork_point_seq", "INTEGER"),
+    ("project_key", "TEXT"),
 )
 
 
@@ -486,15 +489,15 @@ class SqliteSessionMetaStore(SessionMetaStore):
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
-            await self._ensure_lineage_columns(connection)
+            await self._ensure_extra_columns(connection)
             await connection.commit()
 
     @staticmethod
-    async def _ensure_lineage_columns(connection: aiosqlite.Connection) -> None:
-        """存量库加列迁移（幂等）：缺哪列补哪列，旧行 NULL = root。"""
+    async def _ensure_extra_columns(connection: aiosqlite.Connection) -> None:
+        """存量库加列迁移（幂等）：缺哪列补哪列，旧行 NULL。"""
         cursor = await connection.execute("PRAGMA table_info(session_meta)")
         existing = {row[1] for row in await cursor.fetchall()}
-        for name, col_type in _LINEAGE_COLUMNS:
+        for name, col_type in _EXTRA_COLUMNS:
             if name not in existing:
                 await connection.execute(
                     f"ALTER TABLE session_meta ADD COLUMN {name} {col_type}"
@@ -507,8 +510,8 @@ class SqliteSessionMetaStore(SessionMetaStore):
                 """
                 INSERT INTO session_meta (
                     session_id, created_at, agent_id, last_checkpoint_seq, archived,
-                    parent_session_id, origin, fork_point_seq
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_session_id, origin, fork_point_seq, project_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     last_checkpoint_seq = excluded.last_checkpoint_seq,
@@ -526,6 +529,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     meta.parent_session_id,
                     meta.origin,
                     meta.fork_point_seq,
+                    meta.project_key,
                 ),
             )
             await connection.commit()
@@ -574,6 +578,21 @@ class SqliteSessionMetaStore(SessionMetaStore):
             cursor = await connection.execute(
                 "UPDATE session_meta SET last_checkpoint_seq = ? WHERE session_id = ?",
                 (event_seq, session_id),
+            )
+            await connection.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(f"SessionMeta '{session_id}' does not exist")
+        loaded = await self.get(session_id)
+        assert loaded is not None
+        return loaded
+
+    @retry_on_busy
+    async def set_project_key(self, session_id: str, project_key: str) -> SessionMeta:
+        """见 `SessionMetaStore.set_project_key`（#1191 §三.3）。"""
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE session_meta SET project_key = ? WHERE session_id = ?",
+                (project_key, session_id),
             )
             await connection.commit()
             if cursor.rowcount != 1:
