@@ -880,7 +880,7 @@ def _ask_user_input_answer_data(
             entry["custom_text"] = custom_text
         all_skipped = False
         shown = entry["label"]
-        if entry.get("custom_text"):
+        if entry.get("custom_text") and entry["custom_text"] != entry["label"]:
             shown = f"{shown}（补充：{entry['custom_text']}）"
         rendered.append(f"- {text}：{shown}")
         normalized.append({"question": text, "answer": entry})
