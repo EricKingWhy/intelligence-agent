@@ -199,6 +199,21 @@ WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
+# ── #1193：run 致命异常的**明确错误信号**（stream-only，不落盘）──────────────
+# 缺陷背景：run 启动期致命异常（如 begin_run SeqConflict）既无 run/started 也无
+# run/failed，前端只看到「连接中断（stream ended unexpectedly）」并静默重试；而
+# 会话仍停在 plan 档（只读、无计划）——写工具全被拦，重试永远不会成功。
+# 本事件把「为什么失败 + 会话仍在 plan 档 + 手动退出」明确推给前端，替代静默重试。
+#
+# 判定条件（精确，不猜）：run 异常收尾 ∧ `effective_workflow_mode` == plan ∧
+# 事件流中不存在任何 `task/plan_updated`（含前序 run——计划一旦生成过就不是
+# 本事件）。**不是** mode 回滚：任何异常路径都不把 plan 自动翻回 normal
+# （权限只收紧不自动放宽，fail-closed）。
+#
+# 形状说明：wire type 是裸词 "error"（#1193 票面 schema 明确指定），不遵循
+# `域/子域` 惯例——两个词汇生成器的形状正则已按票面放宽以容纳它。
+ERROR = "error"
+
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
 #   COMPACTION_START (source_seq_start, source_seq_end)
@@ -344,7 +359,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
 # appended to the durable log. Listed here so the full event vocabulary is in one
 # place; NOT part of EVENT_TYPES, and Session.append must reject them.
 # ADR-0016：model/delta 词汇保留但运行时不再发射（由 text/delta 承接，见上）。
-STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA})
+# #1193：ERROR 是运行期错误信号（致命异常臂发射），不落盘——它描述"这一次
+# 流里发生了什么"，会话状态真相仍由 durable 事件派生。
+STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA, ERROR})
 
 
 def _utc_now_iso() -> str:

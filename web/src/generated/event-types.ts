@@ -63,6 +63,7 @@ export const EventType = {
   WORKFLOW_MODE_CHANGED: 'workflow/mode-changed',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
+  ERROR: 'error',
   COMPACTION_START: 'compaction/start',
   COMPACTION_END: 'compaction/end',
   MESSAGE_QUEUED: 'message/queued',
@@ -79,6 +80,7 @@ export type EventTypeValue = (typeof EventType)[keyof typeof EventType];
 
 /** Ephemeral streaming signals — never persisted (invariant #4: Event ≠ Diagnostic Log). */
 export const STREAM_ONLY_TYPES = [
+  'error',
   'model/delta',
   'model/started',
 ] as const;

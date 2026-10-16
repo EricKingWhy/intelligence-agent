@@ -152,6 +152,7 @@ from agent_harness.session import (
     RUN_FAILED,
     RUN_PAUSED,
     RUN_STARTED,
+    TASK_PLAN_UPDATED,
     TOOL_FAILURE_GUARD,
     USER_MESSAGE,
     Session,
@@ -171,11 +172,13 @@ from agent_harness.session.derive import (
 from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import (
     CONTEXT_PROTECTED_FACTS_EXCEEDED,
+    ERROR,
     STEER_APPLIED,
     TOOL_RESULT,
     USER_INPUT_REQUESTED,
 )
 from agent_harness.session.queue import SteerRequest, SteerSource
+from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 from agent_harness.storage import (
     CheckpointBoundary,
     CheckpointPolicy,
@@ -3883,6 +3886,28 @@ class AgentRuntime:
         )
         if end_event is not None:
             yield to_agent_event(end_event)
+        # #1193：致命异常且「计划从未生成」时，把明确错误信号推给前端（stream-only，
+        # 不落盘）——会话仍停在 plan 档（只读、无计划），写工具全被拦，前端若只
+        # 按「连接中断」静默重试永远不会成功。前端据此停止重试并展示手动退出入口。
+        # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
+        # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
+        # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
+        # （含前序 run 的——计划一旦生成过，就不是"从未生成"）。
+        if (
+            effective_workflow_mode(arms.session.events) is WorkflowMode.PLAN
+            and not any(
+                event.type == TASK_PLAN_UPDATED for event in arms.session.events
+            )
+        ):
+            yield AgentEvent(
+                type=ERROR,
+                data={
+                    "code": "run-failed-before-plan",
+                    "message": terminal_message,
+                    "workflow_mode": WorkflowMode.PLAN.value,
+                    "hint": "会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
+                },
+            )
         stages.raise_first()
 
     def _sync_context_vision(self, role: str) -> None:

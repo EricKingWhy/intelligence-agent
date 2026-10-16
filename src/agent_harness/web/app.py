@@ -2856,15 +2856,14 @@ def create_app(
                 auto_approve=auto_approve,
                 amend=AmendOptions.from_request(req),
                 launch=launch,
+                # #1193：plan 档作为**初始条件**随创建落盘（在 launch 之前），
+                # 不再创建后补切——否则 run task 可先于 mode 事件到达工具执行
+                # 点，写工具在 NORMAL 档下放行（先 launch 后切 mode 的竞态）。
+                workflow_mode=WorkflowMode.PLAN if workflow_mode_plan else None,
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
                 # #363 / W-19：显式 sandbox 后端选择。
                 sandbox_backend=req.sandbox_backend,
             )
-            # #367 / W-23 选项 A："plan" 档：创建后切 workflow_mode=plan
-            #（计划闸门 W-07：先出计划、用户批准后执行）。
-            if workflow_mode_plan:
-                await service.set_workflow_mode(
-                    result.session.session_id, WorkflowMode.PLAN)
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
         except UnsupportedReasoningEffort as e:
