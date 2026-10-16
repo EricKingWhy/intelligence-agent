@@ -55,7 +55,8 @@ const MIN_SEGMENT_PCT = 1.5;
  *  **这是 UX 提示、不是硬闸**：真实水位是**轮次结构**（后端 `compacted_turn_count==0`
  *  = 没有可压缩的早期轮），前端拿不到，也不为置灰多打一次 dry-run 预览。这里用
  *  已有的 `getContextUsage` 百分比做保守估计——低于此值大概率没有可压缩窗口，
- *  灰掉省得用户白等。真正的拒绝永远在后端（零写入返回"水位过低"）。
+ *  灰掉省得用户白等。真正的拒绝永远在后端（零写入，409 `{reason:"no_early_turns"}`，
+ *  #1197 项 3）——文案照它说"没有可压缩的早期内容"，不说"水位过低"。
  *  取 0.15，与设计稿 §8 的 floor 建议同量级；AC1 的 40% 水位仍可正常点击。 */
 const LOW_WATER_HINT_PCT = 0.15;
 
@@ -322,13 +323,13 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                 className="ctx-usage-compact-btn"
                 onClick={handleCompact}
                 disabled={compacting || lowWater}
-                title={lowWater ? '水位过低无需压缩' : '手动触发一次上下文压缩'}
+                title={lowWater ? '没有可压缩的早期内容' : '手动触发一次上下文压缩'}
               >
                 {compacting && <span className="ctx-usage-spinner" aria-hidden="true" />}
                 {compacting ? '压缩中…' : '手动压缩'}
               </button>
               {lowWater && !compacting && (
-                <span className="ctx-usage-compact-note">水位过低无需压缩</span>
+                <span className="ctx-usage-compact-note">没有可压缩的早期内容</span>
               )}
               {compactError && (
                 <div className="ctx-usage-compact-error" role="alert">
@@ -343,7 +344,7 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                       {fmtTokens(compactResult.tokens_after)} tok
                     </>
                   ) : (
-                    '水位过低，无需压缩（未改动）。'
+                    '没有可压缩的早期内容（未改动）。'
                   )}
                 </div>
               )}

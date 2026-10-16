@@ -1766,6 +1766,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     summarize: summarizeDeltaChars,
   },
   [EventType.TEXT_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
+  // #1197 项 1：`context/window-changed` 是 per-session 上下文窗口挡位的 append-only
+  // 事实。窗口的**生效值**由后端 `context/window.py` 的 derive 给出（倒序 last-wins），
+  // 前端不重复实现那份折叠——挡位读数走 `/api/.../context-settings`。故这里显式登记
+  // 为未投影（与 COMPACTION_* 同一处理），而不是静默漏登记。
+  // ⚠ 项 1 加了这个事件类型却漏登记：`EVENT_SEMANTICS` 是穷尽 `Record<EventTypeValue, …>`，
+  // 缺一条 `tsc -b` 直接失败（gate0 项），而 vitest 不跑 tsc 所以当时没红。
+  [EventType.CONTEXT_WINDOW_CHANGED]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.COMPACTION_START]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.COMPACTION_END]: { apply: unhandledProjection, summarize: unknownSummary },
   // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，
