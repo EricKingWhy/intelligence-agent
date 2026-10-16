@@ -400,8 +400,8 @@ test('UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位�
 /** #179：窄屏（≤820px）项目级操作可达性。
  *
  *  背景：WS-5 #155 的窄屏降级把 `.rail-project-head` 整块 `display:none`——层级信息
- *  丢失是刻意的取舍，但"**项目级操作**（重命名 / 删除项目 / 在此项目中新建任务）只在
- *  那一行的菜单里"意味着它们在窄屏彻底不可达（FE-R11-09 修的是会话级的同源问题）。
+ *  丢失是刻意的取舍，但"**项目级操作**（新建会话 / 新建任务… / 重命名项目 /
+ *  删除项目…）只在那一行的菜单里"意味着它们在窄屏彻底不可达（FE-R11-09 修的是会话级的同源问题）。
  *  本 describe 锁住修复后的两条底线：菜单**能打开**，且**菜单项与宽屏一致**。
  *
  *  为什么用真窄视口而不是只断言 CSS：菜单在窄屏是"文件夹图标 ↔ ⋯"的槽位交换，
@@ -426,8 +426,10 @@ test.describe('窄屏 ≤820px：项目级操作（#179）', () => {
     );
 
     await openProjectMenu(page, '项目 alpha');
-    // AC2：与宽屏同一套动作、同一个确认面（三个菜单项逐字一致）。
-    await expect(page.getByRole('menuitem', { name: '在此项目中新建任务' })).toBeVisible();
+    // AC2：与宽屏同一套动作、同一个确认面（四个菜单项逐字一致，#1177 §A 后为
+    // 新建会话 / 新建任务… / 重命名项目 / 删除项目…）。
+    await expect(page.getByRole('menuitem', { name: '新建会话' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: '新建任务…' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: '重命名项目' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: '删除项目…' })).toBeVisible();
     // 破坏性动作仍走自己的确认面（不是"窄屏简化成直接删"）。
