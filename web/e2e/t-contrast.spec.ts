@@ -992,4 +992,318 @@ for (const theme of ['dark', 'light'] as const) {
     console.log(`[${theme}] .notice-strip-hard .notice-strip-badge color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
     expect(ratio, `.notice-strip-hard .notice-strip-badge contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
+
+/* ── #1208：recovery.css 两处语义色正文收口（#1175 独立审查 Axis B F1 残余）──
+ *
+ *  `.recovery-decision-error` 与 `.recovery-list-error` 把 `--danger` 直接当**正文色**用，
+ *  亮色下压在 `--surface-elevated` 底上只有 4.4482 < 4.5（这就是 #1175 F1 报告值里的
+ *  4.448；报告另给的 4.301 是同一 token `#cf4a46` 压 `--surface-workspace`(#fbfbfc) 的
+ *  理论值——本仓两处的真实底都是 --surface-elevated）。修法同 #1136/#1171/#1175 的
+ *  ink-mix：`color-mix(in srgb, var(--danger) 45%, var(--text-primary))`（亮色压深、
+ *  暗色提亮，只升不降）；图标（.recovery-decision-icon，--warning）与描边/底等装饰
+ *  继续引原 token（#1164 P2-3）。
+ *  两处各走**真实渲染路径**（裁决面板提交校验失败 / 恢复列表拉取 500），不是造影子
+ *  元素，故把字色改回纯 --danger 时对应用例必然变红。 */
+
+const RD_SID = 's-contrast-recovery';
+const RD_ROW = {
+  session_id: RD_SID,
+  event_count: 4,
+  first_event_time: T,
+  last_event_time: T,
+  first_user_message: '待裁决对比度',
+  trace_id: null,
+  trace_url: null,
+};
+
+/** 裁决面板错误态夹具：坏死 run（run/started 无终态）+ 一条待裁决 UNKNOWN。
+ *  面板随 `pending_decisions` 在场；选「当作已生效」并填超过上限的来源 → 点提交触发
+ *  `assembleDecisions` 的来源长度校验抛错 → `setError` → `.recovery-decision-error`
+ *  （role=alert）落屏。上限 `RECOVERY_SOURCE_MAX = 2000`（抛错点 lib/recovery.ts:148；
+ *  与 lib/api.ts 的 `RECOVER_DECISION_SOURCE_MAX` 同值，recovery.test.ts:103 断言二者相等）。 */
+test(`[${theme}] #1208 .recovery-decision-error（裁决来源校验失败条）对比度 ≥4.5`, async ({ page }) => {
+  await routeApi(page, {
+    sessions: [RD_ROW],
+    events: [
+      { type: 'session/started', seq: 1, session_id: RD_SID, run_id: 'rd', time: T },
+      { type: 'run/started', seq: 2, session_id: RD_SID, run_id: 'rd', time: T },
+      { type: 'user/message', data: { content: '待裁决对比度' }, seq: 3, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T },
+      {
+        type: 'tool/call',
+        data: { tool_call_id: 'tc-rd', tool_name: 'bash', args: { command: 'rm -rf /tmp/x' } },
+        seq: 4, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T,
+      },
+    ],
+    pendingDecisions: [
+      {
+        tool_call_id: 'tc-rd', tool_name: 'bash', state: 'UNKNOWN',
+        default_action: 'RETRY', risk_level: 'high',
+        probe: { verifiable: false, suggested_action: null },
+      },
+    ],
+    models: MODELS,
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
+
+  // 选「当作已生效」→ 出现来源输入；填超上限文本 → 提交触发校验失败。
+  await page.locator('.recovery-option input[value="CONFIRM_SUCCESS"]').check();
+  await page.locator('.recovery-source-custom').fill('x'.repeat(2001));
+  await page.locator('.recovery-submit-btn').click();
+
+  const err = page.locator('.recovery-decision-error');
+  await expect(err).toBeVisible();
+  await expect(err).toContainText('裁决来源过长');
+  const m = await measure(page, '.recovery-decision-error');
+  const ratio = contrast(m.color, m.bg);
+  // eslint-disable-next-line no-console
+  console.log(`[${theme}] .recovery-decision-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+  expect(ratio, `.recovery-decision-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+});
+
+/** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
+ *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
+ *  入口是顶栏「恢复列表」按钮（TopBar aria-label="恢复列表"）。 */
+test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对比度 ≥4.5`, async ({ page }) => {
+  await routeApi(page, {
+    sessions: [], events: [], models: MODELS,
+    permissionModes: PERMISSION_MODES, agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+  });
+  // 后注册的 route 优先匹配（Playwright 逆序）——覆盖 routeApi 的默认 200 空快照。
+  await page.route('**/api/recovery/interrupted', (route) =>
+    route.fulfill({ status: 500, body: JSON.stringify({ detail: 'snapshot 不可读' }), contentType: 'application/json' }));
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.getByRole('button', { name: '恢复列表' }).click();
+
+  const err = page.locator('.recovery-list-error');
+  await expect(err).toBeVisible();
+  const m = await measure(page, '.recovery-list-error');
+  const ratio = contrast(m.color, m.bg);
+  // eslint-disable-next-line no-console
+  console.log(`[${theme}] .recovery-list-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+  expect(ratio, `.recovery-list-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+});
+}
+
+/* ── #1175：语义色「当正文色用」的余量收口（40+ 处）──
+ *
+ *  #1171/#1172 收口后，同类规则（`color: var(--danger|warning|info)` 直接当**正文色**
+ *  用）在亮色主题下仍有 40+ 处 <4.5（#1136 ink-mix 方案的下一批残余；清单见 #1175）。
+ *  修法同 #1171：`color-mix(in srgb, <sem> 45%, var(--text-primary))`——亮色
+ *  `--text-primary` 是深墨、混入即压深，暗色是近白、混入即提亮（只升不降）；装饰
+ *  （描边/底）与图标保留原 token（#1164 P2-3）。
+ *
+ *  本块走**真实渲染路径**（run 三态 / 中断条 / 熔断条 / 工具失败 / 改动面 / 模型回退 /
+ *  任务审阅在途 run），把任一处字色改回纯 token 对应用例必然变红——不以静态复算充数。
+ *  逐处静态复算（含未进本文件的余量点）见 #1175 交付报告与沙箱读数。 */
+
+/** 打开一个会话并等到时间线出现（同 #1136 各夹具的通用姿势）。 */
+async function openContrastSession(
+  page: Page,
+  theme: 'dark' | 'light',
+  sid: string,
+  frames: FrameSpec[],
+  firstMessage: string,
+): Promise<void> {
+  await routeApi(page, {
+    sessions: [{
+      session_id: sid, event_count: frames.length, first_event_time: T, last_event_time: T,
+      first_user_message: firstMessage, trace_id: null, trace_url: null,
+    }],
+    events: frames,
+    models: MODELS, permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await page.locator('.turn').first().waitFor();
+}
+
+/** 逐选择器：真机量对比度 + ≥4.5 断言（先 toBeVisible 预检，缺席必须 throw 不许静默假绿）。 */
+async function expectEachContrast(
+  page: Page,
+  theme: 'dark' | 'light',
+  selectors: string[],
+): Promise<void> {
+  for (const sel of selectors) {
+    await expect(page.locator(sel).first(), `${sel} present (${theme})`).toBeVisible();
+    const m = await measure(page, sel);
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] #1175 ${sel} color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  }
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  /* pulse-tool / run-badge-tool：run 运行中且末个 tool 未收口。 */
+  test(`[${theme}] #1175 run 运行态（pulse-tool / run-badge-tool）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-tool';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rt', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑一个工具' }, seq: 3, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+      /* model/started 是关键：deriveRunPulse 在 run_status==='running' 时靠
+         active_step_id 定位当轮，才把「末个 tool 未收口」判成 pulse-tool（缺它落到 thinking）。 */
+      { type: 'model/started', seq: 4, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+      { type: 'tool/call', data: { tool_call_id: 'tc-t', tool_name: 'bash', args: { command: 'sleep 1' } }, seq: 5, session_id: sid, run_id: 'rt', step_id: 1, time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑一个工具');
+    await expectEachContrast(page, theme, ['.run-pulse.pulse-tool', '.detail-header .run-badge-tool']);
+  });
+
+  /* pulse-failed / run-badge-failed：run/failed 终态。 */
+  test(`[${theme}] #1175 run 失败态（pulse-failed / run-badge-failed）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-failed';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rf', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rf', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑到失败' }, seq: 3, session_id: sid, run_id: 'rf', step_id: 1, time: T },
+      { type: 'run/failed', data: { reason: 'model_error' }, seq: 4, session_id: sid, run_id: 'rf', step_id: 1, time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑到失败');
+    await expectEachContrast(page, theme, ['.run-pulse.pulse-failed', '.detail-header .run-badge-failed']);
+  });
+
+  /* pulse-paused + 暂停面板（.pause-panel-head / .pause-resume-btn）：预算到顶暂停（非终态）。 */
+  test(`[${theme}] #1175 预算暂停态（pulse-paused / pause-panel / pause-resume-btn）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-paused';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rp', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rp', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑到预算顶' }, seq: 3, session_id: sid, run_id: 'rp', step_id: 1, time: T },
+      {
+        type: 'run/paused', seq: 4, session_id: sid, run_id: 'rp', step_id: 1, time: T,
+        data: {
+          reason: 'budget_exhausted', trigger_dimension: 'run.max_total_tokens', budget_version: 1,
+          consumed: { agent_turns: 2, total_tokens: 1234 },
+          limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
+          resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+        },
+      },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑到预算顶');
+    await expect(page.locator('.pause-panel')).toBeVisible();
+    await expectEachContrast(page, theme, [
+      '.run-pulse.pulse-paused', '.pause-panel-head', '.pause-resume-btn',
+    ]);
+  });
+
+  /* 中断条（.interrupt-banner）：进程重启打断的 run（run_interrupted && !streaming）。 */
+  test(`[${theme}] #1175 上次中断条（interrupt-banner）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-interrupt';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'ri', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'ri', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '被打断了' }, seq: 3, session_id: sid, run_id: 'ri', step_id: 1, time: T },
+      { type: 'run/interrupted', data: { reason: 'process_restart' }, seq: 4, session_id: sid, run_id: 'ri', step_id: 1, time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '被打断了');
+    await expectEachContrast(page, theme, ['.interrupt-banner']);
+  });
+
+  /* 熔断条 soft 徽标（.notice-strip-soft .notice-strip-badge）：soft failure-guard 事件。 */
+  test(`[${theme}] #1175 熔断条 soft 徽标（notice-strip-soft badge）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-soft';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rs', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rs', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '熔断 soft' }, seq: 3, session_id: sid, run_id: 'rs', step_id: 1, time: T },
+      { type: 'tool/failure-guard', data: { level: 'soft', tool_name: 'bash', consecutive_failures: 3 }, seq: 4, session_id: sid, run_id: 'rs', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rs', time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '熔断 soft');
+    await expectEachContrast(page, theme, ['.notice-strip-soft .notice-strip-badge']);
+  });
+
+  /* 工具失败摘要（.act-error-code）：tool/result ok=false + error_code。 */
+  test(`[${theme}] #1175 工具失败摘要（act-error-code）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-err';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 're', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑失败的工具' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'tool/call', data: { tool_call_id: 'tc-e', tool_name: 'bash', args: { command: 'false' } }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
+      /* 错误信封要嵌在 data 里：投影把 tool.result 落成 parsed.data（projection.ts
+         `tool.result = parsedData ?? message`），而 ToolCard 的 parseErrorShape 只认
+         {ok:false,error_code} 对象——扁平放顶层会被落成 message 字符串、摘要行不渲染。 */
+      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', data: { ok: false, error_code: 'TIMEOUT', message: '命令超时' } }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 6, session_id: sid, run_id: 're', time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑失败的工具');
+    await expectEachContrast(page, theme, ['.act-error-code']);
+  });
+
+  /* 模型回退值（.model-fallback-val）：model/fallback 事件，Inspector 步骤详情呈现。 */
+  test(`[${theme}] #1175 模型回退值（model-fallback-val）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-fb';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rfb', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rfb', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '触发回退' }, seq: 3, session_id: sid, run_id: 'rfb', step_id: 1, time: T },
+      { type: 'model/fallback', data: { from_model: 'primary', to_model: 'fallback', reason: 'TimeoutError' }, seq: 4, session_id: sid, run_id: 'rfb', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rfb', time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '触发回退');
+    /* .model-fallback-val 在 Inspector 的 Overview（id=chat）页 MODEL 区块里；默认 tab 是
+       timeline，先切页再量（否则元素不在 DOM，属夹具问题而非样式问题）。 */
+    await page.getByRole('tablist', { name: 'Inspector 视图' }).getByRole('tab', { name: 'Overview' }).click();
+    await expectEachContrast(page, theme, ['.model-fallback-val']);
+  });
+
+  /* 改动面删除计数（.changes-removed）：文件净删除 >0。走「文件/改动」面真实渲染路径。 */
+  test(`[${theme}] #1175 改动面删除计数（changes-removed）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-chg';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rc', step_id: 1, time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rc', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '删几行' }, seq: 3, session_id: sid, run_id: 'rc', step_id: 1, time: T },
+      { type: 'tool/call', data: { tool_call_id: 'tc-c', tool_name: 'write', args: { path: 'src/a.ts' } }, seq: 4, session_id: sid, run_id: 'rc', step_id: 1, time: T },
+      {
+        type: 'tool/result', seq: 5, session_id: sid, run_id: 'rc', step_id: 1, time: T,
+        data: { tool_call_id: 'tc-c', content: JSON.stringify({ ok: true, message: 'ok', data: { path: 'src/a.ts', before: 'l1\nl2\nl3\n', after: 'l1\n', truncated: false } }) },
+      },
+      { type: 'run/completed', data: {}, seq: 6, session_id: sid, run_id: 'rc', time: T },
+    ];
+    await routeApi(page, {
+      sessions: [{
+        session_id: sid, event_count: frames.length, first_event_time: T, last_event_time: T,
+        first_user_message: '删几行', trace_id: null, trace_url: null,
+      }],
+      events: frames,
+      models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: '文件/改动' }).click();
+    await expect(page.locator('.changes-panel')).toBeVisible();
+    await expectEachContrast(page, theme, ['.changes-removed']);
+  });
+
+  /* 任务审阅在途 run 轴（.task-review-run-axis.running）：open_run_ids 非空。 */
+  test(`[${theme}] #1175 任务审阅在途 run 轴（task-review-run-axis.running）对比度 ≥4.5`, async ({ page }) => {
+    const state: TaskReviewFixture = {
+      task: {
+        defined: true, task_text: '在途对比度', read_write_intent: null, cwd: '/repo',
+        criteria: [criterion('c1', 'x')], verification: { c1: verification('passed') },
+        acceptance: null, version: 1, open_run_ids: ['r1'], product_state: 'executing',
+      },
+      evidence: { c1: [evidenceRecord({ criterion_id: 'c1' })] },
+    };
+    await openTaskReview(page, theme, state);
+    await expectEachContrast(page, theme, ['.task-review-run-axis.running']);
+  });
 }
