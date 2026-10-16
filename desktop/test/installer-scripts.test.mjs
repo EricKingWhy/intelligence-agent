@@ -346,7 +346,7 @@ describe('process gate (#914)', () => {
   })
 
   it('refuses a stage that never calls the gate', () => {
-    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n', '  ${If} $iaProbeFound == "1"\n')
     // #1066 gave the macro a second, in-window call: both call sites have to go
     // for this case to mean what its name says.
     const both = withoutStagingWindowCall(dir)
@@ -358,7 +358,7 @@ describe('process gate (#914)', () => {
     // The pointer must not be armed when the gate refuses: .onGUIEnd and
     // iaRollbackApplication read a non-empty IaBackupDir as "the install
     // section started" and would roll a good installation back.
-    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n', '')
+    const dir = withMutatedGate('  Call iaRequireNoRunningProduct\n  ${If} $iaProbeFound == "1"\n', '  ${If} $iaProbeFound == "1"\n')
     // Both call sites go (#1066 added the in-window one): this case pins the
     // placement rule, so the late call has to be the only one left.
     const withoutCalls = withoutStagingWindowCall(dir)
