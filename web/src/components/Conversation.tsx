@@ -456,6 +456,14 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
             request={askUserRequest}
             resuming={askUserResuming}
             errorMessage={askUserError}
+            /* #1224：按请求落盘的超时档渲染底部提示，与后端注入消息
+               （`minutes = max(1, floor(timeout_seconds / 60))`，向下取整且至少 1）
+               数值一致。缺省（旧事件无该字段）⇒ null ⇒ 卡片回落不带数字的中性提示。 */
+            timeoutMinutes={
+              typeof askUserRequest.timeout_seconds === 'number'
+                ? Math.max(1, Math.floor(askUserRequest.timeout_seconds / 60))
+                : null
+            }
             onSubmit={onAskUserAnswer}
           />
         )}

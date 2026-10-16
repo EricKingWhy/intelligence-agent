@@ -165,6 +165,7 @@ from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
+from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
@@ -1212,6 +1213,19 @@ class AppState:
             # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
             # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
             on_context_snapshot=self._cache_context_snapshot,
+        )
+        # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
+        # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
+        # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
+        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
+        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        self.ask_user_timeout_driver = AskUserTimeoutDriver(
+            timeout_seconds=settings.ask_user_question_timeout,
+            on_expire=lambda session_id, request_id: (
+                session_service(self).resume_ask_user_timeout(
+                    session_id, request_id=request_id,
+                )
+            ),
         )
         # #200：会话 → (builder 快照, 工具定义)。工具定义与快照在**同一次收口**
         # 时取（registry 与 builder 属于同一个 runtime，分开取会得到两个真相）。

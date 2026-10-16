@@ -1,0 +1,1 @@
+2026-10-16	机械归属（非内容审查主张）：跟进分支与 origin/main fa0811d8 的 sync merge be124c1d（父一 0b0d3a11=本线 tip，父二 fa0811d8=origin/main 即 PR #1236）。自动合并完成、零冲突；--cc 空表，故按 fail-closed 规则显式归属。相对父一仅加入 main 已有提交，无本线代码变更；来侧提交已有各自归属。本行只记机械 sync。	0b0d3a111e4ba57d7b4695dcc010a56b991a0ae2..be124c1de1f7e85e382546821a0b6b1c408ad996

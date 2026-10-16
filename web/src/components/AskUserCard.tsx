@@ -30,8 +30,9 @@ export interface AskUserCardProps {
   errorMessage?: string | null;
   /** 后端配置的超时档（分钟）；null = 未知——渲染不带数字的中性提示（零伪造）。
    *
-   *  #1204 审查 P3：本 prop 目前**无生产提供方**（`Conversation.tsx` 未传）⇒ 恒为
-   *  兜底 `null`，卡片一律渲染不带数字的中性文案。生产接线待 #1224，本处不造假接线。 */
+   *  #1224：由 `Conversation` 从请求载荷的 `timeout_seconds`（后端随请求落盘）算出
+   *  `minutes = max(1, floor(seconds / 60))`，与后端注入消息数值一致。旧事件无该
+   *  字段时仍为 null（回落中性文案）。 */
   timeoutMinutes?: number | null;
   onSubmit: (answer: AskUserAnswer) => void;
 }
