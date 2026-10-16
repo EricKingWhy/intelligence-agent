@@ -9,6 +9,7 @@
 import type {
   AgentEvent,
   ArtifactSlice,
+  AskUserQuestionAnswer,
   ConstraintInputChoice,
   HostDirsListing,
   MemoryDeleted,
@@ -2083,6 +2084,19 @@ export interface ConstraintInputAnswerPayload {
   custom_text?: string;
 }
 
+/** #1204：`ask_user` 通用提问的答案形态（`input_request` 的另一支）。
+ *
+ *  与窄场景的 `ConstraintInputAnswerPayload` 共用 `resume_basis: 'user_input'` 通道，
+ *  按事件 `input_request_answer` 的形状分流——两者的 wire 形状互斥（`choice` vs
+ *  `questions`），后端据 `paused` 的那条 `USER_INPUT_REQUESTED.kind` 判定该收哪一支。 */
+export interface AskUserAnswerPayload {
+  request_id: string;
+  questions: AskUserQuestionAnswer[];
+}
+
+/** `input_request` 的 wire 联合：窄场景四选一，或通用提问逐题作答。 */
+export type UserInputAnswerPayload = ConstraintInputAnswerPayload | AskUserAnswerPayload;
+
 export type ResumePausedRunPayload =
   | {
       run_id: string;
@@ -2093,7 +2107,7 @@ export type ResumePausedRunPayload =
       run_id: string;
       resume_basis: 'user_input';
       budget: { expected_version: number; run: ResumeRunLimitsBody };
-      input_request: ConstraintInputAnswerPayload;
+      input_request: UserInputAnswerPayload;
     };
 
 /** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维

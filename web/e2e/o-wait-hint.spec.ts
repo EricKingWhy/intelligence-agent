@@ -14,9 +14,20 @@
  * `shouldShowWaitHint` 的单测里锁。它在本车道要精确编排事件序才构造得出，
  * 收益不抵成本（相位本身的真相在纯函数那一层）。
  *
- * 车道能力：WS 接流 mock 能**保持连接**（`ending: 'keep'`）——于是「长连接 + 停摆 →
- * 重连补一帧 → 继续长连接」这个真机形状在本车道能被如实构造（旧 `route.fulfill`
- * 给不出长连接：帧一次性到齐、包体立刻结束）。
+ * 车道能力：WS 接流 mock 能**保持连接**（`ending: 'keep'`），且 `frameGate` 让用例
+ * 掌握「新事件」到达的**虚拟时刻**——于是「长连接 + 用例扣住一帧 → 放行 → 继续长连接」
+ * 这个形状能在本车道确定性地构造（旧 `route.fulfill` 给不出长连接：帧一次性到齐、
+ * 包体立刻结束）。
+ *
+ * **重连不是本车道的编排手段（实测读数，别把它读成"不会发生重连"）**：`wsSubscribes`
+ * 计数在 `--workers=1` 单跑下为 挂载后 1 → 首次 `fastForward(32_000)` 后 1 →
+ * 放行 seq 5 后 1 → 第二次 `fastForward(32_000)` 后 **2**。即：① seq 5 是**首次接流**
+ * 送出的（放行前后订阅数都是 1 ⇒ 停摆看门狗在首跳期间没有断掉那条连接）；② 停摆看门狗
+ * （`useSession.ts:744` 的 10s 心跳 → `:1069-1076` `stallCheck`）**确实**会在第二次快进时
+ * 走到重连。故本用例只主张「seq 5 由首次接流送出」，**不**主张「不存在重连」，
+ * 其决定性断言也不依赖那次重连。
+ * （不写成「断了就永远送不出来」：闸门是**同一个** Promise，重连的第 2 次订阅会经 `onWs`
+ * 拿到同一份 script 与同一个已 resolve 的闸门 ⇒ 帧只会**迟到**，不会永不到达。）
  */
 
 import { expect, test } from '@playwright/test';
@@ -30,9 +41,9 @@ const LIVE_FRAMES: FrameSpec[] = [
   { type: 'text/delta', data: { delta: '开了个头…' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
 
-/** 停摆重连时补进来的**一条新事件**（seq 5）：它把「空闲基准」重置一次，
- *  之后的幂等重放（同 seq）会被按 seq 去重，不再算进展——也正因此，重连额度
- *  不会耗尽（真进展会 `observeProgress` 复位额度），live 态得以保持。 */
+/** 闸门放行后补进来的**一条新事件**（seq 5）：它把「空闲基准」重置一次。
+ *  （此前注释称它由「停摆重连」补进——**不属实**：它是由**首次接流**送出的
+ *  （实测放行前后 `wsSubscribes` 都是 1），只是被 `frameGate` 扣住。） */
 const MID_FRAMES: FrameSpec[] = [
   { type: 'text/delta', data: { delta: '又吐了一点。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
@@ -43,16 +54,26 @@ function pulseSec(text: string): number {
 }
 
 test('停顿提示锚的是「空闲」而非「流龄」：阈值前不出现；出现后秒数必须小于流龄', async ({ page }) => {
-  let wsSubscribes = 0;
+  // 「新事件」（seq 5）的**放行闸门**（#1214）：握在用例手里。
+  // 详见下方注释——本用例的红/绿过去取决于「seq 5 何时到达」，而那件事在
+  // 虚拟时钟下不可靠，闸门把它变成确定值。
+  let releaseMid!: () => void;
+  const midGate = new Promise<void>((resolve) => {
+    releaseMid = resolve;
+  });
   await page.clock.install();
   await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
-    // 停摆重连补进 MID_FRAMES（一条 seq 5 新事件）后**连接保持**——真后端在
-    // run 未收口时就是这样，界面必须一直维持生成态（否则脉冲秒数无从比较）。
-    onWs: () => {
-      wsSubscribes += 1;
-      return { frames: MID_FRAMES, ending: 'keep' };
-    },
+    // 连接保持（`ending: 'keep'`）：真后端在 run 未收口时就是这样，界面必须一直
+    // 维持生成态（否则脉冲秒数无从比较）。
+    //
+    // ⚠ `frameGate` 是本用例（#1214）的关键：**seq 5 只在用例放行时到达**。
+    // 改前 seq 5 随首次接流在**挂载当口**就到了，于是它与「流龄起点」（`startedAt`）
+    // 写在同一瞬间：`hintSec`（距新事件的空闲）与 `pulseSec`（流龄）只差 0~1s，
+    // 决定性断言 `hintSec < pulseSec` 的余量被压成 1 秒 → 负载下随机变红
+    // （实测 `Expected: < 52, Received: 52`）。注意这与「产品退化成按流龄计时」
+    // **读数同形但成因不同**：那种红是夹具时序造的假象，产品侧锚点是正确重置的。
+    onWs: () => ({ frames: MID_FRAMES, ending: 'keep', frameGate: midGate }),
     events: LIVE_FRAMES,
   });
 
@@ -61,28 +82,29 @@ test('停顿提示锚的是「空闲」而非「流龄」：阈值前不出现�
 
   // 前置条件：生成态真的起来了（否则后面的「不出现」可能只是因为什么都没跑）
   const pulse = page.locator('.run-pulse');
+  const hint = page.locator('.wait-hint');
   await expect(pulse).toContainText('思考中');
   await expect(page.locator('.stream-caret')).toBeVisible();
-  await expect(page.locator('.wait-hint')).toHaveCount(0); // 阈值以下：一个节点都不多
+  await expect(hint).toHaveCount(0); // 阈值以下：一个节点都不多
 
-  // 推进到虚拟 21s：停摆重连（心跳 10s / 阈值 10s / 退避 500ms 起）已在途中补进
-  // seq 5。定时器由虚拟时钟触发，但 **WS 帧的到达是实时的**——所以用轮询等它落地；
-  // 虚拟时钟停住不动，等多久都不影响任何秒数。
-  await page.clock.fastForward(21_000);
-  await expect
-    .poll(() => wsSubscribes, { message: '停摆重连必须发生过——本用例要证明新事件会重置空闲基准' })
-    .toBeGreaterThan(0);
+  // 推到阈值之后（虚拟 ~32s）：seq 5 仍被闸门扣着 ⇒ 空闲锚点还是流起点，
+  // 提示必须出现。这一步同时锁住「阈值门」本身。
+  await page.clock.fastForward(32_000);
+  await expect(hint).toBeVisible();
+  await expect(hint).toContainText('没有新进展');
+
+  // **放行 seq 5**：这是一条新事件，空闲锚点必须随之重置 ⇒ 提示必须消失
+  // （`TopBar` 的进度 effect 会把 idleSec 归零，文案随之为空、节点卸载）。
+  // 这一步是确定性的：观察到「提示消失」就是「锚点确实重置过」的直接证据，
+  // 不用靠跳时钟去碰运气——正是它把断言余量从 1 秒拉回到几十秒。
+  releaseMid();
   await expect(page.locator('.model-output').last()).toContainText('又吐了一点。');
-  await expect(page.locator('.wait-hint')).toHaveCount(0);
+  await expect(hint).toHaveCount(0);
 
-  // 给 React 的进度 effect 一个逐步执行的时钟窗口，确保 seq 5 已重置空闲锚点；
-  // fastForward 会跳到终点且只触发到期回调一次，满载时可能抢在 effect 前推进。
-  await page.clock.runFor(1_000);
-  await expect(page.locator('.wait-hint')).toHaveCount(0);
-
-  // 再跳 30s（虚拟 ~52s）：新事件后累计空闲 ~31s，刚过提示阈值。
-  await page.clock.fastForward(30_000);
-  const hint = page.locator('.wait-hint');
+  // 再推 32s：距 seq 5 累计空闲刚过阈值，而距流起点已经远大于 2×32s——
+  // `install()` 后虚拟时钟与真实时间 1:1 同走，故真实墙钟也计入流龄
+  // （实测该跑为 `hintSec=30` / `pulseSec=96s`，余量 ~66s）。
+  await page.clock.fastForward(32_000);
   await expect(hint).toBeVisible();
   await expect(hint).toContainText('没有新进展');
 

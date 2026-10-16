@@ -118,6 +118,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.approval import (
     effective_permission_mode as _effective_permission_mode,
 )
+from agent_harness.session.ask_user_timeout import ask_user_timeout_message
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -272,6 +273,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy, ToolReconcileInfo
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
@@ -777,33 +779,164 @@ def _pending_user_input_pause(
     )
 
 
-def _constraint_input_answer_data(
+#: 单题被跳过（留空）时在该题渲染行里的占位文案。
+_ASK_SKIPPED_ANSWER = "（跳过）"
+
+
+def _user_input_answer_already_recorded(
+    events: list[SessionEvent], *, request_id: str, normalized_answer: dict[str, Any],
+) -> bool:
+    """同一 request_id 是否已落过等价的回答（幂等重放 → True，冲突 → 抛 409）。"""
+    existing = [
+        event for event in events
+        if event.type == USER_MESSAGE and event.data.get("input_request_id") == request_id
+    ]
+    if not existing:
+        return False
+    if len(existing) == 1 and existing[0].data.get("input_request_answer") == normalized_answer:
+        return True
+    raise BudgetConflict("该用户输入请求已用不同回答处理")
+
+
+def _ask_user_skip_message(question_texts: list[str]) -> str:
+    """整卡跳过时注入用户消息（#1204 用户裁决口径，N=1 时只写原文）。"""
+    first = question_texts[0]
+    if len(question_texts) == 1:
+        return f"用户跳过了提问（共 1 题：{first}）"
+    return f"用户跳过了提问（共 {len(question_texts)} 题：{first} 等）"
+
+
+def _ask_user_input_answer_data(
+    events: list[SessionEvent], *, request_id: str,
+    request: SessionEvent, answer: Mapping[str, Any],
+    ask_user_timeout_seconds: int,
+) -> tuple[dict[str, Any] | None, bool]:
+    """归一 `ask_user` 的通用 `input_request`：每题 `answer` 或为答案、或为 null（跳过）。
+
+    `answer` 结构（#1204 用户裁决）：`{request_id, questions: [{question, answer:
+    {label, custom_text?} | null}]}`；`answer=null` 即该题被跳过/留空，整卡跳过 =
+    全部 null。另有一个 `{request_id, timeout: true}` 形态：超时到点时由运行方提交，
+    只注入"用户可能不在"的系统消息、**不写任何 answer**（用户裁决：超时不替选）。
+    """
+    if answer.get("timeout") is True:
+        if set(answer) != {"request_id", "timeout"}:
+            raise BudgetRejection("timeout 形态的 input_request 不接受其它字段")
+        normalized_timeout: dict[str, Any] = {
+            "request_id": request_id,
+            "timeout": True,
+        }
+        if _user_input_answer_already_recorded(
+            events, request_id=request_id, normalized_answer=normalized_timeout,
+        ):
+            return None, True
+        return {
+            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            "input_request_id": request_id,
+            "input_request_answer": normalized_timeout,
+        }, False
+    if set(answer) - {"request_id", "questions"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    questions = request.data.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise BudgetConflict("提问请求缺少问题定义")
+    submitted = answer.get("questions")
+    if not isinstance(submitted, list) or len(submitted) != len(questions):
+        raise BudgetRejection("input_request.questions 必须与提问逐题对应")
+
+    normalized: list[dict[str, Any]] = []
+    rendered: list[str] = []
+    all_skipped = True
+    for requested, item in zip(questions, submitted):
+        text = requested.get("question") if isinstance(requested, dict) else None
+        if not isinstance(text, str):
+            raise BudgetConflict("提问请求的问题文本缺失")
+        if not isinstance(item, dict) or set(item) - {"question", "answer"}:
+            raise BudgetRejection("input_request.questions 项形状无效")
+        if item.get("question") != text:
+            raise BudgetRejection("input_request 的问题文本与提问不匹配")
+        raw = item.get("answer")
+        if raw is None:
+            normalized.append({"question": text, "answer": None})
+            rendered.append(f"- {text}：{_ASK_SKIPPED_ANSWER}")
+            continue
+        if not isinstance(raw, dict) or set(raw) - {"label", "custom_text"}:
+            raise BudgetRejection("每题答案必须是选项标签或留空（跳过）")
+        label = raw.get("label")
+        custom_text = raw.get("custom_text")
+        entry: dict[str, Any] = {}
+        if isinstance(label, str) and label.strip():
+            if len(label) > 100_000:
+                raise BudgetRejection("选项标签必须是 1 至 100000 字符")
+            entry["label"] = label
+        elif isinstance(custom_text, str) and custom_text.strip():
+            # 只填了自定义行、未点选项：以自定义文本作答。
+            entry["label"] = custom_text.strip()
+        else:
+            raise BudgetRejection("每题答案必须选择一个选项或填写自定义文本")
+        if custom_text is not None:
+            if (
+                not isinstance(custom_text, str)
+                or not custom_text.strip()
+                or len(custom_text) > 100_000
+            ):
+                raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
+            entry["custom_text"] = custom_text
+        all_skipped = False
+        shown = entry["label"]
+        # 审查 P3（#1222 只堵了精确相等）：两侧 strip 后判等，避免 custom_text 未 trim
+        # （如 " x "）时与已 strip 的 label 语义相同却仍重复渲染"（补充：…）"。
+        if (
+            entry.get("custom_text")
+            and entry["custom_text"].strip() != entry["label"].strip()
+        ):
+            shown = f"{shown}（补充：{entry['custom_text']}）"
+        rendered.append(f"- {text}：{shown}")
+        normalized.append({"question": text, "answer": entry})
+
+    if all_skipped:
+        content = _ask_user_skip_message(
+            [q["question"] for q in questions]
+        )
+    else:
+        content = "用户回答了提问：\n" + "\n".join(rendered)
+
+    normalized_answer = {
+        "request_id": request_id,
+        "questions": normalized,
+    }
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
+    return {
+        "content": content,
+        "input_request_id": request_id,
+        "input_request_answer": normalized_answer,
+    }, False
+
+
+def _user_input_answer_data(
     events: list[SessionEvent], *, run_id: str, paused: PausedRun,
     answer: Mapping[str, Any] | None,
+    ask_user_timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, bool]:
+    """把恢复请求的 `input_request` 归一成待落盘的 `USER_MESSAGE` 数据。
+
+    两种待回答请求共用同一条恢复通道（`resume_basis='user_input'`），按事件的
+    `kind` 分流：`ask_user`（通用提问）走 `_ask_user_input_answer_data`，
+    `protected_fact_conflict`（窄场景约束冲突）走下面这段原位逻辑。
+    """
     if paused.reason != REASON_USER_INPUT:
         if answer is not None:
             raise BudgetConflict("本次暂停不接受 user_input 回答")
         return None, False
     if answer is None:
         raise BudgetRejection("user_input 暂停恢复必须提交 input_request 回答")
-    if set(answer) - {"request_id", "choice", "custom_text"}:
-        raise BudgetRejection("input_request 包含不支持的字段")
     request_id = answer.get("request_id")
-    choice = answer.get("choice")
-    custom_text = answer.get("custom_text")
-    if (
-        not isinstance(request_id, str) or not request_id
-        or not isinstance(choice, str) or choice not in _CONSTRAINT_INPUT_CHOICES
-    ):
-        raise BudgetRejection("input_request 的 request_id 或 choice 无效")
+    if not isinstance(request_id, str) or not request_id:
+        raise BudgetRejection("input_request 的 request_id 无效")
     if paused.input_request_id != request_id:
         raise BudgetConflict("input_request_id 与当前暂停的 run 不匹配")
-    if choice == "custom":
-        if not isinstance(custom_text, str) or not custom_text.strip() or len(custom_text) > 100_000:
-            raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
-    elif custom_text is not None:
-        raise BudgetRejection("仅 custom 选项可以携带 custom_text")
 
     requests = [
         event for event in events
@@ -814,8 +947,27 @@ def _constraint_input_answer_data(
     if len(requests) != 1:
         raise BudgetConflict("未找到唯一匹配的持久化用户输入请求")
     request = requests[0]
+    if request.data.get("kind") == "ask_user":
+        return _ask_user_input_answer_data(
+            events, request_id=request_id, request=request,
+            answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
+        )
     if request.data.get("kind") != "protected_fact_conflict":
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
+
+    # ── 窄场景：长期约束冲突（`protected_fact_conflict`）──────────────────
+    if set(answer) - {"request_id", "choice", "custom_text"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    choice = answer.get("choice")
+    custom_text = answer.get("custom_text")
+    if not isinstance(choice, str) or choice not in _CONSTRAINT_INPUT_CHOICES:
+        raise BudgetRejection("input_request 的 request_id 或 choice 无效")
+    if choice == "custom":
+        if not isinstance(custom_text, str) or not custom_text.strip() or len(custom_text) > 100_000:
+            raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
+    elif custom_text is not None:
+        raise BudgetRejection("仅 custom 选项可以携带 custom_text")
+
     source_id = request.data.get("source_event_id")
     source_seq = request.data.get("source_event_seq")
     fact_id = request.data.get("fact_id")
@@ -835,14 +987,10 @@ def _constraint_input_answer_data(
     normalized_answer: dict[str, Any] = {"request_id": request_id, "choice": choice}
     if choice == "custom":
         normalized_answer["custom_text"] = custom_text
-    existing = [
-        event for event in events
-        if event.type == USER_MESSAGE and event.data.get("input_request_id") == request_id
-    ]
-    if existing:
-        if len(existing) == 1 and existing[0].data.get("input_request_answer") == normalized_answer:
-            return None, True
-        raise BudgetConflict("该用户输入请求已用不同回答处理")
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
 
     fact = next(
         (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
@@ -1433,7 +1581,7 @@ class SessionService:
             if needs_reconcile(operation)
             and not (
                 operation.state is OperationState.RUNNING
-                and operation.tool_name == "request_constraint_resolution"
+                and operation.tool_name in USER_INPUT_TOOL_NAMES
                 and operation.tool_call_id in recoverable_constraint_calls
             )
         ]
@@ -2619,8 +2767,9 @@ class SessionService:
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
                 "取代）——expected_version 对应的暂停事实不存在；本请求未启动任何工作"
             )
-        _constraint_input_answer_data(
+        _user_input_answer_data(
             events, run_id=paused.run_id, paused=paused, answer=input_request,
+            ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
         )
         effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
@@ -2809,8 +2958,9 @@ class SessionService:
             await self._assert_user_input_session_headroom(
                 session.events, session_id=session_id, resume_basis=resume_basis,
             )
-            answer_data, answer_already_recorded = _constraint_input_answer_data(
+            answer_data, answer_already_recorded = _user_input_answer_data(
                 session.events, run_id=run_id, paused=paused, answer=input_request,
+                ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
             )
             if answer_data is not None and not answer_already_recorded:
                 session.append(USER_MESSAGE, answer_data)
@@ -5352,7 +5502,7 @@ class SessionService:
                 continue
             if (
                 operation.state is OperationState.RUNNING
-                and operation.tool_name == "request_constraint_resolution"
+                and operation.tool_name in USER_INPUT_TOOL_NAMES
                 and (operation.run_id, operation.tool_call_id)
                 in recoverable_constraint_calls
             ):

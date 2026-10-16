@@ -748,17 +748,67 @@ class ApproveRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class AskUserAnswer(BaseModel):
+    """`ask_user` 单题回答（#1204）：选中选项的 `label`，或自定义行的 `custom_text`。"""
+
+    model_config = {"extra": "forbid"}
+
+    label: str | None = Field(default=None, min_length=1, max_length=100_000)
+    custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def validate_non_blank(self) -> AskUserAnswer:
+        has_label = self.label is not None and bool(self.label.strip())
+        has_custom = self.custom_text is not None and bool(self.custom_text.strip())
+        if not has_label and not has_custom:
+            raise ValueError("each answer requires a non-blank label or custom_text")
+        return self
+
+
+class AskUserAnswerItem(BaseModel):
+    """`ask_user` 单题条目：`answer=null` 即该题被跳过/留空（#1204）。"""
+
+    model_config = {"extra": "forbid"}
+
+    question: str = Field(min_length=1, max_length=100_000)
+    answer: AskUserAnswer | None = None
+
+
 class InputRequestAnswer(BaseModel):
+    """`resume_basis=user_input` 的回答体，按 `kind` 二选一形状（#1204）。
+
+    - 窄场景（`protected_fact_conflict`）：`{request_id, choice, custom_text?}`；
+    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`。
+    形状层只挡明显非法组合；权威语义判定在领域层 `SessionService`（单一规则来源）。
+    """
+
     model_config = {"extra": "forbid"}
 
     request_id: str = Field(min_length=1, max_length=200)
     choice: Literal[
         "replace_persistently", "current_task_only", "keep_existing", "custom",
-    ]
+    ] | None = None
     custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+    questions: list[AskUserAnswerItem] | None = Field(default=None, min_length=1)
+    # #1204：ask_user 超时到点时的恢复形态——只注入"用户可能不在"系统消息，不写答案。
+    timeout: bool = False
 
     @model_validator(mode="after")
-    def validate_custom_text(self) -> InputRequestAnswer:
+    def validate_shape(self) -> InputRequestAnswer:
+        if self.timeout:
+            if (
+                self.choice is not None
+                or self.questions is not None
+                or self.custom_text is not None
+            ):
+                raise ValueError("timeout form cannot carry choice/questions/custom_text")
+            return self
+        if self.questions is not None:
+            if self.choice is not None or self.custom_text is not None:
+                raise ValueError("questions form cannot carry choice/custom_text")
+            return self
+        if self.choice is None:
+            raise ValueError("input_request requires either choice or questions")
         if self.choice == "custom":
             if self.custom_text is None or not self.custom_text.strip():
                 raise ValueError("custom choice requires non-blank custom_text")
@@ -2999,7 +3049,9 @@ def create_app(
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
                 input_request=(
-                    req.input_request.model_dump(exclude_none=True)
+                    req.input_request.model_dump(
+                        exclude_none=True, exclude_defaults=True,
+                    )
                     if req.input_request is not None else None
                 ),
                 **budget_claims(req.budget, resume_surface=True),

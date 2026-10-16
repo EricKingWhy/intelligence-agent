@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingConstraintInputRequest, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, AskUserAnswer, AskUserQuestion, AskUserQuestionAnswer, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingAskUserRequest, PendingConstraintInputRequest, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
@@ -202,6 +202,7 @@ export function initConversation(session_id: string): ConversationState {
     run_interrupted: null,
     run_paused: null,
     pending_constraint_input: null,
+    pending_ask_user: null,
     run_failure: null,
     turn_index: null,
     requested_model: null,
@@ -476,6 +477,13 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   if (request && requestId === request.request_id && answer?.request_id === request.request_id) {
     state.pending_constraint_input = { ...request, answer };
   }
+  // #1204：同一条恢复通道（`resume_basis: 'user_input'`）也承载 ask_user 的答案——
+  // 按事件 `input_request_answer` 的形状分流，两个待回答状态各记各的答案。
+  const askRequest = state.pending_ask_user;
+  const askAnswer = parseAskUserAnswer(event.data.input_request_answer);
+  if (askRequest && requestId === askRequest.request_id && askAnswer?.request_id === askRequest.request_id) {
+    state.pending_ask_user = { ...askRequest, answer: askAnswer };
+  }
 }
 
 const CONSTRAINT_INPUT_CHOICES = new Set<ConstraintInputChoice>([
@@ -503,6 +511,13 @@ function parseConstraintInputAnswer(raw: unknown): ConstraintInputAnswer | null 
 
 function projectUserInputRequested(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
+  // #1204：通用提问 `ask_user` 与窄场景 `protected_fact_conflict` 共用事件类型，
+  // 分流判据是 `data.kind`——前者走内嵌卡片状态，后者走原约束冲突状态，互不替代。
+  if (data.kind === 'ask_user') {
+    const askRequest = parseAskUserRequest(data, event.run_id ?? null);
+    if (askRequest !== null) state.pending_ask_user = askRequest;
+    return;
+  }
   const rawChoices = Array.isArray(data.choices) ? data.choices : [];
   const choices = rawChoices.flatMap((raw) => {
     if (!isRecord(raw)) return [];
@@ -549,11 +564,101 @@ function projectUserInputRequested(state: ConversationState, event: AgentEvent):
   state.pending_constraint_input = request;
 }
 
+/** #1204：解析 `kind == "ask_user"` 的 `USER_INPUT_REQUESTED` 载荷 → 待回答请求。
+ *
+ *  形状不合契约（缺 request_id / 题集为空 / 题目非法）即返回 null——**不伪造**一张
+ *  空卡片：零件缺失时宁可整条不投影（与 `projectUserInputRequested` 的窄场景同款）。
+ *  每题 options 2–4、header ≤12 由工具端强制；这里只做**读取侧的存活校验**，
+ *  不重放工具端的全部参数校验（读了坏数据就丢，不猜）。 */
+function parseAskUserRequest(data: Record<string, unknown>, envelopeRunId: string | null): PendingAskUserRequest | null {
+  const requestId = data.request_id;
+  const runId = envelopeRunId ?? data.run_id;
+  const rawQuestions = data.questions;
+  if (typeof requestId !== 'string' || !requestId) return null;
+  if (typeof runId !== 'string' || !runId) return null;
+  if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
+  const questions: AskUserQuestion[] = [];
+  for (const raw of rawQuestions) {
+    if (!isRecord(raw)) return null;
+    const { question, header, options, recommended } = raw;
+    if (typeof question !== 'string' || !question) return null;
+    if (typeof header !== 'string' || !header) return null;
+    if (!Array.isArray(options) || options.length === 0) return null;
+    const parsedOptions = options.flatMap((option) => {
+      if (!isRecord(option)) return [];
+      const { label, description } = option;
+      if (typeof label !== 'string' || !label.trim()) return [];
+      return [{
+        label,
+        ...(typeof description === 'string' && description ? { description } : {}),
+      }];
+    });
+    if (parsedOptions.length !== options.length) return null;
+    const parsedRecommended =
+      typeof recommended === 'number' && Number.isInteger(recommended)
+      && recommended >= 0 && recommended < parsedOptions.length
+        ? recommended
+        : undefined;
+    questions.push({
+      question,
+      header,
+      options: parsedOptions,
+      ...(parsedRecommended === undefined ? {} : { recommended: parsedRecommended }),
+    });
+  }
+  return { request_id: requestId, run_id: runId, questions, answer: null };
+}
+
+/** #1204：解析 `ask_user` 的持久化答案（`USER_MESSAGE.data.input_request_answer`）。
+ *  与 `parseConstraintInputAnswer` 同款：形状不合即 null（宁可当作"还没回答"）。 */
+function parseAskUserAnswer(raw: unknown): AskUserAnswer | null {
+  if (!isRecord(raw)) return null;
+  const { request_id, questions } = raw;
+  if (typeof request_id !== 'string' || !request_id) return null;
+  if (!Array.isArray(questions)) return null;
+  const parsed: AskUserQuestionAnswer[] = [];
+  for (const item of questions) {
+    if (!isRecord(item)) return null;
+    const text = item.question;
+    if (typeof text !== 'string') return null;
+    const value = item.answer;
+    if (value === null) {
+      parsed.push({ question: text, answer: null });
+      continue;
+    }
+    if (!isRecord(value)) return null;
+    const { label, custom_text } = value;
+    if (typeof label !== 'string' && typeof custom_text !== 'string') return null;
+    parsed.push({
+      question: text,
+      answer: {
+        ...(typeof label === 'string' ? { label } : {}),
+        ...(typeof custom_text === 'string' ? { custom_text } : {}),
+      },
+    });
+  }
+  return { request_id, questions: parsed };
+}
+
+/** #1204：清理两个「待回答的用户输入」状态里命中 `runId` 归属规则的那一份。
+ *
+ *  两个状态（`pending_constraint_input` / `pending_ask_user`）同源（`USER_INPUT_REQUESTED`）
+ *  但 payload 形状不同，**清理规则始终一致**——收进一处，免去在 5 个 run 生命周期点
+ *  （started 用 `stale`：清掉**别的** run 的残留；终态 / resumed 用 `for-run`：清掉**本**
+ *  run 已收口的那一份）逐点双写、漏一处就留下幽灵卡片。
+ *  `runId` 为 null（信封未带 run_id）时 `stale` 也照清（与旧行为一致）。 */
+function clearPendingUserInput(
+  state: ConversationState, runId: string | null, mode: 'stale' | 'for-run',
+): void {
+  const matches = (pendingRun: string | undefined) =>
+    mode === 'stale' ? pendingRun !== runId : pendingRun === runId;
+  if (matches(state.pending_constraint_input?.run_id)) state.pending_constraint_input = null;
+  if (matches(state.pending_ask_user?.run_id)) state.pending_ask_user = null;
+}
+
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_status = 'running';
-  if (state.pending_constraint_input?.run_id !== event.run_id) {
-    state.pending_constraint_input = null;
-  }
+  clearPendingUserInput(state, event.run_id ?? null, 'stale');
   // OBS-007：新 run 开始 = 用户已经接着往下跑了，「上次运行…中断」这条提示随之
   // 过期——不清掉的话它会挂到会话生命结束，与后续 run 的真实结局（比如绿色
   // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
@@ -827,9 +932,7 @@ function projectToolOutputDelta(state: ConversationState, event: AgentEvent): vo
 function projectRunCompleted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   state.run_cancelled = false;
-  if (state.pending_constraint_input?.run_id === event.run_id) {
-    state.pending_constraint_input = null;
-  }
+  clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
   state.run_failure = null;
   state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
@@ -852,9 +955,7 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
  *  可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。 */
 function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
-  if (state.pending_constraint_input?.run_id === event.run_id) {
-    state.pending_constraint_input = null;
-  }
+  clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   state.run_cancelled = isCancelledRunFailure(data);
   // #220：折叠失败归因。要点三条（载荷形状与呈现口径见 ADR-0033 §2.2/2.3）：
   // 取消那支不记（取消 ≠ 错误，da394a9）；两个键互相独立、都可缺；都没给就整体 null
@@ -873,9 +974,7 @@ function projectRunFailed(state: ConversationState, event: AgentEvent): void {
  *  streaming 段 settle 为 done，running 工具标记 stopped（中断 ≠ 错误）。 */
 function projectRunInterrupted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
-  if (state.pending_constraint_input?.run_id === event.run_id) {
-    state.pending_constraint_input = null;
-  }
+  clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   state.run_interrupted = {
     step_id: event.step_id ?? null,
     interrupted_seq: typeof data.interrupted_seq === 'number' ? data.interrupted_seq : null,
@@ -1044,9 +1143,7 @@ function projectRunPaused(state: ConversationState, event: AgentEvent): void {
  *  事件会自己建新轮（`step_base+1`），`finalizeRun('paused')` 已经 settle 过旧轮。 */
 function projectRunResumed(state: ConversationState, event: AgentEvent): void {
   state.run_paused = null;
-  if (state.pending_constraint_input?.run_id === event.run_id) {
-    state.pending_constraint_input = null;
-  }
+  clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   state.run_status = 'running';
   // #537：恢复后的 ceilings 用**恢复事件自带的新快照**更新（run/resumed 载荷的
   // data.limits.run 与 run/paused 同形，值是恢复生效后的 effective limits）——
