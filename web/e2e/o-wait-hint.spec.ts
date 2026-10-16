@@ -17,8 +17,15 @@
  * 车道能力：WS 接流 mock 能**保持连接**（`ending: 'keep'`），且 `frameGate` 让用例
  * 掌握「新事件」到达的**虚拟时刻**——于是「长连接 + 用例扣住一帧 → 放行 → 继续长连接」
  * 这个形状能在本车道确定性地构造（旧 `route.fulfill` 给不出长连接：帧一次性到齐、
- * 包体立刻结束）。**不构造停摆重连**：虚拟时钟一跳与真实定时器的到点无法编排先后，
- * 依赖重连的编排是不确定的（#1214 实测）。
+ * 包体立刻结束）。
+ *
+ * **重连不是本车道的编排手段（实测读数，别把它读成"不会发生重连"）**：`wsSubscribes`
+ * 计数在 `--workers=1` 单跑下为 挂载后 1 → 首次 `fastForward(32_000)` 后 1 →
+ * 放行 seq 5 后 1 → 第二次 `fastForward(32_000)` 后 **2**。即：① seq 5 是**首次接流**
+ * 送出的（放行前后订阅数都是 1，若那次连接已被停摆看门狗断掉，被闸门扣住的帧就永远
+ * 送不出来）；② 停摆看门狗（`useSession.ts:744` 的 10s 心跳 → `:1069-1076`
+ * `stallCheck`）**确实**会在第二次快进时走到重连。故本用例只主张「seq 5 由首次接流
+ * 送出」，**不**主张「不存在重连」，其决定性断言也不依赖那次重连。
  */
 
 import { expect, test } from '@playwright/test';
@@ -33,8 +40,8 @@ const LIVE_FRAMES: FrameSpec[] = [
 ];
 
 /** 闸门放行后补进来的**一条新事件**（seq 5）：它把「空闲基准」重置一次。
- *  （此前注释称它由「停摆重连」补进——**不属实**：它随首次接流到达，只是被
- *  `frameGate` 扣住；虚拟时钟下无法编排重连时序，见文件头。） */
+ *  （此前注释称它由「停摆重连」补进——**不属实**：它是由**首次接流**送出的
+ *  （实测放行前后 `wsSubscribes` 都是 1），只是被 `frameGate` 扣住。） */
 const MID_FRAMES: FrameSpec[] = [
   { type: 'text/delta', data: { delta: '又吐了一点。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
@@ -87,12 +94,14 @@ test('停顿提示锚的是「空闲」而非「流龄」：阈值前不出现�
   // **放行 seq 5**：这是一条新事件，空闲锚点必须随之重置 ⇒ 提示必须消失
   // （`TopBar` 的进度 effect 会把 idleSec 归零，文案随之为空、节点卸载）。
   // 这一步是确定性的：观察到「提示消失」就是「锚点确实重置过」的直接证据，
-  // 不用靠跳时钟去碰运气——正是它把断言余量从 1 秒拉回到 ~32 秒。
+  // 不用靠跳时钟去碰运气——正是它把断言余量从 1 秒拉回到几十秒。
   releaseMid();
   await expect(page.locator('.model-output').last()).toContainText('又吐了一点。');
   await expect(hint).toHaveCount(0);
 
-  // 再推 32s：距 seq 5 累计空闲 ~32s（刚过阈值），距流起点 ~64s。
+  // 再推 32s：距 seq 5 累计空闲刚过阈值，而距流起点已经远大于 2×32s——
+  // `install()` 后虚拟时钟与真实时间 1:1 同走，故真实墙钟也计入流龄
+  // （实测该跑为 `hintSec=30` / `pulseSec=96s`，余量 ~66s）。
   await page.clock.fastForward(32_000);
   await expect(hint).toBeVisible();
   await expect(hint).toContainText('没有新进展');
