@@ -718,6 +718,75 @@ describe('interrupted installer recovery journal (#1035)', () => {
   })
 })
 
+describe('installer refusal journal cleanup (#1165)', () => {
+  const source = readFileSync(new URL('../installer/installer-directories.nsh', import.meta.url), 'utf8').replace(
+    /\r\n/g,
+    '\n',
+  )
+
+  function macroBody(name) {
+    return source.match(new RegExp(`!macro ${name}\\b([\\s\\S]*?)\\n!macroend`))?.[1] ?? ''
+  }
+
+  function refusalBranch(body, marker) {
+    const start = body.indexOf(marker)
+    assert.ok(start >= 0, `missing refusal marker: ${marker}`)
+    const end = body.indexOf('${EndIf}', start)
+    assert.ok(end > start, `refusal branch has no closing conditional: ${marker}`)
+    return body.slice(start, end)
+  }
+
+  function assertClearsBeforeQuit(refusal, label) {
+    const error = refusal.indexOf('SetErrorLevel 2')
+    const clear = refusal.indexOf('!insertmacro iaClearBackupDir')
+    const quit = refusal.indexOf('Quit')
+    assert.ok(error >= 0 && error < clear && clear < quit, `${label} must set exit 2, clear IaBackupDir, then quit`)
+  }
+
+  it('clears a malformed interrupted-backup pointer before refusing', () => {
+    const recovery = macroBody('iaRecoverInterruptedInstall')
+    const refusal = refusalBranch(
+      recovery,
+      'DetailPrint "iaRecoverInterruptedInstall: refusing backup shape:',
+    )
+    assertClearsBeforeQuit(refusal, 'malformed interrupted-backup pointer')
+  })
+
+  it('clears a missing interrupted-backup pointer before refusing', () => {
+    const recovery = macroBody('iaRecoverInterruptedInstall')
+    const refusal = refusalBranch(
+      recovery,
+      'DetailPrint "iaRecoverInterruptedInstall: backup is missing:',
+    )
+    assertClearsBeforeQuit(refusal, 'missing interrupted-backup pointer')
+  })
+
+  it('clears a foreign staging pointer before refusing', () => {
+    const stage = macroBody('iaStageApplication')
+    const shapeRefusal = refusalBranch(
+      stage,
+      'DetailPrint "iaStageApplication: earlier backup pointer refused (shape):',
+    )
+    assertClearsBeforeQuit(shapeRefusal, 'foreign staging pointer')
+  })
+
+  it('clears a failed stage backup-pointer write before refusing', () => {
+    const stage = macroBody('iaStageApplication')
+    const stashStart = stage.indexOf('!insertmacro iaStashBackupDir')
+    const stashEnd = stage.indexOf('${EndIf}', stashStart)
+    assert.ok(stashStart >= 0 && stashEnd > stashStart, 'missing backup-pointer write failure branch')
+    assertClearsBeforeQuit(stage.slice(stashStart, stashEnd), 'backup-pointer write failure')
+  })
+
+  it('clears a failed install-directory rename pointer before refusing', () => {
+    const stage = macroBody('iaStageApplication')
+    const renameStart = stage.indexOf('Rename $INSTDIR $iaBackupDirectory')
+    const renameEnd = stage.indexOf('${EndIf}', renameStart)
+    assert.ok(renameStart >= 0 && renameEnd > renameStart, 'missing install-directory rename failure branch')
+    assertClearsBeforeQuit(stage.slice(renameStart, renameEnd), 'install-directory rename failure')
+  })
+})
+
 describe('Windows installer test shortcuts (#1034)', () => {
   it('disables desktop and Start Menu shortcuts for isolated test installs', () => {
     const source = readFileSync(new URL('../scripts/test-windows-installer.mjs', import.meta.url), 'utf8')
