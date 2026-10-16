@@ -50,7 +50,15 @@ async def _start_server(tmp_path, monkeypatch):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     ))
-    config = uvicorn.Config(app, host="127.0.0.1", port=0,
+    lifespan_task = None
+
+    async def _track_lifespan_task(scope, receive, send):
+        nonlocal lifespan_task
+        if scope["type"] == "lifespan":
+            lifespan_task = asyncio.current_task()
+        await app(scope, receive, send)
+
+    config = uvicorn.Config(_track_lifespan_task, host="127.0.0.1", port=0,
                             log_level="error", lifespan="on")
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve())
@@ -67,6 +75,10 @@ async def _start_server(tmp_path, monkeypatch):
         if not serve_task.done():
             serve_task.cancel()
         await asyncio.gather(serve_task, return_exceptions=True)
+        if lifespan_task is not None:
+            if not lifespan_task.done():
+                lifespan_task.cancel()
+            await asyncio.gather(lifespan_task, return_exceptions=True)
         if startup_timeout.expired():
             raise TimeoutError(
                 f"Uvicorn did not start within {_SERVER_START_TIMEOUT_SECONDS:g}s"
@@ -138,6 +150,39 @@ async def test_start_server_reaps_task_after_startup_timeout(tmp_path, monkeypat
     assert server.should_exit
     assert server.cleaned_up
     assert server.task.done()
+
+
+@pytest.mark.asyncio
+async def test_start_server_reaps_uvicorn_lifespan_task_after_startup_timeout(
+    tmp_path, monkeypatch
+):
+    startup_entered = asyncio.Event()
+    cleaned_up = asyncio.Event()
+    lifespan_task = None
+
+    async def _stalled_app(scope, _receive, _send):
+        nonlocal lifespan_task
+        if scope["type"] == "lifespan":
+            lifespan_task = asyncio.current_task()
+            startup_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned_up.set()
+
+    monkeypatch.setattr(
+        "agent_harness.web.app.create_app", lambda _settings: _stalled_app
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__], "_SERVER_START_TIMEOUT_SECONDS", 2.0, raising=False
+    )
+
+    with pytest.raises(TimeoutError, match="Uvicorn did not start"):
+        await _start_server(tmp_path, monkeypatch)
+
+    assert startup_entered.is_set()
+    assert cleaned_up.is_set()
+    assert lifespan_task is not None and lifespan_task.done()
 
 
 async def _get_raw(port: int, path: str):
