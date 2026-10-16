@@ -637,14 +637,14 @@ for (const theme of ['dark', 'light'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
 
-    // 项目 alpha 的 kebab →「在此项目中新建任务」→ 弹窗填任务 → 创建任务。
+    // 项目 alpha 的 kebab →「新建任务…」→ 弹窗填任务 → 创建并启动。
     const alpha = page.locator('.rail-project').filter({ hasText: '项目 alpha' });
     await alpha.locator('.rail-project-head .rail-menu-btn').click();
-    await page.getByRole('menuitem', { name: '在此项目中新建任务' }).click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
     const box = page.locator('.project-dialog[aria-label="新建任务"]');
     await expect(box).toBeVisible();
     await box.getByLabel('任务描述').fill(WT_TASK);
-    await box.getByRole('button', { name: '创建任务' }).click();
+    await box.getByRole('button', { name: '创建并启动' }).click();
 
     const notice = page.locator('.app-notice');
     await expect(notice).toBeVisible();

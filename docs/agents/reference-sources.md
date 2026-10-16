@@ -196,6 +196,17 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 
 **引用纪律**：两条均为上游实拉核实（HTTP 200），附 commit，符合本清单「引用时按纪律记 commit」（§1）要求。
 
+### Web 前端「新建任务 / 新建会话」入口交互（2026-10-16 新增，#1177 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [Cursor Quickstart](https://cursor.com/docs/get-started/quickstart)（2026-10-15 读取） | 闭源 IDE；prompt-first 直达面的一手行为来源 | 选目录后快捷键直达 Agent 面板、直接输入第一条指令（无创建表单）；Plan Mode 是会话内 `Shift+Tab` 开关 |
+| [VS Code GitHub Copilot Chat agent-mode](https://code.visualstudio.com/docs/copilot/chat/chat-agent-mode)（页面更新 2026-10-14，2026-10-15 读取） | 官方文档 | 直接输入即发送；会话级控制（Target/Agent/Model/Permissions）是输入框旁控件而非前置表单；可并行多会话 |
+| [Claude Code interactive-mode](https://code.claude.com/docs/en/interactive-mode)（2026-10-15 读取） | 官方文档 | 命令行带 prompt 即启动、无必填字段；权限模式 `Shift+Tab` 会话内循环（非创建前置）；`/clear` 开新会话 |
+| [腾讯 CodeBuddy IDE 智能体模式 Create-Task](https://copilot.tencent.com/docs/ide/User-guide/Agent-Mode/Create-Task)（2026-10-15 读取） | 官方文档；与「新建任务」表单形态最接近的对照 | 「新建任务」页本质是一页 composer：需求描述必填、模式有默认并记忆、模型/运行方式可后调、回车即执行 |
+
+**补录说明（§3.1 偏差披露）**：本领域（Web 前端创建入口交互）在本票调研开始时尚未在清单中，属**事后补录**——首轮调查按用户指定主流产品官方文档直接开展，未先补本清单。机制摘要 / 契合点 / 判定（REUSE + BUILD）见 `docs/research/2026-10-16-issue-1177-new-task-dialog-plan.md` §2 及 `~/workspace/research/ia-新建任务交互调查报告.md`。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；
