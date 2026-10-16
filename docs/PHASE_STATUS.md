@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-- **2026-10-16 · #1241 当前施工（同步最新 main，待推送）**：Issue OPEN（testing/P3/in-progress）；分支同步至 origin/main `6e06b09b`，merge `6c0b202e`。新增上游仅 README、图片和 4 条审查台账；本地 merge 归属行 1229。Uvicorn lifespan task 泄漏 P2 已修，聚焦测试 7 passed，修复双轴复审 PASS。Gate-1 云端在代码 head `2c3b143e` 通过（后端 8226 passed、90% coverage；前端 Vitest/build PASS）；其后仅文档/图片/审查台账变化，测试文件 blob 未变，因此按用户指示不重跑全量测试。PR #1245 已开，最新分支尚未推送，待新 head 的 PR CI。未用本机 Docker。详见 Tracker 与月档。
+- **2026-10-16 · #1241 当前施工（同步最新 main，待推送）**：Issue OPEN（testing/P3/in-progress）；分支同步至 origin/main `6e06b09b`，merge `6c0b202e`。新增上游仅 README、图片和 4 条审查台账；本地 merge 归属行 1229。Uvicorn lifespan task 泄漏 P2 已修，聚焦测试 7 passed，修复双轴复审 PASS。Gate-1 云端在代码 head `2c3b143e` 通过（后端 8226 passed、90% coverage；前端 Vitest/build PASS）；其后仅文档/图片/审查台账变化，测试文件 blob 未变，因此按用户指示不重跑全量测试；同步后本地 Gate-0（--since origin/main..HEAD）6/6 PASS（29.1s，非全量收据）。PR #1245 已开，最新分支尚未推送，待新 head 的 PR CI。未用本机 Docker。详见 Tracker 与月档。
 
 - **已完成验证（2026-10-15 · W-31 / PR #1178）**：#1180/#1181/#1182 均 CLOSED；完整 Gate-1 run [38748617682](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38748617682) 在产品代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 全绿（后端 8154 passed / 61 skipped / 51 deselected；四个真实 Docker hardlink 用例执行通过；前端 Vitest/build、PR Gate-0、Chromium E2E smoke、gitleaks 成功）。Standards 与 Correctness/Spec follow-up 均 APPROVE，P0–P4=0。同步至 #1188 后分支含其 CSS/contrast E2E 变更（merge `d9359f88`）；该增量已本地 Vitest 133 files / 1840 tests、build 成功。定向 contrast E2E 本机因 5173 被 `D:\intelligence-agent` Vite 占用而未执行；远端 PR CI 仍是合并门禁。详见 Tracker 与月档 W-31 记录。
 
