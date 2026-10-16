@@ -189,6 +189,7 @@ from agent_harness.storage.checkpoint import note_checkpoint_save_failure
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.exposure import ToolExposureController
 from agent_harness.tooling.quota import ToolQuotaWindow
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 
 if TYPE_CHECKING:
     # #298 T7b：只借类型，不借实现。`memory.v2.runner` 会连带拉起 jobs / executor /
@@ -2411,13 +2412,15 @@ class AgentRuntime:
                 )
                 tool_error = None
                 execution_constraint_context = tool_request_context
-                if any(
-                    call.name == "request_constraint_resolution" for call in calls
-                ):
+                user_input_calls = [
+                    call for call in calls if call.name in USER_INPUT_TOOL_NAMES
+                ]
+                if user_input_calls:
                     execution_constraint_context = (
-                        await self._constraint_request_context_for_execution(
+                        await self._user_input_request_context_for_execution(
                             session,
                             tool_request_context,
+                            tool_name=user_input_calls[0].name,
                             deferred_model_event=defer_model_event,
                         )
                     )
@@ -2492,7 +2495,7 @@ class AgentRuntime:
                     )
                     if (
                         self._session_budget is not None
-                        and call.name == "request_constraint_resolution"
+                        and call.name in USER_INPUT_TOOL_NAMES
                         and isinstance(execution.budget_delta, dict)
                     ):
                         delta = execution.budget_delta
@@ -2845,11 +2848,12 @@ class AgentRuntime:
             data["duration_ms"] = duration_ms
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
 
-    async def _constraint_request_context_for_execution(
+    async def _user_input_request_context_for_execution(
         self,
         session: Session,
         context: ConstraintToolContext | None,
         *,
+        tool_name: str,
         deferred_model_event: bool,
     ) -> ConstraintToolContext | None:
         """Reject a user-input request unless its same-run continuation is admissible."""
@@ -2870,9 +2874,7 @@ class AgentRuntime:
             )
         if run_consumed.tool_calls_by_tool is not None:
             calls = dict(run_consumed.tool_calls_by_tool)
-            calls["request_constraint_resolution"] = (
-                calls.get("request_constraint_resolution", 0) + 1
-            )
+            calls[tool_name] = calls.get(tool_name, 0) + 1
             run_consumed = replace(run_consumed, tool_calls_by_tool=calls)
         if not resume_headroom_ok(
             consumed=run_consumed,
@@ -2894,9 +2896,7 @@ class AgentRuntime:
             session_consumed = snapshot.consumed
             if session_consumed.tool_calls_by_tool is not None:
                 calls = dict(session_consumed.tool_calls_by_tool)
-                calls["request_constraint_resolution"] = (
-                    calls.get("request_constraint_resolution", 0) + 1
-                )
+                calls[tool_name] = calls.get(tool_name, 0) + 1
                 session_consumed = replace(
                     session_consumed, tool_calls_by_tool=calls,
                 )
@@ -3405,7 +3405,7 @@ class AgentRuntime:
             if operation.run_id != run_id or not needs_reconcile(operation):
                 continue
             if (
-                operation.tool_name == "request_constraint_resolution"
+                operation.tool_name in USER_INPUT_TOOL_NAMES
                 and operation.tool_call_id in durable_constraint_requests
             ):
                 # The durable question proves deterministic success; a failed
