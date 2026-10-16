@@ -11,7 +11,16 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agent_harness.tools.ask_user import AskQuestion, AskUserArgs
+from agent_harness.session.context import (
+    ConstraintToolContext,
+    current_constraint_tool_context_var,
+    current_session_var,
+    run_context_var,
+)
+from agent_harness.session.event import USER_INPUT_REQUESTED, USER_MESSAGE
+from agent_harness.session.session import Session
+from agent_harness.session.store import JsonlSessionStore
+from agent_harness.tools.ask_user import AskQuestion, AskUserArgs, AskUserTool
 
 
 def _option(label: str = "A") -> dict:
@@ -119,3 +128,143 @@ def test_recommended_negative_is_rejected():
         AskQuestion(
             **_question(options=[_option("A"), _option("B")], recommended=-1)
         )
+
+
+# ── 准入 / 去重（与 request_constraint_resolution 逐字一致，唯不校验来源原文）──
+
+
+def _session(tmp_path, session_id: str = "ask-user-test") -> Session:
+    return Session.start(JsonlSessionStore(tmp_path), session_id=session_id)
+
+
+def _bind(
+    session: Session,
+    *,
+    run_id: str = "run-1",
+    is_delegated_child: bool = False,
+    rejection_code: str | None = None,
+):
+    context = ConstraintToolContext(
+        session_id=session.session_id,
+        run_id=run_id,
+        agent_id="default",
+        agent_profile="main",
+        source_event_id="src",
+        source_seq=0,
+        source_content="",
+        protected_fact_token_budget=8192,
+        user_input_request_rejection_code=rejection_code,
+        is_delegated_child=is_delegated_child,
+    )
+    return (
+        current_session_var.set(session),
+        run_context_var.set(run_id),
+        current_constraint_tool_context_var.set(context),
+    )
+
+
+def _reset(tokens) -> None:
+    current_constraint_tool_context_var.reset(tokens[2])
+    run_context_var.reset(tokens[1])
+    current_session_var.reset(tokens[0])
+
+
+@pytest.mark.asyncio
+async def test_deadline_configured_rejects_without_creating_request(tmp_path):
+    session = _session(tmp_path)
+    tokens = _bind(session, rejection_code="DEADLINE_CONFIGURED")
+    try:
+        result = await AskUserTool().execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.data["status"] == "rejected"
+    assert result.data["reason_code"] == "DEADLINE_CONFIGURED"
+    assert not result.pending_events
+    assert not any(event.type == USER_INPUT_REQUESTED for event in session.events)
+
+
+@pytest.mark.asyncio
+async def test_insufficient_resume_budget_rejects_without_creating_request(tmp_path):
+    session = _session(tmp_path)
+    tokens = _bind(session, rejection_code="RESUME_UNAVAILABLE")
+    try:
+        result = await AskUserTool().execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.data["status"] == "rejected"
+    assert result.data["reason_code"] == "RESUME_UNAVAILABLE"
+    assert not result.pending_events
+
+
+@pytest.mark.asyncio
+async def test_delegated_child_session_is_disabled(tmp_path):
+    session = _session(tmp_path)
+    tokens = _bind(session, is_delegated_child=True)
+    try:
+        result = await AskUserTool().execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.data["status"] == "rejected"
+    assert result.data["reason_code"] == "SCOPE_NOT_ALLOWED"
+    assert not result.pending_events
+
+
+@pytest.mark.asyncio
+async def test_duplicate_call_reuses_the_single_pending_request(tmp_path):
+    session = _session(tmp_path)
+    tokens = _bind(session)
+    tool = AskUserTool()
+    args = AskUserArgs(questions=[AskQuestion(**_question())])
+    try:
+        first = await tool.execute(args)
+        assert first.ok
+        assert first.data["status"] == "requested"
+        assert first.pending_events is not None
+        event_type, payload = first.pending_events[0]
+        assert event_type == USER_INPUT_REQUESTED
+        assert payload["kind"] == "ask_user"
+        session.append(event_type, payload, run_id="run-1")
+
+        duplicate = await tool.execute(args)
+    finally:
+        _reset(tokens)
+
+    requests = [event for event in session.events if event.type == USER_INPUT_REQUESTED]
+    assert len(requests) == 1
+    assert duplicate.data == {
+        "status": "pending",
+        "request_id": requests[0].data["request_id"],
+    }
+    assert tool.batch_exclusive is True
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_require_direct_user_source(tmp_path):
+    """#1204 票面 §5 准入清单只有 deadline/预算闸、委派禁用、去重——
+
+    与 request_constraint_resolution 不同，ask_user **不**校验"来源须是可核实
+    直接用户原文"（context 的 source_* 字段是空的，仍应放行）。
+    """
+    session = _session(tmp_path)
+    tokens = _bind(session)
+    try:
+        result = await AskUserTool().execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.data["status"] == "requested"
