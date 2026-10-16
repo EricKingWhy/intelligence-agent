@@ -34,7 +34,7 @@ vi.mock('../lib/auth', async (importOriginal) => {
 import { compactSession, getTaskState, type TaskState } from '../lib/api';
 import { Composer } from './Composer';
 
-type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[]];
+type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
 
 let container: HTMLDivElement;
 let root: Root;
@@ -258,7 +258,7 @@ describe('#1195 带参提交拦截', () => {
     await typeText('/unknown foo');
     press('Enter');
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith('/unknown foo', false, []);
+    expect(onSubmit).toHaveBeenCalledWith('/unknown foo', false, [], 'session');
   });
 });
 
