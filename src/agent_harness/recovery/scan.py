@@ -84,6 +84,7 @@ from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.storage.operation import OperationLedger
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 
 logger = logging.getLogger("agent_harness.recovery.scan")
 
@@ -381,7 +382,7 @@ async def _record_constraint_tool_results(
             )
         call = matching_calls[0]
         if (
-            call.data.get("tool_name") != "request_constraint_resolution"
+            call.data.get("tool_name") not in USER_INPUT_TOOL_NAMES
             or call.run_id != event.run_id
             or (
                 event.step_id is not None
@@ -403,7 +404,7 @@ async def _record_constraint_tool_results(
             )
         if (
             not isinstance(delta, dict)
-            or delta.get("tool_name") != "request_constraint_resolution"
+            or delta.get("tool_name") not in USER_INPUT_TOOL_NAMES
         ):
             raise RecoveryError(
                 f"澄清工具结果缺少匹配的预算增量（tool_call_id={tool_call_id}）"
@@ -420,7 +421,7 @@ async def _record_constraint_tool_results(
         await recorder(
             budget_key,
             tool_call_id=tool_call_id,
-            tool_name="request_constraint_resolution",
+            tool_name=call.data["tool_name"],
             calls=calls,
             attempts=attempts,
         )
@@ -439,7 +440,7 @@ def _constraint_tool_result_candidates(
     constraint_calls = [
         event for event in events
         if event.type == TOOL_CALL
-        and event.data.get("tool_name") == "request_constraint_resolution"
+        and event.data.get("tool_name") in USER_INPUT_TOOL_NAMES
     ]
     constraint_ids = {
         event.data.get("tool_call_id")
@@ -465,7 +466,7 @@ def _constraint_tool_result_candidates(
         delta = event.data.get("budget_delta")
         claims_constraint_budget = (
             isinstance(delta, dict)
-            and delta.get("tool_name") == "request_constraint_resolution"
+            and delta.get("tool_name") in USER_INPUT_TOOL_NAMES
         )
         matches_constraint_call = (
             isinstance(tool_call_id, str) and tool_call_id in constraint_ids

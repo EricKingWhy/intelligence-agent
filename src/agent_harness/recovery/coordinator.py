@@ -91,6 +91,7 @@ from agent_harness.storage import (
 )
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 from agent_harness.tooling.approval import PermissionDecision
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 
 logger = logging.getLogger("agent_harness.recovery")
 
@@ -135,14 +136,17 @@ def _try_parse_result_json(result_json: str, tool_name: str) -> ToolResult | Non
 def _constraint_request_result(
     operation: Operation, events: list[SessionEvent],
 ) -> ToolResult | None:
-    """Rebuild the known successful result from its matching durable request event."""
+    """Rebuild the known successful result from its matching durable request event.
+
+    两个用户输入工具（`request_constraint_resolution` / `ask_user`）共用同一份 durable
+    证据：一条带 `tool_call_id` 的 `USER_INPUT_REQUESTED`，且尚无回答。证据成立即
+    确定性重建成功结果，避免恢复期把这条已落盘的问句误判成"副作用未证"转人工裁决。
+    """
     args = _args_from_identity(operation.args_identity)
     if (
-        operation.tool_name != "request_constraint_resolution"
+        operation.tool_name not in USER_INPUT_TOOL_NAMES
         or operation.run_id is None
         or args is None
-        or not isinstance(args.get("fact_id"), str)
-        or not isinstance(args.get("candidate"), str)
     ):
         return None
     requests = [
@@ -155,6 +159,57 @@ def _constraint_request_result(
     request = requests[0]
     data = request.data
     request_id = data.get("request_id")
+    if (
+        request.run_id != operation.run_id
+        or data.get("run_id") != operation.run_id
+        or not isinstance(request_id, str)
+        or not request_id
+    ):
+        return None
+    if any(
+        event.type == USER_MESSAGE
+        and event.data.get("input_request_id") == request_id
+        for event in events
+    ):
+        return None
+    if data.get("kind") == "ask_user":
+        return _ask_user_request_result(
+            request_id=request_id, data=data, args=args,
+        )
+    return _protected_fact_request_result(
+        events, request_id=request_id, data=data, args=args,
+    )
+
+
+def _ask_user_request_result(
+    *, request_id: str, data: dict, args: dict,
+) -> ToolResult | None:
+    """`ask_user` 的确定性成功重建：durable 问句的 questions 与调用参数一致。"""
+    questions = data.get("questions")
+    arg_questions = args.get("questions")
+    if (
+        not isinstance(questions, list)
+        or not questions
+        or not isinstance(arg_questions, list)
+        or len(arg_questions) != len(questions)
+    ):
+        return None
+    return ToolResult.success(
+        message="提问已保存；当前 run 将暂停，等待你的回答后继续。",
+        data={"status": "requested", "request_id": request_id},
+        metadata={"attempt": 1},
+    )
+
+
+def _protected_fact_request_result(
+    events: list[SessionEvent], *, request_id: str, data: dict, args: dict,
+) -> ToolResult | None:
+    """窄场景（`protected_fact_conflict`）的确定性成功重建。"""
+    if (
+        not isinstance(args.get("fact_id"), str)
+        or not isinstance(args.get("candidate"), str)
+    ):
+        return None
     source_id = data.get("source_event_id")
     source_seq = data.get("source_event_seq")
     fact_id = data.get("fact_id")
@@ -171,11 +226,7 @@ def _constraint_request_result(
         None,
     )
     if (
-        request.run_id != operation.run_id
-        or data.get("run_id") != operation.run_id
-        or data.get("kind") != "protected_fact_conflict"
-        or not isinstance(request_id, str)
-        or not request_id
+        data.get("kind") != "protected_fact_conflict"
         or fact_id != args["fact_id"]
         or candidate != args["candidate"]
         or not isinstance(candidate, str)
@@ -189,12 +240,6 @@ def _constraint_request_result(
         or fact.value != old_value
     ):
         return None
-    if any(
-        event.type == USER_MESSAGE
-        and event.data.get("input_request_id") == request_id
-        for event in events
-    ):
-        return None
     return ToolResult.success(
         message="约束问题已保存；当前 run 将暂停，等待你的选择后继续。",
         data={"status": "requested", "request_id": request_id},
@@ -203,8 +248,8 @@ def _constraint_request_result(
 
 
 def _tool_budget_delta(operation: Operation) -> dict | None:
-    """Preserve the one-call budget fact for recovered constraint prompts."""
-    if operation.tool_name != "request_constraint_resolution":
+    """Preserve the one-call budget fact for recovered user-input prompts."""
+    if operation.tool_name not in USER_INPUT_TOOL_NAMES:
         return None
     attempts = 0
     if operation.result_json:
@@ -428,7 +473,7 @@ class RecoveryCoordinator:
             for operation in operations:
                 if (
                     operation.state is not OperationState.RUNNING
-                    or operation.tool_name != "request_constraint_resolution"
+                    or operation.tool_name not in USER_INPUT_TOOL_NAMES
                 ):
                     continue
                 recovered = _constraint_request_result(operation, session.events)
@@ -502,7 +547,7 @@ class RecoveryCoordinator:
                 if (
                     current is None
                     or current.state is not OperationState.RUNNING
-                    or current.tool_name != "request_constraint_resolution"
+                    or current.tool_name not in USER_INPUT_TOOL_NAMES
                 ):
                     raise RecoveryError(
                         "durable user-input request no longer matches its running operation"
