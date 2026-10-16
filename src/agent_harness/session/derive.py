@@ -252,6 +252,10 @@ class ProtectedFact:
     session_id: str
     evidence_event_id: str | None = None
     evidence_seq: int | None = None
+    #: supersede 链上的后继身份。**取值有两种形态**，消费者不可假定它一定是一条
+    #: 可投影的 fact：被动取代时是后继 `task/protected_fact` 的真 `fact_id`；
+    #: #1190 的主动撤销时是合成身份 `fact_revocation:<event_id>`（`_fact_revocation_id`）
+    #: ——**撤销事实不进事实表**（不投影成条目、不注入），故沿链找不到对应 fact 条目。
     superseded_by_fact_id: str | None = None
     #: #1190：被 `task/fact_revocation` 主动撤销时，从该事件派生（无则 None）。
     #: **不进 `to_dict()`**——注入体（`serialize_protected_facts`）只投影 active，
@@ -1142,6 +1146,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         revocation = revoked.get(fact.fact_id)
         if revocation is not None:
             # 主动撤销优先于被动取代：撤销是用户的显式动作，语义更强。
+            # `revocation[0]` 是合成身份 `fact_revocation:<event_id>`（非投影 fact，见字段注释）。
             facts[index] = replace(
                 fact,
                 status="revoked",

@@ -278,8 +278,18 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
   const [pendingRevoke, setPendingRevoke] = useState<ProtectedFact | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const loadedFor = useRef(sessionId);
 
   const load = useCallback(async () => {
+    // 会话切换：先清上一会话的投影，避免新 GET 落定前短暂显示旧行/旧 tab 计数
+    // （渲染分支不区分「上一会话的数据」与「本会话的缓存」）。
+    if (loadedFor.current !== sessionId) {
+      loadedFor.current = sessionId;
+      setFacts([]);
+      setForbidden(false);
+    }
+    // 每次（含重试）开始都先清错误文案：错误态由本次结果决定，不残留上一次的。
+    setError(null);
     setLoading(true);
     try {
       const next = await listProtectedFacts(sessionId);

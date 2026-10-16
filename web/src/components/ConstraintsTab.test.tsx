@@ -336,4 +336,45 @@ describe('ConstraintsTab（状态外壳）', () => {
     expect(listProtectedFacts).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).toContain('不要改动生产环境配置');
   });
+
+  it('AC4：切换会话 → 新 GET 落定前不显示上一会话的旧行（无陈旧窗口）', async () => {
+    let resolveSecond: ((rows: ProtectedFact[]) => void) | null = null;
+    vi.mocked(listProtectedFacts).mockImplementation((sid: string) => {
+      if (sid === 's-old') return Promise.resolve([ACTIVE]);
+      return new Promise<ProtectedFact[]>((res) => {
+        resolveSecond = res;
+      });
+    });
+    render(<ConstraintsTab sessionId="s-old" />);
+    await act(async () => {});
+    expect(tabCount('全部')).toBe('1');
+
+    // 切会话 → 第二个 GET 悬而未决：旧行与旧计数必须**已**消失（不是等它落定才清）。
+    await act(async () => {
+      root!.render(<ConstraintsTab sessionId="s-new" />);
+    });
+    expect(tabCount('全部')).toBe('0');
+    expect(document.body.textContent).not.toContain('不要改动生产环境配置');
+
+    // 收尾：让挂起的请求落定。
+    await act(async () => {
+      resolveSecond?.([ACTIVE]);
+    });
+  });
+
+  it('重试：错误文案在重试开始时即清除（不残留上一次错误）', async () => {
+    vi.mocked(listProtectedFacts)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockImplementation(() => new Promise<ProtectedFact[]>(() => {}));
+    render(<ConstraintsTab sessionId="s-1" />);
+    await act(async () => {});
+    expect(document.body.textContent).toContain('加载失败，请重试');
+
+    // 重试在途（挂起）→ 上一次的错误文案不该还挂着，应回到加载态。
+    await act(async () => {
+      buttonByText('重试').click();
+    });
+    expect(document.body.textContent).not.toContain('加载失败，请重试');
+    expect(document.body.textContent).toContain('正在加载约束…');
+  });
 });
