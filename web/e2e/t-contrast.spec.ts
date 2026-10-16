@@ -315,7 +315,7 @@ const TR_FRAMES: FrameSpec[] = [
   { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: 'run-1', time: T },
 ];
 
-/** 起会话 → 打开「任务审阅」面板（数据走共享的 mockTaskReviewApi，见 fixtures.ts）。 */
+/** 起会话 → 打开「文件/改动」面，并从按需入口打开详细审阅。 */
 async function openTaskReview(
   page: Page,
   theme: 'dark' | 'light',
@@ -327,10 +327,13 @@ async function openTaskReview(
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
   await submitTask(page, '对比度任务审阅');
-  // exact:true 是必须的：本用例的任务文案含「任务审阅」子串，`getByRole('button',
-  // {name:'任务审阅'})` 走子串匹配会同时命中会话项按钮（其 accessible name 含首条
-  // 用户消息）与时间线行（"user/message 对比度任务审阅"）→ strict mode 违规。
-  await page.getByRole('button', { name: '任务审阅', exact: true }).click();
+  await page
+    .getByRole('tablist', { name: '工作区面' })
+    .getByRole('tab', { name: /^文件\/改动/ })
+    .click();
+  const summary = page.locator('.task-review-summary');
+  await expect(summary).toBeVisible();
+  await summary.getByRole('button', { name: '详细审阅' }).click();
   await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
 }
 
@@ -765,7 +768,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.task-review-panel .ctx-usage-close').click();
     await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeHidden();
     state.task.product_state = 'pending_verification';
-    await page.getByRole('button', { name: '任务审阅', exact: true }).click();
+    await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
     const pending = page.locator('.task-review-chip.state-pending_verification');
     await expect(pending).toBeVisible();
     const pm = await measure(page, '.task-review-chip.state-pending_verification');

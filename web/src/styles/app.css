@@ -7311,6 +7311,9 @@ button.json-row {
   padding: 5px 9px;
   font-size: 12.5px;
 }
+.budget-picker-content--v2 .composer-budget-input::placeholder {
+  color: var(--text-tertiary);
+}
 .budget-picker-content--v2 .budget-picker-unit {
   flex: none;
   font-size: 12px;
