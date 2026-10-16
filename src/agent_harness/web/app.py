@@ -2322,6 +2322,11 @@ def create_app(
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # #1256 子智能体 roster 路由（独立 router 文件——只读数据面，投影单源在父事件流）
+    from agent_harness.web.delegations import register_delegation_routes
+
+    register_delegation_routes(app, validate_session_id=validate_session_id)
+
     # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
     # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
     from agent_harness.web.task_delivery import register_task_routes
