@@ -284,3 +284,19 @@ test('AC（#1177 §A）「新建会话」：直达空会话、不弹表单、锚
   expect(posts[0].body.cwd).toBe(ALPHA);
   await expect(alpha.locator('.session-item-id')).toHaveCount(1, { timeout: 10_000 });
 });
+
+test('AC（#1177 §A.2）「新建会话」后焦点落在 composer 输入框（直达即可打字）', async ({
+  page,
+}) => {
+  await routeApi(page, baseMock());
+  await page.goto('/');
+
+  await openProjectMenu(page, '项目 alpha');
+  await page.getByRole('menuitem', { name: '新建会话' }).click();
+
+  // 焦点交接：Radix 关闭菜单默认把焦点归还 trigger（kebab，见 #945 的竞态说明），
+  // SessionList 对该菜单项置位 `suppressMenuAutoFocus` 跳过这次归还，`handleNew`
+  // 再把焦点交给 composer——直达入口的意义就是"光标已在能打字的输入框里"。
+  // 若回归（归还没被跳过 / focus 丢失），焦点会落到 body 或 .rail-menu-btn，本断言红。
+  await expect(page.locator('#composer-input')).toBeFocused();
+});

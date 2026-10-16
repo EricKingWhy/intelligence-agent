@@ -1437,7 +1437,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   cursor: not-allowed;
 }
 .project-advanced-chevron {
-  transition: transform var(--dur-out) var(--ease-apple);
+  /* #1177：与同类披露控件（`.rail-project-chevron`，`:801`）统一用 `--dur-expand`
+     （180ms）——两者都是"展开披露"语义的旋转箭头，不该一个 150ms 一个 180ms。 */
+  transition: transform var(--dur-expand) var(--ease-apple);
 }
 .project-advanced-chevron.open {
   transform: rotate(90deg);

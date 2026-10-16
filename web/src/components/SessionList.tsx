@@ -163,7 +163,8 @@ export const SessionList = memo(function SessionList({
    *     晚到的归还会在输入框挂载后立刻 blur 它，`InlineRename.onBlur` 遂把编辑态
    *     取消（含刚显示的空白名错误提示）——e2e 里表现为 `getByLabel('项目名')` 在
    *     两个断言之间凭空消失。
-   *   - #1177「新建会话」：焦点交给 composer（`onNew` → `focusRun`），晚到的归还会
+   *   - #1177「新建会话」：焦点交给 composer（`onNew` → `handleNew` 里的
+   *     `#composer-input` focus），晚到的归还会
    *     把光标从"马上要打字"的输入框拽回 kebab 按钮——直达入口的意义就没了。
    *  其余菜单项（开对话框 / 纯动作）保持默认的焦点归还。
    *
@@ -490,8 +491,9 @@ export const SessionList = memo(function SessionList({
                                 // 首条消息提交时才真正创建会话、并带 `cwd: project.path`
                                 // 直接诞生在项目目录里并自动入组（不弹任何表单）。
                                 // 不得照搬后丢失 cwd 锚定——这条就是锚定的接缝。
-                                // 焦点归 composer（onNew → focusRun）：跳过 Radix 关闭时
-                                // 的 trigger 归还，否则光标会被拽回 kebab（见 ref 注释）。
+                                // 焦点归 composer（`onNew` → `handleNew` focus
+                                // `#composer-input`）：跳过 Radix 关闭时的 trigger
+                                // 归还，否则光标会被拽回 kebab（见 ref 注释）。
                                 suppressMenuAutoFocus.current = true;
                                 onSelectProject(project.id);
                                 onNew();

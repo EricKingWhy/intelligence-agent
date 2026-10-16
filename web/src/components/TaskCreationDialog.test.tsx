@@ -99,7 +99,7 @@ afterEach(() => {
 });
 
 describe('TaskCreationDialog 化简（#1177 §B）', () => {
-  it('高级设置默认折叠：展开前完成目标/自主度/模型/运行位置全不可见', async () => {
+  it('高级设置默认折叠：完成目标/自主度/模型/运行位置收进折叠容器', async () => {
     await act(async () => {
       render(dialog());
       await Promise.resolve();
@@ -108,8 +108,13 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
     const toggle = advancedToggle();
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(advanced().hidden).toBe(true);
-    // 三个折叠字段 + 运行位置的触发器都不在场（整块 hidden）。
-    expect(document.body.querySelector('[aria-label="运行位置"]')).not.toBeNull();
+    // 折叠字段仍在 DOM 中，但整块 hidden（不进可访问性树、不渲染）——JSDOM 不应用
+    // CSS，"不可见"由 hidden 属性间接表达，真正的可见性由 e2e 兜。
+    // 四个字段都必须**归属**折叠容器：只锁「运行位置」会让"把完成目标 / 模型移出折叠区
+    // 改成常显"仍然全绿（验收 2「其余四者收进折叠」的核心意图回退测不出），故逐一断言。
+    expect(advanced().contains(document.body.querySelector('#task-acceptance'))).toBe(true);
+    expect(advanced().contains(document.body.querySelector('#autonomy-label'))).toBe(true);
+    expect(advanced().contains(document.body.querySelector('[aria-label="模型"]'))).toBe(true);
     expect(advanced().contains(document.body.querySelector('[aria-label="运行位置"]'))).toBe(true);
   });
 
@@ -222,6 +227,23 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
       cancel.click();
     });
     expect(onCreateTask).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('Esc 关闭：Escape 键请求关闭（Radix Dialog 默认，验收 4）', async () => {
+    const onOpenChange = vi.fn();
+    await act(async () => {
+      render(dialog({ onOpenChange }));
+      await Promise.resolve();
+    });
+
+    // Radix Dialog 的 DismissableLayer 在 document 上监听 keydown；Escape 关窗是它的
+    // 默认行为，这里锁住它确实透传到 onOpenChange(false)（确认面可键盘关闭）。
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });
