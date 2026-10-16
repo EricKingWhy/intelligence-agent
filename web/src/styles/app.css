@@ -834,6 +834,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 5px;
   text-align: center;
 }
+/* #1269：项目语境武装（#1028 toggle）的显式状态提示——「新建会话目标」。
+ * 只在行被选中为通用新建的 cwd 继承来源时出现；与 `.project-active` 高亮一同把
+ * "这行是一个可再点取消的 toggle"讲清楚（用户 2026-10-17 反馈：这个状态此前只隐含在
+ * 低对比高亮里）。复用 featured 语言（accent 淡底 + 主文本色），但保持 chrome 面的克制。
+ * 不新增主题 token（`--color-accent` / `--text-primary` 已双主题定义，§15 无涉）。 */
+.rail-project-armed-hint {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
 .rail-project-rows {
   /* 导轨 + 缩进 = 层级；比嵌套卡片轻，比纯缩进清楚。 */
   margin: 1px 0 2px 15px;
@@ -5047,6 +5062,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .rail-project-chevron,
   .rail-project-title,
+  .rail-project-armed-hint,
   .rail-project-count {
     display: none;
   }

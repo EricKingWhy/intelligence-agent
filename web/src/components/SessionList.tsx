@@ -382,6 +382,8 @@ export const SessionList = memo(function SessionList({
                 const expanded = isExpanded(project);
                 const listId = `rail-project-${project.id}`;
                 const renaming = renamingId === project.id;
+                // #1269：本行是否是「通用新建会话」当前继承 cwd 的项目语境（#1028 的 toggle）。
+                const contextArmed = activeProjectId === project.id;
                 // 落点提示只在本项目内亮：跨项目拖动不是重排（见 handleDrop）。
                 const dropEnabled = drag?.projectId === project.id;
                 return (
@@ -409,7 +411,7 @@ export const SessionList = memo(function SessionList({
                       ) : (
                         <button
                           className={`rail-project-toggle${
-                            activeProjectId === project.id ? ' project-active' : ''
+                            contextArmed ? ' project-active' : ''
                           }`}
                           onClick={() => {
                             // #1028：点中项目行 = 选中项目语境（通用新建据此继承 cwd）
@@ -418,7 +420,10 @@ export const SessionList = memo(function SessionList({
                             // **再次点击已 active 的行 = 取消语境**（onSelectProject(null)）：
                             // 可逆语义——用户为浏览而点开项目后能显式退出，不会被动地为
                             // 下一次通用新建武装 cwd（审查 P3）。
-                            onSelectProject(activeProjectId === project.id ? null : project.id);
+                            // #1269：这**是一个 toggle**——展开/收起与语境武装共用同一次点击，
+                            // 故在行上给出显式状态提示（下方 `rail-project-armed-hint` +
+                            // title/aria-label），让用户一眼看出当前是「新建会话目标」、可再点取消。
+                            onSelectProject(contextArmed ? null : project.id);
                             toggle(project.id);
                           }}
                           aria-expanded={expanded}
@@ -426,8 +431,17 @@ export const SessionList = memo(function SessionList({
                           // 窄屏（≤820px）标题与计数被 CSS 收起，而 display:none 会把
                           // 它们从可访问性树里摘掉——不补 aria-label 这个按钮在窄屏
                           // 就是无名控件（#179）。
-                          aria-label={`${project.title}：${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}`}
-                          title={expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}
+                          // #1269：武装态语义也进可访问名称。**刻意不写「新建会话」四字**——
+                          // 那是侧栏「新建会话」按钮的 a11y 名称，而 `getByRole('button',
+                          // { name: '新建会话' })` 默认**按子串匹配**，本行名称一旦含它就会与
+                          // 侧栏按钮双命中（strict mode 违例，实测把 e2e `project-context` AC1
+                          // 打红）。改说「新会话」既传达同一状态，又不与那个入口撞名。
+                          aria-label={`${project.title}：${
+                            expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`
+                          }${contextArmed ? '；已选中为新会话的目标目录，再点一次取消' : ''}`}
+                          title={`${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}${
+                            contextArmed ? ' · 已选中为「新建会话」目标目录（再点一次取消）' : ''
+                          }`}
                         >
                           <ChevronRight
                             size={12}
@@ -442,6 +456,13 @@ export const SessionList = memo(function SessionList({
                           <span className="rail-project-title" title={project.path}>
                             {project.title}
                           </span>
+                          {/* #1269：语境武装的显式状态提示——标出"这是通用新建会话的目标"。
+                              `aria-hidden`：同义已进上方 `aria-label`，避免读屏重复播报。 */}
+                          {contextArmed && (
+                            <span className="rail-project-armed-hint" aria-hidden="true">
+                              新建会话目标
+                            </span>
+                          )}
                           {project.status === 'missing-dir' && (
                             <TriangleAlert
                               size={12}
