@@ -39,7 +39,10 @@
 ---
 
 ## 当前工作焦点
+- **施工中（2026-10-17 · #1198）**：PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) 开放。Gate-0、PR smoke、全量 pytest、Vitest/build、双平台 TUI 已通过；全量 E2E 的 AC3 高度差 65.1875px（允许 8px），已加显式 420px 高度约束，等待 Actions 复验。详见 Tracker/月档。
 
+
+- **已集成（2026-10-16 · #1165）**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) 以 merge commit `76bab688136c16e94474bee4397bc19ad803e861` 合入 main；Issue #1165 CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。Gate-0、PR Chromium smoke、gitleaks、Windows installer smoke 和完整 nightly 全绿；Windows TUI 首轮 EBUSY 在重跑后通过。详见 Tracker/月档。
 - **已集成（2026-10-16 · #1241）**：Issue #1241 CLOSED，保留 testing/P3 并移除 in-progress；PR #1245 于 2026-10-16 合入 main（merge 9f93054ec2cee45a3169154fc9246ce3583f1c82，tree 9d90a705a6a8f558d0ff50bf3029853760c139fc）。测试辅助器修复 Uvicorn serve 与独立 ASGI lifespan task 在启动失败/超时时的回收，并修复施工中发现的 P2。聚焦测试 7 passed；Gate-1 云端 8226 passed / 69 skipped / 51 deselected、90% coverage，Vitest/build 通过；PR Gate-0、Chromium E2E smoke、gitleaks 通过。Spec/Standards 修复复审 PASS，P0–P4=0。详见 Tracker 与月档。
 
 - **已完成验证（2026-10-15 · W-31 / PR #1178）**：#1180/#1181/#1182 均 CLOSED；完整 Gate-1 run [38748617682](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38748617682) 在产品代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 全绿（后端 8154 passed / 61 skipped / 51 deselected；四个真实 Docker hardlink 用例执行通过；前端 Vitest/build、PR Gate-0、Chromium E2E smoke、gitleaks 成功）。Standards 与 Correctness/Spec follow-up 均 APPROVE，P0–P4=0。同步至 #1188 后分支含其 CSS/contrast E2E 变更（merge `d9359f88`）；该增量已本地 Vitest 133 files / 1840 tests、build 成功。定向 contrast E2E 本机因 5173 被 `D:\intelligence-agent` Vite 占用而未执行；远端 PR CI 仍是合并门禁。详见 Tracker 与月档 W-31 记录。
@@ -107,6 +110,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-16 · #1165 已集成**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) merge `76bab688136c16e94474bee4397bc19ad803e861`；Issue CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。PR Gate-0、Windows installer smoke、gitleaks、Chromium PR smoke 全过；完整 nightly 在代码 head `340bb388` 全绿，Windows TUI 重跑后通过。详情见月档 #1165。
 - **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。
 - **2026-10-16 · #1128 集成**：Issue CLOSED；PR [#1217](https://github.com/EricKingWhy/intelligence-agent/pull/1217) merge `838bd798a994c35a9149cf10009bc684959a7dd5`，基线 `879c220ac273b83e684a469f6209a06b2a669868`。验证与关单记录见 Tracker/月档 #1128。
 - **2026-10-16 · #1241 已集成**：Issue CLOSED，保留 testing/P3 并移除 in-progress；PR [#1245](https://github.com/EricKingWhy/intelligence-agent/pull/1245) merge 9f93054ec2cee45a3169154fc9246ce3583f1c82。Gate-1 云端、PR Gate-0、Chromium E2E smoke 与 gitleaks 通过；聚焦测试 7 passed，执行中发现并修复 P2。详见 Tracker 与月档。

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:," />
+  <title>子智能体可见性效果图</title>
+  <style>
+    :root{
+      color-scheme:light dark;
+      --canvas:#ffffff;--surface-1:#f5f6f6;--surface-2:#f6f7f7;--surface-3:#ffffff;--surface-4:#f5f6f6;
+      --ink:#000000;--ink-muted:#34343a;--ink-subtle:#62666d;--ink-tertiary:#8a8f98;
+      --hairline:#dfe1e5;--hairline-strong:#c7cad0;--hairline-tertiary:#b9bdc5;
+      --primary:#5e6ad2;--primary-hover:#828fff;--primary-focus:#5e69d1;--on-primary:#ffffff;
+      --success:#27a644;--warn:#a46a16;--danger:#c7463c;--overlay:#000000;
+      --shadow:0 20px 70px rgba(12,16,27,.13),0 2px 8px rgba(12,16,27,.08);
+      --font-display:"SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+      --font-text:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+      --font-mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+    }
+    @media(prefers-color-scheme:dark){
+      :root{
+        --canvas:#010102;--surface-1:#0f1011;--surface-2:#141516;--surface-3:#18191a;--surface-4:#191a1b;
+        --ink:#f7f8f8;--ink-muted:#d0d6e0;--ink-subtle:#8a8f98;--ink-tertiary:#62666d;
+        --hairline:#23252a;--hairline-strong:#34343a;--hairline-tertiary:#3e3e44;
+        --warn:#d79a46;--danger:#e5665b;--shadow:0 24px 80px rgba(0,0,0,.48),0 2px 10px rgba(0,0,0,.4);
+      }
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%}
+    body{background:var(--canvas);color:var(--ink);font-family:var(--font-text);font-size:14px;line-height:1.5;overflow-x:hidden}
+    button{font:inherit;color:inherit}
+    button:focus-visible{outline:2px solid color-mix(in srgb,var(--primary-focus) 70%,transparent);outline-offset:2px}
+    .page{min-height:100vh;padding:24px clamp(16px,3vw,48px) 40px}
+    .switcher{width:max-content;max-width:100%;margin:0 auto 20px;padding:4px;display:flex;gap:4px;background:var(--surface-1);border:1px solid var(--hairline);border-radius:12px}
+    .switcher button{border:0;background:transparent;color:var(--ink-subtle);padding:8px 14px;border-radius:8px;cursor:pointer;font-weight:500;min-height:40px;white-space:nowrap}
+    .switcher button[aria-selected="true"]{background:var(--surface-3);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+    .stage{max-width:1440px;margin:auto;background:var(--surface-1);border:1px solid var(--hairline);border-radius:16px;overflow:hidden;box-shadow:var(--shadow);min-height:760px}
+    .windowbar{height:44px;border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 16px;gap:8px;background:var(--surface-2)}
+    .traffic{display:flex;gap:6px;margin-right:8px}.traffic i{display:block;width:9px;height:9px;border-radius:9999px;background:var(--hairline-tertiary)}
+    .window-title{font-size:12px;color:var(--ink-subtle);flex:1;text-align:center}.window-actions{display:flex;gap:6px}.icon-button{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--ink-subtle);cursor:pointer}.icon-button:hover{background:var(--surface-3);color:var(--ink)}
+    .workspace{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:715px;background:var(--canvas)}
+    .sidebar{border-right:1px solid var(--hairline);padding:12px;background:var(--surface-1);display:flex;flex-direction:column}
+    .new-chat{display:flex;align-items:center;gap:9px;border:1px solid var(--hairline);background:var(--surface-2);border-radius:8px;padding:9px 10px;color:var(--ink);font-weight:500;margin-bottom:16px}
+    .nav-label{font-size:12px;color:var(--ink-tertiary);padding:6px 8px}.nav-item{height:36px;border-radius:8px;display:flex;align-items:center;gap:9px;padding:0 9px;color:var(--ink-subtle)}.nav-item.active{background:var(--surface-3);color:var(--ink)}
+    .nav-item svg,.new-chat svg{flex:none}.recent{margin-top:18px}.recent-row{padding:8px;border-radius:8px;color:var(--ink-subtle);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recent-row.active{background:var(--surface-2);color:var(--ink)}
+    .profile{margin-top:auto;display:flex;align-items:center;gap:9px;border-top:1px solid var(--hairline);padding:14px 6px 2px}.avatar{width:26px;height:26px;border-radius:9999px;background:var(--surface-3);border:1px solid var(--hairline);display:grid;place-items:center;font-size:11px;font-weight:600}.profile small{color:var(--ink-subtle)}
+    .main{min-width:0;position:relative;display:flex;flex-direction:column}
+    .topbar{height:57px;border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 16px;gap:8px;background:var(--canvas);position:relative;z-index:5}
+    .crumb{display:flex;align-items:center;gap:8px;min-width:0;font-weight:500}.crumb span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.top-spacer{flex:1}
+    .agent-trigger{position:relative;border:1px solid var(--hairline);background:var(--canvas);border-radius:8px;padding:7px 10px;display:flex;align-items:center;gap:8px;cursor:pointer;min-height:36px}.agent-trigger:hover,.agent-trigger.open{background:var(--surface-2);border-color:var(--hairline-strong)}
+    .stack{display:flex;align-items:center}.mini-avatar{width:20px;height:20px;border-radius:9999px;border:2px solid var(--canvas);background:var(--surface-3);display:grid;place-items:center;margin-left:-5px;font-size:8px;font-weight:600}.mini-avatar:first-child{margin-left:0}.mini-avatar.running{color:var(--primary)}
+    .chev{transition:transform .18s}.open .chev{transform:rotate(180deg)}
+    .metric{color:var(--ink-subtle);font-size:13px;white-space:nowrap}
+    .content{flex:1;min-height:0;position:relative;display:grid;grid-template-columns:1fr;overflow:hidden}
+    .conversation{min-width:0;display:flex;flex-direction:column;background:var(--canvas)}
+    .scroll{padding:36px clamp(24px,5vw,72px) 120px;overflow:auto;flex:1}
+    .message{max-width:810px;margin:0 auto 28px}.who{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-weight:600}.who i{width:22px;height:22px;border-radius:9999px;background:var(--surface-2);border:1px solid var(--hairline);display:grid;place-items:center;font-size:10px;font-style:normal}.message p{margin:0;color:var(--ink-muted);font-size:15px}.message h2{font-family:var(--font-display);font-size:22px;letter-spacing:-.4px;margin:6px 0 10px;font-weight:600}.message ul{margin:8px 0;padding-left:21px;color:var(--ink-muted)}.message li{margin:7px 0}.code{font:13px/1.55 var(--font-mono);background:var(--surface-2);border:1px solid var(--hairline);border-radius:8px;padding:12px;margin-top:12px;color:var(--ink-muted)}
+    .task-card{max-width:810px;margin:0 auto 24px;border:1px solid var(--hairline);border-radius:12px;background:var(--surface-1);overflow:hidden}.task-head{height:46px;display:flex;align-items:center;padding:0 14px;gap:9px;font-weight:500}.task-head .count{margin-left:auto;color:var(--ink-subtle);font-size:12px}.task-row{border-top:1px solid var(--hairline);padding:10px 14px;display:flex;align-items:center;gap:10px;color:var(--ink-muted)}.task-row small{margin-left:auto;color:var(--ink-subtle)}
+    .composer{position:absolute;bottom:16px;left:clamp(16px,4vw,64px);right:clamp(16px,4vw,64px);border:1px solid var(--hairline-strong);border-radius:12px;background:var(--surface-2);padding:12px;box-shadow:0 12px 40px rgba(0,0,0,.14)}.composer-input{color:var(--ink-subtle);min-height:27px}.composer-tools{display:flex;align-items:center;gap:8px;margin-top:9px}.tool{border:0;background:transparent;color:var(--ink-subtle);display:flex;align-items:center;gap:5px;padding:4px;border-radius:6px}.send{margin-left:auto;width:30px;height:30px;border:0;border-radius:8px;background:var(--primary);color:var(--on-primary);display:grid;place-items:center}.send:hover{background:var(--primary-hover)}
+    .roster{position:absolute;z-index:20;right:16px;top:48px;width:min(630px,calc(100vw - 300px));background:var(--surface-3);border:1px solid var(--hairline-strong);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;transform-origin:top right;opacity:0;pointer-events:none;transform:translateY(-5px) scale(.985);transition:none}.roster.show{opacity:1;pointer-events:auto;transform:none}.roster-head{height:48px;display:flex;align-items:center;padding:0 16px;border-bottom:1px solid var(--hairline);font-weight:500}.roster-head small{margin-left:8px;color:var(--ink-subtle);font-weight:400}.roster-head .quiet{margin-left:auto;border:0;background:transparent;color:var(--ink-subtle);padding:5px 7px;border-radius:6px;cursor:pointer}.roster-head .quiet:hover{background:var(--surface-4)}
+    .agent-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto 22px;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--hairline);cursor:pointer}.agent-row:last-child{border-bottom:0}.agent-row:hover,.agent-row.active{background:var(--surface-4)}.status{width:8px;height:8px;border-radius:9999px;background:var(--ink-tertiary);margin:auto}.status.done{background:var(--success)}.status.running{background:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 18%,transparent)}.agent-copy{min-width:0}.agent-title{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.agent-sub{color:var(--ink-subtle);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.agent-stats{text-align:right;color:var(--ink-subtle);font-size:12px;line-height:1.55;white-space:nowrap}.row-arrow{color:var(--ink-tertiary)}
+    .split-view{display:none;grid-template-columns:minmax(340px,.9fr) minmax(460px,1.1fr);height:100%;min-height:0}.view-split .single-view{display:none}.view-split .split-view{display:grid}.split-left,.split-right{min-width:0;position:relative;display:flex;flex-direction:column;overflow:hidden}.split-left{border-right:1px solid var(--hairline)}.pane-head{height:46px;border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;gap:9px;background:var(--surface-1)}.pane-head .tiny-status{width:7px;height:7px;border-radius:9999px;background:var(--success)}.pane-head strong{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pane-head small{color:var(--ink-subtle);margin-left:auto;white-space:nowrap}.close-pane{border:0;background:transparent;color:var(--ink-subtle);border-radius:6px;width:28px;height:28px;display:grid;place-items:center;cursor:pointer}.close-pane:hover{background:var(--surface-3);color:var(--ink)}
+    .compact-scroll{padding:26px 24px 120px;overflow:auto;flex:1}.compact-scroll .message{margin-bottom:22px}.compact-scroll .message p,.compact-scroll .message li{font-size:13px}.compact-scroll .message h2{font-size:18px}
+    .child-note{border:1px solid var(--hairline);background:var(--surface-2);border-radius:8px;padding:10px 12px;margin:12px 0;color:var(--ink-muted);font-size:13px}.child-meta{display:flex;gap:12px;color:var(--ink-subtle);font-size:12px;margin-top:7px}.child-meta span{display:flex;gap:5px;align-items:center}
+    .split-right .composer{left:16px;right:16px}.split-right .compact-scroll{padding-bottom:125px}
+    .fig-note{max-width:980px;margin:18px auto 0;text-align:center;color:var(--ink-subtle);font-size:13px}.fig-note strong{color:var(--ink-muted);font-weight:500}
+    svg{display:block}
+    @media(max-width:900px){
+      .page{padding:12px 10px 28px}.stage{min-height:760px;border-radius:12px}.workspace{grid-template-columns:64px minmax(0,1fr)}.sidebar{padding:10px 8px}.new-chat{justify-content:center;padding:9px}.new-chat span,.nav-item span,.nav-label,.recent,.profile div{display:none}.nav-item{justify-content:center;padding:0}.profile{justify-content:center}.roster{width:min(560px,calc(100vw - 96px));right:10px}.split-view{grid-template-columns:1fr}.split-left{display:none}.metric.hide-tablet{display:none}.scroll{padding-left:24px;padding-right:24px}}
+    @media(max-width:560px){
+      .page{padding:8px 8px 22px}.switcher{width:100%;margin-bottom:10px}.switcher button{flex:1;padding:7px 8px;font-size:12px}.stage{min-height:720px}.windowbar{display:none}.workspace{grid-template-columns:1fr;min-height:720px}.sidebar{display:none}.topbar{height:53px;padding:0 10px}.crumb{max-width:120px}.metric{display:none}.agent-trigger{padding:6px 8px}.agent-trigger .label{font-size:12px}.roster{position:fixed;top:auto;left:8px;right:8px;bottom:8px;width:auto;max-height:76vh;overflow:auto;transform-origin:bottom center;transform:translateY(8px) scale(.985);border-radius:16px}.roster.show{transform:none}.agent-row{grid-template-columns:18px minmax(0,1fr) auto;padding:12px 12px}.row-arrow{display:none}.agent-stats span:first-child{display:none}.scroll{padding:24px 16px 112px}.message p{font-size:14px}.message h2{font-size:20px}.task-row{font-size:12px}.composer{left:10px;right:10px;bottom:10px}.fig-note{padding:0 8px}.split-right .compact-scroll{padding:20px 16px 116px}.pane-head{padding:0 10px}.pane-head small{display:none}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="switcher" role="tablist" aria-label="效果图视图">
+      <button id="tab-roster" role="tab" aria-selected="true">图 1 · 子智能体列表</button>
+      <button id="tab-split" role="tab" aria-selected="false">图 2 · 分栏会话</button>
+    </div>
+
+    <section class="stage" aria-label="Agent Harness Inspector 界面效果图">
+      <div class="windowbar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="window-title">Agent Harness Inspector</div>
+        <div class="window-actions">
+          <button class="icon-button" aria-label="布局"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+          <button class="icon-button" aria-label="更多"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
+        </div>
+      </div>
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="new-chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg><span>新建会话</span></div>
+          <div class="nav-label">工作区</div>
+          <div class="nav-item active"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v12H8l-4 3V5Z"/></svg><span>对话</span></div>
+          <div class="nav-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18V8m8 10V4m8 14v-7"/></svg><span>轨迹</span></div>
+          <div class="nav-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>运行</span></div>
+          <div class="recent"><div class="nav-label">最近</div><div class="recent-row active">插件管理窗口设计</div><div class="recent-row">上下文压缩改版</div><div class="recent-row">约束作用域审查</div></div>
+          <div class="profile"><div class="avatar">W</div><div><strong>wong</strong><br><small>本地工作区</small></div></div>
+        </aside>
+
+        <section class="main" id="main-app">
+          <header class="topbar">
+            <div class="crumb"><span>插件管理窗口设计</span></div>
+            <div class="top-spacer"></div>
+            <span class="metric hide-tablet">6 个后台任务</span>
+            <button class="agent-trigger" id="agent-trigger" aria-expanded="false" aria-controls="roster">
+              <span class="stack"><i class="mini-avatar">A</i><i class="mini-avatar running">A</i><i class="mini-avatar">A</i></span>
+              <span class="label">3 个子智能体</span>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 10 5 5 5-5"/></svg>
+            </button>
+            <span class="metric">1.84M tok</span>
+            <button class="icon-button" aria-label="更多操作"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
+
+            <div class="roster" id="roster" role="dialog" aria-label="子智能体列表">
+              <div class="roster-head">子智能体 <small>3 个</small><button class="quiet" id="close-roster">收起</button></div>
+              <div class="agent-row" tabindex="0" data-open-child>
+                <i class="status running"></i><div class="agent-copy"><div class="agent-title">调研 dsh 子智能体交互</div><div class="agent-sub">正在梳理 roster、会话面板与数据流</div></div><div class="agent-stats"><span>842K tok</span><br><span>运行 12分18秒</span></div><svg class="row-arrow" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 5 7 7-7 7"/></svg>
+              </div>
+              <div class="agent-row" tabindex="0" data-open-child>
+                <i class="status done"></i><div class="agent-copy"><div class="agent-title">盘点仓库现有会话能力</div><div class="agent-sub">已定位 Conversation 复用点与最小改动面</div></div><div class="agent-stats"><span>613K tok</span><br><span>完成 8分42秒</span></div><svg class="row-arrow" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 5 7 7-7 7"/></svg>
+              </div>
+              <div class="agent-row" tabindex="0" data-open-child>
+                <i class="status done"></i><div class="agent-copy"><div class="agent-title">独立核验成熟产品方案</div><div class="agent-sub">已完成 Claude Code、Cursor 与 dsh 对照</div></div><div class="agent-stats"><span>385K tok</span><br><span>完成 5分09秒</span></div><svg class="row-arrow" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 5 7 7-7 7"/></svg>
+              </div>
+            </div>
+          </header>
+
+          <div class="content single-view">
+            <div class="conversation">
+              <div class="scroll">
+                <article class="message"><div class="who"><i>W</i>你</div><p>先去查查 dsh 的子智能体交互，同时盘点我们仓库现在能复用的会话能力。</p></article>
+                <article class="message"><div class="who"><i>AI</i>助手</div><h2>已经拆成三路并行调研</h2><p>我把产品交互、仓库现状和成熟产品对照拆给三个子智能体。你可以在右上角随时查看每一路的状态、token 与耗时。</p></article>
+                <div class="task-card"><div class="task-head"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>并行任务 <span class="count">2 已完成 · 1 运行中</span></div><div class="task-row"><i class="status running"></i>调研 dsh 子智能体交互<small>12分18秒</small></div><div class="task-row"><i class="status done"></i>盘点仓库现有会话能力<small>8分42秒</small></div><div class="task-row"><i class="status done"></i>独立核验成熟产品方案<small>5分09秒</small></div></div>
+              </div>
+              <div class="composer"><div class="composer-input">发送消息、@ 文件或继续派工</div><div class="composer-tools"><button class="tool" aria-label="添加"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 5v14M5 12h14"/></svg></button><button class="tool"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 22a10 10 0 1 0-10-10"/><path d="M2 22 22 2"/></svg>完全权限</button><button class="send" aria-label="发送"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div></div>
+            </div>
+          </div>
+
+          <div class="content split-view">
+            <section class="split-left">
+              <div class="pane-head"><strong>插件管理窗口设计</strong><small>父会话</small></div>
+              <div class="compact-scroll">
+                <article class="message"><div class="who"><i>W</i>你</div><p>先去查查 dsh 的子智能体交互，同时盘点我们仓库现在能复用的会话能力。</p></article>
+                <article class="message"><div class="who"><i>AI</i>助手</div><h2>已经拆成三路并行调研</h2><p>右上角可以看到每一路实时状态；点选其中一个会在右侧打开完整会话。</p></article>
+                <div class="task-card"><div class="task-head">并行任务 <span class="count">2 已完成 · 1 运行中</span></div><div class="task-row"><i class="status running"></i>调研 dsh 子智能体交互</div><div class="task-row"><i class="status done"></i>盘点仓库现有会话能力</div><div class="task-row"><i class="status done"></i>独立核验成熟产品方案</div></div>
+              </div>
+              <div class="composer"><div class="composer-input">继续和主智能体对话</div><div class="composer-tools"><button class="tool">完全权限</button><button class="send" aria-label="发送"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div></div>
+            </section>
+            <section class="split-right">
+              <div class="pane-head"><i class="tiny-status"></i><strong>盘点仓库现有会话能力</strong><small>613K tok · 完成</small><button class="close-pane" id="close-pane" aria-label="关闭分栏"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+              <div class="compact-scroll">
+                <article class="message"><div class="who"><i>AI</i>子智能体</div><p>我会只读盘点当前仓库，重点确认已有 Conversation 组件、子会话读取路径，以及最小后端改动面。</p><div class="child-meta"><span>开始于 20:42</span><span>只读任务</span></div></article>
+                <article class="message"><div class="who"><i>AI</i>子智能体</div><h2>现状已经定位</h2><ul><li>现有 Conversation 渲染器可以直接复用，不需要再维护一套子会话 UI。</li><li>父事件流已经保留委派关系，可投影出子智能体列表。</li><li>分栏只需独立选择态，不改变主会话当前路由。</li></ul><div class="code">GET /api/sessions/{session_id}/delegations<br>→ status · token_count · elapsed · child_session_id</div></article>
+                <div class="child-note"><strong>完成</strong> · 最小方案可以保持零新存储：列表来自父事件流，右栏沿用现有会话读取链路。</div>
+              </div>
+              <div class="composer"><div class="composer-input">继续追问这个子智能体</div><div class="composer-tools"><button class="tool">只读</button><button class="send" aria-label="发送"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div></div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </section>
+    <p class="fig-note" id="fig-note"><strong>图 1：</strong>顶栏集中显示子智能体数量与汇总状态；展开后可直接查看每一路任务、token 和耗时。</p>
+  </main>
+<script>
+(function(){
+  var app=document.getElementById('main-app');
+  var trigger=document.getElementById('agent-trigger');
+  var roster=document.getElementById('roster');
+  var tabRoster=document.getElementById('tab-roster');
+  var tabSplit=document.getElementById('tab-split');
+  var note=document.getElementById('fig-note');
+  function setRoster(open){
+    roster.classList.toggle('show',open);
+    trigger.classList.toggle('open',open);
+    trigger.setAttribute('aria-expanded',String(open));
+  }
+  function showRoster(){
+    app.classList.remove('view-split');
+    tabRoster.setAttribute('aria-selected','true');
+    tabSplit.setAttribute('aria-selected','false');
+    note.innerHTML='<strong>图 1：</strong>顶栏集中显示子智能体数量与汇总状态；展开后可直接查看每一路任务、token 和耗时。';
+    setRoster(true);
+  }
+  function showSplit(){
+    setRoster(false);
+    app.classList.add('view-split');
+    tabRoster.setAttribute('aria-selected','false');
+    tabSplit.setAttribute('aria-selected','true');
+    note.innerHTML='<strong>图 2：</strong>点击任一子智能体后，父会话保留在左侧，完整子会话在右侧展开；两边都能独立继续对话。';
+  }
+  trigger.addEventListener('click',function(e){e.stopPropagation();setRoster(!roster.classList.contains('show'));});
+  document.getElementById('close-roster').addEventListener('click',function(e){e.stopPropagation();setRoster(false);});
+  tabRoster.addEventListener('click',showRoster);
+  tabSplit.addEventListener('click',showSplit);
+  document.querySelectorAll('[data-open-child]').forEach(function(row){
+    row.addEventListener('click',showSplit);
+    row.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();showSplit();}});
+  });
+  document.getElementById('close-pane').addEventListener('click',showRoster);
+  document.addEventListener('click',function(e){if(!roster.contains(e.target)&&!trigger.contains(e.target)){setRoster(false);}});
+  showRoster();
+})();
+</script>
+</body>
+</html>
