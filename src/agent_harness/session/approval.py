@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,7 @@ from agent_harness.session.event import (
     PERMISSION_RESOLVED,
     PERMISSION_REVOKED,
     SESSION_STARTED,
+    TASK_FACT_REVOCATION,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
 )
@@ -517,6 +519,29 @@ def append_approval_revoke(session: Session, approval_key: str) -> None:
     )
 
 
+def append_fact_revocation(
+    session: Session, fact_id: str, *, revoked_by: str | None = None,
+) -> SessionEvent:
+    """追加 ``task/fact_revocation``——受保护事实主动撤销的唯一写入口（#1190）。
+
+    append-only 审计：写一条 durable 事实表达"用户撤销了这条约束"，投影
+    （``derive_protected_facts``）把目标 fact 置 ``status="revoked"`` 并从本事件
+    派生 ``revoked_at`` / ``revoked_by``；**不物理删除任何事件**（历史保留链，
+    OpenHands「抑制在视图层、历史不删」同构）。与 :func:`append_approval_revoke`
+    同口径：人工管理动作落 durable 事件、带操作人与时间，不产生 resume 副作用
+    （不变量 #7）。返回实际落盘的事件（调用方据其 data 组装回执）。
+    """
+    data: dict[str, object] = {
+        "revoke_fact_id": fact_id,
+        # 事件自带的 ``time`` 是对账权威；``revoked_at`` 是给"事件自描述"的显式副本
+        # （与 ``append_approval_revoke`` 落 ``revoked_at`` 同一先例），derive 优先读它。
+        "revoked_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+    }
+    if revoked_by:
+        data["revoked_by"] = revoked_by
+    return session.append(TASK_FACT_REVOCATION, data)
+
+
 def derive_approval_grants(events: list[SessionEvent]) -> dict[str, ApprovalGrant]:
     """正序重放事件流，投影出**内存态**的会话级审批授予字典（#526 A2）。
 
@@ -605,6 +630,7 @@ __all__ = [
     "PermissionChange",
     "append_approval_grant",
     "append_approval_revoke",
+    "append_fact_revocation",
     "append_legacy_defaults_migration",
     "append_permission_change",
     "build_approval_callback",

@@ -114,6 +114,8 @@ class TestSessionEventDTO:
             # F18-A (#282)：同 session 内改权限档
             "permission/changed",
             "task/protected_fact",
+            # #1190：受保护事实的通用主动撤销事实（约束管理面板）
+            "task/fact_revocation",
             # MEM-V2-2 (#298)：一次**已提交**的记忆变更。只带计数与 id、
             # 不带内容（事件流不是第二份记忆真相，不变量 #22）；与
             # memory/degraded 并列但语义不同——那条是降级信号，这条是成功写入。
