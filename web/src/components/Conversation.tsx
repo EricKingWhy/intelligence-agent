@@ -410,7 +410,6 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
           key={`plan-${conversation.session_id}`}
           items={conversation.plan}
           runStatus={conversation.run_status}
-          runCancelled={conversation.run_cancelled}
           runInterrupted={conversation.run_interrupted !== null}
         />
       )}

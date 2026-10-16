@@ -149,14 +149,12 @@ function PlanRow({ item, current, collapsed }: { item: PlanItem; current: boolea
 interface PlanListProps {
   items: PlanItem[];
   runStatus?: ConversationState['run_status'];
-  runCancelled?: boolean;
   runInterrupted?: boolean;
 }
 
 export function PlanList({
   items,
   runStatus = 'idle',
-  runCancelled = false,
   runInterrupted = false,
 }: PlanListProps) {
   const [panelExpanded, setPanelExpanded] = useState(false);
@@ -211,7 +209,7 @@ export function PlanList({
   const completed = items.filter((it) => it.status === 'completed');
   const currentItem = items.find((it) => it.status === 'in_progress') ?? null;
   const currentId = currentItem?.id ?? null;
-  const interrupted = runStatus === 'failed' || runCancelled || runInterrupted;
+  const interrupted = runStatus === 'failed' || runInterrupted;
   const allCompleted = completed.length === items.length;
   const terminalText = interrupted
     ? `✖ 任务中断 ${completed.length}/${items.length}`

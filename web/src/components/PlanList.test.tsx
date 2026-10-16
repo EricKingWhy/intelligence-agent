@@ -113,16 +113,14 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   });
 
   it.each([
-    ['失败', 'failed', false, false],
-    ['取消', 'failed', true, false],
-    ['进程中断', 'completed', false, true],
-  ] as const)('%s 显示中断摘要', (_label, runStatus, runCancelled, runInterrupted) => {
+    ['失败或取消（run_status=failed）', 'failed', false],
+    ['进程中断', 'completed', true],
+  ] as const)('%s 显示中断摘要', (_label, runStatus, runInterrupted) => {
     act(() =>
       root.render(
         createElement(PlanList, {
           items: threeState,
           runStatus,
-          runCancelled,
           runInterrupted,
         }),
       ),
@@ -137,6 +135,24 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     expect(toggle?.textContent).toContain('进程 3 项 · 已完成 1 项');
     expect(toggle?.textContent).not.toContain('任务中断');
     expect(toggle?.textContent).not.toContain('任务完成');
+  });
+
+  it('取消标记残留时，新运行与暂停仍显示进行态', () => {
+    const renderWithStaleCancellation = (runStatus: 'running' | 'paused') => {
+      // Mirror persisted projection state: run_cancelled can remain true after run/started.
+      const props = { items: threeState, runStatus, runCancelled: true };
+      act(() => root.render(createElement(PlanList, props as Parameters<typeof PlanList>[0])));
+    };
+
+    renderWithStaleCancellation('running');
+    let toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    expect(toggle?.textContent).toContain('进程 3 项 · 已完成 1 项');
+    expect(toggle?.textContent).not.toContain('任务中断');
+
+    renderWithStaleCancellation('paused');
+    toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
+    expect(toggle?.textContent).toContain('进程 3 项 · 已完成 1 项');
+    expect(toggle?.textContent).not.toContain('任务中断');
   });
 
   it('Escape 收起清单并把焦点还给摘要按钮', () => {
