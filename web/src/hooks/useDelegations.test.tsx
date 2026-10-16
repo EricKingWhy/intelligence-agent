@@ -105,6 +105,27 @@ describe('#1256 useDelegations', () => {
     expect(current).toEqual([entry('c1')]);
   });
 
+  it('切会话先清旧 entries（新响应 resolve 前不显上个会话的行）', async () => {
+    H.getSessionDelegations.mockResolvedValueOnce([entry('c1')]);
+    await act(async () => { root.render(<Harness sessionId="p" conv={conversation(['c1'])} />); });
+    await flush();
+    expect(current).toEqual([entry('c1')]);
+
+    // 切到 'q'：新请求挂起（deferred），resolve 前旧行必须先清空——
+    // 否则短暂显示上一个会话的第二真相（不变量 #22）。
+    let resolveQ: (rows: DelegationEntry[]) => void = () => {};
+    H.getSessionDelegations.mockReturnValueOnce(
+      new Promise<DelegationEntry[]>((res) => { resolveQ = res; }),
+    );
+    await act(async () => { root.render(<Harness sessionId="q" conv={conversation(['c1'])} />); });
+    await flush();
+    expect(current).toEqual([]);
+
+    await act(async () => { resolveQ([entry('c2')]); });
+    await flush();
+    expect(current).toEqual([entry('c2')]);
+  });
+
   it('父流委派签名变化（新委派出现）→ 重拉', async () => {
     H.getSessionDelegations.mockResolvedValue([entry('c1')]);
     await act(async () => { root.render(<Harness sessionId={SID} conv={conversation(['c1'])} />); });

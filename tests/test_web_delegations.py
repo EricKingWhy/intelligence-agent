@@ -18,7 +18,9 @@ from agent_harness.session.event import (
     AGENT_DELEGATION_STARTED,
     MODEL_COMPLETED,
     RUN_INTERRUPTED,
+    RUN_PAUSED,
     USER_MESSAGE,
+    SessionEvent,
 )
 from agent_harness.web.app import create_app
 
@@ -35,15 +37,20 @@ def _seed(
     finish: bool = True,
     finish_status: str = "completed",
     interrupted: bool = False,
+    paused: bool = False,
     child_usage: dict | None = None,
     create_child: bool = True,
-) -> None:
-    """父会话 'p' 委派给子会话 'c1'（可调配对/终态/用量）。"""
+) -> SessionEvent | None:
+    """父会话 'p' 委派给子会话 'c1'（可调配对/终态/用量）。
+
+    返回把在途委派翻 stopped 的那条触发事件（RUN_INTERRUPTED / RUN_PAUSED），
+    无则 None——用例据此拿**真实** time 断言 completed_at（不手编时间戳）。
+    """
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
 
-    async def _run() -> None:
+    async def _run() -> SessionEvent | None:
         parent = Session.start(store, session_id="p")
         parent.append(USER_MESSAGE, {"content": "帮我派个活"})
         if create_child:
@@ -61,9 +68,12 @@ def _seed(
                 "status": finish_status, "summary": "已改好",
             })
         if interrupted:
-            parent.append(RUN_INTERRUPTED, {"reason": "killed"})
+            return parent.append(RUN_INTERRUPTED, {"reason": "killed"})
+        if paused:
+            return parent.append(RUN_PAUSED, {"reason": "budget_exhausted"})
+        return None
 
-    asyncio.run(_run())
+    return asyncio.run(_run())
 
 
 def _one(body: list[dict]) -> dict:
@@ -114,10 +124,28 @@ def test_delegations_failed_status_normalized(tmp_path) -> None:
 
 
 def test_delegations_stopped_on_run_interrupt(tmp_path) -> None:
-    """父 run 被中断、委派未回填 finished ⇒ stopped（≠ failed，≠ running）。"""
-    _seed(tmp_path, finish=False, interrupted=True)
+    """父 run 被中断、委派未回填 finished ⇒ stopped（≠ failed，≠ running）。
+
+    completed_at 冻结在**中断那条事件**的 time：函数契约「起点→终点」要求终态条目
+    有真终点，与前端投影 finalizeRun settle 语义同源（不是 return null）。"""
+    trigger = _seed(tmp_path, finish=False, interrupted=True)
     entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
     assert entry["status"] == "stopped"
+    assert entry["completed_at"]
+    assert entry["completed_at"] == trigger.time
+
+
+def test_delegations_stopped_on_run_pause(tmp_path) -> None:
+    """父 run 暂停、委派未回填 finished ⇒ stopped + completed_at = 暂停事件 time。
+
+    paused 不是 run 终态（event.py:40-42），但**前端投影** projectRunPaused 同样把
+    在途委派翻 stopped（finalizeRun 共用清扫），roster 判据必须与投影同源——仓库既有
+    同构先例：session/interrupt.py 与 session/fork.py 的
+    ``event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED``。"""
+    trigger = _seed(tmp_path, finish=False, paused=True)
+    entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
+    assert entry["status"] == "stopped"
+    assert entry["completed_at"] == trigger.time
 
 
 def test_delegations_usage_only_from_child_events(tmp_path) -> None:

@@ -70,6 +70,16 @@ describe('#1256 durationText — 四态耗时', () => {
     expect(durationText(entry(), NOW)).toBe('耗时 12分18秒');
   });
 
+  it('stopped → 起点→终点「耗时」，且不随 now 漂移（中断时刻已结算）', () => {
+    const e = entry({
+      status: 'stopped',
+      started_at: '2026-10-16T00:00:00.000Z',
+      completed_at: '2026-10-16T00:06:06.000Z',
+    });
+    expect(durationText(e, NOW)).toBe('耗时 6分6秒');
+    expect(durationText(e, NOW + 3600e3)).toBe('耗时 6分6秒');
+  });
+
   it('running → 起点→now「运行」', () => {
     const e = entry({ status: 'running', completed_at: null, started_at: '2026-10-16T00:00:00.000Z' });
     expect(durationText(e, NOW)).toBe('运行 12分18秒');
