@@ -65,6 +65,8 @@ Var iaRunningProduct
 Var iaRuntimeStopStatus
 Var iaRuntimeExitWaits
 Var iaPowerShellPath
+Var iaRollbackStatus
+Var iaLeftoverDirectory
 
 ; installer-cleanup.nsh: iaCheckBackupShape / iaBuildLongPath (plus the reparse
 ; scan and the prepare wrapper, which the injected macro does not reach).
@@ -81,6 +83,8 @@ Var iaPowerShellPath
 @@PRODUCTION_IA_CLASSIFY@@
 
 @@PRODUCTION_IA_REQUIRE@@
+
+@@PRODUCTION_IA_ROLLBACK@@
 
 @@PRODUCTION_IA_STAGE@@
 
