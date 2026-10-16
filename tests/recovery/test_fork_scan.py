@@ -137,6 +137,56 @@ async def test_scan_isolates_unreadable_child(tmp_path: Path) -> None:
     assert not by_id["bad"].reclaimed
 
 
+async def test_scan_isolates_docker_cleanup_failure_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store, registry = _setup(tmp_path)
+    _mark_unfinished_fork(store, registry, "bad")
+    _mark_unfinished_fork(store, registry, "good")
+    bad_workspace = registry.default_workspace_root("bad")
+    good_workspace = registry.default_workspace_root("good")
+    should_fail = True
+    calls: list[str] = []
+
+    def cleanup(session_id: str, *, fork_recovery: bool):
+        nonlocal should_fail
+        assert fork_recovery is True
+        calls.append(session_id)
+        if session_id == "bad" and should_fail:
+            raise OSError("Docker API unavailable")
+
+    monkeypatch.setattr(registry, "cleanup_docker_workspace_resources", cleanup)
+
+    results = await scan_unfinished_forks(
+        session_store=store, workspace_registry=registry
+    )
+
+    by_id = {result.session_id: result for result in results}
+    assert set(calls) == {"bad", "good"}
+    assert by_id["bad"].reclaimed is False
+    assert "Docker API unavailable" in (by_id["bad"].detail or "")
+    assert "Docker workspace cleanup failed" in caplog.text
+    assert by_id["good"].reclaimed is True
+    assert not bad_workspace.exists(), "host cleanup continues after Docker failure"
+    assert not good_workspace.exists()
+    assert registry.exists("bad"), "failed cleanup stays available for retry"
+    assert [event.type for event in store.read_events("bad")] == [
+        "session/started",
+        INTENT,
+    ]
+
+    should_fail = False
+    retry = await scan_unfinished_forks(
+        session_store=store, workspace_registry=registry
+    )
+    retried = {result.session_id: result for result in retry}
+    assert retried["bad"].reclaimed is True
+    assert retried["bad"].detail is None
+    assert calls.count("bad") == 2
+
+
 async def test_scan_without_registry_reports_visibility_only(
     tmp_path: Path,
 ) -> None:
