@@ -12,7 +12,7 @@ import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
-import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
+import { getSessionEvents, type CatalogEntry, type ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { onTokenChange } from '../lib/auth';
@@ -26,6 +26,13 @@ import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import { ReasoningEffortSlider } from './ReasoningEffortSlider';
+import {
+  SLASH_COMMANDS,
+  filterSlashCommands,
+  slashSubmitMatch,
+  slashTriggerMatch,
+  type SlashCommand,
+} from '../lib/slashCommands';
 
 /** #283：升到这一档要在 pill 浮层里给一次显式确认（ADR-0041 D1——后端**不加**强制标志位，
  *  确认是 UX 层的责任）。字面量与后端 `PermissionPolicy.DANGER_FULL_ACCESS` 同值：它同时
@@ -195,6 +202,10 @@ export const Composer = memo(function Composer({
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // #1195：`/permission` `/model` 拉起现有 picker——两组件的 open 都是内部 state
+  //（无受控接口，本体在 Scope Lock 外），程序化 click 各自的 trigger 按钮即可。
+  const permissionPickerRef = useRef<HTMLDivElement | null>(null);
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
   /** #1029：发送回执在途标记。清空挪到回执之后，输入框在在途期间仍有文本 ⇒
    *  「空文本」不再天然挡住重复提交，改由本 ref 显式挡（同步读，见 submit）。
    *
@@ -223,6 +234,13 @@ export const Composer = memo(function Composer({
   const [dragActive, setDragActive] = useState(false);
   /** #1027 兜底提示：发送时被剔除的未就绪附件数（一次性可见提示，可关闭）。 */
   const [droppedNotice, setDroppedNotice] = useState<string | null>(null);
+  // #1195 内联 `/` 命令菜单：触发态由输入值派生（不另记布尔，避免与文本分叉）；
+  // 高亮 index 与错误面是真正的 UI 状态。
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashError, setSlashError] = useState<string | null>(null);
+  // Esc 关闭后 value 不变 ⇒ 派生匹配仍成立，菜单会立刻重开——需要显式 dismissed。
+  // value 一变（继续打字 / 清空）即解除，重新进入触发态。
+  const [slashDismissed, setSlashDismissed] = useState(false);
 
   // ── #1027 发送门禁（Gmail 式阻断，PORT DESIGN）──
   // 门禁锚的是 `useDraftAttachments` 的真实 status 状态机（uploading/ready/failed），
@@ -538,11 +556,58 @@ export const Composer = memo(function Composer({
       });
   };
 
+  // ── #1195 内联 `/` 命令菜单 ──
+  // 触发：行首或空格后半角 `/`（票面正则）。派生态——value 一变即重算，无第二份真值。
+  // 无会话不触发（票面 §4.2：composer 本来也发不出去）。
+  const slashMatch =
+    sessionId != null && !locked ? slashTriggerMatch(value) : null;
+  const slashItems = slashMatch ? filterSlashCommands(SLASH_COMMANDS, slashMatch.query) : [];
+  const slashOpen = slashMatch !== null && !slashDismissed;
+
+
+  const runSlashCommand = useCallback(
+    async (cmd: SlashCommand, args: string | undefined) => {
+      if (!sessionId) return;
+      setSlashError(null);
+      try {
+        await cmd.run(args, {
+          sessionId,
+          openPermissionPicker: () =>
+            permissionPickerRef.current
+              ?.querySelector<HTMLButtonElement>('button[aria-label="权限模式"]')
+              ?.click(),
+          openModelPicker: () =>
+            modelPickerRef.current
+              ?.querySelector<HTMLButtonElement>('button[aria-label="模型选择"]')
+              ?.click(),
+          reportError: (message) => setSlashError(message),
+          getSessionEvents,
+        });
+      } catch (e) {
+        setSlashError(e instanceof Error && e.message ? e.message : '命令执行失败');
+      }
+    },
+    [sessionId],
+  );
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
   // IME composition 守卫（审查 P1）：中文输入法按 Enter 确认拼音时
   // `isComposing` 为真——此时不提交，否则半截拼音会被当成任务发出。
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    // ── #1195 内联菜单键盘语义（在 steer/queue 之前拦截）──
+    // Esc：只关菜单，不清输入（票面 §4.1）。
+    if (slashOpen && e.key === 'Escape') {
+      e.preventDefault();
+      setSlashDismissed(true);
+      return;
+    }
+    if (slashOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      // 菜单开时 ↑↓ 归菜单（不移输入框光标——票面 §4.1）。
+      e.preventDefault();
+      const count = Math.max(slashItems.length, 1);
+      setSlashIndex((i) => (e.key === 'ArrowDown' ? (i + 1) % count : (i - 1 + count) % count));
+      return;
+    }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit('steer');
@@ -550,6 +615,29 @@ export const Composer = memo(function Composer({
     }
     // Enter（无修饰键）= queue。Shift+Enter 保留换行（真实用户习惯）。
     if (e.key === 'Enter' && !e.shiftKey) {
+      // 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`）：整条输入是注册表
+      // 内的命令调用 ⇒ 本地执行，绝不当聊天发给 agent。参数为空（`/goal␣␣`）时
+      // 拦截的正则不命中（`\w+` 后必须有空白 + 参数），自然落到查看分支——与 §4.2 的
+      // 「无参数则查看」一致。
+      const submitHit = slashSubmitMatch(
+        value,
+        SLASH_COMMANDS.map((c) => c.name),
+      );
+      if (submitHit) {
+        e.preventDefault();
+        const cmd = SLASH_COMMANDS.find((c) => c.name === submitHit.name)!;
+        void runSlashCommand(cmd, submitHit.args);
+        setValue('');
+        return;
+      }
+      // 菜单开着且有可见命中 → Enter 执行高亮项（票面 §3.1；唯一命中时高亮必是唯一项）。
+      if (slashOpen && slashItems.length > 0) {
+        e.preventDefault();
+        const cmd = slashItems[Math.min(slashIndex, slashItems.length - 1)];
+        void runSlashCommand(cmd, undefined);
+        setValue('');
+        return;
+      }
       e.preventDefault();
       submit('queue');
     }
@@ -807,6 +895,111 @@ export const Composer = memo(function Composer({
           )}
         </div>
       )}
+      {/* #1195：内联 `/` 菜单——输入框正上方（composer-wrap 的直接子节点、dock 之前；
+          absolute 定位锚在 wrap 上，bottom:100% 相对 dock 视觉位）。非 Dialog 中央浮层
+          （票面 §3.1）。样式 inline 引既有语义 token（app.css 不在 Scope Lock）。 */}
+      {slashOpen && (
+        <div
+          data-testid="slash-menu"
+          role="listbox"
+          aria-label="斜杠命令"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: '100%',
+            marginBottom: 4,
+            background: 'var(--surface-overlay)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 10,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+            padding: 4,
+            zIndex: 40,
+            maxHeight: 260,
+            overflowY: 'auto',
+          }}
+        >
+          {slashItems.length === 0 ? (
+            <div style={{ padding: '6px 10px', color: 'var(--text-tertiary)', fontSize: 12 }}>
+              无匹配命令
+            </div>
+          ) : (
+            ['add', 'command'].map((group) => {
+              const groupItems = slashItems.filter((c) => c.group === group);
+              if (groupItems.length === 0) return null;
+              return (
+                <div key={group}>
+                  <div
+                    style={{
+                      padding: '4px 10px 2px',
+                      color: 'var(--text-tertiary)',
+                      fontSize: 11,
+                    }}
+                  >
+                    {group === 'add' ? '添加' : '指令'}
+                  </div>
+                  {groupItems.map((cmd) => {
+                    const index = slashItems.indexOf(cmd);
+                    const selected = index === Math.min(slashIndex, slashItems.length - 1);
+                    return (
+                      <div
+                        key={cmd.name}
+                        role="option"
+                        aria-selected={selected}
+                        data-slash-name={cmd.name}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'baseline',
+                          gap: 8,
+                          padding: '6px 10px',
+                          borderRadius: 6,
+                          cursor: 'default',
+                          background: selected ? 'var(--surface-selected)' : 'transparent',
+                        }}
+                        onMouseDown={(e) => {
+                          // mousedown 而非 click：textarea 的 blur 会在 click 之前到，
+                          // blur 不关菜单（唯一关闭路径是 Esc/执行），但 mousedown 先选中。
+                          e.preventDefault();
+                          setSlashIndex(index);
+                        }}
+                        onClick={() => {
+                          void runSlashCommand(cmd, undefined);
+                          setValue('');
+                        }}
+                      >
+                        <span style={{ color: 'var(--text-primary)', fontSize: 12 }}>
+                          {cmd.labelCN}
+                        </span>
+                        <span
+                          style={{ color: 'var(--text-tertiary)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
+                        >
+                          /{cmd.name}
+                        </span>
+                        <span style={{ color: 'var(--text-tertiary)', fontSize: 12, marginLeft: 'auto' }}>
+                          {cmd.description}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+      {slashError !== null && (
+        <div
+          data-testid="slash-error"
+          role="alert"
+          style={{
+            padding: '4px 10px',
+            color: 'var(--danger)',
+            fontSize: 12,
+          }}
+        >
+          {slashError}
+        </div>
+      )}
       <div className="composer-dock surface-floating">
         <ComposerAttachments
           items={attachments.items}
@@ -886,7 +1079,12 @@ export const Composer = memo(function Composer({
           className="composer"
           placeholder={showLock ? lockedPlaceholder : `描述一个任务…（${modKey()}+Enter 发送）`}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            // #1195：输入变化 = 可见命令列表身份变化 ⇒ 高亮收回第一项；Esc 关闭态解除。
+            setSlashIndex(0);
+            setSlashDismissed(false);
+            setValue(e.target.value);
+          }}
           onKeyDown={onKeyDown}
           onPaste={(event) => {
             // AC1 剪贴板粘贴：只截取 `kind === 'file'` 的图片。没有文件时**不**
@@ -925,12 +1123,14 @@ export const Composer = memo(function Composer({
         </label>
         {hasControls && (
           <div className="composer-controls">
+            <div ref={modelPickerRef}>
             <ModelPicker
               models={models}
               selectedModel={selectedModel}
               onModelChange={onModelChange ?? (() => {})}
               disabled={locked}
             />
+            </div>
             {reasoningEffortProjection && (
               <span
                 className="composer-fallback-effort-note"
@@ -952,6 +1152,7 @@ export const Composer = memo(function Composer({
                 `session_permission_mode`，由 App 传入）；新会话 → 仍是创建期选择（随 create
                 请求发出）。升到「完全访问」要一次显式确认，确认面在本浮层的 footer 里
                 （见 `renderPermissionFooter`）。 */}
+            <div ref={permissionPickerRef}>
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
@@ -968,6 +1169,7 @@ export const Composer = memo(function Composer({
               showDefault={!permissionInSession}
               footer={renderPermissionFooter}
             />
+            </div>
             <OptionPicker
               ariaLabel="Agent Profile"
               title="这次会话用哪个档位？"
