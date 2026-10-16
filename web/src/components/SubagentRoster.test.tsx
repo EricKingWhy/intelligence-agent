@@ -142,7 +142,7 @@ describe('#1256 SubagentRoster', () => {
     expect(host.querySelector('.agent-stats')?.textContent).toContain('完成');
   });
 
-  it('行主体点击 → onOpenSession（主视图），不触发 onOpenSplit', () => {
+  it('行主体点击 → onOpenSession（主视图），不触发 onOpenSplit，且收面板', () => {
     const onOpenSession = vi.fn();
     const onOpenSplit = vi.fn();
     render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={onOpenSplit} />);
@@ -150,9 +150,11 @@ describe('#1256 SubagentRoster', () => {
     act(() => { host.querySelector<HTMLElement>('.agent-row')!.click(); });
     expect(onOpenSession).toHaveBeenCalledWith('c1');
     expect(onOpenSplit).not.toHaveBeenCalled();
+    // 选中即收面板——面板留着会盖住分栏头部（含关闭按钮）的指针事件。
+    expect(host.querySelector('.roster')).toBeNull();
   });
 
-  it('chevron 点击 → onOpenSplit，不触发 onOpenSession（不串道）', () => {
+  it('chevron 点击 → onOpenSplit，不触发 onOpenSession（不串道），且收面板', () => {
     const onOpenSession = vi.fn();
     const onOpenSplit = vi.fn();
     render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={onOpenSplit} />);
@@ -160,6 +162,7 @@ describe('#1256 SubagentRoster', () => {
     act(() => { host.querySelector<HTMLButtonElement>('.row-arrow')!.click(); });
     expect(onOpenSplit).toHaveBeenCalledWith({ childSessionId: 'c1', target: 'research_review' });
     expect(onOpenSession).not.toHaveBeenCalled();
+    expect(host.querySelector('.roster')).toBeNull();
   });
 });
 

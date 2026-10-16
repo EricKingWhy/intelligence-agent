@@ -85,6 +85,9 @@ test('#1256 AC：chevron → 右栏打开完整子会话，**父会话保持不�
   await page.locator('.agent-trigger').click();
   await page.locator('.row-arrow').click();
 
+  // 选中即收面板：否则浮层会盖住分栏头部（含「关闭分栏」按钮）的指针事件。
+  await expect(page.locator('.roster')).toHaveCount(0);
+
   const pane = page.locator('aside.subagent-split-pane');
   await expect(pane).toBeVisible();
   await expect(pane.locator('.split-title')).toHaveText('research_review');

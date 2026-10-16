@@ -142,12 +142,18 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
                 className="agent-row"
                 role="button"
                 tabIndex={0}
-                onClick={() => onOpenSession(d.child_session_id)}
+                onClick={() => {
+                  // 选中即收面板（浮层纪律）：面板若留着会继续盖在分栏头部、
+                  // 拦住「关闭分栏」等按钮的指针事件（e2e 实测）。
+                  setOpen(false);
+                  onOpenSession(d.child_session_id);
+                }}
                 onKeyDown={(e) => {
                   // 只在**行本身**聚焦时响应——chevron 按钮自己的 Enter/Space 不得冒泡成开主视图。
                   if (e.target !== e.currentTarget) return;
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
+                    setOpen(false);
                     onOpenSession(d.child_session_id);
                   }
                 }}
@@ -169,6 +175,8 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
                   title="右侧分栏打开（父会话保持不动）"
                   onClick={(e) => {
                     e.stopPropagation();
+                    // 同上：分栏打开后收面板，否则面板盖住分栏头部（含关闭按钮）。
+                    setOpen(false);
                     onOpenSplit({ childSessionId: d.child_session_id, target: d.target });
                   }}
                 >
