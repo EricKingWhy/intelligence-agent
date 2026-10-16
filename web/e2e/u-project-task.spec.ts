@@ -25,7 +25,8 @@
  *  - AC11 创建体带 `cwd`、`task`（= prompt 原文）、`autonomy`（默认 ask）；
  *    **默认不发 `model` / `sandbox_backend` / `permission_mode`**（auto/缺省 = 不发键）；
  *    URL 不再拼 `launch` query（#204 的 launch=false 被反转为创建即启动）；
- *  - AC11b 完成目标是可选文本框，提交时拼进首条 prompt
+ *  - AC11b 完成目标是可选**单行**输入框（`input[type=text]`，placeholder「什么结果算完成？」），
+ *    提交时拼进首条 prompt
  *    （`完成目标：<验收>\n\n<prompt>`，Codex `/goal` 自然语言三要素同型）；
  *  - AC12 422 留在确认面：不关对话框、不打全局横幅、后端 detail 原样可见
  *    （submitTask 的 ownError 通道，前缀「提交失败：」）、可重试；

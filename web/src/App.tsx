@@ -549,15 +549,16 @@ export default function App() {
     // 「新建会话」的意图就是"我要说点什么"，所以这一跳是意图本身，不是补偿动画；
     // 能力收窄时 resolveActiveTab 兜底，不会切到一个不存在的面。
     setSelectedSurface('chat');
-    // #1177 §A：直达的意义是"进入即可打字"——把焦点交给 composer 输入框。侧栏「+」
-    // 与项目菜单「新建会话」共用本入口，两处都落到同一个输入框。
+    // #1177 §A：直达的意义是"进入即可打字"——把焦点交给 composer 输入框。侧栏「+」、
+    // 空项目 ghost 与项目菜单「新建会话」共用本入口，三处都落到同一个输入框（有意统一）。
     //
     // 必须**推迟到菜单关闭之后**：从项目菜单点「新建会话」时本回调在菜单 `onSelect`
     // 里同步触发，那一刻 Radix 的 DropdownMenu 还挂载着、焦点陷阱仍在 ⇒ 同步
     // `focus()` 会被陷阱当场拽回菜单；菜单随即关闭、被聚焦的菜单项卸载，焦点就落到
-    // body。`requestAnimationFrame` 在 React 提交（菜单卸载、陷阱拆除）之后、Radix
-    // 关闭时默认的 trigger 归还（`setTimeout(0)`，已被 SessionList 的
-    // `suppressMenuAutoFocus` 跳过）前后落地，是确定性的交接点。
+    // body。交接之所以**确定成立**，靠的是 SessionList 的 `suppressMenuAutoFocus`：
+    // 它在 `onCloseAutoFocus` 里 `preventDefault`，整体取消了 Radix 默认的 trigger
+    // 归还 ⇒ `requestAnimationFrame` 只需落在 composer 挂载之后，与归还（`setTimeout(0)`）
+    // 的相对顺序无关紧要；删掉 `suppressMenuAutoFocus` 则归还重新生效、交接就会回归。
     requestAnimationFrame(() => document.getElementById('composer-input')?.focus());
     // #183 AC4：未钉住时**离开一个正在看的会话** = 收起面板（钉住的用途正是
     // "切换会话时它还开着"）。首次进入（原本没有会话）不算离开——那会把"点开第一个

@@ -436,6 +436,7 @@ export const SessionList = memo(function SessionList({
                           // { name: '新建会话' })` 默认**按子串匹配**，本行名称一旦含它就会与
                           // 侧栏按钮双命中（strict mode 违例，实测把 e2e `project-context` AC1
                           // 打红）。改说「新会话」既传达同一状态，又不与那个入口撞名。
+                          // 武装态文案共三处（本 aria-label / 下方 title / 可见 chip），改动须同步。
                           aria-label={`${project.title}：${
                             expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`
                           }${contextArmed ? '；已选中为新会话的目标目录，再点一次取消' : ''}`}

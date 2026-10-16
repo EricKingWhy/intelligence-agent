@@ -837,7 +837,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* #1269：项目语境武装（#1028 toggle）的显式状态提示——「新建会话目标」。
  * 只在行被选中为通用新建的 cwd 继承来源时出现；与 `.project-active` 高亮一同把
  * "这行是一个可再点取消的 toggle"讲清楚（用户 2026-10-17 反馈：这个状态此前只隐含在
- * 低对比高亮里）。复用 featured 语言（accent 淡底 + 主文本色），但保持 chrome 面的克制。
+ * 低对比高亮里）。复用 `.project-active` 的 accent 淡底 + `--text-primary`，但保持 chrome 面的克制。
  * 不新增主题 token（`--color-accent` / `--text-primary` 已双主题定义，§15 无涉）。 */
 .rail-project-armed-hint {
   flex-shrink: 0;
