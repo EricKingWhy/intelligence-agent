@@ -365,7 +365,10 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     pass
                 elif msg_type == "send_message":
                     # 续聊走 SessionService（业务逻辑不进 WS 层）
-                    from agent_harness.agent.budget import BudgetRejection
+                    from agent_harness.agent.budget import (
+                        BudgetConflict,
+                        BudgetRejection,
+                    )
                     from agent_harness.session.service import (
                         AttachmentMessageTooLarge,
                         AttachmentReferenceInvalid,
@@ -435,6 +438,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     # 续聊入口——不在这里收编，它会逃到外层的 `except Exception`（只
                     # `logger.debug`）并让连接静默死掉，用户看不到任何原因。
                     # BudgetRejection（#308）：同上，别名冲突 / 越权 ceiling 也要有回声。
+                    # BudgetConflict（#1240 / #1223）：会话有待回答的用户输入时 `send_message`
+                    # 抛的 409 闸门——同一条"不在此收编即静默断连"的漏网项，回 error 帧。
                     except (
                         InvalidSessionId,
                         SessionNotFound,
@@ -445,6 +450,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         ModelDoesNotSupportImages,
                         WorkspaceBindingConflict,
                         BudgetRejection,
+                        BudgetConflict,
                     ) as e:
                         await _send_json({"type": "error", "message": str(e)})
                         continue
