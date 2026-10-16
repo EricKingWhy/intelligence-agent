@@ -7029,9 +7029,9 @@ button.json-row {
 /* ── #1198：BudgetPicker v2 视觉层 ──
  *   仅作用于预算面板；复用现有 picker 外壳、图标与主题 token，不增加 :root 变量。 */
 .budget-picker-content--v2 {
-  width: 308px;
-  min-width: min(308px, calc(100vw - 24px));
-  max-width: min(308px, calc(100vw - 24px));
+  width: 720px;
+  min-width: min(720px, calc(100vw - 24px));
+  max-width: min(720px, calc(100vw - 24px));
   max-height: min(420px, calc(100vh - 24px));
   padding: 0;
   gap: 0;
