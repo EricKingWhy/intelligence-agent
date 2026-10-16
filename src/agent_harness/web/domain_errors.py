@@ -130,6 +130,8 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     ModelDoesNotSupportImages,
     PendingApprovalConflict,
+    ProtectedFactNotFound,
+    ProtectedFactNotRevocable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
@@ -193,6 +195,8 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     #（不泄露存在性）。读端点在自己的 except 里把它译成定制 404 文案；本表登记
     # 是为了"新增领域异常必须显式登记"的覆盖纪律（漏登记先红）。
     AttachmentNotReferenced: 404,
+    # #1190：约束管理面板撤销目标不存在于本会话投影（404：资源不存在）。
+    ProtectedFactNotFound: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # F6 / #635：手动压缩的两个类型化拒绝（in-flight 防重 / 落盘并发改动）。
@@ -213,6 +217,9 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # ——所以不谎报 404（那会让前端以为会话没了），用 409。
     SupersedeTargetInvalid: 409,
     ProtectedFactReferenceInvalid: 409,
+    # #1190：约束管理面板撤销目标非 active（已被取代）——会话与 fact 都在，是当前
+    # 状态不允许主动撤销（409，与 SupersedeTargetInvalid 同立场）。
+    ProtectedFactNotRevocable: 409,
     # F18-A / #282：会话有未裁决的审批时拒绝改权限档（理由见 ADR-0041 §4.1）。
     PendingApprovalConflict: 409,
     # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），

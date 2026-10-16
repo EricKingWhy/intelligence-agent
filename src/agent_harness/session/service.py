@@ -101,6 +101,7 @@ from agent_harness.session.approval import (
     SESSION_PERMISSION_MODE_KEY,
     PermissionChange,
     append_approval_revoke,
+    append_fact_revocation,
     append_legacy_defaults_migration,
     append_permission_change,
     derive_approval_grants,
@@ -154,6 +155,8 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     ModelDoesNotSupportImages,
     PendingApprovalConflict,
+    ProtectedFactNotFound,
+    ProtectedFactNotRevocable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
@@ -6549,6 +6552,94 @@ class SessionService:
         append_workflow_mode_change(session, mode)
         return {"id": session_id, "mode": mode.value}
 
+    # ── #1190：会话级约束管理面板（受保护事实查看 + 主动撤销）──────────────
+    async def list_protected_facts(self, session_id: str) -> list[dict[str, Any]]:
+        """投影本会话全量受保护事实（active/revoked/superseded），按来源 seq 倒序。
+
+        面板数据面：状态值域钉死三值（`revoked` 由 `task/fact_revocation` 派生）；
+        逐条带 `registered_at`（来源事件时间）与 `revoked_at` / `revoked_by`
+        （撤销事件派生，无则 null）。**不做任何过滤或二次加工**——筛选属展示层
+        （PRD 全局铁律：前端不维护第二套状态）。
+        """
+        await self._require_existing_session(session_id)
+        events = await self.get_events(session_id)
+        return project_protected_fact_rows(events)
+
+    async def revoke_protected_fact(
+        self, session_id: str, fact_id: str, *, revoked_by: str,
+    ) -> dict[str, Any]:
+        """主动撤销一条 active 受保护事实（#1190）。
+
+        走会话级管理写入口（`session/approval.py::append_fact_revocation`，与
+        `append_approval_revoke` 同口径）；追加 `task/fact_revocation` 事件，
+        **不物理删除任何事件**（历史保留链）。同步路径：当前请求内完成，返回
+        `{fact_id, status: "revoked", revoked_at}`。幂等：已 revoked → 原样回执
+        （不重复落事件）。目标不存在 → `ProtectedFactNotFound`（404）；非 active
+        （已被取代）→ `ProtectedFactNotRevocable`（409）。
+
+        「读投影 → 判状态 → 追加事件」是**读-判-写**序列，须原子：否则同一 fact 的
+        两个并发撤销请求会各自读到 `active`、各落一条 `task/fact_revocation`。用
+        `RunManager` 的**每会话锁**取临界区（进程内互斥，同 `_resume_lock` 的既有
+        口径；Web 层每请求新建服务实例，锁不能挂在本实例上）。
+        """
+        await self._require_existing_session(session_id)
+        async with self._resume_lock(session_id):
+            events = await self.get_events(session_id)
+            fact = next(
+                (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
+                None,
+            )
+            if fact is None:
+                raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+            if fact.status == "revoked":
+                # 幂等：真值已是 revoked，不重复落事件。
+                return {
+                    "fact_id": fact_id,
+                    "status": "revoked",
+                    "revoked_at": fact.revoked_at,
+                }
+            if fact.status != "active":
+                raise ProtectedFactNotRevocable(
+                    f"protected fact '{fact_id}' is {fact.status}, not revocable"
+                )
+            session = Session.load(self._store, session_id)
+            event = append_fact_revocation(session, fact_id, revoked_by=revoked_by)
+            return {
+                "fact_id": fact_id,
+                "status": "revoked",
+                "revoked_at": event.data.get("revoked_at") or event.time,
+            }
+
+
+def project_protected_fact_rows(events: list[SessionEvent]) -> list[dict[str, Any]]:
+    """把 `derive_protected_facts` 的全量投影转成约束管理面板行（#1190）。
+
+    - `registered_at` 取来源事件时间（事件流是时间的唯一来源）；
+    - `revoked_at` / `revoked_by` 由 derive 从 `task/fact_revocation` 事件派生
+      （无则 null）；
+    - 按来源 `source_seq` 倒序（同一来源事件的多条事实按 `fact_id` 定序，
+      保证排序稳定、可复现）。
+
+    **不做过滤**：面板的"状态/类型"筛选是展示层职责（前端不维护第二套状态）。
+    """
+    time_by_event_id = {event.event_id: event.time for event in events}
+    rows = [
+        {
+            "fact_id": fact.fact_id,
+            "type": fact.type,
+            "value": fact.value,
+            "status": fact.status,
+            "source_event_id": fact.source_event_id,
+            "source_seq": fact.source_seq,
+            "registered_at": time_by_event_id.get(fact.source_event_id),
+            "revoked_at": fact.revoked_at,
+            "revoked_by": fact.revoked_by,
+        }
+        for fact in derive_protected_facts(events)
+    ]
+    rows.sort(key=lambda row: (row["source_seq"], row["fact_id"]), reverse=True)
+    return rows
+
 
 # ── 公开符号重导出（候选 2 纯结构重构）────────────────────────────────
 # 异常 / 模型切换领域逻辑已移到兄弟模块，这里统一 re-export，
@@ -6587,6 +6678,7 @@ __all__ = [
     "current_model_selection",
     "current_reasoning_effort",
     "inherit_parent_model",
+    "project_protected_fact_rows",
     "resolve_model_target",
     "validate_session_id",
 ]

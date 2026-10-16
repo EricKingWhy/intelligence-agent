@@ -1,0 +1,1 @@
+2026-10-16	#1190 约束管理面板 Phase 1 首轮独立双轴审查。Correctness APPROVE P0/P1/P2=0 P3=3 P4=2；Standards REQUEST_CHANGES P2=2 P3=2 P4=2。全部修于 ab51c15f：亮色主题弹窗 token 移入 :root、补全亮色覆盖、修无效 font 简写与失真注释。范围含后端 task/fact_revocation 事件与投影、GET/POST 约束接口、Session Inspector 约束页、vitest 与 e2e 测试、生成物。	838bd798a994c35a9149cf10009bc684959a7dd5..ab51c15f04c514ed4b1d22aee161ef0e786f2a5f
