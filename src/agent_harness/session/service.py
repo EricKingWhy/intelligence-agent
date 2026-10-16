@@ -748,6 +748,22 @@ def _latest_pending_user_input_request(
     return _pending_user_input_request(events, run_id=run_id)
 
 
+def _pending_user_input_conflict_message(
+    request: SessionEvent, *, resume_action: str,
+) -> str:
+    """待回答用户输入阻塞新任务时的 409 文案——按 ``data.kind`` 分流（#1223）。
+
+    约束澄清（``protected_fact_conflict``）与通用提问（``ask_user``）共用同一道闸门
+    （:func:`_latest_pending_user_input_request`），但语义不同：前者是长期约束冲突的
+    窄场景，后者是通用提问。文案写死「约束澄清」会把通用提问误报成约束冲突，把用户
+    引去处理一个并不存在的冲突。故按 kind 分流：``ask_user`` 走中性句，其余（含缺
+    ``kind`` 的历史事件）走约束澄清**原句**，保既有行为零回归。
+    """
+    if request.data.get("kind") == "ask_user":
+        return f"当前有待回答的提问；请先提交答案，{resume_action}"
+    return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
+
+
 def _pending_user_input_pause(
     events: list[SessionEvent], *, run_id: str,
 ) -> PausedRun | None:
@@ -2095,10 +2111,14 @@ class SessionService:
                     "约束澄清工具的持久结果缺失，拒绝启动该会话的新 run。"
                 )
             self._budget_recovery_failed_sessions.discard(session_id)
-        if task is not None and _latest_pending_user_input_request(existing) is not None:
-            raise BudgetConflict(
-                "当前有待回答的约束澄清；请先提交答案，再启动新任务"
-            )
+        if task is not None:
+            pending_user_input = _latest_pending_user_input_request(existing)
+            if pending_user_input is not None:
+                raise BudgetConflict(
+                    _pending_user_input_conflict_message(
+                        pending_user_input, resume_action="再启动新任务",
+                    )
+                )
         # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
         # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
         # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
@@ -2576,13 +2596,14 @@ class SessionService:
             )
             if not locked_events:
                 raise SessionNotFound(f"session '{session_id}' not found")
-            if (
-                task is not None
-                and _latest_pending_user_input_request(locked_events) is not None
-            ):
-                raise BudgetConflict(
-                    "当前有待回答的约束澄清；请先提交答案，再发送新任务"
-                )
+            if task is not None:
+                pending_user_input = _latest_pending_user_input_request(locked_events)
+                if pending_user_input is not None:
+                    raise BudgetConflict(
+                        _pending_user_input_conflict_message(
+                            pending_user_input, resume_action="再发送新任务",
+                        )
+                    )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -3425,9 +3446,12 @@ class SessionService:
         current_events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
-        if _latest_pending_user_input_request(current_events) is not None:
+        pending_user_input = _latest_pending_user_input_request(current_events)
+        if pending_user_input is not None:
             raise BudgetConflict(
-                "当前有待回答的约束澄清；请先提交答案，再发送新消息"
+                _pending_user_input_conflict_message(
+                    pending_user_input, resume_action="再发送新消息",
+                )
             )
 
         try:

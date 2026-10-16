@@ -137,6 +137,29 @@ describe('Composer pending constraint input lock', () => {
   });
 });
 
+// ── #1223：`ask_user` 通用提问也参与 composer 锁定，文案**中性**（ask_user 不是约束澄清）──
+describe('Composer pending ask_user lock (#1223)', () => {
+  it('待回答的 ask_user 提问 → 锁定输入框，提示中性（绝不出现「约束澄清」字样）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      askUserPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toMatch(/<textarea[^>]*disabled=""/);
+    expect(html).toContain('请先回答当前提问，再发送新消息');
+    expect(html).toContain('等待回答…');
+    expect(html).not.toContain('约束澄清');
+  });
+
+  it('约束澄清在场时其锁文案**保持不动**（没有被中性的 ask_user 文案顶掉）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      constraintInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
+    expect(html).toContain('等待约束澄清回答…');
+  });
+});
+
 describe('Composer procedural rule signal (#298 R5)', () => {
   it('offers an explicit opt-in for reusable rules', () => {
     const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');

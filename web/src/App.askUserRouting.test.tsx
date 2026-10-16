@@ -175,3 +175,23 @@ describe('#1204 — App 按 kind 分流挂载提问 UI', () => {
     expect(document.querySelector('.ask-user-card')).toBeNull();
   });
 });
+
+describe('#1223 — 待回答的用户输入锁 composer', () => {
+  it('kind=ask_user 待回答 ⇒ composer 锁定，提示中性（把用户引向卡片，不撞 409）', async () => {
+    const el = await mount('ask_user');
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea).not.toBeNull();
+    expect(textarea!.hasAttribute('disabled')).toBe(true);
+    const hint = el.querySelector('.composer-locked-hint');
+    expect(hint?.textContent).toContain('请先回答当前提问，再发送新消息');
+    expect(hint?.textContent).not.toContain('约束澄清');
+  });
+
+  it('kind=protected_fact_conflict 待回答 ⇒ composer 锁定，约束澄清文案保持不动', async () => {
+    const el = await mount('protected_fact_conflict');
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea!.hasAttribute('disabled')).toBe(true);
+    const hint = el.querySelector('.composer-locked-hint');
+    expect(hint?.textContent).toContain('请先回答当前约束澄清，再发送新消息');
+  });
+});

@@ -1053,6 +1053,11 @@ export default function App() {
     paused.run_id === pendingAskUser.run_id
       ? pendingAskUser
       : null;
+  /** #1223：`ask_user` 待回答（答案尚未落回事件流）→ 参与 composer 锁定，把用户引向
+   *  对话流里的待回答卡片，而不是让他发新消息撞后端 409。与 `constraintInputPending`
+   *  完全同形（同一 `USER_INPUT_REQUESTED` 抽象，只是 `kind` 不同；锁的判据是投影字段
+   *  ＋「答案未到」，不另立第二真相源）。 */
+  const askUserPending = pendingAskUser !== null && pendingAskUser.answer === null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -1664,6 +1669,9 @@ export default function App() {
                     /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
                     ownership={ownership}
                     constraintInputPending={constraintInputPending}
+                    /* #1223：待回答的 `ask_user` 提问也锁 composer（与约束澄清同一条
+                       锁定语义；文案在 Composer 内中性化，不出现「约束澄清」字样）。 */
+                    askUserPending={askUserPending}
                     /* #1148：分离投递（窗外落定）迟到的失败原文——hook 把没送出去的
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
