@@ -674,7 +674,8 @@ export default function App() {
 
   // ── #1193：plan-stuck 横幅的「退出 plan 模式」动作 ──
   /** 动作状态（横幅内联展示 pending / 失败原因，同 recoverState 的既有形状）。
-   *  成功路径由 hook 清横幅（`runFailedBeforePlan` 归 null）→ 横幅整体卸载；
+   *  成功路径由投影收口：退出写入的 `workflow/mode-changed` 取代失败标记，
+   *  hook 重读事件后 `runFailedBeforePlan` 派生为 null → 横幅整体卸载；
    *  失败保持横幅在场并就地回显——不静默吞，也不自动重试。
    *  `sessionId` 随状态一起记：横幅卸载后状态仍在（App 常驻），渲染端按会话
    *  配对，失败原因不会串到另一个会话的横幅上。 */

@@ -196,11 +196,13 @@ class TestPlanModeIsInitialCondition:
             await asyncio.sleep(0.3)
             return result
 
-        with patch.object(SessionService, "create_and_launch", delayed):
-            with _ModelProbe(
+        with (
+            patch.object(SessionService, "create_and_launch", delayed),
+            _ModelProbe(
                 [[_write_tool_call("call-write-window"), AIMessage(content="done")]]
-            ):
-                resp = client.post("/api/sessions", json=_create_payload())
+            ),
+        ):
+            resp = client.post("/api/sessions", json=_create_payload())
         assert resp.status_code == 200, resp.text
         sid = _session_id(resp)
 
@@ -225,11 +227,13 @@ class TestPlanModeIsInitialCondition:
             time.sleep(0.05)
             return original_begin_run(self, **kwargs)
 
-        with patch.object(Session, "begin_run", slow_begin_run):
-            with _ModelProbe(
+        with (
+            patch.object(Session, "begin_run", slow_begin_run),
+            _ModelProbe(
                 [[_write_tool_call("call-write-slow"), AIMessage(content="done")]]
-            ):
-                resp = client.post("/api/sessions", json=_create_payload())
+            ),
+        ):
+            resp = client.post("/api/sessions", json=_create_payload())
         assert resp.status_code == 200, resp.text
         sid = _session_id(resp)
 
@@ -250,9 +254,11 @@ class TestRunFailedBeforePlanSurface:
         self, tmp_path: Path
     ):
         client = _client(tmp_path)
-        with patch.object(Session, "begin_run", _boom_begin_run):
-            with _ModelProbe([[AIMessage(content="unused")]]):
-                resp = client.post("/api/sessions", json=_create_payload())
+        with (
+            patch.object(Session, "begin_run", _boom_begin_run),
+            _ModelProbe([[AIMessage(content="unused")]]),
+        ):
+            resp = client.post("/api/sessions", json=_create_payload())
         assert resp.status_code == 200, resp.text
         sid = _session_id(resp)
 
@@ -281,12 +287,49 @@ class TestRunFailedBeforePlanSurface:
         assert durable_errors[0]["data"]["code"] == "run-failed-before-plan"
         assert durable_errors[0]["seq"] == errors[0]["seq"]
 
+    def test_durable_append_failure_degrades_to_transient_frame(
+        self, tmp_path: Path
+    ):
+        """落盘失败兜底：不得顶替原始异常，且在场的订阅者仍收到瞬时帧。
+
+        durable 化（审查 F2）把信号从流挪进日志，代价是异常臂里多了一次 IO——
+        这条用例钉住那次 IO 失败时的降级形状（stages 契约：第一处异常在全部
+        收尾跑完后**原样**再抛；不得被 OSError 顶替，也不得静默丢弃信号）。"""
+        client = _client(tmp_path)
+        original_append = Session.append
+
+        def failing_append(self, event_type, data, **kwargs):
+            if event_type == "error":
+                raise OSError("injected durable write failure")
+            return original_append(self, event_type, data, **kwargs)
+
+        with (
+            patch.object(Session, "begin_run", _boom_begin_run),
+            patch.object(Session, "append", failing_append),
+            _ModelProbe([[AIMessage(content="unused")]]),
+        ):
+            resp = client.post("/api/sessions", json=_create_payload())
+        assert resp.status_code == 200, resp.text
+
+        errors = _error_frames(resp)
+        assert len(errors) == 1, f"落盘失败仍须推出信号：{_frames(resp)}"
+        assert errors[0]["seq"] is None, "退化为瞬时帧（没有 seq 可分配）"
+
+        sid = _session_id(resp)
+        events = _events(client, sid)
+        types = [e["type"] for e in events]
+        assert "error" not in types, f"落盘失败就不该出现在 durable log：{types}"
+        # 不回滚 mode 的语义与落盘成败无关。
+        assert _mode_values(events) == ["plan"]
+
     def test_manual_exit_plan_restores_write_tools(self, tmp_path: Path):
         """用户显式退出 plan 后，写操作工具恢复可用（端到端恢复路径）。"""
         client = _client(tmp_path)
-        with patch.object(Session, "begin_run", _boom_begin_run):
-            with _ModelProbe([[AIMessage(content="unused")]]):
-                resp = client.post("/api/sessions", json=_create_payload())
+        with (
+            patch.object(Session, "begin_run", _boom_begin_run),
+            _ModelProbe([[AIMessage(content="unused")]]),
+        ):
+            resp = client.post("/api/sessions", json=_create_payload())
         assert resp.status_code == 200, resp.text
         sid = _session_id(resp)
         assert _error_frames(resp), "前置条件：崩溃 run 必须推出 run-failed-before-plan"

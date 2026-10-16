@@ -142,6 +142,10 @@ class TestSessionEventDTO:
             # #352：验收项与真实证据的服务端投影——append-only 证据记录
             # （14 字段 DTO；重跑追加不覆盖；权威投影在后端 derive_evidence_state）。
             "evidence/recorded",
+            # #1193：run 致命异常的明确错误信号（plan 档 + 计划从未生成）。
+            # 由 STREAM_ONLY 升为 durable：致命启动失败发生在 run 起点，
+            # 前端接流总晚一步，瞬时帧必丢（详见 event.py 中 ERROR 定义处）。
+            "error",
         }
         assert EVENT_TYPES == expected
 
