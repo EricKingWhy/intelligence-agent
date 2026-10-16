@@ -48,7 +48,11 @@ def _create_session(client: TestClient) -> str:
     ):
         resp = client.post(
             "/api/sessions",
-            json={"task": "hi", "budget": {"local": {"max_agent_turns": 1}}},
+            json={
+                "task": "hi",
+                "sandbox_backend": "local",
+                "budget": {"local": {"max_agent_turns": 1}},
+            },
         )
     assert resp.status_code == 200, resp.text
     frames = [
@@ -272,3 +276,41 @@ class TestWorkspaceExportApi:
             resp = _export(client, sid, {"host_target": str(target)})
         assert resp.status_code == 500, resp.text
         assert not target.exists(), "服务端故障却创建了导出目标目录"
+
+    def test_export_staging_cleanup_failure_is_surfaced(self, tmp_path: Path) -> None:
+        """临时 staging 清理失败必须可见，不能被 best-effort 删除吞掉。"""
+        from agent_harness.sandbox.base import Sandbox
+        from agent_harness.web import workspace_export
+
+        client = _client(tmp_path)
+        sid = _create_session(client)
+        target = tmp_path.parent / f"{tmp_path.name}-cleanup-failure-export"
+        real_rmtree = shutil.rmtree
+        staging_paths: list[Path] = []
+        cleanup_ignore_errors: list[bool] = []
+
+        def _partial_export(_self: object, dest: object) -> None:
+            (Path(dest) / "partial.txt").write_text("partial", encoding="utf-8")
+            raise OSError("simulated extraction failure")
+
+        def _fail_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+            staging_paths.append(Path(path))
+            ignore_errors = bool(kwargs.get("ignore_errors"))
+            cleanup_ignore_errors.append(ignore_errors)
+            if ignore_errors:
+                return
+            raise PermissionError("simulated staging cleanup failure")
+
+        try:
+            with (
+                patch.object(Sandbox, "export_to_host", _partial_export),
+                patch.object(workspace_export.shutil, "rmtree", _fail_cleanup),
+            ):
+                response = _export(client, sid, {"host_target": str(target)})
+        finally:
+            for staging in staging_paths:
+                real_rmtree(staging, ignore_errors=True)
+
+        assert response.status_code == 500, response.text
+        assert cleanup_ignore_errors and not any(cleanup_ignore_errors)
+        assert not target.exists()

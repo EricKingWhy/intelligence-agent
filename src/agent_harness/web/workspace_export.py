@@ -24,6 +24,7 @@ import stat
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 import anyio
@@ -154,8 +155,6 @@ def register_workspace_export_routes(
         映射 → 404（复用 `session_sandbox` 既有语义）/ 并发建同一目标 → 409 /
         导出树含不安全成员 → 422 / 服务端故障（磁盘/权限）→ 500。
         """
-        from tempfile import mkdtemp
-
         target = Path(body.host_target)
         _require_absolute_target(body.host_target)
         if target.exists():
@@ -167,8 +166,8 @@ def register_workspace_export_routes(
         sandbox = await session_sandbox(
             app.state.agent, session_id, validate_session_id
         )
-        staging = Path(mkdtemp(prefix="export-staging-"))
-        try:
+        with TemporaryDirectory(prefix="export-staging-") as staging_dir:
+            staging = Path(staging_dir)
             # 错误映射刻意**精确**，不宽泛：
             # - `ValueError` → 422：导出树成员不安全（绝对/`..`/特殊项）是请求问题；
             # - `tarfile.TarError` → 422：Docker 归档 `extractall(filter="data")`
@@ -185,6 +184,4 @@ def register_workspace_export_routes(
                 raise HTTPException(status_code=409, detail=str(error)) from error
             except (ValueError, tarfile.TarError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
         return {"status": "ok", "target": str(target)}
