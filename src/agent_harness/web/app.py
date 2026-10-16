@@ -790,9 +790,19 @@ class InputRequestAnswer(BaseModel):
     ] | None = None
     custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
     questions: list[AskUserAnswerItem] | None = Field(default=None, min_length=1)
+    # #1204：ask_user 超时到点时的恢复形态——只注入"用户可能不在"系统消息，不写答案。
+    timeout: bool = False
 
     @model_validator(mode="after")
     def validate_shape(self) -> InputRequestAnswer:
+        if self.timeout:
+            if (
+                self.choice is not None
+                or self.questions is not None
+                or self.custom_text is not None
+            ):
+                raise ValueError("timeout form cannot carry choice/questions/custom_text")
+            return self
         if self.questions is not None:
             if self.choice is not None or self.custom_text is not None:
                 raise ValueError("questions form cannot carry choice/custom_text")
@@ -3032,7 +3042,9 @@ def create_app(
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
                 input_request=(
-                    req.input_request.model_dump(exclude_none=True)
+                    req.input_request.model_dump(
+                        exclude_none=True, exclude_defaults=True,
+                    )
                     if req.input_request is not None else None
                 ),
                 **budget_claims(req.budget, resume_surface=True),

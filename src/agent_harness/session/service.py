@@ -117,6 +117,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.approval import (
     effective_permission_mode as _effective_permission_mode,
 )
+from agent_harness.session.ask_user_timeout import ask_user_timeout_message
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -805,13 +806,31 @@ def _ask_user_skip_message(question_texts: list[str]) -> str:
 def _ask_user_input_answer_data(
     events: list[SessionEvent], *, run_id: str, request_id: str,
     request: SessionEvent, answer: Mapping[str, Any],
+    ask_user_timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, bool]:
     """归一 `ask_user` 的通用 `input_request`：每题 `answer` 或为答案、或为 null（跳过）。
 
     `answer` 结构（#1204 用户裁决）：`{request_id, questions: [{question, answer:
     {label, custom_text?} | null}]}`；`answer=null` 即该题被跳过/留空，整卡跳过 =
-    全部 null。
+    全部 null。另有一个 `{request_id, timeout: true}` 形态：超时到点时由运行方提交，
+    只注入"用户可能不在"的系统消息、**不写任何 answer**（用户裁决：超时不替选）。
     """
+    if answer.get("timeout") is True:
+        if set(answer) != {"request_id", "timeout"}:
+            raise BudgetRejection("timeout 形态的 input_request 不接受其它字段")
+        normalized_timeout: dict[str, Any] = {
+            "request_id": request_id,
+            "timeout": True,
+        }
+        if _user_input_answer_already_recorded(
+            events, request_id=request_id, normalized_answer=normalized_timeout,
+        ):
+            return None, True
+        return {
+            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            "input_request_id": request_id,
+            "input_request_answer": normalized_timeout,
+        }, False
     if set(answer) - {"request_id", "questions"}:
         raise BudgetRejection("input_request 包含不支持的字段")
     questions = request.data.get("questions")
@@ -891,6 +910,7 @@ def _ask_user_input_answer_data(
 def _user_input_answer_data(
     events: list[SessionEvent], *, run_id: str, paused: PausedRun,
     answer: Mapping[str, Any] | None,
+    ask_user_timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, bool]:
     """把恢复请求的 `input_request` 归一成待落盘的 `USER_MESSAGE` 数据。
 
@@ -922,7 +942,7 @@ def _user_input_answer_data(
     if request.data.get("kind") == "ask_user":
         return _ask_user_input_answer_data(
             events, run_id=run_id, request_id=request_id, request=request,
-            answer=answer,
+            answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
         )
     if request.data.get("kind") != "protected_fact_conflict":
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
@@ -2741,6 +2761,7 @@ class SessionService:
             )
         _user_input_answer_data(
             events, run_id=paused.run_id, paused=paused, answer=input_request,
+            ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
         )
         effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
@@ -2931,6 +2952,7 @@ class SessionService:
             )
             answer_data, answer_already_recorded = _user_input_answer_data(
                 session.events, run_id=run_id, paused=paused, answer=input_request,
+                ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
             )
             if answer_data is not None and not answer_already_recorded:
                 session.append(USER_MESSAGE, answer_data)
