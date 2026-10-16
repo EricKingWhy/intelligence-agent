@@ -80,6 +80,17 @@ export interface WsScript {
   delayMs?: number;
   /** Delay between streamed frames so a test can observe intermediate UI state. */
   frameDelayMs?: number;
+  /** 下发 `frames` **之前**等待（用例精确掌握「新事件」到达的虚拟时刻）。
+   *
+   *  与 `delayMs` / `frameDelayMs` 的区别是**谁掌握时钟**：那两个按**真实**时间计时，
+   *  而 `page.clock` 下的虚拟时钟只在用例显式 `runFor` / `fastForward` 时才前进——
+   *  两者无法编排先后，「新事件到达时流已经跑了多久」于是变成竞态（#1214）。
+   *  闸门把时机交回用例：用例先把虚拟时钟推到目标时刻，再放行，帧才下发，
+   *  于是这段几何完全确定、且**与负载无关**。
+   *
+   *  只挡**增量帧**，不挡快照：订阅时快照照常立即下行，连接活性语义与不加闸门时
+   *  一致。不设 = 立即下发（既有行为）。 */
+  frameGate?: Promise<void>;
   /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
   closeNow?: boolean;
   /** 心跳 opt-in（毫秒）：按此间隔下行 `{type:'server_ping'}`，直到连接关闭。
@@ -157,6 +168,8 @@ async function installWsRoute(
             has_active_run: active,
           }),
         );
+        // 用例持有的闸门：放行前不下发增量帧（快照已在上方立即下行）。
+        if (script?.frameGate) await script.frameGate;
         for (const [index, f] of frames.entries()) {
           ws.send(JSON.stringify({ type: 'event', session_id: sessionId, event: f }));
           if (script?.frameDelayMs && index < frames.length - 1) {
