@@ -24,8 +24,8 @@ from agent_harness.context.compactor import (
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
-from agent_harness.context.window import effective_context_window
 from agent_harness.context.tokens import estimate_message_tokens, message_cost
+from agent_harness.context.window import effective_context_window
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,

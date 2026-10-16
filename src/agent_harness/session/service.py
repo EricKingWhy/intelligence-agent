@@ -88,6 +88,7 @@ from agent_harness.agent.run_budget import (
     validate_resume,
 )
 from agent_harness.assembly import build_runtime
+from agent_harness.context.window import append_context_window_change
 from agent_harness.logging import log_event
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -253,7 +254,6 @@ from agent_harness.session.workflow import (
     WorkflowMode,
     append_workflow_mode_change,
 )
-from agent_harness.context.window import append_context_window_change
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,

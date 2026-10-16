@@ -864,6 +864,10 @@ async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) 
     """
     import time
 
+    from agent_harness.context.window import (
+        append_context_window_change,
+        effective_context_window,
+    )
     from agent_harness.session.approval import (
         append_approval_grant,
         derive_approval_grants,
@@ -873,10 +877,6 @@ async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) 
         PERMISSION_GRANTED,
         PERMISSION_REVOKED,
         WORKFLOW_MODE_CHANGED,
-    )
-    from agent_harness.context.window import (
-        append_context_window_change,
-        effective_context_window,
     )
     from agent_harness.session.workflow import (
         WorkflowMode,

@@ -130,7 +130,7 @@ async def _build_with_window(tmp_path, window: int | None, *, payload: int = 20)
 @pytest.mark.asyncio
 async def test_build_derives_the_session_window(tmp_path) -> None:
     """会话挡位改到 500K 后，build 按 500K 判定（同一 builder 实例，不重建）。"""
-    builder, _messages, _session_ = await _build_with_window(tmp_path, 500_000)
+    builder, _messages, _ = await _build_with_window(tmp_path, 500_000)
     assert builder.max_context_tokens == 500_000
 
 
@@ -140,7 +140,7 @@ async def test_build_falls_back_to_the_constructor_default(tmp_path) -> None:
 
     构造期传的是 200K，改传 100K 后本用例若仍读 200K 就说明回落写死了。
     """
-    builder, _messages, _session_ = await _build_with_window(tmp_path, None)
+    builder, _messages, _ = await _build_with_window(tmp_path, None)
     assert builder.max_context_tokens == 200_000
 
 

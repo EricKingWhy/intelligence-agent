@@ -1485,7 +1485,7 @@ def _reconcile_info_provider(
 
 def _context_settings_payload(
     settings: Settings, session_id: str, events: list[SessionEvent]
-) -> "ContextSettings":
+) -> ContextSettings:
     """把「生效窗口 + 派生线」组装成 `ContextSettings`（#1197 项 1）。
 
     窗口走 `effective_context_window`（**唯一**派生入口，与 `ContextBuilder` 同源），
