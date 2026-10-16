@@ -46,7 +46,8 @@ async function openReview(page: Page, state: TaskReviewFixture): Promise<void> {
   await mockTaskReviewApi(page, state);
   await page.goto('/');
   await submitTask(page, '审阅这个任务');
-  await page.getByRole('button', { name: '任务审阅' }).click();
+  await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: /文件\/改动/ }).click();
+  await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
   await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
 }
 
@@ -77,11 +78,12 @@ test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }
   await expect(panel).toContainText('覆盖文件已变动：src/a.py');
 
   // 两轴分区：Run 轴执行中 + 交付态 chip 待验证
-  await expect(panel).toContainText('Run / 操作态');
-  await expect(panel).toContainText('执行中（1 个在途 run）');
+  await expect(panel).toContainText('工作进度');
+  await expect(panel).toContainText('正在处理中（1 项操作）');
   await expect(panel.locator('.task-review-chip')).toHaveText('待验证');
 
-  // UNKNOWN 留槽不推断
+  // Internal event diagnostics are available only after explicit disclosure.
+  await panel.locator('.task-review-diagnostic-disclosure > summary').click();
   await expect(panel).toContainText('需 reconcile（来源未接入）');
 });
 
@@ -99,8 +101,8 @@ test('可交付 + 证据已过期并存：chip 文案不被前端修正，仅叠
   const panel = page.getByRole('dialog', { name: '任务审阅' });
   await expect(panel.locator('.task-review-chip')).toHaveText('可交付');
   const disambiguation = panel.locator('.task-review-disambiguation');
-  await expect(disambiguation).toContainText('服务端判定：可交付');
-  await expect(disambiguation).toContainText('证据新鲜度：已过期');
+  await expect(disambiguation).toContainText('验收项状态：可交付');
+  await expect(disambiguation).toContainText('证据状态：已过期');
 });
 
 test('接受 → 交付态变已接受；刷新后同源（状态来自服务端投影，非本地缓存）', async ({ page }) => {
@@ -121,11 +123,12 @@ test('接受 → 交付态变已接受；刷新后同源（状态来自服务端
   await page.getByRole('button', { name: '接受', exact: true }).click();
   const panel = page.getByRole('dialog', { name: '任务审阅' });
   await expect(panel.locator('.task-review-chip')).toHaveText('已接受');
-  await expect(panel).toContainText('已接受：服务端交付状态为「已接受」');
+  await expect(panel).toContainText('任务已接受。');
 
   // 刷新后重开：状态仍来自服务端投影（同源），不是本地缓存推断
   await page.reload();
-  await page.getByRole('button', { name: '任务审阅' }).click();
+  await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: /文件\/改动/ }).click();
+  await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
   await expect(page.getByRole('dialog', { name: '任务审阅' }).locator('.task-review-chip')).toHaveText('已接受');
 });
 
@@ -143,14 +146,14 @@ test('带原因接受 reason 为空 → 客户端先校验（不发请求）；�
   await openReview(page, state);
   const panel = page.getByRole('dialog', { name: '任务审阅' });
 
+  await page.locator('.task-review-more-actions > summary').click();
   await page.getByRole('button', { name: '带原因接受' }).click();
   await expect(panel).toContainText('带原因接受必须填写原因。');
 
-  await page.getByRole('button', { name: '释放目录' }).click();
-  await expect(panel).toContainText('未释放：本会话不是该目录的写租约持有者');
+  await page.getByRole('button', { name: '释放工作目录' }).click();
+  await expect(panel).toContainText('未释放：当前会话未持有该工作目录');
 
-  // 三操作后果文案分开（释放目录 ≠ 撤销接受）
-  await expect(panel).toContainText('这不是撤销接受');
+  await expect(panel).toContainText('让其他任务可以使用这个目录');
 });
 
 test('文件/diff/快照：git status 文件列表 + unified diff + 快照清单 + 一致性 reasons', async ({ page }) => {

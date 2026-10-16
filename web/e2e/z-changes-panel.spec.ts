@@ -10,7 +10,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { SID, T, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
+import { SID, T, fulfillSse, mockTaskReviewApi, routeApi, submitTask, type FrameSpec, type TaskReviewFixture } from './fixtures';
 
 /** 一次 write/edit 的 tool/call + tool/result 对（data 形状同后端 `_diff_data`）。 */
 function writePair(
@@ -58,7 +58,11 @@ const HEAD: FrameSpec[] = [
  *  就声明了 `changes`，所以"面出现"由真实载荷驱动，不再靠用例自己造声明。
  *  镜像不等于同源：后端改值这里不会自动跟（后端侧由
  *  `tests/web/test_web_phase2_endpoints.py::TestCapabilities` 锁）。 */
-async function openChanges(page: import('@playwright/test').Page, frames: FrameSpec[]) {
+async function openChanges(
+  page: import('@playwright/test').Page,
+  frames: FrameSpec[],
+  reviewState?: TaskReviewFixture,
+) {
   await routeApi(page, {
     sessions: [{
       session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T,
@@ -67,11 +71,61 @@ async function openChanges(page: import('@playwright/test').Page, frames: FrameS
     events: frames,
     onSessionPost: (route) => fulfillSse(route, frames),
   });
+  if (reviewState) await mockTaskReviewApi(page, reviewState);
   await page.goto('/');
   await submitTask(page, '改两个文件');
-  await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: '文件/改动' }).click();
+  await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: /文件\/改动/ }).click();
   await expect(page.locator('.changes-panel')).toBeVisible();
 }
+
+test('completed changes show a file count and open detailed review on demand', async ({ page }) => {
+  const frames: FrameSpec[] = [
+    ...HEAD,
+    ...writePair(4, 'tc-review', 'write', 'src/a.ts', '', 'new\\n'),
+    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: 'run-189', time: T },
+  ];
+  const reviewState: TaskReviewFixture = {
+    task: {
+      defined: true, task_text: '改两个文件', read_write_intent: null, authorization: null,
+      cwd: '/repo', criteria: [], verification: {}, acceptance: null, version: 1,
+      open_run_ids: [], product_state: 'executing',
+    },
+    evidence: {},
+  };
+  await openChanges(page, frames, reviewState);
+
+  await expect(
+    page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: '文件/改动，1 个文件' }),
+  ).toBeVisible();
+  const summary = page.locator('.task-review-summary');
+  await expect(summary.locator('.task-review-summary-message')).toHaveText('本次改动 1 个文件，请查看 diff');
+  await expect(summary.getByRole('button', { name: '详细审阅' })).not.toHaveClass(/is-emphasized/);
+  await expect(page.getByRole('dialog', { name: '任务审阅' })).toHaveCount(0);
+
+  await summary.getByRole('button', { name: '详细审阅' }).click();
+  const dialog = page.getByRole('dialog', { name: '任务审阅' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('section[aria-label="逐项结果"]')).toHaveCount(0);
+});
+
+test('failed and interrupted runs are counted while cancellation is excluded', async ({ page }) => {
+  const frames: FrameSpec[] = [
+    ...HEAD,
+    ...writePair(4, 'tc-review', 'write', 'src/a.ts', '', 'new\\n'),
+    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: 'run-189', time: T },
+    { type: 'run/started', data: {}, seq: 7, session_id: SID, run_id: 'run-failed', time: T },
+    { type: 'run/failed', data: { reason: 'model_error' }, seq: 8, session_id: SID, run_id: 'run-failed', time: T },
+    { type: 'run/started', data: {}, seq: 9, session_id: SID, run_id: 'run-interrupted', time: T },
+    { type: 'run/interrupted', data: {}, seq: 10, session_id: SID, run_id: 'run-interrupted', time: T },
+    { type: 'run/started', data: {}, seq: 11, session_id: SID, run_id: 'run-cancelled', time: T },
+    { type: 'run/failed', data: { reason: 'cancelled' }, seq: 12, session_id: SID, run_id: 'run-cancelled', time: T },
+  ];
+  await openChanges(page, frames);
+
+  const summary = page.locator('.task-review-summary');
+  await expect(summary.locator('.task-review-summary-message')).toHaveText('有 2 个任务未完成，请查看');
+  await expect(summary.getByRole('button', { name: '详细审阅' })).toHaveClass(/is-emphasized/);
+});
 
 test('AC1/AC2/AC8：两次改动同一文件只有一行；点文件名 → diff 可见且按时间序列出各次改动', async ({
   page,

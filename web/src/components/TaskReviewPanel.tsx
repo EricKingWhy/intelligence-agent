@@ -179,6 +179,8 @@ export function TaskReviewPanel({
   const task = review.task;
   const productLabel =
     task && task.product_state !== '' ? PRODUCT_LABEL[task.product_state] : null;
+  const readWriteIntent = task?.read_write_intent?.trim() || null;
+  const authorization = task?.authorization?.trim() || null;
 
   // 消歧（选项 1-C）：chip 文案**不改**，只在证据 stale / 缺证据时叠加醒目警示与固定文案。
   // P1-1：证据加载失败（不可得）时不计入缺证据/过期——不可得≠缺证据，不触发消歧。
@@ -241,7 +243,7 @@ export function TaskReviewPanel({
 
         {!review.error && review.notDefined && (
           <div className="task-review-empty">
-            未定义任务：该会话尚无 `task/defined` 事件，没有可审阅的交付状态。
+            此会话尚未建立任务，暂无可审阅详情。
           </div>
         )}
 
@@ -252,54 +254,57 @@ export function TaskReviewPanel({
         {!review.error && !review.notDefined && task !== null && (
           <>
             {/* ① 原目标 / 约束 / 验收项 */}
-            <section className="task-review-section" aria-label="原目标与验收项">
+            <section className="task-review-section" aria-label="原目标">
               <h3 className="task-review-h">原目标</h3>
               <pre className="task-review-task">{task.task_text || '（空）'}</pre>
               <dl className="task-review-meta">
-                <dt>读写意图</dt>
-                <dd>{task.read_write_intent ?? '—'}</dd>
+                {(readWriteIntent || authorization) && (
+                  <>
+                    <dt>读写意图</dt>
+                    <dd>{readWriteIntent ?? '未声明'}</dd>
+                    <dt>授权档位</dt>
+                    <dd>{authorization ?? '未声明'}</dd>
+                  </>
+                )}
                 <dt>工作目录</dt>
                 <dd>{task.cwd ?? '—'}</dd>
-                <dt>授权档位</dt>
-                <dd>{task.authorization ?? '未声明'}</dd>
               </dl>
-              <h3 className="task-review-h">验收项（{task.criteria.length}）</h3>
-              {task.criteria.length === 0 ? (
-                <div className="task-review-hint">尚无验收项（Agent 可稍后提出清单）。</div>
-              ) : (
-                <ul className="task-review-criteria">
-                  {task.criteria.map((c) => (
-                    <li key={c.item_id} className="task-review-criterion">
-                      <span className="task-review-criterion-text">{c.text}</span>
-                      <span className="task-review-tag">{ORIGIN_LABEL[c.origin]}</span>
-                      <span className={`task-review-tag ${c.confirmed ? 'ok' : 'warn'}`}>
-                        {c.confirmed ? '已确认' : '未确认'}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+              {!readWriteIntent && !authorization && (
+                <div className="task-review-meta-empty">读写意图与授权档位未声明</div>
+              )}
+              {task.criteria.length > 0 && (
+                <>
+                  <h3 className="task-review-h">验收项（{task.criteria.length}）</h3>
+                  <ul className="task-review-criteria">
+                    {task.criteria.map((c) => (
+                      <li key={c.item_id} className="task-review-criterion">
+                        <span className="task-review-criterion-text">{c.text}</span>
+                        <span className="task-review-tag">{ORIGIN_LABEL[c.origin]}</span>
+                        <span className={`task-review-tag ${c.confirmed ? 'ok' : 'warn'}`}>
+                          {c.confirmed ? '已确认' : '未确认'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
               )}
             </section>
 
-            {/* ② 两轴状态（Run 轴 / 交付轴，分两区不混排） */}
-            <section className="task-review-section" aria-label="状态（两轴）">
+            <section className="task-review-section" aria-label="状态">
               <h3 className="task-review-h">状态</h3>
               <div className="task-review-axes">
-                <div className="task-review-axis" aria-label="Run / 操作态">
-                  <span className="task-review-axis-label">Run / 操作态</span>
+                <div className="task-review-axis" aria-label="工作进度">
+                  <span className="task-review-axis-label">工作进度</span>
                   {task.open_run_ids.length > 0 ? (
                     <span className="task-review-run-axis running">
-                      执行中（{task.open_run_ids.length} 个在途 run）
+                      正在处理中（{task.open_run_ids.length} 项操作）
                     </span>
                   ) : (
-                    <span className="task-review-run-axis idle">无在途 run</span>
+                    <span className="task-review-run-axis idle">当前没有进行中的操作</span>
                   )}
-                  <span className="task-review-hint">
-                    在途 run 来自交付投影 `open_run_ids`；run 终态属事件流事实，本投影只报在途。
-                  </span>
                 </div>
-                <div className="task-review-axis" aria-label="交付态">
-                  <span className="task-review-axis-label">Task 交付态</span>
+                <div className="task-review-axis" aria-label="交付情况">
+                  <span className="task-review-axis-label">交付情况</span>
                   {productLabel ? (
                     <span className={`task-review-chip state-${task.product_state}`}>
                       {productLabel}
@@ -307,24 +312,18 @@ export function TaskReviewPanel({
                   ) : (
                     <span className="task-review-chip">—</span>
                   )}
-                  <span className="task-review-hint">
-                    服务端判定依据：验收项验证值（不依据证据新鲜度）。
-                  </span>
                 </div>
               </div>
-              {/* 选项 1-C：不合并、不改 chip 文案，只叠加醒目警示 + 固定消歧文案。 */}
               {disambiguate && (
                 <div className="task-review-disambiguation" role="status">
-                  <strong>注意：交付判定与证据新鲜度不一致。</strong>
-                  <div>服务端判定：可交付（基于验收项验证）；证据新鲜度：{hasStale ? '已过期' : '存在缺证据项'}。</div>
-                  <div className="task-review-hint">
-                    这是两个独立事实的并列呈现，不是前端合并出的结论；请按下方逐项证据判断。
-                  </div>
+                  <strong>验收结果与证据状态不一致。</strong>
+                  <div>验收项状态：可交付；证据状态：{hasStale ? '已过期' : '有项目缺少证据'}。</div>
+                  <div className="task-review-hint">请逐项核对后再接受。</div>
                 </div>
               )}
             </section>
 
-            {/* ③ 逐项结果 */}
+            {task.criteria.length > 0 && (
             <section className="task-review-section" aria-label="逐项结果">
               <h3 className="task-review-h">逐项结果</h3>
               {review.evidenceError ? (
@@ -392,6 +391,7 @@ export function TaskReviewPanel({
                 })
               )}
             </section>
+            )}
 
             {/* ④ 改了哪些文件 + diff + 快照 vs 当前 */}
             <section className="task-review-section" aria-label="文件与差异">
@@ -466,12 +466,9 @@ export function TaskReviewPanel({
               </div>
             </section>
 
-            {/* ⑤ 失败尝试 + UNKNOWN 留槽 */}
-            <section className="task-review-section" aria-label="失败尝试与待对账">
-              <h3 className="task-review-h">失败尝试</h3>
-              {failedItems.length === 0 ? (
-                <div className="task-review-hint">投影中无失败的验收项。</div>
-              ) : (
+            {failedItems.length > 0 && (
+              <section className="task-review-section" aria-label="失败尝试">
+                <h3 className="task-review-h">失败尝试</h3>
                 <ul className="task-review-files">
                   {failedItems.map((c) => (
                     <li key={c.item_id}>
@@ -479,34 +476,25 @@ export function TaskReviewPanel({
                     </li>
                   ))}
                 </ul>
-              )}
-              <div className="task-review-unknown">
-                需 reconcile（来源未接入）
-                <span className="task-review-hint">
-                  UNKNOWN / reconcile 属 Operation Ledger 域，本票不接入也不推断。
-                </span>
-              </div>
-              <h3 className="task-review-h">下一步</h3>
-              {nextStepItems.length === 0 ? (
-                <div className="task-review-hint">暂无下一步建议（服务端未提供）。</div>
-              ) : (
-                <div>
-                  <div className="task-review-hint">处理以下未通过/缺证据项：</div>
-                  <ul className="task-review-files">
-                    {nextStepItems.map((c) => (
-                      <li key={c.item_id}>
-                        <code>{c.text}</code>
-                        <span className="task-review-tag warn">
-                          {task?.verification[c.item_id]?.value === 'failed' ? '未通过' : '缺证据'}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </section>
+              </section>
+            )}
+            {nextStepItems.length > 0 && (
+              <section className="task-review-section" aria-label="下一步">
+                <h3 className="task-review-h">下一步</h3>
+                <div className="task-review-hint">处理以下未通过或缺少证据的项目：</div>
+                <ul className="task-review-files">
+                  {nextStepItems.map((c) => (
+                    <li key={c.item_id}>
+                      <code>{c.text}</code>
+                      <span className="task-review-tag warn">
+                        {task.verification[c.item_id]?.value === 'failed' ? '未通过' : '缺证据'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
 
-            {/* ⑥ 三操作（各自后果分别说明；不与权限审批共用语义与文案） */}
             <section className="task-review-section" aria-label="操作">
               <h3 className="task-review-h">操作</h3>
               <div className="task-review-ops">
@@ -518,90 +506,99 @@ export function TaskReviewPanel({
                   >
                     接受
                   </button>
-                  <p className="task-review-op-consequence">
-                    后果：服务端交付态变为「已接受」（CAS；版本取自当前投影）。若已接受过，重复请求按幂等处理。
-                  </p>
+                  <p className="task-review-op-consequence">接受后锁定当前版本</p>
                 </div>
-                <div className="task-review-op">
-                  <label className="task-review-op-label" htmlFor="task-review-reason">
-                    带原因接受（原因必填）
-                  </label>
-                  <textarea
-                    id="task-review-reason"
-                    className="task-review-reason"
-                    value={gapReason}
-                    onChange={(e) => setGapReason(e.target.value)}
-                    rows={2}
-                    placeholder="说明接受缺项的原因"
-                  />
-                  <button
-                    className="btn-ghost"
-                    disabled={review.busy}
-                    onClick={() => void review.acceptWithGaps(gapReason)}
-                  >
-                    带原因接受
-                  </button>
-                  <p className="task-review-op-consequence">
-                    后果：接受但标注「带缺项」；服务端保留未通过 / 缺失的验收项。原因必填，客户端先校验，服务端仍会复核。
-                  </p>
-                </div>
-                <div className="task-review-op">
-                  <button
-                    className="btn-ghost"
-                    disabled={review.busy}
-                    onClick={() => void review.releaseLease()}
-                  >
-                    释放目录
-                  </button>
-                  <p className="task-review-op-consequence">
-                    后果：释放该目录的写租约（幂等；非持有者 `released:false` 会如实显示）。**这不是撤销接受**。
-                  </p>
-                </div>
-                {task.acceptance !== null && (
-                  <div className="task-review-op">
-                    <button
-                      className="btn-ghost"
-                      disabled={review.busy}
-                      onClick={() => void review.releaseAcceptance()}
-                    >
-                      撤销接受
-                    </button>
-                    <p className="task-review-op-consequence">
-                      后果：撤销接受裁决（同样 CAS）；验收项的验证值保持不变。与「释放目录」是两个不同事实。
-                    </p>
-                  </div>
-                )}
-                {/* #368 W-24：存储占用 + 清理预览。只读占用 + 一个入口，不动既有操作逻辑。 */}
-                <div className="task-review-op">
-                  <div className="task-review-usage" aria-label="存储占用">
-                    <span className="task-review-axis-label">存储占用</span>
-                    {usageError ? (
-                      <span className="task-review-hint">存储占用不可得：{usageError}</span>
-                    ) : usage === null ? (
-                      <span className="task-review-hint">读取中…</span>
-                    ) : (
-                      <>
-                        <span>
-                          事件 {formatBytes(usage.events_bytes)} · 原件{' '}
-                          {formatBytes(usage.artifacts_bytes)}（{usage.artifact_count} 个） · 进度{' '}
-                          {formatBytes(usage.progress_bytes)}
-                        </span>
-                        <span className="task-review-hint">
-                          可回收 {formatBytes(usage.reclaimable_bytes)}
-                        </span>
-                      </>
+                <details className="task-review-disclosure task-review-more-actions">
+                  <summary>更多操作</summary>
+                  <div className="task-review-disclosure-content">
+                    <div className="task-review-op">
+                      <label className="task-review-op-label" htmlFor="task-review-reason">
+                        带原因接受（原因必填）
+                      </label>
+                      <textarea
+                        id="task-review-reason"
+                        className="task-review-reason"
+                        value={gapReason}
+                        onChange={(e) => setGapReason(e.target.value)}
+                        rows={2}
+                        placeholder="说明接受缺项的原因"
+                      />
+                      <button
+                        className="btn-ghost"
+                        disabled={review.busy}
+                        onClick={() => void review.acceptWithGaps(gapReason)}
+                      >
+                        带原因接受
+                      </button>
+                      <p className="task-review-op-consequence">
+                        接受缺少部分验收项；需要填写原因。
+                      </p>
+                    </div>
+                    <div className="task-review-op">
+                      <button
+                        className="btn-ghost"
+                        disabled={review.busy}
+                        onClick={() => void review.releaseLease()}
+                      >
+                        释放工作目录
+                      </button>
+                      <p className="task-review-op-consequence">
+                        让其他任务可以使用这个目录
+                      </p>
+                    </div>
+                    {task.acceptance !== null && (
+                      <div className="task-review-op">
+                        <button
+                          className="btn-ghost"
+                          disabled={review.busy}
+                          onClick={() => void review.releaseAcceptance()}
+                        >
+                          撤销接受
+                        </button>
+                        <p className="task-review-op-consequence">
+                          撤销接受状态，不改变验收项结果。
+                        </p>
+                      </div>
                     )}
+                    <div className="task-review-op">
+                      <div className="task-review-usage" aria-label="存储占用">
+                        <span className="task-review-axis-label">存储占用</span>
+                        {usageError ? (
+                          <span className="task-review-hint">存储占用不可得：{usageError}</span>
+                        ) : usage === null ? (
+                          <span className="task-review-hint">读取中…</span>
+                        ) : (
+                          <>
+                            <span>
+                              事件 {formatBytes(usage.events_bytes)} · 原件{' '}
+                              {formatBytes(usage.artifacts_bytes)}（{usage.artifact_count} 个） · 进度{' '}
+                              {formatBytes(usage.progress_bytes)}
+                            </span>
+                            <span className="task-review-hint">
+                              可回收 {formatBytes(usage.reclaimable_bytes)}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <button className="btn-ghost" onClick={() => setCleanupOpen(true)}>
+                        清理预览…
+                      </button>
+                      <p className="task-review-op-consequence">
+                        预览会列出可清理的内容与受影响的证据；执行后无法恢复。
+                        <strong>不可恢复</strong>。
+                      </p>
+                    </div>
                   </div>
-                  <button className="btn-ghost" onClick={() => setCleanupOpen(true)}>
-                    清理预览…
-                  </button>
-                  <p className="task-review-op-consequence">
-                    后果：预览列出可清理的原件与将失去可回读原件的证据；执行会删除选中原件，
-                    <strong>不可恢复</strong>。
-                  </p>
-                </div>
+                </details>
               </div>
             </section>
+            <details className="task-review-disclosure task-review-diagnostic-disclosure">
+              <summary>诊断信息</summary>
+              <div className="task-review-disclosure-content task-review-diagnostics">
+                <div>在途 run 来自交付投影 `open_run_ids`；run 终态属事件流事实，本投影只报在途。</div>
+                <div>需 reconcile（来源未接入）。UNKNOWN / reconcile 属 Operation Ledger 域，本票不接入也不推断。</div>
+              </div>
+            </details>
           </>
         )}
       </div>
