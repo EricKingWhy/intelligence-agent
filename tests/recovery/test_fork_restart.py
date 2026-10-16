@@ -15,16 +15,19 @@ HTTP/CLI 面不在此处；本文件只钉 durable 判定与"重启之后现场�
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from agent_harness.recovery.scan import scan_unfinished_forks
-from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 
 pytestmark = pytest.mark.asyncio
@@ -40,12 +43,45 @@ PARENT_ID = "parent"
 CHILD_ID = "child"
 
 
-def _crash(tmp_path: Path) -> None:
+def _docker_available() -> bool:
+    try:
+        docker = importlib.import_module("docker")
+        client = docker.from_env(use_context=False)
+        client.ping()
+        client.close()
+    except Exception:  # noqa: BLE001 - daemon probe
+        return False
+    return True
+
+
+docker_required = pytest.mark.skipif(
+    not _docker_available(), reason="Docker SDK or daemon is unavailable"
+)
+
+
+def _crash(
+    tmp_path: Path,
+    *,
+    backend: str = "local",
+    parent_id: str = PARENT_ID,
+    child_id: str = CHILD_ID,
+) -> None:
     """跑一次"fork 拷贝中途真崩溃"的子进程，并校验退出码前提。"""
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
     completed = subprocess.run(
-        [sys.executable, str(_CHILD), json.dumps({"root": str(tmp_path)})],
+        [
+            sys.executable,
+            str(_CHILD),
+            json.dumps(
+                {
+                    "root": str(tmp_path),
+                    "backend": backend,
+                    "parent_id": parent_id,
+                    "child_id": child_id,
+                }
+            ),
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -101,3 +137,84 @@ async def test_fork_crash_residue_reclaimed_on_startup_scan(tmp_path: Path) -> N
     )
     assert [r.session_id for r in again] == [CHILD_ID]
     assert again[0].reclaimed
+
+
+@docker_required
+async def test_docker_fork_crash_reclaims_child_without_touching_parent(
+    tmp_path: Path,
+) -> None:
+    docker = importlib.import_module("docker")
+    client = docker.from_env(use_context=False)
+    parent_id = f"fork-recovery-parent-{uuid4().hex[:10]}"
+    child_id = f"fork-recovery-child-{uuid4().hex[:10]}"
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    registry = WorkspaceRegistry(root=tmp_path / "sandbox", backend="local")
+
+    try:
+        _crash(
+            tmp_path,
+            backend="docker",
+            parent_id=parent_id,
+            child_id=child_id,
+        )
+
+        parent_events_path = store._events_path(parent_id)
+        parent_events_before = parent_events_path.read_bytes()
+        child_events = store.read_events(child_id)
+        assert [event.type for event in child_events] == [
+            "session/started",
+            "fork/in-progress",
+        ]
+        child_container_name = f"agent-harness-{child_id}"
+        child_volume_name = f"agent-harness-{child_id}"
+        parent_container_name = f"agent-harness-{parent_id}"
+        parent_volume_name = f"agent-harness-{parent_id}"
+        client.containers.get(child_container_name)
+        client.volumes.get(child_volume_name)
+
+        results = await scan_unfinished_forks(
+            session_store=store, workspace_registry=registry
+        )
+
+        assert len(results) == 1
+        assert results[0].session_id == child_id
+        assert results[0].reclaimed is True
+        with pytest.raises(docker.errors.NotFound):
+            client.containers.get(child_container_name)
+        with pytest.raises(docker.errors.NotFound):
+            client.volumes.get(child_volume_name)
+        client.containers.get(parent_container_name)
+        client.volumes.get(parent_volume_name)
+        assert parent_events_path.read_bytes() == parent_events_before
+        assert [event.type for event in store.read_events(child_id)] == [
+            "session/started",
+            "fork/in-progress",
+        ]
+        assert registry.exists(child_id)
+        with pytest.raises(
+            WorkspaceBindingError, match="Docker workspace volume is missing"
+        ):
+            registry.get(child_id)
+
+        recovered_parent = registry.get(parent_id)
+        assert recovered_parent.read_text("keep.txt") == "父资产"
+        recovered_parent.write_text("recovery-check.txt", "parent still writable")
+        assert recovered_parent.read_text("recovery-check.txt") == (
+            "parent still writable"
+        )
+
+        again = await scan_unfinished_forks(
+            session_store=store, workspace_registry=registry
+        )
+        assert len(again) == 1
+        assert again[0].session_id == child_id
+        assert again[0].reclaimed is True
+        assert parent_events_path.read_bytes() == parent_events_before
+    finally:
+        for session_id in (child_id, parent_id):
+            name = f"agent-harness-{session_id}"
+            with suppress(Exception):
+                client.containers.get(name).remove(force=True, v=True)
+            with suppress(Exception):
+                client.volumes.get(name).remove(force=True)
+        client.close()
