@@ -1587,6 +1587,77 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+// ── 会话级约束管理面板（#1190 / #1176 Phase 1）──
+
+/** 受保护事实状态值域（钉死三值；`pending_approval` 是请求级状态，永不进入此值域）。 */
+export type ProtectedFactStatus = 'active' | 'revoked' | 'superseded';
+
+/** 单条受保护事实（后端 `GET .../protected-facts` 的原样投影，前端不二次加工）。 */
+export interface ProtectedFact {
+  fact_id: string;
+  type: string;
+  value: unknown;
+  status: ProtectedFactStatus;
+  source_event_id: string;
+  source_seq: number;
+  registered_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+}
+
+/** 同步撤销回执。 */
+export interface ProtectedFactRevokeReceipt {
+  fact_id: string;
+  status: 'revoked';
+  revoked_at: string | null;
+}
+
+/** 列本会话的全量受保护事实（#1190）。
+ *
+ *  数据是**后端实时投影**（前端不维护第二套状态）：每次调用都重拉，绝不缓存。
+ *  错误矩阵：
+ *    422 / 404 —— session_id 形态非法 / 会话不存在；
+ *    409 —— 事件日志损坏（不可重试）；
+ *    403 / 401 —— 非本机来源 / 缺身份令牌（面板据此显示"无权限查看约束"）。 */
+export async function listProtectedFacts(sessionId: string): Promise<ProtectedFact[]> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts`,
+  );
+  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const facts = typeof raw === 'object' && raw !== null
+    ? (raw as { facts?: unknown }).facts
+    : null;
+  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  return facts as ProtectedFact[];
+}
+
+/** 撤销一条 active 受保护事实（POST，二次确认由调用方负责）。
+ *
+ *  语义：200 → `{fact_id, status: "revoked", revoked_at}`（幂等）；409 → 目标已被取代
+ *  （非 active，不可主动撤销）；404 → 目标/会话不存在；403 / 401 同上。
+ *  走到 200 即"后端已落撤销事件"——调用方据此**重拉 GET** 对齐，不做乐观本地更新。 */
+export async function revokeProtectedFact(
+  sessionId: string,
+  factId: string,
+): Promise<ProtectedFactRevokeReceipt> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts/${encodeURIComponent(factId)}/revoke`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
+  if (body.status !== 'revoked') {
+    throw new Error('撤销回执缺少 revoked 状态');
+  }
+  return {
+    fact_id: typeof body.fact_id === 'string' ? body.fact_id : factId,
+    status: 'revoked',
+    revoked_at: typeof body.revoked_at === 'string' ? body.revoked_at : null,
+  };
+}
+
 // ── 证据保留 / 空间占用 / 清理（#368 W-24）──
 
 /** 会话存储占用（GET /api/sessions/{id}/usage）——**只读投影**，不缓存。

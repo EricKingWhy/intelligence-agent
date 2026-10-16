@@ -32,6 +32,7 @@ import {
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
+import { ConstraintsTab } from './ConstraintsTab';
 import { CopyButton } from './CopyButton';
 import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
@@ -45,7 +46,7 @@ export type InspectorFocus =
   | { kind: 'event'; event: AgentEvent }
   | { kind: 'child'; childSessionId: string; target: string };
 
-type Tab = 'timeline' | 'chat' | 'changes' | 'terminal' | 'artifacts';
+type Tab = 'timeline' | 'chat' | 'changes' | 'terminal' | 'artifacts' | 'constraints';
 
 /** Tab 图标 —— 每个 tab 一个 lucide icon，与 label 配对。
  *  Inspector 分段控件（segmented control）参考 Linear issue 面板与 VS Code
@@ -56,6 +57,7 @@ const TAB_ICONS: Record<Tab, typeof ListTree> = {
   changes: FileDiff,
   terminal: TerminalSquare,
   artifacts: Package,
+  constraints: ShieldCheck,
 };
 
 const TABS: readonly { id: Tab; label: string }[] = [
@@ -64,6 +66,7 @@ const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'changes', label: 'Changes' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'artifacts', label: 'Artifacts' },
+  { id: 'constraints', label: 'Constraints' },
 ];
 
 // C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
@@ -562,6 +565,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             <TerminalTab tools={tools} onFocusTool={onFocusTool} selectedKey={selectedKey} />
           )}
           {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} />}
+          {tab === 'constraints' && <ConstraintsTab sessionId={sessionId} />}
         </div>
 
         {/* AC2：peek 关掉只是 `hidden`（**不卸载**）——内部标签条与滚动位置留着，
