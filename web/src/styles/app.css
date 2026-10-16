@@ -4709,6 +4709,107 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   opacity: 0.7;
   flex-shrink: 0;
 }
+
+/* ── #1192 子详情「约束继承」区（mockups/phase3.html 直译；类型色板复用
+ *    constraints.css 的 :root 级 --cn-* 变量，不另存一份）── */
+.ci-clean-msg {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ci-rows {
+  display: flex;
+  flex-direction: column;
+}
+.ci-rows.ci-dim {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.ci-group-label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin: var(--space-xs) 0 2px;
+}
+.ci-group-tag {
+  margin-left: var(--space-xs);
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+.ci-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ci-row:last-child {
+  border-bottom: none;
+}
+.ci-row.ci-skip {
+  opacity: 0.5;
+}
+.ci-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.ci-scope {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  margin-bottom: 2px;
+}
+.ci-val {
+  font-size: var(--text-sm);
+  color: var(--color-foreground);
+  word-break: break-word;
+}
+.ci-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-right: var(--space-sm);
+}
+.ci-tdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ci-why {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.ci-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  padding-top: 2px;
+}
+.ci-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cn-dot-active, #27a644);
+  flex-shrink: 0;
+}
+.ci-row.ci-skip .ci-dot {
+  background: var(--cn-dot-inactive, #8a8f98);
+}
+.ci-empty {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  padding: var(--space-xs) 0;
+}
 /* ── Key-Value 行：VS Code Settings 式对齐（key 固定宽度，扫读快）── */
 .detail-row {
   display: flex;
