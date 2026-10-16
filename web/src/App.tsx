@@ -381,10 +381,18 @@ export default function App() {
   // 终审 P1 修复：context-usage 看板是**非 Radix** 的 role="dialog"（无焦点陷阱，
   // 焦点通常还留在 body/composer 上），closest 会不命中——不挡的话 Esc 关看板
   // 会同时打断在途 run（两个 handler 都在 window 上，App 的先注册先跑）。
+  // #1195 复审 P1（streaming×Esc）：React 合成 handler（slash 菜单关、排队项就地
+  // 编辑取消）挂在 root 容器、先于 window 监听跑——它们对 Esc **只 preventDefault
+  // 不 stopPropagation**，事件仍会冒泡到这里。`defaultPrevented` 守卫把"已有更近的
+  // handler 认领了这个 Esc"作为统一信号：菜单/编辑框只关自己，在途 run 不被连带
+  // cancel（e2e：composer-stream-actions.spec.ts 的 streaming×Esc 组合用例）。
   useEffect(() => {
     if (!streaming) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      // #1195 复审 P1：更近的合成 handler（slash 菜单、排队项编辑框）已认领的
+      // Esc 不再打断在途 run——cancelStream 只吃"没人要"的 Esc。
+      if (e.defaultPrevented) return;
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
