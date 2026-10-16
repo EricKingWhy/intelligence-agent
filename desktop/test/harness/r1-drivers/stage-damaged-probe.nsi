@@ -59,6 +59,7 @@ LangString iaUpdateFailed ${LANG_ENGLISH} "probe stand-in: update failed"
 ; their own (installer-cleanup.nsh declares the shape/scan/delete state).
 Var iaFinalDirectory
 Var iaBackupDirectory
+Var iaRecoveryPending
 Var iaProbeFound
 Var iaRunningProduct
 Var iaRuntimeStopStatus
@@ -75,21 +76,34 @@ Var iaPowerShellPath
 
 @@PRODUCTION_IA_BACKUP_MACROS@@
 
+@@PRODUCTION_IA_RECOVERY@@
+
 @@PRODUCTION_IA_CLASSIFY@@
 
 @@PRODUCTION_IA_REQUIRE@@
 
 @@PRODUCTION_IA_STAGE@@
 
+; The production install-success path resets a prior SetErrorLevel to zero.
+; Keep that observable behavior in the probe so a shape refusal that falls
+; through is distinguished from a refusal that exits immediately.
+!macro quitSuccess
+  SetErrorLevel 0
+  Quit
+!macroend
+
 Section
   StrCpy $INSTDIR "${PROBE_INSTALL}"
 
-  ; The production customInit calls this macro. It either returns (the gate
-  ; proved the tree clean, or stopped the bundled runtime) or `Quit`s with exit
-  ; code 2 — in which case this Section never reaches the write below.
-  !insertmacro iaStageApplication
+  ; Match customInit's recovery-then-stage order. A stale backup pointer can
+  ; refuse here before staging is considered.
+  !insertmacro iaRecoverInterruptedInstall
+  ${If} $iaRecoveryPending != "1"
+    !insertmacro iaStageApplication
+  ${EndIf}
 
   FileOpen $9 "${PROBE_RESULT}" w
-  FileWrite $9 "leg=${PROBE_LEG} stage_returned=1 answer=$iaRunningProduct probe=$iaProbeFound$\r$\n"
+  FileWrite $9 "leg=${PROBE_LEG} recovery_pending=$iaRecoveryPending stage_returned=1 answer=$iaRunningProduct probe=$iaProbeFound$\r$\n"
   FileClose $9
+  !insertmacro quitSuccess
 SectionEnd
