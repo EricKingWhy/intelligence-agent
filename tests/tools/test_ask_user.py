@@ -20,7 +20,12 @@ from agent_harness.session.context import (
 from agent_harness.session.event import USER_INPUT_REQUESTED
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
-from agent_harness.tools.ask_user import AskQuestion, AskUserArgs, AskUserTool
+from agent_harness.tools.ask_user import (
+    AskOption,
+    AskQuestion,
+    AskUserArgs,
+    AskUserTool,
+)
 
 
 def _option(label: str = "A") -> dict:
@@ -62,6 +67,20 @@ def test_zero_questions_are_rejected():
 def test_five_questions_are_rejected():
     with pytest.raises(ValidationError):
         AskUserArgs(questions=[_question() for _ in range(5)])
+
+
+# ── 审查 P1：纯空白 label 必须参数拒绝 ──
+# 前端投影对空白 label 整条丢弃（projection.ts `!label.trim()`），若工具端放行
+# 空白 label，run 已暂停却没有可渲染的卡片 ⇒ 无 UI 出口卡死。
+@pytest.mark.parametrize("blank", [" ", "\n", "\t", "   "])
+def test_whitespace_only_option_label_is_rejected(blank):
+    with pytest.raises(ValidationError):
+        AskOption(label=blank)
+
+
+def test_normal_option_label_is_accepted_verbatim():
+    option = AskOption(label="今晚低峰期")
+    assert option.label == "今晚低峰期"
 
 
 def test_two_options_are_accepted():

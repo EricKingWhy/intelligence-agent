@@ -804,7 +804,7 @@ def _ask_user_skip_message(question_texts: list[str]) -> str:
 
 
 def _ask_user_input_answer_data(
-    events: list[SessionEvent], *, run_id: str, request_id: str,
+    events: list[SessionEvent], *, request_id: str,
     request: SessionEvent, answer: Mapping[str, Any],
     ask_user_timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, bool]:
@@ -880,7 +880,12 @@ def _ask_user_input_answer_data(
             entry["custom_text"] = custom_text
         all_skipped = False
         shown = entry["label"]
-        if entry.get("custom_text") and entry["custom_text"] != entry["label"]:
+        # 审查 P3（#1222 只堵了精确相等）：两侧 strip 后判等，避免 custom_text 未 trim
+        # （如 " x "）时与已 strip 的 label 语义相同却仍重复渲染"（补充：…）"。
+        if (
+            entry.get("custom_text")
+            and entry["custom_text"].strip() != entry["label"].strip()
+        ):
             shown = f"{shown}（补充：{entry['custom_text']}）"
         rendered.append(f"- {text}：{shown}")
         normalized.append({"question": text, "answer": entry})
@@ -941,7 +946,7 @@ def _user_input_answer_data(
     request = requests[0]
     if request.data.get("kind") == "ask_user":
         return _ask_user_input_answer_data(
-            events, run_id=run_id, request_id=request_id, request=request,
+            events, request_id=request_id, request=request,
             answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
         )
     if request.data.get("kind") != "protected_fact_conflict":

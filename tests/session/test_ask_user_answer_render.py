@@ -30,7 +30,6 @@ def _request(question: str) -> SessionEvent:
 def _normalize(question: str, answer: dict) -> dict:
     data, _replayed = _ask_user_input_answer_data(
         [],
-        run_id="run-1",
         request_id=_REQUEST_ID,
         request=_request(question),
         answer={
@@ -62,3 +61,27 @@ def test_option_with_distinct_custom_text_keeps_supplement() -> None:
 
     content = data["content"]
     assert content == "用户回答了提问：\n- 什么时候出发？：选项A（补充：补充说明）"
+
+
+# ── 审查 P3：判等须 strip（#1222 只堵了精确相等）──
+
+
+def test_custom_only_with_surrounding_whitespace_is_not_rendered_twice() -> None:
+    """custom_text 未 trim（" x "）时 label 是 strip 后的 "x"，旧实现 `custom_text != label`
+
+    （" x " != "x"）判不等 ⇒ 又追加"（补充： x ）"重复渲染。两侧 strip 后判等即消除。
+    """
+    data = _normalize("什么时候出发？", {"custom_text": " x "})
+
+    content = data["content"]
+    assert content == "用户回答了提问：\n- 什么时候出发？：x"
+    assert "（补充：" not in content
+
+
+def test_option_label_with_whitespace_wrapped_custom_text_keeps_no_supplement() -> None:
+    # 选项 label 与仅首尾带空白的 custom_text 语义相同 ⇒ 不再重复渲染补充。
+    data = _normalize("什么时候出发？", {"label": "选项A", "custom_text": " 选项A "})
+
+    content = data["content"]
+    assert content == "用户回答了提问：\n- 什么时候出发？：选项A"
+    assert "（补充：" not in content

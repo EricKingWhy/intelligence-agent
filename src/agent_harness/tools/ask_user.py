@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agent_harness.session.context import (
     current_constraint_tool_context_var,
@@ -55,6 +55,16 @@ class AskOption(BaseModel):
             description="Optional short explanation of what choosing this option means.",
         ),
     ]
+
+    @field_validator("label")
+    @classmethod
+    def _label_not_blank(cls, value: str) -> str:
+        # #1204 审查 P1：纯空白 label 被前端投影整条丢弃（projection.ts `!label.trim()`
+        # ⇒ parsedOptions 长度不符 ⇒ 整卡不投影），但 run 已暂停 ⇒ 无 UI 出口卡死。
+        # 参数校验直接拒绝空白标签（不 strip 原值——正常 label 仍逐字作答案文本）。
+        if not value.strip():
+            raise ValueError("option label must not be blank")
+        return value
 
 
 class AskQuestion(BaseModel):
