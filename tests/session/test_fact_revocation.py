@@ -14,6 +14,7 @@ import pytest
 
 from agent_harness.session import (
     TASK_FACT_REVOCATION,
+    TASK_PROTECTED_FACT,
     USER_MESSAGE,
     Session,
 )
@@ -165,3 +166,51 @@ async def test_fork_descendant_does_not_inject_revoked_fact(tmp_path):
     child_fact = next(f for f in child_facts if f.fact_id == fact_id)
     assert child_fact.status == "revoked"
     assert fact_id not in serialize_protected_facts(child_facts)
+
+
+def test_adopt_history_remaps_revocation_to_replacement_fact(tmp_path):
+    """fork 时按 `fact_id_remap` 改写 `revoke_fact_id`（指向 child 的替代事实）。
+
+    `adopt_history` 的契约：调用方给的 `fact_id_remap` 只对**被 fork 边界移除**的
+    事实生效——事实本体不进 child（其 source 事件被 `event_id_remap` 抹掉），故撤销
+    事件必须跟着指向替代事实；否则 child 里的替代授权不会被撤销。
+    """
+    parent = _session(tmp_path, session_id="p-remap")
+    msg, fact_id = _register_constraint(parent, "回复时先给结论。")
+    revoke = parent.append(
+        TASK_FACT_REVOCATION, {"revoke_fact_id": fact_id, "revoked_by": "local"}
+    )
+
+    child = Session.start(JsonlSessionStore(tmp_path), session_id="c-remap")
+    child.adopt_history(
+        parent.events,
+        event_id_remap={msg.event_id: None},      # 事实来源事件在 fork 边界被移除
+        fact_id_remap={fact_id: "pf-child-new"},  # 该事实映射到 child 替代事实
+    )
+
+    # 来源被移除 ⇒ 事实本体不进 child（撤销才有改写对象）
+    assert all(e.type != TASK_PROTECTED_FACT for e in child.events)
+    adopted = next(e for e in child.events if e.type == TASK_FACT_REVOCATION)
+    assert adopted.data["revoke_fact_id"] == "pf-child-new"
+    # 逐字保留 event_id / time（adopt_history 的既有契约）
+    assert adopted.event_id == revoke.event_id
+    assert adopted.data["revoked_by"] == "local"
+
+
+def test_adopt_history_drops_revocation_when_target_dropped(tmp_path):
+    """目标事实在 fork 边界被丢弃（映射为 None）⇒ 撤销事件整条丢弃。
+
+    child 里那个事实本就不存在，留着撤销事件会是一条指向空气的悬空引用。
+    """
+    parent = _session(tmp_path, session_id="p-drop")
+    msg, fact_id = _register_constraint(parent, "别在周末推送早报。")
+    parent.append(TASK_FACT_REVOCATION, {"revoke_fact_id": fact_id, "revoked_by": "local"})
+
+    child = Session.start(JsonlSessionStore(tmp_path), session_id="c-drop")
+    child.adopt_history(
+        parent.events,
+        event_id_remap={msg.event_id: None},
+        fact_id_remap={fact_id: None},
+    )
+
+    assert all(e.type != TASK_FACT_REVOCATION for e in child.events)

@@ -25,7 +25,6 @@
   --cn-surface-1: #0f1011;
   --cn-surface-2: #141516;
   --cn-hairline: #23252a;
-  --cn-hairline-strong: #34343a;
   --cn-ink: #f7f8f8;
   --cn-ink-muted: #d0d6e0;
   --cn-ink-subtle: #8a8f98;
@@ -161,8 +160,13 @@
   border-top: 1px solid var(--cn-hairline);
 }
 
-.cn-row.revoked {
-  opacity: 0.6;
+/* 已撤销/被取代行：**不**整行降透明度。
+ * 整行 `opacity` 会把行内 12px 元信息（ink-subtle 本为 5.9:1）压到 ≈2.8:1，跌破
+ * PRODUCT.md 的 4.5:1 硬阈值，而 `t-contrast.spec.ts` 明示不建模祖先 `opacity`
+ * 意味着它抓不到。状态已由状态 pill（点 + 「已撤销」/「已被取代」）与 disabled
+ * 按钮承载；这里只压暗**装饰性**类型圆点（aria-hidden，非文本）。 */
+.cn-row.revoked .cn-tdot {
+  opacity: 0.45;
 }
 
 .cn-row-main {
@@ -202,6 +206,7 @@
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -209,6 +214,7 @@
 .cn-value.expanded {
   display: block;
   -webkit-line-clamp: unset;
+  line-clamp: unset;
   overflow: visible;
 }
 
@@ -322,14 +328,9 @@
 }
 
 /* ── 撤销二次确认弹窗（效果图 modal 样式）──
- * 经 Radix Portal 挂到 body：只用 `:root` 上的 `--cn-*`（勿回退字面量）。 */
-.cn-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-  z-index: 200;
-}
-
+ * 经 Radix Portal 挂到 body：只用 `:root` 上的 `--cn-*`（勿回退字面量）。
+ * 遮罩复用共享的 `.palette-overlay`（app.css，与仓内 10+ 弹窗同款，Reuse First）；
+ * 内容类自带定位（fixed + 居中），故不必进 app.css 的浮层定位选择器组。 */
 .cn-modal {
   position: fixed;
   top: 50%;
@@ -428,7 +429,6 @@
   --cn-surface-1: #ffffff;
   --cn-surface-2: #f4f4f5;
   --cn-hairline: rgba(0, 0, 0, 0.1);
-  --cn-hairline-strong: rgba(0, 0, 0, 0.18);
   --cn-ink: #111113;
   --cn-ink-muted: #3f3f46;
   --cn-ink-subtle: #52525b;

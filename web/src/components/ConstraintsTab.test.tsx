@@ -155,6 +155,12 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).toContain('加载约束失败（500）');
     expect(html).toContain('重试');
   });
+
+  it('AC4：错误态**不展示旧数据**（即使 props 里还带着 facts）', () => {
+    const html = ssr({ facts: [ACTIVE], error: '加载约束失败（500）' });
+    expect(html).toContain('加载失败，请重试');
+    expect(html).not.toContain('不要改动生产环境配置');
+  });
 });
 
 describe('formatFactTime / operatorLabel', () => {
@@ -269,6 +275,23 @@ describe('ConstraintsTab（状态外壳）', () => {
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('无权限查看约束');
+  });
+
+  it('AC4：先有数据、后拉取失败 → 清空旧数据不说谎', async () => {
+    vi.mocked(listProtectedFacts).mockImplementation(async (sid: string) => {
+      if (sid === 's-ok') return [ACTIVE];
+      throw new Error('boom');
+    });
+    render(<ConstraintsTab sessionId="s-ok" />);
+    await act(async () => {});
+    expect(document.body.textContent).toContain('不要改动生产环境配置');
+
+    // 换会话 → 触发重新拉取并失败：旧会话的数据必须消失（不许用缓存冒充）。
+    await act(async () => {
+      root!.render(<ConstraintsTab sessionId="s-bad" />);
+    });
+    expect(document.body.textContent).toContain('加载失败，请重试');
+    expect(document.body.textContent).not.toContain('不要改动生产环境配置');
   });
 
   it('加载失败 → 错误态 + 重试可重拉', async () => {

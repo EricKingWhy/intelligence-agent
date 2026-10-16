@@ -41,6 +41,7 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     ProtectedFactNotFound,
     ProtectedFactNotRevocable,
+    SeqConflict,
     SessionNotFound,
 )
 from agent_harness.storage.sqlite import StorageBusyError
@@ -107,8 +108,8 @@ def register_protected_fact_routes(app: FastAPI) -> None:
         """列出本会话全量受保护事实（active/revoked/superseded），按来源 seq 倒序。
 
         语义：422 → session_id 形态非法；404 → 会话不存在；409 → 事件日志损坏
-        （`EventLogCorruptError`，不可重试）。走到 200 即"投影完整"——前端据此渲染，
-        不展示任何缓存副本。
+        （`EventLogCorruptError`，不可重试）；503 → 存储暂忙（磁盘满/锁冲突，可重试）。
+        走到 200 即"投影完整"——前端据此渲染，不展示任何缓存副本。
         """
         from agent_harness.web.app import session_service
 
@@ -117,6 +118,8 @@ def register_protected_fact_routes(app: FastAPI) -> None:
             rows = await service.list_protected_facts(session_id)
         except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as error:
             raise http_error(error) from error
+        except StorageBusyError as error:
+            raise storage_http_error(error) from error
         return ProtectedFactsResponse(
             facts=[ProtectedFactRow(**row) for row in rows]
         )
@@ -130,9 +133,10 @@ def register_protected_fact_routes(app: FastAPI) -> None:
         """主动撤销一条 active 受保护事实（走会话级管理写入口，不物理删除）。
 
         语义：422 → session_id / fact_id 形态非法（先于 404，路径穿越防线）；
-        404 → 会话或目标 fact 不存在；409 → fact 已被取代（非 active，不可主动撤销）
-        或会话日志损坏；200 → `{fact_id, status: "revoked", revoked_at}`（幂等：
-        重复撤销仍 200）。操作人取当前身份（本地信任模式为 `local`）。
+        404 → 会话或目标 fact 不存在；409 → fact 已被取代（非 active，不可主动撤销）、
+        会话日志损坏（`EventLogCorruptError`）或写号与在途 run 竞态（`SeqConflict`）；
+        503 → 存储暂忙（可重试）；200 → `{fact_id, status: "revoked", revoked_at}`
+        （幂等：重复撤销仍 200）。操作人取当前身份（本地信任模式为 `local`）。
         """
         if not _FACT_ID_PATTERN.fullmatch(fact_id):
             raise HTTPException(
@@ -153,6 +157,7 @@ def register_protected_fact_routes(app: FastAPI) -> None:
             ProtectedFactNotFound,
             ProtectedFactNotRevocable,
             EventLogCorruptError,
+            SeqConflict,
         ) as error:
             raise http_error(error) from error
         except StorageBusyError as error:

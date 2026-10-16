@@ -292,7 +292,10 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
         setError(null);
       } else {
         // 不保留旧数据（不许用缓存冒充）：失败即清空，展示错误态。
+        // 同时复位 `forbidden`——否则「先 403、后 5xx」会让内存态两个标志同时为真
+        // （渲染分支互斥，用户看不到脏数据，但不变量该单一为真）。
         setFacts([]);
+        setForbidden(false);
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
@@ -348,7 +351,7 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
         }}
       >
         <Dialog.Portal>
-          <Dialog.Overlay className="cn-modal-overlay" />
+          <Dialog.Overlay className="palette-overlay" />
           <Dialog.Content className="cn-modal" aria-describedby="cn-modal-desc">
             <Dialog.Title className="cn-modal-title">撤销这条约束？</Dialog.Title>
             <p className="cn-modal-desc" id="cn-modal-desc">
