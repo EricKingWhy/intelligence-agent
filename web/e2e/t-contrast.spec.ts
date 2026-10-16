@@ -10,6 +10,8 @@
  *  6. #1030 / #1136 的 ink-mix 使用点：.run-pulse.pulse-awaiting-decision、恢复冲突条，
  *     以及 .app-error / .app-notice / .recover-btn / .auth-banner / .task-review-* 族
  *     （语义色当正文色用，亮色下靠 `color-mix(<sem> 45%, --text-primary)` 压到达标）
+ *  7. #1190 约束管理页的 `--cn-*` 墨面：.cn-value / .cn-type / .cn-meta / .cn-pill /
+ *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -1305,5 +1307,48 @@ for (const theme of ['dark', 'light'] as const) {
     };
     await openTaskReview(page, theme, state);
     await expectEachContrast(page, theme, ['.task-review-run-axis.running']);
+  });
+
+  /* #1190 约束管理页：新墨面（值 14px / 类型名 / 12px 元信息 / 状态 pill / 撤销按钮）
+   * 的对比度与 12px 地板。元信息刻意用 ink-subtle 而非票面 #62666d（对比度取舍，见
+   * constraints.css 头注释）——本用例把那句口头承诺变成机械守卫（PRODUCT.md:59/72）。 */
+  test(`[${theme}] #1190 约束管理（值/类型/元信息/状态 pill/撤销）对比度 ≥4.5 且 12px 地板`, async ({ page }) => {
+    const sid = 's-contrast-cn';
+    const facts = [{
+      fact_id: 'f-cn', type: 'constraint', value: '不要改动生产环境配置', status: 'active',
+      source_event_id: 'ev-3', source_seq: 3, registered_at: T, revoked_at: null, revoked_by: null,
+    }];
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 'rcn', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '约束对比度' }, seq: 3, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'model/completed', data: { text: '好' }, seq: 4, session_id: sid, run_id: 'rcn', step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 5, session_id: sid, run_id: 'rcn', time: T },
+    ];
+    await routeApi(page, {
+      sessions: [{
+        session_id: sid, event_count: frames.length, first_event_time: T, last_event_time: T,
+        first_user_message: '约束对比度', trace_id: null, trace_url: null,
+      }],
+      events: frames,
+      models: MODELS, permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS,
+      protectedFacts: facts,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await page
+      .getByRole('tablist', { name: 'Inspector 视图' })
+      .getByRole('tab', { name: 'Constraints' })
+      .click();
+    await expect(page.getByTestId('constraints-panel')).toBeVisible();
+    await expectEachContrast(page, theme, ['.cn-value', '.cn-type', '.cn-meta', '.cn-pill', '.cn-revoke']);
+    // 12px 地板：元信息行是面板里最小的字（效果图给 12px）。
+    for (const sel of ['.cn-type', '.cn-meta', '.cn-pill']) {
+      const m = await measure(page, sel);
+      expect(m.fontSize, `${sel} font-size (${theme})`).toBe('12px');
+    }
   });
 }

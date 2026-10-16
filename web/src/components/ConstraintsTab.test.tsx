@@ -207,6 +207,12 @@ const tabByLabel = (label: string): HTMLButtonElement => {
   return found;
 };
 
+/** tab 上的计数（`.cn-tab-count`）——它由**内存态 `facts`** 算出，故是「旧数据是否
+ *  真被清空」的唯一可靠断言口：渲染分支互斥会让旧值在 DOM 里本就不出现，
+ *  只查 DOM 的断言对 `setFacts([])` 无区分度（假绿）。 */
+const tabCount = (label: string): string =>
+  (tabByLabel(label).querySelector('.cn-tab-count')?.textContent ?? '').trim();
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.mocked(listProtectedFacts).mockReset();
@@ -285,6 +291,7 @@ describe('ConstraintsTab（状态外壳）', () => {
     render(<ConstraintsTab sessionId="s-ok" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('不要改动生产环境配置');
+    expect(tabCount('全部')).toBe('1');
 
     // 换会话 → 触发重新拉取并失败：旧会话的数据必须消失（不许用缓存冒充）。
     await act(async () => {
@@ -292,6 +299,9 @@ describe('ConstraintsTab（状态外壳）', () => {
     });
     expect(document.body.textContent).toContain('加载失败，请重试');
     expect(document.body.textContent).not.toContain('不要改动生产环境配置');
+    // 内存态也必须清空：tab 计数由 `facts` 算出（渲染分支互斥会让旧值本就不进 DOM，
+    // 只查 DOM 的断言对 `setFacts([])` 无区分度）。
+    expect(tabCount('全部')).toBe('0');
   });
 
   it('AC4：先有数据、后 403 → 同样清空旧数据（内存态不留上一会话行）', async () => {
@@ -302,12 +312,14 @@ describe('ConstraintsTab（状态外壳）', () => {
     render(<ConstraintsTab sessionId="s-ok" />);
     await act(async () => {});
     expect(document.body.textContent).toContain('不要改动生产环境配置');
+    expect(tabCount('全部')).toBe('1');
 
     await act(async () => {
       root!.render(<ConstraintsTab sessionId="s-forbidden" />);
     });
     expect(document.body.textContent).toContain('无权限查看约束');
     expect(document.body.textContent).not.toContain('不要改动生产环境配置');
+    expect(tabCount('全部')).toBe('0');
   });
 
   it('加载失败 → 错误态 + 重试可重拉', async () => {

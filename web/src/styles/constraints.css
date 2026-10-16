@@ -17,8 +17,9 @@
  * 与 6 类圆点色），遵守 AGENTS.md §15 / PRODUCT.md「新增 token 必须检查暗亮两块」。
  *
  * 另一处刻意偏离效果图：元信息行效果图用 ink-tertiary #62666d，在暗底上实测 ≈3.3:1 < 4.5，
- * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（在 surface-1 上 ≈5.9:1）。同一条
- * 「用户指令 vs 产品文档」的取舍，已列入待裁决。
+ * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（暗底 ≈5.8:1 / 亮底 ≈6.9:1，
+ * 真机读数见 e2e `t-contrast.spec.ts` 的 #1190 用例）。同一条「用户指令 vs 产品文档」的取舍，
+ * 已列入待裁决。
  */
 
 :root {
@@ -161,7 +162,7 @@
 }
 
 /* 已撤销/被取代行：**不**整行降透明度。
- * 整行 `opacity` 会把行内 12px 元信息（ink-subtle 本为 5.9:1）压到 ≈2.8:1，跌破
+ * 整行 `opacity` 会把行内 12px 元信息（ink-subtle 本为 ≈5.8:1）压到 ≈2.8:1，跌破
  * PRODUCT.md 的 4.5:1 硬阈值，而 `t-contrast.spec.ts` 明示不建模祖先 `opacity`
  * 意味着它抓不到。状态已由状态 pill（点 + 「已撤销」/「已被取代」）与 disabled
  * 按钮承载；这里只压暗**装饰性**类型圆点（aria-hidden，非文本）。 */
