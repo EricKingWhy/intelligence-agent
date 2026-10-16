@@ -126,6 +126,9 @@ def test_status_map_is_the_audited_contract():
         # 请求形态合法）。本表是精确类型索引，两个新类型各自登记。
         "ProtectedFactNotFound": 404,
         "ProtectedFactNotRevocable": 409,
+        # #1191（Phase 2）：登记项目级约束时会话解析不出项目键（不在 git 仓库内）——
+        # 请求在当前上下文不可执行，票面 §六.2 逐字定 422（不是 409 的引用问题）。
+        "ProjectKeyUnavailable": 422,
         # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
         # 两侧目录可能都在，是**归属事实**矛盾（不是 404 的"目录没了"，也不是 422 的
         # "请求写错"）。续聊拒绝静默选边。

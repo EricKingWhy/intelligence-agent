@@ -264,6 +264,14 @@ class ProtectedFact:
     revoked_at: str | None = None
     revoked_by: str | None = None
 
+    #: #1191（Phase 2）：作用域（`session|project|global`）。会话投影产出的永远是
+    #: `"session"`；project/global 由独立规则层供给，在 `effective-constraints`
+    #: 端点里合流。**不进 `to_dict()`**（注入体口径不变，见上一条注释）。
+    scope: str = "session"
+    #: #1191：被更高优先级同文约束覆盖时填覆盖方 fact_id（否则 None）。合流计算，
+    #: **不进 `to_dict()`**。
+    overridden_by: str | None = None
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", deepcopy(self.value))
 
@@ -382,17 +390,25 @@ def validate_user_protected_fact_annotations(
         raise ValueError("protected_facts must be a list of at most 32 annotations")
 
     normalized: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str | None]] = set()
+    seen: set[tuple[str, str, str | None, str]] = set()
     for annotation in annotations:
         if not isinstance(annotation, dict) or set(annotation) - {
             "fact_type",
             "value",
             "supersedes_fact_id",
+            "scope",
         }:
             raise ValueError("protected fact annotation has unsupported fields")
         fact_type = annotation.get("fact_type")
         value = annotation.get("value")
         supersedes_id = annotation.get("supersedes_fact_id")
+        # #1191（Phase 2）：登记作用域三选一，**默认 session**（缺省 = 会话级，既有行为
+        # 逐字不变）。project/global 注解在本会话事件流里只作**审计留痕**——投影
+        # （derive_protected_facts）跳过它们，不产生会话级 ProtectedFact；真值写入
+        # 独立规则层（`session/scoped_constraints.py`）。
+        scope = annotation.get("scope", "session")
+        if scope not in ("session", "project", "global"):
+            raise ValueError("protected fact annotation scope is unsupported")
         if not isinstance(fact_type, str) or fact_type not in _USER_INPUT_FACT_TYPES:
             raise ValueError("protected fact annotation type is unsupported")
         if (
@@ -410,7 +426,7 @@ def validate_user_protected_fact_annotations(
             or len(supersedes_id) > 200
         ):
             raise ValueError("supersedes_fact_id must be a non-empty fact id")
-        identity = (fact_type, value, supersedes_id)
+        identity = (fact_type, value, supersedes_id, scope)
         if identity in seen:
             raise ValueError("duplicate protected fact annotation")
         seen.add(identity)
@@ -423,6 +439,9 @@ def validate_user_protected_fact_annotations(
                     if supersedes_id is not None
                     else {}
                 ),
+                # 只在**非会话级**时落下 `scope`——会话级（缺省）的规范化字典与
+                # #1190 之前逐字一致（"会话级行为逐字不变"）。
+                **({"scope": scope} if scope != "session" else {}),
             }
         )
     return normalized
@@ -965,6 +984,10 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 annotations = []
             if not data.get("injected_by"):
                 for annotation in annotations:
+                    # #1191：project/global 级注解只作会话事件流里的**审计留痕**，
+                    # 不投影成本会话 ProtectedFact（真值在独立规则层）。
+                    if annotation.get("scope", "session") != "session":
+                        continue
                     fact_data = {
                         "fact_type": annotation["fact_type"],
                         "value": annotation["value"],

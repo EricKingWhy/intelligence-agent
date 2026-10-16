@@ -33,7 +33,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_harness.identity import get_identity_context
 from agent_harness.session.errors import (
@@ -97,6 +97,63 @@ class ProtectedFactRevoked(BaseModel):
     revoked_at: str | None
 
 
+# ── #1191（Phase 2）：作用域三层 ────────────────────────────────────────
+
+ConstraintScopeLiteral = Literal["session", "project", "global"]
+
+
+class EffectiveConstraintRow(BaseModel):
+    """`effective-constraints` 的单条（三 scope 合流后，附 scope 与覆盖关系）。
+
+    复用了 #1190 §5.1 的行字段，另加 `scope` 与 `overridden_by`（票面 §六.1）。
+    `source_event_id` / `source_seq` 对**项目/全局级**为 None——它们不在本会话事件流
+    里（真值在独立规则层；会话事件流只留审计痕）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str
+    type: str
+    value: Any
+    status: FactStatus
+    source_event_id: str | None
+    source_seq: int | None
+    registered_at: str | None
+    revoked_at: str | None
+    revoked_by: str | None
+    scope: ConstraintScopeLiteral
+    overridden_by: str | None
+
+
+class EffectiveProjectMeta(BaseModel):
+    """当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 None。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    label: str | None
+
+
+class EffectiveConstraintsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    facts: list[EffectiveConstraintRow]
+    project: EffectiveProjectMeta | None
+
+
+class ScopedRevokeRequest(BaseModel):
+    """项目/全局级撤销请求体（票面 §六.3）。
+
+    `session_id` 用于服务端**权威解析**项目键（不让请求体自带 project_key）；`scope`
+    只接受 project/global（会话级走 #1190 的 `.../protected-facts/{id}/revoke`）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["project", "global"]
+    session_id: str = Field(min_length=1, max_length=200)
+
+
 def register_protected_fact_routes(app: FastAPI) -> None:
     """把约束管理面板路由挂到既有 app（`create_app` 里一行调用的接入面）。"""
 
@@ -158,6 +215,75 @@ def register_protected_fact_routes(app: FastAPI) -> None:
             ProtectedFactNotRevocable,
             EventLogCorruptError,
             SeqConflict,
+        ) as error:
+            raise http_error(error) from error
+        except StorageBusyError as error:
+            raise storage_http_error(error) from error
+        return ProtectedFactRevoked(**result)
+
+    # ── #1191（Phase 2）：三作用域合流 + 项目/全局级撤销 ──────────────────
+    @app.get("/api/sessions/{session_id}/effective-constraints")
+    async def effective_constraints(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> EffectiveConstraintsResponse:
+        """返回本会话实际可见的约束全集（会话投影 + 本项目 + 全局），附 scope 与覆盖。
+
+        同 `protected-facts` 的来源闸与错误矩阵：422 → session_id 非法；404 → 会话
+        不存在；409 → 事件日志损坏；503 → 存储暂忙。前端三组按 scope 分组渲染，
+        不做二次计算（票面 §六.1）。
+        """
+        from agent_harness.web.app import session_service
+
+        service = session_service(app.state.agent)
+        try:
+            payload = await service.effective_constraints(session_id)
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as error:
+            raise http_error(error) from error
+        except StorageBusyError as error:
+            raise storage_http_error(error) from error
+        return EffectiveConstraintsResponse(
+            facts=[EffectiveConstraintRow(**row) for row in payload["facts"]],
+            project=(
+                EffectiveProjectMeta(**payload["project"])
+                if payload["project"] is not None
+                else None
+            ),
+        )
+
+    @app.post("/api/memory/constraints/{fact_id}/revoke")
+    async def revoke_scoped_constraint(
+        fact_id: str,
+        req: ScopedRevokeRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> ProtectedFactRevoked:
+        """撤销一条项目/全局级约束（独立规则层，历史保留链；幂等）。
+
+        影响面（票面 §六.3，前端二次确认文案据此）：项目级撤销影响本仓库所有会话，
+        全局级撤销影响所有项目的新会话。422 → fact_id 形态非法（先于 404）；404 →
+        会话或目标不存在；409 → 事件日志损坏；503 → 存储暂忙。
+        """
+        if not _FACT_ID_PATTERN.fullmatch(fact_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"fact_id 只接受单个安全名字段：{fact_id!r}",
+            )
+        from agent_harness.web.app import session_service
+
+        identity = get_identity_context()
+        service = session_service(app.state.agent)
+        try:
+            result = await service.revoke_scoped_constraint(
+                fact_id,
+                scope=req.scope,
+                session_id=req.session_id,
+                revoked_by=identity.user_id,
+            )
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ProtectedFactNotFound,
+            EventLogCorruptError,
         ) as error:
             raise http_error(error) from error
         except StorageBusyError as error:

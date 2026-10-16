@@ -937,6 +937,7 @@ async def build_runtime(
         model_supports_vision(settings, config.fallback)
         if config.fallback is not None else False
     )
+    scoped_fact_provider = _build_scoped_fact_provider(settings)
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -999,6 +1000,8 @@ async def build_runtime(
             # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
             image_normalize_max_dimension=settings.image_normalize_max_dimension,
             image_normalize_max_bytes=settings.image_normalize_max_bytes,
+            # #1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（独立规则层）。
+            scoped_fact_provider=scoped_fact_provider,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
@@ -1045,3 +1048,35 @@ async def build_runtime(
         # CLI / 既有单测路径行为零变化）。
         completion_policy=completion_policy,
     )
+
+
+
+def _build_scoped_fact_provider(settings: Settings) -> Any:
+    """#1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（闭包）。
+
+    每次 build 现读规则层文件（**精确取用不检索**）；按会话 cwd 现场解析项目键。
+    独立于 memory v2（用户裁决 Fork 2 = A）。
+    """
+    from agent_harness.session.cwd import session_cwd
+    from agent_harness.session.derive import derive_protected_facts
+    from agent_harness.session.scoped_constraints import (
+        ScopedConstraintStore,
+        resolve_project_key,
+        scoped_context_facts,
+    )
+
+    store = ScopedConstraintStore(Path(settings.workspace_dir) / "constraints")
+
+    def provider(events: list[Any]) -> list[Any]:
+        if not events:
+            return []
+        cwd = session_cwd(events)
+        project_key = resolve_project_key(cwd) if cwd is not None else None
+        return scoped_context_facts(
+            store,
+            derive_protected_facts(events),
+            session_id=events[0].session_id,
+            project_key=project_key,
+        )
+
+    return provider

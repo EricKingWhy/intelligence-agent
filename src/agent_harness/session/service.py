@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
@@ -149,6 +150,7 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     ModelDoesNotSupportImages,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
     ProtectedFactNotFound,
     ProtectedFactNotRevocable,
     ProtectedFactReferenceInvalid,
@@ -235,6 +237,11 @@ from agent_harness.session.progress import (
     write_progress_file,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
+from agent_harness.session.scoped_constraints import (
+    ScopedConstraintStore,
+    project_label,
+    resolve_project_key,
+)
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
     EventLogIntegrity,
@@ -1263,6 +1270,9 @@ class SessionService:
         budget_recovery_failed_sessions: set[str] | None = None,
         registered_tool_names: RegisteredToolNamesProvider | None = None,
         reconcile_info: ToolReconcileInfoProvider | None = None,
+        # #1191（Phase 2）：项目/全局级约束的**独立规则层**存储（不碰 memory v2）。
+        # None = 未装配（CLI / 单测缺省），相关端点与登记会响亮失败而不是静默丢件。
+        scoped_constraint_store: ScopedConstraintStore | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -1287,6 +1297,7 @@ class SessionService:
         )
         self._registered_tool_names = registered_tool_names
         self._reconcile_info = reconcile_info
+        self._scoped_constraint_store = scoped_constraint_store
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -3539,6 +3550,37 @@ class SessionService:
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
         )
+
+        # #1191（Phase 2）：非会话级注解在这里**登记进独立规则层**（project/global）。
+        # 位置在**全部纯读校验之后、任何落盘之前**：project scope 解析不出项目键即
+        # 422（票面 §六.2 逐字文案），零副作用。会话级注解不在此处落任何东西——
+        # 它仍由消息事件承载（`user_input_metadata["protected_facts"]`），行为逐字不变。
+        scoped_annotations = [
+            annotation
+            for annotation in normalized_protected_facts
+            if annotation.get("scope") in ("project", "global")
+        ] if mode == "queue" else []
+        if scoped_annotations:
+            project_key = self._project_key_for(current_events)
+            if (
+                any(a["scope"] == "project" for a in scoped_annotations)
+                and project_key is None
+            ):
+                raise ProjectKeyUnavailable(
+                    "当前会话不在 git 仓库内，无法登记项目级约束"
+                )
+            store = self._require_scoped_store()
+            registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
+            for annotation in scoped_annotations:
+                store.register(
+                    annotation["scope"],
+                    project_key=(
+                        project_key if annotation["scope"] == "project" else None
+                    ),
+                    fact_type=annotation["fact_type"],
+                    value=annotation["value"],
+                    registered_at=registered_at,
+                )
 
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
@@ -6551,6 +6593,183 @@ class SessionService:
                 "status": "revoked",
                 "revoked_at": event.data.get("revoked_at") or event.time,
             }
+
+    # ── #1191（Phase 2）：作用域三层（会话 / 项目 / 全局）──────────────────
+    def _require_scoped_store(self) -> ScopedConstraintStore:
+        store = self._scoped_constraint_store
+        if store is None:
+            # 装配错误，不是用户错误：Web 装配恒带规则层存储（`AppState`）。
+            raise RuntimeError("当前装配没有项目/全局约束规则层存储")
+        return store
+
+    @staticmethod
+    def _project_key_for(events: list[SessionEvent]) -> str | None:
+        cwd = session_cwd(events)
+        if cwd is None:
+            return None
+        return resolve_project_key(cwd)
+
+    async def effective_constraints(self, session_id: str) -> dict[str, Any]:
+        """返回本会话实际可见的约束全集（三 scope 合流），附 scope 与覆盖关系（#1191）。
+
+        合流：会话投影（全状态，来源事件时间）× 本项目（规则层）× 全局（规则层）。
+        同一 fact_id 至多出现一次（三 scope 的 id 前缀天然不同，仍去重兜底）。
+        `overridden_by`：非会话级条目被**更高优先级同文**（type 相同且 value 去首尾
+        空白后逐字相等）的 active 条目覆盖时，填覆盖方 fact_id（会话＞项目＞全局）；
+        注入侧据此过滤（见 `context/builder.py`）。
+        `project` 为当前会话项目键与展示标注；非 git 目录会话为 None（前端不渲染
+        PROJECT 组，票面 §五.5）。
+        """
+        await self._require_existing_session(session_id)
+        events = await self.get_events(session_id)
+        time_by_event_id = {event.event_id: event.time for event in events}
+        session_rows: list[dict[str, Any]] = [
+            {
+                "fact_id": fact.fact_id,
+                "type": fact.type,
+                "value": fact.value,
+                "status": fact.status,
+                "source_event_id": fact.source_event_id,
+                "source_seq": fact.source_seq,
+                "registered_at": time_by_event_id.get(fact.source_event_id),
+                "revoked_at": fact.revoked_at,
+                "revoked_by": fact.revoked_by,
+                "scope": "session",
+            }
+            for fact in derive_protected_facts(events)
+        ]
+
+        cwd = session_cwd(events)
+        project_key = resolve_project_key(cwd) if cwd is not None else None
+        project_rows: list[dict[str, Any]] = []
+        global_rows: list[dict[str, Any]] = []
+        if project_key is not None:
+            for constraint in self._require_scoped_store().list(
+                "project", project_key=project_key
+            ):
+                project_rows.append(_scoped_constraint_row(constraint))
+        for constraint in self._require_scoped_store().list("global"):
+            global_rows.append(_scoped_constraint_row(constraint))
+
+        rows = _merge_effective_rows(session_rows, project_rows, global_rows)
+        project_meta = (
+            {"key": project_key, "label": project_label(cwd)}
+            if project_key is not None
+            else None
+        )
+        return {"facts": rows, "project": project_meta}
+
+    async def revoke_scoped_constraint(
+        self, fact_id: str, *, scope: str, session_id: str, revoked_by: str | None,
+    ) -> dict[str, Any]:
+        """撤销一条项目/全局级约束（规则层，历史保留链；幂等）。
+
+        `scope` 只接受 `project|global`（会话级走 `revoke_protected_fact`）。project
+        作用域的项目键从**会话**（`session_id`）现场解析——不让请求体自带项目键
+        （防伪，与 `TrustedMemoryIdentity` 同立场）。目标不存在 → `ProtectedFactNotFound`
+        （404）；会话没有项目键却要撤项目级 → 404（该会话看不到项目级约束）。
+        """
+        if scope not in ("project", "global"):
+            raise ProtectedFactReferenceInvalid(
+                f"unsupported revoke scope: {scope!r}"
+            )
+        await self._require_existing_session(session_id)
+        store = self._require_scoped_store()
+        project_key: str | None = None
+        if scope == "project":
+            events = await self.get_events(session_id)
+            project_key = self._project_key_for(events)
+            if project_key is None:
+                raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+        existing = store.get(scope, fact_id, project_key=project_key)
+        if existing is None:
+            raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+        updated = store.revoke(
+            scope,
+            fact_id,
+            project_key=project_key,
+            revoked_by=revoked_by,
+            revoked_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+        )
+        return {
+            "fact_id": fact_id,
+            "status": "revoked",
+            "revoked_at": updated.revoked_at if updated is not None else None,
+        }
+
+
+def _scoped_constraint_row(constraint: Any) -> dict[str, Any]:
+    """规则层记录 → 面板行（无会话来源事件，`source_*` 为 None）。"""
+    return {
+        "fact_id": constraint.fact_id,
+        "type": constraint.type,
+        "value": constraint.value,
+        "status": constraint.status,
+        "source_event_id": None,
+        "source_seq": None,
+        "registered_at": constraint.registered_at,
+        "revoked_at": constraint.revoked_at,
+        "revoked_by": constraint.revoked_by,
+        "scope": constraint.scope,
+    }
+
+
+def _normalized_fact_value(value: Any) -> Any:
+    """覆盖判据的值归一：字符串去首尾空白，其余原样（票面 §五.4）。"""
+    return value.strip() if isinstance(value, str) else value
+
+
+def _merge_effective_rows(
+    session_rows: list[dict[str, Any]],
+    project_rows: list[dict[str, Any]],
+    global_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """三 scope 合流 + 覆盖计算（会话＞项目＞全局）。
+
+    - 去重：同一 `fact_id` 只留第一条（防装配异常导致的重复）。
+    - `overridden_by`：非会话级 active 条目，被更高优先级 scope 里 type 相同且
+      normalized value 相等的 **active** 条目覆盖时填其 fact_id；否则 None。
+    """
+    active_session = [
+        (row["type"], _normalized_fact_value(row["value"]), row["fact_id"])
+        for row in session_rows
+        if row["status"] == "active"
+    ]
+    active_project = [
+        (row["type"], _normalized_fact_value(row["value"]), row["fact_id"])
+        for row in project_rows
+        if row["status"] == "active"
+    ]
+
+    def covering(type_: str, value: Any, candidates: list[tuple[str, Any, str]]) -> str | None:
+        for candidate_type, candidate_value, candidate_id in candidates:
+            if candidate_type == type_ and candidate_value == value:
+                return candidate_id
+        return None
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def emit(row: dict[str, Any], overridden_by: str | None) -> None:
+        if row["fact_id"] in seen:
+            return
+        seen.add(row["fact_id"])
+        merged.append({**row, "overridden_by": overridden_by})
+
+    for row in session_rows:
+        # 会话级不被任何东西覆盖（最高优先级）。
+        emit(row, None)
+    for row in project_rows:
+        numeric = _normalized_fact_value(row["value"])
+        covering_id = covering(row["type"], numeric, active_session)
+        emit(row, covering_id)
+    for row in global_rows:
+        numeric = _normalized_fact_value(row["value"])
+        covering_id = covering(row["type"], numeric, active_session) or covering(
+            row["type"], numeric, active_project
+        )
+        emit(row, covering_id)
+    return merged
 
 
 def project_protected_fact_rows(events: list[SessionEvent]) -> list[dict[str, Any]]:

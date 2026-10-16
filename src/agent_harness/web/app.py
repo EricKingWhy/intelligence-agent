@@ -111,6 +111,7 @@ from agent_harness.session.derive import validate_user_protected_fact_annotation
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
+from agent_harness.session.scoped_constraints import ScopedConstraintStore
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
     COMPACT_ENTRY_API,
@@ -127,6 +128,7 @@ from agent_harness.session.service import (
     InvalidSessionId,
     ModelDoesNotSupportImages,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     ReconcileDecision,
@@ -884,6 +886,11 @@ class ProtectedFactAnnotation(BaseModel):
     ]
     value: str = Field(min_length=1, max_length=10_000)
     supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1191（Phase 2）：登记作用域三选一（票面 §四.1）。默认 None = 会话级（既有行为
+    # 逐字不变）；`project` / `global` 时服务端把真值写入独立规则层，会话事件流里只留
+    # 审计痕（投影跳过）。`None` 而非 `"session"` 是为让 `exclude_none` 下**缺省完全不
+    # 发键**——会话路径的请求体逐字节不变。
+    scope: Literal["session", "project", "global"] | None = None
 
 
 #: `attachments` 的静态兜底上限（#823 / MM-02，A3/B7）。取部署上限键
@@ -1177,6 +1184,11 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # #1191（Phase 2）：项目/全局级约束的独立规则层（用户裁决 Fork 2 = A：
+        # 不碰 memory v2）。只构造一次（持有进程内写锁）；根目录同在 workspace_dir 下。
+        self.scoped_constraint_store = ScopedConstraintStore(
+            Path(settings.workspace_dir) / "constraints"
+        )
         # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
         # 必须在 RunManager **之前**建：下面的 on_run_terminal 回调要用它（闭包按
         # 引用捕获 self，顺序其实无妨，但先建可读性更好）。
@@ -1508,6 +1520,7 @@ def session_service(state: AppState) -> SessionService:
         budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
         reconcile_info=state.reconcile_info,
+        scoped_constraint_store=state.scoped_constraint_store,
     )
 
 
@@ -3872,6 +3885,7 @@ def create_app(
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
+            ProjectKeyUnavailable,
             AttachmentReferenceInvalid,
             TooManyAttachments,
             AttachmentMessageTooLarge,

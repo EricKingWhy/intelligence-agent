@@ -247,6 +247,15 @@ class ProtectedFactNotRevocable(SessionServiceError):
     """
 
 
+class ProjectKeyUnavailable(SessionServiceError):
+    """#1191：登记/操作项目级约束时，当前会话解析不出项目键（不在 git 仓库内）。
+
+    请求形状合法、也不是状态冲突——是这份请求在当前上下文**不可执行**（票面 §六.2：
+    "project scope 登记时必须能解析出项目键，否则返回 422"）。故 422，不能借用
+    `ProtectedFactReferenceInvalid`（那是 409 的引用问题）。
+    """
+
+
 class SupersedeTargetInvalid(SessionServiceError):
     """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
 
