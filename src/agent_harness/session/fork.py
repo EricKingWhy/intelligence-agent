@@ -46,6 +46,7 @@ from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
+    CONTEXT_WINDOW_CHANGED,
     FORK_IN_PROGRESS,
     MODEL_COMPLETED,
     PERMISSION_CHANGED,
@@ -236,6 +237,9 @@ async def fork_session(
     # `workflow/mode-changed`（工作流档）同属会话级状态——fork **不继承授权**
     # （#358 W-14 / F26：高风险权限不因 Fork 静默扩大；设计文档 §5 推荐默认值），
     # 工作流档亦不继承（child 从 NORMAL 起，用户可一键重进 plan）。
+    # #1197：`context/window-changed`（会话级上下文窗口）同理不继承——child 从默认
+    # 200K 起。窗口不是安全边界（不继承不扩大风险面），且它是**偏好**：新会话面板
+    # 上显示的就是它真正生效的挡位，用户改一次即可，好过悄悄沿用父的挡位。
     boundary_events = [event for event in parent_events if event.seq < anchor.seq]
     seed = [
         event
@@ -248,6 +252,7 @@ async def fork_session(
             PERMISSION_GRANTED,
             PERMISSION_REVOKED,
             WORKFLOW_MODE_CHANGED,
+            CONTEXT_WINDOW_CHANGED,
         }
     ]
     _validate_run_complete(seed, parent_session_id)
@@ -308,6 +313,7 @@ async def fork_session(
             PERMISSION_GRANTED,
             PERMISSION_REVOKED,
             WORKFLOW_MODE_CHANGED,
+            CONTEXT_WINDOW_CHANGED,
         }
     }
     event_id_remap: dict[str, str | None] = {

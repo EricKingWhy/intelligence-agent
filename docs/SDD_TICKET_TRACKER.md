@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**当前状态（2026-10-17，#1198）**：Issue #1198 OPEN（bug/P2，`in-progress`），PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) OPEN；分支 `codex/issue-1198-budget-picker`，当前代码修订基于 `ad66ab5f98635c3c869b3b3f18c42288c1460f40`，基线 `772d05452346468b59bc46392e29a58c5e8ac48d`。Spec 复审 PASS（P0–P4=0）；Standards PASS（P0/P1/P2/P4=0，P3=2，为测试可靠性意见）。Actions run 38929049857 的 Gate-0、PR smoke、gitleaks、全量 pytest、Vitest/build、双平台 TUI 通过；全量 E2E 在 AC3 高度断言失败：与 mockup 相差 65.1875px（上限 8px），两个 viewport 均复现。根因为预算面板仅有 max-height，内容不足时自然收缩；当前 CSS 加入显式 `height: min(420px, calc(100vh - 24px))`，尚待新 Actions 验证，PR 未合并。
+
 **当前状态（2026-10-17，#1183）**：UI-only 第一阶段实现已提交，分支 `codex/issue-1183-task-review`，代码提交 `71a982ae957ca6a412eb720319103afedbd08225`；已无冲突同步 `origin/main` `60e167fcf309dd4439bcfe04422811b356fd6474`（merge `8ba995b8b7a57e50d92aed0c4e4ac1c62a48df0f`）。issue 保持 OPEN / `in-progress`；审查覆盖与 PR 待收口。
 - **实现/验证**：复用 ChangesPanel / DiffBlock / changedFiles 等既有 UI；详情按需展开，横条按 run 终态给出准确提醒，详情文案去内部术语；未改接受与租约后端语义。合并后聚焦 Vitest 47/47、`pnpm build` 通过；`pnpm lint` exit 0（仓库既存 warnings）。
 - **审查/待办**：Correctness 与 Standards 独立复审均 PASS、P0–P4=0；明细见 `docs/phase_status/2026-10.md` #1183 与 review ledger。Issue 要求的全量 E2E/Vitest/Gate-0 须在云端 `shell/ia-test`，当前会话无该入口，本机未跑重车道；后续推送、开 PR、按流程更新 issue 标签与状态。
