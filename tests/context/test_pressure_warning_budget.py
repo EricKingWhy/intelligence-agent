@@ -49,16 +49,20 @@ async def test_pressure_warning_is_counted_into_budget(tmp_path):
     session.append(USER_MESSAGE, {"content": "next"})
 
     model = ScriptedModel([])
-    builder = ContextBuilder(model)
 
     # fixture 反解预算：pre = 投影消息 + 保护事实（与 build 同一编码器口径），
     # 取 M = 4*pre//3 使 pre 落在 [0.7M, 0.85M) 带内且给 warning 文本留足
     # 上侧余量（并入 warning 后仍 < 0.85M，注入判据在修复前后都成立）。
+    # 预算经**构造期**传入而非事后改字段：#1197 项 1 起 `build()` 顶部按会话
+    # 挡位现派生窗口（`_sync_session_context_window`），事后赋值会被回落默认值
+    # （200_000）覆盖，fixture 直接掉出带外、warning 永不注入。
     projected = [
         message for message, _source_range
         in derive_messages_with_source_ranges(session.events)
     ]
-    facts_messages = builder._protected_facts_messages(
+    # 纯静态投影（不读实例状态），fixture 阶段先按类调用——builder 要等预算
+    # 反解出来才能构造。
+    facts_messages = ContextBuilder._protected_facts_messages(
         derive_protected_facts(session.events)
     )
     pre = estimate_message_tokens(projected)
@@ -70,7 +74,7 @@ async def test_pressure_warning_is_counted_into_budget(tmp_path):
     assert auto_band <= pre < hard_band, (
         f"fixture 未落入带内：pre={pre}, auto={auto_band}, hard={hard_band}"
     )
-    builder.max_context_tokens = max_context_tokens
+    builder = ContextBuilder(model, max_context_tokens=max_context_tokens)
 
     # mock 压缩：走"无可压缩早期轮" no-op 路径（零 bracket 写入），warning
     # 逻辑与已压缩路径共用同一份收尾装配。

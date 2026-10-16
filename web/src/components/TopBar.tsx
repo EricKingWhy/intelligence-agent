@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, Sun } from 'lucide-react';
+import { Activity, Brain, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -40,6 +40,9 @@ interface Props {
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
   onOpenContextUsage: (sessionId: string) => void;
+  /** #1197 项 5B：打开「上下文窗口」挡位选择器。可选——未提供时不渲染入口
+   *  （同 `onOpenRecoveryList` 的先例：既有测试夹具零迁移）。 */
+  onOpenContextWindow?: (sessionId: string) => void;
   /** #1030：后端待裁决清单非空（`GET /api/sessions/{id}/recovery` 或 409 载荷）。
    *  可选 + 缺省 false——既有测试夹具零迁移（同 `onOpenRecoveryList` 的先例）。
    *  为真时徽标显示一等态「待裁决」而非「思考中」：坏死 run 的 `run_status` 停在
@@ -50,7 +53,7 @@ interface Props {
   rosterSlot?: ReactNode;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, awaitingDecision = false, rosterSlot }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -220,6 +223,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             title="上下文容量——已用/窗口/分类占比/缓存命中率"
           >
             <Gauge size={16} />
+          </button>
+        )}
+        {/* #1197 项 5B：上下文窗口挡位选择器入口。与容量看板同簇——同一件事
+            的读写两面（看板读占用、这里改窗口）；无会话时不渲染。 */}
+        {sessionId && onOpenContextWindow && (
+          <button
+            className="icon-btn"
+            onClick={() => onOpenContextWindow(sessionId)}
+            aria-label="上下文窗口"
+            title="上下文窗口——改本会话的窗口挡位（越大压缩越晚，运行更慢更贵）"
+          >
+            <SlidersHorizontal size={16} />
           </button>
         )}
         <button

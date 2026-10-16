@@ -441,7 +441,7 @@ def _spawn_setup(
 
 def _delegate_args() -> object:
     return type("_Args", (), {"target": "coding", "task": "x", "constraints": [],
-                              "output_schema": None})()
+                              "output_schema": None, "omit_constraints": False})()
 
 
 class TestSubagentChildInheritance:

@@ -40,6 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     StrictInt,
     ValidationError,
@@ -67,13 +68,14 @@ from agent_harness.assembly import (
 from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
-from agent_harness.config import Settings
+from agent_harness.config import CONTEXT_WINDOW_TIERS, Settings
 from agent_harness.context.project_instructions import (
     empty_project_instruction_status,
     project_instruction_store,
     release_project_instruction_store,
 )
 from agent_harness.context.tokens import estimate_tokens
+from agent_harness.context.window import effective_context_window
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
     HOST_SKILLS_NONCE_HEADER,
@@ -130,6 +132,7 @@ from agent_harness.session.service import (
     InvalidDecision,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProjectKeyUnavailable,
     ProtectedFactReferenceInvalid,
@@ -1113,6 +1116,51 @@ class WorkflowModeChanged(BaseModel):
     mode: str
 
 
+class ContextSettings(BaseModel):
+    """`GET`/`PATCH /api/sessions/{id}/context-settings` 的响应（#1197 项 1）。
+
+    形状 = 「**生效值 + 可选集合 + 派生线**」三件：`context_window` 是会话**当下**
+    生效的挡位（PATCH 后即此值，幂等），`tiers` 是可选挡位全表（前端选择器直接用，
+    不必另抄一份清单），`thresholds` 是 70%/85% 线**按生效窗口换算后**的十进制整数
+    （票面验收第一条的可观测面：500K→350000/425000、100K→70000/85000）。
+
+    `configured_default` = 部署级默认（`Settings.max_context_tokens`），与生效值分列：
+    没有挡位事件时两者相等，改过之后仍能看出"默认是多少"（前端"恢复默认"用得上，
+    也让"per-session 独立"可自证——两个会话可各持不同值而默认不变）。
+    """
+
+    session_id: str
+    context_window: int
+    configured_default: int
+    tiers: list[int]
+    thresholds: dict[str, int]
+
+
+class SetContextWindowRequest(BaseModel):
+    """切换会话上下文窗口挡位的请求体（#1197 项 1）。
+
+    `context_window` 用 `StrictInt`（照抄 app.py:314 的 #548 教训：pydantic 2.13 的
+    `Field(strict=True)` 只约束容器、不级联到值类型，`true`→1 / `"200000"`→200000
+    仍被 lax 强制）——挡位是**精确契约**，静默强制转换会让"传错类型"变成"传对了"。
+    白名单校验在 `field_validator` 里读 `CONTEXT_WINDOW_TIERS`（**唯一**清单）：
+    挡位外的整数 → 422 且**零写入**（票面验收第一条"非法值响亮失败"的 HTTP 面）。
+    `extra="forbid"`（照抄 `MemorySettingsPatch`）：拼错字段名不静默吞掉。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    context_window: StrictInt
+
+    @field_validator("context_window")
+    @classmethod
+    def _validate_tier(cls, value: int) -> int:
+        if value not in CONTEXT_WINDOW_TIERS:
+            raise ValueError(
+                f"context_window 必须是 {list(CONTEXT_WINDOW_TIERS)} 之一，得到 {value}"
+            )
+        return value
+
+
 class ClientExitSignaled(BaseModel):
     """`POST /api/sessions/{id}/client-exit` 的成功响应（#360 W-17 / W-12 #356）。
 
@@ -1512,6 +1560,36 @@ def _reconcile_info_provider(
         )
 
     return _info
+
+
+def _context_settings_payload(
+    settings: Settings, session_id: str, events: list[SessionEvent]
+) -> ContextSettings:
+    """把「生效窗口 + 派生线」组装成 `ContextSettings`（#1197 项 1）。
+
+    窗口走 `effective_context_window`（**唯一**派生入口，与 `ContextBuilder` 同源），
+    所以这里读到的值必然就是下一轮 `build()` 会用的值——两处各算一遍就会出现
+    「面板显示 500K、实际按 200K 压」的错位。
+
+    70%/85% 线**按生效窗口现算**（`int(window * ratio)`，与 `ContextBuilder` 的
+    `self.max_context_tokens * self.auto_compact_threshold` /
+    `* self.hard_guard_threshold` 同一算式）。
+    五挡位下两式恒为十进制整数（`window * 70 // 100 == int(window * 0.70)` 逐挡位
+    实测成立，见 `tests/test_context_window_tiers.py`），故不需要取整策略。
+    """
+    window = effective_context_window(
+        events, default=settings.max_context_tokens
+    )
+    return ContextSettings(
+        session_id=session_id,
+        context_window=window,
+        configured_default=settings.max_context_tokens,
+        tiers=list(CONTEXT_WINDOW_TIERS),
+        thresholds={
+            "auto_compact": int(window * settings.auto_compact_threshold),
+            "hard_guard": int(window * settings.hard_guard_threshold),
+        },
+    )
 
 
 def session_service(state: AppState) -> SessionService:
@@ -3289,7 +3367,10 @@ def create_app(
         状态码（顺序即服务层的校验顺序）：422 → id 形态非法（先于 404，路径穿越防线）；
         404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run（`ActiveRunConflict`，
         零写入）/ 该会话已有压缩在途（`CompactionInProgress`，零写入）/ 落盘窗口并发
-        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）；
+        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）/
+        **无可压缩的早期内容**（`NoCompactableEarlyTurn`，零写入；#1197 项 3 的"被拒"
+        态，`detail` 是 `{"message", "reason": "no_early_turns"}` 对象——三态契约要求
+        前端能与"摘要校验失败"区分）；
         500 → bracket 已写入但复核未通过
         （`CompactionPostWriteError`，fail-closed；历史已多出 bracket，不谎报"未改动"）。
 
@@ -3307,6 +3388,17 @@ def create_app(
             )
         except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
             raise http_error(e) from e
+        except NoCompactableEarlyTurn as e:
+            # #1197 项 3 的"被拒"态：会话里**确实没东西可压**，不是压缩失败。
+            # 刻意不走 `http_error`——那会把 detail 压成纯字符串，前端拿不到
+            # `reason`（#1195 要据它与"摘要校验失败"区分三态）。形状照本文件
+            # `SandboxUnavailableError` 的结构化 409 先例：`detail` 是对象，
+            # 机器可读字段与给人看的文案分列。状态码仍与 `web/domain_errors.py`
+            # 的登记一致（409）。
+            raise HTTPException(
+                status_code=409,
+                detail={"message": str(e), "reason": e.reason},
+            ) from e
         except ConfigError as e:
             # 非法摘要模型名（统一解析点抛出）：请求形状非法 → 422，detail 原样上抛。
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -3524,6 +3616,53 @@ def create_app(
             events=events,
         )
         return payload
+
+    @app.get("/api/sessions/{session_id}/context-settings")
+    async def get_context_settings(session_id: str) -> ContextSettings:
+        """读会话当下生效的上下文窗口挡位（#1197 项 1）。
+
+        只读端点（同 `context-usage`，不设来源闸）：`context_window` 由事件流
+        派生（`context/window-changed` last-wins，见 `context/window.py`），
+        `thresholds` 按生效窗口现算 70%/85%。
+
+        **路由形态的偏离（用户裁决 A，2026-10-16 14:06）**：票面原文
+        `PATCH /api/context-settings`「由请求会话上下文隐含」按字面不可实现
+        （服务端无"当前会话"概念、前端不发 session 头），改为复用仓库统一
+        per-session 形状（先例：`.../workflow-mode`、`.../permission-mode`）。
+        票面正文不动，语义记在此处与 `tests/web/test_context_settings_api.py`。
+        """
+        service = session_service(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        return _context_settings_payload(app.state.agent.settings, session_id, events)
+
+    @app.patch("/api/sessions/{session_id}/context-settings")
+    async def set_context_settings(
+        session_id: str,
+        body: SetContextWindowRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> ContextSettings:
+        """切换会话上下文窗口挡位（#1197 项 1），**per-session 独立**。
+
+        追加 `context/window-changed`（append-only，last-wins）；`ContextBuilder`
+        每次 `build()` / `compact_now()` 现派生，**下一轮上下文构建即生效**，
+        无需重建（同 workflow-mode 的生效语义）。语义：200 → 生效后的完整设置
+        （**幂等**）；404 → 没有这个会话；422 → id 形态非法 / 挡位非法
+        （先于 404，且零写入）。
+
+        来源闸（ADR-0025 D1）：改窗口是宿主侧管理动作，只接受本机来源。
+        """
+        service = session_service(app.state.agent)
+        try:
+            await service.set_context_window(session_id, body.context_window)
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return _context_settings_payload(app.state.agent.settings, session_id, events)
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(

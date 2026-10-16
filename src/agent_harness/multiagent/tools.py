@@ -117,6 +117,15 @@ class _DelegateArgs(BaseModel):
         default_factory=list,
         description="可选约束清单（如：只改某目录、必须先写测试）",
     )
+    omit_constraints: bool = Field(
+        default=False,
+        description=(
+            "可选：干净启动（#1192 / #1176 Phase 3）。true 时子代理**不继承**任何"
+            "项目/全局级约束与当前有效授权，只按 task 描述工作（对标 Claude Code 的"
+            "omitClaudeMd）。缺省 false = 默认继承持续约束。该开关由用户在委派前设置，"
+            "模型不得自行改判。"
+        ),
+    )
     output_schema: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -242,6 +251,7 @@ class DelegateTool(Tool):
         try:
             result = await self._provider.run(
                 target=args.target, task=task, constraints=args.constraints,
+                omit_constraints=args.omit_constraints,
             )
         except ValueError as error:
             failed = ToolResult.failure(
@@ -390,6 +400,7 @@ class DelegateTool(Tool):
                 result2 = await self._provider.run(
                     target=args.target, task=retry_task,
                     constraints=args.constraints,
+                    omit_constraints=args.omit_constraints,
                 )
             except ValueError as error:
                 budget_note = f"retry_not_started: {error}"

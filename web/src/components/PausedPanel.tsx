@@ -72,9 +72,6 @@ export function PausedPanel({
   resuming,
 }: PausedPanelProps) {
   const facts = pauseFacts(paused);
-  // `#1026`：context 硬护栏暂停没有 run ceiling 可抬（恢复依据是手动压缩/调上限，
-  // 不是数字输入）——判别收拢成一个布尔，渲染块内各分派只读这一个变量。
-  const isContextPause = facts.resumeTarget.kind === 'context';
   const draftError = ceilingDraftError(paused, ceilingDraft);
   const continuation = paused.continuation;
   // 标题按**命中的那一维**报读数：命中 local fuse（非 run 维）或某个**工具配额**
@@ -163,58 +160,46 @@ export function PausedPanel({
         </div>
       )}
       <div className="pause-panel-resume">
-        {isContextPause ? (
-          <>
-            {/* `#1026`：context 硬护栏暂停——恢复依据是"换一个放得下的上下文"
-                （手动压缩 / 调大上限），不是抬高任何 run ceiling。数字输入对它是
-                错配的旋钮（旧实现回落到 max_agent_turns_total 正是票面修法④
-                要除掉的错配），所以整段输入行替换为处置引导。 */}
-            <div className="pause-panel-context-guidance">
-              上下文超限（max_context_tokens）不是 run 预算维：抬任何 ceiling 都改变不了
-              「投影放不进窗口」。请先手动执行 <code>/compact</code> 压缩会话上下文，
-              或调大 max_context_tokens / 换窗口更大的模型后重试；恢复本身无需 ceiling。
-            </div>
-          </>
-        ) : (
-          <>
-            <label htmlFor="pause-resume-ceiling">
-              {/* `#315`：deadline 的目标是**时刻**不是 ceiling 数字——标签与输入模式都要换，
-                  否则用户会按数字形状去填一个 RFC 3339 文本（或者反过来）。 */}
-              {facts.deadlinePause
-                ? `新的绝对截止时刻（${resumeTargetLabel(facts.resumeTarget)}，RFC 3339 UTC）`
-                : `绝对 ceiling（${resumeTargetLabel(facts.resumeTarget)}）`}
-            </label>
-            <input
-              id="pause-resume-ceiling"
-              type="text"
-              inputMode={facts.deadlinePause ? 'text' : 'decimal'}
-              placeholder={facts.deadlinePause ? DEADLINE_EXAMPLE : undefined}
-              value={ceilingDraft}
-              onChange={(e) => onCeilingDraftChange(e.target.value)}
-              aria-label={
-                facts.deadlinePause
-                  ? `恢复用的绝对截止时刻：${resumeTargetLabel(facts.resumeTarget)}（RFC 3339 UTC）`
-                  : `恢复用的绝对 ceiling：${resumeTargetLabel(facts.resumeTarget)}`
-              }
-              disabled={resuming}
-            />
-          </>
-        )}
-        {!isContextPause && (
-          <button
-            className="pause-resume-btn"
-            onClick={onResume}
-            disabled={resuming || draftError !== null}
-            title={`以同一 run_id 恢复：提交 ${resumeTargetLabel(facts.resumeTarget)} 的绝对值与当前预算版本（CAS）`}
-          >
-            <PauseCircle size={14} aria-hidden="true" />
-            {resuming ? '恢复中…' : '恢复同一 run'}
-          </button>
-        )}
-        {!isContextPause && draftError !== null && !resuming && (
+        {/* `#1197` 项 2：这里**没有** context 分支了——上下文满的暂停由 App 路由到
+            `ContextFullDialog`（一句话 + 换模型/结束），不再走这个技术屏。原先
+            `#1026` 那段"请手动 /compact、或调大 max_context_tokens"的引导连同
+            `isContextPause` 判别一起删除：不可达的分支留着只会让下一个改这里的人
+            以为面板还要负责 context 暂停。路由不变量由
+            `App.contextFullRouting.test.tsx` 在 App 层钉住。 */}
+        <label htmlFor="pause-resume-ceiling">
+          {/* `#315`：deadline 的目标是**时刻**不是 ceiling 数字——标签与输入模式都要换，
+              否则用户会按数字形状去填一个 RFC 3339 文本（或者反过来）。 */}
+          {facts.deadlinePause
+            ? `新的绝对截止时刻（${resumeTargetLabel(facts.resumeTarget)}，RFC 3339 UTC）`
+            : `绝对 ceiling（${resumeTargetLabel(facts.resumeTarget)}）`}
+        </label>
+        <input
+          id="pause-resume-ceiling"
+          type="text"
+          inputMode={facts.deadlinePause ? 'text' : 'decimal'}
+          placeholder={facts.deadlinePause ? DEADLINE_EXAMPLE : undefined}
+          value={ceilingDraft}
+          onChange={(e) => onCeilingDraftChange(e.target.value)}
+          aria-label={
+            facts.deadlinePause
+              ? `恢复用的绝对截止时刻：${resumeTargetLabel(facts.resumeTarget)}（RFC 3339 UTC）`
+              : `恢复用的绝对 ceiling：${resumeTargetLabel(facts.resumeTarget)}`
+          }
+          disabled={resuming}
+        />
+        <button
+          className="pause-resume-btn"
+          onClick={onResume}
+          disabled={resuming || draftError !== null}
+          title={`以同一 run_id 恢复：提交 ${resumeTargetLabel(facts.resumeTarget)} 的绝对值与当前预算版本（CAS）`}
+        >
+          <PauseCircle size={14} aria-hidden="true" />
+          {resuming ? '恢复中…' : '恢复同一 run'}
+        </button>
+        {draftError !== null && !resuming && (
           <span className="pause-panel-error">{draftError}</span>
         )}
-        {!isContextPause && draftError === null && !resuming && (
+        {draftError === null && !resuming && (
           <span className="pause-panel-hint">{resumeInputHint(facts)}</span>
         )}
       </div>
