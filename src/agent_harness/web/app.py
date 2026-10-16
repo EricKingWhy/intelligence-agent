@@ -2468,6 +2468,13 @@ def create_app(
 
     register_attachment_routes(app, validate_session_id=validate_session_id)
 
+    # #1190 / #1176 Phase 1：会话级约束管理面板（受保护事实查看 + 主动撤销；独立
+    # router）。数据是后端实时投影（前端不维护第二套状态），撤销走会话级管理写入口
+    # 追加 `task/fact_revocation`、不物理删除；来源闸用既有的 `require_trusted_origin`。
+    from agent_harness.web.protected_facts import register_protected_fact_routes
+
+    register_protected_fact_routes(app)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。

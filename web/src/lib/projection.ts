@@ -1791,6 +1791,11 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.MEMORY_RECALLED]: { apply: projectMemoryRecalled, summarize: emptySummary },
   // #346: protected facts are a durable context projection, not a conversation timeline item.
   [EventType.TASK_PROTECTED_FACT]: { apply: noopProjection, summarize: emptySummary },
+  // #1190：约束撤销事件——与 TASK_PROTECTED_FACT 同形（durable context 投影，非对话
+  // 时间线项）。撤销后的权威状态在后端 `derive_protected_facts` / GET protected-facts
+  // 单源，前端不在本地再造第二套状态（不变量 #22）。登记为 no-op ⇒ 已知类型、不进
+  // `unknown_events`；不登记则穷尽性 `Record<EventTypeValue, EventSemantics>` 被破坏。
+  [EventType.TASK_FACT_REVOCATION]: { apply: noopProjection, summarize: emptySummary },
   // #352：evidence/recorded 是验收证据的 durable 事实，不是对话时间线项；
   // 权威投影在后端 `derive_evidence_state`（GET /api/sessions/{sid}/evidence 单源），
   // 前端不在本地再造第二套证据状态（与 TASK_* 同不变量 #22）。登记为 no-op ⇒ 已知类型、
