@@ -373,6 +373,7 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
 
   // 在途的界面真相：停止按钮在场（发送按钮同时在场，ADR-0030 D10）。
   await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+  await expect.poll(() => sessionPosts).toBeGreaterThan(0);
   // 基线而不是硬编码 1：建立这一步本身就允许出现一次 POST /api/sessions
   // （**不**断言它必须等于 1——那会把"首条消息走哪条通道"也锁进来，
   // 而那由 selectedId 决定，与本次回归无关）。要锁的是**增量**。
@@ -766,8 +767,8 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
  * 断言要活过三轮退避（5s+）才看得见差别——与 T12o 同理。
  *
  * 心跳仍按脚本 opt-in（第 2 次 delayMs 期间连接已建立但无帧，真后端此时也在发
- * 2s 一次 server_ping）；**不给 mock 加全局 ping**——o-wait-hint.spec.ts 依赖
- * 停摆路径，必须按脚本 opt-in。 */
+ * 2s 一次 server_ping）；**不给 mock 加全局 ping**——需要停摆语境的 spec 各自
+ * 显式 opt-in，不能全局默认开。 */
 
 /** 本用例专用的**更晚**落定（1750ms）。T12o 族的共享常量 `LATE_MS=1600` 是整族的
  *  时序基线，不能为本用例改动；而"纠正落进 release→#2 重锁缝隙"需要把纠正点再往后
@@ -829,7 +830,7 @@ test('T12o-缝隙：迟到纠正落进 release→relock 缝隙 → 无假「连�
  *  4. 正确行为：客户端必须重连 → 出现第 3 次订阅
  *  5. Bug 行为（修前）：hold 未释放 → request() 返回 null → 无第 3 次订阅
  *
- * 不给 mock 加全局 ping（o-wait-hint 依赖停摆路径，按脚本 opt-in）。 */
+ * 不给 mock 加全局 ping（需要停摆语境的 spec 各自显式 opt-in）。 */
 
 test('P3-1：纠正后新流首帧释放 hold → 真实断线能重连', async ({ page }) => {
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];

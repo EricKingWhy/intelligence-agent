@@ -116,6 +116,9 @@ def test_status_map_is_the_audited_contract():
         # SeqConflict 同为 409 但**不可重试**（损坏不因重试消失，detail 带脱敏定位
         # 记录引导人工修复）；沿用 BUG-011 同一逻辑：损坏不是「不存在」，404 会掩盖。
         "EventLogCorruptError": 409,
+        # #1191（Phase 2）：项目/全局约束规则层存储读写失败（IO / 损坏文件）——与
+        # EventLogCorruptError 同立场（存储损坏 = 状态对不上且不可重试）→ 409。
+        "ScopeConstraintError": 409,
         # #172 / ADR-0029：会话是别的会话的 fork 父——不级联（删掉用户没选中的子会话）、
         # 不 orphan（留悬空来源链接），所以只有 409 诚实：请求形态没错、父也确实存在。
         "SessionHasChildren": 409,
@@ -125,6 +128,14 @@ def test_status_map_is_the_audited_contract():
         # 不存在」会让前端显示错误的失败原因。
         "SupersedeTargetInvalid": 409,
         "ProtectedFactReferenceInvalid": 409,
+        # #1190：约束管理面板的撤销入口——目标 fact 不存在 → 404；目标已被取代
+        # （非 active、不可主动撤销）→ 409。与 404 的「不存在」刻意分开（状态冲突，
+        # 请求形态合法）。本表是精确类型索引，两个新类型各自登记。
+        "ProtectedFactNotFound": 404,
+        "ProtectedFactNotRevocable": 409,
+        # #1191（Phase 2）：登记项目级约束时会话解析不出项目键（不在 git 仓库内）——
+        # 请求在当前上下文不可执行，票面 §六.2 逐字定 422（不是 409 的引用问题）。
+        "ProjectKeyUnavailable": 422,
         # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
         # 两侧目录可能都在，是**归属事实**矛盾（不是 404 的"目录没了"，也不是 422 的
         # "请求写错"）。续聊拒绝静默选边。

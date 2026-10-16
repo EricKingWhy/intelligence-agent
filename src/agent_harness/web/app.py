@@ -113,6 +113,10 @@ from agent_harness.session.derive import validate_user_protected_fact_annotation
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
+from agent_harness.session.scoped_constraints import (
+    ScopeConstraintError,
+    ScopedConstraintStore,
+)
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
     COMPACT_ENTRY_API,
@@ -130,6 +134,7 @@ from agent_harness.session.service import (
     ModelDoesNotSupportImages,
     NoCompactableEarlyTurn,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     ReconcileDecision,
@@ -163,6 +168,7 @@ from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
+from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
@@ -751,17 +757,67 @@ class ApproveRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class AskUserAnswer(BaseModel):
+    """`ask_user` 单题回答（#1204）：选中选项的 `label`，或自定义行的 `custom_text`。"""
+
+    model_config = {"extra": "forbid"}
+
+    label: str | None = Field(default=None, min_length=1, max_length=100_000)
+    custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def validate_non_blank(self) -> AskUserAnswer:
+        has_label = self.label is not None and bool(self.label.strip())
+        has_custom = self.custom_text is not None and bool(self.custom_text.strip())
+        if not has_label and not has_custom:
+            raise ValueError("each answer requires a non-blank label or custom_text")
+        return self
+
+
+class AskUserAnswerItem(BaseModel):
+    """`ask_user` 单题条目：`answer=null` 即该题被跳过/留空（#1204）。"""
+
+    model_config = {"extra": "forbid"}
+
+    question: str = Field(min_length=1, max_length=100_000)
+    answer: AskUserAnswer | None = None
+
+
 class InputRequestAnswer(BaseModel):
+    """`resume_basis=user_input` 的回答体，按 `kind` 二选一形状（#1204）。
+
+    - 窄场景（`protected_fact_conflict`）：`{request_id, choice, custom_text?}`；
+    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`。
+    形状层只挡明显非法组合；权威语义判定在领域层 `SessionService`（单一规则来源）。
+    """
+
     model_config = {"extra": "forbid"}
 
     request_id: str = Field(min_length=1, max_length=200)
     choice: Literal[
         "replace_persistently", "current_task_only", "keep_existing", "custom",
-    ]
+    ] | None = None
     custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+    questions: list[AskUserAnswerItem] | None = Field(default=None, min_length=1)
+    # #1204：ask_user 超时到点时的恢复形态——只注入"用户可能不在"系统消息，不写答案。
+    timeout: bool = False
 
     @model_validator(mode="after")
-    def validate_custom_text(self) -> InputRequestAnswer:
+    def validate_shape(self) -> InputRequestAnswer:
+        if self.timeout:
+            if (
+                self.choice is not None
+                or self.questions is not None
+                or self.custom_text is not None
+            ):
+                raise ValueError("timeout form cannot carry choice/questions/custom_text")
+            return self
+        if self.questions is not None:
+            if self.choice is not None or self.custom_text is not None:
+                raise ValueError("questions form cannot carry choice/custom_text")
+            return self
+        if self.choice is None:
+            raise ValueError("input_request requires either choice or questions")
         if self.choice == "custom":
             if self.custom_text is None or not self.custom_text.strip():
                 raise ValueError("custom choice requires non-blank custom_text")
@@ -837,6 +893,11 @@ class ProtectedFactAnnotation(BaseModel):
     ]
     value: str = Field(min_length=1, max_length=10_000)
     supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1191（Phase 2）：登记作用域三选一（票面 §四.1）。默认 None = 会话级（既有行为
+    # 逐字不变）；`project` / `global` 时服务端把真值写入独立规则层，会话事件流里只留
+    # 审计痕（投影跳过）。`None` 而非 `"session"` 是为让 `exclude_none` 下**缺省完全不
+    # 发键**——会话路径的请求体逐字节不变。
+    scope: Literal["session", "project", "global"] | None = None
 
 
 #: `attachments` 的静态兜底上限（#823 / MM-02，A3/B7）。取部署上限键
@@ -1175,6 +1236,11 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # #1191（Phase 2）：项目/全局级约束的独立规则层（用户裁决 Fork 2 = A：
+        # 不碰 memory v2）。只构造一次（持有进程内写锁）；根目录同在 workspace_dir 下。
+        self.scoped_constraint_store = ScopedConstraintStore(
+            Path(settings.workspace_dir) / "constraints"
+        )
         # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
         # 必须在 RunManager **之前**建：下面的 on_run_terminal 回调要用它（闭包按
         # 引用捕获 self，顺序其实无妨，但先建可读性更好）。
@@ -1195,6 +1261,19 @@ class AppState:
             # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
             # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
             on_context_snapshot=self._cache_context_snapshot,
+        )
+        # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
+        # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
+        # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
+        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
+        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        self.ask_user_timeout_driver = AskUserTimeoutDriver(
+            timeout_seconds=settings.ask_user_question_timeout,
+            on_expire=lambda session_id, request_id: (
+                session_service(self).resume_ask_user_timeout(
+                    session_id, request_id=request_id,
+                )
+            ),
         )
         # #200：会话 → (builder 快照, 工具定义)。工具定义与快照在**同一次收口**
         # 时取（registry 与 builder 属于同一个 runtime，分开取会得到两个真相）。
@@ -1534,6 +1613,7 @@ def session_service(state: AppState) -> SessionService:
         budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
         reconcile_info=state.reconcile_info,
+        scoped_constraint_store=state.scoped_constraint_store,
     )
 
 
@@ -2494,6 +2574,13 @@ def create_app(
 
     register_attachment_routes(app, validate_session_id=validate_session_id)
 
+    # #1190 / #1176 Phase 1：会话级约束管理面板（受保护事实查看 + 主动撤销；独立
+    # router）。数据是后端实时投影（前端不维护第二套状态），撤销走会话级管理写入口
+    # 追加 `task/fact_revocation`、不物理删除；来源闸用既有的 `require_trusted_origin`。
+    from agent_harness.web.protected_facts import register_protected_fact_routes
+
+    register_protected_fact_routes(app)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -3068,7 +3155,9 @@ def create_app(
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
                 input_request=(
-                    req.input_request.model_dump(exclude_none=True)
+                    req.input_request.model_dump(
+                        exclude_none=True, exclude_defaults=True,
+                    )
                     if req.input_request is not None else None
                 ),
                 **budget_claims(req.budget, resume_surface=True),
@@ -3950,6 +4039,8 @@ def create_app(
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
+            ProjectKeyUnavailable,
+            ScopeConstraintError,
             AttachmentReferenceInvalid,
             TooManyAttachments,
             AttachmentMessageTooLarge,

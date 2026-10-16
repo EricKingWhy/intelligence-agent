@@ -67,7 +67,9 @@ import {
   getPermissionModes,
   getReasoningEfforts,
   getSandboxBackends,
+  listEffectiveConstraints,
   type CatalogEntry,
+  type ConstraintScope,
   type ModelCatalogEntry,
   type PendingDecision,
   type SandboxBackendEntry,
@@ -78,7 +80,7 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
+import type { AskUserAnswer, ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
@@ -308,6 +310,33 @@ export default function App() {
     if (activeProject === null) return null;
     return describeOwnership(activeProject.title, activeProject.path);
   }, [selectedId, selectedSummary, sessionCwd, activeProject]);
+
+  // ── #1191（Phase 2）：当前会话是否落在 git 仓库内 ──
+  // 「登记作用域」里「本项目」是否可选（票面 §七.4）依赖它。真值只有后端知道
+  // （`effective-constraints` 的 `project` 字段——git 根由 `git rev-parse --git-common-dir`
+  // 解析）；前端不猜路径（不变量 #22：成员资格/项目归属是后端真相）。`null` = 未知
+  // （新建态 / 尚未取到 / 取失败）⇒ 不置灰，交由后端 422 兜底。会话切换先清空，
+  // 不让上一会话的判定冒充本会话（同 sessionCwd 的身份闸纪律）。
+  const [projectAvailable, setProjectAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (selectedId === null) {
+      setProjectAvailable(null);
+      return;
+    }
+    let alive = true;
+    setProjectAvailable(null);
+    listEffectiveConstraints(selectedId)
+      .then((res) => {
+        if (alive) setProjectAvailable(res.project !== null);
+      })
+      .catch(() => {
+        // 取不到项目信息 ≠ 非 git：保持「未知」不置灰，避免误锁「本项目」。
+        if (alive) setProjectAvailable(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedId]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -717,11 +746,22 @@ export default function App() {
       task: string,
       rememberAsProceduralRule = false,
       attachmentIds: string[] = [],
+      scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
         : {};
+      // #1191（Phase 2）：非会话级登记——把「作为可复用规则」的这条消息同时登记进
+      // 项目/全局规则层。注解 `value` 必须命中消息正文（后端
+      // `validate_user_protected_fact_annotations` 的 `value in content` 判据），故取
+      // 本次正文 `task`；`fact_type='constraint'`（一条可复用规则即一条约束）。
+      // 会话级（缺省）**不发注解**——行为逐字不变，仍只由 `remember_as_procedural_rule`
+      // 承载（票面裁定 Fork 1）。
+      const scopedFacts =
+        scope !== 'session'
+          ? { protected_facts: [{ fact_type: 'constraint' as const, value: task, scope }] }
+          : {};
       // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
       // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
       // 续聊：已有会话 → 发消息到现有会话（PRD §5.3 续聊入口）。
@@ -738,6 +778,7 @@ export default function App() {
       const amend = {
         ...toAmendFields(composerControls),
         ...ruleSignal,
+        ...scopedFacts,
         // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
@@ -750,6 +791,15 @@ export default function App() {
         }
         if (sid !== null) {
           return await sendMessage(sid, task, { amend });
+        }
+        // #1191：非会话级登记必须落在一个**真实会话**上（`protected_facts` 只在
+        // `/messages` 契约里，创建路径没有）。新建态先懒建出会话身份
+        // （`ensureSession`：只建会话、不启动 run），再走续聊路径——同一次用户动作，
+        // 用户无感；否则注解会被创建路径静默丢弃（假受理）。
+        if (scope !== 'session') {
+          const created = await ensureSession();
+          if (created === null) return false; // 懒建失败 ⇒ 未受理（保留输入）
+          return await sendMessage(created, task, { amend });
         }
         // 新建会话：`POST /api/sessions` 没有附件字段（后端 `CreateSessionRequest`
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
@@ -777,7 +827,7 @@ export default function App() {
         return failure === null;
       })();
     },
-    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
+    [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
@@ -871,9 +921,13 @@ export default function App() {
       task: string,
       rememberAsProceduralRule = false,
       attachmentIds: string[] = [],
+      scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
-      if (!selectedId) {
-        return handleSubmit(task, rememberAsProceduralRule, attachmentIds);
+      // #1191：非会话级登记只在 queue 投递路径上完成（后端 `send_message` 的规则层
+      // 登记门是 `mode == "queue"`；steer 是瞬态投递，不承载持久登记）。用户用 steer
+      // 键位登记项目/全局约束时回落 queue——**绝不静默丢弃**那次登记。
+      if (!selectedId || scope !== 'session') {
+        return handleSubmit(task, rememberAsProceduralRule, attachmentIds, scope);
       }
       return sendSteer(selectedId, task, rememberAsProceduralRule, attachmentIds);
     },
@@ -1032,6 +1086,8 @@ export default function App() {
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
   const [dismissedConstraintRequestId, setDismissedConstraintRequestId] = useState<string | null>(null);
   const [resumingConstraintRequestId, setResumingConstraintRequestId] = useState<string | null>(null);
+  /** #1204：在途恢复的 ask_user 请求 id（null = 无在途）。与约束澄清同款按请求记账。 */
+  const [resumingAskUserRequestId, setResumingAskUserRequestId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
   const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
@@ -1045,6 +1101,23 @@ export default function App() {
     paused.run_id === pendingConstraintInput.run_id
       ? pendingConstraintInput
       : null;
+  /** #1204：`kind=ask_user` 的待回答请求——挂载内嵌卡片的**唯一**判据，与约束澄清
+   *  完全同形地要求「暂停 run 与请求 id 对齐」，两条管线互不冒充（分流在投影的
+   *  `data.kind` 处已经发生，这里只是同一条对齐检查）。 */
+  const pendingAskUser = conversation?.pending_ask_user ?? null;
+  const askUserRequest =
+    paused !== null &&
+    pendingAskUser !== null &&
+    paused.reason === 'user_input' &&
+    paused.input_request_id === pendingAskUser.request_id &&
+    paused.run_id === pendingAskUser.run_id
+      ? pendingAskUser
+      : null;
+  /** #1223：`ask_user` 待回答（答案尚未落回事件流）→ 参与 composer 锁定，把用户引向
+   *  对话流里的待回答卡片，而不是让他发新消息撞后端 409。与 `constraintInputPending`
+   *  完全同形（同一 `USER_INPUT_REQUESTED` 抽象，只是 `kind` 不同；锁的判据是投影字段
+   *  ＋「答案未到」，不另立第二真相源）。 */
+  const askUserPending = pendingAskUser !== null && pendingAskUser.answer === null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -1101,6 +1174,21 @@ export default function App() {
       inputRequest: answer,
     }).finally(() => setResumingConstraintRequestId(null));
   }, [constraintRequest, paused, selectedId, resumePausedRun]);
+
+  /** #1204：`ask_user` 内嵌卡片的作答提交——复用与约束澄清**同一条**恢复通道
+   *  （`resume_basis: 'user_input'` + `input_request`），答案 wire 形态是通用的
+   *  `{request_id, questions:[{question, answer}]}`。失败路径由 `resumePausedRun`
+   *  统一处理（刷新权威日志 + 显示原因），这里只管在途记账。 */
+  const handleAskUserAnswer = useCallback((answer: AskUserAnswer) => {
+    if (!askUserRequest || !paused || selectedId === null) return;
+    setResumingAskUserRequestId(askUserRequest.request_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      kind: 'user_input',
+      inputRequest: answer,
+    }).finally(() => setResumingAskUserRequestId(null));
+  }, [askUserRequest, paused, selectedId, resumePausedRun]);
 
   const handleConstraintDialogOpenChange = useCallback((open: boolean) => {
     if (open) {
@@ -1654,6 +1742,15 @@ export default function App() {
                     onEditTurn={handleEditTurn}
                     goneApprovalIds={goneApprovalIds}
                     onApprovalGone={onApprovalGone}
+                    /* #1204：`kind=ask_user` 的提问卡片内嵌在对话流尾部（与约束澄清
+                       的模态挂载区刻意分开）；三个 prop 的身份都稳定（derive 自
+                       conversation / useCallback / 原语），不破坏 Conversation 的 memo。 */
+                    askUserRequest={askUserRequest}
+                    askUserResuming={
+                      askUserRequest !== null && resumingAskUserRequestId === askUserRequest.request_id
+                    }
+                    askUserError={error}
+                    onAskUserAnswer={handleAskUserAnswer}
                     /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
@@ -1664,6 +1761,9 @@ export default function App() {
                     /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
                     ownership={ownership}
                     constraintInputPending={constraintInputPending}
+                    /* #1223：待回答的 `ask_user` 提问也锁 composer（与约束澄清同一条
+                       锁定语义；文案在 Composer 内中性化，不出现「约束澄清」字样）。 */
+                    askUserPending={askUserPending}
                     /* #1148：分离投递（窗外落定）迟到的失败原文——hook 把没送出去的
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
@@ -1678,6 +1778,9 @@ export default function App() {
                     )}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
+                    /* #1191：项目级登记是否可选——真值来自后端（见上方 effect），
+                       未知（新建态 / 取失败）传 null 不置灰。 */
+                    projectAvailable={projectAvailable}
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}

@@ -1,0 +1,1 @@
+2026-10-16	#1190 第五轮独立双轴审查。Standards APPROVE P0-P3=0 P4=1；Correctness APPROVE P0-P3=0 P4=2。三条 P4 修于 95352abd：superseded_by_fact_id 语义超载补注释明示合成身份、会话切换清空上一会话投影消除陈旧窗口、load 起始清错误文案。均补测试并变异复核。	779da607f0f284138d9664f2862290c7ddcdb565..95352abd49faf4510abf3e3f024e2fc1891bdd4c

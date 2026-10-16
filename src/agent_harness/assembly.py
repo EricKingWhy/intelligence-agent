@@ -94,6 +94,7 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.tools.ask_user import AskUserTool
 from agent_harness.tools.register_constraint import RegisterConstraintTool
 from agent_harness.tools.request_constraint_resolution import (
     REGISTER_CONSTRAINT_HANDOFF,
@@ -334,6 +335,12 @@ def _build_tooling(
         ))
     if include_resolution_tool:
         registry.register(RequestConstraintResolutionTool())
+        # #1204：通用提问 `ask_user` 与澄清工具共用**回答通道**（都靠前端提交
+        # `input_request`），故与它同一道开关——没有回答通道的入口（CLI）不注册。
+        # #1224：把配置的超时档注入工具，随 `USER_INPUT_REQUESTED` 载荷落盘。
+        registry.register(
+            AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
+        )
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
@@ -471,6 +478,8 @@ def root_registry_tool_names(
         names.add(RegisterConstraintTool().name)
     if include_resolution_tool:
         names.add(RequestConstraintResolutionTool().name)
+        # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
+        names.add(AskUserTool().name)
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
@@ -772,6 +781,12 @@ async def build_runtime(
             ))
         if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
             registry.register(RequestConstraintResolutionTool())
+        # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
+        # #1224：同源注入配置的超时档（与 `_build_tooling` 逐字一致）。
+        if include_resolution_tool and AskUserTool().name not in registered_names:
+            registry.register(
+                AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
+            )
 
     # 曝光级别接线（#528 / IMP-11）：Registry 定型（含上面的收窄）后，存在
     # deferred 工具才注册内置 tool_search 并建立定义集控制器——全 direct
@@ -928,6 +943,7 @@ async def build_runtime(
         model_supports_vision(settings, config.fallback)
         if config.fallback is not None else False
     )
+    scoped_fact_provider = _build_scoped_fact_provider(settings)
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -990,6 +1006,8 @@ async def build_runtime(
             # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
             image_normalize_max_dimension=settings.image_normalize_max_dimension,
             image_normalize_max_bytes=settings.image_normalize_max_bytes,
+            # #1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（独立规则层）。
+            scoped_fact_provider=scoped_fact_provider,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
@@ -1036,3 +1054,40 @@ async def build_runtime(
         # CLI / 既有单测路径行为零变化）。
         completion_policy=completion_policy,
     )
+
+
+def _build_scoped_fact_provider(settings: Settings) -> Any:
+    """#1191（Phase 2 / Fork 3）：项目/全局级约束的注入供给器（闭包）。
+
+    每次 build 现读规则层文件（**精确取用不检索**）。项目键走**同一取用口径**
+    （`effective_project_key`）：先读会话元数据里持久化的 key（同步只读，
+    `read_session_project_key`），缺失再按 cwd 现场解析——与面板 / 登记 / 撤销
+    同源，避免"面板列着、注入侧却按另一个键取不到"的分裂（重审 finding C1）。
+    独立于 memory v2（用户裁决 Fork 2 = A）。
+    """
+    from agent_harness.session.cwd import session_cwd
+    from agent_harness.session.derive import derive_protected_facts
+    from agent_harness.session.scoped_constraints import (
+        ScopedConstraintStore,
+        effective_project_key,
+        scoped_context_facts,
+    )
+    from agent_harness.storage.sqlite import read_session_project_key
+
+    store = ScopedConstraintStore(Path(settings.workspace_dir) / "constraints")
+    db_path = Path(settings.workspace_dir) / "harness.db"
+
+    def provider(events: list[Any]) -> list[Any]:
+        if not events:
+            return []
+        session_id = events[0].session_id
+        persisted = read_session_project_key(db_path, session_id)
+        project_key = effective_project_key(persisted, session_cwd(events))
+        return scoped_context_facts(
+            store,
+            derive_protected_facts(events),
+            session_id=session_id,
+            project_key=project_key,
+        )
+
+    return provider

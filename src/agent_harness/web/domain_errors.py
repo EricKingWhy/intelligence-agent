@@ -131,6 +131,9 @@ from agent_harness.session.errors import (
     ModelDoesNotSupportImages,
     NoCompactableEarlyTurn,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
+    ProtectedFactNotFound,
+    ProtectedFactNotRevocable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
@@ -150,6 +153,7 @@ from agent_harness.session.errors import (
     WorkspaceNotFound,
     WorkspacePathInvalid,
 )
+from agent_harness.session.scoped_constraints import ScopeConstraintError
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.workspace import UnknownLedgerEntry, UnknownWorkspace
 
@@ -194,6 +198,8 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     #（不泄露存在性）。读端点在自己的 except 里把它译成定制 404 文案；本表登记
     # 是为了"新增领域异常必须显式登记"的覆盖纪律（漏登记先红）。
     AttachmentNotReferenced: 404,
+    # #1190：约束管理面板撤销目标不存在于本会话投影（404：资源不存在）。
+    ProtectedFactNotFound: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # F6 / #635：手动压缩的两个类型化拒绝（in-flight 防重 / 落盘并发改动）。
@@ -220,6 +226,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # ——所以不谎报 404（那会让前端以为会话没了），用 409。
     SupersedeTargetInvalid: 409,
     ProtectedFactReferenceInvalid: 409,
+    # #1190：约束管理面板撤销目标非 active（已被取代）——会话与 fact 都在，是当前
+    # 状态不允许主动撤销（409，与 SupersedeTargetInvalid 同立场）。
+    ProtectedFactNotRevocable: 409,
+    # #1191（Phase 2）：登记项目级约束时会话解析不出项目键（不在 git 仓库内）——
+    # 请求在当前上下文不可执行，票面 §六.2 逐字定 422。
+    ProjectKeyUnavailable: 422,
     # F18-A / #282：会话有未裁决的审批时拒绝改权限档（理由见 ADR-0041 §4.1）。
     PendingApprovalConflict: 409,
     # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），
@@ -244,6 +256,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
     # 脱敏定位记录人工修复；文案里已带该指引。
     EventLogCorruptError: 409,
+    # #1191（Phase 2）审查 C6：项目/全局约束规则层存储读写失败（IO / 损坏文件）——
+    # 与 EventLogCorruptError 同立场：存储损坏属"状态对不上且不可重试"，409。
+    # 此前该异常是裸 RuntimeError，逃出规则层端点只能落 FastAPI 默认 500。
+    ScopeConstraintError: 409,
     # 413：单条消息引用的图片总字节超部署上限（#824 / MM-03）。与上传端点单张图
     # 超限同码（HTTP `Content Too Large`）——都是"载荷太大"，客户端可缩小后重试。
     AttachmentMessageTooLarge: 413,

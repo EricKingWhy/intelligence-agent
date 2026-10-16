@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
@@ -102,6 +103,7 @@ from agent_harness.session.approval import (
     SESSION_PERMISSION_MODE_KEY,
     PermissionChange,
     append_approval_revoke,
+    append_fact_revocation,
     append_legacy_defaults_migration,
     append_permission_change,
     derive_approval_grants,
@@ -117,6 +119,13 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.approval import (
     effective_permission_mode as _effective_permission_mode,
+)
+from agent_harness.session.ask_user_timeout import (
+    ExpireOutcome,
+    ask_user_timeout_message,
+    latest_pending_input_request,
+    pending_ask_user_request_id,
+    pending_input_request,
 )
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
@@ -149,6 +158,9 @@ from agent_harness.session.errors import (
     ModelDoesNotSupportImages,
     NoCompactableEarlyTurn,
     PendingApprovalConflict,
+    ProjectKeyUnavailable,
+    ProtectedFactNotFound,
+    ProtectedFactNotRevocable,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
@@ -179,9 +191,6 @@ from agent_harness.session.event import (
     PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_INTERRUPTED,
     RUN_PAUSED,
     RUN_RESUMED,
     SESSION_FORKED,
@@ -233,6 +242,15 @@ from agent_harness.session.progress import (
     write_progress_file,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
+from agent_harness.session.scoped_constraints import (
+    ConstraintScope,
+    ScopedConstraint,
+    ScopedConstraintStore,
+    covering_fact_id,
+    effective_project_key,
+    normalized_fact_value,
+    project_label_for_key,
+)
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
     EventLogIntegrity,
@@ -271,6 +289,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy, ToolReconcileInfo
+from agent_harness.tooling.user_input import USER_INPUT_TOOL_NAMES
 from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
@@ -337,6 +356,14 @@ _SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 #: 此时 store 的 seq 守卫拒写。重读快照即可拿到新号——3 次足够覆盖真实并发度
 #: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
 _WRITE_CONFLICT_ATTEMPTS = 3
+
+#: #1191（Phase 2）：非会话级（规则层）作用域词表 = 注解 `scope` 里落在规则层的取值。
+#: 从 `ConstraintScope` 派生而不是再写一遍字面量——本文件内规则层作用域词表只此一处
+#: （审查 finding S-b2）。注意 DTO 侧（`agent_harness.web.protected_facts`）另有
+#: `Literal[...]` 字面量，属该层独立校验，不在此口径内。
+_SCOPED_SCOPE_VALUES = frozenset(
+    (ConstraintScope.PROJECT.value, ConstraintScope.GLOBAL.value)
+)
 
 #: #516 列表路径专用的 to_thread 限流器（模块级单例：SessionService 每次调用现造，
 #: 实例字段挂不住跨请求状态）。anyio 默认 40 线程会把 100 并发突发切成 ~3 波——
@@ -715,37 +742,35 @@ _CONSTRAINT_INPUT_CHOICES = frozenset(
 def _pending_user_input_request(
     events: list[SessionEvent], *, run_id: str,
 ) -> SessionEvent | None:
-    answered = {
-        event.data.get("input_request_id")
-        for event in events
-        if event.type == USER_MESSAGE
-        and isinstance(event.data.get("input_request_id"), str)
-    }
-    return next(
-        (
-            event for event in reversed(events)
-            if event.type == USER_INPUT_REQUESTED
-            and event.run_id == run_id
-            and isinstance(event.data.get("request_id"), str)
-            and event.data["request_id"] not in answered
-        ),
-        None,
-    )
+    """某 run 上最新未答复的 `USER_INPUT_REQUESTED`。
+
+    #1220 复审 B1：扫描逻辑收口到 `ask_user_timeout.pending_input_request`（超时守卫与
+    409 闸门共用同一份），此处只做转发，不再各写一遍。
+    """
+    return pending_input_request(events, run_id=run_id)
 
 
 def _latest_pending_user_input_request(
     events: list[SessionEvent],
 ) -> SessionEvent | None:
-    run_id = latest_run_id(events)
-    if run_id is None:
-        return None
-    if any(
-        event.run_id == run_id
-        and event.type in {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
-        for event in events
-    ):
-        return None
-    return _pending_user_input_request(events, run_id=run_id)
+    """最新逻辑 run 上未答复的用户输入请求（run 已终态 ⇒ `None`）。"""
+    return latest_pending_input_request(events)
+
+
+def _pending_user_input_conflict_message(
+    request: SessionEvent, *, resume_action: str,
+) -> str:
+    """待回答用户输入阻塞新任务时的 409 文案——按 ``data.kind`` 分流（#1223）。
+
+    约束澄清（``protected_fact_conflict``）与通用提问（``ask_user``）共用同一道闸门
+    （:func:`_latest_pending_user_input_request`），但语义不同：前者是长期约束冲突的
+    窄场景，后者是通用提问。文案写死「约束澄清」会把通用提问误报成约束冲突，把用户
+    引去处理一个并不存在的冲突。故按 kind 分流：``ask_user`` 走中性句，其余（含缺
+    ``kind`` 的历史事件）走约束澄清**原句**，保既有行为零回归。
+    """
+    if request.data.get("kind") == "ask_user":
+        return f"当前有待回答的提问；请先提交答案，{resume_action}"
+    return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
 
 
 def _pending_user_input_pause(
@@ -776,33 +801,164 @@ def _pending_user_input_pause(
     )
 
 
-def _constraint_input_answer_data(
+#: 单题被跳过（留空）时在该题渲染行里的占位文案。
+_ASK_SKIPPED_ANSWER = "（跳过）"
+
+
+def _user_input_answer_already_recorded(
+    events: list[SessionEvent], *, request_id: str, normalized_answer: dict[str, Any],
+) -> bool:
+    """同一 request_id 是否已落过等价的回答（幂等重放 → True，冲突 → 抛 409）。"""
+    existing = [
+        event for event in events
+        if event.type == USER_MESSAGE and event.data.get("input_request_id") == request_id
+    ]
+    if not existing:
+        return False
+    if len(existing) == 1 and existing[0].data.get("input_request_answer") == normalized_answer:
+        return True
+    raise BudgetConflict("该用户输入请求已用不同回答处理")
+
+
+def _ask_user_skip_message(question_texts: list[str]) -> str:
+    """整卡跳过时注入用户消息（#1204 用户裁决口径，N=1 时只写原文）。"""
+    first = question_texts[0]
+    if len(question_texts) == 1:
+        return f"用户跳过了提问（共 1 题：{first}）"
+    return f"用户跳过了提问（共 {len(question_texts)} 题：{first} 等）"
+
+
+def _ask_user_input_answer_data(
+    events: list[SessionEvent], *, request_id: str,
+    request: SessionEvent, answer: Mapping[str, Any],
+    ask_user_timeout_seconds: int,
+) -> tuple[dict[str, Any] | None, bool]:
+    """归一 `ask_user` 的通用 `input_request`：每题 `answer` 或为答案、或为 null（跳过）。
+
+    `answer` 结构（#1204 用户裁决）：`{request_id, questions: [{question, answer:
+    {label, custom_text?} | null}]}`；`answer=null` 即该题被跳过/留空，整卡跳过 =
+    全部 null。另有一个 `{request_id, timeout: true}` 形态：超时到点时由运行方提交，
+    只注入"用户可能不在"的系统消息、**不写任何 answer**（用户裁决：超时不替选）。
+    """
+    if answer.get("timeout") is True:
+        if set(answer) != {"request_id", "timeout"}:
+            raise BudgetRejection("timeout 形态的 input_request 不接受其它字段")
+        normalized_timeout: dict[str, Any] = {
+            "request_id": request_id,
+            "timeout": True,
+        }
+        if _user_input_answer_already_recorded(
+            events, request_id=request_id, normalized_answer=normalized_timeout,
+        ):
+            return None, True
+        return {
+            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            "input_request_id": request_id,
+            "input_request_answer": normalized_timeout,
+        }, False
+    if set(answer) - {"request_id", "questions"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    questions = request.data.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise BudgetConflict("提问请求缺少问题定义")
+    submitted = answer.get("questions")
+    if not isinstance(submitted, list) or len(submitted) != len(questions):
+        raise BudgetRejection("input_request.questions 必须与提问逐题对应")
+
+    normalized: list[dict[str, Any]] = []
+    rendered: list[str] = []
+    all_skipped = True
+    for requested, item in zip(questions, submitted):
+        text = requested.get("question") if isinstance(requested, dict) else None
+        if not isinstance(text, str):
+            raise BudgetConflict("提问请求的问题文本缺失")
+        if not isinstance(item, dict) or set(item) - {"question", "answer"}:
+            raise BudgetRejection("input_request.questions 项形状无效")
+        if item.get("question") != text:
+            raise BudgetRejection("input_request 的问题文本与提问不匹配")
+        raw = item.get("answer")
+        if raw is None:
+            normalized.append({"question": text, "answer": None})
+            rendered.append(f"- {text}：{_ASK_SKIPPED_ANSWER}")
+            continue
+        if not isinstance(raw, dict) or set(raw) - {"label", "custom_text"}:
+            raise BudgetRejection("每题答案必须是选项标签或留空（跳过）")
+        label = raw.get("label")
+        custom_text = raw.get("custom_text")
+        entry: dict[str, Any] = {}
+        if isinstance(label, str) and label.strip():
+            if len(label) > 100_000:
+                raise BudgetRejection("选项标签必须是 1 至 100000 字符")
+            entry["label"] = label
+        elif isinstance(custom_text, str) and custom_text.strip():
+            # 只填了自定义行、未点选项：以自定义文本作答。
+            entry["label"] = custom_text.strip()
+        else:
+            raise BudgetRejection("每题答案必须选择一个选项或填写自定义文本")
+        if custom_text is not None:
+            if (
+                not isinstance(custom_text, str)
+                or not custom_text.strip()
+                or len(custom_text) > 100_000
+            ):
+                raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
+            entry["custom_text"] = custom_text
+        all_skipped = False
+        shown = entry["label"]
+        # 审查 P3（#1222 只堵了精确相等）：两侧 strip 后判等，避免 custom_text 未 trim
+        # （如 " x "）时与已 strip 的 label 语义相同却仍重复渲染"（补充：…）"。
+        if (
+            entry.get("custom_text")
+            and entry["custom_text"].strip() != entry["label"].strip()
+        ):
+            shown = f"{shown}（补充：{entry['custom_text']}）"
+        rendered.append(f"- {text}：{shown}")
+        normalized.append({"question": text, "answer": entry})
+
+    if all_skipped:
+        content = _ask_user_skip_message(
+            [q["question"] for q in questions]
+        )
+    else:
+        content = "用户回答了提问：\n" + "\n".join(rendered)
+
+    normalized_answer = {
+        "request_id": request_id,
+        "questions": normalized,
+    }
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
+    return {
+        "content": content,
+        "input_request_id": request_id,
+        "input_request_answer": normalized_answer,
+    }, False
+
+
+def _user_input_answer_data(
     events: list[SessionEvent], *, run_id: str, paused: PausedRun,
     answer: Mapping[str, Any] | None,
+    ask_user_timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, bool]:
+    """把恢复请求的 `input_request` 归一成待落盘的 `USER_MESSAGE` 数据。
+
+    两种待回答请求共用同一条恢复通道（`resume_basis='user_input'`），按事件的
+    `kind` 分流：`ask_user`（通用提问）走 `_ask_user_input_answer_data`，
+    `protected_fact_conflict`（窄场景约束冲突）走下面这段原位逻辑。
+    """
     if paused.reason != REASON_USER_INPUT:
         if answer is not None:
             raise BudgetConflict("本次暂停不接受 user_input 回答")
         return None, False
     if answer is None:
         raise BudgetRejection("user_input 暂停恢复必须提交 input_request 回答")
-    if set(answer) - {"request_id", "choice", "custom_text"}:
-        raise BudgetRejection("input_request 包含不支持的字段")
     request_id = answer.get("request_id")
-    choice = answer.get("choice")
-    custom_text = answer.get("custom_text")
-    if (
-        not isinstance(request_id, str) or not request_id
-        or not isinstance(choice, str) or choice not in _CONSTRAINT_INPUT_CHOICES
-    ):
-        raise BudgetRejection("input_request 的 request_id 或 choice 无效")
+    if not isinstance(request_id, str) or not request_id:
+        raise BudgetRejection("input_request 的 request_id 无效")
     if paused.input_request_id != request_id:
         raise BudgetConflict("input_request_id 与当前暂停的 run 不匹配")
-    if choice == "custom":
-        if not isinstance(custom_text, str) or not custom_text.strip() or len(custom_text) > 100_000:
-            raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
-    elif custom_text is not None:
-        raise BudgetRejection("仅 custom 选项可以携带 custom_text")
 
     requests = [
         event for event in events
@@ -813,8 +969,27 @@ def _constraint_input_answer_data(
     if len(requests) != 1:
         raise BudgetConflict("未找到唯一匹配的持久化用户输入请求")
     request = requests[0]
+    if request.data.get("kind") == "ask_user":
+        return _ask_user_input_answer_data(
+            events, request_id=request_id, request=request,
+            answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
+        )
     if request.data.get("kind") != "protected_fact_conflict":
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
+
+    # ── 窄场景：长期约束冲突（`protected_fact_conflict`）──────────────────
+    if set(answer) - {"request_id", "choice", "custom_text"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    choice = answer.get("choice")
+    custom_text = answer.get("custom_text")
+    if not isinstance(choice, str) or choice not in _CONSTRAINT_INPUT_CHOICES:
+        raise BudgetRejection("input_request 的 request_id 或 choice 无效")
+    if choice == "custom":
+        if not isinstance(custom_text, str) or not custom_text.strip() or len(custom_text) > 100_000:
+            raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
+    elif custom_text is not None:
+        raise BudgetRejection("仅 custom 选项可以携带 custom_text")
+
     source_id = request.data.get("source_event_id")
     source_seq = request.data.get("source_event_seq")
     fact_id = request.data.get("fact_id")
@@ -834,14 +1009,10 @@ def _constraint_input_answer_data(
     normalized_answer: dict[str, Any] = {"request_id": request_id, "choice": choice}
     if choice == "custom":
         normalized_answer["custom_text"] = custom_text
-    existing = [
-        event for event in events
-        if event.type == USER_MESSAGE and event.data.get("input_request_id") == request_id
-    ]
-    if existing:
-        if len(existing) == 1 and existing[0].data.get("input_request_answer") == normalized_answer:
-            return None, True
-        raise BudgetConflict("该用户输入请求已用不同回答处理")
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
 
     fact = next(
         (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
@@ -1114,6 +1285,9 @@ class SessionService:
         budget_recovery_failed_sessions: set[str] | None = None,
         registered_tool_names: RegisteredToolNamesProvider | None = None,
         reconcile_info: ToolReconcileInfoProvider | None = None,
+        # #1191（Phase 2）：项目/全局级约束的**独立规则层**存储（不碰 memory v2）。
+        # None = 未装配（CLI / 单测缺省），相关端点与登记会响亮失败而不是静默丢件。
+        scoped_constraint_store: ScopedConstraintStore | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -1138,6 +1312,7 @@ class SessionService:
         )
         self._registered_tool_names = registered_tool_names
         self._reconcile_info = reconcile_info
+        self._scoped_constraint_store = scoped_constraint_store
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -1432,7 +1607,7 @@ class SessionService:
             if needs_reconcile(operation)
             and not (
                 operation.state is OperationState.RUNNING
-                and operation.tool_name == "request_constraint_resolution"
+                and operation.tool_name in USER_INPUT_TOOL_NAMES
                 and operation.tool_call_id in recoverable_constraint_calls
             )
         ]
@@ -1949,10 +2124,14 @@ class SessionService:
                     "约束澄清工具的持久结果缺失，拒绝启动该会话的新 run。"
                 )
             self._budget_recovery_failed_sessions.discard(session_id)
-        if task is not None and _latest_pending_user_input_request(existing) is not None:
-            raise BudgetConflict(
-                "当前有待回答的约束澄清；请先提交答案，再启动新任务"
-            )
+        if task is not None:
+            pending_user_input = _latest_pending_user_input_request(existing)
+            if pending_user_input is not None:
+                raise BudgetConflict(
+                    _pending_user_input_conflict_message(
+                        pending_user_input, resume_action="再启动新任务",
+                    )
+                )
         # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
         # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
         # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
@@ -2430,13 +2609,14 @@ class SessionService:
             )
             if not locked_events:
                 raise SessionNotFound(f"session '{session_id}' not found")
-            if (
-                task is not None
-                and _latest_pending_user_input_request(locked_events) is not None
-            ):
-                raise BudgetConflict(
-                    "当前有待回答的约束澄清；请先提交答案，再发送新任务"
-                )
+            if task is not None:
+                pending_user_input = _latest_pending_user_input_request(locked_events)
+                if pending_user_input is not None:
+                    raise BudgetConflict(
+                        _pending_user_input_conflict_message(
+                            pending_user_input, resume_action="再发送新任务",
+                        )
+                    )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -2618,8 +2798,9 @@ class SessionService:
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
                 "取代）——expected_version 对应的暂停事实不存在；本请求未启动任何工作"
             )
-        _constraint_input_answer_data(
+        _user_input_answer_data(
             events, run_id=paused.run_id, paused=paused, answer=input_request,
+            ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
         )
         effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
@@ -2808,8 +2989,9 @@ class SessionService:
             await self._assert_user_input_session_headroom(
                 session.events, session_id=session_id, resume_basis=resume_basis,
             )
-            answer_data, answer_already_recorded = _constraint_input_answer_data(
+            answer_data, answer_already_recorded = _user_input_answer_data(
                 session.events, run_id=run_id, paused=paused, answer=input_request,
+                ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
             )
             if answer_data is not None and not answer_already_recorded:
                 session.append(USER_MESSAGE, answer_data)
@@ -2864,6 +3046,55 @@ class SessionService:
             raise BudgetConflict(
                 "Shared session budget no longer has room for same-run continuation."
             )
+
+    async def resume_ask_user_timeout(
+        self, session_id: str, *, request_id: str,
+    ) -> ExpireOutcome:
+        """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
+
+        到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
+        是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
+        未答复 `ask_user` 上才恢复。恢复走既有 `resume_and_launch`
+        （`resume_basis='user_input'` + `{request_id, timeout:true}`），由它注入
+        "用户在 N 分钟内未回答…"到底层消息且**不写任何 answer**。
+
+        返回 :class:`ExpireOutcome` 供驱动分流（#1220 复审 A2）：
+        - `RESOLVED`：已答复 / 整卡跳过 / 已终结 / 请求已变（零副作用，无需再试）；
+        - `RETRY`：可重试失败（共享预算无位 / 并发冲突）——驱动据此保留计时并下个窗口
+          重试，而不是永久丢弃该提问的超时；
+        - `RESUMED`：恢复已发起。
+        并发（多个连接同时到点）由 `resume_and_launch` 的会话锁 + CAS 串行化，输家拿到
+        `ActiveRunConflict` 等 → 这里按 `RETRY` 返回（不是错误）。
+        """
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if pending_ask_user_request_id(events) != request_id:
+            return ExpireOutcome.RESOLVED
+        paused = latest_paused_run(events)
+        if paused is None:
+            run_id = latest_run_id(events)
+            if run_id is not None:
+                paused = _pending_user_input_pause(events, run_id=run_id)
+        if (
+            paused is None
+            or paused.reason != REASON_USER_INPUT
+            or paused.input_request_id != request_id
+        ):
+            return ExpireOutcome.RESOLVED
+        try:
+            await self.resume_and_launch(
+                session_id=session_id,
+                resume_run_id=paused.run_id,
+                expected_version=paused.version,
+                resume_basis=RESUME_BASIS_USER_INPUT,
+                input_request={"request_id": request_id, "timeout": True},
+            )
+        except (BudgetConflict, BudgetRejection, ActiveRunConflict):
+            return ExpireOutcome.RETRY
+        except SessionNotFound:
+            # 会话已不存在——终态，无需再试（read_events 已会返回空 ⇒ 上面已 RESOLVED；
+            # 这里是并发删除的兜底）。
+            return ExpireOutcome.RESOLVED
+        return ExpireOutcome.RESUMED
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 
@@ -3277,9 +3508,12 @@ class SessionService:
         current_events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
-        if _latest_pending_user_input_request(current_events) is not None:
+        pending_user_input = _latest_pending_user_input_request(current_events)
+        if pending_user_input is not None:
             raise BudgetConflict(
-                "当前有待回答的约束澄清；请先提交答案，再发送新消息"
+                _pending_user_input_conflict_message(
+                    pending_user_input, resume_action="再发送新消息",
+                )
             )
 
         try:
@@ -3389,6 +3623,39 @@ class SessionService:
             request=local_max_agent_turns,
         )
 
+        # #1191（Phase 2）：非会话级注解（project/global）在这里**纯读校验**——
+        # 位置在全部纯读校验之后、任何落盘之前：project scope 解析不出项目键即
+        # 422（票面 §六.2 逐字文案），零副作用。真正的登记挪到**所有写成功之后**
+        # （见方法尾部）：先落消息事件（= 审计留痕，`user_input_metadata["protected_facts"]`），
+        # 事件写成功才登记规则层——否则一个被拒的 launch/steer 会把项目/全局级约束
+        # 静默写进**所有**会话（审查 finding C4）。会话级注解不在此处落任何东西——
+        # 它仍由消息事件承载，行为逐字不变。
+        #
+        # `mode` 不再是登记门槛（审查 finding C5）：`mode=="steer"` 带 scope 同样登记，
+        # 否则会出现"200 steered 却什么也没登记"的静默假受理。登记时机（写成功之后）
+        # 天然排除 steer 目标不存在等被拒分支。
+        scoped_annotations = [
+            annotation
+            for annotation in normalized_protected_facts
+            if annotation.get("scope") in _SCOPED_SCOPE_VALUES
+        ]
+        scoped_project_key: str | None = None
+        if scoped_annotations:
+            # 装配检查是纯读的：放在写之前，避免"消息事件/steer 已落盘、规则层却因
+            # 未装配而 500"的半成功（重审 finding：写后失败的残余面尽量收窄）。
+            self._require_scoped_store()
+            # 写前校验用**纯读**口径：被拒（如 SteerTargetNotFound）不留任何写。
+            scoped_project_key = await self._session_project_key(
+                session_id, current_events
+            )
+            if (
+                any(a["scope"] == ConstraintScope.PROJECT.value for a in scoped_annotations)
+                and scoped_project_key is None
+            ):
+                raise ProjectKeyUnavailable(
+                    "当前会话不在 git 仓库内，无法登记项目级约束"
+                )
+
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
 
@@ -3489,6 +3756,28 @@ class SessionService:
                 superseded_seq=supersedes_seq,
                 carrier=mode,
             )
+
+        # 第 4 步（#1191）：消息事件已落盘（= 审计留痕）之后，才把非会话级约束登记进
+        # 独立规则层（与注入侧 `scoped_context_facts` 同源）。任一分支（launch / queue /
+        # steer）成功后才走到这里 ⇒ 被拒请求零副作用（审查 finding C4）。
+        if scoped_annotations:
+            store = self._require_scoped_store()
+            # 写成功后惰性补写元数据 project_key（写前那次是纯读；键在会话启动后不再
+            # 变化，直接复用写前解析结果，不重复跑 git 解析）。登记用键与面板/注入同口径。
+            await self._record_session_project_key(session_id, scoped_project_key)
+            registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
+            for annotation in scoped_annotations:
+                store.register(
+                    annotation["scope"],
+                    project_key=(
+                        scoped_project_key
+                        if annotation["scope"] == ConstraintScope.PROJECT.value
+                        else None
+                    ),
+                    fact_type=annotation["fact_type"],
+                    value=annotation["value"],
+                    registered_at=registered_at,
+                )
         return result
 
     async def _assert_supersedable(self, session_id: str, superseded_seq: int) -> None:
@@ -5365,7 +5654,7 @@ class SessionService:
                 continue
             if (
                 operation.state is OperationState.RUNNING
-                and operation.tool_name == "request_constraint_resolution"
+                and operation.tool_name in USER_INPUT_TOOL_NAMES
                 and (operation.run_id, operation.tool_call_id)
                 in recoverable_constraint_calls
             ):
@@ -6378,6 +6667,299 @@ class SessionService:
         append_workflow_mode_change(session, mode)
         return {"id": session_id, "mode": mode.value}
 
+    # ── #1190：会话级约束管理面板（受保护事实查看 + 主动撤销）──────────────
+    async def list_protected_facts(self, session_id: str) -> list[dict[str, Any]]:
+        """投影本会话全量受保护事实（active/revoked/superseded），按来源 seq 倒序。
+
+        面板数据面：状态值域钉死三值（`revoked` 由 `task/fact_revocation` 派生）；
+        逐条带 `registered_at`（来源事件时间）与 `revoked_at` / `revoked_by`
+        （撤销事件派生，无则 null）。**不做任何过滤或二次加工**——筛选属展示层
+        （PRD 全局铁律：前端不维护第二套状态）。
+        """
+        await self._require_existing_session(session_id)
+        events = await self.get_events(session_id)
+        return project_protected_fact_rows(events)
+
+    async def revoke_protected_fact(
+        self, session_id: str, fact_id: str, *, revoked_by: str,
+    ) -> dict[str, Any]:
+        """主动撤销一条 active 受保护事实（#1190）。
+
+        走会话级管理写入口（`session/approval.py::append_fact_revocation`，与
+        `append_approval_revoke` 同口径）；追加 `task/fact_revocation` 事件，
+        **不物理删除任何事件**（历史保留链）。同步路径：当前请求内完成，返回
+        `{fact_id, status: "revoked", revoked_at}`。幂等：已 revoked → 原样回执
+        （不重复落事件）。目标不存在 → `ProtectedFactNotFound`（404）；非 active
+        （已被取代）→ `ProtectedFactNotRevocable`（409）。
+
+        「读投影 → 判状态 → 追加事件」是**读-判-写**序列，须原子：否则同一 fact 的
+        两个并发撤销请求会各自读到 `active`、各落一条 `task/fact_revocation`。用
+        `RunManager` 的**每会话锁**取临界区（进程内互斥，同 `_resume_lock` 的既有
+        口径；Web 层每请求新建服务实例，锁不能挂在本实例上）。
+        """
+        await self._require_existing_session(session_id)
+        async with self._resume_lock(session_id):
+            events = await self.get_events(session_id)
+            fact = next(
+                (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
+                None,
+            )
+            if fact is None:
+                raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+            if fact.status == "revoked":
+                # 幂等：真值已是 revoked，不重复落事件。
+                return {
+                    "fact_id": fact_id,
+                    "status": "revoked",
+                    "revoked_at": fact.revoked_at,
+                }
+            if fact.status != "active":
+                raise ProtectedFactNotRevocable(
+                    f"protected fact '{fact_id}' is {fact.status}, not revocable"
+                )
+            session = Session.load(self._store, session_id)
+            event = append_fact_revocation(session, fact_id, revoked_by=revoked_by)
+            return {
+                "fact_id": fact_id,
+                "status": "revoked",
+                "revoked_at": event.data.get("revoked_at") or event.time,
+            }
+
+    # ── #1191（Phase 2）：作用域三层（会话 / 项目 / 全局）──────────────────
+    def _require_scoped_store(self) -> ScopedConstraintStore:
+        store = self._scoped_constraint_store
+        if store is None:
+            # 装配错误，不是用户错误：Web 装配恒带规则层存储（`AppState`）。
+            raise RuntimeError("当前装配没有项目/全局约束规则层存储")
+        return store
+
+    async def _session_project_key(
+        self, session_id: str, events: list[SessionEvent],
+    ) -> str | None:
+        """会话项目键（#1191 §三.3）；取值口径见 `effective_project_key`（持久化优先）。
+
+        **纯读**：没有持久化键时按 cwd 现场解析（票面 §三.3 允许的兜底），不写元数据。
+        需要把解析结果落盘（存量会话首次被打开/登记的惰性补写）时显式再调
+        `_record_session_project_key`——写入点从调用处可见，读取函数无默认副作用
+        （审查 finding：getter 形状却默认写库）。
+        """
+        # 本读取依赖 `session_meta` 表存在；`send_message` 路径不像
+        # `_require_existing_session` 那样已经确保过（幂等 no-op，不走 scoped 注解时
+        # 无额外开销）。不确保则直构 service / 直播种会话的路径会 500。
+        await self._ensure_stores()
+        meta = await self._session_meta_store.get(session_id)
+        persisted = meta.project_key if meta is not None else None
+        return effective_project_key(persisted, session_cwd(events))
+
+    async def _record_session_project_key(
+        self, session_id: str, key: str | None,
+    ) -> None:
+        """把已解析的会话项目键惰性补写进元数据（§三.3：只记一次，之后不再解析）。
+
+        仅在元数据行存在且尚无键时写一次（存量会话首次被打开/登记的补写通道）；
+        `key is None`（非 git 目录）不写，行缺失（直构 service 的调用方）不写。
+        补写走 `set_project_key` 单列更新——不用 `upsert`，避免既有全行 upsert 调用方
+        把已补写的值静默抹成 NULL。
+        """
+        if key is None:
+            return
+        await self._ensure_stores()
+        meta = await self._session_meta_store.get(session_id)
+        if meta is None or meta.project_key is not None:
+            return
+        try:
+            await self._session_meta_store.set_project_key(session_id, key)
+        except KeyError:  # pragma: no cover —— get 命中过，补写时行被删的极窄竞态
+            pass
+
+    async def effective_constraints(self, session_id: str) -> dict[str, Any]:
+        """返回本会话实际可见的约束全集（三 scope 合流），附 scope 与覆盖关系（#1191）。
+
+        合流：会话投影（全状态，来源事件时间）× 本项目（规则层）× 全局（规则层）。
+        同一 fact_id 至多出现一次（三 scope 的 id 前缀天然不同，仍去重兜底）。
+        `overridden_by`：非会话级条目被**更高优先级同文**（type 相同且 value 去首尾
+        空白后逐字相等）的 active 条目覆盖时，填覆盖方 fact_id（会话＞项目＞全局）；
+        注入侧据此过滤（见 `context/builder.py`）。
+        `project` 为当前会话项目键与展示标注；非 git 目录会话为 None（前端不渲染
+        PROJECT 组，票面 §五.5）。
+        """
+        await self._require_existing_session(session_id)
+        events = await self.get_events(session_id)
+        time_by_event_id = {event.event_id: event.time for event in events}
+        session_rows: list[dict[str, Any]] = [
+            {
+                "fact_id": fact.fact_id,
+                "type": fact.type,
+                "value": fact.value,
+                "status": fact.status,
+                "source_event_id": fact.source_event_id,
+                "source_seq": fact.source_seq,
+                "registered_at": time_by_event_id.get(fact.source_event_id),
+                "revoked_at": fact.revoked_at,
+                "revoked_by": fact.revoked_by,
+                "scope": ConstraintScope.SESSION.value,
+            }
+            for fact in derive_protected_facts(events)
+        ]
+
+        project_key = await self._session_project_key(session_id, events)
+        # 面板首开是存量会话的惰性补写通道（§三.3：只记一次）。
+        await self._record_session_project_key(session_id, project_key)
+        project_rows: list[dict[str, Any]] = []
+        global_rows: list[dict[str, Any]] = []
+        if project_key is not None:
+            for constraint in self._require_scoped_store().list(
+                ConstraintScope.PROJECT.value, project_key=project_key
+            ):
+                project_rows.append(_scoped_constraint_row(constraint))
+        for constraint in self._require_scoped_store().list(
+            ConstraintScope.GLOBAL.value
+        ):
+            global_rows.append(_scoped_constraint_row(constraint))
+
+        rows = _merge_effective_rows(session_rows, project_rows, global_rows)
+        project_meta = (
+            {"label": project_label_for_key(project_key)}
+            if project_key is not None
+            else None
+        )
+        return {"facts": rows, "project": project_meta}
+
+    async def revoke_scoped_constraint(
+        self, fact_id: str, *, scope: str, session_id: str, revoked_by: str | None,
+    ) -> dict[str, Any]:
+        """撤销一条项目/全局级约束（规则层，历史保留链；幂等）。
+
+        `scope` 只接受 `project|global`（会话级走 `revoke_protected_fact`）。project
+        作用域的项目键从**会话**（`session_id`）现场解析——不让请求体自带项目键
+        （防伪，与 `TrustedMemoryIdentity` 同立场）。目标不存在 → `ProtectedFactNotFound`
+        （404）；会话没有项目键却要撤项目级 → 404（该会话看不到项目级约束）。
+        """
+        if scope not in _SCOPED_SCOPE_VALUES:
+            raise ProtectedFactReferenceInvalid(
+                f"unsupported revoke scope: {scope!r}"
+            )
+        await self._require_existing_session(session_id)
+        store = self._require_scoped_store()
+        project_key: str | None = None
+        if scope == ConstraintScope.PROJECT.value:
+            events = await self.get_events(session_id)
+            # 纯读口径：撤销自身失败（404）时不在元数据上留下写。
+            project_key = await self._session_project_key(session_id, events)
+            if project_key is None:
+                raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+        existing = store.get(scope, fact_id, project_key=project_key)
+        if existing is None:
+            raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
+        updated = store.revoke(
+            scope,
+            fact_id,
+            project_key=project_key,
+            revoked_by=revoked_by,
+            revoked_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+        )
+        return {
+            "fact_id": fact_id,
+            "status": "revoked",
+            "revoked_at": updated.revoked_at if updated is not None else None,
+        }
+
+
+def _scoped_constraint_row(constraint: ScopedConstraint) -> dict[str, Any]:
+    """规则层记录 → 面板行（无会话来源事件，`source_*` 为 None）。"""
+    return {
+        "fact_id": constraint.fact_id,
+        "type": constraint.type,
+        "value": constraint.value,
+        "status": constraint.status,
+        "source_event_id": None,
+        "source_seq": None,
+        "registered_at": constraint.registered_at,
+        "revoked_at": constraint.revoked_at,
+        "revoked_by": constraint.revoked_by,
+        "scope": constraint.scope,
+    }
+
+
+def _merge_effective_rows(
+    session_rows: list[dict[str, Any]],
+    project_rows: list[dict[str, Any]],
+    global_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """三 scope 合流 + 覆盖计算（会话＞项目＞全局）。
+
+    - 去重：同一 `fact_id` 只留第一条（防装配异常导致的重复）。
+    - `overridden_by`：非会话级 active 条目，被更高优先级 scope 里 type 相同且
+      normalized value 相等的 **active** 条目覆盖时填其 fact_id；否则 None。
+    - 覆盖判据（归一 + 匹配）走 `scoped_constraints` 的**单一 owner**
+      （`normalized_fact_value` / `covering_fact_id`），与注入侧同源（审查 finding S-b1）。
+    """
+    active_session = [
+        (row["type"], normalized_fact_value(row["value"]), row["fact_id"])
+        for row in session_rows
+        if row["status"] == "active"
+    ]
+    active_project = [
+        (row["type"], normalized_fact_value(row["value"]), row["fact_id"])
+        for row in project_rows
+        if row["status"] == "active"
+    ]
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def emit(row: dict[str, Any], overridden_by: str | None) -> None:
+        if row["fact_id"] in seen:
+            return
+        seen.add(row["fact_id"])
+        merged.append({**row, "overridden_by": overridden_by})
+
+    for row in session_rows:
+        # 会话级不被任何东西覆盖（最高优先级）。
+        emit(row, None)
+    for row in project_rows:
+        covering_id = covering_fact_id(
+            row["type"], normalized_fact_value(row["value"]), active_session
+        )
+        emit(row, covering_id)
+    for row in global_rows:
+        numeric = normalized_fact_value(row["value"])
+        covering_id = covering_fact_id(
+            row["type"], numeric, active_session
+        ) or covering_fact_id(row["type"], numeric, active_project)
+        emit(row, covering_id)
+    return merged
+
+
+def project_protected_fact_rows(events: list[SessionEvent]) -> list[dict[str, Any]]:
+    """把 `derive_protected_facts` 的全量投影转成约束管理面板行（#1190）。
+
+    - `registered_at` 取来源事件时间（事件流是时间的唯一来源）；
+    - `revoked_at` / `revoked_by` 由 derive 从 `task/fact_revocation` 事件派生
+      （无则 null）；
+    - 按来源 `source_seq` 倒序（同一来源事件的多条事实按 `fact_id` 定序，
+      保证排序稳定、可复现）。
+
+    **不做过滤**：面板的"状态/类型"筛选是展示层职责（前端不维护第二套状态）。
+    """
+    time_by_event_id = {event.event_id: event.time for event in events}
+    rows = [
+        {
+            "fact_id": fact.fact_id,
+            "type": fact.type,
+            "value": fact.value,
+            "status": fact.status,
+            "source_event_id": fact.source_event_id,
+            "source_seq": fact.source_seq,
+            "registered_at": time_by_event_id.get(fact.source_event_id),
+            "revoked_at": fact.revoked_at,
+            "revoked_by": fact.revoked_by,
+        }
+        for fact in derive_protected_facts(events)
+    ]
+    rows.sort(key=lambda row: (row["source_seq"], row["fact_id"]), reverse=True)
+    return rows
+
 
 # ── 公开符号重导出（候选 2 纯结构重构）────────────────────────────────
 # 异常 / 模型切换领域逻辑已移到兄弟模块，这里统一 re-export，
@@ -6417,6 +6999,7 @@ __all__ = [
     "current_model_selection",
     "current_reasoning_effort",
     "inherit_parent_model",
+    "project_protected_fact_rows",
     "resolve_model_target",
     "validate_session_id",
 ]

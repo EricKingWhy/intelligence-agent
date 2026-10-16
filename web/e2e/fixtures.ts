@@ -80,11 +80,24 @@ export interface WsScript {
   delayMs?: number;
   /** Delay between streamed frames so a test can observe intermediate UI state. */
   frameDelayMs?: number;
+  /** 下发 `frames` **之前**等待（用例精确掌握「新事件」到达的虚拟时刻）。
+   *
+   *  与 `delayMs` / `frameDelayMs` 的区别是**谁掌握时钟**：那两个走测试进程（Node）的
+   *  **真实** `setTimeout`，`page.clock` 管不到；而页面侧 `install()` 之后虽仍按真实时间
+   *  1:1 前进（要冻结得 `pauseAt()`），但 `runFor` / `fastForward` 能把它**瞬间跳到**未来——
+   *  跳变与真实定时器的到点无法编排先后，「新事件到达时流已经跑了多久」于是成为竞态（#1214）。
+   *  闸门把时机交回用例：用例先把虚拟时钟推到目标时刻，再放行，帧才下发，
+   *  于是这段几何完全确定、且**与负载无关**。
+   *
+   *  只挡**增量帧**，不挡快照：订阅时快照照常立即下行，连接活性语义与不加闸门时
+   *  一致。按**每次**接流生效（重连也会被同一闸门挡住），且**无超时**——用例不放行，
+   *  该次接流的增量帧就永不下发，只适合用例自持的短窗口。不设 = 立即下发（既有行为）。 */
+  frameGate?: Promise<void>;
   /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
   closeNow?: boolean;
   /** 心跳 opt-in（毫秒）：按此间隔下行 `{type:'server_ping'}`，直到连接关闭。
-   *  真后端 2s 一次（#420 AC1 计入停摆看门狗活性）。缺省不发——o-wait-hint
-   *  等 spec 刻意依赖停摆路径，必须按脚本 opt-in，不能全局默认开。 */
+   *  真后端 2s 一次（#420 AC1 计入停摆看门狗活性）。缺省不发——依赖停摆/重连
+   *  路径的 spec 必须按脚本 opt-in，不能全局默认开。 */
   pingIntervalMs?: number;
 }
 
@@ -157,6 +170,8 @@ async function installWsRoute(
             has_active_run: active,
           }),
         );
+        // 用例持有的闸门：放行前不下发增量帧（快照已在上方立即下行）。
+        if (script?.frameGate) await script.frameGate;
         for (const [index, f] of frames.entries()) {
           ws.send(JSON.stringify({ type: 'event', session_id: sessionId, event: f }));
           if (script?.frameDelayMs && index < frames.length - 1) {
@@ -238,6 +253,36 @@ export interface ApiMock {
   artifactContentError?: { status: number; detail: unknown };
   /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
   onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
+  // ── #1190 / #1176 Phase 1：会话级约束管理（受保护事实）──
+  /** GET /api/sessions/{id}/protected-facts 的原样回执行（形状 = 后端
+   *  `project_protected_fact_rows` 的行：`{fact_id,type,value,status,source_event_id,
+   *  source_seq,registered_at,revoked_at,revoked_by}`）。缺省 = 空列表（后端说"这个会话
+   *  没有受保护事实"）。 */
+  protectedFacts?: unknown[];
+  /** GET 拦截口（计数 / 伪造 403·500 等非 2xx——前端据此显示"无权限查看约束"或错误态）。
+   *  返回 true = 已处理。 */
+  onProtectedFactsGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
+  /** POST `/api/sessions/{id}/protected-facts/{fact_id}/revoke` 的拦截口（计数 / 断言请求体 /
+   *  伪造 403·409）。返回 = 已处理。缺省按真后端语义**成功**：只允许 active 可撤销，
+   *  撤销后把该行翻成 revoked（后续 GET 就能读到新状态）。 */
+  onProtectedFactRevokePost?: (
+    route: Route,
+    sessionId: string,
+    factId: string,
+  ) => Promise<void> | void;
+  // ── #1191 Phase 2：约束作用域三层 ──
+  /** `GET /api/sessions/{id}/effective-constraints` 的项目元信息（`git 根 · label`）。
+   *  缺省 `null` = 非 git 目录（面板不渲染 PROJECT 组）。 */
+  effectiveProject?: { label: string | null } | null;
+  /** effective-constraints GET 拦截口（计数 / 伪造 403·500）。返回 true = 已处理。 */
+  onEffectiveConstraintsGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
+  /** `POST /api/memory/constraints/{fact_id}/revoke` 的拦截口（计数 / 断言请求体）。
+   *  返回 true = 已处理。缺省按真后端语义**成功**并把该行翻成 revoked（跨会话账面）。 */
+  onScopedRevokePost?: (
+    route: Route,
+    factId: string,
+    body: Record<string, unknown>,
+  ) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
    *  为什么要这个口子：**"端点没被调用"这类回归不会改变 tab 集**（缺省 payload 与
    *  "拿到真 payload" 都会渲染出面），所以只断言 tab 集会漏掉"前端压根没调这个端点"
@@ -532,6 +577,39 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
    *  在 e2e 里就是 mock 的真行为，而不是靠断言绕过去。 */
   const attachmentState = new Map<string, { bytes: Buffer; mediaType: string }>();
   let attachmentSeq = 0;
+  /** #1190：受保护事实的可变状态（每会话一份，首次 GET 时从 `mock.protectedFacts` 深拷）。
+   *  撤销真的翻行状态——"撤销后重拉对齐、行变已撤销、按钮 disabled"考的是界面跟着后端
+   *  走，而不是"界面读了我塞的假值"（本夹具的既有纪律）。 */
+  const protectedFactState = new Map<string, Array<Record<string, unknown>>>();
+  const protectedFactsFor = (sid: string): Array<Record<string, unknown>> => {
+    let rows = protectedFactState.get(sid);
+    if (!rows) {
+      rows = (mock.protectedFacts ?? []).map((r) => ({ ...(r as Record<string, unknown>) }));
+      protectedFactState.set(sid, rows);
+    }
+    return rows;
+  };
+  /** #1191：effective-constraints 的行 = 受保护事实 + scope/overridden_by（缺省会话级）。
+   *  fixture 里若某行自带 `scope`/`overridden_by`（Phase 2 用例）则原样透传。 */
+  const effectiveFactsFor = (sid: string): Array<Record<string, unknown>> =>
+    protectedFactsFor(sid).map((r) => ({
+      scope: 'session',
+      overridden_by: null,
+      ...r,
+    }));
+  /** #1191：项目/全局级撤销——跨会话账面按 fact_id 翻行（真后端走独立规则层）。 */
+  const revokeScopedFact = (factId: string): boolean => {
+    for (const rows of protectedFactState.values()) {
+      const row = rows.find((r) => r['fact_id'] === factId);
+      if (row) {
+        row['status'] = 'revoked';
+        row['revoked_at'] = row['revoked_at'] ?? T;
+        row['revoked_by'] = row['revoked_by'] ?? 'local';
+        return true;
+      }
+    }
+    return false;
+  };
   /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
   let listCalls = 0;
 
@@ -715,6 +793,59 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       const forced = mock.artifactContentError;
       if (forced) return json(route, { detail: forced.detail }, forced.status);
       return json(route, mock.artifactContent ?? { artifact_id: aid, lines: [], total_lines: 0, returned_lines: 0, truncated: false });
+    }
+    // ── #1190 / #1176 Phase 1：会话级约束管理（受保护事实投影 + 撤销）──
+    // GET 回 `{facts: [...]}`（形状 = 后端 `web/protected_facts.py::ProtectedFactsResponse`）；
+    // POST revoke **真的**把该行翻成 revoked（撤销后重拉对齐才有真语义可考，不是靠断言绕）。
+    const protectedFactsMatch = /^\/api\/sessions\/([^/]+)\/protected-facts$/.exec(path);
+    if (protectedFactsMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(protectedFactsMatch[1]);
+      if (mock.onProtectedFactsGet && (await mock.onProtectedFactsGet(route, sid))) return undefined;
+      return json(route, { facts: protectedFactsFor(sid) });
+    }
+    const protectedFactRevokeMatch =
+      /^\/api\/sessions\/([^/]+)\/protected-facts\/([^/]+)\/revoke$/.exec(path);
+    if (protectedFactRevokeMatch && req.method() === 'POST') {
+      const sid = decodeURIComponent(protectedFactRevokeMatch[1]);
+      const fid = decodeURIComponent(protectedFactRevokeMatch[2]);
+      if (mock.onProtectedFactRevokePost) return mock.onProtectedFactRevokePost(route, sid, fid);
+      const rows = protectedFactsFor(sid);
+      const row = rows.find((r) => r['fact_id'] === fid);
+      if (!row) return json(route, { detail: `事实 '${fid}' 不存在` }, 404);
+      // 与后端同形：只有 active 可主动撤销；已撤销 → 幂等 200；已被取代 → 409。
+      if (row['status'] === 'superseded') return json(route, { detail: '该事实已被取代，不可撤销' }, 409);
+      row['status'] = 'revoked';
+      row['revoked_at'] = row['revoked_at'] ?? T;
+      row['revoked_by'] = row['revoked_by'] ?? 'local';
+      return json(route, { fact_id: fid, status: 'revoked', revoked_at: row['revoked_at'] });
+    }
+    // ── #1191 Phase 2：三作用域合流 + 项目/全局级撤销 ──
+    const effectiveMatch = /^\/api\/sessions\/([^/]+)\/effective-constraints$/.exec(path);
+    if (effectiveMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(effectiveMatch[1]);
+      if (mock.onEffectiveConstraintsGet && (await mock.onEffectiveConstraintsGet(route, sid))) {
+        return undefined;
+      }
+      return json(route, {
+        facts: effectiveFactsFor(sid),
+        project: mock.effectiveProject ?? null,
+      });
+    }
+    const scopedRevokeMatch = /^\/api\/memory\/constraints\/([^/]+)\/revoke$/.exec(path);
+    if (scopedRevokeMatch && req.method() === 'POST') {
+      const fid = decodeURIComponent(scopedRevokeMatch[1]);
+      let body: Record<string, unknown> = {};
+      try {
+        body = (req.postDataJSON() as Record<string, unknown>) ?? {};
+      } catch {
+        body = {};
+      }
+      if (mock.onScopedRevokePost && (await mock.onScopedRevokePost(route, fid, body))) {
+        return undefined;
+      }
+      const ok = revokeScopedFact(fid);
+      if (!ok) return json(route, { detail: `约束 '${fid}' 不存在` }, 404);
+      return json(route, { fact_id: fid, status: 'revoked', revoked_at: T });
     }
     // ── #171 会话归档（有状态 mock：语义对齐 `web/app.py::archive_session`）──
     const sessionArchiveMatch = /^\/api\/sessions\/([^/]+)\/archive$/.exec(path);

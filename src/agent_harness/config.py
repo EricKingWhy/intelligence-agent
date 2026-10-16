@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
     # 又不让一个没人管的危险工具无限期挂住 run。
     approval_timeout_seconds: float = 300.0
+    # #1204：通用提问 `ask_user` 的超时档（秒，抄 Claude Code `askUserQuestionTimeout`
+    # 的 60s / 5m / 10m）。计时器仅在至少一个前端连接存在时启动/继续；到点后 run 自动
+    # 继续并注入"用户可能不在"系统消息，**不替用户选择任何选项**。取值只允许
+    # {60, 300, 600}（下面的 validator 在构造期响亮拒绝其它值）。
+    ask_user_question_timeout: int = 300
     # Bash 工具的执行预算（秒）。ADR-0039（含 2026-09-22 附录）：#244 冻结
     # 「ToolExecutor 是唯一 deadline owner、Local/Docker 默认有效预算同为 60 秒」，
     # 本字段只提供 Executor 消费的预算输入，不与它争 owner。
@@ -269,6 +274,17 @@ class Settings(BaseSettings):
         if value not in CONTEXT_WINDOW_TIERS:
             raise ValueError(
                 f"max_context_tokens 必须是 {list(CONTEXT_WINDOW_TIERS)} 之一，得到 {value}"
+            )
+        return value
+
+    @field_validator("ask_user_question_timeout")
+    @classmethod
+    def _validate_ask_user_question_timeout(cls, value: int) -> int:
+        """`ask_user` 超时只允许票面三档（构造期即启动期，配错响亮失败）。"""
+        allowed = {60, 300, 600}
+        if value not in allowed:
+            raise ValueError(
+                f"ask_user_question_timeout must be one of {sorted(allowed)}, got {value}"
             )
         return value
 

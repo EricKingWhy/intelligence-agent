@@ -34,6 +34,9 @@ class SessionMeta(BaseModel):
     parent_session_id: str | None = None
     origin: Literal["fork", "delegation"] | None = None
     fork_point_seq: int | None = None
+    #: #1191（Phase 2，票面 §三.3）：会话工作目录的 git 仓库根（`project_key`）。
+    #: 记录后不再重解析；非 git 目录 / 未补写 = None（读取侧回退到按 cwd 现场解析）。
+    project_key: str | None = None
 
 
 class SessionMetaStore(ABC):
@@ -67,6 +70,15 @@ class SessionMetaStore(ABC):
         self, session_id: str, event_seq: int
     ) -> SessionMeta:
         """刷新 last_checkpoint_seq；不存在抛 KeyError。"""
+
+    @abstractmethod
+    async def set_project_key(self, session_id: str, project_key: str) -> SessionMeta:
+        """写入会话的 `project_key`（#1191 §三.3 的惰性补写通道）；不存在抛 KeyError。
+
+        单独一个方法（不复用 `upsert`）的原因：`upsert` 的 `ON CONFLICT DO UPDATE`
+        不写 `project_key`——否则既有调用方（不带该字段的全行 upsert）会把已补写的
+        值静默抹成 NULL。本方法只更新这一列。
+        """
 
     @abstractmethod
     async def clear_delegation_parent(self, parent_session_id: str) -> int:

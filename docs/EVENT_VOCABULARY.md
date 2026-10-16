@@ -71,6 +71,7 @@
 | `TASK_ACCEPTANCE_REVISED` | `task/acceptance-revised` |
 | `TASK_ACCEPTED` | `task/accepted` |
 | `TASK_DEFINED` | `task/defined` |
+| `TASK_FACT_REVOCATION` | `task/fact_revocation` |
 | `TASK_PLAN_UPDATED` | `task/plan_updated` |
 | `TASK_PROTECTED_FACT` | `task/protected_fact` |
 | `TEXT_DELTA` | `text/delta` |

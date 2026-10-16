@@ -77,6 +77,15 @@ ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
 # W-02 (#346): a typed, append-only registration that points back to its source event.
 TASK_PROTECTED_FACT = "task/protected_fact"
+# #1190（Phase 1 约束管理面板）：受保护事实的**通用**主动撤销事实。
+# 用户经面板撤销一条 active 受保护事实时落此事件。与授权撤销刻意分开——后者是
+# `user/message` 上的 `revoke_fact_id`（`derive.py` 明文只撤销 authorization 类型，
+# 见其校验路径）；本事件是**通用**的，6 类事实都可撤。投影
+# （`derive_protected_facts`）把被撤销 fact 置 `status="revoked"`（区别于被动
+# supersede 的 `"superseded"`），并从本事件派生 `revoked_at` / `revoked_by`；
+# 不物理删除任何事件（历史保留链，OpenHands「抑制在视图层、历史不删」同构）。
+# data：revoke_fact_id / revoked_by / revoked_at。
+TASK_FACT_REVOCATION = "task/fact_revocation"
 # ── W-04 (#348)：摘要尝试失败的任务可见状态 ──────────────────────────────
 # 每次"自动压缩的摘要尝试失败"落一条（attempt 有界 ≤2，载荷有界）。失败**不是**
 # 压缩：derive 的投影集合不收它、不 shadow 任何事件——它只是"这次没压成、原投影
@@ -275,6 +284,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
         TASK_PROTECTED_FACT,
+        # #1190：受保护事实的通用主动撤销事实（状态事件，不投影成消息）
+        TASK_FACT_REVOCATION,
         # W-04 (#348)：摘要尝试失败的任务可见状态（不投影成消息）
         CONTEXT_COMPACTION_FAILED,
         # #430（W-02.1）：保护事实预算超限的诊断事件（不投影成消息）

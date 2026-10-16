@@ -1,0 +1,1 @@
+2026-10-16	#1241 startup-timeout repair — Standards independent review: ASGI task tracking and scoped cancellation cleanup; only tests/web/test_metrics.py changed; PASS, P0–P4=0.	e9e8d8bb68d9096917dd6670106e8cd2086ab417..efd16b7f8d115bc812231666505d9f3e97a795dd

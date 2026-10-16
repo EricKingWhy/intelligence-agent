@@ -68,19 +68,31 @@ from agent_harness.session.progress import (
 logger = logging.getLogger("agent_harness.context")
 
 
-def protected_facts_for_context(events: list[SessionEvent]) -> list[ProtectedFact]:
-    """Return the exact active facts selected for direct context injection."""
+def protected_facts_for_context(
+    events: list[SessionEvent],
+    *,
+    extra_facts: list[ProtectedFact] | None = None,
+) -> list[ProtectedFact]:
+    """Return the exact active facts selected for direct context injection.
+
+    #1191（Phase 2，Fork 3）：`extra_facts` 是本会话可见的**项目/全局级**约束（由
+    独立规则层供给，已按 `overridden_by` 过滤——被更高优先级同文约束覆盖的不注入）。
+    缺省 None = 纯会话投影，既有行为逐字不变。
+    """
     all_facts = derive_protected_facts(events)
     latest_work_boundary = max(
         (fact for fact in all_facts if fact.type == "work_boundary"),
         key=lambda fact: fact.source_seq,
         default=None,
     )
-    return [
+    selected = [
         fact for fact in all_facts
         if fact.type != "work_boundary"
         or fact.fact_id == (latest_work_boundary.fact_id if latest_work_boundary else None)
     ]
+    if extra_facts:
+        selected = [*selected, *extra_facts]
+    return selected
 
 
 def _protected_facts_messages(facts: list[ProtectedFact]) -> list[AnyMessage]:
@@ -532,6 +544,10 @@ class ContextBuilder:
         # `attachments.normalize` 的模块常量（DSH 一组），装配层从 Settings 接线。
         image_normalize_max_dimension: int = TARGET_MAX_DIMENSION,
         image_normalize_max_bytes: int = TARGET_MAX_BYTES,
+        # #1191（Phase 2）：项目/全局级约束的注入供给器（Fork 3）。给定会话事件，
+        # 返回本会话可见、且未被更高优先级同文约束覆盖的额外 ProtectedFact。缺省
+        # None = 不注入任何项目/全局约束，既有行为逐字不变（CLI/单测零影响）。
+        scoped_fact_provider: Callable[[list[SessionEvent]], list[ProtectedFact]] | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -559,6 +575,7 @@ class ContextBuilder:
         self._image_detail = image_detail
         self._image_normalize_max_dimension = image_normalize_max_dimension
         self._image_normalize_max_bytes = image_normalize_max_bytes
+        self._scoped_fact_provider = scoped_fact_provider
         self._image_payloads: dict[str, tuple[str, str]] = {}
         # #823 / MM-02（B3）：`attachment_id → (media_type, base64)` 实例级缓存。
         # 附件内容寻址（id = 字节的 sha256）、不可变，归一化/编码又是纯函数，故
@@ -719,7 +736,9 @@ class ContextBuilder:
         else:
             messages, source_ranges = await self._prune_projection(session, pairs)
             anchor_ranges = source_ranges
-        protected_facts = protected_facts_for_context(session.events)
+        protected_facts = protected_facts_for_context(
+            session.events, extra_facts=self._scoped_facts(session.events)
+        )
         protected_facts_messages = self._protected_facts_messages(protected_facts)
         protected_facts_tokens = protected_fact_token_count(protected_facts)
         self._last_protected_fact_tokens = protected_facts_tokens
@@ -989,7 +1008,9 @@ class ContextBuilder:
         # #1084：不再自写"最新 work_boundary"筛选——与 `build` 共用
         # `protected_facts_for_context`（单一 owner），避免手动/自动压缩在事实
         # 选择上分叉。token 成本同 `build` 走 `protected_fact_token_count` 口径。
-        protected_facts = protected_facts_for_context(session.events)
+        protected_facts = protected_facts_for_context(
+            session.events, extra_facts=self._scoped_facts(session.events)
+        )
         protected_facts_tokens = protected_fact_token_count(protected_facts)
         self._last_protected_fact_tokens = protected_facts_tokens
         if protected_facts_tokens > self.protected_fact_token_budget:
@@ -1225,6 +1246,13 @@ class ContextBuilder:
     @staticmethod
     def _protected_facts_messages(facts: list[ProtectedFact]) -> list[AnyMessage]:
         return _protected_facts_messages(facts)
+
+    def _scoped_facts(self, events: list[SessionEvent]) -> list[ProtectedFact]:
+        """#1191：项目/全局级可分注入约束（Fork 3）。未装配供给器 → 空列表。"""
+        provider = self._scoped_fact_provider
+        if provider is None:
+            return []
+        return provider(events)
 
     @staticmethod
     def _inject_protected_facts(

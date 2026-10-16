@@ -9,6 +9,7 @@
 import type {
   AgentEvent,
   ArtifactSlice,
+  AskUserQuestionAnswer,
   ConstraintInputChoice,
   HostDirsListing,
   MemoryDeleted,
@@ -656,6 +657,10 @@ export interface ProtectedFactAnnotationPayload {
     | 'task_progress';
   value: string;
   supersedes_fact_id?: string;
+  /** #1191（Phase 2）：登记作用域三选一（票面 §六.2）。缺省（不发键）= 会话级，
+   *  既有行为逐字不变；`project` / `global` 时后端把真值写入独立规则层，会话事件流
+   *  只留审计痕。「缺省不发键」由 `SEND_MESSAGE_FIELDS` 的构造器执行。 */
+  scope?: 'session' | 'project' | 'global';
 }
 
 export interface SendMessagePayload {
@@ -1587,6 +1592,165 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+// ── 会话级约束管理面板（#1190 / #1176 Phase 1）──
+
+/** 受保护事实状态值域（钉死三值；`pending_approval` 是请求级状态，永不进入此值域）。 */
+export type ProtectedFactStatus = 'active' | 'revoked' | 'superseded';
+
+/** 单条受保护事实（后端 `GET .../protected-facts` 的原样投影，前端不二次加工）。 */
+export interface ProtectedFact {
+  fact_id: string;
+  type: string;
+  value: unknown;
+  status: ProtectedFactStatus;
+  source_event_id: string;
+  source_seq: number;
+  registered_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+}
+
+/** 同步撤销回执。 */
+export interface ProtectedFactRevokeReceipt {
+  fact_id: string;
+  status: 'revoked';
+  revoked_at: string | null;
+}
+
+/** 列本会话的全量受保护事实（#1190）。
+ *
+ *  数据是**后端实时投影**（前端不维护第二套状态）：每次调用都重拉，绝不缓存。
+ *  错误矩阵：
+ *    422 / 404 —— session_id 形态非法 / 会话不存在；
+ *    409 —— 事件日志损坏（不可重试）；
+ *    403 / 401 —— 非本机来源 / 缺身份令牌（面板据此显示"无权限查看约束"）。 */
+export async function listProtectedFacts(sessionId: string): Promise<ProtectedFact[]> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts`,
+  );
+  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const facts = typeof raw === 'object' && raw !== null
+    ? (raw as { facts?: unknown }).facts
+    : null;
+  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  return facts as ProtectedFact[];
+}
+
+/** 撤销一条 active 受保护事实（POST，二次确认由调用方负责）。
+ *
+ *  语义：200 → `{fact_id, status: "revoked", revoked_at}`（幂等）；409 → 目标已被取代
+ *  （非 active，不可主动撤销）；404 → 目标/会话不存在；403 / 401 同上。
+ *  走到 200 即"后端已落撤销事件"——调用方据此**重拉 GET** 对齐，不做乐观本地更新。 */
+export async function revokeProtectedFact(
+  sessionId: string,
+  factId: string,
+): Promise<ProtectedFactRevokeReceipt> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts/${encodeURIComponent(factId)}/revoke`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
+  if (body.status !== 'revoked') {
+    throw new Error('撤销回执缺少 revoked 状态');
+  }
+  return {
+    fact_id: typeof body.fact_id === 'string' ? body.fact_id : factId,
+    status: 'revoked',
+    revoked_at: typeof body.revoked_at === 'string' ? body.revoked_at : null,
+  };
+}
+
+// ── 约束作用域三层（#1191 / #1176 Phase 2）──
+
+/** 登记作用域三选一（票面 §六.1）。 */
+export type ConstraintScope = 'session' | 'project' | 'global';
+
+/** `GET .../effective-constraints` 的单条（票面 §六.1）——`#1190` §5.1 行字段的超集，
+ *  附带 `scope` 与 `overridden_by`。`source_event_id` / `source_seq` 对**项目/全局级**
+ *  为 `null`：它们不在本会话事件流里（真值在独立规则层，会话流只留审计痕）。 */
+export interface EffectiveConstraintRow {
+  fact_id: string;
+  type: string;
+  value: unknown;
+  status: ProtectedFactStatus;
+  source_event_id: string | null;
+  source_seq: number | null;
+  registered_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  scope: ConstraintScope;
+  /** 被更高优先级 scope 覆盖时填覆盖方的 fact_id，否则 null（票面 §六.1）。 */
+  overridden_by: string | null;
+}
+
+/** 当前会话的项目信息（票面 §五.2 的 `git 根 · label`）。非 git 目录为 null。 */
+export interface EffectiveProjectMeta {
+  label: string | null;
+}
+
+export interface EffectiveConstraintsResponse {
+  facts: EffectiveConstraintRow[];
+  project: EffectiveProjectMeta | null;
+}
+
+/** 列本会话实际可见的约束全集 = 会话投影 + 本项目 + 全局，附 scope 与覆盖关系
+ *  （#1191 §六.1）。
+ *
+ *  数据是**后端实时投影**（前端不维护第二套状态）：每次调用都重拉，绝不缓存。
+ *  错误矩阵与 `listProtectedFacts` 同口径：422 / 404 / 409 / 503 / 403 / 401。 */
+export async function listEffectiveConstraints(
+  sessionId: string,
+): Promise<EffectiveConstraintsResponse> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/effective-constraints`,
+  );
+  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : null;
+  const facts = obj?.facts;
+  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  const project =
+    typeof obj?.project === 'object' && obj.project !== null
+      ? (obj.project as EffectiveProjectMeta)
+      : null;
+  return { facts: facts as EffectiveConstraintRow[], project };
+}
+
+/** 撤销一条**项目/全局级**约束（#1191 §六.3，走独立规则层的历史保留链；幂等）。
+ *
+ *  `session_id` 让服务端**权威解析**项目键（不让请求体自带 project_key）。影响面：
+ *  项目级撤销影响本仓库所有会话，全局级撤销影响所有项目的新会话——面板二次确认文案
+ *  据此。语义与 `revokeProtectedFact` 同：200 → `{fact_id, status:"revoked", revoked_at}`；
+ *  422 / 404 / 409 / 503 / 403 / 401 同口径。走到 200 即"后端已落撤销"——调用方据此
+ *  **重拉 GET** 对齐，不做乐观本地更新。 */
+export async function revokeScopedConstraint(
+  factId: string,
+  opts: { scope: 'project' | 'global'; sessionId: string },
+): Promise<ProtectedFactRevokeReceipt> {
+  const res = await apiFetch(
+    `/api/memory/constraints/${encodeURIComponent(factId)}/revoke`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: opts.scope, session_id: opts.sessionId }),
+    },
+  );
+  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
+  if (body.status !== 'revoked') {
+    throw new Error('撤销回执缺少 revoked 状态');
+  }
+  return {
+    fact_id: typeof body.fact_id === 'string' ? body.fact_id : factId,
+    status: 'revoked',
+    revoked_at: typeof body.revoked_at === 'string' ? body.revoked_at : null,
+  };
+}
+
 // ── 证据保留 / 空间占用 / 清理（#368 W-24）──
 
 /** 会话存储占用（GET /api/sessions/{id}/usage）——**只读投影**，不缓存。
@@ -2012,6 +2176,19 @@ export interface ConstraintInputAnswerPayload {
   custom_text?: string;
 }
 
+/** #1204：`ask_user` 通用提问的答案形态（`input_request` 的另一支）。
+ *
+ *  与窄场景的 `ConstraintInputAnswerPayload` 共用 `resume_basis: 'user_input'` 通道，
+ *  按事件 `input_request_answer` 的形状分流——两者的 wire 形状互斥（`choice` vs
+ *  `questions`），后端据 `paused` 的那条 `USER_INPUT_REQUESTED.kind` 判定该收哪一支。 */
+export interface AskUserAnswerPayload {
+  request_id: string;
+  questions: AskUserQuestionAnswer[];
+}
+
+/** `input_request` 的 wire 联合：窄场景四选一，或通用提问逐题作答。 */
+export type UserInputAnswerPayload = ConstraintInputAnswerPayload | AskUserAnswerPayload;
+
 export type ResumePausedRunPayload =
   | {
       run_id: string;
@@ -2022,7 +2199,7 @@ export type ResumePausedRunPayload =
       run_id: string;
       resume_basis: 'user_input';
       budget: { expected_version: number; run: ResumeRunLimitsBody };
-      input_request: ConstraintInputAnswerPayload;
+      input_request: UserInputAnswerPayload;
     };
 
 /** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维

@@ -74,6 +74,8 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
         "RequestConstraintResolutionTool",
         "agent_harness.tools.request_constraint_resolution",
     ),
+    # #1204：通用提问工具，与澄清工具同一道回答通道开关，同为根会话工具
+    ("AskUserTool", "agent_harness.tools.ask_user"),
     # knowledge / memory / websearch / skills / multiagent / ticker（demo）
     ("RetrieveKnowledgeTool", "agent_harness.knowledge.tools"),
     ("ReadKnowledgeSourceTool", "agent_harness.knowledge.tools"),
@@ -125,6 +127,11 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     "request_constraint_resolution": (
         "只供直接用户会话的根 main/coding Runtime 使用；coding AgentSpec 同时用于委派 child，"
         "故不放入共享 tool_scope，根 coding 在 profile 收窄后单独接回、grantable_names 恒剔除"
+    ),
+    "ask_user": (
+        "只供直接用户会话的根 main/coding Runtime 使用（与 request_constraint_resolution "
+        "同一道回答通道开关）；coding AgentSpec 同时用于委派 child，故不放入共享 tool_scope，"
+        "根 coding 在 profile 收窄后单独接回、grantable_names 恒剔除"
     ),
     "ingest_document": (
         "知识库**写入**工具，未在任何档位声明（子代理走只读检索 retrieve_knowledge / "

@@ -1,0 +1,1 @@
+2026-10-16	#1223 ask_user 待回答时统一锁 composer＋409 文案按 kind 中性化（用户裁决 1A：锁＋中性文案，依据 Claude Code AskUserQuestion 阻塞语义一手）。独立双轴审查（Correctness/Standards，codebuddy glm-5.3-flash fresh 会话）：A 轴 APPROVE-WITH-FINDINGS（P3×2/P4×1）、B 轴 APPROVE-WITH-FINDINGS（P3×2/P4×4），findings 在 222f3e91/d5fd5af4 全数处置。	16577aa9b3e7f06044538e3483b70160597bfda2..87d8ac18a57f7f30bb4592e0c3e85f9d6bf978ba

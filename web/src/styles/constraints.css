@@ -1,0 +1,528 @@
+/* 约束管理面板（#1190 / #1176 Phase 1）——Session Inspector 内一页。
+ *
+ * 视觉 token 逐字取自 issue §三/§四（效果图定稿 v2）：深黑底 #010102、两级 surface
+ * （#0f1011/#141516）、hairline #23252a、主操作薰衣草紫 #5e6ad2、
+ * 6 类圆点固定色。这些值由**已批准的 issue 明文给定**（AGENTS.md §1.1 优先级第 7 条），
+ * 且任务书要求「按效果图逐元素实现」——故此处**刻意另立 `--cn-*` 命名空间**而非复用
+ * `index.css` 的 `--surface-*`（两者取值不同：仓内 surface-1 是 #101014，效果图是 #0f1011）。
+ * ⚠ 已知与 `web/PRODUCT.md`「不复制 Linear 品牌…抄外观不行」存在张力：本票的配色是
+ * 用户自己在该 issue 里给定的，属「用户明确指令 > 仓库产品文档」的取舍，已在交付报告
+ * 「待裁决」中列出，供用户终裁。
+ *
+ * token 定义在 **`:root`**（不是 `.cn-panel`）：撤销确认框经 `Dialog.Portal` 挂到
+ * `document.body`，在 `.cn-panel` 作用域**之外**——若 token 只定义在 `.cn-panel`，弹窗
+ * 在亮色主题下会回退到暗色字面量（实测问题）。放 `:root` 后弹窗与面板共享同一组变量。
+ *
+ * 亮色覆盖见文件末尾 `:root[data-theme='light']`（覆盖**全部** `--cn-*`，含两级 surface
+ * 与 6 类圆点色），遵守 AGENTS.md §15 / PRODUCT.md「新增 token 必须检查暗亮两块」。
+ *
+ * 另一处刻意偏离效果图：元信息行效果图用 ink-tertiary #62666d，在暗底上实测 ≈3.3:1 < 4.5，
+ * 不达 PRODUCT.md 的 12px 元信息门槛，故改用 ink-subtle #8a8f98（暗底 ≈5.8:1 / 亮底 ≈6.9:1，
+ * 真机读数见 e2e `t-contrast.spec.ts` 的 #1190 用例）。同一条「用户指令 vs 产品文档」的取舍，
+ * 已列入待裁决。
+ */
+
+:root {
+  --cn-surface-1: #0f1011;
+  --cn-surface-2: #141516;
+  --cn-hairline: #23252a;
+  --cn-ink: #f7f8f8;
+  --cn-ink-muted: #d0d6e0;
+  --cn-ink-subtle: #8a8f98;
+  --cn-primary: #5e6ad2;
+  --cn-primary-hover: #828fff;
+  --cn-on-primary: #ffffff;
+  --cn-success: #27a644;
+  --cn-danger: #e5484d;
+  --cn-type-constraint: #8a7ff0;
+  --cn-type-user-goal: #4cc38a;
+  --cn-type-authorization: #e5a13d;
+  --cn-type-work-boundary: #6b9cf5;
+  --cn-type-failed-approach: #e5484d;
+  --cn-type-evidence-ref: #8a8f98;
+  --cn-type-default: #8a8f98;
+  --cn-dot-active: #27a644;
+  --cn-dot-inactive: #8a8f98;
+}
+
+.cn-panel {
+  padding: 20px 16px 28px;
+  color: var(--cn-ink);
+}
+
+.cn-eyebrow {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  color: var(--cn-ink-subtle);
+  text-transform: uppercase;
+}
+
+.cn-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.6px;
+  line-height: 1.2;
+  margin: 6px 0 0;
+  color: var(--cn-ink);
+}
+
+.cn-session-line {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cn-session-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--cn-ink-muted);
+  background: var(--cn-surface-1);
+  border: 1px solid var(--cn-hairline);
+  border-radius: 4px;
+  padding: 1px 8px;
+}
+
+.cn-livedot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cn-success);
+  display: inline-block;
+}
+
+/* ── 作用域三层（#1191 / #1176 Phase 2）── */
+
+/* 顶部优先级条：hairline 上下分隔线（票面 §五.1）。 */
+.cn-prio {
+  margin: 16px 0 4px;
+  padding: 10px 2px;
+  border-top: 1px solid var(--cn-hairline);
+  border-bottom: 1px solid var(--cn-hairline);
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+  line-height: 1.6;
+}
+
+.cn-prio code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--cn-ink-muted);
+}
+
+/* 每个 scope 组：眉标 + 行。 */
+.cn-group {
+  margin-top: 20px;
+}
+
+.cn-ghead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 4px 8px;
+  flex-wrap: wrap;
+}
+
+.cn-gen {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: var(--cn-ink-subtle);
+  text-transform: uppercase;
+}
+
+.cn-gzh {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--cn-ink);
+}
+
+.cn-gkey {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+.cn-gcnt {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+/* 「被本会话覆盖」描边小标签（票面 §五.4）。 */
+.cn-ov {
+  border: 1px solid var(--cn-hairline);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+/* 组内最后一行也不与下一组眉标叠线：`.cn-row:first-child` 的顶线由组容器承载。 */
+.cn-group .cn-row:first-child {
+  border-top: 1px solid var(--cn-hairline);
+}
+
+.cn-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 4px;
+  flex-wrap: wrap;
+}
+
+.cn-tabs {
+  display: flex;
+  gap: 4px;
+  border: 1px solid var(--cn-hairline);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.cn-tab {
+  border: none;
+  background: none;
+  color: var(--cn-ink-subtle);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.cn-tab.on {
+  background: var(--cn-surface-2);
+  color: var(--cn-ink);
+}
+
+.cn-tab-count {
+  opacity: 0.55;
+  margin-left: 5px;
+  font-size: 12px;
+}
+
+.cn-type-select {
+  margin-left: auto;
+  background: var(--cn-surface-1);
+  border: 1px solid var(--cn-hairline);
+  color: var(--cn-ink-muted);
+  font: inherit;
+  font-size: 13px;
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+.cn-list {
+  margin-top: 8px;
+}
+
+.cn-row {
+  padding: 20px 4px;
+  border-bottom: 1px solid var(--cn-hairline);
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.cn-row:first-child {
+  border-top: 1px solid var(--cn-hairline);
+}
+
+/* 已撤销/被取代行：**不**整行降透明度。
+ * 整行 `opacity` 会把行内 12px 元信息（ink-subtle 本为 ≈5.8:1）压到 ≈2.8:1，跌破
+ * PRODUCT.md 的 4.5:1 硬阈值，而 `t-contrast.spec.ts` 明示不建模祖先 `opacity`
+ * 意味着它抓不到。状态已由状态 pill（点 + 「已撤销」/「已被取代」）与 disabled
+ * 按钮承载；这里只压暗**装饰性**类型圆点（aria-hidden，非文本）。 */
+.cn-row.revoked .cn-tdot {
+  opacity: 0.45;
+}
+
+.cn-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cn-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.cn-type {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--cn-ink-subtle);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cn-tdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.cn-value {
+  font-size: 14px;
+  line-height: 1.5;
+  letter-spacing: -0.05px;
+  color: var(--cn-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cn-value.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+}
+
+.cn-value-toggle {
+  margin-top: 2px;
+  border: none;
+  background: none;
+  color: var(--cn-ink-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.cn-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cn-fact-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+.cn-row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.cn-pill {
+  background: var(--cn-surface-2);
+  color: var(--cn-ink-muted);
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cn-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.cn-revoke {
+  background: none;
+  border: none;
+  color: var(--cn-ink-subtle);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 6px 4px;
+}
+
+.cn-revoke:hover:not(:disabled) {
+  color: var(--cn-danger);
+}
+
+.cn-revoke:disabled {
+  cursor: default;
+  /* 禁用控件按 WCAG 1.4.3 豁免对比度门槛（"inactive UI component"）——这里压暗是
+   * 承载"不可撤销"的语义；与上面 `.cn-row.revoked` 不同：那条压暗的是**仍可读**的
+   * 元信息（用户要读的内容），故必须保 4.5:1。 */
+  opacity: 0.5;
+}
+
+.cn-state {
+  padding: 40px 4px;
+  text-align: center;
+  color: var(--cn-ink-subtle);
+  font-size: 13px;
+  border-bottom: 1px solid var(--cn-hairline);
+}
+
+.cn-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--cn-danger);
+}
+
+.cn-error-detail {
+  color: var(--cn-ink-subtle);
+  font-size: 12px;
+}
+
+.cn-retry {
+  border: 1px solid var(--cn-hairline);
+  background: var(--cn-surface-1);
+  color: var(--cn-ink);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.cn-footer {
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+/* ── 撤销二次确认弹窗（效果图 modal 样式）──
+ * 经 Radix Portal 挂到 body：只用 `:root` 上的 `--cn-*`（勿回退字面量）。
+ * 遮罩复用共享的 `.palette-overlay`（app.css，与仓内 10+ 弹窗同款，Reuse First）；
+ * 内容类自带定位（fixed + 居中），故不必进 app.css 的浮层定位选择器组。 */
+.cn-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--cn-surface-1);
+  border: 1px solid var(--cn-hairline);
+  border-radius: 12px;
+  padding: 28px;
+  width: min(440px, calc(100vw - 32px));
+  /* 与 `.palette-overlay`(50) 配对成仓内浮层「50/51」层族（app.css:3184 明文）；
+   * 内容必须**高于**遮罩，否则 inset:0 的遮罩会接走指针事件（#203 的教训）。 */
+  z-index: 51;
+  color: var(--cn-ink);
+}
+
+.cn-modal-title {
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.2px;
+  margin: 0 0 10px;
+}
+
+.cn-modal-desc {
+  font-size: 14px;
+  color: var(--cn-ink-muted);
+  margin: 0 0 14px;
+}
+
+.cn-modal-quote {
+  background: var(--cn-surface-2);
+  border: 1px solid var(--cn-hairline);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cn-modal-value {
+  font-size: 13px;
+  color: var(--cn-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cn-modal-factid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--cn-ink-subtle);
+}
+
+.cn-modal-error {
+  color: var(--cn-danger);
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.cn-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.cn-btn {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border: 1px solid var(--cn-hairline);
+  background: var(--cn-surface-1);
+  color: var(--cn-ink);
+}
+
+.cn-btn-primary {
+  background: var(--cn-primary);
+  border-color: var(--cn-primary);
+  color: var(--cn-on-primary);
+}
+
+.cn-btn-primary:hover:not(:disabled) {
+  background: var(--cn-primary-hover);
+  border-color: var(--cn-primary-hover);
+}
+
+.cn-btn:disabled {
+  cursor: default;
+  /* 同上：禁用控件（WCAG 1.4.3 豁免），压暗仅承载不可交互语义。 */
+  opacity: 0.6;
+}
+
+/* ── 亮色主题覆盖（AGENTS §15：新增 token 必须检查两块）──
+ * 覆盖**全部** `--cn-*`（含两级 surface 与 6 类圆点色）：漏一个该 token 在亮色下
+ * 仍用暗色值。圆点在亮色底上取更深一档，保证 12px 名称旁的辨识度。 */
+:root[data-theme='light'] {
+  --cn-surface-1: #ffffff;
+  --cn-surface-2: #f4f4f5;
+  --cn-hairline: rgba(0, 0, 0, 0.1);
+  --cn-ink: #111113;
+  --cn-ink-muted: #3f3f46;
+  --cn-ink-subtle: #52525b;
+  --cn-primary: #5e6ad2;
+  --cn-primary-hover: #4f5bc4;
+  --cn-on-primary: #ffffff;
+  --cn-success: #1a7f37;
+  --cn-danger: #cf222e;
+  --cn-type-constraint: #6b5ce0;
+  --cn-type-user-goal: #1a7f37;
+  --cn-type-authorization: #b06a00;
+  --cn-type-work-boundary: #2f6fdb;
+  --cn-type-failed-approach: #cf222e;
+  --cn-type-evidence-ref: #52525b;
+  --cn-type-default: #52525b;
+  --cn-dot-active: #1a7f37;
+  --cn-dot-inactive: #52525b;
+}

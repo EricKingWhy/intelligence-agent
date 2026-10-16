@@ -52,6 +52,7 @@ from agent_harness.session.event import (
     SESSION_STARTED,
     STEER_REQUESTED,
     STREAM_ONLY_TYPES,
+    TASK_FACT_REVOCATION,
     TASK_PROTECTED_FACT,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -549,8 +550,19 @@ class Session:
                 MESSAGE_QUEUED,
                 STEER_REQUESTED,
                 TASK_PROTECTED_FACT,
+                TASK_FACT_REVOCATION,
             }:
                 moved_data = dict(event.data)
+            if event.type == TASK_FACT_REVOCATION:
+                # #1190：撤销事件引用被撤销 fact——fork 时按 fact 重映射改写；
+                # 目标 fact 在 fork 边界被丢弃（source 事件不在种子内）⇒ 撤销无
+                # 对象，整条丢弃（child 里该 fact 也不存在，无注入可言）。
+                revoke_id = moved_data.get("revoke_fact_id")
+                if isinstance(revoke_id, str) and revoke_id in fact_remap:
+                    remapped_revoke_id = fact_remap[revoke_id]
+                    if remapped_revoke_id is None:
+                        continue
+                    moved_data["revoke_fact_id"] = remapped_revoke_id
             if event.type in {USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED}:
                 revoke_id = moved_data.get("revoke_fact_id")
                 if isinstance(revoke_id, str) and revoke_id in fact_remap:

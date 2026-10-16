@@ -678,6 +678,56 @@ export interface PendingConstraintInputRequest {
   answer: ConstraintInputAnswer | null;
 }
 
+/** #1204：`ask_user` 通用提问的一个可选项（对齐工具端 `ask_user.py::AskOption`）。 */
+export interface AskUserOption {
+  label: string;
+  description?: string;
+}
+
+/** #1204：`ask_user` 的一道题（对齐工具端 `AskQuestion`：1–4 题/卡、2–4 选项/题）。
+ *
+ *  `header` 是卡片级 scope chip 的来源（用户裁决 B2：多题共用一个 scope 标签，
+ *  不为每题另加 chip）——工具端仍按 ≤12 字符存参。 */
+export interface AskUserQuestion {
+  question: string;
+  header: string;
+  options: AskUserOption[];
+  /** 推荐选项下标（0 基）；工具端已校验在 range 内。渲染为"推荐"描边小标。 */
+  recommended?: number;
+}
+
+/** 一题的作答值（wire 形态）：选中选项给 `label`、填自定义给 `custom_text`。
+ *  两者互斥；工具端把只填自定义的那支归一为 `label = custom_text`。 */
+export interface AskUserAnswerValue {
+  label?: string;
+  custom_text?: string;
+}
+
+/** 一题的最终答案。`answer` 为 null 即该题被跳过/留空（用户裁决 A1）。 */
+export interface AskUserQuestionAnswer {
+  question: string;
+  answer: AskUserAnswerValue | null;
+}
+
+/** #1204：`ask_user` 整卡答案（`resume_basis: 'user_input'` 的 `input_request` 形态）。 */
+export interface AskUserAnswer {
+  request_id: string;
+  questions: AskUserQuestionAnswer[];
+}
+
+/** #1204：`kind == "ask_user"` 的待回答请求——对话流内嵌卡片的数据源。 */
+export interface PendingAskUserRequest {
+  request_id: string;
+  run_id: string;
+  questions: AskUserQuestion[];
+  answer: AskUserAnswer | null;
+  /** #1224：后端配置的超时档（秒，随请求落盘）——卡片底部提示按
+   *  `minutes = max(1, floor(timeout_seconds / 60))` 渲染（向下取整且至少 1 分钟），
+   *  与后端注入消息数值一致。缺省（旧事件无此字段）= 卡片渲染不带数字的中性提示
+   *  （零伪造）。 */
+  timeout_seconds?: number;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
@@ -801,6 +851,12 @@ export interface ConversationState {
   run_paused: RunPausedInfo | null;
   /** Durable protected-fact question and any answer already committed for it. */
   pending_constraint_input: PendingConstraintInputRequest | null;
+  /** #1204：`kind == "ask_user"` 的通用提问（对话流内嵌卡片的数据源）。
+   *
+   *  与 `pending_constraint_input` 是**两个独立事实**（payload 形状不同），分流判据
+   *  是 `USER_INPUT_REQUESTED.data.kind`（`ask_user` 走这里，其余含
+   *  `protected_fact_conflict` 走上面那个）——两者互不替代。null = 无待回答的提问。 */
+  pending_ask_user: PendingAskUserRequest | null;
   /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
    *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
    *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商

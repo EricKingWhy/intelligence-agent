@@ -254,6 +254,27 @@ class ProtectedFactReferenceInvalid(SessionServiceError):
     """A user-supplied protected-fact link is stale or does not match its target."""
 
 
+class ProtectedFactNotFound(SessionServiceError):
+    """#1190：撤销目标 fact_id 在本会话投影里不存在（已被删/从未登记/跨会话）。"""
+
+
+class ProtectedFactNotRevocable(SessionServiceError):
+    """#1190：目标 fact 存在但非 active（已被取代）——当前状态不允许主动撤销。
+
+    与 `ProtectedFactNotFound` 分开：会话与 fact 都在，是这次动作按当前状态不成立
+    （同 `SupersedeTargetInvalid` 的 409 立场）。
+    """
+
+
+class ProjectKeyUnavailable(SessionServiceError):
+    """#1191：登记/操作项目级约束时，当前会话解析不出项目键（不在 git 仓库内）。
+
+    请求形状合法、也不是状态冲突——是这份请求在当前上下文**不可执行**（票面 §六.2：
+    "project scope 登记时必须能解析出项目键，否则返回 422"）。故 422，不能借用
+    `ProtectedFactReferenceInvalid`（那是 409 的引用问题）。
+    """
+
+
 class SupersedeTargetInvalid(SessionServiceError):
     """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
 
