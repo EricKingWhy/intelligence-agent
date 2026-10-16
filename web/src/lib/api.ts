@@ -2788,6 +2788,64 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+/** 上下文窗口挡位设置（`GET/PATCH /api/sessions/{id}/context-settings`，后端
+ *  `web/app.py:3613/3634`）。**形状是后端 DTO 原样透传**——挡位清单以后端为准，
+ *  前端不硬编码副本：`tiers` 就是权威列表，选择器只按它渲染。
+ *
+ *  与 `/context-usage` 的一处**口径差异**（调用方必须知道）：
+ *  - `thresholds` 在这里是**绝对 token 数**（后端 `int(window * ratio)`），
+ *    而 `/context-usage` 的 `thresholds` 是 0.70/0.85 的**比例**。同名不同义。
+ *
+ *  两处的 `window` / `window_tokens` 曾经口径不同（后者是部署默认），#1249
+ *  （`a37f6e35`）已把 `/context-usage` 改为同样跟随 per-session 挡位：两侧现在
+ *  都读 `effective_context_window`，改挡位两边一起变。 */
+export interface ContextSettings {
+  session_id: string;
+  /** 本会话生效窗口（token）。 */
+  context_window: number;
+  /** 部署默认挡位——「恢复默认」的锚点（不硬编码 200_000）。 */
+  configured_default: number;
+  /** 合法挡位清单（后端 `CONTEXT_WINDOW_TIERS`），选择器的唯一数据源。 */
+  tiers: number[];
+  /** **绝对 token 数**（不是比例，见上）。 */
+  thresholds: { auto_compact: number; hard_guard: number };
+}
+
+/** GET /api/sessions/{id}/context-settings —— 读本会话窗口挡位（只读，无副作用）。 */
+export async function getContextSettings(sessionId: string): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`);
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `context-settings ${res.status}`);
+  }
+  return res.json();
+}
+
+/** PATCH /api/sessions/{id}/context-settings —— 改挡位，回执是**生效后**的完整设置。
+ *
+ *  状态码语义（照后端路由 docstring，前端不合并它们）：
+ *    200 幂等（同值再写一次仍 200，回执不变）
+ *    404 会话不存在
+ *    422 挡位非法（**零写入**——调用方据此说"没改"，不说"改了一半"）
+ *    503 存储忙（StorageBusyError）
+ *  一律走 `SessionError`（带 status）；文案直接用后端 detail——它已写清合法取值，
+ *  前端再编一句只会更差。 */
+export async function setContextWindow(
+  sessionId: string,
+  contextWindow: number,
+): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context_window: contextWindow }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `set context window ${res.status}`);
+  }
+  return res.json();
+}
+
 /** 手动压缩回执（后端 `POST /api/sessions/{id}/context/compact`，`#635`）。
  *
  *  形状是服务层 DTO 的字段透传。`bracket_id` 指向新落的 bracket；低水位
@@ -2814,7 +2872,9 @@ const COMPACT_TIMEOUT_MS = 180_000;
  *
  *  错误矩阵（后端 `web/app.py::compact_session_context`）：
  *    404 —— 没有这个会话；
- *    409 —— 在途 run 或该会话已有压缩在途（`detail` 原样上抛，不自己编文案）；
+ *    409 —— 在途 run / 该会话已有压缩在途（`detail` 原样上抛，不自己编文案）/
+ *           无可压缩的早期内容（#1197 项 3 的"被拒"态，`detail` 是
+ *           `{message, reason: 'no_early_turns'}` 对象——`reason` 是机器可读字段）；
  *    422 —— id 形态非法 / 非法 `?model=`（`detail` 原样上抛）；
  *    403 —— 非本机来源（宿主侧管理动作只接受本机来源，ADR-0025 D1）。
  *  超时 → 明确的 Error（前端不再无限等待）。 */

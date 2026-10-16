@@ -129,7 +129,9 @@ $backupMacros = (Get-ProductionBlock $directoriesSource '!macro iaClearBackupDir
   "`r`n`r`n" +
   (Get-ProductionBlock $directoriesSource '!macro iaReadBackupDir' '!macroend' 'iaReadBackupDir') +
   "`r`n`r`n" +
-  (Get-ProductionBlock $directoriesSource '!macro iaStashBackupDir' '!macroend' 'iaStashBackupDir')
+  (Get-ProductionBlock $directoriesSource '!macro iaStashBackupDir' '!macroend' 'iaStashBackupDir') +
+  "`r`n`r`n" +
+  (Get-ProductionBlock $directoriesSource '!macro iaReadLeftoverDir' '!macroend' 'iaReadLeftoverDir')
 $replacements = [ordered]@{
   '@@PRODUCTION_IA_CLEANUP@@'       = $cleanupSource
   '@@PRODUCTION_IA_PROBE_PATH@@'    = Get-ProductionBlock $directoriesSource 'Function iaProbePath' 'FunctionEnd' 'iaProbePath'
@@ -137,6 +139,7 @@ $replacements = [ordered]@{
   '@@PRODUCTION_IA_RECOVERY@@'      = $recoveryMacro
   '@@PRODUCTION_IA_CLASSIFY@@'      = Get-ProductionBlock $directoriesSource 'Function iaClassifyRunningProduct' 'FunctionEnd' 'iaClassifyRunningProduct'
   '@@PRODUCTION_IA_REQUIRE@@'       = Get-ProductionBlock $directoriesSource 'Function iaRequireNoRunningProduct' 'FunctionEnd' 'iaRequireNoRunningProduct'
+  '@@PRODUCTION_IA_ROLLBACK@@'      = Get-ProductionBlock $directoriesSource 'Function iaRollbackApplication' 'FunctionEnd' 'iaRollbackApplication'
   '@@PRODUCTION_IA_STAGE@@'         = $stageMacro
 }
 $probeSource = $probeTemplate
