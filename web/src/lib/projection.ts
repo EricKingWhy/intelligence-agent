@@ -1874,6 +1874,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.PERMISSION_GRANTED]: { apply: noopProjection, summarize: summarizeApprovalGranted },
   [EventType.PERMISSION_REVOKED]: { apply: noopProjection, summarize: summarizeApprovalRevoked },
   [EventType.WORKFLOW_MODE_CHANGED]: { apply: noopProjection, summarize: summarizeWorkflowModeChanged },
+  // #1193：run 致命异常且计划从未生成的**明确错误信号**（stream-only，不落盘）
+  // ——横幅状态归 useSession 的 `runFailedBeforePlan`（它需要手动退出动作，
+  // 不是对话投影项；且事件本身不入重放历史，投影成时间线条目会在刷新后消失
+  // 得自相矛盾）。登记为 no-op ⇒ 已知类型、不进 `unknown_events`；不登记则
+  // 穷尽性 `Record<EventTypeValue, EventSemantics>` 被破坏（tsc 红）。
+  [EventType.ERROR]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,
