@@ -180,6 +180,7 @@ export function initConversation(session_id: string): ConversationState {
     active_step_id: null,
     run_status: 'idle',
     run_cancelled: false,
+    compaction_in_progress: false,
     compactions: [],
     reconcile_queue: [],
     pending_approvals: [],
@@ -362,6 +363,17 @@ interface EventSemantics {
 
 /** 已知类型但无投影——保持「进 unknown_events」的既有兜底行为。
  *  登记它而非省略，是为了让未接线的事件类型在注册表里可见。 */
+/** #1197 项 5A：`compaction/start` / `compaction/end` 是 bracket 的两端，投影成
+ *  一个布尔（进行中与否）——**不**再进 unknown_events（那是未接线兜底）。
+ *  `compaction/end` 到达即恢复常态（票面：自动消失，不许静默）。 */
+function projectCompactionInProgress(state: ConversationState): void {
+  state.compaction_in_progress = true;
+}
+
+function projectCompactionEnded(state: ConversationState): void {
+  state.compaction_in_progress = false;
+}
+
 function unhandledProjection(state: ConversationState, event: AgentEvent): void {
   state.unknown_events = [...state.unknown_events, event];
 }
@@ -1895,8 +1907,15 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     summarize: summarizeDeltaChars,
   },
   [EventType.TEXT_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
-  [EventType.COMPACTION_START]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.COMPACTION_END]: { apply: unhandledProjection, summarize: unknownSummary },
+  // #1197 项 1：`context/window-changed` 是 per-session 上下文窗口挡位的 append-only
+  // 事实。窗口的**生效值**由后端 `context/window.py` 的 derive 给出（倒序 last-wins），
+  // 前端不重复实现那份折叠——挡位读数走 `/api/.../context-settings`。故这里显式登记
+  // 为未投影（与 COMPACTION_* 同一处理），而不是静默漏登记。
+  // ⚠ 项 1 加了这个事件类型却漏登记：`EVENT_SEMANTICS` 是穷尽 `Record<EventTypeValue, …>`，
+  // 缺一条 `tsc -b` 直接失败（gate0 项），而 vitest 不跑 tsc 所以当时没红。
+  [EventType.CONTEXT_WINDOW_CHANGED]: { apply: unhandledProjection, summarize: unknownSummary },
+  [EventType.COMPACTION_START]: { apply: projectCompactionInProgress, summarize: emptySummary },
+  [EventType.COMPACTION_END]: { apply: projectCompactionEnded, summarize: emptySummary },
   // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，
   // 事件流是唯一事实）。摘要给 Timeline 一行语义（不再是「未接线」）。
   [EventType.MESSAGE_QUEUED]: { apply: projectUndelivered, summarize: summarizeMessageQueued },
@@ -2151,6 +2170,9 @@ function finalizeRun(
   status: 'completed' | 'failed' | 'paused',
   time?: string,
 ): void {
+  // #1197 项 5A：bracket 中途夭折（run 在 START 与 END 之间终结）时 flag 必须
+  // 跟着收口——否则它会永久为 true，且没有任何后续事件能再把它摘掉。
+  state.compaction_in_progress = false;
   state.run_status = status;
   state.active_step_id = null;
   markPendingApprovalsStale(state);

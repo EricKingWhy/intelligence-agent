@@ -25,8 +25,10 @@ import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
+import { ContextWindowPanel } from './components/ContextWindowPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { ContextFullDialog } from './components/ContextFullDialog';
 import { StuckPausedPanel } from './components/StuckPausedPanel';
 import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
@@ -53,7 +55,7 @@ import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { adjudicationHeadline } from './lib/recovery';
 import { AdjudicationTechDetail } from './components/AdjudicationTechDetail';
 import { describeOwnership } from './lib/ownership';
-import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
+import { ceilingDraftValue, CONTEXT_TRIGGER_DIMENSION, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
 import {
@@ -361,6 +363,9 @@ export default function App() {
 
   // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
   const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
+  // #1197 项 5B：上下文窗口挡位选择器（open 的 sid；null = 关闭）。同因在 Esc
+  // 中断 effect 之前声明。
+  const [contextWindowOpen, setContextWindowOpen] = useState<string | null>(null);
   // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
   // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
   const [taskReviewOpen, setTaskReviewOpen] = useState(false);
@@ -376,19 +381,28 @@ export default function App() {
   // 终审 P1 修复：context-usage 看板是**非 Radix** 的 role="dialog"（无焦点陷阱，
   // 焦点通常还留在 body/composer 上），closest 会不命中——不挡的话 Esc 关看板
   // 会同时打断在途 run（两个 handler 都在 window 上，App 的先注册先跑）。
+  // #1195 复审 P1（streaming×Esc）：React 合成 handler（slash 菜单关、排队项就地
+  // 编辑取消）挂在 root 容器、先于 window 监听跑——它们对 Esc **只 preventDefault
+  // 不 stopPropagation**，事件仍会冒泡到这里。`defaultPrevented` 守卫把"已有更近的
+  // handler 认领了这个 Esc"作为统一信号：菜单/编辑框只关自己，在途 run 不被连带
+  // cancel（e2e：composer-stream-actions.spec.ts 的 streaming×Esc 组合用例）。
   useEffect(() => {
     if (!streaming) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      // #1195 复审 P1：更近的合成 handler（slash 菜单、排队项编辑框）已认领的
+      // Esc 不再打断在途 run——cancelStream 只吃"没人要"的 Esc。
+      if (e.defaultPrevented) return;
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
+      if (contextWindowOpen !== null) return; // 挡位选择器同因（非 Radix，closest 不命中）
       if (taskReviewOpen) return; // #353：审阅浮层在场，Esc 归浮层（非 Radix，closest 不命中）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream, contextUsageOpen, taskReviewOpen]);
+  }, [streaming, cancelStream, contextUsageOpen, contextWindowOpen, taskReviewOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -1132,6 +1146,25 @@ export default function App() {
   // live 流，那一小段窗口里 `run_paused` 可能还没被 run/resumed 清掉——那时露出
   // 一个"恢复"按钮等于给用户一个重复提交 CAS 的机会。
   const canResumePaused = paused !== null && selectedId !== null && !streaming;
+  /** #1197 项 2：「结束」只收起这一屏——**不是**终止 run。
+   *  暂停 run 的 task 已经 done，`POST /cancel` 只会拿到 200 `no_active_run`
+   *  （`runmanager.get_active` 对 terminal/paused 返回 None），后端也没有 abandon /
+   *  dismiss 端点；假装它能结束什么就是在骗用户。按 run_id 记账：下一个 run 的暂停
+   *  不该继承上一次的"已收起"。 */
+  const [contextFullDismissedRunId, setContextFullDismissedRunId] = useState<string | null>(null);
+  const handleContextFullEndRun = useCallback(() => {
+    if (paused !== null) setContextFullDismissedRunId(paused.run_id);
+  }, [paused]);
+  /** #1197 项 2：「换模型」打开模型选择器。
+   *  `ModelPicker` 的开态是它自己的内部 state（`ModelPicker.tsx:77`），App 无法命令式
+   *  打开，所以走 DOM 级触发——照抄 `focus-composer` 那条先例。Radix 的菜单触发器
+   *  开在 **pointerdown** 上（`@radix-ui/react-dropdown-menu` 的 Trigger 只 compose
+   *  onPointerDown，没有 onClick），派发 click 是打不开的，必须发 pointerdown。 */
+  const handleContextFullChangeModel = useCallback(() => {
+    document
+      .querySelector('.model-picker')
+      ?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+  }, []);
 
   const constraintDialogOpen =
     constraintRequest !== null &&
@@ -1442,6 +1475,7 @@ export default function App() {
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
+        onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
       />
 
@@ -1633,8 +1667,20 @@ export default function App() {
               （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
               输入通道照常可用。 */}
+          {/* #1197 项 2：上下文满（trigger_dimension=max_context_tokens）时**不弹技术屏**。
+              判别用 `resumeTarget.kind === 'context'` 的等价判据（`#1026` 裁决 A），
+              而**不是** `reason`——context 暂停的 reason 也是 `budget_exhausted`，
+              与普通预算暂停共用同一个字符串；按 reason 分支会把两者混为一谈。
+              这一支必须在 `PAUSE_REASON_STUCK` 之前判（stuck 的 reason 不同，本不冲突，
+              但次序写反时 context 会被 stuck 分支漏掉、掉进 PausedPanel 技术屏）。 */}
           {canResumePaused && paused && paused.reason !== 'user_input' && (
-            paused.reason === PAUSE_REASON_STUCK ? (
+            paused.trigger_dimension === CONTEXT_TRIGGER_DIMENSION ? (
+              <ContextFullDialog
+                open={contextFullDismissedRunId !== paused.run_id}
+                onEndRun={handleContextFullEndRun}
+                onChangeModel={handleContextFullChangeModel}
+              />
+            ) : paused.reason === PAUSE_REASON_STUCK ? (
               <StuckPausedPanel paused={paused} />
             ) : (
               <PausedPanel
@@ -1841,6 +1887,12 @@ export default function App() {
         sessionId={contextUsageOpen ?? ''}
         open={contextUsageOpen !== null}
         onClose={() => setContextUsageOpen(null)}
+      />
+      {/* #1197 项 5B：上下文窗口挡位选择器（TopBar Sliders 入口）。 */}
+      <ContextWindowPanel
+        sessionId={contextWindowOpen ?? ''}
+        open={contextWindowOpen !== null}
+        onClose={() => setContextWindowOpen(null)}
       />
       {/* #353 W-09：任务审阅浮层（服务端 Task/Evidence 投影驱动；会话切走即关闭）。 */}
       {taskReviewOpen && selectedId !== null && (

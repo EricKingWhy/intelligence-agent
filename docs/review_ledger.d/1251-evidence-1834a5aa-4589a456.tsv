@@ -1,0 +1,1 @@
+2026-10-16	[#1251] Windows 真机验证证据：中断后 /S 重跑 exit 0（修复前 exit 2），备份缺失仍 exit 2 fail-closed	1834a5aa57865a5c25af64bc65f8dae3808044ab..4589a45620a967182a2324dbddd0bdb3eff1cb02

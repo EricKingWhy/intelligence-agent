@@ -854,20 +854,26 @@ async def test_fork_copy_failure_compensates_and_leaves_marked_child(
 
 @pytest.mark.asyncio
 async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) -> None:
-    """#526：fork 不继承会话级审批授权与工作流档。
+    """#526：fork 不继承会话级审批授权与工作流档；#1197 同理不继承上下文窗口。
 
-    父会话有一条 approval grant + 一次 plan 档切换；fork 后 child 的 seed 里
-    不得含有 permission/approval-granted|revoked 与 workflow/mode-changed，
-    derive_approval_grants 为空、effective_workflow_mode 回落 NORMAL。
+    父会话有一条 approval grant + 一次 plan 档切换 + 一次窗口改 500K；fork 后
+    child 的 seed 里不得含有 permission/approval-granted|revoked、
+    workflow/mode-changed、context/window-changed，derive_approval_grants 为空、
+    effective_workflow_mode 回落 NORMAL、effective_context_window 回落 200K。
     （#358 W-14 / F26：高风险权限不因 Fork 静默扩大。）
     """
     import time
 
+    from agent_harness.context.window import (
+        append_context_window_change,
+        effective_context_window,
+    )
     from agent_harness.session.approval import (
         append_approval_grant,
         derive_approval_grants,
     )
     from agent_harness.session.event import (
+        CONTEXT_WINDOW_CHANGED,
         PERMISSION_GRANTED,
         PERMISSION_REVOKED,
         WORKFLOW_MODE_CHANGED,
@@ -901,6 +907,7 @@ async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) 
     )
     append_approval_grant(parent, grant)
     append_workflow_mode_change(parent, WorkflowMode.PLAN)
+    append_context_window_change(parent, 500_000)
     anchor = parent.events[-2].seq  # 第二条用户消息（grant/plan 事件在其后也无妨）
     # 锚点取"第二条"用户消息：grant 与 mode 事件在锚点之前，确保进 seed 候选
     anchor = next(
@@ -917,8 +924,11 @@ async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) 
     assert PERMISSION_GRANTED not in child_types
     assert PERMISSION_REVOKED not in child_types
     assert WORKFLOW_MODE_CHANGED not in child_types
+    assert CONTEXT_WINDOW_CHANGED not in child_types
     assert derive_approval_grants(child.events) == {}
     assert effective_workflow_mode(child.events) is WorkflowMode.NORMAL
+    assert effective_context_window(child.events) == 200_000
     # 父不受影响
     assert derive_approval_grants(parent.events) != {}
     assert effective_workflow_mode(parent.events) is WorkflowMode.PLAN
+    assert effective_context_window(parent.events) == 500_000
