@@ -64,7 +64,7 @@ test('停顿提示锚的是「空闲」而非「流龄」：阈值前不出现�
     // 决定性断言 `hintSec < pulseSec` 的余量被压成 1 秒 → 负载下随机变红
     // （实测 `Expected: < 52, Received: 52`）。注意这与「产品退化成按流龄计时」
     // **读数同形但成因不同**：那种红是夹具时序造的假象，产品侧锚点是正确重置的。
-    onWs: () => ({ frames: MID_FRAMES, hasActiveRun: true, ending: 'keep', frameGate: midGate }),
+    onWs: () => ({ frames: MID_FRAMES, ending: 'keep', frameGate: midGate }),
     events: LIVE_FRAMES,
   });
 
