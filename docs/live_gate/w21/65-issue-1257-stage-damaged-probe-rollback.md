@@ -139,10 +139,15 @@ M2 删两行 `Var` ⇒ `Usage: StrCpy $(user_var: output)…` 硬错）。
 
 ## 6 冻结读数可传递性与门禁
 
-- 代码面冻结 = `a96ffb05`（tree 见 `docs/gate/<sha>.json`）。其后只追加 `docs/**`（本证据 + 台账 + gate 收据）。
-- gate0（本机 6 条机械车道）在沙箱 `shell/ia-test` 以 **CI 同形**依赖跑（`git bundle` 真仓克隆 +
-  `uv sync --frozen` + `pnpm install --frozen-lockfile`），读数落盘 `docs/gate/<sha>.json`。
-- `scripts/check_review_coverage.py`：本笔 `a96ffb05` 的归属行见 `docs/review_ledger.d/1257-*`（两轴各一行）。
+- 代码面冻结 = `a96ffb05`；其后只追加 `docs/**`（证据 / 台账 / gate 收据），代码面未变。
+- **Gate-0（6/6 PASS）** 在沙箱 `shell/ia-test` 以 **CI 同形**依赖跑（`git bundle` 真仓克隆 +
+  `uv sync --frozen` + `pnpm install --frozen-lockfile`）：
+  `tip=98b837caf511` / `tree=2d076cf4c65d`（与宿主 `git rev-parse 98b837ca^{tree}` **逐字节相同**）/ 6 车道全 PASS /
+  墙钟 29.05s / `env_failures=[]` / `worktree.tracked_matches_head=true`。
+  收据：`docs/gate/98b837caf51114edf24c69f496f562c5184bd3b9.json`
+  （车道：diff-check / ruff / oxlint / tsc / guards / coverage，全 PASS）。
+- `scripts/check_review_coverage.py`：本笔 `a96ffb05` 的归属行见两轴各一行（本机实测 **exit 0**，
+  「089524a~1..HEAD 每条 commit 均有归属」）。
 
 ---
 
@@ -163,7 +168,7 @@ M2 删两行 `Var` ⇒ `Usage: StrCpy $(user_var: output)…` 硬错）。
 - 修复提交：`a96ffb05`
 - 归属行：`docs/review_ledger.d/1257-stage-probe-rollback-axis-a-correctness-853e7ff6-a96ffb05.tsv`、
   `docs/review_ledger.d/1257-stage-probe-rollback-axis-b-standards-853e7ff6-a96ffb05.tsv`
-- gate0 收据：`docs/gate/<a96ffb05 的 HEAD sha>.json`（push 前落盘）
+- gate0 收据（6/6 PASS，tip `98b837ca` / tree `2d076cf4c65d`）：`docs/gate/98b837caf51114edf24c69f496f562c5184bd3b9.json`
 - 本地 scratch（**未入库**，旁证）：`/tmp/ia1257-probe/{build-probe.py,probe-before.nsi,probe-after.nsi,guards-*.log,review-*.out}`
 
 ---
