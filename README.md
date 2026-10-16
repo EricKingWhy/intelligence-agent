@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/owlet-vesper.png" alt="Owlet × Vesper" width="240" />
+</p>
+
 # intelligence-agent
 
 [English](README_EN.md) | 中文
