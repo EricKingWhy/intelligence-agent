@@ -373,6 +373,7 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
 
   // 在途的界面真相：停止按钮在场（发送按钮同时在场，ADR-0030 D10）。
   await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+  await expect.poll(() => sessionPosts).toBeGreaterThan(0);
   // 基线而不是硬编码 1：建立这一步本身就允许出现一次 POST /api/sessions
   // （**不**断言它必须等于 1——那会把"首条消息走哪条通道"也锁进来，
   // 而那由 selectedId 决定，与本次回归无关）。要锁的是**增量**。
