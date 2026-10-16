@@ -1698,6 +1698,15 @@ function summarizeModelChanged(event: AgentEvent): string {
   return typeof to === 'string' && to ? `模型 → ${to}` : '模型已切换';
 }
 
+// #1192：委派约束继承快照的单行语义（子会话事件流的独立审计事件）。
+function summarizeConstraintInheritance(event: AgentEvent): string {
+  const d = event.data as Record<string, unknown>;
+  if (d.omit_constraints === true) return '干净启动：不继承任何约束';
+  const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
+  const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
+  return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;
+}
+
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
 
 const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
@@ -1854,6 +1863,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.AGENT_DELEGATION_FINISHED]: {
     apply: projectAgentDelegationFinished,
     summarize: summarizeDelegationFinished,
+  },
+  // #1192：委派约束继承快照——只落**子会话**事件流（父流不见），不投影进
+  // ConversationState：子详情「约束继承」区直接按事件流只读渲染（不变量 #22，
+  // 事件流仍是唯一真相）；登记为 no-op 防进 unknown_events。
+  [EventType.AGENT_CONSTRAINT_INHERITANCE]: {
+    apply: noopProjection,
+    summarize: summarizeConstraintInheritance,
   },
   [EventType.REASONING_STARTED]: { apply: projectReasoning, summarize: summarizeReasoningStarted },
   [EventType.REASONING_DELTA]: { apply: projectReasoning, summarize: summarizeDeltaChars },
