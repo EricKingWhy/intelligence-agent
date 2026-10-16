@@ -10,9 +10,10 @@ import asyncio
 import functools
 import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import aiosqlite
 
@@ -49,18 +50,24 @@ def read_session_project_key(
 ) -> str | None:
     """**同步**、只读地取一条会话的 `project_key`（#1191 §三.3）。
 
-    给不跑事件循环的同步消费者用：`context/builder` 的注入供给器是 sync 闭包
-    （每轮 build 现读规则层文件），拿不到异步 `SessionMetaStore`。库 / 表 / 行缺失
-    或文件不可读一律返回 None ⇒ 读取侧按 `effective_project_key` 的「持久化优先、
-    现场 cwd 兜底」回落（与面板同一口径，避免两侧分组漂移）。
+    给不跑事件循环的同步消费者用：`assembly._build_scoped_fact_provider` 造的注入供给器
+    是 sync 闭包（`context/builder` 每轮 build 现读规则层文件），拿不到异步
+    `SessionMetaStore`。库 / 表 / 行缺失或文件不可读一律返回 None ⇒ 读取侧按
+    `effective_project_key` 的「持久化优先、现场 cwd 兜底」回落（与面板同一口径，
+    避免两侧分组漂移）。
 
     只读 URI 打开，不写、不升级锁；WAL 下与写连接互不阻塞。
     """
     path = Path(database_path)
     if not path.exists():
         return None
+    # 路径必须 percent-encode：裸拼进 `file:` URI 时 `?`/`%`/`#` 会被 URI 解析吃掉，
+    # 令 `mode=ro` 失效（甚至指向别处）并静默回落——正是重审 finding F1 的复查点。
+    uri = f"file:{quote(str(path))}?mode=ro"
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        # `closing` 而非裸 `with`：sqlite3 连接的 `__exit__` 只提交/回滚，**不关连接**
+        # （重审 finding F2）；此读取每轮 build 都跑，句柄不能靠 refcount GC 回收。
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             row = connection.execute(
                 "SELECT project_key FROM session_meta WHERE session_id = ?",
                 (session_id,),

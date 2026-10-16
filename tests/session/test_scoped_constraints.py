@@ -152,7 +152,7 @@ def test_effective_project_key_prefers_persisted_then_cwd(tmp_path: Path) -> Non
     assert effective_project_key(None, str(tmp_path / "nope")) is None
 
 
-def test_project_label_prefers_owner_repo_then_dirname(tmp_path: Path) -> None:
+def test_project_label_for_key_prefers_owner_repo_then_dirname(tmp_path: Path) -> None:
     repo = tmp_path / "myrepo"
     repo.mkdir()
     _git_init(repo)

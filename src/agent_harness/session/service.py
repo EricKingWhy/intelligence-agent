@@ -353,7 +353,9 @@ _SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 _WRITE_CONFLICT_ATTEMPTS = 3
 
 #: #1191（Phase 2）：非会话级（规则层）作用域词表 = 注解 `scope` 里落在规则层的取值。
-#: 从 `ConstraintScope` 派生而不是再写一遍字面量——词表只此一处（审查 finding S-b2）。
+#: 从 `ConstraintScope` 派生而不是再写一遍字面量——本文件内规则层作用域词表只此一处
+#: （审查 finding S-b2）。注意 DTO 侧另有 `web/protected_facts.py` 的 `Literal[...]`
+#: 字面量，属该层独立校验，不在此口径内。
 _SCOPED_SCOPE_VALUES = frozenset(
     (ConstraintScope.PROJECT.value, ConstraintScope.GLOBAL.value)
 )
@@ -3584,7 +3586,7 @@ class SessionService:
             self._require_scoped_store()
             # 写前校验用**纯读**口径：被拒（如 SteerTargetNotFound）不留任何写。
             scoped_project_key = await self._session_project_key(
-                session_id, current_events, persist=False
+                session_id, current_events
             )
             if (
                 any(a["scope"] == ConstraintScope.PROJECT.value for a in scoped_annotations)
@@ -3700,17 +3702,15 @@ class SessionService:
         # steer）成功后才走到这里 ⇒ 被拒请求零副作用（审查 finding C4）。
         if scoped_annotations:
             store = self._require_scoped_store()
-            # 写成功之后才走到这里：这一遍 `persist=True` 的解析负责**惰性补写**元数据
-            # 里的 project_key（写前那次是纯读）；登记用的键与面板/注入同一条口径。
-            registered_project_key = await self._session_project_key(
-                session_id, current_events
-            )
+            # 写成功后惰性补写元数据 project_key（写前那次是纯读；键在会话启动后不再
+            # 变化，直接复用写前解析结果，不重复跑 git 解析）。登记用键与面板/注入同口径。
+            await self._record_session_project_key(session_id, scoped_project_key)
             registered_at = datetime.now(UTC).isoformat(timespec="milliseconds")
             for annotation in scoped_annotations:
                 store.register(
                     annotation["scope"],
                     project_key=(
-                        registered_project_key
+                        scoped_project_key
                         if annotation["scope"] == ConstraintScope.PROJECT.value
                         else None
                     ),
@@ -6639,18 +6639,14 @@ class SessionService:
         return store
 
     async def _session_project_key(
-        self, session_id: str, events: list[SessionEvent], *, persist: bool = True,
+        self, session_id: str, events: list[SessionEvent],
     ) -> str | None:
         """会话项目键（#1191 §三.3）；取值口径见 `effective_project_key`（持久化优先）。
 
-        没有持久化键时按 cwd 现场解析（票面 §三.3 允许的兜底）；`persist=True` 且在
-        元数据行存在时**惰性补写**一次（存量会话首次被打开时的补写通道）。
-        `persist=False` 用于**写前纯读校验**（`send_message` 的 422 判定）——一次注定
-        被拒的请求不得在元数据上留下任何写（重审 finding：写前校验越权写）。
-
-        补写走 `set_project_key` 单列更新——不用 `upsert`，避免既有全行 upsert
-        调用方把已补写的值静默抹成 NULL。元数据行缺失（直构 service 的调用方）
-        只现场解析、不补写（无行可写）。
+        **纯读**：没有持久化键时按 cwd 现场解析（票面 §三.3 允许的兜底），不写元数据。
+        需要把解析结果落盘（存量会话首次被打开/登记的惰性补写）时显式再调
+        `_record_session_project_key`——写入点从调用处可见，读取函数无默认副作用
+        （审查 finding：getter 形状却默认写库）。
         """
         # 本读取依赖 `session_meta` 表存在；`send_message` 路径不像
         # `_require_existing_session` 那样已经确保过（幂等 no-op，不走 scoped 注解时
@@ -6658,13 +6654,28 @@ class SessionService:
         await self._ensure_stores()
         meta = await self._session_meta_store.get(session_id)
         persisted = meta.project_key if meta is not None else None
-        key = effective_project_key(persisted, session_cwd(events))
-        if persist and key is not None and persisted is None and meta is not None:
-            try:
-                await self._session_meta_store.set_project_key(session_id, key)
-            except KeyError:  # pragma: no cover —— get 命中过，补写时行被删的极窄竞态
-                pass
-        return key
+        return effective_project_key(persisted, session_cwd(events))
+
+    async def _record_session_project_key(
+        self, session_id: str, key: str | None,
+    ) -> None:
+        """把已解析的会话项目键惰性补写进元数据（§三.3：只记一次，之后不再解析）。
+
+        仅在元数据行存在且尚无键时写一次（存量会话首次被打开/登记的补写通道）；
+        `key is None`（非 git 目录）不写，行缺失（直构 service 的调用方）不写。
+        补写走 `set_project_key` 单列更新——不用 `upsert`，避免既有全行 upsert 调用方
+        把已补写的值静默抹成 NULL。
+        """
+        if key is None:
+            return
+        await self._ensure_stores()
+        meta = await self._session_meta_store.get(session_id)
+        if meta is None or meta.project_key is not None:
+            return
+        try:
+            await self._session_meta_store.set_project_key(session_id, key)
+        except KeyError:  # pragma: no cover —— get 命中过，补写时行被删的极窄竞态
+            pass
 
     async def effective_constraints(self, session_id: str) -> dict[str, Any]:
         """返回本会话实际可见的约束全集（三 scope 合流），附 scope 与覆盖关系（#1191）。
@@ -6697,6 +6708,8 @@ class SessionService:
         ]
 
         project_key = await self._session_project_key(session_id, events)
+        # 面板首开是存量会话的惰性补写通道（§三.3：只记一次）。
+        await self._record_session_project_key(session_id, project_key)
         project_rows: list[dict[str, Any]] = []
         global_rows: list[dict[str, Any]] = []
         if project_key is not None:
@@ -6737,9 +6750,7 @@ class SessionService:
         if scope == ConstraintScope.PROJECT.value:
             events = await self.get_events(session_id)
             # 纯读口径：撤销自身失败（404）时不在元数据上留下写。
-            project_key = await self._session_project_key(
-                session_id, events, persist=False
-            )
+            project_key = await self._session_project_key(session_id, events)
             if project_key is None:
                 raise ProtectedFactNotFound(f"protected fact '{fact_id}' not found")
         existing = store.get(scope, fact_id, project_key=project_key)
