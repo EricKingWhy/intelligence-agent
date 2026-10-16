@@ -110,7 +110,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
-- **2026-10-17 · #1183 等待云端验证**：任务审阅轻量化已实现并同步最新 `origin/main` `5b09883`（merge `7a663898`）；分支 `codex/issue-1183-task-review`，代码提交 `71a982ae`。聚焦 Vitest 47 passed / 0 failed，lint/build 通过；Gate-0 收据 `docs/gate/0d8e4066694fed86205f3984aaea593ca2620df5.json`。全量云端验证与 PR 检查待跑；Issue 保持 OPEN / in-progress。详见 Tracker 与月档 #1183。
+- **2026-10-17 · #1183 等待云端验证**：任务审阅轻量化已实现；分支 `codex/issue-1183-task-review`，代码提交 `71a982ae`，已同步最新 `origin/main` `8a0ddbba`（merge `f10dcc2d`，仅带入 docs）。聚焦 Vitest 47 passed / 0 failed，lint/build 与覆盖闸门通过；Gate-0 收据 `docs/gate/0d8e4066694fed86205f3984aaea593ca2620df5.json`。全量云端验证与 PR 检查待跑；Issue 保持 OPEN / in-progress。详见 Tracker 与月档 #1183。
 - **2026-10-16 · #1165 已集成**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) merge `76bab688136c16e94474bee4397bc19ad803e861`；Issue CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。PR Gate-0、Windows installer smoke、gitleaks、Chromium PR smoke 全过；完整 nightly 在代码 head `340bb388` 全绿，Windows TUI 重跑后通过。详情见月档 #1165。
 - **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。
 - **2026-10-16 · #1128 集成**：Issue CLOSED；PR [#1217](https://github.com/EricKingWhy/intelligence-agent/pull/1217) merge `838bd798a994c35a9149cf10009bc684959a7dd5`，基线 `879c220ac273b83e684a469f6209a06b2a669868`。验证与关单记录见 Tracker/月档 #1128。
