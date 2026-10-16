@@ -139,6 +139,7 @@ export function BudgetPickerPanel({
             <div className="composer-budget budget-picker-dimension-control">
               <OptionPicker
                 ariaLabel="预算 tokens 档位"
+                title="本次 run 的总 token 上限？"
                 icon={Coins}
                 options={TOKEN_OPTIONS}
                 value={tokensTierId(tokens)}
@@ -198,6 +199,7 @@ export function BudgetPickerPanel({
               <div className="composer-budget budget-picker-dimension-control">
                 <OptionPicker
                   ariaLabel="预算截止时长档位"
+                  title="本次 run 距截止还有多久？"
                   icon={Timer}
                   options={DURATION_OPTIONS}
                   value={durationTierId(deadline)}
