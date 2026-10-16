@@ -15,11 +15,19 @@ from agent_harness.session.derive import (
     derive_protected_facts,
     is_direct_user_input_event,
 )
-from agent_harness.session.event import USER_INPUT_REQUESTED, USER_MESSAGE
+from agent_harness.session.event import USER_INPUT_REQUESTED
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.tools.user_input_common import (
+    SCOPE_REJECTION_NOT_ALLOWED,
+    SCOPE_REJECTION_SOURCE_UNAVAILABLE,
+    admission_rejection_message,
+    pending_user_input_request,
+    rejected_result,
+    scope_rejection_code,
+)
 
 _CHOICES = (
     {"id": "replace_persistently", "label": "永久替换旧约束"},
@@ -27,15 +35,6 @@ _CHOICES = (
     {"id": "keep_existing", "label": "保留旧约束并忽略本次要求"},
     {"id": "custom", "label": "自定义回复"},
 )
-
-_ADMISSION_REJECTION_MESSAGES = {
-    "DEADLINE_CONFIGURED": (
-        "当前 run 或 session 配置了绝对 deadline，不能等待用户澄清；未创建问题。"
-    ),
-    "RESUME_UNAVAILABLE": (
-        "剩余预算不足以保证收到回答后同一 run 能继续；未创建问题。"
-    ),
-}
 
 
 class RequestConstraintResolutionArgs(BaseModel):
@@ -149,22 +148,17 @@ class RequestConstraintResolutionTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
         context = current_constraint_tool_context_var.get()
-        if context is None:
+        scope_code = scope_rejection_code(session, run_id, context)
+        if scope_code == SCOPE_REJECTION_SOURCE_UNAVAILABLE:
             return self._rejected(
-                "SOURCE_UNAVAILABLE",
+                scope_code,
                 "当前模型输入中没有可核实的直接用户原文，未发起问题。",
             )
-        if (
-            context.session_id != session.session_id
-            or context.run_id != run_id
-            or context.agent_id != "default"
-            or context.agent_profile not in (None, "main", "coding")
-            # #1085（#663 AC01）：委派子会话不得获得有效入口（执行期兜底）。
-            or context.is_delegated_child
-        ):
+        if scope_code == SCOPE_REJECTION_NOT_ALLOWED:
             return self._rejected(
-                "SCOPE_NOT_ALLOWED", "当前执行范围不能发起约束澄清。",
+                scope_code, "当前执行范围不能发起约束澄清。",
             )
+        assert context is not None
 
         source = next(
             (event for event in session.events if event.event_id == context.source_event_id),
@@ -200,29 +194,9 @@ class RequestConstraintResolutionTool(Tool):
             )
         if context.user_input_request_rejection_code is not None:
             code = context.user_input_request_rejection_code
-            return self._rejected(
-                code,
-                _ADMISSION_REJECTION_MESSAGES.get(
-                    code, "无法保证同一 run 在收到回答后继续；未创建问题。"
-                ),
-            )
+            return self._rejected(code, admission_rejection_message(code))
 
-        answered = {
-            event.data.get("input_request_id")
-            for event in session.events
-            if event.type == USER_MESSAGE
-            and isinstance(event.data.get("input_request_id"), str)
-        }
-        pending = next(
-            (
-                event for event in reversed(session.events)
-                if event.type == USER_INPUT_REQUESTED
-                and event.run_id == run_id
-                and isinstance(event.data.get("request_id"), str)
-                and event.data["request_id"] not in answered
-            ),
-            None,
-        )
+        pending = pending_user_input_request(session.events, run_id=run_id)
         if pending is not None:
             return ToolResult.success(
                 message="本 run 已有待处理的约束问题；将恢复该问题，不会创建第二个请求。",
@@ -260,11 +234,4 @@ class RequestConstraintResolutionTool(Tool):
 
     @staticmethod
     def _rejected(reason_code: str, reason: str) -> ToolResult:
-        return ToolResult.success(
-            message=reason,
-            data={
-                "status": "rejected",
-                "reason_code": reason_code,
-                "reason": reason,
-            },
-        )
+        return rejected_result(reason_code, reason)

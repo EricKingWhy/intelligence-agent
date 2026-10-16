@@ -17,7 +17,7 @@ from agent_harness.session.context import (
     current_session_var,
     run_context_var,
 )
-from agent_harness.session.event import USER_INPUT_REQUESTED, USER_MESSAGE
+from agent_harness.session.event import USER_INPUT_REQUESTED
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tools.ask_user import AskQuestion, AskUserArgs, AskUserTool
