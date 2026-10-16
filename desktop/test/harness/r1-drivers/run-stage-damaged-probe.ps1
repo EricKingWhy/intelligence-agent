@@ -1,5 +1,6 @@
 # Compile and run the PRODUCTION iaStageApplication macro against a damaged
-# installation (#914 review Axis A — the user-ruled must-fix).
+# installation (#914 review Axis A — the user-ruled must-fix) and the #1165
+# rejection paths.
 #
 # The Axis A defect was a placement defect, not a logic defect: the gate call sat
 # INSIDE the `${If} $iaProbeFound == "1"` branch, and that branch skips staging
@@ -9,8 +10,9 @@
 #
 # run-process-gate-probe.ps1 drives the gate FUNCTION, so it cannot see where the
 # call sits. This driver compiles the real macro (taken verbatim from
-# installer-directories.nsh, with iaProbePath and the two cleanup helpers it
-# calls) and drives eight legs:
+# installer-directories.nsh, with iaRecoverInterruptedInstall,
+# iaStageApplication, iaProbePath and the cleanup helpers they call) and drives
+# the legs below:
 #
 #   intact-clean     app.exe present, nothing running   -> gate returns, staging
 #                    proceeds: the tree is renamed to "<dir>.old-{guid}"
@@ -29,6 +31,13 @@
 #                    gate still classifies it, proves the empty directory clean
 #                    and returns, and staging is skipped because there is no app
 #                    executable to find: a fresh install proceeds (#1074)
+#   missing-backup   damaged install plus a correctly-shaped but missing backup
+#                    path -> first run refuses with exit 2 and clears IaBackupDir;
+#                    second run reaches the existing no-pointer path and the
+#                    process gate before staging
+#   foreign-shape    intact install plus an IaBackupDir outside the installer's
+#                    backup shape -> exit 2, pointer cleared, tree not renamed,
+#                    and the success exit-code reset is unreachable (#1165)
 #
 #   window-runtime   app.exe present and the gate already returned, then the
 #                    bundled service starts inside the staging window -> the
@@ -62,22 +71,22 @@
 # "<dir>.old-{guid}" tree. -DirectoriesSource with the second call deleted is
 # the red proof: window-runtime then reports the service still alive.
 #
-# Every leg clears the probe registry key before it runs: the shipped installer
-# clears its backup pointer in iaPromoteApplication, which these legs never
-# reach, and a pointer left behind by an earlier leg makes the #904 item 2 shape
-# check set the error level without quitting, which would contaminate the exit
-# code the window legs assert on.
+# Every run clears the probe registry key first. The #1165 legs seed a pointer
+# only after that reset; they use this dedicated key rather than the product's
+# registry location.
 #
 # Usage (from desktop/): powershell -File test/harness/r1-drivers/run-stage-damaged-probe.ps1 [-Keep]
 #   -DirectoriesSource <path>  drive the legs against another revision of
 #                              installer-directories.nsh. Used for the red proof:
-#                              the same legs must FAIL on the pre-fix macro (the
-#                              three damaged legs), which is what shows they
-#                              discriminate rather than merely pass. #1074 uses
-#                              the same switch to show that a body-level early
-#                              return inside the gate — which every build-time
-#                              rule accepts — turns these legs red.
-param([switch]$Keep, [string]$DirectoriesSource)
+#                              the #914/#1074 legs distinguish process-gate
+#                              regressions and the #1165 legs fail on the old
+#                              rejection paths. #1074 also uses this switch to
+#                              show that a body-level early return inside the
+#                              gate — which every build-time rule accepts —
+#                              turns the process legs red.
+#   -Expect1165Regression      assert both #1165 symptoms against the supplied
+#                              pre-fix source, then exit successfully.
+param([switch]$Keep, [string]$DirectoriesSource, [switch]$Expect1165Regression)
 $ErrorActionPreference = 'Stop'
 
 $harness = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -115,13 +124,17 @@ function Get-ProductionBlock {
 $probeTemplatePath = Join-Path $harness 'stage-damaged-probe.nsi'
 $probeTemplate = [System.IO.File]::ReadAllText($probeTemplatePath, [System.Text.Encoding]::UTF8)
 $stageMacro = Get-ProductionBlock $directoriesSource '!macro iaStageApplication' '!macroend' 'iaStageApplication'
-$backupMacros = (Get-ProductionBlock $directoriesSource '!macro iaReadBackupDir' '!macroend' 'iaReadBackupDir') +
+$recoveryMacro = Get-ProductionBlock $directoriesSource '!macro iaRecoverInterruptedInstall' '!macroend' 'iaRecoverInterruptedInstall'
+$backupMacros = (Get-ProductionBlock $directoriesSource '!macro iaClearBackupDir' '!macroend' 'iaClearBackupDir') +
+  "`r`n`r`n" +
+  (Get-ProductionBlock $directoriesSource '!macro iaReadBackupDir' '!macroend' 'iaReadBackupDir') +
   "`r`n`r`n" +
   (Get-ProductionBlock $directoriesSource '!macro iaStashBackupDir' '!macroend' 'iaStashBackupDir')
 $replacements = [ordered]@{
   '@@PRODUCTION_IA_CLEANUP@@'       = $cleanupSource
   '@@PRODUCTION_IA_PROBE_PATH@@'    = Get-ProductionBlock $directoriesSource 'Function iaProbePath' 'FunctionEnd' 'iaProbePath'
   '@@PRODUCTION_IA_BACKUP_MACROS@@' = $backupMacros
+  '@@PRODUCTION_IA_RECOVERY@@'      = $recoveryMacro
   '@@PRODUCTION_IA_CLASSIFY@@'      = Get-ProductionBlock $directoriesSource 'Function iaClassifyRunningProduct' 'FunctionEnd' 'iaClassifyRunningProduct'
   '@@PRODUCTION_IA_REQUIRE@@'       = Get-ProductionBlock $directoriesSource 'Function iaRequireNoRunningProduct' 'FunctionEnd' 'iaRequireNoRunningProduct'
   '@@PRODUCTION_IA_STAGE@@'         = $stageMacro
@@ -184,12 +197,8 @@ function Test-ProcessAlive {
 }
 
 function Reset-ProbeState {
-  # The shipped installer clears IaBackupDir in iaPromoteApplication, which these
-  # legs never reach, so a staging leg would hand its pointer to the next one. A
-  # pointer that names another leg's tree makes the #904 item 2 shape check
-  # refuse, and that branch sets the error level WITHOUT quitting, so the leg
-  # would report exit 2 while the staging it is asserting on succeeded (#1066).
-  # Every leg therefore starts from the state a first install has: no values.
+  # Every run starts with an empty scratch registry key. Individual rejection
+  # legs seed the exact IaBackupDir value they need after this reset.
   Remove-Item -LiteralPath $probeRegistryKey -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -205,7 +214,7 @@ function Wait-StageWindow {
 }
 
 function Invoke-StageLeg {
-  param([string]$Leg, [string]$Install, [switch]$HoldWindow, [string]$WindowExe)
+  param([string]$Leg, [string]$Install, [switch]$HoldWindow, [string]$WindowExe, [string]$BackupPointer)
   $buildDir = Join-Path $scratchRoot ("stage-$Leg-build-$runId")
   $result = Join-Path $scratchRoot ("stage-$Leg-result-$runId.txt")
   New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
@@ -223,6 +232,10 @@ function Invoke-StageLeg {
 
   Remove-Item -LiteralPath $result -ErrorAction SilentlyContinue
   Reset-ProbeState
+  if (-not [string]::IsNullOrEmpty($BackupPointer)) {
+    New-Item -ItemType Directory -Force -Path $probeRegistryKey | Out-Null
+    New-ItemProperty -LiteralPath $probeRegistryKey -Name 'IaBackupDir' -Value $BackupPointer -PropertyType String -Force | Out-Null
+  }
   $windowProcess = $null
   if (-not $HoldWindow) {
     $process = Start-Process -FilePath $exe -Wait -PassThru
@@ -244,13 +257,57 @@ function Invoke-StageLeg {
   }
   $exitCode = $process.ExitCode
   $reading = if (Test-Path -LiteralPath $result) { (Get-Content -LiteralPath $result -Raw).Trim() } else { '<no reading>' }
-  Write-Host ("[{0}] exit={1} {2}" -f $Leg, $exitCode, $reading)
-  return [pscustomobject]@{ Leg = $Leg; ExitCode = $exitCode; Reading = $reading; Install = $Install; WindowProcess = $windowProcess }
+  $backupPointerAfter = (Get-ItemProperty -LiteralPath $probeRegistryKey -Name 'IaBackupDir' -ErrorAction SilentlyContinue).IaBackupDir
+  $pointerReading = if ($null -eq $backupPointerAfter) { '<empty>' } else { $backupPointerAfter }
+  Write-Host ("[{0}] exit={1} pointer={2} {3}" -f $Leg, $exitCode, $pointerReading, $reading)
+  return [pscustomobject]@{ Leg = $Leg; ExitCode = $exitCode; Reading = $reading; Install = $Install; BackupPointer = $backupPointerAfter; WindowProcess = $windowProcess }
 }
 
 $started = @()
 $failures = @()
 try {
+  if ($Expect1165Regression) {
+    if ([string]::IsNullOrEmpty($DirectoriesSource)) {
+      throw '-Expect1165Regression requires -DirectoriesSource with the pre-fix installer source'
+    }
+    $regressionFailures = @()
+
+    $installMissingBackup = New-FakeInstall 'missing-backup-pre-fix'
+    $missingBackupPointer = "$installMissingBackup.old-{00000000-0000-0000-0000-000000000000}"
+    $firstMissingBackup = Invoke-StageLeg -leg 'missing-backup-pre-fix' -install $installMissingBackup -BackupPointer $missingBackupPointer
+    if ($firstMissingBackup.ExitCode -ne 2 -or $firstMissingBackup.Reading -ne '<no reading>') {
+      $regressionFailures += '[missing-backup] pre-fix source did not refuse before returning into customInit'
+    }
+    if ($firstMissingBackup.BackupPointer -ne $missingBackupPointer) {
+      $regressionFailures += '[missing-backup] pre-fix source did not leave the missing pointer armed'
+    }
+    $secondMissingBackup = Invoke-StageLeg -leg 'missing-backup-repeat-pre-fix' -install $installMissingBackup -BackupPointer $firstMissingBackup.BackupPointer
+    if ($secondMissingBackup.ExitCode -ne 2 -or $secondMissingBackup.Reading -ne '<no reading>') {
+      $regressionFailures += '[missing-backup] pre-fix source did not repeat the refusal on rerun'
+    }
+    if ($secondMissingBackup.BackupPointer -ne $missingBackupPointer) {
+      $regressionFailures += '[missing-backup] the repeated pre-fix refusal did not retain the pointer'
+    }
+
+    $installForeignShape = New-FakeInstall 'foreign-stage-shape-pre-fix' -WithAppExe
+    $foreignShape = Invoke-StageLeg -leg 'foreign-stage-shape-pre-fix' -install $installForeignShape -BackupPointer 'C:\foreign-backup'
+    if ($foreignShape.ExitCode -ne 0 -or $foreignShape.Reading -notmatch 'stage_returned=1 answer=0 probe=1') {
+      $regressionFailures += '[foreign-shape] pre-fix source did not fall through into the success path with exit 0'
+    }
+    if ([string]::IsNullOrEmpty($foreignShape.BackupPointer) -or $foreignShape.BackupPointer -eq 'C:\foreign-backup') {
+      $regressionFailures += '[foreign-shape] pre-fix success did not replace the foreign pointer'
+    }
+    if ((Get-OldSiblings -Root $installForeignShape).Count -ne 1 -or (Test-Path -LiteralPath (Join-Path $installForeignShape 'app.exe'))) {
+      $regressionFailures += '[foreign-shape] pre-fix success did not rename the install tree aside'
+    }
+
+    if ($regressionFailures.Count -gt 0) {
+      throw "pre-fix #1165 red proof was not reproduced: $($regressionFailures -join '; ')"
+    }
+    Write-Host 'pre-fix #1165 red proofs reproduced: missing-backup refusal repeats; foreign-shape exit 2 is reset to 0 after staging'
+    return
+  }
+
   # --- intact-clean: the ordinary update path still stages -------------------
   $installIntact = New-FakeInstall 'intact-clean' -WithAppExe
   $leg = Invoke-StageLeg -leg 'intact-clean' -install $installIntact
@@ -283,6 +340,42 @@ try {
   }
   if (Test-Path -LiteralPath $installFresh) {
     $failures += '[first-install] the run created the install directory; a fresh install must be left untouched'
+  }
+
+  # --- #1165: a missing backup is refused once, then the slot stays clear ----
+  # Carry the registry value observed after the first isolated process into the
+  # second one. This reproduces what a real rerun sees without sharing any other
+  # per-process state.
+  $installMissingBackup = New-FakeInstall 'missing-backup-recovery'
+  $missingBackupPointer = "$installMissingBackup.old-{00000000-0000-0000-0000-000000000000}"
+  $firstMissingBackup = Invoke-StageLeg -leg 'missing-backup-first' -install $installMissingBackup -BackupPointer $missingBackupPointer
+  if ($firstMissingBackup.ExitCode -ne 2) { $failures += "[missing-backup-first] expected exit 2, got $($firstMissingBackup.ExitCode)" }
+  if ($firstMissingBackup.Reading -ne '<no reading>') { $failures += "[missing-backup-first] refusal continued into customInit: $($firstMissingBackup.Reading)" }
+  if (-not [string]::IsNullOrEmpty($firstMissingBackup.BackupPointer)) {
+    $failures += '[missing-backup-first] the refused missing path stayed in IaBackupDir'
+  }
+  $secondMissingBackup = Invoke-StageLeg -leg 'missing-backup-rerun' -install $installMissingBackup -BackupPointer $firstMissingBackup.BackupPointer
+  if ($secondMissingBackup.ExitCode -ne 0) { $failures += "[missing-backup-rerun] expected the no-pointer path to proceed, got exit $($secondMissingBackup.ExitCode)" }
+  if ($secondMissingBackup.Reading -notmatch 'recovery_pending= stage_returned=1 answer=0 probe=0') {
+    $failures += "[missing-backup-rerun] expected recovery selection to stay closed and the process gate to run before staging: $($secondMissingBackup.Reading)"
+  }
+  if (-not [string]::IsNullOrEmpty($secondMissingBackup.BackupPointer)) {
+    $failures += '[missing-backup-rerun] the no-pointer damaged-install path armed a backup pointer'
+  }
+
+  # --- #1165: a foreign staging shape must not fall through to success -------
+  $installForeignShape = New-FakeInstall 'foreign-stage-shape' -WithAppExe
+  $leg = Invoke-StageLeg -leg 'foreign-stage-shape' -install $installForeignShape -BackupPointer 'C:\foreign-backup'
+  if ($leg.ExitCode -ne 2) { $failures += "[foreign-stage-shape] expected exit 2, got $($leg.ExitCode)" }
+  if ($leg.Reading -ne '<no reading>') { $failures += "[foreign-stage-shape] the refusal reached the success path: $($leg.Reading)" }
+  if (-not [string]::IsNullOrEmpty($leg.BackupPointer)) {
+    $failures += '[foreign-stage-shape] the foreign pointer stayed in IaBackupDir'
+  }
+  if ((Get-OldSiblings -Root $installForeignShape).Count -ne 0) {
+    $failures += '[foreign-stage-shape] the refusal renamed the live install aside'
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $installForeignShape 'app.exe'))) {
+    $failures += '[foreign-stage-shape] the refusal changed the live install tree'
   }
 
   # --- damaged-runtime: exe gone, the bundled service is what is running -----
@@ -432,4 +525,4 @@ if ($failures.Count -gt 0) {
   foreach ($failure in $failures) { Write-Host "FAIL $failure" }
   throw "$($failures.Count) stage-damaged leg assertion(s) failed"
 }
-Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), damaged-runtime (stopped), damaged-mixed (refused, both alive), damaged-rootproc (refused, alive), damaged-unknown (refused), window-runtime (stopped by the re-check), window-client (refused, alive)'
+Write-Host 'stage-damaged legs OK: intact-clean (staged), first-install (clean, nothing staged), missing-backup (refused once, then no-pointer path), foreign-shape (refused before success), damaged-runtime (stopped), damaged-mixed (refused, both alive), damaged-rootproc (refused, alive), damaged-unknown (refused), window-runtime (stopped by the re-check), window-client (refused, alive)'
