@@ -74,6 +74,8 @@ def test_ask_user_pauses_and_resume_continues_the_same_run(tmp_path):
         pause = next(e for e in before if e["type"] == RUN_PAUSED)
         assert request["data"]["kind"] == "ask_user"
         assert request["data"]["questions"][0]["question"] == "Which database should we use?"
+        # #1224：超时档随请求落盘（默认 300s），前端据此渲染与后端注入消息一致的数字。
+        assert request["data"]["timeout_seconds"] == 300
         assert pause["data"]["reason"] == "user_input"
         assert pause["data"]["input_request_id"] == request["data"]["request_id"]
         assert len(probe.models[0].snapshots) == 1

@@ -126,8 +126,11 @@ class AskUserArgs(BaseModel):
 
 
 class AskUserTool(Tool):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, timeout_seconds: int = 300) -> None:
+        # #1224：随请求落盘的超时档（秒）——与 `ask_user_timeout_message` 渲染的注入
+        # 消息（`minutes = timeout_seconds / 60`）同源，前端据此渲染一致的数字。
+        # 缺省 300 与 `Settings.ask_user_question_timeout` 默认一致；装配层传入真实配置。
+        self._timeout_seconds = int(timeout_seconds)
 
     @property
     def name(self) -> str:
@@ -224,6 +227,9 @@ class AskUserTool(Tool):
             "kind": "ask_user",
             "run_id": run_id,
             "questions": questions,
+            # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。数值与后端注入
+            # 消息同源（`minutes = timeout_seconds / 60`）。
+            "timeout_seconds": self._timeout_seconds,
         }
         return ToolResult.success(
             message="提问已保存；当前 run 将暂停，等待你的回答后继续。",

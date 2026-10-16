@@ -179,6 +179,36 @@ describe('applyEvent — 折叠语义', () => {
     expect(state.pending_ask_user).toBeNull();
   });
 
+  it('#1224：ask_user 载荷里的 timeout_seconds 投影到待回答请求（缺省不伪造）', () => {
+    const withTimeout = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'ask-1',
+        kind: 'ask_user',
+        run_id: 'run-1',
+        timeout_seconds: 600,
+        questions: [{ question: 'Ship?', header: 'Rel', options: [{ label: 'A' }, { label: 'B' }] }],
+      },
+    });
+    expect(projectHistory('s', [withTimeout]).pending_ask_user?.timeout_seconds).toBe(600);
+
+    // 旧事件无 timeout_seconds ⇒ 字段缺席（卡片回落中性提示，不伪造数字）。
+    const legacy = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'ask-2',
+        kind: 'ask_user',
+        run_id: 'run-1',
+        questions: [{ question: 'Ship?', header: 'Rel', options: [{ label: 'A' }, { label: 'B' }] }],
+      },
+    });
+    expect(projectHistory('s', [legacy]).pending_ask_user?.timeout_seconds).toBeUndefined();
+  });
+
   it('#1204：畸形 ask_user 载荷不投影（不伪造空卡片）', () => {
     const bad = ev({
       type: EventType.USER_INPUT_REQUESTED,

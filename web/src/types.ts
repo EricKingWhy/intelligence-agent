@@ -721,6 +721,10 @@ export interface PendingAskUserRequest {
   run_id: string;
   questions: AskUserQuestion[];
   answer: AskUserAnswer | null;
+  /** #1224：后端配置的超时档（秒，随请求落盘）——卡片底部提示按
+   *  `minutes = timeout_seconds / 60` 渲染，与后端注入消息数值一致。缺省
+   *  （旧事件无此字段）= 卡片渲染不带数字的中性提示（零伪造）。 */
+  timeout_seconds?: number;
 }
 
 export interface ConversationState {

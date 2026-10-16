@@ -606,7 +606,17 @@ function parseAskUserRequest(data: Record<string, unknown>, envelopeRunId: strin
       ...(parsedRecommended === undefined ? {} : { recommended: parsedRecommended }),
     });
   }
-  return { request_id: requestId, run_id: runId, questions, answer: null };
+  return {
+    request_id: requestId,
+    run_id: runId,
+    questions,
+    answer: null,
+    // #1224：随请求落盘的超时档（秒）。缺失/非法（旧事件）⇒ 不投影该字段，
+    // 卡片回落中性提示（零伪造，数值由 Conversation 按 `秒/60` 渲染）。
+    ...(typeof data.timeout_seconds === 'number' && Number.isFinite(data.timeout_seconds)
+      ? { timeout_seconds: data.timeout_seconds }
+      : {}),
+  };
 }
 
 /** #1204：解析 `ask_user` 的持久化答案（`USER_MESSAGE.data.input_request_answer`）。

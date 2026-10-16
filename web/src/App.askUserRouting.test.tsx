@@ -84,10 +84,11 @@ function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
 
 /** 造一段"有一轮用户消息 + 一个待回答请求"的会话事件——Conversation 只有在
  *  `turns.length > 0` 时才走对话流渲染区（空态不渲染内嵌卡片）。 */
-function events(kind: 'ask_user' | 'protected_fact_conflict'): AgentEvent[] {
+function events(kind: 'ask_user' | 'protected_fact_conflict', timeoutSeconds?: number): AgentEvent[] {
   const requestData = kind === 'ask_user'
     ? {
         request_id: `${kind}-1`, kind, run_id: 'r1',
+        ...(timeoutSeconds === undefined ? {} : { timeout_seconds: timeoutSeconds }),
         questions: [
           {
             question: '新版本什么时候发布？', header: '发布决策', recommended: 0,
@@ -122,8 +123,10 @@ function events(kind: 'ask_user' | 'protected_fact_conflict'): AgentEvent[] {
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-async function mount(kind: 'ask_user' | 'protected_fact_conflict'): Promise<HTMLDivElement> {
-  H.conv = projectHistory(SID, events(kind));
+async function mount(
+  kind: 'ask_user' | 'protected_fact_conflict', timeoutSeconds?: number,
+): Promise<HTMLDivElement> {
+  H.conv = projectHistory(SID, events(kind, timeoutSeconds));
   const el = document.createElement('div');
   document.body.appendChild(el);
   container = el;
@@ -193,5 +196,19 @@ describe('#1223 — 待回答的用户输入锁 composer', () => {
     expect(textarea!.hasAttribute('disabled')).toBe(true);
     const hint = el.querySelector('.composer-locked-hint');
     expect(hint?.textContent).toContain('请先回答当前约束澄清，再发送新消息');
+  });
+});
+
+describe('#1224 — 卡片超时提示与后端注入消息数值一致', () => {
+  it('载荷带 timeout_seconds=600 ⇒ 底部提示渲染 10 分钟（600/60）', async () => {
+    const el = await mount('ask_user', 600);
+    const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
+    expect(tip).toContain('10 分钟');
+  });
+
+  it('载荷无 timeout_seconds（旧事件）⇒ 中性提示，不伪造数字', async () => {
+    const el = await mount('ask_user');
+    const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
+    expect(tip).toBe('长时间未回答将自动继续');
   });
 });
