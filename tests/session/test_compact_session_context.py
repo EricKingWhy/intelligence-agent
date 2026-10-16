@@ -1,6 +1,6 @@
 """#635 T3：`SessionService.compact_session_context` 的行为契约。
 
-覆盖：拒绝路径（404/422/在途 run/空 transcript 零写入）、低水位手动成功产出合法
+覆盖：拒绝路径（404/422/在途 run/空 transcript/无可压缩早期轮，均零写入）、低水位手动成功产出合法
 bracket、append-only、in-flight 防重与 finally 释放、token 计数、失败上报、
 `--model` 优先级与非法模型零副作用、dry_run 零 LLM 零写入。
 """
@@ -31,6 +31,7 @@ from agent_harness.session.errors import (
     CompactionConcurrentWrite,
     CompactionInProgress,
     InvalidSessionId,
+    NoCompactableEarlyTurn,
     SessionNotFound,
 )
 from agent_harness.session.runmanager import RunManager
@@ -139,7 +140,14 @@ async def test_busy_run_is_rejected_with_zero_event_writes(make_session_service,
 
 
 @pytest.mark.asyncio
-async def test_empty_transcript_is_below_floor_with_zero_writes(make_session_service, tmp_path):
+async def test_empty_transcript_is_rejected_with_zero_writes(make_session_service, tmp_path):
+    """空 transcript（只有 session/started）同样落"无可压缩早期轮"这一档。
+
+    #1197 项 3 前这里是 below-floor DTO（200 + `compacted_turn_count=0`）；三态契约
+    把"没得压"与"压坏了"拆开，所以本条与 `test_no_early_turns_rejected_with_409_reason`
+    走同一路径、同一断言面——保留独立用例是因为"一条消息都没有"与"只有当前一条
+    user 消息"是两个不同的输入形态，判据（`compactable_early_window`）对两者都要成立。
+    """
     store = JsonlSessionStore(root=tmp_path)
     session = make_session(tmp_path)  # 只有 session/started
     before = _events(store, session.session_id)
@@ -148,10 +156,10 @@ async def test_empty_transcript_is_below_floor_with_zero_writes(make_session_ser
     )
     service._compact_context_builder = _builder_factory(responses=[])
 
-    outcome = await service.compact_session_context(session.session_id, entry_point="api")
+    with pytest.raises(NoCompactableEarlyTurn) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="api")
 
-    assert outcome.compacted_turn_count == 0
-    assert outcome.bracket_id is None
+    assert excinfo.value.reason == "no_early_turns"
     assert _events(store, session.session_id) == before, "空 transcript 必须零写入"
 
 
@@ -630,24 +638,47 @@ async def test_explicit_summary_model_name_is_stripped(
 
 # ── dry_run 前缀判据与 compactor early 窗口对齐（F5 #635）──────────
 
-def test_has_compactable_early_turn_stops_at_leading_summary_system_message():
-    """前导旧版摘要 SystemMessage 是 early 窗口起点，不作为可跳过前缀。
+def test_has_compactable_early_turn_matches_compactor_gate():
+    """P2-1 #1197 修回：预检与 compactor 的 `compacted_turn_count` 闸门一致。
 
-    与 `ContextCompactor.compact` 的 early 窗口同一前缀判据（`_is_compaction_summary`
-    守卫，见 compactor.py:217–226）：`prefix_end` 遇摘要即停，而非一路跳过所有
-    SystemMessage。此前 dry-run 预览会把该摘要当前缀跳过 → 判据漂移。
+    - early 窗口只有摘要/系统消息（无非摘要 HumanMessage）⇒ 不可压（False）：
+      与 compactor 得 0 计数走 200 below-floor 的行为一致——`compact_session_context`
+      由此提前走 409 `NoCompactableEarlyTurn`。
+    - early 窗口含非摘要 HumanMessage ⇒ 可压（True）。
+
+    前缀规则本身（前导摘要是 early 窗口起点、不作前缀跳过）由共享判据的单测
+    `test_compactable_early_window_shares_prefix_and_cut_rule` 直接覆盖。
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    class _FakeSession:
-        def derive_messages(self):
-            return [
-                SystemMessage(content="## 目标\n旧版压缩摘要"),
-                SystemMessage(content="## 其他系统块"),
-                HumanMessage(content="current"),
-            ]
+    from agent_harness.session.derive import COMPACTION_SUMMARY_MESSAGE_NAME
 
-    assert SessionService._has_compactable_early_turn(_FakeSession()) is True
+    class _FakeSession:
+        def __init__(self, messages):
+            self._messages = messages
+
+        def derive_messages(self):
+            return self._messages
+
+    # early = [旧版摘要 SystemMessage, 系统块]：无非摘要 HumanMessage ⇒ False
+    assert SessionService._has_compactable_early_turn(_FakeSession([
+        SystemMessage(content="## 目标\n旧版压缩摘要"),
+        SystemMessage(content="## 其他系统块"),
+        HumanMessage(content="current"),
+    ])) is False
+
+    # early = [上一轮摘要 HumanMessage]：无非摘要 HumanMessage ⇒ False
+    assert SessionService._has_compactable_early_turn(_FakeSession([
+        HumanMessage(content="## 上一轮摘要", name=COMPACTION_SUMMARY_MESSAGE_NAME),
+        HumanMessage(content="current"),
+    ])) is False
+
+    # early 含非摘要 HumanMessage ⇒ True（可压）
+    assert SessionService._has_compactable_early_turn(_FakeSession([
+        SystemMessage(content="sys"),
+        HumanMessage(content="older turn"),
+        HumanMessage(content="current"),
+    ])) is True
 
 
 # ── dry_run ────────────────────────────────────────────────────────
@@ -695,3 +726,66 @@ async def test_dry_run_reports_below_floor_when_no_early_turn(make_session_servi
 
     assert outcome.dry_run is True
     assert outcome.compacted_turn_count == 0
+
+
+# ── #1197 项 3：无可压缩早期轮 → 409（被拒，不是"水位过低"）─────────────
+
+
+@pytest.mark.asyncio
+async def test_no_early_turns_rejected_with_409_reason(make_session_service, tmp_path):
+    """#1197 项 3：没有可压缩的早期内容 ⇒ **被拒**（409 `{reason: no_early_turns}`）。
+
+    旧行为把这条路径吞成 200 + `compacted_turn_count=0`（"水位过低，无需压缩"），
+    与"摘要校验失败"共用一个 DTO，前端无法区分"没得压"和"压坏了"——三态契约
+    （压缩中 / 被拒 / 失败）要求这条路径**类型化拒绝**，且零写入。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = _events(store, session.session_id)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+    service._compact_context_builder = _builder_factory(responses=[])
+
+    with pytest.raises(NoCompactableEarlyTurn) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="api")
+
+    assert excinfo.value.reason == "no_early_turns"
+    assert _events(store, session.session_id) == before, "被拒必须零写入"
+
+
+@pytest.mark.asyncio
+async def test_summary_only_early_window_rejected_with_409(make_session_service, tmp_path):
+    """P2-1 #1197 修回：early 窗口只剩上一轮压缩摘要 ⇒ 409（不是 200 零改动）。
+
+    复现链（独立 Correctness 轴）：第一轮压缩成功写下 bracket 后，derive 出来的
+    消息是 `[上一轮摘要 HumanMessage, 当前 user]`——`compactable_early_window` 的
+    early 段（`[prefix_end:cut]`，不含 recent 段的那条 user）恰好只含摘要
+    HumanMessage。旧预检（`cut > prefix_end` 只判窗口非空）误判为可压，真实管线
+    以"early 中非摘要 HumanMessage 数 > 0"为闸门得 `compacted_turn_count=0`，
+    走 below-floor 分支返回 200 零改动，绕过了 409 NoCompactableEarlyTurn。
+    修回后预检与闸门一致：early 内非摘要 HumanMessage 数 > 0 才算可压。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+    service._compact_context_builder = _builder_factory(
+        responses=[AIMessage(content=MODEL_SECTIONS)] * 2,
+    )
+
+    # 第一轮：真实管线产出合法 bracket，上一轮摘要 HumanMessage 落盘
+    first = await service.compact_session_context(session.session_id, entry_point="api")
+    assert first.compacted_turn_count == 1
+    assert first.bracket_id
+
+    # 第二轮：early 段只剩上一轮摘要——必须走 409 被拒，不许 200 零改动
+    before = _events(store, session.session_id)
+    with pytest.raises(NoCompactableEarlyTurn) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="api")
+
+    assert excinfo.value.reason == "no_early_turns"
+    assert _events(store, session.session_id) == before, "被拒必须零写入"

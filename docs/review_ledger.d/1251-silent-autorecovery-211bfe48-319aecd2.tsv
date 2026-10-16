@@ -1,0 +1,1 @@
+2026-10-16	[#1251] 静默重跑自动恢复被中断安装：iaRecoverInterruptedInstall 静默分支改调 iaRollbackApplication（MSI 自动回滚成熟产品依据），失败才 exit 2 fail-closed；含 #1227 证据文档	211bfe48621c05e72383ce2093c628502369c31a..319aecd2f7ecb25f0ed044836ee5411116c332d4

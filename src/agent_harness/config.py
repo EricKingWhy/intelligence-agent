@@ -13,6 +13,15 @@ from agent_harness.attachments.validation import parse_allowed_media_types
 #: 无意义但无害（该路径下不存在 .env，退化为环境变量配置）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: 上下文窗口五挡位（#1197 项 1）。**唯一的**挡位清单：`Settings.max_context_tokens`
+#: 的构造期白名单、API 的 PATCH 校验、前端选择器三处都读它——挡位表分列两处就会出现
+#: 「面板能选、后端 422」的错位。
+#:
+#: 为什么是白名单而不是 `ge=1` 区间：票面要求挡位外的值**启动期响亮失败**，区间校验
+#: 会放行 100001 这种既非挡位、又让 70%/85% 线落到非整数上的值。为什么不做
+#: 挡位×模型联动：那是二期（票面「第一版只做挡位校验，不做模型联动」）。
+CONTEXT_WINDOW_TIERS: tuple[int, ...] = (100_000, 200_000, 256_000, 300_000, 500_000)
+
 
 class Settings(BaseSettings):
     # extra="ignore"：部署机 .env 常混有编辑器/部署工具/其它应用的变量；
@@ -247,6 +256,26 @@ class Settings(BaseSettings):
     # development，绝不落入 default）；release 标版本/SHA（空=不塞，SDK 自决）。
     langfuse_tracing_environment: str = "development"
     langfuse_release: str = ""
+
+    @field_validator("max_context_tokens")
+    @classmethod
+    def _validate_context_window_tier(cls, value: int) -> int:
+        """上下文窗口在**构造期**（= 启动期）校验挡位，与同族 `Field(ge=1)` 同风格。
+
+        挡位外的值在服务起来时即响亮失败，而不是拖到 run 跑到一半才在压缩路径抛
+        （那时用户已经烧了 token，且报错落在一个「压缩失败」的壳里，看不出是配置
+        写错了）。挡位清单单点在 `CONTEXT_WINDOW_TIERS`——API 的 PATCH 校验与前端
+        选择器都读它。
+
+        注意作用域：这是**进程级默认值**。per-session 覆盖走 `context/window.py` 的
+        append-only 事件（#1197 项 1），不经过本校验器——挡位合法性在那里由同一个
+        常量把关。
+        """
+        if value not in CONTEXT_WINDOW_TIERS:
+            raise ValueError(
+                f"max_context_tokens 必须是 {list(CONTEXT_WINDOW_TIERS)} 之一，得到 {value}"
+            )
+        return value
 
     @field_validator("ask_user_question_timeout")
     @classmethod
