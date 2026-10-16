@@ -158,14 +158,19 @@ const baseMutations = {
     '  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined',
     '  StrCpy $9 $9',
   ),
-  // #919 fix round (Q9 follow-up): the failed delete has to reach the kept
-  // accounting. The guard's walk follows the failure path through this block's
-  // labels; measured before the rule, this exact edit kept the whole suite
-  // green while every failed delete went uncounted (the silent direction — no
-  // report, exit code left at 0).
-  'failed delete skips the kept count (#919 fix round Q9)': replace(
-    ['  StrCpy $iaDeleteStatus "failed"', 'iaSweepKept:'].join(lf),
-    ['  StrCpy $iaDeleteStatus "failed"', '  Goto iaSweepNext', 'iaSweepKept:'].join(lf),
+  // #919 fix round (Q9 follow-up), re-anchored for #1201 item 2: the failed
+  // delete has to reach the kept accounting. The guard's walk follows the
+  // failure path through this block's labels; measured before the rule, the
+  // original edit (a `Goto iaSweepNext` wedged between the status write and the
+  // kept label) kept the whole suite green while every failed delete went
+  // uncounted (the silent direction — no report, exit code left at 0). The
+  // #1201 sweep reaches iaSweepKept from the failed delete with an explicit
+  // Goto of its own, so the two lines are no longer adjacent; today's silent
+  // twin of that edit sends the failure branch's jump at the next candidate
+  // instead of the kept count (measured: the reachability rule reports it).
+  'failed delete skips the kept count (#919 fix round Q9, #1201 re-anchor)': replace(
+    ['  StrCpy $iaDeleteStatus "failed"', '  Goto iaSweepKept'].join(lf),
+    ['  StrCpy $iaDeleteStatus "failed"', '  Goto iaSweepNext'].join(lf),
   ),
 }
 

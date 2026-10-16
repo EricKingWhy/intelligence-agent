@@ -230,28 +230,35 @@ iaSweepLoop:
   ; classification, and a query that cannot answer is fail-closed (refuse the
   ; delete) for the same reason answer 13 refuses on the installer side: a
   ; sweep that cannot see processes cannot prove a tree safe to delete.
-  ; Uninstaller code: only un.-prefixed functions can be called here. The
-  ; directory travels on the stack as the FindFirst pieces this loop already
-  ; holds ($2 = the parent cut off $INSTDIR, $1 = the leaf) — the same input
-  ; the candidate copy below is built from, and not a third read of the
-  ; tracked candidate, which the delete-site guard's arming window would
-  ; refuse to follow (fail-closed).
+  ; Uninstaller code: only un.-prefixed functions can be called here. This body
+  ; only ever compiles inside the uninstaller build (the installer build never
+  ; inserts customUnInstall, and NSIS compiles a macro body only where it is
+  ; inserted -- measured: an invalid instruction in this body was reported by
+  ; the BUILD_UNINSTALLER pass alone). The directory travels on the stack as the
+  ; FindFirst pieces this loop already holds ($2 = the parent cut off $INSTDIR,
+  ; $1 = the leaf) -- the same input the candidate copy above is built from,
+  ; and not a third read of the tracked candidate, which the delete-site
+  ; guard's arming window would refuse to follow (fail-closed).
   Push "$2\$1"
   Call un.iaScanLiveProcesses
-  StrCmp $iaLiveAnswer "0" 0 iaSweepKept
-  ; This body only ever compiles inside the uninstaller build (the installer
-  ; build never inserts customUnInstall, and NSIS compiles a macro body only
-  ; where it is inserted -- measured: an invalid instruction in this body was
-  ; reported by the BUILD_UNINSTALLER pass alone). There, this is un. code and
-  ; NSIS only lets it Call un.-prefixed functions, so the call names the
-  ; uninstaller instantiation of the helper directly. The installer's own
-  ; delete sites use the plain name.
+  StrCmp $iaLiveAnswer "0" 0 iaSweepLiveBusy
+  ; Answer "0": nothing runs from this tree -- the guarded prepare+delete runs.
   Call un.iaPrepareDelete
   StrCmp $iaDeleteStatus "ok" 0 iaSweepKept
   ClearErrors
   RMDir /r "$iaDeleteTarget"
   IfErrors 0 iaSweepNext
   StrCpy $iaDeleteStatus "failed"
+  Goto iaSweepKept
+iaSweepLiveBusy:
+  ; Not proven clean: the tree keeps WHOLE. Name the reason on the report line
+  ; instead of letting $iaDeleteStatus show the previous candidate's value
+  ; (iaPrepareDelete has not run for this candidate, so it is stale here).
+  ; "kept-live" = a process runs from the tree; "kept-broken" = the query
+  ; could not answer, refused fail-closed (the gate's answer-13 direction).
+  StrCpy $iaDeleteStatus "kept-live"
+  StrCmp $iaLiveAnswer "1" iaSweepKept
+  StrCpy $iaDeleteStatus "kept-broken"
 iaSweepKept:
   DetailPrint "customUnInstall: leftover kept: $iaDeleteCandidate ($iaDeleteStatus)"
   IntOp $9 $9 + 1

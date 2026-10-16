@@ -270,6 +270,12 @@ iaPrepareDone:
 ; clean tree and 3 on a catch, so a broken WMI or a blocked PowerShell is
 ; distinguishable from a clean tree. Clobbers $0 through nsExec's Pop, which is
 ; why the answer lives in its own Var.
+; The launcher path repeats the gate's "$SYSDIR\WindowsPowerShell..." literal
+; (installer-directories.nsh) rather than reusing its $iaPowerShellPath: that
+; Var's assignment lives in a file which is NOT compiled into the uninstaller
+; build at all (installer.nsh !ifdef BUILD_UNINSTALLER), so this macro can only
+; see its own literal. Two copies of a constant, kept honest by the guard tests
+; that run the payload through this exact text.
 !macro iaScanLiveProcessesBody
   Pop $iaLiveDir
   StrCpy $iaLiveAnswer "broken"
