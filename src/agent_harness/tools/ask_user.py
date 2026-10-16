@@ -128,8 +128,9 @@ class AskUserArgs(BaseModel):
 class AskUserTool(Tool):
     def __init__(self, timeout_seconds: int = 300) -> None:
         # #1224：随请求落盘的超时档（秒）——与 `ask_user_timeout_message` 渲染的注入
-        # 消息（`minutes = timeout_seconds / 60`）同源，前端据此渲染一致的数字。
-        # 缺省 300 与 `Settings.ask_user_question_timeout` 默认一致；装配层传入真实配置。
+        # 消息（`minutes = max(1, timeout_seconds // 60)`）同源，前端据此渲染一致的数字。
+        # 缺省 300 **仅供直接构造 / 测试**：生产装配（`assembly.py` 两处）恒注入
+        # `Settings.ask_user_question_timeout`，故此处不随档位配置联动（#1220 复审 B3）。
         self._timeout_seconds = int(timeout_seconds)
 
     @property

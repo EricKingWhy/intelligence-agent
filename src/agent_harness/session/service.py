@@ -118,8 +118,11 @@ from agent_harness.session.approval import (
     effective_permission_mode as _effective_permission_mode,
 )
 from agent_harness.session.ask_user_timeout import (
+    ExpireOutcome,
     ask_user_timeout_message,
+    latest_pending_input_request,
     pending_ask_user_request_id,
+    pending_input_request,
 )
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
@@ -181,9 +184,6 @@ from agent_harness.session.event import (
     PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_INTERRUPTED,
     RUN_PAUSED,
     RUN_RESUMED,
     SESSION_FORKED,
@@ -718,37 +718,19 @@ _CONSTRAINT_INPUT_CHOICES = frozenset(
 def _pending_user_input_request(
     events: list[SessionEvent], *, run_id: str,
 ) -> SessionEvent | None:
-    answered = {
-        event.data.get("input_request_id")
-        for event in events
-        if event.type == USER_MESSAGE
-        and isinstance(event.data.get("input_request_id"), str)
-    }
-    return next(
-        (
-            event for event in reversed(events)
-            if event.type == USER_INPUT_REQUESTED
-            and event.run_id == run_id
-            and isinstance(event.data.get("request_id"), str)
-            and event.data["request_id"] not in answered
-        ),
-        None,
-    )
+    """某 run 上最新未答复的 `USER_INPUT_REQUESTED`。
+
+    #1220 复审 B1：扫描逻辑收口到 `ask_user_timeout.pending_input_request` 唯一一份
+    （超时守卫与 409 闸门共用），此处只做转发，不再各写一遍。
+    """
+    return pending_input_request(events, run_id=run_id)
 
 
 def _latest_pending_user_input_request(
     events: list[SessionEvent],
 ) -> SessionEvent | None:
-    run_id = latest_run_id(events)
-    if run_id is None:
-        return None
-    if any(
-        event.run_id == run_id
-        and event.type in {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
-        for event in events
-    ):
-        return None
-    return _pending_user_input_request(events, run_id=run_id)
+    """最新逻辑 run 上未答复的用户输入请求（run 已终态 ⇒ `None`）。"""
+    return latest_pending_input_request(events)
 
 
 def _pending_user_input_conflict_message(
@@ -3037,22 +3019,28 @@ class SessionService:
                 "Shared session budget no longer has room for same-run continuation."
             )
 
-    async def resume_ask_user_timeout(self, session_id: str, *, request_id: str) -> bool:
+    async def resume_ask_user_timeout(
+        self, session_id: str, *, request_id: str,
+    ) -> ExpireOutcome:
         """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
 
         到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
         是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
-        未答复 `ask_user` 上才恢复（已答复 / 整卡跳过 / 已终结 / 请求已变 ⇒ 返回 False，
-        零副作用）。恢复走既有 `resume_and_launch`
+        未答复 `ask_user` 上才恢复。恢复走既有 `resume_and_launch`
         （`resume_basis='user_input'` + `{request_id, timeout:true}`），由它注入
         "用户在 N 分钟内未回答…"到底层消息且**不写任何 answer**。
 
-        并发（多个连接同时到点）由 `resume_and_launch` 的会话锁 + CAS 串行化：输家拿到
-        冲突/拒绝，这里吞掉返回 False（不是错误）。
+        返回 :class:`ExpireOutcome` 供驱动分流（#1220 复审 A2）：
+        - `RESOLVED`：已答复 / 整卡跳过 / 已终结 / 请求已变（零副作用，无需再试）；
+        - `RETRY`：可重试失败（共享预算无位 / 并发冲突）——驱动据此保留计时并下个窗口
+          重试，而不是永久丢弃该提问的超时；
+        - `RESUMED`：恢复已发起。
+        并发（多个连接同时到点）由 `resume_and_launch` 的会话锁 + CAS 串行化，输家拿到
+        `ActiveRunConflict` 等 → 这里按 `RETRY` 返回（不是错误）。
         """
         events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
         if pending_ask_user_request_id(events) != request_id:
-            return False
+            return ExpireOutcome.RESOLVED
         paused = latest_paused_run(events)
         if paused is None:
             run_id = latest_run_id(events)
@@ -3063,7 +3051,7 @@ class SessionService:
             or paused.reason != REASON_USER_INPUT
             or paused.input_request_id != request_id
         ):
-            return False
+            return ExpireOutcome.RESOLVED
         try:
             await self.resume_and_launch(
                 session_id=session_id,
@@ -3072,14 +3060,13 @@ class SessionService:
                 resume_basis=RESUME_BASIS_USER_INPUT,
                 input_request={"request_id": request_id, "timeout": True},
             )
-        except (
-            BudgetConflict,
-            BudgetRejection,
-            ActiveRunConflict,
-            SessionNotFound,
-        ):
-            return False
-        return True
+        except (BudgetConflict, BudgetRejection, ActiveRunConflict):
+            return ExpireOutcome.RETRY
+        except SessionNotFound:
+            # 会话已不存在——终态，无需再试（read_events 已会返回空 ⇒ 上面已 RESOLVED；
+            # 这里是并发删除的兜底）。
+            return ExpireOutcome.RESOLVED
+        return ExpireOutcome.RESUMED
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 

@@ -18,6 +18,7 @@ import json
 import pytest
 from langchain_core.messages import AIMessage
 
+from tests.fake_clock import FakeClock
 from tests.scripted_model import ScriptedModel
 
 _QUESTIONS = [
@@ -31,14 +32,6 @@ _QUESTIONS = [
         "recommended": 0,
     }
 ]
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
 
 
 def _ask_then_finish_factory(scripts: list[list[AIMessage]]):
@@ -145,7 +138,7 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
     try:
         driver = app.state.agent.ask_user_timeout_driver
         # 把驱动的档位与挂钟换成测试可控（装配发生在 WS subscribe 那一刻）。
-        clock = _FakeClock()
+        clock = FakeClock()
         driver.clock = clock
         driver.timeout_seconds = 60.0
 
@@ -199,7 +192,7 @@ async def test_ask_user_timeout_does_not_fire_without_a_connection(tmp_path, mon
     )
     try:
         driver = app.state.agent.ask_user_timeout_driver
-        clock = _FakeClock()
+        clock = FakeClock()
         driver.clock = clock
         driver.timeout_seconds = 60.0
 

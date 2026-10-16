@@ -21,21 +21,11 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
+from tests.fake_clock import FakeClock
 
 
 def test_timer_does_not_start_without_a_frontend_connection():
-    clock = _FakeClock()
+    clock = FakeClock()
     tracker = AskUserTimeoutTracker(60, clock=clock)
 
     clock.advance(10_000)
@@ -46,7 +36,7 @@ def test_timer_does_not_start_without_a_frontend_connection():
 
 
 def test_timer_only_accumulates_while_connected():
-    clock = _FakeClock()
+    clock = FakeClock()
     tracker = AskUserTimeoutTracker(300, clock=clock)
 
     tracker.set_connected(True)
@@ -59,7 +49,7 @@ def test_timer_only_accumulates_while_connected():
 
 
 def test_reconnect_resumes_from_where_it_froze():
-    clock = _FakeClock()
+    clock = FakeClock()
     tracker = AskUserTimeoutTracker(100, clock=clock)
 
     tracker.set_connected(True)
@@ -76,7 +66,7 @@ def test_reconnect_resumes_from_where_it_froze():
 
 @pytest.mark.parametrize("timeout", [60, 300, 600])
 def test_expires_at_the_configured_tier(timeout: int):
-    clock = _FakeClock()
+    clock = FakeClock()
     tracker = AskUserTimeoutTracker(timeout, clock=clock)
 
     tracker.set_connected(True)

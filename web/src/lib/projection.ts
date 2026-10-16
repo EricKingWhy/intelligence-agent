@@ -612,7 +612,8 @@ function parseAskUserRequest(data: Record<string, unknown>, envelopeRunId: strin
     questions,
     answer: null,
     // #1224：随请求落盘的超时档（秒）。缺失/非法（旧事件）⇒ 不投影该字段，
-    // 卡片回落中性提示（零伪造，数值由 Conversation 按 `秒/60` 渲染）。
+    // 卡片回落中性提示（零伪造；数值由 Conversation 按 `max(1, floor(秒/60))` 渲染，
+    // 与后端 `ask_user_timeout_message` 同口径）。
     ...(typeof data.timeout_seconds === 'number' && Number.isFinite(data.timeout_seconds)
       ? { timeout_seconds: data.timeout_seconds }
       : {}),

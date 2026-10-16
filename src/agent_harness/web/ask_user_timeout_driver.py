@@ -29,14 +29,20 @@ from collections.abc import Awaitable, Callable, Iterable
 
 from agent_harness.session.ask_user_timeout import (
     AskUserTimeoutTracker,
+    ExpireOutcome,
     pending_ask_user_request_id,
 )
 from agent_harness.session.event import SessionEvent
 
 logger = logging.getLogger("agent_harness.web.ask_user_timeout_driver")
 
-#: 到点恢复的出口：`(session_id, request_id) -> 是否真的发起了恢复`。
-ExpireCallback = Callable[[str, str], Awaitable[bool]]
+#: 到点恢复的出口：`(session_id, request_id) -> ExpireOutcome`（见 `session.ask_user_timeout`）。
+ExpireCallback = Callable[[str, str], Awaitable[ExpireOutcome]]
+
+#: 冻结（无连接、不会触发）计时器的保留上限：只兜住"被彻底放弃的待回答会话"在临时接缝
+#: 里的无界增长。超限按最早冻结者淘汰——被淘汰会话重连后重头计时，属可接受的降级
+#: （正常重连远达不到该量级）。W-12 删本模块时一并作废。
+_MAX_FROZEN_TRACKERS = 256
 
 
 class AskUserTimeoutDriver:
@@ -64,6 +70,8 @@ class AskUserTimeoutDriver:
         self._connections: dict[str, int] = {}
         self._trackers: dict[str, AskUserTimeoutTracker] = {}
         self._armed_request: dict[str, str] = {}
+        #: 冻结中的会话（无连接、计时暂停）——插入序 = 冻结先后，供超限淘汰。
+        self._frozen: dict[str, None] = {}
 
     # ── 在场计数 ──────────────────────────────────────────────────────
 
@@ -72,6 +80,7 @@ class AskUserTimeoutDriver:
         count = self._connections.get(session_id, 0) + 1
         self._connections[session_id] = count
         if count == 1:
+            self._frozen.pop(session_id, None)
             tracker = self._trackers.get(session_id)
             if tracker is not None:
                 tracker.set_connected(True)
@@ -84,8 +93,15 @@ class AskUserTimeoutDriver:
             return
         self._connections.pop(session_id, None)
         tracker = self._trackers.get(session_id)
-        if tracker is not None:
-            tracker.set_connected(False)
+        if tracker is None:
+            return
+        tracker.set_connected(False)
+        # 冻结条目保留"已累计"供重连续计；仅以宽松上限兜住被放弃会话的无界增长。
+        self._frozen[session_id] = None
+        while len(self._frozen) > _MAX_FROZEN_TRACKERS:
+            oldest = next(iter(self._frozen))
+            logger.info("淘汰被放弃的 ask_user 超时计时器（session=%s）", oldest)
+            self.disarm(oldest)
 
     # ── 待回答装配 / 撤销 ─────────────────────────────────────────────
 
@@ -109,12 +125,14 @@ class AskUserTimeoutDriver:
         tracker = AskUserTimeoutTracker(self.timeout_seconds, clock=self.clock)
         if self._connections.get(session_id, 0) > 0:
             tracker.set_connected(True)
+            self._frozen.pop(session_id, None)
         self._trackers[session_id] = tracker
         self._armed_request[session_id] = request_id
 
     def disarm(self, session_id: str) -> None:
         self._trackers.pop(session_id, None)
         self._armed_request.pop(session_id, None)
+        self._frozen.pop(session_id, None)
 
     def is_armed(self, session_id: str) -> bool:
         return session_id in self._trackers
@@ -122,28 +140,44 @@ class AskUserTimeoutDriver:
     # ── 到点检查 ──────────────────────────────────────────────────────
 
     async def check_expiries(self) -> list[str]:
-        """推进一次到期检查：到点且仍装配着的会话经 `on_expire` 触发一次恢复。
+        """推进一次到期检查：**此刻有连接在场**且已到点的会话经 `on_expire` 触发恢复。
 
-        触发前**先收口**（disarm）——同一请求至多触发一次，且"是否真的恢复"由
-        `on_expire` 按同一份 `pending_ask_user_request_id` 判据复查（已答复 / 已跳过
-        的不恢复）。返回**确实发起恢复**的 session_id 列表（供断言/观测）。
+        只遍历"当前至少有一个前端连接"的会话（#1220 复审 A1/A3）：到点意味着计时器在
+        有连接时累计够了，但**触发**同样要求此刻有连接——无连接时不触发（与"无连接时
+        不启动/继续"同一口径，提问保持挂起）；同时冻结条目既不触发也不参与每心跳扫描。
+
+        每次尝试按 `on_expire` 的结果分流（#1220 复审 A2）：
+        - `RESUMED`：已发起恢复 → 收口（disarm），计入返回列表；
+        - `RESOLVED`：该请求已不再待回答 → 收口；
+        - `RETRY`：可重试失败 → 重置计时基线（保留在场），下个超时窗口再试——既不永久
+          丢失该提问的超时，也不每心跳空转。
+        回调抛异常按 `RETRY` 处理（一次失败不得打垮心跳 / 其余会话）。
+
+        返回**确实发起恢复**（`RESUMED`）的 session_id 列表（供断言/观测）。
         """
         fired: list[str] = []
-        for session_id, tracker in list(self._trackers.items()):
-            if not tracker.expired():
+        for session_id in list(self._connections):
+            tracker = self._trackers.get(session_id)
+            if tracker is None or not tracker.expired():
                 continue
             request_id = self._armed_request.get(session_id)
-            self.disarm(session_id)
             if request_id is None:
+                self.disarm(session_id)
                 continue
             try:
-                resumed = await self._on_expire(session_id, request_id)
+                outcome = await self._on_expire(session_id, request_id)
             except Exception:  # 一次恢复失败不得打垮心跳 / 其余会话
                 logger.exception(
                     "ask_user 超时恢复失败（session=%s, request=%s）",
                     session_id, request_id,
                 )
+                outcome = ExpireOutcome.RETRY
+            if outcome is ExpireOutcome.RETRY:
+                # 保留在场、重置累计：下个超时窗口再试（见本方法 docstring）。
+                self.disarm(session_id)
+                self.arm(session_id, request_id=request_id)
                 continue
-            if resumed:
+            self.disarm(session_id)
+            if outcome is ExpireOutcome.RESUMED:
                 fired.append(session_id)
         return fired

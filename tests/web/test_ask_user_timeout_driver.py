@@ -6,31 +6,27 @@
 - 无连接在场 ⇒ 不启动、永不到点；
 - 连接进出 ⇒ 起表 / 冻结；断线重续**累计不清零**；
 - 已答复 / 已整卡跳过 ⇒ 撤销，不再触发；
-- 到点 ⇒ 恰好触发一次恢复（同一 request 不重复）。
+- 到点 ⇒ 恰好触发一次恢复（同一 request 不重复）；
+- 到点但**此刻无连接** ⇒ 不触发（#1220 复审 A3）；可重试失败 ⇒ 下个窗口重试（A2）；
+  冻结条目有上限（A1）。
 """
 
 from __future__ import annotations
 
 import pytest
 
+from agent_harness.session.ask_user_timeout import ExpireOutcome
 from agent_harness.session.event import (
     RUN_STARTED,
     USER_INPUT_REQUESTED,
     USER_MESSAGE,
     SessionEvent,
 )
-from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
+from agent_harness.web.ask_user_timeout_driver import (
+    _MAX_FROZEN_TRACKERS,
+    AskUserTimeoutDriver,
+)
+from tests.fake_clock import FakeClock
 
 
 def _events(*, answered: bool = False) -> list[SessionEvent]:
@@ -49,12 +45,12 @@ def _events(*, answered: bool = False) -> list[SessionEvent]:
     return events
 
 
-def _driver(clock: _FakeClock, timeout: float = 60.0, fired: list | None = None):
+def _driver(clock, timeout: float = 60.0, fired: list | None = None):
     fired = fired if fired is not None else []
 
-    async def on_expire(session_id: str, request_id: str) -> bool:
+    async def on_expire(session_id: str, request_id: str) -> ExpireOutcome:
         fired.append((session_id, request_id))
-        return True
+        return ExpireOutcome.RESUMED
 
     return AskUserTimeoutDriver(
         timeout_seconds=timeout, on_expire=on_expire, clock=clock,
@@ -63,7 +59,7 @@ def _driver(clock: _FakeClock, timeout: float = 60.0, fired: list | None = None)
 
 @pytest.mark.asyncio
 async def test_no_connection_never_starts_and_never_expires():
-    clock = _FakeClock()
+    clock = FakeClock()
     driver, fired = _driver(clock)
     # 有提问但**没有**前端连接：装配也不起表。
     driver.note_session_state("s1", _events())
@@ -75,7 +71,7 @@ async def test_no_connection_never_starts_and_never_expires():
 
 @pytest.mark.asyncio
 async def test_connection_enter_starts_and_expires_once():
-    clock = _FakeClock()
+    clock = FakeClock()
     driver, fired = _driver(clock)
     driver.connection_subscribed("s1")
     driver.note_session_state("s1", _events())
@@ -91,7 +87,7 @@ async def test_connection_enter_starts_and_expires_once():
 
 @pytest.mark.asyncio
 async def test_disconnect_then_reconnect_accumulates_without_reset():
-    clock = _FakeClock()
+    clock = FakeClock()
     driver, _fired = _driver(clock, timeout=100.0)
     driver.note_session_state("s1", _events())
     driver.connection_subscribed("s1")
@@ -109,7 +105,7 @@ async def test_disconnect_then_reconnect_accumulates_without_reset():
 
 @pytest.mark.asyncio
 async def test_answered_request_is_disarmed_and_never_fires():
-    clock = _FakeClock()
+    clock = FakeClock()
     driver, fired = _driver(clock)
     driver.connection_subscribed("s1")
     driver.note_session_state("s1", _events())
@@ -123,11 +119,14 @@ async def test_answered_request_is_disarmed_and_never_fires():
 
 
 @pytest.mark.asyncio
-async def test_on_expire_false_does_not_report_fired():
-    clock = _FakeClock()
+async def test_resolved_outcome_is_disarmed_and_does_not_report_fired():
+    """`on_expire` 判 `RESOLVED`（已答复/已跳过）⇒ 收口、不计入 fired。"""
+    clock = FakeClock()
+    calls: list = []
 
-    async def on_expire(session_id: str, request_id: str) -> bool:
-        return False  # 复查发现已不再暂停 / 已答复
+    async def on_expire(session_id: str, request_id: str) -> ExpireOutcome:
+        calls.append((session_id, request_id))
+        return ExpireOutcome.RESOLVED
 
     driver = AskUserTimeoutDriver(
         timeout_seconds=60.0, on_expire=on_expire, clock=clock,
@@ -136,3 +135,73 @@ async def test_on_expire_false_does_not_report_fired():
     driver.note_session_state("s1", _events())
     clock.advance(60)
     assert await driver.check_expiries() == []
+    # 收口后不再重复打扰恢复出口（避免每心跳空转）。
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert calls == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_retry_outcome_keeps_timer_and_retries_next_window():
+    """`RETRY`（可重试失败）⇒ 重置基线保留在场，下个超时窗口再试（不永久丢失）。"""
+    clock = FakeClock()
+    outcomes = [ExpireOutcome.RETRY, ExpireOutcome.RESUMED]
+    calls: list = []
+
+    async def on_expire(session_id: str, request_id: str) -> ExpireOutcome:
+        calls.append((session_id, request_id))
+        return outcomes.pop(0)
+
+    driver = AskUserTimeoutDriver(
+        timeout_seconds=60.0, on_expire=on_expire, clock=clock,
+    )
+    driver.connection_subscribed("s1")
+    driver.note_session_state("s1", _events())
+
+    clock.advance(60)
+    assert await driver.check_expiries() == []  # 第一次 RETRY：未发起恢复
+    assert driver.is_armed("s1") is True  # 保留计时（重置基线）
+    clock.advance(60)
+    assert await driver.check_expiries() == ["s1"]  # 下个窗口重试成功
+    assert calls == [("s1", "req-1"), ("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_expired_but_disconnected_is_not_fired():
+    """到点但**此刻无连接** ⇒ 不触发（#1220 复审 A3），重连后才恢复。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock)
+    driver.connection_subscribed("s1")
+    driver.note_session_state("s1", _events())
+
+    clock.advance(60)  # 已到点（累计时确有连接）
+    driver.connection_closed("s1")  # 触发前连接离开
+
+    assert await driver.check_expiries() == []  # 无连接 ⇒ 不触发
+    assert fired == []
+    assert driver.is_armed("s1") is True  # 计时保留
+
+    # 重连（仍待回答）⇒ 已累计超阈值，下个 tick 触发。
+    driver.connection_subscribed("s1")
+    driver.note_session_state("s1", _events())
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_frozen_trackers_are_capped():
+    """被放弃的冻结计时器有上限，防止临时接缝里的无界增长（#1220 复审 A1）。"""
+    clock = FakeClock()
+    driver, _fired = _driver(clock, timeout=60.0)
+
+    total = _MAX_FROZEN_TRACKERS + 5
+    for i in range(total):
+        sid = f"s{i}"
+        driver.connection_subscribed(sid)
+        driver.note_session_state(sid, _events())
+        driver.connection_closed(sid)  # 冻结（未到点）
+
+    assert len(driver._trackers) <= _MAX_FROZEN_TRACKERS
+    # 最早的被淘汰（重连后重头计时，属可接受降级）。
+    assert driver.is_armed("s0") is False
+    assert driver.is_armed(f"s{total - 1}") is True
