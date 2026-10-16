@@ -238,6 +238,7 @@ from agent_harness.session.progress import (
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.scoped_constraints import (
+    ScopedConstraint,
     ScopedConstraintStore,
     covering_fact_id,
     normalized_fact_value,
@@ -6736,7 +6737,7 @@ class SessionService:
         }
 
 
-def _scoped_constraint_row(constraint: Any) -> dict[str, Any]:
+def _scoped_constraint_row(constraint: ScopedConstraint) -> dict[str, Any]:
     """规则层记录 → 面板行（无会话来源事件，`source_*` 为 None）。"""
     return {
         "fact_id": constraint.fact_id,
