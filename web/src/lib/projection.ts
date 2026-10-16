@@ -514,7 +514,7 @@ function projectUserInputRequested(state: ConversationState, event: AgentEvent):
   // #1204：通用提问 `ask_user` 与窄场景 `protected_fact_conflict` 共用事件类型，
   // 分流判据是 `data.kind`——前者走内嵌卡片状态，后者走原约束冲突状态，互不替代。
   if (data.kind === 'ask_user') {
-    const askRequest = parseAskUserRequest(data, event.run_id);
+    const askRequest = parseAskUserRequest(data, event.run_id ?? null);
     if (askRequest !== null) state.pending_ask_user = askRequest;
     return;
   }
