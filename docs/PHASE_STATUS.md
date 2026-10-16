@@ -40,6 +40,8 @@
 
 ## 当前工作焦点
 
+- **2026-10-16 · #1241 本地修复/验证（未发布）**：Issue OPEN（bug/P3/in-progress）；只改 Uvicorn `/metrics` 测试 helper。定向 6 passed、Ruff/diff-check 通过、两轴审查 PASS（P0–P4=0）；首次 Gate-0 5/6，唯一 coverage 待 review 行入账后重跑。分支 `codex/issue-1241-metrics-startup`，代码提交 `6a2bae78`；详见 Tracker 与月档 #1241。
+
 - **已完成验证（2026-10-15 · W-31 / PR #1178）**：#1180/#1181/#1182 均 CLOSED；完整 Gate-1 run [38748617682](https://github.com/EricKingWhy/intelligence-agent/actions/runs/38748617682) 在产品代码 head `ee76d7941bf3c3b1a19cf0afaf607dd5ac92c8e9` 全绿（后端 8154 passed / 61 skipped / 51 deselected；四个真实 Docker hardlink 用例执行通过；前端 Vitest/build、PR Gate-0、Chromium E2E smoke、gitleaks 成功）。Standards 与 Correctness/Spec follow-up 均 APPROVE，P0–P4=0。同步至 #1188 后分支含其 CSS/contrast E2E 变更（merge `d9359f88`）；该增量已本地 Vitest 133 files / 1840 tests、build 成功。定向 contrast E2E 本机因 5173 被 `D:\intelligence-agent` Vite 占用而未执行；远端 PR CI 仍是合并门禁。详见 Tracker 与月档 W-31 记录。
 
 - **已完成（2026-10-15 · #1173 session 创建测试先决条件）**：Issue CLOSED（bug/P3，`in-progress` 已移除）；修复提交 `7f1d9852`，post-sync HEAD `f965c88a`；79 个 API/workspace 聚焦用例、26 个 multiturn 用例、17 个 delete/owner-lock 用例通过（前两组使用 test-process local-backend override）；全仓 Ruff、diff-check、review coverage 通过；Gate-0 6/6 PASS，收据 `docs/gate/449039a1acd347c62dd8c1adb763856facac5120.json`；双轴 review APPROVE（零 finding）。本机全量 pytest 415 failed，主因 Docker Desktop 服务停止且启动被权限拒绝；另有 Windows symlink privilege failures。需在 PR 分支远端跑完整 `gate1` 后再合入。详见月档 #1173。
@@ -105,6 +107,9 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。
+- **2026-10-16 · #1128 集成**：Issue CLOSED；PR [#1217](https://github.com/EricKingWhy/intelligence-agent/pull/1217) merge `838bd798a994c35a9149cf10009bc684959a7dd5`，基线 `879c220ac273b83e684a469f6209a06b2a669868`。验证与关单记录见 Tracker/月档 #1128。
+- **2026-10-16 · #1241 本地修复/验证**：Issue OPEN（bug/P3/in-progress）；聚焦测试、双轴审查通过；review ledger 入账后的 Gate-0 待复跑。分支 `codex/issue-1241-metrics-startup`，代码提交 `6a2bae78`；详见 Tracker/月档 #1241。
 - **2026-10-15 · #1158 死代码清理（已集成；删除 `JsonlSessionStore.last_event_seq`）**：Issue CLOSED；PR [#1161](https://github.com/EricKingWhy/intelligence-agent/pull/1161) 于 2026-10-15 合入 main，merge commit `7a3538cb0bc59aa21cdb389252ff6bc5937e80b4`。实现提交 `2c4370af`；`tests/session` 978 passed / 1 skipped。全量 8108 passed / 1 failed / 56 skipped / 51 deselected，唯一失败为覆盖闸门自指且基线同签名；详见月档 #1158。
 - **2026-10-15 · #1056 AC1 变异承重证据**：旧 session-side retry-loop 变异在当前实现中不存在；按用户裁决在隔离副本关闭 delivered `allocate`，AC1 六个参数用例均因 `SeqConflict` 变红。`c1a0acf9` 上 `tests/session/test_seq_resync.py` 连跑 10 次 × 每次 38 passed；`Boom`/thief 同 Store 结论与哈希见月档 #1056。无产品代码改动；Issue CLOSED，`in-progress` 已移除；PR [#1155](https://github.com/EricKingWhy/intelligence-agent/pull/1155) OPEN，未合并。
 - **2026-10-13 · #1079 Docker exec 清理测试稳定性**：公共 `DockerSandbox.exec` 测试 seam 确认 reader 启动后再取消，并验证清理错误、`kill`/`wait` 与 finally 收尾。仅测试改动 `7dd4faeb`；用例 10/10 重复通过、测试文件 40 passed / 4 skipped。Standards + Spec APPROVE、P0–P4=0，隔离变异均按预期失败。Issue CLOSED，`in-progress` 已移除；评论 https://github.com/EricKingWhy/intelligence-agent/issues/1079#issuecomment-6139022090。最终全量与 Gate-0 证据见月档 #1076/#1079。
