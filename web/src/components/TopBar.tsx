@@ -7,7 +7,7 @@
  */
 
 import { Activity, Brain, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, Sun } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
@@ -45,9 +45,12 @@ interface Props {
    *  为真时徽标显示一等态「待裁决」而非「思考中」：坏死 run 的 `run_status` 停在
    *  'running'，只看事件流必然推出「思考中」（本票缺陷①）。 */
   awaitingDecision?: boolean;
+  /** #1256：子智能体 roster 入口（会话区旁）。调用方（App）按"当前会话有无委派"
+   *  决定渲染与否——无委派传 null/undefined，本组件不自行取数。 */
+  rosterSlot?: ReactNode;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, awaitingDecision = false }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, awaitingDecision = false, rosterSlot }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -168,6 +171,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           ))}
         </span>
         {waiting && <WaitingHint idleSec={idleSec} awaitingApproval={awaitingApproval} />}
+        {rosterSlot}
       </div>
 
       <div className="appbar-right">

@@ -199,6 +199,9 @@ export interface ApiMock {
   sessions?: unknown[];
   /** GET /api/sessions/{id}/events（历史重放） */
   events?: FrameSpec[];
+  /** GET /api/sessions/{id}/delegations（#1256 子智能体 roster；形状 = 后端
+   *  `web/delegations.py` 的行）。缺省 = 空列表（后端说"这个会话没有子智能体"）。 */
+  delegations?: unknown[];
   /** 调用方传入的空数组：fixture 把每次 WS `subscribe` 上行的 `{session_id, after_seq}`
    *  推进去（#208）。用来锁"客户端把本地游标带上了"——见 `installWsRoute` 的注释。 */
   wsSubscribes?: Array<{ session_id: string; after_seq?: unknown }>;
@@ -921,6 +924,11 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         body: JSON.stringify(streamed ?? mock.events ?? []),
         contentType: 'application/json',
       });
+    }
+    if (/^\/api\/sessions\/[^/]+\/delegations$/.test(path)) {
+      // #1256：真后端从**父会话事件流**派生这份 roster；本夹具直接回 `mock.delegations`
+      // （父事件流已在 `events`/`onWs` 里，roster 行与委派节点的对账由单测钉）。
+      return json(route, mock.delegations ?? []);
     }
     if (/^\/api\/sessions\/[^/]+\/stream$/.test(path)) {
       // 实时流主通道已是 WS（#205）；这条路只剩降级兜底与 `stream/truncated`
