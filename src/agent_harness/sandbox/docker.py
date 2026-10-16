@@ -11,6 +11,7 @@ import posixpath
 import queue
 import shlex
 import shutil
+import stat
 import tarfile
 import tempfile
 import threading
@@ -60,6 +61,66 @@ def _glob_match_posix(rel_path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
         PurePosixPath(rel_path).name, pattern
     )
+
+
+def _validate_windows_archive_members(members: list[tarfile.TarInfo]) -> None:
+    reserved_names = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
+        f"{prefix}{number}"
+        for prefix in ("com", "lpt")
+        for number in (*range(1, 10), "¹", "²", "³")
+    }
+    invalid_characters = set('<>:"|?*')
+    for member in members:
+        name = (
+            member.name[:-1]
+            if member.isdir() and member.name.endswith("/")
+            else member.name
+        )
+        parts = name.split("/")
+        if (
+            not name
+            or name.startswith("/")
+            or "\\" in name
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(
+                part.endswith((".", " "))
+                or any(
+                    ord(character) < 0x20 or character in invalid_characters
+                    for character in part
+                )
+                or part.split(".", 1)[0].casefold() in reserved_names
+                for part in parts
+            )
+        ):
+            raise ValueError("Docker workspace archive contains a Windows-unsafe path")
+
+
+def _retry_readonly_cleanup(
+    function: Callable[..., object],
+    path: str,
+    error_info: tuple[type[BaseException], BaseException, object],
+) -> None:
+    error = error_info[1]
+    if os.name != "nt" or not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    function(path)
+
+
+def _remove_export_path(path: Path) -> None:
+    try:
+        if path.is_symlink() or not path.is_dir():
+            try:
+                path.unlink()
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+                os.chmod(path, path.stat().st_mode | stat.S_IWRITE)
+                path.unlink()
+            return
+        shutil.rmtree(path, onerror=_retry_readonly_cleanup)
+    except FileNotFoundError:
+        return
 
 
 class DockerSandbox(Sandbox):
@@ -1040,18 +1101,43 @@ class DockerSandbox(Sandbox):
         各自独立，不共享 inode/canary；绝不把宿主 `/workspace` 当直连路径。
         """
         out = Path(dest)
-        out.mkdir(parents=True, exist_ok=True)
-        self.ensure_started()
-        stream, _ = self._container.get_archive(str(self.workspace_root))
-        payload = b"".join(stream)
-        with tempfile.TemporaryDirectory() as raw_dir:
-            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
-                archive.extractall(path=raw_dir, filter="data")
-            raw = Path(raw_dir)
-            extracted = list(raw.iterdir())
-            source = extracted[0] if len(extracted) == 1 and extracted[0].is_dir() else raw
-            for item in source.iterdir():
-                shutil.move(str(item), str(out / item.name))
+        destination_exists = out.exists()
+        if destination_exists and not out.is_dir():
+            raise NotADirectoryError(out)
+        created_destination = False
+        created_targets: list[Path] = []
+        try:
+            self.ensure_started()
+            stream, _ = self._container.get_archive(str(self.workspace_root))
+            payload = b"".join(stream)
+            with tempfile.TemporaryDirectory() as raw_dir:
+                with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+                    members = archive.getmembers()
+                    if os.name == "nt":
+                        _validate_windows_archive_members(members)
+                    archive.extractall(path=raw_dir, members=members, filter="data")
+                raw = Path(raw_dir)
+                extracted = list(raw.iterdir())
+                source = (
+                    extracted[0]
+                    if len(extracted) == 1 and extracted[0].is_dir()
+                    else raw
+                )
+                if not destination_exists:
+                    out.mkdir(parents=True)
+                    created_destination = True
+                for item in source.iterdir():
+                    target = out / item.name
+                    if not target.exists() and not target.is_symlink():
+                        created_targets.append(target)
+                    shutil.move(str(item), str(target))
+        except BaseException:
+            if created_destination:
+                _remove_export_path(out)
+            else:
+                for target in reversed(created_targets):
+                    _remove_export_path(target)
+            raise
 
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""
