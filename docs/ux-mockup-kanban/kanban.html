@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent 看板 · 效果图 v2</title>
+<title>Agent 看板 · 效果图 v3</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -33,11 +33,10 @@
   .toggle-accepted:hover { border-color: #58a6ff; color: #e6edf3; }
   main { flex: 1; display: flex; gap: 12px; padding: 16px 20px; overflow-x: auto; align-items: flex-start; }
   .col {
-    flex: 0 0 290px; background: #010409; border: 1px solid #21262d; border-radius: 10px;
+    flex: 0 0 300px; background: #010409; border: 1px solid #21262d; border-radius: 10px;
     display: flex; flex-direction: column; max-height: 100%; min-height: 200px;
   }
   .col.drag-over { border-color: #58a6ff; background: #0d1526; }
-  .col.attention-col { border-color: rgba(210,153,34,.45); }
   .col-head {
     display: flex; align-items: center; gap: 8px; padding: 10px 12px;
     border-bottom: 1px solid #21262d; font-size: 13px; font-weight: 600; flex-shrink: 0;
@@ -57,7 +56,8 @@
     cursor: pointer; transition: border-color .15s;
   }
   .card:hover { border-color: #58a6ff; }
-  .card.in-attention { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.06); }
+  /* 注意力覆盖层：卡片留在原列，染色+横幅+置顶（C2） */
+  .card.in-attention { border-color: rgba(210,153,34,.55); background: rgba(210,153,34,.07); order: -1; }
   .card .title-row { display: flex; align-items: flex-start; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
   .dot.working { background: #3fb950; animation: pulse 1.6s infinite; }
@@ -88,9 +88,6 @@
   }
   .pill.ok { color: #3fb950; border-color: rgba(63,185,80,.4); }
   .pill.wait { color: #d29922; border-color: rgba(210,153,34,.4); }
-  .pill.pr { color: #a5d6ff; border-color: rgba(88,166,255,.4); }
-  .pill.pr.draft { color: #8b949e; border-color: #30363d; }
-  .pill.pr.merged { color: #bc8cff; border-color: rgba(188,140,255,.4); }
   .card.dim { opacity: .55; }
   .card[draggable="true"] { cursor: grab; }
   .draft-hint { font-size: 11px; color: #6e7681; margin-top: 6px; }
@@ -123,24 +120,29 @@
 <body>
 <header>
   <h1>Agent 看板</h1>
-  <span class="sub">效果图 v2 · 12 裁决落地：需要注意独立列 / PR pill / 未读加粗 / 子智能体行 / 已接受默认隐藏</span>
+  <span class="sub">效果图 v3 · 第二轮交叉后：注意力=覆盖层 / 无PR pill / deliverable 列v1不渲染</span>
   <div class="search-hint" id="searchHint">搜索卡片 <kbd>⌘K</kbd></div>
   <div class="toggle-accepted" id="toggleAccepted">显示已接受</div>
 </header>
 <main id="board">
-  <!-- 需要注意：独立列（Q2=A），卡片只在此处，不在原列重复 -->
-  <section class="col attention-col" data-col="attention">
-    <div class="col-head">⚠ 需要注意 <span class="count">2</span></div>
+  <section class="col" data-col="backlog">
+    <div class="col-head">待办 Backlog <span class="count">2</span><span class="add" title="新建">＋</span></div>
     <div class="col-body">
-      <div class="card unread in-attention">
-        <div class="title-row"><span class="dot needs"></span><span class="title">#1283 修补：budget 语义三档对齐</span></div>
-        <div class="ask">ask_user 待回答：超时闸口接线方案二选一，等你拍板</div>
-        <div class="msgs">
-          <div class="u">你：修补 PR 开了，你看一眼</div>
-          <div class="a">agent：P1×1+P2×4 已修完，沙箱门禁全绿，等合并</div>
-        </div>
-        <div class="foot"><span class="pill pr">⑂ PR #1287 · open</span><span>wt/1283-fix</span><span style="margin-left:auto">1 小时前</span></div>
+      <div class="card" draggable="true">
+        <div class="title-row"><span class="dot idle"></span><span class="title">把 #1256 效果图导出为 PR 素材</span></div>
+        <div class="draft-hint">草稿 · 拖到「执行中」即拉起新会话</div>
       </div>
+      <div class="card" draggable="true">
+        <div class="title-row"><span class="dot idle"></span><span class="title">调研 orca 看板实现细节</span></div>
+        <div class="draft-hint">草稿 · 拖到「执行中」即拉起新会话</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-col="working">
+    <div class="col-head">执行中 <span class="count">2</span></div>
+    <div class="col-body">
+      <!-- 注意力覆盖层：卡片留在执行中列，染色+横幅+置顶 -->
       <div class="card in-attention">
         <div class="title-row"><span class="dot needs"></span><span class="title">Windows 真机跑 #1225 车道</span></div>
         <div class="ask">permission 待批准：允许覆写 web/dist 产物？</div>
@@ -150,26 +152,6 @@
         </div>
         <div class="foot"><span>intelligence-agent</span><span style="margin-left:auto">26 分钟前</span></div>
       </div>
-    </div>
-  </section>
-
-  <section class="col" data-col="backlog">
-    <div class="col-head">待办 Backlog <span class="count">2</span><span class="add" title="新建">＋</span></div>
-    <div class="col-body">
-      <div class="card" draggable="true">
-        <div class="title-row"><span class="dot idle"></span><span class="title">把 #1256 效果图导出为 PR 素材</span></div>
-        <div class="draft-hint">草稿 · 拖到「执行中」即拉起会话</div>
-      </div>
-      <div class="card" draggable="true">
-        <div class="title-row"><span class="dot idle"></span><span class="title">调研 orca 看板实现细节</span></div>
-        <div class="draft-hint">草稿 · 拖到「执行中」即拉起会话</div>
-      </div>
-    </div>
-  </section>
-
-  <section class="col" data-col="working">
-    <div class="col-head">执行中 <span class="count">1</span></div>
-    <div class="col-body">
       <div class="card unread">
         <div class="title-row"><span class="dot working"></span><span class="title">实现 #1200 插件管理窗口</span></div>
         <div class="msgs">
@@ -181,7 +163,7 @@
           <div class="sub-row"><span class="dot working"></span>code-review · Correctness — 读完 verification.ts</div>
           <div class="sub-row"><span class="dot working"></span>code-review · Standards — 检查 API 命名</div>
         </div>
-        <div class="foot"><span class="pill pr draft">⑂ draft · #1290</span><span>wt/1200-plugin-mgmt</span><span style="margin-left:auto">2 分钟前</span></div>
+        <div class="foot"><span>wt/1200-plugin-mgmt</span><span style="margin-left:auto">2 分钟前</span></div>
       </div>
     </div>
   </section>
@@ -189,45 +171,34 @@
   <section class="col" data-col="verify">
     <div class="col-head">待验证 <span class="count">1</span></div>
     <div class="col-body">
-      <div class="card">
-        <div class="title-row"><span class="dot done"></span><span class="title">#1246 ask_user 超时闸口接线</span></div>
+      <div class="card unread in-attention">
+        <div class="title-row"><span class="dot needs"></span><span class="title">#1283 修补：budget 语义三档对齐</span></div>
+        <div class="ask">ask_user 待回答：超时闸口接线方案二选一，等你拍板</div>
         <div class="msgs">
-          <div class="a">agent：ask_user 超时闸口已接线，websocket.py:484 含 BudgetConflict，待合并</div>
+          <div class="u">你：修补 PR 开了，你看一眼</div>
+          <div class="a">agent：P1×1+P2×4 已修完，沙箱门禁全绿，等合并</div>
         </div>
-        <div class="foot"><span class="pill wait">待合并</span><span class="pill pr merged">⑂ merged · #1246</span><span style="margin-left:auto">3 小时前</span></div>
+        <div class="foot"><span class="pill wait">待合并</span><span>wt/1283-fix</span><span style="margin-left:auto">1 小时前</span></div>
       </div>
     </div>
   </section>
 
-  <section class="col" data-col="deliver">
-    <div class="col-head">可交付 <span class="count">1</span></div>
-    <div class="col-body">
-      <div class="card">
-        <div class="title-row"><span class="dot done"></span><span class="title">#1190 会话级约束管理面板 Phase 1</span></div>
-        <div class="msgs">
-          <div class="a">agent：PR #1242 已合并，四态验收通过，待你验收</div>
-        </div>
-        <div class="foot"><span class="pill ok">CI 通过</span><span class="pill pr">⑂ PR #1242 · open</span><span style="margin-left:auto">昨天</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 已接受：默认隐藏（Q8=A），Orca idle 列翻版 -->
+  <!-- 已接受：默认隐藏（Q8=A），accepted 卡沉降于此 -->
   <section class="col hidden" data-col="accepted" id="acceptedCol">
     <div class="col-head">已接受 <span class="count">1</span></div>
     <div class="col-body">
       <div class="card dim">
-        <div class="title-row"><span class="dot idle"></span><span class="title">#1184 旧 ticket 归档</span></div>
-        <div class="foot"><span>已合并</span><span style="margin-left:auto">3 天前</span></div>
+        <div class="title-row"><span class="dot idle"></span><span class="title">#1190 会话级约束管理面板 Phase 1</span></div>
+        <div class="foot"><span>已合并</span><span style="margin-left:auto">昨天</span></div>
       </div>
     </div>
   </section>
 </main>
-<footer>列 = PRODUCT_STATES 投影（派生列只读，卡片只属一列） · 拖拽仅 backlog→执行中有写语义 · 点击卡片 ack 并直达会话 · 快照全量推送+节流渲染</footer>
+<footer>列 = PRODUCT_STATES 严格投影（一卡一列） · 注意力是覆盖层：染色+横幅+列内置顶，不单设列 · deliverable 列 v1 不渲染（criteria 链未通） · 拖拽仅 backlog→执行中有写语义 · 点击卡片 ack 并直达会话</footer>
 
 <div id="searchOverlay">
   <div id="searchBox">
-    <input id="searchInput" placeholder="搜索卡片标题、消息、工作区、#PR号…">
+    <input id="searchInput" placeholder="搜索卡片标题、消息、工作区…">
     <div class="tip">输入即过滤 · Esc 关闭</div>
   </div>
 </div>
@@ -239,7 +210,6 @@
     t.textContent = msg; t.classList.add('show');
     clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
   };
-  // 子智能体展开
   document.querySelectorAll('.sub-toggle').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -248,21 +218,18 @@
       el.textContent = (open ? '▾' : '▸') + ' 2 个子智能体';
     });
   });
-  // 点击卡片 = ack + 直达
   document.querySelectorAll('.card').forEach(c => {
     c.addEventListener('click', () => {
       c.classList.remove('unread');
       toast('已标已读，直达会话（演示）');
     });
   });
-  // 已接受列显隐
   const accCol = document.getElementById('acceptedCol');
   const accBtn = document.getElementById('toggleAccepted');
   accBtn.addEventListener('click', () => {
     const hidden = accCol.classList.toggle('hidden');
     accBtn.textContent = hidden ? '显示已接受' : '隐藏已接受';
   });
-  // 搜索
   const overlay = document.getElementById('searchOverlay');
   const input = document.getElementById('searchInput');
   const openSearch = () => { overlay.classList.add('open'); input.value=''; input.focus(); filter(''); };
@@ -279,7 +246,6 @@
     });
   };
   input.addEventListener('input', () => filter(input.value));
-  // 拖拽：backlog → 执行中（新建会话语义）
   let dragCard = null;
   document.querySelectorAll('.card[draggable="true"]').forEach(c => {
     c.addEventListener('dragstart', () => { dragCard = c; });
