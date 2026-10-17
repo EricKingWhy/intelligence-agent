@@ -133,8 +133,9 @@ def test_resolve_project_key_shares_across_worktree(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Git stdout encoding regression")
-def test_resolve_project_key_unicode_worktree_with_legacy_python_encoding(
-    tmp_path: Path,
+@pytest.mark.parametrize("python_utf8", ["0", "1"], ids=["legacy-locale", "utf8-mode"])
+def test_resolve_project_key_unicode_worktree_with_python_encoding_modes(
+    tmp_path: Path, python_utf8: str
 ) -> None:
     repo = tmp_path / "主仓库"
     repo.mkdir()
@@ -148,12 +149,16 @@ def test_resolve_project_key_unicode_worktree_with_legacy_python_encoding(
     )
 
     script = (
-        "import json, sys\n"
+        "import json, locale, sys\n"
         "from agent_harness.session.scoped_constraints import resolve_project_key\n"
-        "print(json.dumps(resolve_project_key(sys.argv[1])))\n"
+        "print(json.dumps({\n"
+        "  'preferred_encoding': locale.getpreferredencoding(False),\n"
+        "  'project_key': resolve_project_key(sys.argv[1]),\n"
+        "  'utf8_mode': sys.flags.utf8_mode,\n"
+        "}))\n"
     )
     env = os.environ.copy()
-    env["PYTHONUTF8"] = "0"
+    env["PYTHONUTF8"] = python_utf8
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
     result = subprocess.run(
         [sys.executable, "-c", script, str(worktree)],
@@ -163,7 +168,15 @@ def test_resolve_project_key_unicode_worktree_with_legacy_python_encoding(
     )
 
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
-    assert json.loads(result.stdout.decode("ascii")) == str(repo.resolve())
+    payload = json.loads(result.stdout.decode("ascii"))
+    assert payload["utf8_mode"] == int(python_utf8)
+    if python_utf8 == "0":
+        encoding = payload["preferred_encoding"].replace("-", "").replace("_", "").casefold()
+        if encoding == "utf8":
+            pytest.skip(
+                "Windows ANSI code page is UTF-8; legacy locale decoding is not exercised"
+            )
+    assert payload["project_key"] == str(repo.resolve())
 
 
 def test_resolve_project_key_non_git_returns_none(tmp_path: Path) -> None:
