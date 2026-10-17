@@ -1,0 +1,1 @@
+﻿2026-10-17	#1283 R1 发现轮双轴（CodeBuddy deepseek，dispatch 归档为 1283-rev-*.out）：Correctness APPROVE-WITH-FINDINGS P0-P2=0/P3×1/P4×1；Standards APPROVE-WITH-FINDINGS P0-P2=0/P3×2/P4×3。8 文件 diff 全读 + 变异在 /tmp 副本。findings 修复见 8a40aa31/6a99975c。证据：/home/hatch/workspace/system/dispatch/1283-rev-correctness.out、1283-rev-standards.out	795fe5afda241c1dd441d5c8e985390fae65247c..761b6bbd
