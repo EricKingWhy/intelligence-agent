@@ -247,6 +247,44 @@ def test_attention_takes_last_unresolved_approval_title() -> None:
     assert projection.attention_summary == "待批准：Write (workspace-write)"
 
 
+def test_attention_input_wins_when_its_seq_is_later() -> None:
+    events = [
+        *_executing_events(),
+        _approval(3, "a1", "Bash (workspace-write)"),
+        _ask_user(4, "q1", "选 A 还是 B"),
+    ]
+    projection = derive_board_projection(events)
+    assert projection.attention_kind == "input"
+    assert projection.attention_summary == "待回答：选 A 还是 B"
+
+
+def test_attention_approval_is_session_wide_across_runs() -> None:
+    events = [
+        _ev(0, SESSION_STARTED),
+        _defined(1, "2026-10-17T01:00:00.100+00:00"),
+        _ev(2, RUN_STARTED, run_id="r1", time="2026-10-17T01:00:02.300+00:00"),
+        _approval(3, "a1", "Write (workspace-write)"),
+        _ev(4, RUN_COMPLETED, run_id="r1", time="2026-10-17T01:00:04.500+00:00"),
+        _ev(5, RUN_STARTED, run_id="r2", time="2026-10-17T01:00:05.600+00:00"),
+    ]
+    projection = derive_board_projection(events)
+    assert projection.product_state == "executing"
+    assert projection.attention_kind == "approval"
+    assert projection.attention_summary == "待批准：Write (workspace-write)"
+
+
+def test_attention_malformed_ask_user_does_not_raise() -> None:
+    malformed = _ev(
+        3,
+        USER_INPUT_REQUESTED,
+        run_id="r1",
+        data={"request_id": "q1", "kind": "ask_user", "run_id": "r1", "questions": []},
+    )
+    projection = derive_board_projection([*_executing_events(), malformed])
+    assert projection.attention_kind is None
+    assert projection.attention_summary is None
+
+
 def test_attention_is_cleared_when_latest_run_is_terminal() -> None:
     events = [
         *_executing_events(),
@@ -301,6 +339,38 @@ def _session_with_task(tmp_path: Path) -> tuple[JsonlSessionStore, Session]:
     )
     assert outcome.ok, outcome.reason
     return store, session
+
+
+def test_answering_ask_user_clears_attention_in_sidecar(tmp_path: Path) -> None:
+    """票面写「USER_MESSAGE 不改注意力」——带 input_request_id 的答复是例外。
+
+    `pending_input_request` 的「未答复」谓词正是排除已答复的 request_id；若这条
+    USER_MESSAGE 只推进水位不重算，sidecar 会把「待回答」钉到下一个触发事件。
+    """
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(store)
+    apply_task_definition(session, task_text="看板地基", criteria=[{"text": "A"}])
+    run_id, _ = session.begin_run()
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "q1",
+            "kind": "ask_user",
+            "run_id": run_id,
+            "questions": [{"header": "选择", "question": "哪个？"}],
+        },
+        run_id=run_id,
+    )
+    projection_store = BoardProjectionStore(store)
+    assert projection_store.get(session.session_id).attention_kind == "input"
+
+    session.append(
+        USER_MESSAGE,
+        {"content": "A", "input_request_id": "q1"},
+        run_id=run_id,
+    )
+    assert projection_store.get(session.session_id).attention_kind is None
+    assert projection_store.get(session.session_id).attention_summary is None
 
 
 def test_store_persists_sidecar_and_returns_stable_projection(tmp_path: Path) -> None:

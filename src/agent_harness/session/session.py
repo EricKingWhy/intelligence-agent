@@ -88,6 +88,22 @@ _BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
 ) | RUN_TERMINAL_TYPES
 
 
+def _board_projection_needs_recompute(event: SessionEvent) -> bool:
+    """触发集判定；answer-bearing USER_MESSAGE 是票面遗漏的注意力清除点。
+
+    票面写「USER_MESSAGE 不改注意力」，但 ``pending_input_request`` 的「未答复」
+    谓词正是「该 request_id 不在任一带 ``input_request_id`` 的 USER_MESSAGE 里」——
+    用户提交答案（或整卡跳过 / 超时）时注意力确实变了。只对带
+    ``input_request_id`` 的 USER_MESSAGE 重算：普通聊天消息仍然只推进水位，
+    不会把触发集扩成每条用户消息一次 O(事件数) 重放。
+    """
+    if event.type in _BOARD_PROJECTION_TRIGGER_TYPES:
+        return True
+    return event.type == USER_MESSAGE and isinstance(
+        event.data.get("input_request_id"), str
+    )
+
+
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
     """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
 
@@ -556,7 +572,7 @@ class Session:
             get_board_projection_store(self._store).update_from_events(
                 self.session_id,
                 self._events,
-                recompute=event.type in _BOARD_PROJECTION_TRIGGER_TYPES,
+                recompute=_board_projection_needs_recompute(event),
             )
         except Exception:
             logger.exception(

@@ -220,7 +220,9 @@ class BoardProjectionStore:
             events = self._store.read_events(session_id)
             projection = derive_board_projection(events)
             stamp_after = self._events_stamp(session_id)
-            if stamp_after is not None:
+            # 只有「读事件期间文件没变」才回填缓存；否则下一轮重放，避免把
+            # 少一条事件的投影钉在更新的戳上。
+            if stamp_after is not None and stamp_after == stamp:
                 self._persist(session_id, projection, stamp_after)
             return projection
 
@@ -248,7 +250,7 @@ class BoardProjectionStore:
                 stamp = self._events_stamp(session_id)
                 if stamp is None:
                     return
-                current_seq = max(event.seq for event in events)
+                current_seq = events[-1].seq
                 if recompute:
                     projection = derive_board_projection(events)
                 else:
