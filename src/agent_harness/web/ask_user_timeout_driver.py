@@ -23,12 +23,15 @@
     `#356` CLOSED 的人会得出"现在就该删"或"永远不会删"两种相反结论。
 
     **删除清单（按文件，`git grep -n "#1220" -- src` 可复核）**：
-      - `web/websocket.py` 7 处：`_watch_session`/`watching` 在场计数（~142-153）、
-        `_push_snapshot` 的装配与订阅后补读（~209-228）、relay 的 `arm`（~314-325）、
+      - `web/websocket.py` 7 处：`driver = state.ask_user_timeout_driver` 绑定
+        （~144-145）、`_watch_session`/`watching` 在场计数（~142-153）、
+        `_push_snapshot` 的装配与订阅后补读（~209-228、补读块 ~264-279）、
+        relay 的 `arm`（~314-325）、
         launch 处的 `_watch_session`（~507）、心跳里的 `check_expiries`（~579-582）、
         `finally` 的 `connection_closed` 归零（~622-626）；
       - `web/app.py` 2 处：import（~171）+ 组合根装配（~1265-1278）；
-      - `session/service.py`：`resume_ask_user_timeout` 整个方法（~3050-3100）；
+      - `session/service.py`：import 行（~127）+ `resume_ask_user_timeout`
+        整个方法（~3050-3100）；
       - `session/ask_user_timeout.py`：模块 docstring 的接缝段（~14-25）；
       - 本模块（整个文件）；
       - `tests/web/test_ask_user_timeout_driver.py`、`tests/web/test_ask_user_timeout_online.py`。

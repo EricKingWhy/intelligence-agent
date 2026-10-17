@@ -269,10 +269,13 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         # 重复装配保留已累计时长）。
         # 不能以"有在途 run"为条件：提问落盘后 run 会以 `run/paused` 收口并结束 task
         # （`get_active` 随之为 None），恰是最需要补读的时刻。
+        # 已知代价（#1285 复审登记，不改代码）：每次 subscribe 无条件全量重读事件
+        # 文件，订阅路径 IO 翻倍；若成为热点，可改为按 `latest_seq` 增量补读。
         try:
             fresh_events = await service.get_events(session_id)
-        except Exception:  # 补读失败不拆快照：relay 仍兜住后续事件
-            logger.debug(
+        except Exception:  # 补读失败不拆快照：relay 只兜订阅后事件，窗口内存量
+            # 依赖下次 subscribe 重读。
+            logger.warning(
                 "ask_user 超时装配补读失败（session=%s）", session_id, exc_info=True,
             )
         else:
