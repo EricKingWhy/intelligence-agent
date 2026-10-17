@@ -62,6 +62,8 @@
   .icon-btn:hover { background: #1a1c20; color: #b9bdc4; }
   .qbody { padding: 10px 18px 0; }
   .qcard.collapsed .qbody, .qcard.collapsed .qfoot { display: none; }
+  /* 提交后卡片主体已冻结（脚本里的 done）：视觉上也要看得出来。 */
+  .qcard.done .qbody, .qcard.done .qfoot { opacity: .55; }
   .q-title { font-size: 17px; font-weight: 600; letter-spacing: -.2px; line-height: 1.5; }
   .q-anim { transition: opacity .16s ease, transform .16s ease; }
   .q-anim.out { opacity: 0; transform: translateX(18px); }
@@ -235,8 +237,8 @@
     el.addEventListener('click', e => { if (frozen()) e.stopPropagation(); }, true);
 
   function render(dir) {
-    const q = QUESTIONS[cur];
     const apply = () => {
+      const q = QUESTIONS[cur]; // 按触发时刻的 cur 取题：动画期间 cur 不会再变（点击已冻结）
       $('scope').textContent = q.scope;
       $('qtitle').textContent = q.title;
       $('opts').innerHTML = q.options.map((o, i) => `
@@ -264,9 +266,10 @@
     busy = true;
     qanim.classList.add(dir > 0 ? 'out' : 'out-back');
     setTimeout(() => {
-      apply();
-      qanim.classList.remove('out', 'out-back');
-      busy = false;
+      try { apply(); } finally {
+        qanim.classList.remove('out', 'out-back');
+        busy = false; // apply 万一抛错也要解冻，否则卡片主体永久失去响应
+      }
     }, 150);
   }
 
@@ -327,11 +330,19 @@
       ? '未作答问题均已跳过，按当前状态继续发布…'
       : '收到，按你的决定继续发布…';
     m.textContent = `${intro}\n\n${s}`;
-    done = true; // 提交后卡片只读：再改选项不会改写已经发出的完成提示。
+    // done 是样例自造的终态（产品里提交后卡片随 run 收起），不是产品状态。
+    done = true;
+    // 冻结要看得见：此刻已经无效的控件显式置为不可用，而不是静默吞掉点击。
+    qcard.classList.add('done');
+    $('customInput').readOnly = true;
+    $('submit').disabled = true;
+    $('skip').disabled = true;
   }
 
   $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));
-  $('close').addEventListener('click', () => toast('已关闭卡片，run 保持暂停等待回答'));
+  $('close').addEventListener('click', () => toast(done
+    ? '已关闭卡片，run 已按你的决定继续'
+    : '已关闭卡片，run 保持暂停等待回答'));
 
   function toast(msg) {
     const el = $('toast');

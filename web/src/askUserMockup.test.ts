@@ -76,7 +76,7 @@ describe('ask_user 交互样例的完成提示（#1218）', () => {
     expect(m.after().match(/：跳过/g)).toHaveLength(QUESTIONS_COUNT);
   });
 
-  it('提前提交：未作答的题按跳过计；提交后卡片只读，不再改写完成提示', () => {
+  it('提前提交：未作答的题按跳过计；提交后完成提示不被改写且卡片显式置为不可用', () => {
     const m = openMockup();
     m.clickFirstOption(); // 只答第 1 题
     m.click('submit');
@@ -85,11 +85,27 @@ describe('ask_user 交互样例的完成提示（#1218）', () => {
     expect(m.after()).toContain('今晚低峰期');
     expect(m.after().match(/：跳过/g)).toHaveLength(3);
 
-    // 提交后卡片只读：再改选项、再点提交都不会改写已经发出的完成提示。
+    // 再改选项、再点提交都不会改写已经发出的完成提示。
     m.clickOption(1); // 「明早 9 点」
     m.click('submit');
     expect(m.after()).toContain('今晚低峰期');
     expect(m.after()).not.toContain('明早 9 点');
+
+    // 冻结要看得见：此刻已经无效的控件被显式置为不可用。
+    expect(m.doc.getElementById('qcard')?.classList.contains('done')).toBe(true);
+    expect((m.doc.getElementById('submit') as HTMLButtonElement).disabled).toBe(true);
+    expect((m.doc.getElementById('skip') as HTMLButtonElement).disabled).toBe(true);
+    expect((m.doc.getElementById('customInput') as HTMLTextAreaElement).readOnly).toBe(true);
+  });
+
+  it('提交后点关闭：提示不再自称 run 仍暂停', () => {
+    const m = openMockup();
+    m.clickFirstOption();
+    m.click('submit');
+
+    m.click('close');
+    expect(m.toast()).toBe('已关闭卡片，run 已按你的决定继续');
+    expect(m.toast()).not.toContain('保持暂停');
   });
 
   it('翻页动画期间的输入被丢弃：不写进新题，也不解锁新题的提交', async () => {
