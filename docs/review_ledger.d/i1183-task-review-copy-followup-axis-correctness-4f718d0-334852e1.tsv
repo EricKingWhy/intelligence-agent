@@ -1,0 +1,1 @@
+2026-10-17	#1183 Correctness follow-up review: PASS, P0-P4=0. Scope: two changed user-copy assertions in useTaskReview.test.tsx; verified each against the hook output and issue language direction. No product semantics changed.	4f718d0ca8fc0f08056d7c316f724824b1344991..334852e1ec74087b8da18c80834728e9f0ff533e

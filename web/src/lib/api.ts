@@ -229,6 +229,32 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+/** #1256：某父会话的子智能体 roster 行（= 后端 `GET /delegations` 的响应元素）。
+ *
+ *  形状与后端 `web/delegations.py` 契约逐字一致；`status` 值域与
+ *  `Delegation['status']`（types.ts）同四态同语义（与 DelegationNode 的状态色同源）。 */
+export interface DelegationEntry {
+  child_session_id: string;
+  target: string;
+  task: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  started_at: string | null;
+  completed_at: string | null;
+  summary?: string;
+  /** 窗口占用（最近一次调用输入规模 / 精确分类，依 usage_state）。 */
+  used_tokens: number;
+  /** 诚实口径：ok=精确分类；usage_only=事件流下界（估算）；no_data=无数据。 */
+  usage_state: 'ok' | 'usage_only' | 'no_data';
+}
+
+/** #1256：读父会话的委派记录（roster 数据源）。只读；404 = 父会话不存在。 */
+export async function getSessionDelegations(sessionId: string): Promise<DelegationEntry[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/delegations`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+  if (!res.ok) throw new Error(`get delegations ${res.status}`);
+  return res.json();
+}
+
 export interface BudgetPayload {
   /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。
    *

@@ -17,9 +17,12 @@ import type { CSSProperties } from 'react';
 import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
+import { useDelegations } from './hooks/useDelegations';
+import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
+import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
 import { Composer, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
@@ -37,6 +40,7 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
 import { TaskReviewPanel } from './components/TaskReviewPanel';
+import { changedFiles } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
@@ -285,6 +289,22 @@ export default function App() {
      本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
      `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
   const sessionId = conversation?.session_id;
+  const hasSelectedConversation = conversation?.session_id === selectedId;
+  const reviewEvents = hasSelectedConversation ? conversation.events : [];
+  const reviewEventsVersion = hasSelectedConversation ? conversation.eventsVersion : 0;
+  const changes = useMemo(
+    () => conversation?.session_id === selectedId
+      ? changedFiles(tools)
+      : { files: [], unattributed: 0 },
+    [conversation?.session_id, selectedId, tools],
+  );
+  const changedFileCount = changes.files.length;
+  const workspaceTabs = useMemo(
+    () => tabs.map((tab) => (tab.key === 'changes' && changedFileCount > 0
+      ? { ...tab, count: changedFileCount }
+      : tab)),
+    [tabs, changedFileCount],
+  );
 
   // ── #1028：归属 chip 的数据源 ──
   // 当前会话：项目名来自后端 `SessionSummary.workspace`（成员资格真相），cwd 来自
@@ -593,6 +613,32 @@ export default function App() {
     focusRun();
     if (!panel.pinned && leaving) setInspectorOpen(false);
   }, [selectSession, focusRun, panel.pinned, selectedId]);
+
+  // ── #1256 子智能体可见性：roster（投影 = 后端父事件流派生）+ 右侧分栏 ──
+  // roster 数据来自后端只读端点（自身从父会话事件流派生）；父流委派事件到达时重拉。
+  // UI 不建第二套真相（不变量 #22）。
+  const delegations = useDelegations(selectedId, conversation);
+  // 分栏是**独立选择态**——只记录"看哪个子会话"，不改变主会话当前路由。
+  const [splitChild, setSplitChild] = useState<SplitChild | null>(null);
+  // 换父会话 ⇒ 关分栏（它属于某个父会话的上下文：拿 A 的子会话站在 B 里 = 跨会话第二真相）。
+  useEffect(() => {
+    setSplitChild(null);
+  }, [selectedId]);
+  const splitChildConversation = useChildConversation(splitChild?.childSessionId ?? null);
+  /** 行主体 → 主视图打开（现有 handleSelect 语义；开分栏时先收分栏，
+   *  否则左列（父会话）会被换成同一个子会话）。 */
+  const handleOpenChildMain = useCallback(
+    (childId: string) => {
+      setSplitChild(null);
+      handleSelect(childId);
+    },
+    [handleSelect],
+  );
+  /** chevron → 右侧分栏打开（父会话保持不动）。 */
+  const handleOpenChildSplit = useCallback(
+    (child: SplitChild) => setSplitChild(child),
+    [],
+  );
 
   useEffect(() => {
     void fetchModels();
@@ -1524,6 +1570,13 @@ export default function App() {
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
+        rosterSlot={
+          <SubagentRoster
+            delegations={delegations}
+            onOpenSession={handleOpenChildMain}
+            onOpenSplit={handleOpenChildSplit}
+          />
+        }
       />
 
       <main
@@ -1565,7 +1618,10 @@ export default function App() {
           onSetArchived={handleSetArchived}
         />
 
-        <section className="app-workspace">
+        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+          {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
+              父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
+          <div className="workspace-main">
           {authRequired && (
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
@@ -1763,14 +1819,6 @@ export default function App() {
               />
             )
           )}
-          {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
-          {selectedId !== null && (
-            <div className="task-review-entry">
-              <button className="btn-ghost" onClick={() => setTaskReviewOpen(true)}>
-                任务审阅
-              </button>
-            </div>
-          )}
           {constraintRequest && selectedId !== null && !loadingHistory && (
             <ConstraintResolutionDialog
               key={constraintRequest.request_id}
@@ -1789,7 +1837,7 @@ export default function App() {
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
               （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
               `lib/capabilities.ts` 的登记表给出（声明 `terminal`、渲染成「输出」）。 */}
-          <WorkspaceTabs tabs={tabs} active={activeTab} onSelect={setSelectedSurface} />
+          <WorkspaceTabs tabs={workspaceTabs} active={activeTab} onSelect={setSelectedSurface} />
           {/* **每个可见面各有一个 panel**，非激活的用 `hidden` 藏起来（不卸载——切回来
               时滚动位置与内部状态还在，与 Inspector "折叠 ≠ 卸载"同一取舍）。
               为什么不渲染"单个会换 id 的 panel"：那样每个 tab 的 `aria-controls` 里
@@ -1847,6 +1895,14 @@ export default function App() {
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
                     failedDraft={failedDraft}
+                    /* #1264：后端真有压缩在途（投影自 `compaction/start`..
+                       `compaction/end`）——自动路径的循环内再压与手动 `/compact`
+                       共用同一个面。只读投影，不推断。 */
+                    compactionInProgress={
+                      conversation !== null && conversation.session_id === selectedId
+                        ? conversation.compaction_in_progress
+                        : false
+                    }
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
@@ -1903,10 +1959,30 @@ export default function App() {
               {tab.key === 'changes' ? (
                 /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
                    数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
-                <ChangesPanel tools={tools} sessionId={sessionId} />
+                <ChangesPanel
+                  files={changes.files}
+                  unattributed={changes.unattributed}
+                  sessionId={sessionId}
+                  events={reviewEvents}
+                  eventsVersion={reviewEventsVersion}
+                  streaming={streaming}
+                  onOpenTaskReview={() => setTaskReviewOpen(true)}
+                />
               ) : null}
             </div>
           ))}
+          </div>
+          {splitChild && (
+            <SubagentSplitPane
+              child={splitChild}
+              conversation={splitChildConversation.conversation}
+              error={splitChildConversation.error}
+              density={density}
+              disclosure={disclosure}
+              reasoningDisclosure={reasoningDisclosure}
+              onClose={() => setSplitChild(null)}
+            />
+          )}
         </section>
 
         <StepDetail

@@ -173,6 +173,7 @@ from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
+    sandbox_unavailable_http_error,
     storage_http_error,
     storage_http_status,
 )
@@ -220,10 +221,11 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
 
 
 class _AmendValueValidators(BaseModel):
-    """amend 字段的静态取值校验（三个请求体共用一份，ADR-0020b / ADR-0021）。
+    """amend 字段的静态取值校验（多个请求体共用一份，ADR-0020b / ADR-0021）。
 
     ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
-    SendMessageRequest），校验逻辑只写一遍——三个入口对同一份取值集合负责。
+    SendMessageRequest / ForkRequest）——每个校验器只写一遍，子类按需声明
+    （ForkRequest 只声明 ``sandbox_backend``）。
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
@@ -1265,8 +1267,9 @@ class AppState:
         # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
         # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
         # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
-        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
-        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        # on_run_terminal）；W-12 登记协议（#356 中 DEFER 的部分）落地后删本接缝，
+        # 改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO
+        # 与删除清单）。
         self.ask_user_timeout_driver = AskUserTimeoutDriver(
             timeout_seconds=settings.ask_user_question_timeout,
             on_expire=lambda session_id, request_id: (
@@ -2400,6 +2403,11 @@ def create_app(
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # #1256 子智能体 roster 路由（独立 router 文件——只读数据面，投影单源在父事件流）
+    from agent_harness.web.delegations import register_delegation_routes
+
+    register_delegation_routes(app, validate_session_id=validate_session_id)
+
     # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
     # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
     from agent_harness.web.task_delivery import register_task_routes
@@ -2955,21 +2963,8 @@ def create_app(
         except SandboxUnavailableError as e:
             # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
             # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": str(e),
-                    "backend": e.backend,
-                    "reason": e.reason,
-                    "details": e.details,
-                    "remediation": e.remediation,
-                    "available_backends": [
-                        c.backend
-                        for c in probe_all_capabilities()
-                        if c.available
-                    ],
-                },
-            ) from e
+            # `#1278`：同一份构造与 fork 端点共用（`web/domain_errors.py`）。
+            raise sandbox_unavailable_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 

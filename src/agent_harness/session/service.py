@@ -122,7 +122,8 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.ask_user_timeout import (
     ExpireOutcome,
-    ask_user_timeout_message,
+    ask_user_timeout_message_for_minutes,
+    ask_user_timeout_minutes_from_payload,
     latest_pending_input_request,
     pending_ask_user_request_id,
     pending_input_request,
@@ -879,7 +880,15 @@ def _ask_user_input_answer_data(
         ):
             return None, True
         return {
-            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            # #1284 P2-2：注入消息读**请求载荷快照**（`timeout_seconds` /
+            # `timeout_minutes`），不读活的 `self._settings`——配置改动并重启后，旧请求
+            # 的卡片数字与这条消息必须仍是同一个数。只有 #1224 之前的旧事件回落到
+            # `ask_user_timeout_seconds`（调用方传的当前配置）。
+            "content": ask_user_timeout_message_for_minutes(
+                ask_user_timeout_minutes_from_payload(
+                    request.data, fallback_seconds=ask_user_timeout_seconds,
+                )
+            ),
             "input_request_id": request_id,
             "input_request_answer": normalized_timeout,
         }, False
@@ -3084,6 +3093,9 @@ class SessionService:
         self, session_id: str, *, request_id: str,
     ) -> ExpireOutcome:
         """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
+
+        W-12 登记协议（#356 中 DEFER 的部分）落地后随 `AskUserTimeoutDriver` 一并删除
+        （清单见 `web/ask_user_timeout_driver.py` 模块 docstring）。
 
         到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
         是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
@@ -6464,13 +6476,17 @@ class SessionService:
         return True, meta_tcid == record.tool_call_id, False
 
     async def fork(
-        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
+        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False,
+        sandbox_backend: str | None = None,
     ) -> str:
         """从 ``from_seq``（用户消息 seq）派生 child session，返回其 id（PRD §2.4）。
 
         复用 ``fork.py``，不重写。在途 run 拒绝（ActiveRunConflict），锚点非法
         → InvalidForkBoundary。HTTP 端点默认不生成 tail summary（无模型调用，
         确定性；CLI ``fork`` 仍可显式开启）。
+
+        ``sandbox_backend``（`#1278`）：None = 继承父会话显式选择（父没选 ⇒
+        部署默认）；显式值优先。透传给 ``fork_session``，本层不另造语义。
 
         child 继承父会话的当前模型：fork seed 按设计不含父 ``session/started``，
         不补一条 ``model/changed`` 的话，父创建时选的 catalog 模型会在 child 静默
@@ -6499,6 +6515,8 @@ class SessionService:
                 session_id,
                 boundary_user_message_seq=from_seq,
                 workspace_registry=self._workspace_registry,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=sandbox_backend,
                 with_tail_summary=with_tail_summary,
                 # `#318`：fork 谱系读父账行（只读；父零写入）。
                 budget_ledger=self._stores.delegation_tree_ledger,

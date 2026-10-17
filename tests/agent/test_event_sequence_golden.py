@@ -139,7 +139,12 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
-from agent_harness.session.event import EVENT_TYPES, RUN_TERMINAL_TYPES
+from agent_harness.session.event import (
+    ERROR,
+    EVENT_TYPES,
+    RUN_TERMINAL_TYPES,
+    WORKFLOW_MODE_CHANGED,
+)
 from agent_harness.storage import SqliteOperationLedger
 from agent_harness.tooling import (
     ErrorCode,
@@ -906,12 +911,19 @@ async def test_emitted_sequence_matches_golden(name: str, tmp_path: Any) -> None
 async def test_emitted_ephemeral_are_exactly_the_stream_only_types(
     name: str, tmp_path: Any,
 ) -> None:
-    """只有 STREAM_ONLY_TYPES 能不带 seq；其余帧一律带 seq。"""
+    """只有 STREAM_ONLY_TYPES 能不带 seq；其余帧一律带 seq——唯一例外是
+    #1280 钉住的**存储降级帧**：durable 型因 `Session.append` 失败降级为瞬时帧时
+    无 seq 可分配，`data.degraded=True` 自描述（生产唯一发射点：runtime 异常臂的
+    run-failed-before-plan 降级路径）。"""
     _scenario, emitted, session = await _run(name, tmp_path)
     for event in emitted:
         if event.seq is None:
-            assert event.type in STREAM_ONLY_TYPES, \
-                f"{event.type} 不带 seq 但不在 STREAM_ONLY_TYPES 里"
+            assert event.type in STREAM_ONLY_TYPES or (
+                event.type == ERROR and event.data.get("degraded") is True
+            ), (
+                f"{event.type} 不带 seq 但不在 STREAM_ONLY_TYPES 里，"
+                "也不是带 degraded 标记的 error 降级帧"
+            )
             assert not event.is_durable
         else:
             assert event.type not in STREAM_ONLY_TYPES, \
@@ -963,6 +975,48 @@ async def test_durable_frames_mirror_the_persisted_log(name: str, tmp_path: Any)
     _scenario, emitted, session = await _run(name, tmp_path)
     frames = [e for e in emitted if e.seq is not None]
     persisted = [(e.type, e.seq, e.step_id, e.data) for e in _persisted(session)]
+    assert [(e.type, e.seq, e.step_id, e.data) for e in frames] == persisted[:len(frames)]
+
+
+@pytest.mark.asyncio
+async def test_fatal_error_frame_follows_terminal_in_full_stream(tmp_path: Any) -> None:
+    """#1280 review A 轴 P3：run-failed-before-plan 臂的**全消费**流序。
+
+    `SCENARIO_IDS` 的场景表不覆盖这条臂（plan 档 ∧ 计划从未生成 ∧ 模型中途炸），
+    「error 帧（seq N+1）在 run/failed（seq N）之后进流、镜像前缀序成立」此前只有
+    结构推演（append 在 `failure_terminal` 之后、yield 顺序与落盘同序）。本用例
+    在全消费流上补直接证据：run/failed → error 相邻、seq 递增、与落盘逐条全等。
+    """
+    session = make_session(tmp_path)
+    # plan 档是 run 的初始条件（与 tests/agent/test_runtime_failure_paths.py
+    # 的 #1280 AC1 断开用例同口径：先切档、后启动）。
+    session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+    runtime = _runtime(_ExplodingModel())
+    emitted = [e async for e in runtime.run_stream(session, "先出计划")]
+
+    failed_idx = next(i for i, e in enumerate(emitted) if e.type == RUN_FAILED)
+    error_idx = next(i for i, e in enumerate(emitted) if e.type == ERROR)
+    assert error_idx == failed_idx + 1, (
+        f"durable error 帧必须紧跟 run/failed 进流：{[e.type for e in emitted]}"
+    )
+    failed, error = emitted[failed_idx], emitted[error_idx]
+    assert failed.seq is not None and error.seq is not None
+    assert error.seq > failed.seq, (
+        f"error.seq 必须晚于 run/failed.seq：{error.seq} vs {failed.seq}"
+    )
+    assert error.data["code"] == "run-failed-before-plan"
+    assert error.data.get("degraded") is None, "落盘成功路径不得带 degraded 标记"
+
+    # 镜像前缀序在该臂上同样成立（与 test_durable_frames_mirror_the_persisted_log
+    # 同判据）：流里带 seq 的帧逐条等于落盘事实的前缀。落盘序列里 run 之前手写的
+    # workflow/mode-changed（切档初始条件）不进流，按类型排除——不从流侧取
+    # from_seq 锚（修后重审 P4：以流首帧为锚时，回归丢掉第一个带 seq 帧会把
+    # 盲区右移，断言假绿）。
+    frames = [e for e in emitted if e.seq is not None]
+    persisted = [
+        (e.type, e.seq, e.step_id, e.data)
+        for e in _persisted(session) if e.type != WORKFLOW_MODE_CHANGED
+    ]
     assert [(e.type, e.seq, e.step_id, e.data) for e in frames] == persisted[:len(frames)]
 
 

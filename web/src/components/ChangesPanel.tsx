@@ -16,10 +16,12 @@
  *  不做 git 状态——那是 #191。
  */
 import { FileDiff } from 'lucide-react';
-import { useState } from 'react';
-import type { ToolCall } from '../types';
-import { changedFiles, type FileChange } from '../lib/changedFiles';
+import { useMemo, useState } from 'react';
+import type { AgentEvent } from '../types';
+import type { FileChange } from '../lib/changedFiles';
+import { summarizeTaskRuns } from '../lib/taskReviewSummary';
 import { DiffBlock } from './DiffBlock';
+import '../styles/task-review.css';
 
 /** 统计徽标：`+N` / `-M` 只显示非零的一侧，净零显示 `±0`。
  *  `±0` 是一条真事实（改完又改回去）——隐藏它会让这个文件看起来"没被改过"，
@@ -61,22 +63,56 @@ function UnattributedFootnote({ count }: { count: number }) {
 }
 
 export function ChangesPanel({
-  tools,
+  files,
+  unattributed,
   sessionId,
+  events = [],
+  eventsVersion,
+  streaming = false,
+  onOpenTaskReview,
 }: {
-  tools: readonly ToolCall[];
+  files: readonly FileChange[];
+  unattributed: number;
   /** #186 AC2：归档 diff 的「就地展开」要按会话读 artifact 内容。 */
   sessionId?: string;
+  events?: readonly AgentEvent[];
+  eventsVersion: number;
+  streaming?: boolean;
+  onOpenTaskReview?: () => void;
 }) {
-  const { files, unattributed } = changedFiles(tools);
   const [wanted, setWanted] = useState<string | null>(null);
   /* 渲染期收窄（同 #182 `resolveActiveTab` / #183 的 peek 口径）：选中的文件可能已经
    * 不在清单里（会话切换、或那次改动被后续事件改写），此时落回第一个文件——绝不留在
    * 一个指向不存在文件的选择上。 */
   const selected = files.find((f) => f.path === wanted) ?? files[0] ?? null;
+  // Projection appends events in place; eventsVersion is the append invalidation signal.
+  const runSummary = useMemo(
+    () => (streaming ? null : summarizeTaskRuns(events)),
+    [sessionId, eventsVersion, streaming], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const showReviewSummary =
+    runSummary?.hasTerminalRun === true && !runSummary.hasRunningRun;
 
   return (
     <div className="changes-panel" role="region" aria-label="文件/改动">
+      {showReviewSummary && runSummary && (
+        <div className={`task-review-summary${runSummary.incompleteCount > 0 ? ' is-warning' : ''}`}>
+          <span className="task-review-summary-message" role="status">
+            {runSummary.incompleteCount > 0
+              ? `有 ${runSummary.incompleteCount} 个任务未完成，请查看`
+              : `本次改动 ${files.length} 个文件，请查看 diff`}
+          </span>
+          {onOpenTaskReview && (
+            <button
+              type="button"
+              className={`task-review-summary-link${runSummary.emphasizeDetails ? ' is-emphasized' : ''}`}
+              onClick={onOpenTaskReview}
+            >
+              详细审阅
+            </button>
+          )}
+        </div>
+      )}
       {files.length === 0 ? (
         <div className="detail-tab-empty">
           <FileDiff size={24} className="detail-empty-icon" aria-hidden="true" />

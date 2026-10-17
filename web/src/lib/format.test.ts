@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
+import { formatBytes, formatCoarseDuration, formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -133,6 +133,30 @@ describe('formatBytes — 唯一实现（#937 / M-22：1024 进制 + IEC 标签�
     expect(formatBytes(-1)).toBe('—');
     expect(formatBytes(NaN)).toBe('—');
     expect(formatBytes(Infinity)).toBe('—');
+  });
+});
+
+describe('formatCoarseDuration — 分钟级时长（委派 / 子智能体 roster，可读性优先）', () => {
+  it('<60s 显 N秒（整秒向下取整）', () => {
+    expect(formatCoarseDuration(0)).toBe('0秒');
+    expect(formatCoarseDuration(59_999)).toBe('59秒');
+  });
+
+  it('1–59 分钟显 M分S秒', () => {
+    expect(formatCoarseDuration(60_000)).toBe('1分0秒');
+    expect(formatCoarseDuration(12 * 60_000 + 18_000)).toBe('12分18秒'); // mockup 的 12分18秒
+    expect(formatCoarseDuration(3_599_999)).toBe('59分59秒');
+  });
+
+  it('≥60 分钟显 H小时M分', () => {
+    expect(formatCoarseDuration(3_600_000)).toBe('1小时0分');
+    expect(formatCoarseDuration(2 * 3_600_000 + 3 * 60_000)).toBe('2小时3分');
+  });
+
+  it('非有限 / 负值（时钟倒挂）返回 null（不显数字，与 formatDuration 同口径）', () => {
+    expect(formatCoarseDuration(-1)).toBeNull();
+    expect(formatCoarseDuration(NaN)).toBeNull();
+    expect(formatCoarseDuration(Infinity)).toBeNull();
   });
 });
 

@@ -181,8 +181,8 @@ describe('applyEvent — 折叠语义', () => {
     expect(state.pending_ask_user).toBeNull();
   });
 
-  it('#1224：ask_user 载荷里的 timeout_seconds 投影到待回答请求（缺省不伪造）', () => {
-    const withTimeout = ev({
+  it('#1284：ask_user 超时快照投影为分钟（新字段优先，旧事件由 seconds 换算）', () => {
+    const make = (data: Record<string, unknown>) => ev({
       type: EventType.USER_INPUT_REQUESTED,
       seq: 1,
       run_id: 'run-1',
@@ -190,26 +190,45 @@ describe('applyEvent — 折叠语义', () => {
         request_id: 'ask-1',
         kind: 'ask_user',
         run_id: 'run-1',
-        timeout_seconds: 600,
         questions: [{ question: 'Ship?', header: 'Rel', options: [{ label: 'A' }, { label: 'B' }] }],
+        ...data,
       },
     });
-    expect(projectHistory('s', [withTimeout]).pending_ask_user?.timeout_seconds).toBe(600);
+    const projected = (data: Record<string, unknown>) =>
+      projectHistory('s', [make(data)]).pending_ask_user?.timeout_minutes;
 
-    // 旧事件无 timeout_seconds ⇒ 字段缺席（卡片回落中性提示，不伪造数字）。
-    const legacy = ev({
-      type: EventType.USER_INPUT_REQUESTED,
-      seq: 1,
-      run_id: 'run-1',
-      data: {
-        request_id: 'ask-2',
-        kind: 'ask_user',
-        run_id: 'run-1',
-        questions: [{ question: 'Ship?', header: 'Rel', options: [{ label: 'A' }, { label: 'B' }] }],
-      },
-    });
-    expect(projectHistory('s', [legacy]).pending_ask_user?.timeout_seconds).toBeUndefined();
+    // 新事件：后端落盘的 timeout_minutes 直接投影（前端不再自算）。
+    expect(projected({ timeout_seconds: 600, timeout_minutes: 10 })).toBe(10);
+    expect(projected({ timeout_seconds: 60, timeout_minutes: 1 })).toBe(1);
+    // 冲突时 minutes 优先（与后端 `ask_user_timeout_seconds_from_payload` 同一优先级：
+    // 计时、注入消息与卡片必须始终同数）。
+    expect(projected({ timeout_seconds: 60, timeout_minutes: 10 })).toBe(10);
+    // #1224 旧事件只有 seconds ⇒ 同一公式换算（向下取整且至少 1）。
+    expect(projected({ timeout_seconds: 600 })).toBe(10);
+    expect(projected({ timeout_seconds: 60 })).toBe(1);
+    // 旧旧事件（#1224 之前）无字段 ⇒ 缺席（卡片回落中性提示，不伪造数字）。
+    expect(projected({})).toBeUndefined();
   });
+
+  it.each([0, -60, 1.5, 600.5, '600', true, null])(
+    '#1284：非法超时快照 %s ⇒ 不投影（不钳成 1 分钟/不伪造数字）',
+    (bad) => {
+      const event = ev({
+        type: EventType.USER_INPUT_REQUESTED,
+        seq: 1,
+        run_id: 'run-1',
+        data: {
+          request_id: 'ask-bad',
+          kind: 'ask_user',
+          run_id: 'run-1',
+          timeout_seconds: bad,
+          timeout_minutes: bad,
+          questions: [{ question: 'Ship?', header: 'Rel', options: [{ label: 'A' }, { label: 'B' }] }],
+        },
+      });
+      expect(projectHistory('s', [event]).pending_ask_user?.timeout_minutes).toBeUndefined();
+    },
+  );
 
   it('#1204：畸形 ask_user 载荷不投影（不伪造空卡片）', () => {
     const bad = ev({
@@ -1255,6 +1274,21 @@ describe('applyEvent — df4f7d8 新形状', () => {
   it('summarizeEvent：MEMORY_DEGRADED / MODEL_FAILED 空摘要（类型标签足够）', () => {
     expect(summarizeEvent(ev({ type: EventType.MEMORY_DEGRADED, data: { reason: 'x' } }))).toBe('');
     expect(summarizeEvent(ev({ type: EventType.MODEL_FAILED }))).toBe('');
+  });
+
+  // #1280 AC4：`error`（#1193 致命失败信号）不再空摘要——message 是可读原因。
+  // 与 summarizeRunFailed 同规则不截断（完整句子，ADR-0033 §2.3）。
+  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（全文不截断）；缺失 → 「运行失败」', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.ERROR,
+      data: { code: 'run-failed-before-plan', message: '模型调用失败' },
+    }))).toBe('运行失败 · 模型调用失败');
+    const long = 'x'.repeat(60);
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: long } }))).toBe(
+      `运行失败 · ${long}`,
+    );
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('运行失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('运行失败');
   });
 
   // ── 事件语义注册表（架构深化 C2）：穷尽性由 tsc 强制

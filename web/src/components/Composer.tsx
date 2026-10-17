@@ -180,6 +180,14 @@ interface Props {
    *  `restoreFailedDrafts` 的同一纪律回填（只在输入框为空时，绝不覆盖更新的草稿）。
    *  对象引用变化即触发一次注入（裸 string 会被 `Object.is` 挡掉第二次，见 `FailedDraft`）。 */
   failedDraft?: FailedDraft | null;
+  /** #1264（Shape A）：后端**真有**压缩在途——即会话投影里
+   *  `compaction/start` 已到、`compaction/end` 未到（`lib/projection.ts`
+   *  `projectCompactionInProgress`）。自动路径（run 循环内再压）与手动
+   *  `/compact` 都经同一对事件，因此这一个 flag 同时覆盖两条路径。
+   *
+   *  纪律（#1197 项 5A 的教训）：这里**只读投影**，不做任何前端推断——
+   *  缺省 `false` 就是"没有证据说在压"，绝不猜。 */
+  compactionInProgress?: boolean;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
    *  降级隐藏（不伪造列表）。条目即目录真相，零硬编码模型名。 */
   models?: ModelCatalogEntry[];
@@ -254,6 +262,7 @@ export const Composer = memo(function Composer({
   onCancel,
   presetTask,
   failedDraft = null,
+  compactionInProgress = false,
   models = [],
   selectedModel = null,
   onModelChange,
@@ -1165,7 +1174,11 @@ export const Composer = memo(function Composer({
           {slashInfo}
         </div>
       )}
-      {compact.compacting && (
+      {/* #1264：**两条路径共用一个面**——手动 `/compact`（`compact.compacting`）
+          与自动路径的循环内再压（`compactionInProgress`，投影自
+          `compaction/start`..`compaction/end`）。文案是 #1197 项 5 的一手文案
+          （四家成熟产品同款），不另造措辞。 */}
+      {(compact.compacting || compactionInProgress) && (
         <div data-testid="slash-compacting" role="status" className="slash-status">
           <span className="ctx-usage-spinner" aria-hidden="true" />
           正在压缩上下文…
