@@ -1373,6 +1373,66 @@ for (const theme of ['dark', 'light'] as const) {
       expect(m.fontSize, `${sel} font-size (${theme})`).toBe('12px');
     }
   });
+
+  /* #1200 插件管理窗口：面板新立的全部可见文字（名称 / 元信息 / 来源标签 / 状态 pill /
+     工具 chip / 错误条）在暗亮两主题下 ≥4.5 且守 12px 地板。状态 pill 与错误条是
+     **语义色当正文色**的又一例（亮色纯 --warning 在白底/12% 染底上不达 AA），
+     修法同 #1175/#1190 的 ink-mix；把 color 改回纯 token 时本用例必红。 */
+  test(`[${theme}] #1200 插件管理窗口对比度 ≥4.5 且 12px 地板`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [],
+      mcpServers: [
+        {
+          name: 'playwright', connected: true, enabled: true, needs_auth: false,
+          tool_count: 2, require_confirm: false, transport: 'stdio',
+          command: 'npx @playwright/mcp', url: '',
+        },
+        {
+          name: 'github', connected: false, enabled: true, needs_auth: true,
+          tool_count: 0, require_confirm: true, transport: 'http', command: '',
+          url: 'https://example.test/mcp',
+        },
+      ],
+      mcpTools: {
+        playwright: [
+          { name: 'browser_navigate', description: '打开页面', enabled: true },
+          { name: 'browser_upload', description: '上传文件', enabled: false },
+        ],
+      },
+      skills: [{
+        name: 'code-review', description: '双轴代码审查', when_to_use: '',
+        source: '/ws/skills/code-review/SKILL.md', scope: 'workspace',
+        origin: 'project', enabled: true,
+      }],
+      mcpErrors: ['plugin-settings.json 不可读：示例'],
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: '插件' }).click();
+    await expect(page.getByTestId('plugin-panel')).toBeVisible();
+    // 首行（playwright）默认选中 → 详情区与工具 chips 落屏；再点 github 看 amber pill。
+    await expect(page.locator('.plugin-dialog .pill.green').first()).toBeVisible();
+    await expectEachContrast(page, theme, [
+      '.plugin-name',
+      '.plugin-meta',
+      '.plugin-tag',
+      '.plugin-dialog .pill.green',
+      '.plugin-dialog .tool-chip',
+      '.plugin-errors',
+    ]);
+    await page.getByTestId('plugin-row-github').click();
+    await expect(page.locator('.plugin-dialog .pill.amber').first()).toBeVisible();
+    await expectEachContrast(page, theme, ['.plugin-dialog .pill.amber']);
+    // 12px 地板：面板内所有可读文本（10/11px 在本轮审查里被清掉）。
+    for (const sel of ['.plugin-meta', '.plugin-tag', '.plugin-dialog .pill.amber', '.plugin-errors']) {
+      const m = await measure(page, sel);
+      expect(m.fontSize, `${sel} font-size (${theme})`).toBe('12px');
+    }
+    // 名称是 13px（--text-sm，面板里的主标识）；只守地板，不钉具体档位。
+    const nameSize = await measure(page, '.plugin-name');
+    expect(parseFloat(nameSize.fontSize), `.plugin-name font-size (${theme})`).toBeGreaterThanOrEqual(12);
+  });
 }
 
 /* ── #1204：`.ask-user-error`（提问卡片恢复失败条）语义色正文对比度回归锁 ──

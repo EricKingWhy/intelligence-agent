@@ -1384,7 +1384,7 @@ class ToolExecutor:
         # #1200 / 裁决 E：MCP server 的「调用工具前需要我确认」。这是**每次调用都
         # 问人**的显式选择，必须压过规则引擎 ALLOW 早退，也不能被会话 grant /
         # 项目级持久规则短路（它们替代的是"人的重复决定"，不是这条每次确认）。
-        requires_confirmation = bool(getattr(tool, "require_confirmation", False))
+        requires_confirmation = bool(tool.require_confirmation)
 
         rule_verdict = RuleVerdict.NO_MATCH
         rule_reason: str | None = None

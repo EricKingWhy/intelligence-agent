@@ -54,21 +54,14 @@ def register_skill_routes(app: FastAPI) -> None:
         # #1200 / 裁决 D1：`enabled` 以 plugin-settings.json 的持久选择态为准
         # （管理窗口在重启前就要看到"已禁用"的意图；真正不投影给模型发生在下次
         # 装配）。settings 读不出时回落目录条目的 enabled（不把只读列表打成 500）。
-        from agent_harness.plugins.settings import (
-            PluginSettings,
-            PluginSettingsError,
-            load_plugin_settings,
-        )
+        from agent_harness.plugins.settings import load_plugin_settings_or_default
 
         # getattr 防御：宿主挑战等测试用替身 agent 可能没有 settings；缺失时
         # 不叠加选择态（条目自带的 enabled 仍是权威的目录投影）。
         agent_settings = getattr(app.state.agent, "settings", None)
         workspace_dir = getattr(agent_settings, "workspace_dir", None)
         if workspace_dir is not None:
-            try:
-                plugin_settings = load_plugin_settings(workspace_dir)
-            except PluginSettingsError:
-                plugin_settings = PluginSettings()
+            plugin_settings, _ = load_plugin_settings_or_default(workspace_dir)
         else:
             plugin_settings = None
         payload = {

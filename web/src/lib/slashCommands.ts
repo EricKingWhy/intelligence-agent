@@ -24,21 +24,12 @@ import {
   describeSessionError,
   SessionError,
   TaskNotDefinedError,
+  type SlashRegistryCommand as SlashRegistryEntry,
 } from './api';
 
 /** #1200 Phase 3：`/` 菜单的唯一数据源（后端 `GET /api/plugins/slash-registry`）。
- *  内置命令与 skill 同处一个列表；前端**不再维护**任何命令元数据（D2=A）。 */
-export type SlashRegistryKind = 'builtin' | 'skill';
-
-export interface SlashRegistryEntry {
-  name: string;
-  kind: SlashRegistryKind;
-  description: string;
-  /** 参数提示（frontmatter `argument-hint`），仅 skill 可能有。 */
-  argumentHint?: string;
-  /** 插件来源 skill 的消歧前缀（渲染为 `/namespace:name`）。 */
-  namespace?: string;
-}
+ *  形状定义在 api.ts（线上类型的唯一出处）；这里 re-export 一次，调用点不必双导入。 */
+export type { SlashRegistryCommand as SlashRegistryEntry } from './api';
 
 /** 菜单里显示的命令名：插件 skill 加 `namespace:` 前缀消歧（票面 §4）。 */
 export function slashDisplayName(entry: SlashRegistryEntry): string {
@@ -138,19 +129,16 @@ function makeOpen(open: (ctx: SlashCommandContext) => void) {
   };
 }
 
-/** 内置命令的执行表（按 name 查）；顺序无关——展示顺序由后端 registry 决定。 */
-export const BUILTIN_RUNS: Readonly<Record<string, SlashCommand['run']>> = {
+/** 内置命令的执行表（按 name 查）；顺序无关——展示顺序由后端 registry 决定。
+ *  类型是 `Partial`：后端 registry 才是"哪些内置命令存在"的真相，前端表可能落后
+ *  （漏一条 = 菜单能点但没回调）⇒ 调用方必须处理 `undefined`，不许静默吞。 */
+export const BUILTIN_RUNS: Readonly<Partial<Record<string, SlashCommand['run']>>> = {
   goal: runGoal,
   plan: runPlan,
   compact: runCompact,
   permission: makeOpen((ctx) => ctx.openPermissionPicker()),
   model: makeOpen((ctx) => ctx.openModelPicker()),
 };
-
-/** 兼容导出（#1195 测试与旧调用点按 name 查 run）。 */
-export const SLASH_COMMANDS: readonly SlashCommand[] = Object.entries(BUILTIN_RUNS).map(
-  ([name, run]) => ({ name, run }),
-);
 
 export interface SlashTriggerMatch {
   query: string;
@@ -160,7 +148,8 @@ export interface SlashTriggerMatch {
 }
 
 /** 触发判定（票面正则 `/(^|\s)\/(\w*)$/`）：行首或空格后半角 `/` 开尾。
- *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。 */
+ *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。
+ *  #1200：`:` 额外进 query（插件 skill 的显示名是 `plugin:skill`）。 */
 export function slashTriggerMatch(value: string): SlashTriggerMatch | null {
   // #1200：`:` 也进 query——插件 skill 的显示名是 `plugin:skill`，输入到冒号后
   // 仍要继续 fuzzy 过滤（票面 §4「继续输入 fuzzy 过滤」）。
@@ -173,7 +162,8 @@ export interface SlashSubmitMatch {
   args: string | undefined;
 }
 
-/** 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`）：
+/** 带参提交拦截（票面正则 `^\/([\w:-]+)(?:\s+([\s\S]+))?$`；#1200 补 `:`，
+ *  与触发正则同一字符集——否则 `/acme:code-review args` 菜单能插入、提交却不拦截）：
  *  整条输入是一个命令调用且命令名在注册表 ⇒ preventDefault 本地执行，
  *  不走「原发送逻辑」（防止 `/goal <文本>` 被当聊天发给 agent）。
  *  调用方传 **trim 后**的整条输入（审查 A-P2-1：`/goal␣` 尾随空格同样落到
@@ -182,7 +172,7 @@ export function slashSubmitMatch(
   value: string,
   knownNames: readonly string[],
 ): SlashSubmitMatch | null {
-  const m = /^\/(\w+)(?:\s+([\s\S]+))?$/.exec(value);
+  const m = /^\/([\w:-]+)(?:\s+([\s\S]+))?$/.exec(value);
   if (!m || !knownNames.includes(m[1])) return null;
   return { name: m[1], args: m[2] };
 }

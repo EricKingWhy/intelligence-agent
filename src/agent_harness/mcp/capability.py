@@ -37,18 +37,12 @@ class MCPCapability:
         self.errors = errors
         # #1200：管理面数据源。configs 是「配置 ∪ 运行时」里的配置层（含未连接/
         # 已断开的 server）；server_tools 是每 server 的发现结果（含被工具级禁用
-        # 过滤掉的条目——管理面要显示它们并给出启停开关）。缺省时从现有连接
-        # 与工具推导，旧构造点（3 个位置参数）行为不变。
+        # 过滤掉的条目——管理面要显示它们并给出启停开关）。缺省为空表：管理面
+        # 没有发现结果就是没有，不从工具表反推。
         self._configs = list(configs or ())
-        if server_tools is not None:
-            self._server_tools = {name: list(items) for name, items in server_tools.items()}
-        else:
-            grouped: dict[str, list[Any]] = {}
-            for tool in tools:
-                server = getattr(tool, "server_name", None)
-                if server is not None:
-                    grouped.setdefault(server, []).append(tool)
-            self._server_tools = grouped
+        self._server_tools = {
+            name: list(items) for name, items in (server_tools or {}).items()
+        }
         # #362 / W-18：server 名 → 连接（按 server 断开用；连接按配置顺序先到先得，
         # 同名冲突的工具已在 build 时丢弃，连接本身保留首个）。
         # getattr 防御：测试替身（StubConnection）可能没有 config_name。
@@ -161,10 +155,6 @@ async def build_mcp_capability(
         if server.name in disabled_servers:
             continue
         connection = MCPServerConnection(server)
-        # 管理面需要"配置了但没连上"也可见（连接失败降级后仍在列表里）。
-        # 测试替身没有 config_name 也无妨（getattr 缺省 None）。
-        if getattr(connection, "config_name", None) is None:
-            connection.config_name = server.name  # type: ignore[attr-defined]
         try:
             await connection.connect()
             remote_tools = await connection.list_tools()

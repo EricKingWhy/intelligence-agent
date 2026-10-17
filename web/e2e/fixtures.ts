@@ -471,6 +471,18 @@ export interface ApiMock {
   };
   /** 这些路径的列举直接回错误（错误矩阵就地显示：403 无权限 / 404 / 422 不是目录）。 */
   hostDirsErrors?: Record<string, { status: number; detail: string }>;
+  // ── #1200 插件管理窗口 ──
+  /** `GET /api/mcp/servers` 的行（形状 = 后端 `list_mcp_servers`，含 #1200 增量字段）。
+   *  缺省 = 空列表（"没配 MCP"是缺省态，不该让无关 spec 看到红色错误盒）。 */
+  mcpServers?: unknown[];
+  /** `GET /api/mcp/servers` 的 `errors` 数组（配置解析失败 / 选择态不可读）。 */
+  mcpErrors?: string[];
+  /** `GET /api/mcp/servers/{name}/tools` 的行（缺省 = 空）。 */
+  mcpTools?: Record<string, unknown[]>;
+  /** `GET /api/skills` 的行（形状 = 后端 `skills.py`，含 #1200 的 scope/origin/enabled）。 */
+  skills?: unknown[];
+  /** `GET /api/plugins/slash-registry` 的 commands（缺省 = 空）。 */
+  slashRegistry?: unknown[];
 }
 
 /** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
@@ -1393,6 +1405,23 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       if (before === null) project.session_ids.push(sessionId);
       else project.session_ids.splice(project.session_ids.indexOf(before), 0, sessionId);
       return json(route, projectView(project));
+    }
+
+    // ── #1200 插件管理窗口（只读面；写端点不在 e2e 覆盖范围——Phase 2 由
+    //    `tests/web/test_plugin_management_api.py` 锁后端语义）──
+    if (path === '/api/mcp/servers' && req.method() === 'GET') {
+      return json(route, { servers: mock.mcpServers ?? [], errors: mock.mcpErrors ?? [] });
+    }
+    const mcpToolsMatch = /^\/api\/mcp\/servers\/([^/]+)\/tools$/.exec(path);
+    if (mcpToolsMatch && req.method() === 'GET') {
+      const name = decodeURIComponent(mcpToolsMatch[1]);
+      return json(route, { tools: mock.mcpTools?.[name] ?? [] });
+    }
+    if (path === '/api/skills' && req.method() === 'GET') {
+      return json(route, { skills: mock.skills ?? [], errors: [], conflicts: [] });
+    }
+    if (path === '/api/plugins/slash-registry' && req.method() === 'GET') {
+      return json(route, { commands: mock.slashRegistry ?? [] });
     }
 
     // ── WS-7 / #170：宿主目录列举（`path` 缺省 = 根模式）──

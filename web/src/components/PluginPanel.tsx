@@ -183,7 +183,9 @@ function PluginPanelBody() {
             placeholder="搜索插件…"
             aria-label="搜索插件"
           />
-          <div className="plugin-list" role="list">
+          {/* 列表语义：这里是一组**按钮**，不是 list/listitem——把 listitem 压在
+              button 上会顶掉 button 角色（读屏只剩"列表项"，不再说可点击）。 */}
+          <div className="plugin-list">
             <div className="plugin-group">MCP SERVERS · {visibleServers.length}</div>
             {visibleServers.map((server) => {
               const selected =
@@ -206,7 +208,6 @@ function PluginPanelBody() {
                 <button
                   key={server.name}
                   type="button"
-                  role="listitem"
                   data-testid={`plugin-row-${server.name}`}
                   className={`plugin-row${selected ? ' selected' : ''}`}
                   onClick={() => setSelection({ kind: 'server', name: server.name })}
@@ -228,7 +229,6 @@ function PluginPanelBody() {
                 <button
                   key={skill.name}
                   type="button"
-                  role="listitem"
                   data-testid={`plugin-row-${skill.name}`}
                   className={`plugin-row${selected ? ' selected' : ''}`}
                   onClick={() => setSelection({ kind: 'skill', name: skill.name })}
@@ -398,7 +398,7 @@ function ServerDetail({
 
       <div className="pd-sec">
         <div className="pd-sec-title">
-          工具（{server.tool_count}）— 由模型自动调用，不进 / 菜单
+          工具（{tools?.length ?? server.tool_count}）— 由模型自动调用，不进 / 菜单
         </div>
         {tools === null ? (
           <div className="plugin-meta">正在加载工具清单…</div>

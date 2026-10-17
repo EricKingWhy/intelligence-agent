@@ -3802,10 +3802,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .slash-menu-item.selected {
   background: var(--surface-selected);
 }
-.slash-menu-label {
-  color: var(--text-primary);
-  font-size: 12px;
-}
 .slash-menu-name {
   color: var(--text-tertiary);
   font-size: 11px;
@@ -9643,7 +9639,7 @@ button.json-row {
 }
 .plugin-group {
   padding: 10px 8px 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   letter-spacing: 0.4px;
   color: var(--text-tertiary);
 }
@@ -9677,7 +9673,7 @@ button.json-row {
   color: var(--text-primary);
 }
 .plugin-meta {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -9686,7 +9682,7 @@ button.json-row {
 .plugin-tag {
   margin-left: auto;
   flex: none;
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   background: var(--surface-1);
   border: 1px solid var(--border-subtle);
@@ -9707,8 +9703,10 @@ button.json-row {
 .plugin-errors {
   max-height: 90px;
   overflow-y: auto;
-  font-size: 11px;
-  color: var(--warning);
+  font-size: var(--text-xs);
+  /* 语义色当正文色用：亮色 #b07a10 在白底只有 3.7:1（不达 AA）。ink-mix 与
+     .app-error / #1175 族同一修法（亮色压深、暗色只升不降）。 */
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
 }
 .plugin-btn {
   font-size: var(--text-sm);
@@ -9747,7 +9745,7 @@ button.json-row {
   background: var(--text-tertiary);
 }
 .plugin-dialog .pill {
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 2px 9px;
   border-radius: 20px;
   flex: none;
@@ -9760,7 +9758,8 @@ button.json-row {
   background: color-mix(in srgb, var(--success) 12%, transparent);
 }
 .plugin-dialog .pill.amber {
-  color: var(--warning);
+  /* 同上：12% 染底上纯 --warning 亮色仅 3.3:1。 */
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   border-color: color-mix(in srgb, var(--warning) 30%, transparent);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
 }
@@ -9795,7 +9794,7 @@ button.json-row {
 }
 .plugin-dialog .pd-config code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-primary);
   background: var(--surface-1);
   border: 1px solid var(--border-subtle);
@@ -9809,7 +9808,7 @@ button.json-row {
 }
 .plugin-dialog .tool-chip {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   background: var(--surface-1);
   border: 1px solid var(--border-subtle);

@@ -26,7 +26,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from agent_harness.skills.package_lock import registry_lock
@@ -145,6 +145,20 @@ def load_plugin_settings(workspace_dir: str | os.PathLike[str]) -> PluginSetting
     return _parse(payload)
 
 
+def load_plugin_settings_or_default(
+    workspace_dir: str | os.PathLike[str],
+) -> tuple[PluginSettings, str | None]:
+    """读选择态；坏文件按全默认降级并返回错误文本（调用方决定告警/呈现）。
+
+    三处装配/只读投影（wiring ×2、`GET /api/skills`、`GET /api/mcp/servers`）
+    共用这一份降级语义：文件损坏是"选不出"，不是"全禁用"，更不该 500。
+    """
+    try:
+        return load_plugin_settings(workspace_dir), None
+    except PluginSettingsError as error:
+        return PluginSettings(), str(error)
+
+
 def _write_atomic(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -181,8 +195,6 @@ def mutate_plugin_settings(
             updated = mutate(current)
             _write_atomic(path, updated.to_dict())
             return updated
-    except PluginSettingsError:
-        raise
     except OSError as error:
         raise PluginSettingsError(f"无法写入 {path}: {error}") from error
 
@@ -195,12 +207,7 @@ def set_server_enabled(
         disabled.discard(name)
         if not enabled:
             disabled.add(name)
-        return PluginSettings(
-            disabled_servers=frozenset(disabled),
-            disabled_tools=current.disabled_tools,
-            require_confirm=current.require_confirm,
-            skill_overrides=current.skill_overrides,
-        )
+        return replace(current, disabled_servers=frozenset(disabled))
 
     return mutate_plugin_settings(workspace_dir, _mutate)
 
@@ -216,11 +223,9 @@ def set_tool_enabled(
             bucket.add(tool)
         if not bucket:
             disabled.pop(server, None)
-        return PluginSettings(
-            disabled_servers=current.disabled_servers,
+        return replace(
+            current,
             disabled_tools={key: frozenset(value) for key, value in disabled.items()},
-            require_confirm=current.require_confirm,
-            skill_overrides=current.skill_overrides,
         )
 
     return mutate_plugin_settings(workspace_dir, _mutate)
@@ -234,12 +239,7 @@ def set_require_confirm(
         names.discard(name)
         if require_confirm:
             names.add(name)
-        return PluginSettings(
-            disabled_servers=current.disabled_servers,
-            disabled_tools=current.disabled_tools,
-            require_confirm=frozenset(names),
-            skill_overrides=current.skill_overrides,
-        )
+        return replace(current, require_confirm=frozenset(names))
 
     return mutate_plugin_settings(workspace_dir, _mutate)
 
@@ -253,11 +253,6 @@ def set_skill_enabled(
             overrides.pop(name, None)
         else:
             overrides[name] = False
-        return PluginSettings(
-            disabled_servers=current.disabled_servers,
-            disabled_tools=current.disabled_tools,
-            require_confirm=current.require_confirm,
-            skill_overrides=overrides,
-        )
+        return replace(current, skill_overrides=overrides)
 
     return mutate_plugin_settings(workspace_dir, _mutate)

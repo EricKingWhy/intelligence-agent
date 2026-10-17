@@ -211,6 +211,49 @@ describe('#1195 触发与渲染', () => {
     expect(container.querySelector('[data-slash-name="api-design"]')).toBeNull();
   });
 
+  it('注册表加载中：菜单说"正在加载"，Enter 不把 `/` 输入当聊天发出去', async () => {
+    let resolveRegistry: (v: SlashRegistryCommand[]) => void = () => {};
+    vi.mocked(getSlashRegistry).mockImplementation(
+      () => new Promise<SlashRegistryCommand[]>((resolve) => { resolveRegistry = resolve; }),
+    );
+    await mount();
+    await typeText('/go');
+    expect(menu()?.textContent).toContain('正在加载命令');
+    textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    // 加载完成后菜单才给出真实命中（不缓存空表）。
+    await act(async () => { resolveRegistry(REGISTRY); });
+    expect(menu()?.textContent).toContain('/goal');
+  });
+
+  it('点选 skill：插入 `/name ` 到输入框，不执行、不发送（Claude Code 语义）', async () => {
+    await typeText('/deep');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // skill 没有前端 run 回调：接受 = 把 `/skill ` 写进输入框，正文由 agent 的
+    // load_skill 读；这里钉住"不 onSubmit、不清空、菜单关闭"三件事。
+    expect(textarea().value).toBe('/deep-research ');
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(menu()).toBeNull();
+  });
+
+  it('内置命令与前端执行表漂移：点选可见错误，不静默 no-op', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'ghost', kind: 'builtin', description: '后端新增但前端未实现' },
+    ]);
+    await mount();
+    await typeText('/ghost');
+    const item = container.querySelector('[data-slash-name="ghost"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(slashError()).toContain('命令未实现：/ghost');
+    expect(textarea().value).toBe('/ghost');
+  });
+
   it('空格后 / 触发', async () => {
     await typeText('帮我看看 /');
     expect(menu()).not.toBeNull();
@@ -232,10 +275,12 @@ describe('#1195 触发与渲染', () => {
     expect(menuItems()[0].textContent).toContain('plan');
   });
 
-  it('fuzzy 过滤 skill：/deep → deep-research', async () => {
+  it('fuzzy 过滤 skill：/deep → deep-research 排首位', async () => {
     await typeText('/deep');
-    expect(menuItems().length).toBe(1);
+    // fuzzy 是**子序列**匹配：`deep` 也能穿过 `api-design` 的描述（REST API 设计审查）
+    // 命中，故这里钉的是**排序**（显示名前缀命中得分最高），不是「唯一命中」。
     expect(menuItems()[0].getAttribute('data-slash-name')).toBe('deep-research');
+    expect(menuItems().length).toBeLessThan(REGISTRY.length);
   });
 
   it('无命中空态：无匹配命令', async () => {

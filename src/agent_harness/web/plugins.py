@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, HTTPException
@@ -25,15 +24,14 @@ from agent_harness.plugins.settings import (
     set_skill_enabled,
     set_tool_enabled,
 )
-from agent_harness.skills.discovery import single_line
+from agent_harness.skills.discovery import is_valid_skill_name, single_line
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-#: skill 名白名单（票面 §5：不合规 422，不做静默规范化）。
-#: 与 discovery 的 `_NAME_PATTERN` 同族，但这里要求整串匹配（`\Z`）。
-_SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-_]*\Z")
+#: 票面 §5：不合规的 skill 名 422，不做静默规范化。判据与发现/写入侧同一份
+#: （`is_valid_skill_name`），不另起一套正则。
 
 #: `/` 菜单的内置命令（#1195 定稿命令表，D2=A 单一注册表）。
 #: 元数据由后端提供，前端只保留按 name 查表的 `run` 回调（#1200 Phase 3）。
@@ -261,7 +259,7 @@ def register_plugin_routes(app: FastAPI) -> None:
         return {"name": name, "enabled": enabled}
 
     async def _require_skill_known(name: str):
-        if _SKILL_NAME.fullmatch(name) is None:
+        if not is_valid_skill_name(name):
             raise HTTPException(
                 status_code=422,
                 detail=f"非法 skill 名：{name!r}（允许小写字母/数字/连字符/下划线）",

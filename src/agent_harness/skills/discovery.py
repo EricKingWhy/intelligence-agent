@@ -40,6 +40,11 @@ MAX_SKILL_BYTES = 64_000
 SKILL_NAME_MAX_LENGTH = 64
 _NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-_]*")
 
+
+def is_valid_skill_name(name: str) -> bool:
+    """发现 / 写入 / 管理端点共用的唯一 name 判据（#588 白名单 + 长度上限）。"""
+    return bool(_NAME_PATTERN.fullmatch(name)) and len(name) <= SKILL_NAME_MAX_LENGTH
+
 #: 目录行 / ToolResult message 是**单行声明面**（#588 兜底层）。
 #: #607/F2：补 U+0085 NEL / U+2028 LS / U+2029 PS——str.splitlines() 识别集的
 #: 这三成员（CPython 文档全集，本机 3.13.5 实测）漏掉则「单行」输出仍被撕成多行。
@@ -193,7 +198,7 @@ def parse_skill_markdown_text(
     when_to_use = meta.pop("when_to_use", None)
     if not isinstance(name, str) or not name.strip():
         errors.append(f"{_spath(path)}: frontmatter requires non-empty 'name'")
-    elif not _NAME_PATTERN.fullmatch(name) or len(name) > SKILL_NAME_MAX_LENGTH:
+    elif not is_valid_skill_name(name):
         # #588：多行/控制符 name 会插值进 ToolResult message 与 catalog 目录行，
         # 把单行声明拉成多行、可伪造后续行的"系统语气"——入口整体拒绝，进 errors
         # 可观察（ADR-0011 Q1 同款通道）。name 走 repr、path 走 _spath 单行化，错误行自身保持单行。
@@ -524,7 +529,7 @@ class SkillDiscovery:
         # 纵深防御（审查 P2）：entry.name 是磁盘路径的组成部分——解析期白名单
         # （#588）在这里同样强制，公开写入 API 的任何调用方（不限于 promoter 的
         # 解析路径）都不能让 `../x` 式 name 落到 project 目录之外。
-        if not _NAME_PATTERN.fullmatch(entry.name) or len(entry.name) > SKILL_NAME_MAX_LENGTH:
+        if not is_valid_skill_name(entry.name):
             raise ValueError(
                 f"refusing to write: invalid skill name {entry.name!r} "
                 f"(must match ^[a-z0-9][a-z0-9-_]*$, max {SKILL_NAME_MAX_LENGTH} chars)"

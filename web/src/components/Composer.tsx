@@ -527,7 +527,8 @@ export const Composer = memo(function Composer({
         setSlashError('当前没有会话，命令暂不可用');
         return;
       }
-      const run = BUILTIN_RUNS[submitHit.name];
+      // 命中条件就是「name ∈ Object.keys(BUILTIN_RUNS)」⇒ 查表必然有值。
+      const run = BUILTIN_RUNS[submitHit.name]!;
       void runSlashCommand({ name: submitHit.name, run }, submitHit.args);
       setValue('');
       setSlashIndex(0);
@@ -641,7 +642,8 @@ export const Composer = memo(function Composer({
     sessionId != null && !locked ? slashTriggerMatch(value) : null;
   // #1200 Phase 3：菜单数据源唯一化——内置命令 + 启用中的 skill 都来自后端
   // registry（D2=A）；前端只保留 builtin 的 run 回调，不过滤"哪些命令存在"。
-  const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[]>([]);
+  // null = 还没拿到过（首帧/首次打开）：菜单不能把"加载中"说成"无匹配命令"。
+  const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[] | null>(null);
   // 菜单每次打开都重拉：插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。
   const slashActive = slashMatch !== null;
   useEffect(() => {
@@ -653,7 +655,8 @@ export const Composer = memo(function Composer({
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        // 注册表拿不到就不画菜单（不伪造命令），原因落到可见错误面。
+        // 注册表拿不到就不伪造命令：落成空表（不是永久"加载中"），原因落到可见错误面。
+        setSlashRegistry([]);
         setSlashError(e instanceof Error ? e.message : '命令注册表加载失败');
       });
     return () => {
@@ -661,7 +664,7 @@ export const Composer = memo(function Composer({
     };
   }, [slashActive]);
   const slashItems = slashMatch
-    ? filterSlashCommands(slashRegistry, slashMatch.query)
+    ? filterSlashCommands(slashRegistry ?? [], slashMatch.query)
     : [];
   const slashOpen = slashMatch !== null && !slashDismissed;
   // 定位切除的统一起点（B-S-3）：菜单开着时 = 命令 token（含分隔空白）在 value 里的起点。
@@ -758,7 +761,13 @@ export const Composer = memo(function Composer({
       return;
     }
     const run = BUILTIN_RUNS[entry.name];
-    if (run) void runSlashCommand({ name: entry.name, run }, args);
+    if (!run) {
+      // 后端 registry 与前端执行表漂移（重命名/新增内置命令）时不许静默 no-op：
+      // 菜单项点了没反应是最难查的一类 bug。保留输入，错误可见。
+      setSlashError(`命令未实现：/${entry.name}`);
+      return;
+    }
+    void runSlashCommand({ name: entry.name, run }, args);
     setValue((v) => (cutFrom === null ? '' : v.slice(0, cutFrom)));
     setSlashIndex(0);
     setSlashDismissed(false);
@@ -796,6 +805,12 @@ export const Composer = memo(function Composer({
       if (slashOpen && slashItems.length > 0) {
         e.preventDefault();
         acceptSlashCommand(slashItems[selectedSlashIndex], undefined, slashCutStart);
+        return;
+      }
+      // 注册表还在路上时 Enter 不能穿透成发送：`/go` 会被当聊天发给模型。
+      // 菜单仍开着（等加载完再选），按键只做"等"。
+      if (slashOpen && slashRegistry === null) {
+        e.preventDefault();
         return;
       }
       e.preventDefault();
@@ -1070,7 +1085,9 @@ export const Composer = memo(function Composer({
           className="slash-menu"
         >
           {slashItems.length === 0 ? (
-            <div className="slash-menu-empty">无匹配命令</div>
+            <div className="slash-menu-empty">
+              {slashRegistry === null ? '正在加载命令…' : '无匹配命令'}
+            </div>
           ) : (
             (['builtin', 'skill'] as const).map((kind) => {
               const groupItems = slashItems.filter((c) => c.kind === kind);

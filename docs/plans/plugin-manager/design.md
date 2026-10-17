@@ -44,7 +44,7 @@
 
 ## 5. 生效链路
 
-- MCP：`_wire_mcp` 读 settings → 过滤 disabled server（config 与 packaged 并集）→ `build_mcp_capability(..., disabled_tools, require_confirm)`；`contributes_tools()` 过滤禁用工具；`MCPTool.require_confirmation` 供 Executor。
+- MCP：`_wire_mcp` 读 settings → 过滤 disabled server（config 与 packaged 并集）→ `build_mcp_capability(..., disabled_tools, require_confirm)`；**禁用工具在 build 期就不进 `tools` 表**（管理面仍可从 `server_tools` 看到全量）；`MCPTool.require_confirmation` 供 Executor。
 - Skills：`SkillDiscovery` 接收 `disabled_names` 与 root 元数据；条目带 `scope/origin/plugin/enabled`；`catalog()` 只出启用项（模型 context + `/` 菜单），`all_entries()` 出全量（管理面）；`load()` 只认启用项。
 - 审批：`_check_approval` 在 `RuleVerdict.ALLOW` 早退前检查 `tool.require_confirmation`；命中时跳过会话 grant / 项目持久规则。
 - 注册表：`GET /api/plugins/slash-registry` = 5 条 builtin（后端元数据）+ `catalog()` ∩ settings 的 skills；MCP 工具永不进入。

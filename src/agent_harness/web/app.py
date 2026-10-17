@@ -2491,20 +2491,12 @@ def create_app(
         `enabled / needs_auth / tool_count / require_confirm`（向后兼容）。
         """
         from agent_harness.mcp.capability import MCPCapability
-        from agent_harness.plugins.settings import (
-            PluginSettings,
-            PluginSettingsError,
-            load_plugin_settings,
-        )
+        from agent_harness.plugins.settings import load_plugin_settings_or_default
 
-        try:
-            plugin_settings = load_plugin_settings(state.settings.workspace_dir)
-        except PluginSettingsError as error:
-            # 读不出选择态不拖垮只读列表：按默认（全部启用）投影，错误如实附带。
-            plugin_settings = PluginSettings()
-            settings_error = str(error)
-        else:
-            settings_error = None
+        # 读不出选择态不拖垮只读列表：按默认（全部启用）投影，错误如实附带。
+        plugin_settings, settings_error = load_plugin_settings_or_default(
+            state.settings.workspace_dir
+        )
 
         # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
         # 替换实现注入的是这一份，不要绕过它去闭包里的初始 AppState。

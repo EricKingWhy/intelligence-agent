@@ -368,18 +368,11 @@ async def _wire_skills(
     directories.extend(additional_directories)
     # #1200 / 裁决 C1：管理选择态（禁用名）在装配期读一次；坏文件响亮告警并
     # 按默认继续（OPTIONAL 子系统不得拖垮 core）。
-    from agent_harness.plugins.settings import (
-        PluginSettingsError,
-        load_plugin_settings,
-    )
+    from agent_harness.plugins.settings import load_plugin_settings_or_default
 
-    try:
-        plugin_settings = load_plugin_settings(settings.workspace_dir)
-    except PluginSettingsError as error:
-        logger.warning("plugin-settings.json 不可读，按默认（全部启用）继续：%s", error)
-        from agent_harness.plugins.settings import PluginSettings
-
-        plugin_settings = PluginSettings()
+    plugin_settings, settings_error = load_plugin_settings_or_default(settings.workspace_dir)
+    if settings_error is not None:
+        logger.warning("plugin-settings.json 不可读，按默认（全部启用）继续：%s", settings_error)
     directory_provenance: dict[Path, tuple[str, str]] = {
         global_dir: ("global", "personal"),
         project_dir: ("workspace", "project"),
@@ -447,19 +440,13 @@ async def _wire_mcp(
         MCPPackageError,
         MCPPackageManager,
     )
-    from agent_harness.plugins.settings import (
-        PluginSettings,
-        PluginSettingsError,
-        load_plugin_settings,
-    )
+    from agent_harness.plugins.settings import load_plugin_settings_or_default
 
     # #1200：管理选择态（禁用 server / 工具、调用前确认）。文件缺失=全默认；
     # 损坏则记 warning 按默认继续——可选子系统不得拖垮装配（与 _wire_skills 同款）。
-    try:
-        plugin_settings = load_plugin_settings(settings.workspace_dir)
-    except PluginSettingsError as error:
-        logger.warning("plugin-settings.json 不可读，MCP 按默认（全部启用）继续：%s", error)
-        plugin_settings = PluginSettings()
+    plugin_settings, settings_error = load_plugin_settings_or_default(settings.workspace_dir)
+    if settings_error is not None:
+        logger.warning("plugin-settings.json 不可读，MCP 按默认（全部启用）继续：%s", settings_error)
 
     try:
         servers = parse_mcp_servers(cfg.options)

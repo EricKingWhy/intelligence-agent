@@ -144,6 +144,7 @@ def test_legacy_stub_entries_still_work(tmp_path: Path) -> None:
         body = client.get("/api/skills").json()
     entry = body["skills"][0]
     assert entry["name"] == "legacy"
-    assert entry["scope"] in {"global", "workspace"}
-    assert entry["origin"] in {"personal", "project", "plugin", "oauth"}
+    # 旧替身没有这两个字段：投影必须回落到文档化的缺省值（不是"任意合法值"）。
+    assert entry["scope"] == "workspace"
+    assert entry["origin"] == "personal"
     assert entry["enabled"] is True

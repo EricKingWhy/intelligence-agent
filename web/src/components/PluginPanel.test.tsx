@@ -103,13 +103,15 @@ let container: HTMLDivElement;
 let root: Root;
 let onOpenChange: Mock<(open: boolean) => void>;
 
+// Radix Dialog 走 Portal 渲染到 document.body（与 ApprovalModal 测试同款）：
+// 查询面必须是 body，而不是挂载宿主容器。
 const row = (name: string): HTMLElement | null =>
-  container.querySelector(`[data-testid="plugin-row-${name}"]`);
-const detail = (): HTMLElement => container.querySelector('[data-testid="plugin-detail"]')!;
+  document.body.querySelector(`[data-testid="plugin-row-${name}"]`);
+const detail = (): HTMLElement => document.body.querySelector('[data-testid="plugin-detail"]')!;
 const alert = (): string | null =>
-  container.querySelector('[role="alert"]')?.textContent ?? null;
+  document.body.querySelector('[role="alert"]')?.textContent ?? null;
 const status = (): string | null =>
-  container.querySelector('[role="status"]')?.textContent ?? null;
+  document.body.querySelector('[role="status"]')?.textContent ?? null;
 
 async function mount(open = true): Promise<void> {
   await act(async () => {
@@ -159,8 +161,8 @@ afterEach(async () => {
 
 describe('#1200 Phase 1 只读渲染', () => {
   it('两组分组标题与行齐全', () => {
-    expect(container.textContent).toContain('MCP SERVERS · 3');
-    expect(container.textContent).toContain('SKILLS · 2');
+    expect(document.body.textContent).toContain('MCP SERVERS · 3');
+    expect(document.body.textContent).toContain('SKILLS · 2');
     expect(row('playwright')).not.toBeNull();
     expect(row('api-design')).not.toBeNull();
   });
@@ -189,6 +191,18 @@ describe('#1200 Phase 1 只读渲染', () => {
     expect(text).toContain('不进 / 菜单');
   });
 
+  it('工具数标题以实际工具清单为准（列表 tool_count 只是列表页摘要）', async () => {
+    // 发现结果为空但列表摘要说 2：标题必须显示 0，不能拿摘要冒充详情。
+    vi.mocked(getMcpServerTools).mockResolvedValue([]);
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    expect(detail().textContent).toContain('工具（0）');
+    expect(detail().textContent).not.toContain('工具（2）');
+  });
+
   it('被禁用的工具 chip 带 off 类（划线）', () => {
     const chip = [...detail().querySelectorAll('.tool-chip')].find(
       (el) => el.textContent === 'browser_upload',
@@ -200,14 +214,19 @@ describe('#1200 Phase 1 只读渲染', () => {
   it('加载失败原因可见（errors 列表）', async () => {
     vi.mocked(getMcpServers).mockResolvedValue({ servers: [], errors: ['server 装配失败'] });
     vi.mocked(getSkills).mockResolvedValue({ skills: [], errors: [], conflicts: [] });
+    // 面板体只在 open=true 时挂载；同 props 重渲染不会重跑 effect ⇒ 必须真正重挂。
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
     await mount();
-    expect(container.textContent).toContain('server 装配失败');
+    expect(document.body.textContent).toContain('server 装配失败');
   });
 });
 
 describe('#1200 Phase 2 管理动作', () => {
   it('禁用 server → 调端点并提示重启后生效', async () => {
-    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用'));
+    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用') ?? null);
     expect(setMcpServerEnabled).toHaveBeenCalledWith('playwright', false);
     expect(status()).toContain('重启后生效');
   });
@@ -230,24 +249,26 @@ describe('#1200 Phase 2 管理动作', () => {
   });
 
   it('重新连接 → 调端点', async () => {
-    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '重新连接'));
+    await click(
+      [...detail().querySelectorAll('button')].find((b) => b.textContent === '重新连接') ?? null,
+    );
     expect(reconnectMcpServer).toHaveBeenCalledWith('playwright');
   });
 
   it('skill 选中后禁用 → 调端点', async () => {
     await click(row('api-design'));
-    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用'));
+    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用') ?? null);
     expect(setSkillEnabled).toHaveBeenCalledWith('api-design', false);
   });
 
   it('写失败原因可见（role=alert），不静默', async () => {
     vi.mocked(setMcpServerEnabled).mockRejectedValue(new Error('plugin-settings.json 不可写'));
-    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用'));
+    await click([...detail().querySelectorAll('button')].find((b) => b.textContent === '禁用') ?? null);
     expect(alert()).toContain('plugin-settings.json 不可写');
   });
 
   it('搜索过滤列表', async () => {
-    const input = container.querySelector('input[aria-label="搜索插件"]') as HTMLInputElement;
+    const input = document.body.querySelector('input[aria-label="搜索插件"]') as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype,

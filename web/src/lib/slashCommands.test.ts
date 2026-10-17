@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
-  SLASH_COMMANDS,
+  BUILTIN_RUNS,
   slashTriggerMatch,
   slashSubmitMatch,
   filterSlashCommands,
@@ -33,26 +33,23 @@ vi.mock('./api', async (importOriginal) => {
 
 describe('#1200 注册表 — 元数据在后端，前端只有 run 回调', () => {
   it('恰好 5 条 builtin 执行回调（名字与 #1195 定稿表一致）', () => {
-    expect(SLASH_COMMANDS.map((c) => c.name)).toEqual([
-      'goal',
-      'plan',
+    expect(Object.keys(BUILTIN_RUNS).sort()).toEqual([
       'compact',
-      'permission',
+      'goal',
       'model',
+      'permission',
+      'plan',
     ]);
   });
 
   it('前端不再维护 label / description / group 元数据（D2=A）', () => {
-    for (const c of SLASH_COMMANDS) {
-      expect(c).not.toHaveProperty('labelCN');
-      expect(c).not.toHaveProperty('description');
-      expect(c).not.toHaveProperty('group');
-      expect(typeof c.run).toBe('function');
+    for (const run of Object.values(BUILTIN_RUNS)) {
+      expect(typeof run).toBe('function');
     }
   });
 
   it('export / feedback / file 不在执行表（王浩宇 10-16 裁决）', () => {
-    const names = SLASH_COMMANDS.map((c) => c.name);
+    const names = Object.keys(BUILTIN_RUNS);
     expect(names).not.toContain('export');
     expect(names).not.toContain('feedback');
     expect(names).not.toContain('file');
@@ -108,6 +105,13 @@ describe('#1195 带参提交拦截 slashSubmitMatch', () => {
 
   it('命令名不在注册表 = 不拦截（当聊天发送）', () => {
     expect(slashSubmitMatch('/unknown foo', ['goal'])).toBeNull();
+  });
+
+  it('#1200 插件 skill 的 `/namespace:name` 也能被提交拦截（与触发正则同字符集）', () => {
+    expect(slashSubmitMatch('/acme:code-review 改一下', ['acme:code-review'])).toEqual({
+      name: 'acme:code-review',
+      args: '改一下',
+    });
   });
 
   it('仅斜杠不拦截', () => {
@@ -177,7 +181,7 @@ describe('#1200 显示名 — 插件 skill 加 namespace 前缀', () => {
 });
 
 describe('#1195 命令执行层（run 语义，findings 修回）', () => {
-  const cmd = (name: string): SlashCommand => SLASH_COMMANDS.find((c) => c.name === name)!;
+  const cmd = (name: string): SlashCommand => ({ name, run: BUILTIN_RUNS[name]! });
 
   const makeCtx = () => ({
     sessionId: 's-1',
