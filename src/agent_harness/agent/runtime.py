@@ -3976,6 +3976,13 @@ class AgentRuntime:
         # 总晚一步（认领轮询 ≥150ms / 交付层攒包更晚）——瞬时帧发出时没有订阅者，
         # 必丢，前端照样退回「连接中断」重试。落盘后迟到接流的 WS 快照与刷新后的
         # GET /events 都能读到，横幅成为事件流投影（不变量 #22）。
+        # **#1280 AC1：落盘先于任何终态帧 yield**——run 已启动的致命子形态下，消费方
+        # 收到 run/failed 后立即断开，生成器不再被拉取，排在 yield 之后的 append
+        # 不会执行，事件从 durable log 里消失（tests/agent/test_runtime_failure_paths.py
+        # 的断开用例钉住）。append 在终态帧 yield 之前完成；帧 yield 位置：落盘成功
+        # error 帧在终态帧之后；落盘失败的降级帧（degraded，无 seq 不可重放）为
+        # 可达性置于终态帧之前——镜像序仅约束带 seq 帧，降级帧是显式标记的带外信号
+        # （#1288）。
         # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
         # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
         # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
@@ -3995,20 +4002,37 @@ class AgentRuntime:
                 hint="会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
             )
             try:
-                error_event = arms.session.append(ERROR, error_data)
+                # #1280 AC3：run 已启动时挂真实 run_id（owner 是 _RunFinalizer，
+                # arms.run_id 单点只读）；begin_run 之前崩溃 = None——没有 run 可挂，
+                # 信封字段如实缺席（by-design，见 session/event.py ERROR 注释）。
+                # 已接受的纯理论边界（#1280 review A 轴 P4）：append 成功而
+                # to_agent_event 映射抛错（纯字段映射，现实中不会）会把已落盘事件
+                # 误判为落盘失败——处理它需要把映射挪出 try，反而引入映射异常顶替
+                # 原始异常的真实风险，两害相权维持现状。
+                error_event = to_agent_event(
+                    arms.session.append(ERROR, error_data, run_id=arms.run_id)
+                )
             except Exception:  # noqa: BLE001 - 落盘失败不得顶替原始异常（见上方
                 # "第一处异常在全部收尾跑完后原样再抛"）；退化为瞬时帧：在场的
                 # 订阅者至少还能收到信号，缺席者由失败日志兜底。
                 self._log("task_failed", "run-failed-before-plan 落盘失败，退化为瞬时帧",
                           span_id=new_span_id(), outcome="error", exc_info=True)
-        # Deliver the transient fallback before the terminal frame as well: a consumer
+                # #1280 AC2：降级帧带显式 degraded 标记自描述——durable 型却无 seq
+                # 的帧自此可判别，golden 不变式据此放宽为「seq=None ⟺
+                # STREAM_ONLY_TYPES ∪ 带 degraded 标记的 ERROR 存储降级帧」。
+                # #1280 review A 轴 P4：降级帧同样挂 run_id，与上方 durable 成功
+                # 路径同口径——run 已启动时信封不悬空；begin_run 之前崩溃
+                # = None，与 AC3 的缺席语义一致。
+                error_data = {**error_data, "degraded": True}
+        # Deliver the transient fallback before the terminal frame as well (#1288): a consumer
         # may close the stream at run/failed, and an unpersisted signal cannot be replayed.
+        # #1280：镜像序仅约束带 seq 帧；降级帧是显式标记的带外信号，为可达性置于终态帧之前。
         if error_data is not None and error_event is None:
-            yield AgentEvent(type=ERROR, data=error_data)
+            yield AgentEvent(type=ERROR, data=error_data, run_id=arms.run_id)
         if end_event is not None:
             yield to_agent_event(end_event)
         if error_event is not None:
-            yield to_agent_event(error_event)
+            yield error_event
         stages.raise_first()
 
     def _sync_context_vision(self, role: str) -> None:
