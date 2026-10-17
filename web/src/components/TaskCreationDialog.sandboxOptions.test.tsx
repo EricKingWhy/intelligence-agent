@@ -40,6 +40,10 @@ function render(ui: ReactElement): void {
 const query = <T extends Element>(selector: string) => document.body.querySelector<T>(selector);
 
 function openOptions(): string[] {
+  // #1177 §B：运行位置已收进「高级设置」，默认折叠——先展开再点它的触发器。
+  const advancedToggle = query<HTMLButtonElement>('.project-advanced-toggle');
+  expect(advancedToggle).not.toBeNull();
+  act(() => advancedToggle!.click());
   const trigger = query<HTMLButtonElement>('[aria-label="\u8fd0\u884c\u4f4d\u7f6e"]');
   expect(trigger).not.toBeNull();
   act(() => trigger!.click());
@@ -108,6 +112,11 @@ describe('TaskCreationDialog sandbox options (#1071/#1048)', () => {
       await Promise.resolve();
     });
 
+    // #1177 §B：运行位置在「高级设置」里，先展开——否则折叠态下"查无此项"是假阴性
+    // （探针返回空与折叠隐藏会给出同一个 null，这条就测不出探针契约了）。
+    const advancedToggle = query<HTMLButtonElement>('.project-advanced-toggle');
+    expect(advancedToggle).not.toBeNull();
+    act(() => advancedToggle!.click());
     expect(query('[aria-label="\u8fd0\u884c\u4f4d\u7f6e"]')).toBeNull();
   });
 });

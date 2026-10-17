@@ -12,6 +12,7 @@
  *     （语义色当正文色用，亮色下靠 `color-mix(<sem> 45%, --text-primary)` 压到达标）
  *  7. #1190 约束管理页的 `--cn-*` 墨面：.cn-value / .cn-type / .cn-meta / .cn-pill /
  *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
+ *  8. #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5 且守 12px 地板
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -348,6 +349,27 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
+  /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮
+     双轴审查意见登记进地板锁（沿用 U-1 约定：新增可见文字元素必须在亮/暗双主题下量到
+     ≥4.5 且不破 12px 地板，否则将来有人换色不会红）。 */
+  test(`[${theme}] #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [],
+      projects: [{ id: 'p-contrast', path: 'D:/repos/contrast', title: '对比度项目', session_ids: [] }],
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    // 武装项目语境（#1028 的锚定入口）：菜单「新建会话」→ 行上出现显式提示。
+    await page.locator('.rail-project-head .rail-menu-btn').first().click();
+    await page.getByRole('menuitem', { name: '新建会话' }).click();
+    await expect(page.locator('.rail-project-armed-hint')).toBeVisible();
+    const m = await measure(page, '.rail-project-armed-hint');
+    expect(m.fontSize, 'armed hint font-size').toBe('12px');
+    const ratio = contrast(m.color, m.bg);
+    expect(ratio, '.rail-project-armed-hint contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
   test(`[${theme}] composer placeholder 对比度 ≥4.5（R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
     const ratio = await page.evaluate(() => {
@@ -640,14 +662,14 @@ for (const theme of ['dark', 'light'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
 
-    // 项目 alpha 的 kebab →「在此项目中新建任务」→ 弹窗填任务 → 创建任务。
+    // 项目 alpha 的 kebab →「新建任务…」→ 弹窗填任务 → 创建并启动。
     const alpha = page.locator('.rail-project').filter({ hasText: '项目 alpha' });
     await alpha.locator('.rail-project-head .rail-menu-btn').click();
-    await page.getByRole('menuitem', { name: '在此项目中新建任务' }).click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
     const box = page.locator('.project-dialog[aria-label="新建任务"]');
     await expect(box).toBeVisible();
     await box.getByLabel('任务描述').fill(WT_TASK);
-    await box.getByRole('button', { name: '创建任务' }).click();
+    await box.getByRole('button', { name: '创建并启动' }).click();
 
     const notice = page.locator('.app-notice');
     await expect(notice).toBeVisible();
