@@ -777,6 +777,13 @@ def _pending_user_input_conflict_message(
     return f"当前有待回答的提问；请先回答该提问，{resume_action}"
 
 
+#1283 复审 P4：``resume_and_launch`` 的快路径与锁内复查是**同一动作**（新任务续聊），
+# 动作子句提为共享常量——两处曾各写字面量，同一次审查里就漂移出两种尾句；竞态
+# 窗口（快路径读完后、拿锁前出现待答请求）难以构造测试，常量让单点漂移在结构上
+# 不可能，而非靠测试兜底。
+_RESUME_NEW_TASK_ACTION = "再启动新任务"
+
+
 def _raise_if_pending_user_input(
     events: list[SessionEvent], *, resume_action: str,
 ) -> None:
@@ -2161,7 +2168,7 @@ class SessionService:
                 )
             self._budget_recovery_failed_sessions.discard(session_id)
         if task is not None:
-            _raise_if_pending_user_input(existing, resume_action="再启动新任务")
+            _raise_if_pending_user_input(existing, resume_action=_RESUME_NEW_TASK_ACTION)
         # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
         # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
         # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
@@ -2641,7 +2648,7 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if task is not None:
                 _raise_if_pending_user_input(
-                    locked_events, resume_action="再启动新任务",
+                    locked_events, resume_action=_RESUME_NEW_TASK_ACTION,
                 )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
