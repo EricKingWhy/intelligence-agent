@@ -1,0 +1,1 @@
+﻿2026-10-17	#1283 sync merge 机械归属：merge origin/main（795fe5af→279ba13e，PR #1273/#1193）进本短分支，ort 零冲突零手工解决。纯并集双向核验：p1→merge 交集文件（service.py/App.tsx）71 行全为来侧 #1193 内容；merge→p2 90 行全为本侧已审内容（R1-R3 行覆盖）。合并未引入两侧之外的新内容。	795fe5afda241c1dd441d5c8e985390fae65247c..28d95bbe20559f652f76c28124321088180eec29
