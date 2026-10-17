@@ -24,7 +24,10 @@ OUTPUT_PATH = ROOT / "web" / "src" / "generated" / "event-types.ts"
 # 事件值形状：`域/子域[/细分]`，如 tool/call、model/delta、operation/reconcile-required。
 # event.py 里所有匹配此形状的模块级字符串常量都视为事件词汇；
 # 将来若新增同形状的非事件字符串常量，本脚本与守卫测试会暴露它。
-_EVENT_VALUE_RE = re.compile(r"^[a-z]+(/[a-z_-]+)+$")
+# #1193：形状放宽为「裸小写词 或 域/子域」——票面 schema 指定的 error 事件
+# wire type 是裸词 "error"（见 event.py 的 ERROR 注释）。两向守卫语义不变：
+# 匹配到的常量必须入册（unregistered），入册值必须有常量（orphan）。
+_EVENT_VALUE_RE = re.compile(r"^[a-z]+(/[a-z_-]+)*$")
 
 
 def collect_vocabulary() -> tuple[list[tuple[str, str]], frozenset[str], frozenset[str]]:
