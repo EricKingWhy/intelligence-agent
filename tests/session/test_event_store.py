@@ -90,6 +90,8 @@ class TestSessionEventDTO:
             "model/fallback",
             "agent/delegation-started",
             "agent/delegation-finished",
+            # #1192：委派约束继承快照（独立审计事件，落子会话事件流）
+            "agent/constraint-inheritance",
             "reasoning/started",
             "reasoning/delta",
             "reasoning/completed",

@@ -1088,7 +1088,7 @@ export function useSession() {
    *  返回值：`null` = 请求已被接受、流已接上；否则 = **给用户看的失败原因**。
    *  默认同时写进全局 error 横幅（Composer 路径的历史行为，App 还据那句话识别
    *  「未知模型」并刷新模型目录）。传 `{ ownError: true }` 时**不**写横幅、只返回
-   *  原因——「在此项目中新建任务」确认面（#169 AC12）要把它留在浮层里，而且需要
+   *  原因——「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把它留在浮层里，而且需要
    *  后端 detail 原文（如「目录不存在：…」），所以那条路径连 422 也不套用
    *  「未知模型」的旧语义。 */
   const submitTask = useCallback(
@@ -1187,7 +1187,8 @@ export function useSession() {
          *
          *  两个守卫：
          *   - 代际已换代（`streamGenRef.current !== gen`）⇒ 这是过期会话的事，不污染新会话；
-         *   - `opts?.ownError`（TaskCreationDialog 的「在此项目中新建任务」）⇒ 失败文案
+         *   - `opts?.ownError`（TaskCreationDialog 的「在此项目中新建任务」，#1177 §A.3
+         *     改名，现名「新建任务…」）⇒ 失败文案
          *     回浮层里显示，原文在**弹窗的输入框**里而不在 Composer；照抄这条通道会让
          *     用户在对话输入框里看到一段凭空冒出来的任务文本。 */
         started.catch((e: unknown) => {
