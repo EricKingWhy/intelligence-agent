@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1314 分支 sync merge be9a1720，父一 8b72532a（本线 tip：#1303 看板后端投影地基，PR #1314 head）/ 父二 dcbaa946（origin/main，#1300 合入后 tip）。merge-base 741cd67d。零冲突自动合并（git merge 一次完成，无手工解冲突、无手工改动）：冲突标记 0、git diff --check rc=0。合并树 be9a1720 与父一树、父二树互不相等 ⇒ 闸门 fail-closed 形状，故补此行。	8b72532a8efdc4f5e3802e461b69597c4dd5760a..be9a17202121d5f0f5e94d6b56a2e25edc13f1fb
