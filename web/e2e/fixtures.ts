@@ -295,6 +295,18 @@ export interface ApiMock {
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  /** `POST /api/sessions/{id}/<subPath>` 会话级命令（#1195 slash 命令族；#1304 起
+   *  被看板拖拽用到的 `/task/definition` 走这条）。返回 true = 已处理，false/缺省
+   *  走下面的默认分支。
+   *
+   *  ⚠ 这是**回调钩子不是计数器**（与 `onMessagesPost` 同款，见 #1304 审查 P2-5）：
+   *  "恰好发了几次"这类断言由各 spec 用闭包变量自己数——夹具不替它们记。 */
+  onSessionCommandPost?: (
+    route: Route,
+    sessionId: string,
+    subPath: string,
+    body: Record<string, unknown>,
+  ) => Promise<boolean> | boolean;
   // ── #825（MM-04）附件（POST 上传 / GET 受控读回）──
   /** `POST /api/sessions/{id}/attachments?name=` 的拦截口（计数 / 造 413·422）。
    *  缺省 = 记住字节并回 `sha256:<64 hex>` 回执（形状同 `AttachmentUploadResponse`）。 */
@@ -1037,6 +1049,21 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         }),
         contentType: 'application/json',
       });
+    }
+    // #1304：会话级命令（`/task/definition` 等）。默认**404**——照真后端"这个端点
+    // 没被 mock"的语义；看板用例自己用 `onSessionCommandPost` 接住并回 200/409。
+    // 放在 messages 分支**之前**：两者路径形状不同（`/messages` vs `/<cmd>`），
+    // 但都带 session 前缀，先匹配更具体的命令族可避免将来加通配时被吃掉。
+    const commandMatch = /^\/api\/sessions\/([^/]+)\/(task\/definition|workflow-mode)$/.exec(path);
+    if (commandMatch && req.method() === 'POST') {
+      const sessionId = commandMatch[1];
+      const subPath = `/${commandMatch[2]}`;
+      const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
+      if (mock.onSessionCommandPost) {
+        const handled = await mock.onSessionCommandPost(route, sessionId, subPath, body);
+        if (handled) return;
+      }
+      return json(route, { detail: 'not mocked in e2e' }, 404);
     }
     if (/^\/api\/sessions\/[^/]+\/messages$/.test(path) && req.method() === 'POST') {
       if (mock.onMessagesPost) return mock.onMessagesPost(route);

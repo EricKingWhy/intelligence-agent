@@ -1,0 +1,232 @@
+/* #1304 Agent 看板样式。
+ *
+ * 全部颜色走既有双主题 token（`index.css` 的 `:root` / `:root[data-theme='light']`）
+ *  ⇒ AGENTS.md §15「新增 token 必须同步两个定义块」自动成立（本文件**未新增任何 token**）。
+ *  字号地板 12px（`--text-xs`，PRD D3 / UI-02）；对比度沿用 token 已实测达标的值。
+ *
+ *  来源（抄优先）：
+ *  - 注意力覆盖层三件套（染色 + 横幅 + 列内置顶）——效果图 `kanban.html:60`
+ *    （`.card.in-attention { border-color: rgba(210,153,34,.55); background: rgba(210,153,34,.07); order: -1; }`）。
+ *    颜色**不照抄十六进制**：那是效果图的一次性色值，本仓已有 `--warning` token
+ *    （暗 `#e3b565` / 亮 `#b07a10`，两主题都实测达 AA），用 `color-mix` 派生成
+ *    同族的边/底/横幅三档——§15 双块同步规则因此不需要破例。
+ *  - 列的骨架（列头 + 计数徽标 + 列体滚动）：Orca `AgentKanbanBoard.tsx:88-118` 的
+ *    `KanbanColumn`（`section` + `header` + 计数 + 滚动体）。
+ *  - 横幅排版（小字号 + 圆角 + 图标同行）：Orca `AgentKanbanCard.tsx:280-285`。
+ */
+
+/* 入场动画用**本文件自己的** keyframe，不复用 `.project-dialog-in`：那个是给居中浮层
+   写的（`from { transform: translate(-50%, -50%) scale(.97) }`），套到 `inset: 0` 的
+   全屏面板上会让面板在动画期间整体左上偏移半个身位再弹回来。全屏面只需要淡入。 */
+@keyframes kanban-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 全屏浮层（票面 §4.1：不是 core surface，是顶栏入口打开的浮层）。
+   `inset: 0` 而不是居中定宽——看板横向要放四列。 */
+.kanban-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  background: var(--surface-canvas);
+  animation: kanban-in var(--dur-fast) var(--ease-apple);
+}
+
+.kanban-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.kanban-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.kanban-search {
+  margin-left: auto;
+  width: min(280px, 40vw);
+  padding: 4px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.kanban-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 「显示已接受」开关：按下态给 accent 边（与 `.icon-btn.on` 的语义一致）。 */
+.kanban-toggle {
+  padding: 4px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.kanban-toggle[aria-pressed='true'] {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.kanban-notice {
+  flex-shrink: 0;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.kanban-notice-warn {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.kanban-notice-error {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* 四列横向排布；窄屏横向滚动（列有最小宽度，不把卡片挤成一条）。 */
+.kanban-board {
+  display: flex;
+  gap: var(--space-md);
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+}
+.kanban-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 240px;
+  min-height: 0;
+  background: var(--surface-chrome);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.kanban-col-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.kanban-col-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.kanban-col-count {
+  margin-left: auto;
+  padding: 1px var(--space-sm);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  background: var(--surface-elevated);
+  border-radius: var(--radius-full);
+}
+/* 列体是 `flex` 容器而不是普通块：`.in-attention` 的 `order: -1` 只对
+   **flex/grid 子项**生效——这是"注意力卡列内置顶"能成立的前提。 */
+.kanban-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.kanban-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.kanban-card[draggable='true'] {
+  cursor: grab;
+}
+.kanban-card-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+.kanban-card-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--text-tertiary);
+}
+.kanban-card-title {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.kanban-card-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.kanban-card-attention {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  border-radius: var(--radius-sm);
+}
+.kanban-card-attention-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kanban-card-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.kanban-card-time {
+  margin-left: auto;
+}
+
+/* ── 注意力覆盖层（C2）：卡片**留在原列**，只加三件事 ──
+   1. 染色；2. 横幅（见上 `.kanban-card-attention`）；3. `order: -1` 列内置顶。
+   **为什么不能做成第 6 列**（C2 的机械理由）：`PRODUCT_STATES` 是完整划分（每会话
+   恰好一态），attention 是**另一根轴**——一个会话可以同时是 `executing` 且在等审批。
+   加第 6 列必然要么一卡两列（`grouped[bucket].push` 结构不支持），要么把卡从
+   executing 列挪走（"正在跑但被卡住"的卡反而消失，而那最该被看见）。Orca 没有这个
+   矛盾，因为它的桶是 attention 优先的单一投影（`dashboard-card-bucket.ts:6-19`），
+   且横幅被桶门控（`build-dashboard-snapshot.ts:250`）。 */
+.kanban-card.in-attention {
+  order: -1;
+  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface-elevated));
+}
