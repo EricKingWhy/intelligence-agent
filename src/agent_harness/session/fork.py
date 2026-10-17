@@ -186,6 +186,9 @@ async def fork_session(
     child_session_id: str | None = None,
     agent_id: str = "default",
     workspace_registry: WorkspaceRegistry | None = None,
+    # #1278：child 的 sandbox 后端。None = 继承父会话显式选择（父
+    # `session/started.data.sandbox_backend`；父没选 ⇒ 部署默认）；显式值优先。
+    sandbox_backend: str | None = None,
     summarizer: TailSummarizerProtocol | None = None,
     with_tail_summary: bool = True,
     budget_ledger: SessionBudgetLedger | None = None,
@@ -204,6 +207,13 @@ async def fork_session(
     任何事件）。父行不存在（父会话还没跑过任何 step）⇒ 落 `snapshot: null`，
     "父没有账"与"父的账是空的"都如实可读。child 行由它自己的首个 run 惰性
     建出（与创建路径同一条规则）。
+
+    sandbox 后端（`#1278`）：fork 是「同一会话回到更早时间点」，child 延续父的
+    运行时配置。父的**显式选择**记在父 `session/started.data.sandbox_backend`
+    （`#363` / W-19），但 seed 按设计排除父 `session/started` ⇒ 必须在这里显式
+    读父事件、显式传给 `Session.start`（它负责建 sandbox 并写 child 的
+    `session/started` 审计事实）。优先级：显式 `sandbox_backend` 参数 > 继承父 >
+    None（部署默认）。父未显式选择时传 None，行为与修前逐字一致。
     """
     # 父会话只读加载（§7 父不可改：绝不能 Session.resume，那会追加 resumed）
     parent_events = store.read_events(parent_session_id)
@@ -282,6 +292,13 @@ async def fork_session(
     parent_started = next(
         (e for e in parent_events if e.type == SESSION_STARTED), None,
     )
+    # #1278：缺省继承父会话显式选择的 sandbox 后端。父没有显式选择（键缺席
+    # 或不是非空字符串）⇒ 维持 None，让 child 走部署默认——不把"父没选"误记成
+    # "父选了某个后端"（与 `Session.start` 的 explicit / default 两档同源）。
+    if sandbox_backend is None and parent_started is not None:
+        inherited_backend = (parent_started.data or {}).get("sandbox_backend")
+        if isinstance(inherited_backend, str) and inherited_backend:
+            sandbox_backend = inherited_backend
     parent_tree_id = (
         (parent_started.data or {}).get("delegation_tree_id")
         if parent_started is not None else None
@@ -299,6 +316,9 @@ async def fork_session(
         workspace_registry=workspace_registry,
         started_data=inherited or None,
         cwd=session_cwd(parent_events),
+        # #1278：显式传入（继承值已在上面的分支解析），由 Session.start 写进
+        # child 的 session/started —— 不另造审计路径。
+        sandbox_backend=sandbox_backend,
     )
     # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。

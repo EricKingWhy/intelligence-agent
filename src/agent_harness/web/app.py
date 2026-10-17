@@ -220,10 +220,10 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
 
 
 class _AmendValueValidators(BaseModel):
-    """amend 字段的静态取值校验（三个请求体共用一份，ADR-0020b / ADR-0021）。
+    """amend 字段的静态取值校验（多个请求体共用一份，ADR-0020b / ADR-0021）。
 
     ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
-    SendMessageRequest），校验逻辑只写一遍——三个入口对同一份取值集合负责。
+    SendMessageRequest / ForkRequest）——校验逻辑只写一遍，同一份取值集合。
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """

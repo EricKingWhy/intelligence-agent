@@ -20,7 +20,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from agent_harness.session.lineage import (
     LineageNode,
@@ -34,20 +34,25 @@ from agent_harness.session.service import (
     SessionNotFound,
 )
 from agent_harness.storage.sqlite import StorageBusyError
-from agent_harness.web.app import session_service
+from agent_harness.web.app import _AmendValueValidators, session_service
 from agent_harness.web.domain_errors import http_error, storage_http_error
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-class ForkRequest(BaseModel):
+class ForkRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/forks 的请求体（T7 #137，PRD §2.4）。
 
     from_seq 是父会话中用户消息的 seq（fork 锚点，锚点消息不进 child）。
+
+    sandbox_backend（`#1278`）：None = 继承父会话显式选择（父没选 ⇒ 部署默认）；
+    显式值优先。取值校验复用 `_AmendValueValidators._validate_sandbox_backend`
+    ——与 create / resume / send 同一份判据，未知后端名在请求层 422。
     """
 
     from_seq: int = Field(ge=0)
+    sandbox_backend: str | None = None
 
 
 def register_lineage_routes(
@@ -126,7 +131,9 @@ def register_lineage_routes(
         service = session_service(app.state.agent)
         try:
             child_id = await service.fork(
-                session_id=session_id, from_seq=req.from_seq
+                session_id=session_id, from_seq=req.from_seq,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=req.sandbox_backend,
             )
         except (
             InvalidSessionId,

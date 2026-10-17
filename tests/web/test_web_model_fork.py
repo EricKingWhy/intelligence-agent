@@ -163,6 +163,55 @@ class TestForkEndpoint:
 
         assert resp.status_code == 422
 
+    def test_unknown_sandbox_backend_422(self, client):
+        """#1278：ForkRequest 接受 sandbox_backend，未知值在请求层响亮 422。"""
+        _seed_forkable(client)
+
+        resp = client.post(
+            "/api/sessions/sid-1/forks",
+            json={"from_seq": 1, "sandbox_backend": "windows-sandbox"},
+        )
+
+        assert resp.status_code == 422
+        assert "sandbox_backend must be one of" in resp.text
+
+    def test_fork_inherits_parent_sandbox_backend(self, client):
+        """#1278：web 全链（route → service → fork_session）缺省继承父的显式选择。
+
+        fake registry 的缺省 create(backend=None) 与 "local" 可区分——这正是
+        Windows「父选 local、child 落到部署默认 docker」的复现形状。
+        """
+        registry = _RecordingRegistry()
+        client.app.state.agent.workspace_registry = registry
+        store = client.app.state.agent.store
+        Session.start(store, session_id="sid-1", sandbox_backend="local")
+        session = Session.load(store, "sid-1")
+        session.append(USER_MESSAGE, {"content": "first"})
+        session.append(RUN_STARTED, {})
+        session.append(RUN_COMPLETED, {})
+
+        resp = client.post("/api/sessions/sid-1/forks", json={"from_seq": 1})
+
+        assert resp.status_code == 200
+        child_id = resp.json()["session_id"]
+        assert registry.created == [(child_id, "local")]
+        started = client.app.state.agent.store.read_events(child_id)[0]
+        assert started.type == "session/started"
+        assert started.data["sandbox_backend"] == "local"
+
+
+class _RecordingRegistry:
+    """记录 `Session.start` 传给 `registry.create` 的 backend（父无 workspace）。"""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str | None]] = []
+
+    def create(self, session_id: str, backend: str | None = None, **_kwargs):
+        self.created.append((session_id, backend))
+
+    def exists(self, session_id: str) -> bool:
+        return False
+
 
 class TestModelsEndpointShadowing:
     def test_entry_shadowed_by_default_is_not_listed(self, tmp_path):

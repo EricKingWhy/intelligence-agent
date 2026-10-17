@@ -6438,13 +6438,17 @@ class SessionService:
         return True, meta_tcid == record.tool_call_id, False
 
     async def fork(
-        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
+        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False,
+        sandbox_backend: str | None = None,
     ) -> str:
         """从 ``from_seq``（用户消息 seq）派生 child session，返回其 id（PRD §2.4）。
 
         复用 ``fork.py``，不重写。在途 run 拒绝（ActiveRunConflict），锚点非法
         → InvalidForkBoundary。HTTP 端点默认不生成 tail summary（无模型调用，
         确定性；CLI ``fork`` 仍可显式开启）。
+
+        ``sandbox_backend``（`#1278`）：None = 继承父会话显式选择（父没选 ⇒
+        部署默认）；显式值优先。透传给 ``fork_session``，本层不另造语义。
 
         child 继承父会话的当前模型：fork seed 按设计不含父 ``session/started``，
         不补一条 ``model/changed`` 的话，父创建时选的 catalog 模型会在 child 静默
@@ -6473,6 +6477,8 @@ class SessionService:
                 session_id,
                 boundary_user_message_seq=from_seq,
                 workspace_registry=self._workspace_registry,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=sandbox_backend,
                 with_tail_summary=with_tail_summary,
                 # `#318`：fork 谱系读父账行（只读；父零写入）。
                 budget_ledger=self._stores.delegation_tree_ledger,
