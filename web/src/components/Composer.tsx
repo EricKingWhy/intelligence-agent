@@ -664,10 +664,10 @@ export const Composer = memo(function Composer({
   // registry（D2=A）；前端只保留 builtin 的 run 回调，不过滤"哪些命令存在"。
   // null = 还没拿到过（首帧/首次打开）：菜单不能把"加载中"说成"无匹配命令"。
   const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[] | null>(null);
-  // 菜单每次打开都重拉：插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。
-  // **挂载即拉一次**（不再等菜单打开）：submit 拦截的 skill/内置同名消歧要在
-  // 首次输入就可用——否则粘贴 `/goal 目标` 直接 Enter 时注册表还是 null，
-  // 同名 skill 会被静默判给内置命令。
+  // 挂载即拉一次、且菜单每次打开再拉一次（`slashActive` 翻转是唯一重拉触发）：
+  // 插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。挂载那次是为了
+  // submit 拦截的 skill/内置同名消歧在首次输入就可用——否则粘贴 `/goal 目标`
+  // 直接 Enter 时注册表还是 null，同名 skill 会被静默判给内置命令。
   const slashActive = slashMatch !== null;
   useEffect(() => {
     let cancelled = false;

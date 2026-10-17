@@ -1422,13 +1422,17 @@ class ToolExecutor:
             # #1200：「调用工具前需要我确认」在**没有人工审批通道**的会话里兑现不了
             # （composition root 会用 deny / auto-approve 回调顶替 None）。静默放行
             # 等于面板承诺了一个做不到的开关 ⇒ fail-closed，并说清为什么。
+            # 归因不猜档位名：自动批准档、计划档、danger-full-access 档都落在这里
+            # （danger 档在 create/resume 两路都把 interactive 判为 False），逐一点名
+            # 会把"完全访问"的实时会话错报成"没有人工通道"。故只说事实 + 给可执行改法。
             return ToolExecution(
                 tool_call_id=tool_call_id,
                 result=ToolResult.failure(
                     message=(
                         f"工具 '{name}' 所在 MCP server 已设置为「调用工具前需要我确认」，"
-                        "但当前会话没有人工审批通道（如自动/计划模式）；已按 fail-closed 拒绝。"
-                        "切换到逐次确认的权限档后重试。"
+                        "但当前会话没有可用的逐次人工审批通道（自动批准档、计划档与"
+                        "「完全访问」档都属于此列）；已按 fail-closed 拒绝，不会静默放行。"
+                        "请在权限档里选择需要审批的档位（如工作区写入）后重试。"
                     ),
                     error_code=ErrorCode.PERMISSION_DENIED,
                     retryable=False,

@@ -85,9 +85,10 @@ def register_plugin_routes(app: FastAPI) -> None:
     async def slash_registry() -> dict:
         """`/` 菜单的唯一注册表（#1200 §5 / 裁决 D2=A）。
 
-        内置命令 + 启用中的 skill 同处一个列表；禁用的 skill 由 `catalog()`
-        （已按 plugin-settings.json 过滤）在服务端排除。MCP 工具**永不进入**
-        （它们是模型工具，不是用户命令）。
+        内置命令 + 启用中的 skill 同处一个列表。禁用项的排除有**两层**：装配期
+        的 `catalog()`（按 plugin-settings.json 快照过滤）+ 本端点的现读叠加
+        （见下方 `live_settings`）——后者让刚在面板里禁用的 skill 立刻从菜单消失，
+        而不必等下次装配。MCP 工具**永不进入**（它们是模型工具，不是用户命令）。
         """
         commands: list[dict] = [dict(cmd, kind="builtin") for cmd in BUILTIN_SLASH_COMMANDS]
         _, wiring = await app.state.agent.get_wiring()
@@ -168,10 +169,12 @@ def register_plugin_routes(app: FastAPI) -> None:
         return {"name": server_name, "enabled": enabled}
 
     def _reject_config_disabled(capability, server_name: str) -> None:
-        """配置层 `enabled:false` 的 server：选择态开关对它无效（配置层胜出）。
+        """`enabled:false` 的 server：选择态开关对它无效（禁用源胜出）。
 
-        不拦的话端点会 200 + 落盘一个永远不生效的选择——UI 靠 `configOff` 挡住了，
-        裸 API 调用则会拿到"成功"的假回执。
+        两个来源都走这里（`configs()` = CAPABILITIES 配置层 ∪ 所选包，两边都含
+        禁用项）：不拦的话端点会 200 + 落盘一个永远不生效的选择——UI 靠
+        `configOff` 挡住了，裸 API 调用则会拿到"成功"的假回执。禁用源不同、
+        改法不同，故文案两种可能都点明（不猜来源，避免给出不可执行的指引）。
         """
         config = next(
             (item for item in capability.configs() if item.name == server_name), None
@@ -182,8 +185,10 @@ def register_plugin_routes(app: FastAPI) -> None:
                 detail={
                     "code": "config_disabled",
                     "message": (
-                        f"MCP server {server_name} 在配置层被禁用（enabled: false），"
-                        "插件管理的启停管不到它；请在 CAPABILITIES 配置里启用。"
+                        f"MCP server {server_name} 被标记为禁用（enabled: false）——"
+                        "来自 CAPABILITIES 配置层或所选插件包，两者都优先于插件管理的"
+                        "选择态，因此这里的启停/确认开关对它无效。请在对应来源"
+                        "（CAPABILITIES 配置或包源）里启用后重启。"
                     ),
                 },
             )
@@ -272,7 +277,10 @@ def register_plugin_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_trusted_origin)],
     )
     async def set_mcp_require_confirm(server_name: str, body: RequireConfirmBody) -> dict:
-        await _require_server(server_name)
+        capability = await _require_server(server_name)
+        # 与 enable/disable 同一类"假回执"：禁用源胜出的 server 永不装配 ⇒ 永远
+        # 没有 MCPTool 带上 require_confirmation，落盘的开关一辈子不会触发。
+        _reject_config_disabled(capability, server_name)
         try:
             set_require_confirm(_workspace(), server_name, body.require_confirm)
         except PluginSettingsError as error:

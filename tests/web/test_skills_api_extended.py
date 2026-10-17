@@ -103,6 +103,18 @@ def test_disabled_skill_listed_but_not_enabled(tmp_path: Path) -> None:
     assert body["skills"][0]["enabled"] is False
 
 
+def test_description_is_single_line(tmp_path: Path) -> None:
+    """换行/控制符必须压成空格：与 `/api/plugins/slash-registry` 同一投影口径。
+
+    两个只读面各写一套会让同一 skill 在面板里多行、在 `/` 菜单里单行（#588/#607
+    的单行纪律）。这里钉住 `/api/skills` 这一侧——去掉 `single_line()` 即红。
+    """
+    client = _client(tmp_path, [_entry("multi", description="first\nsecond")])
+    with client:
+        body = client.get("/api/skills").json()
+    assert "\n" not in body["skills"][0]["description"]
+
+
 def test_description_truncated_to_1536(tmp_path: Path) -> None:
     long = "x" * (MAX_DESCRIPTION + 200)
     client = _client(tmp_path, [_entry("long", description=long)])

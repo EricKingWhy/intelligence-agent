@@ -482,5 +482,40 @@ def test_config_disabled_server_rejects_selection_writes(workspace: Path) -> Non
     )
 
 
+def test_config_disabled_server_rejects_require_confirm_too(workspace: Path) -> None:
+    """require-confirm 与 enable/disable 同族：禁用源胜出的 server 永不装配，
+    写进去的开关一辈子不触发 ⇒ 必须同样 409，不给"成功"的假回执。"""
+    config_disabled = _config("reserved")
+    object.__setattr__(config_disabled, "enabled", False)
+    capability = MCPCapability(
+        connections=[],
+        tools=[],
+        errors=[],
+        configs=[*_client_configs(), config_disabled],
+        server_tools={},
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
+    )
+    app = create_app(settings)
+    app.state.agent = _FakeAgent(
+        settings,
+        SimpleNamespace(lifecycle=[capability], skills=_SkillsCapability(), mcp_packages=[]),
+    )
+    with TestClient(app) as bare:
+        r = bare.post(
+            "/api/mcp/servers/reserved/require-confirm", json={"require_confirm": True}
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "config_disabled"
+        # 普通 server 不受影响。
+        ok = bare.post(
+            "/api/mcp/servers/playwright/require-confirm", json={"require_confirm": True}
+        )
+        assert ok.status_code == 200, ok.text
+    path = workspace / "plugin-settings.json"
+    assert not path.exists() or "reserved" not in json.loads(path.read_text())["require_confirm"]
+
+
 def _client_configs() -> list:
     return [_config("playwright"), _config("github")]
