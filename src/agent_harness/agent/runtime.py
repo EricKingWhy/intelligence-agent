@@ -156,6 +156,7 @@ from agent_harness.session import (
     RUN_FAILED,
     RUN_PAUSED,
     RUN_STARTED,
+    TASK_PLAN_UPDATED,
     TOOL_FAILURE_GUARD,
     USER_MESSAGE,
     Session,
@@ -175,11 +176,13 @@ from agent_harness.session.derive import (
 from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import (
     CONTEXT_PROTECTED_FACTS_EXCEEDED,
+    ERROR,
     STEER_APPLIED,
     TOOL_RESULT,
     USER_INPUT_REQUESTED,
 )
 from agent_harness.session.queue import SteerRequest, SteerSource
+from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 from agent_harness.storage import (
     CheckpointBoundary,
     CheckpointPolicy,
@@ -3969,6 +3972,37 @@ class AgentRuntime:
         )
         if end_event is not None:
             yield to_agent_event(end_event)
+        # #1193：致命异常且「计划从未生成」时，把明确错误信号落盘并推给前端。
+        # **durable（独立审查 F2/F3 实测）**：致命启动失败发生在 run 起点，前端接流
+        # 总晚一步（认领轮询 ≥150ms / 交付层攒包更晚）——瞬时帧发出时没有订阅者，
+        # 必丢，前端照样退回「连接中断」重试。落盘后迟到接流的 WS 快照与刷新后的
+        # GET /events 都能读到，横幅成为事件流投影（不变量 #22）。
+        # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
+        # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
+        # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
+        # （含前序 run 的——计划一旦生成过，就不是"从未生成"）。
+        if (
+            effective_workflow_mode(arms.session.events) is WorkflowMode.PLAN
+            and not any(
+                event.type == TASK_PLAN_UPDATED for event in arms.session.events
+            )
+        ):
+            error_data = {
+                "code": "run-failed-before-plan",
+                "message": terminal_message,
+                "workflow_mode": WorkflowMode.PLAN.value,
+                "hint": "会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
+            }
+            try:
+                error_event = arms.session.append(ERROR, error_data)
+            except Exception:  # noqa: BLE001 - 落盘失败不得顶替原始异常（见上方
+                # "第一处异常在全部收尾跑完后原样再抛"）；退化为瞬时帧：在场的
+                # 订阅者至少还能收到信号，缺席者由失败日志兜底。
+                self._log("task_failed", "run-failed-before-plan 落盘失败，退化为瞬时帧",
+                          span_id=new_span_id(), outcome="error", exc_info=True)
+                yield AgentEvent(type=ERROR, data=error_data)
+            else:
+                yield to_agent_event(error_event)
         stages.raise_first()
 
     def _sync_context_vision(self, role: str) -> None:

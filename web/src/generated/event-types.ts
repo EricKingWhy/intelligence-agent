@@ -65,6 +65,7 @@ export const EventType = {
   CONTEXT_WINDOW_CHANGED: 'context/window-changed',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
+  ERROR: 'error',
   COMPACTION_START: 'compaction/start',
   COMPACTION_END: 'compaction/end',
   MESSAGE_QUEUED: 'message/queued',
