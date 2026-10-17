@@ -141,8 +141,20 @@ def test_lock_is_auto_released_when_holder_process_dies(tmp_path: Path) -> None:
         proc.kill()
         proc.wait(timeout=30)
 
-    # 子进程已死 → 锁必须自动可用（父进程此刻应能拿到）
-    lock = InstanceLock(tmp_path).acquire()
+    # 子进程已死 → 锁必须自动可用。Windows 上 OS 释放字节区间锁有微小延迟窗口
+    # （#1237：立刻断言约 13% 偶发失败），所以短轮询而不是一次定胜负；5 秒仍未
+    # 释放才说明真的留了残留锁。
+    deadline = time.monotonic() + 5.0
+    last_error: InstanceLockError | None = None
+    while time.monotonic() < deadline:
+        try:
+            lock = InstanceLock(tmp_path).acquire()
+            break
+        except InstanceLockError as error:
+            last_error = error
+            time.sleep(0.1)
+    else:
+        pytest.fail(f"子进程退出 5 秒后锁仍不可获取（疑似残留锁）：{last_error}")
     lock.release()
 
 

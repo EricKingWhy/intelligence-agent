@@ -41,6 +41,20 @@ const LIVE_FRAMES: FrameSpec[] = [
   { type: 'user/message', data: { content: '跑一下' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
 ];
 
+const LIVE_WITH_PLAN: FrameSpec[] = [
+  ...LIVE_FRAMES,
+  {
+    type: 'task/plan_updated',
+    data: {
+      items: [{ id: 'current', content: 'Current task', activeForm: 'Running current task', status: 'in_progress', source: 'agent' }],
+    },
+    seq: 4,
+    session_id: SID,
+    run_id: RUN,
+    time: T,
+  },
+];
+
 /** 已收口的会话（非流式）：用来锁"非流式下提示必须不存在"。 */
 const DONE_FRAMES: FrameSpec[] = [
   ...LIVE_FRAMES,
@@ -60,7 +74,7 @@ const sessionRow = {
 
 async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES) {
   await routeApi(page, {
-    sessions: [sessionRow],
+    sessions: [{ ...sessionRow, event_count: frames.length }],
     models: MODELS,
     permissionModes: PERMISSION_MODES,
     agentProfiles: AGENT_PROFILES,
@@ -211,4 +225,27 @@ test('#1195 复审：streaming 中 Esc 关 slash 菜单不连带打断在途 run
   // Esc 中断整个一刀切掉。
   await page.keyboard.press('Escape');
   await expect.poll(() => cancels, { message: '菜单已关的 Esc 必须照常 POST /cancel' }).toBe(1);
+});
+
+test('Escape closes the expanded progress panel without cancelling a streaming run', async ({ page }) => {
+  let cancels = 0;
+  await routeStreaming(page, LIVE_WITH_PLAN);
+  await page.route('**/api/sessions/*/cancel', async (route) => {
+    cancels += 1;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"ok"}' });
+  });
+
+  await page.goto('/');
+  await submitTask(page, 'Run this');
+  const toggle = page.locator('.plan-list-summary-toggle');
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+  await page.keyboard.press('Escape');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect.poll(() => cancels, { message: 'closing the progress panel must not cancel the run' }).toBe(0);
+
+  await page.keyboard.press('Escape');
+  await expect.poll(() => cancels, { message: 'an unclaimed Escape must still cancel the run' }).toBe(1);
 });
