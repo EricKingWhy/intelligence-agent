@@ -8,6 +8,10 @@
 接缝：真实 uvicorn ASGI 服务器 + httpx2 WebSocket 客户端 + ScriptedModel 剧本桩。
 在场信号取自 WS 连接级订阅计数（`web/ask_user_timeout_driver.py`），到点经
 `SessionService.resume_ask_user_timeout` 走既有 user_input 恢复链。
+
+成色说明（#1220 复审 F7）：本文件把心跳调到 3600s 并显式 tick `check_expiries()`，
+**未覆盖** `websocket.py` 心跳调用 `check_expiries` 这条生产接线本身——那条由
+常规 WS 心跳测试与手工验证兜底，此处不重复构造真实节拍。
 """
 
 from __future__ import annotations
