@@ -332,7 +332,9 @@
     m.textContent = `${intro}\n\n${s}`;
     // done 是样例自造的终态（产品里提交后卡片随 run 收起），不是产品状态。
     done = true;
-    // 冻结要看得见：此刻已经无效的控件显式置为不可用，而不是静默吞掉点击。
+    // 冻结要看得见：对已失效的交互显式置为不可用——整卡加 done 类（.qbody/.qfoot opacity 淡化）、
+    // 自定义输入 readOnly、提交/跳过 disabled；prev/fwd 不在此列，提交后仍为 enabled，其点击
+    // 由上方 capture 监听在冻结期静默吞掉，可见反馈只有整卡 opacity 淡化。
     qcard.classList.add('done');
     $('customInput').readOnly = true;
     $('submit').disabled = true;
