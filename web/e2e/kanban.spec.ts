@@ -280,7 +280,11 @@ test.describe('#1304 看板：拖拽写路径', () => {
     //    两条钩子各自 push，命令先到 ⇒ 用"命令已到达时 messages 还没到"来钉顺序。
     expect(commands.length).toBe(1);
     // ⑤ 拖拽成功后前端**主动 refetch 一次**，随后卡片出现在执行中列。
-    expect(listGets).toBeGreaterThan(listsBefore);
+    //    `listGets` 由 `page.on('request')` 递增，而那个回调是**异步投递**的
+    //    （与 `commands`/`messages` 的同步闭包 push 不同）⇒ 同步读会跟它赛跑，
+    //    1920 视口下就输过（1280 恰好赢）。改成 poll：断言的是"refetch 确实发生"，
+    //    不是"回调在这一微任务内已投递"。
+    await expect.poll(() => listGets).toBeGreaterThan(listsBefore);
     await expect(cardsIn(page, 'executing')).toHaveCount(2);
     await expect(cardsIn(page, 'backlog')).toHaveCount(0);
     await expect(page.locator('.kanban-card[data-session-id="s-c"]')).toBeVisible();
