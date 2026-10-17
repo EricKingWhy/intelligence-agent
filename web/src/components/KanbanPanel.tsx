@@ -126,6 +126,10 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        // 更近的一层（Radix 命令面板在 document 捕获相位 preventDefault）已认领的
+        // Esc 不再关板——否则 Ctrl+K 开面板后按 Esc 会**同时**关掉面板与看板
+        // （AC-15 要的是板还在、搜索框仍可聚焦）。判据同 `App.tsx:418`。
+        if (event.defaultPrevented) return;
         event.preventDefault();
         onOpenChange(false);
       }

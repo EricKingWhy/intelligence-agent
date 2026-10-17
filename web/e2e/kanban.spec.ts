@@ -477,9 +477,23 @@ test.describe('#1304 看板：AC-18 不新增 core surface', () => {
     });
     const mock: ApiMock = { sessions: [boardRow('s-1', '')] };
     await routeApi(page, mock);
-    await openBoard(page);
+
+    // 判据是**开板这个动作的增量**，不是全生命周期总量：App 挂载时本来就会拉一次
+    // 能力声明（`App.tsx` 的 `fetchCapabilities`，与看板无关）。所以先等应用落定、
+    // 记下基线，再开板比增量——否则这条断言量的是"App 会不会拉 capabilities"，
+    // 而那件事早在看板存在之前就定了。
+    await page.goto('/');
+    await expect(page.getByLabel('看板')).toBeVisible();
+    await expect(page.locator('.session-item').first()).toBeVisible();
+    // 等挂载那次拉取真的落地再记基线——`page.on('request')` 是异步投递的，
+    // 不等就可能把"挂载那次"算进开板增量里（假红）。
+    await expect.poll(() => capabilitiesGets).toBeGreaterThan(0);
+    const baseline = capabilitiesGets;
+
+    await page.getByLabel('看板').click();
+    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
     await expect(cardsIn(page, 'backlog')).toHaveCount(1);
-    // 看板不是 core surface：它不消费能力声明（那正是 §4.1 的三条判据之一）。
-    expect(capabilitiesGets).toBe(0);
+    // 看板不是 core surface：开板不消费能力声明（§4.1 的三条判据之一）。
+    expect(capabilitiesGets).toBe(baseline);
   });
 });

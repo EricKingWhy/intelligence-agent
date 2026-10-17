@@ -296,8 +296,13 @@ export interface ApiMock {
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
   /** `POST /api/sessions/{id}/<subPath>` 会话级命令（#1195 slash 命令族；#1304 起
-   *  被看板拖拽用到的 `/task/definition` 走这条）。返回 true = 已处理，false/缺省
-   *  走下面的默认分支。
+   *  被看板拖拽用到的 `/task/definition` 走这条）。**给了钩子即由它接管**这条路由
+   *  （与 `onMessagesPost` 同款），缺省则回 404。
+   *
+   *  ⚠ 判"接管"看的是**钩子在不在**，不是它的返回值：钩子的自然写法是
+   *  `return route.fulfill(...)`（Promise<void>），await 出来是 `undefined`，
+   *  拿返回值当布尔会把已 fulfill 的路由再喂一次 ⇒ Playwright 抛
+   *  `Route is already handled!`（#1304 实测踩到）。
    *
    *  ⚠ 这是**回调钩子不是计数器**（与 `onMessagesPost` 同款，见 #1304 审查 P2-5）：
    *  "恰好发了几次"这类断言由各 spec 用闭包变量自己数——夹具不替它们记。 */
@@ -306,7 +311,7 @@ export interface ApiMock {
     sessionId: string,
     subPath: string,
     body: Record<string, unknown>,
-  ) => Promise<boolean> | boolean;
+  ) => Promise<void> | void;
   // ── #825（MM-04）附件（POST 上传 / GET 受控读回）──
   /** `POST /api/sessions/{id}/attachments?name=` 的拦截口（计数 / 造 413·422）。
    *  缺省 = 记住字节并回 `sha256:<64 hex>` 回执（形状同 `AttachmentUploadResponse`）。 */
@@ -1060,8 +1065,8 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       const subPath = `/${commandMatch[2]}`;
       const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
       if (mock.onSessionCommandPost) {
-        const handled = await mock.onSessionCommandPost(route, sessionId, subPath, body);
-        if (handled) return;
+        await mock.onSessionCommandPost(route, sessionId, subPath, body);
+        return;
       }
       return json(route, { detail: 'not mocked in e2e' }, 404);
     }
