@@ -27,6 +27,7 @@
   }
   .msg.user { align-self: flex-end; background: #1b1d24; border: 1px solid #26282f; }
   .msg.agent { align-self: flex-start; background: transparent; color: #9aa0a8; padding-left: 2px; font-size: 13px; }
+  #afterMsg { white-space: pre-line; }
   .status-pill {
     align-self: flex-start; display: flex; align-items: center; gap: 7px;
     font-size: 12.5px; color: #c6c9f5;
@@ -61,6 +62,8 @@
   .icon-btn:hover { background: #1a1c20; color: #b9bdc4; }
   .qbody { padding: 10px 18px 0; }
   .qcard.collapsed .qbody, .qcard.collapsed .qfoot { display: none; }
+  /* 提交后卡片主体已冻结（脚本里的 done）：视觉上也要看得出来。 */
+  .qcard.done .qbody, .qcard.done .qfoot { opacity: .55; }
   .q-title { font-size: 17px; font-weight: 600; letter-spacing: -.2px; line-height: 1.5; }
   .q-anim { transition: opacity .16s ease, transform .16s ease; }
   .q-anim.out { opacity: 0; transform: translateX(18px); }
@@ -222,14 +225,20 @@
   ];
 
   const answers = new Array(QUESTIONS.length).fill(null);
-  let cur = 0, maxReached = 0;
+  let cur = 0, maxReached = 0, busy = false, done = false;
+  // 翻页动画期间 cur 已前进而 DOM 还是旧题，提交后 answers 也不该再变 ⇒ 这两种状态下卡片主体
+  // （选项 / 自定义输入 / 翻页 / 跳过 / 提交）整体不响应点击：否则点击会写到别的题上（选项下标
+  // 还可能越界），或让完成提示与已经发出的决定不一致。收起 / 关闭属于卡片外壳，不受影响。
+  const frozen = () => busy || done;
 
   const $ = id => document.getElementById(id);
   const qcard = $('qcard'), qanim = $('qanim');
+  for (const el of [qanim, document.querySelector('.qfoot')])
+    el.addEventListener('click', e => { if (frozen()) e.stopPropagation(); }, true);
 
   function render(dir) {
-    const q = QUESTIONS[cur];
     const apply = () => {
+      const q = QUESTIONS[cur]; // 按触发时刻的 cur 取题：动画期间 cur 不会再变（点击已冻结）
       $('scope').textContent = q.scope;
       $('qtitle').textContent = q.title;
       $('opts').innerHTML = q.options.map((o, i) => `
@@ -246,7 +255,7 @@
       const isCustom = a && a.idx === -1;
       $('customRow').classList.toggle('selected', !!isCustom);
       $('customInput').classList.toggle('show', !!isCustom);
-      if (isCustom) $('customInput').value = a.text || '';
+      $('customInput').value = isCustom ? a.text || '' : '';
       $('page').textContent = `${cur + 1} / ${QUESTIONS.length}`;
       $('prev').disabled = cur === 0;
       $('fwd').disabled = cur >= maxReached;
@@ -254,10 +263,13 @@
       $('skip').textContent = cur === QUESTIONS.length - 1 ? '跳过' : '跳过';
     };
     if (dir === 0) { apply(); return; }
+    busy = true;
     qanim.classList.add(dir > 0 ? 'out' : 'out-back');
     setTimeout(() => {
-      apply();
-      qanim.classList.remove('out', 'out-back');
+      try { apply(); } finally {
+        qanim.classList.remove('out', 'out-back');
+        busy = false; // apply 万一抛错也要解冻，否则卡片主体永久失去响应
+      }
     }, 150);
   }
 
@@ -281,6 +293,7 @@
     $('customInput').focus();
   });
   $('customInput').addEventListener('input', e => {
+    if (frozen()) return;
     answers[cur] = { idx: -1, text: e.target.value };
     $('submit').disabled = !valid(cur);
   });
@@ -296,19 +309,42 @@
   $('submit').addEventListener('click', finish);
 
   function finish() {
+    // 真正作答：选了选项，或自定义输入非空。显式跳过（idx=-2）与留空（null）都不算。
+    const isAnswered = a => !!a && (a.idx >= 0 || (a.idx === -1 && (a.text || '').trim().length > 0));
+    const answered = answers.filter(isAnswered).length;
+    const skipped = QUESTIONS.length - answered;
     const s = answers.map((a, i) => {
-      if (!a || a.idx === -2) return `${QUESTIONS[i].title}：跳过`;
-      if (a.idx === -1) return `${QUESTIONS[i].title}：${a.text.trim()}（自定义）`;
-      return `${QUESTIONS[i].title}：${QUESTIONS[i].options[a.idx].label}`;
+      const title = QUESTIONS[i].title.replace(/[？?]\s*$/, '');
+      if (!isAnswered(a)) return `${title}：跳过`;
+      if (a.idx === -1) return `${title}：${a.text.trim()}（自定义）`;
+      return `${title}：${QUESTIONS[i].options[a.idx].label}`;
     }).join('\n');
-    toast('已提交 4 个决定，run 继续');
+    toast(skipped === 0
+      ? `已提交 ${answered} 个决定，run 继续`
+      : answered === 0
+        ? `已跳过全部 ${skipped} 个问题，run 继续`
+        : `已提交 ${answered} 个决定，跳过 ${skipped} 个问题，run 继续`);
     const m = $('afterMsg');
     m.style.display = '';
-    m.textContent = '收到，按你的决定继续发布…';
+    const intro = answered === 0
+      ? '未作答问题均已跳过，按当前状态继续发布…'
+      : '收到，按你的决定继续发布…';
+    m.textContent = `${intro}\n\n${s}`;
+    // done 是样例自造的终态（产品里提交后卡片随 run 收起），不是产品状态。
+    done = true;
+    // 冻结要看得见：对已失效的交互显式置为不可用——整卡加 done 类（.qbody/.qfoot opacity 淡化）、
+    // 自定义输入 readOnly、提交/跳过 disabled；prev/fwd 不在此列，提交后仍为 enabled，其点击
+    // 由上方 capture 监听在冻结期静默吞掉，可见反馈只有整卡 opacity 淡化。
+    qcard.classList.add('done');
+    $('customInput').readOnly = true;
+    $('submit').disabled = true;
+    $('skip').disabled = true;
   }
 
   $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));
-  $('close').addEventListener('click', () => toast('已关闭卡片，run 保持暂停等待回答'));
+  $('close').addEventListener('click', () => toast(done
+    ? '已关闭卡片，run 已按你的决定继续'
+    : '已关闭卡片，run 保持暂停等待回答'));
 
   function toast(msg) {
     const el = $('toast');
