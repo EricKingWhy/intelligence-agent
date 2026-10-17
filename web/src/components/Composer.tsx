@@ -77,10 +77,17 @@ const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
  *  优先级与 #1223 的既有行为逐字一致：约束澄清 > ask_user > 审批。 */
 type LockReason = 'constraint' | 'ask_user' | 'approval';
 
-const LOCK_COPY: Record<
-  LockReason,
-  { hint: string; placeholder: string; queueHint: string; permissionHint: string }
-> = {
+interface LockCopy {
+  hint: string;
+  placeholder: string;
+  permissionHint: string;
+  /** 队列条（编辑/立即/flush）的 title。只有**待答用户输入**会锁队列条
+   *  （`pendingUserInputLocked`）；审批锁没有队列语义，故该项可选、approval 不填
+   *  （#1283 复审 P4：留着会让人以为审批锁拥有队列文案）。 */
+  queueHint?: string;
+}
+
+const LOCK_COPY: Record<LockReason, LockCopy> = {
   constraint: {
     hint: '请先回答当前约束澄清，再发送新消息',
     placeholder: '等待约束澄清回答…',
@@ -96,7 +103,6 @@ const LOCK_COPY: Record<
   approval: {
     hint: '等待审批决策后再继续',
     placeholder: '等待审批决策…',
-    queueHint: '等待审批决策',
     permissionHint: '等待审批决策后再改档',
   },
 };
@@ -287,21 +293,23 @@ export const Composer = memo(function Composer({
   const [editDraft, setEditDraft] = useState('');
 
   /** #1283 P2-2：保存排队项。返回值契约同 `onSubmit`（#1029）——显式 `false`（含
-   *  409 / 网络失败）⇒ **保留**编辑态与用户改好的文本；`true` / `undefined`（旧签名）
-   *  ⇒ 关闭编辑。此前无脑 `setEditingId(null)` 会让 409 后改好的文本从界面消失。 */
+   *  409 / 网络失败）⇒ **保留**编辑态与用户改好的文本；其余（`true` / `undefined`）
+   *  ⇒ 关闭编辑。此前无脑 `setEditingId(null)` 会让 409 后改好的文本从界面消失。
+   *
+   *  #1283 复审 P3：锁可能在编辑态**打开之后**才到（待答请求从另一路事件流推来），
+   *  此时保存按钮已禁用、但 Enter 仍会走到这里——首行守卫把按钮/键盘两条路径一起
+   *  挡住，不发必然 409 的请求。 */
   const commitEdit = async (item: UndeliveredInput) => {
+    if (pendingUserInputLocked) return;
     const trimmed = editDraft.trim();
     if (!trimmed) return;
     try {
-      const accepted = onEditItem?.(item, trimmed);
-      if (accepted === false) return;
-      if (accepted === undefined) {
-        setEditingId(null);
-        return;
-      }
-      if (await accepted) setEditingId(null);
-    } catch {
-      // 未受理（抛错）同样保留编辑态：宁可让用户再试，也不静默丢输入。
+      const accepted = await onEditItem?.(item, trimmed);
+      if (accepted !== false) setEditingId(null);
+    } catch (err) {
+      // 抛错（非 409 路径）同样保留编辑态：宁可让用户再试，也不静默丢输入；
+      // 但编程错误不能表现成「点保存没反应」，留一条可观察痕迹（复审 P4）。
+      console.error('[Composer] 保存排队消息失败，已保留草稿', err);
     }
   };
 

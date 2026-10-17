@@ -50,6 +50,23 @@ async function mount(onEditItem: (item: UndeliveredInput, content: string) => Pr
   return el;
 }
 
+/** 重渲染：模拟「编辑态已打开后，待答请求才从事件流推来」的迟到锁。 */
+async function rerender(onEditItem: (item: UndeliveredInput, content: string) => Promise<boolean>): Promise<void> {
+  await act(async () => {
+    root!.render(createElement(Composer, {
+      streaming: false,
+      onSubmit: NOOP,
+      onCancel: NOOP,
+      onEnsureSession: async () => null,
+      undelivered: QUEUE,
+      onEditItem,
+      onSteerItem: NOOP,
+      onFlush: NOOP,
+      askUserInputPending: true,
+    }));
+  });
+}
+
 function button(el: HTMLElement, label: string): HTMLButtonElement {
   const found = el.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
   if (!found) throw new Error(`button not found: ${label}`);
@@ -109,5 +126,34 @@ describe('#1283 P2-2 — 编辑保存被拒时保留编辑态与草稿', () => {
 
     expect(onEditItem).toHaveBeenCalledTimes(1);
     expect(el.querySelector('input.queue-item-edit')).toBeNull();
+  });
+
+  it('锁在编辑态打开之后才到 ⇒ Enter 也不提交（不发必然 409 的请求），草稿保留', async () => {
+    const onEditItem = vi.fn(async () => true);
+    const el = await mount(onEditItem);
+
+    await act(async () => { button(el, '编辑排队消息').click(); });
+    const input = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    expect(input).not.toBeNull();
+    await act(async () => { setInputValue(input!, '锁后改好的文本'); });
+
+    // 迟到锁：编辑态已经打开，待答请求才从事件流推来。
+    await rerender(onEditItem);
+
+    const save = button(el, '保存排队消息');
+    expect(save.disabled).toBe(true);
+    expect(save.title).toBe('请先回答当前提问');
+
+    await act(async () => {
+      el.querySelector<HTMLInputElement>('input.queue-item-edit')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onEditItem).not.toHaveBeenCalled();
+    const stillEditing = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    expect(stillEditing).not.toBeNull();
+    expect(stillEditing!.value).toBe('锁后改好的文本');
   });
 });

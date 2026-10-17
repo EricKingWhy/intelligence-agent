@@ -782,8 +782,9 @@ def _raise_if_pending_user_input(
 ) -> None:
     """有未答复的用户输入 ⇒ 以 409（``BudgetConflict``）拒绝新任务，零副作用。
 
-    三个入口（创建 / 恢复 / 续聊）共用这一处，``resume_action`` 只决定文案尾句；
-    扫描与文案分流各自只有一份，避免下次新增入口时漏改或传错参数。
+    ``resume_and_launch`` 的两道闸门（锁前快路径 + 锁内复查）与 ``send_message``
+    共用这一处，``resume_action`` 只决定文案尾句；扫描与文案分流各自只有一份，
+    避免下次新增入口时漏改或传错参数。
     """
     pending = _latest_pending_user_input_request(events)
     if pending is not None:
