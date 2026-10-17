@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：同步 origin/main 8a0ddbba，merge f10dcc2d（父一 aef52d94=本线 tip；父二 8a0ddbba=origin/main；merge-base 5b09883b）。相对父一仅新增两份 docs/** 文件（#1232 TUI 图片套件重跑记录及 #1272 同步归属行），无代码差异；父二侧本线实现和审查证据沿用既有覆盖。本行仅作 sync merge 机械归属，不声称新增内容审查。	aef52d94534760a3f5abf15ee21fbbcd04c8dcf2..f10dcc2d5ce0b57dea8470d967c8892d7bd3ac02

@@ -162,6 +162,27 @@ test('AC9/AC10 菜单顺序与入口；确认面逐字明示路径、prompt 必�
   await expect(box.locator('.composer-control[aria-label="权限模式"]')).toHaveCount(0);
 });
 
+test('A long project path can be inspected with the keyboard before task creation', async ({ page }) => {
+  const longPath = 'D:/repos/organization/product/frontend/agent-workspace';
+  const mock = baseMock();
+  mock.projects[0] = { ...mock.projects[0], path: longPath, title: 'Keyboard Test' };
+  await routeApi(page, mock);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  await openStartDialog(page, 'Keyboard Test');
+  const box = dialog(page);
+  const toggle = box.locator('.project-path-callout-toggle');
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-label', /.+/);
+  await toggle.focus();
+  await expect(toggle).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(box.locator('#project-path-full')).toHaveText(longPath);
+});
+
 test('AC11 创建即启动：请求带 cwd/task/autonomy、默认不发 model/sandbox_backend/permission_mode，会话落组', async ({
   page,
 }) => {

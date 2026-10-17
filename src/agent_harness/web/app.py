@@ -1267,8 +1267,9 @@ class AppState:
         # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
         # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
         # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
-        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
-        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        # on_run_terminal）；W-12 登记协议（#356 中 DEFER 的部分）落地后删本接缝，
+        # 改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO
+        # 与删除清单）。
         self.ask_user_timeout_driver = AskUserTimeoutDriver(
             timeout_seconds=settings.ask_user_question_timeout,
             on_expire=lambda session_id, request_id: (
@@ -2401,6 +2402,11 @@ def create_app(
     from agent_harness.web.lineage import register_lineage_routes
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
+
+    # #1256 子智能体 roster 路由（独立 router 文件——只读数据面，投影单源在父事件流）
+    from agent_harness.web.delegations import register_delegation_routes
+
+    register_delegation_routes(app, validate_session_id=validate_session_id)
 
     # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
     # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）

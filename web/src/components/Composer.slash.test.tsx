@@ -751,3 +751,22 @@ describe('#1195 复审修回（1195-FIX2）', () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });
+
+describe('#1264 Shape A — 自动路径的"正在压缩"面（投影驱动，非推断）', () => {
+  it('compactionInProgress=true ⇒ 状态行可见；无手动压缩也在场', async () => {
+    await mount('s-1', { compactionInProgress: true });
+    const status = container.querySelector('[data-testid=slash-compacting]');
+    expect(status?.getAttribute('role')).toBe('status');
+    expect(status?.textContent).toContain('正在压缩上下文');
+  });
+
+  it('compactionInProgress=false 且无手动压缩 ⇒ 状态行不存在（不伪造在途）', async () => {
+    await mount('s-1', { compactionInProgress: false });
+    expect(container.querySelector('[data-testid=slash-compacting]')).toBeNull();
+  });
+
+  it('缺省不传 ⇒ 按 false 处理（没有证据说在压就不显示）', async () => {
+    await mount('s-1');
+    expect(container.querySelector('[data-testid=slash-compacting]')).toBeNull();
+  });
+});

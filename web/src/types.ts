@@ -721,11 +721,10 @@ export interface PendingAskUserRequest {
   run_id: string;
   questions: AskUserQuestion[];
   answer: AskUserAnswer | null;
-  /** #1224：后端配置的超时档（秒，随请求落盘）——卡片底部提示按
-   *  `minutes = max(1, floor(timeout_seconds / 60))` 渲染（向下取整且至少 1 分钟），
-   *  与后端注入消息数值一致。缺省（旧事件无此字段）= 卡片渲染不带数字的中性提示
-   *  （零伪造）。 */
-  timeout_seconds?: number;
+  /** #1284：显示用超时分钟数（后端随请求快照落盘，投影已归一）。卡片只渲染
+   *  这个数，与后端注入消息同一份快照。缺省（旧事件无快照）= 卡片渲染不带数字的
+   *  中性提示（零伪造）。 */
+  timeout_minutes?: number;
 }
 
 export interface ConversationState {
@@ -744,9 +743,10 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
-  /** #1197 项 5A：自动压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
-   *  5A UI 已按 2026-10-16 20:45 二次证伪裁决 A 移除；本字段仅保留作接线（不变量 #22：
-   *  界面是投影），供未来后端语义调整后直接生效。当前无渲染消费者。
+  /** #1197 项 5A / #1264：压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
+   *  #1264（Shape A）起有渲染消费者：`App.tsx` 经 `Composer.compactionInProgress`
+   *  渲染「正在压缩上下文…」，同时覆盖自动路径（run 循环内再压）与手动 `/compact`
+   *  ——两条路径共用同一对事件，界面不维护第二套真相（不变量 #22）。
    *  后端 bracket 三事件背靠背落盘（`builder.py::compact_now`），故真机上本字段的
    *  可见窗口很短。详见 #1252。 */
   compaction_in_progress: boolean;

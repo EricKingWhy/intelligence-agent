@@ -10,12 +10,35 @@
 `finally` 收尾（离开）。按会话做**跨连接引用计数**：0→≥1 `set_connected(True)`，
 归零 `set_connected(False)`；断线重连不清零（同名请求重复装配保留已累计时长）。
 
-⚠ **临时接缝——W-12 落地后删除本模块**：
-    TODO(#1220 → W-12)：产品客户端在场协议
+⚠ **临时接缝——W-12 登记协议（#356 中 DEFER 的部分）落地后删除本模块**：
+    TODO(#1220)：产品客户端在场协议
     `agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，
     把在场信号迁到那道闸门（`enroll()` 登记 / `mark_absent()` 缺席），并把本模块
     及其对 WS 订阅计数的直接依赖**整体删除**。本接缝只为补上"谁在场"这一格，
     不是长期形态（W-12 的登记 / 心跳 / 明确退出 vs 意外断线区分不在本模块承担）。
+
+    触发条件为什么是"登记协议"而不是"W-12 落地"：#356 已于 2026-10-06 关单
+    （选项 B：只做明确退出信号，**整套 presence 登记表/宽限 DEFER**），#366 也于
+    2026-10-04 关单——但 `enroll()` 至今**没有生产调用方**。照旧措辞读，grep 到
+    `#356` CLOSED 的人会得出"现在就该删"或"永远不会删"两种相反结论。
+
+    **删除清单（按文件，`git grep -n "#1220" -- src` 可复核）**：
+      - `web/websocket.py` 7 处：`driver = state.ask_user_timeout_driver` 绑定
+        （~144-145）、`_watch_session`/`watching` 在场计数（~142-153）、
+        `_push_snapshot` 的装配与订阅后补读（~209-228、补读块 ~264-279）、
+        relay 的 `arm`（~314-325）、
+        launch 处的 `_watch_session`（~507）、心跳里的 `check_expiries`（~579-582）、
+        `finally` 的 `connection_closed` 归零（~622-626）；
+      - `web/app.py` 2 处：import（~171）+ 组合根装配（~1265-1278）；
+      - `session/service.py`：import 行（~127）+ `resume_ask_user_timeout`
+        整个方法（~3050-3100）；
+      - `session/ask_user_timeout.py`：模块 docstring 的接缝段（~14-25）；
+      - 本模块（整个文件）；
+      - `tests/web/test_ask_user_timeout_driver.py`、`tests/web/test_ask_user_timeout_online.py`。
+    `pending_ask_user_request_id`（`session/ask_user_timeout.py`）的**生产调用点全部
+    属于本接缝**（本模块与 `service.resume_ask_user_timeout`）⇒ 删完接缝它只剩测试
+    消费者。届时二选一并记录：新闸门复用同一份扫描，或连同其测试一并删除——不得
+    让它悄悄退回"只在测试里被实例化"的 #1220 前状态。
 
 确定性：挂钟与超时档都可注入（单测不实等）；`on_expire` 是唯一的恢复出口（由组合根
 注入 session service 的调用，本模块不 import session service，避免 web↔service 环）。
@@ -30,7 +53,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from agent_harness.session.ask_user_timeout import (
     AskUserTimeoutTracker,
     ExpireOutcome,
-    pending_ask_user_request_id,
+    ask_user_timeout_seconds_from_payload,
+    latest_pending_input_request,
 )
 from agent_harness.session.event import SessionEvent
 
@@ -55,6 +79,10 @@ class AskUserTimeoutDriver:
       一个未答复的 `ask_user`；没有则不装配（无连接时也无从累计 ⇒ 永不超时）。
 
     单事件循环内使用（与 WS handler 同一 loop），不做跨线程同步。
+
+    #1284 P2-2：`timeout_seconds` 构造参数只是**旧事件兜底**；每个请求的计时档读
+    `USER_INPUT_REQUESTED` 载荷快照（`timeout_minutes` 优先，缺失/非法回落
+    `timeout_seconds`，再回落本参数——见 `note_session_state`）。
     """
 
     def __init__(
@@ -70,6 +98,9 @@ class AskUserTimeoutDriver:
         self._connections: dict[str, int] = {}
         self._trackers: dict[str, AskUserTimeoutTracker] = {}
         self._armed_request: dict[str, str] = {}
+        #: 每个已装配请求的**生效**超时档（读请求载荷快照；旧事件才回落构造参数）。
+        #: RETRY 重装时必须沿用它，否则会掉回启动配置（#1284 P2-2）。
+        self._armed_timeout: dict[str, int] = {}
         #: 冻结中的会话（无连接、计时暂停）——插入序 = 冻结先后，供超限淘汰。
         self._frozen: dict[str, None] = {}
 
@@ -115,18 +146,34 @@ class AskUserTimeoutDriver:
         最新 run 上还有未答复的 `ask_user` ⇒ 装配（同一 request_id 重复调用保留已累计
         时长——断线重连续计不清零）；否则**撤销**——已答复 / 整卡跳过 / 无提问的会话
         不再触发超时恢复。
+
+        #1284 P2-2：计时档读**请求载荷快照**（`timeout_minutes` 优先，缺失/非法回落
+        `timeout_seconds`，见 `ask_user_timeout_seconds_from_payload`），不读启动配置。
+        运维改配置并重启后，旧请求仍按创建时的档位到期；只有 #1224 之前落盘、没有
+        快照的旧事件才回落到 `self.timeout_seconds`。
         """
-        request_id = pending_ask_user_request_id(events)
-        if request_id is None:
+        request = latest_pending_input_request(events, kind="ask_user")
+        if request is None:
             self.disarm(session_id)
             return
-        self.arm(session_id, request_id=request_id)
+        self.arm(
+            session_id,
+            request_id=request.data["request_id"],
+            timeout_seconds=ask_user_timeout_seconds_from_payload(
+                request.data, fallback=int(self.timeout_seconds),
+            ),
+        )
 
-    def arm(self, session_id: str, *, request_id: str) -> None:
+    def arm(
+        self, session_id: str, *, request_id: str, timeout_seconds: int | None = None,
+    ) -> None:
         """为一个待回答请求装配计时器（同一 request_id 幂等，保留已累计时长）。"""
         if self._armed_request.get(session_id) == request_id and session_id in self._trackers:
             return
-        tracker = AskUserTimeoutTracker(self.timeout_seconds, clock=self.clock)
+        effective_timeout = int(
+            self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        tracker = AskUserTimeoutTracker(effective_timeout, clock=self.clock)
         if self._connections.get(session_id, 0) > 0:
             tracker.set_connected(True)
             self._frozen.pop(session_id, None)
@@ -136,13 +183,16 @@ class AskUserTimeoutDriver:
             self._freeze(session_id)
         self._trackers[session_id] = tracker
         self._armed_request[session_id] = request_id
+        self._armed_timeout[session_id] = effective_timeout
 
     def disarm(self, session_id: str) -> None:
         self._trackers.pop(session_id, None)
         self._armed_request.pop(session_id, None)
+        self._armed_timeout.pop(session_id, None)
         self._frozen.pop(session_id, None)
 
     def is_armed(self, session_id: str) -> bool:
+        """该会话是否装着计时器（含无连接时冻结的条目——冻结≠撤销）。"""
         return session_id in self._trackers
 
     # ── 到点检查 ──────────────────────────────────────────────────────
@@ -181,6 +231,12 @@ class AskUserTimeoutDriver:
                 )
                 outcome = ExpireOutcome.RETRY
             if outcome is ExpireOutcome.RESUMED:
+                # 产品行为改变（用户未回答、run 自动继续）必须在日志里留下第一条
+                # 线索——否则排障时"为什么这个 run 自己跑了"只能靠事件流事后回溯。
+                logger.info(
+                    "ask_user 超时到点，已发起恢复（session=%s, request=%s, 档位=%.0fs）",
+                    session_id, request_id, self.timeout_seconds,
+                )
                 fired.append(session_id)
             # 收口/RETRY 仅在仍装配着**同一** request 时进行：`await on_expire` 期间 relay /
             # `note_session_state` 可能已为同一会话装了**新的** request，误拆会丢掉它的超时
@@ -189,8 +245,13 @@ class AskUserTimeoutDriver:
                 continue
             if outcome is ExpireOutcome.RETRY:
                 # 保留在场、重置累计：下个超时窗口再试（见本方法 docstring）。
+                # #1284：重装必须沿用该请求的**快照**档位，不得掉回启动配置。
+                armed_timeout = self._armed_timeout.get(session_id)
                 self.disarm(session_id)
-                self.arm(session_id, request_id=request_id)
+                self.arm(
+                    session_id, request_id=request_id,
+                    timeout_seconds=armed_timeout,
+                )
             else:
                 self.disarm(session_id)
         return fired
