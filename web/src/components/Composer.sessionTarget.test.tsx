@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
-/** #1312：Composer 会话级目标 pill。
+/** #1312：Composer 会话级目标状态行。
  *
  * AC1 的两态：
- *  - 选中会话（`sessionId !== null`）→「正在向会话 <8 位 id> 追问」+「改为新会话」；
- *  - 未选中（`sessionId === null`）→「将创建新会话」，无按钮。
+ *  - 选中会话（`sessionId` 真值）→「正在向会话 <8 位 id> 追问」+「改为新会话」；
+ *  - 未选中（`sessionId` 空/缺省）→「将创建新会话」，无按钮。
  *
  * 用真挂载而不是 SSR 字符串：`改为新会话` 的价值在**点击后走到 onNewSession**
  * （App 侧接 `handleNew`），SSR 只能证明文案在，证明不了动作通。
  *
- * 第三条是 AC2 的机械下限：新 pill 与 #1028 归属 chip 必须是**两个节点**、两块
+ * 第三条是 AC2 的机械下限：新状态行与 #1028 归属 chip 必须是**两个节点**、两块
  * 语义（会话身份 vs 项目归属），不能一边把另一边吃掉或并进同一个 role="note"。
  */
 import { act } from 'react';
@@ -27,19 +27,32 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  // Composer 挂载后会 `loadImageLimits()`（Composer.tsx:419）——给 fetch 一个同步
+  // 落定的响应，否则那次异步 setState 跑在 act 之外，测试会刷 act 警告。
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      max_image_bytes: 20 * 1024 * 1024,
+      max_images_per_message: 20,
+      max_message_image_bytes: 200 * 1024 * 1024,
+      allowed_media_types: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    }),
+  })));
 });
 
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.unstubAllGlobals();
 });
 
-function paint(props: {
+async function paint(props: {
   sessionId?: string | null;
   onNewSession?: () => void;
   ownership?: Ownership | null;
-}): void {
-  act(() => {
+}): Promise<void> {
+  await act(async () => {
     root.render(
       <Composer
         streaming={false}
@@ -49,43 +62,62 @@ function paint(props: {
         {...props}
       />,
     );
+    // 冲掉 loadImageLimits 的 microtask，让它的 setLimits 落在 act 内。
+    await Promise.resolve();
   });
 }
 
 const target = (): HTMLElement | null =>
   container.querySelector<HTMLElement>('[data-testid="composer-session-target"]');
 
-describe('Composer 会话级目标 pill（#1312）', () => {
-  it('选中会话：显示 8 位 id 与「改为新会话」，点击调用 onNewSession', () => {
+describe('Composer 会话级目标状态行（#1312）', () => {
+  it('选中会话：显示 8 位 id 与「改为新会话」，点击调用 onNewSession', async () => {
     const onNewSession = vi.fn();
-    paint({ sessionId: SESSION_ID, onNewSession });
+    await paint({ sessionId: SESSION_ID, onNewSession });
 
-    const pill = target();
-    expect(pill).not.toBeNull();
-    expect(pill!.textContent).toContain('正在向会话');
-    expect(pill!.textContent).toContain('abcdef12');
-    // 只露前 8 位：完整 id 不应出现在可见文案里（避免长 id 撑破 composer）。
-    expect(pill!.textContent).not.toContain(SESSION_ID);
+    const statusLine = target();
+    expect(statusLine).not.toBeNull();
+    expect(statusLine!.getAttribute('role')).toBe('status');
+    expect(statusLine!.textContent).toContain('正在向会话');
 
-    const button = pill!.querySelector<HTMLButtonElement>('button[aria-label="改为新会话"]');
+    // 只露前 8 位：precisely 断言 id 槽内容（旧断言 `not.toContain(完整 id)`
+    // 在 id 槽为空时也恒真，证明不了截断）。
+    const id = statusLine!.querySelector<HTMLElement>('.composer-session-target-id');
+    expect(id).not.toBeNull();
+    expect(id!.textContent).toBe('abcdef12');
+    expect(id!.textContent).toMatch(/^[0-9a-f]{8}$/);
+    expect(statusLine!.textContent).not.toContain(SESSION_ID);
+
+    const button = statusLine!.querySelector<HTMLButtonElement>('button[aria-label="改为新会话"]');
     expect(button).not.toBeNull();
+    expect(button!.classList.contains('composer-session-target-new-btn')).toBe(true);
     expect(button!.textContent).toBe('改为新会话');
 
     act(() => button!.click());
     expect(onNewSession).toHaveBeenCalledTimes(1);
   });
 
-  it('未选中会话：显示「将创建新会话」，且没有「改为新会话」按钮', () => {
-    paint({ sessionId: null });
+  it('未选中会话：显示「将创建新会话」，且没有「改为新会话」按钮', async () => {
+    await paint({ sessionId: null });
 
-    const pill = target();
-    expect(pill).not.toBeNull();
-    expect(pill!.textContent).toBe('将创建新会话');
-    expect(pill!.querySelector('button')).toBeNull();
+    const statusLine = target();
+    expect(statusLine).not.toBeNull();
+    expect(statusLine!.textContent).toBe('将创建新会话');
+    expect(statusLine!.querySelector('button')).toBeNull();
   });
 
-  it('与 #1028 归属 chip 并存且互不吞并（会话身份 ≠ 项目归属）', () => {
-    paint({
+  it('空串 sessionId 视同未选中：不渲染「正在向会话  追问」', async () => {
+    await paint({ sessionId: '' });
+
+    const statusLine = target();
+    expect(statusLine).not.toBeNull();
+    expect(statusLine!.textContent).toBe('将创建新会话');
+    expect(statusLine!.textContent).not.toContain('正在向会话');
+    expect(statusLine!.querySelector('button')).toBeNull();
+  });
+
+  it('与 #1028 归属 chip 并存且互不吞并（会话身份 ≠ 项目归属）', async () => {
+    await paint({
       sessionId: 'sess-1',
       onNewSession: () => {},
       ownership: {
@@ -97,14 +129,14 @@ describe('Composer 会话级目标 pill（#1312）', () => {
       },
     });
 
-    const pill = target();
+    const statusLine = target();
     const chip = container.querySelector<HTMLElement>('.composer-owner-chip');
-    expect(pill).not.toBeNull();
+    expect(statusLine).not.toBeNull();
     expect(chip).not.toBeNull();
-    expect(pill!.contains(chip)).toBe(false);
-    expect(chip!.contains(pill)).toBe(false);
+    expect(statusLine!.contains(chip)).toBe(false);
+    expect(chip!.contains(statusLine)).toBe(false);
     expect(chip!.getAttribute('role')).toBe('note');
-    expect(pill!.textContent).toContain('正在向会话');
+    expect(statusLine!.textContent).toContain('正在向会话');
     expect(chip!.textContent).toContain('项目 alpha');
   });
 });
