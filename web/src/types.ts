@@ -181,7 +181,7 @@ export interface SessionSummary {
    *  从未定义任务时为 null。 */
   product_state_changed_at: string | null;
   /** #1303：会话在等你什么：`'input'` / `'approval'` / null（仅 `executing` 时有值）。 */
-  attention_kind: string | null;
+  attention_kind: 'input' | 'approval' | null;
   /** #1303：注意力横幅文案，与 `attention_kind` 同源（如「待回答：…」）。 */
   attention_summary: string | null;
 }

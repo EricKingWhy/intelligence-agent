@@ -1026,12 +1026,12 @@ class SessionSummary(BaseModel):
     # `archived`/`corrupted` 同款**刻意不给默认值**——给了默认值，漏映射的构造点
     # 会把看板静默渲染成 backlog/无注意力，那是一条假事实（不变量 #21）。
     product_state: str
-    #: 产品四态最后一次跃迁的事件时刻——看板 ack 比较键的**唯一**来源
-    #: （同态事件不刷新它；Orca `agent-attention-acknowledgement.ts` 的比较形状）。
+    # 产品四态最后一次跃迁的事件时刻——看板 ack 比较键的**唯一**来源
+    # （同态事件不刷新它；Orca `agent-attention-acknowledgement.ts` 的比较形状）。
     product_state_changed_at: str | None
-    #: `"input"` / `"approval"` / None：会话在等你什么（仅 `executing` 时有值）。
+    # `"input"` / `"approval"` / None：会话在等你什么（仅 `executing` 时有值）。
     attention_kind: str | None
-    #: 注意力横幅文案，与 `attention_kind` 同源。
+    # 注意力横幅文案，与 `attention_kind` 同源。
     attention_summary: str | None
 
 

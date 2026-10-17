@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -579,13 +581,258 @@ def test_sidecar_with_attention_outside_executing_falls_back_to_replay(
 def test_sidecar_with_negative_projection_seq_falls_back_to_replay(
     tmp_path: Path,
 ) -> None:
-    """#1310：水位不得为负（空会话由「无事件文件」路径处理，不走 sidecar）。"""
+    """#1310：水位不得为负。
+
+    注意 ``< 0`` 本身是冗余防御：盘上尾 seq 不是 -1，``== 盘上尾`` 已能拒绝，
+    本用例证明的是「负水位不被信任」，不是单独钉 ``< 0`` 那半个子句（B-09）。
+    """
     store, session = _session_with_task(tmp_path)
     sid = session.session_id
     first = BoardProjectionStore(store).get(sid)
     _mutate_sidecar(store, sid, projection_seq=-1)
 
     assert BoardProjectionStore(store).get(sid) == first
+
+
+def test_sidecar_with_backlog_timestamp_falls_back_to_replay(tmp_path: Path) -> None:
+    """B-02：backlog（从未 defined）不可能有跃迁时刻。"""
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(store)
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    assert first.product_state == ""
+    assert first.product_state_changed_at is None
+
+    _mutate_sidecar(store, sid, product_state_changed_at="2026-10-17T00:00:00.000+00:00")
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection == first, "backlog 带时间戳是派生不可能产出的组合"
+    assert projection.product_state_changed_at is None
+
+
+def test_sidecar_with_half_attention_pair_falls_back_to_replay(tmp_path: Path) -> None:
+    """B-02：``attention_kind`` 与 ``attention_summary`` 恒成对。"""
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(store)
+    apply_task_definition(session, task_text="看板地基", criteria=[{"text": "A"}])
+    run_id, _ = session.begin_run()
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "q1",
+            "kind": "ask_user",
+            "run_id": run_id,
+            "questions": [{"header": "选择", "question": "哪个？"}],
+        },
+        run_id=run_id,
+    )
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    assert first.attention_kind == "input"
+
+    _mutate_sidecar(store, sid, attention_summary=None)
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection == first, "单边 attention 必须被视为坏 sidecar"
+    assert projection.attention_summary == first.attention_summary
+
+    _mutate_sidecar(store, sid, attention_kind=None, attention_summary="伪造")
+    assert BoardProjectionStore(store).get(sid) == first
+
+
+def test_attention_inner_failure_keeps_product_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-05：注意力求值异常只清 attention，不得影响产品列。"""
+    from agent_harness.session import ask_user_timeout
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("attention bug")
+
+    monkeypatch.setattr(ask_user_timeout, "latest_pending_input_request", boom)
+    projection = derive_board_projection([*_executing_events(), _ask_user(3, "q1", "选择")])
+    assert projection.product_state == "executing"
+    assert projection.attention_kind is None
+    assert projection.attention_summary is None
+
+
+def test_attention_failure_is_not_persisted_to_sidecar(tmp_path: Path) -> None:
+    """A-2：注意力派生失败不得把「无注意力」写进 sidecar。
+
+    污染行 ``data="oops"`` 会让 ``pending_input_request`` 的 ``.get`` 抛
+    ``AttributeError``（``SessionEvent.from_dict`` 不校验 ``data``）；此时投影
+    照常返回，但缓存与 sidecar 都不能被覆盖。
+    """
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(store)
+    apply_task_definition(session, task_text="看板地基", criteria=[{"text": "A"}])
+    run_id, _ = session.begin_run()
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "q1",
+            "kind": "ask_user",
+            "run_id": run_id,
+            "questions": [{"header": "选择", "question": "哪个？"}],
+        },
+        run_id=run_id,
+    )
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    assert first.attention_kind == "input"
+    sidecar = store.board_state_path(sid)
+    before = json.loads(sidecar.read_text("utf-8"))
+
+    # 旁路写者追加一条 data 不是 dict 的 USER_MESSAGE（越过 Session 钩子）。
+    corrupted = SessionEvent(
+        seq=session.next_seq,
+        type=USER_MESSAGE,
+        session_id=sid,
+        data="oops",
+    )
+    store.append_event(sid, corrupted)
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection.product_state == "executing", "注意力失败不得影响产品列"
+    assert projection.attention_kind is None, "失败时对调用方降级为无注意力"
+    assert json.loads(sidecar.read_text("utf-8")) == before, (
+        "瞬时注意力失败不得被钉成『无注意力』"
+    )
+
+
+def test_concurrent_cold_gets_replay_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-3：同一会话的并发冷启动只允许一次 ``read_events`` + 派生。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    BoardProjectionStore(store).get(sid)
+    store.board_state_path(sid).unlink()
+
+    projection_store = BoardProjectionStore(store)
+    calls = 0
+    original = store.read_events
+
+    def slow_read_events(session_id: str):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.05)
+        return original(session_id)
+
+    monkeypatch.setattr(store, "read_events", slow_read_events)
+
+    barrier = threading.Barrier(8)
+    results: list[BoardProjection] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            results.append(projection_store.get(sid))
+        except BaseException as exc:  # noqa: BLE001 - 线程内异常要带回主线程
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert calls == 1, "并发突发只放行 leader 重放一次"
+    assert len(results) == 8
+    assert all(result == results[0] for result in results)
+
+
+def test_get_does_not_persist_when_tail_is_unparseable(tmp_path: Path) -> None:
+    """A-4/B-12：盘上尾不可解析时读侧不得写一份自己永远拒绝的 sidecar。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    BoardProjectionStore(store).get(sid)
+    sidecar = store.board_state_path(sid)
+    before = json.loads(sidecar.read_text("utf-8"))
+
+    # 模拟崩溃留下的半行：read_events 跳过它，_disk_tail_seq 解析不到。
+    with store.events_path(sid).open("ab") as fh:
+        fh.write(b'{"seq": 99, "type": "user/mess')
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection.projection_seq < 99
+    assert json.loads(sidecar.read_text("utf-8")) == before, (
+        "尾部不可解析时落盘会被读侧永久拒绝，必须跳过"
+    )
+
+
+def test_read_last_line_handles_events_larger_than_the_chunk(tmp_path: Path) -> None:
+    """B-06 ①：64KB+ 的单行必须能读到最后一行。"""
+    payload = b'{"seq": 7, "data": "' + b"x" * (64 * 1024) + b'"}'
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b'{"seq": 6}\n' + payload + b"\n")
+    assert BoardProjectionStore._read_last_line(path) == payload
+
+
+def test_read_last_line_at_exact_chunk_boundary(tmp_path: Path) -> None:
+    """B-06 ②：末行（含换行）恰好 8KB，行首与块边界重合。"""
+    prefix = b'{"seq": 8, "pad": "'
+    suffix = b'"}'
+    last = prefix + b"z" * (8191 - len(prefix) - len(suffix)) + suffix
+    assert len(last) + 1 == bp._TAIL_CHUNK_BYTES
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b'{"seq": 7}\n' + last + b"\n")
+    assert BoardProjectionStore._read_last_line(path) == last
+
+
+def test_sidecar_hits_when_last_event_exceeds_the_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B-06 ①（集成）：大末行不影响 sidecar 命中（AC-12 仍是零 read_events）。"""
+    store, session = _session_with_task(tmp_path)
+    session.append(USER_MESSAGE, {"content": "x" * 70_000})
+    first = BoardProjectionStore(store).get(session.session_id)
+
+    def forbidden(_session_id: str):
+        raise AssertionError("sidecar 命中时不得 read_events")
+
+    monkeypatch.setattr(store, "read_events", forbidden)
+    assert BoardProjectionStore(store).get(session.session_id) == first
+
+
+def test_append_after_bypass_event_never_stamps_a_gapped_view(tmp_path: Path) -> None:
+    """B-01：中段缺口 + 再 append 两条，不得把缺事件的旧视图盖上新水位。
+
+    旧判据只查「最后两笔连续」，第 2 条 append 后 ``events[-2]+1 == events[-1]``
+    成立，会把一份缺旁路事件的投影写成当前水位并被读侧永久信任。
+    """
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    assert projection_store.get(sid).product_state == "pending_verification"
+
+    # 旁路写者追加触发事件 task/accepted：Session 的内存视图看不到它。
+    foreign = SessionEvent(
+        seq=session.next_seq,
+        type=TASK_ACCEPTED,
+        session_id=sid,
+        data={"decision": "accepted"},
+    )
+    store.append_event(sid, foreign)
+
+    # 场景前提：本聚合已交付在途 runtime ⇒ 撞号会在 store 锁内改号（#1062）。
+    session.deliver_to_runtime()
+    # 同一 Session 再 append 两条非触发事件：视图 [0,1,3,4]，中段缺 2。
+    session.append(USER_MESSAGE, {"content": "一"})
+    session.append(USER_MESSAGE, {"content": "二"})
+    assert [event.seq for event in session.events] == [0, 1, 3, 4]
+
+    stale = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert stale["projection_seq"] != session.events[-1].seq, (
+        "视图有中段缺口时不得推进水位"
+    )
+
+    # 下一次读取从盘上重放，拿到旁路事件造成的真实状态。
+    healed = projection_store.get(sid)
+    assert healed.product_state == "accepted"
+    assert healed.projection_seq == store.read_events(sid)[-1].seq
 
 
 def test_executing_sidecar_with_attention_still_hits_without_read_events(

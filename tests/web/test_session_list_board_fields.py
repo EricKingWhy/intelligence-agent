@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
 
 import pytest
@@ -41,10 +41,10 @@ def _app(tmp_path: Path):
 def _drop_memory_cache(store: JsonlSessionStore) -> None:
     """清掉该 root 的进程级单例——模拟「进程重启 / 冷启动」。
 
-    单例按 `store._root` 的绝对路径分片（`board_projection.get_board_projection_store`），
+    单例按 `Path(store._root).resolve()` 分片（`board_projection.get_board_projection_store`），
     只弹自己这一个 key，不碰别的测试的 root。
     """
-    bp._STORES.pop(os.path.abspath(os.fspath(store._root)), None)
+    bp._STORES.pop(str(Path(store._root).resolve()), None)
 
 
 def _start_session(store: JsonlSessionStore, *, cwd: Path) -> Session:
@@ -195,3 +195,44 @@ def test_deleted_sidecar_self_heals_and_second_request_hits_cache(
     again = {row["session_id"]: row for row in _rows(client)}
     assert again == before
     assert read_events_calls == 1, "第二次请求必须命中缓存，不得再重放"
+
+
+def test_list_rejects_and_heals_a_tampered_sidecar(tmp_path: Path) -> None:
+    """#1310 验收：坏 sidecar 在 `GET /api/sessions` 入口也被拒并自愈回填。
+
+    列表路径必须经 `BoardProjectionStore.get()` 的三级读取校验；若 service 层
+    将来绕过它直接读 sidecar，这条用例会红。
+    """
+    app = _app(tmp_path)
+    store = app.state.agent.store
+    session = _start_session(store, cwd=tmp_path)
+    sid = session.session_id
+    client = TestClient(app)
+    before = {row["session_id"]: row for row in _rows(client)}
+    assert before[sid]["product_state"] == "pending_verification"
+
+    sidecar = store.board_state_path(sid)
+
+    def rewrite(**changes) -> None:
+        payload = json.loads(sidecar.read_text("utf-8"))
+        payload.update(changes)
+        sidecar.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    # 注入 1：非法枚举 —— 必须回落重放并回填真值。
+    rewrite(product_state="banana")
+    _drop_memory_cache(store)
+    assert {row["session_id"]: row for row in _rows(client)} == before
+    healed = json.loads(sidecar.read_text("utf-8"))
+    assert healed["product_state"] == "pending_verification", "列表入口必须自愈回填"
+
+    # 注入 2：戳匹配但水位落后于盘上尾 seq —— 同样必须被拒。
+    tail = json.loads(store.events_path(sid).read_text("utf-8").splitlines()[-1])["seq"]
+    assert tail > 0
+    rewrite(projection_seq=tail - 1)
+    _drop_memory_cache(store)
+    assert {row["session_id"]: row for row in _rows(client)} == before
+    healed = json.loads(sidecar.read_text("utf-8"))
+    assert healed["projection_seq"] == tail

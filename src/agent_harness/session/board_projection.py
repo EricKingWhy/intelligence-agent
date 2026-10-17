@@ -27,9 +27,19 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
   按「turn / 状态起始时刻」比较，不按 ``updatedAt``；对应到本仓即
   ``product_state_changed_at``（只在状态跃迁时更新）。
 
-已知上限（ponytail）：每次触发集事件是一次 O(事件数) 重放；触发点只在 run 边界
-与用户动作上，单 run 约 4–8 次。升级路径是在 ``derive_task_state`` 上做增量
-fold，**不是**另写一份投影语义。
+已知上限（ponytail）：
+
+* 每次触发集事件是一次 O(事件数) 重放；触发点只在 run 边界与用户动作上，
+  单 run 约 4–8 次。升级路径是在 ``derive_task_state`` 上做增量 fold，
+  **不是**另写一份投影语义。
+* 触发集外的事件（``tool/call``、``tool/result``、``model/completed`` 等高频
+  事件）每条都会 stat 事件文件 + 尾部读 8KB + 原子重写 sidecar（含 ``fsync``）
+  以推进水位：append 路径因此多一次 fsync 与一次尾部读。这是按票面「所有
+  ``_persist_event`` 都推进水位」换来的写放大；写失败只丢缓存，下一次重放
+  自愈，不影响正确性。
+* ``derive_task_state`` 的逐事件产品态判定是 O(事件数 × 验收项数)
+  （``all(criteria)``）；本轮已收窄到只在可能改变产品态的事件类型上重算
+  （``task._PRODUCT_STATE_EVENT_TYPES``），长会话 + 多验收项仍是可感知成本。
 """
 
 from __future__ import annotations
@@ -42,14 +52,16 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
 )
-from agent_harness.session.store import JsonlSessionStore
+
+if TYPE_CHECKING:
+    from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session.board_projection")
 
@@ -81,6 +93,11 @@ def _attention(events: list[SessionEvent]) -> tuple[AttentionKind | None, str | 
     候选 B：全会话口径的最后一条未决审批（``approval/requested`` 与
     ``permission/resolved`` 载荷都不带 ``run_id``，无法限定 run）。
     两者都在时取 ``seq`` 更大者。
+
+    前提：**一个会话一个逻辑在途 run**（``run_budget.latest_paused_run`` 同款
+    前提）。若同一会话存在重叠 run（旧 run 仍开、新 run 已终态），本函数按
+    「最新 run 终态 ⇒ 两者都 None」清空注意力，旧 run 上的待回答不会显示——
+    与票面 §3.2 口径一致，只在该不变量被打破时才成为问题（独立审查 A-7）。
     """
     # 延迟导入：session 包初始化期间本模块先于 tooling/agent 装配；模块级导入会
     # 触发 `agent_harness.agent.__init__ -> tooling -> session` 的循环。
@@ -127,8 +144,12 @@ def _attention(events: list[SessionEvent]) -> tuple[AttentionKind | None, str | 
     return kind, summary
 
 
-def _derive(events: list[SessionEvent]) -> BoardProjection | None:
-    """纯派生；派生本身失败时返回 ``None``（由调用方决定是否沿用旧缓存）。
+def _derive(events: list[SessionEvent]) -> tuple[BoardProjection | None, bool]:
+    """纯派生；返回 ``(投影, 是否可缓存)``。
+
+    派生本身失败 → ``(None, False)``（由调用方决定是否沿用旧缓存）。注意力
+    派生失败 → 投影照常返回但 ``cacheable=False``：瞬时失败绝不能被落盘成
+    「无注意力」（独立审查 A-2）。
 
     与 ``derive_board_projection`` 分开是为了让 store 能区分「合法的空投影」与
     「派生失败」——后者绝不能落盘/进缓存，否则一次瞬时异常会把看板钉成空列，
@@ -146,24 +167,29 @@ def _derive(events: list[SessionEvent]) -> BoardProjection | None:
             "看板投影派生失败（session=%s）",
             materialized[-1].session_id if materialized else None,
         )
-        return None
+        return None, False
 
     attention_kind: AttentionKind | None = None
     attention_summary: str | None = None
+    cacheable = True
     if state.product_state == "executing":
         try:
             attention_kind, attention_summary = _attention(materialized)
         except Exception:
             logger.exception(
-                "看板注意力派生失败（session=%s）；attention 置空",
+                "看板注意力派生失败（session=%s）；attention 置空且不落盘",
                 materialized[-1].session_id if materialized else None,
             )
-    return BoardProjection(
-        product_state=state.product_state,
-        product_state_changed_at=state.product_state_changed_at,
-        attention_kind=attention_kind,
-        attention_summary=attention_summary,
-        projection_seq=projection_seq,
+            cacheable = False
+    return (
+        BoardProjection(
+            product_state=state.product_state,
+            product_state_changed_at=state.product_state_changed_at,
+            attention_kind=attention_kind,
+            attention_summary=attention_summary,
+            projection_seq=projection_seq,
+        ),
+        cacheable,
     )
 
 
@@ -184,21 +210,38 @@ def derive_board_projection(events: list[SessionEvent]) -> BoardProjection:
     异常隔离：本函数在 ``Session._persist_event`` 的 append 路径上被调用，任何
     派生异常都必须被吞掉并记日志，**不得**冒到 append 契约。失败时返回一份
     保守的空投影（product_state="" / attention=None），宁可列表短暂少一列，
-    也不能让写事件失败。``BoardProjectionStore`` 走 ``_derive``，派生失败时
-    不落盘/不覆盖缓存，避免把瞬时空值钉住。
+    也不能让写事件失败。``BoardProjectionStore`` 走 ``_derive``，派生失败或
+    注意力失败时都不落盘/不覆盖缓存，避免把瞬时空值钉住。
     """
-    projection = _derive(events)
+    projection, _cacheable = _derive(events)
     return projection if projection is not None else _empty(events)
 
 
+class _ReplayCohort:
+    """一次 in-flight 重放的共享记录（``store._ScanGate`` 同型）。"""
+
+    __slots__ = ("done", "error", "result")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: tuple[BoardProjection | None, bool, list[SessionEvent]] | None = None
+        self.error: BaseException | None = None
+
+
 #: 单例按 store root 分片：不同 root（测试 / 多实例）互不干扰。
+#: 这是**进程级永久表**（不淘汰）：生产按设置 root 唯一，条目数 = 1；只有
+#: 测试 / 多实例会积累，规模可控，不为此引入淘汰（独立审查 A-6/B-12）。
 _STORES: dict[str, BoardProjectionStore] = {}
 _STORES_LOCK = threading.Lock()
 
 
 def get_board_projection_store(store: JsonlSessionStore) -> BoardProjectionStore:
-    """按 ``store._root`` 取进程级单例（``Session.__init__`` 不新增参数）。"""
-    key = os.path.abspath(os.fspath(store._root))
+    """按 ``store._root`` 取进程级单例（``Session.__init__`` 不新增参数）。
+
+    键用 ``Path.resolve()``：折叠符号链接与 ``..``，同一目录的两种写法共享一份
+    缓存（``abspath`` 不折叠符号链接）。
+    """
+    key = str(Path(store._root).resolve())
     with _STORES_LOCK:
         instance = _STORES.get(key)
         if instance is None:
@@ -224,6 +267,12 @@ class BoardProjectionStore:
     5. 冷缓存（本实例还没算过该会话）一律从事件流重放，**不复用** sidecar 里
        的旧投影：sidecar 可能因写失败/旁路写者落后于事件文件，直接复用会把
        旧状态盖上当前戳（独立审查 P1）。
+
+    锁纪律：``_state_lock`` 只保护 ``_cache`` / 会话锁表 / in-flight 表的字典
+    结构；每个会话另有一把锁（``store._lock_for`` 同款分片）串行化该会话的
+    sidecar 读写与派生——跨会话的 append / 列表读互不阻塞。冷启动重放用
+    per-session 单飞（``store._ScanGate`` 同型）：并发突发只放行 leader 重放
+    一次，其余共享同一结果。
     """
 
     def __init__(self, store: JsonlSessionStore) -> None:
@@ -232,44 +281,137 @@ class BoardProjectionStore:
         # session_id -> (projection, events 文件戳)。戳用于识别「另一个写者
         # 追加过」——内存命中也不能越过外部追加。
         self._cache: dict[str, tuple[BoardProjection, tuple[int, int]]] = {}
-        self._lock = threading.Lock()
+        # 字典结构（cache / 锁表 / in-flight）的保护锁；绝不在它里面做磁盘 IO。
+        self._state_lock = threading.Lock()
+        self._session_locks: dict[str, threading.Lock] = {}
+        self._inflight: dict[str, _ReplayCohort] = {}
+
+    # ── 缓存 / 锁的分片 ─────────────────────────────────────────────────
+
+    def _lock_for(self, session_id: str) -> threading.Lock:
+        """该会话的 IO 串行锁（懒创建；表结构由 ``_state_lock`` 保护）。"""
+        with self._state_lock:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = self._session_locks[session_id] = threading.Lock()
+            return lock
+
+    def _cached(
+        self, session_id: str
+    ) -> tuple[BoardProjection, tuple[int, int]] | None:
+        with self._state_lock:
+            return self._cache.get(session_id)
+
+    def _remember(
+        self,
+        session_id: str,
+        projection: BoardProjection,
+        stamp: tuple[int, int],
+    ) -> None:
+        with self._state_lock:
+            self._cache[session_id] = (projection, stamp)
+
+    def _forget(self, session_id: str) -> None:
+        with self._state_lock:
+            self._cache.pop(session_id, None)
 
     # ── 公开读取 ────────────────────────────────────────────────────────
 
     def get(self, session_id: str) -> BoardProjection:
         """读投影：内存 → sidecar → 重放（并回填 sidecar）。"""
-        with self._lock:
+        stamp = self._events_stamp(session_id)
+        cached = self._cached(session_id)
+        if cached is not None and cached[1] == stamp:
+            return cached[0]
+
+        # 会话级锁只串行化**同一会话**：不同会话的 sidecar 读 / 派生互不阻塞
+        # （独立审查 B-03）。
+        with self._lock_for(session_id):
+            # 落锁前可能有别的线程刚填过缓存 / 文件刚被追加，重新取戳再判。
             stamp = self._events_stamp(session_id)
-            cached = self._cache.get(session_id)
+            cached = self._cached(session_id)
             if cached is not None and cached[1] == stamp:
                 return cached[0]
 
             if stamp is not None:
                 sidecar = self._read_sidecar(session_id, stamp)
                 if sidecar is not None:
-                    self._cache[session_id] = (sidecar, stamp)
+                    self._remember(session_id, sidecar, stamp)
                     return sidecar
 
-        # 重放不持锁：冷启动的整段重放是 O(事件数)，持锁会串行阻塞 append 钩子
-        # （独立审查 P3）。两次并发重放得到同一结果，回填以最后落锁者为准。
-        events = self._store.read_events(session_id)
-        projection = _derive(events)
-        if projection is None:
-            # 读路径同样不能留下旧缓存：下一次非触发 append 会用缓存重算并推进
-            # 水位，把这次失败时的旧状态钉住（独立审查第三轮 P3）。
-            with self._lock:
-                self._cache.pop(session_id, None)
-            return _empty(events)
-        stamp_after = self._events_stamp(session_id)
-        # 只有「读事件期间文件没变」才回填缓存；否则下一轮重放，避免把
-        # 少一条事件的投影钉在更新的戳上。
-        if stamp_after is not None and stamp_after == stamp:
-            with self._lock:
-                # 落锁前再核一次戳：重放不持锁，期间 append 钩子可能已经写入
-                # 更新的一份（独立审查 P3 回归）；此时绝不能用旧投影覆盖它。
-                if self._events_stamp(session_id) == stamp_after:
-                    self._persist(session_id, projection, stamp_after)
-        return projection
+        # 重放不持会话锁：冷启动的整段重放是 O(事件数)，持锁会串行阻塞同一
+        # 会话的 append 钩子（独立审查 P3）。单飞保证并发突发只重放一次。
+        projection, cacheable, events = self._replay_once(session_id)
+
+        with self._lock_for(session_id):
+            if projection is None:
+                # 读路径同样不能留下旧缓存：下一次非触发 append 会用缓存重算并
+                # 推进水位，把这次失败时的旧状态钉住（独立审查第三轮 P3）。
+                self._forget(session_id)
+                return _empty(events)
+            if not cacheable:
+                # 注意力派生失败：投影照常返回，但既不落盘也不进缓存——否则
+                # 一次瞬时失败会把「无注意力」钉到下一个触发事件（独立审查 A-2）。
+                self._forget(session_id)
+                return projection
+            stamp_after = self._events_stamp(session_id)
+            # 只有「读事件期间文件没变」且「本投影确实覆盖到盘上最后一行」才
+            # 回填缓存；否则下一轮重放，避免把少一条事件的投影钉在更新的戳上。
+            # 负水位（空/全坏日志）永远过不了读侧校验，直接跳过写盘（A-4/B-12）。
+            # 落锁后再次核戳：期间同会话 append 不得被旧投影覆盖。
+            if (
+                stamp_after is not None
+                and stamp_after == stamp
+                and projection.projection_seq >= 0
+                and projection.projection_seq == self._disk_tail_seq(session_id)
+                and self._events_stamp(session_id) == stamp_after
+            ):
+                self._persist(session_id, projection, stamp_after)
+            return projection
+
+    def _replay_once(
+        self, session_id: str
+    ) -> tuple[BoardProjection | None, bool, list[SessionEvent]]:
+        """冷启动 / 自愈重放的 per-session 单飞（``store._ScanGate`` 同型）。
+
+        并发突发只放行 leader 真正 ``read_events`` + ``_derive`` 一次；其余调用
+        阻塞在 ``done`` 上共享 leader 的结果（同批 waiter 复用同一份事件列表，
+        下游只读）。闸门只合并时间上重叠的调用，重放结束即清，不引入任何跨
+        请求缓存。
+        """
+        with self._state_lock:
+            cohort = self._inflight.get(session_id)
+            if cohort is None:
+                cohort = _ReplayCohort()
+                self._inflight[session_id] = cohort
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            cohort.done.wait()
+            if cohort.error is not None:
+                raise cohort.error
+            assert cohort.result is not None
+            projection, cacheable, events = cohort.result
+            return projection, cacheable, events
+
+        try:
+            events = self._store.read_events(session_id)
+            projection, cacheable = _derive(events)
+        except BaseException as error:
+            cohort.error = error
+            self._close_cohort(session_id, cohort)
+            cohort.done.set()
+            raise
+        cohort.result = (projection, cacheable, events)
+        self._close_cohort(session_id, cohort)
+        cohort.done.set()
+        return projection, cacheable, events
+
+    def _close_cohort(self, session_id: str, cohort: _ReplayCohort) -> None:
+        with self._state_lock:
+            if self._inflight.get(session_id) is cohort:
+                self._inflight.pop(session_id, None)
 
     # ── 写入钩子 ────────────────────────────────────────────────────────
 
@@ -292,34 +434,34 @@ class BoardProjectionStore:
         if not events:
             return
         try:
-            with self._lock:
+            with self._lock_for(session_id):
                 stamp = self._events_stamp(session_id)
                 if stamp is None:
                     return
                 current_seq = events[-1].seq
                 if recompute:
-                    projection = _derive(events)
+                    projection, cacheable = _derive(events)
                 else:
                     # 触发集外：本条事件按定义不改变产品态/注意力，直接复用上一份
                     # 投影，只把水位推到当前 seq。这里**不**校验旧戳——戳在 append
                     # 之后必然已变，校验会让每次 USER_MESSAGE 都退化成全量重放。
-                    cached = self._cache.get(session_id)
-                    projection = (
-                        replace(cached[0], projection_seq=current_seq)
-                        if cached is not None
-                        else _derive(events)
-                    )
-                if projection is None:
-                    # 派生失败：保留旧 sidecar，但丢弃内存缓存，下一次读/写都从
-                    # 事件流重放——否则下一条非触发事件会把旧缓存盖上当前水位
-                    # （独立审查 P2/P3）。
-                    self._cache.pop(session_id, None)
+                    cached = self._cached(session_id)
+                    if cached is not None:
+                        projection = replace(cached[0], projection_seq=current_seq)
+                        cacheable = True
+                    else:
+                        projection, cacheable = _derive(events)
+                if projection is None or not cacheable:
+                    # 派生失败 / 注意力失败：保留旧 sidecar，但丢弃内存缓存，
+                    # 下一次读/写都从事件流重放——否则下一条非触发事件会把旧
+                    # 缓存盖上当前水位（独立审查 P2/P3、A-2）。
+                    self._forget(session_id)
                     return
                 # O(1) 对账：本视图的最后一笔必须就是盘上最后一笔，且 seq 连续
                 # （连续 ⇒ 本视图没漏掉旁路写者插进来的事件）。不成立就不落盘、
                 # 不进缓存，让 get() 从盘上重放（独立审查 P2）。
                 if not self._view_matches_disk(session_id, events):
-                    self._cache.pop(session_id, None)
+                    self._forget(session_id)
                     return
                 self._persist(session_id, projection, stamp)
         except Exception:
@@ -340,23 +482,27 @@ class BoardProjectionStore:
     def _view_matches_disk(
         self, session_id: str, events: list[SessionEvent]
     ) -> bool:
-        """本视图是否覆盖盘上最后一条事件（O(1)：一次尾部读 + 一次连续性检查）。
+        """本视图是否覆盖盘上最后一条事件（O(1)：一次尾部读 + 一次区间检查）。
 
         两条证据缺一不可：
 
-        1. ``events[-2].seq + 1 == events[-1].seq``：本视图没有 seq 缺口——旁路
-           写者插入的事件会让内存列表出现空档；
+        1. ``events[-1].seq - events[0].seq + 1 == len(events)``：本视图在
+           ``[events[0].seq, events[-1].seq]`` 区间内**没有** seq 缺口——旁路
+           写者插入的事件会让内存列表出现空档。用区间算式而不是扫描列表，
+           仍是 O(1)，且能识别中段缺口（不只最后一对）。
         2. 盘上最后一行的 ``seq`` == ``events[-1].seq``：本视图之后没有旁路写入。
 
         任一不成立说明「内存只是我的视角、盘上还有我没读到的事实」，此时写
         sidecar 就是把旧状态盖上新戳。调用方应丢弃缓存并让 ``get()`` 重放。
+
+        判据不要求 ``events[0].seq == 0``：头部丢行的视图仍可落盘，与
+        ``read_events`` 对头部缺口的既有宽容语义一致。
         """
         if not events:
             return False
-        last = events[-1].seq
-        if len(events) >= 2 and events[-2].seq + 1 != last:
+        if events[-1].seq - events[0].seq + 1 != len(events):
             return False
-        return self._disk_tail_seq(session_id) == last
+        return self._disk_tail_seq(session_id) == events[-1].seq
 
     def _disk_tail_seq(self, session_id: str) -> int | None:
         """事件文件最后一行的 seq（只读最后一行；解析不了返回 None）。"""
@@ -412,7 +558,10 @@ class BoardProjectionStore:
         1. ``projection_seq`` 非负且等于事件文件最后一行的 ``seq``
            （``_disk_tail_seq``，O(1) 尾部读，不调用 ``read_events``）；
         2. ``product_state`` 是合法枚举（``""`` 或 ``PRODUCT_STATES``），且
-           非 ``executing`` 时 ``attention_*`` 必须为空（attention 只属于执行中）。
+           非 ``executing`` 时 ``attention_*`` 必须为空（attention 只属于执行中）；
+        3. 两对字段「同生同灭」：backlog（``""``）不可能有跃迁时刻，
+           ``attention_kind`` 与 ``attention_summary`` 恒成对（``_derive``
+           永远不可能产出单边值）。
         """
         path = self._store.board_state_path(session_id)
         try:
@@ -437,6 +586,9 @@ class BoardProjectionStore:
         # 延迟导入：同 `_derive`，避免 session 包初始化期的循环导入。
         from agent_harness.session.task import PRODUCT_STATES
 
+        # ``< 0`` 只在与 ``_empty`` 的 -1 语义对齐时有独立意义：盘上尾也是负数
+        # 时 ``_read_last_line`` 已返回 None，因此这半个判据是冗余防御，真正的
+        # 判据是 ``== 盘上尾 seq``（独立审查 B-09）。
         if projection_seq < 0 or projection_seq != self._disk_tail_seq(session_id):
             return None
         if not isinstance(product_state, str) or product_state not in (
@@ -453,6 +605,16 @@ class BoardProjectionStore:
         if product_state != "executing" and (
             attention_kind is not None or attention_summary is not None
         ):
+            return None
+        if product_state == "" and changed_at is not None:
+            # backlog 只可能来自「从未 defined」，此时跃迁从未发生 ⇒ changed_at
+            # 必为 None。**刻意不加逆命题**（非 backlog ⇒ changed_at 非 null）：
+            # ``SessionEvent.from_dict`` 不校验 ``time``，一条 ``time: null`` 的
+            # 污染行会让派生合法产出 ``(非空状态, None)``，加了会把该会话推进
+            # 「每进程一次永久拒绝 → 重放」的循环（独立审查 A-1）。
+            return None
+        if (attention_kind is None) != (attention_summary is None):
+            # ``_attention`` 恒成对返回，单边出现即是坏 sidecar。
             return None
         return BoardProjection(
             product_state=product_state,
@@ -474,7 +636,7 @@ class BoardProjectionStore:
             logger.exception(
                 "看板 sidecar 写入失败（session=%s）；内存缓存仍可用", session_id,
             )
-        self._cache[session_id] = (projection, stamp)
+        self._remember(session_id, projection, stamp)
 
     def _write_sidecar(
         self,
@@ -482,9 +644,19 @@ class BoardProjectionStore:
         projection: BoardProjection,
         stamp: tuple[int, int],
     ) -> None:
-        """原子写 sidecar（照抄 ``progress.py::_write_meta_atomic`` 的形状）。"""
+        """原子写 sidecar（照抄 ``progress.py::_write_meta_atomic`` 的形状）。
+
+        会话目录只由 store 的 append 创建，投影无权创建目录：``path.parent``
+        不存在（会话刚被硬删 / 硬删与写盘之间的极窄窗口）就直接返回，避免
+        重建一个只有 sidecar、没有 ``events.jsonl`` 的空壳目录（ADR-0036）。
+
+        已知残余：进程在 ``mkstemp`` 与 ``os.replace`` 之间被杀会留下
+        ``board_state.json.*.tmp``；不影响 ``list_session_ids``（只认
+        ``events.jsonl``），本轮不做清理。
+        """
         path = self._store.board_state_path(session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.parent.is_dir():
+            return
         payload = {
             "product_state": projection.product_state,
             "product_state_changed_at": projection.product_state_changed_at,
