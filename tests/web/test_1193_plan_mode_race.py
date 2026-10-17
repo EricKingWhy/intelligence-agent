@@ -314,6 +314,10 @@ class TestRunFailedBeforePlanSurface:
         errors = _error_frames(resp)
         assert len(errors) == 1, f"落盘失败仍须推出信号：{_frames(resp)}"
         assert errors[0]["seq"] is None, "退化为瞬时帧（没有 seq 可分配）"
+        # #1280 AC2：降级帧带显式 degraded 标记自描述——durable 型却无 seq 的帧
+        # 只允许这一种形状（golden 不变式「seq=None ⟺ STREAM_ONLY_TYPES ∪
+        # 带 degraded 标记的存储降级帧」的生产发射点就在这里）。
+        assert errors[0]["data"].get("degraded") is True, errors[0]
 
         sid = _session_id(resp)
         events = _events(client, sid)

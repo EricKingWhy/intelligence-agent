@@ -906,12 +906,16 @@ async def test_emitted_sequence_matches_golden(name: str, tmp_path: Any) -> None
 async def test_emitted_ephemeral_are_exactly_the_stream_only_types(
     name: str, tmp_path: Any,
 ) -> None:
-    """只有 STREAM_ONLY_TYPES 能不带 seq；其余帧一律带 seq。"""
+    """只有 STREAM_ONLY_TYPES 能不带 seq；其余帧一律带 seq——唯一例外是
+    #1280 钉住的**存储降级帧**：durable 型因 `Session.append` 失败降级为瞬时帧时
+    无 seq 可分配，`data.degraded=True` 自描述（生产唯一发射点：runtime 异常臂的
+    run-failed-before-plan 降级路径）。"""
     _scenario, emitted, session = await _run(name, tmp_path)
     for event in emitted:
         if event.seq is None:
-            assert event.type in STREAM_ONLY_TYPES, \
-                f"{event.type} 不带 seq 但不在 STREAM_ONLY_TYPES 里"
+            assert event.type in STREAM_ONLY_TYPES \
+                or event.data.get("degraded") is True, \
+                f"{event.type} 不带 seq 但不在 STREAM_ONLY_TYPES 里，也没带 degraded 标记"
             assert not event.is_durable
         else:
             assert event.type not in STREAM_ONLY_TYPES, \

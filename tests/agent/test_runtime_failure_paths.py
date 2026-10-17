@@ -36,7 +36,7 @@ from agent_harness.session import (
     JsonlSessionStore,
 )
 from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import RUN_TERMINAL_TYPES
+from agent_harness.session.event import ERROR, RUN_TERMINAL_TYPES, WORKFLOW_MODE_CHANGED
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -933,3 +933,50 @@ class TestTerminalWriteFailureAttribution:
             e for e in persisted
             if e.type in RUN_TERMINAL_TYPES and e.type != RUN_FAILED
         ], "真故障下不得假造终态（尤其不得出现 run/completed）"
+
+
+# ---------- #1280 AC1：plan 档致命失败的 durable error 落盘先于终态帧 yield ----------
+
+
+class TestDurableErrorBeforeTerminalFrame:
+    """#1193 残余观察 1（#1280 AC1）：run **已启动**的致命子形态（plan 档 ∧ 计划
+    从未生成 ∧ 模型调用中途炸）下，`error`（code=run-failed-before-plan）的
+    `session.append` 曾排在失败终态帧的 yield 之后——消费方收到 run/failed 后
+    立即断开，生成器不再被拉取，排在其后的 append 被跳过，事件从 durable log
+    消失（前端刷新后什么都看不到）。修复后 append 提前，本用例钉住：
+    「终态帧后立即断开」不丢 durable error。
+    """
+
+    @pytest.mark.asyncio
+    async def test_disconnect_at_terminal_frame_keeps_durable_error(self, tmp_path):
+        session = make_session(tmp_path)
+        # plan 档是 run 的初始条件（与 web 层 #1193 修复同口径：先切档、后启动）。
+        session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+        runtime = _runtime(ExplodingModel())
+
+        agen = runtime.run_stream(session, "先出计划")
+        seen: list[str] = []
+        async for frame in agen:
+            seen.append(frame.type)
+            if frame.type == RUN_FAILED:
+                break  # 消费方在终态帧上立即断开
+        await agen.aclose()
+        await asyncio.sleep(0)
+
+        # 前置：终态帧确实送达过（run 已启动 ⇒ run/failed 走既有面）。
+        assert seen[-1] == RUN_FAILED, f"终态帧未送达：{seen}"
+        assert RUN_STARTED in seen or any(
+            e.type == RUN_STARTED for e in session.events
+        ), "前置：本用例针对 run 已启动的子形态"
+
+        # durable log：error 事件必须已在盘上——断开不能丢它。
+        persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+        errors = [e for e in persisted if e.type == ERROR]
+        assert len(errors) == 1, (
+            f"消费方在终态帧后断开，durable error 被丢："
+            f"events={[e.type for e in persisted]}"
+        )
+        assert errors[0].data["code"] == "run-failed-before-plan"
+        # #1280 AC3：run 已启动 ⇒ 信封挂真实 run_id，不留悬空。
+        run_started = next(e for e in persisted if e.type == RUN_STARTED)
+        assert errors[0].run_id == run_started.run_id

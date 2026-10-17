@@ -3893,17 +3893,21 @@ class AgentRuntime:
             fallback_error=double_failure[1] if double_failure else None,
             http_status=terminal_http_status,
         )
-        if end_event is not None:
-            yield to_agent_event(end_event)
         # #1193：致命异常且「计划从未生成」时，把明确错误信号落盘并推给前端。
         # **durable（独立审查 F2/F3 实测）**：致命启动失败发生在 run 起点，前端接流
         # 总晚一步（认领轮询 ≥150ms / 交付层攒包更晚）——瞬时帧发出时没有订阅者，
         # 必丢，前端照样退回「连接中断」重试。落盘后迟到接流的 WS 快照与刷新后的
         # GET /events 都能读到，横幅成为事件流投影（不变量 #22）。
+        # **#1280 AC1：落盘先于任何终态帧 yield**——run 已启动的致命子形态下，消费方
+        # 收到 run/failed 后立即断开，生成器不再被拉取，排在 yield 之后的 append
+        # 不会执行，事件从 durable log 里消失（tests/agent/test_runtime_failure_paths.py
+        # 的断开用例钉住）。append 在终态帧 yield 之前完成；error 帧的 yield 保持在
+        # 终态帧之后（流面按 seq 前缀序镜像落盘序列，消费方契约不变）。
         # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
         # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
         # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
         # （含前序 run 的——计划一旦生成过，就不是"从未生成"）。
+        fatal_error_frame: AgentEvent | None = None
         if (
             effective_workflow_mode(arms.session.events) is WorkflowMode.PLAN
             and not any(
@@ -3917,15 +3921,27 @@ class AgentRuntime:
                 "hint": "会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
             }
             try:
-                error_event = arms.session.append(ERROR, error_data)
+                # #1280 AC3：run 已启动时挂真实 run_id（owner 是 _RunFinalizer，
+                # arms.run_id 单点只读）；begin_run 之前崩溃 = None——没有 run 可挂，
+                # 信封字段如实缺席（by-design，见 session/event.py ERROR 注释）。
+                fatal_error_frame = to_agent_event(
+                    arms.session.append(ERROR, error_data, run_id=arms.run_id)
+                )
             except Exception:  # noqa: BLE001 - 落盘失败不得顶替原始异常（见上方
                 # "第一处异常在全部收尾跑完后原样再抛"）；退化为瞬时帧：在场的
                 # 订阅者至少还能收到信号，缺席者由失败日志兜底。
                 self._log("task_failed", "run-failed-before-plan 落盘失败，退化为瞬时帧",
                           span_id=new_span_id(), outcome="error", exc_info=True)
-                yield AgentEvent(type=ERROR, data=error_data)
-            else:
-                yield to_agent_event(error_event)
+                # #1280 AC2：降级帧带显式 degraded 标记自描述——durable 型却无 seq
+                # 的帧自此可判别，golden 不变式据此放宽为「seq=None ⟺
+                # STREAM_ONLY_TYPES ∪ 带 degraded 标记的存储降级帧」。
+                fatal_error_frame = AgentEvent(
+                    type=ERROR, data={**error_data, "degraded": True},
+                )
+        if end_event is not None:
+            yield to_agent_event(end_event)
+        if fatal_error_frame is not None:
+            yield fatal_error_frame
         stages.raise_first()
 
     def _sync_context_vision(self, role: str) -> None:
