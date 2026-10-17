@@ -31,14 +31,17 @@ interface Props {
 }
 
 export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
-  const attention = session.attention_kind !== null;
+  // P4-5：染色与横幅用同一个布尔值（后端契约保证 `attention_kind` /
+  // `attention_summary` 同源；前端防御性对齐——只有两者都非空才算"有注意力"，
+  // 避免"染色了但没横幅"或反之的半吊子态）。
+  const hasAttention = session.attention_kind !== null && session.attention_summary !== null;
   const empty = session.first_user_message === null;
   const title = cardTitle(session);
   const relative = formatRelativeTime(session.last_event_time, now);
 
   return (
     <article
-      className={`kanban-card${attention ? ' in-attention' : ''}${empty ? ' kanban-card-empty' : ''}`}
+      className={`kanban-card${hasAttention ? ' in-attention' : ''}${empty ? ' kanban-card-empty' : ''}`}
       data-session-id={session.session_id}
       /* 空会话不可拖（§4.7）。**显式** `false`：属性缺失时 HTML 的 `draggable`
          默认是 `auto`（可拖），所以"不可拖"必须显式写出来才算钉住（AC-9②）。 */
@@ -56,7 +59,7 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
     >
       <div className="kanban-card-title-row">
         {/* 有横幅时不画点（Orca `:252` 同构）。 */}
-        {attention ? null : <span className="kanban-card-dot" aria-hidden="true" />}
+        {hasAttention ? null : <span className="kanban-card-dot" aria-hidden="true" />}
         <span className="kanban-card-title" title={title}>
           {title}
         </span>
@@ -67,7 +70,7 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
         <p className="kanban-card-hint">空会话：请先在侧栏打开并发送消息</p>
       )}
 
-      {session.attention_summary !== null && (
+      {hasAttention && (
         <div className="kanban-card-attention" data-attention-kind={session.attention_kind ?? ''}>
           {session.attention_kind === 'approval' ? (
             <ShieldQuestion size={12} aria-hidden="true" />

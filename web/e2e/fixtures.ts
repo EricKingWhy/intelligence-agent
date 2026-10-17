@@ -295,9 +295,10 @@ export interface ApiMock {
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
-  /** `POST /api/sessions/{id}/<subPath>` 会话级命令（#1195 slash 命令族；#1304 起
-   *  被看板拖拽用到的 `/task/definition` 走这条）。**给了钩子即由它接管**这条路由
-   *  （与 `onMessagesPost` 同款），缺省则回 404。
+  /** `POST /api/sessions/{id}/<subPath>` 会话级命令的**测试钩子**（P4-3）——仅放行
+   *  `task/definition` 与 `workflow-mode` 两条命令（实现只匹配这两条，其他命令
+   *  走不到这个钩子）。#1304 起被看板拖拽用到的 `/task/definition` 走这条。
+   *  **给了钩子即由它接管**这条路由（与 `onMessagesPost` 同款），缺省则回 404。
    *
    *  ⚠ 判"接管"看的是**钩子在不在**，不是它的返回值：钩子的自然写法是
    *  `return route.fulfill(...)`（Promise<void>），await 出来是 `undefined`，

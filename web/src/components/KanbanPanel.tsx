@@ -46,6 +46,7 @@ import {
   filterByTitle,
   groupSessions,
   readShowAccepted,
+  unknownStateCount,
   writeShowAccepted,
 } from '../lib/kanban';
 import { KanbanCard } from './KanbanCard';
@@ -66,6 +67,9 @@ const defaultLoadSessions = (): Promise<SessionSummary[]> =>
 /** 拖拽被拒绝时的说明（AC-9① 的判据文本）。 */
 const REJECT_TEXT = '只有 backlog 卡可以拖到「执行中」';
 
+/** 顶部提示行的自动消失时长（showNotice 与其 cleanup 共用，禁止第二处各写一份）。 */
+const NOTICE_MS = 4000;
+
 /** 落点两步里第一步的 409 是**正常**语义（该会话已定义过任务），不是错误——
  *  跳过定义、直接开跑（AC-10）。 */
 function isAlreadyDefined(error: unknown): boolean {
@@ -83,6 +87,9 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const [showAccepted, setShowAccepted] = useState(readShowAccepted);
   /** 拖拽中的会话 id（同一次拖拽内跨列共享；`null` = 没有在拖）。 */
   const draggingRef = useRef<string | null>(null);
+  /** 正在落点的会话 id 集（P3-1：快速连续拖拽同一张卡时，同会话的第二组
+   *  写请求被静默拦截，不发第二次）。 */
+  const dropInFlight = useRef<Set<string>>(new Set());
   const [notice, setNotice] = useState<string | null>(null);
   /** 相对时间的基准：**一次加载一个值**（不给每张卡各自 `Date.now()`，也不起定时器）。 */
   const [now, setNow] = useState(() => Date.now());
@@ -111,7 +118,7 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const showNotice = useCallback((text: string) => {
     setNotice(text);
     if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice(null), 4000);
+    noticeTimer.current = setTimeout(() => setNotice(null), NOTICE_MS);
   }, []);
 
   useEffect(
@@ -141,6 +148,8 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const visible = useMemo(() => filterByTitle(sessions, query), [sessions, query]);
   const grouped = useMemo(() => groupSessions(visible), [visible]);
   const hiddenDeliverable = useMemo(() => deliverableCount(visible), [visible]);
+  /** 后端新增的未知状态卡数（P4-4：与 deliverable 同一条"不许静默丢卡"纪律）。 */
+  const hiddenUnknown = useMemo(() => unknownStateCount(visible), [visible]);
 
   const toggleAccepted = () => {
     const next = !showAccepted;
@@ -148,8 +157,9 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
     writeShowAccepted(next);
   };
 
-  /** 落点写路径：只有 backlog -> 执行中走到这里（票面 §4.7 的两步）。 */
-  const runDropOnExecuting = useCallback(
+  /** 落点写路径的实际执行体（原样从 `runDropOnExecuting` 抽出——P3-1 的 in-flight
+   *  守卫由外层做，这里只管"落点两步"本身）。 */
+  const doRunDropOnExecuting = useCallback(
     async (session: SessionSummary) => {
       const taskText = session.first_user_message;
       if (taskText === null) {
@@ -185,6 +195,24 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
       await reload();
     },
     [reload, showNotice],
+  );
+
+  /** 落点写路径：只有 backlog -> 执行中走到这里（票面 §4.7 的两步）。 */
+  const runDropOnExecuting = useCallback(
+    async (session: SessionSummary) => {
+      const sessionId = session.session_id;
+      // P3-1：快速连续拖拽同一张卡到执行中会发出两组
+      // `POST /task/definition` + `POST /messages`（任务被 queue 两次）。
+      // 同一会话的第一组还在飞时，第二次落点直接**静默返回**（不 toast，避免噪音）。
+      if (dropInFlight.current.has(sessionId)) return;
+      dropInFlight.current.add(sessionId);
+      try {
+        await doRunDropOnExecuting(session);
+      } finally {
+        dropInFlight.current.delete(sessionId);
+      }
+    },
+    [doRunDropOnExecuting],
   );
 
   if (!open) return null;
@@ -299,6 +327,11 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
         {hiddenDeliverable > 0 && (
           <div className="kanban-notice kanban-notice-warn" role="status">
             有 {hiddenDeliverable} 张卡片处于 deliverable 状态，该列 v1 未渲染
+          </div>
+        )}
+        {hiddenUnknown > 0 && (
+          <div className="kanban-notice kanban-notice-warn" role="status">
+            有 {hiddenUnknown} 张卡片处于后端新增的未知状态，未渲染也未被计数
           </div>
         )}
 

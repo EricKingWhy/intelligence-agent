@@ -61,10 +61,12 @@ export const COLUMN_TESTIDS: Record<KanbanColumn, string> = {
 /** 「显示已接受」开关的 localStorage 键（票面 §4.2 指定，值域是 `'true'`/`'false'`）。 */
 export const SHOW_ACCEPTED_KEY = 'ahi.kanban.showAccepted.v1';
 
-/** 空会话（无 `first_user_message`）的占位标题——与 `SessionList` 的「未命名会话」同词。 */
+/** 空会话（无 `first_user_message`）的占位标题。 */
 export const UNTITLED = '(未命名会话)';
 
-/** 一张卡归属哪一列；`null` = 不属于任何**渲染中**的列（v1 只有 deliverable）。 */
+/** 一张卡归属哪一列；`null` = 不属于任何**渲染中**的列（v1 有 deliverable 与
+ *  后端可能新增的未知状态，前者由 `deliverableCount` 计数、后者由
+ *  `unknownStateCount` 计数，都不在这里静默丢掉）。 */
 export function columnOf(session: SessionSummary): KanbanColumn | null {
   const state = session.product_state;
   return (KANBAN_COLUMNS as readonly string[]).includes(state)
@@ -131,6 +133,20 @@ export function groupSessions(
 /** v1 未渲染的 deliverable 卡数（票面 AC-3：> 0 时看板顶部必须**说出来**，不许静默丢卡）。 */
 export function deliverableCount(sessions: readonly SessionSummary[]): number {
   return sessions.filter((session) => session.product_state === UNRENDERED_STATE).length;
+}
+
+/** 后端新增的未知 `product_state` 的卡数（P4-4）。
+ *
+ *  这类卡既不进任何列（`columnOf` 回 `null`），又不被 `deliverableCount` 计数——
+ *  后端加了新状态时它会**静默消失**。> 0 时看板顶部与 deliverable 警示并列说出来
+ *  （不变量 #21 的"不许静默丢卡"同样覆盖它）。`deliverable` 本身是已知的未渲染态，
+ *  不计入这里，避免两行警示重复报警。 */
+export function unknownStateCount(sessions: readonly SessionSummary[]): number {
+  return sessions.filter(
+    (session) =>
+      !(KANBAN_COLUMNS as readonly string[]).includes(session.product_state) &&
+      session.product_state !== UNRENDERED_STATE,
+  ).length;
 }
 
 /** 卡片标题：`first_user_message`，为空渲染占位（票面 §4.3）。 */

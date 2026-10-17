@@ -18,6 +18,7 @@ import {
   groupSessions,
   readShowAccepted,
   sortColumn,
+  unknownStateCount,
   writeShowAccepted,
 } from './kanban';
 
@@ -145,6 +146,30 @@ describe('#1304 deliverableCount', () => {
 
   it('UNRENDERED_STATE 与后端字面量一致', () => {
     expect(UNRENDERED_STATE).toBe('deliverable');
+  });
+});
+
+describe('#1304 unknownStateCount (P4-4)', () => {
+  it('只数四态与 deliverable 之外的未知状态（不与 deliverableCount 重复报警）', () => {
+    expect(
+      unknownStateCount([
+        summary('a', { product_state: 'some_future_state' }),
+        summary('b', { product_state: 'deliverable' }),
+        summary('c', { product_state: 'executing' }),
+        summary('d', { product_state: '' }),
+        summary('e', { product_state: 'another_new_state' }),
+      ]),
+    ).toBe(2);
+  });
+
+  it('全已知状态时为 0（0 条不显示警示行）', () => {
+    expect(
+      unknownStateCount([
+        summary('a', { product_state: '' }),
+        summary('b', { product_state: 'executing' }),
+        summary('c', { product_state: 'deliverable' }),
+      ]),
+    ).toBe(0);
   });
 });
 
