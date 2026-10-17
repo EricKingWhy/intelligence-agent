@@ -12,6 +12,10 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
 * 三级读取（内存 → sidecar → 事件重放）：本仓 ``store.py::read_session_summary``
   的「文件戳缓存 + 戳变化回读」纪律（#516）；sidecar 校验用事件文件的
   ``(size, mtime_ns)`` 戳，**不**走 ``_last_seq_on_disk`` 的 ``read_events`` 回退。
+  该等价关系成立的前提是**同一时刻只有一个写者**（本仓 ``append_event`` 的跨进程
+  文件锁就是这个前提）。若旁路写者恰好在「``append_event`` 返回」与「取戳」之间
+  追加，戳会覆盖一条本投影没读到的事件；下一次触发事件会重算并纠正，非触发事件
+  不会把它永久钉住（冷缓存分支一律重放，见 ``update_from_events``）。
 * 原子写：照搬 ``session/progress.py::_write_meta_atomic`` 的
   ``mkstemp + flush + fsync + os.replace`` 形状（本票唯一指定的抄写来源）。
 * best-effort 钩子：照搬 ``session/session.py`` 的 listener 纪律——观察者异常只
@@ -114,34 +118,26 @@ def _attention(events: list[SessionEvent]) -> tuple[AttentionKind | None, str | 
     return kind, summary
 
 
-def derive_board_projection(events: list[SessionEvent]) -> BoardProjection:
-    """纯函数：events → BoardProjection（幂等；重放 N 次结果一致）。
+def _derive(events: list[SessionEvent]) -> BoardProjection | None:
+    """纯派生；派生本身失败时返回 ``None``（由调用方决定是否沿用旧缓存）。
 
-    异常隔离：本函数在 ``Session._persist_event`` 的 append 路径上被调用，任何
-    派生异常都必须被吞掉并记日志，**不得**冒到 append 契约。失败时返回一份
-    保守的空投影（product_state="" / attention=None），宁可列表短暂少一列，
-    也不能让写事件失败。
+    与 ``derive_board_projection`` 分开是为了让 store 能区分「合法的空投影」与
+    「派生失败」——后者绝不能落盘/进缓存，否则一次瞬时异常会把看板钉成空列，
+    直到下一个触发事件才自愈（独立审查 P2）。
     """
     materialized = list(events)
-    projection_seq = -1
+    projection_seq = max((event.seq for event in materialized), default=-1)
     try:
-        projection_seq = max((event.seq for event in materialized), default=-1)
         # 延迟导入：避免 session 包初始化期的循环导入（同 `_attention`）。
         from agent_harness.session.task import derive_task_state
 
         state = derive_task_state(materialized)
     except Exception:
         logger.exception(
-            "看板投影派生失败（session=%s）；返回保守空投影",
+            "看板投影派生失败（session=%s）",
             materialized[-1].session_id if materialized else None,
         )
-        return BoardProjection(
-            product_state="",
-            product_state_changed_at=None,
-            attention_kind=None,
-            attention_summary=None,
-            projection_seq=projection_seq,
-        )
+        return None
 
     attention_kind: AttentionKind | None = None
     attention_summary: str | None = None
@@ -160,6 +156,30 @@ def derive_board_projection(events: list[SessionEvent]) -> BoardProjection:
         attention_summary=attention_summary,
         projection_seq=projection_seq,
     )
+
+
+def _empty(events: list[SessionEvent]) -> BoardProjection:
+    seq = max((event.seq for event in events), default=-1)
+    return BoardProjection(
+        product_state="",
+        product_state_changed_at=None,
+        attention_kind=None,
+        attention_summary=None,
+        projection_seq=seq,
+    )
+
+
+def derive_board_projection(events: list[SessionEvent]) -> BoardProjection:
+    """纯函数：events → BoardProjection（幂等；重放 N 次结果一致）。
+
+    异常隔离：本函数在 ``Session._persist_event`` 的 append 路径上被调用，任何
+    派生异常都必须被吞掉并记日志，**不得**冒到 append 契约。失败时返回一份
+    保守的空投影（product_state="" / attention=None），宁可列表短暂少一列，
+    也不能让写事件失败。``BoardProjectionStore`` 走 ``_derive``，派生失败时
+    不落盘/不覆盖缓存，避免把瞬时空值钉住。
+    """
+    projection = _derive(events)
+    return projection if projection is not None else _empty(events)
 
 
 #: 单例按 store root 分片：不同 root（测试 / 多实例）互不干扰。
@@ -190,7 +210,10 @@ class BoardProjectionStore:
     3. 任何写失败只 ``logger.exception``，绝不影响 ``Session.append`` 契约；
     4. 所有 ``_persist_event``（含触发集外）都推进 sidecar 水位到当前 seq——
        否则 ``USER_MESSAGE`` 等非触发事件会让 sidecar 永远失配、列表路径每次
-       回退到全量重放。
+       回退到全量重放；
+    5. 冷缓存（本实例还没算过该会话）一律从事件流重放，**不复用** sidecar 里
+       的旧投影：sidecar 可能因写失败/旁路写者落后于事件文件，直接复用会把
+       旧状态盖上当前戳（独立审查 P1）。
     """
 
     def __init__(self, store: JsonlSessionStore) -> None:
@@ -217,14 +240,19 @@ class BoardProjectionStore:
                     self._cache[session_id] = (sidecar, stamp)
                     return sidecar
 
-            events = self._store.read_events(session_id)
-            projection = derive_board_projection(events)
-            stamp_after = self._events_stamp(session_id)
-            # 只有「读事件期间文件没变」才回填缓存；否则下一轮重放，避免把
-            # 少一条事件的投影钉在更新的戳上。
-            if stamp_after is not None and stamp_after == stamp:
+        # 重放不持锁：冷启动的整段重放是 O(事件数)，持锁会串行阻塞 append 钩子
+        # （独立审查 P3）。两次并发重放得到同一结果，回填以最后落锁者为准。
+        events = self._store.read_events(session_id)
+        projection = _derive(events)
+        if projection is None:
+            return _empty(events)
+        stamp_after = self._events_stamp(session_id)
+        # 只有「读事件期间文件没变」才回填缓存；否则下一轮重放，避免把
+        # 少一条事件的投影钉在更新的戳上。
+        if stamp_after is not None and stamp_after == stamp:
+            with self._lock:
                 self._persist(session_id, projection, stamp_after)
-            return projection
+        return projection
 
     # ── 写入钩子 ────────────────────────────────────────────────────────
 
@@ -238,8 +266,9 @@ class BoardProjectionStore:
         """``Session._persist_event`` 的 best-effort 钩子。
 
         ``recompute=True``（触发集）：从事件流重算投影。
-        ``recompute=False``（触发集外）：只推进水位，不重算投影；若尚无任何
-        缓存（会话第一条事件），退化为一次重算以建立正确的初始投影。
+        ``recompute=False``（触发集外）：只推进水位，不重算投影；若本实例还没
+        算过该会话（冷缓存），退化为一次重放以建立正确的初始投影——绝不复用
+        sidecar 的旧值（它可能落后于事件文件，复用等于把旧状态盖上当前戳）。
 
         任何异常只记日志——本方法是 append 路径上的观察者。
         """
@@ -252,23 +281,20 @@ class BoardProjectionStore:
                     return
                 current_seq = events[-1].seq
                 if recompute:
-                    projection = derive_board_projection(events)
+                    projection = _derive(events)
                 else:
                     # 触发集外：本条事件按定义不改变产品态/注意力，直接复用上一份
                     # 投影，只把水位推到当前 seq。这里**不**校验旧戳——戳在 append
                     # 之后必然已变，校验会让每次 USER_MESSAGE 都退化成全量重放。
                     cached = self._cache.get(session_id)
-                    existing = (
-                        cached[0]
+                    projection = (
+                        replace(cached[0], projection_seq=current_seq)
                         if cached is not None
-                        else self._read_sidecar(
-                            session_id, stamp, validate_stamp=False
-                        )
+                        else _derive(events)
                     )
-                    if existing is None:
-                        projection = derive_board_projection(events)
-                    else:
-                        projection = replace(existing, projection_seq=current_seq)
+                if projection is None:
+                    # 派生失败：保留旧缓存与旧 sidecar，等下一次触发事件自愈。
+                    return
                 self._persist(session_id, projection, stamp)
         except Exception:
             logger.exception(
@@ -289,18 +315,13 @@ class BoardProjectionStore:
         self,
         session_id: str,
         stamp: tuple[int, int] | None,
-        *,
-        validate_stamp: bool = True,
     ) -> BoardProjection | None:
         """读 sidecar；只有「写它时的事件文件戳 == 当前戳」才算命中。
 
         这是「``projection_seq`` == 盘上最大 seq」的零 ``read_events`` 证明：
-        append-only 文件在两次投影之间没有字节变化（size + mtime 一致）⇒
-        sidecar 覆盖的 seq 就是盘上最大 seq。
-
-        ``validate_stamp=False`` 仅供 ``update_from_events`` 的触发集外分支使用：
-        此时调用方**刚**追加了一条不改状态的事件，已知旧戳必然失配，直接复用
-        上一份投影并推进水位即可。
+        在单写者前提下，append-only 文件在两次投影之间没有字节变化
+        （size + mtime 一致）⇒ sidecar 覆盖的 seq 就是盘上最大 seq。
+        旁路写者的窄窗口假设见模块 docstring。
         """
         path = self._store.board_state_path(session_id)
         try:
@@ -310,12 +331,9 @@ class BoardProjectionStore:
         if not isinstance(raw, dict):
             return None
         if (
-            validate_stamp
-            and (
-                stamp is None
-                or raw.get("events_size") != stamp[0]
-                or raw.get("events_mtime_ns") != stamp[1]
-            )
+            stamp is None
+            or raw.get("events_size") != stamp[0]
+            or raw.get("events_mtime_ns") != stamp[1]
         ):
             return None
         projection_seq = raw.get("projection_seq")

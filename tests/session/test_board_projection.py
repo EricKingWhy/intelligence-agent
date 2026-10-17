@@ -540,3 +540,60 @@ def test_projection_seq_empty_session_is_minus_one() -> None:
         attention_summary=None,
         projection_seq=-1,
     )
+
+
+def test_restart_returns_identical_five_fields(tmp_path: Path) -> None:
+    """AC-13 ⑤：新建 store 实例（进程重启）后五个字段逐字段相等。"""
+    store, session = _session_with_task(tmp_path)
+    first = BoardProjectionStore(store).get(session.session_id)
+
+    # 删掉 sidecar：重启后的读数必须完全来自事件流重放，而不是缓存。
+    store.board_state_path(session.session_id).unlink()
+    restarted = BoardProjectionStore(JsonlSessionStore(root=store._root))
+    assert restarted.get(session.session_id) == first
+    assert store.board_state_path(session.session_id).exists()
+
+
+def test_cold_cache_non_trigger_update_never_trusts_stale_sidecar(
+    tmp_path: Path,
+) -> None:
+    """独立审查 P1：sidecar 落后时，冷缓存的非触发更新不得把它盖上当前戳。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    assert BoardProjectionStore(store).get(sid).product_state == "pending_verification"
+
+    # 触发事件的 sidecar 写失败：盘上已 executing，sidecar 仍是 pending_verification。
+    with pytest.MonkeyPatch.context() as mp:
+
+        def boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        mp.setattr(BoardProjectionStore, "_write_sidecar", boom)
+        session.begin_run()
+
+    # 冷缓存 + 触发集外事件：必须重放，不能复用旧 sidecar。
+    fresh = BoardProjectionStore(store)
+    fresh.update_from_events(sid, session.events, recompute=False)
+    assert fresh.get(sid).product_state == "executing"
+
+
+def test_derivation_failure_does_not_poison_memory_or_sidecar(
+    tmp_path: Path,
+) -> None:
+    """独立审查 P2：派生瞬时失败不得把空投影写进缓存/sidecar。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    before = projection_store.get(sid)
+    sidecar_before = json.loads(store.board_state_path(sid).read_text("utf-8"))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(bp, "_derive", lambda _events: None)
+        session.begin_run()
+
+    sidecar_after = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert sidecar_after["product_state"] == sidecar_before["product_state"]
+    assert sidecar_after["projection_seq"] == sidecar_before["projection_seq"]
+    # 下一次读取从事件流重放，拿到真实的新状态（缓存没被污染）。
+    assert projection_store.get(sid).product_state == "executing"
+    assert before.product_state == "pending_verification"
