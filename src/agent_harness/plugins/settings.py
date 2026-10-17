@@ -93,40 +93,6 @@ def _string_set(value: object, field_name: str) -> frozenset[str]:
     return frozenset(value)
 
 
-def _parse(payload: object) -> PluginSettings:
-    if not isinstance(payload, dict):
-        raise PluginSettingsError("plugin-settings.json 顶层必须是对象")
-    raw_tools = payload.get("disabled_tools")
-    if raw_tools is None:
-        raw_tools = {}
-    if not isinstance(raw_tools, dict):
-        raise PluginSettingsError("disabled_tools 必须是对象")
-    disabled_tools: dict[str, frozenset[str]] = {}
-    for server, tools in raw_tools.items():
-        if not isinstance(server, str):
-            raise PluginSettingsError("disabled_tools 的键必须是 server 名")
-        disabled_tools[server] = _string_set(tools, f"disabled_tools.{server}")
-    raw_overrides = payload.get("skill_overrides")
-    if raw_overrides is None:
-        raw_overrides = {}
-    if not isinstance(raw_overrides, dict):
-        raise PluginSettingsError("skill_overrides 必须是对象")
-    skill_overrides: dict[str, bool] = {}
-    for name, override in raw_overrides.items():
-        if not isinstance(name, str) or not isinstance(override, dict):
-            raise PluginSettingsError("skill_overrides 的条目必须是 {<name>: {enabled: bool}}")
-        enabled = override.get("enabled")
-        if not isinstance(enabled, bool):
-            raise PluginSettingsError(f"skill_overrides.{name}.enabled 必须是布尔值")
-        skill_overrides[name] = enabled
-    return PluginSettings(
-        disabled_servers=_string_set(payload.get("disabled_servers"), "disabled_servers"),
-        disabled_tools=disabled_tools,
-        require_confirm=_string_set(payload.get("require_confirm"), "require_confirm"),
-        skill_overrides=skill_overrides,
-    )
-
-
 def _read_payload(workspace_dir: str | os.PathLike[str]) -> object | None:
     """读原始 JSON；文件缺失 → None。损坏/超限/读不出显式抛错（不静默吞）。"""
     path = settings_path(workspace_dir)
@@ -146,19 +112,26 @@ def _read_payload(workspace_dir: str | os.PathLike[str]) -> object | None:
 
 
 def load_plugin_settings(workspace_dir: str | os.PathLike[str]) -> PluginSettings:
-    """读当前选择状态；文件缺失 = 全默认。损坏/超限显式抛错，不静默吞。"""
+    """读当前选择状态；文件缺失 = 全默认。损坏/超限/坏形状显式抛错，不静默吞。
+
+    严格读 = 容错读 + "有任何错误就抛"。两个解析器各写一遍同一形状的校验
+    （字段增删要改两处）是真实的漂移面，故只保留 `_parse_tolerant` 一份实现。
+    """
     payload = _read_payload(workspace_dir)
     if payload is None:
         return PluginSettings()
-    return _parse(payload)
+    settings, errors = _parse_tolerant(payload)
+    if errors:
+        raise PluginSettingsError("；".join(errors))
+    return settings
 
 
 def _parse_tolerant(payload: object) -> tuple[PluginSettings, list[str]]:
-    """逐字段解析（设计 §4）：坏字段记错误并按默认值继续，**其余字段保留**。
+    """唯一的形状解析器：坏字段记错误并按默认值继续，**其余字段保留**。
 
-    与 `_parse` 的分工：写路径/严格读仍用 `_parse`（一个坏字段整体响亮失败），
-    只读投影与降级读用本函数——否则一个 `{"enabled": "no"}` 会把同文件里合法的
-    `disabled_servers` 一起丢掉，下次装配把用户禁用的 server 又连上。
+    严格读（`load_plugin_settings`）在此之上"有错即抛"，容错读直接消费结果——
+    否则一个 `{"enabled": "no"}` 会把同文件里合法的 `disabled_servers` 一起丢掉，
+    下次装配把用户禁用的 server 又连上。
     """
     if not isinstance(payload, dict):
         raise PluginSettingsError("plugin-settings.json 顶层必须是对象")

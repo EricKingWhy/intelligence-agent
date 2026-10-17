@@ -339,6 +339,12 @@ class ToolExecutor:
         # `workspace_root` 供路径规则（R2）判越界；None ⇒ 跳过路径规则（防御性）。
         permission_rules: PermissionRuleSet | None = None,
         workspace_root: Path | None = None,
+        # #1200：调用方是否提供了**人工**审批通道（交互式审批 holder）。
+        # composition root 在把 None 顶替成 deny / auto-approve 回调**之前**取快照
+        # 并传入。默认 True：裸构造（单测 / 只读端点）没有这层顶替，语义不变。
+        # False ⇒ `require_confirmation` 的工具直接 fail-closed 拒绝，而不是让
+        # "调用工具前需要我确认"在自动批准会话里静默放行。
+        human_approval_available: bool = True,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -353,6 +359,7 @@ class ToolExecutor:
         self._approve_policy_store = ApprovePolicyStore(self._project_root)
         self._permission_rules = permission_rules
         self._workspace_root = workspace_root
+        self._human_approval_available = human_approval_available
 
     @property
     def tracks_operations(self) -> bool:
@@ -1410,6 +1417,24 @@ class ToolExecutor:
                 return None
             if rule_verdict is RuleVerdict.ASK:
                 rule_reason = matched_reason
+
+        if requires_confirmation and not self._human_approval_available:
+            # #1200：「调用工具前需要我确认」在**没有人工审批通道**的会话里兑现不了
+            # （composition root 会用 deny / auto-approve 回调顶替 None）。静默放行
+            # 等于面板承诺了一个做不到的开关 ⇒ fail-closed，并说清为什么。
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"工具 '{name}' 所在 MCP server 已设置为「调用工具前需要我确认」，"
+                        "但当前会话没有人工审批通道（如自动/计划模式）；已按 fail-closed 拒绝。"
+                        "切换到逐次确认的权限档后重试。"
+                    ),
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    retryable=False,
+                ),
+                budget_delta=_rejected_delta(name),
+            )
 
         needs = (
             requires_confirmation

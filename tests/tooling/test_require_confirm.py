@@ -31,6 +31,7 @@ from agent_harness.tooling.permission_rules import (
     PermissionRuleSet,
     RuleVerdict,
 )
+from agent_harness.tooling.result import ErrorCode
 
 
 class _Args(BaseModel):
@@ -87,7 +88,12 @@ _ALLOW_ALL = PermissionRuleSet(
 
 
 def _executor(
-    tool: Tool, *, callback=None, rules=None, project_root: Path | None = None
+    tool: Tool,
+    *,
+    callback=None,
+    rules=None,
+    project_root: Path | None = None,
+    human_approval_available: bool = True,
 ) -> ToolExecutor:
     registry = ToolRegistry()
     registry.register(tool)
@@ -97,6 +103,7 @@ def _executor(
         approval_callback=callback,
         permission_rules=rules,
         project_root=project_root,
+        human_approval_available=human_approval_available,
     )
 
 
@@ -157,3 +164,33 @@ async def test_policy_store_cannot_skip_confirmation(tmp_path: Path) -> None:
 
     assert first.result.ok is True and second.result.ok is True
     assert approver.calls == 2, "项目级持久规则不得替代 require_confirm"
+
+
+@pytest.mark.asyncio
+async def test_require_confirm_fails_closed_without_a_human_channel() -> None:
+    """自动批准会话（composition root 用 auto-approve 回调顶替 None）里，
+    「调用工具前需要我确认」兑现不了 ⇒ 必须 fail-closed。
+
+    静默放行等于面板承诺了一个做不到的开关：用户勾了确认，工具却直接执行。
+    """
+    tool = _McpLikeTool(require_confirmation=True)
+    auto_approve = _Counter()  # 顶替 None 的非人工回调（assembly.py:756 同形）
+    result = await _executor(
+        tool, callback=auto_approve, rules=_ALLOW_ALL, human_approval_available=False
+    ).execute(_tc())
+    assert result.result.ok is False
+    assert result.result.error_code is ErrorCode.PERMISSION_DENIED
+    assert "人工审批通道" in result.result.message
+    assert tool.calls == 0
+    assert auto_approve.calls == 0, "没有人工通道时不该再去问那个自动批准回调"
+
+
+@pytest.mark.asyncio
+async def test_without_require_confirm_the_flag_does_not_change_anything() -> None:
+    """标记为 False 的工具在无人工通道的会话里照常放行（只关这一件事）。"""
+    tool = _McpLikeTool(require_confirmation=False)
+    result = await _executor(
+        tool, callback=_Counter(), rules=_ALLOW_ALL, human_approval_available=False
+    ).execute(_tc())
+    assert result.result.ok is True
+    assert tool.calls == 1

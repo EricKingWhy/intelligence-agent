@@ -744,6 +744,11 @@ async def build_runtime(
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
     # 切片 B：ApprovalCallback 已 async 化（外部 /approve 交互式审批需要 run 暂停）。
     policy = permission_mode
+    # #1200：`require_confirmation` 是"每次调用都问人"的显式选择——只有真的存在
+    # 人工审批通道时才兑现得了。下面两支都会用**非人工**回调顶替 None（deny 或
+    # auto-approve），此时该标记必须 fail-closed 而不是静默放行。在顶替**之前**
+    # 取快照，否则无从区分"调用方没给"与"我们刚补的自动批准"。
+    human_approval_available = approval_callback is not None
     if auto_approve is False and approval_callback is None:
         async def approval_callback(_req):  # type: ignore[no-redef]
             # #423：用户向措辞（原 "manual approval not yet wired" 已退役，见 CHANGELOG）。
@@ -862,6 +867,7 @@ async def build_runtime(
                 overflow_handler=overflow_handler,
                 operation_ledger=stores.operation_ledger,
                 resource_locks=resource_locks,
+                human_approval_available=human_approval_available,
                 # #358 / W-14：子执行器与父同一审批面（决策 11 权限传递）——
                 # 显式注入产品级默认权限矩阵（规则引擎本体默认 None = 不启用）。
                 permission_rules=default_rule_set(),
@@ -954,6 +960,7 @@ async def build_runtime(
                               overflow_handler=overflow_handler,
                               operation_ledger=stores.operation_ledger,
                               resource_locks=resource_locks,
+                              human_approval_available=human_approval_available,
                               # #358 / W-14：主执行器注入产品级默认权限矩阵
                               # （规则引擎本体默认 None = 不启用；矩阵归 composition root）。
                               permission_rules=default_rule_set(),

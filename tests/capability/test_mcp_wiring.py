@@ -476,3 +476,39 @@ async def test_broken_plugin_settings_degrades_to_defaults(tmp_path, stub_connec
 
     assert [tool.name for tool in wiring.tools] == ["mcp__srv__echo"]
     assert any("plugin-settings.json" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_packaged_disabled_server_stays_visible_in_management_layer(
+    tmp_path, stub_connections
+):
+    """包内 `enabled:false` 的 server 与 config 级禁用项同款处理：不接线，
+    但必须留在 `configs()` 里——否则它从窗口彻底消失（既不接线也不可见），
+    用户没有任何路径重新启用它（裁决 C1：禁用≠删除）。"""
+    global_dir = tmp_path / "home" / "skills"
+    manager = MCPPackageManager(tmp_path, global_skills_dir=global_dir)
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "mcp.json").write_text(
+        json.dumps({"servers": [_stdio("live"), _stdio("parked", enabled=False)]}),
+        encoding="utf-8",
+    )
+    manager.install(source, package_id="mixed-tools")
+    manager.trust("mixed-tools")
+    manager.enable("mixed-tools")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(global_dir),
+        model_api_key="sk-test",
+    )
+    wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__live__echo"]
+    assert [c.config.name for c in stub_connections.instances] == ["live"]
+    capability = next(
+        item for item in wiring.lifecycle if hasattr(item, "all_server_names")
+    )
+    assert capability.all_server_names() == ["live", "parked"]
+    assert capability.is_connected("parked") is False

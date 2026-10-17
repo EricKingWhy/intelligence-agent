@@ -18,6 +18,7 @@ from agent_harness.host_service import (
     HOST_SKILLS_RESPONSE_PROOF_HEADER,
     host_skills_response_proof,
 )
+from agent_harness.skills.discovery import single_line
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -107,7 +108,9 @@ def register_skill_routes(app: FastAPI) -> None:
 
 def _skill_payload(entry: object, *, enabled: bool | None = None) -> dict:
     """单个 skill 的投影（#1200 增量字段，全部 getattr 防御以兼容旧替身）。"""
-    description = str(getattr(entry, "description", ""))
+    # 与 `/api/plugins/slash-registry` 同一投影口径（#588/#607 单行纪律）：
+    # 两个只读面各写一套会让同一 skill 在面板里多行、在 `/` 菜单里单行。
+    description = single_line(str(getattr(entry, "description", "")))
     payload = {
         "name": getattr(entry, "name", ""),
         "description": description[:MAX_SKILL_DESCRIPTION_CHARS],

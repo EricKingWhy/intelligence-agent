@@ -152,11 +152,6 @@ class MCPTool(Tool):
         )
 
     @property
-    def server_name(self) -> str:
-        """所属 MCP server 名（#1200：管理面按 server 归组工具）。"""
-        return self._server_config.name
-
-    @property
     def remote_name(self) -> str:
         return self._remote_name
 

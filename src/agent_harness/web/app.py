@@ -2496,7 +2496,7 @@ def create_app(
         字段为增量：既有 `{name, connected}` 保留，新增
         `enabled / needs_auth / tool_count / require_confirm`（向后兼容）。
         """
-        from agent_harness.mcp.capability import MCPCapability
+        from agent_harness.mcp.capability import find_mcp_capability
         from agent_harness.plugins.settings import load_plugin_settings_or_default
 
         # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
@@ -2508,9 +2508,7 @@ def create_app(
             agent_settings.workspace_dir
         )
         _, wiring = await app.state.agent.get_wiring()
-        capability = next(
-            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
-        )
+        capability = find_mcp_capability(wiring)
         if capability is not None:
             names = capability.all_server_names()
             connected = {
@@ -2527,20 +2525,24 @@ def create_app(
             from agent_harness.capability.config import parse_capabilities_config
             from agent_harness.mcp.config import parse_mcp_servers
 
-            names = []
+            parsed: list = []
             try:
                 config = parse_capabilities_config(agent_settings.capabilities)
                 mcp_config = config.get("mcp")
                 if mcp_config is not None:
-                    names = [server.name for server in parse_mcp_servers(mcp_config.options)]
+                    parsed = list(parse_mcp_servers(mcp_config.options))
             except Exception as error:  # noqa: BLE001 — 只读列表不因配置错误 500
                 errors = [f"MCP 配置解析失败：{error}"]
             else:
                 errors = []
+            names = [server.name for server in parsed]
             connected = {name: False for name in names}
             needs_auth = {name: False for name in names}
             tool_counts = {name: 0 for name in names}
-            configs = {}
+            # 配置层条目同样要进 configs：`config_enabled` 与 transport/command/url
+            # 摘要都从它读。置空会让 config 级 `enabled:false` 的 server 在这条路径上
+            # 显示成"已启用"、开关也照发（而它永远由配置层胜出，写进选择态也无效）。
+            configs = {server.name: server for server in parsed}
 
         payload = {
             "servers": [
@@ -2578,13 +2580,11 @@ def create_app(
         语义：200 → `{name, disconnected}`（幂等，无此 server 也 200）；
         来源闸（ADR-0025 D1）：连接管理是宿主侧动作，只接受本机来源。
         """
-        from agent_harness.mcp.capability import MCPCapability
+        from agent_harness.mcp.capability import find_mcp_capability
 
         # 与列表端点同一条取用面（app.state.agent，而不是闭包里的初始 AppState）。
         _, wiring = await app.state.agent.get_wiring()
-        capability = next(
-            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
-        )
+        capability = find_mcp_capability(wiring)
         if capability is None:
             return {"name": server_name, "disconnected": False}
         disconnected = await capability.disconnect_server(server_name)

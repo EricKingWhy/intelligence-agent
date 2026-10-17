@@ -211,3 +211,16 @@ async def build_mcp_capability(
         configs=list(all_servers if all_servers is not None else servers),
         server_tools=server_tools,
     )
+
+
+def find_mcp_capability(wiring: object) -> MCPCapability | None:
+    """从 wiring.lifecycle 里定位 MCP capability（管理面/断开端点共用的唯一判据）。
+
+    三处调用点（`GET /api/mcp/servers`、disconnect、插件管理路由）此前各写一遍
+    `next((c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None)`
+    ——定位规则一旦分叉，管理窗口会与写端点看不同的 capability。
+    """
+    for item in getattr(wiring, "lifecycle", ()) or ():
+        if isinstance(item, MCPCapability):
+            return item
+    return None

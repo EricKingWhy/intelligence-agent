@@ -161,13 +161,45 @@ def test_list_servers_falls_back_to_config_without_capability(workspace: Path) -
             "require_confirm": False,
             # config 级启用态来自配置层，fallback 路径同样可读。
             "config_enabled": True,
-            # 无 runtime capability 时配置摘要不可得：空串，不伪造。
-            "transport": "",
-            "command": "",
+            # 配置摘要同样来自配置层（它不依赖 runtime capability）：这条路径
+            # 以前把 configs 置空，摘要退化成空串、`config_enabled` 恒 True。
+            "transport": "stdio",
+            "command": "npx",
             "url": "",
         }
     ]
     assert body["errors"] == []
+
+
+def test_list_servers_fallback_keeps_config_level_disable_visible(workspace: Path) -> None:
+    """fallback 路径同样要如实报 `config_enabled: false`——否则面板把它显示成
+    "已启用"、开关照发，而配置层永远胜出（写进选择态也不生效）。"""
+    capabilities = json.dumps(
+        {
+            "mcp": {
+                "provider": "builtin",
+                "options": {
+                    "servers": [
+                        {"name": "on", "transport": "stdio", "command": "npx"},
+                        {
+                            "name": "off",
+                            "transport": "stdio",
+                            "command": "npx",
+                            "enabled": False,
+                        },
+                    ]
+                },
+            }
+        }
+    )
+    client = _client_without_mcp(workspace, capabilities=capabilities)
+    with client:
+        servers = {
+            s["name"]: s for s in client.get("/api/mcp/servers").json()["servers"]
+        }
+    assert servers["on"]["config_enabled"] is True
+    assert servers["off"]["config_enabled"] is False
+    assert servers["off"]["transport"] == "stdio"
 
 
 def test_list_servers_reports_broken_capabilities_config(workspace: Path) -> None:
@@ -413,3 +445,42 @@ def test_selection_persists_across_app_instances(workspace: Path) -> None:
         assert {t["name"]: t["enabled"] for t in tools}["create_issue"] is False
         skills = restarted.get("/api/skills").json()["skills"]
         assert {s["name"]: s["enabled"] for s in skills}["code-review"] is False
+
+
+def test_config_disabled_server_rejects_selection_writes(workspace: Path) -> None:
+    """配置层 `enabled:false` 的 server：选择态开关对它无效（配置层胜出）。
+
+    不拦的话端点 200 + 落盘一个永远不生效的选择——UI 靠 `configOff` 挡住了，
+    裸 API 调用会拿到"成功"的假回执。
+    """
+    config_disabled = _config("reserved")
+    object.__setattr__(config_disabled, "enabled", False)
+    capability = MCPCapability(
+        connections=[],
+        tools=[],
+        errors=[],
+        configs=[*_client_configs(), config_disabled],
+        server_tools={},
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
+    )
+    app = create_app(settings)
+    app.state.agent = _FakeAgent(
+        settings,
+        SimpleNamespace(lifecycle=[capability], skills=_SkillsCapability(), mcp_packages=[]),
+    )
+    with TestClient(app) as bare:
+        for verb in ("enable", "disable"):
+            r = bare.post(f"/api/mcp/servers/reserved/{verb}")
+            assert r.status_code == 409, (verb, r.text)
+            assert r.json()["detail"]["code"] == "config_disabled"
+        # 普通 server 不受影响。
+        assert bare.post("/api/mcp/servers/playwright/disable").status_code == 200
+    assert not (workspace / "plugin-settings.json").exists() or (
+        "reserved" not in json.loads((workspace / "plugin-settings.json").read_text())["disabled_servers"]
+    )
+
+
+def _client_configs() -> list:
+    return [_config("playwright"), _config("github")]

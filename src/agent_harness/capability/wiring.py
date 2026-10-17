@@ -476,10 +476,17 @@ async def _wire_mcp(
         *configured_servers,
         *(server for server in packaged_servers if server.enabled),
     ]
-    # 管理面配置层（`configs()`）= 全部配置 server（含 config 级 `enabled:false`）
-    # + 选中的包。config 级禁用项不接线，但管理窗口要看得见（裁决 C1：禁用≠删除）；
-    # 它们只能改配置启用，`plugin-settings.json` 只表达"再禁用"。
-    all_servers = [*parsed_servers, *(server for server in packaged_servers if server.enabled)]
+    # 管理面配置层（`configs()`）= 全部配置 server + 全部选中的包，**两边都含
+    # `enabled:false` 的条目**。禁用项不接线，但管理窗口要看得见（裁决 C1：禁用≠删除）；
+    # 配置层禁用只能改配置启用，包内禁用只能改包源——`plugin-settings.json` 只表达"再禁用"。
+    # 只把 enabled 的包放进 configs 会让包内 `enabled:false` 的 server 从窗口里彻底消失
+    # （既不接线也不可见），与 config 级禁用项的处理不对称。
+    # 按名去重、先到先得（配置层优先，与 `reserved_server_names` 同一优先级）：
+    # 同名条目重复进 configs 会让详情页的配置摘要按后者渲染。
+    all_servers: list = []
+    for candidate in (*parsed_servers, *packaged_servers):
+        if candidate.name not in {server.name for server in all_servers}:
+            all_servers.append(candidate)
     # 禁用 server 不装配（不连接），但保留在 configs 里：管理窗口要显示它并
     # 允许重新启用（裁决 D1：重启后生效）。
     disabled_servers = plugin_settings.disabled_servers

@@ -31,11 +31,14 @@ interface Props {
   onOpenChange: (open: boolean) => void;
 }
 
+/* 来源标签：数据源是 `origin` 枚举本身（票面 §5「直接引用 origin 枚举值渲染」），
+   文案走中文——PRODUCT.md Brand Commitments「界面语言以中文为主」，同面板其余文案
+   （已连接 / 需要认证 / 工作区）全中文；效果图里的英文是设计稿占位。 */
 const ORIGIN_LABELS: Record<SkillEntry['origin'], string> = {
-  personal: 'Personal',
-  project: 'Project',
-  plugin: 'Plugin',
-  oauth: 'OAuth',
+  personal: '个人',
+  project: '项目',
+  plugin: '插件',
+  oauth: 'OAuth 授权',
 };
 
 const RESTART_NOTICE = '已保存；重启后生效。';

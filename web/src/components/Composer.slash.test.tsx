@@ -216,6 +216,10 @@ describe('#1195 触发与渲染', () => {
     vi.mocked(getSlashRegistry).mockImplementation(
       () => new Promise<SlashRegistryCommand[]>((resolve) => { resolveRegistry = resolve; }),
     );
+    // 挂载即拉 ⇒ 必须**重挂**才能回到"表还没到手"的首帧：beforeEach 的那次挂载
+    // 已用已解析的表填过 state，就地重渲染会读到它。
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
     await mount();
     await typeText('/go');
     expect(menu()?.textContent).toContain('正在加载命令');
@@ -224,6 +228,26 @@ describe('#1195 触发与渲染', () => {
     // 加载完成后菜单才给出真实命中（不缓存空表）。
     await act(async () => { resolveRegistry(REGISTRY); });
     expect(menu()?.textContent).toContain('/goal');
+  });
+
+  /* 注册表**挂载即拉**（不再等菜单打开）：粘贴 `/goal 目标` 直接 Enter 时若表还是
+     null，同名消歧无从判定，skill 会被静默判给内置命令。 */
+  it('挂载即拉注册表：首帧输入就能做同名消歧', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'goal', kind: 'skill', description: '同名 skill' },
+    ]);
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    expect(getSlashRegistry).toHaveBeenCalled();
+    // 未开菜单、直接粘贴提交：同名 skill 赢（注册表已在手，不必先开菜单）。
+    await typeText('/goal 目标');
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/goal 目标', false, [], 'session');
+    expect(compactSession).not.toHaveBeenCalled();
   });
 
   it('点选 skill：只做预填 `/name `（不执行、不发送），Enter 才提交给后端执行', async () => {
@@ -238,6 +262,24 @@ describe('#1195 触发与渲染', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(menu()).toBeNull();
     // Enter 把整条 `/skill` 交给既有发送路径（后端展开，不是前端本地执行）。
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/deep-research', false, [], 'session');
+  });
+
+  /* 后端 `_INVOCATION` 锚定**整条消息开头**：`hello /deep` 永远不会执行 skill。
+     点选时保留命令前的前缀（内置命令的 B-S-3 语义）会把用户的点选变成一次静默的
+     普通聊天——所以 skill 走"替换整条输入"，并给可见提示。 */
+  it('点选 skill：不保留命令前的前缀（后端锚定消息开头），且给出可见提示', async () => {
+    await typeText('hello /deep');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(textarea().value).toBe('/deep-research ');
+    expect(container.querySelector('[data-testid=slash-info]')?.textContent).toContain(
+      'skill 需在消息开头调用',
+    );
+    // 提交的是纯 `/skill` ⇒ 后端 `_INVOCATION` 命中，正文真被注入。
     press('Enter');
     expect(onSubmit).toHaveBeenCalledWith('/deep-research', false, [], 'session');
   });

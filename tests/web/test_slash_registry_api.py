@@ -174,6 +174,27 @@ def test_disabled_skill_excluded_server_side(tmp_path: Path) -> None:
     assert "code-review" not in names
 
 
+def test_live_disable_hides_the_skill_before_the_next_assembly(tmp_path: Path) -> None:
+    """菜单是**只读投影**，必须与插件面板同一时刻的答案一致。
+
+    `catalog()` 只过滤装配期读到的禁用项（裁决 D1：模型面下次装配生效）；若菜单
+    也照搬它，用户刚在面板里禁用的 skill 敲 `/` 仍列得出来——面板说已禁用、
+    菜单说可用，同一事实两个答案。
+    """
+    client = _client(tmp_path, [_entry("code-review"), _entry("api-design")])
+    with client:
+        assert "code-review" in [c["name"] for c in client.get(
+            "/api/plugins/slash-registry"
+        ).json()["commands"]]
+        # 面板里禁用（替身 capability 的 enabled 不变——模拟"装配期已过"）。
+        assert client.post("/api/skills/code-review/disable").status_code == 200
+        names = [c["name"] for c in client.get(
+            "/api/plugins/slash-registry"
+        ).json()["commands"]]
+    assert "code-review" not in names
+    assert "api-design" in names
+
+
 def test_mcp_tools_never_enter_the_registry(tmp_path: Path) -> None:
     commands = _commands(_client(tmp_path, [_entry("api-design")]))
     names = {c["name"] for c in commands}

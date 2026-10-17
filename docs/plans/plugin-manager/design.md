@@ -18,6 +18,29 @@
 | 本仓既有 | `GET /api/skills`、`GET /api/mcp/servers`、`MCPPackageManager`、`SkillDiscovery`、#1195 slash 组件、`PermissionRuleSet` | REUSE |
 | 冻结规格 | `09 §1.1` 允许重启生效；`08 §7` OPTIONAL_RUNTIME 降级；ADR-0010 无第二份 YAML | 合规 |
 
+### 2.1 Phase 3「多源合并为单一注册表」的来源（D2=A）
+
+票面 §3 把这条列在 Claude Code 名下；实际证据来自四家成熟产品的**同一**形态，逐条记 commit：
+
+| 来源 | 机制 | 判定 |
+|---|---|---|
+| Claude Code `/` 菜单 | 内置命令与自定义 skill 同处一个列表；`↑↓`/Enter/Esc；skill 用目录名作命令名 | ADAPT |
+| VS Code Copilot Chat `/` 命令面板 | 单一命令面按 kind 分组渲染，前端不维护"哪些命令存在" | ADAPT |
+| JetBrains AI Assistant 斜杠命令 | 同一次查询返回全部候选（无第二份前端清单） | ADAPT |
+| Cursor `/` 菜单 | skill 直接可运行；插件来源加前缀消歧 | PORT DESIGN |
+
+判定 = **A（后端单一注册表）**：前端只保留按 name 查表的 `run` 回调，命令是否存在由
+`GET /api/plugins/slash-registry` 一处决定（前端 `slashCommands.ts` 不再维护 builtin 元数据）。
+
+### 2.2 显式 `/skill` 的正文注入（ADR-0011 Gate 2 的唯一例外）
+
+票面 §4「执行语义 = Claude Code：消息开头出现 skill 名则执行其内容」要求当轮把正文注入
+Context。这与 ADR-0011 Q3 的「全文绝不在此路径出现」**表面冲突**，故按 §5 的边界登记：
+Gate 2 的默认面（目录注入零正文）不变；例外只在**用户亲手**在消息开头写 `/<skill>` 时成立，
+注入走 `load_skill` 同款 untrusted framing 与 `cap_skill_body` 截断。判定点唯一——
+`user_source_events()` 的最新一条用户消息（HTTP / 排队 / steer / CLI 四条路径共用），
+不在前端 payload 上另设判定。ADR-0011 Q3 的措辞已同步补记（见该 ADR 的 #1200 增补）。
+
 ## 3. 决策（用户 11:17 裁决）
 
 - A1：原地扩展 `GET /api/skills`，不新建端点；新增 `scope/origin/plugin?/enabled`，描述截断 1536，保留既有字段与可选 HMAC 回执。
@@ -48,6 +71,9 @@
 - Skills：`SkillDiscovery` 接收 `disabled_names` 与 root 元数据；条目带 `scope/origin/plugin/enabled`；`catalog()` 只出启用项（模型 context + `/` 菜单），`all_entries()` 出全量（管理面）；`load()` 只认启用项。
 - 审批：`_check_approval` 在 `RuleVerdict.ALLOW` 早退前检查 `tool.require_confirmation`；命中时跳过会话 grant / 项目持久规则。
 - 注册表：`GET /api/plugins/slash-registry` = 5 条 builtin（后端元数据）+ `catalog()` ∩ settings 的 skills；MCP 工具永不进入。
+- 显式 `/skill`：`SkillCatalogContextProvider._invoked_message` 读最新用户消息，匹配
+  `^\s*/([\w:-]+)(?:\s+([\s\S]*))?$` 且显示名在 `catalog()` 内 → 注入正文（`$ARGUMENTS` 插值）。
+  锚定**整条消息开头**——前端点选 skill 因此不保留命令前的前缀（与内置命令的定位切除相反）。
 
 ## 6. 兼容性
 

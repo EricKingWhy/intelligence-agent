@@ -177,9 +177,11 @@ describe('#1200 Phase 1 只读渲染', () => {
     expect(row('filesystem')!.textContent).toContain('已禁用');
   });
 
-  it('skill 行带来源标签；禁用 skill 标「已禁用」', () => {
-    expect(row('api-design')!.textContent).toContain('Project');
-    expect(row('code-review')!.textContent).toContain('Plugin');
+  /* 来源标签文案是中文（PRODUCT.md Brand Commitments「界面语言以中文为主」）——
+     同面板其余文案（已连接 / 需要认证 / 工作区）全中文，效果图里的英文是设计稿占位。 */
+  it('skill 行带来源标签（中文）；禁用 skill 标「已禁用」', () => {
+    expect(row('api-design')!.textContent).toContain('项目');
+    expect(row('code-review')!.textContent).toContain('插件');
     expect(row('code-review')!.textContent).toContain('已禁用');
   });
 

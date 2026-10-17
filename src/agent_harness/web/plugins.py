@@ -27,14 +27,15 @@ from agent_harness.plugins.settings import (
 from agent_harness.skills.discovery import is_valid_skill_name, single_line
 from agent_harness.web.projects import require_trusted_origin
 
+#: 展示上限与 `GET /api/skills` 共用同一常量（两处各写一份 1536 会静默漂移，
+#: 同一 skill 在插件面板与 `/` 菜单下发的描述长度会不一致）。
+from agent_harness.web.skills import MAX_SKILL_DESCRIPTION_CHARS
+
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 #: 票面 §5：不合规的 skill 名 422，不做静默规范化。判据与发现/写入侧同一份
 #: （`is_valid_skill_name`），不另起一套正则。
-
-#: 与 `GET /api/skills` 同一展示上限：`/` 菜单也不该把整篇正文当描述下发。
-MAX_SKILL_DESCRIPTION_CHARS = 1536
 
 #: `/` 菜单的内置命令（#1195 定稿命令表，D2=A 单一注册表）。
 #: 元数据由后端提供，前端只保留按 name 查表的 `run` 回调（#1200 Phase 3）。
@@ -60,11 +61,9 @@ class RequireConfirmBody(BaseModel):
 
 
 def _mcp_capability(wiring):
-    from agent_harness.mcp.capability import MCPCapability
+    from agent_harness.mcp.capability import find_mcp_capability
 
-    return next(
-        (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
-    )
+    return find_mcp_capability(wiring)
 
 
 def _known_servers(capability) -> set[str]:
@@ -95,9 +94,15 @@ def register_plugin_routes(app: FastAPI) -> None:
         capability = getattr(wiring, "skills", None)
         if capability is not None:
             entries = capability.catalog() if hasattr(capability, "catalog") else []
+            # `catalog()` 只过滤**装配期**读到的禁用项（裁决 D1：模型面下次装配生效）。
+            # 菜单是只读投影，必须与插件面板同一时刻的答案一致——否则用户刚在面板里
+            # 禁用的 skill，敲 `/` 仍列得出来（面板说已禁用、菜单说可用）。
+            live_settings = _settings(app)
             for entry in entries:
                 name = getattr(entry, "name", "")
                 if not name:
+                    continue
+                if not live_settings.skill_enabled(name):
                     continue
                 item = {
                     "name": name,
@@ -162,12 +167,34 @@ def register_plugin_routes(app: FastAPI) -> None:
             ) from error
         return {"name": server_name, "enabled": enabled}
 
+    def _reject_config_disabled(capability, server_name: str) -> None:
+        """配置层 `enabled:false` 的 server：选择态开关对它无效（配置层胜出）。
+
+        不拦的话端点会 200 + 落盘一个永远不生效的选择——UI 靠 `configOff` 挡住了，
+        裸 API 调用则会拿到"成功"的假回执。
+        """
+        config = next(
+            (item for item in capability.configs() if item.name == server_name), None
+        )
+        if config is not None and not getattr(config, "enabled", True):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "config_disabled",
+                    "message": (
+                        f"MCP server {server_name} 在配置层被禁用（enabled: false），"
+                        "插件管理的启停管不到它；请在 CAPABILITIES 配置里启用。"
+                    ),
+                },
+            )
+
     @app.post(
         "/api/mcp/servers/{server_name}/enable",
         dependencies=[Depends(require_trusted_origin)],
     )
     async def enable_mcp_server(server_name: str) -> dict:
-        await _require_server(server_name)
+        capability = await _require_server(server_name)
+        _reject_config_disabled(capability, server_name)
         return _set_server(server_name, True)
 
     @app.post(
@@ -175,7 +202,8 @@ def register_plugin_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_trusted_origin)],
     )
     async def disable_mcp_server(server_name: str) -> dict:
-        await _require_server(server_name)
+        capability = await _require_server(server_name)
+        _reject_config_disabled(capability, server_name)
         return _set_server(server_name, False)
 
     @app.post(

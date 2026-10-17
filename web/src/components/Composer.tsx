@@ -665,9 +665,11 @@ export const Composer = memo(function Composer({
   // null = 还没拿到过（首帧/首次打开）：菜单不能把"加载中"说成"无匹配命令"。
   const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[] | null>(null);
   // 菜单每次打开都重拉：插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。
+  // **挂载即拉一次**（不再等菜单打开）：submit 拦截的 skill/内置同名消歧要在
+  // 首次输入就可用——否则粘贴 `/goal 目标` 直接 Enter 时注册表还是 null，
+  // 同名 skill 会被静默判给内置命令。
   const slashActive = slashMatch !== null;
   useEffect(() => {
-    if (!slashActive) return;
     let cancelled = false;
     void getSlashRegistry()
       .then((commands) => {
@@ -770,12 +772,16 @@ export const Composer = memo(function Composer({
   ) => {
     const display = slashDisplayName(entry);
     if (entry.kind === 'skill') {
-      /* skill 不是本地命令：执行语义 = Claude Code（消息开头出现 skill 名则执行
-         其内容）。这里只把 `/skill ` 插进输入框（保留命令前的前缀），再按 Enter
-         由既有发送路径交给 agent——模型经 load_skill 读取正文。参数提示已展示。 */
-      setValue((v) =>
-        `${cutFrom === null ? '' : v.slice(0, cutFrom)}/${display} `,
-      );
+      /* skill 不是本地命令：执行语义 = Claude Code（消息**开头**出现 skill 名则
+         执行其内容，后端 `_INVOCATION` 锚定整条消息）。这里只把 `/skill ` 插进
+         输入框，再按 Enter 由既有发送路径交给 agent——模型经 load_skill 读取正文。
+         ⚠ 不保留命令前的前缀（与内置命令的 B-S-3「定位切除」相反）：锚定在开头
+         意味着 `hello /deep` 永远不会执行 skill，保留前缀就是把用户的点选变成
+         一次静默的普通聊天。前缀被丢弃时给可见提示，不静默吞。 */
+      if (cutFrom !== null && value.slice(0, cutFrom).trim() !== '') {
+        setSlashInfo('skill 需在消息开头调用；已替换原输入的前缀文本。');
+      }
+      setValue(`/${display} `);
       setSlashIndex(0);
       setSlashDismissed(true);
       return;
