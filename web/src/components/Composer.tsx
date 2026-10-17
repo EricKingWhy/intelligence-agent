@@ -81,23 +81,17 @@ interface LockCopy {
   hint: string;
   placeholder: string;
   permissionHint: string;
-  /** 队列条（编辑/立即/flush）的 title。只有**待答用户输入**会锁队列条
-   *  （`pendingUserInputLocked`）；审批锁没有队列语义，故该项可选、approval 不填
-   *  （#1283 复审 P4：留着会让人以为审批锁拥有队列文案）。 */
-  queueHint?: string;
 }
 
 const LOCK_COPY: Record<LockReason, LockCopy> = {
   constraint: {
     hint: '请先回答当前约束澄清，再发送新消息',
     placeholder: '等待约束澄清回答…',
-    queueHint: '请先回答当前约束澄清',
     permissionHint: '等待约束澄清回答后再改档',
   },
   ask_user: {
     hint: '请先回答当前提问，再发送新消息',
     placeholder: '等待回答…',
-    queueHint: '请先回答当前提问',
     permissionHint: '等待回答当前提问后再改档',
   },
   approval: {
@@ -105,6 +99,16 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
     placeholder: '等待审批决策…',
     permissionHint: '等待审批决策后再改档',
   },
+};
+
+/** 队列条（编辑/立即/flush）的 title。只有**待答用户输入**会锁队列条，审批锁
+ *  没有队列语义。用**窄键必填表**（#1283 复审 P4）：将来新增纳入锁定的 kind 却
+ *  漏填文案时 `tsc` 直接报错，而不是靠运行期 `?? ''` 静默出空 title。 */
+type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user'>;
+
+const QUEUE_HINT: Record<QueueLockReason, string> = {
+  constraint: '请先回答当前约束澄清',
+  ask_user: '请先回答当前提问',
 };
 
 interface Props {
@@ -421,8 +425,12 @@ export const Composer = memo(function Composer({
   /** #1223：排队条的 steer/flush 也是"开新消息"路径，与输入框同一把锁管到底——
    *  否则输入框锁了、队列条还能点，用户照样撞后端 409。标题按具体待答项中性化。
    *  #1283 P2-2：队列项的「编辑→保存」也走 `POST /messages {queue_id}`，同一把锁。 */
-  const pendingUserInputLocked = lockReason === 'constraint' || lockReason === 'ask_user';
-  const pendingUserInputHint = lockCopy?.queueHint ?? '';
+  const pendingUserInputReason: QueueLockReason | null =
+    lockReason === 'constraint' || lockReason === 'ask_user' ? lockReason : null;
+  const pendingUserInputLocked = pendingUserInputReason !== null;
+  const pendingUserInputHint = pendingUserInputReason === null
+    ? ''
+    : QUEUE_HINT[pendingUserInputReason];
 
   // ── #283 权限 pill：会话内可改 + 升档确认 ──
   // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
@@ -955,6 +963,9 @@ export const Composer = memo(function Composer({
                     value={editDraft}
                     autoFocus
                     aria-label="编辑排队消息内容"
+                    /* #1283 复审 P4：锁在编辑态打开后才到时，Enter 是静默 no-op；
+                       输入框自身给出原因（按钮的 disabled title 对键盘用户不可见）。 */
+                    title={pendingUserInputLocked ? pendingUserInputHint : undefined}
                     onChange={(e) => setEditDraft(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') {

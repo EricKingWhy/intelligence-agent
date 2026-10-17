@@ -137,12 +137,19 @@ describe('#1283 P2-2 — 编辑保存被拒时保留编辑态与草稿', () => {
     expect(input).not.toBeNull();
     await act(async () => { setInputValue(input!, '锁后改好的文本'); });
 
+    // 锁前基线（#1283 复审 P4）：若保存按钮被无条件禁用，下面的断言会失去鉴别力。
+    expect(button(el, '保存排队消息').disabled).toBe(false);
+
     // 迟到锁：编辑态已经打开，待答请求才从事件流推来。
     await rerender(onEditItem);
 
     const save = button(el, '保存排队消息');
     expect(save.disabled).toBe(true);
     expect(save.title).toBe('请先回答当前提问');
+    // Enter 是静默 no-op（不弹任何东西），原因只能由输入框自身给出。
+    expect(
+      el.querySelector<HTMLInputElement>('input.queue-item-edit')!.title,
+    ).toBe('请先回答当前提问');
 
     await act(async () => {
       el.querySelector<HTMLInputElement>('input.queue-item-edit')!.dispatchEvent(
