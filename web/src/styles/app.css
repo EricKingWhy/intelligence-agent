@@ -1392,9 +1392,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── WS-6 / #169：在此项目中新建任务（确认面）──
  *  路径明示行承担"你正在把哪个目录交给 agent"的确认责任（敏感操作知情），
  *  #1177 §B 起**收窄为单行**：任务描述才是唯一主视觉，这条不再抢正文注意力。
- *  路径动态取项目 cwd；过长时整行省略，完整值进 `title`。 */
+ *  路径动态取项目 cwd；默认紧凑显示，并提供键盘可达的完整路径展开入口。 */
 .project-path-callout {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 7px var(--space-sm);
@@ -1420,6 +1421,29 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .project-path-callout-path {
   margin-left: 2px;
   font-weight: 600;
+  color: var(--text-primary);
+}
+.project-path-callout-toggle {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.project-path-callout-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.project-path-callout-full-path {
+  flex-basis: 100%;
+  min-width: 0;
+  margin-left: 19px;
+  overflow-wrap: anywhere;
   color: var(--text-primary);
 }
 
