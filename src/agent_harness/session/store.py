@@ -146,6 +146,19 @@ class SessionSummaryStats:
     #: 状态，不是"不存在"——列表应包含并标记，而不是静默丢弃（与 `recover`
     #: 的 409 诊断对齐）。由 `SessionService.list_sessions` 经完整性报告回填。
     corrupted: bool = False
+    #: #1303 §3.3：看板四态投影（`""` = 从未 `task/defined` = backlog）。
+    #: 与 `workspace`/`archived` 同款分工——store 不认识投影，值由
+    #: `SessionService.list_sessions` 从 `BoardProjectionStore` 回填；这里的默认值
+    #: 与"投影缺席"同义，不伪造任何状态（不变量 #21）。
+    product_state: str = ""
+    #: #1303：产品四态最后一次**跃迁**的事件时刻——看板 ack 比较键的**唯一**来源。
+    #: 同态事件（`model/completed` 等）不刷新它（Orca `agent-attention-acknowledgement.ts`
+    #: 的"按状态起始比较、不按 updatedAt"形状）。从未 defined ⇒ None。
+    product_state_changed_at: str | None = None
+    #: #1303：会话在等你什么（`"input"` / `"approval"` / None）；仅 `executing` 时有值。
+    attention_kind: str | None = None
+    #: #1303：注意力横幅文案（如「待回答：…」/「待批准：…」），与 `attention_kind` 同源。
+    attention_summary: str | None = None
 
 
 #: #516：目录扫描 stat 批次的共享线程池（懒建）。stat 在 syscall 期间释放 GIL，
