@@ -4,8 +4,8 @@
 
 **在途（2026-10-17，#1289）**：Issue [#1289](https://github.com/EricKingWhy/intelligence-agent/issues/1289) OPEN（`bug`/`P2`/`in-progress`）；分支 `codex/issue-1289-unicode-path` 基于 `origin/main` `279ba13e`，代码 tip `ee3e843b`。修复 Windows Unicode linked-worktree 路径下 Git stdout 按错误本地编码解码的问题；用 Python subprocess 二进制 stdout、只解码消费的 UTF-8 stdout，并丢弃未使用 stderr。
 - **审查**：Correctness/Spec 与 Standards 两轴先发现旧测试未验证真实 legacy locale，修后再发现 `cp65001` UTF-8 alias 未归一；分别补运行时 mode/locale 断言与 `codecs.lookup` 规范化，最终 `19ae2131..ee3e843b` 有界闭合复审无 P0–P4 finding。六条 review ledger 行覆盖三轮审查。
-- **增量验证**：用显式 `PYTHONPATH` 指向本 worktree 的 `src`，`tests/session/test_scoped_constraints.py` 11/11；Ruff 与 `git diff --check origin/main...HEAD` 通过；review coverage 通过。Gate-0 待文档落盘后重跑。
-- **待发布**：尚无 PR；Gate-0 通过后推送并创建 PR，随后 Issue 按 `等待merge` 关单，不合并 PR。
+- **增量验证**：用显式 `PYTHONPATH` 指向本 worktree 的 `src`，`tests/session/test_scoped_constraints.py` 11/11；Ruff 与 `git diff --check origin/main...HEAD` 通过；review coverage 通过。Gate-0 收据 `docs/gate/64557772c268bb57faa512615a6bbbeaadd33e90.json` 为 6/6 PASS；最终文档 tip 推送前再跑 `--no-record`。
+- **待发布**：尚无 PR；Gate-0 6/6 后推送并创建 PR，随后 Issue 按 `等待merge` 关单，不合并 PR。
 
 **当前状态（2026-10-17，#1198）**：Issue #1198 OPEN（bug/P2，`in-progress`），PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) OPEN；分支 `codex/issue-1198-budget-picker`，当前代码修订基于 `ad66ab5f98635c3c869b3b3f18c42288c1460f40`，基线 `772d05452346468b59bc46392e29a58c5e8ac48d`。Spec 复审 PASS（P0–P4=0）；Standards PASS（P0/P1/P2/P4=0，P3=2，为测试可靠性意见）。Actions run 38929049857 的 Gate-0、PR smoke、gitleaks、全量 pytest、Vitest/build、双平台 TUI 通过；全量 E2E 在 AC3 高度断言失败：与 mockup 相差 65.1875px（上限 8px），两个 viewport 均复现。根因为预算面板仅有 max-height，内容不足时自然收缩；当前 CSS 加入显式 `height: min(420px, calc(100vh - 24px))`，尚待新 Actions 验证，PR 未合并。
 
