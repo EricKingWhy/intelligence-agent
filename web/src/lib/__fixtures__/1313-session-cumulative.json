@@ -1,0 +1,290 @@
+[
+  {
+    "seq": 0,
+    "time": "2026-10-17T13:22:05.668+00:00",
+    "type": "session/started",
+    "run_id": null,
+    "step_id": null,
+    "data": {}
+  },
+  {
+    "seq": 3,
+    "time": "2026-10-17T13:22:06.252+00:00",
+    "type": "run/started",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": null,
+    "data": {
+      "turn_index": 1,
+      "model": "hy4-preview-f"
+    }
+  },
+  {
+    "seq": 31,
+    "time": "2026-10-17T13:22:17.252+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 1,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 13325,
+        "completion_tokens": 259,
+        "total_tokens": 13584,
+        "cached_tokens": 0,
+        "uncached_tokens": 13325
+      }
+    }
+  },
+  {
+    "seq": 53,
+    "time": "2026-10-17T13:22:26.609+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 2,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 14331,
+        "completion_tokens": 214,
+        "total_tokens": 14545,
+        "cached_tokens": 0,
+        "uncached_tokens": 14331
+      }
+    }
+  },
+  {
+    "seq": 65,
+    "time": "2026-10-17T13:22:34.297+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 3,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 14866,
+        "completion_tokens": 77,
+        "total_tokens": 14943,
+        "cached_tokens": 0,
+        "uncached_tokens": 14866
+      }
+    }
+  },
+  {
+    "seq": 71,
+    "time": "2026-10-17T13:22:41.018+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 4,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 16079,
+        "completion_tokens": 34,
+        "total_tokens": 16113,
+        "cached_tokens": 0,
+        "uncached_tokens": 16079
+      }
+    }
+  },
+  {
+    "seq": 109,
+    "time": "2026-10-17T13:22:55.306+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 5,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 17385,
+        "completion_tokens": 382,
+        "total_tokens": 17767,
+        "cached_tokens": 0,
+        "uncached_tokens": 17385
+      }
+    }
+  },
+  {
+    "seq": 132,
+    "time": "2026-10-17T13:23:09.607+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 6,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 18243,
+        "completion_tokens": 245,
+        "total_tokens": 18488,
+        "cached_tokens": 0,
+        "uncached_tokens": 18243
+      }
+    }
+  },
+  {
+    "seq": 177,
+    "time": "2026-10-17T13:23:23.421+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 7,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 18580,
+        "completion_tokens": 545,
+        "total_tokens": 19125,
+        "cached_tokens": 0,
+        "uncached_tokens": 18580
+      }
+    }
+  },
+  {
+    "seq": 187,
+    "time": "2026-10-17T13:23:30.232+00:00",
+    "type": "model/completed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": 8,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 19329,
+        "completion_tokens": 66,
+        "total_tokens": 19395,
+        "cached_tokens": 4160,
+        "uncached_tokens": 15169
+      }
+    }
+  },
+  {
+    "seq": 207,
+    "time": "2026-10-17T13:23:37.764+00:00",
+    "type": "run/failed",
+    "run_id": "a5627bc5-5d16-488d-aea0-79c372022afb",
+    "step_id": null,
+    "data": {
+      "usage_total": {
+        "prompt_tokens": 132138,
+        "completion_tokens": 1822,
+        "total_tokens": 133960,
+        "cached_tokens": 4160,
+        "uncached_tokens": 127978
+      },
+      "reason": "RemoteProtocolError",
+      "message": "运行失败（RemoteProtocolError）：无法连接模型供应商（网络或网关不可达）；完整原始信息见后端日志"
+    }
+  },
+  {
+    "seq": 208,
+    "time": "2026-10-17T13:27:03.619+00:00",
+    "type": "session/resumed",
+    "run_id": null,
+    "step_id": null,
+    "data": {}
+  },
+  {
+    "seq": 210,
+    "time": "2026-10-17T13:27:04.134+00:00",
+    "type": "run/started",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": null,
+    "data": {
+      "turn_index": 2,
+      "model": "hy4-preview-f"
+    }
+  },
+  {
+    "seq": 244,
+    "time": "2026-10-17T13:27:19.610+00:00",
+    "type": "model/completed",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": 10,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 19857,
+        "completion_tokens": 333,
+        "total_tokens": 20190,
+        "cached_tokens": 0,
+        "uncached_tokens": 19857
+      }
+    }
+  },
+  {
+    "seq": 276,
+    "time": "2026-10-17T13:27:31.006+00:00",
+    "type": "model/completed",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": 11,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 20080,
+        "completion_tokens": 465,
+        "total_tokens": 20545,
+        "cached_tokens": 5056,
+        "uncached_tokens": 15024
+      }
+    }
+  },
+  {
+    "seq": 293,
+    "time": "2026-10-17T13:27:40.089+00:00",
+    "type": "model/completed",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": 12,
+    "data": {
+      "content": "",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 20789,
+        "completion_tokens": 251,
+        "total_tokens": 21040,
+        "cached_tokens": 4544,
+        "uncached_tokens": 16245
+      }
+    }
+  },
+  {
+    "seq": 363,
+    "time": "2026-10-17T13:27:53.872+00:00",
+    "type": "model/completed",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": 13,
+    "data": {
+      "content": "刚才那次查询时 /tmp 已经被大幅清理过（之前 85 个普通文件，现在只剩 15 个），我按**当",
+      "model": "hy4-preview-f",
+      "usage": {
+        "prompt_tokens": 21278,
+        "completion_tokens": 615,
+        "total_tokens": 21893,
+        "cached_tokens": 19968,
+        "uncached_tokens": 1310
+      }
+    }
+  },
+  {
+    "seq": 364,
+    "time": "2026-10-17T13:27:54.197+00:00",
+    "type": "run/completed",
+    "run_id": "ff7525a7-c013-4e9e-a3eb-3450222fc373",
+    "step_id": null,
+    "data": {
+      "usage_total": {
+        "prompt_tokens": 82004,
+        "completion_tokens": 1664,
+        "total_tokens": 83668,
+        "cached_tokens": 29568,
+        "uncached_tokens": 52436
+      }
+    }
+  }
+]
