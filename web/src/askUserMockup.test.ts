@@ -3,6 +3,7 @@
 // jsdom 无内置类型声明，web 也未安装 @types/jsdom。
 // @ts-expect-error jsdom 无内置类型声明
 import { JSDOM } from 'jsdom';
+// @ts-expect-error node 内置模块没有声明（web 的 tsconfig 只带 vite/client）
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -20,13 +21,22 @@ function openMockup() {
   openWindows.push(dom);
   const doc = dom.window.document;
   const click = (id: string) => (doc.getElementById(id) as HTMLElement).click();
-  const clickFirstOption = () => (doc.querySelector('.opt') as HTMLElement).click();
+  const clickOption = (i: number) => (doc.querySelectorAll('.opt')[i] as HTMLElement).click();
+  const clickFirstOption = () => clickOption(0);
+  const setCustom = (text: string) => {
+    const input = doc.getElementById('customInput') as HTMLTextAreaElement;
+    input.value = text;
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
   const toast = () => doc.getElementById('toast')?.textContent ?? '';
   const after = () => doc.getElementById('afterMsg')?.textContent ?? '';
-  return { doc, click, clickFirstOption, toast, after };
+  return { doc, click, clickOption, clickFirstOption, setCustom, toast, after };
 }
 
-/** 翻页动画 150ms 后才重绘下一题，等它落定再点选项。 */
+/**
+ * 翻页动画 150ms 后才重绘下一题，且动画期间样例丢弃输入（见「翻页动画期间」用例），
+ * 所以每次翻页后都要等它落定，再点下一题的按钮。
+ */
 async function waitForQuestion(doc: Document, questionIndex: number) {
   const expectedPage = `${questionIndex + 1} / ${QUESTIONS_COUNT}`;
   const deadline = Date.now() + 1000;
@@ -37,12 +47,15 @@ async function waitForQuestion(doc: Document, questionIndex: number) {
 }
 
 describe('ask_user 交互样例的完成提示（#1218）', () => {
-  it('部分作答、部分跳过：只把真正作答的题算作已提交', () => {
+  it('部分作答、部分跳过：只把真正作答的题算作已提交', async () => {
     const m = openMockup();
     m.clickFirstOption(); // 第 1 题选「今晚低峰期」
     m.click('fwd'); // 第 2 题
+    await waitForQuestion(m.doc, 1);
     m.click('skip'); // 第 2 题跳过
+    await waitForQuestion(m.doc, 2);
     m.click('skip'); // 第 3 题跳过
+    await waitForQuestion(m.doc, 3);
     m.click('skip'); // 第 4 题跳过，触发 finish
 
     expect(m.toast()).toBe('已提交 1 个决定，跳过 3 个问题，run 继续');
@@ -51,16 +64,19 @@ describe('ask_user 交互样例的完成提示（#1218）', () => {
     expect(m.after()).toContain('收到，按你的决定继续发布…');
   });
 
-  it('全部跳过：不说成已提交，并说明跳过了全部题目', () => {
+  it('全部跳过：不说成已提交，并说明跳过了全部题目', async () => {
     const m = openMockup();
-    for (let i = 0; i < QUESTIONS_COUNT; i++) m.click('skip');
+    for (let i = 0; i < QUESTIONS_COUNT; i++) {
+      m.click('skip');
+      if (i < QUESTIONS_COUNT - 1) await waitForQuestion(m.doc, i + 1);
+    }
 
     expect(m.toast()).toBe(`已跳过全部 ${QUESTIONS_COUNT} 个问题，run 继续`);
     expect(m.after()).toContain('未作答问题均已跳过');
     expect(m.after().match(/：跳过/g)).toHaveLength(QUESTIONS_COUNT);
   });
 
-  it('提前提交：未作答的题按跳过计，不混入已提交数量', () => {
+  it('提前提交：未作答的题按跳过计；提交后卡片只读，不再改写完成提示', () => {
     const m = openMockup();
     m.clickFirstOption(); // 只答第 1 题
     m.click('submit');
@@ -68,38 +84,79 @@ describe('ask_user 交互样例的完成提示（#1218）', () => {
     expect(m.toast()).toBe('已提交 1 个决定，跳过 3 个问题，run 继续');
     expect(m.after()).toContain('今晚低峰期');
     expect(m.after().match(/：跳过/g)).toHaveLength(3);
+
+    // 提交后卡片只读：再改选项、再点提交都不会改写已经发出的完成提示。
+    m.clickOption(1); // 「明早 9 点」
+    m.click('submit');
+    expect(m.after()).toContain('今晚低峰期');
+    expect(m.after()).not.toContain('明早 9 点');
   });
 
-  it('自定义答案计为已提交、摘要按题隔离且按文本展示；空白自定义禁用提交', async () => {
+  it('翻页动画期间的输入被丢弃：不写进新题，也不解锁新题的提交', async () => {
+    const m = openMockup();
+    m.click('skip'); // 第 1 题跳过 → 动画切到第 2 题
+    m.clickOption(0); // 动画期间：选选项（写进新题就会把没人作答的第 2 题算成已提交）
+    m.click('customRow'); // 动画期间：切自定义
+    m.setCustom('乱写'); // 动画期间：输入文本
+    m.click('fwd'); // 动画期间：往后翻
+    m.click('prev'); // 动画期间：回退
+    await waitForQuestion(m.doc, 1);
+
+    expect(m.doc.getElementById('page')?.textContent).toBe(`2 / ${QUESTIONS_COUNT}`);
+    expect((m.doc.getElementById('customInput') as HTMLTextAreaElement).value).toBe('');
+    expect((m.doc.getElementById('submit') as HTMLButtonElement).disabled).toBe(true);
+    expect(m.doc.querySelector('.opt.selected')).toBeNull();
+
+    m.click('skip'); // 仍然停在第 2 题：跳过它
+    await waitForQuestion(m.doc, 2);
+    m.click('skip'); // 第 3 题跳过
+    await waitForQuestion(m.doc, 3);
+    m.click('skip'); // 第 4 题跳过，触发 finish
+
+    expect(m.toast()).toBe(`已跳过全部 ${QUESTIONS_COUNT} 个问题，run 继续`);
+    expect(m.after().match(/：跳过/g)).toHaveLength(QUESTIONS_COUNT);
+  });
+
+  it('自定义答案计为已提交、摘要按题隔离且按文本展示；空白自定义既禁用提交也不计入已提交', async () => {
     const m = openMockup();
     m.click('customRow');
-    const input = m.doc.getElementById('customInput') as HTMLTextAreaElement;
-    input.value = '<img src=x onerror="window.__injected=true"> 下周一凌晨';
-    input.dispatchEvent(new m.doc.defaultView!.Event('input', { bubbles: true }));
+    m.setCustom('<img src=x onerror="window.__injected=true"> 下周一凌晨');
     m.click('fwd');
     await waitForQuestion(m.doc, 1);
     expect((m.doc.getElementById('customInput') as HTMLTextAreaElement).value).toBe('');
     m.click('customRow');
     expect((m.doc.getElementById('customInput') as HTMLTextAreaElement).value).toBe('');
     m.click('skip');
+    await waitForQuestion(m.doc, 2);
     m.click('skip');
+    await waitForQuestion(m.doc, 3);
     m.click('skip');
 
     expect(m.toast()).toBe('已提交 1 个决定，跳过 3 个问题，run 继续');
-    expect(m.after()).toContain('新版本什么时候发布：<img src=x onerror="window.__injected=true"> 下周一凌晨（自定义）');
+    expect(m.after()).toContain(
+      '新版本什么时候发布：<img src=x onerror="window.__injected=true"> 下周一凌晨（自定义）',
+    );
     expect(m.after()).toContain('这次发版走哪套部署流程：跳过');
     expect(m.doc.querySelector('#afterMsg img')).toBeNull();
     expect(m.doc.defaultView?.__injected).toBeUndefined();
     expect(m.after().match(/：跳过/g)).toHaveLength(3);
 
+    // 空白自定义：当前题禁用提交；落到别的题上提交时，这一题也只算「跳过」。
     const blank = openMockup();
     blank.click('customRow');
-    const blankInput = blank.doc.getElementById('customInput') as HTMLTextAreaElement;
-    blankInput.value = '   ';
-    blankInput.dispatchEvent(new blank.doc.defaultView!.Event('input', { bubbles: true }));
-
+    blank.setCustom('   ');
+    blank.click('fwd');
+    await waitForQuestion(blank.doc, 1);
+    blank.click('customRow');
+    expect((blank.doc.getElementById('customInput') as HTMLTextAreaElement).value).toBe('');
     expect((blank.doc.getElementById('submit') as HTMLButtonElement).disabled).toBe(true);
     expect(blank.toast()).toBe('');
+
+    blank.clickFirstOption(); // 第 2 题选一项后提交
+    blank.click('submit');
+    expect(blank.toast()).toBe('已提交 1 个决定，跳过 3 个问题，run 继续');
+    expect(blank.after()).toContain('新版本什么时候发布：跳过');
+    expect(blank.after()).not.toContain('（自定义）');
   });
 
   it('全部作答：四题都算已提交，摘要列出四个选择', async () => {

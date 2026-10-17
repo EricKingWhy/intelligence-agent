@@ -223,10 +223,16 @@
   ];
 
   const answers = new Array(QUESTIONS.length).fill(null);
-  let cur = 0, maxReached = 0;
+  let cur = 0, maxReached = 0, busy = false, done = false;
+  // 翻页动画期间 cur 已前进而 DOM 还是旧题，提交后 answers 也不该再变 ⇒ 这两种状态下卡片主体
+  // （选项 / 自定义输入 / 翻页 / 跳过 / 提交）整体不响应点击：否则点击会写到别的题上（选项下标
+  // 还可能越界），或让完成提示与已经发出的决定不一致。收起 / 关闭属于卡片外壳，不受影响。
+  const frozen = () => busy || done;
 
   const $ = id => document.getElementById(id);
   const qcard = $('qcard'), qanim = $('qanim');
+  for (const el of [qanim, document.querySelector('.qfoot')])
+    el.addEventListener('click', e => { if (frozen()) e.stopPropagation(); }, true);
 
   function render(dir) {
     const q = QUESTIONS[cur];
@@ -255,10 +261,12 @@
       $('skip').textContent = cur === QUESTIONS.length - 1 ? '跳过' : '跳过';
     };
     if (dir === 0) { apply(); return; }
+    busy = true;
     qanim.classList.add(dir > 0 ? 'out' : 'out-back');
     setTimeout(() => {
       apply();
       qanim.classList.remove('out', 'out-back');
+      busy = false;
     }, 150);
   }
 
@@ -282,6 +290,7 @@
     $('customInput').focus();
   });
   $('customInput').addEventListener('input', e => {
+    if (frozen()) return;
     answers[cur] = { idx: -1, text: e.target.value };
     $('submit').disabled = !valid(cur);
   });
@@ -318,6 +327,7 @@
       ? '未作答问题均已跳过，按当前状态继续发布…'
       : '收到，按你的决定继续发布…';
     m.textContent = `${intro}\n\n${s}`;
+    done = true; // 提交后卡片只读：再改选项不会改写已经发出的完成提示。
   }
 
   $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));
