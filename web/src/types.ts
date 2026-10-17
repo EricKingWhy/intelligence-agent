@@ -851,10 +851,10 @@ export interface ConversationState {
    *    `run/failed` 以本 run 的流式累计（R）结转进来。
    *  - 缺失语义：`null` = 尚无任何终态 run（**不是** 0）；非 null 时各维仍可
    *    单独为 null（该维未知，见 UsageStats）——外层可空与维可空相互正交。
-   *  - 与 `usage_total` 的区别：上面那个是 **run 级**运行中视图（`run/completed`
-   *    直接覆盖、`run/started` 后从零重算，StepDetail 的「本 run 用量」消费）；
-   *    本字段是**会话级**账，run 边界不清零。顶栏取二者之和，见
-   *    `projection.sessionCumulativeUsage`。 */
+   *  - 与 `usage_total` 的区别：上面那个是 **run 级**槽（`run/completed` 直接覆盖、
+   *    **run 边界不清零**——跨 run 混用正是 #1313 的根因；StepDetail RUN 段的
+   *    `tokens` 行消费）；本字段是**会话级**账，run 边界不清零。顶栏取二者之和，
+   *    见 `projection.displayedSessionUsage`。 */
   session_usage_total: UsageStats | null;
   /** #1313 口径 B（会话累计）**R 槽**：**当前 run** 的流式累计（各次
    *  `model/completed.data.usage` 逐条累加）。

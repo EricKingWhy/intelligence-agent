@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType, type EventTypeValue } from '../types';
-import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, sessionCumulativeUsage, summarizeEvent } from './projection';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, displayedSessionUsage, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -1091,7 +1091,7 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     }
   });
 
-  it('RUN_FAILED 不捕获 run 级观测字段（契约只定义在 run/completed），失败 run 的流式消耗计入会话累计', () => {
+  it('RUN_FAILED 不捕获 run 级观测字段（契约只定义在 run/completed），失败 run 的消耗计入会话累计', () => {
     let s = applyEvent(initConversation('s'), ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
@@ -1101,7 +1101,20 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     // run 级槽（StepDetail 契约）不捕获 failed 载荷：保持原样。
     expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
     expect(s.cost_usd).toBeNull();
-    // #1313 口径 B：失败 run 已消耗的流式累计结转进会话累计槽，当前 run 流式槽归零。
+    // #1313 口径 B：事件带权威 usage_total ⇒ 以权威值结转进会话累计槽（口径同
+    // run/completed，优先于流式值），当前 run 流式槽归零。
+    expect(s.session_usage_total).toEqual({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+    expect(s.run_usage_live).toBeNull();
+  });
+
+  it('RUN_FAILED 缺权威 usage_total 时退回流式累计结转（客户端错过 model/completed 也不丢）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'boom' } }));
+
     expect(s.session_usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
     expect(s.run_usage_live).toBeNull();
   });
@@ -1116,7 +1129,7 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
 describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
   /** 顶栏显示值：口径 B 的投影 = S（已终态 run 权威值之和）+ R（当前 run 流式累计）。 */
   const shown = (s: ReturnType<typeof initConversation>): number | null =>
-    sessionCumulativeUsage(s)?.total_tokens ?? null;
+    displayedSessionUsage(s)?.total_tokens ?? null;
 
   const modelCompleted = (tokens: number) => ev({
     type: EventType.MODEL_COMPLETED,
@@ -1128,7 +1141,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
     data: { usage_total: { prompt_tokens: tokens, completion_tokens: 0, total_tokens: tokens } },
   });
 
-  it('a. 多 run 会话顶栏序列单调非减（run/completed 不出现覆盖式跳变）', () => {
+  it('AC1：多 run 会话顶栏序列单调非减（run/completed 不出现覆盖式跳变）', () => {
     const seq: (number | null)[] = [];
     let s = initConversation('s');
     const step = (e: AgentEvent) => { s = applyEvent(s, e); seq.push(shown(s)); };
@@ -1146,7 +1159,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
     }
   });
 
-  it('b. run/completed 后显示值 = 到达前 − 本 run 流式贡献 + 本 run 权威值（精确复算）', () => {
+  it('AC2：run/completed 后显示值 = 到达前 − 本 run 流式贡献 + 本 run 权威值（精确复算）', () => {
     let s = applyEvent(initConversation('s'), runCompleted(1000));
     s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
     s = applyEvent(s, modelCompleted(300));
@@ -1159,7 +1172,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
     expect(after).toBe(1260);
   });
 
-  it('c. 无双计：run/completed 权威值替换流式贡献，不是叠加', () => {
+  it('AC4：无双计：run/completed 权威值替换流式贡献，不是叠加', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: {} }));
     s = applyEvent(s, modelCompleted(999));
     s = applyEvent(s, runCompleted(1234));
@@ -1168,7 +1181,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
     expect(s.run_usage_live).toBeNull();
   });
 
-  it('d. 失败 run 计入会话累计：100（failed）+ 60（completed 权威） = 160', () => {
+  it('AC3：失败 run 计入会话累计：100（failed）+ 60（completed 权威） = 160', () => {
     let s = applyEvent(initConversation('s'), modelCompleted(100));
     s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'boom' } }));
     expect(shown(s)).toBe(100);
@@ -1179,6 +1192,16 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
 
     s = applyEvent(s, runCompleted(60));
     expect(shown(s)).toBe(160);       // 100 + 60（R 被权威值替换，不残留 50）
+  });
+
+  it('AC5：中断 run 的用量结转进 S，下一个 run/started 后不倒退', () => {
+    let s = applyEvent(initConversation('s'), modelCompleted(100));
+    s = applyEvent(s, ev({ type: EventType.RUN_INTERRUPTED, data: { interrupted_seq: 9 } }));
+    expect(shown(s)).toBe(100);        // 中断 run 已消耗的 100 结转进 S
+
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    expect(s.run_usage_live).toBeNull();
+    expect(shown(s)).toBe(100);        // 不倒退（回归护栏：R 清零不得吃掉这段用量）
   });
 
   it('run/started 清零 R 但不动 S（会话累计跨 run 存活）', () => {
@@ -1192,7 +1215,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
   });
 
   it('两槽皆空 → null（不伪造 0）', () => {
-    expect(sessionCumulativeUsage(initConversation('s'))).toBeNull();
+    expect(displayedSessionUsage(initConversation('s'))).toBeNull();
   });
 
   it('粘性 null 不因 S/R 相加被抹平：任一维未知 ⇒ 该维显示 null', () => {
@@ -1206,7 +1229,7 @@ describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
     s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
     s = applyEvent(s, modelCompleted(7));
 
-    expect(sessionCumulativeUsage(s)).toEqual({ prompt_tokens: 17, completion_tokens: 5, total_tokens: null });
+    expect(displayedSessionUsage(s)).toEqual({ prompt_tokens: 17, completion_tokens: 5, total_tokens: null });
   });
 });
 
@@ -3118,7 +3141,7 @@ describe('run 预算镜像（#537）', () => {
 // —— tsconfig 没有 resolveJsonModule，不能用 `import ... from '*.json'`。
 const replayEvents = JSON.parse(
   readFileSync(new URL('./__fixtures__/1313-session-cumulative.json', import.meta.url), 'utf8'),
-) as AgentEvent[];
+) as unknown as AgentEvent[];
 
 /** 按 fixture 顺序逐事件折叠，收顶栏显示值（`null` = 尚无任何用量，不显示）。 */
 function replayDisplayedTotals(): Array<number | null> {
@@ -3126,7 +3149,7 @@ function replayDisplayedTotals(): Array<number | null> {
   const out: Array<number | null> = [];
   for (const e of replayEvents) {
     s = applyEvent(s, ev(e));
-    out.push(sessionCumulativeUsage(s)?.total_tokens ?? null);
+    out.push(displayedSessionUsage(s)?.total_tokens ?? null);
   }
   return out;
 }

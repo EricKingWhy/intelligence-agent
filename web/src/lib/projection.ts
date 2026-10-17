@@ -817,8 +817,8 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
 
 /** #537：MODEL_REQUEST 是 requests / tokens / cost 三个维的计数点（后端
  *  `consumed_from_events` 同一事件、同一口径）。此前本事件在投影里是 no-op——
- *  徽标需要 run 作用域账，而 `usage_total` 是**会话级**聚合（跨 run 累计、且
- *  cost 不在内），不能拿来当 run 徽标的消耗。
+ *  徽标需要 run 作用域账，而 `usage_total` 是 run 级槽却**不在 run 边界清零**
+ *  （跨 run 混用，且 cost 不在内），不能拿来当 run 徽标的消耗。
  *
  *  粘性 None（后端同语义）：某请求缺 `usage.total_tokens` / `cost_usd` ⇒ 该维从
  *  这一刻起不可得（null），**不是** 0；cost 是十进制**字符串**累加（复用
@@ -977,11 +977,11 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
   clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
   state.run_failure = null;
-  state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
   // #1313 口径 B：权威值**替换**本 run 的流式贡献（不是叠加——双计是本票的核心坑）：
-  // authority 存在时绝不把 R 再加一次；缺 authority（事件未携带）时才用流式值兜底。
-  const authority = parseUsage(data.usage_total);
-  const terminal = authority ?? state.run_usage_live;
+  // authoritative 存在时绝不把 R 再加一次；缺权威值（事件未携带）时才用流式值兜底。
+  const authoritative = parseUsage(data.usage_total);
+  state.usage_total = authoritative ?? state.usage_total;
+  const terminal = authoritative ?? state.run_usage_live;
   if (terminal) state.session_usage_total = addUsage(state.session_usage_total, terminal);
   state.run_usage_live = null;
   state.cost_usd =
@@ -1015,13 +1015,13 @@ function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   state.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
   state.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
   // #1313 口径 B（裁决记录：失败 run 计入会话累计；王浩宇可一句话推翻）：失败 run 已
-  // 消耗的流式累计结转进 S，R 归零。`data.usage_total` 不进 run 级槽——那是既有契约
-  // （run/completed 才有权威聚合），本行只动顶栏口径的会话累计槽。
-  if (state.run_usage_live) {
-    state.session_usage_total = addUsage(state.session_usage_total, state.run_usage_live);
-  }
+  // 消耗的用量结转进 S，R 归零。口径与 `run/completed` 对齐——事件带 `usage_total`
+  // 时以权威值为准（R 为 null 即客户端错过该 run 的 model/completed 时，权威值是唯
+  // 一读数）；缺权威值才退回流式累计。`data.usage_total` 仍不进 run 级槽——那是既有
+  // 契约（run/completed 才有权威聚合），本行只动顶栏口径的会话累计槽。
+  const authoritative = parseUsage(data.usage_total) ?? state.run_usage_live;
+  if (authoritative) state.session_usage_total = addUsage(state.session_usage_total, authoritative);
   state.run_usage_live = null;
-  // run/interrupted 不在此列（Scope 外）：它走 projectRunInterrupted，本票不改其 usage 语义。
   finalizeRun(state, 'failed', event.time);
 }
 
@@ -1037,6 +1037,12 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
     reason: typeof data.reason === 'string' ? data.reason : 'process_restart',
   };
   state.run_failure = null; // #220：中断是这轮 run 的**结局**终态，过期归因同 run/completed 清掉
+  // #1313 口径 B：中断 run 的用量**同样结转进 S**，口径照 `run/failed`（token 已经
+  // 被消耗，中断不是没发生）。不结转的后果是回归：下一次 `run/started` 清 R，这段
+  // 用量永久丢失。
+  const authoritative = parseUsage(data.usage_total) ?? state.run_usage_live;
+  if (authoritative) state.session_usage_total = addUsage(state.session_usage_total, authoritative);
+  state.run_usage_live = null;
   finalizeRun(state, 'completed', event.time);
 }
 
@@ -2461,12 +2467,13 @@ function addUsage(a: UsageStats | null, b: UsageStats): UsageStats {
  *  **替换**本 run 的流式贡献（`projectRunCompleted` 里做的），所以到达前后不出现
  *  「数字变小」的覆盖式跳变。
  *
- *  与 run 级 `usage_total` 的区别：后者是 run 作用域的运行中视图（StepDetail 的
- *  「本 run 用量」消费，`run/completed` 直接覆盖），不是会话累计。
+ *  与 run 级 `usage_total` 的区别：后者是 run 级槽（`run/completed` 直接覆盖、
+ *  **run 边界不清零**——跨 run 混用正是 #1313 的根因；StepDetail RUN 段的 `tokens`
+ *  行消费），不是会话累计。会话累计由独立的 S 槽（`session_usage_total`）维护。
  *
  *  两槽都空 ⇒ null（无数据不显示，零伪造）；任一侧非空即返回其与另一侧的和，
  *  逐维 null 的粘性由 `addUsage` 保证（未知维不会被当成 0）。 */
-export function sessionCumulativeUsage(state: ConversationState): UsageStats | null {
+export function displayedSessionUsage(state: ConversationState): UsageStats | null {
   if (!state.session_usage_total) return state.run_usage_live;
   if (!state.run_usage_live) return state.session_usage_total;
   return addUsage(state.session_usage_total, state.run_usage_live);

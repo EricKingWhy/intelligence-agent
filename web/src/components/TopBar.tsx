@@ -13,7 +13,7 @@ import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
-import { awaitingApproval as hasLiveApproval, sessionCumulativeUsage } from '../lib/projection';
+import { awaitingApproval as hasLiveApproval, displayedSessionUsage } from '../lib/projection';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -99,7 +99,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // 就会给一个死掉的 run 计秒——正是本票要修的谎报）。
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
   // #1313 口径 B：顶栏用量 = 会话累计（S + R），在渲染期派生（不是 effect 里的状态）。
-  const sessionUsage = conversation ? sessionCumulativeUsage(conversation) : null;
+  const sessionUsage = conversation ? displayedSessionUsage(conversation) : null;
 
   // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里
   // 流龄一路涨，用它当阈值会把正常慢任务报成停顿。events.length 是投影真值的进度
