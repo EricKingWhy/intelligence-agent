@@ -82,17 +82,27 @@ function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, session_id: SID, time: T, ...partial } as AgentEvent;
 }
 
+interface MountOptions {
+  /** 随请求落盘的超时快照：双写 `timeout_seconds`/`timeout_minutes`（#1224/#1284）。 */
+  seconds?: number;
+  minutes?: number;
+  /** 答复形态：`answered` = 选了选项；`skipped` = 整卡跳过（每题 `answer=null`）。 */
+  answer?: 'answered' | 'skipped';
+  /** 是否带 `run/paused`（卡片挂载的必要条件之一）。 */
+  paused?: boolean;
+}
+
 /** 造一段"有一轮用户消息 + 一个待回答请求"的会话事件——Conversation 只有在
  *  `turns.length > 0` 时才走对话流渲染区（空态不渲染内嵌卡片）。 */
 function events(
-  kind: 'ask_user' | 'protected_fact_conflict',
-  timeout?: { seconds?: number; minutes?: number },
+  kind: 'ask_user' | 'protected_fact_conflict', opts: MountOptions = {},
 ): AgentEvent[] {
+  const { seconds, minutes, answer, paused = true } = opts;
   const requestData = kind === 'ask_user'
     ? {
         request_id: `${kind}-1`, kind, run_id: 'r1',
-        ...(timeout?.seconds === undefined ? {} : { timeout_seconds: timeout.seconds }),
-        ...(timeout?.minutes === undefined ? {} : { timeout_minutes: timeout.minutes }),
+        ...(seconds === undefined ? {} : { timeout_seconds: seconds }),
+        ...(minutes === undefined ? {} : { timeout_minutes: minutes }),
         questions: [
           {
             question: '新版本什么时候发布？', header: '发布决策', recommended: 0,
@@ -112,15 +122,46 @@ function events(
           { id: 'custom', label: 'Custom reply' },
         ],
       };
+  const tail: AgentEvent[] = paused
+    ? [
+        ev({
+          type: 'run/paused', seq: 5, run_id: 'r1',
+          data: { reason: 'user_input', input_request_id: `${kind}-1` },
+        }),
+      ]
+    : [];
+  // 答复事件（#1283 P2-3）：`pending_ask_user.answer` 由 `user/message` 的
+  // `input_request_answer` 回填；整卡跳过是「每题 answer=null」的非 null 答案对象。
+  const answered: AgentEvent[] = answer === undefined
+    ? []
+    : [
+        ev({
+          type: 'user/message', seq: 6, run_id: 'r1', step_id: 1,
+          data: {
+            content: '',
+            input_request_id: `${kind}-1`,
+            input_request_answer: kind === 'ask_user'
+              ? {
+                  request_id: `${kind}-1`,
+                  questions: [{
+                    question: '新版本什么时候发布？',
+                    answer: answer === 'skipped' ? null : { label: '今晚低峰期' },
+                  }],
+                }
+              : {
+                  request_id: `${kind}-1`,
+                  choice: 'keep_existing',
+                },
+          },
+        }),
+      ];
   return [
     ev({ type: 'session/started', seq: 1, run_id: 'r1' }),
     ev({ type: 'run/started', seq: 2, run_id: 'r1' }),
     ev({ type: 'user/message', seq: 3, run_id: 'r1', step_id: 1, data: { content: '走起', step: 1 } }),
     ev({ type: 'user/input-requested', seq: 4, run_id: 'r1', data: requestData }),
-    ev({
-      type: 'run/paused', seq: 5, run_id: 'r1',
-      data: { reason: 'user_input', input_request_id: `${kind}-1` },
-    }),
+    ...tail,
+    ...answered,
   ];
 }
 
@@ -128,10 +169,9 @@ let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 async function mount(
-  kind: 'ask_user' | 'protected_fact_conflict',
-  timeout?: { seconds?: number; minutes?: number },
+  kind: 'ask_user' | 'protected_fact_conflict', opts: MountOptions = {},
 ): Promise<HTMLDivElement> {
-  H.conv = projectHistory(SID, events(kind, timeout));
+  H.conv = projectHistory(SID, events(kind, opts));
   const el = document.createElement('div');
   document.body.appendChild(el);
   container = el;
@@ -201,6 +241,40 @@ describe('#1223 — 待回答的用户输入锁 composer', () => {
     expect(textarea!.hasAttribute('disabled')).toBe(true);
     const hint = el.querySelector('.composer-locked-hint');
     expect(hint?.textContent).toContain('请先回答当前约束澄清，再发送新消息');
+  });
+
+  it('#1283 P2-1：有请求、无 run/paused ⇒ 不锁（没有卡片可答时绝不锁死输入框）', async () => {
+    const el = await mount('ask_user', { paused: false });
+    // 卡片挂载要求「请求与暂停对齐」；这里没有暂停 ⇒ 没有卡可答。
+    expect(el.querySelector('.ask-user-card')).toBeNull();
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea).not.toBeNull();
+    expect(textarea!.hasAttribute('disabled')).toBe(false);
+    expect(el.querySelector('.composer-locked-hint')).toBeNull();
+  });
+
+  it('#1283 复审：约束澄清同样「有请求、无 run/paused ⇒ 不锁」（与卡片同源）', async () => {
+    const el = await mount('protected_fact_conflict', { paused: false });
+    // 约束弹窗挂载同样要求「请求与暂停对齐」；这里没有暂停 ⇒ 没有可答的卡。
+    expect(document.querySelector('.constraint-input-dialog')).toBeNull();
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea).not.toBeNull();
+    expect(textarea!.hasAttribute('disabled')).toBe(false);
+    expect(el.querySelector('.composer-locked-hint')).toBeNull();
+  });
+
+  it('#1283 P2-3：已答复（answer !== null）⇒ 锁解除', async () => {
+    const el = await mount('ask_user', { answer: 'answered' });
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea!.hasAttribute('disabled')).toBe(false);
+    expect(el.querySelector('.composer-locked-hint')).toBeNull();
+  });
+
+  it('#1283 P2-3：整卡跳过（投影成非 null answer）⇒ 锁解除', async () => {
+    const el = await mount('ask_user', { answer: 'skipped' });
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea!.hasAttribute('disabled')).toBe(false);
+    expect(el.querySelector('.composer-locked-hint')).toBeNull();
   });
 });
 

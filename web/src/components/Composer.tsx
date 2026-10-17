@@ -74,6 +74,53 @@ const SCOPE_OPTIONS: readonly {
  *  title 两处同源（#937 / M-24 同款手法），改一处即两处。 */
 const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
 
+/** #1283 P1：composer 被锁的**真实原因**——文案全部由它映射，不再各写一份三元链。
+ *  优先级与 #1223 的既有行为逐字一致：约束澄清 > ask_user > 审批。 */
+type LockReason = 'constraint' | 'ask_user' | 'approval';
+
+interface LockCopy {
+  hint: string;
+  placeholder: string;
+  permissionHint: string;
+}
+
+const LOCK_COPY: Record<LockReason, LockCopy> = {
+  // #1283 复审 P4：约束场景的**后端 409 原句**按 #1223 冻结为「请先提交答案」
+  // （service._pending_user_input_conflict_message），与这里的「回答」动词差是
+  // 有意的口径差，不是漂移——改这句前先核对 #1223 的冻结结论。
+  constraint: {
+    hint: '请先回答当前约束澄清，再发送新消息',
+    placeholder: '等待约束澄清回答…',
+    permissionHint: '等待约束澄清回答后再改档',
+  },
+  ask_user: {
+    hint: '请先回答当前提问，再发送新消息',
+    placeholder: '等待回答…',
+    permissionHint: '等待回答当前提问后再改档',
+  },
+  approval: {
+    hint: '等待审批决策后再继续',
+    placeholder: '等待审批决策…',
+    permissionHint: '等待审批决策后再改档',
+  },
+};
+
+/** 队列条（编辑/立即/flush）的 title。只有**待答用户输入**会锁队列条，审批锁
+ *  没有队列语义。用**窄键必填表**（#1283 复审 P4）：将来新增纳入锁定的 kind 却
+ *  漏填文案时 `tsc` 直接报错，而不是靠运行期 `?? ''` 静默出空 title。 */
+type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user'>;
+
+const QUEUE_HINT: Record<QueueLockReason, string> = {
+  constraint: '请先回答当前约束澄清',
+  ask_user: '请先回答当前提问',
+};
+
+/** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
+ *  `422`…）⇒ 保留用户输入；`true` / `undefined`（旧签名）⇒ 按已受理收尾。
+ *  `onSubmit` / `onSteer` / `onEditItem` 共用这一份，避免同一契约写三遍。
+ *  export：消费方（App 的 handleEditItem 等）引用同一别名，契约变更时 tsc 全仓追平。 */
+export type SubmitResult = void | boolean | Promise<void | boolean>;
+
 interface Props {
   streaming: boolean;
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
@@ -83,9 +130,9 @@ interface Props {
   constraintInputPending?: boolean;
   /** #1223：待回答的 `ask_user` 通用提问时同样锁住新消息——与约束澄清**同一条**锁定
    *  语义（把用户引向对话流里的待回答卡片，而不是让他发新消息撞后端 409）。
-   *  文案必须**中性**：ask_user 是通用提问、不是约束澄清，见下方 `lockHint`。 */
-  askUserPending?: boolean;
-  /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
+   *  文案必须**中性**：ask_user 是通用提问、不是约束澄清，见下方 `lockReason`。 */
+  askUserInputPending?: boolean;
+  /** 返回值 = 这次发送**是否已被受理**（#1029，契约见 `SubmitResult`）：
    *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
    *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
    *    状态并保留用户未发送的输入」）；
@@ -98,7 +145,7 @@ interface Props {
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
     scope?: ConstraintScope,
-  ) => void | boolean | Promise<void | boolean>;
+  ) => SubmitResult;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
   onSteer?: (
@@ -106,7 +153,7 @@ interface Props {
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
     scope?: ConstraintScope,
-  ) => void | boolean | Promise<void | boolean>;
+  ) => SubmitResult;
   /** #1191（Phase 2）：当前会话是否落在 git 仓库内（项目级登记可选）。
    *  `null`/缺省 = 未知（新建态、或尚未取得项目信息）⇒ 不置灰，交由后端 422 兜底；
    *  `false` = 已确知非 git 目录 ⇒ 「本项目」置灰不可选（票面 §七.4）。 */
@@ -192,8 +239,10 @@ interface Props {
   /** 「取消」= POST /sessions/{sid}/queue/{queue_id}/cancel。 */
   onCancelItem?: (item: UndeliveredInput) => void;
   /** 「编辑」= 就地编辑该排队项（ADR-0030 §5.2）：提交后走
-   *  `POST /messages {content, queue_id}`（后端取消旧项 + 按 mode 重新投递）。 */
-  onEditItem?: (item: UndeliveredInput, newContent: string) => void;
+   *  `POST /messages {content, queue_id}`（后端取消旧项 + 按 mode 重新投递）。
+   *  返回值契约同 `onSubmit`（#1029 / `SubmitResult`）：显式 `false` = 未受理
+   *  ⇒ 保留编辑态与文本。 */
+  onEditItem?: (item: UndeliveredInput, newContent: string) => SubmitResult;
   /** ADR-0030 §4.6「立即发送」：立刻投递队首待发送输入（POST /queue/flush）。
    *  缺席 = 不渲染按钮（重启后手动投递是 ADR 明确的前端职责）。 */
   onFlush?: () => void;
@@ -204,7 +253,7 @@ export const Composer = memo(function Composer({
   streaming,
   approvalPending = false,
   constraintInputPending = false,
-  askUserPending = false,
+  askUserInputPending = false,
   onSubmit,
   onSteer,
   projectAvailable = null,
@@ -266,6 +315,32 @@ export const Composer = memo(function Composer({
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+
+  /** #1283 P2-2：保存排队项。返回值契约同 `onSubmit`（#1029）——显式 `false`（含
+   *  409 / 网络失败）⇒ **保留**编辑态与用户改好的文本；其余（`true` / `undefined`）
+   *  ⇒ 关闭编辑。此前无脑 `setEditingId(null)` 会让 409 后改好的文本从界面消失。
+   *
+   *  #1283 复审 P3：锁可能在编辑态**打开之后**才到（待答请求从另一路事件流推来），
+   *  此时保存按钮已禁用、但 Enter 仍会走到这里——首行守卫把按钮/键盘两条路径一起
+   *  挡住，不发必然 409 的请求。
+   *
+   *  #1283 复审残余（登记不修）：`sendFollowUp` 的**分离投递**在 >1200ms 窗外先回
+   *  `true`（见 `useSession.ts` 的函数头注释），迟到的 409 由 `reportDetachedFailure`
+   *  把文本还回**主输入框**——不丢文本，但此时编辑态已关闭、旧队列项仍在。该窗口属
+   *  #1029 既有契约，不是本票新增；本票只保证窗内路径不再无脑清空。 */
+  const commitEdit = async (item: UndeliveredInput) => {
+    if (pendingUserInputLocked) return;
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    try {
+      const accepted = await onEditItem?.(item, trimmed);
+      if (accepted !== false) setEditingId(null);
+    } catch (err) {
+      // 抛错（非 409 路径）同样保留编辑态：宁可让用户再试，也不静默丢输入；
+      // 但编程错误不能表现成「点保存没反应」，留一条可观察痕迹（复审 P4）。
+      console.error('[Composer] 保存排队消息失败，已保留草稿', err);
+    }
+  };
 
   // ── #825（MM-04）附图草稿 ──
   // 状态机在 hook 里（上传/缩略图/失败重试/换会话清理），这里只做**入口门禁**与
@@ -356,33 +431,40 @@ export const Composer = memo(function Composer({
   // queue（Enter）/ steer（Ctrl/Cmd+Enter），两条通道都有后端消费。
   // #1223：`ask_user` 通用提问与约束澄清**共用同一条锁定语义**（都是"有待回答的
   // 用户输入"），差别只在文案——ask_user 不是约束澄清，故走中性措辞。
-  const locked = approvalPending || constraintInputPending || askUserPending;
+  // #1283：文案按**实际 lock 原因**一次算清（constraint > ask_user > approval，与
+  // 既有优先级逐字一致）；`lockHint` / `lockedPlaceholder` / 权限 pill 的禁用原因 /
+  // 队列条 title 全部从它派生，避免四份三元链各写一遍优先级、改文案时漂移。
+  const lockReason: LockReason | null = constraintInputPending
+    ? 'constraint'
+    : askUserInputPending
+      ? 'ask_user'
+      : approvalPending
+        ? 'approval'
+        : null;
+  const locked = lockReason !== null;
   // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = locked && !streaming;
-  const lockHint = constraintInputPending
-    ? '请先回答当前约束澄清，再发送新消息'
-    : askUserPending
-      ? '请先回答当前提问，再发送新消息'
-      : '等待审批决策后再继续';
-  const lockedPlaceholder = constraintInputPending
-    ? '等待约束澄清回答…'
-    : askUserPending
-      ? '等待回答…'
-      : '等待审批决策…';
+  const lockCopy = lockReason === null ? null : LOCK_COPY[lockReason];
+  const lockHint = lockCopy?.hint ?? '';
+  const lockedPlaceholder = lockCopy?.placeholder ?? '';
   /** #1223：排队条的 steer/flush 也是"开新消息"路径，与输入框同一把锁管到底——
-   *  否则输入框锁了、队列条还能点，用户照样撞后端 409。标题按具体待答项中性化。 */
-  const pendingUserInputLocked = constraintInputPending || askUserPending;
-  const pendingUserInputHint = constraintInputPending
-    ? '请先回答当前约束澄清'
-    : '请先回答当前提问';
+   *  否则输入框锁了、队列条还能点，用户照样撞后端 409。标题按具体待答项中性化。
+   *  #1283 P2-2：队列项的「编辑→保存」也走 `POST /messages {queue_id}`，同一把锁。 */
+  const pendingUserInputReason: QueueLockReason | null =
+    lockReason === 'constraint' || lockReason === 'ask_user' ? lockReason : null;
+  const pendingUserInputLocked = pendingUserInputReason !== null;
+  const pendingUserInputHint = pendingUserInputReason === null
+    ? ''
+    : QUEUE_HINT[pendingUserInputReason];
 
   // ── #283 权限 pill：会话内可改 + 升档确认 ──
-  // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
-  // ADR-0041 D5）与本轮进行中（档位下一轮才生效，本轮改了 UI 无从交代结果）。
+  // 禁用原因由 `lockReason` 一次算清（待回答用户输入 / 待审批，后端闸门都会 409，
+  // ADR-0041 D5），再加上本轮进行中（档位下一轮才生效，本轮改了 UI 无从交代结果）。
   // `#236` 的「会话内一律只读」那一条已随本票删除。
   const permissionLocked = locked || streaming;
-  const permissionDisabledHint = locked
-    ? '等待审批决策后再改档'
+  // #1283 P1：禁用原因按真实 lock 原因分流——ask_user 待答时绝不能报「等待审批」。
+  const permissionDisabledHint = lockCopy
+    ? lockCopy.permissionHint
     : streaming
       ? '本轮进行中，等这一轮结束再改档'
       : undefined;
@@ -974,6 +1056,9 @@ export const Composer = memo(function Composer({
                     value={editDraft}
                     autoFocus
                     aria-label="编辑排队消息内容"
+                    /* #1283 复审 P4：锁在编辑态打开后才到时，Enter 是静默 no-op；
+                       输入框自身给出原因（按钮的 disabled title 对键盘用户不可见）。 */
+                    title={pendingUserInputLocked ? pendingUserInputHint : undefined}
                     onChange={(e) => setEditDraft(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') {
@@ -983,24 +1068,17 @@ export const Composer = memo(function Composer({
                       }
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
-                        const trimmed = editDraft.trim();
-                        if (!trimmed) return;
-                        onEditItem?.(item, trimmed);
-                        setEditingId(null);
+                        void commitEdit(item);
                       }
                     }}
                   />
                   <span className="queue-item-actions">
                     <button
                       className="queue-item-btn"
-                      onClick={() => {
-                        const trimmed = editDraft.trim();
-                        if (!trimmed) return;
-                        onEditItem?.(item, trimmed);
-                        setEditingId(null);
-                      }}
+                      onClick={() => { void commitEdit(item); }}
+                      disabled={pendingUserInputLocked}
                       aria-label="保存排队消息"
-                      title="保存这一条"
+                      title={pendingUserInputLocked ? pendingUserInputHint : '保存这一条'}
                     >
                       <Check size={13} />
                     </button>
@@ -1045,9 +1123,9 @@ export const Composer = memo(function Composer({
                     setEditingId(item.id);
                     setEditDraft(item.content);
                   }}
-                  disabled={!onEditItem}
+                  disabled={!onEditItem || pendingUserInputLocked}
                   aria-label="编辑排队消息"
-                  title="编辑这条排队消息"
+                  title={pendingUserInputLocked ? pendingUserInputHint : '编辑这条排队消息'}
                 >
                   <Pencil size={13} />
                 </button>
@@ -1390,7 +1468,8 @@ export const Composer = memo(function Composer({
               onChange={handlePermissionSelect}
               icon={Shield}
               placeholder="权限"
-              // 禁用只剩操作性原因（审批待决 / 本轮进行中）——不再是「档位不可变」。
+              // 禁用原因按真实 lockReason 分流（待回答用户输入 / 待审批 / 本轮进行中）
+              // ——不再是「档位不可变」。
               disabled={permissionLocked}
               disabledHint={permissionDisabledHint}
               // 会话内没有「默认（未选）」这个目标：端点只接受三个具体档位，`null` 发过去

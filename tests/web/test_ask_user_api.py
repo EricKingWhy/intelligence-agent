@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.session.event import (
@@ -292,10 +293,88 @@ def test_new_message_while_ask_user_pending_reports_neutral_conflict(tmp_path):
 
     assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
-    assert "约束澄清" not in detail, detail
-    assert "提问" in detail, detail
+    # #1283 P4：整句相等——弱断言（`"提问" in detail`）钉不住动作子句。
+    assert detail == "当前有待回答的提问；请先回答该提问，再发送新消息"
     # 零副作用：拒绝不落任何新事件。
     assert client.get(f"/api/sessions/{session_id}/events").json() == before
+
+
+def test_resume_with_new_task_while_ask_user_pending_reports_neutral_conflict(tmp_path):
+    """#1283 P3：`resume_and_launch` 的 409 接线也按 kind 分流（不只有 `/messages`）。
+
+    传 `task` 时是「新任务续聊」入口；待答闸门必须先拒绝，且动作子句是
+    「再启动新任务」——三处入口各传各的 `resume_action`，传错在这里会红。
+    """
+    _app, client, session_id = _web_run(tmp_path)
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {
+                    "run": {"max_agent_turns_total": 8, "max_model_requests": 8},
+                },
+            },
+        )
+        assert started.status_code == 200, started.text
+        before = client.get(f"/api/sessions/{session_id}/events").json()
+        assert any(e["type"] == USER_INPUT_REQUESTED for e in before)
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={"task": "Another task before I answer."},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        "当前有待回答的提问；请先回答该提问，再启动新任务"
+    )
+    assert client.get(f"/api/sessions/{session_id}/events").json() == before
+
+
+@pytest.mark.parametrize("extra", [{"kind": "future_kind"}, {}])
+def test_unknown_or_missing_kind_never_reports_a_constraint_conflict(tmp_path, extra):
+    """#1283 P2-4：分流是允许清单——只有 `protected_fact_conflict` 走约束原句。
+
+    第三种 kind（以及缺 `kind` 的历史事件）必须走中性句：把它们按约束澄清处理，
+    就会把用户引去处理一个并不存在的冲突。这里在真实暂停的 run 上追加一条
+    「非约束澄清」的待答请求，再发新消息。
+    """
+    app, client, session_id = _web_run(tmp_path)
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {
+                    "run": {"max_agent_turns_total": 8, "max_model_requests": 8},
+                },
+            },
+        )
+        assert started.status_code == 200, started.text
+        before = client.get(f"/api/sessions/{session_id}/events").json()
+        pause = next(e for e in before if e["type"] == RUN_PAUSED)
+        Session.append_event(
+            app.state.agent.store,
+            session_id,
+            USER_INPUT_REQUESTED,
+            {"request_id": "future-1", **extra},
+            run_id=pause["run_id"],
+        )
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Another task before I answer."},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        "当前有待回答的提问；请先回答该提问，再发送新消息"
+    )
 
 
 # ── #1284 P2-1：装配接线（settings → payload）必须被非默认档位钉住 ──────

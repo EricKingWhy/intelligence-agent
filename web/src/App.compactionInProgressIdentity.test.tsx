@@ -36,6 +36,10 @@ const summaryB: SessionSummary = {
   workspace: null,
   archived: false,
   corrupted: false,
+  product_state: '',
+  product_state_changed_at: null,
+  attention_kind: null,
+  attention_summary: null,
 };
 
 vi.mock('./hooks/useSession', async (importOriginal) => {

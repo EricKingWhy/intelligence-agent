@@ -169,6 +169,21 @@ export interface SessionSummary {
    *  `archived` 同款理由。前端据此渲染损坏徽标并引导至恢复入口，而不是让
    *  会话静默消失。 */
   corrupted: boolean;
+  /** #1303 §3.3：看板四态投影（后端 `SessionSummary.product_state`）。
+   *  `''` = 从未定义任务（= backlog）；其余为
+   *  `executing` / `pending_verification` / `deliverable` / `accepted`。
+   *  **非可选**——与 `archived` 同款理由：漏读会变成 `undefined`，看板把
+   *  每一行都静默渲染成 backlog（假事实）。本票只加类型，UI 消费在 T2。 */
+  product_state: string;
+  /** #1303：产品四态最后一次**跃迁**的事件时刻——看板 ack 比较键的**唯一**来源。
+   *  同态事件（如 model/completed）不刷新它（Orca
+   *  `agent-attention-acknowledgement.ts` 的比较形状：按状态起始比较，不按 updatedAt）。
+   *  从未定义任务时为 null。 */
+  product_state_changed_at: string | null;
+  /** #1303：会话在等你什么：`'input'` / `'approval'` / null（仅 `executing` 时有值）。 */
+  attention_kind: 'input' | 'approval' | null;
+  /** #1303：注意力横幅文案，与 `attention_kind` 同源（如「待回答：…」）。 */
+  attention_summary: string | null;
 }
 
 /** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。

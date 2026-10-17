@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1290 分支 sync merge 42c79618，父一 ce22e13f（本线 tip：#1218 ask_user 交互样例 mockup）/ 父二 741cd67d（origin/main，#1298 合入后 tip）。merge-base 795fe5af。docs/phase_status/2026-10.md 1 处纯追加型文档冲突，机械并集消解（两侧章节各自逐字保留、零删改），其余文件 ort 自动合并。无损核验：冲突标记 0、git diff --check rc=0。	ce22e13f8f7bfdbf2c0620803461ef748f3d1f89..42c79618ed28abc50a5410fd1ecaa89b21d17866
