@@ -769,8 +769,8 @@ def _pending_user_input_conflict_message(
 
     分流是**允许清单**：只有明确等于 ``protected_fact_conflict`` 才走约束澄清原句；
     ``ask_user``、未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——缺字段
-    时「不说假话」优先于「猜它是约束澄清」。动作动词与前端 composer 锁定提示统一为
-    「回答」。
+    时「不说假话」优先于「猜它是约束澄清」。通用提问的动词与前端 composer 锁定提示
+    统一为「回答」；约束澄清原句按 #1223 冻结（仍说「提交答案」），不随本票改动。
     """
     if request.data.get("kind") == "protected_fact_conflict":
         return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
@@ -2625,7 +2625,7 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if task is not None:
                 _raise_if_pending_user_input(
-                    locked_events, resume_action="再发送新任务",
+                    locked_events, resume_action="再启动新任务",
                 )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
