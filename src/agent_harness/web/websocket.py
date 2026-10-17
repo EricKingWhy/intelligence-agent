@@ -262,6 +262,25 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             raise
         if subscriber is not None:
             subscriptions[session_id] = (active_run, subscriber)
+        # #1220 复审 P2-1：上面那次读盘发生在**装配 subscriber 之前**——若
+        # `user/input-requested` 恰好落在两者之间，旧快照判"无需装配"，而该事件又早于
+        # 本订阅者的扇出起点（`_fanout` 只发给此刻已存在的订阅者）⇒ 计时器永不装配，
+        # 提问永不超时、run 永久挂起。订阅建立后重读一次补齐这个窗口：落在此刻之后
+        # 的事件由 relay 装配（`_relay_events` 同一判据），两条路径都幂等（同 request_id
+        # 重复装配保留已累计时长）。
+        # 不能以"有在途 run"为条件：提问落盘后 run 会以 `run/paused` 收口并结束 task
+        # （`get_active` 随之为 None），恰是最需要补读的时刻。
+        # 已知代价（#1285 复审登记，不改代码）：每次 subscribe 无条件全量重读事件
+        # 文件，订阅路径 IO 翻倍；若成为热点，可改为按 `latest_seq` 增量补读。
+        try:
+            fresh_events = await service.get_events(session_id)
+        except Exception:  # 补读失败不拆快照：relay 只兜订阅后事件，窗口内存量
+            # 依赖下次 subscribe 重读。
+            logger.warning(
+                "ask_user 超时装配补读失败（session=%s）", session_id, exc_info=True,
+            )
+        else:
+            driver.note_session_state(session_id, fresh_events)
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]

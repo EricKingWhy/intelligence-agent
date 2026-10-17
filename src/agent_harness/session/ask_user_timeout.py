@@ -14,10 +14,14 @@ web / session service，保持可单测（也是 web↔service 共用的低层�
 ⚠ **在线驱动为临时接缝（issue #1220，用户裁决 2A）**：#1204 起本模块只在测试里被实例化，
 生产装配**没有**连接进出 / 超时恢复的调用方。本票以 `web/ask_user_timeout_driver.py` 的
 `AskUserTimeoutDriver` 临时接线：在场信号取自 **WS 连接级订阅计数**（一个前端连接
-`subscribe(session_id)` = 在场）。**TODO（W-12 落地后迁移）**：产品客户端在场协议
+`subscribe(session_id)` = 在场）。**TODO（W-12 登记协议落地后迁移）**：产品客户端在场协议
 `agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，把在场信号
 迁到那道闸门（`enroll()` / `mark_absent()`），并**整体删除** `AskUserTimeoutDriver`
 及其对 WS 订阅计数的直接依赖——本接缝是临时的，不是长期形态。
+
+触发条件是 **W-12 的登记协议（#356 中 DEFER 的部分）**，不是"W-12 落地"：#356/#366
+均已关单，但 `enroll()` 仍无生产调用方（选项 B 只做明确退出信号）。删除清单见
+`web/ask_user_timeout_driver.py` 的模块 docstring。
 """
 
 from __future__ import annotations

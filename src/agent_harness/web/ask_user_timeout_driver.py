@@ -10,12 +10,35 @@
 `finally` 收尾（离开）。按会话做**跨连接引用计数**：0→≥1 `set_connected(True)`，
 归零 `set_connected(False)`；断线重连不清零（同名请求重复装配保留已累计时长）。
 
-⚠ **临时接缝——W-12 落地后删除本模块**：
-    TODO(#1220 → W-12)：产品客户端在场协议
+⚠ **临时接缝——W-12 登记协议（#356 中 DEFER 的部分）落地后删除本模块**：
+    TODO(#1220)：产品客户端在场协议
     `agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，
     把在场信号迁到那道闸门（`enroll()` 登记 / `mark_absent()` 缺席），并把本模块
     及其对 WS 订阅计数的直接依赖**整体删除**。本接缝只为补上"谁在场"这一格，
     不是长期形态（W-12 的登记 / 心跳 / 明确退出 vs 意外断线区分不在本模块承担）。
+
+    触发条件为什么是"登记协议"而不是"W-12 落地"：#356 已于 2026-10-06 关单
+    （选项 B：只做明确退出信号，**整套 presence 登记表/宽限 DEFER**），#366 也于
+    2026-10-04 关单——但 `enroll()` 至今**没有生产调用方**。照旧措辞读，grep 到
+    `#356` CLOSED 的人会得出"现在就该删"或"永远不会删"两种相反结论。
+
+    **删除清单（按文件，`git grep -n "#1220" -- src` 可复核）**：
+      - `web/websocket.py` 7 处：`driver = state.ask_user_timeout_driver` 绑定
+        （~144-145）、`_watch_session`/`watching` 在场计数（~142-153）、
+        `_push_snapshot` 的装配与订阅后补读（~209-228、补读块 ~264-279）、
+        relay 的 `arm`（~314-325）、
+        launch 处的 `_watch_session`（~507）、心跳里的 `check_expiries`（~579-582）、
+        `finally` 的 `connection_closed` 归零（~622-626）；
+      - `web/app.py` 2 处：import（~171）+ 组合根装配（~1265-1278）；
+      - `session/service.py`：import 行（~127）+ `resume_ask_user_timeout`
+        整个方法（~3050-3100）；
+      - `session/ask_user_timeout.py`：模块 docstring 的接缝段（~14-25）；
+      - 本模块（整个文件）；
+      - `tests/web/test_ask_user_timeout_driver.py`、`tests/web/test_ask_user_timeout_online.py`。
+    `pending_ask_user_request_id`（`session/ask_user_timeout.py`）的**生产调用点全部
+    属于本接缝**（本模块与 `service.resume_ask_user_timeout`）⇒ 删完接缝它只剩测试
+    消费者。届时二选一并记录：新闸门复用同一份扫描，或连同其测试一并删除——不得
+    让它悄悄退回"只在测试里被实例化"的 #1220 前状态。
 
 确定性：挂钟与超时档都可注入（单测不实等）；`on_expire` 是唯一的恢复出口（由组合根
 注入 session service 的调用，本模块不 import session service，避免 web↔service 环）。
@@ -169,6 +192,7 @@ class AskUserTimeoutDriver:
         self._frozen.pop(session_id, None)
 
     def is_armed(self, session_id: str) -> bool:
+        """该会话是否装着计时器（含无连接时冻结的条目——冻结≠撤销）。"""
         return session_id in self._trackers
 
     # ── 到点检查 ──────────────────────────────────────────────────────
@@ -207,6 +231,12 @@ class AskUserTimeoutDriver:
                 )
                 outcome = ExpireOutcome.RETRY
             if outcome is ExpireOutcome.RESUMED:
+                # 产品行为改变（用户未回答、run 自动继续）必须在日志里留下第一条
+                # 线索——否则排障时"为什么这个 run 自己跑了"只能靠事件流事后回溯。
+                logger.info(
+                    "ask_user 超时到点，已发起恢复（session=%s, request=%s, 档位=%.0fs）",
+                    session_id, request_id, self.timeout_seconds,
+                )
                 fired.append(session_id)
             # 收口/RETRY 仅在仍装配着**同一** request 时进行：`await on_expire` 期间 relay /
             # `note_session_state` 可能已为同一会话装了**新的** request，误拆会丢掉它的超时

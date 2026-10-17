@@ -8,6 +8,11 @@
 接缝：真实 uvicorn ASGI 服务器 + httpx2 WebSocket 客户端 + ScriptedModel 剧本桩。
 在场信号取自 WS 连接级订阅计数（`web/ask_user_timeout_driver.py`），到点经
 `SessionService.resume_ask_user_timeout` 走既有 user_input 恢复链。
+
+成色说明（#1220 复审 F7）：本文件把心跳调到 3600s 并显式 tick `check_expiries()`，
+**未覆盖** `websocket.py` 心跳调用 `check_expiries` 这条生产接线本身——该接线
+仅由手工验证兜底（无自动化测试断言心跳循环调用了 `check_expiries`），此处不
+重复构造真实节拍。
 """
 
 from __future__ import annotations
@@ -264,6 +269,60 @@ async def test_relay_armed_request_uses_the_payload_snapshot(tmp_path, monkeypat
                 if any(e["type"] == "run/completed" for e in events):
                     break
                 await asyncio.sleep(0.05)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_arms_timer_when_input_request_lands_after_snapshot_read(
+    tmp_path, monkeypatch,
+):
+    """P2-1：`get_events` 返回旧快照、提问随后落盘 ⇒ 订阅仍须装配计时器。
+
+    竞态原样：subscribe 处理先读事件流（无待回答）→ `note_session_state` 判"无需装配"
+    → 之后 `user/input-requested` 才落盘。relay 只收到**订阅之后**扇出的事件，旧快照
+    又不含提问 ⇒ 不补读就永远不会装配，提问永不超时、run 永久挂起（违反 AC②）。
+
+    构造：把 `SessionService.get_events` 的**第一次**调用裁掉 `user/input-requested`
+    （= 读到旧快照），其后返回真实事件流（= 补读能看到已落盘的提问）。
+    """
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+    )
+    try:
+        driver = app.state.agent.ask_user_timeout_driver
+        clock = FakeClock()
+        driver.clock = clock
+        driver.timeout_seconds = 60.0
+
+        sid = await _start_run(port, "请设置存储层")
+        await _wait_paused(port, sid)  # 先等提问落盘（HTTP 读不走被裁的路径）
+
+        from agent_harness.session.event import USER_INPUT_REQUESTED
+        from agent_harness.session.service import SessionService
+
+        real_get_events = SessionService.get_events
+        stale_once = {"left": 1}
+
+        async def get_events(self, session_id):
+            events = await real_get_events(self, session_id)
+            if stale_once["left"] and session_id == sid:
+                stale_once["left"] -= 1
+                return [e for e in events if e.type != USER_INPUT_REQUESTED]
+            return events
+
+        monkeypatch.setattr(SessionService, "get_events", get_events)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
+            await _recv_snapshot(ws)
+            assert driver.is_armed(sid), (
+                "快照读到的旧状态不含提问，订阅后必须补读事件流装配计时器"
+            )
     finally:
         await _shutdown(server, serve_task)
 

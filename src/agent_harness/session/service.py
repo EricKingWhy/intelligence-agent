@@ -3077,6 +3077,9 @@ class SessionService:
     ) -> ExpireOutcome:
         """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
 
+        W-12 登记协议（#356 中 DEFER 的部分）落地后随 `AskUserTimeoutDriver` 一并删除
+        （清单见 `web/ask_user_timeout_driver.py` 模块 docstring）。
+
         到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
         是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
         未答复 `ask_user` 上才恢复。恢复走既有 `resume_and_launch`
