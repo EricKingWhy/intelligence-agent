@@ -607,6 +607,40 @@ def test_derivation_failure_does_not_poison_memory_or_sidecar(
     assert before.product_state == "pending_verification"
 
 
+def test_read_path_derivation_failure_evicts_the_cache(tmp_path: Path) -> None:
+    """独立审查第三轮 P3：读路径派生失败也必须丢掉旧缓存。
+
+    否则下一次非触发更新会拿旧缓存重算并推进水位，把失败时点的旧状态钉住。
+    """
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = bp.get_board_projection_store(store)
+    assert projection_store.get(sid).product_state == "pending_verification"
+
+    # 旁路写者把盘上状态推到 executing，但不经过 Session 钩子（缓存仍是旧值）。
+    foreign = SessionEvent(
+        seq=session.next_seq,
+        type=RUN_STARTED,
+        session_id=sid,
+        run_id="r1",
+        data={},
+    )
+    store.append_event(sid, foreign)
+
+    from agent_harness.session import task as task_module
+
+    def boom(_events):
+        raise RuntimeError("projection bug")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(task_module, "derive_task_state", boom)
+        assert projection_store.get(sid).product_state == "", "失败时返回保守空投影"
+
+    # 失败后的非触发更新：事件视图与盘上一致，唯一区别是缓存是否已清掉。
+    projection_store.update_from_events(sid, store.read_events(sid), recompute=False)
+    assert projection_store.get(sid).product_state == "executing"
+
+
 def test_update_never_stamps_a_view_that_lags_the_disk(tmp_path: Path) -> None:
     """独立审查 P2：内存视图看不到旁路写入时，不得把旧投影盖上新戳。"""
     store, session = _session_with_task(tmp_path)
