@@ -674,6 +674,7 @@ async def test_transient_plan_failure_marker_precedes_terminal_when_append_fails
     assert len(errors) == 1
     assert errors[0].data["code"] == "run-failed-before-plan"
     assert errors[0].seq is None
+    assert errors[0].data["degraded"] is True
     assert seen.index(errors[0]) < next(
         index for index, event in enumerate(seen) if event.type == RUN_FAILED
     )
