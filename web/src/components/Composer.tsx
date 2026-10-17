@@ -519,7 +519,18 @@ export const Composer = memo(function Composer({
        尾随空格同样落进命令路径，args 为空 ⇒ 走 §4.2「无参数则查看」。
        受 `locked` 门控（审查 A-P2-3）：与菜单触发同把锁——锁定态命令不执行，
        也不会被当成聊天发出。 */
-    const submitHit = slashSubmitMatch(trimmed, Object.keys(BUILTIN_RUNS));
+    /* #1200 同名消歧：skill 与内置命令同名（如叫 `goal` 的 skill）时，注册表里
+       的 skill 赢——否则用户点的是 skill、执行的却是内置命令。注册表未加载
+       （null）时无从判定，保持只认内置的既有行为。 */
+    const skillDisplays = new Set(
+      (slashRegistry ?? [])
+        .filter((c) => c.kind === 'skill')
+        .map((c) => slashDisplayName(c)),
+    );
+    const submitHit = slashSubmitMatch(
+      trimmed,
+      Object.keys(BUILTIN_RUNS).filter((name) => !skillDisplays.has(name)),
+    );
     if (submitHit) {
       if (sessionId == null) {
         /* 无会话不可执行（审查 A-P3-1）：给可见反馈且**不清输入**——静默 return
@@ -1104,7 +1115,7 @@ export const Composer = memo(function Composer({
                     return (
                       <div
                         key={`${kind}:${display}`}
-                        id={`slash-opt-${display}`}
+                        id={`slash-opt-${kind}:${display}`}
                         role="option"
                         aria-selected={selected}
                         data-slash-name={display}
@@ -1237,7 +1248,9 @@ export const Composer = memo(function Composer({
           aria-controls={slashOpen ? slashMenuId : undefined}
           aria-activedescendant={
             slashOpen && slashItems.length > 0
-              ? `slash-opt-${slashItems[selectedSlashIndex].name}`
+              ? `slash-opt-${slashItems[selectedSlashIndex].kind}:${slashDisplayName(
+                  slashItems[selectedSlashIndex],
+                )}`
               : undefined
           }
           onChange={(e) => {

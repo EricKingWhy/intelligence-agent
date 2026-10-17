@@ -226,17 +226,52 @@ describe('#1195 触发与渲染', () => {
     expect(menu()?.textContent).toContain('/goal');
   });
 
-  it('点选 skill：插入 `/name ` 到输入框，不执行、不发送（Claude Code 语义）', async () => {
+  it('点选 skill：只做预填 `/name `（不执行、不发送），Enter 才提交给后端执行', async () => {
     await typeText('/deep');
     const item = container.querySelector('[data-slash-name="deep-research"]')!;
     await act(async () => {
       item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    // skill 没有前端 run 回调：接受 = 把 `/skill ` 写进输入框，正文由 agent 的
-    // load_skill 读；这里钉住"不 onSubmit、不清空、菜单关闭"三件事。
+    // 点选 = 预填（Claude Code 语义）；执行发生在 Enter 提交时，由后端按
+    // 「消息开头出现 skill 名」确定性注入正文。
     expect(textarea().value).toBe('/deep-research ');
     expect(onSubmit).not.toHaveBeenCalled();
     expect(menu()).toBeNull();
+    // Enter 把整条 `/skill` 交给既有发送路径（后端展开，不是前端本地执行）。
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/deep-research', false, [], 'session');
+  });
+
+  it('skill 与内置同名：执行 skill（提交不被内置命令截走）', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'goal', kind: 'skill', description: '同名 skill' },
+    ]);
+    // 注册表只在菜单打开时拉取：换 mock 后必须重挂，否则读到的还是旧表。
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    // 注册表只在菜单打开时拉取（触发条件：输入以 `/token` 结尾）——先输入
+    // `/goal` 让菜单打开并落定注册表，再补参数。
+    await typeText('/goal');
+    await act(async () => {});
+    await typeText('/goal 目标文本');
+    press('Enter');
+    // 注册表里的 skill 赢：走 onSubmit 让后端展开，而不是本地跑内置 /goal。
+    expect(onSubmit).toHaveBeenCalledWith('/goal 目标文本', false, [], 'session');
+    expect(getTaskState).not.toHaveBeenCalled();
+  });
+
+  it('命名空间 skill 的 aria-activedescendant 指向真实存在的选项 id', async () => {
+    await typeText('/acme');
+    const ta = textarea();
+    const id = ta.getAttribute('aria-activedescendant');
+    expect(id).toBe('slash-opt-skill:acme:code-review');
+    const option = container.querySelector(`#${CSS.escape(id!)}`);
+    expect(option).not.toBeNull();
+    expect(option?.getAttribute('role')).toBe('option');
   });
 
   it('内置命令与前端执行表漂移：点选可见错误，不静默 no-op', async () => {
@@ -632,7 +667,7 @@ describe('#1195 findings 修回 — 菜单与反馈面', () => {
     const menuId = ta.getAttribute('aria-controls');
     expect(menuId).toBeTruthy();
     expect(document.getElementById(menuId!)).not.toBeNull();
-    expect(ta.getAttribute('aria-activedescendant')).toBe('slash-opt-plan');
+    expect(ta.getAttribute('aria-activedescendant')).toBe('slash-opt-builtin:plan');
   });
 });
 
