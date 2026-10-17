@@ -74,6 +74,9 @@ const H = vi.hoisted(() => ({
   conv: null as ConversationState | null,
   set: null as unknown as (c: ConversationState) => void,
   submitTask: vi.fn(),
+  // #1312：`handleNew` 的唯一可观测出口就是 selectSession(null)——命令面板项必须真的
+  // 走到它，而不是只在自己的副本里跑一遍回调。
+  selectSession: vi.fn(),
 }));
 
 const NOOP = () => {};
@@ -103,7 +106,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
           terminalRepaired: false, stillUnterminated: false, stillDangling: false,
           pendingDecisions: null,
         },
-        selectSession: NOOP,
+        selectSession: H.selectSession,
         submitTask: H.submitTask,
         sendMessage: NOOP,
         cancelStream: NOOP,
@@ -222,6 +225,7 @@ beforeEach(() => {
   eventBudget = EVENT_COUNT;
   H.conv = buildConversation(EVENT_COUNT);
   H.submitTask.mockClear();
+  H.selectSession.mockClear();
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -295,10 +299,13 @@ describe('F4 AC2 — 打开那一刻候选表是最新的', () => {
  *  任何窗口大小 / 排序 / 分组的偏离都会让它失败。
  *  基准重定（2026-10-05，#684/#685 审批持久规则）：`manage-approve-policy`
  *  在 `manage-memories` 后新增（顶栏 Shield 与命令面板共用入口，同
- *  `manage-memories` 模式），现共 111 项。功能加项须同步重定本表。 */
+ *  `manage-memories` 模式），现共 111 项。功能加项须同步重定本表。
+ *  基准重定（2026-10-17，#1312 会话级目标 pill）：`new-session` 在 actions 组第 3 位
+ *  新增（复用 `handleNew`），现共 112 项。 */
 const GOLDEN_OPEN_ITEMS: [string, string][] = [
   ['toggle-inspector', 'actions'],
   ['toggle-inspector-fullpage', 'actions'],
+  ['new-session', 'actions'],
   ['jump-latest', 'actions'],
   ['toggle-theme', 'actions'],
   ['focus-composer', 'actions'],
@@ -320,6 +327,30 @@ describe('F4 AC4 — 打开态候选表 golden', () => {
     await openPalette();
     const got = lastProps().items.map((i) => [i.id, i.group]);
     expect(got).toEqual(GOLDEN_OPEN_ITEMS);
+  });
+});
+
+// ── #1312：命令面板的「新建会话」入口 ─────────────────────────────────────
+describe('#1312 — 命令面板新建会话', () => {
+  it('actions 组含「新建会话」，从浮层执行后走 handleNew（selectSession(null)）', async () => {
+    await mount();
+    await openPalette();
+    expect(lastProps().items.map((i) => i.id)).toContain('new-session');
+
+    // 真键盘入口 → 真浮层项：只断言 items 数组证明不了 run 接到了 App.handleNew。
+    const input = document.querySelector<HTMLInputElement>('.palette-input')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter!.call(input, '新建会话');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const option = [...document.querySelectorAll<HTMLButtonElement>('.palette-content .palette-item')]
+      .find((el) => el.querySelector('.palette-item-label')?.textContent === '新建会话');
+    expect(option).toBeDefined();
+
+    await act(async () => option!.click());
+    // 精确匹配 null：伪造 `''`/undefined 都会在 App 里被读成"仍有会话"或"新建"的二义。
+    expect(H.selectSession).toHaveBeenCalledWith(null);
   });
 });
 

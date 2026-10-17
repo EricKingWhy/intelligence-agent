@@ -1413,6 +1413,16 @@ export default function App() {
         },
       },
       {
+        /* #1312：新建会话 = 与续聊分离的显式入口（ChatGPT / Claude 侧栏「New Chat」
+           同型；本仓的键盘入口就是命令面板 Ctrl/Cmd+K，不新增全局快捷键）。
+           复用 handleNew，不另造创建路径。 */
+        id: 'new-session',
+        label: '新建会话',
+        keywords: 'new session chat 新对话',
+        group: 'actions',
+        run: () => handleNew(),
+      },
+      {
         id: 'jump-latest',
         label: '跳到最新事件',
         keywords: 'jump to latest event 定位',
@@ -1549,7 +1559,7 @@ export default function App() {
       });
     }
     return items;
-  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
+  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
   return (
     <div className="app-frame">
@@ -1919,6 +1929,9 @@ export default function App() {
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}
+                    /* #1312：会话级目标的动作出口——「改为新会话」与命令面板的
+                       「新建会话」共用 handleNew，不另造创建路径。 */
+                    onNewSession={handleNew}
                     onEnsureSession={ensureSession}
                     onCancel={cancelStream}
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
