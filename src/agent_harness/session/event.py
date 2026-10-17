@@ -206,6 +206,28 @@ CONTEXT_WINDOW_CHANGED = "context/window-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
+# ── #1193：run 致命异常的**明确错误信号**（durable，落盘）────────────────────
+# 缺陷背景：run 启动期致命异常（如 begin_run SeqConflict）既无 run/started 也无
+# run/failed，前端只看到「连接中断（stream ended unexpectedly）」并静默重试；而
+# 会话仍停在 plan 档（只读、无计划）——写工具全被拦，重试永远不会成功。
+# 本事件把「为什么失败 + 会话仍在 plan 档 + 手动退出」明确推给前端，替代静默重试。
+#
+# **为什么 durable（#1193 独立审查 F2/F3 实测）**：致命启动失败发生在 run 起点，
+# 而前端接流总晚一步（POST /sessions 路径先轮询认领会话 id 再接 WS，实测 ≥150ms；
+# 交付层攒包路径更晚）——失败帧发出时没有订阅者在场，瞬时帧必丢，前端照样退回
+# 「连接中断」重试。durable 之后，迟到接流的 WS 快照（websocket.py `_push_snapshot`
+# 无论有无在途 run 都补 after_seq 之后的一截）与刷新后的 GET /events 都能读到它，
+# 前端横幅成为事件流的投影（不变量 #22），而非只活在流里的一次性信号。
+#
+# 判定条件（精确，不猜）：run 异常收尾 ∧ `effective_workflow_mode` == plan ∧
+# 事件流中不存在任何 `task/plan_updated`（含前序 run——计划一旦生成过就不是
+# 本事件）。**不是** mode 回滚：任何异常路径都不把 plan 自动翻回 normal
+# （权限只收紧不自动放宽，fail-closed）。
+#
+# 形状说明：wire type 是裸词 "error"（#1193 票面 schema 明确指定），不遵循
+# `域/子域` 惯例——两个词汇生成器的形状正则已按票面放宽以容纳它。
+ERROR = "error"
+
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
 #   COMPACTION_START (source_seq_start, source_seq_end)
@@ -346,6 +368,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_CHANGED,
         # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
         PERMISSION_CHANGED,
+        # #1193：run 致命异常的明确错误信号（plan 档 + 计划从未生成；durable 的
+        # 理由与判定条件见上方 ERROR 定义处）
+        ERROR,
         # #1197 项 1：会话级上下文窗口挡位
         CONTEXT_WINDOW_CHANGED,
     }
