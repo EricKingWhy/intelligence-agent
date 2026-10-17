@@ -1112,8 +1112,6 @@ export default function App() {
 
   const paused = conversation?.run_paused ?? null;
   const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
-  const constraintInputPending =
-    pendingConstraintInput !== null && pendingConstraintInput.answer === null;
   const constraintRequest =
     paused !== null &&
     pendingConstraintInput !== null &&
@@ -1122,6 +1120,11 @@ export default function App() {
     paused.run_id === pendingConstraintInput.run_id
       ? pendingConstraintInput
       : null;
+  /** #1283：`constraintInputPending` 的判据与**卡片挂载来源**同宽——用已与
+   *  `run_paused` 对齐的 `constraintRequest`。「有请求、无 `run/paused`」时没有卡
+   *  可答，锁住 composer 就是「锁了但没卡」的死角（与 ask_user 同款，见下）。 */
+  const constraintInputPending =
+    constraintRequest !== null && constraintRequest.answer === null;
   /** #1204：`kind=ask_user` 的待回答请求——挂载内嵌卡片的**唯一**判据，与约束澄清
    *  完全同形地要求「暂停 run 与请求 id 对齐」，两条管线互不冒充（分流在投影的
    *  `data.kind` 处已经发生，这里只是同一条对齐检查）。 */

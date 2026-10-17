@@ -251,6 +251,16 @@ describe('#1223 — 待回答的用户输入锁 composer', () => {
     expect(el.querySelector('.composer-locked-hint')).toBeNull();
   });
 
+  it('#1283 复审：约束澄清同样「有请求、无 run/paused ⇒ 不锁」（与卡片同源）', async () => {
+    const el = await mount('protected_fact_conflict', { paused: false });
+    // 约束弹窗挂载同样要求「请求与暂停对齐」；这里没有暂停 ⇒ 没有可答的卡。
+    expect(document.querySelector('.constraint-input-dialog')).toBeNull();
+    const textarea = el.querySelector('textarea.composer');
+    expect(textarea).not.toBeNull();
+    expect(textarea!.hasAttribute('disabled')).toBe(false);
+    expect(el.querySelector('.composer-locked-hint')).toBeNull();
+  });
+
   it('#1283 P2-3：已答复（answer !== null）⇒ 锁解除', async () => {
     const el = await mount('ask_user', { answer: 'answered' });
     const textarea = el.querySelector('textarea.composer');
