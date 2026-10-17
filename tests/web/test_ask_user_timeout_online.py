@@ -254,6 +254,16 @@ async def test_relay_armed_request_uses_the_payload_snapshot(tmp_path, monkeypat
 
             clock.now += 61.0
             assert await driver.check_expiries() == [sid]
+
+            # 等恢复的 run 收口（与首用例同一纪律）：`resume_and_launch` 立即返回，
+            # 直接进 `finally` 会与在途 detached run 抢跑。
+            for _ in range(200):
+                events = (await client.get(
+                    f"http://127.0.0.1:{port}/api/sessions/{sid}/events"
+                )).json()
+                if any(e["type"] == "run/completed" for e in events):
+                    break
+                await asyncio.sleep(0.05)
     finally:
         await _shutdown(server, serve_task)
 

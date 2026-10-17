@@ -72,7 +72,7 @@ def ask_user_timeout_seconds_from_payload(
     快照是唯一事实源：运维改配置并重启后，旧请求仍按创建时的档位到期，而不是按
     新进程的配置。两个快照字段同时存在时**以 `timeout_minutes` 为准**（卡片与注入
     消息也读它）——这样即使载荷被外部篡改成互相矛盾的值，计时器与展示数字仍同数；
-    `timeout_seconds`-only 是 #1224 旧载荷，`timeout_minutes`-only 是更旧/手写兜底。
+    `timeout_seconds`-only 是 #1224 旧载荷，`timeout_minutes`-only 是手写/部分生产者兜底。
     """
     minutes = _positive_int(data.get("timeout_minutes"))
     if minutes is not None:

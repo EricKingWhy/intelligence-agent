@@ -124,7 +124,8 @@ class AskUserTimeoutDriver:
         时长——断线重连续计不清零）；否则**撤销**——已答复 / 整卡跳过 / 无提问的会话
         不再触发超时恢复。
 
-        #1284 P2-2：计时档读**请求载荷快照**（`data.timeout_seconds`），不读启动配置。
+        #1284 P2-2：计时档读**请求载荷快照**（`timeout_minutes` 优先，缺失/非法回落
+        `timeout_seconds`，见 `ask_user_timeout_seconds_from_payload`），不读启动配置。
         运维改配置并重启后，旧请求仍按创建时的档位到期；只有 #1224 之前落盘、没有
         快照的旧事件才回落到 `self.timeout_seconds`。
         """

@@ -242,9 +242,10 @@ class AskUserTool(Tool):
             "kind": "ask_user",
             "run_id": run_id,
             "questions": questions,
-            # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。秒→分换算只在
-            # `ask_user_timeout.py::ask_user_timeout_minutes` 一处。
-            # #1284：显示用分钟数也在后端落盘，前端只渲染，不再跨语言重复换算。
+            # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。
+            # #1284：显示用分钟数也在后端落盘——Python 侧秒→分换算只在
+            # `ask_user_timeout.py::ask_user_timeout_minutes` 一处；前端对新事件只渲染，
+            # 仅对没有 `timeout_minutes` 的旧载荷保留同序（向下取整且至少 1）兜底。
             "timeout_seconds": self._timeout_seconds,
             "timeout_minutes": ask_user_timeout_minutes(self._timeout_seconds),
         }

@@ -200,6 +200,9 @@ describe('applyEvent — 折叠语义', () => {
     // 新事件：后端落盘的 timeout_minutes 直接投影（前端不再自算）。
     expect(projected({ timeout_seconds: 600, timeout_minutes: 10 })).toBe(10);
     expect(projected({ timeout_seconds: 60, timeout_minutes: 1 })).toBe(1);
+    // 冲突时 minutes 优先（与后端 `ask_user_timeout_seconds_from_payload` 同一优先级：
+    // 计时、注入消息与卡片必须始终同数）。
+    expect(projected({ timeout_seconds: 60, timeout_minutes: 10 })).toBe(10);
     // #1224 旧事件只有 seconds ⇒ 同一公式换算（向下取整且至少 1）。
     expect(projected({ timeout_seconds: 600 })).toBe(10);
     expect(projected({ timeout_seconds: 60 })).toBe(1);
