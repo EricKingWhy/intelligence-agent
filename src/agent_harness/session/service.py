@@ -1670,6 +1670,12 @@ class SessionService:
         auto_approve: bool = False,
         amend: AmendOptions | None = None,
         launch: bool = True,
+        # #1193：创建时声明的初始工作流档（plan 档 = 只读计划模式）。**在
+        # RunManager.launch 之前**落盘——mode 是 run 的初始条件，不是事后
+        # 补丁；否则 run task 可能先于该事件到达工具执行点（先 launch 后切
+        # mode 的竞态，写工具在 NORMAL 档下放行）。None = 不写（既有行为
+        # 逐字不变）。
+        workflow_mode: WorkflowMode | None = None,
         remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
@@ -1940,6 +1946,7 @@ class SessionService:
             interactive=interactive,
             approval_callback=approval_callback,
             launch=launch,
+            workflow_mode=workflow_mode,
             fuse=fuse,
             launch_budget=launch_budget,
             remember_as_procedural_rule=remember_as_procedural_rule,
@@ -1958,6 +1965,7 @@ class SessionService:
         interactive: bool,
         approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
         launch: bool,
+        workflow_mode: WorkflowMode | None,
         fuse: LocalFuse,
         launch_budget: LaunchRunBudget,
         remember_as_procedural_rule: bool,
@@ -1972,6 +1980,14 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
+
+            # #1193：初始工作流档在**任何 launch 之前**落盘——plan 档是 run
+            # 的初始条件（工具门禁每次调用现派生 effective_workflow_mode）。
+            # 此前该写入由调用方在 create_and_launch 返回后补做，run task 可
+            # 先于它到达工具执行点（先 launch 后切 mode 的竞态）。launch=False
+            # 的只建会话路径同样落盘（调用方声明了初始档就必须是事实）。
+            if workflow_mode is not None:
+                append_workflow_mode_change(session, workflow_mode)
 
             # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
             # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
