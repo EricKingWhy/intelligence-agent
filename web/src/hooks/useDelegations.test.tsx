@@ -163,8 +163,35 @@ describe('#1256 useDelegations', () => {
     expect(current).toEqual([done]);
   });
 
-  it('读失败 → 空 roster（不伪造行）', async () => {
-    H.getSessionDelegations.mockRejectedValue(new Error('boom'));
+  it('同会话 status 翻转重拉期间保留旧行（不清空 ⇒ roster 触发器/面板不闪退）', async () => {
+    H.getSessionDelegations.mockResolvedValueOnce([entry('c1')]);
+    let conv = conversation(['c1']);
+    await act(async () => { root.render(<Harness sessionId={SID} conv={conv} />); });
+    await flush();
+    const before = current;
+    expect(before).toEqual([entry('c1')]);
+
+    // 签名变化（finished）但新请求挂起：旧行必须仍在——切会话清空逻辑不得误伤同会话翻转。
+    let resolveNext: (rows: DelegationEntry[]) => void = () => {};
+    H.getSessionDelegations.mockReturnValueOnce(
+      new Promise<DelegationEntry[]>((res) => { resolveNext = res; }),
+    );
+    const done = entry('c1');
+    done.status = 'completed';
+    conv = applyEvent(conv, ev({
+      type: EventType.AGENT_DELEGATION_FINISHED, seq: 5,
+      data: { child_session_id: 'c1', status: 'completed', summary: 'done' },
+    }));
+    await act(async () => { root.render(<Harness sessionId={SID} conv={conv} />); });
+    await flush();
+    expect(current).toEqual(before); // 仍是旧行，未被清空
+
+    await act(async () => { resolveNext([done]); });
+    await flush();
+    expect(current).toEqual([done]);
+  });
+
+  it('读失败 → 空 roster（不伪造行）', async () => {    H.getSessionDelegations.mockRejectedValue(new Error('boom'));
     await act(async () => { root.render(<Harness sessionId={SID} conv={conversation(['c1'])} />); });
     await flush();
     expect(current).toEqual([]);

@@ -46,11 +46,9 @@ if TYPE_CHECKING:
     from agent_harness.web.app import AppState
 
 # 「把在途委派翻 stopped」的触发事件集 = run 终态（RUN_TERMINAL_TYPES，单一事实源，§9.5）
-# ∪ run/paused。paused **不是** run 终态（event.py:40-42 明示），但前端投影
-# projectRunPaused（projection.ts:1159）同样走 finalizeRun（:2168-2215）把 running
-# 委派一并翻 stopped（:2204-2208）⇒ roster 判据必须与投影同源。仓库既有同构先例：
-# session/interrupt.py:83 与 session/fork.py:156 的
-# ``event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED``。
+# ∪ run/paused。paused **不是** run 终态，但前端投影的 projectRunPaused 同样走 finalizeRun
+# 把 running 委派一并翻 stopped ⇒ roster 判据必须与投影同源。仓库既有同构先例：
+# session/interrupt.py 与 session/fork.py 均写 ``event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED``。
 _STOPPED_RUN_TRIGGERS = RUN_TERMINAL_TYPES | {RUN_PAUSED}
 
 
@@ -162,7 +160,7 @@ async def _attach_usage(
     """
     child_id = entry["child_session_id"]
     # P3-2 纵深：父日志 data 里的 child_session_id 此前只做过 isinstance 检查就进
-    # read_events → _events_path（store.py:288-292 无净化）——含 ``../`` 会读到
+    # read_events（其内部经 store 的 _events_path 拼路径，无净化）——含 ``../`` 会读到
     # store 根之外。非法 id ⇒ 用量如实 no_data（roster 行照列，不 brick 整张表）。
     try:
         validate_session_id(child_id)
@@ -170,8 +168,8 @@ async def _attach_usage(
         entry["used_tokens"] = 0
         entry["usage_state"] = "no_data"
         return
-    # P3-1：与 context-usage 端点同源（app.py:3599-3609）——优先在途 run 的 live
-    # builder 快照（→ ok 精确值）；run 已收口才退 context_snapshots 缓存；都没有
+    # P3-1：与 context-usage 端点同源（同一个 run 的 builder + registry）——优先在途 run
+    # 的 live builder 快照（→ ok 精确值）；run 已收口才退 context_snapshots 缓存；都没有
     # 才按事件流落 usage_only/no_data。roster 的运行中行与看板数值必须同源（AC2）。
     builder_snapshot: dict[str, Any] | None = None
     tool_definitions: list[dict[str, Any]] = []

@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Bot, ChevronDown, ChevronRight, X } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, Square, X } from 'lucide-react';
 import type { ConversationState } from '../types';
 import type { DelegationEntry } from '../lib/api';
 import type { TraceDensity } from '../lib/density';
@@ -23,9 +23,10 @@ import type { Disclosure } from '../lib/disclosure';
 import type { ReasoningDisclosureApi } from './ReasoningBlock';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { formatCoarseDuration } from '../lib/format';
+import { DELEGATION_STATUS_CLASS } from '../lib/delegationStatus';
 import { Conversation } from './Conversation';
 
-/** 委派四态 → 中文标签（与 DelegationNode 的 STATUS_CLASS 同语义）。 */
+/** 委派四态 → 中文标签（状态色 class 后缀走 lib/delegationStatus 单一事实源）。 */
 const STATUS_LABEL: Record<DelegationEntry['status'], string> = {
   running: '运行中',
   completed: '完成',
@@ -42,20 +43,28 @@ export function formatTokenCount(n: number): string {
 }
 
 /** 诚实口径（issue §6.1 / AC6）：usage_state 非 ok 时标注「估算」/「无数据」，
- *  不把下界或无数据当精确值卖（PRODUCT「真实优先于好看」）。 */
-export function tokenText(entry: DelegationEntry): string {
-  if (entry.usage_state === 'no_data') return '无数据';
-  const base = `${formatTokenCount(entry.used_tokens)} tok`;
-  return entry.usage_state === 'usage_only' ? `${base} · 估算` : base;
+ *  不把下界或无数据当精确值卖（PRODUCT「真实优先于好看」）。
+ *  唯一实现——roster 行与分栏头共用（分栏不为此造一个假 DelegationEntry）。 */
+export function tokenText(
+  usedTokens: number,
+  usageState: DelegationEntry['usage_state'],
+): string {
+  if (usageState === 'no_data') return '无数据';
+  const base = `${formatTokenCount(usedTokens)} tok`;
+  return usageState === 'usage_only' ? `${base} · 估算` : base;
 }
 
-/** 耗时：running 用「已运行 起点→now」，其余用「起点→终点」；缺失/倒挂不显数字。 */
+/** 耗时：running 用「已运行 起点→now」，其余用「起点→终点」；缺失/倒挂不显数字。
+ *  不足 1 秒也不显——真实链路 started/finished 同刻落盘（阻塞串行委派，
+ *  `multiagent/tools.py` 明示），差值为 0 ⇒ 「耗时 0秒」是假精度。 */
 export function durationText(entry: DelegationEntry, now: number): string | null {
   if (!entry.started_at) return null;
   const start = new Date(entry.started_at).getTime();
   const end = entry.completed_at ? new Date(entry.completed_at).getTime() : now;
+  const ms = end - start;
+  if (!Number.isFinite(ms) || ms < 1000) return null;
   const label = entry.status === 'running' ? '运行' : '耗时';
-  const value = formatCoarseDuration(end - start);
+  const value = formatCoarseDuration(ms);
   return value === null ? null : `${label} ${value}`;
 }
 
@@ -166,7 +175,7 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
                 </div>
                 <div className="agent-stats">
                   <span className="status-word">{STATUS_LABEL[d.status]}</span>
-                  <span>{tokenText(d)}</span>
+                  <span>{tokenText(d.used_tokens, d.usage_state)}</span>
                   {duration && <span>{duration}</span>}
                 </div>
                 <button
@@ -217,14 +226,6 @@ interface SplitPaneProps {
   onClose: () => void;
 }
 
-/** 委派状态 → DelegationNode 的状态色（completed→success 共享同一组状态色）。 */
-const PILL_CLASS: Record<DelegationEntry['status'], string> = {
-  running: 'running',
-  completed: 'success',
-  failed: 'failed',
-  stopped: 'stopped',
-};
-
 /** 右侧分栏：子智能体的完整会话（复用 Conversation 同一渲染器，不建第二套）。
  *  分栏是**独立选择态**——不改变主会话当前路由，父会话（左列）原样保持。 */
 export function SubagentSplitPane({
@@ -236,21 +237,20 @@ export function SubagentSplitPane({
   reasoningDisclosure,
   onClose,
 }: SplitPaneProps) {
+  // Esc 关闭此前挂在 <aside> 上，但 aside 不可聚焦 ⇒ 打开后键盘用户须先聚焦内部按钮
+  // 才生效。挂载即聚焦托盘（tabIndex=-1 容器），Esc 立刻可用（Correctness P3）。
+  const paneRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    paneRef.current?.focus();
+  }, []);
   // 票面 §5.2 分栏头：[关闭×][状态 pill][子智能体标题][child id 短码]
-  // [`12.4K tok · 运行中`]。token 行走 tokenText 诚实口径（usage_only 标「估算」、
-  // no_data 显「无数据」），不把下界当精确值卖。
-  const usageLine = `${tokenText({
-    child_session_id: child.childSessionId,
-    target: child.target,
-    task: '',
-    status: child.status,
-    started_at: null,
-    completed_at: null,
-    used_tokens: child.used_tokens,
-    usage_state: child.usage_state,
-  })} · ${STATUS_LABEL[child.status]}`;
+  // [`12.4K tok · 运行中`]。token 走 tokenText 诚实口径（usage_only 标「估算」、
+  // no_data 显「无数据」），与 roster 行同一实现。
+  const usageLine = `${tokenText(child.used_tokens, child.usage_state)} · ${STATUS_LABEL[child.status]}`;
   return (
     <aside
+      ref={paneRef}
+      tabIndex={-1}
       className="subagent-split-pane"
       aria-label={`子会话 · ${child.target || child.childSessionId}`}
       onKeyDown={(e) => {
@@ -265,10 +265,15 @@ export function SubagentSplitPane({
           <X size={15} />
         </button>
         <span
-          className={`split-status-pill act-status act-status-${PILL_CLASS[child.status]}`}
-          aria-label={STATUS_LABEL[child.status]}
+          className={`act-status act-status-${DELEGATION_STATUS_CLASS[child.status]}`}
+          aria-hidden="true"
           title={STATUS_LABEL[child.status]}
-        />
+        >
+          {child.status === 'completed' && <Check size={14} />}
+          {child.status === 'failed' && <X size={14} />}
+          {child.status === 'stopped' && <Square size={14} />}
+          {child.status === 'running' && <span className="status-spinner" />}
+        </span>
         <span className="split-title">{child.target || '子智能体'}</span>
         <span className="split-subtitle" title={`child session ${child.childSessionId}`}>
           {child.childSessionId.slice(0, 8)}

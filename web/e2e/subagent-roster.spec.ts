@@ -92,9 +92,9 @@ test('#1256 AC：chevron → 右栏打开完整子会话，**父会话保持不�
   await expect(pane).toBeVisible();
   await expect(pane.locator('.split-title')).toHaveText('research_review');
   await expect(pane.locator('.split-subtitle')).toHaveText(CHILD.slice(0, 8));
-  // 票面 §5.2 分栏头：状态 pill + `12.8K tok · 估算 · 完成`（诚实口径）。
-  await expect(pane.locator('.split-status-pill')).toBeVisible();
-  await expect(pane.locator('.split-status-pill')).toHaveAttribute('aria-label', '完成');
+  // 票面 §5.2 分栏头：状态 pill（图标+状态色）+ `12.8K tok · 估算 · 完成`（诚实口径）。
+  await expect(pane.locator('.subagent-split-head .act-status')).toBeVisible();
+  await expect(pane.locator('.subagent-split-head .act-status')).toHaveClass(/act-status-success/);
   await expect(pane.locator('.split-usage')).toHaveText('12.8K tok · 估算 · 完成');
 
   // 父会话保持不动：布局进 with-split，主列仍在、父会话工具栏/对话流仍渲染

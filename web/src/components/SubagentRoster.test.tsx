@@ -52,15 +52,15 @@ describe('#1256 token 缩写（dsh 口径）', () => {
 
 describe('#1256 tokenText — 诚实口径（AC6）', () => {
   it('ok → 精确值，无标注', () => {
-    expect(tokenText(entry({ usage_state: 'ok', used_tokens: 12_842 }))).toBe('12.8K tok');
+    expect(tokenText(12_842, 'ok')).toBe('12.8K tok');
   });
 
   it('usage_only → 标「估算」（事件流下界，不当下确值卖）', () => {
-    expect(tokenText(entry({ usage_state: 'usage_only', used_tokens: 12_842 }))).toBe('12.8K tok · 估算');
+    expect(tokenText(12_842, 'usage_only')).toBe('12.8K tok · 估算');
   });
 
   it('no_data → 「无数据」（不显 0 tok 假象）', () => {
-    expect(tokenText(entry({ usage_state: 'no_data', used_tokens: 0 }))).toBe('无数据');
+    expect(tokenText(0, 'no_data')).toBe('无数据');
   });
 });
 
@@ -92,6 +92,11 @@ describe('#1256 durationText — 四态耗时', () => {
 
   it('时钟倒挂（end < start）→ null（与 formatCoarseDuration 同口径）', () => {
     const e = entry({ started_at: '2026-10-16T00:12:18.000Z', completed_at: '2026-10-16T00:00:00.000Z' });
+    expect(durationText(e, NOW)).toBeNull();
+  });
+
+  it('不足 1 秒（started==completed，阻塞串行委派同刻落盘）→ null（不显「耗时 0秒」假精度）', () => {
+    const e = entry({ started_at: '2026-10-16T00:00:00.000Z', completed_at: '2026-10-16T00:00:00.400Z' });
     expect(durationText(e, NOW)).toBeNull();
   });
 });
@@ -265,7 +270,7 @@ describe('#1256 SubagentSplitPane', () => {
     expect(host.querySelector('.subagent-split-status')?.textContent).toContain('网络错误');
   });
 
-  it('正常 → 分栏带 aria-label 与关闭按钮（父会话保持不动）', () => {
+  it('正常 → 分栏带 aria-label 与关闭按钮（点关闭回调）', () => {
     const onClose = vi.fn();
     render(
       <SubagentSplitPane
@@ -282,7 +287,7 @@ describe('#1256 SubagentSplitPane', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('分栏头：状态 pill + `12.8K tok · 完成` 行（票面 §5.2）', () => {
+  it('分栏头：状态 pill（图标+状态色）+ `12.8K tok · 完成` 行（票面 §5.2）', () => {
     render(
       <SubagentSplitPane
         child={child()}
@@ -292,10 +297,11 @@ describe('#1256 SubagentSplitPane', () => {
         onClose={NOOP}
       />,
     );
-    const pill = host.querySelector('.split-status-pill');
+    const pill = host.querySelector('.subagent-split-head .act-status');
     expect(pill).not.toBeNull();
-    expect(pill?.getAttribute('aria-label')).toBe('完成');
+    expect(pill?.getAttribute('aria-hidden')).toBe('true'); // 装饰：状态词在 .split-usage 文本行
     expect(pill?.className).toContain('act-status-success'); // completed→success 同状态色
+    expect(pill?.querySelector('svg')).not.toBeNull(); // 有状态图标，非空色点
     expect(host.querySelector('.split-usage')?.textContent).toBe('12.8K tok · 完成');
   });
 
@@ -309,7 +315,7 @@ describe('#1256 SubagentSplitPane', () => {
         onClose={NOOP}
       />,
     );
-    expect(host.querySelector('.split-status-pill')?.className).toContain('act-status-running');
+    expect(host.querySelector('.subagent-split-head .act-status')?.className).toContain('act-status-running');
     expect(host.querySelector('.split-usage')?.textContent).toBe('613.0K tok · 估算 · 运行中');
   });
 });

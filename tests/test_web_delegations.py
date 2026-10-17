@@ -21,6 +21,7 @@ from agent_harness.session.event import (
     MODEL_COMPLETED,
     RUN_INTERRUPTED,
     RUN_PAUSED,
+    RUN_RESUMED,
     USER_MESSAGE,
     SessionEvent,
 )
@@ -140,14 +141,86 @@ def test_delegations_stopped_on_run_interrupt(tmp_path) -> None:
 def test_delegations_stopped_on_run_pause(tmp_path) -> None:
     """父 run 暂停、委派未回填 finished ⇒ stopped + completed_at = 暂停事件 time。
 
-    paused 不是 run 终态（event.py:40-42），但**前端投影** projectRunPaused 同样把
-    在途委派翻 stopped（finalizeRun 共用清扫），roster 判据必须与投影同源——仓库既有
-    同构先例：session/interrupt.py 与 session/fork.py 的
+    paused 不是 run 终态（不在 RUN_TERMINAL_TYPES），但**前端投影** projectRunPaused
+    同样把在途委派翻 stopped（finalizeRun 共用清扫），roster 判据必须与投影同源——
+    仓库既有同构先例：session/interrupt.py 与 session/fork.py 的
     ``event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED``。"""
     trigger = _seed(tmp_path, finish=False, paused=True)
     entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
     assert entry["status"] == "stopped"
     assert entry["completed_at"] == trigger.time
+
+
+def _seed_pause_resume_finish(tmp_path) -> SessionEvent:
+    """父 run 暂停（→ 在途委派会被判 stopped）后**又**回填 finished：finished 必须
+    覆盖 stopped 判定（终态条目不得被 stop 清扫误翻）。"""
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    async def _run() -> SessionEvent:
+        parent = Session.start(store, session_id="p")
+        Session.start(store, session_id="c1")
+        parent.append(AGENT_DELEGATION_STARTED, {
+            "target": "coding", "task": "t", "child_session_id": "c1"})
+        parent.append(RUN_PAUSED, {"reason": "budget_exhausted"})
+        parent.append(RUN_RESUMED, {"reason": "user"})
+        return parent.append(AGENT_DELEGATION_FINISHED, {
+            "target": "coding", "child_session_id": "c1",
+            "status": "completed", "summary": "恢复后完成"})
+
+    return asyncio.run(_run())
+
+
+def test_delegations_finished_after_pause_overrides_stopped(tmp_path) -> None:
+    """finish 覆盖 stop：暂停后又完成 ⇒ completed（唯一真终点 = finished time），
+    不被「暂停后仍在途」的 stopped 清扫误翻（Correctness P3 交互缺口）。"""
+    fin = _seed_pause_resume_finish(tmp_path)
+    entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
+    assert entry["status"] == "completed"
+    assert entry["completed_at"] == fin.time
+    assert entry["summary"] == "恢复后完成"
+
+
+def test_delegations_stop_trigger_before_start_does_not_stop(tmp_path) -> None:
+    """停止触发落在 delegation-started **之前** ⇒ 不得把之后的在途委派翻 stopped
+    （判据是「start 之后的第一条触发」，不是任意触发）。"""
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    async def _run() -> None:
+        parent = Session.start(store, session_id="p")
+        Session.start(store, session_id="c1")
+        parent.append(RUN_PAUSED, {"reason": "older_run"})
+        parent.append(AGENT_DELEGATION_STARTED, {
+            "target": "coding", "task": "t", "child_session_id": "c1"})
+
+    asyncio.run(_run())
+    entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
+    assert entry["status"] == "running"
+    assert entry["completed_at"] is None
+
+
+def test_delegations_multiple_stop_triggers_freezes_first(tmp_path) -> None:
+    """多条停止触发 ⇒ completed_at 冻结在 start 之后**第一条**（不是最后一条）。"""
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    async def _run() -> SessionEvent:
+        parent = Session.start(store, session_id="p")
+        Session.start(store, session_id="c1")
+        parent.append(AGENT_DELEGATION_STARTED, {
+            "target": "coding", "task": "t", "child_session_id": "c1"})
+        first = parent.append(RUN_INTERRUPTED, {"reason": "killed"})
+        parent.append(RUN_PAUSED, {"reason": "budget_exhausted"})
+        return first
+
+    first = asyncio.run(_run())
+    entry = _one(_client(tmp_path).get("/api/sessions/p/delegations").json())
+    assert entry["status"] == "stopped"
+    assert entry["completed_at"] == first.time
 
 
 def test_delegations_usage_only_from_child_events(tmp_path) -> None:
@@ -293,10 +366,26 @@ def test_delegations_prefers_live_builder_snapshot_over_events(tmp_path, monkeyp
     assert entry["used_tokens"] == 4000 + 1000 + 200 + 100
 
 
+def test_delegations_falls_back_to_context_snapshots(tmp_path) -> None:
+    """Correctness P3-1 回退分支：无在途 run（已收口）⇒ 退 context_snapshots 缓存
+    （→ state ok 精确值），与 context-usage 端点同源；不被事件流降级成 usage_only。"""
+    _seed(tmp_path, child_usage={"prompt_tokens": 12842, "total_tokens": 13000})
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    # create_app 后 run_manager.get_active 天然为 None ⇒ 走缓存回退分支。
+    app.state.agent.context_snapshots["c1"] = (
+        {"messages": 3000, "system_prompt": 500, "skills": 0, "other": 0},
+        [],
+    )
+    entry = _one(TestClient(app).get("/api/sessions/p/delegations").json())
+    assert entry["usage_state"] == "ok"
+    assert entry["used_tokens"] == 3000 + 500
+
+
 def test_delegations_child_id_traversal_is_neutralized(tmp_path) -> None:
     """Correctness P3-2：父日志 data 里的 child_session_id 只做过 isinstance 检查就进
-    read_events → _events_path（store.py:288-292 无净化）——含 ../ 的穿越 id 不得读到
-    store 根之外的 decoy 日志（usage_state 如实 no_data，不 brick 整张 roster）。"""
+    read_events（其内部经 store 的 ``_events_path`` 拼路径，无净化）——含 ../ 的穿越 id
+    不得读到 store 根之外的 decoy 日志（usage_state 如实 no_data，不 brick 整张 roster）。"""
     # decoy 放在 store 根（<workspace>/sessions）的**上一级**："../evil" 从 sessions/
     # 出发正好落到 <workspace>/evil（store._events_path 实测为
     # `<workspace>/sessions/../evil/events.jsonl`）。

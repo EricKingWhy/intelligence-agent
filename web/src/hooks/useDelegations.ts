@@ -20,7 +20,9 @@ export function useDelegations(
 
   /** 父流委派状态签名：started 出现、finished 到达（status 翻转）都改变它。
    *  只数投影里的委派（O(turns)），**不扫全量 events**——流式期间每个 delta 都会
-   *  重算，全量 filter 会随事件数线性变贵。 */
+   *  重算，全量 filter 会随事件数线性变贵。
+   *  隐含契约：roster 行由后端 /delegations 给出，与本签名的投影 status **同源**
+   *  （同一父事件流派生，不变量 #22）⇒ status 翻转必然改变签名、触发重拉。 */
   const signature = useMemo(() => {
     const parts: string[] = [];
     for (const turn of conversation?.turns ?? []) {
@@ -31,14 +33,16 @@ export function useDelegations(
     return parts.join('|');
   }, [conversation]);
 
+  // 切会话先清旧行：新响应 resolve 前旧行仍属上一个会话，是短暂的跨会话第二真相。
+  // **只依赖 sessionId**——若并入下方拉取 effect（依赖含 signature），同会话内的状态
+  // 翻转也会清空 ⇒ roster 触发器/面板整体卸载（open 本地态丢失）再重挂，闪一下。
   useEffect(() => {
-    if (!sessionId) {
-      setEntries([]);
-      return;
-    }
-    let alive = true;
-    // 切会话先清旧行：新响应 resolve 前旧行仍属上一个会话，是短暂的跨会话第二真相。
     setEntries([]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let alive = true;
     getSessionDelegations(sessionId)
       .then((rows) => {
         // 非数组形态（老后端 / 代理回整块对象 / 测试桩回 `{}`）= 拿不到 roster ⇒
