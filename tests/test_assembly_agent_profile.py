@@ -145,6 +145,23 @@ async def test_root_coding_runtime_can_opt_in_to_constraint_tools(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_root_coding_runtime_injects_the_configured_ask_user_timeout(tmp_path):
+    """#1284 P2-1：coding profile 的补注册分支也必须注入 settings 的超时档。
+
+    该分支在收窄后重新注册 `ask_user`；漏传 `timeout_seconds=` 会静默回落工具缺省
+    300，60/600 部署下卡片数字立刻错（#1224 复审 P2-1 的第二处）。
+    """
+    runtime = await _build_runtime(
+        tmp_path, agent_profile="coding", include_constraint_tools=True,
+        ask_user_question_timeout=600,
+    )
+    ask_user = next(
+        tool for tool in runtime.registry.list() if tool.name == "ask_user"
+    )
+    assert ask_user._timeout_seconds == 600
+
+
+@pytest.mark.asyncio
 async def test_build_runtime_none_profile_no_system_prompt(tmp_path):
     """agent_profile=None → ContextBuilder.system_prompt 是 None（向后兼容）。"""
     runtime = await _build_runtime(tmp_path, agent_profile=None)

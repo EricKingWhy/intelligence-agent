@@ -116,6 +116,7 @@ function TaskCreationForm({
   const [pending, setPending] = useState(false);
   // #1177 §B：高级设置默认折叠（任务描述是唯一主视觉）。
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [pathExpanded, setPathExpanded] = useState(false);
 
   const promptValid = prompt.trim().length > 0;
 
@@ -192,14 +193,31 @@ function TaskCreationForm({
         在项目「{project.title}」里开一个新任务，创建即启动。
       </Dialog.Description>
 
-      {/* #1177 §B：路径明示行**收窄为单行**（安全责任保留，但不抢正文注意力）。
-          路径动态取项目 cwd，过长按 CSS 省略、完整值进 title。 */}
-      <div className="project-path-callout" role="note" title={project.path}>
+      {/* #1177 §B：保留紧凑单行提示；完整 cwd 通过按需展开入口核验。 */}
+      <div className="project-path-callout" role="group" aria-label="项目工作目录">
         <TriangleAlert size={13} aria-hidden="true" />
         <span className="project-path-callout-text">
           Agent 将直接读写该目录：
           <span className="project-path-callout-path mono">{project.path}</span>
         </span>
+        <button
+          type="button"
+          className="project-path-callout-toggle"
+          aria-expanded={pathExpanded}
+          aria-controls="project-path-full"
+          aria-label={pathExpanded ? '收起完整项目路径' : '查看完整项目路径'}
+          onClick={() => setPathExpanded((value) => !value)}
+          disabled={pending}
+        >
+          {pathExpanded ? '收起' : '查看路径'}
+        </button>
+        <code
+          id="project-path-full"
+          className="project-path-callout-full-path mono"
+          hidden={!pathExpanded}
+        >
+          {project.path}
+        </code>
       </div>
 
       {/* prompt：唯一必填项，#1177 §B 的唯一主视觉（多行文本框） */}

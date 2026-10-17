@@ -159,8 +159,8 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 **端点：`POST /api/sessions/{id}/forks`**
 
 ```json
-// Request body
-{"from_seq": 42}
+// Request body（sandbox_backend 可选，见 as-built 注）
+{"from_seq": 42, "sandbox_backend": "local"}
 
 // Response (200)
 {"session_id": "sess-new-xxx", "from_seq": 42}
@@ -173,7 +173,8 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 > 锚点非法 → 422。HTTP 端点**不生成 tail summary**（无模型调用，确定性）；CLI
 > `/fork`（`demo/live_agent.py`）省略 `from_seq` 时取**最近一个合法切点**，tail 摘要
 > 默认开启（`TailSummarizer`，失败自动降级不挂接）。child 继承父会话当前模型
-> （seed 不含父 `session/started`，后端补一条 `model/changed`）。
+> （seed 不含父 `session/started`，后端补一条 `model/changed`）。`sandbox_backend`
+> 可选：child 缺省继承父显式 sandbox 后端；显式传值优先（#1278）。
 
 ### 2.5 崩溃恢复事件 (#138)
 

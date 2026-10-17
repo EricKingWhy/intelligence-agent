@@ -173,6 +173,7 @@ from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
+    sandbox_unavailable_http_error,
     storage_http_error,
     storage_http_status,
 )
@@ -220,10 +221,11 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
 
 
 class _AmendValueValidators(BaseModel):
-    """amend 字段的静态取值校验（三个请求体共用一份，ADR-0020b / ADR-0021）。
+    """amend 字段的静态取值校验（多个请求体共用一份，ADR-0020b / ADR-0021）。
 
     ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
-    SendMessageRequest），校验逻辑只写一遍——三个入口对同一份取值集合负责。
+    SendMessageRequest / ForkRequest）——每个校验器只写一遍，子类按需声明
+    （ForkRequest 只声明 ``sandbox_backend``）。
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
@@ -2401,6 +2403,11 @@ def create_app(
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # #1256 子智能体 roster 路由（独立 router 文件——只读数据面，投影单源在父事件流）
+    from agent_harness.web.delegations import register_delegation_routes
+
+    register_delegation_routes(app, validate_session_id=validate_session_id)
+
     # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
     # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
     from agent_harness.web.task_delivery import register_task_routes
@@ -2935,15 +2942,14 @@ def create_app(
                 auto_approve=auto_approve,
                 amend=AmendOptions.from_request(req),
                 launch=launch,
+                # #1193：plan 档作为**初始条件**随创建落盘（在 launch 之前），
+                # 不再创建后补切——否则 run task 可先于 mode 事件到达工具执行
+                # 点，写工具在 NORMAL 档下放行（先 launch 后切 mode 的竞态）。
+                workflow_mode=WorkflowMode.PLAN if workflow_mode_plan else None,
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
                 # #363 / W-19：显式 sandbox 后端选择。
                 sandbox_backend=req.sandbox_backend,
             )
-            # #367 / W-23 选项 A："plan" 档：创建后切 workflow_mode=plan
-            #（计划闸门 W-07：先出计划、用户批准后执行）。
-            if workflow_mode_plan:
-                await service.set_workflow_mode(
-                    result.session.session_id, WorkflowMode.PLAN)
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
         except UnsupportedReasoningEffort as e:
@@ -2957,21 +2963,8 @@ def create_app(
         except SandboxUnavailableError as e:
             # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
             # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": str(e),
-                    "backend": e.backend,
-                    "reason": e.reason,
-                    "details": e.details,
-                    "remediation": e.remediation,
-                    "available_backends": [
-                        c.backend
-                        for c in probe_all_capabilities()
-                        if c.available
-                    ],
-                },
-            ) from e
+            # `#1278`：同一份构造与 fork 端点共用（`web/domain_errors.py`）。
+            raise sandbox_unavailable_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 

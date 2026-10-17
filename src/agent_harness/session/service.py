@@ -122,7 +122,8 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.ask_user_timeout import (
     ExpireOutcome,
-    ask_user_timeout_message,
+    ask_user_timeout_message_for_minutes,
+    ask_user_timeout_minutes_from_payload,
     latest_pending_input_request,
     pending_ask_user_request_id,
     pending_input_request,
@@ -852,7 +853,15 @@ def _ask_user_input_answer_data(
         ):
             return None, True
         return {
-            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            # #1284 P2-2：注入消息读**请求载荷快照**（`timeout_seconds` /
+            # `timeout_minutes`），不读活的 `self._settings`——配置改动并重启后，旧请求
+            # 的卡片数字与这条消息必须仍是同一个数。只有 #1224 之前的旧事件回落到
+            # `ask_user_timeout_seconds`（调用方传的当前配置）。
+            "content": ask_user_timeout_message_for_minutes(
+                ask_user_timeout_minutes_from_payload(
+                    request.data, fallback_seconds=ask_user_timeout_seconds,
+                )
+            ),
             "input_request_id": request_id,
             "input_request_answer": normalized_timeout,
         }, False
@@ -1650,6 +1659,12 @@ class SessionService:
         auto_approve: bool = False,
         amend: AmendOptions | None = None,
         launch: bool = True,
+        # #1193：创建时声明的初始工作流档（plan 档 = 只读计划模式）。**在
+        # RunManager.launch 之前**落盘——mode 是 run 的初始条件，不是事后
+        # 补丁；否则 run task 可能先于该事件到达工具执行点（先 launch 后切
+        # mode 的竞态，写工具在 NORMAL 档下放行）。None = 不写（既有行为
+        # 逐字不变）。
+        workflow_mode: WorkflowMode | None = None,
         remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
@@ -1920,6 +1935,7 @@ class SessionService:
             interactive=interactive,
             approval_callback=approval_callback,
             launch=launch,
+            workflow_mode=workflow_mode,
             fuse=fuse,
             launch_budget=launch_budget,
             remember_as_procedural_rule=remember_as_procedural_rule,
@@ -1938,6 +1954,7 @@ class SessionService:
         interactive: bool,
         approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
         launch: bool,
+        workflow_mode: WorkflowMode | None,
         fuse: LocalFuse,
         launch_budget: LaunchRunBudget,
         remember_as_procedural_rule: bool,
@@ -1952,6 +1969,14 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
+
+            # #1193：初始工作流档在**任何 launch 之前**落盘——plan 档是 run
+            # 的初始条件（工具门禁每次调用现派生 effective_workflow_mode）。
+            # 此前该写入由调用方在 create_and_launch 返回后补做，run task 可
+            # 先于它到达工具执行点（先 launch 后切 mode 的竞态）。launch=False
+            # 的只建会话路径同样落盘（调用方声明了初始档就必须是事实）。
+            if workflow_mode is not None:
+                append_workflow_mode_change(session, workflow_mode)
 
             # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
             # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
@@ -6441,13 +6466,17 @@ class SessionService:
         return True, meta_tcid == record.tool_call_id, False
 
     async def fork(
-        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
+        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False,
+        sandbox_backend: str | None = None,
     ) -> str:
         """从 ``from_seq``（用户消息 seq）派生 child session，返回其 id（PRD §2.4）。
 
         复用 ``fork.py``，不重写。在途 run 拒绝（ActiveRunConflict），锚点非法
         → InvalidForkBoundary。HTTP 端点默认不生成 tail summary（无模型调用，
         确定性；CLI ``fork`` 仍可显式开启）。
+
+        ``sandbox_backend``（`#1278`）：None = 继承父会话显式选择（父没选 ⇒
+        部署默认）；显式值优先。透传给 ``fork_session``，本层不另造语义。
 
         child 继承父会话的当前模型：fork seed 按设计不含父 ``session/started``，
         不补一条 ``model/changed`` 的话，父创建时选的 catalog 模型会在 child 静默
@@ -6476,6 +6505,8 @@ class SessionService:
                 session_id,
                 boundary_user_message_seq=from_seq,
                 workspace_registry=self._workspace_registry,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=sandbox_backend,
                 with_tail_summary=with_tail_summary,
                 # `#318`：fork 谱系读父账行（只读；父零写入）。
                 budget_ledger=self._stores.delegation_tree_ledger,

@@ -191,6 +191,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* #1193：带动作的 app-error 变体（plan-stuck 横幅：可读原因 + 退出 plan 按钮）。
+   布局同 .app-notice 的 flex 行；配色/字色不新增 token——直接继承 .app-error
+   （#1136 对比度实测族内成员），按钮复用 .recover-btn（同为 #1136 实测族）。
+   错误文案折行时按钮不缩：flex-shrink 只作用在文本 span 上。 */
+.app-error-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+.app-error-action > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* #367 P3：worktree 自动创建的信息横幅（app-error 同型，信息级配色，可关闭）。 */
 .app-notice {
   display: flex;
@@ -1392,9 +1407,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── WS-6 / #169：在此项目中新建任务（确认面）──
  *  路径明示行承担"你正在把哪个目录交给 agent"的确认责任（敏感操作知情），
  *  #1177 §B 起**收窄为单行**：任务描述才是唯一主视觉，这条不再抢正文注意力。
- *  路径动态取项目 cwd；过长时整行省略，完整值进 `title`。 */
+ *  路径动态取项目 cwd；默认紧凑显示，并提供键盘可达的完整路径展开入口。 */
 .project-path-callout {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 7px var(--space-sm);
@@ -1420,6 +1436,29 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .project-path-callout-path {
   margin-left: 2px;
   font-weight: 600;
+  color: var(--text-primary);
+}
+.project-path-callout-toggle {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.project-path-callout-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.project-path-callout-full-path {
+  flex-basis: 100%;
+  min-width: 0;
+  margin-left: 19px;
+  overflow-wrap: anywhere;
   color: var(--text-primary);
 }
 
@@ -7513,6 +7552,9 @@ button.json-row {
   padding: 5px 9px;
   font-size: 12.5px;
 }
+.budget-picker-content--v2 .composer-budget-input::placeholder {
+  color: var(--text-tertiary);
+}
 .budget-picker-content--v2 .budget-picker-unit {
   flex: none;
   font-size: 12px;
@@ -9576,4 +9618,283 @@ button.json-row {
   margin: 0;
   font-size: var(--text-xs);
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+}
+
+/* ══ #1256 子智能体可见性：顶栏 roster + 右侧分栏 ══
+ * 视觉世界沿用本仓 token（index.css 双主题），结构/层级对标
+ * docs/ux-mockups/2026-10-16-subagent-visibility/mockup.html。
+ * 状态点四色**与 DelegationNode（.act-status-*）同源**（AC2）：
+ * completed=success / failed=danger / running=warning / stopped=text-tertiary。 */
+
+.roster-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.agent-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.agent-trigger:hover,
+.agent-trigger.open {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.roster-stack {
+  display: inline-flex;
+  align-items: center;
+}
+.mini-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: -5px;
+  border: 1.5px solid var(--bg-app);
+  border-radius: var(--radius-full);
+  background: var(--surface-elevated);
+  color: var(--text-tertiary);
+}
+.mini-avatar:first-child {
+  margin-left: 0;
+}
+.mini-avatar.running {
+  color: var(--warning);
+}
+.roster-label {
+  white-space: nowrap;
+}
+.roster-running-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--warning) 24%, transparent);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-trigger .chev {
+  transition: transform 0.18s ease;
+}
+.agent-trigger.open .chev {
+  transform: rotate(180deg);
+}
+
+/* 下拉浮层：右对齐锚在触发器下（顶栏内，z 高于会话区）。 */
+.roster {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(420px, calc(100vw - 40px));
+  overflow: hidden;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.roster-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+.roster-head small {
+  color: var(--text-tertiary);
+}
+.roster-head .quiet {
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.roster-head .quiet:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.agent-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto 22px;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  cursor: pointer;
+}
+.agent-row:hover {
+  background: var(--surface-hover);
+}
+.roster-status {
+  display: block;
+  width: 8px;
+  height: 8px;
+  margin: 0 auto;
+  border-radius: var(--radius-full);
+  background: var(--text-tertiary);
+}
+.roster-status.status-completed {
+  background: var(--success);
+}
+.roster-status.status-failed {
+  background: var(--danger);
+}
+.roster-status.status-running {
+  background: var(--warning);
+}
+.roster-status.status-stopped {
+  background: var(--text-tertiary);
+}
+.agent-copy {
+  min-width: 0;
+}
+.agent-title {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-sub {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-stats {
+  text-align: right;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.agent-stats span {
+  display: block;
+}
+.agent-stats .status-word {
+  color: var(--text-secondary);
+}
+.row-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.row-arrow:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* 右侧分栏：父会话（左列）DOM 原样保持，子会话在右列。 */
+.app-workspace.with-split {
+  flex-direction: row;
+}
+.workspace-main {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.subagent-split-pane {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-workspace);
+}
+.subagent-split-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+}
+.subagent-split-head .close-pane {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.subagent-split-head .close-pane:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.split-title {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+.split-subtitle {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  /* #198 先例：本仓没有独立 .mono 规则——技术标识的等宽写进具体类，不挂空类名。 */
+  font-family: var(--font-mono);
+}
+/* #1256 分栏头 token 行：`12.4K tok · 运行中`（票面 §5.2）。 */
+.split-usage {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.subagent-split-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.subagent-split-status {
+  padding: var(--space-lg);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+
+/* 窄屏：分栏改为叠放（PRODUCT §5.2 移动端非目标——只保证不破版）。 */
+@media (max-width: 900px) {
+  .app-workspace.with-split {
+    flex-direction: column;
+  }
+  .subagent-split-pane {
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+  }
 }

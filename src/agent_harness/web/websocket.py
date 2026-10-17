@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from fastapi import WebSocket, WebSocketDisconnect
 
+from agent_harness.session.ask_user_timeout import ask_user_timeout_seconds_from_payload
 from agent_harness.session.event import USER_INPUT_REQUESTED
 from agent_harness.web.serialization import build_event_payload
 from agent_harness.web.wire_safety import (
@@ -325,7 +326,15 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     and isinstance(data.get("request_id"), str)
                 ):
                     _watch_session(session_id)
-                    driver.arm(session_id, request_id=data["request_id"])
+                    # #1284 P2-2：relay 装配同样只认请求载荷快照（与
+                    # `note_session_state` 同一读取点），旧事件才回落 driver 配置。
+                    driver.arm(
+                        session_id,
+                        request_id=data["request_id"],
+                        timeout_seconds=ask_user_timeout_seconds_from_payload(
+                            data, fallback=int(driver.timeout_seconds),
+                        ),
+                    )
                 await out_q.put({
                     "type": "event",
                     "session_id": session_id,

@@ -453,6 +453,15 @@ function summarizeSuperseded(event: AgentEvent): string {
   return typeof seq === 'number' ? `第 ${seq} 条输入已被新内容取代` : '输入已被取代';
 }
 
+// #1280 AC4：`error`（#1193 致命失败信号，durable）不再空摘要——data.message 是
+// 失败原因的可读口径，Timeline 行给人话，全文走事件钻取。与 summarizeRunFailed
+// 同规则**不截断**：文案是完整句子，截断正好切掉可操作尾巴（ADR-0033 §2.3）。
+function summarizeError(event: AgentEvent): string {
+  const message = event.data.message;
+  const detail = typeof message === 'string' ? message.trim() : '';
+  return detail ? `运行失败 · ${detail}` : '运行失败';
+}
+
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
 function truncateQueueSummary(content: string, max = 40): string {
   return content.length > max ? `${content.slice(0, max)}…` : content;
@@ -618,17 +627,16 @@ function parseAskUserRequest(data: Record<string, unknown>, envelopeRunId: strin
       ...(parsedRecommended === undefined ? {} : { recommended: parsedRecommended }),
     });
   }
+  const timeoutMinutes = askUserTimeoutMinutes(data);
   return {
     request_id: requestId,
     run_id: runId,
     questions,
     answer: null,
-    // #1224：随请求落盘的超时档（秒）。缺失/非法（旧事件）⇒ 不投影该字段，
-    // 卡片回落中性提示（零伪造；数值由 Conversation 按 `max(1, floor(秒/60))` 渲染，
-    // 与后端 `ask_user_timeout_message` 同口径）。
-    ...(typeof data.timeout_seconds === 'number' && Number.isFinite(data.timeout_seconds)
-      ? { timeout_seconds: data.timeout_seconds }
-      : {}),
+    // #1284：显示用分钟数（后端随快照落盘；旧事件由 `timeout_seconds` 按同一公式
+    // 换算）。非法值（0 / 负数 / 非整数 / 非数）⇒ 不投影，卡片回落中性提示
+    // （零伪造，不把 0 钳成 1 分钟）。
+    ...(timeoutMinutes === undefined ? {} : { timeout_minutes: timeoutMinutes }),
   };
 }
 
@@ -1902,6 +1910,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.PERMISSION_GRANTED]: { apply: noopProjection, summarize: summarizeApprovalGranted },
   [EventType.PERMISSION_REVOKED]: { apply: noopProjection, summarize: summarizeApprovalRevoked },
   [EventType.WORKFLOW_MODE_CHANGED]: { apply: noopProjection, summarize: summarizeWorkflowModeChanged },
+  // #1193：run 致命异常且计划从未生成的**明确错误信号**（durable）。对话投影
+  // 本身无字段可改（横幅是「带手动退出动作的错误条」，归 useSession 经
+  // `deriveRunFailedBeforePlan` 从事件流派生——见该函数）。登记为 no-op ⇒
+  // 已知类型、不进 `unknown_events`、时间线可摘要；不登记则穷尽性
+  // `Record<EventTypeValue, EventSemantics>` 被破坏（tsc 红）。
+  [EventType.ERROR]: { apply: noopProjection, summarize: summarizeError },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,
@@ -2335,6 +2349,39 @@ export function deriveSessionTitle(events: AgentEvent[]): string {
   return '';
 }
 
+/** #1193：从事件流派生「run 在计划生成前致命失败、会话仍停在 plan 档」。
+ *
+ *  判定 = 三个**生命周期标记**里最新的一个是 error(run-failed-before-plan)：
+ *   - error(run-failed-before-plan)：失败发生（durable——迟到接流/刷新都读得到）；
+ *   - workflow/mode-changed：用户显式退出/改档 ⇒ 这次失败已被处置；
+ *   - run/started：用户重试且新 run 已启动 ⇒ 失败已被更新的运行事实取代。
+ *  取「最新标记」而非「存在即真」：退出 plan 或重试成功后横幅必须自行消失，
+ *  再次失败（新 error 事件）又必须重新出现——两条都由同一条规则给出。
+ *
+ *  纯投影（不变量 #22）：横幅不另存状态。live 帧、WS 快照、刷新后的 GET /events
+ *  走的是同一份事件列表，因此迟到接流（#1193 审查 F2）与刷新（F3）下结论一致。 */
+export function deriveRunFailedBeforePlan(events: AgentEvent[]): {
+  message: string;
+  hint: string;
+} | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type === EventType.ERROR && e.data?.code === 'run-failed-before-plan') {
+      const message = e.data.message;
+      const hint = e.data.hint;
+      return {
+        message:
+          typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
+        hint: typeof hint === 'string' ? hint : '',
+      };
+    }
+    if (e.type === EventType.WORKFLOW_MODE_CHANGED || e.type === EventType.RUN_STARTED) {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** Try to JSON-parse a tool result `content` string; return null on failure.
  * Backend serializes the full ToolResult via model_dump_json(), so this is the
  * only way to get at ok / data / error_code without re-fetching from the API.
@@ -2394,6 +2441,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** 有限数字才认（NaN / Infinity / 字符串数字一律 undefined = 缺席，不猜）。 */
 function numberOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** 正整数才认（复用 `numberOf` 的有限数守卫）；0 / 负数 / 非整数一律缺席。
+ *  用于"显示用数字"类字段：非法值必须回落中性提示，不能被钳成 1 伪造出来。 */
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = numberOf(value);
+  return parsed !== undefined && Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : undefined;
+}
+
+/** #1284：ask_user 超时快照 → 显示用分钟数。
+ *
+ *  新事件优先读后端落盘的 `timeout_minutes`（前端只渲染）；#1224 落盘的旧事件只有
+ *  `timeout_seconds`，在这里按同一条公式（向下取整且至少 1 分钟）换算——换算只此一处，
+ *  渲染层不再各算一遍。 */
+function askUserTimeoutMinutes(data: Record<string, unknown>): number | undefined {
+  const minutes = positiveInteger(data.timeout_minutes);
+  if (minutes !== undefined) return minutes;
+  const seconds = positiveInteger(data.timeout_seconds);
+  return seconds === undefined ? undefined : Math.max(1, Math.floor(seconds / 60));
 }
 
 /** 字符串列表的宽容读：只留字符串项；不是数组就返回空列表（不编内容）。 */

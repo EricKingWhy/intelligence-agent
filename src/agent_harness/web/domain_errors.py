@@ -10,7 +10,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | 端点 | 翻译的领域异常 |
 | --- | --- |
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision |
+| `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision, SandboxUnavailableError（#363，`#1278` 起与本模块共用） |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
@@ -20,7 +20,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
 | `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
-| `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
+| `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary, SandboxUnavailableError（`#1278`） |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
 | `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
 | `POST /api/sessions/{id}/archive`（会话归档 / #171 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict |
@@ -114,6 +114,10 @@ from agent_harness.agent.budget import (
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.model.config import UnsupportedReasoningEffort
 from agent_harness.model.provider import ModelClientConstructionError
+from agent_harness.sandbox.capabilities import (
+    SandboxUnavailableError,
+    probe_all_capabilities,
+)
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -460,6 +464,44 @@ def model_http_error(exc: Exception) -> HTTPException:
     """
     return HTTPException(
         status_code=_MODEL_ERROR_STATUS[type(exc)], detail=str(exc)
+    )
+
+
+#: sandbox 后端不可用 → HTTP status 的第五张表（#363 / W-19，`#1278` 起共用）。
+#:
+#: 为什么又是单独一张：`SandboxUnavailableError` 是 sandbox 包的能力探针词汇
+#: （RuntimeError 子类），既不是 `SessionServiceError` 也不是 workspace / storage
+#: 词汇。它**绝不静默降级成 local**，所以状态码只有 409 一档（与 create 的
+#: 结构化诊断同形；`detail` 由下面的函数统一构造）。
+_SANDBOX_ERROR_STATUS: dict[type[Exception], int] = {
+    SandboxUnavailableError: 409,
+}
+
+
+def sandbox_unavailable_http_error(
+    exc: SandboxUnavailableError,
+) -> HTTPException:
+    """选定 sandbox 后端不可用 → 409 + 结构化诊断（绝不静默降级）。
+
+    `detail` 带 remediation 与可用后端列表，前端据此渲染"切换"动作
+    （#363 / W-19 口径）。`POST /api/sessions` 与 `POST /api/sessions/{id}/forks`
+    共用这一份构造：两处都必须让"选定的 docker 跑不起来"是同一个可诊断的
+    409，而不是一条裸 500（`#1278` P2-2）。
+    """
+    return HTTPException(
+        status_code=_SANDBOX_ERROR_STATUS[type(exc)],
+        detail={
+            "message": str(exc),
+            "backend": exc.backend,
+            "reason": exc.reason,
+            "details": exc.details,
+            "remediation": exc.remediation,
+            "available_backends": [
+                c.backend
+                for c in probe_all_capabilities()
+                if c.available
+            ],
+        },
     )
 
 

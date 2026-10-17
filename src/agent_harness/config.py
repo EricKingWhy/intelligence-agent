@@ -22,6 +22,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: 挡位×模型联动：那是二期（票面「第一版只做挡位校验，不做模型联动」）。
 CONTEXT_WINDOW_TIERS: tuple[int, ...] = (100_000, 200_000, 256_000, 300_000, 500_000)
 
+#: `ask_user` 超时档（秒）的**唯一**合法域（#1204 / #1224 / #1284）。两处消费：
+#: `Settings` 构造期 validator 与 `AskUserTool.__init__` 的域校验。分列两处会让
+#: "配置能起、工具构造失败"或"部署能改、载荷不认"成为可能。
+ASK_USER_QUESTION_TIMEOUT_TIERS: frozenset[int] = frozenset({60, 300, 600})
+
+#: `ask_user` 超时的缺省档（秒）。`Settings` 与 `AskUserTool.__init__` 共用这一处，
+#: 不再各写一份 `300`；两者相等仍由 `tests/tools/test_ask_user.py` 机械钉住。
+ASK_USER_QUESTION_TIMEOUT_DEFAULT: int = 300
+
 
 class Settings(BaseSettings):
     # extra="ignore"：部署机 .env 常混有编辑器/部署工具/其它应用的变量；
@@ -66,7 +75,7 @@ class Settings(BaseSettings):
     # 的 60s / 5m / 10m）。计时器仅在至少一个前端连接存在时启动/继续；到点后 run 自动
     # 继续并注入"用户可能不在"系统消息，**不替用户选择任何选项**。取值只允许
     # {60, 300, 600}（下面的 validator 在构造期响亮拒绝其它值）。
-    ask_user_question_timeout: int = 300
+    ask_user_question_timeout: int = ASK_USER_QUESTION_TIMEOUT_DEFAULT
     # Bash 工具的执行预算（秒）。ADR-0039（含 2026-09-22 附录）：#244 冻结
     # 「ToolExecutor 是唯一 deadline owner、Local/Docker 默认有效预算同为 60 秒」，
     # 本字段只提供 Executor 消费的预算输入，不与它争 owner。
@@ -130,6 +139,16 @@ class Settings(BaseSettings):
     # slope=0 即固定墙钟（消融候选②的配置形态）。消费点：builder → compactor。
     summary_timeout_seconds: float = Field(default=30.0, gt=0)
     summary_timeout_per_kilotoken_seconds: float = Field(default=0.25, ge=0)
+    # #1279：重试维度的墙钟放大——第 n 次尝试 = min(规模公式 × multiplier^(n-1),
+    # max_seconds)。默认 2× / 300s：慢模型（hy4-preview-f 单轮 45–60s）第二次
+    # 有机会完成；上限保证不会无限等待（再超时照常落 compaction_failed）。
+    # multiplier 必须 ≥1 且有限（(0,1) 会把重试墙钟缩到 attempt 1 以下，与
+    # "放大"相悖；allow_inf_nan=False：inf 等价于取消失败语义）；
+    # max_seconds 必须正且有限。
+    summary_timeout_attempt_multiplier: float = Field(
+        default=2.0, ge=1, allow_inf_nan=False)
+    summary_timeout_max_seconds: float = Field(
+        default=300.0, gt=0, allow_inf_nan=False)
     # #1026：分块摘要（票面修法②）。摘要请求估算超过 hard_guard × ratio 即走
     # 分块（票面"如 > hard_limit 一半"）；summary_chunk_max_tokens 是单块输入
     # 的 token 上限（块内超大原子消息确定性 head/tail 裁剪到界）。
@@ -281,10 +300,10 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_ask_user_question_timeout(cls, value: int) -> int:
         """`ask_user` 超时只允许票面三档（构造期即启动期，配错响亮失败）。"""
-        allowed = {60, 300, 600}
-        if value not in allowed:
+        if value not in ASK_USER_QUESTION_TIMEOUT_TIERS:
             raise ValueError(
-                f"ask_user_question_timeout must be one of {sorted(allowed)}, got {value}"
+                "ask_user_question_timeout must be one of "
+                f"{sorted(ASK_USER_QUESTION_TIMEOUT_TIERS)}, got {value}"
             )
         return value
 

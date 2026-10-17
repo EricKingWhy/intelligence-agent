@@ -974,6 +974,10 @@ async def build_runtime(
             summary_timeout_seconds=settings.summary_timeout_seconds,
             summary_timeout_per_kilotoken_seconds=(
                 settings.summary_timeout_per_kilotoken_seconds),
+            # #1279：attempt 放大与上限（Settings 透传链）。
+            summary_timeout_attempt_multiplier=(
+                settings.summary_timeout_attempt_multiplier),
+            summary_timeout_max_seconds=settings.summary_timeout_max_seconds,
             summary_chunk_request_ratio=settings.summary_chunk_request_ratio,
             summary_chunk_max_tokens=settings.summary_chunk_max_tokens,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选

@@ -55,12 +55,13 @@ const advancedToggle = () =>
   document.body.querySelector<HTMLButtonElement>('.project-advanced-toggle')!;
 
 function dialog(over: {
+  project?: Project;
   onCreateTask?: (p: unknown) => Promise<string | null>;
   onOpenChange?: (o: boolean) => void;
 } = {}) {
   return (
     <TaskCreationDialog
-      project={project}
+      project={over.project ?? project}
       models={models}
       sandboxBackends={[backend('local'), backend('docker')]}
       onOpenChange={over.onOpenChange ?? (() => {})}
@@ -99,6 +100,30 @@ afterEach(() => {
 });
 
 describe('TaskCreationDialog 化简（#1177 §B）', () => {
+  it('a long project path can be revealed with a keyboard-focusable control', async () => {
+    const longPath = 'C:\\workspace\\projects\\team\\service\\very-long-working-directory';
+    await act(async () => {
+      render(dialog({ project: { ...project, path: longPath } }));
+      await Promise.resolve();
+    });
+
+    const toggle = document.body.querySelector<HTMLButtonElement>('[aria-controls="project-path-full"]');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.tagName).toBe('BUTTON');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    const fullPath = document.body.querySelector<HTMLElement>('#project-path-full');
+    expect(fullPath?.hidden).toBe(true);
+    toggle?.focus();
+    expect(document.activeElement).toBe(toggle);
+
+    await act(async () => {
+      toggle?.click();
+    });
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(fullPath?.hidden).toBe(false);
+    expect(fullPath?.textContent).toBe(longPath);
+  });
+
   it('高级设置默认折叠：完成目标/自主度/模型/运行位置收进折叠容器', async () => {
     await act(async () => {
       render(dialog());
