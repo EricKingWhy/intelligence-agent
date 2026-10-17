@@ -313,6 +313,16 @@ test.describe('#1304 看板：拖拽写路径', () => {
     // 卡片不动。
     await expect(cardsIn(page, 'executing')).toHaveCount(1);
     await expect(cardsIn(page, 'pending_verification')).toHaveCount(0);
+
+    // 第二个拒绝面：把**执行中**的卡丢回执行中列。只看目标列的实现会在这里放行，
+    // 为一条非 backlog 会话发出定义 + 开跑两步写请求——所以这条必须单独考。
+    await page
+      .locator('.kanban-card[data-session-id="s-exec"]')
+      .dragTo(page.getByTestId('kanban-col-executing'));
+    await expect(page.getByText(/只有 backlog 卡/)).toBeVisible();
+    expect(commands).toHaveLength(0);
+    expect(messages).toHaveLength(0);
+    await expect(cardsIn(page, 'executing')).toHaveCount(1);
   });
 
   test('AC-9②：空会话卡不可拖（显式 draggable="false"）且有说明文本', async ({ page }) => {

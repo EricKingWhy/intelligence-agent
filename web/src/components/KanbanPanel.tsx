@@ -208,7 +208,10 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
           if (sessionId === null) return;
           const session = sessions.find((row) => row.session_id === sessionId);
           if (session === undefined) return;
-          if (column !== 'executing') {
+          // 接受条件是**源列与目标列都要对**（票面 §4.7：「只有 backlog → 执行中」）：
+          // 只看目标列会漏掉"把执行中的卡拖回执行中"这一路——那会为一条**非 backlog**
+          // 会话发出定义+开跑两步写请求，正是本票要禁的。
+          if (column !== 'executing' || session.product_state !== '') {
             showNotice(REJECT_TEXT);
             return;
           }
@@ -225,8 +228,14 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
               key={session.session_id}
               session={session}
               now={now}
-              /* 可拖条件（票面 §4.7）：backlog **且**非空会话。 */
-              draggable={column === '' && session.first_user_message !== null}
+              /* 可拖条件：**非空会话**即可拖（与列无关）。
+                 两条 AC 各自要求一个方向，只有这个取值同时满足：
+                 - AC-9② 空 backlog 卡必须 `draggable="false"`（不可拖）；
+                 - AC-9① 执行中列的卡拖到待验证列要**给出拒绝提示**——而浏览器对
+                   `draggable="false"` 的元素根本不派发 dragstart/drop，拖不起来也就
+                   没有提示。所以"接不接受"必须在**落点**判（见 onDrop），不能靠
+                   "不给拖"来表达——那会静默，而本票要的是说出来。 */
+              draggable={session.first_user_message !== null}
               onDragStart={() => {
                 draggingRef.current = session.session_id;
               }}
