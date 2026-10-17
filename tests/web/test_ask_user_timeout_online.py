@@ -53,7 +53,7 @@ def _ask_user_scripts() -> list[list[AIMessage]]:
     ]
 
 
-async def _start_server(tmp_path, monkeypatch, factory):
+async def _start_server(tmp_path, monkeypatch, factory, *, ask_user_timeout: int = 300):
     import uvicorn
 
     from agent_harness.config import Settings
@@ -62,9 +62,12 @@ async def _start_server(tmp_path, monkeypatch, factory):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model", factory)
     # 心跳只用来推进超时检查；调大以免与本用例显式 tick 打架（本用例自己驱动）。
     monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 3600.0)
+    # #1284：档位经 `ask_user` 工具进请求载荷快照，到期链路只认快照
+    # （驱动 `timeout_seconds` 仅是旧载荷的兜底）——所以这里从 Settings 设档。
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
+        ask_user_question_timeout=ask_user_timeout,
     ))
     uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
                                log_level="error", lifespan="on")
@@ -134,13 +137,13 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
     """有连接 + 到点 ⇒ run 自动继续、注入票面消息、**不写任何 answer**。"""
     server, serve_task, port, app = await _start_server(
         tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+        ask_user_timeout=60,
     )
     try:
         driver = app.state.agent.ask_user_timeout_driver
-        # 把驱动的档位与挂钟换成测试可控（装配发生在 WS subscribe 那一刻）。
+        # 挂钟换成测试可控；档位走请求快照（Settings 60s ⇒ 载荷 60s）。
         clock = FakeClock()
         driver.clock = clock
-        driver.timeout_seconds = 60.0
 
         sid = await _start_run(port, "请设置存储层")
         await _wait_paused(port, sid)
@@ -179,7 +182,7 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
             "超时恢复不得写任何 answer（不替用户选择）"
         assert any(e["type"] == "run/resumed" for e in events)
         assert any(e["type"] == "run/completed" for e in events)
-        assert "用户在 5 分钟内未回答，可能不在，请按你的判断继续" in answer_event["data"]["content"]
+        assert "用户在 1 分钟内未回答，可能不在，请按你的判断继续" in answer_event["data"]["content"]
     finally:
         await _shutdown(server, serve_task)
 
