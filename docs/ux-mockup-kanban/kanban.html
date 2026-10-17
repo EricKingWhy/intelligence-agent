@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 看板 · 效果图 v2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0d1117; color: #e6edf3; height: 100vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    border-bottom: 1px solid #30363d; background: #010409; flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header .sub { font-size: 12px; color: #8b949e; }
+  .search-hint {
+    margin-left: auto; font-size: 12px; color: #8b949e; border: 1px solid #30363d;
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; background: #161b22;
+  }
+  .search-hint:hover { border-color: #58a6ff; color: #e6edf3; }
+  .search-hint kbd {
+    background: #30363d; border-radius: 4px; padding: 1px 6px; font-size: 11px;
+    font-family: inherit; margin-left: 6px;
+  }
+  .toggle-accepted {
+    font-size: 12px; color: #8b949e; border: 1px solid #30363d; border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; background: #161b22;
+  }
+  .toggle-accepted:hover { border-color: #58a6ff; color: #e6edf3; }
+  main { flex: 1; display: flex; gap: 12px; padding: 16px 20px; overflow-x: auto; align-items: flex-start; }
+  .col {
+    flex: 0 0 290px; background: #010409; border: 1px solid #21262d; border-radius: 10px;
+    display: flex; flex-direction: column; max-height: 100%; min-height: 200px;
+  }
+  .col.drag-over { border-color: #58a6ff; background: #0d1526; }
+  .col.attention-col { border-color: rgba(210,153,34,.45); }
+  .col-head {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid #21262d; font-size: 13px; font-weight: 600; flex-shrink: 0;
+  }
+  .col-head .count {
+    font-size: 11px; font-weight: 400; color: #8b949e; background: #21262d;
+    border-radius: 10px; padding: 1px 8px;
+  }
+  .col-head .add {
+    margin-left: auto; color: #8b949e; cursor: pointer; font-size: 15px; line-height: 1;
+    width: 22px; height: 22px; text-align: center; border-radius: 5px;
+  }
+  .col-head .add:hover { background: #21262d; color: #e6edf3; }
+  .col-body { padding: 10px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px;
+    cursor: pointer; transition: border-color .15s;
+  }
+  .card:hover { border-color: #58a6ff; }
+  .card.in-attention { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.06); }
+  .card .title-row { display: flex; align-items: flex-start; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .dot.working { background: #3fb950; animation: pulse 1.6s infinite; }
+  .dot.needs { background: #d29922; }
+  .dot.done { background: #58a6ff; }
+  .dot.idle { background: #6e7681; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .card .title { font-size: 13px; line-height: 1.45; }
+  .card.unread .title { font-weight: 700; }
+  .card .msgs { margin-top: 8px; font-size: 12px; color: #8b949e; line-height: 1.5; }
+  .card .msgs .u { color: #a5d6ff; }
+  .card .msgs .a { color: #8b949e; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card .ask {
+    margin-top: 8px; font-size: 12px; background: rgba(210,153,34,.12);
+    border: 1px solid rgba(210,153,34,.4); border-radius: 6px; padding: 6px 8px; color: #e3b341;
+  }
+  .card .subs { margin-top: 8px; border-top: 1px dashed #30363d; padding-top: 6px; display: none; }
+  .card .subs.open { display: block; }
+  .card .sub-row { font-size: 12px; color: #8b949e; padding: 3px 0; display: flex; gap: 6px; align-items: center; }
+  .card .sub-toggle { margin-top: 6px; font-size: 12px; color: #58a6ff; cursor: pointer; }
+  .card .foot {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid #21262d;
+    display: flex; align-items: center; gap: 8px; font-size: 11px; color: #6e7681; flex-wrap: wrap;
+  }
+  .pill {
+    font-size: 11px; border-radius: 10px; padding: 1px 8px; border: 1px solid #30363d;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .pill.ok { color: #3fb950; border-color: rgba(63,185,80,.4); }
+  .pill.wait { color: #d29922; border-color: rgba(210,153,34,.4); }
+  .pill.pr { color: #a5d6ff; border-color: rgba(88,166,255,.4); }
+  .pill.pr.draft { color: #8b949e; border-color: #30363d; }
+  .pill.pr.merged { color: #bc8cff; border-color: rgba(188,140,255,.4); }
+  .card.dim { opacity: .55; }
+  .card[draggable="true"] { cursor: grab; }
+  .draft-hint { font-size: 11px; color: #6e7681; margin-top: 6px; }
+  footer {
+    padding: 8px 20px; border-top: 1px solid #21262d; font-size: 11px; color: #6e7681; flex-shrink: 0;
+  }
+  #searchOverlay {
+    display: none; position: fixed; inset: 0; background: rgba(1,4,9,.7); z-index: 50;
+    align-items: flex-start; justify-content: center; padding-top: 15vh;
+  }
+  #searchOverlay.open { display: flex; }
+  #searchBox {
+    width: min(560px, 90vw); background: #161b22; border: 1px solid #58a6ff; border-radius: 10px;
+    padding: 14px 16px;
+  }
+  #searchBox input {
+    width: 100%; background: transparent; border: none; outline: none; color: #e6edf3; font-size: 15px;
+  }
+  #searchBox .tip { font-size: 11px; color: #6e7681; margin-top: 8px; }
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #161b22; border: 1px solid #30363d; color: #e6edf3; font-size: 13px;
+    padding: 10px 18px; border-radius: 8px; opacity: 0; transition: all .25s; z-index: 60;
+    pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent 看板</h1>
+  <span class="sub">效果图 v2 · 12 裁决落地：需要注意独立列 / PR pill / 未读加粗 / 子智能体行 / 已接受默认隐藏</span>
+  <div class="search-hint" id="searchHint">搜索卡片 <kbd>⌘K</kbd></div>
+  <div class="toggle-accepted" id="toggleAccepted">显示已接受</div>
+</header>
+<main id="board">
+  <!-- 需要注意：独立列（Q2=A），卡片只在此处，不在原列重复 -->
+  <section class="col attention-col" data-col="attention">
+    <div class="col-head">⚠ 需要注意 <span class="count">2</span></div>
+    <div class="col-body">
+      <div class="card unread in-attention">
+        <div class="title-row"><span class="dot needs"></span><span class="title">#1283 修补：budget 语义三档对齐</span></div>
+        <div class="ask">ask_user 待回答：超时闸口接线方案二选一，等你拍板</div>
+        <div class="msgs">
+          <div class="u">你：修补 PR 开了，你看一眼</div>
+          <div class="a">agent：P1×1+P2×4 已修完，沙箱门禁全绿，等合并</div>
+        </div>
+        <div class="foot"><span class="pill pr">⑂ PR #1287 · open</span><span>wt/1283-fix</span><span style="margin-left:auto">1 小时前</span></div>
+      </div>
+      <div class="card in-attention">
+        <div class="title-row"><span class="dot needs"></span><span class="title">Windows 真机跑 #1225 车道</span></div>
+        <div class="ask">permission 待批准：允许覆写 web/dist 产物？</div>
+        <div class="msgs">
+          <div class="u">你：车道红了先别动，等我看</div>
+          <div class="a">agent：D2 判据达成，唯一红是时序 flake，已另开 #1237</div>
+        </div>
+        <div class="foot"><span>intelligence-agent</span><span style="margin-left:auto">26 分钟前</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-col="backlog">
+    <div class="col-head">待办 Backlog <span class="count">2</span><span class="add" title="新建">＋</span></div>
+    <div class="col-body">
+      <div class="card" draggable="true">
+        <div class="title-row"><span class="dot idle"></span><span class="title">把 #1256 效果图导出为 PR 素材</span></div>
+        <div class="draft-hint">草稿 · 拖到「执行中」即拉起会话</div>
+      </div>
+      <div class="card" draggable="true">
+        <div class="title-row"><span class="dot idle"></span><span class="title">调研 orca 看板实现细节</span></div>
+        <div class="draft-hint">草稿 · 拖到「执行中」即拉起会话</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-col="working">
+    <div class="col-head">执行中 <span class="count">1</span></div>
+    <div class="col-body">
+      <div class="card unread">
+        <div class="title-row"><span class="dot working"></span><span class="title">实现 #1200 插件管理窗口</span></div>
+        <div class="msgs">
+          <div class="u">你：验收标准再收紧一点，别留模糊表述</div>
+          <div class="a">agent：已按三套预算语义重写 verification.ts，待你确认…</div>
+        </div>
+        <div class="sub-toggle" data-sub="s1">▸ 2 个子智能体</div>
+        <div class="subs" id="s1">
+          <div class="sub-row"><span class="dot working"></span>code-review · Correctness — 读完 verification.ts</div>
+          <div class="sub-row"><span class="dot working"></span>code-review · Standards — 检查 API 命名</div>
+        </div>
+        <div class="foot"><span class="pill pr draft">⑂ draft · #1290</span><span>wt/1200-plugin-mgmt</span><span style="margin-left:auto">2 分钟前</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-col="verify">
+    <div class="col-head">待验证 <span class="count">1</span></div>
+    <div class="col-body">
+      <div class="card">
+        <div class="title-row"><span class="dot done"></span><span class="title">#1246 ask_user 超时闸口接线</span></div>
+        <div class="msgs">
+          <div class="a">agent：ask_user 超时闸口已接线，websocket.py:484 含 BudgetConflict，待合并</div>
+        </div>
+        <div class="foot"><span class="pill wait">待合并</span><span class="pill pr merged">⑂ merged · #1246</span><span style="margin-left:auto">3 小时前</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-col="deliver">
+    <div class="col-head">可交付 <span class="count">1</span></div>
+    <div class="col-body">
+      <div class="card">
+        <div class="title-row"><span class="dot done"></span><span class="title">#1190 会话级约束管理面板 Phase 1</span></div>
+        <div class="msgs">
+          <div class="a">agent：PR #1242 已合并，四态验收通过，待你验收</div>
+        </div>
+        <div class="foot"><span class="pill ok">CI 通过</span><span class="pill pr">⑂ PR #1242 · open</span><span style="margin-left:auto">昨天</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 已接受：默认隐藏（Q8=A），Orca idle 列翻版 -->
+  <section class="col hidden" data-col="accepted" id="acceptedCol">
+    <div class="col-head">已接受 <span class="count">1</span></div>
+    <div class="col-body">
+      <div class="card dim">
+        <div class="title-row"><span class="dot idle"></span><span class="title">#1184 旧 ticket 归档</span></div>
+        <div class="foot"><span>已合并</span><span style="margin-left:auto">3 天前</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>列 = PRODUCT_STATES 投影（派生列只读，卡片只属一列） · 拖拽仅 backlog→执行中有写语义 · 点击卡片 ack 并直达会话 · 快照全量推送+节流渲染</footer>
+
+<div id="searchOverlay">
+  <div id="searchBox">
+    <input id="searchInput" placeholder="搜索卡片标题、消息、工作区、#PR号…">
+    <div class="tip">输入即过滤 · Esc 关闭</div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+  const toast = (msg) => {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+  };
+  // 子智能体展开
+  document.querySelectorAll('.sub-toggle').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = document.getElementById(el.dataset.sub);
+      const open = s.classList.toggle('open');
+      el.textContent = (open ? '▾' : '▸') + ' 2 个子智能体';
+    });
+  });
+  // 点击卡片 = ack + 直达
+  document.querySelectorAll('.card').forEach(c => {
+    c.addEventListener('click', () => {
+      c.classList.remove('unread');
+      toast('已标已读，直达会话（演示）');
+    });
+  });
+  // 已接受列显隐
+  const accCol = document.getElementById('acceptedCol');
+  const accBtn = document.getElementById('toggleAccepted');
+  accBtn.addEventListener('click', () => {
+    const hidden = accCol.classList.toggle('hidden');
+    accBtn.textContent = hidden ? '显示已接受' : '隐藏已接受';
+  });
+  // 搜索
+  const overlay = document.getElementById('searchOverlay');
+  const input = document.getElementById('searchInput');
+  const openSearch = () => { overlay.classList.add('open'); input.value=''; input.focus(); filter(''); };
+  document.getElementById('searchHint').addEventListener('click', openSearch);
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); }
+    if (e.key === 'Escape') overlay.classList.remove('open');
+  });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('open'); });
+  const filter = (q) => {
+    q = q.trim().toLowerCase();
+    document.querySelectorAll('.card').forEach(c => {
+      c.classList.toggle('hidden', q && !c.textContent.toLowerCase().includes(q));
+    });
+  };
+  input.addEventListener('input', () => filter(input.value));
+  // 拖拽：backlog → 执行中（新建会话语义）
+  let dragCard = null;
+  document.querySelectorAll('.card[draggable="true"]').forEach(c => {
+    c.addEventListener('dragstart', () => { dragCard = c; });
+  });
+  document.querySelectorAll('.col').forEach(col => {
+    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', (e) => {
+      e.preventDefault(); col.classList.remove('drag-over');
+      if (!dragCard) return;
+      if (col.dataset.col === 'working') {
+        col.querySelector('.col-body').prepend(dragCard);
+        dragCard.querySelector('.dot').className = 'dot working';
+        dragCard.querySelector('.draft-hint')?.remove();
+        dragCard.setAttribute('draggable', 'false');
+        dragCard.classList.add('unread');
+        updateCounts();
+        toast('已拉起新会话（演示）');
+      } else if (col.dataset.col !== 'backlog') {
+        toast('演示：只有「执行中」接受拖入');
+      }
+      dragCard = null;
+    });
+  });
+  const updateCounts = () => {
+    document.querySelectorAll('.col').forEach(col => {
+      const n = col.querySelectorAll('.col-body .card').length;
+      const c = col.querySelector('.count');
+      if (c) c.textContent = n;
+    });
+  };
+</script>
+</body>
+</html>
