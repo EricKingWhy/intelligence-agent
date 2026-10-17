@@ -1265,8 +1265,9 @@ class AppState:
         # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
         # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
         # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
-        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
-        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        # on_run_terminal）；W-12 登记协议（#356 中 DEFER 的部分）落地后删本接缝，
+        # 改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO
+        # 与删除清单）。
         self.ask_user_timeout_driver = AskUserTimeoutDriver(
             timeout_seconds=settings.ask_user_question_timeout,
             on_expire=lambda session_id, request_id: (

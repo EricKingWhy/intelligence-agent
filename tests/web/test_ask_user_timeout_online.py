@@ -185,6 +185,60 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_subscribe_arms_timer_when_input_request_lands_after_snapshot_read(
+    tmp_path, monkeypatch,
+):
+    """P2-1：`get_events` 返回旧快照、提问随后落盘 ⇒ 订阅仍须装配计时器。
+
+    竞态原样：subscribe 处理先读事件流（无待回答）→ `note_session_state` 判"无需装配"
+    → 之后 `user/input-requested` 才落盘。relay 只收到**订阅之后**扇出的事件，旧快照
+    又不含提问 ⇒ 不补读就永远不会装配，提问永不超时、run 永久挂起（违反 AC②）。
+
+    构造：把 `SessionService.get_events` 的**第一次**调用裁掉 `user/input-requested`
+    （= 读到旧快照），其后返回真实事件流（= 补读能看到已落盘的提问）。
+    """
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+    )
+    try:
+        driver = app.state.agent.ask_user_timeout_driver
+        clock = FakeClock()
+        driver.clock = clock
+        driver.timeout_seconds = 60.0
+
+        sid = await _start_run(port, "请设置存储层")
+        await _wait_paused(port, sid)  # 先等提问落盘（HTTP 读不走被裁的路径）
+
+        from agent_harness.session.event import USER_INPUT_REQUESTED
+        from agent_harness.session.service import SessionService
+
+        real_get_events = SessionService.get_events
+        stale_once = {"left": 1}
+
+        async def get_events(self, session_id):
+            events = await real_get_events(self, session_id)
+            if stale_once["left"] and session_id == sid:
+                stale_once["left"] -= 1
+                return [e for e in events if e.type != USER_INPUT_REQUESTED]
+            return events
+
+        monkeypatch.setattr(SessionService, "get_events", get_events)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
+            await _recv_snapshot(ws)
+            assert driver.is_armed(sid), (
+                "快照读到的旧状态不含提问，订阅后必须补读事件流装配计时器"
+            )
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_ask_user_timeout_does_not_fire_without_a_connection(tmp_path, monkeypatch):
     """无前端连接 ⇒ 不装配、不启动，推进挂钟 + tick 也不恢复。"""
     server, serve_task, port, app = await _start_server(
