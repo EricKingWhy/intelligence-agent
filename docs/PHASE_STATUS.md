@@ -110,6 +110,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-17 · #1289 Windows Unicode 路径修复在途**：Issue OPEN / `bug` / `P2` / `in-progress`；修复 UTF-8 Git stdout 解码和未使用 stderr 解码，双轴复审的测试可靠性 finding 已闭合，focused 11/11 + Ruff 通过。Gate-0 后推送并开 PR；详见 Tracker/月档。
 - **2026-10-17 · #1184 PR 待合并**：按裁决 A 实现布局内进度面板；审查发现的取消标记残留 P2 已由 `8bd0c14a` 修复，双轴复审 PASS。PlanList Vitest 42/42、面板 E2E 4/4、tsc/build/相关 oxlint 通过；推送前 Gate-0 6/6 PASS（tip `0098f6159325`，tree `37116356da5e`，68.9s）。PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) OPEN、未合并；Issue CLOSED，保留 `10-15-UI优化` 并加 `等待merge`。提交 0098f615 的首轮 PR 检查：gate0、gitleaks 通过，Chromium E2E 进行中；完整 Vitest 与云端 `shell/ia-test` 未运行。详情见 tracker/月档 #1184。
 - **2026-10-16 · #1165 已集成**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) merge `76bab688136c16e94474bee4397bc19ad803e861`；Issue CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。PR Gate-0、Windows installer smoke、gitleaks、Chromium PR smoke 全过；完整 nightly 在代码 head `340bb388` 全绿，Windows TUI 重跑后通过。详情见月档 #1165。
 - **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。
