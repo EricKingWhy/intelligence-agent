@@ -110,7 +110,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
-- **2026-10-17 · #1183 已关单、PR 待合并**：Issue CLOSED（`等待merge` + `10-15-UI优化`）；PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN；分支已同步 `origin/main` `279ba13e`，加入 #1288 P3 修复 `072b89d9`，本地 tip `d76658f9` 待推送。#1183 双轴复审 PASS，Vitest 35/35、Playwright 4/4；#1288 双轴 PASS、后端 43/43 + 前端 11/11；详情及门禁待办见 Tracker/月档。
+- **2026-10-17 · #1183 已关单、PR 待合并**：Issue CLOSED（`等待merge` + `10-15-UI优化`）；PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN；分支已同步 `origin/main` `279ba13e`，加入 #1288 P3 修复 `072b89d9`，本地 tip `e29e3314` 待推送。#1183 双轴复审 PASS，Vitest 35/35、Playwright 4/4；#1288 双轴 PASS、后端 43/43 + 前端 11/11；Gate-0 6/6 收据见 Tracker/月档，最终 tip 推送前再跑 `--no-record`。
 - **2026-10-17 · #1184 已集成**：Issue CLOSED，仅保留 `10-15-UI优化`；PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) merge commit `795fe5afda241c1dd441d5c8e985390fae65247c`。实现、审查和验证见 Tracker/月档 #1184。
 - **2026-10-16 · #1165 已集成**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) merge `76bab688136c16e94474bee4397bc19ad803e861`；Issue CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。PR Gate-0、Windows installer smoke、gitleaks、Chromium PR smoke 全过；完整 nightly 在代码 head `340bb388` 全绿，Windows TUI 重跑后通过。详情见月档 #1165。
 - **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。

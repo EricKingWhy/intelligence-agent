@@ -7,7 +7,7 @@
 **当前状态（2026-10-17，#1183）**：Issue CLOSED（标签 `10-15-UI优化` + `等待merge`）；PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN。分支 `codex/issue-1183-task-review` 已包含 `origin/main` `279ba13e`（merge `5f05de31`）及远端 PR head `27c0004c` 文档/收据（merge `d76658f9`）；本地 tip `d76658f9`，待按用户授权 fast-forward push 并更新 PR #1274。
 - **实现与修复**：#1183 审阅轻量化、键盘可读完整路径、双主题对比度及 Escape 隔离修复保持前端票面；新增 #1288 P3 修复 `072b89d9` 已并入本分支，durable 路径先落 `error`、持久事件顺序仍为 `run/failed → error`，append 失败时 transient fallback 为 `error → run/failed`，使用生成的 `EventType.ERROR`。
 - **审查**：#1183 `54b7581..00c9e0bd` 两轴最终复审 PASS；#1288 `5f05de31..072b89d9` Correctness/Spec 与 Standards 独立复审均 PASS，P0–P4=0。同步 merge 另以机械归属行覆盖，不冒充内容审查。
-- **增量验证**：#1183 TaskCreationDialog + PlanList Vitest 35/35；Playwright 4/4；`tsc -b`、build、lint、`git diff --check` 通过。#1288 后端失败路径 43/43、前端 session hook 11/11、`tsc -b`、Ruff、`git diff --check` 通过。新 tip 的 Gate-0 待最终文档提交后重跑；完整 nightly 在旧代码 tip `e3336da3` 已通过，新 tip 的 PR checks 待 push。
+- **增量验证**：#1183 TaskCreationDialog + PlanList Vitest 35/35；Playwright 4/4；`tsc -b`、build、lint、`git diff --check` 通过。#1288 后端失败路径 43/43、前端 session hook 11/11、`tsc -b`、Ruff、`git diff --check` 通过。Gate-0 收据 `docs/gate/209cb1fe30abe80662d0b36bdbbd197212038fcd.json` 为 6/6 PASS；最终文档 tip 推送前再跑 `--no-record`。完整 nightly 在旧代码 tip `e3336da3` 已通过，新 tip 的 PR checks 待 push。
 
 **在途（2026-10-17，#1288）**：Issue [#1288](https://github.com/EricKingWhy/intelligence-agent/issues/1288) OPEN（`bug`/`P3`/`in-progress`）；修复 `072b89d9` 在 #1183 分支、双轴复审 PASS、聚焦测试 43+11 通过，随 PR #1274 一并发布，无单独 PR。Gate-0、PR 更新和云端检查完成后按 `等待merge` 关单；PR 不合并。
 
