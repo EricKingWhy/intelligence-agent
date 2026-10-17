@@ -358,7 +358,9 @@ test.describe('#1304 看板：拖拽写路径', () => {
     await expect(cardsIn(page, 'executing')).toHaveCount(1);
   });
 
-  test('AC-10 反向对照：messages 真失败时如实显示后端 detail 且卡片不动', async ({ page }) => {
+  test('AC-10 反向对照：messages 500（HTTP 响应而非抛错）时如实显示后端 detail 且卡片不动', async ({
+    page,
+  }) => {
     await routeApi(page, {
       sessions: [boardRow('s-fail', '', { first_user_message: '会失败的会话' })],
       onSessionCommandPost: (route) =>
@@ -380,6 +382,11 @@ test.describe('#1304 看板：拖拽写路径', () => {
     // 卡片**不动**（不做乐观移动：板是投影，下一次快照才是真相）。
     await expect(cardsIn(page, 'backlog')).toHaveCount(1);
     await expect(cardsIn(page, 'executing')).toHaveCount(0);
+    // ⚠ 这条用例考的是**最容易漏的一处**：`sendMessage` 返回原始 `Response`、
+    // 非 2xx **不抛**（`lib/api.ts:772`）。漏掉 `res.ok` 检查时，500 会被当成成功
+    // 受理，上面两条断言仍会绿（卡片本来就没动）——只有"必须显示 detail"这条会红。
+    // 所以这条断言是本用例的判别力所在，不是装饰。
+    await expect(page.getByText(/后端炸了/)).toHaveCount(1);
   });
 });
 

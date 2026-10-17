@@ -32,6 +32,7 @@ import { RefreshCw, X } from 'lucide-react';
 import {
   listSessions,
   postSessionCommand,
+  readErrorDetail,
   sendMessage,
   SessionError,
 } from '../lib/api';
@@ -161,7 +162,16 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
           // 409 = 该会话已定义过任务——**跳过这一步，不是错误**（AC-10）。
           if (!isAlreadyDefined(error)) throw error;
         }
-        await sendMessage(session.session_id, { content: taskText, mode: 'queue' });
+        // `sendMessage` 返回**原始 Response**（非 2xx 不抛，见 `lib/api.ts:772` 的签名）
+        // ——必须自己查 `ok`。漏掉这一步，后端 500 会被当成成功受理，然后 refetch
+        // 拿回一张没动的卡，用户看到的是"拖了、没反应、也没说话"（AC-10 的反向面）。
+        const res = await sendMessage(session.session_id, {
+          content: taskText,
+          mode: 'queue',
+        });
+        if (!res.ok) {
+          throw new SessionError(res.status, await readErrorDetail(res));
+        }
       } catch (error) {
         // 任一步失败 -> 如实说出后端 detail，卡片**不动**（不做乐观移动）。
         showNotice((error as Error).message || '拉起会话失败');
