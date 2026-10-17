@@ -23,6 +23,10 @@ function session(
     workspace,
     archived,
     corrupted: false,
+    product_state: '',
+    product_state_changed_at: null,
+    attention_kind: null,
+    attention_summary: null,
   };
 }
 

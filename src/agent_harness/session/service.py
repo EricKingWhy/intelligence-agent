@@ -128,6 +128,7 @@ from agent_harness.session.ask_user_timeout import (
     pending_ask_user_request_id,
     pending_input_request,
 )
+from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -1477,14 +1478,29 @@ class SessionService:
             for sid, (_, integrity) in zip(zero_ids, reports):
                 if integrity.corrupt_lines:
                     corrupt_ids.add(sid)
-        for sid, stats in zip(ids, stats_list):
-            if stats is None:
-                continue
-            if stats.event_count == 0 and sid not in corrupt_ids:
-                continue
+        # 会被返回的行（`None` 与"真空会话"不占行）；后续摘要回填与投影回填共用。
+        visible = [
+            (sid, stats) for sid, stats in zip(ids, stats_list)
+            if stats is not None
+            and (stats.event_count > 0 or sid in corrupt_ids)
+        ]
+        # #1303 §3.3：看板四字段从投影缓存回填。只对**切片后且会被返回**的行取投影
+        # （O(limit) 契约不变）；一次 to_thread 卸载 + 同一限流器，与摘要批量读同款。
+        # `BoardProjectionStore.get` 三级读取：内存 → sidecar（零 read_events）→ 重放
+        # 回填（缺 sidecar 的自愈路径，§3.4 允许一次）。
+        projection_store = get_board_projection_store(store)
+        projections = await anyio.to_thread.run_sync(
+            lambda: [projection_store.get(sid) for sid, _ in visible],
+            limiter=_LIST_SYNC_LIMITER,
+        )
+        for (sid, stats), projection in zip(visible, projections):
             backfill: dict[str, Any] = {
                 "archived": sid in archived_ids,
                 "corrupted": sid in corrupt_ids,
+                "product_state": projection.product_state,
+                "product_state_changed_at": projection.product_state_changed_at,
+                "attention_kind": projection.attention_kind,
+                "attention_summary": projection.attention_summary,
             }
             ref = fixed_ref if workspace_id is not None else refs.get(sid)
             if ref is not None:
