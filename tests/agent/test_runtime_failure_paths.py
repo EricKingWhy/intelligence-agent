@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import openai
@@ -36,7 +37,8 @@ from agent_harness.session import (
     JsonlSessionStore,
 )
 from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import RUN_TERMINAL_TYPES
+from agent_harness.session.event import ERROR, RUN_TERMINAL_TYPES, WORKFLOW_MODE_CHANGED
+from agent_harness.session.session import Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -625,6 +627,56 @@ async def test_stream_close_after_completion_does_not_double_terminate(tmp_path)
 
     terminals = [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)]
     assert terminals == [RUN_COMPLETED], f"出现双终结：{terminals}"
+
+
+@pytest.mark.asyncio
+async def test_plan_failure_marker_is_persisted_before_terminal_yield(tmp_path):
+    """Closing at run/failed must not skip the plan failure marker append."""
+    session = make_session(tmp_path)
+    session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+    agen = _runtime(ExplodingModel()).run_stream(session, "hi")
+
+    async for event in agen:
+        if event.type == RUN_FAILED:
+            break
+    await agen.aclose()
+
+    errors = [event for event in session.events if event.type == ERROR]
+    assert len(errors) == 1
+    assert errors[0].data["code"] == "run-failed-before-plan"
+    persisted_types = [event.type for event in session.events]
+    assert persisted_types.index(RUN_FAILED) < persisted_types.index(ERROR)
+    assert isinstance(errors[0].seq, int)
+
+
+@pytest.mark.asyncio
+async def test_transient_plan_failure_marker_precedes_terminal_when_append_fails(tmp_path):
+    """A failed durable append must be delivered before consumers close at run/failed."""
+    session = make_session(tmp_path)
+    session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+    original_append = Session.append
+
+    def failing_append(self, event_type, data, **kwargs):
+        if event_type == ERROR:
+            raise OSError("injected durable write failure")
+        return original_append(self, event_type, data, **kwargs)
+
+    seen = []
+    with patch.object(Session, "append", failing_append):
+        agen = _runtime(ExplodingModel()).run_stream(session, "hi")
+        async for event in agen:
+            seen.append(event)
+            if event.type == RUN_FAILED:
+                break
+        await agen.aclose()
+
+    errors = [event for event in seen if event.type == ERROR]
+    assert len(errors) == 1
+    assert errors[0].data["code"] == "run-failed-before-plan"
+    assert errors[0].seq is None
+    assert seen.index(errors[0]) < next(
+        index for index, event in enumerate(seen) if event.type == RUN_FAILED
+    )
 
 
 # ---- A 组（R6-2）：零 chunk 流不得伪装成成功完成 ----

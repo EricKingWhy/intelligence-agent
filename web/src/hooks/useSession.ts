@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, FailedDraft, SessionDeleted, SessionMode, SessionSummary } from '../types';
+import { EventType, type AgentEvent, type ConversationState, type FailedDraft, type SessionDeleted, type SessionMode, type SessionSummary } from '../types';
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
@@ -859,7 +859,7 @@ export function useSession() {
           // （finishLive），不再进入「连接中断」重试链——重试永远不会成功
           // （每轮新 run 都派生 PLAN、写工具全被拦）。横幅本身是事件流投影
           // （`deriveRunFailedBeforePlan`），这里只做流终态判定。
-          if (event.type === 'error' && event.data?.code === 'run-failed-before-plan') {
+          if (event.type === EventType.ERROR && event.data?.code === 'run-failed-before-plan') {
             terminalSeenRef.current = true;
             // 不 return：继续走通用投影（类型已登记为 no-op）与游标语义——
             // 这条分支只改「终态判定」，不改帧序。
