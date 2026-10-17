@@ -33,6 +33,10 @@ function session(id: string, archived = false, corrupted = false): SessionSummar
     workspace: null,
     archived,
     corrupted,
+    product_state: '',
+    product_state_changed_at: null,
+    attention_kind: null,
+    attention_summary: null,
   };
 }
 
@@ -63,6 +67,7 @@ function render(props: {
       titlesById: {},
       onSelect: noop,
       onNew: noop,
+      onOpenPlugins: noop,
       activeProjectId: props.activeProjectId ?? null,
       onSelectProject: noop,
       selectedCwd: props.selectedCwd ?? null,

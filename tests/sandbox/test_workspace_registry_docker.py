@@ -343,3 +343,76 @@ class TestDockerRegistryJunctionImport:
             assert (outside / "secret.txt").read_text(encoding="utf-8") == "external secret"
         finally:
             kernel32.CloseHandle(junction_handle)
+
+
+@docker_required
+class TestDockerRegistryPosixSymlinkSwapRace:
+    """#1301：copy_in 非 Windows 分支按路径二次遍历的换链竞态回归。
+
+    竞态是真实的：换链在**真实 tar 归档进行中**触发（addfile 钩子在归档到
+    `workspace/nested` 目录成员那一刻，对真实文件系统执行 rename + symlink）。
+    monkeypatch 只提供确定性交错点，不 mock 竞态本身——归档遍历、换链、泄漏
+    观察全部走真实文件系统与真实容器。基线（按路径二次遍历）会把 `outside`
+    的内容经换链后的 symlink 打进 tar（换链泄漏）；修后（fd 相对 + O_NOFOLLOW）
+    读到的仍是 pin 住的原文件内容。
+    """
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink swap is POSIX-only")
+    @pytest.mark.parametrize("legacy_mapping", [False, True], ids=["new", "psec-migration"])
+    def test_import_does_not_leak_content_through_mid_archive_symlink_swap(
+        self, registry, tmp_path: Path, legacy_mapping: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import tarfile as tarfile_module
+
+        source = tmp_path / "project"
+        nested = source / "nested"
+        nested.mkdir(parents=True)
+        (nested / "payload.txt").write_text("ORIGINAL-PAYLOAD", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "payload.txt").write_text("EXTERNAL-SECRET", encoding="utf-8")
+
+        swapped = {"done": False}
+        original_addfile = tarfile_module.TarFile.addfile
+
+        def addfile_with_real_swap(self, tarinfo, fileobj=None):
+            if (
+                not swapped["done"]
+                and tarinfo.isdir()
+                and tarinfo.name == "workspace/nested"
+            ):
+                swapped["done"] = True
+                os.rename(nested, nested.with_name("nested.pre-swap"))
+                os.symlink(outside, nested)
+            return original_addfile(self, tarinfo, fileobj)
+
+        monkeypatch.setattr(tarfile_module.TarFile, "addfile", addfile_with_real_swap)
+
+        if legacy_mapping:
+            registry._write_mapping(SESSION_ID, {
+                "session_id": SESSION_ID,
+                "backend": "windows_psec",
+                "workspace_root": str(source),
+                "container_name": None,
+                "volume_name": None,
+                "created_at": "legacy-created-at",
+            })
+            sandbox = registry.get(SESSION_ID)
+        else:
+            sandbox = registry.create(
+                SESSION_ID, workspace_root=source, backend="docker",
+            )
+
+        try:
+            assert sandbox.read_text("nested/payload.txt") == "ORIGINAL-PAYLOAD"
+            assert (outside / "payload.txt").read_text(
+                encoding="utf-8"
+            ) == "EXTERNAL-SECRET"
+        finally:
+            if swapped["done"]:
+                if nested.is_symlink():
+                    nested.unlink()
+                pre_swap = nested.with_name("nested.pre-swap")
+                if pre_swap.is_dir():
+                    os.rename(pre_swap, nested)

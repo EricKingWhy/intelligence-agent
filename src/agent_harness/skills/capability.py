@@ -37,7 +37,15 @@ class SkillCapability:
         return self._promoter
 
     def catalog(self) -> list[SkillCatalogEntry]:
-        """目录条目（只有 name/description/meta，不含正文）。"""
+        """启用中的目录条目（只有 name/description/meta，不含正文）。
+
+        #1200：禁用条目（plugin-settings.json 的 skill_overrides）不投影给模型
+        Context / `/` 菜单 / load_skill；管理面用 :meth:`all_entries` 看全量。
+        """
+        return [entry for entry in self._discovery.catalog().entries if entry.enabled]
+
+    def all_entries(self) -> list[SkillCatalogEntry]:
+        """全量目录条目（含禁用项）——插件管理窗口的列表数据源。"""
         return list(self._discovery.catalog().entries)
 
     def errors(self) -> list[str]:
@@ -76,7 +84,7 @@ class SkillCapability:
         UnicodeDecodeError（后者是 ValueError 子类——发现后文件被换成非 UTF-8
         字节正是本防线针对的漂移形态，与 discovery.py 的捕获面一致）。
         """
-        for entry in self._discovery.catalog().entries:
+        for entry in self.catalog():
             if entry.name == name:
                 try:
                     return entry.load_body()
@@ -89,7 +97,7 @@ class SkillCapability:
     def load_with_resource_root(self, name: str) -> tuple[str, Path]:
         """Load one Skill body with the root for resolving its relative resources."""
         body = self.load(name)
-        for entry in self._discovery.catalog().entries:
+        for entry in self.catalog():
             if entry.name == name:
                 return body, entry.source_path.parent
         raise CapabilityError(f"skill '{name}' is not in the catalog", code="not_found")

@@ -1022,6 +1022,17 @@ class SessionSummary(BaseModel):
     # 不是"不存在"——前端据此渲染损坏徽标并引导至恢复入口。与 `archived`
     # 同样刻意不给默认值，漏映射响亮失败。
     corrupted: bool
+    # #1303 §3.3：看板四态投影（`""` = 从未 `task/defined` = backlog）。四字段与
+    # `archived`/`corrupted` 同款**刻意不给默认值**——给了默认值，漏映射的构造点
+    # 会把看板静默渲染成 backlog/无注意力，那是一条假事实（不变量 #21）。
+    product_state: str
+    # 产品四态最后一次跃迁的事件时刻——看板 ack 比较键的**唯一**来源
+    # （同态事件不刷新它；Orca `agent-attention-acknowledgement.ts` 的比较形状）。
+    product_state_changed_at: str | None
+    # `"input"` / `"approval"` / None：会话在等你什么（仅 `executing` 时有值）。
+    attention_kind: str | None
+    # 注意力横幅文案，与 `attention_kind` 同源。
+    attention_summary: str | None
 
 
 class SessionArchived(BaseModel):
@@ -2489,23 +2500,85 @@ def create_app(
 
     @app.get("/api/mcp/servers")
     async def list_mcp_servers() -> dict:
-        """已装配的 MCP server + 连接状态（未装配时空列表，不 503——
-        "没配 MCP" 是缺省态，不是故障）。"""
-        from agent_harness.mcp.capability import MCPCapability
+        """MCP server 管理列表（未装配时空列表，不 503——"没配 MCP" 是缺省态）。
 
-        _, wiring = await state.get_wiring()
-        capability = next(
-            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
+        #1200 / 裁决 B1：数据源是 **config ∪ runtime**——被禁用/连接失败的 server
+        也在列表里（管理窗口要能重新启用它们），不能只看 `_by_name`（只有已连接）。
+        字段为增量：既有 `{name, connected}` 保留，新增
+        `enabled / needs_auth / tool_count / require_confirm`（向后兼容）。
+        """
+        from agent_harness.mcp.capability import find_mcp_capability
+        from agent_harness.plugins.settings import load_plugin_settings_or_default
+
+        # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
+        # 替换实现注入的是这一份，不要绕过它去闭包里的初始 AppState——写端点
+        # 落盘用的 workspace 也必须与这里读的是同一个，否则开关写了却读不回。
+        agent_settings = getattr(app.state.agent, "settings", None) or state.settings
+        # 读不出选择态不拖垮只读列表：按默认（全部启用）投影，错误如实附带。
+        plugin_settings, settings_error = load_plugin_settings_or_default(
+            agent_settings.workspace_dir
         )
-        if capability is None:
-            return {"servers": []}
-        return {
+        _, wiring = await app.state.agent.get_wiring()
+        capability = find_mcp_capability(wiring)
+        if capability is not None:
+            names = capability.all_server_names()
+            connected = {
+                name: capability.is_connected(name) for name in names
+            }
+            needs_auth = {name: capability.needs_auth(name) for name in names}
+            tool_counts = {name: capability.tool_count(name) for name in names}
+            # 详情页「配置」摘要（transport / command / url）——配置层原文，只读。
+            configs = {server.name: server for server in capability.configs()}
+            errors = list(capability.errors)
+        else:
+            # 未装配 MCP capability（无 mcp 段 / 装配失败）：仍按配置层列出，
+            # 否则管理窗口会把"配置了但没连上"错报成"没配"。
+            from agent_harness.capability.config import parse_capabilities_config
+            from agent_harness.mcp.config import parse_mcp_servers
+
+            parsed: list = []
+            try:
+                config = parse_capabilities_config(agent_settings.capabilities)
+                mcp_config = config.get("mcp")
+                if mcp_config is not None:
+                    parsed = list(parse_mcp_servers(mcp_config.options))
+            except Exception as error:  # noqa: BLE001 — 只读列表不因配置错误 500
+                errors = [f"MCP 配置解析失败：{error}"]
+            else:
+                errors = []
+            names = [server.name for server in parsed]
+            connected = {name: False for name in names}
+            needs_auth = {name: False for name in names}
+            tool_counts = {name: 0 for name in names}
+            # 配置层条目同样要进 configs：`config_enabled` 与 transport/command/url
+            # 摘要都从它读。置空会让 config 级 `enabled:false` 的 server 在这条路径上
+            # 显示成"已启用"、开关也照发（而它永远由配置层胜出，写进选择态也无效）。
+            configs = {server.name: server for server in parsed}
+
+        payload = {
             "servers": [
-                {"name": name, "connected": capability.is_connected(name)}
-                for name in capability.server_names()
+                {
+                    "name": name,
+                    "connected": connected[name],
+                    "enabled": plugin_settings.server_enabled(name),
+                    "needs_auth": needs_auth[name],
+                    "tool_count": tool_counts[name],
+                    "require_confirm": plugin_settings.requires_confirmation(name),
+                    # config 级 `enabled:false`：不接线也不受 plugin-settings 控制，
+                    # 面板据此说明"需改配置启用"（运行时选择态管不到它）。
+                    "config_enabled": getattr(configs.get(name), "enabled", True),
+                    # #1200 Phase 1：详情页配置摘要（缺省空串，不伪造）。
+                    "transport": getattr(configs.get(name), "transport", "") or "",
+                    "command": getattr(configs.get(name), "command", "") or "",
+                    "url": getattr(configs.get(name), "url", "") or "",
+                }
+                for name in names
             ],
-            "errors": list(capability.errors),
+            "errors": errors,
         }
+        if settings_error is not None:
+            payload["errors"] = [*errors, f"plugin-settings.json 不可读：{settings_error}"]
+        return payload
 
     @app.post("/api/mcp/servers/{server_name}/disconnect")
     async def disconnect_mcp_server(
@@ -2518,12 +2591,11 @@ def create_app(
         语义：200 → `{name, disconnected}`（幂等，无此 server 也 200）；
         来源闸（ADR-0025 D1）：连接管理是宿主侧动作，只接受本机来源。
         """
-        from agent_harness.mcp.capability import MCPCapability
+        from agent_harness.mcp.capability import find_mcp_capability
 
-        _, wiring = await state.get_wiring()
-        capability = next(
-            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
-        )
+        # 与列表端点同一条取用面（app.state.agent，而不是闭包里的初始 AppState）。
+        _, wiring = await app.state.agent.get_wiring()
+        capability = find_mcp_capability(wiring)
         if capability is None:
             return {"name": server_name, "disconnected": False}
         disconnected = await capability.disconnect_server(server_name)
@@ -2549,6 +2621,11 @@ def create_app(
     from agent_harness.web.mcp_packages import register_mcp_package_routes
 
     register_mcp_package_routes(app)
+
+    # #1200 插件管理写端点（server / 工具 / skill 启停、重连、调用前确认）。
+    from agent_harness.web.plugins import register_plugin_routes
+
+    register_plugin_routes(app)
 
     # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
     from agent_harness.web.host_dirs import register_host_dir_routes
@@ -2753,6 +2830,10 @@ def create_app(
                 ),
                 archived=s.archived,
                 corrupted=s.corrupted,
+                product_state=s.product_state,
+                product_state_changed_at=s.product_state_changed_at,
+                attention_kind=s.attention_kind,
+                attention_summary=s.attention_summary,
             )
             for s in summaries
         ]

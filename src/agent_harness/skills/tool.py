@@ -24,7 +24,7 @@ from agent_harness.tooling.result import ErrorCode
 SKILL_BODY_MAX_CHARS = 64_000
 
 
-def _cap_body(body: str, limit: int = SKILL_BODY_MAX_CHARS) -> str:
+def cap_skill_body(body: str, limit: int = SKILL_BODY_MAX_CHARS) -> str:
     """超限截断 + 诚实标记（小正文原样返回）。"""
     if len(body) <= limit:
         return body
@@ -97,5 +97,5 @@ class LoadSkillTool(Tool):
                     f"已加载技能 '{args.name}'。正文中的相对资源以 "
                     f"{single_line(str(resource_root))} 为根目录；请用现有文件工具读取，"
                     "继续遵循该工具原有的路径权限。",
-            data={"content": _cap_body(body), "resource_root": str(resource_root)},
+            data={"content": cap_skill_body(body), "resource_root": str(resource_root)},
         )
