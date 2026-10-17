@@ -57,8 +57,9 @@ class AskUserTimeoutDriver:
 
     单事件循环内使用（与 WS handler 同一 loop），不做跨线程同步。
 
-    #1284 P2-2：`timeout_seconds` 构造参数只是**旧事件兜底**；每个请求的计时档
-    以 `USER_INPUT_REQUESTED.data.timeout_seconds` 快照为准（见 `note_session_state`）。
+    #1284 P2-2：`timeout_seconds` 构造参数只是**旧事件兜底**；每个请求的计时档读
+    `USER_INPUT_REQUESTED` 载荷快照（`timeout_minutes` 优先，缺失/非法回落
+    `timeout_seconds`，再回落本参数——见 `note_session_state`）。
     """
 
     def __init__(
