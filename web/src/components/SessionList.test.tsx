@@ -192,4 +192,21 @@ describe('归属提示（#1028）', () => {
 
     expect(html).not.toContain('project-active');
   });
+
+  it('#1269 武装态：项目行带显式状态提示「新建会话目标」+ aria-label 说明可再点取消', () => {
+    const html = plain(render({ projects: [project('p1', '项目 alpha')], activeProjectId: 'p1' }));
+
+    expect(html).toContain('rail-project-armed-hint');
+    expect(html).toContain('新建会话目标');
+    // 只显示"已选中"不够——ticket #1269 要的是把 toggle 的**可逆性**讲清（再点一次取消）。
+    // 可访问名称用「新会话」（不是「新建会话」，避免与侧栏同名按钮在 byRole 子串匹配下撞车）。
+    expect(html).toContain('已选中为新会话的目标目录，再点一次取消');
+  });
+
+  it('#1269 未武装态：不渲染「新建会话目标」提示', () => {
+    const html = plain(render({ projects: [project('p1', '项目 alpha')], activeProjectId: null }));
+
+    expect(html).not.toContain('rail-project-armed-hint');
+    expect(html).not.toContain('新建会话目标');
+  });
 });

@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1184 分支与 origin/main 781733e8 的 sync merge d56e4ad5（父一 d0c4d1c5=本线 tip；父二 781733e8=origin/main；merge-base 772d0545）。ort 零冲突；merge-base..父一 10 文件、merge-base..父二 5 文件，交集为空；父一→合并树仅新增 5 个文档/效果图文件。git show --cc 空表、三树互异，覆盖闸门 fail-closed，故补本行；来侧提交由自身台账/路径归属覆盖。本行只机械归属合并，不主张内容审查。	d0c4d1c5a974b88fda4ecc97e60b797ff699cf60..d56e4ad5ff4eae006026e593be966debb0aab91a

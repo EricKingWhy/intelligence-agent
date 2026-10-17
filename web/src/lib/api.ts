@@ -630,7 +630,7 @@ export function worktreePathFromResponse(res: Response): string | null {
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
  *
- *  单独开这个缝的原因：「在此项目中新建任务」确认面（#169 AC12）要把后端 detail
+ *  单独开这个缝的原因：「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把后端 detail
  *  **原样**留在浮层里，而 useSession 的失败通道是给用户看的一句话——它还带着
  *  "422 = 未知模型"的旧语义（App 据那句话刷新模型目录）。两者混在一起会让
  *  「cwd 目录不存在」被显示成「模型不可用」。由调用方自己读，两条语义各自成立。 */
