@@ -282,9 +282,10 @@ def _archive_posix_tree_fd_relative(
     完全位于源树内的 hard-link pair 经 gettarinfo 的 inode 去重仍归档为
     LNKTYPE 成员）；FileNotFoundError（根缺失 / 条目消失）与 put_archive
     失败的 RuntimeError 抛错点不变；tar 成员名（`root_name` 树形）不变。
-    两处**有意收紧**（与 Windows 分支同契约，非行为保持）：symlink 根由
-    "归档出 SYMTYPE 成员"改为 PermissionError 响亮失败；socket 成员由基线
-    `TarFile.add` 的静默跳过改为 PermissionError 响亮失败。
+    两处**有意收紧**（与 Windows 分支同契约，非行为保持）：根被换成 symlink
+    由"归档出 SYMTYPE 成员"改为 PermissionError 响亮失败；根/成员被换成
+    unix socket 由基线的静默跳过（`TarFile.add` 对 gettarinfo→None 不报错）
+    改为 PermissionError 响亮失败。
     """
     dir_flags = (
         os.O_RDONLY
@@ -315,9 +316,9 @@ def _archive_posix_tree_fd_relative(
         # symlink 的根，O_NONBLOCK 防根被换成 fifo 时阻塞在打开上。
         root_fd = os.open(source, file_flags)
     except OSError as error:
-        if error.errno == errno.ELOOP:
-            # 根本身被换成 symlink：fail-closed（基线对 symlink 根会归档出
-            # 一个 SYMTYPE 成员破坏 volume，收紧为响亮失败）。
+        # ELOOP：根被换成 symlink；ENXIO：根被换成 unix socket——与组件级
+        # 映射同构的 fail-closed（基线分别会归档出 SYMTYPE 成员 / 静默跳过）。
+        if error.errno in (errno.ELOOP, errno.ENXIO):
             raise PermissionError(
                 "copy_in source changed during archive"
             ) from error

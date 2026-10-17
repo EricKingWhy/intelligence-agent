@@ -180,6 +180,52 @@ def test_copy_in_imports_host_file(
 
 
 @docker_required
+def test_copy_in_fails_closed_when_entry_swapped_to_unix_socket(
+    docker_sandbox: object,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1301：归档进行中文件组件被换成 unix socket ⇒ fail-closed 响亮失败。
+
+    换链是真实文件系统操作（mksocket + rename），addfile 钩子只提供确定性
+    交错点（触发于根目录成员归档时，即遍历开始前）。基线 `TarFile.add` 对
+    socket 成员静默跳过（导入"成功"但条目丢失）；修后必须 PermissionError
+    响亮失败，且容器工作区不得出现该名。
+    """
+    import socket as socket_module
+    import tarfile as tarfile_module
+
+    source = tmp_path / "project"
+    source.mkdir()
+    payload = source / "payload.txt"
+    payload.write_text("ORIGINAL-PAYLOAD", encoding="utf-8")
+    socket_path = tmp_path / "payload.sock"
+    sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    sock.bind(str(socket_path))
+
+    swapped = {"done": False}
+    original_addfile = tarfile_module.TarFile.addfile
+
+    def addfile_with_real_swap(self, tarinfo, fileobj=None):
+        if not swapped["done"] and tarinfo.isdir() and tarinfo.name == "workspace":
+            swapped["done"] = True
+            payload.unlink()
+            socket_path.rename(payload)
+        return original_addfile(self, tarinfo, fileobj)
+
+    monkeypatch.setattr(tarfile_module.TarFile, "addfile", addfile_with_real_swap)
+
+    with pytest.raises(PermissionError):
+        docker_sandbox.copy_in(source, ".")
+    assert docker_sandbox.path_kind("payload.txt") is None
+
+    sock.close()
+    # 还原现场：payload 处现在是换入的 socket，摘掉即可（源文件已在换链时
+    # 被 unlink，内容由本用例自建，无外部数据）。
+    payload.unlink(missing_ok=True)
+
+
+@docker_required
 class TestDockerPathKind:
     """#1167：`path_kind` 必须能探测容器内路径（基类实现对 `PurePosixPath`
     工作区根恒返回 `None`，曾导致 Docker 会话的项目指令加载/重载恒为 missing）。"""
