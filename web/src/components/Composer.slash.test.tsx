@@ -24,6 +24,7 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     compactSession: vi.fn(),
     getTaskState: vi.fn(),
+    getSlashRegistry: vi.fn(),
   };
 });
 vi.mock('../lib/auth', async (importOriginal) => {
@@ -31,7 +32,14 @@ vi.mock('../lib/auth', async (importOriginal) => {
   return { ...actual, getToken: vi.fn(() => null) };
 });
 
-import { compactSession, getTaskState, type SessionContextCompacted, type TaskState } from '../lib/api';
+import {
+  compactSession,
+  getSlashRegistry,
+  getTaskState,
+  type SessionContextCompacted,
+  type SlashRegistryCommand,
+  type TaskState,
+} from '../lib/api';
 import { Composer } from './Composer';
 
 type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
@@ -41,6 +49,18 @@ let root: Root;
 let onSubmit: Mock<(...args: SubmitArgs) => void>;
 let onSteer: Mock<(...args: SubmitArgs) => void>;
 let fetchMock: Mock;
+
+/** #1200：后端 registry 的固定投影（5 builtin + 3 skill，含插件命名空间）。 */
+const REGISTRY: SlashRegistryCommand[] = [
+  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
+  { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
+  { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
+  { name: 'model', kind: 'builtin', description: '选择本会话使用的模型' },
+  { name: 'deep-research', kind: 'skill', description: '深度调研', argumentHint: '主题…' },
+  { name: 'api-design', kind: 'skill', description: 'REST API 设计审查' },
+  { name: 'code-review', kind: 'skill', description: '双轴代码审查', namespace: 'acme' },
+];
 
 const taskState = (text: string | null): TaskState => ({
   defined: text !== null,
@@ -96,6 +116,8 @@ async function typeText(text: string): Promise<void> {
     setter?.call(ta, text);
     ta.dispatchEvent(new Event('input', { bubbles: true }));
   });
+  // #1200：菜单打开时才拉 registry——再冲一次微任务，让 mock 的 resolve 落到 DOM。
+  await act(async () => {});
 }
 
 function press(key: string, opts: KeyboardEventInit = {}): boolean {
@@ -141,6 +163,8 @@ beforeEach(async () => {
   onSteer = vi.fn();
   vi.mocked(compactSession).mockReset();
   vi.mocked(getTaskState).mockReset();
+  vi.mocked(getSlashRegistry).mockReset();
+  vi.mocked(getSlashRegistry).mockResolvedValue(REGISTRY);
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
   await mount();
@@ -156,12 +180,35 @@ afterEach(async () => {
 });
 
 describe('#1195 触发与渲染', () => {
-  it('行首 / → 菜单开，5 条命令按分组齐全', async () => {
+  it('行首 / → 菜单开，内置命令与 Skills 两组齐全（单一注册表）', async () => {
     await typeText('/');
     expect(menu()).not.toBeNull();
-    expect(menuItems().length).toBe(5);
-    expect(container.textContent).toContain('添加');
-    expect(container.textContent).toContain('指令');
+    expect(menuItems().length).toBe(REGISTRY.length);
+    expect(container.textContent).toContain('内置命令');
+    expect(container.textContent).toContain('Skills');
+  });
+
+  it('skill 行展示 /name + argument-hint + 描述', async () => {
+    await typeText('/');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    expect(item.textContent).toContain('/deep-research');
+    expect(item.textContent).toContain('主题…');
+    expect(item.textContent).toContain('深度调研');
+  });
+
+  it('插件 skill 用 namespace:name 消歧', async () => {
+    await typeText('/');
+    const item = container.querySelector('[data-slash-name="acme:code-review"]')!;
+    expect(item.textContent).toContain('/acme:code-review');
+  });
+
+  it('禁用 skill 由后端排除：注册表里没有就不渲染', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue(
+      REGISTRY.filter((c) => c.name !== 'api-design'),
+    );
+    await mount();
+    await typeText('/');
+    expect(container.querySelector('[data-slash-name="api-design"]')).toBeNull();
   });
 
   it('空格后 / 触发', async () => {
@@ -182,7 +229,13 @@ describe('#1195 触发与渲染', () => {
   it('fuzzy 过滤：/pl → 只剩 plan', async () => {
     await typeText('/pl');
     expect(menuItems().length).toBe(1);
-    expect(menuItems()[0].textContent).toContain('计划');
+    expect(menuItems()[0].textContent).toContain('plan');
+  });
+
+  it('fuzzy 过滤 skill：/deep → deep-research', async () => {
+    await typeText('/deep');
+    expect(menuItems().length).toBe(1);
+    expect(menuItems()[0].getAttribute('data-slash-name')).toBe('deep-research');
   });
 
   it('无命中空态：无匹配命令', async () => {

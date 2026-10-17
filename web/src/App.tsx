@@ -24,6 +24,7 @@ import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
+import { PluginPanel } from './components/PluginPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { ContextWindowPanel } from './components/ContextWindowPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
@@ -1284,6 +1285,7 @@ export default function App() {
    *  `onAfterClose` 注释：命令执行时浮层还开着，直接 focus 会被关闭时的焦点恢复打断）。 */
   const paletteAfterClose = useRef<(() => void) | null>(null);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
@@ -1554,6 +1556,8 @@ export default function App() {
              hook 回调，SessionList 的 memo 才不会因它失效。 */
           onDeleteSession={removeSession}
           onSetArchived={handleSetArchived}
+          /* #1200：侧栏一级常驻入口——插件管理窗口（MCP + Skills 启停）。 */
+          onOpenPlugins={() => setPluginsOpen(true)}
         />
 
         <section className="app-workspace">
@@ -1929,6 +1933,8 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #1200：插件管理窗口（侧栏「插件」入口；左列表 + 右详情）。 */}
+      <PluginPanel open={pluginsOpen} onOpenChange={setPluginsOpen} />
       {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
           恢复仍走会话内既有恢复链路（不新增恢复编排）。 */}
       <RecoveryListPanel

@@ -26,7 +26,24 @@ import {
   TaskNotDefinedError,
 } from './api';
 
-export type SlashCommandGroup = 'add' | 'command';
+/** #1200 Phase 3：`/` 菜单的唯一数据源（后端 `GET /api/plugins/slash-registry`）。
+ *  内置命令与 skill 同处一个列表；前端**不再维护**任何命令元数据（D2=A）。 */
+export type SlashRegistryKind = 'builtin' | 'skill';
+
+export interface SlashRegistryEntry {
+  name: string;
+  kind: SlashRegistryKind;
+  description: string;
+  /** 参数提示（frontmatter `argument-hint`），仅 skill 可能有。 */
+  argumentHint?: string;
+  /** 插件来源 skill 的消歧前缀（渲染为 `/namespace:name`）。 */
+  namespace?: string;
+}
+
+/** 菜单里显示的命令名：插件 skill 加 `namespace:` 前缀消歧（票面 §4）。 */
+export function slashDisplayName(entry: SlashRegistryEntry): string {
+  return entry.namespace ? `${entry.namespace}:${entry.name}` : entry.name;
+}
 
 export interface SlashCommandContext {
   sessionId: string;
@@ -44,12 +61,9 @@ export interface SlashCommandContext {
   getSessionEvents: (sessionId: string) => Promise<AgentEvent[]>;
 }
 
+/** 内置命令的**执行**回调（元数据在后端 registry；前端只按 name 查表）。 */
 export interface SlashCommand {
   name: string;
-  labelCN: string;
-  labelEN: string;
-  description: string;
-  group: SlashCommandGroup;
   run: (args: string | undefined, ctx: SlashCommandContext) => Promise<void>;
 }
 
@@ -124,49 +138,19 @@ function makeOpen(open: (ctx: SlashCommandContext) => void) {
   };
 }
 
-/** 注册表：顺序 = 效果图分组顺序（添加两条 → 指令三条）。 */
-export const SLASH_COMMANDS: readonly SlashCommand[] = [
-  {
-    name: 'goal',
-    labelCN: '目标',
-    labelEN: 'goal',
-    description: '设置或查看长期任务目标',
-    group: 'add',
-    run: runGoal,
-  },
-  {
-    name: 'plan',
-    labelCN: '计划',
-    labelEN: 'plan',
-    description: '进入或退出计划模式',
-    group: 'add',
-    run: runPlan,
-  },
-  {
-    name: 'compact',
-    labelCN: '压缩',
-    labelEN: 'compact',
-    description: '压缩以上对话内容',
-    group: 'command',
-    run: runCompact,
-  },
-  {
-    name: 'permission',
-    labelCN: '权限',
-    labelEN: 'permission',
-    description: '切换权限预设（沙箱模式与审批策略）',
-    group: 'command',
-    run: makeOpen((ctx) => ctx.openPermissionPicker()),
-  },
-  {
-    name: 'model',
-    labelCN: '模型',
-    labelEN: 'model',
-    description: '选择本会话使用的模型',
-    group: 'command',
-    run: makeOpen((ctx) => ctx.openModelPicker()),
-  },
-];
+/** 内置命令的执行表（按 name 查）；顺序无关——展示顺序由后端 registry 决定。 */
+export const BUILTIN_RUNS: Readonly<Record<string, SlashCommand['run']>> = {
+  goal: runGoal,
+  plan: runPlan,
+  compact: runCompact,
+  permission: makeOpen((ctx) => ctx.openPermissionPicker()),
+  model: makeOpen((ctx) => ctx.openModelPicker()),
+};
+
+/** 兼容导出（#1195 测试与旧调用点按 name 查 run）。 */
+export const SLASH_COMMANDS: readonly SlashCommand[] = Object.entries(BUILTIN_RUNS).map(
+  ([name, run]) => ({ name, run }),
+);
 
 export interface SlashTriggerMatch {
   query: string;
@@ -178,7 +162,9 @@ export interface SlashTriggerMatch {
 /** 触发判定（票面正则 `/(^|\s)\/(\w*)$/`）：行首或空格后半角 `/` 开尾。
  *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。 */
 export function slashTriggerMatch(value: string): SlashTriggerMatch | null {
-  const m = /(?:^|\s)\/(\w*)$/.exec(value);
+  // #1200：`:` 也进 query——插件 skill 的显示名是 `plugin:skill`，输入到冒号后
+  // 仍要继续 fuzzy 过滤（票面 §4「继续输入 fuzzy 过滤」）。
+  const m = /(?:^|\s)\/([\w:-]*)$/.exec(value);
   return m ? { query: m[1], start: m.index } : null;
 }
 
@@ -201,19 +187,23 @@ export function slashSubmitMatch(
   return { name: m[1], args: m[2] };
 }
 
-/** 过滤：haystack = labelCN + labelEN + description 的可搜面，fuzzyScore 打分
- *  降序（与 `filterCommands` 同款稳定排序；空 query 原序全量）。 */
+/** 过滤：haystack = 显示名 + 描述 + 参数提示的可搜面，fuzzyScore 打分降序
+ *  （与 `filterCommands` 同款稳定排序；空 query 原序全量）。
+ *  #1200：数据源是后端 registry 条目，前端不做任何"哪些命令存在"的判定。 */
 export function filterSlashCommands(
-  items: readonly SlashCommand[],
+  items: readonly SlashRegistryEntry[],
   query: string,
-): SlashCommand[] {
+): SlashRegistryEntry[] {
   if (!query.trim()) return [...items];
   return items
     .map((item) => ({
       item,
-      score: fuzzyScore(query, `${item.labelCN} ${item.labelEN} ${item.description}`),
+      score: fuzzyScore(
+        query,
+        `${slashDisplayName(item)} ${item.description} ${item.argumentHint ?? ''}`,
+      ),
     }))
-    .filter((x): x is { item: SlashCommand; score: number } => x.score !== null)
+    .filter((x): x is { item: SlashRegistryEntry; score: number } => x.score !== null)
     .sort((a, b) => b.score - a.score)
     .map((x) => x.item);
 }

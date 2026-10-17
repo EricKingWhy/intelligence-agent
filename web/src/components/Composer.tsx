@@ -12,7 +12,7 @@ import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
-import { getSessionEvents, type CatalogEntry, type ConstraintScope, type ModelCatalogEntry } from '../lib/api';
+import { getSessionEvents, getSlashRegistry, type CatalogEntry, type ConstraintScope, type ModelCatalogEntry, type SlashRegistryCommand } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { onTokenChange } from '../lib/auth';
@@ -29,8 +29,9 @@ import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import { ReasoningEffortSlider } from './ReasoningEffortSlider';
 import {
-  SLASH_COMMANDS,
+  BUILTIN_RUNS,
   filterSlashCommands,
+  slashDisplayName,
   slashSubmitMatch,
   slashTriggerMatch,
   type SlashCommand,
@@ -518,7 +519,7 @@ export const Composer = memo(function Composer({
        尾随空格同样落进命令路径，args 为空 ⇒ 走 §4.2「无参数则查看」。
        受 `locked` 门控（审查 A-P2-3）：与菜单触发同把锁——锁定态命令不执行，
        也不会被当成聊天发出。 */
-    const submitHit = slashSubmitMatch(trimmed, SLASH_COMMANDS.map((c) => c.name));
+    const submitHit = slashSubmitMatch(trimmed, Object.keys(BUILTIN_RUNS));
     if (submitHit) {
       if (sessionId == null) {
         /* 无会话不可执行（审查 A-P3-1）：给可见反馈且**不清输入**——静默 return
@@ -526,8 +527,8 @@ export const Composer = memo(function Composer({
         setSlashError('当前没有会话，命令暂不可用');
         return;
       }
-      const cmd = SLASH_COMMANDS.find((c) => c.name === submitHit.name)!;
-      void runSlashCommand(cmd, submitHit.args);
+      const run = BUILTIN_RUNS[submitHit.name];
+      void runSlashCommand({ name: submitHit.name, run }, submitHit.args);
       setValue('');
       setSlashIndex(0);
       setSlashDismissed(false);
@@ -638,7 +639,30 @@ export const Composer = memo(function Composer({
   // 无会话不触发（票面 §4.2：composer 本来也发不出去）。
   const slashMatch =
     sessionId != null && !locked ? slashTriggerMatch(value) : null;
-  const slashItems = slashMatch ? filterSlashCommands(SLASH_COMMANDS, slashMatch.query) : [];
+  // #1200 Phase 3：菜单数据源唯一化——内置命令 + 启用中的 skill 都来自后端
+  // registry（D2=A）；前端只保留 builtin 的 run 回调，不过滤"哪些命令存在"。
+  const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[]>([]);
+  // 菜单每次打开都重拉：插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。
+  const slashActive = slashMatch !== null;
+  useEffect(() => {
+    if (!slashActive) return;
+    let cancelled = false;
+    void getSlashRegistry()
+      .then((commands) => {
+        if (!cancelled) setSlashRegistry(commands);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        // 注册表拿不到就不画菜单（不伪造命令），原因落到可见错误面。
+        setSlashError(e instanceof Error ? e.message : '命令注册表加载失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slashActive]);
+  const slashItems = slashMatch
+    ? filterSlashCommands(slashRegistry, slashMatch.query)
+    : [];
   const slashOpen = slashMatch !== null && !slashDismissed;
   // 定位切除的统一起点（B-S-3）：菜单开着时 = 命令 token（含分隔空白）在 value 里的起点。
   const slashCutStart = slashOpen && slashMatch !== null ? slashMatch.start : null;
@@ -717,11 +741,24 @@ export const Composer = memo(function Composer({
    *  保留命令前的前缀文本，如 `hello /compact` 执行后剩 `hello`）；`null` =
    *  整条输入就是命令调用（submit 拦截路径），全清。 */
   const acceptSlashCommand = (
-    cmd: SlashCommand,
+    entry: SlashRegistryCommand,
     args: string | undefined,
     cutFrom: number | null,
   ) => {
-    void runSlashCommand(cmd, args);
+    const display = slashDisplayName(entry);
+    if (entry.kind === 'skill') {
+      /* skill 不是本地命令：执行语义 = Claude Code（消息开头出现 skill 名则执行
+         其内容）。这里只把 `/skill ` 插进输入框（保留命令前的前缀），再按 Enter
+         由既有发送路径交给 agent——模型经 load_skill 读取正文。参数提示已展示。 */
+      setValue((v) =>
+        `${cutFrom === null ? '' : v.slice(0, cutFrom)}/${display} `,
+      );
+      setSlashIndex(0);
+      setSlashDismissed(true);
+      return;
+    }
+    const run = BUILTIN_RUNS[entry.name];
+    if (run) void runSlashCommand({ name: entry.name, run }, args);
     setValue((v) => (cutFrom === null ? '' : v.slice(0, cutFrom)));
     setSlashIndex(0);
     setSlashDismissed(false);
@@ -1035,22 +1072,25 @@ export const Composer = memo(function Composer({
           {slashItems.length === 0 ? (
             <div className="slash-menu-empty">无匹配命令</div>
           ) : (
-            ['add', 'command'].map((group) => {
-              const groupItems = slashItems.filter((c) => c.group === group);
+            (['builtin', 'skill'] as const).map((kind) => {
+              const groupItems = slashItems.filter((c) => c.kind === kind);
               if (groupItems.length === 0) return null;
               return (
-                <div key={group}>
-                  <div className="slash-menu-group">{group === 'add' ? '添加' : '指令'}</div>
+                <div key={kind}>
+                  <div className="slash-menu-group">
+                    {kind === 'builtin' ? '内置命令' : 'Skills'}
+                  </div>
                   {groupItems.map((cmd) => {
                     const index = slashItems.indexOf(cmd);
                     const selected = index === selectedSlashIndex;
+                    const display = slashDisplayName(cmd);
                     return (
                       <div
-                        key={cmd.name}
-                        id={`slash-opt-${cmd.name}`}
+                        key={`${kind}:${display}`}
+                        id={`slash-opt-${display}`}
                         role="option"
                         aria-selected={selected}
-                        data-slash-name={cmd.name}
+                        data-slash-name={display}
                         className={`slash-menu-item${selected ? ' selected' : ''}`}
                         onMouseDown={(e) => {
                           // mousedown 而非 click：textarea 的 blur 会在 click 之前到，
@@ -1060,8 +1100,10 @@ export const Composer = memo(function Composer({
                         }}
                         onClick={() => acceptSlashCommand(cmd, undefined, slashCutStart)}
                       >
-                        <span className="slash-menu-label">{cmd.labelCN}</span>
-                        <span className="slash-menu-name">/{cmd.name}</span>
+                        <span className="slash-menu-name">/{display}</span>
+                        {cmd.argumentHint !== undefined && (
+                          <span className="slash-menu-hint">{cmd.argumentHint}</span>
+                        )}
                         <span className="slash-menu-desc">{cmd.description}</span>
                       </div>
                     );

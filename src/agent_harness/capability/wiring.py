@@ -366,6 +366,26 @@ async def _wire_skills(
     if enabled_global_skill_digests:
         directories.append(global_managed_dir)
     directories.extend(additional_directories)
+    # #1200 / 裁决 C1：管理选择态（禁用名）在装配期读一次；坏文件响亮告警并
+    # 按默认继续（OPTIONAL 子系统不得拖垮 core）。
+    from agent_harness.plugins.settings import (
+        PluginSettingsError,
+        load_plugin_settings,
+    )
+
+    try:
+        plugin_settings = load_plugin_settings(settings.workspace_dir)
+    except PluginSettingsError as error:
+        logger.warning("plugin-settings.json 不可读，按默认（全部启用）继续：%s", error)
+        from agent_harness.plugins.settings import PluginSettings
+
+        plugin_settings = PluginSettings()
+    directory_provenance: dict[Path, tuple[str, str]] = {
+        global_dir: ("global", "personal"),
+        project_dir: ("workspace", "project"),
+    }
+    for extra in additional_directories:
+        directory_provenance[extra] = ("workspace", "personal")
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
     discovery = SkillDiscovery(
@@ -381,6 +401,8 @@ async def _wire_skills(
             "global": enabled_global_skill_digests,
         },
         selection_errors=selection_errors,
+        disabled_names=plugin_settings.skill_disabled_names(),
+        directory_provenance=directory_provenance,
     )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
@@ -425,6 +447,19 @@ async def _wire_mcp(
         MCPPackageError,
         MCPPackageManager,
     )
+    from agent_harness.plugins.settings import (
+        PluginSettings,
+        PluginSettingsError,
+        load_plugin_settings,
+    )
+
+    # #1200：管理选择态（禁用 server / 工具、调用前确认）。文件缺失=全默认；
+    # 损坏则记 warning 按默认继续——可选子系统不得拖垮装配（与 _wire_skills 同款）。
+    try:
+        plugin_settings = load_plugin_settings(settings.workspace_dir)
+    except PluginSettingsError as error:
+        logger.warning("plugin-settings.json 不可读，MCP 按默认（全部启用）继续：%s", error)
+        plugin_settings = PluginSettings()
 
     try:
         servers = parse_mcp_servers(cfg.options)
@@ -452,6 +487,9 @@ async def _wire_mcp(
         *configured_servers,
         *(server for server in packaged_servers if server.enabled),
     ]
+    # 禁用 server 不装配（不连接），但保留在 configs 里：管理窗口要显示它并
+    # 允许重新启用（裁决 D1：重启后生效）。
+    disabled_servers = plugin_settings.disabled_servers
     names = [server.name for server in servers]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -460,7 +498,12 @@ async def _wire_mcp(
             "resolve the source explicitly",
             code="init_failed",
         )
-    capability = await build_mcp_capability(servers)
+    capability = await build_mcp_capability(
+        servers,
+        disabled_servers=disabled_servers,
+        disabled_tools=plugin_settings.disabled_tools,
+        require_confirm=plugin_settings.require_confirm,
+    )
     # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
     # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了
     # 但 tools/list 为空的 server（mis-scoped token 常见症状）走"无工具降级

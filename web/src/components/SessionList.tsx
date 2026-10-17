@@ -31,6 +31,7 @@ import {
   FolderOpen,
   FolderPlus,
   Plus,
+  Puzzle,
   TriangleAlert,
 } from 'lucide-react';
 import type { Project, SessionDeleted, SessionSummary } from '../types';
@@ -101,6 +102,8 @@ interface Props {
    *  否则是**给用户看的原因**（后端 detail 原文）——就地显示在本栏顶部，不弹全局横幅
    *  （AC9）。可逆动作因此不需要确认面（AC11）：再点一次「取消归档」就是撤销。 */
   onSetArchived: (sessionId: string, archived: boolean) => Promise<string | null>;
+  /** #1200：打开「插件」管理窗口（侧栏一级入口，常驻）。 */
+  onOpenPlugins: () => void;
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
@@ -126,6 +129,7 @@ export const SessionList = memo(function SessionList({
   sandboxBackends,
   onDeleteSession,
   onSetArchived,
+  onOpenPlugins,
 }: Props) {
   const now = useTickingNow();
   /** 「显示已归档」开关（#171 AC10）：**视图状态**，持久化到 localStorage 但**不重拉
@@ -269,6 +273,15 @@ export const SessionList = memo(function SessionList({
     <aside className="session-rail">
       <div className="session-list-header">
         <span className="panel-label">会话</span>
+        {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
+        <button
+          className="icon-btn rail-plugins-btn"
+          onClick={onOpenPlugins}
+          aria-label="插件"
+          title="插件：MCP Servers 与 Skills 的启用 / 禁用"
+        >
+          <Puzzle size={14} />
+        </button>
         {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
             「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
             （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}

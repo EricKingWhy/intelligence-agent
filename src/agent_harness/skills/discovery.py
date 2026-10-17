@@ -90,6 +90,16 @@ class SkillCatalogEntry:
     scanned_root: Path | None = None
     # Verify the exact bytes consumed by lazy load_skill against the install snapshot.
     managed_skill_sha256: str | None = None
+    # #1200：管理面来源标注（发现期由扫描根决定，与正文解析无关）。
+    # scope 是装配作用域（全局目录 / workspace 目录）；origin 是来源类别
+    # （personal=用户手写、project=workspace 内、plugin=安装的包）。
+    scope: str = "workspace"
+    origin: str = "personal"
+    plugin: str | None = None
+    # #1200：管理选择态（plugin-settings.json 的 skill_overrides）。禁用条目仍在
+    # 目录里（禁用≠删除），但 SkillCapability.catalog() 只投影启用项——模型
+    # Context / `/` 菜单看不到，load_skill 也拒绝加载。
+    enabled: bool = True
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
@@ -244,6 +254,8 @@ class SkillDiscovery:
         managed_directories: dict[str, Path] | None = None,
         enabled_managed_digests: dict[str, dict[str, str]] | None = None,
         selection_errors: list[str] | None = None,
+        disabled_names: frozenset[str] | None = None,
+        directory_provenance: dict[Path, tuple[str, str]] | None = None,
     ) -> None:
         self._directories = [Path(d) for d in directories]
         self._manual_paths = [Path(p) for p in (manual_paths or [])]
@@ -266,6 +278,13 @@ class SkillDiscovery:
             scope: dict(digests)
             for scope, digests in (enabled_managed_digests or {}).items()
         }
+        # #1200：禁用名（plugin-settings.json）——条目仍被发现，只是 enabled=False。
+        self._disabled_names = frozenset(disabled_names or ())
+        # #1200：扫描根 → (scope, origin)。未登记的目录按 project/workspace 处理
+        # （options 扩展目录属于本项目装配面）。
+        self._directory_provenance = {
+            Path(path): value for path, value in (directory_provenance or {}).items()
+        }
         # 最近一次 discover() 结果的缓存：SkillCapability 持本类引用（不再是装配期
         # 静态 catalog），写入方法刷新后 capability 的可见性随之收敛。
         self._catalog: SkillCatalog | None = None
@@ -284,7 +303,15 @@ class SkillDiscovery:
         seen: dict[str, tuple[Path, bool]] = {}
         blocked_managed_conflicts: set[str] = set()
 
-        def _consider(path: Path, origin: str, root: Path | None) -> None:
+        def _consider(
+            path: Path,
+            origin: str,
+            root: Path | None,
+            *,
+            scope: str = "workspace",
+            origin_kind: str = "project",
+            plugin: str | None = None,
+        ) -> None:
             claim = self._managed_claim_for(path)
             if claim is not None and claim.digest is None:
                 return
@@ -305,6 +332,13 @@ class SkillDiscovery:
                     scanned_root=root,
                     managed_skill_sha256=managed_digest,
                 )
+            entry = replace(
+                entry,
+                scope=scope,
+                origin=origin_kind,
+                plugin=plugin,
+                enabled=entry.name not in self._disabled_names,
+            )
             if entry.name in blocked_managed_conflicts:
                 return
             if entry.name in seen:
@@ -340,20 +374,29 @@ class SkillDiscovery:
                 # 容错契约，绝不中断整个扫描（否则一个坏目录让所有技能消失）。
                 catalog.errors.append(f"[directory] {_spath(directory)}: unreadable ({error})")
                 continue
+            scope, origin_kind = self._directory_provenance.get(
+                directory, ("workspace", "project")
+            )
             for skill_dir in skill_dirs:
                 if managed_scope is not None and skill_dir.name not in self._enabled_digests(managed_scope):
                     continue
                 skill_file = skill_dir / "SKILL.md"
                 if skill_dir.is_dir() and skill_file.is_file():
+                    managed_scope_kind = (
+                        "workspace" if managed_scope == "project" else "global"
+                    )
                     _consider(
                         skill_file,
                         "directory",
                         skill_dir if managed_scope is not None else directory,
+                        scope=managed_scope_kind if managed_scope is not None else scope,
+                        origin_kind="plugin" if managed_scope is not None else origin_kind,
+                        plugin=skill_dir.name if managed_scope is not None else None,
                     )
 
         for manual in self._manual_paths:
             if manual.is_file():
-                _consider(manual, "manual", None)
+                _consider(manual, "manual", None, scope="global", origin_kind="personal")
             else:
                 catalog.errors.append(f"[manual] {_spath(manual)}: not a file")
         self._catalog = catalog

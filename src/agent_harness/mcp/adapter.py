@@ -117,9 +117,14 @@ class MCPTool(Tool):
         connection: MCPServerConnection,
         server_config: MCPServerConfig,
         remote_tool: Any,
+        *,
+        require_confirmation: bool = False,
     ) -> None:
         self._connection = connection
         self._server_config = server_config
+        # #1200：插件管理的「调用工具前需要我确认」。装配期从 plugin-settings.json
+        # 读入（裁决 D1：重启后生效），Executor 在审批关卡读它。
+        self.require_confirmation = require_confirmation
         self._remote_name = remote_tool.name
         self._name = mcp_tool_name(server_config.name, remote_tool.name)
         self._description = (getattr(remote_tool, "description", None) or "").strip()
@@ -145,6 +150,11 @@ class MCPTool(Tool):
             input_schema,
             f"{'_'.join(p for p in (server_config.name, remote_tool.name) if p)}_args",
         )
+
+    @property
+    def server_name(self) -> str:
+        """所属 MCP server 名（#1200：管理面按 server 归组工具）。"""
+        return self._server_config.name
 
     @property
     def remote_name(self) -> str:

@@ -144,6 +144,16 @@ class MCPServerConnection:
         return self._config.name
 
     @property
+    def needs_auth(self) -> bool:
+        """是否需要（重新）OAuth 授权（#1200：插件管理窗口的授权状态）。
+
+        OAuth provider 只在连接建立后存在；未连接且没有 provider 时无法断言
+        需要授权——按 False 报（管理面显示"未连接"，由重连去触发真实授权流）。
+        """
+        provider = self._oauth_provider
+        return bool(getattr(provider, "reauthorization_required", False))
+
+    @property
     def _has_interactive_oauth_handlers(self) -> bool:
         return (
             self._oauth_redirect_handler is not None

@@ -2483,23 +2483,87 @@ def create_app(
 
     @app.get("/api/mcp/servers")
     async def list_mcp_servers() -> dict:
-        """已装配的 MCP server + 连接状态（未装配时空列表，不 503——
-        "没配 MCP" 是缺省态，不是故障）。"""
-        from agent_harness.mcp.capability import MCPCapability
+        """MCP server 管理列表（未装配时空列表，不 503——"没配 MCP" 是缺省态）。
 
-        _, wiring = await state.get_wiring()
+        #1200 / 裁决 B1：数据源是 **config ∪ runtime**——被禁用/连接失败的 server
+        也在列表里（管理窗口要能重新启用它们），不能只看 `_by_name`（只有已连接）。
+        字段为增量：既有 `{name, connected}` 保留，新增
+        `enabled / needs_auth / tool_count / require_confirm`（向后兼容）。
+        """
+        from agent_harness.mcp.capability import MCPCapability
+        from agent_harness.plugins.settings import (
+            PluginSettings,
+            PluginSettingsError,
+            load_plugin_settings,
+        )
+
+        try:
+            plugin_settings = load_plugin_settings(state.settings.workspace_dir)
+        except PluginSettingsError as error:
+            # 读不出选择态不拖垮只读列表：按默认（全部启用）投影，错误如实附带。
+            plugin_settings = PluginSettings()
+            settings_error = str(error)
+        else:
+            settings_error = None
+
+        # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
+        # 替换实现注入的是这一份，不要绕过它去闭包里的初始 AppState。
+        _, wiring = await app.state.agent.get_wiring()
         capability = next(
             (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
         )
-        if capability is None:
-            return {"servers": []}
-        return {
+        if capability is not None:
+            names = capability.all_server_names()
+            connected = {
+                name: capability.is_connected(name) for name in names
+            }
+            needs_auth = {name: capability.needs_auth(name) for name in names}
+            tool_counts = {name: capability.tool_count(name) for name in names}
+            # 详情页「配置」摘要（transport / command / url）——配置层原文，只读。
+            configs = {server.name: server for server in capability.configs()}
+            errors = list(capability.errors)
+        else:
+            # 未装配 MCP capability（无 mcp 段 / 装配失败）：仍按配置层列出，
+            # 否则管理窗口会把"配置了但没连上"错报成"没配"。
+            from agent_harness.capability.config import parse_capabilities_config
+            from agent_harness.mcp.config import parse_mcp_servers
+
+            names = []
+            try:
+                config = parse_capabilities_config(state.settings.capabilities)
+                mcp_config = config.get("mcp")
+                if mcp_config is not None:
+                    names = [server.name for server in parse_mcp_servers(mcp_config.options)]
+            except Exception as error:  # noqa: BLE001 — 只读列表不因配置错误 500
+                errors = [f"MCP 配置解析失败：{error}"]
+            else:
+                errors = []
+            connected = {name: False for name in names}
+            needs_auth = {name: False for name in names}
+            tool_counts = {name: 0 for name in names}
+            configs = {}
+
+        payload = {
             "servers": [
-                {"name": name, "connected": capability.is_connected(name)}
-                for name in capability.server_names()
+                {
+                    "name": name,
+                    "connected": connected[name],
+                    "enabled": plugin_settings.server_enabled(name),
+                    "needs_auth": needs_auth[name],
+                    "tool_count": tool_counts[name],
+                    "require_confirm": plugin_settings.requires_confirmation(name),
+                    # #1200 Phase 1：详情页配置摘要（缺省空串，不伪造）。
+                    "transport": getattr(configs.get(name), "transport", "") or "",
+                    "command": getattr(configs.get(name), "command", "") or "",
+                    "url": getattr(configs.get(name), "url", "") or "",
+                }
+                for name in names
             ],
-            "errors": list(capability.errors),
+            "errors": errors,
         }
+        if settings_error is not None:
+            payload["errors"] = [*errors, f"plugin-settings.json 不可读：{settings_error}"]
+        return payload
 
     @app.post("/api/mcp/servers/{server_name}/disconnect")
     async def disconnect_mcp_server(
@@ -2543,6 +2607,11 @@ def create_app(
     from agent_harness.web.mcp_packages import register_mcp_package_routes
 
     register_mcp_package_routes(app)
+
+    # #1200 插件管理写端点（server / 工具 / skill 启停、重连、调用前确认）。
+    from agent_harness.web.plugins import register_plugin_routes
+
+    register_plugin_routes(app)
 
     # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
     from agent_harness.web.host_dirs import register_host_dir_routes

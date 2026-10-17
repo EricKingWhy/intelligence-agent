@@ -15,8 +15,10 @@ import {
   slashSubmitMatch,
   filterSlashCommands,
   currentWorkflowMode,
+  slashDisplayName,
   type SlashCommand,
   type SlashCommandContext,
+  type SlashRegistryEntry,
 } from './slashCommands';
 import { postSessionCommand, SessionError, type TaskState } from './api';
 
@@ -29,8 +31,8 @@ vi.mock('./api', async (importOriginal) => {
   };
 });
 
-describe('#1195 注册表 — 5 条定稿命令', () => {
-  it('恰好 5 条、名字与分组与票面一致', () => {
+describe('#1200 注册表 — 元数据在后端，前端只有 run 回调', () => {
+  it('恰好 5 条 builtin 执行回调（名字与 #1195 定稿表一致）', () => {
     expect(SLASH_COMMANDS.map((c) => c.name)).toEqual([
       'goal',
       'plan',
@@ -38,29 +40,18 @@ describe('#1195 注册表 — 5 条定稿命令', () => {
       'permission',
       'model',
     ]);
-    expect(SLASH_COMMANDS.map((c) => c.group)).toEqual([
-      'add',
-      'add',
-      'command',
-      'command',
-      'command',
-    ]);
   });
 
-  it('每条都有中文 label 与 description（效果图文案）', () => {
+  it('前端不再维护 label / description / group 元数据（D2=A）', () => {
     for (const c of SLASH_COMMANDS) {
-      expect(c.labelCN.length).toBeGreaterThan(0);
-      expect(c.description.length).toBeGreaterThan(0);
+      expect(c).not.toHaveProperty('labelCN');
+      expect(c).not.toHaveProperty('description');
+      expect(c).not.toHaveProperty('group');
+      expect(typeof c.run).toBe('function');
     }
-    const byName = new Map(SLASH_COMMANDS.map((c) => [c.name, c]));
-    expect(byName.get('goal')!.labelCN).toBe('目标');
-    expect(byName.get('plan')!.labelCN).toBe('计划');
-    expect(byName.get('compact')!.labelCN).toBe('压缩');
-    expect(byName.get('permission')!.labelCN).toBe('权限');
-    expect(byName.get('model')!.labelCN).toBe('模型');
   });
 
-  it('export / feedback / file 不在注册表（王浩宇 10-16 裁决）', () => {
+  it('export / feedback / file 不在执行表（王浩宇 10-16 裁决）', () => {
     const names = SLASH_COMMANDS.map((c) => c.name);
     expect(names).not.toContain('export');
     expect(names).not.toContain('feedback');
@@ -92,6 +83,11 @@ describe('#1195 触发正则 slashTriggerMatch', () => {
   it('已带空格的参数不再是触发态（菜单关闭，走提交拦截）', () => {
     expect(slashTriggerMatch('/goal xxx')).toBeNull();
   });
+
+  it('#1200 冒号进 query（插件 skill `/plugin:` 可继续 fuzzy）', () => {
+    expect(slashTriggerMatch('/acme:')).toEqual({ query: 'acme:', start: 0 });
+    expect(slashTriggerMatch('x /acme:co')).toEqual({ query: 'acme:co', start: 1 });
+  });
 });
 
 describe('#1195 带参提交拦截 slashSubmitMatch', () => {
@@ -119,29 +115,42 @@ describe('#1195 带参提交拦截 slashSubmitMatch', () => {
   });
 });
 
-describe('#1195 fuzzy 过滤 — 复用 fuzzyScore', () => {
-  const cmds = () => SLASH_COMMANDS;
-  it('空 query 全量（按注册表序）', () => {
+describe('#1200 fuzzy 过滤 — 后端 registry 条目', () => {
+  const entry = (
+    name: string,
+    description = '',
+    extra: Partial<SlashRegistryEntry> = {},
+  ): SlashRegistryEntry => ({ name, kind: 'skill', description, ...extra });
+  const cmds = (): SlashRegistryEntry[] => [
+    { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+    { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
+    entry('deep-research', '深度调研', { argumentHint: '主题…' }),
+    entry('code-review', '双轴代码审查', { namespace: 'acme' }),
+  ];
+
+  it('空 query 全量（保持后端顺序）', () => {
     expect(filterSlashCommands(cmds(), '').map((c) => c.name)).toEqual([
       'goal',
       'plan',
-      'compact',
-      'permission',
-      'model',
+      'deep-research',
+      'code-review',
     ]);
   });
 
-  it('中文 label 可过滤', () => {
+  it('中文描述可过滤', () => {
     expect(filterSlashCommands(cmds(), '目标').map((c) => c.name)).toEqual(['goal']);
   });
 
-  it('英文名可过滤（前缀优先）', () => {
+  it('命令名前缀可过滤', () => {
     expect(filterSlashCommands(cmds(), 'pl').map((c) => c.name)).toEqual(['plan']);
   });
 
-  it('英文 keywords 命中（labelEN 可搜）', () => {
-    const hits = filterSlashCommands(cmds(), 'compact');
-    expect(hits.map((c) => c.name)).toContain('compact');
+  it('argument-hint 进可搜面', () => {
+    expect(filterSlashCommands(cmds(), '主题').map((c) => c.name)).toEqual(['deep-research']);
+  });
+
+  it('插件 skill 的 namespace 前缀可过滤（/acme:）', () => {
+    expect(filterSlashCommands(cmds(), 'acme:').map((c) => c.name)).toEqual(['code-review']);
   });
 
   it('无命中 = 空数组（空态「无匹配命令」）', () => {
@@ -153,6 +162,17 @@ describe('#1195 fuzzy 过滤 — 复用 fuzzyScore', () => {
     const snapshot = [...src];
     filterSlashCommands(src, 'pl');
     expect(src).toEqual(snapshot);
+  });
+});
+
+describe('#1200 显示名 — 插件 skill 加 namespace 前缀', () => {
+  it('无 namespace = 原名', () => {
+    expect(slashDisplayName({ name: 'goal', kind: 'builtin', description: '' })).toBe('goal');
+  });
+  it('有 namespace = `plugin:skill`', () => {
+    expect(
+      slashDisplayName({ name: 'code-review', kind: 'skill', description: '', namespace: 'acme' }),
+    ).toBe('acme:code-review');
   });
 });
 
