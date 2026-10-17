@@ -3924,6 +3924,10 @@ class AgentRuntime:
                 # #1280 AC3：run 已启动时挂真实 run_id（owner 是 _RunFinalizer，
                 # arms.run_id 单点只读）；begin_run 之前崩溃 = None——没有 run 可挂，
                 # 信封字段如实缺席（by-design，见 session/event.py ERROR 注释）。
+                # 已接受的纯理论边界（#1280 review A 轴 P4）：append 成功而
+                # to_agent_event 映射抛错（纯字段映射，现实中不会）会把已落盘事件
+                # 误判为落盘失败——处理它需要把映射挪出 try，反而引入映射异常顶替
+                # 原始异常的真实风险，两害相权维持现状。
                 fatal_error_frame = to_agent_event(
                     arms.session.append(ERROR, error_data, run_id=arms.run_id)
                 )
@@ -3935,8 +3939,12 @@ class AgentRuntime:
                 # #1280 AC2：降级帧带显式 degraded 标记自描述——durable 型却无 seq
                 # 的帧自此可判别，golden 不变式据此放宽为「seq=None ⟺
                 # STREAM_ONLY_TYPES ∪ 带 degraded 标记的存储降级帧」。
+                # #1280 review A 轴 P4：降级帧同样挂 run_id（durable 成功路径
+                # :3928 同口径）——run 已启动时信封不悬空；begin_run 之前崩溃
+                # = None，与 AC3 的缺席语义一致。
                 fatal_error_frame = AgentEvent(
                     type=ERROR, data={**error_data, "degraded": True},
+                    run_id=arms.run_id,
                 )
         if end_event is not None:
             yield to_agent_event(end_event)

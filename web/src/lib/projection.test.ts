@@ -1258,14 +1258,15 @@ describe('applyEvent — df4f7d8 新形状', () => {
   });
 
   // #1280 AC4：`error`（#1193 致命失败信号）不再空摘要——message 是可读原因。
-  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（超长 1 行截断）；缺失 → 「运行失败」', () => {
+  // 与 summarizeRunFailed 同规则不截断（完整句子，ADR-0033 §2.3）。
+  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（全文不截断）；缺失 → 「运行失败」', () => {
     expect(summarizeEvent(ev({
       type: EventType.ERROR,
       data: { code: 'run-failed-before-plan', message: '模型调用失败' },
     }))).toBe('运行失败 · 模型调用失败');
     const long = 'x'.repeat(60);
     expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: long } }))).toBe(
-      `运行失败 · ${'x'.repeat(40)}…`,
+      `运行失败 · ${long}`,
     );
     expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('运行失败');
     expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('运行失败');

@@ -454,11 +454,12 @@ function summarizeSuperseded(event: AgentEvent): string {
 }
 
 // #1280 AC4：`error`（#1193 致命失败信号，durable）不再空摘要——data.message 是
-// 失败原因的可读口径，Timeline 行给人话，全文仍走事件钻取（1 行截断同 §5.2）。
+// 失败原因的可读口径，Timeline 行给人话，全文走事件钻取。与 summarizeRunFailed
+// 同规则**不截断**：文案是完整句子，截断正好切掉可操作尾巴（ADR-0033 §2.3）。
 function summarizeError(event: AgentEvent): string {
   const message = event.data.message;
   const detail = typeof message === 'string' ? message.trim() : '';
-  return detail ? `运行失败 · ${truncateQueueSummary(detail)}` : '运行失败';
+  return detail ? `运行失败 · ${detail}` : '运行失败';
 }
 
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
