@@ -13,6 +13,7 @@
  *  7. #1190 约束管理页的 `--cn-*` 墨面：.cn-value / .cn-type / .cn-meta / .cn-pill /
  *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
  *  8. #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5 且守 12px 地板
+ *  9. #1183 新建任务的项目路径入口（.project-path-callout-toggle）对比度 ≥4.5 且守 12px 地板
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -368,6 +369,26 @@ for (const theme of ['dark', 'light'] as const) {
     expect(m.fontSize, 'armed hint font-size').toBe('12px');
     const ratio = contrast(m.color, m.bg);
     expect(ratio, '.rail-project-armed-hint contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1183：新建任务路径展开入口是新增的可见 ink；锁住暗/亮主题的可读性，避免 accent 或字号回退。 */
+  test(`[${theme}] #1183 新建任务项目路径入口对比度 ≥4.5 且字号 ≥12px`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [],
+      projects: [{ id: 'p-contrast', path: 'D:/repos/contrast', title: '对比度项目', session_ids: [] }],
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.rail-project-head .rail-menu-btn').first().click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
+
+    const toggle = page.locator('.project-path-callout-toggle');
+    await expect(toggle).toBeVisible();
+    const m = await measure(page, '.project-path-callout-toggle');
+    expect(Number.parseFloat(m.fontSize), 'project path toggle font-size').toBeGreaterThanOrEqual(12);
+    const ratio = contrast(m.color, m.bg);
+    expect(ratio, `.project-path-callout-toggle contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
   test(`[${theme}] composer placeholder 对比度 ≥4.5（R3）`, async ({ page }) => {
