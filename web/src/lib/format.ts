@@ -19,6 +19,25 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return formatShortDuration(ms);
 }
 
+/** 粗粒度时长（委派 / 子智能体 roster 这类**分钟级**场景，可读性优先）：
+ *  <60s → 'N秒'；<60min → 'M分S秒'；否则 'H小时M分'。
+ *
+ *  与 formatShortDuration 的分工：后者是**工具调用**级精度（<50ms/ms/X.Xs），
+ *  委派动辄几分钟，用它会把 12 分钟显示成 '738.2s'。两种语言各服务各的量级，
+ *  不是同一语义的两种写法。
+ *
+ *  非有限 / 负值（时钟倒挂）→ null（不显数字，调用方隐藏该行，与 formatDuration 同口径）。 */
+export function formatCoarseDuration(ms: number): string | null {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}秒`;
+  const minutes = Math.floor(totalSec / 60);
+  const seconds = totalSec % 60;
+  if (minutes < 60) return `${minutes}分${seconds}秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}小时${minutes % 60}分`;
+}
+
 /** 全时间戳（本地时区，含毫秒）：'YYYY-MM-DD HH:mm:ss.fff'。
  *  Inspector 浮层 / Tooltip 等需要完整精度的展示场景使用（相对时间不够看时）。
  *  非法或缺失时间返回 null——调用方据此决定是否渲染该行。 */

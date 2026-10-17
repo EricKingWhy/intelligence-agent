@@ -17,9 +17,12 @@ import type { CSSProperties } from 'react';
 import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
+import { useDelegations } from './hooks/useDelegations';
+import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
+import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
@@ -610,6 +613,32 @@ export default function App() {
     focusRun();
     if (!panel.pinned && leaving) setInspectorOpen(false);
   }, [selectSession, focusRun, panel.pinned, selectedId]);
+
+  // ── #1256 子智能体可见性：roster（投影 = 后端父事件流派生）+ 右侧分栏 ──
+  // roster 数据来自后端只读端点（自身从父会话事件流派生）；父流委派事件到达时重拉。
+  // UI 不建第二套真相（不变量 #22）。
+  const delegations = useDelegations(selectedId, conversation);
+  // 分栏是**独立选择态**——只记录"看哪个子会话"，不改变主会话当前路由。
+  const [splitChild, setSplitChild] = useState<SplitChild | null>(null);
+  // 换父会话 ⇒ 关分栏（它属于某个父会话的上下文：拿 A 的子会话站在 B 里 = 跨会话第二真相）。
+  useEffect(() => {
+    setSplitChild(null);
+  }, [selectedId]);
+  const splitChildConversation = useChildConversation(splitChild?.childSessionId ?? null);
+  /** 行主体 → 主视图打开（现有 handleSelect 语义；开分栏时先收分栏，
+   *  否则左列（父会话）会被换成同一个子会话）。 */
+  const handleOpenChildMain = useCallback(
+    (childId: string) => {
+      setSplitChild(null);
+      handleSelect(childId);
+    },
+    [handleSelect],
+  );
+  /** chevron → 右侧分栏打开（父会话保持不动）。 */
+  const handleOpenChildSplit = useCallback(
+    (child: SplitChild) => setSplitChild(child),
+    [],
+  );
 
   useEffect(() => {
     void fetchModels();
@@ -1532,6 +1561,13 @@ export default function App() {
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
+        rosterSlot={
+          <SubagentRoster
+            delegations={delegations}
+            onOpenSession={handleOpenChildMain}
+            onOpenSplit={handleOpenChildSplit}
+          />
+        }
       />
 
       <main
@@ -1573,7 +1609,10 @@ export default function App() {
           onSetArchived={handleSetArchived}
         />
 
-        <section className="app-workspace">
+        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+          {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
+              父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
+          <div className="workspace-main">
           {authRequired && (
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
@@ -1923,6 +1962,18 @@ export default function App() {
               ) : null}
             </div>
           ))}
+          </div>
+          {splitChild && (
+            <SubagentSplitPane
+              child={splitChild}
+              conversation={splitChildConversation.conversation}
+              error={splitChildConversation.error}
+              density={density}
+              disclosure={disclosure}
+              reasoningDisclosure={reasoningDisclosure}
+              onClose={() => setSplitChild(null)}
+            />
+          )}
         </section>
 
         <StepDetail
