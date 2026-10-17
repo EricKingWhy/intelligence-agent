@@ -9431,6 +9431,39 @@ button.json-row {
   border-color: color-mix(in srgb, var(--color-warning) 45%, var(--border-subtle));
   color: color-mix(in srgb, var(--color-warning) 55%, var(--text-primary));
 }
+/* #1312：会话级目标状态行（会话身份，回答「这条消息发往哪个会话」）。
+ * 与 #1028 归属 chip 的视觉区分是**结构性的**：本行在 .composer-dock 之外、无边框/
+ * 无底色/无胶囊圆角，是状态行；归属 chip 在 dock 内、带描边胶囊。二者语义正交
+ * （会话 vs 项目），共用字号与墨色，靠无边框/无底色/无圆角 + dock 外置区分。
+ * 文案色用既有 --text-secondary（暗亮双主题均 ≥4.5，见 t-contrast 口径），
+ * 不新增主题 token（AGENTS §15）。 */
+.composer-session-target {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0 var(--space-xs) var(--space-xs);
+  padding: 0 var(--space-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.composer-session-target-id {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.composer-session-target-new-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.composer-session-target-new-btn:hover {
+  color: color-mix(in srgb, var(--color-accent) 80%, var(--text-primary));
+}
 /* #1027 兜底提示的文本（与 .composer-attach-error-text 同一版式语言）。 */
 .composer-attach-dropped-text {
   flex: 1;

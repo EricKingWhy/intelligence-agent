@@ -14,6 +14,8 @@
  *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
  *  8. #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5 且守 12px 地板
  *  9. #1183 新建任务的项目路径入口（.project-path-callout-toggle）对比度 ≥4.5 且守 12px 地板
+ * 10. #1312 Composer 会话级目标状态行（.composer-session-target）12px 地板 + 对比度 ≥4.5，
+ *     及「改为新会话」入口（.composer-session-target-new-btn，accent 色）对比度 ≥4.5
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -389,6 +391,33 @@ for (const theme of ['dark', 'light'] as const) {
     expect(Number.parseFloat(m.fontSize), 'project path toggle font-size').toBeGreaterThanOrEqual(12);
     const ratio = contrast(m.color, m.bg);
     expect(ratio, `.project-path-callout-toggle contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1312：Composer 会话级目标状态行与「改为新会话」入口是本轮新增的可见 ink。
+     选中会话后两者都在真实渲染路径上（openWorkspace 已点会话）——状态行守 12px
+     地板（--text-xs）且 --text-secondary ≥4.5；入口按钮是 accent 色、12px 正文，
+     亮/暗都不得回退到 <4.5。改字色/字号任一处，本用例立刻变红。 */
+  test(`[${theme}] #1312 会话级目标状态行与「改为新会话」对比度 ≥4.5 且 12px 地板`, async ({ page }) => {
+    await openWorkspace(page, theme);
+    const line = page.locator('.composer-session-target');
+    await expect(line).toBeVisible();
+    await expect(line).toContainText('正在向会话');
+
+    const m = await measure(page, '.composer-session-target');
+    expect(m.fontSize, '.composer-session-target font-size').toBe('12px');
+    const ratio = contrast(m.color, m.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .composer-session-target color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+    expect(ratio, `.composer-session-target contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    const btn = page.locator('.composer-session-target-new-btn');
+    await expect(btn).toBeVisible();
+    const bm = await measure(page, '.composer-session-target-new-btn');
+    expect(bm.fontSize, '.composer-session-target-new-btn font-size').toBe('12px');
+    const bRatio = contrast(bm.color, bm.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .composer-session-target-new-btn color=${bm.color} bg=${bm.bg} ratio=${bRatio.toFixed(4)}`);
+    expect(bRatio, `.composer-session-target-new-btn contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
   test(`[${theme}] composer placeholder 对比度 ≥4.5（R3）`, async ({ page }) => {

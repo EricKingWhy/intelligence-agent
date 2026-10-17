@@ -15,7 +15,7 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   items: CommandItem[];
-  /** 关闭**之后**执行一次的动作（当前只有「聚焦输入框」用）；**返回 `true` = 已接管落点**。
+  /** 关闭**之后**执行一次的动作（当前有「聚焦输入框」/「新建会话」两处调用）；**返回 `true` = 已接管落点**。
    *
    *  为什么需要这个缝：命令是在浮层**还开着**的时候跑 `run()` 的，而 Radix 关闭时会把焦点
    *  还给"打开前的元素"——于是命令里那句 `composer-input.focus()` 当场被这次焦点恢复打断，
