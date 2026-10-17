@@ -166,6 +166,10 @@ interface Props {
    *  只建出一个会话）。resolve 会话 id；resolve `null` = 懒建失败，hook 经 AC3
    *  通道给可见错误。Composer 只问"现在能不能附"，不问"会话从哪来"。 */
   onEnsureSession: () => Promise<string | null>;
+  /** #1312：会话级目标的**动作**出口——「改为新会话」= 回到新建态（App 传 `handleNew`）。
+   *  缺席时不渲染按钮（只读展示「正在向会话 … 追问」），与其余可选入口同款降级。
+   *  提交语义不经这里：`handleSubmit` 的 selectedId 二选一分支原样不动。 */
+  onNewSession?: () => void;
   /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
    *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
    *  本组件只渲染文案。`null`/缺省 = 不渲染 chip：**空白新建态**（无选中会话、无项目
@@ -258,6 +262,7 @@ export const Composer = memo(function Composer({
   projectAvailable = null,
   sessionId = null,
   onEnsureSession,
+  onNewSession,
   ownership = null,
   onCancel,
   presetTask,
@@ -1184,6 +1189,33 @@ export const Composer = memo(function Composer({
           正在压缩上下文…
         </div>
       )}
+      {/* #1312：会话级目标 pill——回答「这条消息要发往哪个会话」。
+          放在 .composer-dock **之外**：dock 里已有 #1028 的项目归属 chip，两者语义正交
+          （会话身份 vs 项目归属），外置且无边框/无底色，视觉上不与归属胶囊混淆。
+          未选中时明说「将创建新会话」——避免用户把全新任务误当续聊发给旧会话。 */}
+      <div className="composer-session-target" data-testid="composer-session-target">
+        {sessionId !== null ? (
+          <>
+            <span>
+              正在向会话{' '}
+              <span className="composer-session-target-id">{sessionId.slice(0, 8)}</span>{' '}
+              追问
+            </span>
+            {onNewSession !== undefined && (
+              <button
+                type="button"
+                className="composer-session-target-new"
+                aria-label="改为新会话"
+                onClick={onNewSession}
+              >
+                改为新会话
+              </button>
+            )}
+          </>
+        ) : (
+          <span>将创建新会话</span>
+        )}
+      </div>
       <div className="composer-dock surface-floating">
         <ComposerAttachments
           items={attachments.items}
