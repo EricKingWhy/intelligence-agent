@@ -9825,6 +9825,14 @@ button.json-row {
   margin-left: auto;
   color: var(--text-tertiary);
   font-size: var(--text-xs);
+  /* #198 先例：本仓没有独立 .mono 规则——技术标识的等宽写进具体类，不挂空类名。 */
+  font-family: var(--font-mono);
+}
+/* #1256 分栏头 token 行：`12.4K tok · 运行中`（票面 §5.2）。 */
+.split-usage {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 .subagent-split-body {
   display: flex;

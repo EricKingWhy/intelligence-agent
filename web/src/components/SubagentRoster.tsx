@@ -64,7 +64,7 @@ interface RosterProps {
   /** 行主体点击 → 主视图打开（复用现有 handleSelect 语义）。 */
   onOpenSession: (childSessionId: string) => void;
   /** chevron → 右侧分栏打开（父会话保持不动）。 */
-  onOpenSplit: (child: { childSessionId: string; target: string }) => void;
+  onOpenSplit: (child: SplitChild) => void;
 }
 
 export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: RosterProps) {
@@ -177,7 +177,13 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
                     e.stopPropagation();
                     // 同上：分栏打开后收面板，否则面板盖住分栏头部（含关闭按钮）。
                     setOpen(false);
-                    onOpenSplit({ childSessionId: d.child_session_id, target: d.target });
+                    onOpenSplit({
+                      childSessionId: d.child_session_id,
+                      target: d.target,
+                      status: d.status,
+                      used_tokens: d.used_tokens,
+                      usage_state: d.usage_state,
+                    });
                   }}
                 >
                   <ChevronRight size={15} />
@@ -191,8 +197,18 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
   );
 }
 
+/** 分栏打开的 child 荷载：路由 id + 票面 §5.2 分栏头三件（状态 pill / token 行）
+ *  所需字段——`delegations` 行现成有（App.tsx 侧），不另查。 */
+export interface SplitChild {
+  childSessionId: string;
+  target: string;
+  status: DelegationEntry['status'];
+  used_tokens: number;
+  usage_state: DelegationEntry['usage_state'];
+}
+
 interface SplitPaneProps {
-  child: { childSessionId: string; target: string };
+  child: SplitChild;
   conversation: ConversationState | null;
   error: string | null;
   density: TraceDensity;
@@ -200,6 +216,14 @@ interface SplitPaneProps {
   reasoningDisclosure?: ReasoningDisclosureApi;
   onClose: () => void;
 }
+
+/** 委派状态 → DelegationNode 的状态色（completed→success 共享同一组状态色）。 */
+const PILL_CLASS: Record<DelegationEntry['status'], string> = {
+  running: 'running',
+  completed: 'success',
+  failed: 'failed',
+  stopped: 'stopped',
+};
 
 /** 右侧分栏：子智能体的完整会话（复用 Conversation 同一渲染器，不建第二套）。
  *  分栏是**独立选择态**——不改变主会话当前路由，父会话（左列）原样保持。 */
@@ -212,6 +236,19 @@ export function SubagentSplitPane({
   reasoningDisclosure,
   onClose,
 }: SplitPaneProps) {
+  // 票面 §5.2 分栏头：[关闭×][状态 pill][子智能体标题][child id 短码]
+  // [`12.4K tok · 运行中`]。token 行走 tokenText 诚实口径（usage_only 标「估算」、
+  // no_data 显「无数据」），不把下界当精确值卖。
+  const usageLine = `${tokenText({
+    child_session_id: child.childSessionId,
+    target: child.target,
+    task: '',
+    status: child.status,
+    started_at: null,
+    completed_at: null,
+    used_tokens: child.used_tokens,
+    usage_state: child.usage_state,
+  })} · ${STATUS_LABEL[child.status]}`;
   return (
     <aside
       className="subagent-split-pane"
@@ -227,10 +264,16 @@ export function SubagentSplitPane({
         <button className="close-pane" aria-label="关闭分栏" onClick={onClose} title="关闭分栏（Esc）">
           <X size={15} />
         </button>
+        <span
+          className={`split-status-pill act-status act-status-${PILL_CLASS[child.status]}`}
+          aria-label={STATUS_LABEL[child.status]}
+          title={STATUS_LABEL[child.status]}
+        />
         <span className="split-title">{child.target || '子智能体'}</span>
-        <span className="split-subtitle mono" title={`child session ${child.childSessionId}`}>
+        <span className="split-subtitle" title={`child session ${child.childSessionId}`}>
           {child.childSessionId.slice(0, 8)}
         </span>
+        <span className="split-usage">{usageLine}</span>
       </header>
       <div className="subagent-split-body">
         {error ? (

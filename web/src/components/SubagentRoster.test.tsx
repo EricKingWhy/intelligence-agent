@@ -19,6 +19,7 @@ import {
   durationText,
   formatTokenCount,
   tokenText,
+  type SplitChild,
 } from './SubagentRoster';
 import type { DelegationEntry } from '../lib/api';
 
@@ -170,17 +171,90 @@ describe('#1256 SubagentRoster', () => {
     render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={onOpenSplit} />);
     act(() => { host.querySelector<HTMLButtonElement>('.agent-trigger')!.click(); });
     act(() => { host.querySelector<HTMLButtonElement>('.row-arrow')!.click(); });
-    expect(onOpenSplit).toHaveBeenCalledWith({ childSessionId: 'c1', target: 'research_review' });
+    // 分栏头三件（状态 pill / token 行）所需字段随 child 荷载带过去，不另查。
+    expect(onOpenSplit).toHaveBeenCalledWith({
+      childSessionId: 'c1',
+      target: 'research_review',
+      status: 'completed',
+      used_tokens: 12842,
+      usage_state: 'ok',
+    });
     expect(onOpenSession).not.toHaveBeenCalled();
     expect(host.querySelector('.roster')).toBeNull();
   });
 });
 
+describe('#1256 SubagentRoster 键盘路径（AC9）', () => {
+  it('行聚焦 Enter → onOpenSession（主视图），不走 onOpenSplit', () => {
+    const onOpenSession = vi.fn();
+    const onOpenSplit = vi.fn();
+    render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={onOpenSplit} />);
+    act(() => { host.querySelector<HTMLButtonElement>('.agent-trigger')!.click(); });
+    const row = host.querySelector<HTMLElement>('.agent-row')!;
+    act(() => {
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    expect(onOpenSession).toHaveBeenCalledWith('c1');
+    expect(onOpenSplit).not.toHaveBeenCalled();
+    expect(host.querySelector('.roster')).toBeNull(); // 同点击：选中即收面板
+  });
+
+  it('行聚焦 Space → preventDefault（不滚动页面），且与点击同语义', () => {
+    const onOpenSession = vi.fn();
+    render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={NOOP} />);
+    act(() => { host.querySelector<HTMLButtonElement>('.agent-trigger')!.click(); });
+    const row = host.querySelector<HTMLElement>('.agent-row')!;
+    expect(row.getAttribute('tabIndex')).toBe('0'); // 键盘可达
+    const ev = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+    act(() => {
+      row.dispatchEvent(ev);
+    });
+    expect(ev.defaultPrevented).toBe(true);
+    expect(onOpenSession).toHaveBeenCalledWith('c1');
+  });
+
+  it('其它键（a）→ 无动作', () => {
+    const onOpenSession = vi.fn();
+    render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={NOOP} />);
+    act(() => { host.querySelector<HTMLButtonElement>('.agent-trigger')!.click(); });
+    act(() => {
+      host.querySelector<HTMLElement>('.agent-row')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'a', bubbles: true }),
+      );
+    });
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(host.querySelector('.roster')).not.toBeNull(); // 面板不收
+  });
+
+  it('chevron 聚焦 Enter → 只走 onOpenSplit（行 onKeyDown 守卫挡住冒泡串道）', () => {
+    const onOpenSession = vi.fn();
+    const onOpenSplit = vi.fn();
+    render(<SubagentRoster delegations={[entry()]} onOpenSession={onOpenSession} onOpenSplit={onOpenSplit} />);
+    act(() => { host.querySelector<HTMLButtonElement>('.agent-trigger')!.click(); });
+    host.querySelector<HTMLButtonElement>('.row-arrow')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+    expect(onOpenSplit).not.toHaveBeenCalled(); // chevron 的键盘激活走它自己的 click
+    expect(onOpenSession).not.toHaveBeenCalled(); // 行守卫：target≠currentTarget 不开主视图
+  });
+});
+
 describe('#1256 SubagentSplitPane', () => {
+  function child(over: Partial<SplitChild> = {}): SplitChild {
+    return {
+      childSessionId: 'abcdef123456',
+      target: 'research_review',
+      status: 'completed' as const,
+      used_tokens: 12842,
+      usage_state: 'ok' as const,
+      ...over,
+    };
+  }
+
   it('加载失败 → 显错误行，不渲染 Conversation 正文', () => {
     render(
       <SubagentSplitPane
-        child={{ childSessionId: 'c1', target: 'research_review' }}
+        child={child({ childSessionId: 'c1' })}
         conversation={null}
         error="网络错误"
         density="balanced"
@@ -195,7 +269,7 @@ describe('#1256 SubagentSplitPane', () => {
     const onClose = vi.fn();
     render(
       <SubagentSplitPane
-        child={{ childSessionId: 'abcdef123456', target: 'research_review' }}
+        child={child()}
         conversation={null}
         error={null}
         density="balanced"
@@ -206,5 +280,36 @@ describe('#1256 SubagentSplitPane', () => {
     expect(host.querySelector('.split-subtitle')?.textContent).toBe('abcdef12');
     act(() => { host.querySelector<HTMLButtonElement>('.close-pane')!.click(); });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('分栏头：状态 pill + `12.8K tok · 完成` 行（票面 §5.2）', () => {
+    render(
+      <SubagentSplitPane
+        child={child()}
+        conversation={null}
+        error={null}
+        density="balanced"
+        onClose={NOOP}
+      />,
+    );
+    const pill = host.querySelector('.split-status-pill');
+    expect(pill).not.toBeNull();
+    expect(pill?.getAttribute('aria-label')).toBe('完成');
+    expect(pill?.className).toContain('act-status-success'); // completed→success 同状态色
+    expect(host.querySelector('.split-usage')?.textContent).toBe('12.8K tok · 完成');
+  });
+
+  it('分栏头：运行中行显「运行中」+ usage_only 标「估算」（诚实口径）', () => {
+    render(
+      <SubagentSplitPane
+        child={child({ status: 'running', used_tokens: 613_000, usage_state: 'usage_only' })}
+        conversation={null}
+        error={null}
+        density="balanced"
+        onClose={NOOP}
+      />,
+    );
+    expect(host.querySelector('.split-status-pill')?.className).toContain('act-status-running');
+    expect(host.querySelector('.split-usage')?.textContent).toBe('613.0K tok · 估算 · 运行中');
   });
 });

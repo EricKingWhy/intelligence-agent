@@ -22,7 +22,7 @@ import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
-import { SubagentRoster, SubagentSplitPane } from './components/SubagentRoster';
+import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
@@ -600,7 +600,7 @@ export default function App() {
   // UI 不建第二套真相（不变量 #22）。
   const delegations = useDelegations(selectedId, conversation);
   // 分栏是**独立选择态**——只记录"看哪个子会话"，不改变主会话当前路由。
-  const [splitChild, setSplitChild] = useState<{ childSessionId: string; target: string } | null>(null);
+  const [splitChild, setSplitChild] = useState<SplitChild | null>(null);
   // 换父会话 ⇒ 关分栏（它属于某个父会话的上下文：拿 A 的子会话站在 B 里 = 跨会话第二真相）。
   useEffect(() => {
     setSplitChild(null);
@@ -617,7 +617,7 @@ export default function App() {
   );
   /** chevron → 右侧分栏打开（父会话保持不动）。 */
   const handleOpenChildSplit = useCallback(
-    (child: { childSessionId: string; target: string }) => setSplitChild(child),
+    (child: SplitChild) => setSplitChild(child),
     [],
   );
 

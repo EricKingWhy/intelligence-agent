@@ -140,6 +140,29 @@ describe('#1256 useDelegations', () => {
     expect(current).toEqual([entry('c1'), entry('c2')]);
   });
 
+  it('finished 到达（投影 status 翻转）→ signature 变化 → 重拉', async () => {
+    H.getSessionDelegations.mockResolvedValue([entry('c1')]);
+    let conv = conversation(['c1']);
+    await act(async () => { root.render(<Harness sessionId={SID} conv={conv} />); });
+    await flush();
+    const first = H.getSessionDelegations.mock.calls.length;
+
+    // WS 推送 agent/delegation-finished：投影里 c1 的 status 翻为 completed ⇒
+    // signature `${child}:${status}` 变化 ⇒ hook 重拉（不刷新页面）。
+    const done = entry('c1');
+    done.status = 'completed';
+    H.getSessionDelegations.mockResolvedValue([done]);
+    conv = applyEvent(conv, ev({
+      type: EventType.AGENT_DELEGATION_FINISHED, seq: 5,
+      data: { child_session_id: 'c1', status: 'completed', summary: 'done' },
+    }));
+    await act(async () => { root.render(<Harness sessionId={SID} conv={conv} />); });
+    await flush();
+
+    expect(H.getSessionDelegations.mock.calls.length).toBeGreaterThan(first);
+    expect(current).toEqual([done]);
+  });
+
   it('读失败 → 空 roster（不伪造行）', async () => {
     H.getSessionDelegations.mockRejectedValue(new Error('boom'));
     await act(async () => { root.render(<Harness sessionId={SID} conv={conversation(['c1'])} />); });

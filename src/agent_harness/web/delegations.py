@@ -78,7 +78,7 @@ def register_delegation_routes(
 
         entries = _project_delegations(events)
         for entry in entries:
-            await _attach_usage(entry, state)
+            await _attach_usage(entry, state, validate_session_id=validate_session_id)
         return entries
 
 
@@ -152,19 +152,40 @@ def _project_delegations(events: list[Any]) -> list[dict]:
     return entries
 
 
-async def _attach_usage(entry: dict, state: AppState) -> None:
+async def _attach_usage(
+    entry: dict, state: AppState, *, validate_session_id: Callable[[str], str]
+) -> None:
     """逐子会话产 ``used_tokens`` / ``usage_state``（复用看板数据面，不重写口径）。
 
     子会话事件用**宽容读**（缺文件 → 空列表 → ``no_data``）：一个已清理/cold 的
     子会话不能让整张 roster 失败（对齐 lineage 对孤儿节点的处置纪律）。
     """
     child_id = entry["child_session_id"]
-    child_events = await anyio.to_thread.run_sync(state.store.read_events, child_id)
+    # P3-2 纵深：父日志 data 里的 child_session_id 此前只做过 isinstance 检查就进
+    # read_events → _events_path（store.py:288-292 无净化）——含 ``../`` 会读到
+    # store 根之外。非法 id ⇒ 用量如实 no_data（roster 行照列，不 brick 整张表）。
+    try:
+        validate_session_id(child_id)
+    except InvalidSessionId:
+        entry["used_tokens"] = 0
+        entry["usage_state"] = "no_data"
+        return
+    # P3-1：与 context-usage 端点同源（app.py:3599-3609）——优先在途 run 的 live
+    # builder 快照（→ ok 精确值）；run 已收口才退 context_snapshots 缓存；都没有
+    # 才按事件流落 usage_only/no_data。roster 的运行中行与看板数值必须同源（AC2）。
     builder_snapshot: dict[str, Any] | None = None
     tool_definitions: list[dict[str, Any]] = []
-    cached = state.context_snapshots.get(child_id)
-    if cached is not None:
-        builder_snapshot, tool_definitions = cached
+    active = state.run_manager.get_active(child_id)
+    if active is not None and active.runtime is not None:
+        builder = active.runtime._context_builder
+        if builder is not None:
+            builder_snapshot = builder.usage_snapshot(active.session)
+        tool_definitions = active.runtime.registry.export_model_definitions()
+    else:
+        cached = state.context_snapshots.get(child_id)
+        if cached is not None:
+            builder_snapshot, tool_definitions = cached
+    child_events = await anyio.to_thread.run_sync(state.store.read_events, child_id)
     payload = build_context_usage_payload(
         settings=state.settings,
         builder_snapshot=builder_snapshot,

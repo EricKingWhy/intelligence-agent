@@ -92,6 +92,10 @@ test('#1256 AC：chevron → 右栏打开完整子会话，**父会话保持不�
   await expect(pane).toBeVisible();
   await expect(pane.locator('.split-title')).toHaveText('research_review');
   await expect(pane.locator('.split-subtitle')).toHaveText(CHILD.slice(0, 8));
+  // 票面 §5.2 分栏头：状态 pill + `12.8K tok · 估算 · 完成`（诚实口径）。
+  await expect(pane.locator('.split-status-pill')).toBeVisible();
+  await expect(pane.locator('.split-status-pill')).toHaveAttribute('aria-label', '完成');
+  await expect(pane.locator('.split-usage')).toHaveText('12.8K tok · 估算 · 完成');
 
   // 父会话保持不动：布局进 with-split，主列仍在、父会话工具栏/对话流仍渲染
   await expect(page.locator('.app-workspace.with-split')).toHaveCount(1);
@@ -111,4 +115,71 @@ test('#1256 AC：关闭分栏 → 回到单列', async ({ page }) => {
   await page.locator('.close-pane').click();
   await expect(page.locator('aside.subagent-split-pane')).toHaveCount(0);
   await expect(page.locator('.app-workspace.with-split')).toHaveCount(0);
+});
+
+// ── Correctness P2-2：AC3 实时翻转链 ──────────────────────────────────────
+
+const RUNNING_EVENTS: FrameSpec[] = [
+  { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+  { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+  { type: 'user/message', data: { content: '安排个子智能体' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+  { type: 'agent/delegation-started', data: { child_session_id: CHILD, target: 'research_review', task: '查一下这个改动' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+];
+
+const FINISHED: FrameSpec = {
+  type: 'agent/delegation-finished',
+  data: { child_session_id: CHILD, target: 'research_review', status: 'completed', summary: '看过了' },
+  seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T,
+};
+
+const runningRow = () => ({
+  child_session_id: CHILD, target: 'research_review', task: '查一下这个改动',
+  status: 'running', started_at: T, completed_at: null,
+  used_tokens: 12_842, usage_state: 'usage_only',
+});
+
+test('#1256 P2-2：finished 经 WS 到达 → 投影 status 翻转 → roster 重拉 → 行显「完成」', async ({ page }) => {
+  // frameGate：增量帧只在用例放行后下发——「finished 何时到达」由测试掌握，无竞态。
+  let release!: () => void;
+  const midGate = new Promise<void>((res) => { release = res; });
+  // 真后端从父事件流派生 roster：finished 落盘后 /delegations 即翻 completed。
+  let roster: unknown[] = [runningRow()];
+
+  await routeApi(page, {
+    sessions: [{ ...sessionRow, event_count: RUNNING_EVENTS.length }],
+    events: RUNNING_EVENTS,
+    delegations: () => roster.map((r) => ({ ...r })),
+    onWs: () => ({ frames: [FINISHED], ending: 'keep', frameGate: midGate }),
+  });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.timeline-row')).toHaveCount(RUNNING_EVENTS.length);
+
+  await page.locator('.agent-trigger').click();
+  const stats = page.locator('.agent-stats');
+  await expect(stats).toContainText('运行中');
+
+  // 子会话完成：后端快照先翻转，再放行 WS 增量帧——前端投影 status 翻转 ⇒
+  // signature `${child}:${status}` 变化 ⇒ useDelegations 重拉 ⇒ 行显「完成」。
+  roster = [{ ...runningRow(), status: 'completed', completed_at: T }];
+  release();
+  await expect(stats).toContainText('完成');
+});
+
+// ── Correctness P3-3：AC9 键盘路径 ─────────────────────────────────────────
+
+test('#1256 AC9：键盘路径：行聚焦 Enter → 主视图打开子会话（与点击行主体同语义）', async ({ page }) => {
+  const childRow = { ...sessionRow, session_id: CHILD, first_user_message: '子任务' };
+  await routeApi(page, { sessions: [sessionRow, childRow], events: EVENTS, delegations: DELEGATIONS });
+  await page.goto('/');
+  await openSession(page);
+
+  await page.locator('.agent-trigger').click();
+  await page.locator('.agent-row').focus();
+  await page.keyboard.press('Enter');
+
+  // 主视图打开子会话：左列选中项切到 child（handleSelect 语义）
+  await expect(page.locator('.session-item.selected')).toHaveAttribute('title', new RegExp(CHILD));
+  // 选中即收面板（与点击同纪律）
+  await expect(page.locator('.roster')).toHaveCount(0);
 });
