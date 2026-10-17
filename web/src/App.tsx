@@ -20,7 +20,7 @@ import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
-import { Composer } from './components/Composer';
+import { Composer, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -1047,8 +1047,10 @@ export default function App() {
   // 输入框 + 取消原项"：那种做法在取消失败时会留下一个已预填却仍排队的双重状态。
   // #1283 P2-2：返回值透传 `sendMessage` 的受理结果——409 / 未受理时 Composer
   // 靠它保留编辑态与用户改好的文本（此前无论结果如何都清空编辑框）。
+  // #1283 复审 P4：返回值契约引用 Composer 的共享 `SubmitResult` 别名——
+  // 此前手写同一联合类型，契约变更时这里会被 tsc 静默放过。
   const handleEditItem = useCallback(
-    (item: UndeliveredInput, newContent: string): Promise<boolean> | boolean | void => {
+    (item: UndeliveredInput, newContent: string): SubmitResult => {
       if (!selectedId) return false;
       const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
       return sendMessage(selectedId, newContent, {

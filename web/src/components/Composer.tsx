@@ -84,6 +84,9 @@ interface LockCopy {
 }
 
 const LOCK_COPY: Record<LockReason, LockCopy> = {
+  // #1283 复审 P4：约束场景的**后端 409 原句**按 #1223 冻结为「请先提交答案」
+  // （service._pending_user_input_conflict_message），与这里的「回答」动词差是
+  // 有意的口径差，不是漂移——改这句前先核对 #1223 的冻结结论。
   constraint: {
     hint: '请先回答当前约束澄清，再发送新消息',
     placeholder: '等待约束澄清回答…',
@@ -113,8 +116,9 @@ const QUEUE_HINT: Record<QueueLockReason, string> = {
 
 /** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
  *  `422`…）⇒ 保留用户输入；`true` / `undefined`（旧签名）⇒ 按已受理收尾。
- *  `onSubmit` / `onSteer` / `onEditItem` 共用这一份，避免同一契约写三遍。 */
-type SubmitResult = void | boolean | Promise<void | boolean>;
+ *  `onSubmit` / `onSteer` / `onEditItem` 共用这一份，避免同一契约写三遍。
+ *  export：消费方（App 的 handleEditItem 等）引用同一别名，契约变更时 tsc 全仓追平。 */
+export type SubmitResult = void | boolean | Promise<void | boolean>;
 
 interface Props {
   streaming: boolean;

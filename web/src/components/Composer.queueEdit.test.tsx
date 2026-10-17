@@ -152,11 +152,16 @@ describe('#1283 P2-2 — 编辑保存被拒时保留编辑态与草稿', () => {
     await act(async () => { button(el, '保存排队消息').click(); });
     await act(async () => { await Promise.resolve(); });
 
-    const stillEditing = el.querySelector<HTMLInputElement>('input.queue-item-edit');
-    expect(stillEditing).not.toBeNull();
-    expect(stillEditing!.value).toBe('抛错后仍要留下');
-    expect(spy).toHaveBeenCalled();
-    spy.mockRestore();
+    // #1283 复审 P4：restore 放 finally——前面任一 expect 失败时若不恢复，
+    // 本文件后续用例的 console.error 会被持续静默，掩盖真实错误日志。
+    try {
+      const stillEditing = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+      expect(stillEditing).not.toBeNull();
+      expect(stillEditing!.value).toBe('抛错后仍要留下');
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('锁在编辑态打开之后才到 ⇒ Enter 也不提交（不发必然 409 的请求），草稿保留', async () => {
