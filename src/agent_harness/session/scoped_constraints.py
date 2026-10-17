@@ -109,18 +109,13 @@ def _require_scope(scope: ConstraintScope | str) -> ConstraintScope:
         raise ValueError(f"unknown constraint scope: {scope!r}") from error
 
 
-def resolve_project_key(cwd: str | Path) -> str | None:
-    """会话工作目录 → 项目键（主仓库根绝对路径）；非 git 目录返回 None。
-
-    口径（票面 §三.2）：`git rev-parse --git-common-dir` 归一化——同一仓库的
-    worktree / 子目录算出同一个键（worktree 的 common dir 指向主仓库 `.git`）。
-    """
-    base = Path(cwd)
+def _git_stdout(*args: str) -> str | None:
+    """Run Git and decode only its consumed UTF-8 stdout, avoiding locale stderr."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(base), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
+            ["git", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             timeout=5,
             check=False,
         )
@@ -128,8 +123,21 @@ def resolve_project_key(cwd: str | Path) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    raw = result.stdout.strip()
-    if not raw:
+    try:
+        return result.stdout.decode("utf-8").strip() or None
+    except UnicodeDecodeError:
+        return None
+
+
+def resolve_project_key(cwd: str | Path) -> str | None:
+    """会话工作目录 → 项目键（主仓库根绝对路径）；非 git 目录返回 None。
+
+    口径（票面 §三.2）：`git rev-parse --git-common-dir` 归一化——同一仓库的
+    worktree / 子目录算出同一个键（worktree 的 common dir 指向主仓库 `.git`）。
+    """
+    base = Path(cwd)
+    raw = _git_stdout("-C", str(base), "rev-parse", "--git-common-dir")
+    if raw is None:
         return None
     common = Path(raw)
     if not common.is_absolute():
@@ -163,21 +171,10 @@ def project_label_for_key(key: str) -> str:
     按**键**而非 cwd 取标注：会话 `project_key` 可能来自持久化元数据（#1191 §三.3），
     标注必须由同一条键推出，否则与键所在的项目分组漂移。
     """
-    try:
-        remote = subprocess.run(
-            ["git", "-C", key, "config", "--get", "remote.origin.url"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        remote = None
-    if remote is not None and remote.returncode == 0:
-        url = remote.stdout.strip()
-        slug = _remote_slug(url)
-        if slug:
-            return slug
+    url = _git_stdout("-C", key, "config", "--get", "remote.origin.url")
+    slug = _remote_slug(url or "")
+    if slug:
+        return slug
     return Path(key).name
 
 

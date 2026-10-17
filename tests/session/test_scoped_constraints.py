@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,6 +132,40 @@ def test_resolve_project_key_shares_across_worktree(tmp_path: Path) -> None:
     assert resolve_project_key(sub) == key_main
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Git stdout encoding regression")
+def test_resolve_project_key_unicode_worktree_with_legacy_python_encoding(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "主仓库"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    worktree = tmp_path / "工作树"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", str(worktree)], check=True
+    )
+
+    script = (
+        "import json, sys\n"
+        "from agent_harness.session.scoped_constraints import resolve_project_key\n"
+        "print(json.dumps(resolve_project_key(sys.argv[1])))\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "0"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(worktree)],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert json.loads(result.stdout.decode("ascii")) == str(repo.resolve())
+
+
 def test_resolve_project_key_non_git_returns_none(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -164,3 +200,32 @@ def test_project_label_for_key_prefers_owner_repo_then_dirname(tmp_path: Path) -
     assert project_label_for_key(resolve_project_key(repo)) == (
         "EricKingWhy/intelligence-agent"
     )
+
+
+def test_project_label_for_key_does_not_decode_git_stderr(monkeypatch) -> None:
+    from agent_harness.session import scoped_constraints
+
+    args_seen: list[str] = []
+    options_seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        args_seen.extend(args)
+        options_seen.update(kwargs)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=b"git@github.com:EricKingWhy/intelligence-agent.git\n",
+            stderr="错误".encode("gbk"),
+        )
+
+    monkeypatch.setattr(scoped_constraints.subprocess, "run", fake_run)
+
+    assert (
+        project_label_for_key("C:/工作区/主仓库")
+        == "EricKingWhy/intelligence-agent"
+    )
+    assert args_seen[-2:] == ["--get", "remote.origin.url"]
+    assert options_seen["stdout"] == subprocess.PIPE
+    assert options_seen["stderr"] == subprocess.DEVNULL
+    assert "text" not in options_seen
+    assert "capture_output" not in options_seen
