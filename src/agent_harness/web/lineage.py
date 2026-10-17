@@ -20,8 +20,9 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from agent_harness.sandbox.capabilities import SandboxUnavailableError
 from agent_harness.session.lineage import (
     LineageNode,
     build_lineage_index,
@@ -34,20 +35,29 @@ from agent_harness.session.service import (
     SessionNotFound,
 )
 from agent_harness.storage.sqlite import StorageBusyError
-from agent_harness.web.app import session_service
-from agent_harness.web.domain_errors import http_error, storage_http_error
+from agent_harness.web.app import _AmendValueValidators, session_service
+from agent_harness.web.domain_errors import (
+    http_error,
+    sandbox_unavailable_http_error,
+    storage_http_error,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-class ForkRequest(BaseModel):
+class ForkRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/forks 的请求体（T7 #137，PRD §2.4）。
 
     from_seq 是父会话中用户消息的 seq（fork 锚点，锚点消息不进 child）。
+
+    sandbox_backend（`#1278`）：None = 继承父会话显式选择（父没选 ⇒ 部署默认）；
+    显式值优先。取值校验复用 `_AmendValueValidators._validate_sandbox_backend`
+    ——与 create / resume / send 同一份判据，未知后端名在请求层 422。
     """
 
     from_seq: int = Field(ge=0)
+    sandbox_backend: str | None = None
 
 
 def register_lineage_routes(
@@ -120,13 +130,19 @@ def register_lineage_routes(
     async def fork_session(session_id: str, req: ForkRequest) -> dict:
         """从历史用户消息 seq 派生 child session（T7 #137，PRD §2.4）。
 
-        404 = session 不存在；409 = 在途 run（历史未 settled）；
-        422 = from_seq 不是合法 fork 锚点。
+        404 = session 不存在；409 = 在途 run（历史未 settled）或 sandbox 后端不可用；
+        422 = from_seq 非法（负值/非锚点）或 sandbox_backend 未知。
+
+        `sandbox_backend`（`#1278`）：缺省 / `null` = 继承父会话的显式选择
+        （父没选 ⇒ 部署默认）。本字段没有"强制走部署默认"的表达方式——已知
+        表达力边界（父选了 docker 而调用方想要部署默认时无解）。
         """
         service = session_service(app.state.agent)
         try:
             child_id = await service.fork(
-                session_id=session_id, from_seq=req.from_seq
+                session_id=session_id, from_seq=req.from_seq,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=req.sandbox_backend,
             )
         except (
             InvalidSessionId,
@@ -135,6 +151,10 @@ def register_lineage_routes(
             InvalidForkBoundary,
         ) as e:
             raise http_error(e) from e
+        except SandboxUnavailableError as e:
+            # `#1278`：显式传入或继承来的 docker 在本机不可用 → 与 create 同一份
+            # 结构化 409（child 未创建，客户端可换后端重试）。
+            raise sandbox_unavailable_http_error(e) from e
         except StorageBusyError as e:
             # #515：fork 要给 child 补 session_meta 行（共享 harness.db 写），锁竞争
             # 重试耗尽报 503——child 未创建，客户端稍后重试即可。
