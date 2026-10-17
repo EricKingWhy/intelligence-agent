@@ -22,6 +22,7 @@ import type { Delegation } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { hasSummaryOverflow } from '../lib/projection';
 import { KIND_ICON } from '../lib/eventKind';
+import { DELEGATION_STATUS_CLASS } from '../lib/delegationStatus';
 import { formatDuration, truncateForDisplay } from '../lib/format';
 import { CopyButton } from './CopyButton';
 
@@ -35,14 +36,6 @@ interface Props {
    *  父会话上下文不丢。缺省时不出现入口。 */
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
 }
-
-/** 委派状态 → DSH 四态列名（completed→success 共享同一组状态色与图标语言）。 */
-const STATUS_CLASS: Record<Delegation['status'], string> = {
-  running: 'running',
-  completed: 'success',
-  failed: 'failed',
-  stopped: 'stopped',
-};
 
 // memo：projection copy-on-write 保证委派对象仅在自身事件到达时替换——
 // 同 turn 其它节点跳过重渲染。
@@ -62,7 +55,7 @@ export const DelegationNode = memo(function DelegationNode({ delegation, density
         aria-expanded={hasSummary ? open : undefined}
         title={hasSummary ? (open ? '收起结果摘要' : '展开结果摘要') : undefined}
       >
-        <span className={`act-status act-status-${STATUS_CLASS[delegation.status]}`}>
+        <span className={`act-status act-status-${DELEGATION_STATUS_CLASS[delegation.status]}`}>
           {delegation.status === 'completed' && <Check size={14} />}
           {delegation.status === 'failed' && <X size={14} />}
           {delegation.status === 'stopped' && <Square size={14} />}
