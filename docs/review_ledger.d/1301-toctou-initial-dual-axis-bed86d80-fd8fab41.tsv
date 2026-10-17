@@ -1,0 +1,1 @@
+﻿2026-10-17	#1301 双轴发现审查（correctness+standards，codebuddy glm-5.3-flash 双 fresh 会话）：范围 bed86d80..fd8fab41。Correctness PASS-WITH-FINDINGS（P3×1 symlink 根收紧登记项 / P4×2 ENXIO 映射、平台守卫；/tmp 副本变异红证×2 + 基线换链泄漏红证实测）+ Standards PASS-WITH-FINDINGS（P4×2 docstring 断言过宽、socket 契约漏声明）。全修于 db07d833。	b35dd6b0ae47eb8682041b0a1836ec14f6d3d4dc^..fd8fab411ab2c6aed03aef8b86342483f1804a98
