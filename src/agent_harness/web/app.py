@@ -173,6 +173,8 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
+from agent_harness.watchtower.service import WatchtowerService
+from agent_harness.watchtower.store import SqliteWatchtowerStore
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
@@ -1410,6 +1412,12 @@ class AppState:
         # #1320：常驻超时推进任务（lifespan 启动；shutdown 置停止位并等当前轮收尾）。
         self._ask_user_timeout_ticker: asyncio.Task | None = None
         self._ask_user_timeout_stop: asyncio.Event | None = None
+        self.watchtower_store = SqliteWatchtowerStore(self.harness_db)
+        self.watchtower = WatchtowerService(
+            store=self.watchtower_store,
+            session_service=session_service(self),
+            settings=settings,
+        )
 
     async def _board_snapshot_rows(self) -> list[dict[str, Any]]:
         """看板快照行：与 `GET /api/sessions?include_archived=true` 同一函数、同一映射。
@@ -1499,6 +1507,7 @@ class AppState:
             if not self._stores_ready:
                 await initialize_stores(self.stores)
                 await self.transport_ledger.initialize()
+                await self.watchtower_store.initialize()
                 # W-10：租约/队列表 + 重启对账（与 Session 状态对齐；有效会话
                 # 的持有租约原样保留——租约不因重启释放，PRD §3）。
                 await self.lease_manager.initialize()
@@ -1567,7 +1576,9 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
-        # #1320：先停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
+        # #1296：先停值班触发器，避免 shutdown 期间再派发新 session。
+        await self.watchtower.stop()
+        # #1320：再停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
         # （超时答复已落盘、恢复链提交到一半），中途取消会留下半截状态。置停止位
         # 后等当前一轮跑完；只有超过上限（真正卡死）才强制取消。
         ticker, self._ask_user_timeout_ticker = self._ask_user_timeout_ticker, None
@@ -2505,6 +2516,7 @@ def create_app(
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建未投递输入失败（不阻塞启动）"
                 )
+            await state.ensure_stores()
             # #1320：按持久事件流重建 `ask_user` 超时计时器（durable timer 不因进程
             # 重启丢掉挂起提问）。与上面的队列重建同序：失败不阻塞启动——提问事实
             # 仍在事件流里，下一次**启动**仍可重建。订阅路径自 #1320 起不再补读
@@ -2520,6 +2532,7 @@ def create_app(
                     "启动重建 ask_user 超时计时器失败（不阻塞启动）"
                 )
             state.start_ask_user_timeout_ticker()
+            await state.watchtower.start()
             try:
                 yield
             finally:
@@ -3066,6 +3079,11 @@ def create_app(
     # Read-only model/profile catalogs use a narrow dependency seam and are
     # registered as one explicit router instead of being captured by this factory.
     register_catalog_routes(app)
+
+    # #1296：serve 内单次值班调度器与独立管理面。
+    from agent_harness.web.watchtower_routes import register_watchtower_routes
+
+    register_watchtower_routes(app)
 
     @app.post("/api/sessions")
     async def create_session(

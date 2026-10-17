@@ -1015,6 +1015,23 @@ def _user_input_answer_data(
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
 
     # ── 窄场景：长期约束冲突（`protected_fact_conflict`）──────────────────
+    if answer.get("timeout") is True:
+        if set(answer) != {"request_id", "timeout"}:
+            raise BudgetRejection("timeout 形态的 input_request 不接受其它字段")
+        normalized_timeout = {"request_id": request_id, "timeout": True}
+        if _user_input_answer_already_recorded(
+            events, request_id=request_id, normalized_answer=normalized_timeout,
+        ):
+            return None, True
+        return {
+            "content": (
+                "用户未及时回应约束冲突；该冲突仍未解决，未选择或授权任何选项。"
+                "停止受冲突影响的工作，不得采用候选值或旧值绕过冲突；"
+                "向用户说明未解决状态并等待处理。"
+            ),
+            "input_request_id": request_id,
+            "input_request_answer": normalized_timeout,
+        }, False
     if set(answer) - {"request_id", "choice", "custom_text"}:
         raise BudgetRejection("input_request 包含不支持的字段")
     choice = answer.get("choice")
@@ -1727,6 +1744,10 @@ class SessionService:
         # `default_backend_for_platform`）。docker 不可用时 registry.create 抛
         # SandboxUnavailableError（fail-fast，零副作用），绝不静默回落。
         sandbox_backend: str | None = None,
+        # #1296：调度器在持久 dispatch intent 里预分配的 Session ID。只供内部
+        # 幂等恢复使用；请求入口不暴露此参数。复用已有 ID 必须先由调用方对账，
+        # 这里再做 fail-closed 碰撞检查，避免把新规则接到旧会话上。
+        session_id: str | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -1815,7 +1836,12 @@ class SessionService:
             raise WorkspacePathInvalid("workspace 与 cwd 只能二选一")
         workspace_name = self._validate_workspace_name(workspace_name)
 
-        session_id = str(uuid4())
+        if session_id is None:
+            session_id = str(uuid4())
+        else:
+            self._validate_session_id(session_id)
+            if await self.has_session(session_id):
+                raise ValueError("session_id is already in use")
         if cwd is not None:
             workspace = self._resolve_cwd(cwd)
         else:

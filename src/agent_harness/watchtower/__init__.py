@@ -1,0 +1,1 @@
+"""Single-fire unattended schedules."""

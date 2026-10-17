@@ -1715,6 +1715,26 @@ class AgentRuntime:
             arms.step_base = step_base
             if user_input is not None:
                 message_data = {"content": user_input}
+                idempotency_key = (
+                    user_input_metadata.get("idempotency_key")
+                    if user_input_metadata is not None else None
+                )
+                existing_idempotent_messages = []
+                if idempotency_key is not None:
+                    if not isinstance(idempotency_key, str) or not idempotency_key:
+                        raise ValueError("user input idempotency_key must be non-empty text")
+                    existing_idempotent_messages = [
+                        event for event in session.events
+                        if event.type == USER_MESSAGE
+                        and event.data.get("idempotency_key") == idempotency_key
+                    ]
+                    if len(existing_idempotent_messages) > 1:
+                        raise ValueError("user input idempotency_key is already duplicated")
+                    if existing_idempotent_messages:
+                        if existing_idempotent_messages[0].data.get("content") != user_input:
+                            raise ValueError("user input idempotency_key content mismatch")
+                    else:
+                        message_data["idempotency_key"] = idempotency_key
                 message_data.update(
                     {
                         key: user_input_metadata[key]
@@ -1730,8 +1750,11 @@ class AgentRuntime:
                         and key in user_input_metadata
                     }
                 )
-                user_event = session.append(USER_MESSAGE, message_data)
-                yield to_agent_event(user_event)
+                if existing_idempotent_messages:
+                    user_event = existing_idempotent_messages[0]
+                else:
+                    user_event = session.append(USER_MESSAGE, message_data)
+                    yield to_agent_event(user_event)
                 # #1323：勾选「作为可复用规则」是用户的确定性手势——user/message
                 # 落盘后立即机械登记，不依赖模型当次是否调用 register_constraint。
                 # 判据把 project/global 排除在外：那两档由服务层写成功后走独立规则层
@@ -1740,7 +1763,7 @@ class AgentRuntime:
                 # #1085：委派子会话不得借机械路径获得有效入口（与
                 # register_constraint 的 SCOPE_NOT_ALLOWED 同一条边界）。
                 if (
-                    is_session_explicit_rule(message_data)
+                    is_session_explicit_rule(user_event.data)
                     and not session_is_delegated_child(session.events)
                 ):
                     register_explicit_constraint(
