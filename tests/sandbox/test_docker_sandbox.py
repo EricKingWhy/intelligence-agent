@@ -215,14 +215,15 @@ def test_copy_in_fails_closed_when_entry_swapped_to_unix_socket(
 
     monkeypatch.setattr(tarfile_module.TarFile, "addfile", addfile_with_real_swap)
 
-    with pytest.raises(PermissionError):
-        docker_sandbox.copy_in(source, ".")
-    assert docker_sandbox.path_kind("payload.txt") is None
-
-    sock.close()
-    # 还原现场：payload 处现在是换入的 socket，摘掉即可（源文件已在换链时
-    # 被 unlink，内容由本用例自建，无外部数据）。
-    payload.unlink(missing_ok=True)
+    try:
+        with pytest.raises(PermissionError):
+            docker_sandbox.copy_in(source, ".")
+        assert docker_sandbox.path_kind("payload.txt") is None
+    finally:
+        sock.close()
+        # 还原现场：payload 处现在是换入的 socket，摘掉即可（源文件已在换链
+        # 时被 unlink，内容由本用例自建，无外部数据）。
+        payload.unlink(missing_ok=True)
 
 
 @docker_required
