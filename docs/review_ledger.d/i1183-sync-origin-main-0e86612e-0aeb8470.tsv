@@ -1,0 +1,1 @@
+2026-10-17	#1183 sync merge: origin/main 0e86612e (PR #1277). Combined diff is App.tsx + app.css; both parents’ edits auto-merged without conflict. Incoming #1256 code retains upstream review/CI; this row attributes the merge commit only.	80a9361cb849ae7d9e2933d028da25705f2ae421..0aeb8470e275a405aa566663cc9573bf7d04bfa7
