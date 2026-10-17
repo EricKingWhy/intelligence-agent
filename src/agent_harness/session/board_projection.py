@@ -39,6 +39,7 @@ import tempfile
 import threading
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal
 
 from agent_harness.session.event import (
@@ -52,10 +53,10 @@ logger = logging.getLogger("agent_harness.session.board_projection")
 
 AttentionKind = Literal["input", "approval"]
 
-#: 尾部对账窗口：读盘上最后一行只需要最后一小块；单事件大 payload（如 100KB
-#: task_text）会让窗口里没有换行，此时解析失败 ⇒ 本轮不落盘（正确性优先，
-#: 下一次小事件会补上水位）。
-_TAIL_WINDOW_BYTES = 64 * 1024
+#: 尾部对账的块大小与上限：只读最后一行，按 8KB 从文件尾反向收缩；
+#: 超过 4MB 仍找不到行首（病态单行）就返回 None —— 本轮不落盘，正确性优先。
+_TAIL_CHUNK_BYTES = 8 * 1024
+_TAIL_MAX_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,10 @@ class BoardProjectionStore:
         events = self._store.read_events(session_id)
         projection = _derive(events)
         if projection is None:
+            # 读路径同样不能留下旧缓存：下一次非触发 append 会用缓存重算并推进
+            # 水位，把这次失败时的旧状态钉住（独立审查第三轮 P3）。
+            with self._lock:
+                self._cache.pop(session_id, None)
             return _empty(events)
         stamp_after = self._events_stamp(session_id)
         # 只有「读事件期间文件没变」才回填缓存；否则下一轮重放，避免把
@@ -351,22 +356,44 @@ class BoardProjectionStore:
         return self._disk_tail_seq(session_id) == last
 
     def _disk_tail_seq(self, session_id: str) -> int | None:
-        """事件文件最后一行的 seq（只读尾部窗口；解析不了返回 None）。"""
-        try:
-            with self._store.events_path(session_id).open("rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                fh.seek(max(0, size - _TAIL_WINDOW_BYTES))
-                chunk = fh.read()
-        except OSError:
+        """事件文件最后一行的 seq（只读最后一行；解析不了返回 None）。"""
+        line = self._read_last_line(self._store.events_path(session_id))
+        if line is None:
             return None
-        line = chunk.rstrip(b"\r\n").rsplit(b"\n", 1)[-1]
         try:
             raw = json.loads(line)
         except ValueError:
             return None
         seq = raw.get("seq") if isinstance(raw, dict) else None
         return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+    @staticmethod
+    def _read_last_line(path: Path) -> bytes | None:
+        """从文件尾部反向按块读取最后一条非空行。
+
+        逐块收缩而不是「读固定 64KB 窗口」：单事件大 payload（task_text 上限
+        100K 字符，UTF-8 可达数百 KB）不会让最后一行永远解析不到。上限
+        ``_TAIL_MAX_BYTES`` 之外的病态行返回 None（调用方只是跳过落盘，正确性
+        不受影响）。
+        """
+        try:
+            with path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                pos = fh.tell()
+                buffer = b""
+                while pos > 0:
+                    step = min(_TAIL_CHUNK_BYTES, pos)
+                    pos -= step
+                    fh.seek(pos)
+                    buffer = fh.read(step) + buffer
+                    stripped = buffer.rstrip(b"\r\n")
+                    if b"\n" in stripped:
+                        return stripped.rsplit(b"\n", 1)[-1]
+                    if len(buffer) > _TAIL_MAX_BYTES:
+                        return None
+                return buffer.strip(b"\r\n") or None
+        except OSError:
+            return None
 
     def _read_sidecar(
         self,

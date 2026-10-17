@@ -583,7 +583,8 @@ def test_derivation_failure_does_not_poison_memory_or_sidecar(
     """独立审查 P2：派生瞬时失败不得把空投影写进缓存/sidecar。"""
     store, session = _session_with_task(tmp_path)
     sid = session.session_id
-    projection_store = BoardProjectionStore(store)
+    # 用钩子同一个单例，才能断言失败后的缓存状态。
+    projection_store = bp.get_board_projection_store(store)
     before = projection_store.get(sid)
     sidecar_before = json.loads(store.board_state_path(sid).read_text("utf-8"))
 
@@ -599,7 +600,9 @@ def test_derivation_failure_does_not_poison_memory_or_sidecar(
     sidecar_after = json.loads(store.board_state_path(sid).read_text("utf-8"))
     assert sidecar_after["product_state"] == sidecar_before["product_state"]
     assert sidecar_after["projection_seq"] == sidecar_before["projection_seq"]
-    # 下一次读取从事件流重放，拿到真实的新状态（缓存没被污染）。
+    # 失败后的下一条**非触发**事件不得把旧缓存盖上当前水位（缓存弹出的判据）；
+    # 下一次读取必须从事件流重放，拿到真实的新状态。
+    session.append(USER_MESSAGE, {"content": "投影失败后的普通消息"})
     assert projection_store.get(sid).product_state == "executing"
     assert before.product_state == "pending_verification"
 
