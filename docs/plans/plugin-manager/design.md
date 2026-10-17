@@ -71,6 +71,7 @@ Gate 2 的默认面（目录注入零正文）不变；例外只在**用户亲�
 - Skills：`SkillDiscovery` 接收 `disabled_names` 与 root 元数据；条目带 `scope/origin/plugin/enabled`；`catalog()` 只出启用项（模型 context + `/` 菜单），`all_entries()` 出全量（管理面）；`load()` 只认启用项。
 - 审批：`_check_approval` 在 `RuleVerdict.ALLOW` 早退前检查 `tool.require_confirmation`；命中时跳过会话 grant / 项目持久规则。
 - 注册表：`GET /api/plugins/slash-registry` = 5 条 builtin（后端元数据）+ `catalog()` ∩ settings 的 skills；MCP 工具永不进入。
+  · **两个只读面（菜单 / 面板）现读、执行面按装配期快照**（裁决 D1 的直接后果）：面板与 `/` 菜单都读 `plugin-settings.json` 现值，故刚禁用即消失；但 `_invoked_message` → `capability.load()` 走装配期 `catalog()`，手敲 `/<name>` 在下次装配前仍会执行。这是 D1「不做热重载」的固有语义，不是缺口——面板行为区已明示该时间差。
 - 显式 `/skill`：`SkillCatalogContextProvider._invoked_message` 读最新用户消息，匹配
   `^\s*/([\w:-]+)(?:\s+([\s\S]*))?$` 且显示名在 `catalog()` 内 → 注入正文（`$ARGUMENTS` 插值）。
   锚定**整条消息开头**——前端点选 skill 因此不保留命令前的前缀（与内置命令的定位切除相反）。
