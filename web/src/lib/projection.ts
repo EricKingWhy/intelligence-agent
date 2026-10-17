@@ -194,6 +194,11 @@ export function initConversation(session_id: string): ConversationState {
     unknown_events: [],
     model: null,
     usage_total: null,
+    // #1313 口径 B：顶栏会话累计的两个槽，与 run 级 `usage_total` 分开维护。
+    // S：已终态 run 的权威值之和（跨 run 存活，`run/started` 不清零）；
+    // R：当前 run 的流式累计（`run/started` 归零，终态时被权威值替换或结转进 S）。
+    session_usage_total: null,
+    run_usage_live: null,
     cost_usd: null,
     plan: null,
     trace_id: null,
@@ -714,6 +719,9 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
     : null;
   state.run_budget_ceilings = budgetEcho ? parseRunLimitFacts(budgetEcho) : null;
   state.run_budget_consumed = { agent_turns: 0, model_requests: 0, total_tokens: 0, cost_usd: '0' };
+  // #1313 口径 B：新 run 的流式槽（R）归零；会话累计槽（S）**不清零**——
+  // 顶栏口径是「会话内所有 run 累计、单调非减」，run 边界不改变已挣得的数字。
+  state.run_usage_live = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -796,6 +804,9 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
     // C6 口径：usage 逐维可空，累加走 addUsage 保证**未知粘性**——某维一旦转
     // `null`，不再从 0 或旧值起算（与后端 `_accumulate_usage` 同语义）。
     state.usage_total = addUsage(state.usage_total, usage);
+    // #1313 口径 B：同一次推理也计入**当前 run 流式槽**（R）。上面那行是 run 级
+    // 运行中视图（StepDetail 消费），这里这行喂顶栏的会话累计（S + R）。
+    state.run_usage_live = addUsage(state.run_usage_live, usage);
   }
   // #537：turns 的计数点与后端 `consumed_from_events` 同一事件（MODEL_COMPLETED）。
   const consumed = state.run_budget_consumed;
@@ -967,6 +978,12 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
   // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
   state.run_failure = null;
   state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
+  // #1313 口径 B：权威值**替换**本 run 的流式贡献（不是叠加——双计是本票的核心坑）：
+  // authority 存在时绝不把 R 再加一次；缺 authority（事件未携带）时才用流式值兜底。
+  const authority = parseUsage(data.usage_total);
+  const terminal = authority ?? state.run_usage_live;
+  if (terminal) state.session_usage_total = addUsage(state.session_usage_total, terminal);
+  state.run_usage_live = null;
   state.cost_usd =
     typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
   state.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
@@ -997,6 +1014,14 @@ function projectRunFailed(state: ConversationState, event: AgentEvent): void {
     state.run_cancelled || (reason === null && message === null) ? null : { reason, message };
   state.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
   state.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
+  // #1313 口径 B（裁决记录：失败 run 计入会话累计；王浩宇可一句话推翻）：失败 run 已
+  // 消耗的流式累计结转进 S，R 归零。`data.usage_total` 不进 run 级槽——那是既有契约
+  // （run/completed 才有权威聚合），本行只动顶栏口径的会话累计槽。
+  if (state.run_usage_live) {
+    state.session_usage_total = addUsage(state.session_usage_total, state.run_usage_live);
+  }
+  state.run_usage_live = null;
+  // run/interrupted 不在此列（Scope 外）：它走 projectRunInterrupted，本票不改其 usage 语义。
   finalizeRun(state, 'failed', event.time);
 }
 
@@ -2429,6 +2454,22 @@ function addUsage(a: UsageStats | null, b: UsageStats): UsageStats {
     completion_tokens: sum(a.completion_tokens, b.completion_tokens),
     total_tokens: sum(a.total_tokens, b.total_tokens),
   };
+}
+
+/** #1313 口径 B（会话累计）：顶栏显示的用量 = S（已终态 run 权威值之和）+
+ *  R（当前 run 流式累计）。单次连续视图内**单调非减**——`run/completed` 以权威值
+ *  **替换**本 run 的流式贡献（`projectRunCompleted` 里做的），所以到达前后不出现
+ *  「数字变小」的覆盖式跳变。
+ *
+ *  与 run 级 `usage_total` 的区别：后者是 run 作用域的运行中视图（StepDetail 的
+ *  「本 run 用量」消费，`run/completed` 直接覆盖），不是会话累计。
+ *
+ *  两槽都空 ⇒ null（无数据不显示，零伪造）；任一侧非空即返回其与另一侧的和，
+ *  逐维 null 的粘性由 `addUsage` 保证（未知维不会被当成 0）。 */
+export function sessionCumulativeUsage(state: ConversationState): UsageStats | null {
+  if (!state.session_usage_total) return state.run_usage_live;
+  if (!state.run_usage_live) return state.session_usage_total;
+  return addUsage(state.session_usage_total, state.run_usage_live);
 }
 
 // ── `#312` run/paused 载荷的小工具（放在投影只读路径上，一律"缺失即缺席"）──
