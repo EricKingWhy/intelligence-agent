@@ -453,6 +453,15 @@ function summarizeSuperseded(event: AgentEvent): string {
   return typeof seq === 'number' ? `第 ${seq} 条输入已被新内容取代` : '输入已被取代';
 }
 
+// #1280 AC4：`error`（#1193 致命失败信号，durable）不再空摘要——data.message 是
+// 失败原因的可读口径，Timeline 行给人话，全文走事件钻取。与 summarizeRunFailed
+// 同规则**不截断**：文案是完整句子，截断正好切掉可操作尾巴（ADR-0033 §2.3）。
+function summarizeError(event: AgentEvent): string {
+  const message = event.data.message;
+  const detail = typeof message === 'string' ? message.trim() : '';
+  return detail ? `运行失败 · ${detail}` : '运行失败';
+}
+
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
 function truncateQueueSummary(content: string, max = 40): string {
   return content.length > max ? `${content.slice(0, max)}…` : content;
@@ -1906,7 +1915,7 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // `deriveRunFailedBeforePlan` 从事件流派生——见该函数）。登记为 no-op ⇒
   // 已知类型、不进 `unknown_events`、时间线可摘要；不登记则穷尽性
   // `Record<EventTypeValue, EventSemantics>` 被破坏（tsc 红）。
-  [EventType.ERROR]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.ERROR]: { apply: noopProjection, summarize: summarizeError },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,

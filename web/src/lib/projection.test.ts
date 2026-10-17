@@ -1276,6 +1276,21 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(summarizeEvent(ev({ type: EventType.MODEL_FAILED }))).toBe('');
   });
 
+  // #1280 AC4：`error`（#1193 致命失败信号）不再空摘要——message 是可读原因。
+  // 与 summarizeRunFailed 同规则不截断（完整句子，ADR-0033 §2.3）。
+  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（全文不截断）；缺失 → 「运行失败」', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.ERROR,
+      data: { code: 'run-failed-before-plan', message: '模型调用失败' },
+    }))).toBe('运行失败 · 模型调用失败');
+    const long = 'x'.repeat(60);
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: long } }))).toBe(
+      `运行失败 · ${long}`,
+    );
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('运行失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('运行失败');
+  });
+
   // ── 事件语义注册表（架构深化 C2）：穷尽性由 tsc 强制
   //    （Record<EventTypeValue, EventSemantics> 缺键即编译失败）；这里锁定
   //    「词汇表内但前端未接线」那批类型的**既有兜底行为**，使未来接线成为

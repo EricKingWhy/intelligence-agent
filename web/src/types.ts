@@ -743,9 +743,10 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
-  /** #1197 项 5A：自动压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
-   *  5A UI 已按 2026-10-16 20:45 二次证伪裁决 A 移除；本字段仅保留作接线（不变量 #22：
-   *  界面是投影），供未来后端语义调整后直接生效。当前无渲染消费者。
+  /** #1197 项 5A / #1264：压缩**进行中**——`compaction/start` 已到、`compaction/end` 未到。
+   *  #1264（Shape A）起有渲染消费者：`App.tsx` 经 `Composer.compactionInProgress`
+   *  渲染「正在压缩上下文…」，同时覆盖自动路径（run 循环内再压）与手动 `/compact`
+   *  ——两条路径共用同一对事件，界面不维护第二套真相（不变量 #22）。
    *  后端 bracket 三事件背靠背落盘（`builder.py::compact_now`），故真机上本字段的
    *  可见窗口很短。详见 #1252。 */
   compaction_in_progress: boolean;

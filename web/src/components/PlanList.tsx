@@ -181,6 +181,7 @@ export function PlanList({
     if (!panelExpanded) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
       setPanelExpanded(false);
       summaryToggleRef.current?.focus();
     };
