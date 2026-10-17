@@ -133,9 +133,11 @@ class Settings(BaseSettings):
     # #1279：重试维度的墙钟放大——第 n 次尝试 = min(规模公式 × multiplier^(n-1),
     # max_seconds)。默认 2× / 300s：慢模型（hy4-preview-f 单轮 45–60s）第二次
     # 有机会完成；上限保证不会无限等待（再超时照常落 compaction_failed）。
-    # 两者都必须正且有限（allow_inf_nan=False：inf 等价于取消失败语义）。
+    # multiplier 必须 ≥1 且有限（(0,1) 会把重试墙钟缩到 attempt 1 以下，与
+    # "放大"相悖；allow_inf_nan=False：inf 等价于取消失败语义）；
+    # max_seconds 必须正且有限。
     summary_timeout_attempt_multiplier: float = Field(
-        default=2.0, gt=0, allow_inf_nan=False)
+        default=2.0, ge=1, allow_inf_nan=False)
     summary_timeout_max_seconds: float = Field(
         default=300.0, gt=0, allow_inf_nan=False)
     # #1026：分块摘要（票面修法②）。摘要请求估算超过 hard_guard × ratio 即走

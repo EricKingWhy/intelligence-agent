@@ -560,11 +560,13 @@ class ContextCompactor:
         # #1026：墙钟斜率（候选①线性缩放）——0 = 固定墙钟（候选②的退化形态）。
         if summary_timeout_per_kilotoken_seconds < 0:
             raise ValueError("summary_timeout_per_kilotoken_seconds must be non-negative")
-        # #1279：attempt 缩放必须为正且有限；上限必须为正且有限（"不许无限大"——
+        # #1279：attempt 缩放必须 ≥1 且有限（(0,1) 会把重试墙钟缩到 attempt 1
+        # 以下，与"放大"相悖）；上限必须为正且有限（"不许无限大"——
         # 放大到无界等于取消失败语义）。
         if (not math.isfinite(summary_timeout_attempt_multiplier)
-                or summary_timeout_attempt_multiplier <= 0):
-            raise ValueError("summary_timeout_attempt_multiplier must be positive")
+                or summary_timeout_attempt_multiplier < 1):
+            raise ValueError(
+                "summary_timeout_attempt_multiplier must be >= 1")
         if (not math.isfinite(summary_timeout_max_seconds)
                 or summary_timeout_max_seconds <= 0):
             raise ValueError("summary_timeout_max_seconds must be positive")
@@ -621,16 +623,23 @@ class ContextCompactor:
         共用同一恒定值（票面修法①）。
 
         #1279：再按 **attempt 维度**放大——`min(formula × multiplier^(attempt-1),
-        max_seconds)`。attempt=1 的公式值与 #1026 逐字相同（快模型行为不变）；
-        attempt=2 默认 2×，给慢模型（如单轮 45–60s 的网关）一次真正可能完成的
-        重试。上限防止"无限等待"：第二次仍超时则照常落 `compaction_failed`。
+        max_seconds)`（min 仅作用于 attempt≥2）。attempt=1 **无条件**返回裸公式
+        值（与 #1026 逐字相同，快模型行为不变——即使公式值超过 max_seconds 也
+        不夹逼，否则属静默行为改变）；attempt=2 默认 2×，给慢模型（如单轮
+        45–60s 的网关）一次真正可能完成的重试。上限防止"无限等待"：第二次仍
+        超时则照常落 `compaction_failed`。
         """
         formula = (self._summary_timeout
                    + request_token_estimate / 1000 * self._timeout_per_kilotoken)
-        return min(
-            formula * self._timeout_attempt_multiplier ** (attempt - 1),
-            self._timeout_max,
-        )
+        if attempt == 1:
+            # 与 #1026 逐字相同：attempt=1 不受 max_seconds 夹逼。
+            return formula
+        try:
+            scaled = formula * self._timeout_attempt_multiplier ** (attempt - 1)
+        except OverflowError:
+            # 极端 attempt 下幂运算溢出时直接取上限。
+            return self._timeout_max
+        return min(scaled, self._timeout_max)
 
     async def _summarize_chunked(
         self, chunks: list[list[AnyMessage]], prompt: SystemMessage,

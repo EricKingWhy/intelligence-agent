@@ -107,6 +107,15 @@ def test_attempt_timeout_is_capped_by_max_seconds():
     assert compactor._summary_timeout_for(0, 2) == pytest.approx(20.0)
     assert compactor._summary_timeout_for(0, 3) == pytest.approx(25.0)
     assert compactor._summary_timeout_for(0, 20) == pytest.approx(25.0)
+    # attempt=1 无条件走裸公式值：公式值超过 max_seconds 也不夹逼（审查 F1——
+    # "与 #1026 逐字相同"必须无条件成立，min 只作用于 attempt≥2）。
+    uncapped = ContextCompactor(
+        object(), summary_timeout_seconds=40.0,
+        summary_timeout_per_kilotoken_seconds=0.0,
+        summary_timeout_attempt_multiplier=2.0,
+        summary_timeout_max_seconds=25.0)
+    assert uncapped._summary_timeout_for(0, 1) == pytest.approx(40.0)
+    assert uncapped._summary_timeout_for(0, 2) == pytest.approx(25.0)
 
 
 # ── 行为：慢模型 attempt 1 超时、attempt 2 在放大墙钟内成功 ──────────────────
@@ -194,15 +203,16 @@ async def test_double_timeout_still_emits_failure_event_with_timeout_seconds(tmp
     assert [event.data["attempt"] for event in failures] == [1, 2]
     assert [event.data["error_class"] for event in failures] == ["timeout", "timeout"]
     assert [event.data["timeout_seconds"] for event in failures] == pytest.approx(
-        [0.05, 0.1])
-    assert all("timeout_seconds" in event.data for event in failures), (
-        "失败事件必须携带本次 attempt 实际使用的墙钟，供诊断")
+        [0.05, 0.1]), "失败事件必须携带本次 attempt 实际使用的墙钟，供诊断"
 
 
 # ── 配置面：非法值响亮拒绝；非默认值一路到达 compactor ─────────────────────
 
 
-def test_nonpositive_attempt_multiplier_and_max_are_rejected():
+def test_invalid_attempt_multiplier_and_max_are_rejected():
+    # multiplier 必须 ≥1：(0,1) 会把重试墙钟缩到 attempt 1 以下，与"放大"相悖。
+    with pytest.raises(ValueError, match="multiplier"):
+        ContextCompactor(object(), summary_timeout_attempt_multiplier=0.5)
     with pytest.raises(ValueError, match="multiplier"):
         ContextCompactor(object(), summary_timeout_attempt_multiplier=0)
     with pytest.raises(ValueError, match="multiplier"):
@@ -216,9 +226,11 @@ def test_nonpositive_attempt_multiplier_and_max_are_rejected():
         ContextCompactor(object(), summary_timeout_max_seconds=float("inf"))
 
 
-def test_settings_reject_nonpositive_attempt_timeout_fields():
+def test_settings_reject_invalid_attempt_timeout_fields():
     from agent_harness.config import Settings
 
+    with pytest.raises(ValidationError):
+        Settings(summary_timeout_attempt_multiplier=0.5)
     with pytest.raises(ValidationError):
         Settings(summary_timeout_attempt_multiplier=0)
     with pytest.raises(ValidationError):
