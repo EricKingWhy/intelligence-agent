@@ -135,7 +135,12 @@ def _open_within_pinned_parent(parent_fd: int, name: str, flags: int) -> int:
     try:
         return os.open(name, flags, dir_fd=parent_fd)
     except OSError as error:
-        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+        # ELOOP：组件被换成 symlink（O_NOFOLLOW 拒绝）；ENOTDIR：目录组件被
+        # 换成非目录；ENXIO：文件组件被换成 unix socket（O_RDONLY 打开报
+        # ENXIO）。三者都按 Windows 分支同一契约 fail-closed。其余错误原样
+        # 上抛（含 FileNotFoundError：条目在归档中途消失与基线按路径遍历的
+        # 行为一致）。
+        if error.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENXIO):
             raise PermissionError(
                 "copy_in source changed during archive"
             ) from error
@@ -207,8 +212,13 @@ def _walk_fd_tree(
     每个组件都用 `os.open(O_NOFOLLOW, dir_fd=已 pin 的祖先 fd)` 相对打开
     （与 `skills/inspection.py` 的安全读同型；Go 1.24 `os.Root`/`OpenInRoot`
     的逐组件 openat(O_NOFOLLOW|O_DIRECTORY) 同思路），文件内容一律从已打开
-    的 fd 读取，绝不按路径名二次打开。归档期间任何组件被换成 symlink /
-    类型改变 ⇒ PermissionError("copy_in source changed during archive")。
+    的 fd 读取，绝不按路径名二次打开。凡是能让读取**逃出 pin 住的树**的
+    换链（组件被换成 symlink ⇒ ELOOP、目录组件换成非目录 ⇒ ENOTDIR、文件
+    组件换成 socket ⇒ ENXIO）一律 fail-closed；同一 pin 树内的对象替换
+    （rename 换名、内容重写）不被放大为逃逸——读取自 fd，描述的是 pin 住
+    时刻观察到的对象。symlink/fifo/设备成员的稳定快照见
+    `_add_pinned_leaf_member`；归档中途条目消失按基线行为原样上抛
+    FileNotFoundError。
     """
     with os.scandir(parent_fd) as scanner:
         entries = sorted(scanner, key=lambda entry: entry.name)
@@ -270,8 +280,11 @@ def _archive_posix_tree_fd_relative(
 
     行为契约保持：`dereference=False` 语义不变（symlink 本体进 tar，不跟随；
     完全位于源树内的 hard-link pair 经 gettarinfo 的 inode 去重仍归档为
-    LNKTYPE 成员）；根缺失的 FileNotFoundError 与 put_archive 失败的
-    RuntimeError 抛错点不变；tar 成员名（`root_name` 树形）不变。
+    LNKTYPE 成员）；FileNotFoundError（根缺失 / 条目消失）与 put_archive
+    失败的 RuntimeError 抛错点不变；tar 成员名（`root_name` 树形）不变。
+    两处**有意收紧**（与 Windows 分支同契约，非行为保持）：symlink 根由
+    "归档出 SYMTYPE 成员"改为 PermissionError 响亮失败；socket 成员由基线
+    `TarFile.add` 的静默跳过改为 PermissionError 响亮失败。
     """
     dir_flags = (
         os.O_RDONLY
@@ -289,6 +302,8 @@ def _archive_posix_tree_fd_relative(
     if (
         os.open not in os.supports_dir_fd
         or os.scandir not in os.supports_fd
+        or os.stat not in os.supports_dir_fd
+        or os.readlink not in os.supports_dir_fd
         or not hasattr(os, "O_NOFOLLOW")
         or not hasattr(os, "O_DIRECTORY")
     ):
