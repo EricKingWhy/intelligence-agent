@@ -300,7 +300,7 @@ describe('F4 AC2 — 打开那一刻候选表是最新的', () => {
  *  基准重定（2026-10-05，#684/#685 审批持久规则）：`manage-approve-policy`
  *  在 `manage-memories` 后新增（顶栏 Shield 与命令面板共用入口，同
  *  `manage-memories` 模式），现共 111 项。功能加项须同步重定本表。
- *  基准重定（2026-10-17，#1312 会话级目标 pill）：`new-session` 在 actions 组第 3 位
+ *  基准重定（2026-10-17，#1312 会话级目标状态行）：`new-session` 在 actions 组第 3 位
  *  新增（复用 `handleNew`），现共 112 项。 */
 const GOLDEN_OPEN_ITEMS: [string, string][] = [
   ['toggle-inspector', 'actions'],
@@ -349,8 +349,12 @@ describe('#1312 — 命令面板新建会话', () => {
     expect(option).toBeDefined();
 
     await act(async () => option!.click());
+    // `new-session` 的 run 只把 handleNew 登记进 paletteAfterClose，真正执行落在 Radix
+    // `onCloseAutoFocus`（关闭那一 tick 的回调，可能晚于 click 的 act flush）——同步断言
+    // 会间歇红（实测 1/5）。等它落地再判；本文件不引 @testing-library，用 vitest 自带的
+    // `vi.waitFor`（同样的轮询语义）。
+    await vi.waitFor(() => expect(H.selectSession).toHaveBeenCalledWith(null));
     // 精确匹配 null：伪造 `''`/undefined 都会在 App 里被读成"仍有会话"或"新建"的二义。
-    expect(H.selectSession).toHaveBeenCalledWith(null);
   });
 });
 
