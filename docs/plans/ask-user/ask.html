@@ -27,6 +27,7 @@
   }
   .msg.user { align-self: flex-end; background: #1b1d24; border: 1px solid #26282f; }
   .msg.agent { align-self: flex-start; background: transparent; color: #9aa0a8; padding-left: 2px; font-size: 13px; }
+  #afterMsg { white-space: pre-line; }
   .status-pill {
     align-self: flex-start; display: flex; align-items: center; gap: 7px;
     font-size: 12.5px; color: #c6c9f5;
@@ -296,15 +297,24 @@
   $('submit').addEventListener('click', finish);
 
   function finish() {
+    // 真正作答：选了选项，或自定义输入非空。显式跳过（idx=-2）与留空（null）都不算。
+    const isAnswered = a => !!a && (a.idx >= 0 || (a.idx === -1 && (a.text || '').trim().length > 0));
+    const answered = answers.filter(isAnswered).length;
+    const skipped = QUESTIONS.length - answered;
     const s = answers.map((a, i) => {
-      if (!a || a.idx === -2) return `${QUESTIONS[i].title}：跳过`;
-      if (a.idx === -1) return `${QUESTIONS[i].title}：${a.text.trim()}（自定义）`;
-      return `${QUESTIONS[i].title}：${QUESTIONS[i].options[a.idx].label}`;
+      const title = QUESTIONS[i].title.replace(/[？?]\s*$/, '');
+      if (!isAnswered(a)) return `${title}：跳过`;
+      if (a.idx === -1) return `${title}：${a.text.trim()}（自定义）`;
+      return `${title}：${QUESTIONS[i].options[a.idx].label}`;
     }).join('\n');
-    toast('已提交 4 个决定，run 继续');
+    toast(skipped === 0
+      ? `已提交 ${answered} 个决定，run 继续`
+      : answered === 0
+        ? `已跳过全部 ${skipped} 个问题，run 继续`
+        : `已提交 ${answered} 个决定，跳过 ${skipped} 个，run 继续`);
     const m = $('afterMsg');
     m.style.display = '';
-    m.textContent = '收到，按你的决定继续发布…';
+    m.textContent = `收到，按你的决定继续发布…\n\n${s}`;
   }
 
   $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));
