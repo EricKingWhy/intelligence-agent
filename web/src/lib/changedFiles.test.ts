@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ToolCall } from '../types';
-import { changedFiles, lineDelta, netStatOf } from './changedFiles';
+import { changedFiles, hasSuccessfulBashCall, lineDelta, netStatOf } from './changedFiles';
 
 function editTool(
   id: string,
@@ -197,5 +197,32 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
     expect(files[0].added).toBeNull();
     expect(files[0].limited).toBe('archived');
     expect(files[0].edits[0].artifactId).toBe('0123456789abcdef');
+  });
+});
+
+describe('hasSuccessfulBashCall — 空态弱提示判据（#1311）', () => {
+  it('成功的 bash 调用 → true（可能有未被清单覆盖的文件副作用）', () => {
+    const bash = (status: ToolCall['status']): ToolCall => ({
+      tool_call_id: 'b', name: 'bash', args: { command: 'echo hi' }, status,
+    });
+    expect(hasSuccessfulBashCall([bash('success')])).toBe(true);
+  });
+
+  it('失败/进行中的 bash → false（只有成功执行才可能有文件副作用）', () => {
+    const bash = (status: ToolCall['status']): ToolCall => ({
+      tool_call_id: 'b', name: 'bash', args: { command: 'ls' }, status,
+    });
+    expect(hasSuccessfulBashCall([bash('failed')])).toBe(false);
+    expect(hasSuccessfulBashCall([bash('running')])).toBe(false);
+    expect(hasSuccessfulBashCall([bash('stopped')])).toBe(false);
+  });
+
+  it('非 bash 工具 → false（写工具的副作用已在清单里，无需提醒）', () => {
+    const tools = [editTool('t1', 'a.ts', 'a\n', 'b\n')];
+    expect(hasSuccessfulBashCall(tools)).toBe(false);
+  });
+
+  it('空清单 → false', () => {
+    expect(hasSuccessfulBashCall([])).toBe(false);
   });
 });

@@ -69,6 +69,7 @@ export function ChangesPanel({
   events = [],
   eventsVersion,
   streaming = false,
+  hasBashCall = false,
   onOpenTaskReview,
 }: {
   files: readonly FileChange[];
@@ -78,6 +79,9 @@ export function ChangesPanel({
   events?: readonly AgentEvent[];
   eventsVersion: number;
   streaming?: boolean;
+  /** #1311：会话里存在**成功**的 bash 调用（`hasSuccessfulBashCall(tools)`）。
+   *  空态据此给弱提示——bash 的文件副作用不在此清单，这是必须让用户知道的事。 */
+  hasBashCall?: boolean;
   onOpenTaskReview?: () => void;
 }) {
   const [wanted, setWanted] = useState<string | null>(null);
@@ -116,7 +120,15 @@ export function ChangesPanel({
       {files.length === 0 ? (
         <div className="detail-tab-empty">
           <FileDiff size={24} className="detail-empty-icon" aria-hidden="true" />
-          <div className="detail-empty-hint">本次会话未改动任何文件。</div>
+          {/* #1311：口径声明而非全称断言——bash 等命令的文件副作用不进清单（设计边界），
+              不能说"未改动任何文件"。弱提示只讲"有成功 bash"这一条已发生的事实，
+              与 UnattributedFootnote（单条改动归属缺失）语义不撞车。 */}
+          <div className="detail-empty-hint">本次会话没有通过文件工具改动文件。</div>
+          {hasBashCall && (
+            <div className="detail-empty-hint">
+              会话中有成功的 bash 调用：它对文件的副作用不在此清单内。
+            </div>
+          )}
           <UnattributedFootnote count={unattributed} />
         </div>
       ) : (
@@ -185,6 +197,11 @@ export function ChangesPanel({
           <UnattributedFootnote count={unattributed} />
         </>
       )}
+      {/* #1311：数据源标注在空态/有文件两种版式下常驻——清单只覆盖结构化文件工具事件，
+          shell 副作用由「任务审阅」的 git 口径兜底；两个口径的差异有标注才有得区分。 */}
+      <div className="changes-footnote">
+        数据来源：write / edit / apply_patch 工具事件；shell 命令的文件副作用不在此列（git 口径见「任务审阅」）。
+      </div>
     </div>
   );
 }

@@ -180,3 +180,15 @@ export function changedFiles(tools: readonly ToolCall[]): {
 } {
   return buildFiles(tools);
 }
+
+/** 会话里是否存在**成功**的 bash 调用（#1311 空态弱提示的判据）。
+ *
+ *  清单只认 `WRITE_TOOL_NAMES`，bash 的文件副作用不进清单（与 Claude Code Checkpointing
+ *  "does not track files modified by Bash commands"、aider "Whenever aider edits a file,
+ *  it commits" 只认自身编辑动作的边界同型：结构化编辑进清单，shell 副作用交给外部
+ *  对账层——本项目是「任务审阅」的 git 口径）。空态因此不能说"未改动任何文件"，
+ *  有成功 bash 时还要提醒这条边界。失败/进行中的调用没有已落地的副作用，不算。
+ *  `bash` 是唯一的命令工具名（与 `commandOutput.ts` 同一口径）。 */
+export function hasSuccessfulBashCall(tools: readonly ToolCall[]): boolean {
+  return tools.some((tool) => tool.name === 'bash' && tool.status === 'success');
+}
