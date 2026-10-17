@@ -23,11 +23,10 @@ vi.mock('../lib/api', async (importOriginal) => {
 });
 
 import { uploadAttachment, type AttachmentUploadReceipt } from '../lib/api';
-import { Composer } from './Composer';
+import { Composer, type SubmitResult } from './Composer';
 
 /** 提交口签名：`false` = 未受理（保留输入）；`undefined`/`true` = 已受理（清空）。 */
 type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
-type SubmitResult = void | boolean;
 
 const receipt = (id: string): AttachmentUploadReceipt => ({
   attachment_id: id,

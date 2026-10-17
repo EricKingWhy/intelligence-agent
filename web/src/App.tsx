@@ -23,7 +23,7 @@ import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
-import { Composer } from './components/Composer';
+import { Composer, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -1091,11 +1091,15 @@ export default function App() {
   // 「编辑」= 就地编辑排队项（ADR-0030 §5.2）：POST /messages 带 queue_id——
   // 后端先取消旧项（queue/cancelled）再按 mode 重新投递新内容。**不是**"回填主
   // 输入框 + 取消原项"：那种做法在取消失败时会留下一个已预填却仍排队的双重状态。
+  // #1283 P2-2：返回值透传 `sendMessage` 的受理结果——409 / 未受理时 Composer
+  // 靠它保留编辑态与用户改好的文本（此前无论结果如何都清空编辑框）。
+  // #1283 复审 P4：返回值契约引用 Composer 的共享 `SubmitResult` 别名——
+  // 此前手写同一联合类型，契约变更时这里会被 tsc 静默放过。
   const handleEditItem = useCallback(
-    (item: UndeliveredInput, newContent: string) => {
-      if (!selectedId) return;
+    (item: UndeliveredInput, newContent: string): SubmitResult => {
+      if (!selectedId) return false;
       const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
-      void sendMessage(selectedId, newContent, {
+      return sendMessage(selectedId, newContent, {
         amend: {
           mode: 'queue',
           queue_id: item.id,
@@ -1183,8 +1187,6 @@ export default function App() {
 
   const paused = conversation?.run_paused ?? null;
   const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
-  const constraintInputPending =
-    pendingConstraintInput !== null && pendingConstraintInput.answer === null;
   const constraintRequest =
     paused !== null &&
     pendingConstraintInput !== null &&
@@ -1193,6 +1195,11 @@ export default function App() {
     paused.run_id === pendingConstraintInput.run_id
       ? pendingConstraintInput
       : null;
+  /** #1283：`constraintInputPending` 的判据与**卡片挂载来源**同宽——用已与
+   *  `run_paused` 对齐的 `constraintRequest`。「有请求、无 `run/paused`」时没有卡
+   *  可答，锁住 composer 就是「锁了但没卡」的死角（与 ask_user 同款，见下）。 */
+  const constraintInputPending =
+    constraintRequest !== null && constraintRequest.answer === null;
   /** #1204：`kind=ask_user` 的待回答请求——挂载内嵌卡片的**唯一**判据，与约束澄清
    *  完全同形地要求「暂停 run 与请求 id 对齐」，两条管线互不冒充（分流在投影的
    *  `data.kind` 处已经发生，这里只是同一条对齐检查）。 */
@@ -1206,10 +1213,12 @@ export default function App() {
       ? pendingAskUser
       : null;
   /** #1223：`ask_user` 待回答（答案尚未落回事件流）→ 参与 composer 锁定，把用户引向
-   *  对话流里的待回答卡片，而不是让他发新消息撞后端 409。与 `constraintInputPending`
-   *  完全同形（同一 `USER_INPUT_REQUESTED` 抽象，只是 `kind` 不同；锁的判据是投影字段
-   *  ＋「答案未到」，不另立第二真相源）。 */
-  const askUserPending = pendingAskUser !== null && pendingAskUser.answer === null;
+   *  对话流里的待回答卡片，而不是让他发新消息撞后端 409。
+   *  #1283 P2-1：判据必须与**卡片挂载来源**同宽——用已与 `run_paused` 对齐的
+   *  `askUserRequest`，而不是裸投影。事件流里出现"有请求、无 `run/paused`"时
+   *  （后端 `_pending_user_input_pause` 明确承认该状态）没有卡可答，锁住输入框就是
+   *  「锁了但没卡」的死角。`answer !== null`（含整卡跳过）即解除锁定。 */
+  const askUserInputPending = askUserRequest !== null && askUserRequest.answer === null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -1881,7 +1890,7 @@ export default function App() {
                     constraintInputPending={constraintInputPending}
                     /* #1223：待回答的 `ask_user` 提问也锁 composer（与约束澄清同一条
                        锁定语义；文案在 Composer 内中性化，不出现「约束澄清」字样）。 */
-                    askUserPending={askUserPending}
+                    askUserInputPending={askUserInputPending}
                     /* #1148：分离投递（窗外落定）迟到的失败原文——hook 把没送出去的
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
