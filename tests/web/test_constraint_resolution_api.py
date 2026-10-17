@@ -120,8 +120,10 @@ def test_constraint_answer_resumes_same_run_and_only_persistent_choice_replaces_
             json={"content": "Start another task before I answer."},
         )
         assert blocked_message.status_code == 409, blocked_message.text
-        # #1223：约束澄清的 409 文案**保持原句**（按 kind 分流，别被中性句顶掉）。
-        assert "约束澄清" in blocked_message.json()["detail"]
+        # #1223/#1283 P4：约束澄清的 409 文案保持原句；整句相等（弱断言钉不住动作子句）。
+        assert blocked_message.json()["detail"] == (
+            "当前有待回答的约束澄清；请先提交答案，再发送新消息"
+        )
         assert client.get(f"/api/sessions/{session_id}/events").json() == events_before_resume
 
         Session.append_event(
