@@ -189,6 +189,22 @@ def test_builtins_survive_without_skills_capability(tmp_path: Path) -> None:
     assert [c["name"] for c in commands] == BUILTIN_NAMES
 
 
+def test_namespace_omitted_when_equal_to_name(tmp_path: Path) -> None:
+    """托管安装的 plugin 名就是 skill 名：自指前缀 `/code-review:code-review` 无意义。"""
+    commands = _commands(_client(tmp_path, [_entry("code-review", plugin="code-review")]))
+    skill = next(c for c in commands if c["kind"] == "skill")
+    assert "namespace" not in skill
+
+
+def test_description_truncated_to_display_cap(tmp_path: Path) -> None:
+    """与 `GET /api/skills` 同一展示上限：菜单不能把整篇描述当载荷下发。"""
+    commands = _commands(
+        _client(tmp_path, [_entry("long", description="字" * 4000)])
+    )
+    skill = next(c for c in commands if c["kind"] == "skill")
+    assert len(skill["description"]) == 1536
+
+
 def test_description_is_single_line(tmp_path: Path) -> None:
     commands = _commands(
         _client(tmp_path, [_entry("multi", description="first\nsecond")])

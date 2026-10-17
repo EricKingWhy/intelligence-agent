@@ -134,6 +134,69 @@ class TestSkillCatalogContextProvider:
             assert BODY not in messages[0].content
 
 
+def _session_with(content: str) -> Session:
+    """最小会话：provider 只读事件流里的用户来源消息。"""
+    from agent_harness.session.event import USER_MESSAGE, SessionEvent
+
+    session = Session.__new__(Session)
+    session._events = [
+        SessionEvent(seq=0, type=USER_MESSAGE, session_id="s", data={"content": content})
+    ]
+    return session
+
+
+class TestSkillExplicitInvocation:
+    """#1200 票面 §4：消息开头出现 skill 名则执行其内容（Claude Code 语义）。"""
+
+    @pytest.mark.asyncio
+    async def test_leading_slash_skill_injects_body(self, tmp_path):
+        provider = SkillCatalogContextProvider(_capability(tmp_path))
+        messages = await provider.select(_session_with("/pdf-export 请导出"), 2000)
+        assert len(messages) == 2  # 目录 + 被调用正文
+        body_message = messages[1].content
+        assert BODY in body_message
+        frame = DEFAULT_REGISTRY.assemble("frame:untrusted_skill").fragment_text
+        assert frame in body_message  # 与 load_skill 同款 untrusted framing
+        # 目录消息仍然零正文（Gate 2 默认面不变）
+        assert BODY not in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_arguments_substitution(self, tmp_path):
+        _entry("templated", "带参技能", "主题：$ARGUMENTS", tmp_path)
+        provider = SkillCatalogContextProvider(_capability(tmp_path))
+        messages = await provider.select(_session_with("/templated 季度报告"), 2000)
+        assert "主题：季度报告" in messages[1].content
+        assert "$ARGUMENTS" not in messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_plain_message_and_unknown_slash_do_not_inject_body(self, tmp_path):
+        provider = SkillCatalogContextProvider(_capability(tmp_path))
+        for content in ("请用 pdf-export 导出", "/ghost 你好"):
+            messages = await provider.select(_session_with(content), 2000)
+            assert len(messages) == 1, content
+            assert BODY not in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_disabled_skill_cannot_be_invoked(self, tmp_path):
+        _entry("pdf-export", "导出 PDF 报告", BODY, tmp_path)
+        discovery = SkillDiscovery(
+            directories=[tmp_path], project_dir=tmp_path, disabled_names=frozenset({"pdf-export"})
+        )
+        discovery.discover()
+        provider = SkillCatalogContextProvider(SkillCapability(discovery))
+        messages = await provider.select(_session_with("/pdf-export 导出"), 2000)
+        assert messages == []  # 目录为空 + 正文不可加载（load 拒绝禁用项）
+        with pytest.raises(CapabilityError) as err:
+            SkillCapability(discovery).load("pdf-export")
+        assert err.value.code == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_body_respects_budget(self, tmp_path):
+        provider = SkillCatalogContextProvider(_capability(tmp_path))
+        messages = await provider.select(_session_with("/pdf-export"), 30)
+        assert all(BODY not in message.content for message in messages)
+
+
 class TestLoadSkillTool:
     def test_contract_is_readonly_context_tool(self, tmp_path):
         tool = LoadSkillTool(_capability(tmp_path))

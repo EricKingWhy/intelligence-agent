@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict
 from agent_harness.plugins.settings import (
     PluginSettings,
     PluginSettingsError,
-    load_plugin_settings,
+    load_plugin_settings_tolerant,
     set_require_confirm,
     set_server_enabled,
     set_skill_enabled,
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
 #: 票面 §5：不合规的 skill 名 422，不做静默规范化。判据与发现/写入侧同一份
 #: （`is_valid_skill_name`），不另起一套正则。
+
+#: 与 `GET /api/skills` 同一展示上限：`/` 菜单也不该把整篇正文当描述下发。
+MAX_SKILL_DESCRIPTION_CHARS = 1536
 
 #: `/` 菜单的内置命令（#1195 定稿命令表，D2=A 单一注册表）。
 #: 元数据由后端提供，前端只保留按 name 查表的 `run` 回调（#1200 Phase 3）。
@@ -69,14 +72,13 @@ def _known_servers(capability) -> set[str]:
 
 
 def _settings(app) -> PluginSettings:
-    """当前选择态（文件即真相，每次请求现读，不缓存第二份）。"""
-    try:
-        return load_plugin_settings(app.state.agent.settings.workspace_dir)
-    except PluginSettingsError as error:
-        raise HTTPException(
-            status_code=500,
-            detail={"code": "settings_unreadable", "message": str(error)},
-        ) from error
+    """当前选择态（文件即真相，每次请求现读，不缓存第二份）。
+
+    读用容错版：坏字段只丢该字段，同文件里合法的禁用项仍生效。写路径的
+    read-modify-write 也走容错读，用户能靠 UI 的开关把坏字段归一化修好。
+    """
+    settings, _errors = load_plugin_settings_tolerant(app.state.agent.settings.workspace_dir)
+    return settings
 
 
 def register_plugin_routes(app: FastAPI) -> None:
@@ -100,7 +102,9 @@ def register_plugin_routes(app: FastAPI) -> None:
                 item = {
                     "name": name,
                     "kind": "skill",
-                    "description": single_line(str(getattr(entry, "description", ""))),
+                    "description": single_line(
+                        str(getattr(entry, "description", ""))
+                    )[:MAX_SKILL_DESCRIPTION_CHARS],
                 }
                 # 参数提示来自 frontmatter `argument-hint`（票面 §5；插件 mockup 注⑤）。
                 meta = getattr(entry, "meta", None) or {}
@@ -108,8 +112,10 @@ def register_plugin_routes(app: FastAPI) -> None:
                 if hint:
                     item["argumentHint"] = single_line(str(hint))
                 # 插件来源 skill 加 namespace，前端渲染 `/plugin:skill` 消歧。
+                # namespace 与 name 相同时省略：托管安装的 plugin 名就是 skill 名，
+                # 否则会渲染出 `/code-review:code-review` 这种自指前缀。
                 plugin = getattr(entry, "plugin", None)
-                if plugin:
+                if plugin and plugin != name:
                     item["namespace"] = plugin
                 commands.append(item)
         return {"commands": commands}

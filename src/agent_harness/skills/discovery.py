@@ -51,6 +51,18 @@ def is_valid_skill_name(name: str) -> bool:
 _LINE_BREAKERS = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
 
 
+def slash_display_name(name: str, plugin: str | None) -> str:
+    """`/` 菜单显示名（#1200）：插件来源 skill 用 `plugin:name` 消歧。
+
+    namespace 与 name 相同时省略——托管安装的 plugin 名就是 skill 名，否则会
+    渲染出 `/code-review:code-review` 这种自指前缀。后端注册表、Context 里的
+    确定性调用解析、前端 `slashDisplayName` 共用这一条规则。
+    """
+    if plugin and plugin != name:
+        return f"{plugin}:{name}"
+    return name
+
+
 def single_line(text: str) -> str:
     """把换行与控制符压成空格，保证插值点不被字段内容拉成多行。
 
