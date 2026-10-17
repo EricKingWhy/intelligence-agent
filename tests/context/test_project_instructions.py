@@ -355,7 +355,7 @@ def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) ->
     # 会话创建时的快照导入：私有 workspace 与宿主同内容起步。
     sandbox.write_text("AGENTS.md", "host version one")
     initial = store.load_for_sandbox_session("session-sandbox-reload", sandbox)
-    assert initial.source_paths == (Path("/workspace/AGENTS.md"),)
+    assert initial.source_paths == (PurePosixPath("/workspace/AGENTS.md"),)
     assert "host version one" in (initial.prompt_text or "")
 
     # 会话创建后：宿主改动（隔离会话不应看到）+ 私有 workspace 改动（应当看到）。
@@ -364,7 +364,7 @@ def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) ->
 
     reloaded = store.reload_for_sandbox_session("session-sandbox-reload", sandbox)
 
-    assert reloaded.source_paths == (Path("/workspace/AGENTS.md"),)
+    assert reloaded.source_paths == (PurePosixPath("/workspace/AGENTS.md"),)
     prompt = reloaded.prompt_text or ""
     assert "private workspace version" in prompt
     assert "host version two" not in prompt
