@@ -142,7 +142,7 @@ describe('Composer pending ask_user lock (#1223)', () => {
   it('待回答的 ask_user 提问 → 锁定输入框，提示中性（绝不出现「约束澄清」字样）', () => {
     const html = renderToString(createElement(Composer, {
       ...base,
-      askUserPending: true,
+      askUserInputPending: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
     expect(html).toContain('请先回答当前提问，再发送新消息');
@@ -175,7 +175,7 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
       undelivered: queue,
       onSteerItem: noop,
       onFlush: noop,
-      askUserPending: true,
+      askUserInputPending: true,
     })).replaceAll('<!-- -->', '');
     const steer = buttonTag(html, '立即发送');
     const flush = buttonTag(html, '立即发送全部');
@@ -196,6 +196,35 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
     })).replaceAll('<!-- -->', '');
     expect(buttonTag(html, '立即发送')).toContain('请先回答当前约束澄清');
     expect(buttonTag(html, '立即发送全部')).toContain('disabled=""');
+  });
+
+  // #1283 P2-2：编辑→保存同样走 `POST /messages {queue_id}`，撞同一个待答 409 ⇒
+  // 与 steer/flush 同锁；否则用户能打开编辑却被拒，改好的文本还会随编辑态一起消失。
+  it('#1283 P2-2：ask_user 待答 ⇒ 「编辑」入口同样禁用（不给必然 409 的死胡同）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      undelivered: queue,
+      onEditItem: noop,
+      onSteerItem: noop,
+      onFlush: noop,
+      askUserInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    const edit = buttonTag(html, '编辑排队消息');
+    expect(edit).toContain('disabled=""');
+    expect(edit).toContain('请先回答当前提问');
+    expect(edit).not.toContain('约束澄清');
+  });
+
+  it('#1283 P2-2：约束澄清待答 ⇒ 「编辑」入口同样禁用（原有锁定语义不回归）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      undelivered: queue,
+      onEditItem: noop,
+      onSteerItem: noop,
+      onFlush: noop,
+      constraintInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(buttonTag(html, '编辑排队消息')).toContain('disabled=""');
   });
 
   it('无待回答输入 ⇒ 队列条按钮可用（锁解除，反证锁不常驻）', () => {
@@ -258,6 +287,28 @@ describe('Composer 权限 pill（#283）', () => {
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain('title="等待审批决策后再改档"');
+  });
+
+  // #1283 P1：`locked` 已包含两种「待回答的用户输入」，改档禁用原因必须按**真实**
+  // lock 原因分流——否则 ask_user 待答时用户被引去找一个并不存在的审批。
+  it('#1283 P1：ask_user 待答 → 改档提示指向提问，绝不写「审批」', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, askUserInputPending: true, permissionModes: MODES, selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop, permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('title="等待回答当前提问后再改档"');
+    expect(html).not.toContain('审批');
+  });
+
+  it('#1283 P1：约束澄清待答 → 改档提示指向约束澄清，绝不写「审批」', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, constraintInputPending: true, permissionModes: MODES, selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop, permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('title="等待约束澄清回答后再改档"');
+    expect(html).not.toContain('审批');
   });
 
   it('新会话（permissionInSession 假）→ 仍是创建期选择，无会话内的锁', () => {

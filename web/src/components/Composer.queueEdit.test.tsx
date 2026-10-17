@@ -1,0 +1,113 @@
+// @vitest-environment jsdom
+/** #1283 P2-2：排队项「编辑 → 保存」的失败保留契约。
+ *
+ *  保存走 `POST /messages {queue_id}`，与 steer/flush 共用待答 409 闸门；组件此前
+ *  在同一帧就 `setEditingId(null)`，409 一回来用户改好的文本随编辑态一起消失。
+ *  这里用真 DOM 驱动点击与输入，钉住「未受理（显式 `false`）⇒ 保留编辑态与草稿」。
+ */
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { Composer } from './Composer';
+import type { UndeliveredInput } from '../types';
+
+const NOOP = () => {};
+
+const QUEUE: UndeliveredInput[] = [
+  { kind: 'queue', id: 'q-1', content: '原始排队内容', seq: 1, created_at: '' },
+];
+
+let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+
+/** React 的受控 input 只认原生 setter 触发的 input 事件。 */
+function setInputValue(el: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype, 'value',
+  )?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function mount(onEditItem: (item: UndeliveredInput, content: string) => Promise<boolean>): Promise<HTMLDivElement> {
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  container = el;
+  root = createRoot(el);
+  await act(async () => {
+    root!.render(createElement(Composer, {
+      streaming: false,
+      onSubmit: NOOP,
+      onCancel: NOOP,
+      onEnsureSession: async () => null,
+      undelivered: QUEUE,
+      onEditItem,
+      onSteerItem: NOOP,
+      onFlush: NOOP,
+    }));
+  });
+  return el;
+}
+
+function button(el: HTMLElement, label: string): HTMLButtonElement {
+  const found = el.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+  if (!found) throw new Error(`button not found: ${label}`);
+  return found;
+}
+
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: false, media: query, onchange: null,
+    addEventListener: NOOP, removeEventListener: NOOP,
+    addListener: NOOP, removeListener: NOOP, dispatchEvent: () => false,
+  }));
+  vi.stubGlobal('ResizeObserver', class { observe = NOOP; unobserve = NOOP; disconnect = NOOP; });
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', {
+    status: 200, headers: { 'content-type': 'application/json' },
+  })));
+});
+
+afterEach(async () => {
+  if (root) await act(async () => { root!.unmount(); });
+  if (container) container.remove();
+  document.body.innerHTML = '';
+  root = null;
+  container = null;
+  vi.unstubAllGlobals();
+});
+
+describe('#1283 P2-2 — 编辑保存被拒时保留编辑态与草稿', () => {
+  it('onEditItem 返回 false（409/未受理）⇒ 编辑框与改好的文本都还在', async () => {
+    const onEditItem = vi.fn(async () => false);
+    const el = await mount(onEditItem);
+
+    await act(async () => { button(el, '编辑排队消息').click(); });
+    const input = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    expect(input).not.toBeNull();
+
+    await act(async () => { setInputValue(input!, '改好的文本'); });
+    await act(async () => { button(el, '保存排队消息').click(); });
+    // 等异步回执落定。
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onEditItem).toHaveBeenCalledTimes(1);
+    expect(onEditItem).toHaveBeenCalledWith(QUEUE[0], '改好的文本');
+    const stillEditing = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    expect(stillEditing).not.toBeNull();
+    expect(stillEditing!.value).toBe('改好的文本');
+  });
+
+  it('onEditItem 返回 true（已受理）⇒ 编辑态关闭（旧行为不回归）', async () => {
+    const onEditItem = vi.fn(async () => true);
+    const el = await mount(onEditItem);
+
+    await act(async () => { button(el, '编辑排队消息').click(); });
+    await act(async () => { button(el, '保存排队消息').click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onEditItem).toHaveBeenCalledTimes(1);
+    expect(el.querySelector('input.queue-item-edit')).toBeNull();
+  });
+});
