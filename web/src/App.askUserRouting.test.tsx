@@ -84,11 +84,15 @@ function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
 
 /** 造一段"有一轮用户消息 + 一个待回答请求"的会话事件——Conversation 只有在
  *  `turns.length > 0` 时才走对话流渲染区（空态不渲染内嵌卡片）。 */
-function events(kind: 'ask_user' | 'protected_fact_conflict', timeoutSeconds?: number): AgentEvent[] {
+function events(
+  kind: 'ask_user' | 'protected_fact_conflict',
+  timeout?: { seconds?: number; minutes?: number },
+): AgentEvent[] {
   const requestData = kind === 'ask_user'
     ? {
         request_id: `${kind}-1`, kind, run_id: 'r1',
-        ...(timeoutSeconds === undefined ? {} : { timeout_seconds: timeoutSeconds }),
+        ...(timeout?.seconds === undefined ? {} : { timeout_seconds: timeout.seconds }),
+        ...(timeout?.minutes === undefined ? {} : { timeout_minutes: timeout.minutes }),
         questions: [
           {
             question: '新版本什么时候发布？', header: '发布决策', recommended: 0,
@@ -124,9 +128,10 @@ let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 async function mount(
-  kind: 'ask_user' | 'protected_fact_conflict', timeoutSeconds?: number,
+  kind: 'ask_user' | 'protected_fact_conflict',
+  timeout?: { seconds?: number; minutes?: number },
 ): Promise<HTMLDivElement> {
-  H.conv = projectHistory(SID, events(kind, timeoutSeconds));
+  H.conv = projectHistory(SID, events(kind, timeout));
   const el = document.createElement('div');
   document.body.appendChild(el);
   container = el;
@@ -200,15 +205,36 @@ describe('#1223 — 待回答的用户输入锁 composer', () => {
 });
 
 describe('#1224 — 卡片超时提示与后端注入消息数值一致', () => {
-  it('载荷带 timeout_seconds=600 ⇒ 底部提示渲染 10 分钟（600/60）', async () => {
-    const el = await mount('ask_user', 600);
+  it('快照 600 秒 ⇒ 底部提示渲染 10 分钟（与后端注入消息同数）', async () => {
+    const el = await mount('ask_user', { seconds: 600, minutes: 10 });
     const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
-    expect(tip).toContain('10 分钟');
+    expect(tip).toBe('10 分钟无回答自动继续');
   });
 
-  it('载荷无 timeout_seconds（旧事件）⇒ 中性提示，不伪造数字', async () => {
+  it('快照 60 秒 ⇒ 底部提示渲染 1 分钟（下界，不是 0）', async () => {
+    const el = await mount('ask_user', { seconds: 60, minutes: 1 });
+    const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
+    expect(tip).toBe('1 分钟无回答自动继续');
+  });
+
+  it('旧事件只有 seconds 字段 ⇒ 仍按同一公式换算（60 → 1 分钟）', async () => {
+    const el = await mount('ask_user', { seconds: 60 });
+    const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
+    expect(tip).toBe('1 分钟无回答自动继续');
+  });
+
+  it('快照缺失（旧事件）⇒ 中性提示，不伪造数字', async () => {
     const el = await mount('ask_user');
     const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
     expect(tip).toBe('长时间未回答将自动继续');
   });
+
+  it.each([0, -60, 1.5, 600.5])(
+    '非法快照值 %s ⇒ 中性提示（零伪造，不钳成 1 分钟）',
+    async (bad) => {
+      const el = await mount('ask_user', { seconds: bad, minutes: bad });
+      const tip = el.querySelector('.ask-user-timeout-tip')?.textContent ?? '';
+      expect(tip).toBe('长时间未回答将自动继续');
+    },
+  );
 });

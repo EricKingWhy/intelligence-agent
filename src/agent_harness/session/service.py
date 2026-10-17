@@ -122,7 +122,8 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.ask_user_timeout import (
     ExpireOutcome,
-    ask_user_timeout_message,
+    ask_user_timeout_message_for_minutes,
+    ask_user_timeout_minutes_from_payload,
     latest_pending_input_request,
     pending_ask_user_request_id,
     pending_input_request,
@@ -852,7 +853,15 @@ def _ask_user_input_answer_data(
         ):
             return None, True
         return {
-            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            # #1284 P2-2：注入消息读**请求载荷快照**（`timeout_seconds` /
+            # `timeout_minutes`），不读活的 `self._settings`——配置改动并重启后，旧请求
+            # 的卡片数字与这条消息必须仍是同一个数。只有 #1224 之前的旧事件回落到
+            # `ask_user_timeout_seconds`（调用方传的当前配置）。
+            "content": ask_user_timeout_message_for_minutes(
+                ask_user_timeout_minutes_from_payload(
+                    request.data, fallback_seconds=ask_user_timeout_seconds,
+                )
+            ),
             "input_request_id": request_id,
             "input_request_answer": normalized_timeout,
         }, False

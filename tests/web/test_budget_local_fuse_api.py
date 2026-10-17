@@ -38,8 +38,14 @@ from tests.scripted_model import ScriptedModel
 _DEFAULT_CEILING = 500
 
 
-def _web(tmp_path, *, ceiling: int | None = None) -> tuple[Any, TestClient]:
-    """隔离 app + client；`ceiling` 显式模拟运维压低 Deployment 上限。"""
+def _web(
+    tmp_path, *, ceiling: int | None = None, **settings_overrides: Any,
+) -> tuple[Any, TestClient]:
+    """隔离 app + client；`ceiling` 显式模拟运维压低 Deployment 上限。
+
+    `settings_overrides` 供各票按需注入配置（例如 #1284 的 `ask_user_question_timeout`），
+    与 `ceiling` 同一套 overrides 通路，避免第二份 `create_app` 装配。
+    """
     overrides: dict[str, Any] = {
         "_env_file": None,  # 不吃仓库根 .env（测试必须自足）
         "workspace_dir": str(tmp_path),
@@ -48,6 +54,7 @@ def _web(tmp_path, *, ceiling: int | None = None) -> tuple[Any, TestClient]:
     }
     if ceiling is not None:
         overrides["local_max_agent_turns"] = ceiling
+    overrides.update(settings_overrides)
     app = create_app(Settings(**overrides), enable_cors=False)
     return app, TestClient(app)
 

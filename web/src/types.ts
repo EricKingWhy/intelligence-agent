@@ -721,11 +721,10 @@ export interface PendingAskUserRequest {
   run_id: string;
   questions: AskUserQuestion[];
   answer: AskUserAnswer | null;
-  /** #1224：后端配置的超时档（秒，随请求落盘）——卡片底部提示按
-   *  `minutes = max(1, floor(timeout_seconds / 60))` 渲染（向下取整且至少 1 分钟），
-   *  与后端注入消息数值一致。缺省（旧事件无此字段）= 卡片渲染不带数字的中性提示
-   *  （零伪造）。 */
-  timeout_seconds?: number;
+  /** #1284：显示用超时分钟数（后端随请求快照落盘，投影已归一）。卡片只渲染
+   *  这个数，与后端注入消息同一份快照。缺省（旧事件无快照）= 卡片渲染不带数字的
+   *  中性提示（零伪造）。 */
+  timeout_minutes?: number;
 }
 
 export interface ConversationState {

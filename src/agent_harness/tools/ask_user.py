@@ -18,6 +18,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_harness.config import ASK_USER_QUESTION_TIMEOUT_TIERS
+from agent_harness.session.ask_user_timeout import ask_user_timeout_minutes
 from agent_harness.session.context import (
     current_constraint_tool_context_var,
     current_session_var,
@@ -131,6 +133,13 @@ class AskUserTool(Tool):
         # 消息（`minutes = max(1, timeout_seconds // 60)`）同源，前端据此渲染一致的数字。
         # 缺省 300 **仅供直接构造 / 测试**：生产装配（`assembly.py` 两处）恒注入
         # `Settings.ask_user_question_timeout`，故此处不随档位配置联动（#1220 复审 B3）。
+        # #1284 P3：缺省值与合法域都从 `config.py` 取——第二处字面量会与 validator
+        # 漂移，且 0 / 负数此前会原样落盘。
+        if timeout_seconds not in ASK_USER_QUESTION_TIMEOUT_TIERS:
+            raise ValueError(
+                "timeout_seconds must be one of "
+                f"{sorted(ASK_USER_QUESTION_TIMEOUT_TIERS)}, got {timeout_seconds!r}"
+            )
         self._timeout_seconds = int(timeout_seconds)
 
     @property
@@ -230,7 +239,9 @@ class AskUserTool(Tool):
             "questions": questions,
             # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。数值与后端注入
             # 消息同源（`minutes = max(1, timeout_seconds // 60)`，见 :131）。
+            # #1284：显示用分钟数也在后端落盘，前端只渲染，不再跨语言重复换算。
             "timeout_seconds": self._timeout_seconds,
+            "timeout_minutes": ask_user_timeout_minutes(self._timeout_seconds),
         }
         return ToolResult.success(
             message="提问已保存；当前 run 将暂停，等待你的回答后继续。",

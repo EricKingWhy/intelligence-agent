@@ -30,9 +30,9 @@ export interface AskUserCardProps {
   errorMessage?: string | null;
   /** 后端配置的超时档（分钟）；null = 未知——渲染不带数字的中性提示（零伪造）。
    *
-   *  #1224：由 `Conversation` 从请求载荷的 `timeout_seconds`（后端随请求落盘）算出
-   *  `minutes = max(1, floor(seconds / 60))`，与后端注入消息数值一致。旧事件无该
-   *  字段时仍为 null（回落中性文案）。 */
+   *  #1284：由投影从请求快照归一（后端落 `timeout_minutes`，旧事件由 `timeout_seconds`
+   *  换算），与后端注入消息数值一致；本组件只渲染。旧事件无快照时仍为 null（回落中性
+   *  文案）。 */
   timeoutMinutes?: number | null;
   onSubmit: (answer: AskUserAnswer) => void;
 }
@@ -119,9 +119,11 @@ export function AskUserCard({
     if (!collapsed && draft?.kind === 'custom') inputRef.current?.focus();
   }, [collapsed, draft?.kind]);
 
+  // #1284 P4：与 mockup 定稿一致（`docs/plans/ask-user/ask.html`："5 分钟无回答自动继续"）
+  // ——不用第三人称"用户在…"，也不再自称"将"。
   const timeoutTip = timeoutMinutes === null
     ? '长时间未回答将自动继续'
-    : `用户在 ${timeoutMinutes} 分钟内未回答将自动继续`;
+    : `${timeoutMinutes} 分钟无回答自动继续`;
 
   if (closed) {
     return (

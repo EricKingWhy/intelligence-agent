@@ -303,5 +303,44 @@ async def test_payload_carries_configured_timeout_seconds(tmp_path):
 
     assert result.ok
     assert result.pending_events is not None
-    _event_type, payload = result.pending_events[0]
+    event_type, payload = result.pending_events[0]
+    assert event_type == USER_INPUT_REQUESTED
     assert payload["timeout_seconds"] == 600
+    # #1284 P3：显示用分钟数由后端随快照落盘，前端不再自算（消除跨语言重复换算）。
+    assert payload["timeout_minutes"] == 10
+
+
+@pytest.mark.asyncio
+async def test_payload_renders_the_smallest_tier_as_one_minute(tmp_path):
+    """#1284 P2-3：60 秒档（合法档位下界）→ 1 分钟，不是 0 或 60。"""
+    session = _session(tmp_path)
+    tokens = _bind(session)
+    try:
+        result = await AskUserTool(timeout_seconds=60).execute(
+            AskUserArgs(questions=[AskQuestion(**_question())])
+        )
+    finally:
+        _reset(tokens)
+
+    assert result.ok
+    assert result.pending_events is not None
+    _event_type, payload = result.pending_events[0]
+    assert payload["timeout_seconds"] == 60
+    assert payload["timeout_minutes"] == 1
+
+
+def test_default_timeout_matches_settings_default():
+    """#1284 P3：工具缺省值与 `Settings` 默认值是两处字面量，必须机械相等。"""
+    from agent_harness.config import Settings
+
+    assert (
+        AskUserTool()._timeout_seconds
+        == Settings.model_fields["ask_user_question_timeout"].default
+    )
+
+
+@pytest.mark.parametrize("value", [0, -60, 61, 600.5, True])
+def test_rejects_timeout_outside_the_configured_tiers(value):
+    """#1284 P3：构造期按配置 validator 的合法域校验（0/负数/非整数不得原样落盘）。"""
+    with pytest.raises(ValueError):
+        AskUserTool(timeout_seconds=value)
