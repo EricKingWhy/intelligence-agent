@@ -129,6 +129,7 @@ export default function App() {
     streaming,
     reconnecting,
     error,
+    runFailedBeforePlan,
     sessionsError,
     titlesById,
     recoverState,
@@ -145,6 +146,7 @@ export default function App() {
     refreshSessions,
     changeModel,
     changePermission,
+    exitPlanMode,
     reloadConversation,
     fork,
     sendSteer,
@@ -722,6 +724,31 @@ export default function App() {
       reloadConversation(selectedId);
     },
     [selectedId, changePermission, reloadConversation],
+  );
+
+  // ── #1193：plan-stuck 横幅的「退出 plan 模式」动作 ──
+  /** 动作状态（横幅内联展示 pending / 失败原因，同 recoverState 的既有形状）。
+   *  成功路径由投影收口：退出写入的 `workflow/mode-changed` 取代失败标记，
+   *  hook 重读事件后 `runFailedBeforePlan` 派生为 null → 横幅整体卸载；
+   *  失败保持横幅在场并就地回显——不静默吞，也不自动重试。
+   *  `sessionId` 随状态一起记：横幅卸载后状态仍在（App 常驻），渲染端按会话
+   *  配对，失败原因不会串到另一个会话的横幅上。 */
+  const [exitPlanState, setExitPlanState] = useState<{
+    status: 'idle' | 'pending' | 'error';
+    sessionId?: string;
+    message?: string;
+  }>({ status: 'idle' });
+  const handleExitPlanMode = useCallback(
+    async (sessionId: string) => {
+      setExitPlanState({ status: 'pending', sessionId });
+      try {
+        await exitPlanMode(sessionId);
+        setExitPlanState({ status: 'idle' });
+      } catch (e) {
+        setExitPlanState({ status: 'error', sessionId, message: (e as Error).message });
+      }
+    },
+    [exitPlanMode],
   );
 
   // ── #1015：新建态懒建会话 ──
@@ -1586,6 +1613,30 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
+              （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
+              原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
+              只属于发起它的那个会话，切走自然不再渲染。 */}
+          {runFailedBeforePlan && runFailedBeforePlan.sessionId === selectedId && (
+            <div className="app-error app-error-action" role="alert">
+              <span>
+                {runFailedBeforePlan.message}
+                {runFailedBeforePlan.hint ? ` ${runFailedBeforePlan.hint}` : ''}
+              </span>
+              <button
+                className="recover-btn"
+                onClick={() => void handleExitPlanMode(runFailedBeforePlan.sessionId)}
+                disabled={exitPlanState.status === 'pending'}
+                title="显式退出 plan 档（只读）——退出后写操作工具恢复可用"
+              >
+                {exitPlanState.status === 'pending' ? '退出中…' : '退出 plan 模式'}
+              </button>
+              {exitPlanState.status === 'error' &&
+                exitPlanState.sessionId === runFailedBeforePlan.sessionId && (
+                  <span className="recover-error">{exitPlanState.message}</span>
+                )}
+            </div>
+          )}
           {/* #367 P3：worktree 自动创建的一次性提示（信息级，可关闭）。 */}
           {worktreeNotice && (
             <div className="app-notice" role="status">

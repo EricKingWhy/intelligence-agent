@@ -2391,6 +2391,41 @@ export async function changeSessionPermission(
   return res.json();
 }
 
+// ── 工作流档切换（#526 B1 端点 / #1193 消费）──
+
+/** POST /api/sessions/{id}/workflow-mode 的成功响应。
+ *  `mode` 是**动作后**的真值（幂等：重复切同档仍 200）。 */
+export interface WorkflowModeChangeResult {
+  id: string;
+  mode: string;
+}
+
+/** 切换会话工作流档（normal / plan）。
+ *
+ * #1193 的消费点：run 致命异常且计划从未生成时，会话停在 plan 档（只读）——
+ * 服务端**刻意不自动回滚**（权限只收紧不自动放宽，fail-closed），恢复路径
+ * 是用户经本函数**显式**退出 plan。与 `changeSessionPermission` 同约定：
+ * 不用回执写本地状态——档位的唯一真相是事件流投影；调用方成功后就地重读
+ * 事件（`reloadConversation`）。
+ *
+ * 错误码（`detail` 原样带出）：404 = session 不存在；422 = id 形态非法 / mode
+ * 非法；503 = 存储写锁耗尽。 */
+export async function changeWorkflowMode(
+  sessionId: string,
+  mode: 'normal' | 'plan',
+): Promise<WorkflowModeChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/workflow-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `change workflow mode ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Fork（T7 #137，PRD §2.4）──
 
 /** POST /api/sessions/{id}/forks 的响应体。 */
