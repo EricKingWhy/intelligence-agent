@@ -161,8 +161,8 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
         if (updated && updated.defined) setTask(updated);
         setOperationNotice(
           decision === 'accepted'
-            ? '已接受：服务端交付状态为「已接受」。'
-            : '已带缺项接受：服务端交付状态为「已接受」，并记录了带缺项原因。',
+            ? '任务已接受。'
+            : '任务已接受，并记录了原因。',
         );
         await load();
       } catch (e) {
@@ -173,7 +173,7 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
             const fresh = await getTaskState(sessionId);
             if (fresh.acceptance !== null) {
               setTask(fresh);
-              setOperationNotice('已接受（此前已完成，重复请求按幂等处理）。');
+              setOperationNotice('任务此前已接受。');
               return;
             }
           } catch {
@@ -212,7 +212,7 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
     try {
       const updated = await releaseTaskAcceptance(sessionId, { expected_version: task.version });
       if (updated && updated.defined) setTask(updated);
-      setOperationNotice('已撤销接受：接受裁决已释放，验收项的验证值保持不变。');
+      setOperationNotice('已撤销接受：验收项结果保持不变。');
       await load();
     } catch (e) {
       setOperationError(e instanceof Error ? e.message : '撤销接受失败');
@@ -229,11 +229,11 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
       const result = await releaseTaskLease(sessionId);
       setLeaseNotice(
         result.released
-          ? `已释放目录写租约${result.promoted_to ? `；队首 ${result.promoted_to} 提升为持有者` : ''}。`
-          : '未释放：本会话不是该目录的写租约持有者（released:false）。',
+          ? `工作目录已释放${result.promoted_to ? `；${result.promoted_to} 已可以使用` : ''}。`
+          : '未释放：当前会话未持有该工作目录。',
       );
     } catch (e) {
-      setOperationError(e instanceof Error ? e.message : '释放目录失败');
+      setOperationError(e instanceof Error ? e.message : '释放工作目录失败');
     } finally {
       setBusy(false);
     }

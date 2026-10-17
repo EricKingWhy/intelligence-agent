@@ -19,6 +19,7 @@ import { tabKeyTarget, type SurfaceKey } from '../lib/capabilities';
 export interface WorkspaceTab {
   key: SurfaceKey;
   label: string;
+  count?: number;
 }
 
 export function WorkspaceTabs({
@@ -55,6 +56,7 @@ export function WorkspaceTabs({
             type="button"
             role="tab"
             className="workspace-tab"
+            aria-label={tab.count !== undefined && tab.count > 0 ? `${tab.label}，${tab.count} 个文件` : undefined}
             aria-selected={selected}
             // 面板 id 由 App 渲染时给出（同一命名规则），指向"这个 tab 控制哪个面板"。
             aria-controls={`workspace-panel-${tab.key}`}
@@ -63,6 +65,9 @@ export function WorkspaceTabs({
             onKeyDown={handleKeyDown}
           >
             {tab.label}
+            {tab.count !== undefined && tab.count > 0 && (
+              <span className="workspace-tab-count" aria-hidden="true">·{tab.count}</span>
+            )}
           </button>
         );
       })}

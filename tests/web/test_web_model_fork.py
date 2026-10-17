@@ -78,6 +78,7 @@ def _seed(client, session_id: str = "sid-1") -> None:
         client.app.state.agent.store,
         session_id=session_id,
         workspace_registry=client.app.state.agent.workspace_registry,
+        sandbox_backend="local",
         started_data={"provider": "deepseek", "model_id": "gpt-4o"},
     )
 
@@ -87,6 +88,7 @@ def _seed_forkable(client, session_id: str = "sid-1") -> None:
         client.app.state.agent.store,
         session_id=session_id,
         workspace_registry=client.app.state.agent.workspace_registry,
+        sandbox_backend="local",
         started_data={"provider": "deepseek", "model_id": "gpt-4o"},
     )
     session.append(USER_MESSAGE, {"content": "first"})

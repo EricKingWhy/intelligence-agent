@@ -1,0 +1,1 @@
+2026-10-17	sync merge main（#1237 分支 fix/1237-flake）：父 2efbeeb0（#1237）/ bed86d80（main，#1295），零冲突；main 侧自 merge-base 7e28d4be 起合入 PR #1255–#1295 共 18 个（含 #1295/#1279 摘要超时自适应、#1287 fork sandbox_backend 继承、#1256 子智能体可见性、#1251 静默自动恢复、#1193 plan-mode race 等）及配套 gate/台账/docs 收尾行，共 247 提交	2efbeeb0..977883aa

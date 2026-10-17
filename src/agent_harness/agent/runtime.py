@@ -111,6 +111,10 @@ from agent_harness.context.builder import (
     ContextWindowExceededError,
     ProtectedFactBudgetExceededError,
 )
+from agent_harness.context.compactor import (
+    _TRANSIENT_ERROR_CLASSES,
+    CompactionPostWriteError,
+)
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
@@ -176,6 +180,7 @@ from agent_harness.session.event import (
     STEER_APPLIED,
     TOOL_RESULT,
     USER_INPUT_REQUESTED,
+    RunFailedBeforePlanData,
 )
 from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
@@ -934,6 +939,37 @@ class _SessionRequestAccounting:
     reserved_requests: int
 
 
+def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
+    """#1264（Shape A）：这次 context 超限**值不值得**在循环内再压一次？
+
+    "再压一次"只在**摘要尝试被模型侧抖动打掉**时有意义（超时 / 传输 / 输出不成
+    摘要 / 校验闸门拒绝）。其余每一条都是**结构性**的，再压必然同结果：
+
+    · 结构性词条（`_TRANSIENT_ERROR_CLASSES` 的补集，见 compactor 侧二分）；
+    · `ProtectedFactBudgetExceededError`（保护事实超独立预算，与摘要无关）；
+    · `CompactionPostWriteError`（bracket **已落盘**，历史已变，重试会写出第二对）；
+    · `failures` 为空（异常不是从压缩链出来的，无从判断）。
+
+    判定只读 `error.failures` 的 `error_class`，不看 message——message 是给人看的
+    文案，词表才是契约（有界 16 项，`_SUMMARY_ERROR_CLASSES`）。
+
+    只看**摘要尝试**的失败（`attempt >= 1`，与 `builder.py:_backfill_artifact_ref`
+    同一条口径）：`attempt=0` 的诊断是**非摘要尝试**的旁证（预检拒绝
+    `preflight_request_exceeds_hard_limit`、超大原子块释放 `chunk_bound_released`、
+    无早期回合 `no_compactable_early_turn`、区间不可用 `source_range_unavailable`），
+    它们与"模型侧是否抖动"无关，`all()` 会把它们当成否决票 —— 例如分块请求
+    先记一条 `chunk_bound_released`（`compactor.py` 在尝试循环**之前**追加），
+    随后两次摘要尝试都死于 `timeout`，失败面 = [chunk_bound_released, timeout,
+    timeout]；不筛 `attempt` 就会误判成结构性、白丢一次本该成功的续跑。
+    """
+    if isinstance(error, (ProtectedFactBudgetExceededError, CompactionPostWriteError)):
+        return False
+    failures = [f for f in (error.failures or ()) if f.attempt >= 1]
+    return bool(failures) and all(
+        failure.error_class in _TRANSIENT_ERROR_CLASSES for failure in failures
+    )
+
+
 @dataclass
 class _TerminalArms:
     """一次 run 的终结臂上下文（#264 / T11 第一切片）：六个终结点共享的收尾输入收成一个对象。
@@ -977,6 +1013,11 @@ class _TerminalArms:
     settled_request_events: dict[str, SessionEvent] = field(default_factory=dict)
     completed_model_response: Any | None = None
     session_request_accounting: _SessionRequestAccounting | None = None
+    #: #1264（Shape A）：循环内"有界再压"的**一次性闸门**（照搬 Pi 的
+    #: `_overflowRecoveryAttempted`，agent-session.ts:395/2995-3040）。生命周期 =
+    #: 单次 run：随本对象走，run 结束即消失——**不引入新状态、不落 SessionEvent**。
+    #: 置位后同一次 run 内不再有第二次再压（AC4 幂等）。
+    compaction_retry_attempted: bool = False
 
     @property
     def run_id(self) -> str | None:
@@ -1859,6 +1900,9 @@ class AgentRuntime:
 
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
+                # #1264：本轮的 build 是否走了"循环内再压成功 ⇒ 零操作续跑"分支。
+                # 为假 ⇒ 下面走既有超限收口（与本票之前逐字节等价）。
+                continue_after_recompaction = False
                 telemetry.context_build_started(step=steps)
                 # #823 / MM-02（A2）：投影跟随**当前请求模型**——run 内切到 fallback
                 # 后，本步的视觉/占位判定（PRD D6）必须按 fallback 的能力。
@@ -1872,23 +1916,57 @@ class AgentRuntime:
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
-                    # session 预留整步退回（`#318`）：context 超限臂的契约是"模型在
-                    # 本轮从未被调用"——turns / requests 的预留都没变成真账。
-                    if session_step_reserved:
-                        session_step_reserved = False
-                        accounting_id = (
-                            arms.session_request_accounting.accounting_id
-                            if arms.session_request_accounting is not None else None
-                        )
-                        await self._session_budget.refund_step(
-                            accounting_id=accounting_id,
-                        )
-                        arms.session_request_accounting = None
-                    async for streamed in self._terminal_context_exceeded(
-                        arms, launch=launch_budget, steps=steps, error=error,
+                    # #1264（Shape A）：**循环内有界再压**——不暂停、不引入新状态。
+                    # 票面原状态机（暂停 → 后端再压 → 成功自动恢复）已证伪：暂停臂
+                    # 会调 `arms.terminal.mark_terminal_written()`（本文件 :3444 /
+                    # :3758），之后没有任何合法写路径，也就无所谓"自动恢复"。
+                    # 因此把"再压一次"放在**终态写入之前**：成功就落回下面的正常
+                    # 续跑（零操作续跑，不是"恢复"——不写 `resume_basis`、不发
+                    # `run/resumed`）；失败才落到既有的暂停收口。
+                    #
+                    # 只对**瞬时**失败再压（`_is_retriable_compaction_failure`）：
+                    # 结构性失败再压必然同结果。一次性闸门（Pi 的
+                    # `_overflowRecoveryAttempted`）保证同一次 run 至多一次。
+                    if (
+                        not arms.compaction_retry_attempted
+                        and _is_retriable_compaction_failure(error)
                     ):
-                        yield streamed
-                    return
+                        arms.compaction_retry_attempted = True
+                        try:
+                            # `runtime_context` 不传：与手动路径同口径（哨兵 ⇒
+                            # compact_now 自行渲染一次）。首轮 build 已渲染过的那份
+                            # 快照不进这里，避免 `_runtime_context_provider` 被多调。
+                            await self._context_builder.compact_now(session)
+                        except ContextWindowExceededError as retry_error:
+                            error = retry_error
+                        else:
+                            # 再压成功 ⇒ 本轮**继续**（不是新的一轮）：重走一次
+                            # build 拿压缩后的投影，然后落回下面的镜像段与模型调用。
+                            try:
+                                messages = await self._context_builder.build(session)
+                            except ContextWindowExceededError as rebuild_error:
+                                error = rebuild_error
+                            else:
+                                session_step_reserved = False
+                                continue_after_recompaction = True
+                    if not continue_after_recompaction:
+                        # session 预留整步退回（`#318`）：context 超限臂的契约是"模型在
+                        # 本轮从未被调用"——turns / requests 的预留都没变成真账。
+                        if session_step_reserved:
+                            session_step_reserved = False
+                            accounting_id = (
+                                arms.session_request_accounting.accounting_id
+                                if arms.session_request_accounting is not None else None
+                            )
+                            await self._session_budget.refund_step(
+                                accounting_id=accounting_id,
+                            )
+                            arms.session_request_accounting = None
+                        async for streamed in self._terminal_context_exceeded(
+                            arms, launch=launch_budget, steps=steps, error=error,
+                        ):
+                            yield streamed
+                        return
                 source_event = latest_direct_user_input_event(session.events, messages)
                 if source_event is None or run_id is None:
                     tool_request_context = None
@@ -3901,25 +3979,28 @@ class AgentRuntime:
         # **#1280 AC1：落盘先于任何终态帧 yield**——run 已启动的致命子形态下，消费方
         # 收到 run/failed 后立即断开，生成器不再被拉取，排在 yield 之后的 append
         # 不会执行，事件从 durable log 里消失（tests/agent/test_runtime_failure_paths.py
-        # 的断开用例钉住）。append 在终态帧 yield 之前完成；error 帧的 yield 保持在
-        # 终态帧之后（流面按 seq 前缀序镜像落盘序列，消费方契约不变）。
+        # 的断开用例钉住）。append 在终态帧 yield 之前完成；帧 yield 位置：落盘成功
+        # error 帧在终态帧之后；落盘失败的降级帧（degraded，无 seq 不可重放）为
+        # 可达性置于终态帧之前——镜像序仅约束带 seq 帧，降级帧是显式标记的带外信号
+        # （#1288）。
         # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
         # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
         # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
         # （含前序 run 的——计划一旦生成过，就不是"从未生成"）。
-        fatal_error_frame: AgentEvent | None = None
+        error_data: RunFailedBeforePlanData | None = None
+        error_event = None
         if (
             effective_workflow_mode(arms.session.events) is WorkflowMode.PLAN
             and not any(
                 event.type == TASK_PLAN_UPDATED for event in arms.session.events
             )
         ):
-            error_data = {
-                "code": "run-failed-before-plan",
-                "message": terminal_message,
-                "workflow_mode": WorkflowMode.PLAN.value,
-                "hint": "会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
-            }
+            error_data = RunFailedBeforePlanData(
+                code="run-failed-before-plan",
+                message=terminal_message,
+                workflow_mode="plan",
+                hint="会话仍处于 plan 档（只读），可手动退出 plan 模式后重试",
+            )
             try:
                 # #1280 AC3：run 已启动时挂真实 run_id（owner 是 _RunFinalizer，
                 # arms.run_id 单点只读）；begin_run 之前崩溃 = None——没有 run 可挂，
@@ -3928,7 +4009,7 @@ class AgentRuntime:
                 # to_agent_event 映射抛错（纯字段映射，现实中不会）会把已落盘事件
                 # 误判为落盘失败——处理它需要把映射挪出 try，反而引入映射异常顶替
                 # 原始异常的真实风险，两害相权维持现状。
-                fatal_error_frame = to_agent_event(
+                error_event = to_agent_event(
                     arms.session.append(ERROR, error_data, run_id=arms.run_id)
                 )
             except Exception:  # noqa: BLE001 - 落盘失败不得顶替原始异常（见上方
@@ -3942,14 +4023,16 @@ class AgentRuntime:
                 # #1280 review A 轴 P4：降级帧同样挂 run_id，与上方 durable 成功
                 # 路径同口径——run 已启动时信封不悬空；begin_run 之前崩溃
                 # = None，与 AC3 的缺席语义一致。
-                fatal_error_frame = AgentEvent(
-                    type=ERROR, data={**error_data, "degraded": True},
-                    run_id=arms.run_id,
-                )
+                error_data = {**error_data, "degraded": True}
+        # Deliver the transient fallback before the terminal frame as well (#1288): a consumer
+        # may close the stream at run/failed, and an unpersisted signal cannot be replayed.
+        # #1280：镜像序仅约束带 seq 帧；降级帧是显式标记的带外信号，为可达性置于终态帧之前。
+        if error_data is not None and error_event is None:
+            yield AgentEvent(type=ERROR, data=error_data, run_id=arms.run_id)
         if end_event is not None:
             yield to_agent_event(end_event)
-        if fatal_error_frame is not None:
-            yield fatal_error_frame
+        if error_event is not None:
+            yield error_event
         stages.raise_first()
 
     def _sync_context_vision(self, role: str) -> None:
