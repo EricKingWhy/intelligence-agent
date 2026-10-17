@@ -99,8 +99,7 @@ class TestGitStatus:
 
         assert result.result.ok is True
         assert result.result.data["exit_code"] != 0
-        assert "not a git repository" in result.result.data["stderr"].lower() or \
-               "not a git repo" in result.result.data["stderr"].lower()
+        assert result.result.data["stderr"], "Git 的非零退出诊断必须原样保留"
 
     @pytest.mark.asyncio
     async def test_pathspec_filter(

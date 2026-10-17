@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
@@ -128,27 +129,27 @@ class TestWorkspaceExportApi:
         self, tmp_path: Path
     ) -> None:
         """AC6：导出树构建拒绝 `..` / 绝对路径 / 设备特殊项（真实断言）。"""
-        import pytest
-
         from agent_harness.web.workspace_export import build_export_archive
 
         # 符号链接目标为绝对路径 → 拒绝。
         src_abs = tmp_path / "src_abs"
         src_abs.mkdir()
-        (src_abs / "evil").symlink_to("/etc/passwd")
+        _symlink_or_skip(src_abs / "evil", "/etc/passwd")
         with pytest.raises(ValueError):
             build_export_archive(src_abs, tmp_path / "dest_abs")
 
         # 符号链接目标含 `..` 穿越 → 拒绝。
         src_up = tmp_path / "src_up"
         src_up.mkdir()
-        (src_up / "up").symlink_to("../outside")
+        _symlink_or_skip(src_up / "up", "../outside")
         with pytest.raises(ValueError):
             build_export_archive(src_up, tmp_path / "dest_up")
 
         # 设备/FIFO 特殊项 → 拒绝。
         src_fifo = tmp_path / "src_fifo"
         src_fifo.mkdir()
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation is only available on POSIX")
         os.mkfifo(src_fifo / "pipe")
         with pytest.raises(ValueError):
             build_export_archive(src_fifo, tmp_path / "dest_fifo")
@@ -168,7 +169,7 @@ class TestWorkspaceExportApi:
         os.link(canary, src / "linked.txt")
         # 安全的相对符号链接：导出必须原样重建链接（不解析成实体文件）。
         (src / "real.txt").write_text("REAL", encoding="utf-8")
-        (src / "alias.txt").symlink_to("real.txt")
+        _symlink_or_skip(src / "alias.txt", "real.txt")
 
         dest = tmp_path / "fresh_export"
         build_export_archive(src, dest)
@@ -198,7 +199,7 @@ class TestWorkspaceExportApi:
         client = _client(tmp_path)
         sid = _create_session(client)
         root = _workspace_root(client, sid)
-        (root / "escape").symlink_to("/etc/passwd")
+        _symlink_or_skip(root / "escape", "/etc/passwd")
 
         target = tmp_path.parent / f"{tmp_path.name}-escape-export"
         try:
@@ -209,6 +210,7 @@ class TestWorkspaceExportApi:
             assert not target.exists(), "成员安全失败却留下了导出目标目录"
         finally:
             shutil.rmtree(target, ignore_errors=True)
+
 
     def test_export_maps_member_safety_error_to_422(
         self, tmp_path: Path
@@ -314,3 +316,13 @@ class TestWorkspaceExportApi:
         assert response.status_code == 500, response.text
         assert cleanup_ignore_errors and not any(cleanup_ignore_errors)
         assert not target.exists()
+
+
+def _symlink_or_skip(link: Path, target: str) -> None:
+    """Skip only when Windows does not grant this test process symlink privilege."""
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires Developer Mode or elevation")
+        raise
