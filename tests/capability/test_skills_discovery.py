@@ -545,3 +545,25 @@ def test_guard_does_not_swallow_unexpected_parser_errors(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="unexpected loader failure"):
         parse_skill_markdown(skill_dir / "SKILL.md")
+
+
+def test_disabled_names_mark_entries_without_hiding_them(tmp_path):
+    """#1200：禁用名只翻 `enabled`，条目仍在目录里（管理面要看全量）。
+
+    真实 SkillDiscovery（不是 fake）——这条语义是 plugin-settings.json 生效链的
+    第一环，装配层只是把名字传进来。
+    """
+    root = tmp_path / "skills"
+    root.mkdir()
+    _write_skill(root, "kept", _fm("kept"))
+    # 名字别用 `off`/`on`/`no`：YAML 1.1 会把它们解析成布尔（name 非字符串 → 解析失败）。
+    _write_skill(root, "switched-off", _fm("switched-off"))
+
+    catalog = SkillDiscovery(
+        directories=[root], disabled_names=frozenset({"switched-off"})
+    ).discover()
+
+    by_name = {entry.name: entry for entry in catalog.entries}
+    assert set(by_name) == {"kept", "switched-off"}
+    assert by_name["kept"].enabled is True
+    assert by_name["switched-off"].enabled is False

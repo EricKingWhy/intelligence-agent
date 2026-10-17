@@ -1,0 +1,1 @@
+﻿2026-10-17	#1301 窄确认（纯测试机械 delta，单轴结论对两轴补审 P4 落实）：范围 6907e0ca..042a609c 仅 test_docker_sandbox.py try/finally 重构。结论 CLEAN：diff 与声明逐行一致、断言集合不变、finally 清理语义正确（swap 触发/未触发两态均安全）。	6907e0ca2853e649a7e330395c3bd8b50da8dc0a..042a609c8ad38fced67b839745399182d210f972

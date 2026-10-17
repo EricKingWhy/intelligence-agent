@@ -409,10 +409,25 @@ export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
     }));
 }
 
-/** #362 / W-18：GET /api/mcp/servers —— 已装配 MCP server + 连接状态。 */
+/** #362 / W-18：GET /api/mcp/servers —— MCP server 列表（配置 ∪ 运行时）。
+ *  #1200 起原地扩展管理面字段（向后兼容：旧字段不变，新字段全有默认值）。 */
 export interface McpServerEntry {
   name: string;
   connected: boolean;
+  /** 选择态（plugin-settings.json）：false = 下次装配跳过（重启后生效）。 */
+  enabled: boolean;
+  /** 需要（重新）走 OAuth 授权。 */
+  needs_auth: boolean;
+  /** 该 server 发现的工具数（含被工具级禁用的）。 */
+  tool_count: number;
+  /** 「调用工具前需要我确认」开关。 */
+  require_confirm: boolean;
+  /** config 级 `enabled:false`（不是运行时选择态：面板开关管不到，需改配置）。 */
+  config_enabled: boolean;
+  /** 详情页配置摘要（配置层原文；只读）。 */
+  transport: string;
+  command: string;
+  url: string;
 }
 
 export async function getMcpServers(): Promise<{ servers: McpServerEntry[]; errors: string[] }> {
@@ -425,7 +440,18 @@ export async function getMcpServers(): Promise<{ servers: McpServerEntry[]; erro
   return {
     servers: servers
       .filter((s) => typeof s.name === 'string')
-      .map((s) => ({ name: s.name as string, connected: s.connected === true })),
+      .map((s) => ({
+        name: s.name as string,
+        connected: s.connected === true,
+        enabled: s.enabled !== false,
+        needs_auth: s.needs_auth === true,
+        tool_count: typeof s.tool_count === 'number' ? s.tool_count : 0,
+        require_confirm: s.require_confirm === true,
+        config_enabled: s.config_enabled !== false,
+        transport: typeof s.transport === 'string' ? s.transport : '',
+        command: typeof s.command === 'string' ? s.command : '',
+        url: typeof s.url === 'string' ? s.url : '',
+      })),
     errors: errors.filter((e): e is string => typeof e === 'string'),
   };
 }
@@ -439,6 +465,149 @@ export async function disconnectMcpServer(name: string): Promise<boolean> {
   const body: unknown = await res.json().catch(() => ({}));
   const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
   return r.disconnected === true;
+}
+
+/** #1200：管理写端点的统一 POST 小工具——成功返回 JSON 体，失败抛 SessionError
+ *  （detail 原文给 UI 显示，不静默）。与 apiFetch 同一条鉴权链路。 */
+async function postPluginAction(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  const res = await apiFetch(path, {
+    method: 'POST',
+    ...(body === undefined
+      ? {}
+      : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `请求失败（${res.status}）`);
+  }
+  const parsed: unknown = await res.json().catch(() => ({}));
+  return (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Record<string, unknown>;
+}
+
+/** #1200：GET /api/mcp/servers/{name}/tools —— 该 server 的发现结果（含禁用项）。 */
+export interface McpServerToolEntry {
+  name: string;
+  description: string;
+  enabled: boolean;
+}
+
+export async function getMcpServerTools(
+  server: string,
+): Promise<McpServerToolEntry[]> {
+  const res = await apiFetch(`/api/mcp/servers/${encodeURIComponent(server)}/tools`);
+  if (!res.ok) throw new SessionError(res.status, await readErrorDetail(res));
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  return (Array.isArray(r.tools) ? r.tools : [])
+    .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+    .filter((t) => typeof t.name === 'string')
+    .map((t) => ({
+      name: t.name as string,
+      description: typeof t.description === 'string' ? t.description : '',
+      enabled: t.enabled !== false,
+    }));
+}
+
+export async function setMcpServerEnabled(server: string, enabled: boolean): Promise<void> {
+  await postPluginAction(
+    `/api/mcp/servers/${encodeURIComponent(server)}/${enabled ? 'enable' : 'disable'}`,
+  );
+}
+
+export async function reconnectMcpServer(server: string): Promise<boolean> {
+  const r = await postPluginAction(`/api/mcp/servers/${encodeURIComponent(server)}/reconnect`);
+  return r.connected === true;
+}
+
+export async function setMcpToolEnabled(
+  server: string,
+  tool: string,
+  enabled: boolean,
+): Promise<void> {
+  await postPluginAction(
+    `/api/mcp/servers/${encodeURIComponent(server)}/tools/${encodeURIComponent(tool)}/${enabled ? 'enable' : 'disable'}`,
+  );
+}
+
+export async function setMcpRequireConfirm(server: string, requireConfirm: boolean): Promise<void> {
+  await postPluginAction(`/api/mcp/servers/${encodeURIComponent(server)}/require-confirm`, {
+    require_confirm: requireConfirm,
+  });
+}
+
+/** #1200：GET /api/skills —— skill 目录（含禁用项；管理窗口数据源）。 */
+export interface SkillEntry {
+  name: string;
+  description: string;
+  when_to_use: string;
+  source: string;
+  scope: 'global' | 'workspace';
+  origin: 'personal' | 'project' | 'plugin' | 'oauth';
+  plugin?: string;
+  enabled: boolean;
+}
+
+export async function getSkills(): Promise<{
+  skills: SkillEntry[];
+  errors: string[];
+  conflicts: string[];
+}> {
+  const res = await apiFetch('/api/skills');
+  if (!res.ok) throw new SessionError(res.status, await readErrorDetail(res));
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  const strings = (value: unknown) =>
+    (Array.isArray(value) ? value : []).filter((v): v is string => typeof v === 'string');
+  return {
+    skills: (Array.isArray(r.skills) ? r.skills : [])
+      .filter((e): e is Record<string, unknown> => typeof e === 'object' && e !== null)
+      .filter((e) => typeof e.name === 'string')
+      .map((e) => ({
+        name: e.name as string,
+        description: typeof e.description === 'string' ? e.description : '',
+        when_to_use: typeof e.when_to_use === 'string' ? e.when_to_use : '',
+        source: typeof e.source === 'string' ? e.source : '',
+        scope: e.scope === 'global' ? 'global' : 'workspace',
+        origin:
+          e.origin === 'project' || e.origin === 'plugin' || e.origin === 'oauth'
+            ? e.origin
+            : 'personal',
+        ...(typeof e.plugin === 'string' ? { plugin: e.plugin } : {}),
+        enabled: e.enabled !== false,
+      })),
+    errors: strings(r.errors),
+    conflicts: strings(r.conflicts),
+  };
+}
+
+export async function setSkillEnabled(name: string, enabled: boolean): Promise<void> {
+  await postPluginAction(`/api/skills/${encodeURIComponent(name)}/${enabled ? 'enable' : 'disable'}`);
+}
+
+/** #1200 Phase 3：`/` 菜单唯一注册表（后端给元数据，前端只保留 run 回调）。 */
+export interface SlashRegistryCommand {
+  name: string;
+  kind: 'builtin' | 'skill';
+  description: string;
+  argumentHint?: string;
+  namespace?: string;
+}
+
+export async function getSlashRegistry(): Promise<SlashRegistryCommand[]> {
+  const res = await apiFetch('/api/plugins/slash-registry');
+  if (!res.ok) throw new SessionError(res.status, await readErrorDetail(res));
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  return (Array.isArray(r.commands) ? r.commands : [])
+    .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+    .filter((c) => typeof c.name === 'string' && (c.kind === 'builtin' || c.kind === 'skill'))
+    .map((c) => ({
+      name: c.name as string,
+      kind: c.kind as 'builtin' | 'skill',
+      description: typeof c.description === 'string' ? c.description : '',
+      ...(typeof c.argumentHint === 'string' ? { argumentHint: c.argumentHint } : {}),
+      ...(typeof c.namespace === 'string' ? { namespace: c.namespace } : {}),
+    }));
 }
 
 /** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import importlib
 import io
@@ -22,6 +23,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
+from types import SimpleNamespace
 from typing import ClassVar
 from uuid import uuid4
 
@@ -121,6 +123,237 @@ def _remove_export_path(path: Path) -> None:
         shutil.rmtree(path, onerror=_retry_readonly_cleanup)
     except FileNotFoundError:
         return
+
+
+def _open_within_pinned_parent(parent_fd: int, name: str, flags: int) -> int:
+    """相对已 pin 住的父目录 fd 打开组件，O_NOFOLLOW 拒绝换链（#1301）。
+
+    ELOOP / ENOTDIR（组件被换成 symlink / 类型改变）按 Windows 分支同一契约
+    fail-closed；其余错误原样上抛（含 FileNotFoundError：条目在归档中途消失
+    与基线按路径遍历的行为一致）。
+    """
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        # ELOOP：组件被换成 symlink（O_NOFOLLOW 拒绝）；ENOTDIR：目录组件被
+        # 换成非目录；ENXIO：文件组件被换成 unix socket（O_RDONLY 打开报
+        # ENXIO）。三者都按 Windows 分支同一契约 fail-closed。其余错误原样
+        # 上抛（含 FileNotFoundError：条目在归档中途消失与基线按路径遍历的
+        # 行为一致）。
+        if error.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENXIO):
+            raise PermissionError(
+                "copy_in source changed during archive"
+            ) from error
+        raise
+
+
+def _add_pinned_leaf_member(
+    archive: tarfile.TarFile, parent_fd: int, name: str, member_name: str
+) -> None:
+    """symlink / fifo / 设备成员：不经路径打开，dir_fd 两次取稳定快照（#1301）。
+
+    symlink 本体进 tar（dereference=False 语义不变，不跟随）；linkname 与
+    lstat 各读两次逐项比对，归档中途被换链/重建即 fail-closed。快照稳定后
+    再发生的换链不影响本次归档——成员描述的是 pin 住时刻观察到的对象，
+    与常规文件"fd pin 住后读旧 inode"同一语义。
+    """
+
+    def _snapshot() -> tuple[os.stat_result, str]:
+        entry_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        linkname = (
+            os.readlink(name, dir_fd=parent_fd)
+            if stat.S_ISLNK(entry_stat.st_mode)
+            else ""
+        )
+        return entry_stat, linkname
+
+    first_stat, first_link = _snapshot()
+    second_stat, second_link = _snapshot()
+    if (first_stat.st_ino, first_stat.st_mtime_ns, first_link) != (
+        second_stat.st_ino,
+        second_stat.st_mtime_ns,
+        second_link,
+    ):
+        raise PermissionError("copy_in source changed during archive")
+
+    member = tarfile.TarInfo(member_name)
+    member.mode = first_stat.st_mode
+    member.uid = first_stat.st_uid
+    member.gid = first_stat.st_gid
+    member.mtime = first_stat.st_mtime
+    member.linkname = first_link
+    if stat.S_ISLNK(first_stat.st_mode):
+        member.type = tarfile.SYMTYPE
+    elif stat.S_ISFIFO(first_stat.st_mode):
+        member.type = tarfile.FIFOTYPE
+    elif stat.S_ISCHR(first_stat.st_mode) or stat.S_ISBLK(first_stat.st_mode):
+        member.type = (
+            tarfile.CHRTYPE if stat.S_ISCHR(first_stat.st_mode) else tarfile.BLKTYPE
+        )
+        if hasattr(os, "major") and hasattr(os, "minor"):
+            member.devmajor = os.major(first_stat.st_rdev)
+            member.devminor = os.minor(first_stat.st_rdev)
+    else:
+        # socket 等 tarfile.gettarinfo 同样映射不了的类型，与 Windows 分支同
+        # 契约 fail-closed。
+        raise PermissionError("copy_in accepts only regular files and directories")
+    archive.addfile(member)
+
+
+def _walk_fd_tree(
+    archive: tarfile.TarFile,
+    parent_fd: int,
+    parent_arc: str,
+    dir_flags: int,
+    file_flags: int,
+) -> None:
+    """从已 pin 住的目录 fd 相对遍历并归档整棵子树（#1301）。
+
+    每个组件都用 `os.open(O_NOFOLLOW, dir_fd=已 pin 的祖先 fd)` 相对打开
+    （与 `skills/inspection.py` 的安全读同型；Go 1.24 `os.Root`/`OpenInRoot`
+    的逐组件 openat(O_NOFOLLOW|O_DIRECTORY) 同思路），文件内容一律从已打开
+    的 fd 读取，绝不按路径名二次打开。凡是能让读取**逃出 pin 住的树**的
+    换链（组件被换成 symlink ⇒ ELOOP、目录组件换成非目录 ⇒ ENOTDIR、文件
+    组件换成 socket ⇒ ENXIO）一律 fail-closed；同一 pin 树内的对象替换
+    （rename 换名、内容重写）不被放大为逃逸——读取自 fd，描述的是 pin 住
+    时刻观察到的对象。symlink/fifo/设备成员的稳定快照见
+    `_add_pinned_leaf_member`；归档中途条目消失按基线行为原样上抛
+    FileNotFoundError。
+    """
+    with os.scandir(parent_fd) as scanner:
+        entries = sorted(scanner, key=lambda entry: entry.name)
+    for entry in entries:
+        member_name = f"{parent_arc}/{entry.name}"
+        if entry.is_symlink():
+            _add_pinned_leaf_member(archive, parent_fd, entry.name, member_name)
+            continue
+        entry_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(entry_stat.st_mode):
+            dir_fd = _open_within_pinned_parent(parent_fd, entry.name, dir_flags)
+            try:
+                member = archive.gettarinfo(
+                    arcname=member_name,
+                    fileobj=SimpleNamespace(name="", fileno=lambda fd=dir_fd: fd),
+                )
+                if member is None or not member.isdir():
+                    raise PermissionError("copy_in source changed during archive")
+                archive.addfile(member)
+                _walk_fd_tree(archive, dir_fd, member_name, dir_flags, file_flags)
+            finally:
+                os.close(dir_fd)
+        elif stat.S_ISREG(entry_stat.st_mode):
+            # O_NONBLOCK：常规文件打开无效果；若组件在 scandir 之后被换成
+            # fifo，可避免打开时阻塞，由下面的 fstat 复核 fail-closed。
+            fd = _open_within_pinned_parent(parent_fd, entry.name, file_flags)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise PermissionError("copy_in source changed during archive")
+                stream = os.fdopen(fd, "rb")
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                member = archive.gettarinfo(
+                    arcname=member_name,
+                    fileobj=SimpleNamespace(name="", fileno=stream.fileno),
+                )
+                if member is None or not (member.isreg() or member.islnk()):
+                    raise PermissionError("copy_in source changed during archive")
+                archive.addfile(member, stream)
+            finally:
+                stream.close()
+        else:
+            _add_pinned_leaf_member(archive, parent_fd, entry.name, member_name)
+
+
+def _archive_posix_tree_fd_relative(
+    archive: tarfile.TarFile, source: Path, root_name: str
+) -> None:
+    """copy_in 非 Windows 分支：fd 相对归档源树，不按路径二次遍历（#1301）。
+
+    修补前 `archive.add(source, recursive=True)` 按**路径**二次遍历整棵树
+    （lstat/open 之间的窗口可被并发换链利用：先按路径 lstat 到常规文件、
+    再按路径 open 时已被换成指向源根外的 symlink ⇒ 源根外内容被打进 tar，
+    绕过 `_reject_escaping_symlinks` 的 fail-closed 边界）。现改为：pin 住
+    根 fd 后逐组件 dir_fd 相对打开，所有读取都从 fd 出发；Windows 分支的
+    `_pin_host_path_tree_for_archive` 在 POSIX 的等价实现。
+
+    行为契约保持：`dereference=False` 语义不变（symlink 本体进 tar，不跟随；
+    完全位于源树内的 hard-link pair 经 gettarinfo 的 inode 去重仍归档为
+    LNKTYPE 成员）；FileNotFoundError（根缺失 / 条目消失）与 put_archive
+    失败的 RuntimeError 抛错点不变；tar 成员名（`root_name` 树形）不变。
+    两处**有意收紧**（与 Windows 分支同契约，非行为保持）：根被换成 symlink
+    由"归档出 SYMTYPE 成员"改为 PermissionError 响亮失败；根/成员被换成
+    unix socket 由基线的静默跳过（`TarFile.add` 对 gettarinfo→None 不报错）
+    改为 PermissionError 响亮失败。
+    """
+    dir_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    if (
+        os.open not in os.supports_dir_fd
+        or os.scandir not in os.supports_fd
+        or os.stat not in os.supports_dir_fd
+        or os.readlink not in os.supports_dir_fd
+        or not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+    ):
+        raise OSError("fd-relative copy_in archiving is unavailable on this platform.")
+
+    try:
+        # 根不带 O_DIRECTORY：copy_in 的根允许是常规文件（契约"regular files
+        # and directories"），目录/文件由 fstat 分派；O_NOFOLLOW 拒绝换链成
+        # symlink 的根，O_NONBLOCK 防根被换成 fifo 时阻塞在打开上。
+        root_fd = os.open(source, file_flags)
+    except OSError as error:
+        # ELOOP：根被换成 symlink；ENXIO：根被换成 unix socket——与组件级
+        # 映射同构的 fail-closed（基线分别会归档出 SYMTYPE 成员 / 静默跳过）。
+        if error.errno in (errno.ELOOP, errno.ENXIO):
+            raise PermissionError(
+                "copy_in source changed during archive"
+            ) from error
+        raise
+    try:
+        root_stat = os.fstat(root_fd)
+        if stat.S_ISDIR(root_stat.st_mode):
+            member = archive.gettarinfo(
+                arcname=root_name,
+                fileobj=SimpleNamespace(name="", fileno=lambda fd=root_fd: fd),
+            )
+            if member is None or not member.isdir():
+                raise PermissionError("copy_in source changed during archive")
+            archive.addfile(member)
+            _walk_fd_tree(archive, root_fd, root_name, dir_flags, file_flags)
+        elif stat.S_ISREG(root_stat.st_mode):
+            stream = os.fdopen(root_fd, "rb")
+            root_fd = -1  # 所有权转移给 stream
+            try:
+                member = archive.gettarinfo(
+                    arcname=root_name,
+                    fileobj=SimpleNamespace(name="", fileno=stream.fileno),
+                )
+                if member is None or not (member.isreg() or member.islnk()):
+                    raise PermissionError("copy_in source changed during archive")
+                archive.addfile(member, stream)
+            finally:
+                stream.close()
+        else:
+            raise PermissionError(
+                "copy_in accepts only regular files and directories"
+            )
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
 
 
 class DockerSandbox(Sandbox):
@@ -1085,7 +1318,8 @@ class DockerSandbox(Sandbox):
                             if fd is not None:
                                 os.close(fd)
             else:
-                archive.add(source, arcname=target.name, recursive=True)
+                # #1301：fd 相对归档，不按路径二次遍历（换链 TOCTOU 修补）。
+                _archive_posix_tree_fd_relative(archive, source, target.name)
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 

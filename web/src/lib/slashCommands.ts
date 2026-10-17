@@ -24,9 +24,17 @@ import {
   describeSessionError,
   SessionError,
   TaskNotDefinedError,
+  type SlashRegistryCommand as SlashRegistryEntry,
 } from './api';
 
-export type SlashCommandGroup = 'add' | 'command';
+/** #1200 Phase 3：`/` 菜单的唯一数据源（后端 `GET /api/plugins/slash-registry`）。
+ *  形状定义在 api.ts（线上类型的唯一出处）；这里 re-export 一次，调用点不必双导入。 */
+export type { SlashRegistryCommand as SlashRegistryEntry } from './api';
+
+/** 菜单里显示的命令名：插件 skill 加 `namespace:` 前缀消歧（票面 §4）。 */
+export function slashDisplayName(entry: SlashRegistryEntry): string {
+  return entry.namespace ? `${entry.namespace}:${entry.name}` : entry.name;
+}
 
 export interface SlashCommandContext {
   sessionId: string;
@@ -44,12 +52,9 @@ export interface SlashCommandContext {
   getSessionEvents: (sessionId: string) => Promise<AgentEvent[]>;
 }
 
+/** 内置命令的**执行**回调（元数据在后端 registry；前端只按 name 查表）。 */
 export interface SlashCommand {
   name: string;
-  labelCN: string;
-  labelEN: string;
-  description: string;
-  group: SlashCommandGroup;
   run: (args: string | undefined, ctx: SlashCommandContext) => Promise<void>;
 }
 
@@ -124,49 +129,16 @@ function makeOpen(open: (ctx: SlashCommandContext) => void) {
   };
 }
 
-/** 注册表：顺序 = 效果图分组顺序（添加两条 → 指令三条）。 */
-export const SLASH_COMMANDS: readonly SlashCommand[] = [
-  {
-    name: 'goal',
-    labelCN: '目标',
-    labelEN: 'goal',
-    description: '设置或查看长期任务目标',
-    group: 'add',
-    run: runGoal,
-  },
-  {
-    name: 'plan',
-    labelCN: '计划',
-    labelEN: 'plan',
-    description: '进入或退出计划模式',
-    group: 'add',
-    run: runPlan,
-  },
-  {
-    name: 'compact',
-    labelCN: '压缩',
-    labelEN: 'compact',
-    description: '压缩以上对话内容',
-    group: 'command',
-    run: runCompact,
-  },
-  {
-    name: 'permission',
-    labelCN: '权限',
-    labelEN: 'permission',
-    description: '切换权限预设（沙箱模式与审批策略）',
-    group: 'command',
-    run: makeOpen((ctx) => ctx.openPermissionPicker()),
-  },
-  {
-    name: 'model',
-    labelCN: '模型',
-    labelEN: 'model',
-    description: '选择本会话使用的模型',
-    group: 'command',
-    run: makeOpen((ctx) => ctx.openModelPicker()),
-  },
-];
+/** 内置命令的执行表（按 name 查）；顺序无关——展示顺序由后端 registry 决定。
+ *  类型是 `Partial`：后端 registry 才是"哪些内置命令存在"的真相，前端表可能落后
+ *  （漏一条 = 菜单能点但没回调）⇒ 调用方必须处理 `undefined`，不许静默吞。 */
+export const BUILTIN_RUNS: Readonly<Partial<Record<string, SlashCommand['run']>>> = {
+  goal: runGoal,
+  plan: runPlan,
+  compact: runCompact,
+  permission: makeOpen((ctx) => ctx.openPermissionPicker()),
+  model: makeOpen((ctx) => ctx.openModelPicker()),
+};
 
 export interface SlashTriggerMatch {
   query: string;
@@ -176,9 +148,12 @@ export interface SlashTriggerMatch {
 }
 
 /** 触发判定（票面正则 `/(^|\s)\/(\w*)$/`）：行首或空格后半角 `/` 开尾。
- *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。 */
+ *  命中 = 菜单开着、query 为 `/` 后的词片段；`\w` 不含全角 ⇒ `／` 天然不触发。
+ *  #1200：`:` 额外进 query（插件 skill 的显示名是 `plugin:skill`）。 */
 export function slashTriggerMatch(value: string): SlashTriggerMatch | null {
-  const m = /(?:^|\s)\/(\w*)$/.exec(value);
+  // #1200：`:` 也进 query——插件 skill 的显示名是 `plugin:skill`，输入到冒号后
+  // 仍要继续 fuzzy 过滤（票面 §4「继续输入 fuzzy 过滤」）。
+  const m = /(?:^|\s)\/([\w:-]*)$/.exec(value);
   return m ? { query: m[1], start: m.index } : null;
 }
 
@@ -187,7 +162,8 @@ export interface SlashSubmitMatch {
   args: string | undefined;
 }
 
-/** 带参提交拦截（票面正则 `^\/(\w+)(?:\s+([\s\S]+))?$`）：
+/** 带参提交拦截（票面正则 `^\/([\w:-]+)(?:\s+([\s\S]+))?$`；#1200 补 `:`，
+ *  与触发正则同一字符集——否则 `/acme:code-review args` 菜单能插入、提交却不拦截）：
  *  整条输入是一个命令调用且命令名在注册表 ⇒ preventDefault 本地执行，
  *  不走「原发送逻辑」（防止 `/goal <文本>` 被当聊天发给 agent）。
  *  调用方传 **trim 后**的整条输入（审查 A-P2-1：`/goal␣` 尾随空格同样落到
@@ -196,24 +172,28 @@ export function slashSubmitMatch(
   value: string,
   knownNames: readonly string[],
 ): SlashSubmitMatch | null {
-  const m = /^\/(\w+)(?:\s+([\s\S]+))?$/.exec(value);
+  const m = /^\/([\w:-]+)(?:\s+([\s\S]+))?$/.exec(value);
   if (!m || !knownNames.includes(m[1])) return null;
   return { name: m[1], args: m[2] };
 }
 
-/** 过滤：haystack = labelCN + labelEN + description 的可搜面，fuzzyScore 打分
- *  降序（与 `filterCommands` 同款稳定排序；空 query 原序全量）。 */
+/** 过滤：haystack = 显示名 + 描述 + 参数提示的可搜面，fuzzyScore 打分降序
+ *  （与 `filterCommands` 同款稳定排序；空 query 原序全量）。
+ *  #1200：数据源是后端 registry 条目，前端不做任何"哪些命令存在"的判定。 */
 export function filterSlashCommands(
-  items: readonly SlashCommand[],
+  items: readonly SlashRegistryEntry[],
   query: string,
-): SlashCommand[] {
+): SlashRegistryEntry[] {
   if (!query.trim()) return [...items];
   return items
     .map((item) => ({
       item,
-      score: fuzzyScore(query, `${item.labelCN} ${item.labelEN} ${item.description}`),
+      score: fuzzyScore(
+        query,
+        `${slashDisplayName(item)} ${item.description} ${item.argumentHint ?? ''}`,
+      ),
     }))
-    .filter((x): x is { item: SlashCommand; score: number } => x.score !== null)
+    .filter((x): x is { item: SlashRegistryEntry; score: number } => x.score !== null)
     .sort((a, b) => b.score - a.score)
     .map((x) => x.item);
 }

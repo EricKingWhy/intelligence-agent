@@ -899,6 +899,9 @@ async def test_runtime_refuses_oauth_connection_without_saved_credentials(monkey
         await connection.connect()
 
     assert not transport_opened
+    # #1200：缺 token 是"需要授权"的失败形态——管理窗口要显示 needs-auth，
+    # 而不是笼统的"未连接"（provider 此时还没建出来，只看它会漏报）。
+    assert connection.needs_auth is True
 
 
 @pytest.mark.asyncio

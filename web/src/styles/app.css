@@ -3826,10 +3826,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .slash-menu-item.selected {
   background: var(--surface-selected);
 }
-.slash-menu-label {
-  color: var(--text-primary);
-  font-size: 12px;
-}
 .slash-menu-name {
   color: var(--text-tertiary);
   font-size: 11px;
@@ -3839,6 +3835,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-tertiary);
   font-size: 12px;
   margin-left: auto;
+}
+/* #1200：skill 行的参数提示（frontmatter `argument-hint`，如「主题…」）。 */
+.slash-menu-hint {
+  color: var(--accent);
+  font-size: 11px;
 }
 .slash-menu-empty {
   padding: 6px 10px;
@@ -9651,6 +9652,241 @@ button.json-row {
   margin: 0;
   font-size: var(--text-xs);
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * #1200 插件管理窗口（docs/plans/plugin-manager/plugin.html 场景一）
+ * 布局按效果图：左侧 300px 列表（MCP SERVERS / SKILLS 分组）+ 右侧详情。
+ * 全部用既有语义 token，亮色主题随 :root[data-theme='light'] 自动跟随。
+ * ═══════════════════════════════════════════════════════════════════ */
+.plugin-dialog {
+  width: min(860px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 64px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  overflow: hidden;
+}
+.plugin-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.plugin-side {
+  width: 300px;
+  flex: none;
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.plugin-search {
+  margin: var(--space-sm);
+  padding: 7px 10px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+.plugin-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 6px var(--space-sm);
+}
+.plugin-group {
+  padding: 10px 8px 4px;
+  font-size: var(--text-xs);
+  letter-spacing: 0.4px;
+  color: var(--text-tertiary);
+}
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: default;
+}
+.plugin-row:hover {
+  background: var(--surface-1);
+}
+.plugin-row.selected {
+  background: var(--surface-selected);
+}
+.plugin-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.plugin-name {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.plugin-meta {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-tag {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.plugin-empty {
+  padding: var(--space-sm);
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.plugin-detail {
+  flex: 1;
+  min-width: 0;
+  padding: 18px 20px;
+  overflow-y: auto;
+}
+.plugin-errors {
+  max-height: 90px;
+  overflow-y: auto;
+  font-size: var(--text-xs);
+  /* 语义色当正文色用：亮色 #b07a10 在白底只有 3.7:1（不达 AA）。ink-mix 与
+     .app-error / #1175 族同一修法（亮色压深、暗色只升不降）。 */
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
+}
+.plugin-btn {
+  font-size: var(--text-sm);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: default;
+}
+.plugin-btn:disabled {
+  opacity: 0.5;
+}
+.plugin-source {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.plugin-switch {
+  width: 34px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.plugin-dialog .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.plugin-dialog .dot.green {
+  background: var(--success);
+}
+.plugin-dialog .dot.amber {
+  background: var(--warning);
+}
+.plugin-dialog .dot.gray {
+  background: var(--text-tertiary);
+}
+.plugin-dialog .pill {
+  font-size: var(--text-xs);
+  padding: 2px 9px;
+  border-radius: 20px;
+  flex: none;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.plugin-dialog .pill.green {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.plugin-dialog .pill.amber {
+  /* 同上：12% 染底上纯 --warning 亮色仅 3.3:1。 */
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.plugin-dialog .pd-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plugin-dialog .pd-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.plugin-dialog .pd-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.plugin-dialog .pd-sec {
+  margin-top: 18px;
+}
+.plugin-dialog .pd-sec-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.plugin-dialog .pd-config {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.9;
+}
+.plugin-dialog .pd-config code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.plugin-dialog .tool-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.plugin-dialog .tool-chip {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: default;
+}
+.plugin-dialog .tool-chip.off {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+.plugin-dialog .switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: 8px;
 }
 
 /* ══ #1256 子智能体可见性：顶栏 roster + 右侧分栏 ══
