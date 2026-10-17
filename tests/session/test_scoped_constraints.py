@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import subprocess
@@ -170,12 +171,13 @@ def test_resolve_project_key_unicode_worktree_with_python_encoding_modes(
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
     payload = json.loads(result.stdout.decode("ascii"))
     assert payload["utf8_mode"] == int(python_utf8)
-    if python_utf8 == "0":
-        encoding = payload["preferred_encoding"].replace("-", "").replace("_", "").casefold()
-        if encoding == "utf8":
-            pytest.skip(
-                "Windows ANSI code page is UTF-8; legacy locale decoding is not exercised"
-            )
+    if (
+        python_utf8 == "0"
+        and codecs.lookup(payload["preferred_encoding"]).name == "utf-8"
+    ):
+        pytest.skip(
+            "Windows ANSI code page is UTF-8; legacy locale decoding is not exercised"
+        )
     assert payload["project_key"] == str(repo.resolve())
 
 
