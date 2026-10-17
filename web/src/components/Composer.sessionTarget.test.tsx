@@ -8,7 +8,7 @@
  * 用真挂载而不是 SSR 字符串：`改为新会话` 的价值在**点击后走到 onNewSession**
  * （App 侧接 `handleNew`），SSR 只能证明文案在，证明不了动作通。
  *
- * 第三条是 AC2 的机械下限：新状态行与 #1028 归属 chip 必须是**两个节点**、两块
+ * 第四条是 AC2 的机械下限：新状态行与 #1028 归属 chip 必须是**两个节点**、两块
  * 语义（会话身份 vs 项目归属），不能一边把另一边吃掉或并进同一个 role="note"。
  */
 import { act } from 'react';
@@ -77,8 +77,12 @@ describe('Composer 会话级目标状态行（#1312）', () => {
 
     const statusLine = target();
     expect(statusLine).not.toBeNull();
-    expect(statusLine!.getAttribute('role')).toBe('status');
-    expect(statusLine!.textContent).toContain('正在向会话');
+    // live region 只圈文本：外层容器不带 role，「改为新会话」按钮留在它外面——
+    // 否则状态播报会把一个可操作控件读进只读区域。
+    expect(statusLine!.getAttribute('role')).toBeNull();
+    const live = statusLine!.querySelector<HTMLElement>('[role="status"]');
+    expect(live).not.toBeNull();
+    expect(live!.textContent).toContain('正在向会话');
 
     // 只露前 8 位：precisely 断言 id 槽内容（旧断言 `not.toContain(完整 id)`
     // 在 id 槽为空时也恒真，证明不了截断）。
@@ -92,6 +96,7 @@ describe('Composer 会话级目标状态行（#1312）', () => {
     expect(button).not.toBeNull();
     expect(button!.classList.contains('composer-session-target-new-btn')).toBe(true);
     expect(button!.textContent).toBe('改为新会话');
+    expect(live!.contains(button!)).toBe(false);
 
     act(() => button!.click());
     expect(onNewSession).toHaveBeenCalledTimes(1);
@@ -102,6 +107,8 @@ describe('Composer 会话级目标状态行（#1312）', () => {
 
     const statusLine = target();
     expect(statusLine).not.toBeNull();
+    expect(statusLine!.getAttribute('role')).toBeNull();
+    expect(statusLine!.querySelector('[role="status"]')!.textContent).toBe('将创建新会话');
     expect(statusLine!.textContent).toBe('将创建新会话');
     expect(statusLine!.querySelector('button')).toBeNull();
   });

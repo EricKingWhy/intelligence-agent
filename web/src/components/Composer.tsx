@@ -1193,17 +1193,16 @@ export const Composer = memo(function Composer({
           放在 .composer-dock **之外**：dock 里已有 #1028 的项目归属 chip，两者语义正交
           （会话身份 vs 项目归属），外置且无边框/无底色，视觉上不与归属胶囊混淆。
           未选中时明说「将创建新会话」——避免用户把全新任务误当续聊发给旧会话。
-          `role="status"` 与 .slash-info / .composer-send-blocked 同区惯例：只读文本，
-          不频繁打断（不是 alert）。真值判断与 handleSubmit 里两处 `!sessionId`
-          判空同口径——空串不是会话。 */}
-      <div
-        className="composer-session-target"
-        data-testid="composer-session-target"
-        role="status"
-      >
+          live region（`role="status"`）只圈文本：与 .slash-info / .composer-send-blocked
+          同区惯例，只读文本、不频繁打断（不是 alert）。「改为新会话」是交互按钮，
+          留在 live region 之外，否则状态播报会把一个可操作控件读进只读区域。
+          判定用**真值**（空串按「无会话」处理），与 :766 `runSlashCommand` 的
+          `!sessionId` 一致；:619 的 `sessionId == null` 不同口径（空串仍当会话，
+          Scope 外未改），两处差异在此如实记录。 */}
+      <div className="composer-session-target" data-testid="composer-session-target">
         {sessionId ? (
           <>
-            <span>
+            <span role="status">
               正在向会话{' '}
               <span className="composer-session-target-id">{sessionId.slice(0, 8)}</span>{' '}
               追问
@@ -1220,7 +1219,7 @@ export const Composer = memo(function Composer({
             )}
           </>
         ) : (
-          <span>将创建新会话</span>
+          <span role="status">将创建新会话</span>
         )}
       </div>
       <div className="composer-dock surface-floating">
