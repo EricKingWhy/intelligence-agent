@@ -300,6 +300,15 @@ class JsonlSessionStore:
         """
         return self._events_path(session_id)
 
+    def board_state_path(self, session_id: str) -> Path:
+        """会话目录的看板投影 sidecar 路径（公开）。
+
+        #1303：``BoardProjectionStore`` 只把 sidecar 当缓存，路径规则仍唯一由
+        store 定义（与 ``events_path`` 同款纪律）——消费方不得自己拼
+        ``_root / session_id / ...``。
+        """
+        return self._session_dir(session_id) / "board_state.json"
+
     def _lock_for(self, session_id: str) -> threading.Lock:
         """取得该会话的写锁（懒创建；表结构由 _state_guard 保护）。
 

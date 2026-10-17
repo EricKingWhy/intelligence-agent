@@ -108,6 +108,30 @@ class Acceptance:
     reason: str | None
 
 
+def _derive_product_state(
+    *,
+    defined: bool,
+    acceptance: Acceptance | None,
+    criteria: tuple[TaskCriterion, ...],
+    verification: dict[str, VerificationEntry],
+    open_run_ids: tuple[str, ...] | set[str],
+) -> str:
+    """产品四态的唯一判定式（属性与逐事件跃迁跟踪共用，不复制第二份语义）。"""
+    if not defined:
+        return ""
+    if acceptance is not None:
+        return "accepted"
+    if open_run_ids:
+        return "executing"
+    if criteria and all(
+        verification.get(item.item_id) is not None
+        and verification[item.item_id].value == "passed"
+        for item in criteria
+    ):
+        return "deliverable"
+    return "pending_verification"
+
+
 @dataclass(frozen=True)
 class TaskState:
     """三轴投影快照（不可变；``product_state`` 是派生值不是存储值）。"""
@@ -127,23 +151,20 @@ class TaskState:
     #: 接受轴版本号 = task/accepted + task/acceptance-released 事件计数（CAS 对齐键）。
     version: int = 0
     open_run_ids: tuple[str, ...] = ()
+    #: 产品四态最后一次**跃迁**的事件时刻（ISO-8601 毫秒精度）。看板 ack 比较键的
+    #: 唯一来源：同态事件（如 model/completed）不刷新它。从未 defined ⇒ None。
+    product_state_changed_at: str | None = None
 
     @property
     def product_state(self) -> str:
         """产品四态投影（优先级 accepted > executing > deliverable > 待验证）。"""
-        if not self.defined:
-            return ""
-        if self.acceptance is not None:
-            return "accepted"
-        if self.open_run_ids:
-            return "executing"
-        if self.criteria and all(
-            self.verification.get(item.item_id) is not None
-            and self.verification[item.item_id].value == "passed"
-            for item in self.criteria
-        ):
-            return "deliverable"
-        return "pending_verification"
+        return _derive_product_state(
+            defined=self.defined,
+            acceptance=self.acceptance,
+            criteria=self.criteria,
+            verification=self.verification,
+            open_run_ids=self.open_run_ids,
+        )
 
     def to_payload(self) -> dict:
         return {
@@ -165,6 +186,7 @@ class TaskState:
             "version": self.version,
             "open_run_ids": list(self.open_run_ids),
             "product_state": self.product_state,
+            "product_state_changed_at": self.product_state_changed_at,
         }
 
 
@@ -272,6 +294,8 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
     acceptance: Acceptance | None = None
     version = 0
     open_runs: set[str] = set()
+    previous_product_state = ""
+    product_state_changed_at: str | None = None
     for event in events:
         etype = event.type
         if etype == TASK_DEFINED:
@@ -338,6 +362,16 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
                 open_runs.add(event.run_id)
         elif etype in RUN_TERMINAL_TYPES and event.run_id is not None:
             open_runs.discard(event.run_id)
+        current_product_state = _derive_product_state(
+            defined=defined,
+            acceptance=acceptance,
+            criteria=criteria,
+            verification=verification,
+            open_run_ids=open_runs,
+        )
+        if current_product_state != previous_product_state:
+            previous_product_state = current_product_state
+            product_state_changed_at = event.time
     mode = declared_permission_mode(events)
     return TaskState(
         defined=defined,
@@ -350,6 +384,7 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
         acceptance=acceptance,
         version=version,
         open_run_ids=tuple(sorted(open_runs)),
+        product_state_changed_at=product_state_changed_at,
     )
 
 

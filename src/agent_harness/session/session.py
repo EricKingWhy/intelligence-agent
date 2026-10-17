@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from agent_harness.sandbox.registry import WorkspaceRegistry
 
+from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_NOT_EXECUTED_DENIED,
@@ -44,6 +45,7 @@ from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     EVENT_TYPES,
     MESSAGE_QUEUED,
+    PERMISSION_RESOLVED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
@@ -52,15 +54,38 @@ from agent_harness.session.event import (
     SESSION_STARTED,
     STEER_REQUESTED,
     STREAM_ONLY_TYPES,
+    TASK_ACCEPTANCE_RELEASED,
+    TASK_ACCEPTANCE_REVISED,
+    TASK_ACCEPTED,
+    TASK_DEFINED,
     TASK_FACT_REVOCATION,
     TASK_PROTECTED_FACT,
+    TOOL_APPROVAL_REQUESTED,
     TOOL_RESULT,
+    USER_INPUT_REQUESTED,
     USER_MESSAGE,
+    VERIFICATION_UPDATED,
     SessionEvent,
 )
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
+
+#: 看板投影触发集：只有这些事件会改变 `product_state` 或注意力。
+#: 触发集外的事件只推进 sidecar 水位（见 BoardProjectionStore.update_from_events）。
+_BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
+    {
+        TASK_DEFINED,
+        TASK_ACCEPTANCE_REVISED,
+        VERIFICATION_UPDATED,
+        TASK_ACCEPTED,
+        TASK_ACCEPTANCE_RELEASED,
+        RUN_STARTED,
+        USER_INPUT_REQUESTED,
+        TOOL_APPROVAL_REQUESTED,
+        PERMISSION_RESOLVED,
+    }
+) | RUN_TERMINAL_TYPES
 
 
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
@@ -505,6 +530,8 @@ class Session:
         # 会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进冲突分支
         # （#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。
         self._next_seq = event.seq + 1
+        if notify:
+            self._update_board_projection(event)
         if not notify:
             return event
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
@@ -517,6 +544,25 @@ class Session:
                     self.session_id, event.type,
                 )
         return event
+
+    def _update_board_projection(self, event: SessionEvent) -> None:
+        """best-effort 更新看板投影（#1303 §3.2）。
+
+        观察者纪律与 listener 相同：任何异常只记日志，绝不破坏 append 契约。
+        ``adopt_history`` 走 ``notify=False`` 不逐条触发，完成后一次全量重放
+        （避免 fork N 条历史时的 O(N²)）。
+        """
+        try:
+            get_board_projection_store(self._store).update_from_events(
+                self.session_id,
+                self._events,
+                recompute=event.type in _BOARD_PROJECTION_TRIGGER_TYPES,
+            )
+        except Exception:
+            logger.exception(
+                "看板投影钩子失败（session=%s, event=%s）",
+                self.session_id, event.type,
+            )
 
     def adopt_history(
         self,
@@ -699,6 +745,16 @@ class Session:
                 new_fact_id = moved.data.get("fact_id")
                 if isinstance(old_fact_id, str) and isinstance(new_fact_id, str):
                     fact_remap[old_fact_id] = new_fact_id
+        # adopt 期间逐条 _persist_event(notify=False) 不触发投影；这里一次全量重放，
+        # 避免 fork N 条历史时的 O(N²)（#1303 已知上限的例外）。
+        try:
+            get_board_projection_store(self._store).update_from_events(
+                self.session_id, self._events, recompute=True,
+            )
+        except Exception:
+            logger.exception(
+                "adopt_history 后的看板投影重放失败（session=%s）", self.session_id,
+            )
         return adopted
 
     def derive_messages(self) -> list[AnyMessage]:
