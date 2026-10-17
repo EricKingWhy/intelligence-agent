@@ -13,9 +13,10 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
   的「文件戳缓存 + 戳变化回读」纪律（#516）；sidecar 校验用事件文件的
   ``(size, mtime_ns)`` 戳，**不**走 ``_last_seq_on_disk`` 的 ``read_events`` 回退。
   该等价关系成立的前提是**同一时刻只有一个写者**（本仓 ``append_event`` 的跨进程
-  文件锁就是这个前提）。若旁路写者恰好在「``append_event`` 返回」与「取戳」之间
-  追加，戳会覆盖一条本投影没读到的事件；下一次触发事件会重算并纠正，非触发事件
-  不会把它永久钉住（冷缓存分支一律重放，见 ``update_from_events``）。
+  文件锁就是这个前提）。旁路写者若插在「``append_event`` 返回」与「取戳」之间，
+  戳会覆盖一条本投影没读到的事件；为此每次落盘前还做一次 O(1) 对账
+  （``_view_matches_disk``：内存视图的 seq 连续 + 等于盘上最后一行的 seq），
+  不成立就丢弃缓存、不写 sidecar，让下一次 ``get()`` 从盘上重放。
 * 原子写：照搬 ``session/progress.py::_write_meta_atomic`` 的
   ``mkstemp + flush + fsync + os.replace`` 形状（本票唯一指定的抄写来源）。
 * best-effort 钩子：照搬 ``session/session.py`` 的 listener 纪律——观察者异常只
@@ -50,6 +51,11 @@ from agent_harness.session.store import JsonlSessionStore
 logger = logging.getLogger("agent_harness.session.board_projection")
 
 AttentionKind = Literal["input", "approval"]
+
+#: 尾部对账窗口：读盘上最后一行只需要最后一小块；单事件大 payload（如 100KB
+#: task_text）会让窗口里没有换行，此时解析失败 ⇒ 本轮不落盘（正确性优先，
+#: 下一次小事件会补上水位）。
+_TAIL_WINDOW_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -251,7 +257,10 @@ class BoardProjectionStore:
         # 少一条事件的投影钉在更新的戳上。
         if stamp_after is not None and stamp_after == stamp:
             with self._lock:
-                self._persist(session_id, projection, stamp_after)
+                # 落锁前再核一次戳：重放不持锁，期间 append 钩子可能已经写入
+                # 更新的一份（独立审查 P3 回归）；此时绝不能用旧投影覆盖它。
+                if self._events_stamp(session_id) == stamp_after:
+                    self._persist(session_id, projection, stamp_after)
         return projection
 
     # ── 写入钩子 ────────────────────────────────────────────────────────
@@ -293,7 +302,16 @@ class BoardProjectionStore:
                         else _derive(events)
                     )
                 if projection is None:
-                    # 派生失败：保留旧缓存与旧 sidecar，等下一次触发事件自愈。
+                    # 派生失败：保留旧 sidecar，但丢弃内存缓存，下一次读/写都从
+                    # 事件流重放——否则下一条非触发事件会把旧缓存盖上当前水位
+                    # （独立审查 P2/P3）。
+                    self._cache.pop(session_id, None)
+                    return
+                # O(1) 对账：本视图的最后一笔必须就是盘上最后一笔，且 seq 连续
+                # （连续 ⇒ 本视图没漏掉旁路写者插进来的事件）。不成立就不落盘、
+                # 不进缓存，让 get() 从盘上重放（独立审查 P2）。
+                if not self._view_matches_disk(session_id, events):
+                    self._cache.pop(session_id, None)
                     return
                 self._persist(session_id, projection, stamp)
         except Exception:
@@ -310,6 +328,45 @@ class BoardProjectionStore:
         except OSError:
             return None
         return (stat.st_size, stat.st_mtime_ns)
+
+    def _view_matches_disk(
+        self, session_id: str, events: list[SessionEvent]
+    ) -> bool:
+        """本视图是否覆盖盘上最后一条事件（O(1)：一次尾部读 + 一次连续性检查）。
+
+        两条证据缺一不可：
+
+        1. ``events[-2].seq + 1 == events[-1].seq``：本视图没有 seq 缺口——旁路
+           写者插入的事件会让内存列表出现空档；
+        2. 盘上最后一行的 ``seq`` == ``events[-1].seq``：本视图之后没有旁路写入。
+
+        任一不成立说明「内存只是我的视角、盘上还有我没读到的事实」，此时写
+        sidecar 就是把旧状态盖上新戳。调用方应丢弃缓存并让 ``get()`` 重放。
+        """
+        if not events:
+            return False
+        last = events[-1].seq
+        if len(events) >= 2 and events[-2].seq + 1 != last:
+            return False
+        return self._disk_tail_seq(session_id) == last
+
+    def _disk_tail_seq(self, session_id: str) -> int | None:
+        """事件文件最后一行的 seq（只读尾部窗口；解析不了返回 None）。"""
+        try:
+            with self._store.events_path(session_id).open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - _TAIL_WINDOW_BYTES))
+                chunk = fh.read()
+        except OSError:
+            return None
+        line = chunk.rstrip(b"\r\n").rsplit(b"\n", 1)[-1]
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            return None
+        seq = raw.get("seq") if isinstance(raw, dict) else None
+        return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
 
     def _read_sidecar(
         self,

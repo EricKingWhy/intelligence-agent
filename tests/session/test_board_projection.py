@@ -459,7 +459,7 @@ def test_non_trigger_event_advances_watermark_without_recomputing(
     def forbidden(_events):
         raise AssertionError("触发集外事件不得重算投影")
 
-    monkeypatch.setattr(bp, "derive_board_projection", forbidden)
+    monkeypatch.setattr(bp, "_derive", forbidden)
     session.append(USER_MESSAGE, {"content": "只推进水位"})
     payload = json.loads(store.board_state_path(session.session_id).read_text("utf-8"))
     assert payload["projection_seq"] == session.events[-1].seq
@@ -587,8 +587,13 @@ def test_derivation_failure_does_not_poison_memory_or_sidecar(
     before = projection_store.get(sid)
     sidecar_before = json.loads(store.board_state_path(sid).read_text("utf-8"))
 
+    from agent_harness.session import task as task_module
+
+    def boom(_events):
+        raise RuntimeError("projection bug")
+
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(bp, "_derive", lambda _events: None)
+        mp.setattr(task_module, "derive_task_state", boom)
         session.begin_run()
 
     sidecar_after = json.loads(store.board_state_path(sid).read_text("utf-8"))
@@ -597,3 +602,31 @@ def test_derivation_failure_does_not_poison_memory_or_sidecar(
     # 下一次读取从事件流重放，拿到真实的新状态（缓存没被污染）。
     assert projection_store.get(sid).product_state == "executing"
     assert before.product_state == "pending_verification"
+
+
+def test_update_never_stamps_a_view_that_lags_the_disk(tmp_path: Path) -> None:
+    """独立审查 P2：内存视图看不到旁路写入时，不得把旧投影盖上新戳。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    assert projection_store.get(sid).product_state == "pending_verification"
+
+    # 旁路写者越过 Session 钩子追加一条触发事件：session.events 里看不到它。
+    foreign = SessionEvent(
+        seq=session.next_seq,
+        type=RUN_STARTED,
+        session_id=sid,
+        run_id="r1",
+        data={},
+    )
+    store.append_event(sid, foreign)
+
+    # 钩子仍按旧视图推进水位（等价于 append 返回与取戳之间的窗口）。
+    projection_store.update_from_events(sid, list(session.events), recompute=False)
+
+    stale = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert stale["projection_seq"] != foreign.seq, "不得把没投影过的 seq 写成已覆盖"
+    assert stale["product_state"] == "pending_verification"
+
+    # 下一次读取必须从盘上重放，拿到旁路事件造成的真实状态。
+    assert projection_store.get(sid).product_state == "executing"
