@@ -79,7 +79,8 @@ export function ChangesPanel({
   events?: readonly AgentEvent[];
   eventsVersion: number;
   streaming?: boolean;
-  /** #1311：会话里存在**成功**的 bash 调用（`hasSuccessfulBashCall(tools)`）。
+  /** #1311：会话里存在执行过的 bash 调用（`hasSuccessfulBashCall(tools)`；投影里
+   *  exit_code!=0 的命令也落 success，故判据实际含义是"执行过"，不含未执行的 failed）。
    *  空态据此给弱提示——bash 的文件副作用不在此清单，这是必须让用户知道的事。 */
   hasBashCall?: boolean;
   onOpenTaskReview?: () => void;
@@ -121,12 +122,17 @@ export function ChangesPanel({
         <div className="detail-tab-empty">
           <FileDiff size={24} className="detail-empty-icon" aria-hidden="true" />
           {/* #1311：口径声明而非全称断言——bash 等命令的文件副作用不进清单（设计边界），
-              不能说"未改动任何文件"。弱提示只讲"有成功 bash"这一条已发生的事实，
-              与 UnattributedFootnote（单条改动归属缺失）语义不撞车。 */}
-          <div className="detail-empty-hint">本次会话没有通过文件工具改动文件。</div>
+              不能说"未改动任何文件"。弱提示只讲"有执行过 bash"这一条已发生的事实
+              （投影里 exit≠0 也落 success，故口径中性，不说"成功"）；
+              unattributed>0 时首句带"可归属"限定，避免与归因脚注（肯定存在改动）同屏矛盾。 */}
+          <div className="detail-empty-hint">
+            {unattributed > 0
+              ? '清单里没有可归属的文件改动。'
+              : '本次会话没有通过文件工具改动文件。'}
+          </div>
           {hasBashCall && (
             <div className="detail-empty-hint">
-              会话中有成功的 bash 调用：它对文件的副作用不在此清单内。
+              会话中有执行过的 bash 命令：它对文件的副作用不在此清单内。
             </div>
           )}
           <UnattributedFootnote count={unattributed} />
@@ -200,7 +206,7 @@ export function ChangesPanel({
       {/* #1311：数据源标注在空态/有文件两种版式下常驻——清单只覆盖结构化文件工具事件，
           shell 副作用由「任务审阅」的 git 口径兜底；两个口径的差异有标注才有得区分。 */}
       <div className="changes-footnote">
-        数据来源：write / edit / apply_patch 工具事件；shell 命令的文件副作用不在此列（git 口径见「任务审阅」）。
+        数据来源：write/edit/apply_patch 工具事件；shell 命令的文件副作用不在此清单内（git 口径见「任务审阅」）。
       </div>
     </div>
   );

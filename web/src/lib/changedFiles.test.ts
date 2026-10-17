@@ -201,14 +201,17 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
 });
 
 describe('hasSuccessfulBashCall — 空态弱提示判据（#1311）', () => {
-  it('成功的 bash 调用 → true（可能有未被清单覆盖的文件副作用）', () => {
+  // 投影口径：bash.py 把 exit_code!=0 映射为 ok=True → projection 落 status='success'。
+  // 所以判据的真实含义是"执行过（到达命令执行）的 bash"，对 exit≠0 有副作用的命令
+  // 多报是安全方向；'failed' 在生产里只来自 TOOL_EXECUTION_ERROR（命令未执行）。
+  it("status='success'（含 exit_code!=0 的业务失败）→ true（可能有未被清单覆盖的文件副作用）", () => {
     const bash = (status: ToolCall['status']): ToolCall => ({
       tool_call_id: 'b', name: 'bash', args: { command: 'echo hi' }, status,
     });
     expect(hasSuccessfulBashCall([bash('success')])).toBe(true);
   });
 
-  it('失败/进行中的 bash → false（只有成功执行才可能有文件副作用）', () => {
+  it('failed（TOOL_EXECUTION_ERROR：命令未执行）/running → false', () => {
     const bash = (status: ToolCall['status']): ToolCall => ({
       tool_call_id: 'b', name: 'bash', args: { command: 'ls' }, status,
     });
