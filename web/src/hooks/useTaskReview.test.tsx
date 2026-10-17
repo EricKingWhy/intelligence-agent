@@ -157,7 +157,7 @@ describe('#353 useTaskReview — 三操作', () => {
     getTaskState.mockResolvedValue(taskState({ acceptance: { decision: 'accepted', reason: null }, version: 2, product_state: 'accepted' }));
     await act(async () => { await current!.accept(); });
     expect(current?.operationError).toBeNull();
-    expect(current?.operationNotice).toContain('幂等');
+    expect(current?.operationNotice).toContain('任务此前已接受');
   });
 
   it('acceptWithGaps：reason 为空 → 客户端先校验，不发请求', async () => {
@@ -191,7 +191,7 @@ describe('#353 useTaskReview — 三操作', () => {
     releaseTaskLease.mockResolvedValue({ released: false, promoted_to: null });
     await act(async () => { await current!.releaseLease(); });
     expect(current?.leaseNotice).toContain('未释放');
-    expect(current?.leaseNotice).toContain('不是该目录的写租约持有者');
+    expect(current?.leaseNotice).toContain('当前会话未持有该工作目录');
   });
 
   it('releaseLease：released=true 且提升队首时如实报告', async () => {

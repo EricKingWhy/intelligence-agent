@@ -40,6 +40,7 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
 import { TaskReviewPanel } from './components/TaskReviewPanel';
+import { changedFiles } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
@@ -288,6 +289,22 @@ export default function App() {
      本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
      `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
   const sessionId = conversation?.session_id;
+  const hasSelectedConversation = conversation?.session_id === selectedId;
+  const reviewEvents = hasSelectedConversation ? conversation.events : [];
+  const reviewEventsVersion = hasSelectedConversation ? conversation.eventsVersion : 0;
+  const changes = useMemo(
+    () => conversation?.session_id === selectedId
+      ? changedFiles(tools)
+      : { files: [], unattributed: 0 },
+    [conversation?.session_id, selectedId, tools],
+  );
+  const changedFileCount = changes.files.length;
+  const workspaceTabs = useMemo(
+    () => tabs.map((tab) => (tab.key === 'changes' && changedFileCount > 0
+      ? { ...tab, count: changedFileCount }
+      : tab)),
+    [tabs, changedFileCount],
+  );
 
   // ── #1028：归属 chip 的数据源 ──
   // 当前会话：项目名来自后端 `SessionSummary.workspace`（成员资格真相），cwd 来自
@@ -1793,14 +1810,6 @@ export default function App() {
               />
             )
           )}
-          {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
-          {selectedId !== null && (
-            <div className="task-review-entry">
-              <button className="btn-ghost" onClick={() => setTaskReviewOpen(true)}>
-                任务审阅
-              </button>
-            </div>
-          )}
           {constraintRequest && selectedId !== null && !loadingHistory && (
             <ConstraintResolutionDialog
               key={constraintRequest.request_id}
@@ -1819,7 +1828,7 @@ export default function App() {
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
               （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
               `lib/capabilities.ts` 的登记表给出（声明 `terminal`、渲染成「输出」）。 */}
-          <WorkspaceTabs tabs={tabs} active={activeTab} onSelect={setSelectedSurface} />
+          <WorkspaceTabs tabs={workspaceTabs} active={activeTab} onSelect={setSelectedSurface} />
           {/* **每个可见面各有一个 panel**，非激活的用 `hidden` 藏起来（不卸载——切回来
               时滚动位置与内部状态还在，与 Inspector "折叠 ≠ 卸载"同一取舍）。
               为什么不渲染"单个会换 id 的 panel"：那样每个 tab 的 `aria-controls` 里
@@ -1941,7 +1950,15 @@ export default function App() {
               {tab.key === 'changes' ? (
                 /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
                    数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
-                <ChangesPanel tools={tools} sessionId={sessionId} />
+                <ChangesPanel
+                  files={changes.files}
+                  unattributed={changes.unattributed}
+                  sessionId={sessionId}
+                  events={reviewEvents}
+                  eventsVersion={reviewEventsVersion}
+                  streaming={streaming}
+                  onOpenTaskReview={() => setTaskReviewOpen(true)}
+                />
               ) : null}
             </div>
           ))}

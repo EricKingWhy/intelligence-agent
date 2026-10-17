@@ -9,7 +9,8 @@
 import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
-import type { ToolCall } from '../types';
+import { EventType, type AgentEvent, type ToolCall } from '../types';
+import { changedFiles } from '../lib/changedFiles';
 import { ChangesPanel } from './ChangesPanel';
 
 function editTool(
@@ -31,7 +32,8 @@ function editTool(
 }
 
 const render = (tools: readonly ToolCall[]) =>
-  renderToString(createElement(ChangesPanel, { tools })).replaceAll('<!-- -->', '');
+  renderToString(createElement(ChangesPanel, { ...changedFiles(tools), eventsVersion: 0 }))
+    .replaceAll('<!-- -->', '');
 
 const rowCount = (html: string) => (html.match(/changes-file-row/g) || []).length;
 
@@ -161,5 +163,76 @@ describe('#189 AC4：只读面（不提供编辑入口）', () => {
     expect(html).not.toContain('<textarea');
     expect(html).not.toContain('contenteditable');
     expect(html).not.toMatch(/保存|应用|撤销|编辑/);
+  });
+});
+
+describe('task review summary', () => {
+  it('shows a review entry after a terminal run', () => {
+    const events: AgentEvent[] = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1' },
+      { type: EventType.RUN_COMPLETED, data: {}, seq: 2, run_id: 'r1' },
+    ];
+    const html = renderToString(
+      createElement(ChangesPanel, {
+        ...changedFiles([]),
+        events,
+        eventsVersion: events.length,
+        onOpenTaskReview: () => {},
+      }),
+    );
+
+    expect(html).toContain('task-review-summary');
+    expect(html).toContain('task-review-summary-link');
+  });
+
+  it('hides the summary while a run is open', () => {
+    const events: AgentEvent[] = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1' },
+    ];
+    const html = renderToString(
+      createElement(ChangesPanel, {
+        ...changedFiles([]),
+        events,
+        eventsVersion: events.length,
+        onOpenTaskReview: () => {},
+      }),
+    );
+
+    expect(html).not.toContain('task-review-summary');
+  });
+
+  it('puts the whole summary in warning state when a run failed', () => {
+    const events: AgentEvent[] = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1' },
+      { type: EventType.RUN_FAILED, data: { reason: 'error' }, seq: 2, run_id: 'r1' },
+    ];
+    const html = renderToString(
+      createElement(ChangesPanel, {
+        ...changedFiles([]),
+        events,
+        eventsVersion: events.length,
+        onOpenTaskReview: () => {},
+      }),
+    );
+
+    expect(html).toContain('class="task-review-summary is-warning"');
+  });
+
+  it('does not scan run events while streaming', () => {
+    const events = new Proxy([] as AgentEvent[], {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) throw new Error('events were scanned while streaming');
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => renderToString(
+      createElement(ChangesPanel, {
+        ...changedFiles([]),
+        events,
+        eventsVersion: 0,
+        streaming: true,
+      }),
+    )).not.toThrow();
   });
 });
