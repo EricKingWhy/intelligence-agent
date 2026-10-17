@@ -247,7 +247,7 @@
       const isCustom = a && a.idx === -1;
       $('customRow').classList.toggle('selected', !!isCustom);
       $('customInput').classList.toggle('show', !!isCustom);
-      if (isCustom) $('customInput').value = a.text || '';
+      $('customInput').value = isCustom ? a.text || '' : '';
       $('page').textContent = `${cur + 1} / ${QUESTIONS.length}`;
       $('prev').disabled = cur === 0;
       $('fwd').disabled = cur >= maxReached;
@@ -311,10 +311,13 @@
       ? `已提交 ${answered} 个决定，run 继续`
       : answered === 0
         ? `已跳过全部 ${skipped} 个问题，run 继续`
-        : `已提交 ${answered} 个决定，跳过 ${skipped} 个，run 继续`);
+        : `已提交 ${answered} 个决定，跳过 ${skipped} 个问题，run 继续`);
     const m = $('afterMsg');
     m.style.display = '';
-    m.textContent = `收到，按你的决定继续发布…\n\n${s}`;
+    const intro = answered === 0
+      ? '未作答问题均已跳过，按当前状态继续发布…'
+      : '收到，按你的决定继续发布…';
+    m.textContent = `${intro}\n\n${s}`;
   }
 
   $('collapse').addEventListener('click', () => qcard.classList.toggle('collapsed'));

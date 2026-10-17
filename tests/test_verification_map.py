@@ -365,6 +365,19 @@ def test_focused_only_inlines_pytest_subsets():
     assert all("（" in item and "）" in item for item in rest), f"不内联项必须带原因：{rest}"
 
 
+def test_ask_user_mockup_changes_require_frontend_lanes():
+    """独立 mockup 的 HTML 不在 web/src，但它的回归断言由前端 Vitest 驱动。"""
+    g0 = _gate0_module()
+    rows = [
+        r for r in ROWS
+        if any(g0.map_matches(pattern, "docs/plans/ask-user/ask.html") for pattern in _split(r[I_SURFACE]))
+    ]
+    frontend = [r for r in rows if r[I_LAYER] == "frontend-src"]
+    assert len(frontend) == 1, f"ask_user mockup 应命中 frontend-src 映射行，实得 {[r[I_LAYER] for r in rows]}"
+    assert {"vitest", "tsc", "oxlint", "build"}.issubset(set(_split(frontend[0][I_LANES])))
+    assert "web/src" in _split(frontend[0][I_FOCUSED])
+
+
 def test_every_inlined_pytest_target_actually_collects_tests():
     """内联的 pytest 目标必须**真能收到用例**。
 
