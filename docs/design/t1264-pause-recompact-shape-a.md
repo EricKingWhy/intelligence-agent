@@ -12,7 +12,7 @@
 
 ## 1. Shape B（暂停后自动恢复）为什么被证伪 —— 一手证据
 
-- `src/agent_harness/agent/runtime.py:3358`、`:3672`：暂停/终态臂调用 `arms.terminal.mark_terminal_written()`。
+- `src/agent_harness/agent/runtime.py:3435`、`:3749`：暂停/终态臂调用 `arms.terminal.mark_terminal_written()`。
   该方法一旦执行，**之后所有终态写入被拒**。暂停事件落盘后，run 在状态机里已经终结，
   "自动恢复"没有任何合法写路径 —— 只能新开 run（那就不是 AC2 要的"用户无操作"）。
 - 结论：Shape B 不是"难做"，是**与不变量冲突**。ADR-0044 的暂停/恢复语义保持不动（Shape A 不碰 ADR-0044）。
@@ -44,7 +44,7 @@ except ContextWindowExceededError as error:
 
 | 来源 | 位置 | 判定 |
 |---|---|---|
-| 摘要双失败 + 无截断可能 `"Summary validation failed and original context exceeds hard guard"` | `compactor.py:1020` | **按 failures 分类**（唯一候选） |
+| 摘要双失败 + 无截断可能 `"Summary validation failed and original context exceeds hard guard"` | `compactor.py:1031` | **按 failures 分类**（唯一候选） |
 | 压缩后仍超硬护栏 `"Compaction cannot fit context: ..."` | `compactor.py:1023-1030` | 结构性，不再压 |
 | 落 bracket 后重投影仍超硬护栏 `"Re-projected compaction still exceeds hard guard"` | `builder.py:915-919` | 结构性 |
 | 抖动闸门 `_THRASHING_GUARD_MESSAGE` | `builder.py:1139`（阈值 3，`builder.py:309`） | 结构性（已连续 3 次预检拒绝） |
@@ -65,7 +65,7 @@ except ContextWindowExceededError as error:
 
 ## 4. 与「compactor 内部已重试两次」的关系（必须显式交代）
 
-- `compactor.py:855`：`for attempt in (1, 2):` —— 单次 `compact_now` 内**已经**最多两次摘要尝试
+- `compactor.py:875`：`for attempt in (1, 2):` —— 单次 `compact_now` 内**已经**最多两次摘要尝试
   （注释：「W-04 (#348)：摘要生成至多两次尝试」）。
 - 因此 Shape A 的运行时再压是**第三层**尝试。奥卡姆剃刀的质疑成立，故施加硬约束：
   - **至多一次**（见 §5 一次性闸门），总请求上限 = 2（首轮内部）+ 2（再压内部）= 4，
@@ -175,7 +175,8 @@ AC1 票面写 `run 进入 PAUSED_COMPACTING（新）`。Shape A **明令不引�
 - **与不变量契合**：不变量 #3（append-only 类型化 SessionEvent）——不新增类型、复用既有 bracket；
   #4（Event ≠ Diagnostic Log）——失败诊断走既有 `context/compaction_failed` 有界通道；
   #22（Web UI 不得维护第二套不可对账真相）——前端只读投影 flag，不推断；
-  #8（Recovery before Retry）——再压不是盲重试，先按 `error_class` 分类。
+  Vision L105「Recovery before Retry」（**不是** `AGENTS.md` §7 的 #8 —— 那条是
+  "Tool Retry 只有 ToolExecutor 一个责任域"）——再压不是盲重试，先按 `error_class` 分类。
 - **许可**：两来源均为 MIT；本仓仅移植设计（一次性闸门 + 分层预算），不复制代码，
   来源与差异记录于本文件与 commit message。
 
@@ -198,6 +199,44 @@ AC1 票面写 `run 进入 PAUSED_COMPACTING（新）`。Shape A **明令不引�
 再压成功 ⇒ 本轮**继续**：`session_step_reserved` 置回 False 但**不退款** —— 这一步真的
 用掉了（模型即将被调用），退款才是记假账。再压失败 ⇒ 走既有退款臂（预留整步退回）。
 两分支互斥，由 `continue_after_recompaction` 单点判定。
+
+**已知口径偏差（双轴审查 P2 修回，如实记账）**：本票把"预留成为真账"说全了，
+但**再压自身那 2 次摘要请求（`compactor.py:899` 的 `ainvoke`）从不落 `model/request`
+事件** —— 该事件的唯一生产点是 runtime（`runtime.py:2935`），压缩链不过它；
+而 session 的 `model_requests` 计数只认 `MODEL_REQUEST` 事件
+（`runtime.py:_record_active_session_model_requests`）。因此走了再压的 run 会
+**少记**再压的真实 provider 请求数（最多 2）。
+- 这**不是**本票引入的偏差：手动 `/compact` 与首轮压缩的摘要请求同样不落账，
+  本票只是把同一事实多发生一次；改动它属于"压缩请求要不要进 session 账"的独立
+  议题（牵动 `_SUMMARY_ERROR_CLASSES` 之外的记账契约与 run 作用域镜像），
+  超出 Shape A 的最小改动面，**本票不开**（发现即记，不夹带）。
+- 方向上偏差**偏松**（少记 ⇒ 用户不会因再压被提前暂停），不制造越权。
+- 回归钉：`tests/agent/test_1264_inloop_recompaction.py::test_retry_success_keeps_the_session_step_reserved`
+  只钉"预留不退"这一半；再压请求的记账面**明确不在本票断言范围**。
+
+## 10ter. 双轴审查修复（2026-10-17）
+
+- **P1-a（Standards 轴）** `_is_retriable_compaction_failure` 只看 `attempt >= 1` 的失败：
+  `attempt=0` 的非摘要诊断（`chunk_bound_released` 等）不得当否决票（§3 判定式已按此收紧；
+  与 `builder.py:_backfill_artifact_ref` 同一条口径）。回归钉：
+  `tests/agent/test_1264_inloop_recompaction.py::test_benign_attempt_zero_diagnostic_does_not_veto_the_retry`
+  与反向的 `::test_failure_surface_with_no_summary_attempt_is_not_retried`。
+- **P1-b（Standards 轴）** `App.tsx` 的 `compactionInProgress` 补会话身份闸门（照 `sessionCwd` 写法）：
+  切会话时 `conversation` 仍是旧会话，不设闸门会把旧会话的"压缩在途"残影画到新会话上（不变量 #22）。
+  回归钉：`web/src/App.compactionInProgressIdentity.test.tsx`（红证已做：摘掉闸门该文件 1 红）。
+- **P2** 删掉 `tests/context/test_1264_transient_failure_classes.py` 里恒真的 partition 断言；
+  compactor 注释改为如实描述守卫强度（新增词条会静默落结构性侧，测试不报错）。
+- **P3** 陈旧行号（post-image）与不变量出处更正；测试走公开 `context_builder=` ctor 形参。
+- **P2（Correctness 轴，3 条，均为测试/记账缺口，非交付路径缺陷）**
+  1. 闸门用例 `test_the_gate_allows_at_most_one_retry_per_run` 原本**恒绿**：两条失败
+     都写在同一次迭代的脚本里，第一次失败时 `compact_now` 自身就抛，走不到第二次
+     build（删掉闸门该用例照样过）。已改为跨**两轮迭代**（第一轮带工具调用），
+     并做变异验证：删掉 `not arms.compaction_retry_attempted and` ⇒ 该用例转红。
+  2. 续跑臂 `session_step_reserved = False`（不退预留）原先**无覆盖**：本文件所有
+     用例都不传 `session_budget`，`#318` 整段是死代码。已加
+     `test_retry_success_keeps_the_session_step_reserved`（模型失败收尾 ⇒
+     `consumed.agent_turns` 保持 1），变异验证：删掉那行 ⇒ 该用例转红。
+  3. §10bis 的记账口径偏差（再压的摘要请求不落 `model/request`）—— 见上，如实记账、本票不开。
 
 ## 11. 其他取证备注
 

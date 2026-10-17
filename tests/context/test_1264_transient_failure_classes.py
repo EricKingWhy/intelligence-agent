@@ -18,9 +18,10 @@ def test_transient_is_a_subset_of_the_bounded_vocabulary() -> None:
 
 
 def test_transient_and_structural_partition_the_vocabulary_exactly() -> None:
-    structural = set(_SUMMARY_ERROR_CLASSES) - _TRANSIENT_ERROR_CLASSES
-    assert _TRANSIENT_ERROR_CLASSES | structural == set(_SUMMARY_ERROR_CLASSES)
-    assert not (_TRANSIENT_ERROR_CLASSES & structural), "二分不得重叠"
+    # 只留两条**能失败**的断言：子集（上面那个用例）+ 不重叠 + 无重复项。
+    # 原先这里还有 `_TRANSIENT | structural == set(_SUMMARY)` —— structural 就是
+    # 按差集定义的，该断言恒真、抓不到任何东西（#1264 双轴审查 P2）。
+    assert not (_TRANSIENT_ERROR_CLASSES & (set(_SUMMARY_ERROR_CLASSES) - _TRANSIENT_ERROR_CLASSES)), "二分不得重叠"
     assert len(_SUMMARY_ERROR_CLASSES) == len(set(_SUMMARY_ERROR_CLASSES)), "词表不得有重复项"
 
 

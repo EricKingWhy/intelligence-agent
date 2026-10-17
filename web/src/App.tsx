@@ -1790,7 +1790,11 @@ export default function App() {
                     /* #1264：后端真有压缩在途（投影自 `compaction/start`..
                        `compaction/end`）——自动路径的循环内再压与手动 `/compact`
                        共用同一个面。只读投影，不推断。 */
-                    compactionInProgress={conversation?.compaction_in_progress ?? false}
+                    compactionInProgress={
+                      conversation !== null && conversation.session_id === selectedId
+                        ? conversation.compaction_in_progress
+                        : false
+                    }
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */

@@ -948,10 +948,19 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
 
     判定只读 `error.failures` 的 `error_class`，不看 message——message 是给人看的
     文案，词表才是契约（有界 16 项，`_SUMMARY_ERROR_CLASSES`）。
+
+    只看**摘要尝试**的失败（`attempt >= 1`，与 `builder.py:_backfill_artifact_ref`
+    同一条口径）：`attempt=0` 的诊断是**非摘要尝试**的旁证（预检拒绝
+    `preflight_request_exceeds_hard_limit`、超大原子块释放 `chunk_bound_released`、
+    无早期回合 `no_compactable_early_turn`、区间不可用 `source_range_unavailable`），
+    它们与"模型侧是否抖动"无关，`all()` 会把它们当成否决票 —— 例如分块请求
+    先记一条 `chunk_bound_released`（`compactor.py` 在尝试循环**之前**追加），
+    随后两次摘要尝试都死于 `timeout`，失败面 = [chunk_bound_released, timeout,
+    timeout]；不筛 `attempt` 就会误判成结构性、白丢一次本该成功的续跑。
     """
     if isinstance(error, (ProtectedFactBudgetExceededError, CompactionPostWriteError)):
         return False
-    failures = error.failures or ()
+    failures = [f for f in (error.failures or ()) if f.attempt >= 1]
     return bool(failures) and all(
         failure.error_class in _TRANSIENT_ERROR_CLASSES for failure in failures
     )
@@ -1905,8 +1914,8 @@ class AgentRuntime:
                 except ContextWindowExceededError as error:
                     # #1264（Shape A）：**循环内有界再压**——不暂停、不引入新状态。
                     # 票面原状态机（暂停 → 后端再压 → 成功自动恢复）已证伪：暂停臂
-                    # 会调 `arms.terminal.mark_terminal_written()`（本文件 :3358 /
-                    # :3672），之后没有任何合法写路径，也就无所谓"自动恢复"。
+                    # 会调 `arms.terminal.mark_terminal_written()`（本文件 :3435 /
+                    # :3749），之后没有任何合法写路径，也就无所谓"自动恢复"。
                     # 因此把"再压一次"放在**终态写入之前**：成功就落回下面的正常
                     # 续跑（零操作续跑，不是"恢复"——不写 `resume_basis`、不发
                     # `run/resumed`）；失败才落到既有的暂停收口。

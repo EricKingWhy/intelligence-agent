@@ -126,8 +126,11 @@ _SUMMARY_ERROR_CLASSES = (
 #: `source_range_unavailable` / `preflight_request_exceeds_hard_limit` /
 #: `deterministic_truncation_fallback` / `chunk_bound_released` /
 #: `no_compactable_early_turn`）：再压一次必然同结果，**不得**重试。
-#: 与 `_SUMMARY_ERROR_CLASSES` 同处一个 owner（词表加项时这里必须同步二分，
-#: 由 `tests/context/test_1264_transient_failure_classes.py` 机械守卫）。
+#: 与 `_SUMMARY_ERROR_CLASSES` 同处一个 owner：词表加项时这里**必须**同步二分。
+#: 守卫强度如实交代（#1264 双轴审查 P2）：`tests/context/
+#: test_1264_transient_failure_classes.py` 只机械钉住「子集 + 不重叠 + 无重复项」
+#: 与两侧的写死样例；**新增**一个词条而忘了归类时，它会静默落到"结构性"侧
+#: （保守方向：不重试，不会误烧请求），测试不会失败。
 _TRANSIENT_ERROR_CLASSES = frozenset({
     "timeout",
     "transport_error",
