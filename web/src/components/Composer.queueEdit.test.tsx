@@ -30,7 +30,7 @@ function setInputValue(el: HTMLInputElement, value: string): void {
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-async function mount(onEditItem: (item: UndeliveredInput, content: string) => Promise<boolean>): Promise<HTMLDivElement> {
+async function mount(onEditItem: (item: UndeliveredInput, content: string) => void | boolean | Promise<void | boolean>): Promise<HTMLDivElement> {
   const el = document.createElement('div');
   document.body.appendChild(el);
   container = el;
@@ -51,7 +51,7 @@ async function mount(onEditItem: (item: UndeliveredInput, content: string) => Pr
 }
 
 /** 重渲染：模拟「编辑态已打开后，待答请求才从事件流推来」的迟到锁。 */
-async function rerender(onEditItem: (item: UndeliveredInput, content: string) => Promise<boolean>): Promise<void> {
+async function rerender(onEditItem: (item: UndeliveredInput, content: string) => void | boolean | Promise<void | boolean>): Promise<void> {
   await act(async () => {
     root!.render(createElement(Composer, {
       streaming: false,
@@ -126,6 +126,37 @@ describe('#1283 P2-2 — 编辑保存被拒时保留编辑态与草稿', () => {
 
     expect(onEditItem).toHaveBeenCalledTimes(1);
     expect(el.querySelector('input.queue-item-edit')).toBeNull();
+  });
+
+  it('onEditItem 返回 undefined（旧签名 = 已受理）⇒ 编辑态关闭', async () => {
+    const onEditItem = vi.fn(() => undefined);
+    const el = await mount(onEditItem);
+
+    await act(async () => { button(el, '编辑排队消息').click(); });
+    await act(async () => { button(el, '保存排队消息').click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onEditItem).toHaveBeenCalledTimes(1);
+    expect(el.querySelector('input.queue-item-edit')).toBeNull();
+  });
+
+  it('onEditItem 抛错 ⇒ 按未受理处理：保留编辑态与草稿，并留可观察痕迹', async () => {
+    const boom = new Error('network down');
+    const onEditItem = vi.fn(async () => { throw boom; });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const el = await mount(onEditItem);
+
+    await act(async () => { button(el, '编辑排队消息').click(); });
+    const input = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    await act(async () => { setInputValue(input!, '抛错后仍要留下'); });
+    await act(async () => { button(el, '保存排队消息').click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    const stillEditing = el.querySelector<HTMLInputElement>('input.queue-item-edit');
+    expect(stillEditing).not.toBeNull();
+    expect(stillEditing!.value).toBe('抛错后仍要留下');
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it('锁在编辑态打开之后才到 ⇒ Enter 也不提交（不发必然 409 的请求），草稿保留', async () => {

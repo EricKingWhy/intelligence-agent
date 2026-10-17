@@ -111,6 +111,11 @@ const QUEUE_HINT: Record<QueueLockReason, string> = {
   ask_user: '请先回答当前提问',
 };
 
+/** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
+ *  `422`…）⇒ 保留用户输入；`true` / `undefined`（旧签名）⇒ 按已受理收尾。
+ *  `onSubmit` / `onSteer` / `onEditItem` 共用这一份，避免同一契约写三遍。 */
+type SubmitResult = void | boolean | Promise<void | boolean>;
+
 interface Props {
   streaming: boolean;
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
@@ -122,7 +127,7 @@ interface Props {
    *  语义（把用户引向对话流里的待回答卡片，而不是让他发新消息撞后端 409）。
    *  文案必须**中性**：ask_user 是通用提问、不是约束澄清，见下方 `lockReason`。 */
   askUserInputPending?: boolean;
-  /** 返回值 = 这次发送**是否已被受理**（#1029）。判据是**显式 `false`**：
+  /** 返回值 = 这次发送**是否已被受理**（#1029，契约见 `SubmitResult`）：
    *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
    *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
    *    状态并保留用户未发送的输入」）；
@@ -135,7 +140,7 @@ interface Props {
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
     scope?: ConstraintScope,
-  ) => void | boolean | Promise<void | boolean>;
+  ) => SubmitResult;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
   onSteer?: (
@@ -143,7 +148,7 @@ interface Props {
     rememberAsProceduralRule: boolean,
     attachmentIds?: string[],
     scope?: ConstraintScope,
-  ) => void | boolean | Promise<void | boolean>;
+  ) => SubmitResult;
   /** #1191（Phase 2）：当前会话是否落在 git 仓库内（项目级登记可选）。
    *  `null`/缺省 = 未知（新建态、或尚未取得项目信息）⇒ 不置灰，交由后端 422 兜底；
    *  `false` = 已确知非 git 目录 ⇒ 「本项目」置灰不可选（票面 §七.4）。 */
@@ -222,8 +227,9 @@ interface Props {
   onCancelItem?: (item: UndeliveredInput) => void;
   /** 「编辑」= 就地编辑该排队项（ADR-0030 §5.2）：提交后走
    *  `POST /messages {content, queue_id}`（后端取消旧项 + 按 mode 重新投递）。
-   *  返回值契约同 `onSubmit`（#1029）：显式 `false` = 未受理 ⇒ 保留编辑态与文本。 */
-  onEditItem?: (item: UndeliveredInput, newContent: string) => Promise<boolean> | boolean | void;
+   *  返回值契约同 `onSubmit`（#1029 / `SubmitResult`）：显式 `false` = 未受理
+   *  ⇒ 保留编辑态与文本。 */
+  onEditItem?: (item: UndeliveredInput, newContent: string) => SubmitResult;
   /** ADR-0030 §4.6「立即发送」：立刻投递队首待发送输入（POST /queue/flush）。
    *  缺席 = 不渲染按钮（重启后手动投递是 ADR 明确的前端职责）。 */
   onFlush?: () => void;
@@ -302,7 +308,12 @@ export const Composer = memo(function Composer({
    *
    *  #1283 复审 P3：锁可能在编辑态**打开之后**才到（待答请求从另一路事件流推来），
    *  此时保存按钮已禁用、但 Enter 仍会走到这里——首行守卫把按钮/键盘两条路径一起
-   *  挡住，不发必然 409 的请求。 */
+   *  挡住，不发必然 409 的请求。
+   *
+   *  #1283 复审残余（登记不修）：`sendFollowUp` 的**分离投递**在 >1200ms 窗外先回
+   *  `true`（见 `useSession.ts` 的函数头注释），迟到的 409 由 `reportDetachedFailure`
+   *  把文本还回**主输入框**——不丢文本，但此时编辑态已关闭、旧队列项仍在。该窗口属
+   *  #1029 既有契约，不是本票新增；本票只保证窗内路径不再无脑清空。 */
   const commitEdit = async (item: UndeliveredInput) => {
     if (pendingUserInputLocked) return;
     const trimmed = editDraft.trim();
@@ -433,8 +444,8 @@ export const Composer = memo(function Composer({
     : QUEUE_HINT[pendingUserInputReason];
 
   // ── #283 权限 pill：会话内可改 + 升档确认 ──
-  // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
-  // ADR-0041 D5）与本轮进行中（档位下一轮才生效，本轮改了 UI 无从交代结果）。
+  // 禁用原因由 `lockReason` 一次算清（待回答用户输入 / 待审批，后端闸门都会 409，
+  // ADR-0041 D5），再加上本轮进行中（档位下一轮才生效，本轮改了 UI 无从交代结果）。
   // `#236` 的「会话内一律只读」那一条已随本票删除。
   const permissionLocked = locked || streaming;
   // #1283 P1：禁用原因按真实 lock 原因分流——ask_user 待答时绝不能报「等待审批」。
@@ -1362,7 +1373,8 @@ export const Composer = memo(function Composer({
               onChange={handlePermissionSelect}
               icon={Shield}
               placeholder="权限"
-              // 禁用只剩操作性原因（审批待决 / 本轮进行中）——不再是「档位不可变」。
+              // 禁用原因按真实 lockReason 分流（待回答用户输入 / 待审批 / 本轮进行中）
+              // ——不再是「档位不可变」。
               disabled={permissionLocked}
               disabledHint={permissionDisabledHint}
               // 会话内没有「默认（未选）」这个目标：端点只接受三个具体档位，`null` 发过去
