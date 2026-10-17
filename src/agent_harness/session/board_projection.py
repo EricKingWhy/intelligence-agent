@@ -16,7 +16,9 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
   文件锁就是这个前提）。旁路写者若插在「``append_event`` 返回」与「取戳」之间，
   戳会覆盖一条本投影没读到的事件；为此每次落盘前还做一次 O(1) 对账
   （``_view_matches_disk``：内存视图的 seq 连续 + 等于盘上最后一行的 seq），
-  不成立就丢弃缓存、不写 sidecar，让下一次 ``get()`` 从盘上重放。
+  不成立就丢弃缓存、不写 sidecar，让下一次 ``get()`` 从盘上重放。读路径同理再
+  校验 ``projection_seq`` 等于盘上最后一行的 ``seq``（``_disk_tail_seq``，O(1)
+  尾部读），戳只能证明文件没变，证明不了 sidecar 写的是最新水位（#1310）。
 * 原子写：照搬 ``session/progress.py::_write_meta_atomic`` 的
   ``mkstemp + flush + fsync + os.replace`` 形状（本票唯一指定的抄写来源）。
 * best-effort 钩子：照搬 ``session/session.py`` 的 listener 纪律——观察者异常只
@@ -212,8 +214,9 @@ class BoardProjectionStore:
 
     1. 内存与 sidecar **都只是缓存**。删掉两者后 ``get()`` 从事件流重放，结果
        逐字段不变；
-    2. sidecar 命中**零** ``read_events``：校验只读 sidecar 自带的
-       ``projection_seq`` + 事件文件 ``(size, mtime_ns)`` 戳（目录元数据）；
+    2. sidecar 命中**零** ``read_events``：校验只读事件文件 ``(size, mtime_ns)``
+       戳（目录元数据）+ 最后一行的 ``seq``（O(1) 尾部读，不重放）；戳只证明
+       文件没变，水位还必须是盘上最大 ``seq``（#1310）；
     3. 任何写失败只 ``logger.exception``，绝不影响 ``Session.append`` 契约；
     4. 所有 ``_persist_event``（含触发集外）都推进 sidecar 水位到当前 seq——
        否则 ``USER_MESSAGE`` 等非触发事件会让 sidecar 永远失配、列表路径每次
@@ -400,12 +403,16 @@ class BoardProjectionStore:
         session_id: str,
         stamp: tuple[int, int] | None,
     ) -> BoardProjection | None:
-        """读 sidecar；只有「写它时的事件文件戳 == 当前戳」才算命中。
+        """读 sidecar；只有「戳匹配 + 水位是盘上最大 seq + 内容自洽」才算命中。
 
-        这是「``projection_seq`` == 盘上最大 seq」的零 ``read_events`` 证明：
-        在单写者前提下，append-only 文件在两次投影之间没有字节变化
-        （size + mtime 一致）⇒ sidecar 覆盖的 seq 就是盘上最大 seq。
-        旁路写者的窄窗口假设见模块 docstring。
+        戳匹配只证明「写 sidecar 之后事件文件没变」，证明不了写 sidecar 的那一版
+        代码算到了最新事件（跨版本残留）或手改过 sidecar（#1310）。因此补两条
+        fail-closed 判据，任一不成立即视为未命中（回落重放并自愈）：
+
+        1. ``projection_seq`` 非负且等于事件文件最后一行的 ``seq``
+           （``_disk_tail_seq``，O(1) 尾部读，不调用 ``read_events``）；
+        2. ``product_state`` 是合法枚举（``""`` 或 ``PRODUCT_STATES``），且
+           非 ``executing`` 时 ``attention_*`` 必须为空（attention 只属于执行中）。
         """
         path = self._store.board_state_path(session_id)
         try:
@@ -427,13 +434,25 @@ class BoardProjectionStore:
         attention_summary = raw.get("attention_summary")
         if not isinstance(projection_seq, int) or isinstance(projection_seq, bool):
             return None
-        if not isinstance(product_state, str):
+        # 延迟导入：同 `_derive`，避免 session 包初始化期的循环导入。
+        from agent_harness.session.task import PRODUCT_STATES
+
+        if projection_seq < 0 or projection_seq != self._disk_tail_seq(session_id):
+            return None
+        if not isinstance(product_state, str) or product_state not in (
+            "",
+            *PRODUCT_STATES,
+        ):
             return None
         if changed_at is not None and not isinstance(changed_at, str):
             return None
         if attention_kind not in (None, "input", "approval"):
             return None
         if attention_summary is not None and not isinstance(attention_summary, str):
+            return None
+        if product_state != "executing" and (
+            attention_kind is not None or attention_summary is not None
+        ):
             return None
         return BoardProjection(
             product_state=product_state,

@@ -493,6 +493,130 @@ def test_corrupt_sidecar_falls_back_to_replay(tmp_path: Path) -> None:
     assert projection == first
 
 
+# ── #1310：sidecar 命中必须校验水位与内容一致性 ───────────────────────────
+
+
+def _mutate_sidecar(store: JsonlSessionStore, sid: str, **changes) -> dict:
+    """外部改写 sidecar（不动事件文件）；返回写回的完整 payload。"""
+    path = store.board_state_path(sid)
+    payload = json.loads(path.read_text("utf-8"))
+    payload.update(changes)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return payload
+
+
+def _restamp_sidecar(store: JsonlSessionStore, sid: str) -> dict:
+    """把 sidecar 的事件戳改成当前戳，模拟「戳匹配、投影陈旧」的坏缓存。"""
+    stat = store.events_path(sid).stat()
+    return _mutate_sidecar(
+        store, sid, events_size=stat.st_size, events_mtime_ns=stat.st_mtime_ns
+    )
+
+
+def test_sidecar_with_matching_stamp_but_stale_watermark_falls_back_to_replay(
+    tmp_path: Path,
+) -> None:
+    """#1310 复现 A/B：戳匹配但 projection_seq 落后于盘上尾 seq，不得被信任。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    stale = BoardProjectionStore(store).get(sid)
+    assert stale.product_state == "pending_verification"
+
+    # 旁路写者越过 Session 钩子追加事实：盘上已 accepted，sidecar 仍停在旧水位。
+    accepted = SessionEvent(
+        seq=session.next_seq,
+        type=TASK_ACCEPTED,
+        session_id=sid,
+        data={"decision": "accepted"},
+    )
+    store.append_event(sid, accepted)
+    _restamp_sidecar(store, sid)
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection.product_state == "accepted"
+    assert projection.projection_seq == accepted.seq
+    healed = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert healed["projection_seq"] == accepted.seq, "重放后必须自愈回填 sidecar"
+
+
+def test_sidecar_with_illegal_product_state_falls_back_to_replay(
+    tmp_path: Path,
+) -> None:
+    """#1310 复现 B：非法枚举原样透出 —— 读路径必须拒绝并重放。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    _mutate_sidecar(store, sid, product_state="banana")
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection == first, "非法枚举必须视为损坏缓存"
+    healed = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert healed["product_state"] == first.product_state
+
+
+def test_sidecar_with_attention_outside_executing_falls_back_to_replay(
+    tmp_path: Path,
+) -> None:
+    """#1310 复现 B：非 executing 带 attention 违反「attention 仅 executing」不变量。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    assert first.product_state != "executing"
+
+    _mutate_sidecar(
+        store, sid, attention_kind="input", attention_summary="待回答：伪造"
+    )
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection == first
+    assert projection.attention_kind is None
+    assert projection.attention_summary is None
+
+
+def test_sidecar_with_negative_projection_seq_falls_back_to_replay(
+    tmp_path: Path,
+) -> None:
+    """#1310：水位不得为负（空会话由「无事件文件」路径处理，不走 sidecar）。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    first = BoardProjectionStore(store).get(sid)
+    _mutate_sidecar(store, sid, projection_seq=-1)
+
+    assert BoardProjectionStore(store).get(sid) == first
+
+
+def test_executing_sidecar_with_attention_still_hits_without_read_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合法的 executing + attention sidecar 仍命中（AC-12：零 read_events）。"""
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session.start(store)
+    apply_task_definition(session, task_text="看板地基", criteria=[{"text": "A"}])
+    run_id, _ = session.begin_run()
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "q1",
+            "kind": "ask_user",
+            "run_id": run_id,
+            "questions": [{"header": "选择", "question": "哪个？"}],
+        },
+        run_id=run_id,
+    )
+    first = BoardProjectionStore(store).get(session.session_id)
+    assert first.product_state == "executing"
+    assert first.attention_kind == "input"
+
+    def forbidden(_session_id: str):
+        raise AssertionError("sidecar 命中时不得 read_events")
+
+    monkeypatch.setattr(store, "read_events", forbidden)
+    assert BoardProjectionStore(store).get(session.session_id) == first
+
+
 def test_sidecar_write_failure_does_not_break_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
