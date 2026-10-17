@@ -12,14 +12,14 @@
 
 ## 1. Shape B（暂停后自动恢复）为什么被证伪 —— 一手证据
 
-- `src/agent_harness/agent/runtime.py:3435`、`:3749`：暂停/终态臂调用 `arms.terminal.mark_terminal_written()`。
+- `src/agent_harness/agent/runtime.py:3444`、`:3758`：暂停/终态臂调用 `arms.terminal.mark_terminal_written()`。
   该方法一旦执行，**之后所有终态写入被拒**。暂停事件落盘后，run 在状态机里已经终结，
   "自动恢复"没有任何合法写路径 —— 只能新开 run（那就不是 AC2 要的"用户无操作"）。
 - 结论：Shape B 不是"难做"，是**与不变量冲突**。ADR-0044 的暂停/恢复语义保持不动（Shape A 不碰 ADR-0044）。
 
 ## 2. 插入点（最小改动面，只碰一处）
 
-`src/agent_harness/agent/runtime.py:1861-1882`，主循环 `while True:`（:1749）内、第 0 步 steer（:1817）之后：
+`src/agent_harness/agent/runtime.py:1914-1964`，主循环 `while True:`（:1798）内、第 0 步 steer（:1887）之后：
 
 ```python
 try:
@@ -44,8 +44,8 @@ except ContextWindowExceededError as error:
 
 | 来源 | 位置 | 判定 |
 |---|---|---|
-| 摘要双失败 + 无截断可能 `"Summary validation failed and original context exceeds hard guard"` | `compactor.py:1031` | **按 failures 分类**（唯一候选） |
-| 压缩后仍超硬护栏 `"Compaction cannot fit context: ..."` | `compactor.py:1023-1030` | 结构性，不再压 |
+| 摘要双失败 + 无截断可能 `"Summary validation failed and original context exceeds hard guard"` | `compactor.py:1034-1038` | **按 failures 分类**（唯一候选） |
+| 压缩后仍超硬护栏 `"Compaction cannot fit context: ..."` | `compactor.py:1046-1050` | 结构性，不再压 |
 | 落 bracket 后重投影仍超硬护栏 `"Re-projected compaction still exceeds hard guard"` | `builder.py:915-919` | 结构性 |
 | 抖动闸门 `_THRASHING_GUARD_MESSAGE` | `builder.py:1139`（阈值 3，`builder.py:309`） | 结构性（已连续 3 次预检拒绝） |
 | `"Refusing to persist an unvalidated compaction summary"` | `builder.py:1154` | 结构性 |
@@ -61,11 +61,11 @@ except ContextWindowExceededError as error:
 - 结构性（重试无意义）：`summary_not_smaller`、`target_not_reached`、`source_range_unavailable`、
   `preflight_request_exceeds_hard_limit`、`deterministic_truncation_fallback`、`chunk_bound_released`、`no_compactable_early_turn`
 
-该划分是对 `_SUMMARY_ERROR_CLASSES`（`compactor.py:86-120`，16 项有界词表）的**穷尽二分**，不新增词条。
+该划分是对 `_SUMMARY_ERROR_CLASSES`（`compactor.py:87-121`，16 项有界词表）的**穷尽二分**，不新增词条。
 
 ## 4. 与「compactor 内部已重试两次」的关系（必须显式交代）
 
-- `compactor.py:875`：`for attempt in (1, 2):` —— 单次 `compact_now` 内**已经**最多两次摘要尝试
+- `compactor.py:878`：`for attempt in (1, 2):` —— 单次 `compact_now` 内**已经**最多两次摘要尝试
   （注释：「W-04 (#348)：摘要生成至多两次尝试」）。
 - 因此 Shape A 的运行时再压是**第三层**尝试。奥卡姆剃刀的质疑成立，故施加硬约束：
   - **至多一次**（见 §5 一次性闸门），总请求上限 = 2（首轮内部）+ 2（再压内部）= 4，
@@ -73,7 +73,7 @@ except ContextWindowExceededError as error:
   - 再压**只在"首轮失败且可归类为瞬时"时**发生 —— 结构性失败一次都不再压。
 - 为什么不直接依赖内部两次：内部两次的失败面**不进 runtime**，runtime 无从区分"压过了但失败"与"根本没压"，
   也就无法在 AC2/AC3 之间做出选择。**运行时拥有这个决策**才是 Shape A 的实质，而不是"多试一次"。
-- 既有降级链不变、不重复：`_deterministic_truncation`（`compactor.py:246-291`）在 `token_estimate > hard_limit`
+- 既有降级链不变、不重复：`_deterministic_truncation`（`compactor.py:269-303`）在 `token_estimate > hard_limit`
   时已经先试确定性截断；截断成功则 `result.fallback_used=True` → `builder.py:1149` 返回，**根本不会抛到 runtime**。
 
 ## 5. 一次性闸门（AC4 幂等 / 不重复触发）
@@ -131,12 +131,12 @@ Composer 里那句「正在压缩上下文…」（`Composer.tsx:1090-1095`，`d
 ⇒ **本票零文案改动、零新 prop**。票面、任务书、已批准 mockup 三处同源，改它才是扩权。
 
 **语义上它也站得住**：走到这条臂的前提是「摘要两次没压成 + 确定性截断也放不下」
-（`compactor.py:1020`）——"**可压的**内容"（能被摘要压进硬护栏的内容）确实不存在，
+（`compactor.py:1034-1038`）——"**可压的**内容"（能被摘要压进硬护栏的内容）确实不存在，
 用户能做的确实只有换更大的窗口或结束。§3 的"结构性失败不再压"正是同一事实的另一面。
 
 ## 7bis. 请求数上界（可观测，非估算）
 
-再压走 `compact_now`，其内部 `for attempt in (1, 2)`（`compactor.py:855`）不变 ⇒
+再压走 `compact_now`，其内部 `for attempt in (1, 2)`（`compactor.py:878`）不变 ⇒
 **单次 run 的摘要请求上界 = 首轮 2 + 再压 2 = 4**（原先 2）。这正是 oh-my-pi
 `oneshotRetry` docstring 警告的"预算相乘"的**有界**形态：层数 2、每层默认 1，
 不是 10×3。
@@ -201,7 +201,7 @@ AC1 票面写 `run 进入 PAUSED_COMPACTING（新）`。Shape A **明令不引�
 两分支互斥，由 `continue_after_recompaction` 单点判定。
 
 **已知口径偏差（双轴审查 P2 修回，如实记账）**：本票把"预留成为真账"说全了，
-但**再压自身那 2 次摘要请求（`compactor.py:899` 的 `ainvoke`）从不落 `model/request`
+但**再压自身那 2 次摘要请求（`compactor.py:902` 的 `ainvoke`）从不落 `model/request`
 事件** —— 该事件的唯一生产点是 runtime（`runtime.py:2935`），压缩链不过它；
 而 session 的 `model_requests` 计数只认 `MODEL_REQUEST` 事件
 （`runtime.py:_record_active_session_model_requests`）。因此走了再压的 run 会

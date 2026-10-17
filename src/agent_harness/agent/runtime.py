@@ -1914,8 +1914,8 @@ class AgentRuntime:
                 except ContextWindowExceededError as error:
                     # #1264（Shape A）：**循环内有界再压**——不暂停、不引入新状态。
                     # 票面原状态机（暂停 → 后端再压 → 成功自动恢复）已证伪：暂停臂
-                    # 会调 `arms.terminal.mark_terminal_written()`（本文件 :3435 /
-                    # :3749），之后没有任何合法写路径，也就无所谓"自动恢复"。
+                    # 会调 `arms.terminal.mark_terminal_written()`（本文件 :3444 /
+                    # :3758），之后没有任何合法写路径，也就无所谓"自动恢复"。
                     # 因此把"再压一次"放在**终态写入之前**：成功就落回下面的正常
                     # 续跑（零操作续跑，不是"恢复"——不写 `resume_basis`、不发
                     # `run/resumed`）；失败才落到既有的暂停收口。
