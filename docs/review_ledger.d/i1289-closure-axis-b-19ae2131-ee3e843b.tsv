@@ -1,0 +1,1 @@
+2026-10-17	#1289 Standards bounded closure review: prior cp65001 P3 closed; stdlib codecs.lookup canonicalization and Windows UTF-8 alias behavior independently verified. No new P0-P4 findings. Did not run tests. Evidence: docs/phase_status/2026-10.md #1289.	19ae213121c1707bc150a58df310237e1f6caa12..ee3e843bd324bffbe6a0884acdfab61259b5066f

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 #: RuntimeEvent 信封版本（SDD 03 §3）：SSE 帧 / JSONL 行 / AgentEvent 统一携带，
@@ -206,6 +206,45 @@ CONTEXT_WINDOW_CHANGED = "context/window-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
+# ── #1193：run 致命异常的**明确错误信号**（durable，落盘）────────────────────
+# 缺陷背景：run 启动期致命异常（如 begin_run SeqConflict）既无 run/started 也无
+# run/failed，前端只看到「连接中断（stream ended unexpectedly）」并静默重试；而
+# 会话仍停在 plan 档（只读、无计划）——写工具全被拦，重试永远不会成功。
+# 本事件把「为什么失败 + 会话仍在 plan 档 + 手动退出」明确推给前端，替代静默重试。
+#
+# **为什么 durable（#1193 独立审查 F2/F3 实测）**：致命启动失败发生在 run 起点，
+# 而前端接流总晚一步（POST /sessions 路径先轮询认领会话 id 再接 WS，实测 ≥150ms；
+# 交付层攒包路径更晚）——失败帧发出时没有订阅者在场，瞬时帧必丢，前端照样退回
+# 「连接中断」重试。durable 之后，迟到接流的 WS 快照（websocket.py `_push_snapshot`
+# 无论有无在途 run 都补 after_seq 之后的一截）与刷新后的 GET /events 都能读到它，
+# 前端横幅成为事件流的投影（不变量 #22），而非只活在流里的一次性信号。
+#
+# 判定条件（精确，不猜）：run 异常收尾 ∧ `effective_workflow_mode` == plan ∧
+# 事件流中不存在任何 `task/plan_updated`（含前序 run——计划一旦生成过就不是
+# 本事件）。**不是** mode 回滚：任何异常路径都不把 plan 自动翻回 normal
+# （权限只收紧不自动放宽，fail-closed）。
+#
+# 形状说明：wire type 是裸词 "error"（#1193 票面 schema 明确指定），不遵循
+# `域/子域` 惯例——两个词汇生成器的形状正则已按票面放宽以容纳它。
+# 信封 run_id（#1280 AC3，非悬空）：异常臂 append 时挂 `arms.run_id`——run 已启动
+# 的致命子形态下是**真实 run_id**；begin_run 之前崩溃 = None（没有 run 可挂，
+# by-design，与「run_id 为 None ⇒ 无 run 可终结」的终态臂判据同一条口径）。
+# 降级形状（#1280 AC2）：durable append 失败时退化为无 seq 的瞬时帧，data 带
+# `degraded: true` 自描述——这是「durable 型无 seq」的唯一合法形状（golden
+# 不变式 `test_emitted_ephemeral_are_exactly_the_stream_only_types` 钉住）。
+ERROR = "error"
+
+
+class RunFailedBeforePlanData(TypedDict):
+    """Payload for the durable plan-mode startup failure signal (#1193)."""
+
+    code: Literal["run-failed-before-plan"]
+    message: str
+    workflow_mode: Literal["plan"]
+    hint: str
+    # #1280 AC2：durable append 失败降级为瞬时帧时置 True（落盘成功路径不携带）。
+    degraded: NotRequired[bool]
+
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
 #   COMPACTION_START (source_seq_start, source_seq_end)
@@ -346,6 +385,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_CHANGED,
         # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
         PERMISSION_CHANGED,
+        # #1193：run 致命异常的明确错误信号（plan 档 + 计划从未生成；durable 的
+        # 理由与判定条件见上方 ERROR 定义处）
+        ERROR,
         # #1197 项 1：会话级上下文窗口挡位
         CONTEXT_WINDOW_CHANGED,
     }

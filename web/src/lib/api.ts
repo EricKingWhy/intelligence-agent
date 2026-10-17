@@ -229,6 +229,32 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+/** #1256：某父会话的子智能体 roster 行（= 后端 `GET /delegations` 的响应元素）。
+ *
+ *  形状与后端 `web/delegations.py` 契约逐字一致；`status` 值域与
+ *  `Delegation['status']`（types.ts）同四态同语义（与 DelegationNode 的状态色同源）。 */
+export interface DelegationEntry {
+  child_session_id: string;
+  target: string;
+  task: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  started_at: string | null;
+  completed_at: string | null;
+  summary?: string;
+  /** 窗口占用（最近一次调用输入规模 / 精确分类，依 usage_state）。 */
+  used_tokens: number;
+  /** 诚实口径：ok=精确分类；usage_only=事件流下界（估算）；no_data=无数据。 */
+  usage_state: 'ok' | 'usage_only' | 'no_data';
+}
+
+/** #1256：读父会话的委派记录（roster 数据源）。只读；404 = 父会话不存在。 */
+export async function getSessionDelegations(sessionId: string): Promise<DelegationEntry[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/delegations`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+  if (!res.ok) throw new Error(`get delegations ${res.status}`);
+  return res.json();
+}
+
 export interface BudgetPayload {
   /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。
    *
@@ -2361,6 +2387,41 @@ export async function changeSessionPermission(
     // 带 status 的具名错误（同 createEmptySession）：409 与 422 需要被调用方分开讲，
     // 而 changeSessionModel 那种裸 `Error` 只有一句状态码，用户看不懂。
     throw new SessionError(res.status, detail || `change permission ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── 工作流档切换（#526 B1 端点 / #1193 消费）──
+
+/** POST /api/sessions/{id}/workflow-mode 的成功响应。
+ *  `mode` 是**动作后**的真值（幂等：重复切同档仍 200）。 */
+export interface WorkflowModeChangeResult {
+  id: string;
+  mode: string;
+}
+
+/** 切换会话工作流档（normal / plan）。
+ *
+ * #1193 的消费点：run 致命异常且计划从未生成时，会话停在 plan 档（只读）——
+ * 服务端**刻意不自动回滚**（权限只收紧不自动放宽，fail-closed），恢复路径
+ * 是用户经本函数**显式**退出 plan。与 `changeSessionPermission` 同约定：
+ * 不用回执写本地状态——档位的唯一真相是事件流投影；调用方成功后就地重读
+ * 事件（`reloadConversation`）。
+ *
+ * 错误码（`detail` 原样带出）：404 = session 不存在；422 = id 形态非法 / mode
+ * 非法；503 = 存储写锁耗尽。 */
+export async function changeWorkflowMode(
+  sessionId: string,
+  mode: 'normal' | 'plan',
+): Promise<WorkflowModeChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/workflow-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `change workflow mode ${res.status}`);
   }
   return res.json();
 }

@@ -527,6 +527,8 @@ class ContextBuilder:
         # ContextCompactor——校验在 compactor 构造处响亮失败，本层不重复）。
         summary_timeout_seconds: float = 30.0,
         summary_timeout_per_kilotoken_seconds: float = 0.25,
+        summary_timeout_attempt_multiplier: float = 2.0,
+        summary_timeout_max_seconds: float = 300.0,
         summary_chunk_request_ratio: float = 0.5,
         summary_chunk_max_tokens: int = 24_000,
         artifact_store: Any | None = None,
@@ -561,6 +563,10 @@ class ContextBuilder:
         self._summary_timeout_seconds = summary_timeout_seconds
         self._summary_timeout_per_kilotoken_seconds = (
             summary_timeout_per_kilotoken_seconds)
+        # #1279：attempt 放大与上限（原样透传给 compactor）。
+        self._summary_timeout_attempt_multiplier = (
+            summary_timeout_attempt_multiplier)
+        self._summary_timeout_max_seconds = summary_timeout_max_seconds
         self._summary_chunk_request_ratio = summary_chunk_request_ratio
         self._summary_chunk_max_tokens = summary_chunk_max_tokens
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
@@ -1100,6 +1106,10 @@ class ContextBuilder:
             summary_timeout_seconds=self._summary_timeout_seconds,
             summary_timeout_per_kilotoken_seconds=(
                 self._summary_timeout_per_kilotoken_seconds),
+            # #1279：attempt 放大与上限（Settings 透传链终点）。
+            summary_timeout_attempt_multiplier=(
+                self._summary_timeout_attempt_multiplier),
+            summary_timeout_max_seconds=self._summary_timeout_max_seconds,
             summary_chunk_request_ratio=self._summary_chunk_request_ratio,
             summary_chunk_max_tokens=self._summary_chunk_max_tokens,
         )
@@ -1305,7 +1315,8 @@ class ContextBuilder:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
         事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
-        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens /
+        #1279 的 timeout_seconds）；
         `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
 
@@ -1327,6 +1338,9 @@ class ContextBuilder:
                 "duration_ms": failure.duration_ms,
                 "request_token_estimate": failure.request_token_estimate,
                 "request_budget_tokens": failure.request_budget_tokens,
+                # #1279：本次摘要尝试实际使用的墙钟（秒）；attempt=0 诊断没有
+                # 摘要墙钟 ⇒ None（additive 键，不伪造）。
+                "timeout_seconds": failure.timeout_seconds,
                 # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
                 "narrowed": failure.narrowed,
                 # #1041：本轮失败保存的 raw artifact ref（None = 未落盘）。

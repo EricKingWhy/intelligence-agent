@@ -119,20 +119,24 @@ async function renderPanel() {
 }
 
 const text = () => host.textContent ?? '';
+const openMoreActions = () => {
+  const details = host.querySelector('.task-review-more-actions') as HTMLDetailsElement;
+  details.open = true;
+};
 
 describe('#353 TaskReviewPanel — 空态与两轴', () => {
   it('未定义任务（404）→ 空态，不是错误', async () => {
     getTaskState.mockRejectedValue(new api.TaskNotDefinedError('未定义任务'));
     await renderPanel();
-    expect(text()).toContain('未定义任务');
+    expect(text()).toContain('此会话尚未建立任务');
   });
 
   it('两轴分区：在途 run + 四态 chip 分两区', async () => {
     getTaskState.mockResolvedValue(taskState({ product_state: 'executing', open_run_ids: ['r1', 'r2'] }));
     await renderPanel();
-    expect(text()).toContain('Run / 操作态');
-    expect(text()).toContain('执行中（2 个在途 run）');
-    expect(text()).toContain('Task 交付态');
+    expect(text()).toContain('工作进度');
+    expect(text()).toContain('正在处理中（2 项操作）');
+    expect(text()).toContain('交付情况');
     expect(text()).toContain('执行中');
   });
 
@@ -203,8 +207,8 @@ describe('#353 TaskReviewPanel — 逐项六态 + 证据', () => {
     // chip 不被前端"修正"
     expect(host.querySelector('.task-review-chip')?.textContent).toBe('可交付');
     const disambiguation = host.querySelector('.task-review-disambiguation')?.textContent ?? '';
-    expect(disambiguation).toContain('服务端判定：可交付');
-    expect(disambiguation).toContain('证据新鲜度：已过期');
+    expect(disambiguation).toContain('验收项状态：可交付');
+    expect(disambiguation).toContain('证据状态：已过期');
   });
 });
 
@@ -250,18 +254,24 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
       product_state: 'pending_verification',
     }));
     await renderPanel();
-    expect(host.querySelector('.task-review-section[aria-label="失败尝试与待对账"]')?.textContent).toContain('错误行不谎报完成');
+    expect(host.querySelector('.task-review-section[aria-label="失败尝试"]')?.textContent).toContain('错误行不谎报完成');
     expect(text()).toContain('需 reconcile（来源未接入）');
+    const diagnostics = host.querySelector('.task-review-diagnostic-disclosure') as HTMLDetailsElement;
+    expect(diagnostics.open).toBe(false);
+    expect(diagnostics.textContent).toContain('Operation Ledger');
   });
 
   it('三操作各自后果文案在场；带原因接受 reason 为空 → 客户端先校验、不发请求', async () => {
     await renderPanel();
     const ops = host.querySelector('.task-review-ops')?.textContent ?? '';
+    expect(host.querySelector('.task-review-more-actions[open]')).toBeNull();
+    expect(ops).toContain('接受后锁定当前版本');
     expect(ops).toContain('接受');
     expect(ops).toContain('带原因接受');
-    expect(ops).toContain('释放目录');
-    expect(ops).toContain('这不是撤销接受');
+    expect(ops).toContain('释放工作目录');
+    expect(ops).toContain('让其他任务可以使用这个目录');
     // 填空白原因点提交
+    openMoreActions();
     const btn = [...host.querySelectorAll('button')].find((b) => b.textContent?.includes('带原因接受'))!;
     await act(async () => { btn.click(); });
     expect(acceptTask).not.toHaveBeenCalled();
@@ -276,13 +286,14 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
     await renderPanel();
     const ops = host.querySelector('.task-review-ops')?.textContent ?? '';
     expect(ops).toContain('撤销接受');
-    expect(ops).toContain('与「释放目录」是两个不同事实');
+    expect(ops).toContain('撤销接受状态，不改变验收项结果。');
   });
 
   it('释放目录点击 → releaseTaskLease 受理，回执如实（released:false 不冒充成功）', async () => {
     releaseTaskLease.mockResolvedValue({ released: false, promoted_to: null });
     await renderPanel();
-    const btn = [...host.querySelectorAll('button')].find((b) => b.textContent?.includes('释放目录'))!;
+    openMoreActions();
+    const btn = [...host.querySelectorAll('button')].find((b) => b.textContent?.includes('释放工作目录'))!;
     await act(async () => { btn.click(); });
     await act(async () => {});
     expect(releaseTaskLease).toHaveBeenCalledWith('s1');
@@ -363,6 +374,20 @@ describe('#353 P2-2/P2-3 — 授权诚实呈现与下一步', () => {
     expect(text()).not.toContain('服务端投影暂未提供');
   });
 
+  it('hides empty criteria and evidence sections and combines undeclared metadata', async () => {
+    getTaskState.mockResolvedValue(taskState({
+      criteria: [],
+      verification: {},
+      read_write_intent: null,
+      authorization: null,
+    }));
+    await renderPanel();
+
+    expect(host.querySelector('.task-review-criteria')).toBeNull();
+    expect(host.querySelector('section[aria-label="逐项结果"]')).toBeNull();
+    expect(host.querySelector('.task-review-meta-empty')?.textContent).toBe('读写意图与授权档位未声明');
+  });
+
   it('P2-3：有未通过项 → 下一步列出"未通过"', async () => {
     getTaskState.mockResolvedValue(
       taskState({
@@ -376,7 +401,7 @@ describe('#353 P2-2/P2-3 — 授权诚实呈现与下一步', () => {
     getEvidenceState.mockResolvedValue({ 'ac-2': [evidenceRecord({})] });
     await renderPanel();
     expect(text()).toContain('下一步');
-    expect(text()).toContain('处理以下未通过/缺证据项');
+    expect(text()).toContain('处理以下未通过或缺少证据的项目');
     expect(text()).toContain('未通过');
   });
 
@@ -384,7 +409,6 @@ describe('#353 P2-2/P2-3 — 授权诚实呈现与下一步', () => {
     getTaskState.mockResolvedValue(taskState());
     getEvidenceState.mockResolvedValue({ 'ac-1': [evidenceRecord({})] });
     await renderPanel();
-    expect(text()).toContain('下一步');
-    expect(text()).toContain('暂无下一步建议（服务端未提供）');
+    expect(host.querySelector('section[aria-label="下一步"]')).toBeNull();
   });
 });

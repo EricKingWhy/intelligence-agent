@@ -461,14 +461,10 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
             request={askUserRequest}
             resuming={askUserResuming}
             errorMessage={askUserError}
-            /* #1224：按请求落盘的超时档渲染底部提示，与后端注入消息
-               （`minutes = max(1, floor(timeout_seconds / 60))`，向下取整且至少 1）
-               数值一致。缺省（旧事件无该字段）⇒ null ⇒ 卡片回落不带数字的中性提示。 */
-            timeoutMinutes={
-              typeof askUserRequest.timeout_seconds === 'number'
-                ? Math.max(1, Math.floor(askUserRequest.timeout_seconds / 60))
-                : null
-            }
+            /* #1284：分钟数由投影从请求快照归一（后端落 `timeout_minutes`，旧事件由
+               `timeout_seconds` 换算）；本层只渲染，不再自算，避免与后端消息分叉。
+               缺省（旧事件无快照）⇒ null ⇒ 卡片回落不带数字的中性提示。 */
+            timeoutMinutes={askUserRequest.timeout_minutes ?? null}
             onSubmit={onAskUserAnswer}
           />
         )}

@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1299 分支 sync merge 7e69cc8，父一 17def16（本线 tip：#1284 #1224 复审 findings 修补）/ 父二 933495bd（origin/main，#1297 合入后 tip）。merge-base 279ba13。冲突文件 2（docs/SDD_TICKET_TRACKER.md、docs/phase_status/2026-10.md，均为两侧文末追加登记节，按并集机械消解）。无损核验：冲突标记 0、git diff --check rc=0。	17def164094bfb2ea8c73e565605cc93661e31bb..7e69cc848da7b0e13349ba818e66de718a7455cb

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
@@ -119,6 +120,29 @@ _SUMMARY_ERROR_CLASSES = (
     # 对标 #639 阶段3a，attempt=0 + 有界词条 + 经 #348 落任务可见。
     "no_compactable_early_turn",
 )
+
+#: #1264（Shape A）：`_SUMMARY_ERROR_CLASSES` 的**瞬时/结构性**二分中"瞬时"的那一半——
+#: 模型侧抖动（超时、传输、输出不成摘要、校验闸门拒绝），**重试有意义**。
+#: 补集即结构性失败（`summary_not_smaller` / `target_not_reached` /
+#: `source_range_unavailable` / `preflight_request_exceeds_hard_limit` /
+#: `deterministic_truncation_fallback` / `chunk_bound_released` /
+#: `no_compactable_early_turn`）：再压一次必然同结果，**不得**重试。
+#: 与 `_SUMMARY_ERROR_CLASSES` 同处一个 owner：词表加项时这里**必须**同步二分。
+#: 守卫强度如实交代（#1264 双轴审查 P2）：`tests/context/
+#: test_1264_transient_failure_classes.py` 只机械钉住「子集 + 不重叠 + 无重复项」
+#: 与两侧的写死样例；**新增**一个词条而忘了归类时，它会静默落到"结构性"侧
+#: （保守方向：不重试，不会误烧请求），测试不会失败。
+_TRANSIENT_ERROR_CLASSES = frozenset({
+    "timeout",
+    "transport_error",
+    "empty_summary",
+    "tool_calls_in_response",
+    "non_text",
+    "heading_mismatch",
+    "empty_section",
+    "programmatic_mismatch",
+    "plan_section_mismatch",
+})
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
 _FAILURE_MESSAGE_LIMIT = 300
@@ -322,6 +346,10 @@ class CompactionFailure:
     duration_ms: int
     request_token_estimate: int
     request_budget_tokens: int
+    #: #1279：本次摘要尝试**实际使用**的墙钟（秒，含 attempt 放大与 max 夹逼）。
+    #: 预检 / 分块放行 / 来源不可用等 attempt=0 诊断没有摘要墙钟 ⇒ None（不伪造）。
+    #: 单请求路径 = 该 attempt 的公式值；分块路径 = 失败时正在使用的那一块的墙钟。
+    timeout_seconds: float | None = None
     #: #639 阶段 A：该诊断是否为**缩小段**判定（False = 全段预检）。仅预检拒绝
     #: （attempt=0）会置位；其余诊断/摘要尝试失败保持默认假值。有界布尔，不撑载荷。
     narrowed: bool = False
@@ -542,6 +570,8 @@ class ContextCompactor:
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0,
                  summary_timeout_per_kilotoken_seconds: float = 0.25,
+                 summary_timeout_attempt_multiplier: float = 2.0,
+                 summary_timeout_max_seconds: float = 300.0,
                  summary_chunk_request_ratio: float = 0.5,
                  summary_chunk_max_tokens: int = 24_000,
                  summary_model: Any | None = None,
@@ -553,6 +583,16 @@ class ContextCompactor:
         # #1026：墙钟斜率（候选①线性缩放）——0 = 固定墙钟（候选②的退化形态）。
         if summary_timeout_per_kilotoken_seconds < 0:
             raise ValueError("summary_timeout_per_kilotoken_seconds must be non-negative")
+        # #1279：attempt 缩放必须 ≥1 且有限（(0,1) 会把重试墙钟缩到 attempt 1
+        # 以下，与"放大"相悖）；上限必须为正且有限（"不许无限大"——
+        # 放大到无界等于取消失败语义）。
+        if (not math.isfinite(summary_timeout_attempt_multiplier)
+                or summary_timeout_attempt_multiplier < 1):
+            raise ValueError(
+                "summary_timeout_attempt_multiplier must be >= 1")
+        if (not math.isfinite(summary_timeout_max_seconds)
+                or summary_timeout_max_seconds <= 0):
+            raise ValueError("summary_timeout_max_seconds must be positive")
         if not 0 < summary_chunk_request_ratio <= 1:
             raise ValueError("summary_chunk_request_ratio must be in (0, 1]")
         if summary_chunk_max_tokens <= 0:
@@ -572,6 +612,9 @@ class ContextCompactor:
         self._summary_timeout = summary_timeout_seconds
         # #1026：墙钟缩放斜率与分块参数（Settings 透传链见 builder/assembly）。
         self._timeout_per_kilotoken = summary_timeout_per_kilotoken_seconds
+        # #1279：重试维度的放大（第 n 次 = 公式值 × multiplier^(n-1)，受上限夹逼）。
+        self._timeout_attempt_multiplier = summary_timeout_attempt_multiplier
+        self._timeout_max = summary_timeout_max_seconds
         self._chunk_ratio = summary_chunk_request_ratio
         self._chunk_max_tokens = summary_chunk_max_tokens
         self._max_context_tokens = max_context_tokens
@@ -586,7 +629,9 @@ class ContextCompactor:
         """
         return self._gate.slot() if self._gate is not None else nullcontext(None)
 
-    def _summary_timeout_for(self, request_token_estimate: int) -> float:
+    def _summary_timeout_for(
+        self, request_token_estimate: int, attempt: int = 1,
+    ) -> float:
         """#1026：摘要请求的墙钟随**本次请求规模**线性缩放（消融候选①）。
 
         `base + kt × slope`：base = `summary_timeout_seconds`（Settings，默认 30——
@@ -599,13 +644,30 @@ class ContextCompactor:
         的 `test_timeout_formula_scales_with_request_size`）。
         每次摘要尝试用**当时**的请求规模取墙钟——两次 attempt / 分块逐块不再
         共用同一恒定值（票面修法①）。
+
+        #1279：再按 **attempt 维度**放大——`min(formula × multiplier^(attempt-1),
+        max_seconds)`（min 仅作用于 attempt≥2）。attempt=1 **无条件**返回裸公式
+        值（与 #1026 逐字相同，快模型行为不变——即使公式值超过 max_seconds 也
+        不夹逼，否则属静默行为改变）；attempt=2 默认 2×，给慢模型（如单轮
+        45–60s 的网关）一次真正可能完成的重试。上限防止"无限等待"：第二次仍
+        超时则照常落 `compaction_failed`。
         """
-        return (self._summary_timeout
-                + request_token_estimate / 1000 * self._timeout_per_kilotoken)
+        formula = (self._summary_timeout
+                   + request_token_estimate / 1000 * self._timeout_per_kilotoken)
+        if attempt == 1:
+            # 与 #1026 逐字相同：attempt=1 不受 max_seconds 夹逼。
+            return formula
+        try:
+            scaled = formula * self._timeout_attempt_multiplier ** (attempt - 1)
+        except OverflowError:
+            # 极端 attempt 下幂运算溢出时直接取上限。
+            return self._timeout_max
+        return min(scaled, self._timeout_max)
 
     async def _summarize_chunked(
         self, chunks: list[list[AnyMessage]], prompt: SystemMessage,
         plan_block: str | None, *, request_sizes: list[int],
+        attempt: int, request_timeouts: list[float],
     ) -> AIMessage:
         """#1026：分块递进归并摘要（spike 验证的首选③变体，PORT DESIGN 依据见下）。
 
@@ -642,9 +704,11 @@ class ContextCompactor:
             # 诊断的 request_token_estimate 在分块路径记逐块口径，不再记全 early
             # 单请求估算（两口径可区分，见 attempt 循环处注释）。
             request_sizes.append(chunk_request_tokens)
-            async with self._slot(), asyncio.timeout(
-                self._summary_timeout_for(chunk_request_tokens),
-            ):
+            # #1279：逐块墙钟同样带 attempt 放大（失败诊断取失败时正在使用的那块）。
+            chunk_timeout = self._summary_timeout_for(
+                chunk_request_tokens, attempt)
+            request_timeouts.append(chunk_timeout)
+            async with self._slot(), asyncio.timeout(chunk_timeout):
                 response = await self._model.ainvoke(parts)
             if not isinstance(response, AIMessage) or response.tool_calls:
                 raise _SummaryRejected(
@@ -862,6 +926,11 @@ class ContextCompactor:
             # ——两口径可区分）。尚未发起任何块请求就失败时无逐块读数，回落
             # 全 early 估算。
             chunk_request_sizes: list[int] = []
+            chunk_request_timeouts: list[float] = []
+            # #1279：本次 attempt 的墙钟 = 规模公式 × multiplier^(attempt-1)，
+            # 受 max_seconds 夹逼。先算出再进 try，失败诊断直接记这个实际值。
+            attempt_timeout = self._summary_timeout_for(
+                request_token_estimate, attempt)
             try:
                 # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（墙钟是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
@@ -871,11 +940,11 @@ class ContextCompactor:
                     response = await self._summarize_chunked(
                         chunks, prompt, plan_block,
                         request_sizes=chunk_request_sizes,
+                        attempt=attempt,
+                        request_timeouts=chunk_request_timeouts,
                     )
                 else:
-                    async with self._slot(), asyncio.timeout(
-                        self._summary_timeout_for(request_token_estimate),
-                    ):
+                    async with self._slot(), asyncio.timeout(attempt_timeout):
                         response = await self._model.ainvoke(request)
                 attempt_model_id = _summary_model_id(self._model, response)
                 summary_model_id = attempt_model_id
@@ -944,6 +1013,12 @@ class ContextCompactor:
                         if chunk_request_sizes else request_token_estimate
                     ),
                     request_budget_tokens=int(self._hard_limit),
+                    # #1279：失败时正在使用的墙钟（分块路径取最后发起的那一块，
+                    # 即实际超时/抛错时生效的预算）；无逐块读数时用本次 attempt 值。
+                    timeout_seconds=(
+                        chunk_request_timeouts[-1]
+                        if chunk_request_timeouts else attempt_timeout
+                    ),
                 ))
                 logger.warning(
                     "Context compaction attempt %s rejected (%s)",
@@ -1817,6 +1892,7 @@ def _record_failure(
     auto_limit: float, hard_limit: float,
     *, summary_model_id: str | None, duration_ms: int,
     request_token_estimate: int, request_budget_tokens: int,
+    timeout_seconds: float | None = None,
 ) -> CompactionFailure:
     """一次尝试的异常 → 有界 CompactionFailure。
 
@@ -1838,4 +1914,5 @@ def _record_failure(
         duration_ms=duration_ms,
         request_token_estimate=request_token_estimate,
         request_budget_tokens=request_budget_tokens,
+        timeout_seconds=timeout_seconds,
     )
