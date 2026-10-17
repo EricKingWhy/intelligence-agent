@@ -120,6 +120,29 @@ _SUMMARY_ERROR_CLASSES = (
     "no_compactable_early_turn",
 )
 
+#: #1264（Shape A）：`_SUMMARY_ERROR_CLASSES` 的**瞬时/结构性**二分中"瞬时"的那一半——
+#: 模型侧抖动（超时、传输、输出不成摘要、校验闸门拒绝），**重试有意义**。
+#: 补集即结构性失败（`summary_not_smaller` / `target_not_reached` /
+#: `source_range_unavailable` / `preflight_request_exceeds_hard_limit` /
+#: `deterministic_truncation_fallback` / `chunk_bound_released` /
+#: `no_compactable_early_turn`）：再压一次必然同结果，**不得**重试。
+#: 与 `_SUMMARY_ERROR_CLASSES` 同处一个 owner：词表加项时这里**必须**同步二分。
+#: 守卫强度如实交代（#1264 双轴审查 P2）：`tests/context/
+#: test_1264_transient_failure_classes.py` 只机械钉住「子集 + 不重叠 + 无重复项」
+#: 与两侧的写死样例；**新增**一个词条而忘了归类时，它会静默落到"结构性"侧
+#: （保守方向：不重试，不会误烧请求），测试不会失败。
+_TRANSIENT_ERROR_CLASSES = frozenset({
+    "timeout",
+    "transport_error",
+    "empty_summary",
+    "tool_calls_in_response",
+    "non_text",
+    "heading_mismatch",
+    "empty_section",
+    "programmatic_mismatch",
+    "plan_section_mismatch",
+})
+
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
 _FAILURE_MESSAGE_LIMIT = 300
 _SUMMARY_MODEL_ID_LIMIT = 256
