@@ -3938,9 +3938,9 @@ class AgentRuntime:
                           span_id=new_span_id(), outcome="error", exc_info=True)
                 # #1280 AC2：降级帧带显式 degraded 标记自描述——durable 型却无 seq
                 # 的帧自此可判别，golden 不变式据此放宽为「seq=None ⟺
-                # STREAM_ONLY_TYPES ∪ 带 degraded 标记的存储降级帧」。
-                # #1280 review A 轴 P4：降级帧同样挂 run_id（durable 成功路径
-                # :3928 同口径）——run 已启动时信封不悬空；begin_run 之前崩溃
+                # STREAM_ONLY_TYPES ∪ 带 degraded 标记的 ERROR 存储降级帧」。
+                # #1280 review A 轴 P4：降级帧同样挂 run_id，与上方 durable 成功
+                # 路径同口径——run 已启动时信封不悬空；begin_run 之前崩溃
                 # = None，与 AC3 的缺席语义一致。
                 fatal_error_frame = AgentEvent(
                     type=ERROR, data={**error_data, "degraded": True},

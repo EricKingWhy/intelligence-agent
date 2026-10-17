@@ -318,6 +318,10 @@ class TestRunFailedBeforePlanSurface:
         # 只允许这一种形状（golden 不变式「seq=None ⟺ STREAM_ONLY_TYPES ∪
         # 带 degraded 标记的存储降级帧」的生产发射点就在这里）。
         assert errors[0]["data"].get("degraded") is True, errors[0]
+        # #1280 修后重审 P4：begin_run 被炸 ⇒ arms.run_id 恒 None——降级帧
+        # run_id 的**缺席**语义在此钉住（非 None 子形态与 durable 成功路径
+        # 结构同源：同一 arms.run_id 单点只读）。
+        assert errors[0].get("run_id") is None, errors[0]
 
         sid = _session_id(resp)
         events = _events(client, sid)

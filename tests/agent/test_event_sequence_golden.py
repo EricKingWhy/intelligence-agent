@@ -1009,12 +1009,13 @@ async def test_fatal_error_frame_follows_terminal_in_full_stream(tmp_path: Any) 
 
     # 镜像前缀序在该臂上同样成立（与 test_durable_frames_mirror_the_persisted_log
     # 同判据）：流里带 seq 的帧逐条等于落盘事实的前缀。落盘序列里 run 之前手写的
-    # workflow/mode-changed（切档初始条件）不进流，按 seq 截掉。
+    # workflow/mode-changed（切档初始条件）不进流，按类型排除——不从流侧取
+    # from_seq 锚（修后重审 P4：以流首帧为锚时，回归丢掉第一个带 seq 帧会把
+    # 盲区右移，断言假绿）。
     frames = [e for e in emitted if e.seq is not None]
-    from_seq = frames[0].seq
     persisted = [
         (e.type, e.seq, e.step_id, e.data)
-        for e in _persisted(session) if e.seq is not None and e.seq >= from_seq
+        for e in _persisted(session) if e.type != WORKFLOW_MODE_CHANGED
     ]
     assert [(e.type, e.seq, e.step_id, e.data) for e in frames] == persisted[:len(frames)]
 
