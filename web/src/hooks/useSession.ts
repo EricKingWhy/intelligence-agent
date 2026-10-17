@@ -21,12 +21,12 @@
  * 显式中断唯一入口是 cancelStream 的 POST /cancel（decideCancel 决策）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, FailedDraft, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { EventType, type AgentEvent, type ConversationState, type FailedDraft, type SessionDeleted, type SessionMode, type SessionSummary } from '../types';
+import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
-import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
+import { initConversation, applyEvent, projectHistory, deriveSessionTitle, deriveRunFailedBeforePlan, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
@@ -623,6 +623,9 @@ export function useSession() {
     // ⚠ 顺序不能动：这句在下面 `setError('续聊失败：…')` 之前跑，判的是**上一拍**
     // 的 `mode`（即「发送前就是 viewing」）——正是 `switchingSession` 的定义。
     if (switchingSession) setError(null);
+    // #1193：plan-stuck 横幅**不需要**在这里清——它是 `conversation.events` 的
+    // 投影，切会话即随新会话的事件重建（旧会话的记录不跨会话存活；切回来时
+    // 事件仍在，横幅照旧在场——这正是它该有的样子）。
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
@@ -849,6 +852,17 @@ export function useSession() {
             sseRef.current?.cancel();
             scheduleReconnect(liveSidRef.current, 'seq gap');
             return;
+          }
+          // #1193：run 致命异常且「计划从未生成」——服务端刻意不回滚 mode
+          // （fail-closed），会话停在 plan 档（只读）；把它当**终态**处理：
+          // terminalSeen 置真 ⇒ 后端随后收流时 onStreamEnd 走干净迁移
+          // （finishLive），不再进入「连接中断」重试链——重试永远不会成功
+          // （每轮新 run 都派生 PLAN、写工具全被拦）。横幅本身是事件流投影
+          // （`deriveRunFailedBeforePlan`），这里只做流终态判定。
+          if (event.type === EventType.ERROR && event.data?.code === 'run-failed-before-plan') {
+            terminalSeenRef.current = true;
+            // 不 return：继续走通用投影（类型已登记为 no-op）与游标语义——
+            // 这条分支只改「终态判定」，不改帧序。
           }
           if (RUN_TERMINAL_TYPES.has(event.type)) {
             terminalSeenRef.current = true;
@@ -1088,7 +1102,7 @@ export function useSession() {
    *  返回值：`null` = 请求已被接受、流已接上；否则 = **给用户看的失败原因**。
    *  默认同时写进全局 error 横幅（Composer 路径的历史行为，App 还据那句话识别
    *  「未知模型」并刷新模型目录）。传 `{ ownError: true }` 时**不**写横幅、只返回
-   *  原因——「在此项目中新建任务」确认面（#169 AC12）要把它留在浮层里，而且需要
+   *  原因——「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把它留在浮层里，而且需要
    *  后端 detail 原文（如「目录不存在：…」），所以那条路径连 422 也不套用
    *  「未知模型」的旧语义。 */
   const submitTask = useCallback(
@@ -1187,7 +1201,8 @@ export function useSession() {
          *
          *  两个守卫：
          *   - 代际已换代（`streamGenRef.current !== gen`）⇒ 这是过期会话的事，不污染新会话；
-         *   - `opts?.ownError`（TaskCreationDialog 的「在此项目中新建任务」）⇒ 失败文案
+         *   - `opts?.ownError`（TaskCreationDialog 的「在此项目中新建任务」，#1177 §A.3
+         *     改名，现名「新建任务…」）⇒ 失败文案
          *     回浮层里显示，原文在**弹窗的输入框**里而不在 Composer；照抄这条通道会让
          *     用户在对话输入框里看到一段凭空冒出来的任务文本。 */
         started.catch((e: unknown) => {
@@ -2069,6 +2084,22 @@ export function useSession() {
     [],
   );
 
+  /** #1193：**显式**退出 plan 档（run 致命异常且计划从未生成时的恢复路径）。
+   *
+   *  服务端刻意不自动回滚（fail-closed），恢复只能由用户发起——本函数是那个
+   *  动作的唯一入口。成功 = `workflow/mode-changed`（normal）已 durable 落盘
+   *  → 就地重读事件重投影（档位真相在事件流，不用回执写本地状态，同
+   *  `changePermission` 的约定）→ 横幅随投影自行消失（新的 mode-changed 标记
+   *  取代失败标记，见 `deriveRunFailedBeforePlan`），无需在此清状态。
+   *  失败向上抛：横幅就地展示错误、保持在场，不静默吞。 */
+  const exitPlanMode = useCallback(
+    async (sessionId: string) => {
+      await changeWorkflowMode(sessionId, 'normal');
+      reloadConversation(sessionId);
+    },
+    [reloadConversation],
+  );
+
   /** T7 #137：从历史用户消息 seq 派生 child session（POST /api/sessions/{id}/forks）。
    * - 锚点消息本身不进 child seed
    * - child 继承父会话当前模型
@@ -2224,6 +2255,21 @@ export function useSession() {
     [],
   );
 
+  /** #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode（fail-closed），
+   *  会话停在 plan 档（只读、无计划），写工具全被拦。非 null 时主区渲染带
+   *  「退出 plan 模式」动作的错误横幅。
+   *
+   *  **投影派生，不另存状态**（不变量 #22）：live 帧、WS 快照、刷新后的
+   *  GET /events 走的是同一份 `conversation.events`，判定规则单点在
+   *  `deriveRunFailedBeforePlan`（最新生命周期标记 = 该 error 事件）。因此迟到
+   *  接流（审查 F2）与刷新/切回（F3）下横幅都在场；用户退出 plan 或重试成功后
+   *  自动消失（新的 mode-changed / run/started 取代该标记）。 */
+  const runFailedBeforePlan = useMemo(() => {
+    if (!conversation) return null;
+    const derived = deriveRunFailedBeforePlan(conversation.events);
+    return derived ? { sessionId: conversation.session_id, ...derived } : null;
+  }, [conversation]);
+
   return {
     sessions,
     selectedId,
@@ -2232,6 +2278,7 @@ export function useSession() {
     streaming,
     reconnecting,
     error,
+    runFailedBeforePlan,
     sessionsError,
     titlesById,
     recoverState,
@@ -2248,6 +2295,7 @@ export function useSession() {
     refreshSessions,
     changeModel,
     changePermission,
+    exitPlanMode,
     reloadConversation,
     fork,
     sendSteer,

@@ -186,6 +186,38 @@ def test_second_call_while_compaction_in_flight_is_409(tmp_path):
     assert _events(client, sid) == before, "压缩进行中拒绝必须零写入"
 
 
+def test_no_early_turns_is_409_with_machine_readable_reason(tmp_path):
+    """#1197 项 3：无可压缩早期轮 → 409 `{reason: "no_early_turns"}`，零写入。
+
+    三态契约（压缩中 / 被拒 / 失败）要求"没得压"是**被拒**而不是失败：这条路径
+    此前没有 HTTP 接线，`NoCompactableEarlyTurn` 逃出端点的 except 元组落到 500
+    "Internal Server Error"——前端只能把它当服务端 bug，看不出"没有可压缩的早期
+    内容"。`reason` 是机器可读字段（#1195 据此与"摘要校验失败"区分），不能只靠
+    detail 文案。
+    """
+    client = TestClient(
+        create_app(
+            Settings(
+                _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            ),
+            enable_cors=False,
+        ),
+        raise_server_exceptions=False,
+    )
+    store = client.app.state.agent.store
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = _events(client, session.session_id)
+
+    resp = _post(client, session.session_id)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason"] == "no_early_turns", detail
+    assert detail["message"], "人可读文案仍须在（detail.message）"
+    assert _events(client, session.session_id) == before, "被拒必须零写入"
+
+
 # ── 写后复核失败：500 fail-closed（不谎报"未改动"）（F2 #635）─────────
 
 

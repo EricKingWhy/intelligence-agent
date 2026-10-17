@@ -43,6 +43,12 @@ test('#864：黄金夹具窗口化折叠 + 悬浮弹出 + 点击固定 + 互斥'
   const list = page.locator('.plan-list');
   await expect(list).toBeVisible();
   await expect(list).toContainText('进程 17 项 · 已完成 11 项');
+  const panelToggle = page.locator('.plan-list-summary-toggle');
+  await expect(panelToggle).toHaveAttribute('aria-expanded', 'false');
+  await panelToggle.click();
+  await expect(panelToggle).toHaveAttribute('aria-expanded', 'true');
+  const completedText = list.locator('.plan-list-item-done .plan-list-text').first();
+  await expect(completedText).toHaveCSS('text-decoration-line', 'none');
 
   const before = page.locator('.plan-list-fold-before .plan-list-fold-toggle');
   const after = page.locator('.plan-list-fold-after .plan-list-fold-toggle');
@@ -85,4 +91,47 @@ test('#864：黄金夹具窗口化折叠 + 悬浮弹出 + 点击固定 + 互斥'
   await expect(before).toHaveAttribute('aria-expanded', 'false');
   await page.keyboard.press('Enter');
   await expect(before).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('#1184 progress panel stays in layout without covering messages or composer', async ({ page }) => {
+  await routeApi(page, { sessions: [sessionRow(SID)], events });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+
+  const toggle = page.locator('.plan-list-summary-toggle');
+  const details = page.locator('.plan-list-details');
+  const scroll = page.locator('.conversation-scroll');
+  const composer = page.locator('.composer');
+
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toContainText('✓ 本次运行结束 11/17');
+
+    const stripBox = await toggle.boundingBox();
+    const collapsedScroll = await scroll.boundingBox();
+    const collapsedComposer = await composer.boundingBox();
+    expect(stripBox).not.toBeNull();
+    expect(stripBox!.height).toBeLessThanOrEqual(30);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const detailsBox = await details.boundingBox();
+    const expandedScroll = await scroll.boundingBox();
+    const expandedComposer = await composer.boundingBox();
+    expect(detailsBox).not.toBeNull();
+    expect(detailsBox!.height).toBeLessThanOrEqual(viewport.height * 0.32 + 1);
+    expect(expandedScroll!.y).toBeGreaterThanOrEqual(detailsBox!.y + detailsBox!.height - 1);
+    expect(expandedScroll!.y + expandedScroll!.height).toBeLessThanOrEqual(expandedComposer!.y + 1);
+    expect(expandedScroll!.y).toBeGreaterThan(collapsedScroll!.y);
+    expect(expandedScroll!.height).toBeLessThan(collapsedScroll!.height);
+    expect(expandedComposer!.y).toBeCloseTo(collapsedComposer!.y, 0);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  }
 });

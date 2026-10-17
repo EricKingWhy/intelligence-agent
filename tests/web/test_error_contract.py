@@ -50,6 +50,7 @@ def _client(tmp_path: Path, **client_kwargs) -> TestClient:
         ("get", "/api/sessions/{sid}/events"),
         ("post", "/api/sessions/{sid}/archive"),
         ("get", "/api/sessions/{sid}/lineage"),
+        ("get", "/api/sessions/{sid}/delegations"),
     ],
 )
 def test_oversized_session_id_is_422_not_500_or_404(

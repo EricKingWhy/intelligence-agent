@@ -17,16 +17,21 @@ import type { CSSProperties } from 'react';
 import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
+import { useDelegations } from './hooks/useDelegations';
+import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
+import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
+import { ContextWindowPanel } from './components/ContextWindowPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { ContextFullDialog } from './components/ContextFullDialog';
 import { StuckPausedPanel } from './components/StuckPausedPanel';
 import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
@@ -35,6 +40,7 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
 import { TaskReviewPanel } from './components/TaskReviewPanel';
+import { changedFiles } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
@@ -53,7 +59,7 @@ import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { adjudicationHeadline } from './lib/recovery';
 import { AdjudicationTechDetail } from './components/AdjudicationTechDetail';
 import { describeOwnership } from './lib/ownership';
-import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
+import { ceilingDraftValue, CONTEXT_TRIGGER_DIMENSION, defaultResumeDraft, resumeRequestTarget, PAUSE_REASON_STUCK} from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import { loadImageLimits } from './lib/attachments';
 import {
@@ -124,6 +130,7 @@ export default function App() {
     streaming,
     reconnecting,
     error,
+    runFailedBeforePlan,
     sessionsError,
     titlesById,
     recoverState,
@@ -140,6 +147,7 @@ export default function App() {
     refreshSessions,
     changeModel,
     changePermission,
+    exitPlanMode,
     reloadConversation,
     fork,
     sendSteer,
@@ -281,6 +289,22 @@ export default function App() {
      本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
      `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
   const sessionId = conversation?.session_id;
+  const hasSelectedConversation = conversation?.session_id === selectedId;
+  const reviewEvents = hasSelectedConversation ? conversation.events : [];
+  const reviewEventsVersion = hasSelectedConversation ? conversation.eventsVersion : 0;
+  const changes = useMemo(
+    () => conversation?.session_id === selectedId
+      ? changedFiles(tools)
+      : { files: [], unattributed: 0 },
+    [conversation?.session_id, selectedId, tools],
+  );
+  const changedFileCount = changes.files.length;
+  const workspaceTabs = useMemo(
+    () => tabs.map((tab) => (tab.key === 'changes' && changedFileCount > 0
+      ? { ...tab, count: changedFileCount }
+      : tab)),
+    [tabs, changedFileCount],
+  );
 
   // ── #1028：归属 chip 的数据源 ──
   // 当前会话：项目名来自后端 `SessionSummary.workspace`（成员资格真相），cwd 来自
@@ -361,6 +385,9 @@ export default function App() {
 
   // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
   const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
+  // #1197 项 5B：上下文窗口挡位选择器（open 的 sid；null = 关闭）。同因在 Esc
+  // 中断 effect 之前声明。
+  const [contextWindowOpen, setContextWindowOpen] = useState<string | null>(null);
   // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
   // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
   const [taskReviewOpen, setTaskReviewOpen] = useState(false);
@@ -376,19 +403,28 @@ export default function App() {
   // 终审 P1 修复：context-usage 看板是**非 Radix** 的 role="dialog"（无焦点陷阱，
   // 焦点通常还留在 body/composer 上），closest 会不命中——不挡的话 Esc 关看板
   // 会同时打断在途 run（两个 handler 都在 window 上，App 的先注册先跑）。
+  // #1195 复审 P1（streaming×Esc）：React 合成 handler（slash 菜单关、排队项就地
+  // 编辑取消）挂在 root 容器、先于 window 监听跑——它们对 Esc **只 preventDefault
+  // 不 stopPropagation**，事件仍会冒泡到这里。`defaultPrevented` 守卫把"已有更近的
+  // handler 认领了这个 Esc"作为统一信号：菜单/编辑框只关自己，在途 run 不被连带
+  // cancel（e2e：composer-stream-actions.spec.ts 的 streaming×Esc 组合用例）。
   useEffect(() => {
     if (!streaming) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      // #1195 复审 P1：更近的合成 handler（slash 菜单、排队项编辑框）已认领的
+      // Esc 不再打断在途 run——cancelStream 只吃"没人要"的 Esc。
+      if (e.defaultPrevented) return;
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
+      if (contextWindowOpen !== null) return; // 挡位选择器同因（非 Radix，closest 不命中）
       if (taskReviewOpen) return; // #353：审阅浮层在场，Esc 归浮层（非 Radix，closest 不命中）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream, contextUsageOpen, taskReviewOpen]);
+  }, [streaming, cancelStream, contextUsageOpen, contextWindowOpen, taskReviewOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -549,6 +585,17 @@ export default function App() {
     // 「新建会话」的意图就是"我要说点什么"，所以这一跳是意图本身，不是补偿动画；
     // 能力收窄时 resolveActiveTab 兜底，不会切到一个不存在的面。
     setSelectedSurface('chat');
+    // #1177 §A：直达的意义是"进入即可打字"——把焦点交给 composer 输入框。侧栏「+」、
+    // 空项目 ghost 与项目菜单「新建会话」共用本入口，三处都落到同一个输入框（有意统一）。
+    //
+    // 必须**推迟到菜单关闭之后**：从项目菜单点「新建会话」时本回调在菜单 `onSelect`
+    // 里同步触发，那一刻 Radix 的 DropdownMenu 还挂载着、焦点陷阱仍在 ⇒ 同步
+    // `focus()` 会被陷阱当场拽回菜单；菜单随即关闭、被聚焦的菜单项卸载，焦点就落到
+    // body。交接之所以**确定成立**，靠的是 SessionList 的 `suppressMenuAutoFocus`：
+    // 它在 `onCloseAutoFocus` 里 `preventDefault`，整体取消了 Radix 默认的 trigger
+    // 归还 ⇒ `requestAnimationFrame` 只需落在 composer 挂载之后，与归还（`setTimeout(0)`）
+    // 的相对顺序无关紧要；删掉 `suppressMenuAutoFocus` 则归还重新生效、交接就会回归。
+    requestAnimationFrame(() => document.getElementById('composer-input')?.focus());
     // #183 AC4：未钉住时**离开一个正在看的会话** = 收起面板（钉住的用途正是
     // "切换会话时它还开着"）。首次进入（原本没有会话）不算离开——那会把"点开第一个
     // 会话"也变成"面板自己关掉"。
@@ -566,6 +613,32 @@ export default function App() {
     focusRun();
     if (!panel.pinned && leaving) setInspectorOpen(false);
   }, [selectSession, focusRun, panel.pinned, selectedId]);
+
+  // ── #1256 子智能体可见性：roster（投影 = 后端父事件流派生）+ 右侧分栏 ──
+  // roster 数据来自后端只读端点（自身从父会话事件流派生）；父流委派事件到达时重拉。
+  // UI 不建第二套真相（不变量 #22）。
+  const delegations = useDelegations(selectedId, conversation);
+  // 分栏是**独立选择态**——只记录"看哪个子会话"，不改变主会话当前路由。
+  const [splitChild, setSplitChild] = useState<SplitChild | null>(null);
+  // 换父会话 ⇒ 关分栏（它属于某个父会话的上下文：拿 A 的子会话站在 B 里 = 跨会话第二真相）。
+  useEffect(() => {
+    setSplitChild(null);
+  }, [selectedId]);
+  const splitChildConversation = useChildConversation(splitChild?.childSessionId ?? null);
+  /** 行主体 → 主视图打开（现有 handleSelect 语义；开分栏时先收分栏，
+   *  否则左列（父会话）会被换成同一个子会话）。 */
+  const handleOpenChildMain = useCallback(
+    (childId: string) => {
+      setSplitChild(null);
+      handleSelect(childId);
+    },
+    [handleSelect],
+  );
+  /** chevron → 右侧分栏打开（父会话保持不动）。 */
+  const handleOpenChildSplit = useCallback(
+    (child: SplitChild) => setSplitChild(child),
+    [],
+  );
 
   useEffect(() => {
     void fetchModels();
@@ -668,6 +741,31 @@ export default function App() {
       reloadConversation(selectedId);
     },
     [selectedId, changePermission, reloadConversation],
+  );
+
+  // ── #1193：plan-stuck 横幅的「退出 plan 模式」动作 ──
+  /** 动作状态（横幅内联展示 pending / 失败原因，同 recoverState 的既有形状）。
+   *  成功路径由投影收口：退出写入的 `workflow/mode-changed` 取代失败标记，
+   *  hook 重读事件后 `runFailedBeforePlan` 派生为 null → 横幅整体卸载；
+   *  失败保持横幅在场并就地回显——不静默吞，也不自动重试。
+   *  `sessionId` 随状态一起记：横幅卸载后状态仍在（App 常驻），渲染端按会话
+   *  配对，失败原因不会串到另一个会话的横幅上。 */
+  const [exitPlanState, setExitPlanState] = useState<{
+    status: 'idle' | 'pending' | 'error';
+    sessionId?: string;
+    message?: string;
+  }>({ status: 'idle' });
+  const handleExitPlanMode = useCallback(
+    async (sessionId: string) => {
+      setExitPlanState({ status: 'pending', sessionId });
+      try {
+        await exitPlanMode(sessionId);
+        setExitPlanState({ status: 'idle' });
+      } catch (e) {
+        setExitPlanState({ status: 'error', sessionId, message: (e as Error).message });
+      }
+    },
+    [exitPlanMode],
   );
 
   // ── #1015：新建态懒建会话 ──
@@ -824,7 +922,7 @@ export default function App() {
     [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
-  /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
+  /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
    *  三档自主度 + 模型 + 运行位置），走 `submitTask` 的既有 SSE 接线创建并启动。
    *  失败原因返回给确认面在浮层里就地显示（AC12），不打全局横幅。
@@ -1132,6 +1230,25 @@ export default function App() {
   // live 流，那一小段窗口里 `run_paused` 可能还没被 run/resumed 清掉——那时露出
   // 一个"恢复"按钮等于给用户一个重复提交 CAS 的机会。
   const canResumePaused = paused !== null && selectedId !== null && !streaming;
+  /** #1197 项 2：「结束」只收起这一屏——**不是**终止 run。
+   *  暂停 run 的 task 已经 done，`POST /cancel` 只会拿到 200 `no_active_run`
+   *  （`runmanager.get_active` 对 terminal/paused 返回 None），后端也没有 abandon /
+   *  dismiss 端点；假装它能结束什么就是在骗用户。按 run_id 记账：下一个 run 的暂停
+   *  不该继承上一次的"已收起"。 */
+  const [contextFullDismissedRunId, setContextFullDismissedRunId] = useState<string | null>(null);
+  const handleContextFullEndRun = useCallback(() => {
+    if (paused !== null) setContextFullDismissedRunId(paused.run_id);
+  }, [paused]);
+  /** #1197 项 2：「换模型」打开模型选择器。
+   *  `ModelPicker` 的开态是它自己的内部 state（`ModelPicker.tsx:77`），App 无法命令式
+   *  打开，所以走 DOM 级触发——照抄 `focus-composer` 那条先例。Radix 的菜单触发器
+   *  开在 **pointerdown** 上（`@radix-ui/react-dropdown-menu` 的 Trigger 只 compose
+   *  onPointerDown，没有 onClick），派发 click 是打不开的，必须发 pointerdown。 */
+  const handleContextFullChangeModel = useCallback(() => {
+    document
+      .querySelector('.model-picker')
+      ?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+  }, []);
 
   const constraintDialogOpen =
     constraintRequest !== null &&
@@ -1442,7 +1559,15 @@ export default function App() {
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
+        onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
+        rosterSlot={
+          <SubagentRoster
+            delegations={delegations}
+            onOpenSession={handleOpenChildMain}
+            onOpenSplit={handleOpenChildSplit}
+          />
+        }
       />
 
       <main
@@ -1484,7 +1609,10 @@ export default function App() {
           onSetArchived={handleSetArchived}
         />
 
-        <section className="app-workspace">
+        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+          {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
+              父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
+          <div className="workspace-main">
           {authRequired && (
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
@@ -1502,6 +1630,30 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
+              （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
+              原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
+              只属于发起它的那个会话，切走自然不再渲染。 */}
+          {runFailedBeforePlan && runFailedBeforePlan.sessionId === selectedId && (
+            <div className="app-error app-error-action" role="alert">
+              <span>
+                {runFailedBeforePlan.message}
+                {runFailedBeforePlan.hint ? ` ${runFailedBeforePlan.hint}` : ''}
+              </span>
+              <button
+                className="recover-btn"
+                onClick={() => void handleExitPlanMode(runFailedBeforePlan.sessionId)}
+                disabled={exitPlanState.status === 'pending'}
+                title="显式退出 plan 档（只读）——退出后写操作工具恢复可用"
+              >
+                {exitPlanState.status === 'pending' ? '退出中…' : '退出 plan 模式'}
+              </button>
+              {exitPlanState.status === 'error' &&
+                exitPlanState.sessionId === runFailedBeforePlan.sessionId && (
+                  <span className="recover-error">{exitPlanState.message}</span>
+                )}
+            </div>
+          )}
           {/* #367 P3：worktree 自动创建的一次性提示（信息级，可关闭）。 */}
           {worktreeNotice && (
             <div className="app-notice" role="status">
@@ -1633,8 +1785,20 @@ export default function App() {
               （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
               输入通道照常可用。 */}
+          {/* #1197 项 2：上下文满（trigger_dimension=max_context_tokens）时**不弹技术屏**。
+              判别用 `resumeTarget.kind === 'context'` 的等价判据（`#1026` 裁决 A），
+              而**不是** `reason`——context 暂停的 reason 也是 `budget_exhausted`，
+              与普通预算暂停共用同一个字符串；按 reason 分支会把两者混为一谈。
+              这一支必须在 `PAUSE_REASON_STUCK` 之前判（stuck 的 reason 不同，本不冲突，
+              但次序写反时 context 会被 stuck 分支漏掉、掉进 PausedPanel 技术屏）。 */}
           {canResumePaused && paused && paused.reason !== 'user_input' && (
-            paused.reason === PAUSE_REASON_STUCK ? (
+            paused.trigger_dimension === CONTEXT_TRIGGER_DIMENSION ? (
+              <ContextFullDialog
+                open={contextFullDismissedRunId !== paused.run_id}
+                onEndRun={handleContextFullEndRun}
+                onChangeModel={handleContextFullChangeModel}
+              />
+            ) : paused.reason === PAUSE_REASON_STUCK ? (
               <StuckPausedPanel paused={paused} />
             ) : (
               <PausedPanel
@@ -1645,14 +1809,6 @@ export default function App() {
                 resuming={resumingRunId === paused.run_id}
               />
             )
-          )}
-          {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
-          {selectedId !== null && (
-            <div className="task-review-entry">
-              <button className="btn-ghost" onClick={() => setTaskReviewOpen(true)}>
-                任务审阅
-              </button>
-            </div>
           )}
           {constraintRequest && selectedId !== null && !loadingHistory && (
             <ConstraintResolutionDialog
@@ -1672,7 +1828,7 @@ export default function App() {
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
               （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
               `lib/capabilities.ts` 的登记表给出（声明 `terminal`、渲染成「输出」）。 */}
-          <WorkspaceTabs tabs={tabs} active={activeTab} onSelect={setSelectedSurface} />
+          <WorkspaceTabs tabs={workspaceTabs} active={activeTab} onSelect={setSelectedSurface} />
           {/* **每个可见面各有一个 panel**，非激活的用 `hidden` 藏起来（不卸载——切回来
               时滚动位置与内部状态还在，与 Inspector "折叠 ≠ 卸载"同一取舍）。
               为什么不渲染"单个会换 id 的 panel"：那样每个 tab 的 `aria-controls` 里
@@ -1730,6 +1886,14 @@ export default function App() {
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
                     failedDraft={failedDraft}
+                    /* #1264：后端真有压缩在途（投影自 `compaction/start`..
+                       `compaction/end`）——自动路径的循环内再压与手动 `/compact`
+                       共用同一个面。只读投影，不推断。 */
+                    compactionInProgress={
+                      conversation !== null && conversation.session_id === selectedId
+                        ? conversation.compaction_in_progress
+                        : false
+                    }
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
@@ -1786,10 +1950,30 @@ export default function App() {
               {tab.key === 'changes' ? (
                 /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
                    数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
-                <ChangesPanel tools={tools} sessionId={sessionId} />
+                <ChangesPanel
+                  files={changes.files}
+                  unattributed={changes.unattributed}
+                  sessionId={sessionId}
+                  events={reviewEvents}
+                  eventsVersion={reviewEventsVersion}
+                  streaming={streaming}
+                  onOpenTaskReview={() => setTaskReviewOpen(true)}
+                />
               ) : null}
             </div>
           ))}
+          </div>
+          {splitChild && (
+            <SubagentSplitPane
+              child={splitChild}
+              conversation={splitChildConversation.conversation}
+              error={splitChildConversation.error}
+              density={density}
+              disclosure={disclosure}
+              reasoningDisclosure={reasoningDisclosure}
+              onClose={() => setSplitChild(null)}
+            />
+          )}
         </section>
 
         <StepDetail
@@ -1841,6 +2025,12 @@ export default function App() {
         sessionId={contextUsageOpen ?? ''}
         open={contextUsageOpen !== null}
         onClose={() => setContextUsageOpen(null)}
+      />
+      {/* #1197 项 5B：上下文窗口挡位选择器（TopBar Sliders 入口）。 */}
+      <ContextWindowPanel
+        sessionId={contextWindowOpen ?? ''}
+        open={contextWindowOpen !== null}
+        onClose={() => setContextWindowOpen(null)}
       />
       {/* #353 W-09：任务审阅浮层（服务端 Task/Evidence 投影驱动；会话切走即关闭）。 */}
       {taskReviewOpen && selectedId !== null && (

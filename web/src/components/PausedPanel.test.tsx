@@ -314,40 +314,28 @@ describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
   });
 });
 
-// ── #1026：context 维暂停——恢复控件给引导，不给 turns 数字输入（验收 5） ──
+// ── #1197 项 2：context 维暂停**不再**进这个面板（#1026 的旧契约已被取代） ──
+//
+// 历史：#1026 让 PausedPanel 对 context 暂停换掉数字输入、改渲染一段"请手动 /compact
+// 或调大 max_context_tokens"的引导。本项把那条路整个挪走了——App 现在把 context 暂停
+// 路由到 `ContextFullDialog`（一句话 + 换模型/结束，见 `App.contextFullRouting.test.tsx`），
+// PausedPanel 根本不再收到 context 暂停，`isContextPause` 判别与引导块已删除。
+//
+// 这里保留的是一条**反向**钉：那段技术术语引导不许再回到面板上（它正是票面点名要拿掉的
+// "技术屏"）。路由本身在 App 层钉住，组件层只负责"我这边没有 context 分支"。
 
-describe('PausedPanel — context 维暂停（#1026 裁决 A 恢复控件对齐）', () => {
-  function contextPaused(): RunPausedInfo {
-    return paused({
-      reason: 'budget_exhausted',
-      trigger_dimension: 'max_context_tokens',
-      consumed_dimensions: {
-        agent_turns: 5, model_requests: 9, total_tokens: 160_000, cost_usd: null,
-        tool_calls: 4, tool_attempts: 4,
-        tool_calls_by_tool: { read: 2 }, tool_attempts_by_tool: { read: 2 },
-      },
-      run_limits: {
-        max_agent_turns_total: 20,
-        max_model_requests: null,
-        max_total_tokens: null,
-        max_cost_usd: null,
-        deadline_at: null,
-        tool_call_limits: {},
-      },
-    });
-  }
-
-  it('不渲染绝对 ceiling 数字输入（尤其不是 max_agent_turns_total）', () => {
-    const html = render(contextPaused());
-    // 输入框（id 与「绝对 ceiling（<字段名>）」标签形状）都不渲染；其余文案里的
-    // "绝对 ceiling" 字样（reasonLabel / 旧 continuation 文本）不是输入控件。
-    expect(html).not.toContain('pause-resume-ceiling');
-    expect(html).not.toContain('绝对 ceiling（');
+describe('PausedPanel — 不再承担 context 暂停（#1197 项 2 取代 #1026）', () => {
+  it('面板里没有 context 引导文案，也没有 context 专用 class', () => {
+    const html = render(paused());
+    expect(html).not.toContain('pause-panel-context-guidance');
+    // 旧引导的那句"抬任何 ceiling 都改变不了「投影放不进窗口」"不许回来。
+    expect(html).not.toContain('投影放不进窗口');
   });
 
-  it('渲染恢复引导：指向手动压缩 / 调大上下文上限', () => {
-    const html = render(contextPaused());
-    expect(html).toContain('压缩');
-    expect(html).toContain('max_context_tokens');
+  it('PausedPanel 只服务 run 维 / deadline：context 暂停的判别已不在组件内', () => {
+    // 直接渲染一个 context 暂停（真实 App 不会这么做）：面板按普通预算暂停呈现，
+    // 这正是"路由层负责分派"的证据——组件不再试图自己识别 context。
+    const html = render(paused({ reason: 'budget_exhausted', trigger_dimension: 'max_context_tokens' }));
+    expect(html).toContain('pause-resume-ceiling');
   });
 });

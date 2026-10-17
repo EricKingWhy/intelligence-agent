@@ -25,6 +25,7 @@ from agent_harness.context.compactor import (
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, message_cost
+from agent_harness.context.window import effective_context_window
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
@@ -526,6 +527,8 @@ class ContextBuilder:
         # ContextCompactor——校验在 compactor 构造处响亮失败，本层不重复）。
         summary_timeout_seconds: float = 30.0,
         summary_timeout_per_kilotoken_seconds: float = 0.25,
+        summary_timeout_attempt_multiplier: float = 2.0,
+        summary_timeout_max_seconds: float = 300.0,
         summary_chunk_request_ratio: float = 0.5,
         summary_chunk_max_tokens: int = 24_000,
         artifact_store: Any | None = None,
@@ -560,6 +563,10 @@ class ContextBuilder:
         self._summary_timeout_seconds = summary_timeout_seconds
         self._summary_timeout_per_kilotoken_seconds = (
             summary_timeout_per_kilotoken_seconds)
+        # #1279：attempt 放大与上限（原样透传给 compactor）。
+        self._summary_timeout_attempt_multiplier = (
+            summary_timeout_attempt_multiplier)
+        self._summary_timeout_max_seconds = summary_timeout_max_seconds
         self._summary_chunk_request_ratio = summary_chunk_request_ratio
         self._summary_chunk_max_tokens = summary_chunk_max_tokens
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
@@ -588,6 +595,10 @@ class ContextBuilder:
         # 内容寻址 + 不可变仍可安全做 LRU）。
         self._image_payload_cache: dict[str, tuple[str, str]] = {}
         self.max_context_tokens = max_context_tokens
+        # #1197 项 1：构造期收到的**部署级**默认，per-session 派生的回落值。
+        # 与 `self.max_context_tokens` 分列两个字段：后者每次 build 被会话挡位覆盖，
+        # 前者终身不变（否则第一轮改过窗口后，后续轮次的回落会取到被覆盖的值）。
+        self._configured_max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.protected_fact_token_budget = protected_fact_token_budget
@@ -711,6 +722,10 @@ class ContextBuilder:
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
+        # #1197 项 1：每轮从会话事件现派生窗口（per-session 挡位，改后下一轮生效）。
+        # 必须在读 `self.max_context_tokens` 之前——本方法内的自动压缩判定、
+        # `_reproject` 的重投影复核、`_with_providers` 的 provider 剩余预算都读它。
+        self._sync_session_context_window(session)
         # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
         # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
         self._last_pressure_warning_tokens = 0
@@ -949,6 +964,10 @@ class ContextBuilder:
     ) -> CompactionResult | None:
         """压缩 runtime 投影的**唯一实现**（自动路径与手动路径共用，#635 / 不变量 #22）。
 
+        #1197 项 1：进入时同样现派生会话窗口——手动 `/compact` 走的是本方法
+        （经 `SessionService.compact_session_context` → `_compact_context_builder`），
+        不经 `build()`，不在这里同步会让「改了挡位后手动压缩」按旧窗口判定。
+
         T2 (#635)：从 `build()` 抽出"压缩整段"——构造 `ContextCompactor` →
         `compact()` → 失败记录 → bracket 三事件落盘 → 重投影确认 → 硬护栏复核。
         `build()` 阈值命中时调它；`SessionService.compact_session_context`（手动
@@ -978,6 +997,8 @@ class ContextBuilder:
         把这份**自身写入**计入基线——否则"首试失败、重试成功"会被误判成并发改动而
         409。guard 调用点在失败记录已 append **之后**，故计数包含它们。
         """
+        # #1197 项 1：现派生会话窗口（本方法不经 build()，手动路径只走这里）。
+        self._sync_session_context_window(session)
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
         pairs = derive_messages_with_source_ranges(
@@ -1085,6 +1106,10 @@ class ContextBuilder:
             summary_timeout_seconds=self._summary_timeout_seconds,
             summary_timeout_per_kilotoken_seconds=(
                 self._summary_timeout_per_kilotoken_seconds),
+            # #1279：attempt 放大与上限（Settings 透传链终点）。
+            summary_timeout_attempt_multiplier=(
+                self._summary_timeout_attempt_multiplier),
+            summary_timeout_max_seconds=self._summary_timeout_max_seconds,
             summary_chunk_request_ratio=self._summary_chunk_request_ratio,
             summary_chunk_max_tokens=self._summary_chunk_max_tokens,
         )
@@ -1290,7 +1315,8 @@ class ContextBuilder:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
         事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
-        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens /
+        #1279 的 timeout_seconds）；
         `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
 
@@ -1312,6 +1338,9 @@ class ContextBuilder:
                 "duration_ms": failure.duration_ms,
                 "request_token_estimate": failure.request_token_estimate,
                 "request_budget_tokens": failure.request_budget_tokens,
+                # #1279：本次摘要尝试实际使用的墙钟（秒）；attempt=0 诊断没有
+                # 摘要墙钟 ⇒ None（additive 键，不伪造）。
+                "timeout_seconds": failure.timeout_seconds,
                 # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
                 "narrowed": failure.narrowed,
                 # #1041：本轮失败保存的 raw artifact ref（None = 未落盘）。
@@ -1472,6 +1501,29 @@ class ContextBuilder:
             for aid in referenced
             if aid in self._image_payload_cache
         }
+
+    def _sync_session_context_window(self, session: Session) -> None:
+        """按**会话当下挡位**更新本次投影的上下文窗口（#1197 项 1）。
+
+        票面「per-session 独立、会话内下一轮上下文构建即生效」：窗口是会话级配置，
+        可在 run 跑到一半时改，所以每次 `build` / `compact_now` 都从事件流现派生
+        一次。此后投影、自动压缩判定（`build` 内的 `auto_compact_threshold`）、
+        硬护栏（`_reproject` / `compact_now` 的 `hard_guard_threshold` 判定）、
+        `_with_providers` 的剩余预算与透传给 compactor 的预算全部读同一个
+        `self.max_context_tokens`，一次更新即全局同口径。
+
+        为什么放在 builder 内部而不是 runtime 的 `_sync_context_vision` 那样的外部
+        接缝：`build` 是**唯一**的投影入口（runtime 两处调用点 + 手动压缩路径都走
+        它），放在这里天然全覆盖；外部接缝要改 runtime 的 `_drive` 主循环与 closeout
+        两处，且 `_compact_context_builder` 那条腿还得再写一遍。
+
+        ``default`` 取**构造期**收到的部署级默认（`Settings.max_context_tokens` 经
+        `assembly.py` 传入），不是 200K 字面量——否则部署者在 .env 里设的
+        `MAX_CONTEXT_TOKENS` 会被静默忽略（面板显示 500K、实际按 200K 压缩）。
+        """
+        self.max_context_tokens = effective_context_window(
+            session.events, default=self._configured_max_context_tokens,
+        )
 
     def set_supports_vision(self, supports_vision: bool) -> None:
         """更新本次投影的视觉判定（#823 / MM-02 A2：跟随**当前请求模型**）。

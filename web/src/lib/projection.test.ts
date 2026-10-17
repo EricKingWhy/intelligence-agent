@@ -15,6 +15,8 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
+      // #1197 项 5A：压缩进行中 flag 的初值——投影的必填字段，形状断言跟着长。
+      compaction_in_progress: false,
       permission_policy: null, session_permission_mode: null, session_cwd: null,
       events: [], unknown_events: [],
       // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
@@ -1260,13 +1262,17 @@ describe('applyEvent — df4f7d8 新形状', () => {
   //    「词汇表内但前端未接线」那批类型的**既有兜底行为**，使未来接线成为
   //    一次显式决定，而不是悄悄改变。
 
-  it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
+  it('#1197 项 5A 接线后：COMPACTION_START/END 不再落 unknown_events（本条曾钉「未投影」）', () => {
+    // 这两条此前是**显式登记**的「未接线」类型（上面的注册表注释说明其用意：让接线
+    // 成为一次显式决定）。#1197 项 5A 做了那个决定——`compaction/start` 投影成
+    // 进行中 flag（见 projection.compactionProgress.test.ts），
+    // 于是这里反过来钉住新行为：它们必须**不**再进 unknown_events。
     for (const type of [
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
     ]) {
       const s = applyEvent(initConversation('s'), ev({ type }));
-      expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
+      expect(s.unknown_events, `${type} 已接线，不该再落 unknown_events`).toHaveLength(0);
     }
   });
 

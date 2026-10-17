@@ -203,6 +203,11 @@ def test_timeout_formula_scales_with_request_size():
     assert compactor._summary_timeout_for(0) == 30.0
     assert compactor._summary_timeout_for(167_000) == pytest.approx(71.75)
     assert compactor._summary_timeout_for(30_000) == pytest.approx(37.5)
+    # #1279：attempt 缩放必须**从第二次**才开始——attempt=1 与上面逐字相同
+    # （快模型行为不变）；默认可配值不参与首试公式。
+    assert compactor._summary_timeout_for(0, 1) == 30.0
+    assert compactor._summary_timeout_for(167_000, 1) == pytest.approx(71.75)
+    assert compactor._summary_timeout_for(30_000, 1) == pytest.approx(37.5)
     # 消融候选②（固定大墙钟）= slope 0 的退化形态，配置面可达。
     fixed = ContextCompactor(
         object(), summary_timeout_seconds=90.0,

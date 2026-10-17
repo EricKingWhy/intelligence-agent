@@ -229,6 +229,32 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+/** #1256：某父会话的子智能体 roster 行（= 后端 `GET /delegations` 的响应元素）。
+ *
+ *  形状与后端 `web/delegations.py` 契约逐字一致；`status` 值域与
+ *  `Delegation['status']`（types.ts）同四态同语义（与 DelegationNode 的状态色同源）。 */
+export interface DelegationEntry {
+  child_session_id: string;
+  target: string;
+  task: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  started_at: string | null;
+  completed_at: string | null;
+  summary?: string;
+  /** 窗口占用（最近一次调用输入规模 / 精确分类，依 usage_state）。 */
+  used_tokens: number;
+  /** 诚实口径：ok=精确分类；usage_only=事件流下界（估算）；no_data=无数据。 */
+  usage_state: 'ok' | 'usage_only' | 'no_data';
+}
+
+/** #1256：读父会话的委派记录（roster 数据源）。只读；404 = 父会话不存在。 */
+export async function getSessionDelegations(sessionId: string): Promise<DelegationEntry[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/delegations`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+  if (!res.ok) throw new Error(`get delegations ${res.status}`);
+  return res.json();
+}
+
 export interface BudgetPayload {
   /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。
    *
@@ -630,7 +656,7 @@ export function worktreePathFromResponse(res: Response): string | null {
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
  *
- *  单独开这个缝的原因：「在此项目中新建任务」确认面（#169 AC12）要把后端 detail
+ *  单独开这个缝的原因：「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把后端 detail
  *  **原样**留在浮层里，而 useSession 的失败通道是给用户看的一句话——它还带着
  *  "422 = 未知模型"的旧语义（App 据那句话刷新模型目录）。两者混在一起会让
  *  「cwd 目录不存在」被显示成「模型不可用」。由调用方自己读，两条语义各自成立。 */
@@ -1592,6 +1618,25 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+/** 会话级命令 JSON POST（#1195 slash 命令：`/workflow-mode`、`/task/definition`）。
+ *
+ *  鉴权注入、BASE 前缀、401 处理与错误映射**复用 apiFetch/sessionError 同一条
+ *  链路**——审查 B-S-5：不在调用侧复刻第二份 Bearer 拼装（两处一漂移，401 语义
+ *  就分叉）。非 2xx 抛 `SessionError`（message = 后端 detail，status 供调用方
+ *  按码分流，如 task/definition 的 409 = 已定义）。 */
+export async function postSessionCommand(
+  sessionId: string,
+  subPath: string,
+  body: unknown,
+): Promise<void> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}${subPath}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await sessionError(res, '命令执行失败');
+}
+
 // ── 会话级约束管理面板（#1190 / #1176 Phase 1）──
 
 /** 受保护事实状态值域（钉死三值；`pending_approval` 是请求级状态，永不进入此值域）。 */
@@ -2346,6 +2391,41 @@ export async function changeSessionPermission(
   return res.json();
 }
 
+// ── 工作流档切换（#526 B1 端点 / #1193 消费）──
+
+/** POST /api/sessions/{id}/workflow-mode 的成功响应。
+ *  `mode` 是**动作后**的真值（幂等：重复切同档仍 200）。 */
+export interface WorkflowModeChangeResult {
+  id: string;
+  mode: string;
+}
+
+/** 切换会话工作流档（normal / plan）。
+ *
+ * #1193 的消费点：run 致命异常且计划从未生成时，会话停在 plan 档（只读）——
+ * 服务端**刻意不自动回滚**（权限只收紧不自动放宽，fail-closed），恢复路径
+ * 是用户经本函数**显式**退出 plan。与 `changeSessionPermission` 同约定：
+ * 不用回执写本地状态——档位的唯一真相是事件流投影；调用方成功后就地重读
+ * 事件（`reloadConversation`）。
+ *
+ * 错误码（`detail` 原样带出）：404 = session 不存在；422 = id 形态非法 / mode
+ * 非法；503 = 存储写锁耗尽。 */
+export async function changeWorkflowMode(
+  sessionId: string,
+  mode: 'normal' | 'plan',
+): Promise<WorkflowModeChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/workflow-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `change workflow mode ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Fork（T7 #137，PRD §2.4）──
 
 /** POST /api/sessions/{id}/forks 的响应体。 */
@@ -2769,6 +2849,64 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+/** 上下文窗口挡位设置（`GET/PATCH /api/sessions/{id}/context-settings`，后端
+ *  `web/app.py:3613/3634`）。**形状是后端 DTO 原样透传**——挡位清单以后端为准，
+ *  前端不硬编码副本：`tiers` 就是权威列表，选择器只按它渲染。
+ *
+ *  与 `/context-usage` 的一处**口径差异**（调用方必须知道）：
+ *  - `thresholds` 在这里是**绝对 token 数**（后端 `int(window * ratio)`），
+ *    而 `/context-usage` 的 `thresholds` 是 0.70/0.85 的**比例**。同名不同义。
+ *
+ *  两处的 `window` / `window_tokens` 曾经口径不同（后者是部署默认），#1249
+ *  （`a37f6e35`）已把 `/context-usage` 改为同样跟随 per-session 挡位：两侧现在
+ *  都读 `effective_context_window`，改挡位两边一起变。 */
+export interface ContextSettings {
+  session_id: string;
+  /** 本会话生效窗口（token）。 */
+  context_window: number;
+  /** 部署默认挡位——「恢复默认」的锚点（不硬编码 200_000）。 */
+  configured_default: number;
+  /** 合法挡位清单（后端 `CONTEXT_WINDOW_TIERS`），选择器的唯一数据源。 */
+  tiers: number[];
+  /** **绝对 token 数**（不是比例，见上）。 */
+  thresholds: { auto_compact: number; hard_guard: number };
+}
+
+/** GET /api/sessions/{id}/context-settings —— 读本会话窗口挡位（只读，无副作用）。 */
+export async function getContextSettings(sessionId: string): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`);
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `context-settings ${res.status}`);
+  }
+  return res.json();
+}
+
+/** PATCH /api/sessions/{id}/context-settings —— 改挡位，回执是**生效后**的完整设置。
+ *
+ *  状态码语义（照后端路由 docstring，前端不合并它们）：
+ *    200 幂等（同值再写一次仍 200，回执不变）
+ *    404 会话不存在
+ *    422 挡位非法（**零写入**——调用方据此说"没改"，不说"改了一半"）
+ *    503 存储忙（StorageBusyError）
+ *  一律走 `SessionError`（带 status）；文案直接用后端 detail——它已写清合法取值，
+ *  前端再编一句只会更差。 */
+export async function setContextWindow(
+  sessionId: string,
+  contextWindow: number,
+): Promise<ContextSettings> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context_window: contextWindow }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `set context window ${res.status}`);
+  }
+  return res.json();
+}
+
 /** 手动压缩回执（后端 `POST /api/sessions/{id}/context/compact`，`#635`）。
  *
  *  形状是服务层 DTO 的字段透传。`bracket_id` 指向新落的 bracket；低水位
@@ -2795,7 +2933,9 @@ const COMPACT_TIMEOUT_MS = 180_000;
  *
  *  错误矩阵（后端 `web/app.py::compact_session_context`）：
  *    404 —— 没有这个会话；
- *    409 —— 在途 run 或该会话已有压缩在途（`detail` 原样上抛，不自己编文案）；
+ *    409 —— 在途 run / 该会话已有压缩在途（`detail` 原样上抛，不自己编文案）/
+ *           无可压缩的早期内容（#1197 项 3 的"被拒"态，`detail` 是
+ *           `{message, reason: 'no_early_turns'}` 对象——`reason` 是机器可读字段）；
  *    422 —— id 形态非法 / 非法 `?model=`（`detail` 原样上抛）；
  *    403 —— 非本机来源（宿主侧管理动作只接受本机来源，ADR-0025 D1）。
  *  超时 → 明确的 Error（前端不再无限等待）。 */

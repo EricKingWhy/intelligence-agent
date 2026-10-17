@@ -89,6 +89,7 @@ from agent_harness.agent.run_budget import (
     validate_resume,
 )
 from agent_harness.assembly import build_runtime
+from agent_harness.context.window import append_context_window_change
 from agent_harness.logging import log_event
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -155,6 +156,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     ModelDoesNotSupportImages,
+    NoCompactableEarlyTurn,
     PendingApprovalConflict,
     ProjectKeyUnavailable,
     ProtectedFactNotFound,
@@ -1648,6 +1650,12 @@ class SessionService:
         auto_approve: bool = False,
         amend: AmendOptions | None = None,
         launch: bool = True,
+        # #1193：创建时声明的初始工作流档（plan 档 = 只读计划模式）。**在
+        # RunManager.launch 之前**落盘——mode 是 run 的初始条件，不是事后
+        # 补丁；否则 run task 可能先于该事件到达工具执行点（先 launch 后切
+        # mode 的竞态，写工具在 NORMAL 档下放行）。None = 不写（既有行为
+        # 逐字不变）。
+        workflow_mode: WorkflowMode | None = None,
         remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
@@ -1918,6 +1926,7 @@ class SessionService:
             interactive=interactive,
             approval_callback=approval_callback,
             launch=launch,
+            workflow_mode=workflow_mode,
             fuse=fuse,
             launch_budget=launch_budget,
             remember_as_procedural_rule=remember_as_procedural_rule,
@@ -1936,6 +1945,7 @@ class SessionService:
         interactive: bool,
         approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
         launch: bool,
+        workflow_mode: WorkflowMode | None,
         fuse: LocalFuse,
         launch_budget: LaunchRunBudget,
         remember_as_procedural_rule: bool,
@@ -1950,6 +1960,14 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
+
+            # #1193：初始工作流档在**任何 launch 之前**落盘——plan 档是 run
+            # 的初始条件（工具门禁每次调用现派生 effective_workflow_mode）。
+            # 此前该写入由调用方在 create_and_launch 返回后补做，run task 可
+            # 先于它到达工具执行点（先 launch 后切 mode 的竞态）。launch=False
+            # 的只建会话路径同样落盘（调用方声明了初始档就必须是事实）。
+            if workflow_mode is not None:
+                append_workflow_mode_change(session, workflow_mode)
 
             # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
             # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
@@ -4262,6 +4280,20 @@ class SessionService:
                     dry_run=True,
                 )
 
+            # ⑥' #1197 项 3：无可压缩早期轮 ⇒ **类型化拒绝**（409
+            # `{reason: "no_early_turns"}`），不再吞成 200 + `compacted_turn_count=0`
+            # 的"水位过低"。判据与 compactor 的 `early` 窗口**同源**
+            # （`compactable_early_window`，经 `_has_compactable_early_turn`），
+            # 且判定在任何 LLM 装配 / 任何写入之前——被拒路径**零写入**。
+            #
+            # 放在 dry_run 之后：dry_run 是**预览**（自己的 DTO 契约，"将压缩 / 不
+            # 会压缩"），不是用户的压缩动作，不适用"被拒"语义。
+            if not self._has_compactable_early_turn(session):
+                raise NoCompactableEarlyTurn(
+                    f"session '{session_id}' has no compactable early turn; "
+                    "there is nothing to summarize yet"
+                )
+
             # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
             from agent_harness.context.compactor import (
                 CompactionPostWriteError,
@@ -4517,19 +4549,31 @@ class SessionService:
 
     @staticmethod
     def _has_compactable_early_turn(session: Session) -> bool:
-        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+        """dry_run 预览：是否存在可压缩的早期轮（与 compactor 闸门**一致**的判据）。
 
         前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
         `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
         函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
 
-        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
-        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        判据与 `compact` 的 `compacted_turn_count` 计算式**完全一致**：early 窗口内
+        非摘要 `HumanMessage` 数 > 0 才算可压（P2-1 #1197 修回——旧实现只判窗口
+        非空，early 恰好只含上一轮压缩摘要 HumanMessage 时会误判为可压，真实管线
+        以 0 计数走 below-floor 200 分支，绕过 409 `NoCompactableEarlyTurn`）。
         """
-        from agent_harness.context.compactor import compactable_early_window
+        from langchain_core.messages import HumanMessage
 
-        prefix_end, cut = compactable_early_window(session.derive_messages())
-        return cut > prefix_end
+        from agent_harness.context.compactor import (
+            _is_compaction_summary,
+            compactable_early_window,
+        )
+
+        messages = session.derive_messages()
+        prefix_end, cut = compactable_early_window(messages)
+        return any(
+            isinstance(message, HumanMessage)
+            and not _is_compaction_summary(message)
+            for message in messages[prefix_end:cut]
+        )
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
@@ -6410,13 +6454,17 @@ class SessionService:
         return True, meta_tcid == record.tool_call_id, False
 
     async def fork(
-        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
+        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False,
+        sandbox_backend: str | None = None,
     ) -> str:
         """从 ``from_seq``（用户消息 seq）派生 child session，返回其 id（PRD §2.4）。
 
         复用 ``fork.py``，不重写。在途 run 拒绝（ActiveRunConflict），锚点非法
         → InvalidForkBoundary。HTTP 端点默认不生成 tail summary（无模型调用，
         确定性；CLI ``fork`` 仍可显式开启）。
+
+        ``sandbox_backend``（`#1278`）：None = 继承父会话显式选择（父没选 ⇒
+        部署默认）；显式值优先。透传给 ``fork_session``，本层不另造语义。
 
         child 继承父会话的当前模型：fork seed 按设计不含父 ``session/started``，
         不补一条 ``model/changed`` 的话，父创建时选的 catalog 模型会在 child 静默
@@ -6445,6 +6493,8 @@ class SessionService:
                 session_id,
                 boundary_user_message_seq=from_seq,
                 workspace_registry=self._workspace_registry,
+                # `#1278`：None = 继承父的显式选择；显式值优先。
+                sandbox_backend=sandbox_backend,
                 with_tail_summary=with_tail_summary,
                 # `#318`：fork 谱系读父账行（只读；父零写入）。
                 budget_ledger=self._stores.delegation_tree_ledger,
@@ -6611,6 +6661,27 @@ class SessionService:
         existed = approval_key in grants
         append_approval_revoke(session, approval_key)
         return {"id": session_id, "approval_key": approval_key, "revoked": existed}
+
+    async def set_context_window(
+        self, session_id: str, context_window: int
+    ) -> dict[str, Any]:
+        """切换会话上下文窗口挡位（#1197 项 1），**per-session 独立**。
+
+        守卫复用 `_require_existing_session`（422 先于 404）；写入走
+        `append_context_window_change`（**唯一**写入口，白名单在此再拦一道：
+        即便调用方绕过 HTTP 的 pydantic 校验也写不进非法挡位）。追加
+        `context/window-changed`（append-only，last-wins）；`ContextBuilder` 每次
+        `build()` / `compact_now()` 现派生，**下一轮上下文构建即生效**，无需重建
+        （与 `set_workflow_mode` 同款生效语义）。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        append_context_window_change(session, context_window)
+        return {"id": session_id, "context_window": context_window}
 
     async def set_workflow_mode(
         self, session_id: str, mode: WorkflowMode
@@ -6943,6 +7014,7 @@ __all__ = [
     "LaunchResult",
     "ModelChange",
     "ModelTarget",
+    "NoCompactableEarlyTurn",
     "PendingApprovalConflict",
     "PermissionChange",
     "QueueItemNotFound",

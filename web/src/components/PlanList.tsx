@@ -27,9 +27,9 @@
  * openDelay≈120ms / closeDelay≈80ms）；触摸设备（hover:none）点按；同一时刻
  * 至多一组展开（打开一组自动收起另一组）。
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Check, ChevronDown, ChevronRight } from 'lucide-react';
-import type { PlanItem } from '../types';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { Check, ChevronDown, ChevronRight, X } from 'lucide-react';
+import type { ConversationState, PlanItem } from '../types';
 
 /** 折叠阈值：清单 ≤ 此值不折叠（ZCode 实测 = 6）。 */
 export const FOLD_THRESHOLD = 6;
@@ -146,7 +146,20 @@ function PlanRow({ item, current, collapsed }: { item: PlanItem; current: boolea
   );
 }
 
-export function PlanList({ items }: { items: PlanItem[] }) {
+interface PlanListProps {
+  items: PlanItem[];
+  runStatus?: ConversationState['run_status'];
+  runInterrupted?: boolean;
+}
+
+export function PlanList({
+  items,
+  runStatus = 'idle',
+  runInterrupted = false,
+}: PlanListProps) {
+  const [panelExpanded, setPanelExpanded] = useState(false);
+  const detailsId = useId();
+  const summaryToggleRef = useRef<HTMLButtonElement>(null);
   // 交互：pinnedGroup = click/键盘**固定**展开的组；hoverGroup = 悬浮**临时**展开的组。
   // 生效组 = hoverGroup ?? pinnedGroup（悬浮临时接管、离开即回落到固定组）。
   // 单一生效组天然满足互斥（打开一组自动收起另一组）；固定态不会被悬浮静默解除。
@@ -163,6 +176,18 @@ export function PlanList({ items }: { items: PlanItem[] }) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!panelExpanded) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setPanelExpanded(false);
+      summaryToggleRef.current?.focus();
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [panelExpanded]);
 
   if (items.length === 0) return null;
 
@@ -183,7 +208,17 @@ export function PlanList({ items }: { items: PlanItem[] }) {
 
   const fold = computePlanFold(items);
   const completed = items.filter((it) => it.status === 'completed');
-  const currentId = items.find((it) => it.status === 'in_progress')?.id ?? null;
+  const currentItem = items.find((it) => it.status === 'in_progress') ?? null;
+  const currentId = currentItem?.id ?? null;
+  const interrupted = runStatus === 'failed' || runInterrupted;
+  const allCompleted = completed.length === items.length;
+  const terminalText = interrupted
+    ? `✖ 任务中断 ${completed.length}/${items.length}`
+    : runStatus === 'completed'
+      ? allCompleted
+        ? `✓ 任务完成 ${completed.length}/${items.length}`
+        : `✓ 本次运行结束 ${completed.length}/${items.length}`
+      : null;
 
   const openGroup: FoldSide | null = hoverGroup ?? pinnedGroup;
   const beforeOpen = fold.folded && openGroup === 'before';
@@ -261,12 +296,50 @@ export function PlanList({ items }: { items: PlanItem[] }) {
 
   return (
     <section className="plan-list" aria-label="进度清单">
-      <div className="plan-list-head">
-        <span className="plan-list-counter">
-          进程 {items.length} 项 · 已完成 {completed.length} 项
-        </span>
+      <button
+        ref={summaryToggleRef}
+        type="button"
+        className={`plan-list-summary-toggle${terminalText ? ' plan-list-summary-terminal' : ''}`}
+        aria-expanded={panelExpanded}
+        aria-controls={detailsId}
+        onClick={() => setPanelExpanded((expanded) => !expanded)}
+      >
+        {terminalText ? (
+          <span className="plan-list-terminal-text">{terminalText}</span>
+        ) : (
+          <>
+            <span className="plan-list-counter">
+              进程 {items.length} 项 · 已完成 {completed.length} 项
+            </span>
+            <span className="plan-list-summary-current">
+              {currentItem ? `→ ${currentItem.activeForm}` : '任务进度'}
+            </span>
+            <span className="plan-list-summary-ratio">
+              {completed.length}/{items.length}
+            </span>
+          </>
+        )}
+        <ChevronRight className="plan-list-summary-icon" size={16} aria-hidden="true" />
+      </button>
+      <div className="plan-list-details" id={detailsId} hidden={!panelExpanded}>
+        <div className="plan-list-head">
+          <span className="plan-list-counter">
+            进程 {items.length} 项 · 已完成 {completed.length} 项
+          </span>
+          <button
+            type="button"
+            className="plan-list-close"
+            aria-label="收起进度清单"
+            onClick={() => {
+              setPanelExpanded(false);
+              summaryToggleRef.current?.focus();
+            }}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
+        <ul className="plan-list-items">{rows}</ul>
       </div>
-      <ul className="plan-list-items">{rows}</ul>
     </section>
   );
 }

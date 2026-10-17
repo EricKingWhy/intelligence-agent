@@ -12,6 +12,8 @@
  *     （语义色当正文色用，亮色下靠 `color-mix(<sem> 45%, --text-primary)` 压到达标）
  *  7. #1190 约束管理页的 `--cn-*` 墨面：.cn-value / .cn-type / .cn-meta / .cn-pill /
  *     .cn-revoke 对比度 ≥4.5，且 .cn-type/.cn-meta/.cn-pill 守 12px 地板
+ *  8. #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5 且守 12px 地板
+ *  9. #1183 新建任务的项目路径入口（.project-path-callout-toggle）对比度 ≥4.5 且守 12px 地板
  *
  *  对比度算法：WCAG 相对亮度；背景取元素到根的祖先 backgroundColor 逐层
  *  alpha 合成（body 的 gradient 不参与——background-color 落在最后一层 canvas）。
@@ -315,7 +317,7 @@ const TR_FRAMES: FrameSpec[] = [
   { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: 'run-1', time: T },
 ];
 
-/** 起会话 → 打开「任务审阅」面板（数据走共享的 mockTaskReviewApi，见 fixtures.ts）。 */
+/** 起会话 → 打开「文件/改动」面，并从按需入口打开详细审阅。 */
 async function openTaskReview(
   page: Page,
   theme: 'dark' | 'light',
@@ -327,10 +329,13 @@ async function openTaskReview(
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
   await submitTask(page, '对比度任务审阅');
-  // exact:true 是必须的：本用例的任务文案含「任务审阅」子串，`getByRole('button',
-  // {name:'任务审阅'})` 走子串匹配会同时命中会话项按钮（其 accessible name 含首条
-  // 用户消息）与时间线行（"user/message 对比度任务审阅"）→ strict mode 违规。
-  await page.getByRole('button', { name: '任务审阅', exact: true }).click();
+  await page
+    .getByRole('tablist', { name: '工作区面' })
+    .getByRole('tab', { name: /^文件\/改动/ })
+    .click();
+  const summary = page.locator('.task-review-summary');
+  await expect(summary).toBeVisible();
+  await summary.getByRole('button', { name: '详细审阅' }).click();
   await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
 }
 
@@ -343,6 +348,47 @@ for (const theme of ['dark', 'light'] as const) {
       const ratio = contrast(m.color, m.bg);
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
+  });
+
+  /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮
+     双轴审查意见登记进地板锁（沿用 U-1 约定：新增可见文字元素必须在亮/暗双主题下量到
+     ≥4.5 且不破 12px 地板，否则将来有人换色不会红）。 */
+  test(`[${theme}] #1269 项目语境武装提示（.rail-project-armed-hint）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [],
+      projects: [{ id: 'p-contrast', path: 'D:/repos/contrast', title: '对比度项目', session_ids: [] }],
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    // 武装项目语境（#1028 的锚定入口）：菜单「新建会话」→ 行上出现显式提示。
+    await page.locator('.rail-project-head .rail-menu-btn').first().click();
+    await page.getByRole('menuitem', { name: '新建会话' }).click();
+    await expect(page.locator('.rail-project-armed-hint')).toBeVisible();
+    const m = await measure(page, '.rail-project-armed-hint');
+    expect(m.fontSize, 'armed hint font-size').toBe('12px');
+    const ratio = contrast(m.color, m.bg);
+    expect(ratio, '.rail-project-armed-hint contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
+  /* #1183：新建任务路径展开入口是新增的可见 ink；锁住暗/亮主题的可读性，避免 accent 或字号回退。 */
+  test(`[${theme}] #1183 新建任务项目路径入口对比度 ≥4.5 且字号 ≥12px`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [],
+      projects: [{ id: 'p-contrast', path: 'D:/repos/contrast', title: '对比度项目', session_ids: [] }],
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.rail-project-head .rail-menu-btn').first().click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
+
+    const toggle = page.locator('.project-path-callout-toggle');
+    await expect(toggle).toBeVisible();
+    const m = await measure(page, '.project-path-callout-toggle');
+    expect(Number.parseFloat(m.fontSize), 'project path toggle font-size').toBeGreaterThanOrEqual(12);
+    const ratio = contrast(m.color, m.bg);
+    expect(ratio, `.project-path-callout-toggle contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
   test(`[${theme}] composer placeholder 对比度 ≥4.5（R3）`, async ({ page }) => {
@@ -637,14 +683,14 @@ for (const theme of ['dark', 'light'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
 
-    // 项目 alpha 的 kebab →「在此项目中新建任务」→ 弹窗填任务 → 创建任务。
+    // 项目 alpha 的 kebab →「新建任务…」→ 弹窗填任务 → 创建并启动。
     const alpha = page.locator('.rail-project').filter({ hasText: '项目 alpha' });
     await alpha.locator('.rail-project-head .rail-menu-btn').click();
-    await page.getByRole('menuitem', { name: '在此项目中新建任务' }).click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
     const box = page.locator('.project-dialog[aria-label="新建任务"]');
     await expect(box).toBeVisible();
     await box.getByLabel('任务描述').fill(WT_TASK);
-    await box.getByRole('button', { name: '创建任务' }).click();
+    await box.getByRole('button', { name: '创建并启动' }).click();
 
     const notice = page.locator('.app-notice');
     await expect(notice).toBeVisible();
@@ -765,7 +811,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.task-review-panel .ctx-usage-close').click();
     await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeHidden();
     state.task.product_state = 'pending_verification';
-    await page.getByRole('button', { name: '任务审阅', exact: true }).click();
+    await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
     const pending = page.locator('.task-review-chip.state-pending_verification');
     await expect(pending).toBeVisible();
     const pm = await measure(page, '.task-review-chip.state-pending_verification');

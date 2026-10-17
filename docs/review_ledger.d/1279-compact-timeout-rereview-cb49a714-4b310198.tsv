@@ -1,0 +1,1 @@
+2026-10-17	#1279 双轴审查 findings 修回（修回笔 4b310198）：P2-1 attempt==1 返回裸公式（min 夹逼与 OverflowError 防护仅作用于 attempt≥2）；multiplier 校验收紧为 ge=1（Settings Field + compactor 构造器，注释与测试同步）；测试冗余断言合并。聚焦复审双 PASS；相关测试 26 passed；ruff 全过	cb49a71467138fe9f23db3926eea7c27ca2fc73a..4b3101987c3961ad50ed76b6b199f354bb62e7fa

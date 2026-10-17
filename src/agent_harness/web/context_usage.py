@@ -26,6 +26,14 @@ usage 的会话，端点回的是 ``used_tokens=0, state="no_data"`` ⇒ 看板�
 数据来源：在途 run 的 builder 最近一次 build 快照（``ContextBuilder.usage_snapshot``，
 launch 后未 build 时 used=0 是诚实的"未 build"信号）+ 该会话事件流里的
 ``model/completed.usage`` / ``run/completed.usage_total`` 汇总。
+
+``window_tokens``（#1249）：取该会话**生效**的上下文窗口——走
+:func:`agent_harness.context.window.effective_context_window`（**唯一**派生入口，
+与 ``ContextBuilder`` 同源），部署默认 ``Settings.max_context_tokens`` 只做回退。
+修前这里直接取部署默认，于是切挡位（``PATCH /api/sessions/{id}/context-settings``）
+之后容量看板的分母不动：70%/85% 标记（前端按 ``used/window_tokens`` 定位）落在
+一个用户没选过的位置上。两处各算一遍窗口就会出现「面板显示 500K、实际按 200K 压」
+——所以派生必须共用同一个入口，不在这里另写一遍 last-wins。
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_harness.context.window import effective_context_window
 from agent_harness.session import MODEL_COMPLETED
 
 # 工具 schema 估算的 core 名单（设计稿 §3.2.1：不靠名字前缀猜，显式常量集合）。
@@ -156,7 +165,10 @@ def build_context_usage_payload(
 ) -> dict[str, Any]:
     """组装端点响应（设计稿 §3.3 形状）。``builder_snapshot is None`` ⇒
     ``usage_only``（事件流里有 usage）或 ``no_data``（两者都没有）。"""
-    window_tokens = settings.max_context_tokens
+    # #1249：分母跟随会话挡位（部署默认只做回退）。
+    window_tokens = effective_context_window(
+        events, default=settings.max_context_tokens
+    )
     thresholds = {
         "auto_compact": settings.auto_compact_threshold,
         "hard_guard": settings.hard_guard_threshold,

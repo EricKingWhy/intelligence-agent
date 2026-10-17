@@ -1,0 +1,1 @@
+2026-10-17	#1183/#1287 sync regression fix, Correctness/Spec independent review PASS, P0-P4=0. `tests/web/test_web_model_fork.py`: pin API fixture backends to local; Docker-unavailable 409 remains explicitly exercised. Evidence and focused result in docs/phase_status/2026-10.md.	730aef8be99ac8ff5c32ab5e3c4f987cada44df9..d1b8aafe13defd465ea9b32d5d178aab4a8f9bca

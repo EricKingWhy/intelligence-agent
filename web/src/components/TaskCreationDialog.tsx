@@ -1,14 +1,21 @@
-/** 新建任务统一入口（#367 [W-23] 选项 A，用户 2026-10-06 批准）。
+/** 新建任务统一入口（#367 [W-23] 选项 A，用户 2026-10-06 批准；#1177 §B 化简）。
  *
  *  六家成熟产品共识（研究报告 `~/workspace/issue-367-study/mature-products.md`）：
  *  prompt 优先、无多步向导、无结构化验收项、无任务级排队、三档自主度。
  *  本弹窗即按此共识的信息架构：
  *  - prompt 是**唯一必填项**（顶置大输入框）
- *  - 验收项降级为可选文本框，内容拼进首条 prompt（零服务端契约变更，
+ *  - 验收项降级为可选**单行**输入框，内容拼进首条 prompt（零服务端契约变更，
  *    对标 Codex `/goal` 自然语言三要素）
  *  - 三档自主度抄 Copilot Interactive / Plan / Autopilot
  *    （≈ Codex 三档 ≈ Claude Code modes）
  *  - 目录冲突默认 worktree（后端 `on_conflict` 默认值，前端不另设）
+ *
+ *  #1177 §B（用户 2026-10-15 审批的效果图）：**任务描述是唯一主视觉**，完成目标 /
+ *  自主度 / 模型 / 运行位置收进「高级设置」折叠区，默认折叠（composer-first 的产品
+ *  把设置后置到输入框旁，本仓保留模态但把设置收进折叠——Cursor / VS Code Copilot
+ *  Chat / Claude Code / 腾讯 CodeBuddy 的清一色做法，见
+ *  `docs/research/2026-10-16-issue-1177-new-task-dialog-plan.md` §2）。路径警告保留，
+ *  但收窄为单行（安全相关，不删除）。「创建即启动」语义一字未动。
  *
  *  取代 `StartTaskInProjectDialog` 的"空会话"流程（#204 的"弹窗不该有任务内容"
  *  裁定被选项 A 取代：prompt 进弹窗，创建即带任务启动）。
@@ -19,7 +26,7 @@
 
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Cpu, HardDrive, TriangleAlert, X } from 'lucide-react';
+import { ChevronRight, Cpu, HardDrive, TriangleAlert, X } from 'lucide-react';
 import type { ModelCatalogEntry, SandboxBackendEntry } from '../lib/api';
 import type { Project } from '../types';
 import type { StartSessionPayload } from '../lib/api';
@@ -98,7 +105,7 @@ function TaskCreationForm({
 }: Props & { project: Project }) {
   // prompt 是唯一必填项
   const [prompt, setPrompt] = useState('');
-  // 验收项：可选文本框，提交时拼进首条 prompt（零服务端契约变更）
+  // 验收项：可选单行输入框，提交时拼进首条 prompt（零服务端契约变更）
   const [acceptance, setAcceptance] = useState('');
   const [autonomy, setAutonomy] = useState<AutonomyId>('ask');
   // 模型：'auto' = 不发 model 键（后端默认链）；其余为目录 name
@@ -107,6 +114,9 @@ function TaskCreationForm({
   const [sandbox, setSandbox] = useState<string>('auto');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // #1177 §B：高级设置默认折叠（任务描述是唯一主视觉）。
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [pathExpanded, setPathExpanded] = useState(false);
 
   const promptValid = prompt.trim().length > 0;
 
@@ -183,16 +193,34 @@ function TaskCreationForm({
         在项目「{project.title}」里开一个新任务，创建即启动。
       </Dialog.Description>
 
-      {/* 路径明示行：承担"你正在把哪个目录交给 agent"的确认责任 */}
-      <div className="project-path-callout" role="note">
+      {/* #1177 §B：保留紧凑单行提示；完整 cwd 通过按需展开入口核验。 */}
+      <div className="project-path-callout" role="group" aria-label="项目工作目录">
         <TriangleAlert size={13} aria-hidden="true" />
-        <span>
+        <span className="project-path-callout-text">
           Agent 将直接读写该目录：
           <span className="project-path-callout-path mono">{project.path}</span>
         </span>
+        <button
+          type="button"
+          className="project-path-callout-toggle"
+          aria-expanded={pathExpanded}
+          aria-controls="project-path-full"
+          aria-label={pathExpanded ? '收起完整项目路径' : '查看完整项目路径'}
+          onClick={() => setPathExpanded((value) => !value)}
+          disabled={pending}
+        >
+          {pathExpanded ? '收起' : '查看路径'}
+        </button>
+        <code
+          id="project-path-full"
+          className="project-path-callout-full-path mono"
+          hidden={!pathExpanded}
+        >
+          {project.path}
+        </code>
       </div>
 
-      {/* prompt：唯一必填项 */}
+      {/* prompt：唯一必填项，#1177 §B 的唯一主视觉（多行文本框） */}
       <div className="project-field">
         <label className="project-field-label" htmlFor="task-prompt">
           任务描述 <span aria-hidden="true">*</span>
@@ -209,95 +237,117 @@ function TaskCreationForm({
         />
       </div>
 
-      {/* 验收项：可选文本框，拼进首条 prompt */}
-      <div className="project-field">
-        <label className="project-field-label" htmlFor="task-acceptance">
-          完成目标 <span className="project-field-optional">（可选）</span>
-        </label>
-        <textarea
-          id="task-acceptance"
-          className="project-textarea"
-          value={acceptance}
-          onChange={(e) => setAcceptance(e.target.value)}
-          placeholder="怎么算做完？（例如：pytest 全绿，覆盖率不下降）"
-          rows={2}
+      {/* #1177 §B：高级设置折叠区，默认折叠——完成目标/自主度/模型/运行位置收进这里。 */}
+      <div className="project-advanced">
+        <button
+          type="button"
+          className="project-advanced-toggle"
+          aria-expanded={advancedOpen}
+          aria-controls="task-advanced"
+          onClick={() => setAdvancedOpen((v) => !v)}
           disabled={pending}
-        />
-        <span className="project-field-hint">
-          会拼在任务描述前面一起发给 agent，不单独存。
-        </span>
-      </div>
-
-      {/* 三档自主度 */}
-      <div className="project-field">
-        <span className="project-field-label" id="autonomy-label">自主度</span>
-        <div
-          className="segmented"
-          role="radiogroup"
-          aria-labelledby="autonomy-label"
         >
-          {AUTONOMY_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              role="radio"
-              aria-checked={autonomy === opt.id}
-              className={`segmented-option${autonomy === opt.id ? ' selected' : ''}`}
-              onClick={() => setAutonomy(opt.id)}
+          <ChevronRight
+            size={13}
+            className={`project-advanced-chevron${advancedOpen ? ' open' : ''}`}
+            aria-hidden="true"
+          />
+          高级设置
+        </button>
+
+        <div id="task-advanced" className="project-advanced-content" hidden={!advancedOpen}>
+          {/* 完成目标：可选**单行**输入，拼进首条 prompt（#1177 §B 效果图 03：单行
+              input，非多行 textarea；用户 2026-10-17 裁决 1A）。 */}
+          <div className="project-field">
+            <label className="project-field-label" htmlFor="task-acceptance">
+              完成目标 <span className="project-field-optional">（可选）</span>
+            </label>
+            <input
+              id="task-acceptance"
+              type="text"
+              className="project-input"
+              value={acceptance}
+              onChange={(e) => setAcceptance(e.target.value)}
+              placeholder="什么结果算完成？"
               disabled={pending}
-              title={opt.description}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-        <span className="project-field-hint">
-          {AUTONOMY_OPTIONS.find((o) => o.id === autonomy)?.description}
-        </span>
-      </div>
-
-      {/* 模型（含 Auto） */}
-      {models.length > 0 && (
-        <div className="project-field">
-          <span className="project-field-label">模型</span>
-          <OptionPicker
-            ariaLabel="模型"
-            title="用哪个模型跑这个任务？"
-            icon={Cpu}
-            options={modelOptions}
-            value={model}
-            onChange={(id) => setModel(id ?? 'auto')}
-            placeholder="Auto（默认）"
-            disabled={pending}
-          />
-        </div>
-      )}
-
-      {/* 运行位置 */}
-      {projectBackends.length > 0 && (
-        <div className="project-field">
-          <span className="project-field-label">运行位置</span>
-          <OptionPicker
-            ariaLabel="运行位置"
-            title="任务在哪里跑？"
-            icon={HardDrive}
-            options={sandboxOptions}
-            value={sandbox}
-            onChange={(id) => setSandbox(id ?? 'auto')}
-            placeholder="默认"
-            disabled={pending}
-          />
-          {unavailableBackends.length > 0 && (
+            />
             <span className="project-field-hint">
-              不可用：{unavailableBackends.map((b) =>
-                `${b.backend}（${b.reason ?? '未知原因'}）`).join('、')}
+              会拼在任务描述前面一起发给 agent，不单独存。
             </span>
+          </div>
+
+          {/* 三档自主度 */}
+          <div className="project-field">
+            <span className="project-field-label" id="autonomy-label">自主度</span>
+            <div
+              className="segmented"
+              role="radiogroup"
+              aria-labelledby="autonomy-label"
+            >
+              {AUTONOMY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={autonomy === opt.id}
+                  className={`segmented-option${autonomy === opt.id ? ' selected' : ''}`}
+                  onClick={() => setAutonomy(opt.id)}
+                  disabled={pending}
+                  title={opt.description}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <span className="project-field-hint">
+              {AUTONOMY_OPTIONS.find((o) => o.id === autonomy)?.description}
+            </span>
+          </div>
+
+          {/* 模型（含 Auto） */}
+          {models.length > 0 && (
+            <div className="project-field">
+              <span className="project-field-label">模型</span>
+              <OptionPicker
+                ariaLabel="模型"
+                title="用哪个模型跑这个任务？"
+                icon={Cpu}
+                options={modelOptions}
+                value={model}
+                onChange={(id) => setModel(id ?? 'auto')}
+                placeholder="Auto（默认）"
+                disabled={pending}
+              />
+            </div>
           )}
-          <span className="project-field-hint">
-            目录被其他任务占用时，默认自动建 worktree 并行（可在创建请求里改排队）。
-          </span>
+
+          {/* 运行位置 */}
+          {projectBackends.length > 0 && (
+            <div className="project-field">
+              <span className="project-field-label">运行位置</span>
+              <OptionPicker
+                ariaLabel="运行位置"
+                title="任务在哪里跑？"
+                icon={HardDrive}
+                options={sandboxOptions}
+                value={sandbox}
+                onChange={(id) => setSandbox(id ?? 'auto')}
+                placeholder="默认"
+                disabled={pending}
+              />
+              {unavailableBackends.length > 0 && (
+                <span className="project-field-hint">
+                  不可用：{unavailableBackends.map((b) =>
+                    `${b.backend}（${b.reason ?? '未知原因'}）`).join('、')}
+                </span>
+              )}
+              <span className="project-field-hint">
+                目录被其他任务占用时，默认自动建 worktree 并行（可在创建请求里改排队）。
+              </span>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {error && (
         <div className="project-error" role="alert">
@@ -314,7 +364,7 @@ function TaskCreationForm({
           onClick={() => void submit()}
           disabled={pending || !promptValid}
         >
-          {pending ? '正在创建…' : '创建任务'}
+          {pending ? '正在创建…' : '创建并启动'}
         </button>
       </div>
     </Dialog.Content>

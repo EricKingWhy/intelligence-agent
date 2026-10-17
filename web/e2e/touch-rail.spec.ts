@@ -112,7 +112,9 @@ test.describe('#181 窄屏触摸：⋯ 菜单不依赖 hover', () => {
     await expect(page.getByRole('menuitem', { name: '移出项目' })).toHaveCount(0);
 
     await projectBtn.tap();
-    await expect(page.getByRole('menuitem', { name: '在此项目中新建任务' })).toBeVisible();
+    // #1177 §A：项目菜单前两项 =「新建会话」/「新建任务…」（重命名/删除在下）。
+    await expect(page.getByRole('menuitem', { name: '新建会话' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: '新建任务…' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: '重命名项目' })).toBeVisible();
   });
 

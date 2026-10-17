@@ -39,6 +39,8 @@
 ---
 
 ## 当前工作焦点
+- **施工中（2026-10-17 · #1198）**：PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) 开放。Gate-0、PR smoke、全量 pytest、Vitest/build、双平台 TUI 已通过；全量 E2E 的 AC3 高度差 65.1875px（允许 8px），已加显式 420px 高度约束，等待 Actions 复验。详见 Tracker/月档。
+
 
 - **已集成（2026-10-16 · #1165）**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) 以 merge commit `76bab688136c16e94474bee4397bc19ad803e861` 合入 main；Issue #1165 CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。Gate-0、PR Chromium smoke、gitleaks、Windows installer smoke 和完整 nightly 全绿；Windows TUI 首轮 EBUSY 在重跑后通过。详见 Tracker/月档。
 - **已集成（2026-10-16 · #1241）**：Issue #1241 CLOSED，保留 testing/P3 并移除 in-progress；PR #1245 于 2026-10-16 合入 main（merge 9f93054ec2cee45a3169154fc9246ce3583f1c82，tree 9d90a705a6a8f558d0ff50bf3029853760c139fc）。测试辅助器修复 Uvicorn serve 与独立 ASGI lifespan task 在启动失败/超时时的回收，并修复施工中发现的 P2。聚焦测试 7 passed；Gate-1 云端 8226 passed / 69 skipped / 51 deselected、90% coverage，Vitest/build 通过；PR Gate-0、Chromium E2E smoke、gitleaks 通过。Spec/Standards 修复复审 PASS，P0–P4=0。详见 Tracker 与月档。
@@ -108,6 +110,8 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-17 · #1183/#1288 已关单、PR 待合并**：Issue #1183 保留 `10-15-UI优化`/`等待merge`；#1288 保留 bug/P3/`等待merge`，施工标签均已移除。PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN、未合并，代码 tip `34761909`；PR Gate-0、Chromium smoke、gitleaks 与完整 nightly 全过。测试、关单评论与月档读数见 Tracker/月档。
+- **2026-10-17 · #1184 已集成**：Issue CLOSED，仅保留 `10-15-UI优化`；PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) merge commit `795fe5afda241c1dd441d5c8e985390fae65247c`。实现、审查和验证见 Tracker/月档 #1184。
 - **2026-10-16 · #1165 已集成**：PR [#1254](https://github.com/EricKingWhy/intelligence-agent/pull/1254) merge `76bab688136c16e94474bee4397bc19ad803e861`；Issue CLOSED，保留 bug/P2，移除 in-progress/ready-for-agent。PR Gate-0、Windows installer smoke、gitleaks、Chromium PR smoke 全过；完整 nightly 在代码 head `340bb388` 全绿，Windows TUI 重跑后通过。详情见月档 #1165。
 - **2026-10-16 · #1131 集成**：Issue CLOSED（`in-progress` 已移除）；PR [#1219](https://github.com/EricKingWhy/intelligence-agent/pull/1219) merge `471857d1b156ee3808fcde13131c444f7a40fe8e`，基线 `41c9da6fc82c9901955fa9c4e2e3bb3900a996f8`。门禁、关单与 Windows 验证限制见 Tracker/月档 #1131。
 - **2026-10-16 · #1128 集成**：Issue CLOSED；PR [#1217](https://github.com/EricKingWhy/intelligence-agent/pull/1217) merge `838bd798a994c35a9149cf10009bc684959a7dd5`，基线 `879c220ac273b83e684a469f6209a06b2a669868`。验证与关单记录见 Tracker/月档 #1128。

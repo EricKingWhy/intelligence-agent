@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1183 同步 origin/main 5b09883，merge 7a663898（父一 246292ca=本线 tip；父二 5b09883=origin/main；merge-base 60e167fc）。唯一文本冲突 Tracker 已按批准保留 #1198 在前、#1183 在后；其余由 ort 自动合并。`git show --cc` 对 App.tsx 无合并新 hunk；父一 #1183 代码与父二上游代码各自已有 review 覆盖。本行仅作 sync merge 机械归属，不声称新增内容审查。	246292ca46cbe49e033c1d5e502febb70e1b8137..7a66389897259f3a9ebec58de48a57444e7ef113

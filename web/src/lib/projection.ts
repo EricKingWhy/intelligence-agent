@@ -180,6 +180,7 @@ export function initConversation(session_id: string): ConversationState {
     active_step_id: null,
     run_status: 'idle',
     run_cancelled: false,
+    compaction_in_progress: false,
     compactions: [],
     reconcile_queue: [],
     pending_approvals: [],
@@ -362,6 +363,17 @@ interface EventSemantics {
 
 /** 已知类型但无投影——保持「进 unknown_events」的既有兜底行为。
  *  登记它而非省略，是为了让未接线的事件类型在注册表里可见。 */
+/** #1197 项 5A：`compaction/start` / `compaction/end` 是 bracket 的两端，投影成
+ *  一个布尔（进行中与否）——**不**再进 unknown_events（那是未接线兜底）。
+ *  `compaction/end` 到达即恢复常态（票面：自动消失，不许静默）。 */
+function projectCompactionInProgress(state: ConversationState): void {
+  state.compaction_in_progress = true;
+}
+
+function projectCompactionEnded(state: ConversationState): void {
+  state.compaction_in_progress = false;
+}
+
 function unhandledProjection(state: ConversationState, event: AgentEvent): void {
   state.unknown_events = [...state.unknown_events, event];
 }
@@ -1698,6 +1710,15 @@ function summarizeModelChanged(event: AgentEvent): string {
   return typeof to === 'string' && to ? `模型 → ${to}` : '模型已切换';
 }
 
+// #1192：委派约束继承快照的单行语义（子会话事件流的独立审计事件）。
+function summarizeConstraintInheritance(event: AgentEvent): string {
+  const d = event.data as Record<string, unknown>;
+  if (d.omit_constraints === true) return '干净启动：不继承任何约束';
+  const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
+  const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
+  return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;
+}
+
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
 
 const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
@@ -1855,6 +1876,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectAgentDelegationFinished,
     summarize: summarizeDelegationFinished,
   },
+  // #1192：委派约束继承快照——只落**子会话**事件流（父流不见），不投影进
+  // ConversationState：子详情「约束继承」区直接按事件流只读渲染（不变量 #22，
+  // 事件流仍是唯一真相）；登记为 no-op 防进 unknown_events。
+  [EventType.AGENT_CONSTRAINT_INHERITANCE]: {
+    apply: noopProjection,
+    summarize: summarizeConstraintInheritance,
+  },
   [EventType.REASONING_STARTED]: { apply: projectReasoning, summarize: summarizeReasoningStarted },
   [EventType.REASONING_DELTA]: { apply: projectReasoning, summarize: summarizeDeltaChars },
   [EventType.REASONING_COMPLETED]: {
@@ -1874,13 +1902,26 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.PERMISSION_GRANTED]: { apply: noopProjection, summarize: summarizeApprovalGranted },
   [EventType.PERMISSION_REVOKED]: { apply: noopProjection, summarize: summarizeApprovalRevoked },
   [EventType.WORKFLOW_MODE_CHANGED]: { apply: noopProjection, summarize: summarizeWorkflowModeChanged },
+  // #1193：run 致命异常且计划从未生成的**明确错误信号**（durable）。对话投影
+  // 本身无字段可改（横幅是「带手动退出动作的错误条」，归 useSession 经
+  // `deriveRunFailedBeforePlan` 从事件流派生——见该函数）。登记为 no-op ⇒
+  // 已知类型、不进 `unknown_events`、时间线可摘要；不登记则穷尽性
+  // `Record<EventTypeValue, EventSemantics>` 被破坏（tsc 红）。
+  [EventType.ERROR]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,
   },
   [EventType.TEXT_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
-  [EventType.COMPACTION_START]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.COMPACTION_END]: { apply: unhandledProjection, summarize: unknownSummary },
+  // #1197 项 1：`context/window-changed` 是 per-session 上下文窗口挡位的 append-only
+  // 事实。窗口的**生效值**由后端 `context/window.py` 的 derive 给出（倒序 last-wins），
+  // 前端不重复实现那份折叠——挡位读数走 `/api/.../context-settings`。故这里显式登记
+  // 为未投影（与 COMPACTION_* 同一处理），而不是静默漏登记。
+  // ⚠ 项 1 加了这个事件类型却漏登记：`EVENT_SEMANTICS` 是穷尽 `Record<EventTypeValue, …>`，
+  // 缺一条 `tsc -b` 直接失败（gate0 项），而 vitest 不跑 tsc 所以当时没红。
+  [EventType.CONTEXT_WINDOW_CHANGED]: { apply: unhandledProjection, summarize: unknownSummary },
+  [EventType.COMPACTION_START]: { apply: projectCompactionInProgress, summarize: emptySummary },
+  [EventType.COMPACTION_END]: { apply: projectCompactionEnded, summarize: emptySummary },
   // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，
   // 事件流是唯一事实）。摘要给 Timeline 一行语义（不再是「未接线」）。
   [EventType.MESSAGE_QUEUED]: { apply: projectUndelivered, summarize: summarizeMessageQueued },
@@ -2135,6 +2176,9 @@ function finalizeRun(
   status: 'completed' | 'failed' | 'paused',
   time?: string,
 ): void {
+  // #1197 项 5A：bracket 中途夭折（run 在 START 与 END 之间终结）时 flag 必须
+  // 跟着收口——否则它会永久为 true，且没有任何后续事件能再把它摘掉。
+  state.compaction_in_progress = false;
   state.run_status = status;
   state.active_step_id = null;
   markPendingApprovalsStale(state);
@@ -2295,6 +2339,39 @@ export function deriveSessionTitle(events: AgentEvent[]): string {
     if (title) return title;
   }
   return '';
+}
+
+/** #1193：从事件流派生「run 在计划生成前致命失败、会话仍停在 plan 档」。
+ *
+ *  判定 = 三个**生命周期标记**里最新的一个是 error(run-failed-before-plan)：
+ *   - error(run-failed-before-plan)：失败发生（durable——迟到接流/刷新都读得到）；
+ *   - workflow/mode-changed：用户显式退出/改档 ⇒ 这次失败已被处置；
+ *   - run/started：用户重试且新 run 已启动 ⇒ 失败已被更新的运行事实取代。
+ *  取「最新标记」而非「存在即真」：退出 plan 或重试成功后横幅必须自行消失，
+ *  再次失败（新 error 事件）又必须重新出现——两条都由同一条规则给出。
+ *
+ *  纯投影（不变量 #22）：横幅不另存状态。live 帧、WS 快照、刷新后的 GET /events
+ *  走的是同一份事件列表，因此迟到接流（#1193 审查 F2）与刷新（F3）下结论一致。 */
+export function deriveRunFailedBeforePlan(events: AgentEvent[]): {
+  message: string;
+  hint: string;
+} | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type === EventType.ERROR && e.data?.code === 'run-failed-before-plan') {
+      const message = e.data.message;
+      const hint = e.data.hint;
+      return {
+        message:
+          typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
+        hint: typeof hint === 'string' ? hint : '',
+      };
+    }
+    if (e.type === EventType.WORKFLOW_MODE_CHANGED || e.type === EventType.RUN_STARTED) {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** Try to JSON-parse a tool result `content` string; return null on failure.
