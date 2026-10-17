@@ -49,6 +49,7 @@ const SERVERS: McpServerEntry[] = [
     needs_auth: false,
     tool_count: 2,
     require_confirm: false,
+    config_enabled: true,
     transport: 'stdio',
     command: 'npx @playwright/mcp',
     url: '',
@@ -60,6 +61,7 @@ const SERVERS: McpServerEntry[] = [
     needs_auth: true,
     tool_count: 0,
     require_confirm: true,
+    config_enabled: true,
     transport: 'http',
     command: '',
     url: 'https://example.test/mcp',
@@ -71,6 +73,7 @@ const SERVERS: McpServerEntry[] = [
     needs_auth: false,
     tool_count: 0,
     require_confirm: false,
+    config_enabled: true,
     transport: 'stdio',
     command: 'npx filesystem',
     url: '',
@@ -231,12 +234,43 @@ describe('#1200 Phase 2 管理动作', () => {
     expect(status()).toContain('重启后生效');
   });
 
-  it('工具 chip 点击 → 工具级启用', async () => {
-    const chip = [...detail().querySelectorAll('.tool-chip')].find(
-      (el) => el.textContent === 'browser_upload',
-    )!;
-    await click(chip);
+  it('工具 chip 点击 → 工具级启用，并按写后真相刷新 chip（不留旧状态）', async () => {
+    const chip = () =>
+      [...detail().querySelectorAll('.tool-chip')].find(
+        (el) => el.textContent === 'browser_upload',
+      )!;
+    expect(chip().getAttribute('aria-pressed')).toBe('false');
+    vi.mocked(getMcpServerTools).mockResolvedValue([
+      { name: 'browser_navigate', description: '打开页面', enabled: true },
+      { name: 'browser_upload', description: '', enabled: true },
+    ]);
+    await click(chip());
     expect(setMcpToolEnabled).toHaveBeenCalledWith('playwright', 'browser_upload', true);
+    // 写成功后重拉工具清单：chip 不能停在旧值（否则再点一次会把刚启用的又禁掉）。
+    expect(getMcpServerTools).toHaveBeenCalledWith('playwright');
+    expect(chip().getAttribute('aria-pressed')).toBe('true');
+    expect(chip().className).not.toContain('off');
+  });
+
+  it('config 级 enabled:false：开关禁用并说明需改配置（运行时选择态管不到）', async () => {
+    vi.mocked(getMcpServers).mockResolvedValue({
+      servers: [
+        { ...SERVERS[0], name: 'legacy', enabled: true, connected: false, config_enabled: false },
+      ],
+      errors: [],
+    });
+    // 面板体已挂载：同 props 重渲染不会重跑加载 effect ⇒ 真正重挂。
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    expect(row('legacy')?.textContent).toContain('配置已禁用');
+    const toggle = [...detail().querySelectorAll('button')].find(
+      (b) => b.textContent === '禁用',
+    ) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(true);
+    expect(detail().textContent).toContain('修改配置并重启后才会接线');
   });
 
   it('require-confirm 开关 → 对应端点', async () => {

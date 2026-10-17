@@ -32,6 +32,41 @@ def ws(tmp_path: Path) -> Path:
     return tmp_path / "ws"
 
 
+def test_corrupt_field_does_not_discard_valid_fields(ws: Path):
+    """设计 §4 逐字段容错：一个坏字段不得连坐同文件里的合法选择。"""
+    from agent_harness.plugins.settings import load_plugin_settings_tolerant
+
+    ws.mkdir()
+    settings_path(ws).write_text(
+        json.dumps({
+            "disabled_servers": ["filesystem"],
+            "skill_overrides": {"code-review": {"enabled": "no"}},
+        }),
+        encoding="utf-8",
+    )
+    settings, errors = load_plugin_settings_tolerant(ws)
+    assert settings.disabled_servers == frozenset({"filesystem"})
+    assert settings.skill_overrides == {}
+    assert any("skill_overrides.code-review.enabled" in message for message in errors)
+
+
+def test_mutate_normalizes_corrupt_fields(ws: Path):
+    """写路径走容错读：坏字段在用户点开关时被归一化，端点不再 500。"""
+    ws.mkdir()
+    settings_path(ws).write_text(
+        json.dumps({
+            "disabled_servers": ["filesystem"],
+            "skill_overrides": {"code-review": {"enabled": "no"}},
+        }),
+        encoding="utf-8",
+    )
+    updated = set_server_enabled(ws, "playwright", False)
+    assert updated.disabled_servers == frozenset({"filesystem", "playwright"})
+    on_disk = json.loads(settings_path(ws).read_text(encoding="utf-8"))
+    assert on_disk["disabled_servers"] == ["filesystem", "playwright"]
+    assert on_disk["skill_overrides"] == {}
+
+
 def test_missing_file_is_all_defaults(ws: Path):
     settings = load_plugin_settings(ws)
     assert settings == PluginSettings()

@@ -159,6 +159,8 @@ def test_list_servers_falls_back_to_config_without_capability(workspace: Path) -
             "needs_auth": False,
             "tool_count": 0,
             "require_confirm": False,
+            # config 级启用态来自配置层，fallback 路径同样可读。
+            "config_enabled": True,
             # 无 runtime capability 时配置摘要不可得：空串，不伪造。
             "transport": "",
             "command": "",
@@ -202,6 +204,7 @@ def test_list_servers_reports_management_fields(workspace: Path) -> None:
         "needs_auth": True,
         "tool_count": 2,
         "require_confirm": False,
+        "config_enabled": True,
         # Phase 1 详情页配置摘要（配置层原文）。
         "transport": "stdio",
         "command": "npx",
@@ -242,6 +245,62 @@ def test_reconnect_returns_connected(workspace: Path) -> None:
         r = client.post("/api/mcp/servers/playwright/reconnect")
     assert r.status_code == 200, r.text
     assert r.json() == {"name": "playwright", "connected": True}
+
+
+def test_disconnect_then_reconnect(workspace: Path) -> None:
+    """断开必须可逆：断掉后仍是同一个 server，重连能把连接接回来。"""
+    client, capability = _client(workspace)
+    with client:
+        assert client.post("/api/mcp/servers/playwright/disconnect").json() == {
+            "name": "playwright", "disconnected": True,
+        }
+        servers = {s["name"]: s for s in client.get("/api/mcp/servers").json()["servers"]}
+        assert servers["playwright"]["connected"] is False
+        r = client.post("/api/mcp/servers/playwright/reconnect")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"name": "playwright", "connected": True}
+        assert capability.is_connected("playwright") is True
+
+
+def test_reconnect_of_wiring_failed_server(workspace: Path) -> None:
+    """接线失败（connect 抛错、句柄仍在名表里）的 server 也要能重连，不能 404。"""
+    client, capability = _client(workspace)
+    connection = capability.connection("github")
+    connection.connected = False
+    with client:
+        r = client.post("/api/mcp/servers/github/reconnect")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"name": "github", "connected": True}
+
+
+def test_config_level_disabled_server_is_listed(workspace: Path) -> None:
+    """config 里 `enabled:false` 的 server 不接线，但管理面必须看得见（禁用≠删除）。"""
+    disabled_config = MCPServerConfig.model_validate(
+        {"name": "legacy", "transport": "stdio", "command": "npx", "enabled": False}
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
+    )
+    app = create_app(settings)
+    wiring = SimpleNamespace(
+        lifecycle=[
+            MCPCapability(
+                connections=[FakeConnection("playwright")],
+                tools=[],
+                errors=[],
+                configs=[_config("playwright"), disabled_config],
+                server_tools={},
+            )
+        ],
+        skills=_SkillsCapability(),
+        mcp_packages=[],
+    )
+    app.state.agent = _FakeAgent(settings, wiring)
+    with TestClient(app) as client:
+        servers = {s["name"]: s for s in client.get("/api/mcp/servers").json()["servers"]}
+    assert servers["legacy"]["connected"] is False
+    assert servers["legacy"]["config_enabled"] is False
+    assert servers["playwright"]["config_enabled"] is True
 
 
 def test_tool_level_enable_disable(workspace: Path) -> None:

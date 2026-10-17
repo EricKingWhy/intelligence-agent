@@ -92,6 +92,11 @@ async def test_mcp_wiring_contributes_namespaced_tools(tmp_path, stub_connection
     assert names == ["mcp__srv1__echo"], names
     # disabled server 不连接
     assert [c.config.name for c in stub_connections.instances] == ["srv1"]
+    # 管理面配置层要含 config 级 enabled:false 的 server（禁用≠删除，可重新启用）。
+    capability = next(
+        c for c in wiring.lifecycle if c.__class__.__name__ == "MCPCapability"
+    )
+    assert [server.name for server in capability.configs()] == ["srv1", "srv2"]
     # descriptor 已注册（registry.available 含 mcp）
     assert any(d.name == "mcp" for d in registry.available())
     # capability 挂 lifecycle（aclose 关闭其全部连接，AppState.shutdown 调用）

@@ -378,7 +378,9 @@ async def _wire_skills(
         project_dir: ("workspace", "project"),
     }
     for extra in additional_directories:
-        directory_provenance[extra] = ("workspace", "personal")
+        # setdefault：额外目录若与已知根重合（同一路径既被配置又自动发现），
+        # 不能被降级成 personal/workspace 覆盖掉 global/project 的既有归属。
+        directory_provenance.setdefault(extra, ("workspace", "personal"))
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
     discovery = SkillDiscovery(
@@ -449,7 +451,7 @@ async def _wire_mcp(
         logger.warning("plugin-settings.json 不可读，MCP 按默认（全部启用）继续：%s", settings_error)
 
     try:
-        servers = parse_mcp_servers(cfg.options)
+        parsed_servers = parse_mcp_servers(cfg.options)
     except ConfigError as error:
         raise CapabilityError(
             f"capability 'mcp' 配置错误：{error}", code="init_failed"
@@ -458,7 +460,7 @@ async def _wire_mcp(
         settings.workspace_dir,
         global_skills_dir=settings.skill_global_dir or None,
     )
-    configured_servers = [server for server in servers if server.enabled]
+    configured_servers = [server for server in parsed_servers if server.enabled]
     try:
         packaged_servers = package_manager.selected_servers(
             reserved_server_names={server.name for server in configured_servers}
@@ -474,6 +476,10 @@ async def _wire_mcp(
         *configured_servers,
         *(server for server in packaged_servers if server.enabled),
     ]
+    # 管理面配置层（`configs()`）= 全部配置 server（含 config 级 `enabled:false`）
+    # + 选中的包。config 级禁用项不接线，但管理窗口要看得见（裁决 C1：禁用≠删除）；
+    # 它们只能改配置启用，`plugin-settings.json` 只表达"再禁用"。
+    all_servers = [*parsed_servers, *(server for server in packaged_servers if server.enabled)]
     # 禁用 server 不装配（不连接），但保留在 configs 里：管理窗口要显示它并
     # 允许重新启用（裁决 D1：重启后生效）。
     disabled_servers = plugin_settings.disabled_servers
@@ -490,6 +496,7 @@ async def _wire_mcp(
         disabled_servers=disabled_servers,
         disabled_tools=plugin_settings.disabled_tools,
         require_confirm=plugin_settings.require_confirm,
+        all_servers=all_servers,
     )
     # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
     # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了

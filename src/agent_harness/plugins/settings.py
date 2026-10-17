@@ -22,6 +22,7 @@ wiring 读取，二者都不把它当 provider/凭据配置。
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -126,37 +127,122 @@ def _parse(payload: object) -> PluginSettings:
     )
 
 
-def load_plugin_settings(workspace_dir: str | os.PathLike[str]) -> PluginSettings:
-    """读当前选择状态；文件缺失 = 全默认。损坏/超限显式抛错，不静默吞。"""
+def _read_payload(workspace_dir: str | os.PathLike[str]) -> object | None:
+    """读原始 JSON；文件缺失 → None。损坏/超限/读不出显式抛错（不静默吞）。"""
     path = settings_path(workspace_dir)
     try:
         with path.open("rb") as handle:
             raw = handle.read(MAX_SETTINGS_BYTES + 1)
     except FileNotFoundError:
-        return PluginSettings()
+        return None
     except OSError as error:
         raise PluginSettingsError(f"无法读取 {path}: {error}") from error
     if len(raw) > MAX_SETTINGS_BYTES:
         raise PluginSettingsError(f"{path} 超过 {MAX_SETTINGS_BYTES} 字节上限")
     try:
-        payload = json.loads(raw.decode("utf-8-sig"))
+        return json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PluginSettingsError(f"{path} 不是合法 JSON: {error}") from error
+
+
+def load_plugin_settings(workspace_dir: str | os.PathLike[str]) -> PluginSettings:
+    """读当前选择状态；文件缺失 = 全默认。损坏/超限显式抛错，不静默吞。"""
+    payload = _read_payload(workspace_dir)
+    if payload is None:
+        return PluginSettings()
     return _parse(payload)
+
+
+def _parse_tolerant(payload: object) -> tuple[PluginSettings, list[str]]:
+    """逐字段解析（设计 §4）：坏字段记错误并按默认值继续，**其余字段保留**。
+
+    与 `_parse` 的分工：写路径/严格读仍用 `_parse`（一个坏字段整体响亮失败），
+    只读投影与降级读用本函数——否则一个 `{"enabled": "no"}` 会把同文件里合法的
+    `disabled_servers` 一起丢掉，下次装配把用户禁用的 server 又连上。
+    """
+    if not isinstance(payload, dict):
+        raise PluginSettingsError("plugin-settings.json 顶层必须是对象")
+    errors: list[str] = []
+
+    def string_set(field_name: str) -> frozenset[str]:
+        try:
+            return _string_set(payload.get(field_name), field_name)
+        except PluginSettingsError as error:
+            errors.append(str(error))
+            return frozenset()
+
+    disabled_tools: dict[str, frozenset[str]] = {}
+    raw_tools = payload.get("disabled_tools")
+    if raw_tools is not None:
+        if not isinstance(raw_tools, dict):
+            errors.append("disabled_tools 必须是对象")
+        else:
+            for server, tools in raw_tools.items():
+                if not isinstance(server, str):
+                    errors.append("disabled_tools 的键必须是 server 名")
+                    continue
+                try:
+                    disabled_tools[server] = _string_set(tools, f"disabled_tools.{server}")
+                except PluginSettingsError as error:
+                    errors.append(str(error))
+
+    skill_overrides: dict[str, bool] = {}
+    raw_overrides = payload.get("skill_overrides")
+    if raw_overrides is not None:
+        if not isinstance(raw_overrides, dict):
+            errors.append("skill_overrides 必须是对象")
+        else:
+            for name, override in raw_overrides.items():
+                if not isinstance(name, str) or not isinstance(override, dict):
+                    errors.append("skill_overrides 的条目必须是 {<name>: {enabled: bool}}")
+                    continue
+                enabled = override.get("enabled")
+                if not isinstance(enabled, bool):
+                    errors.append(f"skill_overrides.{name}.enabled 必须是布尔值")
+                    continue
+                skill_overrides[name] = enabled
+
+    return (
+        PluginSettings(
+            disabled_servers=string_set("disabled_servers"),
+            disabled_tools=disabled_tools,
+            require_confirm=string_set("require_confirm"),
+            skill_overrides=skill_overrides,
+        ),
+        errors,
+    )
+
+
+def load_plugin_settings_tolerant(
+    workspace_dir: str | os.PathLike[str],
+) -> tuple[PluginSettings, list[str]]:
+    """读选择态：坏 JSON/超限 → 全默认 + 一条错误；坏字段 → 该字段默认 + 错误。
+
+    只读投影（`GET /api/skills`、`GET /api/mcp/servers`）、wiring 降级与写路径的
+    read-modify-write 共用这一份语义：坏字段不得连坐同文件里的合法选择。
+    """
+    try:
+        payload = _read_payload(workspace_dir)
+    except PluginSettingsError as error:
+        return PluginSettings(), [str(error)]
+    if payload is None:
+        return PluginSettings(), []
+    try:
+        return _parse_tolerant(payload)
+    except PluginSettingsError as error:
+        return PluginSettings(), [str(error)]
 
 
 def load_plugin_settings_or_default(
     workspace_dir: str | os.PathLike[str],
 ) -> tuple[PluginSettings, str | None]:
-    """读选择态；坏文件按全默认降级并返回错误文本（调用方决定告警/呈现）。
+    """读选择态；坏文件按默认降级并返回错误文本（调用方决定告警/呈现）。
 
     三处装配/只读投影（wiring ×2、`GET /api/skills`、`GET /api/mcp/servers`）
     共用这一份降级语义：文件损坏是"选不出"，不是"全禁用"，更不该 500。
     """
-    try:
-        return load_plugin_settings(workspace_dir), None
-    except PluginSettingsError as error:
-        return PluginSettings(), str(error)
+    settings, errors = load_plugin_settings_tolerant(workspace_dir)
+    return settings, ("；".join(errors) if errors else None)
 
 
 def _write_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -171,6 +257,14 @@ def _write_atomic(path: Path, payload: dict[str, object]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
+        # 落 rename 后 fsync 父目录：否则崩溃时目录项可能还没落盘（部分文件系统）。
+        # 打不开目录（如 Windows）就跳过——这是尽力而为的持久化加固，不是写入前提。
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except BaseException:
         try:
             os.unlink(temp_name)
@@ -191,7 +285,9 @@ def mutate_plugin_settings(
     path = settings_path(workspace_dir)
     try:
         with registry_lock(path):
-            current = load_plugin_settings(workspace_dir)
+            # 容错读：坏字段按默认继续，写回时自然归一化——否则一个手改坏的
+            # 字段会让管理窗口的每个开关都 500，且用户无从在 UI 里修复。
+            current, _read_errors = load_plugin_settings_tolerant(workspace_dir)
             updated = mutate(current)
             _write_atomic(path, updated.to_dict())
             return updated

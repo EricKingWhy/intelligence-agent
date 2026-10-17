@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Puzzle, RefreshCw, X } from 'lucide-react';
 import {
+  disconnectMcpServer,
   getMcpServerTools,
   getMcpServers,
   getSkills,
@@ -114,32 +115,36 @@ function PluginPanelBody() {
 
   // 工具清单按选中 server 现拉（含被工具级禁用的条目）。
   const serverName = selectedServer?.name ?? null;
+  // 抽成回调：工具开关写完后要重拉这份清单——`load()` 只刷新 server/skill 列表，
+  // 不碰 chips，否则界面上按下的状态永远停在旧值（写成功但看起来没生效）。
+  const refreshTools = useCallback(async (name: string) => {
+    try {
+      setTools(await getMcpServerTools(name));
+    } catch (e) {
+      setError(`加载工具清单失败：${(e as Error).message}`);
+    }
+  }, []);
   useEffect(() => {
     if (serverName === null) {
       setTools(null);
       return;
     }
-    let cancelled = false;
     setTools(null);
-    getMcpServerTools(serverName)
-      .then((items) => {
-        if (!cancelled) setTools(items);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(`加载工具清单失败：${(e as Error).message}`);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [serverName]);
+    void refreshTools(serverName);
+  }, [serverName, refreshTools]);
 
-  const run = async (key: string, action: () => Promise<void>, done = RESTART_NOTICE) => {
+  /** `done=null`：动作自己用 `setNotice` 写更精确的结果（重连成功/失败两态）。 */
+  const run = async (
+    key: string,
+    action: () => Promise<void>,
+    done: string | null = RESTART_NOTICE,
+  ) => {
     setBusy(key);
     setError(null);
     setNotice(null);
     try {
       await action();
-      setNotice(done);
+      if (done !== null) setNotice(done);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -190,14 +195,18 @@ function PluginPanelBody() {
             {visibleServers.map((server) => {
               const selected =
                 selection?.kind === 'server' && selection.name === server.name;
-              const dot = !server.enabled
+              const dot = !server.config_enabled
+                ? 'gray'
+                : !server.enabled
                 ? 'gray'
                 : server.needs_auth
                   ? 'amber'
                   : server.connected
                     ? 'green'
                     : 'gray';
-              const meta = !server.enabled
+              const meta = !server.config_enabled
+                ? '配置已禁用'
+                : !server.enabled
                 ? '已禁用'
                 : server.needs_auth
                   ? '需要认证'
@@ -265,9 +274,27 @@ function PluginPanelBody() {
                 run(
                   `reconnect:${selectedServer.name}`,
                   async () => {
-                    await reconnectMcpServer(selectedServer.name);
+                    // 端点 200 但 connected=false（例如 OAuth 仍缺授权）不是成功：
+                    // 通知文案必须如实反映，不能一律说"已重新连接"。
+                    const connected = await reconnectMcpServer(selectedServer.name);
+                    setNotice(
+                      connected
+                        ? '已重新连接。'
+                        : '重连未建立连接；如提示需要认证，请先在 CLI 完成 OAuth 登录。',
+                    );
                   },
-                  '已重新连接。',
+                  null,
+                )
+              }
+              onDisconnect={() =>
+                run(
+                  `disconnect:${selectedServer.name}`,
+                  async () => {
+                    const disconnected = await disconnectMcpServer(selectedServer.name);
+                    if (!disconnected) throw new Error('该 server 当前没有可断开的连接。');
+                  },
+                  // 断开是立即生效的连接动作，不是"重启后生效"的选择态。
+                  '已断开连接；可随时点「重新连接」恢复。',
                 )
               }
               onToggleEnabled={(enabled) =>
@@ -281,9 +308,10 @@ function PluginPanelBody() {
                 )
               }
               onToggleTool={(tool, enabled) =>
-                run(`tool:${selectedServer.name}:${tool}`, () =>
-                  setMcpToolEnabled(selectedServer.name, tool, enabled),
-                )
+                run(`tool:${selectedServer.name}:${tool}`, async () => {
+                  await setMcpToolEnabled(selectedServer.name, tool, enabled);
+                  await refreshTools(selectedServer.name);
+                })
               }
             />
           )}
@@ -348,6 +376,7 @@ function ServerDetail({
   tools,
   busy,
   onReconnect,
+  onDisconnect,
   onToggleEnabled,
   onToggleRequireConfirm,
   onToggleTool,
@@ -356,11 +385,17 @@ function ServerDetail({
   tools: McpServerToolEntry[] | null;
   busy: string | null;
   onReconnect: () => void;
+  onDisconnect: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onToggleRequireConfirm: (value: boolean) => void;
   onToggleTool: (tool: string, enabled: boolean) => void;
 }) {
-  const status = !server.enabled
+  // config 级 `enabled:false` 是配置源的事实，运行时选择态盖不过它：
+  // 面板开关对它无效，状态必须说清"需改配置"，不能假装点一下就能启用。
+  const configOff = !server.config_enabled;
+  const status = configOff
+    ? { label: '配置已禁用', tone: 'gray' }
+    : !server.enabled
     ? { label: '已禁用', tone: 'gray' }
     : server.needs_auth
       ? { label: '需要认证', tone: 'amber' }
@@ -370,6 +405,7 @@ function ServerDetail({
   const enabledBusy = busy === `server:${server.name}`;
   const confirmBusy = busy === `confirm:${server.name}`;
   const reconnectBusy = busy === `reconnect:${server.name}`;
+  const disconnectBusy = busy === `disconnect:${server.name}`;
 
   return (
     <>
@@ -385,10 +421,20 @@ function ServerDetail({
           >
             {reconnectBusy ? '重连中…' : '重新连接'}
           </button>
+          {/* 断开只在真的连着时可点：对未连接的 server 发断开是空操作。 */}
           <button
             type="button"
             className="plugin-btn"
-            disabled={enabledBusy}
+            disabled={disconnectBusy || !server.connected}
+            onClick={onDisconnect}
+          >
+            {disconnectBusy ? '断开中…' : '断开'}
+          </button>
+          <button
+            type="button"
+            className="plugin-btn"
+            disabled={enabledBusy || configOff}
+            title={configOff ? '该 server 在配置里被禁用；需修改配置后重启' : undefined}
             onClick={() => onToggleEnabled(!server.enabled)}
           >
             {server.enabled ? '禁用' : '启用'}
@@ -450,12 +496,17 @@ function ServerDetail({
           <input
             type="checkbox"
             className="plugin-switch"
-            checked={server.enabled}
-            disabled={enabledBusy}
+            checked={server.enabled && !configOff}
+            disabled={enabledBusy || configOff}
             onChange={(e) => onToggleEnabled(e.target.checked)}
           />
           启用此 server
         </label>
+        {configOff && (
+          <div className="plugin-meta">
+            配置里标记为禁用（enabled: false）；修改配置并重启后才会接线。
+          </div>
+        )}
         <label className="switch-row">
           <input
             type="checkbox"

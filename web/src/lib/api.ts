@@ -396,6 +396,8 @@ export interface McpServerEntry {
   tool_count: number;
   /** 「调用工具前需要我确认」开关。 */
   require_confirm: boolean;
+  /** config 级 `enabled:false`（不是运行时选择态：面板开关管不到，需改配置）。 */
+  config_enabled: boolean;
   /** 详情页配置摘要（配置层原文；只读）。 */
   transport: string;
   command: string;
@@ -419,6 +421,7 @@ export async function getMcpServers(): Promise<{ servers: McpServerEntry[]; erro
         needs_auth: s.needs_auth === true,
         tool_count: typeof s.tool_count === 'number' ? s.tool_count : 0,
         require_confirm: s.require_confirm === true,
+        config_enabled: s.config_enabled !== false,
         transport: typeof s.transport === 'string' ? s.transport : '',
         command: typeof s.command === 'string' ? s.command : '',
         url: typeof s.url === 'string' ? s.url : '',

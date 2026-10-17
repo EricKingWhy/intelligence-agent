@@ -2493,13 +2493,14 @@ def create_app(
         from agent_harness.mcp.capability import MCPCapability
         from agent_harness.plugins.settings import load_plugin_settings_or_default
 
+        # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
+        # 替换实现注入的是这一份，不要绕过它去闭包里的初始 AppState——写端点
+        # 落盘用的 workspace 也必须与这里读的是同一个，否则开关写了却读不回。
+        agent_settings = getattr(app.state.agent, "settings", None) or state.settings
         # 读不出选择态不拖垮只读列表：按默认（全部启用）投影，错误如实附带。
         plugin_settings, settings_error = load_plugin_settings_or_default(
-            state.settings.workspace_dir
+            agent_settings.workspace_dir
         )
-
-        # 经 app.state.agent（与 skills / 插件管理路由同一条取用面）：测试与
-        # 替换实现注入的是这一份，不要绕过它去闭包里的初始 AppState。
         _, wiring = await app.state.agent.get_wiring()
         capability = next(
             (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
@@ -2522,7 +2523,7 @@ def create_app(
 
             names = []
             try:
-                config = parse_capabilities_config(state.settings.capabilities)
+                config = parse_capabilities_config(agent_settings.capabilities)
                 mcp_config = config.get("mcp")
                 if mcp_config is not None:
                     names = [server.name for server in parse_mcp_servers(mcp_config.options)]
@@ -2544,6 +2545,9 @@ def create_app(
                     "needs_auth": needs_auth[name],
                     "tool_count": tool_counts[name],
                     "require_confirm": plugin_settings.requires_confirmation(name),
+                    # config 级 `enabled:false`：不接线也不受 plugin-settings 控制，
+                    # 面板据此说明"需改配置启用"（运行时选择态管不到它）。
+                    "config_enabled": getattr(configs.get(name), "enabled", True),
                     # #1200 Phase 1：详情页配置摘要（缺省空串，不伪造）。
                     "transport": getattr(configs.get(name), "transport", "") or "",
                     "command": getattr(configs.get(name), "command", "") or "",
@@ -2570,7 +2574,8 @@ def create_app(
         """
         from agent_harness.mcp.capability import MCPCapability
 
-        _, wiring = await state.get_wiring()
+        # 与列表端点同一条取用面（app.state.agent，而不是闭包里的初始 AppState）。
+        _, wiring = await app.state.agent.get_wiring()
         capability = next(
             (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
         )

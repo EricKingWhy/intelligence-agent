@@ -60,10 +60,16 @@ def register_skill_routes(app: FastAPI) -> None:
         # 不叠加选择态（条目自带的 enabled 仍是权威的目录投影）。
         agent_settings = getattr(app.state.agent, "settings", None)
         workspace_dir = getattr(agent_settings, "workspace_dir", None)
+        settings_error: str | None = None
         if workspace_dir is not None:
-            plugin_settings, _ = load_plugin_settings_or_default(workspace_dir)
+            plugin_settings, settings_error = load_plugin_settings_or_default(workspace_dir)
         else:
             plugin_settings = None
+        errors = list(capability.errors())
+        if settings_error is not None:
+            # 选择态坏文件不能静默：否则 UI 上"全部启用"与磁盘真相不一致，
+            # 用户也无从知道禁用为什么没生效。
+            errors.append(f"plugin-settings.json 不可读：{settings_error}")
         payload = {
             # 文件即真相的投影（只读）；正文经 load_skill / 文件系统按需读。
             "skills": [
@@ -78,7 +84,7 @@ def register_skill_routes(app: FastAPI) -> None:
                 for entry in entries
             ],
             "drafts": drafts,
-            "errors": capability.errors(),
+            "errors": errors,
             "conflicts": capability.conflicts(),
         }
         nonce = getattr(request.state, "host_skills_challenge_nonce", None)
