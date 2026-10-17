@@ -366,6 +366,21 @@ async def _wire_skills(
     if enabled_global_skill_digests:
         directories.append(global_managed_dir)
     directories.extend(additional_directories)
+    # #1200 / 裁决 C1：管理选择态（禁用名）在装配期读一次；坏文件响亮告警并
+    # 按默认继续（OPTIONAL 子系统不得拖垮 core）。
+    from agent_harness.plugins.settings import load_plugin_settings_or_default
+
+    plugin_settings, settings_error = load_plugin_settings_or_default(settings.workspace_dir)
+    if settings_error is not None:
+        logger.warning("plugin-settings.json 不可读，按默认（全部启用）继续：%s", settings_error)
+    directory_provenance: dict[Path, tuple[str, str]] = {
+        global_dir: ("global", "personal"),
+        project_dir: ("workspace", "project"),
+    }
+    for extra in additional_directories:
+        # setdefault：额外目录若与已知根重合（同一路径既被配置又自动发现），
+        # 不能被降级成 personal/workspace 覆盖掉 global/project 的既有归属。
+        directory_provenance.setdefault(extra, ("workspace", "personal"))
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
     discovery = SkillDiscovery(
@@ -381,6 +396,8 @@ async def _wire_skills(
             "global": enabled_global_skill_digests,
         },
         selection_errors=selection_errors,
+        disabled_names=plugin_settings.skill_disabled_names(),
+        directory_provenance=directory_provenance,
     )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
@@ -425,9 +442,16 @@ async def _wire_mcp(
         MCPPackageError,
         MCPPackageManager,
     )
+    from agent_harness.plugins.settings import load_plugin_settings_or_default
+
+    # #1200：管理选择态（禁用 server / 工具、调用前确认）。文件缺失=全默认；
+    # 损坏则记 warning 按默认继续——可选子系统不得拖垮装配（与 _wire_skills 同款）。
+    plugin_settings, settings_error = load_plugin_settings_or_default(settings.workspace_dir)
+    if settings_error is not None:
+        logger.warning("plugin-settings.json 不可读，MCP 按默认（全部启用）继续：%s", settings_error)
 
     try:
-        servers = parse_mcp_servers(cfg.options)
+        parsed_servers = parse_mcp_servers(cfg.options)
     except ConfigError as error:
         raise CapabilityError(
             f"capability 'mcp' 配置错误：{error}", code="init_failed"
@@ -436,7 +460,7 @@ async def _wire_mcp(
         settings.workspace_dir,
         global_skills_dir=settings.skill_global_dir or None,
     )
-    configured_servers = [server for server in servers if server.enabled]
+    configured_servers = [server for server in parsed_servers if server.enabled]
     try:
         packaged_servers = package_manager.selected_servers(
             reserved_server_names={server.name for server in configured_servers}
@@ -452,6 +476,20 @@ async def _wire_mcp(
         *configured_servers,
         *(server for server in packaged_servers if server.enabled),
     ]
+    # 管理面配置层（`configs()`）= 全部配置 server + 全部选中的包，**两边都含
+    # `enabled:false` 的条目**。禁用项不接线，但管理窗口要看得见（裁决 C1：禁用≠删除）；
+    # 配置层禁用只能改配置启用，包内禁用只能改包源——`plugin-settings.json` 只表达"再禁用"。
+    # 只把 enabled 的包放进 configs 会让包内 `enabled:false` 的 server 从窗口里彻底消失
+    # （既不接线也不可见），与 config 级禁用项的处理不对称。
+    # 按名去重、先到先得（配置层优先，与 `reserved_server_names` 同一优先级）：
+    # 同名条目重复进 configs 会让详情页的配置摘要按后者渲染。
+    all_servers: list = []
+    for candidate in (*parsed_servers, *packaged_servers):
+        if candidate.name not in {server.name for server in all_servers}:
+            all_servers.append(candidate)
+    # 禁用 server 不装配（不连接），但保留在 configs 里：管理窗口要显示它并
+    # 允许重新启用（裁决 D1：重启后生效）。
+    disabled_servers = plugin_settings.disabled_servers
     names = [server.name for server in servers]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -460,7 +498,13 @@ async def _wire_mcp(
             "resolve the source explicitly",
             code="init_failed",
         )
-    capability = await build_mcp_capability(servers)
+    capability = await build_mcp_capability(
+        servers,
+        disabled_servers=disabled_servers,
+        disabled_tools=plugin_settings.disabled_tools,
+        require_confirm=plugin_settings.require_confirm,
+        all_servers=all_servers,
+    )
     # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
     # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了
     # 但 tools/list 为空的 server（mis-scoped token 常见症状）走"无工具降级

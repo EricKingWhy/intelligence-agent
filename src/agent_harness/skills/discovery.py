@@ -40,10 +40,27 @@ MAX_SKILL_BYTES = 64_000
 SKILL_NAME_MAX_LENGTH = 64
 _NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-_]*")
 
+
+def is_valid_skill_name(name: str) -> bool:
+    """发现 / 写入 / 管理端点共用的唯一 name 判据（#588 白名单 + 长度上限）。"""
+    return bool(_NAME_PATTERN.fullmatch(name)) and len(name) <= SKILL_NAME_MAX_LENGTH
+
 #: 目录行 / ToolResult message 是**单行声明面**（#588 兜底层）。
 #: #607/F2：补 U+0085 NEL / U+2028 LS / U+2029 PS——str.splitlines() 识别集的
 #: 这三成员（CPython 文档全集，本机 3.13.5 实测）漏掉则「单行」输出仍被撕成多行。
 _LINE_BREAKERS = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
+
+
+def slash_display_name(name: str, plugin: str | None) -> str:
+    """`/` 菜单显示名（#1200）：插件来源 skill 用 `plugin:name` 消歧。
+
+    namespace 与 name 相同时省略——托管安装的 plugin 名就是 skill 名，否则会
+    渲染出 `/code-review:code-review` 这种自指前缀。后端注册表、Context 里的
+    确定性调用解析、前端 `slashDisplayName` 共用这一条规则。
+    """
+    if plugin and plugin != name:
+        return f"{plugin}:{name}"
+    return name
 
 
 def single_line(text: str) -> str:
@@ -90,6 +107,16 @@ class SkillCatalogEntry:
     scanned_root: Path | None = None
     # Verify the exact bytes consumed by lazy load_skill against the install snapshot.
     managed_skill_sha256: str | None = None
+    # #1200：管理面来源标注（发现期由扫描根决定，与正文解析无关）。
+    # scope 是装配作用域（全局目录 / workspace 目录）；origin 是来源类别
+    # （personal=用户手写、project=workspace 内、plugin=安装的包）。
+    scope: str = "workspace"
+    origin: str = "personal"
+    plugin: str | None = None
+    # #1200：管理选择态（plugin-settings.json 的 skill_overrides）。禁用条目仍在
+    # 目录里（禁用≠删除），但 SkillCapability.catalog() 只投影启用项——模型
+    # Context / `/` 菜单看不到，load_skill 也拒绝加载。
+    enabled: bool = True
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
@@ -183,7 +210,7 @@ def parse_skill_markdown_text(
     when_to_use = meta.pop("when_to_use", None)
     if not isinstance(name, str) or not name.strip():
         errors.append(f"{_spath(path)}: frontmatter requires non-empty 'name'")
-    elif not _NAME_PATTERN.fullmatch(name) or len(name) > SKILL_NAME_MAX_LENGTH:
+    elif not is_valid_skill_name(name):
         # #588：多行/控制符 name 会插值进 ToolResult message 与 catalog 目录行，
         # 把单行声明拉成多行、可伪造后续行的"系统语气"——入口整体拒绝，进 errors
         # 可观察（ADR-0011 Q1 同款通道）。name 走 repr、path 走 _spath 单行化，错误行自身保持单行。
@@ -244,6 +271,8 @@ class SkillDiscovery:
         managed_directories: dict[str, Path] | None = None,
         enabled_managed_digests: dict[str, dict[str, str]] | None = None,
         selection_errors: list[str] | None = None,
+        disabled_names: frozenset[str] | None = None,
+        directory_provenance: dict[Path, tuple[str, str]] | None = None,
     ) -> None:
         self._directories = [Path(d) for d in directories]
         self._manual_paths = [Path(p) for p in (manual_paths or [])]
@@ -266,6 +295,13 @@ class SkillDiscovery:
             scope: dict(digests)
             for scope, digests in (enabled_managed_digests or {}).items()
         }
+        # #1200：禁用名（plugin-settings.json）——条目仍被发现，只是 enabled=False。
+        self._disabled_names = frozenset(disabled_names or ())
+        # #1200：扫描根 → (scope, origin)。未登记的目录按 project/workspace 处理
+        # （options 扩展目录属于本项目装配面）。
+        self._directory_provenance = {
+            Path(path): value for path, value in (directory_provenance or {}).items()
+        }
         # 最近一次 discover() 结果的缓存：SkillCapability 持本类引用（不再是装配期
         # 静态 catalog），写入方法刷新后 capability 的可见性随之收敛。
         self._catalog: SkillCatalog | None = None
@@ -284,7 +320,15 @@ class SkillDiscovery:
         seen: dict[str, tuple[Path, bool]] = {}
         blocked_managed_conflicts: set[str] = set()
 
-        def _consider(path: Path, origin: str, root: Path | None) -> None:
+        def _consider(
+            path: Path,
+            origin: str,
+            root: Path | None,
+            *,
+            scope: str = "workspace",
+            origin_kind: str = "project",
+            plugin: str | None = None,
+        ) -> None:
             claim = self._managed_claim_for(path)
             if claim is not None and claim.digest is None:
                 return
@@ -305,6 +349,13 @@ class SkillDiscovery:
                     scanned_root=root,
                     managed_skill_sha256=managed_digest,
                 )
+            entry = replace(
+                entry,
+                scope=scope,
+                origin=origin_kind,
+                plugin=plugin,
+                enabled=entry.name not in self._disabled_names,
+            )
             if entry.name in blocked_managed_conflicts:
                 return
             if entry.name in seen:
@@ -340,20 +391,29 @@ class SkillDiscovery:
                 # 容错契约，绝不中断整个扫描（否则一个坏目录让所有技能消失）。
                 catalog.errors.append(f"[directory] {_spath(directory)}: unreadable ({error})")
                 continue
+            scope, origin_kind = self._directory_provenance.get(
+                directory, ("workspace", "project")
+            )
             for skill_dir in skill_dirs:
                 if managed_scope is not None and skill_dir.name not in self._enabled_digests(managed_scope):
                     continue
                 skill_file = skill_dir / "SKILL.md"
                 if skill_dir.is_dir() and skill_file.is_file():
+                    managed_scope_kind = (
+                        "workspace" if managed_scope == "project" else "global"
+                    )
                     _consider(
                         skill_file,
                         "directory",
                         skill_dir if managed_scope is not None else directory,
+                        scope=managed_scope_kind if managed_scope is not None else scope,
+                        origin_kind="plugin" if managed_scope is not None else origin_kind,
+                        plugin=skill_dir.name if managed_scope is not None else None,
                     )
 
         for manual in self._manual_paths:
             if manual.is_file():
-                _consider(manual, "manual", None)
+                _consider(manual, "manual", None, scope="global", origin_kind="personal")
             else:
                 catalog.errors.append(f"[manual] {_spath(manual)}: not a file")
         self._catalog = catalog
@@ -481,7 +541,7 @@ class SkillDiscovery:
         # 纵深防御（审查 P2）：entry.name 是磁盘路径的组成部分——解析期白名单
         # （#588）在这里同样强制，公开写入 API 的任何调用方（不限于 promoter 的
         # 解析路径）都不能让 `../x` 式 name 落到 project 目录之外。
-        if not _NAME_PATTERN.fullmatch(entry.name) or len(entry.name) > SKILL_NAME_MAX_LENGTH:
+        if not is_valid_skill_name(entry.name):
             raise ValueError(
                 f"refusing to write: invalid skill name {entry.name!r} "
                 f"(must match ^[a-z0-9][a-z0-9-_]*$, max {SKILL_NAME_MAX_LENGTH} chars)"

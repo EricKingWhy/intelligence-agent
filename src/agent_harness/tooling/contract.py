@@ -202,6 +202,11 @@ class Tool(ABC):
     #: 副作用」的工具（如 update_plan 发布计划清单）。
     plan_mode_exempt: bool = False
 
+    #: #1200 调用前确认标记：True 时 Executor 在规则引擎 ALLOW 早退**之前**
+    #: 强制走审批（插件管理的「调用工具前需要我确认」）。MCP 工具按 server
+    #: 选择态设置；普通工具默认 False。
+    require_confirmation: bool = False
+
     # —— 必填字段（身份 + Schema + 行为） ——
     @property
     @abstractmethod

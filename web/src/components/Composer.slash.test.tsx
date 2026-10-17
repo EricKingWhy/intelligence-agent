@@ -24,6 +24,7 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     compactSession: vi.fn(),
     getTaskState: vi.fn(),
+    getSlashRegistry: vi.fn(),
   };
 });
 vi.mock('../lib/auth', async (importOriginal) => {
@@ -31,7 +32,14 @@ vi.mock('../lib/auth', async (importOriginal) => {
   return { ...actual, getToken: vi.fn(() => null) };
 });
 
-import { compactSession, getTaskState, type SessionContextCompacted, type TaskState } from '../lib/api';
+import {
+  compactSession,
+  getSlashRegistry,
+  getTaskState,
+  type SessionContextCompacted,
+  type SlashRegistryCommand,
+  type TaskState,
+} from '../lib/api';
 import { Composer } from './Composer';
 
 type SubmitArgs = [task: string, rememberAsProceduralRule: boolean, attachmentIds?: string[], scope?: 'session' | 'project' | 'global'];
@@ -41,6 +49,18 @@ let root: Root;
 let onSubmit: Mock<(...args: SubmitArgs) => void>;
 let onSteer: Mock<(...args: SubmitArgs) => void>;
 let fetchMock: Mock;
+
+/** #1200：后端 registry 的固定投影（5 builtin + 3 skill，含插件命名空间）。 */
+const REGISTRY: SlashRegistryCommand[] = [
+  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
+  { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
+  { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
+  { name: 'model', kind: 'builtin', description: '选择本会话使用的模型' },
+  { name: 'deep-research', kind: 'skill', description: '深度调研', argumentHint: '主题…' },
+  { name: 'api-design', kind: 'skill', description: 'REST API 设计审查' },
+  { name: 'code-review', kind: 'skill', description: '双轴代码审查', namespace: 'acme' },
+];
 
 const taskState = (text: string | null): TaskState => ({
   defined: text !== null,
@@ -96,6 +116,8 @@ async function typeText(text: string): Promise<void> {
     setter?.call(ta, text);
     ta.dispatchEvent(new Event('input', { bubbles: true }));
   });
+  // #1200：菜单打开时才拉 registry——再冲一次微任务，让 mock 的 resolve 落到 DOM。
+  await act(async () => {});
 }
 
 function press(key: string, opts: KeyboardEventInit = {}): boolean {
@@ -141,6 +163,8 @@ beforeEach(async () => {
   onSteer = vi.fn();
   vi.mocked(compactSession).mockReset();
   vi.mocked(getTaskState).mockReset();
+  vi.mocked(getSlashRegistry).mockReset();
+  vi.mocked(getSlashRegistry).mockResolvedValue(REGISTRY);
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
   await mount();
@@ -156,12 +180,155 @@ afterEach(async () => {
 });
 
 describe('#1195 触发与渲染', () => {
-  it('行首 / → 菜单开，5 条命令按分组齐全', async () => {
+  it('行首 / → 菜单开，内置命令与 Skills 两组齐全（单一注册表）', async () => {
     await typeText('/');
     expect(menu()).not.toBeNull();
-    expect(menuItems().length).toBe(5);
-    expect(container.textContent).toContain('添加');
-    expect(container.textContent).toContain('指令');
+    expect(menuItems().length).toBe(REGISTRY.length);
+    expect(container.textContent).toContain('内置命令');
+    expect(container.textContent).toContain('Skills');
+  });
+
+  it('skill 行展示 /name + argument-hint + 描述', async () => {
+    await typeText('/');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    expect(item.textContent).toContain('/deep-research');
+    expect(item.textContent).toContain('主题…');
+    expect(item.textContent).toContain('深度调研');
+  });
+
+  it('插件 skill 用 namespace:name 消歧', async () => {
+    await typeText('/');
+    const item = container.querySelector('[data-slash-name="acme:code-review"]')!;
+    expect(item.textContent).toContain('/acme:code-review');
+  });
+
+  it('禁用 skill 由后端排除：注册表里没有就不渲染', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue(
+      REGISTRY.filter((c) => c.name !== 'api-design'),
+    );
+    await mount();
+    await typeText('/');
+    expect(container.querySelector('[data-slash-name="api-design"]')).toBeNull();
+  });
+
+  it('注册表加载中：菜单说"正在加载"，Enter 不把 `/` 输入当聊天发出去', async () => {
+    let resolveRegistry: (v: SlashRegistryCommand[]) => void = () => {};
+    vi.mocked(getSlashRegistry).mockImplementation(
+      () => new Promise<SlashRegistryCommand[]>((resolve) => { resolveRegistry = resolve; }),
+    );
+    // 挂载即拉 ⇒ 必须**重挂**才能回到"表还没到手"的首帧：beforeEach 的那次挂载
+    // 已用已解析的表填过 state，就地重渲染会读到它。
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    await mount();
+    await typeText('/go');
+    expect(menu()?.textContent).toContain('正在加载命令');
+    textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    // 加载完成后菜单才给出真实命中（不缓存空表）。
+    await act(async () => { resolveRegistry(REGISTRY); });
+    expect(menu()?.textContent).toContain('/goal');
+  });
+
+  /* 注册表**挂载即拉**（不再等菜单打开）：粘贴 `/goal 目标` 直接 Enter 时若表还是
+     null，同名消歧无从判定，skill 会被静默判给内置命令。 */
+  it('挂载即拉注册表：首帧输入就能做同名消歧', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'goal', kind: 'skill', description: '同名 skill' },
+    ]);
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    expect(getSlashRegistry).toHaveBeenCalled();
+    // 未开菜单、直接粘贴提交：同名 skill 赢（注册表已在手，不必先开菜单）。
+    await typeText('/goal 目标');
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/goal 目标', false, [], 'session');
+    expect(compactSession).not.toHaveBeenCalled();
+  });
+
+  it('点选 skill：只做预填 `/name `（不执行、不发送），Enter 才提交给后端执行', async () => {
+    await typeText('/deep');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // 点选 = 预填（Claude Code 语义）；执行发生在 Enter 提交时，由后端按
+    // 「消息开头出现 skill 名」确定性注入正文。
+    expect(textarea().value).toBe('/deep-research ');
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(menu()).toBeNull();
+    // Enter 把整条 `/skill` 交给既有发送路径（后端展开，不是前端本地执行）。
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/deep-research', false, [], 'session');
+  });
+
+  /* 后端 `_INVOCATION` 锚定**整条消息开头**：`hello /deep` 永远不会执行 skill。
+     点选时保留命令前的前缀（内置命令的 B-S-3 语义）会把用户的点选变成一次静默的
+     普通聊天——所以 skill 走"替换整条输入"，并给可见提示。 */
+  it('点选 skill：不保留命令前的前缀（后端锚定消息开头），且给出可见提示', async () => {
+    await typeText('hello /deep');
+    const item = container.querySelector('[data-slash-name="deep-research"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(textarea().value).toBe('/deep-research ');
+    expect(container.querySelector('[data-testid=slash-info]')?.textContent).toContain(
+      'skill 需在消息开头调用',
+    );
+    // 提交的是纯 `/skill` ⇒ 后端 `_INVOCATION` 命中，正文真被注入。
+    press('Enter');
+    expect(onSubmit).toHaveBeenCalledWith('/deep-research', false, [], 'session');
+  });
+
+  it('skill 与内置同名：执行 skill（提交不被内置命令截走）', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'goal', kind: 'skill', description: '同名 skill' },
+    ]);
+    // 注册表只在菜单打开时拉取：换 mock 后必须重挂，否则读到的还是旧表。
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await mount();
+    // 注册表只在菜单打开时拉取（触发条件：输入以 `/token` 结尾）——先输入
+    // `/goal` 让菜单打开并落定注册表，再补参数。
+    await typeText('/goal');
+    await act(async () => {});
+    await typeText('/goal 目标文本');
+    press('Enter');
+    // 注册表里的 skill 赢：走 onSubmit 让后端展开，而不是本地跑内置 /goal。
+    expect(onSubmit).toHaveBeenCalledWith('/goal 目标文本', false, [], 'session');
+    expect(getTaskState).not.toHaveBeenCalled();
+  });
+
+  it('命名空间 skill 的 aria-activedescendant 指向真实存在的选项 id', async () => {
+    await typeText('/acme');
+    const ta = textarea();
+    const id = ta.getAttribute('aria-activedescendant');
+    expect(id).toBe('slash-opt-skill:acme:code-review');
+    const option = container.querySelector(`#${CSS.escape(id!)}`);
+    expect(option).not.toBeNull();
+    expect(option?.getAttribute('role')).toBe('option');
+  });
+
+  it('内置命令与前端执行表漂移：点选可见错误，不静默 no-op', async () => {
+    vi.mocked(getSlashRegistry).mockResolvedValue([
+      ...REGISTRY,
+      { name: 'ghost', kind: 'builtin', description: '后端新增但前端未实现' },
+    ]);
+    await mount();
+    await typeText('/ghost');
+    const item = container.querySelector('[data-slash-name="ghost"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(slashError()).toContain('命令未实现：/ghost');
+    expect(textarea().value).toBe('/ghost');
   });
 
   it('空格后 / 触发', async () => {
@@ -182,7 +349,15 @@ describe('#1195 触发与渲染', () => {
   it('fuzzy 过滤：/pl → 只剩 plan', async () => {
     await typeText('/pl');
     expect(menuItems().length).toBe(1);
-    expect(menuItems()[0].textContent).toContain('计划');
+    expect(menuItems()[0].textContent).toContain('plan');
+  });
+
+  it('fuzzy 过滤 skill：/deep → deep-research 排首位', async () => {
+    await typeText('/deep');
+    // fuzzy 是**子序列**匹配：`deep` 也能穿过 `api-design` 的描述（REST API 设计审查）
+    // 命中，故这里钉的是**排序**（显示名前缀命中得分最高），不是「唯一命中」。
+    expect(menuItems()[0].getAttribute('data-slash-name')).toBe('deep-research');
+    expect(menuItems().length).toBeLessThan(REGISTRY.length);
   });
 
   it('无命中空态：无匹配命令', async () => {
@@ -534,7 +709,7 @@ describe('#1195 findings 修回 — 菜单与反馈面', () => {
     const menuId = ta.getAttribute('aria-controls');
     expect(menuId).toBeTruthy();
     expect(document.getElementById(menuId!)).not.toBeNull();
-    expect(ta.getAttribute('aria-activedescendant')).toBe('slash-opt-plan');
+    expect(ta.getAttribute('aria-activedescendant')).toBe('slash-opt-builtin:plan');
   });
 });
 

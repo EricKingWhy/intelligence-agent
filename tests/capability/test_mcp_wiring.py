@@ -92,6 +92,11 @@ async def test_mcp_wiring_contributes_namespaced_tools(tmp_path, stub_connection
     assert names == ["mcp__srv1__echo"], names
     # disabled server 不连接
     assert [c.config.name for c in stub_connections.instances] == ["srv1"]
+    # 管理面配置层要含 config 级 enabled:false 的 server（禁用≠删除，可重新启用）。
+    capability = next(
+        c for c in wiring.lifecycle if c.__class__.__name__ == "MCPCapability"
+    )
+    assert [server.name for server in capability.configs()] == ["srv1", "srv2"]
     # descriptor 已注册（registry.available 含 mcp）
     assert any(d.name == "mcp" for d in registry.available())
     # capability 挂 lifecycle（aclose 关闭其全部连接，AppState.shutdown 调用）
@@ -380,3 +385,130 @@ async def test_appstate_shutdown_closes_mcp_lifecycle(tmp_path):
     state._registry, state._wiring = None, wiring
     await state.shutdown()
     assert fake.closed, "AppState.shutdown 必须关闭 lifecycle 通道"
+
+
+# ---------------------------------------------------------------------------
+# #1200：plugin-settings.json 的 MCP 选择态在装配期生效（裁决 D1：重启后生效）
+# ---------------------------------------------------------------------------
+
+
+def _write_plugin_settings(tmp_path, payload: dict) -> None:
+    (tmp_path / "plugin-settings.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_disabled_server_is_skipped_at_wiring_but_listed(
+    tmp_path, stub_connections
+):
+    """禁用的 server 不连接（不装配），但仍留在 capability.configs 里——
+    管理窗口要能显示它并重新启用。"""
+    _write_plugin_settings(tmp_path, {"disabled_servers": ["off"]})
+    settings = _settings([_stdio("on"), _stdio("off")], tmp_path)
+    config = parse_capabilities_config(settings.capabilities)
+
+    wiring = await wire_capabilities(CapabilityRegistry(), config, settings=settings)
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__on__echo"]
+    assert [c.config.name for c in stub_connections.instances] == ["on"]
+    capability = next(
+        item for item in wiring.lifecycle if hasattr(item, "all_server_names")
+    )
+    assert capability.all_server_names() == ["on", "off"]
+    assert capability.is_connected("off") is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_tool_is_not_contributed_but_visible(
+    tmp_path, stub_connections
+):
+    """工具级禁用（Windsurf disabledTools 同形）：不进模型工具表，但管理面
+    仍能列出它并给回开关。"""
+
+    async def _two_tools(self):
+        return [make_fake_tool("echo"), make_fake_tool("drop")]
+
+    stub_connections.list_tools = _two_tools
+    _write_plugin_settings(
+        tmp_path, {"disabled_tools": {"srv": ["drop"]}}
+    )
+    settings = _settings([_stdio("srv")], tmp_path)
+
+    wiring = await wire_capabilities(
+        CapabilityRegistry(),
+        parse_capabilities_config(settings.capabilities),
+        settings=settings,
+    )
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__srv__echo"]
+    capability = next(
+        item for item in wiring.lifecycle if hasattr(item, "tools_for")
+    )
+    assert [tool.remote_name for tool in capability.tools_for("srv")] == ["echo", "drop"]
+
+
+@pytest.mark.asyncio
+async def test_require_confirm_marks_server_tools(tmp_path, stub_connections):
+    _write_plugin_settings(tmp_path, {"require_confirm": ["srv"]})
+    settings = _settings([_stdio("srv")], tmp_path)
+
+    wiring = await wire_capabilities(
+        CapabilityRegistry(),
+        parse_capabilities_config(settings.capabilities),
+        settings=settings,
+    )
+
+    assert [tool.require_confirmation for tool in wiring.tools] == [True]
+
+
+@pytest.mark.asyncio
+async def test_broken_plugin_settings_degrades_to_defaults(tmp_path, stub_connections, caplog):
+    """可选子系统不得拖垮装配：坏 settings 记 warning，按默认（全启用）继续。"""
+    (tmp_path / "plugin-settings.json").write_text("{not json", encoding="utf-8")
+    settings = _settings([_stdio("srv")], tmp_path)
+
+    wiring = await wire_capabilities(
+        CapabilityRegistry(),
+        parse_capabilities_config(settings.capabilities),
+        settings=settings,
+    )
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__srv__echo"]
+    assert any("plugin-settings.json" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_packaged_disabled_server_stays_visible_in_management_layer(
+    tmp_path, stub_connections
+):
+    """包内 `enabled:false` 的 server 与 config 级禁用项同款处理：不接线，
+    但必须留在 `configs()` 里——否则它从窗口彻底消失（既不接线也不可见），
+    用户没有任何路径重新启用它（裁决 C1：禁用≠删除）。"""
+    global_dir = tmp_path / "home" / "skills"
+    manager = MCPPackageManager(tmp_path, global_skills_dir=global_dir)
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "mcp.json").write_text(
+        json.dumps({"servers": [_stdio("live"), _stdio("parked", enabled=False)]}),
+        encoding="utf-8",
+    )
+    manager.install(source, package_id="mixed-tools")
+    manager.trust("mixed-tools")
+    manager.enable("mixed-tools")
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(global_dir),
+        model_api_key="sk-test",
+    )
+    wiring = await wire_capabilities(CapabilityRegistry(), {}, settings=settings)
+
+    assert [tool.name for tool in wiring.tools] == ["mcp__live__echo"]
+    assert [c.config.name for c in stub_connections.instances] == ["live"]
+    capability = next(
+        item for item in wiring.lifecycle if hasattr(item, "all_server_names")
+    )
+    assert capability.all_server_names() == ["live", "parked"]
+    assert capability.is_connected("parked") is False
