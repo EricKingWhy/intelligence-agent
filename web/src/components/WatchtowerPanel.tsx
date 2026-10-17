@@ -712,7 +712,7 @@ function CreateWatchtowerForm({
         <section className="watchtower-consent-box" aria-labelledby="watchtower-consent-title">
           <h3 id="watchtower-consent-title">值班使用自动权限</h3>
           <ul>
-            <li>值班任务可调用提问工具等待你回复。通用提问超时后不写入答案，run 收到“用户可能不在”的提示后继续；约束冲突超时后不作任何选择或授权，run 收到未解决提示并停止受影响工作，等待你处理。</li>
+            <li>只有 run 和 session 都没有绝对截止时间，且运行时确认同 run 有足够恢复预算时，值班任务才可等待提问工具；时长预算会创建持续计时的截止时间，等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，run 收到“用户可能不在”的提示后继续；约束冲突超时后不作任何选择或授权，run 收到未解决提示并停止受影响工作，等待你处理。</li>
             <li>删除文件、发外部请求、git push 等危险操作会自动放行；此期间没有人逐次复核。</li>
             <li>仍使用你选定的 Sandbox。运行结果只进入「待验证」，不会自动验收或标记为通过。</li>
           </ul>

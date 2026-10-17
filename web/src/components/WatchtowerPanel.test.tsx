@@ -149,6 +149,8 @@ describe('WatchtowerPanel', () => {
     expect(prompt).not.toBeNull();
     expect(duration).not.toBeNull();
     expect(createButton?.disabled).toBe(true);
+    expect(document.body.textContent).toContain('只有 run 和 session 都没有绝对截止时间，且运行时确认同 run 有足够恢复预算时');
+    expect(document.body.textContent).toContain('时长预算会创建持续计时的截止时间，等待请求会被拒绝');
     expect(document.body.textContent).toContain('停止受影响工作，等待你处理');
     expect(document.body.textContent).not.toContain('保持暂停');
 
