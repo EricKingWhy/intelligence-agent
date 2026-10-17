@@ -194,6 +194,16 @@ async function installWsRoute(
   });
 }
 
+/** 后端 `web/plugins.py::BUILTIN_SLASH_COMMANDS` 的镜像（e2e 不启真后端）。
+ *  只镜像"存在哪些命令 + 展示元数据"；执行回调仍在前端 `BUILTIN_RUNS`。 */
+const BUILTIN_SLASH_FIXTURE = [
+  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
+  { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
+  { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
+  { name: 'model', kind: 'builtin', description: '选择本会话使用的模型' },
+];
+
 export interface ApiMock {
   /** GET /api/sessions（会话列表） */
   sessions?: unknown[];
@@ -481,7 +491,9 @@ export interface ApiMock {
   mcpTools?: Record<string, unknown[]>;
   /** `GET /api/skills` 的行（形状 = 后端 `skills.py`，含 #1200 的 scope/origin/enabled）。 */
   skills?: unknown[];
-  /** `GET /api/plugins/slash-registry` 的 commands（缺省 = 空）。 */
+  /** `GET /api/plugins/slash-registry` 的 commands。
+   *  缺省 = 后端 `BUILTIN_SLASH_COMMANDS` 的 5 条（真实后端恒有内置命令；
+   *  空注册表不是任何一种真实状态）。要构造"注册表为空"的降级场景请显式传 `[]`。 */
   slashRegistry?: unknown[];
 }
 
@@ -1421,7 +1433,7 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       return json(route, { skills: mock.skills ?? [], errors: [], conflicts: [] });
     }
     if (path === '/api/plugins/slash-registry' && req.method() === 'GET') {
-      return json(route, { commands: mock.slashRegistry ?? [] });
+      return json(route, { commands: mock.slashRegistry ?? BUILTIN_SLASH_FIXTURE });
     }
 
     // ── WS-7 / #170：宿主目录列举（`path` 缺省 = 根模式）──
