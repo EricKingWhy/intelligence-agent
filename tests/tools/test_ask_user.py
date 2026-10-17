@@ -324,18 +324,20 @@ async def test_payload_renders_the_smallest_tier_as_one_minute(tmp_path):
 
     assert result.ok
     assert result.pending_events is not None
-    _event_type, payload = result.pending_events[0]
+    event_type, payload = result.pending_events[0]
+    assert event_type == USER_INPUT_REQUESTED
     assert payload["timeout_seconds"] == 60
     assert payload["timeout_minutes"] == 1
 
 
 def test_default_timeout_matches_settings_default():
-    """#1284 P3：工具缺省值与 `Settings` 默认值是两处字面量，必须机械相等。"""
-    from agent_harness.config import Settings
+    """#1284 P3：工具缺省值直接取 `config.py` 常量，与 `Settings` 默认值同源。"""
+    from agent_harness.config import ASK_USER_QUESTION_TIMEOUT_DEFAULT, Settings
 
+    assert AskUserTool()._timeout_seconds == ASK_USER_QUESTION_TIMEOUT_DEFAULT
     assert (
-        AskUserTool()._timeout_seconds
-        == Settings.model_fields["ask_user_question_timeout"].default
+        Settings.model_fields["ask_user_question_timeout"].default
+        == ASK_USER_QUESTION_TIMEOUT_DEFAULT
     )
 
 

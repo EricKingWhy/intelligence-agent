@@ -287,6 +287,21 @@ async def test_legacy_request_without_snapshot_uses_the_driver_config():
 
 
 @pytest.mark.asyncio
+async def test_minutes_only_snapshot_arms_from_the_minute_value():
+    """只带 `timeout_minutes` 的手写/更旧载荷 ⇒ 计时按分钟折秒，不读启动配置。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=600.0)
+    driver.connection_subscribed("s1")
+    driver.note_session_state("s1", _events(timeout_minutes=5))
+
+    clock.advance(299)
+    assert await driver.check_expiries() == []
+    clock.advance(1)
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
 async def test_retry_rearms_with_the_request_snapshot_timeout():
     """RETRY 重装计时器必须沿用请求快照，不得掉回启动配置（60 vs 600）。"""
     clock = FakeClock()

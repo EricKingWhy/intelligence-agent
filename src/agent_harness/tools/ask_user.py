@@ -18,7 +18,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agent_harness.config import ASK_USER_QUESTION_TIMEOUT_TIERS
+from agent_harness.config import (
+    ASK_USER_QUESTION_TIMEOUT_DEFAULT,
+    ASK_USER_QUESTION_TIMEOUT_TIERS,
+)
 from agent_harness.session.ask_user_timeout import ask_user_timeout_minutes
 from agent_harness.session.context import (
     current_constraint_tool_context_var,
@@ -128,12 +131,14 @@ class AskUserArgs(BaseModel):
 
 
 class AskUserTool(Tool):
-    def __init__(self, timeout_seconds: int = 300) -> None:
-        # #1224：随请求落盘的超时档（秒）——与 `ask_user_timeout_message` 渲染的注入
-        # 消息（`minutes = max(1, timeout_seconds // 60)`）同源，前端据此渲染一致的数字。
-        # 缺省 300 **仅供直接构造 / 测试**：生产装配（`assembly.py` 两处）恒注入
-        # `Settings.ask_user_question_timeout`，故此处不随档位配置联动（#1220 复审 B3）。
-        # #1284 P3：缺省值与合法域都从 `config.py` 取——第二处字面量会与 validator
+    def __init__(
+        self, timeout_seconds: int = ASK_USER_QUESTION_TIMEOUT_DEFAULT,
+    ) -> None:
+        # #1224：随请求落盘的超时档（秒）。秒→分换算只在
+        # `session/ask_user_timeout.py::ask_user_timeout_minutes` 一处，注入消息与卡片
+        # 都从落盘快照取同一个数字。缺省档来自 `config.py`（与 `Settings` 共用），生产
+        # 装配（`assembly.py` 两处）恒注入 `Settings.ask_user_question_timeout`。
+        # #1284 P3：合法域与缺省值都从 `config.py` 取——第二处字面量会与 validator
         # 漂移，且 0 / 负数此前会原样落盘。
         if timeout_seconds not in ASK_USER_QUESTION_TIMEOUT_TIERS:
             raise ValueError(
@@ -237,8 +242,8 @@ class AskUserTool(Tool):
             "kind": "ask_user",
             "run_id": run_id,
             "questions": questions,
-            # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。数值与后端注入
-            # 消息同源（`minutes = max(1, timeout_seconds // 60)`，见 :131）。
+            # #1224：超时档随请求落盘（前端直接读，不另开配置端点）。秒→分换算只在
+            # `ask_user_timeout.py::ask_user_timeout_minutes` 一处。
             # #1284：显示用分钟数也在后端落盘，前端只渲染，不再跨语言重复换算。
             "timeout_seconds": self._timeout_seconds,
             "timeout_minutes": ask_user_timeout_minutes(self._timeout_seconds),

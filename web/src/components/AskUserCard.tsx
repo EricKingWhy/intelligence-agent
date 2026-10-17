@@ -119,8 +119,9 @@ export function AskUserCard({
     if (!collapsed && draft?.kind === 'custom') inputRef.current?.focus();
   }, [collapsed, draft?.kind]);
 
-  // #1284 P4：与 mockup 定稿一致（`docs/plans/ask-user/ask.html`："5 分钟无回答自动继续"）
-  // ——不用第三人称"用户在…"，也不再自称"将"。
+  // #1284 P4：数字分支与 mockup 定稿一致（`docs/plans/ask-user/ask.html`：
+  // "5 分钟无回答自动继续"）——不用第三人称"用户在…"，也不再自称"将"；
+  // 无数字的中性分支仍用"将"（不承诺具体时长）。
   const timeoutTip = timeoutMinutes === null
     ? '长时间未回答将自动继续'
     : `${timeoutMinutes} 分钟无回答自动继续`;
