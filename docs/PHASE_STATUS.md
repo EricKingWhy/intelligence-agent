@@ -39,6 +39,7 @@
 ---
 
 ## 当前工作焦点
+- **施工中（2026-10-17 · #1284）**：#1224 复审 P2×3 修补（快照权威），分支 `codebuddy/1284-1224-review-fix` @ tip `e4393b33`。三轮双轴审查（发现轮 REQUEST_CHANGES/A-W-F → 修后重审 P4×6 → P4 收口+merge 重审两轴 APPROVE 0 finding）；沙箱全量门禁 8378P/2F（两条均归因：coverage 自指预期红 + host_dirs 既有环境红）；台账 3 行落盘；PR 开放待 merge。详见 Tracker/月档。
 - **施工中（2026-10-17 · #1198）**：PR [#1263](https://github.com/EricKingWhy/intelligence-agent/pull/1263) 开放。Gate-0、PR smoke、全量 pytest、Vitest/build、双平台 TUI 已通过；全量 E2E 的 AC3 高度差 65.1875px（允许 8px），已加显式 420px 高度约束，等待 Actions 复验。详见 Tracker/月档。
 
 

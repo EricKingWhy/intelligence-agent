@@ -23,8 +23,9 @@ web / session service，保持可单测（也是 web↔service 共用的低层�
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
+from typing import Any
 
 from agent_harness.agent.run_budget import latest_run_id
 from agent_harness.session.event import (
@@ -39,16 +40,64 @@ from agent_harness.session.event import (
 #: 逻辑 run 的终态事件——一旦出现，最新 run 上就不该再有"待回答"。
 _TERMINAL_RUN_EVENTS = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
 
-#: 超时注入消息的正文模板（#1204 用户裁决逐字）。`minutes` = max(1, 配置秒数 // 60)。
+#: 超时注入消息的正文模板（#1204 用户裁决逐字）。`minutes` 取请求载荷快照的
+#: 分钟数；旧载荷才按 `max(1, 配置秒数 // 60)` 换算（见下方两个读取函数）。
 ASK_USER_TIMEOUT_MESSAGE_TEMPLATE = (
     "用户在 {minutes} 分钟内未回答，可能不在，请按你的判断继续"
 )
 
 
-def ask_user_timeout_message(timeout_seconds: int) -> str:
-    """把配置的超时秒数（60 / 300 / 600）渲染成注入消息正文。"""
-    minutes = max(1, int(timeout_seconds) // 60)
-    return ASK_USER_TIMEOUT_MESSAGE_TEMPLATE.format(minutes=minutes)
+def ask_user_timeout_minutes(timeout_seconds: int) -> int:
+    """秒 → 分钟（向下取整且至少 1）——**唯一**的 Python 换算点。"""
+    return max(1, int(timeout_seconds) // 60)
+
+
+def ask_user_timeout_message_for_minutes(minutes: int) -> str:
+    """把快照的分钟数渲染成注入消息正文（模板逐字不变）。"""
+    return ASK_USER_TIMEOUT_MESSAGE_TEMPLATE.format(minutes=max(1, int(minutes)))
+
+
+def _positive_int(value: object) -> int | None:
+    """载荷快照里的正整数（`bool` 是 `int` 子类，必须显式排除）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def ask_user_timeout_seconds_from_payload(
+    data: Mapping[str, Any], *, fallback: int,
+) -> int:
+    """#1284：到期计时读请求载荷快照的秒数；缺失/非法（旧事件）才回落 `fallback`。
+
+    快照是唯一事实源：运维改配置并重启后，旧请求仍按创建时的档位到期，而不是按
+    新进程的配置。两个快照字段同时存在时**以 `timeout_minutes` 为准**（卡片与注入
+    消息也读它）——这样即使载荷被外部篡改成互相矛盾的值，计时器与展示数字仍同数；
+    `timeout_seconds`-only 是 #1224 旧载荷，`timeout_minutes`-only 是手写/部分生产者兜底。
+    """
+    minutes = _positive_int(data.get("timeout_minutes"))
+    if minutes is not None:
+        return minutes * 60
+    seconds = _positive_int(data.get("timeout_seconds"))
+    if seconds is not None:
+        return seconds
+    return int(fallback)
+
+
+def ask_user_timeout_minutes_from_payload(
+    data: Mapping[str, Any], *, fallback_seconds: int,
+) -> int:
+    """#1284：注入消息读请求载荷快照的分钟数；缺失/非法才回落当前配置。
+
+    优先用后端落盘的显示值 `timeout_minutes`（与卡片、计时器同源）；#1224 落盘的旧
+    事件只有 `timeout_seconds`，再按同一公式换算。两者由 `AskUserTool` 同一次构造
+    写入，不会各自漂移。
+    """
+    minutes = _positive_int(data.get("timeout_minutes"))
+    if minutes is not None:
+        return minutes
+    return ask_user_timeout_minutes(
+        ask_user_timeout_seconds_from_payload(data, fallback=fallback_seconds)
+    )
 
 
 class ExpireOutcome(Enum):

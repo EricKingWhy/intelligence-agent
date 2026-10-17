@@ -627,17 +627,16 @@ function parseAskUserRequest(data: Record<string, unknown>, envelopeRunId: strin
       ...(parsedRecommended === undefined ? {} : { recommended: parsedRecommended }),
     });
   }
+  const timeoutMinutes = askUserTimeoutMinutes(data);
   return {
     request_id: requestId,
     run_id: runId,
     questions,
     answer: null,
-    // #1224：随请求落盘的超时档（秒）。缺失/非法（旧事件）⇒ 不投影该字段，
-    // 卡片回落中性提示（零伪造；数值由 Conversation 按 `max(1, floor(秒/60))` 渲染，
-    // 与后端 `ask_user_timeout_message` 同口径）。
-    ...(typeof data.timeout_seconds === 'number' && Number.isFinite(data.timeout_seconds)
-      ? { timeout_seconds: data.timeout_seconds }
-      : {}),
+    // #1284：显示用分钟数（后端随快照落盘；旧事件由 `timeout_seconds` 按同一公式
+    // 换算）。非法值（0 / 负数 / 非整数 / 非数）⇒ 不投影，卡片回落中性提示
+    // （零伪造，不把 0 钳成 1 分钟）。
+    ...(timeoutMinutes === undefined ? {} : { timeout_minutes: timeoutMinutes }),
   };
 }
 
@@ -2442,6 +2441,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** 有限数字才认（NaN / Infinity / 字符串数字一律 undefined = 缺席，不猜）。 */
 function numberOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** 正整数才认（复用 `numberOf` 的有限数守卫）；0 / 负数 / 非整数一律缺席。
+ *  用于"显示用数字"类字段：非法值必须回落中性提示，不能被钳成 1 伪造出来。 */
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = numberOf(value);
+  return parsed !== undefined && Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : undefined;
+}
+
+/** #1284：ask_user 超时快照 → 显示用分钟数。
+ *
+ *  新事件优先读后端落盘的 `timeout_minutes`（前端只渲染）；#1224 落盘的旧事件只有
+ *  `timeout_seconds`，在这里按同一条公式（向下取整且至少 1 分钟）换算——换算只此一处，
+ *  渲染层不再各算一遍。 */
+function askUserTimeoutMinutes(data: Record<string, unknown>): number | undefined {
+  const minutes = positiveInteger(data.timeout_minutes);
+  if (minutes !== undefined) return minutes;
+  const seconds = positiveInteger(data.timeout_seconds);
+  return seconds === undefined ? undefined : Math.max(1, Math.floor(seconds / 60));
 }
 
 /** 字符串列表的宽容读：只留字符串项；不是数组就返回空列表（不编内容）。 */

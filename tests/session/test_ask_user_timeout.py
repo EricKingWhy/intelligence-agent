@@ -10,7 +10,10 @@ import pytest
 
 from agent_harness.session.ask_user_timeout import (
     AskUserTimeoutTracker,
-    ask_user_timeout_message,
+    ask_user_timeout_message_for_minutes,
+    ask_user_timeout_minutes,
+    ask_user_timeout_minutes_from_payload,
+    ask_user_timeout_seconds_from_payload,
     pending_ask_user_request_id,
 )
 from agent_harness.session.event import (
@@ -81,9 +84,66 @@ def test_expires_at_the_configured_tier(timeout: int):
     [(60, 1), (300, 5), (600, 10)],
 )
 def test_timeout_message_renders_minutes(timeout: int, minutes: int):
-    assert ask_user_timeout_message(timeout) == (
+    assert ask_user_timeout_minutes(timeout) == minutes
+    assert ask_user_timeout_message_for_minutes(minutes) == (
         f"用户在 {minutes} 分钟内未回答，可能不在，请按你的判断继续"
     )
+
+
+@pytest.mark.parametrize("timeout", [0, -1, -60, 59, 90, 119])
+def test_timeout_message_clamps_to_at_least_one_minute(timeout: int):
+    """#1284 P2-3：钳位语义（至少 1 分钟、向下取整）对非法/不足一分钟的秒数成立。"""
+    minutes = ask_user_timeout_minutes(timeout)
+    assert minutes == 1
+    assert ask_user_timeout_message_for_minutes(minutes) == (
+        "用户在 1 分钟内未回答，可能不在，请按你的判断继续"
+    )
+
+
+# ── #1284 P2-2：到期链路读请求载荷快照（缺失才回落配置）───────────────
+
+
+def test_payload_snapshot_wins_over_the_live_config():
+    data = {"timeout_seconds": 60, "timeout_minutes": 1}
+    assert ask_user_timeout_seconds_from_payload(data, fallback=600) == 60
+    assert ask_user_timeout_minutes_from_payload(data, fallback_seconds=600) == 1
+
+
+def test_legacy_payload_without_snapshot_falls_back_to_live_config():
+    """#1224 之前落盘的旧请求没有 `timeout_seconds` ⇒ 只能回落当前配置。"""
+    assert ask_user_timeout_seconds_from_payload({}, fallback=300) == 300
+    assert ask_user_timeout_minutes_from_payload({}, fallback_seconds=60) == 1
+
+
+def test_legacy_payload_with_seconds_only_derives_minutes():
+    """#1224 与 #1284 之间落盘的请求只有秒 ⇒ 由同一 Python 公式换算。"""
+    assert ask_user_timeout_seconds_from_payload(
+        {"timeout_seconds": 600}, fallback=60,
+    ) == 600
+    assert ask_user_timeout_minutes_from_payload(
+        {"timeout_seconds": 600}, fallback_seconds=60,
+    ) == 10
+
+
+def test_minutes_only_payload_is_honoured():
+    """手写/更旧的载荷只有分钟 ⇒ 计时按分钟折秒，消息与卡片同数。"""
+    data = {"timeout_minutes": 5}
+    assert ask_user_timeout_seconds_from_payload(data, fallback=60) == 300
+    assert ask_user_timeout_minutes_from_payload(data, fallback_seconds=60) == 5
+
+
+def test_conflicting_snapshot_fields_keep_timer_and_message_on_the_same_number():
+    """#1284 复审 P3：两字段被外部改成矛盾值时，minutes 优先（卡片/消息/计时同数）。"""
+    data = {"timeout_seconds": 90, "timeout_minutes": 2}
+    assert ask_user_timeout_seconds_from_payload(data, fallback=600) == 120
+    assert ask_user_timeout_minutes_from_payload(data, fallback_seconds=600) == 2
+
+
+@pytest.mark.parametrize("bad", [0, -5, 1.5, "600", True, None])
+def test_invalid_snapshot_values_fall_back(bad: object):
+    assert ask_user_timeout_seconds_from_payload(
+        {"timeout_seconds": bad}, fallback=300,
+    ) == 300
 
 
 # ── #1220：待回答守卫的纯判据（装配 / 复查共用）─────────────────────────

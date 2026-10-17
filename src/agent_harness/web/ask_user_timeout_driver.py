@@ -30,7 +30,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from agent_harness.session.ask_user_timeout import (
     AskUserTimeoutTracker,
     ExpireOutcome,
-    pending_ask_user_request_id,
+    ask_user_timeout_seconds_from_payload,
+    latest_pending_input_request,
 )
 from agent_harness.session.event import SessionEvent
 
@@ -55,6 +56,10 @@ class AskUserTimeoutDriver:
       一个未答复的 `ask_user`；没有则不装配（无连接时也无从累计 ⇒ 永不超时）。
 
     单事件循环内使用（与 WS handler 同一 loop），不做跨线程同步。
+
+    #1284 P2-2：`timeout_seconds` 构造参数只是**旧事件兜底**；每个请求的计时档读
+    `USER_INPUT_REQUESTED` 载荷快照（`timeout_minutes` 优先，缺失/非法回落
+    `timeout_seconds`，再回落本参数——见 `note_session_state`）。
     """
 
     def __init__(
@@ -70,6 +75,9 @@ class AskUserTimeoutDriver:
         self._connections: dict[str, int] = {}
         self._trackers: dict[str, AskUserTimeoutTracker] = {}
         self._armed_request: dict[str, str] = {}
+        #: 每个已装配请求的**生效**超时档（读请求载荷快照；旧事件才回落构造参数）。
+        #: RETRY 重装时必须沿用它，否则会掉回启动配置（#1284 P2-2）。
+        self._armed_timeout: dict[str, int] = {}
         #: 冻结中的会话（无连接、计时暂停）——插入序 = 冻结先后，供超限淘汰。
         self._frozen: dict[str, None] = {}
 
@@ -115,18 +123,34 @@ class AskUserTimeoutDriver:
         最新 run 上还有未答复的 `ask_user` ⇒ 装配（同一 request_id 重复调用保留已累计
         时长——断线重连续计不清零）；否则**撤销**——已答复 / 整卡跳过 / 无提问的会话
         不再触发超时恢复。
+
+        #1284 P2-2：计时档读**请求载荷快照**（`timeout_minutes` 优先，缺失/非法回落
+        `timeout_seconds`，见 `ask_user_timeout_seconds_from_payload`），不读启动配置。
+        运维改配置并重启后，旧请求仍按创建时的档位到期；只有 #1224 之前落盘、没有
+        快照的旧事件才回落到 `self.timeout_seconds`。
         """
-        request_id = pending_ask_user_request_id(events)
-        if request_id is None:
+        request = latest_pending_input_request(events, kind="ask_user")
+        if request is None:
             self.disarm(session_id)
             return
-        self.arm(session_id, request_id=request_id)
+        self.arm(
+            session_id,
+            request_id=request.data["request_id"],
+            timeout_seconds=ask_user_timeout_seconds_from_payload(
+                request.data, fallback=int(self.timeout_seconds),
+            ),
+        )
 
-    def arm(self, session_id: str, *, request_id: str) -> None:
+    def arm(
+        self, session_id: str, *, request_id: str, timeout_seconds: int | None = None,
+    ) -> None:
         """为一个待回答请求装配计时器（同一 request_id 幂等，保留已累计时长）。"""
         if self._armed_request.get(session_id) == request_id and session_id in self._trackers:
             return
-        tracker = AskUserTimeoutTracker(self.timeout_seconds, clock=self.clock)
+        effective_timeout = int(
+            self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        tracker = AskUserTimeoutTracker(effective_timeout, clock=self.clock)
         if self._connections.get(session_id, 0) > 0:
             tracker.set_connected(True)
             self._frozen.pop(session_id, None)
@@ -136,10 +160,12 @@ class AskUserTimeoutDriver:
             self._freeze(session_id)
         self._trackers[session_id] = tracker
         self._armed_request[session_id] = request_id
+        self._armed_timeout[session_id] = effective_timeout
 
     def disarm(self, session_id: str) -> None:
         self._trackers.pop(session_id, None)
         self._armed_request.pop(session_id, None)
+        self._armed_timeout.pop(session_id, None)
         self._frozen.pop(session_id, None)
 
     def is_armed(self, session_id: str) -> bool:
@@ -189,8 +215,13 @@ class AskUserTimeoutDriver:
                 continue
             if outcome is ExpireOutcome.RETRY:
                 # 保留在场、重置累计：下个超时窗口再试（见本方法 docstring）。
+                # #1284：重装必须沿用该请求的**快照**档位，不得掉回启动配置。
+                armed_timeout = self._armed_timeout.get(session_id)
                 self.disarm(session_id)
-                self.arm(session_id, request_id=request_id)
+                self.arm(
+                    session_id, request_id=request_id,
+                    timeout_seconds=armed_timeout,
+                )
             else:
                 self.disarm(session_id)
         return fired
