@@ -323,6 +323,10 @@ class _FakeContainerSandbox:
             return "directory"
         return None
 
+    def resolve_within_workspace(self, path: str) -> PurePosixPath:
+        raw = PurePosixPath(path.replace("\\", "/"))
+        return raw if raw.is_absolute() else self.workspace_root / raw
+
     def read_text(self, relative_path: str) -> str:
         return (self._backing / relative_path).read_text(encoding="utf-8")
 
@@ -356,6 +360,7 @@ def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) ->
     sandbox.write_text("AGENTS.md", "host version one")
     initial = store.load_for_sandbox_session("session-sandbox-reload", sandbox)
     assert initial.source_paths == (PurePosixPath("/workspace/AGENTS.md"),)
+    assert type(initial.source_paths[0]) is PurePosixPath
     assert "host version one" in (initial.prompt_text or "")
 
     # 会话创建后：宿主改动（隔离会话不应看到）+ 私有 workspace 改动（应当看到）。
@@ -365,10 +370,33 @@ def test_reload_for_sandbox_session_reads_through_sandbox_api(tmp_path: Path) ->
     reloaded = store.reload_for_sandbox_session("session-sandbox-reload", sandbox)
 
     assert reloaded.source_paths == (PurePosixPath("/workspace/AGENTS.md"),)
+    assert type(reloaded.source_paths[0]) is PurePosixPath
     prompt = reloaded.prompt_text or ""
     assert "private workspace version" in prompt
     assert "host version two" not in prompt
     assert "host version one" not in prompt
+
+
+def test_load_for_sandbox_path_preserves_container_posix_paths(
+    tmp_path: Path,
+) -> None:
+    container_backing = tmp_path / "container-backing"
+    nested = container_backing / "nested"
+    nested.mkdir(parents=True)
+    (nested / "AGENTS.md").write_text("nested instructions", encoding="utf-8")
+    sandbox = _FakeContainerSandbox(container_backing)
+    store = ProjectInstructionStore()
+
+    store.load_for_sandbox_session("session-sandbox-path", sandbox)
+    snapshot = store.load_for_sandbox_path(
+        "session-sandbox-path", sandbox, "nested/module.py",
+    )
+
+    assert snapshot.source_paths == (
+        PurePosixPath("/workspace/nested/AGENTS.md"),
+    )
+    assert type(snapshot.source_paths[0]) is PurePosixPath
+    assert "nested instructions" in (snapshot.prompt_text or "")
 
 
 def test_reload_for_sandbox_session_keeps_host_cwd_untouched(tmp_path: Path) -> None:

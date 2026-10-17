@@ -62,7 +62,7 @@ class ProjectInstructionsSnapshot:
         return "missing"
 
     @property
-    def source_paths(self) -> tuple[Path, ...]:
+    def source_paths(self) -> tuple[PurePath, ...]:
         return tuple(source.path for source in self.sources)
 
     def as_status(self) -> dict[str, object]:
