@@ -1415,12 +1415,16 @@ export default function App() {
       {
         /* #1312：新建会话 = 与续聊分离的显式入口（ChatGPT / Claude 侧栏「New Chat」
            同型；本仓的键盘入口就是命令面板 Ctrl/Cmd+K，不新增全局快捷键）。
-           复用 handleNew，不另造创建路径。 */
+           复用 handleNew，不另造创建路径。
+           同 `focus-composer`（下方）的结论：命令跑时浮层还开着，handleNew 末尾的
+           焦点移交会被 Radix 关闭时的焦点恢复打断，所以登记到浮层关闭后执行。 */
         id: 'new-session',
         label: '新建会话',
         keywords: 'new session chat 新对话',
         group: 'actions',
-        run: () => handleNew(),
+        run: () => {
+          paletteAfterClose.current = handleNew;
+        },
       },
       {
         id: 'jump-latest',

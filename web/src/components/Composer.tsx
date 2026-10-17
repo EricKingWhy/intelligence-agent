@@ -1189,12 +1189,19 @@ export const Composer = memo(function Composer({
           正在压缩上下文…
         </div>
       )}
-      {/* #1312：会话级目标 pill——回答「这条消息要发往哪个会话」。
+      {/* #1312：会话级目标状态行——回答「这条消息要发往哪个会话」。
           放在 .composer-dock **之外**：dock 里已有 #1028 的项目归属 chip，两者语义正交
           （会话身份 vs 项目归属），外置且无边框/无底色，视觉上不与归属胶囊混淆。
-          未选中时明说「将创建新会话」——避免用户把全新任务误当续聊发给旧会话。 */}
-      <div className="composer-session-target" data-testid="composer-session-target">
-        {sessionId !== null ? (
+          未选中时明说「将创建新会话」——避免用户把全新任务误当续聊发给旧会话。
+          `role="status"` 与 .slash-info / .composer-send-blocked 同区惯例：只读文本，
+          不频繁打断（不是 alert）。真值判断与 handleSubmit 里两处 `!sessionId`
+          判空同口径——空串不是会话。 */}
+      <div
+        className="composer-session-target"
+        data-testid="composer-session-target"
+        role="status"
+      >
+        {sessionId ? (
           <>
             <span>
               正在向会话{' '}
@@ -1204,7 +1211,7 @@ export const Composer = memo(function Composer({
             {onNewSession !== undefined && (
               <button
                 type="button"
-                className="composer-session-target-new"
+                className="composer-session-target-new-btn"
                 aria-label="改为新会话"
                 onClick={onNewSession}
               >
