@@ -173,6 +173,7 @@ from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
+    sandbox_unavailable_http_error,
     storage_http_error,
     storage_http_status,
 )
@@ -223,7 +224,8 @@ class _AmendValueValidators(BaseModel):
     """amend 字段的静态取值校验（多个请求体共用一份，ADR-0020b / ADR-0021）。
 
     ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
-    SendMessageRequest / ForkRequest）——校验逻辑只写一遍，同一份取值集合。
+    SendMessageRequest / ForkRequest）——每个校验器只写一遍，子类按需声明
+    （ForkRequest 只声明 ``sandbox_backend``）。
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
@@ -2956,21 +2958,8 @@ def create_app(
         except SandboxUnavailableError as e:
             # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
             # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": str(e),
-                    "backend": e.backend,
-                    "reason": e.reason,
-                    "details": e.details,
-                    "remediation": e.remediation,
-                    "available_backends": [
-                        c.backend
-                        for c in probe_all_capabilities()
-                        if c.available
-                    ],
-                },
-            ) from e
+            # `#1278`：同一份构造与 fork 端点共用（`web/domain_errors.py`）。
+            raise sandbox_unavailable_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+import agent_harness.sandbox.registry as sandbox_registry
 from agent_harness.config import Settings
+from agent_harness.sandbox.capabilities import SandboxCapabilities
 from agent_harness.session.event import (
     MODEL_CHANGED,
     RUN_COMPLETED,
@@ -17,12 +19,42 @@ from agent_harness.session.event import (
     USER_MESSAGE,
 )
 from agent_harness.session.session import Session
+from agent_harness.web import domain_errors
 from agent_harness.web.app import create_app
+from tests.session.registry_doubles import RecordingRegistry
 
 _CATALOG_JSON = (
     '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"},'
     ' {"name": "mimo-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
+
+
+def _make_docker_unavailable(monkeypatch) -> None:
+    """让 docker 探针确定性答"不可用"（本机有无 Docker 都不影响结论）。
+
+    同时固定 409 detail 里的可选后端列表：`probe_all_capabilities` 会真探
+    daemon，读 `available_backends` 的断言不该依赖本机环境。
+    """
+    monkeypatch.setattr(
+        sandbox_registry,
+        "probe_docker_capabilities",
+        lambda *a, **k: SandboxCapabilities(
+            backend="docker",
+            available=False,
+            reason="Docker Python SDK 未安装",
+            details={"remediation": "pip install docker"},
+        ),
+    )
+    monkeypatch.setattr(
+        domain_errors,
+        "probe_all_capabilities",
+        lambda *a, **k: [
+            SandboxCapabilities(backend="local", available=True),
+            SandboxCapabilities(
+                backend="docker", available=False, reason="Docker Python SDK 未安装"
+            ),
+        ],
+    )
 
 
 @pytest.fixture
@@ -181,7 +213,7 @@ class TestForkEndpoint:
         fake registry 的缺省 create(backend=None) 与 "local" 可区分——这正是
         Windows「父选 local、child 落到部署默认 docker」的复现形状。
         """
-        registry = _RecordingRegistry()
+        registry = RecordingRegistry()
         client.app.state.agent.workspace_registry = registry
         store = client.app.state.agent.store
         Session.start(store, session_id="sid-1", sandbox_backend="local")
@@ -199,18 +231,45 @@ class TestForkEndpoint:
         assert started.type == "session/started"
         assert started.data["sandbox_backend"] == "local"
 
+    def test_unavailable_explicit_backend_409(self, client, monkeypatch):
+        """#1278 P2-2：显式传 docker 但本机不可用 ⇒ 与 create 同一份结构化 409。"""
+        _seed_forkable(client)
+        _make_docker_unavailable(monkeypatch)
 
-class _RecordingRegistry:
-    """记录 `Session.start` 传给 `registry.create` 的 backend（父无 workspace）。"""
+        resp = client.post(
+            "/api/sessions/sid-1/forks",
+            json={"from_seq": 1, "sandbox_backend": "docker"},
+        )
 
-    def __init__(self) -> None:
-        self.created: list[tuple[str, str | None]] = []
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["backend"] == "docker"
+        assert detail["remediation"] == "pip install docker"
+        assert detail["available_backends"] == ["local"]
 
-    def create(self, session_id: str, backend: str | None = None, **_kwargs):
-        self.created.append((session_id, backend))
+    def test_unavailable_inherited_backend_409(self, client, monkeypatch):
+        """#1278 P2-2：继承来的 docker 已不可用同样 409（不是裸 500）。"""
+        store = client.app.state.agent.store
+        session = Session.start(
+            store,
+            session_id="sid-1",
+            started_data={
+                "provider": "deepseek",
+                "model_id": "gpt-4o",
+                "sandbox_backend": "docker",
+            },
+        )
+        session.append(USER_MESSAGE, {"content": "first"})
+        session.append(RUN_STARTED, {})
+        session.append(RUN_COMPLETED, {})
+        _make_docker_unavailable(monkeypatch)
 
-    def exists(self, session_id: str) -> bool:
-        return False
+        resp = client.post("/api/sessions/sid-1/forks", json={"from_seq": 1})
+
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["backend"] == "docker"
+        assert detail["available_backends"] == ["local"]
 
 
 class TestModelsEndpointShadowing:

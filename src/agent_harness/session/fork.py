@@ -36,6 +36,7 @@ from langchain_core.messages import HumanMessage
 
 from agent_harness.agent.run_budget import session_budget_key
 from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.sandbox.capabilities import SUPPORTED_BACKENDS
 from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
@@ -208,12 +209,14 @@ async def fork_session(
     "父没有账"与"父的账是空的"都如实可读。child 行由它自己的首个 run 惰性
     建出（与创建路径同一条规则）。
 
-    sandbox 后端（`#1278`）：fork 是「同一会话回到更早时间点」，child 延续父的
-    运行时配置。父的**显式选择**记在父 `session/started.data.sandbox_backend`
-    （`#363` / W-19），但 seed 按设计排除父 `session/started` ⇒ 必须在这里显式
-    读父事件、显式传给 `Session.start`（它负责建 sandbox 并写 child 的
-    `session/started` 审计事实）。优先级：显式 `sandbox_backend` 参数 > 继承父 >
-    None（部署默认）。父未显式选择时传 None，行为与修前逐字一致。
+    sandbox 后端（`#1278`）：child 必须能启动，所以缺省沿用父**显式选择**的后端
+    ——这是环境兼容性，不是安全边界 / 权限面（审批授权、工作流档、上下文窗口
+    仍不继承，见下面的 seed 剔除清单）。父的显式选择记在父
+    `session/started.data.sandbox_backend`（`#363` / W-19），但 seed 按设计排除
+    父 `session/started` ⇒ 必须在这里显式读父事件、显式传给 `Session.start`
+    （它负责建 sandbox 并写 child 的 `session/started` 审计事实）。优先级：
+    显式 `sandbox_backend` 参数 > 继承父 > None（部署默认）。父未显式选择时传
+    None，行为与修前逐字一致。
     """
     # 父会话只读加载（§7 父不可改：绝不能 Session.resume，那会追加 resumed）
     parent_events = store.read_events(parent_session_id)
@@ -295,10 +298,23 @@ async def fork_session(
     # #1278：缺省继承父会话显式选择的 sandbox 后端。父没有显式选择（键缺席
     # 或不是非空字符串）⇒ 维持 None，让 child 走部署默认——不把"父没选"误记成
     # "父选了某个后端"（与 `Session.start` 的 explicit / default 两档同源）。
+    # 继承值再过一遍 `SUPPORTED_BACKENDS`：父事件是**历史数据**，可能记录着已
+    # 退役的后端名（#1048 的 windows_psec 先例）。registry 对未知名抛 ValueError
+    # ⇒ 500，且会让所有记着旧值的父会话永久不可 fork；这里降级为 None + 一条
+    # warning，child 改走部署默认（不把未知值带进新会话）。
     if sandbox_backend is None and parent_started is not None:
         inherited_backend = (parent_started.data or {}).get("sandbox_backend")
         if isinstance(inherited_backend, str) and inherited_backend:
-            sandbox_backend = inherited_backend
+            if inherited_backend in SUPPORTED_BACKENDS:
+                sandbox_backend = inherited_backend
+            else:
+                logger.warning(
+                    "fork：父会话 %s 记录的 sandbox 后端 %r 不在支持列表（%s）内，"
+                    "child 改走部署默认",
+                    parent_session_id,
+                    inherited_backend,
+                    ", ".join(SUPPORTED_BACKENDS),
+                )
     parent_tree_id = (
         (parent_started.data or {}).get("delegation_tree_id")
         if parent_started is not None else None
