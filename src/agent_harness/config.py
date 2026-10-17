@@ -130,6 +130,14 @@ class Settings(BaseSettings):
     # slope=0 即固定墙钟（消融候选②的配置形态）。消费点：builder → compactor。
     summary_timeout_seconds: float = Field(default=30.0, gt=0)
     summary_timeout_per_kilotoken_seconds: float = Field(default=0.25, ge=0)
+    # #1279：重试维度的墙钟放大——第 n 次尝试 = min(规模公式 × multiplier^(n-1),
+    # max_seconds)。默认 2× / 300s：慢模型（hy4-preview-f 单轮 45–60s）第二次
+    # 有机会完成；上限保证不会无限等待（再超时照常落 compaction_failed）。
+    # 两者都必须正且有限（allow_inf_nan=False：inf 等价于取消失败语义）。
+    summary_timeout_attempt_multiplier: float = Field(
+        default=2.0, gt=0, allow_inf_nan=False)
+    summary_timeout_max_seconds: float = Field(
+        default=300.0, gt=0, allow_inf_nan=False)
     # #1026：分块摘要（票面修法②）。摘要请求估算超过 hard_guard × ratio 即走
     # 分块（票面"如 > hard_limit 一半"）；summary_chunk_max_tokens 是单块输入
     # 的 token 上限（块内超大原子消息确定性 head/tail 裁剪到界）。
