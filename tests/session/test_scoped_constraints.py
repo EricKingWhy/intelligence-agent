@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import codecs
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,6 +133,54 @@ def test_resolve_project_key_shares_across_worktree(tmp_path: Path) -> None:
     assert resolve_project_key(sub) == key_main
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Git stdout encoding regression")
+@pytest.mark.parametrize("python_utf8", ["0", "1"], ids=["legacy-locale", "utf8-mode"])
+def test_resolve_project_key_unicode_worktree_with_python_encoding_modes(
+    tmp_path: Path, python_utf8: str
+) -> None:
+    repo = tmp_path / "主仓库"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    worktree = tmp_path / "工作树"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", str(worktree)], check=True
+    )
+
+    script = (
+        "import json, locale, sys\n"
+        "from agent_harness.session.scoped_constraints import resolve_project_key\n"
+        "print(json.dumps({\n"
+        "  'preferred_encoding': locale.getpreferredencoding(False),\n"
+        "  'project_key': resolve_project_key(sys.argv[1]),\n"
+        "  'utf8_mode': sys.flags.utf8_mode,\n"
+        "}))\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = python_utf8
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(worktree)],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    payload = json.loads(result.stdout.decode("ascii"))
+    assert payload["utf8_mode"] == int(python_utf8)
+    if (
+        python_utf8 == "0"
+        and codecs.lookup(payload["preferred_encoding"]).name == "utf-8"
+    ):
+        pytest.skip(
+            "Windows ANSI code page is UTF-8; legacy locale decoding is not exercised"
+        )
+    assert payload["project_key"] == str(repo.resolve())
+
+
 def test_resolve_project_key_non_git_returns_none(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -164,3 +215,32 @@ def test_project_label_for_key_prefers_owner_repo_then_dirname(tmp_path: Path) -
     assert project_label_for_key(resolve_project_key(repo)) == (
         "EricKingWhy/intelligence-agent"
     )
+
+
+def test_project_label_for_key_does_not_decode_git_stderr(monkeypatch) -> None:
+    from agent_harness.session import scoped_constraints
+
+    args_seen: list[str] = []
+    options_seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        args_seen.extend(args)
+        options_seen.update(kwargs)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=b"git@github.com:EricKingWhy/intelligence-agent.git\n",
+            stderr="错误".encode("gbk"),
+        )
+
+    monkeypatch.setattr(scoped_constraints.subprocess, "run", fake_run)
+
+    assert (
+        project_label_for_key("C:/工作区/主仓库")
+        == "EricKingWhy/intelligence-agent"
+    )
+    assert args_seen[-2:] == ["--get", "remote.origin.url"]
+    assert options_seen["stdout"] == subprocess.PIPE
+    assert options_seen["stderr"] == subprocess.DEVNULL
+    assert "text" not in options_seen
+    assert "capture_output" not in options_seen

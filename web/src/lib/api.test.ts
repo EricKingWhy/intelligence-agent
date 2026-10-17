@@ -442,6 +442,10 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url / WS-3 #1
     workspace: { id: 'w1', title: '项目甲' },
     archived: false,
     corrupted: false,
+    product_state: '',
+    product_state_changed_at: null,
+    attention_kind: null,
+    attention_summary: null,
   };
 
   it('原样保留 trace_url（fetch 层不重排/不丢键/不重命名）', async () => {

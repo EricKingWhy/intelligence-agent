@@ -8,6 +8,11 @@
 接缝：真实 uvicorn ASGI 服务器 + httpx2 WebSocket 客户端 + ScriptedModel 剧本桩。
 在场信号取自 WS 连接级订阅计数（`web/ask_user_timeout_driver.py`），到点经
 `SessionService.resume_ask_user_timeout` 走既有 user_input 恢复链。
+
+成色说明（#1220 复审 F7）：本文件把心跳调到 3600s 并显式 tick `check_expiries()`，
+**未覆盖** `websocket.py` 心跳调用 `check_expiries` 这条生产接线本身——该接线
+仅由手工验证兜底（无自动化测试断言心跳循环调用了 `check_expiries`），此处不
+重复构造真实节拍。
 """
 
 from __future__ import annotations
@@ -53,7 +58,36 @@ def _ask_user_scripts() -> list[list[AIMessage]]:
     ]
 
 
-async def _start_server(tmp_path, monkeypatch, factory):
+class _GatedAskModel(ScriptedModel):
+    """首发前等闸门：让测试先建立 WS 订阅，再让 `ask_user` 经 relay 流经。"""
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        super().__init__(responses=[AIMessage(content="", tool_calls=[{
+            "id": "ask-1", "name": "ask_user",
+            "args": {"questions": _QUESTIONS},
+        }])])
+        self._gate = gate
+
+    async def astream(self, messages, **kwargs):
+        await self._gate.wait()
+        async for chunk in super().astream(messages, **kwargs):
+            yield chunk
+
+
+def _gated_ask_then_finish_factory(gate: asyncio.Event):
+    """首个 runtime 用闸门模型（relay 路径），超时续跑用普通剧本。"""
+    models: list[ScriptedModel] = [
+        _GatedAskModel(gate),
+        ScriptedModel([AIMessage(content="Continued after timeout.")]),
+    ]
+
+    def factory(config, **kwargs):
+        return models.pop(0)
+
+    return factory
+
+
+async def _start_server(tmp_path, monkeypatch, factory, *, ask_user_timeout: int = 300):
     import uvicorn
 
     from agent_harness.config import Settings
@@ -62,9 +96,12 @@ async def _start_server(tmp_path, monkeypatch, factory):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model", factory)
     # 心跳只用来推进超时检查；调大以免与本用例显式 tick 打架（本用例自己驱动）。
     monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 3600.0)
+    # #1284：档位经 `ask_user` 工具进请求载荷快照，到期链路只认快照
+    # （驱动 `timeout_seconds` 仅是旧载荷的兜底）——所以这里从 Settings 设档。
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
+        ask_user_question_timeout=ask_user_timeout,
     ))
     uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
                                log_level="error", lifespan="on")
@@ -134,13 +171,13 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
     """有连接 + 到点 ⇒ run 自动继续、注入票面消息、**不写任何 answer**。"""
     server, serve_task, port, app = await _start_server(
         tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+        ask_user_timeout=60,
     )
     try:
         driver = app.state.agent.ask_user_timeout_driver
-        # 把驱动的档位与挂钟换成测试可控（装配发生在 WS subscribe 那一刻）。
+        # 挂钟换成测试可控；档位走请求快照（Settings 60s ⇒ 载荷 60s）。
         clock = FakeClock()
         driver.clock = clock
-        driver.timeout_seconds = 60.0
 
         sid = await _start_run(port, "请设置存储层")
         await _wait_paused(port, sid)
@@ -179,7 +216,113 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
             "超时恢复不得写任何 answer（不替用户选择）"
         assert any(e["type"] == "run/resumed" for e in events)
         assert any(e["type"] == "run/completed" for e in events)
-        assert "用户在 5 分钟内未回答，可能不在，请按你的判断继续" in answer_event["data"]["content"]
+        assert "用户在 1 分钟内未回答，可能不在，请按你的判断继续" in answer_event["data"]["content"]
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_relay_armed_request_uses_the_payload_snapshot(tmp_path, monkeypatch):
+    """#1284 复审 P2：relay 就地装配也必须读请求载荷快照，而不是 driver 启动配置。
+
+    构造：Settings=60s（载荷快照），driver 回退值故意设为 600s。先订阅再放行模型，
+    让 `ask_user` 只经 relay 路径流经（不走 subscribe 时的 `note_session_state`）。
+    若 relay 仍读启动配置，+61s 不会到期。
+    """
+    gate = asyncio.Event()
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, _gated_ask_then_finish_factory(gate),
+        ask_user_timeout=60,
+    )
+    try:
+        driver = app.state.agent.ask_user_timeout_driver
+        clock = FakeClock()
+        driver.clock = clock
+        driver.timeout_seconds = 600.0  # 旧事件回退值；快照 60s 必须赢
+
+        sid = await _start_run(port, "请设置存储层")
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
+            await _recv_snapshot(ws)
+            gate.set()
+            await _wait_paused(port, sid)
+            for _ in range(100):
+                if driver.is_armed(sid):
+                    break
+                await asyncio.sleep(0.02)
+            assert driver.is_armed(sid), "relay 流经 ask_user 后应装配计时器"
+
+            clock.now += 61.0
+            assert await driver.check_expiries() == [sid]
+
+            # 等恢复的 run 收口（与首用例同一纪律）：`resume_and_launch` 立即返回，
+            # 直接进 `finally` 会与在途 detached run 抢跑。
+            for _ in range(200):
+                events = (await client.get(
+                    f"http://127.0.0.1:{port}/api/sessions/{sid}/events"
+                )).json()
+                if any(e["type"] == "run/completed" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_arms_timer_when_input_request_lands_after_snapshot_read(
+    tmp_path, monkeypatch,
+):
+    """P2-1：`get_events` 返回旧快照、提问随后落盘 ⇒ 订阅仍须装配计时器。
+
+    竞态原样：subscribe 处理先读事件流（无待回答）→ `note_session_state` 判"无需装配"
+    → 之后 `user/input-requested` 才落盘。relay 只收到**订阅之后**扇出的事件，旧快照
+    又不含提问 ⇒ 不补读就永远不会装配，提问永不超时、run 永久挂起（违反 AC②）。
+
+    构造：把 `SessionService.get_events` 的**第一次**调用裁掉 `user/input-requested`
+    （= 读到旧快照），其后返回真实事件流（= 补读能看到已落盘的提问）。
+    """
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+    )
+    try:
+        driver = app.state.agent.ask_user_timeout_driver
+        clock = FakeClock()
+        driver.clock = clock
+        driver.timeout_seconds = 60.0
+
+        sid = await _start_run(port, "请设置存储层")
+        await _wait_paused(port, sid)  # 先等提问落盘（HTTP 读不走被裁的路径）
+
+        from agent_harness.session.event import USER_INPUT_REQUESTED
+        from agent_harness.session.service import SessionService
+
+        real_get_events = SessionService.get_events
+        stale_once = {"left": 1}
+
+        async def get_events(self, session_id):
+            events = await real_get_events(self, session_id)
+            if stale_once["left"] and session_id == sid:
+                stale_once["left"] -= 1
+                return [e for e in events if e.type != USER_INPUT_REQUESTED]
+            return events
+
+        monkeypatch.setattr(SessionService, "get_events", get_events)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
+            await _recv_snapshot(ws)
+            assert driver.is_armed(sid), (
+                "快照读到的旧状态不含提问，订阅后必须补读事件流装配计时器"
+            )
     finally:
         await _shutdown(server, serve_task)
 
@@ -194,7 +337,6 @@ async def test_ask_user_timeout_does_not_fire_without_a_connection(tmp_path, mon
         driver = app.state.agent.ask_user_timeout_driver
         clock = FakeClock()
         driver.clock = clock
-        driver.timeout_seconds = 60.0
 
         sid = await _start_run(port, "请设置存储层")
         await _wait_paused(port, sid)

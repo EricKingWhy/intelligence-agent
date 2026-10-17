@@ -1,0 +1,1 @@
+2026-10-17	#1237 Windows 锁 flake 测试修复：test_lock_is_auto_released 加 5 秒轮询（双轴审查 PASS）	7e28d4be..fde59dc6

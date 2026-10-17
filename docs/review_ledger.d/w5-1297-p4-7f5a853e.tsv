@@ -1,0 +1,1 @@
+2026-10-17	机械归属（非内容审查主张）：#1280 分支 tip 测试提交 7f5a853e（test(#1280): 双轴重审 P4 收口——降级帧 degraded 标记在本文件用例钉住），仅改 tests/agent/test_runtime_failure_paths.py +1 行；该断言内容已由 #1280 窄范围双轴重审双 PASS 覆盖，本行只做机械归属。	b44978d149015e0e2cfc61844b61ff8f8848e2c9..7f5a853e124e3c3e5bd37c56999d214c9d6fd95a

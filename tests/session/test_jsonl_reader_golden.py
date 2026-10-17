@@ -152,6 +152,11 @@ def test_missing_and_empty_jsonl_return_shapes(store: JsonlSessionStore) -> None
         "workspace": None,
         "archived": False,
         "corrupted": False,
+        # #1303：看板四字段由 `list_sessions` 回填，store 侧恒为「投影缺席」默认值。
+        "product_state": "",
+        "product_state_changed_at": None,
+        "attention_kind": None,
+        "attention_summary": None,
     }
 
 
@@ -275,6 +280,11 @@ def test_summary_corrupt_tail_fallback_shape_golden(
         "workspace": None,
         "archived": False,
         "corrupted": False,
+        # #1303：看板四字段由 `list_sessions` 回填，store 侧恒为「投影缺席」默认值。
+        "product_state": "",
+        "product_state_changed_at": None,
+        "attention_kind": None,
+        "attention_summary": None,
     }
     assert caplog.records
     assert all(record.name == _STORE_LOGGER for record in caplog.records)

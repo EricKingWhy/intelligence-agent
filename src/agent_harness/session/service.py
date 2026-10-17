@@ -122,11 +122,13 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.ask_user_timeout import (
     ExpireOutcome,
-    ask_user_timeout_message,
+    ask_user_timeout_message_for_minutes,
+    ask_user_timeout_minutes_from_payload,
     latest_pending_input_request,
     pending_ask_user_request_id,
     pending_input_request,
 )
+from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -760,17 +762,44 @@ def _latest_pending_user_input_request(
 def _pending_user_input_conflict_message(
     request: SessionEvent, *, resume_action: str,
 ) -> str:
-    """待回答用户输入阻塞新任务时的 409 文案——按 ``data.kind`` 分流（#1223）。
+    """待回答用户输入阻塞新任务时的 409 文案——按 ``data.kind`` 显式分流（#1223/#1283）。
 
     约束澄清（``protected_fact_conflict``）与通用提问（``ask_user``）共用同一道闸门
     （:func:`_latest_pending_user_input_request`），但语义不同：前者是长期约束冲突的
     窄场景，后者是通用提问。文案写死「约束澄清」会把通用提问误报成约束冲突，把用户
-    引去处理一个并不存在的冲突。故按 kind 分流：``ask_user`` 走中性句，其余（含缺
-    ``kind`` 的历史事件）走约束澄清**原句**，保既有行为零回归。
+    引去处理一个并不存在的冲突。
+
+    分流是**允许清单**：只有明确等于 ``protected_fact_conflict`` 才走约束澄清原句；
+    ``ask_user``、未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——缺字段
+    时「不说假话」优先于「猜它是约束澄清」。通用提问的动词与前端 composer 锁定提示
+    统一为「回答」；约束澄清原句按 #1223 冻结（仍说「提交答案」），不随本票改动。
     """
-    if request.data.get("kind") == "ask_user":
-        return f"当前有待回答的提问；请先提交答案，{resume_action}"
-    return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
+    if request.data.get("kind") == "protected_fact_conflict":
+        return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
+    return f"当前有待回答的提问；请先回答该提问，{resume_action}"
+
+
+#1283 复审 P4：``resume_and_launch`` 的快路径与锁内复查是**同一动作**（新任务续聊），
+# 动作子句提为共享常量——两处曾各写字面量，同一次审查里就漂移出两种尾句；竞态
+# 窗口（快路径读完后、拿锁前出现待答请求）难以构造测试，常量让单点漂移在结构上
+# 不可能，而非靠测试兜底。
+_RESUME_NEW_TASK_ACTION = "再启动新任务"
+
+
+def _raise_if_pending_user_input(
+    events: list[SessionEvent], *, resume_action: str,
+) -> None:
+    """有未答复的用户输入 ⇒ 以 409（``BudgetConflict``）拒绝新任务，零副作用。
+
+    ``resume_and_launch`` 的两道闸门（锁前快路径 + 锁内复查）与 ``send_message``
+    共用这一处，``resume_action`` 只决定文案尾句；扫描与文案分流各自只有一份，
+    避免下次新增入口时漏改或传错参数。
+    """
+    pending = _latest_pending_user_input_request(events)
+    if pending is not None:
+        raise BudgetConflict(
+            _pending_user_input_conflict_message(pending, resume_action=resume_action)
+        )
 
 
 def _pending_user_input_pause(
@@ -852,7 +881,15 @@ def _ask_user_input_answer_data(
         ):
             return None, True
         return {
-            "content": ask_user_timeout_message(ask_user_timeout_seconds),
+            # #1284 P2-2：注入消息读**请求载荷快照**（`timeout_seconds` /
+            # `timeout_minutes`），不读活的 `self._settings`——配置改动并重启后，旧请求
+            # 的卡片数字与这条消息必须仍是同一个数。只有 #1224 之前的旧事件回落到
+            # `ask_user_timeout_seconds`（调用方传的当前配置）。
+            "content": ask_user_timeout_message_for_minutes(
+                ask_user_timeout_minutes_from_payload(
+                    request.data, fallback_seconds=ask_user_timeout_seconds,
+                )
+            ),
             "input_request_id": request_id,
             "input_request_answer": normalized_timeout,
         }, False
@@ -1468,14 +1505,29 @@ class SessionService:
             for sid, (_, integrity) in zip(zero_ids, reports):
                 if integrity.corrupt_lines:
                     corrupt_ids.add(sid)
-        for sid, stats in zip(ids, stats_list):
-            if stats is None:
-                continue
-            if stats.event_count == 0 and sid not in corrupt_ids:
-                continue
+        # 会被返回的行（`None` 与"真空会话"不占行）；后续摘要回填与投影回填共用。
+        visible = [
+            (sid, stats) for sid, stats in zip(ids, stats_list)
+            if stats is not None
+            and (stats.event_count > 0 or sid in corrupt_ids)
+        ]
+        # #1303 §3.3：看板四字段从投影缓存回填。只对**切片后且会被返回**的行取投影
+        # （O(limit) 契约不变）；一次 to_thread 卸载 + 同一限流器，与摘要批量读同款。
+        # `BoardProjectionStore.get` 三级读取：内存 → sidecar（零 read_events）→ 重放
+        # 回填（缺 sidecar 的自愈路径，§3.4 允许一次）。
+        projection_store = get_board_projection_store(store)
+        projections = await anyio.to_thread.run_sync(
+            lambda: [projection_store.get(sid) for sid, _ in visible],
+            limiter=_LIST_SYNC_LIMITER,
+        )
+        for (sid, stats), projection in zip(visible, projections):
             backfill: dict[str, Any] = {
                 "archived": sid in archived_ids,
                 "corrupted": sid in corrupt_ids,
+                "product_state": projection.product_state,
+                "product_state_changed_at": projection.product_state_changed_at,
+                "attention_kind": projection.attention_kind,
+                "attention_summary": projection.attention_summary,
             }
             ref = fixed_ref if workspace_id is not None else refs.get(sid)
             if ref is not None:
@@ -2141,13 +2193,7 @@ class SessionService:
                 )
             self._budget_recovery_failed_sessions.discard(session_id)
         if task is not None:
-            pending_user_input = _latest_pending_user_input_request(existing)
-            if pending_user_input is not None:
-                raise BudgetConflict(
-                    _pending_user_input_conflict_message(
-                        pending_user_input, resume_action="再启动新任务",
-                    )
-                )
+            _raise_if_pending_user_input(existing, resume_action=_RESUME_NEW_TASK_ACTION)
         # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
         # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
         # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
@@ -2626,13 +2672,9 @@ class SessionService:
             if not locked_events:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if task is not None:
-                pending_user_input = _latest_pending_user_input_request(locked_events)
-                if pending_user_input is not None:
-                    raise BudgetConflict(
-                        _pending_user_input_conflict_message(
-                            pending_user_input, resume_action="再发送新任务",
-                        )
-                    )
+                _raise_if_pending_user_input(
+                    locked_events, resume_action=_RESUME_NEW_TASK_ACTION,
+                )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -3067,6 +3109,9 @@ class SessionService:
         self, session_id: str, *, request_id: str,
     ) -> ExpireOutcome:
         """#1220 临时接缝：连接在场计时到点 → 触发一次 `ask_user` 超时恢复。
+
+        W-12 登记协议（#356 中 DEFER 的部分）落地后随 `AskUserTimeoutDriver` 一并删除
+        （清单见 `web/ask_user_timeout_driver.py` 模块 docstring）。
 
         到点判定在 `web/ask_user_timeout_driver.py`（只关心"连接在场累计时长"）；本方法
         是**权威守卫**——发起前重读事件流，仅当最新逻辑 run 仍暂停在该 `request_id` 的
@@ -3524,14 +3569,7 @@ class SessionService:
         current_events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
-        pending_user_input = _latest_pending_user_input_request(current_events)
-        if pending_user_input is not None:
-            raise BudgetConflict(
-                _pending_user_input_conflict_message(
-                    pending_user_input, resume_action="再发送新消息",
-                )
-            )
-
+        _raise_if_pending_user_input(current_events, resume_action="再发送新消息")
         try:
             normalized_protected_facts = validate_user_protected_fact_annotations(
                 content, [] if protected_facts is None else protected_facts

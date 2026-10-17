@@ -1,0 +1,1 @@
+﻿2026-10-17	#1283 R2 修后重审（R1 findings 修复笔 8a40aa31）：Standards 轴 APPROVE-WITH-FINDINGS P0-P3=0/P4×3（Enter 守卫/docstring 三调用点/queueHint 死值/accepted!==false/catch 留痕 5 条全核验已修）；Correctness 轴 429 未取到结论（原始横幅 1283-rerev-correctness.out），缺口由 R3 双轴全范围覆盖闭合。证据：dispatch/1283-rerev-standards.out	761b6bbd..8a40aa31

@@ -35,6 +35,10 @@ const summaryB: SessionSummary = {
   workspace: { id: 'p1', title: '项目 X' },
   archived: false,
   corrupted: false,
+  product_state: '',
+  product_state_changed_at: null,
+  attention_kind: null,
+  attention_summary: null,
 };
 
 vi.mock('./hooks/useSession', async (importOriginal) => {

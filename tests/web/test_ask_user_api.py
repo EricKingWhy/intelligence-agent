@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.session.event import (
@@ -35,8 +36,8 @@ _QUESTIONS = [
 ]
 
 
-def _web_run(tmp_path):
-    app, client = _web(tmp_path)
+def _web_run(tmp_path, **settings_overrides):
+    app, client = _web(tmp_path, **settings_overrides)
     session_id = str(uuid4())
     Session.start(app.state.agent.store, session_id=session_id)
     return app, client, session_id
@@ -292,7 +293,165 @@ def test_new_message_while_ask_user_pending_reports_neutral_conflict(tmp_path):
 
     assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
-    assert "约束澄清" not in detail, detail
-    assert "提问" in detail, detail
+    # #1283 P4：整句相等——弱断言（`"提问" in detail`）钉不住动作子句。
+    assert detail == "当前有待回答的提问；请先回答该提问，再发送新消息"
     # 零副作用：拒绝不落任何新事件。
     assert client.get(f"/api/sessions/{session_id}/events").json() == before
+
+
+def test_resume_with_new_task_while_ask_user_pending_reports_neutral_conflict(tmp_path):
+    """#1283 P3：`resume_and_launch` 的 409 接线也按 kind 分流（不只有 `/messages`）。
+
+    传 `task` 时是「新任务续聊」入口；待答闸门必须先拒绝，且动作子句是
+    「再启动新任务」——三处入口各传各的 `resume_action`，传错在这里会红。
+    """
+    _app, client, session_id = _web_run(tmp_path)
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {
+                    "run": {"max_agent_turns_total": 8, "max_model_requests": 8},
+                },
+            },
+        )
+        assert started.status_code == 200, started.text
+        before = client.get(f"/api/sessions/{session_id}/events").json()
+        assert any(e["type"] == USER_INPUT_REQUESTED for e in before)
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={"task": "Another task before I answer."},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        "当前有待回答的提问；请先回答该提问，再启动新任务"
+    )
+    assert client.get(f"/api/sessions/{session_id}/events").json() == before
+
+
+@pytest.mark.parametrize("extra", [{"kind": "future_kind"}, {}])
+def test_unknown_or_missing_kind_never_reports_a_constraint_conflict(tmp_path, extra):
+    """#1283 P2-4：分流是允许清单——只有 `protected_fact_conflict` 走约束原句。
+
+    第三种 kind（以及缺 `kind` 的历史事件）必须走中性句：把它们按约束澄清处理，
+    就会把用户引去处理一个并不存在的冲突。这里在真实暂停的 run 上追加一条
+    「非约束澄清」的待答请求，再发新消息。
+    """
+    app, client, session_id = _web_run(tmp_path)
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {
+                    "run": {"max_agent_turns_total": 8, "max_model_requests": 8},
+                },
+            },
+        )
+        assert started.status_code == 200, started.text
+        before = client.get(f"/api/sessions/{session_id}/events").json()
+        pause = next(e for e in before if e["type"] == RUN_PAUSED)
+        Session.append_event(
+            app.state.agent.store,
+            session_id,
+            USER_INPUT_REQUESTED,
+            {"request_id": "future-1", **extra},
+            run_id=pause["run_id"],
+        )
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Another task before I answer."},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        "当前有待回答的提问；请先回答该提问，再发送新消息"
+    )
+
+
+# ── #1284 P2-1：装配接线（settings → payload）必须被非默认档位钉住 ──────
+
+
+def test_non_default_timeout_setting_reaches_the_persisted_payload(tmp_path):
+    """600 秒档走真实装配链：删掉 `assembly.py` 的注入会回落工具缺省 300 而红。"""
+    _app, client, session_id = _web_run(
+        tmp_path, ask_user_question_timeout=600,
+    )
+    probe = _start_probe()
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {"run": {"max_agent_turns_total": 8, "max_model_requests": 8}},
+            },
+        )
+        assert started.status_code == 200, started.text
+
+    events = client.get(f"/api/sessions/{session_id}/events").json()
+    request = next(e for e in events if e["type"] == USER_INPUT_REQUESTED)
+    assert request["data"]["timeout_seconds"] == 600
+    assert request["data"]["timeout_minutes"] == 10
+
+
+# ── #1284 P2-2：改配置 + 重启后，旧请求仍按落盘快照到期 ────────────────
+
+
+def test_timeout_message_uses_request_snapshot_after_config_change(tmp_path):
+    """旧请求在 60s 档下创建；重启成 600s 后到期，注入消息仍是 1 分钟。
+
+    快照是唯一事实源：卡片（`timeout_minutes`）与注入消息必须用同一个数。
+    """
+    _app1, client1, session_id = _web_run(
+        tmp_path, ask_user_question_timeout=60,
+    )
+    with _start_probe():
+        started = client1.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "Please set up the storage layer.",
+                "budget": {"run": {"max_agent_turns_total": 8, "max_model_requests": 8}},
+            },
+        )
+        assert started.status_code == 200, started.text
+
+    before = client1.get(f"/api/sessions/{session_id}/events").json()
+    request = next(e for e in before if e["type"] == USER_INPUT_REQUESTED)
+    pause = next(e for e in before if e["type"] == RUN_PAUSED)
+    request_id = request["data"]["request_id"]
+    assert request["data"]["timeout_seconds"] == 60
+    assert request["data"]["timeout_minutes"] == 1
+
+    # 运维改配置并重启：同一 workspace 起一个新 app（600s），旧请求不受影响。
+    _app2, client2 = _web(tmp_path, ask_user_question_timeout=600)
+    probe = _ModelProbe([[AIMessage(content="Continued after timeout.")]])
+    with probe:
+        resumed = client2.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "run_id": pause["run_id"],
+                "resume_basis": "user_input",
+                "budget": {"expected_version": pause["data"]["budget_version"], "run": {}},
+                "input_request": {"request_id": request_id, "timeout": True},
+            },
+        )
+    assert resumed.status_code == 200, resumed.text
+
+    events = client2.get(f"/api/sessions/{session_id}/events").json()
+    timeout_message = next(
+        e for e in events
+        if e["type"] == USER_MESSAGE
+        and e["data"].get("input_request_id") == request_id
+    )
+    assert timeout_message["data"]["content"] == (
+        "用户在 1 分钟内未回答，可能不在，请按你的判断继续"
+    )

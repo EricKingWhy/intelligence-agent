@@ -1022,6 +1022,17 @@ class SessionSummary(BaseModel):
     # 不是"不存在"——前端据此渲染损坏徽标并引导至恢复入口。与 `archived`
     # 同样刻意不给默认值，漏映射响亮失败。
     corrupted: bool
+    # #1303 §3.3：看板四态投影（`""` = 从未 `task/defined` = backlog）。四字段与
+    # `archived`/`corrupted` 同款**刻意不给默认值**——给了默认值，漏映射的构造点
+    # 会把看板静默渲染成 backlog/无注意力，那是一条假事实（不变量 #21）。
+    product_state: str
+    # 产品四态最后一次跃迁的事件时刻——看板 ack 比较键的**唯一**来源
+    # （同态事件不刷新它；Orca `agent-attention-acknowledgement.ts` 的比较形状）。
+    product_state_changed_at: str | None
+    # `"input"` / `"approval"` / None：会话在等你什么（仅 `executing` 时有值）。
+    attention_kind: str | None
+    # 注意力横幅文案，与 `attention_kind` 同源。
+    attention_summary: str | None
 
 
 class SessionArchived(BaseModel):
@@ -1267,8 +1278,9 @@ class AppState:
         # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
         # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
         # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
-        # on_run_terminal）；W-12 在场协议落地后删本接缝，改走
-        # `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO）。
+        # on_run_terminal）；W-12 登记协议（#356 中 DEFER 的部分）落地后删本接缝，
+        # 改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO
+        # 与删除清单）。
         self.ask_user_timeout_driver = AskUserTimeoutDriver(
             timeout_seconds=settings.ask_user_question_timeout,
             on_expire=lambda session_id, request_id: (
@@ -2752,6 +2764,10 @@ def create_app(
                 ),
                 archived=s.archived,
                 corrupted=s.corrupted,
+                product_state=s.product_state,
+                product_state_changed_at=s.product_state_changed_at,
+                attention_kind=s.attention_kind,
+                attention_summary=s.attention_summary,
             )
             for s in summaries
         ]

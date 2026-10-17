@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 #: RuntimeEvent 信封版本（SDD 03 §3）：SSE 帧 / JSONL 行 / AgentEvent 统一携带，
@@ -226,6 +226,12 @@ TEXT_DELTA = "text/delta"
 #
 # 形状说明：wire type 是裸词 "error"（#1193 票面 schema 明确指定），不遵循
 # `域/子域` 惯例——两个词汇生成器的形状正则已按票面放宽以容纳它。
+# 信封 run_id（#1280 AC3，非悬空）：异常臂 append 时挂 `arms.run_id`——run 已启动
+# 的致命子形态下是**真实 run_id**；begin_run 之前崩溃 = None（没有 run 可挂，
+# by-design，与「run_id 为 None ⇒ 无 run 可终结」的终态臂判据同一条口径）。
+# 降级形状（#1280 AC2）：durable append 失败时退化为无 seq 的瞬时帧，data 带
+# `degraded: true` 自描述——这是「durable 型无 seq」的唯一合法形状（golden
+# 不变式 `test_emitted_ephemeral_are_exactly_the_stream_only_types` 钉住）。
 ERROR = "error"
 
 
@@ -236,6 +242,8 @@ class RunFailedBeforePlanData(TypedDict):
     message: str
     workflow_mode: Literal["plan"]
     hint: str
+    # #1280 AC2：durable append 失败降级为瞬时帧时置 True（落盘成功路径不携带）。
+    degraded: NotRequired[bool]
 
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
