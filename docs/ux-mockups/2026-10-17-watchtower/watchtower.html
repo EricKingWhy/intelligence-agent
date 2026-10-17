@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>自动值班 · 效果图 v1</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --canvas: #010102;
+    --s1: #0f1011;
+    --s2: #141516;
+    --hair: #23252a;
+    --hair-s: #34343a;
+    --ink: #f7f8f8;
+    --muted: #d0d6e0;
+    --subtle: #8a8f98;
+    --tertiary: #62666d;
+    --primary: #5e6ad2;
+    --primary-hover: #828fff;
+    --primary-focus: #5e69d1;
+    --success: #27a644;
+    --amber: #d29922;
+    --red: #f85149;
+  }
+  body {
+    font-family: "Inter", -apple-system, "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--canvas);
+    color: var(--ink);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 48px 32px 64px; }
+
+  /* header */
+  .eyebrow {
+    font-size: 13px; font-weight: 500; letter-spacing: 0.4px;
+    color: var(--subtle); margin-bottom: 12px;
+  }
+  .head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+  h1 {
+    font-size: 28px; font-weight: 600; letter-spacing: -0.6px; line-height: 1.2;
+  }
+  .lede { margin-top: 8px; font-size: 14px; color: var(--subtle); line-height: 1.5; }
+  .head-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--s2); color: var(--muted);
+    font-size: 12px; border-radius: 9999px; padding: 2px 8px;
+    border: 1px solid var(--hair); white-space: nowrap;
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .dot.ok { background: var(--success); }
+  .dot.wait { background: var(--amber); }
+  .dot.bad { background: var(--red); }
+  .dot.idle { background: var(--tertiary); }
+  .dot.live { background: var(--primary); }
+
+  .btn {
+    font-size: 14px; font-weight: 500; line-height: 1.2;
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid transparent;
+    font-family: inherit; white-space: nowrap;
+  }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-primary:disabled { background: var(--s2); color: var(--tertiary); cursor: not-allowed; }
+  .btn-secondary { background: var(--s1); color: var(--ink); border-color: var(--hair); }
+  .btn-secondary:hover { border-color: var(--hair-s); background: var(--s2); }
+  .btn-tertiary { background: transparent; color: var(--ink); }
+  .btn-tertiary:hover { color: var(--muted); }
+  .btn:focus-visible { outline: 2px solid var(--primary-focus); outline-offset: 2px; }
+
+  /* list */
+  .list { margin-top: 32px; border-top: 1px solid var(--hair); }
+  .row {
+    display: grid; grid-template-columns: 1fr auto; gap: 8px 24px;
+    padding: 24px 0; border-bottom: 1px solid var(--hair); align-items: start;
+  }
+  .row-main { min-width: 0; }
+  .row-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .row-title { font-size: 16px; font-weight: 400; letter-spacing: -0.05px; }
+  .row.dim .row-title { color: var(--subtle); }
+  .row-meta {
+    display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px;
+    font-size: 12px; color: var(--subtle);
+  }
+  .row-meta .k { color: var(--tertiary); }
+  .countdown {
+    font-size: 20px; font-weight: 400; letter-spacing: -0.2px;
+    font-variant-numeric: tabular-nums; color: var(--ink); margin-top: 10px;
+  }
+  .countdown .unit { font-size: 12px; color: var(--subtle); margin-left: 8px; font-family: inherit; }
+  .row-actions { display: flex; gap: 8px; align-items: center; padding-top: 2px; }
+  .link { color: var(--primary); font-size: 13px; cursor: pointer; text-decoration: none; }
+  .link:hover { color: var(--primary-hover); }
+  .state-text-fail { color: var(--red); font-size: 13px; }
+  .state-text-exp { color: var(--amber); font-size: 13px; }
+
+  .section-label {
+    margin-top: 40px; margin-bottom: 4px;
+    font-size: 13px; font-weight: 500; letter-spacing: 0.4px; color: var(--subtle);
+  }
+
+  .foot-note {
+    margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--hair);
+    font-size: 12px; color: var(--tertiary); line-height: 1.8;
+  }
+
+  /* modal */
+  .overlay {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,0.72); align-items: flex-start; justify-content: center;
+    padding: 8vh 16px 16px; overflow-y: auto;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    width: 640px; max-width: 100%;
+    background: var(--s1); border: 1px solid var(--hair); border-radius: 12px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    animation: rise 0.18s ease-out;
+  }
+  @keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .modal-head { padding: 20px 24px 0; }
+  .modal-head h2 { font-size: 22px; font-weight: 500; letter-spacing: -0.4px; }
+  .modal-head p { margin-top: 6px; font-size: 14px; color: var(--subtle); }
+  .modal-body { padding: 20px 24px; display: flex; flex-direction: column; gap: 20px; }
+  .field label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 8px; }
+  .field .hint { font-size: 12px; color: var(--tertiary); margin-top: 6px; line-height: 1.5; }
+  textarea, input[type="text"], input[type="number"], input[type="datetime-local"], select {
+    width: 100%; background: var(--s2); color: var(--ink);
+    border: 1px solid var(--hair); border-radius: 8px; padding: 8px 12px;
+    font-size: 14px; font-family: inherit;
+  }
+  textarea { min-height: 84px; resize: vertical; line-height: 1.5; }
+  textarea:focus, input:focus, select:focus {
+    outline: 2px solid var(--primary-focus); outline-offset: -1px; border-color: var(--hair-s);
+  }
+  .seg { display: inline-flex; background: var(--canvas); border: 1px solid var(--hair); border-radius: 9999px; padding: 3px; gap: 2px; }
+  .seg button {
+    border: none; background: transparent; color: var(--subtle);
+    font-size: 14px; font-weight: 500; border-radius: 9999px; padding: 6px 14px; cursor: pointer;
+    font-family: inherit;
+  }
+  .seg button.sel { background: var(--s2); color: var(--ink); }
+  .inline-row { display: flex; gap: 12px; align-items: center; }
+  .inline-row input[type="number"] { width: 110px; }
+  .inline-row select { width: auto; }
+  .budget-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+  .consent {
+    background: var(--s2); border: 1px solid var(--hair); border-radius: 8px;
+    padding: 16px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .consent h3 { font-size: 14px; font-weight: 500; margin-bottom: 10px; }
+  .consent ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .consent li { font-size: 13px; color: var(--muted); line-height: 1.55; padding-left: 18px; position: relative; }
+  .consent li::before {
+    content: ""; position: absolute; left: 2px; top: 8px;
+    width: 5px; height: 5px; border-radius: 50%; background: var(--tertiary);
+  }
+  .consent li b { color: var(--ink); font-weight: 500; }
+  .check-row { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; cursor: pointer; }
+  .check-row input { display: none; }
+  .box {
+    width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; margin-top: 1px;
+    border: 1px solid var(--hair-s); background: var(--canvas); position: relative;
+    transition: background 0.12s;
+  }
+  .check-row.on .box { background: var(--primary); border-color: var(--primary); }
+  .check-row.on .box::after {
+    content: ""; position: absolute; left: 5px; top: 2px;
+    width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  .check-row span { font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+  .modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 16px 24px 20px; border-top: 1px solid var(--hair);
+  }
+
+  #toast {
+    position: fixed; bottom: 28px; left: 50%; z-index: 60;
+    transform: translateX(-50%) translateY(12px);
+    background: var(--s2); border: 1px solid var(--hair-s); color: var(--ink);
+    font-size: 13px; padding: 10px 18px; border-radius: 8px;
+    opacity: 0; transition: all 0.22s; pointer-events: none; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .hidden { display: none !important; }
+  @media (max-width: 640px) {
+    .wrap { padding: 32px 20px 48px; }
+    .row { grid-template-columns: 1fr; }
+    .row-actions { padding-top: 4px; }
+    .budget-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">AUTOMATION · 自动值班</div>
+  <div class="head-row">
+    <div>
+      <h1>自动值班</h1>
+      <p class="lede">单次延时执行 · 到点新开会话 · 跑完待验证，由你亲自验收</p>
+    </div>
+    <div class="head-actions">
+      <span class="pill"><span class="dot ok"></span>调度器运行中 · 单实例</span>
+      <button class="btn btn-primary" id="openModal">新建值班</button>
+    </div>
+  </div>
+
+  <div class="section-label">待触发 · 2</div>
+  <div class="list" style="margin-top:8px">
+    <div class="row" data-rule>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="pill"><span class="dot live"></span>待触发</span>
+          <span class="row-title">2 小时后提醒我看 #1287 的 CI 结果</span>
+        </div>
+        <div class="countdown mono"><span id="cd1">01:58:42</span><span class="unit">后触发</span></div>
+        <div class="row-meta">
+          <span><span class="k">预算</span>　50 turns · 2h 截止</span>
+          <span><span class="k">权限</span>　自动档 · ask 已裁剪</span>
+          <span><span class="k">会话</span>　新开</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-secondary" data-pause>暂停</button>
+        <button class="btn btn-tertiary" data-cancel>取消</button>
+      </div>
+    </div>
+
+    <div class="row" data-rule>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="pill"><span class="dot live"></span>待触发</span>
+          <span class="row-title">明天 9:00 跑一遍 #1225 相关单测</span>
+        </div>
+        <div class="countdown mono" style="font-size:15px;">明天 09:00 <span class="unit">Asia/Shanghai · 创建时锁定</span></div>
+        <div class="row-meta">
+          <span><span class="k">预算</span>　默认</span>
+          <span><span class="k">权限</span>　自动档 · ask 已裁剪</span>
+          <span><span class="k">会话</span>　新开</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-secondary" data-pause>暂停</button>
+        <button class="btn btn-tertiary" data-cancel>取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label">需要处理 · 2</div>
+  <div class="list" style="margin-top:8px">
+    <div class="row" data-rule>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="pill"><span class="dot wait"></span>已过期</span>
+          <span class="row-title">今早 8:00 跑回归测试</span>
+        </div>
+        <div class="state-text-exp">已过期 3 小时 12 分 · 宽限窗（5 分钟）已过，未补跑</div>
+        <div class="row-meta">
+          <span><span class="k">预算</span>　100 turns · 4h 截止</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-secondary" data-resched>改期重跑</button>
+        <button class="btn btn-tertiary" data-cancel>归档</button>
+      </div>
+    </div>
+
+    <div class="row" data-rule>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="pill"><span class="dot bad"></span>启动失败</span>
+          <span class="row-title">1 小时前触发 · 模型 429，无可用额度</span>
+        </div>
+        <div class="state-text-fail">未顺延（顺延等于替你改时间）· 未产生会话</div>
+        <div class="row-meta">
+          <span><span class="k">预算</span>　50 turns · 2h 截止</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-secondary" data-rerun>立即重跑</button>
+        <button class="btn btn-tertiary" data-cancel>归档</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label">已归档 · 1</div>
+  <div class="list" style="margin-top:8px">
+    <div class="row dim" data-rule>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="pill"><span class="dot idle"></span>已归档</span>
+          <span class="row-title">昨天 20:00 提醒看 PR #1287</span>
+        </div>
+        <div class="row-meta">
+          <span>已触发 → <a class="link">会话 · 待验证</a></span>
+          <span><span class="k">预算</span>　30 turns</span>
+        </div>
+      </div>
+      <div class="row-actions"></div>
+    </div>
+  </div>
+
+  <div class="foot-note">
+    调度器：serve 进程内 · 单实例锁 · 宽限窗 5 分钟（锚计划时间）· 超窗标记过期不补跑 · fire 前 CAS 置位防双跑<br>
+    语义：跑完进「待验证」，永不自动通过 · ask 提问工具已裁剪 · 预算时长档按实际触发时刻换算
+  </div>
+</div>
+
+<!-- 新建值班 -->
+<div class="overlay" id="overlay">
+  <div class="modal" role="dialog" aria-label="新建值班">
+    <div class="modal-head">
+      <h2>新建值班</h2>
+      <p>单次延时执行 · 到点新开一个会话</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>任务描述</label>
+        <textarea id="fPrompt" placeholder="到点让 agent 做什么？"></textarea>
+      </div>
+
+      <div class="field">
+        <label>触发时间</label>
+        <div class="seg" id="timeSeg">
+          <button class="sel" data-t="rel">相对</button>
+          <button data-t="abs">绝对</button>
+        </div>
+        <div style="margin-top:12px" id="relBox">
+          <div class="inline-row">
+            <input type="number" id="fNum" value="2" min="1">
+            <select id="fUnit">
+              <option>分钟后</option>
+              <option selected>小时后</option>
+              <option>天后</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:12px" class="hidden" id="absBox">
+          <input type="datetime-local" id="fAbs">
+          <div class="hint">绝对时间创建时锁定系统时区（Asia/Shanghai）。夏令时边界首版可能跳过一次。</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>预算 <span style="color:var(--tertiary);font-weight:400">· 触发时换算，时长档按实际触发时刻起算</span></label>
+        <div class="budget-grid">
+          <div>
+            <input type="number" id="fTurns" value="50" min="1">
+            <div class="hint">turns 上限</div>
+          </div>
+          <div>
+            <select id="fTokens">
+              <option selected>默认</option>
+              <option>32k</option>
+              <option>64k</option>
+              <option>128k</option>
+            </select>
+            <div class="hint">tokens 档位</div>
+          </div>
+          <div>
+            <select id="fDur">
+              <option>30 分钟</option>
+              <option selected>2 小时</option>
+              <option>4 小时</option>
+              <option>不设</option>
+            </select>
+            <div class="hint">截止时长</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>无人值守确认</label>
+        <div class="consent">
+          <h3>值班一律按自动档跑</h3>
+          <ul>
+            <li><b>ask 提问卡片不再弹出</b>，且值班 run 里已裁掉提问工具 —— agent 全程自主决策</li>
+            <li><b>删文件、发外部请求、git push 等危险操作将自动放行</b>，半夜无人复核</li>
+            <li>跑完进入<b>「待验证」</b>，由你亲自验收，<b>永不自动通过</b></li>
+          </ul>
+          <label class="check-row" id="agreeRow">
+            <input type="checkbox" id="fAgree">
+            <span class="box"></span>
+            <span>我已知晓并同意以上内容，值班触发后果由我承担</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-tertiary" id="cancelModal">取消</button>
+      <button class="btn btn-primary" id="createBtn" disabled>创建值班</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+  const toast = (msg) => {
+    const t = $('#toast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+  };
+
+  // 倒计时
+  let remain = 1 * 3600 + 58 * 60 + 42;
+  const pad = (n) => String(n).padStart(2, '0');
+  setInterval(() => {
+    if (remain <= 0) return;
+    remain--;
+    const h = Math.floor(remain / 3600), m = Math.floor(remain % 3600 / 60), s = remain % 60;
+    $('#cd1').textContent = pad(h) + ':' + pad(m) + ':' + pad(s);
+  }, 1000);
+
+  // modal
+  const overlay = $('#overlay');
+  $('#openModal').addEventListener('click', () => overlay.classList.add('open'));
+  $('#cancelModal').addEventListener('click', () => overlay.classList.remove('open'));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('open'); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') overlay.classList.remove('open'); });
+
+  // 相对/绝对切换
+  $$('#timeSeg button').forEach(b => b.addEventListener('click', () => {
+    $$('#timeSeg button').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel');
+    const abs = b.dataset.t === 'abs';
+    $('#relBox').classList.toggle('hidden', abs);
+    $('#absBox').classList.toggle('hidden', !abs);
+  }));
+
+  // 知情同意
+  const agreeRow = $('#agreeRow'), agree = $('#fAgree'), createBtn = $('#createBtn');
+  agreeRow.addEventListener('click', (e) => {
+    e.preventDefault();
+    agree.checked = !agree.checked;
+    agreeRow.classList.toggle('on', agree.checked);
+    createBtn.disabled = !agree.checked;
+  });
+  createBtn.addEventListener('click', () => {
+    const p = $('#fPrompt').value.trim() || '（未填任务描述）';
+    overlay.classList.remove('open');
+    toast('值班已创建（演示）');
+  });
+
+  // 行操作
+  $$('[data-pause]').forEach(b => b.addEventListener('click', () => {
+    const on = b.textContent === '暂停';
+    b.textContent = on ? '恢复' : '暂停';
+    toast(on ? '已暂停（演示）' : '已恢复（演示）');
+  }));
+  $$('[data-cancel]').forEach(b => b.addEventListener('click', () => toast('已取消 / 归档（演示）')));
+  $$('[data-resched]').forEach(b => b.addEventListener('click', () => toast('打开改期（演示）')));
+  $$('[data-rerun]').forEach(b => b.addEventListener('click', () => toast('立即重跑（演示）')));
+</script>
+</body>
+</html>
