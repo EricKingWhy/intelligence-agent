@@ -24,7 +24,8 @@ interface Props {
   /** 相对时间的基准（由看板统一下发一次，卡片不各自 `Date.now()`——
    *  否则同一次渲染里每张卡读到不同时刻，测试也就无法稳定断言）。 */
   now: number;
-  /** 可拖条件由看板判（backlog 且非空会话），卡片只渲染结果。 */
+  /** 可拖条件由看板判（非空会话），卡片只渲染结果；"哪一列接受落点"由看板在
+   *  drop 里判——卡片不持有落点语义。 */
   draggable: boolean;
   onDragStart: () => void;
 }
@@ -40,7 +41,7 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
       className={`kanban-card${attention ? ' in-attention' : ''}${empty ? ' kanban-card-empty' : ''}`}
       data-session-id={session.session_id}
       /* 空会话不可拖（§4.7）。**显式** `false`：属性缺失时 HTML 的 `draggable`
-         默认是 `auto`（可拖），所以"不可拖"必须显式写出来才算钉住。 */
+         默认是 `auto`（可拖），所以"不可拖"必须显式写出来才算钉住（AC-9②）。 */
       draggable={draggable}
       onDragStart={(event) => {
         // 兜底：`draggable={false}` 的元素正常不会起拖，但子元素/浏览器差异下仍可能
