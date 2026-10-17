@@ -298,7 +298,7 @@ export default function App() {
       : { files: [], unattributed: 0 },
     [conversation?.session_id, selectedId, tools],
   );
-  /* #1311：空态弱提示判据——会话里有成功的 bash 调用时，「文件/改动」面板要提醒
+  /* #1311：空态弱提示判据——会话里有执行过的 bash 调用时，「文件/改动」面板要提醒
      其文件副作用不在此清单。与 `changes` 同一条身份闸（非选中会话不给提示）。 */
   const hasBashCall = useMemo(
     () => conversation?.session_id === selectedId && hasSuccessfulBashCall(tools),
