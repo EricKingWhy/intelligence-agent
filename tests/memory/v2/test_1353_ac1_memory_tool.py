@@ -241,7 +241,7 @@ def _module_schema(module) -> dict | None:
             continue
         try:
             args = getattr(object.__new__(value), "args_schema", None)
-        except Exception:  # noqa: BLE001 - 任何构造/属性异常的类都不算 Tool 落点
+        except Exception:  # noqa: BLE001,S112 - 任何构造/属性异常的类都不算 Tool 落点
             continue
         if _is_args_model(args):
             return args.model_json_schema()
