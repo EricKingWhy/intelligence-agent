@@ -1282,6 +1282,12 @@ def test_uncertain_mutation_leg_runs_on_the_production_composition(tmp_path):
     `SessionService.recover` 的恢复闸门、`SessionService.budget_projection` 的投影。
     实测教训：三连真实 FAIL（`TypeError: 'NoneType' object is not iterable`）时机制层的
     单测全绿，说明红在没人离线跑过的那一段；把这段也钉住，红就不再需要真实调用才发现。
+
+    `#1327` 起的恢复语义（自动裁决，不再拒绝）：`call-uncertain-1` 是 `bash`
+    （MUTATING）+ 副作用未证（UNKNOWN）⇒ `recover()` 无 decisions 时注入
+    `AutoReconcileCallback` ⇒ 自动 ABANDON ⇒ 账本落 `CANCELLED`，无冲突、无弹窗。
+    不变量 #14 仍成立：MUTATING 工具拿不到 RETRY，`sentinel_after_recovery` 不变
+    证明没有盲重跑；投影的欠账清单结清为空。
     """
     workspace = tmp_path / "workspace"
     sandbox = LocalSubprocessSandbox(workspace_root=workspace)
@@ -1315,9 +1321,14 @@ def test_uncertain_mutation_leg_runs_on_the_production_composition(tmp_path):
     assert result["sentinel_after_calls"] == 1, "副作用已落地 ⇒ 结论真的证不出来"
     assert result["second"].result.error_code is ErrorCode.DEADLINE_EXCEEDED
     assert UNCERTAIN_CALL_TWO not in rows, "准入前被拒不得在账上留行"
-    assert type(result["recovery_refused"]).__name__ == "RecoveryConflict"
-    assert result["sentinel_after_recovery"] == 1, "恢复被拒 ⇒ 没有盲重跑"
-    assert result["reconcile_pending"] == [UNCERTAIN_CALL], "投影把欠账如实报给客户端"
+    # `#1327`：无 decisions 的 recover 不再抛 RecoveryConflict，而是按操作类型
+    # 自动裁决——bash 是 MUTATING ⇒ 自动 ABANDON ⇒ 账本落 CANCELLED。
+    assert result["recovery_refused"] is None, "自动裁决：恢复入口不再拒绝"
+    assert result["rows_after_recovery"][UNCERTAIN_CALL].state is OperationState.CANCELLED, (
+        "bash（MUTATING）+ UNKNOWN ⇒ 自动 ABANDON ⇒ 账本 CANCELLED"
+    )
+    assert result["sentinel_after_recovery"] == 1, "ABANDON 不重跑 ⇒ 没有盲重跑"
+    assert result["reconcile_pending"] == [], "投影把结清后的欠账如实报为空"
 
 
 # ── 失败可定位（真实运行的取证纪律）──────────────────────────────────────
