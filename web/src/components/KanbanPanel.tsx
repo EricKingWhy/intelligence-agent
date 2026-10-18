@@ -52,6 +52,7 @@ import {
   writeShowAccepted,
 } from '../lib/kanban';
 import { KanbanCard } from './KanbanCard';
+import { markAcknowledged, readAck, unread } from '../lib/kanbanUnread';
 import { defaultLoadSessions, useBoardSnapshot } from '../hooks/useBoardSnapshot';
 import '../styles/kanban.css';
 
@@ -61,6 +62,8 @@ interface Props {
   /** 数据源注入缝：只服务**降级路径**与显式刷新（主路径走 WS 板级快照）。
    *  缺省 = `useBoardSnapshot` 导出的那一份（**唯一**一份，本组件不自带副本）。 */
   loadSessions?: () => Promise<SessionSummary[]>;
+  /** 点卡 -> 打开该会话（#1306）。ack 已在**调用前**写好（见 `openSession`）。 */
+  onOpenSession: (sessionId: string) => void;
 }
 
 /** 拖拽被拒绝时的说明（AC-9① 的判据文本）。 */
@@ -75,7 +78,12 @@ function isAlreadyDefined(error: unknown): boolean {
   return error instanceof SessionError && error.status === 409;
 }
 
-export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSessions }: Props) {
+export function KanbanPanel({
+  open,
+  onOpenChange,
+  loadSessions = defaultLoadSessions,
+  onOpenSession,
+}: Props) {
   /** #1305：数据源换成 WS 板级快照（打开时订阅 + 服务端 250ms 节流推送）。
    *  降级（WS 建连失败）时 hook 自己退回「拉一次 + 手动刷新」，组件这侧无分支。 */
   const board = useBoardSnapshot(open, loadSessions);
@@ -89,6 +97,9 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
    *  "先渲染默认态、再在 effect 里改"会闪一下）。所以用**惰性初始化**直接读
    *  localStorage，而不是在 effect 里补——顺带避免了 effect 里的 setState。 */
   const [showAccepted, setShowAccepted] = useState(readShowAccepted);
+  /** ack 表（#1306）：惰性初始化直接读 localStorage（同 `showAccepted` 的纪律：
+   *  首帧就要按它渲染，不能在 effect 里补）。 */
+  const [ack, setAck] = useState(readAck);
   /** 拖拽中的会话 id（同一次拖拽内跨列共享；`null` = 没有在拖）。 */
   const draggingRef = useRef<string | null>(null);
   /** 正在落点的会话 id 集（P3-1：快速连续拖拽同一张卡时，同会话的第二组
@@ -154,6 +165,16 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
     setShowAccepted(next);
     writeShowAccepted(next);
   };
+
+  /** 点卡打开会话（#1306 AC-7②）。**顺序不可换**：先写 ack 再导航——反过来的话，
+   *  导航引起的重渲染会先拿旧 ack 画一帧，卡片在关闭前闪一下未读。 */
+  const openSession = useCallback(
+    (sessionId: string) => {
+      setAck(markAcknowledged(sessionId, ack));
+      onOpenSession(sessionId);
+    },
+    [ack, onOpenSession],
+  );
 
   /** 落点写路径的实际执行体（原样从 `runDropOnExecuting` 抽出——P3-1 的 in-flight
    *  守卫由外层做，这里只管"落点两步"本身）。 */
@@ -273,6 +294,8 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
               onDragStart={() => {
                 draggingRef.current = session.session_id;
               }}
+              unread={unread(session, ack)}
+              onOpen={() => openSession(session.session_id)}
             />
           ))}
         </div>
