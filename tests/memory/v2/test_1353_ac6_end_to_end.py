@@ -325,7 +325,8 @@ async def _run_turns(runtime: AgentRuntime, session: Any, conversation: list[str
     for text in conversation:
         result = await runtime.run(session, text)
         assert result.status == "completed", (
-            f"AC6 的 run 没有正常收口（{result.status}）：这一轮记忆不会被 review"
+            f"AC6 的 run 没有正常收口（{result.status}, reason={result.reason!r}）："
+            "这一轮记忆不会被 review"
         )
 
 

@@ -47,10 +47,10 @@ ALICE = IdentityContext("acme", "alice", ["user"])
 
 
 class _ExplodingSearchStore(FakeVectorStore):
-    """检索必炸的向量后端（Milvus 不可用/超时的替身）。"""
+    """检索必炸的向量后端（向量服务不可用/超时的替身）。"""
 
     async def search(self, query, identity, scope, limit):  # type: ignore[override]
-        raise ConnectionError("milvus is down: secret-ish detail")
+        raise ConnectionError("vector backend is down: secret-ish detail")
 
 
 class _HangingSearchStore(FakeVectorStore):
@@ -98,7 +98,7 @@ async def test_consolidate_without_a_model_still_writes_and_reports_it(tmp_path)
 async def test_retrieval_failure_degrades_to_insert_without_losing_the_candidate(tmp_path):
     """**本票最容易做错的形状**：检索炸了 → 候选仍然落盘，且降级原因可上报。
 
-    没有这条保证，#158 就是"让 Milvus 抖动变成静默丢记忆"。
+    没有这条保证，#158 就是"让向量后端抖动变成静默丢记忆"。
     """
     # 给了模型才会走"检索 + 决策"这条路（AC1）；检索在这里必炸。
     capability, _ = await _langmem(tmp_path, _ExplodingSearchStore(),
@@ -156,7 +156,7 @@ async def test_degradation_reason_carries_only_the_exception_type(tmp_path):
 async def test_bounded_store_caps_item_count_and_chars(tmp_path):
     """provider 面向 prompt 的检索结果：条数 ≤ query_limit、每条 ≤ 字符上界，且带截断标记。
 
-    包的是**真 adapter**（`SqliteMilvusBaseStore`），所以这条同时证明"包一层不改变写/读路径"。
+    包的是**真 adapter**（SQLite 基线存储），所以这条同时证明"包一层不改变写/读路径"。
     """
     vectors = FakeVectorStore()
     capability, records = await _langmem(tmp_path, vectors)

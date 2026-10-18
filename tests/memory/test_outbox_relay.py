@@ -312,7 +312,7 @@ async def test_persistent_ack_failures_still_dead_letter(tmp_path, caplog):
 async def test_restored_memory_re_arms_dead_lettered_entry(tmp_path):
     """内容被重新 store（revision 更新）时必须重置死信跳过。
 
-    此前死信按 memory_id 在进程内永久生效：Milvus 故障超过 ~25s（5 次 × 5s
+    此前死信按 memory_id 在进程内永久生效：向量后端故障超过 ~25s（5 次 × 5s
     轮询）期间写入的记忆全部死信，之后对该记忆的任何更新（新版本内容）也
     永远不再被索引——静默丢失直到进程重启。新 revision 是"新内容、可能已
     可同步"的证据：重置重试预算；SQLite outbox 行仍是权威（indexed=FALSE
@@ -329,7 +329,7 @@ async def test_restored_memory_re_arms_dead_lettered_entry(tmp_path):
 
         async def upsert(self, *args):
             if self.fail:
-                raise ValueError("milvus down")
+                raise ValueError("vector backend down")
             await super().upsert(*args)
 
     vector = Poisoned()
@@ -340,7 +340,7 @@ async def test_restored_memory_re_arms_dead_lettered_entry(tmp_path):
         await relay.flush()
     assert await relay.flush() == 0  # 已死信，不再尝试
 
-    vector.fail = False  # Milvus 恢复
+    vector.fail = False  # 向量后端恢复
     await store.store(MemoryEntry(id="m1", content="new", scope=MemoryScope.USER,
                                   created_at="2026-09-05"), alice)  # 更新 → 新 revision
     assert await relay.flush() == 1  # 重臂：新版本重新同步
