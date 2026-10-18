@@ -205,13 +205,9 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
       // `POST /task/definition` + `POST /messages`（任务被 queue 两次）。
       // 同一会话的第一组还在飞时，第二次落点直接**静默返回**（不 toast，避免噪音）。
       //
-      // 标记只覆盖"这一组写请求在飞"这段，不覆盖到快照翻转。已知仍能重拖的窗口有两条，
-      // 均按现状保留（第二步 queue 到在途 run 是既定语义，卡片位置本就只由快照决定）：
-      // ① `reload()` 抛错（列表请求失败）⇒ `sessions` 停在 backlog；
-      // ② `reload()` 返回 200 但该行投影走了 `_empty` 兜底（`board_projection.py`，
-      //    派生异常时 `product_state=""`）⇒ 快照也仍是 backlog。
-      // 不把标记绑到状态：那会把上面两个**瞬时**故障放大成该卡在本板内永久不可拖
-      // （标记无人复位，`finally` 是唯一删除点）。
+      // 标记只覆盖"写请求在飞"这段，不绑状态（`finally` 是唯一删除点；绑了会把下面两个瞬时
+      // 故障放大成永久不可拖）。仍能重拖的窗口：① `loadSessions()` 失败（`reload` 吞错不重抛）；
+      // ② `reload()` 200 但该行投影走 `_empty` 兜底（派生异常 ⇒ `product_state=""`）仍是 backlog。
       if (dropInFlight.current.has(sessionId)) return;
       dropInFlight.current.add(sessionId);
       try {

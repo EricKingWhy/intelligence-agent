@@ -33,8 +33,8 @@ interface Props {
 export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
   // 后端契约保证 `attention_kind` / `attention_summary` **恒成对**：`_attention` 成对返回，
   // 读盘校验 `(kind is None) != (summary is None)` 即判非法，派生失败兜底 `_empty` 也两者皆空
-  // （`board_projection.py`）⇒ 单边值到不了前端。故染色 / 圆点 / 横幅三处用**同一个**布尔值
-  // 即可，不写单边值分支（不可达且无夹具能覆盖），也不留"染色了但没横幅"的半吊子态。
+  // （`board_projection.py`）；列表按行独立取投影，故单边值到不了前端。染色 / 圆点 / 横幅
+  // 三处因此共用一个布尔值，不写不可达的单边分支。
   const hasAttention = session.attention_kind !== null && session.attention_summary !== null;
   const empty = session.first_user_message === null;
   const title = cardTitle(session);
