@@ -147,11 +147,16 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
           {/* 进度：`running` 阶段逐事件推进；完成态满格。`role="progressbar"` 让
               "回放过程可见"这条 AC 有可机读的形状（e2e 断言它，而不是靠看动画）。 */}
           <div className="replay-progress-head">
-            {phase === 'running' && !loaded ? '正在读取事件…' : `重放中 ${revealed}/${steps.length}`}
+            {phase === 'running' && !loaded
+              ? '正在读取事件…'
+              : phase === 'running'
+                ? `重放中 ${revealed}/${steps.length}`
+                : `已重放 ${revealed}/${steps.length}`}
           </div>
           <div
             className="replay-progress"
             role="progressbar"
+            aria-label="回放进度"
             aria-valuemin={0}
             aria-valuemax={steps.length}
             aria-valuenow={revealed}
@@ -175,7 +180,7 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
           )}
           {phase === 'done' && (
             <div className="replay-done" role="status">
-              回放完成 · {steps.length} 个事件（零副作用，原会话未改动）
+              回放完成 · {steps.length} 个可渲染事件（零副作用，原会话未改动）
             </div>
           )}
         </div>

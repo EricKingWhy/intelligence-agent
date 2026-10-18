@@ -59,14 +59,14 @@ test('会话菜单有重放入口 → 二次确认 → 逐事件回放 → 结�
   await expect(dialog).toContainText('[user] 列出文件');
   // 冻结终态：tool result 不重执行，如实呈现已发生的事实
   await expect(dialog).toContainText('→ result (frozen):');
-  await expect(dialog).toContainText(`回放完成 · ${DEFAULT_REPLAY_STEPS.length} 个事件`);
+  await expect(dialog).toContainText(`回放完成 · ${DEFAULT_REPLAY_STEPS.length} 个可渲染事件`);
 });
 
 test('回放中状态可见（延迟响应撑开"正在读取事件"窗口）', async ({ page }) => {
   await routeApi(
     page,
     railMock({
-      onReplayGet: async (route) => {
+      onReplayGet: async (_route) => {
         await new Promise((r) => setTimeout(r, 500));
         return false; // 交给缺省分支回 200
       },

@@ -106,7 +106,11 @@ describe('SessionReplayDialog', () => {
     expect(text).toContain('[user] 列出文件');
     expect(text).toContain('→ result (frozen):');
     expect(text).toContain('[assistant] 有两个文件');
-    expect(text).toContain('回放完成 · 4 个事件');
+    expect(text).toContain('回放完成 · 4 个可渲染事件');
+    expect(text).toContain('已重放 4/4');
+    expect(text).not.toContain('重放中 4/4');
+    const bar = document.querySelector('[role="progressbar"]');
+    expect(bar?.getAttribute('aria-label')).toBe('回放进度');
     expect(document.querySelectorAll('.replay-step')).toHaveLength(4);
   });
 
@@ -133,7 +137,7 @@ describe('SessionReplayDialog', () => {
     );
     clickButton('开始重放');
     await waitFor(() => (document.body.textContent ?? '').includes('没有可回放的内容'));
-    expect(document.body.textContent).toContain('回放完成 · 0 个事件');
+    expect(document.body.textContent).toContain('回放完成 · 0 个可渲染事件');
   });
 
   it('失败：后端 detail 留在原地，可重试（回到确认态）', async () => {

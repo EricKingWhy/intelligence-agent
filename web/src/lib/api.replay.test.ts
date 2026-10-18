@@ -58,10 +58,12 @@ describe('replaySession', () => {
     await expect(replaySession('ghost')).rejects.toThrow("session 'ghost' not found");
   });
 
-  it('形状防御：缺 steps / 非对象 → 空列表，不抛 TypeError', async () => {
+  it('形状防御：缺 steps → 抛错，不伪装成空成功', async () => {
     captureFetch(200, null);
-    const result = await replaySession('s1');
-    expect(result).toEqual({ session_id: 's1', count: 0, steps: [] });
+    await expect(replaySession('s1')).rejects.toThrow('回放回执缺少 steps');
+
+    captureFetch(200, { session_id: 's1', count: 0 });
+    await expect(replaySession('s1')).rejects.toThrow('回放回执缺少 steps');
   });
 
   it('形状防御：steps 里的脏条目被过滤掉', async () => {
@@ -71,6 +73,7 @@ describe('replaySession', () => {
       steps: [
         { seq: 1, type: 'user/message', line: 'ok' },
         { seq: 2, type: 'model/completed' }, // 缺 line → 丢弃
+        { seq: '3', type: 'model/completed', line: 'bad seq' }, // seq 非数 → 丢弃
         'garbage',
       ],
     });

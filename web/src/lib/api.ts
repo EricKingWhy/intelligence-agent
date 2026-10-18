@@ -1817,15 +1817,19 @@ export async function replaySession(sessionId: string): Promise<SessionReplay> {
     method: 'GET',
   });
   if (!res.ok) throw await sessionError(res, '重放会话失败');
-  // 形状防御（同 deleteSession 纪律）：非对象 / 缺 steps 一律当空，别让读字段抛。
+  // 形状防御：`steps` 是回执的权威（前端不自行重建第二份真相）。缺 steps 说明契约
+  // 被破坏，必须显式失败——返回空数组会把"回执坏了"伪装成"会话没有可回放内容"。
   const raw: unknown = await res.json().catch(() => null);
   const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionReplay>;
-  const steps: SessionReplayStep[] = Array.isArray(body.steps)
-    ? body.steps.filter(
-        (s): s is SessionReplayStep =>
-          typeof s === 'object' && s !== null && typeof (s as SessionReplayStep).line === 'string',
-      )
-    : [];
+  if (!Array.isArray(body.steps)) throw new Error('回放回执缺少 steps');
+  const steps: SessionReplayStep[] = (body.steps as unknown[]).filter(
+    (s: unknown): s is SessionReplayStep =>
+      typeof s === 'object' &&
+      s !== null &&
+      typeof (s as SessionReplayStep).seq === 'number' &&
+      typeof (s as SessionReplayStep).type === 'string' &&
+      typeof (s as SessionReplayStep).line === 'string',
+  );
   return {
     session_id: typeof body.session_id === 'string' ? body.session_id : sessionId,
     count: typeof body.count === 'number' ? body.count : steps.length,
