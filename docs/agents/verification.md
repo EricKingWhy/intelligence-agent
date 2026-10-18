@@ -152,8 +152,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
-- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
-  `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
+- 期望证据：`6 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
+  `12 passed`（索引可执行位守卫）= **`40 passed`（4 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
   该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
   三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
@@ -403,7 +403,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - **fail-closed**：任何车道"工具缺失 / 超时 / 无法执行"一律算**失败**，不算"跳过"、不算通过
   （沿用覆盖闸门"核对不了就不放行"的口径）。
 
-### 4.1 Flake 的两条死规矩（issue #1338 改动 2）
+---
+
+## 4.1 Flake 的两条死规矩（issue #1338 改动 2）
 
 台账：**`docs/flake-ledger.md`** —— flaky 测试的**唯一登记处**。准入判据 F1–F5
 （具名+签名+触发命令+树 SHA 且读数落盘 / 同树隔离重跑 ≥2 次全绿 / `git diff` 与失败 spec

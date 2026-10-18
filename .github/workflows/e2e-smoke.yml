@@ -2,7 +2,8 @@
 #
 # 为什么拆出来（这是本文件存在的唯一理由）
 #
-# 冒烟集只在 `web/**` 变动时有意义：纯 `docs/**` 的 PR 跑 40 分钟的 Chromium 是纯浪费。
+# 冒烟集只在 `web/**` 变动时有意义：纯 `docs/**` 的 PR 跑 413s（约 7min，#1330 实测）
+# 的 Chromium 是纯浪费。
 # 但**不能**把 `paths-ignore: ['docs/**']` 加到 gate0.yml 上：gate0 是分支保护里的**必需**
 # 状态检查（strict: true），被 paths-ignore 跳过的必需检查在 GitHub 上**永远不会被报出**，
 # 于是 docs-only PR 会永久停在 "Expected — waiting for status to be reported"，卡死所有

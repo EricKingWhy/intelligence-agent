@@ -287,6 +287,7 @@ def test_docs_surface_claiming_e2e_forces_1338_reevaluation():
         "（.github/workflows/e2e-smoke.yml 的 paths-ignore docs/**）——"
         "否则那些 docs 改动会静默跳过 e2e。")
 
+
 def test_event_vocabulary_surface_pulls_in_the_generated_artifacts_guard():
     """`session/event.py` 是词汇唯一真值 ⇒ 必须连带选中生成物守卫（这一条只有那一行能提供）。"""
     lanes, focused, _ = _mine_eval("src/agent_harness/session/event.py")

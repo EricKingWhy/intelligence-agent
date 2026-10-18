@@ -65,6 +65,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -427,54 +428,58 @@ def build_lanes(since: str) -> list[Lane]:
 # --------------------------------------------------------------------------- #
 # receipt-present 收据在场检查（issue #1338 改动 3）
 # --------------------------------------------------------------------------- #
-#: 「docs-only」的**权威**判据在 `scripts/check_review_coverage.py::DOC_PATTERN`——本处只引用，
-#: 不另立一套口径（两套口径必然漂移）。import 不到时回落到下面的字面副本。
-#: keep in sync with scripts/check_review_coverage.py DOC_PATTERN (authority)。
+#: 「docs-only」的**权威**判据在 `scripts/check_review_coverage.py::DOC_PATTERN`，能 import 到就
+#: 直接引用它。import 不到时（例如测试用 importlib 按文件加载本模块，`sys.path` 里没有
+#: `scripts/`）回落到下面的字面副本——此时跑的是**第二套口径**，改 `DOC_PATTERN` 必须同步
+#: 改这里（两套口径必然漂移，靠人工同步；本节不另立测试）。
+#: 与 scripts/check_review_coverage.py 的 DOC_PATTERN 保持同步（它是权威）。
 _DOC_PATTERN_FALLBACK = (
     r'^(docs/.*\.(md|txt|rst|tsv|json|jsonl|ya?ml)$'
     r'|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md)$'
 )
-_DOC_RE_CACHE: list = []
 #: 收据文件名：`docs/gate/<被测树 40 位 sha>.json`（入库文件名 = 引用口径）。
 _RECEIPT_RE = re.compile(r"^docs/gate/([0-9a-f]{40})\.json$")
 
 
+@functools.cache
 def _doc_pattern():
-    if not _DOC_RE_CACHE:
-        try:
-            from check_review_coverage import DOC_PATTERN as _p
-        except ImportError:
-            _p = _DOC_PATTERN_FALLBACK
-        _DOC_RE_CACHE.append(re.compile(_p))
-    return _DOC_RE_CACHE[0]
+    try:
+        from check_review_coverage import DOC_PATTERN as _p
+    except ImportError:
+        _p = _DOC_PATTERN_FALLBACK
+    return re.compile(_p)
 
 
 def _git_at(repo_root, *args: str) -> subprocess.CompletedProcess:
-    """`git -C <repo_root>`：本节的 git 调用一律显式绑仓库根（不碰上面的 `git()` 助手）。"""
-    return subprocess.run(
-        ["git", "-C", str(repo_root), *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False,
-    )
+    """`git -C <repo_root>`：本节的 git 调用一律显式绑仓库根（复用上面的 `git()` 助手）。
+
+    `-C <repo_root>` 已决定 git 的工作目录，`git()` 里 `cwd=REPO_ROOT` 在此冗余但无害；
+    `repo_root` 缺省即 `REPO_ROOT` 时与旧实现逐字节等价。
+    """
+    return git("-C", str(repo_root), *args)
+
+
+#: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
+#: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
+_RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
-    """引入本检查的第一笔提交（scripts/gate0.py 里出现字面量 "receipt-present"）。
+    """引入本检查的第一笔提交（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
 
     Bootstrap 规则（#1338 改动 3）：规则存在**之前**写的提交、以及引入规则的那笔提交自身都在
-    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。找不到 = None（fail-closed）。
+    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。
     """
-    repo_root = repo_root or REPO_ROOT
-    proc = _git_at(repo_root, "log", "--format=%H", "--reverse", "-S", "receipt-present",
-                   "--", "scripts/gate0.py")
-    lines = [ln.strip() for ln in proc.stdout.split("\n") if ln.strip()]
-    return lines[0] if proc.returncode == 0 and lines else None
+    return _RECEIPT_BOOTSTRAP_SHA
 
 
 def head_tree_receipts(repo_root=None) -> dict:
     """HEAD 树里 `docs/gate/<40hex>.json` 的校验结果：{sha: {"valid": bool, "reason": str}}。
 
     有效 iff：可解析 JSON、`sha` 字段 == 文件名、`tree` == `git rev-parse <sha>^{tree}`、
-    `result` == "PASS"、`passed` == `total`。其余一律 invalid（**当它不存在** = fail-closed）。
+    `result` == "PASS"、**`passed`/`total` 为 int 且相等**（缺字段时两边都是 None，
+    `None == None` 为真，必须显式拒绝——否则三字段手写收据能顶掉整条在场检查）。
+    其余一律 invalid（**当它不存在** = fail-closed）。
     """
     repo_root = repo_root or REPO_ROOT
     proc = _git_at(repo_root, "ls-tree", "-r", "--name-only", "HEAD", "--", "docs/gate/")
@@ -508,7 +513,12 @@ def head_tree_receipts(repo_root=None) -> dict:
         if treeproc.returncode != 0 or not tree or obj.get("tree") != tree:
             receipts[sha] = {"valid": False, "reason": "tree 字段与 git rev-parse 不符"}
             continue
-        if obj.get("result") != "PASS" or obj.get("passed") != obj.get("total"):
+        passed, total = obj.get("passed"), obj.get("total")
+        if (
+            obj.get("result") != "PASS"
+            or not (isinstance(passed, int) and isinstance(total, int))
+            or passed != total
+        ):
             receipts[sha] = {"valid": False, "reason": "result/passed/total 不是全绿"}
             continue
         receipts[sha] = {"valid": True, "reason": ""}
@@ -530,13 +540,25 @@ def commit_file_changes(repo_root, c: str) -> list:
     for line in diff.stdout.split("\n"):
         parts = line.split("\t")
         if len(parts) >= 2 and parts[0].strip():
-            changes.append((parts[0].strip(), parts[1].strip()))
+            status = parts[0].strip()
+            if status.startswith("R") and len(parts) >= 3:
+                # 改名（`R100\t旧\t新`）取**新**路径：判的是落点树里的位置，旧路径已不存在。
+                path = parts[2].strip()
+            else:
+                path = parts[1].strip()
+            changes.append((status, path))
     return changes
 
 
 def is_pure_docs_commit(changes: list) -> bool:
-    """改动全在 docs/**（判据同 check_review_coverage 的 DOC_RE）。"""
-    return bool(changes) and all(_doc_pattern().match(p) for _s, p in changes)
+    """纯 docs 提交：每笔改动都是 A/M 且路径全在 docs/**（SDD §8.1 口径）。
+
+    D（删除）/ R（改名）等一律不得免检：删 docs 文件或把文件移出 docs/ 都可能改变构建
+    输入，不能按"纯文档改动"放行（#1338 P2-3）。
+    """
+    return bool(changes) and all(
+        s in ("A", "M") and _doc_pattern().match(p) for s, p in changes
+    )
 
 
 def is_pure_receipt_landing(changes: list) -> bool:
@@ -568,7 +590,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
     B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受三种形状：
     ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
-    且 c 是 t 的祖先——即批次冻结在树 F 后整批只跑一次全量，每笔 c 的 t 都是后代 F。
+    c 是 t 的祖先、**且 c 与 t 同一冻结树**（`c^{tree} == t^{tree}`）——即批次冻结在树 F 后整批
+    只跑一次全量，每笔 c 的 t 都是后代 F。
 
     ③ 落地票面对 t 的定义（"t 是 c 的被测树"，t = c 与 t = 父+传递只是实例）：字面只认
     "t = c 或父"会要求**每笔代码提交各跑一次门禁**，与改动标题"每棵冻结树只跑一次全量"及
@@ -614,11 +637,17 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
             and transfer_diff_docs_only(repo_root, p1, c)
         )
         if not acceptable:
-            # ③ 批次冻结树：t 在区间内、t != c、且 c 是 t 的祖先 ⇒ c 的被测树就是后代 t。
+            # ③ 批次冻结树：t 在区间内、t != c、c 是 t 的祖先、**且 c 与 t 同一冻结树**
+            # （`c^{tree} == t^{tree}`）⇒ c 的被测树就是后代 t。只判祖先不判树，会让 tip
+            # 的一张收据免检所有更早的代码提交（#1338 P1-1），fail-open；树比对失败 ⇒ 不认。
+            c_tree = _git_at(repo_root, "rev-parse", f"{c}^{{tree}}").stdout.strip()
             for t in receipts:
                 if t == c or t not in range_set or not receipts[t].get("valid", False):
                     continue
-                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode == 0:
+                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
+                    continue
+                t_tree = _git_at(repo_root, "rev-parse", f"{t}^{{tree}}").stdout.strip()
+                if c_tree and t_tree and c_tree == t_tree:
                     acceptable = True
                     break
         if not acceptable:
@@ -1136,6 +1165,25 @@ def usage() -> int:
     return 0
 
 
+def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
+    """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 6 条）。
+
+    只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
+    就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
+    """
+    for i, (lane, rc, secs, out) in enumerate(results):
+        if lane.name == "guards":
+            if rc == 0:
+                ok, detail, warn = receipt_present_check()
+                if not ok:
+                    if warn:
+                        print("warn-only receipt-present (#1338 change 3, first week): alert only, not counted")
+                        print(detail)
+                    else:
+                        results[i] = (lane, 1, secs, out + "\n" + detail)
+            break
+
+
 def main(argv: list[str]) -> int:
     _utf8_stdio()
     since, only, affected_rev, replay_path = "", "", "", ""
@@ -1255,18 +1303,7 @@ def main(argv: list[str]) -> int:
         print(f"[{idx}/{len(lanes)}] {lane.name:11s} {'PASS' if rc == 0 else 'FAIL'}  {secs:6.2f}s")
         results.append((lane, rc, secs, out))
 
-    # receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 6 条）。
-    for _g_i, (_g_lane, _g_rc, _g_secs, _g_out) in enumerate(results):
-        if _g_lane.name == "guards":
-            if _g_rc == 0:
-                _g_ok, _g_detail, _g_warn = receipt_present_check()
-                if not _g_ok:
-                    if _g_warn:
-                        print("warn-only receipt-present (#1338 change 3, first week): alert only, not counted")
-                        print(_g_detail)
-                    else:
-                        results[_g_i] = (_g_lane, 1, _g_secs, _g_out + "\n" + _g_detail)
-            break
+    _apply_receipt_check(results)
 
     wall = time.time() - started
     for lane, rc, _secs, out in results:
