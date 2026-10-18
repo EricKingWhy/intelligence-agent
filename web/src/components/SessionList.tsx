@@ -55,6 +55,7 @@ import {
   InlineRename,
 } from './ProjectDialogs';
 import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
+import { SessionReplayDialog, type ReplaySessionTarget } from './SessionReplayDialog';
 import { TaskCreationDialog } from './TaskCreationDialog';
 
 interface Props {
@@ -155,6 +156,9 @@ export const SessionList = memo(function SessionList({
   /** 待硬删的会话（null = 确认面关闭）——与项目软删分开一个状态：两者的后果与
    *  文案都不同（一个只摘注册记录，一个不可恢复），共用会让"点错了哪一类"没法表达。 */
   const [deletingSession, setDeletingSession] = useState<DeleteSessionTarget | null>(null);
+  /** 待重放的会话（`#1322`，null = 浮层关闭）。与硬删分开一个状态：重放只读、零
+   *  副作用、可无限重来，与不可恢复的删除是两种后果，共用会让入口语义含混。 */
+  const [replayTarget, setReplayTarget] = useState<ReplaySessionTarget | null>(null);
   const [attachFor, setAttachFor] = useState<string | null>(null);
   /** 「新建任务…」的目标项目（null = 确认面关闭）。 */
   const [startTaskFor, setStartTaskFor] = useState<Project | null>(null);
@@ -618,6 +622,7 @@ export const SessionList = memo(function SessionList({
                             onSetArchived={(sessionId, archived) =>
                               void handleSetArchived(sessionId, archived)
                             }
+                            onReplay={setReplayTarget}
                           />
                         ))}
                         {dropEnabled && rows.length > 0 && (
@@ -712,6 +717,7 @@ export const SessionList = memo(function SessionList({
                 onSetArchived={(sessionId, archived) =>
                   void handleSetArchived(sessionId, archived)
                 }
+                onReplay={setReplayTarget}
               />
             ))}
           </div>
@@ -745,6 +751,14 @@ export const SessionList = memo(function SessionList({
           if (!open) setDeletingSession(null);
         }}
         onConfirm={onDeleteSession}
+      />
+      {/* #1322：逻辑回放浮层。自包含（只读端点，不改任何会话状态），故不经过 App
+          ——与硬删（要收敛列表状态）刻意不同。 */}
+      <SessionReplayDialog
+        target={replayTarget}
+        onOpenChange={(open) => {
+          if (!open) setReplayTarget(null);
+        }}
       />
       <AttachToProjectDialog
         sessionId={attachFor}
@@ -802,6 +816,9 @@ interface RowProps {
   /** 本行归档 / 取消归档（#171）。真正落库在 App 侧的 onSetArchived 里；
    *  本组件只转交意图，不碰会话真相。 */
   onSetArchived: (sessionId: string, archived: boolean) => void;
+  /** 打开本行的重放浮层（`#1322`）。重放只读、零副作用，故只把意图转交出去
+   *  （浮层自包含，真正调用在 `SessionReplayDialog` 里）。 */
+  onReplay: (target: ReplaySessionTarget) => void;
 }
 
 function SessionRow({
@@ -827,6 +844,7 @@ function SessionRow({
   onDropRow,
   onDelete,
   onSetArchived,
+  onReplay,
 }: RowProps) {
   const inProject = projectId !== null;
   const index = ledger.indexOf(s.session_id);
@@ -974,6 +992,16 @@ function SessionRow({
               onSelect={() => onSetArchived(s.session_id, !s.archived)}
             >
               {s.archived ? '取消归档' : '归档'}
+            </DropdownMenu.Item>
+            {/* #1322：逻辑回放入口（README 承诺的「可重放」在 Web 侧的唯一入口）。
+                与归档同组（都是非破坏性动作），刻意排在硬删之前——重放只读、零
+                副作用、可无限重来，离"删除"这道缓冲越远越好。二次确认在浮层里
+                （讲清"零副作用地重放"，见 SessionReplayDialog）。 */}
+            <DropdownMenu.Item
+              className="rail-menu-item"
+              onSelect={() => onReplay({ id: s.session_id, title })}
+            >
+              重放会话…
             </DropdownMenu.Item>
             <DropdownMenu.Separator className="rail-menu-sep" />
             {/* 硬删（#172 / ADR-0029）——两分支共用、永远最后一项：不可恢复的动作
