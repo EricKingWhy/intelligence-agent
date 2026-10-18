@@ -26,12 +26,14 @@ import {
 /** #1325 S5/S9：后端 `reason` 是机读成因，前端在此唯一分派点映射成中文。
  *  与 CLI `compress` 的文案、面板低水位提示同词——用户不该在两条入口读到两种语言。
  *  其余 409（`run_busy` / `event_drift` / 压缩进行中）保持后端原文（票面：文案不变）。 */
-const COMPACT_REJECT_COPY: Record<string, string> = {
+export const COMPACT_REJECT_COPY: Record<string, string> = {
   no_early_turns: '没有可压缩的早期内容',
 };
 
 function describeCompactError(error: unknown): string {
-  if (error instanceof SessionError && error.reason !== null) {
+  // status 一并判：`reason` 是 409 家族的类型化拒绝（`no_early_turns`），若后端日后在
+  // 5xx/422 复用了同名 reason，真实故障不能被伪装成「没得压」。
+  if (error instanceof SessionError && error.status === 409 && error.reason !== null) {
     const mapped = COMPACT_REJECT_COPY[error.reason];
     if (mapped) return mapped;
   }

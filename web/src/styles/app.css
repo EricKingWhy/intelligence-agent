@@ -9815,7 +9815,7 @@ button.json-row {
 .plugin-loading {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-xs);
 }
 .plugin-detail {
   flex: 1;

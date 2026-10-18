@@ -200,7 +200,7 @@ function PluginPanelBody() {
             {loading && (
               <div className="plugin-empty plugin-loading" role="status">
                 <span className="ctx-usage-spinner" aria-hidden="true" />
-                {' '}加载中…
+                加载中…
               </div>
             )}
             {!loading && (

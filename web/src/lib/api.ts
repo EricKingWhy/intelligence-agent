@@ -134,8 +134,9 @@ export async function readErrorDetail(res: Response): Promise<string> {
 }
 
 /**
- * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
- * 这次读取）。
+ * 一次读取拿到 `{message, code, reason, objectDetail}`（响应体只能读一次，所有消费者
+ * 必须共用这次读取）。`reason` 是对象形 detail 的机读成因（`#1325` S5：压缩被拒的
+ * `no_early_turns`），与 `code` 同一「只按字段判、不按文案猜」口径。
  *
  * `objectDetail` = "后端用了 `detail` 是对象的**机读形状**回答"（#227）：用它区分三种
  * 截然不同的情况——纯字符串 detail（旧版后端）、对象 detail 带码、对象 detail **没有**
@@ -2695,8 +2696,8 @@ export async function forkSession(
     // BUG-001 fix / #1325 S8：sandbox 不可用时 detail 是**对象**，直接
     // `String(detail)` 会渲染成「[object Object]」。统一走 readErrorBody 取
     // 给人看的 message（后端已把 remediation 拼进 message，无需二次拼装）。
-    const { message } = await readErrorBody(res);
-    throw new Error(message || `fork ${res.status}`);
+    const { message, reason } = await readErrorBody(res);
+    throw new SessionError(res.status, message || `fork ${res.status}`, reason);
   }
   return res.json();
 }

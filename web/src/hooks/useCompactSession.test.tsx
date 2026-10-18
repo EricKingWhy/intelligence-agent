@@ -75,6 +75,14 @@ describe('#1325 S5 — 压缩被拒按 reason 映射中文', () => {
     expect(current?.compactError).toBe('压缩已在进行中');
   });
 
+  it('非 409 的错误即便带同名 reason 也不被改写成「没得压」', async () => {
+    compactSession.mockRejectedValue(
+      new api.SessionError(500, 'internal error while compacting', 'no_early_turns'),
+    );
+    await runCompact();
+    expect(current?.compactError).toBe('internal error while compacting');
+  });
+
   it('非 SessionError（网络层）→ 沿用 describeSessionError 口径', async () => {
     compactSession.mockRejectedValue(new Error('网络断了'));
     await runCompact();

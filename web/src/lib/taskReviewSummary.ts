@@ -1,6 +1,7 @@
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
 import { groupEventsByRun, type RunGroup } from './timelineGroups';
+import { RUN_TERMINAL_TYPES } from './runState';
 
 const LONG_RUN_MS = 10 * 60 * 1000;
 
@@ -51,9 +52,14 @@ export function summarizeTaskRuns(events: readonly AgentEvent[]): TaskReviewSumm
     const group = runGroup(runEvents);
     return group ? [{ group, duration: durationMs(runEvents) }] : [];
   });
-  // Map 迭代序 = run 首次出现序；「最近」取最后一个已终态（非 running）的 run。
-  const latestTerminalRunId =
-    [...runs].reverse().find(({ group }) => group.status !== 'running')?.group.runId ?? null;
+  // 「最近」= **终态事件最晚**的那个 run，按事件序取（`Map` 迭代序是首次出现序：
+  // 两个 run 交错时 r1 先起后完、r2 后起先完，按首次出现序会把 r2 当成最近的）。
+  let latestTerminalRunId: string | null = null;
+  for (const event of events) {
+    if (event.run_id && RUN_TERMINAL_TYPES.has(event.type)) {
+      latestTerminalRunId = event.run_id;
+    }
+  }
   const incompleteCount = runs.filter(
     ({ group }) => group.status === 'failed' || group.status === 'interrupted',
   ).length;

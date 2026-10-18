@@ -1243,7 +1243,9 @@ describe('#1325 S8 — forkSession 对象形 detail 不出 [object Object]', () 
       },
     });
     const err = await forkSession('s1', 3).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(SessionError);
+    expect((err as SessionError).status).toBe(409);
+    expect((err as SessionError).reason).toBe('daemon_not_running');
     expect((err as Error).message).not.toContain('[object Object]');
     expect((err as Error).message).toContain('Sandbox 后端');
     expect((err as Error).message).toContain('修复');

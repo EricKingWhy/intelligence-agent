@@ -63,11 +63,12 @@ describe('ChangesPanel event memoization', () => {
       expect(markRead).toBeDefined();
       act(() => markRead.click());
 
-      // 同一 run：退出警示强调，弱入口收起，回执可见。
+      // 同一 run：退出警示强调，弱入口收起，回执可见——但**主状态行不消失**
+      // （效果图里「已标记为已读」是瞬时回执，文件数/未完成数必须常驻）。
       expect(host.querySelector('.task-review-summary.is-warning')).toBeNull();
-      expect(host.querySelector('.task-review-summary')?.textContent).toContain(
-        '已标记为已读，不会阻断后续操作',
-      );
+      const summaryText = host.querySelector('.task-review-summary')?.textContent ?? '';
+      expect(summaryText).toContain('有 1 个任务未完成，请查看');
+      expect(summaryText).toContain('已标记为已读，不会阻断后续操作');
       expect([...host.querySelectorAll('button')].some((b) => b.textContent === '标记已读')).toBe(false);
 
       // 新 run 终态：提醒重新出现（作用域是 run，不是整个会话）。
