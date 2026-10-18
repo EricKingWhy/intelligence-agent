@@ -330,11 +330,12 @@ class TestWebSocketDisconnectCleanup:
 
 
 class TestCrashReconcileGuard:
-    """T8 #138：崩溃遗留（UNKNOWN tool_call）续聊必须 409，不伪造「结果未知」。
+    """T8 #138：崩溃遗留（UNKNOWN tool_call）续聊的恢复闸门（`#1327` 起自动裁决）。
 
     不变量 #13/#14：Ledger reconcile 是唯一恢复入口；UNKNOWN 高风险副作用
-    无 ReconcileCallback 时安全拒绝，绝不能落到 Session.resume 的 dangling
-    兜底去替模型猜结论。
+    绝不能替模型猜结论。`#1327` 起"猜"被"按操作类型自动裁决"取代：`bash` 是
+    MUTATING ⇒ 自动 ABANDON ⇒ 账本落 `CANCELLED`，合成的 tool/result 如实写
+    "崩溃时结果未知"（不伪造成功/失败），绝不盲重跑那条调用。
     """
 
     def _seed_crashed_unknown(self, app, session_id: str) -> None:
@@ -345,7 +346,12 @@ class TestCrashReconcileGuard:
         from agent_harness.storage import Operation, OperationState
 
         state = app.state.agent
-        session = Session.start(state.store, session_id=session_id)
+        # `#1327` 起续聊会走到 launch（不再 409）：会话需要 workspace 映射，
+        # 与 `test_terminal_operation_is_reconciled_then_continue_succeeds` 同款。
+        session = Session.start(
+            state.store, session_id=session_id,
+            workspace_registry=state.workspace_registry,
+        )
         run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "删库"}, run_id=run_id)
         session.append(
@@ -379,8 +385,47 @@ class TestCrashReconcileGuard:
 
         asyncio.run(_seed())
 
-    def test_unknown_operation_blocks_continue_with_409(self, app_and_client):
-        app, client = app_and_client
+    def test_unknown_operation_auto_adjudicated_then_continue_succeeds(
+        self, tmp_path, monkeypatch
+    ):
+        """`#1327` 起：崩溃遗留的 UNKNOWN tool_call 续聊不再 409，而是自动裁决后继续。
+
+        `bash`（MUTATING）+ 副作用未知 ⇒ 恢复入口按操作类型自动 ABANDON ⇒
+        账本落 `CANCELLED`，续聊正常继续（200）。fail-closed 精神保留在新断言里：
+        1. 那条 `rm -rf /prod` 没有被盲重跑（账本 CANCELLED + verdict ABANDON，
+           不是 RETRY/SUCCEEDED；事件流里只有种子那一条 tool/call）。
+        2. 没有伪造结论：合成的 tool/result 是失败（`ok` 为假）且如实写
+           "崩溃时结果未知"，不是一条伪造的成功/失败断言。
+        """
+        import asyncio
+        import json
+
+        from fastapi.testclient import TestClient
+        from langchain_core.messages import AIMessage
+
+        from agent_harness.config import Settings
+        from agent_harness.session.event import (
+            OPERATION_RECONCILED,
+            TOOL_CALL,
+            TOOL_RESULT,
+        )
+        from agent_harness.storage import OperationState
+        from agent_harness.web.app import create_app
+        from tests.scripted_model import ScriptedModel
+
+        # 恢复后新 run 的模型：只说 done，不发起任何工具调用。
+        # （自建 app：`openai` provider 本树不认，用隔壁用例同款 deepseek 配置；
+        # `create_chat_model` 仍被替身接管，不发生真实请求。）
+        monkeypatch.setattr(
+            "agent_harness.assembly.create_chat_model",
+            lambda config, **kw: ScriptedModel([AIMessage(content="done")]),
+        )
+        app = create_app(Settings(
+            _env_file=None, workspace_dir=str(tmp_path),
+            model_api_key="sk-test", model_provider="deepseek",
+            model_name="deepseek-chat", enable_cors=False,
+        ))
+        client = TestClient(app)
         session_id = "crashed-unknown"
         self._seed_crashed_unknown(app, session_id)
 
@@ -389,18 +434,39 @@ class TestCrashReconcileGuard:
             json={"content": "继续", "mode": "queue"},
         )
 
-        assert response.status_code == 409
-        # #547：409 detail 统一为结构体——message 点名 UNKNOWN Operation，
-        # pending_decisions 是机器可读的待裁决清单（UI 据此引导裁决）
-        detail = response.json()["detail"]
-        assert "UNKNOWN" in detail["message"]
-        assert any(
-            p["tool_call_id"] == "call-1" for p in detail["pending_decisions"]
-        )
-        # 拒绝即零伪造：没有合成 tool/result，也没有假的恢复完成标记
+        # （1）自动裁决后续聊正常继续：200，不是 409。
+        assert response.status_code == 200, response.text
+
+        # （2）bash（MUTATING）+ 副作用未知 ⇒ 自动 ABANDON ⇒ 账本 CANCELLED。
+        async def _row_state():
+            op = await app.state.agent.operation_ledger.get(session_id, "call-1")
+            return op.state
+
+        assert asyncio.run(_row_state()) is OperationState.CANCELLED
+        reconciled = {
+            e.data["tool_call_id"]: e.data["verdict"]
+            for e in app.state.agent.store.read_events(session_id)
+            if e.type == OPERATION_RECONCILED
+        }
+        assert reconciled == {"call-1": "ABANDON"}
+
+        # （3）没有盲重跑：事件流里只有种子那一条 tool/call（call-1 没被重新执行）。
         events = app.state.agent.store.read_events(session_id)
-        assert not any(e.type == "tool/result" for e in events)
-        assert not any(e.type == "session/resumed" for e in events)
+        seed_calls = [
+            e for e in events
+            if e.type == TOOL_CALL and e.data.get("tool_call_id") == "call-1"
+        ]
+        assert len(seed_calls) == 1, "自动裁决不得重新执行那条高风险调用"
+
+        # （4）不伪造结论：合成的 tool/result 是失败且如实写"未知"。
+        results = [
+            e for e in events
+            if e.type == TOOL_RESULT and e.data.get("tool_call_id") == "call-1"
+        ]
+        assert results, "ABANDON 必须合成一条可忽略的被动通知（tool/result）"
+        payload = json.loads(results[0].data["content"])
+        assert payload["ok"] is False, "合成结果不得伪装成成功"
+        assert "已按规则自动裁决放弃" in payload["message"]
 
     def test_terminal_operation_is_reconciled_then_continue_succeeds(
         self, tmp_path, monkeypatch

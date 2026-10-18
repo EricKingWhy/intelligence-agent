@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
-/** #1030 呈现层（缺陷②/③，AC2/AC3）：待裁决横幅与人话文案。
+/** `#1327` 呈现层：待裁决被动通知（无弹窗 / 无裁决入口 / 无 409）。
  *
  *  渲染**真 App**，只把数据 hook（`useSession`）与 `useProjects` 换成可控夹具
- *  ——横幅的可见性与文案全是 App 的派生逻辑，抄进测试宿主就只测到副本。
+ *  ——通知的可见性与文案全是 App 的派生逻辑，抄进测试宿主就只测到副本。
  *
- *  锁三件事：
- *   1. AC3：**无需任何 409**，只要后端清单非空，横幅与「去裁决」入口就在场；
- *   2. AC2：横幅第一层是人话，**不含**任一协议词汇；后端原文只在 `<details>` 里；
- *   3. AC2/AC3：`null`（未知）与 `[]`（后端说没有）都**不**出横幅——没有事实就不报态。
+ *  锁三件事（新行为）：
+ *   1. 清单非空 ⇒ 只有被动通知横幅（`role="status"`，无需交互），**没有任何**
+ *      裁决面板 / 弹窗 / 「去裁决」按钮——后端按操作类型自动裁决，前端没有
+ *      可点的事；
+ *   2. 横幅第一层是人话（声明"下次恢复会按操作类型自动处理"），**不含**任一
+ *      协议词汇；后端原文只在 `<details>` 折叠层里；
+ *   3. `null`（未知）与 `[]`（后端说没有）都**不**出横幅——没有事实就不报态。
  */
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -148,71 +151,45 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('#1030 待裁决横幅（AC2/AC3）', () => {
-  it('AC3：清单非空 ⇒ 裁决面板**自动**在场（零 409、零点击）', async () => {
-    // 这正是缺陷②的修法：此前面板只在"点恢复会话 → 撞一次带 pending_decisions 的
-    // 409"之后才出现；现在后端清单非空就直接驱动它。
+describe('#1327 待裁决被动通知（无弹窗 / 无裁决入口）', () => {
+  it('清单非空 ⇒ 被动通知横幅在场，且**没有任何**裁决面板/弹窗/可点入口', async () => {
+    // `#1327`：裁决改由后端按操作类型自动做。前端只如实呈现"有欠账"，
+    // 不给用户任何需要点的东西——弹窗与「去裁决」按钮已删。
     H.recoverState = recoverStateWith(PENDING, PROTOCOL_MESSAGE);
     await mount();
-    expect(container!.querySelector('.recovery-decision-panel')).not.toBeNull();
-    expect(container!.textContent).toContain('结果不确定');
-  });
-
-  it('AC3：关掉面板后横幅接替成为常驻入口（不是"关了就再也找不到"）', async () => {
-    H.recoverState = recoverStateWith(PENDING, PROTOCOL_MESSAGE);
-    await mount();
-    const close = container!.querySelector('.recovery-decision-close') as HTMLButtonElement;
-    await act(async () => {
-      close.click();
-    });
-    expect(container!.querySelector('.recovery-decision-panel')).toBeNull();
-
     const el = banner();
     expect(el).not.toBeNull();
-    const openBtn = el!.querySelector('.adjudication-open-btn') as HTMLButtonElement;
-    expect(openBtn.textContent).toContain('去裁决');
-
-    // 点它 → 面板回来（横幅是**动作**，不是只读装饰）。
-    await act(async () => {
-      openBtn.click();
-    });
-    expect(container!.querySelector('.recovery-decision-panel')).not.toBeNull();
+    expect(el!.getAttribute('role')).toBe('status');
+    expect(container!.querySelector('.recovery-decision-panel')).toBeNull();
+    expect(el!.querySelector('button')).toBeNull();
+    expect(container!.textContent).not.toContain('去裁决');
   });
 
-  it('AC2：横幅第一层是人话，且**不含**任何协议词汇', async () => {
+  it('横幅第一层是人话（声明自动处理），且**不含**任何协议词汇', async () => {
     H.recoverState = recoverStateWith(PENDING, PROTOCOL_MESSAGE);
     await mount();
-    // 先关掉面板，让横幅成为可观测的入口。
-    await act(async () => {
-      (container!.querySelector('.recovery-decision-close') as HTMLButtonElement).click();
-    });
     const headline = container!.querySelector('.adjudication-headline')!;
-    expect(headline.textContent).toContain('裁决');
+    expect(headline.textContent).toContain('自动处理');
+    expect(headline.textContent).not.toContain('裁决');
     for (const token of ['POST /api/sessions', 'tool_call_id', 'verdict ∈', 'decisions=[']) {
       expect(headline.textContent, `人话层泄漏了 ${token}`).not.toContain(token);
     }
   });
 
-  it('AC2：后端原文进折叠层——逐字保留，不是消失（排查/手工结清的唯一依据）', async () => {
+  it('后端原文进折叠层——逐字保留，不是消失（排查/手工结清的唯一依据）', async () => {
     H.recoverState = recoverStateWith(PENDING, PROTOCOL_MESSAGE);
     await mount();
-    // 面板里的技术详情层（面板自己是第一层人话）。
-    const details = container!.querySelector('.recovery-decision-panel .adjudication-tech') as HTMLDetailsElement;
+    // 横幅里的技术详情层（横幅自己是第一层人话）。
+    const details = container!.querySelector('.adjudication-banner .adjudication-tech') as HTMLDetailsElement;
     expect(details).not.toBeNull();
     expect(details.open).toBe(false); // 默认折叠
     expect(details.querySelector('summary')!.textContent).toContain('技术详情');
     const body = details.querySelector('.adjudication-tech-body')!;
     expect(body.textContent).toBe(PROTOCOL_MESSAGE);
     expect(body.textContent).toContain('tool_call_id');
-
-    // 且**面板的人话标题**里没有协议词汇。
-    const title = container!.querySelector('.recovery-decision-title')!;
-    for (const token of ['POST /api/sessions', 'tool_call_id', 'verdict ∈']) {
-      expect(title.textContent).not.toContain(token);
-    }
   });
 
-  it('`[]`（后端明确说没有）⇒ 不出面板也不出横幅——没有事实就不报态', async () => {
+  it('`[]`（后端明确说没有）⇒ 不出横幅——没有事实就不报态', async () => {
     H.recoverState = recoverStateWith([]);
     await mount();
     expect(banner()).toBeNull();
@@ -227,10 +204,10 @@ describe('#1030 待裁决横幅（AC2/AC3）', () => {
     expect(container!.querySelector('.recovery-decision-panel')).toBeNull();
   });
 
-  it('没有 message 时不画空的折叠层（没有可展开的内容）', async () => {
+  it('没有 message 时不画空的折叠层，但横幅仍在（没有可展开的内容）', async () => {
     H.recoverState = recoverStateWith(PENDING, null);
     await mount();
-    expect(container!.querySelector('.recovery-decision-panel')).not.toBeNull();
+    expect(banner()).not.toBeNull();
     expect(container!.querySelector('.adjudication-tech')).toBeNull();
   });
 });

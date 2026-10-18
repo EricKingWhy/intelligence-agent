@@ -531,6 +531,47 @@ def test_web_git_oversized_output_without_artifact_store_returns_structured_503(
     assert rows == [("started", None), ("failed", None)]
 
 
+def test_web_git_oversized_503_settles_operation_row(tmp_path: Path) -> None:
+    """`#1327` P0 回归：503 之后 `operations` 行不得停在 RUNNING。
+
+    根因：`ArtifactOverflowUnavailable` / `BaseException` / 取消三条异常臂只写
+    `transport_ledger`，从不收口 `operations` ⇒ 该行永久 RUNNING ⇒ 恢复链把它
+    当成"结果不确定"弹人工裁决（本票的原始症状）。
+
+    本用例钉的就是那条缺失的收口：**两本账对同一次失败必须同结论**。它同时是
+    "旧用例为什么没抓住这个 bug"的答案——上面那条 503 用例只断言了
+    `transport_ledger`，`operations` 表一个字都没查。
+    """
+    client = _client(tmp_path, artifact_dir="", artifact_overflow_chars=100)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    for index in range(20):
+        _seed(root, f"untracked-{index:02d}.py", "print('oversized output')\n")
+
+    response = client.get(_url(sid, "/git/status"))
+    assert response.status_code == 503, response.text
+
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        rows = connection.execute(
+            "SELECT tool_call_id, tool_name, state, result_json, finished_at"
+            " FROM operations ORDER BY rowid"
+        ).fetchall()
+
+    assert len(rows) == 1, "transport 查询只应产生一条 Operation 行"
+    tool_call_id, tool_name, state, result_json, finished_at = rows[0]
+    assert tool_call_id.startswith("transport-")
+    assert tool_name == "git_status"
+    assert state == "FAILED", "503 是确定性失败：operations 行必须收口，不能停在 RUNNING"
+    assert finished_at is not None, "终态必须带 finished_at"
+    assert result_json is not None, "终态必须带结果（恢复链据此合成，不再问用户）"
+    assert '"ok":false' in result_json.replace(" ", "")
+
+    # 恢复链不再把这一行当待裁决：它已是终态，不需要任何人裁决。
+    recover = client.post(f"/api/sessions/{sid}/recover")
+    assert recover.status_code == 200, recover.text
+
+
 def test_web_git_audit_redacts_relative_and_absolute_pathspec(
     tmp_path: Path,
 ) -> None:

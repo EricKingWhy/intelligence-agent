@@ -297,8 +297,10 @@ class Tool(ABC):
         判据（True 的必要且充分条件）：``side_effect == READ_ONLY`` 且重执行
         幂等、无任何外部副作用（含远程）。形制取自 Pi durable ``replay:"safe"``
         （双 safe 才重跑）；与 reconcile_hint 正交——hint 只影响「可否外部核验」，
-        本属性只影响「可否安全重放」。不变量 #14 不变：协调器永不据此自动重跑，
-        本属性只驱动恢复裁决 UI 的默认方向（#357 W-13 契约 7）。
+        本属性只影响「可否安全重放」。`#1327` 起：自动裁决路径仅对 READ_ONLY +
+        replay_safe 给 RETRY（`recovery/coordinator.py` 的 `AutoReconcileCallback`）；
+        协调器仍不重执行原操作，只合成 retryable 结果（重跑由模型发起新的
+        tool_call）。
         """
         return False
 

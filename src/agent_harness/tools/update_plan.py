@@ -111,10 +111,19 @@ class UpdatePlanTool(Tool):
 
     @property
     def reconcile_hint(self) -> ReconcileHint:
+        """`verifiable=False` 是判据、文案只解释它（`#1327` P2 消矛盾）。
+
+        原文案写"重复提交同一张表是幂等的，重跑安全"，与本字段 `verifiable=False`
+        及默认 `replay_safe=False` 都相反：本工具是 MUTATING（写 `plan_updated`
+        事件），恢复时**不**自动重跑（不变量 #14），而 `suggested_action` 现在只进
+        `pending_decisions` 的 probe 展示字段（R14，不按 verifiable 门控、逐字呈现
+        供排查），不再进已删除的裁决面板——那句"重跑安全"既不可见、也不成立。
+        """
         return ReconcileHint(
             verifiable=False,
             suggested_action=(
-                "清单状态以事件流重放为准；重复提交同一张表是幂等的，重跑安全。"
+                "清单状态以事件流重放为准，无法从工具侧核对本次提交是否落盘；"
+                "不确定时不要重跑（本工具写会话状态）。"
             ),
         )
 

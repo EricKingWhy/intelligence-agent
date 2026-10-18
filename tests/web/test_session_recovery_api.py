@@ -20,7 +20,11 @@ from langchain_core.messages import AIMessageChunk
 from agent_harness.agent import AgentRuntime
 from agent_harness.config import Settings
 from agent_harness.session import TOOL_CALL, Session
-from agent_harness.session.event import RUN_INTERRUPTED, TOOL_RESULT
+from agent_harness.session.event import (
+    OPERATION_RECONCILED,
+    RUN_INTERRUPTED,
+    TOOL_RESULT,
+)
 from agent_harness.storage import Operation, OperationState
 from agent_harness.storage.operation import unproven_meta
 from agent_harness.tooling import ToolExecutor, ToolRegistry
@@ -43,15 +47,13 @@ def _snapshot(state, session_id: str):
     return events, [row.model_dump() for row in rows]
 
 
-def _recover_409_pending(client, session_id: str) -> list[dict]:
-    resp = client.post(f"/api/sessions/{session_id}/recover")
-    assert resp.status_code == 409, resp.json()
-    return resp.json()["detail"]["pending_decisions"]
+def test_restart_scan_auto_adjudicates_then_recovery_lists_empty(client):
+    """AC1：重启扫描（`#1327` 起注入自动裁决）把可结清的行全部结清。
 
-
-def test_restart_scan_pending_listed_and_equals_409_payload(client):
-    """AC1：重启扫描后（run/interrupted 落盘、Ledger 仍待裁决），端点列出待裁决项，
-    载荷与同会话 409 的 ``pending_decisions`` 逐字段一致。"""
+    call-r1（bash，MUTATING）⇒ ABANDON；call-r2（read，replay_safe）⇒ RETRY——
+    两条都在扫描期落终态 CANCELLED，因此扫描后不存在「Ledger 仍待裁决」的前提：
+    只读端点返回空清单，再 POST /recover（无 decisions）是幂等的 200。
+    """
     state = client.app.state.agent
     session = asyncio.run(
         _seed_reconcile_window(state, ["call-r1", "call-r2"], tool_names=["bash", "read"])
@@ -66,16 +68,29 @@ def test_restart_scan_pending_listed_and_equals_409_payload(client):
     asyncio.run(session_service(state).scan_interrupted())
     assert RUN_INTERRUPTED in [e.type for e in state.store.read_events(sid)]
 
+    # （1）扫描后清单为空——两行都已结清，不再有待裁决项。
     resp = client.get(f"/api/sessions/{sid}/recovery")
-
     assert resp.status_code == 200, resp.json()
-    body = resp.json()
-    assert set(body) == {"pending_decisions"}
-    assert {(p["tool_call_id"], p["state"]) for p in body["pending_decisions"]} == {
-        ("call-r1", "UNKNOWN"),
-        ("call-r2", "NEED_RECONCILE"),
+    assert resp.json() == {"pending_decisions": []}
+
+    # （2）Ledger 两行的终态都是 CANCELLED。
+    async def _rows():
+        return await state.stores.operation_ledger.list_for_session(sid)
+
+    rows = {row.tool_call_id: row for row in asyncio.run(_rows())}
+    assert rows["call-r1"].state is OperationState.CANCELLED
+    assert rows["call-r2"].state is OperationState.CANCELLED
+
+    # （3）自动裁决证据：bash → ABANDON、read → RETRY。
+    reconciled = {
+        e.data["tool_call_id"]: e.data["verdict"]
+        for e in state.store.read_events(sid)
+        if e.type == OPERATION_RECONCILED
     }
-    assert body["pending_decisions"] == _recover_409_pending(client, sid)
+    assert reconciled == {"call-r1": "ABANDON", "call-r2": "RETRY"}
+
+    # （4）无待裁决时 POST /recover 无 decisions 是幂等 200。
+    assert client.post(f"/api/sessions/{sid}/recover").status_code == 200
 
 
 def test_timeout_unproven_unknown_is_listed(client):
@@ -126,7 +141,19 @@ def test_timeout_unproven_unknown_is_listed(client):
     assert resp.status_code == 200, resp.json()
     pending = resp.json()["pending_decisions"]
     assert [(p["tool_call_id"], p["state"]) for p in pending] == [("call-to", "UNKNOWN")]
-    assert pending == _recover_409_pending(client, session.session_id)
+
+    # `#1327` 起无 decisions 的 recover 走自动裁决：bash 是 MUTATING ⇒ ABANDON
+    # → CANCELLED；结清后清单为空（409 不再是清单的唯一出口）。
+    assert client.post(f"/api/sessions/{session.session_id}/recover").status_code == 200
+    listed = client.get(f"/api/sessions/{session.session_id}/recovery")
+    assert listed.status_code == 200, listed.json()
+    assert listed.json()["pending_decisions"] == []
+
+    async def _row_state():
+        op = await ledger.get(session.session_id, "call-to")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.CANCELLED
 
 
 class _BlockedModel:

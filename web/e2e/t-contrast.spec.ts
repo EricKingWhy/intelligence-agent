@@ -508,7 +508,8 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
-     （看不清就没人去裁决，会话永远卡着）。这里**真量**而不是信注释里的算术：
+     （`#1327` 起它是"有欠账、等自动处理"的如实呈现；看不清等于把状态藏起来）。
+     这里**真量**而不是信注释里的算术：
      `.pulse-awaiting-decision` 的文字色是 `color-mix(--warning 45%, --text-primary)`
      压在 12% warning 底上。纯 `--warning` 在这个底上亮色实测 **2.91:1**（不达 AA），
      混入 ink 后才够——本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --warning，
@@ -579,13 +580,13 @@ for (const theme of ['dark', 'light'] as const) {
       ).toBeLessThan(4.5);
     }
 
-    // 同色域的另两处：#1030 新增的横幅人话层与「去裁决」按钮用的是**同一条**
-    // color-mix 公式，但它们的底不是胶囊体而是页面底——底色不同则比值不同，必须
-    // 各量各的（不能靠"公式一样"外推）。两处都是 12px 正文，同样受 AA 约束。
-    // 横幅与面板互斥（面板在场时横幅让位，避免同一句话说两遍）⇒ 先关掉面板。
-    await page.locator('.recovery-decision-close').click();
+    // 同色域的另两处：#1030 新增的横幅人话层用的是**同一条**
+    // color-mix 公式，但它的底不是胶囊体而是页面底——底色不同则比值不同，必须
+    // 各量各的（不能靠"公式一样"外推）。12px 正文，同样受 AA 约束。
+    // `#1327`：裁决面板已删——横幅不再与面板互斥，清单非空即直接呈现被动通知；
+    // 「去裁决」按钮已删，只量横幅人话层。
     await page.locator('.adjudication-banner').waitFor();
-    for (const sel of ['.adjudication-headline', '.adjudication-open-btn']) {
+    for (const sel of ['.adjudication-headline']) {
       const mm = await measure(page, sel);
       expect(contrast(mm.color, mm.bg), `${sel} contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
     }
@@ -1070,79 +1071,14 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio, `.notice-strip-hard .notice-strip-badge contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
-/* ── #1208：recovery.css 两处语义色正文收口（#1175 独立审查 Axis B F1 残余）──
+/* ── #1208：recovery.css 语义色正文收口（#1175 独立审查 Axis B F1 残余）──
  *
- *  `.recovery-decision-error` 与 `.recovery-list-error` 把 `--danger` 直接当**正文色**用，
- *  亮色下压在 `--surface-elevated` 底上只有 4.4482 < 4.5（这就是 #1175 F1 报告值里的
- *  4.448；报告另给的 4.301 是同一 token `#cf4a46` 压 `--surface-workspace`(#fbfbfc) 的
- *  理论值——本仓两处的真实底都是 --surface-elevated）。修法同 #1136/#1171/#1175 的
- *  ink-mix：`color-mix(in srgb, var(--danger) 45%, var(--text-primary))`（亮色压深、
- *  暗色提亮，只升不降）；图标（.recovery-decision-icon，--warning）与描边/底等装饰
- *  继续引原 token（#1164 P2-3）。
- *  两处各走**真实渲染路径**（裁决面板提交校验失败 / 恢复列表拉取 500），不是造影子
- *  元素，故把字色改回纯 --danger 时对应用例必然变红。 */
-
-const RD_SID = 's-contrast-recovery';
-const RD_ROW = {
-  session_id: RD_SID,
-  event_count: 4,
-  first_event_time: T,
-  last_event_time: T,
-  first_user_message: '待裁决对比度',
-  trace_id: null,
-  trace_url: null,
-};
-
-/** 裁决面板错误态夹具：坏死 run（run/started 无终态）+ 一条待裁决 UNKNOWN。
- *  面板随 `pending_decisions` 在场；选「当作已生效」并填超过上限的来源 → 点提交触发
- *  `assembleDecisions` 的来源长度校验抛错 → `setError` → `.recovery-decision-error`
- *  （role=alert）落屏。上限 `RECOVERY_SOURCE_MAX = 2000`（抛错点 lib/recovery.ts:148；
- *  与 lib/api.ts 的 `RECOVER_DECISION_SOURCE_MAX` 同值，recovery.test.ts:103 断言二者相等）。 */
-test(`[${theme}] #1208 .recovery-decision-error（裁决来源校验失败条）对比度 ≥4.5`, async ({ page }) => {
-  await routeApi(page, {
-    sessions: [RD_ROW],
-    events: [
-      { type: 'session/started', seq: 1, session_id: RD_SID, run_id: 'rd', time: T },
-      { type: 'run/started', seq: 2, session_id: RD_SID, run_id: 'rd', time: T },
-      { type: 'user/message', data: { content: '待裁决对比度' }, seq: 3, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T },
-      {
-        type: 'tool/call',
-        data: { tool_call_id: 'tc-rd', tool_name: 'bash', args: { command: 'rm -rf /tmp/x' } },
-        seq: 4, session_id: RD_SID, run_id: 'rd', step_id: 1, time: T,
-      },
-    ],
-    pendingDecisions: [
-      {
-        tool_call_id: 'tc-rd', tool_name: 'bash', state: 'UNKNOWN',
-        default_action: 'RETRY', risk_level: 'high',
-        probe: { verifiable: false, suggested_action: null },
-      },
-    ],
-    models: MODELS,
-    permissionModes: PERMISSION_MODES,
-    agentProfiles: AGENT_PROFILES,
-    reasoningEfforts: REASONING_EFFORTS,
-  });
-  await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/');
-  await page.locator('.session-item').first().click();
-  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
-
-  // 选「当作已生效」→ 出现来源输入；填超上限文本 → 提交触发校验失败。
-  await page.locator('.recovery-option input[value="CONFIRM_SUCCESS"]').check();
-  await page.locator('.recovery-source-custom').fill('x'.repeat(2001));
-  await page.locator('.recovery-submit-btn').click();
-
-  const err = page.locator('.recovery-decision-error');
-  await expect(err).toBeVisible();
-  await expect(err).toContainText('裁决来源过长');
-  const m = await measure(page, '.recovery-decision-error');
-  const ratio = contrast(m.color, m.bg);
-  // eslint-disable-next-line no-console
-  console.log(`[${theme}] .recovery-decision-error color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
-  expect(ratio, `.recovery-decision-error contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
-});
+ *  原先两处：`.recovery-decision-error`（裁决面板提交校验失败条）与
+ *  `.recovery-list-error`（恢复列表拉取失败条）。`#1327` 起裁决面板已删，
+ *  前者随组件一并删除；后者保留，走**真实渲染路径**（恢复列表拉取 500），
+ *  不是造影子元素，故把字色改回纯 --danger 时用例必然变红。
+ *  （`.recovery-decision-error` 的旧用例见 git 历史，本文件不再保留。）
+ */
 
 /** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
  *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
