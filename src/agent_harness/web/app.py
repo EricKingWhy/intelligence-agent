@@ -2531,9 +2531,9 @@ def create_app(
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建 ask_user 超时计时器失败（不阻塞启动）"
                 )
-            state.start_ask_user_timeout_ticker()
-            await state.watchtower.start()
             try:
+                state.start_ask_user_timeout_ticker()
+                await state.watchtower.start()
                 yield
             finally:
                 await state.shutdown()

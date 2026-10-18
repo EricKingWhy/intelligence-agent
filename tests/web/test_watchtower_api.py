@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
@@ -38,6 +39,28 @@ def _body(**overrides) -> dict:
         "consent_version": _CONSENT_VERSION,
     }
     return {**body, **overrides}
+
+
+@pytest.mark.anyio
+async def test_watchtower_start_failure_cleans_up_timeout_ticker(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    app = create_app(Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+    ))
+    state = app.state.agent
+
+    async def fail_start():
+        raise RuntimeError("watchtower start failed")
+
+    monkeypatch.setattr(state.watchtower, "start", fail_start)
+    with pytest.raises(RuntimeError, match="watchtower start failed"):
+        async with app.router.lifespan_context(app):
+            pytest.fail("startup should not enter the application lifespan")
+
+    assert state._ask_user_timeout_ticker is None
+    assert state._closed is True
 
 
 def test_create_requires_backend_consent_and_persists_rule(tmp_path, monkeypatch):
