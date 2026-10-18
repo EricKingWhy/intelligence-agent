@@ -5,7 +5,8 @@
   **零 answer 落盘**；
 - **无任何前端连接**（真实 Web 前端的 HTTP 轮询形态）⇒ 提问落盘即装表、组合根 ticker
   到点推进、照常恢复——#1320 的核心口径（推翻 #1220 复审 A1/A3）；
-- relay / 订阅补读路径仍读请求载荷快照。
+- 进程重启（内存表清空）⇒ 启动时按持久事件流重建计时器，ticker 照常推进；
+- 计时档读请求载荷快照（driver 启动配置只是旧事件兜底）。
 
 接缝：真实 uvicorn ASGI 服务器 + httpx2 WebSocket 客户端 + ScriptedModel 剧本桩。
 装配来自 `RunManager` 的会话事件观察者（#1320，不看连接数），推进来自 lifespan 里的
@@ -227,12 +228,11 @@ async def test_ask_user_timeout_resumes_when_connected_zero_answer(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_relay_armed_request_uses_the_payload_snapshot(tmp_path, monkeypatch):
+async def test_ask_user_timeout_uses_the_payload_snapshot(tmp_path, monkeypatch):
     """#1284 复审 P2 / #1320：事件驱动装配必须读请求载荷快照，而不是 driver 启动配置。
 
     构造：Settings=60s（载荷快照），driver 回退值故意设为 600s。先订阅再放行模型，
-    让 `ask_user` 在订阅之后落盘（事件观察者路径，原 relay 路径同源）。
-    若仍读启动配置，+61s 不会到期。
+    让 `ask_user` 在订阅之后落盘（事件观察者路径）。若仍读启动配置，+61s 不会到期。
     """
     gate = asyncio.Event()
     server, serve_task, port, app = await _start_server(
@@ -279,55 +279,45 @@ async def test_relay_armed_request_uses_the_payload_snapshot(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_subscribe_arms_timer_when_input_request_lands_after_snapshot_read(
-    tmp_path, monkeypatch,
-):
-    """P2-1 回归：订阅读到旧快照也不得漏装配（#1320 后由事件观察者兜住）。
+async def test_restart_rebuilds_pending_ask_user_timer(tmp_path, monkeypatch):
+    """#1320 复审 P1：进程重启（内存表清空）后按持久事件流重建计时器。
 
-    竞态原样：subscribe 处理先读事件流（无待回答）→ `note_session_state` 判"无需装配"
-    → 之后 `user/input-requested` 才落盘。旧实现在这里依赖订阅后补读才不漏；#1320 的
-    事件观察者在落盘当刻就装表，补读仍保留为额外兜底。
-
-    构造：把 `SessionService.get_events` 的**第一次**调用裁掉 `user/input-requested`
-    （= 读到旧快照），其后返回真实事件流。
+    不重建 = durable timer 退化成进程内 timer：重启前挂起的提问永远不会超时。
+    这里用「清空驱动内存表 + 调启动重建」模拟重启（事件流留在磁盘），再由常驻
+    ticker 证明重建出来的表真的会到点恢复。
     """
     server, serve_task, port, app = await _start_server(
         tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
+        ask_user_timeout=60, tick_seconds=0.1,
     )
     try:
         driver = app.state.agent.ask_user_timeout_driver
         clock = FakeClock()
         driver.clock = clock
-        driver.timeout_seconds = 60.0
 
         sid = await _start_run(port, "请设置存储层")
-        await _wait_paused(port, sid)  # 先等提问落盘（HTTP 读不走被裁的路径）
+        await _wait_paused(port, sid)
+        assert driver.is_armed(sid) is True, "事件观察者应先装表"
 
-        from agent_harness.session.event import USER_INPUT_REQUESTED
-        from agent_harness.session.service import SessionService
+        driver.disarm(sid)  # 模拟进程重启：内存表清空，磁盘事件流仍在
+        assert await app.state.agent.restore_ask_user_timeouts() == 1
+        assert driver.is_armed(sid) is True, "启动重建必须找回挂起的提问"
 
-        real_get_events = SessionService.get_events
-        stale_once = {"left": 1}
-
-        async def get_events(self, session_id):
-            events = await real_get_events(self, session_id)
-            if stale_once["left"] and session_id == sid:
-                stale_once["left"] -= 1
-                return [e for e in events if e.type != USER_INPUT_REQUESTED]
-            return events
-
-        monkeypatch.setattr(SessionService, "get_events", get_events)
-
+        clock.now += 61.0
         import httpx2
 
-        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
-            f"ws://127.0.0.1:{port}/api/ws"
-        ) as ws:
-            await ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
-            await _recv_snapshot(ws)
-            assert driver.is_armed(sid), (
-                "快照读到的旧状态不含提问，订阅后必须补读事件流装配计时器"
-            )
+        async with httpx2.AsyncClient(timeout=10) as client:
+            events: list[dict] = []
+            for _ in range(200):
+                events = (await client.get(
+                    f"http://127.0.0.1:{port}/api/sessions/{sid}/events"
+                )).json()
+                if any(e["type"] == "run/resumed" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+        assert any(e["type"] == "run/resumed" for e in events), (
+            "重建的计时器必须由常驻 ticker 推进到恢复"
+        )
     finally:
         await _shutdown(server, serve_task)
 

@@ -138,10 +138,6 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     outbound_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
     run_manager: RunManager = state.run_manager
-    # #1220/#1320：驱动只用于订阅补读时按事件流装配超时计时器；计时是否推进与
-    # 本连接的存在无关（#1320 D1A：服务端 durable timer，见
-    # `ask_user_timeout_driver` 模块 docstring）。
-    driver = state.ask_user_timeout_driver
 
     async def _detach_subscription(session_id: str) -> None:
         """替换某会话的订阅，不遗留旧 relay（#341）。"""
@@ -197,11 +193,6 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             await _send_json({"type": "error", "message": "snapshot failed"})
             return
 
-        # #1220：按事件流现状装配 / 撤销 `ask_user` 超时计时器。这里用 push_snapshot
-        # 刚读到的 events（重连 → 重查现状，已答复/已跳过的自动撤销）。放在截断分支
-        # **之前**：超限与否都不影响装配——计时本身不依赖本连接（#1320）。
-        driver.note_session_state(session_id, events)
-
         # #341：重复 subscribe = 替换该会话的旧 relay。瞬时读错误不应拆散一条
         # 仍在正常工作的订阅；如果新快照被截断，则仍要摘掉旧订阅。
         active_run = run_manager.get_active(session_id)
@@ -251,25 +242,6 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             raise
         if subscriber is not None:
             subscriptions[session_id] = (active_run, subscriber)
-        # #1220 复审 P2-1：上面那次读盘发生在**装配 subscriber 之前**——若
-        # `user/input-requested` 恰好落在两者之间，旧快照判"无需装配"，而该事件又早于
-        # 本订阅者的扇出起点（`_fanout` 只发给此刻已存在的订阅者）⇒ 计时器永不装配，
-        # 提问永不超时、run 永久挂起。订阅建立后重读一次补齐这个窗口：落在此刻之后
-        # 的事件由 relay 装配（`_relay_events` 同一判据），两条路径都幂等（同 request_id
-        # 重复装配保留已累计时长）。
-        # 不能以"有在途 run"为条件：提问落盘后 run 会以 `run/paused` 收口并结束 task
-        # （`get_active` 随之为 None），恰是最需要补读的时刻。
-        # 已知代价（#1285 复审登记，不改代码）：每次 subscribe 无条件全量重读事件
-        # 文件，订阅路径 IO 翻倍；若成为热点，可改为按 `latest_seq` 增量补读。
-        try:
-            fresh_events = await service.get_events(session_id)
-        except Exception:  # 补读失败不拆快照：relay 只兜订阅后事件，窗口内存量
-            # 依赖下次 subscribe 重读。
-            logger.warning(
-                "ask_user 超时装配补读失败（session=%s）", session_id, exc_info=True,
-            )
-        else:
-            driver.note_session_state(session_id, fresh_events)
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]

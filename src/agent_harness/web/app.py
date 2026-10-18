@@ -1237,6 +1237,9 @@ class ApprovePolicyRuleRevoked(BaseModel):
 #: `ask_user` 超时到点检查的间隔（秒）。#1320：由常驻 ticker 推进，**不**借 WS
 #: 心跳——真实 Web 前端在 `run/paused` 上不建 WS 订阅，零连接时也必须推进计时。
 _ASK_USER_TIMEOUT_TICK_SECONDS = 1.0
+#: 关停时等 ticker 跑完当前一轮的上限（秒）。正常一轮是毫秒级；超过即视为卡死，
+#: 强制取消（见 `AppState.shutdown`）。
+_ASK_USER_TIMEOUT_SHUTDOWN_WAIT_SECONDS = 5.0
 
 
 class AppState:
@@ -1381,12 +1384,14 @@ class AppState:
         # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
         # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
         self.interrupted_scan: list | None = None
-        # #1320：常驻超时推进任务（lifespan 启动；shutdown 取消）。
+        # #1320：常驻超时推进任务（lifespan 启动；shutdown 置停止位并等当前轮收尾）。
         self._ask_user_timeout_ticker: asyncio.Task | None = None
+        self._ask_user_timeout_stop: asyncio.Event | None = None
 
     def start_ask_user_timeout_ticker(self) -> None:
         """启动服务端超时推进（#1320）：与任何前端连接无关。幂等。"""
         if self._ask_user_timeout_ticker is None:
+            self._ask_user_timeout_stop = asyncio.Event()
             self._ask_user_timeout_ticker = asyncio.create_task(
                 self._ask_user_timeout_tick_loop(),
                 name="ask-user-timeout-ticker",
@@ -1394,14 +1399,52 @@ class AppState:
 
     async def _ask_user_timeout_tick_loop(self) -> None:
         """按固定间隔推进一次到期检查；单轮失败只记日志，不终止 ticker。"""
+        stop = self._ask_user_timeout_stop
+        if stop is None:
+            return
         while True:
-            await asyncio.sleep(_ASK_USER_TIMEOUT_TICK_SECONDS)
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=_ASK_USER_TIMEOUT_TICK_SECONDS,
+                )
+                return
+            except TimeoutError:
+                pass
             try:
                 await self.ask_user_timeout_driver.check_expiries()
             except Exception:
                 logging.getLogger("agent_harness.web").exception(
                     "ask_user 超时检查失败（ticker 继续）"
                 )
+
+    async def restore_ask_user_timeouts(self) -> int:
+        """#1320：启动时按持久事件流重建超时计时器，返回装配的会话数。
+
+        进程重启后内存表为空；不重建就等于把"服务端 durable timer"降级成"进程内
+        timer"——重启前挂起的 `ask_user` 会永久不再超时。与
+        `rebuild_message_queues` 同一条启动扫描纪律：一次性全量读盘、失败不阻塞
+        启动。已到期的请求会在 ticker 的首轮里立即恢复（durable timer 的应有语义）。
+        """
+        session_ids = await anyio.to_thread.run_sync(self.store.list_session_ids)
+        armed = 0
+        for session_id in session_ids:
+            try:
+                events = await anyio.to_thread.run_sync(
+                    self.store.read_events, session_id,
+                )
+            except Exception:
+                logging.getLogger("agent_harness.web").warning(
+                    "ask_user 超时重建读盘失败（session=%s）", session_id,
+                    exc_info=True,
+                )
+                continue
+            if not events:
+                continue
+            was_armed = self.ask_user_timeout_driver.is_armed(session_id)
+            self.ask_user_timeout_driver.note_session_state(session_id, events)
+            if not was_armed and self.ask_user_timeout_driver.is_armed(session_id):
+                armed += 1
+        return armed
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1490,12 +1533,22 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
-        # #1320：先停超时 ticker（它可能正在 await `on_expire`）。
+        # #1320：先停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
+        # （超时答复已落盘、恢复链提交到一半），中途取消会留下半截状态。置停止位
+        # 后等当前一轮跑完；只有超过上限（真正卡死）才强制取消。
         ticker, self._ask_user_timeout_ticker = self._ask_user_timeout_ticker, None
+        stop, self._ask_user_timeout_stop = self._ask_user_timeout_stop, None
+        if stop is not None:
+            stop.set()
         if ticker is not None:
-            ticker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await ticker
+            try:
+                await asyncio.wait_for(
+                    ticker, timeout=_ASK_USER_TIMEOUT_SHUTDOWN_WAIT_SECONDS,
+                )
+            except TimeoutError:
+                ticker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ticker
         # 先停 detached run（它们引用 wiring 的工具/模型），再关 wiring。
         await self.run_manager.aclose()
         async with self._wiring_lock:
@@ -2371,6 +2424,19 @@ def create_app(
                 # 它重新投递（flush 读的是事件流，不依赖这份镜像），所以降级安全。
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建未投递输入失败（不阻塞启动）"
+                )
+            # #1320：按持久事件流重建 `ask_user` 超时计时器（durable timer 不因进程
+            # 重启丢掉挂起提问）。与上面的队列重建同序：失败不阻塞启动——提问事实
+            # 仍在事件流里，下一次启动或订阅仍可重建。
+            try:
+                armed = await state.restore_ask_user_timeouts()
+                if armed:
+                    logging.getLogger("agent_harness.web").info(
+                        "启动重建 ask_user 超时计时器：%d 个会话待超时", armed,
+                    )
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "启动重建 ask_user 超时计时器失败（不阻塞启动）"
                 )
             state.start_ask_user_timeout_ticker()
             try:

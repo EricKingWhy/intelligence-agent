@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from agent_harness.session.ask_user_timeout import ExpireOutcome
@@ -29,26 +31,19 @@ from tests.fake_clock import FakeClock
 
 
 def _events(
-    *, answered: bool = False, timeout_seconds: int | None = None,
-    timeout_minutes: int | None = None,
+    *, timeout_seconds: int | None = None, timeout_minutes: int | None = None,
 ) -> list[SessionEvent]:
     payload: dict[str, object] = {"request_id": "req-1", "kind": "ask_user"}
     if timeout_seconds is not None:
         payload["timeout_seconds"] = timeout_seconds
     if timeout_minutes is not None:
         payload["timeout_minutes"] = timeout_minutes
-    events = [
+    return [
         SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
         SessionEvent(
             type=USER_INPUT_REQUESTED, run_id="r1", seq=1, data=payload,
         ),
     ]
-    if answered:
-        events.append(SessionEvent(
-            type=USER_MESSAGE, run_id="r1", seq=2,
-            data={"input_request_id": "req-1"},
-        ))
-    return events
 
 
 def _request_event(
@@ -118,7 +113,7 @@ async def test_note_event_ignores_other_input_kinds():
 
 @pytest.mark.asyncio
 async def test_rearming_the_same_request_preserves_elapsed():
-    """同一 request 重复装配（订阅补读 / 事件重放）保留已累计，不重头计时。"""
+    """同一 request 重复装配（事件重放 / 启动重建）保留已累计，不重头计时。"""
     clock = FakeClock()
     driver, fired = _driver(clock, timeout=100.0)
     driver.note_session_state("s1", _events())
@@ -132,17 +127,45 @@ async def test_rearming_the_same_request_preserves_elapsed():
 
 
 @pytest.mark.asyncio
-async def test_answered_request_is_disarmed_and_never_fires():
+async def test_snapshot_without_the_pending_request_does_not_disarm():
+    """#1320 复审 P2：读盘快照可能落后于落盘事件——"没看到"不是"已了结"。
+
+    启动重建与事件观察者可能并发：快照里没有待回答请求，不得撤掉观察者刚装上的
+    表、更不得清零已累计时长。撤销只由答复 / run 终态事件驱动。
+    """
     clock = FakeClock()
     driver, fired = _driver(clock)
     driver.note_session_state("s1", _events())
+    clock.advance(30)
 
-    # 用户答复落盘后重读：不再有待回答 ⇒ 撤销。
-    driver.note_session_state("s1", _events(answered=True))
-    assert driver.is_armed("s1") is False
-    clock.advance(10_000)
-    assert await driver.check_expiries() == []
-    assert fired == []
+    stale = [SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={})]
+    driver.note_session_state("s1", stale)
+    assert driver.is_armed("s1") is True
+
+    clock.advance(30)  # 30 + 30 = 60：已累计时长未被重置
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_restore_keeps_the_deadline_from_the_persisted_request_time():
+    """#1320：启动重建按请求事件时间接上已累计时长——停机期间到期的提问立即恢复。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    asked_at = (datetime.now(UTC) - timedelta(seconds=90)).isoformat()
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1, time=asked_at,
+            data={
+                "request_id": "req-1", "kind": "ask_user",
+                "timeout_seconds": 60,
+            },
+        ),
+    ])
+
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
 
 
 @pytest.mark.asyncio
