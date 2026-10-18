@@ -1,0 +1,1 @@
+﻿2026-10-18	机械归属（非内容审查主张）：#1321 分支与 origin/main 78da4213 的 sync merge f015a151（父一 c9ff2209=本线 tip，父二 78da4213=origin/main #1330，merge-base 86b75b43）。ort 零冲突；git show --cc --name-only 为空表；三树互不相等（0cb1bf41 / 7aeb5ed8 / a66f8b2e）⇒ 覆盖闸门刻意 fail-closed，故补本行。range 从父一起算，只归属本合并；来侧 2 笔 docs-only 按路径自动归属；本线代码笔的审查行待协调员独立审查后补。	c9ff2209..f015a151

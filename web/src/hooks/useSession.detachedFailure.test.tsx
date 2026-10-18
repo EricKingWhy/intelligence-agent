@@ -42,7 +42,7 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
 });
 
 import { getSessionEvents, sendMessage as apiSendMessage, startSession, type PendingDecision } from '../lib/api';
-import { discoverNewSessionId, sessionIdBaseline } from '../lib/wsStream';
+import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaseline } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
 
 const SID = 's-1148';
@@ -362,5 +362,54 @@ describe('#1148 路径 B — submitTask 认领成功后 POST 才失败', () => {
     // 既不能灌草稿，也不能打全局横幅（横幅由调用方就地展示）。
     expect(captured.hook!.failedDraft).toBeNull();
     expect(captured.hook!.error).toBeNull();
+  });
+});
+
+describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () => {
+  it('会话可能已创建但未接上 ⇒ 可行动提示 + 保留原文', async () => {
+    // POST 仍悬挂（交付层攒包 / 后端慢），认领在预算内没认出会话。
+    vi.mocked(startSession).mockReturnValue(new Promise<Response>(() => {}) as never);
+    vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
+
+    await mount();
+    let result: string | null = null;
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '慢负载下不能丢的原文' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      result = await p;
+    });
+
+    // 返回非 null = Composer 按「未受理」保留输入框原文。
+    expect(result).not.toBeNull();
+    expect(captured.hook!.error).not.toContain('提交失败');
+    expect(captured.hook!.error).toContain('可能已成功');
+    expect(captured.hook!.error).toContain('刷新');
+  });
+
+  it('POST 的真实失败优先于认领超时 ⇒ 仍报「提交失败：<原因>」', async () => {
+    let rejectPost!: (e: Error) => void;
+    vi.mocked(startSession).mockReturnValue(
+      new Promise<Response>((_r, reject) => { rejectPost = reject; }) as never,
+    );
+    let rejectClaim!: (e: Error) => void;
+    vi.mocked(discoverNewSessionId).mockReturnValue(
+      new Promise<string>((_r, reject) => { rejectClaim = reject; }) as never,
+    );
+
+    await mount();
+    let result: string | null = null;
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: 'POST 真的失败了' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      // 先让 POST 落定失败，再由认领超时收口：`late.failure` 必须优先。
+      rejectPost(new Error('网络中断'));
+      await vi.advanceTimersByTimeAsync(0);
+      rejectClaim(new SessionClaimTimeoutError());
+      await vi.advanceTimersByTimeAsync(0);
+      result = await p;
+    });
+
+    expect(result).toBe('提交失败：网络中断');
+    expect(captured.hook!.error).toBe('提交失败：网络中断');
   });
 });

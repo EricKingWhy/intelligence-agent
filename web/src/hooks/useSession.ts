@@ -25,7 +25,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EventType, type AgentEvent, type ConversationState, type FailedDraft, type SessionDeleted, type SessionMode, type SessionSummary } from '../types';
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
-import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
+import {
+  SessionClaimTimeoutError,
+  wsStreamResponse,
+  discoverNewSessionId,
+  sessionIdBaseline,
+  sessionExists,
+} from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, deriveRunFailedBeforePlan, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
@@ -1223,7 +1229,14 @@ export function useSession() {
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
-        const message = `提交失败：${(e as Error).message}`;
+        // #1321 AC4：认领超时 != 提交失败。差分轮询超时只说明「还没在列表里
+        // 认出新会话」，而 POST 已经发出、后端通常已经落盘（票面实测：页面报
+        // 失败时会话其实已在跑）。把它渲染成「提交失败」会让用户重试，从而
+        // 造出第二个会话。这里改用可行动提示，并保留输入框原文（返回非 null）。
+        const message =
+          e instanceof SessionClaimTimeoutError
+            ? `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`
+            : `提交失败：${(e as Error).message}`;
         if (!opts?.ownError) setError(message);
         return message;
       }

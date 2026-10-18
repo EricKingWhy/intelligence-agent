@@ -356,6 +356,72 @@ export function wsStreamResponse(
   });
 }
 
+/** 认领新会话的默认总预算。
+ *
+ *  旧实现把它写死成 6000ms：每次轮询都是一次**全量** `GET /api/sessions`
+ *  （含归档），共享后端在并发提交 / 大列表下单次往返就能到 1.5–2s，6s 只够
+ *  3–4 轮；而 `POST /api/sessions` 的会话落盘在负载下也会晚于这个窗口
+ *  （#1321 实测 1/5：界面报「未认领到新会话」，会话其实已创建）。
+ *  预算必须大于「后端创建延迟 + 一轮列表往返」，20s 按 1.5s/轮、10s 创建
+ *  延迟留出两轮以上余量；调用点可用 `opts.timeoutMs` 覆盖。 */
+export const DEFAULT_SESSION_CLAIM_TIMEOUT_MS = 20_000;
+
+/** 指数退避的起点（#1321）。旧实现的固定 150ms 让所有客户端同相位轮询。 */
+export const CLAIM_BASE_DELAY_MS = 150;
+
+/** 单次退避上限（票面建议上限 15s）。总预算 `timeoutMs` 只约束 sleep：
+ *  在途的 `listSessions` 请求本身不可取消，可能使总时长超出一个往返。 */
+export const CLAIM_MAX_DELAY_MS = 15_000;
+
+/** 认领参数：总预算与退避曲线。默认值面向共享后端；测试按比例缩小。 */
+export interface SessionClaimOptions {
+  timeoutMs?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  /** 随机源，默认 `Math.random`；测试注入确定性序列。 */
+  random?: () => number;
+}
+
+/** 第 `attempt` 次失败后的退避（equal jitter：上限的一半 + 一半随机）。
+ *
+ *  采用 AWS Architecture Blog「Exponential Backoff And Jitter」的 equal-jitter
+ *  变体：`cap = min(max, base * 2^attempt)`，`sleep = cap/2 + rand*cap/2`。
+ *  与固定间隔相比，它同时消除同相位重试（雪崩）与「随机到 0 立即重试」；
+ *  与 full-jitter 相比，它保证至少一半的指数增长，慢链路不会被压成热循环。
+ *
+ *  预算边界：`discoverNewSessionId` 只把 **sleep** 夹到剩余预算；在途的
+ *  `listSessions` 请求不可取消（无 AbortSignal），因此总时长可能比 `timeoutMs`
+ *  超出一个往返。不要把它当硬 deadline 使用。
+ */
+export function claimBackoffMs(
+  attempt: number,
+  baseDelayMs = CLAIM_BASE_DELAY_MS,
+  maxDelayMs = CLAIM_MAX_DELAY_MS,
+  random: () => number = Math.random,
+): number {
+  const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+  return ceiling / 2 + random() * (ceiling / 2);
+}
+
+/** 认领超时：**会话很可能已经创建**，只是没接上。
+ *
+ *  调用方必须把它与「提交失败」区分开（#1321 AC4）：抛 `Error` 会让
+ *  `useSession` 统一渲染成「提交失败：…」，而这条路径上后端其实已经落盘。
+ */
+export class SessionClaimTimeoutError extends Error {
+  readonly lastError: unknown;
+
+  constructor(lastError: unknown = null) {
+    super(
+      lastError instanceof Error
+        ? `未认领到新会话：${lastError.message}`
+        : '未认领到新会话（超时）',
+    );
+    this.name = 'SessionClaimTimeoutError';
+    this.lastError = lastError;
+  }
+}
+
 /** 轮询会话列表，找出本轮新建的那个 session_id。
  *
  * ## 为什么需要它
@@ -366,16 +432,29 @@ export function wsStreamResponse(
  * 差分」认出新建的那条，既不改动后端，也不影响 POST 上原有的全部字段语义
  * （模型 / 权限 / 校验一律照旧生效）。
  *
- * @param known     发起 POST **之前**已存在的会话 id 集合（基线）
- * @param timeoutMs 认领超时
+ * ## 为什么不是「让创建响应直接给 id」
+ *
+ * 票面建议的最省事正解是 POST 响应头带 session id，但本仓实测的交付层
+ * （EdgeOne / CloudStudio Gateway）会把整个响应攒到 run 结束才下发——响应头
+ * 44.158s 才到（见本文件顶部），id 到得比轮询更晚。拆成「launch=false 建会话
+ * 拿 id → POST /messages 发任务」能绕开，但把一次原子创建拆成两步：第二步失败
+ * 会留下空会话，`remember_as_procedural_rule` 等只对「带任务的创建」生效的
+ * 契约也要重写——超出本票的 Bug 修复面。故保留差分轮询，只修预算与节奏。
+ *
+ * @param known 发起 POST **之前**已存在的会话 id 集合（基线）
+ * @param opts  总预算与退避参数；默认 20s / 150ms 起点 / 15s 上限
  */
 export async function discoverNewSessionId(
   known: ReadonlySet<string>,
-  timeoutMs = 6000,
+  opts: SessionClaimOptions = {},
 ): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_SESSION_CLAIM_TIMEOUT_MS;
+  const baseDelayMs = opts.baseDelayMs ?? CLAIM_BASE_DELAY_MS;
+  const maxDelayMs = opts.maxDelayMs ?? CLAIM_MAX_DELAY_MS;
+  const random = opts.random ?? Math.random;
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown = null;
-  while (Date.now() < deadline) {
+  for (let attempt = 0; Date.now() < deadline; attempt += 1) {
     try {
       const rows = await listSessions({ includeArchived: true });
       // rows 通常已按时间倒序；仍全表扫以容忍排序变化
@@ -384,11 +463,15 @@ export async function discoverNewSessionId(
     } catch (e) {
       lastErr = e;
     }
-    await new Promise((r) => setTimeout(r, 150));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const delay = Math.min(
+      claimBackoffMs(attempt, baseDelayMs, maxDelayMs, random),
+      remaining,
+    );
+    await new Promise((r) => setTimeout(r, delay));
   }
-  throw new Error(
-    lastErr instanceof Error ? `未认领到新会话：${lastErr.message}` : '未认领到新会话（超时）',
-  );
+  throw new SessionClaimTimeoutError(lastErr);
 }
 
 /** 取当前会话 id 基线（给 discoverNewSessionId 用）。
