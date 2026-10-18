@@ -58,10 +58,15 @@ class RecoveryAdjudicationToken:
 
 
 class ReconcileVerdict(str, Enum):
-    """用户对 UNKNOWN Operation 的五种显式裁决（07 §6/§7 + #357 W-13）。
+    """对 UNKNOWN Operation 的五种裁决（07 §6/§7 + #357 W-13；`#1327` 起
+    允许按操作类型**自动**裁决，不再只由用户显式给出）。
 
-    RETRY 只能来自用户裁决：协调器任何自动路径都不得产生 retryable=True 的
-    恢复结果（不变量 #14——UNKNOWN 高风险副作用不盲重跑）。
+    RETRY 的来源边界：用户显式裁决可给出任意一档；自动路径给出 RETRY
+    **仅限**「只读且声明 `replay_safe`」的工具（抄 DeepSeek Harness
+    `packages/core/session/src/repair.ts:34` 前半句："retry only if the
+    operation is read-only or idempotent"）——MUTATING 工具的自动路径仍
+    不得产生 retryable=True 的恢复结果（不变量 #14 的"不盲重跑"精神保留：
+    高风险副作用永远不由代码代劳重试）。
     """
 
     CONFIRM_SUCCESS = "CONFIRM_SUCCESS"  # 副作用已确认发生且符合预期 → SUCCEEDED
