@@ -296,6 +296,41 @@ async def test_restart_recovers_same_dispatch_session_without_creating_another(t
 
 
 @pytest.mark.asyncio
+async def test_restart_preserves_deadline_before_first_session_event(tmp_path, monkeypatch):
+    store, session_service, service = await _new_service(tmp_path)
+    rule = await _rule(service)
+    armed = await store.transition(
+        rule.rule_id, expected_version=rule.version, state="armed", event_kind="armed",
+    )
+    execution = await store.claim_fire(
+        rule.rule_id, expected_version=armed.version,
+        fire_id="deadline-recovery", session_id="deadline-recovery-session",
+        fire_at=datetime.now(UTC),
+    )
+    original = await store.set_deadline(
+        execution.fire_id, duration_seconds=1800,
+    )
+    assert original.deadline_at is not None
+    later = original.deadline_at + timedelta(hours=2)
+    monkeypatch.setattr(
+        "agent_harness.watchtower.store._now", lambda: later,
+    )
+    recovered_store = SqliteWatchtowerStore(tmp_path / "harness.db")
+    await recovered_store.initialize()
+    recovered = WatchtowerService(
+        store=recovered_store, session_service=session_service, settings=_settings(),
+    )
+
+    await recovered.tick()
+
+    resumed = await recovered_store.get_execution(execution.fire_id)
+    assert resumed.deadline_at == original.deadline_at
+    assert session_service.resumed[0]["run_deadline_at"] == original.deadline_at
+    await service.stop()
+    await recovered.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_events", "expected_state"),
     [

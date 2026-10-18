@@ -294,7 +294,7 @@ class SqliteWatchtowerStore:
     @retry_on_busy
     async def set_deadline(
         self, fire_id: str, deadline_at: datetime | None = None, *,
-        duration_seconds: int | None = None, replace_unstarted: bool = False,
+        duration_seconds: int | None = None,
     ) -> WatchtowerExecution:
         if (deadline_at is None) == (duration_seconds is None):
             raise ValueError("provide exactly one of deadline_at or duration_seconds")
@@ -310,9 +310,7 @@ class SqliteWatchtowerStore:
                 row = await cursor.fetchone()
                 if row is None:
                     raise KeyError(f"unknown fire_id: {fire_id}")
-                if row["deadline_at"] is None or (
-                    replace_unstarted and row["state"] == "dispatching"
-                ):
+                if row["deadline_at"] is None:
                     if duration_seconds is not None:
                         deadline_at = _now() + timedelta(seconds=duration_seconds)
                     assert deadline_at is not None

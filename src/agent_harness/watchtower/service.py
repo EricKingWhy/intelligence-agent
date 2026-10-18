@@ -448,7 +448,6 @@ class WatchtowerService:
                 execution = await self.store.set_deadline(
                     execution.fire_id,
                     duration_seconds=rule.budget_duration_seconds,
-                    replace_unstarted=True,
                 )
             if not events:
                 await self.session_service.create_and_launch(
