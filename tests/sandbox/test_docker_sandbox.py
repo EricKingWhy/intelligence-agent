@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -179,6 +180,9 @@ def test_copy_in_imports_host_file(
     assert docker_sandbox.read_text("imports/copied.txt") == "from Host"
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX copy_in archive is not used on Windows"
+)
 @docker_required
 def test_copy_in_fails_closed_when_entry_swapped_to_unix_socket(
     docker_sandbox: object,
