@@ -1,0 +1,1 @@
+2026-10-18	#1304 窄确认（correctness + standards 双 fresh 会话，各 8 次工具调用内）：范围 13ec2aa1..a0325639（补审 findings 的落实提交，2 文件）。机械判据：diff 的增删行剔除 diff 头后，非注释行为 0（两次独立量法：grep 筛选与 git diff -U0 计数，均 0）⇒ 零代码 / 控制流 / JSX 改动，纯注释字串增删。两轴均 APPROVE，P0/P1/P2/P3/P4 = 0：两条 P4 逐条判闭合（KanbanPanel 注释块 11→7 行、其中本票新写仅 3 行，已落在本文件惯例 ≤4 行内；KanbanCard 失实论据已删）。	13ec2aa1..a0325639

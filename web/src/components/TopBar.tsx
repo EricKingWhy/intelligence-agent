@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
+import { Activity, Brain, Columns3, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -36,6 +36,9 @@ interface Props {
   /** 打开恢复列表浮层（#357 W-13）：列出上次运行留下的中断会话。可选——
    *  未提供时不渲染入口（保持 TopBar 既有测试夹具零迁移）。 */
   onOpenRecoveryList?: () => void;
+  /** 打开 Agent 看板浮层（#1304）：会话四态投影。可选——未提供时不渲染入口
+   *  （同 `onOpenRecoveryList` 的先例：既有测试夹具零迁移）。 */
+  onOpenKanban?: () => void;
   /** #200：会话 id（context-usage 看板的数据源）；null = 无会话（按钮不渲染）。 */
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
@@ -53,7 +56,7 @@ interface Props {
   rosterSlot?: ReactNode;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -266,6 +269,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             title="恢复列表——查看上次运行留下的中断会话（只读）"
           >
             <History size={16} />
+          </button>
+        )}
+        {/* #1304：Agent 看板入口（会话四态投影）。与恢复列表同簇——同为"看一眼全局"
+            的低频动作，且都不依赖当前选中会话。 */}
+        {onOpenKanban && (
+          <button
+            className="icon-btn"
+            onClick={onOpenKanban}
+            aria-label="看板"
+            title="Agent 看板——会话四态投影"
+          >
+            <Columns3 size={16} />
           </button>
         )}
         <button

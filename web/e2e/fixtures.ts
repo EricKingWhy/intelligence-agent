@@ -305,6 +305,24 @@ export interface ApiMock {
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  /** `POST /api/sessions/{id}/<subPath>` 会话级命令的**测试钩子**（P4-3）——仅放行
+   *  `task/definition` 与 `workflow-mode` 两条命令（实现只匹配这两条，其他命令
+   *  走不到这个钩子）。#1304 起被看板拖拽用到的 `/task/definition` 走这条。
+   *  **给了钩子即由它接管**这条路由（与 `onMessagesPost` 同款），缺省则回 404。
+   *
+   *  ⚠ 判"接管"看的是**钩子在不在**，不是它的返回值：钩子的自然写法是
+   *  `return route.fulfill(...)`（Promise<void>），await 出来是 `undefined`，
+   *  拿返回值当布尔会把已 fulfill 的路由再喂一次 ⇒ Playwright 抛
+   *  `Route is already handled!`（#1304 实测踩到）。
+   *
+   *  ⚠ 这是**回调钩子不是计数器**（与 `onMessagesPost` 同款，见 #1304 审查 P2-5）：
+   *  "恰好发了几次"这类断言由各 spec 用闭包变量自己数——夹具不替它们记。 */
+  onSessionCommandPost?: (
+    route: Route,
+    sessionId: string,
+    subPath: string,
+    body: Record<string, unknown>,
+  ) => Promise<void> | void;
   // ── #825（MM-04）附件（POST 上传 / GET 受控读回）──
   /** `POST /api/sessions/{id}/attachments?name=` 的拦截口（计数 / 造 413·422）。
    *  缺省 = 记住字节并回 `sha256:<64 hex>` 回执（形状同 `AttachmentUploadResponse`）。 */
@@ -1061,6 +1079,21 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         }),
         contentType: 'application/json',
       });
+    }
+    // #1304：会话级命令（`/task/definition` 等）。默认**404**——照真后端"这个端点
+    // 没被 mock"的语义；看板用例自己用 `onSessionCommandPost` 接住并回 200/409。
+    // 放在 messages 分支**之前**：两者路径形状不同（`/messages` vs `/<cmd>`），
+    // 但都带 session 前缀，先匹配更具体的命令族可避免将来加通配时被吃掉。
+    const commandMatch = /^\/api\/sessions\/([^/]+)\/(task\/definition|workflow-mode)$/.exec(path);
+    if (commandMatch && req.method() === 'POST') {
+      const sessionId = commandMatch[1];
+      const subPath = `/${commandMatch[2]}`;
+      const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
+      if (mock.onSessionCommandPost) {
+        await mock.onSessionCommandPost(route, sessionId, subPath, body);
+        return;
+      }
+      return json(route, { detail: 'not mocked in e2e' }, 404);
     }
     if (/^\/api\/sessions\/[^/]+\/messages$/.test(path) && req.method() === 'POST') {
       if (mock.onMessagesPost) return mock.onMessagesPost(route);

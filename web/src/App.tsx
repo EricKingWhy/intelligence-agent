@@ -27,6 +27,7 @@ import { Composer, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
+import { KanbanPanel } from './components/KanbanPanel';
 import { PluginPanel } from './components/PluginPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { ContextWindowPanel } from './components/ContextWindowPanel';
@@ -1355,6 +1356,9 @@ export default function App() {
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
   // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
   const [recoveryListOpen, setRecoveryListOpen] = useState(false);
+  // #1304：Agent 看板浮层（顶栏 看板 按钮入口）。数据源由 KanbanPanel 打开时自取
+  // （`GET /api/sessions`），App 只持有开合状态——不在这里缓存第二份会话列表。
+  const [kanbanOpen, setKanbanOpen] = useState(false);
   /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
    *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
   const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
@@ -1591,6 +1595,7 @@ export default function App() {
         onOpenMemories={() => setMemoriesOpen(true)}
         onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
+        onOpenKanban={() => setKanbanOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
@@ -2062,6 +2067,9 @@ export default function App() {
         open={approvePolicyOpen}
         onOpenChange={setApprovePolicyOpen}
       />
+      {/* #1304：Agent 看板（TopBar Columns 入口）。打开时自取一次会话列表 + 手动刷新；
+          不订阅 WS（T3 / #1305），不写 ack（T4 / #1306）——本票只做投影与拖拽写路径。 */}
+      <KanbanPanel open={kanbanOpen} onOpenChange={setKanbanOpen} />
       {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
       <ContextUsagePanel
         sessionId={contextUsageOpen ?? ''}
