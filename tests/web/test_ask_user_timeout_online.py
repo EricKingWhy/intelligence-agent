@@ -342,7 +342,7 @@ async def test_ask_user_timeout_fires_without_any_connection(tmp_path, monkeypat
     """
     server, serve_task, port, app = await _start_server(
         tmp_path, monkeypatch, _ask_then_finish_factory(_ask_user_scripts()),
-        tick_seconds=0.2,
+        ask_user_timeout=60, tick_seconds=0.2,
     )
     try:
         driver = app.state.agent.ask_user_timeout_driver
