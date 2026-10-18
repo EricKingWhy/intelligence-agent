@@ -110,6 +110,7 @@ from agent_harness.memory.v2.types import (
     MemoryDraftV2,
     MemoryRecordV2,
     MemoryScope,
+    MemoryStatus,
     SourceType,
     TrustedMemoryIdentity,
 )
@@ -1210,6 +1211,18 @@ class MemoryJobExecutor:
             raise _Degraded(DegradedReason.APPLY_FAILED) from None
         if committed is None:
             return await self._lost(job.job_id)
+        # #1353 §2：markdown 权威面在 SQLite 事务**提交之后**补落（它无法参与那笔提交）。
+        # 撤回与新增要分开：`invalidate_in` 返回的记录内容必须从文件里删掉，不能 add。
+        mirror = getattr(self._writer, "mirror_committed", None)
+        if mirror is not None:
+            invalidated = tuple(
+                record for record in committed
+                if record.status is MemoryStatus.INVALIDATED
+            )
+            await mirror(
+                tuple(record for record in committed if record.status is MemoryStatus.ACTIVE),
+                invalidated=invalidated,
+            )
         state.phase = MemoryJobStage.COMPLETED.value
         self._observe("apply", {
             "job_id": job.job_id, "session_id": job.session_id,

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-import re
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -56,7 +56,6 @@ class CapabilityWiring:
     #: 工具贡献的第二来源（#159）：由 wiring 挂载的工具仍走统一收集循环。
     tool_contributors: list[Any] = field(default_factory=list)
     memory_provider: str | None = None
-    memory_vectors: Any | None = None
     #: V2 记忆形成管线（`memory/v2/assembly.build_memory_formation` 的产物）。它是**终结臂的
     #: 接收端**：`build_runtime` 把它注入 `AgentRuntime(memory_formation=...)`，每轮 run 收尾
     #: 时由它决定该不该入队、并在可见答复交付**之前**把 job 落盘（#298 T7b）。
@@ -121,41 +120,30 @@ class CapabilityWiring:
 async def _wire_memory(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
-    """Prepare the shared vector client; V2 owns all active memory behavior."""
+    """记忆的装配闸：markdown 权威目录（`<workspace_dir>/memories`）可写。
+
+    #1353 §5：V1 的"向量库 + 嵌入模型六个配置全有才装配"闸门随向量腿一起删除。
+    现在唯一的前置条件是**权威面能落盘**——目录建不出来或不可写时，记忆写进去就会
+    丢，所以宁可降级缺席（`MISSING_SETTINGS`，与"没配"同一码）也不装配。
+    """
     if not cfg.enabled:
         return
-    if not (
-        settings.milvus_uri
-        and settings.milvus_token.get_secret_value()
-        and settings.milvus_collection
-        and settings.embedding_model
-        and settings.embedding_base_url
-        and settings.embedding_api_key.get_secret_value()
-    ):
+    # 目录名与 assembly 同一事实源（相对 workspace_dir）；惰性 import 保持记忆链可选。
+    from agent_harness.memory.v2.assembly import MEMORIES_DIRECTORY_NAME
+
+    memories = Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME
+    try:
+        memories.mkdir(parents=True, exist_ok=True)
+        if not os.access(memories, os.W_OK):
+            raise PermissionError(f"memory directory not writable: {memories}")
+    except OSError as error:
+        logger.warning(
+            "capability 'memory' 的 markdown 目录不可用（%s: %s），按 %s 降级缺席",
+            type(error).__name__, error, Degradation.OPTIONAL_RUNTIME.value,
+        )
         wiring.degradations["memory"] = DegradeReason.MISSING_SETTINGS.value
         return
-    target = settings.milvus_collection
-    if (
-        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target)
-        or (settings.knowledge_collection and
-            target.casefold() == settings.knowledge_collection.casefold())
-    ):
-        raise CapabilityError(
-            "memory collection target is invalid or conflicts with Knowledge",
-            code="init_failed",
-        )
-
-    vectors = factories.build_memory_vector_client(settings)
-    try:
-        await vectors.initialize()
-    except Exception:
-        try:
-            await vectors.close()
-        except Exception:
-            logger.warning("memory vector client cleanup failed", exc_info=True)
-        raise
     wiring.memory_provider = cfg.provider
-    wiring.memory_vectors = vectors
 
 
 async def _wire_memory_v2(
@@ -163,9 +151,8 @@ async def _wire_memory_v2(
     *, sessions: JsonlSessionStore | None,
     workspace_index: Any | None = None,
 ) -> None:
-    """Wire V2 as the exclusive memory service, index client, and optional formation."""
-    vectors = wiring.memory_vectors
-    if wiring.memory_provider is None or vectors is None:
+    """Wire V2 as the exclusive memory service and optional formation."""
+    if wiring.memory_provider is None:
         return
     from agent_harness.model.config import ConfigError
 
@@ -179,7 +166,7 @@ async def _wire_memory_v2(
         from agent_harness.memory.v2.roles import resolve_configured_memory_roles
         from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
 
-        service = await build_memory_v2_service(settings, vector_store=vectors)
+        service = await build_memory_v2_service(settings)
         if sessions is None:
             runner = None
         else:
@@ -188,20 +175,13 @@ async def _wire_memory_v2(
             roles = resolve_configured_memory_roles(settings)
             runner = await build_memory_formation(
                 settings, sessions=sessions, memory_v2=service,
-                vector_store=vectors, workspace_index=workspace_index, roles=roles,
+                workspace_index=workspace_index, roles=roles,
             )
     except ConfigError as error:
-        await vectors.close()
-        wiring.memory_vectors = None
         raise CapabilityError(
             f"capability 'memory' 的 V2 形成管线配置错误：{error}", code="init_failed"
         ) from error
     except Exception:
-        try:
-            await vectors.close()
-        except Exception:
-            logger.warning("memory vector client cleanup failed", exc_info=True)
-        wiring.memory_vectors = None
         logger.warning(
             "V2 记忆装配失败，按 %s 降级跳过",
             Degradation.OPTIONAL_RUNTIME.value, exc_info=True,
@@ -227,11 +207,13 @@ async def _wire_memory_v2(
         )
         wiring.context_providers.append(_MemorySettingsContextProvider(v2_context, service))
     if sessions is not None:
+        from agent_harness.memory.v2.memory_tool import MemoryTool
         from agent_harness.memory.v2.tools import (
             ForgetMemoryV2Tool,
             RememberMemoryV2Tool,
         )
 
+        markdown = service.markdown
         wiring.tool_contributors.append(_ToolsProvider([
             RememberMemoryV2Tool(service, sessions, workspace_index=workspace_index),
             ForgetMemoryV2Tool(service, sessions, workspace_index=workspace_index),
@@ -239,13 +221,14 @@ async def _wire_memory_v2(
                 service, workspace_index=workspace_index,
                 timeout_seconds=settings.memory_search_timeout_seconds,
             ),
+            # #1353 M1/M8：markdown 权威面的直接写入工具 + 它的静态 guidance。
+            # markdown 缺席时（纯 SQLite 部署）不注册——没有可写的权威面。
+            *([MemoryTool(markdown, sessions)] if markdown is not None else []),
         ]))
     service.start_tombstone_purger()
     wiring.lifecycle.append(service)
-    wiring.lifecycle.append(vectors)
     if runner is not None:
         wiring.memory_formation = runner
-        # Stop/drain the runner before the shared vector provider is closed.
         wiring.lifecycle.append(runner)
 
 def coerce_skill_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
@@ -540,7 +523,7 @@ async def _wire_knowledge(
     降级（警告可观察）；store 连接/schema 故障 = 环境错误同样降级缺席；
     其余配置错误（provider 名等）在 wire_capabilities 上游响亮失败。
     """
-    from agent_harness.knowledge.milvus_store import MilvusKnowledgeVectorStore
+    from agent_harness.knowledge import build_knowledge_vector_store
     from agent_harness.knowledge.registry import SqliteKnowledgeSourceRegistry
     from agent_harness.knowledge.service import KnowledgeService
     from agent_harness.knowledge.tools import (
@@ -560,7 +543,7 @@ async def _wire_knowledge(
     try:
         from agent_harness.memory.embeddings import create_embeddings
 
-        store = MilvusKnowledgeVectorStore(
+        store = build_knowledge_vector_store(
             settings,
             create_embeddings(settings) if settings.embedding_model else None,
         )

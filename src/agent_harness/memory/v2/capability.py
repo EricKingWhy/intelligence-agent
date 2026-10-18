@@ -4,7 +4,7 @@
 
 记忆必须停在 Capability + Context Provider 的既有 seam 后面：AgentRuntime 不得长出
 provider 专属分支。所以调用方（工具、API、后续的 formation 流水线）只依赖
-`MemoryV2Capability` 这七个方法，而**不**知道背后是 SQLite、Milvus，还是 LangMem。
+`MemoryV2Capability` 这七个方法，而**不**知道背后是 SQLite 还是别的 provider。
 
 `MemoryV2Service` 是当前唯一实现，但它不是"边界"本身：边界是 Protocol。
 任何满足这七个方法的对象都可以替换它——包括测试替身与后续 ticket 引入的
@@ -17,17 +17,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import math
 from collections.abc import Sequence
 from typing import Protocol
 
 import aiosqlite
 
-from agent_harness.memory.v2.index import (
-    MemoryV2IndexRelay,
-    MemoryV2VectorIndex,
-    resolve_active_hits,
-)
+from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.policy import find_secret
 from agent_harness.memory.v2.recall import (
     RankedMemory,
@@ -96,10 +92,14 @@ class MemoryV2Service:
     def __init__(
         self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex,
         *, relay: MemoryV2IndexRelay | None = None,
+        markdown: MarkdownMemoryStore | None = None,
     ) -> None:
         self._store = store
         self._index = index
         self._relay = relay
+        #: #1353：markdown 权威面。为 `None` 时退化为纯 SQLite（既有测试与旧部署路径），
+        #: 装配层注入后 create/update/invalidate 先落 markdown 再投影 SQLite。
+        self._markdown = markdown
         self._tombstone_purger: asyncio.Task | None = None
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
@@ -133,15 +133,134 @@ class MemoryV2Service:
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         self._reject_secret(draft)
+        await self._mirror_markdown(draft, previous_id=None)
         return await self._store.create(draft, trusted)
 
     async def update(self, previous_id: str, draft: MemoryDraftV2,
                      trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         self._reject_secret(draft)
+        await self._mirror_markdown(draft, previous_id=previous_id, trusted=trusted)
         return await self._store.update(previous_id, draft, trusted)
 
     async def invalidate(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+        await self._mirror_markdown(None, previous_id=memory_id, trusted=trusted)
         return await self._store.invalidate(memory_id, trusted)
+
+    # ----------------------------------------------------------------------------------
+    # markdown 权威面（#1353 §2）
+    # ----------------------------------------------------------------------------------
+    #
+    # 顺序是 **markdown 先、SQLite 后**：markdown 是权威，SQLite 是派生/历史层。SQLite 失败
+    # 时 markdown 已落盘、调用方看到异常——这是"权威已改、投影未成"的正确方向（重放一次
+    # 写入即可收敛，反方向会丢用户的记忆）。反过来（SQLite 先）一旦 markdown 写失败，
+    # 权威面就永远缺这条事实，而派生层看起来一切正常。
+    #
+    # 事务内写（`*_in`）**不做** markdown 镜像：它们跑在 formation job 的事务里，markdown
+    # 写无法参与那笔提交；由执行器在提交成功后调用 `mirror_committed` 补落（见 executor）。
+
+    @property
+    def markdown(self) -> MarkdownMemoryStore | None:
+        return self._markdown
+
+    @staticmethod
+    def markdown_target(record: MemoryDraftV2 | MemoryRecordV2) -> str:
+        """分拣规则：`kind=user` 或 `tier=profile` → USER.md，其余 → MEMORY.md。
+
+        与 §4 迁移的分拣**同一句话**——两条路分拣不一致，迁移后第一条自动写入就会把事实
+        挪到另一个文件里，用户看到"刚写的记忆跑到别处去了"。
+        """
+        if record.tier.value == "profile" or record.kind.value == "user":
+            return "user"
+        return "memory"
+
+    async def _mirror_markdown(
+        self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
+        trusted: TrustedMemoryIdentity | None = None,
+    ) -> None:
+        store = self._markdown
+        if store is None:
+            return
+        if draft is None:
+            assert previous_id is not None and trusted is not None  # 调用方保证
+            try:
+                previous = await self._store.get(previous_id, trusted)
+            except KeyError:
+                return
+            if not store.target_enabled(self.markdown_target(previous)):
+                return
+            await store.remove(
+                self.markdown_target(previous), previous.content, matched_entry=previous.content,
+            )
+            return
+        target = self.markdown_target(draft)
+        if not store.target_enabled(target):
+            return
+        if previous_id is None:
+            await store.add(target, draft.content)
+            return
+        assert trusted is not None  # 调用方保证
+        try:
+            previous = await self._store.get(previous_id, trusted)
+        except KeyError:
+            await store.add(target, draft.content)
+            return
+        previous_target = self.markdown_target(previous)
+        if previous_target != target:
+            # 分拣变了（tier/kind 被改）：先删旧文件里的条目，再写新文件。
+            await store.remove(previous_target, previous.content, matched_entry=previous.content)
+            await store.add(target, draft.content)
+            return
+        # `matched_entry` 钉住**审阅时的那条原文**：并发手改后条目已变，replace 会以
+        # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）。
+        response = await store.replace(
+            target, previous.content, draft.content, matched_entry=previous.content,
+        )
+        if not response.get("success"):
+            await store.add(target, draft.content)
+
+    async def _mirror_deleted(self, memories: Sequence[MemoryRecordV2]) -> None:
+        """硬删（delete / bulk_delete）后把条目从 markdown 移除。"""
+        store = self._markdown
+        if store is None:
+            return
+        for memory in memories:
+            target = self.markdown_target(memory)
+            if store.target_enabled(target):
+                await store.remove(target, memory.content, matched_entry=memory.content)
+
+    async def mirror_committed(
+        self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
+    ) -> None:
+        """事务内写（formation job）**提交之后**补落 markdown。
+
+        formation 的写入走 `create_in/update_in/invalidate_in`，它们与 job 终态在同一笔
+        SQLite 事务里；markdown 写不可能参与那笔提交，所以只能在这里补。补写失败**不回滚**
+        已提交的 SQLite（事实已经成立），只记一条告警：markdown 下一次读取/投影会收敛，
+        而把已提交的事实回滚掉才是真的丢数据。
+        """
+        store = self._markdown
+        if store is None:
+            return
+        for record in records:
+            target = self.markdown_target(record)
+            if store.target_enabled(target):
+                try:
+                    await store.add(target, record.content)
+                except Exception as error:  # noqa: BLE001 — 见 docstring
+                    logger.warning(
+                        "markdown 投影失败（%s），SQLite 已提交：%s",
+                        type(error).__name__, record.id,
+                    )
+        for record in invalidated:
+            target = self.markdown_target(record)
+            if store.target_enabled(target):
+                try:
+                    await store.remove(target, record.content, matched_entry=record.content)
+                except Exception as error:  # noqa: BLE001 — 同上
+                    logger.warning(
+                        "markdown 撤回投影失败（%s），SQLite 已提交：%s",
+                        type(error).__name__, record.id,
+                    )
 
     async def list_records(
         self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
@@ -197,12 +316,14 @@ class MemoryV2Service:
             evidence=[EvidenceItem(role="user_edit", excerpt="", hash=evidence_hash)],
         )
         self._reject_secret(draft)
+        await self._mirror_markdown(draft, previous_id=memory_id, trusted=trusted)
         return await self._store.update(memory_id, draft, trusted)
 
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity,
     ) -> MemoryDeletionReceiptV2:
         receipt = await self._store.delete(memory_id, trusted)
+        await self._mirror_deleted(receipt.memories)
         if receipt.memories:
             try:
                 await self._delete_vectors(receipt.memories)
@@ -217,6 +338,7 @@ class MemoryV2Service:
     ) -> list[MemoryDeletionReceiptV2]:
         receipts = await self._store.bulk_delete(trusted, kind=kind)
         memories = tuple(memory for receipt in receipts for memory in receipt.memories)
+        await self._mirror_deleted(memories)
         if memories:
             try:
                 await self._delete_vectors(memories)
@@ -293,10 +415,10 @@ class MemoryV2Service:
     async def search(
         self, query: str, trusted: TrustedMemoryIdentity, *, scope: MemoryScope, limit: int,
     ) -> list[MemoryRecordV2]:
-        if self._relay is not None:
-            await self._relay.flush()
-        hits = await self._index.search(query, trusted, scope, limit)
-        return await resolve_active_hits(self._store, hits, trusted, scope)
+        """词法检索（FTS5）。#1353 §5：没有 dense 腿，`search` 直接走权威 SQLite。"""
+        return await self._store.keyword_search(
+            keyword_terms(query), trusted, scope=scope, limit=limit,
+        )
 
     async def list_profiles(
         self, trusted: TrustedMemoryIdentity, *, limit: int = 256,
@@ -307,44 +429,33 @@ class MemoryV2Service:
         self, query: str, trusted: TrustedMemoryIdentity, *,
         scopes: Sequence[MemoryScope], limit: int,
     ) -> list[RankedMemory]:
-        """Dense + SQLite keyword recall with SQLite identity/status revalidation."""
+        """FTS5 词法召回 + SQLite 身份/状态复核。
+
+        #1353 §5：dense 语义腿已删除（派生向量索引已退出记忆域），
+        名字保留是因为调用方（`retrieve_memory` / recall）与既有契约都按它取记忆；
+        `explanation["dense"]` 恒 0，排序由 `rank_memory` 的关键词/时效/权威因子决定。
+        """
         if not query.strip() or limit <= 0:
             return []
         if self._relay is not None:
             await self._relay.flush()
         terms = keyword_terms(query)
         candidate_limit = min(128, max(20, limit * 4))
-        candidates: dict[str, tuple[MemoryRecordV2, float]] = {}
+        candidates: dict[str, MemoryRecordV2] = {}
         for scope in dict.fromkeys(scopes):
             if scope is MemoryScope.PROJECT and trusted.project_id is None:
                 continue
-            dense_hits = await self._index.search(query, trusted, scope, candidate_limit)
-            dense_ids = [(memory_id, score) for memory_id, score in dense_hits
-                         if isinstance(score, (int, float)) and math.isfinite(score)]
-            for record in await resolve_active_hits(self._store, dense_ids, trusted, scope):
-                if record.tier.value == "collection":
-                    score = next((float(value) for memory_id, value in dense_ids
-                                  if memory_id == record.id), 0.0)
-                    candidates[record.id] = (record, max(0.0, min(1.0, score)))
-
-            lexical = await self._store.keyword_search(
+            for record in await self._store.keyword_search(
                 terms, trusted, scope=scope, limit=candidate_limit,
-            )
-            for record in lexical:
-                try:
-                    current = await self._store.get(record.id, trusted)
-                except KeyError:
-                    continue
-                if (current.status.value == "active" and current.tier.value == "collection"
-                        and current.scope is scope):
-                    candidates.setdefault(current.id, (current, 0.0))
+            ):
+                candidates.setdefault(record.id, record)
 
         ranked = [RankedMemory(
             record=record,
             explanation=rank_memory(
-                record, dense=dense, keyword=keyword_overlap(record.content, terms),
+                record, dense=0.0, keyword=keyword_overlap(record.content, terms),
             ),
-        ) for record, dense in candidates.values()]
+        ) for record in candidates.values()]
         ranked.sort(key=lambda hit: (-float(hit.explanation["score"]), hit.record.id))
         return ranked[:min(limit, 128)]
 

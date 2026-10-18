@@ -39,10 +39,12 @@ runner 持有服务循环（`_pump` task）、`Semaphore` 与脏标记，它们�
 （真正的执行在后台任务里），但它必须在**有任何新 run 之前**发生——否则一个重启后残留的
 job 会排在这一轮新 job 后面，而按用户串行的 `claim` 会把它挡到更久。
 
-# 派生索引：与 V1 共享已初始化的 Milvus client，搜索前收敛 V2 outbox
+# 检索：FTS5 词法腿，无派生索引后端
 
-形成与自动/显式召回共享同一个 `MemoryV2Service` 和派生索引。召回前由同一 service
-刷新 SQLite outbox；Milvus 仍是派生索引，所有命中随后回 SQLite 做身份、项目、active 状态复核。
+#1353 §5 删掉了 dense 语义腿：`MemoryV2Service.hybrid_search` 走 SQLite 的
+`memory_v2_fts`，命中随后回 `memory_v2_records` 做身份、项目、active 状态复核。
+`InMemoryMemoryV2Index` 仍作为 outbox 投影的进程内落点保留（契约不变、可重建），
+但它不再是任何检索的入口。
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import MemoryJobExecutor
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
     MemoryModelRoles,
@@ -71,28 +74,28 @@ logger = logging.getLogger(__name__)
 #: V2 的 SQLite 库位（相对 `settings.workspace_dir`）。见模块 docstring 的决定二。
 MEMORY_V2_DATABASE_NAME = "memory-v2.db"
 
+#: markdown 权威面目录（相对 `settings.workspace_dir`）。#1353 §2。
+MEMORIES_DIRECTORY_NAME = "memories"
 
-async def build_memory_v2_service(
-    settings: Settings, *, vector_store: Any | None = None,
-) -> MemoryV2Service:
+
+async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     """Build SQLite authority and its derived index independently of the formation model."""
     database = Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME
     store = SqliteMemoryV2Store(database)
     await store.initialize()
     await store.purge_expired_tombstones()
-    if vector_store is None:
-        index = InMemoryMemoryV2Index()
-    else:
-        from agent_harness.memory.v2.milvus_index import MilvusMemoryV2Index
-
-        index = MilvusMemoryV2Index(vector_store)
+    index = InMemoryMemoryV2Index()
     relay = MemoryV2IndexRelay(store, index)
-    return MemoryV2Service(store, index, relay=relay)
+    # #1353 §2：markdown 是权威面（`<workspace_dir>/memories/MEMORY.md` / `USER.md`），
+    # SQLite 降为派生/历史层。注入后 create/update/invalidate 先落 markdown 再投影。
+    markdown = MarkdownMemoryStore(Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME)
+    markdown.load_from_disk()
+    return MemoryV2Service(store, index, relay=relay, markdown=markdown)
 
 
 async def build_memory_formation(
     settings: Settings, *, sessions: JsonlSessionStore,
-    vector_store: Any | None = None, workspace_index: Any | None = None,
+    workspace_index: Any | None = None,
     memory_v2: MemoryV2Service | None = None,
     roles: MemoryModelRoles | None = None,
 ) -> MemoryJobRunner | None:
@@ -125,7 +128,7 @@ async def build_memory_formation(
 
     # 组合实现同时满足两个执行器端口（写者 `create_in/update_in/invalidate_in`、
     # 检索者 `search`）——一个对象，所以"写进去的"与"检索到的"不可能是两套可见性规则。
-    service = memory_v2 or await build_memory_v2_service(settings, vector_store=vector_store)
+    service = memory_v2 or await build_memory_v2_service(settings)
     observability = get_observability_sink(settings)
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),

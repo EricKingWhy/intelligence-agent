@@ -5,7 +5,7 @@ from agent_harness.memory.types import MemoryScope, scope_to_namespace
 
 
 class FakeVectorStore:
-    """镜像 `MilvusVectorStore` 的 upsert/search/delete/get 四个动词。
+    """镜像真实向量库 adapter 的 upsert/search/delete/get 四个动词。
 
     `delete` 按 namespace 过滤（跨 namespace 删不掉，与真实 adapter 的 filter 同款）；
     `get` 是"无残留"的验收入口（`search` 只能证明检索不到）。

@@ -10,8 +10,8 @@
 
 ## 选型：为什么不复用 `run_memory_v2_real_gold_gate.py`
 
-`run_memory_v2_real_gold_gate.py` 跑的是**合成 Memory V2 gold 集**（`GoldCase` 语料 +
-Milvus/embedding 预检 + SQLite 每例一库），判据全是 Memory V2 的写入/召回；它不经
+旧版 Memory V2 gold 门禁跑的是**合成 gold 集**（`GoldCase` 语料 + 向量库/embedding 预检
++ SQLite 每例一库），判据全是 Memory V2 的写入/召回；它不经
 `create_app` 的 HTTP/SSE 生产会话入口，也不碰 `register_constraint` /
 `request_constraint_resolution` / `user/input-requested` / protected-fact 投影。AC16 的
 执行面是**Web 生产会话**（M7 的预算拒绝、M8/M9 的暂停-恢复卡片都只在 web 路径上有），

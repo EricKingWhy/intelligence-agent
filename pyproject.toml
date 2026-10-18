@@ -40,7 +40,6 @@ artifact = ["aioboto3>=13.0"]
 memory = [
     "langgraph>=0.6.0",
     "langmem>=0.0.30,<0.1",
-    "pymilvus>=3.0.2,<3.1",
 ]
 observability = [
     "langfuse>=3",
