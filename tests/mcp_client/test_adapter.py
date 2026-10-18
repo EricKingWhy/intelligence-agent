@@ -50,7 +50,7 @@ def test_naming_namespaces_server_and_tool():
 @pytest.mark.asyncio
 async def test_permission_defaults_hint_and_override():
     """无注解 → DANGER/MUTATING（最严默认）；readOnlyHint → READ_ONLY/READ_ONLY；
-    server 配置覆写优先于注解。"""
+    server 配置可覆写 permission，side_effect 则取显式 read-only 配置与 hint 的或。"""
     server = FakeMCPServer(tools=[
         make_fake_tool("no_annot"),
         make_fake_tool("ro_tool", read_only=True),
