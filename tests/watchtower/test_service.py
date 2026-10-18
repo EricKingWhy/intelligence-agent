@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness.session.event import (
+    MODEL_COMPLETED,
+    MODEL_REQUEST,
     RUN_FAILED,
     RUN_STARTED,
     USER_INPUT_REQUESTED,
@@ -237,6 +239,54 @@ async def test_restart_recovers_same_dispatch_session_without_creating_another(t
     assert session_service.resumed[0]["session_id"] == "stable-session"
     assert (await store.get_execution("stable-fire")).state == "fired"
     assert (await store.get_rule(rule.rule_id)).fired_session_id == "stable-session"
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_events", "expected_state"),
+    [
+        ([MODEL_REQUEST, RUN_FAILED], "launch_failed"),
+        ([MODEL_REQUEST, MODEL_COMPLETED, MODEL_REQUEST, RUN_FAILED], "fired"),
+    ],
+)
+async def test_restart_classifies_429_by_first_model_request(
+    tmp_path, model_events, expected_state,
+):
+    store, session_service, service = await _new_service(tmp_path)
+    rule = await _rule(service)
+    armed = await store.transition(
+        rule.rule_id, expected_version=rule.version, state="armed", event_kind="armed",
+    )
+    execution = await store.claim_fire(
+        rule.rule_id, expected_version=armed.version,
+        fire_id="later-429", session_id="session-later-429", fire_at=datetime.now(UTC),
+    )
+    session_service.events[execution.session_id] = [
+        SimpleNamespace(type=RUN_STARTED, data={}, run_id="run-later-429"),
+        *(
+            SimpleNamespace(
+                type=event_type,
+                data={"http_status": 429} if event_type == RUN_FAILED else {},
+                run_id="run-later-429",
+            )
+            for event_type in model_events
+        ),
+    ]
+    restarted = WatchtowerService(
+        store=store, session_service=session_service, settings=_settings(),
+    )
+
+    await restarted.tick()
+
+    updated = await store.get_rule(rule.rule_id)
+    recovered = await store.get_execution(execution.fire_id)
+    assert recovered.state == expected_state
+    assert updated.state == expected_state
+    assert updated.fired_session_id == (
+        execution.session_id if expected_state == "fired" else None
+    )
+    await service.stop()
     await restarted.stop()
 
 

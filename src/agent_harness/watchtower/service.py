@@ -389,10 +389,17 @@ class WatchtowerService:
             if events:
                 starts = [event for event in events if event.type == RUN_STARTED]
                 if starts:
-                    failed_429 = any(
-                        event.type == RUN_FAILED and event.data.get("http_status") == 429
-                        for event in events
-                    )
+                    model_requests = 0
+                    model_completed = False
+                    failed_429 = False
+                    for event in events:
+                        if event.type == MODEL_REQUEST:
+                            model_requests += 1
+                        elif event.type == MODEL_COMPLETED:
+                            model_completed = True
+                        elif event.type == RUN_FAILED and event.data.get("http_status") == 429:
+                            failed_429 = model_requests == 1 and not model_completed
+                            break
                     if failed_429:
                         await self.store.finish_fire(
                             execution.fire_id, state="launch_failed",
