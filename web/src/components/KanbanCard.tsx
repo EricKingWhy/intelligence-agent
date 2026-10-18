@@ -31,13 +31,11 @@ interface Props {
 }
 
 export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
-  // 后端契约保证 `attention_kind` / `attention_summary` **恒成对**
-  // （`board_projection.py` 的读盘校验 `(kind is None) != (summary is None)` 即判非法），
-  // 故两字段在正常数据下同生同灭。这里对坏数据（单边值）的退化方向是**宁可多显示、
-  // 不丢文案**（PRODUCT.md「可观测默认」）：染色与圆点看两字段齐备（半吊子态不染色），
-  // 横幅只看 `summary`（有文案就渲染，绝不静默吞掉）。
+  // 后端契约保证 `attention_kind` / `attention_summary` **恒成对**：`_attention` 成对返回，
+  // 读盘校验 `(kind is None) != (summary is None)` 即判非法，派生失败兜底 `_empty` 也两者皆空
+  // （`board_projection.py`）⇒ 单边值到不了前端。故染色 / 圆点 / 横幅三处用**同一个**布尔值
+  // 即可，不写单边值分支（不可达且无夹具能覆盖），也不留"染色了但没横幅"的半吊子态。
   const hasAttention = session.attention_kind !== null && session.attention_summary !== null;
-  const showAttention = session.attention_summary !== null;
   const empty = session.first_user_message === null;
   const title = cardTitle(session);
   const relative = formatRelativeTime(session.last_event_time, now);
@@ -73,7 +71,7 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
         <p className="kanban-card-hint">空会话：请先在侧栏打开并发送消息</p>
       )}
 
-      {showAttention && (
+      {hasAttention && (
         <div className="kanban-card-attention" data-attention-kind={session.attention_kind ?? ''}>
           {session.attention_kind === 'approval' ? (
             <ShieldQuestion size={12} aria-hidden="true" />
