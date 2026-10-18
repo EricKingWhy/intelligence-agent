@@ -259,6 +259,9 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
     const diagnostics = host.querySelector('.task-review-diagnostic-disclosure') as HTMLDetailsElement;
     expect(diagnostics.open).toBe(false);
     expect(diagnostics.textContent).toContain('Operation Ledger');
+    // #1325 S3：对照表要求整行删除内部投影术语（普通用户不需要理解）。
+    expect(diagnostics.textContent).not.toContain('open_run_ids');
+    expect(diagnostics.textContent).not.toContain('交付投影');
   });
 
   it('三操作各自后果文案在场；带原因接受 reason 为空 → 客户端先校验、不发请求', async () => {
