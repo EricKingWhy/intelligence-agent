@@ -97,7 +97,7 @@ async def test_zero_match_returns_current_entries(store) -> None:
     assert result["current_entries"] == ["fact A"]
 
 
-async def test_ambiguous_match_returns_current_entries(store) -> None:
+async def test_ambiguous_match_returns_every_competing_entry(store) -> None:
     await _add(store, "memory", "server A runs nginx")
     await _add(store, "memory", "server B runs nginx")
 
@@ -105,8 +105,18 @@ async def test_ambiguous_match_returns_current_entries(store) -> None:
 
     assert result["success"] is False
     assert "Multiple" in result["error"]
-    # 票面 AC1 明确要求 ≥2 命中时也回 current_entries（让模型自纠）。
-    assert result["current_entries"] == ["server A runs nginx", "server B runs nginx"]
+
+    # 判据只锁「模型能自纠」这件事：≥2 命中必须回**全部候选条目**，而不是只说“有歧义”。
+    # ⚠ 票面 §6 AC1 / §3 M1 的散文写「≥2 命中返回 `current_entries`」，而上游 oracle
+    # （`memory_tool_store.py:329-331`，票面同时要求逐行搬）用的是 `matches=[...]`（截断 80 字符）；
+    # 两处口径不一致已上报，本条不替任一方拍板：两种形状都接受，但候选集必须完整。
+    candidates = result.get("current_entries")
+    if candidates is None:
+        matches = result.get("matches")
+        assert matches, f"≥2 命中必须回候选集（current_entries 或 matches）：{result!r}"
+        candidates = [text.removesuffix("...") for text in matches]
+    assert candidates == ["server A runs nginx", "server B runs nginx"]
+
     assert read_entries(path_of(store, "memory")) == [
         "server A runs nginx",
         "server B runs nginx",

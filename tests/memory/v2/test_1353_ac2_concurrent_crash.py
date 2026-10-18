@@ -37,7 +37,12 @@ WORKER = Path(__file__).resolve().parent / "_1353_store_worker.py"
 
 def _worker_env() -> dict[str, str]:
     env = dict(os.environ)
-    env["PYTHONPATH"] = f"{REPO_ROOT / 'src'}{os.pathsep}{REPO_ROOT}"
+    # 本仓 src 永远排第一（门禁用 `run_tests_clean.sh` 清空 PYTHONPATH，故不存在遮蔽）；
+    # 保留父进程的条目只为「用另一棵 worktree 的实现在本树预览」时不至于把子进程打成
+    # `#1353 未找到markdown 存储实现模块` 的假红。
+    entries = [str(REPO_ROOT / "src"), str(REPO_ROOT)]
+    entries += [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    env["PYTHONPATH"] = os.pathsep.join(entries)
     env["PYTHONUTF8"] = "1"
     for name in ("NO_PROXY", "no_proxy"):
         env[name] = "localhost,127.0.0.1"
