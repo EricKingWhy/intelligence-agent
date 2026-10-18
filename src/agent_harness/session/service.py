@@ -3716,6 +3716,17 @@ class SessionService:
 
         if mode == "steer":
             if active_run is None:
+                # #1324：这条拒绝是**设计内**的（前端收到后改投 queue 并成功），
+                # 但它此前在全链路没有归因记录——现场只能看到"一次 409 被吞掉"。
+                # 字段按票面 AC2(a) 固定：异常类型 + session_id + run_id。此处
+                # `active_run is None` 正是判据本身 ⇒ run_id 诚实地是 None
+                # （没有在途 run），不拿别的 id 顶替。
+                logger.warning(
+                    "steer 打空被拒（SteerTargetNotFound）：session=%s run_id=%s "
+                    "reason=no_active_run",
+                    session_id,
+                    None,
+                )
                 raise SteerTargetNotFound(
                     "steer requires an active run; use mode='queue' to enqueue"
                 )
