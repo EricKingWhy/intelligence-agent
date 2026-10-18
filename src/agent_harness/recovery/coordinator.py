@@ -380,6 +380,20 @@ class AutoReconcileCallback(ReconcileCallback):
     CONFIRM_FAILURE：它断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量
     #14 禁止替工具断言它没生效）。
 
+    文档化限制（`#1327` Q2=A 用户裁决 2026-10-18）：票面 P1 的中间分支
+    「可从服务端对账确认未生效 ⇒ RETRY」**本票不做**。四家成熟产品均无
+    「harness 侧运行时逐工具对账、确认未生效后自动重跑」这条分支
+    （取证 `~/workspace/1327-coord/mature-evidence-q1q2.md` §Q2）：
+      - DeepSeek Harness `repair.ts:34` 的 "first verify external state"
+        主语是**模型**（模型用自己的工具去查），不是 harness 代码；
+        harness 侧只合成 unknown 结果追加回日志，从头到尾不判定副作用
+        是否发生；
+      - Orca / ZCode 有运行时对账，但只对**账本身份**（provider 历史 /
+        queue / transcript），终点是收窄 / 丢弃，**绝不**自动重跑工具调用
+        （ZCode："绝不能据此自动重放"）；
+      - oh-my-pi 无对账、无标注、无分支。
+    按工具语义做运行时外部状态确认、确认未生效后自动重跑，属自研范围
+    （四家均无对应物），留待后续票。
 
     为什么只认 `replay_safe`：该属性已把"只读 + 幂等 + 无任何外部副作用（含远程）"
     三条编码进去（`tooling/contract.py`），且 22 处逐工具 override 已存在——本类只
