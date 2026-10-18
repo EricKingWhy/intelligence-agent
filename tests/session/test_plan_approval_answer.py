@@ -59,6 +59,11 @@ def test_approve_renders_approval_and_artifact_ref():
     assert data["content"].startswith("计划已批准，现在开始执行。")
     # 计划正文已落 artifact：批准消息必须带上引用，模型据此回读而非复述。
     assert "abc123" in data["content"]
+    # #1356 审查 P2-1：读回工具名按后端而定（Local/MinIO ⇒ `read_artifact`，
+    # S3 ⇒ `inspect_artifact`）。领域层写死任一名字都会在另一种后端指路到不在册
+    # 的工具，故消息只给引用、不点名工具。
+    assert "inspect_artifact" not in data["content"]
+    assert "read_artifact" not in data["content"]
 
 
 def test_revise_echoes_the_user_feedback_verbatim():

@@ -100,7 +100,7 @@ from agent_harness.tools.request_constraint_resolution import (
     REGISTER_CONSTRAINT_HANDOFF,
     RequestConstraintResolutionTool,
 )
-from agent_harness.tools.submit_plan import SubmitPlanTool
+from agent_harness.tools.submit_plan import SUBMIT_PLAN_TOOL_NAME, SubmitPlanTool
 from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
@@ -497,7 +497,7 @@ def root_registry_tool_names(
     if include_resolution_tool and selection is not None:
         # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store
         # ——与 `_build_tooling` 同名分支逐字同判（漂移即三方对账红灯）。
-        names.add(SubmitPlanTool(None).name)
+        names.add(SUBMIT_PLAN_TOOL_NAME)
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
         # 与 `_build_tooling` 的同名分支逐字同判（名字在不在，两边必须一致）。
@@ -523,6 +523,8 @@ def root_registry_reconcile_info(
     *,
     session_id: str,
     session_store: JsonlSessionStore | None,
+    include_constraint_tools: bool = False,
+    include_constraint_resolution_tool: bool | None = None,
 ) -> dict[str, ToolReconcileInfo]:
     """根 registry 恢复裁决呈现元数据的**零副作用**计算（#357 W-13 §2.4）。
 
@@ -532,6 +534,12 @@ def root_registry_reconcile_info(
     消费点：``_reconcile_pending`` 产出 ``default_action/risk_level/probe``
     只读展示字段；判据与真实工具面漂移即红灯
     （``tests/test_assembly_root_registry_names.py``）。
+
+    两个 ``include_*`` 开关与 ``root_registry_tool_names`` **同名同义**（#1356
+    审查 P1-3）：根会话专属工具（``register_constraint`` / ``ask_user`` /
+    ``request_constraint_resolution`` / ``submit_plan``）是否在册由装配点决定，
+    投影必须能跟着开——否则它们的 ``reconcile_hint`` 永远到不了 UI，恢复裁决
+    退化为无提示的人工 DEFER/high。
     """
     info: dict[str, ToolReconcileInfo] = {}
     for tool_cls in BUILTIN_LOCAL_TOOLS:
@@ -539,15 +547,29 @@ def root_registry_reconcile_info(
         info[tool.name] = _tool_reconcile_info(tool)
     update_plan = UpdatePlanTool()
     info[update_plan.name] = _tool_reconcile_info(update_plan)
-    # #1356：`submit_plan` 与 `ask_user` / `request_constraint_resolution` 一样
-    # **不**在这里出现——本函数没有 `include_*` 形参，只覆盖"无条件注册"的那一面
-    # （既有两条根会话专属工具同样缺席，不是本票新增的缺口）。消费方
-    # `_reconcile_pending` 对不在表里的工具 fail-closed（DEFER/high + 
-    # verifiable=false），不会把未知工具渲染成可安全重试。
+    include_resolution_tool = (
+        include_constraint_tools
+        if include_constraint_resolution_tool is None
+        else include_constraint_resolution_tool
+    )
+    if include_constraint_tools:
+        info[RegisterConstraintTool().name] = _tool_reconcile_info(
+            RegisterConstraintTool()
+        )
+    if include_resolution_tool:
+        # #1204：通用提问与澄清工具同一道回答通道开关（与名字集同判）。
+        info[RequestConstraintResolutionTool().name] = _tool_reconcile_info(
+            RequestConstraintResolutionTool()
+        )
+        info[AskUserTool().name] = _tool_reconcile_info(AskUserTool())
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         read_tool = selection.read_tool(None)
         info[read_tool.name] = _tool_reconcile_info(read_tool)
+    if include_resolution_tool and selection is not None:
+        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store
+        # ——与 `root_registry_tool_names` / `_build_tooling` 同名分支逐字同判。
+        info[SUBMIT_PLAN_TOOL_NAME] = _tool_reconcile_info(SubmitPlanTool(None))
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
         # 与 `root_registry_tool_names` 的同名分支逐字同判（两边必须一致）。
@@ -816,7 +838,7 @@ async def build_runtime(
         if (
             include_resolution_tool
             and context_artifact_store is not None
-            and SubmitPlanTool(None).name not in registered_names
+            and SUBMIT_PLAN_TOOL_NAME not in registered_names
         ):
             registry.register(SubmitPlanTool(context_artifact_store))
 

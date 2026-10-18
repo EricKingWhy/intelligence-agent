@@ -52,6 +52,10 @@ from agent_harness.tools.user_input_common import (
 #: 大块文本"输入面）。超限整单拒绝：无事件、无 artifact。
 PLAN_MARKDOWN_MAX_CHARS = 100_000
 
+#: 工具名。装配期需要"只要名字、不要 store"（`SubmitPlanTool(None).name`），
+#: 单源成常量后装配处不再依赖"`name` property 不碰 `_store`"这条隐式契约。
+SUBMIT_PLAN_TOOL_NAME = "submit_plan"
+
 
 class SubmitPlanArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -76,6 +80,20 @@ class SubmitPlanArgs(BaseModel):
         ),
     ]
 
+    # 审查 P4-2：`max_length` 的默认文案（"String should have at most N characters"）
+    # 不带任何下一步指引。票面要求超限时告诉模型"缩短正文或拆分计划"。`mode="before"`
+    # 让这条先于 `max_length` 触发，故模型看到的是下面这句而非 pydantic 默认文案；
+    # `max_length` 保留为声明式契约（schema 导出仍带上限，模型菜单里看得见）。
+    @field_validator("plan_markdown", mode="before")
+    @classmethod
+    def _within_limit(cls, value: object) -> object:
+        if isinstance(value, str) and len(value) > PLAN_MARKDOWN_MAX_CHARS:
+            raise ValueError(
+                f"plan_markdown 超过 {PLAN_MARKDOWN_MAX_CHARS} 字符上限；"
+                "请缩短正文或把计划拆成多次提交后重试。"
+            )
+        return value
+
     @field_validator("plan_markdown")
     @classmethod
     def _not_blank(cls, value: str) -> str:
@@ -91,11 +109,16 @@ class SubmitPlanTool(Tool):
     plan_mode_exempt: bool = True
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
+        """`artifact_store` 只在 `execute` 期使用（落计划正文）。
+
+        装配期为了拿名字而 `SubmitPlanTool(None)` 的写法依赖这条契约；要名字请用
+        `SUBMIT_PLAN_TOOL_NAME`，别再造一个 `None` 实例。
+        """
         self._store = artifact_store
 
     @property
     def name(self) -> str:
-        return "submit_plan"
+        return SUBMIT_PLAN_TOOL_NAME
 
     @property
     def description(self) -> str:

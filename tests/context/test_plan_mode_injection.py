@@ -8,11 +8,11 @@
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agent_harness.context.compactor import _is_compaction_summary
 from agent_harness.context.builder import (
     _PLAN_MODE_BLOCK_HEADING,
     ContextBuilder,
 )
+from agent_harness.context.compactor import _is_compaction_summary
 from agent_harness.session import USER_MESSAGE, JsonlSessionStore, Session
 from agent_harness.session.workflow import WorkflowMode, append_workflow_mode_change
 from tests.scripted_model import ScriptedModel
@@ -75,6 +75,29 @@ async def test_normal_mode_does_not_inject(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_normal_mode_projection_is_byte_identical_to_the_baseline(tmp_path):
+    """AC2：NORMAL 档**其余部分逐字节一致**——新注入器没有挪动任何既有消息。
+
+    只断言"块缺席"钉不住这一面：`_inject_plan_mode_block` 是下标敏感操作
+    （`[*messages[:i], SystemMessage(...), *messages[i:]]`），而压缩摘要相关的
+    既有契约正是按下标断言的。这里同事件流双跑，PLAN 产物**删掉那条块**后
+    必须与 NORMAL 产物逐条逐字节相等。
+    """
+    # 同一会话双跑（先 NORMAL，再追加切档事件后重跑）：保护事实块里的
+    # source_event_id 由事件流派生，两个不同会话会带不同 UUID，比不了字节。
+    session = _session(tmp_path)
+    normal = await ContextBuilder(ScriptedModel([])).build(session)
+    append_workflow_mode_change(session, WorkflowMode.PLAN)
+    plan = await ContextBuilder(ScriptedModel([])).build(session)
+
+    stripped = [m for m in plan if _block([m]) is None]
+    assert len(stripped) == len(plan) - 1, "PLAN 产物必须恰好多出一条指令块"
+    assert [m.model_dump_json() for m in stripped] == [
+        m.model_dump_json() for m in normal
+    ]
+
+
+@pytest.mark.asyncio
 async def test_block_disappears_after_switching_back(tmp_path):
     """切回 NORMAL ⇒ 块消失（判据是现派生档位，不是历史痕迹）。"""
     session = _session(tmp_path, mode=WorkflowMode.PLAN)
@@ -116,8 +139,20 @@ async def test_block_lands_before_the_user_message(tmp_path):
 
 @pytest.mark.asyncio
 async def test_block_tokens_are_counted_before_the_threshold(tmp_path):
-    """token 纪律「先计入再注入」：块成本计入估算，不算进 last_usage 的偏差。"""
+    """token 纪律「先计入再注入」：块成本进 other 桶并闭合进 used_tokens。
+
+    口径照 `test_modified_paths_injection.py::test_accounting_other_bucket_and_sum_invariant`
+    ——只断言 `_last_*_tokens > 0` 是"字段被写了"，不断言"字段进了账"；#1356
+    审查 P1-2 的真 bug 恰好落在这条分界线上。
+    """
     session = _session(tmp_path, mode=WorkflowMode.PLAN)
     builder = ContextBuilder(ScriptedModel([]))
     await builder.build(session)
     assert builder._last_plan_mode_tokens > 0
+    snapshot = builder.usage_snapshot(session)
+    assert snapshot["other"] >= builder._last_plan_mode_tokens > 0
+    assert snapshot["other_breakdown"]["plan_mode"] == builder._last_plan_mode_tokens
+    assert snapshot["used_tokens"] == (
+        snapshot["messages"] + snapshot["system_prompt"]
+        + snapshot["skills"] + snapshot["other"]
+    )

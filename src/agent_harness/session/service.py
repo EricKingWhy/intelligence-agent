@@ -769,13 +769,18 @@ def _pending_user_input_conflict_message(
     窄场景，后者是通用提问。文案写死「约束澄清」会把通用提问误报成约束冲突，把用户
     引去处理一个并不存在的冲突。
 
-    分流是**允许清单**：只有明确等于 ``protected_fact_conflict`` 才走约束澄清原句；
-    ``ask_user``、未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——缺字段
-    时「不说假话」优先于「猜它是约束澄清」。通用提问的动词与前端 composer 锁定提示
-    统一为「回答」；约束澄清原句按 #1223 冻结（仍说「提交答案」），不随本票改动。
+    分流是**允许清单**，三个具名分支（约束澄清 / 计划审批 / 通用提问）：只有明确
+    命中才走专用原句；未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——
+    缺字段时「不说假话」优先于「猜它是约束澄清」。动词与前端 composer 锁定提示
+    逐分支统一：通用提问 =「回答」（#1223/#1283），计划审批 =「裁决」（#1356，
+    前端 ``Composer.tsx`` 的 ``请先裁决当前计划``）；约束澄清原句按 #1223 冻结
+    （仍说「提交答案」），不随本票改动。
     """
-    if request.data.get("kind") == "protected_fact_conflict":
+    kind = request.data.get("kind")
+    if kind == "protected_fact_conflict":
         return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
+    if kind == "plan_approval":
+        return f"当前有待裁决的计划；请先裁决该计划，{resume_action}"
     return f"当前有待回答的提问；请先回答该提问，{resume_action}"
 
 
@@ -873,7 +878,12 @@ def _plan_approval_input_answer_data(
         # 正文——正文不必在上下文里再灌一遍。
         content = "计划已批准，现在开始执行。"
         if artifact_ref:
-            content += f"（计划全文：artifact {artifact_ref}，可用 inspect_artifact 读取）"
+            # #1356 审查 P2-1：**不点名**读回工具——名字由 `select_artifact_store`
+            # 按后端决定（S3 ⇒ `inspect_artifact`，MinIO/Local ⇒ `read_artifact`），
+            # 领域层拿不到装配期的选择结果；写死一个会在默认 Local 档指路到不在册
+            # 的工具（模型多一轮 tool-not-found 自纠错）。名字的单一来源在装配期
+            # 的 `assembly.py`（`selection.read_tool(...)`），模型从工具清单里读。
+            content += f"（计划全文：artifact {artifact_ref}，用当前可用的 artifact 读取工具回读）"
     elif decision == "revise":
         content = (
             f"用户要求修改计划，反馈原文：\n\n{feedback}\n\n"
@@ -3162,6 +3172,12 @@ class SessionService:
                 # 与 #1193 的边界：那边禁的是**异常路径**自动回滚 mode（权限只收紧不
                 # 自动放宽）；这里是用户点了"批准"，不是异常臂，两者不冲突。
                 # 幂等：`answer_already_recorded` 的重放不重复写 mode 事件。
+                # 审查 P4-1（知情接受）：这两次 append 之间有一个极窄的崩溃窗——
+                # 若进程恰好死在这里，重试时 `answer_already_recorded` 仍为 False，
+                # 会再落一条 mode(normal)。`effective_workflow_mode` 是 last-wins，
+                # 功能无损；唯一受影响的是"批准恰好落一条 normal"的断言（无崩溃路径
+                # 成立）。收敛方式（重放判定里也认 mode 事件）会动幂等语义，收益不抵
+                # 风险，故不改。
                 if (
                     answer_data["input_request_answer"].get("decision") == "approve"
                 ):

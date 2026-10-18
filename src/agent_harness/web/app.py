@@ -1734,8 +1734,11 @@ def _reconcile_info_provider(
 
     async def _info(session_id: str) -> dict[str, Any]:
         _, wiring = await get_wiring()
+        # #1356 审查 P1-3：本端口只服务根会话（委派子会话的收窄由子会话自己的
+        # 装配负责），故与 `_session_declaration_validator` 同口径开约束工具。
         return root_registry_reconcile_info(
             settings, wiring, session_id=session_id, session_store=store,
+            include_constraint_tools=True,
         )
 
     return _info

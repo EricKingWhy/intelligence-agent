@@ -138,9 +138,10 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     ),
     "submit_plan": (
         "只供直接用户会话的根 main/coding Runtime 使用（与 ask_user 同一道回答通道"
-        "开关，且依赖 artifact store 落计划正文）；coding AgentSpec 同时用于委派 "
-        "child，子代理没有可审批的用户，故不放入共享 tool_scope，根 coding 在 "
-        "profile 收窄后单独接回、grantable_names 恒剔除"
+        "开关，且依赖 artifact store 落计划正文）；未在任何档位声明（与 "
+        "`ingest_document` 同口径），故 `grantable_names` 无从产生它——不在 "
+        "`ROOT_ONLY_TOOL_NAMES` 也不在 `_CODING_TOOLS`，排除机制是「从未登记」而非"
+        "「收窄后接回再剔除」（#1356 审查 P3-3）"
     ),
     "ingest_document": (
         "知识库**写入**工具，未在任何档位声明（子代理走只读检索 retrieve_knowledge / "

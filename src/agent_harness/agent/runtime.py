@@ -2044,6 +2044,10 @@ class AgentRuntime:
                     # `request_constraint_resolution`）照旧在空来源上 fail-closed
                     # （`SOURCE_NOT_ACTIVE`）。此前把两者混为一谈会让恢复 run 里的
                     # `submit_plan` 被误判为 SOURCE_UNAVAILABLE，且**整段跳过**准入闸。
+                    # 副作用（知情承认）：同一个 context 也喂给 `ask_user`，故恢复 run
+                    # 里的 `ask_user` 从"拒绝（SOURCE_UNAVAILABLE）"变成"可发起"。
+                    # 方向正确（追问链本该通），但这是对 #1204 域的行为变更，记在
+                    # #1204 的账上——#1356 只对 `submit_plan` 负责（审查 P3-1）。
                     tool_request_context = ConstraintToolContext(
                         session_id=session.session_id,
                         run_id=run_id,
@@ -4082,6 +4086,10 @@ class AgentRuntime:
         # 模式后重试"——错话。故把 `USER_INPUT_REQUESTED(kind="plan_approval")`
         # 也算作"计划已生成"的证据：两个条件都从事件流现派生、仍然 fail-closed
         # （两者都没有才报），不新增事件类型、不动 mode 不回滚的铁律。
+        # 审查 P4-3（知情接受）：`plan_approval` 的判据不区分待批/已答复/前序 run
+        # 终结时遗留的 dangling 请求。dangling 边角下用户拿不到"可手动退出 plan
+        # 模式"的横幅——与票面"已提交待审批的计划不会触发该帧"同向，且收紧判据
+        # 会把"已答复但计划仍有效"的场景也一起改掉，故只记录不收紧。
         error_data: RunFailedBeforePlanData | None = None
         error_event = None
         if (

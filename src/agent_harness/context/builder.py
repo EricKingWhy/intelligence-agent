@@ -56,7 +56,6 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.plan import PlanState, derive_plan
-from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 from agent_harness.session.progress import (
     PROGRESS_VERIFY_OK,
     PROGRESS_VERIFY_STALE,
@@ -65,6 +64,7 @@ from agent_harness.session.progress import (
     verify_progress_file,
     write_progress_file,
 )
+from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -291,6 +291,31 @@ def _plan_mode_block(events: list[SessionEvent]) -> str | None:
     return _PLAN_MODE_BLOCK_HEADING + "\n" + _PLAN_MODE_BLOCK_BODY
 
 
+def _first_compaction_summary_index(messages: list[AnyMessage]) -> int | None:
+    """第一条压缩摘要的下标（无摘要 ⇒ ``None``）——四个注入块的共同锚点。"""
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return index
+    return None
+
+
+def _insert_system_block(
+    messages: list[AnyMessage], text: str, anchor: int | None = None,
+) -> list[AnyMessage]:
+    """在系统块区域插入一条 SystemMessage 的**唯一落点规则**（#1356 审查 P2-3）。
+
+    ``anchor`` = 插入点下标（调用方按自己的锚定规则算好）；``None`` ⇒ 兜底到
+    开头连续 SystemMessage 之后。两条落点都只依赖 SystemMessage 分布，不会插进
+    AI(tool_calls)/ToolResult 配对中间。此前四个注入器各抄一份同形代码，落点
+    规则一改要改四处且没有测试拦漏改。
+    """
+    if anchor is None:
+        anchor = 0
+        while anchor < len(messages) and isinstance(messages[anchor], SystemMessage):
+            anchor += 1
+    return [*messages[:anchor], SystemMessage(content=text), *messages[anchor:]]
+
+
 def _inject_plan_mode_block(
     messages: list[AnyMessage], block_text: str,
 ) -> list[AnyMessage]:
@@ -300,15 +325,9 @@ def _inject_plan_mode_block(
     之后）。调用顺序在 `_inject_plan_block` **之前**——模式边界比清单更靠前，
     模型先看到"你在计划档"再看到"当前清单"。
     """
-    for index, message in enumerate(messages):
-        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
-            return [
-                *messages[:index], SystemMessage(content=block_text), *messages[index:],
-            ]
-    insertion = 0
-    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
-        insertion += 1
-    return [*messages[:insertion], SystemMessage(content=block_text), *messages[insertion:]]
+    return _insert_system_block(
+        messages, block_text, _first_compaction_summary_index(messages),
+    )
 
 
 def _should_inject_progress(events: list[SessionEvent]) -> bool:
@@ -346,19 +365,9 @@ def _inject_progress_block(messages: list[AnyMessage], progress_text: str) -> li
     压缩摘要之前；无摘要时开头连续 SystemMessage 之后）。只依赖 SystemMessage
     分布，不会插进 AI(tool_calls)/ToolResult 配对中间。调用顺序在
     `_inject_plan_block` 之后 ⇒ 最终顺序 = 清单 → 进度核对 → 摘要。"""
-    for index, message in enumerate(messages):
-        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
-            return [
-                *messages[:index], SystemMessage(content=progress_text),
-                *messages[index:],
-            ]
-    insertion = 0
-    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
-        insertion += 1
-    return [
-        *messages[:insertion], SystemMessage(content=progress_text),
-        *messages[insertion:],
-    ]
+    return _insert_system_block(
+        messages, progress_text, _first_compaction_summary_index(messages),
+    )
 #: #639 阶段 B：3a 预检拒绝的诊断分类（与 `compactor._SUMMARY_ERROR_CLASSES` 里的同名
 #: 词条一致；`attempt=0` 标记非摘要尝试）。thrashing guard 只认这一类。
 _PREFLIGHT_REJECTION_ERROR_CLASS = "preflight_request_exceeds_hard_limit"
@@ -444,15 +453,9 @@ def _inject_plan_block(messages: list[AnyMessage], plan_text: str) -> list[AnyMe
     尚无摘要时插在开头连续 SystemMessage 之后（同一系统块区域）。两种落点都只
     依赖 SystemMessage 分布，不会插进 AI(tool_calls)/ToolResult 配对中间。
     """
-    for index, message in enumerate(messages):
-        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
-            return [
-                *messages[:index], SystemMessage(content=plan_text), *messages[index:],
-            ]
-    insertion = 0
-    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
-        insertion += 1
-    return [*messages[:insertion], SystemMessage(content=plan_text), *messages[insertion:]]
+    return _insert_system_block(
+        messages, plan_text, _first_compaction_summary_index(messages),
+    )
 
 
 def _render_modified_paths_block(paths: list[str]) -> str:
@@ -475,19 +478,13 @@ def _inject_modified_paths(
     该兜底不可达——锚块要么由本次 build 的 `_inject_plan_block` 刚放置，要么
     在其后的同一注入序列里。
     """
-    for index, message in enumerate(messages):
-        if (isinstance(message, SystemMessage)
-                and message.content.startswith(_PLAN_BLOCK_HEADING)):
-            return [
-                *messages[:index + 1], SystemMessage(content=paths_text),
-                *messages[index + 1:],
-            ]
-    insertion = 0
-    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
-        insertion += 1
-    return [
-        *messages[:insertion], SystemMessage(content=paths_text), *messages[insertion:],
-    ]
+    anchor = next(
+        (index + 1 for index, message in enumerate(messages)
+         if isinstance(message, SystemMessage)
+         and message.content.startswith(_PLAN_BLOCK_HEADING)),
+        None,
+    )
+    return _insert_system_block(messages, paths_text, anchor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1852,10 +1849,12 @@ class ContextBuilder:
             "modified_paths": self._last_modified_paths_tokens,
             "pressure_warning": self._last_pressure_warning_tokens,
             "progress": self._last_progress_tokens,
+            "plan_mode": self._last_plan_mode_tokens,
         }
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
         # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
-        # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
+        # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）+ 进度核对块
+        # （W-06 #350）+ PLAN 档指令块（#1356 方案 1）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
         other = sum(other_breakdown.values())

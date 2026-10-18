@@ -141,6 +141,51 @@ test('#1356 AC9：拒绝 → decision=reject，反馈随裁决发出', async ({ 
   });
 });
 
+/** 计划卡 + 一条真实 `task/plan_updated` 同时在场的帧剧本（AC11 的"同屏"面）。 */
+const PLAN_ITEMS = [
+  { id: 'p1', content: '改 a.py', activeForm: '改 a.py', status: 'in_progress', source: 'agent' },
+  { id: 'p2', content: '跑测试', activeForm: '跑测试', status: 'pending', source: 'agent' },
+];
+
+test('#1356 AC11：计划卡与 PlanList 同屏互不干扰（批准后清单不变）', async ({ page }) => {
+  const frames = planPausedFrames();
+  // 在 `user/input-requested` 之前插一条清单帧：两者都由**独立**投影驱动，
+  // 同屏是正常状态，不是互斥关系（submit_plan 刻意不发 `task/plan_updated`）。
+  frames.splice(3, 0, {
+    type: 'task/plan_updated', data: { items: PLAN_ITEMS },
+    seq: 3.5, session_id: SID, run_id: RUN, time: T,
+  });
+  const history: FrameSpec[] = [...frames];
+  await routeApi(page, {
+    sessions: [sessionRow(SID)],
+    events: history,
+    onWs: () => ({ events: history, hasActiveRun: false }),
+  });
+  await page.route(new RegExp(`/api/sessions/${SID}/resume$`), async (route: Route) => {
+    const resumeFrames: FrameSpec[] = [
+      { type: 'run/resumed', data: { resume_basis: 'user_input' }, seq: 6, session_id: SID, run_id: RUN, time: T },
+      { type: 'run/completed', data: {}, seq: 7, session_id: SID, run_id: RUN, time: T },
+    ];
+    history.push(...resumeFrames);
+    await fulfillSse(route, resumeFrames);
+  });
+
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.plan-approval-card')).toBeVisible();
+  // 同屏：清单与计划卡同时在场，清单内容与帧里的一致（审批卡没有"吃掉"清单）。
+  const list = page.locator('.plan-list');
+  await expect(list).toBeVisible();
+  await expect(list).toContainText('2 项');
+  const itemsBefore = await page.locator('.plan-list-item').allInnerTexts();
+
+  await page.locator('.plan-approval-approve').click();
+  await expect(page.locator('.plan-approval-card')).toHaveCount(0);
+  // 批准不产生 `task/plan_updated`（`submit_plan` 与 `update_plan` 正交）⇒ 清单原样。
+  await expect(page.locator('.plan-list')).toBeVisible();
+  expect(await page.locator('.plan-list-item').allInnerTexts()).toEqual(itemsBefore);
+});
+
 test('#1356 AC11：计划审批锁住 composer，且不污染进度清单', async ({ page }) => {
   await openPlanCard(page);
 

@@ -18,6 +18,8 @@ import json
 
 from langchain_core.messages import AIMessage
 
+from agent_harness.session.event import TASK_PLAN_UPDATED
+from agent_harness.session.plan import derive_plan
 from tests.web.test_budget_local_fuse_api import _web
 from tests.web.test_constraint_resolution_api import _ModelProbe
 
@@ -110,7 +112,14 @@ def _tool_result(events: list[dict], call_id: str) -> dict:
 
 
 def test_approve_switches_to_normal_before_the_resumed_run(tmp_path):
-    """AC6：mode(normal) 的 seq 严格早于恢复 run 的任何事件，写工具随即放行。"""
+    """AC6：mode(normal) 的 seq 严格早于恢复 run 的任何事件，写工具随即放行。
+
+    AC6 原文提到"用 monkeypatch 放大窗口"（仿 #1193 范式）。本实现**不需要**：
+    最终预算检查与两个 append（`mode(normal)` + 答复 `user/message`）之间没有任何
+    await，恢复 run 的全部事件又都在 `_commit` 返回之后才产生——窗口在结构上不存在，
+    没有可以放大到可观测的东西。事后 seq 断言（下面 `normal_seq < run_resumed_seq`
+    与"恢复 run 事件全部 > normal_seq"）已完整钉死 AC6 语义。
+    """
     _app, client = _web_run(tmp_path)
     probe = _probe(resumed=[_write_call(), AIMessage(content="done")])
 
@@ -226,6 +235,94 @@ def test_reject_keeps_plan_mode(tmp_path):
     )
     assert feedback in resumed_messages
     assert "用户拒绝了该计划" in resumed_messages
+
+
+def test_new_message_while_plan_approval_pending_says_plan_not_question(tmp_path):
+    """#1356 审查 P2-2：待审批计划时发新消息 → 409 文案说「计划/裁决」。
+
+    同一时刻前端 composer 的锁定条写的是「请先裁决当前计划」，后端若沿用通用
+    提问的中性句，用户会看到同一状态的两个名字。整句相等断言（弱断言钉不住
+    动作子句），并复核零副作用。
+    """
+    _app, client = _web_run(tmp_path)
+    probe = _probe(resumed=[AIMessage(content="ok")])
+
+    with probe:
+        started = _start(client)
+        assert started.status_code == 200, started.text
+        session_id = _session_id(started)
+        _request, pause = _pause(client, session_id)
+        del pause
+        before = _events(client, session_id)
+
+        blocked = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "先做别的。"},
+        )
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        "当前有待裁决的计划；请先裁决该计划，再发送新消息"
+    )
+    assert _events(client, session_id) == before
+
+
+def test_plan_approval_and_update_plan_are_orthogonal(tmp_path):
+    """AC11：批准后再多次 `update_plan`——两类事件并存且互不触发。
+
+    `submit_plan` 落 `user/input-requested(kind=plan_approval)`，`update_plan` 落
+    `task/plan_updated`；`ConversationState.plan` 只由后者驱动。这条钉的是**事件流
+    层面**的正交性：审批请求不因为清单更新而变化（不新增、不消失），清单投影也
+    只读 `task/plan_updated`。
+    """
+    _app, client = _web_run(tmp_path)
+    first_items = [
+        {"id": "1", "content": "改 a.py", "activeForm": "改 a.py",
+         "status": "in_progress", "source": "agent"},
+    ]
+    second_items = [
+        {"id": "1", "content": "改 a.py", "activeForm": "改 a.py",
+         "status": "completed", "source": "agent"},
+        {"id": "2", "content": "跑测试", "activeForm": "跑测试",
+         "status": "in_progress", "source": "agent"},
+    ]
+    probe = _probe(resumed=[
+        AIMessage(content="", tool_calls=[{
+            "id": "plan-upd-1", "name": "update_plan", "args": {"items": first_items},
+        }]),
+        AIMessage(content="", tool_calls=[{
+            "id": "plan-upd-2", "name": "update_plan", "args": {"items": second_items},
+        }]),
+        AIMessage(content="done"),
+    ])
+
+    with probe:
+        started = _start(client)
+        assert started.status_code == 200, started.text
+        session_id = _session_id(started)
+        request, pause = _pause(client, session_id)
+
+        resumed = _resume_for(
+            client, session_id, pause, request, {"decision": "approve"},
+        )
+        assert resumed.status_code == 200, resumed.text
+
+    events = _events(client, session_id)
+    approvals = [
+        e for e in events
+        if e["type"] == "user/input-requested"
+        and e["data"].get("kind") == "plan_approval"
+    ]
+    assert len(approvals) == 1, "清单更新不得新增/抹掉审批请求"
+    assert approvals[0]["data"]["request_id"] == request["data"]["request_id"]
+
+    plan_updates = [e for e in events if e["type"] == TASK_PLAN_UPDATED]
+    assert len(plan_updates) == 2
+    assert [e["data"]["items"] for e in plan_updates] == [first_items, second_items]
+    # 投影只由 `task/plan_updated` 驱动：last-wins = 第二次整表。
+    plan = derive_plan(_app.state.agent.store.read_events(session_id))
+    assert [item.id for item in plan.items] == ["1", "2"]
+    assert plan.items[0].status == "completed"
 
 
 def test_misspelled_decision_field_is_422(tmp_path):

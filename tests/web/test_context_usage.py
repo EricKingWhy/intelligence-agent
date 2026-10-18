@@ -599,7 +599,7 @@ async def test_1095_compacted_session_summary_attributed_to_messages_not_other(t
     assert sum(detail.values()) == snap["other"]
     assert set(detail) == {"provider_injected", "runtime_context", "plan_anchor",
                            "protected_facts", "modified_paths",
-                           "pressure_warning", "progress"}
+                           "pressure_warning", "progress", "plan_mode"}
 
 
 # ── T5：端点形状（HTTP）───────────────────────────────────────────────

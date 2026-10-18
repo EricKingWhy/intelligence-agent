@@ -92,8 +92,11 @@ def test_plan_markdown_at_the_limit_is_accepted():
 
 
 def test_plan_markdown_over_the_limit_is_rejected():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as excinfo:
         SubmitPlanArgs(**_args(markdown="x" * 100_001))
+    # 审查 P4-2：文案必须带下一步指引（票面要求"缩短正文或拆分计划"），
+    # 不是 pydantic 的默认 "String should have at most ... characters"。
+    assert "缩短正文" in str(excinfo.value)
 
 
 def test_empty_plan_markdown_is_rejected():
@@ -161,7 +164,7 @@ async def test_normal_mode_fails_and_points_at_update_plan(registry, sandbox, st
     assert "update_plan" in execution.result.message
     # 整单拒绝：无事件、无 artifact。
     assert not execution.result.pending_events
-    assert store._artifacts == {}
+    assert store.count() == 0
 
 
 # ── AC5 / AC8：暂停载荷 + artifact 往返 ────────────────────────────────
