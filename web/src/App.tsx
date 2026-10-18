@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { KeyRound, Gavel, RotateCcw, X } from 'lucide-react';
+import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { useDelegations } from './hooks/useDelegations';
@@ -35,7 +35,6 @@ import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './co
 import { PausedPanel } from './components/PausedPanel';
 import { ContextFullDialog } from './components/ContextFullDialog';
 import { StuckPausedPanel } from './components/StuckPausedPanel';
-import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
@@ -77,7 +76,6 @@ import {
   type CatalogEntry,
   type ConstraintScope,
   type ModelCatalogEntry,
-  type PendingDecision,
   type SandboxBackendEntry,
   type StartSessionPayload,
 } from './lib/api';
@@ -145,7 +143,6 @@ export default function App() {
     setArchived,
     recover,
     resumePausedRun,
-    submitDecisions,
     refreshSessions,
     changeModel,
     changePermission,
@@ -1359,20 +1356,15 @@ export default function App() {
   // #1304：Agent 看板浮层（顶栏 看板 按钮入口）。数据源由 KanbanPanel 打开时自取
   // （`GET /api/sessions`），App 只持有开合状态——不在这里缓存第二份会话列表。
   const [kanbanOpen, setKanbanOpen] = useState(false);
-  /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
-   *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
-  const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
-  // #357 W-13：裁决面板的可见性——由后端待裁决清单驱动（不变量 #22）。两个同源读面：
-  // 带 `pending_decisions` 的 409（#596），以及打开会话时主动拉的
-  // `GET /api/sessions/{id}/recovery`（#1030 缺陷②）。用户 Esc/关闭只收起**当前这一份**
-  // 清单（按引用判等），新的清单会带来新数组而重新弹出。
+  // #1327：待裁决清单仍由后端驱动（不变量 #22），但**不再有用户裁决入口**——
+  // 未结清的行由后端按操作类型自动裁决（只读 + replay_safe ⇒ 重跑，其余 ⇒ 结清
+  // 不重跑），前端只把它当作"这个会话还有欠账"的如实呈现（徽标 / 横幅）。
   const pendingDecisions = recoverState.pendingDecisions;
   /** 有待裁决 = 有一份非空清单。`null`（未知）与 `[]`（后端说没有）都不算。
    *  注意：重读失败时这份清单是**上一个已知值**（可能 stale），不是"后端此刻这么说"
    *  ——见 `useSession.ts` 的 recover 200 分支（`prev.pendingDecisions`）。界面上宁可
-   *  多报"仍被封"，也不谎报"没事"（PRODUCT 原则 3；本票 AC1 要消灭的就是谎报方向）。 */
+   *  多报"仍被封"，也不谎报"没事"（PRODUCT 原则 3）。 */
   const hasPendingDecisions = pendingDecisions !== null && pendingDecisions.length > 0;
-  const showDecisionPanel = hasPendingDecisions && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1764,44 +1756,20 @@ export default function App() {
               })}
             </div>
           )}
-          {/* #357 W-13：UNKNOWN 裁决面板（修订 A §9.4）——由后端 409 的
-              `pending_decisions` 驱动，提交走 useSession.submitDecisions（同一 #547
-              合同）。全部由后端载荷构成，App 不维护第二套裁决真相（不变量 #22）。
-              放在 canRecover 门**外**：裁决在途时入口仍应可见。 */}
-          {showDecisionPanel && pendingDecisions && (
-            <RecoveryDecisionPanel
-              key={pendingDecisions.map((d) => d.tool_call_id).join('|')}
-              decisions={pendingDecisions}
-              submitting={recoverState.status === 'pending'}
-              message={recoverState.message}
-              onSubmit={(payload) => {
-                if (selectedId) void submitDecisions(selectedId, payload);
-              }}
-              onClose={() => setDismissedDecisions(pendingDecisions)}
-            />
-          )}
-          {/* #1030（缺陷②/③，AC2/AC3）：待裁决横幅——**主动**出现，两层文案。
-              挂在与 canRecover 无关的位置：裁决与「恢复会话」是两件事，前者不需要
-              用户先点后者、也不需要先撞一次 409。清单来自后端只读端点（#22）。
-
-              第一层人话（adjudicationHeadline）+ 一个真正的动作（去裁决）；
-              协议原文（tool_call_id / POST /recover / verdict 枚举）只进 <details>
-              折叠层——这是 Kubernetes reason/message 双层的 ADAPT：默认给人话，
-              要排查的人展开仍有原文，两者都不丢（AC2 要求"只在折叠层出现"）。
-              「去裁决」与面板自身同为展开入口：用户关掉面板后仍能重新打开
-              （dismissedDecisions 只收起当前这一份，横幅不会跟着消失）。 */}
-          {hasPendingDecisions && pendingDecisions && !showDecisionPanel && (
+          {/* #1327：待裁决横幅从"裁决入口"降级为**被动通知**（`role="status"`，
+              无需交互）——`#1030` 时它是面板的再入口，面板已删，它只如实陈述事实。
+              清单来自后端只读端点（#22），混合形态被拒的 409 载荷里的
+              `pending_decisions` 同源（同一 `_reconcile_pending`），横幅照单呈现；
+              文案逐字来自 `adjudicationHeadline`；
+              协议原文（tool_call_id / POST /recover / verdict 枚举）仍进折叠层，
+              要排查的人展开就有（Kubernetes reason/message 双层的 ADAPT 保留）。
+              横幅不挂"去裁决"按钮：后端在下次恢复时按操作类型自动结清，用户没有
+              需要点的事（成熟产品无一让用户裁决 UNKNOWN，`#1327` 三方调研）。 */}
+          {hasPendingDecisions && pendingDecisions && (
             <div className="adjudication-banner" role="status" aria-live="polite">
               <span className="adjudication-headline">
                 {adjudicationHeadline(pendingDecisions.length)}
               </span>
-              <button
-                className="adjudication-open-btn"
-                onClick={() => setDismissedDecisions(null)}
-              >
-                <Gavel size={14} />
-                去裁决
-              </button>
               <AdjudicationTechDetail message={recoverState.message} />
             </div>
           )}

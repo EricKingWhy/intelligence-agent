@@ -1,4 +1,8 @@
-/** #1029 端到端：待裁决会话发送被拒后，composer 文本必须还在，且裁决面板被唤起。
+/** #1029 端到端：发送失败后 composer 文本的处理 + 待裁决被动通知。
+ *
+ *  `#1327` 起：发送不再 409（未结清的行由后端按操作类型自动裁决，消息被受理），
+ *  `RecoveryDecisionPanel` 已删。本文件原先的"待裁决 409"三条用例（文本保留 +
+ *  面板唤起 / 面板落定 / 读面 5xx 保清单）随旧 409 流一并删除或重写。
  *
  *  为什么必须是 e2e（不是只有单测）：本票的**接缝在 App 层**——`handleSubmit` 把
  *  `sendMessage` 的 `Promise<boolean>` 透传给 `Composer`，`Composer` 据此决定清不清空。
@@ -7,17 +11,12 @@
  *  这正是修复前的形态），两边单测**都还是绿的**。所以这条断言只能由真实浏览器跑。
  *
  *  锁三件事：
- *  ① 待裁决 409 后，输入框里那段文本还在（数据不丢）；
- *  ② 横幅是**人话**（不透传后端协议原文的 `tool_call_id` / `POST /recover` 词表）；
- *  ③ 裁决面板被这条发送路径唤起（此前只由恢复路径 409 触发，发送路径永不可达）。
+ *  ① 受理成功（JSON 收据）后 composer 才清空（对照组）；
+ *  ② #1148：窗外迟到的失败 ⇒ 先按已受理清空，迟到失败后原文回到输入框；
+ *  ③ #1151（新口径）：权威读面 5xx 不得抹掉已知的待裁决横幅（不变量 #22）。
  *
  *  夹具形状与 `recovery-w13.spec.ts` 同源（`pending_decisions` 逐字段对齐后端
- *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。
- *
- *  ⚠ 本文件是 **5 条** `test()`（前三条：一并断言上面三件事 / 锁「裁决能落定」/
- *  对照组「受理成功才清空」；第四条是 #1148 的窗外迟到失败回填；第五条是 #1151 加的
- *  「读失败 ≠ 没事」）；Playwright 每例跑两个视口 ⇒ 报告里是 **10 个 run**。别把
- *  「10」读成 10 条用例（独立审查两次记录过这处口径混淆）。 */
+ *  `domain_errors` / `session/service.py::recover` 的 RecoveryConflict）。 */
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';
@@ -108,83 +107,6 @@ async function openCrashed(page: Page, mock: ApiMock): Promise<void> {
   await expect(page.locator('.recover-btn')).toBeVisible();
 }
 
-test('待裁决 409：composer 文本仍在 + 人话横幅 + 裁决面板被唤起', async ({ page }) => {
-  // #1151：权威读面与这次 409 说同一件事（见 pendingReadFace 注释）。
-  const state = scenario();
-  await openCrashed(page, {
-    sessions: [ROW],
-    events: crashedEvents(),
-    onRecoveryGet: pendingReadFace(state),
-    onMessagesPost: async (route) => {
-      state.conflicted = true;
-      await route.fulfill({
-        status: 409,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
-      });
-    },
-  });
-
-  const composer = page.getByLabel('Agent 任务');
-  await composer.fill(DRAFT);
-  await page.getByLabel('发送').click();
-
-  // ① 数据不丢：被拒后文本原样留在输入框（修复前：提交瞬间同步清空 ⇒ 此处为空）
-  await expect(composer).toHaveValue(DRAFT);
-  // ③ 裁决面板由**发送路径**唤起（修复前：发送路径从不写 recoverState.pendingDecisions）
-  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
-  // ② 横幅是人话，不透传协议原文（用户照 `tool_call_id` / `POST /recover` 行动不了）
-  const banner = page.locator('.app-error');
-  await expect(banner).toContainText('待人工裁决');
-  await expect(banner).not.toContainText('tool_call_id');
-  await expect(banner).not.toContainText('POST /api/sessions');
-});
-
-test('待裁决 409 后提交裁决：面板能落定（不永久停在「提交中」）', async ({ page }) => {
-  /* P1 的端到端盲区（独立审查记录）：此前只验到「面板渲染出来」，没验「能提交」。
-     修复前 mode 留在 `live` ⇒ `recover` 的落地守护 `shouldApplyRecoverResult`（只认
-     `viewing`）把 200 结果整段丢弃 ⇒ 面板永久「提交中…」、按钮禁用、用户点不动。 */
-  const state = scenario();
-  await openCrashed(page, {
-    sessions: [ROW],
-    events: crashedEvents(),
-    onRecoveryGet: pendingReadFace(state),
-    onMessagesPost: async (route) => {
-      state.conflicted = true;
-      await route.fulfill({
-        status: 409,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
-      });
-    },
-    // 裁决 200 = 后端返回**已结清**的事件流（run 有终态、无悬空 tool_call）。
-    onRecoverPost: async (route) => {
-      state.adjudicated = true;
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          ...crashedEvents(),
-          { type: 'tool/result', data: { tool_call_id: 'call-1', content: 'ok' }, seq: 6, session_id: SID, step_id: 1, run_id: RUN, time: T },
-          { type: 'run/completed', data: {}, seq: 7, session_id: SID, run_id: RUN, time: T },
-        ]),
-      });
-    },
-  });
-
-  const composer = page.getByLabel('Agent 任务');
-  await composer.fill(DRAFT);
-  await page.getByLabel('发送').click();
-  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
-
-  await page.locator('.recovery-submit-btn').click();
-
-  // 裁决落定：面板退场（修复前 `submitting` 恒真 ⇒ 面板挂着、按钮永远禁用）
-  await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
-  // 结清后会话不再可恢复 ⇒ 恢复入口随之消失
-  await expect(page.locator('.recover-btn')).toHaveCount(0);
-});
-
 test('对照：受理成功（JSON 收据）后 composer 才清空', async ({ page }) => {
   await openCrashed(page, {
     sessions: [ROW],
@@ -244,53 +166,52 @@ test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文�
   await expect(banner).not.toContainText('tool_call_id');
 });
 
-test('#1151 读失败 ≠ 没事：权威读面 5xx 不得抹掉已知的待裁决清单', async ({ page }) => {
-  /* 本票（#1151）裁决的第 2 条：夹具改成有状态之后，「读失败 ≠ 没事」这条意图仍必须
-     **可测**。这是本类缺陷的真正防线（不变量 #22 在 UI 侧的表达）：读不到是「未知」，
-     与后端明确说「没有待裁决」是两件事。
+test('#1151（新口径）读失败 ≠ 没事：重读 5xx 不得抹掉已知的待裁决横幅', async ({ page }) => {
+  /* 本票（#1151）裁决的第 2 条在新呈现下的形态：`#1327` 起裁决面板已删，
+     "已知的待裁决清单"以后端驱动的被动通知横幅呈现。不变量 #22 在 UI 侧的
+     表达不变：读不到是「未知」，与后端明确说「没有待裁决」是两件事。
 
-     「未知」与「空」在屏幕上的差别（同一会话、同一 409 载荷）：
-       - 读面答**空清单**（后端说没事）      ⇒ 清单被覆盖 ⇒ 面板**不在场**。
-         这就是本文件修前的红形状，由本文件第 1 条用例反向覆盖（它要求面板在场）。
-       - 读面 **5xx**（读不到 ⇒ `fetchPendingDecisions` 回 `null`，`useSession.ts:692-701`）
-                                            ⇒ 409 点亮的清单**保留** ⇒ 面板**在场**（本节）。
-     本臂守的就是后者：读面坏了，界面**保留**已知事实，既不抹掉、也不谎报"已结清"。
-
-     ⚠ 见证不可少：只断言"面板在场"挡不住「主动读面 effect 被短路/删掉」这类回归
-     （那时面板仍因 409 而点亮，用例照样绿，而它宣称守的读面已经没人读了）⇒ 末条断言
-     把「读面真的被请求过」钉住。 */
+     触发重读的路径是"恢复会话" 200 后的 `refreshPendingDecisions`
+    （`useSession.ts`：200 只证明请求被接受，清单一律重读后端事实；重读失败
+     时保留上一个已知值，不回落空清单——正是本条要锁的）。
+     注意不用"发送"触发：发送成功（ack）会把恢复态整体置回 IDLE（陈旧态退场），
+     那是另一条正确的语义；也不用"换会话"触发：换会话照旧整表重置。 */
+  let flipped = false;
   let recoveryReads = 0;
   await openCrashed(page, {
     sessions: [ROW],
     events: crashedEvents(),
-    // 读面整体不可用（500）：前端必须保持"未知"，绝不回落空清单。
     onRecoveryGet: async (route) => {
       recoveryReads += 1;
       await route.fulfill({
-        status: 500,
+        status: flipped ? 500 : 200,
         contentType: 'application/json',
-        body: JSON.stringify({ detail: 'boom' }),
+        body: JSON.stringify(flipped ? { detail: 'boom' } : { pending_decisions: PENDING }),
       });
     },
-    onMessagesPost: async (route) => {
+    // 恢复 200 但没修好任何东西（幂等 no-op）：只为触发重读，不为修好。
+    onRecoverPost: async (route) => {
       await route.fulfill({
-        status: 409,
+        status: 200,
+        body: JSON.stringify(crashedEvents()),
         contentType: 'application/json',
-        body: JSON.stringify({ detail: { message: PROTOCOL_MESSAGE, pending_decisions: PENDING } }),
       });
     },
   });
 
-  const composer = page.getByLabel('Agent 任务');
-  await composer.fill(DRAFT);
-  await page.getByLabel('发送').click();
+  // ① 打开会话：被动通知横幅在场（role=status），无裁决面板。
+  const banner = page.locator('.adjudication-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toHaveAttribute('role', 'status');
+  await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
+  const readsBefore = recoveryReads;
 
-  // ① 数据不丢这条契约不因读面故障而变。
-  await expect(composer).toHaveValue(DRAFT);
-  // ② 读面坏了 ≠ 没事：409 已点亮的清单必须仍在（面板在场，不是空态）。
-  await expect(page.locator('.recovery-decision-panel')).toBeVisible();
-  // ③ 也不得反向谎报"已结清"——横幅仍如实说明需要人工裁决。
-  await expect(page.locator('.app-error')).toContainText('待人工裁决');
-  // ④ 见证：权威读面**真的被读过**。缺了它，「读面被短路」这类回归仍会让上面两条全绿。
-  expect(recoveryReads).toBeGreaterThan(0);
+  // ② 翻转读面为 500，再点"恢复会话"触发重读。
+  flipped = true;
+  await page.locator('.recover-btn').click();
+
+  // ③ 重读失败 ≠ 没事：横幅保留上一个已知值，不被抹掉。
+  await expect.poll(() => recoveryReads).toBeGreaterThan(readsBefore);
+  await expect(banner).toBeVisible();
+  await expect(banner.locator('.adjudication-headline')).toContainText('自动处理');
 });

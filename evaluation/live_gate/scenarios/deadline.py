@@ -18,8 +18,9 @@
    落 `run/resumed`（同一 `run_id`、版本 +1、快照里是新时刻）并**真的继续干活**
    （信息屏障保证剩余链步只可能发生在恢复之后）。
 4. **未证副作用不会被当成"没事"**：同一台机器上，一个真实的 MUTATING 超时（生产
-   `BashTool` + 生产 Ledger）留下 `UNKNOWN` + "副作用未证"标记 ⇒ 恢复入口拒绝
-   （`RecoveryConflict`）、投影报 `reconcile.tool_call_ids`（`11 §6.1` 的真键名）、
+   `BashTool` + 生产 Ledger）留下 `UNKNOWN` + "副作用未证"标记 ⇒ 恢复入口按操作类型
+   **自动裁决**（`#1327`：MUTATING ⇒ 自动 ABANDON ⇒ 账本落 `CANCELLED`，合成结果如实
+   写"崩溃时结果未知"不伪造成功/失败）、投影的 `reconcile.tool_call_ids` 结清为空、
    **没有重跑**（副作用计数不变）。这一条不需要模型配合，因此**每次尝试都必然出现**。
 
 ## 第二条腿的收尾形状由模型当下的选择决定（两种都安全）
@@ -628,7 +629,9 @@ class RunDeadlineBoundaryScenario:
         }
         sentinel_after_calls = _sentinel_count(ctx.sandbox)
 
-        # 生产恢复入口：欠对账 ⇒ 拒绝（没有 ReconcileCallback 时不允许"猜一个结果"）。
+        # 生产恢复入口：欠对账 ⇒ 按操作类型自动裁决（`#1327`：无 decisions 时注入
+        # `AutoReconcileCallback`，bash 是 MUTATING ⇒ ABANDON ⇒ 账本落 CANCELLED，
+        # 不再是"没有 ReconcileCallback 时安全拒绝"）。
         refusal: BaseException | None = None
         try:
             await service.recover(session_id)
