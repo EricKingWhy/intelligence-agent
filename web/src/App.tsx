@@ -1758,7 +1758,9 @@ export default function App() {
           )}
           {/* #1327：待裁决横幅从"裁决入口"降级为**被动通知**（`role="status"`，
               无需交互）——`#1030` 时它是面板的再入口，面板已删，它只如实陈述事实。
-              清单来自后端只读端点（#22），文案逐字来自 `adjudicationHeadline`；
+              清单来自后端只读端点（#22），混合形态被拒的 409 载荷里的
+              `pending_decisions` 同源（同一 `_reconcile_pending`），横幅照单呈现；
+              文案逐字来自 `adjudicationHeadline`；
               协议原文（tool_call_id / POST /recover / verdict 枚举）仍进折叠层，
               要排查的人展开就有（Kubernetes reason/message 双层的 ADAPT 保留）。
               横幅不挂"去裁决"按钮：后端在下次恢复时按操作类型自动结清，用户没有

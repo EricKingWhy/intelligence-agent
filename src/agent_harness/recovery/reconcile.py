@@ -88,6 +88,10 @@ class ReconcileCallback(ABC):
     恢复，绝不伪造结果或盲目重跑。
     """
 
+    # 自动裁决回调覆写为 True；``_commit_reconcile`` 据此选审计文案。
+    # 禁止用 isinstance 判来源——装饰器/组合会误记（`#1327` P4）。
+    is_automatic: bool = False
+
     @abstractmethod
     async def resolve(
         self, operation: Operation, hint: ReconcileHint

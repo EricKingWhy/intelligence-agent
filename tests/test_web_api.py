@@ -829,7 +829,7 @@ async def _seed_reconcile_window(
     ``tool_names``（#357 W-13 R12-R14）：逐 call 指定账行的 tool_name（默认全
     bash），供展示字段按工具元数据（replay_safe / reconcile_hint）分流断言。
     """
-    from agent_harness.storage import Operation, OperationState
+    from agent_harness.storage import Operation
 
     names = tool_names or ["bash"] * len(call_ids)
     ledger = state.stores.operation_ledger
@@ -887,8 +887,6 @@ def test_recover_with_decision_settles_operation_and_resumes(client):
     """主链路：CONFIRM_SUCCESS → 行进 SUCCEEDED + operation/reconciled 落盘，
     幂等二次恢复，resume 闸门重开（无未结清账）。"""
     import asyncio
-
-    from agent_harness.storage import OperationState
 
     state = client.app.state.agent
     session = asyncio.run(_seed_reconcile_window(state, ["call-ok"]))
@@ -950,6 +948,12 @@ def test_recover_decision_matrix(client, verdict, expected_state, needle):
             if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-m"
         ]
         assert results and needle in results[0]["data"]["content"]
+        # 显式 decisions 走用户路径：不得出现自动裁决文案（`#1327` 文案诚实性）。
+        # CONFIRM_SUCCESS / CONFIRM_FAILURE 本就没有 auto 分支，逐字断言会误伤；
+        # "用户已裁决"只属于 RETRY / ABANDON 两条共享分支。
+        assert "已按规则自动裁决" not in results[0]["data"]["content"]
+        if verdict in {"RETRY", "ABANDON"}:
+            assert "用户已裁决" in results[0]["data"]["content"]
 
 
 def test_recover_decisions_reject_malformed_requests(client):
@@ -992,8 +996,6 @@ def test_recover_partial_coverage_returns_409_with_pending_list(client):
     """只裁决一部分：409 + 清单仍列出全部待裁决行（开工前覆盖性预检，零写入）。"""
     import asyncio
 
-    from agent_harness.storage import OperationState
-
     state = client.app.state.agent
     session = asyncio.run(_seed_reconcile_window(state, ["call-a", "call-b"]))
 
@@ -1025,8 +1027,6 @@ def test_recover_with_defer_is_accepted_and_keeps_pending(client):
     "再次 POST /recover 撞 409"——无裁决的恢复会走自动裁决把行结清（这正是本票
     要的行为）。DEFER 的语义未变：它只落审计、不推进终态。
     """
-    from agent_harness.storage import OperationState
-
     state = client.app.state.agent
     session = asyncio.run(_seed_reconcile_window(state, ["call-def"]))
     base = f"/api/sessions/{session.session_id}/recover"
@@ -1214,6 +1214,9 @@ def test_recover_without_decisions_auto_adjudicates_read_only_operation(client):
         if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-ro"
     ]
     assert results and "重新发起" in results[0]["data"]["content"]
+    # 自动路径的审计文案必须诚实：无人在场，绝不写"用户已裁决"（`#1327`）。
+    assert "已按规则自动裁决" in results[0]["data"]["content"]
+    assert "用户已裁决" not in results[0]["data"]["content"]
 
     async def _row_state():
         op = await state.stores.operation_ledger.get(session.session_id, "call-ro")
@@ -1226,10 +1229,10 @@ def test_recover_without_decisions_auto_adjudicates_mutating_operation(client):
     """`#1327` AC-3：写操作自动收口为 CANCELLED（结清、不重跑）+ 一条被动通知。
 
     为什么是 ABANDON 而不是 CONFIRM_FAILURE：`ReconcileVerdict` 没有 FAILED 档，
-    而 `ABANDON → CANCELLED` 正是"记失败 + 不重跑"的落点；`CONFIRM_FAILURE` 会
-    断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量 #14 禁止替工具
-    断言它没生效）。合成的 tool/result 是给模型的**可忽略通知**，不是给用户的
-    选择题——这正是本票要消灭的形态。
+    而 `ABANDON → CANCELLED` 正是"记为未成功/结清（CANCELLED）、不重跑"的落点；
+    `CONFIRM_FAILURE` 会断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量
+    #14 禁止替工具断言它没生效）。合成的 tool/result 是给模型的**可忽略通知**，不是
+    给用户的选择题——这正是本票要消灭的形态。
     """
     state = client.app.state.agent
     session = asyncio.run(
@@ -1242,6 +1245,15 @@ def test_recover_without_decisions_auto_adjudicates_mutating_operation(client):
     events = resp.json()
     reconciled = [e for e in events if e["type"] == "operation/reconciled"]
     assert reconciled[0]["data"]["verdict"] == "ABANDON"
+
+    results = [
+        e for e in events
+        if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-w"
+    ]
+    # "一条可忽略通知"的证据：自动路径的文案必须自陈是规则裁决，不冒充用户裁决
+    # （`#1327` P2-2；同时覆盖 P3-5）。
+    assert results and "已按规则自动裁决" in results[0]["data"]["content"]
+    assert "用户已裁决" not in results[0]["data"]["content"]
 
     async def _row_state():
         op = await state.stores.operation_ledger.get(session.session_id, "call-w")
@@ -1312,6 +1324,7 @@ def test_recover_without_decisions_auto_adjudicates_every_declared_read_only_too
     }
     assert verdicts, "自动裁决必须为每个待裁决行落 operation/reconciled"
     assert set(verdicts.values()) == {"RETRY"}, verdicts
+    assert set(verdicts) == {f"call-{name}" for name in safe}, "漏结清一个工具也会红"
 
 
 def test_recover_partial_decisions_are_rejected_not_half_automated(client):

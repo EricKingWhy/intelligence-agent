@@ -92,6 +92,7 @@ local 的 `newline=""` 字节透传（CRLF 不被折叠）与 docker 的容器�
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -138,6 +139,8 @@ if TYPE_CHECKING:
 
     from agent_harness.sandbox import Sandbox
     from agent_harness.web.app import AppState
+
+logger = logging.getLogger(__name__)
 
 #: 列文件的条目上限。与 `host_dirs.MAX_ENTRIES` 同量级，但**各自独立**：那条路径列的是
 #: 宿主目录（一次点击换一层列举），这条列的是一个工作区里匹配 pattern 的全部文件——
@@ -311,7 +314,7 @@ async def _settle_transport_operation(
     `ToolExecutor` 的既有契约是"存储失败不属于 Tool failure ⇒ Ledger 保留 RUNNING，
     交 Recovery reconcile"（`tooling/executor.py` 收尾段注释）——那条对**进程崩溃**
     成立：进程没了，没人能判定副作用。但本函数的异常臂是**本进程当场拿到的确定性
-    失败**（HTTP 已把 503 / 异常回给客户端，`transport_ledger` 也已记终态），此时让
+    失败**（HTTP 随后把 503 / 异常回给客户端，`transport_ledger` 随后记终态），此时让
     `operations` 停在 RUNNING，等于对同一件事给出两个相反结论；而恢复链只读
     `operations`，于是把一次确定性失败永久报成"结果不确定"（`#1327` 的弹窗根因）。
 
@@ -433,14 +436,23 @@ async def _execute_git_request(
             artifact_ref=artifact_id,
         )
     except ArtifactOverflowUnavailable as error:
-        await _settle_transport_operation(
-            state, session_id, operation_id,
-            terminal=OperationState.FAILED,
-            note=(
-                "大输出暂时无法安全外置（artifact store 不可用），"
-                "本次调用没有产生可用结果。"
-            ),
-        )
+        try:
+            await _settle_transport_operation(
+                state, session_id, operation_id,
+                terminal=OperationState.FAILED,
+                note=(
+                    "大输出暂时无法安全外置（artifact store 不可用），"
+                    "本次调用没有产生可用结果。"
+                ),
+            )
+        except Exception:
+            # 收口失败只记日志：不能顶掉下面的 503，也不能跳过 transport 审计写。
+            logger.warning(
+                "settle transport operation failed (session=%s operation=%s)",
+                session_id,
+                operation_id,
+                exc_info=True,
+            )
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
             session_id=session_id,
@@ -482,11 +494,20 @@ async def _execute_git_request(
     except BaseException:
         if tracer is not None:
             tracer.run_failed("failed")
-        await _settle_transport_operation(
-            state, session_id, operation_id,
-            terminal=OperationState.FAILED,
-            note="web git 查询在收尾前异常退出，本次调用没有产生可用结果。",
-        )
+        try:
+            await _settle_transport_operation(
+                state, session_id, operation_id,
+                terminal=OperationState.FAILED,
+                note="web git 查询在收尾前异常退出，本次调用没有产生可用结果。",
+            )
+        except BaseException:
+            # 收口失败只记日志：不得顶掉原始异常，也不跳过下面的 transport 审计写。
+            logger.warning(
+                "settle transport operation failed (session=%s operation=%s)",
+                session_id,
+                operation_id,
+                exc_info=True,
+            )
         if not terminal_written:
             await state.transport_ledger.append(new_transport_entry(
                 request_id=request_id,

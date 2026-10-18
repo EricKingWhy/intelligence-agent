@@ -5624,7 +5624,8 @@ class SessionService:
                 "verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / CONFIRM_FAILURE / "
                 "RETRY / ABANDON / DEFER）；裁决前请先核查该调用的外部事实。"
                 "不带 decisions 调用则按操作类型自动裁决（只读 + replay_safe "
-                "⇒ 重跑，其余 ⇒ 记失败不重跑）——自动与显式裁决不混用",
+                "⇒ 重跑，其余 ⇒ 记为未成功/结清（CANCELLED），不重跑）——"
+                "自动与显式裁决不混用",
                 pending_decisions=pending,
             )
 

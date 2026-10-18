@@ -367,18 +367,25 @@ class DecisionsReconcileCallback(ReconcileCallback):
 class AutoReconcileCallback(ReconcileCallback):
     """按操作类型自动裁决（`#1327` P1）：不再把 UNKNOWN 摆成用户选择题。
 
-    判据（抄 DeepSeek Harness `packages/core/session/src/repair.ts:34` 的规则原文，
-    但由**代码**执行而不是交给模型——本仓的裁决事实必须可审计、可复现）：
+    判据前半句抄 DeepSeek Harness `packages/core/session/src/repair.ts:34` 的规则原文
+    （"retry only if read-only or idempotent"），但由**代码**执行而不是交给模型——
+    本仓的裁决事实必须可审计、可复现；"其余 ⇒ ABANDON" 是本仓自研的保守落点
+    （DSH 原文后半句是"verify external state or ask the user"；四家成熟产品均无
+    harness 侧逐工具对账后自动重跑，取证
+    `~/workspace/1327-coord/mature-evidence-q1q2.md` §Q2）：
 
         read-only 且声明 replay_safe  ⇒ RETRY   （只读幂等，重跑不改变世界）
         其余                          ⇒ ABANDON （结清账本，不重跑）
 
     为什么"其余"是 ABANDON 而不是 FAILED：`ReconcileVerdict` 没有 FAILED 这一档，
-    而 `ABANDON → OperationState.CANCELLED`（`_verdict_outcome`）正是"记失败 + 不
-    重跑"的落点——合成的 tool/result 是一条**可忽略的被动通知**，模型读到后自行决定
-    下一步（DSH 同款：把"不知道"如实交回，绝不伪造成功/失败）。刻意**不选**
-    CONFIRM_FAILURE：它断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量
-    #14 禁止替工具断言它没生效）。
+    而 `ABANDON → OperationState.CANCELLED`（`_verdict_outcome`）正是"记为未成功/
+    结清（CANCELLED）、不重跑"的落点——合成的 tool/result 是一条**可忽略的被动
+    通知**，模型读到后自行决定下一步（与 ZCode `discarded` 语义同构：把"不知道"
+    如实交回，绝不伪造成功/失败；DSH 实际保持 unknown 交模型、不落 CANCELLED）。
+    刻意**不选** CONFIRM_FAILURE：它断言"副作用已确认失败"，而这里的事实恰恰是
+    **未证**（不变量 #14 禁止替工具断言它没生效）。四家成熟产品均无 UNKNOWN→裸
+    FAILED 的落点，故 ABANDON→CANCELLED 为自研——抄的是"不伪造"的诚实性，不抄
+    终态映射。
 
     文档化限制（`#1327` Q2=A 用户裁决 2026-10-18）：票面 P1 的中间分支
     「可从服务端对账确认未生效 ⇒ RETRY」**本票不做**。四家成熟产品均无
@@ -393,10 +400,11 @@ class AutoReconcileCallback(ReconcileCallback):
         （ZCode："绝不能据此自动重放"）；
       - oh-my-pi 无对账、无标注、无分支。
     按工具语义做运行时外部状态确认、确认未生效后自动重跑，属自研范围
-    （四家均无对应物），留待后续票。
+    （四家均无对应物），留待后续票。(c) 触发条件：某成熟产品落地 harness 侧逐工具
+    外部状态探针，或本仓某工具提供可验证的"未生效"探针时，再开票。
 
     为什么只认 `replay_safe`：该属性已把"只读 + 幂等 + 无任何外部副作用（含远程）"
-    三条编码进去（`tooling/contract.py`），且 22 处逐工具 override 已存在——本类只
+    三条编码进去（`tooling/contract.py`），且 11 处逐工具 override 已存在——本类只
     换消费方（UI → 协调器），不新造第二套工具注册表（不变量 #22）。
 
     安全边界（为什么不违反不变量 #14）：RETRY **不是**协调器重执行原操作，而是
@@ -408,6 +416,8 @@ class AutoReconcileCallback(ReconcileCallback):
     来源自陈（`source_for`）恒为 None：没有人在场自陈，字段如实留空。
     """
 
+    is_automatic: bool = True
+
     def __init__(
         self, replay_safe: Callable[[str], Awaitable[Mapping[str, bool]]]
     ) -> None:
@@ -417,6 +427,10 @@ class AutoReconcileCallback(ReconcileCallback):
         self, operation: Operation, hint: ReconcileHint
     ) -> ReconcileVerdict:
         verdicts = await self._replay_safe(operation.session_id)
+        # 只认 replay_safe 即等价于"只读且声明 replay_safe"：该属性 True 的必要
+        # 条件已含 side_effect == READ_ONLY（tooling/contract.py），且
+        # tests/tooling/test_replay_safe.py 把"只读工具声明 True / MUTATING 工具
+        # 保持 False"钉死；未来若有 MUTATING 工具覆写 replay_safe=True 属契约违约。
         if verdicts.get(operation.tool_name, False):
             return ReconcileVerdict.RETRY
         return ReconcileVerdict.ABANDON
@@ -1048,11 +1062,14 @@ class RecoveryCoordinator:
         *,
         source: str | None = None,
     ) -> None:
-        """在重获恢复锁并通过 token 校验后提交人工裁决。"""
+        """在重获恢复锁并通过 token 校验后提交裁决（用户显式或自动）。"""
         # `auto` 决定 `_verdict_outcome` 的审计文案措辞：自动路径（
         # `AutoReconcileCallback`，无人在场）绝不能写"用户已裁决"
         # （`#1327` 修复轮——那是谎话）。用户显式裁决保留原措辞。
-        auto = isinstance(self._reconcile_callback, AutoReconcileCallback)
+        auto = (
+            self._reconcile_callback is not None
+            and self._reconcile_callback.is_automatic
+        )
         result, ledger_state = self._verdict_outcome(
             operation, verdict, auto=auto
         )
@@ -1269,7 +1286,7 @@ class RecoveryCoordinator:
             )
         # ABANDON 兜底：用户显式裁决保留"用户已裁决"措辞；自动路径
         # （`#1327`）写"已按规则自动裁决"——`#1327` Q1=A：写操作对不上账
-        # 终态保持 CANCELLED（不改 FAILED），语义是"记失败 + 不重跑"。
+        # 终态保持 CANCELLED（不改 FAILED）：语义是"记为未成功/结清"，不重跑。
         abandon_note = (
             "已按规则自动裁决放弃（非只读 / 不可安全重放的工具不重跑），"
             "原调用已终止，不再重跑。"
