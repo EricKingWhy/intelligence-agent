@@ -160,8 +160,9 @@ def test_endpoint_rows_carry_honest_progress_version_and_resume_failsafe(
     invalid_row = rows[sid_invalid]
     assert invalid_row["progress"]["status"] == "invalid_schema"
     assert invalid_row["resume_available"] is True
-    # 账行 UNKNOWN 的会话必须标 needs_manual_reconcile（不伪造已恢复）。
-    assert invalid_row["recovery"] == "needs_manual_reconcile"
+    # `#1327` 起 lifespan 扫描注入自动裁决：账行 tool_name 是 bash（MUTATING）
+    # ⇒ 扫描期自动 ABANDON → CANCELLED，已结清，不再标 needs_manual_reconcile。
+    assert invalid_row["recovery"] == "recovered"
 
 
 def test_valid_progress_version_is_read_from_file_header(app, tmp_path):

@@ -1,4 +1,4 @@
-/* #357 W-13 恢复 UI（裁决面板 / 恢复列表）。
+/* #357 W-13 恢复 UI（恢复列表）。
  *
  * 只用既有主题 token（`index.css` 的 :root 与 :root[data-theme='light'] 两组都
  * 已定义）——本文件不新增 token，因此无需双块同步（AGENTS.md §15）。文字一律
@@ -7,249 +7,22 @@
  * `color-mix(in srgb, var(--danger) 45%, var(--text-primary))`；语义色当装饰
  * （图标/描边/底）时仍引原 token（#1164 P2-3）。 */
 
-.recovery-decision-panel {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface-elevated);
-  padding: var(--space-md);
-  margin: var(--space-sm) 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
-.recovery-decision-head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-}
-
-.recovery-decision-icon {
-  color: var(--warning);
-  flex: none;
-  margin-top: 2px;
-}
-
-.recovery-decision-title {
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-  flex: 1;
-}
-
-.recovery-decision-close {
-  flex: none;
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 2px;
-  border-radius: var(--radius-xs);
-}
-
-.recovery-decision-close:hover {
-  color: var(--text-primary);
-  background: var(--surface-hover);
-}
-
-.recovery-cards {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
-.recovery-card {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-workspace);
-  padding: var(--space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.recovery-card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  flex-wrap: wrap;
-}
-
-.recovery-tool-name {
-  font-family: var(--font-mono);
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.recovery-card-state {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-
-.recovery-args,
-.recovery-probe {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-xs);
-  align-items: baseline;
-}
-
-.recovery-args-value {
-  color: var(--text-tertiary);
-}
-
-.recovery-probe-state {
-  font-weight: 600;
-}
-
-.recovery-probe-state--found {
-  color: var(--success);
-}
-
-.recovery-probe-state--missing {
-  color: var(--text-tertiary);
-}
-
-.recovery-probe-detail {
-  color: var(--text-secondary);
-}
-
-.recovery-options {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-.recovery-option {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-  cursor: pointer;
-  padding: var(--space-xs);
-  border-radius: var(--radius-xs);
-}
-
-.recovery-option:hover {
-  background: var(--surface-hover);
-}
-
-.recovery-option input[type='radio'] {
-  margin-top: 3px;
-  flex: none;
-  accent-color: var(--accent-strong);
-}
-
-.recovery-option-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.recovery-option-label {
-  font-weight: 600;
-}
-
-.recovery-option-help {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-
-.recovery-source {
-  border-top: 1px dashed var(--border-subtle);
-  padding-top: var(--space-sm);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.recovery-source-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-
-.recovery-source-choice,
-.recovery-source-custom {
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-  background: var(--surface-overlay);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 4px 8px;
-}
-
-.recovery-source-hint {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-}
-
-.recovery-decision-error {
-  margin: 0;
-  font-size: var(--text-sm);
-  /* #1208：语义色当正文色用——亮色下纯 --danger 压 --surface-elevated 仅 4.448 < 4.5，
-     混入 --text-primary 压深（同 #1136/#1171/#1175 的 ink-mix）。 */
-  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
-}
-
-.recovery-actions {
-  display: flex;
-  gap: var(--space-sm);
-  justify-content: flex-end;
-}
-
-.recovery-batch-btn,
-.recovery-submit-btn,
 .recovery-list-retry {
   font-size: var(--text-sm);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
   cursor: pointer;
   border: 1px solid var(--border-strong);
-}
-
-.recovery-batch-btn,
-.recovery-list-retry {
   background: transparent;
   color: var(--text-primary);
-}
-
-.recovery-batch-btn:hover:not(:disabled),
-.recovery-list-retry:hover {
-  background: var(--surface-hover);
-}
-
-.recovery-submit-btn {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent-strong);
-  font-weight: 600;
-}
-
-.recovery-batch-btn:disabled,
-.recovery-submit-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.recovery-list-retry {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   align-self: flex-start;
+}
+
+.recovery-list-retry:hover {
+  background: var(--surface-hover);
 }
 
 /* ── 恢复列表面板（RecoveryListPanel） ── */
@@ -276,7 +49,8 @@
 }
 
 .recovery-list-error {
-  /* #1208：同 .recovery-decision-error——语义色当正文色用，ink-mix 压深。 */
+  /* #1208：语义色当正文色用——亮色下纯 --danger 压 --surface-elevated 仅 4.448 < 4.5，
+     混入 --text-primary 压深（同 #1136/#1171/#1175 的 ink-mix）。 */
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 

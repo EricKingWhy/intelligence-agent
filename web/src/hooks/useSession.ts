@@ -25,7 +25,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EventType, type AgentEvent, type ConversationState, type FailedDraft, type SessionDeleted, type SessionMode, type SessionSummary } from '../types';
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
-import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
+import {
+  SessionClaimTimeoutError,
+  wsStreamResponse,
+  discoverNewSessionId,
+  sessionIdBaseline,
+  sessionExists,
+} from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, deriveRunFailedBeforePlan, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
@@ -1223,7 +1229,14 @@ export function useSession() {
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
-        const message = `提交失败：${(e as Error).message}`;
+        // #1321 AC4：认领超时 != 提交失败。差分轮询超时只说明「还没在列表里
+        // 认出新会话」，而 POST 已经发出、后端通常已经落盘（票面实测：页面报
+        // 失败时会话其实已在跑）。把它渲染成「提交失败」会让用户重试，从而
+        // 造出第二个会话。这里改用可行动提示，并保留输入框原文（返回非 null）。
+        const message =
+          e instanceof SessionClaimTimeoutError
+            ? `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`
+            : `提交失败：${(e as Error).message}`;
         if (!opts?.ownError) setError(message);
         return message;
       }
@@ -1545,10 +1558,10 @@ export function useSession() {
             return await deliver({ ...rest, mode: 'queue' });
           }
           /* #1029：会话待人工裁决。三件事一起做，缺一条这个 409 就还是死胡同：
-             ① 点亮 `recoverState`（conflict + 后端给的清单）——App 已按
-                `recoverState.pendingDecisions` 渲染 `RecoveryDecisionPanel`，这条
-                路径此前从不写它，所以面板对发送路径**永不可达**；
-             ② 横幅写**人话**文案（后端协议原文只在裁决面板里作细节，用户照它
+             ① 点亮 `recoverState`（conflict + 后端给的清单）——这条路径此前
+                从不写它；#1327 起待裁决信息只进被动通知横幅（App.tsx 的
+                `adjudication-banner`），无面板、无再入口；
+             ② 横幅写**人话**文案（后端协议原文只在横幅的折叠层里作细节，用户照它
                 行动不了：`tool_call_id` / `verdict` 词表不是给最终用户看的）；
              ③ **就地** resolve `false`，不 throw —— 失败路径不改代际（唯一的
                 mode 例外见下方 `setMode(viewing)` 处），composer 据此保留文本，
@@ -1830,8 +1843,9 @@ export function useSession() {
    *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。
    *
    *  #357 W-13（契约 4）：`decisions` 非空时作为裁决载荷随请求发出（用户显式
-   *  裁决）；409 载荷的 `pending_decisions` 落到 `recoverState.pendingDecisions`
-   *  供 UI 呈现与再提交（`submitDecisions` 即本函数的裁决入口）。pending 期间
+   *  裁决）；409 载荷的 `pending_decisions` 落到 `recoverState.pendingDecisions`，
+   *  供被动通知横幅与技术详情折叠层呈现；用户显式裁决仍可经同一链路发出
+   *  （`decisions` 非空）。pending 期间
    *  **保留**上一次清单（提交过程中卡片不闪没），成功/其它失败落 null。
    *
    *  成功落 `done` 而非回 `idle`：崩溃会话往往已被后端启动扫描修完，recover
@@ -1922,7 +1936,10 @@ export function useSession() {
     [refreshSessions, refreshPendingDecisions],
   );
 
-  /** 用户裁决提交（#357 W-13 契约 4）：复用 `recover` 的**同一链路与同一守护**——
+  /** @deprecated 遗留别名：生产代码不再经此入口（裁决面板已删），仅测试用它行使
+   *  显式裁决路径；新代码直接调 `recover(sid, decisions)`。
+   *
+   *  用户裁决提交（#357 W-13 契约 4）：复用 `recover` 的**同一链路与同一守护**——
    *  非空 `decisions` 走请求体裁决结清；200 整表重建（同 recover 成功路径），
    *  仍 409（未覆盖全/非法）则刷新权威 `pendingDecisions`；pending 期间切走即丢弃。
    *  裁决清单只来自后端 409 载荷（#22）：本函数不合成、不缓存。 */

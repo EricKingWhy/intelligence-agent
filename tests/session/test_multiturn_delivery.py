@@ -439,6 +439,51 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_accepted_steer_with_rule_signal_registers_session_constraint(
+    tmp_path, monkeypatch,
+):
+    """#1323：mid-run steer 被受理 + 勾选「作为可复用规则」⇒ 机械登记会话级约束。
+
+    修复前的漏登路径：被受理的 steer 由 `_inject_steers` 落盘 USER_MESSAGE，
+    但确定性登记只挂在 drive 的 user_input 分支——这条路径绕过登记。模型替身
+    从不调用 register_constraint，SESSION 组出现约束只能来自机械路径。
+    """
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [_TOOL_TURN, AIMessage(content="done")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(task="A")
+    session_id = launched.session.session_id
+    await launched.run.wait_run_id()
+
+    content = "B，合并前必须跑完所有测试。"
+    steered = await harness.service.send_message(
+        session_id=session_id, content=content, mode="steer",
+        remember_as_procedural_rule=True,
+    )
+    assert steered.status == "steered"
+
+    gate.set()
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_COMPLETED)) == 1,
+        what="run 完成",
+    )
+
+    steer_user = next(
+        e for e in harness.of_type(session_id, USER_MESSAGE)
+        if e.data.get("steer_id")
+    )
+    constraints = [
+        fact for fact in derive_protected_facts(harness.events(session_id))
+        if fact.type == "constraint" and fact.status == "active"
+    ]
+    assert [fact.value for fact in constraints] == [content], (
+        "被受理的 steer 必须逐字登记进 SESSION 组"
+    )
+    assert constraints[0].source_event_id == steer_user.event_id
+
+
+@pytest.mark.asyncio
 async def test_steer_with_mismatched_run_id_is_discarded_then_relayed(
     tmp_path, monkeypatch,
 ):

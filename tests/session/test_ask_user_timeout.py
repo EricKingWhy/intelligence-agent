@@ -1,7 +1,7 @@
-"""#1204：`ask_user` 超时闸的确定性单测（时钟注入，不实等）。
+"""#1204/#1320：`ask_user` 超时闸的确定性单测（时钟注入，不实等）。
 
-口径：计时器只在**至少一个前端连接存在**时启动 / 继续；无前端连接时不启动。
-三档（60 / 300 / 600 秒）各验一例；注入消息正文逐字断言。
+口径（#1320 D1A）：计时从装配起按挂钟持续累计，**不依赖前端连接**；三档
+（60 / 300 / 600 秒）各验一例；注入消息正文逐字断言。
 """
 
 from __future__ import annotations
@@ -27,41 +27,31 @@ from agent_harness.session.event import (
 from tests.fake_clock import FakeClock
 
 
-def test_timer_does_not_start_without_a_frontend_connection():
+def test_timer_starts_at_construction_and_counts_wall_time():
+    """零连接也计时：构造即起表，时长按挂钟前进（#1320 推翻 A1/A3）。"""
     clock = FakeClock()
     tracker = AskUserTimeoutTracker(60, clock=clock)
 
     clock.advance(10_000)
 
-    assert tracker.running is False
-    assert tracker.elapsed_seconds() == 0.0
-    assert tracker.expired() is False
+    assert tracker.elapsed_seconds() == 10_000
+    assert tracker.expired() is True
 
 
-def test_timer_only_accumulates_while_connected():
+def test_timer_can_resume_from_persisted_elapsed():
+    """#1320：重启重建接上事件时间，不把倒计时清零（durable timer 的截止时刻）。"""
     clock = FakeClock()
-    tracker = AskUserTimeoutTracker(300, clock=clock)
+    tracker = AskUserTimeoutTracker(60, clock=clock, elapsed_seconds=59)
 
-    tracker.set_connected(True)
-    clock.advance(30)
-    tracker.set_connected(False)
-    clock.advance(10_000)  # 断开期间不计时
-
-    assert tracker.elapsed_seconds() == 30
-    assert tracker.expired() is False
+    clock.advance(1)
+    assert tracker.expired() is True
 
 
-def test_reconnect_resumes_from_where_it_froze():
+def test_timer_does_not_expire_before_the_threshold():
     clock = FakeClock()
     tracker = AskUserTimeoutTracker(100, clock=clock)
 
-    tracker.set_connected(True)
-    clock.advance(60)
-    tracker.set_connected(False)
-    clock.advance(1_000)
-    tracker.set_connected(True)
-    clock.advance(39)
-
+    clock.advance(99)
     assert tracker.expired() is False
     clock.advance(1)
     assert tracker.expired() is True
@@ -72,7 +62,6 @@ def test_expires_at_the_configured_tier(timeout: int):
     clock = FakeClock()
     tracker = AskUserTimeoutTracker(timeout, clock=clock)
 
-    tracker.set_connected(True)
     clock.advance(timeout - 1)
     assert tracker.expired() is False
     clock.advance(1)
