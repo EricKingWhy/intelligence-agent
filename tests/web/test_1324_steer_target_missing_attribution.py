@@ -62,4 +62,6 @@ def test_idle_steer_409_is_attributed_in_the_log(tmp_path, caplog):
     assert "SteerTargetNotFound" in message
     assert session_id in message
     assert "run_id=None" in message
+    # 复审补的副作用面维度：该用例的请求不带 queue_id ⇒ 无排队项被取消。
+    assert "queue_id=None" in message
     assert "no_active_run" in message

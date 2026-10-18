@@ -131,10 +131,46 @@ describe('#1324 steer 打空 → 改投 queue', () => {
     expect(secondPayload.content).toBe('补一句引导');
 
     // ③ 不静默：一条可检索的归因记录，带会话与后端 detail。
-    expect(warn).toHaveBeenCalledTimes(1);
-    const line = String(warn.mock.calls[0][0]);
+    // 按前缀收窄再计数：spy 装在 mount() 之前，装载期 wsStream 等噪声 warn 也
+    // 会进同一个 spy，直接 toHaveBeenCalledTimes 是结构性脆弱。
+    const steerLines = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.includes('steer 打空'));
+    expect(steerLines).toHaveLength(1);
+    const line = steerLines[0];
     expect(line).toContain('SteerTargetNotFound');
     expect(line).toContain(`session=${SID}`);
     expect(line).toContain(STEER_MARKER);
+  });
+
+  it('带 queue_id 的 steer 打空 → 剥除 queue_id 改投 queue，归因行带原 queue_id', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(apiSendMessage)
+      .mockResolvedValueOnce(steerTargetMissing409())
+      .mockResolvedValueOnce(acceptedReceipt());
+
+    await mount();
+    await enterViewing(SID);
+
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = await captured.hook!.sendMessage(SID, '排队条立即', {
+        amend: { mode: 'steer', queue_id: 'q-1324' },
+      });
+    });
+
+    expect(accepted).toBe(true);
+    // ① 两次投递：steer（带 queue_id）→ queue（已剥除）。
+    expect(vi.mocked(apiSendMessage)).toHaveBeenCalledTimes(2);
+    const secondPayload = vi.mocked(apiSendMessage).mock.calls[1][1];
+    expect(secondPayload.mode).toBe('queue');
+    // ② 带同一个 queue_id 重投会撞 404 QueueItemNotFound（原项已取消）。
+    expect(secondPayload.queue_id).toBeUndefined();
+    // ③ 归因行带上被取消的那条 queue_id。
+    const steerLines = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.includes('steer 打空'));
+    expect(steerLines).toHaveLength(1);
+    expect(steerLines[0]).toContain('queue_id=q-1324');
   });
 });

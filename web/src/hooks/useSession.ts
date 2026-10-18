@@ -1560,7 +1560,8 @@ export function useSession() {
                成功时不弹任何错误横幅（AC2(c)）。 */
             console.warn(
               '[useSession] steer 打空（409 SteerTargetNotFound），改投 queue：' +
-                `session=${sessionId} mode=${payload.mode} detail=${body?.message ?? ''}`,
+                `session=${sessionId} mode=${payload.mode} detail=${body?.message ?? ''}` +
+                ` queue_id=${payload.queue_id ?? 'none'}`,
             );
             const { queue_id: _alreadyCancelled, ...rest } = payload;
             return await deliver({ ...rest, mode: 'queue' });

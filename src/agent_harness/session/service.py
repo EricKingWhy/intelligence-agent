@@ -3721,11 +3721,14 @@ class SessionService:
                 # 字段按票面 AC2(a) 固定：异常类型 + session_id + run_id。此处
                 # `active_run is None` 正是判据本身 ⇒ run_id 诚实地是 None
                 # （没有在途 run），不拿别的 id 顶替。
+                # 复审补 `queue_id` 维度：`cancel_queue` 在本判定之前执行，两种
+                # 副作用面（带 queue_id ⇒ 排队项已被取消；不带 ⇒ 无副作用）此
+                # 前日志逐字相同、无法区分。`queue_id=None` 即"无排队项被取消"。
                 logger.warning(
-                    "steer 打空被拒（SteerTargetNotFound）：session=%s run_id=%s "
-                    "reason=no_active_run",
+                    "steer 打空被拒（SteerTargetNotFound）：session=%s run_id=None "
+                    "queue_id=%s reason=no_active_run",
                     session_id,
-                    None,
+                    queue_id,
                 )
                 raise SteerTargetNotFound(
                     "steer requires an active run; use mode='queue' to enqueue"
