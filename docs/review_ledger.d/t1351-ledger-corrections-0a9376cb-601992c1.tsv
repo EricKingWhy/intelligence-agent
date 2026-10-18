@@ -1,0 +1,1 @@
+2026-10-18	#1351 台账更正（append-only；范围同原行 0a9376cb..601992c1）：①原「均为措辞层」不准——P4-5 是行为涟漪登记（_settle_state），改为「P3-1/P3-2/P3-3/P4-4/P4-6 措辞层，P4-5 行为涟漪登记」。②「side_effect 第 4 消费点」应为「至少第 4 个，不含 executor.py:442 DecisionRequest 传参」（DecisionHookRunner 在 src 无构造点）。③按「追加=新建文件」拆分原三行文件为一文件一行（§8.5 第 5 条未合并分支例外；判据 rev-list 0a9376cb..601992c1 ^origin/main = 1/1）。	0a9376cb..601992c1
