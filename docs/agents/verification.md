@@ -150,8 +150,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
        `verification.map.tsv` 表头）需一并改 72 行映射表 + `tests/test_verification_map.py`
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
-- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
-  `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
+- **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
+  `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
+- 期望证据：`6 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
+  `12 passed`（索引可执行位守卫）= **`40 passed`（4 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
   该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
   三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
@@ -400,6 +402,27 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   其改动会被执行、且仍报出一个叫 `gate0` 的绿检查）。完整边界见该工作流头部注释。
 - **fail-closed**：任何车道"工具缺失 / 超时 / 无法执行"一律算**失败**，不算"跳过"、不算通过
   （沿用覆盖闸门"核对不了就不放行"的口径）。
+
+---
+
+## 4.1 Flake 的两条死规矩（issue #1338 改动 2）
+
+台账：**`docs/flake-ledger.md`** —— flaky 测试的**唯一登记处**。准入判据 F1–F5
+（具名+签名+触发命令+树 SHA 且读数落盘 / 同树隔离重跑 ≥2 次全绿 / `git diff` 与失败 spec
+零文件交集 / 基线对照 / 首次即登记且累计 ≥2 次未修则移出必需路径并开票指派 owner）
+**缺一不放行**；未登记的偶发红按真 bug 处理。
+
+1. **已登记 flake 不阻塞合并，只进 nightly。** nightly 已覆盖全量
+   （`.github/workflows/gate-nightly.yml`，本票**不改**该工作流）；"移出必需路径"只是把它从
+   **PR 必需路径**上摘下来，nightly 仍跑它。"移出必需路径"的载体 = 台账登记 + **§2 车道清单
+   里该用例标注"走 nightly"**，由执行器在**台账 PR 里一并改**（本票只建台账与规则，尚无用例被移出）。
+2. **「复跑转绿」四字不许作为唯一归因。** #1298 的 5 条正是因此被复核打回——复跑转绿只说明
+   "这次没复现"，说明不了"不是本次改动引入的"；归因必须落在 F1–F5 的证据上（§5 第 5 条
+   "不要用失败总数归因"同源）。
+
+与 **#1292**（e2e 既有红跟踪票）**互补**：F4 判定为"既有红"的条目走 waive + 开票路线、
+**不登记为 flake**；#1292 的条目在台账建成后**可迁移**进 `docs/flake-ledger.md`（迁移时按
+F1–F5 补齐证据）。
 
 ---
 
