@@ -24,6 +24,8 @@ function summary(id: string, overrides: Partial<SessionSummary> = {}): SessionSu
     product_state_changed_at: null,
     attention_kind: null,
     attention_summary: null,
+    last_user_message: null,
+    last_agent_message: null,
     ...overrides,
   };
 }

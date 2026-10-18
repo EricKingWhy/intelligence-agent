@@ -15,8 +15,16 @@
  *  是否未读由看板算好下发（比较键是 `product_state_changed_at`，见 `lib/kanbanUnread.ts`），
  *  卡片只渲染结果。
  *
- *  **本票不含**：子智能体折叠行（T5 / #1307）、最后一条消息（T6）、PR pill /
- *  worktree / repo 页脚（AC-16 明确断言页脚**只有**时间节点）。
+ *  **#1308 最后一条消息（Q10-A）**：正文两行——`You` + user 消息（单行 clamp）/
+ *  `agent` + agent 文本（两行 clamp）。形状照抄 Orca `AgentKanbanCard.tsx:255-268`
+ *  （`line-clamp-1` / `line-clamp-2`）；本仓无 Tailwind，clamp 落在
+ *  `styles/kanban.css` 的 `.kanban-card-msg-*`（先例：`.kanban-card-attention-text`）。
+ *  agent 名用固定 `agent` 前缀：本仓 `SessionSummary` 没有 agentType 字段，不为此
+ *  新造一份契约；效果图（`kanban.html:150-151`）的 `你：` / `agent：` 也是固定前缀。
+ *  **截断是写入侧的职责**（后端 128 字符），组件不再二次截断。
+ *
+ *  **本票不含**：子智能体折叠行（T5 / #1307）、PR pill / worktree / repo 页脚
+ *  （AC-16 明确断言页脚**只有**时间节点）。
  */
 
 import { AlertCircle, ShieldQuestion } from 'lucide-react';
@@ -91,6 +99,23 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
           {title}
         </span>
       </div>
+
+      {session.last_user_message !== null || session.last_agent_message !== null ? (
+        <div className="kanban-card-msgs">
+          {session.last_user_message !== null && (
+            <div className="kanban-card-msg-user kanban-card-msg-clamp-1">
+              <span className="kanban-card-msg-prefix">You</span>{' '}
+              {session.last_user_message}
+            </div>
+          )}
+          {session.last_agent_message !== null && (
+            <div className="kanban-card-msg-agent kanban-card-msg-clamp-2">
+              <span className="kanban-card-msg-prefix">agent</span>{' '}
+              {session.last_agent_message}
+            </div>
+          )}
+        </div>
+      ) : null}
 
       {empty && (
         // 空会话不是错误，是"还没开始"——次级说明而不是告警色（诚实但不吓人）。

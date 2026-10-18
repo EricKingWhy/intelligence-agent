@@ -33,6 +33,7 @@ from agent_harness.session.event import (
     TASK_ACCEPTED,
     TASK_DEFINED,
     TOOL_APPROVAL_REQUESTED,
+    TOOL_RESULT,
     USER_INPUT_REQUESTED,
     USER_MESSAGE,
     VERIFICATION_UPDATED,
@@ -455,6 +456,8 @@ def test_every_persisted_event_advances_the_sidecar_watermark(tmp_path: Path) ->
 def test_non_trigger_event_advances_watermark_without_recomputing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # #1308 起 USER_MESSAGE / MODEL_COMPLETED 进了触发集（最后一条消息要新鲜），
+    # 所以这里改用真正的触发集外事件（tool/result）钉住"只推进水位"这条路径。
     store, session = _session_with_task(tmp_path)
     BoardProjectionStore(store).get(session.session_id)
 
@@ -462,7 +465,7 @@ def test_non_trigger_event_advances_watermark_without_recomputing(
         raise AssertionError("触发集外事件不得重算投影")
 
     monkeypatch.setattr(bp, "_derive", forbidden)
-    session.append(USER_MESSAGE, {"content": "只推进水位"})
+    session.append(TOOL_RESULT, {"tool_call_id": "t1", "content": "ok"})
     payload = json.loads(store.board_state_path(session.session_id).read_text("utf-8"))
     assert payload["projection_seq"] == session.events[-1].seq
 
@@ -909,6 +912,8 @@ def test_projection_seq_empty_session_is_minus_one() -> None:
         product_state_changed_at=None,
         attention_kind=None,
         attention_summary=None,
+        last_user_message=None,
+        last_agent_message=None,
         projection_seq=-1,
     )
 
@@ -1038,3 +1043,165 @@ def test_update_never_stamps_a_view_that_lags_the_disk(tmp_path: Path) -> None:
 
     # 下一次读取必须从盘上重放，拿到旁路事件造成的真实状态。
     assert projection_store.get(sid).product_state == "executing"
+
+
+# ── #1308 / AC-19：最后一条 user / agent 消息（写入与截断）──────────────────
+
+
+def test_last_messages_track_user_then_agent_without_crossing(tmp_path: Path) -> None:
+    """AC-19 ①②：user/message 只更新 user 字段；model/completed 只更新 agent 字段。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    after_user = projection_store.get(sid)
+    assert after_user.last_user_message == "改一下标题"
+    assert after_user.last_agent_message is None
+
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+    after_agent = projection_store.get(sid)
+    assert after_agent.last_agent_message == "已改好"
+    assert after_agent.last_user_message == "改一下标题", "agent 消息不得覆盖 user 字段"
+
+    # 再来一条 user：agent 字段保持上一条 agent 文本。
+    session.append(USER_MESSAGE, {"content": "再改一下"})
+    again = projection_store.get(sid)
+    assert again.last_user_message == "再改一下"
+    assert again.last_agent_message == "已改好"
+
+
+def test_non_message_events_leave_last_messages_unchanged(tmp_path: Path) -> None:
+    """AC-19 ③：run/started 等非消息事件两字段均不变。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+    before = projection_store.get(sid)
+
+    session.begin_run()
+    session.append(VERIFICATION_UPDATED, {"item_id": "ac-1", "value": "passed"})
+
+    after = projection_store.get(sid)
+    assert after.last_user_message == before.last_user_message
+    assert after.last_agent_message == before.last_agent_message
+
+
+def test_last_messages_are_truncated_on_the_write_side(tmp_path: Path) -> None:
+    """AC-19 ④：>128 字符在写入侧截断，sidecar 存的也是截断值（与 first_user_message 同口径）。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    long_user = "长" * 200
+    long_agent = "答" * 200
+    session.append(USER_MESSAGE, {"content": long_user})
+    session.append(MODEL_COMPLETED, {"content": long_agent})
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection.last_user_message == long_user[:128]
+    assert projection.last_agent_message == long_agent[:128]
+
+    payload = json.loads(store.board_state_path(sid).read_text("utf-8"))
+    assert payload["last_user_message"] == long_user[:128]
+    assert payload["last_agent_message"] == long_agent[:128]
+
+
+def test_last_messages_ignore_blank_and_non_string_content(tmp_path: Path) -> None:
+    """空白 / 非字符串 content 不更新字段（与 first_user_message 的谓词同口径）。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+
+    session.append(USER_MESSAGE, {"content": "   "})
+    session.append(MODEL_COMPLETED, {"content": None})
+
+    projection = projection_store.get(sid)
+    assert projection.last_user_message == "改一下标题"
+    assert projection.last_agent_message == "已改好"
+
+
+# ── #1308 / AC-20：读取与重启 ────────────────────────────────────────────
+
+
+def test_last_messages_survive_restart_from_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-20 ①③：sidecar 命中零 read_events；新 store 实例读数逐字段相等。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+    first = BoardProjectionStore(store).get(sid)
+    assert first.last_user_message == "改一下标题"
+    assert first.last_agent_message == "已改好"
+
+    def forbidden(_session_id: str):
+        raise AssertionError("sidecar 命中时不得 read_events")
+
+    monkeypatch.setattr(store, "read_events", forbidden)
+    restarted = BoardProjectionStore(JsonlSessionStore(root=store._root))
+    assert restarted.get(sid) == first
+
+
+def test_last_messages_self_heal_after_sidecar_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-21 ①②：删 sidecar → 一次重放回填；第二次请求命中缓存。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+    first = BoardProjectionStore(store).get(sid)
+    store.board_state_path(sid).unlink()
+
+    calls = 0
+    original = store.read_events
+
+    def counting(session_id: str):
+        nonlocal calls
+        calls += 1
+        return original(session_id)
+
+    monkeypatch.setattr(store, "read_events", counting)
+    fresh = BoardProjectionStore(store)
+    assert fresh.get(sid) == first
+    assert fresh.get(sid) == first
+    assert calls == 1
+
+
+def test_legacy_sidecar_without_message_fields_falls_back_to_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧版 sidecar 没有两字段：必须判 miss 并重放自愈，而不是渲染成 null。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+    sidecar = store.board_state_path(sid)
+    payload = json.loads(sidecar.read_text("utf-8"))
+    payload.pop("last_user_message")
+    payload.pop("last_agent_message")
+    sidecar.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    projection = BoardProjectionStore(store).get(sid)
+    assert projection.last_user_message == "改一下标题"
+    assert projection.last_agent_message == "已改好"
+    healed = json.loads(sidecar.read_text("utf-8"))
+    assert healed["last_user_message"] == "改一下标题"
+
+
+def test_sidecar_with_illegal_message_field_falls_back_to_replay(
+    tmp_path: Path,
+) -> None:
+    """非字符串消息字段 = 坏 sidecar（fail-closed 同款校验）。"""
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    sidecar = store.board_state_path(sid)
+    payload = json.loads(sidecar.read_text("utf-8"))
+    payload["last_user_message"] = 42
+    sidecar.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert BoardProjectionStore(store).get(sid).last_user_message == "改一下标题"

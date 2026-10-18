@@ -29,9 +29,12 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
 
 已知上限（ponytail）：
 
-* 每次触发集事件是一次 O(事件数) 重放；触发点只在 run 边界与用户动作上，
-  单 run 约 4–8 次。升级路径是在 ``derive_task_state`` 上做增量 fold，
-  **不是**另写一份投影语义。
+* 每次触发集事件是一次 O(事件数) 重放。T1 的触发点只在 run 边界与用户动作上
+  （单 run 约 4–8 次）；**#1308 起 ``USER_MESSAGE`` 与 ``MODEL_COMPLETED`` 也在
+  触发集内**（最后一条消息要新鲜），上限因此抬高到「每条用户消息 + 每个模型
+  回合各一次 O(事件数) 重放」——长 run 有几十上百回合。``ponytail:`` 这是本票
+  有意为之的取舍（消息新鲜度优先），不是遗漏。升级路径：在 ``derive_task_state``
+  上做增量 fold，或只对消息字段做尾部 O(1) 扫描；**不是**另写一份投影语义。
 * 触发集外的事件（``tool/call``、``tool/result``、``model/completed`` 等高频
   事件）每条都会 stat 事件文件 + 尾部读 8KB + 原子重写 sidecar（含 ``fsync``）
   以推进水位：append 路径因此多一次 fsync 与一次尾部读。这是按票面「所有
@@ -56,8 +59,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from agent_harness.session.event import (
+    MODEL_COMPLETED,
     RUN_TERMINAL_TYPES,
     TOOL_APPROVAL_REQUESTED,
+    USER_MESSAGE,
     SessionEvent,
 )
 
@@ -82,6 +87,10 @@ class BoardProjection:
     product_state_changed_at: str | None
     attention_kind: AttentionKind | None
     attention_summary: str | None
+    #: #1308：最后一条用户消息 / 最后一条 agent 文本（写入侧已截断到 128 字符，
+    #: 与 ``first_user_message`` 同口径）。从未出现 ⇒ None（不伪造）。
+    last_user_message: str | None
+    last_agent_message: str | None
     #: 本投影覆盖到的最后一个事件 seq；空会话为 -1。
     projection_seq: int
 
@@ -145,6 +154,30 @@ def _attention(events: list[SessionEvent]) -> tuple[AttentionKind | None, str | 
     return kind, summary
 
 
+#: 与 ``first_user_message``（store.py 的快路径/回退路径）同口径：strip 后取前 128
+#: 字符。截断在**写入侧**完成（票面 AC-19 ④），渲染侧不再二次截断。
+_MESSAGE_MAX_CHARS = 128
+
+
+def _last_message(events: list[SessionEvent], event_type: str) -> str | None:
+    """最后一条带非空文本的事件内容（``USER_MESSAGE`` / ``MODEL_COMPLETED`` 共用）。
+
+    谓词与 ``first_user_message`` 一致：``content`` 必须是 strip 后非空的字符串。
+    空白 / 缺键 / 非字符串一律跳过——不把 ``None`` 渲染成 "None"，也不让一条空
+    消息把上一条真消息抹掉。
+    """
+    for event in reversed(events):
+        if event.type != event_type:
+            continue
+        # 旁路写者/手工编辑可能把 data 写成非 dict（`_attention` 同款防御）：
+        # 一条坏行不得让整份投影派生失败。
+        data = event.data if isinstance(event.data, dict) else {}
+        content = data.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()[:_MESSAGE_MAX_CHARS]
+    return None
+
+
 def _derive(events: list[SessionEvent]) -> tuple[BoardProjection | None, bool]:
     """纯派生；返回 ``(投影, 是否可缓存)``。
 
@@ -188,6 +221,8 @@ def _derive(events: list[SessionEvent]) -> tuple[BoardProjection | None, bool]:
             product_state_changed_at=state.product_state_changed_at,
             attention_kind=attention_kind,
             attention_summary=attention_summary,
+            last_user_message=_last_message(materialized, USER_MESSAGE),
+            last_agent_message=_last_message(materialized, MODEL_COMPLETED),
             projection_seq=projection_seq,
         ),
         cacheable,
@@ -201,6 +236,8 @@ def _empty(events: list[SessionEvent]) -> BoardProjection:
         product_state_changed_at=None,
         attention_kind=None,
         attention_summary=None,
+        last_user_message=None,
+        last_agent_message=None,
         projection_seq=seq,
     )
 
@@ -638,6 +675,12 @@ class BoardProjectionStore:
         changed_at = raw.get("product_state_changed_at")
         attention_kind = raw.get("attention_kind")
         attention_summary = raw.get("attention_summary")
+        # #1308：两字段缺失（旧版 sidecar）或类型不对 ⇒ 判 miss 并重放自愈。
+        # 缺失不能当 None：那会把"有消息"的会话静默渲染成"没有消息"。
+        if "last_user_message" not in raw or "last_agent_message" not in raw:
+            return None
+        last_user_message = raw.get("last_user_message")
+        last_agent_message = raw.get("last_agent_message")
         if not isinstance(projection_seq, int) or isinstance(projection_seq, bool):
             return None
         # 延迟导入：同 `_derive`，避免 session 包初始化期的循环导入。
@@ -659,6 +702,10 @@ class BoardProjectionStore:
             return None
         if attention_summary is not None and not isinstance(attention_summary, str):
             return None
+        if last_user_message is not None and not isinstance(last_user_message, str):
+            return None
+        if last_agent_message is not None and not isinstance(last_agent_message, str):
+            return None
         if product_state != "executing" and (
             attention_kind is not None or attention_summary is not None
         ):
@@ -678,6 +725,8 @@ class BoardProjectionStore:
             product_state_changed_at=changed_at,
             attention_kind=attention_kind,
             attention_summary=attention_summary,
+            last_user_message=last_user_message,
+            last_agent_message=last_agent_message,
             projection_seq=projection_seq,
         )
 
@@ -719,6 +768,8 @@ class BoardProjectionStore:
             "product_state_changed_at": projection.product_state_changed_at,
             "attention_kind": projection.attention_kind,
             "attention_summary": projection.attention_summary,
+            "last_user_message": projection.last_user_message,
+            "last_agent_message": projection.last_agent_message,
             "projection_seq": projection.projection_seq,
             "events_size": stamp[0],
             "events_mtime_ns": stamp[1],
