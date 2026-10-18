@@ -79,13 +79,12 @@ _DEGRADED_MESSAGE: dict[DegradeReason, str] = {
         "请改为 enabled=true（或删掉这条登记）。"
     ),
     DegradeReason.MISSING_SETTINGS: (
-        "memory capability 缺前置配置：向量检索（MILVUS_URI / MILVUS_TOKEN / "
-        "MILVUS_COLLECTION）与嵌入模型（EMBEDDING_MODEL / EMBEDDING_BASE_URL / "
-        "EMBEDDING_API_KEY）两组都齐才装配记忆。补齐后重启后端。"
+        "memory capability 缺前置配置：CAPABILITIES 里已登记 memory，但 "
+        "markdown 记忆目录不可写（WORKSPACE_DIR/memories）。修好目录权限后重启后端。"
     ),
     DegradeReason.INIT_FAILED: (
         "memory capability 初始化失败：CAPABILITIES 里已登记且启用，但装配时出错"
-        "（记忆向量库不可达是常见原因）。这不是「没配置」——改 CAPABILITIES 没用；"
+        "（记忆目录不可写 / markdown 初始化出错是常见原因）。这不是「没配置」——改 CAPABILITIES 没用；"
         "完整原因在后端日志的「capability 'memory' 初始化失败」那条里，排除后重启后端即可恢复。"
     ),
 }

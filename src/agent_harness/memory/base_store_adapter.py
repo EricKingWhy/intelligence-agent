@@ -24,7 +24,7 @@ from agent_harness.memory.vector_store import VectorIndexStore
 logger = logging.getLogger(__name__)
 
 
-class SqliteMilvusBaseStore(BaseStore):
+class SqliteVectorBaseStore(BaseStore):
     def __init__(self, records: MemoryRecordStore, vectors: VectorIndexStore) -> None:
         self.records = records
         self.vectors = vectors
