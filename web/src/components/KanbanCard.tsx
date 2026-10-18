@@ -154,7 +154,9 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
       )}
 
       {canExpand && (
-        <div className="kanban-card-subagents">
+        // 卡片自身是 column flex + gap，这层只是把「按钮 + 结果」收成一组；组内
+        // 间距与卡内一致（6px），不新增 CSS（本票只改两个组件文件）。
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {/* 真 `<button>` + `aria-expanded`（Orca `AgentKanbanCard.tsx:288-305` 同构）。
               卡本身是 `role="button"`，所以点击/键盘都必须 `stopPropagation`——
               否则展开子智能体会顺手把会话打开（嵌套交互事故）。
