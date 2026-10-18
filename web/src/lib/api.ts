@@ -134,8 +134,9 @@ export async function readErrorDetail(res: Response): Promise<string> {
 }
 
 /**
- * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
- * 这次读取）。
+ * 一次读取拿到 `{message, code, reason, objectDetail}`（响应体只能读一次，所有消费者
+ * 必须共用这次读取）。`reason` 是对象形 detail 的机读成因（`#1325` S5：压缩被拒的
+ * `no_early_turns`），与 `code` 同一「只按字段判、不按文案猜」口径。
  *
  * `objectDetail` = "后端用了 `detail` 是对象的**机读形状**回答"（#227）：用它区分三种
  * 截然不同的情况——纯字符串 detail（旧版后端）、对象 detail 带码、对象 detail **没有**
@@ -145,11 +146,20 @@ export async function readErrorDetail(res: Response): Promise<string> {
  */
 export async function readErrorBody(
   res: Response,
-): Promise<{ message: string; code: string | null; objectDetail: boolean; pendingDecisions?: PendingDecision[] }> {
+): Promise<{
+  message: string;
+  code: string | null;
+  /** #1325 S5：对象形 detail 的机读成因（如压缩的 `no_early_turns`）。
+   *  字符串/数组 detail 没有该字段 ⇒ null（不按文案猜原因）。 */
+  reason: string | null;
+  objectDetail: boolean;
+  pendingDecisions?: PendingDecision[];
+}> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
-    if (typeof detail === 'string') return { message: detail, code: null, objectDetail: false };
+    if (typeof detail === 'string')
+      return { message: detail, code: null, reason: null, objectDetail: false };
     if (Array.isArray(detail)) {
       const message = detail
         .flatMap((item) => {
@@ -157,24 +167,26 @@ export async function readErrorBody(
           return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
         })
         .join('；');
-      return { message, code: null, objectDetail: false };
+      return { message, code: null, reason: null, objectDetail: false };
     }
     if (typeof detail === 'object' && detail !== null) {
-      const { message, code, pending_decisions } = detail as {
+      const { message, code, reason, pending_decisions } = detail as {
         message?: unknown;
         code?: unknown;
+        reason?: unknown;
         pending_decisions?: unknown;
       };
       return {
         message: typeof message === 'string' ? message : '',
         code: typeof code === 'string' && code ? code : null,
+        reason: typeof reason === 'string' && reason ? reason : null,
         objectDetail: true,
         pendingDecisions: parsePendingDecisions(pending_decisions),
       };
     }
-    return { message: '', code: null, objectDetail: false };
+    return { message: '', code: null, reason: null, objectDetail: false };
   } catch {
-    return { message: '', code: null, objectDetail: false };
+    return { message: '', code: null, reason: null, objectDetail: false };
   }
 }
 
@@ -1808,9 +1820,13 @@ export async function getAttachmentBytes(sessionId: string, attachmentId: string
  *  两者对界面的含义不同，且这里必须带上状态码。 */
 export class SessionError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** #1325 S5：对象形 detail 里的机读成因（无则 null）。调用方按
+   *  `status + reason` 分流；不拿 message 文案做子串匹配。 */
+  readonly reason: string | null;
+  constructor(status: number, message: string, reason: string | null = null) {
     super(message);
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -1855,8 +1871,10 @@ export async function deleteSession(sessionId: string): Promise<SessionDeleted> 
 
 /** 非 2xx → SessionError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
 async function sessionError(res: Response, fallback: string): Promise<SessionError> {
-  const detail = await readErrorDetail(res);
-  return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+  // #1325 S5：一次读取同时拿到 message 与机读 reason（响应体只能读一次）；
+  // 缺 message 时仍用兜底前缀 + 状态码，与旧行为一致。
+  const { message, reason } = await readErrorBody(res);
+  return new SessionError(res.status, message || `${fallback}（${res.status}）`, reason);
 }
 
 /** 归档一个会话（#171）：把它从默认列表里收起来，**可逆**，不删任何东西。
@@ -2807,10 +2825,11 @@ export async function forkSession(
     body: JSON.stringify({ from_seq: fromSeq }),
   });
   if (!res.ok) {
-    // BUG-001 fix：解析后端 detail 给用户看（可用边界列表等）。
-    let detail = '';
-    try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
-    throw new Error(detail || `fork ${res.status}`);
+    // BUG-001 fix / #1325 S8：sandbox 不可用时 detail 是**对象**，直接
+    // `String(detail)` 会渲染成「[object Object]」。统一走 readErrorBody 取
+    // 给人看的 message（后端已把 remediation 拼进 message，无需二次拼装）。
+    const { message, reason } = await readErrorBody(res);
+    throw new SessionError(res.status, message || `fork ${res.status}`, reason);
   }
   return res.json();
 }

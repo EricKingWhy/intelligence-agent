@@ -483,10 +483,13 @@ def sandbox_unavailable_http_error(
 ) -> HTTPException:
     """选定 sandbox 后端不可用 → 409 + 结构化诊断（绝不静默降级）。
 
-    `detail` 带 remediation 与可用后端列表，前端据此渲染"切换"动作
-    （#363 / W-19 口径）。`POST /api/sessions` 与 `POST /api/sessions/{id}/forks`
-    共用这一份构造：两处都必须让"选定的 docker 跑不起来"是同一个可诊断的
-    409，而不是一条裸 500（`#1278` P2-2）。
+    `detail` 带 remediation 与可用后端列表，供客户端诊断。
+    （#1325 S8：此前这里承诺"前端据此渲染切换动作"，但 `web/src/` 从未消费
+    `available_backends`——承诺已删；Web 侧只展示 message，其中已由
+    `SandboxUnavailableError` 拼入 remediation。）
+    `POST /api/sessions` 与 `POST /api/sessions/{id}/forks` 共用这一份构造：
+    两处都必须让"选定的 docker 跑不起来"是同一个可诊断的 409，而不是一条
+    裸 500（`#1278` P2-2）。
     """
     return HTTPException(
         status_code=_SANDBOX_ERROR_STATUS[type(exc)],

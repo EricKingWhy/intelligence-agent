@@ -100,10 +100,10 @@ test('completed changes show a file count and open detailed review on demand', a
   const summary = page.locator('.task-review-summary');
   await expect(summary.locator('.task-review-summary-message')).toHaveText('本次改动 1 个文件，请查看 diff');
   await expect(summary.getByRole('button', { name: '详细审阅' })).not.toHaveClass(/is-emphasized/);
-  await expect(page.getByRole('dialog', { name: '任务审阅' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: '详细审阅' })).toHaveCount(0);
 
   await summary.getByRole('button', { name: '详细审阅' }).click();
-  const dialog = page.getByRole('dialog', { name: '任务审阅' });
+  const dialog = page.getByRole('dialog', { name: '详细审阅' });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator('section[aria-label="逐项结果"]')).toHaveCount(0);
 });
