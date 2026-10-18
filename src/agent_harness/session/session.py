@@ -339,11 +339,11 @@ class Session:
         按 Ledger 精确回填（不变量 #13/#14），再 load 出 Session 继续跑，
         避免与恢复标记重复再写一条 `session/resumed`。
 
-        sandbox 是**尽力而为**的（#1235）：映射缺席（历史会话 / 映射卷被清空 /
+        sandbox 是**尽力而为**的（#1235）：映射文件缺失（历史会话 / 映射卷被清空 /
         手工构造）时降级为 ``sandbox=None``，与不传 registry 同义——写路径端点
         只用 load 追加事件，不该因映射缺席 500。需要 sandbox 的调用方自行判空。
-        但 `WorkspaceBindingError`（硬删除进行中 / 重绑定）仍然上抛：那不是
-        「没有映射」，是「映射此刻不可用」。
+        但「映射此刻不可用」仍然上抛 `WorkspaceBindingError`（硬删除进行中 /
+        重绑定 / Docker 持久卷缺失），那不是「没有映射」。
         """
         events = store.read_events(session_id)
         if not events:
@@ -354,7 +354,10 @@ class Session:
             try:
                 sandbox = workspace_registry.get(session_id)
             except KeyError:
-                sandbox = None
+                logger.warning(
+                    "Session %s 没有 workspace 映射，sandbox 降级为 None（#1235）",
+                    session_id,
+                )
         validate_event_seq(session_id, events)
         return cls(session_id, store, events, sandbox=sandbox)
 
