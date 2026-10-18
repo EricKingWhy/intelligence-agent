@@ -338,16 +338,23 @@ class Session:
         用于「恢复语义已由上游完成」的场景——崩溃路径先经 RecoveryCoordinator
         按 Ledger 精确回填（不变量 #13/#14），再 load 出 Session 继续跑，
         避免与恢复标记重复再写一条 `session/resumed`。
+
+        sandbox 是**尽力而为**的（#1235）：映射缺席（历史会话 / 映射卷被清空 /
+        手工构造）时降级为 ``sandbox=None``，与不传 registry 同义——写路径端点
+        只用 load 追加事件，不该因映射缺席 500。需要 sandbox 的调用方自行判空。
+        但 `WorkspaceBindingError`（硬删除进行中 / 重绑定）仍然上抛：那不是
+        「没有映射」，是「映射此刻不可用」。
         """
         events = store.read_events(session_id)
         if not events:
             raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
 
-        sandbox = (
-            workspace_registry.get(session_id)
-            if workspace_registry is not None
-            else None
-        )
+        sandbox = None
+        if workspace_registry is not None:
+            try:
+                sandbox = workspace_registry.get(session_id)
+            except KeyError:
+                sandbox = None
         validate_event_seq(session_id, events)
         return cls(session_id, store, events, sandbox=sandbox)
 
