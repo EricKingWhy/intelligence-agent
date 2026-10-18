@@ -166,6 +166,31 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     expect(requests).toHaveLength(1);
   });
 
+  test('AC-11② 的另一半：缓存到**看板关闭**为止——关掉再开重新拉一次', async ({ page }) => {
+    const requests = countDelegationRequests(page);
+    await routeApi(page, {
+      sessions: [boardRow('s-exec', 'executing')],
+      delegations: DELEGATIONS,
+    });
+    await openBoard(page);
+    await cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }).click();
+    await expect.poll(() => requests.length).toBe(1);
+
+    await page.getByRole('button', { name: '关闭看板' }).click();
+    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toHaveCount(0);
+    // **不刷新页面**地重新打开：考的正是"卡片随看板卸载"这条路径（page.goto 会
+    // 顺带清掉一切，绿了也证明不了缓存边界）。
+    await page.getByLabel('看板').click();
+    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await expect(cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }))
+      .toHaveAttribute('aria-expanded', 'false');
+    await cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }).click();
+    // 卡片随看板卸载、本地态归零 ⇒ 重新展开必须再拉一次（这是"缓存到看板关闭"的边界，
+    // 不是"永久缓存"）。折叠态也回到收起：重开时按钮先是 aria-expanded=false。
+    await expect.poll(() => requests.length).toBe(2);
+    await expect(cardOf(page, 's-exec').locator('.agent-row')).toHaveCount(2);
+  });
+
   test('AC-11④：待验证/待办/已接受卡不渲染折叠按钮，对这些会话零请求', async ({ page }) => {
     const requests = countDelegationRequests(page);
     const mock: ApiMock = {
