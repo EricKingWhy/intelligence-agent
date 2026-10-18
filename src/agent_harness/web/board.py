@@ -44,6 +44,10 @@ logger = logging.getLogger("agent_harness.web.board")
 PUBLISH_THROTTLE_MS = 250
 
 #: 单连接待发帧上限。满时丢最旧（见模块 docstring 的"已知上限"）。
+#: 取值依据 = **≥ 一个节流窗口内可能堆积的帧数**：推送速率被 250ms 节流封顶在
+#: 4 帧/秒，而泵任务（`websocket.py::_pump_board`）只是把帧搬进出站队列、几乎不
+#: 停顿 ⇒ 8 帧 ≈ 2 秒消费余量；真满说明对端已卡死 ≥2s，此时丢最旧无损（每帧都是
+#: 权威全量快照）。Orca 侧无对应常量，这是本票自定值。
 _DEFAULT_QUEUE_MAXSIZE = 8
 
 #: 快照工厂：返回与 ``GET /api/sessions`` 同形的行列表。
@@ -54,7 +58,7 @@ class BoardBroadcaster:
     """板级快照广播：订阅集合 + 服务端一次性 250ms 节流。
 
     ``snapshot`` 是**注入的快照工厂**——生产里接 ``GET /api/sessions`` 的同一段
-    行映射（``app.py::list_session_rows``），保证 WS 帧与 REST 行逐字段相等；
+    行映射（``app.py::session_rows``），保证 WS 帧与 REST 行逐字段相等；
     测试里可换成计数替身。本类不认识会话、不认识 HTTP，只做"谁订阅、何时推什么"。
     """
 
@@ -83,11 +87,17 @@ class BoardBroadcaster:
         return len(self._subscribers)
 
     async def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        """登记一个订阅者并**立即**推一帧权威全量快照。
+        """登记一个订阅者并**尽力**立即推一帧权威全量快照。
 
         "订阅即得全量"是票面 §7 的语义（前端拿到即可渲染，不必再拉一次 REST）——
-        首帧在 ``await`` 返回前已入队，调用方可以直接 ``get_nowait()`` 内联下发，
-        从而保证"订阅后的第一条业务帧就是快照"这条顺序对客户端可见。
+        首帧在 ``await`` 返回前已入队，调用方可以内联下发，从而保证"订阅后的第一
+        条业务帧就是快照"这条顺序对客户端可见。
+
+        ⚠ **首帧可能缺席**：``_publish`` 按观察者纪律吞掉快照计算失败（只记日志、
+        不入队，见其注释）⇒ 调用方**不得**假定队列非空。缺席时不下发首帧，靠后续
+        投影更新点的帧补上（``websocket.py::_subscribe_board`` 用的是
+        ``suppress(QueueEmpty)``）。不要为了"保证有首帧"在这里再算一次快照——
+        那只是把同一个失败点搬到同一个地方。
         """
         loop = asyncio.get_running_loop()
         self._loop = loop

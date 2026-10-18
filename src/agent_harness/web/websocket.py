@@ -176,15 +176,22 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     async def _subscribe_board() -> None:
         """订阅板级快照：重复订阅是**替换**（旧订阅先摘，不留双份推送）。
 
-        首帧由 `BoardBroadcaster.subscribe` 在 await 返回前入队，这里立刻取出
+        首帧通常由 `BoardBroadcaster.subscribe` 在 await 返回前入队，这里立刻取出
         内联下发——保证"订阅后的第一条板帧就是权威全量快照"，而不是等泵任务
         被调度（顺序对客户端可见）。
+
+        ⚠ **首帧可能缺席**：快照计算失败时 `_publish` 按观察者纪律只记日志、不入队
+        （见其注释）⇒ 队列是空的。此时**不下发首帧**（`suppress(QueueEmpty)`），
+        靠 `_pump_board` 的后续帧补上；绝不能让它抛出——`QueueEmpty` 不是
+        `CancelledError`，冲出这里会打断本连接的读循环，而前端只会看到 WS 静默
+        掉线且**不触发降级**（降级只认 onerror/onclose），用户看到的是"板永远空着"。
         """
         nonlocal board_queue, board_relay_task
         await _unsubscribe_board()
         queue = await board_broadcaster.subscribe()
         board_queue = queue
-        await outbound_queue.put(queue.get_nowait())
+        with contextlib.suppress(asyncio.QueueEmpty):
+            await outbound_queue.put(queue.get_nowait())
         board_relay_task = asyncio.create_task(_pump_board(queue))
 
     run_manager: RunManager = state.run_manager

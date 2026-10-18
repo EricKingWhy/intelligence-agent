@@ -153,6 +153,11 @@ from agent_harness.session.service import (
     WorkspaceNotFound,
     validate_session_id,
 )
+
+# 领域摘要 dataclass（`SessionSummaryStats`）与传输模型 `SessionSummary` **刻意同名
+# 不同物**（前者无校验、不依赖 Pydantic），这里别名消歧：`session_rows` 的入参用
+# 领域类型，返回值用传输模型。
+from agent_harness.session.store import SessionSummaryStats as DomainSessionSummaryStats
 from agent_harness.session.workflow import WorkflowMode
 from agent_harness.storage import (
     SqliteCheckpointStore,
@@ -1379,11 +1384,14 @@ class AppState:
         )
         # 触发源接线（票面 §7「触发源 = T1 投影更新点」）：投影 store 的脏通知
         # → 广播器。投影 store 是**按 store root 分片的进程级单例**，这里取本
-        # AppState 那个 root 的实例并挂上；重复构造 AppState（测试）会挂多个
-        # 监听器，而 `mark_dirty` 幂等且无订阅者时空操作 ⇒ 无副作用。
-        get_board_projection_store(self.store).add_dirty_listener(
-            self.board_broadcaster.mark_dirty
-        )
+        # AppState 那个 root 的实例并挂上。
+        #
+        # ⚠ 登记的是绑定方法 ⇒ 强引用本 AppState 整棵对象图，而单例不释放 ⇒
+        # **必须**在 `shutdown()` 里摘掉（`_board_listener` 存下来就为这个）。
+        # 重复构造 AppState（测试进程每用例一个 tmp root）不摘就是线性累积。
+        self._board_projection_store = get_board_projection_store(self.store)
+        self._board_listener = self.board_broadcaster.mark_dirty
+        self._board_projection_store.add_dirty_listener(self._board_listener)
 
     async def _board_snapshot_rows(self) -> list[dict[str, Any]]:
         """看板快照行：与 `GET /api/sessions?include_archived=true` 同一函数、同一映射。
@@ -1492,6 +1500,10 @@ class AppState:
         if wiring is not None:
             await wiring.aclose()
         release_project_instruction_store(self.settings)
+        # #1305：摘掉看板脏通知监听器（`__init__` 里挂的绑定方法）。投影 store 是
+        # 进程级单例、永不淘汰，不摘就把本 AppState 整棵对象图钉在单例上——测试
+        # 进程里每个用例构造一个 AppState 即线性累积（幂等：摘两次无害）。
+        self._board_projection_store.remove_dirty_listener(self._board_listener)
 
 
 # ── 领域服务的组合根适配（#248）──────────────────────────────────────
@@ -1632,13 +1644,18 @@ def _context_settings_payload(
     )
 
 
-def session_rows(summaries: list[Any]) -> list[SessionSummary]:
+def session_rows(
+    summaries: list[DomainSessionSummaryStats],
+) -> list[SessionSummary]:
     """领域摘要 → 传输模型行（``GET /api/sessions`` 的**唯一**映射点）。
 
     #1305 §7：WS ``board_snapshot`` 帧与 REST 行必须逐字段相等，而票面点名了
     "契约形状可能漂"的风险（REST 逐字段手写映射、WS 另写序列化）。唯一可靠的
     防漂手段是**同一个函数**产出两侧——所以这段映射从路由体里提出来，路由与
     广播器共用；单测断言两侧相等即等于断言"没有第二份映射"。
+
+    入参用领域 dataclass 而不是 ``Any``：这里正是「领域字段改名 ⇒ 传输层响亮
+    失败」的那道检查，退化成 ``Any`` 就只剩运行期 ``AttributeError``。
 
     字段语义与"为什么刻意不给默认值"见 `SessionSummary` 的字段注释。
     """

@@ -8,9 +8,10 @@
  *
  * ## 降级（票面「降级」）
  *
- * WS 建连失败（握手被拒 / CSP / 非 WS 环境）⇒ 退回「打开时拉一次
- * `GET /api/sessions` + 手动刷新按钮」，**不引入轮询定时器**——轮询会与
- * `wsStream.ts:372/402/426` 的既有会话列表轮询语义打架（票面「不做边界」）。
+ * WS 建连失败（握手被拒 / CSP / 非 WS 环境）**或已收到帧之后连接异常断开**⇒
+ * 置 `degraded` 并退回「拉一次 `GET /api/sessions` + 手动刷新按钮」，**不引入轮询
+ * 定时器**——轮询会与 `wsStream.ts:372/402/426` 的既有会话列表轮询语义打架
+ * （票面「不做边界」）。两条触发路径都只**拉一次**（不是轮询）。
  *
  * `refresh()` 在**两条路径下都真的拉**：它是显式刷新（用户点按钮 / 拖拽落点后
  * 的主动 refetch），语义是"现在去问一次服务端"，与"WS 推来的帧要不要再节流"
@@ -20,7 +21,7 @@
  * "没有会话"是假陈述（不变量 #21）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listSessions } from '../lib/api';
 import { subscribeBoardSnapshot } from '../lib/wsStream';
 import type { SessionSummary } from '../types';
@@ -28,7 +29,8 @@ import type { SessionSummary } from '../types';
 export interface BoardSnapshotState {
   /** 当前行（WS 推送或降级拉取的结果）。 */
   sessions: SessionSummary[];
-  /** 是否已退回「打开时拉一次 + 手动刷新」路径（WS 不可用）。 */
+  /** 是否已退回「拉一次 + 手动刷新」路径（WS 不可用或已断）。`KanbanPanel` 据此
+   *  渲染降级提示——它不是一个只写不读的状态。 */
   degraded: boolean;
   /** 降级路径的最近一次错误文案（null = 没出错）。 */
   error: string | null;
@@ -36,9 +38,9 @@ export interface BoardSnapshotState {
   refresh: () => Promise<void>;
 }
 
-/** 缺省数据源：与 `KanbanPanel` 的原缺省同款——**总是**要全量（含已归档），
- *  可见性由视图开关决定而不是由请求决定（#171 的纪律，不变量 #22）。 */
-const defaultLoadSessions = (): Promise<SessionSummary[]> =>
+/** 缺省数据源：**总是**要全量（含已归档），可见性由视图开关决定而不是由请求决定
+ *  （#171 的纪律，不变量 #22）。唯一一份——`KanbanPanel` 不再自带同款默认值。 */
+export const defaultLoadSessions = (): Promise<SessionSummary[]> =>
   listSessions({ includeArchived: true });
 
 export function useBoardSnapshot(
@@ -78,7 +80,7 @@ export function useBoardSnapshot(
       },
       (e) => {
         if (!aliveRef.current) return;
-        // 建连失败 ⇒ 降级：拉一次（手动刷新按钮据此出现）。
+        // WS 不可用 / 已断 ⇒ 降级：拉一次（手动刷新按钮与降级提示据此出现）。
         setDegraded(true);
         setError(e.message);
         void pullOnce();
@@ -93,10 +95,17 @@ export function useBoardSnapshot(
   // 关板时复位降级态：下次打开重新尝试 WS（一次建连失败不该永久钉住降级路径）。
   useEffect(() => {
     if (open) return;
+    // 对外部信号（open 由 true → false）的同步，不是从渲染值派生状态。
+    // oxlint-disable-next-line react/set-state-in-effect
     setDegraded(false);
     setError(null);
   }, [open]);
 
-  return { sessions, degraded, error, refresh: pullOnce };
+  // 返回值 useMemo 稳定引用：`KanbanPanel.reload` 的依赖是 `board.refresh`，对象
+  // 字面量每次渲染都是新引用会让依赖数组失去意义。
+  return useMemo(
+    () => ({ sessions, degraded, error, refresh: pullOnce }),
+    [sessions, degraded, error, pullOnce],
+  );
 }
 

@@ -445,18 +445,24 @@ export interface BoardSubscription {
  *
  * - **不做第二次节流**（票面「不做边界」）：服务端已按 250ms leading/trailing 合并，
  *   前端收到即渲染；
- * - **不做降级**：WS 建连失败时回调 `onError`，由调用方退回「打开时拉一次 +
- *   手动刷新」（`useBoardSnapshot`），**不引入轮询定时器**。
+ * - **不做重连**：连接异常时回调 `onError` 一次，由调用方退回「拉一次 + 手动刷新」
+ *   （`useBoardSnapshot`），**不引入轮询定时器**。
+ *
+ * ⚠ `onError` **不区分**"建连就失败"与"收到过帧之后才断"：两种情况都要报——只报
+ * 前者的写法（本函数实现轮的 `if (closed || receivedFrame) return`）会让一次网络
+ * 抖动把板**永久冻结**在最后一帧，且 `degraded` 恒 false、零提示，用户看到一个
+ * 看起来正常但永不更新的板。**一次连接最多回调一次**（`onerror`/`onclose` 双触发
+ * 由 `errored` 去重）。
  *
  * @param onSnapshot 每帧 `board_snapshot` 的 `sessions` 行（与 `GET /api/sessions` 同形）。
- * @param onError    建连失败 / 异常关闭时回调一次（**只在还没收到任何帧时**）。
+ * @param onError    连接失败 / 异常关闭时回调一次（无论此前是否收到过帧）。
  */
 export function subscribeBoardSnapshot(
   onSnapshot: (sessions: SessionSummary[]) => void,
   onError?: (error: Error) => void,
 ): BoardSubscription {
   let closed = false;
-  let receivedFrame = false;
+  let errored = false;
   let sock: WebSocket | null = null;
 
   const close = () => {
@@ -478,7 +484,8 @@ export function subscribeBoardSnapshot(
   };
 
   const fail = (message: string) => {
-    if (closed || receivedFrame) return;
+    if (closed || errored) return;
+    errored = true;
     close();
     onError?.(new Error(message));
   };
@@ -516,7 +523,6 @@ export function subscribeBoardSnapshot(
     if (frame.type !== 'board_snapshot') return; // 其它帧非本订阅关心
     // 非数组形态（老后端 / 代理回整块对象）= 拿不到行 ⇒ 不当快照喂给视图。
     if (!Array.isArray(frame.sessions)) return;
-    receivedFrame = true;
     onSnapshot(frame.sessions as SessionSummary[]);
   };
   s.onerror = () => fail('board ws error');

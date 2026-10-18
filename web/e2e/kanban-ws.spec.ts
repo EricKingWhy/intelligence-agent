@@ -52,7 +52,11 @@ function cardsIn(page: Page, slug: string) {
 }
 
 test.describe('#1305 看板 WS 推送', () => {
-  test('AC-14 ①②：WS 订阅推来的帧逐字段渲染（不二次节流、不发 REST）', async ({ page }) => {
+  // ⚠ 标题**不写** "AC-14 ①②"：本用例覆盖的是前端侧的「订阅即渲染 + 开板零 REST
+  // + 不二次节流」。AC-14① 的「1s 内帧数 ≤3 且 ≥1」是**服务端**行为，由后端单测
+  // `tests/web/test_board_broadcaster.py` 钉住（前端侧没有这条因果可测，见文件头注释）；
+  // AC-14② 的逐字段相等在**下一条**用例。
+  test('WS 订阅首帧渲染 + 开板零 REST（不二次节流）', async ({ page }) => {
     // spec 内闭包：REST 列表请求次数（降级路径的判据）。
     let listGets = 0;
     page.on('request', (req) => {
@@ -102,11 +106,16 @@ test.describe('#1305 看板 WS 推送', () => {
       push!(finalRows);
       pushed += 1;
     }
-    push!(finalRows);
+    // **末帧内容必须唯一**：三帧推同一份行集的话，"末帧被丢弃"在 DOM 上不可观测
+    // （前两帧已经渲染出同样的结果），断言就退化成自证。这里末帧多一行 `s-last`，
+    // 它出现 = 末帧确实被渲染（前端有二次节流/丢末帧时这一行不会出现）。
+    const lastRows = [...finalRows, boardRow('s-last', 'executing')];
+    push!(lastRows);
     pushed += 1;
 
-    // 最后一帧的两行都在板上 ⇒ 末帧未被丢弃（前端无二次节流）。
-    await expect(cardsIn(page, 'executing')).toHaveCount(1);
+    // 末帧的行渲染到位 ⇒ 末帧未被丢弃（前端无二次节流）。
+    await expect(page.locator('.kanban-card[data-session-id="s-last"]')).toBeVisible();
+    await expect(cardsIn(page, 'executing')).toHaveCount(2);
     await expect(cardsIn(page, 'pending_verification')).toHaveCount(1);
     expect(pushed, '本用例推了 3 帧').toBe(3);
     // ③ 开板后全程零 REST：行只来自 WS（契约漂移/降级都会让这个数变正）。

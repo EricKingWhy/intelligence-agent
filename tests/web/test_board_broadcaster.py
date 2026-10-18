@@ -66,17 +66,8 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
     return frames
 
 
-def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
-    """读 WS 上当前已排队的业务帧，遇到 ``pong`` 栅栏即停。
-
-    ⚠ **必须先 ``settle`` 再发 ping**：板帧走**出站队列**（``_write_loop``），
-    而 ``pong`` 由读循环直接 ``send_text``——两条路径都往同一个 socket 写，
-    ping 紧跟订阅发出时 pong 可能**抢在**尚未被写循环调度的板帧前面到达
-    （实测：栅栏读到 0 帧而板帧随后才到）。``settle`` 取 > 节流窗口（250ms），
-    保证任何已产生的板帧（含 trailing）都已刷出，栅栏才是确定性的。
-    """
-    time.sleep(settle)
-    ws.send_text(json.dumps({"type": "ping"}))
+def _read_until_pong(ws) -> list[dict]:
+    """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。"""
     frames: list[dict] = []
     for _ in range(50):
         frame = json.loads(ws.receive_text())
@@ -88,6 +79,38 @@ def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
             continue
         frames.append(frame)
     raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
+
+
+def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
+    """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
+
+    两个坑，都是实测踩出来的：
+
+    1. **``pong`` 会超车板帧**。板帧走**出站队列**（``_write_loop``），而 ``pong``
+       由读循环直接 ``send_text``——两条路径写同一个 socket，ping 紧跟订阅发出时
+       pong 可能**抢在**尚未被写循环调度的板帧前面到达（实测：栅栏读到 0 帧而板帧
+       随后才到）。所以**每轮先 ``settle``（> 节流窗口 250ms）再发 ping**。
+    2. **"读到 pong 就返回"不等于"帧已到齐"**。实测：订阅后追加一条事件，帧在
+       出站队列里排到了**下一轮**才刷出（`TestClient` 的 portal 调度），单轮栅栏
+       读到 0 帧就返回 ⇒ 断言恒真（假绿）。所以这里**连读到连续两轮为空**才收工。
+
+    语义 = "等到安静为止"，与调用方此前是否发过 ping 无关（第一轮会吃掉遗留的
+    pong）。断言"没有帧"（``== []``）时也成立：连续两轮空才是真的空。
+    """
+    frames: list[dict] = []
+    quiet = 0
+    for _ in range(8):
+        time.sleep(settle)
+        ws.send_text(json.dumps({"type": "ping"}))
+        batch = _read_until_pong(ws)
+        if batch:
+            frames.extend(batch)
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 2:
+                return frames
+    return frames
 
 
 # ── ① 节流帧数上下界（AC-14 ①）─────────────────────────────────────────────
@@ -189,6 +212,100 @@ def test_leading_and_trailing_are_distinguishable_when_window_has_expired() -> N
     assert len(frames) == 2, (
         f"窗口过期后两条变化应为 leading+trailing 共 2 帧，实得 {len(frames)}"
     )
+
+
+def test_subscribe_survives_a_failing_snapshot(tmp_path: Path) -> None:
+    """快照计算失败时订阅**不得**把异常甩给调用方（#1305 审查 P1-1）。
+
+    ``_publish`` 按观察者纪律吞掉快照失败（只记日志、不入队）⇒ 订阅返回的队列
+    可能是**空的**。`websocket.py::_subscribe_board` 原来无条件 ``get_nowait()``
+    ⇒ 抛 ``asyncio.QueueEmpty``（不是 ``CancelledError``，`_unsubscribe_board` 的
+    suppress 也覆盖不到）冲出订阅分支：轻则读循环中断、订阅从未建立，重则未处理
+    任务异常。用户侧表现是"板永远空着且**不降级**"（前端降级只认 onerror/onclose，
+    收不到服务端异常语义）。
+
+    判据 = 订阅照常返回、订阅集合照常登记（连接仍可用），且随后一次成功的发布
+    能把帧送达。
+    """
+    calls = 0
+
+    async def flaky_snapshot() -> list[dict]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("会话 JSONL 损坏")
+        return [{"session_id": "s1"}]
+
+    async def main() -> tuple[bool, list[dict]]:
+        broadcaster = BoardBroadcaster(snapshot=flaky_snapshot)
+        # 首帧失败：不得抛，队列是空的。
+        queue = await broadcaster.subscribe()
+        assert queue.empty(), "快照失败时不该有首帧"
+        # 订阅本身已登记（连接可用），后续成功的发布照常送达。
+        assert broadcaster.subscriber_count == 1
+        broadcaster.mark_dirty()
+        await asyncio.sleep(PUBLISH_THROTTLE_MS / 1000 + 0.3)
+        return True, await _drain(queue)
+
+    ok, frames = asyncio.run(main())
+    assert ok
+    assert len(frames) == 1, f"后续发布应送达 1 帧，实得 {len(frames)}"
+    assert frames[0]["sessions"] == [{"session_id": "s1"}]
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    """轮询等 ``predicate()`` 为真（``ws.send_text`` 是 fire-and-forget，服务端处理
+    完之前不能断言）。超时返回 False——**不阻塞**，所以变异下是用例失败而非挂死。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_subscribe_board_with_a_failing_snapshot_keeps_the_socket_usable(
+    tmp_path: Path,
+) -> None:
+    """端到端：快照失败时 ``subscribe_board`` 不打断读循环（P1-1 的接线判据）。
+
+    两个坑，都是实测踩出来的：
+
+    - **不能用"读一帧"当活性判据**：读循环真断了的话，``receive_text()`` 会**永久
+      阻塞**（用例挂死而不是失败，M1 变异下正是这个形状）⇒ 活性探针改用
+      ``unsubscribe_board``（同样由读循环处理，效果可从 ``subscriber_count`` 读到，
+      不发也不收 socket 帧）。
+    - **``ws.send_text`` 是 fire-and-forget**：发完立刻断言会读到尚未处理的旧状态
+      （本用例初版就这么假红过）⇒ 一律用 :func:`_wait_until` 轮询。
+
+    判据是"订阅**建立并保持**"：M1 变异（去掉 ``suppress(QueueEmpty)``）下
+    ``subscribe()`` 先登记、异常随即冲出读循环、``finally`` 再摘掉 ⇒ 计数先 1 后 0，
+    轮询超时（或保持断言失败）。
+    """
+    client = _app(tmp_path)
+    broadcaster = client.app.state.agent.board_broadcaster
+
+    # 把快照工厂换成"总是失败"——模拟 JSONL 损坏 / 读盘异常。
+    async def boom() -> list[dict]:
+        raise RuntimeError("快照算不出来")
+
+    broadcaster._snapshot = boom
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(json.dumps({"type": "subscribe_board"}))
+        assert _wait_until(lambda: broadcaster.subscriber_count == 1), (
+            "订阅没建立：快照异常冲出了订阅分支（读循环已断）"
+        )
+        # 保持性：异常发生在 subscribe 返回**之后**（`get_nowait` 那一步），
+        # 若没被 suppress，finally 会在这一刻把订阅摘掉。
+        time.sleep(0.3)
+        assert broadcaster.subscriber_count == 1, "订阅被快照异常连带摘掉了"
+
+        # 读循环还活着：同一连接上还能处理下一条上行。
+        ws.send_text(json.dumps({"type": "unsubscribe_board"}))
+        assert _wait_until(lambda: broadcaster.subscriber_count == 0), (
+            "读循环被快照异常打断了（unsubscribe_board 没被处理）"
+        )
 
 
 # ── 无订阅者空操作 ─────────────────────────────────────────────────────────
@@ -418,18 +535,25 @@ def test_closing_the_socket_clears_the_board_subscription(tmp_path: Path) -> Non
 
 
 def test_projection_trigger_event_pushes_a_frame_to_subscribers(tmp_path: Path) -> None:
-    """触发集事件（``task/defined``）⇒ 经投影更新点推出新帧（端到端接线判据）。"""
+    """触发集事件（``task/defined``）⇒ 经投影更新点推出新帧（端到端接线判据）。
+
+    会话**先建、再订阅**：``Session.start`` 写的是 ``SESSION_STARTED``（触发集外的
+    水位事件），#1305 起它**也会**推帧（板行含 ``event_count``，见下一条用例）——
+    放在订阅后建会让本用例量到两帧，掩盖"一次触发事件推一帧"这条判据。
+    """
     client = _app(tmp_path)
     _seed(tmp_path, client, 1)
     store: JsonlSessionStore = client.app.state.agent.store
+    session = Session.start(store, cwd=str(tmp_path))
 
     with client.websocket_connect("/api/ws") as ws:
         ws.send_text(json.dumps({"type": "subscribe_board"}))
         initial = _drain_blocking(ws)
         assert len(initial) == 1
+        before = {row["session_id"]: row for row in initial[0]["sessions"]}
+        assert session.session_id in before, "订阅首帧应已含新建的会话"
 
         # 窗口已过（首帧即 leading）⇒ 下一次触发是新的 leading，立即成帧。
-        session = Session.start(store, cwd=str(tmp_path))
         outcome = apply_task_definition(
             session,
             task_text="新增一张卡",
@@ -439,28 +563,95 @@ def test_projection_trigger_event_pushes_a_frame_to_subscribers(tmp_path: Path) 
 
         frames = _drain_blocking(ws)
 
-    assert len(frames) == 1, f"触发集事件应推一帧，实得 {len(frames)}"
+    assert len(frames) == 1, f"一次触发集事件应推一帧，实得 {len(frames)}"
     assert frames[0]["type"] == "board_snapshot", frames[0]
-    assert len(frames[0]["sessions"]) == 2, frames[0]["sessions"]
+    rows = {row["session_id"]: row for row in frames[0]["sessions"]}
+    # 帧确实反映**新事件**（不是把订阅首帧又发了一遍）：水位前进了。
+    assert rows[session.session_id]["event_count"] > before[session.session_id]["event_count"]
 
 
-def test_non_trigger_event_does_not_push_a_frame(tmp_path: Path) -> None:
-    """触发集外的事件不推帧（节流只在服务端做一次，不靠前端二次节流兜）。"""
+def test_non_trigger_event_still_pushes_a_frame(tmp_path: Path) -> None:
+    """**触发集外**的事件也推帧（#1305 审查 P2-1 的判据）。
+
+    板行含 `event_count` / `last_event_time`（`app.py::session_rows` 逐字段映射
+    `SessionSummaryStats`），而这两个值**每条事件都会变**——`ASSISTANT_MESSAGE` /
+    `TOOL_RESULT` / 普通 `USER_MESSAGE` 全在触发集外。只按触发集通知的话，长 run
+    期间卡片的时间标签会停在最后一个触发事件那一刻（前端 `KanbanCard.tsx` 渲染
+    `last_event_time`，`lib/kanban.ts` 列内同键排序也用它）。
+
+    成本侧由 250ms 节流封顶（4 帧/秒）+ 无订阅者时空操作，见 `web/board.py`。
+    """
     client = _app(tmp_path)
     _seed(tmp_path, client, 1)
     store: JsonlSessionStore = client.app.state.agent.store
     broadcaster = client.app.state.agent.board_broadcaster
+    # 会话在**订阅之前**建好：`SESSION_STARTED` 也是触发集外的水位事件，#1305 起
+    # 它同样推帧——放订阅后建会让本用例量到两帧，说不清是哪条事件推的。
+    session = Session.start(store, cwd=str(tmp_path))
 
     with client.websocket_connect("/api/ws") as ws:
         ws.send_text(json.dumps({"type": "subscribe_board"}))
-        ws.send_text(json.dumps({"type": "ping"}))
-        _drain_blocking(ws)
+        initial = _drain_blocking(ws)
+        assert len(initial) == 1
+        before = {row["session_id"]: row for row in initial[0]["sessions"]}
 
-        # 冷启动：先让该会话的投影算过一次，再追加触发集外的 USER_MESSAGE。
-        session = Session.start(store, cwd=str(tmp_path))
+        # 触发集外的普通聊天消息（`USER_MESSAGE` 不在 `_BOARD_PROJECTION_TRIGGER_TYPES`）。
         from agent_harness.session.event import USER_MESSAGE
 
         session.append(USER_MESSAGE, {"content": "普通聊天"})
         assert broadcaster.subscriber_count == 1
 
-        assert _drain_blocking(ws) == [], "触发集外事件不该推帧"
+        frames = _drain_blocking(ws)
+
+    assert len(frames) == 1, (
+        f"触发集外事件也应推一帧（板行含 event_count/last_event_time），实得 {len(frames)}"
+    )
+    rows = {row["session_id"]: row for row in frames[0]["sessions"]}
+    # 帧确实反映了这条非触发事件（水位前进）——这正是"只按触发集通知"会漏掉的更新。
+    assert rows[session.session_id]["event_count"] > before[session.session_id]["event_count"]
+
+
+def test_dirty_listener_can_be_removed(tmp_path: Path) -> None:
+    """``remove_dirty_listener`` 摘得掉、幂等（#1305 审查 P2-1(S)/P2-3(C)）。
+
+    投影 store 是**进程级单例**，监听器是绑定方法 ⇒ 强引用监听者整棵对象图。
+    没有移除 API 的话，测试进程里每构造一个 `AppState` 就多钉一份，GC 收不掉。
+    """
+    from agent_harness.session.board_projection import get_board_projection_store
+
+    client = _app(tmp_path)
+    state = client.app.state.agent
+    projection_store = get_board_projection_store(state.store)
+    broadcaster = state.board_broadcaster
+
+    assert state._board_listener in projection_store._dirty_listeners
+
+    projection_store.remove_dirty_listener(state._board_listener)
+    assert state._board_listener not in projection_store._dirty_listeners
+
+    # 幂等：再摘一次不抛（`suppress(ValueError)`）。
+    projection_store.remove_dirty_listener(state._board_listener)
+
+    # 摘掉后事件不再触达该广播器（订阅者数为 0 时本就是空操作 ⇒ 这里直接验接线
+    # 断了：重新挂回再摘，仍不炸）。
+    projection_store.add_dirty_listener(state._board_listener)
+    assert broadcaster.subscriber_count == 0
+
+
+def test_shutdown_removes_the_dirty_listener(tmp_path: Path) -> None:
+    """``AppState.shutdown()`` 摘监听器（生命周期归 lifespan，不留悬空引用）。
+
+    必须用 ``with`` 进 TestClient：lifespan 只在上下文管理器里跑（裸构造不跑
+    startup/teardown），``client.close()`` 单独调不触发 ``state.shutdown()``。
+    """
+    from agent_harness.session.board_projection import get_board_projection_store
+
+    with _app(tmp_path) as client:
+        state = client.app.state.agent
+        projection_store = get_board_projection_store(state.store)
+        assert state._board_listener in projection_store._dirty_listeners
+
+    # 退出 with ⇒ lifespan 的 finally 跑过 `state.shutdown()`。
+    assert state._board_listener not in projection_store._dirty_listeners, (
+        "shutdown 未摘监听器：单例会永久钉住 AppState 对象图"
+    )

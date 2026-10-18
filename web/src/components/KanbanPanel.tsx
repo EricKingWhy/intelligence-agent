@@ -33,7 +33,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, X } from 'lucide-react';
 import {
-  listSessions,
   postSessionCommand,
   readErrorDetail,
   sendMessage,
@@ -53,20 +52,16 @@ import {
   writeShowAccepted,
 } from '../lib/kanban';
 import { KanbanCard } from './KanbanCard';
-import { useBoardSnapshot } from '../hooks/useBoardSnapshot';
+import { defaultLoadSessions, useBoardSnapshot } from '../hooks/useBoardSnapshot';
 import '../styles/kanban.css';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 数据源注入缝（T3 用 WS 快照替换；缺省 = 打开时拉一次 REST）。 */
+  /** 数据源注入缝：只服务**降级路径**与显式刷新（主路径走 WS 板级快照）。
+   *  缺省 = `useBoardSnapshot` 导出的那一份（**唯一**一份，本组件不自带副本）。 */
   loadSessions?: () => Promise<SessionSummary[]>;
 }
-
-/** 缺省数据源：与 `useSession.refreshSessions` 同款——**总是**要全量（含已归档），
- *  可见性由视图开关决定而不是由请求决定（#171 的纪律，不变量 #22）。 */
-const defaultLoadSessions = (): Promise<SessionSummary[]> =>
-  listSessions({ includeArchived: true });
 
 /** 拖拽被拒绝时的说明（AC-9① 的判据文本）。 */
 const REJECT_TEXT = '只有 backlog 卡可以拖到「执行中」';
@@ -86,6 +81,8 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const board = useBoardSnapshot(open, loadSessions);
   const sessions = board.sessions;
   const loadError = board.error;
+  const degraded = board.degraded;
+  const refresh = board.refresh;
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   /** 开关是**视图状态**：首帧就要按它渲染（同 `lib/railArchive.ts` 的纪律：
@@ -105,12 +102,12 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      await board.refresh();
+      await refresh();
       setNow(Date.now());
     } finally {
       setLoading(false);
     }
-  }, [board]);
+  }, [refresh]);
 
   // 打开时**不再**拉一次：`useBoardSnapshot` 在 open 时订阅 `subscribe_board`，
   // 服务端订阅即推全量首帧（#1305 §7）。只有 WS 建连失败时 hook 才自己退回
@@ -343,6 +340,14 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
         {loadError !== null && (
           <div className="kanban-notice kanban-notice-error" role="alert">
             加载会话列表失败：{loadError}
+          </div>
+        )}
+        {/* 降级不是错误、但必须**说出来**：实时推送已停（WS 建连失败或中途断开），
+            现在看到的行不会自己更新。不提示的话用户面对的是一个"看起来正常但
+            永不刷新"的板——这正是本票要解决的问题的反面。手动刷新按钮就在右上角。 */}
+        {degraded && (
+          <div className="kanban-notice kanban-notice-warn" role="status">
+            实时推送不可用，看板已降级为手动刷新
           </div>
         )}
         {notice !== null && (
