@@ -17,9 +17,11 @@
  *
  *  **#1307 子智能体折叠行（T5）**：只有 `product_state === 'executing'` 的卡渲染
  *  折叠按钮（Orca `AgentKanbanCard.tsx:288-305` 同构：真 `<button>` + `aria-expanded`）。
- *  **首次展开才拉** `GET /api/sessions/{id}/delegations`，结果（含空结果/失败）缓存在
- *  卡片本地态里；`KanbanPanel` 关闭时整块板 `return null` ⇒ 卡片卸载 ⇒ 缓存自然
- *  失效，正是"缓存到看板关闭"的语义，不需要额外失效逻辑。
+ *  **首次展开才拉** `GET /api/sessions/{id}/delegations`：看板打开时不为执行中卡预拉，
+ *  避免 N×`/delegations` fan-out；C3 明令不进 sessions 投影。空结果缓存、
+ *  失败态允许重试（失败不缓存），缓存放在卡片本地态里；`KanbanPanel` 关闭时整块板
+ *  `return null` ⇒ 卡片卸载 ⇒ 缓存自然失效，正是"缓存到看板关闭"的语义，
+ *  不需要额外失效逻辑。
  *  行内格式化全部复用 roster 的单一事实源（`STATUS_LABEL` / `tokenText` /
  *  `durationText`），本文件不写第二份映射。耗时基准用看板下发的 `now`（与相对时间同源）。
  *
@@ -158,8 +160,9 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
         // 间距与卡内一致（6px），不新增 CSS（本票只改两个组件文件）。
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {/* 真 `<button>` + `aria-expanded`（Orca `AgentKanbanCard.tsx:288-305` 同构）。
-              卡本身是 `role="button"`，所以点击/键盘都必须 `stopPropagation`——
+              卡本身是 `role="button"`，所以点击/键盘 Enter/Space 必须 `stopPropagation`——
               否则展开子智能体会顺手把会话打开（嵌套交互事故）。
+              其他键（如 Esc 关看板）放行给祖先处理。
               `.agent-trigger` 的 `.chev` 在 `.open` 时旋转 180°（既有 CSS，不新增）。 */}
           <button
             type="button"
@@ -170,7 +173,14 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
               event.stopPropagation();
               toggleSubagents();
             }}
-            onKeyDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              // 只拦截按钮的激活键（Enter/Space）：卡本身是 `role="button"`，
+              // 这两个键冒泡会触发祖先的键盘打开逻辑（嵌套交互事故）；
+              // 其他键（如 Esc 关看板）放行给祖先处理。
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.stopPropagation();
+              }
+            }}
           >
             <ChevronDown size={14} className="chev" aria-hidden="true" />
             <span className="roster-label">子智能体</span>

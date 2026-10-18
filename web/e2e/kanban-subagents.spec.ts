@@ -15,7 +15,9 @@ import { routeApi, sessionRow, type ApiMock } from './fixtures';
 
 const T = '2026-10-17T00:00:00Z';
 
-/** 看板行：在 `sessionRow` 之上补 #1303 的四字段（真后端恒发全部四个）。 */
+/** 看板行：在 `sessionRow` 之上补 #1303 的四字段（真后端恒发全部四个）。
+ *  本仓惯例：各看板 spec 各自定义自己的 `boardRow`/`openBoard`（`kanban.spec.ts`、
+ *  `kanban-ws.spec.ts` 同款），不做跨 spec import，故意自包含——不抽取共享。 */
 function boardRow(
   sessionId: string,
   productState: string,
@@ -101,7 +103,7 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     await expect.poll(() => requests.length).toBe(1);
     expect(requests[0]).toBe('s-exec');
 
-    // 行内容：状态词（STATUS_LABEL）、token（formatTokenCount）、耗时（durationText）
+    // 行内容：状态词（STATUS_LABEL）、token（tokenText）、耗时（durationText）
     // 全部来自 roster 的单一事实源，本票不复制映射。
     await expect(card.locator('.agent-row')).toHaveCount(2);
     await expect(card.getByText('完成')).toBeVisible();
