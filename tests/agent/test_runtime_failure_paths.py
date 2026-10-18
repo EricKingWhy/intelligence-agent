@@ -37,7 +37,12 @@ from agent_harness.session import (
     JsonlSessionStore,
 )
 from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import ERROR, RUN_TERMINAL_TYPES, WORKFLOW_MODE_CHANGED
+from agent_harness.session.event import (
+    ERROR,
+    RUN_TERMINAL_TYPES,
+    USER_INPUT_REQUESTED,
+    WORKFLOW_MODE_CHANGED,
+)
 from agent_harness.session.session import Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
@@ -647,6 +652,62 @@ async def test_plan_failure_marker_is_persisted_before_terminal_yield(tmp_path):
     persisted_types = [event.type for event in session.events]
     assert persisted_types.index(RUN_FAILED) < persisted_types.index(ERROR)
     assert isinstance(errors[0].seq, int)
+
+
+@pytest.mark.asyncio
+async def test_submitted_plan_approval_suppresses_the_before_plan_marker(tmp_path):
+    """#1356 方案 4 / AC13：已提交待审批的计划不算"计划从未生成"。
+
+    `submit_plan` 按方案 4 的既定选择**不发** `task/plan_updated`（否则
+    `ConversationState.plan` 的进度清单被计划正文污染）。若判据只认
+    `task/plan_updated`，"模型已交计划、审批还没回来时进程崩了"会命中"计划从未
+    生成"——横幅对一份已交的计划说"可手动退出 plan 模式后重试"是错话。
+    """
+    session = make_session(tmp_path)
+    session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "req-1",
+            "kind": "plan_approval",
+            "run_id": "run-prev",
+            "plan_markdown": "# 计划\n\n1. 改 a.py",
+            "touched_files": ["a.py"],
+            "artifact_id": "art-1",
+            "plan_sha256": "0" * 64,
+        },
+        run_id="run-prev",
+    )
+
+    agen = _runtime(ExplodingModel()).run_stream(session, "hi")
+    async for event in agen:
+        if event.type == RUN_FAILED:
+            break
+    await agen.aclose()
+
+    assert not [event for event in session.events if event.type == ERROR], (
+        "已提交待审批的计划不得触发 run-failed-before-plan"
+    )
+
+
+@pytest.mark.asyncio
+async def test_answered_plan_approval_still_counts_as_a_generated_plan(tmp_path):
+    """判据不区分"待批 / 已答复"：计划提交过就是提交过（审批完崩了同样不是从未生成）。"""
+    session = make_session(tmp_path)
+    session.append(WORKFLOW_MODE_CHANGED, {"mode": "plan"})
+    session.append(
+        USER_INPUT_REQUESTED,
+        {"request_id": "req-1", "kind": "plan_approval", "run_id": "run-prev"},
+        run_id="run-prev",
+    )
+
+    agen = _runtime(ExplodingModel()).run_stream(session, "hi")
+    async for event in agen:
+        if event.type == RUN_FAILED:
+            break
+    await agen.aclose()
+
+    assert not [event for event in session.events if event.type == ERROR]
 
 
 @pytest.mark.asyncio

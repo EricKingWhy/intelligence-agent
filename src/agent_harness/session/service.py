@@ -833,6 +833,77 @@ def _pending_user_input_pause(
 #: 单题被跳过（留空）时在该题渲染行里的占位文案。
 _ASK_SKIPPED_ANSWER = "（跳过）"
 
+#: `plan_approval` 的三决策（与 `web/app.py::InputRequestAnswer.decision` 同值域）。
+_PLAN_DECISIONS = ("approve", "revise", "reject")
+
+#: 用户反馈（修改意见 / 拒绝理由）上限，对齐 `custom_text` 的量级。
+_PLAN_FEEDBACK_MAX_CHARS = 100_000
+
+
+def _plan_approval_input_answer_data(
+    events: list[SessionEvent], *, request_id: str,
+    request: SessionEvent, answer: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    """归一 `plan_approval` 的裁决：批准 / 要求修改 / 拒绝。
+
+    **无副作用**：本函数在一次恢复里会被调用三次（阶段一校验、恢复后复校、落盘前），
+    任何写操作都会被放大成重复事件。切档（批准 ⇒ `workflow/mode-changed(normal)`）
+    因此落在 `_commit_paused_resume` 的落盘点，由那里保证 seq 严格早于恢复 run 的
+    任何事件（AC6）——**不是**在这里。
+    """
+    decision = answer.get("decision")
+    if decision not in _PLAN_DECISIONS:
+        raise BudgetRejection("input_request.decision 必须是 approve / revise / reject")
+    if set(answer) - {"request_id", "decision", "feedback"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    feedback = answer.get("feedback")
+    if feedback is not None:
+        if not isinstance(feedback, str) or not feedback.strip():
+            raise BudgetRejection("input_request.feedback 必须是非空文本")
+        if len(feedback) > _PLAN_FEEDBACK_MAX_CHARS:
+            raise BudgetRejection("input_request.feedback 必须是 1 至 100000 字符")
+        # 批准不带意见：静默丢弃用户写下的字比拒绝更糟（同 `extra="forbid"` 的取向）。
+        if decision == "approve":
+            raise BudgetRejection("批准形态不接受 feedback")
+
+    artifact_id = request.data.get("artifact_id")
+    artifact_ref = artifact_id if isinstance(artifact_id, str) and artifact_id else ""
+    if decision == "approve":
+        # 计划正文已落 artifact（内容寻址）：批准消息带引用，模型按引用回读而非复述
+        # 正文——正文不必在上下文里再灌一遍。
+        content = "计划已批准，现在开始执行。"
+        if artifact_ref:
+            content += f"（计划全文：artifact {artifact_ref}，可用 inspect_artifact 读取）"
+    elif decision == "revise":
+        content = (
+            f"用户要求修改计划，反馈原文：\n\n{feedback}\n\n"
+            "按反馈修订后重新调用 submit_plan。"
+            if feedback is not None else
+            "用户要求修改计划（未附具体意见）。按你的判断修订后重新调用 submit_plan。"
+        )
+    else:
+        content = (
+            f"用户拒绝了该计划：{feedback}。请重新调研或提出不同方案。"
+            if feedback is not None else
+            "用户拒绝了该计划（未附理由）。请重新调研或提出不同方案。"
+        )
+
+    normalized_answer: dict[str, Any] = {
+        "request_id": request_id,
+        "decision": decision,
+    }
+    if feedback is not None:
+        normalized_answer["feedback"] = feedback
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
+    return {
+        "content": content,
+        "input_request_id": request_id,
+        "input_request_answer": normalized_answer,
+    }, False
+
 
 def _user_input_answer_already_recorded(
     events: list[SessionEvent], *, request_id: str, normalized_answer: dict[str, Any],
@@ -1010,6 +1081,10 @@ def _user_input_answer_data(
         return _ask_user_input_answer_data(
             events, request_id=request_id, request=request,
             answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
+        )
+    if request.data.get("kind") == "plan_approval":
+        return _plan_approval_input_answer_data(
+            events, request_id=request_id, request=request, answer=answer,
         )
     if request.data.get("kind") != "protected_fact_conflict":
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
@@ -3080,6 +3155,17 @@ class SessionService:
                 ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
             )
             if answer_data is not None and not answer_already_recorded:
+                # #1356 AC6：批准计划 = 用户显式动作的一部分，切档与恢复 run 是**同一个
+                # 原子动作**（对标 Claude Code 的 "approving a plan exits plan mode"）。
+                # 顺序是硬要求：mode(normal) 的 seq 必须严格早于恢复 run 的任何事件
+                # ——执行期第一个工具调用在放行时现派生 mode，必须已经读到 normal。
+                # 与 #1193 的边界：那边禁的是**异常路径**自动回滚 mode（权限只收紧不
+                # 自动放宽）；这里是用户点了"批准"，不是异常臂，两者不冲突。
+                # 幂等：`answer_already_recorded` 的重放不重复写 mode 事件。
+                if (
+                    answer_data["input_request_answer"].get("decision") == "approve"
+                ):
+                    append_workflow_mode_change(session, WorkflowMode.NORMAL)
                 session.append(USER_MESSAGE, answer_data)
             # 用户输入续跑的 Recovery 延迟 SESSION_RESUMED 到上述最终预算检查之后。
             # 其他路径由 RecoveryCoordinator 写入；无 Recovery 时由 CAS 胜者写入。

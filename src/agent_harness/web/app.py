@@ -796,10 +796,11 @@ class AskUserAnswerItem(BaseModel):
 
 
 class InputRequestAnswer(BaseModel):
-    """`resume_basis=user_input` 的回答体，按 `kind` 二选一形状（#1204）。
+    """`resume_basis=user_input` 的回答体，按 `kind` 三选一形状（#1204 / #1356）。
 
     - 窄场景（`protected_fact_conflict`）：`{request_id, choice, custom_text?}`；
-    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`。
+    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`；
+    - 计划审批（`plan_approval`）：`{request_id, decision, feedback?}`。
     形状层只挡明显非法组合；权威语义判定在领域层 `SessionService`（单一规则来源）。
     """
 
@@ -813,9 +814,28 @@ class InputRequestAnswer(BaseModel):
     questions: list[AskUserAnswerItem] | None = Field(default=None, min_length=1)
     # #1204：ask_user 超时到点时的恢复形态——只注入"用户可能不在"系统消息，不写答案。
     timeout: bool = False
+    # #1356：计划审批的裁决。**不复用 `choice`**——它的 Literal 被约束冲突场景钉死，
+    # 放宽它等于同时松动另一条业务线。`feedback` 只在 revise / reject 时有意义。
+    decision: Literal["approve", "revise", "reject"] | None = None
+    feedback: str | None = Field(default=None, min_length=1, max_length=100_000)
 
     @model_validator(mode="after")
     def validate_shape(self) -> InputRequestAnswer:
+        if self.decision is not None:
+            if (
+                self.choice is not None
+                or self.questions is not None
+                or self.custom_text is not None
+                or self.timeout
+            ):
+                raise ValueError(
+                    "decision form cannot carry choice/questions/custom_text/timeout"
+                )
+            if self.decision == "approve" and self.feedback is not None:
+                raise ValueError("approve form cannot carry feedback")
+            return self
+        if self.feedback is not None:
+            raise ValueError("feedback is only allowed with a decision")
         if self.timeout:
             if (
                 self.choice is not None
@@ -829,7 +849,7 @@ class InputRequestAnswer(BaseModel):
                 raise ValueError("questions form cannot carry choice/custom_text")
             return self
         if self.choice is None:
-            raise ValueError("input_request requires either choice or questions")
+            raise ValueError("input_request requires either choice, questions or decision")
         if self.choice == "custom":
             if self.custom_text is None or not self.custom_text.strip():
                 raise ValueError("custom choice requires non-blank custom_text")

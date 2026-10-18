@@ -56,6 +56,7 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.plan import PlanState, derive_plan
+from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 from agent_harness.session.progress import (
     PROGRESS_VERIFY_OK,
     PROGRESS_VERIFY_STALE,
@@ -250,6 +251,64 @@ _MODIFIED_PATHS_BLOCK_HEADING = "## 最近修改文件"
 #: W-06（#350）：进度核对块标题。同样避开 `_is_compaction_summary` 全部前缀
 #: 与清单/文件块标题——ephemeral 块与持久化摘要绝不同形。
 _PROGRESS_BLOCK_HEADING = "## 任务进度核对（progress.md）"
+
+#: #1356 方案 1：PLAN 档指令块标题。同前三个块：避开 `_is_compaction_summary`
+#: 的全部识别前缀（"## 原始目标与用户约束"/"## 目标"），ephemeral 块与持久化
+#: 摘要绝不同形。
+_PLAN_MODE_BLOCK_HEADING = "## 计划档（plan mode）工作方式"
+
+#: #1356：指令块正文。结构抄 Claude Code 的"边界 → 判定标准 → 唯一出口"，文案
+#: 是本仓自己的。指令是**模式相关**的，只能走 ephemeral 注入块——塞进
+#: system_prompt 会让 NORMAL 档也背上这段 token，并破坏既有的逐字节契约。
+_PLAN_MODE_BLOCK_BODY = """你现在处于计划档：**只做只读调研，不得修改任何文件**。
+写操作会被 Runtime 直接拦截，不要尝试——把要改的东西写进计划里。
+
+调研完成后，把计划写成结构化 markdown，至少包含：
+- 目标：要达成什么、为什么
+- 现状证据：读到的关键文件与行号
+- 分步改动：可执行的步骤序列
+- 触碰文件：将创建或修改的文件路径清单
+- 风险：回滚方式与可能踩的坑
+
+收口的**唯一方式**是调用 `submit_plan`（计划正文 + `touched_files`），不要用自然
+语言散文说"我打算这样改"就结束本轮。提交后 run 会暂停，等待用户裁决：
+- **批准**：会话切回 normal 档，你拿到执行权，按计划开始执行；
+- **要求修改**：会话仍在计划档，按用户的反馈修订后**再次**调用 `submit_plan`；
+- **拒绝**：会话仍在计划档，重新调研或提出不同方案后再提交。
+
+维护执行期的进度清单请用 `update_plan`——那是"汇报进度"，与 `submit_plan` 的
+"请求授权"是两件事，不要混用。"""
+
+
+def _plan_mode_block(events: list[SessionEvent]) -> str | None:
+    """#1356 方案 1：PLAN 档生效时返回指令块正文，否则 None。
+
+    判据**纯事件推导**（`effective_workflow_mode` 现派生）⇒ 可重放、无 wall-clock、
+    无实例状态——与 `_should_inject_plan` 同一范式。
+    """
+    if effective_workflow_mode(events) != WorkflowMode.PLAN:
+        return None
+    return _PLAN_MODE_BLOCK_HEADING + "\n" + _PLAN_MODE_BLOCK_BODY
+
+
+def _inject_plan_mode_block(
+    messages: list[AnyMessage], block_text: str,
+) -> list[AnyMessage]:
+    """把 PLAN 档指令块作为一条 SystemMessage 注入。
+
+    落点与清单块同形（第一条压缩摘要之前；无摘要时开头连续 SystemMessage
+    之后）。调用顺序在 `_inject_plan_block` **之前**——模式边界比清单更靠前，
+    模型先看到"你在计划档"再看到"当前清单"。
+    """
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=block_text), *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [*messages[:insertion], SystemMessage(content=block_text), *messages[insertion:]]
 
 
 def _should_inject_progress(events: list[SessionEvent]) -> bool:
@@ -649,6 +708,9 @@ class ContextBuilder:
         # W-06（#350）：最近一次 build 实际注入的进度核对块成本（同清单锚块的
         # 记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
         self._last_progress_tokens: int = 0
+        # #1356 方案 1：最近一次 build 实际注入的 PLAN 档指令块成本（同清单锚块
+        # 的记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
+        self._last_plan_mode_tokens: int = 0
         # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
         # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
         # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
@@ -852,6 +914,14 @@ class ContextBuilder:
         progress_text, progress_tokens = await self._resolve_progress_block(session)
         token_estimate += progress_tokens
         self._last_progress_tokens = progress_tokens
+        # #1356 方案 1：PLAN 档指令块（先计入再注入——注入了就计数）。
+        plan_mode_text = _plan_mode_block(session.events)
+        plan_mode_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_mode_text)])
+            if plan_mode_text is not None else 0
+        )
+        token_estimate += plan_mode_tokens
+        self._last_plan_mode_tokens = plan_mode_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -860,6 +930,8 @@ class ContextBuilder:
             built = await self._with_providers(session, messages, token_estimate)
             built = self._inject_protected_facts(built, protected_facts_messages)
             built = self._inject_runtime_context(built, runtime_context)
+            if plan_mode_text is not None:
+                built = _inject_plan_mode_block(built, plan_mode_text)
             if plan_text is not None:
                 built = _inject_plan_block(built, plan_text)
             if progress_text is not None:
@@ -903,6 +975,13 @@ class ContextBuilder:
         # 经核对的原目标/下一步）。
         progress_text, progress_tokens = await self._resolve_progress_block(session)
         self._last_progress_tokens = progress_tokens
+        # #1356 方案 1：PLAN 档指令块（压缩后同样先计入再注入）。
+        plan_mode_text = _plan_mode_block(session.events)
+        plan_mode_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_mode_text)])
+            if plan_mode_text is not None else 0
+        )
+        self._last_plan_mode_tokens = plan_mode_tokens
         # 压缩后的 token_estimate 只含 messages；所有在 messages 之外的上下文
         # （system prompt、运行时快照、保护事实与计划锚块）在 provider 预算中各补回一次。
         reserved_tokens = (
@@ -912,6 +991,7 @@ class ContextBuilder:
             + plan_tokens
             + paths_tokens
             + progress_tokens
+            + plan_mode_tokens
         )
         # 硬护栏复核只对**确已压缩**的路径生效（no-op 沿用原投影，不在此拒）。
         recheck = compacted_token_estimate + protected_facts_tokens
@@ -943,6 +1023,8 @@ class ContextBuilder:
         built = await self._with_providers(session, compacted_messages, provider_estimate)
         built = self._inject_protected_facts(built, protected_facts_messages)
         built = self._inject_runtime_context(built, runtime_context)
+        if plan_mode_text is not None:
+            built = _inject_plan_mode_block(built, plan_mode_text)
         if plan_text is not None:
             built = _inject_plan_block(built, plan_text)
         if progress_text is not None:
@@ -1088,12 +1170,21 @@ class ContextBuilder:
         token_estimate += plan_tokens + paths_tokens
         self._last_plan_tokens = plan_tokens
         self._last_modified_paths_tokens = paths_tokens
+        # #1356 方案 1：PLAN 档指令块同口径预留（文本注入在 build 尾部执行）。
+        plan_mode_text = _plan_mode_block(session.events)
+        plan_mode_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_mode_text)])
+            if plan_mode_text is not None else 0
+        )
+        token_estimate += plan_mode_tokens
+        self._last_plan_mode_tokens = plan_mode_tokens
         reserved_tokens = (
             protected_facts_tokens
             + (self._system_prompt_tokens or 0)
             + runtime_context_tokens
             + plan_tokens
             + paths_tokens
+            + plan_mode_tokens
         )
         # ── 压缩（唯一管线；#22）────────────────────────────────────────
         compactor = ContextCompactor(

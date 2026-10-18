@@ -100,6 +100,7 @@ from agent_harness.tools.request_constraint_resolution import (
     REGISTER_CONSTRAINT_HANDOFF,
     RequestConstraintResolutionTool,
 )
+from agent_harness.tools.submit_plan import SubmitPlanTool
 from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
@@ -368,6 +369,15 @@ def _build_tooling(
         context_artifact_store = selection.store
         context_read_tool_name = read_tool.name
 
+    # #1356：`submit_plan`（计划提交 + 审批）与 `ask_user` **同一条分发路**——
+    # 两者都要一个真人回答，而回答通道只有 web 有，故共用
+    # `include_resolution_tool` 这道开关（子代理没有可审批的用户，不注册）。
+    # 落点必须在 `select_artifact_store` **之后**：store 是构造依赖（同
+    # `InspectArtifactTool`），计划正文由它落盘；store 选不出 ⇒ 计划无处持久化，
+    # 工具缺席（fail-open，不变量 21：可选能力故障不许拖垮 Core）。
+    if include_resolution_tool and selection is not None:
+        registry.register(SubmitPlanTool(selection.store))
+
     runtime_multiagent_provider = None
     if wiring.multiagent_provider is not None and session_store is not None:
         # CapabilityWiring is cached across requests; activation state is not.
@@ -484,6 +494,10 @@ def root_registry_tool_names(
     if selection is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
         names.add(selection.read_tool(None).name)
+    if include_resolution_tool and selection is not None:
+        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store
+        # ——与 `_build_tooling` 同名分支逐字同判（漂移即三方对账红灯）。
+        names.add(SubmitPlanTool(None).name)
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
         # 与 `_build_tooling` 的同名分支逐字同判（名字在不在，两边必须一致）。
@@ -525,6 +539,11 @@ def root_registry_reconcile_info(
         info[tool.name] = _tool_reconcile_info(tool)
     update_plan = UpdatePlanTool()
     info[update_plan.name] = _tool_reconcile_info(update_plan)
+    # #1356：`submit_plan` 与 `ask_user` / `request_constraint_resolution` 一样
+    # **不**在这里出现——本函数没有 `include_*` 形参，只覆盖"无条件注册"的那一面
+    # （既有两条根会话专属工具同样缺席，不是本票新增的缺口）。消费方
+    # `_reconcile_pending` 对不在表里的工具 fail-closed（DEFER/high + 
+    # verifiable=false），不会把未知工具渲染成可安全重试。
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         read_tool = selection.read_tool(None)
@@ -792,6 +811,14 @@ async def build_runtime(
             registry.register(
                 AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
             )
+        # #1356：`submit_plan` 同属"根会话专属"一组，与上面两个一样在 profile
+        # 收窄后接回（`_CODING_TOOLS` 不收它 ⇒ 收窄会把它剔掉）。
+        if (
+            include_resolution_tool
+            and context_artifact_store is not None
+            and SubmitPlanTool(None).name not in registered_names
+        ):
+            registry.register(SubmitPlanTool(context_artifact_store))
 
     # 曝光级别接线（#528 / IMP-11）：Registry 定型（含上面的收窄）后，存在
     # deferred 工具才注册内置 tool_search 并建立定义集控制器——全 direct
