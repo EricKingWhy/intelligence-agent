@@ -150,6 +150,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
        `verification.map.tsv` 表头）需一并改 72 行映射表 + `tests/test_verification_map.py`
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
+- **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
+  `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
 - 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
   `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
