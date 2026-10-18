@@ -230,6 +230,9 @@ class ManagedRun:
     def _fanout(self, event: AgentEvent) -> None:
         # 队列携带 AgentEvent（领域对象）；SSE 帧渲染由端点侧生成器做——
         # runmanager 不反向依赖 web.app（避免循环导入）。
+        # #1320：每条已去重的事件先交给组合根的观察者（`ask_user` 超时装表用）。
+        # 观察者不依赖订阅者是否存在——真实 Web 前端在 `run/paused` 上只走 HTTP 轮询。
+        self._manager._observe_session_event(self.session.session_id, event)
         for sub in list(self.subscribers.values()):
             try:
                 sub.queue.put_nowait(event)
@@ -324,8 +327,13 @@ class RunManager:
         disconnect_grace_seconds: float = 300.0,
         on_run_terminal: Callable[[str], Awaitable[None]] | None = None,
         on_context_snapshot: Callable[[str, dict, list[dict]], None] | None = None,
+        on_session_event: Callable[[str, AgentEvent], None] | None = None,
     ) -> None:
         self.disconnect_grace_seconds = disconnect_grace_seconds
+        # #1320：已扇出事件的纯观察者（组合根接 `ask_user` 超时装表）。默认 None ⇒
+        # 测试与既有调用零改动；与 `on_run_terminal` 同一条"RunManager 不认识具体
+        # 消费者语义"的装配纪律。
+        self._on_session_event = on_session_event
         # run 终态后的唯一驱动回调（ADR-0030 D4）：接力投递下一条未投递输入。
         # 默认 None ⇒ 测试与既有调用零改动，且 RunManager 不认识 queue 语义
         # （回调由 session 层提供，Web 层只负责"在正确的时刻叫它"）。
@@ -377,6 +385,20 @@ class RunManager:
             followers.remove(follower)
         if not followers:
             self._session_followers.pop(session_id, None)
+
+    def _observe_session_event(self, session_id: str, event: AgentEvent) -> None:
+        """把每条已去重的会话事件交给可选观察者（#1320）。
+
+        观察者是纯通知：异常只记日志，绝不打断事件扇出（与 `Session` listener 同一
+        纪律）。与订阅者无关——零订阅者时事件也必须被观察到。
+        """
+        observer = self._on_session_event
+        if observer is None:
+            return
+        try:
+            observer(session_id, event)
+        except Exception:
+            logger.exception("session event observer 失败（session=%s）", session_id)
 
     def _fanout_session(self, session_id: str, event: AgentEvent) -> None:
         """把一条已合并事件扇给该会话的全部会话级订阅者。

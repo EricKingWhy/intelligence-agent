@@ -27,8 +27,6 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent_harness.session.ask_user_timeout import ask_user_timeout_seconds_from_payload
-from agent_harness.session.event import USER_INPUT_REQUESTED
 from agent_harness.web.serialization import build_event_payload
 from agent_harness.web.wire_safety import (
     BODY_MAX_BYTES,
@@ -140,18 +138,10 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     outbound_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
     run_manager: RunManager = state.run_manager
-    # #1220 临时接缝：本连接的"在场"计数——一个前端连接 subscribe 一个会话即视为
-    # 在看着它。`watching` 保证每会话只对本连接计数一次（重订阅不重复加），断开时
-    # 逐项归零。驱动在 `state.ask_user_timeout_driver`（WS 订阅计数 → 超时恢复）。
+    # #1220/#1320：驱动只用于订阅补读时按事件流装配超时计时器；计时是否推进与
+    # 本连接的存在无关（#1320 D1A：服务端 durable timer，见
+    # `ask_user_timeout_driver` 模块 docstring）。
     driver = state.ask_user_timeout_driver
-    watching: set[str] = set()
-
-    def _watch_session(session_id: str) -> None:
-        """本连接开始观看该会话（幂等）：跨连接引用计数 +1 → 计时器起表/继续。"""
-        if session_id in watching:
-            return
-        watching.add(session_id)
-        driver.connection_subscribed(session_id)
 
     async def _detach_subscription(session_id: str) -> None:
         """替换某会话的订阅，不遗留旧 relay（#341）。"""
@@ -207,10 +197,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             await _send_json({"type": "error", "message": "snapshot failed"})
             return
 
-        # #1220 临时接缝：订阅即在场；按事件流现状装配 / 撤销 `ask_user` 超时计时器。
-        # 这里用 push_snapshot 刚读到的 events（重连 → 重查现状，已答复/已跳过的自动
-        # 撤销）。放在截断分支**之前**：超限与否都代表"这个前端在看着这个会话"。
-        _watch_session(session_id)
+        # #1220：按事件流现状装配 / 撤销 `ask_user` 超时计时器。这里用 push_snapshot
+        # 刚读到的 events（重连 → 重查现状，已答复/已跳过的自动撤销）。放在截断分支
+        # **之前**：超限与否都不影响装配——计时本身不依赖本连接（#1320）。
         driver.note_session_state(session_id, events)
 
         # #341：重复 subscribe = 替换该会话的旧 relay。瞬时读错误不应拆散一条
@@ -315,26 +304,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 if event is rm.DONE:
                     await out_q.put({"type": "done", "session_id": session_id})
                     break
-                # #1220 临时接缝：run 在途时落的 `ask_user` 提问经本 relay 流经——
-                # 就地装配超时计时器（不必等下一次 subscribe 重读）。已答复/已跳过由
-                # `note_session_state` / `check_expiries` 的复查兜住。
-                data = getattr(event, "data", None)
-                if (
-                    event.type == USER_INPUT_REQUESTED
-                    and isinstance(data, dict)
-                    and data.get("kind") == "ask_user"
-                    and isinstance(data.get("request_id"), str)
-                ):
-                    _watch_session(session_id)
-                    # #1284 P2-2：relay 装配同样只认请求载荷快照（与
-                    # `note_session_state` 同一读取点），旧事件才回落 driver 配置。
-                    driver.arm(
-                        session_id,
-                        request_id=data["request_id"],
-                        timeout_seconds=ask_user_timeout_seconds_from_payload(
-                            data, fallback=int(driver.timeout_seconds),
-                        ),
-                    )
+                # #1320：`ask_user` 超时计时器由组合根的事件观察者装配（`_fanout`
+                # 内、与订阅者无关）；relay 只负责传输，不再做装配。
                 await out_q.put({
                     "type": "event",
                     "session_id": session_id,
@@ -516,7 +487,6 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     if result.status == "launched":
                         # 新 run 启动 → 自动订阅（先摘旧订阅：#341，不遗留旧 relay）
                         run, sub = result.run, result.subscriber
-                        _watch_session(sid)  # #1220：本连接此刻起在场于该会话
                         await _detach_subscription(sid)
                         subscriptions[sid] = (run, sub)
                         relay_task = asyncio.create_task(
@@ -588,10 +558,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         try:
             while True:
                 await asyncio.sleep(WS_PING_INTERVAL)
-                # #1220 临时接缝：借既有心跳节拍推进一次超时到期检查（在场连接存在
-                # 才有心跳 ⇒ 无连接时不会有 tick，计时器也从不累计）。到点且仍暂停在
-                # `ask_user` 的会话经驱动走恢复链；全局检查、与会话是否属于本连接无关。
-                await driver.check_expiries()
+                # #1320：`ask_user` 超时推进已迁到组合根的常驻 ticker（不依赖任何
+                # WS 连接）；心跳只负责死对端检测。
                 idle = time.monotonic() - last_received[0]
                 if idle > WS_PING_TIMEOUT:
                     logger.info("WS 心跳超时（%.0fs 无上行消息），关闭连接", idle)
@@ -631,11 +599,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             if run is not None:
                 run.unsubscribe(sub)
         subscriptions.clear()
-        # #1220 临时接缝：本连接离开 → 对每个观看过的会话归零在场计数（计时器冻结，
-        # 已累计的不清零；重连后从断点继续）。
-        for sid in watching:
-            driver.connection_closed(sid)
-        watching.clear()
+        # #1320：本连接离开不再改变任何超时计时器状态——计时由服务端 durable
+        # 状态推进，与连接数无关。
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
         with contextlib.suppress(asyncio.CancelledError):

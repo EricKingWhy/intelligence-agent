@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hmac
 import importlib.metadata
 import json
@@ -1233,6 +1234,11 @@ class ApprovePolicyRuleRevoked(BaseModel):
     revoked: bool
 
 
+#: `ask_user` 超时到点检查的间隔（秒）。#1320：由常驻 ticker 推进，**不**借 WS
+#: 心跳——真实 Web 前端在 `run/paused` 上不建 WS 订阅，零连接时也必须推进计时。
+_ASK_USER_TIMEOUT_TICK_SECONDS = 1.0
+
+
 class AppState:
     """app 内部共享状态的薄容器——避免全局变量。
 
@@ -1274,13 +1280,19 @@ class AppState:
             # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
             # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
             on_context_snapshot=self._cache_context_snapshot,
+            # #1320：`ask_user` 超时表**不依赖任何前端连接**——`user/input-requested`
+            # 落盘即装配（真实 Web 前端在 `run/paused` 上只走 HTTP 轮询，从不建 WS
+            # 订阅）。到点推进见下面的常驻 ticker。
+            on_session_event=lambda session_id, event: (
+                self.ask_user_timeout_driver.note_event(session_id, event)
+            ),
         )
-        # #1220 临时接缝：把 `ask_user` 超时闸接到 WS 连接级订阅计数（一个前端连接
-        # subscribe 一个会话 = 在场），到点经 session service 走既有 user_input 恢复链
-        # 注入"用户可能不在"消息。`on_expire` 用 lambda 延迟构造 service（同
-        # on_run_terminal）；W-12 登记协议（#356 中 DEFER 的部分）落地后删本接缝，
-        # 改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver` 的 TODO
-        # 与删除清单）。
+        # #1220/#1320：`ask_user` 超时闸的服务端 durable 驱动。到点经 session service
+        # 走既有 user_input 恢复链注入"用户可能不在"消息；是否计时只看事件流里的待回答
+        # 请求，**不看** WS 连接数（#1320 D1A；装配见 `on_session_event`，推进见
+        # `_ask_user_timeout_tick_loop`）。W-12 登记协议（#356 中 DEFER 的部分）落地后
+        # 删本接缝，改走 `ClientPresenceGate.enroll()`（见 `ask_user_timeout_driver`
+        # 的 TODO 与删除清单）。
         self.ask_user_timeout_driver = AskUserTimeoutDriver(
             timeout_seconds=settings.ask_user_question_timeout,
             on_expire=lambda session_id, request_id: (
@@ -1369,6 +1381,27 @@ class AppState:
         # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
         # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
         self.interrupted_scan: list | None = None
+        # #1320：常驻超时推进任务（lifespan 启动；shutdown 取消）。
+        self._ask_user_timeout_ticker: asyncio.Task | None = None
+
+    def start_ask_user_timeout_ticker(self) -> None:
+        """启动服务端超时推进（#1320）：与任何前端连接无关。幂等。"""
+        if self._ask_user_timeout_ticker is None:
+            self._ask_user_timeout_ticker = asyncio.create_task(
+                self._ask_user_timeout_tick_loop(),
+                name="ask-user-timeout-ticker",
+            )
+
+    async def _ask_user_timeout_tick_loop(self) -> None:
+        """按固定间隔推进一次到期检查；单轮失败只记日志，不终止 ticker。"""
+        while True:
+            await asyncio.sleep(_ASK_USER_TIMEOUT_TICK_SECONDS)
+            try:
+                await self.ask_user_timeout_driver.check_expiries()
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "ask_user 超时检查失败（ticker 继续）"
+                )
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1457,6 +1490,12 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
+        # #1320：先停超时 ticker（它可能正在 await `on_expire`）。
+        ticker, self._ask_user_timeout_ticker = self._ask_user_timeout_ticker, None
+        if ticker is not None:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
         # 先停 detached run（它们引用 wiring 的工具/模型），再关 wiring。
         await self.run_manager.aclose()
         async with self._wiring_lock:
@@ -2333,6 +2372,7 @@ def create_app(
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建未投递输入失败（不阻塞启动）"
                 )
+            state.start_ask_user_timeout_ticker()
             try:
                 yield
             finally:

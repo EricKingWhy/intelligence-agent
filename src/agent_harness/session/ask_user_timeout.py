@@ -1,9 +1,12 @@
-"""#1204：`ask_user` 提问的超时闸——只在有前端连接在场时计时。
+"""#1204/#1320：`ask_user` 提问的超时闸——服务端 durable 计时。
 
-口径（#1204 票面 §5 + 用户裁决）：超时到点后 run **自动继续**，并在上下文里注入一条
-系统消息"用户在 N 分钟内未回答，可能不在，请按你的判断继续"，**不替用户选择任何选项**
-（不写任何 `answer`）。计时器只在**至少一个前端连接存在**时启动 / 继续；无前端连接
-时不启动（抄 Claude Code）。
+口径（#1204 票面 §5 + 用户裁决 + #1320 D1A）：超时到点后 run **自动继续**，并在上下文
+里注入一条系统消息"用户在 N 分钟内未回答，可能不在，请按你的判断继续"，**不替用户选择
+任何选项**（不写任何 `answer`）。计时从装配起由**服务端**持续累计，**不依赖前端连接是否
+存在**——#1320 推翻 #1204 的"只在至少一个前端连接存在时计时"：真实 Web 前端在
+`run/paused` 上只走 HTTP 轮询、不建 WS 订阅（连接数不是在场证据），旧口径使超时闸
+对真实前端永久不触发。形状对齐 Temporal `Workflow.await(timeout, condition)` 的服务端
+durable timer（见 `web/ask_user_timeout_driver.py`）。
 
 本模块只承载**确定性计时**这一件事，挂钟可注入（测试不实等）；另含"待回答用户输入"
 的事件流扫描（`pending_input_request` / `latest_pending_input_request`，服务 409 闸门与
@@ -11,13 +14,14 @@
 `set_connected`、谁在 `expired()` 后触发恢复，是上层（web 层）的接线——这一层不 import
 web / session service，保持可单测（也是 web↔service 共用的低层家）。
 
-⚠ **在线驱动为临时接缝（issue #1220，用户裁决 2A）**：#1204 起本模块只在测试里被实例化，
+⚠ **在线驱动为临时接缝（issue #1220 / #1320）**：#1204 起本模块只在测试里被实例化，
 生产装配**没有**连接进出 / 超时恢复的调用方。本票以 `web/ask_user_timeout_driver.py` 的
-`AskUserTimeoutDriver` 临时接线：在场信号取自 **WS 连接级订阅计数**（一个前端连接
-`subscribe(session_id)` = 在场）。**TODO（W-12 登记协议落地后迁移）**：产品客户端在场协议
-`agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，把在场信号
-迁到那道闸门（`enroll()` / `mark_absent()`），并**整体删除** `AskUserTimeoutDriver`
-及其对 WS 订阅计数的直接依赖——本接缝是临时的，不是长期形态。
+`AskUserTimeoutDriver` 临时接线：装配来自服务端事件流（`user/input-requested` 落盘），
+到点推进来自组合根的常驻 ticker——**均不读连接数**（#1320 已把"连接数 ⇒ 是否计时"
+这层解耦）。**TODO（W-12 登记协议落地后迁移）**：产品客户端在场协议
+`agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，把超时推进
+迁到该闸门（`enroll()` / `mark_absent()`），并**整体删除** `AskUserTimeoutDriver`
+——本接缝是临时的，不是长期形态。
 
 触发条件是 **W-12 的登记协议（#356 中 DEFER 的部分）**，不是"W-12 落地"：#356/#366
 均已关单，但 `enroll()` 仍无生产调用方（选项 B 只做明确退出信号）。删除清单见
@@ -179,11 +183,12 @@ def pending_ask_user_request_id(events: Iterable[SessionEvent]) -> str | None:
 
 
 class AskUserTimeoutTracker:
-    """一个 `ask_user` 暂停的倒计时：累计"有前端连接在场"的时长。
+    """一个 `ask_user` 暂停的倒计时：累计起表后的时长。
 
-    语义：`set_connected(True)` 开始累计，`set_connected(False)` 冻结（已累计的不清零
-    ——重连后从断点继续，不重头计）；`expired()` 在累计时长 ≥ 阈值时为真。无前端连接
-    时**从不**累计，故永不 `expired()`。挂钟经 `clock` 注入，测试可直接推进。
+    语义：`set_connected(True)` 起表，`set_connected(False)` 冻结（已累计的不清零）；
+    `expired()` 在累计时长 ≥ 阈值时为真。`set_connected` 是通用的起表/冻结接口；
+    #1320 的生产驱动**装表即起表、不再冻结**（服务端 durable timer 不看连接数），
+    保留该接口只为让计时器本身保持纯粹、可单测。挂钟经 `clock` 注入，测试可直接推进。
     """
 
     __slots__ = ("_accumulated", "_clock", "_connected_since", "_timeout")
@@ -197,7 +202,7 @@ class AskUserTimeoutTracker:
         self._connected_since: float | None = None
 
     def set_connected(self, connected: bool) -> None:
-        """前端连接存在性变化（幂等）。True 起表 / 继续；False 冻结。"""
+        """起表 / 冻结（幂等）。True 起表或继续；False 冻结。"""
         now = self._clock()
         if connected and self._connected_since is None:
             self._connected_since = now
@@ -206,7 +211,7 @@ class AskUserTimeoutTracker:
             self._connected_since = None
 
     def elapsed_seconds(self) -> float:
-        """已累计的"连接在场"时长（秒）。"""
+        """已累计的计时时长（秒）。"""
         total = self._accumulated
         if self._connected_since is not None:
             total += self._clock() - self._connected_since
@@ -217,5 +222,5 @@ class AskUserTimeoutTracker:
 
     @property
     def running(self) -> bool:
-        """是否正在计时（有前端连接在场）。"""
+        """是否正在计时（已起表且未冻结）。"""
         return self._connected_since is not None
