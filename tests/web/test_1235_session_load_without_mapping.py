@@ -1,6 +1,6 @@
 """#1235 HTTP 面：映射缺席的会话，per-session 写端点仍应 200。
 
-这四条端点只用 `Session.load` 追加事件、从不碰 sandbox。映射缺席的可达形态：
+这三条端点只用 `Session.load` 追加事件、从不碰 sandbox。映射缺席的可达形态：
 早于 WorkspaceRegistry 的历史会话、映射卷被清空、手工/测试构造的会话。
 旧行为是 `Session.load` 里 `registry.get()` 抛 `KeyError` → 500。
 

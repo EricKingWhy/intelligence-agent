@@ -368,7 +368,8 @@ class Session:
     ) -> Session:
         """加载已有 Session：校验 seq、修复 dangling、append session/resumed。
 
-        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox。
+        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox；
+        查不到映射时与 `load` 同口径降级为 None（见 `load` 的 #1235 说明）。
         """
         session = cls.load(store, session_id, workspace_registry=workspace_registry)
 
