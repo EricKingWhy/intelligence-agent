@@ -147,9 +147,18 @@ def test_absolute_trigger_rejects_dst_gap_and_resolves_ambiguous_time():
 
 
 @pytest.mark.asyncio
-async def test_fire_uses_existing_session_path_and_preserves_sandbox_and_consent(tmp_path):
+async def test_fire_uses_existing_session_path_and_preserves_sandbox_and_consent(
+    tmp_path, monkeypatch,
+):
     store, session_service, service = await _new_service(tmp_path)
     session_service.create_delay_seconds = 0.15
+    set_deadline = store.set_deadline
+
+    async def delayed_deadline_write(*args, **kwargs):
+        await asyncio.sleep(2)
+        return await set_deadline(*args, **kwargs)
+
+    monkeypatch.setattr(store, "set_deadline", delayed_deadline_write)
     rule = await _rule(service)
     rule = await store.transition(
         rule.rule_id, expected_version=rule.version, state="active",
@@ -175,8 +184,8 @@ async def test_fire_uses_existing_session_path_and_preserves_sandbox_and_consent
     assert session_service.resumed[0]["run_deadline_at"] is not None
     deadline = session_service.resumed[0]["run_deadline_at"]
     assert session_service.created[0]["run_deadline_at"] == deadline
-    assert session_service.create_started_at <= deadline
-    assert deadline <= session_service.create_started_at + timedelta(seconds=1800)
+    assert deadline >= session_service.create_started_at + timedelta(seconds=1799)
+    assert deadline <= session_service.create_started_at + timedelta(seconds=1801)
     assert session_service.resume_started_at <= deadline
     assert "计划触发：" in session_service.resumed[0]["task"]
     assert "检查构建失败并修复" in session_service.resumed[0]["task"]
@@ -209,6 +218,50 @@ async def test_overlapping_ticks_dispatch_a_fire_once(tmp_path):
     assert len(session_service.created) == 1
     assert len(session_service.resumed) == 1
     assert (await store.get_execution(executions[0].fire_id)).state == "fired"
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multiple_due_rules_dispatch_serially_and_all_fire(tmp_path, monkeypatch):
+    store, _, service = await _new_service(tmp_path)
+    now = datetime.now(UTC)
+    rules = [await _rule(service), await _rule(service)]
+    for rule in rules:
+        active = await store.transition(
+            rule.rule_id, expected_version=rule.version, state="active",
+            event_kind="test_due", patch={"trigger_at": now.isoformat()},
+        )
+        assert active is not None
+
+    dispatch = service._dispatch
+    active_dispatches = 0
+    max_active_dispatches = 0
+    dispatched_rule_ids = []
+
+    async def tracked_dispatch(rule, execution):
+        nonlocal active_dispatches, max_active_dispatches
+        active_dispatches += 1
+        max_active_dispatches = max(max_active_dispatches, active_dispatches)
+        dispatched_rule_ids.append(rule.rule_id)
+        try:
+            await asyncio.sleep(0.01)
+            await dispatch(rule, execution)
+        finally:
+            active_dispatches -= 1
+
+    monkeypatch.setattr(service, "_dispatch", tracked_dispatch)
+
+    await service.tick()
+
+    assert max_active_dispatches == 1
+    assert len(dispatched_rule_ids) == 2
+    assert len(set(dispatched_rule_ids)) == 2
+    for rule in rules:
+        updated = await store.get_rule(rule.rule_id)
+        executions = await store.list_executions(rule.rule_id)
+        assert updated.state == "fired"
+        assert len(executions) == 1
+        assert executions[0].state == "fired"
     await service.stop()
 
 
@@ -246,8 +299,34 @@ async def test_restart_recovers_same_dispatch_session_without_creating_another(t
 @pytest.mark.parametrize(
     ("model_events", "expected_state"),
     [
-        ([MODEL_REQUEST, RUN_FAILED], "launch_failed"),
-        ([MODEL_REQUEST, MODEL_COMPLETED, MODEL_REQUEST, RUN_FAILED], "fired"),
+        ([(MODEL_REQUEST, {"http_status": 429}), (RUN_FAILED, {"http_status": 429})],
+         "launch_failed"),
+        (
+            [
+                (MODEL_REQUEST, {"http_status": 429}),
+                (MODEL_REQUEST, {"http_status": 429}),
+                (RUN_FAILED, {"http_status": 429}),
+            ],
+            "launch_failed",
+        ),
+        (
+            [
+                (MODEL_REQUEST, {"http_status": 500}),
+                (MODEL_REQUEST, {"http_status": 429}),
+                (RUN_FAILED, {"http_status": 429}),
+            ],
+            "fired",
+        ),
+        (
+            [
+                (MODEL_REQUEST, {"http_status": 429}),
+                (MODEL_COMPLETED, {}),
+                (MODEL_REQUEST, {"http_status": 429}),
+                (RUN_FAILED, {"http_status": 429}),
+            ],
+            "fired",
+        ),
+        ([(MODEL_REQUEST, {}), (RUN_FAILED, {"http_status": 429})], "launch_failed"),
     ],
 )
 async def test_restart_classifies_429_by_first_model_request(
@@ -267,10 +346,10 @@ async def test_restart_classifies_429_by_first_model_request(
         *(
             SimpleNamespace(
                 type=event_type,
-                data={"http_status": 429} if event_type == RUN_FAILED else {},
+                data=event_data,
                 run_id="run-later-429",
             )
-            for event_type in model_events
+            for event_type, event_data in model_events
         ),
     ]
     restarted = WatchtowerService(
@@ -361,7 +440,9 @@ async def test_first_model_429_moves_execution_to_manual_retry(tmp_path):
     )
     await store.finish_fire(execution.fire_id, state="fired")
     session_service.subscriber.queue.put_nowait(
-        SimpleNamespace(type="model/request", data={}, seq=1),
+        SimpleNamespace(
+            type=MODEL_REQUEST, data={"http_status": 429}, seq=1,
+        ),
     )
     session_service.subscriber.queue.put_nowait(
         SimpleNamespace(type=RUN_FAILED, data={"http_status": 429}, seq=2),
@@ -380,6 +461,40 @@ async def test_first_model_429_moves_execution_to_manual_retry(tmp_path):
     assert updated.fired_session_id is None
     assert "未自动顺延" in updated.last_error
     assert session_service.run.unsubscribed
+
+
+@pytest.mark.asyncio
+async def test_fallback_double_429_moves_execution_to_manual_retry(tmp_path):
+    store, session_service, service = await _new_service(tmp_path)
+    rule = await _rule(service)
+    armed = await store.transition(
+        rule.rule_id, expected_version=rule.version, state="armed", event_kind="armed",
+    )
+    execution = await store.claim_fire(
+        rule.rule_id, expected_version=armed.version,
+        fire_id="fire-double-429", session_id="session-double-429",
+        fire_at=datetime.now(UTC),
+    )
+    await store.finish_fire(execution.fire_id, state="fired")
+    for seq in (1, 2):
+        session_service.subscriber.queue.put_nowait(
+            SimpleNamespace(
+                type=MODEL_REQUEST, data={"http_status": 429}, seq=seq,
+            ),
+        )
+    session_service.subscriber.queue.put_nowait(
+        SimpleNamespace(type=RUN_FAILED, data={"http_status": 429}, seq=3),
+    )
+    session_service.subscriber.queue.put_nowait(session_service.run.DONE)
+
+    await service._monitor_run(
+        session_service.run, session_service.subscriber,
+        rule.rule_id, execution.fire_id, launch_failure_eligible=True,
+    )
+
+    assert (await store.get_execution(execution.fire_id)).state == "launch_failed"
+    assert (await store.get_rule(rule.rule_id)).state == "launch_failed"
+    await service.stop()
 
 
 @pytest.mark.asyncio

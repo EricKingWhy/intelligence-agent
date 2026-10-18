@@ -13,12 +13,12 @@ _RULES = "/api/watchtower/rules"
 _CONSENT_VERSION = "watchtower-consent-v1"
 
 
-def _client(tmp_path: Path, monkeypatch) -> TestClient:
+def _client(tmp_path: Path, monkeypatch, *, enable_cors: bool = False) -> TestClient:
     monkeypatch.chdir(tmp_path)
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=enable_cors))
 
 
 def _body(**overrides) -> dict:
@@ -73,3 +73,33 @@ def test_create_requires_backend_consent_and_persists_rule(tmp_path, monkeypatch
         assert payload["scheduler"]["single_instance"] is True
         assert payload["rules"][0]["rule_id"] == rule["rule_id"]
         assert payload["rules"][0]["consented_at"] == rule["consented_at"]
+
+
+def test_all_watchtower_routes_require_trusted_origin(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch, enable_cors=True) as client:
+        created = client.post(_RULES, json=_body())
+        assert created.status_code == 200, created.text
+        rule_id = created.json()["rule"]["rule_id"]
+        evil = {"Origin": "http://evil.example"}
+        calls = [
+            ("GET", "/api/watchtower", None),
+            ("POST", _RULES, _body()),
+            ("POST", f"{_RULES}/{rule_id}/pause", None),
+            ("POST", f"{_RULES}/{rule_id}/resume", None),
+            ("POST", f"{_RULES}/{rule_id}/archive", None),
+            ("POST", f"{_RULES}/{rule_id}/retry", None),
+            (
+                "POST", f"{_RULES}/{rule_id}/reschedule",
+                {"timezone": "UTC", "local_time": "2026-10-19T09:00"},
+            ),
+        ]
+
+        for method, path, body in calls:
+            response = client.request(method, path, json=body, headers=evil)
+            assert response.status_code == 403, (
+                f"cross-origin {method} {path} returned {response.status_code}"
+            )
+
+        snapshot = client.get("/api/watchtower").json()
+        assert [row["rule_id"] for row in snapshot["rules"]] == [rule_id]
+        assert snapshot["rules"][0]["state"] == "active"

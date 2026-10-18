@@ -46,6 +46,46 @@ WAIT_TIMEOUT_MESSAGE = (
 TERMINAL_RUN_EVENTS = {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
 
 
+def _failed_after_first_request_429(events: list[Any]) -> bool:
+    """A failed first provider attempt requires manual retry; a later 429 does not."""
+    first_request_seen = False
+    first_request_status: int | None = None
+    model_requests = 0
+    model_completed = False
+    for event in events:
+        if event.type == MODEL_REQUEST:
+            model_requests += 1
+            if not first_request_seen:
+                first_request_seen = True
+                status = event.data.get("http_status")
+                first_request_status = status if isinstance(status, int) else None
+        elif event.type == MODEL_COMPLETED:
+            model_completed = True
+        elif event.type == RUN_FAILED:
+            return _first_request_429_requires_retry(
+                first_request_status=first_request_status,
+                model_requests=model_requests,
+                model_completed=model_completed,
+                failure_status=event.data.get("http_status"),
+            )
+    return False
+
+
+def _first_request_429_requires_retry(
+    *, first_request_status: int | None, model_requests: int,
+    model_completed: bool, failure_status: Any,
+) -> bool:
+    """Apply AC11, retaining the old single-request event shape for in-flight fires."""
+    return not model_completed and (
+        first_request_status == 429
+        or (
+            first_request_status is None
+            and model_requests == 1
+            and failure_status == 429
+        )
+    )
+
+
 def absolute_trigger(local_time: str, timezone: str) -> datetime:
     """Resolve a local wall time once, rejecting DST gaps and choosing the earlier fold."""
     try:
@@ -389,18 +429,7 @@ class WatchtowerService:
             if events:
                 starts = [event for event in events if event.type == RUN_STARTED]
                 if starts:
-                    model_requests = 0
-                    model_completed = False
-                    failed_429 = False
-                    for event in events:
-                        if event.type == MODEL_REQUEST:
-                            model_requests += 1
-                        elif event.type == MODEL_COMPLETED:
-                            model_completed = True
-                        elif event.type == RUN_FAILED and event.data.get("http_status") == 429:
-                            failed_429 = model_requests == 1 and not model_completed
-                            break
-                    if failed_429:
+                    if _failed_after_first_request_429(events):
                         await self.store.finish_fire(
                             execution.fire_id, state="launch_failed",
                             error="首个模型请求返回 HTTP 429；未自动顺延。",
@@ -416,11 +445,10 @@ class WatchtowerService:
                 rule, execution.fire_at, execution.created_at,
             )
             if not events and rule.budget_duration_seconds is not None:
-                deadline = datetime.now(UTC) + timedelta(
-                    seconds=rule.budget_duration_seconds,
-                )
                 execution = await self.store.set_deadline(
-                    execution.fire_id, deadline, replace_unstarted=True,
+                    execution.fire_id,
+                    duration_seconds=rule.budget_duration_seconds,
+                    replace_unstarted=True,
                 )
             if not events:
                 await self.session_service.create_and_launch(
@@ -500,6 +528,7 @@ class WatchtowerService:
         *, launch_failure_eligible: bool,
     ) -> None:
         model_requests = 0
+        first_request_status: int | None = None
         model_completed = False
         try:
             while True:
@@ -510,19 +539,22 @@ class WatchtowerService:
                     self.wake()
                 elif event.type == MODEL_REQUEST:
                     model_requests += 1
+                    if model_requests == 1:
+                        status = event.data.get("http_status")
+                        first_request_status = status if isinstance(status, int) else None
                 elif event.type == MODEL_COMPLETED:
                     model_completed = True
-                elif (
-                    launch_failure_eligible
-                    and event.type == RUN_FAILED
-                    and event.data.get("http_status") == 429
-                    and model_requests == 1
-                    and not model_completed
-                ):
-                    await self.store.finish_fire(
-                        fire_id, state="launch_failed",
-                        error="首个模型请求返回 HTTP 429；未自动顺延。",
-                    )
+                elif event.type == RUN_FAILED:
+                    if launch_failure_eligible and _first_request_429_requires_retry(
+                        first_request_status=first_request_status,
+                        model_requests=model_requests,
+                        model_completed=model_completed,
+                        failure_status=event.data.get("http_status"),
+                    ):
+                        await self.store.finish_fire(
+                            fire_id, state="launch_failed",
+                            error="首个模型请求返回 HTTP 429；未自动顺延。",
+                        )
                     return
                 elif event.type in TERMINAL_RUN_EVENTS:
                     return
@@ -536,6 +568,7 @@ class WatchtowerService:
             finally:
                 self._monitored_fire_ids.discard(fire_id)
                 self.wake()
+
 
     async def _attach_existing_run_monitors(self) -> None:
         """Adopt live runs resumed by a user after an earlier wait paused them."""

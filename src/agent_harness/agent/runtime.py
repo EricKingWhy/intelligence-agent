@@ -1073,7 +1073,7 @@ class _TerminalArms:
 
     def record_request_failed(
         self, role: str, request_id: str, *, step_id: int,
-        duration_ms: int | None = None,
+        duration_ms: int | None = None, http_status: int | None = None,
     ) -> SessionEvent:
         """Persist a known failed attempt before fallback can start."""
         data: dict[str, Any] = {
@@ -1082,6 +1082,8 @@ class _TerminalArms:
         }
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
+        if http_status is not None:
+            data["http_status"] = http_status
         event = self.session.append(
             MODEL_REQUEST,
             data,
@@ -2085,13 +2087,16 @@ class AgentRuntime:
 
                 def record_request_failed(
                     role: str, request_id: str,
-                    duration_ms: int | None = None, step: int = steps + 1,
+                    duration_ms: int | None = None,
+                    http_status: int | None = None,
+                    step: int = steps + 1,
                 ) -> None:
-                    # 第三参 duration_ms 由 coordinator 回调按位传入（#520）：
-                    # 失败事件与 drain 路径共用同一格测得的耗时。
+                    # 失败事实、状态码与耗时由 coordinator 同格传入，在线消费与
+                    # drain/recovery 看到同一条 model/request。
                     arms.record_request_failed(
                         role, request_id, step_id=arms.envelope_step(step),
                         duration_ms=duration_ms,
+                        http_status=http_status,
                     )
 
                 if stream:
@@ -2969,6 +2974,7 @@ class AgentRuntime:
                 cost=cost if produced_response else None,
                 model=model if produced_response else None,
                 duration_ms=attempt.duration_ms,
+                http_status=attempt.http_status,
             ))
         return events
 
@@ -2977,6 +2983,7 @@ class AgentRuntime:
         run_id: str | None, step: int, usage: dict[str, int] | None = None,
         cost: Decimal | None = None, model: str | None = None,
         request_id: str | None = None, duration_ms: int | None = None,
+        http_status: int | None = None,
     ) -> SessionEvent:
         """落一条 `model/request`（`model_requests` 的唯一计数点，`02 §5.1`）。
 
@@ -2997,6 +3004,8 @@ class AgentRuntime:
             data["cost_usd"] = format(cost, "f")
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
+        if http_status is not None:
+            data["http_status"] = http_status
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
 
     async def _user_input_request_context_for_execution(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -293,9 +293,13 @@ class SqliteWatchtowerStore:
 
     @retry_on_busy
     async def set_deadline(
-        self, fire_id: str, deadline_at: datetime, *, replace_unstarted: bool = False,
+        self, fire_id: str, deadline_at: datetime | None = None, *,
+        duration_seconds: int | None = None, replace_unstarted: bool = False,
     ) -> WatchtowerExecution:
-        deadline_text = deadline_at.astimezone(UTC).isoformat()
+        if (deadline_at is None) == (duration_seconds is None):
+            raise ValueError("provide exactly one of deadline_at or duration_seconds")
+        if duration_seconds is not None and duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive")
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
@@ -309,6 +313,10 @@ class SqliteWatchtowerStore:
                 if row["deadline_at"] is None or (
                     replace_unstarted and row["state"] == "dispatching"
                 ):
+                    if duration_seconds is not None:
+                        deadline_at = _now() + timedelta(seconds=duration_seconds)
+                    assert deadline_at is not None
+                    deadline_text = deadline_at.astimezone(UTC).isoformat()
                     await connection.execute(
                         "UPDATE watchtower_executions SET deadline_at=?, updated_at=? WHERE fire_id=?",
                         (deadline_text, _now().isoformat(), fire_id),

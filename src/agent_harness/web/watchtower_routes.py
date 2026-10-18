@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -17,8 +17,13 @@ from pydantic import (
 from agent_harness.session.service import SessionNotFound
 from agent_harness.session.task import derive_task_state
 from agent_harness.watchtower.service import WatchtowerService
+from agent_harness.web.projects import require_trusted_origin
 
-router = APIRouter(prefix="/api/watchtower", tags=["watchtower"])
+router = APIRouter(
+    prefix="/api/watchtower",
+    tags=["watchtower"],
+    dependencies=[Depends(require_trusted_origin)],
+)
 
 
 class CreateRuleRequest(BaseModel):
