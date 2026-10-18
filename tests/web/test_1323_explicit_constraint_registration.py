@@ -110,15 +110,23 @@ def test_explicit_session_rule_registers_five_of_five(tmp_path, monkeypatch) -> 
             completed += 1
             _wait_for_run(store, old_session, completed)
 
-        new_session = client.post("/api/sessions?launch=false", json={}).json()["session_id"]
+        # 新会话：第一条走真实创建路径（前端 submitTask），第二条续聊。
+        created = client.post(
+            "/api/sessions",
+            json={
+                "task": new_rules[0],
+                "remember_as_procedural_rule": True,
+                "budget": _BUDGET,
+            },
+        )
+        assert created.status_code == 200, created.text
+        new_session = created.json()["session_id"]
         completed = 0
-        for rule in new_rules:
-            _send(
-                client, new_session, rule,
-                remember_as_procedural_rule=True,
-            )
-            completed += 1
-            _wait_for_run(store, new_session, completed)
+        completed += 1
+        _wait_for_run(store, new_session, completed)
+        _send(client, new_session, new_rules[1], remember_as_procedural_rule=True)
+        completed += 1
+        _wait_for_run(store, new_session, completed)
 
     print(f"AC2 session ids: old={old_session} new={new_session}")
     old_values = [event.data["value"] for event in _facts(store, old_session)]
