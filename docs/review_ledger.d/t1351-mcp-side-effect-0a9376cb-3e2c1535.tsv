@@ -1,0 +1,1 @@
+2026-10-19	#1351 实现：MCPTool.side_effect 派生改为 `read_only_hint or tool_permissions[name] is READ_ONLY`（落地 ADR-0012 决策 5 与 adapter 模块 docstring 早已承诺的显式覆写；原先只认 server 自报 readOnlyHint，导致显式 read-only 工具仍被判 MUTATING 而被 PLAN 档拦、失去超时重试与并行资格）。新增用例覆盖验收三分支（显式 read-only→READ_ONLY；未配置无 hint→DANGER/MUTATING；未配置有 hint→READ_ONLY 回归）加 workspace-write 反例。双轴独立审查待 Muse 协调后回填结论。	0a9376cb..601992c1
