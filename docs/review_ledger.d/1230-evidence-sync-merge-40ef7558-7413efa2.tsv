@@ -1,0 +1,1 @@
+2026-10-18	机械归属（非内容审查主张）：#1230 证据分支 evidence/1230-mm08-rerun 与 origin/main 的 sync merge（父一 40ef7558（本线 tip，#1230 证据 2 笔），父二 2ff98a79=origin/main，merge-base 86b75b43）。GitHub UI 一键 update-branch 生成，无冲突（ort 自动合并）。vs 父一 = 本票 2 文件（docs/live_gate/w21/* #1230 证据，已由本票前序提交覆盖，本行不重复主张）；vs 父二 = 来侧 main 自 86b75b43 起各笔（#1336 等），各笔由 main 侧自带台账行覆盖，本行不重复主张。合并自身不引入新代码，故不另开审查轮。	40ef7558..7413efa2

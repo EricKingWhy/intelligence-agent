@@ -49,6 +49,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -285,6 +286,9 @@ class BoardProjectionStore:
         self._state_lock = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._inflight: dict[str, _ReplayCohort] = {}
+        # #1305：投影更新后的脏通知（板级 WS 推送的触发源）。只在触发集命中时
+        # 调用；无监听器时零开销（空元组遍历）。
+        self._dirty_listeners: list[Callable[[], None]] = []
 
     # ── 缓存 / 锁的分片 ─────────────────────────────────────────────────
 
@@ -468,6 +472,59 @@ class BoardProjectionStore:
             logger.exception(
                 "看板投影更新失败（session=%s）；append 契约不受影响", session_id,
             )
+        else:
+            # #1305：**任意**事件都通知"板可能变了"（不再按触发集分流）。放在 try
+            # 的 else 上，与 `_persist_event` 里 listener 的时机一致（持久化成功
+            # 后才回调）。
+            #
+            # 为什么不是"只通知触发集命中"（实现轮的原写法）：板行的字段含
+            # `event_count` 与 `last_event_time`（`app.py::session_rows` 逐字段映射
+            # `SessionSummaryStats`），这两个值**每条事件都会变**——`ASSISTANT_MESSAGE`
+            # / `TOOL_RESULT` / 普通 `USER_MESSAGE` 全在触发集外。只按触发集通知的话，
+            # 长 run 期间卡片的时间标签与 `event_count` 会停在最后一个触发事件那一刻
+            # （前端 `KanbanCard.tsx` 渲染 `last_event_time`，`lib/kanban.ts` 列内同键
+            # 排序也用它），所以原注释里"板的行不会变"是**错的**。
+            #
+            # 成本：`mark_dirty` 无订阅者时空操作，有订阅者时被 250ms 节流封顶在
+            # 4 帧/秒——而节流存在的全部理由就是吸收突发；快照是全量重算，这正是
+            # 本票已登记的上限（见 `web/board.py` 的 ponytail 段）。
+            self._notify_dirty()
+
+    # ── #1305：脏通知（板级推送的触发源）────────────────────────────────
+
+    def add_dirty_listener(self, callback: Callable[[], None]) -> None:
+        """登记"投影已更新"回调（#1305 的触发源接缝）。
+
+        纪律与 ``Session.add_listener`` 逐字相同：观察者，异常只记日志，绝不
+        破坏 append 契约。回调**可能在任何线程**上被调用（``_persist_event``
+        跑在 worker 线程时），所以监听器自己必须线程安全——``BoardBroadcaster``
+        的 ``mark_dirty`` 只做一次 ``call_soon_threadsafe``。
+
+        ⚠ **必须配对** :meth:`remove_dirty_listener`：本 store 是按 root 分片的
+        **进程级单例**（见 :data:`_STORES`），挂上去的回调是绑定方法 ⇒ 强引用
+        监听者（`BoardBroadcaster` → `AppState` 整棵对象图），单例不释放则 GC
+        收不掉。重复构造 `AppState`（测试进程最常见）会线性累积。
+        """
+        with self._state_lock:
+            self._dirty_listeners.append(callback)
+
+    def remove_dirty_listener(self, callback: Callable[[], None]) -> None:
+        """摘掉一个脏通知回调（幂等；没登记过就什么都不做）。
+
+        与 :meth:`add_dirty_listener` 配对，调用点在 `AppState.shutdown`（lifespan
+        的 teardown 侧）——生命周期归 lifespan，与本仓既有的接线形状一致。
+        """
+        with self._state_lock, suppress(ValueError):
+            self._dirty_listeners.remove(callback)
+
+    def _notify_dirty(self) -> None:
+        with self._state_lock:
+            listeners = tuple(self._dirty_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                logger.exception("看板脏通知回调失败（不影响 append 契约）")
 
     # ── sidecar IO ──────────────────────────────────────────────────────
 
