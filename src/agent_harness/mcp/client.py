@@ -123,6 +123,10 @@ class MCPServerConnection:
         self._oauth_redirect_handler = oauth_redirect_handler
         self._oauth_callback_handler = oauth_callback_handler
         self._oauth_provider: PersistingOAuthClientProvider | None = None
+        # 无 token 且非交互的建连路径在建出 provider 之前就失败，`_oauth_provider`
+        # 永远为 None——只看 provider 会把"明确缺授权"错报成"不需要授权"。
+        # 这个粘性标志在失败点置位，下一次建连重置。
+        self._auth_required = False
         self._session: ClientSession | None = None
         self._owner_task: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -142,6 +146,18 @@ class MCPServerConnection:
     def config_name(self) -> str:
         """server 配置名（#362 / W-18：按名断开/状态查询用）。"""
         return self._config.name
+
+    @property
+    def needs_auth(self) -> bool:
+        """是否需要（重新）OAuth 授权（#1200：插件管理窗口的授权状态）。
+
+        两个来源：建连期明确缺 token（`_auth_required`，此时 provider 还没建
+        出来）或已建 provider 报告刷新失败（`reauthorization_required`）。
+        """
+        if self._auth_required:
+            return True
+        provider = self._oauth_provider
+        return bool(getattr(provider, "reauthorization_required", False))
 
     @property
     def _has_interactive_oauth_handlers(self) -> bool:
@@ -175,6 +191,7 @@ class MCPServerConnection:
         self._stop = asyncio.Event()
         self._setup_error = None
         self._oauth_provider = None
+        self._auth_required = False
         # 协议违规状态随新连接重置：重连即新会话，旧 fault 不污染后续调用。
         self._protocol_fault = None
         self._protocol_fault_event = asyncio.Event()
@@ -252,6 +269,7 @@ class MCPServerConnection:
                         if not interactive and not (
                             tokens and (tokens.access_token or tokens.refresh_token)
                         ):
+                            self._auth_required = True
                             raise MCPServerDownError(
                                 "OAuth login is required; run 'agent-harness plugins mcp login <server>'"
                             )

@@ -207,6 +207,21 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 
 **补录说明（§3.1 偏差披露）**：本领域（Web 前端创建入口交互）在本票调研开始时尚未在清单中，属**事后补录**——首轮调查按用户指定主流产品官方文档直接开展，未先补本清单。机制摘要 / 契合点 / 判定（REUSE + BUILD）见 `docs/research/2026-10-16-issue-1177-new-task-dialog-plan.md` §2 及 `~/workspace/research/ia-新建任务交互调查报告.md`。
 
+### 插件管理面 / MCP server 与 skill 的启停 UI（2026-10-17 新增，#1200 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [Claude Code plugins](https://code.claude.com/docs/en/plugins) / [MCP](https://code.claude.com/docs/en/mcp)（2026-10-17 读取） | 官方文档；本仓票面 §3 的主来源 | `/plugin` 与 `/mcp` 的左列表+右详情；禁用≠删除；`N tools` 计数；Disable / Reconnect 动作；skill 目录名=命令名、插件前缀、`argument-hint`、描述 1536 截断 |
+| [Windsurf MCP 集成](https://docs.windsurf.com/windsurf/mcp)（2026-10-17 读取） | 官方文档 | server + **工具**双层粒度（`disabledTools`）：禁用的工具不进模型工具表，但仍可管理 |
+| [Cursor Customize / MCP](https://docs.cursor.com/context/mcp)（2026-10-17 读取） | 官方文档 | 统一管理页 + 作用域过滤；`/` 菜单里 skill 直接可运行 |
+| [VS Code Copilot Chat 斜杠命令](https://code.visualstudio.com/docs/copilot/chat/chat-agent-mode)（2026-10-17 读取） | 官方文档 | `/` 菜单单一命令面按 kind 分组；前端不维护"哪些命令存在"的第二份清单 |
+| [JetBrains AI Assistant 斜杠命令](https://www.jetbrains.com/help/idea/ai-assistant.html)（2026-10-17 读取） | 官方文档 | 同一次查询返回全部候选；skill 与内置命令同处一个列表 |
+
+**补录说明（§3.1 偏差披露）**：本领域（插件管理窗口 / `/` 菜单 Skills 分组）在本票调研
+开始时尚未在清单中，属**事后补录**——首轮调查按票面 §3 指定的 Claude Code / Cursor /
+Windsurf 直接开展，未先补本清单。机制摘要 / 契合点 / 判定见
+`docs/plans/plugin-manager/design.md` §2 与 §2.1。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；

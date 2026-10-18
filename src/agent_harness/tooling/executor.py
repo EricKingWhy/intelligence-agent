@@ -339,6 +339,12 @@ class ToolExecutor:
         # `workspace_root` 供路径规则（R2）判越界；None ⇒ 跳过路径规则（防御性）。
         permission_rules: PermissionRuleSet | None = None,
         workspace_root: Path | None = None,
+        # #1200：调用方是否提供了**人工**审批通道（交互式审批 holder）。
+        # composition root 在把 None 顶替成 deny / auto-approve 回调**之前**取快照
+        # 并传入。默认 True：裸构造（单测 / 只读端点）没有这层顶替，语义不变。
+        # False ⇒ `require_confirmation` 的工具直接 fail-closed 拒绝，而不是让
+        # "调用工具前需要我确认"在自动批准会话里静默放行。
+        human_approval_available: bool = True,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -353,6 +359,7 @@ class ToolExecutor:
         self._approve_policy_store = ApprovePolicyStore(self._project_root)
         self._permission_rules = permission_rules
         self._workspace_root = workspace_root
+        self._human_approval_available = human_approval_available
 
     @property
     def tracks_operations(self) -> bool:
@@ -1381,6 +1388,10 @@ class ToolExecutor:
         启发式，不是 OS 隔离。
         """
         tool_perm = tool.permission
+        # #1200 / 裁决 E：MCP server 的「调用工具前需要我确认」。这是**每次调用都
+        # 问人**的显式选择，必须压过规则引擎 ALLOW 早退，也不能被会话 grant /
+        # 项目级持久规则短路（它们替代的是"人的重复决定"，不是这条每次确认）。
+        requires_confirmation = bool(tool.require_confirmation)
 
         rule_verdict = RuleVerdict.NO_MATCH
         rule_reason: str | None = None
@@ -1402,12 +1413,38 @@ class ToolExecutor:
                     ),
                     budget_delta=_rejected_delta(name),
                 )
-            if rule_verdict is RuleVerdict.ALLOW:
+            if rule_verdict is RuleVerdict.ALLOW and not requires_confirmation:
                 return None
             if rule_verdict is RuleVerdict.ASK:
                 rule_reason = matched_reason
 
-        needs = rule_verdict is RuleVerdict.ASK or needs_approval(tool_perm, self._policy)
+        if requires_confirmation and not self._human_approval_available:
+            # #1200：「调用工具前需要我确认」在**没有人工审批通道**的会话里兑现不了
+            # （composition root 会用 deny / auto-approve 回调顶替 None）。静默放行
+            # 等于面板承诺了一个做不到的开关 ⇒ fail-closed，并说清为什么。
+            # 归因不猜档位名：自动批准档、计划档、danger-full-access 档都落在这里
+            # （danger 档在 create/resume 两路都把 interactive 判为 False），逐一点名
+            # 会把"完全访问"的实时会话错报成"没有人工通道"。故只说事实 + 给可执行改法。
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"工具 '{name}' 所在 MCP server 已设置为「调用工具前需要我确认」，"
+                        "但当前会话没有可用的逐次人工审批通道（自动批准档、计划档与"
+                        "「完全访问」档都属于此列）；已按 fail-closed 拒绝，不会静默放行。"
+                        "请在权限档里选择需要审批的档位（如工作区写入）后重试。"
+                    ),
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    retryable=False,
+                ),
+                budget_delta=_rejected_delta(name),
+            )
+
+        needs = (
+            requires_confirmation
+            or rule_verdict is RuleVerdict.ASK
+            or needs_approval(tool_perm, self._policy)
+        )
         if not needs:
             return None
 
@@ -1435,7 +1472,8 @@ class ToolExecutor:
 
         # 会话授权命中：仅替代"人的决定"，不改 needs_approval 结论，且绑定
         # policy_at_approval（ADR-0041 D6）/ TTL / 权限上界。
-        if session is not None and approval_key is not None:
+        # #1200：require_confirm 要求每次调用都问人，跳过会话级短路。
+        if not requires_confirmation and session is not None and approval_key is not None:
             grants = derive_approval_grants(session.events)
             grant = grants.get(approval_key)
             if grant is not None and grant_valid(
@@ -1450,12 +1488,19 @@ class ToolExecutor:
         # 命中判定集中在 ApprovePolicyStore.find_match：exact 全等 / command 去
         # args hash，且两档都重验 permission == permission_at_approval（防提权）。
         # 不依赖 session：持久规则是项目配置，裸执行域（无会话）同样生效。
-        if identity is not None and self._approve_policy_store.find_match(identity) is not None:
+        if (
+            not requires_confirmation
+            and identity is not None
+            and self._approve_policy_store.find_match(identity) is not None
+        ):
             return None
 
-        reason = rule_reason if rule_reason is not None else approval_reason(
-            tool_perm, self._policy,
-        )
+        if requires_confirmation:
+            reason = f"该 MCP server 已设置为「调用工具前需要我确认」（工具 '{name}'）"
+        elif rule_reason is not None:
+            reason = rule_reason
+        else:
+            reason = approval_reason(tool_perm, self._policy)
         request = ApprovalRequest(
             tool_name=name,
             args=raw_args,
