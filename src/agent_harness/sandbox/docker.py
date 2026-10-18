@@ -1332,7 +1332,8 @@ class DockerSandbox(Sandbox):
         故剥掉该顶层目录、把内容直接落在 `dest` 根——否则导出目标会平白多出一层
         `workspace/`，docker fork 的子 volume 也会被多套一层目录（子会话按
         `/workspace/<file>` 读不到父文件）。导出的是**副本**：容器内对象与宿主目标
-        各自独立，不共享 inode/canary；绝不把宿主 `/workspace` 当直连路径。
+        各自独立，不共享 inode/canary；绝不把宿主 `/workspace` 当直连路径。允许把
+        新成员写入既有目标目录，但遇到同名目标项时拒绝覆盖。
         """
         out = Path(dest)
         destination_exists = out.exists()
@@ -1362,9 +1363,18 @@ class DockerSandbox(Sandbox):
                     created_destination = True
                 for item in source.iterdir():
                     target = out / item.name
-                    if not target.exists() and not target.is_symlink():
-                        created_targets.append(target)
-                    shutil.move(str(item), str(target))
+                    if target.exists() or target.is_symlink():
+                        raise FileExistsError(
+                            f"导出目标项已存在，拒绝覆盖：{target}"
+                        )
+                    created_targets.append(target)
+                    if item.is_symlink():
+                        shutil.copy2(item, target, follow_symlinks=False)
+                    elif item.is_dir():
+                        shutil.copytree(item, target, symlinks=True)
+                    else:
+                        shutil.copy2(item, target)
+                    _remove_export_path(item)
         except BaseException:
             if created_destination:
                 _remove_export_path(out)

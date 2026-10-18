@@ -90,19 +90,42 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     expect(details?.hasAttribute('hidden')).toBe(true);
   });
 
-  it('成功终态收成 M/M，并保留用户展开；新运行时恢复进行态', () => {
+  it('成功终态收成 M/M 并自动收起；同一终态内手动重展不被反复打断（#1325 S1）', () => {
     act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'running' })));
     const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle')!;
     act(() => fireClick(toggle));
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
 
+    // run 进入终态 = 边沿：收起一次，摘要行换成终态文案。
     act(() => root.render(createElement(PlanList, { items: completedThree, runStatus: 'completed' })));
     expect(toggle.textContent).toContain('✓ 任务完成 3/3');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+    // 同一终态内用户手动重新展开：保持展开，不被终态期间的重复渲染收起。
+    act(() => fireClick(toggle));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    act(() => root.render(createElement(PlanList, { items: completedThree, runStatus: 'completed' })));
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
 
+    // 新 run 开始：进行态文案回归，展开状态仍是用户的（边沿只在进入终态时触发）。
     act(() => root.render(createElement(PlanList, { items: completedThree, runStatus: 'running' })));
     expect(toggle.textContent).toContain('进程 3 项 · 已完成 3 项');
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it.each([
+    ['失败（run_status=failed）', 'failed', false],
+    ['中断（runInterrupted）', 'running', true],
+  ] as const)('终态边沿自动收起：%s', (_label, runStatus, runInterrupted) => {
+    act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'running' })));
+    const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle')!;
+    act(() => fireClick(toggle));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    act(() =>
+      root.render(createElement(PlanList, { items: threeState, runStatus, runInterrupted })),
+    );
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('运行正常结束但清单未全完时显示实际计数', () => {

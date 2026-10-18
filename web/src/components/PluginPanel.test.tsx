@@ -162,6 +162,44 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
+describe('#1325 S7 — 首帧加载态', () => {
+  it('数据未返回：显示加载指示，不出现「· 0」分组计数；返回后分组正常', async () => {
+    // 挂起两个列表请求，观察首帧。
+    let releaseServers!: (v: Awaited<ReturnType<typeof getMcpServers>>) => void;
+    let releaseSkills!: (v: Awaited<ReturnType<typeof getSkills>>) => void;
+    vi.mocked(getMcpServers).mockReturnValue(
+      new Promise((resolve) => {
+        releaseServers = resolve;
+      }),
+    );
+    vi.mocked(getSkills).mockReturnValue(
+      new Promise((resolve) => {
+        releaseSkills = resolve;
+      }),
+    );
+    // beforeEach 已挂载并完成一次加载；重新挂载一个干净实例观察首帧。
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(PluginPanel, { open: true, onOpenChange }));
+    });
+    expect(document.body.textContent).not.toContain('· 0');
+    expect(document.body.textContent).toContain('加载中…');
+    expect(document.body.querySelector('.plugin-loading .ctx-usage-spinner')).not.toBeNull();
+
+    await act(async () => {
+      releaseServers({ servers: SERVERS, errors: [] });
+      releaseSkills({ skills: SKILLS, errors: [], conflicts: [] });
+    });
+    await act(async () => {});
+    expect(document.body.textContent).toContain('MCP SERVERS · 3');
+    expect(document.body.textContent).toContain('SKILLS · 2');
+    expect(document.body.querySelector('.plugin-loading')).toBeNull();
+  });
+});
+
 describe('#1200 Phase 1 只读渲染', () => {
   it('两组分组标题与行齐全', () => {
     expect(document.body.textContent).toContain('MCP SERVERS · 3');

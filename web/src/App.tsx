@@ -36,6 +36,7 @@ import { PausedPanel } from './components/PausedPanel';
 import { ContextFullDialog } from './components/ContextFullDialog';
 import { StuckPausedPanel } from './components/StuckPausedPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
+import { WatchtowerPanel } from './components/WatchtowerPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
@@ -327,6 +328,13 @@ export default function App() {
   // `lib/permission.ts:96` 的 `composerPermissionMode`（同款身份闸）。
   const sessionCwd =
     conversation !== null && conversation.session_id === selectedId ? conversation.session_cwd : null;
+  const sessionSandboxBackend = useMemo(() => {
+    if (conversation === null || conversation.session_id !== selectedId) return null;
+    const started = conversation.events.find((event) => event.type === 'session/started');
+    return typeof started?.data.sandbox_backend === 'string'
+      ? started.data.sandbox_backend
+      : null;
+  }, [conversation, selectedId]);
   const ownership = useMemo(() => {
     if (selectedId !== null) {
       return describeOwnership(selectedSummary?.workspace?.title ?? null, sessionCwd);
@@ -1349,6 +1357,8 @@ export default function App() {
   // 让它整棵树重渲。与其它 on* 回调一样给稳定引用。
   const handleOpenPlugins = useCallback(() => setPluginsOpen(true), []);
   const [memoriesOpen, setMemoriesOpen] = useState(false);
+  // #1296：值班是独立工作区页面，开合状态只属于当前界面，不持久化。
+  const [watchtowerOpen, setWatchtowerOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
   // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
@@ -1588,6 +1598,7 @@ export default function App() {
         onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
         onOpenRecoveryList={() => setRecoveryListOpen(true)}
         onOpenKanban={() => setKanbanOpen(true)}
+        onOpenWatchtower={() => setWatchtowerOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
@@ -1601,7 +1612,23 @@ export default function App() {
         }
       />
 
+      {watchtowerOpen && (
+        <WatchtowerPanel
+          onClose={() => setWatchtowerOpen(false)}
+          onOpenSession={(sid) => {
+            setWatchtowerOpen(false);
+            void selectSession(sid);
+          }}
+          models={models}
+          sandboxBackends={sandboxBackends}
+          defaultModel={selectedModel}
+          defaultCwd={sessionCwd ?? activeProject?.path ?? null}
+          defaultSandboxBackend={sessionSandboxBackend}
+        />
+      )}
+
       <main
+        hidden={watchtowerOpen}
         className={
           `app-regions ${inspectorOpen ? '' : 'inspector-closed'}` +
           (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '')

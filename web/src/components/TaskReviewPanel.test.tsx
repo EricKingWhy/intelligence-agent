@@ -259,6 +259,9 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
     const diagnostics = host.querySelector('.task-review-diagnostic-disclosure') as HTMLDetailsElement;
     expect(diagnostics.open).toBe(false);
     expect(diagnostics.textContent).toContain('Operation Ledger');
+    // #1325 S3：对照表要求整行删除内部投影术语（普通用户不需要理解）。
+    expect(diagnostics.textContent).not.toContain('open_run_ids');
+    expect(diagnostics.textContent).not.toContain('交付投影');
   });
 
   it('三操作各自后果文案在场；带原因接受 reason 为空 → 客户端先校验、不发请求', async () => {
@@ -298,6 +301,15 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
     await act(async () => {});
     expect(releaseTaskLease).toHaveBeenCalledWith('s1');
     expect(text()).toContain('未释放');
+  });
+});
+
+describe('#1325 S4 — 入口与对话框标题同一措辞', () => {
+  it('对话框 aria-label 与可见标题都是「详细审阅」，不再是「任务审阅」', async () => {
+    await renderPanel();
+    expect(host.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('详细审阅');
+    expect(host.querySelector('.ctx-usage-title')?.textContent).toBe('详细审阅');
+    expect(text()).not.toContain('任务审阅');
   });
 });
 

@@ -426,6 +426,12 @@ async def test_child_without_cwd_anchor_resolves_to_owner_workspace(
     owner_root = Path(
         harness.state.workspace_registry.get(PARENT_ID).workspace_root
     )
+    # Docker reports its in-container root here; the registry records the matching
+    # host root, so compare alias bindings through the registry on both sessions.
+    owner_recorded_roots = harness.state.workspace_registry.recorded_workspace_roots(
+        PARENT_ID
+    )
+    assert len(owner_recorded_roots) == 1
     assert fallback_dir != owner_root  # 前置：两腿目录确实不同值
 
     result = await harness.service.resume_and_launch(
@@ -436,9 +442,10 @@ async def test_child_without_cwd_anchor_resolves_to_owner_workspace(
     # 恢复按 alias 解析到属主 workspace（回落目录只是无锚腿的既有 mkdir 产物，
     # 不是恢复落点——注册表登记的仍只有属主目录这一个事实）。
     assert Path(result.session.sandbox.workspace_root) == owner_root
-    assert harness.state.workspace_registry.recorded_workspace_roots(child_id) == [
-        str(owner_root)
-    ]
+    assert (
+        harness.state.workspace_registry.recorded_workspace_roots(child_id)
+        == owner_recorded_roots
+    )
 
 
 # ── AC2 补强：委派标记在而 agent_id 不可解析 ⇒ 响亮失败（fail-closed）──────
