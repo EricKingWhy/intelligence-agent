@@ -4,7 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,15 +106,10 @@ async def test_process_kill_recovers_the_same_fire_once(
     else:
         assert len(crashed_messages) == 1
         assert crashed_messages[0].data["idempotency_key"] == execution.fire_id
-    # A no-session crash retries creation with a fresh deadline. Once the
-    # session exists, its original create-time deadline remains authoritative.
+    # The first deadline remains authoritative even if the process crashes
+    # before creating the planned session.
     assert crashed_execution.deadline_at is not None
     assert not [event for event in crashed_events if event.type == RUN_STARTED]
-    if crash_point == "before_session":
-        await store.set_deadline(
-            execution.fire_id, datetime.now(UTC) - timedelta(hours=1),
-            replace_unstarted=True,
-        )
 
     recovered = await _run_child(
         [sys.executable, str(child), str(root), "recover", execution.session_id],
@@ -139,7 +134,6 @@ async def test_process_kill_recovers_the_same_fire_once(
     assert executions[0].fire_id == execution.fire_id
     assert executions[0].state == "fired"
     assert executions[0].deadline_at > datetime.now(UTC)
-    if crash_point == "after_message":
-        assert executions[0].deadline_at == crashed_execution.deadline_at
+    assert executions[0].deadline_at == crashed_execution.deadline_at
     assert (await updated_store.get_rule(rule.rule_id)).fired_session_id == execution.session_id
     await service.stop()
