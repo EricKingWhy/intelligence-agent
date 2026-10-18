@@ -409,6 +409,138 @@ export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
     }));
 }
 
+export type WatchtowerRuleState =
+  | 'active'
+  | 'armed'
+  | 'paused'
+  | 'dispatching'
+  | 'fired'
+  | 'expired'
+  | 'launch_failed'
+  | 'archived';
+
+export interface WatchtowerExecutionEntry {
+  fire_id: string;
+  rule_id: string;
+  session_id: string | null;
+  state: 'dispatching' | 'fired' | 'launch_failed';
+  fire_at: string;
+  deadline_at: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  product_state: string | null;
+}
+
+export interface WatchtowerRuleEntry {
+  rule_id: string;
+  prompt: string;
+  trigger_kind: 'relative' | 'absolute';
+  trigger_at: string;
+  timezone: string;
+  local_time: string | null;
+  delay_seconds: number | null;
+  model: string | null;
+  sandbox_backend: string | null;
+  cwd: string | null;
+  budget_turns: number | null;
+  budget_tokens: number | null;
+  budget_duration_seconds: number | null;
+  consent_version: string;
+  consented_at: string;
+  state: WatchtowerRuleState;
+  version: number;
+  fired_session_id: string | null;
+  last_error: string | null;
+  last_notice: string | null;
+  created_at: string;
+  updated_at: string;
+  occurrence_count: number;
+  executions: WatchtowerExecutionEntry[];
+}
+
+export interface WatchtowerSnapshot {
+  scheduler: {
+    running: boolean;
+    single_instance: boolean;
+    last_tick_at: string | null;
+    error: string | null;
+    consent_version: string;
+  };
+  rules: WatchtowerRuleEntry[];
+  pending_verification: Array<{
+    session_id: string;
+    rule_id: string;
+    prompt: string;
+    updated_at: string;
+  }>;
+}
+
+export interface CreateWatchtowerRulePayload {
+  prompt: string;
+  trigger_kind: 'relative' | 'absolute';
+  timezone: string;
+  delay_seconds?: number;
+  local_time?: string;
+  model?: string | null;
+  sandbox_backend?: string | null;
+  cwd?: string | null;
+  budget_turns?: number | null;
+  budget_tokens?: number | null;
+  budget_duration_seconds?: number | null;
+  consent_acknowledged: boolean;
+  consent_version: string;
+}
+
+async function watchtowerJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new Error(detail || `自动值班请求失败（${res.status}）`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function getWatchtower(): Promise<WatchtowerSnapshot> {
+  return watchtowerJson('/api/watchtower');
+}
+
+export function createWatchtowerRule(
+  payload: CreateWatchtowerRulePayload,
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson('/api/watchtower/rules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export type WatchtowerRuleAction = 'pause' | 'resume' | 'archive' | 'retry';
+
+export function actOnWatchtowerRule(
+  ruleId: string,
+  action: WatchtowerRuleAction,
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson(
+    `/api/watchtower/rules/${encodeURIComponent(ruleId)}/${action}`,
+    { method: 'POST' },
+  );
+}
+
+export function rescheduleWatchtowerRule(
+  ruleId: string,
+  payload: { timezone: string; local_time: string },
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson(
+    `/api/watchtower/rules/${encodeURIComponent(ruleId)}/reschedule`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 /** #362 / W-18：GET /api/mcp/servers —— MCP server 列表（配置 ∪ 运行时）。
  *  #1200 起原地扩展管理面字段（向后兼容：旧字段不变，新字段全有默认值）。 */
 export interface McpServerEntry {

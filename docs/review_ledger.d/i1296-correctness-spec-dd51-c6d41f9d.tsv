@@ -1,0 +1,1 @@
+2026-10-18	#1296 Correctness/Spec initial review: NEEDS-FIX; P0/P1/P2/P4=0, P3=3 (PurePath annotation, exact POSIX type assertion, direct sandbox-path coverage); see docs/phase_status/2026-10.md#1296	d72bf77c9582c8456a078e928b5671f815136d04..be09941408e8c816e67dabb03a6ff6d0fc383e42

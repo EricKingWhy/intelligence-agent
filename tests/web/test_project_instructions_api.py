@@ -26,7 +26,7 @@ def test_status_and_explicit_reload_are_visible_without_session_events(
         created = client.post(
             "/api/sessions",
             params={"launch": "false"},
-            json={"cwd": str(workspace)},
+            json={"cwd": str(workspace), "sandbox_backend": "local"},
         )
         assert created.status_code == 200
         session_id = created.json()["session_id"]
@@ -80,7 +80,7 @@ def test_reload_exposes_missing_and_unreadable_instruction_files(
         created = client.post(
             "/api/sessions",
             params={"launch": "false"},
-            json={"cwd": str(workspace)},
+            json={"cwd": str(workspace), "sandbox_backend": "local"},
         )
         session_id = created.json()["session_id"]
         status = client.post(
