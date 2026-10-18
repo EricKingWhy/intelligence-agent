@@ -182,6 +182,10 @@ from agent_harness.session.event import (
     USER_INPUT_REQUESTED,
     RunFailedBeforePlanData,
 )
+from agent_harness.session.explicit_constraint import (
+    is_session_explicit_rule,
+    register_explicit_constraint,
+)
 from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 from agent_harness.storage import (
@@ -1713,6 +1717,25 @@ class AgentRuntime:
                 )
                 user_event = session.append(USER_MESSAGE, message_data)
                 yield to_agent_event(user_event)
+                # #1323：勾选「作为可复用规则」是用户的确定性手势——user/message
+                # 落盘后立即机械登记，不依赖模型当次是否调用 register_constraint。
+                # 判据把 project/global 排除在外：那两档由服务层写成功后走独立规则层
+                # （同一次勾选不得在 SESSION 组多出一条）。登记在 USER_ACCEPTED 之前，
+                # 让稳定边界之后的读回包含这条约束。
+                # #1085：委派子会话不得借机械路径获得有效入口（与
+                # register_constraint 的 SCOPE_NOT_ALLOWED 同一条边界）。
+                if (
+                    is_session_explicit_rule(message_data)
+                    and not session_is_delegated_child(session.events)
+                ):
+                    register_explicit_constraint(
+                        session,
+                        content=user_input,
+                        source_event_id=user_event.event_id,
+                        token_budget=(
+                            self._context_builder.protected_fact_token_budget
+                        ),
+                    )
                 # USER_ACCEPTED 稳定边界：user/message 已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
             # user_input is None = 同 run 续跑且无新任务文本（`#312`）：既没有新
