@@ -15,8 +15,24 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   compactSession,
   describeSessionError,
+  SessionError,
   type SessionContextCompacted,
 } from '../lib/api';
+
+/** #1325 S5/S9：后端 `reason` 是机读成因，前端在此唯一分派点映射成中文。
+ *  与 CLI `compress` 的文案、面板低水位提示同词——用户不该在两条入口读到两种语言。
+ *  其余 409（`run_busy` / `event_drift` / 压缩进行中）保持后端原文（票面：文案不变）。 */
+const COMPACT_REJECT_COPY: Record<string, string> = {
+  no_early_turns: '没有可压缩的早期内容',
+};
+
+function describeCompactError(error: unknown): string {
+  if (error instanceof SessionError && error.reason !== null) {
+    const mapped = COMPACT_REJECT_COPY[error.reason];
+    if (mapped) return mapped;
+  }
+  return describeSessionError(error, '压缩失败');
+}
 
 export interface CompactRunOptions {
   /** 成功回执（含被拒=零写入）后的宿主钩子；抛错不影响三态本身。 */
@@ -51,7 +67,7 @@ export function useCompactSession(sessionId: string | null) {
         setCompactResult(result);
         opts?.onSuccess?.(result);
       } catch (e) {
-        setCompactError(describeSessionError(e, '压缩失败'));
+        setCompactError(describeCompactError(e));
       } finally {
         inFlight.current = false;
         setCompacting(false);

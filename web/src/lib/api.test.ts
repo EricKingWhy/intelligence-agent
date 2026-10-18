@@ -35,6 +35,7 @@ import {
   getAttachmentLimits,
   postApproval,
   readErrorDetail,
+  compactSession,
   recoverSession,
   renameProject,
   reorderProjectSession,
@@ -1202,6 +1203,29 @@ describe('deleteSession — 会话硬删端点契约（#172 / ADR-0029；状态�
     expect(describeSessionError(new Error('网络断了'), '删除会话失败')).toBe('网络断了');
     expect(describeSessionError(new Error(''), '删除会话失败')).toBe('删除会话失败');
     expect(describeSessionError(null, '删除会话失败')).toBe('删除会话失败');
+  });
+});
+
+describe('#1325 S5 — compactSession 409 携带机读 reason', () => {
+  it('对象形 detail → SessionError.reason 取自 detail.reason（调用方不必解析文案）', async () => {
+    captureFetch(409, {
+      detail: {
+        message:
+          "session '9f1c2d3e-aaaa-bbbb-cccc-0123456789ab' has no compactable early turn; there is nothing to summarize yet",
+        reason: 'no_early_turns',
+      },
+    });
+    const err = await compactSession('s1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionError);
+    expect((err as SessionError).status).toBe(409);
+    expect((err as SessionError).reason).toBe('no_early_turns');
+  });
+
+  it('字符串 detail → reason 为 null（不按文案猜）', async () => {
+    captureFetch(409, { detail: 'session has an active run' });
+    const err = await compactSession('s1').catch((e: unknown) => e);
+    expect((err as SessionError).reason).toBeNull();
+    expect((err as SessionError).message).toBe('session has an active run');
   });
 });
 
