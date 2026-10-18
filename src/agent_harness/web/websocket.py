@@ -117,6 +117,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
       {"type": "send_message", "session_id": "...", "content": "...", "mode": "queue"}
       {"type": "steer", "session_id": "...", "content": "..."}
       {"type": "cancel", "session_id": "..."}
+      {"type": "subscribe_board"}  — #1305：订阅板级快照（全量行 + 服务端 250ms 节流）
+      {"type": "unsubscribe_board"}  — #1305：退订板级快照（连接不关）
       {"type": "ping"}  — client-initiated ping, server replies pong
       {"type": "pong"}  — reply to server_ping（心跳应答；任意上行都算活性）
 
@@ -125,6 +127,10 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
       {"type": "event", "session_id": "...", "event": {...}}
       {"type": "done", "session_id": "..."}
       {"type": "error", "message": "..."}
+      {"type": "board_snapshot", "generated_at": "<ISO8601>", "sessions": [...]}
+          — #1305：板级全量快照，行与 `GET /api/sessions?include_archived=true`
+          逐字段相等（两侧共用 `app.py::session_rows` 同一映射）。订阅即得首帧；
+          之后由投影更新点经 `BoardBroadcaster` 的 250ms leading/trailing 节流推送。
       {"type": "pong"}
       {"type": "server_ping"}  — 服务端心跳探测，客户端须回 {"type": "pong"}
     """
@@ -138,6 +144,48 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     relay_tasks_by_session: dict[str, asyncio.Task] = {}
     # 读循环和写循环之间的事件桥
     outbound_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
+
+    # #1305：本连接的板级订阅（None = 未订阅）。广播器只认"订阅者队列"，
+    # 而 WS 侧的发送统一走出站队列（`_write_loop` 是唯一 send_text 出口）
+    # ⇒ 中间用一条 relay task 把广播器队列泵进出站队列。
+    board_queue: asyncio.Queue | None = None
+    board_relay_task: asyncio.Task | None = None
+    board_broadcaster = state.board_broadcaster
+
+    async def _pump_board(queue: asyncio.Queue) -> None:
+        """把广播器投递的快照帧转进出站队列（本连接唯一的发送通道）。"""
+        try:
+            while True:
+                frame = await queue.get()
+                await outbound_queue.put(frame)
+        except asyncio.CancelledError:
+            pass
+
+    async def _unsubscribe_board() -> None:
+        """退订 + 停泵（幂等）。连接关闭与显式退订共用这一个收尾点。"""
+        nonlocal board_queue, board_relay_task
+        if board_queue is not None:
+            board_broadcaster.unsubscribe(board_queue)
+            board_queue = None
+        task = board_relay_task
+        board_relay_task = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _subscribe_board() -> None:
+        """订阅板级快照：重复订阅是**替换**（旧订阅先摘，不留双份推送）。
+
+        首帧由 `BoardBroadcaster.subscribe` 在 await 返回前入队，这里立刻取出
+        内联下发——保证"订阅后的第一条板帧就是权威全量快照"，而不是等泵任务
+        被调度（顺序对客户端可见）。
+        """
+        nonlocal board_queue, board_relay_task
+        await _unsubscribe_board()
+        queue = await board_broadcaster.subscribe()
+        board_queue = queue
+        await outbound_queue.put(queue.get_nowait())
+        board_relay_task = asyncio.create_task(_pump_board(queue))
 
     run_manager: RunManager = state.run_manager
     # #1220 临时接缝：本连接的"在场"计数——一个前端连接 subscribe 一个会话即视为
@@ -416,6 +464,11 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                             else -1
                         )
                         await _push_snapshot(sid, after)
+                elif msg_type == "subscribe_board":
+                    # #1305：板级快照订阅（无 session_id——板是全局面）。
+                    await _subscribe_board()
+                elif msg_type == "unsubscribe_board":
+                    await _unsubscribe_board()
                 elif msg_type == "ping":
                     await _send_json({"type": "pong"})
                 elif msg_type == "pong":
@@ -618,6 +671,11 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     finally:
         heartbeat_task.cancel()
         write_task.cancel()
+        # #1305：先清板级订阅（广播器集合里的悬空订阅者会让 `mark_dirty` 一直算
+        # 快照，且泵任务会永远阻塞在 queue.get() 上）。放在 session relay 之前：
+        # 与 relay 一样属于"本连接持有的订阅"，两者都要在退出路径上收干净。
+        with contextlib.suppress(Exception):
+            await _unsubscribe_board()
         # #341：先取消在途 relay（它们阻塞在 subscriber.queue.get() 上，
         # 不取消就是任务泄漏）；relay 的 finally 会自己做绑定式 unsubscribe。
         pending_relays = tuple(relay_tasks)

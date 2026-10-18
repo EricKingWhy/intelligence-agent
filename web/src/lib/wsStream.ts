@@ -71,7 +71,7 @@
  * 慢链路引入假降级，而它已经被上层的停摆检查覆盖（10s → 重连 3 次 → 明确报错）。
  */
 
-import type { AgentEvent } from '../types';
+import type { AgentEvent, SessionSummary } from '../types';
 import { listSessions, streamSession } from './api';
 import { getToken } from './auth';
 // 终态集合**不另抄一份**：runState.ts 是「这个 run 收口了吗」的唯一判断点
@@ -430,4 +430,97 @@ export async function sessionExists(sessionId: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/** 板级快照订阅的句柄：`close()` 幂等（退订 + 关 socket）。 */
+export interface BoardSubscription {
+  close: () => void;
+}
+
+/**
+ * 订阅板级 WS 快照（#1305 §7）：`subscribe_board` 上行，`board_snapshot` 下行。
+ *
+ * 复用 `wsEndpoint()` / `wsSubprotocols()`——**不另写鉴权**（票面「前端改动清单」）。
+ * 与 `wsStreamResponse` 的两点差别，都是票面点名的：
+ *
+ * - **不做第二次节流**（票面「不做边界」）：服务端已按 250ms leading/trailing 合并，
+ *   前端收到即渲染；
+ * - **不做降级**：WS 建连失败时回调 `onError`，由调用方退回「打开时拉一次 +
+ *   手动刷新」（`useBoardSnapshot`），**不引入轮询定时器**。
+ *
+ * @param onSnapshot 每帧 `board_snapshot` 的 `sessions` 行（与 `GET /api/sessions` 同形）。
+ * @param onError    建连失败 / 异常关闭时回调一次（**只在还没收到任何帧时**）。
+ */
+export function subscribeBoardSnapshot(
+  onSnapshot: (sessions: SessionSummary[]) => void,
+  onError?: (error: Error) => void,
+): BoardSubscription {
+  let closed = false;
+  let receivedFrame = false;
+  let sock: WebSocket | null = null;
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    const s = sock;
+    sock = null;
+    if (s) {
+      s.onopen = null;
+      s.onmessage = null;
+      s.onerror = null;
+      s.onclose = null;
+      try {
+        s.close();
+      } catch {
+        /* 已关闭 / 不可关闭：无副作用 */
+      }
+    }
+  };
+
+  const fail = (message: string) => {
+    if (closed || receivedFrame) return;
+    close();
+    onError?.(new Error(message));
+  };
+
+  try {
+    sock = new WebSocket(wsEndpoint(), wsSubprotocols());
+  } catch (e) {
+    // 构造就抛（CSP / 非 WS 环境）：没有 socket 可关，直接降级。
+    closed = true;
+    onError?.(new Error((e as Error).message));
+    return { close };
+  }
+
+  const s = sock;
+  s.onopen = () => {
+    s.send(JSON.stringify({ type: 'subscribe_board' }));
+  };
+  s.onmessage = (msg: MessageEvent) => {
+    if (closed) return;
+    let frame: { type?: string; sessions?: unknown };
+    try {
+      frame = JSON.parse(String(msg.data)) as typeof frame;
+    } catch {
+      return; // 非 JSON 帧：忽略，不污染快照
+    }
+    if (frame.type === 'server_ping') {
+      // 应用层心跳：必须应答（30s 无上行即被判死），但不改变快照状态。
+      try {
+        s.send(JSON.stringify({ type: 'pong' }));
+      } catch {
+        /* 发送失败由 onclose 兜底 */
+      }
+      return;
+    }
+    if (frame.type !== 'board_snapshot') return; // 其它帧非本订阅关心
+    // 非数组形态（老后端 / 代理回整块对象）= 拿不到行 ⇒ 不当快照喂给视图。
+    if (!Array.isArray(frame.sessions)) return;
+    receivedFrame = true;
+    onSnapshot(frame.sessions as SessionSummary[]);
+  };
+  s.onerror = () => fail('board ws error');
+  s.onclose = () => fail('board ws closed');
+
+  return { close };
 }

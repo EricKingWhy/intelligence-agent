@@ -49,6 +49,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -285,6 +286,9 @@ class BoardProjectionStore:
         self._state_lock = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._inflight: dict[str, _ReplayCohort] = {}
+        # #1305：投影更新后的脏通知（板级 WS 推送的触发源）。只在触发集命中时
+        # 调用；无监听器时零开销（空元组遍历）。
+        self._dirty_listeners: list[Callable[[], None]] = []
 
     # ── 缓存 / 锁的分片 ─────────────────────────────────────────────────
 
@@ -468,6 +472,35 @@ class BoardProjectionStore:
             logger.exception(
                 "看板投影更新失败（session=%s）；append 契约不受影响", session_id,
             )
+        else:
+            # #1305：触发集命中 ⇒ 通知"板可能变了"。放在 try 的 else 上，与
+            # `_persist_event` 里 listener 的时机一致（持久化成功后才回调）。
+            # 触发集外（只推水位）不通知——那些事件按定义不改产品态/注意力，
+            # 板的行不会变，通知只会白白算一次全量快照。
+            if recompute:
+                self._notify_dirty()
+
+    # ── #1305：脏通知（板级推送的触发源）────────────────────────────────
+
+    def add_dirty_listener(self, callback: Callable[[], None]) -> None:
+        """登记"投影已更新"回调（#1305 的触发源接缝）。
+
+        纪律与 ``Session.add_listener`` 逐字相同：观察者，异常只记日志，绝不
+        破坏 append 契约。回调**可能在任何线程**上被调用（``_persist_event``
+        跑在 worker 线程时），所以监听器自己必须线程安全——``BoardBroadcaster``
+        的 ``mark_dirty`` 只做一次 ``call_soon_threadsafe``。
+        """
+        with self._state_lock:
+            self._dirty_listeners.append(callback)
+
+    def _notify_dirty(self) -> None:
+        with self._state_lock:
+            listeners = tuple(self._dirty_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                logger.exception("看板脏通知回调失败（不影响 append 契约）")
 
     # ── sidecar IO ──────────────────────────────────────────────────────
 

@@ -108,6 +108,7 @@ from agent_harness.sandbox import (
     probe_all_capabilities,
 )
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
 from agent_harness.session.projects import ProjectService
@@ -169,6 +170,7 @@ from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
+from agent_harness.web.board import BoardBroadcaster
 from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
@@ -1369,6 +1371,30 @@ class AppState:
         # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
         # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
         self.interrupted_scan: list | None = None
+        # #1305 §7：看板 WS 广播器。快照工厂接 `GET /api/sessions` 的**同一个**
+        # 行映射（`session_rows`）——两侧逐字段相等由"同一函数"保证，不靠对齐维护。
+        # 只构造一次：订阅集合与节流窗口都是进程内状态。
+        self.board_broadcaster = BoardBroadcaster(
+            snapshot=self._board_snapshot_rows,
+        )
+        # 触发源接线（票面 §7「触发源 = T1 投影更新点」）：投影 store 的脏通知
+        # → 广播器。投影 store 是**按 store root 分片的进程级单例**，这里取本
+        # AppState 那个 root 的实例并挂上；重复构造 AppState（测试）会挂多个
+        # 监听器，而 `mark_dirty` 幂等且无订阅者时空操作 ⇒ 无副作用。
+        get_board_projection_store(self.store).add_dirty_listener(
+            self.board_broadcaster.mark_dirty
+        )
+
+    async def _board_snapshot_rows(self) -> list[dict[str, Any]]:
+        """看板快照行：与 `GET /api/sessions?include_archived=true` 同一函数、同一映射。
+
+        恒 `include_archived=True`（票面 §7）：可见性由前端视图开关决定，不由请求
+        决定（#171 的纪律，不变量 #22）——与 `KanbanPanel` 的缺省数据源同款。
+        返回 `model_dump()` 后的纯 dict（WS 帧走 `json.dumps`，不吃 Pydantic 对象）。
+        """
+        service = session_service(self)
+        summaries = await service.list_sessions(include_archived=True)
+        return [row.model_dump() for row in session_rows(summaries)]
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1604,6 +1630,43 @@ def _context_settings_payload(
             "hard_guard": int(window * settings.hard_guard_threshold),
         },
     )
+
+
+def session_rows(summaries: list[Any]) -> list[SessionSummary]:
+    """领域摘要 → 传输模型行（``GET /api/sessions`` 的**唯一**映射点）。
+
+    #1305 §7：WS ``board_snapshot`` 帧与 REST 行必须逐字段相等，而票面点名了
+    "契约形状可能漂"的风险（REST 逐字段手写映射、WS 另写序列化）。唯一可靠的
+    防漂手段是**同一个函数**产出两侧——所以这段映射从路由体里提出来，路由与
+    广播器共用；单测断言两侧相等即等于断言"没有第二份映射"。
+
+    字段语义与"为什么刻意不给默认值"见 `SessionSummary` 的字段注释。
+    """
+    return [
+        SessionSummary(
+            session_id=s.session_id,
+            event_count=s.event_count,
+            first_event_time=s.first_event_time,
+            last_event_time=s.last_event_time,
+            first_user_message=s.first_user_message,
+            trace_id=s.trace_id,
+            trace_url=s.trace_url,
+            # 领域值对象 → 传输模型（两者刻意同名不同物：前者无校验、不依赖
+            # Pydantic；后者是契约与 OpenAPI schema 的定义点）。
+            workspace=(
+                WorkspaceRef(id=s.workspace.id, title=s.workspace.title)
+                if s.workspace is not None
+                else None
+            ),
+            archived=s.archived,
+            corrupted=s.corrupted,
+            product_state=s.product_state,
+            product_state_changed_at=s.product_state_changed_at,
+            attention_kind=s.attention_kind,
+            attention_summary=s.attention_summary,
+        )
+        for s in summaries
+    ]
 
 
 def session_service(state: AppState) -> SessionService:
@@ -2812,31 +2875,8 @@ def create_app(
             )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
-        return [
-            SessionSummary(
-                session_id=s.session_id,
-                event_count=s.event_count,
-                first_event_time=s.first_event_time,
-                last_event_time=s.last_event_time,
-                first_user_message=s.first_user_message,
-                trace_id=s.trace_id,
-                trace_url=s.trace_url,
-                # 领域值对象 → 传输模型（两者刻意同名不同物：前者无校验、不依赖
-                # Pydantic；后者是契约与 OpenAPI schema 的定义点）。
-                workspace=(
-                    WorkspaceRef(id=s.workspace.id, title=s.workspace.title)
-                    if s.workspace is not None
-                    else None
-                ),
-                archived=s.archived,
-                corrupted=s.corrupted,
-                product_state=s.product_state,
-                product_state_changed_at=s.product_state_changed_at,
-                attention_kind=s.attention_kind,
-                attention_summary=s.attention_summary,
-            )
-            for s in summaries
-        ]
+        # 映射体在 `session_rows`（#1305 起 WS 快照与 REST 共用同一份，防契约漂）。
+        return session_rows(summaries)
 
     @app.get("/api/sessions/{session_id}/events")
     async def get_session_events(session_id: str) -> list[dict]:
