@@ -44,8 +44,6 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
-from tests.memory.v2._vector import FakeMemoryVectorClient
-
 RUN_ID = "run-wiring"
 
 
@@ -58,35 +56,17 @@ def _settings(tmp_path, **overrides) -> Settings:
     """一份"记忆能力齐备 + 主记忆角色可解析"的设置。
 
     `MODEL_PROVIDER=senseaudio` 是让 `resolve_memory_roles` 走"默认链恰好就是该 provider"
-    那一支（PRD §5.3.3 固定 `memory.primary` → `senseaudio`）。milvus / embedding 那几项
-    是 V2 记忆组件的就绪条件——本文件多数用例把向量客户端换成替身，但保留设置形状与
-    生产一致（否则"就绪"这件事在用例里是另一套判据）。
+    那一支（PRD §5.3.3 固定 `memory.primary` → `senseaudio`）。V2 记忆的就绪条件只剩
+    markdown 权威目录可写（#1353 §5），不再有向量库/嵌入模型配置。
     """
     values: dict = {
         "_env_file": None,
         "workspace_dir": str(tmp_path),
         "model_provider": "senseaudio", "model_name": "memory-primary",
         "model_api_key": "test-only",
-        "milvus_uri": "https://example.test", "milvus_token": "test-only",
-        "milvus_collection": "col", "embedding_model": "m",
-        "embedding_base_url": "https://x", "embedding_api_key": "k",
     }
     values.update(overrides)
     return Settings(**values)
-
-
-def _patch_vectors(monkeypatch) -> list[FakeMemoryVectorClient]:
-    fakes: list[FakeMemoryVectorClient] = []
-
-    def build(settings):
-        fake = FakeMemoryVectorClient(settings)
-        fakes.append(fake)
-        return fake
-
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_vector_client", build,
-    )
-    return fakes
 
 
 def _sessions(tmp_path) -> JsonlSessionStore:
@@ -123,7 +103,6 @@ async def test_without_a_resolvable_primary_role_there_is_no_pipeline(tmp_path) 
 
 @pytest.mark.asyncio
 async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, monkeypatch) -> None:
-    _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path, model_provider="deepseek"),
@@ -203,7 +182,6 @@ async def test_the_pipeline_hangs_on_the_wiring_and_its_lifecycle(tmp_path, monk
     `lifecycle` 是进程退出时唯一会调 `aclose()` 的地方——只挂前者的话，进程退出时服务
     循环与在飞 job 没人收（`aclose` 的语义是"先停泵、再有界排空"）。
     """
-    _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path), sessions=_sessions(tmp_path),
@@ -229,7 +207,6 @@ async def test_without_a_session_store_governance_remains_but_auto_context_and_t
     `sessions=None` 时没有可安全解析可信项目身份的 V2 recall 上下文；因此自动 recall 为空，
     治理 API 仍可用，任何旧版工具都不回退启用。
     """
-    fakes = _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path),
@@ -238,11 +215,9 @@ async def test_without_a_session_store_governance_remains_but_auto_context_and_t
     assert wiring.memory_v2 is not None, "治理 API 不依赖 session store"
     assert wiring.memory_v2 in wiring.lifecycle
     assert wiring.memory_formation is None
-    assert wiring.memory_vectors is fakes[0] and wiring.memory_vectors in wiring.lifecycle
     assert wiring.context_providers == []
     assert wiring.tools == []
     await wiring.aclose()
-    assert fakes[0].closed
 
 
 @pytest.mark.asyncio
@@ -258,24 +233,27 @@ async def test_memory_disabled_means_no_pipeline(tmp_path) -> None:
         settings=_settings(tmp_path), sessions=_sessions(tmp_path),
     )
 
-    assert wiring.memory_vectors is None and wiring.memory_v2 is None
+    assert wiring.memory_v2 is None
     assert wiring.memory_formation is None
     assert wiring.degradations["memory"] == DegradeReason.DISABLED.value
 
 
 @pytest.mark.asyncio
 async def test_memory_components_missing_means_no_pipeline(tmp_path) -> None:
-    """V2 记忆因**配置不齐**而降级时保持缺席（不 patch 工厂，走真实判据）。
+    """V2 记忆因**权威目录不可写**而降级时保持缺席（不 patch 工厂，走真实判据）。
 
-    设置里 `memory` 是开着的（没有 `enabled: false`），缺席由配置完整性判定。
+    `memory` 是开着的（没有 `enabled: false`），缺席由 markdown 目录可写性判定
+    （#1353 §5）。用文件占住 `<workspace_dir>` 让目录建不出来。
     """
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {}}'),
-        settings=Settings(_env_file=None, workspace_dir=str(tmp_path)),
+        settings=Settings(_env_file=None, workspace_dir=str(blocked)),
         sessions=_sessions(tmp_path),
     )
 
-    assert wiring.memory_vectors is None and wiring.memory_v2 is None
+    assert wiring.memory_v2 is None
     assert wiring.memory_formation is None
     assert wiring.degradations["memory"] == DegradeReason.MISSING_SETTINGS.value
 
@@ -288,8 +266,6 @@ async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, m
     自动回退到 V1 会违反 cutover 的独占要求。降级原因写进 `degradations`，路由层才分得清"没配"
     与"配了但坏了"（#225 的同一诉求）。
     """
-    fakes = _patch_vectors(monkeypatch)
-
     async def _boom(*args, **kwargs):
         raise RuntimeError("memory-v2 assembly is broken")
 
@@ -300,8 +276,7 @@ async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, m
     )
 
     assert wiring.memory_formation is None
-    assert wiring.memory_v2 is None and wiring.memory_vectors is None
-    assert fakes[0].closed
+    assert wiring.memory_v2 is None
     assert wiring.context_providers == []
     assert wiring.tools == []
     assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
@@ -314,7 +289,6 @@ async def test_optional_v2_import_failure_degrades_after_disabling_privileged_v1
 ) -> None:
     import sys
 
-    _patch_vectors(monkeypatch)
     monkeypatch.setitem(sys.modules, "agent_harness.memory.v2.assembly", None)
 
     wiring = await wire_capabilities(
@@ -430,7 +404,6 @@ async def test_a_broken_model_catalog_fails_loudly_instead_of_degrading(
     判别性：把 `except ConfigError: raise` 那一支删掉，本用例转红（拿到 `degradations`
     而不是异常）。
     """
-    _patch_vectors(monkeypatch)
     settings = _settings(tmp_path, agent_models="{这不是合法 JSON")
     with pytest.raises(CapabilityError) as caught:
         await wire_capabilities(

@@ -547,50 +547,6 @@ async def test_consolidation_failure_is_still_observable_with_its_retrieval_cost
     assert events[0].latency_ms is not None  # 耗时字段必须存在（值本身随环境浮动）
 
 
-# ── 生产装配：模型必须真的接上（否则 consolidate 永远走 no_decision_model）──
-
-
-def test_builtin_memory_wiring_passes_a_decision_model(tmp_path, monkeypatch):
-    """AC1 的装配前提：生产形状必须给 capability 一个决策模型。
-
-    `factories.build_memory_components` 此前**没传**模型，于是 `store()` 的 manager 分支
-    从不执行 —— "写入只能新增"的真正机制在这里，而不是票面推测的 `query_model`。
-    """
-    import agent_harness.memory.langmem_capability as module
-
-    captured: dict = {}
-
-    class _Recorder:
-        def __init__(self, records, vectors, model=None, **kwargs):
-            captured["model"] = model
-            captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(module, "LangMemMemoryCapability", _Recorder)
-    # 必须打在 factories 的模块属性上：它 `from ... import create_chat_model` 已绑定。
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.create_chat_model", lambda config, **kw: "sentinel-model"
-    )
-    from agent_harness.capability.factories import build_memory_components
-    from agent_harness.config import Settings
-
-    build_memory_components(
-        Settings(
-            _env_file=None,
-            workspace_dir=str(tmp_path),
-            model_api_key="sk-test",
-            # milvus + embedding 是装配的前置条件（缺一则 builder 直接返回 None）：
-            # 本用例要证的是"装配真的走到 capability 构造并喂了模型"。
-            milvus_uri="https://example.test",
-            milvus_token="test-only",
-            milvus_collection="col",
-            embedding_model="m",
-            embedding_base_url="https://x",
-            embedding_api_key="k",
-        )
-    )
-    assert captured["model"] == "sentinel-model"
-
-
 # ── P0 回归：截断投影**不得**被回写进权威记录（Standards review 抓到）──
 
 

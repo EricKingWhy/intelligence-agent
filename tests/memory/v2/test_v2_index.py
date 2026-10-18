@@ -103,7 +103,7 @@ async def test_index_failure_keeps_the_committed_fact_and_the_intent(
 ) -> None:
     """AC6：索引写失败不得回滚已提交的 SQLite 事实；outbox 意图保留，供下轮重试。"""
     created = await store.create(make_draft(content="用户偏好深色主题"), USER_A)
-    index.fail_upsert = RuntimeError("milvus unavailable")
+    index.fail_upsert = RuntimeError("index unavailable")
 
     assert await relay(store, index).flush() == 0
 
@@ -117,7 +117,7 @@ async def test_replay_converges_the_index_exactly_once(
 ) -> None:
     """AC6：故障恢复后重放恰好收敛一次——索引只有一条，且 outbox 清空。"""
     created = await store.create(make_draft(content="用户偏好深色主题"), USER_A)
-    index.fail_upsert = RuntimeError("milvus unavailable")
+    index.fail_upsert = RuntimeError("index unavailable")
     await relay(store, index).flush()
 
     index.fail_upsert = None
@@ -245,7 +245,7 @@ async def test_index_delete_failure_keeps_the_committed_state_and_the_intent(
     created = await store.create(make_draft(content="偏好浅色主题"), USER_A)
     await relay(store, index).flush()
     await store.invalidate(created.id, USER_A)
-    index.fail_delete = RuntimeError("milvus unavailable")
+    index.fail_delete = RuntimeError("index unavailable")
 
     assert await relay(store, index).flush() == 0
 
@@ -275,7 +275,7 @@ async def test_index_failures_are_abandoned_after_the_budget_but_the_intent_surv
 
     async def failing_upsert(record) -> None:
         attempts.append(record.id)
-        raise RuntimeError("milvus unavailable")
+        raise RuntimeError("index unavailable")
 
     monkeypatch.setattr(index, "upsert", failing_upsert)
     relay_instance = relay(store, index)
@@ -303,7 +303,7 @@ async def test_a_new_revision_resets_an_abandoned_retry_budget(
 
     async def failing_upsert(record) -> None:
         attempts.append(record.id)
-        raise RuntimeError("milvus unavailable")
+        raise RuntimeError("index unavailable")
 
     monkeypatch.setattr(index, "upsert", failing_upsert)
     relay_instance = relay(store, index)
