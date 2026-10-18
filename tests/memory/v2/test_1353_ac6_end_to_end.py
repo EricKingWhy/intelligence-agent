@@ -346,6 +346,11 @@ async def test_ten_turn_conversation_is_remembered_without_keywords(
         memory_formation=runner,
     )
     session = make_session(tmp_path / "sessions")
+    # 生产交付点（RunManager.launch）会标记这枚聚合并交给 runtime；标记后 append 撞号
+    # 才在 store 的写锁内改号重落（#1055/#1062）。不标记时后台 review 的 `memory/updated`
+    # 一旦抢在下一轮 USER_MESSAGE 之前落盘，前台就会以 SeqConflict 失败——那是
+    # "聚合未走交付点"的测试假象，不是产品路径。
+    session.deliver_to_runtime()
     try:
         await _run_turns(runtime, session, _conversation())
         await runner.drain()
@@ -399,6 +404,7 @@ async def test_without_forming_decision_nothing_reaches_the_files(
         memory_formation=runner,
     )
     session = make_session(tmp_path / "sessions")
+    session.deliver_to_runtime()
     try:
         await _run_turns(runtime, session, _conversation())
         await runner.drain()

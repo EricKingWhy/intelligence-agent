@@ -297,7 +297,10 @@ async def test_optional_v2_import_failure_degrades_after_disabling_privileged_v1
     )
 
     assert wiring.context_providers == []
-    assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
+    # #1353 §5：就绪闸门先 import assembly 取目录名 ⇒ 这个故障在 `_wire_memory`
+    # 就被兜住，只落 `memory` 码。`memory_v2` 是 V2 装配内部失败时的附加码，
+    # 路由层两个键都认（`web/memory.py`），所以这里锁 `memory` 即可。
+    assert wiring.degradations == {"memory": DegradeReason.INIT_FAILED.value}
     assert wiring.tools == []
 
 
