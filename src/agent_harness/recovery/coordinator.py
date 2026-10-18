@@ -1035,7 +1035,13 @@ class RecoveryCoordinator:
         source: str | None = None,
     ) -> None:
         """在重获恢复锁并通过 token 校验后提交人工裁决。"""
-        result, ledger_state = self._verdict_outcome(operation, verdict)
+        # `auto` 决定 `_verdict_outcome` 的审计文案措辞：自动路径（
+        # `AutoReconcileCallback`，无人在场）绝不能写"用户已裁决"
+        # （`#1327` 修复轮——那是谎话）。用户显式裁决保留原措辞。
+        auto = isinstance(self._reconcile_callback, AutoReconcileCallback)
+        result, ledger_state = self._verdict_outcome(
+            operation, verdict, auto=auto
+        )
         content = result.model_dump_json()
         meta: dict[str, str] = {
             "verdict": verdict.value,
@@ -1159,9 +1165,14 @@ class RecoveryCoordinator:
 
     @staticmethod
     def _verdict_outcome(
-        operation: Operation, verdict: ReconcileVerdict
+        operation: Operation, verdict: ReconcileVerdict, *, auto: bool = False
     ) -> tuple[ToolResult, OperationState]:
-        """把用户裁决映射为（合成 ToolResult，Ledger 目标状态）。
+        """把裁决映射为（合成 ToolResult，Ledger 目标状态）。
+
+        裁决有两种来源：用户显式裁决（`DecisionsReconcileCallback`）与
+        按操作类型自动裁决（`AutoReconcileCallback`，`#1327`）。`auto=True`
+        时审计文案必须写"已按规则自动裁决"，绝不能写"用户已裁决"——
+        没有人在场，写了就是伪造审计事实。
 
         CONFIRM_SUCCESS / CONFIRM_FAILURE：Ledger 已有 result_json 时以它为准
         （那是崩溃前记录的执行事实）；缺失时合成带"人工 reconcile"明示的结果。
@@ -1200,11 +1211,22 @@ class RecoveryCoordinator:
                 OperationState.FAILED,
             )
         if verdict is ReconcileVerdict.RETRY:
+            if auto:
+                # 自动路径：只读 + replay_safe 的工具由规则重跑——无人裁决，
+                # 不写"用户已裁决"（`#1327` 审计文案诚实性）。
+                retry_note = (
+                    "已按规则自动裁决重试（只读且 replay_safe 的工具重跑安全）。"
+                    "原调用已终止，请重新发起该工具调用。"
+                )
+            else:
+                retry_note = (
+                    "用户已裁决重试。原调用已终止，请重新发起该工具调用。"
+                )
             return (
                 ToolResult.failure(
                     message=(
                         f"操作 '{operation.tool_name}' 崩溃时结果未知；"
-                        "用户已裁决重试。原调用已终止，请重新发起该工具调用。"
+                        + retry_note
                     ),
                     error_code=ErrorCode.CANCELLED,
                     retryable=True,
@@ -1231,11 +1253,20 @@ class RecoveryCoordinator:
                 ),
                 OperationState.NEED_RECONCILE,
             )
+        # ABANDON 兜底：用户显式裁决保留"用户已裁决"措辞；自动路径
+        # （`#1327`）写"已按规则自动裁决"——`#1327` Q1=A：写操作对不上账
+        # 终态保持 CANCELLED（不改 FAILED），语义是"记失败 + 不重跑"。
+        abandon_note = (
+            "已按规则自动裁决放弃（非只读 / 不可安全重放的工具不重跑），"
+            "原调用已终止，不再重跑。"
+            if auto
+            else "用户已裁决放弃，不再重跑。"
+        )
         return (
             ToolResult.failure(
                 message=(
                     f"操作 '{operation.tool_name}' 崩溃时结果未知；"
-                    "用户已裁决放弃，不再重跑。"
+                    + abandon_note
                 ),
                 error_code=ErrorCode.CANCELLED,
             ),
