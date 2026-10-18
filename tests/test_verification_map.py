@@ -269,6 +269,25 @@ def test_three_states_semantics_docs_only():
     assert focused == []
 
 
+def test_docs_surface_claiming_e2e_forces_1338_reevaluation():
+    """守卫 #1338 的跳过规则：`docs/**` 的 PR 不跑 e2e（`.github/workflows/e2e-smoke.yml` 的
+    `paths-ignore: ['docs/**']`）——前提是**没有任何 docs 面声明 e2e 车道**。
+
+    一旦某个 docs 作用域的行列出了 `e2e`，那条忽略规则就会在真正需要 e2e 的 docs 改动上
+    静默跳过它（#1338 两轮审查的结论）。这条断言把"改 map"与"重新评估跳过规则"绑在一起。
+    """
+    offenders = [
+        r[I_LAYER] for r in ROWS
+        if any(p == "docs/" or p.startswith("docs/") for p in _split(r[I_SURFACE]))
+        and "e2e" in _split(r[I_LANES])
+    ]
+    assert not offenders, (
+        f"docs/** 作用域的行现在声明了 e2e 车道：{offenders}。"
+        "必须在合并这条 map 改动前，重新评估 #1338 的跳过规则"
+        "（.github/workflows/e2e-smoke.yml 的 paths-ignore docs/**）——"
+        "否则那些 docs 改动会静默跳过 e2e。")
+
+
 def test_event_vocabulary_surface_pulls_in_the_generated_artifacts_guard():
     """`session/event.py` 是词汇唯一真值 ⇒ 必须连带选中生成物守卫（这一条只有那一行能提供）。"""
     lanes, focused, _ = _mine_eval("src/agent_harness/session/event.py")

@@ -65,6 +65,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -72,7 +73,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(REPO_ROOT, "web")
@@ -422,6 +423,255 @@ def build_lanes(since: str) -> list[Lane]:
                       [py, os.path.join("scripts", "check_review_coverage.py")] if py else None,
                       REPO_ROOT, blocked="找不到 .venv 解释器"))
     return lanes
+
+
+# --------------------------------------------------------------------------- #
+# receipt-present 收据在场检查（issue #1338 改动 3）
+# --------------------------------------------------------------------------- #
+#: 「docs-only」的**权威**判据在 `scripts/check_review_coverage.py::DOC_PATTERN`，能 import 到就
+#: 直接引用它。import 不到时（例如测试用 importlib 按文件加载本模块，`sys.path` 里没有
+#: `scripts/`）回落到下面的字面副本——此时跑的是**第二套口径**，改 `DOC_PATTERN` 必须同步
+#: 改这里（两套口径必然漂移，靠人工同步；本节不另立测试）。
+#: 与 scripts/check_review_coverage.py 的 DOC_PATTERN 保持同步（它是权威）。
+_DOC_PATTERN_FALLBACK = (
+    r'^(docs/.*\.(md|txt|rst|tsv|json|jsonl|ya?ml)$'
+    r'|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md)$'
+)
+#: 收据文件名：`docs/gate/<被测树 40 位 sha>.json`（入库文件名 = 引用口径）。
+_RECEIPT_RE = re.compile(r"^docs/gate/([0-9a-f]{40})\.json$")
+
+
+@functools.cache
+def _doc_pattern():
+    try:
+        from check_review_coverage import DOC_PATTERN as _p
+    except ImportError:
+        _p = _DOC_PATTERN_FALLBACK
+    return re.compile(_p)
+
+
+def _git_at(repo_root, *args: str) -> subprocess.CompletedProcess:
+    """`git -C <repo_root>`：本节的 git 调用一律显式绑仓库根（复用上面的 `git()` 助手）。
+
+    `-C <repo_root>` 已决定 git 的工作目录，`git()` 里 `cwd=REPO_ROOT` 在此冗余但无害；
+    `repo_root` 缺省即 `REPO_ROOT` 时与旧实现逐字节等价。
+    """
+    return git("-C", str(repo_root), *args)
+
+
+#: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
+#: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
+_RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
+
+
+def receipt_bootstrap_sha(repo_root=None) -> str | None:
+    """引入本检查的第一笔提交（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
+
+    Bootstrap 规则（#1338 改动 3）：规则存在**之前**写的提交、以及引入规则的那笔提交自身都在
+    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。
+    """
+    return _RECEIPT_BOOTSTRAP_SHA
+
+
+def head_tree_receipts(repo_root=None) -> dict:
+    """HEAD 树里 `docs/gate/<40hex>.json` 的校验结果：{sha: {"valid": bool, "reason": str}}。
+
+    有效 iff：可解析 JSON、`sha` 字段 == 文件名、`tree` == `git rev-parse <sha>^{tree}`、
+    `result` == "PASS"、**`passed`/`total` 为 int 且相等**（缺字段时两边都是 None，
+    `None == None` 为真，必须显式拒绝——否则三字段手写收据能顶掉整条在场检查）。
+    其余一律 invalid（**当它不存在** = fail-closed）。
+    """
+    repo_root = repo_root or REPO_ROOT
+    proc = _git_at(repo_root, "ls-tree", "-r", "--name-only", "HEAD", "--", "docs/gate/")
+    receipts: dict = {}
+    if proc.returncode != 0:
+        return receipts
+    for raw in proc.stdout.split("\n"):
+        path = raw.strip()
+        m = _RECEIPT_RE.match(path)
+        if not m:
+            continue
+        sha = m.group(1)
+        show = _git_at(repo_root, "show", f"HEAD:{path}")
+        if show.returncode != 0:
+            receipts[sha] = {"valid": False, "reason": "git show 失败"}
+            continue
+        try:
+            obj = json.loads(show.stdout)
+        except ValueError:
+            receipts[sha] = {"valid": False, "reason": "不是合法 JSON"}
+            continue
+        if not isinstance(obj, dict):
+            receipts[sha] = {"valid": False, "reason": "顶层不是 JSON 对象"}
+            continue
+        if obj.get("sha") != sha:
+            receipts[sha] = {"valid": False,
+                             "reason": f"sha 字段 {obj.get('sha')!r} 与文件名不符"}
+            continue
+        treeproc = _git_at(repo_root, "rev-parse", f"{sha}^{{tree}}")
+        tree = treeproc.stdout.strip()
+        if treeproc.returncode != 0 or not tree or obj.get("tree") != tree:
+            receipts[sha] = {"valid": False, "reason": "tree 字段与 git rev-parse 不符"}
+            continue
+        passed, total = obj.get("passed"), obj.get("total")
+        if (
+            obj.get("result") != "PASS"
+            or not (isinstance(passed, int) and isinstance(total, int))
+            or passed != total
+        ):
+            receipts[sha] = {"valid": False, "reason": "result/passed/total 不是全绿"}
+            continue
+        receipts[sha] = {"valid": True, "reason": ""}
+    return receipts
+
+
+def commit_file_changes(repo_root, c: str) -> list:
+    """一笔提交的 (status, path) 列表；merge 提交对**第一父**取 diff。"""
+    proc = _git_at(repo_root, "rev-list", "--parents", "-n", "1", c)
+    fields = proc.stdout.split()
+    if proc.returncode != 0 or not fields:
+        return []
+    parents = fields[1:]
+    if len(parents) > 1:
+        diff = _git_at(repo_root, "diff", "--name-status", parents[0], c)
+    else:
+        diff = _git_at(repo_root, "diff-tree", "--no-commit-id", "--name-status", "-r", c)
+    changes = []
+    for line in diff.stdout.split("\n"):
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip():
+            status = parts[0].strip()
+            if status.startswith("R") and len(parts) >= 3:
+                # 改名（`R100\t旧\t新`）取**新**路径：判的是落点树里的位置，旧路径已不存在。
+                path = parts[2].strip()
+            else:
+                path = parts[1].strip()
+            changes.append((status, path))
+    return changes
+
+
+def is_pure_docs_commit(changes: list) -> bool:
+    """纯 docs 提交：每笔改动都是 A/M 且路径全在 docs/**（SDD §8.1 口径）。
+
+    D（删除）/ R（改名）等一律不得免检：删 docs 文件或把文件移出 docs/ 都可能改变构建
+    输入，不能按"纯文档改动"放行（#1338 P2-3）。
+    """
+    return bool(changes) and all(
+        s in ("A", "M") and _doc_pattern().match(p) for s, p in changes
+    )
+
+
+def is_pure_receipt_landing(changes: list) -> bool:
+    """纯收据落盘提交（只**新增** docs/gate/<40hex>.json）⇒ 豁免。
+
+    否则"收据入库产生新 head"会让新 head 又要求自己的收据——无限回归（#1338 改动 3）。
+    """
+    return bool(changes) and all(
+        s == "A" and _RECEIPT_RE.match(p) for s, p in changes
+    )
+
+
+def transfer_diff_docs_only(repo_root, p: str, c: str) -> bool:
+    """SDD §8.1 读数传递规则的机械形式：p（冻结树）之后只多了 docs/台账类改动 ⇒ c 可复用 p 的读数。
+
+    传递的是**读数**，不是"看起来差不多"：只认 A/M 的 docs-only 路径，任何删除、改名或非 docs
+    路径都会让传递失效。
+    """
+    proc = _git_at(repo_root, "diff", "--name-status", p, c)
+    if proc.returncode != 0:
+        return False
+    rows = [ln.split("\t") for ln in proc.stdout.split("\n") if ln.strip()]
+    return all(len(r) >= 2 and r[0] in ("A", "M") and _doc_pattern().match(r[1]) for r in rows)
+
+
+def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
+    """收据在场检查（#1338 改动 3）⇒ (ok, detail, warn_only)。
+
+    对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
+    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受三种形状：
+    ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
+    c 是 t 的祖先、**且 c 与 t 同一冻结树**（`c^{tree} == t^{tree}`）——即批次冻结在树 F 后整批
+    只跑一次全量，每笔 c 的 t 都是后代 F。
+
+    ③ 落地票面对 t 的定义（"t 是 c 的被测树"，t = c 与 t = 父+传递只是实例）：字面只认
+    "t = c 或父"会要求**每笔代码提交各跑一次门禁**，与改动标题"每棵冻结树只跑一次全量"及
+    PR #1336 的既有实践（7 笔代码提交、1 枚冻结 tip 读数）冲突。merge commit 不需特判：同步合并
+    的树真被测过就有后代读数，没测过的新树照旧红（SDD §8.1 的 fail-closed 语义）。找不到 = 违规。
+    """
+    repo_root = repo_root or REPO_ROOT
+    mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
+    base = mb.stdout.strip()
+    if mb.returncode != 0 or not base:
+        return (False, f"cannot determine merge-base: {(mb.stderr or mb.stdout).strip()[:200]}",
+                False)
+    bootstrap = bootstrap_sha or receipt_bootstrap_sha(repo_root)
+    if not bootstrap:
+        return (False, ('cannot locate receipt-present bootstrap commit'
+                        '（scripts/gate0.py 的历史里找不到 "receipt-present"）'), False)
+
+    rev = _git_at(repo_root, "rev-list", f"{base}..HEAD")
+    if rev.returncode != 0:
+        return False, f"cannot list commits: {rev.stderr.strip()[:200]}", False
+    commits = [x for x in rev.stdout.split("\n") if x.strip()]
+    range_set = set(commits)
+
+    scope = []
+    for c in commits:
+        if c == bootstrap:
+            continue
+        if _git_at(repo_root, "merge-base", "--is-ancestor", bootstrap, c).returncode != 0:
+            continue  # 早于 bootstrap（规则存在之前的提交 / 在途 PR）⇒ 范围外
+        changes = commit_file_changes(repo_root, c)
+        if is_pure_docs_commit(changes) or is_pure_receipt_landing(changes):
+            continue  # 票面明示的两类豁免
+        scope.append(c)
+
+    receipts = head_tree_receipts(repo_root)
+    violations = []
+    for c in scope:
+        parents = _git_at(repo_root, "rev-list", "--parents", "-n", "1", c).stdout.split()[1:]
+        p1 = parents[0] if parents else None
+        acceptable = receipts.get(c, {}).get("valid", False) or (
+            p1 is not None
+            and receipts.get(p1, {}).get("valid", False)
+            and transfer_diff_docs_only(repo_root, p1, c)
+        )
+        if not acceptable:
+            # ③ 批次冻结树：t 在区间内、t != c、c 是 t 的祖先、**且 c 与 t 同一冻结树**
+            # （`c^{tree} == t^{tree}`）⇒ c 的被测树就是后代 t。只判祖先不判树，会让 tip
+            # 的一张收据免检所有更早的代码提交（#1338 P1-1），fail-open；树比对失败 ⇒ 不认。
+            c_tree = _git_at(repo_root, "rev-parse", f"{c}^{{tree}}").stdout.strip()
+            for t in receipts:
+                if t == c or t not in range_set or not receipts[t].get("valid", False):
+                    continue
+                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
+                    continue
+                t_tree = _git_at(repo_root, "rev-parse", f"{t}^{{tree}}").stdout.strip()
+                if c_tree and t_tree and c_tree == t_tree:
+                    acceptable = True
+                    break
+        if not acceptable:
+            subject = _git_at(repo_root, "log", "-1", "--format=%s", c).stdout.strip()
+            violations.append((c, subject))
+
+    # 首周 warn-only（#1338）：从 bootstrap 提交时间起 7 天内只告警不红；日期解析失败 ⇒ 不宽限。
+    warn_only = False
+    when = _git_at(repo_root, "log", "-1", "--format=%cI", bootstrap).stdout.strip()
+    try:
+        warn_only = (datetime.now().astimezone()
+                     < datetime.fromisoformat(when) + timedelta(days=7))
+    except ValueError:
+        warn_only = False
+
+    detail = [f"receipt-present（#1338 改动 3）：base={base[:12]} bootstrap={bootstrap[:12]} "
+              f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
+              + ("（首周 warn-only）" if warn_only else "")]
+    for sha, subject in violations:
+        detail.append(f"missing receipt for {sha[:12]} {subject}")
+    if violations and not warn_only:
+        detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，"
+                      "或从第一父提交传递读数（仅限 docs-only 改动）")
+    return len(violations) == 0, "\n".join(detail), warn_only
 
 
 def run_lane(lane: Lane) -> tuple[int, float, str]:
@@ -915,6 +1165,25 @@ def usage() -> int:
     return 0
 
 
+def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
+    """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 6 条）。
+
+    只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
+    就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
+    """
+    for i, (lane, rc, secs, out) in enumerate(results):
+        if lane.name == "guards":
+            if rc == 0:
+                ok, detail, warn = receipt_present_check()
+                if not ok:
+                    if warn:
+                        print("warn-only receipt-present (#1338 change 3, first week): alert only, not counted")
+                        print(detail)
+                    else:
+                        results[i] = (lane, 1, secs, out + "\n" + detail)
+            break
+
+
 def main(argv: list[str]) -> int:
     _utf8_stdio()
     since, only, affected_rev, replay_path = "", "", "", ""
@@ -1033,6 +1302,8 @@ def main(argv: list[str]) -> int:
         rc, secs, out = run_lane(lane)
         print(f"[{idx}/{len(lanes)}] {lane.name:11s} {'PASS' if rc == 0 else 'FAIL'}  {secs:6.2f}s")
         results.append((lane, rc, secs, out))
+
+    _apply_receipt_check(results)
 
     wall = time.time() - started
     for lane, rc, _secs, out in results:
