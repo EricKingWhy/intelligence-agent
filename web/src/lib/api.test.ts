@@ -35,6 +35,8 @@ import {
   getAttachmentLimits,
   postApproval,
   readErrorDetail,
+  compactSession,
+  forkSession,
   recoverSession,
   renameProject,
   reorderProjectSession,
@@ -1204,6 +1206,57 @@ describe('deleteSession — 会话硬删端点契约（#172 / ADR-0029；状态�
     expect(describeSessionError(new Error('网络断了'), '删除会话失败')).toBe('网络断了');
     expect(describeSessionError(new Error(''), '删除会话失败')).toBe('删除会话失败');
     expect(describeSessionError(null, '删除会话失败')).toBe('删除会话失败');
+  });
+});
+
+describe('#1325 S5 — compactSession 409 携带机读 reason', () => {
+  it('对象形 detail → SessionError.reason 取自 detail.reason（调用方不必解析文案）', async () => {
+    captureFetch(409, {
+      detail: {
+        message:
+          "session '9f1c2d3e-aaaa-bbbb-cccc-0123456789ab' has no compactable early turn; there is nothing to summarize yet",
+        reason: 'no_early_turns',
+      },
+    });
+    const err = await compactSession('s1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionError);
+    expect((err as SessionError).status).toBe(409);
+    expect((err as SessionError).reason).toBe('no_early_turns');
+  });
+
+  it('字符串 detail → reason 为 null（不按文案猜）', async () => {
+    captureFetch(409, { detail: 'session has an active run' });
+    const err = await compactSession('s1').catch((e: unknown) => e);
+    expect((err as SessionError).reason).toBeNull();
+    expect((err as SessionError).message).toBe('session has an active run');
+  });
+});
+
+describe('#1325 S8 — forkSession 对象形 detail 不出 [object Object]', () => {
+  it('sandbox 不可用 409（对象 detail）→ message 可读，不含 [object Object]', async () => {
+    captureFetch(409, {
+      detail: {
+        message: "Sandbox 后端 'docker' 不可用：daemon not running；修复：启动 Docker Desktop / dockerd 后重试",
+        backend: 'docker',
+        reason: 'daemon_not_running',
+        details: {},
+        remediation: '启动 Docker Desktop / dockerd 后重试',
+        available_backends: ['local'],
+      },
+    });
+    const err = await forkSession('s1', 3).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionError);
+    expect((err as SessionError).status).toBe(409);
+    expect((err as SessionError).reason).toBe('daemon_not_running');
+    expect((err as Error).message).not.toContain('[object Object]');
+    expect((err as Error).message).toContain('Sandbox 后端');
+    expect((err as Error).message).toContain('修复');
+  });
+
+  it('字符串 detail（404）仍原样透出', async () => {
+    captureFetch(404, { detail: "session 's-1' not found" });
+    const err = await forkSession('s-1', 3).catch((e: unknown) => e);
+    expect((err as Error).message).toBe("session 's-1' not found");
   });
 });
 

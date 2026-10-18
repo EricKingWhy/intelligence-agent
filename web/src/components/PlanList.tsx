@@ -177,6 +177,27 @@ export function PlanList({
     [],
   );
 
+  // #1325 S1：run 进入终态（completed / failed / cancelled）的**边沿**自动收起清单。
+  // 只在边沿触发一次——终态期间用户手动重新展开后不再被反复打断（票面 AC1：
+  // 「一次性收起」，不是终态期间持续强制收起）。cancelled 在投影里落 run_status
+  // 'failed'，已由 terminal 覆盖。
+  //
+  // `runInterrupted` 不会跨 run 残留：`run/started` 在投影里清空它
+  // （`lib/projection.ts` 的 `projectRunStarted`，与 run_failure 同一失效规则），
+  // 中断那轮本身又已由 `finalizeRun` 落成 run_status='completed'。闩锁因此在
+  // 「离开终态」这一拍显式复位——不靠隐含的赋值顺序。
+  const wasTerminalRef = useRef(false);
+  useEffect(() => {
+    const terminal =
+      runStatus === 'completed' || runStatus === 'failed' || runInterrupted;
+    if (!terminal) {
+      wasTerminalRef.current = false;
+      return;
+    }
+    if (!wasTerminalRef.current) setPanelExpanded(false);
+    wasTerminalRef.current = true;
+  }, [runStatus, runInterrupted]);
+
   useEffect(() => {
     if (!panelExpanded) return;
     const closeOnEscape = (event: KeyboardEvent) => {

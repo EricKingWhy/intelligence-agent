@@ -20,6 +20,7 @@ import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ContextFullDialog } from './ContextFullDialog';
+import { COMPACT_REJECT_COPY } from '../hooks/useCompactSession';
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
@@ -66,6 +67,22 @@ describe('#1197 项 2 — ContextFullDialog（压不住时的一句话兜底）'
     expect(text).toContain('前面没有可压缩的内容，换个窗口更大的模型继续吧。');
     expect(text).toContain('换模型');
     expect(text).toContain('结束');
+  });
+
+  it('#1325 S9：自动满窗与手动被拒同一语言（中文、同用「没有可压缩」措辞）', () => {
+    const text = mount();
+    // 自动路径保持票面中文引导，不出现英文原文 / 机读 reason / 裸 session id。
+    expect(text).toContain('前面没有可压缩的内容');
+    expect(text).not.toContain('no_early_turns');
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i);
+  });
+
+  it('#1325 S9：两条入口共享同一核心措辞（绑定而不是各测各的）', () => {
+    // 手动路径 409 `no_early_turns` 的映射文案（唯一分派点导出的常量）与自动路径
+    // 的票面引导必须同时包含「没有可压缩」——任一侧改词，这条就红。
+    const manual = COMPACT_REJECT_COPY.no_early_turns;
+    expect(manual).toContain('没有可压缩');
+    expect(mount()).toContain('没有可压缩');
   });
 
   it('不出现任何内部术语（设计说明 02：只说人话）', () => {

@@ -3231,7 +3231,7 @@ def create_app(
             raise storage_http_error(e) from e
         except SandboxUnavailableError as e:
             # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
-            # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
+            # detail 带 remediation 与可用后端列表，供客户端诊断。
             # `#1278`：同一份构造与 fork 端点共用（`web/domain_errors.py`）。
             raise sandbox_unavailable_http_error(e) from e
 

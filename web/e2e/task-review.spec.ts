@@ -48,7 +48,7 @@ async function openReview(page: Page, state: TaskReviewFixture): Promise<void> {
   await submitTask(page, '审阅这个任务');
   await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: /文件\/改动/ }).click();
   await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
-  await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '详细审阅' })).toBeVisible();
 }
 
 test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }) => {
@@ -67,7 +67,7 @@ test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }
     },
   };
   await openReview(page, state);
-  const panel = page.getByRole('dialog', { name: '任务审阅' });
+  const panel = page.getByRole('dialog', { name: '详细审阅' });
 
   for (const label of ['未开始', '进行中', '通过', '失败', '受阻', '未完成']) {
     await expect(panel).toContainText(label);
@@ -98,7 +98,7 @@ test('可交付 + 证据已过期并存：chip 文案不被前端修正，仅叠
     evidence: { c1: [evidenceRecord({ criterion_id: 'c1', result: 'pass', freshness: { status: 'stale', reasons: ['base_head 已变动'] } })] },
   };
   await openReview(page, state);
-  const panel = page.getByRole('dialog', { name: '任务审阅' });
+  const panel = page.getByRole('dialog', { name: '详细审阅' });
   await expect(panel.locator('.task-review-chip')).toHaveText('可交付');
   const disambiguation = panel.locator('.task-review-disambiguation');
   await expect(disambiguation).toContainText('验收项状态：可交付');
@@ -121,7 +121,7 @@ test('接受 → 交付态变已接受；刷新后同源（状态来自服务端
   };
   await openReview(page, state);
   await page.getByRole('button', { name: '接受', exact: true }).click();
-  const panel = page.getByRole('dialog', { name: '任务审阅' });
+  const panel = page.getByRole('dialog', { name: '详细审阅' });
   await expect(panel.locator('.task-review-chip')).toHaveText('已接受');
   await expect(panel).toContainText('任务已接受。');
 
@@ -129,7 +129,7 @@ test('接受 → 交付态变已接受；刷新后同源（状态来自服务端
   await page.reload();
   await page.getByRole('tablist', { name: '工作区面' }).getByRole('tab', { name: /文件\/改动/ }).click();
   await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
-  await expect(page.getByRole('dialog', { name: '任务审阅' }).locator('.task-review-chip')).toHaveText('已接受');
+  await expect(page.getByRole('dialog', { name: '详细审阅' }).locator('.task-review-chip')).toHaveText('已接受');
 });
 
 test('带原因接受 reason 为空 → 客户端先校验（不发请求）；释放目录 released:false 如实显示', async ({ page }) => {
@@ -144,7 +144,7 @@ test('带原因接受 reason 为空 → 客户端先校验（不发请求）；�
     leaseReleased: false,
   };
   await openReview(page, state);
-  const panel = page.getByRole('dialog', { name: '任务审阅' });
+  const panel = page.getByRole('dialog', { name: '详细审阅' });
 
   await page.locator('.task-review-more-actions > summary').click();
   await page.getByRole('button', { name: '带原因接受' }).click();
@@ -169,7 +169,7 @@ test('文件/diff/快照：git status 文件列表 + unified diff + 快照清单
     gitDiff: { exit_code: 0, stdout: 'diff --git a/src/a.py b/src/a.py\n+added line', stderr: '', artifact_ref: null },
   };
   await openReview(page, state);
-  const panel = page.getByRole('dialog', { name: '任务审阅' });
+  const panel = page.getByRole('dialog', { name: '详细审阅' });
   await expect(panel).toContainText('agent-progress/' + SID + '/progress.md');
   await expect(panel.locator('.task-review-diff')).toContainText('+added line');
   await expect(panel).toContainText('快照（证据记录时的覆盖清单）');

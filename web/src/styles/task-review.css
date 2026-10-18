@@ -50,6 +50,12 @@
   font-weight: 600;
 }
 
+/* #1325 S2：「标记已读」是比「详细审阅」更弱的动作（效果图 `link-button subtle`）。
+   弱不等于不可见：--text-tertiary 两套主题都在 AA 元信息色档内。 */
+.task-review-summary-link.is-subtle {
+  color: var(--text-tertiary);
+}
+
 .task-review-meta-empty {
   color: var(--text-tertiary);
   font-size: var(--text-xs);

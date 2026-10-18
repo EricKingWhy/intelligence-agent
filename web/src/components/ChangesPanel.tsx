@@ -16,7 +16,7 @@
  *  不做 git 状态——那是 #191。
  */
 import { FileDiff } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AgentEvent } from '../types';
 import type { FileChange } from '../lib/changedFiles';
 import { summarizeTaskRuns } from '../lib/taskReviewSummary';
@@ -86,6 +86,20 @@ export function ChangesPanel({
   onOpenTaskReview?: () => void;
 }) {
   const [wanted, setWanted] = useState<string | null>(null);
+  /* #1325 S2：「标记已读」是**run 作用域**的本地确认态（GitHub "Mark as viewed" /
+   * Linear inbox 同款：弱动作、不写服务端）。存 `${sessionId}:${runId}` 而不是
+   * 一个布尔——新 run 终态一到就该重新提醒，且会话切走后不能沿用上一会话的确认。
+   * 它只摘掉横条的强调/警示，**不替换**主状态行（「本次改动 N 个文件」这类信息
+   * 必须常驻，效果图里「已标记为已读」是瞬时回执而非常驻文案）；不变量 #22 不变。 */
+  const [readRunKey, setReadRunKey] = useState<string | null>(null);
+  /* 回执与 `compactError` 同一时长口径（8s 自动消退）：确认动作的结果是**瞬时**的，
+   * 常驻会把「已读」变成第二行状态，与主状态行抢同一块版面。 */
+  const [readReceipt, setReadReceipt] = useState<string | null>(null);
+  useEffect(() => {
+    if (readReceipt === null) return;
+    const t = setTimeout(() => setReadReceipt(null), 8000);
+    return () => clearTimeout(t);
+  }, [readReceipt]);
   /* 渲染期收窄（同 #182 `resolveActiveTab` / #183 的 peek 口径）：选中的文件可能已经
    * 不在清单里（会话切换、或那次改动被后续事件改写），此时落回第一个文件——绝不留在
    * 一个指向不存在文件的选择上。 */
@@ -97,23 +111,43 @@ export function ChangesPanel({
   );
   const showReviewSummary =
     runSummary?.hasTerminalRun === true && !runSummary.hasRunningRun;
+  const terminalRunKey =
+    runSummary?.latestTerminalRunId != null
+      ? `${sessionId ?? ''}:${runSummary.latestTerminalRunId}`
+      : null;
+  const markedRead = terminalRunKey !== null && readRunKey === terminalRunKey;
 
   return (
     <div className="changes-panel" role="region" aria-label="文件/改动">
       {showReviewSummary && runSummary && (
-        <div className={`task-review-summary${runSummary.incompleteCount > 0 ? ' is-warning' : ''}`}>
+        <div className={`task-review-summary${runSummary.incompleteCount > 0 && !markedRead ? ' is-warning' : ''}`}>
           <span className="task-review-summary-message" role="status">
             {runSummary.incompleteCount > 0
               ? `有 ${runSummary.incompleteCount} 个任务未完成，请查看`
               : `本次改动 ${files.length} 个文件，请查看 diff`}
+            {readReceipt !== null && ` · ${readReceipt}`}
           </span>
           {onOpenTaskReview && (
             <button
               type="button"
-              className={`task-review-summary-link${runSummary.emphasizeDetails ? ' is-emphasized' : ''}`}
+              className={`task-review-summary-link${runSummary.emphasizeDetails && !markedRead ? ' is-emphasized' : ''}`}
               onClick={onOpenTaskReview}
             >
               详细审阅
+            </button>
+          )}
+          {/* 弱入口（效果图 `#panel-normal` 的 `link-button subtle`）：确认这一轮
+              审阅提醒，不打开面板、不写任何事实。 */}
+          {terminalRunKey !== null && !markedRead && (
+            <button
+              type="button"
+              className="task-review-summary-link is-subtle"
+              onClick={() => {
+                setReadRunKey(terminalRunKey);
+                setReadReceipt('已标记为已读，不会阻断后续操作');
+              }}
+            >
+              标记已读
             </button>
           )}
         </div>
@@ -204,9 +238,9 @@ export function ChangesPanel({
         </>
       )}
       {/* #1311：数据源标注在空态/有文件两种版式下常驻——清单只覆盖结构化文件工具事件，
-          shell 副作用由「任务审阅」的 git 口径兜底；两个口径的差异有标注才有得区分。 */}
+          shell 副作用由「详细审阅」的 git 口径兜底；两个口径的差异有标注才有得区分。 */}
       <div className="changes-footnote">
-        数据来源：write/edit/apply_patch 工具事件；shell 命令的文件副作用不在此清单内（git 口径见「任务审阅」）。
+        数据来源：write/edit/apply_patch 工具事件；shell 命令的文件副作用不在此清单内（git 口径见「详细审阅」）。
       </div>
     </div>
   );
