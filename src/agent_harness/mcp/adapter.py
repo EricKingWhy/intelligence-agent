@@ -130,9 +130,11 @@ class MCPTool(Tool):
         self._description = (getattr(remote_tool, "description", None) or "").strip()
         annotations = getattr(remote_tool, "annotations", None)
         read_only_hint = bool(getattr(annotations, "read_only_hint", False)) if annotations else False
-        self._read_only = read_only_hint
 
         override = server_config.tool_permissions.get(self._remote_name)
+        # #1351：显式 read-only 配置与 readOnlyHint 一样派生只读副作用（配置是用户
+        # 的显式声明，优先于 server 自报元数据）；其余情况仍按 hint 判定。
+        self._read_only = read_only_hint or override is ToolPermission.READ_ONLY
         if override is not None:
             self._permission = override
         elif read_only_hint:
