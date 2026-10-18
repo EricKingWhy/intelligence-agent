@@ -13,7 +13,7 @@ import pytest
 
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.sandbox.paths import canonical_workspace_path
-from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from tests.workspace_fixtures import rewrite_workspace_mapping
@@ -143,6 +143,17 @@ class TestLoadWithoutWorkspaceMapping:
 
         assert resumed.sandbox is None
         assert any(e.type == "session/resumed" for e in resumed.events)
+
+    def test_binding_error_still_propagates(self, store_and_registry):
+        """只降级「没有映射」；硬删除进行中是「映射此刻不可用」，必须继续响亮失败。"""
+        store, registry = store_and_registry
+        session_id = Session.start(store).session_id
+        registry._write_mapping(
+            session_id, {"session_id": session_id, "workspace_delete_in_progress": True}
+        )
+
+        with pytest.raises(WorkspaceBindingError, match="hard-delete"):
+            Session.load(store, session_id, workspace_registry=registry)
 
 
 class TestRecordedWorkspaceRoots:
