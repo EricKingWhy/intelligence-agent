@@ -30,12 +30,16 @@ async def _store(tmp_path, memory_limit: int, user_limit: int):
 
 
 def _assert_three_part(result: dict, *, current: int, limit: int, entries: list[str]) -> None:
+    """票面 M3：超限错误必须同时给出「用量 / 上限 / 全部条目」。
+
+    「用量」是**这次尝试最终会达到的**用量（add 是加上新条目后，replace/batch 是改完后的
+    终态）——只报旧用量无法解释"为什么被拒"。`usage` 字段本身是**当前**占用，不参与本条
+    断言（上游同形：文案带终态数字，`usage` 仍是活用量）。
+    """
     assert result["success"] is False
     message = result["error"]
     assert f"{current:,}" in message or str(current) in message, message
     assert f"{limit:,}" in message or str(limit) in message, message
-    usage = result.get("usage", "")
-    assert f"{current:,}/{limit:,}" in str(usage) or f"{current}/{limit}" in str(usage), usage
     assert result.get("current_entries") == entries
 
 
@@ -85,17 +89,17 @@ async def test_batch_overflow_checks_final_state_only(tmp_path) -> None:
     assert (await call(store.add, "memory", "a" * 60))["success"] is True
     assert (await call(store.add, "memory", "b" * 40))["success"] is True
 
-    # 先删后加：中间态超限、最终态不超限 ⇒ 必须成功。
+    # 先加后删：中间态 176 > 120、最终态 113 ≤ 120 ⇒ 必须成功（预算只看最终态）。
     ok = await call(
         store.apply_batch,
         "memory",
         [
+            {"action": "add", "content": "c" * 70},
             {"action": "remove", "old_text": "a" * 60},
-            {"action": "add", "content": "c" * 90},
         ],
     )
     assert ok["success"] is True
-    assert read_entries(path_of(store, "memory")) == ["b" * 40, "c" * 90]
+    assert read_entries(path_of(store, "memory")) == ["b" * 40, "c" * 70]
 
     # 最终态超限 ⇒ 整批拒绝，三段式错误 + 全量条目。
     before = read_entries(path_of(store, "memory"))
@@ -106,7 +110,7 @@ async def test_batch_overflow_checks_final_state_only(tmp_path) -> None:
     )
     _assert_three_part(
         bad,
-        current=len("b" * 40 + "\n§\n" + "c" * 90 + "\n§\n" + "d" * 40),
+        current=len("b" * 40 + "\n§\n" + "c" * 70 + "\n§\n" + "d" * 40),
         limit=120,
         entries=before,
     )

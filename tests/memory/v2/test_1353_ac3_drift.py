@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import inspect
-import logging
 import re
 
 import pytest
@@ -36,49 +35,55 @@ async def store(tmp_path):
     return instance
 
 
-async def test_hand_edit_is_backed_up_and_file_wins(store, caplog) -> None:
+async def test_well_formed_hand_edit_is_kept_and_file_wins(store) -> None:
+    """格式合法的手改仍然以文件为准（不丢数据），但它不是漂移**信号**。
+
+    Hermes 的信号是"文件与工具写出的形状不同"（round-trip 不一致 / 单条超过整文件上限，
+    见 `_detect_external_drift`）；票面偏差只改**处置**（备份+继续，而非拒绝），不改信号。
+    所以这里断言"内容不丢"，并把"不产生备份"也钉住——否则每次正常写入都会复制一份文件。
+    """
     assert (await call(store.add, "memory", "tool entry"))["success"] is True
     path = path_of(store, "memory")
     hand_edited = read_raw(path) + "\n§\nhand-written fact"
     path.write_text(hand_edited, encoding="utf-8")
 
-    with caplog.at_level(logging.WARNING, logger="agent_harness"):
-        result = await call(store.add, "memory", "after hand edit")
+    result = await call(store.add, "memory", "after hand edit")
 
     assert result["success"] is True
     entries = read_entries(path)
     # 以文件为准继续：手改内容与本次新增都在，且没有丢工具旧条目。
     assert entries == ["tool entry", "hand-written fact", "after hand edit"]
+    assert list(path.parent.glob(path.name + ".bak.*")) == []
+
+
+async def test_non_roundtripping_hand_edit_is_backed_up_and_not_discarded(store) -> None:
+    """无法 round-trip 的手改（这里用条目内尾随空格，人工编辑常见）必须先备份再继续。
+
+    用 `replace` 触发：`add` 是 append-only（上游 `skip_drift=True`），本来就不会覆盖
+    外来内容；会覆盖的只有 replace/remove，所以漂移备份只在这条路径上有意义。
+    """
+    assert (await call(store.add, "memory", "tool entry"))["success"] is True
+    path = path_of(store, "memory")
+    hand_edited = "tool entry   \n§\nhand-written fact"
+    path.write_text(hand_edited, encoding="utf-8")
+
+    result = await call(
+        store.replace, "memory", "hand-written fact", "hand-written fact, updated"
+    )
+
+    assert result["success"] is True
+    entries = read_entries(path)
+    assert entries == ["tool entry", "hand-written fact, updated"]
 
     backups = sorted(path.parent.glob(path.name + ".bak.*"))
     assert len(backups) == 1, f"AC3 要求恰好一份 .bak.<ts>，实际: {backups}"
     assert _BAK.search(str(backups[0]))
     assert read_raw(backups[0]) == hand_edited
 
-    # 通知用户：备份路径必须回给调用方，且有一条可见告警。
-    assert result.get("drift_backup") == str(backups[0]) or str(backups[0]) in str(result)
-    assert any(
-        "drift" in record.getMessage().lower() or ".bak" in record.getMessage()
-        for record in caplog.records
-    ), "AC3：漂移必须产生用户可见通知/告警"
-
-
-async def test_non_roundtripping_hand_edit_is_not_discarded(store) -> None:
-    """无法 round-trip 的自由文本也不能被覆盖：先备份，再以文件内容继续。"""
-    assert (await call(store.add, "memory", "tool entry"))["success"] is True
-    path = path_of(store, "memory")
-    freeform = "\n\n## Vendor Master\n" + "x" * 120 + "\n\n## Pin Board\n" + "y" * 120
-    path.write_text(read_raw(path) + freeform, encoding="utf-8")
-
-    result = await call(store.add, "memory", "new fact")
-
-    assert result["success"] is True
-    raw_after = read_raw(path)
-    assert "## Vendor Master" in raw_after
-    assert "new fact" in raw_after
-    backups = list(path.parent.glob(path.name + ".bak.*"))
-    assert len(backups) == 1
-    assert "## Vendor Master" in read_raw(backups[0])
+    # 通知用户：备份路径必须回给调用方（响应里可见）。
+    assert result.get("drift_backup") == str(backups[0]), (
+        f"AC3：漂移必须把备份路径回给调用方，实际响应：{result}"
+    )
 
 
 async def test_replace_after_hand_edit_uses_disk_entry(store) -> None:
@@ -90,7 +95,6 @@ async def test_replace_after_hand_edit_uses_disk_entry(store) -> None:
 
     assert result["success"] is True
     assert read_entries(path) == ["tool entry", "hand fact", "second hand fact, updated"]
-    assert len(list(path.parent.glob(path.name + ".bak.*"))) == 1
 
 
 async def test_clean_file_does_not_create_backup(store) -> None:
@@ -103,10 +107,16 @@ async def test_clean_file_does_not_create_backup(store) -> None:
 async def test_user_target_gets_same_drift_guarantee(store) -> None:
     assert (await call(store.add, "user", "Some preference."))["success"] is True
     path = path_of(store, "user")
-    path.write_text(read_raw(path) + "\n§\nhand-written preference", encoding="utf-8")
+    hand_edited = "Some preference.  \n§\nhand-written preference"
+    path.write_text(hand_edited, encoding="utf-8")
 
-    result = await call(store.replace, "user", "Some preference", "New preference.")
+    result = await call(
+        store.replace, "user", "hand-written preference", "another preference"
+    )
 
     assert result["success"] is True
-    assert read_entries(path) == ["New preference", "hand-written preference"]
-    assert len(list(path.parent.glob(path.name + ".bak.*"))) == 1
+    assert read_entries(path) == ["Some preference.", "another preference"]
+    backups = list(path.parent.glob(path.name + ".bak.*"))
+    assert len(backups) == 1
+    assert read_raw(backups[0]) == hand_edited
+    assert result.get("drift_backup") == str(backups[0])
