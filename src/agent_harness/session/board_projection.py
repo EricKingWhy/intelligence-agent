@@ -173,6 +173,9 @@ def _last_message(events: list[SessionEvent], event_type: str) -> str | None:
     ``Session.user_turn_count`` 的既有排除口径一致，不另立判据。
     （``origin=PROGRESS_CONFIRM_ORIGIN`` 的确认指令不排除：那三条既有判据都
     把它算作用户来源——用户确实确认了这次外部编辑。）
+
+    带 ``input_request_id`` 的同样是 harness 生成的文本（提问超时 / 跳过提问），
+    不是用户原话；``is_direct_user_input_event`` 对这类事件一律判否，这里对齐。
     """
     for event in reversed(events):
         if event.type != event_type:
@@ -181,7 +184,9 @@ def _last_message(events: list[SessionEvent], event_type: str) -> str | None:
         # 一条坏行不得让整份投影派生失败。
         data = event.data if isinstance(event.data, dict) else {}
         if event_type == USER_MESSAGE and (
-            data.get("injected_by") or data.get("replace")
+            data.get("injected_by")
+            or data.get("replace")
+            or "input_request_id" in data
         ):
             continue
         content = data.get("content")

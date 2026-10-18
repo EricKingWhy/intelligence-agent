@@ -1157,6 +1157,28 @@ def test_last_user_message_skips_injected_and_replacement_messages(tmp_path: Pat
     assert projection_store.get(sid).last_user_message == "再改一下"
 
 
+def test_last_user_message_skips_input_request_timeout_message(tmp_path: Path) -> None:
+    """F-2：提问超时 / 跳过提问生成的 USER_MESSAGE 不是用户原话。
+
+    这类事件带 ``input_request_id``，``derive.is_direct_user_input_event``
+    一律判否；卡面 ``You`` 必须同口径，不能把「等待回答超时」当成用户说的话。
+    """
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+
+    session.append(
+        USER_MESSAGE,
+        {
+            "content": "提问等待超时，已按默认继续",
+            "input_request_id": "q1",
+            "input_request_answer": {"request_id": "q1", "timeout": True},
+        },
+    )
+    assert projection_store.get(sid).last_user_message == "改一下标题"
+
+
 # ── #1308 / AC-20：读取与重启 ────────────────────────────────────────────
 
 
