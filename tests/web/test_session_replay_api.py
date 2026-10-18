@@ -8,6 +8,7 @@
 | 无任何可渲染事件（只有生命周期噪音） | 200 `count=0, steps=[]` |
 | 会话不存在 | 404 `session '<id>' not found` |
 | id 形态非法 | 422（先于 404，路径穿越防线） |
+| 事件日志损坏（完整坏行 / seq 断层 / 重复） | 409（与 `/events`、`/recovery` 同一口径） |
 
 三条口径要点：
 
@@ -166,7 +167,7 @@ def test_replay_is_idempotent(tmp_path: Path) -> None:
     assert first == second
 
 
-# ── 错误矩阵：404 / 422 ───────────────────────────────────────────────
+# ── 错误矩阵：404 / 409 / 422 ─────────────────────────────────────────
 
 
 def test_replay_unknown_session_is_404(tmp_path: Path) -> None:
@@ -174,6 +175,22 @@ def test_replay_unknown_session_is_404(tmp_path: Path) -> None:
     resp = client.get("/api/sessions/no-such-session/replay")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "session 'no-such-session' not found"
+
+
+def test_replay_corrupt_event_log_is_409(tmp_path: Path) -> None:
+    """完整坏行 ⇒ 409（与 `/events`、`/recovery` 同一口径，#565）。
+
+    损坏日志不是"没有内容"：404 会把"数据坏了，需要恢复"掩蔽成"没这个东西"，
+    用户到不了恢复入口。回放必须复现同一判据，而不是投影一段残缺历史。
+    """
+    _seed_session(tmp_path)
+    with _events_path(tmp_path, "hist").open("ab") as fh:
+        fh.write(b"{not json}\n")
+    client = _client(tmp_path)
+
+    resp = client.get("/api/sessions/hist/replay")
+    assert resp.status_code == 409, resp.text
+    assert "损坏行" in resp.json()["detail"]
 
 
 def test_replay_invalid_session_id_is_422(tmp_path: Path) -> None:
