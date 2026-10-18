@@ -615,7 +615,7 @@ describe('sessionIdBaseline / discoverNewSessionId', () => {
       discoverNewSessionId(
         new Set(Array.from({ length: 5000 }, (_, i) => `old-${i}`)),
         {
-          timeoutMs: 800,
+          timeoutMs: 2500,
           baseDelayMs: 20,
           maxDelayMs: 80,
         },

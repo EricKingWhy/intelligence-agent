@@ -369,7 +369,8 @@ export const DEFAULT_SESSION_CLAIM_TIMEOUT_MS = 20_000;
 /** 指数退避的起点（#1321）。旧实现的固定 150ms 让所有客户端同相位轮询。 */
 export const CLAIM_BASE_DELAY_MS = 150;
 
-/** 单次退避上限（票面建议上限 15s）。总预算仍由 `timeoutMs` 收口。 */
+/** 单次退避上限（票面建议上限 15s）。总预算 `timeoutMs` 只约束 sleep：
+ *  在途的 `listSessions` 请求本身不可取消，可能使总时长超出一个往返。 */
 export const CLAIM_MAX_DELAY_MS = 15_000;
 
 /** 认领参数：总预算与退避曲线。默认值面向共享后端；测试按比例缩小。 */
@@ -381,12 +382,16 @@ export interface SessionClaimOptions {
   random?: () => number;
 }
 
-/** 第 `attempt` 次失败后的退避（等于 jitter：上限的一半 + 一半随机）。
+/** 第 `attempt` 次失败后的退避（equal jitter：上限的一半 + 一半随机）。
  *
  *  采用 AWS Architecture Blog「Exponential Backoff And Jitter」的 equal-jitter
  *  变体：`cap = min(max, base * 2^attempt)`，`sleep = cap/2 + rand*cap/2`。
  *  与固定间隔相比，它同时消除同相位重试（雪崩）与「随机到 0 立即重试」；
  *  与 full-jitter 相比，它保证至少一半的指数增长，慢链路不会被压成热循环。
+ *
+ *  预算边界：`discoverNewSessionId` 只把 **sleep** 夹到剩余预算；在途的
+ *  `listSessions` 请求不可取消（无 AbortSignal），因此总时长可能比 `timeoutMs`
+ *  超出一个往返。不要把它当硬 deadline 使用。
  */
 export function claimBackoffMs(
   attempt: number,

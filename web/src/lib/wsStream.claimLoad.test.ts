@@ -34,6 +34,12 @@ describe.runIf(RUN)('#1321 慢负载验收（20 次连续提交）', () => {
   it(
     '20/20 零「未认领到新会话」；记录列表延迟读数',
     async () => {
+      // 空跑防线：IA_CLAIM_SUBMISSIONS 非正整数（如 `abc` → NaN）会让循环整体
+      // 跳过、failures 保持 []，脚本假绿。先失败，再谈 20/20。
+      expect(
+        Number.isInteger(SUBMISSIONS) && SUBMISSIONS > 0,
+        `IA_CLAIM_SUBMISSIONS 必须是正整数（实际：${String(ENV?.IA_CLAIM_SUBMISSIONS)}）`,
+      ).toBe(true);
       /** session_id → 对列表可见的绝对时刻（base 行恒可见）。 */
       const visibleAt = new Map<string, number>();
       for (let i = 0; i < 40; i += 1) visibleAt.set(`base-${i}`, 0);
@@ -90,6 +96,8 @@ describe.runIf(RUN)('#1321 慢负载验收（20 次连续提交）', () => {
           `submit_elapsed_ms=${JSON.stringify(elapsed)} failures=${JSON.stringify(failures)}`,
       );
 
+      // 有提交就必然有列表往返；为零说明 fetch 桩未生效或循环空跑。
+      expect(listLatencies.length).toBeGreaterThan(0);
       expect(failures, failures.join('; ')).toEqual([]);
     },
     600_000,
