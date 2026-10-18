@@ -1553,7 +1553,16 @@ export function useSession() {
                模式改 queue，语义正好是"这条排队项立即作为新消息投递"。
                无 queue_id 时该 409 在 register_steer **之前**抛出、什么也没登记，
                重投同样不会重复投递。重投不会再回退：改投后 mode=queue，而这张表只在
-               mode=steer 时给出 retry-queue ⇒ 递归深度恒为 1。 */
+               mode=steer 时给出 retry-queue ⇒ 递归深度恒为 1。
+
+               #1324 AC2(b)：重试**不许静默**。这里在改投前留一条可检索的归因
+               记录（会话 + 被拒的 mode + 后端 detail）；用户可见层不变——重投
+               成功时不弹任何错误横幅（AC2(c)）。 */
+            console.warn(
+              '[useSession] steer 打空（409 SteerTargetNotFound），改投 queue：' +
+                `session=${sessionId} mode=${payload.mode} detail=${body?.message ?? ''}` +
+                ` queue_id=${payload.queue_id ?? 'none'}`,
+            );
             const { queue_id: _alreadyCancelled, ...rest } = payload;
             return await deliver({ ...rest, mode: 'queue' });
           }
