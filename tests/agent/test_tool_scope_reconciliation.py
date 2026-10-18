@@ -142,6 +142,12 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     "load_skill": (
         "skills 能力工具（`skills/tool.py`），未在任何档位声明：技能包由 main 加载"
     ),
+    "memory": (
+        "#1353 M1 markdown 长期记忆工具（`memory/v2/memory_tool.py`）：由 "
+        "`_wire_memory_v2` 在 V2 store 就绪时注册，未进任何档位 scope——单用户记忆面"
+        "只在根会话开放（子代理记忆面待决）；写操作仍受 WORKSPACE_WRITE 权限与 "
+        "markdown 目录闸门约束"
+    ),
     "promote_skill": (
         "#529 沉淀提议工具（`skills/promote_tool.py`），未在任何档位声明：只写 "
         "staging 待审区，注册另经 register_skill 的 DANGER 审批闸门"
