@@ -4,7 +4,7 @@
  *  - 判据形状：`src/renderer/src/attention/agent-attention-acknowledgement.ts:26-48`
  *    的 `isAgentTurnUnacknowledged(acknowledgedAt, turnStartedAt)` ——
  *    `turnStartedAt != null && acknowledgedAt < turnStartedAt`。
- *  - 比较键选型的上游原话（同文件 `:40-44`）：
+ *  - 比较键选型的上游原话（同文件 `:45-49`）：
  *    "Why compare stateStartedAt (not updatedAt): same-state pings must not re-trigger
  *    an ack, matching the is-unvisited rule the workspace card uses."
  *    **本仓逐字对应**：比 `product_state_changed_at`，**绝不比 `last_event_time`**
@@ -37,7 +37,11 @@ function parseTime(iso: string | null | undefined): number | null {
  *
  *  - `product_state_changed_at === null`（含 backlog 空串、不可解析）⇒ 没有"状态开始
  *    时刻"可读，永不未读（上游 `turnStartedAt != null` 同一条短路）。
- *  - ack 缺失 / 损坏 ⇒ 未读：宁可多提醒一次，也不静默吞掉一个待看的卡。 */
+ *  - ack 缺失 / 损坏 ⇒ 未读：宁可多提醒一次，也不静默吞掉一个待看的卡。
+ *
+ *  **已接受的偏离**：损坏 ack 按未读，与票面公式字面的 `Date.parse(ack ?? 0) < changed`
+ *  （损坏字符串得 NaN ⇒ 已读）不一致——这是故意的 fail-safe 方向，不是公式抄错；
+ *  下次点击即被新鲜 ISO 覆盖。行为由单测"ack 值损坏"一条钉住。 */
 export function unread(session: SessionSummary, ack: AckMap): boolean {
   const changed = parseTime(session.product_state_changed_at);
   if (changed === null) return false;
@@ -72,7 +76,11 @@ export function writeAck(ack: AckMap): void {
   }
 }
 
-/** 把一张卡标成已读：旧表上追加一条、落盘、返回新表（**不改入参**）。
+/** 把一张卡标成已读：与落盘表合并后写回、返回新表（**不改入参**）。
+ *
+ *  合并（而不是拿内存表全量写回）是为了修同 tick 连点/跨 tab 丢 ack：调用方的
+ *  `ack` 是渲染闭包里的旧快照，直接 spread 写回会覆盖掉别处刚写入的条目。
+ *  仍有 TOCTOU 窗口（read 与 write 之间），但把它从"必丢"压到"跨 tab 同瞬"。
  *
  *  `at` 可注入是为了单测能钉住写进去的值；调用方不传 = 现在。 */
 export function markAcknowledged(
@@ -80,7 +88,7 @@ export function markAcknowledged(
   ack: AckMap,
   at: Date = new Date(),
 ): AckMap {
-  const next: AckMap = { ...ack, [sessionId]: at.toISOString() };
+  const next: AckMap = { ...readAck(), ...ack, [sessionId]: at.toISOString() };
   writeAck(next);
   return next;
 }

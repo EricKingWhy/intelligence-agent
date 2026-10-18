@@ -145,6 +145,24 @@ describe('#1306 ack 读写', () => {
     expect(() => markAcknowledged('a', {})).not.toThrow();
   });
 
+  it('markAcknowledged 写前与落盘合并：不丢外部（另一 tab / 同 tick 另一次点击）写入的条目', () => {
+    const store = installStorageStub();
+    // 第一次点击：闭包里的内存表是空的。
+    const first = markAcknowledged('a', {}, new Date('2026-10-18T00:00:00Z'));
+    expect(store.get(KANBAN_ACK_KEY)).toBe('{"a":"2026-10-18T00:00:00.000Z"}');
+    // 外部改动：另一 tab 落了 c。此时调用方的 first 快照里没有 c。
+    store.set(KANBAN_ACK_KEY, JSON.stringify({ ...first, c: '2026-10-18T00:00:01.000Z' }));
+    // 第二次点击：闭包拿的还是旧快照 `first`（不含 c）。
+    const second = markAcknowledged('b', first, new Date('2026-10-18T00:00:02Z'));
+    const expected = {
+      a: '2026-10-18T00:00:00.000Z',
+      c: '2026-10-18T00:00:01.000Z',
+      b: '2026-10-18T00:00:02.000Z',
+    };
+    expect(second).toEqual(expected);
+    expect(readAck()).toEqual(expected);
+  });
+
   it('markAcknowledged 在旧表上追加一条并落盘，返回新表（不改入参）', () => {
     installStorageStub();
     const prev = { a: '2026-10-17T03:00:00Z' };

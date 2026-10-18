@@ -550,7 +550,10 @@ test.describe('#1306 看板未读 / ack（AC-7）', () => {
     await expect(title).not.toHaveCSS('font-weight', '600');
 
     // ④ 同态事件：只推进 `last_event_time`（product_state 不变）⇒ 仍已读。
-    //    这正是 Orca 修掉的 bug 的消融对照：拿 last_event_time 当比较键时这里会复活。
+    //    防的是"推送/重渲染把已读卡重新标未读"这类回归（同态事件复活 bug 的产品面防线）。
+    //    **不是**比较键的消融对照：本用例里 ack 是点击时的当天墙钟，而 last_event_time
+    //    被推到前一天（早于 ack）——错键实现同样算出已读、不会变红。真正的比较键判据
+    //    是下面的 ⑤（只改 product_state_changed_at 为未来值）与 vitest 用例 5。
     rows[0]['last_event_time'] = '2026-10-17T09:00:00Z';
     rows[0]['first_user_message'] = '未读用例（同态事件后）';
     push!(rows);

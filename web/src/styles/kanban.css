@@ -152,6 +152,7 @@
   min-height: 0;
 }
 
+/* 整卡可点（打开会话）：指针语义。拖拽卡已有 `cursor: grab`，它优先级更高。 */
 .kanban-card {
   display: flex;
   flex-direction: column;
@@ -160,6 +161,7 @@
   background: var(--surface-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  cursor: pointer;
 }
 .kanban-card[draggable='true'] {
   cursor: grab;
@@ -187,10 +189,6 @@
    只改字重不改色——颜色已经被注意力覆盖层占用，再上一档会和"在等你"混同。 */
 .kanban-card-title.is-unread {
   font-weight: 600;
-}
-/* 整卡可点（打开会话）：指针语义。拖拽卡已有 `cursor: grab`，它优先级更高。 */
-.kanban-card {
-  cursor: pointer;
 }
 .kanban-card:focus-visible {
   outline: 2px solid var(--accent);

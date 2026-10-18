@@ -167,7 +167,9 @@ export function KanbanPanel({
   };
 
   /** 点卡打开会话（#1306 AC-7②）。**顺序不可换**：先写 ack 再导航——反过来的话，
-   *  导航引起的重渲染会先拿旧 ack 画一帧，卡片在关闭前闪一下未读。 */
+   *  导航引起的重渲染会先拿旧 ack 画一帧，卡片在关闭前闪一下未读。
+   *  `ack` 是渲染闭包里的快照，但 `markAcknowledged` 写前会与落盘合并，
+   *  所以同 tick 连点/跨 tab 的旧快照不会覆盖别处刚写入的条目。 */
   const openSession = useCallback(
     (sessionId: string) => {
       setAck(markAcknowledged(sessionId, ack));
