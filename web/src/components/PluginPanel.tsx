@@ -194,7 +194,18 @@ function PluginPanelBody() {
           {/* 列表语义：这里是一组**按钮**，不是 list/listitem——把 listitem 压在
               button 上会顶掉 button 角色（读屏只剩"列表项"，不再说可点击）。 */}
           <div className="plugin-list">
-            <div className="plugin-group">MCP SERVERS · {visibleServers.length}</div>
+            {/* #1325 S7：首帧数据未返回前不渲染分组计数——「MCP SERVERS · 0」
+                会被读成「确实没有插件」，与加载态是两种信号。加载指示沿用
+                `.ctx-usage-empty` 的空态排版 + `.ctx-usage-spinner`（同一窗口族）。 */}
+            {loading && (
+              <div className="plugin-empty plugin-loading" role="status">
+                <span className="ctx-usage-spinner" aria-hidden="true" />
+                {' '}加载中…
+              </div>
+            )}
+            {!loading && (
+              <div className="plugin-group">MCP SERVERS · {visibleServers.length}</div>
+            )}
             {visibleServers.map((server) => {
               const selected =
                 selection?.kind === 'server' && selection.name === server.name;
@@ -233,7 +244,7 @@ function PluginPanelBody() {
                 </button>
               );
             })}
-            <div className="plugin-group">SKILLS · {visibleSkills.length}</div>
+            {!loading && <div className="plugin-group">SKILLS · {visibleSkills.length}</div>}
             {visibleSkills.map((skill) => {
               const selected =
                 selection?.kind === 'skill' && selection.name === skill.name;

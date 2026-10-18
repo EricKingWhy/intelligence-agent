@@ -9730,6 +9730,13 @@ button.json-row {
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
+/* #1325 S7：加载态与空态同一排版，只多一个 spinner 的横向间距；颜色沿用
+   空态（tertiary 是元数据层，不是可读正文）。 */
+.plugin-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .plugin-detail {
   flex: 1;
   min-width: 0;
