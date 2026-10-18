@@ -558,7 +558,9 @@ test.describe('#1306 看板未读 / ack（AC-7）', () => {
     await expect(card).toHaveAttribute('data-unread', 'false');
 
     // ⑤ 状态跃迁（task/accepted）：`product_state_changed_at` 晚于 ack ⇒ 重新未读。
-    rows[0]['product_state_changed_at'] = '2026-10-18T00:00:00Z';
+    //    必须是**相对当前时刻**的未来值：ack 是点击时的 `new Date()`，写死的"未来"
+    //    日期一到那天就变成过去（本用例首跑即踩：写死 10-18T00:00Z，而当天已 11:00Z）。
+    rows[0]['product_state_changed_at'] = new Date(Date.now() + 3_600_000).toISOString();
     push!(rows);
     await expect(card).toHaveAttribute('data-unread', 'true');
     await expect(title).toHaveCSS('font-weight', '600');
