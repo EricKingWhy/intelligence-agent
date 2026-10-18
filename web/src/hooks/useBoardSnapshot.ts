@@ -108,4 +108,3 @@ export function useBoardSnapshot(
     [sessions, degraded, error, pullOnce],
   );
 }
-
