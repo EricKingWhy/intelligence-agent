@@ -31,9 +31,10 @@ function editTool(
   };
 }
 
-const render = (tools: readonly ToolCall[]) =>
-  renderToString(createElement(ChangesPanel, { ...changedFiles(tools), eventsVersion: 0 }))
-    .replaceAll('<!-- -->', '');
+const render = (tools: readonly ToolCall[], over: Record<string, unknown> = {}) =>
+  renderToString(
+    createElement(ChangesPanel, { ...changedFiles(tools), eventsVersion: 0, ...over }),
+  ).replaceAll('<!-- -->', '');
 
 const rowCount = (html: string) => (html.match(/changes-file-row/g) || []).length;
 
@@ -134,17 +135,63 @@ describe('#189 AC5/AC6 + 不伪造：不可得与空态', () => {
     expect(html).not.toContain('inspect_artifact');
   });
 
-  it('无改动：空态文案逐字（AC6/AC8——不是空列表，也不是"加载中"）', () => {
+  /* #1311：空态是**统计口径声明**（"没有通过文件工具改动"），不是全称断言——
+     bash 副作用不进清单是设计边界，文案不许说"未改动任何文件"。 */
+  it('无改动：空态文案如实表达统计口径（不是空列表，也不是"加载中"）', () => {
     const html = render([]);
-    expect(html).toContain('本次会话未改动任何文件');
+    expect(html).toContain('本次会话没有通过文件工具改动文件');
+    expect(html).not.toContain('未改动任何文件');
     expect(rowCount(html)).toBe(0);
   });
 
-  it('无改动但命令输出是唯一内容时也算无改动（bash 不进清单）', () => {
+  it('bash 不进清单（哪怕成功执行过）：清单仍为空，仍是口径声明（#1311 设计边界）', () => {
     const html = render([
       { tool_call_id: 'b', name: 'bash', args: { command: 'echo hi' }, status: 'success' } as ToolCall,
     ]);
-    expect(html).toContain('本次会话未改动任何文件');
+    expect(rowCount(html)).toBe(0);
+    expect(html).toContain('本次会话没有通过文件工具改动文件');
+  });
+
+  it('空态 + 存在执行过的 bash（status=success）：给弱提示（其文件副作用不在此清单内，#1311 AC3）', () => {
+    const html = render([], { hasBashCall: true });
+    expect(html).toContain('执行过的 bash 命令');
+    // 口径中性：投影里 exit_code!=0 的 bash 也落 success，文案不许说"成功"
+    expect(html).not.toContain('成功的 bash');
+    expect(html).toContain('不在此清单');
+  });
+
+  it('空态 + 无执行过的 bash：不给弱提示（没有可提醒的事实）', () => {
+    expect(render([])).not.toContain('bash 命令');
+    // status='failed' 在生产里只对应 TOOL_EXECUTION_ERROR（沙箱拒绝/生成失败，
+    // 命令未执行、无副作用）——不是"命令业务失败"（exit≠0 会落 success）。
+    const noSuccess = render([
+      { tool_call_id: 'b', name: 'bash', args: { command: 'ls' }, status: 'failed' } as ToolCall,
+    ]);
+    expect(noSuccess).not.toContain('bash 命令');
+  });
+
+  it('有文件 + 执行过 bash：不给弱提示（弱提示只属于空态版式，#1311 B/P4）', () => {
+    const html = render([editTool('t1', 'src/a.ts', 'a\n', 'b\n')], { hasBashCall: true });
+    expect(rowCount(html)).toBe(1);
+    expect(html).not.toContain('执行过的 bash 命令');
+  });
+
+  it('弱提示与归因脚注语义不撞车：unattributed>0 时空态首句改口径，不再全称否定', () => {
+    const html = render([editTool('t1', '   ', 'a', 'b')], { hasBashCall: false });
+    expect(html).toContain('1 次改动无法归属到文件');
+    // 首句与"另有 1 次改动无法归属到文件"同屏时不得自相矛盾（#1311 A/P2-2）
+    expect(html).toContain('清单里没有可归属的文件改动');
+    expect(html).not.toContain('本次会话没有通过文件工具改动文件');
+    expect(html).not.toContain('bash 命令');
+  });
+
+  it('数据源标注（#1311 AC2）：空态与有文件两种版式下都在场，写明工具事件口径', () => {
+    const empty = render([]);
+    const withFiles = render([editTool('t1', 'src/a.ts', 'a\n', 'b\n')]);
+    for (const html of [empty, withFiles]) {
+      expect(html).toContain('数据来源：write/edit/apply_patch 工具事件');
+      expect(html).toContain('shell 命令的文件副作用不在此清单内');
+    }
   });
 
   it('有改动但归属不了文件（缺 path）：脚注如实说明数量，不静默丢', () => {
