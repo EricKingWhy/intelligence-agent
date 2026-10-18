@@ -391,14 +391,20 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
     vi.mocked(startSession).mockReturnValue(
       new Promise<Response>((_r, reject) => { rejectPost = reject; }) as never,
     );
-    vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
+    let rejectClaim!: (e: Error) => void;
+    vi.mocked(discoverNewSessionId).mockReturnValue(
+      new Promise<string>((_r, reject) => { rejectClaim = reject; }) as never,
+    );
 
     await mount();
     let result: string | null = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task: 'POST 真的失败了' });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      // 先让 POST 落定失败，再由认领超时收口：`late.failure` 必须优先。
       rejectPost(new Error('网络中断'));
+      await vi.advanceTimersByTimeAsync(0);
+      rejectClaim(new SessionClaimTimeoutError());
       await vi.advanceTimersByTimeAsync(0);
       result = await p;
     });

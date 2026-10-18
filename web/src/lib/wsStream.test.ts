@@ -612,11 +612,14 @@ describe('sessionIdBaseline / discoverNewSessionId', () => {
     );
 
     await expect(
-      discoverNewSessionId(new Set(['old-0']), {
-        timeoutMs: 800,
-        baseDelayMs: 20,
-        maxDelayMs: 80,
-      }),
+      discoverNewSessionId(
+        new Set(Array.from({ length: 5000 }, (_, i) => `old-${i}`)),
+        {
+          timeoutMs: 800,
+          baseDelayMs: 20,
+          maxDelayMs: 80,
+        },
+      ),
     ).resolves.toBe('fresh');
     expect(calls).toBeGreaterThanOrEqual(6);
   });

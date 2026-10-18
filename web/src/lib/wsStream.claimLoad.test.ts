@@ -19,10 +19,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { discoverNewSessionId, sessionIdBaseline } from './wsStream';
 
-const RUN = process.env.IA_CLAIM_LOAD_1321 === '1';
+const ENV = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+  .process?.env;
+const RUN = ENV?.IA_CLAIM_LOAD_1321 === '1';
+const SUBMISSIONS = Number(ENV?.IA_CLAIM_SUBMISSIONS ?? 20);
 const LIST_LATENCY_MS = 1500;
 const CREATE_VISIBLE_MS = 12_000;
-const SUBMISSIONS = 20;
 
 describe.runIf(RUN)('#1321 慢负载验收（20 次连续提交）', () => {
   afterEach(() => {
@@ -70,6 +72,12 @@ describe.runIf(RUN)('#1321 慢负载验收（20 次连续提交）', () => {
           failures.push(`#${i + 1} ${(e as Error).message}`);
         }
         elapsed.push(Date.now() - submitStartedAt);
+        // 下一次提交的基线必须已经包含本次会话（真实用户看到失败后会先刷新/
+        // 等下一条列表刷新；否则上一轮迟到的会话会被下一轮差分误认成新会话，
+        // 那是另一个缺陷，不能混进本票的 20/20 读数）。
+        const visible = visibleAt.get(fresh)!;
+        const wait = visible - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       }
 
       const sorted = [...listLatencies].sort((a, b) => a - b);

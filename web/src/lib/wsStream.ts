@@ -404,13 +404,16 @@ export function claimBackoffMs(
  *  `useSession` 统一渲染成「提交失败：…」，而这条路径上后端其实已经落盘。
  */
 export class SessionClaimTimeoutError extends Error {
-  constructor(readonly lastError: unknown = null) {
+  readonly lastError: unknown;
+
+  constructor(lastError: unknown = null) {
     super(
       lastError instanceof Error
         ? `未认领到新会话：${lastError.message}`
         : '未认领到新会话（超时）',
     );
     this.name = 'SessionClaimTimeoutError';
+    this.lastError = lastError;
   }
 }
 
