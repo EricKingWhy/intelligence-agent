@@ -9,7 +9,8 @@
        - 终态 3 种 → Ledger result_json 精确合成（#29）
        - PENDING → PendingPolicy 决策（默认 skip，#29）
        - RUNNING/UNKNOWN/NEED_RECONCILE → 状态推进至 NEED_RECONCILE 后
-         交独立 ReconcileCallback 人工裁决；无 callback 安全拒绝
+         交独立 ReconcileCallback 裁决（web 侧注入 AutoReconcileCallback 按
+         操作类型自动定，`#1327`）；无 callback 安全拒绝
     6. restore tool result / message consistency → append 合成事件
     7. rebuild Runtime Context（derive_messages 从恢复后事件重新投影）
     8. return Session，交给 AgentRuntime 继续
@@ -23,8 +24,12 @@
 - 并发恢复串行化：SQLite 无行级锁——用 BEGIN EXCLUSIVE 事务在【数据库级】悲观串行化，
   第二个恢复方阻塞直到第一个完成或 busy_timeout 超时。WAL 模式下读者不被阻塞，
   恢复期间经 OperationLedger 的只读查询正常进行。
-- UNKNOWN 永不自动验证 / 自动重跑（不变量 #14）：ReconcileHint 只是给用户的建议数据；
-  RETRY 裁决只能来自用户，且表现为"原调用终止 + 可重试结果"，重跑由模型发起新 tool_call。
+- UNKNOWN 永不自动验证（不变量 #14）：ReconcileHint 只是建议数据，协调器不据此
+  执行任何验证动作。
+- RETRY 的语义边界（`#1327` 起由 AutoReconcileCallback 自动给出，此前只由用户给出）：
+  它**不是**协调器重执行原操作，而是"原调用终止 + 可重试结果"，重跑由模型发起**新的**
+  tool_call；且只有 `replay_safe`（只读 + 幂等 + 无外部副作用）的工具拿得到它——
+  MUTATING 一律不重跑，故"高风险副作用不盲重跑"未被削弱。
 - Session.resume() 保持现状（只管 events）；本协调器自行组装 Session，
   避免 resume 的 Phase 1 dangling 占位抢在 Ledger reconcile 之前污染事件流。
   Ledger 不知道的 dangling call（如 validation 失败未建 Operation）仍回退
@@ -36,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -311,10 +316,15 @@ class RecoveryError(Exception):
 
 
 class ReconcileRequired(RecoveryError):
-    """存在 UNKNOWN / RUNNING Operation 且没有 ReconcileCallback → 需人工裁决。
+    """存在 UNKNOWN / RUNNING Operation 且**没有裁决回调** → 拒绝恢复（fail-closed）。
 
-    与「恢复失败」区分：这不是基础设施故障，而是不变量 #14 要求的人工关卡。
-    启动扫描据此把 session 标成「需人工确认」而不是「恢复失败」。
+    与「恢复失败」区分：这不是基础设施故障，而是不变量 #14 要求的关卡——**没人能
+    给出裁决**时（例如直构协调器的调用方没注入 callback）宁可拒绝，也不伪造结果或
+    盲目重跑。启动扫描据此把 session 标成「需人工确认」而不是「恢复失败」。
+
+    `#1327` 起「裁决由谁给」不再等于「用户点选」：web 侧注入的是
+    :class:`AutoReconcileCallback`（按操作类型自动裁决）；本异常保留为**回调缺席**
+    时的兜底，判据是"有没有 callback"，不是"有没有人在场"。
     """
 
 
@@ -352,6 +362,50 @@ class DecisionsReconcileCallback(ReconcileCallback):
     def source_for(self, operation: Operation) -> str | None:
         """返回该裁决的用户来源自陈；未给来源时 None（不伪造）。"""
         return self._sources.get(operation.tool_call_id)
+
+
+class AutoReconcileCallback(ReconcileCallback):
+    """按操作类型自动裁决（`#1327` P1）：不再把 UNKNOWN 摆成用户选择题。
+
+    判据（抄 DeepSeek Harness `packages/core/session/src/repair.ts:34` 的规则原文，
+    但由**代码**执行而不是交给模型——本仓的裁决事实必须可审计、可复现）：
+
+        read-only 且声明 replay_safe  ⇒ RETRY   （只读幂等，重跑不改变世界）
+        其余                          ⇒ ABANDON （结清账本，不重跑）
+
+    为什么"其余"是 ABANDON 而不是 FAILED：`ReconcileVerdict` 没有 FAILED 这一档，
+    而 `ABANDON → OperationState.CANCELLED`（`_verdict_outcome`）正是"记失败 + 不
+    重跑"的落点——合成的 tool/result 是一条**可忽略的被动通知**，模型读到后自行决定
+    下一步（DSH 同款：把"不知道"如实交回，绝不伪造成功/失败）。刻意**不选**
+    CONFIRM_FAILURE：它断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量
+    #14 禁止替工具断言它没生效）。
+
+
+    为什么只认 `replay_safe`：该属性已把"只读 + 幂等 + 无任何外部副作用（含远程）"
+    三条编码进去（`tooling/contract.py`），且 22 处逐工具 override 已存在——本类只
+    换消费方（UI → 协调器），不新造第二套工具注册表（不变量 #22）。
+
+    安全边界（为什么不违反不变量 #14）：RETRY **不是**协调器重执行原操作，而是
+    "原调用以 CANCELLED 终止 + 合成 retryable 结果，重跑由模型发起**新的** tool_call"
+    （`_verdict_outcome` 逐字如此）。MUTATING 工具一律拿不到 RETRY，因此"高风险
+    副作用不盲重跑"未被削弱。未注册的工具名（拿不到 `replay_safe`）同样落到
+    ABANDON——fail-closed，绝不把未知工具当成可安全重放。
+
+    来源自陈（`source_for`）恒为 None：没有人在场自陈，字段如实留空。
+    """
+
+    def __init__(
+        self, replay_safe: Callable[[str], Awaitable[Mapping[str, bool]]]
+    ) -> None:
+        self._replay_safe = replay_safe
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        verdicts = await self._replay_safe(operation.session_id)
+        if verdicts.get(operation.tool_name, False):
+            return ReconcileVerdict.RETRY
+        return ReconcileVerdict.ABANDON
 
 
 class PendingPolicy(ABC):

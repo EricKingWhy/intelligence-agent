@@ -35,6 +35,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.event import TASK_DEFINED
+from agent_harness.storage import OperationState
 from agent_harness.storage.checkpoint import (
     note_checkpoint_save_failure,
     reset_checkpoint_save_failure_count,
@@ -858,22 +859,28 @@ async def _seed_reconcile_window(
     return session
 
 
-def test_recover_without_decisions_returns_machine_readable_409(client):
-    """UNKNOWN 行 + 无裁决 → 409 detail 携带机器可读 pending_decisions 清单。"""
+def test_recover_without_decisions_auto_adjudicates_instead_of_409(client):
+    """`#1327`：UNKNOWN 行 + 无裁决 → **自动裁决**，不再 409。
+
+    本用例是 `#1327` 之前那条 `test_recover_without_decisions_returns_machine_readable_409`
+    的反转：成熟产品没有一家把"结果不确定"做成用户选择题（DSH / Orca / oh-my-pi /
+    ZCode 三方实查，报告 `~/workspace/unknown-ops/`），系统手里有确定性证据时更不该问。
+    判据抄 DSH `repair.ts:34` 的规则原文，但由**代码**执行。
+
+    这里用 `bash`（MUTATING、未声明 `replay_safe`）⇒ 落 ABANDON：结清账本、**不**重跑
+    （不变量 #14）。只读工具的 RETRY 分支见
+    `test_recover_without_decisions_auto_adjudicates_read_only_operation`。
+    """
     import asyncio
 
     state = client.app.state.agent
-    session = asyncio.run(_seed_reconcile_window(state, ["call-409"]))
+    session = asyncio.run(_seed_reconcile_window(state, ["call-auto"]))
 
     resp = client.post(f"/api/sessions/{session.session_id}/recover")
 
-    assert resp.status_code == 409
-    detail = resp.json()["detail"]
-    pending = detail["pending_decisions"]
-    assert [p["tool_call_id"] for p in pending] == ["call-409"]
-    assert pending[0]["tool_name"] == "bash"
-    assert pending[0]["state"] == "UNKNOWN"
-    assert "CONFIRM_SUCCESS" in detail["message"], "409 文案必须指引四裁决合同"
+    assert resp.status_code == 200, resp.text
+    reconciled = [e for e in resp.json() if e["type"] == "operation/reconciled"]
+    assert reconciled and reconciled[0]["data"]["verdict"] == "ABANDON"
 
 
 def test_recover_with_decision_settles_operation_and_resumes(client):
@@ -1012,8 +1019,12 @@ def test_recover_partial_coverage_returns_409_with_pending_list(client):
 
 
 def test_recover_with_defer_is_accepted_and_keeps_pending(client):
-    """R4/R6：DEFER 被预检接纳（200，不再 422）；Ledger 保持 NEED_RECONCILE，
-    再次 recover 无裁决 → 409 且该 op 仍在 pending_decisions（可稍后重新裁决）。"""
+    """R4/R6：DEFER 被预检接纳（200，不再 422）；Ledger 保持 NEED_RECONCILE。
+
+    `#1327` 起"仍挂着"的读面是 ``GET /recovery``（只读清单），**不再**是
+    "再次 POST /recover 撞 409"——无裁决的恢复会走自动裁决把行结清（这正是本票
+    要的行为）。DEFER 的语义未变：它只落审计、不推进终态。
+    """
     from agent_harness.storage import OperationState
 
     state = client.app.state.agent
@@ -1033,10 +1044,11 @@ def test_recover_with_defer_is_accepted_and_keeps_pending(client):
 
     assert asyncio.run(_row()).state is OperationState.NEED_RECONCILE
 
-    again = client.post(base)
-    assert again.status_code == 409, "DEFER 不结清：无裁决再次恢复必须仍 409"
-    pending = again.json()["detail"]["pending_decisions"]
-    assert [p["tool_call_id"] for p in pending] == ["call-def"]
+    listed = client.get(f"/api/sessions/{session.session_id}/recovery")
+    assert listed.status_code == 200, listed.text
+    assert [p["tool_call_id"] for p in listed.json()["pending_decisions"]] == [
+        "call-def"
+    ]
 
 
 def test_recover_all_deferred_decisions_do_not_block(client):
@@ -1112,6 +1124,10 @@ def test_recover_409_pending_decisions_carry_recovery_display_fields(client):
     - R14：probe 逐字取工具既有 ``ReconcileHint``，不伪造「已查到/未查到」结论；
       账行工具名不在根 registry（未知工具）→ fail-closed：DEFER/high +
       verifiable=false。
+
+    `#1327` 起 409 只在**混合形态**（给了 `decisions` 但没全覆盖）出现——无裁决
+    一律走自动裁决。展示字段本身不变：它同时是自动裁决的判据来源，两个消费方
+    读同一份事实（``replay_safe``）。
     """
     state = client.app.state.agent
     session = asyncio.run(
@@ -1121,7 +1137,10 @@ def test_recover_409_pending_decisions_carry_recovery_display_fields(client):
         )
     )
 
-    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-read", "verdict": "DEFER"}]},
+    )
 
     assert resp.status_code == 409
     pending = {
@@ -1165,6 +1184,166 @@ def test_recover_409_pending_decisions_carry_recovery_display_fields(client):
         ]},
     )
     assert ok.status_code == 200, ok.json()
+
+
+def test_recover_without_decisions_auto_adjudicates_read_only_operation(client):
+    """`#1327` AC-2：只读 + `replay_safe` 的待裁决行**自动 RETRY**，全程无 409。
+
+    成熟产品没有一家把"结果不确定"做成用户选择题（DSH / Orca / oh-my-pi / ZCode
+    三方实查）；系统手里有确定性证据时更不该问。判据抄 DSH `repair.ts:34` 的规则
+    原文，但由**代码**执行（裁决事实必须可审计、可复现）。
+
+    RETRY 的语义边界（不变量 #14 未被削弱）：**不是**协调器重执行原操作，而是
+    "原调用以 CANCELLED 终止 + 合成 retryable 结果，重跑由模型发起新的 tool_call"。
+    """
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(state, ["call-ro"], tool_names=["read"])
+    )
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 200, resp.text
+    events = resp.json()
+    reconciled = [e for e in events if e["type"] == "operation/reconciled"]
+    assert reconciled, "自动裁决同样要落 operation/reconciled 审计事件"
+    assert reconciled[0]["data"]["verdict"] == "RETRY"
+
+    results = [
+        e for e in events
+        if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-ro"
+    ]
+    assert results and "重新发起" in results[0]["data"]["content"]
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-ro")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.CANCELLED
+
+
+def test_recover_without_decisions_auto_adjudicates_mutating_operation(client):
+    """`#1327` AC-3：写操作自动收口为 CANCELLED（结清、不重跑）+ 一条被动通知。
+
+    为什么是 ABANDON 而不是 CONFIRM_FAILURE：`ReconcileVerdict` 没有 FAILED 档，
+    而 `ABANDON → CANCELLED` 正是"记失败 + 不重跑"的落点；`CONFIRM_FAILURE` 会
+    断言"副作用已确认失败"，而这里的事实恰恰是**未证**（不变量 #14 禁止替工具
+    断言它没生效）。合成的 tool/result 是给模型的**可忽略通知**，不是给用户的
+    选择题——这正是本票要消灭的形态。
+    """
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(state, ["call-w"], tool_names=["bash"])
+    )
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 200, resp.text
+    events = resp.json()
+    reconciled = [e for e in events if e["type"] == "operation/reconciled"]
+    assert reconciled[0]["data"]["verdict"] == "ABANDON"
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-w")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.CANCELLED
+    # 结清后不再挂账：第二次 recover 无待裁决，也不重复合成。
+    assert client.post(f"/api/sessions/{session.session_id}/recover").status_code == 200
+
+
+def test_recover_without_decisions_auto_adjudicates_unknown_tool_as_unsafe(client):
+    """未知工具名（账上有、根 registry 里没有）⇒ fail-closed：不重跑。
+
+    与 `_reconcile_pending` 的展示字段同一条纪律：拿不到 `replay_safe` 就绝不
+    假设可安全重放（不变量 #14）。"""
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(state, ["call-ghost"], tool_names=["no-such-tool"])
+    )
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 200, resp.text
+    reconciled = [e for e in resp.json() if e["type"] == "operation/reconciled"]
+    assert reconciled[0]["data"]["verdict"] == "ABANDON"
+
+
+def test_recover_without_decisions_auto_adjudicates_every_declared_read_only_tool(
+    client,
+):
+    """`#1327` P2 回归：根 registry 里**每一个**声明 `replay_safe` 的工具都自动 RETRY。
+
+    逐个断言而不是只挑 `read` 一个：这条规则的全部价值在于"只读工具不打扰用户"，
+    少一个工具就多一类永久挂账的会话。
+
+    名单**从根 registry 的裁决元数据投影现取**（`state.reconcile_info`），不手抄：
+    投影本身是 capability 相关的（`web_search` 缺 Tavily key、artifact 读回工具缺
+    store、知识/记忆工具缺 wiring 时都不进根 registry），手抄的清单会随装配漂移，
+    而漂移方向恰好是"测试绿、线上仍挂账"。同一个投影也是 `AutoReconcileCallback`
+    的判据来源，所以这里断言的是"判据覆盖它自己认识的全部安全工具"——空名单即
+    红灯（下一条 `assert safe`），否则本用例会退化成永真。
+    """
+    state = client.app.state.agent
+    session_id = "sess-probe"
+
+    async def _safe_tool_names() -> list[str]:
+        info = await state.reconcile_info(session_id)
+        return sorted(name for name, meta in info.items() if meta.replay_safe)
+
+    safe = asyncio.run(_safe_tool_names())
+    assert safe, "根 registry 必须至少有一个 replay_safe 工具（否则本用例是永真）"
+
+    session = asyncio.run(
+        _seed_reconcile_window(
+            state,
+            [f"call-{name}" for name in safe],
+            tool_names=safe,
+        )
+    )
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 200, resp.text
+    verdicts = {
+        e["data"]["tool_call_id"]: e["data"]["verdict"]
+        for e in resp.json()
+        if e["type"] == "operation/reconciled"
+    }
+    assert verdicts, "自动裁决必须为每个待裁决行落 operation/reconciled"
+    assert set(verdicts.values()) == {"RETRY"}, verdicts
+
+
+def test_recover_partial_decisions_are_rejected_not_half_automated(client):
+    """混合形态刻意拒绝（零写入）：显式裁决与自动裁决不混用。
+
+    半显式半自动会让审计分不清"这条裁决是谁下的"——`reconcile_meta` 里记不下
+    这个区别。要么全给 `decisions`（用户裁决），要么全不给（自动裁决）。"""
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(
+            state, ["call-r2", "call-b2"], tool_names=["read", "bash"]
+        )
+    )
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-r2", "verdict": "ABANDON"}]},
+    )
+
+    assert resp.status_code == 409, resp.text
+    pending = resp.json()["detail"]["pending_decisions"]
+    assert {p["tool_call_id"] for p in pending} == {"call-r2", "call-b2"}
+
+    async def _row_states():
+        return [
+            (await state.stores.operation_ledger.get(session.session_id, call_id)).state
+            for call_id in ("call-r2", "call-b2")
+        ]
+
+    assert all(s is OperationState.UNKNOWN for s in asyncio.run(_row_states())), (
+        "被拒请求必须零写入"
+    )
 
 
 def test_recover_duplicate_tool_call_id_rejected_without_writes(client):

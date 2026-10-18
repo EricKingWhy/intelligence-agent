@@ -109,13 +109,14 @@ from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.progress import PROGRESS_DIRNAME
 from agent_harness.storage.artifact import slice_lines
 from agent_harness.storage.artifact_select import select_artifact_store
-from agent_harness.storage.operation import OperationContext
+from agent_harness.storage.operation import OperationContext, OperationState
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import (
     ArtifactOverflowHandler,
     ArtifactOverflowUnavailable,
 )
+from agent_harness.tooling.result import ErrorCode, ToolResult
 from agent_harness.tools.git import (
     GitDiffTool,
     GitStatusTool,
@@ -297,6 +298,40 @@ def _scope_for(checked_pathspec: str) -> str:
     return "" if checked_pathspec else "."
 
 
+async def _settle_transport_operation(
+    state: AppState,
+    session_id: str,
+    operation_id: str,
+    *,
+    terminal: OperationState,
+    note: str,
+) -> None:
+    """把 transport 操作的 `operations` 行收口成终态（`#1327` P0：两本账必须同结论）。
+
+    `ToolExecutor` 的既有契约是"存储失败不属于 Tool failure ⇒ Ledger 保留 RUNNING，
+    交 Recovery reconcile"（`tooling/executor.py` 收尾段注释）——那条对**进程崩溃**
+    成立：进程没了，没人能判定副作用。但本函数的异常臂是**本进程当场拿到的确定性
+    失败**（HTTP 已把 503 / 异常回给客户端，`transport_ledger` 也已记终态），此时让
+    `operations` 停在 RUNNING，等于对同一件事给出两个相反结论；而恢复链只读
+    `operations`，于是把一次确定性失败永久报成"结果不确定"（`#1327` 的弹窗根因）。
+
+    判据只认"本进程**没有**把结果落进 Ledger"（`state is RUNNING`）：已是终态的行
+    （例如 executor 收尾成功之后才失败的收尾步骤）**不覆盖**——那是已落盘的执行
+    事实。行不存在（异常发生在 `_create_pending_operation` 之前）时无事可做。
+    """
+    operation = await state.operation_ledger.get(session_id, operation_id)
+    if operation is None or operation.state is not OperationState.RUNNING:
+        return
+    await state.operation_ledger.update_state(
+        session_id,
+        operation_id,
+        terminal,
+        result_json=ToolResult.failure(
+            message=note, error_code=ErrorCode.TOOL_EXECUTION_ERROR
+        ).model_dump_json(),
+    )
+
+
 async def _execute_git_request(
     *,
     state: AppState,
@@ -398,6 +433,14 @@ async def _execute_git_request(
             artifact_ref=artifact_id,
         )
     except ArtifactOverflowUnavailable as error:
+        await _settle_transport_operation(
+            state, session_id, operation_id,
+            terminal=OperationState.FAILED,
+            note=(
+                "大输出暂时无法安全外置（artifact store 不可用），"
+                "本次调用没有产生可用结果。"
+            ),
+        )
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
             session_id=session_id,
@@ -425,12 +468,25 @@ async def _execute_git_request(
                 status=TransportStatus.CANCELLED,
                 duration_ms=round((perf_counter() - started) * 1000),
             ))
+        # 同根因的第三处（`#1327`）：取消臂此前也只写 transport ledger，operations
+        # 行同样会永久停在 RUNNING。这里放在审计写**之后**（而不是像另两臂那样在
+        # 之前）：取消场景下 await 可能被二次取消，审计条目不能被新增的 await 挤掉。
+        await _settle_transport_operation(
+            state, session_id, operation_id,
+            terminal=OperationState.CANCELLED,
+            note="web git 查询被取消，本次调用没有产生可用结果。",
+        )
         if tracer is not None:
             tracer.run_failed("cancelled")
         raise
     except BaseException:
         if tracer is not None:
             tracer.run_failed("failed")
+        await _settle_transport_operation(
+            state, session_id, operation_id,
+            terminal=OperationState.FAILED,
+            note="web git 查询在收尾前异常退出，本次调用没有产生可用结果。",
+        )
         if not terminal_written:
             await state.transport_ledger.append(new_transport_entry(
                 request_id=request_id,

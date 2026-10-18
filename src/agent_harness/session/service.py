@@ -5543,17 +5543,28 @@ class SessionService:
     ) -> list:
         """崩溃恢复（原 POST /recover）：RecoveryCoordinator 唯一入口。
 
-        修复 dangling tool_call、按 Ledger 终态回填结果；RUNNING/UNKNOWN 需要
-        人工裁决 → 无裁决时 RecoveryConflict（不变量 #14，不伪造、不盲跑）。
-        ``decisions``（#547 裁决合同，用户拍板 2026-10-03）是用户对 UNKNOWN
-        Operation 的显式裁决：四值词表（ReconcileVerdict，CONFIRM_SUCCESS /
-        CONFIRM_FAILURE / RETRY / ABANDON，复用既有词汇不造第二套）。目标合法性、
-        防重复提交与覆盖性在**任何写入之前**预检完毕，被拒请求零副作用；裁决经
-        ``DecisionsReconcileCallback`` 进入协调器既有的 token-CAS 提交链
-        （reconcile_meta 记裁决原文，operation/reconciled 落审计事件）。用户裁决
-        ≠副作用证据：外部事实核查由 UI 引导（#357 W-13 恢复页复用同一合同）。
+        修复 dangling tool_call、按 Ledger 终态回填结果。待裁决的
+        RUNNING/UNKNOWN/NEED_RECONCILE 行由 ``decisions`` **或**自动裁决结清
+        （`#1327`）：不变量 #14 要的是"不伪造、不盲跑"，不是"必须有人点一下"。
+
+        - ``decisions`` 给出时（#547 裁决合同，用户拍板 2026-10-03）：走用户显式裁决，
+          五值词表（ReconcileVerdict，CONFIRM_SUCCESS / CONFIRM_FAILURE / RETRY /
+          ABANDON / DEFER，复用既有词汇不造第二套）。目标合法性、防重复提交与
+          覆盖性在**任何写入之前**预检完毕，被拒请求零副作用；裁决经
+          ``DecisionsReconcileCallback`` 进入协调器既有的 token-CAS 提交链。
+        - **未给** ``decisions``：注入 ``AutoReconcileCallback``，按操作类型自动定
+          （只读 + ``replay_safe`` ⇒ RETRY；其余 ⇒ ABANDON 结清不重跑，合成一条
+          可忽略的被动结果）。**不再 409**——成熟产品没有一家把"结果不确定"做成
+          用户选择题（`#1327` 的三方调研），系统手里有确定性证据时更不该问。
+          仍拿不准"要不要重跑"的判断保留在 ``replay_safe`` 这一维上（工具声明）。
+        - ``decisions`` **只覆盖一部分**待裁决行：仍 409（机器可读清单）——**混合
+          形态刻意拒绝**。用户显式指定了一部分而另一部分由代码代填，会让"这条裁决
+          是谁下的"在审计上不可分辨；要么全显式、要么全自动。
+
+        裁决 ≠ 副作用证据：外部事实核查由调用方自行完成。
         """
         from agent_harness.recovery.coordinator import (
+            AutoReconcileCallback,
             DecisionsReconcileCallback,
             ReconcileVerdict,
             RecoveryCoordinator,
@@ -5598,9 +5609,11 @@ class SessionService:
                     f"裁决目标 '{tool_call_id}' 不是本会话待裁决的 Operation"
                     f"（{where}，可能已被其他恢复方结清）"
                 )
-        if pending and not all(
+        if normalized and not all(
             item["tool_call_id"] in normalized for item in pending
         ):
+            # 只覆盖一部分 ⇒ 拒绝（零写入）。全空走自动裁决，全给走用户裁决；
+            # 半给半自动会让审计分不清哪条裁决是人下的（`#1327`）。
             detail = ", ".join(
                 f"{item['tool_name']}(tool_call_id={item['tool_call_id']})"
                 for item in pending
@@ -5609,7 +5622,9 @@ class SessionService:
                 f"存在需要人工裁决的 UNKNOWN Operation（{detail}）：先 POST "
                 "/api/sessions/{id}/recover 携带 decisions=[{tool_call_id, "
                 "verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / CONFIRM_FAILURE / "
-                "RETRY / ABANDON / DEFER）；裁决前请先核查该调用的外部事实",
+                "RETRY / ABANDON / DEFER）；裁决前请先核查该调用的外部事实。"
+                "不带 decisions 调用则按操作类型自动裁决（只读 + replay_safe "
+                "⇒ 重跑，其余 ⇒ 记失败不重跑）——自动与显式裁决不混用",
                 pending_decisions=pending,
             )
 
@@ -5618,10 +5633,12 @@ class SessionService:
             workspace_registry=self._workspace_registry,
             operation_ledger=self._operation_ledger,
             database_path=self._harness_db,
+            # 显式裁决优先；未给时按操作类型自动裁决（`#1327`）。两者都是
+            # ReconcileCallback，共用同一条 token-CAS 提交链与审计事件。
             reconcile_callback=(
                 DecisionsReconcileCallback(normalized, sources=sources)
                 if normalized
-                else None
+                else AutoReconcileCallback(self._replay_safe_map)
             ),
         )
         try:
@@ -5672,6 +5689,27 @@ class SessionService:
             return []
         pending = await self._reconcile_pending(session_id, existing)
         return [] if in_flight() else pending
+
+    async def _replay_safe_map(self, session_id: str) -> Mapping[str, bool]:
+        """自动裁决（`#1327`）判据：``tool_name → replay_safe``。
+
+        复用**既有**领域端口 ``ToolReconcileInfoProvider``（组合根在
+        ``web/app.py`` 注入，实现在 ``assembly.root_registry_reconcile_info``，
+        零副作用、与根 registry 名字投影同构）——不新造第二套工具注册表，
+        也不让领域层去 import 组合层的类型（``tests/session/
+        test_service_collaborators.py`` 的 R2 守卫钉着这条边界）。
+
+        与 ``_reconcile_pending`` 的展示字段同源：那里把同一个 ``replay_safe``
+        渲染成 ``default_action``，这里把它当**裁决判据**——同一份事实，两个
+        消费方，不会漂移。
+
+        未注入端口 ⇒ 空映射 ⇒ 全部落 ABANDON（fail-closed）：拿不到
+        ``replay_safe`` 就绝不假设可安全重放（不变量 #14）。
+        """
+        if self._reconcile_info is None:
+            return {}
+        info_map = await self._reconcile_info(session_id)
+        return {name: info.replay_safe for name, info in info_map.items()}
 
     async def _reconcile_pending(self, session_id: str, events: list) -> list[dict]:
         """待人工裁决的 Operation 清单（#547 的机器可读 409 载荷）。
@@ -5754,6 +5792,7 @@ class SessionService:
         返回被处理的 session 结论（无中断的 session 不出现在结果里）。
         单个 session 失败不抛出——扫描的职责是把全部中断如实标记出来。
         """
+        from agent_harness.recovery.coordinator import AutoReconcileCallback
         from agent_harness.recovery.scan import scan_interrupted_sessions
 
         await self._ensure_stores()
@@ -5770,6 +5809,9 @@ class SessionService:
                 self._stores.delegation_tree_ledger.record_session_tool_call
             ),
             session_budget_ledger=self._stores.delegation_tree_ledger,
+            # 与 recover() 同源：扫描期的 reconcile 也走自动裁决，否则重启扫描
+            # 仍会把每个可自动结清的行标成「需人工确认」（`#1327`）。
+            reconcile_callback=AutoReconcileCallback(self._replay_safe_map),
         )
         self._budget_recovery_failed_sessions.update(
             result.session_id for result in results if result.budget_recovery_failed
