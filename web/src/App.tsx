@@ -27,6 +27,7 @@ import { Composer, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
+import { PluginPanel } from './components/PluginPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { ContextWindowPanel } from './components/ContextWindowPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
@@ -40,7 +41,7 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
 import { TaskReviewPanel } from './components/TaskReviewPanel';
-import { changedFiles } from './lib/changedFiles';
+import { changedFiles, hasSuccessfulBashCall } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
@@ -296,6 +297,12 @@ export default function App() {
     () => conversation?.session_id === selectedId
       ? changedFiles(tools)
       : { files: [], unattributed: 0 },
+    [conversation?.session_id, selectedId, tools],
+  );
+  /* #1311：空态弱提示判据——会话里有执行过的 bash 调用时，「文件/改动」面板要提醒
+     其文件副作用不在此清单。与 `changes` 同一条身份闸（非选中会话不给提示）。 */
+  const hasBashCall = useMemo(
+    () => conversation?.session_id === selectedId && hasSuccessfulBashCall(tools),
     [conversation?.session_id, selectedId, tools],
   );
   const changedFileCount = changes.files.length;
@@ -1339,6 +1346,10 @@ export default function App() {
    *  `onAfterClose` 注释：命令执行时浮层还开着，直接 focus 会被关闭时的焦点恢复打断）。 */
   const paletteAfterClose = useRef<(() => void) | null>(null);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  // SessionList 是 memo 的（同文件 :177-179 的注释）：内联箭头每次渲染换引用会
+  // 让它整棵树重渲。与其它 on* 回调一样给稳定引用。
+  const handleOpenPlugins = useCallback(() => setPluginsOpen(true), []);
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
@@ -1410,6 +1421,20 @@ export default function App() {
         run: () => {
           setInspectorOpen(true);
           onPanelAction({ type: 'expand', value: !panel.expanded });
+        },
+      },
+      {
+        /* #1312：新建会话 = 与续聊分离的显式入口（ChatGPT / Claude 侧栏「New Chat」
+           同型；本仓的键盘入口就是命令面板 Ctrl/Cmd+K，不新增全局快捷键）。
+           复用 handleNew，不另造创建路径。
+           同 `focus-composer`（下方）的结论：命令跑时浮层还开着，handleNew 末尾的
+           焦点移交会被 Radix 关闭时的焦点恢复打断，所以登记到浮层关闭后执行。 */
+        id: 'new-session',
+        label: '新建会话',
+        keywords: 'new session chat 新对话',
+        group: 'actions',
+        run: () => {
+          paletteAfterClose.current = handleNew;
         },
       },
       {
@@ -1549,7 +1574,7 @@ export default function App() {
       });
     }
     return items;
-  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
+  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
   return (
     <div className="app-frame">
@@ -1616,6 +1641,8 @@ export default function App() {
              hook 回调，SessionList 的 memo 才不会因它失效。 */
           onDeleteSession={removeSession}
           onSetArchived={handleSetArchived}
+          /* #1200：侧栏一级常驻入口——插件管理窗口（MCP + Skills 启停）。 */
+          onOpenPlugins={handleOpenPlugins}
         />
 
         <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
@@ -1919,6 +1946,9 @@ export default function App() {
                     /* #1015：新建态附图入口常开——首次投喂经 `onEnsureSession`
                        懒建会话（App 侧单例 + in-flight 去重），再走既有上传。 */
                     sessionId={selectedId}
+                    /* #1312：会话级目标的动作出口——「改为新会话」与命令面板的
+                       「新建会话」共用 handleNew，不另造创建路径。 */
+                    onNewSession={handleNew}
                     onEnsureSession={ensureSession}
                     onCancel={cancelStream}
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
@@ -1966,6 +1996,7 @@ export default function App() {
                   events={reviewEvents}
                   eventsVersion={reviewEventsVersion}
                   streaming={streaming}
+                  hasBashCall={hasBashCall}
                   onOpenTaskReview={() => setTaskReviewOpen(true)}
                 />
               ) : null}
@@ -2014,6 +2045,8 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #1200：插件管理窗口（侧栏「插件」入口；左列表 + 右详情）。 */}
+      <PluginPanel open={pluginsOpen} onOpenChange={setPluginsOpen} />
       {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
           恢复仍走会话内既有恢复链路（不新增恢复编排）。 */}
       <RecoveryListPanel

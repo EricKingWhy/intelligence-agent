@@ -12,7 +12,7 @@ import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
-import { getSessionEvents, type CatalogEntry, type ConstraintScope, type ModelCatalogEntry } from '../lib/api';
+import { getSessionEvents, getSlashRegistry, type CatalogEntry, type ConstraintScope, type ModelCatalogEntry, type SlashRegistryCommand } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { onTokenChange } from '../lib/auth';
@@ -29,8 +29,9 @@ import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import { ReasoningEffortSlider } from './ReasoningEffortSlider';
 import {
-  SLASH_COMMANDS,
+  BUILTIN_RUNS,
   filterSlashCommands,
+  slashDisplayName,
   slashSubmitMatch,
   slashTriggerMatch,
   type SlashCommand,
@@ -166,6 +167,10 @@ interface Props {
    *  只建出一个会话）。resolve 会话 id；resolve `null` = 懒建失败，hook 经 AC3
    *  通道给可见错误。Composer 只问"现在能不能附"，不问"会话从哪来"。 */
   onEnsureSession: () => Promise<string | null>;
+  /** #1312：会话级目标的**动作**出口——「改为新会话」= 回到新建态（App 传 `handleNew`）。
+   *  缺席时不渲染按钮（只读展示「正在向会话 … 追问」），与其余可选入口同款降级。
+   *  提交语义不经这里：`handleSubmit` 的 selectedId 二选一分支原样不动。 */
+  onNewSession?: () => void;
   /** #1028 AC2：常驻归属 chip——当前会话/新建态的项目归属与 cwd。数据由 App 组装
    *  （项目名来自后端 `SessionSummary.workspace`，cwd 来自 `session/started` 投影）；
    *  本组件只渲染文案。`null`/缺省 = 不渲染 chip：**空白新建态**（无选中会话、无项目
@@ -258,6 +263,7 @@ export const Composer = memo(function Composer({
   projectAvailable = null,
   sessionId = null,
   onEnsureSession,
+  onNewSession,
   ownership = null,
   onCancel,
   presetTask,
@@ -609,7 +615,18 @@ export const Composer = memo(function Composer({
        尾随空格同样落进命令路径，args 为空 ⇒ 走 §4.2「无参数则查看」。
        受 `locked` 门控（审查 A-P2-3）：与菜单触发同把锁——锁定态命令不执行，
        也不会被当成聊天发出。 */
-    const submitHit = slashSubmitMatch(trimmed, SLASH_COMMANDS.map((c) => c.name));
+    /* #1200 同名消歧：skill 与内置命令同名（如叫 `goal` 的 skill）时，注册表里
+       的 skill 赢——否则用户点的是 skill、执行的却是内置命令。注册表未加载
+       （null）时无从判定，保持只认内置的既有行为。 */
+    const skillDisplays = new Set(
+      (slashRegistry ?? [])
+        .filter((c) => c.kind === 'skill')
+        .map((c) => slashDisplayName(c)),
+    );
+    const submitHit = slashSubmitMatch(
+      trimmed,
+      Object.keys(BUILTIN_RUNS).filter((name) => !skillDisplays.has(name)),
+    );
     if (submitHit) {
       if (sessionId == null) {
         /* 无会话不可执行（审查 A-P3-1）：给可见反馈且**不清输入**——静默 return
@@ -617,8 +634,9 @@ export const Composer = memo(function Composer({
         setSlashError('当前没有会话，命令暂不可用');
         return;
       }
-      const cmd = SLASH_COMMANDS.find((c) => c.name === submitHit.name)!;
-      void runSlashCommand(cmd, submitHit.args);
+      // 命中条件就是「name ∈ Object.keys(BUILTIN_RUNS)」⇒ 查表必然有值。
+      const run = BUILTIN_RUNS[submitHit.name]!;
+      void runSlashCommand({ name: submitHit.name, run }, submitHit.args);
       setValue('');
       setSlashIndex(0);
       setSlashDismissed(false);
@@ -729,7 +747,34 @@ export const Composer = memo(function Composer({
   // 无会话不触发（票面 §4.2：composer 本来也发不出去）。
   const slashMatch =
     sessionId != null && !locked ? slashTriggerMatch(value) : null;
-  const slashItems = slashMatch ? filterSlashCommands(SLASH_COMMANDS, slashMatch.query) : [];
+  // #1200 Phase 3：菜单数据源唯一化——内置命令 + 启用中的 skill 都来自后端
+  // registry（D2=A）；前端只保留 builtin 的 run 回调，不过滤"哪些命令存在"。
+  // null = 还没拿到过（首帧/首次打开）：菜单不能把"加载中"说成"无匹配命令"。
+  const [slashRegistry, setSlashRegistry] = useState<SlashRegistryCommand[] | null>(null);
+  // 挂载即拉一次、且菜单每次打开再拉一次（`slashActive` 翻转是唯一重拉触发）：
+  // 插件窗口里的启停/新增 skill 立即反映，不缓存第二份真相。挂载那次是为了
+  // submit 拦截的 skill/内置同名消歧在首次输入就可用——否则粘贴 `/goal 目标`
+  // 直接 Enter 时注册表还是 null，同名 skill 会被静默判给内置命令。
+  const slashActive = slashMatch !== null;
+  useEffect(() => {
+    let cancelled = false;
+    void getSlashRegistry()
+      .then((commands) => {
+        if (!cancelled) setSlashRegistry(commands);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        // 注册表拿不到就不伪造命令：落成空表（不是永久"加载中"），原因落到可见错误面。
+        setSlashRegistry([]);
+        setSlashError(e instanceof Error ? e.message : '命令注册表加载失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slashActive]);
+  const slashItems = slashMatch
+    ? filterSlashCommands(slashRegistry ?? [], slashMatch.query)
+    : [];
   const slashOpen = slashMatch !== null && !slashDismissed;
   // 定位切除的统一起点（B-S-3）：菜单开着时 = 命令 token（含分隔空白）在 value 里的起点。
   const slashCutStart = slashOpen && slashMatch !== null ? slashMatch.start : null;
@@ -808,11 +853,34 @@ export const Composer = memo(function Composer({
    *  保留命令前的前缀文本，如 `hello /compact` 执行后剩 `hello`）；`null` =
    *  整条输入就是命令调用（submit 拦截路径），全清。 */
   const acceptSlashCommand = (
-    cmd: SlashCommand,
+    entry: SlashRegistryCommand,
     args: string | undefined,
     cutFrom: number | null,
   ) => {
-    void runSlashCommand(cmd, args);
+    const display = slashDisplayName(entry);
+    if (entry.kind === 'skill') {
+      /* skill 不是本地命令：执行语义 = Claude Code（消息**开头**出现 skill 名则
+         执行其内容，后端 `_INVOCATION` 锚定整条消息）。这里只把 `/skill ` 插进
+         输入框，再按 Enter 由既有发送路径交给 agent——模型经 load_skill 读取正文。
+         ⚠ 不保留命令前的前缀（与内置命令的 B-S-3「定位切除」相反）：锚定在开头
+         意味着 `hello /deep` 永远不会执行 skill，保留前缀就是把用户的点选变成
+         一次静默的普通聊天。前缀被丢弃时给可见提示，不静默吞。 */
+      if (cutFrom !== null && value.slice(0, cutFrom).trim() !== '') {
+        setSlashInfo('skill 需在消息开头调用；已替换原输入的前缀文本。');
+      }
+      setValue(`/${display} `);
+      setSlashIndex(0);
+      setSlashDismissed(true);
+      return;
+    }
+    const run = BUILTIN_RUNS[entry.name];
+    if (!run) {
+      // 后端 registry 与前端执行表漂移（重命名/新增内置命令）时不许静默 no-op：
+      // 菜单项点了没反应是最难查的一类 bug。保留输入，错误可见。
+      setSlashError(`命令未实现：/${entry.name}`);
+      return;
+    }
+    void runSlashCommand({ name: entry.name, run }, args);
     setValue((v) => (cutFrom === null ? '' : v.slice(0, cutFrom)));
     setSlashIndex(0);
     setSlashDismissed(false);
@@ -850,6 +918,12 @@ export const Composer = memo(function Composer({
       if (slashOpen && slashItems.length > 0) {
         e.preventDefault();
         acceptSlashCommand(slashItems[selectedSlashIndex], undefined, slashCutStart);
+        return;
+      }
+      // 注册表还在路上时 Enter 不能穿透成发送：`/go` 会被当聊天发给模型。
+      // 菜单仍开着（等加载完再选），按键只做"等"。
+      if (slashOpen && slashRegistry === null) {
+        e.preventDefault();
         return;
       }
       e.preventDefault();
@@ -1120,24 +1194,29 @@ export const Composer = memo(function Composer({
           className="slash-menu"
         >
           {slashItems.length === 0 ? (
-            <div className="slash-menu-empty">无匹配命令</div>
+            <div className="slash-menu-empty">
+              {slashRegistry === null ? '正在加载命令…' : '无匹配命令'}
+            </div>
           ) : (
-            ['add', 'command'].map((group) => {
-              const groupItems = slashItems.filter((c) => c.group === group);
+            (['builtin', 'skill'] as const).map((kind) => {
+              const groupItems = slashItems.filter((c) => c.kind === kind);
               if (groupItems.length === 0) return null;
               return (
-                <div key={group}>
-                  <div className="slash-menu-group">{group === 'add' ? '添加' : '指令'}</div>
+                <div key={kind}>
+                  <div className="slash-menu-group">
+                    {kind === 'builtin' ? '内置命令' : 'Skills'}
+                  </div>
                   {groupItems.map((cmd) => {
                     const index = slashItems.indexOf(cmd);
                     const selected = index === selectedSlashIndex;
+                    const display = slashDisplayName(cmd);
                     return (
                       <div
-                        key={cmd.name}
-                        id={`slash-opt-${cmd.name}`}
+                        key={`${kind}:${display}`}
+                        id={`slash-opt-${kind}:${display}`}
                         role="option"
                         aria-selected={selected}
-                        data-slash-name={cmd.name}
+                        data-slash-name={display}
                         className={`slash-menu-item${selected ? ' selected' : ''}`}
                         onMouseDown={(e) => {
                           // mousedown 而非 click：textarea 的 blur 会在 click 之前到，
@@ -1147,8 +1226,10 @@ export const Composer = memo(function Composer({
                         }}
                         onClick={() => acceptSlashCommand(cmd, undefined, slashCutStart)}
                       >
-                        <span className="slash-menu-label">{cmd.labelCN}</span>
-                        <span className="slash-menu-name">/{cmd.name}</span>
+                        <span className="slash-menu-name">/{display}</span>
+                        {cmd.argumentHint !== undefined && (
+                          <span className="slash-menu-hint">{cmd.argumentHint}</span>
+                        )}
                         <span className="slash-menu-desc">{cmd.description}</span>
                       </div>
                     );
@@ -1184,6 +1265,39 @@ export const Composer = memo(function Composer({
           正在压缩上下文…
         </div>
       )}
+      {/* #1312：会话级目标状态行——回答「这条消息要发往哪个会话」。
+          放在 .composer-dock **之外**：dock 里已有 #1028 的项目归属 chip，两者语义正交
+          （会话身份 vs 项目归属），外置且无边框/无底色，视觉上不与归属胶囊混淆。
+          未选中时明说「将创建新会话」——避免用户把全新任务误当续聊发给旧会话。
+          live region（`role="status"`）只圈文本：与 .slash-info / .composer-send-blocked
+          同区惯例，只读文本、不频繁打断（不是 alert）。「改为新会话」是交互按钮，
+          留在 live region 之外，否则状态播报会把一个可操作控件读进只读区域。
+          判定用**真值**（空串按「无会话」处理），与 :766 `runSlashCommand` 的
+          `!sessionId` 一致；:619 的 `sessionId == null` 不同口径（空串仍当会话，
+          Scope 外未改），两处差异在此如实记录。 */}
+      <div className="composer-session-target" data-testid="composer-session-target">
+        {sessionId ? (
+          <>
+            <span role="status">
+              正在向会话{' '}
+              <span className="composer-session-target-id">{sessionId.slice(0, 8)}</span>{' '}
+              追问
+            </span>
+            {onNewSession !== undefined && (
+              <button
+                type="button"
+                className="composer-session-target-new-btn"
+                aria-label="改为新会话"
+                onClick={onNewSession}
+              >
+                改为新会话
+              </button>
+            )}
+          </>
+        ) : (
+          <span role="status">将创建新会话</span>
+        )}
+      </div>
       <div className="composer-dock surface-floating">
         <ComposerAttachments
           items={attachments.items}
@@ -1269,7 +1383,9 @@ export const Composer = memo(function Composer({
           aria-controls={slashOpen ? slashMenuId : undefined}
           aria-activedescendant={
             slashOpen && slashItems.length > 0
-              ? `slash-opt-${slashItems[selectedSlashIndex].name}`
+              ? `slash-opt-${slashItems[selectedSlashIndex].kind}:${slashDisplayName(
+                  slashItems[selectedSlashIndex],
+                )}`
               : undefined
           }
           onChange={(e) => {

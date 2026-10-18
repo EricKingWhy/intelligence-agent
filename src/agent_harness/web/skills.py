@@ -18,9 +18,14 @@ from agent_harness.host_service import (
     HOST_SKILLS_RESPONSE_PROOF_HEADER,
     host_skills_response_proof,
 )
+from agent_harness.skills.discovery import single_line
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+
+
+#: 票面 §5：description 按 1536 字符截断（Claude Code skill 描述的展示上限）。
+MAX_SKILL_DESCRIPTION_CHARS = 1536
 
 
 def register_skill_routes(app: FastAPI) -> None:
@@ -38,25 +43,49 @@ def register_skill_routes(app: FastAPI) -> None:
                     "message": "skills capability 未启用：请在 CAPABILITIES 中配置 skills。",
                 },
             )
-        entries = capability.catalog()
+        # #1200：管理面列表要含禁用项（禁用≠删除）；旧替身无 all_entries 时回落
+        # catalog（其条目默认 enabled=True）。
+        all_entries = getattr(capability, "all_entries", None)
+        entries = all_entries() if all_entries is not None else capability.catalog()
         promoter = getattr(capability, "promoter", None)
         drafts = (
             [{"name": d.name, "status": d.status} for d in promoter.drafts()]
             if promoter is not None else []
         )
+        # #1200 / 裁决 D1：`enabled` 以 plugin-settings.json 的持久选择态为准
+        # （管理窗口在重启前就要看到"已禁用"的意图；真正不投影给模型发生在下次
+        # 装配）。settings 读不出时回落目录条目的 enabled（不把只读列表打成 500）。
+        from agent_harness.plugins.settings import load_plugin_settings_or_default
+
+        # getattr 防御：宿主挑战等测试用替身 agent 可能没有 settings；缺失时
+        # 不叠加选择态（条目自带的 enabled 仍是权威的目录投影）。
+        agent_settings = getattr(app.state.agent, "settings", None)
+        workspace_dir = getattr(agent_settings, "workspace_dir", None)
+        settings_error: str | None = None
+        if workspace_dir is not None:
+            plugin_settings, settings_error = load_plugin_settings_or_default(workspace_dir)
+        else:
+            plugin_settings = None
+        errors = list(capability.errors())
+        if settings_error is not None:
+            # 选择态坏文件不能静默：否则 UI 上"全部启用"与磁盘真相不一致，
+            # 用户也无从知道禁用为什么没生效。
+            errors.append(f"plugin-settings.json 不可读：{settings_error}")
         payload = {
             # 文件即真相的投影（只读）；正文经 load_skill / 文件系统按需读。
             "skills": [
-                {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "when_to_use": entry.when_to_use,
-                    "source": str(entry.source_path),
-                }
+                _skill_payload(
+                    entry,
+                    enabled=(
+                        plugin_settings.skill_enabled(entry.name)
+                        if plugin_settings is not None
+                        else None
+                    ),
+                )
                 for entry in entries
             ],
             "drafts": drafts,
-            "errors": capability.errors(),
+            "errors": errors,
             "conflicts": capability.conflicts(),
         }
         nonce = getattr(request.state, "host_skills_challenge_nonce", None)
@@ -75,3 +104,23 @@ def register_skill_routes(app: FastAPI) -> None:
             )
             return cast(dict, response)
         return payload
+
+
+def _skill_payload(entry: object, *, enabled: bool | None = None) -> dict:
+    """单个 skill 的投影（#1200 增量字段，全部 getattr 防御以兼容旧替身）。"""
+    # 与 `/api/plugins/slash-registry` 同一投影口径（#588/#607 单行纪律）：
+    # 两个只读面各写一套会让同一 skill 在面板里多行、在 `/` 菜单里单行。
+    description = single_line(str(getattr(entry, "description", "")))
+    payload = {
+        "name": getattr(entry, "name", ""),
+        "description": description[:MAX_SKILL_DESCRIPTION_CHARS],
+        "when_to_use": getattr(entry, "when_to_use", ""),
+        "source": str(getattr(entry, "source_path", "")),
+        "scope": getattr(entry, "scope", "workspace"),
+        "origin": getattr(entry, "origin", "personal"),
+        "enabled": bool(getattr(entry, "enabled", True)) if enabled is None else enabled,
+    }
+    plugin = getattr(entry, "plugin", None)
+    if plugin is not None:
+        payload["plugin"] = plugin
+    return payload

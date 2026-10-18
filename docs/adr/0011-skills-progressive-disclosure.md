@@ -40,8 +40,19 @@
 **决策**：`degradation=OPTIONAL_RUNTIME`、`supports_recovery=False`、`supports_concurrency=True`（读文件天然并发）、`supports_streaming=False`。能力缺失/目录不存在 → `optional("skills")` 返回 None，装配跳过两个 Consumer，Agent 正常运行——08 §7 OPTIONAL 语义的标准落地。
 **理由**：与 Memory 的降级模式完全一致（不变量 #21）。
 
+> **增补（2026-10-17，#1200 显式调用例外）**：Q3 第 1 条的「全文绝不在此路径出现」在
+> **一条**新增路径上不再成立——用户在消息**开头**亲手写 `/<skill>` 时，当轮把正文注入
+> Context（票面 §4「执行语义 = Claude Code：消息开头出现 skill 名则执行其内容」）。
+> Gate 2 的默认面不变：目录注入仍是零正文，模型**自发**路径（不写 `/`）仍只能经
+> `load_skill` 取全文。判定点唯一——`user_source_events()` 的最新一条用户消息，四条
+> 入站路径（HTTP / 排队 / steer / CLI）共用；注入复用 `load_skill` 同款
+> `frame:untrusted_skill` framing 与 `cap_skill_body` 截断。`$ARGUMENTS` 是本次新引入的
+> 插值约定（来源：Claude Code 的既有机制，判定 ADAPT）。机制与边界见
+> `docs/plans/plugin-manager/design.md` §2.2 / §5。
+
 ## Consequences
 
-- Gate 2 可测：catalog provider 输出中不含任何 skill 正文断言。
+- Gate 2 可测：catalog provider 输出中不含任何 skill 正文断言（显式 `/<skill>` 注入
+  的正文**不在** catalog provider 的输出里，它是同 provider 的另一条消息）。
 - `load_skill` 走 ToolExecutor → 自动获得 permission/timeout/（未来）Ledger 语义，零旁路。
 - Skill 无自动推荐、无 Marketplace——显式超出 V1 清单的一律不做（09 §2）。

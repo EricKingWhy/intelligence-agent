@@ -67,6 +67,7 @@ function render(props: {
       titlesById: {},
       onSelect: noop,
       onNew: noop,
+      onOpenPlugins: noop,
       activeProjectId: props.activeProjectId ?? null,
       onSelectProject: noop,
       selectedCwd: props.selectedCwd ?? null,
