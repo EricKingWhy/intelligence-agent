@@ -142,10 +142,10 @@ export function deliverableCount(sessions: readonly SessionSummary[]): number {
  *  （不变量 #21 的"不许静默丢卡"同样覆盖它）。`deliverable` 本身是已知的未渲染态，
  *  不计入这里，避免两行警示重复报警。 */
 export function unknownStateCount(sessions: readonly SessionSummary[]): number {
+  // 复用 `columnOf` 的成员判据，不在这里再抄一份 cast+includes：两处各写一份，
+  // 后端加列时容易只改一处而漂移。
   return sessions.filter(
-    (session) =>
-      !(KANBAN_COLUMNS as readonly string[]).includes(session.product_state) &&
-      session.product_state !== UNRENDERED_STATE,
+    (session) => columnOf(session) === null && session.product_state !== UNRENDERED_STATE,
   ).length;
 }
 

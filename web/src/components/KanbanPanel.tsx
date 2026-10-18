@@ -204,6 +204,20 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
       // P3-1：快速连续拖拽同一张卡到执行中会发出两组
       // `POST /task/definition` + `POST /messages`（任务被 queue 两次）。
       // 同一会话的第一组还在飞时，第二次落点直接**静默返回**（不 toast，避免噪音）。
+      //
+      // 标记生命周期只覆盖"这一组写请求在飞"这段，不覆盖到快照翻转。**这不是漏洞**：
+      // 落点接受条件（`onDrop`）读的 `session.product_state` 来自 `sessions` state，
+      // 而该 state 只由 `reload()` 写。`doRunDropOnExecuting` 先发 `/task/definition`
+      // 再发 `/messages`，且 `task/defined` 一旦落盘就使 `derive_task_state` 的
+      // `defined=True`（此后无任何分支把它复位）⇒ `_derive_product_state` 的
+      // `if not defined: return ""` 不再命中，状态至少是 `pending_verification`。
+      // 故 `reload()` **成功返回**后拿到的快照必然已把该卡移出 backlog，第二道闸
+      // 也会拦下重拖；"reload 回来了但快照仍是 backlog"在成功路径上不可达。
+      // 唯一可达的重复入队路径是 `reload()` **失败**（列表请求挂了）：此时快照确实
+      // 停在 backlog，标记已删 ⇒ 重拖会再发一组。该场景下重拖是用户对着"没动的卡"
+      // 再操作一次，且第二步 queue 到在途 run 是既定语义（卡片位置本来就由快照决定），
+      // 故按现状保留——把标记绑到状态反而会把"列表请求失败"这一个瞬时故障放大成
+      // 该卡在本板内**永久不可再拖**（标记无人复位）。
       if (dropInFlight.current.has(sessionId)) return;
       dropInFlight.current.add(sessionId);
       try {
@@ -331,7 +345,7 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
         )}
         {hiddenUnknown > 0 && (
           <div className="kanban-notice kanban-notice-warn" role="status">
-            有 {hiddenUnknown} 张卡片处于后端新增的未知状态，未渲染也未被计数
+            有 {hiddenUnknown} 张卡片处于后端新增的未知状态，未渲染
           </div>
         )}
 
