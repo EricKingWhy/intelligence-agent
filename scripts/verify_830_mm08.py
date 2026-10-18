@@ -171,6 +171,22 @@ def screenshot_png() -> bytes:
 # --------------------------------------------------------------------------- #
 # 报告
 # --------------------------------------------------------------------------- #
+def _console_safe(text: str) -> str:
+    """#1341：Windows GBK 控制台打印 Unicode 字符时的编码安全降级。
+
+    成熟产品依据：pip 的输出统一走 `errors="replace"` 包装
+    （`pip/_internal/utils/compat.py::StreamWrapper`），Click 的 `click.echo`
+    在 Windows 上自动处理控制台编码。
+    UTF-8 下是恒等式（任何 str 都能按 UTF-8 编码），Linux 行为不变。
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="replace").decode(encoding)
+    return text
+
+
 class Report:
     """证据收集器：每条 check 落 `status/evidence/notes`，最后写 JSON。"""
 
@@ -182,7 +198,9 @@ class Report:
         self._log_path = path
 
     def log(self, message: str) -> None:
-        print(message, flush=True)
+        # #1341：Windows GBK 控制台打印 ⇒/✓ 等字符会 UnicodeEncodeError；
+        # _console_safe 只在目标编码不支持时做 errors="replace" 降级。
+        print(_console_safe(message), flush=True)
         if self._log_path is not None:
             with self._log_path.open("a", encoding="utf-8") as handle:
                 handle.write(message + "\n")
@@ -325,10 +343,18 @@ class Server:
     def kill(self) -> None:
         if self.proc is None:
             return
-        try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if sys.platform == "win32":
+            # #1339：Windows 上 os.killpg/os.getpgid 是 POSIX-only（AttributeError）。
+            # 成熟产品依据：Python subprocess 文档 "On Windows, kill() calls
+            # TerminateProcess()"；Node.js child_process / Go os/exec 在 Windows 上
+            # 也是同构的强制终止——与 POSIX 的 SIGKILL 同为"无商量立即终止"语义
+            # （D7 已用此同构临时补丁在真机上验过 AC2）。
+            self.proc.kill()
+        else:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         try:
             self.proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
@@ -497,11 +523,17 @@ def vision_jsonl_fragment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _TUI_SCRIPT = """\
 import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
 const zlib = require("node:zlib");
 const [repoRoot, baseUrl, mode, sessionId, outPath, name] = process.argv.slice(2);
-const { ApiClient } = await import(`${repoRoot}/tui/src/api.ts`);
+// #1340：Windows 裸路径（C:\\...）会被 Node ESM loader 拒收
+// （ERR_UNSUPPORTED_ESM_URL_SCHEME）；成熟产品依据：Node.js 官方文档
+// url.pathToFileURL、Vite vite-node、Jest jest-resolve——都是先转 file:// URL 再 import。
+// pathToFileURL 在 POSIX 上是恒等式（/a/b → file:///a/b），Linux 行为不变。
+const { ApiClient } = await import(pathToFileURL(join(repoRoot, "tui", "src", "api.ts")).href);
 const out = { mode };
 const attachmentRefs = (rows) => {
   const refs = [];
