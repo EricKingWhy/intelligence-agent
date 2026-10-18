@@ -173,7 +173,7 @@ test.describe('#1305 看板 WS 推送', () => {
 
     await routeApi(page, {
       sessions: [boardRow('s-degraded', 'executing')],
-      onWs: () => ({ closeNow: true }),
+      closeBoardNow: true,
     });
 
     await page.goto('/');

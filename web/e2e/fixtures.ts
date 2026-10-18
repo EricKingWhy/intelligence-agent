@@ -136,6 +136,14 @@ async function installWsRoute(
       // `app.py::session_rows`"的契约一致。
       if (msg.type === 'subscribe_board') {
         mock.boardSubscribes?.push(true);
+        // 板级拒服务（考降级路径）：与 `onWs: closeNow` 同款——一个业务帧都不发
+        // 就关连接。**必须在这里判**：`onWs` 只在**会话** `subscribe` 分支被读，
+        // 看板走的是这条分支，拿 `closeNow` 当板级降级开关会静默不生效
+        // （看板照常拿到首帧，"降级"用例于是恒真/恒假）。
+        if (mock.closeBoardNow) {
+          ws.close();
+          return;
+        }
         const push = (rows: unknown[]) => {
           try {
             ws.send(
@@ -253,6 +261,10 @@ export interface ApiMock {
    *  leading/trailing 节流驱动；fixture 不重实现节流，只当"服务端说什么就发什么"）。
    *  计数与断言的闭包留在**各 spec 内**（票面点名：fixtures 无通用计数器）。 */
   onBoardSubscribe?: (push: (rows: unknown[]) => void) => void;
+  /** 板级订阅被拒（#1305 降级路径）：`subscribe_board` 收到就关连接、一个帧都不发。
+   *  与会话侧的 `onWs: closeNow` 分开——`onWs` 不覆盖板级分支（见 `subscribe_board`
+   *  分支里的注释），两者混用会静默不生效。不设 = 订阅即推全量首帧。 */
+  closeBoardNow?: boolean;
   /** 第 N 次之后的 `GET /api/sessions` 直接回 500（N 从 1 数）。
    *  用途：构造"归档写成功了、但随后的列表重拉失败"这个只在真机上偶发的窗口——
    *  界面此刻的行还是旧状态，必须**说出来**而不是沉默（#171 AC9 的就地报错）。
