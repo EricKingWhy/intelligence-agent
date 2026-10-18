@@ -4,9 +4,13 @@
  *  A-P1-3：两条入口必须同一份逻辑，不许各写一套漂移）：
  *   - 压缩中 = 流程已启动未终态（宿主渲染"正在压缩上下文…"+ spinner，并以此
  *     禁用再次触发——本 hook 的 `run` 单飞：在途重复调用直接忽略）；
- *   - 被拒   = 200 但 `compacted_turn_count == 0`（零写入，"没有可压缩的早期
- *     内容"不是错误——文案归宿主）；
+ *   - 被拒   = 200 但 `compacted_turn_count == 0`（零写入），或 409
+ *     `{reason: "no_early_turns"}`（#1197 项 3 的类型化拒绝）——两者都不是错误，
+ *     统一说「没有可压缩的早期内容」（与 CLI、面板低水位提示同词）；
  *   - 失败   = 传输/服务端异常（`compactError` 为后端 detail，宿主就地展示）。
+ *
+ *   #1325 S5/S9：`reason` 是机读成因，只在 `describeCompactError` 这一个点分派；
+ *   其余 409（run_busy / event_drift / 压缩进行中）保持后端可读文案。
  *  成功回执（`compactResult`）携带 tokens_before/after 供宿主做前后对比；水位
  *  刷新由宿主经 `onSuccess` 自行决定（面板重拉水位；slash 路径无水位面可刷）。
  */

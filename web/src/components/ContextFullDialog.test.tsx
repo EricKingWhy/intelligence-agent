@@ -68,6 +68,17 @@ describe('#1197 项 2 — ContextFullDialog（压不住时的一句话兜底）'
     expect(text).toContain('结束');
   });
 
+  it('#1325 S9：自动满窗与手动被拒同一语言（中文、同用「没有可压缩」措辞）', () => {
+    const text = mount();
+    // 手动路径的 409 `no_early_turns` 在 `useCompactSession` 映射为
+    // 「没有可压缩的早期内容」；自动路径保持票面中文引导，两者共享同一措辞，
+    // 不出现英文原文 / 机读 reason / 裸 session id。
+    expect(text).toContain('没有可压缩');
+    expect(text).not.toContain('no_early_turns');
+    expect(text).not.toContain('session');
+    expect(text).not.toMatch(/[A-Za-z]{3,}/);
+  });
+
   it('不出现任何内部术语（设计说明 02：只说人话）', () => {
     const text = mount();
     for (const jargon of [
