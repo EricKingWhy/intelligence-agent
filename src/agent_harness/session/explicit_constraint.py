@@ -17,7 +17,8 @@
   因此不会各说各话。
 - 不改 #1191 Fork 1 的裁定「会话级不发 `protected_facts` 注解」：这里直接写会话事件流
   的 `task/protected_fact`，与工具路径同一个 durable 落点。
-- 不经过模型：调用点固定在 `AgentRuntime.run_stream` 的 user/message 落盘之后。
+- 不经过模型：调用点固定在 user/message 落盘之后——`run_stream` 的 user_input
+  分支与 mid-run steer 注入分支（`_inject_steers`），两处共用同一判据与函数。
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ from agent_harness.session.derive import build_protected_fact_data
 from agent_harness.session.scoped_constraints import ConstraintScope
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查，避免与 session 包互相导入
-    from agent_harness.session.session import Session
     from agent_harness.session.event import SessionEvent
+    from agent_harness.session.session import Session
 
 logger = logging.getLogger(__name__)
 

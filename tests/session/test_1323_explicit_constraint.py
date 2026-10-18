@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+import pytest
+from langchain_core.messages import AIMessage
+
+from agent_harness.agent import AgentRuntime
 from agent_harness.session import TASK_PROTECTED_FACT, USER_MESSAGE, Session
 from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.explicit_constraint import (
@@ -14,6 +18,8 @@ from agent_harness.session.explicit_constraint import (
     register_explicit_constraint,
 )
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.tooling import ToolExecutor, ToolRegistry
+from tests.scripted_model import ScriptedModel
 
 
 def _session(tmp_path) -> Session:
@@ -114,3 +120,37 @@ def test_invalid_source_does_not_raise_or_register(tmp_path) -> None:
         session, content="规则", source_event_id="missing-event", token_budget=8192,
     ) is None
     assert _constraints(session) == []
+
+
+@pytest.mark.asyncio
+async def test_delegated_child_session_does_not_register(tmp_path) -> None:
+    """runtime drive 分支的 #1085 边界：委派子会话 + 勾选 ⇒ 不登记。
+
+    修复前该分支只有注释没有回归钉子（审查 P2-1/P2-3）：分支一旦被重构误删，
+    现有测试不会红。这里钉住 runtime 行为本身——信号在、消息落盘，但不登记。
+    """
+    session = Session.start(
+        JsonlSessionStore(tmp_path), session_id="s-child",
+        started_data={"delegation_tree_id": "tree-1"},
+    )
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        model=ScriptedModel([AIMessage(content="done")]),
+        registry=registry,
+        executor=ToolExecutor(registry),
+        max_agent_turns=5,
+    )
+
+    _ = [event async for event in runtime.run_stream(
+        session, "子会话里勾选的规则", None, None,
+        {"remember_as_procedural_rule": True},
+    )]
+
+    assert [event.type for event in session.events].count(USER_MESSAGE) == 1, (
+        "勾选消息本身必须正常落盘（排除的是登记，不是投递）"
+    )
+    assert _constraints(session) == []
+    assert not [
+        event for event in session.events
+        if event.type == TASK_PROTECTED_FACT
+    ]

@@ -1503,6 +1503,9 @@ class AgentRuntime:
         if not drained:
             return []
         appended: list[SessionEvent] = []
+        # #1085：委派子会话判定与 drive 分支同一条边界（机械登记不给子会话
+        # 有效入口）；整个 drain 只判一次。
+        delegated_child = session_is_delegated_child(session.events)
         for steer in self._applicable_steers(drained, run_id):
             user_data = {"content": steer.content, "steer_id": steer.steer_id}
             for key in (
@@ -1519,6 +1522,18 @@ class AgentRuntime:
                 user_data,
                 run_id=run_id, step_id=step_id,
             )
+            # #1323：被受理的 mid-run steer 同样是用户的确定性手势——与 drive
+            # 的 user_input 分支同一判据、同一登记函数（is_session_explicit_rule
+            # 排除 project/global），不依赖模型当次是否调用 register_constraint。
+            if not delegated_child and is_session_explicit_rule(user_data):
+                register_explicit_constraint(
+                    session,
+                    content=steer.content,
+                    source_event_id=user_event.event_id,
+                    token_budget=(
+                        self._context_builder.protected_fact_token_budget
+                    ),
+                )
             applied = session.append(
                 STEER_APPLIED,
                 {"steer_id": steer.steer_id, "applied_seq": user_event.seq, "run_id": run_id},
