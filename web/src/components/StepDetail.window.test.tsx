@@ -152,6 +152,31 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
   });
 });
 
+describe('#1325 S6 — 折叠提示用用户语言', () => {
+  // 第 4 处（Timeline 自己的窗口条）同一常量文案，由源码 grep 零命中守住
+  // （AC6：旧措辞在 web/src/ 的 grep 必须为空）。
+  const hints = () => [...container.querySelectorAll('.timeline-window-hint')].map((el) => el.textContent ?? '');
+
+  it('TOOLS / DIFFS / ARTIFACTS 三处提示一致，且不再出现内部术语「真相」', () => {
+    render(<ChatTab conversation={initConversation('f5')} tools={mkTools(N, 'plain')} onFocusTool={noop} />);
+    expect(hints()).toHaveLength(1);
+    expect(hints()[0]).toContain('前段已折叠，可展开查看');
+    expect(hints()[0]).not.toContain('真相');
+
+    for (const el of [
+      <ChangesTab key="d" tools={mkTools(N, 'diff')} sessionId="f5" />,
+      <ArtifactsTab key="a" tools={mkTools(N, 'artifact')} sessionId="f5" />,
+    ]) {
+      act(() => root.unmount());
+      root = createRoot(container);
+      render(el);
+      expect(hints()).toHaveLength(1);
+      expect(hints()[0]).toContain('前段已折叠，可展开查看');
+      expect(hints()[0]).not.toContain('真相');
+    }
+  });
+});
+
 describe('F5 尾窗：窗口不改变任何一行的存在的意义（AC6 守卫）', () => {
   it('TOOLS：窗口化只裁首段，保留的是**尾部**连续段（无空洞）', () => {
     render(<ChatTab conversation={initConversation('f5')} tools={mkTools(N, 'plain')} onFocusTool={noop} />);
