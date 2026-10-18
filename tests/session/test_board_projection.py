@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -868,16 +869,25 @@ def test_executing_sidecar_with_attention_still_hits_without_read_events(
 
 
 def test_sidecar_write_failure_does_not_break_append(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _store, session = _session_with_task(tmp_path)
+    """AC-21 ③：写失败只记日志、不破坏 append；后续 `get()` 仍给出正确投影。"""
+    store, session = _session_with_task(tmp_path)
 
     def boom(*_args, **_kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(BoardProjectionStore, "_write_sidecar", boom)
-    session.append(USER_MESSAGE, {"content": "写 sidecar 失败也必须落盘"})
+    with caplog.at_level(logging.ERROR, logger="agent_harness.session.board_projection"):
+        session.append(USER_MESSAGE, {"content": "写 sidecar 失败也必须落盘"})
     assert session.events[-1].type == USER_MESSAGE
+    assert any(
+        "sidecar 写入失败" in record.getMessage() for record in caplog.records
+    ), "写失败必须 logger.exception 出来，不得静默"
+
+    monkeypatch.undo()
+    projection = BoardProjectionStore(store).get(session.session_id)
+    assert projection.last_user_message == "写 sidecar 失败也必须落盘"
 
 
 def test_adopt_history_replays_once_and_fills_sidecar(tmp_path: Path) -> None:
@@ -1140,7 +1150,9 @@ def test_last_messages_survive_restart_from_sidecar(
     def forbidden(_session_id: str):
         raise AssertionError("sidecar 命中时不得 read_events")
 
-    monkeypatch.setattr(store, "read_events", forbidden)
+    # 打**类**上而不是旧 store 实例上：`restarted` 包的是新实例，实例级
+    # monkeypatch 到不了它（独立审查 P4）。
+    monkeypatch.setattr(JsonlSessionStore, "read_events", forbidden)
     restarted = BoardProjectionStore(JsonlSessionStore(root=store._root))
     assert restarted.get(sid) == first
 

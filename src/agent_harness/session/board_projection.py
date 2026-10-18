@@ -35,8 +35,8 @@ dict 与 ``board_state.json`` sidecar **都只是缓存**——删掉内存与 s
   回合各一次 O(事件数) 重放」——长 run 有几十上百回合。``ponytail:`` 这是本票
   有意为之的取舍（消息新鲜度优先），不是遗漏。升级路径：在 ``derive_task_state``
   上做增量 fold，或只对消息字段做尾部 O(1) 扫描；**不是**另写一份投影语义。
-* 触发集外的事件（``tool/call``、``tool/result``、``model/completed`` 等高频
-  事件）每条都会 stat 事件文件 + 尾部读 8KB + 原子重写 sidecar（含 ``fsync``）
+* 触发集外的事件（``tool/call``、``tool/result`` 等高频事件）每条都会
+  stat 事件文件 + 尾部读 8KB + 原子重写 sidecar（含 ``fsync``）
   以推进水位：append 路径因此多一次 fsync 与一次尾部读。这是按票面「所有
   ``_persist_event`` 都推进水位」换来的写放大；写失败只丢缓存，下一次重放
   自愈，不影响正确性。
@@ -300,7 +300,7 @@ class BoardProjectionStore:
        文件没变，水位还必须是盘上最大 ``seq``（#1310）；
     3. 任何写失败只 ``logger.exception``，绝不影响 ``Session.append`` 契约；
     4. 所有 ``_persist_event``（含触发集外）都推进 sidecar 水位到当前 seq——
-       否则 ``USER_MESSAGE`` 等非触发事件会让 sidecar 永远失配、列表路径每次
+       否则 ``TOOL_RESULT`` 等非触发事件会让 sidecar 永远失配、列表路径每次
        回退到全量重放；
     5. 冷缓存（本实例还没算过该会话）一律从事件流重放，**不复用** sidecar 里
        的旧投影：sidecar 可能因写失败/旁路写者落后于事件文件，直接复用会把
@@ -485,7 +485,7 @@ class BoardProjectionStore:
                 else:
                     # 触发集外：本条事件按定义不改变产品态/注意力，直接复用上一份
                     # 投影，只把水位推到当前 seq。这里**不**校验旧戳——戳在 append
-                    # 之后必然已变，校验会让每次 USER_MESSAGE 都退化成全量重放。
+                    # 之后必然已变，校验会让每次 TOOL_RESULT 都退化成全量重放。
                     cached = self._cached(session_id)
                     if cached is not None:
                         projection = replace(cached[0], projection_seq=current_seq)
