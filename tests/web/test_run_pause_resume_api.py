@@ -1028,13 +1028,25 @@ def test_deadline_in_the_past_pauses_immediately(tmp_path):
         assert projection["trigger_dimension"] == "run.deadline_at"
 
 
-def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
-    """账本上还有未对账的副作用 ⇒ 恢复被 409 拒绝，且不启动任何工作（`03 §5`）。
+def test_resume_auto_adjudicates_unreconciled_mutating_operation_and_continues(tmp_path):
+    """`#1327` 起：账本上还有未对账的 MUTATING 副作用时，resume 不再 409 拒绝。
 
-    这是"对账优先于恢复"的执行层：客户端拿着合法的新 ceiling 来恢复，闸门在**开工
-    前**（`recover()` → 无 ReconcileCallback 时安全拒绝）拦下——不落 `run/resumed`、
-    不构造模型、不伪造那条未知调用的结果（不变量 #14：未知高风险工具不盲重跑）。
+    恢复入口先走自动裁决（无 decisions ⇒ `AutoReconcileCallback`）：`write_file`
+    是 MUTATING、副作用未证 ⇒ 自动 ABANDON ⇒ 账本落 `CANCELLED`，随后 resume
+    正常继续（200）。这是"对账优先于恢复"的自动裁决版：欠账先被结清，而不是
+    在开工前拦下整个恢复。
+
+    fail-closed 精神保留在新断言里：
+    1. 那条写操作**没有被盲重跑**（不变量 #14）：账本终态是 CANCELLED，不是
+       RETRY/SUCCEEDED；合成结果如实写"已按规则自动裁决放弃"。
+    2. 没有伪造结论：`operation/reconciled` 事件的 verdict 是 ABANDON，合成的
+       tool/result 是失败（`ok` 为假）而非成功。
+    3. 恢复后的新工作是模型**新一轮**的执行（第二次模型装配），不是把旧调用
+       当成功复活——续跑的 run 正常落 `run/resumed`。
     """
+    from agent_harness.session.event import OPERATION_RECONCILED, TOOL_RESULT
+    from agent_harness.storage import OperationState
+
     app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
 
@@ -1043,7 +1055,6 @@ def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
         run_id = paused[RUN_ID_KEY]
         # 上一次 run 留下一条"副作用未证"的行（典型来源：写工具超时）
         _seed_unreconciled_operation(app, session_id)
-        before = _events(client, session_id)
         calls_before = len(probe.calls)
 
         resp = client.post(
@@ -1054,19 +1065,46 @@ def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
             },
         )
 
-    assert resp.status_code == 409, resp.text
-    # #547：409 detail 升级为结构体（message + pending_decisions 机器可读清单），
-    # 文案事实不变：仍点名那条调用与 fail-closed 立场
-    detail = resp.json()["detail"]
-    assert "write_file" in detail["message"] and "call-1" in detail["message"], (
-        "拒绝理由必须点名那条调用（人要知道该对账的是哪一个副作用）"
+    # （1）自动裁决后 resume 正常继续：200，不是 409。
+    assert resp.status_code == 200, resp.text
+
+    # （2）写操作被自动 ABANDON：账本落 CANCELLED，没有被盲重跑。
+    async def _row_state():
+        op = await app.state.agent.operation_ledger.get(session_id, "call-1")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.CANCELLED, (
+        "write_file（MUTATING）+ 副作用未证 ⇒ 自动 ABANDON ⇒ CANCELLED"
     )
-    assert "ReconcileCallback" in detail["message"] or "decisions" in detail["message"]
-    assert any(
-        p["tool_call_id"] == "call-1" for p in detail["pending_decisions"]
+
+    # （3）自动裁决证据：reconcile 事件的 verdict 是 ABANDON。
+    reconciled = {
+        e.data["tool_call_id"]: e.data["verdict"]
+        for e in app.state.agent.store.read_events(session_id)
+        if e.type == OPERATION_RECONCILED
+    }
+    assert reconciled == {"call-1": "ABANDON"}, (
+        "无人裁决时按规则自动给出 ABANDON，不是用户裁决"
     )
-    assert len(probe.calls) == calls_before, "被拒的恢复没有装配第二次执行"
-    _assert_no_new_work(client, session_id, before)
+
+    # （4）不伪造结论：给 call-1 合成的 tool/result 是失败且如实写"未知"，
+    # 不是一条伪造的成功。
+    results = [
+        e for e in app.state.agent.store.read_events(session_id)
+        if e.type == TOOL_RESULT and e.data.get("tool_call_id") == "call-1"
+    ]
+    assert results, "ABANDON 必须合成一条可忽略的被动通知（tool/result）"
+    payload = json.loads(results[0].data["content"])
+    assert payload["ok"] is False, "合成结果不得伪装成成功"
+    assert "已按规则自动裁决放弃" in payload["message"], (
+        "自动裁决的审计文案必须如实写自动来源"
+    )
+    assert payload["error_code"] == "CANCELLED"
+
+    # （5）恢复确实继续了：第二次模型装配（续跑的新一轮）+ run/resumed 落盘
+    # （run/resumed 只进事件日志、不进 live 流，故从事件日志查）。
+    assert len(probe.calls) == calls_before + 1, "续跑开工：恰好多一次模型装配"
+    assert "run/resumed" in _types(_events(client, session_id)), "续跑落 run/resumed"
 
 
 def test_budget_projection_reports_needs_reconcile_over_the_pause(tmp_path):

@@ -43,6 +43,7 @@ from agent_harness.tools import (
     WriteTool,
 )
 from agent_harness.tools.update_plan import UpdatePlanTool
+from agent_harness.websearch.tools import WebSearchTool
 from tests.mcp_client.fake_server import make_fake_tool
 
 
@@ -98,6 +99,7 @@ _REPLAY_SAFE_READ_ONLY = [
     RetrieveKnowledgeTool,
     ReadKnowledgeSourceTool,
     RetrieveMemoryV2Tool,
+    WebSearchTool,
 ]
 
 

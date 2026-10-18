@@ -88,6 +88,22 @@ class WebSearchTool(Tool):
             suggested_action="重复同一搜索安全（只读），可换措辞复核。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        """只读远程查询：重跑不改变任何外部状态（`#1327` P2 补齐）。
+
+        此前未覆写 ⇒ 落到默认 `False`，恢复时恒 DEFER/high，与同族只读工具
+        （`read` / `grep` / `git_diff` / `retrieve_knowledge` …）不一致；而
+        `reconcile_hint` 的文案本来就写着"重复同一搜索安全（只读）"，两处自相
+        矛盾。补齐后按 `#1327` 的自动裁决规则，只读查询自动重跑、不打扰用户。
+
+        边界（为什么这与 MCP 的保守判定不冲突）：`MCPTool` 即便 `readOnlyHint`
+        也保持 `False`，因为**远端由别人实现**、其"只读"声明本地不可证；本工具
+        的只读性由本仓自己的 `WebSearchTool.execute` 决定（只调 provider.search，
+        不写任何状态），是可证的事实，不是转述的声明。
+        """
+        return True
+
     async def execute(self, args: _WebSearchArgs) -> ToolResult:
         try:
             hits = await self._provider.search(

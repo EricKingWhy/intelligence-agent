@@ -6881,30 +6881,6 @@ button.json-row {
   min-width: 0;
 }
 
-.adjudication-open-btn {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: 3px var(--space-md);
-  font-size: var(--text-xs);
-  font-family: inherit;
-  color: var(--text-primary);
-  background: color-mix(in srgb, var(--warning) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
-  border-radius: var(--radius-full);
-  cursor: pointer;
-}
-
-.adjudication-open-btn:hover {
-  background: color-mix(in srgb, var(--warning) 28%, transparent);
-}
-
-.adjudication-open-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
 /* ── 技术详情：折叠层（AC2 "技术详情只在折叠层出现"）──
    协议原文（tool_call_id / POST /recover / verdict 枚举）放这里，逐字保留——
    它是排查与手工结清的唯一依据，翻译掉就等于把它藏起来。

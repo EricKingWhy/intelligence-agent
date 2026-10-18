@@ -1,5 +1,10 @@
 /** #1030（Web 呈现）：状态投影的「待裁决」一等态（AC1–AC4）。
  *
+ *  `#1327` 起本文件的裁决面板/入口用例已按新呈现重写：`RecoveryDecisionPanel`
+ *  与「去裁决」按钮已删，待裁决只以后端驱动的被动通知横幅（`role="status"`，
+ *  无需交互）呈现；裁决改由后端按操作类型自动做（只读 + replay_safe ⇒ 重跑，
+ *  其余 ⇒ 结清不重跑），前端没有任何可点的裁决入口。
+ *
  *  票面现场（会话 `b9aca235-…`）：一轮 run 的 bash 调用（find，60.4s 超时被杀）结果
  *  UNKNOWN，会话进入待人工裁决态。此时：
  *    ① 顶栏徽标显示「思考中 · 176,512 tok」，而该 run 早已死亡（run 无终态）；
@@ -8,8 +13,8 @@
  *    ④ 后端重启后 `run/interrupted` 落盘 → 徽标变「已中断」、横幅消失，看似痊愈，
  *       但 UNKNOWN 裁决仍挂着、发消息仍 409——误导性最强。
  *
- *  本文件用**主动读面**（`GET /api/sessions/{id}/recovery`，#1049）驱动全部四条，
- *  并刻意**不发任何 POST /recover**：AC3 要的就是"无需任何 409"。
+ *  本文件用**主动读面**（`GET /api/sessions/{id}/recovery`，#1049）驱动全部用例；
+ *  `#1327` 起不再有 409/裁决提交路径，被动通知横幅的唯一事实来源就是这份清单。
  */
 
 import { expect, test, type Page } from '@playwright/test';
@@ -111,138 +116,42 @@ test.describe('#1030 待裁决呈现', () => {
     await expect(page.locator('.run-pulse')).toContainText('思考中');
   });
 
-  test('AC3：无需任何 409，打开会话即可看到裁决入口并完成裁决', async ({ page }) => {
-    let submitted: { decisions?: { tool_call_id: string; verdict: string }[] } | null = null;
-    // #1030 审查 P1 之后，提交成功会**重读**只读端点来决定"还挂不挂着"——
-    // 所以夹具必须跟着变：ABANDON 真的解封（后端把 Operation 收成 CANCELLED），
-    // 重读就该拿到空清单。若这里仍恒回 PENDING，测的就不是产品行为而是夹具自相矛盾
-    // （修前之所以"过"，恰恰是因为前端从不重读——那正是 P1）。
-    let adjudicated = false;
-    await openSession(page, {
-      sessions: [ROW],
-      events: zombieEvents(),
-      pendingDecisions: PENDING,
-      onRecoveryGet: async (route) => {
-        await route.fulfill({
-          status: 200,
-          body: JSON.stringify({ pending_decisions: adjudicated ? [] : PENDING }),
-          contentType: 'application/json',
-        });
-      },
-      onRecoverPost: async (route) => {
-        const body = route.request().postDataJSON() as typeof submitted;
-        // 前端**主动**发现裁决需求后，用户提交才第一次打 POST /recover——
-        // 此前必须先点「恢复会话」撞一次 409 才可能走到这里。
-        submitted = body;
-        adjudicated = true;
-        await route.fulfill({
-          status: 200,
-          body: JSON.stringify([
-            ...zombieEvents(),
-            { type: 'tool/result', data: { tool_call_id: 'call-82ade', content: '{}' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
-          ]),
-          contentType: 'application/json',
-        });
-      },
-    });
+  test('AC3（新口径）：待裁决清单非空 ⇒ 被动通知横幅在场，无任何裁决入口', async ({ page }) => {
+    // `#1327`：裁决改由后端按操作类型自动做。前端只如实呈现"有欠账"——
+    // 被动通知横幅（`role="status"`，无需交互），没有任何可点的裁决入口。
+    await openSession(page, { sessions: [ROW], events: zombieEvents(), pendingDecisions: PENDING });
 
-    // 入口零点击在场。
-    const panel = page.locator('.recovery-decision-panel');
-    await expect(panel).toBeVisible();
-    await expect(page.locator('.recovery-decision-title')).toContainText('结果不确定');
-
-    // AC3 点名 CONFIRM / RETRY / ABANDON：三档都必须在场（DEFER 不解封，不是唯一出路）。
-    const card = page.locator('.recovery-card').first();
-    for (const label of [/当作已生效/, /当作没生效，安全重做/, /当作没生效，就此打住/]) {
-      await expect(card.getByRole('radio', { name: label })).toBeVisible();
-    }
-
-    // 选 ABANDON（"这事我不做了"）并提交 → 会话解封。
-    await card.getByRole('radio', { name: /就此打住/ }).check();
-    await page.locator('.recovery-submit-btn').click();
-    await expect.poll(() => submitted?.decisions?.[0]?.verdict).toBe('ABANDON');
+    const banner = page.locator('.adjudication-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toHaveAttribute('role', 'status');
+    await expect(banner.locator('.adjudication-headline')).toContainText('自动处理');
+    // 没有任何裁决面板 / 弹窗 / 可点入口（「去裁决」按钮已删）。
     await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
+    await expect(banner.locator('button')).toHaveCount(0);
+    await expect(page.locator('body')).not.toContainText('去裁决');
   });
 
-  /* #1030 审查 P1（轴 A）：**DEFER 不解封**，所以提交成功后界面必须重读后端事实，
-     而不是凭"POST 200"推断裁决已结清。
-     后端契约（`recovery/reconcile.py` + `tests/test_web_api.py::
-     test_recover_with_defer_is_accepted_and_keeps_pending`）：DEFER 只落
-     `reconcile_meta` 审计、Ledger 保持 NEED_RECONCILE，该 op **仍出现在后续
-     pending_decisions 里**。
-     修前：200 分支无条件写 `pendingDecisions: null` ⇒ 面板与横幅双双消失、徽标回到
-     「思考中」，而会话其实仍被封着——**正是本票 AC1/AC4 要消灭的那个谎报**。
-     加重因素：`default_action` 由 `replay_safe` 决定，`bash` 未覆写（默认 False）
-     ⇒ 票面现场那个 bash 调用的默认档就是 DEFER，用户"照默认走"一次即复现。 */
-  test('DEFER 不解封：提交成功后徽标与入口**仍在**（不谎报已结清）', async ({ page }) => {
-    await openSession(page, {
-      sessions: [ROW],
-      events: zombieEvents(),
-      pendingDecisions: PENDING,
-      // 后端对 DEFER 的如实回应：200，且该 op 仍在 pending。
-      onRecoveryGet: async (route) => {
-        await route.fulfill({
-          status: 200,
-          body: JSON.stringify({ pending_decisions: PENDING }),
-          contentType: 'application/json',
-        });
-      },
-      onRecoverPost: async (route) => {
-        await route.fulfill({ status: 200, body: JSON.stringify(zombieEvents()), contentType: 'application/json' });
-      },
-    });
+  test('AC2（新口径）：横幅第一层是人话（声明自动处理），不含协议词汇', async ({ page }) => {
+    await openSession(page, { sessions: [ROW], events: zombieEvents(), pendingDecisions: PENDING });
 
-    const panel = page.locator('.recovery-decision-panel');
-    await expect(panel).toBeVisible();
-    // 本夹具的 default_action 是 RETRY，但 RETRY 与 DEFER 并不等价：RETRY 会让模型
-    // 重新发起调用并落新结果（账本结清），DEFER 才是"只落审计、账本仍挂"那一档。
-    // 所以这里显式改选 DEFER——测的正是"提交成功但账本仍挂"。
-    const card = page.locator('.recovery-card').first();
-    await card.getByRole('radio', { name: /先不动它|稍后/ }).check();
-    await page.locator('.recovery-submit-btn').click();
-
-    // 提交确实被接受了（后端 200、无错误提示）……
-    await expect(page.locator('.recovery-decision-error')).toHaveCount(0);
-    // ……但会话仍被封着：重读拿到的事实仍是有待裁决 ⇒ **徽标必须如实说「待裁决」**，
-    // 这正是 AC1 的原话（"顶栏徽标不再显示「思考中」"）。修前这里会变回「思考中」。
-    await expect(page.locator('.run-pulse')).toContainText('待裁决');
-    // 入口也仍在场：后端契约明确允许"稍后重新裁决"，界面不该把这条出路收掉。
-    await expect(panel).toBeVisible();
-    await expect(panel.locator('.recovery-submit-btn')).toBeEnabled();
-  });
-
-  test('AC2：面向用户的文案不含协议词汇；技术详情只在折叠层', async ({ page }) => {
-    await openSession(page, {
-      sessions: [ROW],
-      events: zombieEvents(),
-      pendingDecisions: PENDING,
-    });
-
-    const panel = page.locator('.recovery-decision-panel');
-    await expect(panel).toBeVisible();
-
-    // 第一层（人话 + 卡片）不得出现 AC2 点名的协议词汇。
-    const title = page.locator('.recovery-decision-title');
-    await expect(title).toContainText('结果不确定');
+    const headline = page.locator('.adjudication-banner .adjudication-headline');
+    await expect(headline).toContainText('自动处理');
+    await expect(headline).not.toContainText('裁决');
     for (const token of ['POST /api/sessions', 'tool_call_id', 'verdict ∈']) {
-      await expect(title).not.toContainText(token);
+      await expect(headline).not.toContainText(token);
     }
-
-    // 卡片上必须能被用户读懂，同时**不**把 tool_call_id 当正文（它在折叠层/属性里）。
-    await expect(page.locator('.recovery-tool-name').first()).toContainText('bash');
   });
 
-  test('AC4：重启后（run/interrupted 落盘 + 裁决仍挂）徽标与横幅仍如实反映「待裁决」', async ({ page }) => {
+  test('AC4（新口径）：重启后待裁决 ⇒ 徽标「待裁决」+ 被动横幅如实呈现', async ({ page }) => {
     await openSession(page, { sessions: [ROW], events: restartedEvents(), pendingDecisions: PENDING });
 
-    // 这是票面实测的峰值误导：徽标变「已中断」+ 黄横幅、"看似痊愈"，
-    // 但 UNKNOWN 裁决还挂着、发消息照样 409，而此时连红色横幅都没了。
+    // 票面现场的旧误导（徽标「已中断」+ 看似痊愈）不再出现：徽标如实说「待裁决」，
+    // 横幅是被动通知（无裁决入口）——后端下次恢复时按操作类型自动结清。
     const pulse = page.locator('.run-pulse');
     await expect(pulse).toContainText('待裁决');
     await expect(pulse).not.toContainText('已中断');
-
-    // 入口仍在（不依赖任何 409）。
-    await expect(page.locator('.recovery-decision-panel')).toBeVisible();
+    await expect(page.locator('.adjudication-banner')).toBeVisible();
+    await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
   });
 
   test('AC4（对照臂）：同一重启会话、后端说没有待裁决 ⇒ 徽标是「已中断」', async ({ page }) => {
@@ -263,20 +172,6 @@ test.describe('#1030 待裁决呈现', () => {
 
     await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
     await expect(page.locator('.adjudication-banner')).toHaveCount(0);
-  });
-
-  test('关掉面板后横幅接替成为常驻入口（「去裁决」可重新打开）', async ({ page }) => {
-    await openSession(page, { sessions: [ROW], events: zombieEvents(), pendingDecisions: PENDING });
-    await expect(page.locator('.recovery-decision-panel')).toBeVisible();
-
-    await page.locator('.recovery-decision-close').click();
-    await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);
-
-    const banner = page.locator('.adjudication-banner');
-    await expect(banner).toBeVisible();
-    await expect(banner.locator('.adjudication-headline')).toContainText('裁决');
-    await banner.locator('.adjudication-open-btn').click();
-    await expect(page.locator('.recovery-decision-panel')).toBeVisible();
   });
 
   test('长协议原文不撑破布局（折叠层展开后仍无横向滚动）', async ({ page }) => {
