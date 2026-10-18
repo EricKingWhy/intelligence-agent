@@ -1234,6 +1234,86 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.6;
   color: var(--text-primary);
 }
+/* #1322：逻辑回放浮层。定位 / 材质 / 入场全部继承 .project-dialog（它在上面那条
+ * 共用选择器组里），这里只补回放特有的进度条与逐事件列表。**零新增 token**——只用
+ * 既有语义变量，故 §15 的暗/亮双主题同步没有新增项要维护。 */
+.replay-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: 96px;
+}
+.replay-progress-head {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.replay-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.replay-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width var(--dur-out) var(--ease-apple);
+}
+.replay-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.replay-step {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.replay-step-seq,
+.replay-step-type {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.replay-step-seq {
+  color: var(--text-tertiary);
+}
+.replay-step-type {
+  color: var(--text-secondary);
+}
+.replay-step-line {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.replay-empty {
+  padding: var(--space-sm) 0;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.replay-done {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-primary);
+}
 /* 待删对象的身份块（会话硬删确认面，#172）：标题 + id 片段——用户据此确认"我点的
  * 是这一条"。材质沿用 .project-input（surface-2 + border-subtle + radius-sm），
  * 不引入新 token：§15 的双主题同步只对新增/改动 token 有要求，这里一个都没动。 */

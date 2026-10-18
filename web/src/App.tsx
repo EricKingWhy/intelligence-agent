@@ -2035,9 +2035,16 @@ export default function App() {
         open={approvePolicyOpen}
         onOpenChange={setApprovePolicyOpen}
       />
-      {/* #1304：Agent 看板（TopBar Columns 入口）。打开时自取一次会话列表 + 手动刷新；
-          不订阅 WS（T3 / #1305），不写 ack（T4 / #1306）——本票只做投影与拖拽写路径。 */}
-      <KanbanPanel open={kanbanOpen} onOpenChange={setKanbanOpen} />
+      {/* #1304：Agent 看板（TopBar Columns 入口）。数据源走 WS 板级快照（T3 / #1305）；
+          #1306 起点卡写 ack 并打开会话（ack 写序在 KanbanPanel 内，先 ack 再导航）。 */}
+      <KanbanPanel
+        open={kanbanOpen}
+        onOpenChange={setKanbanOpen}
+        onOpenSession={(sid) => {
+          setKanbanOpen(false);
+          void selectSession(sid);
+        }}
+      />
       {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
       <ContextUsagePanel
         sessionId={contextUsageOpen ?? ''}

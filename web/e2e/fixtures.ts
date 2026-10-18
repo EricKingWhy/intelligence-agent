@@ -128,6 +128,42 @@ async function installWsRoute(
       } catch {
         return;
       }
+      // #1305 板级订阅：真后端订阅即推一帧全量快照（`websocket.py` 的
+      // `subscribe_board` 分支 + `BoardBroadcaster.subscribe`）。fixture 是
+      // **后端替身**，这条上行也必须应答——不应答的话看板在 e2e 里恒空，
+      // 而"空板"与"后端说没有会话"在界面上同形（假绿通道）。
+      // 行与 `GET /api/sessions` 同源（`mock.sessions`），与真后端"两侧共用
+      // `app.py::session_rows`"的契约一致。
+      if (msg.type === 'subscribe_board') {
+        mock.boardSubscribes?.push(true);
+        // 板级拒服务（考降级路径）：与 `onWs: closeNow` 同款——一个业务帧都不发
+        // 就关连接。**必须在这里判**：`onWs` 只在**会话** `subscribe` 分支被读，
+        // 看板走的是这条分支，拿 `closeNow` 当板级降级开关会静默不生效
+        // （看板照常拿到首帧，"降级"用例于是恒真/恒假）。
+        if (mock.closeBoardNow) {
+          ws.close();
+          return;
+        }
+        const push = (rows: unknown[]) => {
+          try {
+            ws.send(
+              JSON.stringify({
+                type: 'board_snapshot',
+                generated_at: new Date().toISOString(),
+                sessions: rows,
+              }),
+            );
+          } catch {
+            /* 连接已关：与真后端同款静默（推送不保证送达） */
+          }
+        };
+        // 订阅即推首帧（真后端 `BoardBroadcaster.subscribe` 同款）。
+        push(mock.sessions ?? []);
+        // 之后由用例驱动（模拟服务端在投影更新点推送）——**计数闭包留在 spec 内**
+        // （票面点名：fixtures 不提供通用计数器）。
+        mock.onBoardSubscribe?.(push);
+        return;
+      }
       if (msg.type !== 'subscribe' || !msg.session_id) return; // pong / 未知上行：忽略
       // 记录每次订阅的**上行原文**（#208 游标契约的观测点）：断言"客户端带了游标"
       // 只能看这里——客户端把游标丢掉时服务端行为依旧正确（当 -1 从头发），
@@ -216,6 +252,19 @@ export interface ApiMock {
   /** 调用方传入的空数组：fixture 把每次 WS `subscribe` 上行的 `{session_id, after_seq}`
    *  推进去（#208）。用来锁"客户端把本地游标带上了"——见 `installWsRoute` 的注释。 */
   wsSubscribes?: Array<{ session_id: string; after_seq?: unknown }>;
+  /** #1305：每次 WS `subscribe_board` 上行 push 一项（真后端应答一帧
+   *  `board_snapshot`，见 `installWsRoute`）。用来锁"看板确实走 WS 而不是
+   *  退回 REST"——只看界面区分不出这两条路径（两侧同源、行一模一样）。 */
+  boardSubscribes?: unknown[];
+  /** #1305：板级订阅建立后拿到一个 `push(rows)` —— 用例据此模拟**服务端**在
+   *  投影更新点推送 `board_snapshot`（真后端由 `BoardBroadcaster` 的 250ms
+   *  leading/trailing 节流驱动；fixture 不重实现节流，只当"服务端说什么就发什么"）。
+   *  计数与断言的闭包留在**各 spec 内**（票面点名：fixtures 无通用计数器）。 */
+  onBoardSubscribe?: (push: (rows: unknown[]) => void) => void;
+  /** 板级订阅被拒（#1305 降级路径）：`subscribe_board` 收到就关连接、一个帧都不发。
+   *  与会话侧的 `onWs: closeNow` 分开——`onWs` 不覆盖板级分支（见 `subscribe_board`
+   *  分支里的注释），两者混用会静默不生效。不设 = 订阅即推全量首帧。 */
+  closeBoardNow?: boolean;
   /** 第 N 次之后的 `GET /api/sessions` 直接回 500（N 从 1 数）。
    *  用途：构造"归档写成功了、但随后的列表重拉失败"这个只在真机上偶发的窗口——
    *  界面此刻的行还是旧状态，必须**说出来**而不是沉默（#171 AC9 的就地报错）。
@@ -414,6 +463,16 @@ export interface ApiMock {
     sessionId: string,
     archived: boolean,
   ) => Promise<boolean> | boolean;
+  // ── #1322 逻辑回放 ──
+  /** GET `/api/sessions/{id}/replay` 的拦截口（计数 / 延迟撑开"回放中"窗口 /
+   *  伪造 404）。返回 true = 已处理。
+   *
+   *  语义对齐后端 `web/lineage.py::replay_session`：缺省 200 → `{session_id,
+   *  count, steps}`，steps 是逐事件重建行。重放**零副作用**（只读），mock 不碰
+   *  任何会话状态——与归档 / 硬删那两条有状态 mock 刻意不同。 */
+  onReplayGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
+  /** 回放步骤 fixture（缺省 = `DEFAULT_REPLAY_STEPS`，4 条可渲染事件）。 */
+  replaySteps?: { seq: number; type: string; line: string }[];
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -547,6 +606,14 @@ export interface MemoryFixture {
   source_event_ids?: string[];
   payload?: Record<string, unknown> | null;
 }
+
+/** #1322：回放端点缺省步骤 fixture（4 条可渲染事件，形状 = 后端 `replay_session`）。 */
+export const DEFAULT_REPLAY_STEPS = [
+  { seq: 2, type: 'user/message', line: '[user] 列出文件' },
+  { seq: 3, type: 'tool/call', line: '[tool] bash(command=ls)' },
+  { seq: 4, type: 'tool/result', line: '  → result (frozen):\n  │ a.txt\n  │ b.txt' },
+  { seq: 5, type: 'model/completed', line: '[assistant] 有两个文件' },
+];
 
 /** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
 export function sessionRow(
@@ -921,6 +988,19 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       // 幂等：重复归档仍是 true（后端用 upsert/set_archived，不是"翻转"）。
       sessionState[at] = { ...(sessionState[at] as Record<string, unknown>), archived: target };
       return json(route, { id: sid, archived: target });
+    }
+    // ── #1322 逻辑回放（只读 mock：语义对齐 `web/lineage.py::replay_session`）──
+    const sessionReplayMatch = /^\/api\/sessions\/([^/]+)\/replay$/.exec(path);
+    if (sessionReplayMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(sessionReplayMatch[1]);
+      if (mock.onReplayGet && (await mock.onReplayGet(route, sid))) return undefined;
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      // 404 的 detail 照抄后端那句（`session 'x' not found`），不自己编。
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      const steps = mock.replaySteps ?? DEFAULT_REPLAY_STEPS;
+      return json(route, { session_id: sid, count: steps.length, steps });
     }
     // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
     const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);

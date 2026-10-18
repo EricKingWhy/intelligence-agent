@@ -12,12 +12,15 @@
  *  3. 既有先例 `ContextUsagePanel.tsx:112-123` / `TaskReviewPanel.tsx:149-159` 就是
  *     这个形状（`role="dialog"` + `aria-label` + 手写 Esc），照抄即零新机制。
  *
- *  ## 数据源（本票的注入缝）
+ *  ## 数据源（#1305 起：WS 板级推送）
  *
- *  打开时拉一次 `GET /api/sessions`（`includeArchived: true`）+ 手动刷新按钮，**不引入
- *  轮询定时器**（票面「不做边界」：避免与 `wsStream.ts:380/404/428` 的既有轮询语义打架）。
- *  数据源经 `loadSessions` prop 注入（缺省 = `lib/api.ts::listSessions`）——T3（#1305）
- *  把 WS 快照接到这个缝上，本组件不用改。
+ *  打开时经 `useBoardSnapshot` 订阅 `subscribe_board`：服务端订阅即推一帧全量
+ *  快照，之后由投影更新点经 250ms leading/trailing 节流推送（节流只在服务端做
+ *  一次，本组件**不做第二次**）。WS 建连失败时 hook 退回「打开时拉一次
+ *  `GET /api/sessions` + 手动刷新按钮」，**不引入轮询定时器**（票面「不做边界」：
+ *  避免与 `wsStream.ts:380/404/428` 的既有轮询语义打架）。
+ *  数据源经 `loadSessions` prop 注入（缺省 = `lib/api.ts::listSessions`），
+ *  该 prop 现在只服务**降级路径**与显式刷新。
  *
  *  ## 拖拽是本票**唯一**有写语义的交互（票面 §4.7）
  *
@@ -30,7 +33,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, X } from 'lucide-react';
 import {
-  listSessions,
   postSessionCommand,
   readErrorDetail,
   sendMessage,
@@ -50,19 +52,19 @@ import {
   writeShowAccepted,
 } from '../lib/kanban';
 import { KanbanCard } from './KanbanCard';
+import { markAcknowledged, readAck, unread } from '../lib/kanbanUnread';
+import { defaultLoadSessions, useBoardSnapshot } from '../hooks/useBoardSnapshot';
 import '../styles/kanban.css';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 数据源注入缝（T3 用 WS 快照替换；缺省 = 打开时拉一次 REST）。 */
+  /** 数据源注入缝：只服务**降级路径**与显式刷新（主路径走 WS 板级快照）。
+   *  缺省 = `useBoardSnapshot` 导出的那一份（**唯一**一份，本组件不自带副本）。 */
   loadSessions?: () => Promise<SessionSummary[]>;
+  /** 点卡 -> 打开该会话（#1306）。ack 已在**调用前**写好（见 `openSession`）。 */
+  onOpenSession: (sessionId: string) => void;
 }
-
-/** 缺省数据源：与 `useSession.refreshSessions` 同款——**总是**要全量（含已归档），
- *  可见性由视图开关决定而不是由请求决定（#171 的纪律，不变量 #22）。 */
-const defaultLoadSessions = (): Promise<SessionSummary[]> =>
-  listSessions({ includeArchived: true });
 
 /** 拖拽被拒绝时的说明（AC-9① 的判据文本）。 */
 const REJECT_TEXT = '只有 backlog 卡可以拖到「执行中」';
@@ -76,15 +78,28 @@ function isAlreadyDefined(error: unknown): boolean {
   return error instanceof SessionError && error.status === 409;
 }
 
-export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSessions }: Props) {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
+export function KanbanPanel({
+  open,
+  onOpenChange,
+  loadSessions = defaultLoadSessions,
+  onOpenSession,
+}: Props) {
+  /** #1305：数据源换成 WS 板级快照（打开时订阅 + 服务端 250ms 节流推送）。
+   *  降级（WS 建连失败）时 hook 自己退回「拉一次 + 手动刷新」，组件这侧无分支。 */
+  const board = useBoardSnapshot(open, loadSessions);
+  const sessions = board.sessions;
+  const loadError = board.error;
+  const degraded = board.degraded;
+  const refresh = board.refresh;
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   /** 开关是**视图状态**：首帧就要按它渲染（同 `lib/railArchive.ts` 的纪律：
    *  "先渲染默认态、再在 effect 里改"会闪一下）。所以用**惰性初始化**直接读
    *  localStorage，而不是在 effect 里补——顺带避免了 effect 里的 setState。 */
   const [showAccepted, setShowAccepted] = useState(readShowAccepted);
+  /** ack 表（#1306）：惰性初始化直接读 localStorage（同 `showAccepted` 的纪律：
+   *  首帧就要按它渲染，不能在 effect 里补）。 */
+  const [ack, setAck] = useState(readAck);
   /** 拖拽中的会话 id（同一次拖拽内跨列共享；`null` = 没有在拖）。 */
   const draggingRef = useRef<string | null>(null);
   /** 正在落点的会话 id 集（P3-1：快速连续拖拽同一张卡时，同会话的第二组
@@ -98,22 +113,16 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await loadSessions();
-      setSessions(rows);
-      setLoadError(null);
+      await refresh();
       setNow(Date.now());
-    } catch (error) {
-      // 失败**不清**列表：把已经拿到的行说成"没有会话"是假陈述（F9 的既有纪律）。
-      setLoadError((error as Error).message || '加载会话列表失败');
     } finally {
       setLoading(false);
     }
-  }, [loadSessions]);
+  }, [refresh]);
 
-  // 打开时拉一次（关闭时不动——关着的时候拉是白做的）。
-  useEffect(() => {
-    if (open) void reload();
-  }, [open, reload]);
+  // 打开时**不再**拉一次：`useBoardSnapshot` 在 open 时订阅 `subscribe_board`，
+  // 服务端订阅即推全量首帧（#1305 §7）。只有 WS 建连失败时 hook 才自己退回
+  // "拉一次"，组件这侧不再有"打开即 REST"这条路径。
 
   const showNotice = useCallback((text: string) => {
     setNotice(text);
@@ -156,6 +165,18 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
     setShowAccepted(next);
     writeShowAccepted(next);
   };
+
+  /** 点卡打开会话（#1306 AC-7②）。**顺序不可换**：先写 ack 再导航——反过来的话，
+   *  导航引起的重渲染会先拿旧 ack 画一帧，卡片在关闭前闪一下未读。
+   *  `ack` 是渲染闭包里的快照，但 `markAcknowledged` 写前会与落盘合并，
+   *  所以同 tick 连点/跨 tab 的旧快照不会覆盖别处刚写入的条目。 */
+  const openSession = useCallback(
+    (sessionId: string) => {
+      setAck(markAcknowledged(sessionId, ack));
+      onOpenSession(sessionId);
+    },
+    [ack, onOpenSession],
+  );
 
   /** 落点写路径的实际执行体（原样从 `runDropOnExecuting` 抽出——P3-1 的 in-flight
    *  守卫由外层做，这里只管"落点两步"本身）。 */
@@ -275,6 +296,8 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
               onDragStart={() => {
                 draggingRef.current = session.session_id;
               }}
+              unread={unread(session, ack)}
+              onOpen={() => openSession(session.session_id)}
             />
           ))}
         </div>
@@ -342,6 +365,14 @@ export function KanbanPanel({ open, onOpenChange, loadSessions = defaultLoadSess
         {loadError !== null && (
           <div className="kanban-notice kanban-notice-error" role="alert">
             加载会话列表失败：{loadError}
+          </div>
+        )}
+        {/* 降级不是错误、但必须**说出来**：实时推送已停（WS 建连失败或中途断开），
+            现在看到的行不会自己更新。不提示的话用户面对的是一个"看起来正常但
+            永不刷新"的板——这正是本票要解决的问题的反面。手动刷新按钮就在右上角。 */}
+        {degraded && (
+          <div className="kanban-notice kanban-notice-warn" role="status">
+            实时推送不可用，看板已降级为手动刷新
           </div>
         )}
         {notice !== null && (

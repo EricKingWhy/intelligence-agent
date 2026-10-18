@@ -1804,6 +1804,56 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+/** 回放的一步：一条可渲染事件的逐事件重建行（`#1322`）。 */
+export interface SessionReplayStep {
+  seq: number;
+  /** 事件类型（`user/message`、`tool/result` …），供前端标注 / 分组。 */
+  type: string;
+  /** 后端 `render_replay_event` 的重建行（与 CLI `replay` 输出逐字同源）。 */
+  line: string;
+}
+
+/** `GET /api/sessions/{id}/replay` 的回执。 */
+export interface SessionReplay {
+  session_id: string;
+  /** 可渲染事件数（= `steps.length`）；生命周期噪音不计。 */
+  count: number;
+  steps: SessionReplayStep[];
+}
+
+/** 逻辑回放一个会话（`#1322`，spec 03 §6 / ADR-0017 决策 4）：只读重建历史，
+ *  **零副作用**——不触发模型 / 工具，不写入原会话事件流。
+ *
+ *  走 `apiFetch`/`sessionError` 同一条链路（鉴权、BASE 前缀、错误映射不分叉）。
+ *  错误矩阵（后端 `web/lineage.py::replay_session`）：
+ *    404 —— 没有这个会话；409 —— 事件日志损坏（需走恢复入口）；
+ *    422 —— id 形态非法（正常路径不会触发）。
+ *  走到 200 就是回放态成立；回执的 `steps` 是权威（前端不自行重建第二份真相）。 */
+export async function replaySession(sessionId: string): Promise<SessionReplay> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/replay`, {
+    method: 'GET',
+  });
+  if (!res.ok) throw await sessionError(res, '重放会话失败');
+  // 形状防御：`steps` 是回执的权威（前端不自行重建第二份真相）。缺 steps 说明契约
+  // 被破坏，必须显式失败——返回空数组会把"回执坏了"伪装成"会话没有可回放内容"。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionReplay>;
+  if (!Array.isArray(body.steps)) throw new Error('回放回执缺少 steps');
+  const steps: SessionReplayStep[] = (body.steps as unknown[]).filter(
+    (s: unknown): s is SessionReplayStep =>
+      typeof s === 'object' &&
+      s !== null &&
+      typeof (s as SessionReplayStep).seq === 'number' &&
+      typeof (s as SessionReplayStep).type === 'string' &&
+      typeof (s as SessionReplayStep).line === 'string',
+  );
+  return {
+    session_id: typeof body.session_id === 'string' ? body.session_id : sessionId,
+    count: typeof body.count === 'number' ? body.count : steps.length,
+    steps,
+  };
+}
+
 /** 会话级命令 JSON POST（#1195 slash 命令：`/workflow-mode`、`/task/definition`）。
  *
  *  鉴权注入、BASE 前缀、401 处理与错误映射**复用 apiFetch/sessionError 同一条
