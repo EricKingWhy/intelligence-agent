@@ -100,15 +100,15 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
         </span>
       </div>
 
-      {session.last_user_message !== null || session.last_agent_message !== null ? (
+      {session.last_user_message != null || session.last_agent_message != null ? (
         <div className="kanban-card-msgs">
-          {session.last_user_message !== null && (
+          {session.last_user_message != null && (
             <div className="kanban-card-msg-user kanban-card-msg-clamp-1">
               <span className="kanban-card-msg-prefix">You</span>{' '}
               {session.last_user_message}
             </div>
           )}
-          {session.last_agent_message !== null && (
+          {session.last_agent_message != null && (
             <div className="kanban-card-msg-agent kanban-card-msg-clamp-2">
               <span className="kanban-card-msg-prefix">agent</span>{' '}
               {session.last_agent_message}

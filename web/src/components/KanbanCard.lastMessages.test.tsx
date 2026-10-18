@@ -118,6 +118,26 @@ describe('#1308 卡片正文最后一条消息', () => {
     expect(host.querySelector('.kanban-card-msg-agent')?.textContent).toBe(`agent ${exact}`);
   });
 
+  it('键缺失（旧服务端 payload）按「无消息」处理，不渲染空的前缀行', () => {
+    // 独立性审查 P4：`undefined !== null` 为真会渲染出只有 `You` 的空行；
+    // 判空用宽松 `!= null`（与 `types.ts` 的「键缺失」纪律一致）。
+    const old: Partial<SessionSummary> = { ...summary() };
+    delete old.last_user_message;
+    delete old.last_agent_message;
+    render(
+      <KanbanCard
+        session={old as SessionSummary}
+        now={Date.parse('2026-10-17T00:01:00Z')}
+        draggable
+        onDragStart={NOOP}
+        unread={false}
+        onOpen={NOOP}
+      />,
+    );
+    expect(host.querySelector('.kanban-card-msg-user')).toBeNull();
+    expect(host.querySelector('.kanban-card-msg-agent')).toBeNull();
+  });
+
   it('页脚仍只有时间节点（AC-16 不回退）', () => {
     renderCard({ last_user_message: '改一下标题', last_agent_message: '已改好' });
     const foot = host.querySelector('.kanban-card-foot');

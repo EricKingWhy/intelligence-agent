@@ -162,9 +162,17 @@ _MESSAGE_MAX_CHARS = 128
 def _last_message(events: list[SessionEvent], event_type: str) -> str | None:
     """最后一条带非空文本的事件内容（``USER_MESSAGE`` / ``MODEL_COMPLETED`` 共用）。
 
-    谓词与 ``first_user_message`` 一致：``content`` 必须是 strip 后非空的字符串。
+    ``content`` 谓词与 ``first_user_message`` 一致：必须是 strip 后非空的字符串。
     空白 / 缺键 / 非字符串一律跳过——不把 ``None`` 渲染成 "None"，也不让一条空
     消息把上一条真消息抹掉。
+
+    ``USER_MESSAGE`` 另加「这是用户说的话」判据：带 ``injected_by``（runtime 的
+    纠错注入，如 ``stuck_guard`` / ``completion_evidence_policy``）或 ``replace``
+    （压缩摘要替身）的不是用户原话，卡片上不能挂 ``You`` 前缀。与
+    ``derive.user_source_events`` / ``is_direct_user_input_event`` /
+    ``Session.user_turn_count`` 的既有排除口径一致，不另立判据。
+    （``origin=PROGRESS_CONFIRM_ORIGIN`` 的确认指令不排除：那三条既有判据都
+    把它算作用户来源——用户确实确认了这次外部编辑。）
     """
     for event in reversed(events):
         if event.type != event_type:
@@ -172,6 +180,10 @@ def _last_message(events: list[SessionEvent], event_type: str) -> str | None:
         # 旁路写者/手工编辑可能把 data 写成非 dict（`_attention` 同款防御）：
         # 一条坏行不得让整份投影派生失败。
         data = event.data if isinstance(event.data, dict) else {}
+        if event_type == USER_MESSAGE and (
+            data.get("injected_by") or data.get("replace")
+        ):
+            continue
         content = data.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()[:_MESSAGE_MAX_CHARS]

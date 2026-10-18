@@ -1132,6 +1132,31 @@ def test_last_messages_ignore_blank_and_non_string_content(tmp_path: Path) -> No
     assert projection.last_agent_message == "已改好"
 
 
+def test_last_user_message_skips_injected_and_replacement_messages(tmp_path: Path) -> None:
+    """独立性审查 P3：runtime 纠正注入 / 压缩替身不是用户原话，不得挂 `You` 前缀。
+
+    判据必须与 `derive.user_source_events` / `Session.user_turn_count` 一致；
+    否则卡面会把「检测到循环…」当成用户说的话。
+    """
+    store, session = _session_with_task(tmp_path)
+    sid = session.session_id
+    projection_store = BoardProjectionStore(store)
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+
+    session.append(
+        USER_MESSAGE,
+        {"content": "检测到循环：repeat（已连续 3 次）", "injected_by": "stuck_guard"},
+    )
+    assert projection_store.get(sid).last_user_message == "改一下标题"
+
+    session.append(USER_MESSAGE, {"content": "压缩摘要替身", "replace": True})
+    assert projection_store.get(sid).last_user_message == "改一下标题"
+
+    # 真用户消息照常推进——排除规则不得把之后的真消息也吞掉。
+    session.append(USER_MESSAGE, {"content": "再改一下"})
+    assert projection_store.get(sid).last_user_message == "再改一下"
+
+
 # ── #1308 / AC-20：读取与重启 ────────────────────────────────────────────
 
 
