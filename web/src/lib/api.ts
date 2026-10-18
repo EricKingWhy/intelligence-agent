@@ -2642,10 +2642,11 @@ export async function forkSession(
     body: JSON.stringify({ from_seq: fromSeq }),
   });
   if (!res.ok) {
-    // BUG-001 fix：解析后端 detail 给用户看（可用边界列表等）。
-    let detail = '';
-    try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
-    throw new Error(detail || `fork ${res.status}`);
+    // BUG-001 fix / #1325 S8：sandbox 不可用时 detail 是**对象**，直接
+    // `String(detail)` 会渲染成「[object Object]」。统一走 readErrorBody 取
+    // 给人看的 message（后端已把 remediation 拼进 message，无需二次拼装）。
+    const { message } = await readErrorBody(res);
+    throw new Error(message || `fork ${res.status}`);
   }
   return res.json();
 }
