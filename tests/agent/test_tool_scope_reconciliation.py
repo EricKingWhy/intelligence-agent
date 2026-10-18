@@ -83,6 +83,8 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("RetrieveMemoryV2Tool", "agent_harness.memory.v2.search_tool"),
     ("RememberMemoryV2Tool", "agent_harness.memory.v2.tools"),
     ("ForgetMemoryV2Tool", "agent_harness.memory.v2.tools"),
+    # #1353 M1：markdown 长期记忆工具（由 _wire_memory_v2 注册，走统一执行路径）
+    ("MemoryTool", "agent_harness.memory.v2.memory_tool"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
     ("LoadSkillTool", "agent_harness.skills.tool"),
     # #529 T-529-5：沉淀闭环工具（统一执行路径，不变量 #7）
