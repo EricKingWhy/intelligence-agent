@@ -215,19 +215,38 @@ _SCHEMA_MODULES = (
 )
 
 
+def _is_args_model(value) -> bool:
+    """参数模型：pydantic 且有 `action` / `target` 两个字段。"""
+    return isinstance(value, type) and hasattr(value, "model_json_schema") and (
+        {"action", "target"} <= set(getattr(value, "model_fields", {}) or {})
+    )
+
+
 def _module_schema(module) -> dict | None:
-    """模块级 `MEMORY_SCHEMA`（照搬面）或 `memory` Tool 的 pydantic schema。"""
+    """模块级 `MEMORY_SCHEMA`（照搬面）或 `memory` Tool 的 pydantic schema。
+
+    `MemoryTool.args_schema` 在本仓是 ``@property``，所以类属性拿不到模型；
+    这里既认模块里直接暴露的 pydantic 参数模型，也认 Tool 实例上的 ``args_schema``
+    （用 ``object.__new__`` 取值，不触发 Tool 的业务初始化）。
+    """
     for attribute in ("MEMORY_SCHEMA", "MEMORY_TOOL_SCHEMA"):
         value = getattr(module, attribute, None)
         if isinstance(value, dict):
             return value
     for value in vars(module).values():
-        if isinstance(value, type) and getattr(value, "name", None) == "memory":
-            args = getattr(value, "args_schema", None)
-            if isinstance(args, type) and hasattr(args, "model_json_schema"):
-                return args.model_json_schema()
-            if isinstance(args, dict):
-                return args
+        if _is_args_model(value):
+            return value.model_json_schema()
+    for value in vars(module).values():
+        if not isinstance(value, type):
+            continue
+        try:
+            args = getattr(object.__new__(value), "args_schema", None)
+        except Exception:  # noqa: BLE001 - 任何构造/属性异常的类都不算 Tool 落点
+            continue
+        if _is_args_model(args):
+            return args.model_json_schema()
+        if isinstance(args, dict):
+            return args
     return None
 
 
