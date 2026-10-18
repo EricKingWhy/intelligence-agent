@@ -13,7 +13,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { consumeSSE } from './sse';
-import { discoverNewSessionId, sessionExists, sessionIdBaseline, wsStreamResponse } from './wsStream';
+import {
+  CLAIM_BASE_DELAY_MS,
+  CLAIM_MAX_DELAY_MS,
+  DEFAULT_SESSION_CLAIM_TIMEOUT_MS,
+  SessionClaimTimeoutError,
+  claimBackoffMs,
+  discoverNewSessionId,
+  sessionExists,
+  sessionIdBaseline,
+  wsStreamResponse,
+} from './wsStream';
 import type { AgentEvent } from '../types';
 
 class FakeWebSocket {
@@ -575,11 +585,57 @@ describe('sessionIdBaseline / discoverNewSessionId', () => {
     expect(await discoverNewSessionId(new Set())).toBe('only');
   });
 
-  it('discoverNewSessionId 超时 → 抛错（不返回伪造的 id）', async () => {
+  it('discoverNewSessionId 超时 → 抛 SessionClaimTimeoutError（不返回伪造的 id）', async () => {
     stubSessions([]);
-    await expect(discoverNewSessionId(new Set(['x']), 300)).rejects.toThrow(
-      /未认领到新会话/,
+    await expect(
+      discoverNewSessionId(new Set(['x']), {
+        timeoutMs: 300,
+        baseDelayMs: 10,
+        maxDelayMs: 40,
+      }),
+    ).rejects.toBeInstanceOf(SessionClaimTimeoutError);
+  });
+
+  it('慢响应 + 大列表：新会话晚 6 轮出现，仍在配置预算内认领（#1321）', async () => {
+    // 每次列表往返 40ms、5000 条（含归档）——按比例缩小 1500ms 的量级，
+    // 保持「预算内只跑得下若干轮」的形状；真实 1500ms 验收见票面记录。
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls += 1;
+        await new Promise((r) => setTimeout(r, 40));
+        const rows = Array.from({ length: 5000 }, (_, i) => ({ session_id: `old-${i}` }));
+        if (calls >= 6) rows.push({ session_id: 'fresh' });
+        return new Response(JSON.stringify(rows), { status: 200 });
+      }),
     );
+
+    await expect(
+      discoverNewSessionId(
+        new Set(Array.from({ length: 5000 }, (_, i) => `old-${i}`)),
+        {
+          timeoutMs: 2500,
+          baseDelayMs: 20,
+          maxDelayMs: 80,
+        },
+      ),
+    ).resolves.toBe('fresh');
+    expect(calls).toBeGreaterThanOrEqual(6);
+  });
+
+  it('默认预算与退避参数：不再是 6000ms 硬编码，上限可配置（#1321 AC1/AC2）', () => {
+    expect(DEFAULT_SESSION_CLAIM_TIMEOUT_MS).toBeGreaterThan(6000);
+    expect(CLAIM_MAX_DELAY_MS).toBeGreaterThan(CLAIM_BASE_DELAY_MS);
+    // 指数增长：每轮上限翻倍（attempt 0/1/2 ⇒ 150/300/600）
+    expect(claimBackoffMs(0, 150, 15_000, () => 0)).toBe(75);
+    expect(claimBackoffMs(1, 150, 15_000, () => 0)).toBe(150);
+    expect(claimBackoffMs(2, 150, 15_000, () => 0)).toBe(300);
+    // equal jitter：同一轮的实际值落在 [cap/2, cap]
+    expect(claimBackoffMs(2, 150, 15_000, () => 0.999)).toBeGreaterThan(449);
+    expect(claimBackoffMs(2, 150, 15_000, () => 0.999)).toBeLessThanOrEqual(600);
+    // 封顶
+    expect(claimBackoffMs(20, 150, 1000, () => 1)).toBe(1000);
   });
 });
 

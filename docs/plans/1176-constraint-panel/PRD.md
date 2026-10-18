@@ -34,7 +34,7 @@ Phase 1 只有 SESSION 组；Phase 2 起三组齐全。
 
 全局铁律（三个阶段都必须守）：
 - 面板数据必须来自后端查询接口的实时投影，前端不维护第二套状态。
-- 撤销是副作用操作，走 Runtime 权限/审批路径，不靠 Prompt 约束。
+- 撤销是副作用操作，经管理写入口（`SessionService.revoke_protected_fact`）在请求内直接追加 `task/fact_revocation` 事件，不靠 Prompt 约束。
 - Memory/事实存储保持 Provider 可替换边界，面板不绑定具体 Provider 实现。
 
 ---
@@ -67,7 +67,7 @@ Web Session Inspector 内新增一页"约束管理"（路由/入口由实现者�
   - Response：`[{fact_id, type, value, status, source_event_id, source_seq, registered_at, revoked_at, revoked_by}]`。`registered_at` 从来源事件时间取；`revoked_at/revoked_by` 从 revocation 事件取。
   - 失败时返回 5xx，前端展示空态 + 错误提示，不允许用缓存数据冒充。
 - `POST /api/sessions/{session_id}/protected-facts/{fact_id}/revoke`
-  - 走 Runtime 权限/审批路径（与现有敏感操作同口径），审批通过后追加 `authorization_revocation` 事件（携带 `revoke_fact_id`、操作人、时间）。
+  - 经管理写入口（`SessionService.revoke_protected_fact`）在请求内直接追加 `task/fact_revocation` 事件（携带 `revoke_fact_id`、操作人、时间）。
   - 不物理删除任何事件/记录。
   - Response：`{fact_id, status: "revoked", revoked_at}`。
 
