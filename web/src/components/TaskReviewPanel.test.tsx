@@ -304,6 +304,15 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
   });
 });
 
+describe('#1325 S4 — 入口与对话框标题同一措辞', () => {
+  it('对话框 aria-label 与可见标题都是「详细审阅」，不再是「任务审阅」', async () => {
+    await renderPanel();
+    expect(host.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('详细审阅');
+    expect(host.querySelector('.ctx-usage-title')?.textContent).toBe('详细审阅');
+    expect(text()).not.toContain('任务审阅');
+  });
+});
+
 describe('#353 TaskReviewPanel — 只读与关闭', () => {
   it('不提供暂存/提交按钮（首版不做）', async () => {
     getTaskState.mockResolvedValue(taskState());

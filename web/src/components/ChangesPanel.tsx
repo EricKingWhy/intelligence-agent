@@ -229,7 +229,7 @@ export function ChangesPanel({
       {/* #1311：数据源标注在空态/有文件两种版式下常驻——清单只覆盖结构化文件工具事件，
           shell 副作用由「任务审阅」的 git 口径兜底；两个口径的差异有标注才有得区分。 */}
       <div className="changes-footnote">
-        数据来源：write/edit/apply_patch 工具事件；shell 命令的文件副作用不在此清单内（git 口径见「任务审阅」）。
+        数据来源：write/edit/apply_patch 工具事件；shell 命令的文件副作用不在此清单内（git 口径见「详细审阅」）。
       </div>
     </div>
   );

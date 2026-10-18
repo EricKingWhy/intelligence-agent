@@ -212,11 +212,11 @@ export function TaskReviewPanel({
       <div
         className="ctx-usage-popover task-review-panel"
         role="dialog"
-        aria-label="任务审阅"
+        aria-label="详细审阅"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="ctx-usage-head">
-          <span className="ctx-usage-title">任务审阅</span>
+          <span className="ctx-usage-title">详细审阅</span>
           <button className="ctx-usage-close" onClick={onClose} aria-label="关闭">
             <X size={14} />
           </button>
