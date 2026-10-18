@@ -854,7 +854,12 @@ export interface ConversationState {
    *  - 与 `usage_total` 的区别：上面那个是 **run 级**槽（`run/completed` 直接覆盖、
    *    **run 边界不清零**——跨 run 混用正是 #1313 的根因；StepDetail RUN 段的
    *    `tokens` 行消费）；本字段是**会话级**账，run 边界不清零。顶栏取二者之和，
-   *    见 `projection.displayedSessionUsage`。 */
+   *    见 `projection.displayedSessionUsage`。
+   *  - 已知约束（不在本票 AC 内，只声明不改行为）：同一 run 内暂停→恢复后，
+   *    `run/completed` 的 `usage_total` 可能仅为恢复后最后一次执行的切片
+   *    （后端 #T5-F1 未裁决，前端无法区分切片与全量），此时顶栏累计可能小于恢复前；
+   *    页面刷新后若回放窗口不完整，数字也可能小于刷新前（单调非减只在单次连续
+   *    视图内成立，见 issue #1313「期望行为」末条）。 */
   session_usage_total: UsageStats | null;
   /** #1313 口径 B（会话累计）**R 槽**：**当前 run** 的流式累计（各次
    *  `model/completed.data.usage` 逐条累加）。

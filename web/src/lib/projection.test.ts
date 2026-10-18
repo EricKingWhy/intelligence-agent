@@ -3186,11 +3186,18 @@ describe('#1313 回放：真实会话 261e3452 的事件序列符合口径 B', (
     expect(totals[totals.length - 1]).not.toBe(83668);
   });
 
-  it('序列（去掉开头的 null）单调非减', () => {
-    const nums = replayDisplayedTotals().filter((v): v is number => v !== null);
-    expect(nums.length).toBeGreaterThan(0);
-    for (let i = 1; i < nums.length; i++) {
-      expect(nums[i]).toBeGreaterThanOrEqual(nums[i - 1]);
+  it('完整序列（含 null 占位）单调非减：除 null 外不出现回退', () => {
+    // `null` = 数字消失（尚无用量/不显示），本身可见但**不计为「变小」**；
+    // 只对相邻两个非 null 值断言不下降。
+    const totals = replayDisplayedTotals();
+    expect(totals.length).toBeGreaterThan(0);
+    expect(totals.some((v) => v === null)).toBe(true);
+    expect(totals.filter((v): v is number => v !== null).length).toBeGreaterThan(0);
+    let prev: number | null = null;
+    for (const v of totals) {
+      if (v === null) continue;
+      if (prev !== null) expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
     }
   });
 

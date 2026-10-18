@@ -2472,7 +2472,16 @@ function addUsage(a: UsageStats | null, b: UsageStats): UsageStats {
  *  行消费），不是会话累计。会话累计由独立的 S 槽（`session_usage_total`）维护。
  *
  *  两槽都空 ⇒ null（无数据不显示，零伪造）；任一侧非空即返回其与另一侧的和，
- *  逐维 null 的粘性由 `addUsage` 保证（未知维不会被当成 0）。 */
+ *  逐维 null 的粘性由 `addUsage` 保证（未知维不会被当成 0）。
+ *
+ *  **已知约束（均不在本票 AC 内，只声明不改行为）**：
+ *  - 暂停→恢复切片：同一 run 内暂停再恢复后，`run/completed` 携带的 `usage_total`
+ *    可能**仅为恢复后最后一次执行的切片**（后端 #T5-F1 未裁决：`_drive` 每次新建
+ *    累加器、恢复时不从暂停快照播种）。前端无法区分「切片」与「全量」，此时顶栏
+ *    累计可能小于恢复前——**已知约束**，不是本函数的 bug。
+ *  - 回放窗口：页面刷新后投影靠事件回放重建，若回放窗口不完整，数字可能小于刷新前
+ *    （单调非减的作用域只是**单次连续视图内**，见 issue #1313「期望行为」末条）。
+ */
 export function displayedSessionUsage(state: ConversationState): UsageStats | null {
   if (!state.session_usage_total) return state.run_usage_live;
   if (!state.run_usage_live) return state.session_usage_total;
