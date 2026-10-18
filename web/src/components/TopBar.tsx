@@ -13,7 +13,7 @@ import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
-import { awaitingApproval as hasLiveApproval } from '../lib/projection';
+import { awaitingApproval as hasLiveApproval, displayedSessionUsage } from '../lib/projection';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -98,6 +98,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // 「待裁决」**不是** active：它没在跑（active 驱动 spinner 与耗时秒数，把它算进去
   // 就会给一个死掉的 run 计秒——正是本票要修的谎报）。
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
+  // #1313 口径 B：顶栏用量 = 会话累计（S + R），在渲染期派生（不是 effect 里的状态）。
+  const sessionUsage = conversation ? displayedSessionUsage(conversation) : null;
 
   // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里
   // 流龄一路涨，用它当阈值会把正常慢任务报成停顿。events.length 是投影真值的进度
@@ -151,11 +153,12 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <PulseIcon size={14} aria-hidden="true" />
           {pulse.label}
           {active && elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}
-          {/* Claude Code "(13s · 28 tokens)" 语言：run 用量计数。usage_total 是
-              投影从 model/completed 聚合的已有真相——工具型 run 流式期间逐步累加，
-              纯文本 run 完成时一次到位；无数据不显示（零伪造）。 */}
-          {conversation?.usage_total && conversation.usage_total.total_tokens !== null && (
-            <span className="num"> · {conversation.usage_total.total_tokens.toLocaleString()} tok</span>
+          {/* Claude Code "(13s · 28 tokens)" 语言，**口径 B·会话累计（#1313）**：
+              S（已终态 run 权威值之和）+ R（当前 run 流式累计），单次连续视图内单调非减；
+              `run/completed` 以权威值**替换**本 run 的流式贡献，因此到达前后不出现
+              数字变小的覆盖式跳变。无数据不显示（零伪造）。 */}
+          {sessionUsage && sessionUsage.total_tokens !== null && (
+            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} tok</span>
           )}
           {/* #537：run 预算徽标「已用 / 上限」——只出设了 ceiling 的维；数据源是
               投影的 run 预算镜像（run/started 回显 + run/resumed 更新），文本经

@@ -1,9 +1,11 @@
 /** projection.ts 纯函数测试——事件→视图状态机的折叠语义契约。 */
 
+// @ts-expect-error node 内置模块没有声明（web 的 tsconfig 只带 vite/client）
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType, type EventTypeValue } from '../types';
-import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, summarizeEvent } from './projection';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, displayedSessionUsage, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -22,6 +24,9 @@ describe('initConversation', () => {
       // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
       eventsVersion: 0,
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
+      // #1313：口径 B 的两个新槽（会话累计 S / 当前 run 流式 R）初值——必填字段，形状断言跟着长。
+      session_usage_total: null,
+      run_usage_live: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
       // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
@@ -1086,21 +1091,145 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     }
   });
 
-  it('RUN_FAILED 不捕获 run 级观测字段（契约只定义在 run/completed），已累计 usage 保留', () => {
+  it('RUN_FAILED 不捕获 run 级观测字段（契约只定义在 run/completed），失败 run 的消耗计入会话累计', () => {
     let s = applyEvent(initConversation('s'), ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
       step_id: 1,
     }));
     s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { usage_total: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }, cost_usd: 1 } }));
+    // run 级槽（StepDetail 契约）不捕获 failed 载荷：保持原样。
     expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
     expect(s.cost_usd).toBeNull();
+    // #1313 口径 B：事件带权威 usage_total ⇒ 以权威值结转进会话累计槽（口径同
+    // run/completed，优先于流式值），当前 run 流式槽归零。
+    expect(s.session_usage_total).toEqual({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+    expect(s.run_usage_live).toBeNull();
+  });
+
+  it('RUN_FAILED 缺权威 usage_total 时退回流式累计结转（客户端错过 model/completed 也不丢）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'boom' } }));
+
+    expect(s.session_usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    expect(s.run_usage_live).toBeNull();
   });
 
   it('无观测字段的 MODEL_COMPLETED 不改动 model/usage（保持 null）', () => {
     const s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x' }, step_id: 1 }));
     expect(s.model).toBeNull();
     expect(s.usage_total).toBeNull();
+  });
+});
+
+describe('applyEvent — #1313 顶栏 token 口径 B（会话累计）', () => {
+  /** 顶栏显示值：口径 B 的投影 = S（已终态 run 权威值之和）+ R（当前 run 流式累计）。 */
+  const shown = (s: ReturnType<typeof initConversation>): number | null =>
+    displayedSessionUsage(s)?.total_tokens ?? null;
+
+  const modelCompleted = (tokens: number) => ev({
+    type: EventType.MODEL_COMPLETED,
+    data: { content: 'x', usage: { prompt_tokens: tokens, completion_tokens: 0, total_tokens: tokens } },
+    step_id: 1,
+  });
+  const runCompleted = (tokens: number) => ev({
+    type: EventType.RUN_COMPLETED,
+    data: { usage_total: { prompt_tokens: tokens, completion_tokens: 0, total_tokens: tokens } },
+  });
+
+  it('AC1：多 run 会话顶栏序列单调非减（run/completed 不出现覆盖式跳变）', () => {
+    const seq: (number | null)[] = [];
+    let s = initConversation('s');
+    const step = (e: AgentEvent) => { s = applyEvent(s, e); seq.push(shown(s)); };
+
+    step(modelCompleted(150));
+    step(modelCompleted(250));
+    step(runCompleted(400));   // 权威值 400 替换本 run 流式贡献 400
+    step(ev({ type: EventType.RUN_STARTED, data: {} }));
+    step(modelCompleted(75));
+    step(runCompleted(90));    // 400 + 90
+
+    expect(seq).toEqual([150, 400, 400, 400, 475, 490]);
+    for (let i = 1; i < seq.length; i += 1) {
+      expect(seq[i]!).toBeGreaterThanOrEqual(seq[i - 1]!);
+    }
+  });
+
+  it('AC2：run/completed 后显示值 = 到达前 − 本 run 流式贡献 + 本 run 权威值（精确复算）', () => {
+    let s = applyEvent(initConversation('s'), runCompleted(1000));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    s = applyEvent(s, modelCompleted(300));
+    const before = shown(s)!;                       // 1000 + 300
+    s = applyEvent(s, runCompleted(260));
+    const after = shown(s)!;
+
+    expect(before).toBe(1300);
+    expect(after).toBe(before - 300 + 260);
+    expect(after).toBe(1260);
+  });
+
+  it('AC4：无双计：run/completed 权威值替换流式贡献，不是叠加', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: {} }));
+    s = applyEvent(s, modelCompleted(999));
+    s = applyEvent(s, runCompleted(1234));
+
+    expect(shown(s)).toBe(1234);      // 不是 999 + 1234
+    expect(s.run_usage_live).toBeNull();
+  });
+
+  it('AC3：失败 run 计入会话累计：100（failed）+ 60（completed 权威） = 160', () => {
+    let s = applyEvent(initConversation('s'), modelCompleted(100));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'boom' } }));
+    expect(shown(s)).toBe(100);
+
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    s = applyEvent(s, modelCompleted(50));
+    expect(shown(s)).toBe(150);       // S=100 + R=50
+
+    s = applyEvent(s, runCompleted(60));
+    expect(shown(s)).toBe(160);       // 100 + 60（R 被权威值替换，不残留 50）
+  });
+
+  it('AC5：中断 run 的用量结转进 S，下一个 run/started 后不倒退', () => {
+    let s = applyEvent(initConversation('s'), modelCompleted(100));
+    s = applyEvent(s, ev({ type: EventType.RUN_INTERRUPTED, data: { interrupted_seq: 9 } }));
+    expect(shown(s)).toBe(100);        // 中断 run 已消耗的 100 结转进 S
+
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    expect(s.run_usage_live).toBeNull();
+    expect(shown(s)).toBe(100);        // 不倒退（回归护栏：R 清零不得吃掉这段用量）
+  });
+
+  it('run/started 清零 R 但不动 S（会话累计跨 run 存活）', () => {
+    let s = applyEvent(initConversation('s'), modelCompleted(40));
+    s = applyEvent(s, runCompleted(50));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+
+    expect(s.run_usage_live).toBeNull();
+    expect(s.session_usage_total).toEqual({ prompt_tokens: 50, completion_tokens: 0, total_tokens: 50 });
+    expect(shown(s)).toBe(50);
+  });
+
+  it('两槽皆空 → null（不伪造 0）', () => {
+    expect(displayedSessionUsage(initConversation('s'))).toBeNull();
+  });
+
+  it('粘性 null 不因 S/R 相加被抹平：任一维未知 ⇒ 该维显示 null', () => {
+    // R 的 total_tokens 未知（NaN ⇒ null），S 有值 ⇒ 结果该维 null，其余维照常相加。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: Number.NaN } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'boom' } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    s = applyEvent(s, modelCompleted(7));
+
+    expect(displayedSessionUsage(s)).toEqual({ prompt_tokens: 17, completion_tokens: 5, total_tokens: null });
   });
 });
 
@@ -2998,5 +3127,86 @@ describe('run 预算镜像（#537）', () => {
     const replayed = projectHistory('s', events);
     expect(replayed.run_budget_ceilings?.max_total_tokens).toBe(500000);
     expect(replayed.run_budget_consumed).toEqual({ agent_turns: 1, model_requests: 1, total_tokens: 100, cost_usd: '0.10' });
+  });
+});
+
+// #1313 回放回归：fixture 来源 = 真实生产会话 `261e3452-5bf2-482b-acec-3af1bdd906c1` 的
+// `events.jsonl`（`.agent/` 被 gitignore，不能直接引用，故裁剪入库）。
+// 裁剪规则：只留本口径关心的 18 个事件（seq 0/3/31/53/65/71/109/132/177/187/207/208/
+// 210/244/276/293/363/364，升序），每事件只留 applyEvent 实际消费的字段
+// （seq/time/type/run_id/step_id/data）；`content` 截 50 字符、`message` 截 100 字符；
+// 其余大字段/无关字段（event_id/session_id/schema_version/agent_id/tool_calls/
+// final_text/trace_*/cost_usd）全删。
+// 读法照抄 `askUserMockup.test.ts` 的 `readFileSync(new URL(..., import.meta.url))`
+// —— tsconfig 没有 resolveJsonModule，不能用 `import ... from '*.json'`。
+const replayEvents = JSON.parse(
+  readFileSync(new URL('./__fixtures__/1313-session-cumulative.json', import.meta.url), 'utf8'),
+) as unknown as AgentEvent[];
+
+/** 按 fixture 顺序逐事件折叠，收顶栏显示值（`null` = 尚无任何用量，不显示）。 */
+function replayDisplayedTotals(): Array<number | null> {
+  let s = initConversation('261e3452-5bf2-482b-acec-3af1bdd906c1');
+  const out: Array<number | null> = [];
+  for (const e of replayEvents) {
+    s = applyEvent(s, ev(e));
+    out.push(displayedSessionUsage(s)?.total_tokens ?? null);
+  }
+  return out;
+}
+
+describe('#1313 回放：真实会话 261e3452 的事件序列符合口径 B', () => {
+  it('顶栏显示值逐位命中真实会话的用量序列', () => {
+    expect(replayDisplayedTotals()).toEqual([
+      null, // seq 0 session/started：无用量
+      null, // seq 3 run/started：S/R 双空（run 开始只清 R，S 本就为空）
+      13584, // seq 31 run1 第 1 次流式：R=13584
+      28129, // seq 53 第 2 次：R=13584+14545
+      43072, // seq 65 第 3 次：R=+14943
+      59185, // seq 71 第 4 次：R=+16113
+      76952, // seq 109 第 5 次：R=+17767
+      95440, // seq 132 第 6 次：R=+18488
+      114565, // seq 177 第 7 次：R=+19125
+      133960, // seq 187 第 8 次：R=+19395 —— run1 八次流式累加至此
+      133960, // seq 207 run/failed：R 结转进 S（133960），R 归零
+      133960, // seq 208 session/resumed：data {} —— 不清 S（恢复不重置会话累计）
+      133960, // seq 210 run2 run/started：只清 R；S 不清零（口径 B 的单调性来自这里）
+      154150, // seq 244 流式：133960+20190 —— issue 里 04 截图的真实数字，逐位命中即"复现"成立
+      174695, // seq 276：+20545
+      195735, // seq 293：+21040
+      217628, // seq 363：+21893
+      217628, // seq 364 run/completed：权威 83668 **替换** R 而非叠加（133960+83668=217628）
+    ]);
+  });
+
+  it('最终值是 217628，不是 05 截图的旧 bug 输出 83668', () => {
+    // 旧实现把 run/completed 的权威值当**覆盖式**会话累计用，S 被 83668 顶掉 ⇒ 顶栏数字
+    // 从 217628 掉回 83668。这条断言就是那个 bug 的回归锁。
+    const totals = replayDisplayedTotals();
+    expect(totals[totals.length - 1]).toBe(217628);
+    expect(totals[totals.length - 1]).not.toBe(83668);
+  });
+
+  it('完整序列（含 null 占位）单调非减：除 null 外不出现回退', () => {
+    // `null` = 数字消失（尚无用量/不显示），本身可见但**不计为「变小」**；
+    // 只对相邻两个非 null 值断言不下降。
+    const totals = replayDisplayedTotals();
+    expect(totals.length).toBeGreaterThan(0);
+    expect(totals.some((v) => v === null)).toBe(true);
+    expect(totals.filter((v): v is number => v !== null).length).toBeGreaterThan(0);
+    let prev: number | null = null;
+    for (const v of totals) {
+      if (v === null) continue;
+      if (prev !== null) expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('run/failed（seq 207）之后失败 run 的已消耗计入 S', () => {
+    let s = initConversation('261e3452-5bf2-482b-acec-3af1bdd906c1');
+    for (const e of replayEvents) {
+      s = applyEvent(s, ev(e));
+      if (e.seq === 207) break;
+    }
+    expect(s.session_usage_total?.total_tokens).toBe(133960);
   });
 });

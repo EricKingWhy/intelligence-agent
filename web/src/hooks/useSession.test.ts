@@ -150,6 +150,8 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     // #1028：会话 cwd 锚（ConversationState 另一个必填字段，字面量构造点跟着长）。
     session_cwd: null,
     events: [], unknown_events: [], model: null, usage_total: null, cost_usd: null,
+    // #1313：口径 B 的两个必填槽（同上：ConversationState 字面量构造点跟着长）。
+    session_usage_total: null, run_usage_live: null,
     // N2（#271）：新增必填字段（本夹具是 ConversationState 的字面量构造点，编译器指出的）。
     eventsVersion: 0,
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
