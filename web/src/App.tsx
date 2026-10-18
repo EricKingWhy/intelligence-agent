@@ -42,7 +42,7 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
 import { TaskReviewPanel } from './components/TaskReviewPanel';
-import { changedFiles } from './lib/changedFiles';
+import { changedFiles, hasSuccessfulBashCall } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
@@ -298,6 +298,12 @@ export default function App() {
     () => conversation?.session_id === selectedId
       ? changedFiles(tools)
       : { files: [], unattributed: 0 },
+    [conversation?.session_id, selectedId, tools],
+  );
+  /* #1311：空态弱提示判据——会话里有执行过的 bash 调用时，「文件/改动」面板要提醒
+     其文件副作用不在此清单。与 `changes` 同一条身份闸（非选中会话不给提示）。 */
+  const hasBashCall = useMemo(
+    () => conversation?.session_id === selectedId && hasSuccessfulBashCall(tools),
     [conversation?.session_id, selectedId, tools],
   );
   const changedFileCount = changes.files.length;
@@ -1995,6 +2001,7 @@ export default function App() {
                   events={reviewEvents}
                   eventsVersion={reviewEventsVersion}
                   streaming={streaming}
+                  hasBashCall={hasBashCall}
                   onOpenTaskReview={() => setTaskReviewOpen(true)}
                 />
               ) : null}

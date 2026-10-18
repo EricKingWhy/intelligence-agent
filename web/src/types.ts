@@ -845,6 +845,32 @@ export interface ConversationState {
    *    （契约 2d7f87a——失败 run 也有可见 trace）；未启用 Langfuse 恒 null。 */
   model: string | null;
   usage_total: UsageStats | null;
+  /** #1313 口径 B（会话累计）**S 槽**：会话内**所有已终态 run** 的权威值之和。
+   *  - 语义：跨 run 累加、单调非减；失败 run 的已消耗也计入（#1313 裁决）。
+   *  - 事件来源：`run/completed` 以 `data.usage_total` 的权威值累加进来；
+   *    `run/failed` 以本 run 的流式累计（R）结转进来。
+   *  - 缺失语义：`null` = 尚无任何终态 run（**不是** 0）；非 null 时各维仍可
+   *    单独为 null（该维未知，见 UsageStats）——外层可空与维可空相互正交。
+   *  - 与 `usage_total` 的区别：上面那个是 **run 级**槽（`run/completed` 直接覆盖、
+   *    **run 边界不清零**——跨 run 混用正是 #1313 的根因；StepDetail RUN 段的
+   *    `tokens` 行消费）；本字段是**会话级**账，run 边界不清零。顶栏取二者之和，
+   *    见 `projection.displayedSessionUsage`。
+   *  - 已知约束（不在本票 AC 内，只声明不改行为）：同一 run 内暂停→恢复后，
+   *    `run/completed` 的 `usage_total` 可能仅为恢复后最后一次执行的切片
+   *    （后端 #T5-F1 未裁决，前端无法区分切片与全量），此时顶栏累计可能小于恢复前；
+   *    页面刷新后若回放窗口不完整，数字也可能小于刷新前（单调非减只在单次连续
+   *    视图内成立，见 issue #1313「期望行为」末条）。 */
+  session_usage_total: UsageStats | null;
+  /** #1313 口径 B（会话累计）**R 槽**：**当前 run** 的流式累计（各次
+   *  `model/completed.data.usage` 逐条累加）。
+   *  - 事件来源：`model/completed` 累加；`run/started` 归零（赋 null）；
+   *    `run/completed` 到达时被权威值**替换**（绝不叠加——防双计），
+   *    `run/failed` 到达时结转进 S 后归零。
+   *  - 缺失语义：`null` = 当前没有在累计的流式用量（未开跑 / 已收口）。
+   *  - 为什么单独开槽而不复用 `usage_total`：后者的口径在 run 生命周期内会从
+   *    「流式累加」变成「权威覆盖」，直接拿来当顶栏累计就会在 `run/completed`
+   *    处出现数字变小的覆盖式跳变（#1313 的原始 bug）。 */
+  run_usage_live: UsageStats | null;
   cost_usd: number | null;
   trace_id: string | null;
   trace_url: string | null;

@@ -213,7 +213,10 @@ test('AC6/AC8：无改动 → 空态文案逐字', async ({ page }) => {
   ];
   await openChanges(page, frames);
 
-  // 跑过命令但没改文件 ≠ 有改动：空态文案逐字（AC6）
+  // 跑过命令但没改文件 ≠ 有改动：空态是口径声明而非全称断言（#1311），
+  // 且该场景（有执行过的 bash）必须带弱提示与数据源标注。
   await expect(page.locator('.changes-files')).toHaveCount(0);
-  await expect(page.locator('.changes-panel')).toContainText('本次会话未改动任何文件。');
+  await expect(page.locator('.changes-panel')).toContainText('本次会话没有通过文件工具改动文件。');
+  await expect(page.locator('.changes-panel')).toContainText('它对文件的副作用不在此清单内。');
+  await expect(page.locator('.changes-panel')).toContainText('数据来源：write/edit/apply_patch 工具事件');
 });

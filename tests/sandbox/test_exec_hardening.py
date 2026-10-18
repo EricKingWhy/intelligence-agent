@@ -1541,14 +1541,19 @@ def test_reclaim_process_group_suppresses_permission_error(tmp_path, monkeypatch
     "Job Object KILL_ON_JOB_CLOSE 已兜底整树终止",
 )
 def test_normal_exit_reclaims_background_orphans_and_returns_promptly(tmp_path):
-    """有界探针：`sleep 30 & echo done` 正常退出后无残留孤儿、exec 及时返回。
+    """有界探针：`sleep 30.1311 & echo done` 正常退出后无残留孤儿、exec 及时返回。
 
     修复前：shell 退出后 sleep 30 被 init 收养永久泄漏（xval H-08），并攥住
     管道写端让 exec 晚 ~2×join(5)（≈10s，SB-03）才返回。修复后 killpg 整组
     回收 → reader 立刻 EOF。绝不用 fork 炸弹做探针（audit 约束）。
+
+    探针 token 用 30.1311 而非裸 30：pgrep -f 是全宿主匹配，xdist 并行下
+    其他 worker 的 exec-cancellation 探针合法持有 `sleep 30` ~1s，裸串会被
+    误捕成假红（2026-10-17 沙箱全量两次同签名复现 + 受控实验实锤）；
+    唯一 token 只匹配本测试自己的后台子进程，泄漏检测语义不变。
     """
     sandbox = LocalSubprocessSandbox(tmp_path)
-    result = sandbox.exec("sleep 30 & echo done", timeout=15)
+    result = sandbox.exec("sleep 30.1311 & echo done", timeout=15)
 
     assert result.exit_code == 0, result.stderr
     assert "done" in result.stdout
@@ -1556,7 +1561,7 @@ def test_normal_exit_reclaims_background_orphans_and_returns_promptly(tmp_path):
         f"exec 返回延迟 {result.duration_ms}ms——管道写端被孤儿攥住（SB-03 回归）"
     )
     probe = subprocess.run(
-        ["pgrep", "-f", "sleep 30"], capture_output=True, text=True, check=False
+        ["pgrep", "-f", r"sleep 30\.1311"], capture_output=True, text=True, check=False
     )
     assert probe.returncode == 1 and not probe.stdout.strip(), (
         f"正常退出后仍有残留孤儿：{probe.stdout}"
