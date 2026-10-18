@@ -1,0 +1,1 @@
+2026-10-18	#1296 Correctness/Spec follow-up: PASS; P0/P1/P2/P3/P4=0; confirmed cleanup guard covers ticker and Watchtower startup failures, and regression exercises lifespan failure; see docs/phase_status/2026-10.md#1296	b04545a2e52c0a59e71e843b7f504704a2d422ee..ec05e73395a39491c9cccdc74e9b33108be8905d

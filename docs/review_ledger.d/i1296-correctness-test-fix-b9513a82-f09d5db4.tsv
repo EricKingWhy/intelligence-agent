@@ -1,1 +1,1 @@
-2026-10-18	#1296 Correctness/Spec follow-up: PASS; P0/P1/P2/P3/P4=0; verified Docker cleanup uses production client settings and surfaces cleanup errors; Windows skips POSIX-only socket race case	b9513a82ca459d038b6eefc83c1186458dc6cecb..f09d5db4aab023116b15f83687332b8e76db8773
+2026-10-18	#1296 Correctness/Spec follow-up: PASS; P0/P1/P2/P3/P4=0; verified Docker cleanup uses production client settings and surfaces cleanup errors; Windows skips POSIX-only socket race case	d9236af0a48c9a76aab2da56c3ddf7e177c3fd12..e9ace83b9f67be0c1208545d0538a38a92ab9662
