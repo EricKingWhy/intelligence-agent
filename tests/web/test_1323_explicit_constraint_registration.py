@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi.testclient import TestClient
@@ -120,7 +121,14 @@ def test_explicit_session_rule_registers_five_of_five(tmp_path, monkeypatch) -> 
             },
         )
         assert created.status_code == 200, created.text
-        new_session = created.json()["session_id"]
+        frames = [
+            json.loads(line.split(":", 1)[1].strip())
+            for line in created.text.splitlines()
+            if line.startswith("data:")
+        ]
+        new_session = next(
+            frame["session_id"] for frame in frames if frame.get("session_id")
+        )
         completed = 0
         completed += 1
         _wait_for_run(store, new_session, completed)
