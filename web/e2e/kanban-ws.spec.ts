@@ -197,6 +197,13 @@ test.describe('#1305 看板 WS 推送', () => {
     await expect(cardsIn(page, 'executing')).toHaveCount(1);
     await expect.poll(() => listGets - listGetsBeforeBoard).toBeGreaterThan(0);
 
+    // 降级**必须说出来**（#1305 审查 P2-2(S)：`degraded` 曾是死状态，注释称"手动
+    // 刷新按钮据此出现"而按钮其实无条件渲染 ⇒ 用户面对一个"看起来正常但永不刷新"
+    // 的板）。这条断言是那个状态的 DOM 判据：不渲染提示时这里会红。
+    await expect(
+      page.getByText('实时推送不可用，看板已降级为手动刷新'),
+    ).toBeVisible();
+
     // 手动刷新按钮可用（降级路径的出口）。
     const before = listGets;
     await page.getByLabel('刷新看板').click();
