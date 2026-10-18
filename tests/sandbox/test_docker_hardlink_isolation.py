@@ -50,22 +50,28 @@ def _clean_deterministic_volume():
     """
 
     def _clean() -> None:
-        try:
-            import docker
+        import docker
 
-            client = docker.from_env()
+        # Match production's client construction. The default context loader
+        # decodes Docker Desktop metadata using the Windows locale encoding;
+        # on Chinese Windows this can fail before stale test resources are
+        # removed, and the old volume then contaminates the snapshot test.
+        client = docker.from_env(use_context=False)
+        try:
             try:
                 client.containers.get(f"agent-harness-{SESSION_ID}").remove(
                     force=True
                 )
-            except Exception:  # noqa: BLE001, S110 — 最佳努力清理
+            except docker.errors.NotFound:
                 pass
             try:
-                client.volumes.get(f"agent-harness-{SESSION_ID}").remove(force=True)
-            except Exception:  # noqa: BLE001, S110 — 最佳努力清理
+                client.volumes.get(f"agent-harness-{SESSION_ID}").remove(
+                    force=True
+                )
+            except docker.errors.NotFound:
                 pass
-        except Exception:  # noqa: BLE001, S110 — 无 Engine 时静默跳过
-            pass
+        finally:
+            client.close()
 
     _clean()
     yield

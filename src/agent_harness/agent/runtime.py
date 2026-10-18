@@ -1073,7 +1073,7 @@ class _TerminalArms:
 
     def record_request_failed(
         self, role: str, request_id: str, *, step_id: int,
-        duration_ms: int | None = None,
+        duration_ms: int | None = None, http_status: int | None = None,
     ) -> SessionEvent:
         """Persist a known failed attempt before fallback can start."""
         data: dict[str, Any] = {
@@ -1082,6 +1082,8 @@ class _TerminalArms:
         }
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
+        if http_status is not None:
+            data["http_status"] = http_status
         event = self.session.append(
             MODEL_REQUEST,
             data,
@@ -1715,6 +1717,26 @@ class AgentRuntime:
             arms.step_base = step_base
             if user_input is not None:
                 message_data = {"content": user_input}
+                idempotency_key = (
+                    user_input_metadata.get("idempotency_key")
+                    if user_input_metadata is not None else None
+                )
+                existing_idempotent_messages = []
+                if idempotency_key is not None:
+                    if not isinstance(idempotency_key, str) or not idempotency_key:
+                        raise ValueError("user input idempotency_key must be non-empty text")
+                    existing_idempotent_messages = [
+                        event for event in session.events
+                        if event.type == USER_MESSAGE
+                        and event.data.get("idempotency_key") == idempotency_key
+                    ]
+                    if len(existing_idempotent_messages) > 1:
+                        raise ValueError("user input idempotency_key is already duplicated")
+                    if existing_idempotent_messages:
+                        if existing_idempotent_messages[0].data.get("content") != user_input:
+                            raise ValueError("user input idempotency_key content mismatch")
+                    else:
+                        message_data["idempotency_key"] = idempotency_key
                 message_data.update(
                     {
                         key: user_input_metadata[key]
@@ -1730,8 +1752,11 @@ class AgentRuntime:
                         and key in user_input_metadata
                     }
                 )
-                user_event = session.append(USER_MESSAGE, message_data)
-                yield to_agent_event(user_event)
+                if existing_idempotent_messages:
+                    user_event = existing_idempotent_messages[0]
+                else:
+                    user_event = session.append(USER_MESSAGE, message_data)
+                    yield to_agent_event(user_event)
                 # #1323：勾选「作为可复用规则」是用户的确定性手势——user/message
                 # 落盘后立即机械登记，不依赖模型当次是否调用 register_constraint。
                 # 判据把 project/global 排除在外：那两档由服务层写成功后走独立规则层
@@ -1740,7 +1765,7 @@ class AgentRuntime:
                 # #1085：委派子会话不得借机械路径获得有效入口（与
                 # register_constraint 的 SCOPE_NOT_ALLOWED 同一条边界）。
                 if (
-                    is_session_explicit_rule(message_data)
+                    is_session_explicit_rule(user_event.data)
                     and not session_is_delegated_child(session.events)
                 ):
                     register_explicit_constraint(
@@ -2062,13 +2087,16 @@ class AgentRuntime:
 
                 def record_request_failed(
                     role: str, request_id: str,
-                    duration_ms: int | None = None, step: int = steps + 1,
+                    duration_ms: int | None = None,
+                    http_status: int | None = None,
+                    step: int = steps + 1,
                 ) -> None:
-                    # 第三参 duration_ms 由 coordinator 回调按位传入（#520）：
-                    # 失败事件与 drain 路径共用同一格测得的耗时。
+                    # 失败事实、状态码与耗时由 coordinator 同格传入，在线消费与
+                    # drain/recovery 看到同一条 model/request。
                     arms.record_request_failed(
                         role, request_id, step_id=arms.envelope_step(step),
                         duration_ms=duration_ms,
+                        http_status=http_status,
                     )
 
                 if stream:
@@ -2946,6 +2974,7 @@ class AgentRuntime:
                 cost=cost if produced_response else None,
                 model=model if produced_response else None,
                 duration_ms=attempt.duration_ms,
+                http_status=attempt.http_status,
             ))
         return events
 
@@ -2954,6 +2983,7 @@ class AgentRuntime:
         run_id: str | None, step: int, usage: dict[str, int] | None = None,
         cost: Decimal | None = None, model: str | None = None,
         request_id: str | None = None, duration_ms: int | None = None,
+        http_status: int | None = None,
     ) -> SessionEvent:
         """落一条 `model/request`（`model_requests` 的唯一计数点，`02 §5.1`）。
 
@@ -2974,6 +3004,8 @@ class AgentRuntime:
             data["cost_usd"] = format(cost, "f")
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
+        if http_status is not None:
+            data["http_status"] = http_status
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
 
     async def _user_input_request_context_for_execution(

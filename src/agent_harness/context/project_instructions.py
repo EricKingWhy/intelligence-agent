@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -30,8 +30,8 @@ _PROJECT_INSTRUCTIONS_TRUNCATION_NOTE = (
 
 @dataclass(frozen=True)
 class ProjectInstructionSource:
-    path: Path
-    directory: Path
+    path: PurePath
+    directory: PurePath
     content: str
     original_bytes: int
     included_bytes: int
@@ -40,12 +40,12 @@ class ProjectInstructionSource:
 
 @dataclass(frozen=True)
 class ProjectInstructionsSnapshot:
-    project_root: Path
-    session_cwd: Path
+    project_root: PurePath
+    session_cwd: PurePath
     sources: tuple[ProjectInstructionSource, ...]
-    searched_directories: tuple[Path, ...]
-    unreadable_sources: tuple[tuple[Path, str], ...]
-    omitted_source_paths: tuple[Path, ...]
+    searched_directories: tuple[PurePath, ...]
+    unreadable_sources: tuple[tuple[PurePath, str], ...]
+    omitted_source_paths: tuple[PurePath, ...]
     total_included_bytes: int
     total_prompt_bytes: int
 
@@ -62,7 +62,7 @@ class ProjectInstructionsSnapshot:
         return "missing"
 
     @property
-    def source_paths(self) -> tuple[Path, ...]:
+    def source_paths(self) -> tuple[PurePath, ...]:
         return tuple(source.path for source in self.sources)
 
     def as_status(self) -> dict[str, object]:
@@ -134,8 +134,8 @@ def empty_project_instruction_status(status: str) -> dict[str, object]:
 
 @dataclass
 class _SessionInstructions:
-    cwd: Path
-    project_root: Path
+    cwd: PurePath
+    project_root: PurePath
     snapshot: ProjectInstructionsSnapshot
 
 
@@ -182,7 +182,7 @@ class ProjectInstructionStore:
     def load_for_sandbox_session(
         self, session_id: str, sandbox: Sandbox,
     ) -> ProjectInstructionsSnapshot:
-        root = Path(sandbox.workspace_root)
+        root = sandbox.workspace_root
         with self._lock:
             cached = self._sessions.get(session_id)
             if cached is not None:
@@ -250,7 +250,7 @@ class ProjectInstructionStore:
     def reload_for_sandbox_session(
         self, session_id: str, sandbox: Sandbox,
     ) -> ProjectInstructionsSnapshot:
-        root = Path(sandbox.workspace_root)
+        root = sandbox.workspace_root
         with self._lock:
             cached = self._sessions.get(session_id)
             directories = (root,)
@@ -331,7 +331,7 @@ class ProjectInstructionStore:
         sandbox: Sandbox,
         target_path: str | Path,
     ) -> ProjectInstructionsSnapshot:
-        root = Path(sandbox.workspace_root)
+        root = sandbox.workspace_root
         relative = sandbox.resolve_within_workspace(str(target_path)).relative_to(root)
         kind = sandbox.path_kind(relative.as_posix())
         target_directory = relative if kind == "directory" else relative.parent
@@ -393,9 +393,9 @@ class ProjectInstructionStore:
     def _read_directories(
         self,
         *,
-        project_root: Path,
-        session_cwd: Path,
-        directories: tuple[Path, ...],
+        project_root: PurePath,
+        session_cwd: PurePath,
+        directories: tuple[PurePath, ...],
         existing: ProjectInstructionsSnapshot | None = None,
         sandbox: Sandbox | None = None,
     ) -> ProjectInstructionsSnapshot:
@@ -533,12 +533,12 @@ class ProjectInstructionStore:
     def _read_sandbox_source(
         self,
         sandbox: Sandbox,
-        path: Path,
-        directory: Path,
+        path: PurePath,
+        directory: PurePath,
         *,
         remaining_bytes: int,
     ) -> tuple[ProjectInstructionSource | None, str | None]:
-        root = Path(sandbox.workspace_root)
+        root = sandbox.workspace_root
         relative_path = path.relative_to(root).as_posix()
         try:
             kind = sandbox.path_kind(relative_path)
@@ -577,8 +577,8 @@ class ProjectInstructionStore:
 
     def _source_from_bytes(
         self,
-        path: Path,
-        directory: Path,
+        path: PurePath,
+        directory: PurePath,
         raw: bytes,
         *,
         original_bytes: int,

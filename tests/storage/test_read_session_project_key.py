@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Self
@@ -42,10 +43,25 @@ def test_reads_project_key_for_normal_path(tmp_path: Path) -> None:
     assert read_session_project_key(db, "s1") == "/repo/x"
 
 
-def test_reads_project_key_when_path_contains_uri_specials(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "dirname",
+    [
+        "a%b#d",
+        pytest.param(
+            "a?b%c#d",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Win32 filenames cannot contain '?'"
+            ),
+        ),
+    ],
+)
+def test_reads_project_key_when_path_contains_uri_specials(
+    tmp_path: Path, dirname: str
+) -> None:
     # `?` / `%` / `#` 裸拼进 file: URI 会被解析吃掉 → mode=ro 失效 → OperationalError
-    # → 静默 None → 供给器回落到 live cwd，重新制造面板/注入分组漂移（F1）。
-    db = _make_db(tmp_path / "a?b%c#d" / "harness.db")
+    # → 静默 None → 供给器回落到 live cwd，重新制造面板/注入分组漂移（F1）。Windows
+    # 不能创建含 `?` 的文件名；`%`/`#` 在所有平台照常验证。
+    db = _make_db(tmp_path / dirname / "harness.db")
     assert read_session_project_key(db, "s1") == "/repo/x"
 
 

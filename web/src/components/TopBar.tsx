@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, Columns3, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
+import { Activity, Brain, Columns3, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -39,6 +39,8 @@ interface Props {
   /** 打开 Agent 看板浮层（#1304）：会话四态投影。可选——未提供时不渲染入口
    *  （同 `onOpenRecoveryList` 的先例：既有测试夹具零迁移）。 */
   onOpenKanban?: () => void;
+  /** #1296：打开自动值班独立面板。可选，保持既有 TopBar 测试夹具兼容。 */
+  onOpenWatchtower?: () => void;
   /** #200：会话 id（context-usage 看板的数据源）；null = 无会话（按钮不渲染）。 */
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
@@ -56,7 +58,7 @@ interface Props {
   rosterSlot?: ReactNode;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -281,6 +283,16 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             title="Agent 看板——会话四态投影"
           >
             <Columns3 size={16} />
+          </button>
+        )}
+        {onOpenWatchtower && (
+          <button
+            className="icon-btn"
+            onClick={onOpenWatchtower}
+            aria-label="自动值班"
+            title="自动值班——安排一次延时执行"
+          >
+            <Timer size={16} />
           </button>
         )}
         <button

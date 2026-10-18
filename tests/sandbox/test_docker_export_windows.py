@@ -138,19 +138,21 @@ def test_export_failure_removes_partial_readonly_files_and_preserves_existing_da
         destination.mkdir()
         (destination / "user-data.txt").write_text("keep", encoding="utf-8")
 
-    real_move = shutil.move
+    real_copy = shutil.copy2
+    real_cleanup = docker_module._remove_export_path
 
-    def fail_after_first_move(source: str, target: str) -> str:
+    def fail_after_first_copy(source: str, target: str, **kwargs: object) -> str:
         if Path(source).name == "readonly.txt":
             os.chmod(source, stat.S_IREAD)
             assert Path(source).stat().st_mode & stat.S_IWRITE == 0
-        result = real_move(source, target)
+        result = real_copy(source, target, **kwargs)
         if Path(target).name == "readonly.txt":
             assert Path(target).stat().st_mode & stat.S_IWRITE == 0
+            real_cleanup(Path(source))
             raise PermissionError("simulated export interruption")
         return result
 
-    monkeypatch.setattr(docker_module.shutil, "move", fail_after_first_move)
+    monkeypatch.setattr(docker_module.shutil, "copy2", fail_after_first_copy)
 
     with pytest.raises(PermissionError, match="simulated export interruption"):
         sandbox.export_to_host(destination)
@@ -174,19 +176,20 @@ def test_export_surfaces_cleanup_failure(
         _archive([("readonly.txt", b"partial", 0o444)]),
     )
     destination = tmp_path / "export"
-    real_move = shutil.move
+    real_copy = shutil.copy2
     real_cleanup = docker_module._remove_export_path
 
-    def readonly_then_fail(source: str, target: str) -> None:
+    def readonly_then_fail(source: str, target: str, **kwargs: object) -> str:
         os.chmod(source, stat.S_IREAD)
-        real_move(source, target)
+        real_copy(source, target, **kwargs)
+        real_cleanup(Path(source))
         raise PermissionError("simulated export interruption")
 
     def fail_cleanup(_path: Path) -> None:
         raise PermissionError("simulated cleanup failure")
 
     with monkeypatch.context() as scoped_patch:
-        scoped_patch.setattr(docker_module.shutil, "move", readonly_then_fail)
+        scoped_patch.setattr(docker_module.shutil, "copy2", readonly_then_fail)
         scoped_patch.setattr(docker_module, "_remove_export_path", fail_cleanup)
 
         with pytest.raises(PermissionError, match="simulated cleanup failure"):
@@ -201,6 +204,9 @@ def test_export_to_host_copies_real_docker_workspace(
     docker_sandbox: DockerSandbox, tmp_path: Path
 ) -> None:
     docker_sandbox.write_text("export-check/note.txt", "from Docker")
+    docker_sandbox.write_text("readonly.txt", "read only from Docker")
+    chmod_result = docker_sandbox.exec("chmod 444 /workspace/readonly.txt")
+    assert chmod_result.exit_code == 0, chmod_result.stderr
     destination = tmp_path / f"docker-export-{uuid4().hex}"
 
     docker_sandbox.export_to_host(destination)
@@ -208,3 +214,8 @@ def test_export_to_host_copies_real_docker_workspace(
     assert (destination / "export-check" / "note.txt").read_text(
         encoding="utf-8"
     ) == "from Docker"
+    readonly = destination / "readonly.txt"
+    assert readonly.read_text(encoding="utf-8") == "read only from Docker"
+    # Windows tar extraction does not map Unix read-only mode onto the host file.
+    if os.name != "nt":
+        assert readonly.stat().st_mode & stat.S_IWRITE == 0
