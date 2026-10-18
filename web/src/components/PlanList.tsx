@@ -177,6 +177,18 @@ export function PlanList({
     [],
   );
 
+  // #1325 S1：run 进入终态（completed / failed / cancelled）的**边沿**自动收起清单。
+  // 只在边沿触发一次——终态期间用户手动重新展开后不再被反复打断（票面 AC1：
+  // 「一次性收起」，不是终态期间持续强制收起）。cancelled 在投影里落 run_status
+  // 'failed'，已由 terminal 覆盖。
+  const wasTerminalRef = useRef(false);
+  useEffect(() => {
+    const terminal =
+      runStatus === 'completed' || runStatus === 'failed' || runInterrupted;
+    if (terminal && !wasTerminalRef.current) setPanelExpanded(false);
+    wasTerminalRef.current = terminal;
+  }, [runStatus, runInterrupted]);
+
   useEffect(() => {
     if (!panelExpanded) return;
     const closeOnEscape = (event: KeyboardEvent) => {
