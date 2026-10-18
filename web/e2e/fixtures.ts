@@ -634,6 +634,9 @@ export function sessionRow(
     // 所以 mock 也给一个字面量默认值——前端类型把它声明成可选就会让"漏读"变成
     // `undefined`（静默假），这条默认值让 mock 与真后端的形状一致。
     archived: false,
+    // #1308：真后端恒发两字段（写入侧截断后的最后一条 user/agent 消息）。
+    last_user_message: null,
+    last_agent_message: null,
     ...over,
   };
 }

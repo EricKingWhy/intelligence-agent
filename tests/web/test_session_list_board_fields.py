@@ -26,7 +26,12 @@ from pydantic import ValidationError
 from agent_harness.config import Settings
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session import board_projection as bp
-from agent_harness.session.event import RUN_STARTED, USER_INPUT_REQUESTED
+from agent_harness.session.event import (
+    MODEL_COMPLETED,
+    RUN_STARTED,
+    USER_INPUT_REQUESTED,
+    USER_MESSAGE,
+)
 from agent_harness.session.task import apply_task_definition
 from agent_harness.web.app import SessionSummary, create_app
 
@@ -92,6 +97,33 @@ def test_rows_carry_board_fields_from_the_projection(tmp_path: Path) -> None:
     assert row["attention_summary"] == "待回答：选 A 还是 B"
 
 
+def test_rows_carry_last_messages_from_the_projection(tmp_path: Path) -> None:
+    """#1308 AC-19：行上的最后一条 user / agent 消息逐字段等于投影真值。"""
+    app = _app(tmp_path)
+    store = app.state.agent.store
+    session = _start_session(store, cwd=tmp_path)
+    session.append(USER_MESSAGE, {"content": "改一下标题"})
+    session.append(MODEL_COMPLETED, {"content": "已改好"})
+
+    rows = {row["session_id"]: row for row in _rows(TestClient(app))}
+    row = rows[session.session_id]
+    assert row["last_user_message"] == "改一下标题"
+    assert row["last_agent_message"] == "已改好"
+
+
+def test_last_messages_are_truncated_to_128_chars_in_the_row(tmp_path: Path) -> None:
+    """#1308 AC-19 ④：行上两字段是写入侧截断后的值。"""
+    app = _app(tmp_path)
+    store = app.state.agent.store
+    session = _start_session(store, cwd=tmp_path)
+    session.append(USER_MESSAGE, {"content": "u" * 200})
+    session.append(MODEL_COMPLETED, {"content": "a" * 200})
+
+    row = {row["session_id"]: row for row in _rows(TestClient(app))}[session.session_id]
+    assert row["last_user_message"] == "u" * 128
+    assert row["last_agent_message"] == "a" * 128
+
+
 def test_undefined_task_row_is_backlog_with_null_board_fields(tmp_path: Path) -> None:
     """从未 `task/defined`：`product_state == ""`，其余三字段为 null（不伪造）。"""
     app = _app(tmp_path)
@@ -104,6 +136,27 @@ def test_undefined_task_row_is_backlog_with_null_board_fields(tmp_path: Path) ->
     assert row["product_state_changed_at"] is None
     assert row["attention_kind"] is None
     assert row["attention_summary"] is None
+    assert row["last_user_message"] is None
+    assert row["last_agent_message"] is None
+
+
+def test_response_model_requires_the_last_message_fields() -> None:
+    """#1308：两字段在响应模型里同样**必填**（漏映射不得静默渲染成"没有消息"）。"""
+    with pytest.raises(ValidationError):
+        SessionSummary(
+            session_id="s",
+            event_count=1,
+            first_event_time=None,
+            last_event_time=None,
+            first_user_message=None,
+            workspace=None,
+            archived=False,
+            corrupted=False,
+            product_state="",
+            product_state_changed_at=None,
+            attention_kind=None,
+            attention_summary=None,
+        )
 
 
 def test_response_model_requires_the_board_fields() -> None:

@@ -1545,6 +1545,8 @@ class SessionService:
                 "product_state_changed_at": projection.product_state_changed_at,
                 "attention_kind": projection.attention_kind,
                 "attention_summary": projection.attention_summary,
+                "last_user_message": projection.last_user_message,
+                "last_agent_message": projection.last_agent_message,
             }
             ref = fixed_ref if workspace_id is not None else refs.get(sid)
             if ref is not None:

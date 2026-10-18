@@ -30,6 +30,8 @@ function boardRow(
     product_state_changed_at: null,
     attention_kind: null,
     attention_summary: null,
+    last_user_message: null,
+    last_agent_message: null,
     ...over,
   });
 }
@@ -152,6 +154,8 @@ test.describe('#1304 看板：注意力覆盖层（C2）', () => {
         product_state_changed_at: '2026-10-17T01:00:00Z',
         attention_kind: 'input',
         attention_summary: '待回答：超时闸口接线方案二选一',
+        last_user_message: null,
+        last_agent_message: null,
       }),
       boardRow('s-plain', 'executing', {
         product_state_changed_at: '2026-10-17T05:00:00Z',
@@ -192,6 +196,8 @@ test.describe('#1304 看板：注意力覆盖层（C2）', () => {
         boardRow('s-approval', 'executing', {
           attention_kind: 'approval',
           attention_summary: '待批准：Bash (execute)',
+          last_user_message: null,
+          last_agent_message: null,
         }),
       ],
     });
@@ -211,6 +217,8 @@ test.describe('#1304 看板：注意力覆盖层（C2）', () => {
         boardRow('s-both', 'executing', {
           attention_kind: 'approval',
           attention_summary: '待批准：Bash (execute)',
+          last_user_message: null,
+          last_agent_message: null,
         }),
       ],
     });
@@ -570,5 +578,50 @@ test.describe('#1306 看板未读 / ack（AC-7）', () => {
     // ack 值本身没被这次推送改动（未读是"ack 早于状态开始"，不是丢了 ack）。
     const ackAfter = await page.evaluate(() => localStorage.getItem('ahi.kanban.ack.v1'));
     expect(JSON.parse(ackAfter ?? '{}')['s-unread']).toBe(ack['s-unread']);
+  });
+});
+
+test.describe('#1308 卡片正文：最后一条 user / agent 消息', () => {
+  test('正文两行（You + clamp-1 / agent + clamp-2），缺一不渲染，空会话回到提示', async ({
+    page,
+  }) => {
+    await routeApi(page, {
+      sessions: [
+        boardRow('s-msgs', 'executing', {
+          last_user_message: '改一下标题',
+          last_agent_message: '已改好',
+        }),
+        boardRow('s-user-only', 'executing', {
+          last_user_message: '只问了一句',
+        }),
+        boardRow('s-none', '', { first_user_message: null }),
+      ],
+    });
+    await openBoard(page);
+
+    const card = page.locator('.kanban-card[data-session-id="s-msgs"]');
+    const user = card.locator('.kanban-card-msg-user');
+    const agent = card.locator('.kanban-card-msg-agent');
+
+    // 形状抄 Orca `:255-268`：`You` 前缀 + 单行 clamp；agent 名 + 两行 clamp。
+    await expect(user).toHaveText('You 改一下标题');
+    await expect(agent).toHaveText('agent 已改好');
+    await expect(user).toHaveCSS('overflow', 'hidden');
+    await expect(user).toHaveCSS('-webkit-line-clamp', '1');
+    await expect(agent).toHaveCSS('-webkit-line-clamp', '2');
+    // 两行都真的渲染出来（不是被裁成 0 高）。
+    await expect(user).toBeVisible();
+    await expect(agent).toBeVisible();
+
+    // 只有 user：agent 行不存在（不渲染空行）。
+    const userOnly = page.locator('.kanban-card[data-session-id="s-user-only"]');
+    await expect(userOnly.locator('.kanban-card-msg-user')).toHaveText('You 只问了一句');
+    await expect(userOnly.locator('.kanban-card-msg-agent')).toHaveCount(0);
+
+    // 两字段都空：正文区不存在，原有空会话提示照旧。
+    const empty = page.locator('.kanban-card[data-session-id="s-none"]');
+    await expect(empty.locator('.kanban-card-msg-user')).toHaveCount(0);
+    await expect(empty.locator('.kanban-card-msg-agent')).toHaveCount(0);
+    await expect(empty.locator('.kanban-card-hint')).toContainText('空会话');
   });
 });

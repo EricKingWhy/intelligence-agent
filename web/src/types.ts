@@ -184,6 +184,11 @@ export interface SessionSummary {
   attention_kind: 'input' | 'approval' | null;
   /** #1303：注意力横幅文案，与 `attention_kind` 同源（如「待回答：…」）。 */
   attention_summary: string | null;
+  /** #1308：最后一条用户消息 / 最后一条 agent 文本（后端写入侧截断 128 字符）。
+   *  从未出现为 null（不伪造）。**非可选**——与看板四字段同款理由：漏读会变成
+   *  `undefined`，卡片正文静默渲染成「没有消息」。 */
+  last_user_message: string | null;
+  last_agent_message: string | null;
 }
 
 /** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。

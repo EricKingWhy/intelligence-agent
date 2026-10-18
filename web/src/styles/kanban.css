@@ -199,6 +199,44 @@
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
+/* #1308 卡片正文：最后一条 user / agent 消息。
+   形状抄 Orca `AgentKanbanCard.tsx:255-268`（`line-clamp-1` / `line-clamp-2`）；
+   本仓无 Tailwind，clamp 用与 `.kanban-card-attention-text` 相同的纯 CSS 形状。
+   两行都用 `--text-xs`（12px）：Orca 的 user 行是 11px，但本仓字号地板是 12px
+   （PRD D3 / UI-02），层级改用颜色区分（user 次级 / agent 主色）。 */
+.kanban-card-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kanban-card-msg-prefix {
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.kanban-card-msg-user {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+.kanban-card-msg-agent {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+.kanban-card-msg-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kanban-card-msg-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .kanban-card-attention {
   display: flex;
   align-items: flex-start;

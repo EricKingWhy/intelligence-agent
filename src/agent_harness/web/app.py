@@ -1043,6 +1043,10 @@ class SessionSummary(BaseModel):
     attention_kind: str | None
     # 注意力横幅文案，与 `attention_kind` 同源。
     attention_summary: str | None
+    # #1308：最后一条 user / agent 消息（写入侧截断 128 字符）。与上面四字段同款
+    # **刻意不给默认值**：漏映射会让卡片正文静默渲染成「没有消息」，那是假事实。
+    last_user_message: str | None
+    last_agent_message: str | None
 
 
 class SessionArchived(BaseModel):
@@ -1784,6 +1788,8 @@ def session_rows(
             product_state_changed_at=s.product_state_changed_at,
             attention_kind=s.attention_kind,
             attention_summary=s.attention_summary,
+            last_user_message=s.last_user_message,
+            last_agent_message=s.last_agent_message,
         )
         for s in summaries
     ]
