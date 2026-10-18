@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -174,6 +175,7 @@ async def test_answer_event_disarms_the_matching_request():
     clock = FakeClock()
     driver, fired = _driver(clock)
     driver.note_event("s1", _request_event("req-1"))
+    assert driver.is_armed("s1") is True  # 装配前置：否则下面的撤销断言无鉴别力
 
     driver.note_event("s1", SessionEvent(
         type=USER_MESSAGE, run_id="r1", seq=2,
@@ -191,6 +193,7 @@ async def test_terminal_run_event_disarms_the_timer():
     clock = FakeClock()
     driver, fired = _driver(clock)
     driver.note_event("s1", _request_event("req-1"))
+    assert driver.is_armed("s1") is True  # 装配前置：否则下面的撤销断言无鉴别力
 
     driver.note_event("s1", SessionEvent(
         type=RUN_COMPLETED, run_id="r1", seq=2, data={},
@@ -301,6 +304,22 @@ async def test_legacy_request_without_snapshot_uses_the_driver_config():
     clock.advance(60)
     assert await driver.check_expiries() == ["s1"]
     assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_expiry_log_reports_the_payload_timeout(caplog):
+    """到点日志必须写该请求的生效档，而不是进程启动配置（AC1 取证用）。"""
+    clock = FakeClock()
+    driver, _fired = _driver(clock, timeout=600.0)
+    driver.note_session_state("s1", _events(timeout_seconds=60))
+
+    with caplog.at_level(
+        logging.INFO, logger="agent_harness.web.ask_user_timeout_driver",
+    ):
+        clock.advance(60)
+        assert await driver.check_expiries() == ["s1"]
+
+    assert "档位=60s" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -86,6 +86,8 @@ class AskUserTimeoutDriver:
     （启动时按事件流重建）。两者都幂等：同一 request_id 重复装配保留已累计时长。
 
     单事件循环内使用（与 run fanout / ticker 同一 loop），不做跨线程同步。
+    注意 `Session.add_listener` 的契约允许任意线程回调；本模块依赖当前 append 实际
+    发生在 loop 内。若未来把 append 挪到线程，必须先给本模块加锁，不能沿用这条假设。
 
     #1284 P2-2：`timeout_seconds` 构造参数只是**旧事件兜底**；每个请求的计时档读
     `USER_INPUT_REQUESTED` 载荷快照（`timeout_minutes` 优先，缺失/非法回落
@@ -202,9 +204,11 @@ class AskUserTimeoutDriver:
         tracker = AskUserTimeoutTracker(
             effective_timeout, clock=self.clock, elapsed_seconds=elapsed_seconds,
         )
-        self._trackers[session_id] = tracker
+        # 先写元数据、最后写 trackers：`check_expiries` 以 trackers 为扫描入口，
+        # 若反向写入，ticker 可能读到「有 tracker、无 request_id」并误撤刚装的表。
         self._armed_request[session_id] = request_id
         self._armed_timeout[session_id] = effective_timeout
+        self._trackers[session_id] = tracker
 
     def disarm(self, session_id: str) -> None:
         self._trackers.pop(session_id, None)
@@ -245,6 +249,10 @@ class AskUserTimeoutDriver:
             if request_id is None:
                 self.disarm(session_id)
                 continue
+            # 日志读该请求的生效档（请求载荷快照），不是进程启动配置（#1284 P2-2）。
+            armed_timeout = self._armed_timeout.get(
+                session_id, int(self.timeout_seconds),
+            )
             try:
                 outcome = await self._on_expire(session_id, request_id)
             except Exception:  # 一次恢复失败不得打垮心跳 / 其余会话
@@ -258,7 +266,7 @@ class AskUserTimeoutDriver:
                 # 线索——否则排障时"为什么这个 run 自己跑了"只能靠事件流事后回溯。
                 logger.info(
                     "ask_user 超时到点，已发起恢复（session=%s, request=%s, 档位=%.0fs）",
-                    session_id, request_id, self.timeout_seconds,
+                    session_id, request_id, armed_timeout,
                 )
                 fired.append(session_id)
             # 收口/RETRY 仅在仍装配着**同一** request 时进行：`await on_expire` 期间

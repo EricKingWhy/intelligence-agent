@@ -2427,7 +2427,8 @@ def create_app(
                 )
             # #1320：按持久事件流重建 `ask_user` 超时计时器（durable timer 不因进程
             # 重启丢掉挂起提问）。与上面的队列重建同序：失败不阻塞启动——提问事实
-            # 仍在事件流里，下一次启动或订阅仍可重建。
+            # 仍在事件流里，下一次**启动**仍可重建。订阅路径自 #1320 起不再补读
+            # （`websocket.py` 已移除装配；恢复入口只有本函数与事件观察者）。
             try:
                 armed = await state.restore_ask_user_timeouts()
                 if armed:
