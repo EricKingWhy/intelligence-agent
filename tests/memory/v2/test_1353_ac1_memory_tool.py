@@ -7,6 +7,7 @@ Oracle：Hermes `tests/tools/test_memory_tool.py`（commit b324b1f7）的对应
 
 from __future__ import annotations
 
+import importlib
 import inspect
 
 import pytest
@@ -16,6 +17,7 @@ from tests.memory.v2._markdown_memory_1353 import (
     build_store,
     call,
     load,
+    method,
     path_of,
     read_entries,
 )
@@ -45,7 +47,7 @@ async def _remove(store, target: str, old_text: str, **kwargs):
 
 
 async def _batch(store, target: str, operations: list[dict]):
-    return await call(store.apply_batch, target, operations)
+    return await call(method(store, "apply_batch", "batch"), target, operations)
 
 
 async def test_add_writes_entry_to_markdown(store) -> None:
@@ -194,16 +196,78 @@ async def test_user_and_memory_targets_stay_separate(store) -> None:
     assert path_of(store, "user").name == "USER.md"
 
 
+_SCHEMA_MODULES = (
+    "agent_harness.memory.v2.markdown_store",
+    "agent_harness.memory.v2.memory_tool",
+    "agent_harness.memory.v2.tools",
+    "agent_harness.memory.markdown_store",
+    "agent_harness.tooling.memory_tool",
+)
+
+
+def _module_schema(module) -> dict | None:
+    """模块级 `MEMORY_SCHEMA`（照搬面）或 `memory` Tool 的 pydantic schema。"""
+    for attribute in ("MEMORY_SCHEMA", "MEMORY_TOOL_SCHEMA"):
+        value = getattr(module, attribute, None)
+        if isinstance(value, dict):
+            return value
+    for value in vars(module).values():
+        if isinstance(value, type) and getattr(value, "name", None) == "memory":
+            args = getattr(value, "args_schema", None)
+            if isinstance(args, type) and hasattr(args, "model_json_schema"):
+                return args.model_json_schema()
+            if isinstance(args, dict):
+                return args
+    return None
+
+
+def _memory_schema() -> tuple[str, dict]:
+    """在票面允许的落点里找 `memory` 工具的参数形状。
+
+    M1 要求"照搬 `MEMORY_SCHEMA` 的 description + 参数形状"，同时把 dispatch 换成
+    Owlet `Tool` + pydantic `args_schema`——所以 schema 既可能是模块级 dict，也可能是
+    Tool 类上的模型。两种都算满足；不在这几个落点就红，并列出找过的地方。
+    """
+    tried: list[str] = []
+    for name in _SCHEMA_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ModuleNotFoundError:
+            tried.append(f"{name}（模块不存在）")
+            continue
+        schema = _module_schema(module)
+        if schema is not None:
+            return name, schema
+        tried.append(f"{name}（无 MEMORY_SCHEMA / memory Tool）")
+    pytest.fail(
+        "#1353 AC1：找不到 `memory` 工具的参数形状；已检查：" + "; ".join(tried),
+        pytrace=False,
+    )
+
+
+def _enum_sets(node, found: list[frozenset]) -> list[frozenset]:
+    """递归收集 JSON Schema 里所有 `enum`（pydantic 会把它们放进 `$defs` / `allOf`）。"""
+    if isinstance(node, dict):
+        enum = node.get("enum")
+        if isinstance(enum, list):
+            found.append(frozenset(enum))
+        for value in node.values():
+            _enum_sets(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _enum_sets(value, found)
+    return found
+
+
 async def test_tool_schema_exposes_memory_action_and_target_enums(store) -> None:
     """M1：`memory` 工具的参数形状必须覆盖 add/replace/remove/batch × memory/user。"""
-    module = inspect.getmodule(type(store))
-    assert module is not None
-    schema = getattr(module, "MEMORY_SCHEMA", None) or getattr(module, "MEMORY_TOOL_SCHEMA", None)
-    assert schema is not None, (
-        "AC1：实现未暴露 MEMORY_SCHEMA（Hermes 照搬面要求参数形状可对账）"
+    _, schema = _memory_schema()
+    parameters = schema.get("parameters", schema)
+    enums = _enum_sets(parameters, [])
+
+    assert frozenset({"add", "replace", "remove", "batch"}) in enums, (
+        f"AC1：schema 里没有 action 的四个取值；实际 enum 集合：{enums}"
     )
-    params = schema.get("parameters", schema)
-    assert "allOf" not in params and "anyOf" not in params and "oneOf" not in params
-    properties = params["properties"]
-    assert set(properties["action"]["enum"]) == {"add", "replace", "remove", "batch"}
-    assert set(properties["target"]["enum"]) == {"memory", "user"}
+    assert frozenset({"memory", "user"}) in enums, (
+        f"AC1：schema 里没有 target 的两个取值；实际 enum 集合：{enums}"
+    )

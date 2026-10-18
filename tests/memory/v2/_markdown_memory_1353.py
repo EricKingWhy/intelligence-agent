@@ -151,6 +151,17 @@ async def call(method: Any, *args: Any, **kwargs: Any) -> Any:
     return result
 
 
+def method(store: Any, *names: str) -> Any:
+    """按候选名取一个方法：票面只固定行为，不固定 batch 入口叫哪个名字。"""
+    for name in names:
+        candidate = getattr(store, name, None)
+        if callable(candidate):
+            return candidate
+    pytest.fail(
+        f"#1353 存储未暴露下列任一方法: {', '.join(names)}", pytrace=False
+    )
+
+
 def load(store: Any) -> Any:
     """调用可选的 ``load_from_disk``（同步或 async 均可，返回 awaitable 时由调用方 await）。"""
     method = getattr(store, "load_from_disk", None)
