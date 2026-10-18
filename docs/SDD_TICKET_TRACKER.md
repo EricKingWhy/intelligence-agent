@@ -30,8 +30,8 @@
 - **方案依据（按协议 §1.3 核实，待回填 issue）**：agent-deck `[fork] docker="auto"`（= 跟随父后端）PORT DESIGN；Claude Code #77306（fork 继承父完整运行时配置）PORT DESIGN；Pi `/fork`（从更早用户消息派生）PORT DESIGN；本仓 create 已接受 `sandbox_backend`、resume 复用既有配置 REUSE。结论：继承父的**显式**选择，不新建配置面。
 
 **验证收尾中（2026-10-18，#1296）**：Issue [#1296](https://github.com/EricKingWhy/intelligence-agent/issues/1296) OPEN（`in-progress`、`10-15-UI-功能设计`）；分支 `codex/issue-1296-watchtower`，已验证代码 tip `f09d5db4aab023116b15f83687332b8e76db8773`。PR [#1326](https://github.com/EricKingWhy/intelligence-agent/pull/1326) OPEN；GitHub 当前 head `9cd224ca9d4eba6663c73a990f1d008a87e1564d`、mergeState DIRTY，本地更新待最终 Gate-0 后推送；未合并。
-- **审查**：Correctness/Spec `978e54b9..b9513a82` PASS（P0–P4=0）；Standards 同范围发现 P3 仅为本文件与 PHASE_STATUS 过期，已同步修正并待确认。Docker 测试改动 `b9513a82..f09d5db4` Correctness/Spec PASS，Standards 跟进待确认。明细见月档。
-- **验证**：`tests/sandbox` 240 passed / 32 skipped。完整后端 `tests/` 8647 passed / 66 skipped / 51 deselected；唯一失败为 review-coverage 台账测试，原因是本轮 5 个提交尚未入账，补账后须重跑该守卫。全量 Playwright E2E `pnpm test:e2e -- --workers=2`：812/812 passed（27.7 分钟）。Gate-0 / coverage 复核待完成。
+- **审查**：Correctness/Spec `978e54b9..b9513a82` PASS（P0–P4=0）；Standards 初审的 P3 状态记录问题已修正并跟进 PASS（P0–P4=0）；Docker 测试改动 `b9513a82..f09d5db4` 两轴均 PASS、P0–P4=0。明细见月档。
+- **验证**：`tests/sandbox` 240 passed / 32 skipped。完整后端 `tests/` 8647 passed / 66 skipped / 51 deselected；唯一失败为 review-coverage 台账测试（本轮提交尚未入账），补齐真实双轴审查记录后定向复验 1 passed，`scripts/check_review_coverage.py` exit 0。全量 Playwright E2E `pnpm test:e2e -- --workers=2`：812/812 passed（27.7 分钟）。Gate-0 待复核。
 - **残余**：补齐审查台账、通过 coverage 与 Gate-0 后推送 PR；由维护者负责集成。
 
 **已完成并集成（2026-10-17，#1184）**：Issue [#1184](https://github.com/EricKingWhy/intelligence-agent/issues/1184) CLOSED，保留 `10-15-UI优化`；PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) 已合入，merge commit `795fe5afda241c1dd441d5c8e985390fae65247c`。实现 `44a621df`、P2 修复 `8bd0c14a`，双轴修后复审 PASS；细节见月档 #1184。
