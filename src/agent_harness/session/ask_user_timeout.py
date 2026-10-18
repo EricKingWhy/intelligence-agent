@@ -1,23 +1,27 @@
-"""#1204：`ask_user` 提问的超时闸——只在有前端连接在场时计时。
+"""#1204/#1320：`ask_user` 提问的超时闸——服务端 durable 计时。
 
-口径（#1204 票面 §5 + 用户裁决）：超时到点后 run **自动继续**，并在上下文里注入一条
-系统消息"用户在 N 分钟内未回答，可能不在，请按你的判断继续"，**不替用户选择任何选项**
-（不写任何 `answer`）。计时器只在**至少一个前端连接存在**时启动 / 继续；无前端连接
-时不启动（抄 Claude Code）。
+口径（#1204 票面 §5 + 用户裁决 + #1320 D1A）：超时到点后 run **自动继续**，并在上下文
+里注入一条系统消息"用户在 N 分钟内未回答，可能不在，请按你的判断继续"，**不替用户选择
+任何选项**（不写任何 `answer`）。计时从装配起由**服务端**持续累计，**不依赖前端连接是否
+存在**——#1320 推翻 #1204 的"只在至少一个前端连接存在时计时"：真实 Web 前端在
+`run/paused` 上只走 HTTP 轮询、不建 WS 订阅（连接数不是在场证据），旧口径使超时闸
+对真实前端永久不触发。形状对齐 Temporal `Workflow.await(timeout, condition)` 的服务端
+durable timer（见 `web/ask_user_timeout_driver.py`）。
 
 本模块只承载**确定性计时**这一件事，挂钟可注入（测试不实等）；另含"待回答用户输入"
 的事件流扫描（`pending_input_request` / `latest_pending_input_request`，服务 409 闸门与
-超时守卫共用同一份）与超时恢复的出口结果 `ExpireOutcome`。谁在连接进出时调用
-`set_connected`、谁在 `expired()` 后触发恢复，是上层（web 层）的接线——这一层不 import
-web / session service，保持可单测（也是 web↔service 共用的低层家）。
+超时守卫共用同一份）与超时恢复的出口结果 `ExpireOutcome`。谁装配 / 撤销计时器、谁在
+`expired()` 后触发恢复，是上层（web 层）的接线——这一层不 import web / session service，
+保持可单测（也是 web↔service 共用的低层家）。
 
-⚠ **在线驱动为临时接缝（issue #1220，用户裁决 2A）**：#1204 起本模块只在测试里被实例化，
-生产装配**没有**连接进出 / 超时恢复的调用方。本票以 `web/ask_user_timeout_driver.py` 的
-`AskUserTimeoutDriver` 临时接线：在场信号取自 **WS 连接级订阅计数**（一个前端连接
-`subscribe(session_id)` = 在场）。**TODO（W-12 登记协议落地后迁移）**：产品客户端在场协议
-`agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，把在场信号
-迁到那道闸门（`enroll()` / `mark_absent()`），并**整体删除** `AskUserTimeoutDriver`
-及其对 WS 订阅计数的直接依赖——本接缝是临时的，不是长期形态。
+⚠ **在线驱动为临时接缝（issue #1220 / #1320）**：#1204 起本模块只在测试里被实例化，
+生产装配**没有**装配 / 推进的调用方。本票以 `web/ask_user_timeout_driver.py` 的
+`AskUserTimeoutDriver` 临时接线：装配来自服务端事件流（`user/input-requested` 落盘），
+到点推进来自组合根的常驻 ticker——**均不读连接数**（#1320 已把"连接数 ⇒ 是否计时"
+这层解耦）。**TODO（W-12 登记协议落地后迁移）**：产品客户端在场协议
+`agent/client_presence.py::ClientPresenceGate.enroll()`（W-22/#366）落地后，把超时推进
+迁到该闸门（`enroll()` / `mark_absent()`），并**整体删除** `AskUserTimeoutDriver`
+——本接缝是临时的，不是长期形态。
 
 触发条件是 **W-12 的登记协议（#356 中 DEFER 的部分）**，不是"W-12 落地"：#356/#366
 均已关单，但 `enroll()` 仍无生产调用方（选项 B 只做明确退出信号）。删除清单见
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -42,7 +47,7 @@ from agent_harness.session.event import (
 )
 
 #: 逻辑 run 的终态事件——一旦出现，最新 run 上就不该再有"待回答"。
-_TERMINAL_RUN_EVENTS = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
+TERMINAL_RUN_EVENTS = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
 
 #: 超时注入消息的正文模板（#1204 用户裁决逐字）。`minutes` 取请求载荷快照的
 #: 分钟数；旧载荷才按 `max(1, 配置秒数 // 60)` 换算（见下方两个读取函数）。
@@ -59,6 +64,23 @@ def ask_user_timeout_minutes(timeout_seconds: int) -> int:
 def ask_user_timeout_message_for_minutes(minutes: int) -> str:
     """把快照的分钟数渲染成注入消息正文（模板逐字不变）。"""
     return ASK_USER_TIMEOUT_MESSAGE_TEMPLATE.format(minutes=max(1, int(minutes)))
+
+
+def elapsed_seconds_since(timestamp: str) -> float:
+    """距事件时间戳（ISO-8601）的秒数；不可解析 / 未来时间 ⇒ 0。
+
+    #1320：进程重启后按持久事件流重建计时器时，用请求事件的落盘时间还原已累计
+    时长——否则"durable timer"会在每次重启时把倒计时清零，服务器停机期间早已到期
+    的提问还要再等满一个档位。挂钟回拨（时间戳在未来）按 0 处理，不产生负时长。
+    """
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return 0.0
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0.0, (datetime.now(UTC) - then).total_seconds())
+
 
 
 def _positive_int(value: object) -> int | None:
@@ -160,7 +182,7 @@ def latest_pending_input_request(
     if run_id is None:
         return None
     if any(
-        event.run_id == run_id and event.type in _TERMINAL_RUN_EVENTS
+        event.run_id == run_id and event.type in TERMINAL_RUN_EVENTS
         for event in events
     ):
         return None
@@ -179,43 +201,31 @@ def pending_ask_user_request_id(events: Iterable[SessionEvent]) -> str | None:
 
 
 class AskUserTimeoutTracker:
-    """一个 `ask_user` 暂停的倒计时：累计"有前端连接在场"的时长。
+    """一个 `ask_user` 暂停的倒计时：从装配起按挂钟累计。
 
-    语义：`set_connected(True)` 开始累计，`set_connected(False)` 冻结（已累计的不清零
-    ——重连后从断点继续，不重头计）；`expired()` 在累计时长 ≥ 阈值时为真。无前端连接
-    时**从不**累计，故永不 `expired()`。挂钟经 `clock` 注入，测试可直接推进。
+    语义（#1320 D1A）：装表即起表，计时持续前进；`expired()` 在累计时长 ≥ 阈值时
+    为真。计时**不**依赖前端连接——#1204 的"连接在场才计时"已被推翻（真实 Web 前端
+    在 `run/paused` 上只走 HTTP 轮询，连接数不是在场证据）。挂钟经 `clock` 注入，
+    测试可直接推进；重启重建可经 `elapsed_seconds` 从请求落盘时间接上已累计时长。
     """
 
-    __slots__ = ("_accumulated", "_clock", "_connected_since", "_timeout")
+    __slots__ = ("_armed_at", "_clock", "_timeout")
 
     def __init__(
-        self, timeout_seconds: float, *, clock: Callable[[], float] = time.monotonic,
+        self,
+        timeout_seconds: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        elapsed_seconds: float = 0.0,
     ) -> None:
         self._timeout = float(timeout_seconds)
         self._clock = clock
-        self._accumulated = 0.0
-        self._connected_since: float | None = None
-
-    def set_connected(self, connected: bool) -> None:
-        """前端连接存在性变化（幂等）。True 起表 / 继续；False 冻结。"""
-        now = self._clock()
-        if connected and self._connected_since is None:
-            self._connected_since = now
-        elif not connected and self._connected_since is not None:
-            self._accumulated += now - self._connected_since
-            self._connected_since = None
+        # #1320：重启重建时从请求落盘时间还原已累计时长（见 `elapsed_seconds_since`）。
+        self._armed_at = clock() - max(0.0, float(elapsed_seconds))
 
     def elapsed_seconds(self) -> float:
-        """已累计的"连接在场"时长（秒）。"""
-        total = self._accumulated
-        if self._connected_since is not None:
-            total += self._clock() - self._connected_since
-        return max(0.0, total)
+        """从装配起已累计的时长（秒）。"""
+        return max(0.0, self._clock() - self._armed_at)
 
     def expired(self) -> bool:
         return self.elapsed_seconds() >= self._timeout
-
-    @property
-    def running(self) -> bool:
-        """是否正在计时（有前端连接在场）。"""
-        return self._connected_since is not None
