@@ -10,6 +10,9 @@ export interface TaskReviewSummary {
   hasTerminalRun: boolean;
   hasRunningRun: boolean;
   emphasizeDetails: boolean;
+  /** #1325 S2：最近一个已终态 run 的 run_id（「标记已读」的作用域）。无终态 run
+   *  时为 null——横条本来就不渲染，调用方不需要再猜。 */
+  latestTerminalRunId: string | null;
 }
 
 function durationMs(events: readonly AgentEvent[]): number | null {
@@ -48,6 +51,9 @@ export function summarizeTaskRuns(events: readonly AgentEvent[]): TaskReviewSumm
     const group = runGroup(runEvents);
     return group ? [{ group, duration: durationMs(runEvents) }] : [];
   });
+  // Map 迭代序 = run 首次出现序；「最近」取最后一个已终态（非 running）的 run。
+  const latestTerminalRunId =
+    [...runs].reverse().find(({ group }) => group.status !== 'running')?.group.runId ?? null;
   const incompleteCount = runs.filter(
     ({ group }) => group.status === 'failed' || group.status === 'interrupted',
   ).length;
@@ -61,5 +67,6 @@ export function summarizeTaskRuns(events: readonly AgentEvent[]): TaskReviewSumm
     hasTerminalRun,
     hasRunningRun,
     emphasizeDetails: incompleteCount > 0 || runs.length >= 3 || hasLongRun,
+    latestTerminalRunId,
   };
 }

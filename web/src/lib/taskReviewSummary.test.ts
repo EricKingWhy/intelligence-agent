@@ -37,7 +37,18 @@ describe('summarizeTaskRuns', () => {
       hasTerminalRun: true,
       hasRunningRun: false,
       emphasizeDetails: true,
+      latestTerminalRunId: 'cancelled',
     });
+  });
+
+  it('reports the most recent terminal run id, skipping an open run', () => {
+    const summary = summarizeTaskRuns([
+      event(EventType.RUN_STARTED, 'done'),
+      event(EventType.RUN_COMPLETED, 'done'),
+      event(EventType.RUN_STARTED, 'active'),
+    ]);
+
+    expect(summary.latestTerminalRunId).toBe('done');
   });
 
   it('keeps the summary unavailable while any distinct run is still open', () => {
