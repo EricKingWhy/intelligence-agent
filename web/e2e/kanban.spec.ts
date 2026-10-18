@@ -501,3 +501,74 @@ test.describe('#1304 看板：AC-18 不新增 core surface', () => {
     expect(capabilitiesGets).toBe(baseline);
   });
 });
+
+test.describe('#1306 看板未读 / ack（AC-7）', () => {
+  const CHANGED = '2026-10-17T03:00:00Z';
+
+  test('AC-7：未读加粗 -> 点击写 ack 并打开会话 -> 重开已读 -> 同态事件不复活 -> 状态跃迁复活', async ({
+    page,
+  }) => {
+    /** 服务端推送驱动（板级订阅建立后由 fixture 交出来）。 */
+    let push: ((rows: unknown[]) => void) | null = null;
+    const rows = [
+      boardRow('s-unread', 'executing', {
+        product_state_changed_at: CHANGED,
+        last_event_time: CHANGED,
+        first_user_message: '未读用例',
+      }),
+    ];
+    await routeApi(page, {
+      sessions: rows,
+      events: [],
+      onBoardSubscribe: (p) => {
+        push = p;
+      },
+    });
+
+    await openBoard(page);
+    const card = page.locator('.kanban-card[data-session-id="s-unread"]');
+    const title = card.locator('.kanban-card-title');
+
+    // ① 未读：标题加粗（Orca `AgentKanbanCard.tsx:247` 的 font-semibold = 600）。
+    await expect(title).toHaveCSS('font-weight', '600');
+    await expect(card).toHaveAttribute('data-unread', 'true');
+
+    // ② 点卡片：ack 先落 localStorage，再导航 + 关板（顺序见 KanbanPanel.openSession）。
+    await card.click();
+    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toHaveCount(0);
+    const ackRaw = await page.evaluate(() => localStorage.getItem('ahi.kanban.ack.v1'));
+    expect(ackRaw, '点卡片必须写入 ack').not.toBeNull();
+    const ack = JSON.parse(ackRaw ?? '{}') as Record<string, string>;
+    expect(Date.parse(ack['s-unread'] ?? '')).toBeGreaterThanOrEqual(Date.parse(CHANGED));
+    // 打开的是这张卡的会话（侧栏选中态）。
+    await expect(page.locator('.session-item.selected')).toContainText('s-unread');
+
+    // ③ 重开看板：未读标记消失。
+    await page.getByLabel('看板').click();
+    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await expect(card).toHaveAttribute('data-unread', 'false');
+    await expect(title).not.toHaveCSS('font-weight', '600');
+
+    // ④ 同态事件：只推进 `last_event_time`（product_state 不变）⇒ 仍已读。
+    //    防的是"推送/重渲染把已读卡重新标未读"这类回归（同态事件复活 bug 的产品面防线）。
+    //    **不是**比较键的消融对照：本用例里 ack 是点击时的当天墙钟，而 last_event_time
+    //    被推到前一天（早于 ack）——错键实现同样算出已读、不会变红。真正的比较键判据
+    //    是下面的 ⑤（只改 product_state_changed_at 为未来值）与 vitest 用例 5。
+    rows[0]['last_event_time'] = '2026-10-17T09:00:00Z';
+    rows[0]['first_user_message'] = '未读用例（同态事件后）';
+    push!(rows);
+    await expect(title).toHaveText('未读用例（同态事件后）'); // 推送确实渲染到位
+    await expect(card).toHaveAttribute('data-unread', 'false');
+
+    // ⑤ 状态跃迁（task/accepted）：`product_state_changed_at` 晚于 ack ⇒ 重新未读。
+    //    必须是**相对当前时刻**的未来值：ack 是点击时的 `new Date()`，写死的"未来"
+    //    日期一到那天就变成过去（本用例首跑即踩：写死 10-18T00:00Z，而当天已 11:00Z）。
+    rows[0]['product_state_changed_at'] = new Date(Date.now() + 3_600_000).toISOString();
+    push!(rows);
+    await expect(card).toHaveAttribute('data-unread', 'true');
+    await expect(title).toHaveCSS('font-weight', '600');
+    // ack 值本身没被这次推送改动（未读是"ack 早于状态开始"，不是丢了 ack）。
+    const ackAfter = await page.evaluate(() => localStorage.getItem('ahi.kanban.ack.v1'));
+    expect(JSON.parse(ackAfter ?? '{}')['s-unread']).toBe(ack['s-unread']);
+  });
+});

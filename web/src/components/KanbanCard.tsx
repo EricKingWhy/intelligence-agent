@@ -10,8 +10,13 @@
  *    本仓已有 `lib/format.ts::formatRelativeTime` 承担同一职责，**直接复用**（懒惰阶梯
  *    第 2 级：仓库已有），不抄第二份。
  *
- *  **本票不含**：未读样式（T4 / #1306）、子智能体折叠行（T5 / #1307）、最后一条
- *  消息（T6）、PR pill / worktree / repo 页脚（AC-16 明确断言页脚**只有**时间节点）。
+ *  **#1306 未读（T4）**：未读卡标题加粗（Orca `AgentKanbanCard.tsx:247` 的
+ *  `font-semibold`），点击卡片 = 写 ack + 打开会话（ack 写序见 `KanbanPanel`）。
+ *  是否未读由看板算好下发（比较键是 `product_state_changed_at`，见 `lib/kanbanUnread.ts`），
+ *  卡片只渲染结果。
+ *
+ *  **本票不含**：子智能体折叠行（T5 / #1307）、最后一条消息（T6）、PR pill /
+ *  worktree / repo 页脚（AC-16 明确断言页脚**只有**时间节点）。
  */
 
 import { AlertCircle, ShieldQuestion } from 'lucide-react';
@@ -28,9 +33,13 @@ interface Props {
    *  drop 里判——卡片不持有落点语义。 */
   draggable: boolean;
   onDragStart: () => void;
+  /** 未读（判据见 `lib/kanbanUnread.ts::unread`）。 */
+  unread: boolean;
+  /** 点卡片 / 键盘 Enter/Space：由看板先写 ack 再打开会话。 */
+  onOpen: () => void;
 }
 
-export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
+export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpen }: Props) {
   // 后端契约保证 `attention_kind` / `attention_summary` **恒成对**：`_attention` 成对返回，
   // 读盘校验 `(kind is None) != (summary is None)` 即判非法，派生失败兜底 `_empty` 也两者皆空
   // （`board_projection.py`）；列表按行独立取投影，故单边值到不了前端。染色 / 圆点 / 横幅
@@ -44,6 +53,20 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
     <article
       className={`kanban-card${hasAttention ? ' in-attention' : ''}${empty ? ' kanban-card-empty' : ''}`}
       data-session-id={session.session_id}
+      data-unread={unread}
+      /* 整卡可点（打开会话）。用 `role="button"` + 手写 Enter/Space，同
+         `SubagentRoster.tsx:149-170` 的既有先例（不是真 `<button>`：卡内将来会有
+         独立可交互元素，包在 button 里会产生嵌套交互）。 */
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
       /* 空会话不可拖（§4.7）。**显式** `false`：属性缺失时 HTML 的 `draggable`
          默认是 `auto`（可拖），所以"不可拖"必须显式写出来才算钉住（AC-9②）。 */
       draggable={draggable}
@@ -61,7 +84,10 @@ export function KanbanCard({ session, now, draggable, onDragStart }: Props) {
       <div className="kanban-card-title-row">
         {/* 有横幅时不画点（Orca `:252` 同构）。 */}
         {hasAttention ? null : <span className="kanban-card-dot" aria-hidden="true" />}
-        <span className="kanban-card-title" title={title}>
+        <span
+          className={`kanban-card-title${unread ? ' is-unread' : ''}`}
+          title={title}
+        >
           {title}
         </span>
       </div>
