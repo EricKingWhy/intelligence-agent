@@ -115,7 +115,7 @@ export function OptionRowContent({
 }
 
 interface Props {
-  /** `aria-label`（也是 trigger 的 `title`）。由调用方传入。 */
+  /** trigger 的 `aria-label`。原生 `title` 另由 `hint` / `disabledHint` 组合，不再等于此值。 */
   ariaLabel: string;
   /** 面板头部的问句标题（这个下拉在决定什么）。 */
   title: string;

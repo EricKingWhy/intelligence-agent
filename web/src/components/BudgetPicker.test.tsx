@@ -40,6 +40,11 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
     expect(out).toContain('type="datetime-local"');
   });
 
+  it('非法草稿不算有效覆盖 → 不渲染「恢复默认」（与 trigger 摘要同判据）', () => {
+    const out = html(createElement(BudgetPickerPanel, { ...full, turns: 'abc' }));
+    expect(out).not.toContain('恢复默认');
+  });
+
   it('未接 onChange 的维不渲染其控件（不渲染吞输入的死框，#426 语义原样）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, onTokensChange: undefined, onDeadlineChange: undefined }));
     expect(out).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
@@ -122,6 +127,12 @@ describe('BudgetPicker — 单入口 trigger（#536 §2.3/§2.5）', () => {
     expect(out).toContain('>预算：turns 5 · 500k · 2h<');
     // 有任一维落定 ⇒ 选中态（#1370 P0-9）。
     expect(out).toContain('data-selected="true"');
+  });
+
+  it('非法草稿（turns=abc）→ 摘要「预算：默认」，且不亮选中态（与摘要同源）', () => {
+    const out = html(createElement(BudgetPicker, { ...full, turns: 'abc' }));
+    expect(out).toContain('>预算：默认<');
+    expect(out).not.toContain('data-selected="true"');
   });
 
   it('disabled → aria-disabled="true"（SSR 可见，同 OptionPicker 契约）', () => {

@@ -351,6 +351,19 @@ for (const theme of ['dark', 'light'] as const) {
       const ratio = contrast(m.color, m.bg);
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
+    // #1370 P0-7：id 的提升是「第三级 → 第二级」；只量 ≥4.5 时回退到 tertiary
+    // （暗 5.7 / 亮 5.4）仍然绿，锁不住本票的语义。等值断言与 `.tl-type` 同法。
+    const [idColor, secondary] = await page.evaluate(() => {
+      const el = document.querySelector('.session-item-id');
+      if (!el) throw new Error('no .session-item-id');
+      const probe = document.createElement('div');
+      probe.style.color = 'var(--text-secondary)';
+      document.body.appendChild(probe);
+      const v = getComputedStyle(probe).color;
+      probe.remove();
+      return [getComputedStyle(el).color, v];
+    });
+    expect(idColor).toBe(secondary);
   });
 
   /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮

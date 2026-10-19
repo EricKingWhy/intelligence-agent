@@ -852,7 +852,7 @@ function SessionRow({
   const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
   return (
     <div
-      className={`session-row${inProject ? ' session-row-in-project' : ''}${dragging ? ' dragging' : ''}`}
+      className={`session-row${dragging ? ' dragging' : ''}`}
       draggable={inProject}
       onDragStart={(e) => {
         if (!inProject) return;

@@ -1526,7 +1526,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
-              hint="权限：工具调用如何批准；改动立即作用于后续工具调用。"
+              hint="权限：工具调用如何批准；改档从下一轮 run 起生效（本轮不受影响）。"
               options={toCatalogOptions(permissionModes, catalogIcon)}
               value={selectedPermissionMode}
               onChange={handlePermissionSelect}
