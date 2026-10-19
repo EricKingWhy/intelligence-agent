@@ -158,7 +158,7 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
     sha, tree = "c" * 40, "d" * 40
     names = [ln.name for ln in gate0.build_lanes("")]
     total = len(names)
-    assert total >= 7, f"Gate-0 至少 7 条机械车道，实得 {names}"
+    assert names == list(gate0.GATE0_LANE_IDS), f"车道集合必须与词表逐项一致，实得 {names}"
 
     pass_argv = gate0._portable_argv([sys.executable, "-c", "pass"])
     fail_argv = gate0._portable_argv([sys.executable, "-c", "import sys; sys.exit(3)"])

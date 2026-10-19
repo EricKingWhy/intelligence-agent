@@ -14,7 +14,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 - **不是安全边界**：pre-push hook 本地可 `--no-verify` 绕过，也不影响别的 clone（启用靠本地
   `git config core.hooksPath .githooks`，该配置**不随仓库分发**）。它挡的是"忘了跑"，不是"故意绕过"。
 - **不取代** `AGENTS.md` §14.10 的集成前完整门禁，也不取代两轴独立审查。
-- **默认不做按路径跳过**：不带 `--affected` 时恒跑全部 6 车道（实测约 **20–22s（热）/ 36–45s（冷）**，
+- **默认不做按路径跳过**：不带 `--affected` 时恒跑全部 7 车道（实测约 **20–22s（热）/ 36–45s（冷）**，
   2026-09-22 读数），已满足预算；改动面只作**信息展示**，不影响跑什么。按改动路径跳过某条车道属于**放松**
   （跨层影响难以穷举）⇒ 所以它是一个**显式 opt-in**、且**不用于推送前**（见下一条）。
 - **`--affected <rev>`（issue #292）**：读 `docs/agents/verification.map.tsv`（代码面 ↔ 必跑车道的**机械映射**），
@@ -405,7 +405,7 @@ def build_lanes(since: str) -> list[Lane]:
                       [node, tsc_js, "-b"] if (node and have_js) else None, WEB_DIR,
                       blocked=blocker or "找不到 node"))
 
-    # ④b 前端样式 lint（#1364）：CSS 里的颜色字面量是本仓设计 token 失控的工程根因
+    # ⑥b 前端样式 lint（#1364）：CSS 里的颜色字面量是本仓设计 token 失控的工程根因
     #     （Lane E 实测 149 种颜色字面量、60% 绕过 token）。规则与放行面全在
     #     `web/stylelint.config.mjs`（唯一真值），这里只负责把那条配置接进机械门禁。
     #     **不经过 `npx` / `.bin/*`**：同 ③④ 的理由（本机沙箱把 `.cmd` 拉黑）。

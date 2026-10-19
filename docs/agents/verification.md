@@ -34,7 +34,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | 任何文件 | ⑨ `git diff --check` + ⑧ 覆盖闸门 | Gate-0（自动） |
 | `src/**` 的 `.py` | ① ruff + ② 后端全量 pytest | Gate-0 跑①；②在冻结树 |
 | `session/event.py` 或任一生成物 | ⑦ 的生成物同步守卫（**必跑**；跨 `src`↔`web` 的只有这一条） | Gate-0（自动） |
-| `web/**` | ④ tsc + ⑥b stylelint + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥⑥b；⑤按需 |
+| `web/**` | ④ tsc + ⑥ oxlint + ⑥b stylelint + ⑤ vitest | Gate-0 跑④⑥⑥b；⑤按需 |
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |

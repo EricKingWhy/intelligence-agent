@@ -256,7 +256,7 @@ def test_three_states_semantics_frontend_src():
     """② 改 `web/src/**` ⇒ 选中前端车道，**不得**选中后端全量 pytest。"""
     lanes, focused, unmapped = _mine_eval("web/src/App.tsx")
     assert not unmapped
-    assert {"oxlint", "tsc", "vitest", "build", "coverage", "diff-check"} <= set(lanes)
+    assert {"oxlint", "tsc", "stylelint", "vitest", "build", "coverage", "diff-check"} <= set(lanes)
     assert not ({"ruff", "pytest-full"} & set(lanes)), lanes
     assert focused == ["web/src"]
 
