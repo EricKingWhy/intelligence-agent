@@ -12,7 +12,8 @@ from agent_harness.mcp.adapter import (
     _pydantic_model_from_json_schema,
     mcp_tool_name,
 )
-from agent_harness.tooling import ToolSideEffect
+from agent_harness.session.workflow import WorkflowMode
+from agent_harness.tooling import ToolExecutor, ToolRegistry, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
 from tests.mcp_client.fake_server import FakeMCPServer, fake_mcp_session, make_fake_tool
@@ -94,6 +95,27 @@ async def test_side_effect_follows_explicit_read_only_tool_permission():
         # 显式 workspace-write 是写权限，副作用仍为 MUTATING
         assert built["writer"].permission == ToolPermission.WORKSPACE_WRITE
         assert built["writer"].side_effect == ToolSideEffect.MUTATING
+
+
+@pytest.mark.asyncio
+async def test_explicit_read_only_mcp_tool_executes_in_plan_mode():
+    server = FakeMCPServer(tools=[make_fake_tool("web_search")])
+    config = _config(tool_permissions={"web_search": "read-only"})
+    async with _built_tools(config, server) as tools:
+        registry = ToolRegistry()
+        tool = next(tool for tool in tools if tool.remote_name == "web_search")
+        registry.register(tool)
+        executor = ToolExecutor(registry, workflow_mode=WorkflowMode.PLAN)
+
+        result = await executor.execute({
+            "id": "plan-read-only-mcp",
+            "name": tool.name,
+            "args": {"text": "query"},
+        })
+
+        assert result.result.ok is True
+        assert server.call_count == 1
+        assert server.calls[0].name == "web_search"
 
 
 def test_pydantic_model_from_schema_types_and_required():
