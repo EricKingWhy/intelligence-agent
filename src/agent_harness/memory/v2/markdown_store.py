@@ -283,7 +283,7 @@ class MarkdownMemoryStore:
         驱动，读盘才与"markdown 是权威"一致；读不出来时退回活列表，绝不因读失败清空提示。
 
         快照刻意**不**在写入后失效（AC8：同一 session 内注入必须逐字节不变，前缀缓存
-        才稳定），所以缓存只按 LRU 式的插入序回收旧会话，见 `SNAPSHOT_CACHE_LIMIT`。
+        才稳定），所以缓存按插入序做 FIFO 回收（命中不重排），见 `SNAPSHOT_CACHE_LIMIT`。
         """
         cached = self._snapshot.get(session_id)
         if cached is not None:
