@@ -61,10 +61,15 @@
   color: var(--accent-strong);
 }
 
+/* #1372 改动 10：字号 / 字重 / 字距 / 大写口径对齐 `constraints.css:53`
+ * 的 `.cn-eyebrow`（全站 eyebrow 唯一标准）——此处只保留本面板的颜色与间距，
+ * 不再另起第二套排版。 */
 .watchtower-eyebrow {
   color: var(--text-tertiary);
-  font-size: var(--text-xs);
-  letter-spacing: .11em;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
   margin: 0 0 8px;
 }
 

@@ -28,6 +28,7 @@ import {
   type WatchtowerRuleState,
   type WatchtowerSnapshot,
 } from '../lib/api';
+import { formatDateTime } from '../lib/format';
 import '../styles/watchtower.css';
 
 const CONSENT_VERSION = 'watchtower-consent-v1';
@@ -245,7 +246,7 @@ export function WatchtowerPanel({
 
       {scheduler?.last_tick_at && (
         <p className="watchtower-heartbeat">
-          最近检查：{new Date(scheduler.last_tick_at).toLocaleString()}
+          最近检查：{formatDateTime(scheduler.last_tick_at) ?? scheduler.last_tick_at}
         </p>
       )}
       {loadError && (

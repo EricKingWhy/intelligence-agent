@@ -25,6 +25,9 @@ export interface ReplaySessionTarget {
   id: string;
   /** 行标题（首条用户消息投影）；空串 = 只显示 id 片段。 */
   title: string;
+  /** #1372 改动 3：关闭时把焦点还给谁。菜单项在菜单关闭时已卸载，Radix 的默认
+   *  归还目标会变成 body；调用方传行内那个稳定的 ⋯ 触发按钮。 */
+  restoreFocus?: HTMLElement | null;
 }
 
 interface Props {
@@ -39,6 +42,12 @@ interface Props {
 const REVEAL_MS = 60;
 
 export function SessionReplayDialog({ target, onOpenChange }: Props) {
+  // #1372 改动 3：关闭时父组件立即把 target 置空，若这里跟着卸载 Content，
+  // Radix 的 FocusScope 会连同 onCloseAutoFocus 一起消失，焦点掉回 body。
+  // 保留最后一个 target 让 Content 撑到 Presence 完成退场（DOM 仍由 Radix 卸载），
+  // onCloseAutoFocus 才有机会把焦点还给行内 ⋯。
+  const [lastTarget, setLastTarget] = useState(target);
+  if (target && target !== lastTarget) setLastTarget(target);
   return (
     <Dialog.Root
       open={target !== null}
@@ -48,7 +57,7 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {target && <SessionReplayForm target={target} />}
+        {lastTarget && <SessionReplayForm target={lastTarget} />}
       </Dialog.Portal>
     </Dialog.Root>
   );
@@ -100,6 +109,9 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
   return (
     <Dialog.Content
       className="project-dialog replay-dialog"
+      /* #1372 改动 3：radix 1.1.23 的 Dialog.Content 不渲染 aria-modal（本地源码无该
+         输出，Lane D 实测 ariaModal=null）。显式补上，读屏才知道这是模态层。 */
+      aria-modal="true"
       data-replay-phase={phase}
       data-replay-revealed={revealed}
       data-replay-count={steps.length}
@@ -109,6 +121,14 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
         if (!cancelRef.current) return;
         e.preventDefault();
         cancelRef.current.focus();
+      }}
+      onCloseAutoFocus={(event) => {
+        // Esc / 关闭后回到打开它的那个 ⋯ 按钮。目标已不在文档里就交回 Radix 默认。
+        const restore = target.restoreFocus;
+        if (restore?.isConnected) {
+          event.preventDefault();
+          restore.focus();
+        }
       }}
     >
       <div className="project-dialog-head">

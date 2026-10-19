@@ -73,13 +73,13 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   // 已暂停（#312）：预算到顶，**等着被恢复**——中性色 + 暂停图标。不能用
   // 「已完成」的绿对勾（那是"这场跑完了"），也不能用失败的红叉（没有失败）。
   paused: { label: '已暂停', className: 'pulse-paused', Icon: PauseCircle },
-  // 待裁决（#1030）：坏死 run（run_status 停在 'running'）与重启后的中断 run
-  // 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。这是与
-  // 「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --warning（"需要人
-  // 动手"，同 .interrupt-banner），**刻意不用 --info**：info 在本仓是"中性提示"，
-  // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色实测
-  // 2.91:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
-  // 等待是静止态，闪动会读成"还在跑"。
+  // 待裁决（#1030；#1372 与 tool 的 warning 拆开）：坏死 run（run_status 停在 'running'）
+  // 与重启后的中断 run 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。
+  // 这是与「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --danger（"必须人
+  // 动手，否则永远不动"），**刻意不用 --info**：info 在本仓是"中性提示"，会把"必须我
+  // 裁决"读成"稍等就好"；纯 --danger 文字在 10% 底色上亮色不达 AA（故 CSS 里用
+  // ink-mix，实测见 app.css 与 e2e/t-contrast.spec.ts #1030 用例）。无动画：等待是
+  // 静止态，闪动会读成"还在跑"。
   'awaiting-decision': { label: '待裁决', className: 'pulse-awaiting-decision', Icon: Gavel },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };

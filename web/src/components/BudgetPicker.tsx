@@ -23,6 +23,7 @@ import * as Popover from '@radix-ui/react-popover';
 import { useId, useState } from 'react';
 import { ChevronDown, ChevronRight, Coins, RotateCw, Timer, Wallet } from 'lucide-react';
 import { OptionPicker } from './OptionPicker';
+import { Tip } from './Tooltip';
 import { parseDurationToken } from '../lib/amend';
 import {
   DURATION_CUSTOM_ID,
@@ -325,20 +326,22 @@ export function BudgetPicker({
 }: BudgetPickerProps) {
   return (
     <Popover.Root>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control composer-budget-trigger"
-          aria-label="预算"
-          title="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。"
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（预算 chip）。 */}
+      <Tip content="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。">
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control composer-budget-trigger"
+            aria-label="预算"
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+          >
+            <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className="picker-content budget-picker-content budget-picker-content--v2"

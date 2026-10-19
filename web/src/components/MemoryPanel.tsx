@@ -75,6 +75,8 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
   const [bulkPreview, setBulkPreview] = useState<{ count: number; exact: boolean; kind: MemoryKind | null; projectId?: string; projectTitle: string | null } | null>(null);
   const [bulkToken, setBulkToken] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
+  /** #1372 改动 9：未启用态的中性空态给一个去「记忆设置」的入口（面板内既有设置区）。 */
+  const settingsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let current = true;
@@ -205,13 +207,13 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
         管理长期记忆。编辑会生成新版本；删除不可恢复。列表与设置以服务端返回为准。
       </Dialog.Description>
 
-      <div className="memory-v2-settings" aria-label="记忆设置">
+      <div className="memory-v2-settings" aria-label="记忆设置" ref={settingsRef}>
         <span className="memory-v2-section-title">自动化</span>
         {settingsLoading ? <span role="status">正在读取设置…</span> : settings && (
           <>
-            <label><input type="checkbox" checked={settings.extraction_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('extraction_enabled', event.target.checked)} /> 自动提取</label>
-            <label><input type="checkbox" checked={settings.recall_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('recall_enabled', event.target.checked)} /> 自动召回</label>
-            <label><input type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.extraction_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('extraction_enabled', event.target.checked)} /> 自动提取</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.recall_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('recall_enabled', event.target.checked)} /> 自动召回</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
           </>
         )}
         {settingsError && <span className="memory-v2-error" role="alert">{settingsError}<button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}
@@ -272,7 +274,31 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
       </section>
 
       <div className="memory-v2-body">
-        {memories.disabled && <div className="memory-degraded" role="status"><strong>记忆未启用</strong><span>{memories.disabled}</span></div>}
+        {memories.disabled && (
+          /* #1372 改动 9：未启用是**配置缺省**，不是故障——中性空态，去红色、去「重试」
+             （重试不会改变服务端配置）。按钮只是把焦点带到面板内既有的设置区。 */
+          <div className="memory-empty memory-disabled" role="status">
+            <p className="memory-empty-title">记忆管理未启用</p>
+            <p className="memory-empty-hint">
+              打开后，agent 会把可复用的操作经验记在这里，下次自动用上。
+            </p>
+            <button
+              type="button"
+              className="memory-v2-quiet memory-disabled-action"
+              onClick={() => {
+                const section = settingsRef.current;
+                section?.scrollIntoView({ block: 'nearest' });
+                section?.querySelector<HTMLElement>('input, button, select')?.focus();
+              }}
+            >
+              查看记忆设置
+            </button>
+            <details className="memory-disabled-detail">
+              <summary>技术详情</summary>
+              <span>{memories.disabled}</span>
+            </details>
+          </div>
+        )}
         {memories.loading && <div className="memory-loading" role="status">正在加载记忆…</div>}
         {!memories.loading && !memories.disabled && memories.visible.length === 0 && !memories.loadError && (
           <div className="memory-empty" role="status">还没有记忆或符合条件的记录。</div>

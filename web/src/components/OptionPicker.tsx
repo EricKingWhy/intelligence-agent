@@ -44,6 +44,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import { focusPickerListOnOpen } from '../lib/pickerFocus';
+import { Tip } from './Tooltip';
 
 /** 一行选项的数据。`description` 为空 → 不渲染描述行（不填占位文案）。
  *  `icon` 缺省 → 图标槽留空（槽本身恒在，见 `OptionRowContent`）。 */
@@ -208,21 +209,27 @@ export function OptionPicker({
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control"
-          aria-label={ariaLabel}
-          title={disabled && disabledHint ? disabledHint : triggerTitle}
-          // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（composer 档位 chip）。 */}
+      <Tip content={disabled && disabledHint ? disabledHint : triggerTitle}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control"
+            aria-label={ariaLabel}
+            /* #1372：disabled 时 Radix tooltip 收不到指针事件，保留原生 title 作
+               降级通道——否则用户看不到「为什么不可点」，那是无障碍回退不是第二套
+               提示系统。启用态一律只走 radix tooltip。 */
+            title={disabled ? (disabledHint ?? triggerTitle) : undefined}
+            // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+          >
+            <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className={`picker-content${customContent !== undefined ? ' picker-content-custom' : ''}`}

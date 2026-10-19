@@ -21,6 +21,7 @@ import { useDelegations } from './hooks/useDelegations';
 import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
+import { SkipLinks } from './components/SkipLinks';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
 import { Composer, type SubmitResult } from './components/Composer';
@@ -1624,6 +1625,7 @@ export default function App() {
 
   return (
     <div className="app-frame">
+      <SkipLinks />
       <TopBar
         conversation={conversation}
         streaming={streaming}
@@ -1643,6 +1645,10 @@ export default function App() {
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
+        sessions={sessions}
+        titlesById={titlesById}
+        sessionTitle={selectedId ? titlesById[selectedId] : undefined}
+        onSelectSession={handleSelect}
         rosterSlot={
           <SubagentRoster
             delegations={delegations}
@@ -1709,7 +1715,13 @@ export default function App() {
           onOpenPlugins={handleOpenPlugins}
         />
 
-        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+        <section
+          className={`app-workspace${splitChild ? ' with-split' : ''}`}
+          id="region-main"
+          role="region"
+          aria-label="主工作区"
+          tabIndex={-1}
+        >
           {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
               父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
           <div className="workspace-main">

@@ -32,7 +32,7 @@ import type {
   ToolCall,
   Turn,
 } from '../types';
-import { formatDuration, truncateForDisplay } from '../lib/format';
+import { formatDateTime, formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
@@ -636,7 +636,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
   }, [chain]);
   // hover 时间戳（调研：完成后才展示，流式期间不打扰；title 属性最轻实现）
   const completedTitle = turn.completed_at
-    ? `完成于 ${new Date(turn.completed_at).toLocaleString()}`
+    ? `完成于 ${formatDateTime(turn.completed_at) ?? turn.completed_at}`
     : undefined;
 
   // ADR-0030 §5.3 编辑态：原地输入（该条消息变成 textarea + 保存/取消），不弹模态。

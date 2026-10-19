@@ -28,6 +28,7 @@ import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import { ReasoningEffortSlider } from './ReasoningEffortSlider';
+import { Tip } from './Tooltip';
 import {
   BUILTIN_RUNS,
   filterSlashCommands,
@@ -1443,9 +1444,13 @@ export const Composer = memo(function Composer({
               onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
               disabled={locked}
             />
-            <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
-              将这条消息作为可复用规则
-            </span>
+            {/* #1372 改动 4/6：说明文字的原生 title 迁到 radix tooltip。span 自身可聚焦，
+                键盘用户也能读到同一条解释；可见文字仍是 <label> 的可访问名（Label in Name）。 */}
+            <Tip content="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
+              <span className="composer-rule-help" tabIndex={0}>
+                将这条消息作为可复用规则
+              </span>
+            </Tip>
           </label>
           {/* #1191：勾选后出现作用域三选一（默认「本会话」，票面 §四.1）。 */}
           {rememberAsProceduralRule && (
@@ -1453,21 +1458,24 @@ export const Composer = memo(function Composer({
               {SCOPE_OPTIONS.map((option) => {
                 const projectDisabled = option.id === 'project' && projectAvailable === false;
                 return (
-                  <button
+                  <Tip
                     key={option.id}
-                    type="button"
-                    className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
-                    aria-pressed={scope === option.id}
-                    disabled={projectDisabled || locked}
-                    title={
+                    content={
                       projectDisabled
                         ? '当前会话不在 git 仓库内，无法登记项目级约束'
                         : option.hint
                     }
-                    onClick={() => setScope(option.id)}
                   >
-                    {option.label}
-                  </button>
+                    <button
+                      type="button"
+                      className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
+                      aria-pressed={scope === option.id}
+                      disabled={projectDisabled || locked}
+                      onClick={() => setScope(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  </Tip>
                 );
               })}
             </div>
@@ -1550,18 +1558,18 @@ export const Composer = memo(function Composer({
                 (() => {
                   const note = toolScopeNote(agentProfiles, selectedAgentProfile);
                   if (!note) return undefined;
-                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；`aria-label`
-                  // **以可见文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名
-                  // 会违反 WCAG 2.5.3（Label in Name：可访问名须包含可见文字，
-                  // 否则语音控制/switch 用户照可见文字说不中）。
+                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；可访问名**以可见
+                  // 文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名会违反
+                  // WCAG 2.5.3（Label in Name）。#1372：title 迁到 radix tooltip。
                   return (
-                    <span
-                      tabIndex={0}
-                      title={note.title}
-                      aria-label={`${note.text}；${note.title}`}
-                    >
-                      {note.text}
-                    </span>
+                    <Tip content={note.title}>
+                      <span
+                        tabIndex={0}
+                        aria-label={`${note.text}；${note.title}`}
+                      >
+                        {note.text}
+                      </span>
+                    </Tip>
                   );
                 })()
               }

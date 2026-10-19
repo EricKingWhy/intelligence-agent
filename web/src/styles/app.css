@@ -29,6 +29,102 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
 }
 
+/* ── #1372 改动 2：skip links（Tab 序首位，聚焦才可见） ───────────────────── */
+.skip-links {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  display: flex;
+  gap: 4px;
+}
+.skip-link {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform: translateY(-200%);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  box-shadow: var(--shadow-overlay);
+  white-space: nowrap;
+}
+/* 四个链接横向错开：焦点到达时全部可见，不互相盖住。 */
+.skip-links .skip-link:nth-child(2) { left: 108px; }
+.skip-links .skip-link:nth-child(3) { left: 224px; }
+.skip-links .skip-link:nth-child(4) { left: 330px; }
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* ── #1372 改动 6：radix tooltip 的唯一样式（暗/亮都走既有 token） ────────── */
+.tip-content {
+  z-index: 1200;
+  max-width: 280px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  box-shadow: var(--shadow-popover);
+  white-space: pre-line;
+}
+.tip-arrow {
+  fill: var(--surface-overlay);
+}
+
+/* #1372 改动 7：定制开关（轨道 24×14、滑块 12px；on 态品牌色、off 态 hairline）。
+ * 用原生 checkbox + appearance:none：语义/键盘/表单行为都保留，只换皮。 */
+.ui-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 14px;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple),
+    border-color var(--dur-out) var(--ease-apple);
+}
+.ui-switch::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: transform var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+}
+.ui-switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.ui-switch:checked::after {
+  transform: translateX(10px);
+  background: var(--surface-canvas);
+}
+.ui-switch:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.ui-switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .app-regions {
   flex: 1;
   display: grid;
@@ -261,15 +357,77 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-sm);
   min-width: 0;
 }
-/* 会话 id：从裸小灰字升级为 context chip（与 run-pulse 同族的胶囊节奏） */
+/* 会话名（#1372 改动 8）：**纯文本 + 下拉箭头**，不再是描边 pill。
+ *  与相邻的 run-pulse 状态 pill 靠「形状」区分：名字没有底色/描边，只有文字与
+ *  一个指示可切换的 chevron；pill 只留给状态。 */
 .appbar-session {
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-  background: var(--color-hover);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-full);
-  padding: 2px var(--space-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 2px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+}
+.appbar-session:hover {
+  color: var(--text-primary);
+  background: var(--color-hover);
+}
+.appbar-session:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.appbar-session-static {
+  cursor: default;
+}
+.appbar-session-static:hover {
+  background: transparent;
+}
+.appbar-session-name {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.appbar-session-chevron {
+  flex: none;
+  opacity: 0.7;
+}
+.appbar-session-menu {
+  min-width: 220px;
+  max-width: 360px;
+}
+.appbar-session-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+.appbar-session-item-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.appbar-session-item-id {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.appbar-more-menu {
+  min-width: 200px;
+}
+.appbar-menu-warn {
+  margin-left: auto;
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
+  font-size: var(--text-xs);
 }
 .appbar-toggle-active {
   color: var(--accent);
@@ -367,21 +525,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--info);
 }
 
-/* 待裁决（#1030）：有 UNKNOWN Operation 等人裁决——不裁决这条会话永远走不动。
-   与「已暂停」**刻意不同色域**：暂停是 info（"稍等，抬预算/续跑就能自己走"），
-   待裁决是 warning（"没人动手它永远不会动"）——两者若同色，用户会把"必须我裁决"
-   读成"等一会儿就好"，而那正是本票要消灭的误读。区分同时靠图标（Gavel）与文字
-   （待裁决 / 已暂停）两个通道——胶囊体永不 color-only。
-   文字色走 ink-mix（同 .approval-chip 既有做法）：纯 --warning 文字压在 12% 的
-   warning 底色上，亮色主题**实测 2.91:1**（Chromium 量值，见 e2e/t-contrast.spec.ts
-   的「#1030 待裁决徽标对比度」用例——它把同一个真实节点改成纯 --warning 现量，
-   所以这个数字与代码同源、不会随底色漂移而失真），**不达 AA 4.5**；混入 45% 的
-   --text-primary 后实测亮色 6.53:1 / 暗色 10.65:1，两个主题都过（§15 无需新增 token）。
+/* 待裁决（#1030；#1372 与 tool 拆开）：有 UNKNOWN Operation 等人裁决——不裁决这条
+   会话永远走不动。与「已暂停」**刻意不同色域**：暂停是 info（"稍等，抬预算/续跑就
+   能自己走"），待裁决是 danger（"没人动手它永远不会动"）——两者若同色，用户会把
+   "必须我裁决"读成"等一会儿就好"，而那正是本票要消灭的误读。区分同时靠图标
+   （Gavel）与文字（待裁决 / 已暂停）两个通道——胶囊体永不 color-only。
+   与 tool 的 warning 也必须分开（改动 5：两者此前共用同色域，同屏不可区分）。
+   文字色走 ink-mix（同 .approval-chip 既有做法）：纯 --danger 压在 10% 的 danger
+   底色上亮色**实测 3.48:1**（e2e/t-contrast.spec.ts 的 #1030 用例把同一个真实节点
+   改成纯 --danger 现量，数字与代码同源），不达 AA 4.5；混入 45% 的 --text-primary
+   后实测亮色 7.33:1 / 暗色 8.68:1，两个主题都过（§15 无需新增 token）。
    无动画：等待是静止态，闪动会被读成"还在跑"，而本态的全部要点恰恰是"它没在跑"。 */
 .run-pulse.pulse-awaiting-decision {
-  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
-  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
 }
 
 /* 停顿等待提示（FE-01/#148）：只是「等久了」的旁注，不是告警——三级文字色、
@@ -399,11 +557,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: var(--space-xs);
   background: var(--color-accent);
-  color: #fff;
+  /* #1372 改动 5b：实心品牌 pill 的文字色跟主题走——暗色 accent 是浅粉，
+     白字读不清；`--surface-canvas` 在暗色近黑、亮色近白，两主题都过 AA。 */
+  color: var(--surface-canvas);
   border: none;
   padding: var(--space-sm) var(--space-lg);
-  border-radius: var(--radius-md);
-  font: 550 var(--text-sm) var(--font-ui);
+  border-radius: var(--radius-full);
+  font: 500 var(--text-base) var(--font-ui);
   cursor: pointer;
   transition: filter var(--dur-out) var(--ease-apple), transform var(--dur-out) var(--ease-apple);
 }
@@ -430,11 +590,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: var(--space-xs);
   background: color-mix(in srgb, var(--color-destructive) 90%, transparent);
-  color: #fff;
+  color: var(--surface-canvas);
   border: none;
   padding: var(--space-sm) var(--space-lg);
-  border-radius: var(--radius-md);
-  font: 550 var(--text-sm) var(--font-ui);
+  border-radius: var(--radius-full);
+  font: 500 var(--text-base) var(--font-ui);
   cursor: pointer;
 }
 .btn-danger:hover {
@@ -448,9 +608,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: transparent;
   color: var(--color-foreground);
   border: 1px solid var(--border-subtle);
-  padding: var(--space-sm) var(--space-lg);
-  border-radius: var(--radius-md);
-  font: 500 var(--text-sm) var(--font-ui);
+  padding: 6px var(--space-md);
+  border-radius: var(--radius-full);
+  font: 500 var(--text-base) var(--font-ui);
   cursor: pointer;
   transition: background var(--dur-out) var(--ease-apple);
 }
@@ -1405,9 +1565,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 6px var(--space-md);
   background: transparent;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  /* #1372 改动 5b：操作按钮统一为描边小 pill，主操作（-primary）实心品牌色。 */
+  border-radius: var(--radius-full);
   font-family: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
+  font-weight: 500;
   color: var(--text-secondary);
   cursor: pointer;
   transition: background var(--dur-out) var(--ease-apple), color var(--dur-out) var(--ease-apple);
@@ -1417,12 +1579,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-primary);
 }
 .project-btn-primary {
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  color: var(--text-primary);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface-canvas);
 }
 .project-btn-primary:hover {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  background: var(--accent);
+  filter: brightness(1.06);
+  color: var(--surface-canvas);
 }
 .project-btn-danger {
   background: var(--surface-danger);
@@ -2980,11 +3144,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 [data-density='compact'] .msg-bubble-user {
   padding: var(--space-xs) var(--space-md);
 }
-.status-spinner {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid var(--color-border);
-  border-top-color: var(--color-warning);
+/* #1372 改动 7：全站唯一一套 spinner（此前 .status-spinner 11px/1.5px 与
+ * .ctx-usage-spinner 12px/2px 两套并存）。几何取新的 12px/2px，顶弧统一品牌色。 */
+.status-spinner,
+.ctx-usage-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   display: inline-block;
@@ -4583,12 +4750,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex: none;
   white-space: nowrap;
 }
-/* 与顶栏 run-pulse 同一状态语言：tinted 胶囊 */
-.run-badge-running,
-.run-badge-thinking {
+/* 状态 pill 体系（#1372 改动 5b）：浅底 + 深字 + 描边，绿/琥珀/红只区分语义。
+ *  running 与 thinking 此前共用同一条规则（视觉不可区分）——现在拆开：
+ *   - running = 品牌 accent（"整个 run 在跑"）
+ *   - thinking = info（"模型在生成"）
+ *   - tool = warning（"工具在跑"）
+ *   - awaiting-decision = danger（"卡住、必须人裁决"）——与 tool 的 warning 分开
+ *   - completed = success；failed = danger（同色域但语义由文案/图标区分）
+ */
+.run-badge-running {
   color: var(--accent);
   background: var(--accent-muted);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.run-badge-thinking {
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 30%, transparent);
 }
 .run-badge-tool {
   color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
@@ -4654,14 +4832,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--color-hover);
   border-color: var(--border-subtle);
 }
-/* 待裁决（#1030）：与顶栏 .pulse-awaiting-decision 同一状态语言（warning 色域 +
-   ink-mix 文字，理由见该处注释；含亮色覆盖，§15 无需新增 token）。Inspector 头标
-   与顶栏对同一会话必须同口径——缺了这条，顶栏说「待裁决」而 Inspector 徽标落回
-   默认中性色，读起来像"已结束"。 */
+/* 待裁决（#1030；#1372 与 tool 拆开）：**危险色域**——它没在跑，而是卡住等人。
+   与 tool（warning）同屏出现时不能再是同一个颜色；文字走 ink-mix 保证亮色 AA。 */
 .run-badge-awaiting-decision {
-  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
-  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
 }
 
 /* ── UI-03：Timeline run 分组头（run_id 首现顺序分隔行）──
@@ -5629,6 +5805,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .copy-btn.copied {
   color: var(--color-success, #22a06b);
+  /* #1372 改动 7：成功态要容纳「已复制」三个字，不再固定 24px 方块。 */
+  width: auto;
+  gap: 4px;
+  padding: 0 6px;
+}
+.copy-btn-label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* 模型回答块：按钮绝对定位右上，hover 浮现（DOM 在正文后，屏阅顺序正确） */
@@ -8375,14 +8560,7 @@ button.json-row {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
-.ctx-usage-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--border-subtle);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
+/* #1372 改动 7：几何与配色并入 .status-spinner（全站一套）。 */
 
 /* ── #1197 项 5B：上下文窗口挡位选择器（效果图 01）─────────────────────
    外壳复用 .ctx-usage-overlay / .ctx-usage-popover（先例 TaskReviewPanel），
