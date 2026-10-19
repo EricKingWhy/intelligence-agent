@@ -348,9 +348,16 @@ test('AC7：supports_vision=false 禁用附图入口并可见说明；粘贴/拖
   });
 
   const attachButton = page.getByRole('button', { name: '添加图片' });
-  await expect(attachButton).toBeDisabled();
+  // #1405：trigger 本身仍可打开「+」菜单（规则入口不能被视觉门禁连带锁死）；
+  // 真正被禁用并给出原因的是菜单里的图片项。
+  await expect(attachButton).toBeEnabled();
   await expect(page.locator('.composer-attach-hint')).toContainText('不支持视觉');
   await expect(attachButton).toHaveAttribute('title', /不支持视觉/);
+  await attachButton.click();
+  const addImageItem = page.locator('[data-testid="composer-add-image"]');
+  await expect(addImageItem).toHaveAttribute('aria-disabled', 'true');
+  await expect(addImageItem).toHaveAttribute('title', /不支持视觉/);
+  await page.keyboard.press('Escape');
 
   // 拖放：遮罩给的是**禁止** + 原因（不是"松开即可"，也不静默）。
   await dragInPage(page, 'enter', 16);

@@ -1870,6 +1870,10 @@ export async function pickControl(
   expected: string,
 ): Promise<void> {
   const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+  // #1405：Agent / Reasoning 默认收在「更多」披露里；未展开时先展开。
+  if (!(await trigger.isVisible())) {
+    await openMore(page);
+  }
   // `:visible` 限定当前打开的浮层：关闭动画期间上一层 listbox 仍是 DOM 节点，
   // 不加过滤会 strict mode violation（探针实测命中 2 个）。
   const listbox = page.locator('[role="listbox"]:visible').last();
@@ -1886,6 +1890,25 @@ export async function pickControl(
   // 不等它真正卸载，下一次 open 的 Enter 会撞在正在关闭的浮层上——表现为
   // 「浮层像是开了，选中却没生效」，且只在连续两次调用时复现（探针实测）。
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+}
+
+/** #1405：展开 Composer 的「更多」披露（Agent / 推理深度）。幂等。 */
+export async function openMore(page: Page): Promise<void> {
+  const trigger = page.getByRole('button', { name: '更多设置' });
+  if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
+    await trigger.click();
+  }
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+}
+
+/** #1405：规则开关在附件「+」菜单里。打开菜单 → 点选开关（菜单随之关闭），
+ *  用 dock 里出现的作用域三选一作为"已勾选"的可见结果断言。 */
+export async function toggleReusableRule(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '添加图片' }).click();
+  const item = page.locator('#remember-as-procedural-rule');
+  await expect(item).toHaveAttribute('aria-checked', 'false');
+  await item.click();
+  await expect(page.getByRole('group', { name: '登记作用域' })).toBeVisible();
 }
 
 /** 选二级列表里的**第一个可选模型**（`FIRST_SELECTABLE_MODEL`，#1016 后默认条目

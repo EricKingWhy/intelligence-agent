@@ -18,6 +18,7 @@ import {
   clickTopBarMenuItem,
   routeApi,
   sessionRow,
+  toggleReusableRule,
 } from './fixtures';
 
 const SESSIONS = Array.from({ length: 9 }, (_, i) =>
@@ -161,7 +162,7 @@ test('#1372 AC1：会话区 / 主工作区跳转键落焦到 region，下一次 
 
 test('#1372 改动 6：disabled 作用域 pill 用原生 title 兜底完整原因', async ({ page }) => {
   await openApp(page);
-  await page.locator('#remember-as-procedural-rule').check();
+  await toggleReusableRule(page);
   // e2e 夹具的 effectiveProject 缺省为 null = 非 git 目录 ⇒「本项目」禁用。
   const project = page.getByRole('button', { name: '本项目', exact: true });
   await expect(project).toBeDisabled();

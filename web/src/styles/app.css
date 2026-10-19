@@ -4802,20 +4802,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer-dock:not(:has(.composer-controls)) .composer {
   padding-right: 52px;
 }
-.composer-rule-signal {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
+/* #1405：规则开关收进附件菜单后，dock 里只在已勾选时保留一枚静态标签
+ * （已选状态可见），不再是可点击的常驻 checkbox。 */
+.composer-rule-active {
   padding: 0 var(--space-lg) var(--space-sm);
   color: var(--color-muted-foreground);
   font: 400 var(--text-xs) var(--font-ui);
-  cursor: pointer;
-}
-.composer-rule-signal input {
-  accent-color: var(--color-accent);
-}
-.composer-rule-signal input:disabled {
-  cursor: not-allowed;
 }
 /* #1191（Phase 2）：登记入口——勾选「作为可复用规则」后，右侧出现作用域三选一，
  * 选中项下方一行 hint。视觉对照 mockups/phase2.html 上半。 */
@@ -8366,6 +8358,32 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
+/* #1405：Agent / 推理收进「更多」披露。展开态沿用档位 chip 的 `data-state=open`
+ * 视觉（底色 + 发丝边），chevron 翻转给出方向；已选值由 trigger 文本回显。 */
+.composer-controls .composer-more[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+.composer-more[aria-expanded="true"] .composer-trigger-chevron {
+  transform: rotate(180deg);
+}
+/* #1405：附件「+」菜单（图片入口 + 可复用规则开关）。 */
+.composer-add-menu {
+  min-width: 232px;
+}
+.composer-rule-menu-item {
+  gap: 6px;
+}
+.composer-rule-menu-check {
+  display: inline-flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--accent-text);
+}
 /* ── #1368：窄屏控件行横向滚动，动作簇钉在右下 ──
  * 换行（`flex-wrap: wrap`）在 390 会把预算 pill 推到第二行，且第一行末尾的
  * Agent pill 钻到绝对定位的动作簇底下（实测重叠 141px²）。改成 nowrap + 横向滚动。
@@ -10428,43 +10446,43 @@ button.json-row {
   color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
 }
-/* #1028 AC2：composer 区常驻归属 chip。归属某项目 → 中性/强调色；未归属 → 警告色
- * （警示载体：用户据此知道当前会话不在任何项目里）。长路径截断，完整值进 title。 */
-.composer-owner-chip {
-  margin: var(--space-sm) var(--space-lg) 0;
-  padding: 1px var(--space-sm);
+/* #1028 AC2 → #1405：归属信息从 dock 内 chip 降为 composer 上方的一行静默文本。
+ * 无边框、无底色、无圆角、无 warning 色；未分组/目录未知仍可运行，不属于告警。
+ * 长路径截断，完整值仍在 title。 */
+.composer-ownership {
+  min-width: 0;
   max-width: 100%;
-  width: fit-content;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-secondary);
-  background: var(--surface-2, transparent);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.composer-owner-chip-project {
-  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--border-subtle));
-  color: color-mix(in srgb, var(--accent-text) 55%, var(--text-primary));
-}
-.composer-owner-chip-ungrouped {
-  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--border-subtle));
-  color: color-mix(in srgb, var(--color-warning) 55%, var(--text-primary));
-}
 /* #1312：会话级目标状态行（会话身份，回答「这条消息发往哪个会话」）。
- * 与 #1028 归属 chip 的视觉区分是**结构性的**：本行在 .composer-dock 之外、无边框/
- * 无底色/无胶囊圆角，是状态行；归属 chip 在 dock 内、带描边胶囊。二者语义正交
- * （会话 vs 项目），共用字号与墨色，靠无边框/无底色/无圆角 + dock 外置区分。
- * 文案色用既有 --text-secondary（暗亮双主题均 ≥4.5，见 t-contrast 口径），
+ * #1405 后与归属行同在 .composer-meta：两块语义正交（会话 vs 项目），
+ * 但视觉语言一致——无边框/无底色/无圆角，靠文本内容区分。 */
+/* 文案色用既有 --text-secondary（暗亮双主题均 ≥4.5，见 t-contrast 口径），
  * 不新增主题 token（AGENTS §15）。 */
+/* #1405：dock 上方的两行静默元信息（会话身份 + 项目归属）共用一条基线。
+ * 归属不再是带描边底色的 chip，也不再占用 warning 色——未分组/目录未知
+ * 仍然可以正常运行，不是告警。 */
+.composer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-md);
+  margin: 0 var(--space-xs) var(--space-xs);
+  padding: 0 var(--space-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
 .composer-session-target {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  margin: 0 var(--space-xs) var(--space-xs);
-  padding: 0 var(--space-sm);
+  min-width: 0;
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-secondary);

@@ -385,9 +385,6 @@ describe('Composer procedural rule signal (#298 R5)', () => {
   it('checked rule opt-in reaches the create request payload', async () => {
     await mount();
     const input = container!.querySelector<HTMLTextAreaElement>('#composer-input')!;
-    const checkbox = container!.querySelector<HTMLInputElement>(
-      '#remember-as-procedural-rule',
-    )!;
     const valueSetter = Object.getOwnPropertyDescriptor(
       HTMLTextAreaElement.prototype, 'value',
     )?.set;
@@ -396,7 +393,18 @@ describe('Composer procedural rule signal (#298 R5)', () => {
       valueSetter!.call(input, '后续始终使用 pnpm');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await act(async () => checkbox.click());
+    // #1405：规则开关在附件「+」菜单里（Radix portal → document.body）。
+    const addTrigger = container!.querySelector<HTMLButtonElement>(
+      'button[aria-label="添加图片"]',
+    )!;
+    await act(async () => {
+      addTrigger.focus();
+      addTrigger.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      );
+    });
+    const ruleItem = document.querySelector<HTMLElement>('#remember-as-procedural-rule')!;
+    await act(async () => ruleItem.click());
     await act(async () => {
       container!.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click();
     });

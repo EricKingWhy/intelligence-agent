@@ -24,6 +24,7 @@ import {
   MODELS,
   PERMISSION_MODES,
   REASONING_EFFORTS,
+  openMore,
   routeApi,
   routeStreaming,
   rowOf,
@@ -190,6 +191,8 @@ test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
 
     const controls = page.locator('.composer-controls');
     await expect(controls).toBeVisible();
+    // #1405：先展开「更多」，让控件行真的包含 Agent / 推理后再量溢出。
+    await openMore(page);
     expect(await controls.evaluate((el) => getComputedStyle(el).flexWrap)).toBe('nowrap');
     // 真的有可滚内容才谈"横向滚动"（否则这条断言是恒真的装饰）
     expect(await controls.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
@@ -205,6 +208,7 @@ test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
     await submitTask(page, '跑一下');
     await expect(page.locator('.composer-esc-hint')).toBeVisible();
     await expect(page.locator('.composer-stop')).toBeVisible();
+    await openMore(page);
 
     // base 那条 `padding-right` 在窄屏必须被 margin 取代（两条叠加实测压住「权限」
     // pill 67px）；这条断言把"归零"钉在计算值上，而不是只看几何结果。

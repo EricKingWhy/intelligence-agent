@@ -122,7 +122,7 @@ async function mount(): Promise<void> {
 }
 
 function chipText(): string | null {
-  return container!.querySelector('.composer-owner-chip')?.textContent ?? null;
+  return container!.querySelector('.composer-ownership')?.textContent ?? null;
 }
 
 beforeEach(() => {

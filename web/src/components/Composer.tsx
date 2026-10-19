@@ -7,7 +7,8 @@
  */
 
 import { forwardRef, memo, useCallback, useEffect, useId, useImperativeHandle, useRef, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
+import { ArrowUp, Brain, Check, ChevronDown, Ellipsis, ImagePlus, Pencil, Play, Plus, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
@@ -335,6 +336,8 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
 }: Props, ref) {
   const [value, setValue] = useState('');
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
+  /** #1405：Agent / 推理深度默认收进「更多」；展开态只是本地披露，不另存档位真值。 */
+  const [moreOpen, setMoreOpen] = useState(false);
   /** #1191：登记作用域（勾选「作为可复用规则」后可选；默认本会话）。 */
   const [scope, setScope] = useState<ConstraintScope>('session');
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
@@ -1081,6 +1084,16 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
           ? 'deep'
           : 'violet';
 
+  /* #1405：档位收进「更多」后，已选值仍要一眼可见——trigger 文本直接带出当前
+     Agent / 推理档名（无选择时退回「更多」）。真值仍只来自 props 投影，不新增副本。 */
+  const selectedAgentName =
+    agentProfiles.find((profile) => profile.id === selectedAgentProfile)?.display_name ?? null;
+  const selectedEffortName =
+    modelReasoningEfforts.find((effort) => effort.id === effectiveReasoningEffort)?.display_name ?? null;
+  const moreSummary = [selectedAgentName, selectedEffortName]
+    .filter((name): name is string => name !== null)
+    .join(' · ');
+
   // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器
   const hasControls =
     models.length > 0 ||
@@ -1320,27 +1333,42 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
           判定用**真值**（空串按「无会话」处理），与 :766 `runSlashCommand` 的
           `!sessionId` 一致；:619 的 `sessionId == null` 不同口径（空串仍当会话，
           Scope 外未改），两处差异在此如实记录。 */}
-      <div className="composer-session-target" data-testid="composer-session-target">
-        {sessionId ? (
-          <>
-            <span role="status">
-              正在向会话{' '}
-              <span className="composer-session-target-id">{sessionId.slice(0, 8)}</span>{' '}
-              追问
-            </span>
-            {onNewSession !== undefined && (
-              <button
-                type="button"
-                className="composer-session-target-new-btn"
-                aria-label="改为新会话"
-                onClick={onNewSession}
-              >
-                改为新会话
-              </button>
-            )}
-          </>
-        ) : (
-          <span role="status">将创建新会话</span>
+      <div className="composer-meta">
+        <div className="composer-session-target" data-testid="composer-session-target">
+          {sessionId ? (
+            <>
+              <span role="status">
+                正在向会话{' '}
+                <span className="composer-session-target-id">{sessionId.slice(0, 8)}</span>{' '}
+                追问
+              </span>
+              {onNewSession !== undefined && (
+                <button
+                  type="button"
+                  className="composer-session-target-new-btn"
+                  aria-label="改为新会话"
+                  onClick={onNewSession}
+                >
+                  改为新会话
+                </button>
+              )}
+            </>
+          ) : (
+            <span role="status">将创建新会话</span>
+          )}
+        </div>
+        {/* #1405（F-12）：归属信息移出 dock——不再用 warning 色 chip，而是与
+            会话状态同一行的 12px 静默文本。归属未知/未分组不等于无法运行，
+            因此这里永不使用 warning 样式；真正的运行阻断仍由 locked-hint /
+            send-blocked 等原有载体给出。title 仍携带完整 cwd。 */}
+        {ownership !== null && (
+          <div
+            className="composer-ownership"
+            role="note"
+            title={ownership.title}
+          >
+            {ownership.label}
+          </div>
         )}
       </div>
       <div className="composer-dock surface-floating">
@@ -1403,18 +1431,8 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
             </button>
           </div>
         )}
-        {/* #1028 AC2：常驻归属 chip——把「当前会话在哪个项目 / 哪个 cwd」显形。
-            归属由后端按 cwd 精确相等判定（前端不比对，见 lib/ownership.ts）；未归属
-            时本 chip 就是那条「你不在任何项目里」的警示。 */}
-        {ownership !== null && (
-          <div
-            className={`composer-owner-chip composer-owner-chip-${ownership.kind}`}
-            role="note"
-            title={ownership.title}
-          >
-            {ownership.label}
-          </div>
-        )}
+        {/* #1405：归属信息已移到 dock 上方的 .composer-meta，不再占用 dock 内的
+            常驻控件位。 */}
         <textarea
           ref={inputRef}
           id="composer-input"
@@ -1472,25 +1490,11 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
           disabled={locked}
           aria-label="Agent 任务"
         />
-        <div className="composer-rule-row">
-          <label className="composer-rule-signal" htmlFor="remember-as-procedural-rule">
-            <input
-              id="remember-as-procedural-rule"
-              type="checkbox"
-              checked={rememberAsProceduralRule}
-              onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
-              disabled={locked}
-            />
-            {/* #1372 改动 4/6：说明文字的原生 title 迁到 radix tooltip。span 自身可聚焦，
-                键盘用户也能读到同一条解释；可见文字仍是 <label> 的可访问名（Label in Name）。 */}
-            <Tip content="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
-              <span className="composer-rule-help" tabIndex={0}>
-                将这条消息作为可复用规则
-              </span>
-            </Tip>
-          </label>
-          {/* #1191：勾选后出现作用域三选一（默认「本会话」，票面 §四.1）。 */}
-          {rememberAsProceduralRule && (
+        {/* #1405（F-12）：规则开关已收进附件「+」菜单，不再常驻 checkbox。
+            只有已勾选时才保留作用域选择——已选状态仍要可见、可改。 */}
+        {rememberAsProceduralRule && (
+          <div className="composer-rule-row">
+            <span className="composer-rule-active">作为可复用规则</span>
             <div className="composer-scope-pills" role="group" aria-label="登记作用域">
               {SCOPE_OPTIONS.map((option) => {
                 const projectDisabled = option.id === 'project' && projectAvailable === false;
@@ -1515,8 +1519,8 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
                 );
               })}
             </div>
-          )}
-        </div>
+          </div>
+        )}
         {/* 选中项下方的 hint 文案——逐字取自票面 §四.2（句子单独成节点，便于逐字核对）。 */}
         {rememberAsProceduralRule && (
           <div className="composer-scope-hint">
@@ -1577,65 +1581,100 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               footer={renderPermissionFooter}
             />
             </div>
-            <OptionPicker
-              ariaLabel="Agent Profile"
-              title="这次会话用哪个档位？"
-              hint="Agent：这次会话用哪个档位（决定可用工具面）；切换后从下一轮 run 生效。"
-              options={toCatalogOptions(agentProfiles, catalogIcon)}
-              value={selectedAgentProfile}
-              onChange={(id) => onAgentProfileChange?.(id)}
-              icon={User}
-              placeholder="Agent"
-              disabled={locked}
-              // #201 冻结 AC：档位收窄提示（用户裁定"要提示，但从简，不能突兀"）。
-              // 文案组装在纯函数里（`lib/agentProfileScope.ts`，vitest 直测）；
-              // 没被收窄 / 后端没给 tool_scope → 该函数返回 null → 不渲染 footer。
-              // 按**当前生效档位**披露：未选时按后端默认档位（main），因为那才是
-              // 这次会话真正会用的工具面。
-              footer={
-                (() => {
-                  const note = toolScopeNote(agentProfiles, selectedAgentProfile);
-                  if (!note) return undefined;
-                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；可访问名**以可见
-                  // 文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名会违反
-                  // WCAG 2.5.3（Label in Name）。#1372：title 迁到 radix tooltip。
-                  return (
-                    <Tip content={note.title}>
-                      <span
-                        tabIndex={0}
-                        aria-label={`${note.text}；${note.title}`}
-                      >
-                        {note.text}
-                      </span>
-                    </Tip>
-                  );
-                })()
-              }
-            />
-            <OptionPicker
-              ariaLabel="Reasoning Effort"
-              title={reasoningEffortProjection ? '备用模型的推理默认档' : '推理深度选哪一档？'}
-              hint="推理：下一轮 run 的推理深度；档位越高越慢、消耗越多。"
-              options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
-              value={effectiveReasoningEffort}
-              onChange={(id) => onReasoningEffortChange?.(id)}
-              icon={Brain}
-              currentTone={reasoningEffortTone}
-              footer={reasoningEffortProjection && reasoningEffortCapability
-                ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；本次任务结束后恢复主模型选择。`
-                : undefined}
-              customContent={
-                <ReasoningEffortSlider
-                  options={modelReasoningEfforts}
-                  value={effectiveReasoningEffort}
-                  defaultValue={reasoningEffortCapability?.default ?? null}
-                  disabled={locked || reasoningEffortProjection !== null}
-                  onChange={(id) => onReasoningEffortChange?.(id)}
-                />
-              }
-              placeholder="推理"
-              disabled={locked}
-            />
+            {(agentProfiles.length > 0 || modelReasoningEfforts.length > 0) && (
+              <>
+                {/* #1405（F-12）：默认工具栏只留模型 + 权限。Agent / 推理深度收进
+                    这个「更多」披露；已选档名回显在 trigger 上（选择状态仍可见），
+                    展开后仍是原来那两只 OptionPicker，功能与 ARIA 不变。 */}
+                <button
+                  type="button"
+                  className="composer-control composer-more"
+                  aria-label="更多设置"
+                  aria-expanded={moreOpen}
+                  data-selected={moreSummary === '' ? undefined : 'true'}
+                  title={
+                    moreSummary === ''
+                      ? '更多设置：Agent 档位与推理深度'
+                      : `更多设置：${selectedAgentName ?? 'Agent 默认'} · ${selectedEffortName ?? '推理默认'}`
+                  }
+                  disabled={locked}
+                  onClick={() => setMoreOpen((open) => !open)}
+                >
+                  <Ellipsis size={13} className="composer-trigger-icon" aria-hidden="true" />
+                  <span className="composer-trigger-current">
+                    {moreSummary === '' ? '更多' : moreSummary}
+                  </span>
+                  <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+                </button>
+                {moreOpen && (
+                  <>
+                    {agentProfiles.length > 0 && (
+                      <OptionPicker
+                        ariaLabel="Agent Profile"
+                        title="这次会话用哪个档位？"
+                        hint="Agent：这次会话用哪个档位（决定可用工具面）；切换后从下一轮 run 生效。"
+                        options={toCatalogOptions(agentProfiles, catalogIcon)}
+                        value={selectedAgentProfile}
+                        onChange={(id) => onAgentProfileChange?.(id)}
+                        icon={User}
+                        placeholder="Agent"
+                        disabled={locked}
+                        // #201 冻结 AC：档位收窄提示（用户裁定"要提示，但从简，不能突兀"）。
+                        // 文案组装在纯函数里（`lib/agentProfileScope.ts`，vitest 直测）；
+                        // 没被收窄 / 后端没给 tool_scope → 该函数返回 null → 不渲染 footer。
+                        // 按**当前生效档位**披露：未选时按后端默认档位（main），因为那才是
+                        // 这次会话真正会用的工具面。
+                        footer={
+                          (() => {
+                            const note = toolScopeNote(agentProfiles, selectedAgentProfile);
+                            if (!note) return undefined;
+                            // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；可访问名**以可见
+                            // 文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名会违反
+                            // WCAG 2.5.3（Label in Name）。#1372：title 迁到 radix tooltip。
+                            return (
+                              <Tip content={note.title}>
+                                <span
+                                  tabIndex={0}
+                                  aria-label={`${note.text}；${note.title}`}
+                                >
+                                  {note.text}
+                                </span>
+                              </Tip>
+                            );
+                          })()
+                        }
+                      />
+                    )}
+                    {modelReasoningEfforts.length > 0 && (
+                      <OptionPicker
+                        ariaLabel="Reasoning Effort"
+                        title={reasoningEffortProjection ? '备用模型的推理默认档' : '推理深度选哪一档？'}
+                        hint="推理：下一轮 run 的推理深度；档位越高越慢、消耗越多。"
+                        options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
+                        value={effectiveReasoningEffort}
+                        onChange={(id) => onReasoningEffortChange?.(id)}
+                        icon={Brain}
+                        currentTone={reasoningEffortTone}
+                        footer={reasoningEffortProjection && reasoningEffortCapability
+                          ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；本次任务结束后恢复主模型选择。`
+                          : undefined}
+                        customContent={
+                          <ReasoningEffortSlider
+                            options={modelReasoningEfforts}
+                            value={effectiveReasoningEffort}
+                            defaultValue={reasoningEffortCapability?.default ?? null}
+                            disabled={locked || reasoningEffortProjection !== null}
+                            onChange={(id) => onReasoningEffortChange?.(id)}
+                          />
+                        }
+                        placeholder="推理"
+                        disabled={locked}
+                      />
+                    )}
+                  </>
+                )}
+              </>
+            )}
             {/* #536：预算三项收敛为单入口 popover（设计稿 §2.3，替换 #426 三平铺）。
                 会话内不显示——budget.run 属于**启动 run** 的请求（#422），续聊不带
                 budget（#308）。留空 = 后端默认（不发键）；到顶/到点自动暂停，恢复
@@ -1662,18 +1701,57 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
             的像素位置与改动前完全一致（right/bottom 同一组值），提示作为它的左邻出现。 */}
         <div className="composer-actions">
           {/* #825（MM-04）AC1/AC7：附图入口（第三个通道：选择器；另两个是粘贴与拖放）。
-              禁用时 title 给出原因，且**不是唯一出口**——非视觉模型的可见说明在上方
-              `.composer-attach-hint` 里。 */}
-          <button
-            type="button"
-            className="composer-attach-trigger"
-            onClick={pickFiles}
-            disabled={!canAttach}
-            aria-label="添加图片"
-            title={canAttach ? '添加图片（也可直接粘贴或拖入页面）' : attachBlockedReason}
-          >
-            <ImagePlus size={16} />
-          </button>
+              #1405（F-12）：这里升级为附件「+」菜单——图片入口仍保留（不可附图时
+              该项禁用并给出 title），规则开关收进同一菜单，不再常驻 dock。
+              注意：trigger 本身不 disabled，否则非视觉模型下规则入口也会被一起锁死；
+              真正被门禁挡住的是菜单里的「添加图片」项。 */}
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                className="composer-attach-trigger"
+                aria-label="添加图片"
+                title={canAttach ? '添加图片（也可直接粘贴或拖入页面）' : attachBlockedReason}
+              >
+                <Plus size={16} />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className="rail-menu composer-add-menu"
+                side="top"
+                align="end"
+                sideOffset={6}
+              >
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  data-testid="composer-add-image"
+                  disabled={!canAttach}
+                  title={canAttach ? '添加图片（也可直接粘贴或拖入页面）' : attachBlockedReason}
+                  onSelect={() => pickFiles()}
+                >
+                  <ImagePlus size={14} aria-hidden="true" />
+                  添加图片…
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="rail-menu-sep" />
+                {/* #1405：可复用规则开关（原常驻 checkbox）。aria-checked 由 Radix
+                    按真实状态写入；已选后 dock 里会出现作用域三选一。 */}
+                <DropdownMenu.CheckboxItem
+                  id="remember-as-procedural-rule"
+                  className="rail-menu-item composer-rule-menu-item"
+                  checked={rememberAsProceduralRule}
+                  onCheckedChange={(checked) => setRememberAsProceduralRule(checked === true)}
+                  disabled={locked}
+                  title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。"
+                >
+                  <span className="composer-rule-menu-check" aria-hidden="true">
+                    {rememberAsProceduralRule ? <Check size={12} /> : null}
+                  </span>
+                  将这条消息作为可复用规则
+                </DropdownMenu.CheckboxItem>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
           {streaming && (
             /* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App
                全局，这里只做可见性——所以整个簇 pointer-events: none，只有按钮可点。 */

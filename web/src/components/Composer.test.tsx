@@ -295,11 +295,13 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
   });
 });
 
-describe('Composer procedural rule signal (#298 R5)', () => {
-  it('offers an explicit opt-in for reusable rules', () => {
+describe('Composer procedural rule signal (#298 R5 / #1405)', () => {
+  it('reusable-rule entry lives in the add menu, never as a persistent dock control', () => {
     const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');
-    expect(html).toContain('将这条消息作为可复用规则');
-    expect(html).toContain('remember-as-procedural-rule');
+    // 附件「+」入口仍在；规则开关不再是 dock 里的常驻 checkbox（Radix portal 只在打开时渲染）。
+    expect(html).toContain('aria-label="添加图片"');
+    expect(html).not.toContain('将这条消息作为可复用规则');
+    expect(html).not.toContain('remember-as-procedural-rule');
   });
 });
 

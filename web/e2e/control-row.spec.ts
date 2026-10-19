@@ -22,6 +22,7 @@ import {
   T,
   fulfillSse,
   longCatalog,
+  openMore,
   pickControl,
   routeApi,
 } from './fixtures';
@@ -78,6 +79,10 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
   await expect(modelTrigger).toHaveCount(0);
   // Controls without per-model capability metadata stay hidden.
   await expect(permTrigger).toBeVisible();
+  // #1405：Agent / 推理默认收在「更多」里——折叠态不渲染，展开后 Agent 才在场。
+  await expect(agentTrigger).toHaveCount(0);
+  await expect(effortTrigger).toHaveCount(0);
+  await openMore(page);
   await expect(agentTrigger).toBeVisible();
   await expect(effortTrigger).toHaveCount(0);
 
@@ -272,6 +277,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await openMore(page);
   await effortTrigger.click();
   const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeVisible();
@@ -296,7 +302,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   await permissionTrigger.click();
   await page.locator('.picker-item', { hasText: readOnlyMode!.display_name }).first().click();
   await expect(permissionTrigger).toContainText(readOnlyMode!.display_name);
-  const agentTrigger = page.locator('.composer-control').nth(1);
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
   const codingProfile = AGENT_PROFILES.find((profile) => profile.id === 'coding');
   await agentTrigger.click();
   await page.locator('.picker-item', { hasText: codingProfile!.display_name }).first().click();
@@ -361,6 +367,7 @@ test('Reasoning Effort refresh keeps a value supported by the selected model', a
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
   await expect(modelTrigger).toBeVisible();
+  await openMore(page);
 
   await modelTrigger.click();
   const openaiProvider = page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: 'openai' }).first();
@@ -441,6 +448,7 @@ test('active fallback projects its own default without replacing the primary pre
 
   await page.goto('/');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await openMore(page);
   await expect(effortTrigger).toBeVisible();
   await effortTrigger.click();
   const slider = page.getByRole('slider', { name: '推理档位' });
@@ -488,6 +496,7 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   });
   await page.goto('/');
 
+  await openMore(page);
   const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
   const foot = page.locator('.picker-foot');
   const openPicker = async () => {
@@ -627,6 +636,7 @@ test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形'
   });
   await page.goto('/');
 
+  await openMore(page);
   const cases = [
     { label: '权限模式', title: '只读' },
     { label: 'Agent Profile', title: 'Main' },

@@ -9,6 +9,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   fulfillSse,
+  openMore,
   routeApi,
 } from './fixtures';
 
@@ -58,8 +59,10 @@ for (const width of WIDTHS) {
     expect(controlsBox!.x).toBeGreaterThanOrEqual(dockBox!.x);
     expect(controlsBox!.x + controlsBox!.width).toBeLessThanOrEqual(dockBox!.x + dockBox!.width + 1);
 
-    // 该宽度下 Reasoning Effort trigger 与其他控件同在；行内计数防止成员静默变化。
-    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(4);
+    // #1405：默认只露权限 + 更多（+ 预算）；Agent / 推理在「更多」展开后才在场。
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(3);
+    await openMore(page);
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(5);
     const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
     await expect(effortTrigger).toBeVisible();
     await expect(page.locator('.composer-budget-trigger')).toHaveCount(1);
@@ -86,6 +89,7 @@ test('Reasoning Effort 在模型未声明能力时隐藏', async ({ page }) => {
   });
 
   await page.goto('/');
+  await openMore(page);
   await expect(page.locator('.composer-control[aria-label="Reasoning Effort"]')).toHaveCount(0);
 });
 
