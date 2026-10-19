@@ -5,6 +5,11 @@
 - SIGKILL 落在原子替换窗口时，旧文件逐字节不变、无半截条目；
 - 随机 SIGKILL 压力下，任何时刻重新解析文件都必须成功且条目完整；
 - 锁文件 0600，且拒绝符号链接（O_NOFOLLOW）。
+
+Windows 上没有 POSIX 权限位、也没有可用的 SIGKILL（`signal.SIGKILL` 不存在、
+`process.kill()` 走 TerminateProcess 拿不到负 returncode），故那三条按平台跳过；
+跨进程不丢写那条（`test_concurrent_processes_do_not_lose_writes`）不依赖任何
+POSIX 专有语义，是全平台等价用例（#1384）。
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ pytestmark = pytest.mark.asyncio
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKER = Path(__file__).resolve().parent / "_1353_store_worker.py"
+
+#: Windows 没有 POSIX 权限位，也没有 `signal.SIGKILL`（`Popen.kill()` 走
+#: TerminateProcess，拿不到 `-SIGKILL` 的 returncode）。这三条按平台跳过；
+#: 跨进程不丢写那条不依赖任一语义，Windows 上照跑（#1384）。
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX 权限位 / SIGKILL")
 
 
 def _worker_env() -> dict[str, str]:
@@ -74,6 +84,7 @@ def _assert_complete(entries: list[str], expected_prefixes: tuple[str, ...]) -> 
         assert entry.startswith(expected_prefixes), f"发现半截/未知条目: {entry!r}"
 
 
+@_POSIX_ONLY
 async def test_lock_file_is_owner_only(tmp_path) -> None:
     store = await _new_store(tmp_path)
     assert (await call(store.add, "memory", "entry-000"))["success"] is True
@@ -101,6 +112,7 @@ async def test_lock_symlink_is_refused(tmp_path) -> None:
     assert outside.read_text(encoding="utf-8") == "do not touch"
 
 
+@_POSIX_ONLY
 async def test_crash_before_atomic_replace_keeps_old_file_intact(tmp_path) -> None:
     store = await _new_store(tmp_path)
     for index in range(3):
@@ -118,6 +130,7 @@ async def test_crash_before_atomic_replace_keeps_old_file_intact(tmp_path) -> No
     assert read_entries(path) == ["seed-000", "seed-001", "seed-002"]
 
 
+@_POSIX_ONLY
 async def test_random_sigkill_never_leaves_partial_entry(tmp_path) -> None:
     store = await _new_store(tmp_path)
     assert (await call(store.add, "memory", "seed-000"))["success"] is True
