@@ -87,7 +87,12 @@ async def recall(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_keeps_keyword_only_and_dense_only_matches(recall) -> None:
+async def test_hybrid_search_keeps_only_lexical_matches(recall) -> None:
+    """#1353 §5：dense 腿已删除 —— 只有词法命中的记录可召回。
+
+    第二段是**反控**：即使派生索引声称有一条语义命中，它也不能进入结果
+    （旧实现会把它并进来）；否则"删掉 dense 腿"这件事没有被任何断言钉住。
+    """
     service, _store, index, relay = recall
     lexical = await service.create(make_draft(content="PostgreSQL stores the project records."), USER)
     semantic = await service.create(make_draft(content="The database is a relational engine."), USER)
@@ -99,48 +104,42 @@ async def test_hybrid_search_keeps_keyword_only_and_dense_only_matches(recall) -
     )
 
     by_id = {hit.record.id: hit for hit in hits}
-    assert set(by_id) == {lexical.id, semantic.id}
+    assert set(by_id) == {lexical.id}
     assert by_id[lexical.id].explanation["keyword"] > 0
-    assert by_id[semantic.id].explanation["dense"] == 0.97
-    assert by_id[semantic.id].explanation["keyword"] == 0
+    assert by_id[lexical.id].explanation["dense"] == 0
     assert all(hit.explanation["ranking_version"] == RANKING_VERSION for hit in hits)
 
 
 @pytest.mark.asyncio
 async def test_hybrid_search_rechecks_status_identity_scope_and_project(recall) -> None:
-    service, _store, index, relay = recall
+    service, _store, _index, relay = recall
     stale = await service.create(make_draft(content="old secret phrase"), USER)
     await service.update(stale.id, make_draft(content="current unrelated fact"), USER)
-    other_user = await service.create(
+    await service.create(
         make_draft(content="private phrase for another user"),
         TrustedMemoryIdentity("tenant-a", "user-b"),
     )
-    other_project = await service.create(
+    await service.create(
         make_draft(
             scope=MemoryScope.PROJECT, project_id="project-y",
             content="project-only private phrase",
         ),
         TrustedMemoryIdentity("tenant-a", "user-a", "project-y"),
     )
-    other_tenant = await service.create(
-        make_draft(content="cross tenant private marker"),
+    await service.create(
+        make_draft(content="cross tenant private phrase"),
         TrustedMemoryIdentity("tenant-b", "user-a"),
     )
     await relay.flush()
-    index.hits = [
-        (stale.id, 1.0), (other_user.id, 0.99), (other_project.id, 0.98),
-        (other_tenant.id, 0.97), ("forged", 0.96),
-    ]
 
     hits = await service.hybrid_search(
         "phrase", PROJECT, scopes=[MemoryScope.USER_GLOBAL, MemoryScope.PROJECT], limit=10,
     )
 
+    # 词法命中的候选全部要过权威复核：已失效 / 他人 / 别的项目 / 别的租户一律不出。
     assert hits == []
-
-    index.hits = []
     assert await service.hybrid_search(
-        "cross tenant private marker", PROJECT,
+        "cross tenant private phrase", PROJECT,
         scopes=[MemoryScope.USER_GLOBAL, MemoryScope.PROJECT], limit=10,
     ) == []
 
@@ -177,7 +176,6 @@ async def test_hybrid_search_rejects_stale_index_hits_while_delete_is_pending(
         for change in await store.pending()
     )
     assert stale.id in index.rows
-    index.hits = [(stale.id, 0.99)]
 
     hits = await search.hybrid_search(
         "pending marker", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
@@ -267,11 +265,22 @@ async def test_hybrid_top_six_observer_captures_raw_hits_before_context_budget(r
     )
     session.append(USER_MESSAGE, {"content": "common token"})
     observed_top_six: list[tuple[str, ...]] = []
-    from scripts.run_memory_v2_real_gold_gate import _RecallEvaluationCapability
 
-    provider = MemoryV2ContextProvider(
-        _RecallEvaluationCapability(service, observed_top_six.append),
-    )
+    class _ObservingRecall:
+        """包一层召回口，记下**预算裁剪前**的前六条（脚本删除后的等价替身）。"""
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        async def list_profiles(self, *args, **kwargs):
+            return await self._inner.list_profiles(*args, **kwargs)
+
+        async def hybrid_search(self, *args, **kwargs):
+            hits = await self._inner.hybrid_search(*args, **kwargs)
+            observed_top_six.append(tuple(hit.record.id for hit in hits[:6]))
+            return hits
+
+    provider = MemoryV2ContextProvider(_ObservingRecall(service))
     identity_token = set_identity_context(IdentityContext("tenant-a", "user-a", ["user"]))
     try:
         injected = await provider.select(session, 1)

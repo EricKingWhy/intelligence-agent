@@ -83,7 +83,7 @@ async def test_delete_is_idempotent_and_writes_no_index_intent_when_absent(tmp_p
 
     没有记录行就没有可用于路由的 namespace（删哪条向量？属于谁？），所以这里如实
     返回"什么都没发生"，而不是编一个空的删除意图——后者会让 relay 拿空 identity
-    去调 Milvus。
+    去调向量后端。
     """
     records = await _store(tmp_path)
     assert await records.delete("ghost", ALICE) is False
@@ -153,7 +153,7 @@ async def test_delete_failure_keeps_the_outbox_intent_for_retry(tmp_path):
 
         async def delete(self, memory_id, identity, scope):
             if self.fail:
-                raise ConnectionError("milvus down")
+                raise ConnectionError("vector backend down")
             await super().delete(memory_id, identity, scope)
 
     vectors = NoDelete()

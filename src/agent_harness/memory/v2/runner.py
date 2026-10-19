@@ -91,14 +91,25 @@ from agent_harness.memory.v2.executor import (
 )
 from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
+    MemoryJobOutcome,
     MemoryJobStage,
     SqliteMemoryV2JobStore,
+)
+from agent_harness.memory.v2.journey import memory_fingerprint
+from agent_harness.memory.v2.notification import (
+    review_messages_for,
+    summarize_background_review_actions,
 )
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
-from agent_harness.session import USER_MESSAGE, Session, SessionEvent
+from agent_harness.session import (
+    MEMORY_HUMAN_UPDATED,
+    USER_MESSAGE,
+    Session,
+    SessionEvent,
+)
 from agent_harness.session.errors import SeqConflict
 from agent_harness.session.store import JsonlSessionStore
 
@@ -366,6 +377,7 @@ class MemoryJobRunner:
         worker_id: str | None = None,
         memory_v2: Any | None = None,
         workspace_index: Any | None = None,
+        notification_mode: str = "on",
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -375,6 +387,9 @@ class MemoryJobRunner:
         self._roles = roles
         self.memory_v2 = memory_v2
         self._workspace_index = workspace_index
+        #: #1353 M7：人面向通知档位（off/on/verbose）。装配期从部署配置传入，
+        #: 运行期不改——它是"这台机器怎么说话"，不是每个用户的治理选择。
+        self._notification_mode = notification_mode
         #: 默认按会话建 sink（`executor` 的端口没有 session 参数，只能在这里绑）。
         #: 允许注入是为了让用例能对着裸 list 断言事件，而不必去读会话日志。
         self._sink = sink
@@ -662,7 +677,7 @@ class MemoryJobRunner:
                             job.job_id,
                         )
                         fallback_enabled = False
-                return await self._executor.run(
+                result = await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
                     fallback_enabled=fallback_enabled,
@@ -670,6 +685,47 @@ class MemoryJobRunner:
             except Exception:
                 logger.exception("Memory V2 job %s failed outside the executor", job.job_id)
                 return await self._abandon(job, reason=DegradedReason.JOB_FAILED)
+            self._notify_human(job, result)
+            return result
+
+    def _notify_human(self, job: MemoryFormationJob, result: MemoryJobResult | None) -> None:
+        """#1353 M7：把**已提交**的记忆变更摘成人面向的一句/几行。
+
+        发射点在 runner 而不是执行器：执行器的 sink 被既有用例逐字钉住
+        （`test_v2_executor` 断言事件列表**恰好**是 `[memory/updated]`），而 M7 的
+        摘要属于"作业宿主告诉用户发生了什么"，不是"执行器观测到了什么"。
+
+        三条边界，都是票面原文：
+
+        - 只报**已提交**的结果。`written` 为空（NO_MEMORY / 全丢弃 / 降级）⇒ 不发——
+          安静成功不能装成"写过了"；
+        - 事件载荷**只带计数与指纹/指针**（不变量 #22）。摘要行本身（verbose 档带
+          内容预览）只进日志；
+        - `off` 档连日志摘要也不生成（`summarize_*` 自己返回空）。
+        """
+        if result is None or result.outcome is not MemoryJobOutcome.COMMITTED:
+            return
+        if not result.written:
+            return
+        actions = summarize_background_review_actions(
+            review_messages_for(result.written), [], self._notification_mode,
+        )
+        if actions:
+            logger.info(
+                "Memory V2 job %s self-improvement review: %s", job.job_id, " · ".join(actions),
+            )
+        if self._notification_mode == "off":
+            return
+        self._sink_for(job).emit(
+            MEMORY_HUMAN_UPDATED,
+            {
+                "count": len(result.written),
+                "memory_ids": [record.id for record in result.written],
+                "fingerprints": [memory_fingerprint(record.content) for record in result.written],
+                "job_id": job.job_id,
+            },
+            run_id=job.run_id,
+        )
 
     async def _abandon(
         self, job: MemoryFormationJob, *, reason: DegradedReason,
