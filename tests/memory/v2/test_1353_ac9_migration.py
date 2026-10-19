@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
 from agent_harness.memory.v2.migration import migrate_active_records
-from tests.memory.v2._markdown_memory_1353 import DELIMITER
 
 pytestmark = pytest.mark.asyncio
 
@@ -89,7 +89,7 @@ async def _seed(db_path: Path, extra_rows: tuple = ()) -> int:
 
 def _entries(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8-sig")
-    return [entry.strip() for entry in raw.split(DELIMITER) if entry.strip()]
+    return [entry.strip() for entry in raw.split(ENTRY_DELIMITER) if entry.strip()]
 
 
 def _migrated_files(workspace: Path) -> tuple[Path, Path]:
