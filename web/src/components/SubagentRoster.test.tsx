@@ -143,7 +143,7 @@ describe('#1256 SubagentRoster', () => {
         onOpenSplit={NOOP}
       />,
     );
-    expect(host.querySelector('.roster-label')?.textContent).toBe('2 个子智能体');
+    expect(host.querySelector('.roster-label')?.textContent).toBe('2 个子任务');
     expect(host.querySelector('.roster-running-badge')?.textContent).toBe('1');
     expect(host.querySelector('.roster')).toBeNull(); // 未展开
   });

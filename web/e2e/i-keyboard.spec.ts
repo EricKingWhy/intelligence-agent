@@ -64,7 +64,7 @@ test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ pa
   // 用**英文**查询、点**中文**条目——一条测试锁两件事：label 已本地化（BUG-007），
   // 且英文说法仍经 keywords 命中（老用户的肌肉记忆不作废）。
   await page.locator('.palette-input').fill('Copy Run');
-  await page.locator('.palette-item', { hasText: '复制 Run ID' }).click();
+  await page.locator('.palette-item', { hasText: '复制任务编号' }).click();
   await expect(page.locator('.palette-input')).toBeHidden();
 
   // copyText 内部是 `void navigator.clipboard.writeText(...)`（不 await）——点击

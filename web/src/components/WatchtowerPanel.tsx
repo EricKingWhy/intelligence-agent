@@ -727,7 +727,7 @@ function CreateWatchtowerForm({
           <button type="button" className="watchtower-action" onClick={() => onOpenChange(false)} disabled={submitting}>取消</button>
           <button type="submit" className="watchtower-primary" disabled={!consent || !prompt.trim() || submitting}>
             {submitting ? <LoaderCircle size={15} className="watchtower-spin" /> : <Plus size={15} />}
-            创建值班规则
+            创建定时任务
           </button>
         </div>
       </form>

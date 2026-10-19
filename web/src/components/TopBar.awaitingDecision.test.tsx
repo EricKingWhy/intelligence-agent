@@ -94,7 +94,7 @@ afterEach(() => {
 describe('#1030 TopBar 徽标 · 待裁决是一等态（AC1/AC4）', () => {
   it('AC1：坏死 run + 待裁决 ⇒ 「待裁决」，不再显示「思考中」', () => {
     renderTopBar(zombieState('s-1'), true);
-    expect(pulse().textContent).toContain('待裁决');
+    expect(pulse().textContent).toContain('等你决定');
     expect(pulse().textContent).not.toContain('思考中');
   });
 
@@ -109,7 +109,7 @@ describe('#1030 TopBar 徽标 · 待裁决是一等态（AC1/AC4）', () => {
     // 票面实测的峰值误导态：徽标转「已中断」+ 黄横幅，"看似痊愈"，
     // 但 UNKNOWN 裁决还挂着、发消息照样 409，且此时连红色横幅都没了。
     renderTopBar(restartedState('s-1'), true);
-    expect(pulse().textContent).toContain('待裁决');
+    expect(pulse().textContent).toContain('等你决定');
     expect(pulse().textContent).not.toContain('已中断');
   });
 

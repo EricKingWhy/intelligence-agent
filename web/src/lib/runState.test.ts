@@ -268,17 +268,17 @@ describe('recoverDoneMessage', () => {
 
   it('回填了工具结果', () => {
     expect(recoverDoneMessage({ repaired: 2, terminalRepaired: false, ...none }))
-      .toBe('已恢复：回填 2 条工具结果');
+      .toBe('已恢复：补回 2 条工具结果');
   });
 
   it('回填工具结果 + 补齐终态：两条都说', () => {
     expect(recoverDoneMessage({ repaired: 1, terminalRepaired: true, ...none }))
-      .toBe('已恢复：回填 1 条工具结果，并补齐 run 终态');
+      .toBe('已恢复：补回 1 条工具结果，并补上结束状态');
   });
 
   it('只补齐终态：不能说成「无可修复项」', () => {
     const m = recoverDoneMessage({ repaired: 0, terminalRepaired: true, ...none });
-    expect(m).toBe('已恢复：补齐 run 终态');
+    expect(m).toBe('已恢复：补上结束状态');
     expect(m).not.toContain('无可修复项');
   });
 
@@ -286,31 +286,31 @@ describe('recoverDoneMessage', () => {
     const m = recoverDoneMessage({
       repaired: 1, terminalRepaired: false, stillUnterminated: true, stillDangling: false,
     });
-    expect(m).toContain('回填 1 条工具结果');
-    expect(m).toContain('仍缺 run 终态');
+    expect(m).toContain('补回 1 条工具结果');
+    expect(m).toContain('仍缺结束状态');
     expect(m).toContain('可重试');
   });
 
-  it('原因分开报：终态已补、只剩悬空 tool_call 时不得说「仍缺 run 终态」', () => {
+  it('原因分开报：终态已补、只剩悬空 tool_call 时不得说「仍缺结束状态」', () => {
     const m = recoverDoneMessage({
       repaired: 0, terminalRepaired: true, stillUnterminated: false, stillDangling: true,
     });
-    expect(m).toContain('仍有未配对工具调用');
-    expect(m).not.toContain('仍缺 run 终态');
+    expect(m).toContain('仍有没配上结果的工具调用');
+    expect(m).not.toContain('仍缺结束状态');
   });
 
   it('两个原因都在时报全', () => {
     const m = recoverDoneMessage({
       repaired: 0, terminalRepaired: false, stillUnterminated: true, stillDangling: true,
     });
-    expect(m).toContain('仍缺 run 终态且有未配对工具调用');
+    expect(m).toContain('仍缺结束状态，且有没配上结果的工具调用');
   });
 
   it('后端没修完（仍缺终态）→ 如实说可重试，不谎报完整', () => {
     const m = recoverDoneMessage({
       repaired: 0, terminalRepaired: false, stillUnterminated: true, stillDangling: false,
     });
-    expect(m).toContain('仍缺 run 终态');
+    expect(m).toContain('仍缺结束状态');
     expect(m).not.toContain('已完整');
   });
 
@@ -657,7 +657,7 @@ describe('deriveRunPulse — awaiting-decision 通道（#1030）', () => {
     expect(deriveRunPulse(s, false).label).toBe('思考中');
 
     expect(deriveRunPulse(s, false, true).state).toBe('awaiting-decision');
-    expect(deriveRunPulse(s, false, true).label).toBe('待裁决');
+    expect(deriveRunPulse(s, false, true).label).toBe('等你决定');
   });
 
   it('AC4：重启后 run/interrupted 已落盘 + 裁决仍挂 ⇒ 仍「待裁决」（最误导态的那一处）', () => {
@@ -700,7 +700,7 @@ describe('deriveRunPulse — awaiting-decision 通道（#1030）', () => {
 
   it('PULSE_TABLE 的 label/className/Icon 三者齐备（渲染不落空）', () => {
     const p = deriveRunPulse(zombie(), false, true);
-    expect(p.label).toBe('待裁决');
+    expect(p.label).toBe('等你决定');
     expect(p.className).toBe('pulse-awaiting-decision');
     expect(p.Icon).toBeTruthy();
   });
@@ -711,7 +711,7 @@ describe('coarsenPulseState / deriveRunSummary — 待裁决不得被粗化（#3
     const s = initConversation('s1');
     const withRun = applyEvent(applyEvent(s, ev(EventType.RUN_STARTED, {})), ev(EventType.MODEL_STARTED, {}, 1));
     // 不并进「运行中」：它会诱发"还在跑，等着就行"的误读——而事实是**必须有人动手**。
-    expect(deriveRunSummary(withRun, true).label).toBe('待裁决');
+    expect(deriveRunSummary(withRun, true).label).toBe('等你决定');
     expect(deriveRunSummary(withRun, true).label).not.toBe('运行中');
     expect(deriveRunSummary(withRun, true).label).not.toBe('已中断');
   });

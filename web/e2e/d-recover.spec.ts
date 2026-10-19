@@ -101,7 +101,7 @@ test('后端未能回填时不谎报「已完整」——如实说明仍缺终�
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
-  await expect(done).toContainText('仍缺 run 终态');
+  await expect(done).toContainText('仍缺结束状态');
   await expect(done).not.toContainText('已完整');
   // 仍是可恢复态 → 入口保留，用户可重试（不是死路）
   await expect(page.locator('.recover-btn')).toBeVisible();
@@ -136,7 +136,7 @@ test('只补上 run 终态（无工具回填）时如实说「补齐 run 终态�
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
-  await expect(done).toContainText('补齐 run 终态');
+  await expect(done).toContainText('补上结束状态');
   // 「无可修复项」会把一次真实的修复说成没修——这正是要防的谎报
   await expect(done).not.toContainText('无可修复项');
   await expect(done).not.toContainText('已完整');

@@ -118,7 +118,7 @@ describe('ConstraintInheritance', () => {
     expect(section.getAttribute('data-omit')).toBe('true');
     expect(c.querySelector('.ci-clean-msg')!.textContent).toContain('干净启动已开启');
     expect(c.querySelector('.ci-rows.ci-dim')).not.toBeNull();
-    expect(c.querySelector('.ci-empty')!.textContent).toContain('没有注入任何约束');
+    expect(c.querySelector('.ci-empty')!.textContent).toContain('没有带上任何要求');
     cleanup();
   });
 });

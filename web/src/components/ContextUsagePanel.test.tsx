@@ -97,7 +97,7 @@ describe('ContextUsagePanel 手动压缩', () => {
 
     act(() => button().click());
     expect(button().disabled).toBe(true);
-    expect(button().textContent).toContain('压缩中');
+    expect(button().textContent).toContain('精简中');
     expect(document.body.querySelector('.ctx-usage-spinner')).not.toBeNull();
 
     await act(async () => {
@@ -147,7 +147,7 @@ describe('ContextUsagePanel 手动压缩', () => {
 
     expect(button().disabled).toBe(true);
     expect(document.body.querySelector('.ctx-usage-compact-note')?.textContent).toContain(
-      '没有可压缩的早期内容',
+      '没有可以精简的早期内容',
     );
     expect(compactSession).not.toHaveBeenCalled();
   });
@@ -164,7 +164,7 @@ describe('ContextUsagePanel 手动压缩', () => {
     });
 
     expect(document.body.querySelector('.ctx-usage-compact-result')?.textContent).toContain(
-      '没有可压缩的早期内容（未改动）',
+      '没有可以精简的早期内容（未改动）',
     );
   });
 });
@@ -196,8 +196,8 @@ describe('ContextUsagePanel「其他」桶细分（#1095）', () => {
     expect(sub).not.toBeNull();
     const text = sub!.textContent ?? '';
     // 全部子项加法列出（后端 key 对齐：provider 注入/运行期快照/计划锚块/
-    // 保护事实/修改路径/水位警告/进度核对），0 子项也显示。
-    for (const label of ['Provider 注入', '运行期快照', '计划锚块', '保护事实',
+    // 牢记事项/修改路径/水位警告/进度核对），0 子项也显示。
+    for (const label of ['Provider 注入', '运行期快照', '计划锚块', '牢记事项',
       '修改路径', '水位警告', '进度核对']) {
       expect(text).toContain(label);
     }
@@ -223,7 +223,7 @@ describe('ContextUsagePanel「其他」桶细分（#1095）', () => {
     expect(text).toContain('运行期快照');
     // 缺席的 key 不渲染「标签 0」（假零）。
     expect(text).not.toContain('计划锚块');
-    expect(text).not.toContain('保护事实');
+    expect(text).not.toContain('牢记事项');
     expect(text).not.toContain('修改路径');
     expect(text).not.toContain('水位警告');
     expect(text).not.toContain('进度核对');

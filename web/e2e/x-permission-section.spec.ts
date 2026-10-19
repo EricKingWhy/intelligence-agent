@@ -171,7 +171,7 @@ test('AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原
 
   const section = permissionSection(page);
   await expect(section).toContainText('无待审批');
-  await expect(section).toContainText('尚无裁决');
+  await expect(section).toContainText('还没有决定');
   // AC4：权限档拿不到 → `—`（**不是** 0、不是任何占位档位名），并说明为什么拿不到。
   // 按行取（`.detail-val-muted` 在段内还有"无待审批/尚无裁决"两处，不能整段模糊匹配）。
   await expect(section.locator('.detail-row', { hasText: '权限档' })).toContainText('—');

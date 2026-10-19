@@ -546,7 +546,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.session-item').first().click();
 
     const pulse = page.locator('.run-pulse');
-    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toContainText('等你决定');
     await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
 
     const m = await measure(page, '.run-pulse.pulse-awaiting-decision');
@@ -679,7 +679,7 @@ for (const theme of ['dark', 'light'] as const) {
 
     const banner = page.locator('.app-error[role="alert"]');
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText('分叉失败');
+    await expect(banner).toContainText('另开一条失败');
     const m = await measure(page, '.app-error[role="alert"]');
     const ratio = contrast(m.color, m.bg);
     // eslint-disable-next-line no-console

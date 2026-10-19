@@ -164,12 +164,12 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
       <div
         className="ctx-usage-popover"
         role="dialog"
-        aria-label="记忆容量"
+        aria-label="记忆用量"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="ctx-usage-head">
           <span className="ctx-usage-title">
-            记忆容量
+            记忆用量
             <span className="ctx-usage-estimated">估算值</span>
           </span>
           <button className="ctx-usage-close" onClick={onClose} aria-label="关闭">

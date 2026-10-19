@@ -227,8 +227,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <button
             className="icon-btn"
             onClick={() => onOpenContextUsage(sessionId)}
-            aria-label="记忆容量"
-            title="记忆容量——已用/容量/分类占比/缓存命中率"
+            aria-label="记忆用量"
+            title="记忆用量——已用/容量/分类占比/缓存命中率"
           >
             <Gauge size={16} />
           </button>

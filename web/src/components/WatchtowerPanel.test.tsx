@@ -128,16 +128,16 @@ describe('WatchtowerPanel', () => {
     await renderPanel();
 
     expect(document.body.textContent).toContain('调度器运行中 · 单实例');
-    expect(document.body.textContent).toContain('1 个值班会话等待你验收');
+    expect(document.body.textContent).toContain('1 个定时任务会话等待你验收');
     expect(document.body.textContent).toContain('检查夜间构建并汇总失败原因');
     expect(document.body.textContent).toContain('Sandbox · docker');
-    expect(document.body.textContent).toContain('64,000 tokens');
+    expect(document.body.textContent).toContain('64,000 字');
   });
 
   it('requires consent and sends the selected model, Sandbox, cwd, and duration as a duration', async () => {
     await renderPanel();
     const openButton = [...document.body.querySelectorAll('button')]
-      .find((button) => button.textContent?.includes('新建值班'));
+      .find((button) => button.textContent?.includes('新建定时任务'));
     await act(async () => openButton?.click());
 
     const prompt = document.body.querySelector<HTMLTextAreaElement>('textarea');
@@ -145,13 +145,13 @@ describe('WatchtowerPanel', () => {
       .find((label) => label.textContent?.includes('运行时长'))
       ?.querySelector('select');
     const createButton = [...document.body.querySelectorAll('button')]
-      .find((button) => button.textContent?.includes('创建值班规则'));
+      .find((button) => button.textContent?.includes('创建定时任务'));
     expect(prompt).not.toBeNull();
     expect(duration).not.toBeNull();
     expect(createButton?.disabled).toBe(true);
-    expect(document.body.textContent).toContain('只有 run 和 session 都没有绝对截止时间，且运行时确认同 run 有足够恢复预算时');
-    expect(document.body.textContent).toContain('时长预算会创建持续计时的截止时间，等待请求会被拒绝');
-    expect(document.body.textContent).toContain('停止受影响工作，等待你处理');
+    expect(document.body.textContent).toContain('只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够时间继续时');
+    expect(document.body.textContent).toContain('如果设了时长预算，到点后会创建截止时间，等待请求会被拒绝');
+    expect(document.body.textContent).toContain('停止受影响的工作，等你处理');
     expect(document.body.textContent).not.toContain('保持暂停');
 
     await act(async () => {

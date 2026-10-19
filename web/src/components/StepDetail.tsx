@@ -665,10 +665,10 @@ export function ChatTab({
     <>
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={14} /> RUN
+          <Hash size={14} /> 任务
         </div>
         <div className="detail-row">
-          <span className="detail-key">run</span>
+          <span className="detail-key">任务</span>
           <code className="detail-val detail-val-mono">{conversation.run_id ?? '—'}</code>
         </div>
         <div className="detail-row">
@@ -724,7 +724,7 @@ export function ChatTab({
           <span className="detail-val">{runDuration ?? '—'}</span>
         </div>
         <div className="detail-row">
-          <span className="detail-key">tokens</span>
+          <span className="detail-key">字数</span>
           <span className="detail-val num">
             {conversation.usage_total && conversation.usage_total.total_tokens !== null
               ? conversation.usage_total.total_tokens.toLocaleString()
@@ -1517,7 +1517,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
           )}
           {event.run_id && (
             <div className="detail-row">
-              <span className="detail-key">run</span>
+              <span className="detail-key">任务</span>
               <span className="detail-val detail-val-mono">{event.run_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1662,7 +1662,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           )}
           {tool.artifact && (
             <div className="detail-row">
-              <span className="detail-key">artifact</span>
+              <span className="detail-key">产出文件</span>
               <span className="detail-val detail-val-mono">{tool.artifact.artifact_id.slice(0, 16)}</span>
             </div>
           )}

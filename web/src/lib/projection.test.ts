@@ -2635,12 +2635,12 @@ describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
   const T = '2026-09-12T00:00:00Z';
   const base = { session_id: 's', time: T };
 
-  it('session/forked → 「已分叉」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
+  it('session/forked → 「已另开一条」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
     const s = applyEvent(initConversation('f'), {
       ...base, type: EventType.SESSION_FORKED, seq: 1, run_id: 'r',
       data: { from_seq: 3, child_session_id: 'child-1' },
     });
-    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已分叉');
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已另开一条');
   });
 
   it('tool/approval-requested → 「等待审批 · {tool_name}」', () => {

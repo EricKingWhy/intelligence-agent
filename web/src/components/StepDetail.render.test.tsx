@@ -76,7 +76,7 @@ describe('N2（#271）Timeline run 分组必须跟随 events 追加更新', () =
     const first = fold(initConversation('n2'), RUN1);
     paint(first);
     expect(headers()).toHaveLength(1);
-    expect(headers()[0]).toContain('Run 1');
+    expect(headers()[0]).toContain('第 1 次任务');
     expect(rowCount()).toBe(4);
 
     // 追加 → 新 state 对象，但 events 是**同一个**引用（append-only 契约）。
@@ -89,8 +89,8 @@ describe('N2（#271）Timeline run 分组必须跟随 events 追加更新', () =
 
     // 改造前这里回落到 1 / 4：memo 依赖 `events`（引用恒等）⇒ 派生值停在首帧。
     expect(headers()).toHaveLength(2);
-    expect(headers()[0]).toContain('Run 1');
-    expect(headers()[1]).toContain('Run 2');
+    expect(headers()[0]).toContain('第 1 次任务');
+    expect(headers()[1]).toContain('第 2 次任务');
     expect(rowCount()).toBe(6);
   });
 

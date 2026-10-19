@@ -34,22 +34,22 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
 
   it('三维全接 → turns 输入 / tokens 档位 trigger / datetime 高级路径全在场（aria-label 沿用旧名）', () => {
     const out = html(createElement(BudgetPickerPanel, full));
-    expect(out).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(out).toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="轮数上限（留空用默认值）"');
+    expect(out).toContain('aria-label="字数档位"');
     expect(out).toContain('aria-label="预算截止时间（留空为不设）"');
     expect(out).toContain('type="datetime-local"');
   });
 
   it('未接 onChange 的维不渲染其控件（不渲染吞输入的死框，#426 语义原样）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, onTokensChange: undefined, onDeadlineChange: undefined }));
-    expect(out).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(out).not.toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="轮数上限（留空用默认值）"');
+    expect(out).not.toContain('aria-label="字数档位"');
     expect(out).not.toContain('aria-label="预算截止时间（留空为不设）"');
   });
 
   it('tokens 草稿命中档位 → 档位 trigger 显示紧凑标签（500k）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, tokens: '500000' }));
-    expect(out).toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="字数档位"');
     expect(out).toContain('>500k<');
   });
 
@@ -60,7 +60,7 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
 
   it('tokens 草稿为空 → 档位 trigger 显示 placeholder（tokens 上限）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, tokens: '' }));
-    expect(out).toContain('>tokens 上限<');
+    expect(out).toContain('>字数上限<');
   });
 
   it('deadline 时长草稿（2h）→ 时长档 trigger 显示「2 小时」', () => {
@@ -117,7 +117,7 @@ describe('BudgetPicker — 单入口 trigger（#536 §2.3/§2.5）', () => {
     const out = html(
       createElement(BudgetPicker, { ...full, turns: '5', tokens: '500000', deadline: '2h' }),
     );
-    expect(out).toContain('>turns 5 · 500k · 2h<');
+    expect(out).toContain('>轮数 5 · 500k · 2h<');
   });
 
   it('disabled → aria-disabled="true"（SSR 可见，同 OptionPicker 契约）', () => {

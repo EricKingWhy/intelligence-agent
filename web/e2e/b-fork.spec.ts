@@ -108,17 +108,17 @@ test('B2：分叉被拒绝时展示后端 detail，不再静默吞错', async ({
   await page.locator('.turn').nth(1).locator('.fork-btn').click();
 
   const alert = page.locator('[role="alert"]');
-  await expect(alert).toContainText('分叉失败');
+  await expect(alert).toContainText('另开一条失败');
   await expect(alert).toContainText('可用边界: [2, 30]');
 });
 
-test('B3：第 1 轮按钮提示 child 将是空会话（锚点消息不进 seed）', async ({ page }) => {
+test('B3：第 1 轮按钮提示这之前没有历史（锚点消息不进 seed）', async ({ page }) => {
   await openSessionWith(page, { sessions: [PARENT_ROW], events: twoTurnEvents() });
 
-  await expect(page.locator('.turn').nth(0).locator('.fork-btn')).toHaveAttribute('title', /空会话/);
+  await expect(page.locator('.turn').nth(0).locator('.fork-btn')).toHaveAttribute('title', /新会话会是空的/);
   await expect(page.locator('.turn').nth(1).locator('.fork-btn')).toHaveAttribute(
     'title',
-    '从此处分叉新会话',
+    '从这里另开一条新会话',
   );
 });
 

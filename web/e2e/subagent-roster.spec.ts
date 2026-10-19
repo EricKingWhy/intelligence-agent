@@ -49,7 +49,7 @@ test('#1256 AC：有子智能体 → 顶栏 roster 入口显数量（无则完�
 
   const trigger = page.locator('.agent-trigger');
   await expect(trigger).toBeVisible();
-  await expect(page.locator('.roster-label')).toHaveText('1 个子智能体');
+  await expect(page.locator('.roster-label')).toHaveText('1 个子任务');
   // 无运行中的子智能体 → 不显 running 徽标
   await expect(page.locator('.roster-running-badge')).toHaveCount(0);
 });

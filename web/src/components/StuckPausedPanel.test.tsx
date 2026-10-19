@@ -65,9 +65,9 @@ describe('StuckPausedPanel — stuck 暂停的引导面板（#968）', () => {
     expect(html).toContain('需要相关 steer，或已记录的环境 / policy 变更');
   });
 
-  it('状态行沿用「不是失败」措辞惯例（stuck 是非终态收口）', () => {
+  it('状态行沿用「不是出错」措辞惯例（stuck 是非终态收口）', () => {
     const html = render(stuckPaused());
-    expect(html).toContain('不是失败');
+    expect(html).toContain('不是出错');
   });
 
   it('事实行报原因标签 / 预算版本 / trace（与 pause-panel 同一投影口径）', () => {

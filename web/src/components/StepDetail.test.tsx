@@ -254,8 +254,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     const html = renderTab(twoRunConversation());
     const headers = (html.match(/tl-run-header/g) || []).length;
     expect(headers).toBe(2);
-    expect(html).toContain('Run 1');
-    expect(html).toContain('Run 2');
+    expect(html).toContain('第 1 次任务');
+    expect(html).toContain('第 2 次任务');
     expect(html).toContain('run-badge-completed');
     expect(html).toContain('run-badge-running');
     // 第一组 4 事件（session/started 归入 r1 组）；打在 .tl-run-count 上防 tl-seq 误命中
@@ -272,12 +272,12 @@ describe('TimelineTab run 分组头（UI-03）', () => {
       s = applyEvent(s, { type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 3 + i, run_id: 'r2', step_id: 1, session_id: 'long' });
     }
     const html = renderTab(s);
-    // r1 的两条已滚出窗口 → 其组头不渲染；r2 组头在场且**保留真序号 Run 2**
-    //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 Run 1 正是本票要防的事故）
+    // r1 的两条已滚出窗口 → 其组头不渲染；r2 组头在场且**保留真序号 第 2 次任务**
+    //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 第 1 次任务 正是本票要防的事故）
     expect(html).not.toContain('run-badge-completed');
     expect(html).toContain('tl-run-header');
-    expect(html).toContain('>Run 2</span>');
-    expect(html).not.toContain('>Run 1</span>');
+    expect(html).toContain('>第 2 次任务</span>');
+    expect(html).not.toContain('>第 1 次任务</span>');
   });
 });
 

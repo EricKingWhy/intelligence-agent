@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** ConstraintsTab / ConstraintsView（#1190 Phase 1 / #1191 Phase 2）—— 约束管理页。
+/** ConstraintsTab / ConstraintsView（#1190 Phase 1 / #1191 Phase 2）—— 我的要求页。
  *
  *  锁的是 issue §四/§五与不变量 #22（UI 不做第二真相）：
  *  ① 纯展示视图 `ConstraintsView` 由数据 props 驱动——状态筛选默认「生效中」、
@@ -139,15 +139,15 @@ describe('ConstraintsView（纯展示，SSR）', () => {
   it('页眉与标题常驻（不因空/错而消失）', () => {
     const html = ssr();
     expect(html).toContain('CONSTRAINTS');
-    expect(html).toContain('约束管理');
+    expect(html).toContain('我的要求');
     expect(html).toContain('s-1');
   });
 
   it('#1191：顶部优先级条逐字在场', () => {
     const html = ssr();
-    expect(html).toContain('同文约束生效优先级：会话＞项目＞全局');
-    expect(html).toContain('不同内容全部注入，由模型裁决。');
-    expect(html).toContain('非 null 的条目不注入。撤销走历史保留链。');
+    expect(html).toContain('同文要求的生效优先级：会话＞项目＞全局');
+    expect(html).toContain('不同内容全部生效，由 AI 决定。');
+    expect(html).toContain('被覆盖的条目不生效。撤销后仍保留历史记录。');
   });
 
   it('默认「生效中」只渲染 active 行', () => {
@@ -198,14 +198,14 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).not.toContain('· 本人操作');
   });
 
-  it('零约束 → 显式「没有符合条件的约束」', () => {
-    expect(ssr()).toContain('没有符合条件的约束');
+  it('零约束 → 显式「没有符合条件的要求」', () => {
+    expect(ssr()).toContain('没有符合条件的要求');
   });
 
-  it('403 → 「无权限查看约束」（不冒充空列表）', () => {
+  it('403 → 「无权限查看要求」（不冒充空列表）', () => {
     const html = ssr({ forbidden: true });
-    expect(html).toContain('无权限查看约束');
-    expect(html).not.toContain('没有符合条件的约束');
+    expect(html).toContain('无权限查看要求');
+    expect(html).not.toContain('没有符合条件的要求');
   });
 
   it('错误态带原因与重试入口', () => {
@@ -352,7 +352,7 @@ describe('ConstraintsTab（状态外壳）', () => {
 
     // 点「撤销」→ 二次确认框（不立刻发请求）。
     act(() => buttonByText('撤销').click());
-    expect(document.body.textContent).toContain('撤销这条约束？');
+    expect(document.body.textContent).toContain('撤销这条要求？');
     expect(revokeProtectedFact).not.toHaveBeenCalled();
 
     // 确认 → 发请求 + 重拉（第二次 GET）。
@@ -401,20 +401,20 @@ describe('ConstraintsTab（状态外壳）', () => {
     await act(async () => {});
 
     act(() => buttonByText('撤销').click());
-    expect(document.body.textContent).toContain('撤销这条约束？');
+    expect(document.body.textContent).toContain('撤销这条要求？');
     await act(async () => {
       buttonByText('取消').click();
     });
     expect(revokeProtectedFact).not.toHaveBeenCalled();
     expect(listEffectiveConstraints).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).not.toContain('撤销这条约束？');
+    expect(document.body.textContent).not.toContain('撤销这条要求？');
   });
 
-  it('403 → 「无权限查看约束」', async () => {
+  it('403 → 「无权限查看要求」', async () => {
     vi.mocked(listEffectiveConstraints).mockRejectedValue(new SessionError(403, '非本机来源'));
     render(<ConstraintsTab sessionId="s-1" />);
     await act(async () => {});
-    expect(document.body.textContent).toContain('无权限查看约束');
+    expect(document.body.textContent).toContain('无权限查看要求');
   });
 
   it('AC4：先有数据、后拉取失败 → 清空旧数据不说谎', async () => {
@@ -451,7 +451,7 @@ describe('ConstraintsTab（状态外壳）', () => {
     await act(async () => {
       root!.render(<ConstraintsTab sessionId="s-forbidden" />);
     });
-    expect(document.body.textContent).toContain('无权限查看约束');
+    expect(document.body.textContent).toContain('无权限查看要求');
     expect(document.body.textContent).not.toContain('不要改动生产环境配置');
     expect(tabCount('全部')).toBe('0');
   });
@@ -509,6 +509,6 @@ describe('ConstraintsTab（状态外壳）', () => {
       buttonByText('重试').click();
     });
     expect(document.body.textContent).not.toContain('加载失败，请重试');
-    expect(document.body.textContent).toContain('正在加载约束…');
+    expect(document.body.textContent).toContain('正在加载要求…');
   });
 });

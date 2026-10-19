@@ -8,7 +8,7 @@
  *
  *  本文件锁三件事：
  *   1. 结构化的 409 → 结局携带后端清单（不是字符串匹配出来的）；
- *   2. `recoverState` 被点亮成 conflict + pendingDecisions ⇒ App 据此渲染裁决面板
+ *   2. `recoverState` 被点亮成 conflict + pendingDecisions ⇒ App 据此渲染待处理列表
  *      （#22：清单只来自后端载荷，本 hook 不合成、不缓存）；
  *   3. 失败时 `sendMessage` resolve **false** —— 这是 composer「保留用户输入」的
  *      唯一信号（`11 §6.1`：「409 冲突后 MUST 刷新权威状态并保留用户未发送的输入」）。
@@ -128,7 +128,7 @@ afterEach(async () => {
 });
 
 describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
-  it('结构化 409：结局携带后端 pending_decisions，点亮 recoverState 供 App 渲染裁决面板', async () => {
+  it('结构化 409：结局携带后端 pending_decisions，点亮 recoverState 供 App 渲染待处理列表', async () => {
     vi.mocked(apiSendMessage).mockResolvedValue(recoveryConflict409());
     await mount();
     await enterViewing(SID);
@@ -156,8 +156,8 @@ describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
     });
 
     const error = captured.hook!.error ?? '';
-    expect(error).toContain('待人工裁决');
-    expect(error).toContain('裁决面板');
+    expect(error).toContain('需要你来决定');
+    expect(error).toContain('待处理列表');
     // 协议原文（POST /recover、tool_call_id、verdict 词表）不进用户层横幅
     expect(error).not.toContain('POST /api/sessions');
     expect(error).not.toContain('tool_call_id=');

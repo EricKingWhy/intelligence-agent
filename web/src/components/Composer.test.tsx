@@ -131,8 +131,8 @@ describe('Composer pending constraint input lock', () => {
       ...base,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
-    expect(html).toContain('等待约束澄清回答…');
+    expect(html).toContain('请先回答当前要求的确认问题，再发送新消息');
+    expect(html).toContain('等待你确认当前要求…');
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
   });
 });
@@ -155,8 +155,8 @@ describe('Composer pending ask_user lock (#1223)', () => {
       ...base,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
-    expect(html).toContain('等待约束澄清回答…');
+    expect(html).toContain('请先回答当前要求的确认问题，再发送新消息');
+    expect(html).toContain('等待你确认当前要求…');
   });
 });
 
@@ -168,8 +168,8 @@ describe('Composer pending plan approval lock (#1356)', () => {
       planApprovalInputPending: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
-    expect(html).toContain('请先裁决当前计划，再发送新消息');
-    expect(html).toContain('等待计划裁决…');
+    expect(html).toContain('请先确认当前计划，再发送新消息');
+    expect(html).toContain('等待你确认计划…');
     // 工具审批是另一回事：计划裁决的文案不得把用户引去找一个不存在的审批。
     expect(html).not.toContain('等待审批决策');
   });
@@ -188,8 +188,8 @@ describe('Composer pending plan approval lock (#1356)', () => {
       onPermissionModeChange: noop,
       permissionInSession: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先裁决当前计划');
-    expect(html).toContain('title="等待计划裁决后再改档"');
+    expect(html).toContain('请先确认当前计划');
+    expect(html).toContain('title="确认计划后再改档"');
   });
 });
 
@@ -227,7 +227,7 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
       onFlush: noop,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(buttonTag(html, '立即发送')).toContain('请先回答当前约束澄清');
+    expect(buttonTag(html, '立即发送')).toContain('请先回答当前要求');
     expect(buttonTag(html, '立即发送全部')).toContain('disabled=""');
   });
 
@@ -340,7 +340,7 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待约束澄清回答后再改档"');
+    expect(html).toContain('title="确认当前要求后再改档"');
     expect(html).not.toContain('审批');
   });
 
@@ -393,7 +393,7 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
         onBudgetRunDeadlineChange: noop,
       }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('>turns 5 · 500k · 2h<');
+    expect(html).toContain('>轮数 5 · 500k · 2h<');
   });
 
   it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {

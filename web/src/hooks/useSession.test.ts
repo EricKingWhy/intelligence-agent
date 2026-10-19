@@ -366,7 +366,7 @@ describe('decideFollowUpOutcome — /messages 结局的单一分派表（#221）
     })).toEqual({ kind: 'fail', text: '存在需人工裁决的高风险操作：tool=bash call_id=c1' });
     // detail 缺失时才退回泛化文案
     expect(decideFollowUpOutcome({ ...base, status: 409 })).toEqual({
-      kind: 'fail', text: '存在需要人工裁决的高风险操作',
+      kind: 'fail', text: '存在需要你决定的高风险操作',
     });
   });
 
