@@ -9,12 +9,12 @@ import argparse
 import asyncio
 import inspect
 import os
+import pathlib
 import signal
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-
+# 子进程的 import 解析由 `_worker_env()` 设置的 PYTHONPATH 提供（见
+# test_1353_ac2_concurrent_crash.py），不在此处改 sys.path——那会污染同进程其它测试。
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
     call,
@@ -51,8 +51,6 @@ async def _crash_before_replace(root: Path) -> None:
 
     def _die(*_args, **_kwargs):
         os.kill(os.getpid(), signal.SIGKILL)
-
-    import pathlib
 
     os.replace = _die
     pathlib.Path.replace = _die
