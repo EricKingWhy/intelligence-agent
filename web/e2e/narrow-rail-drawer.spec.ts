@@ -13,15 +13,22 @@
  *  ⚠ 抽屉开关是**呈现层**：展开/收起不改会话数据流。所以"切换会话"这条必须真的
  *  点中行并断言选中态，不能只断言 aria 属性——否则一个只改 aria 不改行为的实现
  *  也会绿。
+ *
+ *  #1368 复审补强（correctness P1/P3 + standards P1）：流式档的控件让位（Esc 提示
+ *  在场时动作簇更宽）、流式中 Escape 只关抽屉不打断 run、断点穿越后抽屉复位、
+ *  桌面档空态按钮不折行。流式夹具复用 `fixtures.ts` 的 `routeStreaming`。
  */
-import { expect, test, type Locator } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import {
   AGENT_PROFILES,
   MODELS,
   PERMISSION_MODES,
   REASONING_EFFORTS,
   routeApi,
+  routeStreaming,
+  rowOf,
   sessionRow,
+  submitTask,
   type ProjectFixture,
 } from './fixtures';
 
@@ -36,6 +43,10 @@ const sessions = () => [
 ];
 
 const mock = { sessions: sessions(), projects: [P1, P2], models: MODELS, permissionModes: PERMISSION_MODES, agentProfiles: AGENT_PROFILES, reasoningEfforts: REASONING_EFFORTS };
+
+/** 折叠轨宽上界（56px 轨 + 内边距；取 80 作宽松判据）与展开抽屉宽下界。 */
+const COLLAPSED_MAX = 80;
+const EXPANDED_MIN = 200;
 
 const railWidth = async (rail: Locator) => Math.round((await rail.boundingBox())!.width);
 
@@ -55,6 +66,18 @@ const textLines = (locator: Locator) => locator.evaluate((el) => {
   return Math.round((el.getBoundingClientRect().height / lh) * 10) / 10;
 });
 
+/** 控件行的**滚动视口**必须在动作簇左侧结束（`margin` 让位）。这条比几何相交更强：
+ *  相交只说明"此刻滚到了哪里"，而这条说明"任何滚动位置都不会压"——按 DOM 结构，
+ *  溢出的 pill 只会画在控件行内，而这一行的右缘本身就在簇左缘之左，所以逐 pill
+ *  的重叠面积恒为 0，不需要再算一遍（复审 P3：那条循环在结构断言成立时数学上
+ *  不可能失败，留着会被误读成第二道独立防线）。 */
+async function expectControlsClearOfActions(page: Page, label: string) {
+  const actions = (await page.locator('.composer-actions').boundingBox())!;
+  const cbox = (await page.locator('.composer-controls').boundingBox())!;
+  expect(Math.round(cbox.x + cbox.width), label).toBeLessThanOrEqual(Math.round(actions.x));
+  return { actions, cbox };
+}
+
 test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
@@ -66,7 +89,7 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     const toggle = page.locator('.rail-drawer-btn');
 
     // ── 折叠态：56px 轨道，会话正文不渲染（P1-1 的"消失"在这一档是刻意的降级）──
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
     await expect(toggle).toBeVisible();
     expect(await isVisible(page.locator('.session-item-body').first())).toBe(false);
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -74,7 +97,7 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     // ── 展开态：名字必须**可读**——可见、单行、宽度够四个字以上 ──
     await toggle.click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-    expect(await railWidth(rail)).toBeGreaterThanOrEqual(200);
+    expect(await railWidth(rail)).toBeGreaterThanOrEqual(EXPANDED_MIN);
 
     const titles = page.locator('.session-item-title');
     await expect(titles.first()).toBeVisible();
@@ -84,10 +107,9 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     expect((await titles.first().boundingBox())!.width).toBeGreaterThan(60);
 
     // ── 点会话：选中态落到点击的那一行，抽屉自动收起（覆盖层不能挡住刚选中的内容）──
-    const row = page.locator('.session-row').filter({ has: page.locator('.session-item-id', { hasText: 's2' }) });
-    await row.locator('.session-item').click();
+    await rowOf(page, 's2').locator('.session-item').click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
     await expect(page.locator('.session-item.selected')).toHaveAttribute('title', /s2/);
   });
 
@@ -100,19 +122,21 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     const open = async () => {
       await toggle.click();
       await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-      expect(await railWidth(rail)).toBeGreaterThanOrEqual(200);
+      expect(await railWidth(rail)).toBeGreaterThanOrEqual(EXPANDED_MIN);
     };
 
     await open();
     await page.keyboard.press('Escape');
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
 
     await open();
-    // 抽屉宽 ≤272 且靠左：370,400 一定在抽屉之外（不给"点遮罩"造第二个元素）
-    await page.mouse.click(370, 400);
+    // 抽屉宽 ≤272 且靠左：取轨右缘外 20px 的同一行——一定落在遮罩上，且不靠近
+    // 视口边缘（不依赖硬编码的 370/400，视口一变这条就静默点空）。
+    const box = (await rail.boundingBox())!;
+    await page.mouse.click(box.x + box.width + 20, box.y + 200);
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
   });
 
   test('空态按钮只留图标：文字不渲染，因此不可能竖排（P1-4）', async ({ page }) => {
@@ -131,6 +155,30 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     await expect(primary.locator('.rail-empty-btn-label')).toBeVisible();
     expect(await textLines(primary.locator('.rail-empty-btn-label'))).toBeLessThanOrEqual(1.5);
   });
+
+  test('断点穿越后抽屉复位：开 → 拉宽到桌面 → 缩回窄档时仍是收起态（P3）', async ({ page }) => {
+    await routeApi(page, mock);
+    await page.goto('/');
+
+    const rail = page.locator('.session-rail');
+    const toggle = page.locator('.rail-drawer-btn');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(rail).not.toHaveClass(/rail-drawer-open/);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    // 判别面：不复位时这里会自己开着（复审实测正是如此）。
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(rail).not.toHaveClass(/rail-drawer-open/);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
+
+    // 复位不是把状态锁死：窄档里开关照常可用
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  });
 });
 
 test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
@@ -146,25 +194,27 @@ test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
     // 真的有可滚内容才谈"横向滚动"（否则这条断言是恒真的装饰）
     expect(await controls.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
 
-    const actions = (await page.locator('.composer-actions').boundingBox())!;
-    const cbox = (await controls.boundingBox())!;
-    // 结构性判据：滚动视口本身必须在动作簇左侧结束（`margin` 让位）。这条比几何
-    // 相交更强——相交只说明"此刻滚到了哪里"，而这条说明"任何滚动位置都不会压"。
-    expect(Math.round(cbox.x + cbox.width), '控件行右缘 ≤ 动作簇左缘').toBeLessThanOrEqual(Math.round(actions.x));
+    const { actions } = await expectControlsClearOfActions(page, '控件行右缘 ≤ 动作簇左缘');
+    // 非流式簇只有发送 + 附图：用 compact token（80 = 76 + 4 余量），不是流式那条。
+    expect(actions.width).toBeLessThanOrEqual(80);
+  });
 
-    const items = await controls.locator('> *').all();
-    expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      const r = (await item.boundingBox())!;
-      // 滚动容器把超出 padding 盒的部分裁掉（overflow 在 padding 边缘裁），所以只算
-      // **可见区**：滚出视口的 pill 布局矩形仍落在右侧、几何上"相交"，但屏幕上没有
-      // 任何一个像素压到动作簇。判据必须与"用户看到什么"同口径。
-      const vx = Math.max(r.x, cbox.x);
-      const vw = Math.min(r.x + r.width, cbox.x + cbox.width) - vx;
-      const w = Math.max(0, Math.min(actions.x + actions.width, vx + vw) - Math.max(actions.x, vx));
-      const h = Math.max(0, Math.min(actions.y + actions.height, r.y + r.height) - Math.max(actions.y, r.y));
-      expect(Math.round(w * h), 'pill 可见区与动作簇的重叠面积').toBe(0);
-    }
+  test('流式档（Esc 提示 + 停止按钮）控件行同样让位（P1-1）', async ({ page }) => {
+    await routeStreaming(page);
+    await page.goto('/');
+    await submitTask(page, '跑一下');
+    await expect(page.locator('.composer-esc-hint')).toBeVisible();
+    await expect(page.locator('.composer-stop')).toBeVisible();
+
+    // base 那条 `padding-right` 在窄屏必须被 margin 取代（两条叠加实测压住「权限」
+    // pill 67px）；这条断言把"归零"钉在计算值上，而不是只看几何结果。
+    expect(
+      await page.locator('.composer-controls').evaluate((el) => getComputedStyle(el).paddingRight),
+    ).toBe('0px');
+
+    const { actions } = await expectControlsClearOfActions(page, '流式档控件行右缘 ≤ 动作簇左缘');
+    // 判别面：动作簇确实因为 Esc 提示更宽（否则这条用例可能只是在量非流式那一档）。
+    expect(actions.width).toBeGreaterThan(100);
   });
 
   test('记忆卡「详细信息」横排不折行（P1-3）', async ({ page }) => {
@@ -221,6 +271,37 @@ test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
   });
 });
 
+test.describe('#1368 390：流式中 Escape 归属', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('Esc 只关抽屉，不打断在途 run（P2）', async ({ page }) => {
+    let cancels = 0;
+    await routeStreaming(page);
+    // 后注册的 route 先匹配 ⇒ 这条盖住 routeApi 的缺省处理（与 #1195 同手法）
+    await page.route('**/api/sessions/*/cancel', async (route) => {
+      cancels += 1;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"ok"}' });
+    });
+
+    await page.goto('/');
+    await submitTask(page, '跑一下');
+    await expect(page.locator('.composer-esc-hint')).toBeVisible();
+
+    const toggle = page.locator('.rail-drawer-btn');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    await page.keyboard.press('Escape');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect.poll(() => cancels, { message: '关抽屉的 Esc 不得打断在途 run' }).toBe(0);
+
+    // 判别面：抽屉已关，同一个键必须回到「中断」语义——守卫只是让路，不是把
+    // Esc 中断整个一刀切掉。
+    await page.keyboard.press('Escape');
+    await expect.poll(() => cancels, { message: '抽屉已关的 Esc 必须照常 POST /cancel' }).toBe(1);
+  });
+});
+
 test.describe('#1368 768：会话仍可切换', () => {
   test.use({ viewport: { width: 768, height: 900 } });
 
@@ -230,15 +311,35 @@ test.describe('#1368 768：会话仍可切换', () => {
 
     const rail = page.locator('.session-rail');
     const toggle = page.locator('.rail-drawer-btn');
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
     expect(await isVisible(page.locator('.session-item-body').first())).toBe(false);
 
     await toggle.click();
-    expect(await railWidth(rail)).toBeGreaterThanOrEqual(200);
-    const row = page.locator('.session-row').filter({ has: page.locator('.session-item-id', { hasText: 's3' }) });
+    expect(await railWidth(rail)).toBeGreaterThanOrEqual(EXPANDED_MIN);
+    const row = rowOf(page, 's3');
     await expect(row.locator('.session-item-title')).toBeVisible();
     await row.locator('.session-item').click();
     await expect(page.locator('.session-item.selected')).toHaveAttribute('title', /s3/);
-    expect(await railWidth(rail)).toBeLessThanOrEqual(80);
+    expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
+  });
+});
+
+test.describe('#1368 1280：桌面档空态按钮不折行（standards P1）', () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test('桌面 240px 轨里「图标 + 文字」各自单行、按钮不被撑高', async ({ page }) => {
+    await routeApi(page, { sessions: [], projects: [] });
+    await page.goto('/');
+
+    // 390 的抽屉里文字放得下，这两枚按钮的折行**只在桌面档出现**——所以判据必须
+    // 在 1280 量（复审实测：改前 83×38 / 74×40、标签各 2 行）。
+    for (const cls of ['.rail-empty-btn-primary', '.rail-empty-btn-ghost']) {
+      const btn = page.locator(cls);
+      await expect(btn).toBeVisible();
+      const label = btn.locator('.rail-empty-btn-label');
+      await expect(label).toBeVisible();
+      expect(await textLines(label), `${cls} 的标签必须单行`).toBeLessThanOrEqual(1.5);
+      expect((await btn.boundingBox())!.height, `${cls} 不得被两行标签撑高`).toBeLessThanOrEqual(32);
+    }
   });
 });

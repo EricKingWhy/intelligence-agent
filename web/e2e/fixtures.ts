@@ -2090,3 +2090,39 @@ export async function mockAuthRequired(page: Page): Promise<void> {
     }),
   );
 }
+
+/** #194 / #1368：一个「服务端仍在跑」的会话夹具——mock 只给有限帧、模式停在 live，
+ *  提交任务后界面维持流式态（停止按钮 + Esc 提示常驻）。`o-wait-hint.spec.ts` 同款手法。
+ *
+ *  放在这里而不是各 spec 各写一份：流式×动作簇（#194）与流式×抽屉（#1368）考的是
+ *  同一件事（"动作簇在场时谁给谁让位"），夹具漂移会让两条断言测不同的世界。 */
+export const LIVE_FRAMES: FrameSpec[] = [
+  { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+  { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+  { type: 'user/message', data: { content: '跑一下' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+];
+
+export async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES): Promise<void> {
+  await routeApi(page, {
+    sessions: [
+      {
+        session_id: SID,
+        event_count: frames.length,
+        first_event_time: T,
+        last_event_time: T,
+        first_user_message: '跑一下',
+        trace_id: null,
+        trace_url: null,
+      },
+    ],
+    models: MODELS,
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+    onSessionPost: (route) => fulfillSse(route, frames),
+    // 服务端仍在跑（模型还没吐新内容）：快照即全量、连接保持——这正是「流式中」
+    // 的真相，界面必须维持生成态（停止按钮 / Esc 提示在场）。
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+    events: frames,
+  });
+}
