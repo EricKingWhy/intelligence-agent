@@ -412,7 +412,7 @@ class MarkdownMemoryStore:
         重写整个文件）。**漂移不再拒写**：先备份 ``.bak.<ts>``，再以磁盘内容为准继续
         （issue #1353 §0 偏差 1），备份路径经 ``drift_backup`` 回传。
 
-        ``mutate`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
+        ``mutator`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
         返回任何 dict 时原样透传且**不落盘**（错误 dict，或只读闭包的 dry-run 结果）。
         """
         path = self.path_for(target)
