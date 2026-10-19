@@ -2600,8 +2600,19 @@ export interface AskUserAnswerPayload {
   questions: AskUserQuestionAnswer[];
 }
 
-/** `input_request` 的 wire 联合：窄场景四选一，或通用提问逐题作答。 */
-export type UserInputAnswerPayload = ConstraintInputAnswerPayload | AskUserAnswerPayload;
+/** #1356：`plan_approval` 的答案形态（`input_request` 第三支）。
+ *
+ *  `feedback` 只在 revise / reject 时有意义；后端对「approve + feedback」直接 422
+ *  （静默丢弃用户写下的字比拒绝更糟），所以这里在类型层就不允许该组合。 */
+export type PlanApprovalAnswerPayload =
+  | { request_id: string; decision: 'approve' }
+  | { request_id: string; decision: 'revise' | 'reject'; feedback?: string };
+
+/** `input_request` 的 wire 联合：窄场景四选一、通用提问逐题作答，或计划审批裁决。 */
+export type UserInputAnswerPayload =
+  | ConstraintInputAnswerPayload
+  | AskUserAnswerPayload
+  | PlanApprovalAnswerPayload;
 
 export type ResumePausedRunPayload =
   | {

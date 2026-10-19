@@ -179,6 +179,10 @@ def _user_input_request_result(
         for event in events
     ):
         return None
+    # `#1356`：`plan_approval` 刻意不进本表（下面两个重建函数都不认它）——
+    # 计划审批没有可机械判定的默认动作，猜错就是替用户批准/驳回一份计划，
+    # 故一律落 `_protected_fact_request_result` 的 `None`（转真人裁决）。
+    # 这是**靠落空实现的 fail-closed**，加 `plan_approval` 分支前先想清楚默认动作。
     if data.get("kind") == "ask_user":
         return _ask_user_request_result(
             request_id=request_id, data=data, args=args,

@@ -209,6 +209,7 @@ async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_pat
     from agent_harness.tooling.contract import ToolReconcileInfo
     from agent_harness.tools.bash import BashTool
     from agent_harness.tools.read import ReadTool
+    from agent_harness.tools.submit_plan import SubmitPlanTool
 
     settings = _settings(tmp_path, multiagent=False)
     _, wiring = await assemble_wiring(settings)
@@ -222,15 +223,26 @@ async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_pat
         workspace_registry=WorkspaceRegistry(tmp_path, backend="local"),
         session_store=session_store,
         agent_profile=None,
+        # #1356 审查 P1-3：根会话专属工具在册时才对账得动分歧分支——旧写法两边
+        # 都少同样四个工具，"键集漂移"断言恒真，AC12 对本票新工具天然失明。
+        include_constraint_tools=True,
     )
     helper_names = {tool.name for tool in tooling.registry.list()}
 
     info = root_registry_reconcile_info(
         settings, wiring, session_id=session_id, session_store=session_store,
+        include_constraint_tools=True,
     )
     assert set(info) == helper_names == root_registry_tool_names(
         settings, wiring, session_id=session_id, session_store=session_store,
+        include_constraint_tools=True,
     ), "reconcile info 投影与真实根 registry 漂移"
+    # #1356：`submit_plan` 的 reconcile_hint 现在真的能到 UI（P1-3 的判据）。
+    submit_plan = SubmitPlanTool(None)
+    assert info[submit_plan.name].verifiable is True
+    assert info[submit_plan.name].suggested_action == (
+        submit_plan.reconcile_hint.suggested_action
+    )
 
     assert all(isinstance(v, ToolReconcileInfo) for v in info.values())
     # R13/R14 判据逐字对账：read（replay_safe=True）与 bash（默认 unsafe）。

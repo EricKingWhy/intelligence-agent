@@ -2031,17 +2031,38 @@ class AgentRuntime:
                             yield streamed
                         return
                 source_event = latest_direct_user_input_event(session.events, messages)
-                if source_event is None or run_id is None:
+                if run_id is None:
                     tool_request_context = None
                 else:
+                    # #1356 AC7：「run 归因」与「本轮有没有可核实的用户原文」是两件事。
+                    # 恢复 run 的首条用户消息是**对已有请求的答复**（带
+                    # `input_request_id`）⇒ `latest_direct_user_input_event` 按设计返回
+                    # None（答复是裁决，不是新的约束来源，见 #911 P3-1）。但那不是
+                    # "没有 run 上下文"：约束工具的准入闸（deadline / 预算余量）与
+                    # `submit_plan` / `ask_user` 的作用域判定只依赖身份字段。故 context
+                    # 恒建、来源字段留空；真正需要来源的工具（`register_constraint` /
+                    # `request_constraint_resolution`）照旧在空来源上 fail-closed
+                    # （`SOURCE_NOT_ACTIVE`）。此前把两者混为一谈会让恢复 run 里的
+                    # `submit_plan` 被误判为 SOURCE_UNAVAILABLE，且**整段跳过**准入闸。
+                    # 副作用（知情承认）：同一个 context 也喂给 `ask_user`，故恢复 run
+                    # 里的 `ask_user` 从"拒绝（SOURCE_UNAVAILABLE）"变成"可发起"。
+                    # 方向正确（追问链本该通），但这是对 #1204 域的行为变更，记在
+                    # #1204 的账上——#1356 只对 `submit_plan` 负责（审查 P3-1）。
                     tool_request_context = ConstraintToolContext(
                         session_id=session.session_id,
                         run_id=run_id,
                         agent_id=self._agent_id,
                         agent_profile=self._agent_profile,
-                        source_event_id=source_event.event_id,
-                        source_seq=source_event.seq,
-                        source_content=source_event.data["content"],
+                        source_event_id=(
+                            source_event.event_id if source_event is not None else ""
+                        ),
+                        source_seq=(
+                            source_event.seq if source_event is not None else 0
+                        ),
+                        source_content=(
+                            source_event.data["content"]
+                            if source_event is not None else ""
+                        ),
                         protected_fact_token_budget=(
                             self._context_builder.protected_fact_token_budget
                         ),
@@ -4055,14 +4076,31 @@ class AgentRuntime:
         # （#1288）。
         # **不回滚 mode**：任何异常路径都不把 plan 自动翻回 normal（权限只收紧不
         # 自动放宽，fail-closed）；退出 plan 必须由用户显式操作完成。
-        # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中无任何 task/plan_updated
-        # （含前序 run 的——计划一旦生成过，就不是"从未生成"）。
+        # 判定精确、不猜：mode 现派生为 plan ∧ 事件流中既无任何 task/plan_updated
+        # （含前序 run 的——计划一旦生成过，就不是"从未生成"）∧ 也无任何已提交的
+        # plan approval 请求。
+        # #1356 方案 4：`submit_plan` **不发** task/plan_updated（否则
+        # ConversationState.plan 的进度清单被计划正文污染，见 tools/submit_plan.py
+        # 模块注释）。若判据只认 task/plan_updated，"模型已交计划、审批还没回来时
+        # 进程崩了"会命中"计划从未生成"，横幅对一份已交的计划说"可手动退出 plan
+        # 模式后重试"——错话。故把 `USER_INPUT_REQUESTED(kind="plan_approval")`
+        # 也算作"计划已生成"的证据：两个条件都从事件流现派生、仍然 fail-closed
+        # （两者都没有才报），不新增事件类型、不动 mode 不回滚的铁律。
+        # 审查 P4-3（知情接受）：`plan_approval` 的判据不区分待批/已答复/前序 run
+        # 终结时遗留的 dangling 请求。dangling 边角下用户拿不到"可手动退出 plan
+        # 模式"的横幅——与票面"已提交待审批的计划不会触发该帧"同向，且收紧判据
+        # 会把"已答复但计划仍有效"的场景也一起改掉，故只记录不收紧。
         error_data: RunFailedBeforePlanData | None = None
         error_event = None
         if (
             effective_workflow_mode(arms.session.events) is WorkflowMode.PLAN
             and not any(
                 event.type == TASK_PLAN_UPDATED for event in arms.session.events
+            )
+            and not any(
+                event.type == USER_INPUT_REQUESTED
+                and event.data.get("kind") == "plan_approval"
+                for event in arms.session.events
             )
         ):
             error_data = RunFailedBeforePlanData(

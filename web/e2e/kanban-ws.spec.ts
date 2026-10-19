@@ -37,6 +37,8 @@ function boardRow(
     product_state_changed_at: null,
     attention_kind: null,
     attention_summary: null,
+    last_user_message: null,
+    last_agent_message: null,
     ...over,
   });
 }
@@ -126,6 +128,8 @@ test.describe('#1305 看板 WS 推送', () => {
     const row = boardRow('s-fields', 'executing', {
       attention_kind: 'approval',
       attention_summary: '待批准：Bash (execute)',
+      last_user_message: null,
+      last_agent_message: null,
       product_state_changed_at: '2026-10-17T03:00:00Z',
       first_user_message: '逐字段用例',
     });

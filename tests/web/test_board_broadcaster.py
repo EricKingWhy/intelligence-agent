@@ -575,9 +575,9 @@ def test_non_trigger_event_still_pushes_a_frame(tmp_path: Path) -> None:
 
     板行含 `event_count` / `last_event_time`（`app.py::session_rows` 逐字段映射
     `SessionSummaryStats`），而这两个值**每条事件都会变**——`ASSISTANT_MESSAGE` /
-    `TOOL_RESULT` / 普通 `USER_MESSAGE` 全在触发集外。只按触发集通知的话，长 run
-    期间卡片的时间标签会停在最后一个触发事件那一刻（前端 `KanbanCard.tsx` 渲染
-    `last_event_time`，`lib/kanban.ts` 列内同键排序也用它）。
+    `TOOL_RESULT` 都在触发集外。只按触发集通知的话，长 run 期间卡片的时间标签会
+    停在最后一个触发事件那一刻（前端 `KanbanCard.tsx` 渲染 `last_event_time`，
+    `lib/kanban.ts` 列内同键排序也用它）。
 
     成本侧由 250ms 节流封顶（4 帧/秒）+ 无订阅者时空操作，见 `web/board.py`。
     """
@@ -595,10 +595,14 @@ def test_non_trigger_event_still_pushes_a_frame(tmp_path: Path) -> None:
         assert len(initial) == 1
         before = {row["session_id"]: row for row in initial[0]["sessions"]}
 
-        # 触发集外的普通聊天消息（`USER_MESSAGE` 不在 `_BOARD_PROJECTION_TRIGGER_TYPES`）。
-        from agent_harness.session.event import USER_MESSAGE
+        # 触发集外的高频事件（`TOOL_RESULT` 不在 `_BOARD_PROJECTION_TRIGGER_TYPES`）。
+        # 不能用 `USER_MESSAGE`：#1308 起它已在触发集内，用它测"触发集外"是假绿。
+        from agent_harness.session.event import TOOL_RESULT
 
-        session.append(USER_MESSAGE, {"content": "普通聊天"})
+        session.append(
+            TOOL_RESULT,
+            {"tool_call_id": "call-1", "content": "工具输出"},
+        )
         assert broadcaster.subscriber_count == 1
 
         frames = _drain_blocking(ws)
