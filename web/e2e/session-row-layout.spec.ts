@@ -73,29 +73,42 @@ test('#1370 会话行：标题与 id 同行、行高 ≥44、分组发丝线只�
   expect(borders.ungrouped).toEqual(['none']);
 });
 
-test('#1370 窄轨：会话行可点面积 ≥24×24 且不画发丝线', async ({ page }, testInfo) => {
-  // 800px viewport 与 project 无关，只跑一次，避免两个 project 重复同一场景。
-  test.skip(testInfo.project.name !== 'chromium-1280', '窄轨 800px 只跑一个 project');
+test('#1370 窄轨：会话行可点面积 ≥24×24 且不画发丝线', async ({ page }) => {
   const A = 'e2e-1370-narrow-alpha';
-  await routeApi(page, { sessions: [sessionRow(A, null, { first_user_message: '窄轨会话' })], projects: [] });
+  const B = 'e2e-1370-narrow-beta';
+  await routeApi(page, {
+    sessions: [
+      sessionRow(A, null, { first_user_message: '窄轨会话一' }),
+      sessionRow(B, null, { first_user_message: '窄轨会话二' }),
+    ],
+    projects: [],
+  });
   await page.setViewportSize({ width: 800, height: 900 });
   await page.goto('/');
+  // 列表是挂载后异步拉的：先等行真的渲染出来，再量几何。
+  await expect(page.locator('.session-items .session-row')).toHaveCount(2);
 
   const geometry = await page.evaluate(() => {
-    const item = document.querySelector('.session-items .session-row .session-item');
-    if (!item) throw new Error('no narrow session item');
-    const rect = item.getBoundingClientRect();
-    return {
-      width: rect.width,
-      height: rect.height,
-      minHeight: Number.parseFloat(getComputedStyle(item).minHeight),
-      borderBottom: getComputedStyle(item.closest('.session-row')!).borderBottomStyle,
-    };
+    const items = Array.from(document.querySelectorAll<HTMLElement>('.session-items .session-row .session-item'));
+    if (items.length === 0) throw new Error('no narrow session item');
+    return items.map((item) => {
+      const rect = item.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        minHeight: Number.parseFloat(getComputedStyle(item).minHeight),
+        borderBottom: getComputedStyle(item.closest('.session-row')!).borderBottomStyle,
+      };
+    });
   });
 
-  // 图标轨没有文字撑宽，横向 padding 就是唯一可点面积；行高不能被 44px 展开态带跑。
-  expect(geometry.width).toBeGreaterThanOrEqual(24);
-  expect(geometry.height).toBeGreaterThanOrEqual(24);
-  expect(geometry.minHeight).toBeGreaterThanOrEqual(24);
-  expect(geometry.borderBottom).toBe('none');
+  // 图标轨没有文字撑宽，横向 padding 就是唯一可点面积；行高必须是 24px 的收起态，
+  // 不能被展开态的 44px 接管（`min-height` 精确断言，删掉窄轨规则就会红）。
+  for (const row of geometry) {
+    expect(row.width).toBeGreaterThanOrEqual(24);
+    expect(row.minHeight).toBe(24);
+    expect(row.height).toBeLessThan(44);
+    // 同组 ≥2 行：窄轨规则缺席时首行会拿到分组发丝线的 solid。
+    expect(row.borderBottom).toBe('none');
+  }
 });
