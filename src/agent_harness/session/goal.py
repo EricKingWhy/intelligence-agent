@@ -57,6 +57,11 @@ GOAL_ORIGIN = "goal"
 #: 无进展判定的 reason code（票面 AC9）。用户能据此区分"人暂停"与"系统判定原地打转"。
 NO_PROGRESS_CODE = "no-progress"
 
+#: 决策 b（#1359 阶段 3）撞审批点时的 reason code：自动续跑的下一轮会停在审批闸门
+#: 上（当前权限档不是 danger-full-access），所以置 ``blocked`` 而不是入队。
+#: 与 ``NO_PROGRESS_CODE`` 同一读法，但原因不同——这个不是"打转"，是"要人"。
+APPROVAL_REQUIRED_CODE = "approval-required"
+
 #: 合法操作全集。未知操作是**形状**错误（422），与"当前没有目标"无关——
 #: 先判值域再判状态，否则空会话上 ``destroy`` 会被误报成 409。
 #: ``round_started`` 是运行时内部记账（不是用户命令）：REST 面的 Literal 不收它。
@@ -254,11 +259,32 @@ def _tool_digest(kind: str, payload: object) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _result_digest_payload(content: object) -> object:
+    """``tool/result`` 的 digest 载荷：只留语义字段，丢掉**每次调用都变**的元数据。
+
+    ``content`` 是整份 ``ToolResult.model_dump_json()``，而 ToolExecutor 每次尝试都会
+    回填 ``attempt`` / ``max_attempts`` / ``duration_ms`` / ``total_duration_ms``——直接
+    对整串做摘要，两轮"同样的调用、同样的结果"会因耗时不同而永远判为有进展，AC9 的
+    无进展检测就此失效。只保留 ``ok`` / ``message`` / ``data``（结果语义）；非 JSON
+    content（历史事件 / 其他生产者）退回原串，不猜。
+    """
+    if not isinstance(content, str):
+        return content
+    try:
+        parsed = json.loads(content)
+    except (TypeError, ValueError):
+        return content
+    if not isinstance(parsed, dict):
+        return content
+    return {key: parsed.get(key) for key in ("ok", "message", "data")}
+
+
 def goal_round_digests(events: list[SessionEvent]) -> list[str]:
     """按**goal 来源的 user/message** 切分轮次，返回每轮工具活动的 digest。
 
-    digest 覆盖 ``tool/call``（工具名 + 参数）与 ``tool/result``（只取内容，不取
-    调用 id——同形活动每轮 id 都不同，带上就会把"原地打转"误判成有进展）：
+    digest 覆盖 ``tool/call``（工具名 + 参数）与 ``tool/result``（只取结果语义
+    ``ok``/``message``/``data``，不取调用 id 与执行耗时——同形活动每轮的 id 与耗时都
+    不同，带上就会把"原地打转"误判成有进展）：
     "调了同样的工具、拿到同样的结果"与"什么工具都没调"都能被识别。非 goal
     用户消息会关闭当前桶——人工介入那一轮的工具活动不算进 goal 轮次。
     """
@@ -280,7 +306,9 @@ def goal_round_digests(events: list[SessionEvent]) -> list[str]:
                 "args": event.data.get("args"),
             }))
         elif event.type == TOOL_RESULT:
-            active.append(_tool_digest("result", {"content": event.data.get("content")}))
+            active.append(_tool_digest(
+                "result", {"content": _result_digest_payload(event.data.get("content"))},
+            ))
     return [":".join(parts) for parts in rounds]
 
 
@@ -562,6 +590,7 @@ def append_goal_change(
 
 
 __all__ = [
+    "APPROVAL_REQUIRED_CODE",
     "DEFAULT_MAX_GOAL_ROUNDS",
     "GOAL_OBJECTIVE_MAX_LENGTH",
     "GOAL_ORIGIN",

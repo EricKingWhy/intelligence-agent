@@ -216,6 +216,7 @@ from agent_harness.session.evidence import (
     evaluate_evidence_freshness,
 )
 from agent_harness.session.goal import (
+    APPROVAL_REQUIRED_CODE,
     GOAL_ORIGIN,
     NO_PROGRESS_CODE,
     GoalOutcome,
@@ -455,11 +456,6 @@ def _last_user_message_is_goal_round(events: list[SessionEvent]) -> bool:
         if event.type == USER_MESSAGE:
             return event.data.get("origin") == GOAL_ORIGIN
     return False
-
-
-#: #1359 阶段 3 决策 b：自动续跑撞审批点时的 ``blocked_reason.code``。
-#: 与 ``NO_PROGRESS_CODE`` 同一读法，但原因不同——这个不是"打转"，是"要人"。
-APPROVAL_REQUIRED_CODE = "approval-required"
 
 
 #: #1359 阶段 3：终态驱动的 per-session 串行化。快速收敛的自动轮次可能在
@@ -2177,7 +2173,6 @@ class SessionService:
         session_tool_call_limits: Mapping[str, Any] | None = None,
         session_max_delegations: int | None = None,
         session_expected_version: int | None = None,
-        preserve_goal_activation: bool = False,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
 
@@ -2244,9 +2239,12 @@ class SessionService:
         # #1359 AC10：resume 后自动续跑必须**重新授权**（抄 dsh：resume 是新进程
         # 上下文，旧进程的 armed 不继承）。放在这里 = 任何 resume 失败路径都不会
         # 留下 armed（失败不改任何状态，成功也必须先 disarm 再由 `/goal resume` 武装）。
-        # 例外：内部 goal 轮次的投递本身也走本入口（它把 `<goal_round>` 当新任务），
-        # 那不是用户 resume，不能把刚续上的授权扔掉（``preserve_goal_activation``）。
-        if not preserve_goal_activation:
+        # 判据是**入口形态**而不是"谁调用"：只有真正的 resume / replay —— 同 run
+        # 续跑（``task=None``）或显式带 ``resume_run_id`` / ``resume_basis`` —— 才
+        # disarm。普通新任务消息（``send_message`` / POST /resume 带 task / 内部 goal
+        # 轮次投递，三者都把正文当新任务）不是 resume：在这里 disarm 会让
+        # `/goal create` 之后的**第一条用户消息**把授权扔掉，目标从此不再自动续跑。
+        if task is None or resume_run_id is not None or resume_basis is not None:
             self._goal_armed.discard(session_id)
             # 决策 b 的一轮额度同寿命：授权被撤销时额度也不该留着（否则之后
             # 某条重新武装的路径会凭空多跑一轮）。
@@ -4090,8 +4088,6 @@ class SessionService:
         launched = await self.resume_and_launch(
             session_id=session_id, task=nxt.content, amend=amend,
             user_input_metadata=user_input_metadata or None,
-            # 内部 goal 轮次不是用户 resume：不能把刚续上的 activation 扔掉。
-            preserve_goal_activation=nxt.origin == GOAL_ORIGIN,
         )
         # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
         run_id = await launched.run.wait_run_id()
