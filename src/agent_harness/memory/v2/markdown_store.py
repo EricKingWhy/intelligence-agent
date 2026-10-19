@@ -622,16 +622,22 @@ class MarkdownMemoryStore:
     def _batch_sync(self, target: str, operations: list[dict[str, Any]], *, commit: bool) -> dict[str, Any]:
         if not operations:
             return _error("operations list is empty.")
-        ops = [op or {} for op in operations]
+        # 预扫描与执行读同一个规范化后的 op：模型可传 `new_text` 别名，若预扫描只看
+        # `content`，投毒内容就会绕过威胁扫描直接进盘。折叠优先级与执行处逐字同形。
+        ops = [
+            {
+                **op,
+                "content": normalize_entry((op or {}).get("content") or (op or {}).get("new_text") or ""),
+            }
+            for op in operations
+        ]
         # 先扫所有 add/replace 内容，再碰磁盘——一个投毒 op 拒绝整批。
         for i, op in enumerate(ops):
-            # 与 `_apply_batch_op` 收到的 content 同一个取值，否则 new_text 别名绕过守卫。
-            writable = normalize_entry(op.get("content") or op.get("new_text") or "")
-            if delimiter_error := _delimiter_error(writable):
+            if delimiter_error := _delimiter_error(op["content"]):
                 return _error(f"Operation {i + 1}: {delimiter_error}")
             scan_error = (
                 op.get("action") in {"add", "replace"}
-                and op.get("content")
+                and op["content"]
                 and _scan_memory_content(op["content"])
             )
             if scan_error:
@@ -645,7 +651,7 @@ class MarkdownMemoryStore:
                 msg, previous_content = self._apply_batch_op(
                     working,
                     act,
-                    normalize_entry(op.get("content") or op.get("new_text") or ""),
+                    op["content"],
                     normalize_entry(op.get("old_text") or ""),
                     f"Operation {i + 1} ({act or 'unknown'})",
                     op.get("matched_entry"),
