@@ -457,6 +457,11 @@ def _last_user_message_is_goal_round(events: list[SessionEvent]) -> bool:
     return False
 
 
+#: #1359 阶段 3 决策 b：自动续跑撞审批点时的 ``blocked_reason.code``。
+#: 与 ``NO_PROGRESS_CODE`` 同一读法，但原因不同——这个不是"打转"，是"要人"。
+APPROVAL_REQUIRED_CODE = "approval-required"
+
+
 #: #1359 阶段 3：终态驱动的 per-session 串行化。快速收敛的自动轮次可能在
 #: ``deliver_next_undelivered`` 还没记完 ``round_started`` / ``queue/consumed``
 #: 前就再次终态，嵌套的 ``on_run_terminal`` 会读到"同一轮仍待投递"而漏续跑。
@@ -1343,12 +1348,11 @@ class SessionService:
     # 是否允许自动续跑"，不是目标事实；进程重启 / `resume_and_launch` / `fork` 后为空。
     _goal_armed: ClassVar[set[str]] = set()
 
-    #: #1359 阶段 3（王浩宇 2026-10-19 17:42 决策 a）：自动续跑**只在无需审批的
-    #: 权限档**下启用。其他档位终态后不入队 `<goal_round>`——否则会停在审批点，
-    #: 形成"目标 active 却无人推进"的静默卡死。未知/未声明档一律按不允许处理。
-    _goal_auto_round_modes: ClassVar[frozenset[PermissionPolicy]] = frozenset(
-        {PermissionPolicy.DANGER_FULL_ACCESS}
-    )
+    # #1359 阶段 3 决策 b：显式 ``/goal resume`` 授予的**一轮**续跑额度
+    # （进程内，不落盘，与 ``_goal_armed`` 同寿命）。非 danger 档下每轮终态都会
+    # 撞审批闸门；没有这笔额度的话，resume 之后连一轮都跑不起来（刚置 active
+    # 就被重新 park）。额度在 ``_maybe_queue_goal_round`` 决定入队时消费一次。
+    _goal_resume_round_allowance: ClassVar[set[str]] = set()
 
     def __init__(
         self,
@@ -2244,6 +2248,9 @@ class SessionService:
         # 那不是用户 resume，不能把刚续上的授权扔掉（``preserve_goal_activation``）。
         if not preserve_goal_activation:
             self._goal_armed.discard(session_id)
+            # 决策 b 的一轮额度同寿命：授权被撤销时额度也不该留着（否则之后
+            # 某条重新武装的路径会凭空多跑一轮）。
+            self._goal_resume_round_allowance.discard(session_id)
         if session_id in self._budget_recovery_failed_sessions:
             from agent_harness.recovery.scan import record_constraint_tool_results
 
@@ -4110,16 +4117,22 @@ class SessionService:
         return launched
 
     async def _maybe_queue_goal_round(self, session_id: str) -> None:
-        """run 终态后决定是否自动续跑一轮目标（#1359 阶段 3 / AC7–AC9）。
+        """run 终态后决定是否自动续跑一轮目标（#1359 阶段 3 / AC7–AC10）。
 
-        准入是四个**独立**条件的合取（任一不成立就静默不续跑）：
+        准入是三个**独立**条件的合取（任一不成立就静默不续跑）：
 
         1. 目标投影 ``phase == active``；
         2. session 在本进程的 activation 集合里（``/goal create|resume`` 武装）；
-        3. ``rounds_started < max_goal_rounds``；
-        4. 当前生效权限档属于 ``_goal_auto_round_modes``（决策 a：只有
-           ``danger-full-access``）——其他档位会在审批点停下，自动续跑只会制造
-           "目标 active 却无人推进"的假活。
+        3. ``rounds_started < max_goal_rounds``。
+
+        决策 b（撞审批点就 park）：非 ``danger-full-access`` 档下自动续跑会在
+        审批闸门停下（根 registry 恒有 ``bash``：DANGER + MUTATING，其他档位
+        也得逐次审批写类工具）——此时**不入队**，而是把目标置 ``blocked`` +
+        ``blocked_reason={code: "approval-required"}``。人处理审批 / 改档后
+        ``/goal resume``，该次显式 resume 授予**一轮**续跑额度，下一轮正常入队；
+        跑完再终态时若仍是非 danger 档就重新 park
+        （``_goal_resume_round_allowance``）。否则自动续跑会停在审批卡上，形成
+        "目标 active 却无人推进"的静默卡死。
 
         另外两条是语义护栏，不是新条件：已有未投递的 goal 轮次时不重复入队；
         刚结束的若是 goal 轮次且最近两轮无进展（digest 相同或为空），把目标置
@@ -4135,14 +4148,18 @@ class SessionService:
             return
         if state.rounds_started >= state.max_goal_rounds:
             return
-        if _effective_permission_mode(events) not in self._goal_auto_round_modes:
-            return
         pending = undelivered_inputs(events)
         if any(item.origin == GOAL_ORIGIN for item in pending):
             return  # 已有一条在队列里，避免终态重复入队
         if _last_user_message_is_goal_round(events) and goal_rounds_stalled(events):
             await self._pause_goal_for_no_progress(session_id, events, state)
             return
+        mode = _effective_permission_mode(events)
+        if mode is not PermissionPolicy.DANGER_FULL_ACCESS:
+            if session_id not in self._goal_resume_round_allowance:
+                await self._block_goal_for_approval(session_id, events, state, mode)
+                return
+            self._goal_resume_round_allowance.discard(session_id)
         prompt = render_goal_round_prompt(state, state.rounds_started + 1)
         await self._queue_incoming_message(
             session_id=session_id,
@@ -4153,6 +4170,46 @@ class SessionService:
             remember_as_procedural_rule=False,
             user_input_metadata={"origin": GOAL_ORIGIN},
         )
+
+    async def _block_goal_for_approval(
+        self,
+        session_id: str,
+        events: list[SessionEvent],
+        state: GoalState,
+        mode: PermissionPolicy | None,
+    ) -> None:
+        """决策 b（#1359 阶段 3）：非 danger 档下撞审批点 → ``blocked`` 而不是入队。
+
+        判据是权限档：根 registry 恒注册 ``bash``（DANGER + MUTATING），
+        ``workspace-write`` 下它需审批、``read-only`` 下写类 MUTATING 工具也需
+        审批——非 ``danger-full-access`` 档的下一轮必然撞审批闸门。目标停在
+        ``blocked`` 上语义诚实：不是"完成"，也不是"用户暂停"，人处理完审批
+        （或改档）后 ``/goal resume`` 即恢复续跑。
+        """
+        outcome = await self._apply_write_with_conflict_retry(
+            session_id,
+            events,
+            lambda session: append_goal_change(
+                session,
+                "block",
+                blocked_reason={
+                    "code": APPROVAL_REQUIRED_CODE,
+                    "message": (
+                        f"自动续跑会在审批点停下（当前权限档 "
+                        f"{mode.value if mode is not None else '未声明'} 不是 "
+                        "danger-full-access）；处理审批或修改权限档后 /goal resume"
+                    ),
+                },
+                expected_revision=state.revision,
+            ),
+        )
+        if outcome.ok:
+            self._goal_armed.discard(session_id)
+            logger.info("goal 撞审批点，已置 blocked（session=%s）", session_id)
+        else:
+            logger.warning(
+                "goal 置 blocked 被拒（session=%s）：%s", session_id, outcome.reason,
+            )
 
     async def _pause_goal_for_no_progress(
         self, session_id: str, events: list[SessionEvent], state: GoalState,
@@ -7049,8 +7106,13 @@ class SessionService:
         if outcome.ok:
             if operation in ("create", "resume"):
                 self._goal_armed.add(session_id)
+                # 决策 b：只有**显式 resume** 授予一轮额度；create 不授予——非
+                # danger 档下创建后的首个终态同样撞审批闸门，就该 park。
+                if operation == "resume":
+                    self._goal_resume_round_allowance.add(session_id)
             elif operation in ("pause", "complete", "block", "clear"):
                 self._goal_armed.discard(session_id)
+                self._goal_resume_round_allowance.discard(session_id)
             await self.refresh_progress_file(session_id)
         return outcome
 
