@@ -22,6 +22,7 @@ import pytest
 from agent_harness.session.ask_user_timeout import ExpireOutcome
 from agent_harness.session.event import (
     RUN_COMPLETED,
+    RUN_PAUSED,
     RUN_STARTED,
     USER_INPUT_REQUESTED,
     USER_MESSAGE,
@@ -43,6 +44,13 @@ def _events(
         SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
         SessionEvent(
             type=USER_INPUT_REQUESTED, run_id="r1", seq=1, data=payload,
+        ),
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={
+                "reason": "user_input", "trigger_dimension": "user_input",
+                "input_request_id": "req-1",
+            },
         ),
     ]
 
@@ -180,8 +188,81 @@ async def test_restore_keeps_the_deadline_from_the_persisted_request_time():
                 "timeout_seconds": 60,
             },
         ),
+        # #1337：装配还要求当前确实暂停在该请求上（旧流缺这条 ⇒ 不装表）。
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={"reason": "user_input", "trigger_dimension": "user_input",
+                  "input_request_id": "req-1"},
+        ),
     ])
 
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_restore_does_not_arm_a_request_without_a_pause_fact():
+    """#1337：只有 `user/input-requested`、没有 `run/paused` 的旧事件流不装表。
+
+    崩溃现场可能留下「请求已落盘、run 既没暂停也没终态」的事件流。按墙钟补齐的
+    计时器会在首轮 ticker 就判到期，把一个早已无人等待的提问当"刚刚超时"恢复掉
+    （污染事件流）。装配只认当前确实暂停在该请求上的事实——与在线恢复路径
+    `resume_ask_user_timeout` 同源的守卫。
+    """
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+            time=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            data={"request_id": "req-1", "kind": "ask_user",
+                  "timeout_seconds": 60},
+        ),
+    ])
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_disarms_when_the_pause_belongs_to_another_request():
+    """暂停在别的 request 上（事件流错位）⇒ 不为旧请求装表，并撤掉残留表。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_event("s1", _request_event("req-1"))  # 观察者先装了一张
+    assert driver.is_armed("s1") is True
+
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+            data={"request_id": "req-1", "kind": "ask_user"},
+        ),
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={"reason": "user_input", "trigger_dimension": "user_input",
+                  "input_request_id": "req-2"},
+        ),
+    ])
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_arms_a_genuinely_paused_request():
+    """正控：请求 + `run/paused(reason=user_input, 同一 request)` ⇒ 照常装配。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", _events())
+
+    assert driver.is_armed("s1") is True
+    clock.advance(60)
     assert await driver.check_expiries() == ["s1"]
     assert fired == [("s1", "req-1")]
 

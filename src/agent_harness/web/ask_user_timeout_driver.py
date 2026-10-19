@@ -55,6 +55,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 
+from agent_harness.agent.run_budget import REASON_USER_INPUT, latest_paused_run
 from agent_harness.agent.types import AgentEvent
 from agent_harness.session.ask_user_timeout import (
     TERMINAL_RUN_EVENTS,
@@ -157,11 +158,14 @@ class AskUserTimeoutDriver:
     def note_session_state(self, session_id: str, events: Iterable[SessionEvent]) -> None:
         """按事件流**快照**装配计时器（启动重建用，幂等）。
 
-        最新 run 上还有未答复的 `ask_user` ⇒ 装配（同一 request_id 重复调用保留
-        已累计时长）。快照里**没有**待回答请求时**不动**已有计时器：快照可能比
+        最新 run 上还有未答复的 `ask_user`，**且该 run 当前确实暂停在它上面**
+        （`run/paused(reason=user_input, input_request_id=该请求)`）⇒ 装配（同一
+        request_id 重复调用保留已累计时长）。只有请求事件、没有暂停事实的旧事件流
+        ⇒ `disarm`（#1337：否则首轮 ticker 会把早已无人等待的提问当刚超时恢复掉）。
+        快照里**没有**待回答请求时**不动**已有计时器：快照可能比
         进程内事件观察者更旧（读盘与落盘并发），"快照没看到"不是"请求已了结"
-        的证据。撤销只由 `note_event`（权威事件落盘）驱动；漏掉的撤销由到期时
-        `resume_ask_user_timeout` 重读事件流判 `RESOLVED` 兜底。
+        的证据。漏掉的撤销由到期时 `resume_ask_user_timeout` 重读事件流判
+        `RESOLVED` 兜底。
 
         #1320：重启重建时按请求事件的 `time` 还原已累计时长（`elapsed_seconds_since`）
         ——durable timer 的截止时刻在持久事件里，不因进程重启而顺延一个完整档位。
@@ -173,6 +177,21 @@ class AskUserTimeoutDriver:
         """
         request = latest_pending_input_request(events, kind="ask_user")
         if request is None:
+            return
+        events = list(events)
+        # #1337：与 `resume_ask_user_timeout` 同源的暂停态守卫。只判"最新 run 有未答复
+        # 请求"不够——崩溃现场可能留下「`user/input-requested` 已落盘、但没有
+        # `run/paused` 也没有终态」的旧事件流；把它装表会按墙钟补齐已累计时长，首轮
+        # ticker 就把一个早已无人等待的提问当"刚刚超时"恢复掉，污染事件流。
+        # 装配只认**当前确实暂停在该 request 上**的事实（`run/paused` 未被
+        # `run/resumed` / 终态压过）。
+        paused = latest_paused_run(events)
+        if (
+            paused is None
+            or paused.reason != REASON_USER_INPUT
+            or paused.input_request_id != request.data["request_id"]
+        ):
+            self.disarm(session_id)
             return
         self.arm(
             session_id,
