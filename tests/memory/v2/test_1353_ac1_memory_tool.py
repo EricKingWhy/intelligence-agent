@@ -7,17 +7,16 @@ Oracle：Hermes `tests/tools/test_memory_tool.py`（commit b324b1f7）的对应
 
 from __future__ import annotations
 
-import importlib
 import inspect
 
 import pytest
 import pytest_asyncio
 
+from agent_harness.memory.v2.memory_tool import _MemoryArgs
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
     call,
     load,
-    method,
     path_of,
     read_entries,
 )
@@ -47,7 +46,7 @@ async def _remove(store, target: str, old_text: str, **kwargs):
 
 
 async def _batch(store, target: str, operations: list[dict]):
-    return await call(method(store, "apply_batch", "batch"), target, operations)
+    return await store.apply_batch(target, operations)
 
 
 async def test_add_writes_entry_to_markdown(store) -> None:
@@ -109,7 +108,11 @@ async def test_ambiguous_match_returns_every_competing_entry(store) -> None:
     # 判据只锁「模型能自纠」这件事：≥2 命中必须回**全部候选条目**，而不是只说“有歧义”。
     # ⚠ 票面 §6 AC1 / §3 M1 的散文写「≥2 命中返回 `current_entries`」，而上游 oracle
     # （`memory_tool_store.py:329-331`，票面同时要求逐行搬）用的是 `matches=[...]`（截断 80 字符）；
-    # 两处口径不一致已上报，本条不替任一方拍板：两种形状都接受，但候选集必须完整。
+    # 两处口径不一致已上报，本条不替任一方拍板：两种形状都接受，但候选集必须完整，
+    # 且**互斥**——实现必须二选一并自洽，不允许两种键同时出现（Stds-P3）。
+    has_current = "current_entries" in result
+    has_matches = "matches" in result
+    assert has_current != has_matches, f"current_entries 与 matches 必须互斥，实际：{result!r}"
     candidates = result.get("current_entries")
     if candidates is None:
         matches = result.get("matches")
@@ -206,72 +209,27 @@ async def test_user_and_memory_targets_stay_separate(store) -> None:
     assert path_of(store, "user").name == "USER.md"
 
 
-_SCHEMA_MODULES = (
-    "agent_harness.memory.v2.markdown_store",
-    "agent_harness.memory.v2.memory_tool",
-    "agent_harness.memory.v2.tools",
-    "agent_harness.memory.markdown_store",
-    "agent_harness.tooling.memory_tool",
-)
+def _enum_sets(node, found: list[frozenset]) -> list[frozenset]:
+    """递归收集 JSON Schema 里所有 `enum`（pydantic 会把它们放进 `$defs` / `allOf`）。"""
+    if isinstance(node, dict):
+        enum = node.get("enum")
+        if isinstance(enum, list):
+            found.append(frozenset(enum))
+        for value in node.values():
+            _enum_sets(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _enum_sets(value, found)
+    return found
 
 
-def _is_args_model(value) -> bool:
-    """参数模型：pydantic 且有 `action` / `target` 两个字段。"""
-    return isinstance(value, type) and hasattr(value, "model_json_schema") and (
-        {"action", "target"} <= set(getattr(value, "model_fields", {}) or {})
-    )
-
-
-def _module_schema(module) -> dict | None:
-    """模块级 `MEMORY_SCHEMA`（照搬面）或 `memory` Tool 的 pydantic schema。
-
-    `MemoryTool.args_schema` 在本仓是 ``@property``，所以类属性拿不到模型；
-    这里既认模块里直接暴露的 pydantic 参数模型，也认 Tool 实例上的 ``args_schema``
-    （用 ``object.__new__`` 取值，不触发 Tool 的业务初始化）。
-    """
-    for attribute in ("MEMORY_SCHEMA", "MEMORY_TOOL_SCHEMA"):
-        value = getattr(module, attribute, None)
-        if isinstance(value, dict):
-            return value
-    for value in vars(module).values():
-        if _is_args_model(value):
-            return value.model_json_schema()
-    for value in vars(module).values():
-        if not isinstance(value, type):
-            continue
-        try:
-            args = getattr(object.__new__(value), "args_schema", None)
-        except Exception:  # noqa: BLE001,S112 - 任何构造/属性异常的类都不算 Tool 落点
-            continue
-        if _is_args_model(args):
-            return args.model_json_schema()
-        if isinstance(args, dict):
-            return args
-    return None
-
-
-def _memory_schema() -> tuple[str, dict]:
-    """在票面允许的落点里找 `memory` 工具的参数形状。
+def _memory_schema() -> dict:
+    """`memory` 工具参数形状的真实落点：`MemoryTool.args_schema` 返回 `_MemoryArgs`。
 
     M1 要求"照搬 `MEMORY_SCHEMA` 的 description + 参数形状"，同时把 dispatch 换成
-    Owlet `Tool` + pydantic `args_schema`——所以 schema 既可能是模块级 dict，也可能是
-    Tool 类上的模型。两种都算满足；不在这几个落点就红，并列出找过的地方。
+    Owlet `Tool` + pydantic `args_schema`——形状唯一钉死在 `_MemoryArgs`，直连。
     """
-    tried: list[str] = []
-    for name in _SCHEMA_MODULES:
-        try:
-            module = importlib.import_module(name)
-        except ModuleNotFoundError:
-            tried.append(f"{name}（模块不存在）")
-            continue
-        schema = _module_schema(module)
-        if schema is not None:
-            return name, schema
-        tried.append(f"{name}（无 MEMORY_SCHEMA / memory Tool）")
-    pytest.fail(
-        "#1353 AC1：找不到 `memory` 工具的参数形状；已检查：" + "; ".join(tried),
-        pytrace=False,
-    )
+    return _MemoryArgs.model_json_schema()
 
 
 def _enum_sets(node, found: list[frozenset]) -> list[frozenset]:
@@ -290,7 +248,7 @@ def _enum_sets(node, found: list[frozenset]) -> list[frozenset]:
 
 async def test_tool_schema_exposes_memory_action_and_target_enums(store) -> None:
     """M1：`memory` 工具的参数形状必须覆盖 add/replace/remove/batch × memory/user。"""
-    _, schema = _memory_schema()
+    schema = _memory_schema()
     parameters = schema.get("parameters", schema)
     enums = _enum_sets(parameters, [])
 
