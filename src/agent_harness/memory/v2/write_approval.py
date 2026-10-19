@@ -251,7 +251,11 @@ class StagedWriteStore:
 
     # ------------------------------------------------------------------ 裁决
 
-    @retry_on_busy
+    # 不挂 `retry_on_busy`（#1353 复审 S-P2-1）：`approve` 是
+    # get → CAS AWAITING → `_replay`（**外部 markdown 写**）→ CAS APPROVED 的长链，
+    # 不是装饰器前提里的"单语句原子写"。整块重跑时第二遍读到的是自己刚写的 AWAITING，
+    # 直接返回 blocked，而 markdown 已经落盘 ⇒ 状态机卡在 AWAITING、条目重复。
+    # 锁竞争由每次 `_set_status` 自身的重试 + `busy_timeout=10s` 覆盖。
     async def approve(
         self, staged_id: str, trusted: TrustedMemoryIdentity,
     ) -> tuple[GateDecision, dict[str, Any] | None]:
@@ -296,7 +300,6 @@ class StagedWriteStore:
         await self._set_status(staged_id, APPROVED, expected=AWAITING)
         return GateDecision(allow=True), response
 
-    @retry_on_busy
     async def reject(
         self, staged_id: str, trusted: TrustedMemoryIdentity,
     ) -> GateDecision:
