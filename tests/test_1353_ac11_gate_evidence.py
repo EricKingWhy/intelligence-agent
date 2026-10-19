@@ -105,16 +105,39 @@ def test_gate_receipts_are_machine_recorded_and_point_at_their_tree():
         versions = receipt["tool_versions"]
         assert isinstance(versions, dict) and versions, f"{path.name} 缺工具版本"
 
-    # 抽样核对「读数能指到树」：收据里记的 tree 必须等于该 sha 的真实 tree。
-    # 只抽样（不跑 997 次 git）——格式与字段已在上面的全量循环里覆盖。
-    sample = [paths[0], paths[len(paths) // 2], paths[-1]]
-    for path in sample:
+    # 全量核对「读数能指到树」：每张收据里记的 tree 必须等于该 sha 的真实 tree。
+    # 一次 `git log --all --format=%H %T` 拿全仓 commit→tree 映射，避免逐 sha
+    # 各起一个 git 进程（997+ 次）。两类失败显式分开：
+    #   ① sha 在库但 tree 不一致 —— 收据造假/树对不上；
+    #   ② sha 不在对象库 —— 无法在本仓核验（跨 clone 历史收据或对象被 GC），
+    #      同样红，处理方式需裁决（补齐对象 / 移除收据 / 明确接受不可核验语义）。
+    commit_trees: dict[str, str] = {}
+    for line in _git("log", "--all", "--format=%H %T").splitlines():
+        commit, tree = line.split()
+        commit_trees[commit] = tree
+
+    unresolvable: list[str] = []
+    for path in paths:
         receipt = json.loads(path.read_text(encoding="utf-8"))
-        actual = _git("rev-parse", f"{receipt['sha']}^{{tree}}")
-        assert actual == receipt["tree"], (
-            f"{path.name} 记录的 tree 与 {receipt['sha']} 的真实 tree 不一致："
-            f"{receipt['tree']} != {actual}"
+        sha, recorded = str(receipt["sha"]), str(receipt["tree"])
+        actual = commit_trees.get(sha)
+        if actual is None:
+            probe = subprocess.run(
+                ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+            )
+            if probe.returncode != 0:
+                unresolvable.append(f"{path.name}（sha={sha} 不在本仓对象库，tree 无法核验）")
+                continue
+            actual = _git("rev-parse", f"{sha}^{{tree}}")
+        assert actual == recorded, (
+            f"{path.name} 记录的 tree 与 {sha} 的真实 tree 不一致："
+            f"{recorded} != {actual}"
         )
+    assert not unresolvable, (
+        "以下收据的 sha 不在本仓对象库，tree 校验无法执行（全量核对不静默跳过）：\n"
+        + "\n".join(unresolvable)
+    )
 
 
 def test_playwright_full_suite_inputs_exist():
