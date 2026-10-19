@@ -771,50 +771,51 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline-offset: -2px;
 }
 
-/* ── Trace Density 四档切换（Phase 4）：segmented control——选中块浮起
- * （Linear 式分段器），不再是裸按钮 + 分隔线 + 实心 accent 的拼装感。 */
-.density-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-}
-.density-btn {
+/* ── #1396：顶栏图标按钮 ghost 化 ──
+ * 只作用于顶栏：静止态透明、无边框、无内高光，hover/focus 才出现 surface。
+ * 其它面板里的 `.icon-btn`（关闭、看板、抽屉开关）保持原有可触感，不连带改。 */
+.appbar-icon-btn {
   background: transparent;
-  border: none;
-  border-radius: var(--radius-xs);
-  color: var(--color-muted-foreground);
-  font-size: 11px;
-  line-height: 1;
-  padding: 4px 8px;
-  cursor: pointer;
-  /* #1368：两字标签在挤压下会逐字折成竖排（390 实测「紧凑」3 行）——按钮文字永不换行。 */
-  white-space: nowrap;
-  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
-    box-shadow var(--dur-out) var(--ease-apple);
+  border: 0;
+  box-shadow: none;
 }
-.density-btn:hover {
-  color: var(--color-foreground);
-  background: var(--color-hover);
-}
-.density-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
-}
-/* 选中块真浮起：更亮一档的表面 + 双层投影（贴地 1px + 漂浮 6px）+
- * edge-light 内高光——iOS/Linear segmented 的"凸起键"质感。
- * 主题自适应：shadow-overlay 与 edge-light 均随 [data-theme] 翻转。 */
-.density-btn.sel {
+.appbar-icon-btn:hover:not(:disabled) {
   color: var(--text-primary);
-  font-weight: 600;
-  background: var(--surface-overlay);
-  /* 高度只用 --shadow-overlay 一档：原先叠的 1px 字面阴影与它重复（#1364 改动 5）。 */
-  box-shadow:
-    var(--edge-light),
-    var(--shadow-overlay);
+  background: var(--color-hover);
+  border: 0;
+  box-shadow: none;
+  transform: none;
+}
+.appbar-icon-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  box-shadow: none;
+  transform: none;
+}
+.appbar-icon-btn:focus-visible {
+  background: var(--color-hover);
+  box-shadow: none;
+}
+
+/* ── Trace Density 单一下拉（#1396；四档仍是冻结决策） ──
+ * 触发器显示当前档，展开才出现四档；不再常驻四段 segmented。 */
+.appbar-density-trigger {
+  width: auto;
+  height: 28px;
+  padding: 0 8px;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.appbar-density-menu {
+  min-width: 132px;
+}
+.appbar-density-item {
+  justify-content: space-between;
+  gap: var(--space-sm);
 }
 
 /* ── Session Rail（左：低对比导航 chrome，嵌在 frame 内） ── */

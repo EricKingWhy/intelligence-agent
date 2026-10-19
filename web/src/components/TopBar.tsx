@@ -2,14 +2,15 @@
  *
  * Left: product identity. Center: current session title + Run Pulse
  * (signature #1 — icon + color + text, never color-only). Right:
- * trace density selector (four tiers, localStorage-persisted — frozen
- * decision), theme toggle, and the「更多工具」menu (API token, context
- * usage, context window, approval rules, watchtower, Inspector toggle).
- * Memory / kanban / recovery stay as always-visible buttons.
+ * one density dropdown (shows the current tier) + the「更多工具」menu.
+ *
+ * #1396：右簇只保留 2 个可见动作——密度下拉与「更多」。记忆 / 看板 / 恢复 /
+ * 主题与既有管理项都收进同一个菜单，入口零丢失；图标按钮静止态是 ghost
+ * （透明、无边框），hover/focus 才出现 surface。
  */
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Brain, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
+import { Brain, Check, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { formatDateTime } from '../lib/format';
@@ -280,20 +281,48 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-right">
-        <div className="density-picker" role="radiogroup" aria-label="显示密度">
-          {DENSITIES.map((d) => (
-            <Tip key={d} content={`显示密度：${DENSITY_LABEL[d]}`}>
+        {/* #1396：四段 segmented 压成单个下拉——触发器显示当前档，展开才出现四档。
+            `RadioGroup` 保留「一组里只有一个选中」的语义（menuitemradio + aria-checked）。 */}
+        <DropdownMenu.Root>
+          <Tip content={`显示密度：${DENSITY_LABEL[density]} · 点击切换`}>
+            <DropdownMenu.Trigger asChild>
               <button
-                role="radio"
-                aria-checked={density === d}
-                className={`density-btn ${density === d ? 'sel' : ''}`}
-                onClick={() => onDensityChange(d)}
+                type="button"
+                className="icon-btn appbar-icon-btn appbar-density-trigger"
+                aria-label={`显示密度：${DENSITY_LABEL[density]}`}
               >
-                {DENSITY_LABEL[d]}
+                <span>{DENSITY_LABEL[density]}</span>
+                <ChevronDown size={12} aria-hidden="true" />
               </button>
-            </Tip>
-          ))}
-        </div>
+            </DropdownMenu.Trigger>
+          </Tip>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              className="rail-menu appbar-density-menu"
+              align="end"
+              sideOffset={6}
+              aria-label="显示密度"
+            >
+              <DropdownMenu.RadioGroup
+                value={density}
+                onValueChange={(value) => onDensityChange(value as TraceDensity)}
+              >
+                {DENSITIES.map((d) => (
+                  <DropdownMenu.RadioItem
+                    key={d}
+                    value={d}
+                    className="rail-menu-item appbar-density-item"
+                  >
+                    <span>{DENSITY_LABEL[d]}</span>
+                    <DropdownMenu.ItemIndicator>
+                      <Check size={14} aria-hidden="true" />
+                    </DropdownMenu.ItemIndicator>
+                  </DropdownMenu.RadioItem>
+                ))}
+              </DropdownMenu.RadioGroup>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
         {/* 身份 chip（da394a9 认证 UX）：token 已配置且可解码时展示 token 声称的身份。
             仅解码不验签——真伪由 401 拦截兜底；无 token / 畸形 token 不渲染。 */}
         {identity && (
@@ -307,40 +336,14 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             </span>
           </Tip>
         )}
-        {/* #1372 改动 6：10 个图标的收纳。默认只留 4 个会话级高频动作
-            （记忆管理 / 看板 / 恢复列表 / 切换主题），其余 6 个（身份令牌、上下文容量、
-            上下文窗口、持久审批规则、自动值班、收起 Inspector）进 "…" 菜单。
-            功能零丢失：每一项仍是同一条既有回调，只是换了入口。 */}
-        <Tip content="记忆管理——查看并删除系统记住的长期事实">
-          <button className="icon-btn" onClick={onOpenMemories} aria-label="记忆管理">
-            <Brain size={16} />
-          </button>
-        </Tip>
-        {onOpenKanban && (
-          <Tip content="Agent 看板——会话四态投影">
-            <button className="icon-btn" onClick={onOpenKanban} aria-label="看板">
-              <Columns3 size={16} />
-            </button>
-          </Tip>
-        )}
-        {onOpenRecoveryList && (
-          <Tip content="恢复列表——查看上次运行留下的中断会话（只读）">
-            <button className="icon-btn" onClick={onOpenRecoveryList} aria-label="恢复列表">
-              <History size={16} />
-            </button>
-          </Tip>
-        )}
-        <Tip content="切换主题">
-          <button className="icon-btn" onClick={onToggleTheme} aria-label="切换主题">
-            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
-        </Tip>
+        {/* #1372 改动 6 / #1396：低频动作全部进 "…" 菜单。默认可见动作只剩密度下拉
+            与「更多」两个；每一项仍是同一条既有回调，功能零丢失。 */}
         <DropdownMenu.Root>
-          <Tip content="更多工具——身份令牌 / 上下文 / 审批 / 自动值班 / Inspector">
+          <Tip content="更多工具——记忆 / 看板 / 恢复 / 主题 / 身份令牌 / 上下文 / 审批 / Inspector">
             <DropdownMenu.Trigger asChild>
               <button
                 ref={moreTriggerRef}
-                className={`icon-btn appbar-more-trigger${authRequired ? ' attention' : ''}`}
+                className={`icon-btn appbar-icon-btn appbar-more-trigger${authRequired ? ' attention' : ''}`}
                 aria-label="更多工具"
               >
                 <Ellipsis size={16} />
@@ -360,6 +363,28 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                 event.preventDefault();
               }}
             >
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenMemories}>
+                <Brain size={14} aria-hidden="true" /> 记忆管理
+              </DropdownMenu.Item>
+              {onOpenKanban && (
+                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenKanban}>
+                  <Columns3 size={14} aria-hidden="true" /> Agent 看板
+                </DropdownMenu.Item>
+              )}
+              {onOpenRecoveryList && (
+                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenRecoveryList}>
+                  <History size={14} aria-hidden="true" /> 恢复列表
+                </DropdownMenu.Item>
+              )}
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onToggleTheme}>
+                {theme === 'dark' ? (
+                  <Sun size={14} aria-hidden="true" />
+                ) : (
+                  <Moon size={14} aria-hidden="true" />
+                )}
+                切换主题
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="rail-menu-sep" />
               <DropdownMenu.Item className="rail-menu-item" onSelect={openAuthPanel}>
                 <KeyRound size={14} aria-hidden="true" /> API 身份令牌
                 {authRequired && <span className="appbar-menu-warn">需要配置</span>}
