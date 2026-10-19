@@ -80,8 +80,11 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [tokenDraft, setTokenDraft] = useState('');
   const authInputRef = useRef<HTMLInputElement>(null);
-  /** 菜单因「API 身份令牌」而关闭时，别把焦点还给 trigger，交给面板输入框。 */
-  const authPanelOpenRef = useRef(false);
+  /** 「更多工具」触发器：令牌面板从任何路径关闭时，焦点都回到这里。 */
+  const moreTriggerRef = useRef<HTMLButtonElement>(null);
+  /** 本次菜单关闭是否由「打开 API 身份令牌」引起：只在那一次阻止 Radix 归还焦点。
+   *  不能按「面板此刻是否打开」判断——面板已开时用 Esc/其它菜单项关菜单也会被误吞。 */
+  const authFocusPendingRef = useRef(false);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -101,14 +104,13 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const openAuthPanel = () => {
     setTokenDraft(getToken());
     const next = !authPanelOpen;
-    authPanelOpenRef.current = next;
+    authFocusPendingRef.current = next; // 只有「打开」才接管焦点
     setAuthPanelOpen(next);
   };
 
   // Radix 菜单关闭时会把焦点还给 trigger；若面板此刻打开，焦点要落到输入框，
   // 否则 Esc 落在 trigger 上、面板关不掉（键盘用户必须先手动点进来）。
   useEffect(() => {
-    authPanelOpenRef.current = authPanelOpen;
     if (!authPanelOpen) return;
     const timer = window.setTimeout(() => authInputRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
@@ -116,8 +118,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
 
   const saveToken = () => {
     setToken(tokenDraft);
-    setAuthPanelOpen(false);
+    closeAuthPanel();
   };
+
+  /** 关闭令牌面板并把焦点还给「更多工具」。面板内控件（输入框 / 保存 / 清除）
+   *  随即卸载；不先移焦，键盘用户会掉回 body，下一次 Tab 从文档首重来。 */
+  function closeAuthPanel() {
+    setAuthPanelOpen(false);
+    moreTriggerRef.current?.focus();
+  }
 
   // #1030：`awaitingDecision` 是唯一不来自 `conversation` 的输入——坏死 run 的
   // run_status 停在 'running'，事件流里根本没有「卡在等人裁决」这个事实（唯一读面
@@ -331,6 +340,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <Tip content="更多工具——身份令牌 / 上下文 / 审批 / 自动值班 / Inspector">
             <DropdownMenu.Trigger asChild>
               <button
+                ref={moreTriggerRef}
                 className={`icon-btn appbar-more-trigger${authRequired ? ' attention' : ''}`}
                 aria-label="更多工具"
               >
@@ -346,7 +356,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               /* 选中「API 身份令牌」后菜单关闭：默认会把焦点还给触发器，
                  面板里的输入框就接不到 Esc。阻止这次归还，由面板 effect 接管。 */
               onCloseAutoFocus={(event) => {
-                if (authPanelOpenRef.current) event.preventDefault();
+                if (!authFocusPendingRef.current) return;
+                authFocusPendingRef.current = false;
+                event.preventDefault();
               }}
             >
               <DropdownMenu.Item className="rail-menu-item" onSelect={openAuthPanel}>
@@ -388,7 +400,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       {authPanelOpen && (
-        <div className="auth-panel" role="dialog" aria-label="API 身份令牌设置" onKeyDown={(e) => e.key === 'Escape' && setAuthPanelOpen(false)}>
+        <div className="auth-panel" role="dialog" aria-label="API 身份令牌设置" onKeyDown={(e) => e.key === 'Escape' && closeAuthPanel()}>
           <div className="auth-panel-title">API 身份令牌（Bearer）</div>
           <input
             ref={authInputRef}
@@ -411,7 +423,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               className="auth-panel-clear"
               onClick={() => {
                 setToken('');
-                setAuthPanelOpen(false);
+                closeAuthPanel();
               }}
             >
               清除

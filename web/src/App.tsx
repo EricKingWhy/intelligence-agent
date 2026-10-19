@@ -1623,12 +1623,28 @@ export default function App() {
     return items;
   }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
+  // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
+  // projection 状态，无第二真相源）。提取成变量：composer 禁用时「跳到输入框」也
+  // 必须隐藏——disabled 表单控件不可聚焦，链接会变成死路（#1372 r3 P3）。
+  const approvalPending = awaitingApproval(
+    (conversation?.pending_approvals ?? []).filter(
+      (a) => !goneApprovalIds.has(a.approval_id),
+    ),
+  );
+  const composerLocked =
+    constraintInputPending || askUserInputPending || planApprovalInputPending || approvalPending;
+
   return (
     <div className="app-frame">
       <SkipLinks
         inspectorVisible={!watchtowerOpen && inspectorOpen}
         regionsVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen)}
-        composerVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen) && activeTab === 'chat'}
+        composerVisible={
+          !watchtowerOpen &&
+          !(panel.expanded && inspectorOpen) &&
+          activeTab === 'chat' &&
+          !composerLocked
+        }
       />
       <TopBar
         conversation={conversation}
@@ -1998,11 +2014,7 @@ export default function App() {
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
-                    approvalPending={awaitingApproval(
-                      (conversation?.pending_approvals ?? []).filter(
-                        (a) => !goneApprovalIds.has(a.approval_id),
-                      ),
-                    )}
+                    approvalPending={approvalPending}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
                     /* #1191：项目级登记是否可选——真值来自后端（见上方 effect），

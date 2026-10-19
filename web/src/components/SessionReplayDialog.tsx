@@ -2,8 +2,12 @@
  *
  *  二次确认浮层：表单状态在内层 `SessionReplayForm` 里。为了关闭时能把焦点还给
  *  行内 ⋯，Content 不随 target 立刻卸载（卸载会触发 FocusScope 清理、焦点掉回
- *  body）；因此关闭完成时必须 **reset** 表单并在途请求/定时器失效，保证上一次的
- *  进度 / 错误不会漏到下一次。
+ *  body）。表单用「打开批次」作 key：每次从关闭态打开都强制重挂载，上一次的
+ *  进度 / 错误 / 在途请求结果不可能漏进下一次。
+ *
+ *  为什么不是「关闭时 reset」：Radix 的 `onCloseAutoFocus` 在 Content 卸载后的
+ *  0ms 定时器里才派发，那时表单已卸载，`setState` 全是 no-op；而退场动画内重开
+ *  会取消卸载、留下旧实例——两条路径都绕过了 reset。key 重挂载对两条都成立。
  *
  *  为什么是浮层而不是行内：README 把「可重放」写成核心能力，入口却只在 CLI。
  *  本浮层把这条能力搬到 Web 的可观测工作台里（对齐 Langfuse session view 的
@@ -48,7 +52,13 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
   // 保留最后一个 target 让 Content 撑到 Presence 完成退场（DOM 仍由 Radix 卸载），
   // onCloseAutoFocus 才有机会把焦点还给行内 ⋯。
   const [lastTarget, setLastTarget] = useState(target);
-  if (target && target !== lastTarget) setLastTarget(target);
+  /** 打开批次：每次 target 从无到有（调用方传新对象）自增，作为表单 key。
+   *  Content 的挂载/卸载由 Radix 管；这里只保证每次打开都是全新表单实例。 */
+  const [openBatch, setOpenBatch] = useState(0);
+  if (target && target !== lastTarget) {
+    setLastTarget(target);
+    setOpenBatch((n) => n + 1);
+  }
   return (
     <Dialog.Root
       open={target !== null}
@@ -60,11 +70,16 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
         <Dialog.Overlay className="palette-overlay" />
         {lastTarget && (
           <SessionReplayForm
+            key={openBatch}
             target={lastTarget}
             /* 只释放 DOM 引用：Content 若在退场时卸载，FocusScope 的卸载清理会
-               再把焦点抢回 body（AC2 实测红）。target 本身保留到下次打开。 */
+               再把焦点抢回 body（AC2 实测红）。target 本身保留到下次打开。
+               只在仍是同一个 target 时清：0ms 卸载回调可能晚于一次快速重开，
+               不能把新打开的 restoreFocus 一并清掉。 */
             onClosed={() =>
-              setLastTarget((prev) => (prev ? { ...prev, restoreFocus: null } : prev))
+              setLastTarget((prev) =>
+                prev === lastTarget ? { ...prev, restoreFocus: null } : prev,
+              )
             }
           />
         )}
@@ -91,18 +106,6 @@ function SessionReplayForm({
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
-  /** 打开批次令牌：关闭时自增，让在途请求/推进结果失效（Content 不卸载，
-   *  不取消就会把上一次的回放写进下一次打开的表单）。 */
-  const runToken = useRef(0);
-
-  const reset = () => {
-    runToken.current += 1;
-    setPhase('confirm');
-    setSteps([]);
-    setRevealed(0);
-    setLoaded(false);
-    setError(null);
-  };
 
   // 逐事件推进：请求返回后每 REVEAL_MS 揭示一条；到齐即收口为 done。
   useEffect(() => {
@@ -116,7 +119,6 @@ function SessionReplayForm({
   }, [phase, loaded, revealed, steps.length]);
 
   const start = async () => {
-    const token = ++runToken.current;
     setPhase('running');
     setError(null);
     setSteps([]);
@@ -124,11 +126,9 @@ function SessionReplayForm({
     setLoaded(false);
     try {
       const result = await replaySession(target.id);
-      if (token !== runToken.current) return; // 已关闭 / 已重开：丢弃旧结果
       setSteps(result.steps);
       setLoaded(true);
     } catch (e) {
-      if (token !== runToken.current) return;
       // 失败留在原地可重试：回到确认态，把后端 detail 原样贴出来（不自己编文案）。
       setError(describeSessionError(e, '重放会话失败'));
       setPhase('confirm');
@@ -161,7 +161,6 @@ function SessionReplayForm({
           event.preventDefault();
           restore.focus();
         }
-        reset();
         onClosed();
       }}
     >

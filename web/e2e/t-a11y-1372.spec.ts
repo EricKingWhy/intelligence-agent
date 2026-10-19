@@ -188,6 +188,7 @@ test('#1372：Inspector 收起时不再给出无法落焦的跳转键', async ({
   for (const name of ['跳到会话区', '跳到主工作区', '跳到 Inspector', '跳到输入框']) {
     await expect(page.getByRole('link', { name }), `${name}（自动值班时）`).toHaveCount(0);
   }
+  await expect(page.getByRole('navigation', { name: '跳转' })).toHaveCount(0);
   await page.getByRole('button', { name: '返回工作区' }).click();
 
   // 整页 Inspector：rail/workspace visibility:hidden —— 只留 Inspector 一条。
@@ -224,6 +225,15 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   await expect(page.locator('.auth-panel input').first()).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.locator('.auth-panel')).toHaveCount(0);
+  // r3 P3：面板关闭后焦点回到「更多工具」，不掉回 body（保存 / 清除走同一 helper）。
+  await expect(page.getByRole('button', { name: '更多工具' })).toBeFocused();
+
+  // 清除路径同样归还焦点（同一条关闭链的另一出口）。
+  await clickTopBarMenuItem(page, 'API 身份令牌');
+  await page.locator('.auth-panel input').first().fill('dummy');
+  await page.locator('.auth-panel-clear').click();
+  await expect(page.locator('.auth-panel')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '更多工具' })).toBeFocused();
 
   // 2) 上下文容量 → 看板
   await clickTopBarMenuItem(page, '上下文容量');
@@ -256,6 +266,18 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   await expect(page.locator('.app-regions')).not.toHaveClass(/inspector-closed/);
 });
 
+test('#1372 令牌面板已开时关闭菜单：焦点回到「更多工具」而不是 body', async ({ page }) => {
+  await openApp(page);
+  await clickTopBarMenuItem(page, 'API 身份令牌');
+  await expect(page.locator('.auth-panel input').first()).toBeFocused();
+
+  // 面板开着再打开菜单，用 Esc 关菜单（本次关闭与「打开令牌面板」无关）。
+  await page.getByRole('button', { name: '更多工具' }).click();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '更多工具' })).toBeFocused();
+});
+
 test('#1372 改动 1：会话行 Shift+F10 打开 ⋯ 菜单并把焦点交给首项', async ({ page }) => {
   await openApp(page);
   const rowButton = page.locator('.session-row').first().locator('.session-item');
@@ -286,12 +308,10 @@ test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', asyn
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
 
-  const returned = await page.evaluate(() => {
-    const el = document.activeElement as HTMLElement | null;
-    return { cls: el?.className ?? '', label: el?.getAttribute('aria-label') ?? '' };
-  });
-  expect(returned.cls).toContain('rail-menu-btn');
-  expect(returned.label).toContain('操作');
+  // Radix 在卸载后的 0ms 定时器里派发 onCloseAutoFocus；`toBeHidden` 可能在同一个
+  // 任务里先返回。用可重试断言等焦点落定（AC 是行为，不是同一 tick 的时序）。
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveAttribute('aria-label', /操作/);
 });
 
 test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {

@@ -27,7 +27,7 @@ export function SkipLinks({
   inspectorVisible: boolean;
   /** 会话区 + 主工作区可落焦（自动值班 / Inspector 全屏时 main 隐藏）。 */
   regionsVisible: boolean;
-  /** composer 可落焦（chat 面可见）。 */
+  /** composer 可落焦（chat 面可见且未因待审批 / 待回答而禁用）。 */
   composerVisible: boolean;
 }) {
   // 区域仍是 mounted，但隐藏时 focus() 会静默失败——指向看不见、也到不了的地方
@@ -37,6 +37,8 @@ export function SkipLinks({
     if (t.id === 'composer-input') return composerVisible;
     return regionsVisible;
   });
+  // 四目标全隐藏（自动值班）时不留一个空 landmark。
+  if (targets.length === 0) return null;
   return (
     <nav className="skip-links" aria-label="跳转">
       {targets.map(({ id, label }) => (

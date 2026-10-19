@@ -535,7 +535,7 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
-  /* #1372 改动 6：401 时「更多工具」触发器的提示点新增 `.appbar-menu-warn`（danger ink）。
+  /* #1372 改动 6：401 时「更多工具」触发器的提示点新增 `.appbar-menu-warn`（warning ink）。
      走真实 401 路径（同 #1136 auth-banner 夹具），打开菜单后量。 */
   test(`[${theme}] #1372 「更多工具」需要配置徽标（.appbar-menu-warn）对比度 ≥4.5`, async ({ page }) => {
     await mockAuthRequired(page);
