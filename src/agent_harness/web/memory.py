@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -33,6 +33,7 @@ from agent_harness.memory.audit import (
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
+    MarkdownAuthorityError,
     MemoryIndexDeletePending,
     StaleMemoryVersion,
 )
@@ -79,13 +80,12 @@ _DEGRADED_MESSAGE: dict[DegradeReason, str] = {
         "请改为 enabled=true（或删掉这条登记）。"
     ),
     DegradeReason.MISSING_SETTINGS: (
-        "memory capability 缺前置配置：向量检索（MILVUS_URI / MILVUS_TOKEN / "
-        "MILVUS_COLLECTION）与嵌入模型（EMBEDDING_MODEL / EMBEDDING_BASE_URL / "
-        "EMBEDDING_API_KEY）两组都齐才装配记忆。补齐后重启后端。"
+        "memory capability 缺前置配置：CAPABILITIES 里已登记 memory，但 "
+        "markdown 记忆目录不可写（WORKSPACE_DIR/memories）。修好目录权限后重启后端。"
     ),
     DegradeReason.INIT_FAILED: (
         "memory capability 初始化失败：CAPABILITIES 里已登记且启用，但装配时出错"
-        "（记忆向量库不可达是常见原因）。这不是「没配置」——改 CAPABILITIES 没用；"
+        "（记忆目录不可写 / markdown 初始化出错是常见原因）。这不是「没配置」——改 CAPABILITIES 没用；"
         "完整原因在后端日志的「capability 'memory' 初始化失败」那条里，排除后重启后端即可恢复。"
     ),
 }
@@ -191,11 +191,13 @@ class MemorySettingsPatch(BaseModel):
     recall_enabled: bool | None = None
     #: #1039：主端点确定性 provider 类错误是否允许落一次备用（默认开）。
     fallback_enabled: bool | None = None
+    #: #1353 M6：`memory` 工具写入是否先进待审区（默认关 = 直接落盘）。
+    write_approval: bool | None = None
 
     @model_validator(mode="after")
     def _at_least_one(self) -> MemorySettingsPatch:
         if (self.extraction_enabled is None and self.recall_enabled is None
-                and self.fallback_enabled is None):
+                and self.fallback_enabled is None and self.write_approval is None):
             raise ValueError("at least one setting must be provided")
         return self
 
@@ -204,6 +206,46 @@ class MemorySettingsResponse(BaseModel):
     extraction_enabled: bool
     recall_enabled: bool
     fallback_enabled: bool
+    write_approval: bool = False
+
+
+class MemoryPendingWrite(BaseModel):
+    """一条待审写入。``payload`` 是 stage 时的原始形状——用户要看着它决定批不批。"""
+
+    id: str
+    payload: dict
+    created_at: str
+
+
+class MemoryJourneyCard(BaseModel):
+    """`/journey` 的一张记忆卡片（#1353 M10）。
+
+    ``fingerprint`` 是 ``sha256(entry.strip())[:12]``——卡片由**它说的话**标识，
+    不是由它坐的位置标识（上游 #119668）。``memory_id`` / ``version`` / ``state``
+    是版本链独有的三个字段，让卡片能点回具体版本。
+    """
+
+    source: Literal["memory", "profile"]
+    timestamp: str
+    title: str
+    body: str
+    fingerprint: str
+    memory_id: str
+    version: int
+    state: str
+
+
+class MemoryJourneyResponse(BaseModel):
+    """与 Hermes `learning_graph` 同形的载荷；本期 ``edges`` 恒空（skill 边非目标）。
+
+    ``nodes`` / ``edges`` / ``stats`` 的元素形状由 `journey.build_journey` 决定，
+    这里只做透传；标注 ``dict[str, Any]`` 让类型检查至少知道"是映射"而不是裸 dict。
+    """
+
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    memory: list[MemoryJourneyCard]
+    stats: dict[str, Any]
 
 
 class MemoryRecallExplanation(BaseModel):
@@ -432,6 +474,10 @@ def register_memory_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=422, detail="payload kind must match the memory kind",
             ) from error
+        except MarkdownAuthorityError as error:
+            # 权威面拒收（预算超限 / 威胁扫描命中）是**正常业务拒绝**：请求本身形状没错，
+            # 只是内容不可接受。不翻译就会以未登记 RuntimeError 冒成 500（#1353 P2-2）。
+            raise HTTPException(status_code=422, detail=str(error)) from error
         except KeyError as error:
             raise HTTPException(status_code=404, detail="memory not found") from error
         except PermissionError as error:
@@ -491,6 +537,7 @@ def register_memory_routes(app: FastAPI) -> None:
             extraction_enabled=settings.extraction_enabled,
             recall_enabled=settings.recall_enabled,
             fallback_enabled=settings.fallback_enabled,
+            write_approval=settings.write_approval,
         )
 
     @app.patch("/api/memory-settings")
@@ -505,6 +552,7 @@ def register_memory_routes(app: FastAPI) -> None:
                 trusted, extraction_enabled=request.extraction_enabled,
                 recall_enabled=request.recall_enabled,
                 fallback_enabled=request.fallback_enabled,
+                write_approval=request.write_approval,
             )
         except StorageBusyError as error:
             # #376 票面失败点（store.update_settings 的 BEGIN IMMEDIATE）走同一条 mapping。
@@ -516,7 +564,112 @@ def register_memory_routes(app: FastAPI) -> None:
             extraction_enabled=settings.extraction_enabled,
             recall_enabled=settings.recall_enabled,
             fallback_enabled=settings.fallback_enabled,
+            write_approval=settings.write_approval,
         )
+
+    # ----------------------------------------------------------------------------------
+    # 待审写入（#1353 M6）
+    # ----------------------------------------------------------------------------------
+
+    async def _staged_v2():
+        service = await _v2_service()
+        staged = service.staged
+        if staged is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "write_approval_unavailable",
+                        "message": "此部署没有 markdown 权威面，因此没有待审写入区。"},
+            )
+        return staged
+
+    @app.get("/api/memory-journey")
+    async def get_memory_journey(
+        project_id: str | None = Query(None, min_length=1, max_length=256),
+        limit: int = Query(50, ge=1, le=_MAX_LIMIT),
+        _: None = Depends(require_trusted_origin),
+    ) -> MemoryJourneyResponse:
+        """记忆时间线（#1353 M10）：每条记忆的版本链折成卡片。
+
+        数据源是**版本链**（`list_versions`），不是文件 mtime——markdown 是当前态，
+        时间线要回答的是"这条记忆是怎么变成现在这样的"。只取 active 记忆，因此
+        已撤回的版本仍作为历史出现在卡片里（`state` 字段），但已删除的不会。
+        """
+        from agent_harness.memory.v2.journey import build_journey
+
+        service = await _v2_service()
+        trusted = await _trusted_v2(project_id)
+        try:
+            active = await service.list_records(
+                trusted, status=MemoryStatusV2.ACTIVE, project_id=project_id,
+                limit=limit, offset=0,
+            )
+            histories = []
+            for record in active:
+                try:
+                    histories.append(await service.versions(record.root_id, trusted))
+                except KeyError:
+                    # 版本链在两次读之间被删干净：这一条已不是 active 记忆，跳过而不是
+                    # 让整个时间线 500。
+                    continue
+        except PermissionError as error:
+            raise memory_http_error(error) from error
+        payload = build_journey(histories)
+        return MemoryJourneyResponse(
+            nodes=payload["nodes"], edges=payload["edges"],
+            memory=[MemoryJourneyCard(**card) for card in payload["memory"]],
+            stats=payload["stats"],
+        )
+
+    @app.get("/api/memory-pending")
+    async def list_pending_memory_writes(
+        _: None = Depends(require_trusted_origin),
+    ) -> list[MemoryPendingWrite]:
+        staged = await _staged_v2()
+        trusted = await _trusted_v2()
+        return [
+            MemoryPendingWrite(id=item.id, payload=item.payload, created_at=item.created_at)
+            for item in await staged.pending(trusted)
+        ]
+
+    @app.post("/api/memory-pending/{staged_id}/approve")
+    async def approve_pending_memory_write(
+        staged_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        staged = await _staged_v2()
+        trusted = await _trusted_v2()
+        try:
+            decision, response = await staged.approve(staged_id, trusted)
+        except StorageBusyError as error:
+            raise _storage_busy_error(error) from error
+        if decision.blocked:
+            # 409 而不是 404：record 还在（pin 失效时明确保留），用户可 reject 或重建。
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "memory_write_not_applied", "message": decision.message},
+            )
+        record_memory_change(
+            entry_point=ENTRY_API, action="approve_staged", affected_count=1,
+        )
+        return {"id": staged_id, "status": "approved", "response": response}
+
+    @app.post("/api/memory-pending/{staged_id}/reject")
+    async def reject_pending_memory_write(
+        staged_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        staged = await _staged_v2()
+        trusted = await _trusted_v2()
+        decision = await staged.reject(staged_id, trusted)
+        if decision.blocked:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "memory_write_not_pending", "message": decision.message},
+            )
+        record_memory_change(
+            entry_point=ENTRY_API, action="reject_staged", affected_count=1,
+        )
+        return {"id": staged_id, "status": "rejected"}
 
     @app.get("/api/sessions/{session_id}/memory-recalls")
     async def get_session_memory_recalls(

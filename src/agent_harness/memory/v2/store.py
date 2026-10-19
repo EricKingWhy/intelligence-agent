@@ -10,7 +10,7 @@ V1 继续可运行。新表让两条路径各自完整，cutover（MEM-V2-7）�
 
 # 权威性（PRD §6.6）
 
-SQLite 是记录、版本、状态与 outbox 的唯一权威；Milvus 是可重建的派生索引。
+SQLite 是记录、版本、状态与 outbox 的唯一权威；派生索引（进程内）可重建。
 写入一律"记录行 + outbox 意图"同事务提交，索引由 relay 异步收敛
 （见 `memory/v2/index.py`）——所以 `create/update/invalidate` 返回**不代表**
 检索已更新。
@@ -26,9 +26,9 @@ SQLite 是记录、版本、状态与 outbox 的唯一权威；Milvus 是可重�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -39,6 +39,7 @@ from uuid import uuid4
 import aiosqlite
 
 from agent_harness.memory.v2._sqlite import connect, write_connection
+from agent_harness.memory.v2.markdown_store import entry_digest
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
@@ -55,6 +56,23 @@ from agent_harness.memory.v2.types import (
 from agent_harness.storage.sqlite import retry_on_busy
 
 logger = logging.getLogger(__name__)
+
+#: #1353 M6 审批态表。`identity` 是可信身份（tenant/user/project）的规范化 JSON——
+#: 审批重放时必须按**同一个**身份取回记录。独立成常量是因为
+#: `write_approval.StagedWriteStore.initialize()` 单独使用时也要建它（不必先建 store）。
+STAGED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_v2_staged (
+    id TEXT PRIMARY KEY,
+    identity TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    pinned_entry TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS memory_v2_staged_identity
+    ON memory_v2_staged(identity, status, created_at);
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_v2_records (
@@ -94,10 +112,27 @@ CREATE TABLE IF NOT EXISTS memory_v2_settings (
     tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
     extraction_enabled INTEGER NOT NULL, recall_enabled INTEGER NOT NULL,
     fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    write_approval INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, user_id)
 );
+-- #1353 M6：审批态（staged）与 job 态（memory_v2_jobs）语义不同，故单列一张表。
+-- 建在 store 里而不是 write_approval 里：`memory_v2_staged` 与 records 同库同生命周期，
+-- 任何 `SqliteMemoryV2Store.initialize()` 都应得到完整 schema；反过来让 store 反向
+-- import 审批模块会造成循环依赖。
+""" + STAGED_SCHEMA + """
+-- #1353 §5：词法检索腿的 FTS5 虚表（rowid = memory_v2_records.rowid）。
+-- 只收 content：`keyword_search` 的语义就是"只搜规范内容"，不搜 payload/evidence。
+-- 刻意**不是** `content='memory_v2_records'` 的外部内容表：CJK 需要逐字切分才能命中
+-- （见 `_CJK_RUN`），而外部内容表会把原始 content 直接喂给分词器。代价是同步要显式做
+-- ——写路径只有 `_insert` / `_delete_root_in` 两处，都在本模块内。
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_v2_fts USING fts5(content);
 """
+
+#: FTS5 的 `unicode61` 分词器把连续 CJK 当成**一个** token（实测 `用户喜欢冰美式咖啡` 是一个
+#: token），于是"咖啡"永远匹配不到。索引侧按**单字**切 CJK、查询侧把词也切成单字短语，
+#: 两边就对齐了：`"冰 美 式"` 命中 `冰美式` 且不乱序。英文仍按空白/标点分词，不受影响。
+_CJK_RUN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 
 _COLUMNS = (
     "memory_id, schema_version, root_id, version, kind, tier, scope, tenant_id, user_id, "
@@ -109,6 +144,28 @@ _COLUMNS = (
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _fts_indexed(content: str) -> str:
+    """索引侧文本：CJK 逐字切开，其余原样（见 `_CJK_RUN` 的说明）。"""
+    return _CJK_RUN.sub(lambda match: " " + " ".join(match.group()) + " ", content)
+
+
+def _fts_query(terms: Sequence[str]) -> str | None:
+    """把关键词列表折成一条 FTS5 MATCH 表达式；没有可用词时返回 `None`。
+
+    每个词都当**短语**（双引号包裹），所以用户词里的 `AND` / `*` / `-` 不会变成 FTS 语法。
+    引号自身按 FTS5 规则双写。CJK 词切成单字短语，与索引侧的分词对齐。
+    """
+    clauses: list[str] = []
+    for term in terms:
+        if _CJK_RUN.search(term):
+            phrase = " ".join(_CJK_RUN.sub(lambda m: " ".join(m.group()), term).split())
+        else:
+            phrase = term.replace('"', '""')
+        if phrase:
+            clauses.append(f'"{phrase}"')
+    return " OR ".join(clauses) or None
 
 
 class MemoryOperationV2(str, Enum):
@@ -149,21 +206,38 @@ class PendingMemoryChangeV2:
 
 @dataclass(frozen=True, slots=True)
 class DeletedMemoryV2:
-    """Content-free routing facts needed to remove one derived vector."""
+    """One erased version: routing facts for the vector delete + what the markdown
+    mirror needs to remove the entry.
+
+    #1353 B-1：`tier` / `kind` / `content` 必须在这里——markdown 是权威层，删除后
+    镜像要用**同一批**行做分拣与定位。放在 receipt 里而不是让 capability 删除前
+    再读一次，是因为那次读与删除之间有窗口，且 bulk_delete 一次删多个 root。
+    receipt 不序列化、不落日志（web 只读 `memory_id`），所以带上正文不改变任何
+    对外契约。
+    """
 
     memory_id: str
     tenant_id: str
     user_id: str
     scope: MemoryScope
     project_id: str | None
+    kind: MemoryKind
+    tier: MemoryTier
+    content: str
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryDeletionReceiptV2:
-    """Content-free result for idempotent single or bulk deletion."""
+    """Content-free result for idempotent single or bulk deletion.
+
+    ``content_hashes`` 只在 **tombstone-only** 分支填充：记录行早已不在，markdown 侧
+    唯一还能对上的只剩条目正文的哈希（同样不含正文）。删除的正向路径仍走
+    ``memories``——那里有原文，不需要哈希。
+    """
 
     deleted: bool
     memories: tuple[DeletedMemoryV2, ...] = ()
+    content_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +246,8 @@ class MemorySettingsV2:
     recall_enabled: bool = True
     #: #1039 / PRD §5.3 第 4 条修订：主端点确定性 provider 类错误是否允许落一次备用。
     fallback_enabled: bool = True
+    #: #1353 M6：`memory` 工具的写入是否需要人工审批（默认关 = 直接落盘）。
+    write_approval: bool = False
 
 
 async def _add_column_if_missing(
@@ -209,6 +285,28 @@ class SqliteMemoryV2Store:
             await _add_column_if_missing(
                 connection, "memory_v2_settings", "fallback_enabled",
                 "INTEGER NOT NULL DEFAULT 1")
+            # #1353 M6：旧库没有这一列 ⇒ 默认「关」，与既有行为一致（写入直接落盘）。
+            await _add_column_if_missing(
+                connection, "memory_v2_settings", "write_approval",
+                "INTEGER NOT NULL DEFAULT 0")
+            # #1353 §5：虚表与记录表行数一致 ⇒ 已同步，跳过全量重扫。
+            # ponytail: 行数比对只能发现"少了/多了"（典型是 FTS 建表前就存在的旧库），
+            # 发现不了"条数相同但内容被外部改过"；真需要就加一张 fts_version 表，
+            # 等这种情形真的出现再说。
+            # SELECT→DELETE→INSERT 必须是**一笔**写事务（#1353 审查 P2）：行数比对与
+            # 取行若落在事务外，并发写者在两者之间插入的行会从索引里消失，而下一轮行数
+            # 比对才勉强补回来。
+            await connection.execute("BEGIN IMMEDIATE")
+            rows = await (await connection.execute(
+                "SELECT rowid, content FROM memory_v2_records")).fetchall()
+            indexed = await (await connection.execute(
+                "SELECT count(*) AS n FROM memory_v2_fts")).fetchone()
+            if indexed is None or indexed["n"] != len(rows):
+                await connection.execute("DELETE FROM memory_v2_fts")
+                await connection.executemany(
+                    "INSERT INTO memory_v2_fts(rowid, content) VALUES (?, ?)",
+                    [(row["rowid"], _fts_indexed(row["content"])) for row in rows],
+                )
             await connection.commit()
 
     # ----------------------------------------------------------------------------------
@@ -337,6 +435,11 @@ class SqliteMemoryV2Store:
                 # 不在这里 rollback：自开事务时由 `write_connection` 收尾，借用事务时
                 # 回滚是拥有者的事（见 `write_connection` 的说明）。
                 raise ValueError(f"memory record conflicts with an existing row: {error}") from None
+            # 词法腿同步（#1353 §5）：与记录行同一个事务，读到的永远是已提交的内容。
+            await conn.execute(
+                "INSERT INTO memory_v2_fts(rowid, content) "
+                "SELECT rowid, ? FROM memory_v2_records WHERE memory_id=?",
+                (_fts_indexed(record.content), memory_id))
             await self._enqueue(conn, memory_id, MemoryOperationV2.UPSERT,
                                 trusted.tenant_id, trusted.user_id, record.scope.value,
                                 record.project_id)
@@ -418,23 +521,27 @@ class SqliteMemoryV2Store:
 
         SQLite is authoritative. The bounded lexical lane deliberately searches only the
         canonical content, never SessionEvent history, payload evidence, or deleted rows.
+        The lexical leg is the `memory_v2_fts` virtual table (#1353 §5) instead of a
+        `content LIKE '%term%'` full scan.
         """
         safe_terms = list(dict.fromkeys(term for term in terms if term))[:64]
         if not safe_terms or limit <= 0 or (scope is MemoryScope.PROJECT and trusted.project_id is None):
             return []
-        predicates = " OR ".join("content LIKE ?" for _ in safe_terms)
-        params: list[object] = [trusted.tenant_id, trusted.user_id, scope.value]
+        match = _fts_query(safe_terms)
+        if match is None:
+            return []
+        params: list[object] = [match, trusted.tenant_id, trusted.user_id, scope.value]
         where = "tenant_id=? AND user_id=? AND scope=? AND tier='collection' AND status='active'"
         if scope is MemoryScope.PROJECT:
             where += " AND project_id=?"
             params.append(trusted.project_id)
-        params.extend(f"%{term}%" for term in safe_terms)
         params.append(max(0, min(limit, 128)))
         async with (
             connect(self.database_path) as connection,
             connection.execute(f"""
                 SELECT * FROM memory_v2_records
-                WHERE {where} AND ({predicates})
+                WHERE rowid IN (SELECT rowid FROM memory_v2_fts WHERE memory_v2_fts MATCH ?)
+                  AND {where}
                 ORDER BY updated_at DESC, memory_id LIMIT ?
             """, params) as cursor,
         ):
@@ -573,7 +680,12 @@ class SqliteMemoryV2Store:
                     await connection.rollback()
                     raise KeyError(memory_id)
                 await connection.commit()
-                return MemoryDeletionReceiptV2(deleted=False)
+                # #1353 审查 P3：记录行早已不在时，markdown 侧唯一还能对上的线索是
+                # 墓碑里的正文哈希（全版本）。不回传它，残留条目没有任何清理入口。
+                return MemoryDeletionReceiptV2(
+                    deleted=False,
+                    content_hashes=tuple(json.loads(tombstone["content_hashes"])),
+                )
             if not self._visible(row, trusted):
                 await connection.rollback()
                 raise KeyError(memory_id)
@@ -622,7 +734,8 @@ class SqliteMemoryV2Store:
             deleted.append(DeletedMemoryV2(
                 memory_id=item["memory_id"], tenant_id=item["tenant_id"],
                 user_id=item["user_id"], scope=MemoryScope(item["scope"]),
-                project_id=item["project_id"],
+                project_id=item["project_id"], kind=MemoryKind(item["kind"]),
+                tier=MemoryTier(item["tier"]), content=item["content"],
             ))
             await self._enqueue(
                 connection, item["memory_id"], MemoryOperationV2.DELETE,
@@ -640,6 +753,9 @@ class SqliteMemoryV2Store:
                  json.dumps([self._digest(value) for value in json.loads(item["source_event_ids"])],
                             separators=(",", ":")))
             )
+        await connection.execute(
+            "DELETE FROM memory_v2_fts WHERE rowid IN "
+            "(SELECT rowid FROM memory_v2_records WHERE root_id=?)", (root_id,))
         await connection.execute("DELETE FROM memory_v2_records WHERE root_id=?", (root_id,))
         return MemoryDeletionReceiptV2(deleted=bool(deleted), memories=tuple(deleted))
 
@@ -647,7 +763,7 @@ class SqliteMemoryV2Store:
         async with (
             connect(self.database_path) as connection,
             connection.execute(
-                "SELECT extraction_enabled, recall_enabled, fallback_enabled "
+                "SELECT extraction_enabled, recall_enabled, fallback_enabled, write_approval "
                 "FROM memory_v2_settings "
                 "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
             ) as cursor,
@@ -657,26 +773,26 @@ class SqliteMemoryV2Store:
             return MemorySettingsV2()
         return MemorySettingsV2(
             bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
-            bool(row["fallback_enabled"]),
+            bool(row["fallback_enabled"]), bool(row["write_approval"]),
         )
 
     @retry_on_busy
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
-        fallback_enabled: bool | None = None,
+        fallback_enabled: bool | None = None, write_approval: bool | None = None,
     ) -> MemorySettingsV2:
         async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             async with connection.execute(
-                "SELECT extraction_enabled, recall_enabled, fallback_enabled "
+                "SELECT extraction_enabled, recall_enabled, fallback_enabled, write_approval "
                 "FROM memory_v2_settings "
                 "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
             ) as cursor:
                 row = await cursor.fetchone()
             current = MemorySettingsV2() if row is None else MemorySettingsV2(
                 bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
-                bool(row["fallback_enabled"]),
+                bool(row["fallback_enabled"]), bool(row["write_approval"]),
             )
             extraction = (
                 current.extraction_enabled if extraction_enabled is None else extraction_enabled
@@ -685,19 +801,23 @@ class SqliteMemoryV2Store:
             fallback = (
                 current.fallback_enabled if fallback_enabled is None else fallback_enabled
             )
+            approval = (
+                current.write_approval if write_approval is None else write_approval
+            )
             await connection.execute(
                 "INSERT INTO memory_v2_settings "
                 "(tenant_id, user_id, extraction_enabled, recall_enabled, "
-                "fallback_enabled, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
+                "fallback_enabled, write_approval, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
                 "extraction_enabled=excluded.extraction_enabled, "
                 "recall_enabled=excluded.recall_enabled, "
-                "fallback_enabled=excluded.fallback_enabled, updated_at=excluded.updated_at",
+                "fallback_enabled=excluded.fallback_enabled, "
+                "write_approval=excluded.write_approval, updated_at=excluded.updated_at",
                 (trusted.tenant_id, trusted.user_id, int(extraction), int(recall),
-                 int(fallback), self._now().isoformat()),
+                 int(fallback), int(approval), self._now().isoformat()),
             )
             await connection.commit()
-        return MemorySettingsV2(extraction, recall, fallback)
+        return MemorySettingsV2(extraction, recall, fallback, approval)
 
     @retry_on_busy
     async def purge_expired_tombstones(self, *, now: datetime | None = None) -> int:
@@ -743,7 +863,7 @@ class SqliteMemoryV2Store:
 
     @staticmethod
     def _digest(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return entry_digest(value)
 
     @staticmethod
     async def _tombstone_in(

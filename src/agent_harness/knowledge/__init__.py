@@ -20,6 +20,19 @@ from agent_harness.knowledge.types import (
     KnowledgeSource,
 )
 
+
+def build_knowledge_vector_store(settings, embeddings=None):
+    """建 Knowledge 域的真实向量库 adapter。
+
+    存在的理由：装配层（`capability/wiring.py`）不该直接点名具体后端模块——
+    记忆域已无向量腿（#1353 §5），装配层里再出现后端名字会让人以为记忆还在用它。
+    具体实现仍留在 `knowledge/milvus_store.py`（RAG 侧本期不动）。
+    """
+    from agent_harness.knowledge.milvus_store import MilvusKnowledgeVectorStore
+
+    return MilvusKnowledgeVectorStore(settings, embeddings)
+
+
 __all__ = [
     "MAX_CHUNKS_PER_SOURCE",
     "MAX_SOURCE_CHARS",
@@ -33,4 +46,5 @@ __all__ = [
     "KnowledgeService",
     "KnowledgeSource",
     "KnowledgeVectorStore",
+    "build_knowledge_vector_store",
 ]

@@ -49,7 +49,6 @@ from agent_harness.session import (
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.web.app import create_app
-from tests.memory.v2._vector import FakeMemoryVectorClient
 
 IDENTITY = IdentityContext("tenant-a", "user-a", ["user"])
 TRUSTED = TrustedMemoryIdentity("tenant-a", "user-a")
@@ -403,19 +402,12 @@ def _bearer(user_id: str) -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_string_payload_visible_through_web_memory_api(tmp_path, monkeypatch):
-    # web 层走与 memory_app fixture 相同的真实装配（真 SQLite service + 假向量客户端）。
+    # web 层走与 memory_app fixture 相同的真实装配（真 SQLite service）。
     # 记忆写入与 GET 用的是**同一个** app 装配出的 service ⇒ 全链路无 mock 冒充。
     monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", lambda _self: None)
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_vector_client",
-        lambda settings: FakeMemoryVectorClient(settings),
-    )
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_JWT_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
-        milvus_uri="https://example.test", milvus_token="test-only",
-        milvus_collection="memory_test", embedding_model="test-embedding",
-        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     app = create_app(settings, enable_cors=False)
     with TestClient(app) as client:

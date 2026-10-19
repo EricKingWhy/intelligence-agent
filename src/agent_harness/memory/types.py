@@ -15,7 +15,7 @@ from agent_harness.memory.errors import SessionBindingMissing
 
 memory_session_var: ContextVar[str | None] = ContextVar("memory_session", default=None)
 
-#: namespace 元组的根段——LangGraph/LangMem 边界与 Milvus PK 的既有契约（ADR-0008/0009）。
+#: namespace 元组的根段——LangGraph/LangMem 边界与向量主键的既有契约（ADR-0008/0009）。
 NAMESPACE_ROOT = "memories"
 
 
@@ -116,7 +116,7 @@ class MemoryNamespace:
         return json.dumps(self.parts)
 
     def pk_parts(self, memory_id: str) -> list[str]:
-        """Milvus 主键材料：namespace + memory_id（哈希前的稳定列表）。"""
+        """向量主键材料：namespace + memory_id（哈希前的稳定列表）。"""
         return [*self.parts, memory_id]
 
 
