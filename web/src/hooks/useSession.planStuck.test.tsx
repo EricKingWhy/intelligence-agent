@@ -74,7 +74,8 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
   return {
     ...actual,
     // 创建路径的「基线 + 差分」认领：基线给空集、差分直接给 SID（#1148 同款夹具）。
-    sessionIdBaseline: vi.fn(async () => new Set<string>()),
+    // #1333：改取 detailed 基线（serverNowMs null = 客户端时刻降级）。
+    sessionIdBaselineDetailed: vi.fn(async () => ({ ids: new Set<string>(), serverNowMs: null })),
     discoverNewSessionId: vi.fn(async () => SID),
     wsStreamResponse: (sessionId: string, afterSeq?: number) => {
       wsMock.calls.push({ sessionId, afterSeq: afterSeq ?? -1 });
