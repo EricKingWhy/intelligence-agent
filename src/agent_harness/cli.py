@@ -3518,13 +3518,17 @@ def _main_memory(argv: list[str]) -> None:
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
-    print(asyncio.run(_memory_command(settings, args)))
-    if getattr(args, "failed", False):
+    output, failed = asyncio.run(_memory_command(settings, args))
+    print(output)
+    if failed:
         # 迁移有 skipped 行 = 有记忆真的没进 markdown，脚本化调用必须能看出来。
         raise SystemExit(2)
 
 
-async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
+async def _memory_command(
+    settings: Settings, args: argparse.Namespace,
+) -> tuple[str, bool]:
+    """返回 `(输出, 是否应非零退出)`；不往 `argparse.Namespace` 上挂动态属性。"""
     from agent_harness.memory.v2.assembly import (
         MEMORIES_DIRECTORY_NAME,
         MEMORY_V2_DATABASE_NAME,
@@ -3547,12 +3551,12 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
                 f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
             ),
         ]
-        if counts["skipped"]:
-            args.failed = True
+        failed = bool(counts["skipped"])
+        if failed:
             lines.append(f"未导出 {len(counts['skipped'])} 条（见日志 warning）：")
             lines.extend(f"  {memory_id}: {error}" for memory_id, error in counts["skipped"])
         lines.append(f"目标目录：{Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME}")
-        return "\n".join(lines)
+        return "\n".join(lines), failed
 
     service = await build_memory_v2_service(settings)
     staged = service.staged
@@ -3568,7 +3572,7 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
         payload = build_journey([await service.versions(record.root_id, trusted)
                                  for record in active])
         if not payload["memory"]:
-            return "（暂无记忆卡片）"
+            return "（暂无记忆卡片）", False
         lines = [f"记忆时间线（{len(payload['memory'])} 张卡片）："]
         for card in payload["memory"]:
             lines.append(
@@ -3576,13 +3580,13 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
                 f"{card['state']}  {card['fingerprint']}"
             )
             lines.append(f"    {card['title']}")
-        return "\n".join(lines)
+        return "\n".join(lines), False
     if staged is None:  # 装配层总是建它；这里只是不臆造第二种形状
-        return "此部署没有待审写入区。"
+        return "此部署没有待审写入区。", False
     if args.command == "pending":
         items = await staged.pending(trusted)
         if not items:
-            return "（暂无待审写入）"
+            return "（暂无待审写入）", False
         lines = [f"待审写入（{len(items)} 条）："]
         for item in items:
             payload = item.payload
@@ -3592,18 +3596,18 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
                 f"action={payload.get('action')}  created_at={item.created_at}"
             )
             lines.append(f"    {str(body)[:200]}")
-        return "\n".join(lines)
+        return "\n".join(lines), False
     if args.command == "approve":
         decision, response = await staged.approve(args.staged_id, trusted)
         if decision.blocked:
-            return f"未落盘：{decision.message}"
+            return f"未落盘：{decision.message}", False
         # 不 repr 整个响应 dict：里面是 store 的内部形状（含完整条目回显）。
         payload = (response or {})
         summary = payload.get("message") or "（存储未给出摘要）"
         target = payload.get("target") or "?"
-        return f"已批准 {args.staged_id}（target={target}）：{summary}"
+        return f"已批准 {args.staged_id}（target={target}）：{summary}", False
     decision = await staged.reject(args.staged_id, trusted)
-    return decision.message or "已拒绝。"
+    return decision.message or "已拒绝。", False
 
 
 def _main_approvals(argv: list[str]) -> None:
