@@ -4447,6 +4447,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
+/* F-11：拒绝是破坏性动作——danger 文字 + 40% danger 描边，hover 才填充；
+ * 要求修改保持中性 ghost；批准（.primary）仍是唯一实心主按钮。
+ * 文字色用 ink-mix：亮色下纯 --danger 压浅底实测 <4.5:1（同 t-contrast 既有判据）。 */
+.plan-approval-btn.plan-approval-reject {
+  color: color-mix(in srgb, var(--danger) 60%, var(--text-primary));
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.plan-approval-btn.plan-approval-reject:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--danger) 60%, var(--text-primary));
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
 .plan-approval-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
