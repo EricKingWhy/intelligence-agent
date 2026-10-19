@@ -742,7 +742,10 @@ __all__ = [
     "MAX_CONSOLIDATION_FAILURES_PER_TURN",
     "MEMORY_BLOCK_HEADERS",
     "MarkdownMemoryStore",
+    "entry_digest",
     "find_unique_match",
+    "normalize_entry",
     "pinned_index",
     "stale_entry_message",
+    "target_for",
 ]
