@@ -1266,10 +1266,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   opacity: 0.45;
 }
 /* 操作按钮默认隐藏（侧栏默认要安静），hover / 键盘聚焦 / 菜单打开时出现。
- * `:focus-visible` 单独一条：仅靠 opacity 隐藏不能让键盘用户失去入口。 */
+ * `:focus-visible` 单独一条：仅靠 opacity 隐藏不能让键盘用户失去入口。
+ * #1393：`opacity: 0` 只负责视觉隐藏，不参与命中测试——折叠轨里该按钮绝对定位
+ * 压在会话点上，触屏 tap 会被它截走（打开菜单而不是选中会话）。命中权跟着
+ * 「可见态」走：默认 `pointer-events: none`，下面这组可见态再放开。
+ * 打开态同时认 `aria-expanded`：Tooltip 与 DropdownMenu 的 Trigger 用 asChild
+ * 组合时前者会覆盖 `data-state`（实测菜单已开、按钮上仍是 `data-state="closed"`），
+ * 只有 `aria-expanded` 可靠；菜单开着时必须仍可点，否则点它关不掉。 */
 .rail-menu-btn {
   flex-shrink: 0;
   opacity: 0;
+  pointer-events: none;
   width: 22px;
   height: 22px;
   transition: opacity var(--dur-out) var(--ease-apple);
@@ -1279,8 +1286,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .rail-project-head:hover .rail-menu-btn,
 .rail-project-head:focus-within .rail-menu-btn,
 .rail-menu-btn:focus-visible,
-.rail-menu-btn[data-state='open'] {
+.rail-menu-btn[data-state='open'],
+.rail-menu-btn[aria-expanded='true'] {
   opacity: 1;
+  pointer-events: auto;
+}
+/* 桌面输入保持原样：鼠标会先 hover 行、⋯ 随之显形再点，不存在"不可见区域抢
+ * 点击"的问题（e2e 的 `.click()` 也是在 hover 前就做命中检查，需要这一条）。
+ * 触摸档（`hover: none`）没有这个前置 hover，命中权由下面窄屏触摸块的规则
+ * 固定关掉，#1393 修的就是那一档。 */
+@media (hover: hover) {
+  .rail-menu-btn {
+    pointer-events: auto;
+  }
 }
 
 /* ── 拖拽重排的落点反馈 ── */
@@ -6234,7 +6252,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 上点 `button` 也不进 `:focus-within`——于是 ⋯ 可能永远不显形，FE-R11-09（会话级）与
  * #179（项目级）担保的入口在手机上不可达（桌面输入的脚本验证覆盖不到这一档）。
  * `(hover: none)` 是标准判据；与 `(max-width: 820px)` 取交集，只动窄屏触摸这一档。
- * 本块只管"谁在槽里"（可见性），定位与让位节奏仍归上面那一块。 */
+ * 本块管"谁在槽里"（可见性）与"谁能接住 tap"（#1393 的命中权），定位与让位节奏
+ * 仍归上面那一块。 */
 @media (max-width: 820px) and (hover: none) {
   /* 取舍（#181 选定方案 1，纯 CSS）：⋯ 常显，让出槽位的换成**装饰性**的那一半——
      会话点与文件夹图标退到背景。身份 / 层级信息在这一档本来就是刻意降级。
@@ -6243,6 +6262,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .session-rail:not(.rail-drawer-open) .session-row .rail-menu-btn,
   .session-rail:not(.rail-drawer-open) .rail-project-head .rail-menu-btn {
     opacity: 1;
+    /* #1393：这一档没有 hover，`:hover` 会被 touch 合成事件粘住；只靠基线的
+       `pointer-events: none` 仍可能在点击命中的那一刻被 `.session-row:hover`
+       重新放开，tap 落回 ⋯。收起轨的触摸语义是「点行 = 选中」——命中权在这里
+       固定关掉，菜单走抽屉展开态（桌面形态行）。`pointer-events` 不影响键盘
+       激活，`Shift+F10` / Tab+Enter 仍能打开；打开后由下一条把命中权还回来。 */
+    pointer-events: none;
+  }
+  .session-rail:not(.rail-drawer-open) .session-row .rail-menu-btn[aria-expanded='true'],
+  .session-rail:not(.rail-drawer-open) .rail-project-head .rail-menu-btn[aria-expanded='true'] {
+    pointer-events: auto;
+  }
+  /* #1393：触摸档的菜单入口是**抽屉展开态**——行是桌面形态，⋯ 在行尾，不与会话点
+     抢槽位。没有 hover 就显形并保持可点，否则收起轨关掉命中后菜单就彻底不可达。 */
+  .session-rail.rail-drawer-open .session-row .rail-menu-btn,
+  .session-rail.rail-drawer-open .rail-project-head .rail-menu-btn {
+    opacity: 1;
+    pointer-events: auto;
   }
   /* 让位用 opacity 不用 display：`.session-item-dot` 是行里唯一的在流内容，抽掉它
      这一行会塌成 0 高（连同可点面积一起没，见上面那段"padding 就是可点面积"）。 */
