@@ -381,8 +381,14 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         <p className={`memory-content${showFullContent ? '' : ' clamped'}`} title={record.status === 'deleted' ? undefined : record.content}>
           {record.status === 'deleted' ? '内容已删除' : record.content}
         </p>
-        {longContent && <button className="memory-expand" aria-expanded={contentExpanded} aria-label={contentExpanded ? '收起全文' : '展开全文'} onClick={() => setContentExpanded((value) => !value)}>{contentExpanded ? '收起' : '展开全文'}</button>}
-        <button className="memory-expand" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}<span>{detailsOpen ? '收起详情' : '详细信息'}</span></button>
+        {/* #1368：操作列是一个**独立的列**（不再让两个按钮直接挤进正文行里）。
+            此前每个按钮固定 22px 宽，「详细信息」四个汉字只能在 16px 的盒子里逐字
+            堆成 5 行（实测 16×72）。列给最小宽度后，正文列与操作列各自稳定：
+            按钮宽度随文案走、文字永不折行；窄屏时这一列改竖排（见 CSS）。 */}
+        <div className="memory-row-actions">
+          {longContent && <button className="memory-expand" aria-expanded={contentExpanded} aria-label={contentExpanded ? '收起全文' : '展开全文'} onClick={() => setContentExpanded((value) => !value)}>{contentExpanded ? '收起' : '展开全文'}</button>}
+          <button className="memory-expand" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}<span>{detailsOpen ? '收起详情' : '详细信息'}</span></button>
+        </div>
       </div>
       <div className="memory-v2-meta">
         {record.kind && <span>{KIND_LABELS[record.kind]}</span>}

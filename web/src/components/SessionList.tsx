@@ -19,7 +19,7 @@
  *  真实的层级要表达，两套切分叠在一起会让同一行出现在两个不同的分类逻辑下。
  */
 
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
   Archive,
@@ -30,6 +30,8 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Puzzle,
   TriangleAlert,
@@ -151,6 +153,37 @@ export const SessionList = memo(function SessionList({
 
   // 折叠状态是**视图**状态（不持久化，与 Inspector 折叠同一立场）。
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** #1368：窄屏（≤820px）会话抽屉的展开态。**纯呈现状态**——它只决定 `.session-rail`
+   *  是否以覆盖层出现（CSS 在窄屏把它换成 fixed 覆盖），不参与会话数据流：选中会话
+   *  仍然只走 `onSelect`，栅格轨道与 `.app-workspace` 的起点一个像素都不动。
+   *  桌面档这条状态无视觉作用（相关规则全在 `@media (max-width: 820px)` 里）。 */
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 选中会话 = 关抽屉 + 原有选择。窄屏下抽屉是覆盖层，不关就会挡住刚选中的内容。 */
+  const selectSession = (id: string) => {
+    setDrawerOpen(false);
+    onSelect(id);
+  };
+  /** Escape 关抽屉：覆盖层必须有不依赖鼠标的退出路径（键盘用户不能只剩"再点一次按钮"）。
+   *  点抽屉外任意处也关：遮罩是 CSS 画的（`box-shadow` 大扩散），没有可点的节点，
+   *  所以"点外面"由这个 pointerdown 判定——判据是"目标不在 rail 内"，不是"点在遮罩上"。
+   *  用 pointerdown 而不是 click：拖选文本、按滚动条都不该被误判成"点外面"之后的第二次动作。 */
+  const railRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawerOpen(false);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && railRef.current?.contains(event.target)) return;
+      setDrawerOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [drawerOpen]);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
   /** 待硬删的会话（null = 确认面关闭）——与项目软删分开一个状态：两者的后果与
@@ -274,7 +307,21 @@ export const SessionList = memo(function SessionList({
   const sessionsUnavailable = sessionsError !== null;
 
   return (
-    <aside className="session-rail">
+    <aside ref={railRef} className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}>
+      {/* #1368：窄屏专属的抽屉开关。桌面档 `display:none`（轨本来就有 240px 正文，
+          不需要抽屉）；窄屏折叠态它排在图标轨顶部，展开态留在抽屉左上角当关闭键。
+          `aria-controls` 指向会话列表本体（不是整个 aside）：开关控制的是列表的
+          呈现，且该 id 只在列表确实渲染时存在。 */}
+      <button
+        className="icon-btn rail-drawer-btn"
+        onClick={() => setDrawerOpen((open) => !open)}
+        aria-expanded={drawerOpen}
+        aria-controls="session-rail-list"
+        aria-label={drawerOpen ? '收起会话列表' : '展开会话列表'}
+        title={drawerOpen ? '收起会话列表' : '展开会话列表'}
+      >
+        {drawerOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+      </button>
       <div className="session-list-header">
         <span className="panel-label">会话</span>
         {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
@@ -291,11 +338,21 @@ export const SessionList = memo(function SessionList({
             （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
         {showEmpty ? (
           <div className="session-list-actions rail-empty-actions">
-            <button className="rail-empty-btn-primary" onClick={() => setCreateOpen(true)}>
-              新建项目
+            {/* #1368：窄屏 56px 图标轨里，这两个按钮的文字会逐字折成竖排（红线段）。
+                正解是**图标 + 标签**：标签在折叠轨里 `display:none`（`.rail-empty-btn-label`），
+                桌面档与展开的抽屉里照常显示文字——文字按钮是 UI-05 的可识别性契约，
+                不能为了窄屏把它删掉。`aria-label` 让图标态的可访问名称仍是全文。 */}
+            <button
+              className="rail-empty-btn-primary"
+              onClick={() => setCreateOpen(true)}
+              aria-label="新建项目"
+            >
+              <FolderPlus size={14} aria-hidden="true" />
+              <span className="rail-empty-btn-label">新建项目</span>
             </button>
-            <button className="rail-empty-btn-ghost" onClick={onNew}>
-              新会话
+            <button className="rail-empty-btn-ghost" onClick={onNew} aria-label="新会话">
+              <Plus size={14} aria-hidden="true" />
+              <span className="rail-empty-btn-label">新会话</span>
             </button>
           </div>
         ) : (
@@ -372,7 +429,9 @@ export const SessionList = memo(function SessionList({
         </div>
       ) : null}
 
-      <div className="session-items">
+      {/* `id` 是抽屉开关 `aria-controls` 的落点（#1368）：指向**列表本体**而不是整个
+          aside——开关控制的是这份列表的呈现，且展开/收起不改变它的身份。 */}
+      <div className="session-items" id="session-rail-list">
         {showEmpty && !sessionsUnavailable && (
           <div className="empty-hint">暂无会话，提交任务即可开始。</div>
         )}
@@ -601,7 +660,7 @@ export const SessionList = memo(function SessionList({
                               dropTarget?.projectId === project.id &&
                               dropTarget.before === s.session_id
                             }
-                            onSelect={onSelect}
+                            onSelect={selectSession}
                             onMove={handleMove}
                             onDetach={(sessionId) =>
                               void runOp('移出项目失败', () =>
@@ -704,7 +763,7 @@ export const SessionList = memo(function SessionList({
                 dragging={false}
                 dropEnabled={false}
                 dropBefore={false}
-                onSelect={onSelect}
+                onSelect={selectSession}
                 onMove={handleMove}
                 onDetach={() => undefined}
                 onAttachPick={setAttachFor}
