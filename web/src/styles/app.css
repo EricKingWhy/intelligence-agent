@@ -159,10 +159,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* #1371：新增动效必须在同一个既有块里关闭（复用，不另起）。全局块只压
      duration、不碰 animation 名，且本文件后面的 `.turn` 等规则会覆盖同名属性
      ⇒ 这里用 !important 明确关掉，避免“减少了但仍在动”。 */
+  .conversation,
   .conversation-scroll,
   .conversation-empty,
   .session-item,
-  .turn,
   .composer,
   .rail-empty-action {
     animation: none !important;
@@ -10416,38 +10416,46 @@ button.json-row {
   to { opacity: 1; transform: none; }
 }
 
-.conversation-scroll,
-.conversation-empty {
+/* 会话切换：`.conversation-scroll` 带 `key={session_id}`，换会话即重挂 ⇒ 180ms
+ * 淡入。票面原文写的是 `.app-workspace` width 180ms，但 Lane D 实测该宽度在会话
+ * 切换时恒为 842px（栅格轨道由 app-regions 决定），`transition: width` 没有可
+ * 插值的属性，故把"切换不闪"落在真正变化的内容容器上（见完工报告「票面偏离」）。
+ * 空态→数据：数据到达时同一个 `.conversation-scroll` 首次挂载，沿用 180ms（票面
+ * 150ms 落在「面板级 150–200ms」区间内）；`.conversation-empty` 自身 150ms。 */
+.conversation-scroll {
   animation: conversation-in 180ms var(--ease-apple);
+}
+.conversation-empty {
+  animation: conversation-in 150ms var(--ease-apple);
 }
 .session-item {
   animation: rail-row-in 150ms var(--ease-apple);
 }
-[data-density='compact'] .turn {
-  animation-name: density-shift-compact;
-  animation-duration: 150ms;
+/* 密度切换：`data-density` 在 <html> 上翻转，`.conversation` 不重挂。四档各用
+ * 一个 animation-name（内容相同）——属性切换即重启 150ms 动画，这是纯 CSS 里
+ * 「同名动画不会重播」的唯一可靠绕法。只动画容器（一个元素），不给每个 .turn
+ * 各起一份。 */
+[data-density='compact'] .conversation {
+  animation: density-shift-compact 150ms var(--ease-apple);
 }
-[data-density='balanced'] .turn {
-  animation-name: density-shift-balanced;
-  animation-duration: 150ms;
+[data-density='balanced'] .conversation {
+  animation: density-shift-balanced 150ms var(--ease-apple);
 }
-[data-density='detailed'] .turn {
-  animation-name: density-shift-detailed;
-  animation-duration: 150ms;
+[data-density='detailed'] .conversation {
+  animation: density-shift-detailed 150ms var(--ease-apple);
 }
-[data-density='raw'] .turn {
-  animation-name: density-shift-raw;
-  animation-duration: 150ms;
+[data-density='raw'] .conversation {
+  animation: density-shift-raw 150ms var(--ease-apple);
 }
 
 /* 显式 transition：Lane D 读到 computed “all 0s” 是浏览器默认值，源码无声明。
- * 只列会变化的属性，不用 `all`。 */
+ * 只列会变化的属性，不用 `all`：`.composer` 是透明 textarea，只有文字色随主题
+ * 变化；`.rail-empty-action` 同理（hover 换色）。150ms = `--dur-out`。 */
 .composer {
-  transition: color var(--dur-out) var(--ease-apple), opacity var(--dur-out) var(--ease-apple);
+  transition: color var(--dur-out) var(--ease-apple);
 }
 .rail-empty-action {
-  transition: color var(--dur-out) var(--ease-apple),
-    text-decoration-color var(--dur-out) var(--ease-apple);
+  transition: color var(--dur-out) var(--ease-apple);
 }
 
 /* ── 骨架屏（#1371）──
@@ -10530,6 +10538,7 @@ button.json-row {
 }
 .project-dialog .project-btn,
 .provider-dialog .project-btn {
+  padding: 7px var(--space-lg);
   border-radius: var(--radius-full);
   border-color: transparent;
   background: transparent;
