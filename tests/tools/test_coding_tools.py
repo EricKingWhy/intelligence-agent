@@ -430,6 +430,25 @@ class TestBashTool:
         assert "hello" in result.result.data["stdout"]
 
     @pytest.mark.asyncio
+    async def test_empty_command_is_invalid_argument(self, executor: ToolExecutor):
+        result = await executor.execute(_tool_call("bash", {"command": ""}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert result.result.retryable is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command", [" ", "\t", "\n"])
+    async def test_whitespace_only_command_is_invalid_argument(
+        self, executor: ToolExecutor, command: str
+    ):
+        result = await executor.execute(_tool_call("bash", {"command": command}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert result.result.retryable is False
+
+    @pytest.mark.asyncio
     async def test_nonzero_exit_is_still_ok_true(self, executor: ToolExecutor):
         """ADR-0002 核心：exit_code=1（如 pytest 失败）→ ok=True，不是 Tool 失败。"""
         result = await executor.execute(

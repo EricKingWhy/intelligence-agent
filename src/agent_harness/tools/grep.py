@@ -27,7 +27,7 @@ _MAX_LINE_CHARS = 500
 
 
 class _GrepArgs(BaseModel):
-    pattern: str = Field(..., description="正则表达式")
+    pattern: str = Field(..., min_length=1, description="正则表达式")
     path: str = Field(default=".", description="搜索范围子目录，相对 workspace")
     include: str = Field(default="*", description="文件名 glob 过滤（如 '*.py'）")
     max_results: int = Field(default=100, ge=1, le=1000,
