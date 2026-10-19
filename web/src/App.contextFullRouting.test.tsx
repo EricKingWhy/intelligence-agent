@@ -205,7 +205,7 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
     const text = el.textContent ?? '';
     const body = document.body.textContent ?? '';
 
-    expect(text).toContain('预算已用完，任务暂停了');
+    expect(text).toContain('预算或安全上限已到，任务暂停了');
     expect(text).toContain('继续这次任务');
     expect(el.querySelector('#pause-resume-ceiling')).not.toBeNull();
     // 反向：这句话弹窗不该在预算暂停时出现。
