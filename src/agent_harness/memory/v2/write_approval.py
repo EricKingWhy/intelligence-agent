@@ -40,11 +40,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-from datetime import UTC, datetime, timedelta
 
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
