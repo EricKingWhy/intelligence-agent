@@ -6,8 +6,9 @@
 - 随机 SIGKILL 压力下，任何时刻重新解析文件都必须成功且条目完整；
 - 锁文件 0600，且拒绝符号链接（O_NOFOLLOW）。
 
-Windows 上没有 POSIX 权限位、也没有可用的 SIGKILL（`signal.SIGKILL` 不存在、
-`process.kill()` 走 TerminateProcess 拿不到负 returncode），故那三条按平台跳过；
+Windows 上共跳过四条：0600 权限位那条（无 POSIX 权限位）、符号链接那条
+（无 `os.O_NOFOLLOW`），以及两条 SIGKILL 用例（`signal.SIGKILL` 不存在、
+`process.kill()` 走 TerminateProcess 拿不到负 returncode）。
 跨进程不丢写那条（`test_concurrent_processes_do_not_lose_writes`）不依赖任何
 POSIX 专有语义，是全平台等价用例（#1384）。
 """
@@ -39,9 +40,6 @@ pytestmark = pytest.mark.asyncio
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKER = Path(__file__).resolve().parent / "_1353_store_worker.py"
 
-#: Windows 没有 POSIX 权限位，也没有 `signal.SIGKILL`（`Popen.kill()` 走
-#: TerminateProcess，拿不到 `-SIGKILL` 的 returncode）。这三条按平台跳过；
-#: 跨进程不丢写那条不依赖任一语义，Windows 上照跑（#1384）。
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX 权限位 / SIGKILL")
 
 

@@ -14,31 +14,22 @@
 from __future__ import annotations
 
 import inspect
-import sqlite3
 
 import pytest
 
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
 from agent_harness.memory.v2.migration import migrate_active_records
 from tests.memory.v2._markdown_memory_1353 import (
-    build_store,
     call,
-    load,
+    loaded_store,
     path_of,
     read_raw,
 )
+from tests.memory.v2._records import insert_rows, raw_row
 
 pytestmark = pytest.mark.asyncio
 
 _SPLIT = f"part1{ENTRY_DELIMITER}part2"
-
-
-async def _store(tmp_path):
-    store = build_store(tmp_path)
-    pending = load(store)
-    if inspect.isawaitable(pending):
-        await pending
-    return store
 
 
 #: 按**读侧口径**会变成分隔符的同形变体（评审 D1/D2、评审 B-F1）。
@@ -57,7 +48,7 @@ def _assert_blocked(response: dict) -> None:
 
 @pytest.mark.parametrize("content", _FORGED)
 async def test_add_rejects_delimiter_and_leaves_file_unchanged(tmp_path, content) -> None:
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "seed"))["success"] is True
     before = path_of(store, "memory").read_bytes()
 
@@ -69,7 +60,7 @@ async def test_add_rejects_delimiter_and_leaves_file_unchanged(tmp_path, content
 
 async def test_trailing_half_delimiter_does_not_swallow_next_entry(tmp_path) -> None:
     """评审 D2/B-F1 的实害：``"x\n§"`` 若被接受，下一条 add 会被并进本条。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "first"))["success"] is True
     _assert_blocked(await call(store.add, "memory", "x\n§"))
 
@@ -79,7 +70,7 @@ async def test_trailing_half_delimiter_does_not_swallow_next_entry(tmp_path) -> 
 
 @pytest.mark.parametrize("content", _FORGED)
 async def test_replace_rejects_delimiter_and_leaves_file_unchanged(tmp_path, content) -> None:
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "seed"))["success"] is True
     before = path_of(store, "memory").read_bytes()
 
@@ -90,7 +81,7 @@ async def test_replace_rejects_delimiter_and_leaves_file_unchanged(tmp_path, con
 
 
 async def test_batch_add_rejects_delimiter(tmp_path) -> None:
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "seed"))["success"] is True
     before = path_of(store, "memory").read_bytes()
 
@@ -105,7 +96,7 @@ async def test_batch_add_rejects_delimiter(tmp_path) -> None:
 
 @pytest.mark.parametrize("content", _FORGED)
 async def test_batch_replace_rejects_delimiter_via_new_text_alias(tmp_path, content) -> None:
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "seed"))["success"] is True
     before = path_of(store, "memory").read_bytes()
 
@@ -120,7 +111,7 @@ async def test_batch_replace_rejects_delimiter_via_new_text_alias(tmp_path, cont
 
 async def test_batch_remove_with_delimiter_content_is_not_rejected(tmp_path) -> None:
     """评审 D3/B-F5：remove 的 content 不落盘，拿它拒绝一次合法删除是误伤。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "stale"))["success"] is True
     assert (await call(store.add, "memory", "kept"))["success"] is True
 
@@ -135,7 +126,7 @@ async def test_batch_remove_with_delimiter_content_is_not_rejected(tmp_path) -> 
 
 async def test_batch_none_op_returns_error_not_exception(tmp_path) -> None:
     """评审 B-F2：基线对 ``None`` op 返回错误 dict；容错不能退化成 TypeError。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "seed"))["success"] is True
     before = path_of(store, "memory").read_bytes()
 
@@ -147,11 +138,11 @@ async def test_batch_none_op_returns_error_not_exception(tmp_path) -> None:
 
 async def test_migration_delimiter_row_is_skipped_not_split(tmp_path) -> None:
     """迁移侧沿用同一拒绝语义：分裂行进 `skipped`（CLI 据此非零退出），不进文件。"""
+    from agent_harness.memory.v2.store import SqliteMemoryV2Store
+
     database = tmp_path / "memory-v2.db"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    from agent_harness.memory.v2.store import SqliteMemoryV2Store
-
     store = SqliteMemoryV2Store(database)
     await store.initialize()
     closer = getattr(store, "aclose", None) or getattr(store, "close", None)
@@ -160,26 +151,7 @@ async def test_migration_delimiter_row_is_skipped_not_split(tmp_path) -> None:
         if inspect.isawaitable(result):
             await result
 
-    now = "2026-10-19T00:00:00+00:00"
-    columns = (
-        "memory_id", "schema_version", "root_id", "version", "kind", "tier", "scope",
-        "tenant_id", "user_id", "project_id", "content", "payload", "status", "importance",
-        "strength", "source_type", "source_session_id", "source_event_ids", "evidence",
-        "valid_at", "invalidated_at", "superseded_by", "created_at", "updated_at",
-    )
-
-    def row(memory_id: str, content: str) -> tuple:
-        return (memory_id, 2, f"r-{memory_id}", 1, "semantic", "collection", "user_global",
-                "local", "local", None, content, "{}", "active", 0.5, 0.5, "model", None,
-                "[]", "[]", None, None, None, now, now)
-
-    with sqlite3.connect(database) as connection:
-        connection.executemany(
-            f"INSERT INTO memory_v2_records ({', '.join(columns)}) "
-            f"VALUES ({','.join('?' * len(columns))})",
-            [row("m1", _SPLIT), row("m2", "kept")],
-        )
-        connection.commit()
+    insert_rows(database, [raw_row("m1", _SPLIT), raw_row("m2", "kept")])
 
     result = migrate_active_records(database, workspace)
     if inspect.isawaitable(result):

@@ -88,7 +88,7 @@ def _delimiter_error(content: str) -> str | None:
     folded = content.replace("\r\n", "\n").replace("\r", "\n")
     if ENTRY_DELIMITER in folded or folded.endswith(ENTRY_DELIMITER[:-1]):
         return (
-            'Blocked: content contains the reserved entry delimiter "\\n§\\n"; '
+            f"Blocked: content contains the reserved entry delimiter {ENTRY_DELIMITER!r}; "
             "split it into multiple add operations."
         )
     return None

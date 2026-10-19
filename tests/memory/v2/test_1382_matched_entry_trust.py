@@ -11,32 +11,22 @@
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 from tests.memory.v2._markdown_memory_1353 import (
-    build_store,
     build_tool,
     call,
-    load,
+    loaded_store,
     path_of,
     read_entries,
 )
 
 pytestmark = pytest.mark.asyncio
 
-async def _store(tmp_path):
-    store = build_store(tmp_path)
-    pending = load(store)
-    if inspect.isawaitable(pending):
-        await pending
-    return store
-
 
 async def test_tool_batch_cannot_forge_matched_entry(tmp_path) -> None:
     """直写路径（write_approval 默认关）：模型伪造的 pin 不许改动别的条目。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "entry A: cats are nice"))["success"] is True
     assert (await call(store.add, "memory", "entry B: dogs are nice"))["success"] is True
     tool = build_tool(store)
@@ -63,7 +53,7 @@ async def test_tool_batch_cannot_forge_matched_entry(tmp_path) -> None:
 
 async def test_store_batch_ignores_model_matched_entry(tmp_path) -> None:
     """存储层自己就是边界：绕过工具直调也一样剥掉模型给的 pin。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "entry A: cats are nice"))["success"] is True
     assert (await call(store.add, "memory", "entry B: dogs are nice"))["success"] is True
 
@@ -85,7 +75,7 @@ async def test_store_batch_ignores_model_matched_entry(tmp_path) -> None:
 
 async def test_resolve_batch_entries_ignores_model_matched_entry(tmp_path) -> None:
     """stage 前的解析同理：伪造 pin 不能让解析返回别的条目。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "entry A: cats are nice"))["success"] is True
     assert (await call(store.add, "memory", "entry B: dogs are nice"))["success"] is True
 
@@ -104,7 +94,7 @@ async def test_resolve_batch_entries_ignores_model_matched_entry(tmp_path) -> No
 
 async def test_trusted_pins_channel_still_works(tmp_path) -> None:
     """正控：审批重放通道（`trusted_pins=True`）必须继续认 pin。"""
-    store = await _store(tmp_path)
+    store = await loaded_store(tmp_path)
     assert (await call(store.add, "memory", "entry A: cats are nice"))["success"] is True
     path = path_of(store, "memory")
     path.write_text("entry A: cats are nice, edited", encoding="utf-8")
