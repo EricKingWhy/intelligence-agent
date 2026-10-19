@@ -50,9 +50,9 @@ async def _crash_before_replace(root: Path) -> None:
     store = await _build(root)
 
     def _die(*_args, **_kwargs):
-        # Windows 没有 SIGKILL；crash-before-replace 用例在那边本就跳过（#1384），
-        # 这里只保证该模式被误调时是以「进程被杀」的形态退出而不是 AttributeError。
-        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
+        # Windows 没有 SIGKILL，但 crash-before-replace 用例在那边本就跳过（#1384）；
+        # 回退分支不可达且会把「响亮失败」变成静默自杀，直接让这里 AttributeError。
+        os.kill(os.getpid(), signal.SIGKILL)
 
     os.replace = _die
     pathlib.Path.replace = _die

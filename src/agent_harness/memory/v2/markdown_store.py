@@ -77,8 +77,16 @@ def _delimiter_error(content: str) -> str | None:
 
     转义会让磁盘文本 ≠ 记忆文本，而 pin / digest / 去重全按正文逐字相等判定。
     拒绝让模型当场自纠（拆成多次 add），代价只是一轮重试。
+
+    判定按**读侧口径**、且覆盖两个同形变体：
+
+    - 写侧 `newline=""` 原样保留 `\\r`，读侧 `read_text` 会把 CRLF/CR 折成 LF ⇒
+      `\\r\\n§\\r\\n` 落盘后在重载时就是分隔符，必须先折行再判；
+    - 结尾的半个分隔符 `\\n§`（`normalize_entry` 已 strip，故不会带尾随空白）
+      与下一条 `join` 时凑出 `\\n§\\n`，把**下一条**并进本条——同样要拒。
     """
-    if ENTRY_DELIMITER in content:
+    folded = content.replace("\r\n", "\n").replace("\r", "\n")
+    if ENTRY_DELIMITER in folded or folded.endswith(ENTRY_DELIMITER[:-1]):
         return (
             'Blocked: content contains the reserved entry delimiter "\\n§\\n"; '
             "split it into multiple add operations."
@@ -631,24 +639,24 @@ class MarkdownMemoryStore:
         # `matched_entry` 是**系统 pin**（stage 时钉住的条目全文），不是模型输入：
         # 直写路径（write_approval 默认关）里模型能自己填它，填成别的条目就能绕过
         # old_text 把那条改掉。只有审批重放（`trusted_pins=True`）能携带它。
+        # 注：单条 `replace`/`remove` 的 `matched_entry` 仍是调用方自证（pin 在这一层
+        # 无法与调用方区分），其模型不可达由工具面（`operations_payload`）保证。
         ops = [
             {
-                **op,
+                **(op or {}),
                 "content": normalize_entry((op or {}).get("content") or (op or {}).get("new_text") or ""),
                 "matched_entry": (op or {}).get("matched_entry") if trusted_pins else None,
             }
             for op in operations
         ]
         # 先扫所有 add/replace 内容，再碰磁盘——一个投毒 op 拒绝整批。
+        # 只查会落盘的 op：remove 的 content 不参与写入，拿它拒绝一次合法删除是误伤。
         for i, op in enumerate(ops):
+            if op.get("action") not in {"add", "replace"} or not op["content"]:
+                continue
             if delimiter_error := _delimiter_error(op["content"]):
                 return _error(f"Operation {i + 1}: {delimiter_error}")
-            scan_error = (
-                op.get("action") in {"add", "replace"}
-                and op["content"]
-                and _scan_memory_content(op["content"])
-            )
-            if scan_error:
+            if scan_error := _scan_memory_content(op["content"]):
                 return _error(f"Operation {i + 1}: {scan_error}")
 
         def _apply(entries: list[str], limit: int) -> Any:

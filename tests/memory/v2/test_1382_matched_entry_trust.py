@@ -11,13 +11,13 @@
 
 from __future__ import annotations
 
-import importlib
 import inspect
 
 import pytest
 
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
+    build_tool,
     call,
     load,
     path_of,
@@ -25,20 +25,6 @@ from tests.memory.v2._markdown_memory_1353 import (
 )
 
 pytestmark = pytest.mark.asyncio
-
-_TOOL_MODULES = ("agent_harness.memory.v2.memory_tool",)
-_TOOL_CLASSES = ("MemoryTool", "MemoryWriteTool")
-
-
-def _tool(store):
-    for module_name in _TOOL_MODULES:
-        module = importlib.import_module(module_name)
-        for class_name in _TOOL_CLASSES:
-            candidate = getattr(module, class_name, None)
-            if isinstance(candidate, type):
-                return candidate(store)
-    pytest.fail("找不到 memory Tool 实现", pytrace=False)
-
 
 async def _store(tmp_path):
     store = build_store(tmp_path)
@@ -53,7 +39,7 @@ async def test_tool_batch_cannot_forge_matched_entry(tmp_path) -> None:
     store = await _store(tmp_path)
     assert (await call(store.add, "memory", "entry A: cats are nice"))["success"] is True
     assert (await call(store.add, "memory", "entry B: dogs are nice"))["success"] is True
-    tool = _tool(store)
+    tool = build_tool(store)
     before = path_of(store, "memory").read_bytes()
 
     result = await tool.execute(tool.args_schema(

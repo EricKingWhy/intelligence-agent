@@ -14,7 +14,6 @@ AC1 的 oracle 是 Hermes 对应用例"逐条对齐（随迁为本仓用例）"�
 
 from __future__ import annotations
 
-import importlib
 import inspect
 
 import pytest
@@ -23,6 +22,7 @@ from agent_harness.memory.v2.markdown_store import MAX_CONSOLIDATION_FAILURES_PE
 from agent_harness.tooling import ErrorCode
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
+    build_tool,
     call,
     load,
     path_of,
@@ -30,30 +30,6 @@ from tests.memory.v2._markdown_memory_1353 import (
 )
 
 pytestmark = pytest.mark.asyncio
-
-_TOOL_MODULES = (
-    "agent_harness.memory.v2.memory_tool",
-    "agent_harness.memory.v2.tools",
-)
-_TOOL_CLASSES = ("MemoryTool", "MemoryWriteTool")
-
-
-def _tool(store):
-    for module_name in _TOOL_MODULES:
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError:
-            continue
-        for class_name in _TOOL_CLASSES:
-            candidate = getattr(module, class_name, None)
-            if isinstance(candidate, type):
-                return candidate(store)
-    pytest.fail(
-        "#1353 AC1：找不到 memory Tool 实现；尝试过 "
-        f"{_TOOL_MODULES} × {_TOOL_CLASSES}",
-        pytrace=False,
-    )
-
 
 async def _load(store) -> None:
     pending = load(store)
@@ -186,7 +162,7 @@ async def test_success_resets_failure_budget(tmp_path) -> None:
 
 async def test_new_text_alias_works_for_add_and_replace(tmp_path) -> None:
     store = build_store(tmp_path)
-    tool = _tool(store)
+    tool = build_tool(store)
     shape = tool.args_schema
 
     added = await tool.execute(shape(target="memory", action="add", new_text="alias fact"))
@@ -202,7 +178,7 @@ async def test_new_text_alias_works_for_add_and_replace(tmp_path) -> None:
 
 async def test_content_wins_when_both_content_and_new_text_are_set(tmp_path) -> None:
     store = build_store(tmp_path)
-    tool = _tool(store)
+    tool = build_tool(store)
     shape = tool.args_schema
 
     result = await tool.execute(
@@ -216,7 +192,7 @@ async def test_content_wins_when_both_content_and_new_text_are_set(tmp_path) -> 
 async def test_disabled_target_returns_permission_denied(tmp_path) -> None:
     store = build_store(tmp_path)
     store.user_profile_enabled = False
-    tool = _tool(store)
+    tool = build_tool(store)
 
     result = await tool.execute(
         tool.args_schema(target="user", action="add", content="profile fact")

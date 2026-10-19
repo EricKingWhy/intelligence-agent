@@ -8,13 +8,15 @@
 
 1. 按真实签名构造实例，并守住"根目录必须在 tmp_path 下"的安全判据；
 2. 把 store 的同步/async 方法调用统一成 awaitable 桥；
-3. 提供条目解析等文件断言的小工具。
+3. 提供条目解析等文件断言的小工具；
+4. 按真实符号构造 memory Tool（`build_tool`）。
 
 它不实现任何记忆语义，也不替被测代码做断言。
 """
 
 from __future__ import annotations
 
+import importlib
 import inspect
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,31 @@ async def call(method: Any, *args: Any, **kwargs: Any) -> Any:
 def load(store: MarkdownMemoryStore) -> Any:
     """调用 ``load_from_disk``（同步方法；返回值形态保留以兼容既有调用方）。"""
     return store.load_from_disk()
+
+
+_TOOL_MODULES = (
+    "agent_harness.memory.v2.memory_tool",
+    "agent_harness.memory.v2.tools",
+)
+_TOOL_CLASSES = ("MemoryTool", "MemoryWriteTool")
+
+
+def build_tool(store: Any) -> Any:
+    """按真实符号构造 memory Tool（模块/类名探测集中在这里，避免多份拷贝漂移）。"""
+    for module_name in _TOOL_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        for class_name in _TOOL_CLASSES:
+            candidate = getattr(module, class_name, None)
+            if isinstance(candidate, type):
+                return candidate(store)
+    pytest.fail(
+        "#1353：找不到 memory Tool 实现；尝试过 "
+        f"{_TOOL_MODULES} × {_TOOL_CLASSES}",
+        pytrace=False,
+    )
 
 
 def path_of(store: MarkdownMemoryStore, target: str) -> Path:
