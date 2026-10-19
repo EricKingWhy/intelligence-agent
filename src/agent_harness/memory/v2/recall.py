@@ -165,6 +165,9 @@ def _truncate_at_entry_boundary(content: str, limit: int) -> str:
     if len(content) <= limit:
         return content
     boundary = content.rfind(ENTRY_DELIMITER, 0, limit)
+    # ponytail: boundary<=0 说明**单条**超长条目自己就吃掉了整个预算，没有可退的边界。
+    # 此处硬切只影响注入给模型的那份快照（唯一调用点在 `_select_markdown`），
+    # 权威 markdown 与 SQLite 记录都不动，无数据丢失；等真出现单条超长条目再谈逐条。
     return content[:boundary] if boundary > 0 else content[:limit]
 
 
