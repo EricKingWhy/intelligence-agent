@@ -31,9 +31,13 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2 import origin
-from agent_harness.memory.v2.commands import current_user_message
+from agent_harness.memory.v2.commands import (
+    current_user_message,
+    trusted_identity_for_session,
+)
 from agent_harness.memory.v2.guidance import MEMORY_GUIDANCE
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
+from agent_harness.memory.v2.write_approval import evaluate_gate
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -137,6 +141,19 @@ class _MemoryArgs(BaseModel):
         ]
 
 
+def _payload(args: _MemoryArgs) -> dict[str, Any]:
+    """stage 的持久化形状：一次工具调用 = 一条待审记录（batch 整批一条，见 write_approval）。"""
+    payload: dict[str, Any] = {"target": args.target}
+    if args.operations is not None:
+        payload["action"] = "batch"
+        payload["operations"] = args.operations_payload()
+        return payload
+    payload["action"] = args.action
+    payload["content"] = args.content_or_alias()
+    payload["old_text"] = args.old_text
+    return payload
+
+
 def _normalise(text: str) -> str:
     return " ".join(text.casefold().split())
 
@@ -154,9 +171,18 @@ def _grounded_in_user_message(content: str, user_text: str) -> bool:
 class MemoryTool(Tool):
     """`memory`：MEMORY.md / USER.md 的 add / replace / remove / batch 写入面。"""
 
-    def __init__(self, store: MarkdownMemoryStore, sessions: Any | None = None) -> None:
+    def __init__(
+        self, store: MarkdownMemoryStore, sessions: Any | None = None, *,
+        service: Any | None = None, staged: Any | None = None,
+        workspace_index: Any | None = None,
+    ) -> None:
         self._store = store
         self._sessions = sessions
+        #: M6：`service` 读 `write_approval` 开关，`staged` 是门开时的待审区。两者缺席
+        #: （纯 markdown 部署 / 直调）时门恒关——没有开关就没有可开的东西。
+        self._service = service
+        self._staged = staged
+        self._workspace_index = workspace_index
 
     @property
     def name(self) -> str:
@@ -198,13 +224,23 @@ class MemoryTool(Tool):
                 message=f"Built-in {label} writes are disabled in memory config.",
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
+        if args.action == "add" and args.operations is None:
+            denial = await self._add_soft_check(args.content_or_alias())
+            if denial is not None:
+                return denial
+        try:
+            gated = await self._gate(_payload(args))
+            if gated is not None:
+                return gated
+        except PermissionError:
+            return ToolResult.failure(
+                message="user memory scope is not authorized",
+                error_code=ErrorCode.PERMISSION_DENIED,
+            )
         try:
             if args.operations is not None:
                 response = await self._store.apply_batch(target, args.operations_payload())
             elif args.action == "add":
-                denial = await self._add_soft_check(args.content_or_alias())
-                if denial is not None:
-                    return denial
                 response = await self._store.add(target, args.content_or_alias())
             elif args.action == "replace":
                 response = await self._store.replace(
@@ -219,6 +255,33 @@ class MemoryTool(Tool):
                 error_code=ErrorCode.TRANSIENT_ERROR,
             )
         return _result(response, target)
+
+    async def _gate(self, payload: dict[str, Any]) -> ToolResult | None:
+        """M6：门开 → 钉住条目、整批入待审区并**返回 stage 结果**（``None`` = 直接写）。
+
+        ``staged: True`` 必须一路带到模型与 M7 的摘要里——这条写入**没有落盘**，把它报成
+        "已更新"会让用户在下一个 session 里找不到记忆。
+        """
+        if self._service is None or self._staged is None:
+            return None
+        session_id = memory_session_var.get() or ""
+        trusted = trusted_identity_for_session(session_id, self._workspace_index)
+        decision = evaluate_gate(await self._service.get_settings(trusted))
+        if decision.allow:
+            return None
+        pins, error = await self._staged.resolve_pins(payload)
+        if error is not None:
+            # 选不中的 old_text 不进待审区：批准它只会再失败一次。与直接写入的响应同形，
+            # 模型照样能拿 current_entries 自纠。
+            return _result(error, payload["target"])
+        staged = await self._staged.stage(payload, pins, trusted)
+        return ToolResult.success(
+            message=f"{decision.message} Pending id: {staged.id}.",
+            data={
+                "success": True, "staged": True, "pending_id": staged.id,
+                "target": payload["target"], "message": decision.message,
+            },
+        )
 
     async def _add_soft_check(self, content: str) -> ToolResult | None:
         """前台 add 的软校验；后台 review 提炼的内容不适用（来源不是某条 user message）。"""

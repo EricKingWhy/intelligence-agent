@@ -223,7 +223,10 @@ async def _wire_memory_v2(
             ),
             # #1353 M1/M8：markdown 权威面的直接写入工具 + 它的静态 guidance。
             # markdown 缺席时（纯 SQLite 部署）不注册——没有可写的权威面。
-            *([MemoryTool(markdown, sessions)] if markdown is not None else []),
+            *([MemoryTool(
+                markdown, sessions, service=service, staged=service.staged,
+                workspace_index=workspace_index,
+            )] if markdown is not None else []),
         ]))
     service.start_tombstone_purger()
     wiring.lifecycle.append(service)

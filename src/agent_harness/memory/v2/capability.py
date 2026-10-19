@@ -48,6 +48,7 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
+from agent_harness.memory.v2.write_approval import StagedWriteStore
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class MemoryV2Service:
         self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex,
         *, relay: MemoryV2IndexRelay | None = None,
         markdown: MarkdownMemoryStore | None = None,
+        staged: StagedWriteStore | None = None,
     ) -> None:
         self._store = store
         self._index = index
@@ -100,6 +102,9 @@ class MemoryV2Service:
         #: #1353：markdown 权威面。为 `None` 时退化为纯 SQLite（既有测试与旧部署路径），
         #: 装配层注入后 create/update/invalidate 先落 markdown 再投影 SQLite。
         self._markdown = markdown
+        #: #1353 M6：`write_approval` 门开时的待审区。跟着 markdown 走——没有权威面就没有
+        #: 可审批的写入，工具也不会注册。
+        self._staged = staged
         self._tombstone_purger: asyncio.Task | None = None
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
@@ -161,6 +166,11 @@ class MemoryV2Service:
     @property
     def markdown(self) -> MarkdownMemoryStore | None:
         return self._markdown
+
+    @property
+    def staged(self) -> StagedWriteStore | None:
+        """#1353 M6 待审区；`None` = 这个部署没有审批面（门恒关）。"""
+        return self._staged
 
     @staticmethod
     def markdown_target(record: MemoryDraftV2 | MemoryRecordV2) -> str:
@@ -365,11 +375,11 @@ class MemoryV2Service:
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
-        fallback_enabled: bool | None = None,
+        fallback_enabled: bool | None = None, write_approval: bool | None = None,
     ) -> MemorySettingsV2:
         return await self._store.update_settings(
             trusted, extraction_enabled=extraction_enabled, recall_enabled=recall_enabled,
-            fallback_enabled=fallback_enabled,
+            fallback_enabled=fallback_enabled, write_approval=write_approval,
         )
 
     async def purge_expired_tombstones(self) -> int:

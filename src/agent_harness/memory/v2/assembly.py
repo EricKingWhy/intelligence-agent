@@ -66,6 +66,7 @@ from agent_harness.memory.v2.roles import (
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
+from agent_harness.memory.v2.write_approval import StagedWriteStore
 from agent_harness.observability import get_observability_sink
 from agent_harness.session.store import JsonlSessionStore
 
@@ -90,7 +91,10 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     # SQLite 降为派生/历史层。注入后 create/update/invalidate 先落 markdown 再投影。
     markdown = MarkdownMemoryStore(Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME)
     markdown.load_from_disk()
-    return MemoryV2Service(store, index, relay=relay, markdown=markdown)
+    # #1353 M6：待审区与 job/record 同一个库文件（决定二）；与 markdown 同生共死。
+    staged = StagedWriteStore(database, markdown)
+    await staged.initialize()
+    return MemoryV2Service(store, index, relay=relay, markdown=markdown, staged=staged)
 
 
 async def build_memory_formation(
@@ -143,6 +147,7 @@ async def build_memory_formation(
         max_concurrency=settings.memory_v2_max_concurrency,
         memory_v2=service,
         workspace_index=workspace_index,
+        notification_mode=settings.memory_notification_mode,
     )
     recovered = await runner.recover()
     logger.info(
