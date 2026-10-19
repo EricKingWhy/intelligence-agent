@@ -20,8 +20,10 @@ timer——到点由服务端推进状态机，不依赖任何客户端此刻是
 - `note_session_state()`：进程启动时按持久事件流重建（重启不丢计时，幂等）。
 
 到点推进由组合根的常驻 ticker 调 `check_expiries()`（不再借 WS 心跳：零连接时也必须
-推进）。`on_expire` 是唯一恢复出口（组合根注入 session service 的调用，本模块不 import
-session service，避免 web↔service 环）。
+推进）。`on_expire` 是唯一恢复出口（组合根注入 session service 的调用，本模块不调用
+service 的任何方法）。启动重建的三段守卫复用了 `session.service._pending_user_input_pause`
+（与 `resume_ask_user_timeout` 的在线回退同源的纯函数）——这不构成 web↔service 环：
+`web/app.py` 本就顶层 import `session.service`，依赖方向 web→service 早已存在。
 
 ⚠ **迁移计划不变——W-12 登记协议（#356 中 DEFER 的部分）落地后删除本模块**：
     TODO(#1220)：产品客户端在场协议
@@ -55,7 +57,11 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 
-from agent_harness.agent.run_budget import REASON_USER_INPUT, latest_paused_run
+from agent_harness.agent.run_budget import (
+    REASON_USER_INPUT,
+    latest_paused_run,
+    latest_run_id,
+)
 from agent_harness.agent.types import AgentEvent
 from agent_harness.session.ask_user_timeout import (
     TERMINAL_RUN_EVENTS,
@@ -70,6 +76,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.session.service import _pending_user_input_pause
 
 logger = logging.getLogger("agent_harness.web.ask_user_timeout_driver")
 
@@ -158,10 +165,32 @@ class AskUserTimeoutDriver:
     def note_session_state(self, session_id: str, events: Iterable[SessionEvent]) -> None:
         """按事件流**快照**装配计时器（启动重建用，幂等）。
 
-        最新 run 上还有未答复的 `ask_user`，**且该 run 当前确实暂停在它上面**
-        （`run/paused(reason=user_input, input_request_id=该请求)`）⇒ 装配（同一
-        request_id 重复调用保留已累计时长）。只有请求事件、没有暂停事实的旧事件流
-        ⇒ `disarm`（#1337：否则首轮 ticker 会把早已无人等待的提问当刚超时恢复掉）。
+        启动重建的三段守卫（#1337 B；用户已裁决）：
+        ① 当前暂停事实——最新 run 确实暂停在该 request 上
+           （`run/paused(reason=user_input, input_request_id=该请求)`）⇒ 装配
+           （保持既有行为；同一 request_id 重复调用保留已累计时长）；
+        ② 新近请求 + 合成暂停回退——无可用暂停事实，但请求在 2×timeout 内 ⇒
+           复用在线路径 `resume_ask_user_timeout` 的同源回退
+           （`_pending_user_input_pause`）：crash-window 里进程死在
+           `user/input-requested` 与 `run/paused` 两次 append 之间，用户确实在等，
+           必须保留 #1320 durable 语义；
+        ③ 旧流——无可用暂停事实**且**请求已老（`elapsed ≥ 2×timeout`）⇒ `disarm`
+           （#1337：否则首轮 ticker 会把早已无人等待的提问当刚超时恢复掉）。
+
+        其中回退段（②）与 `resume_ask_user_timeout` 同源（`_pending_user_input_pause`）——
+        在线守卫是"暂停事实 → 合成回退"的两段式，启动重建在前面再加一段新近度门禁，
+        构成三段（A 方案只抄了在线守卫的前半段，丢了回退，见 #1337 P1）。
+
+        2×timeout 取值论证：timeout 档位本身就是"等用户多久算超时"的语义边界；
+        若请求发出已超过 2×timeout，即使计时器当初正常装配也早该到期了——此时它
+        必然是无人等待的旧流，disarm 安全。2× 而非 1×：给"请求发出→崩溃→重启→
+        重建"链路留余量，避免边界抖动。平局（`elapsed == 2×timeout`）归 disarm：
+        该时刻计时器已到期满一个档位，"用户还在等"的解释已不可信。
+
+        回退段存在的理由（与 disarm 理由对称，P3）：误 arm 的代价小于误 disarm——
+        装错的表到点时会被 `resume_ask_user_timeout` 重读事件流判 `RESOLVED` 收口，
+        而丢掉的计时器无法挽回。
+
         快照里**没有**待回答请求时**不动**已有计时器：快照可能比
         进程内事件观察者更旧（读盘与落盘并发），"快照没看到"不是"请求已了结"
         的证据。漏掉的撤销由到期时 `resume_ask_user_timeout` 重读事件流判
@@ -175,32 +204,65 @@ class AskUserTimeoutDriver:
         运维改配置并重启后，旧请求仍按创建时的档位到期；只有 #1224 之前落盘、没有
         快照的旧事件才回落到 `self.timeout_seconds`。
         """
+        # P3：迭代器在入口一次物化——`latest_pending_input_request` 内部也会
+        # `list(events)`，若在它之后才物化，传入的迭代器已被消费一半。
+        events = list(events)
         request = latest_pending_input_request(events, kind="ask_user")
         if request is None:
             return
-        events = list(events)
-        # #1337：与 `resume_ask_user_timeout` 同源的暂停态守卫。只判"最新 run 有未答复
-        # 请求"不够——崩溃现场可能留下「`user/input-requested` 已落盘、但没有
-        # `run/paused` 也没有终态」的旧事件流；把它装表会按墙钟补齐已累计时长，首轮
-        # ticker 就把一个早已无人等待的提问当"刚刚超时"恢复掉，污染事件流。
-        # 装配只认**当前确实暂停在该 request 上**的事实（`run/paused` 未被
-        # `run/resumed` / 终态压过）。
+        request_id = request.data["request_id"]
+        timeout_seconds = ask_user_timeout_seconds_from_payload(
+            request.data, fallback=int(self.timeout_seconds),
+        )
+
+        def _arm_with_elapsed() -> None:
+            self.arm(
+                session_id,
+                request_id=request_id,
+                timeout_seconds=timeout_seconds,
+                elapsed_seconds=elapsed_seconds_since(request.time),
+            )
+
+        # 段①——当前暂停事实（保持既有行为）。
         paused = latest_paused_run(events)
         if (
-            paused is None
-            or paused.reason != REASON_USER_INPUT
-            or paused.input_request_id != request.data["request_id"]
+            paused is not None
+            and paused.reason == REASON_USER_INPUT
+            and paused.input_request_id == request_id
         ):
+            _arm_with_elapsed()
+            return
+
+        # 段③——旧流（先判：新近度门禁是段②的前置）。
+        elapsed = elapsed_seconds_since(request.time)
+        if elapsed >= 2 * timeout_seconds:
             self.disarm(session_id)
             return
-        self.arm(
-            session_id,
-            request_id=request.data["request_id"],
-            timeout_seconds=ask_user_timeout_seconds_from_payload(
-                request.data, fallback=int(self.timeout_seconds),
-            ),
-            elapsed_seconds=elapsed_seconds_since(request.time),
-        )
+
+        # 段②——新近请求 + 合成暂停回退（与 `resume_ask_user_timeout` 同源）。
+        run_id = latest_run_id(events)
+        if run_id is not None:
+            synthesized = _pending_user_input_pause(events, run_id=run_id)
+            if (
+                synthesized is not None
+                and synthesized.reason == REASON_USER_INPUT
+                and synthesized.input_request_id == request_id
+            ):
+                _arm_with_elapsed()
+                return
+            # P2：旧格式暂停事件（`run_budget.py:1093-1098` 历史格式）缺
+            # `input_request_id`，归属无法判定——不直接按不匹配 disarm。新近请求按
+            # 保守处理走本段装表：同一 run 同一时刻至多一个未答复请求
+            # （`pending_input_request` 契约），`reason=user_input` 的暂停必然是这个
+            # 待答请求的。
+            if (
+                paused is not None
+                and paused.reason == REASON_USER_INPUT
+                and paused.input_request_id is None
+            ):
+                _arm_with_elapsed()
+                return
+        self.disarm(session_id)
 
     def arm(
         self,

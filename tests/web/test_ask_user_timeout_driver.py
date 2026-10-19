@@ -202,12 +202,13 @@ async def test_restore_keeps_the_deadline_from_the_persisted_request_time():
 
 @pytest.mark.asyncio
 async def test_restore_does_not_arm_a_request_without_a_pause_fact():
-    """#1337：只有 `user/input-requested`、没有 `run/paused` 的旧事件流不装表。
+    """#1337 B 段③：只有 `user/input-requested`、没有 `run/paused` 的旧事件流不装表。
 
-    崩溃现场可能留下「请求已落盘、run 既没暂停也没终态」的事件流。按墙钟补齐的
-    计时器会在首轮 ticker 就判到期，把一个早已无人等待的提问当"刚刚超时"恢复掉
-    （污染事件流）。装配只认当前确实暂停在该请求上的事实——与在线恢复路径
-    `resume_ask_user_timeout` 同源的守卫。
+    崩溃现场可能留下「请求已落盘、run 既没暂停也没终态」的事件流。这里请求是 1
+    小时前的（≫ 2×60s）：即使计时器当初正常装配也早该到期，它必然是无人等待的
+    旧流。按墙钟补齐的计时器会在首轮 ticker 就判到期，把一个早已无人等待的提问
+    当"刚刚超时"恢复掉（污染事件流）。新近请求（< 2×timeout）的同形状走合成暂停
+    回退（见 `test_restore_arms_recent_request_in_crash_window_via_synthesized_pause`）。
     """
     clock = FakeClock()
     driver, fired = _driver(clock, timeout=60.0)
@@ -454,3 +455,201 @@ async def test_retry_rearms_with_the_request_snapshot_timeout():
     assert await driver.check_expiries() == []  # 59 < 60，说明不是掉回 600
     clock.advance(1)
     assert await driver.check_expiries() == ["s1"]
+
+
+# ── #1337 B：启动重建三段守卫 ──
+
+
+def _crash_window_events(
+    *, request_id: str = "req-1", asked_seconds_ago: float = 30.0,
+    timeout_seconds: int = 60,
+) -> list[SessionEvent]:
+    """crash-window 形状：`user/input-requested` 已落盘，无 `run/paused`、无终态。"""
+    return [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+            time=(
+                datetime.now(UTC) - timedelta(seconds=asked_seconds_ago)
+            ).isoformat(),
+            data={
+                "request_id": request_id, "kind": "ask_user",
+                "timeout_seconds": timeout_seconds,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restore_arms_recent_request_in_crash_window_via_synthesized_pause():
+    """#1337 B 段②：进程死在 `user/input-requested` 与 `run/paused` 两次 append
+    之间——请求是新近的（30s < 2×60s），用户确实在等。启动重建复用在线路径
+    `resume_ask_user_timeout` 的同源回退（`_pending_user_input_pause`）合成暂停，
+    装表并保留 #1320 durable 语义；到点正常触发。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", _crash_window_events())
+
+    assert driver.is_armed("s1") is True
+    clock.advance(29)  # 已累计 30 + 29 = 59 < 60
+    assert await driver.check_expiries() == []
+    clock.advance(1)  # 60 ⇒ 到点
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_restore_disarms_three_day_old_request_without_pause_fact():
+    """#1337 B 段③：3 天前的请求、无暂停事实 ⇒ 旧流，首轮 ticker 零 `on_expire`。
+
+    与 1 小时版（`test_restore_does_not_arm_a_request_without_a_pause_fact`）并存：
+    这里 pin 住"远超 2×timeout"的旧流侧。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state(
+        "s1", _crash_window_events(asked_seconds_ago=3 * 24 * 3600),
+    )
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_arms_request_just_inside_two_timeouts():
+    """边界内侧：elapsed = 2×timeout − 5s（+毫秒级墙钟漂移）⇒ 仍走回退段装表。
+
+    5s 裕量远大于用例执行耗时，断言无抖动。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", _crash_window_events(asked_seconds_ago=115.0))
+
+    assert driver.is_armed("s1") is True
+    clock.advance(10_000)  # 已累计 115s ≥ 60s ⇒ 首轮即到点
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_restore_disarms_request_at_exactly_two_timeouts():
+    """边界平局 pin 住 disarm 侧：elapsed ≥ 2×timeout（此处取等，墙钟只会再往大漂）
+    ⇒ 旧流。理由见实现注释：该时刻计时器已到期满一个档位，"用户还在等"的解释
+    已不可信。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", _crash_window_events(asked_seconds_ago=120.0))
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_arms_recent_request_with_legacy_pause_missing_input_request_id():
+    """P2：旧格式 `run/paused`（缺 `input_request_id`，`run_budget.py:1093-1098`
+    历史格式）归属无法判定——不直接按不匹配 disarm。新近请求按保守处理走回退段
+    装表：误 arm 到点时会被在线守卫重读事件流判 RESOLVED 收口，而丢掉的计时器
+    无法挽回。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+            time=(datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
+            data={"request_id": "req-1", "kind": "ask_user",
+                  "timeout_seconds": 60},
+        ),
+        # 旧格式：有 reason、无 input_request_id。
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={"reason": "user_input", "trigger_dimension": "user_input"},
+        ),
+    ])
+
+    assert driver.is_armed("s1") is True
+    clock.advance(30)  # 已累计 30 + 30 = 60 ⇒ 到点
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
+
+
+@pytest.mark.asyncio
+async def test_restore_disarms_legacy_pause_for_old_request():
+    """P2 老请求侧：旧格式暂停 + 请求已老（3 天）⇒ disarm（新近才值得保守装表）。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
+            time=(datetime.now(UTC) - timedelta(days=3)).isoformat(),
+            data={"request_id": "req-1", "kind": "ask_user",
+                  "timeout_seconds": 60},
+        ),
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={"reason": "user_input", "trigger_dimension": "user_input"},
+        ),
+    ])
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_disarms_when_pause_names_an_answered_older_request():
+    """P2：暂停归属错位——贴近生产的形状。
+
+    req-A 已答复（`user/message` 带 `input_request_id`，正是生产答复落盘的形状），
+    run 仍暂停在它上面（答复与 `run/resumed` 之间的崩溃窗口）；req-B 是最新未答复
+    请求但尚无暂停事实。暂停事实明确属于另一个请求（新格式、有 id、可判定）⇒
+    disarm，不借"新近"装表。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    old = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    driver.note_session_state("s1", [
+        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=1, time=old,
+            data={"request_id": "req-A", "kind": "ask_user",
+                  "timeout_seconds": 60},
+        ),
+        SessionEvent(
+            type=RUN_PAUSED, run_id="r1", seq=2,
+            data={"reason": "user_input", "trigger_dimension": "user_input",
+                  "input_request_id": "req-A"},
+        ),
+        SessionEvent(
+            type=USER_MESSAGE, run_id="r1", seq=3,
+            data={"input_request_id": "req-A", "text": "好的"},
+        ),
+        SessionEvent(
+            type=USER_INPUT_REQUESTED, run_id="r1", seq=4, time=recent,
+            data={"request_id": "req-B", "kind": "ask_user",
+                  "timeout_seconds": 60},
+        ),
+    ])
+
+    assert driver.is_armed("s1") is False
+    clock.advance(10_000)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_restore_accepts_an_event_iterator():
+    """P3：`events` 以迭代器传入时，入口一次物化——`latest_pending_input_request`
+    内部的 `list(events)` 不能把调用方的迭代器消费掉一半。"""
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=60.0)
+    driver.note_session_state("s1", iter(_crash_window_events()))
+
+    assert driver.is_armed("s1") is True
+    clock.advance(30)  # 已累计 30 + 30 = 60 ⇒ 到点
+    assert await driver.check_expiries() == ["s1"]
+    assert fired == [("s1", "req-1")]
