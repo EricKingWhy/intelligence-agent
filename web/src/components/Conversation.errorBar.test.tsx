@@ -50,7 +50,10 @@ describe('ErrorBar — 视觉与折叠契约', () => {
     const html = renderToStaticMarkup(
       <ErrorBar copy={describeFailure('提交失败：Failed to fetch', { retryable: true })} onRetry={() => {}} />,
     );
-    expect(html).toContain('class="approval-error conversation-error"');
+    // 解析出类名集合再断言（审查 S-P2-4）：不钉死顺序，且能证明两个类都在同一个
+    // 元素上（`approval-error` 是复用的 alert token，`conversation-error` 是布局类）。
+    const classes = (/class="([^"]*approval-error[^"]*)"/.exec(html)?.[1] ?? '').split(/\s+/);
+    expect(classes).toEqual(expect.arrayContaining(['approval-error', 'conversation-error']));
     expect(html).toContain('role="alert"');
     expect(html).toContain('conversation-error-icon');
   });
@@ -71,6 +74,12 @@ describe('ErrorBar — 视觉与折叠契约', () => {
     const idle = renderToStaticMarkup(<ErrorBar copy={copy} onRetry={() => {}} />);
     expect(idle).toContain('conversation-error-retry');
     expect(idle).toContain('>重试<');
+  });
+
+  it('重试在途时按钮禁用（连点不再发第二个请求，审查 P1-2）', () => {
+    const copy = describeFailure('提交失败：Failed to fetch', { retryable: true });
+    const html = renderToStaticMarkup(<ErrorBar copy={copy} onRetry={() => {}} retryPending />);
+    expect(html).toMatch(/<button[^>]*conversation-error-retry[^>]*disabled/);
   });
 });
 
@@ -112,7 +121,7 @@ describe('Conversation — run 失败的内联条', () => {
 });
 
 describe('Conversation — 断网提交失败的内联条', () => {
-  it('带可见「重试」，且优先于 run 失败条（新的发送失败更贴近当前动作）', () => {
+  it('带可见「重试」；两种失败各呈现一次（submitFailure 不再遮掉 run 失败说明）', () => {
     const html = renderToStaticMarkup(
       <Conversation
         conversation={failedRun()}
@@ -124,7 +133,8 @@ describe('Conversation — 断网提交失败的内联条', () => {
     );
     expect(html).toContain('连不上服务');
     expect(html).toContain('conversation-error-retry');
-    expect(html).not.toContain('模型的密钥不对');
+    // 审查 P3：先前 run 的 401 说明与新的发送失败都在场，不互相遮盖。
+    expect(html).toContain('模型的密钥不对');
   });
 
   it('不可重试的断网（已被受理的迟到失败）不给按钮', () => {

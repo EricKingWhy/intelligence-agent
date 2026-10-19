@@ -23,7 +23,7 @@ import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
-import { Composer, type SubmitResult } from './components/Composer';
+import { Composer, type ComposerHandle, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -130,14 +130,15 @@ export default function App() {
   // #367 P3：目录冲突自动建 worktree 时的一次性提示（后端 X-Worktree-Path 头，
   // 前端在响应可得的两条路径消费；用户关闭后不再出现）。
   const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null);
-  // #1367（P0-3）：断网重试 = 重发上一次 submit（复用既有 handleSubmit 动作，
-  // 不造新机制）。入参存 ref：它不参与渲染，用 state 会让每次发送多一次整树提交。
-  const lastSubmitRef = useRef<{
-    task: string;
-    rememberAsProceduralRule: boolean;
-    attachmentIds: string[];
-    scope: ConstraintScope;
-  } | null>(null);
+  // #1367（P0-3）：断网重试 = 重发**失败的那一次** submit。动作由 `handleSubmit`
+  // 在发起时把本次入参绑进闭包（`SendFailure.onRetry`），不存在跨入口/跨会话共享的
+  // 「上一次提交」槽位——审查 P0 的根因正是那种槽位（steer / 编辑轮次 / 队列项
+  // 失败后点重试会重发无关旧任务）。
+  // 条内重试在途闸门（审查 P1-2）：Composer 的 sendingRef 挡不住这条通道，
+  // 新会话路径连点会发出多个 POST /api/sessions。
+  const retryInFlightRef = useRef(false);
+  const [retryPending, setRetryPending] = useState(false);
+  const composerRef = useRef<ComposerHandle>(null);
 
   const {
     sessions,
@@ -147,11 +148,11 @@ export default function App() {
     streaming,
     reconnecting,
     error,
-    // #1367：`sendFailure` 是新增通道；`App.test.tsx` 等既有用例用部分 mock
-    // 顶替 `useSession()`（不含该键），缺省成 null 才能保持它们零改动。
-    sendFailure = null,
-    // 同上：部分 mock 不含该键（#1193 的 plan-stuck 标记），缺省 null。
-    runFailedBeforePlan = null,
+    // #1367（审查 S-P2-2）：不设缺省。`useSession` 漏返回键时宁可在这里崩掉
+    // （显式报警），也不让整条内联错误通道静默消失。测试替身由各 `App.*.test.tsx`
+    // 的 mock 显式补全这两个键。
+    sendFailure,
+    runFailedBeforePlan,
     sessionsError,
     titlesById,
     recoverState,
@@ -873,8 +874,6 @@ export default function App() {
       attachmentIds: string[] = [],
       scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
-      // #1367：记住本次入参——断网失败后条内「重试」重发的就是这一次。
-      lastSubmitRef.current = { task, rememberAsProceduralRule, attachmentIds, scope };
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -932,7 +931,11 @@ export default function App() {
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
         // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
         // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-        const failure = await submitTask({
+        /* #1367 审查 P0/P1-3：重试动作在**这里**绑定本次的 payload（闭包），
+           并负责受理成功后的草稿消费——Composer 自己的清空链不会为这条重试跑。
+           重发的是**这一份** payload，不是重读控件状态：预算 / 项目 / 模型在失败后
+           可能已被改动，而「重试」的意思是再把失败那次发一遍。 */
+        const payload: StartSessionPayload = {
           task,
           auto_approve: true,
           ...ruleSignal,
@@ -948,7 +951,16 @@ export default function App() {
             totalTokens: budgetRunTokensDraft,
             deadlineAt: budgetRunDeadlineDraft,
           }),
-        });
+        };
+        /** 重发 `payload`。再失败时同一条回执仍带本函数（可继续重试）。 */
+        const resubmit = async (): Promise<boolean> => {
+          focusRun();
+          const resendFailure = await submitTask(payload, { onRetry: resubmit });
+          if (resendFailure !== null) return false;
+          composerRef.current?.acceptSubmitted(task, attachmentIds);
+          return true;
+        };
+        const failure = await submitTask(payload, { onRetry: resubmit });
         // 新会话创建失败 ⇒ 未受理（`submitTask` 返回失败文案；成功返回 null）
         // ——同一条「失败不清空」契约，不因走的是创建路径就丢文本。
         return failure === null;
@@ -957,27 +969,37 @@ export default function App() {
     [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
 
-  /** #1367（P0-3）：断网失败的重试动作 = 原样重发上一次 submit（既有 handleSubmit）。 */
+  /** #1367（P0-3）：条内「重试」入口。动作本身由失败回执携带
+   *  （`sendFailure.onRetry`，绑死失败那次的入参），这里只做在途闸门
+   *  （审查 P1-2）与「是否渲染按钮」的判定。 */
   const handleRetrySubmit = useCallback(() => {
-    const lastSubmit = lastSubmitRef.current;
-    if (lastSubmit === null) return;
-    void handleSubmit(
-      lastSubmit.task,
-      lastSubmit.rememberAsProceduralRule,
-      lastSubmit.attachmentIds,
-      lastSubmit.scope,
-    );
-  }, [handleSubmit]);
+    const retry = sendFailure?.onRetry;
+    if (retry === undefined || retryInFlightRef.current) return;
+    /* 同步闸（ref）而不是只靠 state：同一 tick 的第二次点击读不到刚 set 的
+       `retryPending`，而新会话路径下每一下都是一个 POST /api/sessions。 */
+    retryInFlightRef.current = true;
+    setRetryPending(true);
+    void Promise.resolve(retry()).finally(() => {
+      retryInFlightRef.current = false;
+      setRetryPending(false);
+    });
+  }, [sendFailure]);
 
   /** #1367：断网这一类改在对话区内联呈现（带重试）；其余错误保持原横幅。
    *  `sendFailure` 由 useSession 在**发送失败分支**写入（不是单槽 `error` 的
-   *  推断）⇒ 内联条的「重试」永远绑定刚刚那次发送，不会被「加载历史失败」之类
-   *  无关错误劫持去重发一条旧任务。 */
+   *  推断）⇒ 内联条只呈现这一次失败的原文，不会被「加载历史失败」之类无关错误
+   *  劫持。重试按钮只在这条回执确实带着动作时出现（非 Composer 入口不给按钮）。 */
   const submitFailure = useMemo(() => {
     if (sendFailure === null) return null;
     const copy = describeFailure(sendFailure.message, { retryable: sendFailure.retryable });
     return copy.kind === 'network' ? copy : null;
   }, [sendFailure]);
+
+  /** 内联条与全局横幅是**同一句**错误的两处呈现：只在原文一致时抑制横幅。
+   *  （审查 C-P2-2：原先按 `submitFailure === null` 抑制，窗口期内后到的无关错误
+   *  ——取消失败 / 恢复失败 / 投递失败——会被这条陈旧回执一起吞掉。） */
+  const bannerHiddenByInlineFailure =
+    submitFailure !== null && sendFailure !== null && error === sendFailure.message;
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
@@ -1766,7 +1788,7 @@ export default function App() {
             </div>
           )}
           {/* #1367：断网这一类已下沉到对话区内联条（带重试），不再重复打横幅。 */}
-          {error && submitFailure === null && <div className="app-error">{error}</div>}
+          {error && !bannerHiddenByInlineFailure && <div className="app-error">{error}</div>}
           {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
               （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
               原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
@@ -1994,16 +2016,20 @@ export default function App() {
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
                     supportsVision={currentModelSupportsVision}
-                    /* #1367（P0-3）：断网失败的内联条 + 条内重试（重发上一次 submit）。
-                       `submitFailure` 由 useMemo 持有，身份稳定，不破坏 memo。 */
+                    /* #1367（P0-3）：断网失败的内联条 + 条内重试。
+                       `submitFailure` 由 useMemo 持有，身份稳定，不破坏 memo。
+                       重试动作随失败回执走（`sendFailure.onRetry`）；没有动作的失败
+                       （续聊 / steer / 编辑轮次）只呈现不渲染按钮。 */
                     submitFailure={submitFailure}
-                    onRetrySubmit={handleRetrySubmit}
+                    onRetrySubmit={sendFailure?.onRetry === undefined ? undefined : handleRetrySubmit}
+                    retryPending={retryPending}
                     /* #1193 的 plan-stuck 横幅已带同一句失败原因 + 退出 plan 的
                        动作；内联条再报一次就是同一事实两份 UI。 */
                     suppressRunFailure={runFailedBeforePlan !== null
                       && runFailedBeforePlan.sessionId === selectedId}
                   />
                   <Composer
+                    ref={composerRef}
                     streaming={streaming}
                     /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
                     ownership={ownership}

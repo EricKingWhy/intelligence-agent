@@ -26,7 +26,6 @@ import { EventType, type AgentEvent, type ConversationState, type FailedDraft, t
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import {
-  SessionClaimTimeoutError,
   wsStreamResponse,
   discoverNewSessionId,
   sessionIdBaseline,
@@ -267,11 +266,20 @@ export function isUnknownModelError(message: string | null | undefined): boolean
  *  卡点 2）；后端原文只进折叠的 `detail`。 */
 export type FailureKind = 'auth' | 'model' | 'network' | 'server' | 'unknown';
 
-/** #1367：一次发送失败的回执。`retryable` 由**写入点**声明——只有「请求根本没
- *  被受理」的同步失败才能安全重发；已受理后的迟到失败重发会重复投递。 */
+/** #1367：一次发送失败的回执。
+ *
+ *  `retryable` 由**写入点**声明：只有「请求根本没被受理」的失败才能安全重发；
+ *  认定不了结局的（POST 已发出、响应丢失 / 已认领的迟到失败）一律 false——
+ *  重发会重复投递或再造一个会话。
+ *
+ *  `onRetry` 是**产生失败的那次动作**的重放闭包：调用方在发起时把它绑到本次入参
+ *  上（而不是某个共享的「上一次提交」槽位）。这样条内「重试」永远重发失败的那
+ *  一次，非 Composer 入口（steer / 编辑轮次 / 队列项）不提供它，只呈现不给按钮。
+ *  渲染判据是 `retryable && onRetry !== undefined`。 */
 export interface SendFailure {
   message: string;
   retryable: boolean;
+  onRetry?: () => Promise<boolean> | void;
 }
 
 export interface FailureCopy {
@@ -282,7 +290,8 @@ export interface FailureCopy {
   hint: string;
   /** 原始详情（折叠区展示，逐字保留事实）。 */
   detail: string;
-  /** 调用方是否提供了可用的重试动作（只影响 network 文案措辞）。 */
+  /** 本次失败是否真的会带出一个可用的重试动作：既影响 network 文案措辞，
+   *  **也**决定内联条是否渲染「重试」按钮。 */
   retryable: boolean;
 }
 
@@ -310,13 +319,38 @@ function stripLogPointer(text: string): string {
     .trim();
 }
 
+/** 后端 `run/failed` 的 reason 是**开集**（异常类名也会当码值传下来，见
+ *  `lib/projection.ts::projectRunFailed`）。已有稳定语义的翻成人话；其余不把
+ *  码值摊给用户（原文仍在折叠详情里）。 */
+const REASON_HUMAN: Record<string, string> = {
+  orphaned: '运行被中断（没有正常结束）',
+  cancelled: '运行已取消',
+  interrupted: '运行被中断',
+  process_restart: '运行被进程重启打断',
+  timeout: '模型响应超时',
+  APITimeoutError: '模型响应超时',
+  RateLimitError: '模型供应商限流',
+  model_error: '模型调用出错',
+};
+
+/** `运行失败（BadRequestError，HTTP 400）：…` 的模板前缀：括号里是异常类名与
+ *  HTTP 码。类名不进人话层（审查 P3），只在折叠详情里逐字保留。 */
+const RUN_FAILURE_TEMPLATE = /^运行失败（[^）]*）\s*[：:，,]?\s*/;
+
 export function describeFailure(
   raw: { reason?: string | null; message?: string | null } | string | null | undefined,
-  opts?: { retryable?: boolean },
+  opts?: {
+    retryable?: boolean;
+    /** 失败来源：`send` = 浏览器→后端（fetch 断网），`run` = 后端→模型供应商
+     *  （run 事件已送达浏览器，后端显然是活的）。两者的处方不同，不能共用一个
+     *  「断网」桶（审查 C-P2-3）。 */
+    source?: 'send' | 'run';
+  },
 ): FailureCopy {
   const reason = typeof raw === 'string' || raw === null || raw === undefined ? null : raw.reason ?? null;
   const detail = (typeof raw === 'string' ? raw : raw?.message ?? '').trim();
   const retryable = opts?.retryable === true;
+  const fromRun = opts?.source === 'run';
   const haystack = `${reason ?? ''} ${detail}`;
   const status = /\bHTTP\s+(\d{3})\b/i.exec(detail)?.[1] ?? null;
   const statusCode = status === null ? null : Number(status);
@@ -324,10 +358,12 @@ export function describeFailure(
   if (NETWORK_FAILURE_MARKERS.some((marker) => haystack.includes(marker))) {
     return {
       kind: 'network',
-      title: '连不上服务',
-      hint: retryable
-        ? '网络断了或后端没启动。检查网络后点重试。'
-        : '网络断了或后端没启动。检查网络后重新发送。',
+      title: fromRun ? '连不上模型服务' : '连不上服务',
+      hint: fromRun
+        ? '服务到模型供应商的连接不通，请检查供应商地址 / 网关配置后重新发送。'
+        : retryable
+          ? '网络断了或后端没启动。检查网络后点重试。'
+          : '网络断了或后端没启动。检查网络后重新发送。',
       detail,
       retryable,
     };
@@ -352,14 +388,25 @@ export function describeFailure(
   }
   if (
     reason === 'provider_model_not_found' ||
-    statusCode === 400 ||
-    statusCode === 404 ||
     /model.{0,4}not.{0,4}found|模型不存在/i.test(haystack)
   ) {
     return {
       kind: 'model',
       title: '这个模型名不存在',
       hint: '请检查 .env 的 MODEL_NAME，或在模型选择器里换一个模型。',
+      detail,
+      retryable: false,
+    };
+  }
+  // 裸 4xx 的未分类兜底：后端原文是「模型供应商拒绝了请求」，涵盖参数非法 /
+  // 上下文超限 / 词表拒绝等——**不等于**模型名不存在。给中性文案 + 原文详情，
+  // 不提供错误处方（审查 C-P2-4；票面「400 → MODEL_NAME」的表述收窄为
+  // 「带 `provider_model_not_found` 判据才算模型名问题」）。
+  if (statusCode === 400 || statusCode === 404) {
+    return {
+      kind: 'unknown',
+      title: `请求被供应商拒绝（HTTP ${statusCode}）`,
+      hint: '',
       detail,
       retryable: false,
     };
@@ -374,9 +421,25 @@ export function describeFailure(
     };
   }
   const human = stripLogPointer(detail.replace(ERROR_WRAPPER_PREFIX, ''));
+  /* 人话层不摊码值/异常类名（审查 P3）：带 `运行失败（X，HTTP n）：…` 模板的
+     原文只留「运行失败（HTTP n）：<原因句>」，括号里的类名留给折叠详情；
+     reason 开集里已知的几个翻成中文，未知的只落兜底「运行失败」。 */
+  const template = RUN_FAILURE_TEMPLATE.exec(human);
+  const statusLabel = statusCode === null ? null : `运行失败（HTTP ${statusCode}）`;
+  let title: string;
+  if (template !== null) {
+    const rest = human.slice(template[0].length).trim();
+    const label = statusLabel ?? '运行失败';
+    title = rest === '' ? label : `${label}：${rest}`;
+  } else if (human !== '') {
+    title = human;
+  } else {
+    const known = reason === null ? undefined : REASON_HUMAN[reason];
+    title = statusLabel ?? known ?? '运行失败';
+  }
   return {
     kind: 'unknown',
-    title: human || (reason ? `运行失败（${reason}）` : '运行失败'),
+    title,
     hint: '',
     detail,
     retryable: false,
@@ -1259,7 +1322,13 @@ export function useSession() {
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,
-      opts?: { ownError?: boolean; onWorktreeCreated?: (path: string) => void },
+      opts?: {
+        ownError?: boolean;
+        onWorktreeCreated?: (path: string) => void;
+        /** #1367：失败回执的「重试」动作——由**发起这次提交的入口**绑定本次入参
+         *  （见 `SendFailure.onRetry`）。不传 = 这条失败不给重试按钮。 */
+        onRetry?: () => Promise<boolean> | void;
+      },
     ): Promise<string | null> => {
       setError(null);
       setSendFailure(null);
@@ -1273,6 +1342,13 @@ export function useSession() {
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: null });
+      /** #1321 AC4 / #1367 审查 P1-1：POST 已发出、且「短窗内落定」没有给出结论
+       *  （= 已进入差分认领）之后，**任何**抛错都不能断言「请求没被受理」——
+       *  认领超时与 POST 的迟到网络错误都属这一类。只有在这里之前的失败
+       *  （短窗 4xx/422、或基线都读不到的降级路径）才允许给重试。
+       *  判据是流程位置，不是错误类型（`instanceof` 反推会把 `late.failure`
+       *  这条最危险的形态判成「可重发」）。 */
+      let claimOutcomeUnknown = false;
       try {
         // 交付层（EdgeOne / CloudStudio Gateway）会把整个 SSE 响应攒到**流结束**
         // 才下发（实测 `POST /api/sessions` 的响应头要 44.2s 才到 ≈ run 全长），
@@ -1324,6 +1400,10 @@ export function useSession() {
         // ⚠ 分工（#1148 双轴审查 P2）：`late.failure` **只**供下面 `discoverNewSessionId`
         // 抛错时取用（认领超时的兜底原因）；认领**成功**之后的 POST 失败不走它，走
         // 下方 `started.catch` 的回填通道。两条通道互斥，别把 `late.failure` 当活代码读。
+        //
+        // #1367 审查 P1-1：从这里起 POST 已在途、结局只能靠认领确认 ⇒ 任何失败都
+        // 不给重试（见 `claimOutcomeUnknown` 注释）。
+        claimOutcomeUnknown = true;
         const late = { failure: null as Error | null };
         started.catch((e) => {
           late.failure = e instanceof Error ? e : new Error(String(e));
@@ -1382,14 +1462,23 @@ export function useSession() {
         // 认出新会话」，而 POST 已经发出、后端通常已经落盘（票面实测：页面报
         // 失败时会话其实已在跑）。把它渲染成「提交失败」会让用户重试，从而
         // 造出第二个会话。这里改用可行动提示，并保留输入框原文（返回非 null）。
-        const claimTimeout = e instanceof SessionClaimTimeoutError;
-        const message = claimTimeout
-          ? `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`
+        //
+        // #1367 审查 P1-1：`claimOutcomeUnknown` 把同一条守卫扩到**所有**认领期
+        // 失败——尤其是「POST 迟到网络错误」（`late.failure`），它此前抛的是普通
+        // Error，被 `instanceof SessionClaimTimeoutError` 判成可重发，正是最危险的
+        // 「服务端很可能已落盘」形态。结局不明一律不可重试；能证明没受理的
+        // （短窗 4xx / 降级路径的 POST 失败）才给重试动作。
+        const outcomeUnknown = claimOutcomeUnknown;
+        const message = outcomeUnknown
+          ? `提交可能已成功，但未接上会话：${(e as Error).message}。请刷新页面后从左侧会话列表继续。`
           : `提交失败：${(e as Error).message}`;
         if (!opts?.ownError) {
           setError(message);
-          // 认领超时不给「重发」（POST 可能已落盘，重发会造第二个会话）。
-          setSendFailure({ message, retryable: !claimTimeout });
+          setSendFailure({
+            message,
+            retryable: !outcomeUnknown,
+            ...(outcomeUnknown || opts?.onRetry === undefined ? {} : { onRetry: opts.onRetry }),
+          });
         }
         return message;
       }
@@ -1855,7 +1944,12 @@ export function useSession() {
            契约当场自相矛盾。 */
         const message = `续聊失败：${(e as Error).message}`;
         setError(message);
-        setSendFailure({ message, retryable: true });
+        /* #1367 审查 C-P2-1：**不给重试**。窗内 fetch reject 只证明「响应没回来」，
+           不能证明请求没被受理——服务端可能已 launched/queued，重发会重复投递
+           （与 composer 保留文本形成第二条重发通道）。票面的「断网重试」由新建
+           会话路径（`submitTask` 的降级支）满足；这里只呈现原因，用户按 Enter
+           重新发送时由自己确认。 */
+        setSendFailure({ message, retryable: false });
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
@@ -2491,3 +2585,6 @@ export function useSession() {
     resyncAfterDecision,
   };
 }
+
+/** hook 的返回值契约（测试替身与消费者按名引用，不各自算 `ReturnType<typeof …>`）。 */
+export type SessionApi = ReturnType<typeof useSession>;

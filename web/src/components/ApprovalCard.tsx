@@ -228,7 +228,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
       )}
       {error && !invalid && (
         <div className="approval-error approval-error-inline" role="alert">
-          <AlertTriangle size={14} className="approval-error-icon" aria-hidden />
+          <AlertTriangle size={14} className="approval-error-icon" aria-hidden="true" />
           <span className="approval-error-text">{error}</span>
           {lastAttempt !== null && (
             <button

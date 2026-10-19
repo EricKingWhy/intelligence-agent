@@ -19,20 +19,23 @@ describe('describeFailure — 401 与 400 可区分', () => {
     expect(copy.detail).toContain('HTTP 401'); // 原始事实逐字保留
   });
 
-  it('400 → 模型名不存在 + 指向 MODEL_NAME', () => {
+  it('400 → 中性「请求被供应商拒绝」+ 原文详情（不硬塞 MODEL_NAME 处方）', () => {
+    // 审查 C-P2-4：裸 HTTP 400 涵盖参数非法 / 上下文超限 / 词表拒绝等，不等于
+    // 模型名不存在；只有 `provider_model_not_found`（或文案明说）才走模型分支。
     const copy = describeFailure(unclassified(400));
-    expect(copy.kind).toBe('model');
-    expect(copy.title).toContain('模型名不存在');
-    expect(copy.hint).toContain('MODEL_NAME');
-    expect(copy.hint).toContain('模型选择器');
+    expect(copy.kind).toBe('unknown');
+    expect(copy.title).toContain('请求被供应商拒绝');
+    expect(copy.title).toContain('400');
+    expect(copy.hint).toBe('');
+    expect(copy.detail).toContain('HTTP 400');
   });
 
   it('同一句兜底文案下，401 与 400 的呈现层结论必须不同', () => {
     const auth = describeFailure(unclassified(401));
-    const model = describeFailure(unclassified(400));
-    expect(auth.title).not.toBe(model.title);
+    const rejected = describeFailure(unclassified(400));
+    expect(auth.title).not.toBe(rejected.title);
     expect(auth.title).not.toContain('模型名');
-    expect(model.title).not.toContain('密钥');
+    expect(rejected.title).not.toContain('密钥');
   });
 
   it('后端分类命中的 reason 走同一条分层（不依赖 HTTP 字样）', () => {
@@ -72,6 +75,20 @@ describe('describeFailure — 断网', () => {
     });
     expect(copy.kind).toBe('network');
   });
+
+  it('run 来源的断网指「后端→供应商」，不再劝用户检查自己网络/后端启动（审查 C-P2-3）', () => {
+    const copy = describeFailure(
+      {
+        reason: 'APIConnectionError',
+        message: '运行失败（APIConnectionError）：无法连接模型供应商（网络或网关不可达）',
+      },
+      { source: 'run' },
+    );
+    expect(copy.kind).toBe('network');
+    expect(copy.title).toContain('模型服务');
+    expect(copy.hint).toContain('供应商');
+    expect(copy.hint).not.toContain('后端没启动');
+  });
 });
 
 describe('describeFailure — 未知 / 服务端错误', () => {
@@ -87,6 +104,22 @@ describe('describeFailure — 未知 / 服务端错误', () => {
     const copy = describeFailure(unclassified(503));
     expect(copy.kind).toBe('server');
     expect(copy.title).toContain('503');
+  });
+
+  it('未知分支不把异常类名 / reason 码值摊进 title（审查 P3）', () => {
+    const copy = describeFailure({
+      reason: 'BadRequestError',
+      message: '运行失败（BadRequestError，HTTP 418）：请求参数非法',
+    });
+    expect(copy.title).toBe('运行失败（HTTP 418）：请求参数非法');
+    expect(copy.title).not.toContain('BadRequestError');
+    expect(copy.detail).toContain('BadRequestError'); // 原文逐字留在折叠详情
+  });
+
+  it('已知 reason（orphaned 等）翻成人话，未知码值只落「运行失败」', () => {
+    expect(describeFailure({ reason: 'orphaned', message: '' }).title).not.toContain('orphaned');
+    expect(describeFailure({ reason: 'orphaned', message: '' }).title).toContain('中断');
+    expect(describeFailure({ reason: 'SomeWeirdCode', message: '' }).title).toBe('运行失败');
   });
 
   it('所有分支的 title/hint 都不出现「后端日志」', () => {

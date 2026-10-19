@@ -6,7 +6,7 @@
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { forwardRef, memo, useCallback, useEffect, useId, useImperativeHandle, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, ImagePlus, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
 import type { FailedDraft, PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
@@ -262,9 +262,19 @@ interface Props {
    *  缺席 = 不渲染按钮（重启后手动投递是 ADR 明确的前端职责）。 */
   onFlush?: () => void;
 }
+/** #1367 审查 P1-3：条内「重试」不经 Composer 的 submit 链，受理成功后的草稿
+ *  消费必须由同一个实现完成——否则重试成功了、原文还留在输入框，再按 Enter 就是
+ *  重复投递。这里暴露 Composer 自己的「定位后切除」规则（与 `submit` 的 `accept`
+ *  同一份代码），由 App 在重试受理后调用。 */
+export interface ComposerHandle {
+  /** @param text 失败/重试那次提交的正文（`trimmed`，用于定位）。
+   *  @param attachmentIds 那次提交带出的**已就绪**附件引用（一并清草稿）。 */
+  acceptSubmitted(text: string, attachmentIds: readonly string[]): void;
+}
+
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
 // 输入框不随对话区每个 delta 重渲染。
-export const Composer = memo(function Composer({
+export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer({
   streaming,
   approvalPending = false,
   constraintInputPending = false,
@@ -306,7 +316,7 @@ export const Composer = memo(function Composer({
   onCancelItem,
   onEditItem,
   onFlush,
-}: Props) {
+}: Props, ref) {
   const [value, setValue] = useState('');
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** #1191：登记作用域（勾选「作为可复用规则」后可选；默认本会话）。 */
@@ -617,6 +627,37 @@ export const Composer = memo(function Composer({
     setValue((current) => (current.trim() === '' ? failedDraft.text : current));
   }, [failedDraft]);
 
+  /** #1367 审查 P1-3：受理后消费草稿的**唯一实现**（Composer 自身 submit 与
+   *  条内「重试」共用）。只清**本次提交的那段**（#1029 P3）：清空挪到 ack 之后 ⇒
+   *  在途期间输入框是活的，用户接着打的字不能被这一刀连带抹掉。
+   *
+   *  判据是**定位后切除**，不是前缀比对：提交的是 `trimmed`，而框里是**原始**
+   *  文本——首尾带空白 / 多行（粘贴任务、先回车再打字）时 `startsWith` 必假，
+   *  受理成功后输入框永不清空（独立审查探针实证的回归）。`trimStart` 对齐后
+   *  `indexOf` 定位，切掉那一段、原样保留两侧。
+   *  定位不到（在途期间用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不
+   *  清掉用户没提交的内容。 */
+  const consumeSubmitted = (submitted: string, ids: readonly string[]) => {
+    setValue((v) => {
+      const lead = v.length - v.trimStart().length;
+      const at = v.trimStart().indexOf(submitted);
+      if (at === -1) return v;
+      const rest = v.slice(0, lead + at) + v.slice(lead + at + submitted.length);
+      // 剩下的只有空白（首尾空白 / 多行粘贴的常态）⇒ 就是「清空」，不留残渣。
+      return rest.trim() === '' ? '' : rest;
+    });
+    setRememberAsProceduralRule(false);
+    // #1191：受理后复位作用域选择，下一次登记从默认「本会话」起。
+    setScope('session');
+    // 已进请求的那些草稿清掉。`ids` 只含**已就绪**的引用，在途/失败的草稿没进
+    // 请求，因此仍留在栏里，等用户重试或下一轮再带。
+    attachments.clearSent(ids);
+  };
+
+  // 条内「重试」的草稿消费入口（见 `ComposerHandle`）。每次渲染重建即可：
+  // 它只是把最新一份 `consumeSubmitted` 交出去，没有自己的状态。
+  useImperativeHandle(ref, () => ({ acceptSubmitted: consumeSubmitted }));
+
   const submit = (mode: 'queue' | 'steer') => {
     /* 提交那一刻的**原始**文本（含首尾空白 / 多行缩进）：未受理时的回填用它，
        逐字还给用户；`trimmed` 只用于上线内容与受理侧的切除定位（#1205）。 */
@@ -698,31 +739,6 @@ export const Composer = memo(function Composer({
         : onSubmit(trimmed, rememberAsProceduralRule, attachmentIds, scope);
     sendingRef.current = true;
     setSending(true);
-    /** 受理落定后的清空。**只在受理侧调用**（`false` 与抛错都不调）。 */
-    const accept = () => {
-      /* 只清**本次提交的那段**（#1029 P3）：清空挪到 ack 之后 ⇒ 在途期间输入框是
-         活的，用户接着打的字不能被这一刀连带抹掉。
-         判据是**定位后切除**，不是前缀比对：提交的是 `trimmed`，而框里是**原始**
-         文本——首尾带空白 / 多行（粘贴任务、先回车再打字）时 `startsWith` 必假，
-         受理成功后输入框永不清空（独立审查探针实证的回归）。`trimStart` 对齐后
-         `indexOf` 定位，切掉那一段、原样保留两侧。
-         定位不到（在途期间用户把提交的那段删了/改了）⇒ 原样不动——宁可不清，也不
-         清掉用户没提交的内容（`sendingRef` 已挡住重复提交，留着不会造成重复发送）。 */
-      setValue((v) => {
-        const lead = v.length - v.trimStart().length;
-        const at = v.trimStart().indexOf(trimmed);
-        if (at === -1) return v;
-        const rest = v.slice(0, lead + at) + v.slice(lead + at + trimmed.length);
-        // 剩下的只有空白（首尾空白 / 多行粘贴的常态）⇒ 就是「清空」，不留残渣。
-        return rest.trim() === '' ? '' : rest;
-      });
-      setRememberAsProceduralRule(false);
-      // #1191：受理后复位作用域选择，下一次登记从默认「本会话」起。
-      setScope('session');
-      // 已进请求的那些草稿清掉。`attachmentIds` 只含**已就绪**的引用，在途/失败的
-      // 草稿没进请求，因此仍留在栏里，等用户重试或下一轮再带。
-      attachments.clearSent(attachmentIds);
-    };
     /** 未受理时的回填（#1205）。**只在输入框为空时**回填本次提交的**原文**（`raw`，
         不是 `trimmed`——首尾空白/多行缩进在"用户已清空"这条路上同样不可再生，而框没被
         清空那条路本来就是逐字原文，两条恢复路径的保真度必须一致）：
@@ -738,7 +754,7 @@ export const Composer = memo(function Composer({
       .then(
         (ok) => {
           // `undefined`（旧签名）/ `true` = 受理；只有显式 `false` 才保留。
-          if (ok !== false) accept();
+          if (ok !== false) consumeSubmitted(trimmed, attachmentIds);
           else restoreSubmitted();
         },
         /* 发送口自己抛错 = **未受理**（正常路径由 App 收口成 `false`，不重复报错）。
@@ -1680,4 +1696,4 @@ export const Composer = memo(function Composer({
       </div>
     </div>
   );
-});
+}));
