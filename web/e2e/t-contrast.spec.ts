@@ -546,7 +546,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.session-item').first().click();
 
     const pulse = page.locator('.run-pulse');
-    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toContainText('等你决定');
     await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
 
     const m = await measure(page, '.run-pulse.pulse-awaiting-decision');
@@ -679,7 +679,7 @@ for (const theme of ['dark', 'light'] as const) {
 
     const banner = page.locator('.app-error[role="alert"]');
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText('分叉失败');
+    await expect(banner).toContainText('另开会话失败');
     const m = await measure(page, '.app-error[role="alert"]');
     const ratio = contrast(m.color, m.bg);
     // eslint-disable-next-line no-console
@@ -1216,7 +1216,7 @@ for (const theme of ['dark', 'light'] as const) {
           reason: 'budget_exhausted', trigger_dimension: 'run.max_total_tokens', budget_version: 1,
           consumed: { agent_turns: 2, total_tokens: 1234 },
           limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-          resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+          resume_requirements: ['抬高字数上限后继续这次任务'],
         },
       },
     ];
@@ -1285,7 +1285,7 @@ for (const theme of ['dark', 'light'] as const) {
     await openContrastSession(page, theme, sid, frames, '触发回退');
     /* .model-fallback-val 在 Inspector 的 Overview（id=chat）页 MODEL 区块里；默认 tab 是
        timeline，先切页再量（否则元素不在 DOM，属夹具问题而非样式问题）。 */
-    await page.getByRole('tablist', { name: 'Inspector 视图' }).getByRole('tab', { name: 'Overview' }).click();
+    await page.getByRole('tablist', { name: '运行详情视图' }).getByRole('tab', { name: '概览' }).click();
     await expectEachContrast(page, theme, ['.model-fallback-val']);
   });
 
@@ -1366,8 +1366,8 @@ for (const theme of ['dark', 'light'] as const) {
     await page.goto('/');
     await page.locator('.session-item').first().click();
     await page
-      .getByRole('tablist', { name: 'Inspector 视图' })
-      .getByRole('tab', { name: 'Constraints' })
+      .getByRole('tablist', { name: '运行详情视图' })
+      .getByRole('tab', { name: '我的要求' })
       .click();
     await expect(page.getByTestId('constraints-panel')).toBeVisible();
     await expectEachContrast(page, theme, ['.cn-value', '.cn-type', '.cn-meta', '.cn-pill', '.cn-revoke']);

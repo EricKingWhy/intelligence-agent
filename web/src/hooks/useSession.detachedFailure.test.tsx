@@ -167,7 +167,7 @@ describe('#1148 路径 A — sendFollowUp 窗外落定的失败', () => {
 
     expect(captured.hook!.failedDraft?.text).toBe('窗外失败也必须留住');
     // 两条通道各司其职：人话横幅 + 清单进裁决面板（既有语义不变）。
-    expect(captured.hook!.error).toContain('裁决');
+    expect(captured.hook!.error).toContain('需要你来决定');
     expect(captured.hook!.recoverState.pendingDecisions).toEqual(PENDING);
   });
 

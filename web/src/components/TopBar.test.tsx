@@ -91,10 +91,10 @@ const bar = (conversation: ConversationState | null) =>
   renderToStaticMarkup(createElement(TopBar, { ...baseProps, conversation }));
 
 describe('TopBar 预算徽标（#537）', () => {
-  it('设了 tokens ceiling → 「28000 / 500000 tok」徽标在场（同源文本，未配维不出现）', () => {
+  it('设了 tokens ceiling → 「28000 / 500000 字」徽标在场（同源文本，未配维不出现）', () => {
     const out = bar(conversationWithBudget(BUDGET_ECHO, 28000));
     expect(out).toContain('budget-badge');
-    expect(out).toContain('28000 / 500000 tok');
+    expect(out).toContain('28000 / 500000 字');
     expect(out).not.toContain('turns');
     expect(out).not.toContain('req');
     expect(out).not.toContain('$');
@@ -114,7 +114,7 @@ describe('TopBar 预算徽标（#537）', () => {
 
   it('100% 到顶 → 徽标照常渲染（PausedPanel 接管是另一条链路，TopBar 不崩不吞）', () => {
     const out = bar(conversationWithBudget(BUDGET_ECHO, 500000));
-    expect(out).toContain('500000 / 500000 tok');
+    expect(out).toContain('500000 / 500000 字');
     expect(out).toContain('budget-badge--warning');
   });
 });

@@ -160,7 +160,7 @@ describe('StepDetail 头标徽标 — #1106 聚焦 run 接线', () => {
     expect(query('.detail-profile-badge')?.textContent).toContain('main');
   });
 
-  it('徽标 title 如实标注取值范围：聚焦→「聚焦 run 的生效档位」；无聚焦→「最近一个 run 的生效档位」', () => {
+  it('徽标 title 如实标注取值范围：聚焦→「聚焦任务的生效档位」；无聚焦→「最近一次任务的生效档位」', () => {
     const { state, runAStarted } = buildMultiRunConversation();
     render(
       <StepDetail
@@ -174,8 +174,8 @@ describe('StepDetail 头标徽标 — #1106 聚焦 run 接线', () => {
         panel={PANEL}
       />,
     );
-    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('聚焦 run 的生效档位');
-    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('聚焦 run 请求侧选中的推理档位');
+    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('聚焦任务的生效档位');
+    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('聚焦任务请求侧选中的推理档位');
 
     act(() => root!.render(
       <StepDetail
@@ -189,8 +189,8 @@ describe('StepDetail 头标徽标 — #1106 聚焦 run 接线', () => {
         panel={PANEL}
       />,
     ));
-    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('最近一个 run 的生效档位');
-    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('最近一个 run 请求侧选中的推理档位');
+    expect(query('.detail-profile-badge')?.getAttribute('title')).toContain('最近一次任务的生效档位');
+    expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('最近一次任务请求侧选中的推理档位');
   });
 
   it('聚焦事件信封 run_id 为空串 → 视为无聚焦，回退「取最后值」（防御一致性，与 tool 路径同口径）', () => {

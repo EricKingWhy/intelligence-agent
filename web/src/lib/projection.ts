@@ -405,7 +405,7 @@ function unknownSummary(_event: AgentEvent): string {
 
 /** UI-04：forked / 审批族的单行语义（此前落「未知事件」）。 */
 function summarizeForked(_event: AgentEvent): string {
-  return '已分叉';
+  return '已另开一条';
 }
 
 function summarizeApprovalRequested(event: AgentEvent): string {
@@ -465,7 +465,7 @@ function summarizeSuperseded(event: AgentEvent): string {
 function summarizeError(event: AgentEvent): string {
   const message = event.data.message;
   const detail = typeof message === 'string' ? message.trim() : '';
-  return detail ? `运行失败 · ${detail}` : '运行失败';
+  return detail ? `任务失败 · ${detail}` : '任务失败';
 }
 
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
@@ -1651,7 +1651,7 @@ function summarizeModelCompleted(event: AgentEvent): string {
   // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
   // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
   const tokens =
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null;
   if (model || tokens) {
     return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
@@ -1678,7 +1678,7 @@ function summarizeArtifactCreated(event: AgentEvent): string {
 
 function summarizeContextCompacted(event: AgentEvent): string {
   const d = event.data;
-  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
+  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} 字`;
 }
 
 function summarizeOperationReconcileRequired(event: AgentEvent): string {
@@ -1723,7 +1723,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');
@@ -1743,7 +1743,7 @@ function summarizeReasoningInterrupted(): string {
 
 function summarizeRunInterrupted(event: AgentEvent): string {
   const step = event.step_id;
-  return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
+  return step !== null && step !== undefined ? `第 ${step} 步中断` : '任务中断';
 }
 
 /** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
@@ -1771,14 +1771,14 @@ function summarizeRunPaused(event: AgentEvent): string {
     const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
     const ceiling = info.run_limits?.tool_call_limits?.[tool];
     return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
-      ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
+      ceiling === undefined ? '无上限' : `上限 ${ceiling}`
     }`;
   }
   if (isDeadlinePause(info)) {
     const instant = deadlineInstant(info);
     return `${dimension} · 截止 ${instant ?? 'unavailable'}`;
   }
-  const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
+  const ceiling = info.run_limit === null ? '无上限' : String(info.run_limit);
   return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;
 }
 
@@ -1811,10 +1811,10 @@ function summarizeModelChanged(event: AgentEvent): string {
 // #1192：委派约束继承快照的单行语义（子会话事件流的独立审计事件）。
 function summarizeConstraintInheritance(event: AgentEvent): string {
   const d = event.data as Record<string, unknown>;
-  if (d.omit_constraints === true) return '干净启动：不继承任何约束';
+  if (d.omit_constraints === true) return '干净启动：不沿用任何要求';
   const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
   const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
-  return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;
+  return `沿用 ${inherited} 条 · 未沿用 ${notInherited} 条`;
 }
 
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
@@ -2466,7 +2466,7 @@ export function deriveRunFailedBeforePlan(events: AgentEvent[]): {
       const hint = e.data.hint;
       return {
         message:
-          typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
+          typeof message === 'string' && message ? message : '任务失败（原因见后端日志）',
         hint: typeof hint === 'string' ? hint : '',
       };
     }

@@ -62,12 +62,12 @@ const TAB_ICONS: Record<Tab, typeof ListTree> = {
 };
 
 const TABS: readonly { id: Tab; label: string }[] = [
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'chat', label: 'Overview' },
-  { id: 'changes', label: 'Changes' },
-  { id: 'terminal', label: 'Terminal' },
-  { id: 'artifacts', label: 'Artifacts' },
-  { id: 'constraints', label: 'Constraints' },
+  { id: 'timeline', label: '时间线' },
+  { id: 'chat', label: '概览' },
+  { id: 'changes', label: '变更' },
+  { id: 'terminal', label: '终端' },
+  { id: 'artifacts', label: '产出文件' },
+  { id: 'constraints', label: '我的要求' },
 ];
 
 // C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
@@ -267,8 +267,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     return (
       <aside className="step-detail" data-panel="inspector">
         <div className="detail-header">
-          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话 Run 视图">
-            <ArrowLeft size={14} /> Run
+          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话的运行详情">
+            <ArrowLeft size={14} /> 返回
           </button>
           <span className="panel-label">子会话 · {focus.target || '?'}</span>
           <span className="detail-run-id mono num" title={`child session ${focus.childSessionId}`}>
@@ -408,7 +408,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         className="detail-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="调整 Inspector 宽度"
+        aria-label="调整运行详情宽度"
         aria-valuenow={panel.width}
         aria-valuemin={INSPECTOR_MIN_W}
         aria-valuemax={INSPECTOR_MAX_W}
@@ -421,7 +421,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         onKeyDown={onResizeKeyDown}
       />
       <div className="detail-header">
-        <span className="panel-label">Run Inspector</span>
+        <span className="panel-label">运行详情</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
         {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
             run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
@@ -430,8 +430,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           className="detail-profile-badge mono num"
           title={
             focusedRunId !== null
-              ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
-              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一个 run 的生效档位）`
+              ? `agent_profile: ${agentProfile ?? '未知（聚焦任务未携带）'}（聚焦任务的生效档位）`
+              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一次任务的生效档位）`
           }
         >
           {agentProfile ?? '档位未知'}
@@ -444,8 +444,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             className="detail-effort-badge mono num"
             title={
               focusedRunId !== null
-                ? `reasoning_effort: ${reasoningEffort}（聚焦 run 请求侧选中的推理档位）`
-                : `reasoning_effort: ${reasoningEffort}（最近一个 run 请求侧选中的推理档位）`
+                ? `reasoning_effort: ${reasoningEffort}（聚焦任务请求侧选中的推理档位）`
+                : `reasoning_effort: ${reasoningEffort}（最近一次任务请求侧选中的推理档位）`
             }
           >
             推理 · {reasoningEffort}
@@ -458,9 +458,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         {conversation.events.length > 0 && (
           <span
             className="detail-run-id mono num"
-            title={`runs: ${runIdList.join(', ')}`}
+            title={`任务：${runIdList.join(', ')}`}
           >
-            {runIdList.length} runs · {conversation.events.length} 事件
+            共 {runIdList.length} 轮 · {conversation.events.length} 事件
           </span>
         )}
         {/* #183 AC4/AC5/AC7：钉住 / 整页 / 关闭。三个都是键盘可达的按钮，开关类用
@@ -494,7 +494,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           <button
             type="button"
             className="detail-ctrl"
-            aria-label="关闭 Inspector"
+            aria-label="关闭运行详情"
             onClick={() => onPanelAction({ type: 'close' })}
             title="关闭（Esc）"
           >
@@ -503,7 +503,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         </span>
       </div>
 
-      <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
+      <div className="detail-tabs" role="tablist" aria-label="运行详情视图">
         {TABS.map((t) => {
           const Icon = TAB_ICONS[t.id];
           /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
@@ -665,10 +665,10 @@ export function ChatTab({
     <>
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={14} /> RUN
+          <Hash size={14} /> 任务
         </div>
         <div className="detail-row">
-          <span className="detail-key">run</span>
+          <span className="detail-key">任务</span>
           <code className="detail-val detail-val-mono">{conversation.run_id ?? '—'}</code>
         </div>
         <div className="detail-row">
@@ -710,7 +710,7 @@ export function ChatTab({
             </div>
           )}
         <div className="detail-row">
-          <span className="detail-key">轮次</span>
+          <span className="detail-key">轮数</span>
           <span className="detail-val">{conversation.turns.length}</span>
         </div>
         {runStart && (
@@ -724,7 +724,7 @@ export function ChatTab({
           <span className="detail-val">{runDuration ?? '—'}</span>
         </div>
         <div className="detail-row">
-          <span className="detail-key">tokens</span>
+          <span className="detail-key">字数</span>
           <span className="detail-val num">
             {conversation.usage_total && conversation.usage_total.total_tokens !== null
               ? conversation.usage_total.total_tokens.toLocaleString()
@@ -736,7 +736,7 @@ export function ChatTab({
             trace_id 有值但 trace_url 缺 → 纯 mono code（可复制，手动粘到 Langfuse 搜索）；
             两者都 null（Langfuse 未启用）→「未追踪」灰字（预期降级非故障）。 */}
         <div className="detail-row">
-          <span className="detail-key">Trace</span>
+          <span className="detail-key">追踪</span>
           {conversation.trace_id ? (
             conversation.trace_url ? (
               <a
@@ -819,11 +819,11 @@ export function ChatTab({
           {conversation.compactions.map((c, i) => (
             <div key={i} className="detail-compaction-row">
               <div className="detail-row">
-                <span className="detail-key">压缩轮次</span>
+                <span className="detail-key">精简轮数</span>
                 <span className="detail-val">{c.compacted_turn_count}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">Token 估算</span>
+                <span className="detail-key">字数估算</span>
                 <span className="detail-val">{c.token_estimate.toLocaleString()}</span>
               </div>
               {c.fallback_used && (
@@ -839,7 +839,7 @@ export function ChatTab({
       {conversation.reconcile_queue.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <AlertTriangle size={14} /> 需人工裁决
+            <AlertTriangle size={14} /> 需要你来决定
           </div>
           {conversation.reconcile_queue.map((r, i) => (
             <div key={i} className="detail-reconcile-row">
@@ -924,7 +924,7 @@ export function ChatTab({
               <span className="detail-key">请求模型</span>
               <span
                 className="detail-val detail-val-mono"
-                title="本轮请求侧的模型标识：run/started 携带的 model（持久事件）= 装配给 provider 的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
+                title="本轮请求侧的模型标识：任务开始事件携带的 model（持久事件）= 装配给模型服务商的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
               >
                 {conversation.requested_model}
               </span>
@@ -943,7 +943,7 @@ export function ChatTab({
             <span className="detail-key">用量</span>
             <span className="detail-val">
               {conversation.usage_total
-                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} tok（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
+                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} 字（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
                 : '—'}
             </span>
           </div>
@@ -1027,7 +1027,7 @@ function PermissionSection({
         ),
       )}
       <div className="detail-row">
-        <span className="detail-key">已裁决</span>
+        <span className="detail-key">已处理</span>
         <span className={`detail-val${view.decisions.length === 0 ? ' detail-val-muted' : ''}`}>
           {view.decisionsLabel}
         </span>
@@ -1199,9 +1199,9 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
           <Fragment key={g.start}>
             <div
               className="tl-run-header"
-              title={g.runId ? `run ${g.runId}` : '会话开场（无 run 归属）'}
+              title={g.runId ? `任务 ${g.runId}` : '会话开场（不属于任何一次任务）'}
             >
-              <span className="tl-run-name">{g.runId ? `Run ${g.ordinal}` : '会话'}</span>
+              <span className="tl-run-name">{g.runId ? `第 ${g.ordinal} 轮执行` : '会话'}</span>
               {g.runId && (
                 <span className={`run-badge run-badge-${g.status}`}>
                   {RUN_GROUP_STATUS_LABEL[g.status]}
@@ -1391,7 +1391,7 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
   const hiddenArtifacts = Math.max(0, artifacts.length - artifactWindow);
   const visibleArtifacts = hiddenArtifacts > 0 ? artifacts.slice(hiddenArtifacts) : artifacts;
   if (artifacts.length === 0) {
-    return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
+    return <TabEmpty hint="本次会话没有产出文件。" icon={Package} />;
   }
   return (
     <>
@@ -1414,7 +1414,7 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
             <FileCheck2 size={14} /> {t.name}
           </div>
           <div className="detail-row">
-            <span className="detail-key">ID</span>
+            <span className="detail-key">编号</span>
             <code className="detail-val detail-val-mono">{t.artifact!.artifact_id.slice(0, 16)}</code>
           </div>
           {/* 元数据可空（AC5）：缺了就说"未知"，不拿默认值冒充。
@@ -1468,10 +1468,10 @@ function EventInspector({ focus }: { focus: EventFocus }) {
   const rawJson = JSON.stringify(event, null, 2);
 
   const tabs: readonly { id: EventIoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    { id: 'output', label: 'Output' },
-    { id: 'raw', label: 'Raw' },
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    { id: 'output', label: '输出' },
+    { id: 'raw', label: '原始' },
   ];
 
   return (
@@ -1498,32 +1498,32 @@ function EventInspector({ focus }: { focus: EventFocus }) {
           </div>
           {event.seq !== null && (
             <div className="detail-row">
-              <span className="detail-key">seq</span>
+              <span className="detail-key">序号</span>
               <span className="detail-val detail-val-mono num">{event.seq}</span>
             </div>
           )}
           {event.time && (
             <div className="detail-row">
-              <span className="detail-key">time</span>
+              <span className="detail-key">时间</span>
               <span className="detail-val detail-val-mono">{event.time}</span>
             </div>
           )}
           {/* 宽松判空（语义见 formatEventTooltip 文档）：缺失/null 都不渲染 step 行。 */}
           {event.step_id != null && (
             <div className="detail-row">
-              <span className="detail-key">step</span>
+              <span className="detail-key">步骤</span>
               <span className="detail-val num">{event.step_id}</span>
             </div>
           )}
           {event.run_id && (
             <div className="detail-row">
-              <span className="detail-key">run</span>
+              <span className="detail-key">任务</span>
               <span className="detail-val detail-val-mono">{event.run_id.slice(0, 16)}</span>
             </div>
           )}
           {event.event_id && (
             <div className="detail-row">
-              <span className="detail-key">event_id</span>
+              <span className="detail-key">事件编号</span>
               <span className="detail-val detail-val-mono">{event.event_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1531,7 +1531,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'input' && (
         <div className="detail-section">
-          <div className="detail-section-title">Input (data)</div>
+          <div className="detail-section-title">输入数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1542,7 +1542,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'output' && (
         <div className="detail-section">
-          <div className="detail-section-title">Output (data)</div>
+          <div className="detail-section-title">输出数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1553,9 +1553,9 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'raw' && (
         <div className="detail-section">
-          <div className="detail-section-title">Raw</div>
+          <div className="detail-section-title">原始</div>
           <div className="detail-code-wrap">
-            <CopyButton text={rawJson} label="复制 Raw" />
+            <CopyButton text={rawJson} label="复制原始" />
             <div className="detail-json">
               <JsonTree value={event} />
             </div>
@@ -1597,10 +1597,10 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const [wantTab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'overview');
 
   const tabs: readonly { id: IoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
-    ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    ...(hasOutput ? [{ id: 'output', label: '输出' } as const] : []),
+    ...(hasRaw ? [{ id: 'raw', label: '原始' } as const] : []),
   ];
   /* 渲染期收窄到仍然存在的段（同 #182 `resolveActiveTab` 的口径）：选中项在清单里
      移动时这个组件实例**不重建**（AC1），于是 `useState` 的初始值会留在上一个工具
@@ -1637,20 +1637,20 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
       {tab === 'overview' && (
         <div className="detail-overview">
           <div className="detail-row">
-            <span className="detail-key">tool</span>
+            <span className="detail-key">工具</span>
             <span className="detail-val detail-val-mono">{tool.name}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-key">tool_call_id</span>
+            <span className="detail-key">调用编号</span>
             <span className="detail-val detail-val-mono">{tool.tool_call_id.slice(0, 16)}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-key">status</span>
+            <span className="detail-key">状态</span>
             <span className="detail-val detail-val-tag">{tool.status}</span>
           </div>
           {tool.started_at && (
             <div className="detail-row">
-              <span className="detail-key">started</span>
+              <span className="detail-key">开始时间</span>
               <span className="detail-val detail-val-mono">{tool.started_at}</span>
             </div>
           )}
@@ -1662,7 +1662,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           )}
           {tool.artifact && (
             <div className="detail-row">
-              <span className="detail-key">artifact</span>
+              <span className="detail-key">产出文件</span>
               <span className="detail-val detail-val-mono">{tool.artifact.artifact_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1702,7 +1702,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_call && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/call 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw（tool/call）" />
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制原始（tool/call）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_call} />
               </div>
@@ -1711,7 +1711,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_result && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/result 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw（tool/result）" />
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制原始（tool/result）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_result} />
               </div>
@@ -1779,7 +1779,7 @@ function ChildTimeline({ events }: { events: AgentEvent[] }) {
   return (
     <div className="detail-section">
       <div className="detail-section-title">
-        <ListTree size={14} /> CHILD TIMELINE
+        <ListTree size={14} /> 子任务时间线
       </div>
       {total > CHILD_TIMELINE_WINDOW && (
         <div className="detail-row detail-row-warn">显示最近 {CHILD_TIMELINE_WINDOW} 条 / 共 {total} 条</div>

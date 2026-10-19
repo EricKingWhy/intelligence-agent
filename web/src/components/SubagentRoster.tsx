@@ -51,7 +51,7 @@ export function tokenText(
   usageState: DelegationEntry['usage_state'],
 ): string {
   if (usageState === 'no_data') return '无数据';
-  const base = `${formatTokenCount(usedTokens)} tok`;
+  const base = `${formatTokenCount(usedTokens)} 字`;
   return usageState === 'usage_only' ? `${base} · 估算` : base;
 }
 
@@ -115,7 +115,7 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
         aria-haspopup="dialog"
         aria-controls="subagent-roster"
         onClick={() => setOpen((v) => !v)}
-        title="查看本会话的子智能体"
+        title="查看本会话的子任务"
       >
         <span className="roster-stack" aria-hidden="true">
           {delegations.slice(0, 3).map((d) => (
@@ -127,7 +127,7 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
             </i>
           ))}
         </span>
-        <span className="roster-label">{delegations.length} 个子智能体</span>
+        <span className="roster-label">{delegations.length} 个子任务</span>
         {runningCount > 0 && (
           <span className="roster-running-badge" title={`${runningCount} 个运行中`}>
             {runningCount}
@@ -137,9 +137,9 @@ export function SubagentRoster({ delegations, onOpenSession, onOpenSplit }: Rost
       </button>
 
       {open && (
-        <div className="roster" id="subagent-roster" role="dialog" aria-label="子智能体列表">
+        <div className="roster" id="subagent-roster" role="dialog" aria-label="子任务列表">
           <div className="roster-head">
-            子智能体 <small>{delegations.length} 个</small>
+            子任务 <small>{delegations.length} 个</small>
             <button className="quiet" onClick={() => setOpen(false)}>
               收起
             </button>
@@ -275,7 +275,7 @@ export function SubagentSplitPane({
           {child.status === 'stopped' && <Square size={14} />}
           {child.status === 'running' && <span className="status-spinner" />}
         </span>
-        <span className="split-title">{child.target || '子智能体'}</span>
+        <span className="split-title">{child.target || '子任务'}</span>
         <span className="split-subtitle" title={`child session ${child.childSessionId}`}>
           {child.childSessionId.slice(0, 8)}
         </span>

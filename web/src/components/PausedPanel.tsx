@@ -28,7 +28,6 @@ import type { RunPausedInfo } from '../types';
 import {
   ceilingDraftError,
   CONTINUATION_SECTIONS,
-  DEADLINE_DIMENSION,
   DEADLINE_EXAMPLE,
   pauseFacts,
   resumeInputHint,
@@ -52,14 +51,14 @@ export interface PausedPanelProps {
  *  带"到顶"字样，用户一眼看到是谁卡住了。 */
 function dimensionLine(fact: DimensionFact): string {
   const tripped = fact.tripped ? ' · 到顶' : '';
-  return `${fact.consumedText} / limit ${fact.ceilingText}（剩余 ${fact.remainingText}）${tripped}`;
+  return `${fact.consumedText} / 上限 ${fact.ceilingText}（剩余 ${fact.remainingText}）${tripped}`;
 }
 
 /** 一个工具配额的读数行（与 CLI `_tool_dimension_lines` 同一取舍）：两个 counter
  *  分开写——`calls` 是被接纳的逻辑调用数，`attempts` 含 retry，它们不是同一个量。 */
 function toolQuotaLine(fact: ToolQuotaFact): string {
   const tripped = fact.tripped ? ' · 到顶' : '';
-  return `consumed ${fact.callsText} calls / ${fact.attemptsText} attempts / limit ${
+  return `已用 ${fact.callsText} 次调用 / ${fact.attemptsText} 次尝试 / 上限 ${
     fact.ceilingText
   }（剩余 ${fact.remainingText}）${tripped}`;
 }
@@ -85,17 +84,17 @@ export function PausedPanel({
   // `run.tool_call_limits.<name>` 都在标题里点名）：CLI 的暂停摘要也打
   // `dimension=run.deadline_at`，"卡在哪一维"不该只有命令行看得见。
   const headline = facts.deadlinePause
-    ? `绝对截止时刻 ${facts.deadline ?? 'unavailable'} 已到（${DEADLINE_DIMENSION}）：` +
-      '到点后不再接纳新的 Provider 请求 / 工具调用 / 子 Agent；' +
-      '已在途的调用按各自的 timeout / Ledger 语义收尾'
+    ? `截止时间 ${facts.deadline ?? '暂无读数'} 已到：` +
+      '到点后不再接受新的模型请求 / 工具调用 / 子任务；' +
+      '正在进行的调用会按各自的超时时间收尾；结果未知的会进入待处理列表'
     : tripped
-      ? `${tripped.label}：已消耗 ${tripped.consumedText} · 绝对 ceiling ${tripped.ceilingText}${
+      ? `${tripped.label}：已消耗 ${tripped.consumedText} · 上限 ${tripped.ceilingText}${
           tripped.remaining === null ? '' : `（剩余 ${tripped.remainingText}）`
         }`
       : trippedTool
       ? `${trippedTool.label}：已消耗 ${trippedTool.callsText} 次调用（${
           trippedTool.attemptsText
-        } 次尝试） · 绝对 ceiling ${trippedTool.ceilingText}${
+        } 次尝试） · 上限 ${trippedTool.ceilingText}${
           trippedTool.remaining === null ? '' : `（剩余 ${trippedTool.remainingText}）`
         }`
       : facts.dimensionLabel;
@@ -106,18 +105,18 @@ export function PausedPanel({
         <PauseCircle size={14} aria-hidden="true" />
         <span>
           {facts.deadlinePause
-            ? '已在绝对截止时刻处暂停——同一 run 的非终态收口，不是失败'
-            : '已在预算到顶处暂停——同一 run 的非终态收口，不是失败'}
+            ? '已在截止时间处暂停——这次任务只是暂停，不是出错'
+            : '预算或安全上限已到，任务暂停了——不是出错'}
         </span>
       </div>
       <div className="pause-panel-facts">
         {/* 缺失数字一律说 unavailable / unlimited，**永不**用 0 顶替（`11 §6.1`，
             与 CLI `_pause_facts` 同一口径）。 */}
-        原因 {paused.reason}（{facts.reasonLabel}）· {headline} · 预算版本 {facts.version} · 收口{' '}
+        原因：{facts.reasonLabel} · {headline} · 预算版本 {facts.version} · 结束方式{' '}
         {facts.closeoutSource}
         {facts.localFuseTurns === null
           ? ''
-          : ` · local fuse ${facts.localFuseTurns}${
+          : ` · 单次执行轮数上限 ${facts.localFuseTurns}${
               facts.localFuseSource ? `（${facts.localFuseSource}）` : ''
             }`}
         {paused.trace_id ? ` · trace ${paused.trace_id}` : ''}
@@ -137,7 +136,7 @@ export function PausedPanel({
         <div className="pause-panel-facts">
           {facts.toolQuotas.map((fact) => (
             <div key={fact.dimension}>
-              tool {fact.name}: {toolQuotaLine(fact)}
+              工具 {fact.name}: {toolQuotaLine(fact)}
             </div>
           ))}
         </div>
@@ -171,7 +170,7 @@ export function PausedPanel({
               否则用户会按数字形状去填一个 RFC 3339 文本（或者反过来）。 */}
           {facts.deadlinePause
             ? `新的绝对截止时刻（${resumeTargetLabel(facts.resumeTarget)}，RFC 3339 UTC）`
-            : `绝对 ceiling（${resumeTargetLabel(facts.resumeTarget)}）`}
+            : `上限（${resumeTargetLabel(facts.resumeTarget)}）`}
         </label>
         <input
           id="pause-resume-ceiling"
@@ -183,7 +182,7 @@ export function PausedPanel({
           aria-label={
             facts.deadlinePause
               ? `恢复用的绝对截止时刻：${resumeTargetLabel(facts.resumeTarget)}（RFC 3339 UTC）`
-              : `恢复用的绝对 ceiling：${resumeTargetLabel(facts.resumeTarget)}`
+              : `恢复用的上限：${resumeTargetLabel(facts.resumeTarget)}`
           }
           disabled={resuming}
         />
@@ -191,10 +190,10 @@ export function PausedPanel({
           className="pause-resume-btn"
           onClick={onResume}
           disabled={resuming || draftError !== null}
-          title={`以同一 run_id 恢复：提交 ${resumeTargetLabel(facts.resumeTarget)} 的绝对值与当前预算版本（CAS）`}
+          title={`继续这次任务：提交 ${resumeTargetLabel(facts.resumeTarget)} 的数值与当前预算版本（若版本已变会提示冲突）`}
         >
           <PauseCircle size={14} aria-hidden="true" />
-          {resuming ? '恢复中…' : '恢复同一 run'}
+          {resuming ? '继续中…' : '继续这次任务'}
         </button>
         {draftError !== null && !resuming && (
           <span className="pause-panel-error">{draftError}</span>

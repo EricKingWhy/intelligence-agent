@@ -145,7 +145,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     <header className="appbar">
       <div className="appbar-left">
         <Activity size={16} className="appbar-logo" />
-        <span className="appbar-title">Agent Harness Inspector</span>
+        <span className="appbar-title">Owlet</span>
       </div>
 
       <div className="appbar-center">
@@ -163,7 +163,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               `run/completed` 以权威值**替换**本 run 的流式贡献，因此到达前后不出现
               数字变小的覆盖式跳变。无数据不显示（零伪造）。 */}
           {sessionUsage && sessionUsage.total_tokens !== null && (
-            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} tok</span>
+            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} 字</span>
           )}
           {/* #537：run 预算徽标「已用 / 上限」——只出设了 ceiling 的维；数据源是
               投影的 run 预算镜像（run/started 回显 + run/resumed 更新），文本经
@@ -186,7 +186,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-right">
-        <div className="density-picker" role="radiogroup" aria-label="Trace 密度">
+        <div className="density-picker" role="radiogroup" aria-label="显示密度">
           {DENSITIES.map((d) => (
             <button
               key={d}
@@ -227,8 +227,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <button
             className="icon-btn"
             onClick={() => onOpenContextUsage(sessionId)}
-            aria-label="上下文容量"
-            title="上下文容量——已用/窗口/分类占比/缓存命中率"
+            aria-label="记忆用量"
+            title="记忆用量——已用/容量/分类占比/缓存命中率"
           >
             <Gauge size={16} />
           </button>
@@ -239,8 +239,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <button
             className="icon-btn"
             onClick={() => onOpenContextWindow(sessionId)}
-            aria-label="上下文窗口"
-            title="上下文窗口——改本会话的窗口挡位（越大压缩越晚，运行更慢更贵）"
+            aria-label="记忆容量"
+            title="记忆容量——改本会话的记忆容量（越大精简越晚，运行更慢更贵）"
           >
             <SlidersHorizontal size={16} />
           </button>
@@ -268,7 +268,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             className="icon-btn"
             onClick={onOpenRecoveryList}
             aria-label="恢复列表"
-            title="恢复列表——查看上次运行留下的中断会话（只读）"
+            title="恢复列表——查看上次任务留下的中断会话（只读）"
           >
             <History size={16} />
           </button>
@@ -280,7 +280,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             className="icon-btn"
             onClick={onOpenKanban}
             aria-label="看板"
-            title="Agent 看板——会话四态投影"
+            title="Agent 看板——按四种状态查看全部会话"
           >
             <Columns3 size={16} />
           </button>
@@ -289,8 +289,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <button
             className="icon-btn"
             onClick={onOpenWatchtower}
-            aria-label="自动值班"
-            title="自动值班——安排一次延时执行"
+            aria-label="定时任务"
+            title="定时任务——安排一次延时执行"
           >
             <Timer size={16} />
           </button>
@@ -298,9 +298,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         <button
           className="icon-btn"
           onClick={onToggleInspector}
-          aria-label={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
+          aria-label={inspectorOpen ? '收起运行详情' : '展开运行详情'}
           aria-pressed={inspectorOpen}
-          title={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
+          title={inspectorOpen ? '收起运行详情' : '展开运行详情'}
         >
           <PanelRight size={16} className={inspectorOpen ? 'appbar-toggle-active' : undefined} />
         </button>

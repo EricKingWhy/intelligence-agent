@@ -71,11 +71,11 @@ describe('verdictTone — 语义色档（绿是"已批准"的断言，不许靠�
 });
 
 describe('permissionView — 段内措辞（AC2/AC4：说了没有，也不填 0）', () => {
-  it('零审批的会话：权限档 null + 「无待审批」「尚无裁决」都**说出来**', () => {
+  it('零审批的会话：权限档 null + 「无待审批」「还没有决定」都**说出来**', () => {
     const view = permissionView(initConversation('p'));
     expect(view.policy).toBeNull();
     expect(view.pendingLabel).toBe('无待审批');
-    expect(view.decisionsLabel).toBe('尚无裁决');
+    expect(view.decisionsLabel).toBe('还没有决定');
     expect(view.pending).toEqual([]);
     expect(view.decisions).toEqual([]);
   });

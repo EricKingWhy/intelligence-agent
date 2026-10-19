@@ -106,7 +106,7 @@ async function expandToolToL2(page: import('@playwright/test').Page) {
 /** 打开 Inspector 的 Artifacts 面。 */
 async function openArtifactsTab(page: import('@playwright/test').Page) {
   const aside = page.locator('.step-detail');
-  await aside.getByRole('tab', { name: /Artifacts/ }).click();
+  await aside.getByRole('tab', { name: '产出文件' }).click();
 }
 
 test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点）', async ({ page }) => {
@@ -239,7 +239,7 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
   await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
-  await expect(err).toContainText('本部署没有可读取的 artifact 存储');
+  await expect(err).toContainText('本部署没有可读取的产出文件存储');
   // 后端 detail 原文照显
   await expect(page.locator('.artifact-content-detail')).toContainText('artifact_dir 为空');
   // 不是"不存在"——这两件事对用户不同
@@ -256,7 +256,7 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
   await page.getByRole('button', { name: '查看内容' }).click();
   const gone = page.locator('.artifact-content-error');
   await expect(gone).toContainText('不在本会话里');
-  await expect(gone).not.toContainText('本部署没有可读取的 artifact 存储');
+  await expect(gone).not.toContainText('本部署没有可读取的产出文件存储');
 });
 
 test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署没配存储"', async ({ page }) => {
@@ -277,6 +277,6 @@ test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署
   // 后端文案照显（含码本体的诊断信息由它承担）
   await expect(err).toContainText('对象存储鉴权失败');
   // **不能**把它说成"没配存储"——那是修复前的错法
-  await expect(err).not.toContainText('本部署没有可读取的 artifact 存储');
+  await expect(err).not.toContainText('本部署没有可读取的产出文件存储');
   await expect(err).not.toContainText('部署配置问题');
 });

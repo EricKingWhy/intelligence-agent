@@ -225,6 +225,6 @@ test('/compact：POST context/compact（复用既有压缩端点）；被拒走�
   expect(calls.workflowMode).toHaveLength(0);
   // mock 回执 compacted_turn_count=0（零写入被拒）⇒ #1197 三态契约的中性信息面，
   // 不是红色错误面（A-P1-3）。
-  await expect(page.getByTestId('slash-info')).toHaveText('没有可压缩的早期内容');
+  await expect(page.getByTestId('slash-info')).toHaveText('没有可以精简的早期内容');
   await expect(page.getByTestId('slash-error')).toHaveCount(0);
 });

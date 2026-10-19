@@ -118,7 +118,7 @@ export function budgetSummary(turns: string, tokens: string, deadline: string): 
       ? localStamp(new Date(resolved), new Date())
       : null;
   if (!turnsSet && tokensText === null && deadlineText === null) return '默认';
-  const parts = [`turns ${turnsSet ? turnsTrimmed : '默认'}`];
+  const parts = [`轮数 ${turnsSet ? turnsTrimmed : '默认'}`];
   if (tokensText !== null) parts.push(tokensText);
   if (deadlineText !== null) parts.push(deadlineText);
   return parts.join(' · ');

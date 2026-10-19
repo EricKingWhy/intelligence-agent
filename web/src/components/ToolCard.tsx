@@ -156,12 +156,12 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       {effectiveLevel >= 1 && (
         <div className="act-detail-inline">
           <div className="act-field">
-            <div className="act-field-label">Input</div>
+            <div className="act-field-label">输入</div>
             <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
           </div>
           {tool.result !== undefined && (
             <div className="act-field">
-              <div className="act-field-label">Output</div>
+              <div className="act-field-label">输出</div>
               <pre className="act-detail-result">
                 {truncate(
                   typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),

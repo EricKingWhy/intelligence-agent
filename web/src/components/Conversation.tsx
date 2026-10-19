@@ -776,12 +776,12 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   className="fork-btn"
                   title={
                     isFirstUserTurn
-                      ? '本轮之前没有历史：child 会话将是空会话'
-                      : '从此处分叉新会话'
+                      ? '这之前没有历史：新会话会是空的'
+                      : '从这里另开一条新会话'
                   }
                   onClick={() => onFork(turn.user_message_seq!)}
                 >
-                  分叉
+                  从这里另开一条新会话
                 </button>
               )}
             </span>
@@ -819,7 +819,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   </button>
                 )}
                 {model && turn.model.text && (
-                  <span className="model-tag" title="本次运行使用的模型">{model}</span>
+                  <span className="model-tag" title="本次任务使用的模型">{model}</span>
                 )}
               </div>
             )}

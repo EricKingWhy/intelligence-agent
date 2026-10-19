@@ -45,16 +45,16 @@ function failureText(state: Extract<ArtifactContentState, { status: 'error' }>):
   switch (state.kind) {
     case 'gone':
       return {
-        title: '这个 artifact 不在本会话里',
-        hint: '它可能不存在，或属于另一个会话（artifact_id 是内容哈希，跨会话可能重名）。',
+        title: '这个产出文件不在本会话里',
+        hint: '它可能不存在，或属于另一个会话（文件编号由内容算出，不同会话可能重名）。',
       };
     case 'no-storage':
       return {
-        title: '本部署没有可读取的 artifact 存储',
-        hint: '这是部署配置问题，不是这个产物丢了。',
+        title: '本部署没有可读取的产出文件存储',
+        hint: '这是部署配置问题，不是这个文件丢了。',
       };
     default:
-      return { title: '读取 artifact 内容失败', hint: '' };
+      return { title: '读取产出文件失败', hint: '' };
   }
 }
 
@@ -97,7 +97,7 @@ export function ArtifactContentView({
     return (
       <div className="artifact-content artifact-content-empty">
         <Package size={16} aria-hidden="true" />
-        <span>这个 artifact 没有可显示的内容。</span>
+        <span>这个产出文件没有可显示的内容。</span>
       </div>
     );
   }

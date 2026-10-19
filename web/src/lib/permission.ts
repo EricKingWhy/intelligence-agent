@@ -77,7 +77,7 @@ export function permissionView(state: ConversationState): PermissionView {
       tone: verdictTone(d.decision),
       reason: d.reason,
     })),
-    decisionsLabel: decisions.length === 0 ? '尚无裁决' : `${decisions.length} 条`,
+    decisionsLabel: decisions.length === 0 ? '还没有决定' : `${decisions.length} 条`,
   };
 }
 

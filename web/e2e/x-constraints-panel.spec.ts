@@ -83,8 +83,8 @@ async function openConstraints(
   await page.goto('/');
   await submitTask(page, '跑个任务');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Constraints' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '我的要求' })
     .click();
   await expect(panel(page)).toBeVisible();
 }
@@ -94,8 +94,8 @@ test('AC1：页眉/会话行在场，默认「生效中」只列 active', async 
     protectedFacts: [ACTIVE_FACT, REVOKED_FACT, SUPERSEDED_FACT],
   });
 
-  await expect(panel(page)).toContainText('CONSTRAINTS');
-  await expect(panel(page)).toContainText('约束管理');
+  await expect(panel(page).locator('.cn-eyebrow')).toHaveText('我的要求');
+  await expect(panel(page).locator('.cn-title')).toHaveText('我的要求');
 
   // 默认 tab = 生效中（issue §四.3）。
   await expect(panel(page).getByRole('tab', { name: /生效中/ })).toHaveAttribute(
@@ -146,7 +146,7 @@ test('AC3：撤销走二次确认 → 重拉对齐（行变已撤销、按钮 di
 
   // 二次确认框（Linear 风）：标题 + 事实值 + 事实 id。
   const dialog = page.getByRole('dialog');
-  await expect(dialog).toContainText('撤销这条约束？');
+  await expect(dialog).toContainText('撤销这条要求？');
   await expect(dialog).toContainText('不要改动生产环境配置');
   await expect(dialog).toContainText('f-active');
 
@@ -156,7 +156,7 @@ test('AC3：撤销走二次确认 → 重拉对齐（行变已撤销、按钮 di
   // mock 的 revoke 真的翻行状态（见 fixtures `protectedFactsFor`），GET 重拉读到
   // 已撤销 → 默认「生效中」页里这条消失（不是本地隐藏，是后端说它没了）。
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(panel(page)).toContainText('没有符合条件的约束');
+  await expect(panel(page)).toContainText('没有符合条件的要求');
   // 计数断言放在 UI 落定**之后**，避免点击后同步读计数的轻抖。
   expect(revokeCalls).toBe(1);
 
@@ -170,8 +170,8 @@ test('AC3：撤销走二次确认 → 重拉对齐（行变已撤销、按钮 di
 
 test('AC4：零约束 → 空态说出「没有符合条件的约束」（整页不消失）', async ({ page }) => {
   await openConstraints(page, { protectedFacts: [] });
-  await expect(panel(page)).toContainText('约束管理');
-  await expect(panel(page)).toContainText('没有符合条件的约束');
+  await expect(panel(page)).toContainText('我的要求');
+  await expect(panel(page)).toContainText('没有符合条件的要求');
 });
 
 test('AC5：403 → 「无权限查看约束」（不冒充空列表）', async ({ page }) => {
@@ -185,6 +185,6 @@ test('AC5：403 → 「无权限查看约束」（不冒充空列表）', async 
       return true;
     },
   });
-  await expect(panel(page)).toContainText('无权限查看约束');
-  await expect(panel(page)).not.toContainText('没有符合条件的约束');
+  await expect(panel(page)).toContainText('无权限查看要求');
+  await expect(panel(page)).not.toContainText('没有符合条件的要求');
 });

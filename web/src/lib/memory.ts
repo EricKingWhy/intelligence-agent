@@ -28,7 +28,7 @@ export const SEMANTIC_CATEGORIES: readonly { value: SemanticCategory; label: str
   { value: 'preference', label: '偏好' },
   { value: 'profile', label: '个人画像' },
   { value: 'project_fact', label: '项目事实' },
-  { value: 'constraint', label: '约束' },
+  { value: 'constraint', label: '要求' },
 ];
 
 export type MemoryPayloadDraft = Record<string, string>;

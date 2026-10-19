@@ -220,12 +220,12 @@ describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10
         onOpenSession={() => undefined}
       />,
     );
-    expect(withEntries).toContain('Inspect 子会话');
+    expect(withEntries).toContain('查看子会话');
     expect(withEntries).toContain('打开子会话');
     const without = renderToStaticMarkup(
       <ChainNodeView node={delegationNode} density="balanced" />,
     );
-    expect(without).not.toContain('Inspect 子会话');
+    expect(without).not.toContain('查看子会话');
     expect(without).not.toContain('打开子会话');
   });
 });
@@ -297,7 +297,7 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
       <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
     );
     expect(html).toContain('fork-btn');
-    expect(html).toContain('分叉');
+    expect(html).toContain('从这里另开一条新会话');
   });
 
   it('无锚点（user_message_seq 为 null）→ 不渲染按钮（不造假入口）', () => {
@@ -326,14 +326,14 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
       <TurnView turn={turn()} model={null} density="balanced" onFork={onFork} isFirstUserTurn />,
     );
     expect(html).toContain('fork-btn');
-    expect(html).toContain('空会话');
+    expect(html).toContain('新会话会是空的');
   });
 
   it('非第 1 轮：沿用常规标题（不出现空会话提示）', () => {
     const html = renderToStaticMarkup(
       <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
     );
-    expect(html).toContain('从此处分叉新会话');
-    expect(html).not.toContain('空会话');
+    expect(html).toContain('从这里另开一条新会话');
+    expect(html).not.toContain('新会话会是空的');
   });
 });

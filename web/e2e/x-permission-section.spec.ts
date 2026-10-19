@@ -54,8 +54,8 @@ async function openInspectorOverview(page: import('@playwright/test').Page, fram
   await page.goto('/');
   await submitTask(page, '写个文件');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Overview' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '概览' })
     .click();
   await expect(permissionSection(page)).toBeVisible();
 }
@@ -101,8 +101,8 @@ test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批�
   await submitTask(page, '写个文件');
   // 审批尚未出现：先打开 Inspector Overview（模态一开就点不到了）。
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Overview' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '概览' })
     .click();
   await expect(permissionSection(page)).toBeVisible();
 
@@ -171,7 +171,7 @@ test('AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原
 
   const section = permissionSection(page);
   await expect(section).toContainText('无待审批');
-  await expect(section).toContainText('尚无裁决');
+  await expect(section).toContainText('还没有决定');
   // AC4：权限档拿不到 → `—`（**不是** 0、不是任何占位档位名），并说明为什么拿不到。
   // 按行取（`.detail-val-muted` 在段内还有"无待审批/尚无裁决"两处，不能整段模糊匹配）。
   await expect(section.locator('.detail-row', { hasText: '权限档' })).toContainText('—');

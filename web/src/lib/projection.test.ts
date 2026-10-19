@@ -1362,7 +1362,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'hello', model: 'qwen-plus-0911', usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 } },
-    }))).toBe('qwen-plus-0911 · 1801 tok');
+    }))).toBe('qwen-plus-0911 · 1801 字');
     expect(summarizeEvent(ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hello' } }))).toBe('5 字符');
   });
 
@@ -1370,7 +1370,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.RUN_COMPLETED,
       data: { usage_total: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 }, cost_usd: 0.0024 },
-    }))).toBe('1801 tok · $0.0024');
+    }))).toBe('1801 字 · $0.0024');
     expect(summarizeEvent(ev({ type: EventType.RUN_COMPLETED, data: {} }))).toBe('');
   });
 
@@ -1531,17 +1531,17 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   // #1280 AC4：`error`（#1193 致命失败信号）不再空摘要——message 是可读原因。
   // 与 summarizeRunFailed 同规则不截断（完整句子，ADR-0033 §2.3）。
-  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（全文不截断）；缺失 → 「运行失败」', () => {
+  it('summarizeEvent：ERROR 带 message → 「任务失败 · 原因」（全文不截断）；缺失 → 「任务失败」', () => {
     expect(summarizeEvent(ev({
       type: EventType.ERROR,
       data: { code: 'run-failed-before-plan', message: '模型调用失败' },
-    }))).toBe('运行失败 · 模型调用失败');
+    }))).toBe('任务失败 · 模型调用失败');
     const long = 'x'.repeat(60);
     expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: long } }))).toBe(
-      `运行失败 · ${long}`,
+      `任务失败 · ${long}`,
     );
-    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('运行失败');
-    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('运行失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('任务失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('任务失败');
   });
 
   // ── 事件语义注册表（架构深化 C2）：穷尽性由 tsc 强制
@@ -2635,12 +2635,12 @@ describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
   const T = '2026-09-12T00:00:00Z';
   const base = { session_id: 's', time: T };
 
-  it('session/forked → 「已分叉」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
+  it('session/forked → 「已另开一条」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
     const s = applyEvent(initConversation('f'), {
       ...base, type: EventType.SESSION_FORKED, seq: 1, run_id: 'r',
       data: { from_seq: 3, child_session_id: 'child-1' },
     });
-    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已分叉');
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已另开一条');
   });
 
   it('tool/approval-requested → 「等待审批 · {tool_name}」', () => {

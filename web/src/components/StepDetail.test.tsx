@@ -99,11 +99,11 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
   it('有 result 时默认 Output 选中（看结果优先）', () => {
     const html = renderTool(toolBase);
     expect(html).toContain('io-tabs');
-    expect(html).toContain('>Overview<');
-    expect(html).toContain('>Input<');
-    expect(html).toContain('>Output<');
+    expect(html).toContain('>概览<');
+    expect(html).toContain('>输入<');
+    expect(html).toContain('>输出<');
     // 默认 Output 选中（aria-selected）
-    expect(html).toMatch(/aria-selected="true"[^>]*>Output</);
+    expect(html).toMatch(/aria-selected="true"[^>]*>输出</);
     // Output 面板内容在（exit_code 键来自 result 对象树）
     expect(html).toContain('exit_code');
     // Input 面板默认不渲染其 args 内容（command 是 args 独有键）
@@ -112,23 +112,23 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
   it('无 result（运行中）：默认 Overview，元信息可见且无 Output 标签', () => {
     const html = renderTool({ ...toolBase, result: undefined, status: 'running' });
-    expect(html).toContain('>Overview<');
-    expect(html).toMatch(/aria-selected="true"[^>]*>Overview</);
-    expect(html).not.toContain('>Output<');
+    expect(html).toContain('>概览<');
+    expect(html).toMatch(/aria-selected="true"[^>]*>概览</);
+    expect(html).not.toContain('>输出<');
     // Overview 元信息：tool_call_id / status
-    expect(html).toContain('tool_call_id');
+    expect(html).toContain('调用编号');
     expect(html).toContain('running');
   });
 
   it('有 raw_call/raw_result 才出现 Raw 标签；raw 面板渲染原始事件树', () => {
     const noRaw = renderTool(toolBase);
-    expect(noRaw).not.toContain('>Raw<');
+    expect(noRaw).not.toContain('>原始<');
     const withRaw = renderTool({
       ...toolBase,
       raw_call: { type: 'tool/call', data: { x: 1 } },
       raw_result: { type: 'tool/result', data: { y: 2 } },
     } as ToolCall);
-    expect(withRaw).toContain('>Raw<');
+    expect(withRaw).toContain('>原始<');
     // Raw 面板（含两个「复制 Raw」按钮）只在选中 Raw 档时渲染 ⇒ SSR 首帧看不到，
     // 故这里无法锁住其 aria-label（真机审计 B-D7 的整改见 e2e/真机复验）。
   });
@@ -211,19 +211,19 @@ describe('EventInspector Overview（BUG-008）', () => {
 
   it('step_id 键缺失：不渲染空的 step 幽灵行（否则出现「step」后跟空值）', () => {
     const html = renderEvent(baseEvent);
-    expect(html).not.toContain('>step<');
+    expect(html).not.toContain('>步骤<');
     // 阳性对照——面板整体确实渲染了（避免「整个面板没渲染」这种空洞绿）
     expect(html).toContain('run/started');
-    expect(html).toContain('>seq<');
+    expect(html).toContain('>序号<');
   });
 
   it('同一渲染点的相邻语义：number 渲染 step 行（含值 7），null 哨兵不渲染（0 与数值不是哨兵）', () => {
     const withStepHtml = renderEvent(withStep(7));
-    expect(withStepHtml).toContain('>step<');
+    expect(withStepHtml).toContain('>步骤<');
     expect(withStepHtml).toContain('>7<');
-    expect(renderEvent(withStep(0))).toContain('>step<');
+    expect(renderEvent(withStep(0))).toContain('>步骤<');
     expect(renderEvent(withStep(0))).toContain('>0<');
-    expect(renderEvent(withStep(null))).not.toContain('>step<');
+    expect(renderEvent(withStep(null))).not.toContain('>步骤<');
   });
 });
 
@@ -254,8 +254,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     const html = renderTab(twoRunConversation());
     const headers = (html.match(/tl-run-header/g) || []).length;
     expect(headers).toBe(2);
-    expect(html).toContain('Run 1');
-    expect(html).toContain('Run 2');
+    expect(html).toContain('第 1 轮执行');
+    expect(html).toContain('第 2 轮执行');
     expect(html).toContain('run-badge-completed');
     expect(html).toContain('run-badge-running');
     // 第一组 4 事件（session/started 归入 r1 组）；打在 .tl-run-count 上防 tl-seq 误命中
@@ -276,8 +276,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 Run 1 正是本票要防的事故）
     expect(html).not.toContain('run-badge-completed');
     expect(html).toContain('tl-run-header');
-    expect(html).toContain('>Run 2</span>');
-    expect(html).not.toContain('>Run 1</span>');
+    expect(html).toContain('>第 2 轮执行</span>');
+    expect(html).not.toContain('>第 1 轮执行</span>');
   });
 });
 

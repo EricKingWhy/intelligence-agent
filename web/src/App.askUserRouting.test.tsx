@@ -240,7 +240,7 @@ describe('#1223 — 待回答的用户输入锁 composer', () => {
     const textarea = el.querySelector('textarea.composer');
     expect(textarea!.hasAttribute('disabled')).toBe(true);
     const hint = el.querySelector('.composer-locked-hint');
-    expect(hint?.textContent).toContain('请先回答当前约束澄清，再发送新消息');
+    expect(hint?.textContent).toContain('请先确认当前要求，再发送新消息');
   });
 
   it('#1283 P2-1：有请求、无 run/paused ⇒ 不锁（没有卡片可答时绝不锁死输入框）', async () => {

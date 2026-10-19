@@ -80,7 +80,7 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色实测
   // 2.91:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
   // 等待是静止态，闪动会读成"还在跑"。
-  'awaiting-decision': { label: '待裁决', className: 'pulse-awaiting-decision', Icon: Gavel },
+  'awaiting-decision': { label: '等你决定', className: 'pulse-awaiting-decision', Icon: Gavel },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };
 
@@ -267,7 +267,7 @@ function coarsenPulseState(state: RunPulseState): string {
       // #1030：同 #312 的理由——「待裁决」既不是「运行中」（它没在跑）也不是
       // 「已中断」（它没结束，只是在等人）。粗化成任何一档都会让 Inspector 与
       // 顶栏对同一会话各说一套。
-      return '待裁决';
+      return '等你决定';
     case 'interrupted':
       return '已中断';
     case 'cancelled':
@@ -461,21 +461,21 @@ export function recoverDoneMessage(r: {
 }): string {
   const remaining =
     r.stillUnterminated && r.stillDangling
-      ? '仍缺 run 终态且有未配对工具调用'
+      ? '仍缺结束状态，且有没配上结果的工具调用'
       : r.stillUnterminated
-        ? '仍缺 run 终态'
+        ? '仍缺结束状态'
         : r.stillDangling
-          ? '仍有未配对工具调用'
+          ? '仍有没配上结果的工具调用'
           : null;
   const fixed =
     r.repaired > 0
       ? r.terminalRepaired
-        ? `已恢复：回填 ${r.repaired} 条工具结果，并补齐 run 终态`
-        : `已恢复：回填 ${r.repaired} 条工具结果`
+        ? `已恢复：补回 ${r.repaired} 条工具结果，并补上结束状态`
+        : `已恢复：补回 ${r.repaired} 条工具结果`
       : r.terminalRepaired
-        ? '已恢复：补齐 run 终态'
+        ? '已恢复：补上结束状态'
         : null;
   if (fixed) return remaining ? `${fixed}（${remaining}，可重试）` : fixed;
-  if (remaining) return `已恢复：本次无回填项（${remaining}，可重试）`;
+  if (remaining) return `已恢复：本次没有要补回的内容（${remaining}，可重试）`;
   return '已恢复：无可修复项（会话事件已完整）';
 }

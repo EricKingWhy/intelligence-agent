@@ -56,8 +56,8 @@ const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
 
 /** 顶部优先级条文案（#1191 §五.1，逐字）。`overridden_by` 用等宽字体呈现，
  *  与票面用反引号标注代码标识符的意图一致。 */
-const PRIORITY_BAR = '同文约束生效优先级：会话＞项目＞全局 —— 不同内容全部注入，由模型裁决。';
-const PRIORITY_BAR_TAIL = ' 非 null 的条目不注入。撤销走历史保留链。';
+const PRIORITY_BAR = '同样内容的要求，生效优先级：会话＞项目＞全局——不同内容会全部提供给 AI，由它决定怎么处理。';
+const PRIORITY_BAR_TAIL = ' 标记的条目不生效。撤销后仍保留历史记录。';
 
 /** 三组眉标（#1191 §五.2）。 */
 const GROUPS: readonly {
@@ -255,7 +255,7 @@ export function ConstraintsView({
   if (forbidden) {
     body = (
       <div className="cn-state" role="alert">
-        无权限查看约束
+        无权限查看要求
       </div>
     );
   } else if (error) {
@@ -269,9 +269,9 @@ export function ConstraintsView({
       </div>
     );
   } else if (loading && facts.length === 0) {
-    body = <div className="cn-state">正在加载约束…</div>;
+    body = <div className="cn-state">正在加载要求…</div>;
   } else if (visible.length === 0) {
-    body = <div className="cn-state">没有符合条件的约束</div>;
+    body = <div className="cn-state">没有符合条件的要求</div>;
   } else {
     // 非 git 目录的会话无项目键（`project === null`）→ 不渲染 PROJECT 组（票面 §五.5）。
     const groups = GROUPS.filter((g) => g.scope !== 'project' || project !== null);
@@ -294,12 +294,12 @@ export function ConstraintsView({
 
   return (
     <div className="cn-panel" data-testid="constraints-panel">
-      <div className="cn-eyebrow">CONSTRAINTS</div>
-      <h2 className="cn-title">约束管理</h2>
+      <div className="cn-eyebrow">我的要求</div>
+      <h2 className="cn-title">我的要求</h2>
       <div className="cn-session-line">
         <span className="cn-livedot" aria-hidden="true" />
         当前会话 <code className="cn-session-id">{sessionId}</code>
-        <span>数据来自后端实时查询，前端不存第二份状态</span>
+        <span>当前生效的要求</span>
       </div>
 
       <div className="cn-prio" data-testid="constraints-priority">
@@ -309,7 +309,7 @@ export function ConstraintsView({
       </div>
 
       <div className="cn-toolbar">
-        <div className="cn-tabs" role="tablist" aria-label="约束状态筛选">
+        <div className="cn-tabs" role="tablist" aria-label="要求状态筛选">
           {STATUS_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -341,7 +341,7 @@ export function ConstraintsView({
 
       <div className="cn-list">{body}</div>
 
-      <div className="cn-footer">撤销走 superseded 历史链 —— 来源记录保留，可审计、可追溯。</div>
+      <div className="cn-footer">撤销后会标记为「已被取代」并保留来源记录，可审计、可追溯。</div>
     </div>
   );
 }
@@ -354,7 +354,7 @@ function revokeImpact(scope: ConstraintScope): string {
   if (scope === 'global') {
     return '撤销后，将影响所有项目的新会话。来源记录保留，可审计。';
   }
-  return '撤销后，新的会话将不再注入该条约束。来源记录保留，可审计。';
+  return '撤销后，新的会话将不再带上这条要求。来源记录保留，可审计。';
 }
 
 /** 有状态外壳：负责请求生命周期 + 撤销二次确认。 */
@@ -470,7 +470,7 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
         <Dialog.Portal>
           <Dialog.Overlay className="palette-overlay" />
           <Dialog.Content className="cn-modal" aria-describedby="cn-modal-desc">
-            <Dialog.Title className="cn-modal-title">撤销这条约束？</Dialog.Title>
+            <Dialog.Title className="cn-modal-title">撤销这条要求？</Dialog.Title>
             <p className="cn-modal-desc" id="cn-modal-desc">
               {pendingRevoke ? revokeImpact(pendingRevoke.scope) : ''}
             </p>

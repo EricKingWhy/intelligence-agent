@@ -86,9 +86,9 @@ export const DelegationNode = memo(function DelegationNode({ delegation, density
             onClick={() =>
               onInspectChild({ childSessionId: delegation.child_session_id, target: delegation.target })
             }
-            title="在右侧 Inspector 内展开该子会话（父会话上下文保留）"
+            title="在右侧运行详情内展开该子会话（父会话内容保留）"
           >
-            Inspect 子会话
+            查看子会话
           </button>
         )}
         {onOpenSession && (
