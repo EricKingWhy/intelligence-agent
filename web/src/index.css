@@ -154,7 +154,7 @@
   --accent-soft:   rgba(83, 58, 253, 0.12);
   --accent-muted:  var(--accent-soft); /* legacy alias used across app.css */
   --accent-press:  #2e2b8c;
-  /* accent 当**文字**用时的两档（#1364 施工实测）：#533afd 在暗底只有 2.30–3.15:1，
+  /* accent 当**文字**用时的两档（#1364 施工实测）：#533afd 在暗底只有 2.35–3.24:1，
    * 远低于 AA 4.5 ⇒ 暗色必须换成提亮档；亮色块 `--accent` 本身已 5.49–6.19:1，
    * 故亮色块的两个 text token 直接等于 #533afd / #4434d4。
    * 实测（暗底 canvas/chrome/elevated/overlay）：#9a8bff 6.99/6.79/6.38/5.08，
@@ -162,6 +162,9 @@
    * （#4434d4，暗色下只作**实底 hover**，白字 7.81:1）分开，不能共用一个 token。 */
   --accent-text:        #9a8bff;
   --accent-text-strong: #b3a6ff;
+  /* 焦点环（P2-1）：暗色下 `--accent` 70% 混色只有 2.08:1，不达 WCAG 1.4.11 的 3:1；
+   * 改用 `--accent-text`（#9a8bff，暗底 5.08–6.99:1）。 */
+  --focus-ring: var(--accent-text);
 
   /* Status colors (small-area use only: dots, badges, labels) */
   --success: #6fce9e;
@@ -180,7 +183,19 @@
   --effort-gradient-2: #6d28d9;
   --effort-gradient-3: #9333ea;
   --effort-gradient-4: #c084fc;
+  /* 混色终点（ReasoningEffortSlider.tsx 的 `colorAt` 第三段）：与 `--effort-tone-deep`
+   * 区分——后者是**亮色下的文字档**（#4c1d95），本条是轨道插值终点、两主题同值。 */
+  --effort-gradient-end: #4c1d95;
   --effort-glow: #a855f7;
+
+  /* Drop overlay 插图（DropOverlay.tsx 两幅 SVG，COPY 自上游 MIT 资产，原样保留）：
+   * 这几档是**插图自身**的固有色，不是主题语义色（两主题同值 ⇒ 亮色块继承）。
+   * 单独成组只为一件事：TSX 里不再出现颜色字面量（#1364 工程约束；stylelint 只扫 CSS）。 */
+  --illustration-card-cyan: #9ce5ed;
+  --illustration-card-blue: #679efe;
+  --illustration-card-indigo: #3964fe;
+  --illustration-card-grey: #979da6;
+  --illustration-card-amber: #f59e0b;
 
   /* State tint for hover / selected washes */
   --color-hover: var(--surface-hover);
@@ -260,6 +275,8 @@
    * hover 档沿用 deep（#4434d4 白底 7.81:1），保留"hover 变深"的既有反馈。 */
   --accent-text:        #533afd;
   --accent-text-strong: #4434d4;
+  /* 焦点环：亮色下 `--accent` 本身白底 6.19:1，直接沿用（P2-1）。 */
+  --focus-ring: var(--accent);
 
   /* 同因，且要按**最坏底**定值：原 #2f9e63 在画布底只有 3.01:1。
      但只按纯底色量是不够的——「已完成」徽标与顶栏 run-pulse 的底是
@@ -383,7 +400,7 @@ body {
 
 /* 键盘焦点 */
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

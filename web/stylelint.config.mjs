@@ -23,6 +23,10 @@
  * （gate0 的 `stylelint` 车道用的就是后者，见 `scripts/gate0.py`）。
  */
 export default {
+  /* 块级 `stylelint-disable` 包 270 行 token 定义区：一旦某条规则在该区间**不再需要**
+   * 放行（例如 rgba 字面量被清干净），必须让 stylelint 自己报出来，而不是静默留着
+   * 一个"以后写什么都放行"的窗口。 */
+  reportNeedlessDisables: true,
   rules: {
     'color-no-hex': true,
     'declaration-property-value-disallowed-list': {

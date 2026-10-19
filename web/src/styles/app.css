@@ -1253,13 +1253,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .replay-progress {
   height: 4px;
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   background: var(--surface-2);
   overflow: hidden;
 }
 .replay-progress-fill {
   height: 100%;
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   background: var(--accent);
   transition: width var(--dur-out) var(--ease-apple);
 }
@@ -4243,7 +4243,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: inline-flex;
   gap: 4px;
   border: 1px solid var(--color-border);
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   padding: 3px;
 }
 .composer-scope-pill {
@@ -4252,7 +4252,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-muted-foreground);
   font: 500 var(--text-xs) var(--font-ui);
   padding: 5px 14px;
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   cursor: pointer;
 }
 .composer-scope-pill.on {
@@ -5837,6 +5837,9 @@ button.json-row {
 .io-tab.sel {
   color: var(--color-foreground);
   background: var(--color-surface-3, var(--surface-overlay));
+  /* 有意减法（#1364）：原 `0 1px 2px rgba(0,0,0,0.12)` 不在收敛后的两档阴影里
+   * （--shadow-overlay 是 0 2px 8px，比它重一档）；选中态已由底色 + 0.5px 描边区分，
+   * 再叠一层贴地投影属于装饰冗余，故删而不映射。 */
   box-shadow: 0 0 0 0.5px var(--color-border);
 }
 .io-tab:focus-visible {
@@ -8951,7 +8954,7 @@ button.json-row {
   border: 1px solid var(--border-strong);
 }
 .task-review-chip.state-deliverable { color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
-.task-review-chip.state-accepted { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.task-review-chip.state-accepted { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .task-review-chip.state-executing { color: color-mix(in srgb, var(--info) 45%, var(--text-primary)); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
 .task-review-chip.state-pending_verification { color: color-mix(in srgb, var(--warning) 45%, var(--text-primary)); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
 
@@ -9382,10 +9385,11 @@ button.json-row {
   cursor: not-allowed;
 }
 .reasoning-effort-slider__input:not(:disabled):hover::-webkit-slider-thumb {
-  box-shadow: var(--shadow-overlay);
+  /* hover 必须比基态（--shadow-overlay）抬一档，否则这条规则是死规则（#1364 审查）。 */
+  box-shadow: var(--shadow-popover);
 }
 .reasoning-effort-slider__input:not(:disabled):hover::-moz-range-thumb {
-  box-shadow: var(--shadow-overlay);
+  box-shadow: var(--shadow-popover);
 }
 
 

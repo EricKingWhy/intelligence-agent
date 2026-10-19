@@ -457,8 +457,14 @@ test('active fallback projects its own default without replacing the primary pre
   await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
   const fallbackTrack = page.locator('.reasoning-effort-slider__track');
   await expect(fallbackTrack).toHaveAttribute('data-energy', 'off');
+  // #1364：颜色只来自 token —— 内联值是 `var(--effort-track-start)`（不再是 `#4d93f8` 字面量），
+  // 落屏值由 fill 的 computed `background-image` 钉住：默认档 progress=0，两端都是 rgb(77, 147, 248)。
   expect(await fallbackTrack.evaluate((track) => (track as HTMLElement).style.getPropertyValue('--effort-color')))
-    .toBe('#4d93f8');
+    .toBe('var(--effort-track-start)');
+  const fillBackground = await page.locator('.reasoning-effort-slider__fill')
+    .evaluate((el) => getComputedStyle(el).backgroundImage);
+  expect(fillBackground).toContain('rgb(77, 147, 248)');
+  expect(fillBackground).not.toContain('rgba(0, 0, 0');
   await expect(slider).toBeEnabled();
   await expect(effortTrigger).toContainText('Deep');
   await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);

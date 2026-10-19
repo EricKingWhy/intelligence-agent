@@ -133,7 +133,7 @@
 }
 
 .memory-v2-meta span {
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   background: var(--bg-tertiary, var(--bg-secondary));
   color: var(--text-secondary);
   padding: 2px 7px;

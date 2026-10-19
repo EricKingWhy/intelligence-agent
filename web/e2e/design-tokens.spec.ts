@@ -11,12 +11,12 @@
  *      取**众数像素**断言 RGB(83,58,253)。取众数而不是取中心点：按钮中央压着文字，
  *      中心点会取到字形或抗锯齿边；填充色在整块里是压倒性的多数。
  *
- *  截图落 `docs/gate/<HEAD>/screens/`（票面要求）。`GATE_SCREENS_DIR` /
- *  `GATE_SCREENS_PREFIX` 可覆盖落点与前缀：origin/main 干净构建产"改前"基线时用
- *  `GATE_SCREENS_PREFIX=before-` 把同一组场景写进同一个目录。
+ *  截图默认落 `test-results/design-tokens/`（已 gitignore）；`GATE_SCREENS_DIR` /
+ *  `GATE_SCREENS_PREFIX` 可覆盖落点与前缀：显式验收时用
+ *  `GATE_SCREENS_DIR=docs/gate/<sha>/screens` 写进 gate 目录，origin/main 干净构建
+ *  产"改前"基线时再加 `GATE_SCREENS_PREFIX=before-`。
  */
 
-import { execSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
@@ -25,11 +25,7 @@ import { RUN, SID, T, fulfillSse, routeApi, sessionRow, submitTask, type FrameSp
 /** Playwright 的 cwd 是 `web/`（config 所在目录），仓库根是它上一级。 */
 const REPO_ROOT = path.resolve(process.cwd(), '..');
 
-function headSha(): string {
-  return process.env.GATE_SHA ?? execSync('git rev-parse HEAD', { cwd: REPO_ROOT }).toString().trim();
-}
-
-const SCREENS_DIR = process.env.GATE_SCREENS_DIR ?? path.join(REPO_ROOT, 'docs', 'gate', headSha(), 'screens');
+const SCREENS_DIR = process.env.GATE_SCREENS_DIR ?? path.join(REPO_ROOT, 'test-results', 'design-tokens');
 const PREFIX = process.env.GATE_SCREENS_PREFIX ?? '';
 
 function screensPath(name: string): string {
@@ -56,6 +52,7 @@ const SESSIONS = [
 ];
 
 test('#1364 截图：会话列表 + 顶栏（dark/light）', async ({ page }) => {
+  test.slow(); // P1-1: 两次整页 reload + 截图，30s 默认超时不够
   await freeze(page);
   await routeApi(page, { sessions: SESSIONS, events: [] });
   await page.goto('/');
@@ -69,6 +66,7 @@ test('#1364 截图：会话列表 + 顶栏（dark/light）', async ({ page }) =>
 });
 
 test('#1364 截图：accent 链接 + focus ring（dark/light）', async ({ page }) => {
+  test.slow(); // P1-1: 两次整页 reload + 截图，30s 默认超时不够
   await freeze(page);
   const text = '见 [文档](https://example.com/docs)，正文一行。';
   const frames: FrameSpec[] = [
@@ -90,11 +88,17 @@ test('#1364 截图：accent 链接 + focus ring（dark/light）', async ({ page 
     await page.locator('.session-item').first().click();
     await expect(page.locator('.model-output .md-link').first()).toBeVisible();
     // 链接色必须是 accent 的**文字**档：暗色 #9a8bff、亮色 #533afd（index.css 注释里的实测值）。
+    // computedStyle 钉的是声明值（精确），像素数钉的是它真的落屏（见 countPixels 注释）；
+    // 两者缺一：只量 computed 会被层叠/覆盖骗过，只量像素分不清 #9a8bff 与相邻的近似色。
+    const expectedLink: [number, number, number] = theme === 'dark' ? [154, 139, 255] : [83, 58, 253];
     await expect(page.locator('.model-output .md-link').first()).toHaveCSS(
       'color',
-      theme === 'dark' ? 'rgb(154, 139, 255)' : 'rgb(83, 58, 253)',
+      `rgb(${expectedLink.join(', ')})`,
     );
-    await page.locator('.model-output').last().screenshot({ path: screensPath(`accent-link-${theme}.png`) });
+    const linkPng = await page.locator('.model-output').last().screenshot({ path: screensPath(`accent-link-${theme}.png`) });
+    const linkPixels = await countPixels(page, linkPng, expectedLink);
+    console.log(`[${theme}] accent link pixels = ${linkPixels} @ rgb(${expectedLink.join(', ')})`);
+    expect(linkPixels, `${theme} accent 链接色必须真的画到屏幕上`).toBeGreaterThan(20);
 
     // focus ring：先 `.focus()` 再走一次键盘往返，把 focus-visible 的启发式打开
     // （程序化 focus 不算键盘交互，Chromium 不会画 `:focus-visible` 环）。
@@ -104,9 +108,61 @@ test('#1364 截图：accent 链接 + focus ring（dark/light）', async ({ page 
     await page.keyboard.press('Shift+Tab');
     await page.keyboard.press('Tab');
     await expect(target).toBeFocused();
+    // 焦点环的真断言（门禁 3）：computed `outline-color` 必须等于 `--focus-ring` 的解析值，
+    // 且该解析值逐主题钉死（暗 #9a8bff / 亮 #533afd）——否则「环消失」或「环换色」都能全绿。
+    const ring = await target.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { color: style.outlineColor, width: style.outlineWidth, line: style.outlineStyle };
+    });
+    const tokenRing = await page.evaluate(() => {
+      const probe = document.createElement('div');
+      probe.style.color = 'var(--focus-ring)';
+      document.body.appendChild(probe);
+      const resolved = getComputedStyle(probe).color;
+      probe.remove();
+      return resolved;
+    });
+    console.log(`[${theme}] focus ring = ${ring.width} ${ring.line} ${ring.color}; --focus-ring = ${tokenRing}`);
+    expect(ring.line, `${theme} 焦点环必须真的画出来（:focus-visible 命中）`).toBe('solid');
+    expect(ring.width, `${theme} 焦点环宽度`).toBe('2px');
+    expect(tokenRing, `${theme} --focus-ring 的解析值`).toBe(
+      theme === 'dark' ? 'rgb(154, 139, 255)' : 'rgb(83, 58, 253)',
+    );
+    expect(ring.color, `${theme} 焦点环必须消费 --focus-ring`).toBe(tokenRing);
     await page.locator('.model-output').last().screenshot({ path: screensPath(`focus-ring-${theme}.png`) });
   }
 });
+
+/** 截图里与目标色相近（逐通道 ±tolerance）的不透明像素个数。
+ *  用于把「声明里写着这个颜色」升级成「这一格真的被画成了这个颜色」：文字主体像素
+ *  在 Chromium 的无子像素抗锯齿下就是精确色，边缘才落过渡值，故只数核心像素。 */
+async function countPixels(page: Page, png: Buffer, target: [number, number, number], tolerance = 6): Promise<number> {
+  const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+  return page.evaluate(async ({ url, target, tolerance }) => {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('canvas 2d context unavailable');
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+    let hits = 0;
+    for (let index = 0; index < data.length; index += 4) {
+      if (data[index + 3] < 255) continue;
+      if (
+        Math.abs((data[index] ?? 0) - target[0]) <= tolerance &&
+        Math.abs((data[index + 1] ?? 0) - target[1]) <= tolerance &&
+        Math.abs((data[index + 2] ?? 0) - target[2]) <= tolerance
+      ) {
+        hits += 1;
+      }
+    }
+    return hits;
+  }, { url: dataUrl, target, tolerance });
+}
 
 /** 元素截图的众数不透明像素。PNG 解码交给浏览器自己（canvas），不引新依赖。 */
 async function dominantColor(page: Page, png: Buffer): Promise<[number, number, number]> {
@@ -177,6 +233,7 @@ function planPausedFrames(): FrameSpec[] {
 }
 
 test('#1364 主 CTA 像素 = RGB(83,58,253)（dark/light）', async ({ page }) => {
+  test.slow(); // P1-1: 两次整页 reload + 截图，30s 默认超时不够
   await freeze(page);
   const frames = planPausedFrames();
   await routeApi(page, {
