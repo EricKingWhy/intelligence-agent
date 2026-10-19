@@ -89,8 +89,13 @@ def evaluate_gate(settings: MemorySettingsV2) -> GateDecision:
     """``memory`` 写入的门。开 → stage；关 → allow。
 
     门开时**总是** stage：本仓没有可用的行内审批通道（见模块 docstring），而票面
-    明确"拿不到审批通道 → stage，绝不静默拒绝"。后台 review 与前台走同一条路——
-    上游对后台强制 stage 的理由（无人可问）在这里对两者都成立。
+    明确"拿不到审批通道 → stage，绝不静默拒绝"。
+
+    消费者只有一个：``MemoryTool._gate``（前台 ``memory`` 工具）。**后台 formation
+    不经过这里**——``executor`` 在 ``commit_with_outcome`` 的同一事务里直接
+    ``create_in/update_in/invalidate_in``，把其中一条改成 stage 会让 job 终态与
+    记录落地分属两个事务（AC6/AC7 要的"终态与副作用一起落地"正是那条事务）。
+    后台写入的开关是 ``extraction_enabled``：关掉它就不形成，而不是形成后再逐条问。
     """
     if settings.write_approval:
         return GateDecision(stage=True, message=_staged_message())
