@@ -301,7 +301,8 @@ class MemoryV2Service:
                 logger.warning("markdown 墓碑清理失败（%s）", type(error).__name__)
             else:
                 if cleaned:
-                    logger.warning("markdown 按墓碑哈希清理了残留条目：%s", ", ".join(cleaned))
+                    # 补偿路径成功：删掉的正是墓碑声明已失效的残留条目，不是故障。
+                    logger.info("markdown 按墓碑哈希清理了残留条目：%s", ", ".join(cleaned))
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
