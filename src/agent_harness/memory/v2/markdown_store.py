@@ -23,12 +23,13 @@ markdown 是**唯一权威**；SQLite（`memory_v2_records`）降为派生/历�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,10 @@ DEFAULT_USER_CHAR_LIMIT = 1375
 
 #: 每轮允许的 consolidation 失败次数；超过后返回 TERMINAL，模型停止重试（#42405）。
 MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
+
+#: `_snapshot` 的会话上限。快照**不随写入失效**（AC8：session 内逐字节不变），所以
+#: 唯一能回收的就是旧会话；超上限时丢最早插入的那一个（dict 保序）。
+SNAPSHOT_CACHE_LIMIT = 128
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -95,9 +100,37 @@ def find_unique_match(entries: list[str], old_text: str) -> tuple[int | None, bo
     return (matches[0] if matches else None), False
 
 
+def target_for(kind: str, tier: str) -> str:
+    """分拣规则的**唯一定义**：`kind=user` 或 `tier=profile` → ``user``，其余 → ``memory``。
+
+    capability、migration、journey、notification 共用这一句。定义放在这个叶子模块
+    （无内部导入），再在上面各层做薄适配，避免任何一个方向上的循环导入。
+    """
+    return "user" if tier == "profile" or kind == "user" else "memory"
+
+
+def normalize_entry(text: str) -> str:
+    """条目的唯一规范化：两端去空白。写入侧（add/replace/batch）与定位侧共用这一句。
+
+    条目在文件里永远是 strip 过的；调用方手里的 `matched_entry`（SQLite 记录正文、
+    staged pin）可能带尾随空白。两边不归一，pin 就会指向一条"磁盘上不存在"的原文。
+    """
+    return text.strip()
+
+
+def entry_digest(text: str) -> str:
+    """条目正文的稳定摘要。墓碑（content-free）与 markdown 清理入口之间的唯一对账键。
+
+    算法必须与 `store.SqliteMemoryV2Store._digest` 一致（墓碑里的 `content_hashes`
+    写的就是它）——所以定义放在这个叶子模块，store 反向引用，避免两处各写一遍。
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def pinned_index(entries: list[str], matched_entry: str) -> int | None:
     """staged 写入审阅时的那条完整条目当前的下标；条目已消失 → None（stale）。"""
-    return entries.index(matched_entry) if matched_entry in entries else None
+    entry = normalize_entry(matched_entry)
+    return entries.index(entry) if entry in entries else None
 
 
 def stale_entry_message(entry: str) -> str:
@@ -244,10 +277,13 @@ class MarkdownMemoryStore:
         )
 
     def render_snapshot(self, session_id: str) -> dict[str, str]:
-        """会话级冻结快照（M9）：首次调用渲染，之后返回同一份，直到 `invalidate_snapshot`。
+        """会话级冻结快照（M9）：首次调用渲染，之后返回同一份。
 
         首次渲染**读盘**而不是读活列表：新会话可能由另一个进程（或用户手改）写下的内容
         驱动，读盘才与"markdown 是权威"一致；读不出来时退回活列表，绝不因读失败清空提示。
+
+        快照刻意**不**在写入后失效（AC8：同一 session 内注入必须逐字节不变，前缀缓存
+        才稳定），所以缓存只按 LRU 式的插入序回收旧会话，见 `SNAPSHOT_CACHE_LIMIT`。
         """
         cached = self._snapshot.get(session_id)
         if cached is not None:
@@ -262,11 +298,10 @@ class MarkdownMemoryStore:
             )
             block = self._render_block(target, [self._sanitize(e, path.name) for e in entries])
             rendered[target] = block
+        while len(self._snapshot) >= SNAPSHOT_CACHE_LIMIT:
+            self._snapshot.pop(next(iter(self._snapshot)))
         self._snapshot[session_id] = rendered
         return rendered
-
-    def invalidate_snapshot(self, session_id: str) -> None:
-        self._snapshot.pop(session_id, None)
 
     def _entries_for(self, target: str) -> list[str]:
         return self.user_entries if target == "user" else self.memory_entries
@@ -360,7 +395,8 @@ class MarkdownMemoryStore:
         ):
             return None
         path = self.path_for(target)
-        bak_path = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
+        # 纳秒戳：秒级两道写入落在同一秒会互相覆盖，备份等于没备。
+        bak_path = path.with_suffix(path.suffix + f".bak.{time.time_ns()}")
         try:
             bak_path.write_text(raw, encoding="utf-8")
         except OSError:
@@ -368,9 +404,9 @@ class MarkdownMemoryStore:
         return str(bak_path)
 
     def _mutate(
-        self, target: str, mutate: Any, *, skip_drift: bool = False,
+        self, target: str, mutator: Callable[[list[str], int], Any], *, skip_drift: bool = False,
     ) -> dict[str, Any]:
-        """加锁 → 重读磁盘 → ``mutate(entries, limit)`` → 落盘 → 成功响应。
+        """加锁 → 重读磁盘 → ``mutator(entries, limit)`` → 落盘 → 成功响应。
 
         重读保证不会用旧快照覆盖并发写（上游 #119668）。读失败一律拒写（即便 add 也会
         重写整个文件）。**漂移不再拒写**：先备份 ``.bak.<ts>``，再以磁盘内容为准继续
@@ -387,7 +423,7 @@ class MarkdownMemoryStore:
             bak = None if skip_drift else self._detect_external_drift(target, raw)
             # 漂移时仍以磁盘为准：解析结果就是权威内容，写回只是规范化。
             self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
-            result = mutate(self._entries_for(target), self._char_limit(target))
+            result = mutator(self._entries_for(target), self._char_limit(target))
             if isinstance(result, dict):
                 return result
             self._set_entries(target, result[0])
@@ -440,7 +476,9 @@ class MarkdownMemoryStore:
 
         def _add(entries: list[str], limit: int) -> Any:
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return self._success_response(
+                    target, "Entry already exists (no duplicate added).", deduplicated=True,
+                )
             if len(ENTRY_DELIMITER.join(entries + [content])) > limit:
                 return self._failure_with_entries(
                     target,
@@ -449,10 +487,12 @@ class MarkdownMemoryStore:
                     f"merge overlapping entries into shorter ones or 'remove' stale or less important "
                     f"entries (see current_entries below), then retry this add — all in this turn.",
                 )
-            return entries + [content], "Entry added."
+            return entries + [content], "Entry added.", {"deduplicated": False}
 
-        # 纯追加：跳过漂移检查（追加不会覆盖外来内容），但仍拒绝读失败——add 会重写整个文件。
-        return self._mutate(target, _add, skip_drift=True)
+        # add 会重写整个文件，所以要和其他写路径一样走漂移备份：手改后追加不是漂移
+        # （`_detect_external_drift` 只在 round-trip 失败或单条超限时返回备份路径），
+        # 但**无法 round-trip** 的手改会在 add 时被静默规范化——没有备份就等于吞掉。
+        return self._mutate(target, _add)
 
     def _replace_sync(
         self, target: str, old_text: str, new_content: str, matched_entry: str | None = None,
@@ -473,7 +513,7 @@ class MarkdownMemoryStore:
 
     def _locate(
         self, entries: list[str], old_text: str, verb: str, matched_entry: str | None = None,
-    ) -> Any:
+    ) -> int | dict[str, Any]:
         """``old_text`` 选中的条目下标，或编辑应返回的错误 dict。
 
         staged 写入携带审阅时的**完整条目**（``matched_entry``）：只有那一条合格，
@@ -501,11 +541,11 @@ class MarkdownMemoryStore:
     def _resolve_entry_sync(self, target: str, old_text: str, verb: str) -> dict[str, Any]:
         """``{"success": True, "matched_entry": <完整条目>}``，在锁内读当前态。"""
 
-        def _resolve(entries: list[str], limit: int) -> Any:
+        def _resolve(entries: list[str]) -> dict[str, Any]:
             idx = self._locate(entries, old_text.strip(), verb)
             return idx if isinstance(idx, dict) else {"success": True, "matched_entry": entries[idx]}
 
-        return self._mutate(target, _resolve, skip_drift=True)
+        return self._mutate(target, lambda entries, _limit: _resolve(entries), skip_drift=True)
 
     def _edit(
         self, target: str, old_text: str, new_content: str | None, matched_entry: str | None = None,
@@ -654,6 +694,32 @@ class MarkdownMemoryStore:
         self, target: str, operations: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return await asyncio.to_thread(self._resolve_batch_entries_sync, target, operations)
+
+    async def remove_by_digest(self, digests: Sequence[str]) -> list[str]:
+        """按正文哈希清理条目（墓碑-only 删除的补偿入口，见 `store.MemoryDeletionReceiptV2`）。
+
+        两个文件都扫：墓碑是 content-free 的，除哈希外没有任何分拣线索（kind/tier 随
+        记录行一起没了），所以不能替调用方猜 USER.md 还是 MEMORY.md。返回被清理的
+        文件名（不含条目内容），供调用方留痕；没命中的文件不重写。
+        """
+        wanted = set(digests)
+        if not wanted:
+            return []
+        cleaned: list[str] = []
+        for target in ("memory", "user"):
+            def _drop(entries: list[str], _limit: int) -> Any:
+                kept = [entry for entry in entries if entry_digest(entry) not in wanted]
+                removed = len(entries) - len(kept)
+                if not removed:
+                    return {"success": True, "removed_by_digest": 0}
+                return kept, f"Removed {removed} entry(ies) matched by digest.", {
+                    "removed_by_digest": removed,
+                }
+
+            response = await asyncio.to_thread(self._mutate, target, _drop)
+            if response.get("removed_by_digest"):
+                cleaned.append(self.path_for(target).name)
+        return cleaned
 
     # ------------------------------------------------------------------ 查询
 
