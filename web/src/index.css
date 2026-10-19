@@ -22,6 +22,9 @@
 @import '@fontsource-variable/inter';
 @import '@fontsource-variable/jetbrains-mono';
 
+/* stylelint-disable color-no-hex, declaration-property-value-disallowed-list --
+ * token 定义块是**唯一**允许出现颜色字面量的地方（#1364 / web/stylelint.config.mjs）。
+ * 成对包住下面两个主题块；消费点（其余 7 个 CSS 文件）一律 `var(--token)`。 */
 :root {
   /* ── Fonts ── */
   --font-ui: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -76,6 +79,9 @@
   /* ── Shadows: 2 levels, floating surfaces only ── */
   --shadow-overlay: 0 2px 8px rgba(0, 0, 0, 0.25);
   --shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.42);
+  /* 内嵌高光（0.5px 顶边）**不是**高度阴影，不计入上面 2 档；主题恒定，
+   * 亮色块刻意不覆盖（白 6% 在亮底本就不可见，翻转成黑线会改变既有效果）。 */
+  --inset-highlight: inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
 
   /* ── Motion (PRD §19 P0: inspector 220-280 / inline expand 160-220 /
    *    pulse 600-900 / palette 120-180) ── */
@@ -98,14 +104,15 @@
    * Observable Agent Workspace redesign (feat/frontend-c, Phase 1):
    * primary tokens are the SDD §3/§4.1 semantic surfaces; the older
    * --bg-* / --surface-N names are kept as aliases so app.css keeps
-   * working unchanged. Pink accent per frozen decision 08 #14. */
+   * working unchanged. Accent: indigo signature per ticket #1364
+   * (supersedes frozen decision 08 #14 — see 08_DECISION_LOG.md 2026-10-19). */
   --surface-canvas:    #0c0c0f;   /* app frame / ambient backdrop */
   --surface-chrome:    #101014;   /* app bar / rails / inspector (quieter) */
   --surface-workspace: #121217;   /* primary content area (brightest) */
   --surface-elevated:  #17171d;   /* inset cards, terminal blocks base */
   --surface-overlay:   #262b34;   /* popovers / floating controls */
   --surface-glass:     rgba(38, 43, 52, 0.72); /* translucent overlays */
-  --surface-selected:  rgba(245, 174, 201, 0.08); /* pink-tinted selection */
+  --surface-selected:  rgba(83, 58, 253, 0.08); /* accent-tinted selection */
   --surface-hover:     rgba(255, 255, 255, 0.045);
   --surface-danger:    rgba(229, 114, 111, 0.10);
 
@@ -129,18 +136,51 @@
   --text-secondary: rgba(255, 255, 255, 0.64);
   --text-tertiary:  rgba(255, 255, 255, 0.52);
 
-  /* Accent: restrained pale pink signature (frozen decision 08 #14, SDD 02 §4.1).
-   * Not AI purple, not the prior cool cyan — the product's own quiet tint. */
-  --accent:        #f1b3ca;
-  --accent-strong: #f4a5c4;
-  --accent-soft:   rgba(241, 179, 202, 0.12);
+  /* 主题恒定的两个"非语义"颜色（两主题同值 ⇒ 亮色块刻意不覆盖）：
+   *   --on-solid      —— 放在**饱和实底**（accent/success/danger 按钮、滑杆拇指、
+   *                      星点）上的前景/实体；不随主题翻转，否则亮色下按钮字会变黑。
+   *   --overlay-scrim —— 遮罩 / 压暗基色（`color-mix` 的黑色端）；
+   *                      与 `--cn-ink` 无关（那在暗色下是近白，见 #1364 改动 5）。 */
+  --on-solid:      #ffffff;
+  --overlay-scrim: #000;
+
+  /* Accent: indigo signature (#533afd) — supersedes frozen decision 08 #14
+   * (ticket #1364, 08_DECISION_LOG.md 2026-10-19). CTA-only, used sparingly:
+   * one filled pill per band (Stripe DESIGN.md:250/:268/:440).
+   * 取值来源：Stripe Indigo #533afd / Indigo Deep #4434d4（hover）/ Indigo Press
+   * #2e2b8c（:270，两主题同值）。白底实测 6.19:1 ⇒ 过 AA 正文 4.5:1。 */
+  --accent:        #533afd;
+  --accent-strong: #4434d4;
+  --accent-soft:   rgba(83, 58, 253, 0.12);
   --accent-muted:  var(--accent-soft); /* legacy alias used across app.css */
+  --accent-press:  #2e2b8c;
+  /* accent 当**文字**用时的两档（#1364 施工实测）：#533afd 在暗底只有 2.30–3.15:1，
+   * 远低于 AA 4.5 ⇒ 暗色必须换成提亮档；亮色块 `--accent` 本身已 5.49–6.19:1，
+   * 故亮色块的两个 text token 直接等于 #533afd / #4434d4。
+   * 实测（暗底 canvas/chrome/elevated/overlay）：#9a8bff 6.99/6.79/6.38/5.08，
+   * #b3a6ff 8.3（elevated）——hover 档必须比 base 更亮，故与 `--accent-strong`
+   * （#4434d4，暗色下只作**实底 hover**，白字 7.81:1）分开，不能共用一个 token。 */
+  --accent-text:        #9a8bff;
+  --accent-text-strong: #b3a6ff;
 
   /* Status colors (small-area use only: dots, badges, labels) */
   --success: #6fce9e;
   --warning: #e3b565;
   --danger: #e5726f;
   --info: #7c9eff;
+
+  /* Reasoning-effort slider（app.css `.reasoning-effort-slider*`）：蓝→紫渐变、
+   * 能量辉光与星点亮度是**状态表达**，不是语义色，故不进上面的语义色板。
+   * 亮色块只覆盖三档文字色；渐变/辉光在两种主题下都画在深色轨道上，故同值继承。 */
+  --effort-tone-blue: #9bc4ff;
+  --effort-tone-violet: #d2b2ff;
+  --effort-tone-deep: #e0caff;
+  --effort-track-start: #4d93f8;
+  --effort-gradient-1: #3b1178;
+  --effort-gradient-2: #6d28d9;
+  --effort-gradient-3: #9333ea;
+  --effort-gradient-4: #c084fc;
+  --effort-glow: #a855f7;
 
   /* State tint for hover / selected washes */
   --color-hover: var(--surface-hover);
@@ -185,7 +225,7 @@
   --surface-elevated:  #ffffff;
   --surface-overlay:   #ffffff;
   --surface-glass:     rgba(255, 255, 255, 0.78);
-  --surface-selected:  rgba(207, 91, 139, 0.07);
+  --surface-selected:  rgba(83, 58, 253, 0.07);
   --surface-hover:     rgba(20, 20, 28, 0.04);
   --surface-danger:    rgba(207, 74, 70, 0.08);
 
@@ -206,14 +246,20 @@
    * 粉色选中染底上 4.46:1，均不达 AA——估算让位实测；0.63 → 白底 ≈5.4、染底 ≈5.0。 */
   --text-tertiary:  rgba(18, 18, 24, 0.63);
 
-  /* §15 实测纪律（与 --text-tertiary 同款）：原 #c96990 在白底只有 3.56:1、
-   * 卡片底 3.44:1、画布底 3.15:1——12px 的 .act-name（工具名）与
-   * .rail-empty-action 直接不达 AA。按同一色相压低明度到白底 ≈5.45:1，
-   * 亮色下三档背景（白 / 卡片 / 画布）全部 ≥4.8。 */
-  --accent:        #b2406e;
-  --accent-strong: #9c355e;
-  --accent-soft:   rgba(178, 64, 110, 0.10);
+  /* §15 实测纪律（与 --text-tertiary 同款）：#533afd 是**唯一**主题内同值的
+   * accent（暗色下不改），实测白底 6.19:1、卡片底 5.93:1、画布底 5.88:1 ——
+   * 12px 的 .act-name（工具名）与 .rail-empty-action 全部 ≥4.5:1 AA。
+   * hover 用 Indigo Deep #4434d4（白底 7.4:1），press 用 #2e2b8c（白底 9.5:1）。
+   * 亮色块只覆盖 hover/press/soft，`--accent` 本身与暗色块同值（#1364 改动 3）。 */
+  --accent:        #533afd;
+  --accent-strong: #4434d4;
+  --accent-soft:   rgba(83, 58, 253, 0.10);
   --accent-muted:  var(--accent-soft);
+  --accent-press:  #2e2b8c;
+  /* 亮色下 accent 本身已达标（白底 6.19:1），text 档与 fill 档同值；
+   * hover 档沿用 deep（#4434d4 白底 7.81:1），保留"hover 变深"的既有反馈。 */
+  --accent-text:        #533afd;
+  --accent-text-strong: #4434d4;
 
   /* 同因，且要按**最坏底**定值：原 #2f9e63 在画布底只有 3.01:1。
      但只按纯底色量是不够的——「已完成」徽标与顶栏 run-pulse 的底是
@@ -224,6 +270,12 @@
   --warning: #b07a10;
   --danger: #cf4a46;
   --info: #4a6fd6;
+
+  /* 亮色只覆盖三档文字色（轨道仍是深色渐变 ⇒ 其余 effort token 同值继承，
+   * 见暗色块注释）。白底实测：#2456a4 7.4:1 / #6534b1 7.3:1 / #4c1d95 10.9:1。 */
+  --effort-tone-blue: #2456a4;
+  --effort-tone-violet: #6534b1;
+  --effort-tone-deep: #4c1d95;
 
   --color-hover: var(--surface-hover);
 
@@ -238,6 +290,7 @@
 
   color-scheme: light;
 }
+/* stylelint-enable color-no-hex, declaration-property-value-disallowed-list */
 
 /* ── Reset / base ── */
 *,
