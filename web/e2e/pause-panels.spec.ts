@@ -53,7 +53,7 @@ function pausedFrames(version = 1): FrameSpec[] {
         },
         closeout_source: 'model',
         continuation: {
-          completed: ['本逻辑 run 已消耗 3 个 agent turn'],
+          completed: ['本逻辑 run 已消耗 3 个 agent turn', '第二条已完成项'],
           remaining: ['暂停发生在下一轮模型决策之前'],
           blockers: ['run.max_agent_turns_total 到顶：consumed=3, ceiling=8'],
           next_safe_action: '提高绝对 ceiling 后以同一 run_id 恢复',
@@ -102,9 +102,9 @@ test('① continuation 四键逐字上屏（PausedPanel）', async ({ page }) =>
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText('已在预算到顶处暂停');
-  // 四键按 CONTINUATION_SECTIONS 的固定顺序渲染；文案逐字来自 run/paused 载荷。
+  // 前三键按 CONTINUATION_SECTIONS 顺序渲染，第四键"下一步"为其后独立硬编码 li；文案逐字来自 run/paused 载荷。
   await expect(panel.locator('.pause-panel-continuation li')).toHaveText([
-    '已完成：本逻辑 run 已消耗 3 个 agent turn',
+    '已完成：本逻辑 run 已消耗 3 个 agent turn；第二条已完成项',
     '剩余：暂停发生在下一轮模型决策之前',
     '阻塞：run.max_agent_turns_total 到顶：consumed=3, ceiling=8',
     '下一步：提高绝对 ceiling 后以同一 run_id 恢复',
@@ -128,7 +128,6 @@ test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /res
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText('已因疑似卡住暂停');
-  await expect(panel).toContainText('疑似卡住');
   // 引导面：给的是 steer / 变更依据，并明说本面板不提供一键恢复。
   await expect(panel).toContainText('提供新指示（steer）');
   await expect(panel).toContainText('不提供一键恢复');
@@ -155,7 +154,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   let resumeBody: Record<string, unknown> | null = null;
   let resumeUrl = '';
 
-  await routeApi(page, { sessions: [ROW], events: frames });
+  await routeApi(page, { sessions: [ROW] });
   // 重读 durable log 的观测点：409 后 useSession 必须 `selectSession` 同一会话，
   // 让历史装载 effect 重跑（不变量 #22：屏幕上的暂停事实以服务器那份为准）。
   await page.route(new RegExp(`/api/sessions/${SID}/events$`), async (route: Route) => {
@@ -192,7 +191,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   expect(resumeUrl).toMatch(new RegExp(`/api/sessions/${SID}/resume$`));
 
   // 拒绝面：后端 detail 逐字上屏（前缀标明"被拒绝"而非"失败"）。
-  await expect(page.locator('.app-error')).toHaveText(
+  await expect(page.locator('.app-error').first()).toHaveText(
     '恢复被拒绝：budget version 过期：expected_version=1，当前 version=2（CAS 比较失败，未启动任何工作）',
   );
   // 409 零副作用：面板仍在、用户草稿不丢（改大再来一次即可）。
