@@ -203,6 +203,11 @@ WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
 # ── #1197 项 1：会话级上下文窗口（五挡位之一），per-session 独立；
 # 内存投影见 context/window.py derive（倒序 last-wins）。
 CONTEXT_WINDOW_CHANGED = "context/window-changed"
+# ── #1359 阶段 1：会话级**持久目标对象**（抄 dsh durable goal）──────────────
+# 每次变更携带**变更后的完整快照**（create/edit/pause/resume/complete/block），
+# clear 写墓碑 `{operation:"clear", cleared:{goal_id, revision}}`。重放 = 取最后
+# 一条合法事件（`session/goal.py::effective_goal`），不做增量重算。
+GOAL_CHANGED = "goal/changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -390,6 +395,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ERROR,
         # #1197 项 1：会话级上下文窗口挡位
         CONTEXT_WINDOW_CHANGED,
+        # #1359 阶段 1：持久目标对象（状态事件，不投影成消息）
+        GOAL_CHANGED,
     }
 )
 

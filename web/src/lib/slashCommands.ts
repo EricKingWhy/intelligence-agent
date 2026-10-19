@@ -19,11 +19,12 @@
 import { fuzzyScore } from './commands';
 import { EventType, type AgentEvent } from '../types';
 import {
-  getTaskState,
+  getGoalState,
+  postGoalCommand,
   postSessionCommand,
-  describeSessionError,
   SessionError,
-  TaskNotDefinedError,
+  type GoalSnapshot,
+  type GoalStatePayload,
   type SlashRegistryCommand as SlashRegistryEntry,
 } from './api';
 
@@ -83,36 +84,107 @@ async function runPlan(_args: string | undefined, ctx: SlashCommandContext): Pro
   await postSessionCommand(ctx.sessionId, '/workflow-mode', { mode: next });
 }
 
+/** `/goal` 的子命令文法（抄 dsh `command-goal` 的 `parseGoalCommand`）。
+ *
+ *  控制词**只有占满整个输入**才识别：`/goal pause after verification` 是
+ *  objective（创建/编辑目标），不是 pause——否则一个自然语言目标会被误解析成
+ *  生命周期命令。`edit` 单独出现算"缺 objective"的编辑（给可操作错误，不创建
+ *  一个叫 edit 的目标）。其余一律当 objective。 */
+export type GoalCommand =
+  | { kind: 'show' }
+  | { kind: 'create'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'invalid-edit' }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export function parseGoalCommand(rawInput: string | undefined): GoalCommand {
+  const input = (rawInput ?? '').trim();
+  if (input.length === 0) return { kind: 'show' };
+  const control = input.toLowerCase();
+  if (control === 'clear') return { kind: 'clear' };
+  if (control === 'pause') return { kind: 'pause' };
+  if (control === 'resume') return { kind: 'resume' };
+  if (control === 'edit') return { kind: 'invalid-edit' };
+  if (/^edit(?=\s)/i.test(input)) return { kind: 'edit', objective: input.slice(4).trim() };
+  return { kind: 'create', objective: input };
+}
+
+/** `/goal` 无参回执：objective/phase/轮数/activation/可用命令（票面 AC1 与 UX）。
+ *  纯函数，便于单测；blocked 时附 code + message。 */
+export function formatGoalSnapshot(snapshot: GoalSnapshot): string {
+  const g = snapshot.goal;
+  if (!g.defined) return '当前会话未定义目标。用 /goal <objective> 创建。';
+  const lines = [
+    `目标：${g.objective ?? ''}`,
+    `状态：${g.phase ?? '?'}`,
+    `轮数：${g.rounds_started}/${g.max_goal_rounds}`,
+    `自动续跑：${snapshot.activation}`,
+  ];
+  if (g.phase === 'blocked' && g.blocked_reason) {
+    lines.push(`阻塞：${g.blocked_reason.code}: ${g.blocked_reason.message}`);
+  }
+  if (g.needs_interview) {
+    lines.push('目标缺少 ## Success criteria 或 ## Verification 段，建议先补全再执行。');
+  }
+  lines.push(`可用命令：${goalCommandHint(g)}`);
+  return lines.join('\n');
+}
+
+/** 当前相位下真正有意义的下一批命令（抄 dsh `commandHint`）。 */
+export function goalCommandHint(g: GoalStatePayload): string {
+  if (g.phase === 'complete') return '/goal <objective>，/goal clear';
+  if (g.phase === 'paused' || g.phase === 'blocked') {
+    return '/goal edit <objective>，/goal resume，/goal clear';
+  }
+  return '/goal edit <objective>，/goal pause，/goal clear';
+}
+
+/** 409 的可操作文案（AC3：把 revision 冲突翻成"当前是 rN"）。 */
+function goalConflictMessage(e: SessionError): string {
+  return `${e.message}。可先 /goal 查看当前 revision，再带 expected_revision 重试`;
+}
+
 async function runGoal(args: string | undefined, ctx: SlashCommandContext): Promise<void> {
-  const text = args?.trim();
-  if (text) {
-    // 带参 = 设置（票面 §4.2：请求体 `{task_text}`；422/404 由 reportError 透出）。
-    try {
-      await postSessionCommand(ctx.sessionId, '/task/definition', { task_text: text });
-    } catch (e) {
-      if (e instanceof SessionError && e.status === 409) {
-        // 二次设置必 409（后端语义：task/defined 全流至多一条，不覆盖）。裸 409
-        // detail 只说"已定义"不给下一步（审查 A-P2-2）——补一条可操作的引导。
-        ctx.reportError(
-          `${e.message}。已有目标时 /goal 不再覆盖；输入 /goal（无参数）可查看当前目标`,
+  const command = parseGoalCommand(args);
+  try {
+    switch (command.kind) {
+      case 'show':
+        // 查看结果（含未定义目标）是中性信息，不染红（审查 B-S-4/A-P3-2）。
+        ctx.reportInfo(formatGoalSnapshot(await getGoalState(ctx.sessionId)));
+        return;
+      case 'invalid-edit':
+        ctx.reportError('用法：/goal edit <objective>（edit 后必须跟目标文本）');
+        return;
+      case 'create':
+        ctx.reportInfo(
+          formatGoalSnapshot(
+            await postGoalCommand(ctx.sessionId, { operation: 'create', objective: command.objective }),
+          ),
         );
         return;
-      }
-      throw e;
+      case 'edit':
+        ctx.reportInfo(
+          formatGoalSnapshot(
+            await postGoalCommand(ctx.sessionId, { operation: 'edit', objective: command.objective }),
+          ),
+        );
+        return;
+      case 'pause':
+      case 'resume':
+      case 'clear':
+        ctx.reportInfo(
+          formatGoalSnapshot(await postGoalCommand(ctx.sessionId, { operation: command.kind })),
+        );
+        return;
     }
-    return;
-  }
-  // 无参 = 查看：结果与「未定义」（404，TaskNotDefinedError）都是中性信息——
-  // 不是错误，走 reportInfo（审查 B-S-4/A-P3-2）；其余失败才 reportError。
-  try {
-    const state = await getTaskState(ctx.sessionId);
-    ctx.reportInfo(state.task_text ? `当前目标：${state.task_text}` : '当前会话未定义目标');
   } catch (e) {
-    if (e instanceof TaskNotDefinedError) {
-      ctx.reportInfo('当前会话未定义目标');
+    if (e instanceof SessionError && e.status === 409) {
+      ctx.reportError(goalConflictMessage(e));
       return;
     }
-    ctx.reportError(describeSessionError(e, '查看目标失败'));
+    throw e;
   }
 }
 

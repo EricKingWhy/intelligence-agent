@@ -432,6 +432,22 @@ function summarizeWorkflowModeChanged(event: AgentEvent): string {
   return event.data.mode === 'plan' ? '已切换到 Plan 模式' : '已切换到普通模式';
 }
 
+// #1359 阶段 1：目标生命周期事件——审计行，投影状态不在这里折叠。
+const GOAL_OPERATION_LABELS: Record<string, string> = {
+  create: '已创建目标',
+  edit: '已修改目标',
+  pause: '已暂停目标',
+  resume: '已恢复目标',
+  complete: '已完成目标',
+  block: '目标已阻塞',
+  clear: '已清除目标',
+};
+
+function summarizeGoalChanged(event: AgentEvent): string {
+  const operation = String(event.data.operation ?? '');
+  return GOAL_OPERATION_LABELS[operation] ?? `目标变更（${operation || '未知操作'}）`;
+}
+
 /** 增量类事件共用摘要（model/delta、text/delta、tool/output_delta、
  *  reasoning/delta 同一惯例：Timeline 行仍 verbatim 在场，摘要只记增量）。 */
 function summarizeDeltaChars(event: AgentEvent): string {
@@ -1959,6 +1975,11 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // ⚠ 项 1 加了这个事件类型却漏登记：`EVENT_SEMANTICS` 是穷尽 `Record<EventTypeValue, …>`，
   // 缺一条 `tsc -b` 直接失败（gate0 项），而 vitest 不跑 tsc 所以当时没红。
   [EventType.CONTEXT_WINDOW_CHANGED]: { apply: unhandledProjection, summarize: unknownSummary },
+  // #1359 阶段 1：`goal/changed` 是目标生命周期的 append-only 事实（每次携带变更后
+  // 完整快照）。目标的**生效值**由后端 `session/goal.py::effective_goal` 倒序 last-wins
+  // 派生，前端不重复实现那份折叠——读数走 `GET /api/sessions/{id}/goal`。
+  // 与 WORKFLOW_MODE_CHANGED 同一处理：投影 no-op + Timeline 一行摘要。
+  [EventType.GOAL_CHANGED]: { apply: noopProjection, summarize: summarizeGoalChanged },
   [EventType.COMPACTION_START]: { apply: projectCompactionInProgress, summarize: emptySummary },
   [EventType.COMPACTION_END]: { apply: projectCompactionEnded, summarize: emptySummary },
   // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，

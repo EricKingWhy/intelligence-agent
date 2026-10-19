@@ -63,6 +63,7 @@ export const EventType = {
   PERMISSION_REVOKED: 'permission/approval-revoked',
   WORKFLOW_MODE_CHANGED: 'workflow/mode-changed',
   CONTEXT_WINDOW_CHANGED: 'context/window-changed',
+  GOAL_CHANGED: 'goal/changed',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
   ERROR: 'error',

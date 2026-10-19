@@ -2619,6 +2619,12 @@ def create_app(
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # #1359 阶段 1 持久目标对象路由（独立 router：投影/写入口单源在
+    # session/goal.py，本模块只留一行接入面）
+    from agent_harness.web.goal_delivery import register_goal_routes
+
+    register_goal_routes(app, validate_session_id=validate_session_id)
+
     # W-08 / #352 证据投影路由（独立 router：记录 + 服务端投影查询；
     # 投影单源在 session/evidence.py，本模块只留一行接入面）
     from agent_harness.web.evidence_delivery import register_evidence_routes

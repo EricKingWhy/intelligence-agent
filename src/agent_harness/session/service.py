@@ -215,6 +215,11 @@ from agent_harness.session.evidence import (
     derive_evidence_state,
     evaluate_evidence_freshness,
 )
+from agent_harness.session.goal import (
+    GoalOutcome,
+    append_goal_change,
+    effective_goal,
+)
 from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.model_switch import (
     ModelChange,
@@ -1300,6 +1305,12 @@ class SessionService:
     # set/pop（见 `compact_session_context` 的 finally），不会遮蔽共享字典。
     _compact_in_flight: ClassVar[dict[str, bool]] = {}
 
+    # #1359 阶段 1：目标自动续跑的**进程内**授权集合（armed 的 session_id）。
+    # 与 `_compact_in_flight` 同一条理由：`web/app.py::session_service()` 每请求新建
+    # 一个 SessionService，实例字段跨请求不共享。**不落盘**（抄 dsh）：它描述"本进程
+    # 是否允许自动续跑"，不是目标事实；进程重启 / `resume_and_launch` / `fork` 后为空。
+    _goal_armed: ClassVar[set[str]] = set()
+
     def __init__(
         self,
         *,
@@ -2186,6 +2197,10 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # #1359 AC10：resume 后自动续跑必须**重新授权**（抄 dsh：resume 是新进程
+        # 上下文，旧进程的 armed 不继承）。放在这里 = 任何 resume 失败路径都不会
+        # 留下 armed（失败不改任何状态，成功也必须先 disarm 再由 `/goal resume` 武装）。
+        self._goal_armed.discard(session_id)
         if session_id in self._budget_recovery_failed_sessions:
             from agent_harness.recovery.scan import record_constraint_tool_results
 
@@ -6810,6 +6825,73 @@ class SessionService:
         )
         append_workflow_mode_change(session, mode)
         return {"id": session_id, "mode": mode.value}
+
+    # ── #1359 阶段 1：持久目标对象（goal/changed）──────────────────────────
+    def goal_activation(self, session_id: str) -> str:
+        """进程内 activation 的**唯一**读点（``armed`` / ``disarmed``）。
+
+        不落盘（见 ``_goal_armed`` 注释），所以它既不是事件也不是投影；GET 与
+        POST 回执都从这里取，避免两处各写一份 ``"armed" if ... else``。
+        """
+        return "armed" if session_id in self._goal_armed else "disarmed"
+
+    async def goal_state(self, session_id: str) -> dict[str, Any]:
+        """只读目标投影 + 进程内 activation（`11 §6.1` 同类：零副作用）。
+
+        未定义目标返回 ``defined=False`` 的快照而不是 404——"没有目标"是正常
+        状态（与 ``task_state`` 返回 None 的分工不同：GET 端点总是 200）。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        state = effective_goal(events)
+        return {
+            "id": session_id,
+            "goal": state.to_payload(),
+            "activation": self.goal_activation(session_id),
+        }
+
+    async def set_goal(
+        self,
+        session_id: str,
+        operation: str,
+        *,
+        objective: object = None,
+        blocked_reason: object = None,
+        max_goal_rounds: object = None,
+        expected_revision: object = None,
+    ) -> GoalOutcome:
+        """目标生命周期命令（#1359 阶段 1）。
+
+        守卫与写路径照抄 ``set_workflow_mode`` / ``task_definition``：形态 422 先于
+        404；非 live 路径经 ``_apply_write_with_conflict_retry``（撞号重读重跑）。
+        校验与 CAS 全在 ``append_goal_change``（唯一写入口）——拒绝 = 零事件。
+
+        activation 是**命令的副作用而不是事件**（抄 dsh）：create/resume → armed；
+        pause/complete/block/clear → disarmed；edit 不动。
+        """
+        self._validate_session_id(session_id)
+        existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        outcome = await self._apply_write_with_conflict_retry(
+            session_id,
+            existing,
+            lambda session: append_goal_change(
+                session,
+                operation,
+                objective=objective,
+                blocked_reason=blocked_reason,
+                max_goal_rounds=max_goal_rounds,
+                expected_revision=expected_revision,
+            ),
+        )
+        if outcome.ok:
+            if operation in ("create", "resume"):
+                self._goal_armed.add(session_id)
+            elif operation in ("pause", "complete", "block", "clear"):
+                self._goal_armed.discard(session_id)
+            await self.refresh_progress_file(session_id)
+        return outcome
 
     # ── #1190：会话级约束管理面板（受保护事实查看 + 主动撤销）──────────────
     async def list_protected_facts(self, session_id: str) -> list[dict[str, Any]]:

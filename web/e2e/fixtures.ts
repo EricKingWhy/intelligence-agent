@@ -233,7 +233,7 @@ async function installWsRoute(
 /** 后端 `web/plugins.py::BUILTIN_SLASH_COMMANDS` 的镜像（e2e 不启真后端）。
  *  只镜像"存在哪些命令 + 展示元数据"；执行回调仍在前端 `BUILTIN_RUNS`。 */
 const BUILTIN_SLASH_FIXTURE = [
-  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'goal', kind: 'builtin', description: '设置、查看或管理长期任务目标（暂停/恢复/编辑/清除）' },
   { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
   { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
   { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
