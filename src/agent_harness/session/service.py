@@ -4083,6 +4083,20 @@ class SessionService:
         events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
+        if nxt.origin == GOAL_ORIGIN and nxt.kind == KIND_QUEUE:
+            # P2-6：goal 轮次在 `message/queued` 与投递之间存在窗口。这期间用户
+            # `/goal pause|complete|clear`（或撞审批 / 无进展 park）后，终态驱动
+            # 仍会把它送出去跑一轮——AC2「pause 后不再续跑」在这个窗口不成立。
+            # 判据放在**唯一投递口**：所有来源都路由到这里，比在每个改相位的地方
+            # 各写一份回收逻辑更小也更难漏。回收后重新选队首（普通输入照常投递）。
+            goal_now = effective_goal(events)
+            if not (goal_now.defined and goal_now.phase is GoalPhase.ACTIVE):
+                await self.cancel_queue(session_id=session_id, queue_id=nxt.input_id)
+                # 递归重选队首：普通输入排在后面时不该被 goal 轮次的回收连带跳过。
+                # 每层都消费掉一条 goal 项，队列有限 ⇒ 必然收敛。
+                return await self.deliver_next_undelivered(
+                    session_id=session_id, amend=amend,
+                )
         if _has_procedural_rule_signal(events, nxt.kind, nxt.input_id):
             user_input_metadata["remember_as_procedural_rule"] = True
         launched = await self.resume_and_launch(
@@ -4136,6 +4150,8 @@ class SessionService:
         """
         events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
         if not events:
+            return
+        if not self._settings.goal_auto_round_enabled:  # 上线开关（票面发布说明）
             return
         state = effective_goal(events)
         if not state.defined or state.phase is not GoalPhase.ACTIVE:

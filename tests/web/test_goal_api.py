@@ -19,6 +19,24 @@ from tests.conftest import register_workspace_from_build_kwargs
 _GOOD = "## Objective\n修好登录页\n\n## Success criteria\n跳转成功\n\n## Verification\npytest tests/auth\n"
 
 
+@pytest.fixture(autouse=True)
+def _restore_goal_classvars():
+    """P2-7：两个 activation 集合是进程级 ClassVar，不能 `.clear()` 了就走——
+    那会连带抹掉别的会话/别的用例的授权（xdist 或乱序时）。保存/恢复原样。"""
+    saved = (
+        set(service_module.SessionService._goal_armed),
+        set(service_module.SessionService._goal_resume_round_allowance),
+    )
+    yield
+    armed, allowance = service_module.SessionService._goal_armed, (
+        service_module.SessionService._goal_resume_round_allowance
+    )
+    armed.clear()
+    armed.update(saved[0])
+    allowance.clear()
+    allowance.update(saved[1])
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     async def _fake_build(**kwargs):

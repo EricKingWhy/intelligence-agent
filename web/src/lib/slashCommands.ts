@@ -46,6 +46,9 @@ export interface SlashCommandContext {
   reportError: (message: string) => void;
   /** 中性信息上报口（查看结果 / 执行回执——不是错误，不染红；审查 B-S-4）。 */
   reportInfo: (message: string) => void;
+  /** 把文本写回输入框（**一次性**的访谈入口，AC6）：用户接着补段落后按 Enter 走
+   *  `/goal edit`，不新增表单组件、不新增端点。 */
+  prefillInput: (text: string) => void;
   /** `/compact` 触发：由 Composer 驱动 `useCompactSession` 三态宿主（#1197 契约）。
    *  状态机（压缩中/被拒/失败/成功对比）归宿主，本文件不持有压缩状态。 */
   runCompact: () => Promise<void>;
@@ -120,10 +123,16 @@ export function formatGoalSnapshot(snapshot: GoalSnapshot): string {
     `目标：${g.objective ?? ''}`,
     `状态：${g.phase ?? '?'}`,
     `轮数：${g.rounds_started}/${g.max_goal_rounds}`,
+    // AC3：带版本号，409 文案里的「查看当前 revision」才可执行。
+    `版本：r${g.revision}`,
     `自动续跑：${snapshot.activation}`,
   ];
   if (g.phase === 'blocked' && g.blocked_reason) {
     lines.push(`阻塞：${g.blocked_reason.code}: ${g.blocked_reason.message}`);
+  }
+  // AC9：区分「系统判无进展」与「用户主动暂停」——只有前者带 pause_reason。
+  if (g.phase === 'paused' && g.pause_reason) {
+    lines.push(`暂停原因：${g.pause_reason.code}: ${g.pause_reason.message}`);
   }
   if (g.needs_interview) {
     lines.push('目标缺少 ## Success criteria 或 ## Verification 段，建议先补全再执行。');
@@ -146,14 +155,33 @@ function goalConflictMessage(e: SessionError): string {
   return `${e.message}。可先 /goal 查看当前 revision，再带 expected_revision 重试`;
 }
 
+/** AC6 的"进入访谈"：把缺失段落补成草稿写回输入框。
+ *
+ *  贴 omp `/guided-goal` 的追问思路但不做独立表单/命令：缺哪段就补哪段的空壳，
+ *  用户在输入框里填完按 Enter 就是一次 `/goal edit`。只补两段**可测判据**
+ *  （`needs_interview` 的判据），其余段落不代填——猜出来的目标比模糊的目标更坏。 */
+export function interviewDraft(objective: string): string {
+  const missing = ['## Success criteria', '## Verification'].filter((s) => !objective.includes(s));
+  const body = `${objective.trimEnd()}\n\n${missing.map((s) => `${s}\n`).join('\n')}`;
+  return `/goal edit ${body}`;
+}
+
 async function runGoal(args: string | undefined, ctx: SlashCommandContext): Promise<void> {
   const command = parseGoalCommand(args);
   try {
     switch (command.kind) {
-      case 'show':
+      case 'show': {
         // 查看结果（含未定义目标）是中性信息，不染红（审查 B-S-4/A-P3-2）。
-        ctx.reportInfo(formatGoalSnapshot(await getGoalState(ctx.sessionId)));
+        const snapshot = await getGoalState(ctx.sessionId);
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        // AC6：`needs_interview: true` 不只是提示——把补全草稿写回输入框，
+        // 用户填空后 Enter 即 `/goal edit`（"进入访谈"的最小实现）。
+        const g = snapshot.goal;
+        if (g.defined && g.needs_interview && g.objective) {
+          ctx.prefillInput(interviewDraft(g.objective));
+        }
         return;
+      }
       case 'invalid-edit':
         ctx.reportError('用法：/goal edit <objective>（edit 后必须跟目标文本）');
         return;
@@ -165,9 +193,15 @@ async function runGoal(args: string | undefined, ctx: SlashCommandContext): Prom
         );
         return;
       case 'edit':
+        // AC3：edit 是 CAS 写——先读当前 revision 再带 expected_revision，
+        // 否则并发编辑变成后写覆盖，而 409 文案又让用户去「查看 revision」。
         ctx.reportInfo(
           formatGoalSnapshot(
-            await postGoalCommand(ctx.sessionId, { operation: 'edit', objective: command.objective }),
+            await postGoalCommand(ctx.sessionId, {
+              operation: 'edit',
+              objective: command.objective,
+              expected_revision: (await getGoalState(ctx.sessionId)).goal.revision,
+            }),
           ),
         );
         return;

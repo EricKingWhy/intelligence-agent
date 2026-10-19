@@ -41,7 +41,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agent_harness.session.derive import ProtectedFact, derive_protected_facts
+from agent_harness.session.derive import (
+    ProtectedFact,
+    _bounded_goal_value,
+    derive_protected_facts,
+)
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
@@ -127,6 +131,8 @@ class ProgressDocument:
     fork_point_seq: int | None
     source_event_seq: int
     goal: str | None
+    #: `goal` 的来源事件（有 goal/changed 时）；只用于超长截断标记里的回读指针。
+    goal_source_event_id: str | None
     read_write_intent: str | None
     constraints: tuple[dict[str, Any], ...]
     acceptance: dict[str, Any]
@@ -331,6 +337,7 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
         source_event_seq=events[-1].seq if events else 0,
         # #1359 阶段 0：与 `/goal`、压缩摘要同源（见上文 goal_state）。
         goal=goal,
+        goal_source_event_id=goal_state.source_event_id,
         read_write_intent=task_state.read_write_intent,
         constraints=tuple(constraints),
         acceptance=acceptance_section,
@@ -1125,8 +1132,16 @@ def verify_progress_file(
 def render_progress_brief_lines(doc: ProgressDocument) -> list[str]:
     """W-06 注入块内容行：原目标 + 接受状态 + 阻塞与下一步 + 待对账。
 
-    全部动态文本走 ``_v`` 唯一脱敏出口（与正文渲染同一条纪律）。"""
-    lines = [f"原目标：{_v(doc.goal)}" if doc.goal else f"原目标：{_MISSING}"]
+    全部动态文本走 ``_v`` 唯一脱敏出口（与正文渲染同一条纪律）。
+
+    P2-5：这里注入的是**模型上下文**，必须与压缩摘要同一条 2000 字符口径
+    （``_bounded_goal_value``）；progress.md 正文由 ``render_progress_markdown``
+    负责，仍是全文。不变量「完整保存 ≠ 完整注入」。"""
+    goal = (
+        _bounded_goal_value(doc.goal, doc.goal_source_event_id or "")
+        if doc.goal else None
+    )
+    lines = [f"原目标：{_v(goal)}" if goal else f"原目标：{_MISSING}"]
     acceptance = doc.acceptance
     if acceptance["acceptance"]:
         lines.append(

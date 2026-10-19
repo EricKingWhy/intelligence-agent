@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # `tests/agent/test_local_budget_resolution.py::test_settings_default_matches_contract`
     # 机械钉住——漏了那条就是"规格说 500、部署默认另一个数"。
     local_max_agent_turns: int = Field(default=500, ge=1)
+    # #1359 阶段 3 上线开关（票面发布说明：「首次上线时自动续跑默认关闭」）。
+    # True = run 终态后按 `_maybe_queue_goal_round` 的准入自动续跑；False = 目标
+    # 仍是可管理的持久对象（`/goal` 全生命周期可用），但绝不自己拉下一轮。
+    # 消费点唯一：`SessionService._maybe_queue_goal_round` 入口短路——放在那里
+    # 而不是 `set_goal`，因为 activation 是进程内状态，重启后「默认关闭」仍成立。
+    goal_auto_round_enabled: bool = False
     # 交互式审批等待上限（秒）：无人决策 = fail-closed 默认拒绝（PRD T6 §2.2 C）。
     # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
     # 又不让一个没人管的危险工具无限期挂住 run。

@@ -869,6 +869,14 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     # W-06（#350）：确认过的外部编辑指令（见 PROGRESS_CONFIRM_ORIGIN）以
     # user_goal 保护事实身份进入投影。首条用户消息口径保持不变；这里只是
     # 追加来源，不改变 supersede/取消等既有判定。生效目标存在时只认 goal。
+    #
+    # P2-4（刻意取舍，不是回归）：目标权威后 W-06 的两条效果**同时**失效——
+    # ①确认过的外部编辑不再进 user_goal；②它的 supersede 替换槽也不再改目标
+    # 来源。理由：user_goal 是单一权威事实，两个来源 = 第二套真相（票面阶段 0
+    # 「三处可能读到不同目标」的根因）。外部编辑**没有丢**：确认事件仍在事件流
+    # 里、仍经 `derive_messages` 进模型历史，只是不再参与**目标派生**（也不再以
+    # user_goal 身份出现在 progress.md 的「约束与授权」）。取舍锁定在
+    # `tests/session/test_goal_sources.py::test_active_goal_keeps_w06_edits_visible_but_out_of_user_goal`。
     if not goal_state.authoritative:
         user_goal_sources.update(
             event.event_id

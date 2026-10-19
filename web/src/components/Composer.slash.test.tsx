@@ -67,6 +67,7 @@ const REGISTRY: SlashRegistryCommand[] = [
 const goalSnapshot = (
   objective: string | null,
   phase: GoalSnapshot['goal']['phase'] = 'active',
+  over: Partial<GoalSnapshot['goal']> = {},
 ): GoalSnapshot => ({
   id: 's-1',
   activation: phase === 'active' ? 'armed' : 'disarmed',
@@ -77,9 +78,11 @@ const goalSnapshot = (
     objective,
     phase: objective === null ? null : phase,
     blocked_reason: null,
+    pause_reason: null,
     max_goal_rounds: 32,
     rounds_started: 0,
     needs_interview: false,
+    ...over,
   },
 });
 
@@ -493,6 +496,33 @@ describe('#1195 /goal 无参查看', () => {
     await act(async () => {});
     expect(slashInfo()).toContain('未定义');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
+  });
+
+  it('AC6：needs_interview → 缺失段落草稿写回输入框（进入访谈）', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\n投 20 份简历', 'active', { needs_interview: true }),
+    );
+    await typeText('/goal');
+    press('Enter');
+    await act(async () => {});
+    const draft = textarea().value;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Success criteria');
+    expect(draft).toContain('## Verification');
+    // 已验证段落不重复补：草稿里目标文本只出现一次。
+    expect(draft.indexOf('## Objective')).toBe(draft.lastIndexOf('## Objective'));
+  });
+
+  it('AC6：已有 Success criteria 只补缺的 Verification（不重排目标）', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\nA\n\n## Success criteria\nB', 'active', { needs_interview: true }),
+    );
+    await typeText('/goal');
+    press('Enter');
+    await act(async () => {});
+    const draft = textarea().value;
+    expect(draft).toContain('## Verification');
+    expect(draft.split('## Success criteria').length - 1).toBe(1);
   });
 });
 

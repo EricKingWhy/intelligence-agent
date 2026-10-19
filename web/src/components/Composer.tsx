@@ -827,6 +827,9 @@ export const Composer = memo(function Composer({
               ?.click(),
           reportError: (message) => setSlashError(message),
           reportInfo: (message) => setSlashInfo(message),
+          // AC6：访谈草稿写回输入框（命令受理后的 `setValue('')` 先同步跑完，
+          // 这里的异步回填因此不会被它覆盖掉）。
+          prefillInput: (text) => setValue(text),
           // A-P1-3：压缩走共享三态宿主；成功回执（含被拒=零写入）落中性 info 面，
           // 失败由 hook 的 compactError 面呈现（后端 detail 原样）。
           runCompact: () =>

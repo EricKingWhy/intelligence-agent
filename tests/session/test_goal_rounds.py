@@ -25,6 +25,7 @@ from agent_harness.model.scripted import ScriptedModel
 from agent_harness.session import Session
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     RUN_STARTED,
     TOOL_CALL,
@@ -34,6 +35,7 @@ from agent_harness.session.event import (
 from agent_harness.session.goal import (
     APPROVAL_REQUIRED_CODE,
     GOAL_ORIGIN,
+    GOAL_TOOL_AVAILABLE,
     NO_PROGRESS_CODE,
     GoalPhase,
     append_goal_change,
@@ -58,7 +60,10 @@ pytest tests/auth
 """
 
 
-def _start(tmp_path: Path, *, permission_mode: str = "danger-full-access") -> tuple[AppState, Session]:
+def _start(
+    tmp_path: Path, *, permission_mode: str = "danger-full-access",
+    auto_round: bool = True,
+) -> tuple[AppState, Session]:
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
@@ -66,6 +71,8 @@ def _start(tmp_path: Path, *, permission_mode: str = "danger-full-access") -> tu
         model_name="test-model",
         model_provider="deepseek",
         enable_cors=False,
+        # 上线开关默认 False（票面发布说明）；本文件的续跑用例显式打开。
+        goal_auto_round_enabled=auto_round,
     )
     state = AppState(settings)
     session = Session.start(
@@ -99,6 +106,26 @@ def test_round_prompt_copies_dsh_and_omp_guardrails() -> None:
     assert "Treat the current workspace, tool results, and durable session state as authoritative" in prompt
     assert "NEVER redefine success as a smaller, easier, or already-completed subset." in prompt
     assert "Budget exhaustion ≠ completion." in prompt
+
+
+def test_round_prompt_does_not_instruct_a_missing_goal_tool() -> None:
+    """P1-1：阶段 4 未上线 ⇒ 提示词不得让模型调用不存在的 goal 工具。
+
+    逐字禁用 ``mark it complete`` / ``read the current goal`` / ``goal-tool policy``
+    ——它们只在模型侧 ``goal`` 工具存在时才成立；否则模型只能空口宣称完成。
+    """
+    assert GOAL_TOOL_AVAILABLE is False
+    prompt = render_goal_round_prompt(SimpleNamespace(objective=_GOOD, max_goal_rounds=32), 1)
+    for forbidden in ("read the current goal", "mark it complete", "goal-tool policy"):
+        assert forbidden not in prompt
+    assert "state the evidence in your reply" in prompt
+    assert "NEVER claim you read, changed, completed, or closed it" in prompt
+
+
+def test_goal_tool_availability_flag_matches_the_tool_module() -> None:
+    """常量与实装同生共死：`tools/goal.py` 出现而常量没翻 ⇒ 提示词仍在骗模型。"""
+    tool_module = Path(__file__).resolve().parents[2] / "src/agent_harness/tools/goal.py"
+    assert tool_module.exists() is GOAL_TOOL_AVAILABLE
 
 
 def test_round_started_increments_only_on_active_goal(tmp_path: Path) -> None:
@@ -347,6 +374,54 @@ async def test_no_progress_pauses_goal_and_disarms(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pause_after_queue_cancels_the_pending_goal_round(tmp_path: Path) -> None:
+    """P2-6 / AC2：`message/queued` 与投递之间的窗口——pause 后该轮必须被回收。
+
+    否则用户 `/goal pause`（或撞审批 / 无进展 park）后，终态驱动仍会把已排队的
+    goal 轮次送出去跑一轮，"暂停后不再续跑"在那个窗口不成立。
+    """
+    state, session = _start(tmp_path)
+    service = session_service(state)
+    sid = session.session_id
+    append_goal_change(session, "create", objective=_GOOD)
+    service._goal_armed.add(sid)
+    await service._maybe_queue_goal_round(sid)
+    queued = [e for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED]
+    assert len(queued) == 1 and queued[0].data["origin"] == GOAL_ORIGIN
+
+    assert (await service.set_goal(sid, "pause")).ok
+
+    # 终态驱动照常尝试投递：goal 轮次在唯一投递口被摘除，不开 run。
+    assert await service.deliver_next_undelivered(session_id=sid) is None
+    events = state.store.read_events(sid)
+    assert not [e for e in events if e.type == RUN_STARTED]
+    assert [e.data["queue_id"] for e in events if e.type == QUEUE_CANCELLED] == [
+        queued[0].data["queue_id"]
+    ]
+    assert effective_goal(events).rounds_started == 0  # 投递失败不记账（AC8）
+
+    # pause 之后终态驱动不再入队新轮次。
+    await service._maybe_queue_goal_round(sid)
+    assert len([e for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED]) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_round_switch_off_by_default_queues_nothing(tmp_path: Path) -> None:
+    """P2-8：发布说明「首次上线时自动续跑默认关闭」——开关关着就绝不自己拉下一轮。"""
+    state, session = _start(tmp_path, auto_round=False)
+    service = session_service(state)
+    sid = session.session_id
+    append_goal_change(session, "create", objective=_GOOD)
+    service._goal_armed.add(sid)
+
+    await service._maybe_queue_goal_round(sid)
+
+    goal = effective_goal(state.store.read_events(sid))
+    assert goal.phase is GoalPhase.ACTIVE  # 开关只管续跑，不改目标状态
+    assert not [e for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED]
+
+
+@pytest.mark.asyncio
 async def test_rebuild_restores_goal_origin(tmp_path: Path) -> None:
     state, session = _start(tmp_path)
     sid = session.session_id
@@ -405,6 +480,7 @@ async def test_auto_round_end_to_end_then_no_progress_pause(tmp_path, monkeypatc
         model_name="test-model",
         model_provider="deepseek",
         enable_cors=False,
+        goal_auto_round_enabled=True,  # 本用例验证续跑本身（默认关闭见 P2-8 用例）
     )
     state = AppState(settings)
     service = session_service(state)

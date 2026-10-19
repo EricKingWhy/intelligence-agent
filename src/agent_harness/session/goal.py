@@ -226,13 +226,37 @@ def effective_goal(events: list[SessionEvent]) -> GoalState:
     return GoalState()
 
 
+#: 阶段 4（模型侧 `goal` 工具：`get` / `complete` / `blocked`）是否上线。
+#: 未上线时提示词 MUST NOT 让模型"读目标 / 标完成"——那会指示一个不存在的工具，
+#: 模型只能空口声明完成（事件流不变），目标实际只靠轮次耗尽 / 无进展 / 用户命令
+#: 结束。上线时把它改成 `True` 并让提示词走工具分支；漂移由
+#: `tests/session/test_goal_rounds.py::test_goal_tool_availability_flag_matches_the_tool_module`
+#: 机械钉住（工具文件出现而常量没翻 ⇒ 红）。
+GOAL_TOOL_AVAILABLE = False
+
+
 def render_goal_round_prompt(state: GoalState, round_number: int) -> str:
-    """一轮自动续跑的模型可见输入（抄 dsh ``prompt.ts`` + omp 防漂移两句）。
+    """一轮自动续跑的模型可见输入（抄 dsh ``prompt.ts:15-27`` @5badb150 + omp 防漂移两句）。
 
     只渲染**当前激活 revision 的快照**：目标文本以 JSON 字符串嵌入，避免 objective
     里的换行 / 引号破坏外层结构。``round_number`` 是即将开始的轮次（1-based）。
     """
     objective = json.dumps(state.objective or "", ensure_ascii=False)
+    if GOAL_TOOL_AVAILABLE:
+        completion = (
+            "Before claiming completion, gather evidence that the whole objective "
+            "is achieved, read the current goal, and mark it complete. If work "
+            "remains, leave the goal active for the next round. Follow the "
+            "configured goal-tool policy before reporting a blocker.\n\n"
+        )
+    else:
+        completion = (
+            "Before claiming completion, gather evidence that the whole objective "
+            "is achieved, and state the evidence in your reply. You have no goal "
+            "tool in this session: the goal's own state lives in the session event "
+            "stream, so NEVER claim you read, changed, completed, or closed it. If "
+            "work remains, just keep working — the next round is started for you.\n\n"
+        )
     return (
         "<goal_round>\n"
         f"Objective: {objective}\n"
@@ -240,11 +264,9 @@ def render_goal_round_prompt(state: GoalState, round_number: int) -> str:
         "Continue working toward the objective in this same session. Treat the current "
         "workspace, tool results, and durable session state as authoritative; inspect "
         "them instead of assuming earlier narration is still current. Make concrete "
-        "progress and verify the result. Before claiming completion, gather evidence "
-        "that the whole objective is achieved, read the current goal, and mark it "
-        "complete. If work remains, leave the goal active for the next round. Follow "
-        "the configured goal-tool policy before reporting a blocker.\n\n"
-        "NEVER redefine success as a smaller, easier, or already-completed subset.\n"
+        "progress and verify the result. "
+        + completion
+        + "NEVER redefine success as a smaller, easier, or already-completed subset.\n"
         "Budget exhaustion ≠ completion.\n"
         "</goal_round>"
     )

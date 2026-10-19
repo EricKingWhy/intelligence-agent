@@ -3382,6 +3382,8 @@ export interface GoalStatePayload {
   objective: string | null;
   phase: GoalPhase | null;
   blocked_reason: { code: string; message: string } | null;
+  /** AC9：paused 的成因（系统判无进展 / 用户暂停由 `phase` 本身区分）。 */
+  pause_reason: { code: string; message: string } | null;
   max_goal_rounds: number;
   rounds_started: number;
   /** AC6 可测判据：缺 `## Success criteria` 或 `## Verification` 段。 */

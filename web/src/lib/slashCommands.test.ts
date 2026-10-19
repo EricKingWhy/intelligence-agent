@@ -192,6 +192,7 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     openModelPicker: vi.fn(),
     reportError: vi.fn(),
     reportInfo: vi.fn(),
+    prefillInput: vi.fn(),
     runCompact: vi.fn(async () => {}),
     getSessionEvents: vi.fn(async () => []),
   });
@@ -208,6 +209,7 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
       objective: '## Objective\n投 20 份简历',
       phase: 'active',
       blocked_reason: null,
+      pause_reason: null,
       max_goal_rounds: 32,
       rounds_started: 3,
       needs_interview: false,
@@ -262,7 +264,9 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
   });
 
   it('/goal 409（revision 冲突）→ reportError 带当前 revision 引导（AC3）', async () => {
-    vi.mocked((await import('./api')).postGoalCommand).mockRejectedValue(
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot());
+    vi.mocked(mod.postGoalCommand).mockRejectedValue(
       new SessionError(409, 'revision 冲突：请求基于 r2，当前是 r3'),
     );
     const c = makeCtx();
@@ -270,6 +274,53 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     const msg = c.reportError.mock.calls[0][0] as string;
     expect(msg).toContain('当前是 r3');
     expect(msg).toContain('/goal 查看当前 revision');
+  });
+
+  it('/goal edit 先读当前 revision 再带 expected_revision（AC3 的 UI 面）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot({ revision: 7 }));
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(snapshot({ revision: 8 }));
+    const c = makeCtx();
+    await cmd('goal').run('edit 新目标', asCtx(c));
+    expect(mod.postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'edit',
+      objective: '新目标',
+      expected_revision: 7,
+    });
+    expect(c.reportInfo.mock.calls[0][0]).toContain('版本：r8');
+  });
+
+  it('/goal 回执渲染 paused 的 pause_reason（AC9 可读原因）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot({
+      phase: 'paused',
+      pause_reason: { code: 'no-progress', message: '最近两轮没有工具活动' },
+    }));
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.reportInfo.mock.calls[0][0]).toContain(
+      '暂停原因：no-progress: 最近两轮没有工具活动',
+    );
+  });
+
+  it('AC6：needs_interview 时把补全草稿写回输入框，只补缺失段', async () => {
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(
+      snapshot({ objective: '## Objective\nA\n\n## Success criteria\nB', needs_interview: true }),
+    );
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    const draft = c.prefillInput.mock.calls[0][0] as string;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Verification');
+    // 已有的段不重复补：标题只出现一次（原文一次，不另加空壳）。
+    expect(draft.split('## Success criteria').length - 1).toBe(1);
+  });
+
+  it('AC6：needs_interview=false 不写输入框（不打断用户）', async () => {
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(snapshot());
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.prefillInput).not.toHaveBeenCalled();
   });
 
   it('/goal 其他错误（422）原样上抛（Composer 统一呈现），不加引导', async () => {
