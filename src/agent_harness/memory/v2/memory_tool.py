@@ -158,6 +158,16 @@ def _normalise(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _added_contents(args: _MemoryArgs) -> list[str]:
+    """本次调用里所有 ``action=add`` 的正文（单条 add 或 batch 里的 add）。"""
+    if args.operations is not None:
+        return [
+            op.content if op.content is not None else op.new_text or ""
+            for op in args.operations if op.action == "add"
+        ]
+    return [args.content_or_alias()] if args.action == "add" else []
+
+
 def _grounded_in_user_message(content: str, user_text: str) -> bool:
     """软校验：content 必须能在本 run 的 user message 里找到依据（票面 §1 清单第 3 条）。
 
@@ -221,11 +231,12 @@ class MemoryTool(Tool):
         if not self._store.target_enabled(target):
             label = "USER.md" if target == "user" else "MEMORY.md"
             return ToolResult.failure(
-                message=f"Built-in {label} writes are disabled in memory config.",
+                message=f"内置 {label} 写入已在 memory 配置中关闭。",
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
-        if args.action == "add" and args.operations is None:
-            denial = await self._add_soft_check(args.content_or_alias())
+        # batch 里的每条 add 都要过软校验：整批只查一次等于给批量写入开后门。
+        for content in _added_contents(args):
+            denial = await self._add_soft_check(content)
             if denial is not None:
                 return denial
         try:
@@ -234,7 +245,7 @@ class MemoryTool(Tool):
                 return gated
         except PermissionError:
             return ToolResult.failure(
-                message="user memory scope is not authorized",
+                message="user memory 范围未获授权",
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
         try:
@@ -251,7 +262,7 @@ class MemoryTool(Tool):
         except Exception as error:  # noqa: BLE001 — 不记内容，只记类型
             logger.warning("memory tool failed (%s)", type(error).__name__)
             return ToolResult.failure(
-                message=f"Memory write failed ({type(error).__name__}); the store may be unchanged.",
+                message=f"记忆写入失败（{type(error).__name__}）；存储可能未改变。",
                 error_code=ErrorCode.TRANSIENT_ERROR,
             )
         return _result(response, target)
@@ -312,14 +323,14 @@ def _result(response: dict[str, Any], target: str) -> ToolResult:
     """
     if response.get("success"):
         return ToolResult.success(
-            message=str(response.get("message") or response.get("note") or "Memory updated."),
+            message=str(response.get("message") or response.get("note") or "记忆已更新。"),
             data={**response, "target": target},
         )
-    message = str(response.get("error") or "Memory write rejected.")
+    message = str(response.get("error") or "记忆写入被拒绝。")
     if entries := response.get("current_entries"):
-        message += "\n\nCurrent entries:\n" + "\n".join(f"- {entry}" for entry in entries)
+        message += "\n\n当前条目：\n" + "\n".join(f"- {entry}" for entry in entries)
     if matches := response.get("matches"):
-        message += "\n\nMatching entries (be more specific):\n" + "\n".join(
+        message += "\n\n命中的条目（请用更精确的 old_text）：\n" + "\n".join(
             f"- {entry}" for entry in matches
         )
     return ToolResult.failure(
