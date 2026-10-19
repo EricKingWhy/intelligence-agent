@@ -3543,7 +3543,7 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
         lines = [
             (
                 f"迁移完成：active={counts['active']} 导出={counts['exported']} "
-                f"去重={counts['deduped']}"
+                f"去重={counts['deduplicated']}"
                 f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
             ),
         ]

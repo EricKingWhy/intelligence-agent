@@ -27,10 +27,10 @@ async def migrate_active_records(
 ) -> dict[str, Any]:
     """导出全部 active 行到 `<workspace_dir>/memories/{MEMORY,USER}.md`。
 
-    返回 `{"active": 行数, "exported": n, "deduped": n, "memory": n, "user": n,
+    返回 `{"active": 行数, "exported": n, "deduplicated": n, "memory": n, "user": n,
     "skipped": [(memory_id, error), ...]}`。
 
-    `exported + deduped == active` 且 `skipped == []` 才是成功。**`exported < active`
+    `exported + deduplicated == active` 且 `skipped == []` 才是成功。**`exported < active`
     本身不是去重**：threat 扫描命中与字符预算超限都是真实丢失，落在 `skipped` 里，
     调用方必须处理（CLI 据此非零退出）。
     """
@@ -48,14 +48,14 @@ async def migrate_active_records(
             rows = [tuple(row) for row in await cursor.fetchall()]
 
     counts: dict[str, Any] = {
-        "active": len(rows), "exported": 0, "deduped": 0, "memory": 0, "user": 0, "skipped": [],
+        "active": len(rows), "exported": 0, "deduplicated": 0, "memory": 0, "user": 0, "skipped": [],
     }
     skipped: list[tuple[str, str]] = counts["skipped"]
     for memory_id, kind, tier, content in rows:
         target = target_for(kind, tier)
         response = await store.add(target, content)
         if response.get("success"):
-            counts["deduped" if response.get("deduplicated") else "exported"] += 1
+            counts["deduplicated" if response.get("deduplicated") else "exported"] += 1
             counts[target] += 1
         else:
             error = str(response.get("error") or "unknown error")

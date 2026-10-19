@@ -133,10 +133,10 @@ async def test_migration_is_idempotent(tmp_path) -> None:
 
     assert second == first, "重复执行迁移不得产生重复条目"
     # deduplicated 标志分账：第二次必须全是"去重跳过"，零新写入（Corr-P3-3）。
-    assert second_counts["deduped"] > 0, "第二次迁移的全部 active 行都应命中去重"
+    assert second_counts["deduplicated"] > 0, "第二次迁移的全部 active 行都应命中去重"
     assert second_counts["exported"] == 0, (
         "第二次迁移没有新内容可写，exported 不得虚增："
-        f"exported={second_counts['exported']}, deduped={second_counts['deduped']}"
+        f"exported={second_counts['exported']}, deduplicated={second_counts['deduplicated']}"
     )
     assert first_counts["exported"] > 0, "首次迁移应有真实写入"
 
@@ -157,12 +157,12 @@ async def test_threat_hit_is_skipped_and_accounted_not_deduplicated(tmp_path) ->
     assert matching, f"skipped 必须包含 m6，实际 {skipped!r}"
     assert all(str(error).strip() for _, error in matching), "每条 skipped 必须带错误原因"
 
-    # 如实分账：exported + deduped + len(skipped) == active。
+    # 如实分账：exported + deduplicated + len(skipped) == active。
     assert counts["active"] == active_count
-    assert counts["exported"] + counts["deduped"] + len(skipped) == active_count, (
+    assert counts["exported"] + counts["deduplicated"] + len(skipped) == active_count, (
         f"分账不闭合：{counts!r}"
     )
-    assert counts["deduped"] == 0, "threat 命中不得被计成去重"
+    assert counts["deduplicated"] == 0, "threat 命中不得被计成去重"
 
     memory_path, user_path = _migrated_files(workspace)
     assert _THREAT_CONTENT not in _entries(memory_path) + _entries(user_path), (
