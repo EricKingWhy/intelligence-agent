@@ -2,7 +2,7 @@
  *  done 段一次性 markdown——HANDOFF_PERF_FRONTEND §6 P0-2 方案 a）。 */
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChainNodeView, TurnView } from './Conversation';
+import { ChainNodeView, Conversation, TurnView } from './Conversation';
 import type { ChainNode } from '../lib/projection';
 import type { ReasoningBlock, ToolCall, Turn } from '../types';
 import type { Disclosure } from '../lib/disclosure';
@@ -335,5 +335,31 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
     );
     expect(html).toContain('从这里另开一条新会话');
     expect(html).not.toContain('新会话会是空的');
+  });
+});
+
+/** #1371：历史加载期只渲染骨架，不渲染「暂无对话」空态（替换关系）。 */
+describe('Conversation — 加载期骨架屏（#1371）', () => {
+  it('loadingHistory=true：渲染骨架与 role=status，不出现空态文案', () => {
+    const html = renderToStaticMarkup(
+      <Conversation conversation={null} loadingHistory density="balanced" />,
+    );
+
+    expect(html).toContain('conversation-loading');
+    expect(html).toContain('role="status"');
+    // 不带 aria-busy：busy 期间 live region 抑制播报，区域 settle 即卸载。
+    expect(html).not.toContain('aria-busy');
+    expect(html).toContain('正在加载对话历史');
+    expect(html).not.toContain('暂无对话');
+    expect(html).not.toContain('正在加载历史…');
+  });
+
+  it('loadingHistory=false 且无会话：空态照旧出现（反证骨架不是把空态删了）', () => {
+    const html = renderToStaticMarkup(
+      <Conversation conversation={null} loadingHistory={false} density="balanced" />,
+    );
+
+    expect(html).not.toContain('conversation-loading');
+    expect(html).toContain('暂无对话');
   });
 });

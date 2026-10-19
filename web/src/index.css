@@ -90,6 +90,7 @@
   --dur-in: 240ms;      /* inspector 展开/收起（PRD 220-280） */
   --dur-out: 150ms;
   --dur-expand: 180ms;  /* event inline expand / todo expand（PRD 160-220） */
+  --dur-theme: 200ms;   /* #1371 主题切换（票面定值 200ms） */
   --dur-palette: 150ms; /* command palette（PRD 120-180） */
   --dur-pulse: 750ms;   /* selected event highlight（PRD 600-900） */
 
@@ -336,11 +337,37 @@ body {
     radial-gradient(920px 640px at 88% 108%, color-mix(in srgb, var(--success) 2.5%, transparent), transparent 60%),
     var(--bg-app);
   background-attachment: fixed;
+  /* #1371：主题切换不再全屏硬切。只过渡 background-color / color；背景里的
+     两层 radial-gradient 是 background-image，浏览器不插值——它们仍瞬时换色，
+     但主底色与正文色的渐变已足以消除“整屏一闪”。
+     ⚠ body 实际被 `.app-regions` 整幅盖住，可见面同拍过渡写在那里。 */
+  transition:
+    background-color var(--dur-theme) var(--ease-apple),
+    color var(--dur-theme) var(--ease-apple);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden; /* app shell owns scroll */
+}
+
+/* #1371：主题切换窗口（<html data-theme-switch>，由 lib/theme.ts 在切换瞬间挂上、
+ * 过渡结束后的余量时刻摘掉——窗口 240ms > 过渡 200ms）。窗口内给**所有**元素加颜色
+ * 过渡——覆盖
+ * `.app-workspace` 中间列、对话卡片、消息气泡、浮层面板等逐个写 transition 会漏的
+ * 可见面；窗口外不常驻，避免 hover / 拖拽带上 200ms 迟滞。
+ *   过渡启用的判据是 after-change style 的 transition-property（CSS Transitions
+ *   §3），所以属性与 data-theme 同批写入即可生效。
+ *   `prefers-reduced-motion` 由本文件末尾的 Motion safety 块压到 0.01ms（!important）。 */
+:root[data-theme-switch] *,
+:root[data-theme-switch] *::before,
+:root[data-theme-switch] *::after {
+  transition:
+    background-color var(--dur-theme) var(--ease-apple),
+    color var(--dur-theme) var(--ease-apple),
+    border-color var(--dur-theme) var(--ease-apple),
+    fill var(--dur-theme) var(--ease-apple),
+    stroke var(--dur-theme) var(--ease-apple);
 }
 
 #root {
