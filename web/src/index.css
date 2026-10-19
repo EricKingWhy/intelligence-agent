@@ -282,7 +282,8 @@ body {
 }
 
 /* #1371：主题切换窗口（<html data-theme-switch>，由 lib/theme.ts 在切换瞬间挂上、
- * 240ms 后摘掉）。只在这 200ms 窗口内给**所有**元素加颜色过渡——覆盖
+ * 过渡结束后的余量时刻摘掉——窗口 240ms > 过渡 200ms）。窗口内给**所有**元素加颜色
+ * 过渡——覆盖
  * `.app-workspace` 中间列、对话卡片、消息气泡、浮层面板等逐个写 transition 会漏的
  * 可见面；窗口外不常驻，避免 hover / 拖拽带上 200ms 迟滞。
  *   过渡启用的判据是 after-change style 的 transition-property（CSS Transitions

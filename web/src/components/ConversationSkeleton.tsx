@@ -5,7 +5,7 @@
  * 「正在加载历史…」的可访问性语义，但不再渲染任何空态文案（票面红线：
  * loading 期只渲染骨架）。
  *
- * ⚠ 不加 `aria-busy`（审查 S-P3-2）：live region 在 busy 期间抑制播报，而本区域
+ * ⚠ 不加 `aria-busy`：live region 在 busy 期间抑制播报，而本区域
  * 在 settle 时立即卸载——标签很可能一次都读不出来。
  */
 

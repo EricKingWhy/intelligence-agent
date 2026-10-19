@@ -10399,8 +10399,8 @@ button.json-row {
  *
  * 动效实现说明（票面“只加过渡、不改交互逻辑”）：
  *  - 会话切换 / 空态→数据：内容容器在 React 重挂（session key / 分支切换）时用
- *    CSS animation 淡入。Lane D 采样的 `.app-workspace` 宽度在会话切换时恒为
- *    842px（内容替换不改变栅格轨道），`transition: width` 没有可插值属性；
+ *    CSS animation 淡入。会话切换不改变栅格轨道宽度（`.app-workspace` 的宽度由
+ *    `.app-regions` 决定），`transition: width` 没有可插值属性；
  *    故以内容容器的 opacity/transform 作为可观测过渡面。
  *    ⚠ 两处票面偏离（`.app-workspace` width 180ms → 内容容器 animation；
  *      空态→数据 150ms → 沿用 180ms）已登记在 `ticket7-report.md` 的
@@ -10440,9 +10440,9 @@ button.json-row {
 }
 
 /* 会话切换：`.conversation-scroll` 带 `key={session_id}`，换会话即重挂 ⇒ 180ms
- * 淡入。票面原文写的是 `.app-workspace` width 180ms，但 Lane D 实测该宽度在会话
- * 切换时恒为 842px（栅格轨道由 app-regions 决定），`transition: width` 没有可
- * 插值的属性，故把"切换不闪"落在真正变化的内容容器上（偏离登记见文件头与
+ * 淡入。票面原文写的是 `.app-workspace` width 180ms，但会话切换不改变栅格轨道
+ * 宽度（由 app-regions 决定），`transition: width` 没有可插值的属性，故把
+ * "切换不闪"落在真正变化的内容容器上（偏离登记见文件头与
  * `ticket7-report.md`「票面偏离」）。
  * 空态→数据：数据到达时同一个 `.conversation-scroll` 首次挂载，沿用 180ms（票面
  * 150ms 落在「面板级 150–200ms」区间内，偏离同上报）；`.conversation-empty`
@@ -10453,7 +10453,7 @@ button.json-row {
 .conversation-empty {
   animation: conversation-in 150ms var(--ease-apple);
 }
-/* ⚠ 会话行**不**加入场动画（审查 S-P3-1 / C-P3-3）：票面 4 个场景不含「行入场」，
+/* ⚠ 会话行**不**加入场动画：票面 4 个场景不含「行入场」，
  * 且行挂载会成批重放（归档开关/分组重建）、动画的 transform 还会压掉拖拽态的
  * transform。 */
 /* 密度切换：`data-density` 在 <html> 上翻转，`.conversation` 不重挂。四档各用
@@ -10561,7 +10561,7 @@ button.json-row {
  * 作用面：票面列出的 8 个 Dialog（`.project-dialog` / `.provider-dialog` 根类）之外，
  * 还有两个同族面板用同一套 `.project-btn*` 但根类不在票面清单里：
  * `MemoryPanel`（`.memory-panel`）与 `RecoveryListPanel`（`.recovery-list-panel`）。
- * 不并进来就会同屏三种主按钮长相（审查 C-P3-1 / S-P2-6），故一并覆盖；`ApprovePolicyPanel`
+ * 不并进来就会同屏三种主按钮长相，故一并覆盖；`ApprovePolicyPanel`
  * 与 `PluginPanel` 用 `.project-dialog` 根类，自动跟着生效（影响面 = 10 个弹窗/面板）。 */
 .project-dialog,
 .provider-dialog,
@@ -10638,10 +10638,10 @@ button.json-row {
 }
 /* 输入框 6px 圆角是既有事实（`.project-input` / `.project-textarea` 本来就取
  * --radius-sm），这里只收紧焦点态：边框换满强度 --accent。
- * ⚠ 如实登记（审查 C-P2-3 / S-P2-1）：「去外发光」在 origin/main 上是**空操作**——
+ * ⚠ 如实登记：「去外发光」在 origin/main 上是**空操作**——
  *   这两个输入框本就没有 box-shadow，只有 `outline:none` + 60% 混色边框；本票
  *   的实际变化是把边框提到满强度，并显式 `box-shadow:none` 防回归。
- * `.dir-browser-path` 是「新建项目」弹窗里的真实输入面（审查 S-P2-2），同一条规则
+ * `.dir-browser-path` 是「新建项目」弹窗里的真实输入面，同一条规则
  * 一并覆盖，否则同框两个输入框 focus 色不一致。 */
 .project-dialog .project-input:focus-visible,
 .project-dialog .project-textarea:focus-visible,

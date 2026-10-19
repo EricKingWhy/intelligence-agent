@@ -3,7 +3,7 @@
  * 由 `SessionList` 在 `sessionsPending`（首次请求未 settle 且没有行）时挂载；
  * 首次请求 settle 后由真实列表替换。骨架不渲染「暂无会话」等空态文案。
  * 同 ConversationSkeleton：`role="status"` + `aria-label`，刻意不加 `aria-busy`
- * （busy 期间 live region 抑制播报，而本区域 settle 即卸载——审查 S-P3-2）。
+ * （busy 期间 live region 抑制播报，而本区域 settle 即卸载）。
  */
 
 const ROWS = [0, 1, 2, 3, 4, 5] as const;

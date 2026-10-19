@@ -347,7 +347,7 @@ describe('Conversation — 加载期骨架屏（#1371）', () => {
 
     expect(html).toContain('conversation-loading');
     expect(html).toContain('role="status"');
-    // S-P3-2：不带 aria-busy——busy 期间 live region 抑制播报，区域 settle 即卸载。
+    // 不带 aria-busy：busy 期间 live region 抑制播报，区域 settle 即卸载。
     expect(html).not.toContain('aria-busy');
     expect(html).toContain('正在加载对话历史');
     expect(html).not.toContain('暂无对话');

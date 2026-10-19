@@ -25,10 +25,10 @@ export function initTheme(): Theme {
  *
  *  为什么不是常驻 transition：canvas 之外的可见面（对话区卡片、消息气泡、工作
  *  面板……）逐个写 transition 会漏元素，而 `* { transition }` 常驻又会让 hover /
- *  拖拽带 200ms 迟滞。折中 = 只在切换瞬间挂 `data-theme-switch`，200ms 后摘掉：
- *  CSS 侧 `:root[data-theme-switch] *` 才声明过渡。属性与 `data-theme` 在同一次
- *  样式重算前写入 ⇒ 过渡按 CSS Transitions 规范（取 after-change 的
- *  transition-property）照常启动。 */
+ *  拖拽带 200ms 迟滞。折中 = 只在切换瞬间挂 `data-theme-switch`，过渡时长
+ *  （`--dur-theme`）过后摘掉：CSS 侧 `:root[data-theme-switch] *` 才声明过渡。属性与
+ *  `data-theme` 在同一次样式重算前写入 ⇒ 过渡按 CSS Transitions 规范（取
+ *  after-change 的 transition-property）照常启动。 */
 const SWITCH_ATTR = 'data-theme-switch';
 /** 略大于 `--dur-theme`（200ms）：留一帧调度余量，避免最后一帧被提前摘掉。 */
 const SWITCH_WINDOW_MS = 240;
