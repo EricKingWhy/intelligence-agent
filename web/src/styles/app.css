@@ -38,10 +38,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   gap: 4px;
 }
+/* flex 排列（不是固定 left 错位）：链接数随 Inspector 状态变化，固定像素在
+ * 缩放/本地化/字体变化下会重叠或越界。隐藏态只上下位移，横向位置由 flex 决定。 */
 .skip-link {
-  position: absolute;
-  top: 0;
-  left: 0;
   transform: translateY(-200%);
   padding: 6px 10px;
   border-radius: var(--radius-sm);
@@ -54,10 +53,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: var(--shadow-overlay);
   white-space: nowrap;
 }
-/* 四个链接横向错开：焦点到达时全部可见，不互相盖住。 */
-.skip-links .skip-link:nth-child(2) { left: 108px; }
-.skip-links .skip-link:nth-child(3) { left: 224px; }
-.skip-links .skip-link:nth-child(4) { left: 330px; }
 .skip-link:focus {
   transform: translateY(0);
 }
@@ -365,7 +360,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 4px;
   min-width: 0;
-  padding: 2px 2px;
+  padding: 2px;
   background: transparent;
   border: 0;
   border-radius: var(--radius-sm);
@@ -404,6 +399,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .appbar-session-menu {
   min-width: 220px;
   max-width: 360px;
+  /* 会话数不设上限：菜单必须自己滚动，不能把视口撑破。 */
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
 }
 .appbar-session-menu-item {
   display: flex;
@@ -2113,25 +2111,20 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   justify-content: flex-end;
   gap: var(--space-sm);
 }
-/* 降级态（503 未装配）：实线卡片 + 虚线边框——是"这里本该有东西但没开"，不是错误。 */
-.memory-degraded {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: var(--space-md);
-  background: var(--surface-1);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-md);
-}
-.memory-degraded-title {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
-}
-.memory-degraded-detail {
+/* #1372 改动 9：中性空态的「技术详情」折叠——左对齐、次要色，不抢主文案。 */
+.memory-disabled-detail {
+  text-align: left;
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-tertiary);
+}
+.memory-disabled-detail summary {
+  cursor: pointer;
+}
+.memory-disabled-detail span {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 .memory-loading {
   padding: var(--space-xl) 0;
@@ -4970,7 +4963,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     display: none;
   }
   /* #1372 改动 8：默认 340px 面板也要能看懂这排图标——选中项保留文字标签，
-     其余 icon-only 由 tooltip 说明口径（票面：图标加文字标签 + tooltip）。 */
+     其余 icon-only 由 tooltip 说明口径（票面：图标加文字标签 + tooltip）。
+     **取舍**：6 个英文标签在 340px 内完整排不下（≈520px 需求），全显会截断成
+     省略号；因此「文字标签」只在有空间时（>360px / 选中项）成立，默认宽度下
+     由 6 个 tooltip 补足口径。不做 hover 展开——那会让相邻图标跳动。 */
   .detail-tab.sel .detail-tab-label {
     display: inline;
   }
@@ -6060,10 +6056,12 @@ button.json-row {
 .appbar {
   position: relative;
 }
-.icon-btn-auth {
+/* #1372：身份令牌入口收进「更多工具」后，需要配置的提示点跟着触发按钮走
+ * （菜单关闭即卸载，点不能挂在菜单项上）。 */
+.appbar-more-trigger {
   position: relative;
 }
-.icon-btn-auth.attention::after {
+.appbar-more-trigger.attention::after {
   content: '';
   position: absolute;
   top: 2px;
@@ -10165,11 +10163,6 @@ button.json-row {
 .plugin-source {
   font-family: var(--font-mono);
   word-break: break-all;
-}
-.plugin-switch {
-  width: 34px;
-  height: 18px;
-  accent-color: var(--accent);
 }
 .plugin-dialog .dot {
   width: 8px;

@@ -64,11 +64,10 @@ interface Props {
    *  切换回调都是可选的——没传时退化为纯文本，既有测试夹具零迁移。 */
   sessions?: SessionSummary[];
   titlesById?: Record<string, string>;
-  sessionTitle?: string;
   onSelectSession?: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot, sessions, titlesById, sessionTitle, onSelectSession }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -117,9 +116,19 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const sessionUsage = conversation ? displayedSessionUsage(conversation) : null;
   // #1372 改动 8：会话名（真实标题优先，没有标题时用短 id——不编造名字）。
   const sessionLabel = conversation
-    ? (sessionTitle || titlesById?.[conversation.session_id] || conversation.session_id.slice(0, 8))
+    ? (titlesById?.[conversation.session_id] || conversation.session_id.slice(0, 8))
     : '';
-  const canSwitchSession = conversation !== null && onSelectSession !== undefined && (sessions?.length ?? 0) > 0;
+  // 归档会话默认不在侧栏显示；切换器同口径，不能给出一个侧栏里找不到的选项。
+  const switchableSessions = useMemo(() => sessions?.filter((s) => !s.archived), [sessions]);
+  const canSwitchSession = conversation !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 0;
+  // `exp` 来自未验签的 token claims：任何数字都能进来，`toISOString()` 对
+  // 非有限/越界值会抛 RangeError，整条顶栏会跟着崩。无效就不显过期时间。
+  const expDate = identity?.exp != null && Number.isFinite(identity.exp)
+    ? new Date(identity.exp * 1000)
+    : null;
+  const expText = expDate !== null && !Number.isNaN(expDate.getTime())
+    ? formatDateTime(expDate.toISOString())
+    : null;
 
   // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里
   // 流龄一路涨，用它当阈值会把正常慢任务报成停顿。events.length 是投影真值的进度
@@ -167,14 +176,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         {conversation && (
           canSwitchSession ? (
             <DropdownMenu.Root>
-              <Tip content="当前会话 · 点击切换">
+              <Tip content={`当前会话：${sessionLabel} · 点击切换`}>
                 <DropdownMenu.Trigger asChild>
                   <button
                     type="button"
                     className="appbar-session"
                     aria-label={`切换会话：${sessionLabel}`}
                   >
-                    <span className="appbar-session-name" title={sessionTitle || undefined}>
+                    {/* 完整标题由 tooltip 承载，不再叠一层原生 title。 */}
+                    <span className="appbar-session-name">
                       {sessionLabel}
                     </span>
                     <ChevronDown size={12} className="appbar-session-chevron" aria-hidden="true" />
@@ -187,7 +197,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                   align="start"
                   sideOffset={6}
                 >
-                  {sessions?.map((s) => {
+                  {switchableSessions?.map((s) => {
                     const label = titlesById?.[s.session_id] || s.session_id.slice(0, 8);
                     return (
                       <DropdownMenu.Item
@@ -207,7 +217,10 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
           ) : (
-            <span className="appbar-session appbar-session-static" title={sessionTitle || undefined}>
+            <span
+              className="appbar-session appbar-session-static"
+              title={titlesById?.[conversation.session_id] || undefined}
+            >
               {sessionLabel}
             </span>
           )
@@ -263,7 +276,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         {identity && (
           <Tip
             content={`tenant: ${identity.tenant_id ?? '—'} · user: ${identity.user_id ?? '—'}${
-              identity.exp ? ` · 过期于 ${formatDateTime(new Date(identity.exp * 1000).toISOString()) ?? ''}` : ''
+              expText ? ` · 过期于 ${expText}` : ''
             }`}
           >
             <span className="auth-chip" tabIndex={0}>

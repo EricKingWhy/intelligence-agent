@@ -11,7 +11,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { RUN, SID, T, routeApi, type FrameSpec } from './fixtures';
+import { RUN, SID, T, clickTopBarMenuItem, routeApi, type FrameSpec } from './fixtures';
 
 /** 6 条事件的静止会话：足够让 ↑↓ 有"上/下"两个方向可走。 */
 const EVENTS: FrameSpec[] = [
@@ -140,7 +140,7 @@ test('AC4：钉住跨会话——未钉住切换会话收起，钉住后保持�
   await expect(page.locator('.step-detail')).toBeHidden();
 
   // 打开面板 → 钉住
-  await page.getByRole('button', { name: '展开 Inspector' }).click();
+  await clickTopBarMenuItem(page, '展开 Inspector');
   await expect(page.locator('.step-detail')).toBeVisible();
   const pin = page.locator('.detail-ctrl[aria-label="钉住"]');
   await expect(pin).toHaveAttribute('aria-pressed', 'false');
@@ -271,7 +271,9 @@ test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调�
   // 关闭按钮 = 收起面板（不卸载）
   await page.locator('button[aria-label="关闭 Inspector"]').click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
-  await expect(page.getByRole('button', { name: '展开 Inspector' })).toBeVisible();
+  // #1372：开关收进「更多工具」菜单；菜单关闭即卸载，先打开再断言。
+  await page.getByRole('button', { name: '更多工具' }).click();
+  await expect(page.getByRole('menuitem', { name: '展开 Inspector' })).toBeVisible();
 });
 
 test('AC8：头部必须容得下最长档位名（不溢出面板、控制按钮不被顶出去）', async ({ page }) => {

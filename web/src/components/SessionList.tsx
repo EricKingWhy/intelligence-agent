@@ -860,7 +860,6 @@ function SessionRow({
   const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
   // #1372 改动 1：会话条目与 ⋯ 合并为一个 Tab 停留点。⋯ 按钮仍可由鼠标点、
   // 也能被 Shift+F10 打开的菜单接住焦点，但不进 Tab 序（tabIndex=-1）。
-  const rowRef = useRef<HTMLButtonElement>(null);
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   return (
@@ -891,12 +890,14 @@ function SessionRow({
     >
       {dropBefore && <span className="rail-drop-indicator" aria-hidden="true" />}
       <button
-        ref={rowRef}
         className={`session-item ${selected ? 'selected' : ''}`}
         onClick={() => onSelect(s.session_id)}
-        aria-haspopup="menu"
+        aria-keyshortcuts="Shift+F10"
         onKeyDown={(event) => {
-          // APG Menu Button：Shift+F10 打开当前项的上下文菜单。焦点交给 Radix 菜单。
+          // APG 上下文菜单快捷键：Shift+F10 打开当前项的菜单，焦点交给 Radix。
+          // 行按钮默认动作是「选中会话」而不是弹出，因此**不挂** aria-haspopup——
+          // 那会把默认动作声明成弹出。菜单语义由 ⋯ 触发器承担（Radix 注入
+          // aria-haspopup/aria-expanded）；aria-keyshortcuts 只声明这条捷径。
           if (event.shiftKey && event.key === 'F10') {
             event.preventDefault();
             setMenuOpen(true);

@@ -57,7 +57,9 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {lastTarget && <SessionReplayForm target={lastTarget} />}
+        {lastTarget && (
+          <SessionReplayForm target={lastTarget} onClosed={() => setLastTarget(null)} />
+        )}
       </Dialog.Portal>
     </Dialog.Root>
   );
@@ -65,7 +67,14 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
 
 type Phase = 'confirm' | 'running' | 'done';
 
-function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
+function SessionReplayForm({
+  target,
+  onClosed,
+}: {
+  target: ReplaySessionTarget;
+  /** 退场完成、焦点已归还后清掉保留的 target（不再持有一个已卸载的 DOM 引用）。 */
+  onClosed: () => void;
+}) {
   const [phase, setPhase] = useState<Phase>('confirm');
   const [steps, setSteps] = useState<SessionReplayStep[]>([]);
   /** 已推进到的步数（0..steps.length）。`running` 且 `loaded` 时由定时器自增。 */
@@ -129,6 +138,7 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
           event.preventDefault();
           restore.focus();
         }
+        onClosed();
       }}
     >
       <div className="project-dialog-head">

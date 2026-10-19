@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatCoarseDuration, formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
+import { formatBytes, formatCoarseDuration, formatDateTime, formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -20,6 +20,20 @@ describe('formatDuration', () => {
     const t0 = '2026-09-04T00:00:00.000Z';
     expect(formatDuration(t0, '2026-09-04T00:00:01.400Z')).toBe('1.4s');
     expect(formatDuration(t0, '2026-09-04T00:01:00.000Z')).toBe('60.0s');
+  });
+});
+
+describe('formatDateTime（#1372 改动 10：全站统一到分钟）', () => {
+  it('本地时区 YYYY-MM-DD HH:mm（个位月/日/时/分补零）', () => {
+    const iso = new Date(2026, 8, 7, 0, 5).toISOString();
+    expect(formatDateTime(iso)).toBe('2026-09-07 00:05');
+  });
+
+  it('非法 / 缺失输入返回 null（调用方隐藏该行）', () => {
+    expect(formatDateTime(null)).toBeNull();
+    expect(formatDateTime(undefined)).toBeNull();
+    expect(formatDateTime('')).toBeNull();
+    expect(formatDateTime('not-a-date')).toBeNull();
   });
 });
 

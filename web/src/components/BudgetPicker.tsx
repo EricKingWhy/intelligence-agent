@@ -335,6 +335,8 @@ export function BudgetPicker({
             aria-label="预算"
             aria-disabled={disabled || undefined}
             disabled={disabled}
+            /* 同 ModelPicker：禁用态由原生 title 兜底。 */
+            title={disabled ? '预算（当前不可调整）' : undefined}
           >
             <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
             <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>

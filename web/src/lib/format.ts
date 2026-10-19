@@ -64,7 +64,8 @@ export function formatDateTime(iso: string | null | undefined): string | null {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/** 相对时间：把 ISO 时间戳渲染成 '刚刚 / N 分钟前 / N 小时前 / N 天前 / M月D日'。
+/** 相对时间：把 ISO 时间戳渲染成 '刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY-MM-DD HH:mm'。
+ *  超过一周落到 `formatDateTime` 的绝对格式（不再用 locale 的「9月7日」）。
  *  now 参数化以避免 Date.now() 副作用（可测、可由 tick hook 注入最新值）。
  *  缺省 now 用 Date.now()，保持调用点零改动。 */
 export function formatRelativeTime(iso: string | null, now: number = Date.now()): string {

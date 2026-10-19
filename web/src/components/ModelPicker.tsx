@@ -117,6 +117,9 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
             // Radix 注入 aria-haspopup="menu"/aria-expanded；aria-disabled 让 SSR 可见
             aria-disabled={disabled || undefined}
             disabled={disabled}
+            /* disabled 元素收不到指针/焦点事件，Radix tooltip 不会打开——保留
+               原生 title 作降级通道（与 OptionPicker 同一策略）。 */
+            title={disabled ? triggerLabel : undefined}
           >
             <Cpu size={13} className="composer-trigger-icon" aria-hidden="true" />
             <span className="composer-trigger-current">{triggerLabel}</span>

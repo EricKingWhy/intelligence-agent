@@ -1625,7 +1625,7 @@ export default function App() {
 
   return (
     <div className="app-frame">
-      <SkipLinks />
+      <SkipLinks inspectorOpen={inspectorOpen} />
       <TopBar
         conversation={conversation}
         streaming={streaming}
@@ -1647,7 +1647,6 @@ export default function App() {
         awaitingDecision={hasPendingDecisions}
         sessions={sessions}
         titlesById={titlesById}
-        sessionTitle={selectedId ? titlesById[selectedId] : undefined}
         onSelectSession={handleSelect}
         rosterSlot={
           <SubagentRoster

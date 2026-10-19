@@ -390,7 +390,7 @@ export function KanbanPanel({
             下一步；这里指向真实存在的入口（输入框），不指一个不存在的按钮。 */}
         {!loading && loadError === null && sessions.length === 0 && (
           <div className="kanban-empty" role="status">
-            还没有任务。关闭看板，在下方输入框提交一个任务，它会先出现在「待办」。
+            还没有任务。关闭看板，在下方输入框提交一个任务，它会出现在看板上。
           </div>
         )}
 

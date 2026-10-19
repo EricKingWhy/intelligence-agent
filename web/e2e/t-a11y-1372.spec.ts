@@ -15,6 +15,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   T,
+  clickTopBarMenuItem,
   routeApi,
   sessionRow,
 } from './fixtures';
@@ -135,6 +136,75 @@ test('#1372 AC1：首焦点到 composer ≤10 次按键（region 跳转键）；
   // eslint-disable-next-line no-console
   console.log(`[#1372] 首焦点→composer（纯 Tab）= ${pureTab} 次按键（无阈值，仅供记录）`);
   expect(pureTab).toBeGreaterThan(withSkip);
+});
+
+test('#1372：Inspector 收起时不再给出无法落焦的跳转键', async ({ page }) => {
+  await openApp(page);
+  const link = page.getByRole('link', { name: '跳到 Inspector' });
+  await expect(link).toHaveCount(1);
+  // 展开时可用：激活后焦点落在 region 容器上。
+  await link.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#region-inspector')).toBeFocused();
+
+  // 收起后该 region 是 visibility:hidden（不卸载），focus() 静默失败 ⇒ 链接不渲染。
+  await clickTopBarMenuItem(page, '收起 Inspector');
+  await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
+  await expect(page.getByRole('link', { name: '跳到 Inspector' })).toHaveCount(0);
+});
+
+test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真实入口）', async ({ page }) => {
+  await openApp(page);
+
+  const openMenu = () => page.getByRole('button', { name: '更多工具' }).click();
+  await openMenu();
+  for (const name of [
+    'API 身份令牌',
+    '上下文容量',
+    '上下文窗口',
+    '持久审批规则',
+    '自动值班',
+    '收起 Inspector',
+  ]) {
+    await expect(page.getByRole('menuitem', { name })).toBeVisible();
+  }
+  await page.keyboard.press('Escape');
+
+  // 1) 身份令牌 → 配置面板
+  await clickTopBarMenuItem(page, 'API 身份令牌');
+  await expect(page.locator('.auth-panel')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.auth-panel')).toHaveCount(0);
+
+  // 2) 上下文容量 → 看板
+  await clickTopBarMenuItem(page, '上下文容量');
+  await expect(page.getByRole('dialog', { name: '上下文容量' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '上下文容量' })).toHaveCount(0);
+
+  // 3) 上下文窗口 → 挡位选择器
+  await clickTopBarMenuItem(page, '上下文窗口');
+  await expect(page.getByRole('dialog', { name: '上下文窗口' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '上下文窗口' })).toHaveCount(0);
+
+  // 4) 持久审批规则 → 管理浮层
+  await clickTopBarMenuItem(page, '持久审批规则');
+  await expect(page.getByRole('dialog', { name: '持久审批规则' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '持久审批规则' })).toHaveCount(0);
+
+  // 5) 自动值班 → 独立面板
+  await clickTopBarMenuItem(page, '自动值班');
+  await expect(page.getByLabel('自动值班面板')).toBeVisible();
+  await page.getByRole('button', { name: '返回工作区' }).click();
+  await expect(page.getByLabel('自动值班面板')).toHaveCount(0);
+
+  // 6) Inspector 开关：收起 → 展开
+  await clickTopBarMenuItem(page, '收起 Inspector');
+  await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
+  await clickTopBarMenuItem(page, '展开 Inspector');
+  await expect(page.locator('.app-regions')).not.toHaveClass(/inspector-closed/);
 });
 
 test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', async ({ page }) => {
