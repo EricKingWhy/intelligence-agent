@@ -345,11 +345,17 @@ export const SessionList = memo(function SessionList({
               className="rail-empty-btn-primary"
               onClick={() => setCreateOpen(true)}
               aria-label="新建项目"
+              title="新建项目：注册一个已存在的目录"
             >
               <FolderPlus size={14} aria-hidden="true" />
               <span className="rail-empty-btn-label">新建项目</span>
             </button>
-            <button className="rail-empty-btn-ghost" onClick={onNew} aria-label="新会话">
+            <button
+              className="rail-empty-btn-ghost"
+              onClick={onNew}
+              aria-label="新会话"
+              title="新会话"
+            >
               <Plus size={14} aria-hidden="true" />
               <span className="rail-empty-btn-label">新会话</span>
             </button>
