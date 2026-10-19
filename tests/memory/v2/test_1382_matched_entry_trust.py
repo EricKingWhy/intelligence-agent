@@ -16,7 +16,13 @@ import inspect
 
 import pytest
 
-from tests.memory.v2._markdown_memory_1353 import build_store, call, load, path_of, read_entries
+from tests.memory.v2._markdown_memory_1353 import (
+    build_store,
+    call,
+    load,
+    path_of,
+    read_entries,
+)
 
 pytestmark = pytest.mark.asyncio
 

@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
 from agent_harness.memory.v2.migration import migrate_active_records
-from tests.memory.v2._markdown_memory_1353 import build_store, call, load, path_of, read_raw
+from tests.memory.v2._markdown_memory_1353 import (
+    build_store,
+    call,
+    load,
+    path_of,
+    read_raw,
+)
 
 pytestmark = pytest.mark.asyncio
 
