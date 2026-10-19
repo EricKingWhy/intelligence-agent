@@ -12,13 +12,14 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Activity, AlertTriangle } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { describeFailure, type FailureCopy } from '../hooks/useSession';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain, emptyChildTurnIndex, latestEditableTurn } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
 import type { Disclosure } from '../lib/disclosure';
 import { nextLevel, toolEventKey } from '../lib/disclosure';
+import { OwletMark } from './OwletMark';
 import {
   FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, nestedChainAbsorbs,
   wheelDeltaPixels, type FollowState,
@@ -485,7 +486,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
         {failureBars}
         <div className="conversation-empty">
           <div className="empty-card">
-            <div className="empty-logo"><Activity size={20} /></div>
+            <div className="empty-logo"><OwletMark /></div>
             <div className="empty-hero">暂无对话</div>
             <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
             {/* #1370 P0-7：空状态主 CTA。语义 = 既有「新建会话」入口（不是新路径），

@@ -9,12 +9,13 @@
  */
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Activity, Brain, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
+import { Brain, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { formatDateTime } from '../lib/format';
 import type { SessionSummary } from '../types';
 import { Tip } from './Tooltip';
+import { OwletMark } from './OwletMark';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
@@ -193,7 +194,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   return (
     <header className="appbar">
       <div className="appbar-left">
-        <Activity size={16} className="appbar-logo" />
+        <OwletMark className="appbar-logo" />
         <span className="appbar-title">Owlet</span>
       </div>
 

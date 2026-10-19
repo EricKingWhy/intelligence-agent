@@ -375,10 +375,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .appbar-left {
   min-width: 0;
 }
-/* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon */
+/* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon。
+ * 内层猫头鹰留 5px 内边距（28 → 18px 图形），与 A 版 26/18 的比例一致。 */
 .appbar-logo {
+  --brand-mark-hole: var(--surface-1);
   width: 28px;
   height: 28px;
+  padding: 5px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-sm);
@@ -2495,8 +2498,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-/* 空态 logo：gradient accent 容器 + 内高光，与 appbar-logo 同族 */
+/* 空态 logo：gradient accent 容器 + 内高光，与 appbar-logo 同族。
+ * `--brand-mark-hole` = 容器渐变终点的底色，OwletMark 的眼睛/喙据此「挖空」。 */
 .empty-logo {
+  --brand-mark-hole: var(--surface-2);
   width: 44px;
   height: 44px;
   display: grid;
@@ -2507,6 +2512,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--accent-text);
   margin-bottom: var(--space-lg);
   box-shadow: var(--edge-light);
+}
+.empty-logo svg {
+  width: 24px;
+  height: 24px;
+  display: block;
 }
 .empty-hero {
   font-size: var(--text-xl);
