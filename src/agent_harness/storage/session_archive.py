@@ -623,7 +623,10 @@ class SessionArchive:
                     (_FTS_CJK_STALE_KEY,),
                 )
                 self._cjk_available = False
-                logger.warning(
+                # info 而非 warning：这是**预期内**的降级（没编扩展的机器/测试
+                # 环境都走这条），warning 会作为 system_log 混进结构化事件流，
+                # 把「事件流 schema 不新增字段」的断言打红（tests/test_structured_logging）。
+                logger.info(
                     "fts5_cjk tokenizer 不可用（%s）；CJK 索引降级为 trigram/LIKE",
                     self.cjk_so_path,
                 )
