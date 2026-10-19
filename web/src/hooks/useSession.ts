@@ -195,14 +195,22 @@ export function shouldShowHistoryLoading(
  *  - live→viewing 自迁移：`conversation.session_id === mode.sessionId` ⇒ false，
  *    保留 `shouldShowHistoryLoading` 的「后台对账不闪占位符」语义。
  *
+ *  `settledSessionId` 是**已落地**（成功或失败）的目标会话：读取失败时
+ *  `conversation` 仍是 null，若只看「投影不一致」会让骨架永不退场、把失败说成
+ * 「还在加载」。失败时骨架必须让位给空态 + 错误横幅（同样的道理也适用于
+ * 已删除会话——那条路径直接回 idle，不经过这里）。
+ *
  *  `live` 模式不参与：流帧自己画内容（提交后的第一帧由 composer 的提交态承接）。 */
 export function shouldShowHistorySkeleton(
   mode: SessionMode,
   conversation: ConversationState | null,
   loadingHistory: boolean,
+  settledSessionId: string | null = null,
 ): boolean {
   if (loadingHistory) return true;
-  return mode.kind === 'viewing' && conversation?.session_id !== mode.sessionId;
+  if (mode.kind !== 'viewing') return false;
+  if (settledSessionId === mode.sessionId) return false;
+  return conversation?.session_id !== mode.sessionId;
 }
 
 /** P1-3 delta 合帧提交器（HANDOFF_PERF_FRONTEND §6）：~24ms 窗口内多个 delta
@@ -571,8 +579,16 @@ export function useSession() {
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
   const streaming = mode.kind === 'live';
+  /** #1371：已落地（成功或失败）的目标会话。见 `shouldShowHistorySkeleton` 的
+   *  `settledSessionId` 参数：读取失败时不能继续挂骨架。 */
+  const [historySettledId, setHistorySettledId] = useState<string | null>(null);
   /** #1371：对话区骨架的渲染判据（渲染期派生，覆盖 effect 落地前的那一帧）。 */
-  const historySkeleton = shouldShowHistorySkeleton(mode, conversation, loadingHistory);
+  const historySkeleton = shouldShowHistorySkeleton(
+    mode,
+    conversation,
+    loadingHistory,
+    historySettledId,
+  );
 
   // Load session list on mount.
   /** 重新拉取会话列表。返回**是否成功**——`sessions` 的唯一写入者，所以调用方
@@ -725,7 +741,11 @@ export function useSession() {
         setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
-        if (!cancelled) setLoadingHistory(false);
+        if (!cancelled) {
+          setLoadingHistory(false);
+          // 成功与失败都要记：失败时 `conversation` 仍是 null，判据靠这条收骨架。
+          setHistorySettledId(sid);
+        }
       });
     return () => {
       cancelled = true;

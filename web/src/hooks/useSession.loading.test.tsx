@@ -214,6 +214,16 @@ describe('loadingHistory — 初值、复位与派生骨架', () => {
     expect(captured.hook!.historySkeleton).toBe(false);
   });
 
+  it('历史读取失败：骨架让位给空态 + 错误横幅（不能永远"正在加载"）', async () => {
+    window.localStorage.setItem(SELECTED_SESSION_KEY, SID);
+    apiMock.getSessionEvents.mockRejectedValueOnce(new Error('get events 502'));
+
+    await mount();
+    expect(captured.hook!.loadingHistory).toBe(false);
+    expect(captured.hook!.conversation).toBeNull();
+    expect(captured.hook!.historySkeleton).toBe(false);
+  });
+
   it('空闲态点开会话：events 未返回时 historySkeleton=true（不闪空态）', async () => {
     await mount();
     expect(captured.hook!.selectedId).toBeNull();
@@ -256,6 +266,16 @@ describe('shouldShowHistorySkeleton — 渲染期派生（effect 落地前的那
     expect(shouldShowHistorySkeleton({ kind: 'viewing', sessionId: 'A' }, convA, true)).toBe(
       true,
     );
+  });
+
+  it('目标会话已落地（读取失败）：不再挂骨架', () => {
+    expect(
+      shouldShowHistorySkeleton({ kind: 'viewing', sessionId: 'B' }, null, false, 'B'),
+    ).toBe(false);
+    // 别的会话落地不算：切到 B 时 A 的落地不能提前收起 B 的骨架。
+    expect(
+      shouldShowHistorySkeleton({ kind: 'viewing', sessionId: 'B' }, null, false, 'A'),
+    ).toBe(true);
   });
 
   it('live / idle 不参与：流帧自己画内容，idle 无会话', () => {
