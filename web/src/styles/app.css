@@ -10581,18 +10581,14 @@ button.json-row {
 }
 .project-dialog .btn-primary {
   border-radius: var(--radius-full);
-  color: var(--bg-app);
+  color: var(--surface-canvas);
 }
 .project-dialog .btn-ghost {
   border-color: transparent;
   border-radius: var(--radius-full);
 }
-.project-dialog .project-input,
-.project-dialog .project-textarea,
-.provider-dialog .project-input,
-.provider-dialog .project-textarea {
-  border-radius: var(--radius-sm);
-}
+/* 输入框 6px 圆角是既有事实（`.project-input` / `.project-textarea` 本来就取
+ * --radius-sm），这里只收紧焦点态：边框换满强度 --accent、去掉外发光。 */
 .project-dialog .project-input:focus-visible,
 .project-dialog .project-textarea:focus-visible,
 .provider-dialog .project-input:focus-visible {
