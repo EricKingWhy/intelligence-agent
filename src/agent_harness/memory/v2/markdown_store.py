@@ -72,6 +72,28 @@ def _scan_memory_content(content: str) -> str | None:
     return _first_threat_message(content, scope="strict")
 
 
+def _delimiter_error(content: str) -> str | None:
+    """含保留分隔符的 content 一旦落盘就会分裂成多条——**拒绝，不转义**。
+
+    转义会让磁盘文本 ≠ 记忆文本，而 pin / digest / 去重全按正文逐字相等判定。
+    拒绝让模型当场自纠（拆成多次 add），代价只是一轮重试。
+
+    判定按**读侧口径**、且覆盖两个同形变体：
+
+    - 写侧 `newline=""` 原样保留 `\\r`，读侧 `read_text` 会把 CRLF/CR 折成 LF ⇒
+      `\\r\\n§\\r\\n` 落盘后在重载时就是分隔符，必须先折行再判；
+    - 结尾的半个分隔符 `\\n§`（`normalize_entry` 已 strip，故不会带尾随空白）
+      与下一条 `join` 时凑出 `\\n§\\n`，把**下一条**并进本条——同样要拒。
+    """
+    folded = content.replace("\r\n", "\n").replace("\r", "\n")
+    if ENTRY_DELIMITER in folded or folded.endswith(ENTRY_DELIMITER[:-1]):
+        return (
+            f"Blocked: content contains the reserved entry delimiter {ENTRY_DELIMITER!r}; "
+            "split it into multiple add operations."
+        )
+    return None
+
+
 def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"success": False, "error": message, **extra}
 
@@ -471,6 +493,8 @@ class MarkdownMemoryStore:
         content = normalize_entry(content)
         if not content:
             return _error("Content cannot be empty.")
+        if delimiter_error := _delimiter_error(content):
+            return _error(delimiter_error)
         if scan_error := _scan_memory_content(content):
             return _error(scan_error)
 
@@ -502,6 +526,8 @@ class MarkdownMemoryStore:
             return _error("old_text cannot be empty.")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
+        if delimiter_error := _delimiter_error(new_content):
+            return _error(delimiter_error)
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
         return self._edit(target, normalize_entry(old_text), new_content, matched_entry)
@@ -601,18 +627,36 @@ class MarkdownMemoryStore:
         working[idx:idx + 1] = [content] if act == "replace" else []
         return None, previous_content
 
-    def _batch_sync(self, target: str, operations: list[dict[str, Any]], *, commit: bool) -> dict[str, Any]:
+    def _batch_sync(
+        self, target: str, operations: list[dict[str, Any]], *, commit: bool,
+        trusted_pins: bool = False,
+    ) -> dict[str, Any]:
         if not operations:
             return _error("operations list is empty.")
-        ops = [op or {} for op in operations]
+        # 预扫描与执行读同一个规范化后的 op：模型可传 `new_text` 别名，若预扫描只看
+        # `content`，投毒内容就会绕过威胁扫描直接进盘。折叠优先级与执行处逐字同形。
+        #
+        # `matched_entry` 是**系统 pin**（stage 时钉住的条目全文），不是模型输入：
+        # 直写路径（write_approval 默认关）里模型能自己填它，填成别的条目就能绕过
+        # old_text 把那条改掉。只有审批重放（`trusted_pins=True`）能携带它。
+        # 注：单条 `replace`/`remove` 的 `matched_entry` 仍是调用方自证（pin 在这一层
+        # 无法与调用方区分），其模型不可达由工具面（`operations_payload`）保证。
+        ops = [
+            {
+                **(op or {}),
+                "content": normalize_entry((op or {}).get("content") or (op or {}).get("new_text") or ""),
+                "matched_entry": (op or {}).get("matched_entry") if trusted_pins else None,
+            }
+            for op in operations
+        ]
         # 先扫所有 add/replace 内容，再碰磁盘——一个投毒 op 拒绝整批。
+        # 只查会落盘的 op：remove 的 content 不参与写入，拿它拒绝一次合法删除是误伤。
         for i, op in enumerate(ops):
-            scan_error = (
-                op.get("action") in {"add", "replace"}
-                and op.get("content")
-                and _scan_memory_content(op["content"])
-            )
-            if scan_error:
+            if op.get("action") not in {"add", "replace"} or not op["content"]:
+                continue
+            if delimiter_error := _delimiter_error(op["content"]):
+                return _error(f"Operation {i + 1}: {delimiter_error}")
+            if scan_error := _scan_memory_content(op["content"]):
                 return _error(f"Operation {i + 1}: {scan_error}")
 
         def _apply(entries: list[str], limit: int) -> Any:
@@ -623,7 +667,7 @@ class MarkdownMemoryStore:
                 msg, previous_content = self._apply_batch_op(
                     working,
                     act,
-                    normalize_entry(op.get("content") or op.get("new_text") or ""),
+                    op["content"],
                     normalize_entry(op.get("old_text") or ""),
                     f"Operation {i + 1} ({act or 'unknown'})",
                     op.get("matched_entry"),
@@ -669,7 +713,8 @@ class MarkdownMemoryStore:
     def _resolve_batch_entries_sync(
         self, target: str, operations: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        return self._batch_sync(target, operations, commit=False)
+        # 解析阶段只做「old_text 选中了哪条」——模型给的 matched_entry 一律不认。
+        return self._batch_sync(target, operations, commit=False, trusted_pins=False)
 
     # ------------------------------------------------------------------ async 外壳
 
@@ -687,8 +732,14 @@ class MarkdownMemoryStore:
     async def resolve_entry(self, target: str, old_text: str, verb: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._resolve_entry_sync, target, old_text, verb)
 
-    async def apply_batch(self, target: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._batch_sync, target, operations, commit=True)
+    async def apply_batch(
+        self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
+    ) -> dict[str, Any]:
+        """``trusted_pins=True`` 只给审批重放用（`write_approval._replay`）：它携带的是
+        stage 时从磁盘钉住的条目全文，属于系统 pin。其余调用方（含模型工具面）的
+        ``matched_entry`` 一律剥掉，按 ``old_text`` 重新定位。"""
+        return await asyncio.to_thread(
+            self._batch_sync, target, operations, commit=True, trusted_pins=trusted_pins)
 
     async def resolve_batch_entries(
         self, target: str, operations: list[dict[str, Any]],

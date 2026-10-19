@@ -84,7 +84,8 @@ class _MemoryOp(BaseModel):
     content: str | None = None
     new_text: str | None = None
     old_text: str | None = None
-    #: M6 stage 前 resolve 的完整条目；审批重放时只认它（模型不会填）。
+    #: 仅为 schema 兼容保留（``extra="forbid"`` 下模型多传它会报错）：任何路径都不转发它，
+    #: 审批重放的 pin 由 ``write_approval._replay`` 从 stage 时的 ``pinned_entry`` 注入。
     matched_entry: str | None = None
 
 
@@ -130,12 +131,13 @@ class _MemoryArgs(BaseModel):
         return (self.content if self.content is not None else self.new_text) or ""
 
     def operations_payload(self) -> list[dict[str, Any]]:
+        # `matched_entry` 是系统 pin（审批重放时由 `write_approval._replay` 注入），
+        # 模型填什么这里都不转发：它一旦被采信就能绕过 old_text 改任意条目。
         return [
             {
                 "action": op.action,
                 "content": op.content if op.content is not None else op.new_text,
                 "old_text": op.old_text,
-                **({"matched_entry": op.matched_entry} if op.matched_entry is not None else {}),
             }
             for op in self.operations or []
         ]

@@ -89,3 +89,33 @@ def make_record(*, tenant_id: str = "tenant-a", user_id: str = "user-a",
         created_at=NOW,
         updated_at=NOW,
     )
+
+
+#: `memory_v2_records` 的完整列序（raw INSERT 用）。列顺序变一次，任何写死的下标
+#: 都会静默对到别的列上——所以列清单与 `raw_row` 只此一份，迁移类用例共用。
+RAW_COLUMN_NAMES = (
+    "memory_id", "schema_version", "root_id", "version", "kind", "tier", "scope",
+    "tenant_id", "user_id", "project_id", "content", "payload", "status", "importance",
+    "strength", "source_type", "source_session_id", "source_event_ids", "evidence",
+    "valid_at", "invalidated_at", "superseded_by", "created_at", "updated_at",
+)
+
+
+def raw_row(memory_id: str, content: str, status: str = "active", *, now: str = NOW) -> tuple:
+    """一行 `memory_v2_records` 原始值（与 `RAW_COLUMN_NAMES` 逐列对齐）。"""
+    return (memory_id, 2, f"r-{memory_id}", 1, "semantic", "collection", "user_global",
+            "local", "local", None, content, "{}", status, 0.5, 0.5, "model", None, "[]",
+            "[]", None, None, None, now, now)
+
+
+def insert_rows(db_path, rows: list[tuple]) -> None:
+    """按 `RAW_COLUMN_NAMES` 插入原始行（库须已初始化）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as connection:
+        connection.executemany(
+            f"INSERT INTO memory_v2_records ({', '.join(RAW_COLUMN_NAMES)}) "
+            f"VALUES ({','.join('?' * len(RAW_COLUMN_NAMES))})",
+            rows,
+        )
+        connection.commit()

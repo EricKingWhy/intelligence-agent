@@ -147,6 +147,66 @@ async def test_approve_applies_pinned_replacement_when_file_is_unchanged(approva
 
 
 @pytest.mark.asyncio
+async def test_batch_approve_replays_pinned_ops(approval) -> None:
+    """batch 的 stage→approve→`_replay` 全链路（评审 note：此前只在存储层验过 pin 通道）。
+
+    整批是一条 pending record；重放时 pin 由 `_replay` 注入并走 `trusted_pins=True`。
+    """
+    staged, markdown = approval
+    await _seed(markdown)
+    await _seed(markdown, "gamma obsolete")
+    payload = {
+        "target": "memory",
+        "action": "batch",
+        "operations": [
+            {"action": "replace", "old_text": "alpha preference", "content": "beta preference"},
+            {"action": "remove", "old_text": "gamma obsolete"},
+        ],
+    }
+
+    pins, error = await staged.resolve_pins(payload)
+    assert error is None, error
+    record = await staged.stage(payload, pins, LOCAL)
+    decision, response = await staged.approve(record.id, LOCAL)
+
+    assert decision.allow, decision
+    assert response is not None and response["success"], response
+    text = markdown.path_for("memory").read_text(encoding="utf-8")
+    assert "beta preference" in text
+    assert "alpha preference" not in text
+    assert "gamma obsolete" not in text
+    assert (await staged.get(record.id, LOCAL)).status == APPROVED
+
+
+@pytest.mark.asyncio
+async def test_batch_approve_rejects_after_external_edit_and_keeps_pending_record(approval) -> None:
+    """同一全链路的负控：stage 后外部改条 ⇒ 整批拒绝、文件不被覆盖、record 保留。"""
+    staged, markdown = approval
+    await _seed(markdown)
+    payload = {
+        "target": "memory",
+        "action": "batch",
+        "operations": [
+            {"action": "replace", "old_text": "alpha preference", "content": "beta preference"},
+        ],
+    }
+    pins, error = await staged.resolve_pins(payload)
+    assert error is None, error
+    record = await staged.stage(payload, pins, LOCAL)
+
+    path = markdown.path_for("memory")
+    path.write_text("alpha preference, hand edited", encoding="utf-8")
+    before = path.read_bytes()
+
+    decision, response = await staged.approve(record.id, LOCAL)
+
+    assert decision.blocked, decision
+    assert response is None
+    assert path.read_bytes() == before
+    assert (await staged.get(record.id, LOCAL)).status == PENDING
+
+
+@pytest.mark.asyncio
 async def test_approve_rejects_after_external_edit_and_keeps_pending_record(approval) -> None:
     """AC7 核心：stage 后外部改文件 → approve 拒绝、文件不被覆盖、record 保留。"""
     staged, markdown = approval

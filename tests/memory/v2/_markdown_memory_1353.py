@@ -8,7 +8,8 @@
 
 1. 按真实签名构造实例，并守住"根目录必须在 tmp_path 下"的安全判据；
 2. 把 store 的同步/async 方法调用统一成 awaitable 桥；
-3. 提供条目解析等文件断言的小工具。
+3. 提供条目解析等文件断言的小工具、加载好的 store（`loaded_store`）与
+   memory Tool（`build_tool`）。
 
 它不实现任何记忆语义，也不替被测代码做断言。
 """
@@ -22,6 +23,7 @@ from typing import Any
 import pytest
 
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, MarkdownMemoryStore
+from agent_harness.memory.v2.memory_tool import MemoryTool
 
 
 def build_store(
@@ -62,6 +64,20 @@ async def call(method: Any, *args: Any, **kwargs: Any) -> Any:
 def load(store: MarkdownMemoryStore) -> Any:
     """调用 ``load_from_disk``（同步方法；返回值形态保留以兼容既有调用方）。"""
     return store.load_from_disk()
+
+
+async def loaded_store(tmp_path: Path) -> MarkdownMemoryStore:
+    """构造 store 并完成首次 load（各用例都要的那段样板，只此一份）。"""
+    store = build_store(tmp_path)
+    pending = load(store)
+    if inspect.isawaitable(pending):
+        await pending
+    return store
+
+
+def build_tool(store: Any) -> Any:
+    """按真实符号构造 memory Tool。"""
+    return MemoryTool(store)
 
 
 def path_of(store: MarkdownMemoryStore, target: str) -> Path:

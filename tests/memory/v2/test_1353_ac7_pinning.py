@@ -97,6 +97,9 @@ async def test_batch_pins_each_entry_and_rejects_whole_batch_on_drift(store) -> 
             {"action": "replace", "old_text": "rule one", "content": "rule one v2", "matched_entry": matched[0]},
             {"action": "remove", "old_text": "rule two", "matched_entry": matched[1]},
         ],
+        # 这些 pin 是 `resolve_batch_entries` 从磁盘钉住的全文，属系统 pin；
+        # 只有重放通道认它们（模型输入见 #1382）。
+        trusted_pins=True,
     )
 
     assert result["success"] is False
