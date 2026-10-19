@@ -13,7 +13,7 @@ import pytest
 
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.sandbox.paths import canonical_workspace_path
-from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from tests.workspace_fixtures import rewrite_workspace_mapping
@@ -107,6 +107,53 @@ class TestExistingBehaviorUnchanged:
         assert session2.sandbox is None
         # session/resumed 事件已追加
         assert any(e.type == "session/resumed" for e in session2.events)
+
+
+class TestLoadWithoutWorkspaceMapping:
+    """#1235：映射缺席时 `Session.load` 降级为 `sandbox=None`，而不是抛 `KeyError`。
+
+    可达形态：早于 WorkspaceRegistry 的历史会话、映射卷被清空、测试/手工构造的
+    会话。写路径端点（workflow-mode / approvals/revoke / context-settings）只用
+    `Session.load` 追加事件、从不碰 sandbox——一次缺席的映射不该把 200 变成 500。
+
+    注册表自身的契约不变：`get()` 对缺席仍抛 `KeyError`
+    （`tests/sandbox/test_workspace_registry.py::test_nonexistent_raises`）。
+    """
+
+    def test_load_returns_none_sandbox_when_mapping_absent(self, store_and_registry):
+        store, registry = store_and_registry
+        session = Session.start(store)  # 故意不建映射
+        session_id = session.session_id
+
+        # 测试前提：映射确实缺席，且 registry.get 仍按契约抛 KeyError。
+        with pytest.raises(KeyError):
+            registry.get(session_id)
+
+        loaded = Session.load(store, session_id, workspace_registry=registry)
+
+        assert loaded.sandbox is None
+        assert [e.type for e in loaded.events] == [e.type for e in session.events]
+
+    def test_resume_with_absent_mapping_still_works(self, store_and_registry):
+        """`resume` 委托 `load`：映射缺席不应阻断恢复本身。"""
+        store, registry = store_and_registry
+        session_id = Session.start(store).session_id
+
+        resumed = Session.resume(store, session_id, workspace_registry=registry)
+
+        assert resumed.sandbox is None
+        assert any(e.type == "session/resumed" for e in resumed.events)
+
+    def test_binding_error_still_propagates(self, store_and_registry):
+        """只降级「没有映射」；硬删除进行中是「映射此刻不可用」，必须继续响亮失败。"""
+        store, registry = store_and_registry
+        session_id = Session.start(store).session_id
+        registry._write_mapping(
+            session_id, {"session_id": session_id, "workspace_delete_in_progress": True}
+        )
+
+        with pytest.raises(WorkspaceBindingError, match="hard-delete"):
+            Session.load(store, session_id, workspace_registry=registry)
 
 
 class TestRecordedWorkspaceRoots:
