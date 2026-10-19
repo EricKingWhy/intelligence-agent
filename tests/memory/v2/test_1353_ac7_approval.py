@@ -4,7 +4,7 @@ A 路已落地 `memory_v2_staged` + `StagedWriteStore`（`memory/v2/write_approv
 本文件从"结构契约 + 发现式探测"升级为**真实 API 的行为判据**：
 
 1. 表与列集存在（M6 点名的最小列）；
-2. 审批入口存在（发现式探测，不预设单一命名）；
+2. 审批入口存在（`StagedWriteStore` 公开方法集白名单，见文末判据）；
 3. stage → 文件未变 → approve 落盘（正控，证明重放链本身可用）；
 4. stage → 外部改文件 → approve **拒绝**、状态保持 pending、**record 保留**、
    文件不被覆盖（AC7 核心）；
@@ -14,13 +14,11 @@ A 路已落地 `memory_v2_staged` + `StagedWriteStore`（`memory/v2/write_approv
 
 from __future__ import annotations
 
-import pkgutil
 import sqlite3
 
 import pytest
 import pytest_asyncio
 
-import agent_harness.memory.v2 as v2_package
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.store import MemorySettingsV2, SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
@@ -74,30 +72,24 @@ async def test_staged_approval_schema_exists(store) -> None:
     assert STAGED_COLUMNS <= _columns(database, "memory_v2_staged")
 
 
-def _approval_surface() -> set[str]:
-    """实现侧审批面的落点：staging 模块名或 store 上的审批方法，发现式探测。
-
-    不预设单一命名（A 路可用 `stage` / `approve` / `reject` 等任一命名），
-    只要求"审批这一步在代码里存在"——否则 AC7 的行为用例无处落笔。
-    """
-    found = {
-        f"memory.v2.{module.name}"
-        for module in pkgutil.iter_modules(v2_package.__path__)
-        if "approval" in module.name or "staged" in module.name
-    }
-    for name in ("stage", "stage_write", "approve", "approve_write", "reject"):
-        if callable(getattr(SqliteMemoryV2Store, name, None)):
-            found.add(f"SqliteMemoryV2Store.{name}")
-    return found
-
-
 def test_stage_approve_reject_surface_exists() -> None:
-    """审批入口必须存在，否则 "stage → 外部改文件 → approve 拒绝且保留 record" 不可执行。"""
-    surface = _approval_surface()
-    assert surface, (
-        "AC7 审批层缺口：找不到任何 staging/approve 入口——"
-        "memory.v2 下无 approval/staged 模块，SqliteMemoryV2Store 上也无可调用审批方法。"
-        "M6 要求的 memory_v2_staged + 审批回调（web/CLI）均未落地。"
+    """`StagedWriteStore` 公开方法集必须**恰好**是审批面七方法（白名单判据）。
+
+    未来新增/删除公开方法都会显式红，逼着把新入口写进判据——不再是
+    "任一模块名含 approval 就过"的恒真断言（Stds-P2）。
+    ``initialize`` 是建表入口，与六个审批方法同属公开 API。
+    """
+    public_methods = {
+        name
+        for name, value in vars(StagedWriteStore).items()
+        if not name.startswith("_") and callable(value)
+    }
+    assert public_methods == {
+        "initialize", "stage", "resolve_pins", "pending", "get", "approve", "reject",
+    }, (
+        "AC7 审批面漂移：StagedWriteStore 公开方法集变化。"
+        f"实际：{sorted(public_methods)}；预期：initialize + stage/resolve_pins/pending/get/approve/reject。"
+        "若为有意变更，请同步更新本判据与 issue §3 M6。"
     )
 
 
