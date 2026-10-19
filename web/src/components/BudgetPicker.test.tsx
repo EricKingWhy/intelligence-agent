@@ -40,6 +40,11 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
     expect(out).toContain('type="datetime-local"');
   });
 
+  it('非法草稿不算有效覆盖 → 不渲染「恢复默认」（与 trigger 摘要同判据）', () => {
+    const out = html(createElement(BudgetPickerPanel, { ...full, turns: 'abc' }));
+    expect(out).not.toContain('恢复默认');
+  });
+
   it('未接 onChange 的维不渲染其控件（不渲染吞输入的死框，#426 语义原样）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, onTokensChange: undefined, onDeadlineChange: undefined }));
     expect(out).toContain('aria-label="轮数上限（留空用默认值）"');
@@ -107,17 +112,28 @@ describe('BudgetPicker — 单入口 trigger（#536 §2.3/§2.5）', () => {
     deadline: '', onDeadlineChange: noop,
   };
 
-  it('trigger aria-label="预算" + 全空摘要「默认」', () => {
+  it('trigger aria-label="预算" + 全空摘要「预算：默认」（#1370 3d：入口常显前缀）', () => {
     const out = html(createElement(BudgetPicker, full));
     expect(out).toContain('aria-label="预算"');
-    expect(out).toContain('>默认<');
+    expect(out).toContain('>预算：默认<');
+    // 「选中才给底色」：全空 = 未选态，不带 data-selected。
+    expect(out).not.toContain('data-selected="true"');
   });
 
   it('草稿有值 → 摘要随 drafts 变化（turns 5 · 500k · 2h）', () => {
     const out = html(
       createElement(BudgetPicker, { ...full, turns: '5', tokens: '500000', deadline: '2h' }),
     );
-    expect(out).toContain('>轮数 5 · 500k · 2h<');
+    expect(out).toContain('>预算：轮数 5 · 500k · 2h<');
+    // 有任一维落定 ⇒ 选中态（#1370 P0-9）。
+    expect(out).toContain('data-selected="true"');
+  });
+
+  it('非法草稿（turns=abc）→ 摘要「预算：默认」，且不亮选中态（与摘要同源）', () => {
+    const out = html(createElement(BudgetPicker, { ...full, turns: 'abc' }));
+    expect(out).toContain('>预算：默认<');
+    expect(out).not.toContain('data-selected="true"');
+  });
   });
 
   it('disabled → aria-disabled="true"（SSR 可见，同 OptionPicker 契约）', () => {

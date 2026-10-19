@@ -20,6 +20,10 @@ const CATALOG: ModelCatalogEntry[] = [
   { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
 ];
 
+// #1370 P0-9：权限 chip 的原生 title = 说明段 + 禁用原因段（两段并排保留）。
+// ADR-0041 D4：说明段必须写「下一轮 run 生效」，不得承诺「立即」。
+const PERMISSION_HINT = '权限：工具调用如何批准；改档从下一轮 run 起生效（本轮不受影响）。';
+
 describe('Composer 模型选择器（#103 / Phase 2a）', () => {
   it('端点缺席（models 空）：选择器不渲染——不伪造列表', () => {
     const html = renderToString(createElement(Composer, { ...base, models: [], selectedModel: null, onModelChange: noop }))
@@ -45,6 +49,24 @@ describe('Composer 模型选择器（#103 / Phase 2a）', () => {
     expect(html).toContain('qwen-max');
     // 不应再显示默认链 label（因为切到了具体模型）
     expect(html).not.toContain('>默认链<');
+  });
+});
+
+describe('Composer 输入提示按态切换（#1370 P0-7）', () => {
+  it('空闲态：只说 Enter 发送，不出现排队/打断（没有排队对象）', () => {
+    const html = renderToString(createElement(Composer, { ...base, streaming: false }))
+      .replaceAll('<!-- -->', '');
+    expect(html).toContain('placeholder="描述一个任务…（Enter 发送）"');
+    expect(html).not.toContain('排队');
+    expect(html).not.toContain('打断');
+  });
+
+  it('有 run 在跑：才区分 Enter 排队 / 打断，不再出现「立即」', () => {
+    const html = renderToString(createElement(Composer, { ...base, streaming: true }))
+      .replaceAll('<!-- -->', '');
+    expect(html).toContain('Enter 排队');
+    expect(html).toContain('+Enter 打断');
+    expect(html).not.toContain('立即');
   });
 });
 
@@ -189,6 +211,7 @@ describe('Composer pending plan approval lock (#1356)', () => {
       permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('请先决定当前计划');
+    expect(html).toContain(PERMISSION_HINT);
     expect(html).toContain('title="决定计划后再改档"');
   });
 });
@@ -309,7 +332,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="本轮进行中，等这一轮结束再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('本轮进行中，等这一轮结束再改档');
     expect(html).not.toContain('权限档在会话创建时确定，会话内不可修改');
   });
 
@@ -319,7 +343,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待审批决策后再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('等待审批决策后再改档');
   });
 
   // #1283 P1：`locked` 已包含两种「待回答的用户输入」，改档禁用原因必须按**真实**
@@ -330,7 +355,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待回答当前提问后再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('等待回答当前提问后再改档');
     expect(html).not.toContain('审批');
   });
 
@@ -340,6 +366,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain(PERMISSION_HINT);
     expect(html).toContain('title="确认当前要求后再改档"');
     expect(html).not.toContain('审批');
   });
@@ -376,7 +404,7 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
       createElement(Composer, { ...base, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-label="预算"');
-    expect(html).toContain('>默认<');
+    expect(html).toContain('>预算：默认<');
     // 三平铺已收敛：面板外不再有常驻的预算字段行。
     expect(html).not.toContain('composer-budget-label');
   });
@@ -393,7 +421,7 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
         onBudgetRunDeadlineChange: noop,
       }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('>轮数 5 · 500k · 2h<');
+    expect(html).toContain('>预算：轮数 5 · 500k · 2h<');
   });
 
   it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {

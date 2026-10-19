@@ -79,7 +79,8 @@ export function BudgetPickerPanel({
   // 预览只跟随被接线的维（面板里没有的那一维不产生预览行）。
   const preview = onDeadlineChange !== undefined ? deadlinePreview(deadline, now) : null;
   const summary = budgetSummary(turns, tokens, deadline);
-  const hasBudgetOverrides = turns.trim() !== '' || tokens.trim() !== '' || deadline.trim() !== '';
+  // 与 trigger 的 `data-selected` 同一判据：只有**有效**覆盖值才允许出现「重置」。
+  const hasBudgetOverrides = summary !== '默认';
 
   const resetBudget = () => {
     setCustomTokensPicked(false);
@@ -323,6 +324,10 @@ export function BudgetPicker({
   onDeadlineChange,
   disabled = false,
 }: BudgetPickerProps) {
+  // 摘要与选中态同源：非法草稿（如 turns='abc'）在 `budgetSummary` 里就是「默认」，
+  // 不能出现「chip 亮着、摘要却写默认」的分裂状态。
+  const summary = budgetSummary(turns, tokens, deadline);
+  const hasBudgetOverrides = summary !== '默认';
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
@@ -331,11 +336,13 @@ export function BudgetPicker({
           className="composer-control composer-budget-trigger"
           aria-label="预算"
           title="这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。"
+          /* #1370 P0-9：「选中才给底色」——设了任一维才浮出，全空仍是透明的「预算：默认」。 */
+          data-selected={hasBudgetOverrides ? 'true' : undefined}
           aria-disabled={disabled || undefined}
           disabled={disabled}
         >
           <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>
+          <span className="composer-trigger-current">{`预算：${summary}`}</span>
           <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
         </button>
       </Popover.Trigger>

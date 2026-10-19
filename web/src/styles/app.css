@@ -648,7 +648,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   align-items: flex-start;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
+  /* #1370 P0-7：行高 44px 起（票面值 `padding: 6px 8px`）——标题与 id 合并成一行后，
+   * 两行内容 + 12px 垂直内边距落在 44-48px，比原来的三行密度高约 1/4。 */
+  padding: 6px 8px;
+  min-height: 44px;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
@@ -704,24 +707,40 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   min-width: 0;
   flex: 1;
 }
+/* #1370 P0-7：标题 + id 同一行（id 行尾、标题可截断）。id 不再独占一行，
+ * 但仍保持 mono + 12px（颜色是二级色，见下）：它是辅助寻址信息，不与标题争层级。 */
+.session-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  min-width: 0;
+}
 .session-item-title {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-bottom: 1px;
   line-height: 1.35;
 }
-/* id 是辅助寻址信息：降为第三级——标题/元信息之间的层级从此拉开 */
+/* #1370 P0-7：票面「等宽 + 次要色 + 12px」。基线的第三级灰在同排布局里比标题暗两档、
+ * 又紧贴标题右端，读起来像被削掉的尾巴；提到二级色后它是"行尾的次要信息"而不是残影。
+ * 仍不与标题（primary、500）同权。 */
 .session-item-id {
+  flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 有标题时 id 靠右收在行尾（没有标题时它自己就是首行内容，不推右）。 */
+.session-item-title + .session-item-id {
+  margin-left: auto;
 }
 .session-item-meta {
   font-size: var(--text-xs);
@@ -736,16 +755,20 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 一个说"它的引用对不上了"。 */
 .session-item-archived {
   display: inline-block;
-  margin-top: 3px;
-  padding: 0 5px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  margin-top: 4px;
+  /* #1370 P0-7：Linear 状态徽标规格（surface-2 底 + 次级文字 + caption 字号 + pill +
+   * 2px 8px）。去掉原来的 0.5px 边框与方角——徽标靠底色成形，不靠描边。 */
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-full);
   font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--text-tertiary);
-  background: var(--surface-2, transparent);
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: var(--surface-2);
 }
-/* #752：「已损坏」徽标——用警告色区别于"已归档"的中性灰，传达"需要处理"。 */
+/* #752：「已损坏」徽标——用警告色区别于"已归档"的中性灰，传达"需要处理"。
+ * 保留描边 + 小圆角（radius-sm，不跟随 #1370 的 pill 徽标）：警告语义需要与中性
+ * 状态徽标在形状上也可区分，不能只靠颜色（色觉障碍下仍要读得出）。 */
 .session-item-corrupted {
   display: inline-block;
   margin-top: 3px;
@@ -1026,14 +1049,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   position: relative;
   display: flex;
   align-items: center;
+  /* #1370 P0-7：行间发丝分隔线（Linear 列表的 1px hairline）——列表读起来是一条
+   * 连续的账，而不是一堆各自独立的行块。`.session-row` 并非 `.session-items` 的直接
+   * 子级（项目/未分组各在自己的容器里），所以 `:last-child` 命中的是**每个分组内**的
+   * 末行：组与组之间不再叠一条多余的边。 */
+  border-bottom: 1px solid var(--border-subtle);
+}
+.session-row:last-child {
+  border-bottom: none;
 }
 .session-row .session-item {
   flex: 1;
   min-width: 0;
-}
-.session-row-in-project .session-item {
-  padding-top: 6px;
-  padding-bottom: 6px;
 }
 .session-row.dragging {
   opacity: 0.45;
@@ -2201,6 +2228,54 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-subtle-foreground);
   padding: var(--space-2xl);
 }
+/* #1370 P0-7：空状态收成一张卡片（12px 圆角 + 发丝边 + elevated 底）——卡片是容器，
+ * 主 CTA 才是这一屏的落点；三个示例 chip 仍是次级入口（票面红线：示例不许删）。
+ * 48px 内边距是票面值；窄屏按断点降一档，否则 390px 下内容被挤成竖条。 */
+.empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 520px;
+  padding: 48px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-elevated);
+}
+@media (max-width: 560px) {
+  .empty-card {
+    padding: var(--space-xl);
+  }
+}
+/* 主 CTA：Vercel 的「整屏只有一个实心按钮」——用**既有 token 反转极性**
+ * （深色主题 = 近白底 + canvas 字色，浅色主题 = 近黑底 + canvas 字色），
+ * 不引入新色阶（#1364 刚把 149 个颜色收敛掉）。全圆角 pill 是 marketing CTA 的
+ * 语言，与 44px 行高的 App 内按钮刻意不同：这一颗是"开始"，不是"操作"。 */
+.empty-cta {
+  height: 36px;
+  padding: 0 18px;
+  margin-top: var(--space-lg);
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--text-primary);
+  color: var(--surface-canvas);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple), transform var(--dur-out) var(--ease-apple);
+}
+/* 暗色底是近白、亮色底是近黑：brightness() 在两端都会被裁剪到几乎看不见。
+ * 按 88% 混回卡片底色，两端都产生可感知的同方向反馈（Hover 变暗/变浅）。 */
+.empty-cta:hover {
+  background: color-mix(in srgb, var(--text-primary) 88%, var(--surface-elevated));
+}
+.empty-cta:active {
+  transform: scale(0.98);
+}
+.empty-cta:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 /* 空态 logo：gradient accent 容器 + 内高光，与 appbar-logo 同族 */
 .empty-logo {
   width: 44px;
@@ -2223,7 +2298,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .empty-sub {
   font-size: var(--text-sm);
-  max-width: 340px;
+  max-width: 400px;
 }
 .empty-examples {
   display: flex;
@@ -4460,13 +4535,24 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer {
   display: block;
   width: 100%;
-  padding: var(--space-md) 52px var(--space-md) var(--space-lg);
+  /* #1370 P0-9：票面 `14px 16px`。基线右内边距 52px 是给「动作簇压在 textarea 右下角」
+   * 留的；控制行存在时簇锚在 dock 右下角、与档位行同高（`COMPOSER_METRICS` 实测
+   * textarea 底边 813.6 < 簇顶边 834），这一段可以收回。控制行**缺席**时
+   * （`Composer.hasControls` 为假：模型/权限/Agent/推理目录都空且无预算入口）dock
+   * 底边就是 textarea 底边，簇顶边落在底边之上 40px、与末行文字相交 —— 这一态由下面
+   * 那条 `:not(:has(.composer-controls))` 把右边距补回 52px。 */
+  padding: 14px 16px;
   font: 400 var(--text-md) var(--font-ui);
   color: var(--color-foreground);
   background: transparent;
   border: none;
   resize: none;
   min-height: 52px;
+}
+/* #1370 P0-9：控制行缺席时（`hasControls` 为假）动作簇直接压在 textarea 底边之上，
+ * 这时保留基线原有的 52px 右内边距（本票只改上下/左右到 14/16，未重算这一预留）。 */
+.composer-dock:not(:has(.composer-controls)) .composer {
+  padding-right: 52px;
 }
 .composer-rule-signal {
   display: inline-flex;
@@ -4592,14 +4678,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple);
 }
 .composer-send {
-  /* accent 直接配白图标在浅色主题仅 ~2.3:1（UI 组件需 3:1）——混入 18% 黑
-     加深实底，白图标对比过线，双主题视觉仍是同一族靛蓝（#1364 换色后同式）。 */
-  background: color-mix(in srgb, var(--color-accent) 82%, var(--overlay-scrim));
-  color: var(--on-solid);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-accent) 32%, transparent);
+  /* #1370 P0-9：默认态是描边幽灵键——Composer 里最重的颜色留给"按下之后"，
+   * 常驻实心块不再抢走视觉重心（设计稿：hover 才实底）。hover 实底沿用原来的
+   * accent 实底（含 82% 混黑的对比度修正），所以按下路径的颜色语义没有变。 */
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  box-shadow: none;
 }
 .composer-send:hover:not(:disabled) {
-  filter: brightness(1.1);
+  background: color-mix(in srgb, var(--color-accent) 82%, #000);
+  border-color: transparent;
+  color: #fff;
   transform: translateY(-1px);
   box-shadow: 0 4px 12px color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
@@ -5798,12 +5888,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .session-rail:not(.rail-drawer-open) .session-row {
     position: relative;
+    /* #1370 P0-7：这一档每行只剩一个圆点，行间发丝线会变成圆点脚下一撮短线
+     * 而不是分隔线 —— 收起态不画。 */
+    border-bottom: none;
   }
-  /* 不动行内边距：`.session-items` 在窄屏是 `align-items: center`，行宽由内容决定，
-   * 而内容（会话点 5px）几乎不占宽度——那圈 padding 就是这一行的**可点面积**。
-   * 收掉它会把会话的可点区域从 24px 压到 9px（实测），等于修好菜单却毁了选会话。 */
+  /* #1370 P0-7（集成合并注记）：基线 `.session-item` 横向 padding 已是 8px
+   * （同票 P0-7 的 `6px 8px`），收起态在这里恢复到 `--space-md`（12px），行宽
+   * 回到 29px ≥ 24px 可点下限；限定收起态，抽屉展开态仍走 44px 行高基线。 */
   .session-rail:not(.rail-drawer-open) .session-row .session-item {
     justify-content: center;
+    padding-inline: var(--space-md);
+    min-height: 24px;
   }
   .session-rail:not(.rail-drawer-open) .session-row .rail-menu-btn {
     position: absolute;
@@ -7883,6 +7978,21 @@ button.json-row {
 .composer-control {
   max-width: 180px;
 }
+/* #1370 P0-9：透明 pill 只属于 Composer 的档位行。同一套 trigger 在任务创建弹层
+ * （`.project-field .composer-control`）与预算浮层里也渲染——基础视觉保持原样，
+ * 不能把「透明底 + 全圆角」泄漏到那两个表面（Standards P1-2）。
+ * 票面 `3px 12px` / 24-28px 高度：`.composer-controls` 是 flex 容器，**直接**作为
+ * flex 项的 chip 会被 blockify（`inline-flex` → `flex`），行盒的撑高随之消失——
+ * 实测 Agent chip 22px（ref div 包着的其余四个 25px），所以这里补 min-height。
+ * 边框保留 1px transparent 而不是删掉：显隐切换时宽度不跳。 */
+.composer-controls .composer-model,
+.composer-controls .composer-control {
+  padding: 3px 12px;
+  min-height: 24px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+}
 .composer-trigger-icon {
   flex-shrink: 0;
   color: var(--text-tertiary);
@@ -7907,6 +8017,28 @@ button.json-row {
   color: var(--text-primary);
   border-color: var(--border-strong);
   background: var(--surface-workspace);
+}
+.composer-controls .composer-model:hover:not(:disabled),
+.composer-controls .composer-control:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-2);
+}
+/* 展开态 = "选中"：给底色 + 发丝边（Raycast 的 pill-tab-active 只换底，不加彩色环）。
+ * `data-state` 由 Radix 写在 trigger 上，不新增平行的 React 状态。
+ * 仅 Composer 档位行：弹层/浮层里的同名 trigger 不发生视觉变化。 */
+.composer-controls .composer-model[data-state="open"],
+.composer-controls .composer-control[data-state="open"] {
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+/* #1370 P0-9：「选中才给底色」——已落定一个非默认值时 chip 常驻 surface-2。
+ * 用祖先限定到 Composer 的档位行：同一组件在任务创建弹层 / 预算浮层里也会渲染，
+ * 那两处的触发按钮不是本条的落点。 */
+.composer-controls .composer-model[data-selected="true"],
+.composer-controls .composer-control[data-selected="true"] {
+  color: var(--text-primary);
+  background: var(--surface-2);
 }
 .composer-model:hover:not(:disabled) .composer-trigger-icon,
 .composer-control:hover:not(:disabled) .composer-trigger-icon {
