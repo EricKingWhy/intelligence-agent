@@ -84,6 +84,7 @@
   --dur-in: 240ms;      /* inspector 展开/收起（PRD 220-280） */
   --dur-out: 150ms;
   --dur-expand: 180ms;  /* event inline expand / todo expand（PRD 160-220） */
+  --dur-theme: 200ms;   /* #1371 主题切换（票面定值 200ms） */
   --dur-palette: 150ms; /* command palette（PRD 120-180） */
   --dur-pulse: 750ms;   /* selected event highlight（PRD 600-900） */
 
@@ -271,8 +272,8 @@ body {
      但主底色与正文色的渐变已足以消除“整屏一闪”。
      ⚠ body 实际被 `.app-regions` 整幅盖住，可见面同拍过渡写在那里。 */
   transition:
-    background-color var(--dur-expand) var(--ease-apple),
-    color var(--dur-expand) var(--ease-apple);
+    background-color var(--dur-theme) var(--ease-apple),
+    color var(--dur-theme) var(--ease-apple);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

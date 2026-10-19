@@ -42,8 +42,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
      靠级联区分方向，不需要 JS 状态。完整说明见「F7 过渡编排」。 */
   transition:
     grid-template-columns var(--dur-in) var(--ease-apple),
-    background-color var(--dur-expand) var(--ease-apple),
-    border-color var(--dur-expand) var(--ease-apple);
+    background-color var(--dur-theme) var(--ease-apple),
+    border-color var(--dur-theme) var(--ease-apple);
   min-height: 0;
   /* SDD §9: chrome quieter than workspace. The container is the quietest
    * tone (canvas) so the rail/inspector (chrome) and workspace sit on top
@@ -176,6 +176,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .skeleton {
     animation: none !important;
   }
+  /* 主题切换的三个可见面：不靠 index.css 的全局 * 规则兜底，显式落在这里。 */
+  .app-regions,
+  .appbar,
+  .session-rail,
+  .step-detail {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+  }
 }
 
 /* ── Workspace（中：Agent Workspace） ── */
@@ -253,8 +261,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* #1371：主题切换时 canvas 与顶条同拍淡出/淡入（body 被 .app-regions 整幅盖住，
    * 只过渡 body 是采得到帧、看不见效果）。 */
   transition:
-    background-color var(--dur-expand) var(--ease-apple),
-    border-color var(--dur-expand) var(--ease-apple);
+    background-color var(--dur-theme) var(--ease-apple),
+    border-color var(--dur-theme) var(--ease-apple);
   z-index: 10;
 }
 .appbar-left,
@@ -10405,7 +10413,7 @@ button.json-row {
 /* 主题切换：左栏与右栏各占 240/340px，不跟着 canvas 一起过渡就是半屏硬切。 */
 .session-rail,
 .step-detail {
-  transition: background-color var(--dur-expand) var(--ease-apple);
+  transition: background-color var(--dur-theme) var(--ease-apple);
 }
 @keyframes conversation-in {
   from { opacity: 0; transform: translateY(3px); }
