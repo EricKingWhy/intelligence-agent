@@ -47,6 +47,7 @@ import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { MessageImages } from './MessageImages';
 import { AskUserCard } from './AskUserCard';
 import { PlanApprovalCard } from './PlanApprovalCard';
+import { ConversationSkeleton } from './ConversationSkeleton';
 
 interface Props {
   conversation: ConversationState | null;
@@ -382,11 +383,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   }, [runActive]);
 
   if (loadingHistory) {
-    return (
-      <div className="conversation">
-        <div className="conversation-empty">正在加载历史…</div>
-      </div>
-    );
+    return <ConversationSkeleton />;
   }
 
   if (!conversation || conversation.turns.length === 0) {

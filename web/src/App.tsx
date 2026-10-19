@@ -133,6 +133,7 @@ export default function App() {
 
   const {
     sessions,
+    sessionsLoading,
     selectedId,
     conversation,
     loadingHistory,
@@ -1679,6 +1680,7 @@ export default function App() {
       >
         <SessionList
           sessions={sessions}
+          sessionsLoading={sessionsLoading}
           projects={projects}
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}

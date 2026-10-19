@@ -266,6 +266,10 @@ body {
     radial-gradient(920px 640px at 88% 108%, color-mix(in srgb, var(--success) 2.5%, transparent), transparent 60%),
     var(--bg-app);
   background-attachment: fixed;
+  /* #1371：主题切换不再全屏硬切。只过渡 background-color / color；背景里的
+     两层 radial-gradient 是 background-image，浏览器不插值——它们仍瞬时换色，
+     但主底色与正文色的渐变已足以消除“整屏一闪”。 */
+  transition: background-color 200ms var(--ease-apple), color 200ms var(--ease-apple);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

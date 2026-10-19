@@ -156,6 +156,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .app-regions.inspector-fullpage .app-workspace {
     transition-delay: 0s;
   }
+  /* #1371：新增动效必须在同一个既有块里关闭（复用，不另起）。全局块只压
+     duration、不碰 animation 名，且本文件后面的 `.turn` 等规则会覆盖同名属性
+     ⇒ 这里用 !important 明确关掉，避免“减少了但仍在动”。 */
+  .conversation-scroll,
+  .conversation-empty,
+  .session-item,
+  .turn,
+  .composer,
+  .rail-empty-action {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+  }
+  .skeleton {
+    animation: none !important;
+  }
 }
 
 /* ── Workspace（中：Agent Workspace） ── */
@@ -10361,4 +10377,215 @@ button.json-row {
     border-left: none;
     border-top: 1px solid var(--border-subtle);
   }
+}
+
+/* ═══ #1371：动效 / 骨架屏 / 弹窗规范 ═══
+ *
+ * 动效实现说明（票面“只加过渡、不改交互逻辑”）：
+ *  - 会话切换 / 空态→数据：内容容器在 React 重挂（session key / 分支切换）时用
+ *    CSS animation 淡入。Lane D 采样的 `.app-workspace` 宽度在会话切换时恒为
+ *    842px（内容替换不改变栅格轨道），`transition: width` 没有可插值属性；
+ *    故以内容容器的 opacity/transform 作为可观测过渡面。
+ *  - 密度切换：`data-density` 在 <html> 上切换，容器本身不重挂。四档各用不同
+ *    animation-name ⇒ 属性切换即重启 150ms 动画（keyframes 内容相同）。
+ *  - 主题切换：body 的 background-color/color 过渡（index.css）。
+ *  - 全部新动效在 app.css:150 的既有 reduced-motion 块里关闭。
+ */
+@keyframes conversation-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rail-row-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes density-shift-compact {
+  from { opacity: 0.55; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes density-shift-balanced {
+  from { opacity: 0.55; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes density-shift-detailed {
+  from { opacity: 0.55; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes density-shift-raw {
+  from { opacity: 0.55; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.conversation-scroll,
+.conversation-empty {
+  animation: conversation-in 180ms var(--ease-apple);
+}
+.session-item {
+  animation: rail-row-in 150ms var(--ease-apple);
+}
+[data-density='compact'] .turn {
+  animation-name: density-shift-compact;
+  animation-duration: 150ms;
+}
+[data-density='balanced'] .turn {
+  animation-name: density-shift-balanced;
+  animation-duration: 150ms;
+}
+[data-density='detailed'] .turn {
+  animation-name: density-shift-detailed;
+  animation-duration: 150ms;
+}
+[data-density='raw'] .turn {
+  animation-name: density-shift-raw;
+  animation-duration: 150ms;
+}
+
+/* 显式 transition：Lane D 读到 computed “all 0s” 是浏览器默认值，源码无声明。
+ * 只列会变化的属性，不用 `all`。 */
+.composer {
+  transition: color var(--dur-out) var(--ease-apple), opacity var(--dur-out) var(--ease-apple);
+}
+.rail-empty-action {
+  transition: color var(--dur-out) var(--ease-apple),
+    text-decoration-color var(--dur-out) var(--ease-apple);
+}
+
+/* ── 骨架屏（#1371）──
+ * 颜色全部来自 token；shimmer 在 reduced-motion 块里 animation: none。 */
+@keyframes skeleton-shimmer {
+  from { background-position: 100% 50%; }
+  to { background-position: 0 50%; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    color-mix(in srgb, var(--surface-hover) 70%, var(--surface-2)) 37%,
+    var(--surface-2) 63%
+  );
+  background-size: 400% 100%;
+  border-radius: var(--radius-sm);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.rail-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+}
+.skeleton-rail-section {
+  width: 38%;
+  height: 10px;
+}
+.skeleton-rail-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 7px var(--space-sm);
+}
+.skeleton-rail-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-xs);
+  flex: none;
+}
+.skeleton-rail-line {
+  height: 12px;
+  flex: 1;
+  max-width: 68%;
+}
+.skeleton-turn {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+}
+.skeleton-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  flex: none;
+}
+.skeleton-turn-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.skeleton-line {
+  height: 12px;
+}
+.skeleton-line-w-82 {
+  width: 82%;
+}
+.skeleton-line-w-58 {
+  width: 58%;
+}
+
+/* ── 弹窗规范（#1371）──
+ * 24/24/20 内边距；每框一个实底 pill 主按钮，次要动作 ghost/text；
+ * 输入框 6px 圆角；focus 换品牌色边框且无外发光。颜色全部走 token。 */
+.project-dialog,
+.provider-dialog {
+  padding: var(--space-xl) var(--space-xl) var(--space-lg2);
+}
+.project-dialog .project-btn,
+.provider-dialog .project-btn {
+  border-radius: var(--radius-full);
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+.project-dialog .project-btn:hover,
+.provider-dialog .project-btn:hover {
+  background: var(--color-hover);
+  color: var(--text-primary);
+}
+.project-dialog .project-btn-primary,
+.provider-dialog .project-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-app);
+}
+.project-dialog .project-btn-primary:hover,
+.provider-dialog .project-btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text-primary));
+}
+.project-dialog .project-btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--bg-app);
+}
+.project-dialog .project-btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 88%, var(--text-primary));
+}
+/* Provider 弹窗的主动作是「保存」；删除是次级危险动作，保持文字按钮。 */
+.provider-dialog .project-btn-danger {
+  background: transparent;
+  border-color: transparent;
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+}
+.provider-dialog .project-btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+}
+.project-dialog .btn-primary {
+  border-radius: var(--radius-full);
+  color: var(--bg-app);
+}
+.project-dialog .btn-ghost {
+  border-color: transparent;
+  border-radius: var(--radius-full);
+}
+.project-dialog .project-input,
+.project-dialog .project-textarea,
+.provider-dialog .project-input,
+.provider-dialog .project-textarea {
+  border-radius: var(--radius-sm);
+}
+.project-dialog .project-input:focus-visible,
+.project-dialog .project-textarea:focus-visible,
+.provider-dialog .project-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: none;
 }

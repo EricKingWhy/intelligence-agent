@@ -57,9 +57,12 @@ import {
 import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
 import { SessionReplayDialog, type ReplaySessionTarget } from './SessionReplayDialog';
 import { TaskCreationDialog } from './TaskCreationDialog';
+import { SessionListSkeleton } from './SessionListSkeleton';
 
 interface Props {
   sessions: SessionSummary[];
+  /** #1371：会话列表首次加载中（骨架屏）。缺省 false = 既有调用方/测试的语义。 */
+  sessionsLoading?: boolean;
   projects: Project[];
   selectedId: string | null;
   /** The session currently receiving a live stream (live dot). */
@@ -111,6 +114,7 @@ interface Props {
 // 稳定，跳过每个 delta 的会话栏重渲染；相对时间刷新由内部 useTickingNow 独立驱动。
 export const SessionList = memo(function SessionList({
   sessions,
+  sessionsLoading = false,
   projects,
   selectedId,
   liveSessionId,
@@ -259,7 +263,7 @@ export const SessionList = memo(function SessionList({
     });
   };
 
-  const showEmpty = sessions.length === 0 && projects.length === 0;
+  const showEmpty = !sessionsLoading && sessions.length === 0 && projects.length === 0;
   /** 会话列表**没拿到**（不是"确实没有"）——F9：`sessions === []` 同时是"真没有会话"
    *  与"这次请求失败了"的形状，两者**必须分开说**。
    *
@@ -373,6 +377,10 @@ export const SessionList = memo(function SessionList({
       ) : null}
 
       <div className="session-items">
+        {sessionsLoading && sessions.length === 0 ? (
+          <SessionListSkeleton />
+        ) : (
+          <>
         {showEmpty && !sessionsUnavailable && (
           <div className="empty-hint">暂无会话，提交任务即可开始。</div>
         )}
@@ -722,6 +730,8 @@ export const SessionList = memo(function SessionList({
             ))}
           </div>
         </section>
+          </>
+        )}
       </div>
 
       <CreateProjectDialog

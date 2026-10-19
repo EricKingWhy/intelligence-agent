@@ -408,7 +408,10 @@ export function useSession() {
     return stored ? { kind: 'viewing', sessionId: stored } : { kind: 'idle' };
   });
   const [conversation, setConversation] = useState<ConversationState | null>(null);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  /** #1371：首帧就带会话（localStorage 恢复）时，历史还没开始读——初值直接 true，
+   *  避免 effect 落地前先画一帧「暂无对话」空态。effect 仍按 `switchingSession`
+   *  接管后续迁移（同会话对账不闪骨架）。 */
+  const [loadingHistory, setLoadingHistory] = useState(() => mode.kind !== 'idle');
   const [error, setError] = useState<string | null>(null);
   /** 会话**列表**加载失败原因（F9 / 真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。
    *
@@ -419,6 +422,13 @@ export function useSession() {
    *  区域级通道不会被后续错误顶掉，与既有的 `projectsError`（同文件旁边的项目列表）
    *  完全同形——两者是同一类事实，不该一个有一个没有。 */
   const [sessionsError, setSessionsError] = useState<string | null>(null);
+  /** #1371：会话列表**首次**加载的显式状态位（骨架屏的挂载依据）。
+   *
+   *  `sessions === []` 同时是「正在加载」与「确实没有会话」的形状——骨架屏不能靠
+   *  空数组猜。这里只加一个视图状态：首次请求 settle（成功或失败）即置 false，
+   *  之后的刷新不再闪骨架（旧列表继续显示）。数据流（`sessions` 的唯一写入者）不变。 */
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const sessionsLoadedRef = useRef(false);
   // Session Rail 行标题缓存（Session Model E 轮）：查看某会话时从首条 user/message
   // 投影出标题，本地缓存供 SessionList 行渲染。无缓存时回退到短 ID——不伪造。
   const [titlesById, setTitlesById] = useState<Record<string, string>>({});
@@ -571,6 +581,12 @@ export function useSession() {
     } catch (e) {
       setSessionsError(`加载会话列表失败：${(e as Error).message}`);
       return false;
+    } finally {
+      // 首次 settle（成功或失败）即收起骨架；失败态由 sessionsError 单独表达。
+      if (!sessionsLoadedRef.current) {
+        sessionsLoadedRef.current = true;
+        setSessionsLoading(false);
+      }
     }
   }, []);
 
@@ -2298,6 +2314,7 @@ export function useSession() {
 
   return {
     sessions,
+    sessionsLoading,
     selectedId,
     conversation,
     loadingHistory,
