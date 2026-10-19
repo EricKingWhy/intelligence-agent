@@ -76,7 +76,7 @@ test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ pa
     .toBe('e2e-run-0002');
 });
 
-test('UI-06：palette 密度条目 CJK 间距 + 主题 hint 无箭头（真实渲染断言）', async ({ page }) => {
+test('UI-06：palette 密度条目 CJK 间距 + 主题 meta 无箭头（真实渲染断言）', async ({ page }) => {
   const frames = [
     { type: 'session/started', seq: 1, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
     { type: 'run/started', seq: 2, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
@@ -97,10 +97,10 @@ test('UI-06：palette 密度条目 CJK 间距 + 主题 hint 无箭头（真实�
   const rawLabel = await page.locator('.palette-item-label', { hasText: '切换到 Raw' }).textContent();
   expect(rawLabel).toBe('切换到 Raw');
 
-  // 主题 hint 无方向箭头（UI-06 退役「→」装饰）。e2e 上下文默认 light 主题，
-  // hint 是**目标**档位（'暗色'），不断言具体值——箭头消失本身就是本票要锁的形状。
+  // 主题 meta 无方向箭头（UI-06 退役「→」装饰）。e2e 上下文默认 light 主题，
+  // meta 是**目标**档位（'暗色'），不断言具体值——箭头消失本身就是本票要锁的形状。
   await page.locator('.palette-input').fill('切换主题');
-  const themeHint = await page.locator('.palette-item-hint').first().textContent();
-  expect(themeHint).not.toContain('→');
-  expect(themeHint).toBe('暗色');
+  const themeMeta = await page.locator('.palette-item-meta').first().textContent();
+  expect(themeMeta).not.toContain('→');
+  expect(themeMeta).toBe('暗色');
 });

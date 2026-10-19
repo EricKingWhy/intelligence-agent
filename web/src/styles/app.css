@@ -7448,10 +7448,15 @@ button.json-row {
   color: var(--text-tertiary);
   font-size: var(--text-sm);
 }
+.palette-group {
+  padding: 6px var(--space-md) 4px;
+  color: var(--text-tertiary);
+  font: 500 var(--text-xs) var(--font-ui);
+}
 .palette-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: var(--space-md);
   width: 100%;
   padding: var(--space-sm) var(--space-md);
@@ -7467,7 +7472,15 @@ button.json-row {
   background: var(--accent-muted);
   box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
+.palette-item-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+.palette-item.active .palette-item-icon {
+  color: var(--text-secondary);
+}
 .palette-item-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7476,18 +7489,14 @@ button.json-row {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
-/* 键位提示 kbd 徽章化：hint 与 footer 的按键统一为 mono 小药丸——
- * dev tool（Raycast/Linear palette）的键位提示语言。 */
-.palette-item-hint {
+/* 分类/状态是 label 后的 12px tertiary 文本，不是键帽；
+ * 键帽只保留给底部真实按键提示（.palette-footer）。 */
+.palette-item-meta {
   flex-shrink: 0;
-  font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1;
-  padding: 3px 6px;
-  background: var(--surface-2);
-  border: 0.5px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
   color: var(--text-tertiary);
+  white-space: nowrap;
 }
 .palette-footer {
   display: flex;

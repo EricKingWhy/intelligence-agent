@@ -1504,14 +1504,14 @@ export default function App() {
        依赖变化 ⇒ 立刻用最新 `conversation` 重建，故「打开即最新」不变（PRD §15 只要求
        打开那一刻最新，不要求关闭期间逐帧维护）。 */
     if (!paletteOpen) return CLOSED_PALETTE_ITEMS;
-    // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、hint 已是
+    // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、meta 已是
     // 中文，属本地化做了一半），英文说法放进 keywords 继续可搜（BUG-007）。
     const items: CommandItem[] = [
       {
         id: 'toggle-inspector',
         label: '切换运行详情',
         keywords: 'toggle run inspector 右栏 运行详情',
-        hint: '右栏',
+        meta: '右栏',
         group: 'actions',
         run: () => {
           userToggledRef.current = true;
@@ -1525,7 +1525,7 @@ export default function App() {
         id: 'toggle-inspector-fullpage',
         label: panel.expanded ? '退出运行详情整页' : '整页打开运行详情',
         keywords: 'full page inspector maximize 整页 宽读',
-        hint: '面板',
+        meta: '面板',
         group: 'actions',
         run: () => {
           setInspectorOpen(true);
@@ -1550,7 +1550,7 @@ export default function App() {
         id: 'jump-latest',
         label: '跳到最新事件',
         keywords: 'jump to latest event 定位',
-        hint: '定位',
+        meta: '定位',
         group: 'actions',
         run: () => {
           if (!conversation || conversation.events.length === 0) return;
@@ -1567,7 +1567,7 @@ export default function App() {
             id: 'copy-run-id',
             label: '复制任务编号',
             keywords: 'copy run id 任务编号',
-            hint: conversation.run_id.slice(0, 12),
+            meta: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),
           }]
@@ -1576,7 +1576,7 @@ export default function App() {
         id: 'copy-trace-id',
         label: '复制 Trace ID',
         keywords: 'copy trace id langfuse',
-        hint: conversation?.trace_id ? 'Langfuse' : undefined,
+        meta: conversation?.trace_id ? 'Langfuse' : undefined,
         group: 'actions',
         run: () => {
           // PRD §15 "Copy Trace ID（若存在）"：不存在不出现该命令。
@@ -1586,7 +1586,7 @@ export default function App() {
         id: 'open-trace',
         label: '打开 Trace',
         keywords: 'open trace langfuse',
-        hint: conversation?.trace_url ? 'Langfuse ↗' : undefined,
+        meta: conversation?.trace_url ? 'Langfuse ↗' : undefined,
         group: 'actions',
         run: () => {
           // 契约 2d7f87a：trace_url 缺则该命令不出现（splice 移除）。
@@ -1596,9 +1596,9 @@ export default function App() {
         id: 'toggle-theme',
         label: '切换主题',
         keywords: 'toggle theme dark light 暗色 亮色',
-        // hint 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
-        // UI-06：箭头是方向装饰不是信息——「当前是什么、将切成什么」由 label+hint 联合表达。
-        hint: theme === 'dark' ? '亮色' : '暗色',
+        // meta 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
+        // UI-06：箭头是方向装饰不是信息——「当前是什么、将切成什么」由 label+meta 联合表达。
+        meta: theme === 'dark' ? '亮色' : '暗色',
         group: 'actions',
         run: toggleTheme,
       },
@@ -1606,7 +1606,7 @@ export default function App() {
         id: 'focus-composer',
         label: '聚焦输入框',
         keywords: 'focus composer',
-        hint: '输入框',
+        meta: '输入框',
         group: 'actions',
         // 不在命令里直接 focus()：命令跑的时候面板还开着，Radix 关闭时的焦点恢复会紧接着
         // 把焦点抢回 body（键盘打开的浮层没有触发器，恢复目标就是 body）——真机实测
@@ -1620,7 +1620,7 @@ export default function App() {
         id: 'manage-memories',
         label: '管理记忆',
         keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
-        hint: '记忆库',
+        meta: '记忆库',
         group: 'actions',
         run: () => setMemoriesOpen(true),
       },
@@ -1628,7 +1628,7 @@ export default function App() {
         id: 'manage-approve-policy',
         label: '管理持久审批规则',
         keywords: 'approval approve policy always allow persistent 审批 授权 持久 规则 撤销',
-        hint: '持久授权',
+        meta: '持久授权',
         group: 'actions',
         run: () => setApprovePolicyOpen(true),
       },
@@ -1656,7 +1656,7 @@ export default function App() {
         // 末尾不再重复一次 ${d}：实测「重复的尾 token」会让大量无意义的 3 字符
         // query（如 aac/aca）只靠这层重复命中，纯增噪，而正当匹配一次都不受益。
         keywords: `switch to ${d} density 密度`,
-        hint: d === density ? '当前' : undefined,
+        meta: d === density ? '当前' : undefined,
         group: 'density',
         run: () => changeDensity(d),
       });
@@ -1669,7 +1669,7 @@ export default function App() {
         items.push({
           id: `event-${conversation.events.length - 1 - i}`,
           label: `${e.type}${summary ? ` · ${summary}` : ''}`,
-          hint: e.seq !== null ? `#${e.seq}` : undefined,
+          meta: e.seq !== null ? `#${e.seq}` : undefined,
           group: 'events',
           run: () => {
             focusEvent(e);
