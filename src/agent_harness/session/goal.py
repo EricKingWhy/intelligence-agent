@@ -257,7 +257,8 @@ def _tool_digest(kind: str, payload: object) -> str:
 def goal_round_digests(events: list[SessionEvent]) -> list[str]:
     """按**goal 来源的 user/message** 切分轮次，返回每轮工具活动的 digest。
 
-    digest 覆盖 ``tool/call``（工具名 + 参数）与 ``tool/result``（调用 id + 内容）：
+    digest 覆盖 ``tool/call``（工具名 + 参数）与 ``tool/result``（只取内容，不取
+    调用 id——同形活动每轮 id 都不同，带上就会把"原地打转"误判成有进展）：
     "调了同样的工具、拿到同样的结果"与"什么工具都没调"都能被识别。非 goal
     用户消息会关闭当前桶——人工介入那一轮的工具活动不算进 goal 轮次。
     """
