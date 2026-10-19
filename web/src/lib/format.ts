@@ -56,10 +56,27 @@ export function formatTimestamp(iso: string | null | undefined): string | null {
  *  两种精度都是同一套「YYYY-MM-DD HH:mm」前缀，不再出现 `toLocaleString()` 的
  *  `9/7/2026, 12:00:00 AM` 这类随环境漂移的格式。
  *  非法或缺失时间返回 null——调用方决定隐藏该行。 */
-export function formatDateTime(iso: string | null | undefined): string | null {
+export function formatDateTime(
+  iso: string | null | undefined,
+  timeZone?: string,
+): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
+  if (timeZone) {
+    // 自动值班的规则带自己的 IANA 时区：同一格式，但按规则时区取时分。
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+  }
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }

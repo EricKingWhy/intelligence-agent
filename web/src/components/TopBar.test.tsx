@@ -90,6 +90,37 @@ function conversationWithBudget(echo: typeof BUDGET_ECHO | null, tokens: number)
 const bar = (conversation: ConversationState | null) =>
   renderToStaticMarkup(createElement(TopBar, { ...baseProps, conversation }));
 
+describe('TopBar 会话切换器（#1372 改动 8）', () => {
+  const conv = initConversation('sess-0000');
+  const sessions = [
+    { session_id: 'sess-0000', archived: false },
+    { session_id: 'sess-0001', archived: false },
+  ] as never[];
+  it('只有一个会话 → 不渲染切换器（点开只有当前项没有意义）', () => {
+    const out = renderToStaticMarkup(
+      createElement(TopBar, {
+        ...baseProps,
+        conversation: conv,
+        sessions: sessions.slice(0, 1),
+        onSelectSession: () => {},
+      }),
+    );
+    expect(out).not.toContain('appbar-session"');
+  });
+
+  it('两个会话 → 切换器出现', () => {
+    const out = renderToStaticMarkup(
+      createElement(TopBar, {
+        ...baseProps,
+        conversation: conv,
+        sessions,
+        onSelectSession: () => {},
+      }),
+    );
+    expect(out).toContain('appbar-session"');
+  });
+});
+
 describe('TopBar 预算徽标（#537）', () => {
   it('设了 tokens ceiling → 「28000 / 500000 tok」徽标在场（同源文本，未配维不出现）', () => {
     const out = bar(conversationWithBudget(BUDGET_ECHO, 28000));

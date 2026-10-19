@@ -314,6 +314,10 @@ interface BudgetPickerProps {
   disabled?: boolean;
 }
 
+/** 预算 chip 的完整说明（tooltip 与 disabled 时的原生 title 同源）。 */
+const BUDGET_TIP =
+  '本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。';
+
 /** 单入口：trigger 常显摘要（§2.5——「默认」即全空，设了才展开对应部分）。 */
 export function BudgetPicker({
   turns,
@@ -327,7 +331,7 @@ export function BudgetPicker({
   return (
     <Popover.Root>
       {/* #1372 改动 6：原生 title → radix tooltip（预算 chip）。 */}
-      <Tip content="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。">
+      <Tip content={BUDGET_TIP}>
         <Popover.Trigger asChild>
           <button
             type="button"
@@ -335,8 +339,8 @@ export function BudgetPicker({
             aria-label="预算"
             aria-disabled={disabled || undefined}
             disabled={disabled}
-            /* 同 ModelPicker：禁用态由原生 title 兜底。 */
-            title={disabled ? '预算（当前不可调整）' : undefined}
+            /* 同 ModelPicker：disabled 收不到指针事件，原生 title 兜底完整说明。 */
+            title={disabled ? BUDGET_TIP : undefined}
           >
             <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
             <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>

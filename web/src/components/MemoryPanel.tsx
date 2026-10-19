@@ -277,11 +277,14 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
         {memories.disabled && (
           /* #1372 改动 9：未启用是**配置缺省**，不是故障——中性空态，去红色、去「重试」
              （重试不会改变服务端配置）。按钮只是把焦点带到面板内既有的设置区。 */
-          <div className="memory-empty memory-disabled" role="status">
-            <p className="memory-empty-title">记忆管理未启用</p>
-            <p className="memory-empty-hint">
-              打开后，agent 会把可复用的操作经验记在这里，下次自动用上。
-            </p>
+          <div className="memory-empty memory-disabled">
+            {/* live region 只包状态文案：按钮/详情是交互控件，放进 role=status 会被当状态播报。 */}
+            <div role="status">
+              <p className="memory-empty-title">记忆管理未启用</p>
+              <p className="memory-empty-hint">
+                打开后，agent 会把可复用的操作经验记在这里，下次自动用上。
+              </p>
+            </div>
             <button
               type="button"
               className="memory-v2-quiet memory-disabled-action"

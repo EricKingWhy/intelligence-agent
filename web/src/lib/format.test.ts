@@ -29,6 +29,12 @@ describe('formatDateTime（#1372 改动 10：全站统一到分钟）', () => {
     expect(formatDateTime(iso)).toBe('2026-09-07 00:05');
   });
 
+  it('可传 timeZone：按规则时区而非浏览器时区取时分', () => {
+    const iso = '2026-09-07T00:05:00Z';
+    expect(formatDateTime(iso, 'UTC')).toBe('2026-09-07 00:05');
+    expect(formatDateTime(iso, 'Asia/Shanghai')).toBe('2026-09-07 08:05');
+  });
+
   it('非法 / 缺失输入返回 null（调用方隐藏该行）', () => {
     expect(formatDateTime(null)).toBeNull();
     expect(formatDateTime(undefined)).toBeNull();
@@ -65,10 +71,11 @@ describe('formatRelativeTime', () => {
     expect(formatRelativeTime('2026-08-29T12:00:00Z', NOW)).toBe('6 天前');
   });
 
-  it('7 天及以上落到本地化日期字符串（不再用相对措辞）', () => {
-    const out = formatRelativeTime('2026-08-28T12:00:00Z', NOW);
-    expect(out).toMatch(/[\d]/); // 含日期数字
-    expect(out).not.toMatch(/(刚刚|分钟前|小时前|天前)$/);
+  it('7 天及以上落到全站统一 YYYY-MM-DD HH:mm（不再用相对措辞）', () => {
+    const iso = '2026-08-28T12:00:00Z';
+    const out = formatRelativeTime(iso, NOW);
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(out).toBe(formatDateTime(iso));
   });
 });
 

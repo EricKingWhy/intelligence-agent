@@ -1625,7 +1625,11 @@ export default function App() {
 
   return (
     <div className="app-frame">
-      <SkipLinks inspectorOpen={inspectorOpen} />
+      <SkipLinks
+        inspectorVisible={!watchtowerOpen && inspectorOpen}
+        regionsVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen)}
+        composerVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen) && activeTab === 'chat'}
+      />
       <TopBar
         conversation={conversation}
         streaming={streaming}
@@ -1728,7 +1732,7 @@ export default function App() {
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
               <span>
-                后端要求身份令牌（401）：点击顶栏 <strong>钥匙图标</strong> 配置 Bearer Token
+                后端要求身份令牌（401）：打开顶栏「<strong>更多工具</strong>」→「API 身份令牌」配置 Bearer Token
                 即自动重试——本地开发环境（未配置 JWT_SECRET）不应出现此提示。
               </span>
               <button

@@ -99,7 +99,7 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-full);
   background: transparent;
-  font: inherit;
+  font: 500 var(--text-base) var(--font-ui);
   cursor: pointer;
 }
 .memory-disabled-action:hover {

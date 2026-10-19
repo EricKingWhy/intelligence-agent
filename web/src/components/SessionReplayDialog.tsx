@@ -1,7 +1,8 @@
 /** 会话「重放」浮层（`#1322`，spec 03 §6 / ADR-0017 决策 4）。
  *
- *  与「硬删」确认面（`DeleteSessionDialog`）同构：二次确认浮层 + 表单状态放在
- *  **只在打开时挂载**的内层组件里（`{target && <Form/>}`），关闭即丢弃——上一次的
+ *  二次确认浮层：表单状态在内层 `SessionReplayForm` 里。为了关闭时能把焦点还给
+ *  行内 ⋯，Content 不随 target 立刻卸载（卸载会触发 FocusScope 清理、焦点掉回
+ *  body）；因此关闭完成时必须 **reset** 表单并在途请求/定时器失效，保证上一次的
  *  进度 / 错误不会漏到下一次。
  *
  *  为什么是浮层而不是行内：README 把「可重放」写成核心能力，入口却只在 CLI。
@@ -90,6 +91,18 @@ function SessionReplayForm({
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  /** 打开批次令牌：关闭时自增，让在途请求/推进结果失效（Content 不卸载，
+   *  不取消就会把上一次的回放写进下一次打开的表单）。 */
+  const runToken = useRef(0);
+
+  const reset = () => {
+    runToken.current += 1;
+    setPhase('confirm');
+    setSteps([]);
+    setRevealed(0);
+    setLoaded(false);
+    setError(null);
+  };
 
   // 逐事件推进：请求返回后每 REVEAL_MS 揭示一条；到齐即收口为 done。
   useEffect(() => {
@@ -103,6 +116,7 @@ function SessionReplayForm({
   }, [phase, loaded, revealed, steps.length]);
 
   const start = async () => {
+    const token = ++runToken.current;
     setPhase('running');
     setError(null);
     setSteps([]);
@@ -110,9 +124,11 @@ function SessionReplayForm({
     setLoaded(false);
     try {
       const result = await replaySession(target.id);
+      if (token !== runToken.current) return; // 已关闭 / 已重开：丢弃旧结果
       setSteps(result.steps);
       setLoaded(true);
     } catch (e) {
+      if (token !== runToken.current) return;
       // 失败留在原地可重试：回到确认态，把后端 detail 原样贴出来（不自己编文案）。
       setError(describeSessionError(e, '重放会话失败'));
       setPhase('confirm');
@@ -145,6 +161,7 @@ function SessionReplayForm({
           event.preventDefault();
           restore.focus();
         }
+        reset();
         onClosed();
       }}
     >

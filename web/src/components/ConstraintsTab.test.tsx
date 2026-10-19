@@ -26,6 +26,7 @@ import {
   type EffectiveProjectMeta,
 } from '../lib/api';
 import { formatFactTime, operatorLabel } from '../lib/constraints';
+import { formatDateTime } from '../lib/format';
 import { ConstraintsTab, ConstraintsView } from './ConstraintsTab';
 
 vi.mock('../lib/api', async (importOriginal) => {
@@ -268,6 +269,11 @@ describe('ConstraintsView（纯展示，SSR）', () => {
 describe('formatFactTime / operatorLabel', () => {
   it('坏值原样返回，不猜', () => {
     expect(formatFactTime('not-a-date')).toBe('not-a-date');
+  });
+  it('合法 ISO → 全站统一 YYYY-MM-DD HH:mm（本地时区）', () => {
+    const iso = '2026-09-07T00:05:00Z';
+    expect(formatFactTime(iso)).toBe(formatDateTime(iso));
+    expect(formatFactTime(iso)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
   it('空值 → 空串', () => {
     expect(formatFactTime(null)).toBe('');

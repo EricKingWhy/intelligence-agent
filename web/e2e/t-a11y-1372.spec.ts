@@ -151,6 +151,23 @@ test('#1372：Inspector 收起时不再给出无法落焦的跳转键', async ({
   await clickTopBarMenuItem(page, '收起 Inspector');
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
   await expect(page.getByRole('link', { name: '跳到 Inspector' })).toHaveCount(0);
+
+  // 自动值班：main（含会话区/工作区/Inspector）整体 hidden —— 四条都不可落焦。
+  await clickTopBarMenuItem(page, '自动值班');
+  await expect(page.getByLabel('自动值班面板')).toBeVisible();
+  for (const name of ['跳到会话区', '跳到主工作区', '跳到 Inspector', '跳到输入框']) {
+    await expect(page.getByRole('link', { name }), `${name}（自动值班时）`).toHaveCount(0);
+  }
+  await page.getByRole('button', { name: '返回工作区' }).click();
+
+  // 整页 Inspector：rail/workspace visibility:hidden —— 只留 Inspector 一条。
+  await clickTopBarMenuItem(page, '展开 Inspector');
+  await page.locator('.detail-ctrl[aria-label="整页"]').click();
+  await expect(page.locator('.app-regions')).toHaveClass(/inspector-fullpage/);
+  await expect(page.getByRole('link', { name: '跳到 Inspector' })).toHaveCount(1);
+  for (const name of ['跳到会话区', '跳到主工作区', '跳到输入框']) {
+    await expect(page.getByRole('link', { name }), `${name}（整页时）`).toHaveCount(0);
+  }
 });
 
 test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真实入口）', async ({ page }) => {
@@ -173,8 +190,8 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   // 1) 身份令牌 → 配置面板
   await clickTopBarMenuItem(page, 'API 身份令牌');
   await expect(page.locator('.auth-panel')).toBeVisible();
-  // 菜单关闭时 Radix 会把焦点还给「更多工具」；Esc 只在面板内部生效，先点进输入框。
-  await page.locator('.auth-panel input').first().click();
+  // 菜单关闭后焦点应自动落到输入框（不要求用户再点一次）；面板内 Esc 才生效。
+  await expect(page.locator('.auth-panel input').first()).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.locator('.auth-panel')).toHaveCount(0);
 
@@ -207,6 +224,19 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
   await clickTopBarMenuItem(page, '展开 Inspector');
   await expect(page.locator('.app-regions')).not.toHaveClass(/inspector-closed/);
+});
+
+test('#1372 改动 1：会话行 Shift+F10 打开 ⋯ 菜单并把焦点交给首项', async ({ page }) => {
+  await openApp(page);
+  const rowButton = page.locator('.session-row').first().locator('.session-item');
+  await rowButton.focus();
+  await expect(rowButton).toHaveAttribute('aria-keyshortcuts', 'Shift+F10');
+  await page.keyboard.press('Shift+F10');
+  const menu = page.getByRole('menu');
+  await expect(menu).toBeVisible();
+  await expect(page.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
 });
 
 test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', async ({ page }) => {

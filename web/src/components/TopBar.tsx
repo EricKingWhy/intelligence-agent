@@ -3,7 +3,8 @@
  * Left: product identity. Center: current session title + Run Pulse
  * (signature #1 — icon + color + text, never color-only). Right:
  * trace density selector (four tiers, localStorage-persisted — frozen
- * decision), inspector collapse toggle + theme toggle.
+ * decision), theme toggle, and the「更多工具」menu (API token, context,
+ * approval rules, memory, watchtower, Inspector toggle).
  */
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -31,7 +32,7 @@ interface Props {
   /** 主题状态归 App（Command Palette Toggle Theme 与本按钮共享同一状态源）。 */
   theme: Theme;
   onToggleTheme: () => void;
-  /** 401 已发生（App 广播）——钥匙图标加提示点，引导配置 token。 */
+  /** 401 已发生（App 广播）——「更多工具」触发按钮加提示点，引导配置 token。 */
   authRequired: boolean;
   /** 打开记忆管理浮层（MEM-5 / #160）。低频管理动作，放在 App Bar 右簇。 */
   onOpenMemories: () => void;
@@ -78,6 +79,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // 输入框只在面板打开时同步真值——打开 = 读取当前存储，避免陈旧副本。
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [tokenDraft, setTokenDraft] = useState('');
+  const authInputRef = useRef<HTMLInputElement>(null);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -98,6 +100,14 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     setTokenDraft(getToken());
     setAuthPanelOpen((v) => !v);
   };
+
+  // Radix 菜单关闭时会把焦点还给 trigger；若面板此刻打开，焦点要落到输入框，
+  // 否则 Esc 落在 trigger 上、面板关不掉（键盘用户必须先手动点进来）。
+  useEffect(() => {
+    if (!authPanelOpen) return;
+    const timer = window.setTimeout(() => authInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [authPanelOpen]);
 
   const saveToken = () => {
     setToken(tokenDraft);
@@ -120,7 +130,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     : '';
   // 归档会话默认不在侧栏显示；切换器同口径，不能给出一个侧栏里找不到的选项。
   const switchableSessions = useMemo(() => sessions?.filter((s) => !s.archived), [sessions]);
-  const canSwitchSession = conversation !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 0;
+  const canSwitchSession = conversation !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 1;
   // `exp` 来自未验签的 token claims：任何数字都能进来，`toISOString()` 对
   // 非有限/越界值会抛 RangeError，整条顶栏会跟着崩。无效就不显过期时间。
   const expDate = identity?.exp != null && Number.isFinite(identity.exp)
@@ -371,6 +381,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         <div className="auth-panel" role="dialog" aria-label="API 身份令牌设置" onKeyDown={(e) => e.key === 'Escape' && setAuthPanelOpen(false)}>
           <div className="auth-panel-title">API 身份令牌（Bearer）</div>
           <input
+            ref={authInputRef}
             className="auth-panel-input"
             type="password"
             value={tokenDraft}

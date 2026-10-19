@@ -507,6 +507,48 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
+  /* #1372 改动 5：thinking 与 running 拆分后新增 `.run-badge-thinking`（info 色域）。
+     夹具走真实投影：run/started + model started、无终态 ⇒ run_status='running'，
+     Inspector 头徽章渲染 thinking。 */
+  test(`[${theme}] #1372 思考中徽标（.run-badge-thinking）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'model/started', data: { model: 'e2e-model' }, seq: 3, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await expect(page.locator('.run-badge-thinking')).toBeVisible();
+    // 同一 thinking 状态的两个表面：Inspector 徽章 + 顶栏 run pulse。
+    for (const selector of ['.run-badge-thinking', '.run-pulse.pulse-thinking']) {
+      const m = await measure(page, selector);
+      expect(contrast(m.color, m.bg), `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /* #1372 改动 6：401 时「更多工具」触发器的提示点新增 `.appbar-menu-warn`（danger ink）。
+     走真实 401 路径（同 #1136 auth-banner 夹具），打开菜单后量。 */
+  test(`[${theme}] #1372 「更多工具」需要配置徽标（.appbar-menu-warn）对比度 ≥4.5`, async ({ page }) => {
+    await mockAuthRequired(page);
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: '更多工具' }).click();
+    const warn = page.locator('.appbar-menu-warn');
+    await expect(warn).toBeVisible();
+    const m = await measure(page, '.appbar-menu-warn');
+    expect(contrast(m.color, m.bg), '.appbar-menu-warn contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
   /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
      （`#1327` 起它是"有欠账、等自动处理"的如实呈现；看不清等于把状态藏起来）。
      #1372 改动 5 把它从 warning 移到 danger 色域（与 tool 的 warning 分开），

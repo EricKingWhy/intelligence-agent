@@ -81,11 +81,8 @@ function elapsed(target: string, now: number): string {
 }
 
 function plannedTime(rule: WatchtowerRuleEntry): string {
-  return new Intl.DateTimeFormat('zh-CN', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    timeZone: rule.timezone,
-  }).format(new Date(rule.trigger_at));
+  // 全站统一格式；时间按规则自带的 IANA 时区（不是浏览器本地时区）。
+  return formatDateTime(rule.trigger_at, rule.timezone) ?? rule.trigger_at;
 }
 
 function stateLabel(state: WatchtowerRuleState): string {

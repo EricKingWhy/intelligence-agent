@@ -1457,20 +1457,19 @@ export const Composer = memo(function Composer({
             <div className="composer-scope-pills" role="group" aria-label="登记作用域">
               {SCOPE_OPTIONS.map((option) => {
                 const projectDisabled = option.id === 'project' && projectAvailable === false;
+                const hint = projectDisabled
+                  ? '当前会话不在 git 仓库内，无法登记项目级约束'
+                  : option.hint;
                 return (
-                  <Tip
-                    key={option.id}
-                    content={
-                      projectDisabled
-                        ? '当前会话不在 git 仓库内，无法登记项目级约束'
-                        : option.hint
-                    }
-                  >
+                  <Tip key={option.id} content={hint}>
                     <button
                       type="button"
                       className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
                       aria-pressed={scope === option.id}
                       disabled={projectDisabled || locked}
+                      /* disabled 收不到指针事件 ⇒ Radix tooltip 打不开；原生 title 兜底，
+                         完整原因不能因为禁用就丢。 */
+                      title={projectDisabled || locked ? hint : undefined}
                       onClick={() => setScope(option.id)}
                     >
                       {option.label}

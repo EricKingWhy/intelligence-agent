@@ -25,6 +25,9 @@ test('401 → 引导横幅出现；可点「关闭提示」关掉；再有 401 �
   await expect(banner).toBeVisible();
   // 断言这是**鉴权**横幅（文案是静态的，detail 的传播由 api.test.ts 的单测覆盖）
   await expect(banner).toContainText('身份令牌');
+  // #1372 改动 6：入口收进「更多工具」后，横幅必须指向真实位置（不再写"钥匙图标"）。
+  await expect(banner).toContainText('更多工具');
+  await expect(banner).toContainText('API 身份令牌');
 
   // 唯一出口：关闭按钮（本用例存在的理由——该按钮此前零覆盖）
   await page.getByRole('button', { name: '关闭提示', exact: true }).click();

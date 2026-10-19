@@ -467,9 +467,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   50% { box-shadow: 0 0 12px 1px color-mix(in srgb, currentColor 26%, transparent); }
 }
 .run-pulse.pulse-thinking {
-  color: var(--accent);
-  background: var(--accent-muted);
-  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  /* 同一 thinking 状态在顶栏与 Inspector 徽章用同一色域（info ink），
+     与 .run-badge-thinking 一致；running 才是品牌 accent。 */
+  color: color-mix(in srgb, var(--info) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 30%, transparent);
   animation: pulse-glow 2.2s ease-in-out infinite;
 }
 .run-pulse.pulse-thinking svg {
@@ -6060,7 +6062,7 @@ button.json-row {
  * 后端同步批（df4f7d8）——Auth 接缝 / Recover 入口 / 工具结果新形状
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* ── Auth：钥匙图标 + 设置面板 + 401 引导横幅 ── */
+/* ── Auth：「更多工具」入口 + API 身份令牌面板 + 401 引导横幅 ── */
 .appbar {
   position: relative;
 }

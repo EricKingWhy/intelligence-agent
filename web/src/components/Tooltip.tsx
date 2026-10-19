@@ -35,11 +35,9 @@ export function TipProvider({ children }: { children: ReactNode }) {
 interface TipProps {
   content: ReactNode;
   children: ReactElement;
-  side?: 'top' | 'right' | 'bottom' | 'left';
-  align?: 'start' | 'center' | 'end';
 }
 
-export function Tip({ content, children, side = 'top', align = 'center' }: TipProps) {
+export function Tip({ content, children }: TipProps) {
   const inherited = useContext(TipScopeContext);
   const root = (
     <TooltipPrimitive.Root>
@@ -47,8 +45,8 @@ export function Tip({ content, children, side = 'top', align = 'center' }: TipPr
       <TooltipPrimitive.Portal>
         <TooltipPrimitive.Content
           className="tip-content"
-          side={side}
-          align={align}
+          side="top"
+          align="center"
           sideOffset={6}
           collisionPadding={8}
         >
