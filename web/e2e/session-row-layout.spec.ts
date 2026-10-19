@@ -7,8 +7,8 @@
  *   2. 展开态行高 ≥44px（票面 44px）；
  *   3. 同组相邻行有发丝线，每组末行没有（`border-bottom` 用 `:last-child` 收口）。
  *
- *  收起态（≤820px）是图标轨，行高/可点面积由 `w-session-delete.spec.ts` 的
- *  24px 下限单独锁，不在本用例里重复。 */
+ *  收起态（≤820px）是图标轨，行高与可点面积（≥24px）由本文件的窄轨用例锁住；
+ *  `w-session-delete.spec.ts` 只锁了宽度 ≥24。 */
 
 import { expect, test } from '@playwright/test';
 import { routeApi, sessionRow } from './fixtures';
@@ -26,7 +26,6 @@ test('#1370 会话行：标题与 id 同行、行高 ≥44、分组发丝线只�
     sessions,
     projects: [{ id: 'p-1370', path: '/tmp/1370', title: '项目 1370', session_ids: [A, B] }],
   });
-  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
 
   await expect(page.locator('.session-items .session-row')).toHaveCount(3);
@@ -72,4 +71,31 @@ test('#1370 会话行：标题与 id 同行、行高 ≥44、分组发丝线只�
   }));
   expect(borders.project).toEqual(['solid', 'none']);
   expect(borders.ungrouped).toEqual(['none']);
+});
+
+test('#1370 窄轨：会话行可点面积 ≥24×24 且不画发丝线', async ({ page }, testInfo) => {
+  // 800px viewport 与 project 无关，只跑一次，避免两个 project 重复同一场景。
+  test.skip(testInfo.project.name !== 'chromium-1280', '窄轨 800px 只跑一个 project');
+  const A = 'e2e-1370-narrow-alpha';
+  await routeApi(page, { sessions: [sessionRow(A, null, { first_user_message: '窄轨会话' })], projects: [] });
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.goto('/');
+
+  const geometry = await page.evaluate(() => {
+    const item = document.querySelector('.session-items .session-row .session-item');
+    if (!item) throw new Error('no narrow session item');
+    const rect = item.getBoundingClientRect();
+    return {
+      width: rect.width,
+      height: rect.height,
+      minHeight: Number.parseFloat(getComputedStyle(item).minHeight),
+      borderBottom: getComputedStyle(item.closest('.session-row')!).borderBottomStyle,
+    };
+  });
+
+  // 图标轨没有文字撑宽，横向 padding 就是唯一可点面积；行高不能被 44px 展开态带跑。
+  expect(geometry.width).toBeGreaterThanOrEqual(24);
+  expect(geometry.height).toBeGreaterThanOrEqual(24);
+  expect(geometry.minHeight).toBeGreaterThanOrEqual(24);
+  expect(geometry.borderBottom).toBe('none');
 });

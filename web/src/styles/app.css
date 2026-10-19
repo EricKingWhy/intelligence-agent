@@ -700,8 +700,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--surface-2);
 }
 /* #752：「已损坏」徽标——用警告色区别于"已归档"的中性灰，传达"需要处理"。
- * 保留描边 + 方角（不跟随 #1370 的 pill 徽标）：警告语义需要与中性状态徽标
- * 在形状上也可区分，不能只靠颜色（色觉障碍下仍要读得出）。 */
+ * 保留描边 + 小圆角（radius-sm，不跟随 #1370 的 pill 徽标）：警告语义需要与中性
+ * 状态徽标在形状上也可区分，不能只靠颜色（色觉障碍下仍要读得出）。 */
 .session-item-corrupted {
   display: inline-block;
   margin-top: 3px;
@@ -5621,7 +5621,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* 收起态是图标轨，不是展开列表：44px 的票面行高只属于展开态。
    * `.session-items` 在窄屏是 `align-items: center`，行宽由内容决定，而内容
    * （会话点 5px）几乎不占宽度——横向 padding 就是这一行的**可点面积**；
-   * 基础 padding 收到 8px 后行宽只剩 21px（低于 24px 下限），这里恢复 16px。 */
+   * 基础 padding 收到 8px 后行宽只剩 21px（低于 24px 下限），这里恢复基线的
+   * 12px 横向内边距（`--space-md`），行宽回到 29px。 */
   .session-row .session-item {
     justify-content: center;
     padding-inline: var(--space-md);
