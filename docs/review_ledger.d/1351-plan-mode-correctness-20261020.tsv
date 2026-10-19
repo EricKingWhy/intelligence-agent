@@ -1,0 +1,1 @@
+2026-10-20	#1351 修后 Correctness/Spec 独立复审：AC1 的 PLAN 实际调用证据由新 MCP→ToolRegistry→ToolExecutor(PLAN)测试补齐，先前 P3 关闭；终态复核无新增规格问题。	aef37498fdb8d655a84e37ec5728d8dcf6dd334f..27dc7b97892de4b33d7dcd6f5b781f250c23b638

@@ -1,0 +1,2 @@
+2026-10-19	#1351 MCP tool_permissions=read-only 派生只读 side_effect：双轴审查（Correctness + Standards，fresh 会话；实现者未自审）	0a9376cb..ca87d0e6
+2026-10-19	#1351 sync merge origin/main 34ed194a 入分支 claude/1351-mcp-side-effect-readonly；ort 零冲突；三树互异	507f0265..ae1f7ae6
