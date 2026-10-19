@@ -405,7 +405,7 @@ function unknownSummary(_event: AgentEvent): string {
 
 /** UI-04：forked / 审批族的单行语义（此前落「未知事件」）。 */
 function summarizeForked(_event: AgentEvent): string {
-  return '已分叉';
+  return '已另开一条';
 }
 
 function summarizeApprovalRequested(event: AgentEvent): string {
@@ -1771,14 +1771,14 @@ function summarizeRunPaused(event: AgentEvent): string {
     const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
     const ceiling = info.run_limits?.tool_call_limits?.[tool];
     return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
-      ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
+      ceiling === undefined ? '无上限' : `上限 ${ceiling}`
     }`;
   }
   if (isDeadlinePause(info)) {
     const instant = deadlineInstant(info);
     return `${dimension} · 截止 ${instant ?? 'unavailable'}`;
   }
-  const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
+  const ceiling = info.run_limit === null ? '无上限' : String(info.run_limit);
   return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;
 }
 
@@ -1811,7 +1811,7 @@ function summarizeModelChanged(event: AgentEvent): string {
 // #1192：委派约束继承快照的单行语义（子会话事件流的独立审计事件）。
 function summarizeConstraintInheritance(event: AgentEvent): string {
   const d = event.data as Record<string, unknown>;
-  if (d.omit_constraints === true) return '干净启动：不继承任何约束';
+  if (d.omit_constraints === true) return '干净启动：不沿用任何要求';
   const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
   const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
   return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;

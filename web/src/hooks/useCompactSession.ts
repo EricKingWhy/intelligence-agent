@@ -27,7 +27,7 @@ import {
  *  与 CLI `compress` 的文案、面板低水位提示同词——用户不该在两条入口读到两种语言。
  *  其余 409（`run_busy` / `event_drift` / 压缩进行中）保持后端原文（票面：文案不变）。 */
 export const COMPACT_REJECT_COPY: Record<string, string> = {
-  no_early_turns: '没有可压缩的早期内容',
+  no_early_turns: '没有可以精简的早期内容',
 };
 
 function describeCompactError(error: unknown): string {
@@ -37,7 +37,7 @@ function describeCompactError(error: unknown): string {
     const mapped = COMPACT_REJECT_COPY[error.reason];
     if (mapped) return mapped;
   }
-  return describeSessionError(error, '压缩失败');
+  return describeSessionError(error, '精简失败');
 }
 
 export interface CompactRunOptions {

@@ -125,7 +125,7 @@ function RecoveryListBody({
       <div className="recovery-list-body">
         {state.kind === 'loading' && (
           <div className="recovery-list-loading">
-            <p role="status">正在核对上次运行信息…（事件 → 工作区 → Ledger → 对账 → 工具配对 → 上下文）</p>
+            <p role="status">正在核对上次运行的信息…（事件 → 工作区 → 操作记录 → 结果核对 → 工具结果配对 → 记忆容量）</p>
             <button type="button" className="recovery-resume-btn" disabled aria-disabled="true" aria-describedby="recovery-gate-reason">
               继续
             </button>
@@ -168,13 +168,13 @@ function RecoveryListBody({
                 <li className="recovery-list-item" key={item.session_id}>
                   <p className="recovery-list-task">{item.task ?? '—（未记录任务）'}</p>
                   <dl className="recovery-list-facts">
-                    <dt>中断的 run</dt>
+                    <dt>中断的任务</dt>
                     <dd>
                       {item.interrupted_runs.length === 0
                         ? '—'
                         : item.interrupted_runs.map((run, index) => (
                           <span className="recovery-run" key={`${run.run_id ?? 'none'}-${index}`}>
-                            {run.run_id ?? '（无 run id）'} · 中断于事件 #{run.interrupted_seq}
+                            {run.run_id ?? '（无任务编号）'} · 中断于事件 #{run.interrupted_seq}
                             {run.step_id !== null ? ` · 第 ${run.step_id} 步` : ''}
                             {run.agent_id ? ` · ${run.agent_id}` : ''}
                           </span>

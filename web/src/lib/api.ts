@@ -508,7 +508,7 @@ async function watchtowerJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
     const detail = await readErrorDetail(res);
-    throw new Error(detail || `自动值班请求失败（${res.status}）`);
+    throw new Error(detail || `自动定时任务请求失败（${res.status}）`);
   }
   return res.json() as Promise<T>;
 }
@@ -1580,7 +1580,7 @@ function parseArtifactSlice(raw: unknown): ArtifactSlice {
   const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
   const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
   if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
-    throw new Error('artifact content: 响应形状不符');
+    throw new Error('产出文件内容：响应形状不符');
   }
   return {
     artifact_id: artifactId,
@@ -2042,12 +2042,12 @@ export async function listProtectedFacts(sessionId: string): Promise<ProtectedFa
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts`,
   );
-  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  if (!res.ok) throw await sessionError(res, '加载要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const facts = typeof raw === 'object' && raw !== null
     ? (raw as { facts?: unknown }).facts
     : null;
-  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  if (!Array.isArray(facts)) throw new Error('要求接口返回的数据格式不对');
   return facts as ProtectedFact[];
 }
 
@@ -2064,7 +2064,7 @@ export async function revokeProtectedFact(
     `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts/${encodeURIComponent(factId)}/revoke`,
     { method: 'POST' },
   );
-  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  if (!res.ok) throw await sessionError(res, '撤销要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
   if (body.status !== 'revoked') {
@@ -2121,11 +2121,11 @@ export async function listEffectiveConstraints(
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/effective-constraints`,
   );
-  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  if (!res.ok) throw await sessionError(res, '加载要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : null;
   const facts = obj?.facts;
-  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  if (!Array.isArray(facts)) throw new Error('要求接口返回的数据格式不对');
   const project =
     typeof obj?.project === 'object' && obj.project !== null
       ? (obj.project as EffectiveProjectMeta)
@@ -2152,7 +2152,7 @@ export async function revokeScopedConstraint(
       body: JSON.stringify({ scope: opts.scope, session_id: opts.sessionId }),
     },
   );
-  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  if (!res.ok) throw await sessionError(res, '撤销要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
   if (body.status !== 'revoked') {
@@ -2353,7 +2353,7 @@ function buildRecoverBody(decisions?: RecoverDecisionInput[]): string | null {
   for (const decision of decisions) {
     if (decision.source !== undefined && decision.source.length > RECOVER_DECISION_SOURCE_MAX) {
       throw new Error(
-        `裁决来源过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
+        `决定来源过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
       );
     }
   }
@@ -2389,7 +2389,7 @@ export async function recoverSession(
     const errBody = await readErrorBody(res);
     throw new RecoverError(
       409,
-      errBody.message || '存在需要人工裁决的高风险操作',
+      errBody.message || '存在需要你决定的高风险操作',
       errBody.pendingDecisions,
     );
   }
@@ -3332,11 +3332,11 @@ export async function compactSession(
       `/api/sessions/${encodeURIComponent(sessionId)}/context/compact${query}`,
       { method: 'POST', signal: controller.signal },
     );
-    if (!res.ok) throw await sessionError(res, '压缩会话上下文失败');
+    if (!res.ok) throw await sessionError(res, '精简早期对话失败');
     return res.json();
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error('压缩请求超时（180s）——仍可稍后在上下文容量面板查看结果');
+      throw new Error('精简请求超时（180s）——仍可稍后在记忆容量面板查看结果');
     }
     throw error;
   } finally {

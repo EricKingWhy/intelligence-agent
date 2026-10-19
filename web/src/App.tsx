@@ -1000,7 +1000,7 @@ export default function App() {
       const origin = selectedId;
       setForkError(null);
       try {
-        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '分叉请求');
+        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '另开一条');
         if (selectedIdRef.current !== origin) return;
         // 跳转到 child session（同步镜像，见 selectedIdRef 注释）
         selectedIdRef.current = result.session_id;
@@ -1009,7 +1009,7 @@ export default function App() {
       } catch (e) {
         if (selectedIdRef.current !== origin) return;
         // BUG-001 fix：分叉失败不再静默——展示后端 detail。
-        setForkError({ sessionId: origin, message: `分叉失败：${(e as Error).message}` });
+        setForkError({ sessionId: origin, message: `另开一条失败：${(e as Error).message}` });
       } finally {
         // 只清自己那一格：期间可能已有另一个会话的分叉在途
         if (forkInFlightRef.current === origin) forkInFlightRef.current = null;
@@ -1446,8 +1446,8 @@ export default function App() {
     const items: CommandItem[] = [
       {
         id: 'toggle-inspector',
-        label: '切换 Run Inspector',
-        keywords: 'toggle run inspector 右栏',
+        label: '切换运行详情',
+        keywords: 'toggle inspector 右栏',
         hint: '右栏',
         group: 'actions',
         run: () => {
@@ -1502,8 +1502,8 @@ export default function App() {
       ...(conversation?.run_id
         ? [{
             id: 'copy-run-id',
-            label: '复制 Run ID',
-            keywords: 'copy run id',
+            label: '复制任务编号',
+            keywords: 'copy task id 任务编号',
             hint: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),
@@ -1787,7 +1787,7 @@ export default function App() {
                 className="recover-btn"
                 onClick={() => selectedId && void recover(selectedId)}
                 disabled={recoverState.status === 'pending'}
-                title="修复中断会话：按 Operation Ledger 回填工具结果、标记 dangling 调用（幂等）"
+                title="修复中断会话：按操作记录补回工具结果、标出没有结果的工具调用（重复执行不会重复生效）"
               >
                 <RotateCcw size={14} />
                 {recoverState.status === 'pending' ? '恢复中…' : '恢复会话'}
@@ -1802,7 +1802,7 @@ export default function App() {
                 </div>
               )}
               {recoverState.status === 'idle' && (
-                <span className="recover-hint">该会话缺少 run 终态或有未配对工具调用——可尝试恢复</span>
+                <span className="recover-hint">该会话缺少任务的结束状态，或有没配上结果的工具调用——可以尝试恢复</span>
               )}
             </div>
           )}

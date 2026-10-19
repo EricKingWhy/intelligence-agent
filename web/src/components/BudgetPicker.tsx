@@ -101,9 +101,9 @@ export function BudgetPickerPanel({
               className="budget-picker-dimension-copy"
               htmlFor={turnsInputId}
             >
-              <span className="budget-picker-dimension-name">turns 上限</span>
+              <span className="budget-picker-dimension-name">轮数上限</span>
               <span className="budget-picker-dimension-hint">
-                本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。
+                这次任务最多执行多少轮；留空用默认值。到上限会自动暂停，调高上限后可继续。
               </span>
             </label>
             <span className="budget-picker-dimension-control">
@@ -117,7 +117,7 @@ export function BudgetPickerPanel({
                 onChange={(e) => onTurnsChange(e.target.value)}
                 placeholder="默认"
                 disabled={disabled}
-                aria-label="预算上限（Agent turns，留空为默认）"
+                aria-label="轮数上限（留空用默认值）"
               />
               <span className="budget-picker-unit">轮</span>
             </span>
@@ -131,19 +131,19 @@ export function BudgetPickerPanel({
               <Coins size={14} />
             </span>
             <span className="budget-picker-dimension-copy">
-              <span className="budget-picker-dimension-name">tokens 上限</span>
+              <span className="budget-picker-dimension-name" title="约等于中文字数">字数上限</span>
               <span className="budget-picker-dimension-hint">
-                本次 run 的总 token 上限？
+                这次任务最多能用多少字？
               </span>
             </span>
             <div className="composer-budget budget-picker-dimension-control">
               <OptionPicker
-                ariaLabel="预算 tokens 档位"
-                title="本次 run 的总 token 上限？"
+                ariaLabel="字数档位"
+                title="这次任务最多能用多少字？"
                 icon={Coins}
                 options={TOKEN_OPTIONS}
                 value={tokensTierId(tokens)}
-                placeholder="tokens 上限"
+                placeholder="字数上限"
                 disabled={disabled}
                 onChange={(value) => {
                   if (value === null) {
@@ -162,8 +162,8 @@ export function BudgetPickerPanel({
                 }}
                 footer={
                   tokensCustom ? (
-                    <label className="composer-budget" title="自定义总 token 绝对上限；留空 = 不设。">
-                      <span className="composer-budget-label">自定义 tokens</span>
+                    <label className="composer-budget" title="自定义总字数上限；留空 = 不设。">
+                      <span className="composer-budget-label">自定义字数</span>
                       <input
                         type="number"
                         min={1}
@@ -173,7 +173,7 @@ export function BudgetPickerPanel({
                         onChange={(e) => onTokensChange(e.target.value)}
                         placeholder="默认"
                         disabled={disabled}
-                        aria-label="预算上限（总 tokens，留空为默认）"
+                        aria-label="字数上限（留空用默认值）"
                       />
                     </label>
                   ) : undefined
@@ -193,13 +193,13 @@ export function BudgetPickerPanel({
               <span className="budget-picker-dimension-copy">
                 <span className="budget-picker-dimension-name">截止时长</span>
                 <span className="budget-picker-dimension-hint">
-                  本次 run 距截止还有多久？
+                  这次任务距截止还有多久？
                 </span>
               </span>
               <div className="composer-budget budget-picker-dimension-control">
                 <OptionPicker
                   ariaLabel="预算截止时长档位"
-                  title="本次 run 距截止还有多久？"
+                  title="这次任务距截止还有多久？"
                   icon={Timer}
                   options={DURATION_OPTIONS}
                   value={durationTierId(deadline)}
@@ -285,7 +285,7 @@ export function BudgetPickerPanel({
         <span className="budget-picker-status">
           <span className="budget-picker-status-dot" aria-hidden="true" />
           <span className="budget-picker-status-text">
-            {summary === '默认' ? '当前：默认（后端默认，全不设限）' : '当前：' + summary}
+            {summary === '默认' ? '当前：默认（都不设限）' : '当前：' + summary}
           </span>
         </span>
         {hasBudgetOverrides && (
@@ -330,7 +330,7 @@ export function BudgetPicker({
           type="button"
           className="composer-control composer-budget-trigger"
           aria-label="预算"
-          title="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。"
+          title="这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。"
           aria-disabled={disabled || undefined}
           disabled={disabled}
         >
@@ -351,10 +351,10 @@ export function BudgetPicker({
               <Wallet size={15} />
             </span>
             <span className="budget-picker-head-copy">
-              <span className="budget-picker-head-title">本次 run 的预算</span>
+              <span className="budget-picker-head-title">这次任务的预算</span>
               <span className="budget-picker-head-subtitle">
-                <span className="budget-picker-head-highlight">留空 = 无限制（后端默认）</span>
-                {' · 到顶自动暂停，可在恢复时上调'}
+                <span className="budget-picker-head-highlight">留空 = 不限制（默认）</span>
+                {' · 到上限会自动暂停，可在恢复时调高'}
               </span>
             </span>
           </div>

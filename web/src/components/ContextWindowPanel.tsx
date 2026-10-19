@@ -99,11 +99,11 @@ export function ContextWindowPanel({
       <div
         className="ctx-usage-popover ctx-window-panel"
         role="dialog"
-        aria-label="上下文窗口"
+        aria-label="记忆容量"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="ctx-usage-head">
-          <span className="ctx-usage-title">上下文窗口</span>
+          <span className="ctx-usage-title">记忆容量</span>
           <button className="ctx-usage-close" onClick={onClose} aria-label="关闭">
             <X size={14} />
           </button>
@@ -122,10 +122,10 @@ export function ContextWindowPanel({
             {/* 文案以票面正文（方案 1）审批的提示语为准；效果图 01（mockup.html）
                 写的是「窗口越大，压缩越晚；单次运行也会更慢、成本更高。」，两者同义
                 不同文，这里按票面。 */}
-            <p className="ctx-window-desc">窗口越大，可保留的上下文越多；耗时和成本取决于实际使用量。</p>
+            <p className="ctx-window-desc">记忆容量越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。</p>
             <span className="ctx-window-badge">{fmtTier(settings.context_window)} 当前生效</span>
 
-            <div className="ctx-window-choices" role="radiogroup" aria-label="上下文窗口">
+            <div className="ctx-window-choices" role="radiogroup" aria-label="记忆容量">
               {settings.tiers.map((t) => (
                 <button
                   key={t}
@@ -145,14 +145,14 @@ export function ContextWindowPanel({
                 这两个数配一个"占窗口多少"的读法，由它们反推，不另立口径。 */}
             <div className="ctx-window-thresholds" aria-live="polite">
               <div className="ctx-window-threshold">
-                <span>开始自动压缩</span>
+                <span>开始自动精简</span>
                 <strong>{settings.thresholds.auto_compact.toLocaleString()}</strong>
                 <span className="ctx-window-threshold-pct">
                   {pct(settings.thresholds.auto_compact)}
                 </span>
               </div>
               <div className="ctx-window-threshold">
-                <span>硬护栏</span>
+                <span>硬上限</span>
                 <strong>{settings.thresholds.hard_guard.toLocaleString()}</strong>
                 <span className="ctx-window-threshold-pct">
                   {pct(settings.thresholds.hard_guard)}
@@ -161,7 +161,7 @@ export function ContextWindowPanel({
             </div>
 
             <p className="ctx-window-hint">
-              到了自动压缩线先压缩；到了硬护栏就保护本次运行不再继续膨胀。
+              到了自动精简线会先精简早期对话；到了硬上限就停止，不再继续增加内容。
             </p>
 
             {/* 「恢复默认」的落点是后端给的 configured_default（部署默认挡位），

@@ -134,7 +134,7 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
           <div className="project-dialog-desc">
             将<strong>零副作用</strong>地重放该会话历史：
             <ul className="project-dialog-list">
-              <li>从已持久化的事件重新派生视图，工具结果一律呈现<strong>冻结终态</strong></li>
+              <li>从已持久化的事件重新派生视图，工具结果一律呈现<strong>冻结的结束状态</strong></li>
               <li>不触发模型 / 工具调用，不产生任何外部副作用</li>
               <li>
                 <strong>不写入</strong>原会话事件流——原会话一字不变

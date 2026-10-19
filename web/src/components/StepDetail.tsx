@@ -267,8 +267,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     return (
       <aside className="step-detail" data-panel="inspector">
         <div className="detail-header">
-          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话 Run 视图">
-            <ArrowLeft size={14} /> Run
+          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话的运行详情">
+            <ArrowLeft size={14} /> 返回
           </button>
           <span className="panel-label">子会话 · {focus.target || '?'}</span>
           <span className="detail-run-id mono num" title={`child session ${focus.childSessionId}`}>
@@ -421,7 +421,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         onKeyDown={onResizeKeyDown}
       />
       <div className="detail-header">
-        <span className="panel-label">Run Inspector</span>
+        <span className="panel-label">运行详情</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
         {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
             run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
@@ -430,8 +430,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           className="detail-profile-badge mono num"
           title={
             focusedRunId !== null
-              ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
-              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一个 run 的生效档位）`
+              ? `agent_profile: ${agentProfile ?? '未知（聚焦任务未携带）'}（聚焦任务的生效档位）`
+              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一次任务的生效档位）`
           }
         >
           {agentProfile ?? '档位未知'}
@@ -444,8 +444,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             className="detail-effort-badge mono num"
             title={
               focusedRunId !== null
-                ? `reasoning_effort: ${reasoningEffort}（聚焦 run 请求侧选中的推理档位）`
-                : `reasoning_effort: ${reasoningEffort}（最近一个 run 请求侧选中的推理档位）`
+                ? `reasoning_effort: ${reasoningEffort}（聚焦任务请求侧选中的推理档位）`
+                : `reasoning_effort: ${reasoningEffort}（最近一次任务请求侧选中的推理档位）`
             }
           >
             推理 · {reasoningEffort}
@@ -819,11 +819,11 @@ export function ChatTab({
           {conversation.compactions.map((c, i) => (
             <div key={i} className="detail-compaction-row">
               <div className="detail-row">
-                <span className="detail-key">压缩轮次</span>
+                <span className="detail-key">精简轮次</span>
                 <span className="detail-val">{c.compacted_turn_count}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">Token 估算</span>
+                <span className="detail-key">字数估算</span>
                 <span className="detail-val">{c.token_estimate.toLocaleString()}</span>
               </div>
               {c.fallback_used && (
@@ -839,7 +839,7 @@ export function ChatTab({
       {conversation.reconcile_queue.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <AlertTriangle size={14} /> 需人工裁决
+            <AlertTriangle size={14} /> 需要你来决定
           </div>
           {conversation.reconcile_queue.map((r, i) => (
             <div key={i} className="detail-reconcile-row">
@@ -924,7 +924,7 @@ export function ChatTab({
               <span className="detail-key">请求模型</span>
               <span
                 className="detail-val detail-val-mono"
-                title="本轮请求侧的模型标识：run/started 携带的 model（持久事件）= 装配给 provider 的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
+                title="本轮请求侧的模型标识：任务开始事件携带的 model（持久事件）= 装配给模型服务商的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
               >
                 {conversation.requested_model}
               </span>
@@ -1027,7 +1027,7 @@ function PermissionSection({
         ),
       )}
       <div className="detail-row">
-        <span className="detail-key">已裁决</span>
+        <span className="detail-key">已决定</span>
         <span className={`detail-val${view.decisions.length === 0 ? ' detail-val-muted' : ''}`}>
           {view.decisionsLabel}
         </span>
@@ -1199,9 +1199,9 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
           <Fragment key={g.start}>
             <div
               className="tl-run-header"
-              title={g.runId ? `run ${g.runId}` : '会话开场（无 run 归属）'}
+              title={g.runId ? `任务 ${g.runId}` : '会话开场（不属于任何一次任务）'}
             >
-              <span className="tl-run-name">{g.runId ? `Run ${g.ordinal}` : '会话'}</span>
+              <span className="tl-run-name">{g.runId ? `第 ${g.ordinal} 次任务` : '会话'}</span>
               {g.runId && (
                 <span className={`run-badge run-badge-${g.status}`}>
                   {RUN_GROUP_STATUS_LABEL[g.status]}
@@ -1391,7 +1391,7 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
   const hiddenArtifacts = Math.max(0, artifacts.length - artifactWindow);
   const visibleArtifacts = hiddenArtifacts > 0 ? artifacts.slice(hiddenArtifacts) : artifacts;
   if (artifacts.length === 0) {
-    return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
+    return <TabEmpty hint="本次会话没有产出文件。" icon={Package} />;
   }
   return (
     <>

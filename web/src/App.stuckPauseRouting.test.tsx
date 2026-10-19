@@ -169,24 +169,24 @@ describe('#968 F2 — App 层暂停面板路由（stuck 走引导面板，不走
   it('reason=stuck ⇒ StuckPausedPanel（引导文案），无恢复控件', async () => {
     const el = await mountWith('stuck');
     const text = el.textContent ?? '';
-    expect(text).toContain('不提供一键恢复');
-    expect(text).not.toContain('恢复同一 run');
+    expect(text).toContain('不提供一键继续');
+    expect(text).not.toContain('继续这次任务');
     expect(el.querySelector('#pause-resume-ceiling')).toBeNull();
   });
 
   it('reason=budget_exhausted ⇒ PausedPanel（恢复控件在）', async () => {
     const el = await mountWith('budget_exhausted');
     const text = el.textContent ?? '';
-    expect(text).toContain('恢复同一 run');
+    expect(text).toContain('继续这次任务');
     expect(el.querySelector('#pause-resume-ceiling')).not.toBeNull();
-    expect(text).not.toContain('不提供一键恢复');
+    expect(text).not.toContain('不提供一键继续');
   });
 
   it('reason=deadline ⇒ PausedPanel（恢复控件在）', async () => {
     const el = await mountWith('deadline');
     const text = el.textContent ?? '';
-    expect(text).toContain('恢复同一 run');
+    expect(text).toContain('继续这次任务');
     expect(el.querySelector('#pause-resume-ceiling')).not.toBeNull();
-    expect(text).not.toContain('不提供一键恢复');
+    expect(text).not.toContain('不提供一键继续');
   });
 });

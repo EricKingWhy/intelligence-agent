@@ -89,9 +89,9 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
   // （service._pending_user_input_conflict_message），与这里的「回答」动词差是
   // 有意的口径差，不是漂移——改这句前先核对 #1223 的冻结结论。
   constraint: {
-    hint: '请先回答当前约束澄清，再发送新消息',
-    placeholder: '等待约束澄清回答…',
-    permissionHint: '等待约束澄清回答后再改档',
+    hint: '请先回答当前要求的确认问题，再发送新消息',
+    placeholder: '等待你确认当前要求…',
+    permissionHint: '确认当前要求后再改档',
   },
   ask_user: {
     hint: '请先回答当前提问，再发送新消息',
@@ -101,9 +101,9 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
   // #1356：计划审批是**待答用户输入**（`resume_basis: 'user_input'`），不是工具
   // 审批——所以文案说「裁决计划」，与 `approval`（工具调用审批）明确区分。
   plan_approval: {
-    hint: '请先裁决当前计划，再发送新消息',
-    placeholder: '等待计划裁决…',
-    permissionHint: '等待计划裁决后再改档',
+    hint: '请先确认当前计划，再发送新消息',
+    placeholder: '等待你确认计划…',
+    permissionHint: '确认计划后再改档',
   },
   approval: {
     hint: '等待审批决策后再继续',
@@ -118,9 +118,9 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
 type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user' | 'plan_approval'>;
 
 const QUEUE_HINT: Record<QueueLockReason, string> = {
-  constraint: '请先回答当前约束澄清',
+  constraint: '请先回答当前要求',
   ask_user: '请先回答当前提问',
-  plan_approval: '请先裁决当前计划',
+  plan_approval: '请先确认当前计划',
 };
 
 /** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
@@ -580,7 +580,7 @@ export const Composer = memo(function Composer({
     if (permissionBusy) return <span>提交中…</span>;
     // ADR-0041 D4：改档**下一轮 run 生效** ⇒ UI 不得承诺「立即生效」，得把时机说清。
     return permissionInSession ? (
-      <span>改档从下一轮 run 起生效（本轮不受影响）</span>
+      <span>改档从下一轮执行起生效（本轮不受影响）</span>
     ) : undefined;
   };
 
@@ -850,8 +850,8 @@ export const Composer = memo(function Composer({
               onSuccess: (r) =>
                 setSlashInfo(
                   r.compacted_turn_count > 0
-                    ? `压缩完成：${r.tokens_before.toLocaleString()} → ${r.tokens_after.toLocaleString()} tok`
-                    : '没有可压缩的早期内容',
+                    ? `精简完成：${r.tokens_before.toLocaleString()} → ${r.tokens_after.toLocaleString()} 字`
+                    : '没有可以精简的早期内容',
                 ),
             }),
           getSessionEvents,
@@ -1278,7 +1278,7 @@ export const Composer = memo(function Composer({
       {(compact.compacting || compactionInProgress) && (
         <div data-testid="slash-compacting" role="status" className="slash-status">
           <span className="ctx-usage-spinner" aria-hidden="true" />
-          正在压缩上下文…
+          正在精简早期对话…
         </div>
       )}
       {/* #1312：会话级目标状态行——回答「这条消息要发往哪个会话」。
@@ -1461,7 +1461,7 @@ export const Composer = memo(function Composer({
                     disabled={projectDisabled || locked}
                     title={
                       projectDisabled
-                        ? '当前会话不在 git 仓库内，无法登记项目级约束'
+                        ? '当前会话不在 git 仓库内，无法登记项目级要求'
                         : option.hint
                     }
                     onClick={() => setScope(option.id)}

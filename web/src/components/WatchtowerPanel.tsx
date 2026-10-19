@@ -103,8 +103,8 @@ function stateLabel(state: WatchtowerRuleState): string {
 
 function budgetSummary(rule: WatchtowerRuleEntry): string {
   const parts: string[] = [];
-  if (rule.budget_turns !== null) parts.push(`${rule.budget_turns} turns`);
-  if (rule.budget_tokens !== null) parts.push(`${rule.budget_tokens.toLocaleString()} tokens`);
+  if (rule.budget_turns !== null) parts.push(`${rule.budget_turns} 轮`);
+  if (rule.budget_tokens !== null) parts.push(`${rule.budget_tokens.toLocaleString()} 字`);
   if (rule.budget_duration_seconds !== null) {
     const duration = DURATION_TIERS.find((item) => item.seconds === rule.budget_duration_seconds);
     parts.push(duration?.label ?? `${Math.round(rule.budget_duration_seconds / 60)} 分钟`);
@@ -201,7 +201,7 @@ export function WatchtowerPanel({
   const scheduler = snapshot?.scheduler;
 
   return (
-    <section className="watchtower-page" aria-label="自动值班面板">
+    <section className="watchtower-page" aria-label="定时任务面板">
       <header className="watchtower-page-header">
         <div className="watchtower-heading">
           <button className="watchtower-back" onClick={onClose} aria-label="返回工作区">
@@ -210,7 +210,7 @@ export function WatchtowerPanel({
           </button>
           <div>
             <p className="watchtower-eyebrow">SERVE SCHEDULER · ONE SHOT</p>
-            <h1>自动值班</h1>
+            <h1>定时任务</h1>
             <p className="watchtower-subtitle">
               单次延时执行 · 到点新开会话 · 跑完待验证，由你亲自验收
             </p>
@@ -238,7 +238,7 @@ export function WatchtowerPanel({
           </span>
           <button className="watchtower-primary" onClick={() => setCreateOpen(true)}>
             <Plus size={16} aria-hidden="true" />
-            新建值班
+            新建定时任务
           </button>
         </div>
       </header>
@@ -263,8 +263,8 @@ export function WatchtowerPanel({
         <section className="watchtower-verification" aria-label="待验证会话">
           <div className="watchtower-verification-icon"><CheckCircle2 size={17} aria-hidden="true" /></div>
           <div className="watchtower-verification-copy">
-            <strong>{snapshot!.pending_verification.length} 个值班会话等待你验收</strong>
-            <span>值班只负责执行，结果是否合格由你决定。</span>
+            <strong>{snapshot!.pending_verification.length} 个定时任务会话等待你验收</strong>
+            <span>定时任务只负责执行，结果是否合格由你决定。</span>
           </div>
           <div className="watchtower-verification-links">
             {snapshot!.pending_verification.map((item) => (
@@ -281,7 +281,7 @@ export function WatchtowerPanel({
       )}
 
       {loading && snapshot === null ? (
-        <div className="watchtower-empty"><LoaderCircle size={18} className="watchtower-spin" />正在读取值班规则…</div>
+        <div className="watchtower-empty"><LoaderCircle size={18} className="watchtower-spin" />正在读取定时任务规则…</div>
       ) : (
         <div className="watchtower-groups">
           <RuleGroup
@@ -549,7 +549,7 @@ function CreateWatchtowerForm({
       return;
     }
     if (turnsValue !== null && (!Number.isSafeInteger(turnsValue) || turnsValue < 1)) {
-      setError('turns 上限必须是正整数。');
+      setError('轮数上限必须是正整数。');
       return;
     }
     setSubmitting(true);
@@ -586,11 +586,11 @@ function CreateWatchtowerForm({
     <Dialog.Content className="watchtower-dialog" aria-labelledby="watchtower-create-title">
       <div className="watchtower-dialog-heading">
         <div>
-          <Dialog.Title id="watchtower-create-title">新建值班</Dialog.Title>
-          <Dialog.Description>安排一次未来触发的 agent 任务。</Dialog.Description>
+          <Dialog.Title id="watchtower-create-title">新建定时任务</Dialog.Title>
+          <Dialog.Description>安排一次未来自动执行的任务。</Dialog.Description>
         </div>
         <Dialog.Close asChild>
-          <button className="watchtower-dialog-close" aria-label="关闭新建值班">
+          <button className="watchtower-dialog-close" aria-label="关闭新建定时任务">
             <X size={17} />
           </button>
         </Dialog.Close>
@@ -659,11 +659,11 @@ function CreateWatchtowerForm({
           <legend>运行设置</legend>
           <div className="watchtower-form-grid">
             <label className="watchtower-field" htmlFor={turnsId}>
-              <span>turns 上限</span>
+              <span>轮数上限</span>
               <input id={turnsId} type="number" min={1} value={turns} onChange={(event) => setTurns(event.target.value)} placeholder="默认" />
             </label>
             <label className="watchtower-field" htmlFor={tokensId}>
-              <span>tokens 上限</span>
+              <span>字数上限</span>
               <select id={tokensId} value={tokens} onChange={(event) => setTokens(event.target.value)}>
                 <option value="">默认</option>
                 {TOKEN_TIERS.map((tier) => <option key={tier} value={tier}>{tier.toLocaleString()}</option>)}
@@ -710,15 +710,15 @@ function CreateWatchtowerForm({
         </fieldset>
 
         <section className="watchtower-consent-box" aria-labelledby="watchtower-consent-title">
-          <h3 id="watchtower-consent-title">值班使用自动权限</h3>
+          <h3 id="watchtower-consent-title">定时任务使用自动权限</h3>
           <ul>
-            <li>只有 run 和 session 都没有绝对截止时间，且运行时确认同 run 有足够恢复预算时，值班任务才可等待提问工具；时长预算会创建持续计时的截止时间，等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，run 收到“用户可能不在”的提示后继续；约束冲突超时后不作任何选择或授权，run 收到未解决提示并停止受影响工作，等待你处理。</li>
+            <li>只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够时间继续时，定时任务才可以等待你的回答；如果设了时长预算，到点后会创建截止时间，等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，任务收到“你可能不在”的提示后继续；要求冲突超时后不会替你选择或授权，任务收到未解决提示并停止受影响的工作，等你处理。</li>
             <li>删除文件、发外部请求、git push 等危险操作会自动放行；此期间没有人逐次复核。</li>
             <li>仍使用你选定的 Sandbox。运行结果只进入「待验证」，不会自动验收或标记为通过。</li>
           </ul>
           <label className="watchtower-consent-check">
             <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-            <span>我已知晓并同意以上内容，值班触发后的操作后果由我承担。</span>
+            <span>我已知晓并同意以上内容，定时任务触发后的操作后果由我承担。</span>
           </label>
         </section>
 

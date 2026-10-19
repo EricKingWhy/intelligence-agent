@@ -95,7 +95,7 @@ export interface RunDimensionSpec {
 export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   {
     dimension: 'run.max_agent_turns_total',
-    label: 'run 累计轮次到顶（run.max_agent_turns_total）',
+    label: '这次任务累计轮数到顶',
     consumedKey: 'agent_turns',
     ceilingKey: 'max_agent_turns_total',
     resumeField: 'max_agent_turns_total',
@@ -105,7 +105,7 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
   {
     dimension: 'run.max_model_requests',
-    label: 'run 累计模型请求到顶（run.max_model_requests）',
+    label: '这次任务累计模型请求到顶（max_model_requests）',
     consumedKey: 'model_requests',
     ceilingKey: 'max_model_requests',
     resumeField: 'max_model_requests',
@@ -115,7 +115,7 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
   {
     dimension: 'run.max_total_tokens',
-    label: 'run 累计 token 到顶（run.max_total_tokens）',
+    label: '这次任务累计字数到顶',
     consumedKey: 'total_tokens',
     ceilingKey: 'max_total_tokens',
     resumeField: 'max_total_tokens',
@@ -125,7 +125,7 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
   {
     dimension: 'run.max_cost_usd',
-    label: 'run 累计成本到顶（run.max_cost_usd）',
+    label: '这次任务累计成本到顶（max_cost_usd）',
     consumedKey: 'cost_usd',
     ceilingKey: 'max_cost_usd',
     resumeField: 'max_cost_usd',
@@ -297,7 +297,7 @@ function toolQuotaFact(name: string, paused: RunPausedInfo): ToolQuotaFact {
   return {
     name,
     dimension,
-    label: `工具 ${name} 的本 run 调用配额到顶（${dimension}）`,
+    label: `工具 ${name} 的本次任务调用配额到顶（${dimension}）`,
     calls,
     attempts,
     ceiling,
@@ -472,10 +472,10 @@ export function dimensionLabel(dimension: string): string {
   const spec = RUN_DIMENSIONS.find((row) => row.dimension === dimension);
   if (spec) return spec.label;
   if (dimension === DEADLINE_DIMENSION) {
-    return '绝对截止时刻已到（run.deadline_at）';
+    return '截止时间已到（deadline_at）';
   }
   if (dimension === 'local.max_agent_turns') {
-    return '单次执行保险丝到顶（local.max_agent_turns）';
+    return '单次执行轮数到顶';
   }
   return dimension || '预算维度未声明';
 }
@@ -490,7 +490,7 @@ export function pauseReasonLabel(paused: RunPausedInfo): string {
     return '绝对截止时刻到点（deadline：不再接纳新的 Provider 请求 / 工具调用 / 子 Agent）';
   }
   if (paused.reason === PAUSE_REASON_BUDGET_EXHAUSTED) {
-    return '预算到顶（budget_exhausted：某一维的绝对 ceiling 用尽）';
+    return '预算到顶（某一项上限用完了）';
   }
   if (paused.reason === PAUSE_REASON_STUCK) {
     return '疑似卡住（stuck：需要变更依据才能恢复，属 #317）';
@@ -555,7 +555,7 @@ export type ResumeTarget =
 export function resumeTargetLabel(target: ResumeTarget): string {
   if (target.kind === 'run') return target.spec.resumeField;
   if (target.kind === 'tool') return `tool_call_limits.${target.quota.name}`;
-  if (target.kind === 'context') return '上下文窗口（max_context_tokens）';
+  if (target.kind === 'context') return '记忆容量';
   return DEADLINE_RESUME_FIELD;
 }
 
@@ -568,7 +568,7 @@ export function resumeTargetCliFlag(target: ResumeTarget): string {
   if (target.kind === 'run') return `${target.spec.resumeFlag} N`;
   if (target.kind === 'tool') return `--run-tool-limit ${target.quota.name}=N`;
   if (target.kind === 'context') {
-    return '/compact（或调大 max_context_tokens）后恢复，无需 ceiling';
+    return '/compact（或调大记忆容量）后继续，不需要再设上限';
   }
   return `${DEADLINE_RESUME_FLAG} ${DEADLINE_EXAMPLE}`;
 }
@@ -651,9 +651,9 @@ export function resumeInputHint(facts: PauseFacts): string {
     // 不是抬高某个 run ceiling（后端对该触发维窄豁免"必须点名 ceiling"）。
     // 恢复入口按引导走（先 /compact 再恢复），数字输入对它是错配的旋钮。
     return (
-      '上下文超限不是 run 预算维：抬任何 ceiling 都改变不了「投影放不进窗口」。' +
-      '先手动执行 /compact 压缩会话上下文（或调大 max_context_tokens 后新开会话），' +
-      '再以同一 run_id 恢复——恢复本身无需 ceiling'
+      '记忆容量超限不属于预算：调高任何上限都改变不了「内容放不进记忆容量」。' +
+      '先手动执行 /compact 精简早期对话（或调大记忆容量后新开会话），' +
+      '再继续这次任务——继续本身不需要再设上限'
     );
   }
   if (target.kind === 'deadline') {
@@ -662,12 +662,12 @@ export function resumeInputHint(facts: PauseFacts): string {
     // 不是"把同一个时刻调大"）。
     return `换一个**未来**的绝对截止时刻（CLI: ${resumeTargetCliFlag(target)}，RFC 3339 UTC）；${
       facts.deadline === null ? '本次暂停快照里没有时刻' : `本次 ${facts.deadline} 已到点`
-    }——沿用会被拒（409）。已消耗不重置，恢复沿用同一 run_id`;
+    }——沿用会被拒（409）。已消耗不重置，恢复沿用同一个任务编号`;
   }
   if (target.kind === 'tool') {
     return `抬的是 ${resumeTargetLabel(target)}（CLI: ${resumeTargetCliFlag(target)}，至少 ${String(
       minToolQuotaValue(target.quota),
-    )}）；已消耗不重置，恢复沿用同一 run_id`;
+    )}）；已消耗不重置，恢复沿用同一个任务编号`;
   }
   const spec = target.spec;
   const fact =
@@ -676,7 +676,7 @@ export function resumeInputHint(facts: PauseFacts): string {
   const requirement = spec.decimal
     ? `须严格大于已消耗 ${fact?.consumedText ?? 'unavailable'}（默认给到 ${String(minimum)}）`
     : `至少 ${String(minimum)}`;
-  return `抬的是 ${spec.resumeField}（CLI: ${resumeTargetCliFlag(target)}，${requirement}）；已消耗不重置，恢复沿用同一 run_id`;
+  return `抬的是 ${spec.resumeField}（CLI: ${resumeTargetCliFlag(target)}，${requirement}）；已消耗不重置，恢复沿用同一个任务编号`;
 }
 
 // ── #537：TopBar「已用 / 上限」徽标 ──
@@ -691,9 +691,9 @@ export const BUDGET_WARNING_RATIO_DEN = 5;
 
 /** 徽标上的计量单位（display-only；与暂停面板的长标签不同，徽标只有一格宽）。 */
 export const BUDGET_BADGE_UNITS: Record<RunScalarConsumedKey, string> = {
-  agent_turns: 'turns',
-  model_requests: 'req',
-  total_tokens: 'tok',
+  agent_turns: '轮',
+  model_requests: '次',
+  total_tokens: '字',
   cost_usd: '$',
 };
 
@@ -805,18 +805,18 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
  *  大于已接纳的调用数）。 */
 function toolDraftError(quota: ToolQuotaFact, draft: string): string | null {
   const text = draft.trim();
-  if (!text) return `请填绝对 ceiling（${quota.label}）`;
+  if (!text) return `请填绝对上限（${quota.label}）`;
   // per-tool 配额的 wire 形状是 `dict[str, int]`（`parse_tool_call_limits` 拒 bool /
   // 非整数 / <1）⇒ 形状先按"正整数"判，再判"够不够"（顺序同 run 维）。
-  if (!/^\d+$/.test(text)) return 'ceiling 必须是正整数';
+  if (!/^\d+$/.test(text)) return '上限必须是正整数';
   const value = Number(text);
-  if (!Number.isSafeInteger(value) || value < 1) return 'ceiling 必须是正整数';
+  if (!Number.isSafeInteger(value) || value < 1) return '上限必须是正整数';
   const minimum = minToolQuotaValue(quota);
   if (minimum === null) {
-    return '已消耗读数不可得：这一维配了 ceiling 而账目未知时后端会拒绝恢复（409）';
+    return '用量读数拿不到：这一项设了上限而账目未知时，后端会拒绝继续（409）';
   }
   if (value < minimum) {
-    return `ceiling 必须大于已消耗 ${quota.callsText} 次调用（至少 ${minimum}），否则恢复后立刻会再次暂停`;
+    return `上限必须大于已消耗 ${quota.callsText} 次调用（至少 ${minimum}），否则继续后立刻会再次暂停`;
   }
   return null;
 }
@@ -893,15 +893,15 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
   const spec = target.spec;
   const fact = facts.dimensions.find((row) => row.spec.dimension === spec.dimension) ?? null;
   const text = draft.trim();
-  if (!text) return `请填绝对 ceiling（${spec.label}）`;
+  if (!text) return `请填绝对上限（${spec.label}）`;
   if (spec.decimal) {
-    if (!/^\d+(\.\d+)?$/.test(text)) return 'ceiling 必须是非负十进制数';
+    if (!/^\d+(\.\d+)?$/.test(text)) return '上限必须是非负小数';
   } else {
-    if (!/^\d+$/.test(text)) return 'ceiling 必须是正整数';
+    if (!/^\d+$/.test(text)) return '上限必须是正整数';
     const value = Number(text);
     // 先把"形状"判完（0 / 溢出都不是正整数），再判"够不够"——否则 0 会以
     // "必须大于已消耗"的面目出现，掩盖了它根本不是正整数这件事。
-    if (!Number.isSafeInteger(value) || value < 1) return 'ceiling 必须是正整数';
+    if (!Number.isSafeInteger(value) || value < 1) return '上限必须是正整数';
   }
   const minimum = fact === null ? null : minResumeValue(spec, fact);
   // `fact.consumed` 是**可空属性**（行在、读数为未知）：它与"行不在"是同一件事的两种形状，
@@ -909,7 +909,7 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
   if (minimum === null || fact === null || fact.consumed === null) {
     // 账目未知而该维配了 ceiling：后端必然 409（无法证明在预算内）。前端不编一个
     // 数字，如实说"预校验不了"。
-    return '已消耗读数不可得：这一维配了 ceiling 而账目未知时后端会拒绝恢复（409）';
+    return '用量读数拿不到：这一项设了上限而账目未知时，后端会拒绝继续（409）';
   }
   // 阈值按维度取：可数维度比"最小合法值"（consumed + 预留 + 1），计量维度比"已消耗"
   // 且要求**严格大于**（后端判据 `consumed < ceiling`；拿 consumed + 1 当阈值会把
@@ -920,10 +920,10 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
     comparison === null ? false : spec.decimal ? comparison > 0 : comparison >= 0;
   if (!passes) {
     if (spec.decimal) {
-      return `ceiling 必须严格大于已消耗 ${fact.consumedText}，否则恢复后立刻会再次暂停`;
+      return `上限必须严格大于已消耗 ${fact.consumedText}，否则恢复后立刻会再次暂停`;
     }
     const reserve = spec.reserved > 0 ? ` + ${spec.reserved}` : '';
-    return `ceiling 必须大于已消耗 ${fact.consumedText}${reserve}（至少 ${String(minimum)}），否则恢复后立刻会再次暂停`;
+    return `上限必须大于已消耗 ${fact.consumedText}${reserve}（至少 ${String(minimum)}），否则恢复后立刻会再次暂停`;
   }
   return null;
 }

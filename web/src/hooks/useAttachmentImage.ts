@@ -40,7 +40,7 @@ export function useAttachmentImage(
 
   useEffect(() => {
     if (sessionId === null) {
-      setState({ src: null, loading: false, error: '缺少会话上下文' });
+      setState({ src: null, loading: false, error: '缺少会话信息' });
       return;
     }
     // `attempt` 参与 URL：直连路上换 key 才能让浏览器真的重发（同 URL 会复用失败结果）。

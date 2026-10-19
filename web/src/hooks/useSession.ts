@@ -301,7 +301,7 @@ export type FollowUpOutcome =
  *  也没法手写 POST。所以用户层换成这一句，把「发生了什么 + 下一步点哪里」说清楚；
  *  协议原文仍留在裁决面板的 `message` 里（折叠/次要位置），不丢事实。 */
 export const RECOVERY_CONFLICT_ERROR_TEXT =
-  '会话待人工裁决：有高风险操作的结果未知（不知道它到底生没生效），请先在下方裁决面板逐条处理，' +
+  '会话需要你来决定：有高风险操作的结果未知（不知道它到底有没有生效），请先在下方待处理列表里逐条处理，' +
   '完成后再重发这条消息';
 
 /** 把一条已落定的 `/messages` 响应映射成「接下来做什么」。**纯函数**，窗内窗外共用
@@ -347,7 +347,7 @@ export function decideFollowUpOutcome(input: {
         pendingDecisions,
       };
     }
-    return { kind: 'fail', text: detail || '存在需要人工裁决的高风险操作' };
+    return { kind: 'fail', text: detail || '存在需要你决定的高风险操作' };
   }
   if (status === 422) return { kind: 'fail', text: CONTINUE_PARAMS_ERROR_TEXT };
   if (status === 404) {
@@ -2233,7 +2233,7 @@ export function useSession() {
             if (i === 2) {
               const detail = await readErrorDetail(res);
               throw new Error(
-                detail || '投递被拒绝（409）：在途 run 未收口，或存在需人工裁决的遗留操作',
+                detail || '发送被拒绝：这次任务还没结束，或还有需要你决定的遗留操作',
               );
             }
             await new Promise((r) => setTimeout(r, 1000));

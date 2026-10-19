@@ -58,11 +58,11 @@ export function ConstraintInheritance({ events }: { events: AgentEvent[] }) {
   return (
     <div className="detail-section ci-section" data-omit={omitConstraints || undefined}>
       <div className="detail-section-title">
-        <ShieldCheck size={14} /> 约束继承
+        <ShieldCheck size={14} /> 要求沿用
       </div>
       {omitConstraints && (
         <div className="ci-clean-msg" role="note">
-          干净启动已开启 —— 子 agent 不继承任何约束，只按任务描述工作。
+          干净启动已开启——子任务不沿用任何要求，只按任务描述工作。
         </div>
       )}
       <div className={`ci-rows${omitConstraints ? ' ci-dim' : ''}`}>
@@ -70,7 +70,7 @@ export function ConstraintInheritance({ events }: { events: AgentEvent[] }) {
           INHERITED <span className="ci-group-tag">项目 + 全局 active，默认注入</span>
         </div>
         {inherited.length === 0 ? (
-          <div className="ci-empty">本次委派没有注入任何约束。</div>
+          <div className="ci-empty">本次委派没有带上任何要求。</div>
         ) : (
           inherited.map((row) => <Row key={row.factId} row={row} injected />)
         )}

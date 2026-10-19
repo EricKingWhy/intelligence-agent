@@ -187,14 +187,14 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
     const body = document.body.textContent ?? '';
 
     // 该有的：票面那一句话 + 两个按钮。
-    expect(body).toContain('上下文已经满了');
+    expect(body).toContain('记忆容量已经满了');
     expect(body).toContain('前面没有可压缩的内容，换个窗口更大的模型继续吧。');
     expect(body).toContain('换模型');
     expect(body).toContain('结束');
 
     // 不该有的：技术屏本体与它的内部术语。
-    expect(text).not.toContain('已在预算到顶处暂停');
-    expect(text).not.toContain('恢复同一 run');
+    expect(text).not.toContain('预算已用完，任务已暂停');
+    expect(text).not.toContain('继续这次任务');
     expect(text).not.toContain('max_context_tokens');
     expect(text).not.toContain('预算版本');
     expect(el.querySelector('#pause-resume-ceiling')).toBeNull();
@@ -205,11 +205,11 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
     const text = el.textContent ?? '';
     const body = document.body.textContent ?? '';
 
-    expect(text).toContain('已在预算到顶处暂停');
-    expect(text).toContain('恢复同一 run');
+    expect(text).toContain('预算已用完，任务已暂停');
+    expect(text).toContain('继续这次任务');
     expect(el.querySelector('#pause-resume-ceiling')).not.toBeNull();
     // 反向：这句话弹窗不该在预算暂停时出现。
-    expect(body).not.toContain('上下文已经满了');
+    expect(body).not.toContain('记忆容量已经满了');
   });
 
   it('「换模型」真的打开模型选择器（不是死按钮）', async () => {
@@ -232,7 +232,7 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
 
   it('「结束」收起这一屏（不假装能终止 run——后端没有那个动作）', async () => {
     await mountWith(contextPaused());
-    expect(document.body.textContent ?? '').toContain('上下文已经满了');
+    expect(document.body.textContent ?? '').toContain('记忆容量已经满了');
 
     const endRun = Array.from(document.body.querySelectorAll('button')).find((b) =>
       (b.textContent ?? '').includes('结束'),
@@ -242,7 +242,7 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
       endRun!.click();
     });
 
-    expect(document.body.textContent ?? '').not.toContain('上下文已经满了');
+    expect(document.body.textContent ?? '').not.toContain('记忆容量已经满了');
     // 收起 ≠ 会话被清空：run_paused 事实还在（面板消失只是 UI 意图）。
     expect(H.conv?.run_paused?.run_id).toBe('run-ctx');
   });
