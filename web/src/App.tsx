@@ -24,7 +24,7 @@ import { SessionList } from './components/SessionList';
 import { SkipLinks } from './components/SkipLinks';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
-import { Composer, type SubmitResult } from './components/Composer';
+import { Composer, lockReasonOf, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -1624,15 +1624,21 @@ export default function App() {
   }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
   // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
-  // projection 状态，无第二真相源）。提取成变量：composer 禁用时「跳到输入框」也
-  // 必须隐藏——disabled 表单控件不可聚焦，链接会变成死路（#1372 r3 P3）。
+  // projection 状态，无第二真相源）。`lockReasonOf` 与 Composer 共用同一优先级，
+  // composer 禁用时「跳到输入框」也必须隐藏——disabled 表单控件不可聚焦，
+  // 链接会变成死路（#1372 r3 P3）。
   const approvalPending = awaitingApproval(
     (conversation?.pending_approvals ?? []).filter(
       (a) => !goneApprovalIds.has(a.approval_id),
     ),
   );
   const composerLocked =
-    constraintInputPending || askUserInputPending || planApprovalInputPending || approvalPending;
+    lockReasonOf({
+      constraintInputPending,
+      askUserInputPending,
+      planApprovalInputPending,
+      approvalPending,
+    }) !== null;
 
   return (
     <div className="app-frame">

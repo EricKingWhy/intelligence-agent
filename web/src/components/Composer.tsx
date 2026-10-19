@@ -77,7 +77,22 @@ const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
 
 /** #1283 P1：composer 被锁的**真实原因**——文案全部由它映射，不再各写一份三元链。
  *  优先级与 #1223 的既有行为逐字一致：约束澄清 > ask_user > 审批。 */
-type LockReason = 'constraint' | 'ask_user' | 'plan_approval' | 'approval';
+export type LockReason = 'constraint' | 'ask_user' | 'plan_approval' | 'approval';
+
+/** 唯一锁定判据：Composer 与 App（跳过链接）共用，避免第五个原因只改一侧。
+ *  优先级与文案映射（`LOCK_COPY`）保持一致：constraint > ask_user > plan_approval > approval。 */
+export function lockReasonOf(input: {
+  constraintInputPending: boolean;
+  askUserInputPending: boolean;
+  planApprovalInputPending: boolean;
+  approvalPending: boolean;
+}): LockReason | null {
+  if (input.constraintInputPending) return 'constraint';
+  if (input.askUserInputPending) return 'ask_user';
+  if (input.planApprovalInputPending) return 'plan_approval';
+  if (input.approvalPending) return 'approval';
+  return null;
+}
 
 interface LockCopy {
   hint: string;
@@ -452,15 +467,12 @@ export const Composer = memo(function Composer({
   // #1283：文案按**实际 lock 原因**一次算清（constraint > ask_user > approval，与
   // 既有优先级逐字一致）；`lockHint` / `lockedPlaceholder` / 权限 pill 的禁用原因 /
   // 队列条 title 全部从它派生，避免四份三元链各写一遍优先级、改文案时漂移。
-  const lockReason: LockReason | null = constraintInputPending
-    ? 'constraint'
-    : askUserInputPending
-      ? 'ask_user'
-      : planApprovalInputPending
-        ? 'plan_approval'
-        : approvalPending
-          ? 'approval'
-          : null;
+  const lockReason = lockReasonOf({
+    constraintInputPending,
+    askUserInputPending,
+    planApprovalInputPending,
+    approvalPending,
+  });
   const locked = lockReason !== null;
   // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = locked && !streaming;

@@ -216,7 +216,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
             <label><input className="ui-switch" type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
           </>
         )}
-        {settingsError && <span className="memory-v2-error" role="alert">{settingsError}<button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}
+        {settingsError && <span className="memory-v2-error"><span role="alert">{settingsError}</span><button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}
       </div>
 
       <form className="memory-v2-filters" onSubmit={(event) => { event.preventDefault(); applyFilters(); }}>
@@ -251,7 +251,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
         <button type="button" className="memory-v2-quiet" onClick={clearFilters}>清除筛选</button>
         <button type="button" className="memory-v2-quiet" onClick={() => void memories.retry()} aria-label="刷新记忆"><RefreshCw size={14} /> 刷新</button>
       </form>
-      {projectsError && <div className="memory-v2-error" role="alert">{projectsError}<button className="memory-v2-quiet" disabled={projectsLoading} onClick={() => void retryProjects()}>重试</button></div>}
+      {projectsError && <div className="memory-v2-error"><span role="alert">{projectsError}</span><button className="memory-v2-quiet" disabled={projectsLoading} onClick={() => void retryProjects()}>重试</button></div>}
       {filters.scope === 'project' && !filters.project_id && <p className="memory-v2-hint">选择项目后查看该项目的记忆。</p>}
 
       <section className="memory-v2-bulk" aria-label="批量删除">
@@ -450,7 +450,7 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         {record.status !== 'deleted' && <button className="memory-v2-quiet" aria-label="删除这条记忆" disabled={pending} onClick={() => { setDeleteError(null); setConfirmDelete((value) => !value); }}><Trash2 size={13} /> 删除</button>}
       </div>
       {historyOpen && <div className="memory-v2-history" aria-label="版本历史">
-        {historyError && <span className="memory-v2-error" role="alert">{historyError}<button onClick={() => void loadHistory()}>重试</button></span>}
+        {historyError && <span className="memory-v2-error"><span role="alert">{historyError}</span><button onClick={() => void loadHistory()}>重试</button></span>}
         {versions === null && !historyError && <span role="status">正在读取版本…</span>}
         {versions?.map((version) => <div className="memory-v2-version" key={version.id}>
           <strong>{version.is_tombstone ? STATUS_LABELS.deleted : `v${version.version ?? '—'} · ${version.status ? STATUS_LABELS[version.status] : '旧版'}`}</strong>

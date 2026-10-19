@@ -175,6 +175,40 @@ describe('SessionReplayDialog', () => {
     expect(document.querySelector('.replay-progress')).toBeNull();
   });
 
+  it('打开状态下换 target：表单重挂载回确认态（openBatch key 的判别性护栏）', async () => {
+    vi.mocked(replaySession).mockResolvedValue({ session_id: 's1', count: 4, steps: STEPS });
+    function Harness(): ReactElement {
+      const [target, setTarget] = useState<{ id: string; title: string } | null>({
+        id: 's1',
+        title: '我的会话',
+      });
+      return (
+        <>
+          <button type="button" onClick={() => setTarget({ id: 's2', title: '另一个会话' })}>
+            换会话
+          </button>
+          <SessionReplayDialog
+            target={target}
+            onOpenChange={(open) => {
+              if (!open) setTarget(null);
+            }}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    clickButton('开始重放');
+    await waitFor(() => (document.body.textContent ?? '').includes('回放完成'));
+    expect(document.body.textContent).toContain('已重放 4/4');
+
+    clickButton('换会话');
+    await waitFor(() => buttons().some((b) => b.textContent?.trim() === '开始重放'));
+    // 没有 key 时同一个表单实例只会换 target 文本，phase 仍停在 done。
+    expect(document.body.textContent).not.toContain('已重放');
+    expect(document.querySelector('.replay-progress')).toBeNull();
+    expect(document.body.textContent).toContain('另一个会话');
+  });
+
   it('关闭时在途请求返回：结果被丢弃（不写进下一次打开）', async () => {
     let resolve!: (value: { session_id: string; count: number; steps: typeof STEPS }) => void;
     vi.mocked(replaySession).mockReturnValue(

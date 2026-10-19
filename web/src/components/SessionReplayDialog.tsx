@@ -59,6 +59,9 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
     setLastTarget(target);
     setOpenBatch((n) => n + 1);
   }
+  /** 当前是否处于打开态（0ms 卸载回调可能晚于一次快速重开）。 */
+  const openRef = useRef(target !== null);
+  openRef.current = target !== null;
   return (
     <Dialog.Root
       open={target !== null}
@@ -72,6 +75,9 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
           <SessionReplayForm
             key={openBatch}
             target={lastTarget}
+            /* 0ms 卸载回调可能晚于一次快速重开：只有对话框此刻仍关闭才归还焦点，
+               否则会把焦点从新实例的初焦位置拽到旧行内按钮（P4）。 */
+            canRestoreFocus={() => !openRef.current}
             /* 只释放 DOM 引用：Content 若在退场时卸载，FocusScope 的卸载清理会
                再把焦点抢回 body（AC2 实测红）。target 本身保留到下次打开。
                只在仍是同一个 target 时清：0ms 卸载回调可能晚于一次快速重开，
@@ -93,10 +99,13 @@ type Phase = 'confirm' | 'running' | 'done';
 function SessionReplayForm({
   target,
   onClosed,
+  canRestoreFocus,
 }: {
   target: ReplaySessionTarget;
   /** 退场完成、焦点已归还后清掉保留的 target（不再持有一个已卸载的 DOM 引用）。 */
   onClosed: () => void;
+  /** 卸载回调触发时对话框是否仍处于关闭态（快速重开时为 false）。 */
+  canRestoreFocus: () => boolean;
 }) {
   const [phase, setPhase] = useState<Phase>('confirm');
   const [steps, setSteps] = useState<SessionReplayStep[]>([]);
@@ -157,7 +166,7 @@ function SessionReplayForm({
       onCloseAutoFocus={(event) => {
         // Esc / 关闭后回到打开它的那个 ⋯ 按钮。目标已不在文档里就交回 Radix 默认。
         const restore = target.restoreFocus;
-        if (restore?.isConnected) {
+        if (restore?.isConnected && canRestoreFocus()) {
           event.preventDefault();
           restore.focus();
         }

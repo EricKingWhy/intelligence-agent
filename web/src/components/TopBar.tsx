@@ -3,8 +3,9 @@
  * Left: product identity. Center: current session title + Run Pulse
  * (signature #1 — icon + color + text, never color-only). Right:
  * trace density selector (four tiers, localStorage-persisted — frozen
- * decision), theme toggle, and the「更多工具」menu (API token, context,
- * approval rules, memory, watchtower, Inspector toggle).
+ * decision), theme toggle, and the「更多工具」menu (API token, context
+ * usage, context window, approval rules, watchtower, Inspector toggle).
+ * Memory / kanban / recovery stay as always-visible buttons.
  */
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -241,10 +242,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
           ) : (
-            <span
-              className="appbar-session appbar-session-static"
-              title={titlesById?.[conversation.session_id] || undefined}
-            >
+            <span className="appbar-session appbar-session-static">
               {sessionLabel}
             </span>
           )

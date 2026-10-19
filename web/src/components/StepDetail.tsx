@@ -732,7 +732,7 @@ export function ChatTab({
         {runStart && (
           <div className="detail-row">
             <span className="detail-key">开始</span>
-            <span className="detail-val">{formatDateTime(runStart)}</span>
+            <span className="detail-val">{formatDateTime(runStart) ?? runStart}</span>
           </div>
         )}
         <div className="detail-row">
