@@ -66,7 +66,7 @@ const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'chat', label: 'Overview' },
   { id: 'changes', label: 'Changes' },
   { id: 'terminal', label: 'Terminal' },
-  { id: 'artifacts', label: 'Artifacts' },
+  { id: 'artifacts', label: '产出文件' },
   { id: 'constraints', label: 'Constraints' },
 ];
 

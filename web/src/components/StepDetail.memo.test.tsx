@@ -198,7 +198,7 @@ describe('F2 — AC1 `memo` 包裹', () => {
     expect(badge('Timeline')).toBe('5');
     expect(badge('Terminal')).toBe('1');
     expect(badge('Changes')).toBe('0');
-    expect(badge('Artifacts')).toBe('0');
+    expect(badge('产出文件')).toBe('0');
   });
 });
 
