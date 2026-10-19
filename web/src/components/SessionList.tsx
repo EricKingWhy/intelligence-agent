@@ -158,24 +158,6 @@ export const SessionList = memo(function SessionList({
    *  仍然只走 `onSelect`，栅格轨道与 `.app-workspace` 的起点一个像素都不动。
    *  桌面档这条状态无视觉作用（相关规则全在 `@media (max-width: 820px)` 里）。 */
   const [drawerOpen, setDrawerOpen] = useState(false);
-  /** 选中会话 = 关抽屉 + 原有选择。窄屏下抽屉是覆盖层，不关就会挡住刚选中的内容。 */
-  const selectSession = (id: string) => {
-    setDrawerOpen(false);
-    onSelect(id);
-  };
-  /** Escape 关抽屉：覆盖层必须有不依赖鼠标的退出路径（键盘用户不能只剩"再点一次按钮"）。
-   *  "点抽屉外收起"由遮罩节点承担（`.rail-scrim`，只在展开时渲染）——**不用 document
-   *  pointerdown 判"目标不在 rail 内"**：那样关闭与"点到下面的界面"是同一次点，
-   *  抽屉一层的遮罩会变成直接操作正文（例如点到发送键）。遮罩把这次点吃掉，
-   *  关闭就只是关闭。 */
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDrawerOpen(false);
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [drawerOpen]);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
   /** 待硬删的会话（null = 确认面关闭）——与项目软删分开一个状态：两者的后果与
@@ -211,6 +193,46 @@ export const SessionList = memo(function SessionList({
   const [dropTarget, setDropTarget] = useState<{ projectId: string; before: string | null } | null>(
     null,
   );
+
+  // ── #1368：窄屏抽屉的三个出口（选中 / Escape / 断点穿越）──
+  /** 选中会话 = 关抽屉 + 原有选择。窄屏下抽屉是覆盖层，不关就会挡住刚选中的内容。 */
+  const selectSession = (id: string) => {
+    setDrawerOpen(false);
+    onSelect(id);
+  };
+  /** Escape 关抽屉：覆盖层必须有不依赖鼠标的退出路径（键盘用户不能只剩"再点一次按钮"）。
+   *  "点抽屉外收起"由遮罩节点承担（`.rail-scrim`，只在展开时渲染）——**不用 document
+   *  pointerdown 判"目标不在 rail 内"**：那样关闭与"点到下面的界面"是同一次点，
+   *  抽屉一层的遮罩会变成直接操作正文（例如点到发送键）。遮罩把这次点吃掉，
+   *  关闭就只是关闭。
+   *
+   *  ⚠ **必须认领这个 Esc**（`preventDefault`），与 `PlanList.tsx` 的关闭路径同形：
+   *  App 的全局 Esc（中断在途 run）以 `defaultPrevented` 作为"已有更近的 handler
+   *  认领了它"的统一信号——不打断这个标记，一次关抽屉会**同时**取消正在跑的 run。 */
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setDrawerOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [drawerOpen]);
+  /** 断点穿越复位：抽屉是窄档的临时覆盖层，离开窄档时它已经没有对应物——
+   *  不复位的话「390 打开 → 拉宽到桌面 → 再缩回 390」会让抽屉**自己又开着**
+   *  并接管点击（宽档时类还在，视觉上无副作用，正是这种"看不见的残留"最难发现）。
+   *  用 `matchMedia` 而不是 `resize`：判据与 CSS 的 `@media (max-width: 820px)`
+   *  是同一个条件，不存在两份断点漂移。 */
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const narrow = window.matchMedia('(max-width: 820px)');
+    const onBreakpoint = () => {
+      if (!narrow.matches) setDrawerOpen(false);
+    };
+    narrow.addEventListener('change', onBreakpoint);
+    return () => narrow.removeEventListener('change', onBreakpoint);
+  }, [drawerOpen]);
 
   /** 选中会话所在的项目永远保持展开：折叠一个"里面有当前会话"的项目等于把用户
    *  正在看的行藏起来——界面不该出现这种自相矛盾的状态。 */
@@ -303,7 +325,10 @@ export const SessionList = memo(function SessionList({
       {/* #1368：抽屉的点击遮罩。只在展开时存在，`position: fixed; inset: 0; z-index: -1`
           由 CSS 给：它铺满视口、命中区吃掉"点抽屉外"这一下（关闭与"点到下面的正文"
           不再是同一次点击），但画在轨自己的背景之下 —— 抽屉表面不会被它压暗
-          （视觉遮罩仍是轨本身那条大扩散 box-shadow）。 */}
+          （视觉遮罩仍是轨本身那条大扩散 box-shadow）。
+          遮罩**只吃指针、不是键盘模态**（无 `inert` / 焦点陷阱，Tab 仍可走到正文）：
+          这是票面选定的「轻量 disclosure」语义——抽屉是窄屏的列表展开，不是必须
+          先答完才能继续的对话框（那类才是 `.palette-overlay` 的模态）。 */}
       {drawerOpen ? (
         <div className="rail-scrim" aria-hidden="true" onPointerDown={() => setDrawerOpen(false)} />
       ) : null}

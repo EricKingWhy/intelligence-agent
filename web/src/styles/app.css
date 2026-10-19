@@ -238,6 +238,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: var(--space-sm);
 }
+/* #1368：左组必须能**收缩**，否则标题的 `nowrap` 会把右簇顶出顶栏。
+   `min-width:0` 关掉 flex item 的 auto 最小尺寸（= 内容的 min-content），
+   再让标题自己用省略号收口——「宁可省略也不竖排」这句注释在这里才真的成立。 */
+.appbar-left {
+  min-width: 0;
+}
 /* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon */
 .appbar-logo {
   width: 28px;
@@ -255,8 +261,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-base);
   letter-spacing: -0.01em;
   /* #1368：产品名**永不折行**——390 实测它被挤成三行、把顶栏撑到 67px。
-     窄档直接隐藏（见 `@media (max-width: 560px)`），中间档位宁可省略也不竖排。 */
+     窄档直接隐藏（见 `@media (max-width: 560px)`），中间档位宁可省略也不竖排：
+     561–715 实测右簇 484px 恒宽（无响应式规则），标题整串 min-content 163px 不可
+     收缩就会把 4 个图标推出 appbar（`.app-frame{overflow:hidden}` 直接裁掉），
+     所以 nowrap 必须配 `overflow:hidden` + 省略号 + `.appbar-left{min-width:0}`。 */
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .appbar-center {
   display: flex;
@@ -906,6 +917,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* #1368：图标 + 文字在桌面 240px 轨里会被 flex 收缩到 44px，四个汉字于是折成
+     两行（实测 83×38，改前是 68×28）。与 `.memory-expand` 同口径：文字不折行，
+     宽了就让整行承担，不把"新建项目"拆开。 */
+  white-space: nowrap;
   min-height: 28px;
   padding: 3px 10px;
   border: none;
@@ -923,6 +938,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap; /* #1368：同 `.rail-empty-btn-primary`——「新会话」不折行。 */
   min-height: 28px;
   padding: 3px 10px;
   border: 1px solid var(--border-subtle);
@@ -1852,8 +1868,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  gap: var(--space-xs);
+  /* 桌面档保持改前的 8px（`--space-sm`）：这两个按钮改前是 `.memory-row-head` 的
+     直接子元素、共享那个 gap，改成操作列时不能顺手把可见间距改小。窄屏竖排另用
+     更紧的 4px（见 `@media (max-width: 820px)`）。 */
+  gap: var(--space-sm);
   flex-shrink: 0;
+  /* = 最长按钮「详细信息」的实测下界：icon 14 + gap 4 + 4 个汉字 ≈ 56 + 左右内边距
+     12 = 86，取 88。低于它按钮会被压回竖排（390 实测改前 16×72 = 5 行）。 */
   min-width: 88px;
 }
 .memory-content {
@@ -4333,13 +4354,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   pointer-events: auto;
 }
 /* 动作簇的实测宽度（右缩进 8 + 附图入口 32 + 间距 4 + 提示 64 + 间距 4 + 发送 32
-   + 间距 4 + 停止 32 = 180 的保守下界，取 160：#825 之前本常量只算了「提示 + 一个
-   按钮」，而流式时簇里一直并存发送与停止两个按钮 ⇒ 取值只保证"不比改动前更差、且把
-   本票新增的 36px（32 按钮 + 4 间距）算进去了"；真正的重算是布局票，不在本票范围。
-   **必须定义在 dock 上**：消费方 `.composer-controls` 与 `.composer-actions` 是兄弟，
-   定义在簇里的话档位行读不到，`padding-right` 会在计算值阶段落回 0——本票踩过。 */
+   + 间距 4 + 停止 32 = 180）。#1368 重构实测流式簇矩形宽 **172**（提示文本实际
+   比 64 窄），取 **180 = 172 + 8px 余量**；旧值 160 小于实测值，窄屏流式档因此
+   真重叠 67px（P1-1）。这一枚同时被 base 的 `padding-right`（宽工作区）与窄屏的
+   `margin-right`（滚动视口）消费，**必须定义在 dock 上**：消费方
+   `.composer-controls` 与 `.composer-actions` 是兄弟，定义在簇里的话档位行读不到，
+   `padding-right` 会在计算值阶段落回 0——本票踩过。 */
 .composer-dock {
-  --composer-actions-w: 160px;
+  --composer-actions-w: 180px;
+  /* 窄屏非流式档（只有发送 + 附图，无 Esc 提示）的簇宽：右缩进 8 + 发送 32 +
+     间距 4 + 附图 32 = 76，取 **80 = 76 + 4px 余量**。旧实现把 76 直接写在
+     `margin-right` 上：与按钮尺寸隐式耦合且零余量（实测控件行右缘 == 簇左缘
+     288，簇里任一 1px 变化就重叠）。 */
+  --composer-actions-w-compact: 80px;
 }
 /* 流式中把档位行的右端让给动作簇。
    为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
@@ -5639,13 +5666,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    * "遮罩盖住抽屉内容"的层序问题）。`.app-regions` 的 overflow 不裁剪 fixed 后代。 */
   .session-rail.rail-drawer-open {
     position: fixed;
+    /* 48px = `.appbar` 的高度（`app.css:228`）：抽屉顶在顶栏下沿，不压住顶栏图标。 */
     top: calc(var(--space-sm) + 48px);
     left: var(--space-sm);
     bottom: var(--space-sm);
+    /* 272 = 桌面轨宽 240（`.app-regions` 的轨道）+ 两侧 16 内边距（`--space-lg`），
+       即"抽屉里能放下和桌面轨一样宽的一行"。100vw 上限给 320 以下的极窄屏兜底。 */
     width: min(272px, calc(100vw - 2 * var(--space-sm)));
+    /* 层级：30 = 高于正文（`.appbar` 10、正文 ≤10），低于一切菜单/浮层
+       （slash-menu / auth-panel / roster 40、palette 50/51、拖拽 60、toast 1000）
+       ——抽屉不得盖住这些浮层。遮罩自己的 `-1` 只在本层叠上下文内生效。 */
     z-index: 30;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
+    /* 遮罩 28%（比既有 `ctx-usage-overlay` 的 32% 浅）：抽屉是"轻量 disclosure"，
+       背后仍是用户要看的会话内容；模态浮层才用更重的 32%。 */
     box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, #000 28%, transparent);
   }
   /* 展开态的开关退到左上角（与标题同一行的阅读起点），收起态居中在图标轨里。 */
@@ -5669,6 +5704,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .memory-row-actions {
     flex-direction: column;
     align-items: stretch;
+    gap: var(--space-xs);
     min-width: 0;
   }
   .memory-expand {
@@ -5678,8 +5714,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 /* ── #1368：390 档顶栏只留 logo ──
  * 产品名在 390 折成三行（实测 `.appbar-title` 高 67px ≈ 3 行、`.appbar` 的
- * scrollWidth 565 > clientWidth 372）。560px 是"标题还放得下"的分界：右簇 ≈364px
- * + logo 36px + 两侧 48px ≈ 448px，560 以上不挤，以下藏标题。 */
+ * scrollWidth 565 > clientWidth 372）。560px 是"标题还放得下"的分界：
+ * 实测右簇 **484px** 恒定（全文件无 `.appbar-right` 响应式规则）+ logo 28 + 间距 8
+ * + `.appbar` 两侧内边距 **16×2**（`0 var(--space-lg)`，不是 48），留给标题的
+ * 预算 = 560 − 16×2 − 484 − 28 − 8 ≈ 8px ⇒ 560 已放不下，取 560 是"整串标题
+ * 至少不再参与挤压"的下界（561–~716 档由标题自己的省略号兜住，见上方注释）。 */
 @media (max-width: 560px) {
   .appbar-title {
     display: none;
@@ -7693,7 +7732,10 @@ button.json-row {
  * ⚠ 右端让位用 **margin** 而不是 padding：`nowrap` 下溢出的项会画进 padding 区
  * （overflow 在 padding 边缘裁），padding 只给"滚到最右"留空位——滚在中间时最后
  * 一项照样钻到动作簇底下。margin 缩短的是**滚动视口本身**，任何滚动位置都不会重叠。
- * 流式档（有 Esc 提示）的动作簇更宽，走同一条 margin 口径，不叠两条右缩进。
+ * 流式档（有 Esc 提示）的动作簇更宽，走同一条 margin 口径，**并且必须把 base 那条
+ * `padding-right` 归零**：宽工作区的预留是给 flex 换行用的，窄屏已经用 margin 缩短
+ * 滚动视口，两条右缩进会叠加成 360px（实测控件行 clientW 只剩 168、右缘 251 越过
+ * 簇左缘 184，压住「权限」pill 67px——P1-1）。margin 与 padding 二选一，不是相加。
  * ⚠ 位置不能挪回上面那个 `@media (max-width: 820px)` 大块：本条覆盖的是**本规则下方**
  * 的 `.composer-controls`（基础形态），而媒体查询不加优先级——同权重下后写的赢，
  * 挪回去 `flex-wrap: wrap` 与 `padding` 简写会把它整个盖掉（实测：计算值仍是 wrap）。 */
@@ -7701,7 +7743,7 @@ button.json-row {
   .composer-controls {
     flex-wrap: nowrap;
     overflow-x: auto;
-    margin-right: 76px;
+    margin-right: var(--composer-actions-w-compact);
     scrollbar-width: none;
   }
   .composer-controls::-webkit-scrollbar {
@@ -7712,6 +7754,7 @@ button.json-row {
   }
   .composer-dock:has(.composer-esc-hint) .composer-controls {
     margin-right: var(--composer-actions-w);
+    padding-right: 0;
   }
 }
 .composer-fallback-effort-note {
