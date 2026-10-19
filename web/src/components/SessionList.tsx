@@ -1030,14 +1030,18 @@ function SessionRow({
           aria-hidden="true"
         />
         <div className="session-item-body">
-          {/* #1370 P0-7：标题与 id 同一行（id 在行尾），三行压成两行。可见文本仍截到
-              12 字符（与基线一致），完整 session_id 在行按钮的 title 里。 */}
-          <div className="session-item-head">
-            {title && <div className="session-item-title">{title.slice(0, 48)}</div>}
-            <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
-          </div>
+          {/* #1399：标题独占首行，12 位会话 ID 下移到 meta 行（ID · 事件数 · 时间）。
+              240px 轨里标题不再与 ID 争行尾；完整 session_id 仍在行按钮的 title 里。 */}
+          {title && (
+            <div className="session-item-head">
+              <div className="session-item-title">{title.slice(0, 48)}</div>
+            </div>
+          )}
           <div className="session-item-meta num">
-            {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+            <span className="session-item-id mono">{s.session_id.slice(0, 12)}</span>
+            <span className="session-item-meta-rest">
+              {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+            </span>
           </div>
           {/* #171：「已归档」徽标。只有打开「显示已归档」时这一行才会被渲染出来
               （默认视图里已归档行整个不渲染，见 buildRailModel），所以徽标是**这一行

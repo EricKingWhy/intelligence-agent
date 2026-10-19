@@ -924,16 +924,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   min-width: 0;
   flex: 1;
 }
-/* #1370 P0-7：标题 + id 同一行（id 行尾、标题可截断）。id 不再独占一行，
- * 但仍保持 mono + 12px（颜色是二级色，见下）：它是辅助寻址信息，不与标题争层级。 */
+/* #1399：标题独占首行，拿满 240px 轨的正文宽度；ID 不再和标题争行尾。 */
 .session-item-head {
   display: flex;
   align-items: baseline;
-  gap: var(--space-xs);
   min-width: 0;
 }
 .session-item-title {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   font-size: var(--text-sm);
   font-weight: 500;
@@ -943,27 +941,33 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   white-space: nowrap;
   line-height: 1.35;
 }
-/* #1370 P0-7：票面「等宽 + 次要色 + 12px」。基线的第三级灰在同排布局里比标题暗两档、
- * 又紧贴标题右端，读起来像被削掉的尾巴；提到二级色后它是"行尾的次要信息"而不是残影。
- * 仍不与标题（primary、500）同权。 */
+/* #1399：ID 移到第二行 meta，11–12px tertiary、mono；它是辅助寻址信息，
+ * 与事件数 / 时间同组，不再和标题同权。 */
 .session-item-id {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 有标题时 id 靠右收在行尾（没有标题时它自己就是首行内容，不推右）。 */
-.session-item-title + .session-item-id {
-  margin-left: auto;
-}
 .session-item-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  min-width: 0;
   font-size: var(--text-xs);
   color: var(--text-tertiary);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
+}
+/* 事件数 / 时间在窄轨里可以被截断，但 ID 保持完整（它是寻址信息）。 */
+.session-item-meta-rest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 「已归档」徽标（#171）：只在打开「显示已归档」时已归档行才会被渲染出来（默认视图
  * 里它们整个不渲染），所以徽标要做的是**解释这一行为什么还在列表里**——因此用低调的
