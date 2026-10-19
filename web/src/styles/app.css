@@ -74,6 +74,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: var(--shadow-popover);
   white-space: pre-line;
 }
+/* Radix 的 portal 包装层本身仍可命中（内容设了 none，外层 wrapper 没有）。只对
+ * 装着 tooltip 的 wrapper 生效，不影响 menu / popover（它们需要指针事件）。 */
+[data-radix-popper-content-wrapper]:has(.tip-content) {
+  pointer-events: none;
+}
 .tip-arrow {
   fill: var(--surface-overlay);
 }
