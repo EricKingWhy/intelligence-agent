@@ -963,3 +963,37 @@ async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory
     assert client.get(
         f"/api/sessions/{session_id}/memory-recalls", headers=_auth(_BOB),
     ).json() == []
+
+
+@pytest.mark.asyncio
+async def test_edit_authority_rejection_maps_to_422_not_500(
+    memory_app, monkeypatch: pytest.MonkeyPatch,
+):
+    """#1353 C-P2-2：markdown 权威面拒收（预算超限 / threat 命中）是正常业务拒绝。
+
+    `MarkdownAuthorityError` 是 `RuntimeError` 子类，原先不命中 `edit_memory` 的 except
+    链 ⇒ 冒泡成 500。用户改一条太长/含注入模式的记忆会看到"服务器错误"而不是可纠正的 4xx。
+    """
+    from agent_harness.memory.v2.capability import MarkdownAuthorityError
+
+    client, _components = memory_app
+    record = await _seed_v2(client, _ALICE, "原始内容")
+
+    async def _rejected(*_args, **_kwargs):
+        raise MarkdownAuthorityError("markdown add failed: entry exceeds char limit")
+
+    monkeypatch.setattr(MemoryV2Service, "_mirror_markdown", _rejected)
+    response = client.patch(
+        f"/api/memories/{record.id}", headers=_auth(_ALICE),
+        json={
+            "expected_version": 1,
+            "content": "用户编辑后的内容",
+            "payload": {
+                "kind": "semantic", "subject": "回答风格", "fact": "用户编辑后的内容",
+                "category": "preference",
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "entry exceeds char limit" in response.json()["detail"]
