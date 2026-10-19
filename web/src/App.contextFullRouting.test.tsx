@@ -188,7 +188,7 @@ describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', 
 
     // 该有的：票面那一句话 + 两个按钮。
     expect(body).toContain('记忆容量已经满了');
-    expect(body).toContain('前面没有可压缩的内容，换个窗口更大的模型继续吧。');
+    expect(body).toContain('前面没有可以精简的内容，换一个记忆容量更大的模型继续吧。');
     expect(body).toContain('换模型');
     expect(body).toContain('结束');
 
