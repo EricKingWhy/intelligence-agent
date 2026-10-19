@@ -17,11 +17,13 @@ import {
   CLAIM_BASE_DELAY_MS,
   CLAIM_MAX_DELAY_MS,
   DEFAULT_SESSION_CLAIM_TIMEOUT_MS,
+  SessionClaimAmbiguousError,
   SessionClaimTimeoutError,
   claimBackoffMs,
   discoverNewSessionId,
   sessionExists,
   sessionIdBaseline,
+  sessionIdBaselineDetailed,
   wsStreamResponse,
 } from './wsStream';
 import type { AgentEvent } from '../types';
@@ -669,5 +671,163 @@ describe('sessionExists — 404 语义的存在性判据', () => {
   it('列表读不到 → **true**（保守：不把一次抖动当成已删）', async () => {
     stubSessions('fail');
     expect(await sessionExists('s-1')).toBe(true);
+  });
+});
+
+/** #1333：会话认领差分误认——`first_event_time` 过滤 + 多候选 fail-closed。
+ *
+ * 红钉场景（票面复现思路的压缩版）：`GET /api/sessions` 每次往返有延迟、
+ * 新会话延迟可见；在基线读取之后、认领轮询期间，让上一轮迟到的会话
+ *（`other-0`，创建于本次 POST 之前）先于 `fresh-0` 可见。
+ * 旧实现（纯集合差分）会返回 `other-0`；修复后必须过滤掉它、认领 `fresh-0`。 */
+describe('discoverNewSessionId #1333 时间过滤与歧义 fail-closed', () => {
+  const T0 = 1_750_000_000_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const fast = { timeoutMs: 8000, baseDelayMs: 20, maxDelayMs: 100, random: () => 0 };
+
+  it('上一轮迟到的会话（first_event_time 早于本次提交）不得被认领', async () => {
+    const start = Date.now();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        const rows = [
+          { session_id: 'base-1', first_event_time: iso(T0 - 60_000) },
+          // 迟到：创建于本次 POST 之前，但在基线读取之后才对列表可见
+          { session_id: 'other-0', first_event_time: iso(T0 - 5_000) },
+        ];
+        // fresh-0 在提交 1200ms 后才可见（票面 12s 的压缩版）
+        if (Date.now() - start >= 1200) {
+          rows.push({ session_id: 'fresh-0', first_event_time: iso(T0 + 100) });
+        }
+        return new Response(JSON.stringify(rows), { status: 200 });
+      }),
+    );
+    const sid = await discoverNewSessionId(new Set(['base-1']), {
+      ...fast,
+      submittedAtServerMs: T0,
+    });
+    expect(sid).toBe('fresh-0');
+  });
+
+  it('同轮出现多个候选 → 抛 SessionClaimAmbiguousError（不盲选第一条）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { session_id: 'base-1', first_event_time: iso(T0 - 60_000) },
+            { session_id: 'other-0', first_event_time: iso(T0 + 50) },
+            { session_id: 'fresh-0', first_event_time: iso(T0 + 100) },
+          ]),
+          { status: 200 },
+        ),
+      ),
+    );
+    let caught: unknown = null;
+    try {
+      await discoverNewSessionId(new Set(['base-1']), {
+        ...fast,
+        submittedAtServerMs: T0,
+      });
+      expect.unreachable('应抛 SessionClaimAmbiguousError');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SessionClaimAmbiguousError);
+    // 票面要求"可识别的无法确认"：文案 + 候选 id 都在
+    expect((caught as Error).message).toContain('无法确认');
+    expect((caught as Error).message).toContain('other-0');
+    expect((caught as Error).message).toContain('fresh-0');
+    expect((caught as SessionClaimAmbiguousError).candidateIds).toEqual(
+      expect.arrayContaining(['other-0', 'fresh-0']),
+    );
+  });
+
+  it('first_event_time 恰等于提交时刻（>= 边界）→ 可认领', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { session_id: 'base-1', first_event_time: iso(T0 - 60_000) },
+            { session_id: 'fresh-0', first_event_time: iso(T0) },
+          ]),
+          { status: 200 },
+        ),
+      ),
+    );
+    await expect(
+      discoverNewSessionId(new Set(['base-1']), { ...fast, submittedAtServerMs: T0 }),
+    ).resolves.toBe('fresh-0');
+  });
+
+  it('给了提交时刻但行没有 first_event_time → 不认领（等超时，不造假 id）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify([{ session_id: 'mystery' }]), { status: 200 }),
+      ),
+    );
+    await expect(
+      discoverNewSessionId(new Set(['base-1']), {
+        timeoutMs: 400,
+        baseDelayMs: 20,
+        maxDelayMs: 60,
+        random: () => 0,
+        submittedAtServerMs: T0,
+      }),
+    ).rejects.toBeInstanceOf(SessionClaimTimeoutError);
+  });
+
+  it('不传 submittedAtServerMs → 旧行为（纯集合差分），#1321 旧调用不受影响', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([{ session_id: 'base-1' }, { session_id: 'fresh' }]),
+          { status: 200 },
+        ),
+      ),
+    );
+    // 旧签名：行没有 first_event_time 也照认（claimLoad 负载验收走这条路）
+    await expect(discoverNewSessionId(new Set(['base-1']))).resolves.toBe('fresh');
+  });
+});
+
+describe('sessionIdBaselineDetailed（#1333 服务端时钟锚点）', () => {
+  const T0 = 1_750_000_000_000;
+
+  it('从基线响应的 Date 头取服务端时刻', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify([{ session_id: 'a' }]), {
+          status: 200,
+          headers: { Date: new Date(T0).toUTCString() },
+        }),
+      ),
+    );
+    const d = await sessionIdBaselineDetailed();
+    expect(d?.ids).toEqual(new Set(['a']));
+    expect(d?.serverNowMs).toBe(T0);
+  });
+
+  it('响应没有 Date 头 → serverNowMs 为 null（调用方降级）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify([{ session_id: 'a' }]), { status: 200 })),
+    );
+    const d = await sessionIdBaselineDetailed();
+    expect(d?.ids).toEqual(new Set(['a']));
+    expect(d?.serverNowMs).toBeNull();
+  });
+
+  it('读不到 → null（与 sessionIdBaseline 同契约）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('boom', { status: 500 })),
+    );
+    expect(await sessionIdBaselineDetailed()).toBeNull();
   });
 });

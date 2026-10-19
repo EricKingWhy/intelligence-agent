@@ -26,10 +26,11 @@ import { EventType, type AgentEvent, type ConversationState, type FailedDraft, t
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import {
+  SessionClaimAmbiguousError,
   SessionClaimTimeoutError,
   wsStreamResponse,
   discoverNewSessionId,
-  sessionIdBaseline,
+  sessionIdBaselineDetailed,
   sessionExists,
 } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, deriveRunFailedBeforePlan, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -1135,8 +1136,10 @@ export function useSession() {
         // 对策：先取会话 id 基线 → 发出 POST 但**不 await** → 只有「短窗内就返回」
         // 才当成立即失败（422/4xx 是非流式，会立刻到）→ 否则认领新会话，改用
         // WebSocket 接流（同一交付链路上实测逐帧到达，见 lib/wsStream.ts）。
-        const baseline = await sessionIdBaseline();
+        const baselineDetailed = await sessionIdBaselineDetailed();
+        const clientBaselineAtMs = Date.now();
         const started = startSession(payload);
+        const baseline = baselineDetailed?.ids ?? null;
         if (baseline === null) {
           // 会话列表读不到（降级态）：「基线 + 差分」认领新会话的前提就没了。
           // 退回原行为——老老实实等 POST 响应。交付层攒包时首帧会晚到，但
@@ -1184,7 +1187,16 @@ export function useSession() {
         });
         let sid: string;
         try {
-          sid = await discoverNewSessionId(baseline);
+          // #1333：把「本次 POST 发起时刻（服务端时钟）」交给认领，
+          // 启用 first_event_time 过滤 + 多候选 fail-closed。
+          // serverNowMs = 基线响应 Date 头的服务端时刻，加上基线返回到
+          // POST 发起之间的客户端毫秒增量（时钟漂移在秒级窗口内可忽略）。
+          // 拿不到 Date 头 → 降级用客户端时刻（本机部署两者同钟）。
+          const submittedAtServerMs =
+            baselineDetailed?.serverNowMs != null
+              ? baselineDetailed.serverNowMs + (Date.now() - clientBaselineAtMs)
+              : Date.now();
+          sid = await discoverNewSessionId(baseline, { submittedAtServerMs });
         } catch (e) {
           throw late.failure ?? e; // POST 的真实失败原因优先于「认领超时」
         }
@@ -1236,7 +1248,12 @@ export function useSession() {
         const message =
           e instanceof SessionClaimTimeoutError
             ? `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`
-            : `提交失败：${(e as Error).message}`;
+            : e instanceof SessionClaimAmbiguousError
+              ? // #1333：歧义也不是提交失败（会话很可能已创建，只是无法确认
+                // 是哪一条）。渲染成「提交失败」会诱导用户重试、造出重复会话
+                //（#1321 AC4 同一教训）。文案里保留可识别的「无法确认」。
+                `提交可能已成功，但${e.message}。请刷新页面后从左侧会话列表找到本次提交的会话。`
+              : `提交失败：${(e as Error).message}`;
         if (!opts?.ownError) setError(message);
         return message;
       }
