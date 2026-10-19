@@ -86,6 +86,12 @@ const goalSnapshot = (
   },
 });
 
+/** POST 回执不带 `id`（后端 `_apply` 形状）——与 GET 快照分开构造。 */
+const goalResult = (...args: Parameters<typeof goalSnapshot>) => ({
+  status: 'applied',
+  ...goalSnapshot(...args),
+});
+
 const textarea = (): HTMLTextAreaElement => container.querySelector('#composer-input')!;
 const menu = (): HTMLElement | null => container.querySelector('[data-testid=slash-menu]');
 const menuItems = (): NodeListOf<HTMLElement> =>
@@ -436,7 +442,7 @@ describe('#1195 键盘交互', () => {
 
 describe('#1195 带参提交拦截', () => {
   it('/goal <文本> 拦截：本地执行，不发聊天', async () => {
-    vi.mocked(postGoalCommand).mockResolvedValue(goalSnapshot('每天投20份简历'));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('每天投20份简历'));
     await typeText('/goal 每天投20份简历');
     press('Enter');
     await act(async () => {});
@@ -627,7 +633,7 @@ describe('#1195 /permission /model 拉起现有 UI', () => {
 
 describe('#1195 findings 修回 — 提交拦截汇合点（A-P1-1/A-P2-1/A-P2-3）', () => {
   it('Ctrl+Enter 对 /goal 带参同样拦截：本地执行，不 steer（A-P1-1）', async () => {
-    vi.mocked(postGoalCommand).mockResolvedValue(goalSnapshot('每天投20份简历'));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('每天投20份简历'));
     await typeText('/goal 每天投20份简历');
     press('Enter', { ctrlKey: true });
     await act(async () => {});
@@ -641,7 +647,7 @@ describe('#1195 findings 修回 — 提交拦截汇合点（A-P1-1/A-P2-1/A-P2-3
   });
 
   it('发送按钮点击对 /goal 带参同样拦截（A-P1-1）', async () => {
-    vi.mocked(postGoalCommand).mockResolvedValue(goalSnapshot('另一个目标'));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('另一个目标'));
     await typeText('/goal 另一个目标');
     await act(async () => {
       (container.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click();

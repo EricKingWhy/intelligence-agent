@@ -116,7 +116,9 @@ export function parseGoalCommand(rawInput: string | undefined): GoalCommand {
 
 /** `/goal` 无参回执：objective/phase/轮数/activation/可用命令（票面 AC1 与 UX）。
  *  纯函数，便于单测；blocked 时附 code + message。 */
-export function formatGoalSnapshot(snapshot: GoalSnapshot): string {
+export function formatGoalSnapshot(
+  snapshot: Pick<GoalSnapshot, 'goal' | 'activation'>,
+): string {
   const g = snapshot.goal;
   if (!g.defined) return '当前会话未定义目标。用 /goal <objective> 创建。';
   const lines = [

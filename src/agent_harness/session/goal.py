@@ -513,7 +513,6 @@ def append_goal_change(
                 "phase": GoalPhase.ACTIVE.value,
                 "max_goal_rounds": current.max_goal_rounds,
                 "rounds_started": round_number,
-                "round": round_number,
             },
         )
         return GoalOutcome(
@@ -546,12 +545,13 @@ def append_goal_change(
         text, error = _resolve_objective(objective)
         if error is not None:
             return _failure(current, "shape", error)
-        next_objective = text
         rounds, error = _resolve_max_rounds(max_goal_rounds, current.max_goal_rounds)
         if error is not None:
             return _failure(current, "shape", error)
-        next_max_rounds = rounds  # type: ignore[assignment]
-        next_phase = phase  # type: ignore[assignment]
+        assert text is not None and rounds is not None and phase is not None  # error 已返回
+        next_objective = text
+        next_max_rounds = rounds
+        next_phase = phase
         if phase is GoalPhase.BLOCKED:
             next_reason = current.blocked_reason
         elif phase is GoalPhase.PAUSED:

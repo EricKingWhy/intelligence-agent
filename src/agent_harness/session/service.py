@@ -4129,11 +4129,13 @@ class SessionService:
     async def _maybe_queue_goal_round(self, session_id: str) -> None:
         """run 终态后决定是否自动续跑一轮目标（#1359 阶段 3 / AC7–AC10）。
 
-        准入是三个**独立**条件的合取（任一不成立就静默不续跑）：
+        准入是四个**独立**条件的合取（任一不成立就静默不续跑）：
 
         1. 目标投影 ``phase == active``；
         2. session 在本进程的 activation 集合里（``/goal create|resume`` 武装）；
-        3. ``rounds_started < max_goal_rounds``。
+        3. ``rounds_started < max_goal_rounds``；
+        4. 进程配置 ``goal_auto_round_enabled``（默认关；activation 只在本进程内存里，
+           重启后必须仍默认关，否则落盘的目标会在重启后自行续跑）。
 
         决策 b（撞审批点就 park）：非 ``danger-full-access`` 档下自动续跑会在
         审批闸门停下（根 registry 恒有 ``bash``：DANGER + MUTATING，其他档位

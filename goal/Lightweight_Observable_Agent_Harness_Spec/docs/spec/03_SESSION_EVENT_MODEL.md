@@ -154,7 +154,7 @@ src/agent_harness/session/event.py                  ← 唯一事实源
   （一轮目标轮次真正进入模型历史），不是用户操作，REST 面不暴露。
 - **payload**：变更事件携带**完整快照**而非 delta——`goal_id`、`revision`、`objective`、
   `phase`、`blocked_reason`、`pause_reason`、`max_goal_rounds`、`rounds_started`
-  （`create` 带初始快照；`round_started` 另带 `round`）。`clear` 是唯一例外：
+  （`create` 带初始快照）。`clear` 是唯一例外：
   只带 `cleared` 墓碑（`goal_id` + 新 revision）**不带 goal 字段**——"已清除"必须与
   "从没有过目标"可区分。坏 payload 事件被读侧跳过（继续向前找），不是崩溃点。
 - **`revision` 单调**：每条被接受的事件 +1；`edit` / 生命周期命令可带

@@ -230,9 +230,15 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     expect(c.reportError).not.toHaveBeenCalled();
   });
 
+  /** POST 回执不带 `id`（后端 `_apply` 形状）——与 GET 快照分开构造。 */
+  const result = (over: Partial<GoalSnapshot['goal']> = {}) => ({
+    status: 'applied',
+    ...snapshot(over),
+  });
+
   it('/goal 创建：带 objective 走 POST /goal create，回执仍走 reportInfo', async () => {
     const mod = await import('./api');
-    vi.mocked(mod.postGoalCommand).mockResolvedValue(snapshot());
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(result());
     const c = makeCtx();
     await cmd('goal').run('## Objective\n投 20 份简历', asCtx(c));
     expect(mod.postGoalCommand).toHaveBeenCalledWith('s-1', {
@@ -279,7 +285,7 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
   it('/goal edit 先读当前 revision 再带 expected_revision（AC3 的 UI 面）', async () => {
     const mod = await import('./api');
     vi.mocked(mod.getGoalState).mockResolvedValue(snapshot({ revision: 7 }));
-    vi.mocked(mod.postGoalCommand).mockResolvedValue(snapshot({ revision: 8 }));
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(result({ revision: 8 }));
     const c = makeCtx();
     await cmd('goal').run('edit 新目标', asCtx(c));
     expect(mod.postGoalCommand).toHaveBeenCalledWith('s-1', {

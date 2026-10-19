@@ -3397,6 +3397,14 @@ export interface GoalSnapshot {
   activation: GoalActivation;
 }
 
+/** POST 回执：`{status, goal, activation}`，**不带 `id`**（后端 `_apply` 的形状）。
+ *  与 GET 快照分开声明——写成 `GoalSnapshot` 会让 `id` 成为类型谎报。 */
+export interface GoalCommandResult {
+  status: string;
+  goal: GoalStatePayload;
+  activation: GoalActivation;
+}
+
 /** 生命周期命令体（`operation` 值域与后端 Literal 同表）。 */
 export interface GoalCommandBody {
   operation: 'create' | 'edit' | 'pause' | 'resume' | 'complete' | 'block' | 'clear';
@@ -3419,14 +3427,14 @@ export async function getGoalState(sessionId: string): Promise<GoalSnapshot> {
 export async function postGoalCommand(
   sessionId: string,
   body: GoalCommandBody,
-): Promise<GoalSnapshot> {
+): Promise<GoalCommandResult> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/goal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await sessionError(res, '目标命令执行失败');
-  return (await res.json()) as GoalSnapshot;
+  return (await res.json()) as GoalCommandResult;
 }
 
 /** GET /api/sessions/{id}/evidence —— 证据投影 + 服务端新鲜度（只读）。

@@ -3,8 +3,9 @@
 三层断言：
 
 - **纯函数**：`<goal_round>` 提示词、round_started 状态机、tool digest 无进展判据；
-- **服务准入**：`_maybe_queue_goal_round` 的四个条件（active / armed / 轮次 /
-  权限档）与"已有待投递 goal 轮次不重复入队"；
+- **服务准入**：`_maybe_queue_goal_round` 的准入条件（active / armed / 轮次未用尽 /
+  上线开关）与"已有待投递 goal 轮次不重复入队"；权限档不是准入条件而是分流——
+  非 `danger-full-access` 档置 `blocked`（决策 b），显式 resume 授一轮额度；
 - **端到端**：真实 AppState + RunManager 终态接线 + 假模型，连续两轮空工具活动
   → goal paused（AC9），且 `rounds_started` 只在投递后增长（AC8）。
 """
