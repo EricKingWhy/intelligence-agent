@@ -20,6 +20,8 @@ const H = vi.hoisted(() => ({
   /** 每次 `submitTask` 的 (payload, opts) 按调用顺序落在这里。 */
   calls: [] as { payload: unknown; opts: unknown }[],
   failNext: true,
+  /** 让 mock 回执声明 `retryable:true` 却不携带动作（hook 契约允许的形状）。 */
+  dropRetry: false,
 }));
 
 vi.mock('./hooks/useSession', async (importOriginal) => {
@@ -56,7 +58,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
             const failure = {
               message: '提交失败：Failed to fetch',
               retryable: true,
-              onRetry: opts?.onRetry,
+              ...(H.dropRetry ? {} : { onRetry: opts?.onRetry }),
             };
             H.setSendFailure(failure);
             return failure.message;
@@ -152,6 +154,7 @@ beforeEach(() => {
   H.sendFailure = null;
   H.calls.length = 0;
   H.failNext = true;
+  H.dropRetry = false;
 });
 
 afterEach(async () => {
@@ -192,5 +195,21 @@ describe('#1367 P0-3 — 断网失败条内的重试', () => {
     expect(composer().value).toBe('');
     // 失败条随之消失（回执被清）。
     expect(container.querySelector('.conversation-error')).toBeNull();
+  });
+
+  /* 审查（WIP `28efd9d1`）修的正是这条：`retryable` 由写入点声明，而动作由调用方
+     给；两者不一致时文案不能许诺一个不存在的按钮。 */
+  it('回执 retryable 但不带动作 ⇒ 不给按钮，文案也不承诺「点重试」', async () => {
+    H.dropRetry = true;
+    await mount();
+    await typeText('写一个 FizzBuzz 脚本并运行验证');
+    await pressEnter();
+
+    const bar = container.querySelector('.conversation-error');
+    expect(bar).not.toBeNull();
+    expect(bar!.querySelector('button.conversation-error-retry')).toBeNull();
+    const hint = bar!.querySelector('.conversation-error-hint')?.textContent ?? '';
+    expect(hint).toContain('重新发送');
+    expect(hint).not.toContain('点重试');
   });
 });
