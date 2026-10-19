@@ -87,6 +87,16 @@ class GoalState:
             return False
         return not all(section in self.objective for section in _INTERVIEW_REQUIRED_SECTIONS)
 
+    @property
+    def authoritative(self) -> bool:
+        """是否已有合法目标事件（快照或 ``clear`` 墓碑）。
+
+        ``source_event_id`` 只在命中合法事件时才有值（坏 payload 被跳过），
+        所以它精确表达"目标事件源已接管读侧"：此后不再回落到首条用户消息 /
+        ``task_text``——``clear`` 就是"没有目标"，而不是"退回去读旧文本"。
+        """
+        return self.source_event_id is not None
+
     def to_payload(self) -> dict:
         return {
             "defined": self.defined,

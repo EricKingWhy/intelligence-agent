@@ -59,6 +59,7 @@ from agent_harness.session.event import (
     TASK_ACCEPTANCE_RELEASED,
     TASK_ACCEPTED,
 )
+from agent_harness.session.goal import effective_goal
 from agent_harness.session.plan import derive_plan
 from agent_harness.session.task import derive_task_state
 
@@ -193,6 +194,15 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
     """事件流 → 进度文档（纯函数；与 task/plan/protected-facts 投影同源）。"""
     task_state = derive_task_state(events)
     plan = derive_plan(events)
+    # #1359 阶段 0：目标与 `/goal` / 压缩摘要同源。目标事件源接管后不再回落
+    # task_text（`clear` = 明确"无目标"，不能把旧 task_text 复活）；没有目标
+    # 事件的存量会话仍读 task_text。
+    goal_state = effective_goal(events)
+    goal = (
+        goal_state.objective
+        if goal_state.authoritative
+        else (task_state.task_text or None)
+    )
 
     constraints: list[dict] = []
     if task_state.read_write_intent:
@@ -319,7 +329,8 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
         parent_session_id=parent_session_id,
         fork_point_seq=fork_point_seq,
         source_event_seq=events[-1].seq if events else 0,
-        goal=task_state.task_text or None,
+        # #1359 阶段 0：与 `/goal`、压缩摘要同源（见上文 goal_state）。
+        goal=goal,
         read_write_intent=task_state.read_write_intent,
         constraints=tuple(constraints),
         acceptance=acceptance_section,

@@ -47,6 +47,7 @@ from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    GOAL_CHANGED,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
     MODEL_COMPLETED,
@@ -69,6 +70,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.session.goal import effective_goal
 
 logger = logging.getLogger("agent_harness.session.derive")
 
@@ -328,7 +330,7 @@ def _bounded_goal_value(content: str, source_event_id: str) -> str:
     return (
         content[:_USER_GOAL_VALUE_MAX_CHARS]
         + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
-        + f"全文共{len(content)}字符，见首条用户消息 "
+        + f"全文共{len(content)}字符，见来源事件 "
         + f"source_event_id={source_event_id}］"
     )
 
@@ -854,22 +856,32 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     # 取消规则、`replace` / `injected_by` 排除、非空 content 都在那一处。
     direct_user_events = user_source_events(events)
     first_user_source = direct_user_events[0] if direct_user_events else None
-    user_goal_sources = {first_user_source.event_id} if first_user_source else set()
+    # #1359 阶段 0：目标事实源收敛。存在生效 `goal/changed` 时，user_goal 只以
+    # 该事件的 `objective` 为源（读侧三处同源：本投影 / compactor / progress）；
+    # 否则回落首条用户消息（既有口径）。旧 fact 不迁移：换源 = 换 fact id，
+    # 旧 supersede 链自然终结（票面阶段 0）。`clear` 墓碑也接管读侧（= 无目标），
+    # 此时 `${GOAL_CHANGED}` 事件没有 objective，不产 fact。
+    goal_state = effective_goal(events)
+    if goal_state.authoritative:
+        user_goal_sources = {goal_state.source_event_id}
+    else:
+        user_goal_sources = {first_user_source.event_id} if first_user_source else set()
     # W-06（#350）：确认过的外部编辑指令（见 PROGRESS_CONFIRM_ORIGIN）以
     # user_goal 保护事实身份进入投影。首条用户消息口径保持不变；这里只是
-    # 追加来源，不改变 supersede/取消等既有判定。
-    user_goal_sources.update(
-        event.event_id
-        for event in direct_user_events
-        if event.type == USER_MESSAGE
-        and event.data.get("origin") == PROGRESS_CONFIRM_ORIGIN
-    )
+    # 追加来源，不改变 supersede/取消等既有判定。生效目标存在时只认 goal。
+    if not goal_state.authoritative:
+        user_goal_sources.update(
+            event.event_id
+            for event in direct_user_events
+            if event.type == USER_MESSAGE
+            and event.data.get("origin") == PROGRESS_CONFIRM_ORIGIN
+        )
     # supersede 标记是否成立（替换槽非空，#614①）由 `live_supersede_markers` 判——
     # 与 `is_direct_user_input_event` 共用同一份，不再两写（Call 3 P3-1/P4-1）。
     for target_seq, replacement_seq in live_supersede_markers(events):
         target = event_by_seq[target_seq]
         superseded_sources.add(target.event_id)
-        if target.type == USER_MESSAGE:
+        if target.type == USER_MESSAGE and not goal_state.authoritative:
             replacement = next(
                 (e for e in direct_user_events if e.seq == replacement_seq), None
             )
@@ -892,16 +904,22 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     for event in events:
         data = event.data
         if event.event_id in user_goal_sources:
+            # #1359 阶段 0：`goal/changed` 的 payload 用 `objective`；用户事件用
+            # `content`。两条键路径刻意分开（票面 P0-4 ①）：复用 content 路径
+            # 会在 goal 事件上 KeyError。
+            goal_value = data.get("objective" if event.type == GOAL_CHANGED else "content")
+            if not isinstance(goal_value, str) or not goal_value.strip():
+                continue
             fact_data = {
                 "fact_type": "user_goal",
-                "value": data["content"],
+                "value": goal_value,
                 "source_event_id": event.event_id,
             }
             add_fact(
                 ProtectedFact(
                     fact_id=_expected_fact_id(fact_data),
                     type="user_goal",
-                    value=_bounded_goal_value(data["content"], event.event_id),
+                    value=_bounded_goal_value(goal_value, event.event_id),
                     source_event_id=event.event_id,
                     source_seq=event.seq,
                     status="active",
