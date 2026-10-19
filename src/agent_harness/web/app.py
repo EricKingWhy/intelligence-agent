@@ -168,6 +168,7 @@ from agent_harness.storage import (
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.session_archive import install_session_archive
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
@@ -1291,6 +1292,12 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # #1389：会话全文存档 + FTS5（派生检索索引，不是 Session 真相）。
+        # 挂一次 store 级观察者即覆盖本进程的全部写路径。best-effort：建库失败
+        # 只降级为"没有历史搜索"，不影响会话本身。
+        self.session_archive_observer = install_session_archive(
+            self.store, self.sessions_root / "state.db",
+        )
         # #1191（Phase 2）：项目/全局级约束的独立规则层（用户裁决 Fork 2 = A：
         # 不碰 memory v2）。只构造一次（持有进程内写锁）；根目录同在 workspace_dir 下。
         self.scoped_constraint_store = ScopedConstraintStore(
