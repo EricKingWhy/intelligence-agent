@@ -10553,7 +10553,9 @@ button.json-row {
 .provider-dialog .project-btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--bg-app);
+  /* 与 .ask-user-btn.primary 同一取色法（本文件 3485 行注释）：
+   * 实底主按钮 = --accent 底 + --surface-canvas 字，两个主题实测高对比。 */
+  color: var(--surface-canvas);
 }
 .project-dialog .project-btn-primary:hover,
 .provider-dialog .project-btn-primary:hover {
@@ -10562,7 +10564,7 @@ button.json-row {
 .project-dialog .project-btn-danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--bg-app);
+  color: var(--surface-canvas);
 }
 .project-dialog .project-btn-danger:hover {
   background: color-mix(in srgb, var(--danger) 88%, var(--text-primary));
