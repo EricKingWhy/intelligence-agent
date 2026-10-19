@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS memory_v2_staged (
     payload TEXT NOT NULL,
     pinned_entry TEXT,
     status TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    claimed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS memory_v2_staged_identity
     ON memory_v2_staged(identity, status, created_at);

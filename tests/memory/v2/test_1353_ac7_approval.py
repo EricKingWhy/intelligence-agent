@@ -15,15 +15,19 @@ A 路已落地 `memory_v2_staged` + `StagedWriteStore`（`memory/v2/write_approv
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 
+from agent_harness.memory.v2._sqlite import stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.store import MemorySettingsV2, SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import (
     APPROVED,
+    APPROVING_LEASE,
+    AWAITING,
     PENDING,
     REJECTED,
     StagedWriteStore,
@@ -195,6 +199,45 @@ async def test_legacy_record_without_pin_is_refused_not_reresolved(approval) -> 
     text = markdown.path_for("memory").read_text(encoding="utf-8")
     assert "alpha preference" in text
     assert "beta preference" not in text
+
+
+@pytest.mark.asyncio
+async def test_stale_approving_row_is_reclaimed_by_pending(approval) -> None:
+    """进程在 `approving` 中间态被杀后，`pending()` 必须把超期行收回 PENDING。
+
+    不回收的话这条待审写入既不在待审列表里，又会被 approve/reject 以
+    "already being processed" 永久拒绝——静默消失。
+    """
+    staged, markdown = approval
+    await _seed(markdown)
+    record = await staged.stage(_replace_payload(), ["alpha preference"], LOCAL)
+
+    # 模拟被 SIGKILL 的 approve：CAS 抢到 AWAITING 后再没动过。
+    assert await staged._set_status(record.id, AWAITING, expected=PENDING)
+    stale = stamp(datetime.now(UTC) - APPROVING_LEASE - timedelta(seconds=1))
+    connection = sqlite3.connect(staged.database_path)
+    try:
+        connection.execute(
+            "UPDATE memory_v2_staged SET claimed_at=? WHERE id=?", (stale, record.id))
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert record.id in {item.id for item in await staged.pending(LOCAL)}, (
+        "租约过期的 approving 行必须被 pending() 收回，否则这条待审写入静默消失")
+    assert (await staged.get(record.id, LOCAL)).status == PENDING
+
+
+@pytest.mark.asyncio
+async def test_live_approving_row_is_not_reclaimed(approval) -> None:
+    """租约内的 approving 行**不能**被回收——那会踩掉一个正在重放的 approve。"""
+    staged, markdown = approval
+    await _seed(markdown)
+    record = await staged.stage(_replace_payload(), ["alpha preference"], LOCAL)
+    assert await staged._set_status(record.id, AWAITING, expected=PENDING)
+
+    assert record.id not in {item.id for item in await staged.pending(LOCAL)}
+    assert (await staged.get(record.id, LOCAL)).status == AWAITING
 
 
 def test_evaluate_gate_allows_when_off_and_stages_when_on() -> None:

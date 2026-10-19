@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from datetime import UTC, datetime, timedelta
+
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2
@@ -62,6 +64,13 @@ PENDING = "pending"
 AWAITING = "approving"
 APPROVED = "approved"
 REJECTED = "rejected"
+
+#: `approving` 的租约。进程被 SIGKILL/掉电时行会停在这个中间态，而 `pending()` 只列
+#: PENDING ⇒ 这条待审写入从用户队列里静默消失。超过租约的行由 `pending()` 自动回
+#: PENDING（记 warning）。取 5 分钟：一次 `approve` 的重放只是几次本地文件 IO +
+#: 一次 SQLite 写，正常远小于 1 秒；留 300 倍余量足够覆盖满负载下的调度抖动，
+#: 又短到用户不会被一条僵尸行卡住太久。
+APPROVING_LEASE = timedelta(minutes=5)
 
 
 def _identity(trusted: TrustedMemoryIdentity) -> str:
@@ -139,6 +148,14 @@ class StagedWriteStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with connect(self.database_path) as connection:
             await connection.executescript(STAGED_SCHEMA)
+            # 旧库迁移：`claimed_at` 是 `approving` 的租约时间（见 APPROVING_LEASE）。
+            # 不能只靠建表语句——`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作。
+            async with connection.execute(
+                    "PRAGMA table_info(memory_v2_staged)") as cursor:
+                columns = {row["name"] for row in await cursor.fetchall()}
+            if "claimed_at" not in columns:
+                await connection.execute(
+                    "ALTER TABLE memory_v2_staged ADD COLUMN claimed_at TEXT")
             await connection.commit()
 
     # ------------------------------------------------------------------ stage
@@ -192,14 +209,33 @@ class StagedWriteStore:
     # ------------------------------------------------------------------ 查询
 
     async def pending(self, trusted: TrustedMemoryIdentity) -> list[StagedWrite]:
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
+        """本身份的待审写入；顺带回收**租约过期**的 ``approving`` 行。
+
+        回收是 `approve` 被 SIGKILL/掉电打断后的唯一出路：那些行既不在 PENDING 列表里，
+        又会被 `approve`/`reject` 以 "already being processed" 拒绝，不回收就永久消失。
+        CAS 回 PENDING（`status=approving AND claimed_at<=cutoff`）只会收回**超期**
+        的僵尸行：一次正常 `approve` 的重放只是本地文件 IO + 一次 SQLite 写，远小于
+        5 分钟租约，不会被误收。
+        """
+        identity = _identity(trusted)
+        cutoff = stamp(datetime.now(UTC) - APPROVING_LEASE)
+        async with connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE memory_v2_staged SET status=?, claimed_at=NULL "
+                "WHERE identity=? AND status=? AND (claimed_at IS NULL OR claimed_at<=?)",
+                (PENDING, identity, AWAITING, cutoff),
+            )
+            reclaimed = cursor.rowcount
+            await connection.commit()
+            if reclaimed:
+                logger.warning(
+                    "reclaimed %d stale approving memory write(s) past %s lease",
+                    reclaimed, APPROVING_LEASE)
+            async with connection.execute(
                 "SELECT * FROM memory_v2_staged WHERE identity=? "
-                "AND status=? ORDER BY created_at", (_identity(trusted), PENDING),
-            ) as cursor,
-        ):
-            rows = await cursor.fetchall()
+                "AND status=? ORDER BY created_at", (identity, PENDING),
+            ) as rows_cursor:
+                rows = await rows_cursor.fetchall()
         return [_to_staged(row) for row in rows]
 
     async def get(self, staged_id: str, trusted: TrustedMemoryIdentity) -> StagedWrite | None:
@@ -287,9 +323,14 @@ class StagedWriteStore:
     async def _set_status(
         self, staged_id: str, status: str, *, expected: str | None = None,
     ) -> bool:
-        """状态转移；给了 ``expected`` 就是一次 CAS，返回是否抢到。"""
-        sql = "UPDATE memory_v2_staged SET status=? WHERE id=?"
-        parameters: tuple[Any, ...] = (status, staged_id)
+        """状态转移；给了 ``expected`` 就是一次 CAS，返回是否抢到。
+
+        进 ``AWAITING`` 时记租约起点 `claimed_at`，离开时清空——`pending()` 靠它判断
+        一条 ``approving`` 行是被打断的僵尸还是正在重放的活行。
+        """
+        sql = "UPDATE memory_v2_staged SET status=?, claimed_at=? WHERE id=?"
+        parameters: tuple[Any, ...] = (
+            status, stamp() if status == AWAITING else None, staged_id)
         if expected is not None:
             sql += " AND status=?"
             parameters += (expected,)
