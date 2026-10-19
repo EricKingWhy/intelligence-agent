@@ -40,7 +40,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* F7(#278)：**打开方向**的过渡。关闭 / 整页方向的时长不同，写在各自的态上
      （见下面的 `.inspector-closed` / `.app-regions.inspector-fullpage`）——
      靠级联区分方向，不需要 JS 状态。完整说明见「F7 过渡编排」。 */
-  transition: grid-template-columns var(--dur-in) var(--ease-apple);
+  transition:
+    grid-template-columns var(--dur-in) var(--ease-apple),
+    background-color var(--dur-expand) var(--ease-apple),
+    border-color var(--dur-expand) var(--ease-apple);
   min-height: 0;
   /* SDD §9: chrome quieter than workspace. The container is the quietest
    * tone (canvas) so the rail/inspector (chrome) and workspace sit on top
@@ -163,6 +166,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .conversation-scroll,
   .conversation-empty,
   .session-item,
+  .turn,
   .composer,
   .rail-empty-action {
     animation: none !important;
@@ -246,6 +250,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--bg-sidebar);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
+  /* #1371：主题切换时 canvas 与顶条同拍淡出/淡入（body 被 .app-regions 整幅盖住，
+   * 只过渡 body 是采得到帧、看不见效果）。 */
+  transition:
+    background-color var(--dur-expand) var(--ease-apple),
+    border-color var(--dur-expand) var(--ease-apple);
   z-index: 10;
 }
 .appbar-left,
