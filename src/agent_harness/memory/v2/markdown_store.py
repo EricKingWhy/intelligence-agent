@@ -497,19 +497,19 @@ class MarkdownMemoryStore:
     def _replace_sync(
         self, target: str, old_text: str, new_content: str, matched_entry: str | None = None,
     ) -> dict[str, Any]:
-        new_content = new_content.strip()
-        if not old_text.strip():
+        new_content = normalize_entry(new_content)
+        if not normalize_entry(old_text):
             return _error("old_text cannot be empty.")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
-        return self._edit(target, old_text.strip(), new_content, matched_entry)
+        return self._edit(target, normalize_entry(old_text), new_content, matched_entry)
 
     def _remove_sync(self, target: str, old_text: str, matched_entry: str | None = None) -> dict[str, Any]:
-        if not old_text.strip():
+        if not normalize_entry(old_text):
             return _error("old_text cannot be empty.")
-        return self._edit(target, old_text.strip(), None, matched_entry)
+        return self._edit(target, normalize_entry(old_text), None, matched_entry)
 
     def _locate(
         self, entries: list[str], old_text: str, verb: str, matched_entry: str | None = None,
@@ -542,7 +542,7 @@ class MarkdownMemoryStore:
         """``{"success": True, "matched_entry": <完整条目>}``，在锁内读当前态。"""
 
         def _resolve(entries: list[str]) -> dict[str, Any]:
-            idx = self._locate(entries, old_text.strip(), verb)
+            idx = self._locate(entries, normalize_entry(old_text), verb)
             return idx if isinstance(idx, dict) else {"success": True, "matched_entry": entries[idx]}
 
         return self._mutate(target, lambda entries, _limit: _resolve(entries), skip_drift=True)
@@ -623,8 +623,8 @@ class MarkdownMemoryStore:
                 msg, previous_content = self._apply_batch_op(
                     working,
                     act,
-                    (op.get("content") or op.get("new_text") or "").strip(),
-                    (op.get("old_text") or "").strip(),
+                    normalize_entry(op.get("content") or op.get("new_text") or ""),
+                    normalize_entry(op.get("old_text") or ""),
                     f"Operation {i + 1} ({act or 'unknown'})",
                     op.get("matched_entry"),
                 )
