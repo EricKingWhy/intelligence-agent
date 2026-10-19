@@ -55,7 +55,7 @@ I_SURFACE, I_LAYER, I_SUB, I_POV, I_LANES, I_FOCUSED, I_TIER, I_GOTCHAS = range(
 #: 无条件车道（`docs/agents/verification.md` §1 决策表第 1 行「任何文件」）。**每一行**都必须列它们。
 UNCONDITIONAL_LANES = ("diff-check", "coverage")
 LANE_VOCAB = {
-    "diff-check", "ruff", "oxlint", "tsc", "guards", "coverage",          # Gate-0 可跑的 6 条
+    "diff-check", "ruff", "oxlint", "tsc", "stylelint", "guards", "coverage",  # Gate-0 可跑的 7 条
     "pytest-full", "pytest-clean", "vitest", "build", "e2e", "live",      # 重车道（Gate-0 之外）
 }
 

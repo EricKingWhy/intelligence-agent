@@ -33,7 +33,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
     「推送范围 / 单车道 / 受影响面」的**局部**读数，写进同一个 `<sha>.json` 会把该树的**全量**
     结论覆写成只剩一条车道（`--replay` 还得依赖那个 `<rev>` 仍然存在）。
   · **落盘失败 = FAIL**（fail-closed）：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用。
-  · **工作树偏离 `HEAD` = 拒绝落盘并 FAIL**：6 条车道是在**工作树**上跑的，而读数只能记 `HEAD` 的
+  · **工作树偏离 `HEAD` = 拒绝落盘并 FAIL**：7 条车道是在**工作树**上跑的，而读数只能记 `HEAD` 的
     `sha` / `^{tree}`；两者不一致时写出去，这份读数就指到了一棵**没被测过的树**（§8.7 第 3 条）。
     判据**不看单一 `git status` 的脸色** —— 它受本地 config 影响、且对 `assume-unchanged` 完全失明
     （两种绕过都被 R1 实测复现过）。三条独立判据：① 追踪文件偏离（显式带 `--untracked-files=all`）；
@@ -43,7 +43,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
     唯一来源」永久卡死。只想看结果、不想先提交 ⇒ 加 `--no-record`。
   · `--replay <file>` 按落盘里的 `argv` / `cwd` / `env` **原样重跑**并比对判定（墙钟不参与），
     让"落盘 JSON 可独立复核"成为机械判据而不是人眼比对。
-  ⚠ 它只覆盖本脚本的**这 6 条机械车道**，**不是** `AGENTS.md` §14.10 的完整门禁 ——
+  ⚠ 它只覆盖本脚本的**这 7 条机械车道**，**不是** `AGENTS.md` §14.10 的完整门禁 ——
   JSON 的 `scope.does_not_cover` 如实列出没跑的重车道。
 
 ## 用法 / 退出码
@@ -119,11 +119,11 @@ GATE_DIR = os.path.join("docs", "gate")
 COLUMNS = ("surface", "layer", "sub_features", "how_to_get_to_it",
            "lanes", "focused", "neg_tier", "gotchas")
 
-#: 车道 id 词表（`docs/agents/verification.md` §2）：Gate-0 能跑的 6 条 + 重车道。
+#: 车道 id 词表（`docs/agents/verification.md` §2）：Gate-0 能跑的 7 条 + 重车道。
 #: ⚠ 这是**唯一真值**，`parse_map` 用它做 fail-closed 校验（map 里写错一个车道 id ⇒ 解析期就报错，
 #: 而不是等到 `--affected` 静默少跑一条）。`tests/test_verification_map.py` 另存一份**独立副本**——
 #: 那是刻意的交叉对账（与它那份独立匹配器同理），不是可以合并的重复。
-GATE0_LANE_IDS = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
+GATE0_LANE_IDS = ("diff-check", "ruff", "oxlint", "tsc", "stylelint", "guards", "coverage")
 HEAVY_LANE_IDS = ("pytest-full", "pytest-clean", "vitest", "build", "e2e", "live")
 LANE_VOCAB = (*GATE0_LANE_IDS, *HEAVY_LANE_IDS)
 
@@ -404,6 +404,21 @@ def build_lanes(since: str) -> list[Lane]:
     lanes.append(Lane("tsc", "tsc -b（web/，类型检查；不含 vite build）",
                       [node, tsc_js, "-b"] if (node and have_js) else None, WEB_DIR,
                       blocked=blocker or "找不到 node"))
+
+    # ④b 前端样式 lint（#1364）：CSS 里的颜色字面量是本仓设计 token 失控的工程根因
+    #     （Lane E 实测 149 种颜色字面量、60% 绕过 token）。规则与放行面全在
+    #     `web/stylelint.config.mjs`（唯一真值），这里只负责把那条配置接进机械门禁。
+    #     **不经过 `npx` / `.bin/*`**：同 ③④ 的理由（本机沙箱把 `.cmd` 拉黑）。
+    stylelint_js = os.path.join("node_modules", "stylelint", "bin", "stylelint.mjs")
+    have_stylelint = os.path.isfile(os.path.join(WEB_DIR, stylelint_js))
+    lanes.append(Lane(
+        "stylelint", "stylelint（web/src 的 CSS：禁颜色字面量）",
+        [node, stylelint_js, "--config", "stylelint.config.mjs", "src/**/*.css"]
+        if (node and have_stylelint) else None,
+        WEB_DIR,
+        blocked=("找不到 web/node_modules/stylelint（先 `cd web && pnpm install`）"
+                 if not have_stylelint else "找不到 node"),
+    ))
 
     # ⑤ 机械守卫（生成物同步 / 验证映射 / 索引可执行位）：三类都是**跨面**不变量，各自在别处
     #    没有第二条能抓（跨 `src`↔`web` 的漂移、map 的腐烂、Unix-only 的 `EXE001`）⇒
@@ -965,11 +980,12 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
 
 
 #: 未被跟踪、但**可能被某条车道读进来**的后缀 ⇒ 出现就拒绝落盘（fail-closed）。
-#: ruff 读 py/pyi/ipynb；oxlint / tsc 读 ts/tsx/js/jsx/mjs/cjs/vue；guards / coverage 读
-#: tsv（映射表、台账）与 json/toml/cfg/ini/yaml 一类配置。
+#: ruff 读 py/pyi/ipynb；oxlint / tsc 读 ts/tsx/js/jsx/mjs/cjs/vue；stylelint 读 css；
+#: guards / coverage 读 tsv（映射表、台账）与 json/toml/cfg/ini/yaml 一类配置。
 LANE_INPUT_SUFFIXES = (
     ".py", ".pyi", ".ipynb",
     ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
+    ".css",
     ".json", ".toml", ".cfg", ".ini", ".tsv", ".yaml", ".yml",
 )
 
@@ -1166,7 +1182,7 @@ def usage() -> int:
 
 
 def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
-    """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 6 条）。
+    """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 7 条）。
 
     只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
     就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。

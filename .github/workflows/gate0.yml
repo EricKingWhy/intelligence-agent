@@ -12,7 +12,7 @@
 #
 # 它跑什么
 #
-# `scripts/gate0.py` 的**全部 6 条机械车道**（diff-check / ruff / oxlint / tsc / guards / coverage）。
+# `scripts/gate0.py` 的**全部 7 条机械车道**（diff-check / ruff / oxlint / tsc / stylelint / guards / coverage）。
 # 它跑的是推送前门禁的**同一份脚本**（不是第二套判据实现）—— 但**同一份脚本 ≠ 同一个环境与
 # 范围**，本地绿**推不出** CI 绿。已实测的反例：`ruff` 的 EXE001 只在 Unix 生效（ruff 0.16.3
 # 文档原文 "is not enforced on Windows or WSL"），而 Windows 施工机 `core.filemode=false`
@@ -149,7 +149,7 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
 
-      - name: Gate-0（6 条机械车道，含覆盖闸门）
+      - name: Gate-0（7 条机械车道，含覆盖闸门）
         run: |
           # `--since` 只喂 `diff-check` 与展示：覆盖车道的区间由**台账**推出，不受它影响。
           BASE=$(git merge-base origin/main HEAD)
