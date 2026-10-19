@@ -10397,10 +10397,16 @@ button.json-row {
  *    故以内容容器的 opacity/transform 作为可观测过渡面。
  *  - 密度切换：`data-density` 在 <html> 上切换，容器本身不重挂。四档各用不同
  *    animation-name ⇒ 属性切换即重启 150ms 动画（keyframes 内容相同）。
- *  - 主题切换：body（index.css）+ 可见面 `.app-regions` / `.appbar` 同拍过渡
- *    background-color / border-color（body 被 `.app-regions` 整幅盖住）。
+ *  - 主题切换：body（index.css）+ 三栏可见面（`.app-regions` / `.appbar` /
+ *    `.session-rail` / `.step-detail`）同拍过渡 background-color / border-color
+ *    （body 被 `.app-regions` 整幅盖住；只过渡 body 是采得到帧、看不见效果）。
  *  - 全部新动效在 app.css:150 的既有 reduced-motion 块里关闭。
  */
+/* 主题切换：左栏与右栏各占 240/340px，不跟着 canvas 一起过渡就是半屏硬切。 */
+.session-rail,
+.step-detail {
+  transition: background-color var(--dur-expand) var(--ease-apple);
+}
 @keyframes conversation-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
