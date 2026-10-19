@@ -58,7 +58,14 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
         {lastTarget && (
-          <SessionReplayForm target={lastTarget} onClosed={() => setLastTarget(null)} />
+          <SessionReplayForm
+            target={lastTarget}
+            /* 只释放 DOM 引用：Content 若在退场时卸载，FocusScope 的卸载清理会
+               再把焦点抢回 body（AC2 实测红）。target 本身保留到下次打开。 */
+            onClosed={() =>
+              setLastTarget((prev) => (prev ? { ...prev, restoreFocus: null } : prev))
+            }
+          />
         )}
       </Dialog.Portal>
     </Dialog.Root>

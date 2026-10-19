@@ -173,6 +173,8 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   // 1) 身份令牌 → 配置面板
   await clickTopBarMenuItem(page, 'API 身份令牌');
   await expect(page.locator('.auth-panel')).toBeVisible();
+  // 菜单关闭时 Radix 会把焦点还给「更多工具」；Esc 只在面板内部生效，先点进输入框。
+  await page.locator('.auth-panel input').first().click();
   await page.keyboard.press('Escape');
   await expect(page.locator('.auth-panel')).toHaveCount(0);
 

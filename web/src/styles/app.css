@@ -60,6 +60,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── #1372 改动 6：radix tooltip 的唯一样式（暗/亮都走既有 token） ────────── */
 .tip-content {
   z-index: 1200;
+  /* 说明性 tooltip 不接收指针：它由 hover/focus 触发，打开后会压住邻近控件
+     （实测菜单关闭后焦点回到触发器、tooltip 展开，拦截了下方 Inspector 的点击）。 */
+  pointer-events: none;
   max-width: 280px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
