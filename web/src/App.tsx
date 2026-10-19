@@ -136,7 +136,6 @@ export default function App() {
     sessionsLoading,
     selectedId,
     conversation,
-    loadingHistory,
     historySkeleton,
     streaming,
     reconnecting,
@@ -1183,10 +1182,10 @@ export default function App() {
     () =>
       selectedId !== null &&
       !streaming &&
-      !loadingHistory &&
+      !historySkeleton &&
       conversation !== null &&
       isRecoverableRun(conversation.events),
-    [selectedId, streaming, loadingHistory, conversation],
+    [selectedId, streaming, historySkeleton, conversation],
   );
 
   // ── 预算暂停的恢复入口（`#312`）──
@@ -1302,7 +1301,7 @@ export default function App() {
   const constraintDialogOpen =
     constraintRequest !== null &&
     selectedId !== null &&
-    !loadingHistory &&
+    !historySkeleton &&
     dismissedConstraintRequestId !== constraintRequest.request_id;
 
   const handleConstraintInputAnswer = useCallback((answer: ConstraintInputAnswer) => {
@@ -1889,7 +1888,7 @@ export default function App() {
               />
             )
           )}
-          {constraintRequest && selectedId !== null && !loadingHistory && (
+          {constraintRequest && selectedId !== null && !historySkeleton && (
             <ConstraintResolutionDialog
               key={constraintRequest.request_id}
               request={constraintRequest}
@@ -1924,6 +1923,8 @@ export default function App() {
             >
               {tab.key === 'chat' ? (
                 <>
+                  {/* `historySkeleton` 是渲染期派生（含 `loadingHistory`）：effect
+                      落地前的那一帧也不能落进空态 / 上一会话内容。 */}
                   <Conversation
                     conversation={conversation}
                     loadingHistory={historySkeleton}
