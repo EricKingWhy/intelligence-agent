@@ -439,19 +439,23 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       <div className="detail-header">
         <span className="panel-label">运行详情</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
-            run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
-            「档位未知」（不伪造 "main"）。title 如实标注取值范围。 */}
-        <span
-          className="detail-profile-badge mono num"
-          title={
-            focusedRunId !== null
-              ? `agent_profile: ${agentProfile ?? '未知（聚焦任务未携带）'}（聚焦任务的生效档位）`
-              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一次任务的生效档位）`
-          }
-        >
-          {agentProfile ?? '档位未知'}
-        </span>
+        {/* #198：生效档位——#1106 起按**当前聚焦 run** 取值（选中项的信封
+            run_id 对账；无聚焦回退最后一个 run/started）。#1408：头部只留
+            运行状态 pill；档位改为 12px tertiary 文本，未知＝不渲染（不伪造
+            "main"，也不把"未知"做成与真实状态同权的徽标）。title 如实标注
+            取值范围。 */}
+        {agentProfile !== null && (
+          <span
+            className="detail-profile-badge mono num"
+            title={
+              focusedRunId !== null
+                ? `agent_profile: ${agentProfile}（聚焦任务的生效档位）`
+                : `agent_profile: ${agentProfile}（最近一次任务的生效档位）`
+            }
+          >
+            {agentProfile}
+          </span>
+        )}
         {/* #1093：请求侧推理档位——#1106 起按**当前聚焦 run** 取值（无聚焦回退
             最后一个 run/started）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
             不伪造 "default"）。title 如实标注取值范围。 */}
@@ -493,7 +497,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             onClick={() => onPanelAction({ type: 'pin', value: !panel.pinned })}
             title="钉住：切换会话时不自动收起（视图状态，不持久化）"
           >
-            <Pin size={13} aria-hidden="true" />
+            <Pin size={12} aria-hidden="true" />
             <span className="detail-ctrl-label">钉住</span>
           </button>
           <button
@@ -504,7 +508,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             onClick={() => onPanelAction({ type: 'expand', value: !panel.expanded })}
             title={panel.expanded ? '退回（Esc）' : '整页打开：长 trace / 大 diff 宽读'}
           >
-            {panel.expanded ? <Minimize2 size={13} aria-hidden="true" /> : <Maximize2 size={13} aria-hidden="true" />}
+            {panel.expanded ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
             <span className="detail-ctrl-label">整页</span>
           </button>
           <button
@@ -514,7 +518,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             onClick={() => onPanelAction({ type: 'close' })}
             title="关闭（Esc）"
           >
-            <X size={13} aria-hidden="true" />
+            <X size={12} aria-hidden="true" />
           </button>
         </span>
       </div>

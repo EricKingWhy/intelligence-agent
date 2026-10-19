@@ -193,6 +193,24 @@ describe('StepDetail 头标徽标 — #1106 聚焦 run 接线', () => {
     expect(query('.detail-effort-badge')?.getAttribute('title')).toContain('最近一次任务请求侧选中的推理档位');
   });
 
+  it('旧数据无 agent_profile → 不渲染档位（#1408：未知不占头部权重）', () => {
+    let s = initConversation('s4');
+    s = applyEvent(s, evRun(EventType.RUN_STARTED, {}, 'run-1'));
+    render(
+      <StepDetail
+        conversation={s}
+        streaming={false}
+        focus={{ kind: 'run' }}
+        onFocusRun={noop}
+        onFocusTool={noop}
+        onFocusEvent={noop}
+        onPanelAction={noop as (action: InspectorPanelAction) => void}
+        panel={PANEL}
+      />,
+    );
+    expect(query('.detail-profile-badge')).toBeNull();
+  });
+
   it('聚焦事件信封 run_id 为空串 → 视为无聚焦，回退「取最后值」（防御一致性，与 tool 路径同口径）', () => {
     const { state, runAStarted } = buildMultiRunConversation();
     // 信封 run_id='' 不指向任何 run：不得进入聚焦模式（否则匹配不到 → 档位未知），

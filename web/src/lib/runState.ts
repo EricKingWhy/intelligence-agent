@@ -347,8 +347,8 @@ function deriveRunStartedField(
  * 生效 agent_profile——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
  *
  * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
- * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
- * 编造运行条件，正是 #198 要修的不可回溯根因）。
+ * 旧数据（字段缺失）返回 null，调用方不渲染档位（#1408：未知不是与真实状态
+ * 同权的徽标）——不伪造 "main"（那是编造运行条件，正是 #198 要修的不可回溯根因）。
  *
  * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
  */

@@ -5103,8 +5103,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .detail-ctrl {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px var(--space-xs);
+  gap: 3px;
+  /* #1408：三个控制不再与状态标签抢视觉重量——12px 图标 + 更紧的内距；
+     窄面板本来就只有图标（.detail-ctrl-label 在容器查询里隐藏）。 */
+  padding: 2px 3px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -5209,42 +5211,37 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .run-badge-idle { color: var(--text-tertiary); }
 
-/* #198：Inspector 头标的档位徽标（.detail-profile-badge）——与 .run-badge 同族
- * 视觉参数，但走中性色（档位是事实标签，不是状态）。技术标识用等宽
+/* #198：Inspector 头标的档位（.detail-profile-badge）。#1408：它不再是 pill——
+ * 头部只保留运行状态一枚药丸；档位是中性事实，用 12px tertiary 文本呈现，
+ * 未知值不渲染（JSX 条件），完整取值留在 title 里。技术标识用等宽
  * （这里显式写 font-family——本仓没有独立 .mono 规则，挂空类名是假样式）。 */
 .detail-profile-badge {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  padding: 3px var(--space-sm);
-  border-radius: var(--radius-full);
-  background: var(--color-hover);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
   /* 档位名是**后端标识符**（`research_review` 15 字符 = 126px），长度不受前端
      控制。给它 `min-width:0`（可低于 min-content = 真的能截断）+ 省略号，让它在
      真正不够宽时才让位；不设硬上限——否则宽面板上本来放得下的档位名也会被砍。
-     实测（面板 340 + 该档位名）：`clientWidth 93 / scrollWidth 124`，即**这一档
-     下确实截断**（显示 `research_re…`），完整值在 title 里；同一输入在 480 下
-     仍截断到 ~101（该宽度上 5 个兄弟的 max-content 合计 483 > 内容宽 448，
-     缺口按各弹性项摊分）。所以"截断"是常态而非例外，别再写成"都能完整显示"。 */
+     截断后完整值仍在 title 里。 */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* #1093：Inspector 头标的推理档位徽标（.detail-effort-badge）——与
- * .detail-profile-badge 同族视觉；档位是事实标签，整段仅在 run/started 携带
+/* #1093：Inspector 头标的推理档位（.detail-effort-badge）。#1408：同档位一样
+ * 退出 pill 体系，改为 12px tertiary 文本；整段仅在 run/started 携带
  * reasoning_effort 时渲染（未声明不铺空位，不伪造 "default"）。 */
 .detail-effort-badge {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  padding: 3px var(--space-sm);
-  border-radius: var(--radius-full);
-  background: var(--color-hover);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 /* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。
