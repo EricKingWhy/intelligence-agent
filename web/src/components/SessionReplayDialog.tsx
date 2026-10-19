@@ -20,7 +20,7 @@
  *  （重放零副作用，不改任何会话真相）。数据来自 `replaySession`（只读端点）。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Play, X } from 'lucide-react';
 import { describeSessionError, replaySession, type SessionReplayStep } from '../lib/api';
@@ -59,9 +59,13 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
     setLastTarget(target);
     setOpenBatch((n) => n + 1);
   }
-  /** 当前是否处于打开态（0ms 卸载回调可能晚于一次快速重开）。 */
+  /** 当前是否处于打开态（0ms 卸载回调可能晚于一次快速重开）。
+   *  用 layout effect 而非渲染期写 ref：只在已提交的树上更新，被丢弃的渲染不会
+   *  留下错误的镜像；layout effect 在同一提交内同步执行，先于 0ms 卸载定时器。 */
   const openRef = useRef(target !== null);
-  openRef.current = target !== null;
+  useLayoutEffect(() => {
+    openRef.current = target !== null;
+  }, [target]);
   return (
     <Dialog.Root
       open={target !== null}
