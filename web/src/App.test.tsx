@@ -99,6 +99,8 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
         error: null,
         sessionsError: null,
         titlesById: {},
+        sendFailure: null,
+        runFailedBeforePlan: null,
         recoverState: {
           // #357 W-13：App 现在读 `pendingDecisions` 决定是否挂裁决面板——夹具补全
           // RecoverState 的形状（本用例只驱动投影提交，恢复态保持 idle）。
@@ -398,9 +400,13 @@ describe('Composer procedural rule signal (#298 R5)', () => {
       container!.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click();
     });
 
-    expect(H.submitTask).toHaveBeenCalledWith(expect.objectContaining({
-      task: '后续始终使用 pnpm',
-      remember_as_procedural_rule: true,
-    }));
+    // 第二参是 #1367 的 `{ onRetry }`（重试动作随失败回执走）；这里只核载荷。
+    expect(H.submitTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: '后续始终使用 pnpm',
+        remember_as_procedural_rule: true,
+      }),
+      expect.objectContaining({ onRetry: expect.any(Function) }),
+    );
   });
 });

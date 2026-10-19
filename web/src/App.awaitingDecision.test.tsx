@@ -53,6 +53,8 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
       error: null,
       sessionsError: null,
       titlesById: {},
+      sendFailure: null,
+      runFailedBeforePlan: null,
       recoverState: H.recoverState,
       selectSession: NOOP,
       submitTask: NOOP,

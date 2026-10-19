@@ -1203,6 +1203,60 @@ for (const theme of ['dark', 'light'] as const) {
     await expectEachContrast(page, theme, ['.run-pulse.pulse-failed', '.detail-header .run-badge-failed']);
   });
 
+  /* #1367（审查 P1-4）：run 失败的内联错误条。字色继承 `.approval-error`
+   * （ink-mix(--danger 45%, --text-primary)），复用的 marker 底是 danger 8% 淡染；
+   * 纯 `--color-destructive` 在亮色只有 3.88:1 —— 改回 token 这条必然变红。
+   * 两个类都量：`approval-error` 是共享 token（审批失败条也用它），
+   * `conversation-error` 是本条自己的布局类，同一元素两处口径都要达标。 */
+  test(`[${theme}] #1367 内联错误条（conversation-error / approval-error）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-errorbar';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 're', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑到失败' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'run/failed', data: { reason: 'APIConnectionError', message: '运行失败（APIConnectionError）：无法连接模型供应商（网络或网关不可达）' }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑到失败');
+    await expectEachContrast(page, theme, [
+      '.conversation-error',
+      '.conversation-error .conversation-error-title',
+      '.conversation-error .conversation-error-hint',
+      '.approval-error.conversation-error',
+    ]);
+  });
+
+  /* #1367（审查 P1-4）/ #1356 OBS-015：审批错误条**单独量**。它与对话区那条共用
+   * `.approval-error` 的字色/底规则，但父容器底色不同（卡片面 vs 对话面），
+   * 有效对比度必须各自达标；`.approval-error-text` 与重试按钮都继承该字色。 */
+  test(`[${theme}] #1367 审批错误条（approval-error 族）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: EVENTS,
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+      onApprovePost: (route) => route.fulfill({
+        status: 500,
+        body: JSON.stringify({ detail: 'Internal Server Error' }),
+        contentType: 'application/json',
+      }),
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    const card = page.locator('.approval-card');
+    await card.waitFor();
+    await card.locator('.approval-approve').click();
+    await expect(card.locator('.approval-error')).toBeVisible();
+    await expectEachContrast(page, theme, [
+      '.approval-error',
+      '.approval-error .approval-error-text',
+      '.approval-error .approval-error-retry',
+    ]);
+  });
+
   /* pulse-paused + 暂停面板（.pause-panel-head / .pause-resume-btn）：预算到顶暂停（非终态）。 */
   test(`[${theme}] #1175 预算暂停态（pulse-paused / pause-panel / pause-resume-btn）对比度 ≥4.5`, async ({ page }) => {
     const sid = 's-contrast-paused';

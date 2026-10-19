@@ -12,7 +12,8 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Activity } from 'lucide-react';
+import { Activity, AlertTriangle } from 'lucide-react';
+import { describeFailure, type FailureCopy } from '../hooks/useSession';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain, emptyChildTurnIndex, latestEditableTurn } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
@@ -103,6 +104,16 @@ interface Props {
   planApprovalError?: string | null;
   /** 提交计划裁决（App 侧走同一条 resume 通道）。 */
   onPlanApprovalAnswer?: (answer: PlanApprovalAnswer) => void;
+  /** #1367（P0-3）：提交/续聊失败的**内联**呈现（只承载断网这一类）。
+   *  null = 无。App 用 useMemo 保证身份稳定，不破坏本组件的 memo。 */
+  submitFailure?: FailureCopy | null;
+  /** 条内「重试」动作（由失败回执携带，绑死失败那次入参）。缺席 = 只呈现不给按钮。 */
+  onRetrySubmit?: (() => void) | undefined;
+  /** 重试在途：按钮进入禁用的忙态（同步闸在 App 侧，这里只做可见那一半）。 */
+  retryPending?: boolean;
+  /** `run/failed` 的内联条让位给已有的 plan-stuck 横幅（#1193，同一失败事实已
+   *  带原因 + 退出 plan 动作）。 */
+  suppressRunFailure?: boolean;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -112,6 +123,55 @@ const EXAMPLE_TASKS = [
   '创建 todo.md，写入三条今日计划',
   '列出当前目录的文件结构并总结',
 ];
+
+/**
+ * #1367（P0-3）：对话区内的**内联错误条**。
+ *
+ * 为什么长在这里而不是沿用顶部单槽横幅：`run/failed` 是**这一轮**的失败，
+ * 它的事件与投影（`conversation.run_failure`）本来就落在对话上；把它抬到全局
+ * 横幅会与"会话列表加载失败"之类无关错误抢同一个槽（useSession 的 error 是单槽，
+ * 见其注释），且用户滚到会话中部时看不到原因。提交/续聊失败（断网）没有 run，
+ * 由 App 经 `submitFailure` 传进来，同一套视觉。
+ *
+ * 视觉复用既有 `.approval-error` alert token（红底 8% + 2px 左实条 + 既有字号），
+ * 只加单行布局与折叠详情（`.conversation-error*` 仅布局，不新增第三套 alert 样式）。
+ * 默认收起 = 一行高；原始详情进 `<details>`，不默认铺满。
+ */
+export const ErrorBar = memo(function ErrorBar({
+  copy,
+  onRetry,
+  retryPending = false,
+}: {
+  copy: FailureCopy;
+  onRetry?: () => void;
+  /** 重试在途：按钮禁用（防连点造重复会话，审查 P1-2）。 */
+  retryPending?: boolean;
+}) {
+  return (
+    <div className="approval-error conversation-error" role="alert">
+      <AlertTriangle size={14} className="conversation-error-icon" aria-hidden="true" />
+      <span className="conversation-error-title">{copy.title}</span>
+      {copy.hint !== '' && <span className="conversation-error-hint">{copy.hint}</span>}
+      {copy.detail !== '' && (
+        <details className="conversation-error-detail">
+          <summary>原始详情</summary>
+          <pre>{copy.detail}</pre>
+        </details>
+      )}
+      {copy.retryable && onRetry !== undefined && (
+        <button
+          type="button"
+          className="conversation-error-retry"
+          disabled={retryPending}
+          aria-busy={retryPending}
+          onClick={onRetry}
+        >
+          重试
+        </button>
+      )}
+    </div>
+  );
+});
 
 /**
  * F2（#272）：`memo` 包裹——挡住"与对话无关的父级提交"（打字 / hover / 拖宽 / 换焦点）。
@@ -124,7 +184,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer, submitFailure = null, onRetrySubmit, retryPending = false, suppressRunFailure = false }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -228,6 +288,36 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   // 的内部滚动体。
   const sessionId = conversation?.session_id ?? null;
   const runActive = conversation?.run_status === 'running';
+  // #1367：`run/failed` 的呈现层文案。只认投影事实（run_status + run_failure），
+  // 不碰上报链路；取消的 run 投影里 run_failure 本来就是 null，这里再挡一道。
+  const runFailureCopy = useMemo(() => {
+    if (
+      suppressRunFailure ||
+      !conversation ||
+      conversation.run_status !== 'failed' ||
+      conversation.run_cancelled
+    ) {
+      return null;
+    }
+    const failure = conversation.run_failure;
+    // #1367 审查 C-P2-3：run 失败的「连不上」是**后端→模型供应商**，不是浏览器断网
+    // （这条事件已经送到浏览器了）。来源分开传，文案才不指错方向。
+    return failure === null ? null : describeFailure(failure, { source: 'run' });
+  }, [conversation, suppressRunFailure]);
+  /* #1367：两种失败条**各呈现一次**（审查 P3：原先 submitFailure 会遮掉先前 run 的
+     401/400 说明）。空态与非空态两个分支共用这份节点，避免同一段优先级逻辑写两遍。 */
+  const failureBars = (
+    <>
+      {submitFailure !== null && (
+        <ErrorBar
+          copy={submitFailure}
+          onRetry={onRetrySubmit}
+          retryPending={retryPending}
+        />
+      )}
+      {runFailureCopy !== null && <ErrorBar copy={runFailureCopy} />}
+    </>
+  );
   // run 结束的那一提交也会改高度：流式期间的纯文本要重渲染成 markdown、kind 行
   // 撤掉、复制按钮出现。而 runActive 已转 false，自动贴底 effect 不再跑，于是视口
   // 停在距底几十像素处；此时又不是流式（`suspended` 恒 false），连浮标都没有。
@@ -392,6 +482,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   if (!conversation || conversation.turns.length === 0) {
     return (
       <div className="conversation">
+        {failureBars}
         <div className="conversation-empty">
           <div className="empty-logo"><Activity size={20} /></div>
           <div className="empty-hero">暂无对话</div>
@@ -470,6 +561,9 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
           ))}
         </div>
         <MemoryActivity key={conversation.session_id} conversation={conversation} />
+        {/* #1367（P0-3）：内联错误条——run 失败（含 401/400/5xx）与提交断网
+            共用这一处。虚拟化行之外（同 MemoryActivity），不参与测高。 */}
+        {failureBars}
         {/* #1204：`ask_user` 通用提问的内嵌卡片——长在对话流尾部（虚拟化行之外，
             同 MemoryActivity / 内联审批卡的做法），不参与 measureElement 测高。
             `key` 按 request_id：换请求即重挂，卡片本地草稿不串题。 */}

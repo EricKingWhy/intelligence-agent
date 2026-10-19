@@ -388,7 +388,7 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
     expect(captured.hook!.error).toContain('刷新');
   });
 
-  it('POST 的真实失败优先于认领超时 ⇒ 仍报「提交失败：<原因>」', async () => {
+  it('认领期 POST 迟到失败 ⇒ 同样按「结局不明」呈现，且不给重试动作（审查 P1-1）', async () => {
     let rejectPost!: (e: Error) => void;
     vi.mocked(startSession).mockReturnValue(
       new Promise<Response>((_r, reject) => { rejectPost = reject; }) as never,
@@ -401,7 +401,7 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
     await mount();
     let result: string | null = null;
     await act(async () => {
-      const p = captured.hook!.submitTask({ task: 'POST 真的失败了' });
+      const p = captured.hook!.submitTask({ task: 'POST 真的失败了' }, { onRetry: () => {} });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
       // 先让 POST 落定失败，再由认领超时收口：`late.failure` 必须优先。
       rejectPost(new Error('网络中断'));
@@ -411,8 +411,11 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
       result = await p;
     });
 
-    expect(result).toBe('提交失败：网络中断');
-    expect(captured.hook!.error).toBe('提交失败：网络中断');
+    // 认领已经越过分叉窗口 ⇒ 服务端很可能已落盘 ⇒ 不能自称「提交失败」并劝重试。
+    expect(result).toContain('可能已成功');
+    expect(result).toContain('网络中断');
+    expect(captured.hook!.sendFailure?.retryable).toBe(false);
+    expect(captured.hook!.sendFailure?.onRetry).toBeUndefined();
   });
 });
 
