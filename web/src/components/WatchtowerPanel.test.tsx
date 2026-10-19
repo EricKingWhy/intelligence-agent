@@ -130,7 +130,7 @@ describe('WatchtowerPanel', () => {
     expect(document.body.textContent).toContain('调度器运行中 · 单实例');
     expect(document.body.textContent).toContain('1 个定时任务会话等待你验收');
     expect(document.body.textContent).toContain('检查夜间构建并汇总失败原因');
-    expect(document.body.textContent).toContain('Sandbox · docker');
+    expect(document.body.textContent).toContain('沙箱 · docker');
     expect(document.body.textContent).toContain('64,000 字');
   });
 
@@ -149,8 +149,8 @@ describe('WatchtowerPanel', () => {
     expect(prompt).not.toBeNull();
     expect(duration).not.toBeNull();
     expect(createButton?.disabled).toBe(true);
-    expect(document.body.textContent).toContain('只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够时间继续时');
-    expect(document.body.textContent).toContain('如果设了时长预算，到点后会创建截止时间，等待请求会被拒绝');
+    expect(document.body.textContent).toContain('定时任务可以等待你的回答，但任务必须仍有足够的轮数 / 字数预算，且没有设定截止时间');
+    expect(document.body.textContent).toContain('只要设了时长预算，定时任务就不能等待你的回答——时长预算从触发时开始倒计时');
     expect(document.body.textContent).toContain('停止受影响的工作，等你处理');
     expect(document.body.textContent).not.toContain('保持暂停');
 

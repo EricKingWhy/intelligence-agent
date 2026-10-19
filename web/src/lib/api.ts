@@ -1143,7 +1143,7 @@ export async function postApproval(
     body: JSON.stringify(body),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
-  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（任务已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
@@ -1580,7 +1580,7 @@ function parseArtifactSlice(raw: unknown): ArtifactSlice {
   const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
   const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
   if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
-    throw new Error('产出文件内容：响应形状不符');
+    throw new Error('产出文件内容格式不完整');
   }
   return {
     artifact_id: artifactId,
@@ -2353,7 +2353,7 @@ function buildRecoverBody(decisions?: RecoverDecisionInput[]): string | null {
   for (const decision of decisions) {
     if (decision.source !== undefined && decision.source.length > RECOVER_DECISION_SOURCE_MAX) {
       throw new Error(
-        `决定来源过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
+        `决定说明过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
       );
     }
   }

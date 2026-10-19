@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** ConstraintsTab / ConstraintsView（#1190 Phase 1 / #1191 Phase 2）—— 我的要求页。
+/** ConstraintsTab / ConstraintsView（#1190 Phase 1 / #1191 Phase 2）—— 约束管理页。
  *
  *  锁的是 issue §四/§五与不变量 #22（UI 不做第二真相）：
  *  ① 纯展示视图 `ConstraintsView` 由数据 props 驱动——状态筛选默认「生效中」、
@@ -146,8 +146,8 @@ describe('ConstraintsView（纯展示，SSR）', () => {
   it('#1191：顶部优先级条逐字在场', () => {
     const html = ssr();
     expect(html).toContain('同样内容的要求，生效优先级：会话＞项目＞全局');
-    expect(html).toContain('不同内容全部生效，由 AI 决定。');
-    expect(html).toContain('被覆盖的条目不生效。撤销后仍保留历史记录。');
+    expect(html).toContain('不同内容会全部提供给 AI，由它决定怎么处理。');
+    expect(html).toContain('标记的条目不生效。撤销后仍保留历史记录。');
   });
 
   it('默认「生效中」只渲染 active 行', () => {

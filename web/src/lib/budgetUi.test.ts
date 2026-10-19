@@ -116,10 +116,10 @@ describe('budgetSummary — trigger 摘要（#536 §2.5）', () => {
 
   it('部分设置 → turns 恒在（默认/数值），tokens 与 deadline 设了才出', () => {
     // 设计稿示例形态：turns 未设 + 500k + 2h。
-    expect(budgetSummary('', '500000', '2h')).toBe('轮数 默认 · 500k 字 · 2 小时');
+    expect(budgetSummary('', '500000', '2h')).toBe('轮数 默认 · 500k · 2h');
     expect(budgetSummary('5', '', '')).toBe('轮数 5');
-    expect(budgetSummary('5', '250000', '')).toBe('轮数 5 · 250k 字');
-    expect(budgetSummary('', '', '30m')).toBe('轮数 默认 · 30 分钟');
+    expect(budgetSummary('5', '250000', '')).toBe('轮数 5 · 250k');
+    expect(budgetSummary('', '', '30m')).toBe('轮数 默认 · 30m');
   });
 
   it('datetime 草稿 → 摘要里显示 MM-DD HH:mm（不是原始 datetime-local 串）', () => {

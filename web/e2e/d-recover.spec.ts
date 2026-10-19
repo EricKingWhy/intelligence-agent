@@ -164,6 +164,7 @@ test('恢复遇 409：裁决提示单独成形（自动处理口径），不混�
   // 声明"下次恢复会按操作类型自动处理"，后端原文只在折叠的技术详情层。
   const conflict = page.locator('.recover-conflict');
   await expect(conflict).toContainText('自动处理');
+  await expect(conflict).toContainText('结果还没结清');
   await expect(conflict).not.toContainText('需要你裁决');
   await expect(conflict).not.toContainText('POST /api/sessions');
   await expect(conflict).not.toContainText('tool_call_id');

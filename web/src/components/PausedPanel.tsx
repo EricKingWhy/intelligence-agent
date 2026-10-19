@@ -47,14 +47,6 @@ export interface PausedPanelProps {
   resuming: boolean;
 }
 
-/** 维度 key 的中文短名（暂停面板逐维清单的左侧标签）。 */
-const DIMENSION_DISPLAY: Record<string, string> = {
-  agent_turns: '轮数',
-  model_requests: '模型请求',
-  total_tokens: '字数',
-  cost_usd: '成本',
-};
-
 /** 一维的读数行（与 CLI `_extra_dimension_lines` 同一口径的排版）。命中的那一维
  *  带"到顶"字样，用户一眼看到是谁卡住了。 */
 function dimensionLine(fact: DimensionFact): string {
@@ -92,9 +84,9 @@ export function PausedPanel({
   // `run.tool_call_limits.<name>` 都在标题里点名）：CLI 的暂停摘要也打
   // `dimension=run.deadline_at`，"卡在哪一维"不该只有命令行看得见。
   const headline = facts.deadlinePause
-    ? `截止时间 ${facts.deadline ?? 'unavailable'} 已到：` +
+    ? `截止时间 ${facts.deadline ?? '暂无读数'} 已到：` +
       '到点后不再接受新的模型请求 / 工具调用 / 子任务；' +
-      '正在进行的调用会按各自的超时时间正常结束'
+      '正在进行的调用会按各自的超时时间收尾；结果未知的会进入待处理列表'
     : tripped
       ? `${tripped.label}：已消耗 ${tripped.consumedText} · 上限 ${tripped.ceilingText}${
           tripped.remaining === null ? '' : `（剩余 ${tripped.remainingText}）`
@@ -114,7 +106,7 @@ export function PausedPanel({
         <span>
           {facts.deadlinePause
             ? '已在截止时间处暂停——这次任务只是暂停，不是出错'
-            : '预算已用完，任务暂停了——不是出错'}
+            : '预算或安全上限已到，任务暂停了——不是出错'}
         </span>
       </div>
       <div className="pause-panel-facts">
@@ -134,7 +126,7 @@ export function PausedPanel({
       <div className="pause-panel-facts">
         {facts.dimensions.map((fact) => (
           <div key={fact.spec.dimension}>
-            {DIMENSION_DISPLAY[fact.spec.consumedKey] ?? fact.spec.consumedKey}: {dimensionLine(fact)}
+            {fact.spec.consumedKey}: {dimensionLine(fact)}
           </div>
         ))}
       </div>

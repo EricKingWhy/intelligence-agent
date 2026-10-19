@@ -273,7 +273,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeVisible();
   await expect(slider).toHaveValue('0');
   await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
@@ -369,7 +369,7 @@ test('Reasoning Effort refresh keeps a value supported by the selected model', a
   await expect(modelTrigger).toContainText('effort-model');
 
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeVisible();
   await expect(slider).toBeFocused();
   await page.keyboard.press('ArrowRight');
@@ -443,7 +443,7 @@ test('active fallback projects its own default without replacing the primary pre
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
   await expect(effortTrigger).toBeVisible();
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');

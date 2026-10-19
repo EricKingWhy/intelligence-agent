@@ -55,7 +55,7 @@ function render(p: RunPausedInfo, options: { draft?: string; resuming?: boolean 
 describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
   it('reason / consumed / limit / version / closeout / continuation 全部在场', () => {
     const html = render(paused());
-    expect(html).toContain('预算已用完，任务暂停了');
+    expect(html).toContain('预算或安全上限已到，任务暂停了');
     expect(html).toContain('run.max_agent_turns_total');
     expect(html).toContain('预算到顶（某一项上限用完了）');
     // 读数按**命中的那一维**报（`#313`）：turns 命中时标题给出本轮读数，四维清单
@@ -63,7 +63,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(html).toContain('这次任务累计轮数到顶：已消耗 3');
     expect(html).toContain('上限 8');
     expect(html).toContain('剩余 5');
-    expect(html).toContain('轮数: 3 / 上限 8（剩余 5） · 到顶');
+    expect(html).toContain('agent_turns: 3 / 上限 8（剩余 5） · 到顶');
     expect(html).toContain('预算版本 2');
     expect(html).toContain('结束方式 model');
     expect(html).toContain('单次执行轮数上限 500（deployment）');
@@ -78,7 +78,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     // （它说的是"这一段计划里已完成的部分"），拿整段 HTML 做子串否定会把它误判成
     // "面板声称 run 已完成"。
     const head = html.slice(0, html.indexOf('pause-panel-facts'));
-    expect(head).toContain('预算已用完，任务暂停了');
+    expect(head).toContain('预算或安全上限已到，任务暂停了');
     expect(head).toContain('不是出错');
     expect(head).not.toContain('已完成');
     expect(head).not.toContain('失败：');
@@ -105,10 +105,10 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
       }),
     );
     expect(html).toContain('这次任务累计模型请求到顶：已消耗 4');
-    expect(html).toContain('模型请求: 4 / 上限 4（剩余 0） · 到顶');
+    expect(html).toContain('model_requests: 4 / 上限 4（剩余 0） · 到顶');
     // turns 维没到顶也要在清单里（事实完整），但它不是"卡住的那一维"。
-    expect(html).toContain('轮数: 3 / 上限 8（剩余 5）');
-    expect(html).not.toContain('轮数: 3 / 上限 8（剩余 5） · 到顶');
+    expect(html).toContain('agent_turns: 3 / 上限 8（剩余 5）');
+    expect(html).not.toContain('agent_turns: 3 / 上限 8（剩余 5） · 到顶');
     // 恢复输入抬的是 requests，且预校验按 requests 的消耗算（4 + 预留 1 + 1 = 6）。
     expect(html).toContain('上限（max_model_requests）');
     expect(html).toContain('至少 6');
@@ -136,7 +136,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
       }),
       { draft: '1.50' },
     );
-    expect(html).toContain('成本: 1.25 / 上限 1.25（剩余 0.00） · 到顶');
+    expect(html).toContain('cost_usd: 1.25 / 上限 1.25（剩余 0.00） · 到顶');
     expect(html).toContain('上限（max_cost_usd）');
     // 计量维度不能说"至少 N"（判据是严格大于已消耗，连续域上没有最小值）——
     // 提示必须如实说规则，2.25 只是默认值。
@@ -146,7 +146,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
 
   it('未配 run ceiling：写 unlimited 与"未声明"（不写 0 冒充）', () => {
     const html = render(paused({ run_limit: null, local_fuse: null, continuation: null }));
-    expect(html).toContain('unlimited');
+    expect(html).toContain('不设上限');
     expect(html).not.toContain('剩余 0');
     expect(html).not.toContain('local fuse');
     expect(html).not.toContain('下一步：');
@@ -219,7 +219,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(html).toContain('抬的是 tool_call_limits.glob');
     expect(html).toContain('--run-tool-limit glob=N');
     // turns 维没到顶照旧列着（事实完整），但它不是卡住的那一维。
-    expect(html).toContain('轮数: 2 / 上限 8（剩余 6）');
+    expect(html).toContain('agent_turns: 2 / 上限 8（剩余 6）');
   });
 
   it('命中 run 维时也照旧列出工具配额清单（它是事实，不是"卡住的那一维"）', () => {
@@ -241,7 +241,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
       }),
       { draft: '10' },
     );
-    expect(html).toContain('工具 glob: 已用 2 次调用 / 2 次尝试 / 上限 unlimited（剩余 unavailable）');
+    expect(html).toContain('工具 glob: 已用 2 次调用 / 2 次尝试 / 上限 不设上限（剩余 暂无读数）');
     expect(html).not.toContain(' · 到顶（run.tool_call_limits');
     // 恢复输入照旧抬 turns（工具配额只是清单里的事实）。
     expect(html).toContain('上限（max_agent_turns_total）');
@@ -259,7 +259,7 @@ describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
   function deadlinePaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
     return paused({
       reason: 'deadline',
-      trigger_dimension: 'deadline_at',
+      trigger_dimension: 'run.deadline_at',
       consumed_dimensions: {
         agent_turns: 2, model_requests: 3, total_tokens: 40, cost_usd: null,
         tool_calls: 1, tool_attempts: 1,

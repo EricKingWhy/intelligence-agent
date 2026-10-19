@@ -423,7 +423,7 @@ function RuleGroup({
                   <div className="watchtower-rule-meta">
                     <span>{budgetSummary(rule)}</span>
                     <span>自动档 · 等待超时不会授权</span>
-                    <span>{rule.sandbox_backend ? `Sandbox · ${rule.sandbox_backend}` : 'Sandbox · 部署默认'}</span>
+                    <span>{rule.sandbox_backend ? `沙箱 · ${rule.sandbox_backend}` : '沙箱 · 部署默认'}</span>
                     <span>{rule.model ?? '默认模型链'}</span>
                   </div>
                   {rule.last_notice && <p className="watchtower-notice" role="status">{rule.last_notice}</p>}
@@ -688,7 +688,7 @@ function CreateWatchtowerForm({
             )}
             {(availableBackends.length > 0 || selectedBackendMissing) && (
               <label className="watchtower-field" htmlFor={sandboxId}>
-                <span>Sandbox</span>
+                <span>沙箱</span>
                 <select id={sandboxId} value={sandbox} onChange={(event) => setSandbox(event.target.value)}>
                   <option value="">部署默认</option>
                   {selectedBackendMissing && <option value={sandbox}>{sandbox} · 当前会话</option>}
@@ -712,9 +712,11 @@ function CreateWatchtowerForm({
         <section className="watchtower-consent-box" aria-labelledby="watchtower-consent-title">
           <h3 id="watchtower-consent-title">定时任务使用自动权限</h3>
           <ul>
-            <li>只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够的轮数 / 字数 / 时间预算继续时，定时任务才可以等待你的回答；设了时长预算会立刻开始倒计时，到点后等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，任务收到“用户可能不在”的提示后继续；要求冲突超时后不会替你选择或授权，任务收到未解决提示并停止受影响的工作，等你处理。</li>
+            <li>定时任务可以等待你的回答，但任务必须仍有足够的轮数 / 字数预算，且没有设定截止时间。只要设了时长预算，定时任务就不能等待你的回答——时长预算从触发时开始倒计时。</li>
+            <li>允许等待时，通用提问超时后不写入答案，任务收到“用户可能不在”的提示后继续。</li>
+            <li>要求冲突超时后不会替你选择或授权，任务收到未解决提示并停止受影响的工作，等你处理。</li>
             <li>删除文件、发外部请求、git push 等危险操作会自动放行；此期间没有人逐次复核。</li>
-            <li>仍使用你选定的 Sandbox。运行结果只进入「待验证」，不会自动验收或标记为通过。</li>
+            <li>仍使用你选定的沙箱。运行结果只进入「待验证」，不会自动验收或标记为通过。</li>
           </ul>
           <label className="watchtower-consent-check">
             <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />

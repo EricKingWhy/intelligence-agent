@@ -34,7 +34,7 @@ function pausedFrames(): FrameSpec[] {
         budget_version: 1,
         consumed: { agent_turns: 2, total_tokens: 1234 },
         limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-        resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+        resume_requirements: ['抬高字数上限后继续这次任务'],
       },
     },
   ];
@@ -134,8 +134,8 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   //    重连退避（500ms×2³）走完需要几秒 ⇒ 放宽这一条 expect 的超时。
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
-  await expect(panel).toContainText('预算已用完，任务已暂停');
-  await expect(panel).toContainText('抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复');
+  await expect(panel).toContainText('预算或安全上限已到，任务暂停了');
+  await expect(panel).toContainText('抬高字数上限后继续这次任务');
 
   // ④ UI 抬高卡住的那一维 → 恢复同一 run
   await panel.getByLabel(/恢复用的上限/).fill('9999');

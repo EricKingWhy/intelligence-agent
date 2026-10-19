@@ -349,7 +349,7 @@ test('AC8：头部必须容得下最长档位名（不溢出面板、控制按�
   await expect(resizer).toHaveAttribute('aria-valuenow', '480');
   await expect(page.locator('.detail-run-id')).toBeVisible();
   // 单 run / 6 事件的 fixture（EVENTS）→ 文案逐字（含中文单位，不是裸 run_id）
-  await expect(page.locator('.detail-run-id')).toHaveText('1 次任务 · 6 事件');
+  await expect(page.locator('.detail-run-id')).toHaveText('共 1 轮 · 6 事件');
 
   // 最窄处仍然**真的能点**（Playwright 会做可操作性检查：视口外/被遮挡会超时）
   for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowRight');

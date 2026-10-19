@@ -24,7 +24,7 @@ import {
 /** 挡位短标签：后端给的是 token 数，界面按 K 说（100_000 → 「100K」）。
  *  只做单位换算，不做取舍判断——显示哪个挡位由后端值决定。 */
 function fmtTier(tokens: number): string {
-  return `${Math.round(tokens / 1000)}K`;
+  return `${Math.round(tokens / 1000)}K 字`;
 }
 
 export function ContextWindowPanel({
@@ -146,14 +146,14 @@ export function ContextWindowPanel({
             <div className="ctx-window-thresholds" aria-live="polite">
               <div className="ctx-window-threshold">
                 <span>开始自动精简</span>
-                <strong>{settings.thresholds.auto_compact.toLocaleString()}</strong>
+                <strong>{settings.thresholds.auto_compact.toLocaleString()} 字</strong>
                 <span className="ctx-window-threshold-pct">
                   {pct(settings.thresholds.auto_compact)}
                 </span>
               </div>
               <div className="ctx-window-threshold">
                 <span>上限</span>
-                <strong>{settings.thresholds.hard_guard.toLocaleString()}</strong>
+                <strong>{settings.thresholds.hard_guard.toLocaleString()} 字</strong>
                 <span className="ctx-window-threshold-pct">
                   {pct(settings.thresholds.hard_guard)}
                 </span>

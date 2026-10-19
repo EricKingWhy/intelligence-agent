@@ -393,7 +393,7 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
         onBudgetRunDeadlineChange: noop,
       }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('>轮数 5 · 500k 字 · 2 小时<');
+    expect(html).toContain('>轮数 5 · 500k · 2h<');
   });
 
   it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {

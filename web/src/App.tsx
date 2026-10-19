@@ -1447,7 +1447,7 @@ export default function App() {
       {
         id: 'toggle-inspector',
         label: '切换运行详情',
-        keywords: 'toggle inspector 右栏 运行详情',
+        keywords: 'toggle run inspector 右栏 运行详情',
         hint: '右栏',
         group: 'actions',
         run: () => {
@@ -1503,7 +1503,7 @@ export default function App() {
         ? [{
             id: 'copy-run-id',
             label: '复制任务编号',
-            keywords: 'copy id 任务编号',
+            keywords: 'copy run id 任务编号',
             hint: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),

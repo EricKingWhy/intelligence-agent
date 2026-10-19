@@ -1201,7 +1201,7 @@ for (const theme of ['dark', 'light'] as const) {
           reason: 'budget_exhausted', trigger_dimension: 'run.max_total_tokens', budget_version: 1,
           consumed: { agent_turns: 2, total_tokens: 1234 },
           limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-          resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+          resume_requirements: ['抬高字数上限后继续这次任务'],
         },
       },
     ];

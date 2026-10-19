@@ -102,7 +102,7 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
     expect(html).toContain('>概览<');
     expect(html).toContain('>输入<');
     expect(html).toContain('>输出<');
-    // 默认输出选中（aria-selected）
+    // 默认 Output 选中（aria-selected）
     expect(html).toMatch(/aria-selected="true"[^>]*>输出</);
     // Output 面板内容在（exit_code 键来自 result 对象树）
     expect(html).toContain('exit_code');
@@ -116,7 +116,7 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
     expect(html).toMatch(/aria-selected="true"[^>]*>概览</);
     expect(html).not.toContain('>输出<');
     // Overview 元信息：tool_call_id / status
-    expect(html).toContain('tool_call_id');
+    expect(html).toContain('调用编号');
     expect(html).toContain('running');
   });
 
@@ -211,19 +211,19 @@ describe('EventInspector Overview（BUG-008）', () => {
 
   it('step_id 键缺失：不渲染空的 step 幽灵行（否则出现「step」后跟空值）', () => {
     const html = renderEvent(baseEvent);
-    expect(html).not.toContain('>step<');
+    expect(html).not.toContain('>步骤<');
     // 阳性对照——面板整体确实渲染了（避免「整个面板没渲染」这种空洞绿）
     expect(html).toContain('run/started');
-    expect(html).toContain('>seq<');
+    expect(html).toContain('>序号<');
   });
 
   it('同一渲染点的相邻语义：number 渲染 step 行（含值 7），null 哨兵不渲染（0 与数值不是哨兵）', () => {
     const withStepHtml = renderEvent(withStep(7));
-    expect(withStepHtml).toContain('>step<');
+    expect(withStepHtml).toContain('>步骤<');
     expect(withStepHtml).toContain('>7<');
-    expect(renderEvent(withStep(0))).toContain('>step<');
+    expect(renderEvent(withStep(0))).toContain('>步骤<');
     expect(renderEvent(withStep(0))).toContain('>0<');
-    expect(renderEvent(withStep(null))).not.toContain('>step<');
+    expect(renderEvent(withStep(null))).not.toContain('>步骤<');
   });
 });
 
@@ -254,8 +254,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     const html = renderTab(twoRunConversation());
     const headers = (html.match(/tl-run-header/g) || []).length;
     expect(headers).toBe(2);
-    expect(html).toContain('第 1 次任务');
-    expect(html).toContain('第 2 次任务');
+    expect(html).toContain('第 1 轮执行');
+    expect(html).toContain('第 2 轮执行');
     expect(html).toContain('run-badge-completed');
     expect(html).toContain('run-badge-running');
     // 第一组 4 事件（session/started 归入 r1 组）；打在 .tl-run-count 上防 tl-seq 误命中
@@ -272,12 +272,12 @@ describe('TimelineTab run 分组头（UI-03）', () => {
       s = applyEvent(s, { type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 3 + i, run_id: 'r2', step_id: 1, session_id: 'long' });
     }
     const html = renderTab(s);
-    // r1 的两条已滚出窗口 → 其组头不渲染；r2 组头在场且**保留真序号 第 2 次任务**
-    //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 第 1 次任务 正是本票要防的事故）
+    // r1 的两条已滚出窗口 → 其组头不渲染；r2 组头在场且**保留真序号 Run 2**
+    //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 Run 1 正是本票要防的事故）
     expect(html).not.toContain('run-badge-completed');
     expect(html).toContain('tl-run-header');
-    expect(html).toContain('>第 2 次任务</span>');
-    expect(html).not.toContain('>第 1 次任务</span>');
+    expect(html).toContain('>第 2 轮执行</span>');
+    expect(html).not.toContain('>第 1 轮执行</span>');
   });
 });
 

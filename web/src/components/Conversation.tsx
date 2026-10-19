@@ -781,7 +781,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   }
                   onClick={() => onFork(turn.user_message_seq!)}
                 >
-                  从这里另开一条
+                  从这里另开一条新会话
                 </button>
               )}
             </span>

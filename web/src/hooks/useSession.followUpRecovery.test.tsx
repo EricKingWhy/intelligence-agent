@@ -8,7 +8,7 @@
  *
  *  本文件锁三件事：
  *   1. 结构化的 409 → 结局携带后端清单（不是字符串匹配出来的）；
- *   2. `recoverState` 被点亮成 conflict + pendingDecisions ⇒ App 据此渲染待处理列表
+ *   2. `recoverState` 被点亮成 conflict + pendingDecisions ⇒ App 据此渲染裁决面板
  *      （#22：清单只来自后端载荷，本 hook 不合成、不缓存）；
  *   3. 失败时 `sendMessage` resolve **false** —— 这是 composer「保留用户输入」的
  *      唯一信号（`11 §6.1`：「409 冲突后 MUST 刷新权威状态并保留用户未发送的输入」）。

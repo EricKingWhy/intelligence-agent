@@ -147,14 +147,14 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
   await page.locator('.detail-tab[title="时间线"]').click();
   const headers = page.locator('.tl-run-header');
   await expect(headers).toHaveCount(2);
-  await expect(headers.first()).toContainText('第 1 次任务');
+  await expect(headers.first()).toContainText('第 1 轮执行');
   await expect(headers.first()).toContainText('已完成');
   await expect(headers.first()).toContainText('4 事件');
-  await expect(headers.nth(1)).toContainText('第 2 次任务');
+  await expect(headers.nth(1)).toContainText('第 2 轮执行');
   await expect(headers.nth(1)).toContainText('进行中');
 
   // 头标对齐：描述全会话范围，不再显示单个 run_id 短码
-  await expect(page.locator('.detail-run-id')).toHaveText('2 次任务 · 7 事件');
+  await expect(page.locator('.detail-run-id')).toHaveText('共 2 轮 · 7 事件');
 
   // tab 计数徽章（识别而非回忆）
   await expect(page.locator('.detail-tab[title="时间线"] .detail-tab-count')).toHaveText('7');

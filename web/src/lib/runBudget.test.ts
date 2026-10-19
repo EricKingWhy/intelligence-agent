@@ -184,8 +184,8 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
       'agent_turns', 'model_requests', 'total_tokens',
     ]);
     const tokens = requests.dimensions[2];
-    expect(tokens.ceilingText).toBe('unlimited');
-    expect(tokens.remainingText).toBe('unavailable');
+    expect(tokens.ceilingText).toBe('不设上限');
+    expect(tokens.remainingText).toBe('暂无读数');
     // requests 维的恢复阈值含 closeout 预留：4 + 1 + 1 = 6。
     expect(minResumeValue(targetRunSpec(requests), requests.tripped!)).toBe(6);
   });
@@ -368,8 +368,8 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
     );
     expect(facts.trippedTool).toBeNull();
     expect(facts.toolQuotas.map((quota) => quota.name)).toEqual(['glob']);
-    expect(facts.toolQuotas[0].ceilingText).toBe('unlimited');
-    expect(facts.toolQuotas[0].remainingText).toBe('unavailable');
+    expect(facts.toolQuotas[0].ceilingText).toBe('不设上限');
+    expect(facts.toolQuotas[0].remainingText).toBe('暂无读数');
     // 命中 turns 维时恢复目标照旧是 turns（工具配额只是清单里的事实）。
     expect(targetRunSpec(facts).resumeField).toBe('max_agent_turns_total');
   });
@@ -392,7 +392,7 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
     // calls 表未知 ⇒ 只列配了配额的工具名（glob / bash），读数一律 unavailable。
     expect(facts.toolQuotas.map((quota) => quota.name)).toEqual(['bash', 'glob']);
     expect(facts.toolQuotas.map((quota) => quota.callsText)).toEqual([
-      'unavailable', 'unavailable',
+      '暂无读数', '暂无读数',
     ]);
     // 账目未知时算不出最小合法值 ⇒ 草稿默认值给 null（调用方渲染空串，不编数字），
     // 草稿预校验如实说"这一维配了 ceiling 而账目未知 ⇒ 后端必然 409"。
@@ -408,7 +408,7 @@ describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed
   function deadlinePaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
     return pausedInfo({
       reason: 'deadline',
-      trigger_dimension: 'deadline_at',
+      trigger_dimension: 'run.deadline_at',
       consumed_dimensions: {
         agent_turns: 2, model_requests: 3, total_tokens: 40, cost_usd: null,
         tool_calls: 1, tool_attempts: 1,
@@ -447,7 +447,7 @@ describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed
     const hint = resumeInputHint(facts);
     expect(hint).toContain('未来');
     expect(hint).toContain('2026-09-26T04:10:00Z');
-    expect(hint).toContain('--run-deadline 2026-09-26T04:30:00Z');
+    expect(hint).not.toContain('CLI:');
     expect(resumeTargetCliFlag(facts.resumeTarget)).toBe('--run-deadline 2026-09-26T04:30:00Z');
   });
 
@@ -584,9 +584,9 @@ describe('budgetBadgeFacts — 徽标同源取数（#537）', () => {
     const badges = budgetBadgeFacts(CEILINGS, { agent_turns: 4, model_requests: 8, total_tokens: null, cost_usd: null });
     const tokens = badges.find((f) => f.spec.dimension === 'run.max_total_tokens');
     const cost = badges.find((f) => f.spec.dimension === 'run.max_cost_usd');
-    expect(tokens?.consumedText).toBe('unavailable');
+    expect(tokens?.consumedText).toBe('暂无读数');
     expect(tokens?.warning).toBe(false);
-    expect(cost?.consumedText).toBe('unavailable');
+    expect(cost?.consumedText).toBe('暂无读数');
     expect(cost?.warning).toBe(false);
   });
 
@@ -595,7 +595,7 @@ describe('budgetBadgeFacts — 徽标同源取数（#537）', () => {
   });
 });
 
-// ── #1026：context 维暂停（记忆容量）—— 不是 run ceiling，不给伪数字输入 ──
+// ── #1026：context 维暂停（max_context_tokens）—— 不是 run ceiling，不给伪数字输入 ──
 
 describe('context 维暂停（#1026）—— 记忆容量 不回落 turns（验收 5）', () => {
   /** 真实载荷形状：context 硬护栏触发的 run/paused（W-04 #348）。 */

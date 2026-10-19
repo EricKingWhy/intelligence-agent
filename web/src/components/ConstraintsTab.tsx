@@ -31,7 +31,7 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { FACT_TYPE_DOTS, FACT_TYPE_LABELS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
+import { FACT_TYPE_DOTS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
@@ -39,9 +39,14 @@ type StatusFilter = 'all' | 'active' | 'revoked';
 
 /** 类型下拉的 6 个具体类型（issue §四.3）；「全部类型」是另立的空值 option，
  *  两者合计 = 票面所称的「下拉 7 值」。 */
-const TYPE_OPTIONS: readonly { value: string; label: string }[] = Object.entries(
-  FACT_TYPE_LABELS,
-).map(([value, label]) => ({ value, label }));
+const TYPE_OPTIONS: readonly string[] = [
+  'constraint',
+  'user_goal',
+  'authorization',
+  'work_boundary',
+  'failed_approach',
+  'evidence_ref',
+];
 
 const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -51,8 +56,8 @@ const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
 
 /** 顶部优先级条文案（#1191 §五.1，逐字）。`overridden_by` 用等宽字体呈现，
  *  与票面用反引号标注代码标识符的意图一致。 */
-const PRIORITY_BAR = '同样内容的要求，生效优先级：会话＞项目＞全局——不同内容全部生效，由 AI 决定。';
-const PRIORITY_BAR_TAIL = ' 被覆盖的条目不生效。撤销后仍保留历史记录。';
+const PRIORITY_BAR = '同样内容的要求，生效优先级：会话＞项目＞全局——不同内容会全部提供给 AI，由它决定怎么处理。';
+const PRIORITY_BAR_TAIL = ' 标记的条目不生效。撤销后仍保留历史记录。';
 
 /** 三组眉标（#1191 §五.2）。 */
 const GROUPS: readonly {
@@ -299,6 +304,7 @@ export function ConstraintsView({
 
       <div className="cn-prio" data-testid="constraints-priority">
         {PRIORITY_BAR}
+        <code>overridden_by</code>
         {PRIORITY_BAR_TAIL}
       </div>
 
@@ -326,8 +332,8 @@ export function ConstraintsView({
         >
           <option value="">全部类型</option>
           {TYPE_OPTIONS.map((type) => (
-            <option key={type.value} value={type.value}>
-              {type.label}
+            <option key={type} value={type}>
+              {type}
             </option>
           ))}
         </select>

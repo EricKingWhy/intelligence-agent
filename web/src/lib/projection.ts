@@ -1814,7 +1814,7 @@ function summarizeConstraintInheritance(event: AgentEvent): string {
   if (d.omit_constraints === true) return '干净启动：不沿用任何要求';
   const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
   const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
-  return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;
+  return `沿用 ${inherited} 条 · 未沿用 ${notInherited} 条`;
 }
 
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──

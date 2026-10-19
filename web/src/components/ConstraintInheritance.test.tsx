@@ -82,14 +82,14 @@ describe('ConstraintInheritance', () => {
     const rows = [...c.querySelectorAll('.ci-row')];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('PROJECT · 本项目');
-    expect(rows[0].textContent).toContain('要求');
+    expect(rows[0].textContent).toContain('constraint');
     expect(rows[0].textContent).toContain('所有 Python 改动必须先写 failing test');
     expect(rows[0].textContent).toContain('已沿用');
     expect(rows[1].textContent).toContain('SESSION · 本会话');
-    expect(rows[1].textContent).toContain('授权');
+    expect(rows[1].textContent).toContain('authorization');
     expect(rows[1].textContent).toContain('已沿用');
     expect(c.querySelector('.ci-clean-msg')).toBeNull();
-    // 没有「没有沿用」条目 → 该组不渲染
+    // 无 NOT INHERITED 条目 → 该组不渲染
     expect(c.textContent).not.toContain('没有沿用');
     cleanup();
   });

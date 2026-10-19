@@ -179,7 +179,7 @@ export function ReasoningEffortSlider({
           />
         ))}
         <input
-          aria-label="Reasoning Effort slider"
+          aria-label="推理档位"
           aria-valuetext={valueText}
           className="reasoning-effort-slider__input"
           disabled={disabled}

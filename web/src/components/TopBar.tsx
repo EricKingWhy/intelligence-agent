@@ -186,7 +186,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-right">
-        <div className="density-picker" role="radiogroup" aria-label="Trace 密度">
+        <div className="density-picker" role="radiogroup" aria-label="显示密度">
           {DENSITIES.map((d) => (
             <button
               key={d}

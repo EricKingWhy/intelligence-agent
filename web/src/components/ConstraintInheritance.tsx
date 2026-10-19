@@ -21,7 +21,7 @@ import {
   scopeEyebrow,
   type InheritanceRowView,
 } from '../lib/constraintInheritance';
-import { FACT_TYPE_DOTS, FACT_TYPE_LABELS } from '../lib/constraints';
+import { FACT_TYPE_DOTS } from '../lib/constraints';
 
 function Row({ row, injected }: { row: InheritanceRowView; injected: boolean }) {
   return (
@@ -35,7 +35,7 @@ function Row({ row, injected }: { row: InheritanceRowView; injected: boolean }) 
               style={{ background: FACT_TYPE_DOTS[row.type] ?? 'var(--cn-type-default)' }}
               aria-hidden="true"
             />
-            {FACT_TYPE_LABELS[row.type] ?? row.type}
+            {row.type}
           </span>
           {row.value}
         </div>

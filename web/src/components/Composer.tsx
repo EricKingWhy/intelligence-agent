@@ -1575,7 +1575,7 @@ export const Composer = memo(function Composer({
               icon={Brain}
               currentTone={reasoningEffortTone}
               footer={reasoningEffortProjection && reasoningEffortCapability
-                ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；运行结束后恢复主模型选择。`
+                ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；本次任务结束后恢复主模型选择。`
                 : undefined}
               customContent={
                 <ReasoningEffortSlider

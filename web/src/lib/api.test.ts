@@ -1284,14 +1284,14 @@ describe('getArtifactContent — artifact 切片解析（#185/#186，缺字段�
 
   it('缺 total_lines / returned_lines → 抛错（此前静默填 0，界面会显示"共 0 行"的假空产物）', async () => {
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', lines: [] });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
   });
 
   it('缺 artifact_id 或 lines → 抛错（形状不符不走"空内容"）', async () => {
     captureFetch(200, { lines: [], total_lines: 0, returned_lines: 0 });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', total_lines: 0, returned_lines: 0 });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
   });
 
   /* #227：非 2xx 的 kind **只按机读码判**，不按状态码猜原因。

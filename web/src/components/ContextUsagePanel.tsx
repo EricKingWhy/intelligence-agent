@@ -198,7 +198,7 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
         {!error && usage && (usage.state === 'ok' || usage.state === 'usage_only') && (
           <>
             <div className="ctx-usage-total">
-              {usage.used_tokens.toLocaleString()} / {usage.window_tokens.toLocaleString()}
+              {usage.used_tokens.toLocaleString()} / {usage.window_tokens.toLocaleString()} 字
               {'（'}{pctOf(usage.used_tokens, usage.window_tokens).toFixed(1)}%{'）'}
             </div>
 
@@ -242,7 +242,7 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                     title={
                       i === 0
                         ? `自动精简阈值 ${Math.round(t * 100)}%`
-                        : `硬上限 ${Math.round(t * 100)}%`
+                        : `上限 ${Math.round(t * 100)}%`
                     }
                   />
                 ),

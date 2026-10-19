@@ -221,7 +221,7 @@ export function deadlineDraftError(paused: RunPausedInfo, draft: string): string
   }
   if (ms <= Date.now()) {
     const was = deadlineInstant(paused);
-    return `deadline 必须是**未来**的时刻，否则恢复后立刻再次暂停${
+    return `截止时间必须是未来的时刻，否则恢复后立刻再次暂停${
       was ? `（本次 ${was} 已到点）` : ''
     }`;
   }
@@ -302,10 +302,10 @@ function toolQuotaFact(name: string, paused: RunPausedInfo): ToolQuotaFact {
     attempts,
     ceiling,
     remaining,
-    callsText: calls === null ? 'unavailable' : String(calls),
-    attemptsText: attempts === null ? 'unavailable' : String(attempts),
-    ceilingText: ceiling === null ? 'unlimited' : String(ceiling),
-    remainingText: remaining === null ? 'unavailable' : String(remaining),
+    callsText: calls === null ? '暂无读数' : String(calls),
+    attemptsText: attempts === null ? '暂无读数' : String(attempts),
+    ceilingText: ceiling === null ? '不设上限' : String(ceiling),
+    remainingText: remaining === null ? '暂无读数' : String(remaining),
     tripped: paused.trigger_dimension === dimension,
   };
 }
@@ -471,7 +471,7 @@ function compareDimension(
 export function dimensionLabel(dimension: string): string {
   const spec = RUN_DIMENSIONS.find((row) => row.dimension === dimension);
   if (spec) return spec.label;
-  if (dimension === DEADLINE_DIMENSION || dimension === 'deadline_at') {
+  if (dimension === DEADLINE_DIMENSION) {
     return '截止时间已到';
   }
   if (dimension === 'local.max_agent_turns') {
@@ -521,9 +521,9 @@ function dimensionFact(spec: RunDimensionSpec, paused: RunPausedInfo): Dimension
     ceiling,
     remaining,
     // 缺失一律 unavailable / unlimited，**永不**用 0 顶替（`11 §6.1`，与 CLI 同口径）。
-    consumedText: consumed === null ? 'unavailable' : String(consumed),
-    ceilingText: ceiling === null ? 'unlimited' : String(ceiling),
-    remainingText: remaining === null ? 'unavailable' : String(remaining),
+    consumedText: consumed === null ? '暂无读数' : String(consumed),
+    ceilingText: ceiling === null ? '不设上限' : String(ceiling),
+    remainingText: remaining === null ? '暂无读数' : String(remaining),
     tripped: paused.trigger_dimension === spec.dimension,
   };
 }
@@ -568,7 +568,7 @@ export function resumeTargetCliFlag(target: ResumeTarget): string {
   if (target.kind === 'run') return `${target.spec.resumeFlag} N`;
   if (target.kind === 'tool') return `--run-tool-limit ${target.quota.name}=N`;
   if (target.kind === 'context') {
-    return '/compact（或调大记忆容量）后继续，不需要再设上限';
+    return '/compact（或调大 max_context_tokens / 记忆容量）后继续，不需要再设上限';
   }
   return `${DEADLINE_RESUME_FLAG} ${DEADLINE_EXAMPLE}`;
 }
@@ -660,7 +660,7 @@ export function resumeInputHint(facts: PauseFacts): string {
     // deadline 维的判据是**严格在未来**（`resume_headroom_ok`）：给不出"至少到多少"，
     // 只能点名"必须晚于现在"以及原来那个已到点的时刻（好让用户看出这是**换时刻**，
     // 不是"把同一个时刻调大"）。
-    return `换一个**未来**的绝对截止时刻（CLI: ${resumeTargetCliFlag(target)}，RFC 3339 UTC）；${
+    return `换一个未来的截止时间（RFC 3339 UTC）；${
       facts.deadline === null ? '本次暂停快照里没有时刻' : `本次 ${facts.deadline} 已到点`
     }——沿用会被拒（409）。已消耗不重置，恢复沿用同一个任务编号`;
   }
@@ -674,7 +674,7 @@ export function resumeInputHint(facts: PauseFacts): string {
     facts.dimensions.find((row) => row.spec.dimension === spec.dimension) ?? null;
   const minimum = fact === null ? null : minResumeValue(spec, fact);
   const requirement = spec.decimal
-    ? `须严格大于已消耗 ${fact?.consumedText ?? 'unavailable'}（默认给到 ${String(minimum)}）`
+    ? `须严格大于已消耗 ${fact?.consumedText ?? '暂无读数'}（默认给到 ${String(minimum)}）`
     : `至少 ${String(minimum)}`;
   return `抬的是 ${spec.resumeField}（CLI: ${resumeTargetCliFlag(target)}，${requirement}）；已消耗不重置，恢复沿用同一个任务编号`;
 }
@@ -747,7 +747,7 @@ export function budgetBadgeFacts(
       spec,
       consumed: value,
       ceiling,
-      consumedText: value === null || value === undefined ? 'unavailable' : String(value),
+      consumedText: value === null || value === undefined ? '暂无读数' : String(value),
       ceilingText: String(ceiling),
       warning: badgeWarning(value, ceiling, spec.decimal),
     });

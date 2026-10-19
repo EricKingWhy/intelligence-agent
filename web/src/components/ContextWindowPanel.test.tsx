@@ -76,9 +76,9 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     await renderPanel();
 
     expect(getContextSettings).toHaveBeenCalledWith('s1');
-    expect(radios().map((r) => r.textContent)).toEqual(['50K', '200K']);
-    expect(checked()).toBe('50K');
-    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('50K 当前生效');
+    expect(radios().map((r) => r.textContent)).toEqual(['50K 字', '200K 字']);
+    expect(checked()).toBe('50K 字');
+    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('50K 字 当前生效');
   });
 
   it('阈值与默认挡位都是后端值原样显示（前端不乘比例、不硬编码 200K）', async () => {
@@ -91,15 +91,15 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     );
     await renderPanel();
 
-    expect(threshold('开始自动精简')).toBe('210,000');
-    expect(threshold('上限')).toBe('255,000');
+    expect(threshold('开始自动精简')).toBe('210,000 字');
+    expect(threshold('上限')).toBe('255,000 字');
     // 「恢复默认」的落点是 configured_default（256K），不是写死的 200K。
-    expect(document.body.querySelector('.ctx-window-reset')?.textContent).toContain('恢复 256K');
+    expect(document.body.querySelector('.ctx-window-reset')?.textContent).toContain('恢复 256K 字');
   });
 
   it('点另一挡 → PATCH 该 token 数，回执即新选中态', async () => {
     await renderPanel();
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
 
     await act(async () => {
       radios()[4].click();
@@ -107,8 +107,8 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     expect(setContextWindow).toHaveBeenCalledWith('s1', 500_000);
-    expect(checked()).toBe('500K');
-    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('500K 当前生效');
+    expect(checked()).toBe('500K 字');
+    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('500K 字 当前生效');
   });
 
   it('PATCH 失败（422 非法挡位）→ 选中态不动，就地显示后端 detail', async () => {
@@ -123,7 +123,7 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     // 零改写：仍停在 200K（后端 422 也是零写入，界面与事实一致）。
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
     expect(document.body.querySelector('.ctx-window-error')?.textContent).toContain('得到 12345');
   });
 
@@ -138,7 +138,7 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     expect(setContextWindow).toHaveBeenCalledWith('s1', 200_000);
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
   });
 
   it('读设置失败 → 显示错误，不渲染挡位（不编一个假清单）', async () => {

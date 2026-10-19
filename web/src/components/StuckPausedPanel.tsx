@@ -32,8 +32,7 @@ export function StuckPausedPanel({ paused }: StuckPausedPanelProps) {
         <span>已因疑似卡住暂停——这次任务只是暂停，不是出错</span>
       </div>
       <div className="pause-panel-facts">
-        原因 {paused.reason}（{pauseReasonLabel(paused)}）· 命中模式 {paused.trigger_dimension} ·
-        预算版本 {paused.version} · 结束方式 {paused.closeout_source}
+        原因：{pauseReasonLabel(paused)} · 预算版本 {paused.version}
         {paused.trace_id ? ` · trace ${paused.trace_id}` : ''}
       </div>
       {continuation && (

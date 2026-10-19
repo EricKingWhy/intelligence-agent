@@ -362,7 +362,7 @@ describe('#1193 — 横幅派生规则表（deriveRunFailedBeforePlan）', () =>
 
   it('message 缺失时给可读兜底（不显示空白横幅）', () => {
     const bare = { ...planStuckFrame(9), data: { code: 'run-failed-before-plan' } } as AgentEvent;
-    expect(deriveRunFailedBeforePlan([bare])?.message).toContain('运行失败');
+    expect(deriveRunFailedBeforePlan([bare])?.message).toContain('任务失败');
     expect(deriveRunFailedBeforePlan([bare])?.hint).toBe('');
   });
 });

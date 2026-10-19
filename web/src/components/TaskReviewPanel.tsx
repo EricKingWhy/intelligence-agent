@@ -598,7 +598,7 @@ export function TaskReviewPanel({
                 {/* #1325 S3：按批准文案对照表删掉「交付投影 open_run_ids」一行——
                     普通用户不需要理解内部投影。reconcile / Operation Ledger 的排查
                     说明按对照表留在诊断区（默认收起）。 */}
-                <div>需核对（来源未接入）。结果未知 / 核对属于操作记录的范围，本页不接入也不推断。</div>
+                <div>需核对（来源未接入）。结果未知，或需要核对的事项，属于操作记录的范围；本页不接入也不推断。</div>
               </div>
             </details>
           </>

@@ -196,7 +196,7 @@ describe('ContextUsagePanel「其他」桶细分（#1095）', () => {
     expect(sub).not.toBeNull();
     const text = sub!.textContent ?? '';
     // 全部子项加法列出（后端 key 对齐：provider 注入/运行期快照/计划锚块/
-    // 牢记事项/修改路径/水位警告/进度核对），0 子项也显示。
+    // 保护事实/修改路径/水位警告/进度核对），0 子项也显示。
     for (const label of ['Provider 注入', '运行期快照', '计划锚块', '牢记事项',
       '修改路径', '水位警告', '进度核对']) {
       expect(text).toContain(label);
