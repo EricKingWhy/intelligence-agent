@@ -86,7 +86,7 @@ test('#1370 窄轨：会话行可点面积 ≥24×24 且不画发丝线', async 
   await page.setViewportSize({ width: 800, height: 900 });
   await page.goto('/');
   // 列表是挂载后异步拉的：先等行真的渲染出来，再量几何。
-  await expect(page.locator('.session-items .session-row')).toHaveCount(2);
+  await expect(page.locator('.session-items .session-row .session-item')).toHaveCount(2);
 
   const geometry = await page.evaluate(() => {
     const items = Array.from(document.querySelectorAll<HTMLElement>('.session-items .session-row .session-item'));
@@ -107,7 +107,7 @@ test('#1370 窄轨：会话行可点面积 ≥24×24 且不画发丝线', async 
   for (const row of geometry) {
     expect(row.width).toBeGreaterThanOrEqual(24);
     expect(row.minHeight).toBe(24);
-    expect(row.height).toBeLessThan(44);
+    expect(row.height).toBe(24);
     // 同组 ≥2 行：窄轨规则缺席时首行会拿到分组发丝线的 solid。
     expect(row.borderBottom).toBe('none');
   }
