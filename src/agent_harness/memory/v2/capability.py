@@ -286,11 +286,11 @@ class MemoryV2Service:
             except Exception as error:  # noqa: BLE001 — 见 docstring
                 logger.warning(
                     "markdown 删除投影失败（%s），SQLite 已提交：%s",
-                    type(error).__name__, memory.id,
+                    type(error).__name__, memory.memory_id,
                 )
                 continue
             if not response.get("success"):
-                logger.warning("markdown 删除投影未生效，SQLite 已提交：%s", memory.id)
+                logger.warning("markdown 删除投影未生效，SQLite 已提交：%s", memory.memory_id)
         if digests:
             try:
                 cleaned = await store.remove_by_digest(digests)
