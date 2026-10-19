@@ -3332,6 +3332,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-destructive);
   font-size: var(--text-xs);
 }
+/* #1367：审批错误条内的图标 + 条内「重试」（只加布局；配色仍继承 .approval-error）。 */
+.approval-error-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.approval-error-icon {
+  flex: none;
+}
+.approval-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 /* #1367（P0-3）：对话区内的内联错误条。**视觉 token 全部继承 `.approval-error`**
  * （danger 8% 底 + 2px 左实条 + 既有字号），这里只加单行布局与折叠详情——
  * 不新增第三套 alert 样式（app-error / approval-error / 本组件的配色必须同源）。
