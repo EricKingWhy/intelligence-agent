@@ -525,7 +525,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
           const count = tabCounts[t.id];
           return (
-            <Tip key={t.id} content={TAB_TIPS[t.id]}>
+            <Tip
+              key={t.id}
+              content={`${TAB_TIPS[t.id]}${count !== undefined ? `（当前 ${count} 条）` : ''}`}
+            >
               <button
                 role="tab"
                 aria-selected={tab === t.id}

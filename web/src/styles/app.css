@@ -5393,21 +5393,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .detail-tab-label {
     display: none;
   }
-  /* #1372 改动 8：默认 340px 面板也要能看懂这排图标——选中项保留文字标签，
-     其余 icon-only 由 tooltip 说明口径（票面：图标加文字标签 + tooltip）。
-     **取舍**：6 个英文标签在 340px 内完整排不下（≈520px 需求），全显会截断成
-     省略号；因此「文字标签」只在有空间时（>360px / 选中项）成立，默认宽度下
-     由 6 个 tooltip 补足口径。不做 hover 展开——那会让相邻图标跳动。 */
-  .detail-tab.sel .detail-tab-label {
-    display: inline;
-  }
+  /* #1407：窄面板统一 icon-only + tooltip（含选中项），不再给选中项单独展开
+     文字、也不在图标旁留裸数字——那会让 tab 条变成"一个宽 pill + 一排图标 +
+     数字"的参差行。计数改由 tooltip 说明（Tip 内容带「当前 N 条」）。所有
+     tab 同宽，选中态只靠背景/字色区分。 */
   .detail-tab {
     flex: 0 0 auto;
     padding: var(--space-xs);
   }
-  .detail-tab.sel {
-    flex: 0 1 auto;
-    padding: var(--space-xs) var(--space-sm);
+  .detail-tab-count {
+    display: none;
   }
   /* #183：面板窄到 360 以下时，头部三个控制（钉住/整页/关闭）降级为 icon-only
      ——同一条容器查询口径（拖窄不是"变了个窗口"，是这个面板自己的宽度行为）。 */
