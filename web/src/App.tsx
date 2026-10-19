@@ -991,7 +991,10 @@ export default function App() {
    *  劫持。重试按钮只在这条回执确实带着动作时出现（非 Composer 入口不给按钮）。 */
   const submitFailure = useMemo(() => {
     if (sendFailure === null) return null;
-    const copy = describeFailure(sendFailure.message, { retryable: sendFailure.retryable });
+    /* 文案里的「点重试」与按钮同一个判据：`retryable` 为真但调用方没给动作时
+       （hook 契约允许）不要许诺一个不存在的按钮。 */
+    const canRetry = sendFailure.retryable && sendFailure.onRetry !== undefined;
+    const copy = describeFailure(sendFailure.message, { retryable: canRetry });
     return copy.kind === 'network' ? copy : null;
   }, [sendFailure]);
 
