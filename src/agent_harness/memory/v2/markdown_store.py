@@ -72,6 +72,20 @@ def _scan_memory_content(content: str) -> str | None:
     return _first_threat_message(content, scope="strict")
 
 
+def _delimiter_error(content: str) -> str | None:
+    """含保留分隔符的 content 一旦落盘就会分裂成多条——**拒绝，不转义**。
+
+    转义会让磁盘文本 ≠ 记忆文本，而 pin / digest / 去重全按正文逐字相等判定。
+    拒绝让模型当场自纠（拆成多次 add），代价只是一轮重试。
+    """
+    if ENTRY_DELIMITER in content:
+        return (
+            'Blocked: content contains the reserved entry delimiter "\\n§\\n"; '
+            "split it into multiple add operations."
+        )
+    return None
+
+
 def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"success": False, "error": message, **extra}
 
@@ -471,6 +485,8 @@ class MarkdownMemoryStore:
         content = normalize_entry(content)
         if not content:
             return _error("Content cannot be empty.")
+        if delimiter_error := _delimiter_error(content):
+            return _error(delimiter_error)
         if scan_error := _scan_memory_content(content):
             return _error(scan_error)
 
@@ -502,6 +518,8 @@ class MarkdownMemoryStore:
             return _error("old_text cannot be empty.")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
+        if delimiter_error := _delimiter_error(new_content):
+            return _error(delimiter_error)
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
         return self._edit(target, normalize_entry(old_text), new_content, matched_entry)
@@ -607,6 +625,10 @@ class MarkdownMemoryStore:
         ops = [op or {} for op in operations]
         # 先扫所有 add/replace 内容，再碰磁盘——一个投毒 op 拒绝整批。
         for i, op in enumerate(ops):
+            # 与 `_apply_batch_op` 收到的 content 同一个取值，否则 new_text 别名绕过守卫。
+            writable = normalize_entry(op.get("content") or op.get("new_text") or "")
+            if delimiter_error := _delimiter_error(writable):
+                return _error(f"Operation {i + 1}: {delimiter_error}")
             scan_error = (
                 op.get("action") in {"add", "replace"}
                 and op.get("content")
