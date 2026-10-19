@@ -561,6 +561,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .rail-drawer-btn {
   display: none;
 }
+/* #1368：抽屉遮罩。只在展开时渲染；宽屏（>820px）恒 `display:none`——桌面档没有抽屉，
+   万一状态残留也不能挡住三栏。窄屏的定位（铺满视口、画在轨背景之下）在
+   `@media (max-width: 820px)` 里给。 */
+.rail-scrim {
+  display: none;
+}
 .session-list-header {
   display: flex;
   align-items: center;
@@ -5647,24 +5653,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     align-self: flex-start;
     margin-left: var(--space-md);
   }
-
-  /* ── #1368：控件行横向滚动，动作簇钉在右下 ──
-   * 换行（`flex-wrap: wrap`）在 390 会把预算 pill 推到第二行，且第一行末尾的
-   * Agent pill 钻到绝对定位的动作簇底下（实测重叠 141px²）。改成 nowrap + 横向
-   * 滚动：pill 不缩不换行，右端留出动作簇的宽度（8px 偏移 + 68px 簇宽 + 4px 余量），
-   * 滚动到底也不会被遮住。流式档（有 Esc 提示）继续走 `--composer-actions-w` 那条
-   * `:has()` 规则（160px），它优先级更高、不受这里影响。 */
-  .composer-controls {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    padding-right: calc(var(--space-sm) + 72px);
-    scrollbar-width: none;
-  }
-  .composer-controls::-webkit-scrollbar {
-    display: none;
-  }
-  .composer-controls > * {
-    flex: 0 0 auto;
+  /* 遮罩铺满视口，命中区吃掉"点抽屉外"。`z-index:-1` 让它在**同一个层叠上下文**
+   * （轨的 fixed + z-index 30）里画到轨背景之下：轨自身的盒子仍然是最上层命中区
+   * （点行、滚列表不受影响），而抽屉外的视口范围由遮罩独占——那一下不会穿到正文。
+   * 视觉遮罩不重画：它仍是轨本身 `box-shadow: 0 0 0 100vmax` 那一圈。 */
+  .rail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: -1;
   }
 
   /* #1368：窄屏把记忆卡的操作列改成竖排——正文列留住可读宽度，按钮文字仍横排
@@ -7689,6 +7686,33 @@ button.json-row {
   align-items: center;
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
+}
+/* ── #1368：窄屏控件行横向滚动，动作簇钉在右下 ──
+ * 换行（`flex-wrap: wrap`）在 390 会把预算 pill 推到第二行，且第一行末尾的
+ * Agent pill 钻到绝对定位的动作簇底下（实测重叠 141px²）。改成 nowrap + 横向滚动。
+ * ⚠ 右端让位用 **margin** 而不是 padding：`nowrap` 下溢出的项会画进 padding 区
+ * （overflow 在 padding 边缘裁），padding 只给"滚到最右"留空位——滚在中间时最后
+ * 一项照样钻到动作簇底下。margin 缩短的是**滚动视口本身**，任何滚动位置都不会重叠。
+ * 流式档（有 Esc 提示）的动作簇更宽，走同一条 margin 口径，不叠两条右缩进。
+ * ⚠ 位置不能挪回上面那个 `@media (max-width: 820px)` 大块：本条覆盖的是**本规则下方**
+ * 的 `.composer-controls`（基础形态），而媒体查询不加优先级——同权重下后写的赢，
+ * 挪回去 `flex-wrap: wrap` 与 `padding` 简写会把它整个盖掉（实测：计算值仍是 wrap）。 */
+@media (max-width: 820px) {
+  .composer-controls {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin-right: 76px;
+    scrollbar-width: none;
+  }
+  .composer-controls::-webkit-scrollbar {
+    display: none;
+  }
+  .composer-controls > * {
+    flex: 0 0 auto;
+  }
+  .composer-dock:has(.composer-esc-hint) .composer-controls {
+    margin-right: var(--composer-actions-w);
+  }
 }
 .composer-fallback-effort-note {
   max-width: min(100%, 340px);

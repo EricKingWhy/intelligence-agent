@@ -164,25 +164,17 @@ export const SessionList = memo(function SessionList({
     onSelect(id);
   };
   /** Escape 关抽屉：覆盖层必须有不依赖鼠标的退出路径（键盘用户不能只剩"再点一次按钮"）。
-   *  点抽屉外任意处也关：遮罩是 CSS 画的（`box-shadow` 大扩散），没有可点的节点，
-   *  所以"点外面"由这个 pointerdown 判定——判据是"目标不在 rail 内"，不是"点在遮罩上"。
-   *  用 pointerdown 而不是 click：拖选文本、按滚动条都不该被误判成"点外面"之后的第二次动作。 */
-  const railRef = useRef<HTMLElement>(null);
+   *  "点抽屉外收起"由遮罩节点承担（`.rail-scrim`，只在展开时渲染）——**不用 document
+   *  pointerdown 判"目标不在 rail 内"**：那样关闭与"点到下面的界面"是同一次点，
+   *  抽屉一层的遮罩会变成直接操作正文（例如点到发送键）。遮罩把这次点吃掉，
+   *  关闭就只是关闭。 */
   useEffect(() => {
     if (!drawerOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false);
     };
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && railRef.current?.contains(event.target)) return;
-      setDrawerOpen(false);
-    };
     document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      document.removeEventListener('pointerdown', onPointerDown);
-    };
+    return () => document.removeEventListener('keydown', onKeyDown);
   }, [drawerOpen]);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
@@ -307,7 +299,14 @@ export const SessionList = memo(function SessionList({
   const sessionsUnavailable = sessionsError !== null;
 
   return (
-    <aside ref={railRef} className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}>
+    <aside className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}>
+      {/* #1368：抽屉的点击遮罩。只在展开时存在，`position: fixed; inset: 0; z-index: -1`
+          由 CSS 给：它铺满视口、命中区吃掉"点抽屉外"这一下（关闭与"点到下面的正文"
+          不再是同一次点击），但画在轨自己的背景之下 —— 抽屉表面不会被它压暗
+          （视觉遮罩仍是轨本身那条大扩散 box-shadow）。 */}
+      {drawerOpen ? (
+        <div className="rail-scrim" aria-hidden="true" onPointerDown={() => setDrawerOpen(false)} />
+      ) : null}
       {/* #1368：窄屏专属的抽屉开关。桌面档 `display:none`（轨本来就有 240px 正文，
           不需要抽屉）；窄屏折叠态它排在图标轨顶部，展开态留在抽屉左上角当关闭键。
           `aria-controls` 指向会话列表本体（不是整个 aside）：开关控制的是列表的
