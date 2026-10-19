@@ -23,7 +23,15 @@ import {
   wheelDeltaPixels, type FollowState,
 } from '../lib/followLatest';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
-import type { ConversationState, AskUserAnswer, PendingAskUserRequest, ToolCall, Turn } from '../types';
+import type {
+  ConversationState,
+  AskUserAnswer,
+  PendingAskUserRequest,
+  PendingPlanApprovalRequest,
+  PlanApprovalAnswer,
+  ToolCall,
+  Turn,
+} from '../types';
 import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -38,6 +46,7 @@ import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho
 import { MemoryActivity, RecallNotice } from './MemoryActivity';
 import { MessageImages } from './MessageImages';
 import { AskUserCard } from './AskUserCard';
+import { PlanApprovalCard } from './PlanApprovalCard';
 
 interface Props {
   conversation: ConversationState | null;
@@ -85,6 +94,15 @@ interface Props {
   askUserError?: string | null;
   /** 提交 `ask_user` 答案（App 侧走 resume 通道）。 */
   onAskUserAnswer?: (answer: AskUserAnswer) => void;
+  /** #1356：`kind=plan_approval` 的待裁决计划——非 null 时在对话流尾部内嵌
+   *  `PlanApprovalCard`。挂载判据与 `askUserRequest` 同宽（App 侧三方对齐后给值）。 */
+  planApprovalRequest?: PendingPlanApprovalRequest | null;
+  /** 该裁决的恢复是否在途（禁用三按钮）。 */
+  planApprovalResuming?: boolean;
+  /** 恢复失败原文（App 的会话错误）；null = 无错误。 */
+  planApprovalError?: string | null;
+  /** 提交计划裁决（App 侧走同一条 resume 通道）。 */
+  onPlanApprovalAnswer?: (answer: PlanApprovalAnswer) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -106,7 +124,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -455,6 +473,18 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
         {/* #1204：`ask_user` 通用提问的内嵌卡片——长在对话流尾部（虚拟化行之外，
             同 MemoryActivity / 内联审批卡的做法），不参与 measureElement 测高。
             `key` 按 request_id：换请求即重挂，卡片本地草稿不串题。 */}
+        {/* #1356：计划审批卡——与 `ask_user` 同一条恢复通道的第三支载荷。两者都由
+            「本 run 至多一个待处理请求」的准入去重，不会同时出现；顺序仍按"先计划、
+            后提问"排（若将来放宽去重，计划卡更靠近暂停点）。 */}
+        {planApprovalRequest !== null && onPlanApprovalAnswer && (
+          <PlanApprovalCard
+            key={planApprovalRequest.request_id}
+            request={planApprovalRequest}
+            resuming={planApprovalResuming}
+            errorMessage={planApprovalError}
+            onSubmit={onPlanApprovalAnswer}
+          />
+        )}
         {askUserRequest !== null && onAskUserAnswer && (
           <AskUserCard
             key={askUserRequest.request_id}

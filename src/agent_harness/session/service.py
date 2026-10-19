@@ -769,13 +769,18 @@ def _pending_user_input_conflict_message(
     窄场景，后者是通用提问。文案写死「约束澄清」会把通用提问误报成约束冲突，把用户
     引去处理一个并不存在的冲突。
 
-    分流是**允许清单**：只有明确等于 ``protected_fact_conflict`` 才走约束澄清原句；
-    ``ask_user``、未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——缺字段
-    时「不说假话」优先于「猜它是约束澄清」。通用提问的动词与前端 composer 锁定提示
-    统一为「回答」；约束澄清原句按 #1223 冻结（仍说「提交答案」），不随本票改动。
+    分流是**允许清单**，三个具名分支（约束澄清 / 计划审批 / 通用提问）：只有明确
+    命中才走专用原句；未来新增的 kind、以及缺 ``kind`` 的历史事件一律走中性句——
+    缺字段时「不说假话」优先于「猜它是约束澄清」。动词与前端 composer 锁定提示
+    逐分支统一：通用提问 =「回答」（#1223/#1283），计划审批 =「裁决」（#1356，
+    前端 ``Composer.tsx`` 的 ``请先裁决当前计划``）；约束澄清原句按 #1223 冻结
+    （仍说「提交答案」），不随本票改动。
     """
-    if request.data.get("kind") == "protected_fact_conflict":
+    kind = request.data.get("kind")
+    if kind == "protected_fact_conflict":
         return f"当前有待回答的约束澄清；请先提交答案，{resume_action}"
+    if kind == "plan_approval":
+        return f"当前有待裁决的计划；请先裁决该计划，{resume_action}"
     return f"当前有待回答的提问；请先回答该提问，{resume_action}"
 
 
@@ -832,6 +837,82 @@ def _pending_user_input_pause(
 
 #: 单题被跳过（留空）时在该题渲染行里的占位文案。
 _ASK_SKIPPED_ANSWER = "（跳过）"
+
+#: `plan_approval` 的三决策（与 `web/app.py::InputRequestAnswer.decision` 同值域）。
+_PLAN_DECISIONS = ("approve", "revise", "reject")
+
+#: 用户反馈（修改意见 / 拒绝理由）上限，对齐 `custom_text` 的量级。
+_PLAN_FEEDBACK_MAX_CHARS = 100_000
+
+
+def _plan_approval_input_answer_data(
+    events: list[SessionEvent], *, request_id: str,
+    request: SessionEvent, answer: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    """归一 `plan_approval` 的裁决：批准 / 要求修改 / 拒绝。
+
+    **无副作用**：本函数在一次恢复里会被调用三次（阶段一校验、恢复后复校、落盘前），
+    任何写操作都会被放大成重复事件。切档（批准 ⇒ `workflow/mode-changed(normal)`）
+    因此落在 `_commit_paused_resume` 的落盘点，由那里保证 seq 严格早于恢复 run 的
+    任何事件（AC6）——**不是**在这里。
+    """
+    decision = answer.get("decision")
+    if decision not in _PLAN_DECISIONS:
+        raise BudgetRejection("input_request.decision 必须是 approve / revise / reject")
+    if set(answer) - {"request_id", "decision", "feedback"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    feedback = answer.get("feedback")
+    if feedback is not None:
+        if not isinstance(feedback, str) or not feedback.strip():
+            raise BudgetRejection("input_request.feedback 必须是非空文本")
+        if len(feedback) > _PLAN_FEEDBACK_MAX_CHARS:
+            raise BudgetRejection("input_request.feedback 必须是 1 至 100000 字符")
+        # 批准不带意见：静默丢弃用户写下的字比拒绝更糟（同 `extra="forbid"` 的取向）。
+        if decision == "approve":
+            raise BudgetRejection("批准形态不接受 feedback")
+
+    artifact_id = request.data.get("artifact_id")
+    artifact_ref = artifact_id if isinstance(artifact_id, str) and artifact_id else ""
+    if decision == "approve":
+        # 计划正文已落 artifact（内容寻址）：批准消息带引用，模型按引用回读而非复述
+        # 正文——正文不必在上下文里再灌一遍。
+        content = "计划已批准，现在开始执行。"
+        if artifact_ref:
+            # #1356 审查 P2-1：**不点名**读回工具——名字由 `select_artifact_store`
+            # 按后端决定（S3 ⇒ `inspect_artifact`，MinIO/Local ⇒ `read_artifact`），
+            # 领域层拿不到装配期的选择结果；写死一个会在默认 Local 档指路到不在册
+            # 的工具（模型多一轮 tool-not-found 自纠错）。名字的单一来源在装配期
+            # 的 `assembly.py`（`selection.read_tool(...)`），模型从工具清单里读。
+            content += f"（计划全文：artifact {artifact_ref}，用当前可用的 artifact 读取工具回读）"
+    elif decision == "revise":
+        content = (
+            f"用户要求修改计划，反馈原文：\n\n{feedback}\n\n"
+            "按反馈修订后重新调用 submit_plan。"
+            if feedback is not None else
+            "用户要求修改计划（未附具体意见）。按你的判断修订后重新调用 submit_plan。"
+        )
+    else:
+        content = (
+            f"用户拒绝了该计划：{feedback}。请重新调研或提出不同方案。"
+            if feedback is not None else
+            "用户拒绝了该计划（未附理由）。请重新调研或提出不同方案。"
+        )
+
+    normalized_answer: dict[str, Any] = {
+        "request_id": request_id,
+        "decision": decision,
+    }
+    if feedback is not None:
+        normalized_answer["feedback"] = feedback
+    if _user_input_answer_already_recorded(
+        events, request_id=request_id, normalized_answer=normalized_answer,
+    ):
+        return None, True
+    return {
+        "content": content,
+        "input_request_id": request_id,
+        "input_request_answer": normalized_answer,
+    }, False
 
 
 def _user_input_answer_already_recorded(
@@ -1010,6 +1091,10 @@ def _user_input_answer_data(
         return _ask_user_input_answer_data(
             events, request_id=request_id, request=request,
             answer=answer, ask_user_timeout_seconds=ask_user_timeout_seconds,
+        )
+    if request.data.get("kind") == "plan_approval":
+        return _plan_approval_input_answer_data(
+            events, request_id=request_id, request=request, answer=answer,
         )
     if request.data.get("kind") != "protected_fact_conflict":
         raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
@@ -3080,6 +3165,23 @@ class SessionService:
                 ask_user_timeout_seconds=self._settings.ask_user_question_timeout,
             )
             if answer_data is not None and not answer_already_recorded:
+                # #1356 AC6：批准计划 = 用户显式动作的一部分，切档与恢复 run 是**同一个
+                # 原子动作**（对标 Claude Code 的 "approving a plan exits plan mode"）。
+                # 顺序是硬要求：mode(normal) 的 seq 必须严格早于恢复 run 的任何事件
+                # ——执行期第一个工具调用在放行时现派生 mode，必须已经读到 normal。
+                # 与 #1193 的边界：那边禁的是**异常路径**自动回滚 mode（权限只收紧不
+                # 自动放宽）；这里是用户点了"批准"，不是异常臂，两者不冲突。
+                # 幂等：`answer_already_recorded` 的重放不重复写 mode 事件。
+                # 审查 P4-1（知情接受）：这两次 append 之间有一个极窄的崩溃窗——
+                # 若进程恰好死在这里，重试时 `answer_already_recorded` 仍为 False，
+                # 会再落一条 mode(normal)。`effective_workflow_mode` 是 last-wins，
+                # 功能无损；唯一受影响的是"批准恰好落一条 normal"的断言（无崩溃路径
+                # 成立）。收敛方式（重放判定里也认 mode 事件）会动幂等语义，收益不抵
+                # 风险，故不改。
+                if (
+                    answer_data["input_request_answer"].get("decision") == "approve"
+                ):
+                    append_workflow_mode_change(session, WorkflowMode.NORMAL)
                 session.append(USER_MESSAGE, answer_data)
             # 用户输入续跑的 Recovery 延迟 SESSION_RESUMED 到上述最终预算检查之后。
             # 其他路径由 RecoveryCoordinator 写入；无 Recovery 时由 CAS 胜者写入。

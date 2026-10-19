@@ -45,6 +45,7 @@ const OTHER_DETAIL_ITEMS: Array<{ key: string; label: string }> = [
   { key: 'modified_paths', label: '修改路径' },
   { key: 'pressure_warning', label: '水位警告' },
   { key: 'progress', label: '进度核对' },
+  { key: 'plan_mode', label: '计划档指令' },
 ];
 
 /** 段宽度重标定（opencode 的做法）：小于 MIN_SEGMENT_PCT 的桶显示为最小宽度，

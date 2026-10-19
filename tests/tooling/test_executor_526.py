@@ -249,6 +249,42 @@ class TestPlanMode:
         assert "Plan 模式" not in result.result.message
 
     @pytest.mark.asyncio
+    async def test_plan_mode_blocks_ask_user(self, session: Session):
+        """AC14：PLAN 档下 `ask_user` 被拦截——现状钉住，**由 #1351 修复后转绿**。
+
+        这不是回归守卫，是**有意为之的临时锚**：`ask_user` 的 `side_effect` 是
+        MUTATING（它写 durable 事件并暂停 run），而 PLAN 门禁只放行
+        「非 MUTATING ∧ READ_ONLY」或 `plan_mode_exempt`，两者它都不满足。
+        后果是 PLAN 档下模型无法在动手前澄清——正是 #1351 要解决的缺口。
+        `executor.py` 的放行条件归 #1351，本票不碰；#1351 落地后本用例按新
+        语义（`ask_user` 在 PLAN 档可用）改写或删除。
+        """
+        from agent_harness.session.workflow import append_workflow_mode_change
+        from agent_harness.tools.ask_user import AskUserTool
+
+        append_workflow_mode_change(session, WorkflowMode.PLAN)
+        reg = ToolRegistry()
+        reg.register(AskUserTool())
+        executor = ToolExecutor(reg)
+
+        result = await executor.execute(
+            _tc(
+                "ask_user",
+                {"questions": [{
+                    "header": "范围",
+                    "question": "先改哪个模块？",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                }]},
+            ),
+            session=session,
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+        # 断言命中的是 Plan 门禁本身，不是别的失败路径。
+        assert "Plan 模式" in result.result.message
+
+    @pytest.mark.asyncio
     async def test_normal_mode_unaffected(
         self, sandbox: LocalSubprocessSandbox, registry: ToolRegistry,
         session: Session,

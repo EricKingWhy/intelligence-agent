@@ -34,6 +34,8 @@ describe('initConversation', () => {
       pending_constraint_input: null,
       // #1204：通用提问（kind=ask_user）的初值——同一投影的必填字段，形状断言跟着长。
       pending_ask_user: null,
+      // #1356：计划审批（kind=plan_approval）的初值——同一条恢复通道的第三支。
+      pending_plan_approval: null,
       requested_model: null,
       model_run_id: null,
       seenSeqs: new Set(),
@@ -234,6 +236,128 @@ describe('applyEvent — 折叠语义', () => {
       expect(projectHistory('s', [event]).pending_ask_user?.timeout_minutes).toBeUndefined();
     },
   );
+
+  it('#1356：kind=plan_approval 分流到 pending_plan_approval，答案与恢复同链折叠', () => {
+    const request = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'plan-1',
+        kind: 'plan_approval',
+        run_id: 'run-1',
+        plan_markdown: '# 计划\n\n## 目标\n把 A 改成 B。',
+        touched_files: ['src/a.py'],
+        artifact_id: 'art-1',
+        plan_sha256: 'deadbeef',
+      },
+    });
+    const pause = ev({
+      type: EventType.RUN_PAUSED,
+      seq: 2,
+      run_id: 'run-1',
+      data: { reason: 'user_input', input_request_id: 'plan-1' },
+    });
+    const answer = ev({
+      type: EventType.USER_MESSAGE,
+      seq: 3,
+      run_id: 'run-1',
+      data: {
+        step: 1,
+        content: 'approved',
+        input_request_id: 'plan-1',
+        input_request_answer: { request_id: 'plan-1', decision: 'approve' },
+      },
+    });
+    const resumed = ev({
+      type: EventType.RUN_RESUMED, seq: 4, run_id: 'run-1', data: { resume_basis: 'user_input' },
+    });
+
+    let state = projectHistory('s', [request, pause]);
+    // 分流：三种载荷互不冒充。
+    expect(state.pending_constraint_input).toBeNull();
+    expect(state.pending_ask_user).toBeNull();
+    expect(state.pending_plan_approval).toMatchObject({
+      request_id: 'plan-1',
+      run_id: 'run-1',
+      touched_files: ['src/a.py'],
+      artifact_id: 'art-1',
+      plan_sha256: 'deadbeef',
+      answer: null,
+    });
+    expect(state.pending_plan_approval?.plan_markdown).toContain('把 A 改成 B。');
+
+    state = applyEvent(state, answer);
+    expect(state.pending_plan_approval?.answer).toEqual({
+      request_id: 'plan-1', decision: 'approve',
+    });
+    state = applyEvent(state, resumed);
+    expect(state.pending_plan_approval).toBeNull();
+  });
+
+  it('#1356：revise/reject 的 feedback 原样折叠；畸形裁决不折叠（当作还没回答）', () => {
+    const request = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'plan-1', kind: 'plan_approval', run_id: 'run-1',
+        plan_markdown: '# 计划', touched_files: [],
+      },
+    });
+    const answer = (data: Record<string, unknown>) => ev({
+      type: EventType.USER_MESSAGE,
+      seq: 2,
+      run_id: 'run-1',
+      data: { step: 1, content: 'x', input_request_id: 'plan-1', input_request_answer: data },
+    });
+
+    let state = projectHistory('s', [request]);
+    state = applyEvent(state, answer({
+      request_id: 'plan-1', decision: 'revise', feedback: '先补测试',
+    }));
+    expect(state.pending_plan_approval?.answer).toEqual({
+      request_id: 'plan-1', decision: 'revise', feedback: '先补测试',
+    });
+
+    // 未知 decision / 缺 request_id ⇒ 不折叠（不伪造一个"已回答"）。
+    for (const bad of [
+      { request_id: 'plan-1', decision: 'maybe' },
+      { decision: 'approve' },
+      { request_id: 'plan-1', decision: 'reject', feedback: 42 },
+    ]) {
+      const fresh = applyEvent(projectHistory('s', [request]), answer(bad));
+      expect(fresh.pending_plan_approval?.answer).toBeNull();
+    }
+  });
+
+  it('#1356：畸形 plan_approval 载荷不投影（不伪造空卡片）', () => {
+    const make = (data: Record<string, unknown>) => ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'plan-1', kind: 'plan_approval', run_id: 'run-1',
+        plan_markdown: '# 计划', touched_files: [],
+        ...data,
+      },
+    });
+    for (const bad of [
+      { plan_markdown: '   ' },              // 正文空白
+      { touched_files: 'src/a.py' },          // 不是数组
+      { touched_files: [1, 2] },              // 元素不是字符串
+      { request_id: '' },
+      // 注：`run_id` 以事件信封为准（`envelopeRunId ?? data.run_id`，同 ask_user），
+      // 所以 data 里的 run_id 为空不是畸形——信封有值就用信封的。
+    ]) {
+      expect(projectHistory('s', [make(bad)]).pending_plan_approval).toBeNull();
+    }
+    // 正例：可选展示件缺失仍投影（不显示那一行，不是整卡丢弃）。
+    const ok = projectHistory('s', [make({})]).pending_plan_approval;
+    expect(ok).toMatchObject({ request_id: 'plan-1' });
+    expect(ok?.artifact_id).toBeUndefined();
+    expect(ok?.plan_sha256).toBeUndefined();
+  });
 
   it('#1204：畸形 ask_user 载荷不投影（不伪造空卡片）', () => {
     const bad = ev({

@@ -126,6 +126,8 @@ def _attention(events: list[SessionEvent]) -> tuple[AttentionKind | None, str | 
 
     candidates: list[tuple[int, AttentionKind, str]] = []
 
+    # `kind="ask_user"` 是刻意的：`plan_approval`（#1356）不进 board——计划卡
+    # 由会话自身的审批视图承载，board 只报"等人回答的提问"，两者不重复计数。
     request = latest_pending_input_request(events, kind="ask_user")
     if request is not None:
         questions = request.data.get("questions")
