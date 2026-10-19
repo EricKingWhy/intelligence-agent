@@ -468,7 +468,7 @@ class MarkdownMemoryStore:
     # ------------------------------------------------------------------ 操作
 
     def _add_sync(self, target: str, content: str) -> dict[str, Any]:
-        content = content.strip()
+        content = normalize_entry(content)
         if not content:
             return _error("Content cannot be empty.")
         if scan_error := _scan_memory_content(content):
