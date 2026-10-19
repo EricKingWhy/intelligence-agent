@@ -5130,16 +5130,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  */
 .run-badge-running {
   color: var(--accent);
-/* 状态 pill 体系（#1372 改动 5b）：浅底 + 深字 + 描边，绿/琥珀/红只区分语义。
- *  running 与 thinking 此前共用同一条规则（视觉不可区分）——现在拆开：
- *   - running = 品牌 accent（"整个 run 在跑"）
- *   - thinking = info（"模型在生成"）
- *   - tool = warning（"工具在跑"）
- *   - awaiting-decision = danger（"卡住、必须人裁决"）——与 tool 的 warning 分开
- *   - completed = success；failed = danger（同色域但语义由文案/图标区分）
- */
-.run-badge-running {
-  color: var(--accent);
   background: var(--accent-muted);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
