@@ -173,6 +173,8 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
+from agent_harness.watchtower.service import WatchtowerService
+from agent_harness.watchtower.store import SqliteWatchtowerStore
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
@@ -794,10 +796,11 @@ class AskUserAnswerItem(BaseModel):
 
 
 class InputRequestAnswer(BaseModel):
-    """`resume_basis=user_input` 的回答体，按 `kind` 二选一形状（#1204）。
+    """`resume_basis=user_input` 的回答体，按 `kind` 三选一形状（#1204 / #1356）。
 
     - 窄场景（`protected_fact_conflict`）：`{request_id, choice, custom_text?}`；
-    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`。
+    - 通用提问（`ask_user`）：`{request_id, questions:[{question, answer|null}]}`；
+    - 计划审批（`plan_approval`）：`{request_id, decision, feedback?}`。
     形状层只挡明显非法组合；权威语义判定在领域层 `SessionService`（单一规则来源）。
     """
 
@@ -811,9 +814,28 @@ class InputRequestAnswer(BaseModel):
     questions: list[AskUserAnswerItem] | None = Field(default=None, min_length=1)
     # #1204：ask_user 超时到点时的恢复形态——只注入"用户可能不在"系统消息，不写答案。
     timeout: bool = False
+    # #1356：计划审批的裁决。**不复用 `choice`**——它的 Literal 被约束冲突场景钉死，
+    # 放宽它等于同时松动另一条业务线。`feedback` 只在 revise / reject 时有意义。
+    decision: Literal["approve", "revise", "reject"] | None = None
+    feedback: str | None = Field(default=None, min_length=1, max_length=100_000)
 
     @model_validator(mode="after")
     def validate_shape(self) -> InputRequestAnswer:
+        if self.decision is not None:
+            if (
+                self.choice is not None
+                or self.questions is not None
+                or self.custom_text is not None
+                or self.timeout
+            ):
+                raise ValueError(
+                    "decision form cannot carry choice/questions/custom_text/timeout"
+                )
+            if self.decision == "approve" and self.feedback is not None:
+                raise ValueError("approve form cannot carry feedback")
+            return self
+        if self.feedback is not None:
+            raise ValueError("feedback is only allowed with a decision")
         if self.timeout:
             if (
                 self.choice is not None
@@ -827,7 +849,7 @@ class InputRequestAnswer(BaseModel):
                 raise ValueError("questions form cannot carry choice/custom_text")
             return self
         if self.choice is None:
-            raise ValueError("input_request requires either choice or questions")
+            raise ValueError("input_request requires either choice, questions or decision")
         if self.choice == "custom":
             if self.custom_text is None or not self.custom_text.strip():
                 raise ValueError("custom choice requires non-blank custom_text")
@@ -1041,6 +1063,10 @@ class SessionSummary(BaseModel):
     attention_kind: str | None
     # 注意力横幅文案，与 `attention_kind` 同源。
     attention_summary: str | None
+    # #1308：最后一条 user / agent 消息（写入侧截断 128 字符）。与上面四字段同款
+    # **刻意不给默认值**：漏映射会让卡片正文静默渲染成「没有消息」，那是假事实。
+    last_user_message: str | None
+    last_agent_message: str | None
 
 
 class SessionArchived(BaseModel):
@@ -1410,6 +1436,12 @@ class AppState:
         # #1320：常驻超时推进任务（lifespan 启动；shutdown 置停止位并等当前轮收尾）。
         self._ask_user_timeout_ticker: asyncio.Task | None = None
         self._ask_user_timeout_stop: asyncio.Event | None = None
+        self.watchtower_store = SqliteWatchtowerStore(self.harness_db)
+        self.watchtower = WatchtowerService(
+            store=self.watchtower_store,
+            session_service=session_service(self),
+            settings=settings,
+        )
 
     async def _board_snapshot_rows(self) -> list[dict[str, Any]]:
         """看板快照行：与 `GET /api/sessions?include_archived=true` 同一函数、同一映射。
@@ -1499,6 +1531,7 @@ class AppState:
             if not self._stores_ready:
                 await initialize_stores(self.stores)
                 await self.transport_ledger.initialize()
+                await self.watchtower_store.initialize()
                 # W-10：租约/队列表 + 重启对账（与 Session 状态对齐；有效会话
                 # 的持有租约原样保留——租约不因重启释放，PRD §3）。
                 await self.lease_manager.initialize()
@@ -1567,7 +1600,9 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
-        # #1320：先停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
+        # #1296：先停值班触发器，避免 shutdown 期间再派发新 session。
+        await self.watchtower.stop()
+        # #1320：再停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
         # （超时答复已落盘、恢复链提交到一半），中途取消会留下半截状态。置停止位
         # 后等当前一轮跑完；只有超过上限（真正卡死）才强制取消。
         ticker, self._ask_user_timeout_ticker = self._ask_user_timeout_ticker, None
@@ -1699,8 +1734,11 @@ def _reconcile_info_provider(
 
     async def _info(session_id: str) -> dict[str, Any]:
         _, wiring = await get_wiring()
+        # #1356 审查 P1-3：本端口只服务根会话（委派子会话的收窄由子会话自己的
+        # 装配负责），故与 `_session_declaration_validator` 同口径开约束工具。
         return root_registry_reconcile_info(
             settings, wiring, session_id=session_id, session_store=store,
+            include_constraint_tools=True,
         )
 
     return _info
@@ -1773,6 +1811,8 @@ def session_rows(
             product_state_changed_at=s.product_state_changed_at,
             attention_kind=s.attention_kind,
             attention_summary=s.attention_summary,
+            last_user_message=s.last_user_message,
+            last_agent_message=s.last_agent_message,
         )
         for s in summaries
     ]
@@ -2505,6 +2545,7 @@ def create_app(
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建未投递输入失败（不阻塞启动）"
                 )
+            await state.ensure_stores()
             # #1320：按持久事件流重建 `ask_user` 超时计时器（durable timer 不因进程
             # 重启丢掉挂起提问）。与上面的队列重建同序：失败不阻塞启动——提问事实
             # 仍在事件流里，下一次**启动**仍可重建。订阅路径自 #1320 起不再补读
@@ -2519,8 +2560,9 @@ def create_app(
                 logging.getLogger("agent_harness.web").exception(
                     "启动重建 ask_user 超时计时器失败（不阻塞启动）"
                 )
-            state.start_ask_user_timeout_ticker()
             try:
+                state.start_ask_user_timeout_ticker()
+                await state.watchtower.start()
                 yield
             finally:
                 await state.shutdown()
@@ -3067,6 +3109,11 @@ def create_app(
     # registered as one explicit router instead of being captured by this factory.
     register_catalog_routes(app)
 
+    # #1296：serve 内单次值班调度器与独立管理面。
+    from agent_harness.web.watchtower_routes import register_watchtower_routes
+
+    register_watchtower_routes(app)
+
     @app.post("/api/sessions")
     async def create_session(
         req: CreateSessionRequest, launch: bool = True,
@@ -3207,7 +3254,7 @@ def create_app(
             raise storage_http_error(e) from e
         except SandboxUnavailableError as e:
             # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
-            # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
+            # detail 带 remediation 与可用后端列表，供客户端诊断。
             # `#1278`：同一份构造与 fork 端点共用（`web/domain_errors.py`）。
             raise sandbox_unavailable_http_error(e) from e
 

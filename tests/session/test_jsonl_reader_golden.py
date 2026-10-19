@@ -157,6 +157,9 @@ def test_missing_and_empty_jsonl_return_shapes(store: JsonlSessionStore) -> None
         "product_state_changed_at": None,
         "attention_kind": None,
         "attention_summary": None,
+        # #1308：最后一条消息同由投影回填，store 侧恒为默认 None。
+        "last_user_message": None,
+        "last_agent_message": None,
     }
 
 
@@ -285,6 +288,9 @@ def test_summary_corrupt_tail_fallback_shape_golden(
         "product_state_changed_at": None,
         "attention_kind": None,
         "attention_summary": None,
+        # #1308：最后一条消息同由投影回填，store 侧恒为默认 None。
+        "last_user_message": None,
+        "last_agent_message": None,
     }
     assert caplog.records
     assert all(record.name == _STORE_LOGGER for record in caplog.records)

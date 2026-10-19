@@ -113,6 +113,23 @@ async def test_note_event_ignores_other_input_kinds():
 
 
 @pytest.mark.asyncio
+async def test_plan_approval_never_arms_the_timeout_table():
+    """#1356 AC（票面 §3.2）：`plan_approval` 待审批时超时表不安装。
+
+    计划审批是**用户显式裁决**，没有可机械判定的默认动作——到点自动恢复会
+    直接合成一个"批准/拒绝"，把「提交 → 超时自动恢复 → 再提交」变成循环。
+    这条钉住 kind 过滤：将来把驱动泛化到所有 `USER_INPUT_REQUESTED` 时立刻红。
+    """
+    clock = FakeClock()
+    driver, fired = _driver(clock, timeout=1.0)
+    driver.note_event("s1", _request_event(kind="plan_approval"))
+    assert driver.is_armed("s1") is False
+    clock.advance(3600)
+    assert await driver.check_expiries() == []
+    assert fired == []
+
+
+@pytest.mark.asyncio
 async def test_rearming_the_same_request_preserves_elapsed():
     """同一 request 重复装配（事件重放 / 启动重建）保留已累计，不重头计时。"""
     clock = FakeClock()

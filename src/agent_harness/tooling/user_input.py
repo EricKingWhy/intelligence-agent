@@ -15,4 +15,7 @@ from __future__ import annotations
 USER_INPUT_TOOL_NAMES: frozenset[str] = frozenset({
     "request_constraint_resolution",
     "ask_user",
+    # #1356：计划提交同样暂停 run 等真人裁决。超时语义**不**随名字集走——
+    # `plan_approval` 由 timeout driver 按 `kind` 排除（审批没有合理默认动作）。
+    "submit_plan",
 })

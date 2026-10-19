@@ -783,7 +783,7 @@ export function ChatTab({
               加载更早 {Math.min(TOOLS_WINDOW_STEP, hiddenTools)} 条
             </button>
             <span className="timeline-window-hint">
-              显示最近 {visibleTools.length} / 共 {tools.length} 条（前段已折叠，真相完整保留）
+              显示最近 {visibleTools.length} / 共 {tools.length} 条（前段已折叠，可展开查看）
             </span>
           </div>
         )}
@@ -1184,7 +1184,7 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
             加载更早 {Math.min(TIMELINE_WINDOW_STEP, hidden)} 条
           </button>
           <span className="timeline-window-hint">
-            显示最近 {visible.length} / 共 {total} 条（前段已折叠，真相完整保留）
+            显示最近 {visible.length} / 共 {total} 条（前段已折叠，可展开查看）
           </span>
         </div>
       )}
@@ -1310,7 +1310,7 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
             加载更早 {Math.min(CHANGES_WINDOW_STEP, hiddenDiffs)} 条
           </button>
           <span className="timeline-window-hint">
-            显示最近 {visibleDiffs.length} / 共 {diffs.length} 条（前段已折叠，真相完整保留）
+            显示最近 {visibleDiffs.length} / 共 {diffs.length} 条（前段已折叠，可展开查看）
           </span>
         </div>
       )}
@@ -1404,7 +1404,7 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
             加载更早 {Math.min(ARTIFACTS_WINDOW_STEP, hiddenArtifacts)} 条
           </button>
           <span className="timeline-window-hint">
-            显示最近 {visibleArtifacts.length} / 共 {artifacts.length} 条（前段已折叠，真相完整保留）
+            显示最近 {visibleArtifacts.length} / 共 {artifacts.length} 条（前段已折叠，可展开查看）
           </span>
         </div>
       )}

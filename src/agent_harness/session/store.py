@@ -159,6 +159,11 @@ class SessionSummaryStats:
     attention_kind: str | None = None
     #: #1303：注意力横幅文案（如「待回答：…」/「待批准：…」），与 `attention_kind` 同源。
     attention_summary: str | None = None
+    #: #1308：最后一条用户消息 / 最后一条 agent 文本（投影回填；写入侧已截断 128
+    #: 字符，与 `first_user_message` 同口径）。store 不认识投影，默认 None 与
+    #: 「投影缺席」同义，不伪造。
+    last_user_message: str | None = None
+    last_agent_message: str | None = None
 
 
 #: #516：目录扫描 stat 批次的共享线程池（懒建）。stat 在 syscall 期间释放 GIL，

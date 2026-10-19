@@ -66,9 +66,11 @@ from agent_harness.session import (
     RUN_STARTED,
     TOOL_CALL,
     TOOL_RESULT,
+    USER_INPUT_REQUESTED,
     USER_MESSAGE,
     Session,
 )
+from agent_harness.session.event import WORKFLOW_MODE_CHANGED
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
     OperationState,
@@ -78,6 +80,7 @@ from agent_harness.storage import (
 from agent_harness.storage import (
     needs_reconcile as needs_reconcile_state,
 )
+from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -86,6 +89,8 @@ from agent_harness.tooling import (
     ToolResult,
     ToolSideEffect,
 )
+from agent_harness.tools.register_constraint import RegisterConstraintTool
+from agent_harness.tools.submit_plan import SubmitPlanTool
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 from tests.tooling.test_deadline_admission import _SlowMutatingTool
@@ -620,6 +625,107 @@ async def test_local_fuse_counts_the_current_execution_not_the_run_ledger(tmp_pa
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
     assert paused.data["limits"]["run"]["max_agent_turns_total"] is None
     assert paused.data["limits"]["local"]["max_agent_turns"] == 2
+
+
+# ── `#1356` AC7：恢复 run 的约束工具上下文（审查 P3-1） ─────────────────
+
+
+def _seed_answered_plan_request(session: Session, *, mode: str | None) -> str:
+    """造一个"恢复 run"的起点：run 已开、计划请求已裁决、本轮没有新的用户原文。
+
+    `USER_MESSAGE` 带 `input_request_id` ⇒ `latest_direct_user_input_event` 按设计
+    返回 `None`（答复是裁决，不是新的约束来源）。这正是 `#1356` 放宽判据要覆盖的
+    形状：run 归因仍在，但"可核实的用户原文"不在。
+    """
+    if mode is not None:
+        session.append(WORKFLOW_MODE_CHANGED, {"mode": mode})
+    run_id, _ = session.begin_run()
+    session.append(
+        USER_INPUT_REQUESTED,
+        {
+            "request_id": "req-1", "kind": "plan_approval", "run_id": run_id,
+            "plan_markdown": "# 旧计划", "touched_files": [], "artifact_id": "art-1",
+            "plan_sha256": "0" * 64,
+        },
+        run_id=run_id,
+    )
+    session.append(
+        USER_MESSAGE,
+        {"content": "批准", "input_request_id": "req-1"},
+        run_id=run_id,
+    )
+    return run_id
+
+
+def _tool_round_for(name: str, args: dict[str, Any], call_id: str) -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"id": call_id, "name": name, "args": args}])
+
+
+@pytest.mark.asyncio
+async def test_recovered_run_can_submit_plan_without_a_source_event(tmp_path) -> None:
+    """AC7 revise 循环：恢复 run 的 `submit_plan` 通过准入（不是 SOURCE_UNAVAILABLE）。
+
+    旧判据把"本轮有没有可核实的用户原文"与"run 归因"混为一谈：`source_event is None`
+    时整个 context 置 None，`submit_plan` 直接以 `SOURCE_UNAVAILABLE` 拒绝，且**整段
+    跳过** deadline / 预算余量的准入闸。`submit_plan` 的作用域判定只依赖身份字段
+    （`scope_rejection_code`），来源字段留空即可——这条用例钉住放宽后的行为。
+    """
+    session = make_session(tmp_path)
+    run_id = _seed_answered_plan_request(session, mode="plan")
+    plan = {"plan_markdown": "# 计划\n\n1. 改 a.py", "touched_files": ["a.py"]}
+    model = ScriptedModel([_tool_round_for("submit_plan", plan, "call_plan")])
+    runtime = _runtime(
+        model, ceiling=None, run_id=run_id,
+        tools=[SubmitPlanTool(FakeArtifactStore())],
+    )
+
+    result = await runtime.run(session, None)
+
+    result_event = next(e for e in session.events if e.type == TOOL_RESULT)
+    payload = json.loads(result_event.data["content"])
+    assert payload["data"]["status"] == "requested", (
+        "恢复 run 里的 submit_plan 必须真的提交，而不是被 SOURCE_UNAVAILABLE 拒绝"
+    )
+    assert payload["data"].get("reason_code") != "SOURCE_UNAVAILABLE"
+    # 提交后 run 暂停等裁决：新请求落盘、run/paused 收口。
+    assert result.status == STATUS_PAUSED
+    requests = [
+        e for e in session.events
+        if e.type == USER_INPUT_REQUESTED and e.data.get("kind") == "plan_approval"
+    ]
+    assert len(requests) == 2, "旧的已裁决请求 + 本次新提交的请求"
+    assert requests[-1].data["request_id"] != "req-1"
+
+
+@pytest.mark.asyncio
+async def test_recovered_run_keeps_register_constraint_fail_closed(tmp_path) -> None:
+    """同一条放宽不得在 `register_constraint` 上开口子：空来源照旧 fail-closed。
+
+    与上一条同一形状（恢复 run、无新用户原文），但档位是 NORMAL——`register_constraint`
+    是 MUTATING 且不豁免，PLAN 档下会先被 `_check_plan_mode` 拦掉，测不到这条判据。
+    来源校验按 `source_event_id=""` 查不到事件 ⇒ `SOURCE_NOT_ACTIVE`（**不是**
+    `SOURCE_UNAVAILABLE`：context 现在是恒建的，区别本身就是要钉住的事实）。
+    """
+    session = make_session(tmp_path)
+    run_id = _seed_answered_plan_request(session, mode=None)
+    model = ScriptedModel([
+        _tool_round_for("register_constraint", {"value": "批准"}, "call_reg"),
+        AIMessage(content="好的"),
+    ])
+    runtime = _runtime(
+        model, ceiling=None, run_id=run_id,
+        tools=[RegisterConstraintTool()],
+    )
+
+    result = await runtime.run(session, None)
+
+    result_event = next(e for e in session.events if e.type == TOOL_RESULT)
+    payload = json.loads(result_event.data["content"])
+    assert payload["data"]["status"] == "rejected"
+    assert payload["data"]["reason_code"] == "SOURCE_NOT_ACTIVE", (
+        "空来源必须走来源闸门（SOURCE_NOT_ACTIVE），而不是被当成没有上下文"
+    )
+    assert result.status == STATUS_COMPLETED
 
 
 # ── 进程重启 / 重放：投影可重建 ──────────────────────────────────────────

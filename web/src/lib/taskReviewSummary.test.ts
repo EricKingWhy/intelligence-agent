@@ -37,7 +37,29 @@ describe('summarizeTaskRuns', () => {
       hasTerminalRun: true,
       hasRunningRun: false,
       emphasizeDetails: true,
+      latestTerminalRunId: 'cancelled',
     });
+  });
+
+  it('reports the most recent terminal run id, skipping an open run', () => {
+    const summary = summarizeTaskRuns([
+      event(EventType.RUN_STARTED, 'done'),
+      event(EventType.RUN_COMPLETED, 'done'),
+      event(EventType.RUN_STARTED, 'active'),
+    ]);
+
+    expect(summary.latestTerminalRunId).toBe('done');
+  });
+
+  it('keys the most recent terminal run by terminal event order, not first appearance', () => {
+    // r1 先起、后完；r2 后起、先完。首次出现序的「最后一个」是 r2，终态序的是 r1。
+    const summary = summarizeTaskRuns([
+      event(EventType.RUN_STARTED, 'r1'),
+      event(EventType.RUN_STARTED, 'r2'),
+      event(EventType.RUN_COMPLETED, 'r2'),
+      event(EventType.RUN_COMPLETED, 'r1'),
+    ]);
+    expect(summary.latestTerminalRunId).toBe('r1');
   });
 
   it('keeps the summary unavailable while any distinct run is still open', () => {

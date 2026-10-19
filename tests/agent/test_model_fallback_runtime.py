@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
@@ -25,6 +26,7 @@ from agent_harness.session import (
     MODEL_FALLBACK,
     MODEL_REQUEST,
     MODEL_REQUEST_STARTED,
+    RUN_FAILED,
 )
 from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
@@ -475,6 +477,33 @@ class TestRequestAccounting:
         assert settled.consumed.agent_turns == baseline.consumed.agent_turns
         assert settled.consumed.total_tokens is None
         assert settled.consumed.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_failed_model_requests_persist_provider_http_status(self, tmp_path):
+        def rate_limited_error() -> httpx.HTTPStatusError:
+            request = httpx.Request("POST", "https://model.example/v1/chat")
+            response = httpx.Response(429, request=request)
+            return httpx.HTTPStatusError(
+                "rate limited", request=request, response=response,
+            )
+
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=rate_limited_error(),
+        )
+        fallback = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=rate_limited_error(),
+        )
+        session = make_session(tmp_path)
+
+        await _runtime(primary, fallback).run(session, "你好")
+
+        requests = [event for event in session.events if event.type == MODEL_REQUEST]
+        assert [(event.data["role"], event.data["http_status"]) for event in requests] == [
+            ("primary", 429), ("fallback", 429),
+        ]
+        assert any(event.type == RUN_FAILED for event in session.events)
 
     @pytest.mark.asyncio
     async def test_cancelled_fallback_settles_both_requests_without_a_turn(self, tmp_path):

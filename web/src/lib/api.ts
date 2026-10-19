@@ -134,8 +134,9 @@ export async function readErrorDetail(res: Response): Promise<string> {
 }
 
 /**
- * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
- * 这次读取）。
+ * 一次读取拿到 `{message, code, reason, objectDetail}`（响应体只能读一次，所有消费者
+ * 必须共用这次读取）。`reason` 是对象形 detail 的机读成因（`#1325` S5：压缩被拒的
+ * `no_early_turns`），与 `code` 同一「只按字段判、不按文案猜」口径。
  *
  * `objectDetail` = "后端用了 `detail` 是对象的**机读形状**回答"（#227）：用它区分三种
  * 截然不同的情况——纯字符串 detail（旧版后端）、对象 detail 带码、对象 detail **没有**
@@ -145,11 +146,20 @@ export async function readErrorDetail(res: Response): Promise<string> {
  */
 export async function readErrorBody(
   res: Response,
-): Promise<{ message: string; code: string | null; objectDetail: boolean; pendingDecisions?: PendingDecision[] }> {
+): Promise<{
+  message: string;
+  code: string | null;
+  /** #1325 S5：对象形 detail 的机读成因（如压缩的 `no_early_turns`）。
+   *  字符串/数组 detail 没有该字段 ⇒ null（不按文案猜原因）。 */
+  reason: string | null;
+  objectDetail: boolean;
+  pendingDecisions?: PendingDecision[];
+}> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
-    if (typeof detail === 'string') return { message: detail, code: null, objectDetail: false };
+    if (typeof detail === 'string')
+      return { message: detail, code: null, reason: null, objectDetail: false };
     if (Array.isArray(detail)) {
       const message = detail
         .flatMap((item) => {
@@ -157,24 +167,26 @@ export async function readErrorBody(
           return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
         })
         .join('；');
-      return { message, code: null, objectDetail: false };
+      return { message, code: null, reason: null, objectDetail: false };
     }
     if (typeof detail === 'object' && detail !== null) {
-      const { message, code, pending_decisions } = detail as {
+      const { message, code, reason, pending_decisions } = detail as {
         message?: unknown;
         code?: unknown;
+        reason?: unknown;
         pending_decisions?: unknown;
       };
       return {
         message: typeof message === 'string' ? message : '',
         code: typeof code === 'string' && code ? code : null,
+        reason: typeof reason === 'string' && reason ? reason : null,
         objectDetail: true,
         pendingDecisions: parsePendingDecisions(pending_decisions),
       };
     }
-    return { message: '', code: null, objectDetail: false };
+    return { message: '', code: null, reason: null, objectDetail: false };
   } catch {
-    return { message: '', code: null, objectDetail: false };
+    return { message: '', code: null, reason: null, objectDetail: false };
   }
 }
 
@@ -407,6 +419,138 @@ export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
       details: (typeof b.details === 'object' && b.details !== null
         ? b.details : {}) as Record<string, string>,
     }));
+}
+
+export type WatchtowerRuleState =
+  | 'active'
+  | 'armed'
+  | 'paused'
+  | 'dispatching'
+  | 'fired'
+  | 'expired'
+  | 'launch_failed'
+  | 'archived';
+
+export interface WatchtowerExecutionEntry {
+  fire_id: string;
+  rule_id: string;
+  session_id: string | null;
+  state: 'dispatching' | 'fired' | 'launch_failed';
+  fire_at: string;
+  deadline_at: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  product_state: string | null;
+}
+
+export interface WatchtowerRuleEntry {
+  rule_id: string;
+  prompt: string;
+  trigger_kind: 'relative' | 'absolute';
+  trigger_at: string;
+  timezone: string;
+  local_time: string | null;
+  delay_seconds: number | null;
+  model: string | null;
+  sandbox_backend: string | null;
+  cwd: string | null;
+  budget_turns: number | null;
+  budget_tokens: number | null;
+  budget_duration_seconds: number | null;
+  consent_version: string;
+  consented_at: string;
+  state: WatchtowerRuleState;
+  version: number;
+  fired_session_id: string | null;
+  last_error: string | null;
+  last_notice: string | null;
+  created_at: string;
+  updated_at: string;
+  occurrence_count: number;
+  executions: WatchtowerExecutionEntry[];
+}
+
+export interface WatchtowerSnapshot {
+  scheduler: {
+    running: boolean;
+    single_instance: boolean;
+    last_tick_at: string | null;
+    error: string | null;
+    consent_version: string;
+  };
+  rules: WatchtowerRuleEntry[];
+  pending_verification: Array<{
+    session_id: string;
+    rule_id: string;
+    prompt: string;
+    updated_at: string;
+  }>;
+}
+
+export interface CreateWatchtowerRulePayload {
+  prompt: string;
+  trigger_kind: 'relative' | 'absolute';
+  timezone: string;
+  delay_seconds?: number;
+  local_time?: string;
+  model?: string | null;
+  sandbox_backend?: string | null;
+  cwd?: string | null;
+  budget_turns?: number | null;
+  budget_tokens?: number | null;
+  budget_duration_seconds?: number | null;
+  consent_acknowledged: boolean;
+  consent_version: string;
+}
+
+async function watchtowerJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new Error(detail || `自动值班请求失败（${res.status}）`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function getWatchtower(): Promise<WatchtowerSnapshot> {
+  return watchtowerJson('/api/watchtower');
+}
+
+export function createWatchtowerRule(
+  payload: CreateWatchtowerRulePayload,
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson('/api/watchtower/rules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export type WatchtowerRuleAction = 'pause' | 'resume' | 'archive' | 'retry';
+
+export function actOnWatchtowerRule(
+  ruleId: string,
+  action: WatchtowerRuleAction,
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson(
+    `/api/watchtower/rules/${encodeURIComponent(ruleId)}/${action}`,
+    { method: 'POST' },
+  );
+}
+
+export function rescheduleWatchtowerRule(
+  ruleId: string,
+  payload: { timezone: string; local_time: string },
+): Promise<{ rule: WatchtowerRuleEntry }> {
+  return watchtowerJson(
+    `/api/watchtower/rules/${encodeURIComponent(ruleId)}/reschedule`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 /** #362 / W-18：GET /api/mcp/servers —— MCP server 列表（配置 ∪ 运行时）。
@@ -1676,9 +1820,13 @@ export async function getAttachmentBytes(sessionId: string, attachmentId: string
  *  两者对界面的含义不同，且这里必须带上状态码。 */
 export class SessionError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** #1325 S5：对象形 detail 里的机读成因（无则 null）。调用方按
+   *  `status + reason` 分流；不拿 message 文案做子串匹配。 */
+  readonly reason: string | null;
+  constructor(status: number, message: string, reason: string | null = null) {
     super(message);
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -1723,8 +1871,10 @@ export async function deleteSession(sessionId: string): Promise<SessionDeleted> 
 
 /** 非 2xx → SessionError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
 async function sessionError(res: Response, fallback: string): Promise<SessionError> {
-  const detail = await readErrorDetail(res);
-  return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+  // #1325 S5：一次读取同时拿到 message 与机读 reason（响应体只能读一次）；
+  // 缺 message 时仍用兜底前缀 + 状态码，与旧行为一致。
+  const { message, reason } = await readErrorBody(res);
+  return new SessionError(res.status, message || `${fallback}（${res.status}）`, reason);
 }
 
 /** 归档一个会话（#171）：把它从默认列表里收起来，**可逆**，不删任何东西。
@@ -2450,8 +2600,19 @@ export interface AskUserAnswerPayload {
   questions: AskUserQuestionAnswer[];
 }
 
-/** `input_request` 的 wire 联合：窄场景四选一，或通用提问逐题作答。 */
-export type UserInputAnswerPayload = ConstraintInputAnswerPayload | AskUserAnswerPayload;
+/** #1356：`plan_approval` 的答案形态（`input_request` 第三支）。
+ *
+ *  `feedback` 只在 revise / reject 时有意义；后端对「approve + feedback」直接 422
+ *  （静默丢弃用户写下的字比拒绝更糟），所以这里在类型层就不允许该组合。 */
+export type PlanApprovalAnswerPayload =
+  | { request_id: string; decision: 'approve' }
+  | { request_id: string; decision: 'revise' | 'reject'; feedback?: string };
+
+/** `input_request` 的 wire 联合：窄场景四选一、通用提问逐题作答，或计划审批裁决。 */
+export type UserInputAnswerPayload =
+  | ConstraintInputAnswerPayload
+  | AskUserAnswerPayload
+  | PlanApprovalAnswerPayload;
 
 export type ResumePausedRunPayload =
   | {
@@ -2675,10 +2836,11 @@ export async function forkSession(
     body: JSON.stringify({ from_seq: fromSeq }),
   });
   if (!res.ok) {
-    // BUG-001 fix：解析后端 detail 给用户看（可用边界列表等）。
-    let detail = '';
-    try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
-    throw new Error(detail || `fork ${res.status}`);
+    // BUG-001 fix / #1325 S8：sandbox 不可用时 detail 是**对象**，直接
+    // `String(detail)` 会渲染成「[object Object]」。统一走 readErrorBody 取
+    // 给人看的 message（后端已把 remediation 拼进 message，无需二次拼装）。
+    const { message, reason } = await readErrorBody(res);
+    throw new SessionError(res.status, message || `fork ${res.status}`, reason);
   }
   return res.json();
 }

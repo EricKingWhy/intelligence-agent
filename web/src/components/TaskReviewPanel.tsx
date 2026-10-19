@@ -212,11 +212,11 @@ export function TaskReviewPanel({
       <div
         className="ctx-usage-popover task-review-panel"
         role="dialog"
-        aria-label="任务审阅"
+        aria-label="详细审阅"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="ctx-usage-head">
-          <span className="ctx-usage-title">任务审阅</span>
+          <span className="ctx-usage-title">详细审阅</span>
           <button className="ctx-usage-close" onClick={onClose} aria-label="关闭">
             <X size={14} />
           </button>
@@ -595,7 +595,9 @@ export function TaskReviewPanel({
             <details className="task-review-disclosure task-review-diagnostic-disclosure">
               <summary>诊断信息</summary>
               <div className="task-review-disclosure-content task-review-diagnostics">
-                <div>在途 run 来自交付投影 `open_run_ids`；run 终态属事件流事实，本投影只报在途。</div>
+                {/* #1325 S3：按批准文案对照表删掉「交付投影 open_run_ids」一行——
+                    普通用户不需要理解内部投影。reconcile / Operation Ledger 的排查
+                    说明按对照表留在诊断区（默认收起）。 */}
                 <div>需 reconcile（来源未接入）。UNKNOWN / reconcile 属 Operation Ledger 域，本票不接入也不推断。</div>
               </div>
             </details>

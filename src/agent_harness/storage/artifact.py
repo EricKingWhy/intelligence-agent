@@ -314,6 +314,10 @@ class FakeArtifactStore(ArtifactStore):
         self._artifacts: dict[str, tuple[Artifact, str]] = {}  # id → (meta, content)
         self._blobs: dict[str, tuple[BlobArtifact, bytes]] = {}  # 字节路径 id → (meta, data)
 
+    def count(self) -> int:
+        """已落 artifact 条数（只读口）——测试断言"零副作用"用，别摸 `_artifacts`。"""
+        return len(self._artifacts)
+
     async def save(
         self,
         session_id: str,

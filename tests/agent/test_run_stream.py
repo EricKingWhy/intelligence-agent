@@ -104,6 +104,31 @@ async def test_run_stream_durable_events_have_seq(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_stream_reuses_a_user_message_with_the_same_idempotency_key(tmp_path):
+    runtime = _build_runtime(ScriptedModel([AIMessage(content="answer")]), tmp_path)
+    session = make_session(tmp_path)
+    session.append(
+        USER_MESSAGE,
+        {"content": "scheduled prompt", "idempotency_key": "fire-1"},
+    )
+
+    events = [
+        event async for event in runtime.run_stream(
+            session, "scheduled prompt",
+            user_input_metadata={"idempotency_key": "fire-1"},
+        )
+    ]
+
+    user_messages = [event for event in session.events if event.type == USER_MESSAGE]
+    assert len(user_messages) == 1
+    assert user_messages[0].data == {
+        "content": "scheduled prompt", "idempotency_key": "fire-1",
+    }
+    assert sum(event.type == RUN_STARTED for event in session.events) == 1
+    assert not any(event.type == USER_MESSAGE for event in events)
+
+
+@pytest.mark.asyncio
 async def test_run_stream_keeps_result_holder_as_fourth_positional_argument(tmp_path):
     runtime = _build_runtime(ScriptedModel([AIMessage(content="answer")]), tmp_path)
     session = make_session(tmp_path)
