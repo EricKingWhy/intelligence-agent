@@ -512,9 +512,21 @@ export const SessionList = memo(function SessionList({
             「会话行未到」，项目结构照常可见；loading 窗口内不渲染依赖 sessions 的
             计数/缺失提示，避免把"还没拿到"说成"没有会话"。 */}
         <section className="rail-section" aria-label="项目">
+          {/* #1400：项目区用常规 section header + 右侧「+」表达空态入口，
+              不再复刻拖放区的 dashed 大卡。空态本身只剩一行说明 + 文字链接。 */}
+          <div className="rail-section-label">
+            项目
+            <button
+              className="icon-btn rail-section-add"
+              onClick={() => setCreateOpen(true)}
+              aria-label="新建项目"
+              title="新建项目：注册一个已存在的目录"
+            >
+              <Plus size={12} aria-hidden="true" />
+            </button>
+          </div>
           {projects.length > 0 ? (
             <>
-              <div className="rail-section-label">项目</div>
               {model.groups.map(({ project, sessions: rows, missing }) => {
                 const expanded = isExpanded(project);
                 const listId = `rail-project-${project.id}`;
@@ -789,10 +801,14 @@ export const SessionList = memo(function SessionList({
             // （sessions 与 projects 都为 0）下的文案整段吞掉，与文字按钮指涉
             // 自相矛盾，正是本票要消灭的断点。
             !projectsError && (
-              <div className="rail-project-empty rail-project-empty-first">
-                还没有项目。注册一个已存在的目录，同目录的会话就会归到一起。
-                <button className="rail-empty-action" onClick={() => setCreateOpen(true)}>
-                  注册项目目录 →
+              <div className="rail-project-empty rail-project-empty-hint">
+                还没有项目，
+                <button
+                  className="rail-empty-action"
+                  onClick={() => setCreateOpen(true)}
+                  title="注册一个已存在的目录，同目录的会话就会归到一起"
+                >
+                  注册项目目录
                 </button>
               </div>
             )

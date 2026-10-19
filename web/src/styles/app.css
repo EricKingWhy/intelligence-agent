@@ -1076,6 +1076,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 var(--space-md) 2px;
   user-select: none;
 }
+/* #1400：section header 右侧的「+」——与标题同行的常规入口，ghost 无底色。 */
+.rail-section-add {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text-tertiary);
+}
+.rail-section-add:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--color-hover);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
 .rail-section-count {
   font-size: var(--text-xs);
   letter-spacing: 0;
@@ -1253,11 +1270,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--accent-text-strong);
 }
 
-.rail-project-empty-first {
-  padding: var(--space-sm) var(--space-md);
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-md);
-  margin-top: 2px;
+/* #1400：空项目只留一行 12px 说明 + 文字链接；dashed 卡是拖放区语言，
+ * 不应该常驻在导航栏里。 */
+.rail-project-empty-hint {
+  padding: 0 var(--space-md) 4px;
+  margin-top: 0;
+}
+.rail-project-empty-hint .rail-empty-action {
+  display: inline;
+  margin-top: 0;
+  font-size: inherit;
 }
 .rail-project-missing {
   padding: 2px var(--space-sm) 4px;
