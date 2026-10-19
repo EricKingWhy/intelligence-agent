@@ -138,6 +138,36 @@ test('#1372 AC1：首焦点到 composer ≤10 次按键（region 跳转键）；
   expect(pureTab).toBeGreaterThan(withSkip);
 });
 
+test('#1372 AC1：会话区 / 主工作区跳转键落焦到 region，下一次 Tab 留在区内', async ({ page }) => {
+  await openApp(page);
+  const regions = [
+    ['跳到会话区', '#region-sessions'],
+    ['跳到主工作区', '#region-main'],
+  ] as const;
+  for (const [name, id] of regions) {
+    const link = page.getByRole('link', { name });
+    await link.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator(id)).toBeFocused();
+    // tabindex=-1 的容器只作落点；下一次 Tab 必须进入该区，而不是回到页面顶部。
+    await page.keyboard.press('Tab');
+    const inside = await page.evaluate(
+      (sel) => document.querySelector(sel)?.contains(document.activeElement) ?? false,
+      id,
+    );
+    expect(inside, `${name} 后下一次 Tab 应留在该 region 内`).toBe(true);
+  }
+});
+
+test('#1372 改动 6：disabled 作用域 pill 用原生 title 兜底完整原因', async ({ page }) => {
+  await openApp(page);
+  await page.locator('#remember-as-procedural-rule').check();
+  // e2e 夹具的 effectiveProject 缺省为 null = 非 git 目录 ⇒「本项目」禁用。
+  const project = page.getByRole('button', { name: '本项目', exact: true });
+  await expect(project).toBeDisabled();
+  await expect(project).toHaveAttribute('title', '当前会话不在 git 仓库内，无法登记项目级约束');
+});
+
 test('#1372：Inspector 收起时不再给出无法落焦的跳转键', async ({ page }) => {
   await openApp(page);
   const link = page.getByRole('link', { name: '跳到 Inspector' });

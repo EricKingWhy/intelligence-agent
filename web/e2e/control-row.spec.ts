@@ -514,6 +514,11 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await expect(note).toHaveAttribute('aria-label', /^该档位声明开放 13 个工具（全部档位声明 18 个）；Coding未声明开放：/);
   await expect(note).toHaveAttribute('aria-label', /delegate/);
   await expect(note).toHaveAttribute('aria-label', /web_search/);
+  // #1372：title 迁到 radix tooltip 后必须真的能挂载（不是只剩 aria-label）。
+  await note.hover();
+  await expect(page.locator('.tip-content')).toContainText('未声明开放：');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.tip-content')).toHaveCount(0);
   await closePicker();
 
   // ③ 换回未被收窄的档位（通用 = main）⇒ 提示消失（跟着当前生效档位走，不是一次性的）

@@ -82,15 +82,15 @@ describe('BudgetPickerPanel — 截止预览行（#536 §2.2）', () => {
     expect(out).not.toContain('composer-budget-preview');
   });
 
-  it('时长草稿 → 「≈ MM-DD HH:mm 截止（2 小时后）」', () => {
+  it('时长草稿 → 「≈ YYYY-MM-DD HH:mm 截止（2 小时后）」', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, deadline: '2h' }));
-    expect(out).toMatch(/≈ \d{2}-\d{2} \d{2}:\d{2} 截止（2 小时后）/);
+    expect(out).toMatch(/≈ \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止（2 小时后）/);
     expect(out).not.toContain('composer-budget-preview--danger');
   });
 
   it('datetime 高级路径 → 「≈ … 截止」（无相对语）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, deadline: '2026-10-02T15:30' }));
-    expect(out).toMatch(/≈ \d{2}-\d{2} \d{2}:\d{2} 截止<\/span>/);
+    expect(out).toMatch(/≈ \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止<\/span>/);
   });
 
   it('已过期（datetime 早于 now）→ 「已过期」 + --danger 修饰类', () => {
@@ -120,8 +120,12 @@ describe('BudgetPicker — 单入口 trigger（#536 §2.3/§2.5）', () => {
     expect(out).toContain('>turns 5 · 500k · 2h<');
   });
 
-  it('disabled → aria-disabled="true"（SSR 可见，同 OptionPicker 契约）', () => {
+  it('disabled → aria-disabled="true" + 原生 title 兜底完整说明（#1372）', () => {
     const out = html(createElement(BudgetPicker, { ...full, disabled: true }));
     expect(out).toContain('aria-disabled="true"');
+    // disabled 收不到指针事件 ⇒ Radix tooltip 打不开；完整预算说明不能因此丢失。
+    expect(out).toContain(
+      'title="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。"',
+    );
   });
 });

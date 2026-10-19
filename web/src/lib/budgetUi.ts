@@ -7,7 +7,7 @@
  *  票面锚点：docs/design/t435-budget-ui-interaction-design.md
  *  §2.1 tokens 档位 100k/250k/500k/1M/自定义（不做 token→次数换算）；
  *  §2.2 deadline 时长档 30m/1h/2h/4h/自定义时长，datetime-local 保留为高级路径，
- *  预览「≈ 10-02 15:30 截止（2 小时后）」，过期 → 「已过期」（仅前置提示）；
+ *  预览「≈ 2026-10-02 15:30 截止（2 小时后）」，过期 → 「已过期」（仅前置提示）；
  *  §2.5 默认值用 placeholder / 「默认」表达。 */
 
 import { parseDurationToken, resolveDeadlineDraft } from './amend';

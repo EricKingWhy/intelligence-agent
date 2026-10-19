@@ -80,6 +80,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [tokenDraft, setTokenDraft] = useState('');
   const authInputRef = useRef<HTMLInputElement>(null);
+  /** 菜单因「API 身份令牌」而关闭时，别把焦点还给 trigger，交给面板输入框。 */
+  const authPanelOpenRef = useRef(false);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -98,12 +100,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
 
   const openAuthPanel = () => {
     setTokenDraft(getToken());
-    setAuthPanelOpen((v) => !v);
+    const next = !authPanelOpen;
+    authPanelOpenRef.current = next;
+    setAuthPanelOpen(next);
   };
 
   // Radix 菜单关闭时会把焦点还给 trigger；若面板此刻打开，焦点要落到输入框，
   // 否则 Esc 落在 trigger 上、面板关不掉（键盘用户必须先手动点进来）。
   useEffect(() => {
+    authPanelOpenRef.current = authPanelOpen;
     if (!authPanelOpen) return;
     const timer = window.setTimeout(() => authInputRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
@@ -338,6 +343,11 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               className="rail-menu appbar-more-menu"
               align="end"
               sideOffset={6}
+              /* 选中「API 身份令牌」后菜单关闭：默认会把焦点还给触发器，
+                 面板里的输入框就接不到 Esc。阻止这次归还，由面板 effect 接管。 */
+              onCloseAutoFocus={(event) => {
+                if (authPanelOpenRef.current) event.preventDefault();
+              }}
             >
               <DropdownMenu.Item className="rail-menu-item" onSelect={openAuthPanel}>
                 <KeyRound size={14} aria-hidden="true" /> API 身份令牌
