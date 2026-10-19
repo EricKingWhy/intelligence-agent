@@ -32,7 +32,9 @@ export function initTheme(): Theme {
 const SWITCH_ATTR = 'data-theme-switch';
 /** 略大于 `--dur-theme`（200ms）：留一帧调度余量，避免最后一帧被提前摘掉。 */
 const SWITCH_WINDOW_MS = 240;
-let switchTimer: ReturnType<typeof setTimeout> | null = null;
+/** 用 `undefined` 而不是 `null`：DOM 的 `clearTimeout(id?: number)` 不收 `null`，
+ *  而 clear 对 undefined 本就是 no-op（无需再套 if）。 */
+let switchTimer: ReturnType<typeof setTimeout> | undefined;
 
 function openSwitchWindow(): void {
   const root = document.documentElement;
@@ -40,7 +42,7 @@ function openSwitchWindow(): void {
   clearTimeout(switchTimer);
   switchTimer = setTimeout(() => {
     root.removeAttribute(SWITCH_ATTR);
-    switchTimer = null;
+    switchTimer = undefined;
   }, SWITCH_WINDOW_MS);
 }
 

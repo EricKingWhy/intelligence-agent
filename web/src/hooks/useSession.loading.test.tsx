@@ -91,11 +91,21 @@ interface HookView {
 }
 
 const captured = { hook: null as HookView | null };
+/** 每次**渲染**的状态快照（在渲染期写入，不含 effect 之后的值）。
+ *
+ *  冷启动首帧的回归锁必须读这里：`loadingHistory` 的初值只活到第一次提交，
+ *  effect 一落地就被 `switchingSession` 覆盖成同一个 true——只断言 effect 之后
+ *  的值，把初值改回 false 也不会红（变异实测）。 */
+const renders: Array<{ loadingHistory: boolean; historySkeleton: boolean }> = [];
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 function Harness() {
   const api = useSession();
+  renders.push({
+    loadingHistory: api.loadingHistory,
+    historySkeleton: api.historySkeleton,
+  });
   useEffect(() => {
     captured.hook = api;
   });
@@ -114,6 +124,7 @@ async function mount(): Promise<void> {
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   window.localStorage.clear();
+  renders.length = 0;
   apiMock.listSessions.mockReset();
   apiMock.getSessionEvents.mockReset();
   apiMock.listSessions.mockResolvedValue([]);
@@ -173,6 +184,9 @@ describe('loadingHistory — 初值、复位与派生骨架', () => {
     apiMock.getSessionEvents.mockImplementation(() => events.promise);
 
     await mount();
+    // 首帧（effect 落地前）就必须是 true：localStorage 恢复的会话在第一次绘制时
+    // 历史还没开始读，靠 effect 补会先画一帧「暂无对话」。
+    expect(renders[0]).toEqual({ loadingHistory: true, historySkeleton: true });
     expect(captured.hook!.loadingHistory).toBe(true);
     expect(captured.hook!.historySkeleton).toBe(true);
 
