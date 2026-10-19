@@ -238,6 +238,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: var(--space-sm);
 }
+/* #1368：左组必须能**收缩**，否则标题的 `nowrap` 会把右簇顶出顶栏。
+   `min-width:0` 关掉 flex item 的 auto 最小尺寸（= 内容的 min-content），
+   再让标题自己用省略号收口——「宁可省略也不竖排」这句注释在这里才真的成立。 */
+.appbar-left {
+  min-width: 0;
+}
 /* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon */
 .appbar-logo {
   width: 28px;
@@ -254,6 +260,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-weight: 600;
   font-size: var(--text-base);
   letter-spacing: -0.01em;
+  /* #1368：产品名**永不折行**——390 实测它被挤成三行、把顶栏撑到 67px。
+     窄档直接隐藏（见 `@media (max-width: 560px)`），中间档位宁可省略也不竖排：
+     561–715 实测右簇 484px 恒宽（无响应式规则），标题整串 min-content 163px 不可
+     收缩就会把 4 个图标推出 appbar（`.app-frame{overflow:hidden}` 直接裁掉），
+     所以 nowrap 必须配 `overflow:hidden` + 省略号 + `.appbar-left{min-width:0}`。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .appbar-center {
   display: flex;
@@ -519,6 +533,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1;
   padding: 4px 8px;
   cursor: pointer;
+  /* #1368：两字标签在挤压下会逐字折成竖排（390 实测「紧凑」3 行）——按钮文字永不换行。 */
+  white-space: nowrap;
   transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
     box-shadow var(--dur-out) var(--ease-apple);
 }
@@ -551,6 +567,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   min-width: 0;
   background: var(--bg-sidebar);
   overflow: hidden;
+}
+/* #1368：抽屉开关只在窄屏出现——宽屏轨本来就有 240px 正文，没有可"展开"的东西。
+   窄屏档的排布（居中 / 抽屉里靠左）在 `@media (max-width: 820px)` 里给。 */
+.rail-drawer-btn {
+  display: none;
+}
+/* #1368：抽屉遮罩。只在展开时渲染；宽屏（>820px）恒 `display:none`——桌面档没有抽屉，
+   万一状态残留也不能挡住三栏。窄屏的定位（铺满视口、画在轨背景之下）在
+   `@media (max-width: 820px)` 里给。 */
+.rail-scrim {
+  display: none;
 }
 .session-list-header {
   display: flex;
@@ -888,6 +915,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-xs);
 }
 .rail-empty-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* #1368：图标 + 文字在桌面 240px 轨里会被 flex 收缩到 44px，四个汉字于是折成
+     两行（实测 83×38，改前是 68×28）。与 `.memory-expand` 同口径：文字不折行，
+     宽了就让整行承担，不把"新建项目"拆开。 */
+  white-space: nowrap;
   min-height: 28px;
   padding: 3px 10px;
   border: none;
@@ -902,6 +936,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .rail-empty-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap; /* #1368：同 `.rail-empty-btn-primary`——「新会话」不折行。 */
   min-height: 28px;
   padding: 3px 10px;
   border: 1px solid var(--border-subtle);
@@ -1826,6 +1864,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: flex-start;
   gap: var(--space-sm);
 }
+/* #1368：操作列。此前两个按钮各自固定 22px 宽，「详细信息」在 16px 的盒子里逐字
+ * 竖排（390 实测 16×72 = 5 行）。现在列有最小宽度、按钮宽度随文案走、`white-space:
+ * nowrap` 兜底——四个汉字永远横排。 */
+.memory-row-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  /* 桌面档保持改前的 8px（`--space-sm`）：这两个按钮改前是 `.memory-row-head` 的
+     直接子元素、共享那个 gap，改成操作列时不能顺手把可见间距改小。窄屏竖排另用
+     更紧的 4px（见 `@media (max-width: 820px)`）。 */
+  gap: var(--space-sm);
+  flex-shrink: 0;
+  /* = 最长按钮「详细信息」的实测下界：icon 14 + gap 4 + 4 个汉字 ≈ 56 + 左右内边距
+     12 = 86，取 88。低于它按钮会被压回竖排（390 实测改前 16×72 = 5 行）。 */
+  min-width: 88px;
+}
 .memory-content {
   flex: 1;
   min-width: 0;
@@ -1848,9 +1902,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
+  gap: 4px;
+  width: auto;
+  min-width: 22px;
   height: 22px;
-  padding: 0;
+  padding: 0 6px;
+  white-space: nowrap;
   background: transparent;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -4404,13 +4461,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   pointer-events: auto;
 }
 /* 动作簇的实测宽度（右缩进 8 + 附图入口 32 + 间距 4 + 提示 64 + 间距 4 + 发送 32
-   + 间距 4 + 停止 32 = 180 的保守下界，取 160：#825 之前本常量只算了「提示 + 一个
-   按钮」，而流式时簇里一直并存发送与停止两个按钮 ⇒ 取值只保证"不比改动前更差、且把
-   本票新增的 36px（32 按钮 + 4 间距）算进去了"；真正的重算是布局票，不在本票范围。
-   **必须定义在 dock 上**：消费方 `.composer-controls` 与 `.composer-actions` 是兄弟，
-   定义在簇里的话档位行读不到，`padding-right` 会在计算值阶段落回 0——本票踩过。 */
+   + 间距 4 + 停止 32 = 180）。#1368 重构实测流式簇矩形宽 **172**（提示文本实际
+   比 64 窄），取 **180 = 172 + 8px 余量**；旧值 160 小于实测值，窄屏流式档因此
+   真重叠 67px（P1-1）。这一枚同时被 base 的 `padding-right`（宽工作区）与窄屏的
+   `margin-right`（滚动视口）消费，**必须定义在 dock 上**：消费方
+   `.composer-controls` 与 `.composer-actions` 是兄弟，定义在簇里的话档位行读不到，
+   `padding-right` 会在计算值阶段落回 0——本票踩过。 */
 .composer-dock {
-  --composer-actions-w: 160px;
+  --composer-actions-w: 180px;
+  /* 窄屏非流式档（只有发送 + 附图，无 Esc 提示）的簇宽：右缩进 8 + 发送 32 +
+     间距 4 + 附图 32 = 76，取 **80 = 76 + 4px 余量**。旧实现把 76 直接写在
+     `margin-right` 上：与按钮尺寸隐式耦合且零余量（实测控件行右缘 == 簇左缘
+     288，簇里任一 1px 变化就重叠）。 */
+  --composer-actions-w-compact: 80px;
 }
 /* 流式中把档位行的右端让给动作簇。
    为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
@@ -5558,19 +5621,28 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .app-regions:not(.inspector-closed) {
     grid-template-columns: 56px minmax(0, 1fr) 0px;
   }
-  .session-list-header .panel-label,
-  .session-item-body,
-  .new-session-btn,
-  .session-group-label {
+  /* ── #1368：折叠态与抽屉态由**同一条判据**分流 ──
+   * 下面所有"收正文 / 收标题 / 收空态"的规则都挂在 `.session-rail:not(.rail-drawer-open)`
+   * 上：折叠的 56px 图标轨只留图标，展开的抽屉直接复用桌面形态（同样的行、同样的
+   * 标题、同样的空态文案）。两种形态共用一套声明、靠一个类切换，不会出现"抽屉里
+   * 还要再覆盖一遍"的双份真相。 */
+  .session-rail:not(.rail-drawer-open) .session-list-header .panel-label,
+  .session-rail:not(.rail-drawer-open) .session-item-body,
+  .session-rail:not(.rail-drawer-open) .new-session-btn,
+  .session-rail:not(.rail-drawer-open) .session-group-label,
+  /* UI-05 的文字按钮在折叠轨里收标签、留图标：`.rail-empty-btn-label` 是那条标签，
+     `aria-label` 保住全文（可访问名称不变）。展开的抽屉里文字照常显示。 */
+  .session-rail:not(.rail-drawer-open) .rail-empty-btn-label,
+  .session-rail:not(.rail-drawer-open) .empty-hint {
     display: none;
   }
   /* WS-5 #155：56px 图标轨里放不下层级 chrome——区标题/空态/错误条一律收起，
    * 只留下每个会话的点 + 每个项目的文件夹（与改版前"只看到点"的窄屏行为一致）。
    * 层级信息在窄屏丢失是刻意的降级：这个宽度下任何折叠态都表达不了两层结构。 */
-  .rail-section-label,
-  .rail-project-empty,
-  .rail-project-missing,
-  .rail-error {
+  .session-rail:not(.rail-drawer-open) .rail-section-label,
+  .session-rail:not(.rail-drawer-open) .rail-project-empty,
+  .session-rail:not(.rail-drawer-open) .rail-project-missing,
+  .session-rail:not(.rail-drawer-open) .rail-error {
     display: none;
   }
   /* FE-R11-09：上一行的收起清单里**不含** `.rail-menu-btn`（原来含，是个漏配）——
@@ -5591,21 +5663,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    * （项目身份），hover / focus-within 时让位给 ⋯ 菜单。标题 / 计数 / 箭头在窄屏
    * 收起（放不下），项目名改由 `.rail-project-toggle` 的 `aria-label` 提供——
    * `display:none` 会把标题从可访问性树里摘掉，不能只靠"视觉上还有个图标"。 */
-  .rail-project-head {
+  .session-rail:not(.rail-drawer-open) .rail-project-head {
     position: relative;
   }
   /* 同 `.session-row` 的理由：窄屏轨里这圈 padding 就是这一行的可点面积，不能收。 */
-  .rail-project-toggle {
+  .session-rail:not(.rail-drawer-open) .rail-project-toggle {
     justify-content: center;
     padding: 6px 0;
   }
-  .rail-project-chevron,
-  .rail-project-title,
-  .rail-project-armed-hint,
-  .rail-project-count {
+  .session-rail:not(.rail-drawer-open) .rail-project-chevron,
+  .session-rail:not(.rail-drawer-open) .rail-project-title,
+  .session-rail:not(.rail-drawer-open) .rail-project-armed-hint,
+  .session-rail:not(.rail-drawer-open) .rail-project-count {
     display: none;
   }
-  .rail-project-head .rail-menu-btn {
+  .session-rail:not(.rail-drawer-open) .rail-project-head .rail-menu-btn {
     position: absolute;
     top: 50%;
     right: 50%;
@@ -5613,36 +5685,36 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     width: 20px;
     height: 20px;
   }
-  .rail-project-icon,
-  .rail-project-warn {
+  .session-rail:not(.rail-drawer-open) .rail-project-icon,
+  .session-rail:not(.rail-drawer-open) .rail-project-warn {
     transition: opacity var(--dur-out) var(--ease-apple);
   }
   /* 菜单浮现时图标让位：同一槽位不叠两团东西 */
-  .rail-project-head:hover .rail-project-icon,
-  .rail-project-head:focus-within .rail-project-icon,
-  .rail-project-head:hover .rail-project-warn,
-  .rail-project-head:focus-within .rail-project-warn {
+  .session-rail:not(.rail-drawer-open) .rail-project-head:hover .rail-project-icon,
+  .session-rail:not(.rail-drawer-open) .rail-project-head:focus-within .rail-project-icon,
+  .session-rail:not(.rail-drawer-open) .rail-project-head:hover .rail-project-warn,
+  .session-rail:not(.rail-drawer-open) .rail-project-head:focus-within .rail-project-warn {
     opacity: 0;
   }
   /* 行内重命名在这条窄轨里本来只剩 ~40px，压成那样等于"能打开、没法用"。
      重命名是瞬态编辑态，让它向右溢出盖住正文（`.app-regions` 有 overflow:hidden，
      但正文栏在同一盒子里，不会被裁掉）——这是这一档唯一真的能改名的形状。 */
-  .rail-project-toggle-static .project-rename-input {
+  .session-rail:not(.rail-drawer-open) .rail-project-toggle-static .project-rename-input {
     position: absolute;
     left: 2px;
     min-width: 180px;
     z-index: 2;
   }
-  .session-row {
+  .session-rail:not(.rail-drawer-open) .session-row {
     position: relative;
   }
   /* 不动行内边距：`.session-items` 在窄屏是 `align-items: center`，行宽由内容决定，
    * 而内容（会话点 5px）几乎不占宽度——那圈 padding 就是这一行的**可点面积**。
    * 收掉它会把会话的可点区域从 24px 压到 9px（实测），等于修好菜单却毁了选会话。 */
-  .session-row .session-item {
+  .session-rail:not(.rail-drawer-open) .session-row .session-item {
     justify-content: center;
   }
-  .session-row .rail-menu-btn {
+  .session-rail:not(.rail-drawer-open) .session-row .rail-menu-btn {
     position: absolute;
     top: 50%;
     /* 居中压在会话点上：right:50% + translate 与 justify-content:center 同一槽心 */
@@ -5651,24 +5723,115 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     width: 20px;
     height: 20px;
   }
-  .session-row .session-item-dot {
+  .session-rail:not(.rail-drawer-open) .session-row .session-item-dot {
     transition: opacity var(--dur-out) var(--ease-apple);
   }
   /* 菜单浮现时点让位：同一槽位不叠两团东西 */
-  .session-row:hover .session-item-dot,
-  .session-row:focus-within .session-item-dot {
+  .session-rail:not(.rail-drawer-open) .session-row:hover .session-item-dot,
+  .session-rail:not(.rail-drawer-open) .session-row:focus-within .session-item-dot {
     opacity: 0;
   }
-  .rail-project-rows {
+  .session-rail:not(.rail-drawer-open) .rail-project-rows {
     margin-left: 0;
     padding-left: 0;
     border-left: none;
   }
-  .session-items {
+  .session-rail:not(.rail-drawer-open) .session-items {
     align-items: center;
     padding-top: var(--space-sm);
   }
   .appbar-center {
+    display: none;
+  }
+
+  /* ── #1368：窄屏会话抽屉 ──
+   * 折叠轨里 4 个图标按钮横排会互相挤压（实测 `.session-list-header` 的
+   * scrollWidth 94 > 56），改成竖排后每个按钮独占一行、命中区都是 24px。 */
+  .rail-drawer-btn {
+    display: inline-flex;
+    align-self: center;
+    margin-top: var(--space-sm);
+  }
+  .session-rail:not(.rail-drawer-open) .session-list-header {
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-sm) 0;
+  }
+  .session-rail:not(.rail-drawer-open) .session-list-actions {
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+  /* 图标态的空态按钮：方形命中区，图标居中（文字标签已由上面的清单收起）。 */
+  .session-rail:not(.rail-drawer-open) .rail-empty-btn-primary,
+  .session-rail:not(.rail-drawer-open) .rail-empty-btn-ghost {
+    justify-content: center;
+    padding: 3px;
+    min-width: 28px;
+  }
+
+  /* 抽屉本体：**呈现层覆盖**——`position: fixed` 让它脱离栅格，`.app-workspace` 的
+   * 轨道起点一个像素都不动（数据流/布局契约不变），关闭后原位回落。
+   * 遮罩用大扩散的 box-shadow 画：不新增 DOM 节点，且与抽屉同一个盒（不会出现
+   * "遮罩盖住抽屉内容"的层序问题）。`.app-regions` 的 overflow 不裁剪 fixed 后代。 */
+  .session-rail.rail-drawer-open {
+    position: fixed;
+    /* 48px = `.appbar` 的高度（`app.css:228`）：抽屉顶在顶栏下沿，不压住顶栏图标。 */
+    top: calc(var(--space-sm) + 48px);
+    left: var(--space-sm);
+    bottom: var(--space-sm);
+    /* 272 = 桌面轨宽 240（`.app-regions` 的轨道）+ 两侧 16 内边距（`--space-lg`），
+       即"抽屉里能放下和桌面轨一样宽的一行"。100vw 上限给 320 以下的极窄屏兜底。 */
+    width: min(272px, calc(100vw - 2 * var(--space-sm)));
+    /* 层级：30 = 高于正文（`.appbar` 10、正文 ≤10），低于一切菜单/浮层
+       （slash-menu / auth-panel / roster 40、palette 50/51、拖拽 60、toast 1000）
+       ——抽屉不得盖住这些浮层。遮罩自己的 `-1` 只在本层叠上下文内生效。 */
+    z-index: 30;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    /* 遮罩 28%（比既有 `ctx-usage-overlay` 的 32% 浅）：抽屉是"轻量 disclosure"，
+       背后仍是用户要看的会话内容；模态浮层才用更重的 32%。 */
+    box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, #000 28%, transparent);
+  }
+  /* 展开态的开关退到左上角（与标题同一行的阅读起点），收起态居中在图标轨里。 */
+  .session-rail.rail-drawer-open .rail-drawer-btn {
+    align-self: flex-start;
+    margin-left: var(--space-md);
+  }
+  /* 遮罩铺满视口，命中区吃掉"点抽屉外"。`z-index:-1` 让它在**同一个层叠上下文**
+   * （轨的 fixed + z-index 30）里画到轨背景之下：轨自身的盒子仍然是最上层命中区
+   * （点行、滚列表不受影响），而抽屉外的视口范围由遮罩独占——那一下不会穿到正文。
+   * 视觉遮罩不重画：它仍是轨本身 `box-shadow: 0 0 0 100vmax` 那一圈。 */
+  .rail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+  }
+
+  /* #1368：窄屏把记忆卡的操作列改成竖排——正文列留住可读宽度，按钮文字仍横排
+     （按钮自身 `white-space: nowrap`，这里只改列的排列方向）。 */
+  .memory-row-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-xs);
+    min-width: 0;
+  }
+  .memory-expand {
+    justify-content: flex-start;
+  }
+}
+
+/* ── #1368：390 档顶栏只留 logo ──
+ * 产品名在 390 折成三行（实测 `.appbar-title` 高 67px ≈ 3 行、`.appbar` 的
+ * scrollWidth 565 > clientWidth 372）。560px 是"标题还放得下"的分界：
+ * 实测右簇 **484px** 恒定（全文件无 `.appbar-right` 响应式规则）+ logo 28 + 间距 8
+ * + `.appbar` 两侧内边距 **16×2**（`0 var(--space-lg)`，不是 48），留给标题的
+ * 预算 = 560 − 16×2 − 484 − 28 − 8 ≈ 8px ⇒ 560 已放不下，取 560 是"整串标题
+ * 至少不再参与挤压"的下界（561–~716 档由标题自己的省略号兜住，见上方注释）。 */
+@media (max-width: 560px) {
+  .appbar-title {
     display: none;
   }
 }
@@ -5684,15 +5847,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
      会话点与文件夹图标退到背景。身份 / 层级信息在这一档本来就是刻意降级。
      代价如实记下：两层在触摸档只剩同一个 ⋯ 芯片，比"点 vs 文件夹"更难一眼分辨
      "这是会话还是项目"——这正是 issue 收尾要求确认的那一点。 */
-  .session-row .rail-menu-btn,
-  .rail-project-head .rail-menu-btn {
+  .session-rail:not(.rail-drawer-open) .session-row .rail-menu-btn,
+  .session-rail:not(.rail-drawer-open) .rail-project-head .rail-menu-btn {
     opacity: 1;
   }
   /* 让位用 opacity 不用 display：`.session-item-dot` 是行里唯一的在流内容，抽掉它
      这一行会塌成 0 高（连同可点面积一起没，见上面那段"padding 就是可点面积"）。 */
-  .session-row .session-item-dot,
-  .rail-project-head .rail-project-icon,
-  .rail-project-head .rail-project-warn {
+  .session-rail:not(.rail-drawer-open) .session-row .session-item-dot,
+  .session-rail:not(.rail-drawer-open) .rail-project-head .rail-project-icon,
+  .session-rail:not(.rail-drawer-open) .rail-project-head .rail-project-warn {
     opacity: 0;
   }
   /* 但两个**状态**信号不是装饰——触摸档修复前它们在场上（点与黄三角都是可见的），
@@ -5705,10 +5868,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
      "提升可发现性"互相抵消。强度也确实弱于原来的实心圆点——这是"一个槽只放一个可见
      元素"这条既有约束下的取舍，不是等价替换。
      选中态不走颜色——`.session-item.selected` 的左侧 accent 条继续表达"当前会话"。 */
-  .session-row:has(.session-item-dot-live) .rail-menu-btn {
+  .session-rail:not(.rail-drawer-open) .session-row:has(.session-item-dot-live) .rail-menu-btn {
     color: var(--success);
   }
-  .rail-project-head:has(.rail-project-warn) .rail-menu-btn {
+  .session-rail:not(.rail-drawer-open) .rail-project-head:has(.rail-project-warn) .rail-menu-btn {
     color: var(--warning);
   }
 }
@@ -7680,6 +7843,37 @@ button.json-row {
   align-items: center;
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
+}
+/* ── #1368：窄屏控件行横向滚动，动作簇钉在右下 ──
+ * 换行（`flex-wrap: wrap`）在 390 会把预算 pill 推到第二行，且第一行末尾的
+ * Agent pill 钻到绝对定位的动作簇底下（实测重叠 141px²）。改成 nowrap + 横向滚动。
+ * ⚠ 右端让位用 **margin** 而不是 padding：`nowrap` 下溢出的项会画进 padding 区
+ * （overflow 在 padding 边缘裁），padding 只给"滚到最右"留空位——滚在中间时最后
+ * 一项照样钻到动作簇底下。margin 缩短的是**滚动视口本身**，任何滚动位置都不会重叠。
+ * 流式档（有 Esc 提示）的动作簇更宽，走同一条 margin 口径，**并且必须把 base 那条
+ * `padding-right` 归零**：宽工作区的预留是给 flex 换行用的，窄屏已经用 margin 缩短
+ * 滚动视口，两条右缩进会叠加成 360px（实测控件行 clientW 只剩 168、右缘 251 越过
+ * 簇左缘 184，压住「权限」pill 67px——P1-1）。margin 与 padding 二选一，不是相加。
+ * ⚠ 位置不能挪回上面那个 `@media (max-width: 820px)` 大块：本条覆盖的是**本规则下方**
+ * 的 `.composer-controls`（基础形态），而媒体查询不加优先级——同权重下后写的赢，
+ * 挪回去 `flex-wrap: wrap` 与 `padding` 简写会把它整个盖掉（实测：计算值仍是 wrap）。 */
+@media (max-width: 820px) {
+  .composer-controls {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin-right: var(--composer-actions-w-compact);
+    scrollbar-width: none;
+  }
+  .composer-controls::-webkit-scrollbar {
+    display: none;
+  }
+  .composer-controls > * {
+    flex: 0 0 auto;
+  }
+  .composer-dock:has(.composer-esc-hint) .composer-controls {
+    margin-right: var(--composer-actions-w);
+    padding-right: 0;
+  }
 }
 .composer-fallback-effort-note {
   max-width: min(100%, 340px);

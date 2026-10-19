@@ -20,26 +20,14 @@
 
 import { expect, test, type Page } from '@playwright/test';
 import {
-  AGENT_PROFILES,
-  MODELS,
-  PERMISSION_MODES,
-  REASONING_EFFORTS,
+  LIVE_FRAMES,
   RUN,
   SID,
   T,
-  fulfillSse,
-  routeApi,
+  routeStreaming,
   submitTask,
   type FrameSpec,
 } from './fixtures';
-
-/** 未终态的流：run 一直 running ⇒ `streaming` 恒真、Esc 提示与停止按钮常驻
- *  （与 o-wait-hint.spec.ts 同一手法：mock 只给有限帧，模式停在 live）。 */
-const LIVE_FRAMES: FrameSpec[] = [
-  { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
-  { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
-  { type: 'user/message', data: { content: '跑一下' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
-];
 
 const LIVE_WITH_PLAN: FrameSpec[] = [
   ...LIVE_FRAMES,
@@ -61,31 +49,6 @@ const DONE_FRAMES: FrameSpec[] = [
   { type: 'model/completed', data: { content: '跑完了' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
   { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
 ];
-
-const sessionRow = {
-  session_id: SID,
-  event_count: LIVE_FRAMES.length,
-  first_event_time: T,
-  last_event_time: T,
-  first_user_message: '跑一下',
-  trace_id: null,
-  trace_url: null,
-};
-
-async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES) {
-  await routeApi(page, {
-    sessions: [{ ...sessionRow, event_count: frames.length }],
-    models: MODELS,
-    permissionModes: PERMISSION_MODES,
-    agentProfiles: AGENT_PROFILES,
-    reasoningEfforts: REASONING_EFFORTS,
-    onSessionPost: (route) => fulfillSse(route, frames),
-    // 服务端仍在跑（模型还没吐新内容）：快照即全量、连接保持——这正是「流式中」
-    // 的真相，界面必须维持生成态（停止按钮 / Esc 提示在场）。
-    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
-    events: frames,
-  });
-}
 
 /** 在页面里量「谁和谁相交」——相交判定必须在有布局的地方做，不能拿快照里的
  *  近似值在 Node 侧比。返回的是**越界名单**（空数组 = 干净），不是布尔值：
