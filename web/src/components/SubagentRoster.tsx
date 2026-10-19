@@ -26,8 +26,9 @@ import { formatCoarseDuration } from '../lib/format';
 import { DELEGATION_STATUS_CLASS } from '../lib/delegationStatus';
 import { Conversation } from './Conversation';
 
-/** 委派四态 → 中文标签（状态色 class 后缀走 lib/delegationStatus 单一事实源）。 */
-const STATUS_LABEL: Record<DelegationEntry['status'], string> = {
+/** 委派四态 → 中文标签（状态色 class 后缀走 lib/delegationStatus 单一事实源）。
+ *  #1307 起 export：看板执行中卡片的折叠行复用同一份映射（不复制第二份）。 */
+export const STATUS_LABEL: Record<DelegationEntry['status'], string> = {
   running: '运行中',
   completed: '完成',
   failed: '失败',

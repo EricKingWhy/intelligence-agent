@@ -184,6 +184,11 @@ export interface SessionSummary {
   attention_kind: 'input' | 'approval' | null;
   /** #1303：注意力横幅文案，与 `attention_kind` 同源（如「待回答：…」）。 */
   attention_summary: string | null;
+  /** #1308：最后一条用户消息 / 最后一条 agent 文本（后端写入侧截断 128 字符）。
+   *  从未出现为 null（不伪造）。**非可选**——与看板四字段同款理由：漏读会变成
+   *  `undefined`，卡片正文静默渲染成「没有消息」。 */
+  last_user_message: string | null;
+  last_agent_message: string | null;
 }
 
 /** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。
@@ -742,6 +747,36 @@ export interface PendingAskUserRequest {
   timeout_minutes?: number;
 }
 
+/** #1356：计划审批的三裁决（对齐后端 `service.py::_PLAN_DECISIONS` 与
+ *  `web/app.py::InputRequestAnswer.decision` 的值域）。 */
+export type PlanApprovalDecision = 'approve' | 'revise' | 'reject';
+
+/** #1356：`plan_approval` 的答案 wire 形态（`resume_basis: 'user_input'` 的
+ *  `input_request` 第三支）。`feedback` 只在 revise / reject 时有意义——后端对
+ *  「approve + feedback」直接 422（静默丢弃用户写的字比拒绝更糟）。 */
+export interface PlanApprovalAnswer {
+  request_id: string;
+  decision: PlanApprovalDecision;
+  feedback?: string;
+}
+
+/** #1356：`kind == "plan_approval"` 的待裁决计划——对话流内嵌卡片的数据源。
+ *
+ *  `plan_markdown` 是**全文**（不是摘要）：卡片要能让人在不批准的前提下读懂计划，
+ *  所以正文随请求快照走，`artifact_id` 只是同一份内容的持久引用（模型批准后按引用
+ *  回读，不必在上下文里再灌一遍）。 */
+export interface PendingPlanApprovalRequest {
+  request_id: string;
+  run_id: string;
+  plan_markdown: string;
+  touched_files: string[];
+  /** 计划正文的 artifact 引用（后端落盘；旧事件缺失 = 空，卡片不显示引用行）。 */
+  artifact_id?: string;
+  /** 正文指纹：审批后模型侧可核对「批的就是这份」。缺失即不显示（零伪造）。 */
+  plan_sha256?: string;
+  answer: PlanApprovalAnswer | null;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
@@ -899,6 +934,11 @@ export interface ConversationState {
    *  是 `USER_INPUT_REQUESTED.data.kind`（`ask_user` 走这里，其余含
    *  `protected_fact_conflict` 走上面那个）——两者互不替代。null = 无待回答的提问。 */
   pending_ask_user: PendingAskUserRequest | null;
+  /** #1356：`kind == "plan_approval"` 的计划审批请求（对话流内嵌卡片的数据源）。
+   *
+   *  与 `pending_constraint_input` / `pending_ask_user` 是**三个独立事实**（payload
+   *  形状不同），分流判据同是 `USER_INPUT_REQUESTED.data.kind`。null = 无待裁决计划。 */
+  pending_plan_approval: PendingPlanApprovalRequest | null;
   /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
    *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
    *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商

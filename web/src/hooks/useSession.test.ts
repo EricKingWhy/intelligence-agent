@@ -171,6 +171,8 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     compaction_in_progress: false,
     // #1204：通用提问卡片状态（同上：ConversationState 字面量构造点跟着必填字段长）。
     pending_ask_user: null,
+    // #1356：计划审批卡片状态（同上：ConversationState 字面量构造点跟着必填字段长）。
+    pending_plan_approval: null,
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {

@@ -15,14 +15,35 @@
  *  是否未读由看板算好下发（比较键是 `product_state_changed_at`，见 `lib/kanbanUnread.ts`），
  *  卡片只渲染结果。
  *
- *  **本票不含**：子智能体折叠行（T5 / #1307）、最后一条消息（T6）、PR pill /
- *  worktree / repo 页脚（AC-16 明确断言页脚**只有**时间节点）。
+ *  **#1308 最后一条消息（Q10-A）**：正文两行——`You` + user 消息（单行 clamp）/
+ *  `agent` + agent 文本（两行 clamp）。形状照抄 Orca `AgentKanbanCard.tsx:255-268`
+ *  （`line-clamp-1` / `line-clamp-2`）；本仓无 Tailwind，clamp 落在
+ *  `styles/kanban.css` 的 `.kanban-card-msg-*`（先例：`.kanban-card-attention-text`）。
+ *  agent 名用固定 `agent` 前缀：本仓 `SessionSummary` 没有 agentType 字段，不为此
+ *  新造一份契约；效果图（`kanban.html:150-151`）的 `你：` / `agent：` 也是固定前缀。
+ *  **截断是写入侧的职责**（后端 128 字符），组件不再二次截断。
+ *
+ *  **#1307 子智能体折叠行（T5）**：只有 `product_state === 'executing'` 的卡渲染
+ *  折叠按钮（Orca `AgentKanbanCard.tsx:288-305` 同构：真 `<button>` + `aria-expanded`）。
+ *  **首次展开才拉** `GET /api/sessions/{id}/delegations`：看板打开时不为执行中卡预拉，
+ *  避免 N×`/delegations` fan-out；C3 明令不进 sessions 投影。空结果缓存、
+ *  失败态允许重试（失败不缓存），缓存放在卡片本地态里；`KanbanPanel` 关闭时整块板
+ *  `return null` ⇒ 卡片卸载 ⇒ 缓存自然失效，正是"缓存到看板关闭"的语义，
+ *  不需要额外失效逻辑。
+ *  行内格式化全部复用 roster 的单一事实源（`STATUS_LABEL` / `tokenText` /
+ *  `durationText`），本文件不写第二份映射。耗时基准用看板下发的 `now`（与相对时间同源）。
+ *
+ *  **本文件不含**：PR pill / worktree / repo 页脚（AC-16 明确断言页脚**只有**时间节点）。
  */
 
-import { AlertCircle, ShieldQuestion } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { AlertCircle, ChevronDown, ShieldQuestion } from 'lucide-react';
 import type { SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { cardTitle } from '../lib/kanban';
+import { getSessionDelegations, type DelegationEntry } from '../lib/api';
+import { DELEGATION_STATUS_CLASS } from '../lib/delegationStatus';
+import { STATUS_LABEL, durationText, tokenText } from './SubagentRoster';
 
 interface Props {
   session: SessionSummary;
@@ -39,6 +60,14 @@ interface Props {
   onOpen: () => void;
 }
 
+/** 折叠行数据态：`idle` = 还没拉过（首次展开前）；`ready` 的**空数组也是结果**
+ *  （「无子智能体」），所以它不能退回 `idle`——否则再展开会重拉。 */
+type RosterState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; rows: DelegationEntry[] }
+  | { status: 'error' };
+
 export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpen }: Props) {
   // 后端契约保证 `attention_kind` / `attention_summary` **恒成对**：`_attention` 成对返回，
   // 读盘校验 `(kind is None) != (summary is None)` 即判非法，派生失败兜底 `_empty` 也两者皆空
@@ -48,6 +77,31 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
   const empty = session.first_user_message === null;
   const title = cardTitle(session);
   const relative = formatRelativeTime(session.last_event_time, now);
+
+  // #1307：只有执行中的卡有子智能体可看（其余三态的子智能体在票面语义里不存在）。
+  const canExpand = session.product_state === 'executing';
+  const [expanded, setExpanded] = useState(false);
+  const [roster, setRoster] = useState<RosterState>({ status: 'idle' });
+  /** 在途请求去重：`setState` 是异步的，连点两下时第二次仍会读到旧的 `idle`。
+   *  用 ref 而不是靠状态判断——这是**请求去重**，不是渲染态。 */
+  const fetching = useRef(false);
+
+  const toggleSubagents = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next) return;
+    // 缓存：已拉过（含空结果）就只展开，不再请求。失败态允许重试。
+    if (roster.status !== 'idle' && roster.status !== 'error') return;
+    if (fetching.current) return;
+    fetching.current = true;
+    setRoster({ status: 'loading' });
+    getSessionDelegations(session.session_id)
+      .then((rows) => setRoster({ status: 'ready', rows: Array.isArray(rows) ? rows : [] }))
+      .catch(() => setRoster({ status: 'error' }))
+      .finally(() => {
+        fetching.current = false;
+      });
+  };
 
   return (
     <article
@@ -92,6 +146,23 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
         </span>
       </div>
 
+      {session.last_user_message != null || session.last_agent_message != null ? (
+        <div className="kanban-card-msgs">
+          {session.last_user_message != null && (
+            <div className="kanban-card-msg-user kanban-card-msg-clamp-1">
+              <span className="kanban-card-msg-prefix">You</span>{' '}
+              {session.last_user_message}
+            </div>
+          )}
+          {session.last_agent_message != null && (
+            <div className="kanban-card-msg-agent kanban-card-msg-clamp-2">
+              <span className="kanban-card-msg-prefix">agent</span>{' '}
+              {session.last_agent_message}
+            </div>
+          )}
+        </div>
+      ) : null}
+
       {empty && (
         // 空会话不是错误，是"还没开始"——次级说明而不是告警色（诚实但不吓人）。
         <p className="kanban-card-hint">空会话：请先在侧栏打开并发送消息</p>
@@ -105,6 +176,83 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
             <AlertCircle size={12} aria-hidden="true" />
           )}
           <span className="kanban-card-attention-text">{session.attention_summary}</span>
+        </div>
+      )}
+
+      {canExpand && (
+        // 卡片自身是 column flex + gap，这层只是把「按钮 + 结果」收成一组；组内
+        // 间距与卡内一致（6px），不新增 CSS（本票只改两个组件文件）。
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* 真 `<button>` + `aria-expanded`（Orca `AgentKanbanCard.tsx:288-305` 同构）。
+              卡本身是 `role="button"`，所以点击/键盘 Enter/Space 必须 `stopPropagation`——
+              否则展开子智能体会顺手把会话打开（嵌套交互事故）。
+              其他键（如 Esc 关看板）放行给祖先处理。
+              `.agent-trigger` 的 `.chev` 在 `.open` 时旋转 180°（既有 CSS，不新增）。 */}
+          <button
+            type="button"
+            className={`agent-trigger${expanded ? ' open' : ''}`}
+            aria-expanded={expanded}
+            style={{ alignSelf: 'flex-start' }}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleSubagents();
+            }}
+            onKeyDown={(event) => {
+              // 只拦截按钮的激活键（Enter/Space）：卡本身是 `role="button"`，
+              // 这两个键冒泡会触发祖先的键盘打开逻辑（嵌套交互事故）；
+              // 其他键（如 Esc 关看板）放行给祖先处理。
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.stopPropagation();
+              }
+            }}
+          >
+            <ChevronDown size={14} className="chev" aria-hidden="true" />
+            <span className="roster-label">子智能体</span>
+          </button>
+
+          {expanded && roster.status === 'loading' && (
+            <p className="kanban-card-hint">加载中…</p>
+          )}
+          {expanded && roster.status === 'error' && (
+            <p className="kanban-card-hint">子智能体加载失败</p>
+          )}
+          {expanded && roster.status === 'ready' && roster.rows.length === 0 && (
+            <p className="kanban-card-hint">无子智能体</p>
+          )}
+          {expanded &&
+            roster.status === 'ready' &&
+            roster.rows.map((entry) => {
+              const duration = durationText(entry, now);
+              return (
+                <div
+                  key={entry.child_session_id}
+                  className="agent-row"
+                  /* 复用 roster 行骨架，但这里是**静态展示**（卡内点击已归卡片自己）：
+                     去掉指针语义与行尾的 22px 分栏箭头列。 */
+                  style={{
+                    cursor: 'default',
+                    gridTemplateColumns: '16px minmax(0, 1fr) auto',
+                  }}
+                >
+                  {/* 状态色后缀走 `DELEGATION_STATUS_CLASS` 单一事实源（`completed→success`）；
+                      `.act-status` 是既有的实心圆徽章，这里不画 icon——卡内已有中文状态词，
+                      再复制一份 icon 映射就是第三份。 */}
+                  <span
+                    className={`act-status act-status-${DELEGATION_STATUS_CLASS[entry.status]}`}
+                    aria-hidden="true"
+                  />
+                  <div className="agent-copy">
+                    <div className="agent-title">{entry.target || '?'}</div>
+                    <div className="agent-sub">{entry.task || '—'}</div>
+                  </div>
+                  <div className="agent-stats">
+                    <span className="status-word">{STATUS_LABEL[entry.status]}</span>
+                    <span>{tokenText(entry.used_tokens, entry.usage_state)}</span>
+                    {duration !== null && <span>{duration}</span>}
+                  </div>
+                </div>
+              );
+            })}
         </div>
       )}
 

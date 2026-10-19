@@ -160,6 +160,39 @@ describe('Composer pending ask_user lock (#1223)', () => {
   });
 });
 
+// ── #1356：待裁决的计划同样锁 composer（`resume_basis: 'user_input'` 的第三支）──
+describe('Composer pending plan approval lock (#1356)', () => {
+  it('待裁决计划 → 锁定输入框，文案说「计划裁决」而不是「审批」', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      planApprovalInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toMatch(/<textarea[^>]*disabled=""/);
+    expect(html).toContain('请先裁决当前计划，再发送新消息');
+    expect(html).toContain('等待计划裁决…');
+    // 工具审批是另一回事：计划裁决的文案不得把用户引去找一个不存在的审批。
+    expect(html).not.toContain('等待审批决策');
+  });
+
+  it('队列条与改档 pill 同样锁住，提示指向计划裁决', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      planApprovalInputPending: true,
+      undelivered: [{ kind: 'queue' as const, id: 'q-1', content: '排队', seq: 1, created_at: '' }],
+      onSteerItem: noop,
+      onFlush: noop,
+      permissionModes: [
+        { id: 'read-only', display_name: '只读', description: '', icon: 'lock' },
+      ],
+      selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop,
+      permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('请先裁决当前计划');
+    expect(html).toContain('title="等待计划裁决后再改档"');
+  });
+});
+
 // ── #1223：排队条的 steer/flush 也是"开新消息"路径，与输入框同一把锁管到底 ──
 describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
   const queue = [

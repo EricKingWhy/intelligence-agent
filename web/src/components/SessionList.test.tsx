@@ -37,6 +37,8 @@ function session(id: string, archived = false, corrupted = false): SessionSummar
     product_state_changed_at: null,
     attention_kind: null,
     attention_summary: null,
+    last_user_message: null,
+    last_agent_message: null,
   };
 }
 

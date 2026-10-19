@@ -85,7 +85,15 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { AskUserAnswer, ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
+import type {
+  AskUserAnswer,
+  ConstraintInputAnswer,
+  PlanApprovalAnswer,
+  ToolCall,
+  PresetTask,
+  AgentEvent,
+  UndeliveredInput,
+} from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
@@ -1197,6 +1205,8 @@ export default function App() {
   const [resumingConstraintRequestId, setResumingConstraintRequestId] = useState<string | null>(null);
   /** #1204：在途恢复的 ask_user 请求 id（null = 无在途）。与约束澄清同款按请求记账。 */
   const [resumingAskUserRequestId, setResumingAskUserRequestId] = useState<string | null>(null);
+  /** #1356：在途恢复的计划审批请求 id（null = 无在途）。同款按请求记账。 */
+  const [resumingPlanApprovalRequestId, setResumingPlanApprovalRequestId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
   const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
@@ -1232,6 +1242,21 @@ export default function App() {
    *  （后端 `_pending_user_input_pause` 明确承认该状态）没有卡可答，锁住输入框就是
    *  「锁了但没卡」的死角。`answer !== null`（含整卡跳过）即解除锁定。 */
   const askUserInputPending = askUserRequest !== null && askUserRequest.answer === null;
+  /** #1356：`kind=plan_approval` 的待裁决计划——与上面两支**同宽**的三方对齐
+   *  （`run/paused` 的 reason / request_id / run_id 全对上才挂卡）。分流已在投影的
+   *  `data.kind` 处发生，这里只是同一条对齐检查，三种载荷互不冒充。 */
+  const pendingPlanApproval = conversation?.pending_plan_approval ?? null;
+  const planApprovalRequest =
+    paused !== null &&
+    pendingPlanApproval !== null &&
+    paused.reason === 'user_input' &&
+    paused.input_request_id === pendingPlanApproval.request_id &&
+    paused.run_id === pendingPlanApproval.run_id
+      ? pendingPlanApproval
+      : null;
+  /** 判据与卡片挂载来源同宽（同 #1283 P2-1）：锁住的必须是有卡可答的那个。 */
+  const planApprovalInputPending =
+    planApprovalRequest !== null && planApprovalRequest.answer === null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -1303,6 +1328,21 @@ export default function App() {
       inputRequest: answer,
     }).finally(() => setResumingAskUserRequestId(null));
   }, [askUserRequest, paused, selectedId, resumePausedRun]);
+
+  /** #1356：计划裁决提交——**同一条** `resume_basis: 'user_input'` 通道，答案 wire
+   *  形态换成 `{request_id, decision, feedback?}`。批准后的「切回 normal 档」由后端在
+   *  恢复提交处与续跑当同一个原子动作完成（AC6），前端不发切档请求、也不预切档——
+   *  预切会让"批准请求失败"留下一个已离开 plan 档的假状态。 */
+  const handlePlanApprovalAnswer = useCallback((answer: PlanApprovalAnswer) => {
+    if (!planApprovalRequest || !paused || selectedId === null) return;
+    setResumingPlanApprovalRequestId(planApprovalRequest.request_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      kind: 'user_input',
+      inputRequest: answer,
+    }).finally(() => setResumingPlanApprovalRequestId(null));
+  }, [planApprovalRequest, paused, selectedId, resumePausedRun]);
 
   const handleConstraintDialogOpenChange = useCallback((open: boolean) => {
     if (open) {
@@ -1905,6 +1945,14 @@ export default function App() {
                     }
                     askUserError={error}
                     onAskUserAnswer={handleAskUserAnswer}
+                    /* #1356：计划审批卡——同一条恢复通道的第三支；身份同样稳定。 */
+                    planApprovalRequest={planApprovalRequest}
+                    planApprovalResuming={
+                      planApprovalRequest !== null
+                      && resumingPlanApprovalRequestId === planApprovalRequest.request_id
+                    }
+                    planApprovalError={error}
+                    onPlanApprovalAnswer={handlePlanApprovalAnswer}
                     /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
@@ -1918,6 +1966,8 @@ export default function App() {
                     /* #1223：待回答的 `ask_user` 提问也锁 composer（与约束澄清同一条
                        锁定语义；文案在 Composer 内中性化，不出现「约束澄清」字样）。 */
                     askUserInputPending={askUserInputPending}
+                    /* #1356：待裁决计划同样锁 composer（三条锁定原因互斥且同宽）。 */
+                    planApprovalInputPending={planApprovalInputPending}
                     /* #1148：分离投递（窗外落定）迟到的失败原文——hook 把没送出去的
                        草稿经这条 prop 送回，Composer 按"只在输入框为空时回填"的纪律还回
                        用户（绝不覆盖他已打的新草稿）。 */
