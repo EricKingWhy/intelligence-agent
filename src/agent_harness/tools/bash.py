@@ -61,7 +61,12 @@ def _clip_for_model(text: str, limit: int = _TIMEOUT_PAYLOAD_MAX_CHARS) -> str:
 
 
 class _BashArgs(BaseModel):
-    command: str = Field(..., min_length=1, description="要在 workspace 内执行的 shell 命令")
+    command: str = Field(
+        ...,
+        min_length=1,
+        pattern=r"\S",
+        description="要在 workspace 内执行且至少包含一个非空白字符的 shell 命令",
+    )
 
 
 class BashTool(Tool):
