@@ -3512,15 +3512,47 @@ def _main_memory(argv: list[str]) -> None:
     reject.add_argument("staged_id", metavar="ID")
     journey = subcommands.add_parser("journey", help="按版本链列出记忆卡片时间线")
     journey.add_argument("--limit", type=int, default=50)
+    subcommands.add_parser(
+        "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
     print(asyncio.run(_memory_command(settings, args)))
+    if getattr(args, "failed", False):
+        # 迁移有 skipped 行 = 有记忆真的没进 markdown，脚本化调用必须能看出来。
+        raise SystemExit(2)
 
 
 async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
-    from agent_harness.memory.v2.assembly import build_memory_v2_service
-    from agent_harness.memory.v2.recall import trusted_identity_for_session
+    from agent_harness.memory.v2.assembly import (
+        MEMORIES_DIRECTORY_NAME,
+        MEMORY_V2_DATABASE_NAME,
+        build_memory_v2_service,
+    )
+    from agent_harness.memory.v2.commands import trusted_identity_for_session
+
+    if args.command == "migrate":
+        # #1353 §4：一次性导出。不需要建服务（迁移只读 records 表、写 markdown 文件），
+        # 也**不** load 已装配的 store——否则迁移跑在服务进程里会读到半截状态。
+        from agent_harness.memory.v2.migration import migrate_active_records
+
+        counts = await migrate_active_records(
+            Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME, settings.workspace_dir,
+        )
+        lines = [
+            (
+                f"迁移完成：active={counts['active']} 导出={counts['exported']} "
+                f"去重={counts['deduped']}"
+                f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
+            ),
+        ]
+        if counts["skipped"]:
+            args.failed = True
+            lines.append(f"未导出 {len(counts['skipped'])} 条（见日志 warning）：")
+            lines.extend(f"  {memory_id}: {error}" for memory_id, error in counts["skipped"])
+        lines.append(f"目标目录：{Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME}")
+        return "\n".join(lines)
 
     service = await build_memory_v2_service(settings)
     staged = service.staged
@@ -3565,7 +3597,11 @@ async def _memory_command(settings: Settings, args: argparse.Namespace) -> str:
         decision, response = await staged.approve(args.staged_id, trusted)
         if decision.blocked:
             return f"未落盘：{decision.message}"
-        return f"已批准 {args.staged_id}：{response}"
+        # 不 repr 整个响应 dict：里面是 store 的内部形状（含完整条目回显）。
+        payload = (response or {})
+        summary = payload.get("message") or "（存储未给出摘要）"
+        target = payload.get("target") or "?"
+        return f"已批准 {args.staged_id}（target={target}）：{summary}"
     decision = await staged.reject(args.staged_id, trusted)
     return decision.message or "已拒绝。"
 

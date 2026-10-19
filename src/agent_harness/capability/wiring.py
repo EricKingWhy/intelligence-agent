@@ -201,8 +201,11 @@ async def _wire_memory_v2(
     )
     wiring.memory_v2 = service
     if sessions is not None:
+        # #1353：注入源是 markdown 权威面（`service.markdown`），不是 SQLite capability。
+        # markdown 缺席时（纯 SQLite 部署）回落到 capability 检索路径，见
+        # `MemoryV2ContextProvider` 的构造语义。
         v2_context = MemoryV2ContextProvider(
-            service, workspace_index=workspace_index,
+            service.markdown or service, workspace_index=workspace_index,
             timeout_seconds=settings.memory_search_timeout_seconds,
         )
         wiring.context_providers.append(_MemorySettingsContextProvider(v2_context, service))

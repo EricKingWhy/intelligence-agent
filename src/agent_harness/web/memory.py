@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -235,12 +235,16 @@ class MemoryJourneyCard(BaseModel):
 
 
 class MemoryJourneyResponse(BaseModel):
-    """与 Hermes `learning_graph` 同形的载荷；本期 ``edges`` 恒空（skill 边非目标）。"""
+    """与 Hermes `learning_graph` 同形的载荷；本期 ``edges`` 恒空（skill 边非目标）。
 
-    nodes: list[dict]
-    edges: list[dict]
+    ``nodes`` / ``edges`` / ``stats`` 的元素形状由 `journey.build_journey` 决定，
+    这里只做透传；标注 ``dict[str, Any]`` 让类型检查至少知道"是映射"而不是裸 dict。
+    """
+
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
     memory: list[MemoryJourneyCard]
-    stats: dict
+    stats: dict[str, Any]
 
 
 class MemoryRecallExplanation(BaseModel):
