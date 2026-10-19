@@ -1665,6 +1665,8 @@ class UndeliveredInput:
     #: #823 / MM-02：附件引用数组（规范化后的 event-data 形状），投递时原样带进
     #: 新的 `user/message`，使排队/steer 的附图不静默丢失。
     attachments: list[dict[str, Any]] | None = None
+    #: #1359 阶段 3：`goal` = 自动续跑轮次（`rounds_started` 只统计它）。
+    origin: str | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1714,6 +1716,7 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     refutes_event_id=event.data.get("refutes_event_id"),
                     protected_facts=annotations,
                     attachments=_normalized_attachments(event),
+                    origin=_normalized_origin(event),
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1749,6 +1752,12 @@ def _normalized_attachments(event: SessionEvent) -> list[dict[str, Any]] | None:
     if not refs:
         return None
     return [ref.model_dump() for ref in refs]
+
+
+def _normalized_origin(event: SessionEvent) -> str | None:
+    """事件 data 的 ``origin``（#1359 阶段 3）；非空字符串之外一律视为未标注。"""
+    raw = event.data.get("origin")
+    return raw if isinstance(raw, str) and raw else None
 
 
 def _undelivered_fact_annotations(
