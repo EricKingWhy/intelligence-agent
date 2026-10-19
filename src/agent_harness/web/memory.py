@@ -33,6 +33,7 @@ from agent_harness.memory.audit import (
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
+    MarkdownAuthorityError,
     MemoryIndexDeletePending,
     StaleMemoryVersion,
 )
@@ -473,6 +474,10 @@ def register_memory_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=422, detail="payload kind must match the memory kind",
             ) from error
+        except MarkdownAuthorityError as error:
+            # 权威面拒收（预算超限 / 威胁扫描命中）是**正常业务拒绝**：请求本身形状没错，
+            # 只是内容不可接受。不翻译就会以未登记 RuntimeError 冒成 500（#1353 P2-2）。
+            raise HTTPException(status_code=422, detail=str(error)) from error
         except KeyError as error:
             raise HTTPException(status_code=404, detail="memory not found") from error
         except PermissionError as error:

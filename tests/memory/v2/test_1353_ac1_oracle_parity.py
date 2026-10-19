@@ -19,6 +19,7 @@ import inspect
 
 import pytest
 
+from agent_harness.memory.v2.markdown_store import MAX_CONSOLIDATION_FAILURES_PER_TURN
 from agent_harness.tooling import ErrorCode
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
@@ -58,12 +59,6 @@ async def _load(store) -> None:
     pending = load(store)
     if inspect.isawaitable(pending):
         await pending
-
-
-def _failures_cap() -> int:
-    from tests.memory.v2._markdown_memory_1353 import store_module
-
-    return int(getattr(store_module(), "MAX_CONSOLIDATION_FAILURES_PER_TURN", 3))
 
 
 # --------------------------------------------------------------------------------------
@@ -143,7 +138,7 @@ async def test_unreadable_file_refuses_write_and_keeps_bytes(tmp_path) -> None:
 async def test_zero_match_failures_degrade_after_cap(tmp_path) -> None:
     store = build_store(tmp_path)
     assert (await call(store.add, "memory", "fact A"))["success"] is True
-    cap = _failures_cap()
+    cap = MAX_CONSOLIDATION_FAILURES_PER_TURN
 
     for _ in range(cap):
         result = await call(store.replace, "memory", "nonexistent", "new")
@@ -159,7 +154,7 @@ async def test_zero_match_failures_degrade_after_cap(tmp_path) -> None:
 async def test_batch_failures_count_toward_the_same_budget(tmp_path) -> None:
     store = build_store(tmp_path)
     assert (await call(store.add, "memory", "fact A"))["success"] is True
-    cap = _failures_cap()
+    cap = MAX_CONSOLIDATION_FAILURES_PER_TURN
     bad_batch = [{"action": "replace", "old_text": "nope", "content": "x"}]
 
     for _ in range(cap):
@@ -173,7 +168,7 @@ async def test_batch_failures_count_toward_the_same_budget(tmp_path) -> None:
 async def test_success_resets_failure_budget(tmp_path) -> None:
     store = build_store(tmp_path)
     assert (await call(store.add, "memory", "real entry"))["success"] is True
-    cap = _failures_cap()
+    cap = MAX_CONSOLIDATION_FAILURES_PER_TURN
     for _ in range(cap):
         await call(store.replace, "memory", "nonexistent", "new")
 

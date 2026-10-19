@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS memory_v2_staged (
     payload TEXT NOT NULL,
     pinned_entry TEXT,
     status TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    claimed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS memory_v2_staged_identity
     ON memory_v2_staged(identity, status, created_at);
@@ -292,14 +293,15 @@ class SqliteMemoryV2Store:
             # ponytail: 行数比对只能发现"少了/多了"（典型是 FTS 建表前就存在的旧库），
             # 发现不了"条数相同但内容被外部改过"；真需要就加一张 fts_version 表，
             # 等这种情形真的出现再说。
+            # SELECT→DELETE→INSERT 必须是**一笔**写事务（#1353 审查 P2）：行数比对与
+            # 取行若落在事务外，并发写者在两者之间插入的行会从索引里消失，而下一轮行数
+            # 比对才勉强补回来。
+            await connection.execute("BEGIN IMMEDIATE")
             rows = await (await connection.execute(
                 "SELECT rowid, content FROM memory_v2_records")).fetchall()
             indexed = await (await connection.execute(
                 "SELECT count(*) AS n FROM memory_v2_fts")).fetchone()
             if indexed is None or indexed["n"] != len(rows):
-                # DELETE→SELECT→INSERT 必须是**一笔**写事务（#1353 审查 P2）：否则并发
-                # 写者在两者之间插入的行会从索引里消失，而下一轮行数比对才勉强补回来。
-                await connection.execute("BEGIN IMMEDIATE")
                 await connection.execute("DELETE FROM memory_v2_fts")
                 await connection.executemany(
                     "INSERT INTO memory_v2_fts(rowid, content) VALUES (?, ?)",

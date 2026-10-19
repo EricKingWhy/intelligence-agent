@@ -13,6 +13,7 @@ from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.memory.v2.assembly import MEMORIES_DIRECTORY_NAME
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.recall import MemoryV2ContextProvider
 from agent_harness.session import JsonlSessionStore
@@ -100,10 +101,15 @@ async def test_markdown_is_the_injected_source(tmp_path) -> None:
 
 
 async def test_wiring_activates_the_markdown_snapshot_path(tmp_path) -> None:
-    """装配级判据（Corr-P1-2）：provider 必须从 `wire_capabilities` 拿到，
-    且包装的是 markdown 权威面（`service.markdown`），不是没有
-    `render_snapshot` 的 `MemoryV2Service`——后者会让生产路径静默回落 SQLite。
+    """装配级判据（Corr-P1-2）：包装的必须是 markdown 权威面（`service.markdown`），
+    不是没有 `render_snapshot` 的 `MemoryV2Service`——后者会让生产路径静默回落 SQLite。
+
+    判据只取产物：先按装配约定的 memories 目录写一条记忆，再断言注入渲染里有它。
+    没有 `_provider` / `_markdown` 这类私有属性，装配对象内部怎么套都不影响本断言。
     """
+    marked = MarkdownMemoryStore(memory_dir=tmp_path / MEMORIES_DIRECTORY_NAME)
+    assert (await call(marked.add, "memory", "wired snapshot fact"))["success"] is True
+
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
@@ -118,19 +124,8 @@ async def test_wiring_activates_the_markdown_snapshot_path(tmp_path) -> None:
     )
     try:
         assert {provider.name for provider in wiring.context_providers} == {"memory"}
-        wrapped = wiring.context_providers[0]
-        inner = wrapped._provider
-        assert isinstance(inner, MemoryV2ContextProvider)
-        assert inner._markdown is not None, (
-            "装配必须把 markdown 权威面传给 MemoryV2ContextProvider"
-            "（否则 markdown 快照路径在生产装配里永不激活）"
-        )
-
-        # 行为验证：经装配后的 provider select 真的注入 MEMORY.md 内容。
-        markdown: MarkdownMemoryStore = inner._markdown
-        assert (await call(markdown.add, "memory", "wired snapshot fact"))["success"] is True
         session = make_session(tmp_path / "sessions-select")
-        rendered = _text(await wrapped.select(session, 100_000))
+        rendered = _text(await wiring.context_providers[0].select(session, 100_000))
         assert "wired snapshot fact" in rendered
     finally:
         await wiring.aclose()

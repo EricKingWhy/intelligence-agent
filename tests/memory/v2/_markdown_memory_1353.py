@@ -21,15 +21,7 @@ from typing import Any
 
 import pytest
 
-from agent_harness.memory.v2 import markdown_store
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, MarkdownMemoryStore
-
-DELIMITER = ENTRY_DELIMITER
-
-
-def store_module() -> Any:
-    """真实实现模块。模块挪动 = 本行 import 直接红，不再容忍"写错位置也过"。"""
-    return markdown_store
 
 
 def build_store(
@@ -82,4 +74,4 @@ def read_raw(path: Path) -> str:
 
 def read_entries(path: Path) -> list[str]:
     raw = read_raw(path)
-    return [entry.strip() for entry in raw.split(DELIMITER) if entry.strip()]
+    return [entry.strip() for entry in raw.split(ENTRY_DELIMITER) if entry.strip()]

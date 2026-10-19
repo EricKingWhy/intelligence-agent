@@ -520,6 +520,19 @@ class MemoryJobResult:
     fallback_used: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _AppliedAction:
+    """一条裁决的写入产物：`record` 是新记录，`superseded` 是 UPDATE 顶掉的旧版本。
+
+    旧版本只在 markdown 撤回集里用（`_apply` 的 `mirror_committed`），不参与
+    `state.memory_ids` / `MemoryJobResult.written`——那两处报的是"这次写了什么"，
+    把被取代的旧 id 混进去会让 runner 的 `memory/updated` 事件与通知多报一条。
+    """
+
+    record: MemoryRecordV2
+    superseded: MemoryRecordV2 | None = None
+
+
 @dataclass
 class _RunState:
     """本次执行的可观测摘要（进 job 的 `state` 与降级事件）。
@@ -1183,12 +1196,15 @@ class MemoryJobExecutor:
         """
         state.phase = MemoryJobStage.APPLYING.value
 
-        async def work(connection: aiosqlite.Connection) -> tuple[MemoryRecordV2, ...]:
+        async def work(
+            connection: aiosqlite.Connection,
+        ) -> tuple[tuple[MemoryRecordV2, ...], tuple[MemoryRecordV2, ...]]:
             records: list[MemoryRecordV2] = []
+            superseded: list[MemoryRecordV2] = []
             written: dict[str, int] = {}
             for verdict, candidate_scope in actions:
                 try:
-                    record = await self._apply_one(
+                    produced = await self._apply_one(
                         connection, verdict, job=job, refs=refs,
                         candidate_scope=candidate_scope,
                         relevant_memories=relevant_memories)
@@ -1201,13 +1217,15 @@ class MemoryJobExecutor:
                     key = _discard_key(error)
                     state.discarded[key] = state.discarded.get(key, 0) + 1
                     continue
-                records.append(record)
+                records.append(produced.record)
+                if produced.superseded is not None:
+                    superseded.append(produced.superseded)
                 written[verdict.action.value] = written.get(verdict.action.value, 0) + 1
             state.actions = written
             state.memory_ids = [record.id for record in records]
             if not records:
                 raise _NothingToApply
-            return tuple(records)
+            return tuple(records), tuple(superseded)
 
         try:
             committed = await self._jobs.commit_with_outcome(
@@ -1222,14 +1240,17 @@ class MemoryJobExecutor:
             raise _Degraded(DegradedReason.APPLY_FAILED) from None
         if committed is None:
             return await self._lost(job.job_id)
+        committed, superseded = committed
         # #1353 §2：markdown 权威面在 SQLite 事务**提交之后**补落（它无法参与那笔提交）。
         # 需要从文件里移除的是**所有非 ACTIVE 版本**：`invalidate_in` 给 INVALIDATED，
         # `update_in` 给 SUPERSEDED（旧版本）。漏掉后者，每次后台 update 都在权威面留
         # 一条被取代的僵尸事实，最终吃光字符预算。
+        # `superseded` 由 `_apply_one` 单独带出来：`update_in` 只返回新 ACTIVE 行，
+        # 旧行的 SUPERSEDED 只存在于存储里，不在这条返回链上。
         await self._writer.mirror_committed(
             tuple(record for record in committed if record.status is MemoryStatus.ACTIVE),
             invalidated=tuple(
-                record for record in committed
+                record for record in (*committed, *superseded)
                 if record.status in (MemoryStatus.INVALIDATED, MemoryStatus.SUPERSEDED)
             ),
         )
@@ -1258,30 +1279,40 @@ class MemoryJobExecutor:
         self, connection: aiosqlite.Connection, verdict: AdjudicationResult, *,
         job: MemoryFormationJob, refs: Mapping[str, str],
         candidate_scope: MemoryScope, relevant_memories: Sequence[MemoryRecordV2],
-    ) -> MemoryRecordV2:
+    ) -> _AppliedAction:
         """把一条裁决变成一次存储写入；不合格的目标/内容让异常穿出去给调用方归因。
 
         `INVALIDATE` 不需要 `refs`：撤回一条记忆不新增 provenance。它也**不**校验目标内容
         的证据——目标本来就存在，这次动作没有引入新引用。
+
+        返回 `(新记录, 被取代的旧记录)`：UPDATE 时 `update_in` 只返回新 ACTIVE 行，旧行的
+        SUPERSEDED 状态只写在库里、不在这条返回链上；markdown 权威面要删的正是它
+        （见 `_apply` 的 `mirror_committed`）。旧记录取自 `relevant_memories`——那是
+        `_validate_adjudication_target` 刚刚命中、也是模型看到的那一版。
         """
         if verdict.action is AdjudicationAction.INVALIDATE:
             assert verdict.target_memory_id is not None  # 契约保证（§6.3）
             _validate_adjudication_target(
                 verdict.target_memory_id, candidate_scope=candidate_scope,
                 trusted=job.trusted, relevant_memories=relevant_memories)
-            return await self._writer.invalidate_in(
-                connection, verdict.target_memory_id, job.trusted)
+            return _AppliedAction(await self._writer.invalidate_in(
+                connection, verdict.target_memory_id, job.trusted))
         content = verdict.result
         assert content is not None  # ADD / UPDATE 的契约保证，见 formation.AdjudicationResult
         draft = _draft_from(content, job, refs)
         if verdict.action is AdjudicationAction.ADD:
-            return await self._writer.create_in(connection, draft, job.trusted)
+            return _AppliedAction(await self._writer.create_in(connection, draft, job.trusted))
         assert verdict.target_memory_id is not None
         _validate_adjudication_target(
             verdict.target_memory_id, candidate_scope=candidate_scope,
             trusted=job.trusted, relevant_memories=relevant_memories)
-        return await self._writer.update_in(
+        record = await self._writer.update_in(
             connection, verdict.target_memory_id, draft, job.trusted)
+        previous = next(
+            memory for memory in relevant_memories
+            if memory.id == verdict.target_memory_id)
+        return _AppliedAction(
+            record, superseded=previous.model_copy(update={"status": MemoryStatus.SUPERSEDED}))
 
     async def _advance(
         self, job: MemoryFormationJob, *, worker_id: str, stage: MemoryJobStage,

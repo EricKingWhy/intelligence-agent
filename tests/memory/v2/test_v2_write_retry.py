@@ -56,6 +56,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
+from agent_harness.memory.v2.write_approval import StagedWriteStore
 from agent_harness.storage.sqlite import StorageBusyError
 from tests.memory.v2._records import make_draft
 
@@ -323,6 +324,21 @@ def test_commit_with_outcome_is_not_retry_wrapped() -> None:
     ) is None, (
         "commit_with_outcome 挂了重试——它执行调用方传入的 work，重跑会重复副作用（#376-1 F1）"
     )
+
+
+def test_approval_transitions_are_not_retry_wrapped() -> None:
+    """`approve` / `reject` 不得被重试包装（#1353 复审 S-P2-1）。
+
+    两者是 get → CAS → `_replay`（**外部 markdown 写**）→ CAS 的长链，不满足
+    「整块重跑等价首次」：第二遍会读到第一遍写的 AWAITING 而提前 blocked，markdown
+    已落盘、状态机卡死。`_set_status` 与 `stage` 是单语句，仍挂装饰器。
+    """
+    for name in ("approve", "reject"):
+        assert getattr(getattr(StagedWriteStore, name), "__wrapped__", None) is None, (
+            f"{name} 挂了重试——它的重放写外部 markdown，整块重跑会把状态机卡在 AWAITING"
+        )
+    for name in ("stage", "_set_status"):
+        assert getattr(getattr(StagedWriteStore, name), "__wrapped__", None) is not None
 
 
 @pytest.mark.asyncio

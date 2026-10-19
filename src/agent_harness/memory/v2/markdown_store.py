@@ -283,7 +283,7 @@ class MarkdownMemoryStore:
         驱动，读盘才与"markdown 是权威"一致；读不出来时退回活列表，绝不因读失败清空提示。
 
         快照刻意**不**在写入后失效（AC8：同一 session 内注入必须逐字节不变，前缀缓存
-        才稳定），所以缓存只按 LRU 式的插入序回收旧会话，见 `SNAPSHOT_CACHE_LIMIT`。
+        才稳定），所以缓存按插入序做 FIFO 回收（命中不重排），见 `SNAPSHOT_CACHE_LIMIT`。
         """
         cached = self._snapshot.get(session_id)
         if cached is not None:
@@ -412,7 +412,7 @@ class MarkdownMemoryStore:
         重写整个文件）。**漂移不再拒写**：先备份 ``.bak.<ts>``，再以磁盘内容为准继续
         （issue #1353 §0 偏差 1），备份路径经 ``drift_backup`` 回传。
 
-        ``mutate`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
+        ``mutator`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
         返回任何 dict 时原样透传且**不落盘**（错误 dict，或只读闭包的 dry-run 结果）。
         """
         path = self.path_for(target)
@@ -468,7 +468,7 @@ class MarkdownMemoryStore:
     # ------------------------------------------------------------------ 操作
 
     def _add_sync(self, target: str, content: str) -> dict[str, Any]:
-        content = content.strip()
+        content = normalize_entry(content)
         if not content:
             return _error("Content cannot be empty.")
         if scan_error := _scan_memory_content(content):
@@ -497,19 +497,19 @@ class MarkdownMemoryStore:
     def _replace_sync(
         self, target: str, old_text: str, new_content: str, matched_entry: str | None = None,
     ) -> dict[str, Any]:
-        new_content = new_content.strip()
-        if not old_text.strip():
+        new_content = normalize_entry(new_content)
+        if not normalize_entry(old_text):
             return _error("old_text cannot be empty.")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
-        return self._edit(target, old_text.strip(), new_content, matched_entry)
+        return self._edit(target, normalize_entry(old_text), new_content, matched_entry)
 
     def _remove_sync(self, target: str, old_text: str, matched_entry: str | None = None) -> dict[str, Any]:
-        if not old_text.strip():
+        if not normalize_entry(old_text):
             return _error("old_text cannot be empty.")
-        return self._edit(target, old_text.strip(), None, matched_entry)
+        return self._edit(target, normalize_entry(old_text), None, matched_entry)
 
     def _locate(
         self, entries: list[str], old_text: str, verb: str, matched_entry: str | None = None,
@@ -542,7 +542,7 @@ class MarkdownMemoryStore:
         """``{"success": True, "matched_entry": <完整条目>}``，在锁内读当前态。"""
 
         def _resolve(entries: list[str]) -> dict[str, Any]:
-            idx = self._locate(entries, old_text.strip(), verb)
+            idx = self._locate(entries, normalize_entry(old_text), verb)
             return idx if isinstance(idx, dict) else {"success": True, "matched_entry": entries[idx]}
 
         return self._mutate(target, lambda entries, _limit: _resolve(entries), skip_drift=True)
@@ -623,8 +623,8 @@ class MarkdownMemoryStore:
                 msg, previous_content = self._apply_batch_op(
                     working,
                     act,
-                    (op.get("content") or op.get("new_text") or "").strip(),
-                    (op.get("old_text") or "").strip(),
+                    normalize_entry(op.get("content") or op.get("new_text") or ""),
+                    normalize_entry(op.get("old_text") or ""),
                     f"Operation {i + 1} ({act or 'unknown'})",
                     op.get("matched_entry"),
                 )
@@ -742,7 +742,10 @@ __all__ = [
     "MAX_CONSOLIDATION_FAILURES_PER_TURN",
     "MEMORY_BLOCK_HEADERS",
     "MarkdownMemoryStore",
+    "entry_digest",
     "find_unique_match",
+    "normalize_entry",
     "pinned_index",
     "stale_entry_message",
+    "target_for",
 ]
