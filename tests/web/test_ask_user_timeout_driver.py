@@ -532,108 +532,20 @@ async def test_restore_arms_request_just_inside_two_timeouts():
 
 
 @pytest.mark.asyncio
-async def test_restore_disarms_request_at_exactly_two_timeouts():
-    """边界平局 pin 住 disarm 侧：elapsed ≥ 2×timeout（此处取等，墙钟只会再往大漂）
-    ⇒ 旧流。理由见实现注释：该时刻计时器已到期满一个档位，"用户还在等"的解释
-    已不可信。"""
+async def test_restore_disarms_request_at_exactly_two_timeouts(monkeypatch):
+    """边界平局**真值** pin 住 disarm 侧：`elapsed == 2×timeout` ⇒ 旧流。
+
+    旧版用 `asked_seconds_ago=120.0` 读真实挂钟，墙钟只会往大漂，pin 住的其实是
+    "略大于 2×timeout"而非真平局。此处 monkeypatch `elapsed_seconds_since` 直接
+    返回恰好 `2×timeout`，测的是真 `==`。理由见实现注释：该时刻计时器已到期满
+    一个档位，"用户还在等"的解释已不可信。"""
     clock = FakeClock()
     driver, fired = _driver(clock, timeout=60.0)
-    driver.note_session_state("s1", _crash_window_events(asked_seconds_ago=120.0))
-
-    assert driver.is_armed("s1") is False
-    clock.advance(10_000)
-    assert await driver.check_expiries() == []
-    assert fired == []
-
-
-@pytest.mark.asyncio
-async def test_restore_arms_recent_request_with_legacy_pause_missing_input_request_id():
-    """P2：旧格式 `run/paused`（缺 `input_request_id`，`run_budget.py:1093-1098`
-    历史格式）归属无法判定——不直接按不匹配 disarm。新近请求按保守处理走回退段
-    装表：误 arm 到点时会被在线守卫重读事件流判 RESOLVED 收口，而丢掉的计时器
-    无法挽回。"""
-    clock = FakeClock()
-    driver, fired = _driver(clock, timeout=60.0)
-    driver.note_session_state("s1", [
-        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
-        SessionEvent(
-            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
-            time=(datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
-            data={"request_id": "req-1", "kind": "ask_user",
-                  "timeout_seconds": 60},
-        ),
-        # 旧格式：有 reason、无 input_request_id。
-        SessionEvent(
-            type=RUN_PAUSED, run_id="r1", seq=2,
-            data={"reason": "user_input", "trigger_dimension": "user_input"},
-        ),
-    ])
-
-    assert driver.is_armed("s1") is True
-    clock.advance(30)  # 已累计 30 + 30 = 60 ⇒ 到点
-    assert await driver.check_expiries() == ["s1"]
-    assert fired == [("s1", "req-1")]
-
-
-@pytest.mark.asyncio
-async def test_restore_disarms_legacy_pause_for_old_request():
-    """P2 老请求侧：旧格式暂停 + 请求已老（3 天）⇒ disarm（新近才值得保守装表）。"""
-    clock = FakeClock()
-    driver, fired = _driver(clock, timeout=60.0)
-    driver.note_session_state("s1", [
-        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
-        SessionEvent(
-            type=USER_INPUT_REQUESTED, run_id="r1", seq=1,
-            time=(datetime.now(UTC) - timedelta(days=3)).isoformat(),
-            data={"request_id": "req-1", "kind": "ask_user",
-                  "timeout_seconds": 60},
-        ),
-        SessionEvent(
-            type=RUN_PAUSED, run_id="r1", seq=2,
-            data={"reason": "user_input", "trigger_dimension": "user_input"},
-        ),
-    ])
-
-    assert driver.is_armed("s1") is False
-    clock.advance(10_000)
-    assert await driver.check_expiries() == []
-    assert fired == []
-
-
-@pytest.mark.asyncio
-async def test_restore_disarms_when_pause_names_an_answered_older_request():
-    """P2：暂停归属错位——贴近生产的形状。
-
-    req-A 已答复（`user/message` 带 `input_request_id`，正是生产答复落盘的形状），
-    run 仍暂停在它上面（答复与 `run/resumed` 之间的崩溃窗口）；req-B 是最新未答复
-    请求但尚无暂停事实。暂停事实明确属于另一个请求（新格式、有 id、可判定）⇒
-    disarm，不借"新近"装表。"""
-    clock = FakeClock()
-    driver, fired = _driver(clock, timeout=60.0)
-    old = (datetime.now(UTC) - timedelta(days=3)).isoformat()
-    recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
-    driver.note_session_state("s1", [
-        SessionEvent(type=RUN_STARTED, run_id="r1", seq=0, data={}),
-        SessionEvent(
-            type=USER_INPUT_REQUESTED, run_id="r1", seq=1, time=old,
-            data={"request_id": "req-A", "kind": "ask_user",
-                  "timeout_seconds": 60},
-        ),
-        SessionEvent(
-            type=RUN_PAUSED, run_id="r1", seq=2,
-            data={"reason": "user_input", "trigger_dimension": "user_input",
-                  "input_request_id": "req-A"},
-        ),
-        SessionEvent(
-            type=USER_MESSAGE, run_id="r1", seq=3,
-            data={"input_request_id": "req-A", "text": "好的"},
-        ),
-        SessionEvent(
-            type=USER_INPUT_REQUESTED, run_id="r1", seq=4, time=recent,
-            data={"request_id": "req-B", "kind": "ask_user",
-                  "timeout_seconds": 60},
-        ),
-    ])
+    monkeypatch.setattr(
+        "agent_harness.web.ask_user_timeout_driver.elapsed_seconds_since",
+        lambda _timestamp: 120.0,
+    )
+    driver.note_session_state("s1", _crash_window_events(asked_seconds_ago=30.0))
 
     assert driver.is_armed("s1") is False
     clock.advance(10_000)

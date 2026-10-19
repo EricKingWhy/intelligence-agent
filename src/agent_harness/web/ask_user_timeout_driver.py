@@ -80,6 +80,11 @@ from agent_harness.session.service import _pending_user_input_pause
 
 logger = logging.getLogger("agent_harness.web.ask_user_timeout_driver")
 
+#: #1337 B：启动重建的新近度门禁倍数——请求在 `该倍数 × 超时档` 内才值得合成暂停
+#: 回退装表；达到或超过则按旧流 disarm。取值论证见 `note_session_state` docstring
+#: 的"2×timeout 取值论证"。
+_RESTORE_RECENCY_MULTIPLIER = 2
+
 #: 到点恢复的出口：`(session_id, request_id) -> ExpireOutcome`（见 `session.ask_user_timeout`）。
 ExpireCallback = Callable[[str, str], Awaitable[ExpireOutcome]]
 
@@ -174,20 +179,25 @@ class AskUserTimeoutDriver:
            （`_pending_user_input_pause`）：crash-window 里进程死在
            `user/input-requested` 与 `run/paused` 两次 append 之间，用户确实在等，
            必须保留 #1320 durable 语义；
-        ③ 旧流——无可用暂停事实**且**请求已老（`elapsed ≥ 2×timeout`）⇒ `disarm`
+        ③ 旧流——无可用暂停事实**且**请求已老（`elapsed ≥ 2×timeout`），或新近但
+           合成回退未命中 ⇒ `disarm`
            （#1337：否则首轮 ticker 会把早已无人等待的提问当刚超时恢复掉）。
 
         其中回退段（②）与 `resume_ask_user_timeout` 同源（`_pending_user_input_pause`）——
-        在线守卫是"暂停事实 → 合成回退"的两段式，启动重建在前面再加一段新近度门禁，
-        构成三段（A 方案只抄了在线守卫的前半段，丢了回退，见 #1337 P1）。
+        在线守卫是"暂停事实 → 合成回退"的两段式，启动重建在"合成回退"之前再加一段
+        新近度门禁（位于段①之后、段②之前），构成三段（A 方案曾只抄了在线守卫的
+        前半段、丢了回退）。注意 `_pending_user_input_pause` 在已有暂停事实时是
+        no-op（`state.paused is not None` 即返 `None`）——段②的合成只在 crash-window
+        形状（无 `run/paused` 事件）下真正起作用；暂停事实存在但不归属该请求时
+        直接走段③ disarm。
 
         2×timeout 取值论证：timeout 档位本身就是"等用户多久算超时"的语义边界；
-        若请求发出已超过 2×timeout，即使计时器当初正常装配也早该到期了——此时它
-        必然是无人等待的旧流，disarm 安全。2× 而非 1×：给"请求发出→崩溃→重启→
+        若请求发出已超过 2×timeout，即使计时器当初正常装配也早该到期了——此时按
+        timeout 语义应视为已超时，disarm 安全。2× 而非 1×：给"请求发出→崩溃→重启→
         重建"链路留余量，避免边界抖动。平局（`elapsed == 2×timeout`）归 disarm：
         该时刻计时器已到期满一个档位，"用户还在等"的解释已不可信。
 
-        回退段存在的理由（与 disarm 理由对称，P3）：误 arm 的代价小于误 disarm——
+        回退段存在的理由（与 disarm 理由对称）：误 arm 的代价小于误 disarm——
         装错的表到点时会被 `resume_ask_user_timeout` 重读事件流判 `RESOLVED` 收口，
         而丢掉的计时器无法挽回。
 
@@ -215,12 +225,15 @@ class AskUserTimeoutDriver:
             request.data, fallback=int(self.timeout_seconds),
         )
 
-        def _arm_with_elapsed() -> None:
+        # 新近度门禁的前置计算（段②的门禁与段③的旧流判定共用；墙钟只读一次）。
+        elapsed = elapsed_seconds_since(request.time)
+
+        def _arm() -> None:
             self.arm(
                 session_id,
                 request_id=request_id,
                 timeout_seconds=timeout_seconds,
-                elapsed_seconds=elapsed_seconds_since(request.time),
+                elapsed_seconds=elapsed,
             )
 
         # 段①——当前暂停事实（保持既有行为）。
@@ -230,38 +243,23 @@ class AskUserTimeoutDriver:
             and paused.reason == REASON_USER_INPUT
             and paused.input_request_id == request_id
         ):
-            _arm_with_elapsed()
-            return
-
-        # 段③——旧流（先判：新近度门禁是段②的前置）。
-        elapsed = elapsed_seconds_since(request.time)
-        if elapsed >= 2 * timeout_seconds:
-            self.disarm(session_id)
+            _arm()
             return
 
         # 段②——新近请求 + 合成暂停回退（与 `resume_ask_user_timeout` 同源）。
-        run_id = latest_run_id(events)
-        if run_id is not None:
+        if elapsed < _RESTORE_RECENCY_MULTIPLIER * timeout_seconds:
+            run_id = latest_run_id(events)
+            assert run_id is not None  # `request is not None` 蕴含（`latest_pending_input_request` 无 run_id 直接返 `None`）
             synthesized = _pending_user_input_pause(events, run_id=run_id)
             if (
                 synthesized is not None
                 and synthesized.reason == REASON_USER_INPUT
                 and synthesized.input_request_id == request_id
             ):
-                _arm_with_elapsed()
+                _arm()
                 return
-            # P2：旧格式暂停事件（`run_budget.py:1093-1098` 历史格式）缺
-            # `input_request_id`，归属无法判定——不直接按不匹配 disarm。新近请求按
-            # 保守处理走本段装表：同一 run 同一时刻至多一个未答复请求
-            # （`pending_input_request` 契约），`reason=user_input` 的暂停必然是这个
-            # 待答请求的。
-            if (
-                paused is not None
-                and paused.reason == REASON_USER_INPUT
-                and paused.input_request_id is None
-            ):
-                _arm_with_elapsed()
-                return
+
+        # 段③——旧流收口：请求已老（`elapsed ≥ 2×timeout`），或新近但合成回退未命中。
         self.disarm(session_id)
 
     def arm(
