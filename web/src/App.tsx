@@ -2032,7 +2032,6 @@ export default function App() {
                     reasoningDisclosure={reasoningDisclosure}
                     jumpRequest={jumpRequest}
                     onPresetTask={onPresetTask}
-                    onNewTask={handleNew}
                     onFocusTool={focusTool}
                     onOpenSession={handleSelect}
                     onInspectChild={focusChild}

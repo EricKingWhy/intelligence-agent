@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-/** #1370 P0-7 空状态主 CTA 的行为契约（点击路径要真跑，不用 SSR 绿代替）。
+/** #1401 空状态契约（点击路径要真跑，不用 SSR 绿代替）。
  *
  *  为什么单开文件 + jsdom：`Conversation.test.tsx` 是 SSR 契约测试，`renderToStaticMarkup`
- *  会丢掉事件处理器 ⇒ 在那条车道里断言不出「点下去调的是哪个回调」。这里只锁三件事：
- *  ① CTA 在（文案 + 可点）；② 点击落到注入的回调上（不造第二套新建入口）；③ 红线——
- *  三个示例 chip 一个不少，点它们仍走 `onPresetTask`。
+ *  会丢掉事件处理器 ⇒ 在那条车道里断言不出「点下去调的是哪个回调」。这里只锁两件事：
+ *  ① 空态本体在、且不再渲染 #1370 的白底 CTA（本屏只留 composer 一个主入口）；
+ *  ② 三个示例 chip 一个不少，点它们仍走 `onPresetTask`（降级为文字按钮，行为不变）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactElement } from 'react';
@@ -36,33 +36,21 @@ afterEach(() => {
   root = null;
 });
 
-describe('#1370 空状态主 CTA', () => {
-  it('注入 onNewTask 时渲染「开始新任务」，点击走到该回调（复用既有新建入口）', () => {
-    const onNewTask = vi.fn();
-    render(<Conversation conversation={null} loadingHistory={false} density="balanced" onNewTask={onNewTask} />);
-
-    const cta = container!.querySelector<HTMLButtonElement>('button.empty-cta');
-    expect(cta?.textContent).toBe('开始新任务');
-    if (!cta) throw new Error('empty-cta 未渲染');
-    act(() => cta.click());
-    expect(onNewTask).toHaveBeenCalledTimes(1);
-  });
-
-  it('未注入 onNewTask 时不渲染 CTA（不出现点了没反应的按钮）', () => {
+describe('#1401 空状态', () => {
+  it('渲染空态本体，且不再渲染重复主 CTA', () => {
     render(<Conversation conversation={null} loadingHistory={false} density="balanced" />);
-    expect(container!.querySelector('.empty-cta')).toBeNull();
-    // 空态本体仍在：CTA 是可选项，不是空态的前提。
+    expect(container!.querySelector('.empty-state')).not.toBeNull();
     expect(container!.querySelector('.empty-hero')?.textContent).toBe('暂无对话');
+    expect(container!.querySelector('.empty-cta')).toBeNull();
   });
 
-  it('红线：三个示例 chip 仍全部保留，点击仍走 onPresetTask', () => {
+  it('三个示例 chip 仍全部保留，点击仍走 onPresetTask', () => {
     const onPresetTask = vi.fn();
     render(
       <Conversation
         conversation={null}
         loadingHistory={false}
         density="balanced"
-        onNewTask={() => {}}
         onPresetTask={onPresetTask}
       />,
     );
