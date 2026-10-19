@@ -364,17 +364,20 @@ export const SessionList = memo(function SessionList({
       </button>
       <div className="session-list-header">
         <span className="panel-label">会话</span>
-        {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
-        <Tip content="插件：MCP Servers 与 Skills 的启用 / 禁用">
-          <button className="icon-btn rail-plugins-btn" onClick={onOpenPlugins} aria-label="插件">
-            <Puzzle size={14} />
-          </button>
-        </Tip>
-        {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
-            「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
-            （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
-        {showEmpty ? (
-          <div className="session-list-actions rail-empty-actions">
+        {/* #1397：标题左侧、动作整组右侧——插件按钮并入动作组，不再作为 header 的
+            第三个子项被 `space-between` 摊到 240px 轨的中间。 */}
+        <div className={`session-list-actions${showEmpty ? ' rail-empty-actions' : ''}`}>
+          {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
+          <Tip content="插件：MCP Servers 与 Skills 的启用 / 禁用">
+            <button className="icon-btn rail-plugins-btn" onClick={onOpenPlugins} aria-label="插件">
+              <Puzzle size={14} />
+            </button>
+          </Tip>
+          {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
+              「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
+              （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
+          {showEmpty ? (
+            <>
             {/* #1368：窄屏 56px 图标轨里，这两个按钮的文字会逐字折成竖排（红线段）。
                 正解是**图标 + 标签**：标签在折叠轨里 `display:none`（`.rail-empty-btn-label`），
                 桌面档与展开的抽屉里照常显示文字——文字按钮是 UI-05 的可识别性契约，
@@ -397,9 +400,9 @@ export const SessionList = memo(function SessionList({
               <Plus size={14} aria-hidden="true" />
               <span className="rail-empty-btn-label">新会话</span>
             </button>
-          </div>
-        ) : (
-          <div className="session-list-actions">
+            </>
+          ) : (
+            <>
             {/* #171：「显示已归档」——`aria-pressed` 是开关的语义（不是两个动作按钮），
                 按下态给 accent 色（CSS）。icon-only 与本栏其余动作一致。 */}
             <Tip content="显示已归档会话（归档只改列表可见性，不删任何东西）">
@@ -426,8 +429,9 @@ export const SessionList = memo(function SessionList({
                 <Plus size={14} />
               </button>
             </Tip>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* `opError` 优先（动作级、更具体），它出现时**不再并列**列表加载错误：归档走
