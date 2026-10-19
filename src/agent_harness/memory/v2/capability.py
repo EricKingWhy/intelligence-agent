@@ -18,12 +18,12 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 import aiosqlite
 
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
-from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.policy import find_secret
 from agent_harness.memory.v2.recall import (
     RankedMemory,
@@ -36,6 +36,7 @@ from agent_harness.memory.v2.store import (
     MemorySettingsV2,
     SqliteMemoryV2Store,
 )
+from agent_harness.memory.v2.threat_patterns import first_threat_message
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
@@ -177,66 +178,127 @@ class MemoryV2Service:
         """分拣规则：`kind=user` 或 `tier=profile` → USER.md，其余 → MEMORY.md。
 
         与 §4 迁移的分拣**同一句话**——两条路分拣不一致，迁移后第一条自动写入就会把事实
-        挪到另一个文件里，用户看到"刚写的记忆跑到别处去了"。
+        挪到另一个文件里，用户看到"刚写的记忆跑到别处去了"。定义落在
+        `markdown_store.target_for`（叶子模块），这里只是记录形状上的适配。
         """
-        if record.tier.value == "profile" or record.kind.value == "user":
-            return "user"
-        return "memory"
+        return target_for(record.kind.value, record.tier.value)
+
+    async def _previous_record(
+        self, previous_id: str, trusted: TrustedMemoryIdentity,
+    ) -> MemoryRecordV2 | None:
+        """取上一版记录；不存在（已被删/不可见）→ `None`，由调用方决定如何补写。"""
+        try:
+            return await self._store.get(previous_id, trusted)
+        except KeyError:
+            return None
+
+    @staticmethod
+    def _require_markdown_success(response: dict[str, Any], operation: str) -> None:
+        """markdown 的失败是**返回值**（`success=False`），不是异常。
+
+        权威面没写成就不能继续写 SQLite 投影：调用方看到的必须是一次失败写入，
+        而不是"派生层有、权威层没有"的分叉。错误文案只带 store 的 message，
+        不回显条目内容。
+        """
+        if not response.get("success"):
+            raise MarkdownAuthorityError(
+                f"markdown {operation} failed: {response.get('error') or 'unknown error'}",
+            )
 
     async def _mirror_markdown(
         self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
         trusted: TrustedMemoryIdentity | None = None,
     ) -> None:
+        """把一次权威写入投影到 markdown；失败抛 `MarkdownAuthorityError`。
+
+        顺序是 markdown 先、SQLite 后：权威面写不成时 SQLite 尚未落盘，抛出即整体失败，
+        两侧仍然一致。`mirror_committed` 不同——它跑在 SQLite 已提交之后，只能留痕。
+        """
         store = self._markdown
         if store is None:
             return
+
+        async def _add(target: str, content: str) -> None:
+            if store.target_enabled(target):
+                self._require_markdown_success(await store.add(target, content), "add")
+
+        async def _remove(record: MemoryRecordV2) -> None:
+            target = self.markdown_target(record)
+            if store.target_enabled(target):
+                self._require_markdown_success(
+                    await store.remove(target, record.content, matched_entry=record.content),
+                    "remove",
+                )
+
         if draft is None:
-            assert previous_id is not None and trusted is not None  # 调用方保证
-            try:
-                previous = await self._store.get(previous_id, trusted)
-            except KeyError:
-                return
-            if not store.target_enabled(self.markdown_target(previous)):
-                return
-            await store.remove(
-                self.markdown_target(previous), previous.content, matched_entry=previous.content,
-            )
+            if previous_id is None or trusted is None:
+                raise ValueError("invalidate mirror requires previous_id and a trusted identity")
+            previous = await self._previous_record(previous_id, trusted)
+            if previous is not None:
+                await _remove(previous)
             return
         target = self.markdown_target(draft)
+        if previous_id is None:
+            await _add(target, draft.content)
+            return
+        if trusted is None:
+            raise ValueError("update mirror requires a trusted identity")
+        previous = await self._previous_record(previous_id, trusted)
+        if previous is None:
+            await _add(target, draft.content)
+            return
+        if self.markdown_target(previous) != target:
+            # 分拣变了（tier/kind 被改）：先删旧文件里的条目，再写新文件。
+            await _remove(previous)
+            await _add(target, draft.content)
+            return
         if not store.target_enabled(target):
             return
-        if previous_id is None:
-            await store.add(target, draft.content)
-            return
-        assert trusted is not None  # 调用方保证
-        try:
-            previous = await self._store.get(previous_id, trusted)
-        except KeyError:
-            await store.add(target, draft.content)
-            return
-        previous_target = self.markdown_target(previous)
-        if previous_target != target:
-            # 分拣变了（tier/kind 被改）：先删旧文件里的条目，再写新文件。
-            await store.remove(previous_target, previous.content, matched_entry=previous.content)
-            await store.add(target, draft.content)
-            return
         # `matched_entry` 钉住**审阅时的那条原文**：并发手改后条目已变，replace 会以
-        # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）。
+        # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）；
+        # 预算/扫描失败时 add 同样失败，交给 `_add` 抛出。
         response = await store.replace(
             target, previous.content, draft.content, matched_entry=previous.content,
         )
         if not response.get("success"):
-            await store.add(target, draft.content)
+            await _add(target, draft.content)
 
-    async def _mirror_deleted(self, memories: Sequence[MemoryRecordV2]) -> None:
-        """硬删（delete / bulk_delete）后把条目从 markdown 移除。"""
+    async def _mirror_deleted(
+        self, memories: Sequence[MemoryRecordV2], *, digests: Sequence[str] = (),
+    ) -> None:
+        """硬删（delete / bulk_delete）后把条目从 markdown 移除。
+
+        这是派生投影：SQLite 的删除已提交，markdown 失败不回滚，只留告警（含记录 id，
+        不含条目内容）。``digests`` 只在墓碑-only 删除时给出——那时记录行已经不在，
+        只能按正文哈希清理（见 `store.MemoryDeletionReceiptV2`）。
+        """
         store = self._markdown
         if store is None:
             return
         for memory in memories:
             target = self.markdown_target(memory)
-            if store.target_enabled(target):
-                await store.remove(target, memory.content, matched_entry=memory.content)
+            if not store.target_enabled(target):
+                continue
+            try:
+                response = await store.remove(
+                    target, memory.content, matched_entry=memory.content,
+                )
+            except Exception as error:  # noqa: BLE001 — 见 docstring
+                logger.warning(
+                    "markdown 删除投影失败（%s），SQLite 已提交：%s",
+                    type(error).__name__, memory.id,
+                )
+                continue
+            if not response.get("success"):
+                logger.warning("markdown 删除投影未生效，SQLite 已提交：%s", memory.id)
+        if digests:
+            try:
+                cleaned = await store.remove_by_digest(digests)
+            except Exception as error:  # noqa: BLE001 — 同上，派生投影失败只留痕
+                logger.warning("markdown 墓碑清理失败（%s）", type(error).__name__)
+            else:
+                if cleaned:
+                    logger.warning("markdown 按墓碑哈希清理了残留条目：%s", ", ".join(cleaned))
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
@@ -247,30 +309,43 @@ class MemoryV2Service:
         SQLite 事务里；markdown 写不可能参与那笔提交，所以只能在这里补。补写失败**不回滚**
         已提交的 SQLite（事实已经成立），只记一条告警：markdown 下一次读取/投影会收敛，
         而把已提交的事实回滚掉才是真的丢数据。
+
+        失败同样有两种形态：异常，以及 `success=False`（预算/扫描）——两者都必须留痕。
+        顺序是**先删旧、再加新**：后台 update 的新旧版本内容可能重合，反序会在删除时
+        把刚写进去的新条目一起删掉。
         """
         store = self._markdown
         if store is None:
             return
-        for record in records:
-            target = self.markdown_target(record)
-            if store.target_enabled(target):
-                try:
-                    await store.add(target, record.content)
-                except Exception as error:  # noqa: BLE001 — 见 docstring
-                    logger.warning(
-                        "markdown 投影失败（%s），SQLite 已提交：%s",
-                        type(error).__name__, record.id,
-                    )
         for record in invalidated:
             target = self.markdown_target(record)
-            if store.target_enabled(target):
-                try:
-                    await store.remove(target, record.content, matched_entry=record.content)
-                except Exception as error:  # noqa: BLE001 — 同上
-                    logger.warning(
-                        "markdown 撤回投影失败（%s），SQLite 已提交：%s",
-                        type(error).__name__, record.id,
-                    )
+            if not store.target_enabled(target):
+                continue
+            try:
+                response = await store.remove(
+                    target, record.content, matched_entry=record.content,
+                )
+            except Exception as error:  # noqa: BLE001 — 见 docstring
+                logger.warning(
+                    "markdown 撤回投影失败（%s），SQLite 已提交：%s",
+                    type(error).__name__, record.id,
+                )
+                continue
+            if not response.get("success"):
+                logger.warning("markdown 撤回投影未生效，SQLite 已提交：%s", record.id)
+        for record in records:
+            target = self.markdown_target(record)
+            if not store.target_enabled(target):
+                continue
+            try:
+                response = await store.add(target, record.content)
+            except Exception as error:  # noqa: BLE001 — 见 docstring
+                logger.warning(
+                    "markdown 投影失败（%s），SQLite 已提交：%s", type(error).__name__, record.id,
+                )
+                continue
+            if not response.get("success"):
+                logger.warning("markdown 投影未生效，SQLite 已提交：%s", record.id)
 
     async def list_records(
         self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
@@ -333,7 +408,7 @@ class MemoryV2Service:
         self, memory_id: str, trusted: TrustedMemoryIdentity,
     ) -> MemoryDeletionReceiptV2:
         receipt = await self._store.delete(memory_id, trusted)
-        await self._mirror_deleted(receipt.memories)
+        await self._mirror_deleted(receipt.memories, digests=receipt.content_hashes)
         if receipt.memories:
             try:
                 await self._delete_vectors(receipt.memories)
@@ -348,7 +423,10 @@ class MemoryV2Service:
     ) -> list[MemoryDeletionReceiptV2]:
         receipts = await self._store.bulk_delete(trusted, kind=kind)
         memories = tuple(memory for receipt in receipts for memory in receipt.memories)
-        await self._mirror_deleted(memories)
+        await self._mirror_deleted(
+            memories,
+            digests=tuple(d for receipt in receipts for d in receipt.content_hashes),
+        )
         if memories:
             try:
                 await self._delete_vectors(memories)
@@ -471,10 +549,22 @@ class MemoryV2Service:
 
     @staticmethod
     def _reject_secret(draft: MemoryDraftV2) -> None:
+        """凭证与注入模式在**入口**拒绝，与 markdown 的 strict 扫描同源。
+
+        只查 `find_secret` 不够：markdown 侧还会用 `first_threat_message(scope="strict")`
+        拒掉注入/外泄样本，两层判据不等价时 SQLite 会收下权威面永远写不进的记忆。
+        """
         texts = [draft.content, draft.payload.model_dump_json()]
         texts.extend(item.excerpt for item in draft.evidence)
         if find_secret(*texts) is not None:
             raise PermissionError("memory content contains a credential or secret")
+        for text in texts:
+            if first_threat_message(text, scope="strict") is not None:
+                raise PermissionError("memory content contains a threat pattern")
+
+
+class MarkdownAuthorityError(RuntimeError):
+    """markdown 权威面拒绝了这次写入（成功与否是返回值，不是异常）。"""
 
 
 class StaleMemoryVersion(ValueError):

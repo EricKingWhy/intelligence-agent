@@ -26,7 +26,6 @@ SQLite 是记录、版本、状态与 outbox 的唯一权威；派生索引（�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -40,6 +39,7 @@ from uuid import uuid4
 import aiosqlite
 
 from agent_harness.memory.v2._sqlite import connect, write_connection
+from agent_harness.memory.v2.markdown_store import entry_digest
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
@@ -131,7 +131,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_v2_fts USING fts5(content);
 #: FTS5 的 `unicode61` 分词器把连续 CJK 当成**一个** token（实测 `用户喜欢冰美式咖啡` 是一个
 #: token），于是"咖啡"永远匹配不到。索引侧按**单字**切 CJK、查询侧把词也切成单字短语，
 #: 两边就对齐了：`"冰 美 式"` 命中 `冰美式` 且不乱序。英文仍按空白/标点分词，不受影响。
-_CJK_RUN = re.compile(r"[㐀-鿿豈-﫿]+")
+_CJK_RUN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 
 _COLUMNS = (
     "memory_id, schema_version, root_id, version, kind, tier, scope, tenant_id, user_id, "
@@ -227,10 +227,16 @@ class DeletedMemoryV2:
 
 @dataclass(frozen=True, slots=True)
 class MemoryDeletionReceiptV2:
-    """Content-free result for idempotent single or bulk deletion."""
+    """Content-free result for idempotent single or bulk deletion.
+
+    ``content_hashes`` 只在 **tombstone-only** 分支填充：记录行早已不在，markdown 侧
+    唯一还能对上的只剩条目正文的哈希（同样不含正文）。删除的正向路径仍走
+    ``memories``——那里有原文，不需要哈希。
+    """
 
     deleted: bool
     memories: tuple[DeletedMemoryV2, ...] = ()
+    content_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,15 +288,23 @@ class SqliteMemoryV2Store:
             await _add_column_if_missing(
                 connection, "memory_v2_settings", "write_approval",
                 "INTEGER NOT NULL DEFAULT 0")
-            # #1353 §5：虚表首次建好时把存量行灌进去。幂等（先清空再全量重扫），
-            # 所以每次 initialize 跑一遍的代价只是一次全表读，不会重复堆 token。
-            await connection.execute("DELETE FROM memory_v2_fts")
+            # #1353 §5：虚表与记录表行数一致 ⇒ 已同步，跳过全量重扫。
+            # ponytail: 行数比对只能发现"少了/多了"（典型是 FTS 建表前就存在的旧库），
+            # 发现不了"条数相同但内容被外部改过"；真需要就加一张 fts_version 表，
+            # 等这种情形真的出现再说。
             rows = await (await connection.execute(
                 "SELECT rowid, content FROM memory_v2_records")).fetchall()
-            await connection.executemany(
-                "INSERT INTO memory_v2_fts(rowid, content) VALUES (?, ?)",
-                [(row["rowid"], _fts_indexed(row["content"])) for row in rows],
-            )
+            indexed = await (await connection.execute(
+                "SELECT count(*) AS n FROM memory_v2_fts")).fetchone()
+            if indexed is None or indexed["n"] != len(rows):
+                # DELETE→SELECT→INSERT 必须是**一笔**写事务（#1353 审查 P2）：否则并发
+                # 写者在两者之间插入的行会从索引里消失，而下一轮行数比对才勉强补回来。
+                await connection.execute("BEGIN IMMEDIATE")
+                await connection.execute("DELETE FROM memory_v2_fts")
+                await connection.executemany(
+                    "INSERT INTO memory_v2_fts(rowid, content) VALUES (?, ?)",
+                    [(row["rowid"], _fts_indexed(row["content"])) for row in rows],
+                )
             await connection.commit()
 
     # ----------------------------------------------------------------------------------
@@ -664,7 +678,12 @@ class SqliteMemoryV2Store:
                     await connection.rollback()
                     raise KeyError(memory_id)
                 await connection.commit()
-                return MemoryDeletionReceiptV2(deleted=False)
+                # #1353 审查 P3：记录行早已不在时，markdown 侧唯一还能对上的线索是
+                # 墓碑里的正文哈希（全版本）。不回传它，残留条目没有任何清理入口。
+                return MemoryDeletionReceiptV2(
+                    deleted=False,
+                    content_hashes=tuple(json.loads(tombstone["content_hashes"])),
+                )
             if not self._visible(row, trusted):
                 await connection.rollback()
                 raise KeyError(memory_id)
@@ -842,7 +861,7 @@ class SqliteMemoryV2Store:
 
     @staticmethod
     def _digest(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return entry_digest(value)
 
     @staticmethod
     async def _tombstone_in(
