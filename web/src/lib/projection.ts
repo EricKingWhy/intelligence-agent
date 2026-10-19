@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, AskUserAnswer, AskUserQuestion, AskUserQuestionAnswer, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingAskUserRequest, PendingConstraintInputRequest, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, AskUserAnswer, AskUserQuestion, AskUserQuestionAnswer, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingAskUserRequest, PendingConstraintInputRequest, PendingPlanApprovalRequest, PlanApprovalAnswer, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
@@ -209,6 +209,7 @@ export function initConversation(session_id: string): ConversationState {
     run_paused: null,
     pending_constraint_input: null,
     pending_ask_user: null,
+    pending_plan_approval: null,
     run_failure: null,
     turn_index: null,
     requested_model: null,
@@ -510,6 +511,12 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   if (askRequest && requestId === askRequest.request_id && askAnswer?.request_id === askRequest.request_id) {
     state.pending_ask_user = { ...askRequest, answer: askAnswer };
   }
+  // #1356：同一条恢复通道的第三支——计划审批的裁决（`{request_id, decision, feedback?}`）。
+  const planRequest = state.pending_plan_approval;
+  const planAnswer = parsePlanApprovalAnswer(event.data.input_request_answer);
+  if (planRequest && requestId === planRequest.request_id && planAnswer?.request_id === planRequest.request_id) {
+    state.pending_plan_approval = { ...planRequest, answer: planAnswer };
+  }
 }
 
 const CONSTRAINT_INPUT_CHOICES = new Set<ConstraintInputChoice>([
@@ -542,6 +549,12 @@ function projectUserInputRequested(state: ConversationState, event: AgentEvent):
   if (data.kind === 'ask_user') {
     const askRequest = parseAskUserRequest(data, event.run_id ?? null);
     if (askRequest !== null) state.pending_ask_user = askRequest;
+    return;
+  }
+  // #1356：计划审批是第三种 `USER_INPUT_REQUESTED` 载荷，同款分流、互不冒充。
+  if (data.kind === 'plan_approval') {
+    const planRequest = parsePlanApprovalRequest(data, event.run_id ?? null);
+    if (planRequest !== null) state.pending_plan_approval = planRequest;
     return;
   }
   const rawChoices = Array.isArray(data.choices) ? data.choices : [];
@@ -676,6 +689,51 @@ function parseAskUserAnswer(raw: unknown): AskUserAnswer | null {
   return { request_id, questions: parsed };
 }
 
+/** #1356：解析 `kind == "plan_approval"` 的 `USER_INPUT_REQUESTED` 载荷 → 待裁决计划。
+ *
+ *  与 `parseAskUserRequest` 同款：形状不合契约（缺 request_id / run_id、正文为空、
+ *  `touched_files` 不是字符串数组）即返回 null——**不伪造**一张空卡片。`artifact_id`
+ *  与 `plan_sha256` 是可选展示件：缺失就不显示那一行，不猜。
+ *  只做**读取侧的存活校验**，不重放工具端的 100_000 字符上限（读了坏数据就丢）。 */
+function parsePlanApprovalRequest(
+  data: Record<string, unknown>, envelopeRunId: string | null,
+): PendingPlanApprovalRequest | null {
+  const requestId = data.request_id;
+  const runId = envelopeRunId ?? data.run_id;
+  const planMarkdown = data.plan_markdown;
+  const rawFiles = data.touched_files;
+  if (typeof requestId !== 'string' || !requestId) return null;
+  if (typeof runId !== 'string' || !runId) return null;
+  if (typeof planMarkdown !== 'string' || !planMarkdown.trim()) return null;
+  if (!Array.isArray(rawFiles) || !rawFiles.every((f) => typeof f === 'string')) return null;
+  const artifactId = data.artifact_id;
+  const planSha256 = data.plan_sha256;
+  return {
+    request_id: requestId,
+    run_id: runId,
+    plan_markdown: planMarkdown,
+    touched_files: rawFiles as string[],
+    ...(typeof artifactId === 'string' && artifactId ? { artifact_id: artifactId } : {}),
+    ...(typeof planSha256 === 'string' && planSha256 ? { plan_sha256: planSha256 } : {}),
+    answer: null,
+  };
+}
+
+/** #1356：解析计划审批的持久化裁决（`USER_MESSAGE.data.input_request_answer`）。
+ *  形状不合即 null（宁可当作"还没回答"）——与另两支同款。 */
+function parsePlanApprovalAnswer(raw: unknown): PlanApprovalAnswer | null {
+  if (!isRecord(raw)) return null;
+  const { request_id, decision, feedback } = raw;
+  if (typeof request_id !== 'string' || !request_id) return null;
+  if (decision !== 'approve' && decision !== 'revise' && decision !== 'reject') return null;
+  if (feedback !== undefined && typeof feedback !== 'string') return null;
+  return {
+    request_id,
+    decision,
+    ...(typeof feedback === 'string' ? { feedback } : {}),
+  };
+}
+
 /** #1204：清理两个「待回答的用户输入」状态里命中 `runId` 归属规则的那一份。
  *
  *  两个状态（`pending_constraint_input` / `pending_ask_user`）同源（`USER_INPUT_REQUESTED`）
@@ -690,6 +748,7 @@ function clearPendingUserInput(
     mode === 'stale' ? pendingRun !== runId : pendingRun === runId;
   if (matches(state.pending_constraint_input?.run_id)) state.pending_constraint_input = null;
   if (matches(state.pending_ask_user?.run_id)) state.pending_ask_user = null;
+  if (matches(state.pending_plan_approval?.run_id)) state.pending_plan_approval = null;
 }
 
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
