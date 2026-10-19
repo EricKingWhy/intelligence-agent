@@ -230,6 +230,18 @@ class MemoryV2Service:
                     "remove",
                 )
 
+        async def _replace(target: str, record: MemoryRecordV2, content: str) -> None:
+            # `matched_entry` 钉住**审阅时的那条原文**：并发手改后条目已变，replace 会以
+            # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）；
+            # 预算/扫描失败时 add 同样失败，交给 `_add` 抛出。目标未启用则无事可做。
+            if not store.target_enabled(target):
+                return
+            response = await store.replace(
+                target, record.content, content, matched_entry=record.content,
+            )
+            if not response.get("success"):
+                await _add(target, content)
+
         if draft is None:
             if previous_id is None or trusted is None:
                 raise ValueError("invalidate mirror requires previous_id and a trusted identity")
@@ -252,16 +264,7 @@ class MemoryV2Service:
             await _remove(previous)
             await _add(target, draft.content)
             return
-        if not store.target_enabled(target):
-            return
-        # `matched_entry` 钉住**审阅时的那条原文**：并发手改后条目已变，replace 会以
-        # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）；
-        # 预算/扫描失败时 add 同样失败，交给 `_add` 抛出。
-        response = await store.replace(
-            target, previous.content, draft.content, matched_entry=previous.content,
-        )
-        if not response.get("success"):
-            await _add(target, draft.content)
+        await _replace(target, previous, draft.content)
 
     async def _mirror_deleted(
         self, memories: Sequence[MemoryRecordV2], *, digests: Sequence[str] = (),
