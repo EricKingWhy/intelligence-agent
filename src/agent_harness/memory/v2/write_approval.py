@@ -373,7 +373,7 @@ class StagedWriteStore:
             }
         pinned_ops = [
             {**op, **({"matched_entry": pin} if pin is not None else {})}
-            for op, pin in zip(operations, pins, strict=True)
+            for op, pin in zip(operations, pins)
         ]
         return await self.markdown.apply_batch(target, pinned_ops)
 
