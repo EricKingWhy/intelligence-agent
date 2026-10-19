@@ -346,10 +346,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 
 /* ── App Bar：单帧顶条，嵌在 frame 内（不再是独立卡） ── */
+/* #1395：三列 `1fr auto 1fr`——左右两列等宽，中间会话组按**轨道**居中，
+ * 不再被两侧内容的实际宽度挤偏（旧 `space-between` 下左 90px / 右 484px，
+ * 中间组文字中心落在 ~36% 视口处，右簇前留两百多像素空洞）。
+ * 三列都允许收缩（`minmax(0, …)`）：窄档先由中间组自己收口，不让 `auto`
+ * 的 max-content 把整条顶栏顶出 `.app-frame`；≤820px 仍由既有媒体查询
+ * 隐藏 `.appbar-center`，本票不改该分支。 */
 .appbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   padding: 0 var(--space-lg);
   height: 48px;
   flex-shrink: 0;
@@ -368,6 +374,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   align-items: center;
   gap: var(--space-sm);
+}
+/* #1395：左右贴边、中间按轨道居中（三列等宽 1fr 才成立）。 */
+.appbar-left {
+  justify-self: start;
+}
+.appbar-center {
+  justify-self: center;
+}
+.appbar-right {
+  justify-self: end;
 }
 /* #1368：左组必须能**收缩**，否则标题的 `nowrap` 会把右簇顶出顶栏。
    `min-width:0` 关掉 flex item 的 auto 最小尺寸（= 内容的 min-content），
