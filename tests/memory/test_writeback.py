@@ -159,10 +159,10 @@ async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_pa
         """写入入口（契约的 `consolidate`）整体不可用：连降级写入都失败。"""
 
         async def store(self, scope, content, metadata):
-            raise ConnectionError("milvus down")
+            raise ConnectionError("vector backend down")
 
         async def consolidate(self, scope, content, metadata, *, budget_seconds=None):
-            raise ConnectionError("milvus down")
+            raise ConnectionError("vector backend down")
 
     class OneCandidate:
         async def extract(self, events):

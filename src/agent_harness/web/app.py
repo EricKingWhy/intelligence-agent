@@ -1507,7 +1507,16 @@ class AppState:
             if not events:
                 continue
             was_armed = self.ask_user_timeout_driver.is_armed(session_id)
-            self.ask_user_timeout_driver.note_session_state(session_id, events)
+            try:
+                self.ask_user_timeout_driver.note_session_state(session_id, events)
+            except Exception:
+                # #1337 B P2-2（相邻加固）：与上面的 `read_events` 同一条纪律——
+                # 单个会话装配失败不得阻断其后会话的重建。
+                logging.getLogger("agent_harness.web").warning(
+                    "ask_user 超时重建装配失败（session=%s）", session_id,
+                    exc_info=True,
+                )
+                continue
             if not was_armed and self.ask_user_timeout_driver.is_armed(session_id):
                 armed += 1
         return armed

@@ -2,7 +2,7 @@
 
 # 为什么索引需要"复核"（AC7 / PRD §6.6）
 
-Milvus 是**派生**索引，不是事实源。任何一条检索命中在被送进模型上下文之前，
+派生索引不是事实源。任何一条检索命中在被送进模型上下文之前，
 都必须回到 SQLite 确认三件事：记录存在、状态是 active、调用方对它有权。
 少了这一步，"索引里残留一条已失效/跨用户的向量"就等于"把别人的内容注入本轮对话"。
 所以本模块把复核做成检索路径上的**必经函数**（`resolve_active_hits`），
@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 class MemoryV2VectorIndex(Protocol):
     """派生索引端口：只认 record id 与查询分数，不持有权威事实。
 
-    `delete` 携带完整路由事实（而不是只给 memory_id）：真实后端（Milvus）按
-    namespace 过滤删除，而删除发生时记录行可能已经不在——路由事实只能来自 outbox。
+    `delete` 携带完整路由事实（而不是只给 memory_id）：真实后端按 namespace
+    过滤删除，而删除发生时记录行可能已经不在——路由事实只能来自 outbox。
     """
 
     async def upsert(self, record: MemoryRecordV2) -> None: ...
@@ -62,7 +62,7 @@ class MemoryV2VectorIndex(Protocol):
 
 
 class InMemoryMemoryV2Index:
-    """进程内索引实现：契约的第二个适配者（第一个是真实 Milvus 后端）。
+    """进程内索引实现：契约的第二个适配者（第一个是真实远端后端）。
 
     它同时是**测试替身**：`fail_upsert` / `fail_delete` 用来注入索引侧故障，
     证明"索引失败不回滚已提交事实、且可恢复地恰好收敛一次"（AC6）。

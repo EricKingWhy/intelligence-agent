@@ -1,0 +1,3 @@
+﻿2026-10-19	#1353 B 路测试补强 14 笔（test-only 机械归属，零 src 改动）：AC1 契约 + oracle 补全、AC2 并发/kill、AC3 漂移、AC4 预算、AC5 threat、AC6 端到端真跑、AC7 pinning/审批、AC8 快照、AC9 迁移、AC10 Milvus 清零、AC11 门禁证据；含合并态对齐 A 路 markdown/向量腿删除。14 笔：06f0d421 ced15182 6cfa2ebb a9ad7eb0 d67e6b1c 27e87bbc 9cda67f2 9950ba2f aaa1159c 4a55ddba 080dfe1e e8244719 c9786997 9716c6f9。range 另含 A 路并入提交，其归属见 w7-1353-hermes-memory.tsv。	6a1577af..f9bed391
+2026-10-19	机械归属（非内容审查主张）：#1353 合并 A 路 dc99e8bb 进测试分支（父一 9950ba2f=本线 tip，父二 dc99e8bb=A 路实现）。ort 零冲突；合并自身不引入新内容，不另开审查轮。	9950ba2f..eeb655a5
+2026-10-19	机械归属（非内容审查主张）：#1353 合并 A 路 cd9fc081（M5/M6/M7/M10 + B-1 + gate0 修回）进测试分支（父一 9716c6f9=本线 tip，父二 cd9fc081=A 路 tip）。ort 零冲突；合并自身不引入新内容，不另开审查轮。	9716c6f9..254bb4bf
