@@ -25,18 +25,20 @@ vi.mock('../lib/api', async (importOriginal) => {
   };
 });
 
-// ⚠ `sessionIdBaseline` / `discoverNewSessionId` 在 `lib/wsStream`，**不在** `lib/api`。
+// ⚠ `sessionIdBaselineDetailed` / `discoverNewSessionId` 在 `lib/wsStream`，**不在** `lib/api`。
 vi.mock('../lib/wsStream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/wsStream')>();
   return {
     ...actual,
-    sessionIdBaseline: vi.fn(async () => new Set<string>()),
+    // #1333：useSession 改取 detailed 基线（含服务端时钟锚点）；serverNowMs
+    // 给 null 走客户端时刻降级（本单测不考时钟锚点）。
+    sessionIdBaselineDetailed: vi.fn(async () => ({ ids: new Set<string>(), serverNowMs: null })),
     discoverNewSessionId: vi.fn(),
   };
 });
 
 import { getSessionEvents, sendMessage as apiSendMessage, startSession } from '../lib/api';
-import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaseline } from '../lib/wsStream';
+import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaselineDetailed } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession, type SessionApi } from './useSession';
 
 const SID = 's-1367';
@@ -79,8 +81,8 @@ beforeEach(() => {
   vi.mocked(getSessionEvents).mockResolvedValue(idleHistory(SID));
   vi.mocked(apiSendMessage).mockReset();
   vi.mocked(startSession).mockReset();
-  vi.mocked(sessionIdBaseline).mockReset();
-  vi.mocked(sessionIdBaseline).mockResolvedValue(new Set<string>());
+  vi.mocked(sessionIdBaselineDetailed).mockReset();
+  vi.mocked(sessionIdBaselineDetailed).mockResolvedValue({ ids: new Set<string>(), serverNowMs: null });
   vi.mocked(discoverNewSessionId).mockReset();
 });
 
@@ -123,7 +125,7 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
   });
 
   it('降级路径（会话列表读不到）的 POST 失败 ⇒ retryable:true + 动作保留', async () => {
-    vi.mocked(sessionIdBaseline).mockResolvedValue(null);
+    vi.mocked(sessionIdBaselineDetailed).mockResolvedValue(null);
     vi.mocked(startSession).mockRejectedValue(new Error('网络中断：POST /api/sessions'));
     const retry = vi.fn(async () => true);
     await mount();
