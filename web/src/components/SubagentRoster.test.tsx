@@ -52,11 +52,11 @@ describe('#1256 token 缩写（dsh 口径）', () => {
 
 describe('#1256 tokenText — 诚实口径（AC6）', () => {
   it('ok → 精确值，无标注', () => {
-    expect(tokenText(12_842, 'ok')).toBe('12.8K tok');
+    expect(tokenText(12_842, 'ok')).toBe('12.8K 字');
   });
 
   it('usage_only → 标「估算」（事件流下界，不当下确值卖）', () => {
-    expect(tokenText(12_842, 'usage_only')).toBe('12.8K tok · 估算');
+    expect(tokenText(12_842, 'usage_only')).toBe('12.8K 字 · 估算');
   });
 
   it('no_data → 「无数据」（不显 0 tok 假象）', () => {
@@ -154,7 +154,7 @@ describe('#1256 SubagentRoster', () => {
     expect(host.querySelector('.roster')).not.toBeNull();
     expect(host.querySelector('.agent-row')).not.toBeNull();
     expect(host.querySelector('.agent-title')?.textContent).toBe('research_review');
-    expect(host.querySelector('.agent-stats')?.textContent).toContain('12.8K tok');
+    expect(host.querySelector('.agent-stats')?.textContent).toContain('12.8K 字');
     expect(host.querySelector('.agent-stats')?.textContent).toContain('完成');
   });
 
@@ -302,7 +302,7 @@ describe('#1256 SubagentSplitPane', () => {
     expect(pill?.getAttribute('aria-hidden')).toBe('true'); // 装饰：状态词在 .split-usage 文本行
     expect(pill?.className).toContain('act-status-success'); // completed→success 同状态色
     expect(pill?.querySelector('svg')).not.toBeNull(); // 有状态图标，非空色点
-    expect(host.querySelector('.split-usage')?.textContent).toBe('12.8K tok · 完成');
+    expect(host.querySelector('.split-usage')?.textContent).toBe('12.8K 字 · 完成');
   });
 
   it('分栏头：运行中行显「运行中」+ usage_only 标「估算」（诚实口径）', () => {
@@ -316,6 +316,6 @@ describe('#1256 SubagentSplitPane', () => {
       />,
     );
     expect(host.querySelector('.subagent-split-head .act-status')?.className).toContain('act-status-running');
-    expect(host.querySelector('.split-usage')?.textContent).toBe('613.0K tok · 估算 · 运行中');
+    expect(host.querySelector('.split-usage')?.textContent).toBe('613.0K 字 · 估算 · 运行中');
   });
 });

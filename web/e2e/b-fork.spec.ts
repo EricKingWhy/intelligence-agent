@@ -108,7 +108,7 @@ test('B2：分叉被拒绝时展示后端 detail，不再静默吞错', async ({
   await page.locator('.turn').nth(1).locator('.fork-btn').click();
 
   const alert = page.locator('[role="alert"]');
-  await expect(alert).toContainText('另开一条失败');
+  await expect(alert).toContainText('另开会话失败');
   await expect(alert).toContainText('可用边界: [2, 30]');
 });
 

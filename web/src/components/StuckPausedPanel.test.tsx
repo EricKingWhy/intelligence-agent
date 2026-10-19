@@ -47,7 +47,7 @@ function render(p: RunPausedInfo): string {
 describe('StuckPausedPanel — stuck 暂停的引导面板（#968）', () => {
   it('不含 budget-increase 恢复控件：无恢复按钮、无 ceiling 输入框、无「绝对 ceiling」字样', () => {
     const html = render(stuckPaused());
-    expect(html).not.toContain('恢复同一 run');
+    expect(html).not.toContain('pause-resume-btn');
     expect(html).not.toContain('pause-resume-ceiling');
     expect(html).not.toContain('绝对 ceiling');
   });

@@ -101,6 +101,16 @@ export function deadlinePreview(
   return { text: `≈ ${localStamp(date, now)} 截止${suffix}`, expired: false };
 }
 
+/** 时长 token → 人话（`'2h'` → `'2 小时'`、`'90m'` → `'90 分钟'`）。 */
+function durationText(draft: string): string | null {
+  const trimmed = draft.trim();
+  const tier = DURATION_TIERS.find((t) => t.token === trimmed);
+  if (tier) return tier.label;
+  const minutes = parseDurationToken(trimmed);
+  if (minutes === null) return null;
+  return minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
+}
+
 /** Composer trigger 的常显摘要（§2.5「默认值用 placeholder 表达」）：
  *  全空 → 「默认」；否则 turns 部分恒在（`turns N` / `turns 默认`），
  *  tokens / deadline 部分设了才出，` · ` 连接。判形复用映射层：tokens 合法性
@@ -113,13 +123,13 @@ export function budgetSummary(turns: string, tokens: string, deadline: string): 
   // datetime 高级路径：能换算出绝对时刻才算设置（与提交判形同一执行点）。
   const resolved = resolveDeadlineDraft(deadline);
   const deadlineText = isDuration
-    ? deadline.trim()
+    ? durationText(deadline)
     : resolved !== undefined
       ? localStamp(new Date(resolved), new Date())
       : null;
   if (!turnsSet && tokensText === null && deadlineText === null) return '默认';
   const parts = [`轮数 ${turnsSet ? turnsTrimmed : '默认'}`];
-  if (tokensText !== null) parts.push(tokensText);
+  if (tokensText !== null) parts.push(`${tokensText} 字`);
   if (deadlineText !== null) parts.push(deadlineText);
   return parts.join(' · ');
 }

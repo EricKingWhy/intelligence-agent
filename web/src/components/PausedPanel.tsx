@@ -47,18 +47,26 @@ export interface PausedPanelProps {
   resuming: boolean;
 }
 
+/** 维度 key 的中文短名（暂停面板逐维清单的左侧标签）。 */
+const DIMENSION_DISPLAY: Record<string, string> = {
+  agent_turns: '轮数',
+  model_requests: '模型请求',
+  total_tokens: '字数',
+  cost_usd: '成本',
+};
+
 /** 一维的读数行（与 CLI `_extra_dimension_lines` 同一口径的排版）。命中的那一维
  *  带"到顶"字样，用户一眼看到是谁卡住了。 */
 function dimensionLine(fact: DimensionFact): string {
   const tripped = fact.tripped ? ' · 到顶' : '';
-  return `${fact.consumedText} / limit ${fact.ceilingText}（剩余 ${fact.remainingText}）${tripped}`;
+  return `${fact.consumedText} / 上限 ${fact.ceilingText}（剩余 ${fact.remainingText}）${tripped}`;
 }
 
 /** 一个工具配额的读数行（与 CLI `_tool_dimension_lines` 同一取舍）：两个 counter
  *  分开写——`calls` 是被接纳的逻辑调用数，`attempts` 含 retry，它们不是同一个量。 */
 function toolQuotaLine(fact: ToolQuotaFact): string {
   const tripped = fact.tripped ? ' · 到顶' : '';
-  return `consumed ${fact.callsText} calls / ${fact.attemptsText} attempts / limit ${
+  return `已用 ${fact.callsText} 次调用 / ${fact.attemptsText} 次尝试 / 上限 ${
     fact.ceilingText
   }（剩余 ${fact.remainingText}）${tripped}`;
 }
@@ -106,17 +114,17 @@ export function PausedPanel({
         <span>
           {facts.deadlinePause
             ? '已在截止时间处暂停——这次任务只是暂停，不是出错'
-            : '预算已用完，任务已暂停——只是暂停，不是出错'}
+            : '预算已用完，任务暂停了——不是出错'}
         </span>
       </div>
       <div className="pause-panel-facts">
         {/* 缺失数字一律说 unavailable / unlimited，**永不**用 0 顶替（`11 §6.1`，
             与 CLI `_pause_facts` 同一口径）。 */}
-        原因 {paused.reason}（{facts.reasonLabel}）· {headline} · 预算版本 {facts.version} · 结束方式{' '}
+        原因：{facts.reasonLabel} · {headline} · 预算版本 {facts.version} · 结束方式{' '}
         {facts.closeoutSource}
         {facts.localFuseTurns === null
           ? ''
-          : ` · local fuse ${facts.localFuseTurns}${
+          : ` · 单次执行轮数上限 ${facts.localFuseTurns}${
               facts.localFuseSource ? `（${facts.localFuseSource}）` : ''
             }`}
         {paused.trace_id ? ` · trace ${paused.trace_id}` : ''}
@@ -126,7 +134,7 @@ export function PausedPanel({
       <div className="pause-panel-facts">
         {facts.dimensions.map((fact) => (
           <div key={fact.spec.dimension}>
-            {fact.spec.consumedKey}: {dimensionLine(fact)}
+            {DIMENSION_DISPLAY[fact.spec.consumedKey] ?? fact.spec.consumedKey}: {dimensionLine(fact)}
           </div>
         ))}
       </div>
@@ -136,7 +144,7 @@ export function PausedPanel({
         <div className="pause-panel-facts">
           {facts.toolQuotas.map((fact) => (
             <div key={fact.dimension}>
-              tool {fact.name}: {toolQuotaLine(fact)}
+              工具 {fact.name}: {toolQuotaLine(fact)}
             </div>
           ))}
         </div>

@@ -141,7 +141,7 @@ describe('#183 AC7 面板控制键的可访问性语义', () => {
 
   it('关闭按钮有可读名（不是只有一个 X 图标）', () => {
     const html = renderStepDetail({ conversation: conv, focus: { kind: 'run' } });
-    expect(html).toContain('aria-label="关闭 Inspector"');
+    expect(html).toContain('aria-label="关闭运行详情"');
   });
 
   it('拖宽手柄是 separator：方向 + 当前/上下限都如实报（320→480）', () => {

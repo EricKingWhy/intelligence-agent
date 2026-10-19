@@ -297,7 +297,7 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
       <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
     );
     expect(html).toContain('fork-btn');
-    expect(html).toContain('另开一条');
+    expect(html).toContain('从这里另开一条');
   });
 
   it('无锚点（user_message_seq 为 null）→ 不渲染按钮（不造假入口）', () => {

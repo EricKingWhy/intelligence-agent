@@ -54,8 +54,8 @@ async function openInspectorOverview(page: import('@playwright/test').Page, fram
   await page.goto('/');
   await submitTask(page, '写个文件');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Overview' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '概览' })
     .click();
   await expect(permissionSection(page)).toBeVisible();
 }
@@ -101,8 +101,8 @@ test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批�
   await submitTask(page, '写个文件');
   // 审批尚未出现：先打开 Inspector Overview（模态一开就点不到了）。
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Overview' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '概览' })
     .click();
   await expect(permissionSection(page)).toBeVisible();
 

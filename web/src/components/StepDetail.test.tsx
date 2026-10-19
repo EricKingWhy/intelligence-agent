@@ -99,11 +99,11 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
   it('有 result 时默认 Output 选中（看结果优先）', () => {
     const html = renderTool(toolBase);
     expect(html).toContain('io-tabs');
-    expect(html).toContain('>Overview<');
-    expect(html).toContain('>Input<');
-    expect(html).toContain('>Output<');
-    // 默认 Output 选中（aria-selected）
-    expect(html).toMatch(/aria-selected="true"[^>]*>Output</);
+    expect(html).toContain('>概览<');
+    expect(html).toContain('>输入<');
+    expect(html).toContain('>输出<');
+    // 默认输出选中（aria-selected）
+    expect(html).toMatch(/aria-selected="true"[^>]*>输出</);
     // Output 面板内容在（exit_code 键来自 result 对象树）
     expect(html).toContain('exit_code');
     // Input 面板默认不渲染其 args 内容（command 是 args 独有键）
@@ -112,9 +112,9 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
   it('无 result（运行中）：默认 Overview，元信息可见且无 Output 标签', () => {
     const html = renderTool({ ...toolBase, result: undefined, status: 'running' });
-    expect(html).toContain('>Overview<');
-    expect(html).toMatch(/aria-selected="true"[^>]*>Overview</);
-    expect(html).not.toContain('>Output<');
+    expect(html).toContain('>概览<');
+    expect(html).toMatch(/aria-selected="true"[^>]*>概览</);
+    expect(html).not.toContain('>输出<');
     // Overview 元信息：tool_call_id / status
     expect(html).toContain('tool_call_id');
     expect(html).toContain('running');
@@ -122,13 +122,13 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
   it('有 raw_call/raw_result 才出现 Raw 标签；raw 面板渲染原始事件树', () => {
     const noRaw = renderTool(toolBase);
-    expect(noRaw).not.toContain('>Raw<');
+    expect(noRaw).not.toContain('>原始<');
     const withRaw = renderTool({
       ...toolBase,
       raw_call: { type: 'tool/call', data: { x: 1 } },
       raw_result: { type: 'tool/result', data: { y: 2 } },
     } as ToolCall);
-    expect(withRaw).toContain('>Raw<');
+    expect(withRaw).toContain('>原始<');
     // Raw 面板（含两个「复制 Raw」按钮）只在选中 Raw 档时渲染 ⇒ SSR 首帧看不到，
     // 故这里无法锁住其 aria-label（真机审计 B-D7 的整改见 e2e/真机复验）。
   });

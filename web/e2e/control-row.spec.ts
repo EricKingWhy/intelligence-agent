@@ -677,7 +677,7 @@ test('#283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修
   // 留着就是死胡同）；底部如实披露生效时机（ADR-0041 D4：不得承诺「立即生效」）。
   await trigger.click();
   await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
-  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮 run 起生效');
+  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮执行起生效');
   await expect(page.locator('.picker-item', { hasText: '默认（未选）' })).toHaveCount(0);
   await expect(page.locator('[role="listbox"]:visible .picker-item')).toHaveCount(PERMISSION_MODES.length);
   await page.keyboard.press('Escape');

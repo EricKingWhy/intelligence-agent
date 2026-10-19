@@ -140,7 +140,7 @@ test('AC4：钉住跨会话——未钉住切换会话收起，钉住后保持�
   await expect(page.locator('.step-detail')).toBeHidden();
 
   // 打开面板 → 钉住
-  await page.getByRole('button', { name: '展开 Inspector' }).click();
+  await page.getByRole('button', { name: '展开运行详情' }).click();
   await expect(page.locator('.step-detail')).toBeVisible();
   const pin = page.locator('.detail-ctrl[aria-label="钉住"]');
   await expect(pin).toHaveAttribute('aria-pressed', 'false');
@@ -183,8 +183,8 @@ test('AC5：整页往返（面板按钮 + 命令面板两个入口）', async ({
   // 第二入口：命令面板
   await page.keyboard.press('Control+k');
   await page.locator('.palette-input').fill('整页');
-  await expect(page.locator('.palette-item', { hasText: '整页打开 Inspector' })).toBeVisible();
-  await page.locator('.palette-item', { hasText: '整页打开 Inspector' }).click();
+  await expect(page.locator('.palette-item', { hasText: '整页打开运行详情' })).toBeVisible();
+  await page.locator('.palette-item', { hasText: '整页打开运行详情' }).click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-fullpage/);
 
   // 退回（同一个按钮）
@@ -266,12 +266,12 @@ test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调�
   // 三个按钮都在 Tab 序列里，且名字可读
   await expect(page.locator('.detail-ctrl[aria-label="钉住"]')).toBeVisible();
   await expect(page.locator('.detail-ctrl[aria-label="整页"]')).toBeVisible();
-  await expect(page.locator('button[aria-label="关闭 Inspector"]')).toBeVisible();
+  await expect(page.locator('button[aria-label="关闭运行详情"]')).toBeVisible();
 
   // 关闭按钮 = 收起面板（不卸载）
-  await page.locator('button[aria-label="关闭 Inspector"]').click();
+  await page.locator('button[aria-label="关闭运行详情"]').click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
-  await expect(page.getByRole('button', { name: '展开 Inspector' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '展开运行详情' })).toBeVisible();
 });
 
 test('AC8：头部必须容得下最长档位名（不溢出面板、控制按钮不被顶出去）', async ({ page }) => {
@@ -349,12 +349,12 @@ test('AC8：头部必须容得下最长档位名（不溢出面板、控制按�
   await expect(resizer).toHaveAttribute('aria-valuenow', '480');
   await expect(page.locator('.detail-run-id')).toBeVisible();
   // 单 run / 6 事件的 fixture（EVENTS）→ 文案逐字（含中文单位，不是裸 run_id）
-  await expect(page.locator('.detail-run-id')).toHaveText('1 runs · 6 事件');
+  await expect(page.locator('.detail-run-id')).toHaveText('1 次任务 · 6 事件');
 
   // 最窄处仍然**真的能点**（Playwright 会做可操作性检查：视口外/被遮挡会超时）
   for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowRight');
   await expect(resizer).toHaveAttribute('aria-valuenow', '320');
-  await page.locator('button[aria-label="关闭 Inspector"]').click();
+  await page.locator('button[aria-label="关闭运行详情"]').click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
 });
 

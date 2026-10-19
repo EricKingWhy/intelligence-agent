@@ -1000,7 +1000,7 @@ export default function App() {
       const origin = selectedId;
       setForkError(null);
       try {
-        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '另开一条');
+        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '另开一条会话');
         if (selectedIdRef.current !== origin) return;
         // 跳转到 child session（同步镜像，见 selectedIdRef 注释）
         selectedIdRef.current = result.session_id;
@@ -1009,7 +1009,7 @@ export default function App() {
       } catch (e) {
         if (selectedIdRef.current !== origin) return;
         // BUG-001 fix：分叉失败不再静默——展示后端 detail。
-        setForkError({ sessionId: origin, message: `另开一条失败：${(e as Error).message}` });
+        setForkError({ sessionId: origin, message: `另开会话失败：${(e as Error).message}` });
       } finally {
         // 只清自己那一格：期间可能已有另一个会话的分叉在途
         if (forkInFlightRef.current === origin) forkInFlightRef.current = null;
@@ -1447,7 +1447,7 @@ export default function App() {
       {
         id: 'toggle-inspector',
         label: '切换运行详情',
-        keywords: 'toggle inspector 右栏',
+        keywords: 'toggle inspector 右栏 运行详情',
         hint: '右栏',
         group: 'actions',
         run: () => {
@@ -1460,7 +1460,7 @@ export default function App() {
            那一处就是这里——命令面板不占浏览器快捷键，长 trace / 大 diff 宽读不用
            先找到那个 ⤢ 图标。 */
         id: 'toggle-inspector-fullpage',
-        label: panel.expanded ? '退出 Inspector 整页' : '整页打开 Inspector',
+        label: panel.expanded ? '退出运行详情整页' : '整页打开运行详情',
         keywords: 'full page inspector maximize 整页 宽读',
         hint: '面板',
         group: 'actions',
@@ -1503,7 +1503,7 @@ export default function App() {
         ? [{
             id: 'copy-run-id',
             label: '复制任务编号',
-            keywords: 'copy task id 任务编号',
+            keywords: 'copy id 任务编号',
             hint: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),
@@ -1849,8 +1849,8 @@ export default function App() {
                   紧接 interrupted，如 c63ce4d3-3b26-40bb-8e8c-e3af8dd33035）——
                   渲染成「第 ? 步」等于把「还没开始就断了」说成一个未知数字。*/}
               {conversation.run_interrupted.step_id !== null
-                ? `上次运行在第 ${conversation.run_interrupted.step_id} 步中断`
-                : '上次运行在首个步骤开始前中断'}
+                ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
+                : '上次任务在首个步骤开始前中断'}
               （原因：{conversation.run_interrupted.reason}）
             </div>
           )}

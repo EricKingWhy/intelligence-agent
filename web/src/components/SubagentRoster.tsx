@@ -51,7 +51,7 @@ export function tokenText(
   usageState: DelegationEntry['usage_state'],
 ): string {
   if (usageState === 'no_data') return '无数据';
-  const base = `${formatTokenCount(usedTokens)} tok`;
+  const base = `${formatTokenCount(usedTokens)} 字`;
   return usageState === 'usage_only' ? `${base} · 估算` : base;
 }
 

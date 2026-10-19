@@ -46,7 +46,7 @@ export function RecoveryListPanel({ open, onOpenChange, onResume }: Props) {
 }
 
 /** 「先列后继续」的加载门控文案（说明为什么现在不能继续）。 */
-const GATE_REASON = '加载完成前不能继续——先核对完上次运行的完整状态。';
+const GATE_REASON = '加载完成前不能继续——先核对完上次任务的完整状态。';
 
 function ResumeButton({
   sessionId,
@@ -119,13 +119,13 @@ function RecoveryListBody({
         </Dialog.Close>
       </div>
       <Dialog.Description className="project-dialog-desc">
-        上次运行留下的中断会话。列表只读、来自服务端启动扫描快照；在核对完完整状态之前不会出现可点的「继续」。
+        上次任务留下的中断会话。列表只读、来自服务端启动扫描快照；在核对完完整状态之前不会出现可点的「继续」。
       </Dialog.Description>
 
       <div className="recovery-list-body">
         {state.kind === 'loading' && (
           <div className="recovery-list-loading">
-            <p role="status">正在核对上次运行的信息…（事件 → 工作区 → 操作记录 → 结果核对 → 工具结果配对 → 记忆容量）</p>
+            <p role="status">正在核对上次任务的信息…（事件 → 工作区 → 操作记录 → 结果核对 → 工具结果配对 → 记忆重建）</p>
             <button type="button" className="recovery-resume-btn" disabled aria-disabled="true" aria-describedby="recovery-gate-reason">
               继续
             </button>
@@ -144,7 +144,7 @@ function RecoveryListBody({
 
         {state.kind === 'loaded' && (state.data === undefined || state.data.snapshot_available === false) && (
           <div className="recovery-list-degraded" role="status">
-            <strong>上次运行信息不可用</strong>
+            <strong>上次任务信息不可用</strong>
             <span>服务端启动扫描没有可用的快照，因此无法列出中断会话——不展示任何推测出来的列表。</span>
             <button type="button" className="recovery-resume-btn" disabled aria-disabled="true" aria-describedby="recovery-degraded-reason">
               继续
@@ -190,7 +190,7 @@ function RecoveryListBody({
                   <div className="recovery-item-actions">
                     {!item.resume_available && (
                       <p className="recovery-gate-reason" id={reasonId}>
-                        该行没有可恢复的中断运行。
+                        该行没有可恢复的中断任务。
                       </p>
                     )}
                     <ResumeButton

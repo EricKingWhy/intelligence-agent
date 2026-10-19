@@ -195,9 +195,9 @@ describe('F2 — AC1 `memo` 包裹', () => {
     render(<InspectorHost conversation={seed()} tick={0} />);
     const badge = (label: string) =>
       container!.querySelector(`button[aria-label="${label}"] .detail-tab-count`)?.textContent;
-    expect(badge('Timeline')).toBe('5');
-    expect(badge('Terminal')).toBe('1');
-    expect(badge('Changes')).toBe('0');
+    expect(badge('时间线')).toBe('5');
+    expect(badge('终端')).toBe('1');
+    expect(badge('变更')).toBe('0');
     expect(badge('产出文件')).toBe('0');
   });
 });
@@ -211,7 +211,7 @@ describe('F2 — AC3(a) 与对话无关的提交不得让派生重算', () => {
     const before = counts();
     expect(before.all).toBe(1); // 挂载各算一次
 
-    click('button[aria-label="关闭 Inspector"]');
+    click('button[aria-label="关闭运行详情"]');
     // 刻意设计：关闭只是换祖先 class，组件**不卸载**（App.tsx:920-923）。
     expect(container!.querySelector('[data-panel="inspector"]')).not.toBeNull();
     expect(container!.querySelector('.app-regions')!.className).toContain('inspector-closed');

@@ -105,7 +105,7 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
   {
     dimension: 'run.max_model_requests',
-    label: '这次任务累计模型请求到顶（max_model_requests）',
+    label: '这次任务累计模型请求到顶',
     consumedKey: 'model_requests',
     ceilingKey: 'max_model_requests',
     resumeField: 'max_model_requests',
@@ -125,7 +125,7 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
   },
   {
     dimension: 'run.max_cost_usd',
-    label: '这次任务累计成本到顶（max_cost_usd）',
+    label: '这次任务累计成本到顶',
     consumedKey: 'cost_usd',
     ceilingKey: 'max_cost_usd',
     resumeField: 'max_cost_usd',
@@ -471,8 +471,8 @@ function compareDimension(
 export function dimensionLabel(dimension: string): string {
   const spec = RUN_DIMENSIONS.find((row) => row.dimension === dimension);
   if (spec) return spec.label;
-  if (dimension === DEADLINE_DIMENSION) {
-    return '截止时间已到（deadline_at）';
+  if (dimension === DEADLINE_DIMENSION || dimension === 'deadline_at') {
+    return '截止时间已到';
   }
   if (dimension === 'local.max_agent_turns') {
     return '单次执行轮数到顶';
@@ -487,13 +487,13 @@ export function dimensionLabel(dimension: string): string {
  *  （数字 vs RFC 3339 时刻），文案合并会让用户填错东西。 */
 export function pauseReasonLabel(paused: RunPausedInfo): string {
   if (paused.reason === PAUSE_REASON_DEADLINE) {
-    return '绝对截止时刻到点（deadline：不再接纳新的 Provider 请求 / 工具调用 / 子 Agent）';
+    return '到了截止时间（不再接受新的模型请求 / 工具调用 / 子任务）';
   }
   if (paused.reason === PAUSE_REASON_BUDGET_EXHAUSTED) {
     return '预算到顶（某一项上限用完了）';
   }
   if (paused.reason === PAUSE_REASON_STUCK) {
-    return '疑似卡住（stuck：需要变更依据才能恢复，属 #317）';
+    return '疑似卡住（需要说明你改了什么才能继续）';
   }
   return paused.reason || '暂停原因未声明';
 }

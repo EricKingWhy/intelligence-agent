@@ -83,8 +83,8 @@ async function openConstraints(
   await page.goto('/');
   await submitTask(page, '跑个任务');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Constraints' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '我的要求' })
     .click();
   await expect(panel(page)).toBeVisible();
 }
@@ -94,8 +94,8 @@ test('AC1：页眉/会话行在场，默认「生效中」只列 active', async 
     protectedFacts: [ACTIVE_FACT, REVOKED_FACT, SUPERSEDED_FACT],
   });
 
-  await expect(panel(page)).toContainText('CONSTRAINTS');
-  await expect(panel(page)).toContainText('我的要求');
+  await expect(panel(page).locator('.cn-eyebrow')).toHaveText('我的要求');
+  await expect(panel(page).locator('.cn-title')).toHaveText('我的要求');
 
   // 默认 tab = 生效中（issue §四.3）。
   await expect(panel(page).getByRole('tab', { name: /生效中/ })).toHaveAttribute(

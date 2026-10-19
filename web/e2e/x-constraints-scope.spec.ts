@@ -74,8 +74,8 @@ async function openConstraints(page: Page, mock: Record<string, unknown>): Promi
   await page.goto('/');
   await submitTask(page, '跑个任务');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Constraints' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '我的要求' })
     .click();
   await expect(panel(page)).toBeVisible();
 }

@@ -62,12 +62,12 @@ const TAB_ICONS: Record<Tab, typeof ListTree> = {
 };
 
 const TABS: readonly { id: Tab; label: string }[] = [
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'chat', label: 'Overview' },
-  { id: 'changes', label: 'Changes' },
-  { id: 'terminal', label: 'Terminal' },
+  { id: 'timeline', label: '时间线' },
+  { id: 'chat', label: '概览' },
+  { id: 'changes', label: '变更' },
+  { id: 'terminal', label: '终端' },
   { id: 'artifacts', label: '产出文件' },
-  { id: 'constraints', label: 'Constraints' },
+  { id: 'constraints', label: '我的要求' },
 ];
 
 // C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
@@ -408,7 +408,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         className="detail-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="调整 Inspector 宽度"
+        aria-label="调整运行详情宽度"
         aria-valuenow={panel.width}
         aria-valuemin={INSPECTOR_MIN_W}
         aria-valuemax={INSPECTOR_MAX_W}
@@ -458,9 +458,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         {conversation.events.length > 0 && (
           <span
             className="detail-run-id mono num"
-            title={`runs: ${runIdList.join(', ')}`}
+            title={`任务：${runIdList.join(', ')}`}
           >
-            {runIdList.length} runs · {conversation.events.length} 事件
+            {runIdList.length} 次任务 · {conversation.events.length} 事件
           </span>
         )}
         {/* #183 AC4/AC5/AC7：钉住 / 整页 / 关闭。三个都是键盘可达的按钮，开关类用
@@ -494,7 +494,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           <button
             type="button"
             className="detail-ctrl"
-            aria-label="关闭 Inspector"
+            aria-label="关闭运行详情"
             onClick={() => onPanelAction({ type: 'close' })}
             title="关闭（Esc）"
           >
@@ -503,7 +503,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         </span>
       </div>
 
-      <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
+      <div className="detail-tabs" role="tablist" aria-label="运行详情视图">
         {TABS.map((t) => {
           const Icon = TAB_ICONS[t.id];
           /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
@@ -943,7 +943,7 @@ export function ChatTab({
             <span className="detail-key">用量</span>
             <span className="detail-val">
               {conversation.usage_total
-                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} tok（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
+                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} 字（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
                 : '—'}
             </span>
           </div>
@@ -1468,10 +1468,10 @@ function EventInspector({ focus }: { focus: EventFocus }) {
   const rawJson = JSON.stringify(event, null, 2);
 
   const tabs: readonly { id: EventIoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    { id: 'output', label: 'Output' },
-    { id: 'raw', label: 'Raw' },
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    { id: 'output', label: '输出' },
+    { id: 'raw', label: '原始' },
   ];
 
   return (
@@ -1523,7 +1523,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
           )}
           {event.event_id && (
             <div className="detail-row">
-              <span className="detail-key">event_id</span>
+              <span className="detail-key">事件编号</span>
               <span className="detail-val detail-val-mono">{event.event_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1531,7 +1531,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'input' && (
         <div className="detail-section">
-          <div className="detail-section-title">Input (data)</div>
+          <div className="detail-section-title">输入数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1542,7 +1542,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'output' && (
         <div className="detail-section">
-          <div className="detail-section-title">Output (data)</div>
+          <div className="detail-section-title">输出数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1597,10 +1597,10 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const [wantTab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'overview');
 
   const tabs: readonly { id: IoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
-    ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    ...(hasOutput ? [{ id: 'output', label: '输出' } as const] : []),
+    ...(hasRaw ? [{ id: 'raw', label: '原始' } as const] : []),
   ];
   /* 渲染期收窄到仍然存在的段（同 #182 `resolveActiveTab` 的口径）：选中项在清单里
      移动时这个组件实例**不重建**（AC1），于是 `useState` 的初始值会留在上一个工具
@@ -1779,7 +1779,7 @@ function ChildTimeline({ events }: { events: AgentEvent[] }) {
   return (
     <div className="detail-section">
       <div className="detail-section-title">
-        <ListTree size={14} /> CHILD TIMELINE
+        <ListTree size={14} /> 子任务时间线
       </div>
       {total > CHILD_TIMELINE_WINDOW && (
         <div className="detail-row detail-row-warn">显示最近 {CHILD_TIMELINE_WINDOW} 条 / 共 {total} 条</div>

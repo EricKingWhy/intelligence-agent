@@ -508,7 +508,7 @@ async function watchtowerJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
     const detail = await readErrorDetail(res);
-    throw new Error(detail || `自动定时任务请求失败（${res.status}）`);
+    throw new Error(detail || `定时任务请求失败（${res.status}）`);
   }
   return res.json() as Promise<T>;
 }

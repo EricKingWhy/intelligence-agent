@@ -163,7 +163,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               `run/completed` 以权威值**替换**本 run 的流式贡献，因此到达前后不出现
               数字变小的覆盖式跳变。无数据不显示（零伪造）。 */}
           {sessionUsage && sessionUsage.total_tokens !== null && (
-            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} tok</span>
+            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} 字</span>
           )}
           {/* #537：run 预算徽标「已用 / 上限」——只出设了 ceiling 的维；数据源是
               投影的 run 预算镜像（run/started 回显 + run/resumed 更新），文本经
@@ -268,7 +268,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             className="icon-btn"
             onClick={onOpenRecoveryList}
             aria-label="恢复列表"
-            title="恢复列表——查看上次运行留下的中断会话（只读）"
+            title="恢复列表——查看上次任务留下的中断会话（只读）"
           >
             <History size={16} />
           </button>
@@ -298,9 +298,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         <button
           className="icon-btn"
           onClick={onToggleInspector}
-          aria-label={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
+          aria-label={inspectorOpen ? '收起运行详情' : '展开运行详情'}
           aria-pressed={inspectorOpen}
-          title={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
+          title={inspectorOpen ? '收起运行详情' : '展开运行详情'}
         >
           <PanelRight size={16} className={inspectorOpen ? 'appbar-toggle-active' : undefined} />
         </button>

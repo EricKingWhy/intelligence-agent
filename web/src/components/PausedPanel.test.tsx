@@ -55,18 +55,18 @@ function render(p: RunPausedInfo, options: { draft?: string; resuming?: boolean 
 describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
   it('reason / consumed / limit / version / closeout / continuation 全部在场', () => {
     const html = render(paused());
-    expect(html).toContain('预算已用完，任务已暂停');
+    expect(html).toContain('预算已用完，任务暂停了');
     expect(html).toContain('run.max_agent_turns_total');
-    expect(html).toContain('budget_exhausted');
+    expect(html).toContain('预算到顶（某一项上限用完了）');
     // 读数按**命中的那一维**报（`#313`）：turns 命中时标题给出本轮读数，四维清单
     // 再把它逐维列出（与 CLI 的行文同一份事实，措辞按 Web 的排版）。
     expect(html).toContain('这次任务累计轮数到顶：已消耗 3');
     expect(html).toContain('上限 8');
     expect(html).toContain('剩余 5');
-    expect(html).toContain('agent_turns: 3 / limit 8（剩余 5） · 到顶');
+    expect(html).toContain('轮数: 3 / 上限 8（剩余 5） · 到顶');
     expect(html).toContain('预算版本 2');
     expect(html).toContain('结束方式 model');
-    expect(html).toContain('local fuse 500（deployment）');
+    expect(html).toContain('单次执行轮数上限 500（deployment）');
     expect(html).toContain('trace-xyz');
     expect(html).toContain('提高绝对 ceiling 后以同一 run_id 恢复');
     expect(html).toContain('本逻辑 run 已消耗 3 个 agent turn');
@@ -78,7 +78,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     // （它说的是"这一段计划里已完成的部分"），拿整段 HTML 做子串否定会把它误判成
     // "面板声称 run 已完成"。
     const head = html.slice(0, html.indexOf('pause-panel-facts'));
-    expect(head).toContain('预算已用完，任务已暂停');
+    expect(head).toContain('预算已用完，任务暂停了');
     expect(head).toContain('不是出错');
     expect(head).not.toContain('已完成');
     expect(head).not.toContain('失败：');
@@ -104,11 +104,11 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
         },
       }),
     );
-    expect(html).toContain('这次任务累计模型请求到顶（max_model_requests）：已消耗 4');
-    expect(html).toContain('model_requests: 4 / limit 4（剩余 0） · 到顶');
+    expect(html).toContain('这次任务累计模型请求到顶：已消耗 4');
+    expect(html).toContain('模型请求: 4 / 上限 4（剩余 0） · 到顶');
     // turns 维没到顶也要在清单里（事实完整），但它不是"卡住的那一维"。
-    expect(html).toContain('agent_turns: 3 / limit 8（剩余 5）');
-    expect(html).not.toContain('agent_turns: 3 / limit 8（剩余 5） · 到顶');
+    expect(html).toContain('轮数: 3 / 上限 8（剩余 5）');
+    expect(html).not.toContain('轮数: 3 / 上限 8（剩余 5） · 到顶');
     // 恢复输入抬的是 requests，且预校验按 requests 的消耗算（4 + 预留 1 + 1 = 6）。
     expect(html).toContain('上限（max_model_requests）');
     expect(html).toContain('至少 6');
@@ -136,7 +136,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
       }),
       { draft: '1.50' },
     );
-    expect(html).toContain('cost_usd: 1.25 / limit 1.25（剩余 0.00） · 到顶');
+    expect(html).toContain('成本: 1.25 / 上限 1.25（剩余 0.00） · 到顶');
     expect(html).toContain('上限（max_cost_usd）');
     // 计量维度不能说"至少 N"（判据是严格大于已消耗，连续域上没有最小值）——
     // 提示必须如实说规则，2.25 只是默认值。
@@ -212,14 +212,14 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(html).toContain('剩余 0');
     // 清单逐工具一行，两个 counter 分开写；配了没调过的工具也在——表已知时读数就是
     // **0 / 剩余 = ceiling**（后端 `BudgetConsumed.calls_for` 的口径：表在 ⇒ 缺名 = 0）。
-    expect(html).toContain('tool glob: consumed 1 calls / 3 attempts / limit 1（剩余 0） · 到顶');
-    expect(html).toContain('tool bash: consumed 0 calls / 0 attempts / limit 5（剩余 5）');
+    expect(html).toContain('工具 glob: 已用 1 次调用 / 3 次尝试 / 上限 1（剩余 0） · 到顶');
+    expect(html).toContain('工具 bash: 已用 0 次调用 / 0 次尝试 / 上限 5（剩余 5）');
     // 恢复输入抬的是工具配额（键路径 + 真实 argv 形状的 CLI 开关）。
     expect(html).toContain('上限（tool_call_limits.glob）');
     expect(html).toContain('抬的是 tool_call_limits.glob');
     expect(html).toContain('--run-tool-limit glob=N');
     // turns 维没到顶照旧列着（事实完整），但它不是卡住的那一维。
-    expect(html).toContain('agent_turns: 2 / limit 8（剩余 6）');
+    expect(html).toContain('轮数: 2 / 上限 8（剩余 6）');
   });
 
   it('命中 run 维时也照旧列出工具配额清单（它是事实，不是"卡住的那一维"）', () => {
@@ -241,7 +241,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
       }),
       { draft: '10' },
     );
-    expect(html).toContain('tool glob: consumed 2 calls / 2 attempts / limit unlimited（剩余 unavailable）');
+    expect(html).toContain('工具 glob: 已用 2 次调用 / 2 次尝试 / 上限 unlimited（剩余 unavailable）');
     expect(html).not.toContain(' · 到顶（run.tool_call_limits');
     // 恢复输入照旧抬 turns（工具配额只是清单里的事实）。
     expect(html).toContain('上限（max_agent_turns_total）');
@@ -249,7 +249,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
 
   it('没有任何工具配额事实时不渲染这一节（老暂停：多打一片 unavailable 是噪声）', () => {
     const html = render(paused());
-    expect(html).not.toContain('tool ');
+    expect(html).not.toContain('次调用');
     expect(html).not.toContain('tool_call_limits');
   });
 });
@@ -283,9 +283,9 @@ describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
     expect(html).toContain('截止时间 2026-09-26T04:10:00Z 已到');
     expect(html).toContain('到点后不再接受新的模型请求');
     expect(html).toContain('deadline_at');
-    expect(html).toContain('原因 deadline');
+    expect(html).toContain('原因：到了截止时间');
     // 不是"预算到顶"那句（两种原因对应不同的恢复动作）。
-    expect(html).not.toContain('预算已用完，任务已暂停');
+    expect(html).not.toContain('预算已用完');
   });
 
   it('恢复输入换成"新的绝对截止时刻"：文本输入 + 时刻示例 + 时刻形状的校验', () => {

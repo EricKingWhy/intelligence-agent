@@ -19,7 +19,7 @@ async function openIdleSession(page: Page): Promise<void> {
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
 }
 
-test('T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假话', async ({ page }) => {
+test('T6a：空数据 → 「还没有用量数据」，不出现 0% 假话', async ({ page }) => {
   await routeApi(page, {
     sessions: [],
     events: [],
@@ -37,7 +37,7 @@ test('T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假�
   // 文案只陈述本面板能知道的事实（后端没给数据）。**不得**出现
   // 「会话还没有任何运行」这类归因：no_data 与 run 数量无关——实测
   // 2a2d03f1（16 个 run / 3865 事件）同样落到这一支。
-  await expect(dialog).toContainText('后端未上报用量数据');
+  await expect(dialog).toContainText('还没有用量数据');
   await expect(dialog).not.toContainText('还没有任何运行');
   // 不出现 0% 假话（诚实约束）
   await expect(dialog).not.toContainText('0.0%');
@@ -175,7 +175,7 @@ test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不�
   await expect(dialog).toContainText('54,841 / 200,000');
   await expect(dialog).toContainText('27.4%');
   // 2) **不得**把 usage_only 说成 no_data——这两句对用户是不同的意思
-  await expect(dialog).not.toContainText('后端未上报用量数据');
+  await expect(dialog).not.toContainText('还没有用量数据');
   // 3) 分类如实缺席：只有一段「未分类」，不得冒出六桶中任何一桶
   await expect(dialog).toContainText('未分类');
   for (const label of ['消息', '系统提示词', '技能', '系统工具', 'MCP 工具']) {

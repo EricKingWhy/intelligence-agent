@@ -441,8 +441,8 @@ describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed
 
   it('原因与维度的标签各自成句：deadline 不是 budget_exhausted 的另一种写法', () => {
     const facts = pauseFacts(deadlinePaused());
-    expect(facts.reasonLabel).toContain('deadline');
-    expect(facts.dimensionLabel).toContain('deadline_at');
+    expect(facts.reasonLabel).toContain('截止时间');
+    expect(facts.dimensionLabel).toContain('截止时间');
     // 恢复提示点名"换一个未来时刻"，且给出的是 CLI 的**真实 argv**（开关 + 时刻）。
     const hint = resumeInputHint(facts);
     expect(hint).toContain('未来');

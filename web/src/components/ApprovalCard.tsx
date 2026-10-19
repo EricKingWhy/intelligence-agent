@@ -214,7 +214,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
         <p className="approval-invalid-note" role="status">
           {submitted
             ? '决策已提交——该审批随后失效，最终结果以事件流为准。'
-            : '该审批已失效——所在运行已结束或服务已重启，决策无法再提交。'}
+            : '该审批已失效——所在任务已结束或服务已重启，决策无法再提交。'}
         </p>
       )}
       {error && !invalid && (

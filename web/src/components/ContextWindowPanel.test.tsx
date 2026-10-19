@@ -92,7 +92,7 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     await renderPanel();
 
     expect(threshold('开始自动精简')).toBe('210,000');
-    expect(threshold('硬上限')).toBe('255,000');
+    expect(threshold('上限')).toBe('255,000');
     // 「恢复默认」的落点是 configured_default（256K），不是写死的 200K。
     expect(document.body.querySelector('.ctx-window-reset')?.textContent).toContain('恢复 256K');
   });

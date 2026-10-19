@@ -27,6 +27,17 @@ export const FACT_TYPE_DOTS: Record<string, string> = {
   evidence_ref: 'var(--cn-type-evidence-ref)',
 };
 
+/** 事实类型的中文短名（类型下拉与「约束继承」区共用）——单一 owner，
+ *  避免同一枚举在面板两处各自翻译后漂移。 */
+export const FACT_TYPE_LABELS: Record<string, string> = {
+  constraint: '要求',
+  user_goal: '目标',
+  authorization: '授权',
+  work_boundary: '工作边界',
+  failed_approach: '失败做法',
+  evidence_ref: '证据引用',
+};
+
 /** ISO 时间 → `MM-DD HH:mm`（本地时区）；坏值原样返回，不猜。 */
 export function formatFactTime(iso: string | null): string {
   if (!iso) return '';

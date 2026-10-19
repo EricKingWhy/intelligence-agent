@@ -89,7 +89,7 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
   // （service._pending_user_input_conflict_message），与这里的「回答」动词差是
   // 有意的口径差，不是漂移——改这句前先核对 #1223 的冻结结论。
   constraint: {
-    hint: '请先回答当前要求的确认问题，再发送新消息',
+    hint: '请先确认当前要求，再发送新消息',
     placeholder: '等待你确认当前要求…',
     permissionHint: '确认当前要求后再改档',
   },
@@ -101,9 +101,9 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
   // #1356：计划审批是**待答用户输入**（`resume_basis: 'user_input'`），不是工具
   // 审批——所以文案说「裁决计划」，与 `approval`（工具调用审批）明确区分。
   plan_approval: {
-    hint: '请先确认当前计划，再发送新消息',
-    placeholder: '等待你确认计划…',
-    permissionHint: '确认计划后再改档',
+    hint: '请先决定当前计划怎么处理，再发送新消息',
+    placeholder: '等待你决定计划…',
+    permissionHint: '决定计划后再改档',
   },
   approval: {
     hint: '等待审批决策后再继续',
@@ -118,9 +118,9 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
 type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user' | 'plan_approval'>;
 
 const QUEUE_HINT: Record<QueueLockReason, string> = {
-  constraint: '请先回答当前要求',
+  constraint: '请先确认当前要求',
   ask_user: '请先回答当前提问',
-  plan_approval: '请先确认当前计划',
+  plan_approval: '请先决定当前计划',
 };
 
 /** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
@@ -1157,7 +1157,7 @@ export const Composer = memo(function Composer({
                   aria-label="立即发送"
                   title={pendingUserInputLocked
                     ? pendingUserInputHint
-                    : '立即发送（注入当前运行）'}
+                    : '立即发送（注入当前任务）'}
                 >
                   <Zap size={13} />
                 </button>

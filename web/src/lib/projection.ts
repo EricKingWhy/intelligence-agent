@@ -465,7 +465,7 @@ function summarizeSuperseded(event: AgentEvent): string {
 function summarizeError(event: AgentEvent): string {
   const message = event.data.message;
   const detail = typeof message === 'string' ? message.trim() : '';
-  return detail ? `运行失败 · ${detail}` : '运行失败';
+  return detail ? `任务失败 · ${detail}` : '任务失败';
 }
 
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
@@ -1651,7 +1651,7 @@ function summarizeModelCompleted(event: AgentEvent): string {
   // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
   // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
   const tokens =
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null;
   if (model || tokens) {
     return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
@@ -1678,7 +1678,7 @@ function summarizeArtifactCreated(event: AgentEvent): string {
 
 function summarizeContextCompacted(event: AgentEvent): string {
   const d = event.data;
-  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
+  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} 字`;
 }
 
 function summarizeOperationReconcileRequired(event: AgentEvent): string {
@@ -1723,7 +1723,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');
@@ -1743,7 +1743,7 @@ function summarizeReasoningInterrupted(): string {
 
 function summarizeRunInterrupted(event: AgentEvent): string {
   const step = event.step_id;
-  return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
+  return step !== null && step !== undefined ? `第 ${step} 步中断` : '任务中断';
 }
 
 /** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
@@ -2461,7 +2461,7 @@ export function deriveRunFailedBeforePlan(events: AgentEvent[]): {
       const hint = e.data.hint;
       return {
         message:
-          typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
+          typeof message === 'string' && message ? message : '任务失败（原因见后端日志）',
         hint: typeof hint === 'string' ? hint : '',
       };
     }

@@ -76,13 +76,13 @@ test('恢复成功：提示明确可见，且入口消失后提示不跟着消�
       await route.fulfill({ status: 200, body: JSON.stringify(repairedEvents()), contentType: 'application/json' });
     },
   });
-  await expect(page.locator('.recover-hint')).toContainText('未配对');
+  await expect(page.locator('.recover-hint')).toContainText('没配上结果');
 
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
   await expect(done).toContainText('已恢复');
-  await expect(done).toContainText('回填 1 条工具结果');
+  await expect(done).toContainText('补回 1 条工具结果');
   // 关键：修好后事件已完整 → canRecover 转假、入口卸载，提示必须仍在场
   await expect(page.locator('.recover-btn')).toHaveCount(0);
   await expect(page.locator('.recover-hint')).toHaveCount(0);
@@ -227,5 +227,5 @@ test('中断在某个步骤：横幅仍报具体步号', async ({ page }) => {
   await page.goto('/');
   await page.locator('.session-item').first().click();
 
-  await expect(page.locator('.interrupt-banner')).toContainText('上次运行在第 1 步中断');
+  await expect(page.locator('.interrupt-banner')).toContainText('上次任务在第 1 步中断');
 });

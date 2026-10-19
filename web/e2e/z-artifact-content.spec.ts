@@ -106,7 +106,7 @@ async function expandToolToL2(page: import('@playwright/test').Page) {
 /** 打开 Inspector 的 Artifacts 面。 */
 async function openArtifactsTab(page: import('@playwright/test').Page) {
   const aside = page.locator('.step-detail');
-  await aside.getByRole('tab', { name: /Artifacts/ }).click();
+  await aside.getByRole('tab', { name: '产出文件' }).click();
 }
 
 test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点）', async ({ page }) => {

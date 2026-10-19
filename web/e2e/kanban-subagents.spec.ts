@@ -107,10 +107,10 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     // 全部来自 roster 的单一事实源，本票不复制映射。
     await expect(card.locator('.agent-row')).toHaveCount(2);
     await expect(card.getByText('完成')).toBeVisible();
-    await expect(card.getByText('12.8K tok · 估算')).toBeVisible();
+    await expect(card.getByText('12.8K 字 · 估算')).toBeVisible();
     await expect(card.getByText('耗时 1分30秒')).toBeVisible();
     await expect(card.getByText('失败')).toBeVisible();
-    await expect(card.getByText('500 tok')).toBeVisible();
+    await expect(card.getByText('500 字')).toBeVisible();
 
     // 折叠按钮不冒泡成"打开会话"：点完看板仍在。
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();

@@ -31,7 +31,7 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { FACT_TYPE_DOTS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
+import { FACT_TYPE_DOTS, FACT_TYPE_LABELS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
@@ -39,14 +39,9 @@ type StatusFilter = 'all' | 'active' | 'revoked';
 
 /** 类型下拉的 6 个具体类型（issue §四.3）；「全部类型」是另立的空值 option，
  *  两者合计 = 票面所称的「下拉 7 值」。 */
-const TYPE_OPTIONS: readonly string[] = [
-  'constraint',
-  'user_goal',
-  'authorization',
-  'work_boundary',
-  'failed_approach',
-  'evidence_ref',
-];
+const TYPE_OPTIONS: readonly { value: string; label: string }[] = Object.entries(
+  FACT_TYPE_LABELS,
+).map(([value, label]) => ({ value, label }));
 
 const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -56,7 +51,7 @@ const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
 
 /** 顶部优先级条文案（#1191 §五.1，逐字）。`overridden_by` 用等宽字体呈现，
  *  与票面用反引号标注代码标识符的意图一致。 */
-const PRIORITY_BAR = '同文要求的生效优先级：会话＞项目＞全局——不同内容全部生效，由 AI 决定。';
+const PRIORITY_BAR = '同样内容的要求，生效优先级：会话＞项目＞全局——不同内容全部生效，由 AI 决定。';
 const PRIORITY_BAR_TAIL = ' 被覆盖的条目不生效。撤销后仍保留历史记录。';
 
 /** 三组眉标（#1191 §五.2）。 */
@@ -294,17 +289,16 @@ export function ConstraintsView({
 
   return (
     <div className="cn-panel" data-testid="constraints-panel">
-      <div className="cn-eyebrow">CONSTRAINTS</div>
+      <div className="cn-eyebrow">我的要求</div>
       <h2 className="cn-title">我的要求</h2>
       <div className="cn-session-line">
         <span className="cn-livedot" aria-hidden="true" />
         当前会话 <code className="cn-session-id">{sessionId}</code>
-        <span>数据实时查询，页面不另存一份状态</span>
+        <span>当前生效的要求</span>
       </div>
 
       <div className="cn-prio" data-testid="constraints-priority">
         {PRIORITY_BAR}
-        <code>overridden_by</code>
         {PRIORITY_BAR_TAIL}
       </div>
 
@@ -332,8 +326,8 @@ export function ConstraintsView({
         >
           <option value="">全部类型</option>
           {TYPE_OPTIONS.map((type) => (
-            <option key={type} value={type}>
-              {type}
+            <option key={type.value} value={type.value}>
+              {type.label}
             </option>
           ))}
         </select>
@@ -341,7 +335,7 @@ export function ConstraintsView({
 
       <div className="cn-list">{body}</div>
 
-      <div className="cn-footer">撤销走 superseded 历史链 —— 来源记录保留，可审计、可追溯。</div>
+      <div className="cn-footer">撤销后会标记为「已被取代」并保留来源记录，可审计、可追溯。</div>
     </div>
   );
 }

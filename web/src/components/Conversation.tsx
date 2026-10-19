@@ -781,7 +781,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   }
                   onClick={() => onFork(turn.user_message_seq!)}
                 >
-                  另开一条
+                  从这里另开一条
                 </button>
               )}
             </span>
@@ -819,7 +819,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   </button>
                 )}
                 {model && turn.model.text && (
-                  <span className="model-tag" title="本次运行使用的模型">{model}</span>
+                  <span className="model-tag" title="本次任务使用的模型">{model}</span>
                 )}
               </div>
             )}

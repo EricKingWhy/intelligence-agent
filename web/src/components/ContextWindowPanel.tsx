@@ -152,7 +152,7 @@ export function ContextWindowPanel({
                 </span>
               </div>
               <div className="ctx-window-threshold">
-                <span>硬上限</span>
+                <span>上限</span>
                 <strong>{settings.thresholds.hard_guard.toLocaleString()}</strong>
                 <span className="ctx-window-threshold-pct">
                   {pct(settings.thresholds.hard_guard)}
@@ -161,7 +161,7 @@ export function ContextWindowPanel({
             </div>
 
             <p className="ctx-window-hint">
-              到了自动精简线会先精简早期对话；到了硬上限就停止，不再继续增加内容。
+              到了自动精简线会先精简早期对话；到了上限就停止，不再继续增加内容。
             </p>
 
             {/* 「恢复默认」的落点是后端给的 configured_default（部署默认挡位），

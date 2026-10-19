@@ -138,14 +138,14 @@ const plain = (html: string): string => html.replace(/<!-- -->/g, '');
 describe('ConstraintsView（纯展示，SSR）', () => {
   it('页眉与标题常驻（不因空/错而消失）', () => {
     const html = ssr();
-    expect(html).toContain('CONSTRAINTS');
+    expect(html).toContain('cn-eyebrow');
     expect(html).toContain('我的要求');
     expect(html).toContain('s-1');
   });
 
   it('#1191：顶部优先级条逐字在场', () => {
     const html = ssr();
-    expect(html).toContain('同文要求的生效优先级：会话＞项目＞全局');
+    expect(html).toContain('同样内容的要求，生效优先级：会话＞项目＞全局');
     expect(html).toContain('不同内容全部生效，由 AI 决定。');
     expect(html).toContain('被覆盖的条目不生效。撤销后仍保留历史记录。');
   });

@@ -209,7 +209,7 @@ export function WatchtowerPanel({
             <span>返回工作区</span>
           </button>
           <div>
-            <p className="watchtower-eyebrow">SERVE SCHEDULER · ONE SHOT</p>
+            <p className="watchtower-eyebrow">定时任务 · 单次执行</p>
             <h1>定时任务</h1>
             <p className="watchtower-subtitle">
               单次延时执行 · 到点新开会话 · 跑完待验证，由你亲自验收
@@ -432,7 +432,7 @@ function RuleGroup({
                       className="watchtower-session-link"
                       onClick={() => onOpenSession(execution.session_id!)}
                     >
-                      会话 · {execution.product_state === 'pending_verification' ? '待验证' : '查看运行'}
+                      会话 · {execution.product_state === 'pending_verification' ? '待验证' : '查看详情'}
                       <span className="mono">{execution.session_id.slice(0, 8)}</span>
                     </button>
                   )}
@@ -666,7 +666,7 @@ function CreateWatchtowerForm({
               <span>字数上限</span>
               <select id={tokensId} value={tokens} onChange={(event) => setTokens(event.target.value)}>
                 <option value="">默认</option>
-                {TOKEN_TIERS.map((tier) => <option key={tier} value={tier}>{tier.toLocaleString()}</option>)}
+                {TOKEN_TIERS.map((tier) => <option key={tier} value={tier}>{tier.toLocaleString()} 字</option>)}
               </select>
             </label>
             <label className="watchtower-field" htmlFor={durationId}>
@@ -712,7 +712,7 @@ function CreateWatchtowerForm({
         <section className="watchtower-consent-box" aria-labelledby="watchtower-consent-title">
           <h3 id="watchtower-consent-title">定时任务使用自动权限</h3>
           <ul>
-            <li>只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够时间继续时，定时任务才可以等待你的回答；如果设了时长预算，到点后会创建截止时间，等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，任务收到“你可能不在”的提示后继续；要求冲突超时后不会替你选择或授权，任务收到未解决提示并停止受影响的工作，等你处理。</li>
+            <li>只有任务和会话都没有设定截止时间，且系统确认这次任务还有足够的轮数 / 字数 / 时间预算继续时，定时任务才可以等待你的回答；设了时长预算会立刻开始倒计时，到点后等待请求会被拒绝。允许等待时，通用提问超时后不写入答案，任务收到“用户可能不在”的提示后继续；要求冲突超时后不会替你选择或授权，任务收到未解决提示并停止受影响的工作，等你处理。</li>
             <li>删除文件、发外部请求、git push 等危险操作会自动放行；此期间没有人逐次复核。</li>
             <li>仍使用你选定的 Sandbox。运行结果只进入「待验证」，不会自动验收或标记为通过。</li>
           </ul>
