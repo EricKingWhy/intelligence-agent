@@ -1139,6 +1139,18 @@ export function useSession() {
         const baselineDetailed = await sessionIdBaselineDetailed();
         const clientBaselineAtMs = Date.now();
         const started = startSession(payload);
+        // #1333：锚点必须钉在「本次 POST 发起时刻（服务端时钟）」，在这里
+        // 一次算好、下面认领时复用。⚠ 若挪到 `raceEarlyResponse`（1200ms 早
+        // 窗）之后才算（= 认领开始时刻），锚点会落到自己会话的创建时间之后，
+        // `first_event_time >= submittedAtServerMs` 每轮滤掉自己的会话 → 正常
+        // 提交 100% 走 20s 认领超时（Correctness P0 实锤）。
+        // serverNowMs = 基线响应 Date 头的服务端时刻，加上基线返回到 POST 发
+        // 起之间的客户端毫秒增量（秒级窗口内时钟漂移可忽略）；拿不到 Date 头 →
+        // 降级用客户端时刻（本机部署两者同钟）。
+        const submittedAtServerMs =
+          baselineDetailed?.serverNowMs != null
+            ? baselineDetailed.serverNowMs + (Date.now() - clientBaselineAtMs)
+            : Date.now();
         const baseline = baselineDetailed?.ids ?? null;
         if (baseline === null) {
           // 会话列表读不到（降级态）：「基线 + 差分」认领新会话的前提就没了。
@@ -1187,18 +1199,14 @@ export function useSession() {
         });
         let sid: string;
         try {
-          // #1333：把「本次 POST 发起时刻（服务端时钟）」交给认领，
-          // 启用 first_event_time 过滤 + 多候选 fail-closed。
-          // serverNowMs = 基线响应 Date 头的服务端时刻，加上基线返回到
-          // POST 发起之间的客户端毫秒增量（时钟漂移在秒级窗口内可忽略）。
-          // 拿不到 Date 头 → 降级用客户端时刻（本机部署两者同钟）。
-          const submittedAtServerMs =
-            baselineDetailed?.serverNowMs != null
-              ? baselineDetailed.serverNowMs + (Date.now() - clientBaselineAtMs)
-              : Date.now();
+          // #1333：把上面在 POST 发起时刻钉死的锚点交给认领，启用
+          // first_event_time 过滤 + 多候选 fail-closed。
           sid = await discoverNewSessionId(baseline, { submittedAtServerMs });
         } catch (e) {
-          throw late.failure ?? e; // POST 的真实失败原因优先于「认领超时」
+          // POST 的迟到失败原因优先于「认领超时」/「认领歧义」：迟到失败
+          // （如 401 / 5xx / 断网）是比认领结论更硬的事实（#1148 既有设计，
+          // #1333 C-P3-1 明确为意图如此，单测已 pin 住该优先级）。
+          throw late.failure ?? e;
         }
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
         /* #1148：**认领成功之后** POST 才失败的话，也必须把原文交回用户。
@@ -1245,15 +1253,17 @@ export function useSession() {
         // 认出新会话」，而 POST 已经发出、后端通常已经落盘（票面实测：页面报
         // 失败时会话其实已在跑）。把它渲染成「提交失败」会让用户重试，从而
         // 造出第二个会话。这里改用可行动提示，并保留输入框原文（返回非 null）。
-        const message =
-          e instanceof SessionClaimTimeoutError
-            ? `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`
-            : e instanceof SessionClaimAmbiguousError
-              ? // #1333：歧义也不是提交失败（会话很可能已创建，只是无法确认
-                // 是哪一条）。渲染成「提交失败」会诱导用户重试、造出重复会话
-                //（#1321 AC4 同一教训）。文案里保留可识别的「无法确认」。
-                `提交可能已成功，但${e.message}。请刷新页面后从左侧会话列表找到本次提交的会话。`
-              : `提交失败：${(e as Error).message}`;
+        let message: string;
+        if (e instanceof SessionClaimTimeoutError) {
+          message = `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`;
+        } else if (e instanceof SessionClaimAmbiguousError) {
+          // #1333：歧义也不是提交失败（会话很可能已创建，只是无法确认
+          // 是哪一条）。渲染成「提交失败」会诱导用户重试、造出重复会话
+          //（#1321 AC4 同一教训）。文案里保留可识别的「无法确认」。
+          message = `提交可能已成功，但${e.message}。请刷新页面后从左侧会话列表找到本次提交的会话。`;
+        } else {
+          message = `提交失败：${(e as Error).message}`;
+        }
         if (!opts?.ownError) setError(message);
         return message;
       }

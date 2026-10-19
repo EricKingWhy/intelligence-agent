@@ -401,7 +401,10 @@ export class SessionClaimAmbiguousError extends Error {
   readonly candidateIds: string[];
 
   constructor(candidateIds: string[]) {
-    super(`无法确认新建的会话：本轮发现 ${candidateIds.length} 条候选（${candidateIds.join('、')}），未盲选`);
+    // ⚠ message 是给用户看的（Standards P2-1）：只留"无法确认"与候选条数，
+    // 不带内部 session id（`other-0` 之类用户看不懂也用不上）——id 留在
+    // `candidateIds` 供诊断/日志。也不写"未盲选"这类实现术语。
+    super(`无法确认新建的会话（本轮发现 ${candidateIds.length} 条候选）`);
     this.name = 'SessionClaimAmbiguousError';
     this.candidateIds = candidateIds;
   }

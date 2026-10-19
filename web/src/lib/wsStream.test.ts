@@ -676,7 +676,9 @@ describe('sessionExists — 404 语义的存在性判据', () => {
 
 /** #1333：会话认领差分误认——`first_event_time` 过滤 + 多候选 fail-closed。
  *
- * 红钉场景（票面复现思路的压缩版）：`GET /api/sessions` 每次往返有延迟、
+ * 8 例新测试（其中 3 例为修前红的真红钉：迟到会话被误认 / 歧义未抛 /
+ * 无时间行被认领；其余 5 例为边界语义、回归守卫与新功能用例）。
+ * 场景为票面复现思路的压缩版：`GET /api/sessions` 每次往返有延迟、
  * 新会话延迟可见；在基线读取之后、认领轮询期间，让上一轮迟到的会话
  *（`other-0`，创建于本次 POST 之前）先于 `fresh-0` 可见。
  * 旧实现（纯集合差分）会返回 `other-0`；修复后必须过滤掉它、认领 `fresh-0`。 */
@@ -735,10 +737,11 @@ describe('discoverNewSessionId #1333 时间过滤与歧义 fail-closed', () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(SessionClaimAmbiguousError);
-    // 票面要求"可识别的无法确认"：文案 + 候选 id 都在
+    // 票面要求"可识别的无法确认"：文案是用户语言——带"无法确认"但不含内部
+    // session id（Standards P2-1：id 只留给 candidateIds 诊断字段）
     expect((caught as Error).message).toContain('无法确认');
-    expect((caught as Error).message).toContain('other-0');
-    expect((caught as Error).message).toContain('fresh-0');
+    expect((caught as Error).message).not.toContain('other-0');
+    expect((caught as Error).message).not.toContain('fresh-0');
     expect((caught as SessionClaimAmbiguousError).candidateIds).toEqual(
       expect.arrayContaining(['other-0', 'fresh-0']),
     );
@@ -769,6 +772,28 @@ describe('discoverNewSessionId #1333 时间过滤与歧义 fail-closed', () => {
         new Response(JSON.stringify([{ session_id: 'mystery' }]), { status: 200 }),
       ),
     );
+    await expect(
+      discoverNewSessionId(new Set(['base-1']), {
+        timeoutMs: 400,
+        baseDelayMs: 20,
+        maxDelayMs: 60,
+        random: () => 0,
+        submittedAtServerMs: T0,
+      }),
+    ).rejects.toBeInstanceOf(SessionClaimTimeoutError);
+  });
+
+  it('first_event_time 存在但不可解析 → 不认领（fail-closed，等超时）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([{ session_id: 'garbage-time', first_event_time: '不是个时间' }]),
+          { status: 200 },
+        ),
+      ),
+    );
+    // Date.parse → NaN → Number.isFinite 守卫拦下；不可解析 ≠ 可认领
     await expect(
       discoverNewSessionId(new Set(['base-1']), {
         timeoutMs: 400,
@@ -817,6 +842,37 @@ describe('sessionIdBaselineDetailed（#1333 服务端时钟锚点）', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify([{ session_id: 'a' }]), { status: 200 })),
+    );
+    const d = await sessionIdBaselineDetailed();
+    expect(d?.ids).toEqual(new Set(['a']));
+    expect(d?.serverNowMs).toBeNull();
+  });
+
+  it('Date 头非整秒（HTTP-date 只有秒精度，截断）→ serverNowMs 取整秒', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify([{ session_id: 'a' }]), {
+          status: 200,
+          headers: { Date: new Date(T0 + 999).toUTCString() },
+        }),
+      ),
+    );
+    const d = await sessionIdBaselineDetailed();
+    // 秒截断使锚点低估 0~999ms：方向是放宽（fail-open 有界），不收紧，
+    // 对「认领到自己的会话」是安全方向（Correctness P3-3）
+    expect(d?.serverNowMs).toBe(T0);
+  });
+
+  it('Date 头存在但不可解析 → serverNowMs 为 null（调用方降级）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify([{ session_id: 'a' }]), {
+          status: 200,
+          headers: { Date: 'not-a-valid-http-date' },
+        }),
+      ),
     );
     const d = await sessionIdBaselineDetailed();
     expect(d?.ids).toEqual(new Set(['a']));
