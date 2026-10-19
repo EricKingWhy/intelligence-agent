@@ -86,12 +86,20 @@ def _start(
 
 @pytest.fixture(autouse=True)
 def _isolate_goal_activation():
-    """activation / 一轮额度是进程级 ClassVar；测试之间必须互不串味。"""
+    """activation / 一轮额度是进程级 ClassVar；测试之间必须互不串味。
+
+    与 `tests/web/test_goal_api.py` 同款 save/restore：用例中途抛错也不会把
+    半截状态留给下一个用例（`.clear()` 在 teardown 才补的话，异常路径就漏了）。
+    """
+    armed = set(SessionService._goal_armed)
+    allowance = set(SessionService._goal_resume_round_allowance)
     SessionService._goal_armed.clear()
     SessionService._goal_resume_round_allowance.clear()
     yield
     SessionService._goal_armed.clear()
     SessionService._goal_resume_round_allowance.clear()
+    SessionService._goal_armed.update(armed)
+    SessionService._goal_resume_round_allowance.update(allowance)
 
 
 # ── 纯函数 ───────────────────────────────────────────────────────────

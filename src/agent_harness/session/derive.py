@@ -324,14 +324,19 @@ def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
 _USER_GOAL_VALUE_MAX_CHARS = 2000
 
 
-def _bounded_goal_value(content: str, source_event_id: str) -> str:
+def _bounded_goal_value(content: str, source_event_id: str | None) -> str:
+    """超长目标截到 2000 字符并给回读指针。
+
+    没有 ``source_event_id``（目标回落到 legacy ``task_text``，或 goal 事件本身）时
+    **不印空指针**——``source_event_id=`` 指向空串会让模型去回读一个不存在的 id。
+    """
     if not isinstance(content, str) or len(content) <= _USER_GOAL_VALUE_MAX_CHARS:
         return content
+    pointer = f"，见来源事件 source_event_id={source_event_id}" if source_event_id else ""
     return (
         content[:_USER_GOAL_VALUE_MAX_CHARS]
         + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
-        + f"全文共{len(content)}字符，见来源事件 "
-        + f"source_event_id={source_event_id}］"
+        + f"全文共{len(content)}字符{pointer}］"
     )
 
 
@@ -1675,6 +1680,9 @@ class UndeliveredInput:
     attachments: list[dict[str, Any]] | None = None
     #: #1359 阶段 3：`goal` = 自动续跑轮次（`rounds_started` 只统计它）。
     origin: str | None = None
+    #: #1359 阶段 3：goal 轮次渲染时所依据的目标版本（投递口据此判过期）。
+    goal_id: str | None = None
+    revision: int | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1725,6 +1733,8 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     protected_facts=annotations,
                     attachments=_normalized_attachments(event),
                     origin=_normalized_origin(event),
+                    goal_id=_normalized_str(event, "goal_id"),
+                    revision=_normalized_int(event, "revision"),
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1764,8 +1774,21 @@ def _normalized_attachments(event: SessionEvent) -> list[dict[str, Any]] | None:
 
 def _normalized_origin(event: SessionEvent) -> str | None:
     """事件 data 的 ``origin``（#1359 阶段 3）；非空字符串之外一律视为未标注。"""
-    raw = event.data.get("origin")
+    return _normalized_str(event, "origin")
+
+
+def _normalized_str(event: SessionEvent, key: str) -> str | None:
+    """事件 data 里的非空字符串字段；其余形状一律视为缺省。"""
+    raw = event.data.get(key)
     return raw if isinstance(raw, str) and raw else None
+
+
+def _normalized_int(event: SessionEvent, key: str) -> int | None:
+    """事件 data 里的整数字段（``bool`` 不算）；其余形状视为缺省。"""
+    raw = event.data.get(key)
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        return None
+    return raw
 
 
 def _undelivered_fact_annotations(

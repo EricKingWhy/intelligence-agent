@@ -1138,7 +1138,7 @@ def render_progress_brief_lines(doc: ProgressDocument) -> list[str]:
     （``_bounded_goal_value``）；progress.md 正文由 ``render_progress_markdown``
     负责，仍是全文。不变量「完整保存 ≠ 完整注入」。"""
     goal = (
-        _bounded_goal_value(doc.goal, doc.goal_source_event_id or "")
+        _bounded_goal_value(doc.goal, doc.goal_source_event_id)
         if doc.goal else None
     )
     lines = [f"原目标：{_v(goal)}" if goal else f"原目标：{_MISSING}"]

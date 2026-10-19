@@ -152,9 +152,11 @@ export function goalCommandHint(g: GoalStatePayload): string {
   return '/goal edit <objective>，/goal pause，/goal clear';
 }
 
-/** 409 的可操作文案（AC3：把 revision 冲突翻成"当前是 rN"）。 */
+/** 409 的可操作文案（AC3：把 revision 冲突翻成"当前是 rN"）。
+ *  slash 界面没有传 `expected_revision` 的语法——`edit` 自己会先读当前 revision，
+ *  所以这里只说"重试"，不教用户输入一个他打不出来的字段。 */
 function goalConflictMessage(e: SessionError): string {
-  return `${e.message}。可先 /goal 查看当前 revision，再带 expected_revision 重试`;
+  return `${e.message}。slash 命令会自动重读当前 revision，重试即可；走 REST 的调用方需带 expected_revision`;
 }
 
 /** AC6 的"进入访谈"：把缺失段落补成草稿写回输入框。
@@ -168,6 +170,18 @@ export function interviewDraft(objective: string): string {
   return `/goal edit ${body}`;
 }
 
+/** AC6 的落点：任何拿到快照的路径（show / create / edit）都走同一条判定。
+ *  只在 `defined && needs_interview && objective` 时写回草稿——已经写全的目标不打断用户。 */
+function enterInterviewIfNeeded(
+  snapshot: Pick<GoalSnapshot, 'goal'>,
+  ctx: SlashCommandContext,
+): void {
+  const g = snapshot.goal;
+  if (g.defined && g.needs_interview && g.objective) {
+    ctx.prefillInput(interviewDraft(g.objective));
+  }
+}
+
 async function runGoal(args: string | undefined, ctx: SlashCommandContext): Promise<void> {
   const command = parseGoalCommand(args);
   try {
@@ -178,35 +192,35 @@ async function runGoal(args: string | undefined, ctx: SlashCommandContext): Prom
         ctx.reportInfo(formatGoalSnapshot(snapshot));
         // AC6：`needs_interview: true` 不只是提示——把补全草稿写回输入框，
         // 用户填空后 Enter 即 `/goal edit`（"进入访谈"的最小实现）。
-        const g = snapshot.goal;
-        if (g.defined && g.needs_interview && g.objective) {
-          ctx.prefillInput(interviewDraft(g.objective));
-        }
+        enterInterviewIfNeeded(snapshot, ctx);
         return;
       }
       case 'invalid-edit':
         ctx.reportError('用法：/goal edit <objective>（edit 后必须跟目标文本）');
         return;
-      case 'create':
-        ctx.reportInfo(
-          formatGoalSnapshot(
-            await postGoalCommand(ctx.sessionId, { operation: 'create', objective: command.objective }),
-          ),
-        );
+      case 'create': {
+        const snapshot = await postGoalCommand(ctx.sessionId, {
+          operation: 'create',
+          objective: command.objective,
+        });
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        // AC6 的创建路径：刚 create 的目标若缺可测判据，同样把用户带进访谈，
+        // 否则用户得再输一次裸 `/goal` 才被带走。
+        enterInterviewIfNeeded(snapshot, ctx);
         return;
-      case 'edit':
+      }
+      case 'edit': {
         // AC3：edit 是 CAS 写——先读当前 revision 再带 expected_revision，
         // 否则并发编辑变成后写覆盖，而 409 文案又让用户去「查看 revision」。
-        ctx.reportInfo(
-          formatGoalSnapshot(
-            await postGoalCommand(ctx.sessionId, {
-              operation: 'edit',
-              objective: command.objective,
-              expected_revision: (await getGoalState(ctx.sessionId)).goal.revision,
-            }),
-          ),
-        );
+        const snapshot = await postGoalCommand(ctx.sessionId, {
+          operation: 'edit',
+          objective: command.objective,
+          expected_revision: (await getGoalState(ctx.sessionId)).goal.revision,
+        });
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        enterInterviewIfNeeded(snapshot, ctx);
         return;
+      }
       case 'pause':
       case 'resume':
       case 'clear':

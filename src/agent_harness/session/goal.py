@@ -1,9 +1,11 @@
 """会话级**持久目标对象**（#1359 阶段 1，抄 dsh durable goal）。
 
-与 :mod:`agent_harness.session.workflow` 同形三件套：一个投影、一个写入口、
-一份 payload 契约。区别只在状态机比工作流档大——目标有 id / revision / phase /
-轮次上限，且每次变更携带**变更后的完整快照**（dsh `goal/change` 的做法）：
-重放只需取最后一条合法事件，不做增量重算，坏事件也只损失它自己。
+与 :mod:`agent_harness.session.workflow` 同形：一个投影、一个写入口、一份 payload
+契约。区别只在状态机比工作流档大——目标有 id / revision / phase / 轮次上限，且每次
+变更携带**变更后的完整快照**（dsh `goal/change` 的做法）：重放只需取最后一条合法
+事件，不做增量重算，坏事件也只损失它自己。阶段 3 在本模块补上轮次驱动侧：提示词
+渲染（``render_goal_round_prompt``）、轮次 digest 与无进展判据（``goal_round_digests``
+/ ``goal_rounds_stalled``）——它们都是纯派生物，不写事件流。
 
 - ``effective_goal`` —— 倒序扫 ``goal/changed``，最后一次胜；坏 payload 记
   warning 后继续往下找（与 ``effective_workflow_mode`` 的 warning-continue
@@ -139,9 +141,9 @@ class GoalState:
 
 @dataclass(frozen=True)
 class GoalOutcome:
-    """写入口的统一结果。``error_kind``：``shape`` = 载荷/转移非法（422）；
-    ``conflict`` = revision 对不上（409）——与 ``TaskOutcome`` 同一口径
-    （spec 11 §6.1：形状非法 422、状态对不上 409）。"""
+    """写入口的统一结果。``error_kind``：``shape`` = 载荷非法（422）；
+    ``conflict`` = 状态转移非法或 revision 对不上（409）——与 ``TaskOutcome``
+    同一口径（spec 11 §6.1：形状非法 422、状态/CAS 对不上 409）。"""
 
     ok: bool
     reason: str | None
@@ -236,7 +238,7 @@ GOAL_TOOL_AVAILABLE = False
 
 
 def render_goal_round_prompt(state: GoalState, round_number: int) -> str:
-    """一轮自动续跑的模型可见输入（抄 dsh ``prompt.ts:15-27`` @5badb150 + omp 防漂移两句）。
+    """一轮自动续跑的模型可见输入（抄 dsh ``prompt.ts:12-26`` @5badb150 + omp 防漂移两句）。
 
     只渲染**当前激活 revision 的快照**：目标文本以 JSON 字符串嵌入，避免 objective
     里的换行 / 引号破坏外层结构。``round_number`` 是即将开始的轮次（1-based）。

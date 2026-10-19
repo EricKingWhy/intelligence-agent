@@ -461,10 +461,13 @@ def _last_user_message_is_goal_round(events: list[SessionEvent]) -> bool:
 #: #1359 阶段 3：终态驱动的 per-session 串行化。快速收敛的自动轮次可能在
 #: ``deliver_next_undelivered`` 还没记完 ``round_started`` / ``queue/consumed``
 #: 前就再次终态，嵌套的 ``on_run_terminal`` 会读到"同一轮仍待投递"而漏续跑。
-#: 锁只在「判定 → 入队 → 投递/记账」这段持有，不跨 run 生命周期；等 run_id
-#: 不会反向依赖本锁（run_id 在 begin_run 早期就落盘），因此无死锁。
+#: 锁覆盖「判定 → 入队 → 投递」，其中投递会等到 ``run_id``（``wait_run_id``，5s
+#: 上限）——即持锁跨了 run 启动等待，刻意如此：``round_started`` 的记账必须排在
+#: 同一 session 的下一次判定之前。等 run_id 不会反向依赖本锁（run_id 在
+#: ``begin_run`` 早期就落盘），因此无死锁。
 #: 与 ``SessionService._compact_in_flight`` 同一条寿命理由：Service 可能是每
-#: 请求新建的，状态必须进程级共享。
+#: 请求新建的，状态必须进程级共享。每 session 一把、从不回收——量级等于活跃会话
+#: 数，除非单进程跑上万会话否则不值得加清理。
 _TERMINAL_DRIVE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -4089,9 +4092,21 @@ class SessionService:
             # 仍会把它送出去跑一轮——AC2「pause 后不再续跑」在这个窗口不成立。
             # 判据放在**唯一投递口**：所有来源都路由到这里，比在每个改相位的地方
             # 各写一份回收逻辑更小也更难漏。回收后重新选队首（普通输入照常投递）。
+            #
+            # 只复核相位不够：`edit`（以及 `clear` + `create`）不改 active 相位却在
+            # 窗口里换了目标，旧提示词会带着**上一版 objective** 跑一轮，之后
+            # `round_started` 还记到新目标头上。入队时把渲染所依据的
+            # `goal_id`/`revision` 写进排队项，投递前逐字比对，不一致即过期。
             goal_now = effective_goal(events)
-            if not (goal_now.defined and goal_now.phase is GoalPhase.ACTIVE):
+            stale = (nxt.goal_id, nxt.revision) != (goal_now.goal_id, goal_now.revision)
+            live = goal_now.defined and goal_now.phase is GoalPhase.ACTIVE
+            if not live or stale:
                 await self.cancel_queue(session_id=session_id, queue_id=nxt.input_id)
+                if live:
+                    # 目标还 active，只是版本变了：丢掉这条就再也没有 run 终态来
+                    # 续跑（静默停摆）。按当前版本重新入队一轮，代价是那一轮的
+                    # objective 已是新版——正是 edit 的语义。
+                    await self._maybe_queue_goal_round(session_id)
                 # 递归重选队首：普通输入排在后面时不该被 goal 轮次的回收连带跳过。
                 # 每层都消费掉一条 goal 项，队列有限 ⇒ 必然收敛。
                 return await self.deliver_next_undelivered(
@@ -4182,7 +4197,13 @@ class SessionService:
             refutes_event_id=None,
             protected_facts=None,
             remember_as_procedural_rule=False,
-            user_input_metadata={"origin": GOAL_ORIGIN},
+            # `goal_id`/`revision` = 本条提示词渲染所依据的目标版本；投递口据此
+            # 判定排队期间目标是否已被 edit / clear+create 换掉（过期轮次回收）。
+            user_input_metadata={
+                "origin": GOAL_ORIGIN,
+                "goal_id": state.goal_id,
+                "revision": state.revision,
+            },
         )
 
     async def _block_goal_for_approval(
