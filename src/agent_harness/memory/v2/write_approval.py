@@ -55,6 +55,14 @@ logger = logging.getLogger(__name__)
 #: 上游 ``CONFIG_KEY``；本仓落在 `memory_v2_settings.write_approval`。
 CONFIG_KEY = "write_approval"
 
+#: ``status`` 的取值。approved/rejected 是**终态但保留行**——审计与
+#: 「拒绝时保留 record」都要求行还在。``AWAITING`` 是 approve 的**抢占中间态**：
+#: 先 CAS 抢到它再重放，并发 double-approve 才只有一个人真的落盘。
+PENDING = "pending"
+AWAITING = "approving"
+APPROVED = "approved"
+REJECTED = "rejected"
+
 
 def _identity(trusted: TrustedMemoryIdentity) -> str:
     """可信身份的规范化键。审批只对**同一个**身份可见，项目维度也参与。"""
@@ -64,11 +72,6 @@ def _identity(trusted: TrustedMemoryIdentity) -> str:
         sort_keys=True, separators=(",", ":"),
     )
 
-#: ``status`` 的三个取值。approved/rejected 是**终态但保留行**——审计与
-#: 「拒绝时保留 record」都要求行还在。
-PENDING = "pending"
-APPROVED = "approved"
-REJECTED = "rejected"
 
 
 @dataclass(frozen=True)
@@ -112,14 +115,6 @@ def _staged_message() -> str:
     )
 
 
-def _stale_message(entry: str) -> str:
-    return (
-        f"Entry changed since it was staged, so this write was not applied: '{entry}' is no "
-        f"longer in memory as reviewed. Recreate the change against the current entry or "
-        f"reject it; the pending record has been preserved."
-    )
-
-
 @dataclass(frozen=True)
 class StagedWrite:
     id: str
@@ -148,6 +143,7 @@ class StagedWriteStore:
 
     # ------------------------------------------------------------------ stage
 
+    @retry_on_busy
     async def stage(
         self, payload: dict[str, Any], pins: list[str | None] | None,
         trusted: TrustedMemoryIdentity,
@@ -223,42 +219,84 @@ class StagedWriteStore:
     async def approve(
         self, staged_id: str, trusted: TrustedMemoryIdentity,
     ) -> tuple[GateDecision, dict[str, Any] | None]:
-        """重放一条待审写入。成功 → 落盘 + 行转 approved；pin 失效 → blocked 且**保留**行。"""
+        """重放一条待审写入。成功 → 落盘 + 行转 approved；pin 失效 → blocked 且**保留**行。
+
+        并发 double-approve：读状态与落盘之间必须先 **CAS PENDING→AWAITING** 抢到这条
+        记录，抢不到（另一次 approve/reject 已动过它）直接 blocked。markdown 写成功后
+        才能转 APPROVED；重放失败把状态放回 PENDING——record 保留，用户还能重试或 reject。
+        """
         staged = await self.get(staged_id, trusted)
         if staged is None:
             return GateDecision(blocked=True, message="No such pending memory write."), None
         if staged.status != PENDING:
+            if staged.status == AWAITING:
+                return GateDecision(
+                    blocked=True,
+                    message="This memory write is already being processed by another approval.",
+                ), None
             return GateDecision(
                 blocked=True, message=f"This memory write is already {staged.status}."), None
-        response = await self._replay(staged)
+        if not await self._set_status(staged_id, AWAITING, expected=PENDING):
+            return GateDecision(
+                blocked=True,
+                message="This memory write is already being processed by another approval.",
+            ), None
+        try:
+            response = await self._replay(staged)
+        except BaseException:
+            await self._set_status(staged_id, PENDING, expected=AWAITING)
+            raise
         if response is None:
+            await self._set_status(staged_id, PENDING, expected=AWAITING)
             return GateDecision(
                 blocked=True,
                 message="Pending record has no pinned entry; refusing to re-resolve old_text.",
             ), None
         if not response.get("success"):
             # 保留 record：用户还能重新创建或明确 reject（票面 M6 第 2 条）。
-            return GateDecision(blocked=True, message=str(response.get("error") or "Replay failed.")), None
-        await self._set_status(staged_id, APPROVED)
+            await self._set_status(staged_id, PENDING, expected=AWAITING)
+            return GateDecision(
+                blocked=True, message=str(response.get("error") or "Replay failed.")), None
+        await self._set_status(staged_id, APPROVED, expected=AWAITING)
         return GateDecision(allow=True), response
 
+    @retry_on_busy
     async def reject(
         self, staged_id: str, trusted: TrustedMemoryIdentity,
     ) -> GateDecision:
+        """CAS PENDING→REJECTED；与 approve 抢同一条记录，谁先到谁赢。"""
         staged = await self.get(staged_id, trusted)
         if staged is None:
             return GateDecision(blocked=True, message="No such pending memory write.")
         if staged.status != PENDING:
+            if staged.status == AWAITING:
+                return GateDecision(
+                    blocked=True,
+                    message="This memory write is already being processed by another approval.",
+                )
             return GateDecision(
                 blocked=True, message=f"This memory write is already {staged.status}.")
-        await self._set_status(staged_id, REJECTED)
+        if not await self._set_status(staged_id, REJECTED, expected=PENDING):
+            return GateDecision(
+                blocked=True,
+                message="This memory write is already being processed by another approval.",
+            )
         return GateDecision(allow=True, message="Memory write rejected.")
 
-    async def _set_status(self, staged_id: str, status: str) -> None:
+    @retry_on_busy
+    async def _set_status(
+        self, staged_id: str, status: str, *, expected: str | None = None,
+    ) -> bool:
+        """状态转移；给了 ``expected`` 就是一次 CAS，返回是否抢到。"""
+        sql = "UPDATE memory_v2_staged SET status=? WHERE id=?"
+        parameters: tuple[Any, ...] = (status, staged_id)
+        if expected is not None:
+            sql += " AND status=?"
+            parameters += (expected,)
         async with connect(self.database_path) as connection:
-            await connection.execute(
-                "UPDATE memory_v2_staged SET status=? WHERE id=?", (status, staged_id))
+            cursor = await connection.execute(sql, parameters)
             await connection.commit()
+            return cursor.rowcount == 1
 
     async def _replay(self, staged: StagedWrite) -> dict[str, Any] | None:
         """按 stage 时的形状重放；``None`` = 缺 pin 的 legacy record（拒绝）。"""
@@ -283,9 +321,16 @@ class StagedWriteStore:
             if any(op.get("action") in ("replace", "remove") for op in operations):
                 return None
             return await self.markdown.apply_batch(target, operations)
+        if len(pins) != len(operations):
+            # 截断重放会让后面的操作静默套用别人的 pin：这条 record 只能拒绝。
+            logger.warning("staged batch pin count mismatch (%d != %d)", len(pins), len(operations))
+            return {
+                "success": False,
+                "error": "Pending record's pinned entries do not match its operations.",
+            }
         pinned_ops = [
             {**op, **({"matched_entry": pin} if pin is not None else {})}
-            for op, pin in zip(operations, pins, strict=False)
+            for op, pin in zip(operations, pins, strict=True)
         ]
         return await self.markdown.apply_batch(target, pinned_ops)
 

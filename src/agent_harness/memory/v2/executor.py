@@ -476,6 +476,11 @@ class MemoryRecordWriter(Protocol):
     async def invalidate_in(self, connection: aiosqlite.Connection, memory_id: str,
                             trusted: TrustedMemoryIdentity) -> MemoryRecordV2: ...
 
+    async def mirror_committed(
+        self, records: Sequence[MemoryRecordV2], *,
+        invalidated: Sequence[MemoryRecordV2] = (),
+    ) -> None: ...
+
 
 class MemorySearcher(Protocol):
     """`capability.MemoryV2Capability` 的检索面（执行器只用到这一个方法）。"""
@@ -1218,17 +1223,16 @@ class MemoryJobExecutor:
         if committed is None:
             return await self._lost(job.job_id)
         # #1353 §2：markdown 权威面在 SQLite 事务**提交之后**补落（它无法参与那笔提交）。
-        # 撤回与新增要分开：`invalidate_in` 返回的记录内容必须从文件里删掉，不能 add。
-        mirror = getattr(self._writer, "mirror_committed", None)
-        if mirror is not None:
-            invalidated = tuple(
+        # 需要从文件里移除的是**所有非 ACTIVE 版本**：`invalidate_in` 给 INVALIDATED，
+        # `update_in` 给 SUPERSEDED（旧版本）。漏掉后者，每次后台 update 都在权威面留
+        # 一条被取代的僵尸事实，最终吃光字符预算。
+        await self._writer.mirror_committed(
+            tuple(record for record in committed if record.status is MemoryStatus.ACTIVE),
+            invalidated=tuple(
                 record for record in committed
-                if record.status is MemoryStatus.INVALIDATED
-            )
-            await mirror(
-                tuple(record for record in committed if record.status is MemoryStatus.ACTIVE),
-                invalidated=invalidated,
-            )
+                if record.status in (MemoryStatus.INVALIDATED, MemoryStatus.SUPERSEDED)
+            ),
+        )
         state.phase = MemoryJobStage.COMPLETED.value
         self._observe("apply", {
             "job_id": job.job_id, "session_id": job.session_id,
