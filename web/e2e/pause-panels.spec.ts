@@ -149,10 +149,13 @@ test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /res
 });
 
 test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与面板保留、重读日志', async ({ page }) => {
+  await page.clock.install();
+
   const frames = pausedFrames();
   let eventsCalls = 0;
   let resumeBody: Record<string, unknown> | null = null;
   let resumeUrl = '';
+  let resumeMethod = '';
 
   await routeApi(page, { sessions: [ROW] });
   // 重读 durable log 的观测点：409 后 useSession 必须 `selectSession` 同一会话，
@@ -164,6 +167,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   await page.route(new RegExp(`/api/sessions/${SID}/resume$`), async (route: Route) => {
     resumeBody = route.request().postDataJSON() as Record<string, unknown>;
     resumeUrl = route.request().url();
+    resumeMethod = route.request().method();
     // detail 逐字取自后端 `validate_resume` 的 CAS 失败分支（409 零副作用）。
     await route.fulfill({
       status: 409,
@@ -174,10 +178,13 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
     });
   });
 
-  await openPausedSession(page);
+  await page.goto('/');
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100));
+  await page.locator('.session-item').first().click();
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => eventsCalls).toBeGreaterThanOrEqual(1);
+  const eventsCallsBeforeResume = eventsCalls;
 
   await panel.getByLabel(/恢复用的绝对 ceiling/).fill('9999');
   await panel.getByRole('button', { name: '恢复同一 run' }).click();
@@ -188,6 +195,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
     resume_basis: 'budget_increase',
     budget: { expected_version: 1, run: { max_agent_turns_total: 9999 } },
   });
+  expect(resumeMethod).toBe('POST');
   expect(resumeUrl).toMatch(new RegExp(`/api/sessions/${SID}/resume$`));
 
   // 拒绝面：后端 detail 逐字上屏（前缀标明"被拒绝"而非"失败"）。
@@ -197,6 +205,6 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   // 409 零副作用：面板仍在、用户草稿不丢（改大再来一次即可）。
   await expect(panel).toBeVisible();
   await expect(panel.getByLabel(/恢复用的绝对 ceiling/)).toHaveValue('9999');
-  // 权威状态已重读（首屏 1 次 + 被拒后 1 次）。
-  await expect.poll(() => eventsCalls).toBeGreaterThanOrEqual(2);
+  // The paused virtual clock prevents viewing polls from satisfying this assertion.
+  await expect.poll(() => eventsCalls).toBeGreaterThan(eventsCallsBeforeResume);
 });
