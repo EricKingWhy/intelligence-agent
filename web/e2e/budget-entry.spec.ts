@@ -105,7 +105,7 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   await expect(page.getByLabel('预算上限（总 tokens，留空为默认）')).not.toBeVisible();
   await expect(deadlineInput).toHaveValue('');
   await expect(resetButton).not.toBeVisible();
-  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('默认');
+  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('预算：默认');
   await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（后端默认，全不设限）');
 
   await turnsInput.fill('3');

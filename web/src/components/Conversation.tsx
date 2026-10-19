@@ -62,6 +62,9 @@ interface Props {
   jumpRequest?: { key: string; nonce: number } | null;
   /** 空状态示例任务回调——点击 chip 时由 App 注入 Composer。 */
   onPresetTask?: (text: string) => void;
+  /** #1370：空状态主 CTA「开始新任务」——App 注入**既有的**「新建会话」入口
+   *  （`handleNew`：清选择 + 切回 Chat + 焦点落到 composer），不新增第二套创建路径。 */
+  onNewTask?: () => void;
   /** hover Inspect → 钻取到事件级 Inspector（PRD §9.1 联动）。 */
   onFocusTool?: (tool: ToolCall) => void;
   /** 打开子会话（Phase 13 委派节点入口，复用会话栏同一选择管线）。 */
@@ -124,7 +127,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onNewTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -393,18 +396,27 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
     return (
       <div className="conversation">
         <div className="conversation-empty">
-          <div className="empty-logo"><Activity size={20} /></div>
-          <div className="empty-hero">暂无对话</div>
-          <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
-          {onPresetTask && (
-            <div className="empty-examples">
-              {EXAMPLE_TASKS.map((task) => (
-                <button key={task} className="example-chip" onClick={() => onPresetTask(task)}>
-                  {task}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="empty-card">
+            <div className="empty-logo"><Activity size={20} /></div>
+            <div className="empty-hero">暂无对话</div>
+            <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
+            {/* #1370 P0-7：空状态主 CTA。语义 = 既有「新建会话」入口（不是新路径），
+                所以没有会话可选时它仍是"把焦点交回输入框"这一件确定的事。 */}
+            {onNewTask && (
+              <button type="button" className="empty-cta" onClick={onNewTask}>
+                开始新任务
+              </button>
+            )}
+            {onPresetTask && (
+              <div className="empty-examples">
+                {EXAMPLE_TASKS.map((task) => (
+                  <button key={task} className="example-chip" onClick={() => onPresetTask(task)}>
+                    {task}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );

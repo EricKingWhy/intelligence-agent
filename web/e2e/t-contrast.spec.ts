@@ -1,7 +1,8 @@
 /** UI-02（R2/R3）对比度与排版地板回归锁 + U-1 review 加固项。
  *
  *  锁（暗/亮两主题各一遍）：
- *  1. 会话元数据（.session-item-meta）≥12px 且对比度 ≥4.5:1
+ *  1. 会话元数据（.session-item-meta）与行尾会话 id（.session-item-id，#1370）
+ *     ≥12px 且对比度 ≥4.5:1
  *  2. 时间线序号（.tl-seq）≥12px 且对比度 ≥4.5:1
  *  3. composer placeholder 对比度 ≥4.5:1
  *  4. 时间线事件类型名（.tl-type）== 解析后的 --color-muted-foreground（R1，等值断言）
@@ -344,7 +345,7 @@ async function openTaskReview(
 for (const theme of ['dark', 'light'] as const) {
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    for (const selector of ['.session-item-meta', '.tl-seq']) {
+    for (const selector of ['.session-item-meta', '.session-item-id', '.tl-seq']) {
       const m = await measure(page, selector);
       expect(m.fontSize, `${selector} font-size`).toBe('12px');
       const ratio = contrast(m.color, m.bg);

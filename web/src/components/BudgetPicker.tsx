@@ -323,6 +323,8 @@ export function BudgetPicker({
   onDeadlineChange,
   disabled = false,
 }: BudgetPickerProps) {
+  // 「默认」= 三维全空；与 `BudgetPickerPanel` 的 `hasBudgetOverrides` 同一口径（只读同一份 props）。
+  const hasBudgetOverrides = turns.trim() !== '' || tokens.trim() !== '' || deadline.trim() !== '';
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
@@ -331,11 +333,13 @@ export function BudgetPicker({
           className="composer-control composer-budget-trigger"
           aria-label="预算"
           title="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。"
+          /* #1370 P0-9：「选中才给底色」——设了任一维才浮出，全空仍是透明的「预算：默认」。 */
+          data-selected={hasBudgetOverrides ? 'true' : undefined}
           aria-disabled={disabled || undefined}
           disabled={disabled}
         >
           <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>
+          <span className="composer-trigger-current">{`预算：${budgetSummary(turns, tokens, deadline)}`}</span>
           <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
         </button>
       </Popover.Trigger>

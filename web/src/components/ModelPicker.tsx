@@ -111,7 +111,15 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           type="button"
           className="composer-model model-picker"
           aria-label="模型选择"
-          title={triggerLabel}
+          /* #1370 P0-9 + 审查 P2-1：原 `title={triggerLabel}` 是长模型名的唯一非截断出口
+           * （trigger 受 max-width + ellipsis）。说明文案加在前面，但把选中名保留在首行。 */
+          title={
+            selectedEntry
+              ? `${triggerLabel}\n模型：这次会话使用哪个模型；切换后从下一轮 run 生效。`
+              : '模型：这次会话使用哪个模型；切换后从下一轮 run 生效。'
+          }
+          /* #1370 P0-9：「选中才给底色」——「默认链」是未选态，选中具体模型才浮出底色。 */
+          data-selected={effectiveSelectedModel ? 'true' : undefined}
           // Radix 注入 aria-haspopup="menu"/aria-expanded；aria-disabled 让 SSR 可见
           aria-disabled={disabled || undefined}
           disabled={disabled}

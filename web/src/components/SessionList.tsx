@@ -887,8 +887,12 @@ function SessionRow({
           aria-hidden="true"
         />
         <div className="session-item-body">
-          {title && <div className="session-item-title">{title.slice(0, 48)}</div>}
-          <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
+          {/* #1370 P0-7：标题与 id 同一行（id 在行尾），三行压成两行。可见文本仍截到
+              12 字符（与基线一致），完整 session_id 在行按钮的 title 里。 */}
+          <div className="session-item-head">
+            {title && <div className="session-item-title">{title.slice(0, 48)}</div>}
+            <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
+          </div>
           <div className="session-item-meta num">
             {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
           </div>

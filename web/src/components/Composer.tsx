@@ -1391,7 +1391,16 @@ export const Composer = memo(function Composer({
           id="composer-input"
           name="task"
           className="composer"
-          placeholder={showLock ? lockedPlaceholder : `描述一个任务…（${modKey()}+Enter 发送）`}
+          /* #1370 P0-7：提示语按态切换（只改文案，不改提交语义）——
+             空闲态只说 Enter=发送；有 run 在跑才区分「Enter 排队 / ⌘+Enter 打断」。
+             之前两种态共用一句「Enter 排队 · ⌘+Enter 立即」，空闲时"排队"没有对象。 */
+          placeholder={
+            showLock
+              ? lockedPlaceholder
+              : streaming
+                ? `描述一个任务…（Enter 排队 · ${modKey()}+Enter 打断）`
+                : '描述一个任务…（Enter 发送）'
+          }
           value={value}
           /* S-7（P4）：菜单 = 本 textarea 拥有的 listbox——ARIA 关联三件套
               （展开态 / 所有权 / 当前高亮项），屏幕阅读器读得到"列表开着、选中谁"。 */
@@ -1517,6 +1526,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
+              hint="权限：工具调用如何批准；改动立即作用于后续工具调用。"
               options={toCatalogOptions(permissionModes, catalogIcon)}
               value={selectedPermissionMode}
               onChange={handlePermissionSelect}
@@ -1535,6 +1545,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="Agent Profile"
               title="这次会话用哪个档位？"
+              hint="Agent：这次会话用哪个档位（决定可用工具面）；切换后从下一轮 run 生效。"
               options={toCatalogOptions(agentProfiles, catalogIcon)}
               value={selectedAgentProfile}
               onChange={(id) => onAgentProfileChange?.(id)}
@@ -1569,6 +1580,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="Reasoning Effort"
               title={reasoningEffortProjection ? '备用模型的推理默认档' : '推理深度选哪一档？'}
+              hint="推理：下一轮 run 的推理深度；档位越高越慢、消耗越多。"
               options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
               value={effectiveReasoningEffort}
               onChange={(id) => onReasoningEffortChange?.(id)}
@@ -1649,7 +1661,7 @@ export const Composer = memo(function Composer({
                     ? sendBlockedReason
                     : sending
                       ? '上一条消息还在发送中…'
-                      : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+                      : `发送（Enter 排队 · ${modKey()}+Enter 打断）`
                 }
               >
                 <ArrowUp size={16} />
@@ -1670,7 +1682,7 @@ export const Composer = memo(function Composer({
                   ? sendBlockedReason
                   : sending
                     ? '上一条消息还在发送中…'
-                    : `发送（Enter 排队 · ${modKey()}+Enter 立即）`
+                    : '发送（Enter）'
               }
             >
               <ArrowUp size={16} />
