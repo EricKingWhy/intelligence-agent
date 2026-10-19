@@ -343,3 +343,34 @@ test.describe('#1368 1280：桌面档空态按钮不折行（standards P1）', (
     }
   });
 });
+
+test.describe('#1368 620：顶栏中间档（P2）', () => {
+  test.use({ viewport: { width: 620, height: 900 } });
+
+  test('标题省略，右簇完整留在顶栏内', async ({ page }) => {
+    await routeApi(page, mock);
+    await page.goto('/');
+
+    // 改前实测（同树 A/B）：nowrap 的标题 min-content 163px 不可收缩，右簇被推到
+    // appbar 之外（620 档 2 个图标完全在视口外，`.app-frame{overflow:hidden}` 直接
+    // 裁掉，按钮不可点）。修法是左组 `min-width:0` + 标题省略号。
+    const m = await page.evaluate(() => {
+      const bar = document.querySelector('.appbar')!;
+      const right = document.querySelector('.appbar-right')!.getBoundingClientRect();
+      const title = document.querySelector('.appbar-title')!;
+      return {
+        barRight: Math.round(bar.getBoundingClientRect().right),
+        rightRight: Math.round(right.right),
+        titleWidth: Math.round(title.getBoundingClientRect().width),
+        scrollWidth: bar.scrollWidth,
+        clientWidth: bar.clientWidth,
+      };
+    });
+    expect(m.rightRight, '右簇右缘不得越过顶栏右缘').toBeLessThanOrEqual(m.barRight);
+    expect(m.scrollWidth, '顶栏不得横向溢出').toBeLessThanOrEqual(m.clientWidth);
+    // 判别面：标题此刻确实是**被省略**的（整串 163px，620 档只剩 ~66px）——否则
+    // 这条用例在"标题整个放得下"的布局里也绿，测不到收缩机制本身。
+    expect(m.titleWidth).toBeLessThan(120);
+    expect(m.titleWidth).toBeGreaterThan(0);
+  });
+});
