@@ -195,10 +195,14 @@ export function shouldShowHistoryLoading(
  *  - live→viewing 自迁移：`conversation.session_id === mode.sessionId` ⇒ false，
  *    保留 `shouldShowHistoryLoading` 的「后台对账不闪占位符」语义。
  *
- *  `settledSessionId` 是**已落地**（成功或失败）的目标会话：读取失败时
+ *  `settledSessionId` 是**本次选中**已落地（成功或失败）的目标会话：读取失败时
  *  `conversation` 仍是 null，若只看「投影不一致」会让骨架永不退场、把失败说成
  * 「还在加载」。失败时骨架必须让位给空态 + 错误横幅（同样的道理也适用于
  * 已删除会话——那条路径直接回 idle，不经过这里）。
+ *
+ *  它的有效域是**一次选中**：`selectSession` 入口同步复位（见该处注释），所以
+ *  「落地过 → 回 idle → 再点同一会话」的第一次渲染不会命中这条短路，而是按
+ *  「投影不一致」重新挂骨架。
  *
  *  `live` 模式不参与：流帧自己画内容（提交后的第一帧由 composer 的提交态承接）。 */
 export function shouldShowHistorySkeleton(
@@ -738,6 +742,11 @@ export function useSession() {
           setMode({ kind: 'idle' });
           return;
         }
+        // #1371：切会话（或首开）失败时，`conversation` 还是**上一会话**的投影：
+        // 收骨架（`finally` 记 settled）之后它会被当成目标会话的正文画在新标题下，
+        // 与「失败退到空态 + 错误横幅」的契约相悖。同会话后台重读失败不清——
+        // 那份投影本来就属于这个会话，错误横幅是唯一该变的东西。
+        if (switchingSession) setConversation(null);
         setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
@@ -1811,6 +1820,12 @@ export function useSession() {
     // 用户显式切到某个会话 = 明确要看它：忘掉自动接流的去重记账，让「切走
     // 再切回来」照常再接一次（自动重入的死循环不经过这里，断点仍在）。
     if (id) resumeAttemptedRef.current = forgetResumeAttempt(resumeAttemptedRef.current, id);
+    // #1371：`historySettledId` 只对**这一次选中**有效。不在这里同步复位的话，
+    // 「A 已落地 → 新建会话 → 再点 A」的第一次渲染会命中 `settled === A` 的短路：
+    // 此时 `conversation` 已被 idle 分支清空、`loadingHistory` 也被复位 ⇒ 先画一帧
+    // 「暂无对话」，装载 effect 下一拍才换骨架。复位必须在这个事件处理器里（与
+    // `setMode` 同批提交），放进 effect 就晚一帧了。
+    setHistorySettledId(null);
     streamGenRef.current += 1;
     stallCheckRef.current = null;
     setReconnecting(false);

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** #1371 审查 C-P2-2：loading 状态位的 hook 级回归锁。
+/** #1371：loading 状态位的 hook 级回归锁。
  *
  * 已有的组件级用例（`SessionList.test.tsx` / `Conversation.test.tsx`）注入的是
  * **props**，锁的是渲染分支；真正有出错空间的是 hook 里的两个状态位：
@@ -7,7 +7,7 @@
  *  - `sessionsLoading`：初值 true；**首次** settle（成功或失败）置 false，之后
  *    的刷新不再闪骨架（`sessionsLoadedRef` 守卫）；
  *  - `loadingHistory`：首帧带 localStorage 会话时初值 true；idle / live 迁移必须
- *    复位（否则骨架永不退场——审查 C-P2-1）。
+ *    复位（否则骨架永不退场）。
  *
  * 另锁 `shouldShowHistorySkeleton` 的渲染期派生：idle→viewing / A→B 的那一帧
  * （effect 还没跑）也必须判为加载中，不能先画「暂无对话」或上一会话内容。
@@ -87,6 +87,7 @@ interface HookView {
   conversation: ConversationState | null;
   loadingHistory: boolean;
   historySkeleton: boolean;
+  error: string | null;
   selectSession: (id: string | null) => void;
 }
 
@@ -241,6 +242,62 @@ describe('loadingHistory — 初值、复位与派生骨架', () => {
       events.resolve(settledHistory(SID));
     });
     expect(captured.hook!.historySkeleton).toBe(false);
+  });
+
+  it('已落地 → 回 idle → 重选同一会话：首帧仍挂骨架（不闪「暂无对话」）', async () => {
+    await mount();
+    // 1. 落地一次：settled 记下 SID，投影在场。
+    await act(async () => {
+      captured.hook!.selectSession(SID);
+    });
+    expect(captured.hook!.conversation?.session_id).toBe(SID);
+    expect(captured.hook!.historySkeleton).toBe(false);
+
+    // 2. 回 idle：投影与 loadingHistory 都复位，settled 只在选中入口复位。
+    await act(async () => {
+      captured.hook!.selectSession(null);
+    });
+    expect(captured.hook!.conversation).toBeNull();
+    expect(captured.hook!.loadingHistory).toBe(false);
+
+    // 3. 再点回同一会话，读**第一次渲染**的快照（effect 落地前的那一帧）。
+    const events = deferred<AgentEvent[]>();
+    apiMock.getSessionEvents.mockImplementation(() => events.promise);
+    const mark = renders.length;
+    await act(async () => {
+      captured.hook!.selectSession(SID);
+    });
+    // settled 若不在 selectSession 入口复位，这一帧会是 {false,false}——
+    // Conversation 会把它画成「暂无对话」，下一拍才换成骨架。
+    expect(renders[mark]).toEqual({ loadingHistory: false, historySkeleton: true });
+
+    await act(async () => {
+      events.resolve(settledHistory(SID));
+    });
+    expect(captured.hook!.historySkeleton).toBe(false);
+  });
+
+  it('A 落地后切到 B、B 读取失败：清掉 A 的投影（空态 + 错误横幅）', async () => {
+    const A = 's-a';
+    const B = 's-b';
+    await mount();
+    apiMock.getSessionEvents.mockImplementation(async (sid: string) => settledHistory(sid));
+
+    await act(async () => {
+      captured.hook!.selectSession(A);
+    });
+    expect(captured.hook!.conversation?.session_id).toBe(A);
+
+    apiMock.getSessionEvents.mockRejectedValueOnce(new Error('get events 500'));
+    await act(async () => {
+      captured.hook!.selectSession(B);
+    });
+
+    // 骨架退场（失败不能一直"正在加载"），但投影必须清空——否则 B 的标题下
+    // 会显示 A 的正文，错误横幅与内容自相矛盾。
+    expect(captured.hook!.historySkeleton).toBe(false);
+    expect(captured.hook!.conversation).toBeNull();
+    expect(captured.hook!.error).toContain('get events 500');
   });
 });
 
