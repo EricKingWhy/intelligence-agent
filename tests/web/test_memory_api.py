@@ -158,7 +158,7 @@ async def test_v2_governance_api_works_without_session_store_and_closes_in_its_l
 
         assert settings_response.status_code == 200, settings_response.text
         assert set(settings_response.json()) == {
-            "extraction_enabled", "recall_enabled", "fallback_enabled"}
+            "extraction_enabled", "recall_enabled", "fallback_enabled", "write_approval"}
         assert filtered_response.status_code == 200, filtered_response.text
         assert filtered_response.json() == []
 
@@ -890,7 +890,9 @@ async def test_memory_settings_expose_and_patch_the_fallback_switch(memory_app):
     )
     assert patched.status_code == 200, patched.text
     assert patched.json() == {
-        "extraction_enabled": True, "recall_enabled": True, "fallback_enabled": False}
+        "extraction_enabled": True, "recall_enabled": True, "fallback_enabled": False,
+        "write_approval": False,
+    }
     assert client.get("/api/memory-settings", headers=headers).json() == patched.json()
 
 
@@ -910,13 +912,17 @@ async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory
     )
     assert settings1.status_code == 200
     assert settings1.json() == {
-        "extraction_enabled": False, "recall_enabled": True, "fallback_enabled": True}
+        "extraction_enabled": False, "recall_enabled": True, "fallback_enabled": True,
+        "write_approval": False,
+    }
     settings2 = client.patch(
         "/api/memory-settings", headers=headers, json={"recall_enabled": False},
     )
     assert settings2.status_code == 200
     assert settings2.json() == {
-        "extraction_enabled": False, "recall_enabled": False, "fallback_enabled": True}
+        "extraction_enabled": False, "recall_enabled": False, "fallback_enabled": True,
+        "write_approval": False,
+    }
     assert client.get("/api/memory-settings", headers=headers).json() == settings2.json()
     assert client.get(f"/api/memories/{first.id}", headers=headers).status_code == 200
     assert client.get(f"/api/memories/{second.id}", headers=headers).status_code == 200
