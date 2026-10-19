@@ -1,0 +1,4 @@
+2026-10-19	#1370 双轴独立审查（Correctness NEEDS-FIX / Standards NEEDS-FIX）：7 条 Composer 断言红；权限 chip 时机与 ADR-0041 D4 矛盾；透明 pill 泄漏到弹层；窄轨会话行可点宽 21px 低于 24px；id 二级色无等值断言；会话行几何与 placeholder 无测试；预算摘要与选中态不同源	338365e83f41bfc807689e0f254d10fd628c2b33..561592b8426e5f0623dae5c986203ceaa2aba2f0
+2026-10-19	#1370 findings 修复轮双轴复审 PASS：7 红转绿；权限提示改为下一轮 run 生效；chip 透明视觉限定 .composer-controls；窄轨恢复 12px 横向 padding（行宽 29px）；新增会话行几何 e2e、id 颜色等值断言、idle/running placeholder 测试；预算摘要单一谓词	561592b8426e5f0623dae5c986203ceaa2aba2f0..7dccac6500022f493c7c478f5a503764762cfb5e
+2026-10-19	#1370 P3/P4 收尾双轴复审 PASS：窄轨注释与 radius 说明对齐；窄轨用例消除异步竞态、同组两行判别发丝线、精确锁 24px 行高、两个 project 均执行	7dccac6500022f493c7c478f5a503764762cfb5e..07f731309ea955a5cdcd59882c1a08d30d49bd90
+2026-10-19	#1370 终审建议加固双轴复查 PASS：窄轨 count 选择器改为 .session-item 以覆盖两行；height 由小于 44 改为精确 24，锁住窄轨密度	07f731309ea955a5cdcd59882c1a08d30d49bd90..4516d85103f934df1fd778a0077297fa55b164fd
