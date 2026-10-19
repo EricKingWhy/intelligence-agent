@@ -31,18 +31,20 @@ vi.mock('../lib/api', async (importOriginal) => {
   };
 });
 
-// ⚠ `sessionIdBaseline` / `discoverNewSessionId` 在 `lib/wsStream`，**不在** `lib/api`。
+// ⚠ `sessionIdBaselineDetailed` / `discoverNewSessionId` 在 `lib/wsStream`，**不在** `lib/api`。
 vi.mock('../lib/wsStream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/wsStream')>();
   return {
     ...actual,
-    sessionIdBaseline: vi.fn(async () => new Set<string>()),
+    // #1333：useSession 改取 detailed 基线（含服务端时钟锚点）；serverNowMs
+    // 给 null 走客户端时刻降级（本单测不考时钟锚点）。
+    sessionIdBaselineDetailed: vi.fn(async () => ({ ids: new Set<string>(), serverNowMs: null })),
     discoverNewSessionId: vi.fn(),
   };
 });
 
 import { getSessionEvents, sendMessage as apiSendMessage, startSession, type PendingDecision } from '../lib/api';
-import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaseline } from '../lib/wsStream';
+import { SessionClaimAmbiguousError, SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaselineDetailed } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
 
 const SID = 's-1148';
@@ -133,8 +135,8 @@ beforeEach(() => {
   vi.mocked(getSessionEvents).mockResolvedValue(idleHistory(SID));
   vi.mocked(apiSendMessage).mockReset();
   vi.mocked(startSession).mockReset();
-  vi.mocked(sessionIdBaseline).mockReset();
-  vi.mocked(sessionIdBaseline).mockResolvedValue(new Set<string>());
+  vi.mocked(sessionIdBaselineDetailed).mockReset();
+  vi.mocked(sessionIdBaselineDetailed).mockResolvedValue({ ids: new Set<string>(), serverNowMs: null });
   vi.mocked(discoverNewSessionId).mockReset();
 });
 
@@ -411,5 +413,63 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
 
     expect(result).toBe('提交失败：网络中断');
     expect(captured.hook!.error).toBe('提交失败：网络中断');
+  });
+});
+
+describe('#1333 findings 修复——认领接线', () => {
+  const T0 = 1_750_000_000_000;
+
+  it('P0 接线：submittedAtServerMs 钉在 POST 发起时刻（早窗之前），不是认领开始', async () => {
+    // 服务端时钟锚点：基线 Date 头 = T0
+    vi.mocked(sessionIdBaselineDetailed).mockResolvedValue({
+      ids: new Set<string>(),
+      serverNowMs: T0,
+    });
+    vi.mocked(startSession).mockReturnValue(new Promise<Response>(() => {}) as never);
+    vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
+
+    await mount();
+    let result: string | null = null;
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '接线钉锚点' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      result = await p;
+    });
+
+    const opts = vi.mocked(discoverNewSessionId).mock.calls[0]?.[1];
+    // fake timers 下基线返回与 POST 发起是同一刻度：锚点恰为 T0。
+    // 若锚点被挪到认领开始（1200ms 早窗之后）才算，这里会是 T0 + 1200——
+    // 这正是旧 bug 让"自己的会话每轮被滤掉"的原因。
+    expect(opts?.submittedAtServerMs).toBe(T0);
+    expect(result).toContain('可能已成功');
+  });
+
+  it('C-P3-1：POST 的迟到失败优先于认领歧义 ⇒ 仍报「提交失败：<原因>」', async () => {
+    let rejectPost!: (e: Error) => void;
+    vi.mocked(startSession).mockReturnValue(
+      new Promise<Response>((_r, reject) => { rejectPost = reject; }) as never,
+    );
+    let rejectClaim!: (e: Error) => void;
+    vi.mocked(discoverNewSessionId).mockReturnValue(
+      new Promise<string>((_r, reject) => { rejectClaim = reject; }) as never,
+    );
+
+    await mount();
+    let result: string | null = null;
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: 'POST 失败盖住歧义' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      // 先让 POST 落定失败，再抛歧义：`late.failure ?? e` 必须是前者赢——
+      // 这是意图如此（POST 的硬失败比认领结论更硬），pin 住不许反转。
+      rejectPost(new Error('401 鉴权失败'));
+      await vi.advanceTimersByTimeAsync(0);
+      rejectClaim(new SessionClaimAmbiguousError(['other-0', 'fresh-0']));
+      await vi.advanceTimersByTimeAsync(0);
+      result = await p;
+    });
+
+    expect(result).toBe('提交失败：401 鉴权失败');
+    expect(result).not.toContain('无法确认');
+    expect(captured.hook!.error).toBe('提交失败：401 鉴权失败');
   });
 });

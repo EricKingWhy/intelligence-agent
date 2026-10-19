@@ -24,7 +24,6 @@ from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from tests.conftest import make_session
-from tests.memory.v2._vector import FakeMemoryVectorClient
 from tests.scripted_model import ScriptedModel
 
 TICK_CALL_ID = "call_ticker_0001"
@@ -44,16 +43,11 @@ def _settings(tmp_path: Path) -> Settings:
 
 
 def _memory_ready_settings(tmp_path: Path) -> Settings:
+    """#1353 §5：记忆就绪 = markdown 目录可写；不再需要向量/嵌入配置。"""
     return Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         skill_global_dir=str(tmp_path / "no-such-global"),
-        milvus_uri="https://memory.example.test",
-        milvus_token="test-only",
-        milvus_collection="memory_test",
-        embedding_model="test-model",
-        embedding_base_url="https://embedding.example.test",
-        embedding_api_key="test-only",
     )
 
 
@@ -166,11 +160,6 @@ class TestWebWiringCoexistence:
     async def test_memory_skills_ticker_coexist(self, tmp_path, monkeypatch):
         """Web wiring composes the V2 memory service with skills and ticker."""
         settings = _memory_ready_settings(tmp_path)
-        vectors = FakeMemoryVectorClient(settings)
-        monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_vector_client",
-            lambda _settings: vectors,
-        )
         _make_skill(tmp_path)
 
         config = parse_capabilities_config(
@@ -191,7 +180,6 @@ class TestWebWiringCoexistence:
             "load_skill", "promote_skill", "register_skill", "tick",
         }
         await wiring.aclose()
-        assert vectors.closed
 
 
 class TestGate2SkillsProgressiveDisclosure:
@@ -257,28 +245,31 @@ def _degrade_codes(wiring) -> dict[str, str]:
 
 class TestDegradation:
     @pytest.mark.asyncio
-    async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
-        """OPTIONAL provider 构造失败 → 装配跳过（optional() None）→ 基础 Agent 照常运行。"""
+    async def test_unwritable_memory_dir_degrades_and_base_agent_still_runs(self, tmp_path):
+        """OPTIONAL provider 的前置条件不成立 → 装配跳过 → 基础 Agent 照常运行。
 
-        def _boom(_settings):
-            raise RuntimeError("simulated milvus outage")
-
-        monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_vector_client", _boom,
+        #1353 §5 之后唯一的前置条件是 markdown 权威目录可写；用一个普通文件占住
+        workspace_dir 让 `<ws>/memories` 建不出来。
+        """
+        blocked = tmp_path / "blocked"
+        blocked.write_text("not a directory", encoding="utf-8")
+        settings = Settings(
+            _env_file=None, workspace_dir=str(blocked),
+            skill_global_dir=str(tmp_path / "no-such-global"),
         )
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
             registry, parse_capabilities_config('{"memory": {}}'),
-            settings=_memory_ready_settings(tmp_path),
+            settings=settings,
         )
         assert registry.available() == []  # 未注册 → registry.optional("memory") is None
         assert registry.optional("memory") is None
-        assert wiring.memory_v2 is None and wiring.memory_vectors is None
+        assert wiring.memory_v2 is None
         assert wiring.memory_formation is None
         assert wiring.context_providers == []
         # #225：降级**原因**要结构化留在 wiring 上——否则路由层只能对用户说
         # "未启用"，把"配了但装配失败"说成"没配"（真机症状）。
-        assert wiring.degradations == {"memory": DegradeReason.INIT_FAILED.value}
+        assert wiring.degradations == {"memory": DegradeReason.MISSING_SETTINGS.value}
 
         # 降级后基础 Agent 照常运行（08 §7：OPTIONAL_RUNTIME 缺失不影响 Agent 可运行）。
         model = ScriptedModel([AIMessage(content="纯 Runtime 回答")])
@@ -310,13 +301,17 @@ class TestDegradation:
         assert _degrade_codes(wiring) == {"memory": DegradeReason.DISABLED.value}
         assert wiring.memory_v2 is None
 
-        # ③ 配了、启用了，但 provider 自己的前置配置不齐（真 factory：milvus/embedding
-        # 都没配 → 返回 None）。这条走的是**真** `build_builtin_memory_components`，
-        # 不是替身——"分不出来的原因"正是它里面的那个 `return None`。
+        # ③ 配了、启用了，但权威目录不可写（真 gate：`_wire_memory` 里的
+        # mkdir/os.access，不是替身）——"分不出来的原因"正是它里面的降级分支。
+        blocked = tmp_path / "blocked-memory"
+        blocked.write_text("not a directory", encoding="utf-8")
         wiring = await wire_capabilities(
             registry,
             parse_capabilities_config('{"memory": {}}'),
-            settings=_settings(tmp_path),
+            settings=Settings(
+                _env_file=None, workspace_dir=str(blocked),
+                skill_global_dir=str(tmp_path / "no-such-global"),
+            ),
         )
         assert _degrade_codes(wiring) == {"memory": DegradeReason.MISSING_SETTINGS.value}
         assert wiring.memory_v2 is None

@@ -153,6 +153,14 @@ class TestGrepErrors:
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
 
     @pytest.mark.asyncio
+    async def test_empty_pattern_is_invalid_argument(self, executor: ToolExecutor):
+        result = await executor.execute(_tool_call({"pattern": ""}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert result.result.retryable is False
+
+    @pytest.mark.asyncio
     async def test_empty_workspace(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):

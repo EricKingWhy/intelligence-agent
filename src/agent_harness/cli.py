@@ -1554,6 +1554,9 @@ def _main_dispatch() -> None:
     if argv and argv[0] == "approvals":
         _main_approvals(argv[1:])
         return
+    if argv and argv[0] == "memory":
+        _main_memory(argv[1:])
+        return
     if argv and argv[0] == "plugins":
         _main_plugins(argv[1:])
         return
@@ -3487,6 +3490,124 @@ def _render_compaction(session: str, result: SessionContextCompaction) -> str:
             ),
         ]
     )
+
+
+def _main_memory(argv: list[str]) -> None:
+    """CLI `memory` 入口（#1353 M6）：待审写入的公开管理面。
+
+    - `memory pending`：列出待审写入（id + 形状 + 时间）；
+    - `memory approve <id>`：按 stage 时钉住的条目重放；pin 失效则拒绝且保留记录；
+    - `memory reject <id>`：明确丢弃。
+
+    与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
+    做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
+    web 的 `_trusted_v2()` 同源。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness memory")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("pending", help="列出待审写入")
+    approve = subcommands.add_parser("approve", help="批准一条待审写入并落盘")
+    approve.add_argument("staged_id", metavar="ID")
+    reject = subcommands.add_parser("reject", help="拒绝一条待审写入")
+    reject.add_argument("staged_id", metavar="ID")
+    journey = subcommands.add_parser("journey", help="按版本链列出记忆卡片时间线")
+    journey.add_argument("--limit", type=int, default=50)
+    subcommands.add_parser(
+        "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    output, failed = asyncio.run(_memory_command(settings, args))
+    print(output)
+    if failed:
+        # 迁移有 skipped 行 = 有记忆真的没进 markdown，脚本化调用必须能看出来。
+        raise SystemExit(2)
+
+
+async def _memory_command(
+    settings: Settings, args: argparse.Namespace,
+) -> tuple[str, bool]:
+    """返回 `(输出, 是否应非零退出)`；不往 `argparse.Namespace` 上挂动态属性。"""
+    from agent_harness.memory.v2.assembly import (
+        MEMORIES_DIRECTORY_NAME,
+        MEMORY_V2_DATABASE_NAME,
+        build_memory_v2_service,
+    )
+    from agent_harness.memory.v2.commands import trusted_identity_for_session
+
+    if args.command == "migrate":
+        # #1353 §4：一次性导出。不需要建服务（迁移只读 records 表、写 markdown 文件），
+        # 也**不** load 已装配的 store——否则迁移跑在服务进程里会读到半截状态。
+        from agent_harness.memory.v2.migration import migrate_active_records
+
+        counts = await migrate_active_records(
+            Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME, settings.workspace_dir,
+        )
+        lines = [
+            (
+                f"迁移完成：active={counts['active']} 导出={counts['exported']} "
+                f"去重={counts['deduplicated']}"
+                f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
+            ),
+        ]
+        failed = bool(counts["skipped"])
+        if failed:
+            lines.append(f"未导出 {len(counts['skipped'])} 条（见日志 warning）：")
+            lines.extend(f"  {memory_id}: {error}" for memory_id, error in counts["skipped"])
+        lines.append(f"目标目录：{Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME}")
+        return "\n".join(lines), failed
+
+    service = await build_memory_v2_service(settings)
+    staged = service.staged
+    trusted = trusted_identity_for_session("", None)
+    if args.command == "journey":
+        # #1353 M10：与 GET /api/memory-journey 同一条领域路径（版本链 → 卡片）。
+        from agent_harness.memory.v2.journey import build_journey
+        from agent_harness.memory.v2.types import MemoryStatus
+
+        active = await service.list_records(
+            trusted, status=MemoryStatus.ACTIVE, limit=max(1, args.limit),
+        )
+        payload = build_journey([await service.versions(record.root_id, trusted)
+                                 for record in active])
+        if not payload["memory"]:
+            return "（暂无记忆卡片）", False
+        lines = [f"记忆时间线（{len(payload['memory'])} 张卡片）："]
+        for card in payload["memory"]:
+            lines.append(
+                f"  [{card['source']}] {card['timestamp']}  v{card['version']} "
+                f"{card['state']}  {card['fingerprint']}"
+            )
+            lines.append(f"    {card['title']}")
+        return "\n".join(lines), False
+    if staged is None:  # 装配层总是建它；这里只是不臆造第二种形状
+        return "此部署没有待审写入区。", False
+    if args.command == "pending":
+        items = await staged.pending(trusted)
+        if not items:
+            return "（暂无待审写入）", False
+        lines = [f"待审写入（{len(items)} 条）："]
+        for item in items:
+            payload = item.payload
+            body = payload.get("content") or payload.get("operations") or payload.get("old_text")
+            lines.append(
+                f"  id={item.id}  target={payload.get('target')}  "
+                f"action={payload.get('action')}  created_at={item.created_at}"
+            )
+            lines.append(f"    {str(body)[:200]}")
+        return "\n".join(lines), False
+    if args.command == "approve":
+        decision, response = await staged.approve(args.staged_id, trusted)
+        if decision.blocked:
+            return f"未落盘：{decision.message}", False
+        # 不 repr 整个响应 dict：里面是 store 的内部形状（含完整条目回显）。
+        payload = (response or {})
+        summary = payload.get("message") or "（存储未给出摘要）"
+        target = payload.get("target") or "?"
+        return f"已批准 {args.staged_id}（target={target}）：{summary}", False
+    decision = await staged.reject(args.staged_id, trusted)
+    return decision.message or "已拒绝。", False
 
 
 def _main_approvals(argv: list[str]) -> None:

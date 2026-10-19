@@ -86,6 +86,8 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("RetrieveMemoryV2Tool", "agent_harness.memory.v2.search_tool"),
     ("RememberMemoryV2Tool", "agent_harness.memory.v2.tools"),
     ("ForgetMemoryV2Tool", "agent_harness.memory.v2.tools"),
+    # #1353 M1：markdown 长期记忆工具（由 _wire_memory_v2 注册，走统一执行路径）
+    ("MemoryTool", "agent_harness.memory.v2.memory_tool"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
     ("LoadSkillTool", "agent_harness.skills.tool"),
     # #529 T-529-5：沉淀闭环工具（统一执行路径，不变量 #7）
@@ -149,6 +151,12 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     ),
     "load_skill": (
         "skills 能力工具（`skills/tool.py`），未在任何档位声明：技能包由 main 加载"
+    ),
+    "memory": (
+        "#1353 M1 markdown 长期记忆工具（`memory/v2/memory_tool.py`）：由 "
+        "`_wire_memory_v2` 在 V2 store 就绪时注册，未进任何档位 scope——单用户记忆面"
+        "只在根会话开放（子代理记忆面待决）；写操作仍受 WORKSPACE_WRITE 权限与 "
+        "markdown 目录闸门约束"
     ),
     "promote_skill": (
         "#529 沉淀提议工具（`skills/promote_tool.py`），未在任何档位声明：只写 "

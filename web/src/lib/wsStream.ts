@@ -72,7 +72,7 @@
  */
 
 import type { AgentEvent, SessionSummary } from '../types';
-import { listSessions, streamSession } from './api';
+import { listSessions, listSessionsRaw, streamSession } from './api';
 import { getToken } from './auth';
 // 终态集合**不另抄一份**：runState.ts 是「这个 run 收口了吗」的唯一判断点
 // （T8 加 run/interrupted 时三处各自枚举集体漂移，见那里的注释）。
@@ -380,6 +380,34 @@ export interface SessionClaimOptions {
   maxDelayMs?: number;
   /** 随机源，默认 `Math.random`；测试注入确定性序列。 */
   random?: () => number;
+  /** 本轮 POST 发起时刻（**服务端**时钟，ms epoch，#1333）。
+   *
+   *  传入后启用「创建时间过滤」：候选行必须同时满足「不在基线里」与
+   *  「`first_event_time` ≥ 该时刻」；单轮出现多个候选时抛
+   *  `SessionClaimAmbiguousError`（fail-closed，不盲选第一条）。
+   *  不传 = 旧行为（纯集合差分）：`first_event_time` 缺失或不可解析的行
+   *  照认——#1321 的负载验收（`wsStream.claimLoad.test.ts`）走旧签名，
+   *  其 20/20 读数是回归口径，不得因本票变红。 */
+  submittedAtServerMs?: number;
+}
+
+/** 认领歧义：单轮里有多条候选都满足「基线外 + 本轮新建」，无法确认哪条是
+ *  本次提交创建的（#1333 fail-closed）。
+ *
+ *  调用方必须把它与 `SessionClaimTimeoutError` 区分开：超时 = 会话很可能已
+ *  创建只是没接上；歧义 = 盲选会把用户接到**别人的会话**，宁可报
+ *  「无法确认」也不猜。`candidateIds` 供诊断/日志用。 */
+export class SessionClaimAmbiguousError extends Error {
+  readonly candidateIds: string[];
+
+  constructor(candidateIds: string[]) {
+    // ⚠ message 是给用户看的（Standards P2-1）：只留"无法确认"与候选条数，
+    // 不带内部 session id（`other-0` 之类用户看不懂也用不上）——id 留在
+    // `candidateIds` 供诊断/日志。也不写"未盲选"这类实现术语。
+    super(`无法确认新建的会话（本轮发现 ${candidateIds.length} 条候选）`);
+    this.name = 'SessionClaimAmbiguousError';
+    this.candidateIds = candidateIds;
+  }
 }
 
 /** 第 `attempt` 次失败后的退避（equal jitter：上限的一半 + 一半随机）。
@@ -442,7 +470,8 @@ export class SessionClaimTimeoutError extends Error {
  * 契约也要重写——超出本票的 Bug 修复面。故保留差分轮询，只修预算与节奏。
  *
  * @param known 发起 POST **之前**已存在的会话 id 集合（基线）
- * @param opts  总预算与退避参数；默认 20s / 150ms 起点 / 15s 上限
+ * @param opts  总预算与退避参数；默认 20s / 150ms 起点 / 15s 上限。
+ *  传 `submittedAtServerMs` 即启用 #1333 的创建时间过滤 + 歧义 fail-closed。
  */
 export async function discoverNewSessionId(
   known: ReadonlySet<string>,
@@ -452,15 +481,23 @@ export async function discoverNewSessionId(
   const baseDelayMs = opts.baseDelayMs ?? CLAIM_BASE_DELAY_MS;
   const maxDelayMs = opts.maxDelayMs ?? CLAIM_MAX_DELAY_MS;
   const random = opts.random ?? Math.random;
+  const submittedAtServerMs = opts.submittedAtServerMs;
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown = null;
   for (let attempt = 0; Date.now() < deadline; attempt += 1) {
     try {
       const rows = await listSessions({ includeArchived: true });
       // rows 通常已按时间倒序；仍全表扫以容忍排序变化
-      const fresh = rows.find((r) => !known.has(r.session_id));
-      if (fresh) return fresh.session_id;
+      const candidates = rows.filter((r) => isClaimCandidate(r, known, submittedAtServerMs));
+      // #1333 fail-closed：单轮多个候选 = 无法确认哪条是本次提交创建的，
+      // 盲选第一条会把用户接到别人的会话。歧义不会随轮询自行消除（行只增
+      // 不减），立即抛，不耗尽预算。
+      if (candidates.length > 1) {
+        throw new SessionClaimAmbiguousError(candidates.map((c) => c.session_id));
+      }
+      if (candidates.length === 1) return candidates[0].session_id;
     } catch (e) {
+      if (e instanceof SessionClaimAmbiguousError) throw e;
       lastErr = e;
     }
     const remaining = deadline - Date.now();
@@ -474,6 +511,31 @@ export async function discoverNewSessionId(
   throw new SessionClaimTimeoutError(lastErr);
 }
 
+/** #1333 认领候选谓词。
+ *
+ *  - 旧行为（`submittedAtServerMs` 未传）：纯集合差分，`first_event_time`
+ *    缺失/不可解析的行照认（#1321 旧调用的回归口径）。
+ *  - 新行为：行必须「不在基线里」**且**「`first_event_time` ≥ 本次 POST 发起
+ *    时刻（服务端时钟）」。后者排除三类误认：上一轮迟到的会话、归档/恢复
+ *    重排（`archived` 标记在 DB，`events[0].time` 不被改写）、基线读取后才
+ *    可见的陈旧会话。`first_event_time` 缺失/不可解析 = 无法验证创建时间，
+ *    fail-closed 不认（宁可超时报「无法确认」，不造假 id）。
+ *
+ *  机制参照：Stripe List API 的 `created[gte]`（创建时间下界过滤）+
+ *  Django `QuerySet.get()` 命中多条时抛 `MultipleObjectsReturned`
+ *  （歧义 fail-closed，不盲选第一条）。 */
+function isClaimCandidate(
+  r: SessionSummary,
+  known: ReadonlySet<string>,
+  submittedAtServerMs: number | undefined,
+): boolean {
+  if (known.has(r.session_id)) return false;
+  if (submittedAtServerMs === undefined) return true;
+  if (typeof r.first_event_time !== 'string') return false;
+  const createdMs = Date.parse(r.first_event_time);
+  return Number.isFinite(createdMs) && createdMs >= submittedAtServerMs;
+}
+
 /** 取当前会话 id 基线（给 discoverNewSessionId 用）。
  *
  *  失败返回 `null`（**不**退化成空集）：空集在 `discoverNewSessionId` 眼里等于
@@ -483,9 +545,38 @@ export async function discoverNewSessionId(
  *
  *  空集只有一种合法来源：基线确实为空（首次使用、库里还没有任何会话）。 */
 export async function sessionIdBaseline(): Promise<Set<string> | null> {
+  const detailed = await sessionIdBaselineDetailed();
+  return detailed ? detailed.ids : null;
+}
+
+/** 基线 + 服务端时钟锚点（#1333）。
+ *
+ *  `serverNowMs` = 基线响应 `Date` 头的服务端时刻（ms epoch）。认领的
+ *  `first_event_time` 是**服务端**时钟，比较必须用服务端时间对服务端时间：
+ *  客户端与服务端时钟偏差（云部署下浏览器与 VM 不在同一台机器）会让
+ *  「创建时间 ≥ 本次 POST 发起时刻」这个谓词向任一方向漂——服务端时钟超前
+ *  会放进陈旧会话（误认），滞后会滤掉自己的会话（超时误报）。
+ *  `Date` 头是服务端在发送该响应时刻盖的戳，零额外请求。
+ *  拿不到（代理剥头 / 不可解析）→ `null`，调用方降级用客户端时刻
+ *  （本机部署两者同钟）。 */
+export interface SessionIdBaseline {
+  ids: Set<string>;
+  serverNowMs: number | null;
+}
+
+/** 响应 `Date` 头 → 服务端此刻的 ms epoch；缺失/不可解析 → null。 */
+function serverTimeMsOf(res: Response): number | null {
+  const raw = res.headers.get('date');
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export async function sessionIdBaselineDetailed(): Promise<SessionIdBaseline | null> {
   try {
-    const rows = await listSessions({ includeArchived: true });
-    return new Set(rows.map((r) => r.session_id));
+    const res = await listSessionsRaw({ includeArchived: true });
+    const rows = (await res.json()) as { session_id: string }[];
+    return { ids: new Set(rows.map((r) => r.session_id)), serverNowMs: serverTimeMsOf(res) };
   } catch {
     return null;
   }

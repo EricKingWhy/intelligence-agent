@@ -228,10 +228,18 @@ export async function getHealth(): Promise<{ status: string }> {
 export async function listSessions(
   options: { includeArchived?: boolean } = {},
 ): Promise<SessionSummary[]> {
+  return (await listSessionsRaw(options)).json();
+}
+
+/** 会话列表的裸响应：给需要读响应头（`Date` → 服务端时钟锚点，#1333）的
+ *  调用方。语义与 `listSessions` 逐字一致，只是把 `Response` 本体交出来。 */
+export async function listSessionsRaw(
+  options: { includeArchived?: boolean } = {},
+): Promise<Response> {
   const query = options.includeArchived ? '?include_archived=true' : '';
   const res = await apiFetch(`/api/sessions${query}`);
   if (!res.ok) throw new Error(`list sessions ${res.status}`);
-  return res.json();
+  return res;
 }
 
 export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]> {

@@ -1,26 +1,26 @@
 {
   "schema": 1,
   "gate": "gate0",
-  "recorded_at": "2026-10-02T19:39:02+08:00",
-  "sha": "f1d7f8f863798bae5e9249676f9f2779ca5e7fd7",
-  "tree": "936171dcff27ab23b895b1041c5e3f442528e363",
+  "recorded_at": "2026-10-19T02:54:45+00:00",
+  "sha": "f1e2ac1eac782f2661125ef8d34428f1a7d87461",
+  "tree": "bec91e94de979e4cca5b615c17fcd222c0b3dc79",
   "argv": [],
   "result": "FAIL",
-  "passed": 4,
+  "passed": 5,
   "total": 6,
   "failed": [
-    "tsc",
     "coverage"
   ],
-  "wall_seconds": 29.77,
+  "env_failures": [],
+  "wall_seconds": 19.14,
   "budget_seconds": 60.0,
   "lane_timeout_seconds": 300.0,
   "tool_versions": {
-    "git": "git version 2.52.0.windows.1",
-    "python": "Python 3.13.5",
+    "git": "git version 2.53.0",
+    "python": "Python 3.13.11",
     "ruff": "ruff 0.16.3",
-    "node": "v22.21.1",
-    "oxlint": "Version: 1.81.0",
+    "node": "v22.22.1",
+    "oxlint": "Version: 1.85.0",
     "tsc": "Version 6.0.3"
   },
   "scope": {
@@ -42,7 +42,7 @@
       "desc": "git diff --check",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.03,
+      "seconds": 0.22,
       "cwd": ".",
       "argv": [
         "git",
@@ -56,57 +56,51 @@
       "desc": "ruff check .",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.89,
+      "seconds": 0.17,
       "cwd": ".",
       "argv": [
-        "./.venv/Scripts/ruff.exe",
+        "./.venv/bin/ruff",
         "check",
         "."
       ],
-      "command": "./.venv/Scripts/ruff.exe check ."
+      "command": "./.venv/bin/ruff check ."
     },
     {
       "name": "oxlint",
       "desc": "oxlint（web/）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.29,
+      "seconds": 0.3,
       "cwd": "web",
       "argv": [
-        "D:/DevTools/nodejs/node.EXE",
+        "/usr/bin/node",
         "node_modules/oxlint/bin/oxlint"
       ],
-      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+      "command": "/usr/bin/node node_modules/oxlint/bin/oxlint"
     },
     {
       "name": "tsc",
       "desc": "tsc -b（web/，类型检查；不含 vite build）",
-      "status": "FAIL",
-      "rc": 2,
-      "seconds": 17.23,
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 10.03,
       "cwd": "web",
       "argv": [
-        "D:/DevTools/nodejs/node.EXE",
+        "/usr/bin/node",
         "node_modules/typescript/bin/tsc",
         "-b"
       ],
-      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b",
-      "output_tail": [
-        "src/hooks/useSession.test.ts(165,37): error TS2345: Argument of type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is not assignable to parameter of type 'ConversationState'.",
-        "  Type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is missing the following properties from type 'ConversationState': run_budget_ceilings, run_budget_consumed",
-        "src/hooks/useSession.test.ts(173,37): error TS2345: Argument of type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is not assignable to parameter of type 'ConversationState'.",
-        "  Type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is missing the following properties from type 'ConversationState': run_budget_ceilings, run_budget_consumed"
-      ]
+      "command": "/usr/bin/node node_modules/typescript/bin/tsc -b"
     },
     {
       "name": "guards",
       "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 6.39,
+      "seconds": 3.34,
       "cwd": ".",
       "argv": [
-        "./.venv/Scripts/python.exe",
+        "./.venv/bin/python",
         "-m",
         "pytest",
         "tests/test_event_types_generated.py",
@@ -119,8 +113,9 @@
         "-p",
         "no:cacheprovider"
       ],
-      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "command": "./.venv/bin/python -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
       "env": {
+        "PYTHONUTF8": "1",
         "PYTHONPATH": ""
       }
     },
@@ -129,16 +124,16 @@
       "desc": "覆盖闸门 check_review_coverage.py",
       "status": "FAIL",
       "rc": 1,
-      "seconds": 4.94,
+      "seconds": 2.48,
       "cwd": ".",
       "argv": [
-        "./.venv/Scripts/python.exe",
+        "./.venv/bin/python",
         "scripts/check_review_coverage.py"
       ],
-      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "command": "./.venv/bin/python scripts/check_review_coverage.py",
       "output_tail": [
-        "✅ docs-only（按路径自动归属）: f47e6c22  docs(review-ledger): 二轮终态复审归属行 + tracker/PHASE_STATUS/月档记二轮双轴结论（P3-1 红绿锚处置 CLOSED、P3-2 登记不修） — docs/PHASE_STATUS.md + docs/SDD_TICKET_TRACKER.md + docs/phase_status/2026-10.md + docs/review_ledger.d/t519-t518-second-review-p3-anchor-538aca93-c2a6f1e8.tsv",
         "✅ 零新增内容（树 b55894044205ac225835e44f570b08fa75d7a15f == 父 cd06025b210ef01dd03be0e5a7373579ef93c242 的树）: ff20b89d  Merge pull request #511 from EricKingWhy/fix/t509-t510-e2e-stability",
+        "✅ docs-only（按路径自动归属）: ffa5cf74  docs(gate): 落盘 32a9a59a 的 Gate-0 裸全量读数（6/6 PASS，墙钟 12.0s；先回后正第二轮合并树终态） — docs/gate/32a9a59ab76c82efb80b973f3d413feaf0293203.json",
         "闸门失败。处置（不要改台账蒙过去）：",
         "  · 这些 commit 动了代码 ⇒ **补一次审查**（两轴 /code-review，范围写进台账的新行）；",
         "  · 若确认只是文档改动 ⇒ 归属**本该自动**（脚本按路径机械判定）；仍失败说明它的改动文件",
