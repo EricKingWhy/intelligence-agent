@@ -1,0 +1,1 @@
+2026-10-19	#1351 残余登记（后续票，本分支 scope lock 外）：①ADR-0012 决策 5 的 side_effect 条款已过时（显式 tool_permissions=read-only 也派生 READ_ONLY），需补变更注记；未改 docs/adr/0012-mcp-client-integration.md。②`tooling/executor.py:831` 的 `_settle_state` 是 side_effect 第 4 消费点（票面涟漪只枚举 245/1304/1341）；改后显式 read-only 的 MCP 工具超时不再落 UNKNOWN+unproven 而归 FAILED，与已接受前提自洽，后续审计勿误判为回归。	0a9376cb..601992c1

@@ -12,7 +12,8 @@ from agent_harness.mcp.adapter import (
     _pydantic_model_from_json_schema,
     mcp_tool_name,
 )
-from agent_harness.tooling import ToolSideEffect
+from agent_harness.session.workflow import WorkflowMode
+from agent_harness.tooling import ToolExecutor, ToolRegistry, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
 from tests.mcp_client.fake_server import FakeMCPServer, fake_mcp_session, make_fake_tool
@@ -50,7 +51,7 @@ def test_naming_namespaces_server_and_tool():
 @pytest.mark.asyncio
 async def test_permission_defaults_hint_and_override():
     """无注解 → DANGER/MUTATING（最严默认）；readOnlyHint → READ_ONLY/READ_ONLY；
-    server 配置覆写优先于注解。"""
+    server 配置可覆写 permission，side_effect 则取显式 read-only 配置与 hint 的或。"""
     server = FakeMCPServer(tools=[
         make_fake_tool("no_annot"),
         make_fake_tool("ro_tool", read_only=True),
@@ -64,6 +65,57 @@ async def test_permission_defaults_hint_and_override():
             "server 配置覆写优先于 readOnlyHint"
         )
         assert built["ro_tool"].side_effect == ToolSideEffect.READ_ONLY
+
+
+@pytest.mark.asyncio
+async def test_side_effect_follows_explicit_read_only_tool_permission():
+    """#1351：显式配置 read-only 的工具必须派生 READ_ONLY side_effect（PLAN 档可调用、
+    可并行、超时重试），而不是只认 server 自报的 readOnlyHint。"""
+    server = FakeMCPServer(tools=[
+        make_fake_tool("web_search"),                 # 无注解 + 显式 read-only
+        make_fake_tool("plain"),                      # 无注解 + 未配置
+        make_fake_tool("ro_tool", read_only=True),    # 注解 + 未配置
+        make_fake_tool("writer"),                     # 无注解 + 显式 workspace-write
+    ])
+    config = _config(tool_permissions={
+        "web_search": "read-only",
+        "writer": "workspace-write",
+    })
+    async with _built_tools(config, server) as tools:
+        built = {t.remote_name: t for t in tools}
+        # 分支 1：显式 read-only 覆盖（无 readOnlyHint）→ READ_ONLY 权限与副作用
+        assert built["web_search"].permission == ToolPermission.READ_ONLY
+        assert built["web_search"].side_effect == ToolSideEffect.READ_ONLY
+        # 分支 2：未配置且无注解 → 保持最严默认（DANGER/MUTATING）
+        assert built["plain"].permission == ToolPermission.DANGER
+        assert built["plain"].side_effect == ToolSideEffect.MUTATING
+        # 分支 3：未配置但有 readOnlyHint → 既有行为（回归保护）
+        assert built["ro_tool"].permission == ToolPermission.READ_ONLY
+        assert built["ro_tool"].side_effect == ToolSideEffect.READ_ONLY
+        # 显式 workspace-write 是写权限，副作用仍为 MUTATING
+        assert built["writer"].permission == ToolPermission.WORKSPACE_WRITE
+        assert built["writer"].side_effect == ToolSideEffect.MUTATING
+
+
+@pytest.mark.asyncio
+async def test_explicit_read_only_mcp_tool_executes_in_plan_mode():
+    server = FakeMCPServer(tools=[make_fake_tool("web_search")])
+    config = _config(tool_permissions={"web_search": "read-only"})
+    async with _built_tools(config, server) as tools:
+        registry = ToolRegistry()
+        tool = next(tool for tool in tools if tool.remote_name == "web_search")
+        registry.register(tool)
+        executor = ToolExecutor(registry, workflow_mode=WorkflowMode.PLAN)
+
+        result = await executor.execute({
+            "id": "plan-read-only-mcp",
+            "name": tool.name,
+            "args": {"text": "query"},
+        })
+
+        assert result.result.ok is True
+        assert server.call_count == 1
+        assert server.calls[0].name == "web_search"
 
 
 def test_pydantic_model_from_schema_types_and_required():
