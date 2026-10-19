@@ -449,6 +449,9 @@ test('active fallback projects its own default without replacing the primary pre
   await page.keyboard.press('ArrowRight');
   await expect(effortTrigger).toContainText('Deep');
   await page.keyboard.press('Escape');
+  // picker 有 160ms 退场动画（.picker-content[data-state=closed]）；不等到卸载就
+  // 点下一次，locator 会先命中**上一份**正在退场的 slider（实测 value 仍是 Deep）。
+  await expect(page.locator('.picker-content')).toHaveCount(0);
 
   await page.locator('.session-item').first().click();
   await expect(effortTrigger).toContainText('Minimal');
@@ -511,12 +514,17 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await expect(foot).toBeVisible();
   await expect(foot).toHaveText('该档位声明开放 13 个工具（全部档位声明 18 个）');
   // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
-  // `title` 挂在文案 span 上（`.picker-foot` 是容器槽位——调用方可能放别的东西，
-  // 那个槽位本身不该被强行赋予一个 title 语义）。
-  const note = foot.locator('span[title]');
-  await expect(note).toHaveAttribute('title', /^Coding未声明开放：/);
-  await expect(note).toHaveAttribute('title', /delegate/);
-  await expect(note).toHaveAttribute('title', /web_search/);
+  // #1372：原生 title 迁到 radix tooltip，提示内容仍在可访问名（aria-label）里，
+  // 且**以可见文字开头**（WCAG 2.5.3 Label in Name）。
+  const note = foot.locator('span[aria-label]');
+  await expect(note).toHaveAttribute('aria-label', /^该档位声明开放 13 个工具（全部档位声明 18 个）；Coding未声明开放：/);
+  await expect(note).toHaveAttribute('aria-label', /delegate/);
+  await expect(note).toHaveAttribute('aria-label', /web_search/);
+  // #1372：title 迁到 radix tooltip 后必须真的能挂载（不是只剩 aria-label）。
+  await note.hover();
+  await expect(page.locator('.tip-content')).toContainText('未声明开放：');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.tip-content')).toHaveCount(0);
   await closePicker();
 
   // ③ 换回未被收窄的档位（通用 = main）⇒ 提示消失（跟着当前生效档位走，不是一次性的）

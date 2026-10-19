@@ -122,9 +122,9 @@ describe('budgetSummary — trigger 摘要（#536 §2.5）', () => {
     expect(budgetSummary('', '', '30m')).toBe('轮数 默认 · 30m');
   });
 
-  it('datetime 草稿 → 摘要里显示 MM-DD HH:mm（不是原始 datetime-local 串）', () => {
+  it('datetime 草稿 → 摘要里显示 YYYY-MM-DD HH:mm（不是原始 datetime-local 串）', () => {
     const summary = budgetSummary('', '', '2026-10-02T15:30');
-    expect(summary).toBe('轮数 默认 · 10-02 15:30');
+    expect(summary).toBe('轮数 默认 · 2026-10-02 15:30');
   });
 
   it('非数字 turns / 非法 tokens → 该部分按未设处理（判形唯一执行点一致）', () => {
@@ -161,7 +161,7 @@ describe('deadlinePreview — 截止预览（#536 §2.2）', () => {
   it('datetime-local 高级路径 → 同一格式（含日期与时刻），无相对语', () => {
     const preview = deadlinePreview('2026-10-02T15:30', NOW);
     expect(preview?.expired).toBe(false);
-    expect(preview?.text).toMatch(/≈ \d{2}-\d{2} \d{2}:\d{2} 截止$/);
+    expect(preview?.text).toMatch(/≈ \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止$/);
   });
 
   it('跨年 → 显示完整年份（YYYY-MM-DD HH:mm）', () => {

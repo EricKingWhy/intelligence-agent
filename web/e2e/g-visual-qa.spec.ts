@@ -144,7 +144,7 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
   await page.locator('.session-item').first().click();
 
   // Timeline tab → 两个分组头：序数、状态徽章、计数
-  await page.locator('.detail-tab[title="时间线"]').click();
+  await page.locator('.detail-tab[aria-label="时间线"]').click();
   const headers = page.locator('.tl-run-header');
   await expect(headers).toHaveCount(2);
   await expect(headers.first()).toContainText('第 1 轮执行');
@@ -157,5 +157,5 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
   await expect(page.locator('.detail-run-id')).toHaveText('共 2 轮 · 7 事件');
 
   // tab 计数徽章（识别而非回忆）
-  await expect(page.locator('.detail-tab[title="时间线"] .detail-tab-count')).toHaveText('7');
+  await expect(page.locator('.detail-tab[aria-label="时间线"] .detail-tab-count')).toHaveText('7');
 });

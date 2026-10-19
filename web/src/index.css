@@ -329,6 +329,9 @@ body,
 body {
   font-family: var(--font-ui);
   font-size: var(--text-base);
+  /* #1372 改动 10：全局数字等宽（tabular-nums 可继承）——此前 29 处逐个挂
+     `.num`/局部规则，仍有漏网；这里一次性补齐，局部显式设置仍优先。 */
+  font-variant-numeric: tabular-nums;
   line-height: 1.6;
   color: var(--text-primary);
   /* Ambient background：环境光减半保留（冻结决策 B 衍生：减淡保留一点氛围） */

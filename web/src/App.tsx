@@ -21,9 +21,10 @@ import { useDelegations } from './hooks/useDelegations';
 import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
+import { SkipLinks } from './components/SkipLinks';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
-import { Composer, type ComposerHandle, type SubmitResult } from './components/Composer';
+import { Composer, lockReasonOf, type ComposerHandle, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -1684,8 +1685,35 @@ export default function App() {
     return items;
   }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
+  // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
+  // projection 状态，无第二真相源）。`lockReasonOf` 与 Composer 共用同一优先级，
+  // composer 禁用时「跳到输入框」也必须隐藏——disabled 表单控件不可聚焦，
+  // 链接会变成死路（#1372 r3 P3）。
+  const approvalPending = awaitingApproval(
+    (conversation?.pending_approvals ?? []).filter(
+      (a) => !goneApprovalIds.has(a.approval_id),
+    ),
+  );
+  const composerLocked =
+    lockReasonOf({
+      constraintInputPending,
+      askUserInputPending,
+      planApprovalInputPending,
+      approvalPending,
+    }) !== null;
+
   return (
     <div className="app-frame">
+      <SkipLinks
+        inspectorVisible={!watchtowerOpen && inspectorOpen}
+        regionsVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen)}
+        composerVisible={
+          !watchtowerOpen &&
+          !(panel.expanded && inspectorOpen) &&
+          activeTab === 'chat' &&
+          !composerLocked
+        }
+      />
       <TopBar
         conversation={conversation}
         streaming={streaming}
@@ -1705,6 +1733,9 @@ export default function App() {
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
         awaitingDecision={hasPendingDecisions}
+        sessions={sessions}
+        titlesById={titlesById}
+        onSelectSession={handleSelect}
         rosterSlot={
           <SubagentRoster
             delegations={delegations}
@@ -1772,7 +1803,13 @@ export default function App() {
           onOpenPlugins={handleOpenPlugins}
         />
 
-        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+        <section
+          className={`app-workspace${splitChild ? ' with-split' : ''}`}
+          id="region-main"
+          role="region"
+          aria-label="主工作区"
+          tabIndex={-1}
+        >
           {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
               父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
           <div className="workspace-main">
@@ -1780,7 +1817,7 @@ export default function App() {
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
               <span>
-                后端要求身份令牌（401）：点击顶栏 <strong>钥匙图标</strong> 配置 Bearer Token
+                后端要求身份令牌（401）：打开顶栏「<strong>更多工具</strong>」→「API 身份令牌」配置 Bearer Token
                 即自动重试——本地开发环境（未配置 JWT_SECRET）不应出现此提示。
               </span>
               <button
@@ -2062,11 +2099,7 @@ export default function App() {
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
-                    approvalPending={awaitingApproval(
-                      (conversation?.pending_approvals ?? []).filter(
-                        (a) => !goneApprovalIds.has(a.approval_id),
-                      ),
-                    )}
+                    approvalPending={approvalPending}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
                     /* #1191：项目级登记是否可选——真值来自后端（见上方 effect），

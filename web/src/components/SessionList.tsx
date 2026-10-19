@@ -60,6 +60,7 @@ import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDi
 import { SessionReplayDialog, type ReplaySessionTarget } from './SessionReplayDialog';
 import { TaskCreationDialog } from './TaskCreationDialog';
 import { SessionListSkeleton } from './SessionListSkeleton';
+import { Tip } from './Tooltip';
 
 interface Props {
   sessions: SessionSummary[];
@@ -328,7 +329,15 @@ export const SessionList = memo(function SessionList({
   const sessionsPending = sessionsLoading && sessions.length === 0;
 
   return (
-    <aside className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}>
+    {/* #1372：skip-link 地标（`region-sessions`）。与 #1368 的抽屉状态类共存：
+        抽屉开关只改 class，id/role 不动，键盘"跳到会话区"两种形态都落得到。 */}
+    <aside
+      className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}
+      id="region-sessions"
+      role="region"
+      aria-label="会话区"
+      tabIndex={-1}
+    >
       {/* #1368：抽屉的点击遮罩。只在展开时存在，`position: fixed; inset: 0; z-index: -1`
           由 CSS 给：它铺满视口、命中区吃掉"点抽屉外"这一下（关闭与"点到下面的正文"
           不再是同一次点击），但画在轨自己的背景之下 —— 抽屉表面不会被它压暗
@@ -356,14 +365,11 @@ export const SessionList = memo(function SessionList({
       <div className="session-list-header">
         <span className="panel-label">会话</span>
         {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
-        <button
-          className="icon-btn rail-plugins-btn"
-          onClick={onOpenPlugins}
-          aria-label="插件"
-          title="插件：MCP Servers 与 Skills 的启用 / 禁用"
-        >
-          <Puzzle size={14} />
-        </button>
+        <Tip content="插件：MCP Servers 与 Skills 的启用 / 禁用">
+          <button className="icon-btn rail-plugins-btn" onClick={onOpenPlugins} aria-label="插件">
+            <Puzzle size={14} />
+          </button>
+        </Tip>
         {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
             「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
             （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
@@ -396,26 +402,30 @@ export const SessionList = memo(function SessionList({
           <div className="session-list-actions">
             {/* #171：「显示已归档」——`aria-pressed` 是开关的语义（不是两个动作按钮），
                 按下态给 accent 色（CSS）。icon-only 与本栏其余动作一致。 */}
-            <button
-              className={`icon-btn rail-archived-toggle${showArchived ? ' on' : ''}`}
-              aria-pressed={showArchived}
-              onClick={toggleArchived}
-              aria-label="显示已归档会话"
-              title="显示已归档会话（归档只改列表可见性，不删任何东西）"
-            >
-              <Archive size={14} />
-            </button>
-            <button
-              className="icon-btn"
-              onClick={() => setCreateOpen(true)}
-              aria-label="新建项目"
-              title="新建项目：注册一个已存在的目录"
-            >
-              <FolderPlus size={14} />
-            </button>
-            <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
-              <Plus size={14} />
-            </button>
+            <Tip content="显示已归档会话（归档只改列表可见性，不删任何东西）">
+              <button
+                className={`icon-btn rail-archived-toggle${showArchived ? ' on' : ''}`}
+                aria-pressed={showArchived}
+                onClick={toggleArchived}
+                aria-label="显示已归档会话"
+              >
+                <Archive size={14} />
+              </button>
+            </Tip>
+            <Tip content="新建项目：注册一个已存在的目录">
+              <button
+                className="icon-btn"
+                onClick={() => setCreateOpen(true)}
+                aria-label="新建项目"
+              >
+                <FolderPlus size={14} />
+              </button>
+            </Tip>
+            <Tip content="新建会话">
+              <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
+                <Plus size={14} />
+              </button>
+            </Tip>
           </div>
         )}
       </div>
@@ -965,6 +975,10 @@ function SessionRow({
   const index = ledger.indexOf(s.session_id);
   // #1028：本行的归属标注文案（有选中会话的 cwd 才算；纯函数，算一次供 title/label 复用）。
   const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
+  // #1372 改动 1：会话条目与 ⋯ 合并为一个 Tab 停留点。⋯ 按钮仍可由鼠标点、
+  // 也能被 Shift+F10 打开的菜单接住焦点，但不进 Tab 序（tabIndex=-1）。
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div
       className={`session-row${dragging ? ' dragging' : ''}`}
@@ -995,6 +1009,17 @@ function SessionRow({
       <button
         className={`session-item ${selected ? 'selected' : ''}`}
         onClick={() => onSelect(s.session_id)}
+        aria-keyshortcuts="Shift+F10"
+        onKeyDown={(event) => {
+          // APG 上下文菜单快捷键：Shift+F10 打开当前项的菜单，焦点交给 Radix。
+          // 行按钮默认动作是「选中会话」而不是弹出，因此**不挂** aria-haspopup——
+          // 那会把默认动作声明成弹出。菜单语义由 ⋯ 触发器承担（Radix 注入
+          // aria-haspopup/aria-expanded）；aria-keyshortcuts 只声明这条捷径。
+          if (event.shiftKey && event.key === 'F10') {
+            event.preventDefault();
+            setMenuOpen(true);
+          }
+        }}
         title={`${s.session_id} · ${s.event_count} 事件${inProject ? '' : ' · 未分组'}`}
       >
         <span
@@ -1055,15 +1080,19 @@ function SessionRow({
           )}
         </div>
       </button>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button
-            className="icon-btn rail-menu-btn"
-            aria-label={`会话 ${s.session_id.slice(0, 8)} 操作`}
-          >
-            <Ellipsis size={14} />
-          </button>
-        </DropdownMenu.Trigger>
+      <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
+        <Tip content="会话操作">
+          <DropdownMenu.Trigger asChild>
+            <button
+              ref={menuTriggerRef}
+              className="icon-btn rail-menu-btn"
+              aria-label={`会话 ${s.session_id.slice(0, 8)} 操作`}
+              tabIndex={-1}
+            >
+              <Ellipsis size={14} />
+            </button>
+          </DropdownMenu.Trigger>
+        </Tip>
         <DropdownMenu.Portal>
           <DropdownMenu.Content className="rail-menu" align="end" sideOffset={4}>
             {inProject ? (
@@ -1118,7 +1147,16 @@ function SessionRow({
                 （讲清"零副作用地重放"，见 SessionReplayDialog）。 */}
             <DropdownMenu.Item
               className="rail-menu-item"
-              onSelect={() => onReplay({ id: s.session_id, title })}
+              onSelect={() =>
+                onReplay({
+                  id: s.session_id,
+                  title,
+                  // #1372 改动 3：菜单项在菜单关闭时被卸载，Radix 的默认焦点归还
+                  // 会落到 body。把「稳定的那个触发按钮」（行内 ⋯）记下来，
+                  // 由重放浮层关闭时显式归还。
+                  restoreFocus: menuTriggerRef.current,
+                })
+              }
             >
               重放会话…
             </DropdownMenu.Item>

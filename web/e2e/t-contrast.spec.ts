@@ -521,13 +521,56 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
+  /* #1372 改动 5：thinking 与 running 拆分后新增 `.run-badge-thinking`（info 色域）。
+     夹具走真实投影：run/started + model started、无终态 ⇒ run_status='running'，
+     Inspector 头徽章渲染 thinking。 */
+  test(`[${theme}] #1372 思考中徽标（.run-badge-thinking）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'model/started', data: { model: 'e2e-model' }, seq: 3, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await expect(page.locator('.run-badge-thinking')).toBeVisible();
+    // 同一 thinking 状态的两个表面：Inspector 徽章 + 顶栏 run pulse。
+    for (const selector of ['.run-badge-thinking', '.run-pulse.pulse-thinking']) {
+      const m = await measure(page, selector);
+      expect(contrast(m.color, m.bg), `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /* #1372 改动 6：401 时「更多工具」触发器的提示点新增 `.appbar-menu-warn`（warning ink）。
+     走真实 401 路径（同 #1136 auth-banner 夹具），打开菜单后量。 */
+  test(`[${theme}] #1372 「更多工具」需要配置徽标（.appbar-menu-warn）对比度 ≥4.5`, async ({ page }) => {
+    await mockAuthRequired(page);
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: '更多工具' }).click();
+    const warn = page.locator('.appbar-menu-warn');
+    await expect(warn).toBeVisible();
+    const m = await measure(page, '.appbar-menu-warn');
+    expect(contrast(m.color, m.bg), '.appbar-menu-warn contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
   /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
      （`#1327` 起它是"有欠账、等自动处理"的如实呈现；看不清等于把状态藏起来）。
-     这里**真量**而不是信注释里的算术：
-     `.pulse-awaiting-decision` 的文字色是 `color-mix(--warning 45%, --text-primary)`
-     压在 12% warning 底上。纯 `--warning` 在这个底上亮色实测 **2.91:1**（不达 AA），
-     混入 ink 后才够——本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --warning，
-     「≥4.5」那条立刻变红；谁把注释里的数字写成别的值，「<4.5」那条会替我们说话。 */
+     #1372 改动 5 把它从 warning 移到 danger 色域（与 tool 的 warning 分开），
+     底色随之变成 10% danger。这里**真量**而不是信注释里的算术：
+     `.pulse-awaiting-decision` 的文字色是 `color-mix(--danger 45%, --text-primary)`
+     压在 10% danger 底上。纯 `--danger` 在这个底上亮色不达 AA，混入 ink 后才够——
+     本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --danger，「≥4.5」那条立刻
+     变红；谁把注释里的结论写成别的值，「<4.5」那条会替我们说话。 */
   test(`[${theme}] #1030 待裁决徽标对比度 ≥4.5（亮/暗两主题）`, async ({ page }) => {
     await routeApi(page, {
       sessions: [ROW],
@@ -569,28 +612,28 @@ for (const theme of ['dark', 'light'] as const) {
     console.log(`[${theme}] pulse-awaiting-decision color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
     expect(ratio, `.pulse-awaiting-decision contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
 
-    // 注释里引用的"纯 --warning 不达标"那个读数也在这里**实测**，不靠算术：克隆同一个
-    // 真实节点、只把文字色改回纯 --warning，仍用**同一个 measure 解析器**量它在同一个
+    // 注释里引用的"纯 --danger 不达标"那个读数也在这里**实测**，不靠算术：克隆同一个
+    // 真实节点、只把文字色改回纯 --danger，仍用**同一个 measure 解析器**量它在同一个
     // 底上的比值（不能拿 getComputedStyle 的原始串直接喂 contrast——color-mix 的计算值
     // 可能是 color(srgb …) 形式，只有 measure 内部的解析器认它，直接喂会得到 NaN）。
-    // 这样注释里的数字与代码、测试三者同源（审查 P2-2：此前三处写了 2.96 / 3.26 / ~2.8）。
-    // 只在亮色主题断言——暗色下 --warning 本身就够亮，那正是"为什么暗色看不出问题、
+    // 这样注释里的结论与代码、测试三者同源（审查 P2-2：此前三处写了 2.96 / 3.26 / ~2.8）。
+    // 只在亮色主题断言——暗色下 --danger 本身就够亮，那正是"为什么暗色看不出问题、
     // 而 ink-mix 是亮色必需"的对照臂。
     if (theme === 'light') {
       await page.evaluate(() => {
         const src = document.querySelector('.run-pulse.pulse-awaiting-decision') as HTMLElement;
         const probe = src.cloneNode(true) as HTMLElement;
-        probe.id = 'tmp-plain-warning';
-        probe.style.color = 'var(--warning)';
+        probe.id = 'tmp-plain-danger';
+        probe.style.color = 'var(--danger)';
         src.parentElement!.appendChild(probe);
       });
-      const pm = await measure(page, '#tmp-plain-warning');
+      const pm = await measure(page, '#tmp-plain-danger');
       const plainRatio = contrast(pm.color, pm.bg);
       // eslint-disable-next-line no-console
-      console.log(`[light] plain --warning on same tint ratio=${plainRatio.toFixed(4)}`);
+      console.log(`[light] plain --danger on same tint ratio=${plainRatio.toFixed(4)}`);
       expect(
         plainRatio,
-        '纯 --warning 在亮色下必须不达 AA（这正是 ink-mix 的理由）',
+        '纯 --danger 在亮色下必须不达 AA（这正是 ink-mix 的理由）',
       ).toBeLessThan(4.5);
     }
 

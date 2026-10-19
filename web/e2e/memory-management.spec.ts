@@ -95,13 +95,18 @@ test('AC8: browser shows an empty state only after a successful empty response',
   await expect(panel(page).locator('.memory-error')).toHaveCount(0);
 });
 
-test('AC8: browser reports a disabled memory capability as degraded, not empty', async ({ page }) => {
+test('AC8: browser reports a disabled memory capability as a neutral empty state, not a failure', async ({ page }) => {
   await routeApi(page, { memoryDisabled: 'memory capability 未启用' });
   await page.goto('/');
   await openPanel(page);
 
-  await expect(panel(page).locator('.memory-degraded')).toContainText('记忆未启用');
-  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+  // #1372 改动 9：未启用 = 配置缺省，不是红色故障态；文案/入口都换成中性的。
+  const disabled = panel(page).locator('.memory-empty.memory-disabled');
+  await expect(disabled).toContainText('记忆管理未启用');
+  await expect(disabled).toContainText('查看记忆设置');
+  await expect(disabled).not.toContainText('还没有记忆');
+  await expect(panel(page).locator('.memory-empty:not(.memory-disabled)')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-degraded')).toHaveCount(0);
   await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
   await expect(panel(page).locator('.memory-error')).toHaveCount(0);
 });

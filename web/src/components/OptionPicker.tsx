@@ -44,6 +44,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import { focusPickerListOnOpen } from '../lib/pickerFocus';
+import { Tip } from './Tooltip';
 
 /** 一行选项的数据。`description` 为空 → 不渲染描述行（不填占位文案）。
  *  `icon` 缺省 → 图标槽留空（槽本身恒在，见 `OptionRowContent`）。 */
@@ -215,33 +216,50 @@ export function OptionPicker({
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control"
-          aria-label={ariaLabel}
-          /* #1370 P0-9 + 审查 P3-1：disabled 时 `disabledHint` 只解释"为什么不能点"，
-           * 单独用它会把「这是什么/改了会怎样」整句顶掉；两段并排保留。 */
-          title={
-            disabled && disabledHint
-              ? hint === undefined
-                ? disabledHint
-                : `${hint}\n${disabledHint}`
-              : tooltipTitle
-          }
-          /* #1370 P0-9：「选中才给底色」——默认态（null / 未选）透明，有生效值才浮出底色。
-           * 生效值包含备用模型投影出的默认档（`effectiveReasoningEffort`），那时这一档
-           * 就是本轮真正生效的档位，所以照样亮。 */
-          data-selected={effectiveValue ? 'true' : undefined}
-          // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（composer 档位 chip）。
+          #1370 P0-9 + 审查 P3-1 保留：data-selected 选中态；disabled 时
+          `disabledHint` 只解释"为什么不能点"，与 hint（"这是什么/改了会怎样"）
+          两段并排，整句不顶掉。 */}
+      <Tip
+        content={
+          disabled && disabledHint
+            ? hint === undefined
+              ? disabledHint
+              : `${hint}\n${disabledHint}`
+            : tooltipTitle
+        }
+      >
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control"
+            aria-label={ariaLabel}
+            /* #1370 P0-9：「选中才给底色」——默认态（null / 未选）透明，有生效值才浮出底色。
+             * 生效值包含备用模型投影出的默认档（`effectiveReasoningEffort`），那时这一档
+             * 就是本轮真正生效的档位，所以照样亮。 */
+            data-selected={effectiveValue ? 'true' : undefined}
+            /* #1372：disabled 时 Radix tooltip 收不到指针事件，保留原生 title 作
+               降级通道——否则用户看不到「为什么不可点」，那是无障碍回退不是第二套
+               提示系统。启用态一律只走 radix tooltip。 */
+            title={
+              disabled
+                ? disabledHint === undefined
+                  ? triggerTitle
+                  : hint === undefined
+                    ? disabledHint
+                    : `${hint}\n${disabledHint}`
+                : undefined
+            }
+            // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+          >
+            <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className={`picker-content${customContent !== undefined ? ' picker-content-custom' : ''}`}

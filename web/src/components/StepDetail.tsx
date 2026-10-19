@@ -20,7 +20,7 @@ import {
   TerminalSquare, X,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
-import { formatBytes, formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatBytes, formatDateTime, formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { allTools, summarizeEvent } from '../lib/projection';
 import { permissionView } from '../lib/permission';
@@ -38,6 +38,7 @@ import { CopyButton } from './CopyButton';
 import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
 import { ToolOutputStream } from './ToolOutputStream';
+import { Tip } from './Tooltip';
 
 /** Inspector focus: Run-level overview, a drilled-in event, or a child session
  *  (Phase 13 委派钻取，v2 PRD §10.5 "delegation start ↔ child run" 配对）。 */
@@ -69,6 +70,17 @@ const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'artifacts', label: '产出文件' },
   { id: 'constraints', label: '我的要求' },
 ];
+
+/** #1372 改动 8：统计行每个图标的指标口径（tooltip 用）。计数是**本会话**口径，
+ *  与 tab 上的数字同源（`tabCounts`），这里只解释"这个数在数什么"。 */
+const TAB_TIPS: Record<Tab, string> = {
+  timeline: '时间线：本会话全部事件，按 run 分组',
+  chat: '概览：run 状态、轮次、耗时、tokens 与工具计数',
+  changes: '改动：产生 diff 的工具调用（本会话）',
+  terminal: '输出：命令类工具调用（bash 等）',
+  artifacts: '产物：本会话创建的 artifact 引用',
+  constraints: '约束：本会话生效的长期规则',
+};
 
 // C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
 // 与行边的 4px 间隙、上方放置需要的 16px 顶部裕量）。改一个地方即可。
@@ -396,6 +408,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   return (
     <aside
       className="step-detail"
+      id="region-inspector"
+      role="region"
+      aria-label="Inspector 面板"
+      tabIndex={-1}
       data-panel="inspector"
       data-expanded={panel.expanded ? 'true' : 'false'}
       data-resizing={resizing ? 'true' : 'false'}
@@ -509,26 +525,26 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
           const count = tabCounts[t.id];
           return (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
-              onClick={() => setTab(t.id)}
-              title={t.label}
-              /* 计数徽标是 tab 的真实文本内容：窄面板 label 隐藏（容器查询
-                 icon-only）后它就成了唯一可访问名，getByRole(tab, 'Timeline')
-                 会变成 name '4'。aria-label 钉住语义名，不受徽标/显隐影响。 */
-              aria-label={t.label}
-            >
-              <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
-              <span className="detail-tab-label">{t.label}</span>
-              {count !== undefined && (
-                <span className="detail-tab-count num" aria-hidden="true">
-                  {count}
-                </span>
-              )}
-            </button>
+            <Tip key={t.id} content={TAB_TIPS[t.id]}>
+              <button
+                role="tab"
+                aria-selected={tab === t.id}
+                className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
+                onClick={() => setTab(t.id)}
+                /* 计数徽标是 tab 的真实文本内容：窄面板 label 隐藏（容器查询
+                   icon-only）后它就成了唯一可访问名，getByRole(tab, 'Timeline')
+                   会变成 name '4'。aria-label 钉住语义名，不受徽标/显隐影响。 */
+                aria-label={t.label}
+              >
+                <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
+                <span className="detail-tab-label">{t.label}</span>
+                {count !== undefined && (
+                  <span className="detail-tab-count num" aria-hidden="true">
+                    {count}
+                  </span>
+                )}
+              </button>
+            </Tip>
           );
         })}
       </div>
@@ -716,7 +732,7 @@ export function ChatTab({
         {runStart && (
           <div className="detail-row">
             <span className="detail-key">开始</span>
-            <span className="detail-val">{new Date(runStart).toLocaleTimeString()}</span>
+            <span className="detail-val">{formatDateTime(runStart) ?? runStart}</span>
           </div>
         )}
         <div className="detail-row">

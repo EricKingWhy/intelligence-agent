@@ -5,6 +5,7 @@
 
 import type { MemoryScope, MemorySummary } from '../types';
 import type { MemoryKind, MemoryPayload, MemoryRecord, SemanticCategory } from './memoryV2Api';
+import { formatDateTime } from './format';
 
 export const MEMORY_CONTENT_MAX_CHARS = 500;
 export const MEMORY_PAYLOAD_FIELDS: Record<MemoryKind, readonly { key: string; label: string }[]> = {
@@ -137,9 +138,8 @@ export function scopeLabel(scope: MemoryScope): string {
  *  补一个当前时间诚实——后者会让用户以为这条是刚记的）。空串同理原样返回。
  *  格式化只发生在这里，`types.ts` 的契约字段始终保持后端原值。 */
 export function formatMemoryTime(createdAt: string): string {
-  const at = new Date(createdAt);
-  if (Number.isNaN(at.getTime())) return createdAt;
-  return at.toLocaleString();
+  // #1372 改动 10：统一中文日期格式（本地时区，到分钟），不再随环境漂移。
+  return formatDateTime(createdAt) ?? createdAt;
 }
 
 /** 列表是否还有下一页：请求了 `limit` 条、后端正好给满 `limit` 条才认为可能还有。

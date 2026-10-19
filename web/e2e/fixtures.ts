@@ -1939,6 +1939,14 @@ export async function pressMenuItemKey(page: Page, key: string, expected: string
   await expect.poll(() => activeMenuItem(page), { message: `${key} 之后焦点应移到 ${expected}` }).toContain(expected);
 }
 
+/** #1372：顶栏收纳后，配置 / 诊断类入口（身份令牌、上下文容量、上下文窗口、
+ *  持久审批规则、自动值班、Inspector 开关）在「更多工具」菜单里。Radix 菜单关闭即
+ *  卸载 ⇒ 每次调用都从打开菜单开始；菜单项是 `menuitem` 角色，不是 `button`。 */
+export async function clickTopBarMenuItem(page: Page, name: string): Promise<void> {
+  await page.getByRole('button', { name: '更多工具' }).click();
+  await page.getByRole('menuitem', { name }).click();
+}
+
 /** 打开模型菜单（键盘路径）并等初焦落到菜单项上（同 `pressMenuItemKey` 的延迟移焦成因）。 */
 export async function openModelMenu(page: Page): Promise<void> {
   const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();

@@ -28,6 +28,7 @@ import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import { ReasoningEffortSlider } from './ReasoningEffortSlider';
+import { Tip } from './Tooltip';
 import {
   BUILTIN_RUNS,
   filterSlashCommands,
@@ -76,7 +77,22 @@ const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
 
 /** #1283 P1：composer 被锁的**真实原因**——文案全部由它映射，不再各写一份三元链。
  *  优先级与 #1223 的既有行为逐字一致：约束澄清 > ask_user > 审批。 */
-type LockReason = 'constraint' | 'ask_user' | 'plan_approval' | 'approval';
+export type LockReason = 'constraint' | 'ask_user' | 'plan_approval' | 'approval';
+
+/** 唯一锁定判据：Composer 与 App（跳过链接）共用，避免第五个原因只改一侧。
+ *  优先级与文案映射（`LOCK_COPY`）保持一致：constraint > ask_user > plan_approval > approval。 */
+export function lockReasonOf(input: {
+  constraintInputPending: boolean;
+  askUserInputPending: boolean;
+  planApprovalInputPending: boolean;
+  approvalPending: boolean;
+}): LockReason | null {
+  if (input.constraintInputPending) return 'constraint';
+  if (input.askUserInputPending) return 'ask_user';
+  if (input.planApprovalInputPending) return 'plan_approval';
+  if (input.approvalPending) return 'approval';
+  return null;
+}
 
 interface LockCopy {
   hint: string;
@@ -461,15 +477,12 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
   // #1283：文案按**实际 lock 原因**一次算清（constraint > ask_user > approval，与
   // 既有优先级逐字一致）；`lockHint` / `lockedPlaceholder` / 权限 pill 的禁用原因 /
   // 队列条 title 全部从它派生，避免四份三元链各写一遍优先级、改文案时漂移。
-  const lockReason: LockReason | null = constraintInputPending
-    ? 'constraint'
-    : askUserInputPending
-      ? 'ask_user'
-      : planApprovalInputPending
-        ? 'plan_approval'
-        : approvalPending
-          ? 'approval'
-          : null;
+  const lockReason = lockReasonOf({
+    constraintInputPending,
+    askUserInputPending,
+    planApprovalInputPending,
+    approvalPending,
+  });
   const locked = lockReason !== null;
   // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = locked && !streaming;
@@ -1468,31 +1481,37 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
               disabled={locked}
             />
-            <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
-              将这条消息作为可复用规则
-            </span>
+            {/* #1372 改动 4/6：说明文字的原生 title 迁到 radix tooltip。span 自身可聚焦，
+                键盘用户也能读到同一条解释；可见文字仍是 <label> 的可访问名（Label in Name）。 */}
+            <Tip content="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
+              <span className="composer-rule-help" tabIndex={0}>
+                将这条消息作为可复用规则
+              </span>
+            </Tip>
           </label>
           {/* #1191：勾选后出现作用域三选一（默认「本会话」，票面 §四.1）。 */}
           {rememberAsProceduralRule && (
             <div className="composer-scope-pills" role="group" aria-label="登记作用域">
               {SCOPE_OPTIONS.map((option) => {
                 const projectDisabled = option.id === 'project' && projectAvailable === false;
+                const hint = projectDisabled
+                  ? '当前会话不在 git 仓库内，无法登记项目级约束'
+                  : option.hint;
                 return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
-                    aria-pressed={scope === option.id}
-                    disabled={projectDisabled || locked}
-                    title={
-                      projectDisabled
-                        ? '当前会话不在 git 仓库内，无法登记项目级要求'
-                        : option.hint
-                    }
-                    onClick={() => setScope(option.id)}
-                  >
-                    {option.label}
-                  </button>
+                  <Tip key={option.id} content={hint}>
+                    <button
+                      type="button"
+                      className={`composer-scope-pill${scope === option.id ? ' on' : ''}`}
+                      aria-pressed={scope === option.id}
+                      disabled={projectDisabled || locked}
+                      /* disabled 收不到指针事件 ⇒ Radix tooltip 打不开；原生 title 兜底，
+                         完整原因不能因为禁用就丢。 */
+                      title={projectDisabled || locked ? hint : undefined}
+                      onClick={() => setScope(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  </Tip>
                 );
               })}
             </div>
@@ -1577,18 +1596,18 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
                 (() => {
                   const note = toolScopeNote(agentProfiles, selectedAgentProfile);
                   if (!note) return undefined;
-                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；`aria-label`
-                  // **以可见文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名
-                  // 会违反 WCAG 2.5.3（Label in Name：可访问名须包含可见文字，
-                  // 否则语音控制/switch 用户照可见文字说不中）。
+                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；可访问名**以可见
+                  // 文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名会违反
+                  // WCAG 2.5.3（Label in Name）。#1372：title 迁到 radix tooltip。
                   return (
-                    <span
-                      tabIndex={0}
-                      title={note.title}
-                      aria-label={`${note.text}；${note.title}`}
-                    >
-                      {note.text}
-                    </span>
+                    <Tip content={note.title}>
+                      <span
+                        tabIndex={0}
+                        aria-label={`${note.text}；${note.title}`}
+                      >
+                        {note.text}
+                      </span>
+                    </Tip>
                   );
                 })()
               }

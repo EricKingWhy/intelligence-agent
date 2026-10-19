@@ -23,6 +23,7 @@ import * as Popover from '@radix-ui/react-popover';
 import { useId, useState } from 'react';
 import { ChevronDown, ChevronRight, Coins, RotateCw, Timer, Wallet } from 'lucide-react';
 import { OptionPicker } from './OptionPicker';
+import { Tip } from './Tooltip';
 import { parseDurationToken } from '../lib/amend';
 import {
   DURATION_CUSTOM_ID,
@@ -314,6 +315,10 @@ interface BudgetPickerProps {
   disabled?: boolean;
 }
 
+/** 预算 chip 的完整说明（tooltip 与 disabled 时的原生 title 同源，#1365 术语）。 */
+const BUDGET_TIP =
+  '这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。';
+
 /** 单入口：trigger 常显摘要（§2.5——「默认」即全空，设了才展开对应部分）。 */
 export function BudgetPicker({
   turns,
@@ -330,22 +335,27 @@ export function BudgetPicker({
   const hasBudgetOverrides = summary !== '默认';
   return (
     <Popover.Root>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control composer-budget-trigger"
-          aria-label="预算"
-          title="这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。"
-          /* #1370 P0-9：「选中才给底色」——设了任一维才浮出，全空仍是透明的「预算：默认」。 */
-          data-selected={hasBudgetOverrides ? 'true' : undefined}
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{`预算：${summary}`}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（预算 chip）。#1370 的
+          data-selected 与「预算：」前缀保留（选中态/摘要语义不变）。 */}
+      <Tip content={BUDGET_TIP}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control composer-budget-trigger"
+            aria-label="预算"
+            /* #1370 P0-9：「选中才给底色」——设了任一维才浮出，全空仍是透明的「预算：默认」。 */
+            data-selected={hasBudgetOverrides ? 'true' : undefined}
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+            /* 同 ModelPicker：disabled 收不到指针事件，原生 title 兜底完整说明。 */
+            title={disabled ? BUDGET_TIP : undefined}
+          >
+            <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current">{`预算：${summary}`}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className="picker-content budget-picker-content budget-picker-content--v2"
