@@ -147,8 +147,11 @@ export default function App() {
     streaming,
     reconnecting,
     error,
-    sendFailure,
-    runFailedBeforePlan,
+    // #1367：`sendFailure` 是新增通道；`App.test.tsx` 等既有用例用部分 mock
+    // 顶替 `useSession()`（不含该键），缺省成 null 才能保持它们零改动。
+    sendFailure = null,
+    // 同上：部分 mock 不含该键（#1193 的 plan-stuck 标记），缺省 null。
+    runFailedBeforePlan = null,
     sessionsError,
     titlesById,
     recoverState,
