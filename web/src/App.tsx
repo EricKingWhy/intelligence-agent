@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { KeyRound, RotateCcw, X } from 'lucide-react';
-import { isUnknownModelError, useSession } from './hooks/useSession';
+import { describeFailure, isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { useDelegations } from './hooks/useDelegations';
 import { useChildConversation } from './hooks/useChildConversation';
@@ -130,6 +130,14 @@ export default function App() {
   // #367 P3：目录冲突自动建 worktree 时的一次性提示（后端 X-Worktree-Path 头，
   // 前端在响应可得的两条路径消费；用户关闭后不再出现）。
   const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null);
+  // #1367（P0-3）：断网重试 = 重发上一次 submit（复用既有 handleSubmit 动作，
+  // 不造新机制）。入参存 ref：它不参与渲染，用 state 会让每次发送多一次整树提交。
+  const lastSubmitRef = useRef<{
+    task: string;
+    rememberAsProceduralRule: boolean;
+    attachmentIds: string[];
+    scope: ConstraintScope;
+  } | null>(null);
 
   const {
     sessions,
@@ -139,6 +147,7 @@ export default function App() {
     streaming,
     reconnecting,
     error,
+    sendFailure,
     runFailedBeforePlan,
     sessionsError,
     titlesById,
@@ -861,6 +870,8 @@ export default function App() {
       attachmentIds: string[] = [],
       scope: ConstraintScope = 'session',
     ): Promise<boolean> | void => {
+      // #1367：记住本次入参——断网失败后条内「重试」重发的就是这一次。
+      lastSubmitRef.current = { task, rememberAsProceduralRule, attachmentIds, scope };
       focusRun();
       const ruleSignal = rememberAsProceduralRule
         ? { remember_as_procedural_rule: true }
@@ -942,6 +953,28 @@ export default function App() {
     },
     [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
+
+  /** #1367（P0-3）：断网失败的重试动作 = 原样重发上一次 submit（既有 handleSubmit）。 */
+  const handleRetrySubmit = useCallback(() => {
+    const lastSubmit = lastSubmitRef.current;
+    if (lastSubmit === null) return;
+    void handleSubmit(
+      lastSubmit.task,
+      lastSubmit.rememberAsProceduralRule,
+      lastSubmit.attachmentIds,
+      lastSubmit.scope,
+    );
+  }, [handleSubmit]);
+
+  /** #1367：断网这一类改在对话区内联呈现（带重试）；其余错误保持原横幅。
+   *  `sendFailure` 由 useSession 在**发送失败分支**写入（不是单槽 `error` 的
+   *  推断）⇒ 内联条的「重试」永远绑定刚刚那次发送，不会被「加载历史失败」之类
+   *  无关错误劫持去重发一条旧任务。 */
+  const submitFailure = useMemo(() => {
+    if (sendFailure === null) return null;
+    const copy = describeFailure(sendFailure.message, { retryable: sendFailure.retryable });
+    return copy.kind === 'network' ? copy : null;
+  }, [sendFailure]);
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
@@ -1729,7 +1762,8 @@ export default function App() {
               </button>
             </div>
           )}
-          {error && <div className="app-error">{error}</div>}
+          {/* #1367：断网这一类已下沉到对话区内联条（带重试），不再重复打横幅。 */}
+          {error && submitFailure === null && <div className="app-error">{error}</div>}
           {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
               （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
               原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
@@ -1957,6 +1991,14 @@ export default function App() {
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
                     supportsVision={currentModelSupportsVision}
+                    /* #1367（P0-3）：断网失败的内联条 + 条内重试（重发上一次 submit）。
+                       `submitFailure` 由 useMemo 持有，身份稳定，不破坏 memo。 */
+                    submitFailure={submitFailure}
+                    onRetrySubmit={handleRetrySubmit}
+                    /* #1193 的 plan-stuck 横幅已带同一句失败原因 + 退出 plan 的
+                       动作；内联条再报一次就是同一事实两份 UI。 */
+                    suppressRunFailure={runFailedBeforePlan !== null
+                      && runFailedBeforePlan.sessionId === selectedId}
                   />
                   <Composer
                     streaming={streaming}

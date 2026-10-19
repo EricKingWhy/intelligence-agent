@@ -3332,6 +3332,86 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-destructive);
   font-size: var(--text-xs);
 }
+/* #1367（P0-3）：对话区内的内联错误条。**视觉 token 全部继承 `.approval-error`**
+ * （danger 8% 底 + 2px 左实条 + 既有字号），这里只加单行布局与折叠详情——
+ * 不新增第三套 alert 样式（app-error / approval-error / 本组件的配色必须同源）。
+ * 默认收起 = 一行高；原始详情进 <details>，展开才铺开。 */
+.conversation-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs) var(--space-sm);
+  line-height: 1.5;
+}
+.conversation > .conversation-error {
+  margin: var(--space-lg) var(--space-xl) 0;
+}
+.conversation-error-icon {
+  flex: none;
+}
+.conversation-error-title {
+  font-weight: 600;
+}
+.conversation-error-hint,
+.conversation-error-detail {
+  color: color-mix(in srgb, var(--color-destructive) 45%, var(--text-primary));
+}
+.conversation-error-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.conversation-error-detail[open] {
+  flex-basis: 100%;
+}
+.conversation-error-detail summary {
+  width: max-content;
+  cursor: pointer;
+  list-style: none;
+}
+.conversation-error-detail summary::-webkit-details-marker {
+  display: none;
+}
+.conversation-error-detail summary:hover {
+  text-decoration: underline;
+}
+.conversation-error-detail pre {
+  max-height: 160px;
+  margin: var(--space-xs) 0 0;
+  padding: var(--space-xs) var(--space-sm);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.conversation-error-retry,
+.approval-error-retry {
+  margin-left: auto;
+  padding: 2px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: inherit;
+  background: color-mix(in srgb, var(--color-destructive) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-destructive) 38%, transparent);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.conversation-error-retry:hover:not(:disabled),
+.approval-error-retry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-destructive) 20%, transparent);
+}
+.conversation-error-retry:disabled,
+.approval-error-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.conversation-error-retry:focus-visible,
+.approval-error-retry:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
 /* APR-01: 失效态（run 已终结仍 pending → 后端队列已 GC，决策永不可能提交）。
  * 不用 danger 红——这不是"出错了"，而是一个已经翻篇的历史事实；用中性描边 +
  * 降饱和说明"这张卡还在，但它已经不能动了"。 */
