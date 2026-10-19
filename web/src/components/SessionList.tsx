@@ -984,7 +984,7 @@ function SessionRow({
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div
-      className={`session-row${dragging ? ' dragging' : ''}`}
+      className={`session-row${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}`}
       draggable={inProject}
       onDragStart={(e) => {
         if (!inProject) return;

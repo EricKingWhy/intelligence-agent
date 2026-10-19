@@ -878,28 +878,25 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   cursor: pointer;
   text-align: left;
   color: var(--color-foreground);
-  transition: background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple),
-    transform var(--dur-out) var(--ease-apple);
 }
-/* hover 质感：底色淡染 + 发丝环（0.5px inset）+ 圆点点亮——
- * 三层微反馈叠加出"可按"的暗示，仍保持低对比 chrome 定位。 */
-.session-item:hover {
+/* hover / 选中都染在 `.session-row` 上（#1398）：底色必须覆盖行尾的 22px 菜单槽，
+ * 而不是只染主按钮、把 ⋯ 留在底色外。非选中行不再 `translateX(1px)`——hover
+ * 只换底色，文字不位移。 */
+.session-row:hover {
   background: var(--color-hover);
   box-shadow: inset 0 0 0 0.5px var(--border-subtle);
-  transform: translateX(1px);
 }
 .session-item:hover .session-item-dot {
   background: var(--text-secondary);
 }
 /* 选中态：accent 淡染 + 左侧 2px 聚焦指示条（Linear 式选中语言）——
  * 比单纯底色更有"当前位置"感，且不依赖大色块。 */
-.session-item.selected {
+.session-row.selected {
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
   box-shadow: inset 2px 0 0 0 var(--accent),
     inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 24%, transparent);
 }
-.session-item.selected:hover {
-  transform: none;
+.session-row.selected:hover {
   /* 悬停加深一档（指示条 inset shadow 保持——本条只动背景） */
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
 }
@@ -1269,6 +1266,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   position: relative;
   display: flex;
   align-items: center;
+  border-radius: var(--radius-md);
+  transition: background var(--dur-out) var(--ease-apple),
+    box-shadow var(--dur-out) var(--ease-apple);
   /* #1370 P0-7：行间发丝分隔线（Linear 列表的 1px hairline）——列表读起来是一条
    * 连续的账，而不是一堆各自独立的行块。`.session-row` 并非 `.session-items` 的直接
    * 子级（项目/未分组各在自己的容器里），所以 `:last-child` 命中的是**每个分组内**的
@@ -1299,7 +1299,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   pointer-events: none;
   width: 22px;
   height: 22px;
-  transition: opacity var(--dur-out) var(--ease-apple);
+  /* #1398：⋯ 是行内 ghost 操作，静止态无底色 / 无边框 / 无 edge-light——
+   * 选中行整行染色后，它不再是悬在底色外的另一个按钮。 */
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-tertiary);
+  transition: opacity var(--dur-out) var(--ease-apple), color var(--dur-out) var(--ease-apple),
+    background var(--dur-out) var(--ease-apple);
+}
+.rail-menu-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--color-hover);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
 }
 .session-row:hover .rail-menu-btn,
 .session-row:focus-within .rail-menu-btn,
