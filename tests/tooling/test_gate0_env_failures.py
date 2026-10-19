@@ -157,7 +157,8 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
     """差分钉：除 env 字段外相同的两份读数，replay 判定必须逐项一致（都过）。"""
     sha, tree = "c" * 40, "d" * 40
     names = [ln.name for ln in gate0.build_lanes("")]
-    assert len(names) == 6
+    total = len(names)
+    assert names == list(gate0.GATE0_LANE_IDS), f"车道集合必须与词表逐项一致，实得 {names}"
 
     pass_argv = gate0._portable_argv([sys.executable, "-c", "pass"])
     fail_argv = gate0._portable_argv([sys.executable, "-c", "import sys; sys.exit(3)"])
@@ -181,7 +182,7 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
             lanes.append(entry)
         doc = {
             "schema": 1, "gate": "gate0", "sha": sha, "tree": tree, "argv": [],
-            "result": "FAIL", "passed": 5, "total": 6, "failed": [names[0]],
+            "result": "FAIL", "passed": total - 1, "total": total, "failed": [names[0]],
             "wall_seconds": 1.0, "lanes": lanes,
         }
         if with_env:

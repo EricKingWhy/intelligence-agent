@@ -815,10 +815,11 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
-  /* #1136 P3-1②：交付态 chip 两态（executing=--info / pending_verification=--warning）。
-     chip 底是 `--surface-2`（不染色），但字色本身在亮色下仍 <4.5。product_state 单值，
-     故关面板（hook 置 null 清态）改状态后再开重拉，一个用例量两态。 */
-  test(`[${theme}] #1136 task-review 交付态 chip（executing / pending_verification）对比度 ≥4.5`, async ({ page }) => {
+  /* #1136 P3-1②：交付态 chip 三态（executing=--info / pending_verification=--warning /
+     accepted=--accent-text，第三态为 #1364 补）。chip 底是 `--surface-2`（不染色），
+     但字色本身在亮色下仍 <4.5。product_state 单值，故关面板（hook 置 null 清态）改状态后
+     再开重拉，一个用例量三态。 */
+  test(`[${theme}] #1136 task-review 交付态 chip（executing / pending_verification / accepted）对比度 ≥4.5`, async ({ page }) => {
     const state: TaskReviewFixture = {
       task: {
         defined: true, task_text: 'chip 对比度', read_write_intent: null, cwd: '/repo',
@@ -849,6 +850,20 @@ for (const theme of ['dark', 'light'] as const) {
     // eslint-disable-next-line no-console
     console.log(`[${theme}] .task-review-chip.state-pending_verification color=${pm.color} bg=${pm.bg} ratio=${pr.toFixed(4)}`);
     expect(pr, `.task-review-chip.state-pending_verification contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // #1364：accepted 态是四态里优先级最高者（`--accent` 换色后最容易掉到 <4.5 的一格），
+    // 必须同批量——`#533afd` 在暗底只有 2.5:1，字色走 `--accent-text` 提亮档。
+    await page.locator('.task-review-panel .ctx-usage-close').click();
+    await expect(page.getByRole('dialog', { name: '详细审阅' })).toBeHidden();
+    state.task.product_state = 'accepted';
+    await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
+    const accepted = page.locator('.task-review-chip.state-accepted');
+    await expect(accepted).toBeVisible();
+    const am = await measure(page, '.task-review-chip.state-accepted');
+    const ar = contrast(am.color, am.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-chip.state-accepted color=${am.color} bg=${am.bg} ratio=${ar.toFixed(4)}`);
+    expect(ar, `.task-review-chip.state-accepted contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
   /* #1136 P3-1③：`.task-review-evidence-unavailable`（证据不可得条，--danger 压 12% 底）。

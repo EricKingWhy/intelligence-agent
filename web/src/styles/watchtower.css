@@ -58,7 +58,7 @@
 .watchtower-back:hover,
 .watchtower-inline-button:hover,
 .watchtower-session-link:hover {
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
 }
 
 .watchtower-eyebrow {
@@ -141,7 +141,7 @@
 .watchtower-primary {
   background: var(--accent);
   border: 1px solid var(--accent);
-  color: var(--surface-canvas);
+  color: var(--on-solid);
   font-weight: 600;
   padding: 0 14px;
 }
@@ -165,7 +165,7 @@
 
 .watchtower-action.is-primary {
   border-color: color-mix(in srgb, var(--accent) 44%, var(--border-subtle));
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
 }
 
 .watchtower-action.is-quiet {
@@ -274,7 +274,7 @@
 }
 
 .watchtower-rule-state.is-dispatching {
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
 }
 
 .watchtower-rule-prompt {
@@ -295,7 +295,7 @@
 }
 
 .watchtower-rule-time strong {
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
   font-family: var(--font-mono);
   font-size: var(--text-base);
   font-variant-numeric: tabular-nums;
@@ -398,7 +398,7 @@
 .watchtower-verification-icon {
   display: grid;
   place-items: center;
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
 }
 
 .watchtower-verification-copy {
@@ -423,7 +423,7 @@
   position: fixed;
   inset: 0;
   z-index: 1000;
-  background: rgba(0, 0, 0, .58);
+  background: color-mix(in srgb, var(--overlay-scrim) 58%, transparent);
   backdrop-filter: blur(4px);
 }
 

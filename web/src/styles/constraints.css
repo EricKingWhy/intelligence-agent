@@ -22,6 +22,10 @@
  * 已列入待裁决。
  */
 
+/* stylelint-disable color-no-hex --
+ * 暗色 `--cn-*` token 定义块（#1364 / web/stylelint.config.mjs 放行面 ①）。
+ * 本块只有 hex：函数式颜色规则在这里无事可放行，故**不收进 disable**
+ * （`reportNeedlessDisables` 会当场报出来，见 stylelint.config.mjs）。 */
 :root {
   --cn-surface-1: #0f1011;
   --cn-surface-2: #141516;
@@ -44,6 +48,7 @@
   --cn-dot-active: #27a644;
   --cn-dot-inactive: #8a8f98;
 }
+/* stylelint-enable color-no-hex */
 
 .cn-panel {
   padding: 20px 16px 28px;
@@ -179,7 +184,7 @@
   display: flex;
   gap: 4px;
   border: 1px solid var(--cn-hairline);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   padding: 3px;
 }
 
@@ -191,7 +196,7 @@
   font-size: 13px;
   font-weight: 500;
   padding: 6px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   cursor: pointer;
 }
 
@@ -329,7 +334,7 @@
   background: var(--cn-surface-2);
   color: var(--cn-ink-muted);
   font-size: 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   padding: 2px 10px;
   display: inline-flex;
   align-items: center;
@@ -504,6 +509,8 @@
 /* ── 亮色主题覆盖（AGENTS §15：新增 token 必须检查两块）──
  * 覆盖**全部** `--cn-*`（含两级 surface 与 6 类圆点色）：漏一个该 token 在亮色下
  * 仍用暗色值。圆点在亮色底上取更深一档，保证 12px 名称旁的辨识度。 */
+/* stylelint-disable color-no-hex, declaration-property-value-disallowed-list --
+ * 亮色 `--cn-*` token 定义块（放行面 ①，同上）。 */
 :root[data-theme='light'] {
   --cn-surface-1: #ffffff;
   --cn-surface-2: #f4f4f5;
@@ -526,3 +533,4 @@
   --cn-dot-active: #1a7f37;
   --cn-dot-inactive: #52525b;
 }
+/* stylelint-enable color-no-hex, declaration-property-value-disallowed-list */
