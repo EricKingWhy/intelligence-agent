@@ -1,7 +1,7 @@
 /* 约束管理面板（#1190 / #1176 Phase 1）——Session Inspector 内一页。
  *
  * 视觉 token 逐字取自 issue §三/§四（效果图定稿 v2）：深黑底 #010102、两级 surface
- * （#0f1011/#141516）、hairline #23252a、主操作薰衣草紫 #5e6ad2、
+ * （#0f1011/#141516）、hairline #23252a、主操作色 #533afd（#1366：与全站主色 Stripe indigo 统一）、
  * 6 类圆点固定色。这些值由**已批准的 issue 明文给定**（AGENTS.md §1.1 优先级第 7 条），
  * 且任务书要求「按效果图逐元素实现」——故此处**刻意另立 `--cn-*` 命名空间**而非复用
  * `index.css` 的 `--surface-*`（两者取值不同：仓内 surface-1 是 #101014，效果图是 #0f1011）。
@@ -33,7 +33,7 @@
   --cn-ink: #f7f8f8;
   --cn-ink-muted: #d0d6e0;
   --cn-ink-subtle: #8a8f98;
-  --cn-primary: #5e6ad2;
+  --cn-primary: #533afd;
   --cn-primary-hover: #828fff;
   --cn-on-primary: #ffffff;
   --cn-success: #27a644;
@@ -518,7 +518,7 @@
   --cn-ink: #111113;
   --cn-ink-muted: #3f3f46;
   --cn-ink-subtle: #52525b;
-  --cn-primary: #5e6ad2;
+  --cn-primary: #533afd;
   --cn-primary-hover: #4f5bc4;
   --cn-on-primary: #ffffff;
   --cn-success: #1a7f37;
