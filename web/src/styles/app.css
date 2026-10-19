@@ -425,13 +425,38 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   filter: brightness(1.1);
   transform: translateY(-1px);
 }
+/* #1369：按下反馈必须与 hover 有可见差异（Lane C FAIL #4）——hover 是
+ * brightness(1.1) + 上浮 1px；按下回撤浮起并把填充压暗。压暗取 6%：暗色
+ * accent 是浅粉（hover 后 R 通道已到 255），0.9 会在整块按钮上读作「变灰
+ * 一档」；0.94 实测 hover→active meanDelta 27.6（亮 18.3，参照
+ * `.icon-btn:active` 暗 13.1 / 亮 11.3）——仍是全族可见的按下差。
+ * filter 与 hover 同机制，两个主题同向变暗；不引入新的颜色字面量。 */
 .btn-primary:active:not(:disabled) {
   background: var(--accent-press);
   transform: translateY(0);
+  filter: brightness(0.94);
 }
-.btn-primary:disabled {
+/* #1369：禁用 / 加载统一视觉（Lane C FAIL #1–3）。`.is-loading` 复用同一套
+ * 降对比 + not-allowed，spinner 由消费方塞入；不新增组件、不新增动画。 */
+.btn-primary:disabled,
+.btn-primary.is-loading,
+.btn-danger:disabled,
+.btn-danger.is-loading,
+.btn-ghost:disabled,
+.btn-ghost.is-loading,
+.icon-btn:disabled,
+.icon-btn.is-loading {
   opacity: 0.45;
   cursor: not-allowed;
+}
+/* #1369：`.is-loading` 只减弱视觉会被读成「禁用其实能点」（本票要治的缺陷
+ * 形态）。鼠标侧补 `pointer-events: none` 兜住点击；键盘激活与表单提交仍必
+ * 须由消费方设 `disabled` 属性（纯 CSS 无法撤销键盘激活）。 */
+.btn-primary.is-loading,
+.btn-danger.is-loading,
+.btn-ghost.is-loading,
+.icon-btn.is-loading {
+  pointer-events: none;
 }
 .btn-primary:focus-visible,
 .btn-danger:focus-visible,
@@ -451,9 +476,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: var(--radius-md);
   font: 550 var(--text-sm) var(--font-ui);
   cursor: pointer;
+  transition: filter var(--dur-out) var(--ease-apple);
 }
-.btn-danger:hover {
+.btn-danger:hover:not(:disabled) {
   filter: brightness(1.1);
+}
+/* #1369：按下态（Lane C FAIL #5）——hover 是提亮，按下改为压暗。 */
+.btn-danger:active:not(:disabled) {
+  filter: brightness(0.9);
 }
 
 .btn-ghost {
@@ -469,8 +499,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   cursor: pointer;
   transition: background var(--dur-out) var(--ease-apple);
 }
-.btn-ghost:hover {
+.btn-ghost:hover:not(:disabled) {
   background: var(--color-hover);
+}
+/* #1369：按下态（Lane C FAIL #6）——hover 是 `--color-hover` 洗色（暗 4.5% /
+ * 亮 4%），按下再深一档：同一 text-primary token 的 10% 洗色（暗色更亮、亮色
+ * 更暗，两个主题都明显区别于 hover；不引入颜色字面量）。 */
+.btn-ghost:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
 }
 
 /* ── Icon button：高级质感 = 层次 + 反馈 ──
@@ -496,14 +532,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     box-shadow var(--dur-out) var(--ease-apple),
     transform var(--dur-fast) var(--ease-apple);
 }
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   color: var(--text-primary);
   background: var(--surface-overlay);
   border-color: var(--border-strong);
   box-shadow: var(--edge-light), var(--shadow-overlay);
   transform: translateY(-1px);
 }
-.icon-btn:active {
+/* #1369：`.icon-btn:hover:not(:disabled)` 比裸 `:active` 多一个伪类，会把
+ * 下面这条按下态压掉（实测 hover→active 变成 0.00%）——按下态同样加禁用守卫，
+ * 恢复原有"背景加深 + 去浮起"反馈，视觉不变。 */
+.icon-btn:active:not(:disabled) {
   transform: translateY(0);
   background: var(--color-hover);
   box-shadow: var(--edge-light);
@@ -1406,9 +1445,26 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+/* #1369：错误态（Lane C FAIL #11）——把改名输入框的单条 aria-invalid 约定
+ * 提升为通用输入框。放在 :focus-visible 之前属有意取舍：聚焦时 accent 边框
+ * 是唯一焦点信号，错误描边让位给 `.project-error` 文案；失焦回落 danger 描边。
+ * 当前产品侧尚无 `.project-input` 设 aria-invalid（约定先行，接线另票）。
+ * 同一块里两条选择器的聚焦语义不同属既有事实：`.project-rename-input` 的焦点
+ * 规则只改 outline，聚焦时危险描边保留；`.project-input` 聚焦时描边让位给
+ * accent（见下条）。原 `.rail-project-toggle-static .project-rename-input[aria-invalid='true']`
+ * 的窄选择器按票面要求保留（规则不删），与本条声明等价。 */
+.project-input[aria-invalid='true'],
+.project-rename-input[aria-invalid='true'] {
+  border-color: var(--color-destructive);
+}
 .project-input:focus-visible {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+/* #1369：禁用态（Lane C FAIL #12）——降对比 + not-allowed，与按钮同口径。 */
+.project-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .project-input::placeholder {
   color: var(--text-tertiary);
@@ -1742,7 +1798,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .dir-browser-spinner {
   flex-shrink: 0;
   color: var(--text-tertiary);
-  animation: spin 0.8s linear infinite;
+  /* 动画收敛到 .status-spinner 旁的共享块（#1369）。 */
 }
 .dir-browser-head {
   display: flex;
@@ -3040,14 +3096,40 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 [data-density='compact'] .msg-bubble-user {
   padding: var(--space-xs) var(--space-md);
 }
-.status-spinner {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid var(--color-border);
-  border-top-color: var(--color-warning);
-  border-radius: 50%;
+/* #1369：loading 统一约定（Lane C FAIL #30）——三族共用全局 `@keyframes spin`
+ * （复用既有动画，不新增）。两个边框型（status / ctx）统一 12px 直径与
+ * `--border-subtle` 边框；环厚保留使用面量值（status 1.5px / ctx 2px），不改
+ * 既有渲染。`.dir-browser-spinner` 是 13px 的 lucide SVG，只复用动画。
+ * 语义色就近声明：status=warning（下方）、ctx=accent（使用面）、
+ * dir-browser=text-tertiary（使用面）。 */
+.dir-browser-spinner,
+.status-spinner,
+.ctx-usage-spinner {
   animation: spin 0.8s linear infinite;
+}
+/* #1369：共享块后置会盖掉上文 `.dir-browser-spinner` 的 reduced-motion 显式
+ * 关停（同特异度、源序在后），此处把三族一并关停，顺带补齐 status / ctx 此前
+ * 的缺口。 */
+@media (prefers-reduced-motion: reduce) {
+  .dir-browser-spinner,
+  .status-spinner,
+  .ctx-usage-spinner {
+    animation: none;
+  }
+}
+.status-spinner,
+.ctx-usage-spinner {
+  width: 12px;
+  height: 12px;
+  border-style: solid;
+  border-color: var(--border-subtle);
+  border-top-color: currentColor;
+  border-radius: 50%;
   display: inline-block;
+}
+.status-spinner {
+  border-width: 1.5px;
+  color: var(--color-warning);
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
@@ -3381,6 +3463,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .approval-deny:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+}
+/* #1369：上面两条语义 hover 与 `.btn-primary:active` / `.btn-ghost:active` 同
+ * 特异度且后置，会把审批按钮的按下反馈整条压掉（Lane C FAIL #4/#5 在真实审
+ * 批面上失效）。复合类补回按下态，取值与本票按下规则一致。 */
+.btn-primary.approval-approve:active:not(:disabled) {
+  filter: brightness(0.94);
+}
+.btn-ghost.approval-deny:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
 }
 /* OBS-015: 审批失败提示——danger 淡染底 + 左侧 2px 实条，
  * 让用户一眼看到「这次审批没有生效」。
@@ -8688,13 +8779,11 @@ button.json-row {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
+/* #1369：几何/动画/边框色已收敛到 .status-spinner 旁的共享块，这里只留
+ * 使用面语义色与既有环厚（2px，不改渲染）。 */
 .ctx-usage-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--border-subtle);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  border-width: 2px;
+  color: var(--accent);
 }
 
 /* ── #1197 项 5B：上下文窗口挡位选择器（效果图 01）─────────────────────
