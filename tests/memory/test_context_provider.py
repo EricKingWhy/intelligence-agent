@@ -253,7 +253,7 @@ async def test_search_failure_logs_root_cause_and_types_reason(tmp_path, caplog)
     日志含根因堆栈，原始异常消息不进事件流（防泄露）。"""
     class Broken:
         async def search(self, *args, **kwargs):
-            raise RuntimeError("milvus-down-detail")
+            raise RuntimeError("vector-down-detail")
 
     session = make_session(tmp_path)
     session.append("user/message", {"content": "找一下我的偏好"})
@@ -265,7 +265,7 @@ async def test_search_failure_logs_root_cause_and_types_reason(tmp_path, caplog)
     assert len(degraded) == 1
     assert degraded[0].data["reason"] == "unavailable: RuntimeError"
     assert "RuntimeError" in caplog.text
-    assert "milvus-down-detail" not in str(degraded[0].data)
+    assert "vector-down-detail" not in str(degraded[0].data)
 
 
 @pytest.mark.asyncio

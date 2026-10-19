@@ -59,10 +59,10 @@ class LangMemMemoryCapability:
             create_search_memory_tool,
         )
 
-        from agent_harness.memory.base_store_adapter import SqliteMilvusBaseStore
+        from agent_harness.memory.base_store_adapter import SqliteVectorBaseStore
 
         self._records = records
-        self._store = SqliteMilvusBaseStore(records, vectors)
+        self._store = SqliteVectorBaseStore(records, vectors)
         self._manage = create_manage_memory_tool
         self._search = create_search_memory_tool
         self._manager = create_memory_store_manager
@@ -160,7 +160,7 @@ class LangMemMemoryCapability:
 
         **不丢写**：决策/检索阶段任何失败都降级成一条无条件写入，并把脱敏后的原因交给调用方
         （writeback 据此落 `memory/degraded`）。所以"本方法返回 ⟹ 已有记忆落盘"——这条保证正是
-        本票存在的意义之一：否则 Milvus 一抖动就变成静默丢记忆。
+        本票存在的意义之一：否则向量库一抖动就变成静默丢记忆。
 
         `budget_seconds` 由调用方按外层预算给（见 `MemoryWriteback._remaining_budget`）：
         预算耗尽 → 这里超时 → 降级写入，而不是被外层取消。

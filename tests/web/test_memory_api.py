@@ -39,7 +39,6 @@ from agent_harness.memory.v2.types import (
 from agent_harness.memory.v2.types import (
     MemoryScope as MemoryScopeV2,
 )
-from agent_harness.memory.vector_store import VectorStoreError
 from agent_harness.session import Session
 from agent_harness.session.event import (
     EVENT_TYPES as SESSION_EVENT_TYPES,
@@ -52,7 +51,6 @@ from agent_harness.session.event import (
 from agent_harness.web.app import create_app
 from agent_harness.web.memory import _DEGRADED_MESSAGE
 from tests.memory.v2._records import make_draft
-from tests.memory.v2._vector import FakeMemoryVectorClient
 
 _SECRET = "memory-api-test-signing-secret-at-least-32"
 _ALICE = IdentityContext("acme", "alice", ["user"])
@@ -98,49 +96,30 @@ def _auth(identity: IdentityContext) -> dict[str, str]:
 
 @pytest.fixture
 def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """真 app + fake Memory V2 vector adapter；返回 (client, adapter)。"""
+    """真 app（markdown 权威 + SQLite 派生索引）；第二个元素保留给旧用例的形状。"""
     # This fixture exercises HTTP behavior, not the hourly background purger. The lifecycle
     # test above verifies that task separately; disabling it avoids cross-loop SQLite writes
     # while these tests seed through the direct service seam and issue sync TestClient calls.
     monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", lambda _self: None)
-    vectors: list[FakeMemoryVectorClient] = []
-
-    def build_vectors(settings):
-        client = FakeMemoryVectorClient(settings)
-        vectors.append(client)
-        return client
-
-    monkeypatch.setattr("agent_harness.capability.factories.build_memory_vector_client", build_vectors)
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
-        milvus_uri="https://example.test", milvus_token="test-only",
-        milvus_collection="memory_test", embedding_model="test-embedding",
-        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     app = create_app(settings, enable_cors=False)
     with TestClient(app) as client:
-        yield client, vectors
+        yield client, []
 
 
 @pytest.mark.asyncio
 async def test_v2_governance_api_works_without_session_store_and_closes_in_its_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    vectors = []
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_vector_client",
-        lambda settings: vectors.append(FakeMemoryVectorClient(settings)) or vectors[-1],
-    )
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
-        milvus_uri="https://example.test", milvus_token="test-only",
-        milvus_collection="memory_test", embedding_model="test-embedding",
-        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     app = create_app(settings, enable_cors=False)
     owner_loop = asyncio.get_running_loop()
@@ -179,12 +158,11 @@ async def test_v2_governance_api_works_without_session_store_and_closes_in_its_l
 
         assert settings_response.status_code == 200, settings_response.text
         assert set(settings_response.json()) == {
-            "extraction_enabled", "recall_enabled", "fallback_enabled"}
+            "extraction_enabled", "recall_enabled", "fallback_enabled", "write_approval"}
         assert filtered_response.status_code == 200, filtered_response.text
         assert filtered_response.json() == []
 
     assert start_loops == close_loops == [owner_loop]
-    assert vectors[0].closed
 
 
 async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,
@@ -391,19 +369,18 @@ async def test_memory_init_failure_503_says_fault_not_config_state(tmp_path: Pat
     本来就配好的开关，怎么改都没用。这条与上一条配对，锁"两条 503 的码与文案都不同"。
     """
 
-    def _unreachable(settings, *, provider="builtin"):
-        raise VectorStoreError("Memory vector store: unavailable")
+    async def _unreachable(_settings):
+        raise RuntimeError("Memory markdown store: unavailable")
 
-    monkeypatch.setattr("agent_harness.capability.factories.build_memory_vector_client", _unreachable)
+    monkeypatch.setattr(
+        "agent_harness.memory.v2.assembly.build_memory_v2_service", _unreachable,
+    )
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
-        milvus_uri="https://example.test", milvus_token="test-only",
-        milvus_collection="memory_test", embedding_model="test-embedding",
-        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     with TestClient(create_app(settings, enable_cors=False)) as client:
         resp = client.get("/api/memories", headers=_auth(_ALICE))
@@ -465,16 +442,9 @@ def test_origin_gate_is_wired_on_memory_routes(tmp_path: Path, monkeypatch: pyte
     这条必须在**没有 jwt_secret** 的 app 上验：配置了 JWT 时认证层才是边界，来源闸直接
     让位（跨源网页拿不到签名 token）——那正是 projects 那条测试的结论。
     """
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_vector_client",
-        lambda settings: FakeMemoryVectorClient(settings),
-    )
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         capabilities='{"memory": {"provider": "langmem"}}',
-        milvus_uri="https://example.test", milvus_token="test-only",
-        milvus_collection="memory_test", embedding_model="test-embedding",
-        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     with TestClient(create_app(settings, enable_cors=False)) as client:
         cross_origin = client.get("/api/memories", headers={"Origin": "http://evil.example"})
@@ -811,17 +781,24 @@ async def test_v2_project_tombstone_reads_require_the_matching_trusted_project(m
 
 
 @pytest.mark.asyncio
-async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memory_app):
+async def test_v2_index_failure_reports_committed_delete_and_retains_retry(
+    memory_app, monkeypatch: pytest.MonkeyPatch,
+):
     from agent_harness.memory.v2.index import MemoryV2IndexRelay
 
-    client, vectors = memory_app
+    client, _vectors = memory_app
     record = await _seed_v2(client, _ALICE, "索引故障时仍已删除")
     _registry, wiring = await client.app.state.agent.get_wiring()
     service = wiring.memory_v2
     assert service is not None
     trusted = TrustedMemoryIdentity("acme", "alice")
     await MemoryV2IndexRelay(service._store, service._index).flush()
-    vectors[0].fail_delete = RuntimeError("injected index failure")
+    original_delete = service._index.delete
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("injected index failure")
+
+    monkeypatch.setattr(service._index, "delete", _boom)
 
     response = client.delete(f"/api/memories/{record.id}", headers=_auth(_ALICE))
     assert response.status_code == 503
@@ -833,7 +810,7 @@ async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memor
         "索引故障", trusted, scope=MemoryScopeV2.USER_GLOBAL, limit=10,
     ) == []
 
-    vectors[0].fail_delete = None
+    monkeypatch.setattr(service._index, "delete", original_delete)
     await service._relay.flush()
     assert await service._store.pending() == []
 
@@ -913,7 +890,9 @@ async def test_memory_settings_expose_and_patch_the_fallback_switch(memory_app):
     )
     assert patched.status_code == 200, patched.text
     assert patched.json() == {
-        "extraction_enabled": True, "recall_enabled": True, "fallback_enabled": False}
+        "extraction_enabled": True, "recall_enabled": True, "fallback_enabled": False,
+        "write_approval": False,
+    }
     assert client.get("/api/memory-settings", headers=headers).json() == patched.json()
 
 
@@ -933,13 +912,17 @@ async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory
     )
     assert settings1.status_code == 200
     assert settings1.json() == {
-        "extraction_enabled": False, "recall_enabled": True, "fallback_enabled": True}
+        "extraction_enabled": False, "recall_enabled": True, "fallback_enabled": True,
+        "write_approval": False,
+    }
     settings2 = client.patch(
         "/api/memory-settings", headers=headers, json={"recall_enabled": False},
     )
     assert settings2.status_code == 200
     assert settings2.json() == {
-        "extraction_enabled": False, "recall_enabled": False, "fallback_enabled": True}
+        "extraction_enabled": False, "recall_enabled": False, "fallback_enabled": True,
+        "write_approval": False,
+    }
     assert client.get("/api/memory-settings", headers=headers).json() == settings2.json()
     assert client.get(f"/api/memories/{first.id}", headers=headers).status_code == 200
     assert client.get(f"/api/memories/{second.id}", headers=headers).status_code == 200
@@ -980,3 +963,37 @@ async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory
     assert client.get(
         f"/api/sessions/{session_id}/memory-recalls", headers=_auth(_BOB),
     ).json() == []
+
+
+@pytest.mark.asyncio
+async def test_edit_authority_rejection_maps_to_422_not_500(
+    memory_app, monkeypatch: pytest.MonkeyPatch,
+):
+    """#1353 C-P2-2：markdown 权威面拒收（预算超限 / threat 命中）是正常业务拒绝。
+
+    `MarkdownAuthorityError` 是 `RuntimeError` 子类，原先不命中 `edit_memory` 的 except
+    链 ⇒ 冒泡成 500。用户改一条太长/含注入模式的记忆会看到"服务器错误"而不是可纠正的 4xx。
+    """
+    from agent_harness.memory.v2.capability import MarkdownAuthorityError
+
+    client, _components = memory_app
+    record = await _seed_v2(client, _ALICE, "原始内容")
+
+    async def _rejected(*_args, **_kwargs):
+        raise MarkdownAuthorityError("markdown add failed: entry exceeds char limit")
+
+    monkeypatch.setattr(MemoryV2Service, "_mirror_markdown", _rejected)
+    response = client.patch(
+        f"/api/memories/{record.id}", headers=_auth(_ALICE),
+        json={
+            "expected_version": 1,
+            "content": "用户编辑后的内容",
+            "payload": {
+                "kind": "semantic", "subject": "回答风格", "fact": "用户编辑后的内容",
+                "category": "preference",
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "entry exceeds char limit" in response.json()["detail"]

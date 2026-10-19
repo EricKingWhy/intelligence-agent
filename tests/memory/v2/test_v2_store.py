@@ -3,7 +3,7 @@
 Seam：`SqliteMemoryV2Store` 的公开方法（§8.1 第 1 个 approved seam 的持久化半边）。
 按垂直切片推进：一片测试 → 一片实现 → 下一片；每一片都先红后绿。
 
-Milvus 派生/relay 与 provider 边界在各自的 seam 上另测（`test_v2_index.py` /
+向量索引派生/relay 与 provider 边界在各自的 seam 上另测（`test_v2_index.py` /
 `test_v2_capability.py`）。
 """
 

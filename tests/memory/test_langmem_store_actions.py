@@ -31,7 +31,7 @@ from agent_harness.identity import (
     identity_context_var,
     set_identity_context,
 )
-from agent_harness.memory.base_store_adapter import SqliteMilvusBaseStore
+from agent_harness.memory.base_store_adapter import SqliteVectorBaseStore
 from agent_harness.memory.fake_vector_store import FakeVectorStore
 from agent_harness.memory.outbox_relay import OutboxRelay
 from agent_harness.memory.record_store import MemoryOperation
@@ -78,7 +78,7 @@ async def rig(tmp_path):
     records = SqliteMemoryRecordStore(tmp_path / "memory.db")
     await records.initialize()
     vectors = FakeVectorStore()
-    adapter = SqliteMilvusBaseStore(records, vectors)
+    adapter = SqliteVectorBaseStore(records, vectors)
     token = set_identity_context(ALICE)
     try:
         yield records, vectors, adapter
@@ -402,7 +402,7 @@ class TestSwitchCombinations:
         records = SqliteMemoryRecordStore(tmp_path / "memory.db")
         await records.initialize()
         vectors = AlwaysHitVectorStore()
-        adapter = SqliteMilvusBaseStore(records, vectors)
+        adapter = SqliteVectorBaseStore(records, vectors)
         model = ToolRecordingModel(responses=script)
         manager = create_memory_store_manager(
             model, schemas=[MemoryPayload], namespace=namespace_of(), store=adapter,
@@ -475,7 +475,7 @@ class TestSearchTolerance:
         pytest.importorskip("langmem")
         from agent_harness.memory.langmem_capability import LangMemMemoryCapability
 
-        class VanishingStore(SqliteMilvusBaseStore):
+        class VanishingStore(SqliteVectorBaseStore):
             async def asearch(self, namespace_prefix, **kwargs):
                 now = datetime.now(UTC)
                 return [SearchItem(namespace=tuple(namespace_prefix), key="gone",

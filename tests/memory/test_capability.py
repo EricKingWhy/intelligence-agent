@@ -194,7 +194,7 @@ async def test_langmem_manager_forms_memory_through_owned_store(tmp_path):
 @pytest.mark.asyncio
 async def test_basestore_rejects_foreign_namespace_and_ignores_untrusted_index_ids(tmp_path):
     pytest.importorskip("langmem")
-    from agent_harness.memory.base_store_adapter import SqliteMilvusBaseStore
+    from agent_harness.memory.base_store_adapter import SqliteVectorBaseStore
     from agent_harness.memory.types import MemoryEntry
     records = SqliteMemoryRecordStore(tmp_path / "memory.db")
     await records.initialize()
@@ -203,7 +203,7 @@ async def test_basestore_rejects_foreign_namespace_and_ignores_untrusted_index_i
     class UntrustedIndex(FakeVectorStore):
         async def search(self, *args):
             return [("foreign", 1.0)]
-    adapter = SqliteMilvusBaseStore(records, UntrustedIndex())
+    adapter = SqliteVectorBaseStore(records, UntrustedIndex())
     with pytest.raises(PermissionError):
         await adapter.aget(("memories", "other", "bob", "user"), "foreign")
     assert await adapter.asearch(("memories", "local", "local", "user"), query="private") == []
