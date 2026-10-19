@@ -213,7 +213,7 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
     expect(create!.disabled).toBe(false);
   });
 
-  it('创建并启动：payload 带 task/cwd/autonomy；完成目标拼进首条 prompt；创建成功后请求关闭', async () => {
+  it('创建并启动：payload 带 task/cwd/autonomy；完成目标进 criteria 字段、不拼进 prompt；创建成功后请求关闭', async () => {
     const onCreateTask = vi.fn(async (_p: unknown) => null);
     const onOpenChange = vi.fn();
     await act(async () => {
@@ -251,7 +251,10 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
 
     expect(onCreateTask).toHaveBeenCalledTimes(1);
     const payload = onCreateTask.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload.task).toBe('完成目标：pytest 全绿\n\n跑一遍回归测试');
+    // #1359 阶段 2：完成目标是结构化字段，task 保持 prompt 原文（不再有
+    // 「完成目标：…\n\n…」拼接——拼接会让验收项在事件流里不可检索）。
+    expect(payload.task).toBe('跑一遍回归测试');
+    expect(payload.criteria).toEqual([{ text: 'pytest 全绿' }]);
     expect(payload.cwd).toBe('D:\\Projects\\Demo');
     expect(payload.autonomy).toBe('ask'); // 默认档
     expect(onOpenChange).toHaveBeenCalledWith(false);

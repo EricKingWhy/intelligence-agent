@@ -343,6 +343,60 @@ class TestCreationPathWiring:
         assert payload["product_state"] == "pending_verification"
         assert payload["version"] == 0
 
+    def test_create_with_criteria_persists_structured_acceptance(self, client):
+        """#1359 阶段 2：创建请求直通 criteria——验收项是结构化字段，不是 prompt 文本。
+
+        前端「完成目标」不再拼字符串，而是随创建请求发 ``criteria``；落盘形状必须与
+        ``POST /task/definition`` 同一条 ``_parse_criteria`` 写侧规则（自动补 item_id、
+        origin=user ⇒ confirmed=True），不另造一套。
+        """
+        client, app = client
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "跑一遍回归测试", "criteria": [{"text": "pytest 全绿"}]},
+        )
+        assert resp.status_code == 200, resp.text
+        session = app.state._launched_sessions[0]
+        events = app.state.agent.store.read_events(session.session_id)
+        defined = [e for e in events if e.type == "task/defined"]
+        assert len(defined) == 1
+        assert defined[0].data["task_text"] == "跑一遍回归测试"
+        criteria = defined[0].data["criteria"]
+        assert len(criteria) == 1
+        assert criteria[0]["text"] == "pytest 全绿"
+        assert criteria[0]["item_id"].startswith("ac-")
+        assert criteria[0]["origin"] == "user"
+        assert criteria[0]["confirmed"] is True
+        got = client.get(f"/api/sessions/{session.session_id}/task").json()["task"]
+        assert got["task_text"] == "跑一遍回归测试"
+        assert [c["text"] for c in got["criteria"]] == ["pytest 全绿"]
+
+    def test_criteria_without_task_is_422(self, client):
+        """criteria 只属于任务定义：没有非空 task 就静默丢弃 = 客户端以为存了验收项。
+
+        两种组合都拒：只建会话（launch=false）+ criteria；空白 task + criteria。
+        """
+        client, app = client
+        only_session = client.post(
+            "/api/sessions?launch=false", json={"criteria": [{"text": "x"}]}
+        )
+        assert only_session.status_code == 422, only_session.text
+        blank = client.post("/api/sessions", json={"task": "  ", "criteria": [{"text": "x"}]})
+        assert blank.status_code == 422, blank.text
+        assert app.state._launched_sessions == []
+
+    def test_malformed_criteria_is_422_with_zero_side_effects(self, client):
+        """行级判据非法 → 422 且不建会话（判定先于任何落盘/launch）。
+
+        规则单一来源：与 ``POST /task/definition`` 同一条 ``_parse_criteria``——
+        空 text / 非对象行都必须响亮拒绝，不能"跳过定义照常起跑"。
+        """
+        client, app = client
+        for bad in ([{"text": "  "}], [{"text": 1}], ["not-an-object"]):
+            resp = client.post("/api/sessions", json={"task": "干活", "criteria": bad})
+            assert resp.status_code == 422, (bad, resp.text)
+        assert app.state._launched_sessions == []
+
     def test_blank_task_skips_definition_but_session_still_launches(self, client):
         """空白任务维持既有行为照常起跑；定义缺失如实可见（GET /task → 404）。"""
         client, app = client

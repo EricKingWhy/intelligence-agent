@@ -269,6 +269,7 @@ from agent_harness.session.task import (
     apply_task_definition,
     apply_verification,
     derive_task_state,
+    validate_criteria,
 )
 from agent_harness.session.workflow import (
     WorkflowMode,
@@ -1690,6 +1691,9 @@ class SessionService:
         self,
         *,
         task: str,
+        # #1359 阶段 2：创建即定义时的结构化验收清单（形状校验走
+        # `apply_task_definition` 的写侧规则，本层不复制第二套）。
+        criteria: object = None,
         workspace_name: str | None = None,
         cwd: str | None = None,
         local_max_agent_turns: int | None = None,
@@ -1772,6 +1776,12 @@ class SessionService:
         """
         if remember_as_procedural_rule and (not launch or not task.strip()):
             raise ValueError("remember_as_procedural_rule requires a launched non-blank user task")
+        # #1359 阶段 2：criteria 的形态校验先于一切副作用（不建 workspace、不落
+        # session/started）。`apply_task_definition` 在会话已落盘后才跑，那里失败
+        # 只能跳过定义——客户端会以为验收项存了。规则单一来源 = task.py。
+        criteria_error = validate_criteria(criteria)
+        if criteria_error is not None:
+            raise InvalidDecision(f"criteria 非法：{criteria_error}")
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
@@ -1971,6 +1981,7 @@ class SessionService:
             session=session,
             runtime=runtime,
             task=task,
+            criteria=criteria,
             workspace=workspace,
             workspace_name=workspace_name,
             cwd=cwd,
@@ -1990,6 +2001,7 @@ class SessionService:
         session: Session,
         runtime: Any,
         task: str,
+        criteria: object = None,
         workspace: Path,
         workspace_name: str | None,
         cwd: str | None,
@@ -2026,7 +2038,9 @@ class SessionService:
             # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
             # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
             # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
-            task_outcome = apply_task_definition(session, task_text=task)
+            task_outcome = apply_task_definition(
+                session, task_text=task, criteria=criteria,
+            )
             if not task_outcome.ok:
                 logger.warning(
                     "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"

@@ -26,8 +26,8 @@
  *    **默认不发 `model` / `sandbox_backend` / `permission_mode`**（auto/缺省 = 不发键）；
  *    URL 不再拼 `launch` query（#204 的 launch=false 被反转为创建即启动）；
  *  - AC11b 完成目标是可选**单行**输入框（`input[type=text]`，placeholder「什么结果算完成？」），
- *    提交时拼进首条 prompt
- *    （`完成目标：<验收>\n\n<prompt>`，Codex `/goal` 自然语言三要素同型）；
+ *    提交时作为结构化 `criteria: [{text}]` 字段（#1359 阶段 2 起**不再**拼进
+ *    首条 prompt；task 保持 prompt 原文）；
  *  - AC12 422 留在确认面：不关对话框、不打全局横幅、后端 detail 原样可见
  *    （submitTask 的 ownError 通道，前缀「提交失败：」）、可重试；
  *  - AC13 以上全部由本 spec 覆盖（mock 语义按真后端带 task 的 SSE 启动流，见 fixtures）。
@@ -214,7 +214,7 @@ test('AC11 创建即启动：请求带 cwd/task/autonomy、默认不发 model/sa
   await expect(dialog(page)).toHaveCount(0, { timeout: 10_000 });
 });
 
-test('AC11b 完成目标拼进首条 prompt；改自主度后请求带所选档', async ({ page }) => {
+test('AC11b 完成目标走结构化 criteria；改自主度后请求带所选档', async ({ page }) => {
   await routeApi(page, baseMock());
   const posts = captureSessionPosts(page);
   await page.goto('/');
@@ -229,9 +229,10 @@ test('AC11b 完成目标拼进首条 prompt；改自主度后请求带所选档'
   await box.getByRole('button', { name: '创建并启动' }).click();
 
   await expect.poll(() => posts.length).toBe(1);
-  // 验收项拼在任务描述前面（#367：零服务端契约变更），整串相等锁死拼法——
-  // 改成别的拼接形态（顺序、分隔符）这条必须变红。
-  expect(posts[0].body.task).toBe('完成目标：pytest 全绿\n\n跑一遍回归测试');
+  // #1359 阶段 2：验收项是**结构化字段**，不再拼进 task。整串相等锁死形状——
+  // 谁把拼接加回来（或改成别的键名），这条必须变红。
+  expect(posts[0].body.task).toBe('跑一遍回归测试');
+  expect(posts[0].body.criteria).toEqual([{ text: 'pytest 全绿' }]);
   expect(posts[0].body.autonomy).toBe('auto'); // 改档 → 请求带所选档
   expect(posts[0].body.cwd).toBe(ALPHA);
 });

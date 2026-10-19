@@ -284,6 +284,14 @@ export interface BudgetPayload {
 
 export interface StartSessionPayload {
   task: string;
+  /** #1359 阶段 2：创建即定义时的**结构化验收清单**。此前「完成目标」被拼进
+   *  `task` 字符串（验收项不进三轴投影、事件流里不可检索）；现在作为独立字段
+   *  直通 `task/defined.criteria`，`task` 保持 prompt 原文。
+   *
+   *  形状与 `POST /task/definition` 的 criteria 同一写侧规则（后端
+   *  `_parse_criteria`）：`text` 必填，`item_id` / `confirmed` 由后端补全。
+   *  只与非空 task 一起合法（单独给 → 422）。 */
+  criteria?: { text: string }[];
   /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
   remember_as_procedural_rule?: boolean;
   workspace?: string;
@@ -773,6 +781,8 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 /** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
+  criteria: (p) =>
+    p.criteria && p.criteria.length > 0 ? ['criteria', p.criteria] : null,
   remember_as_procedural_rule: (p) =>
     p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),

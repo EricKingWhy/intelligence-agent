@@ -4,8 +4,8 @@
  *  prompt 优先、无多步向导、无结构化验收项、无任务级排队、三档自主度。
  *  本弹窗即按此共识的信息架构：
  *  - prompt 是**唯一必填项**（顶置大输入框）
- *  - 验收项降级为可选**单行**输入框，内容拼进首条 prompt（零服务端契约变更，
- *    对标 Codex `/goal` 自然语言三要素）
+ *  - 验收项降级为可选**单行**输入框，作为结构化 `criteria` 随创建请求提交
+ *    （#1359 阶段 2 起不再拼进 prompt；对标 omp `/guided-goal` 的结构化采集）
  *  - 三档自主度抄 Copilot Interactive / Plan / Autopilot
  *    （≈ Codex 三档 ≈ Claude Code modes）
  *  - 目录冲突默认 worktree（后端 `on_conflict` 默认值，前端不另设）
@@ -105,7 +105,7 @@ function TaskCreationForm({
 }: Props & { project: Project }) {
   // prompt 是唯一必填项
   const [prompt, setPrompt] = useState('');
-  // 验收项：可选单行输入框，提交时拼进首条 prompt（零服务端契约变更）
+  // 验收项：可选单行输入框，提交时作为结构化 criteria 字段（#1359 阶段 2）
   const [acceptance, setAcceptance] = useState('');
   const [autonomy, setAutonomy] = useState<AutonomyId>('ask');
   // 模型：'auto' = 不发 model 键（后端默认链）；其余为目录 name
@@ -124,12 +124,12 @@ function TaskCreationForm({
     if (pending || !promptValid) return;
     setPending(true);
     setError(null);
-    // 验收项拼进首条 prompt（Codex `/goal` 自然语言三要素同型）
-    const task = acceptance.trim()
-      ? `完成目标：${acceptance.trim()}\n\n${prompt.trim()}`
-      : prompt.trim();
+    // 完成目标走结构化字段（#1359 阶段 2）：不再拼进 prompt——验收项进
+    // task/defined.criteria，`task` 保持 prompt 原文。
+    const acceptanceText = acceptance.trim();
     const payload: StartSessionPayload = {
-      task,
+      task: prompt.trim(),
+      ...(acceptanceText ? { criteria: [{ text: acceptanceText }] } : {}),
       cwd: project.path,
       autonomy,
       ...(model !== 'auto' ? { model } : {}),
@@ -256,8 +256,9 @@ function TaskCreationForm({
         </button>
 
         <div id="task-advanced" className="project-advanced-content" hidden={!advancedOpen}>
-          {/* 完成目标：可选**单行**输入，拼进首条 prompt（#1177 §B 效果图 03：单行
-              input，非多行 textarea；用户 2026-10-17 裁决 1A）。 */}
+          {/* 完成目标：可选**单行**输入，作为结构化验收项随创建请求提交
+              （#1359 阶段 2：不再拼进 prompt；#1177 §B 效果图 03 的单行形态
+              与用户 2026-10-17 裁决 1A 不变）。 */}
           <div className="project-field">
             <label className="project-field-label" htmlFor="task-acceptance">
               完成目标 <span className="project-field-optional">（可选）</span>
@@ -272,7 +273,7 @@ function TaskCreationForm({
               disabled={pending}
             />
             <span className="project-field-hint">
-              会拼在任务描述前面一起发给 agent，不单独存。
+              作为验收项随任务一起保存，不拼进任务描述。
             </span>
           </div>
 
