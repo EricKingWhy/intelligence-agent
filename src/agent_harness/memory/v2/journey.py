@@ -38,6 +38,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from agent_harness.memory.v2.markdown_store import target_for
 from agent_harness.memory.v2.types import MemoryRecordV2
 
 #: 卡片正文截断长度（上游 ``chunk[:1200]``）。
@@ -94,18 +95,17 @@ def _memory_skill_edges(
 
 
 def _source(record: MemoryRecordV2) -> str:
-    """卡片来源：与 `MemoryV2Service.markdown_target` **同一句话**的分拣。
+    """卡片来源：分拣规则只认 `markdown_store.target_for` 一处。
 
-    两处不一致，用户会看到"刚写的记忆跑到另一条时间线上"。这里只读 tier/kind，
-    与 markdown 权威面的分拣共用同一组字段。
+    卡片词汇是 ``memory`` / ``profile``（前端契约），权威面词汇是 ``memory`` /
+    ``user``（文件名）；这里只做词表映射，不做第二次判断——否则加一档时又会漂移。
     """
-    if record.tier.value == "profile" or record.kind.value == "user":
-        return "profile"
-    return "memory"
+    return "profile" if target_for(record.kind.value, record.tier.value) == "user" else "memory"
 
 
 def _title(content: str) -> str:
-    first = content.splitlines()[0].strip().lstrip("# ").strip() if content.splitlines() else ""
+    lines = content.splitlines()
+    first = re.sub(r"^#{1,6}\s+", "", lines[0].strip()).strip() if lines else ""
     return (first[:TITLE_LIMIT] + "…") if len(first) > TITLE_LIMIT else first
 
 

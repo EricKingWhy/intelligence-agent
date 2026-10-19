@@ -48,6 +48,8 @@ import json
 from collections.abc import Iterator, Sequence
 from typing import Any
 
+from agent_harness.memory.v2.markdown_store import target_for
+
 #: 上游 ``_MEMORY_OP_FORMATS``：动作 → (字形, 承载预览的字段, 预览长度)。
 _MEMORY_OP_FORMATS: dict[str, tuple[str, str, int]] = {
     "add": ("➕", "content", 120),
@@ -62,19 +64,8 @@ _CALL_DETAIL_DEFAULTS = (
 )
 
 #: 上游 ``locales/en.yaml`` 的 ``display.review.*`` 文案（本仓没有 i18n 层，
-#: 因此把英文原文收在这里；改文案只改这一处）。
+#: 因此把英文原文收在这里；改文案只改这一处）。上游的 ``t()`` 查表已内联成 f-string。
 _LABELS = {"skill": "Skill", "memory": "Memory", "user": "User profile"}
-
-
-def _t(key: str, **values: Any) -> str:
-    """上游 ``t()`` 的最小替身：只覆盖本模块用到的几条 ``display.review.*``。"""
-    if key == "display.review.memory_op_line":
-        return f"{values['label']} {values['glyph']} {values['preview']}"
-    if key == "display.review.label_updated":
-        return f"{values['label']} updated"
-    if key == "display.review.label":
-        return _LABELS[values["label_key"]]
-    raise KeyError(key)
 
 
 def _preview(text: str, limit: int) -> str:
@@ -87,8 +78,7 @@ def _memory_op_line(label: str, action: str, fields: dict[str, str]) -> str | No
     text = (fields.get(field_name) or "") if glyph else ""
     if not text:
         return None
-    return _t("display.review.memory_op_line",
-              label=label, glyph=glyph, preview=_preview(text, limit))
+    return f"{label} {glyph} {_preview(text, limit)}"
 
 
 def _verbose_memory_lines(label: str, detail: dict) -> list[str]:
@@ -102,7 +92,7 @@ def _verbose_memory_lines(label: str, detail: dict) -> list[str]:
         return [line for line in lines if line]
     return [
         _memory_op_line(label, detail.get("action", ""), detail)
-        or _t("display.review.label_updated", label=label)
+        or f"{label} updated"
     ]
 
 
@@ -112,7 +102,7 @@ def _collect_review_call_details(review_messages: list[dict]) -> tuple[set, dict
     结果 JSON 只说 "Entry added"；动作、目标与内容预览都在调用参数里。限定
     notify 工具，是为了不让恰好成功的辅助工具冒充记忆工作。
     """
-    notify_tools = {"memory", "skill_manage"}
+    notify_tools = {"memory", "promote_skill"}
     all_tool_call_ids: set = set()
     call_details: dict = {}
     for msg in review_messages or []:
@@ -163,7 +153,7 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
         return [data["message"]] if data.get("proposal_staged") and data.get("message") else []
     message = data.get("message", "")
     target = data.get("target", "") or detail.get("target", "")
-    is_skill = detail.get("tool") == "skill_manage"
+    is_skill = detail.get("tool") == "promote_skill"
     if is_skill and "results" in data:
         # 请求过的操作不是"已写入"的证据（审批与原子回滚都可能让它们全没落地）。
         verbs = {
@@ -192,7 +182,7 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
     if not is_skill and not target:
         return []
     label_key = "skill" if is_skill else {"memory": "memory", "user": "user"}.get(target)
-    label = _t("display.review.label", label_key=label_key) if label_key else target
+    label = _LABELS[label_key] if label_key else target
     if verbose:
         if is_skill:
             return [message] if message else [f"Skill {detail.get('action', '')}"]
@@ -200,7 +190,7 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
     hit = any(k in lower for k in ("added", "replaced", "removed", "applied")) or (
         target and "add" in lower
     )
-    return [_t("display.review.label_updated", label=label)] if hit else []
+    return [f"{label} updated"] if hit else []
 
 
 def summarize_background_review_actions(
@@ -243,10 +233,8 @@ def summarize_background_review_actions(
 
 
 def _tool_target(record: Any) -> str:
-    """与 markdown 权威面同一句话的分拣：profile/user → ``user``，其余 → ``memory``。"""
-    if record.tier.value == "profile" or record.kind.value == "user":
-        return "user"
-    return "memory"
+    """与 markdown 权威面同一句话的分拣：规则只在 `markdown_store.target_for` 一处。"""
+    return target_for(record.kind.value, record.tier.value)
 
 
 def _call_arguments(record: Any) -> dict[str, Any]:
