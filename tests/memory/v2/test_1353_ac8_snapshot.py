@@ -7,66 +7,29 @@ M9：provider 按 session 缓存首次渲染结果，session 内后续写入不�
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
+from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.wiring import wire_capabilities
+from agent_harness.config import Settings
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
+from agent_harness.memory.v2.recall import MemoryV2ContextProvider
+from agent_harness.session import JsonlSessionStore
 from tests.conftest import make_session
 from tests.memory.v2._markdown_memory_1353 import (
     build_store,
     call,
     path_of,
     read_raw,
-    store_module,
 )
 
 pytestmark = pytest.mark.asyncio
 
-_PROVIDER_MODULES = (
-    "agent_harness.memory.v2.recall",
-    "agent_harness.memory.v2.context_provider",
-    "agent_harness.memory.v2.markdown_store",
-)
-_PROVIDER_CLASSES = (
-    "MemoryV2ContextProvider",
-    "MarkdownMemoryContextProvider",
-    "MarkdownContextProvider",
-)
 
-
-def _provider_class() -> type:
-    for module_name in _PROVIDER_MODULES:
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError:
-            continue
-        for class_name in _PROVIDER_CLASSES:
-            candidate = getattr(module, class_name, None)
-            if isinstance(candidate, type):
-                return candidate
-    pytest.fail(
-        "#1353 AC8：未找到 markdown 记忆 ContextProvider；"
-        f"尝试过 {_PROVIDER_MODULES} × {_PROVIDER_CLASSES}",
-        pytrace=False,
-    )
-
-
-def _provider(store):
-    cls = _provider_class()
-    attempts = (
-        lambda: cls(store),
-        lambda: cls(store=store),
-        lambda: cls(markdown_store=store),
-        lambda: cls(source=store),
-        lambda: cls(store, workspace_index=None),
-    )
-    errors: list[str] = []
-    for factory in attempts:
-        try:
-            return factory()
-        except TypeError as exc:
-            errors.append(str(exc))
-    pytest.fail("#1353 AC8：ContextProvider 构造形态不匹配：\n" + "\n".join(errors), pytrace=False)
+def _provider(store: MarkdownMemoryStore) -> MemoryV2ContextProvider:
+    """真实签名直构：传 MarkdownMemoryStore 即走 markdown 冻结快照路径。"""
+    return MemoryV2ContextProvider(store)
 
 
 def _text(messages) -> str:
@@ -127,8 +90,6 @@ async def test_poisoned_entry_is_blocked_in_snapshot_but_kept_on_disk(tmp_path) 
 
 async def test_markdown_is_the_injected_source(tmp_path) -> None:
     """注入源必须是 MEMORY.md/USER.md 全文，而不是旧 recall/search。"""
-    module = store_module()
-    assert getattr(module, "ENTRY_DELIMITER", "\n§\n") == "\n§\n"
     store = build_store(tmp_path)
     assert (await call(store.add, "memory", "env fact"))["success"] is True
     assert (await call(store.add, "user", "profile fact"))["success"] is True
@@ -136,3 +97,40 @@ async def test_markdown_is_the_injected_source(tmp_path) -> None:
     rendered = _text(await provider.select(make_session(tmp_path / "sessions"), 100_000))
     assert "env fact" in rendered
     assert "profile fact" in rendered
+
+
+async def test_wiring_activates_the_markdown_snapshot_path(tmp_path) -> None:
+    """装配级判据（Corr-P1-2）：provider 必须从 `wire_capabilities` 拿到，
+    且包装的是 markdown 权威面（`service.markdown`），不是没有
+    `render_snapshot` 的 `MemoryV2Service`——后者会让生产路径静默回落 SQLite。
+    """
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_provider="deepseek", model_name="memory-primary",
+        model_api_key="test-only",
+    )
+    wiring = await wire_capabilities(
+        CapabilityRegistry(),
+        parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+        settings=settings,
+        sessions=JsonlSessionStore(root=tmp_path / "sessions"),
+    )
+    try:
+        assert {provider.name for provider in wiring.context_providers} == {"memory"}
+        wrapped = wiring.context_providers[0]
+        inner = wrapped._provider
+        assert isinstance(inner, MemoryV2ContextProvider)
+        assert inner._markdown is not None, (
+            "装配必须把 markdown 权威面传给 MemoryV2ContextProvider"
+            "（否则 markdown 快照路径在生产装配里永不激活）"
+        )
+
+        # 行为验证：经装配后的 provider select 真的注入 MEMORY.md 内容。
+        markdown: MarkdownMemoryStore = inner._markdown
+        assert (await call(markdown.add, "memory", "wired snapshot fact"))["success"] is True
+        session = make_session(tmp_path / "sessions-select")
+        rendered = _text(await wrapped.select(session, 100_000))
+        assert "wired snapshot fact" in rendered
+    finally:
+        await wiring.aclose()
