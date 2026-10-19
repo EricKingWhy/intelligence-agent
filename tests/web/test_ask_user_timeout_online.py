@@ -374,3 +374,44 @@ async def test_ask_user_timeout_fires_without_any_connection(tmp_path, monkeypat
         )
     finally:
         await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_restore_ask_user_timeouts_isolates_per_session_note_failure():
+    """#1337 B P2-2（相邻加固）：`note_session_state` 单会话抛异常不得阻断其后会话。
+
+    `read_events` 早已有 per-session try/except+continue 纪律（A 方案 P1 同款失效
+    形态：单个坏会话让其后所有会话的 durable timer 全不重建）；`note_session_state`
+    之前裸露，本用例钉住"同一条纪律"：坏会话被跳过，好会话照常重建并计数。
+    """
+    from agent_harness.web.app import AppState
+
+    state = AppState.__new__(AppState)
+
+    class _Store:
+        def list_session_ids(self):
+            return ["bad", "good"]
+
+        def read_events(self, session_id):
+            return ["dummy-event"]
+
+    processed: list[str] = []
+
+    class _Driver:
+        def __init__(self):
+            self.armed: set[str] = set()
+
+        def is_armed(self, session_id):
+            return session_id in self.armed
+
+        def note_session_state(self, session_id, events):
+            if session_id == "bad":
+                raise RuntimeError("boom")
+            processed.append(session_id)
+            self.armed.add(session_id)
+
+    state.store = _Store()
+    state.ask_user_timeout_driver = _Driver()
+
+    assert await state.restore_ask_user_timeouts() == 1
+    assert processed == ["good"]

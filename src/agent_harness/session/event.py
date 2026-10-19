@@ -143,6 +143,11 @@ MEMORY_DEGRADED = "memory/degraded"
 MEMORY_UPDATED = "memory/updated"
 # MEM-V2-3 recall explanation carries redacted IDs and ranking metadata, never content or evidence.
 MEMORY_RECALLED = "memory/recalled"
+# #1353 M7：后台形成的人面向通知（"Memory updated" 那类摘要）。载荷**只带计数与
+# 指纹/指针**（count / memory_ids / fingerprints / job_id），内容预览一律走日志与
+# 通知通道——事件流不是第二份记忆真相（不变量 #22，与 MEMORY_UPDATED 同一条理由）。
+# 安静成功（NO_MEMORY）与降级不发这个事件：没有可报的动作就不报。
+MEMORY_HUMAN_UPDATED = "memory/human_updated"
 # ── #529 §6.2：Skill 沉淀闭环的登记留痕（对标 memory/audit.py 先例） ──────
 # 成功 run 提议的候选 skill 经 lint + 人审后写入 project skill 目录，三条
 # durable 事件分别标记注册/更新/删除（append-only，不改历史事件）。data 载荷：
@@ -346,6 +351,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,
+        # #1353 M7：后台形成的人面向摘要（只带计数/指纹，见常量注释）
+        MEMORY_HUMAN_UPDATED,
         # #529 §6.2：skill 沉淀登记留痕（register / update / remove）
         SKILL_REGISTERED,
         SKILL_UPDATED,
