@@ -375,7 +375,8 @@ class StagedWriteStore:
             {**op, **({"matched_entry": pin} if pin is not None else {})}
             for op, pin in zip(operations, pins)
         ]
-        return await self.markdown.apply_batch(target, pinned_ops)
+        # 这些 pin 是 stage 时从磁盘钉住的全文（系统侧），只有重放通道认它们。
+        return await self.markdown.apply_batch(target, pinned_ops, trusted_pins=True)
 
 
 def _to_staged(row: Any) -> StagedWrite:

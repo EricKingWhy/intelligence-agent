@@ -130,12 +130,13 @@ class _MemoryArgs(BaseModel):
         return (self.content if self.content is not None else self.new_text) or ""
 
     def operations_payload(self) -> list[dict[str, Any]]:
+        # `matched_entry` 是系统 pin（审批重放时由 `write_approval._replay` 注入），
+        # 模型填什么这里都不转发：它一旦被采信就能绕过 old_text 改任意条目。
         return [
             {
                 "action": op.action,
                 "content": op.content if op.content is not None else op.new_text,
                 "old_text": op.old_text,
-                **({"matched_entry": op.matched_entry} if op.matched_entry is not None else {}),
             }
             for op in self.operations or []
         ]
