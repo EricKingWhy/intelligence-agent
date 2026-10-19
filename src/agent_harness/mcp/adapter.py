@@ -3,7 +3,9 @@
 - 命名 `mcp__{server}__{tool}`（双下划线命名空间段，Claude Code/ZCode 惯例）。
 - 权限映射：readOnlyHint=true → READ_ONLY；无注解/非只读 → DANGER（最严默认）；
   server 配置 tool_permissions 可覆写；readOnlyHint 永不升级权限（自报元数据
-  不是安全边界）。
+  不是安全边界）。side_effect 与权限分开派生：显式 read-only 配置与 readOnlyHint
+  同为只读信号（取或，只叠加、不互相撤销），显式 workspace-write 不改变 hint
+  派生的只读副作用。
 - 入参校验：MCP inputSchema → 动态 pydantic 模型（常用子集），server 仍是
   校验权威；schema 复杂/不支持时回退 permissive 模型（不猜、不丢字段）。
 - 输出预算：MAX_OUTPUT_CHARS 截断 + 标记（与 read 工具同一哲学）。
@@ -130,9 +132,11 @@ class MCPTool(Tool):
         self._description = (getattr(remote_tool, "description", None) or "").strip()
         annotations = getattr(remote_tool, "annotations", None)
         read_only_hint = bool(getattr(annotations, "read_only_hint", False)) if annotations else False
-        self._read_only = read_only_hint
 
         override = server_config.tool_permissions.get(self._remote_name)
+        # #1351：显式 read-only 配置与 readOnlyHint 同为只读信号（取或，只叠加、不
+        # 互相撤销）；显式 workspace-write 不改变 hint 派生的只读副作用。
+        self._read_only = read_only_hint or override is ToolPermission.READ_ONLY
         if override is not None:
             self._permission = override
         elif read_only_hint:
