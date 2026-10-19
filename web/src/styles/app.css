@@ -10397,7 +10397,8 @@ button.json-row {
  *    故以内容容器的 opacity/transform 作为可观测过渡面。
  *  - 密度切换：`data-density` 在 <html> 上切换，容器本身不重挂。四档各用不同
  *    animation-name ⇒ 属性切换即重启 150ms 动画（keyframes 内容相同）。
- *  - 主题切换：body 的 background-color/color 过渡（index.css）。
+ *  - 主题切换：body（index.css）+ 可见面 `.app-regions` / `.appbar` 同拍过渡
+ *    background-color / border-color（body 被 `.app-regions` 整幅盖住）。
  *  - 全部新动效在 app.css:150 的既有 reduced-motion 块里关闭。
  */
 @keyframes conversation-in {
