@@ -67,7 +67,9 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
   const hasInspect = Boolean(onFocus);
   // PRD §5.2/§10.2：语义图标按工具 kind 分发（终端/查阅/写入/MCP/扳手），
   // 替换原 bash/其它 二分；状态仍由 act-status 列表达（中断 ≠ 错误）。
-  const KindIcon = KIND_ICON[toolKind(tool.name)];
+  // F-10：kind 同时落到 data-kind，图标色是唯一按类型分色的通道。
+  const kind = toolKind(tool.name);
+  const KindIcon = KIND_ICON[kind];
   // 失败摘要（PRD §5.2 Error：第二行 error_code 摘要，不满屏红、不强制展开）。
   const errorShape = tool.status === 'failed' ? parseErrorShape(tool.result) : null;
 
@@ -99,7 +101,7 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
             {tool.status === 'stopped' && <Square size={14} />}
             {tool.status === 'running' && <span className="status-spinner" />}
           </span>
-          {density !== 'compact' && <span className="act-icon"><KindIcon size={14} /></span>}
+          {density !== 'compact' && <span className="act-icon" data-kind={kind}><KindIcon size={14} /></span>}
         {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
         {(() => {
           const mcp = splitMcpToolName(tool.name);

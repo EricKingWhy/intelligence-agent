@@ -3218,13 +3218,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-muted-foreground);
   flex-shrink: 0;
 }
-/* 工具名：mono + accent 淡色 + 550——运行步骤的"动词"，在灰参数海洋里可跳读 */
+/* F-10：工具类型只用图标色区分，不占用 accent（CTA/链接专用）。 */
+.act-icon[data-kind='terminal'] { color: var(--info); }
+.act-icon[data-kind='search'] { color: var(--warning); }
+.act-icon[data-kind='write'] { color: var(--success); }
+/* 工具名：mono + 550——运行步骤的"动词"。
+ * F-10：普通工具名回到中性文本色；accent 只留给当前展开/选中的工具行
+ * （工具类型改由 .act-icon[data-kind] 的图标色区分）。 */
 .act-name {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 550;
-  color: var(--accent-text);
+  color: var(--text-secondary);
   flex-shrink: 0;
+}
+.act-node[aria-expanded='true'] .act-name {
+  color: var(--accent-text);
 }
 .act-args {
   font-family: var(--font-mono);
