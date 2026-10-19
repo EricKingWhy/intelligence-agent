@@ -329,8 +329,6 @@ export const SessionList = memo(function SessionList({
   const sessionsPending = sessionsLoading && sessions.length === 0;
 
   return (
-    {/* #1372：skip-link 地标（`region-sessions`）。与 #1368 的抽屉状态类共存：
-        抽屉开关只改 class，id/role 不动，键盘"跳到会话区"两种形态都落得到。 */}
     <aside
       className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}
       id="region-sessions"
@@ -338,6 +336,8 @@ export const SessionList = memo(function SessionList({
       aria-label="会话区"
       tabIndex={-1}
     >
+      {/* #1372：skip-link 地标（`region-sessions`）。与 #1368 的抽屉状态类共存：
+          抽屉开关只改 class，id/role 不动，键盘"跳到会话区"两种形态都落得到。 */}
       {/* #1368：抽屉的点击遮罩。只在展开时存在，`position: fixed; inset: 0; z-index: -1`
           由 CSS 给：它铺满视口、命中区吃掉"点抽屉外"这一下（关闭与"点到下面的正文"
           不再是同一次点击），但画在轨自己的背景之下 —— 抽屉表面不会被它压暗
@@ -502,7 +502,6 @@ export const SessionList = memo(function SessionList({
             )}
           </>
         )}
-      </div>
 
         {/* 项目区**不**被会话骨架替换：会话与项目是两条独立请求，
             若 `listSessions` 悬挂，整块被骨架盖住会让项目区永久不可达。骨架只代表

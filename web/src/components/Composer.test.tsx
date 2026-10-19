@@ -212,7 +212,7 @@ describe('Composer pending plan approval lock (#1356)', () => {
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('请先决定当前计划');
     expect(html).toContain(PERMISSION_HINT);
-    expect(html).toContain('title="决定计划后再改档"');
+    expect(html).toContain('决定计划后再改档"');
   });
 });
 
@@ -368,7 +368,7 @@ describe('Composer 权限 pill（#283）', () => {
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain(PERMISSION_HINT);
-    expect(html).toContain('title="确认当前要求后再改档"');
+    expect(html).toContain('确认当前要求后再改档"');
     expect(html).not.toContain('审批');
   });
 

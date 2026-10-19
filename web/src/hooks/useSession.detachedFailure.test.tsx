@@ -447,7 +447,7 @@ describe('#1333 findings 修复——认领接线', () => {
     expect(result).toContain('可能已成功');
   });
 
-  it('C-P3-1：POST 的迟到失败优先于认领歧义 ⇒ 仍报「提交失败：<原因>」', async () => {
+  it('C-P3-1（#1367 P1-1 修订）：POST 的迟到失败优先于认领歧义，但呈现为「结局不明」', async () => {
     let rejectPost!: (e: Error) => void;
     vi.mocked(startSession).mockReturnValue(
       new Promise<Response>((_r, reject) => { rejectPost = reject; }) as never,
@@ -463,7 +463,8 @@ describe('#1333 findings 修复——认领接线', () => {
       const p = captured.hook!.submitTask({ task: 'POST 失败盖住歧义' });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
       // 先让 POST 落定失败，再抛歧义：`late.failure ?? e` 必须是前者赢——
-      // 这是意图如此（POST 的硬失败比认领结论更硬），pin 住不许反转。
+      // 失败原因的优先级不变（POST 的硬失败比认领结论更硬），但 #1367 P1-1 修订了
+      // 呈现：认领期已越过分叉窗口 ⇒ 服务端很可能已落盘 ⇒ 不能自称「提交失败」并劝重试。
       rejectPost(new Error('401 鉴权失败'));
       await vi.advanceTimersByTimeAsync(0);
       rejectClaim(new SessionClaimAmbiguousError(['other-0', 'fresh-0']));
@@ -471,8 +472,11 @@ describe('#1333 findings 修复——认领接线', () => {
       result = await p;
     });
 
-    expect(result).toBe('提交失败：401 鉴权失败');
+    // 原因仍是 POST 的（不是歧义的「无法确认」），但文案是「可能已成功」且不可重试。
+    expect(result).toContain('可能已成功');
+    expect(result).toContain('401 鉴权失败');
     expect(result).not.toContain('无法确认');
-    expect(captured.hook!.error).toBe('提交失败：401 鉴权失败');
+    expect(captured.hook!.error).toContain('可能已成功');
+    expect(captured.hook!.sendFailure?.retryable).toBe(false);
   });
 });
