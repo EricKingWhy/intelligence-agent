@@ -53,6 +53,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
       selectedId: H.selectedId,
       conversation: H.conversation,
       loadingHistory: true,
+      historySkeleton: true,
       streaming: false,
       reconnecting: false,
       error: null,

@@ -137,6 +137,7 @@ export default function App() {
     selectedId,
     conversation,
     loadingHistory,
+    historySkeleton,
     streaming,
     reconnecting,
     error,
@@ -1925,7 +1926,7 @@ export default function App() {
                 <>
                   <Conversation
                     conversation={conversation}
-                    loadingHistory={loadingHistory}
+                    loadingHistory={historySkeleton}
                     density={density}
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}

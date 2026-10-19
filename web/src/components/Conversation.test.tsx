@@ -340,13 +340,15 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
 
 /** #1371：历史加载期只渲染骨架，不渲染「暂无对话」空态（替换关系）。 */
 describe('Conversation — 加载期骨架屏（#1371）', () => {
-  it('loadingHistory=true：渲染骨架与 aria-busy，不出现空态文案', () => {
+  it('loadingHistory=true：渲染骨架与 role=status，不出现空态文案', () => {
     const html = renderToStaticMarkup(
       <Conversation conversation={null} loadingHistory density="balanced" />,
     );
 
     expect(html).toContain('conversation-loading');
-    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain('role="status"');
+    // S-P3-2：不带 aria-busy——busy 期间 live region 抑制播报，区域 settle 即卸载。
+    expect(html).not.toContain('aria-busy');
     expect(html).toContain('正在加载对话历史');
     expect(html).not.toContain('暂无对话');
     expect(html).not.toContain('正在加载历史…');

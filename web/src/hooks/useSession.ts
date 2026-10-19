@@ -182,6 +182,29 @@ export function shouldShowHistoryLoading(
   return false;
 }
 
+/** #1371：对话区**这一帧**是否应渲染历史骨架（渲染期派生，不依赖 effect）。
+ *
+ *  `loadingHistory` 由 `useEffect` 写入——被动效应在提交并**绘制之后**才 flush，
+ *  所以 idle→viewing（点开侧栏某个会话）或 A→B 切换的第一次渲染里它还是 false，
+ *  而 `conversation` 分别还是 null / 上一会话的投影 ⇒ 会先画一帧「暂无对话」或
+ *  上一会话内容，下一拍才换骨架。冷启动路径靠 `loadingHistory` 初值修掉了，但
+ *  「空态列表 → 点开会话」没有；渲染期派生把三条路径一起覆盖：
+ *
+ *  - 首帧冷启动：`loadingHistory` 初值即 true；
+ *  - idle→viewing / A→B：`viewing` 目标与当前投影的 session_id 不一致 ⇒ true；
+ *  - live→viewing 自迁移：`conversation.session_id === mode.sessionId` ⇒ false，
+ *    保留 `shouldShowHistoryLoading` 的「后台对账不闪占位符」语义。
+ *
+ *  `live` 模式不参与：流帧自己画内容（提交后的第一帧由 composer 的提交态承接）。 */
+export function shouldShowHistorySkeleton(
+  mode: SessionMode,
+  conversation: ConversationState | null,
+  loadingHistory: boolean,
+): boolean {
+  if (loadingHistory) return true;
+  return mode.kind === 'viewing' && conversation?.session_id !== mode.sessionId;
+}
+
 /** P1-3 delta 合帧提交器（HANDOFF_PERF_FRONTEND §6）：~24ms 窗口内多个 delta
  * 只触发一次 React 提交。语义边界——只合并「提交」，不合并「折叠」：每帧仍
  * 逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent 进本地 conv（真相不
@@ -548,6 +571,8 @@ export function useSession() {
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
   const streaming = mode.kind === 'live';
+  /** #1371：对话区骨架的渲染判据（渲染期派生，覆盖 effect 落地前的那一帧）。 */
+  const historySkeleton = shouldShowHistorySkeleton(mode, conversation, loadingHistory);
 
   // Load session list on mount.
   /** 重新拉取会话列表。返回**是否成功**——`sessions` 的唯一写入者，所以调用方
@@ -627,9 +652,19 @@ export function useSession() {
     prevModeRef.current = mode;
     if (mode.kind === 'idle') {
       setConversation(null);
+      // #1371：这里**必须**复位。旧实现两支直接 return，而 `finally` 的写入会被
+      // cleanup 的 `cancelled=true` 跳过 ⇒ 若用户在历史落地前点「新建会话」，或
+      // 历史未落地就发送（mode 变 live），`loadingHistory` 会永久停在 true：
+      // 骨架屏（role=status 的 shimmer）从此不退场，整片对话区是空白，用户连
+      // 「正在加载」都看不到。live 期间复位是安全的——流帧自己画内容；回到
+      // viewing 时 effect 会按 `shouldShowHistoryLoading` 重新裁决。
+      setLoadingHistory(false);
       return;
     }
-    if (mode.kind !== 'viewing') return;
+    if (mode.kind !== 'viewing') {
+      setLoadingHistory(false);
+      return;
+    }
     const sid = mode.sessionId;
     let cancelled = false;
     // live→viewing 迁移：conversation 已是同会话真相，后台静默重读对账，
@@ -2318,6 +2353,7 @@ export function useSession() {
     selectedId,
     conversation,
     loadingHistory,
+    historySkeleton,
     streaming,
     reconnecting,
     error,

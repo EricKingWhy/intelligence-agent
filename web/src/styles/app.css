@@ -165,7 +165,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .conversation,
   .conversation-scroll,
   .conversation-empty,
-  .session-item,
   .turn,
   .composer,
   .rail-empty-action {
@@ -10403,11 +10402,15 @@ button.json-row {
  *    CSS animation 淡入。Lane D 采样的 `.app-workspace` 宽度在会话切换时恒为
  *    842px（内容替换不改变栅格轨道），`transition: width` 没有可插值属性；
  *    故以内容容器的 opacity/transform 作为可观测过渡面。
+ *    ⚠ 两处票面偏离（`.app-workspace` width 180ms → 内容容器 animation；
+ *      空态→数据 150ms → 沿用 180ms）已登记在 `ticket7-report.md` 的
+ *      「票面偏离」一节，待协调员裁决。
  *  - 密度切换：`data-density` 在 <html> 上切换，容器本身不重挂。四档各用不同
  *    animation-name ⇒ 属性切换即重启 150ms 动画（keyframes 内容相同）。
- *  - 主题切换：body（index.css）+ 三栏可见面（`.app-regions` / `.appbar` /
- *    `.session-rail` / `.step-detail`）同拍过渡 background-color / border-color
- *    （body 被 `.app-regions` 整幅盖住；只过渡 body 是采得到帧、看不见效果）。
+ *  - 主题切换：index.css 的 `:root[data-theme-switch] *` 在切换的 200ms 窗口内给
+ *    全部可见面（含中间列 `.app-workspace` 与卡片/气泡）加颜色过渡；窗口由
+ *    `lib/theme.ts` 的 `applyTheme` 挂/摘。下面几条三栏可见面的常驻 transition 是
+ *    基线（窗口外的主题变更——理论上不存在——也不会硬切）。
  *  - 全部新动效在 app.css:150 的既有 reduced-motion 块里关闭。
  */
 /* 主题切换：左栏与右栏各占 240/340px，不跟着 canvas 一起过渡就是半屏硬切。 */
@@ -10417,10 +10420,6 @@ button.json-row {
 }
 @keyframes conversation-in {
   from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes rail-row-in {
-  from { opacity: 0; transform: translateY(2px); }
   to { opacity: 1; transform: none; }
 }
 @keyframes density-shift-compact {
@@ -10443,18 +10442,20 @@ button.json-row {
 /* 会话切换：`.conversation-scroll` 带 `key={session_id}`，换会话即重挂 ⇒ 180ms
  * 淡入。票面原文写的是 `.app-workspace` width 180ms，但 Lane D 实测该宽度在会话
  * 切换时恒为 842px（栅格轨道由 app-regions 决定），`transition: width` 没有可
- * 插值的属性，故把"切换不闪"落在真正变化的内容容器上（见完工报告「票面偏离」）。
+ * 插值的属性，故把"切换不闪"落在真正变化的内容容器上（偏离登记见文件头与
+ * `ticket7-report.md`「票面偏离」）。
  * 空态→数据：数据到达时同一个 `.conversation-scroll` 首次挂载，沿用 180ms（票面
- * 150ms 落在「面板级 150–200ms」区间内）；`.conversation-empty` 自身 150ms。 */
+ * 150ms 落在「面板级 150–200ms」区间内，偏离同上报）；`.conversation-empty`
+ * 自身 150ms。 */
 .conversation-scroll {
   animation: conversation-in 180ms var(--ease-apple);
 }
 .conversation-empty {
   animation: conversation-in 150ms var(--ease-apple);
 }
-.session-item {
-  animation: rail-row-in 150ms var(--ease-apple);
-}
+/* ⚠ 会话行**不**加入场动画（审查 S-P3-1 / C-P3-3）：票面 4 个场景不含「行入场」，
+ * 且行挂载会成批重放（归档开关/分组重建）、动画的 transform 还会压掉拖拽态的
+ * transform。 */
 /* 密度切换：`data-density` 在 <html> 上翻转，`.conversation` 不重挂。四档各用
  * 一个 animation-name（内容相同）——属性切换即重启 150ms 动画，这是纯 CSS 里
  * 「同名动画不会重播」的唯一可靠绕法。只动画容器（一个元素），不给每个 .turn
@@ -10555,13 +10556,23 @@ button.json-row {
 
 /* ── 弹窗规范（#1371）──
  * 24/24/20 内边距；每框一个实底 pill 主按钮，次要动作 ghost/text；
- * 输入框 6px 圆角；focus 换品牌色边框且无外发光。颜色全部走 token。 */
+ * 输入框 6px 圆角；focus 换品牌色边框且无外发光。颜色全部走 token。
+ *
+ * 作用面：票面列出的 8 个 Dialog（`.project-dialog` / `.provider-dialog` 根类）之外，
+ * 还有两个同族面板用同一套 `.project-btn*` 但根类不在票面清单里：
+ * `MemoryPanel`（`.memory-panel`）与 `RecoveryListPanel`（`.recovery-list-panel`）。
+ * 不并进来就会同屏三种主按钮长相（审查 C-P3-1 / S-P2-6），故一并覆盖；`ApprovePolicyPanel`
+ * 与 `PluginPanel` 用 `.project-dialog` 根类，自动跟着生效（影响面 = 10 个弹窗/面板）。 */
 .project-dialog,
-.provider-dialog {
+.provider-dialog,
+.memory-panel,
+.recovery-list-panel {
   padding: var(--space-xl) var(--space-xl) var(--space-lg2);
 }
 .project-dialog .project-btn,
-.provider-dialog .project-btn {
+.provider-dialog .project-btn,
+.memory-panel .project-btn,
+.recovery-list-panel .project-btn {
   padding: 7px var(--space-lg);
   border-radius: var(--radius-full);
   border-color: transparent;
@@ -10569,28 +10580,38 @@ button.json-row {
   color: var(--text-secondary);
 }
 .project-dialog .project-btn:hover,
-.provider-dialog .project-btn:hover {
+.provider-dialog .project-btn:hover,
+.memory-panel .project-btn:hover,
+.recovery-list-panel .project-btn:hover {
   background: var(--color-hover);
   color: var(--text-primary);
 }
 .project-dialog .project-btn-primary,
-.provider-dialog .project-btn-primary {
+.provider-dialog .project-btn-primary,
+.memory-panel .project-btn-primary,
+.recovery-list-panel .project-btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  /* 与 .ask-user-btn.primary 同一取色法（本文件 3485 行注释）：
+  /* 与 .ask-user-btn.primary 同一取色法（见本文件 `.ask-user-btn.primary` 上方注释）：
    * 实底主按钮 = --accent 底 + --surface-canvas 字，两个主题实测高对比。 */
   color: var(--surface-canvas);
 }
 .project-dialog .project-btn-primary:hover,
-.provider-dialog .project-btn-primary:hover {
+.provider-dialog .project-btn-primary:hover,
+.memory-panel .project-btn-primary:hover,
+.recovery-list-panel .project-btn-primary:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--text-primary));
 }
-.project-dialog .project-btn-danger {
+.project-dialog .project-btn-danger,
+.memory-panel .project-btn-danger,
+.recovery-list-panel .project-btn-danger {
   background: var(--danger);
   border-color: var(--danger);
   color: var(--surface-canvas);
 }
-.project-dialog .project-btn-danger:hover {
+.project-dialog .project-btn-danger:hover,
+.memory-panel .project-btn-danger:hover,
+.recovery-list-panel .project-btn-danger:hover {
   background: color-mix(in srgb, var(--danger) 88%, var(--text-primary));
 }
 /* Provider 弹窗的主动作是「保存」；删除是次级危险动作，保持文字按钮。 */
@@ -10603,19 +10624,33 @@ button.json-row {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
-.project-dialog .btn-primary {
+.project-dialog .btn-primary,
+.memory-panel .btn-primary,
+.recovery-list-panel .btn-primary {
   border-radius: var(--radius-full);
   color: var(--surface-canvas);
 }
-.project-dialog .btn-ghost {
+.project-dialog .btn-ghost,
+.memory-panel .btn-ghost,
+.recovery-list-panel .btn-ghost {
   border-color: transparent;
   border-radius: var(--radius-full);
 }
 /* 输入框 6px 圆角是既有事实（`.project-input` / `.project-textarea` 本来就取
- * --radius-sm），这里只收紧焦点态：边框换满强度 --accent、去掉外发光。 */
+ * --radius-sm），这里只收紧焦点态：边框换满强度 --accent。
+ * ⚠ 如实登记（审查 C-P2-3 / S-P2-1）：「去外发光」在 origin/main 上是**空操作**——
+ *   这两个输入框本就没有 box-shadow，只有 `outline:none` + 60% 混色边框；本票
+ *   的实际变化是把边框提到满强度，并显式 `box-shadow:none` 防回归。
+ * `.dir-browser-path` 是「新建项目」弹窗里的真实输入面（审查 S-P2-2），同一条规则
+ * 一并覆盖，否则同框两个输入框 focus 色不一致。 */
 .project-dialog .project-input:focus-visible,
 .project-dialog .project-textarea:focus-visible,
-.provider-dialog .project-input:focus-visible {
+.project-dialog .dir-browser-path:focus-visible,
+.provider-dialog .project-input:focus-visible,
+.memory-panel .project-input:focus-visible,
+.memory-panel .project-textarea:focus-visible,
+.recovery-list-panel .project-input:focus-visible,
+.recovery-list-panel .project-textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: none;

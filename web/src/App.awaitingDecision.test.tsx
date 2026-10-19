@@ -48,6 +48,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
       selectedId: 's-1',
       conversation: null,
       loadingHistory: false,
+      historySkeleton: false,
       streaming: false,
       reconnecting: false,
       error: null,

@@ -170,7 +170,8 @@ describe('会话列表骨架屏（#1371）', () => {
     const html = render({ sessionsLoading: true });
 
     expect(html).toContain('rail-skeleton');
-    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain('aria-busy');
     expect(html).toContain('正在加载会话列表');
     expect(html).not.toContain(EMPTY_HINT);
   });
