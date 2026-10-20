@@ -888,6 +888,9 @@ class SessionArchive:
         （`UPDATE ... WHERE id = ? AND ended_at IS NULL`）；与本类
         `_sweep_orphaned_sessions` 的关闭语义一致。行不存在 / 已关闭
         ⇒ 命中 0 行，静默跳过（调用方的 fail-open 依赖它不抛）。
+
+        Hermes 同函数还经 `_end_and_bump` bump conversation generation；
+        本仓无该机制，故省略。
         """
         with self._cursor() as conn:
             cur = conn.execute(
@@ -1803,10 +1806,17 @@ class SessionArchiveObserver:
 
     @property
     def archive(self) -> SessionArchive:
+        # 首建走双重检查锁定：并发首访（观察者事件线程 + web 请求线程）只建
+        # 一个实例，避免重复 initialize/维护与孤儿连接。`initialize()` 与
+        # `maybe_auto_prune_and_vacuum()` 都不回调用本对象的 `_lock`，持锁安全。
         if self._archive is None:
-            arc = SessionArchive(self._archive_path, cjk_so_path=self._cjk_so_path)
-            arc.initialize()
-            self._archive = arc
+            with self._lock:
+                if self._archive is None:
+                    arc = SessionArchive(
+                        self._archive_path, cjk_so_path=self._cjk_so_path,
+                    )
+                    arc.initialize()
+                    self._archive = arc
         if not self._maintained:
             with self._lock:
                 run_maintenance = not self._maintained

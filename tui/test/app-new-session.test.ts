@@ -103,7 +103,10 @@ test("/sessions 选择器切会话不发创建请求（不结束任何会话）"
     return { hide() {} };
   };
   try {
-    await app.showSessionPicker();
+    // 走 runCommand 分发层：直接调 showSessionPicker 会绕过 `/sessions` 的
+    // command arm，分发接错时测试仍绿（F-2）。
+    await app.runCommand("/sessions");
+    assert.ok(list, "runCommand(\"/sessions\") 必须打开选择器");
     list?.onSelect?.({ value: "s2" });
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(
@@ -127,7 +130,8 @@ test("/quit 只发 client-exit，不发创建请求", async () => {
   }) as typeof process.exit;
   app.tui.stop = () => {};
   try {
-    await app.quit().catch(() => undefined);
+    // 走 runCommand 分发层（F-2）：直接调 quit() 守不住 `/quit` 的 command arm。
+    await app.runCommand("/quit");
     assert.equal(exited, true, "quit 必须走 process.exit");
     assert.equal(
       calls.filter((c) => c.method === "POST" && c.path === "/api/sessions").length,

@@ -3306,11 +3306,21 @@ def create_app(
 
         # #1418：**必须**在建会话成功之后——建失败不许误杀旧会话。
         # fail-open 与首写获胜语义在 `SessionArchiveObserver.end_session`。
+        # 先过仓内统一的 id 校验：非法格式等同「前任不存在」，静默跳过
+        # （AC2 契约；这里绝不能 422/500）。
         if req.previous_session_id:
-            await anyio.to_thread.run_sync(
-                partial(state.session_archive_observer.end_session,
-                        req.previous_session_id, "new_session")
-            )
+            try:
+                validate_session_id(req.previous_session_id)
+            except InvalidSessionId:
+                logging.getLogger("agent_harness.web").warning(
+                    "previous_session_id 形态非法，跳过结束前任：%r…（len=%d）",
+                    req.previous_session_id[:64], len(req.previous_session_id),
+                )
+            else:
+                await anyio.to_thread.run_sync(
+                    partial(state.session_archive_observer.end_session,
+                            req.previous_session_id, "new_session")
+                )
 
         # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
         # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。

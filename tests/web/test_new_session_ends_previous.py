@@ -139,6 +139,33 @@ def test_create_failure_does_not_end_previous_session(client):
     assert meta["ended_at"] is None
 
 
+@pytest.mark.parametrize("bad_id", ["bad/id", "a" * 129])
+def test_invalid_previous_session_id_is_silently_skipped(client, monkeypatch, bad_id):
+    """非法 id 等同「不存在」：静默跳过，请求照常 200 建新会话。
+
+    票面 AC2 的契约是 previous 不存在静默跳过；非法格式不能变成 422/500，
+    也不得落到归档写入（`validate_session_id` 不通过 ⇒ 不调 end）。
+    """
+    client, app = client
+    ended: list[str] = []
+    real_end = SessionArchive.end_session
+
+    def _spy(self, session_id, reason):
+        ended.append(session_id)
+        return real_end(self, session_id, reason)
+
+    monkeypatch.setattr(SessionArchive, "end_session", _spy)
+
+    resp = client.post(
+        "/api/sessions?launch=false", json={"previous_session_id": bad_id},
+    )
+    assert resp.status_code == 200, resp.text
+    new = resp.json()["session_id"]
+    assert client.get(f"/api/sessions/{new}/events").status_code == 200
+    assert ended == [], "非法 id 不得触达归档结束写入"
+    assert _archive(app).get_session(bad_id) is None
+
+
 def test_end_failure_is_fail_open(client, monkeypatch):
     """归档写入失败只记 warning：建会话请求照常成功（派生索引不反噬主路径）。"""
     client, app = client

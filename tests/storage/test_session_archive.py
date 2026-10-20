@@ -863,6 +863,53 @@ class TestStoreObserverWiring:
         assert (root / "state.db").exists()
         assert store.list_session_ids() == [sid]
 
+    def test_concurrent_first_access_builds_single_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1418 F-3：多个线程同时首访 `.archive` 只建一个实例、不抛。
+
+        首建 check-then-set 若在锁外，各线程会各建一个 `SessionArchive`
+        并各跑一次 `initialize()`，后写者覆盖前者（连接泄漏 + 重复维护）。
+        """
+        from agent_harness.storage import session_archive as module
+
+        observer = SessionArchiveObserver(
+            tmp_path / "sessions" / "state.db", auto_prune=False,
+        )
+        init_calls: list[SessionArchive] = []
+        real_initialize = module.SessionArchive.initialize
+
+        def slow_initialize(self: SessionArchive) -> None:
+            # 拉宽竞态窗口：没有锁时其它线程必然也通过 `_archive is None` 检查。
+            init_calls.append(self)
+            time.sleep(0.05)
+            real_initialize(self)
+
+        monkeypatch.setattr(module.SessionArchive, "initialize", slow_initialize)
+
+        results: list[SessionArchive] = []
+        errors: list[BaseException] = []
+        start = threading.Barrier(8)
+
+        def hit() -> None:
+            try:
+                start.wait()
+                results.append(observer.archive)
+            except BaseException as exc:  # noqa: BLE001 - 测试要看到任何异常
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(results) == 8
+        assert len(init_calls) == 1, "首建必须只跑一次 initialize()"
+        assert len({id(arc) for arc in results}) == 1, "所有线程必须拿到同一实例"
+        assert observer.archive is results[0]
+
 
 # ------------------------------------------- 修复轮 B：检索语义（Hermes 对齐） ---
 
@@ -1111,7 +1158,11 @@ class TestEndSession:
         assert meta["ended_at"] is not None
 
     def test_first_write_wins(self, archive: SessionArchive) -> None:
-        """已有 ended_at（如压缩结束）时不得覆写——Hermes 原语义。"""
+        """已有 ended_at 时不得覆写——Hermes 原语义（其侧如压缩结束）。
+
+        本仓当前没有写 `end_reason='compression'` 的生产方（压缩是消息级投影）；
+        本用例用裸 SQL 预置结束态，模拟「已有首个写入方」。
+        """
         archive.ensure_session("comp", source="interactive", started_at=time.time())
         with _raw(archive.db_path) as conn:
             conn.execute(
