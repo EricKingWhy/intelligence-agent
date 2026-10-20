@@ -6246,6 +6246,192 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex-shrink: 0;
 }
 
+/* ── #1419 Overview：指标卡 + 8 个折叠段 ─────────────────────────────────────
+ * 折叠段内容始终挂载（inert/aria-hidden 关掉焦点与读屏），收起不丢数据；
+ * 展开用 grid-template-rows 0fr→1fr，不读布局。 */
+.ov-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.ov-metric {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  transition:
+    transform 120ms var(--ease-apple),
+    box-shadow 120ms var(--ease-apple),
+    border-color 120ms var(--ease-apple);
+}
+.ov-metric:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-popover);
+}
+.ov-metric-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ov-metric-label {
+  flex: 1;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ov-metric-icon {
+  color: var(--accent-text);
+  opacity: 0.65;
+  flex-shrink: 0;
+}
+.ov-metric-value {
+  margin-top: 2px;
+  font-size: var(--text-lg);
+  line-height: 1.2;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ov-spark {
+  display: block;
+  width: 100%;
+  height: 24px;
+  margin: 2px 0;
+  overflow: visible;
+}
+.ov-spark polyline {
+  fill: none;
+  stroke: var(--accent-text);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ov-metric-flat {
+  height: 24px;
+  margin: 2px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+  opacity: 0.6;
+}
+.ov-metric-sub {
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ov-acc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ov-acc {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  overflow: hidden;
+}
+.ov-acc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 var(--text-xs) var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple);
+}
+.ov-acc-head:hover {
+  background: var(--surface-hover);
+}
+.ov-acc-head:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+.ov-acc-icon {
+  display: inline-flex;
+  color: var(--accent-text);
+  opacity: 0.75;
+}
+.ov-acc-title {
+  flex: 1;
+  text-align: left;
+}
+.ov-acc-state {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-tertiary);
+}
+.ov-acc-chev {
+  color: var(--text-tertiary);
+  transition: transform 160ms var(--ease-apple);
+  flex-shrink: 0;
+}
+.ov-acc.open .ov-acc-chev {
+  transform: rotate(180deg);
+}
+.ov-acc-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-expand) var(--ease-apple);
+}
+.ov-acc.open .ov-acc-body {
+  grid-template-rows: 1fr;
+}
+.ov-acc-in {
+  min-height: 0;
+  overflow: hidden;
+}
+.ov-acc .detail-section {
+  padding: 0 8px 8px;
+  margin: 0;
+  border-top: 0;
+}
+.ov-acc .detail-section > .detail-section-title {
+  display: none;
+}
+.ov-acc .detail-empty-hint {
+  padding: 2px 0 6px;
+}
+/* 其余 tab 的卡片面（只加 className，不动结构/事件/文案）：统一 1px 边框 +
+ * md 圆角 + 120ms 抬升。 */
+.step-detail .detail-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition:
+    transform 120ms var(--ease-apple),
+    box-shadow 120ms var(--ease-apple),
+    border-color 120ms var(--ease-apple);
+}
+.step-detail .detail-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-popover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-metric,
+  .ov-acc-chev,
+  .ov-acc-body {
+    transition: none;
+  }
+}
+
 /* ── #1192 子详情「约束继承」区（mockups/phase3.html 直译；类型色板复用
  *    constraints.css 的 :root 级 --cn-* 变量，不另存一份）── */
 .ci-clean-msg {

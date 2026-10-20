@@ -49,6 +49,7 @@ function Host({ conv, onAction }: { conv: ConversationState; onAction?: (a: Insp
   }, [onAction]);
   return (
     <main className={`app-regions${open ? '' : ' inspector-closed'}`} data-open={open ? 'true' : 'false'}>
+      <button className="host-toggle" onClick={() => setOpen((v) => !v)}>toggle</button>
       <StepDetail
         conversation={conv}
         streaming
@@ -154,6 +155,34 @@ describe('#1419 Timeline 卡片流交互', () => {
     click(chip('全部'));
     expect(rows()).toHaveLength(EVENTS.length);
     expect(expandedCards()).toHaveLength(1); // 筛选没有丢掉展开
+  });
+
+  it('面板关闭清空展开；重新打开不残留', () => {
+    render(<Host conv={conversation()} />);
+    click(rows()[1]);
+    expect(expandedCards()).toHaveLength(1);
+
+    click(container!.querySelector('button[aria-label="关闭运行详情"]'));
+    expect(container!.querySelector('main')!.classList.contains('inspector-closed')).toBe(true);
+
+    click(container!.querySelector('.host-toggle'));
+    expect(container!.querySelector('main')!.classList.contains('inspector-closed')).toBe(false);
+    expect(expandedCards()).toHaveLength(0);
+  });
+
+  it('实时新增事件不清掉已有展开（按 eventKey 而非索引）', () => {
+    render(<Host conv={conversation()} />);
+    click(rows()[1]);
+    const card = expandedCards()[0];
+    expect(card).toBeTruthy();
+
+    const live = applyEvent(conversation(), {
+      type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 6, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:06.000Z',
+    });
+    render(<Host conv={live} />);
+    expect(rows()).toHaveLength(EVENTS.length + 1);
+    expect(expandedCards()).toHaveLength(1);
+    expect(expandedCards()[0].textContent).toContain('tool/call');
   });
 
   it('展开不扩大窗口：600 事件仍只挂 200 行', () => {

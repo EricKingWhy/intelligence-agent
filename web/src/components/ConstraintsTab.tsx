@@ -137,7 +137,7 @@ function FactRow({
   const inactive = revoked || superseded;
   const dot = FACT_TYPE_DOTS[fact.type] ?? 'var(--cn-type-default)';
   return (
-    <div className={`cn-row${inactive ? ' revoked' : ''}`} data-status={fact.status}>
+    <div className={`cn-row detail-card${inactive ? ' revoked' : ''}`} data-status={fact.status}>
       <div className="cn-row-main">
         <div className="cn-kicker">
           <span className="cn-type">

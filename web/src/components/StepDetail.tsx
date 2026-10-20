@@ -13,12 +13,13 @@
  */
 
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ChevronRight, Clock,
+  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock,
   Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
   Package, Pin, ShieldCheck, TerminalSquare, X,
 } from 'lucide-react';
+import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
@@ -725,6 +726,184 @@ const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
 export const TOOLS_WINDOW_DEFAULT = 50;
 export const TOOLS_WINDOW_STEP = 200;
 
+
+/** #1419 Overview 指标卡的采样：只从**真实事件**取，取不到就 null（不补 0）。
+ *  优先 model/request（每次调用一个点，带 usage/cost/duration），退到
+ *  model/completed（部分 provider 只在完成事件回填 usage）。 */
+interface ModelSample {
+  prompt: number | null;
+  completion: number | null;
+  cost: number | null;
+  duration: number | null;
+}
+
+function finite(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function modelSamples(events: readonly AgentEvent[]): ModelSample[] {
+  const requests = events.filter((e) => e.type === EventType.MODEL_REQUEST);
+  const source = requests.length > 0 ? requests : events.filter((e) => e.type === EventType.MODEL_COMPLETED);
+  return source.map((e) => {
+    const usage = recordOf(e.data.usage);
+    const cost = typeof e.data.cost_usd === 'string' ? Number(e.data.cost_usd) : finite(e.data.cost_usd);
+    return {
+      prompt: finite(usage?.prompt_tokens),
+      completion: finite(usage?.completion_tokens),
+      cost: cost !== null && Number.isFinite(cost) ? cost : null,
+      duration: finite(e.data.duration_ms),
+    };
+  });
+}
+
+function seriesOf(samples: readonly ModelSample[], key: keyof ModelSample): number[] {
+  return samples.flatMap((s) => (s[key] === null ? [] : [s[key] as number]));
+}
+
+/** 采样点太多时按等距抽 24 个：只影响图形密度，不改变数值口径。 */
+function sparkValues(values: readonly number[]): number[] {
+  if (values.length <= 24) return [...values];
+  return Array.from({ length: 24 }, (_, i) => values[Math.round((i / 23) * (values.length - 1))]);
+}
+
+function Sparkline({ values, label }: { values: readonly number[]; label: string }) {
+  if (values.length < 2) return null;
+  const points = sparkValues(values);
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const coords = points
+    .map((v, i) => `${((i / (points.length - 1)) * 100).toFixed(2)},${(24 - ((v - min) / span) * 20 - 2).toFixed(2)}`)
+    .join(' ');
+  return (
+    <svg className="ov-spark" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label={label}>
+      <polyline points={coords} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function MetricCard({
+  label, value, sub, series, icon: Icon,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  series: readonly number[];
+  icon: typeof Hash;
+}) {
+  return (
+    <div className="ov-metric">
+      <div className="ov-metric-head">
+        <span className="ov-metric-label">{label}</span>
+        <Icon size={12} className="ov-metric-icon" aria-hidden="true" />
+      </div>
+      <div className="ov-metric-value num">{value}</div>
+      {series.length >= 2 ? (
+        <Sparkline values={series} label={`${label}趋势`} />
+      ) : (
+        <div className="ov-metric-flat" aria-hidden="true" />
+      )}
+      <div className="ov-metric-sub">{sub}</div>
+    </div>
+  );
+}
+
+function OverviewMetrics({
+  conversation, runDuration,
+}: {
+  conversation: ConversationState;
+  runDuration: string | null;
+}) {
+  const samples = useMemo(() => modelSamples(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const usage = conversation.usage_total;
+  const prompt = usage?.prompt_tokens ?? null;
+  const completion = usage?.completion_tokens ?? null;
+  const cost = conversation.cost_usd;
+  const totalTokens = usage?.total_tokens ?? null;
+  const perMillion = cost !== null && totalTokens !== null && totalTokens > 0
+    ? `$${((cost / totalTokens) * 1_000_000).toFixed(2)} / M tok`
+    : '无完整用量，无法折算';
+  const durations = seriesOf(samples, 'duration');
+  const turnDurations = conversation.turns.flatMap((t) => {
+    const start = t.started_at ? Date.parse(t.started_at) : NaN;
+    const end = t.completed_at ? Date.parse(t.completed_at) : NaN;
+    return Number.isFinite(start) && Number.isFinite(end) && end >= start ? [end - start] : [];
+  });
+  const timeSeries = durations.length >= 2 ? durations : turnDurations;
+  const longest = timeSeries.length > 0 ? Math.max(...timeSeries) : null;
+  return (
+    <div className="ov-metrics">
+      <MetricCard
+        label="输入 tokens"
+        icon={Hash}
+        value={prompt !== null ? prompt.toLocaleString() : '—'}
+        sub={conversation.turns.length > 0 ? `${conversation.turns.length} 轮累计` : '尚无轮次'}
+        series={seriesOf(samples, 'prompt')}
+      />
+      <MetricCard
+        label="输出 tokens"
+        icon={Hash}
+        value={completion !== null ? completion.toLocaleString() : '—'}
+        sub={completion !== null ? '按 model/completed 聚合' : '等待用量回填'}
+        series={seriesOf(samples, 'completion')}
+      />
+      <MetricCard
+        label="成本"
+        icon={Database}
+        value={cost !== null ? `$${cost}` : '—'}
+        sub={perMillion}
+        series={seriesOf(samples, 'cost')}
+      />
+      <MetricCard
+        label="耗时"
+        icon={Clock}
+        value={runDuration ?? '—'}
+        sub={longest !== null ? `最长单次 ${formatShortDuration(longest)}` : '无耗时样本'}
+        series={timeSeries}
+      />
+    </div>
+  );
+}
+
+/** Overview 折叠段：内容**始终挂载**（SSR/测试与“收起不丢数据”），关闭时
+ *  `inert` + aria-hidden 阻止焦点与读屏；默认展开 RUN/TOOLS/决定/PERMISSION。 */
+function OverviewSection({
+  id, title, icon: Icon, defaultOpen = false, className, children,
+}: {
+  id: string;
+  title: string;
+  icon: typeof Hash;
+  defaultOpen?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = `ov-body-${id}`;
+  return (
+    <section className={`ov-acc${open ? ' open' : ''}${className ? ` ${className}` : ''}`} data-ov-section={id}>
+      <button
+        type="button"
+        className="ov-acc-head"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="ov-acc-icon"><Icon size={13} aria-hidden="true" /></span>
+        <span className="ov-acc-title">{title}</span>
+        <span className="ov-acc-state">{open ? '收起' : '展开'}</span>
+        <ChevronDown size={13} className="ov-acc-chev" aria-hidden="true" />
+      </button>
+      <div className="ov-acc-body" id={bodyId} aria-hidden={!open} inert={!open ? true : undefined}>
+        <div className="ov-acc-in">{children}</div>
+      </div>
+    </section>
+  );
+}
+
 export function ChatTab({
   conversation, tools, onFocusTool, onJumpToApproval, selectedKey, awaitingDecision = false,
 }: {
@@ -766,6 +945,9 @@ export function ChatTab({
 
   return (
     <>
+      <OverviewMetrics conversation={conversation} runDuration={runDuration} />
+      <div className="ov-acc-list">
+      <OverviewSection id="run" title="RUN" icon={Hash} defaultOpen>
       <div className="detail-section">
         <div className="detail-section-title">
           <Hash size={14} /> 任务
@@ -858,7 +1040,9 @@ export function ChatTab({
           )}
         </div>
       </div>
+      </OverviewSection>
 
+      <OverviewSection id="tools" title="TOOLS" icon={Package} defaultOpen>
       <div className="detail-section">
         <div className="detail-section-title">
           <Package size={14} /> TOOLS
@@ -913,8 +1097,10 @@ export function ChatTab({
           );
         })}
       </div>
+      </OverviewSection>
 
-      {conversation.compactions.length > 0 && (
+      <OverviewSection id="context" title="CONTEXT" icon={Layers}>
+      {conversation.compactions.length > 0 ? (
         <div className="detail-section">
           <div className="detail-section-title">
             <Layers size={14} /> CONTEXT
@@ -937,9 +1123,13 @@ export function ChatTab({
             </div>
           ))}
         </div>
+      ) : (
+        <div className="detail-empty-hint">暂无上下文精简记录</div>
       )}
+      </OverviewSection>
 
-      {conversation.reconcile_queue.length > 0 && (
+      <OverviewSection id="decide" title="决定" icon={AlertTriangle} defaultOpen>
+      {conversation.reconcile_queue.length > 0 ? (
         <div className="detail-section">
           <div className="detail-section-title">
             <AlertTriangle size={14} /> 需要你来决定
@@ -961,8 +1151,12 @@ export function ChatTab({
             </div>
           ))}
         </div>
+      ) : (
+        <div className="detail-empty-hint">无待裁决操作</div>
       )}
+      </OverviewSection>
 
+      <OverviewSection id="trace" title="TRACE" icon={ListTree}>
       <div className="detail-section">
         <div className="detail-section-title">
           <ListTree size={14} /> TRACE
@@ -984,7 +1178,9 @@ export function ChatTab({
           </div>
         ))}
       </div>
+      </OverviewSection>
 
+      <OverviewSection id="model" title="MODEL" icon={Database}>
       {/* MODEL：后端 Gap 1 已落地（model/completed + run/completed 观测字段）。
           全部缺失时保留空槽语义（提示而非留白），有任一真值则逐行渲染，
           缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。
@@ -1056,12 +1252,20 @@ export function ChatTab({
           </div>
         </div>
       )}
-      <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
+      </OverviewSection>
+
+      <OverviewSection id="checkpoint" title="CHECKPOINT" icon={Database}>
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
           <Database size={14} /> CHECKPOINT
         </div>
         <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
+      </div>
+      </OverviewSection>
+
+      <OverviewSection id="permission" title="PERMISSION" icon={ShieldCheck} defaultOpen>
+      <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
+      </OverviewSection>
       </div>
     </>
   );
@@ -1685,7 +1889,7 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
         </div>
       )}
       {visibleDiffs.map((t) => (
-        <div key={t.tool_call_id} className="detail-section">
+        <div key={t.tool_call_id} className="detail-section detail-card">
           <div className="detail-section-title">
             <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
           </div>
@@ -1719,7 +1923,7 @@ function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; o
         return (
           <button
             key={t.tool_call_id}
-            className={`detail-terminal-row${selected ? ' sel' : ''}`}
+            className={`detail-terminal-row detail-card${selected ? ' sel' : ''}`}
             data-list-key={toolKey(t)}
             aria-current={selected ? 'true' : undefined}
             onClick={() => onFocusTool(t)}
@@ -1779,7 +1983,7 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
         </div>
       )}
       {visibleArtifacts.map((t) => (
-        <div key={t.tool_call_id} className="detail-section">
+        <div key={t.tool_call_id} className="detail-section detail-card">
           <div className="detail-section-title">
             <FileCheck2 size={14} /> {t.name}
           </div>
