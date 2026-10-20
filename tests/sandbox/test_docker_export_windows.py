@@ -229,3 +229,25 @@ def test_export_preserves_readonly_bit_after_safe_tar_filter(monkeypatch, tmp_pa
     exported = destination / 'readonly.txt'
     assert exported.read_bytes() == b'read only'
     assert exported.stat().st_mode & stat.S_IWUSR == 0
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX exported hardlink modes')
+def test_export_preserves_readonly_mode_for_hardlink_members(monkeypatch, tmp_path):
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode='w') as archive:
+        member = tarfile.TarInfo('workspace/readonly.txt')
+        member.mode = 0o444
+        member.size = len(b'read only')
+        archive.addfile(member, io.BytesIO(b'read only'))
+        alias = tarfile.TarInfo('workspace/alias.txt')
+        alias.type = tarfile.LNKTYPE
+        alias.linkname = member.name
+        alias.mode = 0o444
+        archive.addfile(alias)
+    sandbox = _sandbox(monkeypatch, payload.getvalue())
+    destination = tmp_path / 'export'
+    sandbox.export_to_host(destination)
+    for name in ('readonly.txt', 'alias.txt'):
+        exported = destination / name
+        assert exported.read_bytes() == b'read only'
+        assert exported.stat().st_mode & stat.S_IWUSR == 0

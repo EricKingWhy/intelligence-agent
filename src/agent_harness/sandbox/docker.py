@@ -69,7 +69,7 @@ def _export_data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.Ta
     filtered = tarfile.data_filter(member, destination)
     # data_filter grants owner write access for extraction. Preserve a POSIX
     # source's read-only bit without restoring unsafe mode bits or link paths.
-    if (filtered is not None and filtered.isfile() and os.name != "nt"
+    if (filtered is not None and (filtered.isfile() or filtered.islnk()) and os.name != "nt"
             and filtered.mode is not None and not member.mode & stat.S_IWUSR):
         return filtered.replace(mode=filtered.mode & ~stat.S_IWUSR)
     return filtered
