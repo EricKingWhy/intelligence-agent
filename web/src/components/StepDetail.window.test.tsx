@@ -114,7 +114,9 @@ describe('F5 尾窗：默认挂载节点数有上限（AC3）', () => {
 
   it('DIFFS：N=500 时默认行数 ≤ 100（改造前 = 500）', () => {
     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
-    expect(rows('.detail-section')).toBeLessThanOrEqual(CEIL);
+    /* #1419 C-2：变更项的结构类名从 `.detail-section` 换成效果图的 `.step` 文件卡
+       （计数语义不变：一张卡 = 一个文件）。 */
+    expect(rows('.step')).toBeLessThanOrEqual(CEIL);
   });
 
   it('ARTIFACTS：N=500 时默认行数 ≤ 100（改造前 = 500）', () => {
@@ -138,14 +140,14 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
 
   it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', { timeout: 20000 }, () => {
     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
-    const beforeDiffs = rows('.detail-section');
+    const beforeDiffs = rows('.step');
     /* `before < N` 才是 AC4 的区分点：只断言「最终 = N」在改造前**也成立**
        （全量渲染本来就是 N），那是空过。 */
     expect(beforeDiffs).toBeLessThan(N);
     clickEarlier();
-    expect(rows('.detail-section')).toBeGreaterThan(beforeDiffs);
+    expect(rows('.step')).toBeGreaterThan(beforeDiffs);
     for (let i = 0; i < 10 && earlierButton(); i++) clickEarlier();
-    expect(rows('.detail-section')).toBe(N);
+    expect(rows('.step')).toBe(N);
 
     act(() => root.unmount());
     root = createRoot(container);

@@ -24,6 +24,7 @@ import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { timelineHeadline } from '../lib/timelineHeadline';
+import { lineDiff } from '../lib/lineDiff';
 import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
 import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
@@ -817,7 +818,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               streaming={streaming}
             />
           )}
-          {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} />}
+          {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} onFocusTool={onFocusTool} />}
           {tab === 'terminal' && (
             <TerminalTab tools={tools} onFocusTool={onFocusTool} selectedKey={selectedKey} />
           )}
@@ -2409,7 +2410,15 @@ export const CHANGES_WINDOW_STEP = 200;
 
 /** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
  *  状态，从 `StepDetail` 外面进不到这个面）。 */
-export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?: string }) {
+export function ChangesTab({
+  tools, sessionId, onFocusTool,
+}: {
+  tools: ToolCall[];
+  sessionId?: string;
+  /** 「查看事件」的落点：与终端面同一路径（选中该工具并让中心列滚到它）。
+   *  缺省时不画这个按钮——只读场景（子会话视图）不画点不动的按钮。 */
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
   // F2（#272）：`tools` 由调用方 memo 提供，过滤跟着它的引用走——面板关闭期间本组件
   // 仍挂载（`hidden` 不卸载），此前每次提交都要重扫一遍工具表。
   const diffs = useMemo(() => tools.filter((t) => t.diff), [tools]);
@@ -2419,11 +2428,47 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
   const [diffWindow, setDiffWindow] = useState(CHANGES_WINDOW_DEFAULT);
   const hiddenDiffs = Math.max(0, diffs.length - diffWindow);
   const visibleDiffs = hiddenDiffs > 0 ? diffs.slice(hiddenDiffs) : diffs;
+  /* #1419 C-1：+A −D 由 before/after 两份文本算出来（`lib/lineDiff`）。任一文件
+     超出规模闸（算不出准确计数）就整体显示「—」——半个和比没有和更误导。 */
+  const totals = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const t of diffs) {
+      const d = t.diff!;
+      if (d.archived) continue;
+      const r = lineDiff(d.before ?? '', d.after ?? '');
+      if (r.added === null || r.removed === null) return null;
+      added += r.added;
+      removed += r.removed;
+    }
+    return { added, removed };
+  }, [diffs]);
+  const archivedCount = useMemo(() => diffs.filter((t) => t.diff?.archived).length, [diffs]);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
   }
   return (
     <>
+      {/* #1419 C-1：段头（效果图 `.pane-head`）= 小字标签 + mono 计数 + 右徽标。
+          计数全部来自已有字段：`+A −D` 由 `lib/lineDiff` 算，`archived`（内容已归档
+          成产出文件）是投影上的事实。效果图的「已落盘」在后端没有对应事实，故不画；
+          徽标位改用真实事实「已归档 N」——同一视觉位、不编数据。 */}
+      <div className="pane-head">
+        <span className="lbl">工作树改动</span>
+        <span className="n">
+          {diffs.length} 文件
+          {totals === null
+            ? ' · +— −—'
+            : ` · +${totals.added} −${totals.removed}`}
+        </span>
+        <span className="grow" />
+        {archivedCount > 0 && (
+          <span className="ov-badge">
+            <FileDiff size={9} aria-hidden="true" />
+            已归档 {archivedCount}
+          </span>
+        )}
+      </div>
       {hiddenDiffs > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -2438,19 +2483,108 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
         </div>
       )}
       {visibleDiffs.map((t) => (
-        <div key={t.tool_call_id} className="detail-section detail-card">
-          <div className="detail-section-title">
-            <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
-          </div>
-          {/* 这里此前自己内联一份 `.diff-cols`——同一份 before/after 在 Inspector 与
-              中心列各有一套渲染，且这套**认不出归档态**（before/after 已被换成
-              `use read_artifact(<id>)` marker 摘要时，会把 marker 原文当 diff 正文
-              渲染出来，即"显示了一段并不存在的文件内容"）。收敛到 `DiffBlock`
-              （#183 AC9 / #186 AC3）后归档占位态与中心列逐字一致。 */}
-          <DiffBlock diff={t.diff!} sessionId={sessionId} />
-        </div>
+        <ChangeCard key={t.tool_call_id} tool={t} sessionId={sessionId} onFocusTool={onFocusTool} />
       ))}
     </>
+  );
+}
+
+/** #1419 C-2..C-4：一个文件一张卡（效果图 `.step`）。
+ *
+ *  展开 = **行级 unified diff**（`lib/lineDiff` 的双列行号 + 红绿底 + `+/−` 号）。
+ *  归档态（before/after 已被换成 `use read_artifact(<id>)` marker）没有可比对的两份
+ *  文本 —— 回到 `DiffBlock` 的归档占位 + 产出文件读取，不假装能算 diff。
+ *  输入过大（超出 `LINE_DIFF_MAX_CELLS`）同理回到 `DiffBlock` 的整段对照，
+ *  并**不给 +/− 计数**（算不出来就不报数）。 */
+function ChangeCard({
+  tool, sessionId, onFocusTool,
+}: {
+  tool: ToolCall;
+  sessionId?: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const diff = tool.diff!;
+  const path = String(tool.args.path ?? tool.args.file_path ?? '');
+  const result = useMemo(
+    () => (diff.archived ? null : lineDiff(diff.before ?? '', diff.after ?? '')),
+    [diff],
+  );
+  const seq = toolSeq(tool);
+  const dur = formatDuration(tool.started_at, tool.completed_at);
+  const unified = result?.mode === 'unified' ? result : null;
+  const copyText = unified
+    ? unified.rows
+      .map((r) => (r.kind === 'add' ? `+ ${r.text}` : r.kind === 'del' ? `- ${r.text}` : `  ${r.text}`))
+      .join('\n')
+    : `${diff.before ?? ''}\n---\n${diff.after ?? ''}`;
+  return (
+    <section className="step" data-change={tool.tool_call_id} aria-expanded={open}>
+      <button
+        type="button"
+        className="step-head"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`step-ico ${diff.truncated || diff.archived ? 'warn' : 'ok'}`}>
+          <FileDiff size={10} aria-hidden="true" />
+        </span>
+        <span className="step-main">
+          <span className="step-title" title={path}>
+            {path !== '' ? path : tool.name}
+          </span>
+          <span className="step-meta">
+            <span className="mono">{tool.name}</span>
+            {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+            {dur !== null && <><span>·</span><span>{dur}</span></>}
+            {diff.archived && <><span>·</span><span>已归档</span></>}
+          </span>
+        </span>
+        <span className="step-nums">
+          {unified ? (
+            <>
+              <span className="add">+{unified.added}</span>
+              <span className="del">−{unified.removed}</span>
+            </>
+          ) : (
+            <span className="del">{diff.archived ? '归档' : '过大'}</span>
+          )}
+        </span>
+        <ChevronDown size={10} className="step-chev" aria-hidden="true" />
+      </button>
+      <div className="step-body">
+        <div>
+          <div className="step-in">
+            {/* 截断是投影上的事实（正文被裁到 2000 字符），文案与中心列一字不差。 */}
+            {diff.truncated && <div className="fc-note">内容过长，已截断显示</div>}
+            {unified ? (
+              <div className="diff">
+                {unified.rows.map((r, i) => (
+                  <div key={i} className={`dline${r.kind === 'ctx' ? '' : ` ${r.kind}`}`}>
+                    <span className="ln">{r.left ?? ''}</span>
+                    <span className="ln">{r.right ?? ''}</span>
+                    <span className="code">
+                      {r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '} {r.text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              /* 归档 / 过大：整段对照（既有渲染器，认得出归档态）。 */
+              <DiffBlock diff={diff} sessionId={sessionId} />
+            )}
+            <div className="fc-acts">
+              {onFocusTool && (
+                <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+                  查看事件
+                </button>
+              )}
+              <CopyButton text={copyText} label={`复制 ${path || tool.name} 的 diff`} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
