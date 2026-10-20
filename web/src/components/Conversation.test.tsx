@@ -228,6 +228,17 @@ describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10
     expect(without).not.toContain('查看子会话');
     expect(without).not.toContain('打开子会话');
   });
+
+  it('target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView
+        node={{ kind: 'delegation', delegation: { ...delegationNode.delegation, target: '' } }}
+        density="balanced"
+      />,
+    );
+    expect(html).toContain('委派 → —');
+    expect(html).not.toContain('委派 → ?');
+  });
 });
 
 /** TurnView 的最小 Turn 夹具——两个 describe 共用（模块级，避免各自复制漂移）。 */

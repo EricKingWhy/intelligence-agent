@@ -1658,9 +1658,57 @@ function summarizeModelCompleted(event: AgentEvent): string {
   return `${String(d.content ?? '').length} 字符`;
 }
 
+/** #1416：工具参数的可读化摘要——不再 `JSON.stringify(...).slice()`（裸 JSON 被
+ *  硬切在引号/转义中间等同乱码）。已知语义键优先，其余按键值行拼接；嵌套值只报
+ *  形状（`N 项` / `N 字段`），摘要行因此永不出现裸 JSON。 */
+const TOOL_SUMMARY_DETAIL_MAX = 60;
+const TOOL_SUMMARY_MAX_PAIRS = 3;
+const TOOL_PATH_KEYS = ['path', 'file_path', 'file'] as const;
+
+function singleLine(text: string, max = TOOL_SUMMARY_DETAIL_MAX): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+function argValueText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value.trim() ? singleLine(value) : null;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    const scalars = value.filter(
+      (item): item is string | number | boolean =>
+        typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean',
+    );
+    return scalars.length === value.length
+      ? singleLine(scalars.map(String).join(', '))
+      : `${value.length} 项`;
+  }
+  if (isRecord(value)) return `${Object.keys(value).length} 字段`;
+  return null;
+}
+
+function toolCallDetail(args: Record<string, unknown>): string {
+  if (typeof args.command === 'string' && args.command.trim()) return singleLine(args.command);
+  for (const key of TOOL_PATH_KEYS) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return singleLine(value);
+  }
+  const pairs: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    const text = argValueText(value);
+    if (text === null) continue;
+    pairs.push(`${key}: ${text}`);
+    if (pairs.length === TOOL_SUMMARY_MAX_PAIRS) break;
+  }
+  return pairs.join(' · ');
+}
+
 function summarizeToolCall(event: AgentEvent): string {
   const d = event.data;
-  return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
+  const name = typeof d.tool_name === 'string' && d.tool_name ? d.tool_name : '—';
+  const detail = isRecord(d.args) ? toolCallDetail(d.args) : '';
+  return detail ? `${name} · ${detail}` : name;
 }
 
 function summarizeToolResult(event: AgentEvent): string {
@@ -1688,13 +1736,14 @@ function summarizeOperationReconcileRequired(event: AgentEvent): string {
 function summarizeDelegationStarted(event: AgentEvent): string {
   // Phase 13（ADR-0015）：`委派 → {target}`——编排节点单行语义；
   // child_session_id 在节点 UI 可见可复制，单行不塞长 ID。
+  // #1417：target 缺失按空态约定显示 `—`，不用 `?`（那是调试残留的形状）。
   const target = event.data.target;
-  return `委派 → ${typeof target === 'string' && target ? target : '?'}`;
+  return `委派 → ${typeof target === 'string' && target ? target : '—'}`;
 }
 
 function summarizeDelegationFinished(event: AgentEvent): string {
   const d = event.data;
-  const target = typeof d.target === 'string' && d.target ? d.target : '?';
+  const target = typeof d.target === 'string' && d.target ? d.target : '—';
   const outcome = d.status === 'failed' ? '失败' : '完成';
   const summary = typeof d.summary === 'string' && d.summary ? ` · ${d.summary.slice(0, 40)}` : '';
   return `${target} ${outcome}${summary}`;

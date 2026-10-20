@@ -66,7 +66,7 @@ export const DelegationNode = memo(function DelegationNode({ delegation, density
             {(() => { const KindIcon = KIND_ICON.subagent; return <KindIcon size={14} />; })()}
           </span>
         )}
-        <span className="act-name">委派 → {delegation.target || '?'}</span>
+        <span className="act-name">委派 → {delegation.target || '—'}</span>
         {density !== 'compact' && delegation.task && (
           <span className="act-args">{truncateForDisplay(delegation.task.replaceAll('\n', ' '), 48)}</span>
         )}

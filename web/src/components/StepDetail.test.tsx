@@ -247,6 +247,20 @@ describe('StepDetail child focus（v2 PRD §10.5 委派钻取）', () => {
     expect(html).toContain('research_review');
     expect(html).toContain('child-back-btn');
   });
+
+  it('target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    const html = renderToString(createElement(StepDetail, {
+      conversation: conv,
+      streaming: false,
+      focus: { kind: 'child', childSessionId: 'c1234567890', target: '' },
+      onFocusRun: noop,
+      onFocusTool: noop,
+      onFocusEvent: noop,
+      ...panelProps,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('子会话 · —');
+    expect(html).not.toContain('子会话 · ?');
+  });
 });
 
 describe('TimelineTab run 分组头（UI-03）', () => {

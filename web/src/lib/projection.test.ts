@@ -1382,6 +1382,50 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
       expect(summarizeEvent(ev({ type }))).toBe('');
     }
   });
+
+  it('TOOL_CALL：参数提炼人话摘要，不输出裸 JSON（#1416）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'rg -n icon src' } },
+    }))).toBe('bash · rg -n icon src');
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't2', tool_name: 'read', args: { path: 'src/App.tsx' } },
+    }))).toBe('read · src/App.tsx');
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't3', tool_name: 'edit', args: { path: 'src/App.tsx' } },
+    }))).toBe('edit · src/App.tsx');
+    // 通用回退：key: value 键值行；嵌套值只报形状，不展开成第二份 JSON。
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: {
+        tool_call_id: 't4',
+        tool_name: 'mcp__demo__query',
+        args: { query: 'hello', limit: 3, nested: { a: 1 } },
+      },
+    }))).toBe('mcp__demo__query · query: hello · limit: 3 · nested: 1 字段');
+  });
+
+  it('TOOL_CALL：长参数单行截断加省略号；无参数只显示工具名（#1416）', () => {
+    const long = summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'x'.repeat(80) } },
+    }));
+    expect(long).toBe(`bash · ${'x'.repeat(60)}…`);
+    expect(long).not.toMatch(/[{}"]/);
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't2', tool_name: 'bash', args: {} },
+    }))).toBe('bash');
+  });
+
+  it('TOOL_CALL：tool_name 缺失显示 —，不显示 ?（#1417）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1' },
+    }))).toBe('—');
+  });
 });
 
 describe('applyEvent — 引用稳定性（流式渲染 memo 契约）', () => {
@@ -2116,6 +2160,19 @@ describe('Phase 13 — delegation 投影（ADR-0015）', () => {
       'research_review 完成 · 三篇文献综述',
     );
     expect(summarizeEvent(finished('child-1', 'failed', ''))).toBe('research_review 失败');
+  });
+
+  it('summarizeEvent：target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.AGENT_DELEGATION_STARTED,
+      data: { task: '任务', child_session_id: 'child-1' },
+      step_id: 1,
+    }))).toBe('委派 → —');
+    expect(summarizeEvent(ev({
+      type: EventType.AGENT_DELEGATION_FINISHED,
+      data: { child_session_id: 'child-1', status: 'completed' },
+      step_id: 1,
+    }))).toBe('— 完成');
   });
 
   it('copy-on-write：委派回填只克隆宿主 turn；同会话其它 turn 引用不变', () => {

@@ -282,7 +282,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           <button className="child-back-btn" onClick={onFocusRun} title="返回父会话的运行详情">
             <ArrowLeft size={14} /> 返回
           </button>
-          <span className="panel-label">子会话 · {focus.target || '?'}</span>
+          <span className="panel-label">子会话 · {focus.target || '—'}</span>
           <span className="detail-run-id mono num" title={`child session ${focus.childSessionId}`}>
             {focus.childSessionId.slice(0, 8)}
           </span>
