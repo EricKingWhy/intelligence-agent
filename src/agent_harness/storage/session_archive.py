@@ -61,6 +61,19 @@ HIDDEN_SESSION_SOURCES: tuple[str, ...] = ("subagent", "fork")
 #: 可搜但降权的来源：定时任务的重复词汇会淹没用户会话（Hermes `#19434`）。
 DEMOTED_SESSION_SOURCES: tuple[str, ...] = ("cron",)
 
+#: 自动维护只 close 不删的 stale open 来源：这些会话由进程自己拥有生命周期，
+#: 进程死掉时 `ended_at` 永远不写。Hermes 的原集合还含 cli/kanban/acp/api_server/
+#: tool/recovered，本仓没有对应 producer；词汇表见 `SOURCE_*`。
+#: 来源: Hermes `hermes_state.py:463`（`_AUTO_PRUNE_STALE_OPEN_SOURCES`）。
+AUTO_PRUNE_STALE_OPEN_SOURCES: tuple[str, ...] = ("cron", "subagent", "fork")
+
+#: 自动维护 VACUUM 的可回收页占比门槛（`freelist_count / page_count`）。
+#: 低于它时整库重写比回收的 I/O 更贵。来源: Hermes `hermes_state_common.py:289`。
+AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
+
+#: 批量删除的 id 分块：cron 密集的库一次能删上万个会话（Hermes `_id_chunks`）。
+_PRUNE_CHUNK = 500
+
 #: READ 形态单条消息的字符上限（`#69334`：曾有单次 read 回 74K 字符）。
 _READ_MAX_CONTENT = 2_000
 #: discovery 的 bookends 上限。
@@ -574,6 +587,32 @@ def _shape_message(row: dict[str, Any], *, anchor_id: int | None = None,
 
 def _is_compaction_summary(content: str | None) -> bool:
     return bool(content) and str(content).lstrip().startswith(_COMPACTION_PREFIXES)
+
+
+def _session_activity_sql(alias: str = "s") -> str:
+    """会话 recency = freshest of `last_activity_at` / 最新消息 timestamp / `started_at`。
+
+    来源: Hermes `hermes_state_common.py:256-271`（`_sql_session_last_active`）。
+    差异（本仓无该数据来源）：不抄 Hermes 的 coerce-window 垃圾值防御——那边的
+    `messages.timestamp` 可能从损坏页里捞回 TEXT / 异常 double，本仓两列只由本模块
+    以 REAL 写入，不存在窗口外取值。
+    """
+    return (
+        "COALESCE((SELECT MAX(_act.v) FROM ("
+        f"SELECT {alias}.last_activity_at AS v UNION ALL "
+        f"SELECT (SELECT MAX(_act_m.timestamp) FROM messages AS _act_m "
+        f"WHERE _act_m.session_id = {alias}.id)"
+        f") AS _act), {alias}.started_at)"
+    )
+
+
+def _seconds_since(now: float, raw: str | None) -> float | None:
+    """`state_meta` 时间戳的年龄；未记录或损坏 = 没有上次运行。
+    来源: Hermes `hermes_state_maintenance.py:38`（`_seconds_since`）。"""
+    try:
+        return now - float(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- archive ---
@@ -1495,6 +1534,176 @@ class SessionArchive:
             "title": meta.get("title"),
         }
 
+    # -- 自动维护（auto-prune / stale-open sweep / VACUUM） -----------------
+
+    def _get_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM state_meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row is not None else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        with self._cursor() as conn:
+            conn.execute(
+                "INSERT INTO state_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def _prune_sessions(self, cutoff: float) -> int:
+        """删除 `ended_at` 已写、未 pinned、activity < cutoff 的会话。
+
+        子会话先孤儿化（`parent_session_id = NULL`）而不是级联删除：留在窗口外的
+        子会话仍然可读。删 messages 再删 sessions，FTS 行由 delete 触发器连带删。
+        被 sweep close 的孤儿（`end_reason='startup_orphan_reap'`）按 `ended_at`
+        计龄而不是按旧 activity：否则它们会在下一轮维护立刻被删，拿不到完整
+        retention 窗口（Hermes `_PRUNE_FILTERS` 的 `last_active_before` 条款）。
+        来源: Hermes `hermes_state_maintenance.py:301-330`（`prune_sessions`）、
+        `:52-56`（`_PRUNE_FILTERS`）。
+        """
+        activity = _session_activity_sql("s")
+        rows = self._conn.execute(
+            f"SELECT s.id FROM sessions AS s WHERE s.ended_at IS NOT NULL "
+            f"AND COALESCE(s.pinned, 0) = 0 AND {activity} < ? "
+            f"AND (COALESCE(s.end_reason, '') != 'startup_orphan_reap' OR s.ended_at < ?)",
+            (cutoff, cutoff),
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        if not ids:
+            return 0
+        with self._cursor() as conn:
+            for start in range(0, len(ids), _PRUNE_CHUNK):
+                chunk = ids[start:start + _PRUNE_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"UPDATE sessions SET parent_session_id = NULL "
+                    f"WHERE parent_session_id IN ({placeholders})",
+                    chunk,
+                )
+                conn.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", chunk)
+        return len(ids)
+
+    def _sweep_orphaned_sessions(self, cutoff: float, now: float) -> list[str]:
+        """把进程死亡遗留的 open 自动化会话**关闭**（不删）。
+
+        判据：`ended_at IS NULL` + source ∈ `AUTO_PRUNE_STALE_OPEN_SOURCES` +
+        activity < cutoff + 未 pinned。只写 `ended_at` / `end_reason`：消息保留、
+        会话可恢复，并从关闭时刻重新获得完整 retention 窗口。
+        `started_at < cutoff` 与 Hermes 同：保护 activity 抄自旧会话的
+        压缩 / 分支子会话。
+        「mid-turn」在本仓没有租约机制，`ended_at IS NULL` 即视为 open 不删。
+        来源: Hermes `hermes_state_maintenance.py:139-196`（`sweep_orphaned_sessions`）。
+        """
+        if not AUTO_PRUNE_STALE_OPEN_SOURCES:
+            return []
+        placeholders = ",".join("?" for _ in AUTO_PRUNE_STALE_OPEN_SOURCES)
+        activity = _session_activity_sql("sessions")
+        rows = self._conn.execute(
+            f"SELECT id FROM sessions WHERE ended_at IS NULL "
+            f"AND source IN ({placeholders}) AND COALESCE(pinned, 0) = 0 "
+            f"AND started_at < ? AND {activity} < ?",
+            (*AUTO_PRUNE_STALE_OPEN_SOURCES, cutoff, cutoff),
+        ).fetchall()
+        victims = [row["id"] for row in rows]
+        if not victims:
+            return []
+        with self._cursor() as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = 'startup_orphan_reap' "
+                f"WHERE ended_at IS NULL AND source IN ({placeholders}) "
+                f"AND COALESCE(pinned, 0) = 0 AND started_at < ? "
+                f"AND {_session_activity_sql('sessions')} < ?",
+                (now, *AUTO_PRUNE_STALE_OPEN_SOURCES, cutoff, cutoff),
+            )
+        return victims
+
+    def _freelist_ratio(self) -> float | None:
+        """可回收页占比；None = 读不到（退回时间节流）。
+        来源: Hermes `hermes_state_maintenance.py:353`。"""
+        try:
+            pages = int(self._conn.execute("PRAGMA page_count").fetchone()[0])
+            free = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0])
+        except sqlite3.DatabaseError:
+            return None
+        return free / pages if pages > 0 else 0.0
+
+    def maybe_auto_prune_and_vacuum(
+        self,
+        *,
+        auto_prune: bool = True,
+        retention_days: float = 90,
+        min_interval_hours: float = 24,
+        vacuum: bool = True,
+        min_vacuum_interval_days: float = 30,
+        min_vacuum_freelist_ratio: float = AUTO_VACUUM_MIN_FREELIST_RATIO,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """幂等的启动期自动维护：prune → stale-open sweep → 可选 VACUUM；**永不抛**。
+
+        最多每 `min_interval_hours` 跑一次（`state_meta['last_auto_prune']`，跨进程
+        共享）。VACUUM 另有 `min_vacuum_interval_days` 节流，并要求
+        `freelist_count / page_count` 超过阈值——小库删几行不值得整库重写。
+
+        顺序是先 prune 后 sweep（Hermes 原语义）：被 close 的孤儿从关闭时刻起获得
+        完整 retention 窗口，本轮不会被删。`last_auto_prune` 无论删没删到行都写，
+        节流对空跑同样生效。
+
+        返回 `{"skipped", "pruned", "closed", "vacuumed"}`，考虑过 VACUUM 时带
+        `"freelist_ratio"`，失败时带 `"error"`。
+        来源: Hermes `hermes_state_maintenance.py:400-510`
+        （`maybe_auto_prune_and_vacuum`）。
+
+        未照抄的部分（本仓无对应机制）：Hermes 的跨进程 maintenance lock、多进程
+        WAL holder 扫描（`foreign_state_db_holders`）、启动看门狗租约、transcript
+        文件删除、lineage 整体删除；本仓 archive 是派生索引，没有这些对象。
+        """
+        result: dict[str, Any] = {"skipped": False, "pruned": 0, "closed": 0, "vacuumed": False}
+        if not auto_prune:
+            result["skipped"] = True
+            return result
+        if retention_days is None or retention_days < 0:
+            # 负 retention 会构造未来 cutoff，匹配所有已结束会话；
+            # 禁用开关是 auto_prune=False，不是负数。
+            logger.warning(
+                "会话自动维护跳过：retention_days=%r 非法（需 >= 0）；"
+                "关闭请设 auto_prune=False",
+                retention_days,
+            )
+            result["skipped"] = True
+            return result
+        try:
+            now = time.time() if now is None else now
+            since_prune = _seconds_since(now, self._get_meta("last_auto_prune"))
+            if since_prune is not None and since_prune < min_interval_hours * 3600:
+                result["skipped"] = True
+                return result
+            cutoff = now - float(retention_days) * 86400.0
+            # 先 prune：下面被 close 的孤儿因此拿到完整 retention 窗口。
+            result["pruned"] = pruned = self._prune_sessions(cutoff)
+            closed = self._sweep_orphaned_sessions(cutoff, now)
+            result["closed"] = len(closed)
+            # VACUUM 只在真的删了行、时间节流已过、且可回收页占比够高时跑。
+            since_vacuum = _seconds_since(now, self._get_meta("last_vacuum"))
+            vacuum_due = since_vacuum is None or since_vacuum >= min_vacuum_interval_days * 86400
+            if vacuum and pruned > 0 and vacuum_due:
+                result["freelist_ratio"] = ratio = self._freelist_ratio()
+                if ratio is not None and ratio > min_vacuum_freelist_ratio:
+                    self._conn.execute("VACUUM")
+                    self._set_meta("last_vacuum", str(now))
+                    result["vacuumed"] = True
+            # pruned == 0 也要写：节流对空跑同样生效（Hermes 原语义）。
+            self._set_meta("last_auto_prune", str(now))
+            if closed or pruned > 0:
+                logger.info(
+                    "会话自动维护：关闭 %d 个 stale open 会话，清理 %d 个 %s 天无活动的会话%s",
+                    len(closed), pruned, retention_days,
+                    " + VACUUM" if result["vacuumed"] else "",
+                )
+        except Exception as exc:
+            # 维护失败绝不能反噬会话写路径（本方法挂在写入触发的惰性路径上）。
+            logger.warning("会话自动维护失败: %s", exc, exc_info=True)
+            result["error"] = str(exc)
+        return result
+
 
 # --------------------------------------------------------------- 产品接线 --
 
@@ -1543,6 +1752,9 @@ class SessionArchiveObserver:
         archive: SessionArchive | str | Path,
         *,
         cjk_so_path: str | Path | None = None,
+        auto_prune: bool = True,
+        retention_days: float = 90,
+        min_interval_hours: float = 24,
     ) -> None:
         # 传路径时**惰性建库**：web 的 `AppState` 构造早于任何会话，若在那里
         # 就落盘 state.db，会破坏「请求被拒时不留痕迹」的既有不变量
@@ -1551,6 +1763,12 @@ class SessionArchiveObserver:
         self._archive = archive if isinstance(archive, SessionArchive) else None
         self._archive_path = None if self._archive is not None else archive
         self._cjk_so_path = cjk_so_path
+        # 自动维护配置（Hermes `sessions.*` 默认值）。物化 archive 后跑一次；
+        # 内部节流保证 24h 内 no-op，失败不抛。
+        self._auto_prune = auto_prune
+        self._retention_days = retention_days
+        self._min_interval_hours = min_interval_hours
+        self._maintained = False
         # 进程内已登记过的会话（省掉每条事件的 upsert）。**只是缓存**：
         # 多进程 / 重启后由 `ensure_session` 的 INSERT..ON CONFLICT 兜底。
         self._known: set[str] = set()
@@ -1562,6 +1780,17 @@ class SessionArchiveObserver:
             arc = SessionArchive(self._archive_path, cjk_so_path=self._cjk_so_path)
             arc.initialize()
             self._archive = arc
+        if not self._maintained:
+            with self._lock:
+                run_maintenance = not self._maintained
+                self._maintained = True
+            if run_maintenance:
+                # 惰性触发点：建库完成即跑一次自动维护（写入路径上，永不抛）。
+                self._archive.maybe_auto_prune_and_vacuum(
+                    auto_prune=self._auto_prune,
+                    retention_days=self._retention_days,
+                    min_interval_hours=self._min_interval_hours,
+                )
         return self._archive
 
     # -- 接线 --------------------------------------------------------------
@@ -1661,13 +1890,21 @@ def _source_for(event_type: str | None, data: dict) -> str:
 
 def install_session_archive(
     store: Any, db_path: str | Path, *, cjk_so_path: str | Path | None = None,
+    auto_prune: bool = True, retention_days: float = 90, min_interval_hours: float = 24,
 ) -> SessionArchiveObserver:
     """把归档观察者挂到 store 上（#1389 的**唯一**生产接线点）。
 
     不碰磁盘：建库推迟到第一条归档事件（见 `SessionArchiveObserver.__init__`）。
     建库/写入失败只记 warning——存档是派生检索索引，起不来不能让会话写路径
     跟着不可用。
+
+    三个自动维护参数（Hermes `sessions.*` 默认值）透传给观察者；它在**首次物化**
+    archive 后跑一次 `maybe_auto_prune_and_vacuum`（内部节流，失败不抛）。
     """
-    observer = SessionArchiveObserver(db_path, cjk_so_path=cjk_so_path)
+    observer = SessionArchiveObserver(
+        db_path, cjk_so_path=cjk_so_path,
+        auto_prune=auto_prune, retention_days=retention_days,
+        min_interval_hours=min_interval_hours,
+    )
     observer.attach(store)
     return observer

@@ -32,6 +32,7 @@ from agent_harness.session import Session
 from agent_harness.session.event import SessionEvent
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.session_archive import (
+    AUTO_VACUUM_MIN_FREELIST_RATIO,
     FTS_TOOL_CONTENT_PREFIX_CHARS,
     MAX_FTS5_QUERY_CHARS,
     SessionArchive,
@@ -1089,3 +1090,292 @@ class TestCurrentLineageExceptions:
         )
         out = archive.session_search(query="压缩归档关键词", current_session_id="cur-session")
         assert [r["session_id"] for r in out["results"]] == ["cur-session"]
+
+
+# ----------------------------------- 批次 D：auto-prune 90 天（Hermes 对齐） ---
+
+_DAY = 86_400.0
+
+
+def _age_session(
+    archive: SessionArchive, session_id: str, *, days: float,
+    ended: bool = False, pinned: bool = False, source: str | None = None,
+) -> None:
+    """把会话的时间戳整体推回 *days* 天前（裸 SQL：archive API 只写 now）。"""
+    ts = time.time() - days * _DAY
+    with _raw(archive.db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET started_at = ?, last_activity_at = ?, "
+            "ended_at = ?, pinned = ?" + (", source = ?" if source else "") + " WHERE id = ?",
+            (ts, ts, ts if ended else None, int(pinned), *([source] if source else []), session_id),
+        )
+        conn.execute("UPDATE messages SET timestamp = ? WHERE session_id = ?", (ts, session_id))
+        conn.commit()
+
+
+class TestAutoPrune:
+    """§3：照抄 Hermes `maybe_auto_prune_and_vacuum` 的保留策略。"""
+
+    def _seed(self, archive: SessionArchive, sid: str, text: str, **kw: object) -> None:
+        archive.ensure_session(
+            sid, source=str(kw.pop("source", "interactive")), started_at=time.time(),
+        )
+        archive.append_message(sid, "user", text, timestamp=time.time())
+
+    def test_ended_100_days_is_pruned(self, archive: SessionArchive) -> None:
+        self._seed(archive, "old-ended", "古老会话关键词")
+        _age_session(archive, "old-ended", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("old-ended") is None
+        assert archive.get_messages("old-ended") == []
+        # FTS 行由 delete 触发器连带删：检索不得再命中。
+        assert archive.search_messages("古老会话关键词") == []
+
+    def test_ended_10_days_is_kept(self, archive: SessionArchive) -> None:
+        self._seed(archive, "recent-ended", "十天前会话")
+        _age_session(archive, "recent-ended", days=10, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("recent-ended") is not None
+        assert len(archive.get_messages("recent-ended")) == 1
+
+    def test_open_interactive_100_days_is_kept(self, archive: SessionArchive) -> None:
+        """open（ended_at IS NULL）即视为在跑：interactive 一律不删不 close。"""
+        self._seed(archive, "old-open", "没结束的会话")
+        _age_session(archive, "old-open", days=100, ended=False)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0 and out["closed"] == 0
+        meta = archive.get_session("old-open")
+        assert meta is not None and meta["ended_at"] is None
+
+    def test_pinned_ended_100_days_is_kept(self, archive: SessionArchive) -> None:
+        self._seed(archive, "pinned-old", "置顶会话")
+        _age_session(archive, "pinned-old", days=100, ended=True, pinned=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("pinned-old") is not None
+
+    def test_stale_open_cron_100_days_is_closed_not_deleted(self, archive: SessionArchive) -> None:
+        self._seed(archive, "stale-cron", "定时任务会话", source="cron")
+        _age_session(archive, "stale-cron", days=100, ended=False, source="cron")
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 1 and out["pruned"] == 0
+        meta = archive.get_session("stale-cron")
+        assert meta is not None, "stale open 只能 close，不能删"
+        assert meta["ended_at"] is not None
+        assert meta["end_reason"] == "startup_orphan_reap"
+        assert len(archive.get_messages("stale-cron")) == 1, "消息必须保留（可恢复）"
+
+    def test_stale_open_subagent_and_fork_are_closed(self, archive: SessionArchive) -> None:
+        for sid, source in (("stale-sub", "subagent"), ("stale-fork", "fork")):
+            self._seed(archive, sid, f"{source} 会话", source=source)
+            _age_session(archive, sid, days=100, ended=False, source=source)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 2
+        for sid in ("stale-sub", "stale-fork"):
+            assert archive.get_session(sid)["end_reason"] == "startup_orphan_reap"
+
+    def test_closed_orphan_gets_full_retention_window(self, archive: SessionArchive) -> None:
+        """先 prune 后 sweep：本轮被 close 的孤儿不会被同轮删掉。"""
+        self._seed(archive, "just-closed", "孤儿会话", source="cron")
+        _age_session(archive, "just-closed", days=100, ended=False, source="cron")
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 1 and out["pruned"] == 0
+        assert archive.get_session("just-closed") is not None
+
+    def test_orphan_reaped_row_ages_from_its_close(self, archive: SessionArchive) -> None:
+        """sweep 关闭的行按 `ended_at` 计龄：下一轮（24h 后）不得立刻删。"""
+        self._seed(archive, "reaped", "被关闭的孤儿", source="cron")
+        _age_session(archive, "reaped", days=100, ended=False, source="cron")
+        archive.maybe_auto_prune_and_vacuum(now=time.time() - 10 * _DAY)
+        assert archive.get_session("reaped")["end_reason"] == "startup_orphan_reap"
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0, "刚关闭的孤儿还欠一个完整 retention 窗口"
+        assert archive.get_session("reaped") is not None
+
+    def test_orphan_reaped_row_pruned_after_retention_from_close(
+        self, archive: SessionArchive,
+    ) -> None:
+        self._seed(archive, "reaped-old", "早该删的孤儿", source="cron")
+        _age_session(archive, "reaped-old", days=200, ended=False, source="cron")
+        archive.maybe_auto_prune_and_vacuum(now=time.time() - 100 * _DAY)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("reaped-old") is None
+
+    def test_throttle_skips_within_min_interval(self, archive: SessionArchive) -> None:
+        self._seed(archive, "throttled-old", "节流会话")
+        _age_session(archive, "throttled-old", days=100, ended=True)
+        archive._set_meta("last_auto_prune", str(time.time()))
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["skipped"] is True
+        assert out["pruned"] == 0
+        assert archive.get_session("throttled-old") is not None
+
+    def test_empty_run_still_records_last_auto_prune(self, archive: SessionArchive) -> None:
+        out = archive.maybe_auto_prune_and_vacuum(now=1_000_000.0)
+
+        assert out["skipped"] is False and out["pruned"] == 0
+        assert float(archive._get_meta("last_auto_prune")) == 1_000_000.0
+
+    def test_auto_prune_false_is_skipped(self, archive: SessionArchive) -> None:
+        self._seed(archive, "disabled-old", "禁用开关会话")
+        _age_session(archive, "disabled-old", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum(auto_prune=False)
+
+        assert out["skipped"] is True and out["pruned"] == 0
+        assert archive.get_session("disabled-old") is not None
+        assert archive._get_meta("last_auto_prune") is None, "禁用时不得写节流时间"
+
+    def test_negative_retention_is_skipped(self, archive: SessionArchive) -> None:
+        self._seed(archive, "neg-old", "负 retention")
+        _age_session(archive, "neg-old", days=1, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum(retention_days=-1)
+
+        assert out["skipped"] is True and out["pruned"] == 0
+        assert archive.get_session("neg-old") is not None
+
+    def test_activity_uses_latest_message_not_just_last_activity_at(
+        self, archive: SessionArchive,
+    ) -> None:
+        """activity = freshest of last_activity_at / 最新消息 / started_at。"""
+        self._seed(archive, "fresh-msg", "旧行新消息")
+        with _raw(archive.db_path) as conn:
+            # 会话行很旧，但最新消息是刚才：不得被判超窗。
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?",
+                (time.time() - 200 * _DAY, time.time() - 200 * _DAY, "fresh-msg"),
+            )
+            conn.execute(
+                "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+                (time.time(), "fresh-msg"),
+            )
+            conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (time.time(), "fresh-msg"))
+            conn.commit()
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("fresh-msg") is not None
+
+    def test_prune_orphans_children_outside_window(self, archive: SessionArchive) -> None:
+        self._seed(archive, "old-parent", "父会话")
+        archive.ensure_session(
+            "young-child", source="interactive", started_at=time.time(),
+            parent_session_id="old-parent",
+        )
+        archive.append_message("young-child", "user", "子会话", timestamp=time.time())
+        _age_session(archive, "old-parent", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("old-parent") is None
+        child = archive.get_session("young-child")
+        assert child is not None and child["parent_session_id"] is None
+
+    def test_never_raises_on_broken_store(self, archive: SessionArchive) -> None:
+        """维护失败绝不能反噬写入：只记 warning 并在结果里带 error。"""
+        with _raw(archive.db_path) as conn:
+            conn.execute("DROP TABLE messages")
+            conn.commit()
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["error"]
+        assert out["skipped"] is False
+
+    def test_small_prune_does_not_vacuum(self, archive: SessionArchive) -> None:
+        """删过行但 freelist 占比不够 25% → 不 VACUUM，结果带可断言比率。"""
+        self._seed(archive, "tiny-old", "小库会话")
+        _age_session(archive, "tiny-old", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert out["vacuumed"] is False
+        assert "freelist_ratio" in out and out["freelist_ratio"] <= 0.25
+        assert archive._get_meta("last_vacuum") is None
+
+    def test_vacuum_runs_when_freelist_high(self, archive: SessionArchive) -> None:
+        for i in range(40):
+            sid = f"bulk-{i}"
+            self._seed(archive, sid, "x" * 200_000)
+            _age_session(archive, sid, days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 40
+        assert out["freelist_ratio"] > AUTO_VACUUM_MIN_FREELIST_RATIO
+        assert out["vacuumed"] is True
+        assert archive._get_meta("last_vacuum") is not None
+        assert archive._freelist_ratio() == 0.0
+
+    def test_vacuum_throttled_by_min_interval_days(self, archive: SessionArchive) -> None:
+        for i in range(40):
+            sid = f"bulk-{i}"
+            self._seed(archive, sid, "x" * 200_000)
+            _age_session(archive, sid, days=100, ended=True)
+        archive._set_meta("last_vacuum", str(time.time()))
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 40
+        assert out["vacuumed"] is False
+        assert "freelist_ratio" not in out, "时间节流未过时不该考虑 VACUUM"
+
+    def test_observer_runs_maintenance_once_on_materialize(self, tmp_path: Path) -> None:
+        """接线：首次物化 archive 后跑一次，之后同一观察者不再重跑。"""
+        from agent_harness.session.event import USER_MESSAGE
+
+        calls: list[dict[str, object]] = []
+        real = SessionArchive.maybe_auto_prune_and_vacuum
+
+        def spy(self: SessionArchive, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return real(self, **kwargs)
+
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(SessionArchive, "maybe_auto_prune_and_vacuum", spy)
+            install_session_archive(
+                store, tmp_path / "sessions" / "state.db",
+                auto_prune=True, retention_days=30, min_interval_hours=6,
+            )
+            assert calls == [], "接线本身不得建库/跑维护"
+            store.append_event(
+                "sess-m", SessionEvent(type=USER_MESSAGE, session_id="sess-m", seq=0,
+                                       data={"content": "第一次写入"}),
+            )
+            store.append_event(
+                "sess-m", SessionEvent(type=USER_MESSAGE, session_id="sess-m", seq=1,
+                                       data={"content": "第二次写入"}),
+            )
+
+        assert len(calls) == 1
+        assert calls[0] == {
+            "auto_prune": True, "retention_days": 30, "min_interval_hours": 6,
+        }
