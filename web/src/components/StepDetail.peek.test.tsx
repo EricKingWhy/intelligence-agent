@@ -144,13 +144,13 @@ describe('#183 AC7 面板控制键的可访问性语义', () => {
     expect(html).toContain('aria-label="关闭运行详情"');
   });
 
-  it('拖宽手柄是 separator：方向 + 当前/上下限都如实报（320→480）', () => {
+  it('拖宽手柄是 separator：方向 + 当前/上下限都如实报（320→820）', () => {
     const html = renderStepDetail({ conversation: conv, focus: { kind: 'run' }, panelOver: { width: 400 } });
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-orientation="vertical"');
     expect(html).toContain('aria-valuenow="400"');
     expect(html).toContain('aria-valuemin="320"');
-    expect(html).toContain('aria-valuemax="480"');
+    expect(html).toContain('aria-valuemax="820"');
   });
 
   it('详情与面板控制在同一容器内：Esc 的层级只作用于面板内部的焦点', () => {

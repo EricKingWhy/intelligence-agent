@@ -142,7 +142,8 @@ describe('#1419 Timeline 卡片流交互', () => {
     expect(expandedCards()).toHaveLength(1);
     expect(rows()).toHaveLength(before);
     expect(rows()[0].getAttribute('aria-expanded')).toBe('true');
-    expect(expandedCards()[0].textContent).toContain('钻取');
+    // #1419 T-10：段头改为 `#seq · type`（原「钻取」标签退役），仍必须是展开区首行。
+    expect(expandedCards()[0].querySelector('.tl-drill')?.textContent).toContain('#1 · run/started');
     // 点击同一张卡片 = 收起。
     click(rows()[0]);
     expect(expandedCards()).toHaveLength(0);

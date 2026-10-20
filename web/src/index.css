@@ -201,6 +201,89 @@
   /* State tint for hover / selected washes */
   --color-hover: var(--surface-hover);
 
+  /* ══ #1419 RUN INSPECTOR 融合版（inspector-fusion.html）════════════════════
+   * 效果图是独立单文件（自有 :root 调色板），仓库既有语义 token 的色相/层级
+   * 与它不同（仓库 canvas 是中性黑，效果图是蓝黑）。这里按效果图**逐值**新增
+   * 一组 `--fx-*`，只服务 Inspector；既有 token 不动（中心列/顶栏不受影响）。
+   * 亮色块逐项覆盖（§15），值取既有亮色语义色的同族档位。 */
+  --fx-canvas: #0b0f16;
+  --fx-canvas-soft: #080b11;
+  --fx-panel: #0f141d;
+  --fx-panel-2: #121926;
+  --fx-surface-2: #161d29;
+  --fx-surface-3: #1b2331;
+  --fx-card: #111823;
+  --fx-card-hover: #151d2a;
+  --fx-card-open: #131b27;
+  --fx-hairline: #1f2835;
+  --fx-hairline-soft: #18202c;
+  --fx-hairline-strong: #2b3747;
+
+  --fx-ink: #e9eef6;
+  --fx-ink-2: #c2cedd;
+  --fx-mute: #8b98aa;
+  --fx-faint: #7b899d;
+  --fx-ghost: #71809a;
+
+  --fx-ok: #3ddc97;
+  --fx-ok-ink: #8ff0c4;
+  --fx-ok-line: #1d5c46;
+  --fx-ok-bg: #0d211b;
+  --fx-bar-ok: #2fbf85;
+  --fx-bar-ok-ink: #04130d;
+  --fx-bar-sheen: rgba(255, 255, 255, 0.24);
+  --fx-warn: #f4b860;
+  --fx-warn-ink: #ffd79b;
+  --fx-warn-line: #6a4a1d;
+  --fx-warn-bg: #221a0d;
+  --fx-bar-warn: #f0a94a;
+  --fx-danger: #f2637e;
+  --fx-danger-ink: #ff9fb2;
+  --fx-danger-line: #6b2437;
+  --fx-danger-bg: #241018;
+  --fx-bar-fail: #e0526f;
+  --fx-violet: #9d8cff;
+  --fx-violet-ink: #c9c0ff;
+  --fx-violet-line: #3b3470;
+  --fx-violet-bg: #17142e;
+
+  /* brand：效果图 primary 与仓库 --accent 同为 #533afd；只补缺的档位。 */
+  --fx-primary: var(--accent);
+  --fx-primary-hover: #6652ff;
+  --fx-primary-on: #ffffff;
+  --fx-primary-press: #3a2ab8;
+  --fx-primary-ink: #b0a4ff;
+  --fx-primary-soft: #1b1740;
+  --fx-primary-softer: #141130;
+  --fx-primary-line: #342c6b;
+  --fx-primary-ring: var(--accent);
+
+  /* 形状：效果图 `--r-xs:5 / --r-sm:7 / --r-card:10 / --r-lg:14 / --r-pill:999`。 */
+  --fx-r-xs: 5px;
+  --fx-r-sm: 7px;
+  --fx-r-card: 10px;
+  --fx-r-lg: 14px;
+  --fx-r-pill: 999px;
+
+  --fx-edge-hi: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --fx-edge-hi-strong: inset 0 1px 0 rgba(255, 255, 255, 0.075);
+  --fx-shadow-lift: 0 14px 30px -18px rgba(0, 0, 0, 0.92), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --fx-shadow-sticky: 0 14px 18px -16px rgba(0, 0, 0, 0.95);
+  --fx-shadow-pop: 0 18px 36px -20px rgba(0, 0, 0, 0.9), 0 2px 8px rgba(0, 0, 0, 0.5);
+  --fx-track-line: rgba(255, 255, 255, 0.055);
+  --fx-track-line-strong: rgba(255, 255, 255, 0.09);
+
+  --fx-ease: cubic-bezier(0.22, 0.8, 0.28, 1);
+  --fx-ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --fx-dur-fast: 110ms;
+  --fx-dur: 170ms;
+  --fx-dur-med: 260ms;
+
+  /* 效果图面板宽度与甘特列宽（标签列随面板宽度线性缩放，150–280 夹取）。 */
+  --fx-insp-w: 520px;
+  --fx-fc-label: clamp(150px, calc(var(--fx-insp-w) * 0.38), 280px);
+  --fx-fc-dur: 44px;
+
   /* Edge lighting for floating glass only */
   --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
 
@@ -299,6 +382,73 @@
   --effort-tone-deep: #4c1d95;
 
   --color-hover: var(--surface-hover);
+
+  /* #1419 Inspector 融合版亮色档（暗色块逐项覆盖，见 :root）。 */
+  --fx-canvas: #f6f6f8;
+  --fx-canvas-soft: #f8f9fb;
+  --fx-panel: #ffffff;
+  --fx-panel-2: #f3f4f7;
+  --fx-surface-2: #eef0f4;
+  --fx-surface-3: #e7eaf0;
+  --fx-card: #ffffff;
+  --fx-card-hover: #f8f9fb;
+  --fx-card-open: #fbfbfc;
+  --fx-hairline: rgba(18, 18, 24, 0.1);
+  --fx-hairline-soft: rgba(18, 18, 24, 0.06);
+  --fx-hairline-strong: rgba(18, 18, 24, 0.16);
+
+  --fx-ink: #121218;
+  --fx-ink-2: #3f4652;
+  --fx-mute: #5f6875;
+  --fx-faint: #6b7481;
+  --fx-ghost: #7b8492;
+
+  --fx-ok: #1f9d63;
+  --fx-ok-ink: #1f6b42;
+  --fx-ok-line: #a7d7bf;
+  --fx-ok-bg: #eaf7f0;
+  --fx-bar-ok: #1f9d63;
+  --fx-bar-ok-ink: #ffffff;
+  --fx-bar-sheen: rgba(255, 255, 255, 0.35);
+  --fx-warn: #d08a1a;
+  --fx-warn-ink: #8a5a00;
+  --fx-warn-line: #e6c88a;
+  --fx-warn-bg: #fdf5e6;
+  --fx-bar-warn: #e0a33a;
+  --fx-danger: #d4455f;
+  --fx-danger-ink: #b3364a;
+  --fx-danger-line: #e8b4bf;
+  --fx-danger-bg: #fdf0f2;
+  --fx-bar-fail: #d4455f;
+  --fx-violet: #6b4fd8;
+  --fx-violet-ink: #5a3fc4;
+  --fx-violet-line: #cfc3f0;
+  --fx-violet-bg: #f3efff;
+
+  --fx-primary: var(--accent);
+  --fx-primary-hover: #4434d4;
+  --fx-primary-on: #ffffff;
+  --fx-primary-press: #3a2ab8;
+  --fx-primary-ink: #533afd;
+  --fx-primary-soft: rgba(83, 58, 253, 0.1);
+  --fx-primary-softer: rgba(83, 58, 253, 0.05);
+  --fx-primary-line: rgba(83, 58, 253, 0.24);
+  --fx-primary-ring: var(--accent);
+
+  /* 形状（与暗色块同值：圆角不随主题变）。 */
+  --fx-r-xs: 5px;
+  --fx-r-sm: 7px;
+  --fx-r-card: 10px;
+  --fx-r-lg: 14px;
+  --fx-r-pill: 999px;
+
+  --fx-edge-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --fx-edge-hi-strong: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --fx-shadow-lift: 0 14px 30px -20px rgba(20, 20, 28, 0.28), 0 2px 6px rgba(20, 20, 28, 0.08);
+  --fx-shadow-sticky: 0 14px 18px -16px rgba(20, 20, 28, 0.24);
+  --fx-shadow-pop: 0 18px 36px -22px rgba(20, 20, 28, 0.3), 0 2px 8px rgba(20, 20, 28, 0.1);
+  --fx-track-line: rgba(18, 18, 24, 0.06);
+  --fx-track-line-strong: rgba(18, 18, 24, 0.1);
 
   --json-string: #0a7d32;
   --json-number: #0550ae;

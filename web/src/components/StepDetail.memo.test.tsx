@@ -331,7 +331,8 @@ describe('F2 — 反例守卫（记忆化的键是输入，不是"永不重渲�
     expect(container!.querySelector('.detail-peek')?.getAttribute('data-peek')).toBe('off');
     const card = container!.querySelector('.timeline-card.expanded');
     expect(card).not.toBeNull();
-    expect(card!.textContent).toContain('钻取');
+    // #1419 T-10：展开区首行是 `#seq · type` 段头（原「钻取」标签退役）。
+    expect(card!.querySelector('.tl-drill')?.textContent).toContain('#1 · run/started');
     expect(card!.querySelector('.timeline-row')?.getAttribute('aria-expanded')).toBe('true');
     // #1106：聚焦事件带信封 run_id ⇒ focusedRunId 变化 ⇒ 头标档位徽标必须重算
     // （徽标跟随聚焦 run，这正是本票要的行为）；allTools / 脉冲仍不重算——

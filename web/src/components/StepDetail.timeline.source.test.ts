@@ -86,8 +86,8 @@ describe('#1419 Timeline 图标 CSS 守卫', () => {
     expect(icon).toMatch(/(?:^|[;\s])mask(?:-image)?:\s*[^;]*var\(--tl-icon\)/);
   });
 
-  it('fail 状态把 --tl-icon-color 覆盖为 --danger', () => {
+  it('fail 状态把 --tl-icon-color 覆盖为危险色 token', () => {
     const fail = ruleBlock(".timeline-card[data-state='fail'] .timeline-row");
-    expect(fail).toMatch(/--tl-icon-color:\s*var\(--danger\)/);
+    expect(fail).toMatch(/--tl-icon-color:\s*var\(--fx-danger-ink\)/);
   });
 });

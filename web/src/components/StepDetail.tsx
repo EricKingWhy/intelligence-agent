@@ -15,21 +15,22 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock,
+  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock, Cpu,
   Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
-  Package, Pin, ShieldCheck, TerminalSquare, X,
+  Package, Pin, ShieldCheck, TerminalSquare, X, Zap,
 } from 'lucide-react';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
+import { timelineHeadline } from '../lib/timelineHeadline';
 import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
 import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
 import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
 import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
-  clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
+  PEEK_TAP_MS, clampInspectorWidth, escAction, eventKey, nextSelectionIndex, toolKey,
 } from '../lib/inspectorPanel';
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import {
@@ -190,10 +191,26 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))], // eslint-disable-line react-hooks/exhaustive-deps
     [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
   );
+  /* #1419：头部标题取**第一条用户消息**（真实数据）。会话模型没有独立的
+   * run_title 字段——不编一个，也不把最后一条消息当标题。 */
+  const runTitle = useMemo(() => {
+    const raw = conversation?.turns[0]?.user_message ?? '';
+    const firstLine = raw.split('\n').find((line) => line.trim())?.trim() ?? '';
+    return firstLine.length > 72 ? `${firstLine.slice(0, 72)}…` : firstLine;
+  }, [conversation?.turns]);
   /* #183：面板根节点（拖宽要量出"中心列 + 面板"的实际可用宽度）与键盘计时/拖拽状态。
    * 同样是 hook——必须在 early-return 之前。 */
   const panelRef = useRef<HTMLElement>(null);
-  const spaceDownAt = useRef<number | null>(null);
+  /* #1419 AC2「快按 = 保持打开，按住 = 松手关闭」的判据：**阈值到点时键还按着吗**，
+   * 不是「keydown 与 keyup 两个 `timeStamp` 之差」。
+   *
+   * 后者会把**我们自己**的渲染时间算进"按住时长"：keydown 里打开 peek 触发的重渲染
+   * （520px 面板 + 卡片流）在并行跑 e2e / 主线程忙时能吃掉几百毫秒，于是一次零延迟的
+   * `keyboard.press('Space')` 被量成 400ms+ 的长按，peek 刚开就被松手关掉（实测两
+   * worker 并行 6 次复现 5 次）。计时器只在主线程**空闲**时才会走到点——那恰好就是
+   * "用户真的还按着"的意思；排队中的渲染与事件不参与计量。 */
+  const spaceHoldTimer = useRef<number | null>(null);
+  const spaceHeldLong = useRef(false);
   const dragRef = useRef<{ startX: number; startW: number; available: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   /* #1419：筛选与展开是**面板级**视图状态（不是 TimelineTab 内部状态）——
@@ -261,6 +278,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   const reasoningEffort = useMemo(
     () => (conversation ? deriveReasoningEffort(conversation.events, focusedRunId) : null),
     [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* #1419：副行模型徽标——provider 回显优先，其次请求侧（两者都在时回显胜出，
+   * 请求值进 title）。都不在 ⇒ 不渲染，不伪造模型名。 */
+  const headerModel = conversation?.model ?? conversation?.requested_model ?? null;
+  /* 效果图 `.live-dot`：只在真的在跑时呼吸（终态会话挂一个常亮绿点会被读成"还在跑"）。 */
+  const isLive = streaming && (pulse.state === 'thinking' || pulse.state === 'tool');
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
    * filter 逐字一致——收敛成三张表后 tab 计数与列表内容同源，也顺手消掉了每次提交三次
@@ -476,20 +498,29 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       if (spaceExcluded(target)) return;
       e.preventDefault(); // 不让浏览器把它当"滚动/激活当前按钮"
       if (e.repeat) return; // 长按的重复事件不重置计时
-      spaceDownAt.current = performance.now();
+      if (spaceHoldTimer.current === null) {
+        spaceHeldLong.current = false;
+        spaceHoldTimer.current = window.setTimeout(() => {
+          spaceHeldLong.current = true;
+          spaceHoldTimer.current = null;
+        }, PEEK_TAP_MS);
+      }
       // 已有选中项但预览关着 → Space = 预览（Linear：Space 开 peek）。
       if (hasSelection && !panel.peekOpen) onPanelAction({ type: 'open-peek' });
     }
   };
 
-  /** AC2：快按 = 保持打开，按住 = 松手关闭。判定在 lib/inspectorPanel（有测试钉住）。 */
+  /** AC2：快按 = 保持打开，按住 = 松手关闭。判据见 `spaceHoldTimer` 的注释。 */
   const onPanelKeyUp = (e: ReactKeyboardEvent<HTMLElement>) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (spaceExcluded(e.target as HTMLElement)) return;
-    const startedAt = spaceDownAt.current;
-    spaceDownAt.current = null;
-    if (startedAt === null) return;
-    if (spaceReleaseCloses(performance.now() - startedAt)) onPanelAction({ type: 'close-peek' });
+    if (spaceHoldTimer.current !== null) {
+      window.clearTimeout(spaceHoldTimer.current);
+      spaceHoldTimer.current = null;
+    }
+    const held = spaceHeldLong.current;
+    spaceHeldLong.current = false;
+    if (held) onPanelAction({ type: 'close-peek' });
   };
 
   /** AC6 拖宽：`available` 用**实测**的「中心列 + 面板」宽度（不含 rail——窄屏 rail
@@ -570,52 +601,93 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         onKeyDown={onResizeKeyDown}
       />
       <div className="detail-header">
-        <span className="panel-label">运行详情</span>
-        <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* #198：生效档位——#1106 起按**当前聚焦 run** 取值（选中项的信封
-            run_id 对账；无聚焦回退最后一个 run/started）。#1408：头部只留
-            运行状态 pill；档位改为 12px tertiary 文本，未知＝不渲染（不伪造
-            "main"，也不把"未知"做成与真实状态同权的徽标）。title 如实标注
-            取值范围。 */}
-        {agentProfile !== null && (
-          <span
-            className="detail-profile-badge mono num"
-            title={
-              focusedRunId !== null
-                ? `agent_profile: ${agentProfile}（聚焦任务的生效档位）`
-                : `agent_profile: ${agentProfile}（最近一次任务的生效档位）`
-            }
-          >
-            {agentProfile}
-          </span>
-        )}
-        {/* #1093：请求侧推理档位——#1106 起按**当前聚焦 run** 取值（无聚焦回退
-            最后一个 run/started）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
-            不伪造 "default"）。title 如实标注取值范围。 */}
-        {reasoningEffort !== null && (
-          <span
-            className="detail-effort-badge mono num"
-            title={
-              focusedRunId !== null
-                ? `reasoning_effort: ${reasoningEffort}（聚焦任务请求侧选中的推理档位）`
-                : `reasoning_effort: ${reasoningEffort}（最近一次任务请求侧选中的推理档位）`
-            }
-          >
-            推理 · {reasoningEffort}
-          </span>
-        )}
-        {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
-            （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
-            （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与
-            Overview 的 run 行）。 */}
-        {conversation.events.length > 0 && (
-          <span
-            className="detail-run-id mono num"
-            title={`任务：${runIdList.join(', ')}`}
-          >
-            共 {runIdList.length} 轮 · {conversation.events.length} 事件
-          </span>
-        )}
+        <div className="detail-header-main">
+          <div className="ih-eyebrow">
+            <Zap size={10} aria-hidden="true" />
+            RUN INSPECTOR
+          </div>
+          <div className="ih-title">
+            <h2 className="ih-title-text" title={runTitle || undefined}>
+              {runTitle || '运行详情'}
+            </h2>
+            {/* 效果图 `.live-dot`：只在真的在跑时呼吸。 */}
+            {isLive && <span className="ih-live-dot" aria-hidden="true" />}
+            <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
+          </div>
+          <div className="ih-sub">
+            {/* UI-03 头标对齐：时间线平铺全会话事件，副行给**范围**（最近 run id ·
+                轮次），而不是单个 run 短码。完整 run 列表留在 title 里。 */}
+            {conversation.run_id && (
+              <span
+                className="detail-run-id mono"
+                title={`最近任务：${conversation.run_id}${runIdList.length > 1 ? `（共 ${runIdList.length} 轮：${runIdList.join(', ')}）` : ''}`}
+              >
+                {conversation.run_id}
+              </span>
+            )}
+            {conversation.run_id && <span className="ih-sep">·</span>}
+            {conversation.turn_index !== null ? (
+              <span>第 {conversation.turn_index} 轮</span>
+            ) : (
+              runIdList.length > 0 && <span>共 {runIdList.length} 轮</span>
+            )}
+            {/* #226：模型徽标——`model` 是 provider 回显，`requested_model` 是我们
+                发出去的值。两个都在时按效果图 `badge-primary` 显示实际模型，请求侧
+                写进 title（"请求了 A、跑的是 B"是可解释的事实，不是矛盾）。 */}
+            {headerModel !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="badge ih-model-badge mono"
+                  title={
+                    conversation.requested_model && conversation.requested_model !== headerModel
+                      ? `实际模型 ${headerModel} · 请求 ${conversation.requested_model}`
+                      : `模型 ${headerModel}`
+                  }
+                >
+                  <Cpu size={9} aria-hidden="true" />
+                  {headerModel}
+                </span>
+              </>
+            )}
+            {/* #198：生效档位——#1106 起按**当前聚焦 run** 取值（选中项的信封
+                run_id 对账；无聚焦回退最后一个 run/started）。#1408：头部只留
+                运行状态 pill；档位改为徽标文本，未知＝不渲染（不伪造 "main"）。 */}
+            {agentProfile !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="detail-profile-badge mono num"
+                  title={
+                    focusedRunId !== null
+                      ? `agent_profile: ${agentProfile}（聚焦任务的生效档位）`
+                      : `agent_profile: ${agentProfile}（最近一次任务的生效档位）`
+                  }
+                >
+                  <ShieldCheck size={9} aria-hidden="true" />
+                  {agentProfile}
+                </span>
+              </>
+            )}
+            {/* #1093：请求侧推理档位——未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠
+                默认档，不伪造 "default"）。 */}
+            {reasoningEffort !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="detail-effort-badge mono num"
+                  title={
+                    focusedRunId !== null
+                      ? `reasoning_effort: ${reasoningEffort}（聚焦任务请求侧选中的推理档位）`
+                      : `reasoning_effort: ${reasoningEffort}（最近一次任务请求侧选中的推理档位）`
+                  }
+                >
+                  推理 · {reasoningEffort}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
         {/* #183 AC4/AC5/AC7：钉住 / 整页 / 关闭。三个都是键盘可达的按钮，开关类用
             `aria-pressed` 如实上报（不是靠 icon 换形状暗示状态）。 */}
         <span className="detail-header-actions">
@@ -683,6 +755,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
                     {count}
                   </span>
                 )}
+                {/* 效果图 `.tab .alert-dot`：有待确认的约束输入时提醒（真实数据：
+                    `conversation.pending_constraint_input`）。 */}
+                {t.id === 'constraints' && conversation?.pending_constraint_input != null && (
+                  <span className="detail-tab-alert" aria-hidden="true" />
+                )}
               </button>
             </Tip>
           );
@@ -723,6 +800,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               timings={timelineTimings}
               tools={tools}
               eventKeys={timelineKeys}
+              streaming={streaming}
             />
           )}
           {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} />}
@@ -851,27 +929,50 @@ function sparkValues(values: readonly number[]): number[] {
   return Array.from({ length: 24 }, (_, i) => values[Math.round((i / 23) * (values.length - 1))]);
 }
 
+/* #1419 O-2：效果图的 spark 是「面积 + 折线 + 末端圆点」（`.spark .ar/.ln/.dt`），
+ * 几何按 `sparkHTML` 的口径：viewBox 0 0 100 34，左右各留 2、上下各留 4，
+ * 相邻点用中点做三次贝塞尔控制点（圆滑，不插值出新数据）。 */
 function Sparkline({ values, label }: { values: readonly number[]; label: string }) {
   if (values.length < 2) return null;
   const points = sparkValues(values);
   const min = Math.min(...points);
   const max = Math.max(...points);
   const span = max - min || 1;
-  const coords = points
-    .map((v, i) => `${((i / (points.length - 1)) * 100).toFixed(2)},${(24 - ((v - min) / span) * 20 - 2).toFixed(2)}`)
-    .join(' ');
+  const w = 100;
+  const h = 34;
+  const padX = 2;
+  const padY = 4;
+  const pts = points.map((v, i) => [
+    padX + (i * (w - padX * 2)) / (points.length - 1),
+    h - padY - ((v - min) / span) * (h - padY * 2),
+  ]);
+  let line = `M${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1];
+    const [x1, y1] = pts[i];
+    const cx = (x0 + x1) / 2;
+    line += ` C${cx.toFixed(2)} ${y0.toFixed(2)} ${cx.toFixed(2)} ${y1.toFixed(2)} ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+  }
+  const last = pts[pts.length - 1];
+  const area = `${line} L${last[0].toFixed(2)} ${h} L${pts[0][0].toFixed(2)} ${h} Z`;
   return (
-    <svg className="ov-spark" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label={label}>
-      <polyline points={coords} vectorEffect="non-scaling-stroke" />
-    </svg>
+    <div className="ov-spark" role="img" aria-label={label}>
+      <svg viewBox="0 0 100 34" preserveAspectRatio="none">
+        <path className="ov-spark-ar" d={area} />
+        <path className="ov-spark-ln" d={line} />
+        <circle className="ov-spark-dt" cx={last[0].toFixed(2)} cy={last[1].toFixed(2)} r="1.6" />
+      </svg>
+    </div>
   );
 }
 
 function MetricCard({
-  label, value, sub, series, icon: Icon,
+  label, value, unit, sub, series, icon: Icon,
 }: {
   label: string;
   value: string;
+  /** 单位后缀（效果图 `.v .u`：`128,940 tok`）。缺省不渲染。 */
+  unit?: string;
   sub: string;
   series: readonly number[];
   icon: typeof Hash;
@@ -879,16 +980,19 @@ function MetricCard({
   return (
     <div className="ov-metric">
       <div className="ov-metric-head">
+        <Icon size={9} className="ov-metric-icon" aria-hidden="true" />
         <span className="ov-metric-label">{label}</span>
-        <Icon size={12} className="ov-metric-icon" aria-hidden="true" />
       </div>
-      <div className="ov-metric-value num">{value}</div>
+      <div className="ov-metric-value num">
+        {value}
+        {unit && <span className="ov-metric-unit">{unit}</span>}
+      </div>
+      <div className="ov-metric-sub">{sub}</div>
       {series.length >= 2 ? (
         <Sparkline values={series} label={`${label}趋势`} />
       ) : (
         <div className="ov-metric-flat" aria-hidden="true" />
       )}
-      <div className="ov-metric-sub">{sub}</div>
     </div>
   );
 }
@@ -932,6 +1036,7 @@ function OverviewMetrics({
         label="输入 tokens"
         icon={Hash}
         value={prompt !== null ? prompt.toLocaleString() : '—'}
+        unit={prompt !== null ? 'tok' : undefined}
         sub={samplesSub}
         series={seriesOf(samples, 'prompt')}
       />
@@ -939,6 +1044,7 @@ function OverviewMetrics({
         label="输出 tokens"
         icon={Hash}
         value={completion !== null ? completion.toLocaleString() : '—'}
+        unit={completion !== null ? 'tok' : undefined}
         sub={completion !== null ? samplesSub : '等待用量回填'}
         series={seriesOf(samples, 'completion')}
       />
@@ -961,13 +1067,19 @@ function OverviewMetrics({
 }
 
 /** Overview 折叠段：内容**始终挂载**（SSR/测试与“收起不丢数据”），关闭时
- *  `inert` + aria-hidden 阻止焦点与读屏；默认展开 RUN/TOOLS/决定/PERMISSION。 */
+ *  `inert` + aria-hidden 阻止焦点与读屏。 */
 function OverviewSection({
-  id, title, icon: Icon, defaultOpen = false, className, children,
+  id, title, icon: Icon, kv, attn = false, defaultOpen = false, className, children,
 }: {
   id: string;
   title: string;
   icon: typeof Hash;
+  /** 段头右侧的 mono 摘要（效果图 `.acc-kv`：`13 次 · 失败 2`）。
+   *  取代旧的「收起/展开」文字钮——开合态由 chevron 旋转表达。 */
+  kv?: ReactNode;
+  /** 效果图 `.acc.is-attn`：有待处理事项时整段琥珀描边 + 顶部琥珀渐变，
+   *  让"需要你来决定"在一列灰卡里自己跳出来。 */
+  attn?: boolean;
   defaultOpen?: boolean;
   className?: string;
   children: ReactNode;
@@ -975,7 +1087,10 @@ function OverviewSection({
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = `ov-body-${id}`;
   return (
-    <section className={`ov-acc${open ? ' open' : ''}${className ? ` ${className}` : ''}`} data-ov-section={id}>
+    <section
+      className={`ov-acc${open ? ' open' : ''}${attn ? ' is-attn' : ''}${className ? ` ${className}` : ''}`}
+      data-ov-section={id}
+    >
       <button
         type="button"
         className="ov-acc-head"
@@ -983,10 +1098,10 @@ function OverviewSection({
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="ov-acc-icon"><Icon size={13} aria-hidden="true" /></span>
+        <span className="ov-acc-icon"><Icon size={10} aria-hidden="true" /></span>
         <span className="ov-acc-title">{title}</span>
-        <span className="ov-acc-state">{open ? '收起' : '展开'}</span>
-        <ChevronDown size={13} className="ov-acc-chev" aria-hidden="true" />
+        {kv != null && <span className="ov-acc-kv">{kv}</span>}
+        <ChevronDown size={10} className="ov-acc-chev" aria-hidden="true" />
       </button>
       <div className="ov-acc-body" id={bodyId} aria-hidden={!open} inert={!open ? true : undefined}>
         <div className="ov-acc-in">{children}</div>
@@ -1477,7 +1592,9 @@ const eventSummary = summarizeEvent;
 /** P3-2：投影对 run/model 类事件没有单行摘要（`emptySummary`），Timeline 卡片
  *  标题不能因此退回原始类型串。只补这几类**可读**标题，其余仍按投影口径回退
  *  到类型名（未知事件保留原始类型是设计选择）。 */
-function timelineTitle(event: AgentEvent): string {
+function timelineTitle(event: AgentEvent, call?: ToolCall | null): string {
+  const headline = timelineHeadline(event, call);
+  if (headline.title) return headline.title;
   const summary = eventSummary(event);
   if (summary) return summary;
   const model = typeof event.data.model === 'string' && event.data.model ? event.data.model : null;
@@ -1520,6 +1637,13 @@ export function formatEventTooltip(e: AgentEvent): string[] {
 interface TipState {
   x: number;
   y: number;
+  /** 事件标题（人话模板）——T-11 富信息浮层的首行。 */
+  title: string;
+  /** `#seq · type · 时刻`（mono 副行）。 */
+  meta: string;
+  /** 投影摘要；无摘要时不渲染该行。 */
+  summary: string | null;
+  /** 既有行（完整时间戳 + step，`formatEventTooltip` 口径）。 */
   lines: string[];
 }
 
@@ -1536,6 +1660,7 @@ export function TimelineTab({
   timings,
   tools = EMPTY_TOOLS,
   eventKeys,
+  streaming = false,
 }: {
   conversation: ConversationState;
   onFocusEvent: (e: AgentEvent) => void;
@@ -1552,6 +1677,8 @@ export function TimelineTab({
   /** #1419 P2-1：事件对象 → Timeline 行身份（seq-less 同键事件带序号）。
    *  省略时退回 `eventKey`（独立渲染/旧测试兼容）。 */
   eventKeys?: ReadonlyMap<AgentEvent, string>;
+  /** 底部状态条的同步态（`已同步` / `跟随中`）；独立渲染默认终态。 */
+  streaming?: boolean;
 }) {
   // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
   // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
@@ -1590,6 +1717,12 @@ export function TimelineTab({
     () => timings ?? deriveEventTimings(conversation.events, tools),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [timings, conversation.eventsVersion, tools],
+  );
+  /* T-8：TOOL_RESULT 行标题要复用 call 的模板（result 自身内容只有 `ok`）。
+   * 按 tool_call_id 建索引；`tools` 引用稳定（上游 memo），索引跟着它重建。 */
+  const callById = useMemo(
+    () => new Map(tools.map((t) => [t.tool_call_id, t])),
+    [tools],
   );
 
   /* run 分组派生（N2 #271）：键用 `eventsVersion`——写 `events` 不是"省一次重算"，而是
@@ -1690,14 +1823,32 @@ export function TimelineTab({
     }
     const ev = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
     const lines = ev ? formatEventTooltip(ev) : [];
-    if (lines.length === 0) {
+    if (!ev) {
       setTip(null);
       return;
     }
+    /* T-11 富信息：标题 / `#seq · type · 时刻` / 摘要 + 既有时间戳与 step 行。
+     * 行数参与定位高度计算（TIP_LINE_H 每行）。 */
+    const timing = timingsMap.get(eventKey(ev));
+    const meta = [
+      ev.seq != null ? `#${ev.seq}` : null,
+      ev.type,
+      formatClock(ev.time),
+      timing?.durationMs != null ? formatShortDuration(timing.durationMs) : null,
+    ].filter((part): part is string => Boolean(part)).join(' · ');
+    const summary = eventSummary(ev) || null;
+    const rows = 1 + 1 + (summary ? 1 : 0) + lines.length;
     const r = btn.getBoundingClientRect();
-    const tipH = lines.length * TIP_LINE_H + TIP_PADDING;
+    const tipH = rows * TIP_LINE_H + TIP_PADDING;
     const above = r.top > tipH + TIP_TOP_MARGIN;
-    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP, lines });
+    setTip({
+      x: Math.max(8, r.left + 6),
+      y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP,
+      title: timelineTitle(ev),
+      meta,
+      summary,
+      lines,
+    });
   };
   const handleLeave = () => {
     lastRowRef.current = null;
@@ -1747,10 +1898,25 @@ export function TimelineTab({
           ))}
         </div>
         {liveEvent && (
-          <button type="button" className="tl-live-jump" onClick={jumpToLive} title="展开窗口并定位到最后一条运行中事件">
-            <span className="tl-live-dot" aria-hidden="true" />
-            跳转到实时流
-          </button>
+          <>
+            {/* T-12：运行态的「实时」紫钮——真实语义 = 正在跟随实时流，点击跳到最后
+                一条运行中事件。效果图那颗是"插入合成事件"，不移植（不造数据）。 */}
+            {streaming && (
+              <button
+                type="button"
+                className="tl-chip tl-chip-live is-on"
+                onClick={jumpToLive}
+                title="正在跟随实时流 · 跳到最新事件"
+              >
+                <Zap size={9} aria-hidden="true" />
+                实时
+              </button>
+            )}
+            <button type="button" className="tl-live-jump" onClick={jumpToLive} title="展开窗口并定位到最后一条运行中事件">
+              <span className="tl-live-dot" aria-hidden="true" />
+              跳转到实时流
+            </button>
+          </>
         )}
       </div>
 
@@ -1780,6 +1946,7 @@ export function TimelineTab({
         </div>
       ) : lanes.map(({ group, items }) => {
         const timing = laneTiming(group, conversation.events, timingsMap);
+        const failCount = items.filter(({ e }) => timingsMap.get(eventKey(e))?.status === 'fail').length;
         return (
           <Fragment key={group.start}>
             <div
@@ -1787,6 +1954,15 @@ export function TimelineTab({
               data-status={group.status}
               title={group.runId ? `任务 ${group.runId}` : '会话开场（不属于任何一次任务）'}
             >
+              {/* T-2：运行中泳道组头底线的扫光段（`.gh-live` 同款）。 */}
+              {group.status === 'running' && (
+                <span className="tl-run-live" aria-hidden="true"><i /></span>
+              )}
+              <span
+                className="tl-run-dot"
+                data-status={group.status}
+                aria-hidden="true"
+              />
               <span className="tl-run-name">{group.runId ? `第 ${group.ordinal} 轮执行` : '会话'}</span>
               {group.runId && (
                 <span className={`run-badge run-badge-${group.status}`}>
@@ -1796,6 +1972,8 @@ export function TimelineTab({
               <span className="tl-run-count num">
                 {items.length === group.count ? `${group.count} 事件` : `${items.length}/${group.count} 事件`}
               </span>
+              {/* T-1：失败数只在真有时出现，`--danger-ink` 加粗。 */}
+              {failCount > 0 && <span className="tl-run-fail num">{failCount} 失败</span>}
               {timing?.start != null && (
                 <span className="tl-run-time num">
                   {formatClock(new Date(timing.start).toISOString())}
@@ -1811,6 +1989,9 @@ export function TimelineTab({
                   <TimelineCard
                     rowKey={key}
                     event={e}
+                    call={e.type === EventType.TOOL_RESULT
+                      ? callById.get(String(e.data.tool_call_id ?? '')) ?? null
+                      : null}
                     timing={timingsMap.get(eventKey(e))}
                     axis={axis}
                     selected={selectedKey === key}
@@ -1818,6 +1999,7 @@ export function TimelineTab({
                     flash={flashKey === key}
                     onSelect={selectEvent}
                     onToggle={toggleExpanded}
+                    onLocate={onJumpToStream}
                   />
                   {activeFilter === 'all' && gapByIndex.has(i) && (
                     <SeqGapBanner gap={gapByIndex.get(i)!} />
@@ -1831,13 +2013,38 @@ export function TimelineTab({
 
       {tip && (
         <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+          <div className="tl-tooltip-title">{tip.title}</div>
+          <div className="tl-tooltip-meta mono">{tip.meta}</div>
+          {tip.summary && <div className="tl-tooltip-summary">{tip.summary}</div>}
           {tip.lines.map((l, i) => (
             <div key={i} className="tl-tooltip-line">
               {l}
             </div>
           ))}
+          <div className="tl-tooltip-hint">点击展开四段详情</div>
         </div>
       )}
+
+      {/* T-14 底部状态条：左「已显示 / 总数 事件」，右键盘提示 + 同步点。
+          数字全部来自当前筛选与窗口（真实状态），不是效果图的常量。 */}
+      <div className="tl-foot">
+        <span className="tl-foot-count mono">
+          {visible.length} / {filtered.length} 事件
+        </span>
+        <span className="tl-foot-grow" />
+        <span className="tl-foot-kbd">
+          <span className="tl-kbd">↑</span>
+          <span className="tl-kbd">↓</span>
+          选择
+        </span>
+        <span className="tl-foot-kbd">
+          <span className="tl-kbd">↵</span>
+          展开
+        </span>
+        <span className="tl-foot-sync" data-live={streaming ? 'true' : undefined}>
+          {streaming ? '跟随中' : '已同步'}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1911,7 +2118,7 @@ function SeqGapBanner({ gap }: { gap: SeqGap }) {
   return (
     <div className="tl-gap" role="note">
       <AlertTriangle size={12} />
-      <span>seq {gap.from} → {gap.to} 缺失（{gap.missing} 条）</span>
+      <span className="tl-gap-txt">seq {gap.from} → {gap.to} 缺失（{gap.missing} 条）</span>
     </div>
   );
 }
@@ -1919,6 +2126,7 @@ function SeqGapBanner({ gap }: { gap: SeqGap }) {
 const TimelineCard = memo(function TimelineCard({
   rowKey,
   event,
+  call,
   timing,
   axis,
   selected,
@@ -1926,10 +2134,13 @@ const TimelineCard = memo(function TimelineCard({
   flash,
   onSelect,
   onToggle,
+  onLocate,
 }: {
   /** P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号），不是裸 `eventKey`。 */
   rowKey: string;
   event: AgentEvent;
+  /** T-8：TOOL_RESULT 行要复用对应 call 的标题模板（result 自己只有 `ok`）。 */
+  call?: ToolCall | null;
   timing?: EventTiming;
   axis: TimelineAxis | null;
   selected: boolean;
@@ -1937,6 +2148,8 @@ const TimelineCard = memo(function TimelineCard({
   flash: boolean;
   onSelect: (e: AgentEvent) => void;
   onToggle: (key: string) => void;
+  /** T-10：展开区「定位到会话」——反向联动中心列（PRD §9.2）。 */
+  onLocate?: (e: AgentEvent) => void;
 }) {
   const key = rowKey;
   const status: TimelineStatus = timing?.status ?? 'idle';
@@ -1947,6 +2160,8 @@ const TimelineCard = memo(function TimelineCard({
   );
   const clock = formatClock(event.time);
   const toolName = typeof event.data.tool_name === 'string' ? event.data.tool_name : null;
+  /* T-8：人话标题 + 真实副行细节（模型用量等）。纯函数、只用事件字段。 */
+  const headline = timelineHeadline(event, call);
   /* 只有展开行需要 DOM id；未展开行不再每行跑一次正则替换。 */
   const expandId = expanded ? `tl-expand-${key.replace(/[^a-zA-Z0-9_-]/g, '_')}` : undefined;
   return (
@@ -1968,12 +2183,14 @@ const TimelineCard = memo(function TimelineCard({
         }}
       >
         <span className="tl-main">
-          <span className="tl-title">{timelineTitle(event)}</span>
+          <span className="tl-title">{timelineTitle(event, call)}</span>
           <span className="tl-meta">
             {/* P3-5：meta 文本单独包一层可收缩节点，尾部状态 tag 才不会被裁掉。 */}
             <span className="tl-meta-text">
               {`#${event.seq ?? '·'} · ${event.type}${clock ? ` · ${clock}` : ''}${event.step_id != null ? ` · step ${event.step_id}` : ''}${toolName ? ` · ${toolName}` : ''}`}
             </span>
+            {/* T-8：真实可得细节（模型用量）；没有就不占位。 */}
+            {headline.note && <span className="tl-note mono">{headline.note}</span>}
             {status === 'fail' && <span className="tl-tag tl-tag-fail">失败</span>}
             {status === 'run' && <span className="tl-tag tl-tag-run">运行中</span>}
           </span>
@@ -1998,12 +2215,33 @@ const TimelineCard = memo(function TimelineCard({
       {expanded && (
         <div className="tl-expand open" id={expandId}>
           <div className="tl-inner">
+            {/* T-10 段头（效果图 `.fc-drill`）：`#seq · type` 左，时刻 · 耗时右。 */}
             <div className="tl-drill">
-              <ListTree size={11} />
-              <span>钻取</span>
-              <span className="tl-drill-type mono">{event.type}</span>
+              <span className="tl-drill-type mono">
+                {event.seq != null ? `#${event.seq}` : '#·'} · {event.type}
+              </span>
+              <span className="tl-drill-grow" />
+              <Clock size={10} aria-hidden="true" />
+              <span className="mono">
+                {clock ?? '—'}
+                {timing?.durationMs != null ? ` · ${formatShortDuration(timing.durationMs)}` : ''}
+              </span>
             </div>
             <EventInspector focus={{ kind: 'event', event }} />
+            {/* 效果图 `.fc-acts`：反向定位到中心列（PRD §9.2 的既有通路）。 */}
+            {onLocate && (
+              <div className="tl-acts">
+                <button
+                  type="button"
+                  className="tl-btn"
+                  onClick={() => onLocate(event)}
+                  title="在会话里滚动定位到这条事件"
+                >
+                  <ArrowLeft size={10} aria-hidden="true" />
+                  定位到会话
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
