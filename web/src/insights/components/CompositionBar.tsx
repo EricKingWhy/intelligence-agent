@@ -47,7 +47,7 @@ export function CompositionBar({
         ))}
         {marks.map((mark) => (
           <span
-            key={mark.ratio}
+            key={mark.label}
             className="ctx-insights-compbar-mark"
             style={{ left: `${mark.ratio * 100}%` }}
             title={`${mark.label}（窗口比例，非 token 预留）`}
