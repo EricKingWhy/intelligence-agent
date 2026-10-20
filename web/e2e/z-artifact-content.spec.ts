@@ -90,9 +90,9 @@ async function openSession(page: import('@playwright/test').Page, frames: FrameS
  *  `tool-card-body` 不存在）。行本身是 L0→L1→L2 的循环按钮，所以点到 `aria-level=2`
  *  为止（不写死点击次数：默认档位不同会差一次）。
  *
- *  `tool-card-body` 是 `.act-node-wrap` 的**兄弟**（工具卡返回的是 fragment，没有共同
- *  父元素），所以不要把它挂在 wrap 下面找——那条选择器永远匹配不到。本 spec 的 fixture
- *  只有一个工具，直接用页面级选择器，读起来也更直白。 */
+ *  `tool-card-body` 是 `.act-card` 的**后代**（`Collapse` 的网格容器，`.disc-in` 在内），
+ *  但它在 `aria-level < 2` 时根本不挂载（`openedOnce` 门），所以断言前必须先点开——
+ *  页面级选择器足够：本 spec 的 fixture 只有一个工具。 */
 async function expandToolToL2(page: import('@playwright/test').Page) {
   const row = page.locator('.act-node').first();
   for (let i = 0; i < 3; i++) {

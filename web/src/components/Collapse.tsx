@@ -1,4 +1,4 @@
-/** Collapse — `grid-template-rows: 0fr → 1fr` 的展开/收起容器（#1429 打磨点 4）。
+/** Collapse — `grid-template-rows: 0fr → 1fr` 的展开/收起容器（#1429 打磨点 2）。
  *
  * 为什么不是测高：`grid-template-rows` 由浏览器自己插值，内容高度未知也能动，
  * 且不引第三方动画依赖（票面「不引依赖」红线）。
