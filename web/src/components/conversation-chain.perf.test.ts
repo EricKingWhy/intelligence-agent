@@ -43,7 +43,7 @@ vi.mock('@tanstack/react-virtual', async (importOriginal) => {
 
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
-import type { AgentEvent, ToolCall } from '../types';
+import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { initConversation, projectHistory } from '../lib/projection';
 import { useDisclosure, useReasoningDisclosure } from '../lib/disclosure';
 import type { TraceDensity } from '../lib/density';
@@ -75,8 +75,18 @@ function buildEvents(n: number): AgentEvent[] {
   return events;
 }
 
+/** 投影结果按 N 缓存：`Host` 在计时区内渲染，投影本身是另一件事（A 轴 P2）。
+ *  两棵树用同一份缓存策略，所以口径仍然对等——只是把 `projectHistory` 从
+ *  「单次渲染中位数」里拿掉。 */
+const convCache = new Map<number, ConversationState>();
+
 function conversationOf(n: number) {
-  return projectHistory(SID, buildEvents(n));
+  let conv = convCache.get(n);
+  if (!conv) {
+    conv = projectHistory(SID, buildEvents(n));
+    convCache.set(n, conv);
+  }
+  return conv;
 }
 
 const noop = () => {};

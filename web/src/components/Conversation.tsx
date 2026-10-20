@@ -12,7 +12,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { AlertTriangle, Check, ChevronDown, Square, X } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { describeFailure, type FailureCopy } from '../hooks/useSession';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain, emptyChildTurnIndex, latestEditableTurn } from '../lib/projection';
@@ -25,7 +25,7 @@ import {
   wheelDeltaPixels, type FollowState,
 } from '../lib/followLatest';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
-import { GROUP_LABEL, groupChain, type ToolGroup } from '../lib/toolGroups';
+import { GROUP_LABEL, groupChain, type ToolGroup, type ToolGroupStatus } from '../lib/toolGroups';
 import { deriveTurnNav, turnAnchor, type TurnNavItem } from '../lib/turnNav';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { Collapse } from './Collapse';
@@ -40,6 +40,8 @@ import type {
 } from '../types';
 import { formatDateTime, formatDuration, formatShortDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
+import { caret } from './Caret';
+import { kindGlyph, statusGlyph } from './Glyph';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
@@ -857,8 +859,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
           <button
             type="button"
             className={`tm-anchor${anchorCopied ? ' is-done' : ''}`}
-            title={anchorCopied ? '已复制轮次链接' : '复制轮次链接'}
-            aria-label={anchorCopied ? '已复制轮次链接' : '复制轮次链接'}
+            title={anchorCopied ? '已复制轮次锚点' : '复制轮次锚点'}
+            aria-label={anchorCopied ? '已复制轮次锚点' : '复制轮次锚点'}
             onClick={() => {
               const text = turnAnchor(turnIndex);
               const done = () => {
@@ -868,7 +870,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
               };
               // 非安全上下文（http 非 localhost）没有 clipboard API：退回 execCommand。
               if (navigator.clipboard?.writeText) {
-                navigator.clipboard.writeText(text).then(done, done);
+                // 复制失败不能亮「已复制」——那是伪造反馈（P3）。
+                navigator.clipboard.writeText(text).then(done, () => {});
               } else {
                 const ta = document.createElement('textarea');
                 ta.value = text;
@@ -1237,8 +1240,12 @@ export function ChainNodeView(ctx: ChainRenderCtx): ReactNode {
  *
  * 组头是一行字（图标 · 「N 次读取」· 工具名计数 · 状态 · 耗时 · chevron），
  * 子行复用 `ToolCard` 的同一套 L0-L2 契约——分组只改**排布**，不改工具卡的
- * 交互与密度语义。开合走 `grid-template-rows: 0fr → 1fr`（打磨点 2）。 */
-function ToolGroupView({
+ * 交互与密度语义。开合走 `grid-template-rows: 0fr → 1fr`（打磨点 2）。
+ *
+ * `memo`（#1429 F8）：开合状态是 Conversation 层的一张 Map，换一次换引用 ⇒ 所有
+ * `TurnView` 都会重渲染。`open` 是逐组布尔值，memo 让**没被点的那几组**直接 bail
+ * out——"开合只重渲染被点组"才是真的，而不是"每次开合重渲染整轮"。 */
+const ToolGroupView = memo(function ToolGroupView({
   group,
   open,
   onToggle,
@@ -1257,7 +1264,6 @@ function ToolGroupView({
   onFocusTool?: (tool: ToolCall) => void;
   sessionId?: string;
 }) {
-  const Icon = KIND_ICON[group.kind];
   const bodyId = `act-group-body-${group.key}`;
   return (
     <div className={`act-group${open ? ' is-open' : ''}`}>
@@ -1265,69 +1271,76 @@ function ToolGroupView({
         type="button"
         className="act-group-head"
         aria-expanded={open}
-        aria-controls={bodyId}
+        /* 收起态 `Collapse` 会卸载子树（id 不存在）⇒ 悬空的 aria-controls 指向
+           不存在的节点，读屏器会读出一个空引用。只在真有目标时声明（#1429 P3）。 */
+        aria-controls={open ? bodyId : undefined}
         onClick={() => onToggle(group.key)}
       >
-        <span className="act-group-ico"><Icon size={12} aria-hidden="true" /></span>
+        <span className="act-group-ico">{kindGlyph(group.kind, 12)}</span>
         <b>{group.members.length} 次{GROUP_LABEL[group.kind]}</b>
         <span className="act-group-kinds">
           {group.names.map((n) => `${n.name} ×${n.count}`).join(' · ')}
         </span>
         {/* 组头状态 = 成员聚合（任一失败→失败、任一运行中→运行、全完成→完成）。 */}
         <span className={`act-status act-status-${group.status} act-group-status`}>
-          {group.status === 'success' && <Check size={10} />}
-          {group.status === 'failed' && <X size={10} />}
-          {group.status === 'stopped' && <Square size={10} />}
-          {group.status === 'running' && <span className="status-spinner" />}
+          {group.status === 'running'
+            ? <span className="status-spinner" />
+            : statusGlyph(group.status)}
         </span>
         <GroupDuration
           startedAt={group.startedAt}
           completedAt={group.completedAt}
-          running={group.status === 'running'}
+          status={group.status}
         />
-        <ChevronDown size={11} className="act-group-chev" aria-hidden="true" />
+        {caret('act-group-chev')}
       </button>
       <Collapse open={open} className="act-group-body" id={bodyId}>
-        <div className="act-group-in">
-          {group.members.map(({ tool }) => {
-            const key = toolEventKey(tool.tool_call_id);
-            return (
-              <ToolCard
-                key={tool.tool_call_id}
-                tool={tool}
-                density={density}
-                level={disclosure ? disclosure.levelFor(key, density) : undefined}
-                onCycleLevel={onCycleLevel}
-                onFocus={onFocusTool}
-                sessionId={sessionId}
-              />
-            );
-          })}
-        </div>
+        {group.members.map(({ tool }) => (
+          <ToolCard
+            key={tool.tool_call_id}
+            tool={tool}
+            density={density}
+            level={disclosure ? disclosure.levelFor(toolEventKey(tool.tool_call_id), density) : undefined}
+            onCycleLevel={onCycleLevel}
+            onFocus={onFocusTool}
+            sessionId={sessionId}
+          />
+        ))}
       </Collapse>
     </div>
   );
-}
+});
 
-/** 组头耗时 = span（首成员开始 → 末成员结束）。末成员仍在跑时按当前时刻续算，
- *  只显示已运行时长，不造百分比。 */
+/** 组头耗时 = span（首成员开始 → 末成员结束）。
+ *  末成员仍在跑时按当前时刻续算，只显示已运行时长，不造百分比。
+ *  末成员被中断（stopped）时也可能没有 `completed_at`（`finalizeRun` 只翻状态）——
+ *  中断的组没有终点，显式说「已中断」，**不**挂 ticker 永久续算一个已经停住的组
+ *  （#1429 F7）。已收口 / 已中断的组头都不挂 ticker：那是绝大多数。 */
 function GroupDuration({
   startedAt,
   completedAt,
-  running,
+  status,
 }: {
   startedAt?: string;
   completedAt?: string;
-  running: boolean;
+  status: ToolGroupStatus;
 }) {
-  const now = useTickingNow(1000);
   if (!startedAt) return null;
-  const end = completedAt
-    ? new Date(completedAt).getTime()
-    : running
-      ? now
-      : Number.NaN;
-  const text = formatShortDuration(end - new Date(startedAt).getTime());
+  if (completedAt) {
+    const text = formatShortDuration(
+      new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+    );
+    return text === '' ? null : <span className="act-group-total">{text}</span>;
+  }
+  if (status === 'running') return <LiveGroupDuration startedAt={startedAt} />;
+  if (status === 'stopped') return <span className="act-group-total">已中断</span>;
+  return null;
+}
+
+/** 未收口组头的已运行时长（每秒续算；只给"已跑多久"，不给假百分比）。 */
+function LiveGroupDuration({ startedAt }: { startedAt: string }) {
+  const now = useTickingNow(1000);
+  const text = formatShortDuration(now - new Date(startedAt).getTime());
   return text === '' ? null : <span className="act-group-total">{text}</span>;
 }
 

@@ -447,10 +447,13 @@ body {
 }
 
 /* 选中事件高亮 pulse（Main↔Inspector 联动，PRD §9.2：600-900ms fade，
- * 克制不夸张；--dur-pulse 控制时长） */
+ * 克制不夸张；--dur-pulse 控制时长）。
+ * #1429 P3：脉冲**不接管 background**——`.act-card` 自己带底色（失败淡红 / 运行中
+ * 淡主色），改背景等于让卡片闪成另一张卡。用 inset box-shadow 画同一层淡色覆盖，
+ * 圆角随元素，结束后自然消失（`transparent` 不残留阴影）。 */
 @keyframes event-pulse {
-  0% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  100% { background: transparent; }
+  0% { box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { box-shadow: inset 0 0 0 999px transparent; }
 }
 
 /* ── Scrollbars (subtle) ── */

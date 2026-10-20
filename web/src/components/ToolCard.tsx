@@ -16,24 +16,25 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { memo, useEffect, useId, useState } from 'react';
+import { memo, useEffect, useRef, useState, type FocusEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, ArrowRight, Check, ChevronDown, Scissors, Square, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Scissors } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { defaultLevelFor, toolEventKey, type DisclosureLevel } from '../lib/disclosure';
 import { formatDuration, formatShortDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
-import { KIND_ICON, toolKind } from '../lib/eventKind';
+import { toolKind } from '../lib/eventKind';
 import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
-  parseErrorShape,
   parseReadShape,
   splitMcpToolName,
   stripGrepTruncatedSuffix,
   type ReadShape,
 } from '../lib/toolShapes';
 import { useTickingNow } from '../hooks/useTickingNow';
+import { caret } from './Caret';
+import { kindGlyph, statusGlyph } from './Glyph';
 import { CopyButton } from './CopyButton';
 import { Collapse } from './Collapse';
 import { ToolOutputStream } from './ToolOutputStream';
@@ -72,9 +73,11 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
   // 替换原 bash/其它 二分；状态仍由 act-status 列表达（中断 ≠ 错误）。
   // F-10：kind 同时落到 data-kind，图标色是唯一按类型分色的通道。
   const kind = toolKind(tool.name);
-  const KindIcon = KIND_ICON[kind];
   // 失败摘要（PRD §5.2 Error：第二行 error_code 摘要，不满屏红、不强制展开）。
-  const errorShape = tool.status === 'failed' ? parseErrorShape(tool.result) : null;
+  // 真相在投影层：`tool/result` 的信封 `{ok,message,error_code}` 在那里解析一次
+  // （`ToolCall.error`）。视图不再回头拆 `result`——`data` 为空时 result 只剩
+  // message 字符串，error_code 早就不在里面了（#1429 F1）。
+  const errorShape = tool.status === 'failed' ? tool.error ?? null : null;
 
   const handleRowClick = () => {
     if (onCycleLevel) {
@@ -86,13 +89,27 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
   };
 
   /* #1429 打磨点 5：参数中间省略。头段可收缩（CSS ellipsis），尾段固定——
-     行宽不足时省略号落在**中段**，尾部的路径/文件仍可辨（V2 `.tc-arg .ma/.mb`）。 */
+     行宽不足时省略号落在**中段**，尾部的路径/文件仍可辨（V2 `.tc-arg .ma/.mb`）。
+     显示串不预截断（`summarizeArgs` 默认不再砍到 60 字）：否则阈值 64 的中间省略
+     永远触发不了，长命令只剩前 60 字，tooltip 也只是那 60 字（#1429 F5）。 */
   const argsSummary = summarizeArgs(tool);
   const argsParts = splitArgsForDisplay(argsSummary);
   const argsTruncatable = argsParts.tail !== '';
   const [argTip, setArgTip] = useState<{ x: number; y: number } | null>(null);
-  const tipId = useId();
+  const argsRef = useRef<HTMLSpanElement>(null);
+  /* tooltip 的 id 直接由 tool_call_id 派生（全局唯一），不取 `useId()`：每行一次
+     hook + 上下文读写在 500 行规模上是可测的固定税（#1429 F2）。 */
+  const tipId = `arg-tip-${tool.tool_call_id}`;
   const closeTip = () => setArgTip(null);
+  /* 键盘路径（#1429 P3）：参数行本身**不可聚焦**——带 `tabindex` 的 span 嵌在
+     行 button 里属于非法 interactive 嵌套，浏览器不会把它放进 Tab 序。改为行
+     button 聚焦时给出同一份 tooltip（按钮是合法焦点目标，Esc 关闭不变）。 */
+  const openArgTip = () => {
+    const el = argsRef.current;
+    if (!el || !argsTruncatable) return;
+    const r = el.getBoundingClientRect();
+    setArgTip({ x: r.left, y: r.bottom + 4 });
+  };
   useEffect(() => {
     if (argTip === null) return;
     const onKey = (e: KeyboardEvent) => {
@@ -102,37 +119,60 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
     return () => window.removeEventListener('keydown', onKey);
   }, [argTip]);
 
+  /* 快捷动作（复制 / 定位）只在行被 hover 或聚焦后挂载——理由见下方 JSX 注释。
+     失焦时若焦点落进本卡内部（Tab 到复制按钮），保持挂载。 */
+  const [actionsShown, setActionsShown] = useState(false);
+  const onRowBlur = (e: FocusEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget;
+    if (next instanceof Node && e.currentTarget.contains(next)) return;
+    setActionsShown(false);
+  };
+
   const detailOpen = effectiveLevel >= 1;
   const bodyOpen = effectiveLevel >= 2;
+  /* 收起动画要保留（`Collapse` 靠 transitionend 卸载子树），所以「开过一次」之后
+     两个 Collapse 一直挂着；但 L0 常态下**一个都不挂**——闭合的 Collapse 仍是一个
+     组件 + 4 个 hook，200 行常驻就是每次渲染白付 ~6ms（#1429 F2 perf 探针）。
+     ref 在渲染期写入是幂等的，不会触发额外渲染。 */
+  const openedOnce = useRef(false);
+  if (detailOpen || bodyOpen) openedOnce.current = true;
   /* V2 `.tc` 的两种状态底色：失败淡红、运行中主色呼吸条。 */
   const stateClass =
     tool.status === 'failed' ? ' is-fail' : tool.status === 'running' ? ' is-run' : '';
-  const copyText =
-    typeof tool.result === 'string'
+  /* 复制载荷只在本卡真的露出快捷动作时才算：`JSON.stringify(result, null, 2)` 是
+     整份结果的序列化，200 张卡每次渲染都算一遍纯属白付（#1429 F2）。 */
+  const copyText = !actionsShown || tool.result === undefined
+    ? ''
+    : typeof tool.result === 'string'
       ? tool.result
-      : tool.result === undefined
-        ? ''
-        : JSON.stringify(tool.result, null, 2);
+      : JSON.stringify(tool.result, null, 2);
 
   return (
     <div
       /* data-stream-key：Main↔Inspector 联动定位锚（PRD §9.2 反向跳转目标）+ pulse */
       className={`act-node-wrap act-card${stateClass}`}
       data-stream-key={`tool:${tool.tool_call_id}`}
+      onMouseEnter={() => setActionsShown(true)}
+      onMouseLeave={() => setActionsShown(false)}
+      onFocus={() => setActionsShown(true)}
+      onBlur={onRowBlur}
     >
       <button
         className={`act-node act-node-${density}`}
         onClick={handleRowClick}
         aria-level={effectiveLevel}
         aria-expanded={detailOpen}
+        /* 键盘路径：行 button 是真焦点目标；聚焦即给出全量参数 tooltip，
+           失焦关闭（Esc 在 window 级监听里，两条路径共用）。 */
+        onFocus={openArgTip}
+        onBlur={closeTip}
       >
         <span className={`act-status act-status-${tool.status}`}>
-          {tool.status === 'success' && <Check size={14} />}
-          {tool.status === 'failed' && <X size={14} />}
-          {tool.status === 'stopped' && <Square size={14} />}
-          {tool.status === 'running' && <span className="status-spinner" />}
+          {tool.status === 'running'
+            ? <span className="status-spinner" />
+            : statusGlyph(tool.status)}
         </span>
-        {density !== 'compact' && <span className="act-icon" data-kind={kind}><KindIcon size={14} /></span>}
+        {density !== 'compact' && <span className="act-icon" data-kind={kind}>{kindGlyph(kind, 14)}</span>}
       {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
       {(() => {
         const mcp = splitMcpToolName(tool.name);
@@ -147,25 +187,22 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       })()}
       {density !== 'compact' && (
         <span
+          ref={argsRef}
           className="act-args"
           data-full={argsTruncatable ? argsSummary : undefined}
-          tabIndex={argsTruncatable ? 0 : undefined}
           aria-describedby={argTip !== null ? tipId : undefined}
-          onMouseEnter={(e) => {
-            if (!argsTruncatable) return;
-            const r = e.currentTarget.getBoundingClientRect();
-            setArgTip({ x: r.left, y: r.bottom + 4 });
-          }}
+          onMouseEnter={openArgTip}
           onMouseLeave={closeTip}
-          onFocus={(e) => {
-            if (!argsTruncatable) return;
-            const r = e.currentTarget.getBoundingClientRect();
-            setArgTip({ x: r.left, y: r.bottom + 4 });
-          }}
-          onBlur={closeTip}
         >
-          <span className="act-args-head">{argsParts.head}</span>
-          {argsParts.tail !== '' && <span className="act-args-tail">{argsParts.tail}</span>}
+          {/* 不拆分时（参数 ≤64 字）直接放文本：`.act-args` 自己就是省略容器，
+              少一个 span（200 行就是 200 个节点，见 perf 探针）。拆分时才需要
+              head/tail 两个盒子做**中段**省略。 */}
+          {argsParts.tail === '' ? argsParts.head : (
+            <>
+              <span className="act-args-head">{argsParts.head}</span>
+              <span className="act-args-tail">{argsParts.tail}</span>
+            </>
+          )}
         </span>
       )}
       {density === 'compact' && (
@@ -174,11 +211,14 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       <span className="act-duration">
         {duration ?? (tool.status === 'running' ? <LiveToolDuration startedAt={tool.started_at} /> : null)}
       </span>
-      <ChevronDown size={11} className="act-chev" aria-hidden="true" />
+      {caret('act-chev')}
       </button>
       {/* V2 打磨点 3：悬停浮现的快捷动作（复制 / 定位）。定位走 Inspector 联动
-          （`onFocus`），不做工具级重试——失败卡按 P0-1 裁决只呈现错误。 */}
-      {(hasInspect || copyText !== '') && (
+          （`onFocus`），不做工具级重试——失败卡按 P0-1 裁决只呈现错误。
+          只在**行被 hover / 聚焦后**挂载：复制按钮自带 3 个 hook + 图标，200 行常驻
+          的代价是单次渲染的 1/3（见 perf 探针）；而这组动作本来就只在悬停时可见，
+          常驻 DOM 只是白白拖慢首帧。键盘可达：行内聚焦即挂载，Tab 下一步就能到。 */}
+      {actionsShown && (hasInspect || copyText !== '') && (
         <span className="act-quick-acts">
           {copyText !== '' && (
             <span className="act-quick-act">
@@ -189,8 +229,8 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
             <button
               type="button"
               className="act-quick-act act-quick-locate"
-              title="在右栏定位这次调用"
-              aria-label="在右栏定位这次调用"
+              title="定位到运行详情"
+              aria-label="定位到运行详情"
               onClick={(e) => {
                 e.stopPropagation();
                 onFocus?.(tool);
@@ -236,47 +276,51 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       {/* L1 inline detail：Input/Output 摘要（C3 微标签分区，与 Inspector io-tabs 同语言）。
           展开/收起走 grid-rows 0fr→1fr（打磨点 2）；收起后子树卸载，balanced 档
           DOM 里仍然没有内联明细。 */}
-      <Collapse open={detailOpen} className="act-detail-inline">
-        <div className="act-field">
-          <div className="act-field-label">输入</div>
-          <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
-        </div>
-        {tool.result !== undefined && (
+      {openedOnce.current && (
+        <Collapse open={detailOpen} className="act-detail-inline">
           <div className="act-field">
-            <div className="act-field-label">输出</div>
-            <pre className="act-detail-result">
-              {truncate(
-                typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
-                400,
-              )}
-            </pre>
+            <div className="act-field-label">输入</div>
+            <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
           </div>
-        )}
-      </Collapse>
+          {tool.result !== undefined && (
+            <div className="act-field">
+              <div className="act-field-label">输出</div>
+              <pre className="act-detail-result">
+                {truncate(
+                  typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
+                  400,
+                )}
+              </pre>
+            </div>
+          )}
+        </Collapse>
+      )}
 
       {/* L2 advanced inline：完整内容面（四形态专属块）+ 原始事件 JSON。 */}
-      <Collapse open={bodyOpen} className="tool-card-body">
-        {isBash && <BashBlock tool={tool} />}
-        {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} sessionId={sessionId} />}
-        {slice && <ArtifactSliceBlock slice={slice} />}
-        {readShape && <ReadBlock shape={readShape} />}
-        {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
-        {/* 被截断处的「就地展开」（#186 AC2）：判据用**投影**挂上的 `tool.artifact`
-            （来自 `artifact/externalized`），不在视图里解析 marker——标记长什么样是
-            后端的事，前端只认投影这一份真相（AC7 / 不变量 #22）。与 Artifacts 清单
-            共用 `ArtifactViewer`，不新开导航面。
-            这里同时覆盖命令输出与通用结果两条外置路径（不需要各写一遍）。
+      {openedOnce.current && (
+        <Collapse open={bodyOpen} className="tool-card-body">
+          {isBash && <BashBlock tool={tool} />}
+          {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} sessionId={sessionId} />}
+          {slice && <ArtifactSliceBlock slice={slice} />}
+          {readShape && <ReadBlock shape={readShape} />}
+          {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
+          {/* 被截断处的「就地展开」（#186 AC2）：判据用**投影**挂上的 `tool.artifact`
+              （来自 `artifact/externalized`），不在视图里解析 marker——标记长什么样是
+              后端的事，前端只认投影这一份真相（AC7 / 不变量 #22）。与 Artifacts 清单
+              共用 `ArtifactViewer`，不新开导航面。
+              这里同时覆盖命令输出与通用结果两条外置路径（不需要各写一遍）。
 
-            归档 diff 例外：那一份已经由上面的 `DiffBlock` 给了展开入口（`tool.diff`
-            归档时，内容就是同一个 artifact），再渲染一次会变成两个同名同效的按钮。 */}
-        {tool.artifact && sessionId && !(isDiffTool && tool.diff?.archived) && (
-          <ArtifactViewer
-            sessionId={sessionId}
-            artifactId={tool.artifact.artifact_id}
-            label="查看完整内容"
-          />
-        )}
-      </Collapse>
+              归档 diff 例外：那一份已经由上面的 `DiffBlock` 给了展开入口（`tool.diff`
+              归档时，内容就是同一个 artifact），再渲染一次会变成两个同名同效的按钮。 */}
+          {tool.artifact && sessionId && !(isDiffTool && tool.diff?.archived) && (
+            <ArtifactViewer
+              sessionId={sessionId}
+              artifactId={tool.artifact.artifact_id}
+              label="查看完整内容"
+            />
+          )}
+        </Collapse>
+      )}
       {bodyOpen && (tool.raw_call || tool.raw_result) && (
         <div className="act-raw">
           {tool.raw_call && (
@@ -315,12 +359,17 @@ function splitArgsForDisplay(summary: string): { head: string; tail: string } {
   };
 }
 
-function summarizeArgs(tool: ToolCall, max = 60): string {
+/** 行内参数摘要。默认**不预截断**（#1429 F5）：中间省略靠 `splitArgsForDisplay`
+ *  + CSS ellipsis，先砍到 60 字会让 64 字阈值永远触发不了，长命令连 tooltip 都只剩
+ *  前 60 字。`max` 只给 compact 档用（那一档本来就只放一行短摘要）。 */
+function summarizeArgs(tool: ToolCall, max?: number): string {
   const a = tool.args;
-  if (tool.name === 'bash') return String(a.command ?? '').slice(0, max);
-  if ('path' in a) return String(a.path);
-  const entries = Object.entries(a).slice(0, 2);
-  return entries.map(([k, v]) => `${k}=${truncate(JSON.stringify(v), 30)}`).join(' ');
+  const raw = tool.name === 'bash'
+    ? String(a.command ?? '')
+    : 'path' in a
+      ? String(a.path)
+      : Object.entries(a).slice(0, 2).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+  return max === undefined ? raw : truncate(raw, max);
 }
 
 function truncate(s: string, n: number): string {

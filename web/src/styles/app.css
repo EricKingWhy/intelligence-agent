@@ -3047,6 +3047,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+  /* #1429 F9：与 V2 `.prose` 对齐——末行不留孤字（`text-wrap` 可继承，段落/列表
+     一并生效；不支持该属性的浏览器按 `wrap` 处理，无回退风险）。 */
+  text-wrap: pretty;
 }
 /* markdown 渲染后按 block 排版；pre-wrap 只留给流式纯文本场景 */
 .model-output .md-paragraph,
@@ -3201,6 +3204,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }
 }
+/* #1429 P3：`.act-card.is-run` 的行底色已经承担"运行中"（左侧呼吸条 + 淡主色底），
+ * 状态点的 2px 灰环在这一行里是多画的第三层——去掉环只留顶弧。全局 spinner 几何
+ * 不动（`.status-spinner` 仍是 12px/2px，组头与其它位置照旧）。 */
+.act-card.is-run .status-spinner {
+  border-width: 0;
+  border-top-width: 2px;
+}
 /* ── 展开/收起动画（#1429 打磨点 2）：grid-template-rows 0fr → 1fr ──
  * 由浏览器插值行高，内容高度未知也能动；不引第三方动画依赖。时长用 `--dur-in`
  * （本仓没有 V2 的 `--dur-med` 档），缓动是新 token `--ease-spring`。 */
@@ -3275,7 +3285,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex: 0 0 auto;
 }
 .act-group-chev {
+  width: 11px;
+  height: 11px;
   flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   color: var(--text-tertiary);
   transition: transform var(--dur-fast) var(--ease-apple);
 }
@@ -3285,7 +3302,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-group-body {
   padding-left: 15px;
 }
-.act-group-in {
+/* 组内排布直接画在 `Collapse` 的内层（`#1429 F2`）：少一层 div，展开态的计算样式
+ * 与原来 `.act-group-in` 完全一致（flex 列 + 2px 间距 + 3px/2px 内距）。 */
+.act-group-body > .disc-in {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -3318,7 +3337,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline-offset: -2px;
 }
 .act-chev {
+  width: 11px;
+  height: 11px;
   flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   color: var(--text-tertiary);
   transition: transform var(--dur-fast) var(--ease-apple);
 }
@@ -3645,14 +3671,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 参数：一行元信息，紧接工具名，同色同字号；头段可收缩带省略号，尾段固定
  * （#1429 打磨点 5 的中间省略）。 */
 .act-args {
-  display: flex;
+  /* 不拆分时（短参数）本元素自己就是省略容器：块级 + 溢出隐藏 + 尾省略，
+     比常驻一个 `.act-args-head` 子盒少一个节点。 */
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--text-tertiary);
   overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+}
+/* 长参数拆分后（`splitArgsForDisplay`）才走 flex，省略号落中段、尾部路径可辨。 */
+.act-args:has(.act-args-head) {
+  display: flex;
 }
 .act-args-head {
   min-width: 0;
@@ -3760,6 +3793,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* Detailed / Raw：节点下内联展开全字段 + 原始事件 JSON */
 .act-detail-inline {
   margin: 2px 0 var(--space-xs) 0;
+}
+/* 收起残留（#1429 P3）：内距挪进 `.disc-in`。收起态网格行 0fr，外层只剩 margin；
+ * 内层被 `overflow:hidden` + `min-height:0` 压成 0 高度，不再留 8px 空盒子。
+ * 展开态内距数值不变（0 10px 8px），只是换了一层绘制。 */
+.act-detail-inline > .disc-in {
   padding: 0 10px 8px;
 }
 /* F-09：输入/输出不再各自成盒（消除 tool-card > field 双层边框/底色）。
@@ -3919,6 +3957,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tool-card-body {
   margin-left: calc(var(--space-md) + var(--space-sm) + 18px);
   margin-top: var(--space-xs);
+  animation: reveal-in var(--dur-in) var(--ease-apple);
+}
+/* 收起残留（#1429 P3）：底色/边框/内距/圆角画在 `.disc-in` 上。0fr 收起时容器只剩
+ * margin，内层高度为 0（border-box 下边框随之收为零），不再留一条 2px 的空盒子。
+ * 展开态盒子的数值全部照旧（padding / radius / background / border 逐项未改）。 */
+.tool-card-body > .disc-in {
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
   background: var(--terminal-bg);
@@ -3926,7 +3970,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--terminal-fg);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 @keyframes reveal-in {
   from { opacity: 0; transform: translateY(-2px); }
