@@ -7,7 +7,6 @@
 import { useState, type ReactElement } from 'react';
 import type { ContextUsage } from '../../lib/api';
 import {
-  COMPOSITION_PARTS,
   compositionSegments,
   formatCount,
   formatRate,
@@ -56,8 +55,8 @@ export function ContextComposition({ usage }: { usage: ContextUsage }): ReactEle
           <h2>当前窗口构成</h2>
           <p className="ctx-insights-card-sub">
             {usageOnly
-              ? `仅用量口径：${usage.used_tokens.toLocaleString()} 字是窗口占用下界，分类未上报`
-              : `六桶之和 = 快照总量；窗口 ${usage.window_tokens.toLocaleString()} 字`}
+              ? `仅用量口径：${formatCount(usage.used_tokens)} 字是窗口占用下界，分类未上报`
+              : `六桶之和 = 快照总量；窗口 ${formatCount(usage.window_tokens)} 字`}
             {usage.estimated ? ' · 估算值' : ''}
           </p>
         </div>
@@ -74,27 +73,27 @@ export function ContextComposition({ usage }: { usage: ContextUsage }): ReactEle
         onHoverKey={setHoverKey}
       />
       <div className="ctx-insights-legend" onMouseLeave={() => setHoverKey(null)}>
-        {segments.map((segment) => {
-          const part = COMPOSITION_PARTS.find((candidate) => candidate.key === segment.key);
-          return (
-            <div
-              key={segment.key}
-              className={`ctx-insights-legend-row${hoverKey === segment.key ? ' is-on' : ''}`}
-              onMouseEnter={() => setHoverKey(segment.key)}
-            >
-              <span className="ctx-insights-legend-dot" style={{ background: part?.color ?? segment.color }} />
-              <span className="ctx-insights-legend-label">{segment.label}</span>
-              <span className="ctx-insights-legend-value">{formatCount(segment.value)}</span>
-              <span className="ctx-insights-legend-pct">
-                {usageOnly ? '未分类' : `${segment.pct.toFixed(1)}%`}
-              </span>
-            </div>
-          );
-        })}
+        {segments.map((segment) => (
+          <div
+            key={segment.key}
+            className={`ctx-insights-legend-row${hoverKey === segment.key ? ' is-on' : ''}`}
+            onMouseEnter={() => setHoverKey(segment.key)}
+          >
+            <span className="ctx-insights-legend-dot" style={{ background: segment.color }} />
+            <span className="ctx-insights-legend-label">{segment.label}</span>
+            <span className="ctx-insights-legend-value">{formatCount(segment.value)}</span>
+            <span className="ctx-insights-legend-pct">
+              {usageOnly ? '未分类' : `${segment.pct.toFixed(1)}%`}
+            </span>
+          </div>
+        ))}
       </div>
       <div className="ctx-insights-card-foot">
         <span>{cacheText}</span>
-        <span>阈值 70% / 85% 是窗口比例，不是 token 预留</span>
+        <span>
+          阈值 {Math.round(usage.thresholds.auto_compact * 100)}% /{' '}
+          {Math.round(usage.thresholds.hard_guard * 100)}% 是窗口比例，不是 token 预留
+        </span>
       </div>
     </section>
   );

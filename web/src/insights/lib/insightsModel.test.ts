@@ -14,6 +14,7 @@ import {
   heatmapColumns,
   localDayKey,
   sortSessions,
+  thresholdMarks,
   trendScale,
 } from './insightsModel';
 
@@ -205,6 +206,15 @@ describe('trendScale', () => {
       request({ total_tokens: -30 }),
       request({ total_tokens: 20 }),
     ], 'delta')).toEqual({ maxUp: 20, maxDown: 30 });
+  });
+});
+
+describe('thresholdMarks', () => {
+  it('derives labels from the payload ratios instead of hardcoding 70/85', () => {
+    expect(thresholdMarks({ auto_compact: 0.6, hard_guard: 0.9 })).toEqual([
+      { ratio: 0.6, label: '自动压缩 60%' },
+      { ratio: 0.9, label: '硬上限 90%' },
+    ]);
   });
 });
 

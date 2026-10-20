@@ -25,6 +25,7 @@ import { attachEventMarkers } from './lib/insightsModel';
 import { ContextComposition } from './components/ContextComposition';
 import { ContextEvents } from './components/ContextEvents';
 import { FleetView } from './components/FleetView';
+import { InsightsError, InsightsSkeleton } from './components/InsightsStatus';
 import { TrendChart } from './components/TrendChart';
 import './insights.css';
 
@@ -143,38 +144,38 @@ export function SessionInsightsPage({
     <section className="ctx-insights-page" aria-label="会话上下文洞察">
       <header className="ctx-insights-topbar">
         <div className="ctx-insights-topbar-inner">
-        <button ref={backRef} type="button" className="ctx-insights-back" onClick={onClose}>
-          <span aria-hidden="true">←</span> 返回工作区
-        </button>
-        <div className="ctx-insights-heading">
-          <h1>会话上下文</h1>
-          <span className="mono">{sessionId}</span>
-        </div>
-        <div className="ctx-insights-tabs" role="tablist" aria-label="会话洞察子页">
-          {SESSION_TABS.map((entry, index) => {
-            const selected = tab === entry.key;
-            return (
-              <button
-                key={entry.key}
-                ref={(el) => {
-                  tabRefs.current[index] = el;
-                }}
-                id={`ctx-insights-tab-${entry.key}`}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                aria-controls={`ctx-insights-panel-${entry.key}`}
-                // roving tabindex：整条 tab 只占一个 Tab 停靠点，内部用方向键走。
-                tabIndex={selected ? 0 : -1}
-                className={selected ? 'is-on' : ''}
-                onClick={() => setTab(entry.key)}
-                onKeyDown={handleTabKeyDown}
-              >
-                {entry.label}
-              </button>
-            );
-          })}
-        </div>
+          <button ref={backRef} type="button" className="ctx-insights-back" onClick={onClose}>
+            <span aria-hidden="true">←</span> 返回工作区
+          </button>
+          <div className="ctx-insights-heading">
+            <h1>会话上下文</h1>
+            <span className="mono">{sessionId}</span>
+          </div>
+          <div className="ctx-insights-tabs" role="tablist" aria-label="会话洞察子页">
+            {SESSION_TABS.map((entry, index) => {
+              const selected = tab === entry.key;
+              return (
+                <button
+                  key={entry.key}
+                  ref={(el) => {
+                    tabRefs.current[index] = el;
+                  }}
+                  id={`ctx-insights-tab-${entry.key}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={`ctx-insights-panel-${entry.key}`}
+                  // roving tabindex：整条 tab 只占一个 Tab 停靠点，内部用方向键走。
+                  tabIndex={selected ? 0 : -1}
+                  className={selected ? 'is-on' : ''}
+                  onClick={() => setTab(entry.key)}
+                  onKeyDown={handleTabKeyDown}
+                >
+                  {entry.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </header>
 
@@ -188,45 +189,31 @@ export function SessionInsightsPage({
         >
           {timeline === null ? (
             timelineLoading ? (
-              <div className="ctx-insights-skeleton" role="status">
-                <span className="ctx-insights-sr">正在加载上下文数据</span>
-                <span /><span /><span />
-              </div>
+              <InsightsSkeleton label="正在加载上下文数据" blocks={3} />
             ) : timelineError !== null ? (
-              <div className="ctx-insights-error" role="alert">
-                <div>
-                  <b>上下文数据加载失败</b>
-                  <span>{timelineError}</span>
-                </div>
-                <button type="button" onClick={() => setTimelineReload((value) => value + 1)}>
-                  重试
-                </button>
-              </div>
+              <InsightsError
+                title="上下文数据加载失败"
+                message={timelineError}
+                onRetry={() => setTimelineReload((value) => value + 1)}
+              />
             ) : (
               <div className="ctx-insights-empty">这个会话还没有上下文数据</div>
             )
           ) : (
             <>
-              {timelineError !== null && (
-                <div className="ctx-insights-error" role="alert">
-                  <div>
-                    <b>上下文数据刷新失败</b>
-                    <span>{timelineError}</span>
-                  </div>
-                  <button type="button" onClick={() => setTimelineReload((value) => value + 1)}>
-                    重试
-                  </button>
-                </div>
-              )}
               <ContextComposition usage={timeline.window} />
               <section className="ctx-insights-card">
                 <header className="ctx-insights-card-head">
                   <div>
-                    <h2>逐请求趋势</h2>
+                    <h2>{granularity === 'turn' ? '逐轮趋势' : '逐请求趋势'}</h2>
                     <p className="ctx-insights-card-sub">
-                      {mode === 'delta'
-                        ? '增量 = 相邻请求 total 的差值；首行固定 0，耗时不做差分'
-                        : '每次请求的 total token；浅色段是其中缓存命中的部分'}
+                      {granularity === 'turn'
+                        ? mode === 'delta'
+                          ? '增量 = 相邻轮 total 的差值；首行固定 0，耗时不做差分'
+                          : '每轮最后一次请求的 total token；浅色段是其中缓存命中的部分'
+                        : mode === 'delta'
+                          ? '增量 = 相邻请求 total 的差值；首行固定 0，耗时不做差分'
+                          : '每次请求的 total token；浅色段是其中缓存命中的部分'}
                     </p>
                   </div>
                   <div className="ctx-insights-trend-controls">
@@ -272,11 +259,11 @@ export function SessionInsightsPage({
                   <span><i className="is-total" />total token</span>
                   {mode === 'total' && <span><i className="is-cached" />其中缓存命中</span>}
                   {timeline.events.length > 0 && <span><i className="is-event" />上下文事件</span>}
-                  {timelineLoading && <span className="ctx-insights-badge is-muted">更新中</span>}
                 </div>
                 <TrendChart
                   requests={timeline.requests}
                   markers={markers}
+                  granularity={granularity}
                   mode={mode}
                   pinnedSeq={pinnedSeq}
                   onPin={setPinnedSeq}
@@ -296,35 +283,24 @@ export function SessionInsightsPage({
         >
           {fleet === null ? (
             fleetLoading ? (
-              <div className="ctx-insights-skeleton" role="status">
-                <span className="ctx-insights-sr">正在加载 Fleet 数据</span>
-                <span /><span /><span />
-              </div>
+              <InsightsSkeleton label="正在加载 Fleet 数据" blocks={3} />
             ) : fleetError !== null ? (
-              <div className="ctx-insights-error" role="alert">
-                <div>
-                  <b>Fleet 数据加载失败</b>
-                  <span>{fleetError}</span>
-                </div>
-                <button type="button" onClick={() => setFleetReload((value) => value + 1)}>
-                  重试
-                </button>
-              </div>
+              <InsightsError
+                title="Fleet 数据加载失败"
+                message={fleetError}
+                onRetry={() => setFleetReload((value) => value + 1)}
+              />
             ) : (
               <div className="ctx-insights-empty">这个会话还没有 Fleet 数据</div>
             )
           ) : (
             <>
               {fleetError !== null && (
-                <div className="ctx-insights-error" role="alert">
-                  <div>
-                    <b>Fleet 数据刷新失败</b>
-                    <span>{fleetError}</span>
-                  </div>
-                  <button type="button" onClick={() => setFleetReload((value) => value + 1)}>
-                    重试
-                  </button>
-                </div>
+                <InsightsError
+                  title="Fleet 数据刷新失败"
+                  message={fleetError}
+                  onRetry={() => setFleetReload((value) => value + 1)}
+                />
               )}
               <FleetView fleet={fleet} onOpenSession={onOpenSession} />
             </>

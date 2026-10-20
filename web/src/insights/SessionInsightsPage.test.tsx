@@ -136,6 +136,9 @@ describe('SessionInsightsPage', () => {
     expect(getContextTimeline).toHaveBeenLastCalledWith('s1', 'step', 'delta');
     await clickText('按轮');
     expect(getContextTimeline).toHaveBeenLastCalledWith('s1', 'turn', 'delta');
+    expect(host.textContent).toContain('逐轮趋势');
+    expect(host.querySelector('.ctx-insights-chart-scroll')?.getAttribute('aria-label'))
+      .toContain('逐轮 token 趋势');
   });
 
   it('degrades the context panel without hiding Fleet when the timeline fails', async () => {

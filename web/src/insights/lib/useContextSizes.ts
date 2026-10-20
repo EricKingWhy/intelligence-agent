@@ -20,10 +20,16 @@ export function useContextSizes(
   }, [sizes]);
   const key = sessionIds.join('\u0000');
   useEffect(() => {
-    if (!enabled) return undefined;
+    if (!enabled) {
+      setLoading(false);
+      return undefined;
+    }
     const ids = key === '' ? [] : key.split('\u0000');
     const missing = ids.filter((id) => !(id in sizesRef.current));
-    if (missing.length === 0) return undefined;
+    if (missing.length === 0) {
+      setLoading(false);
+      return undefined;
+    }
     let cancelled = false;
     setLoading(true);
     const queue = [...missing];

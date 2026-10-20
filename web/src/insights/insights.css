@@ -3,7 +3,7 @@
  * 类名前缀 `.ctx-insights-`，与既有 `.ctx-usage-*` / `.ctx-window-*` 不相交。 */
 
 .ctx-insights-page {
-  animation: ctx-insights-page-in 180ms ease-out both;
+  animation: ctx-insights-page-in var(--dur-expand) var(--ease-apple) both;
   background: var(--bg-workspace);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -91,7 +91,8 @@
 
 .ctx-insights-range,
 .ctx-insights-seg,
-.ctx-insights-tabs {
+.ctx-insights-tabs,
+.ctx-insights-sort {
   background: var(--surface-canvas);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -103,7 +104,8 @@
 
 .ctx-insights-range button,
 .ctx-insights-seg button,
-.ctx-insights-tabs button {
+.ctx-insights-tabs button,
+.ctx-insights-sort button {
   appearance: none;
   background: transparent;
   border: 0;
@@ -118,13 +120,15 @@
 
 .ctx-insights-range button:hover,
 .ctx-insights-seg button:hover,
-.ctx-insights-tabs button:hover {
+.ctx-insights-tabs button:hover,
+.ctx-insights-sort button:hover {
   color: var(--text-primary);
 }
 
 .ctx-insights-range button.is-on,
 .ctx-insights-seg button.is-on,
-.ctx-insights-tabs button.is-on {
+.ctx-insights-tabs button.is-on,
+.ctx-insights-sort button.is-on {
   background: var(--surface-elevated);
   box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text-primary);
@@ -153,15 +157,12 @@
 }
 
 /* 每个子页一个常驻 panel（非激活用 hidden），`aria-controls` 才始终解析得到；
- * 面板自己接管 body 的纵向节奏，因为 gap 不会穿过包装层。 */
+ * 宽度 / 居中 / flex 尺寸由 `.ctx-insights-body > *` 统一给，这里只管纵向节奏
+ * （gap 不会穿过包装层）。 */
 .ctx-insights-panel {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
   gap: 14px;
-  margin-inline: auto;
-  max-width: 1180px;
-  width: 100%;
 }
 
 /* 显式关掉 `hidden` 的 UA `display:none` 被上面的 `display:flex` 盖掉的问题。 */
@@ -352,7 +353,7 @@
 .ctx-insights-daily-bar {
   fill: var(--accent);
   opacity: 0.78;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease-apple);
 }
 
 .ctx-insights-daily-bar:hover {
@@ -414,7 +415,6 @@
   background: var(--surface-canvas);
   border: 0;
   border-radius: 2px;
-  display: block;
   height: 11px;
   padding: 0;
   width: 11px;
@@ -507,9 +507,9 @@ button.ctx-insights-heat-cell:hover {
 }
 
 .ctx-insights-donut-seg {
-  animation: ctx-insights-donut-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: ctx-insights-donut-in 520ms var(--ease-apple) both;
   animation-delay: calc(var(--ctx-i) * 45ms);
-  transition: opacity 160ms ease, stroke-width 160ms ease;
+  transition: opacity var(--dur-out) var(--ease-apple), stroke-width var(--dur-out) var(--ease-apple);
 }
 
 .ctx-insights-donut.is-dimmed .ctx-insights-donut-seg {
@@ -558,7 +558,7 @@ button.ctx-insights-heat-cell:hover {
   gap: 9px;
   grid-template-columns: 7px minmax(0, 1fr) auto 48px;
   padding: 4px 6px;
-  transition: background 120ms ease;
+  transition: background var(--dur-fast) var(--ease-apple);
 }
 
 .ctx-insights-legend-row.is-on {
@@ -605,7 +605,6 @@ button.ctx-insights-heat-cell:hover {
   border-radius: 4px;
   display: flex;
   height: 12px;
-  overflow: visible;
   position: relative;
   width: 100%;
 }
@@ -614,7 +613,7 @@ button.ctx-insights-heat-cell:hover {
   border-radius: 2px;
   display: block;
   min-width: 2px;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease-apple);
 }
 
 .ctx-insights-compbar-seg.is-on {
@@ -695,11 +694,6 @@ button.ctx-insights-heat-cell:hover {
   background: var(--warning);
 }
 
-.ctx-insights-trend-scroll:focus-visible {
-  outline: 1px solid var(--accent-text);
-  outline-offset: 2px;
-}
-
 .ctx-insights-trend-svg {
   display: block;
 }
@@ -707,11 +701,21 @@ button.ctx-insights-heat-cell:hover {
 .ctx-insights-trend-bar {
   fill: var(--accent);
   opacity: 0.8;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+}
+
+/* 命中区（透明 rect）覆盖整列；悬停时把同组柱子提亮，给 hover 一个可见落点。 */
+g:hover > .ctx-insights-trend-bar {
+  opacity: 1;
 }
 
 .ctx-insights-trend-bar.is-negative {
   fill: var(--danger);
   opacity: 0.72;
+}
+
+g:hover > .ctx-insights-trend-bar.is-negative {
+  opacity: 1;
 }
 
 .ctx-insights-trend-bar.is-pinned {
@@ -789,7 +793,6 @@ button.ctx-insights-heat-cell:hover {
 .ctx-insights-events {
   display: flex;
   flex-direction: column;
-  gap: 0;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -865,40 +868,12 @@ button.ctx-insights-heat-cell:hover {
 
 .ctx-insights-sessions-tools input:focus-visible {
   border-color: var(--accent-text);
-  outline: 1px solid var(--accent-text);
-  outline-offset: 0;
 }
 
-.ctx-insights-sort {
-  background: var(--surface-canvas);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-}
-
+/* 排序档比时间窗 / tabs 更密（卡片头内），只覆盖字号与内边距。 */
 .ctx-insights-sort button {
-  appearance: none;
-  background: transparent;
-  border: 0;
-  border-radius: calc(var(--radius-sm) - 1px);
-  color: var(--text-tertiary);
-  cursor: pointer;
-  font: inherit;
   font-size: 10px;
   padding: 4px 8px;
-  white-space: nowrap;
-}
-
-.ctx-insights-sort button:hover {
-  color: var(--text-primary);
-}
-
-.ctx-insights-sort button.is-on {
-  background: var(--surface-elevated);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-  color: var(--text-primary);
 }
 
 .ctx-insights-group {
@@ -952,18 +927,18 @@ button.ctx-insights-heat-cell:hover {
   min-width: 0;
   padding: 10px 12px;
   text-align: left;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background var(--dur-fast) var(--ease-apple), border-color var(--dur-fast) var(--ease-apple);
 }
 
-.ctx-insights-session-card:hover {
+.ctx-insights-session-card:hover,
+.ctx-insights-fleet-card.is-link:hover {
   background: var(--surface-overlay);
   border-color: var(--border-strong);
 }
 
-.ctx-insights-session-card:focus-visible {
+.ctx-insights-session-card:focus-visible,
+.ctx-insights-fleet-card.is-link:focus-visible {
   border-color: var(--accent-text);
-  outline: 1px solid var(--accent-text);
-  outline-offset: 1px;
 }
 
 .ctx-insights-session-main {
@@ -1061,18 +1036,7 @@ button.ctx-insights-heat-cell:hover {
 
 .ctx-insights-fleet-card.is-link {
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.ctx-insights-fleet-card.is-link:hover {
-  background: var(--surface-overlay);
-  border-color: var(--border-strong);
-}
-
-.ctx-insights-fleet-card.is-link:focus-visible {
-  border-color: var(--accent-text);
-  outline: 1px solid var(--accent-text);
-  outline-offset: 1px;
+  transition: background var(--dur-fast) var(--ease-apple), border-color var(--dur-fast) var(--ease-apple);
 }
 
 .ctx-insights-fleet-card-head {
@@ -1165,10 +1129,6 @@ button.ctx-insights-heat-cell:hover {
   min-height: 72px;
   padding: 18px;
   text-align: center;
-}
-
-.ctx-insights-card .ctx-insights-empty {
-  border-color: var(--border-subtle);
 }
 
 .ctx-insights-error {
@@ -1264,6 +1224,18 @@ button.ctx-insights-heat-cell:hover {
 /* ── 窄屏 ─────────────────────────────────────────────────────────── */
 
 @media (max-width: 1040px) {
+  .ctx-insights-grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ctx-insights-fleet,
+  .ctx-insights-fleet.no-ancestors {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* 三列 KPI 只在 761–1040 成立；≤760 是两列，nth-child(4) 的左边框必须保留。 */
+@media (min-width: 761px) and (max-width: 1040px) {
   .ctx-insights-kpis {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -1275,19 +1247,10 @@ button.ctx-insights-heat-cell:hover {
   .ctx-insights-kpi:nth-child(n + 4) {
     border-top: 1px solid var(--border-subtle);
   }
-
-  .ctx-insights-grid-2 {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .ctx-insights-fleet,
-  .ctx-insights-fleet.no-ancestors {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 760px) {
-  .ctx-insights-topbar {
+  .ctx-insights-topbar-inner {
     flex-wrap: wrap;
     gap: 8px 12px;
   }

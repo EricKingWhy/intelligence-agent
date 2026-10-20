@@ -105,8 +105,7 @@ export function localDayKey(iso: string | null): string | null {
   if (!iso) return null;
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return null;
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return dayKeyOf(date);
 }
 
 export function filterSessions(
@@ -335,14 +334,21 @@ export const FLEET_STATUS_LABELS: Readonly<Record<string, string>> = {
   stopped: '已停止',
 };
 
-/** 上下文窗口阈值线（后端 `thresholds` 是 0..1 比例）。标签写死「比例阈值」，
- *  因为 Owlet 没有 dsh 的 headroom / reserved output，不能画成 token 预留。 */
+/** 上下文窗口阈值线（后端 `thresholds` 是 0..1 比例）。标签由**响应里的比例**
+ *  推导，不写死 70/85——部署改了阈值档位时文案必须跟着变。Owlet 没有 dsh 的
+ *  headroom / reserved output，所以标签写「窗口比例」，不能画成 token 预留。 */
 export function thresholdMarks(thresholds: { auto_compact: number; hard_guard: number }): Array<{
   ratio: number;
   label: string;
 }> {
   return [
-    { ratio: thresholds.auto_compact, label: '自动压缩 70%' },
-    { ratio: thresholds.hard_guard, label: '硬上限 85%' },
+    {
+      ratio: thresholds.auto_compact,
+      label: `自动压缩 ${Math.round(thresholds.auto_compact * 100)}%`,
+    },
+    {
+      ratio: thresholds.hard_guard,
+      label: `硬上限 ${Math.round(thresholds.hard_guard * 100)}%`,
+    },
   ];
 }

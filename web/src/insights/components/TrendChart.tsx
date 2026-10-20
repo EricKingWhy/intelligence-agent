@@ -7,7 +7,7 @@
  */
 
 import { useLayoutEffect, useRef, useState, type ReactElement } from 'react';
-import type { ContextEventPoint, ContextRequestPoint } from '../../lib/api';
+import type { ContextEventPoint, ContextGranularity, ContextRequestPoint } from '../../lib/api';
 import { formatDateTime } from '../../lib/format';
 import {
   CONTEXT_EVENT_LABELS,
@@ -25,6 +25,7 @@ const PAD_BOTTOM = 28;
 export interface TrendChartProps {
   requests: readonly ContextRequestPoint[];
   markers: ReadonlyArray<ContextEventPoint | null>;
+  granularity: ContextGranularity;
   mode: 'total' | 'delta';
   pinnedSeq: number | null;
   onPin: (seq: number | null) => void;
@@ -33,6 +34,7 @@ export interface TrendChartProps {
 export function TrendChart({
   requests,
   markers,
+  granularity,
   mode,
   pinnedSeq,
   onPin,
@@ -68,13 +70,13 @@ export function TrendChart({
     setHoverIndex(next);
   };
   return (
-    <div className="ctx-insights-trend">
+    <div>
       <div
-        className="ctx-insights-chart-scroll ctx-insights-trend-scroll"
+        className="ctx-insights-chart-scroll"
         ref={scrollRef}
         tabIndex={0}
         role="group"
-        aria-label="逐请求 token 趋势；左右方向键移动，Enter 固定明细"
+        aria-label={`${granularity === 'turn' ? '逐轮' : '逐请求'} token 趋势；左右方向键移动，Enter 固定明细`}
         onKeyDown={(event) => {
           if (event.key === 'ArrowLeft') {
             event.preventDefault();

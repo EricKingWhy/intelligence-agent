@@ -26,6 +26,7 @@ import { useContextSizes } from './lib/useContextSizes';
 import { DailyChart } from './components/DailyChart';
 import { Donut } from './components/Donut';
 import { Heatmap } from './components/Heatmap';
+import { InsightsError, InsightsSkeleton } from './components/InsightsStatus';
 import { SessionCard } from './components/SessionCard';
 import './insights.css';
 
@@ -116,53 +117,46 @@ export function InsightsPage({ onClose, onOpenSession }: InsightsPageProps): Rea
     <section className="ctx-insights-page" aria-label="上下文洞察">
       <header className="ctx-insights-topbar">
         <div className="ctx-insights-topbar-inner">
-        <button
-          ref={backRef}
-          type="button"
-          className="ctx-insights-back"
-          onClick={onClose}
-        >
-          <span aria-hidden="true">←</span> 返回工作区
-        </button>
-        <div className="ctx-insights-heading">
-          <h1>上下文洞察</h1>
-          <span>只按 token 口径统计 · 不显示成本</span>
-        </div>
-        <div className="ctx-insights-range" role="group" aria-label="统计时间窗">
-          {(['7d', '30d', 'all'] as const).map((key) => (
-            <button
-              key={key}
-              type="button"
-              className={range === key ? 'is-on' : ''}
-              aria-pressed={range === key}
-              onClick={() => setRange(key)}
-            >
-              {RANGE_LABELS[key]}
-            </button>
-          ))}
-        </div>
+          <button
+            ref={backRef}
+            type="button"
+            className="ctx-insights-back"
+            onClick={onClose}
+          >
+            <span aria-hidden="true">←</span> 返回工作区
+          </button>
+          <div className="ctx-insights-heading">
+            <h1>上下文洞察</h1>
+            <span>只按 token 口径统计 · 不显示成本</span>
+          </div>
+          <div className="ctx-insights-range" role="group" aria-label="统计时间窗">
+            {(['7d', '30d', 'all'] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                className={range === key ? 'is-on' : ''}
+                aria-pressed={range === key}
+                onClick={() => setRange(key)}
+              >
+                {RANGE_LABELS[key]}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
       <div className="ctx-insights-body">
         {error !== null && (
-          <div className="ctx-insights-error" role="alert">
-            <div>
-              <b>洞察数据加载失败</b>
-              <span>{error}</span>
-            </div>
-            <button type="button" onClick={() => setReloadKey((value) => value + 1)}>
-              重试
-            </button>
-          </div>
+          <InsightsError
+            title="洞察数据加载失败"
+            message={error}
+            onRetry={() => setReloadKey((value) => value + 1)}
+          />
         )}
 
         {data === null ? (
           loading ? (
-            <div className="ctx-insights-skeleton" role="status">
-              <span className="ctx-insights-sr">正在加载洞察数据</span>
-              <span /><span /><span /><span />
-            </div>
+            <InsightsSkeleton label="正在加载洞察数据" blocks={6} />
           ) : error === null ? (
             <div className="ctx-insights-empty">还没有可展示的洞察数据</div>
           ) : null
@@ -188,7 +182,6 @@ export function InsightsPage({ onClose, onOpenSession }: InsightsPageProps): Rea
                     <h2>每日计费用量</h2>
                     <p className="ctx-insights-card-sub">{RANGE_LABELS[range]} · 按请求的 total token 折叠</p>
                   </div>
-                  {loading && <span className="ctx-insights-badge is-muted">更新中</span>}
                 </header>
                 <DailyChart points={data.daily} />
               </section>
@@ -197,7 +190,7 @@ export function InsightsPage({ onClose, onOpenSession }: InsightsPageProps): Rea
                 <header className="ctx-insights-card-head">
                   <div>
                     <h2>近 8 周活动</h2>
-                    <p className="ctx-insights-card-sub">点有数据的一天，只看当天活跃的会话</p>
+                    <p className="ctx-insights-card-sub">点有数据的一天，只看最近活动落在当天的会话</p>
                   </div>
                   {day !== null && (
                     <button type="button" className="ctx-insights-chip" onClick={() => setDay(null)}>

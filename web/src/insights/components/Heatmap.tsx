@@ -6,7 +6,7 @@
 
 import type { ReactElement } from 'react';
 import type { InsightsDayPoint } from '../../lib/api';
-import { heatLevel, heatmapColumns, heatmapMax, heatmapToday } from '../lib/insightsModel';
+import { formatCount, heatLevel, heatmapColumns, heatmapMax, heatmapToday } from '../lib/insightsModel';
 
 const WEEKDAY_LABELS: Readonly<Record<number, string>> = { 1: '一', 3: '三', 5: '五' };
 
@@ -50,13 +50,14 @@ export function Heatmap({ points, selected, onSelect }: HeatmapProps): ReactElem
                     <span
                       key={cell.key}
                       className="ctx-insights-heat-cell is-empty"
+                      role="img"
                       title={`${cell.key} · 无用量`}
                       aria-label={`${cell.key} 无用量`}
                     />
                   );
                 }
                 const picked = selected === cell.key;
-                const label = `${cell.key} · ${cell.tokens.toLocaleString()} 字`;
+                const label = `${cell.key} · ${formatCount(cell.tokens)} 字`;
                 return (
                   <button
                     key={cell.key}

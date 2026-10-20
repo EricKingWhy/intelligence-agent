@@ -6,7 +6,7 @@
 
 import { useLayoutEffect, useRef, type ReactElement } from 'react';
 import type { InsightsDayPoint } from '../../lib/api';
-import { formatCompact } from '../lib/insightsModel';
+import { formatCompact, formatCount } from '../lib/insightsModel';
 
 const HEIGHT = 168;
 const PAD_LEFT = 44;
@@ -50,7 +50,7 @@ export function DailyChart({ points }: DailyChartProps): ReactElement {
         height={HEIGHT}
         viewBox={`0 0 ${width} ${HEIGHT}`}
         role="img"
-        aria-label={`每日计费用量：共 ${sum.toLocaleString()} 字，单日最高 ${max.toLocaleString()} 字`}
+        aria-label={`每日计费用量：共 ${formatCount(sum)} 字，单日最高 ${formatCount(max)} 字`}
       >
         {gridValues.map((value) => {
           const y = PAD_TOP + plotHeight - (value / max) * plotHeight;
@@ -67,7 +67,7 @@ export function DailyChart({ points }: DailyChartProps): ReactElement {
           const height = (point.tokens / max) * plotHeight;
           const x = PAD_LEFT + index * step + (step - barWidth) / 2;
           const y = PAD_TOP + plotHeight - height;
-          const label = `${point.date} · ${point.tokens.toLocaleString()} 字`;
+          const label = `${point.date} · ${formatCount(point.tokens)} 字`;
           return (
             <g key={point.date}>
               <rect

@@ -6,7 +6,7 @@
 
 import type { ReactElement } from 'react';
 import type { CompositionSegment } from '../lib/insightsModel';
-import { thresholdMarks } from '../lib/insightsModel';
+import { formatCount, formatRate, thresholdMarks } from '../lib/insightsModel';
 
 export interface CompositionBarProps {
   segments: readonly CompositionSegment[];
@@ -34,7 +34,7 @@ export function CompositionBar({
       <div
         className="ctx-insights-compbar-track"
         role="img"
-        aria-label={painted.map((segment) => `${segment.label} ${segment.value.toLocaleString()} 字`).join('，')}
+        aria-label={painted.map((segment) => `${segment.label} ${formatCount(segment.value)} 字`).join('，')}
       >
         {painted.map((segment) => (
           <span
@@ -47,7 +47,7 @@ export function CompositionBar({
         ))}
         {marks.map((mark) => (
           <span
-            key={mark.label}
+            key={mark.ratio}
             className="ctx-insights-compbar-mark"
             style={{ left: `${mark.ratio * 100}%` }}
             title={`${mark.label}（窗口比例，非 token 预留）`}
@@ -56,8 +56,8 @@ export function CompositionBar({
       </div>
       <div className="ctx-insights-compbar-scale">
         <span>0</span>
-        <span>{used.toLocaleString()} / {windowTokens.toLocaleString()} 字</span>
-        <span>{windowTokens > 0 ? `${((used / windowTokens) * 100).toFixed(1)}%` : '—'}</span>
+        <span>{formatCount(used)} / {formatCount(windowTokens)} 字</span>
+        <span>{windowTokens > 0 ? formatRate(used / windowTokens) : '—'}</span>
       </div>
     </div>
   );

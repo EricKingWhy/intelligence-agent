@@ -28,9 +28,9 @@ export function SessionCard({ row, contextSize, onOpen }: SessionCardProps): Rea
         <span className="ctx-insights-session-title">{title}</span>
         <span className="ctx-insights-session-meta">
           <span className="mono">{row.session_id}</span>
-          <span>{row.turns.toLocaleString()} 轮</span>
+          <span>{formatCount(row.turns)} 轮</span>
           {typeof contextSize === 'number' && (
-            <span>窗口 {contextSize.toLocaleString()} 字</span>
+            <span>窗口 {formatCount(contextSize)} 字</span>
           )}
           <span title={formatDateTime(row.last_active_at) ?? undefined}>
             {row.last_active_at ? formatRelativeTime(row.last_active_at) : '没有活动记录'}

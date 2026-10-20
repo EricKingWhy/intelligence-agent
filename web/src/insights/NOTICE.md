@@ -29,8 +29,9 @@ bridge with this repo's React components, CSS tokens, and `lib/api.ts` contract.
 
 ## Modifications
 
-- All color, spacing, radius, and type values come from `web/src/index.css`
-  tokens; no new palette and no color literals (stylelint #1364).
+- All colors come from `web/src/index.css` tokens; no new palette and no color
+  literals (stylelint #1364). Spacing / radius / type are module-local values
+  (there is no matching global scale token for the dense chart geometry).
 - Cost / dollar rendering is intentionally absent (ticket #1420 decision).
 - API access goes through `web/src/lib/api.ts`; components never fetch directly.
 - Error and empty states are this repo's own (page shell survives a failed
