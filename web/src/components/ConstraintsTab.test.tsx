@@ -172,10 +172,30 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(html).toContain('允许写 workspace');
   });
 
-  it('类型下拉按 type 过滤（纯展示层）', () => {
+  it('类型 chip 按 type 过滤（纯展示层）', () => {
     const html = ssr({ facts: [ACTIVE, REVOKED], statusFilter: 'all', typeFilter: 'user_goal' });
     expect(html).toContain('先修好登录页对比度');
     expect(html).not.toContain('不要改动生产环境配置');
+  });
+
+  /* #1419 R-2：类型筛选由原生 `<select>` 换成 chip 组——选中态必须是 `aria-pressed`
+   * （视觉类名单独承载等于屏幕阅读器不可见），且当前类型那一枚为 true。 */
+  it('类型筛选是 chip 组，选中项由 aria-pressed 表达', () => {
+    const html = ssr({ facts: [ACTIVE], statusFilter: 'all', typeFilter: 'user_goal' });
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="按类型筛选"');
+    expect(html).not.toContain('<select');
+    const pressed = [...html.matchAll(/aria-pressed="(true|false)"/g)].map((m) => m[1]);
+    expect(pressed.filter((v) => v === 'true').length).toBeGreaterThan(0);
+  });
+
+  /* #1419 R-1：汇总行的三个数都是真事实（总数 / 生效 / 已撤销），不编 pending。 */
+  it('汇总行按真实状态计数（总数 · 生效 · 已撤销）', () => {
+    const html = ssr({ facts: [ACTIVE, REVOKED, SUPERSEDED], statusFilter: 'all' });
+    expect(html).toContain('要求清单');
+    // SSR 在相邻文本节点之间插 `<!-- -->`，故按**单个文本节点**断言（同 177 行那例）。
+    expect(html).toMatch(/cn-summary-n">3<!-- --> 条 · <!-- -->1<!-- --> 生效 · <!-- -->2<!-- --> 已撤销/);
+    expect(html).not.toContain('待确认');
   });
 
   it('撤销/取代行：撤销按钮 disabled 且文案=状态标签', () => {
