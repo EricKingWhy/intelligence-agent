@@ -138,6 +138,42 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 - 预算**账目**事件的表示（逐次接纳落账 / 稳定边界落账 / 等价 append-only 形式）属实现自由，
   前提是全部 AC 与 replay 等价成立（#305 §5 的 BOUNDED 条款）。
 
+### 3.5 长期目标事件（`goal/changed`，**持久化、append-only**）
+
+长期目标（#1359）是会话级 durable 事实，不是运行期变量。**`goal/changed`** 是它的唯一
+持久化表示：每次目标变更恰一条事件，状态由**最后一条**合法事件决定（last-wins），
+`effective_goal` 是这唯一的读侧投影。机器可读的**枚举**副本由 `docs/EVENT_VOCABULARY.md`
+承载（该文件从 `event.py` 生成）；本节是**语义与字段权威**，语义与 dsh
+`packages/goal/goal/src/domain.ts` @5badb150 的 `goal/change` 同一形状（标量行为 ADAPT，
+非逐字移植）。
+
+- **操作**：`operation ∈ {create, edit, pause, resume, complete, block, clear, round_started}`。
+  `create` 只在无目标或前一目标已 `complete` 时合法；`edit` 改 objective、phase 不变；
+  `pause` / `resume` / `complete` / `block` 是相位转移；`clear` 写**墓碑**（保留历史，
+  不物理删除，也不回落到"首条用户消息"当目标）；`round_started` 是**系统记账**
+  （一轮目标轮次真正进入模型历史），不是用户操作，REST 面不暴露。
+- **payload**：变更事件携带**完整快照**而非 delta——`goal_id`、`revision`、`objective`、
+  `phase`、`blocked_reason`、`pause_reason`、`max_goal_rounds`、`rounds_started`
+  （`create` 带初始快照）。`clear` 是唯一例外：
+  只带 `cleared` 墓碑（`goal_id` + 新 revision）**不带 goal 字段**——"已清除"必须与
+  "从没有过目标"可区分。坏 payload 事件被读侧跳过（继续向前找），不是崩溃点。
+- **`revision` 单调**：每条被接受的事件 +1；`edit` / 生命周期命令可带
+  `expected_revision` 做 CAS，不匹配即拒绝且**零事件**（并发编辑不接受后写覆盖）。
+  被拒绝的请求 MUST NOT 留下任何事件——校验全部在 append 之前完成。
+- **一次变更一条事件**：禁止"暂停事件 + 状态事件"式成对写入，同一事实只有一个来源。
+
+不变量：
+
+- `goal/changed` MUST 可被 replay 重建出同样的目标状态；删除 / 截断事件流即丢失目标，
+  内存里不存在"更权威的目标副本"；
+- 事件流之外的任何目标形态（首条用户消息、`task_text`、确认过的外部编辑）都只能作为
+  **目标未定义时**的回落来源；一旦有合法 `goal/changed`，该回落失效（`clear` 之后也一样）；
+- **激活（自动续跑开关）不是事件**：armed / disarmed / resume 的一轮授权都是进程内状态，
+  进程重启后重置为 disarmed，而 durable 目标事实仍从事件重建。把激活写进事件流等于让
+  "是否自动续跑"跨重启漂移；
+- 目标轮次的**提示词输入**（`<goal_round>` 块）是派生物，MUST NOT 回写事件流；
+  轮次计数只由 `round_started` 事件推进。
+
 ## 4. Derive Messages
 
 模型历史 SHOULD 由 SessionEvent 投影得到：

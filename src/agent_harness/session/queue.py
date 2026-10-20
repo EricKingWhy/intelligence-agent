@@ -40,6 +40,9 @@ class QueuedMessage:
     remember_as_procedural_rule: bool = False
     #: #823 / MM-02：附件引用数组（`user/message.data["attachments"]` 的形状）。
     attachments: list[dict[str, Any]] | None = None
+    #: #1359 阶段 3：排队项来源。``"goal"`` = 自动续跑轮次；``None`` = 用户输入。
+    #: 投递时原样落进 ``user/message.origin``，``rounds_started`` 只统计本来源。
+    origin: str | None = None
 
 
 @dataclass
@@ -106,6 +109,7 @@ class MessageQueueManager:
         protected_facts: list[dict[str, Any]] | None = None,
         remember_as_procedural_rule: bool = False,
         attachments: list[dict[str, Any]] | None = None,
+        origin: str | None = None,
     ) -> QueuedMessage:
         """把消息放入 session 的队列，返回 QueuedMessage。"""
         queue_id = str(uuid4())
@@ -119,6 +123,7 @@ class MessageQueueManager:
             protected_facts=protected_facts,
             remember_as_procedural_rule=remember_as_procedural_rule,
             attachments=attachments,
+            origin=origin,
         )
         async with self._lock:
             self._queues.setdefault(session_id, []).append(msg)

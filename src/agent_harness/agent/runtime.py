@@ -1747,6 +1747,8 @@ class AgentRuntime:
                             "remember_as_procedural_rule",
                             # #823 / MM-02：附件引用数组随 user/message 落盘（只带引用）。
                             "attachments",
+                            # #1359 阶段 3：goal=自动续跑轮次（轮次记账只认它）。
+                            "origin",
                         )
                         if user_input_metadata is not None
                         and key in user_input_metadata

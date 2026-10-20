@@ -404,6 +404,17 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
     )
 
 
+def validate_criteria(raw_items: object) -> str | None:
+    """写侧判据校验：合法返回 ``None``，否则返回原因（单一规则来源 = ``_parse_criteria``）。
+
+    供创建路径在任何副作用（建 workspace / 落 session/started）之前响亮 422——
+    ``apply_task_definition`` 跑在会话已落盘之后，那里失败只能跳过定义，会让
+    客户端以为验收项存了。
+    """
+    _, error = _parse_criteria(raw_items, write_side=True)
+    return error
+
+
 def apply_task_definition(
     session,
     task_text: object,

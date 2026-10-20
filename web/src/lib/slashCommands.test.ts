@@ -11,6 +11,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BUILTIN_RUNS,
+  parseGoalCommand,
+  formatGoalSnapshot,
   slashTriggerMatch,
   slashSubmitMatch,
   filterSlashCommands,
@@ -20,14 +22,15 @@ import {
   type SlashCommandContext,
   type SlashRegistryEntry,
 } from './slashCommands';
-import { postSessionCommand, SessionError, type TaskState } from './api';
+import { postSessionCommand, SessionError, type GoalSnapshot } from './api';
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>();
   return {
     ...actual,
     postSessionCommand: vi.fn(),
-    getTaskState: vi.fn(),
+    getGoalState: vi.fn(),
+    postGoalCommand: vi.fn(),
   };
 });
 
@@ -189,42 +192,165 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     openModelPicker: vi.fn(),
     reportError: vi.fn(),
     reportInfo: vi.fn(),
+    prefillInput: vi.fn(),
     runCompact: vi.fn(async () => {}),
     getSessionEvents: vi.fn(async () => []),
   });
   type CtxMock = ReturnType<typeof makeCtx>;
   const asCtx = (c: CtxMock): SlashCommandContext => c as unknown as SlashCommandContext;
 
-  it('/goal 查看（无参）走 reportInfo 中性面，不 reportError（B-S-4/A-P3-2）', async () => {
-    vi.mocked(await import('./api')).getTaskState.mockResolvedValue({
+  const snapshot = (over: Partial<GoalSnapshot['goal']> = {}, activation: GoalSnapshot['activation'] = 'armed'): GoalSnapshot => ({
+    id: 's-1',
+    activation,
+    goal: {
       defined: true,
-      task_text: '每天投20份简历',
-    } as TaskState);
+      goal_id: 'goal-1',
+      revision: 3,
+      objective: '## Objective\n投 20 份简历',
+      phase: 'active',
+      blocked_reason: null,
+      pause_reason: null,
+      max_goal_rounds: 32,
+      rounds_started: 3,
+      needs_interview: false,
+      ...over,
+    },
+  });
+
+  it('/goal 查看（无参）走 reportInfo 中性面，不 reportError（B-S-4/A-P3-2）', async () => {
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(snapshot());
     const c = makeCtx();
     await cmd('goal').run(undefined, asCtx(c));
-    expect(c.reportInfo).toHaveBeenCalledWith('当前目标：每天投20份简历');
+    const msg = c.reportInfo.mock.calls[0][0] as string;
+    expect(msg).toContain('投 20 份简历');
+    expect(msg).toContain('状态：active');
+    expect(msg).toContain('轮数：3/32');
+    expect(msg).toContain('自动续跑：armed');
+    expect(msg).toContain('/goal pause');
     expect(c.reportError).not.toHaveBeenCalled();
   });
 
-  it('/goal 二次设置 409 → 后端 detail + 可操作引导（A-P2-2）', async () => {
-    vi.mocked(await import('./api')).postSessionCommand.mockRejectedValue(
-      new SessionError(409, '任务已定义（task/defined 全流至多一条）'),
+  /** POST 回执不带 `id`（后端 `_apply` 形状）——与 GET 快照分开构造。 */
+  const result = (over: Partial<GoalSnapshot['goal']> = {}) => ({
+    status: 'applied',
+    ...snapshot(over),
+  });
+
+  it('/goal 创建：带 objective 走 POST /goal create，回执仍走 reportInfo', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(result());
+    const c = makeCtx();
+    await cmd('goal').run('## Objective\n投 20 份简历', asCtx(c));
+    expect(mod.postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'create',
+      objective: '## Objective\n投 20 份简历',
+    });
+    expect(c.reportInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('控制词只在占满整个输入时识别（/goal pause after verification 是 objective）', () => {
+    expect(parseGoalCommand('pause')).toEqual({ kind: 'pause' });
+    expect(parseGoalCommand(' PAUSE ')).toEqual({ kind: 'pause' });
+    expect(parseGoalCommand('pause after verification')).toEqual({
+      kind: 'create',
+      objective: 'pause after verification',
+    });
+    expect(parseGoalCommand('edit 新目标')).toEqual({ kind: 'edit', objective: '新目标' });
+    expect(parseGoalCommand('edit')).toEqual({ kind: 'invalid-edit' });
+    expect(parseGoalCommand('')).toEqual({ kind: 'show' });
+    expect(parseGoalCommand(undefined)).toEqual({ kind: 'show' });
+  });
+
+  it('/goal edit 缺 objective → reportError 可操作提示，不发请求', async () => {
+    const mod = await import('./api');
+    const c = makeCtx();
+    await cmd('goal').run('edit', asCtx(c));
+    expect(mod.postGoalCommand).not.toHaveBeenCalled();
+    expect(c.reportError.mock.calls[0][0]).toContain('/goal edit <objective>');
+  });
+
+  it('/goal 409（revision 冲突）→ reportError 带当前 revision 与可执行的重试指引（AC3）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot());
+    vi.mocked(mod.postGoalCommand).mockRejectedValue(
+      new SessionError(409, 'revision 冲突：请求基于 r2，当前是 r3'),
     );
     const c = makeCtx();
-    await cmd('goal').run('再设一个', asCtx(c));
-    expect(c.reportError).toHaveBeenCalledTimes(1);
+    await cmd('goal').run('edit 新目标', asCtx(c));
     const msg = c.reportError.mock.calls[0][0] as string;
-    expect(msg).toContain('任务已定义');
-    expect(msg).toContain('/goal（无参数）可查看当前目标');
+    expect(msg).toContain('当前是 r3');
+    // slash 界面没有传 expected_revision 的语法 ⇒ 文案不能教用户打一个传不了的字段。
+    expect(msg).toContain('重试即可');
+    expect(msg).not.toContain('再带 expected_revision 重试');
+  });
+
+  it('/goal edit 先读当前 revision 再带 expected_revision（AC3 的 UI 面）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot({ revision: 7 }));
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(result({ revision: 8 }));
+    const c = makeCtx();
+    await cmd('goal').run('edit 新目标', asCtx(c));
+    expect(mod.postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'edit',
+      objective: '新目标',
+      expected_revision: 7,
+    });
+    expect(c.reportInfo.mock.calls[0][0]).toContain('版本：r8');
+  });
+
+  it('/goal 回执渲染 paused 的 pause_reason（AC9 可读原因）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.getGoalState).mockResolvedValue(snapshot({
+      phase: 'paused',
+      pause_reason: { code: 'no-progress', message: '最近两轮没有工具活动' },
+    }));
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.reportInfo.mock.calls[0][0]).toContain(
+      '暂停原因：no-progress: 最近两轮没有工具活动',
+    );
+  });
+
+  it('AC6：needs_interview 时把补全草稿写回输入框，只补缺失段', async () => {
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(
+      snapshot({ objective: '## Objective\nA\n\n## Success criteria\nB', needs_interview: true }),
+    );
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    const draft = c.prefillInput.mock.calls[0][0] as string;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Verification');
+    // 已有的段不重复补：标题只出现一次（原文一次，不另加空壳）。
+    expect(draft.split('## Success criteria').length - 1).toBe(1);
+  });
+
+  it('AC6：needs_interview=false 不写输入框（不打断用户）', async () => {
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(snapshot());
+    const c = makeCtx();
+    await cmd('goal').run(undefined, asCtx(c));
+    expect(c.prefillInput).not.toHaveBeenCalled();
+  });
+
+  it('AC6：create 路径同样进访谈（不只 show）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(
+      result({ objective: '## Objective\n投 20 份简历', needs_interview: true }),
+    );
+    const c = makeCtx();
+    await cmd('goal').run('## Objective\n投 20 份简历', asCtx(c));
+    const draft = c.prefillInput.mock.calls[0][0] as string;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Success criteria');
+    expect(draft).toContain('## Verification');
   });
 
   it('/goal 其他错误（422）原样上抛（Composer 统一呈现），不加引导', async () => {
-    vi.mocked(await import('./api')).postSessionCommand.mockRejectedValue(
-      new SessionError(422, 'task_text 必须是非空字符串'),
+    vi.mocked((await import('./api')).postGoalCommand).mockRejectedValue(
+      new SessionError(422, 'objective 必须是非空字符串'),
     );
     const c = makeCtx();
     await expect(cmd('goal').run('目标文本', asCtx(c))).rejects.toThrow(
-      'task_text 必须是非空字符串',
+      'objective 必须是非空字符串',
     );
     expect(c.reportError).not.toHaveBeenCalled();
   });
@@ -237,12 +363,31 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
   });
 
   it('/goal 查看未定义 → reportInfo「未定义」，不是错误', async () => {
-    const mod = await import('./api');
-    vi.mocked(mod.getTaskState).mockRejectedValue(new mod.TaskNotDefinedError('未定义任务'));
+    vi.mocked((await import('./api')).getGoalState).mockResolvedValue(
+      snapshot({ defined: false, goal_id: null, objective: null, phase: null }, 'disarmed'),
+    );
     const c = makeCtx();
     await cmd('goal').run(undefined, asCtx(c));
-    expect(c.reportInfo).toHaveBeenCalledWith('当前会话未定义目标');
+    expect(c.reportInfo).toHaveBeenCalledWith(
+      '当前会话未定义目标。用 /goal <objective> 创建。',
+    );
     expect(c.reportError).not.toHaveBeenCalled();
+  });
+
+  it('blocked 快照带 code/message；needs_interview 有提示（AC1/AC6）', () => {
+    const text = formatGoalSnapshot(
+      snapshot(
+        {
+          phase: 'blocked',
+          blocked_reason: { code: 'round-limit', message: '轮次用尽' },
+          needs_interview: true,
+        },
+        'disarmed',
+      ),
+    );
+    expect(text).toContain('阻塞：round-limit: 轮次用尽');
+    expect(text).toContain('## Success criteria');
+    expect(text).toContain('/goal resume');
   });
 
   it('slashSubmitMatch 对 trim 后整条输入匹配（A-P2-1：尾随空格由调用方 trim 兜住）', () => {

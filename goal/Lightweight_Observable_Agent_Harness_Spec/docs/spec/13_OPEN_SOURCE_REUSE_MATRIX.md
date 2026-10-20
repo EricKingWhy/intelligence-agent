@@ -59,6 +59,8 @@ Pi 当前核心价值适合借鉴：
 | Tool execution pipeline | PORT DESIGN | Permission→Scheduler→Executor→Result |
 | Oversized output spill | PORT DESIGN | ArtifactStore/MinIO |
 | Sandbox policy | PORT DESIGN | read-only/workspace-write/approval |
+| 长期目标 durable 对象（#1359） | ADAPT | 抄 `goal/change` 的**完整快照 / clear 墓碑**两形（`packages/goal/goal/src/domain.ts` @5badb150），改名为本仓 `goal/changed`；`session/goal.py` 是唯一写入口，`effective_goal` 是 last-wins 唯一读侧；语义规格见 Spec 03 §3.5 |
+| 目标轮次自动续跑 | ADAPT | 抄 `goal-round-driver` 的 `<goal_round>` 块（`prompt.ts:12-26`）+ omp `goalContinuationActivity`（`src/goals/state.ts:54-70`）的**无进展停机**判据；Python 侧改造成 `goal_round_digests`（只取 `{ok,message,data}` 摘要）与轮次预算。**不抄**模型侧 goal 工具——阶段 4 未上线 |
 | DSH TypeScript/Cordis | DEFER | 不引入为 Python Core runtime |
 
 ## 4. 直接 REUSE 的库/SDK
