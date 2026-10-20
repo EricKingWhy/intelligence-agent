@@ -86,6 +86,9 @@
   /* ── Motion (PRD §19 P0: inspector 220-280 / inline expand 160-220 /
    *    pulse 600-900 / palette 120-180) ── */
   --ease-apple: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* #1429 中间对话区展开动画：V2 设计稿的轻微过冲（0.34, 1.56, 0.64, 1）。
+   * 只服务 `grid-template-rows` 折叠展开；两主题同值，故只定义一次。 */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --dur-fast: 150ms;
   --dur-in: 240ms;      /* inspector 展开/收起（PRD 220-280） */
   --dur-out: 150ms;

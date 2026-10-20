@@ -12,7 +12,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, Square, X } from 'lucide-react';
 import { describeFailure, type FailureCopy } from '../hooks/useSession';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain, emptyChildTurnIndex, latestEditableTurn } from '../lib/projection';
@@ -25,6 +25,10 @@ import {
   wheelDeltaPixels, type FollowState,
 } from '../lib/followLatest';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
+import { GROUP_LABEL, groupChain, type ToolGroup } from '../lib/toolGroups';
+import { deriveTurnNav, turnAnchor, type TurnNavItem } from '../lib/turnNav';
+import { useTickingNow } from '../hooks/useTickingNow';
+import { Collapse } from './Collapse';
 import type {
   ConversationState,
   AskUserAnswer,
@@ -34,7 +38,7 @@ import type {
   ToolCall,
   Turn,
 } from '../types';
-import { formatDateTime, formatDuration, truncateForDisplay } from '../lib/format';
+import { formatDateTime, formatDuration, formatShortDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
@@ -226,6 +230,34 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   const latestEditableSeq = useMemo(
     () => latestEditableTurn(turns)?.user_message_seq ?? null,
     [turns],
+  );
+
+  /* #1429 打磨点 1：分组开合状态收在 Conversation 层（票面：key = 首成员
+     `tool_call_id`）。虚拟化把滚出的行卸载，状态留在这里才不会「滚回就复位」。
+     copy-on-write：切换一次换一次引用，TurnView 的 memo 随之重渲染（点击频率，
+     不是每个 delta）。 */
+  const [groupOpen, setGroupOpen] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const toggleGroup = useCallback((key: string) => {
+    setGroupOpen((prev) => {
+      const next = new Map(prev);
+      next.set(key, !(prev.get(key) ?? true));
+      return next;
+    });
+  }, []);
+
+  /* #1429 打磨点 6：轮次导航 1..N + 压缩置灰（纯推断在 lib/turnNav）。 */
+  const turnNavItems = useMemo(
+    () => deriveTurnNav(turns, conversation?.compactions ?? []),
+    [turns, conversation],
+  );
+  /* 轮次跳转：按 step_id 找虚拟化下标再 scrollToIndex——窗口外的行不在 DOM 里，
+     不能靠 querySelector 定位。 */
+  const jumpToTurn = useCallback(
+    (stepId: number) => {
+      const idx = turns.findIndex((t) => t.step_id === stepId);
+      if (idx >= 0) virtualizer.scrollToIndex(idx, { align: 'start' });
+    },
+    [turns, virtualizer],
   );
 
   // PRD §9.2 反向联动：Inspector Timeline 点行 → 中间滚动定位 + 短促 pulse。
@@ -524,6 +556,8 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
           runInterrupted={conversation.run_interrupted !== null}
         />
       )}
+      {/* #1429 打磨点 6：轮次导航钉在滚动区上方（虚拟化行之外，不参与测高）。 */}
+      {turnNavItems.length > 1 && <TurnNav items={turnNavItems} onJump={jumpToTurn} />}
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={setScrollNode}>
         {/* 虚拟化：绝对定位行 + 动态测高（PRD §20.2）。只有窗口内 turn 参与 DOM。
@@ -533,143 +567,151 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
             「视口剩余高度」，而尾部卡片（失效审批卡 / ask_user / 错误条）按**压缩后**
             的底边定位，绝对定位行再按原坐标绘制上去 → 两团文字重叠。锁定不收缩后，
             尾部卡片永远排在 totalSize 之后。 */}
-        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', flexShrink: 0 }}>
-          {virtualizer.getVirtualItems().map((vi) => (
-            <div
-              key={vi.key}
-              data-index={vi.index}
-              ref={virtualizer.measureElement}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${vi.start}px)`,
-              }}
-            >
-              <TurnView
-                turn={turns[vi.index]}
-                turnIndex={turns[vi.index].turn_index}
-                model={conversation.model}
-                density={density}
-                disclosure={disclosure}
-                reasoningDisclosure={reasoningDisclosure}
-                onFocusTool={onFocusTool}
-                onOpenSession={onOpenSession}
-                onInspectChild={onInspectChild}
-                onFork={onFork}
-                isFirstUserTurn={vi.index === emptyChildTurnIdx}
-                sessionId={conversation.session_id}
-                latestEditableSeq={latestEditableSeq}
-                onEditTurn={onEditTurn}
-                isSupersededTurn={turns[vi.index].superseded === true}
-                supportsVision={supportsVision}
-              />
-            </div>
-          ))}
-        </div>
-        <MemoryActivity key={conversation.session_id} conversation={conversation} />
-        {/* #1367（P0-3）：内联错误条——run 失败（含 401/400/5xx）与提交断网
-            共用这一处。虚拟化行之外（同 MemoryActivity），不参与测高。 */}
-        {failureBars}
-        {/* #1204：`ask_user` 通用提问的内嵌卡片——长在对话流尾部（虚拟化行之外，
-            同 MemoryActivity / 内联审批卡的做法），不参与 measureElement 测高。
-            `key` 按 request_id：换请求即重挂，卡片本地草稿不串题。 */}
-        {/* #1356：计划审批卡——与 `ask_user` 同一条恢复通道的第三支载荷。两者都由
-            「本 run 至多一个待处理请求」的准入去重，不会同时出现；顺序仍按"先计划、
-            后提问"排（若将来放宽去重，计划卡更靠近暂停点）。 */}
-        {planApprovalRequest !== null && onPlanApprovalAnswer && (
-          <PlanApprovalCard
-            key={planApprovalRequest.request_id}
-            request={planApprovalRequest}
-            resuming={planApprovalResuming}
-            errorMessage={planApprovalError}
-            onSubmit={onPlanApprovalAnswer}
-          />
-        )}
-        {askUserRequest !== null && onAskUserAnswer && (
-          <AskUserCard
-            key={askUserRequest.request_id}
-            request={askUserRequest}
-            resuming={askUserResuming}
-            errorMessage={askUserError}
-            /* #1284：分钟数由投影从请求快照归一（后端落 `timeout_minutes`，旧事件由
-               `timeout_seconds` 换算）；本层只渲染，不再自算，避免与后端消息分叉。
-               缺省（旧事件无快照）⇒ null ⇒ 卡片回落不带数字的中性提示。 */
-            timeoutMinutes={askUserRequest.timeout_minutes ?? null}
-            onSubmit={onAskUserAnswer}
-          />
-        )}
-        {/* #37 交互式审批 + #421 模态承载。
-         *
-         *  R5-B3 的根因是审批卡与虚拟化行抢同一块画布：行是 absolute 定位的绘制层，
-         *  测高滞后就盖到卡片的按钮上。修法 = **第一张非失效**待决审批进模态
-         *  （ApprovalModal，Portal + Overlay，指针/焦点都被 Radix 圈住，且没有
-         *  决策不允许关——GitHub required-review 语义）；其余 pending 卡（失效的
-         *  stale/404 孤儿、多卡并存的第 2+ 张）留在内联位置。
-         *
-         *  失效卡**绝不**进模态：它只剩禁用按钮和只读说明，模态化等于把用户锁死
-         *  在一个关不掉的面板里（APR-01 的关闭路径必须保留）。
-         *
-         *  模态候选身上不挂 `data-approval-key`：Inspector PERMISSION 段的跳转
-         *  （#184）在 conversation 根里 querySelector，而模态内容在 body 末尾的
-         *  portal 里，跳不过去——但模态本来就常驻可见，跳转目标已在眼前，no-op
-         *  是可接受的降级（内联卡的跳转不受影响）。 */}
-        {(() => {
-          const isInvalid = (a: (typeof conversation.pending_approvals)[number]) =>
-            a.stale === true || goneApprovalIds?.has(a.approval_id) === true;
-          const firstLiveIdx = conversation.pending_approvals.findIndex((a) => !isInvalid(a));
-          const firstLive = firstLiveIdx >= 0 ? conversation.pending_approvals[firstLiveIdx] : null;
-          return (
-            <>
-              {conversation.pending_approvals.map((a, i) =>
-                i === firstLiveIdx ? null : (
-                  /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
-                     点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
-                  <div key={a.approval_id} data-approval-key={a.approval_id}>
-                    <ApprovalCard
-                      sessionId={conversation.session_id}
-                      approval={a}
-                      /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
-                      invalid={isInvalid(a)}
-                      onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
-                      onDecided={
-                        onApprovalDecided
-                          ? () => onApprovalDecided(conversation.session_id)
-                          : undefined
-                      }
-                      /* UI-01 键盘安全（U-1 P1）：全局快捷键只挂在唯一 autoFocus 卡上。
-                          模态候选存在时它是唯一 autoFocus 卡，内联卡一律 false。 */
-                      autoFocus={false}
-                    />
-                  </div>
-                ),
-              )}
-              {firstLive && (
-                <ApprovalModal
+        {/* 内容列（V2 `.chat-in` 800px）：虚拟化行与尾部卡片共用同一列宽。 */}
+        <div className="conversation-inner">
+          <div style={{ height: virtualizer.getTotalSize(), position: 'relative', flexShrink: 0 }}>
+            {virtualizer.getVirtualItems().map((vi) => (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                <TurnView
+                  turn={turns[vi.index]}
+                  turnIndex={turns[vi.index].turn_index}
+                  model={conversation.model}
+                  density={density}
+                  disclosure={disclosure}
+                  reasoningDisclosure={reasoningDisclosure}
+                  onFocusTool={onFocusTool}
+                  onOpenSession={onOpenSession}
+                  onInspectChild={onInspectChild}
+                  onFork={onFork}
+                  isFirstUserTurn={vi.index === emptyChildTurnIdx}
                   sessionId={conversation.session_id}
-                  approval={firstLive}
-                  onGone={onApprovalGone ? () => onApprovalGone(firstLive.approval_id) : undefined}
-                  onDecided={
-                    onApprovalDecided
-                      ? () => onApprovalDecided(conversation.session_id)
-                      : undefined
-                  }
+                  latestEditableSeq={latestEditableSeq}
+                  onEditTurn={onEditTurn}
+                  isSupersededTurn={turns[vi.index].superseded === true}
+                  supportsVision={supportsVision}
+                  groupOpen={groupOpen}
+                  onToggleGroup={toggleGroup}
+                  isHit={jumpRequest != null && turnHasStreamKey(turns[vi.index], jumpRequest.key)}
                 />
-              )}
-              {/* #420 AC3：已决回显——本观看窗内见过挂起的审批，决出后在这里留
-                  结果卡（消费投影 `approval_decisions`，不本地伪造）。模态收起后
-                  结果落点就在这条队列里，与内联待决卡同一位置。 */}
-              {approvalEchoes.map((d) => (
-                /* `data-approval-key` 沿用：决出后 Inspector PERMISSION 段的跳转
-                    落点仍在原地（不再跳到已消失的待决卡）。 */
-                <div key={`echo-${d.approval_id}`} data-approval-key={d.approval_id}>
-                  <ApprovalEchoCard decision={d} />
-                </div>
-              ))}
-            </>
-          );
-        })()}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="conversation-inner conversation-tail">
+          <MemoryActivity key={conversation.session_id} conversation={conversation} />
+          {/* #1367（P0-3）：内联错误条——run 失败（含 401/400/5xx）与提交断网
+              共用这一处。虚拟化行之外（同 MemoryActivity），不参与测高。 */}
+          {failureBars}
+          {/* #1204：`ask_user` 通用提问的内嵌卡片——长在对话流尾部（虚拟化行之外，
+              同 MemoryActivity / 内联审批卡的做法），不参与 measureElement 测高。
+              `key` 按 request_id：换请求即重挂，卡片本地草稿不串题。 */}
+          {/* #1356：计划审批卡——与 `ask_user` 同一条恢复通道的第三支载荷。两者都由
+              「本 run 至多一个待处理请求」的准入去重，不会同时出现；顺序仍按"先计划、
+              后提问"排（若将来放宽去重，计划卡更靠近暂停点）。 */}
+          {planApprovalRequest !== null && onPlanApprovalAnswer && (
+            <PlanApprovalCard
+              key={planApprovalRequest.request_id}
+              request={planApprovalRequest}
+              resuming={planApprovalResuming}
+              errorMessage={planApprovalError}
+              onSubmit={onPlanApprovalAnswer}
+            />
+          )}
+          {askUserRequest !== null && onAskUserAnswer && (
+            <AskUserCard
+              key={askUserRequest.request_id}
+              request={askUserRequest}
+              resuming={askUserResuming}
+              errorMessage={askUserError}
+              /* #1284：分钟数由投影从请求快照归一（后端落 `timeout_minutes`，旧事件由
+                 `timeout_seconds` 换算）；本层只渲染，不再自算，避免与后端消息分叉。
+                 缺省（旧事件无快照）⇒ null ⇒ 卡片回落不带数字的中性提示。 */
+              timeoutMinutes={askUserRequest.timeout_minutes ?? null}
+              onSubmit={onAskUserAnswer}
+            />
+          )}
+          {/* #37 交互式审批 + #421 模态承载。
+           *
+           *  R5-B3 的根因是审批卡与虚拟化行抢同一块画布：行是 absolute 定位的绘制层，
+           *  测高滞后就盖到卡片的按钮上。修法 = **第一张非失效**待决审批进模态
+           *  （ApprovalModal，Portal + Overlay，指针/焦点都被 Radix 圈住，且没有
+           *  决策不允许关——GitHub required-review 语义）；其余 pending 卡（失效的
+           *  stale/404 孤儿、多卡并存的第 2+ 张）留在内联位置。
+           *
+           *  失效卡**绝不**进模态：它只剩禁用按钮和只读说明，模态化等于把用户锁死
+           *  在一个关不掉的面板里（APR-01 的关闭路径必须保留）。
+           *
+           *  模态候选身上不挂 `data-approval-key`：Inspector PERMISSION 段的跳转
+           *  （#184）在 conversation 根里 querySelector，而模态内容在 body 末尾的
+           *  portal 里，跳不过去——但模态本来就常驻可见，跳转目标已在眼前，no-op
+           *  是可接受的降级（内联卡的跳转不受影响）。 */}
+          {(() => {
+            const isInvalid = (a: (typeof conversation.pending_approvals)[number]) =>
+              a.stale === true || goneApprovalIds?.has(a.approval_id) === true;
+            const firstLiveIdx = conversation.pending_approvals.findIndex((a) => !isInvalid(a));
+            const firstLive = firstLiveIdx >= 0 ? conversation.pending_approvals[firstLiveIdx] : null;
+            return (
+              <>
+                {conversation.pending_approvals.map((a, i) =>
+                  i === firstLiveIdx ? null : (
+                    /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
+                       点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
+                    <div key={a.approval_id} data-approval-key={a.approval_id}>
+                      <ApprovalCard
+                        sessionId={conversation.session_id}
+                        approval={a}
+                        /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
+                        invalid={isInvalid(a)}
+                        onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
+                        onDecided={
+                          onApprovalDecided
+                            ? () => onApprovalDecided(conversation.session_id)
+                            : undefined
+                        }
+                        /* UI-01 键盘安全（U-1 P1）：全局快捷键只挂在唯一 autoFocus 卡上。
+                            模态候选存在时它是唯一 autoFocus 卡，内联卡一律 false。 */
+                        autoFocus={false}
+                      />
+                    </div>
+                  ),
+                )}
+                {firstLive && (
+                  <ApprovalModal
+                    sessionId={conversation.session_id}
+                    approval={firstLive}
+                    onGone={onApprovalGone ? () => onApprovalGone(firstLive.approval_id) : undefined}
+                    onDecided={
+                      onApprovalDecided
+                        ? () => onApprovalDecided(conversation.session_id)
+                        : undefined
+                    }
+                  />
+                )}
+                {/* #420 AC3：已决回显——本观看窗内见过挂起的审批，决出后在这里留
+                    结果卡（消费投影 `approval_decisions`，不本地伪造）。模态收起后
+                    结果落点就在这条队列里，与内联待决卡同一位置。 */}
+                {approvalEchoes.map((d) => (
+                  /* `data-approval-key` 沿用：决出后 Inspector PERMISSION 段的跳转
+                      落点仍在原地（不再跳到已消失的待决卡）。 */
+                  <div key={`echo-${d.approval_id}`} data-approval-key={d.approval_id}>
+                    <ApprovalEchoCard decision={d} />
+                  </div>
+                ))}
+              </>
+            );
+          })()}
+        </div>
       </div>
       {/* Follow-mode 浮标（pi-mono "jump to latest"）：在**投影上仍是 running 的
           run** 里、用户已上滚时出现。`suspended` 由 FOLLOW 原语给出（= 已脱离跟随），
@@ -706,7 +748,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
 // 浅比较才真的会命中原注释所声明的效果。注意它**不能**做成「身份永不改变」：那样
 // override 变化时 memo 也会 bail out，点击工具行的档位循环会静默无效（见
 // lib/disclosure.ts 顶部注释与 Conversation.render.test.tsx 的 AC8 代理用例）。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn, supportsVision = null }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void; isSupersededTurn?: boolean; supportsVision?: boolean | null }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn, supportsVision = null, groupOpen, onToggleGroup, isHit = false }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void; isSupersededTurn?: boolean; supportsVision?: boolean | null; /** 分组开合状态（票面：Conversation 层持有）。缺省 = 组件内兜底（独立渲染/测试）。 */ groupOpen?: ReadonlyMap<string, boolean>; onToggleGroup?: (key: string) => void; isHit?: boolean }) {
   // F1（#270）必做 2：`cycle` 回调此前在链路渲染器里**每次渲染现建一个新闭包**，
   // 作为 prop 传给 memo(ToolCard) ⇒ 浅比较恒不等，memo 恒 miss。移到组件里用
   // useCallback 建立一次（依赖 disclosure——它只在 override / density 变化时换引用，
@@ -725,9 +767,38 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
   const [collapsed, setCollapsed] = useState(false);
+  /* #1429 打磨点 6：`#` 锚点只复制 `#turn-N` 文本（不做 hash 深链——不承诺
+     Timeline 行级定位，也不改写 history）。 */
+  const [anchorCopied, setAnchorCopied] = useState(false);
+  const anchorTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (anchorTimer.current !== null) window.clearTimeout(anchorTimer.current);
+  }, []);
 
   const duration = formatDuration(turn.started_at, turn.completed_at);
   const chain = useMemo(() => deriveChain(turn), [turn]);
+  /* #1429 打磨点 1：渲染层分组。键是 `turn` 引用（与 deriveChain 同键）——
+     流式 delta 不会让已完成 turn 重新分组（票面性能红线）。 */
+  const entries = useMemo(() => groupChain(chain), [chain]);
+  /* 分组开合的兜底宿主（与 ReasoningBlockView 的 fallbackOpen 同一模式）：
+     生产路径由 Conversation 持有（虚拟化滚出/滚回不丢），独立渲染时退化为本地
+     Map，组头仍是真按钮。 */
+  const [localGroupOpen, setLocalGroupOpen] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const groupState = groupOpen ?? localGroupOpen;
+  const toggleGroup = useCallback(
+    (key: string) => {
+      if (onToggleGroup) {
+        onToggleGroup(key);
+        return;
+      }
+      setLocalGroupOpen((prev) => {
+        const next = new Map(prev);
+        next.set(key, !(prev.get(key) ?? true));
+        return next;
+      });
+    },
+    [onToggleGroup],
+  );
   // D12/PRD §10：chain 中最后一个 model 节点 = Final Answer（高对比正文），
   // 其余 done model 段是中间输出（低对比 + 语义行）。
   const lastModelIndex = useMemo(() => {
@@ -767,10 +838,53 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
           孤儿「第 N 轮」标签（问与答都不渲染）。 */}
       {isSupersededTurn ? null : (
         <>
-      {/* T9 #139：轮次标签——turn_index 为 per-turn 事实（run/started 携带）。
-          仅正整数显示：null=旧版后端缺字段，≤0=防御性不渲染。 */}
+      {/* T9 #139 + #1429 打磨点 6：轮次标记——一行小字 + 一条细线。
+          `turn_index` 为 per-turn 事实（run/started 携带）；仅正整数显示：
+          null=旧版后端缺字段，≤0=防御性不渲染。`.turn-index-label` 类名保留
+          （渲染契约测试依赖它），视觉并入 `.turn-mark` 行。 */}
       {turnIndex != null && turnIndex > 0 && (
-        <div className="turn-index-label">第 {turnIndex} 轮</div>
+        <div className={`turn-mark${isHit ? ' is-hit' : ''}`} data-turn={turnIndex}>
+          <span className="turn-index-label tm-n">{String(turnIndex).padStart(2, '0')}</span>
+          <span className="tm-l">第 {turnIndex} 轮</span>
+          {(duration || turn.tools.length > 0) && (
+            <span className="tm-d">
+              {[duration, turn.tools.length > 0 ? `${turn.tools.length} 次调用` : null]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          )}
+          <span className="tm-line" aria-hidden="true" />
+          <button
+            type="button"
+            className={`tm-anchor${anchorCopied ? ' is-done' : ''}`}
+            title={anchorCopied ? '已复制轮次链接' : '复制轮次链接'}
+            aria-label={anchorCopied ? '已复制轮次链接' : '复制轮次链接'}
+            onClick={() => {
+              const text = turnAnchor(turnIndex);
+              const done = () => {
+                setAnchorCopied(true);
+                if (anchorTimer.current !== null) window.clearTimeout(anchorTimer.current);
+                anchorTimer.current = window.setTimeout(() => setAnchorCopied(false), 1600);
+              };
+              // 非安全上下文（http 非 localhost）没有 clipboard API：退回 execCommand。
+              if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(text).then(done, done);
+              } else {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                ta.remove();
+                done();
+              }
+            }}
+          >
+            {anchorCopied ? '已复制' : '#'}
+          </button>
+        </div>
       )}
       {/* User message — minimal, right-aligned；harness 注入的纠正消息
           （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
@@ -927,21 +1041,35 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
             )}
             {!collapsed && (
               <div className="act-chain">
-                {chain.map((node, i) => (
-                  <ChainNodeView
-                    key={chainKey(node, i)}
-                    node={node}
-                    density={density}
-                    disclosure={disclosure}
-                    reasoningDisclosure={reasoningDisclosure}
-                    isFinalModel={i === lastModelIndex}
-                    onCycleLevel={cycleLevel}
-                    onFocusTool={onFocusTool}
-                    onOpenSession={onOpenSession}
-                    onInspectChild={onInspectChild}
-                    sessionId={sessionId}
-                  />
-                ))}
+                {entries.map((entry) =>
+                  entry.type === 'group' ? (
+                    <ToolGroupView
+                      key={entry.group.key}
+                      group={entry.group}
+                      open={groupState.get(entry.group.key) ?? true}
+                      onToggle={toggleGroup}
+                      density={density}
+                      disclosure={disclosure}
+                      onCycleLevel={cycleLevel}
+                      onFocusTool={onFocusTool}
+                      sessionId={sessionId}
+                    />
+                  ) : (
+                    <ChainNodeView
+                      key={chainKey(entry.node, entry.index)}
+                      node={entry.node}
+                      density={density}
+                      disclosure={disclosure}
+                      reasoningDisclosure={reasoningDisclosure}
+                      isFinalModel={entry.index === lastModelIndex}
+                      onCycleLevel={cycleLevel}
+                      onFocusTool={onFocusTool}
+                      onOpenSession={onOpenSession}
+                      onInspectChild={onInspectChild}
+                      sessionId={sessionId}
+                    />
+                  ),
+                )}
               </div>
             )}
           </div>
@@ -1103,4 +1231,133 @@ export function ChainNodeView(ctx: ChainRenderCtx): ReactNode {
   // 已按 Extract 收紧各自 node 类型——调度处一次性还原宽签名。
   const render = CHAIN_RENDERERS[ctx.node.kind] as (c: ChainRenderCtx) => ReactNode;
   return render(ctx);
+}
+
+/** #1429 打磨点 1：连续同类工具调用的组头 + 缩进子行。
+ *
+ * 组头是一行字（图标 · 「N 次读取」· 工具名计数 · 状态 · 耗时 · chevron），
+ * 子行复用 `ToolCard` 的同一套 L0-L2 契约——分组只改**排布**，不改工具卡的
+ * 交互与密度语义。开合走 `grid-template-rows: 0fr → 1fr`（打磨点 2）。 */
+function ToolGroupView({
+  group,
+  open,
+  onToggle,
+  density,
+  disclosure,
+  onCycleLevel,
+  onFocusTool,
+  sessionId,
+}: {
+  group: ToolGroup;
+  open: boolean;
+  onToggle: (key: string) => void;
+  density: TraceDensity;
+  disclosure?: Disclosure;
+  onCycleLevel?: (key: string, density: TraceDensity) => void;
+  onFocusTool?: (tool: ToolCall) => void;
+  sessionId?: string;
+}) {
+  const Icon = KIND_ICON[group.kind];
+  const bodyId = `act-group-body-${group.key}`;
+  return (
+    <div className={`act-group${open ? ' is-open' : ''}`}>
+      <button
+        type="button"
+        className="act-group-head"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => onToggle(group.key)}
+      >
+        <span className="act-group-ico"><Icon size={12} aria-hidden="true" /></span>
+        <b>{group.members.length} 次{GROUP_LABEL[group.kind]}</b>
+        <span className="act-group-kinds">
+          {group.names.map((n) => `${n.name} ×${n.count}`).join(' · ')}
+        </span>
+        {/* 组头状态 = 成员聚合（任一失败→失败、任一运行中→运行、全完成→完成）。 */}
+        <span className={`act-status act-status-${group.status} act-group-status`}>
+          {group.status === 'success' && <Check size={10} />}
+          {group.status === 'failed' && <X size={10} />}
+          {group.status === 'stopped' && <Square size={10} />}
+          {group.status === 'running' && <span className="status-spinner" />}
+        </span>
+        <GroupDuration
+          startedAt={group.startedAt}
+          completedAt={group.completedAt}
+          running={group.status === 'running'}
+        />
+        <ChevronDown size={11} className="act-group-chev" aria-hidden="true" />
+      </button>
+      <Collapse open={open} className="act-group-body" id={bodyId}>
+        <div className="act-group-in">
+          {group.members.map(({ tool }) => {
+            const key = toolEventKey(tool.tool_call_id);
+            return (
+              <ToolCard
+                key={tool.tool_call_id}
+                tool={tool}
+                density={density}
+                level={disclosure ? disclosure.levelFor(key, density) : undefined}
+                onCycleLevel={onCycleLevel}
+                onFocus={onFocusTool}
+                sessionId={sessionId}
+              />
+            );
+          })}
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+/** 组头耗时 = span（首成员开始 → 末成员结束）。末成员仍在跑时按当前时刻续算，
+ *  只显示已运行时长，不造百分比。 */
+function GroupDuration({
+  startedAt,
+  completedAt,
+  running,
+}: {
+  startedAt?: string;
+  completedAt?: string;
+  running: boolean;
+}) {
+  const now = useTickingNow(1000);
+  if (!startedAt) return null;
+  const end = completedAt
+    ? new Date(completedAt).getTime()
+    : running
+      ? now
+      : Number.NaN;
+  const text = formatShortDuration(end - new Date(startedAt).getTime());
+  return text === '' ? null : <span className="act-group-total">{text}</span>;
+}
+
+/** #1429 打磨点 6：轮次导航（1..N 药丸 + 压缩置灰）。粘在对话列顶部——它不在
+ *  滚动容器里，滚到任何位置都可见；点击走虚拟化 `scrollToIndex`，目标行即使
+ *  不在已挂载窗口内也能滚到。 */
+function TurnNav({
+  items,
+  onJump,
+}: {
+  items: TurnNavItem[];
+  onJump: (stepId: number) => void;
+}) {
+  return (
+    <div className="turn-nav" role="group" aria-label="轮次导航">
+      {items.map((item) => (
+        <button
+          key={item.turnIndex}
+          type="button"
+          className={`turn-nav-pill${item.stepId === null ? ' is-off' : ''}`}
+          disabled={item.stepId === null}
+          title={item.title}
+          aria-label={item.title}
+          onClick={() => {
+            if (item.stepId !== null) onJump(item.stepId);
+          }}
+        >
+          {item.turnIndex}
+        </button>
+      ))}
+    </div>
+  );
 }
