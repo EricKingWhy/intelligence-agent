@@ -1,0 +1,19 @@
+{
+  "head": "3288f93799b7b17efff66f46eeb2da031d433fda",
+  "tree": "71cbe85ec8fc731ec59766cb696df4962e205615",
+  "cwd": "/tmp/ia-release",
+  "argv": [
+    "/tmp/ia-release/.venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/sandbox/test_code_worker.py",
+    "tests/sandbox/test_docker_export_windows.py",
+    "tests/tools/test_coding_tools.py::TestBashTool::test_stdout_stderr_in_data",
+    "-q",
+    "-p",
+    "no:randomly"
+  ],
+  "exit_code": 0,
+  "started_at": 1792482518.9823515,
+  "wall_seconds": 10.037144899368286
+}
