@@ -734,6 +734,9 @@ class SessionArchive:
                 # `system_log` 进 agent.jsonl，把「事件流里只有那五类事件」的
                 # 既有断言打红（tests/test_structured_logging.py 全量实测）。
                 # 降级状态仍可从 `cjk_available` 读到，不是隐形。
+                # 例外：.so 存在但探测失败由 `_load_cjk_extension` 单独
+                # warning（异常信号，见那里的注释），本句只管「压根没编 .so」
+                # 的预期内降级。
                 logger.debug(
                     "fts5_cjk tokenizer 不可用（%s）；CJK 索引降级为 trigram/LIKE",
                     self.cjk_so_path,
@@ -841,6 +844,9 @@ class SessionArchive:
             self._conn.execute("DROP TABLE temp.__cjk_probe")
             return True
         except Exception:
+            # warning 是 `_degrade_cjk` 的 debug 口径的刻意豁免：.so 存在却
+            # 装不进来 = 文件损坏/构建不对，是需要人看的异常信号，不是「没编
+            # .so」的预期内降级（那条走 `_degrade_cjk` 的 debug）。
             logger.warning("fts5_cjk 扩展不可用: %s", self.cjk_so_path, exc_info=True)
             return False
 
@@ -1606,19 +1612,21 @@ class SessionArchive:
         victims = [row["id"] for row in rows]
         if not victims:
             return []
+        # 按 victims id 列表 UPDATE（而非重写一遍谓词）：关闭的行必然 ==
+        # 返回的 victims，两处谓词无漂移空间；`AND ended_at IS NULL` 只防
+        # SELECT→UPDATE 之间被别处关闭的竞态，不复刻完整谓词。
         with self._cursor() as conn:
             conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = 'startup_orphan_reap' "
-                f"WHERE ended_at IS NULL AND source IN ({placeholders}) "
-                f"AND COALESCE(pinned, 0) = 0 AND started_at < ? "
-                f"AND {_session_activity_sql('sessions')} < ?",
-                (now, *AUTO_PRUNE_STALE_OPEN_SOURCES, cutoff, cutoff),
+                f"WHERE id IN ({','.join('?' for _ in victims)}) AND ended_at IS NULL",
+                (now, *victims),
             )
         return victims
 
     def _freelist_ratio(self) -> float | None:
-        """可回收页占比；None = 读不到（退回时间节流）。
-        来源: Hermes `hermes_state_maintenance.py:353`。"""
+        """可回收页占比；None = 读不到（退回时间节流，照抄 Hermes 原语义）。
+        来源: Hermes `hermes_state_maintenance.py:353`
+        （"None = fall back to the time throttle"）。"""
         try:
             pages = int(self._conn.execute("PRAGMA page_count").fetchone()[0])
             free = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0])
@@ -1681,12 +1689,14 @@ class SessionArchive:
             result["pruned"] = pruned = self._prune_sessions(cutoff)
             closed = self._sweep_orphaned_sessions(cutoff, now)
             result["closed"] = len(closed)
-            # VACUUM 只在真的删了行、时间节流已过、且可回收页占比够高时跑。
+            # VACUUM 只在真的删了行、时间节流已过时跑；占比读不到（None）时
+            # 退回时间节流照常 VACUUM（Hermes `hermes_state_maintenance.py:482`
+            # `ratio is None or ratio > ...` 原语义）。
             since_vacuum = _seconds_since(now, self._get_meta("last_vacuum"))
             vacuum_due = since_vacuum is None or since_vacuum >= min_vacuum_interval_days * 86400
             if vacuum and pruned > 0 and vacuum_due:
                 result["freelist_ratio"] = ratio = self._freelist_ratio()
-                if ratio is not None and ratio > min_vacuum_freelist_ratio:
+                if ratio is None or ratio > min_vacuum_freelist_ratio:
                     self._conn.execute("VACUUM")
                     self._set_meta("last_vacuum", str(now))
                     result["vacuumed"] = True

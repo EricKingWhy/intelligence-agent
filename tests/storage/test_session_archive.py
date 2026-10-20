@@ -710,7 +710,7 @@ class TestEventStreamUntouched:
         # 归档观察者不往事件流塞自己的事件类型
         assert {e.type for e in archived.events} == {e.type for e in plain.events}
 
-    def test_no_large_content_added_to_event_types(
+    def test_observer_does_not_change_append_event_return_values(
         self, tmp_path: Path, archive: SessionArchive,
     ) -> None:
         """`append_event` 的返回值在有无观察者时 `data` 键集合逐个相同（不变量 #22）。"""
@@ -1346,6 +1346,21 @@ class TestAutoPrune:
         assert out["pruned"] == 40
         assert out["vacuumed"] is False
         assert "freelist_ratio" not in out, "时间节流未过时不该考虑 VACUUM"
+
+    def test_vacuum_runs_when_freelist_ratio_unknown(
+        self, archive: SessionArchive, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """占比读不到（None）→ 退回时间节流照常 VACUUM（Hermes `hermes_state_maintenance.py:482`）。"""
+        self._seed(archive, "tiny-old", "小库会话")
+        _age_session(archive, "tiny-old", days=100, ended=True)
+        monkeypatch.setattr(archive, "_freelist_ratio", lambda: None)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert out["freelist_ratio"] is None
+        assert out["vacuumed"] is True
+        assert archive._get_meta("last_vacuum") is not None
 
     def test_observer_runs_maintenance_once_on_materialize(self, tmp_path: Path) -> None:
         """接线：首次物化 archive 后跑一次，之后同一观察者不再重跑。"""

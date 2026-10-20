@@ -4,12 +4,13 @@ unicode61 + CJK character bigrams (Lucene CJKAnalyzer semantics). Fixes
 1-2 char Korean/Chinese/Japanese terms falling through to LIKE full-table
 scans in session search.
 
-Build:
+Build (can be run from any directory — the script relocates itself to its
+own directory first):
 
-    ./build.sh
+    native/fts5_cjk/build.sh
 
 The `.so` lands next to the source (`native/fts5_cjk/libfts5_cjk.so`).
-Pass a directory to install elsewhere: `./build.sh /path/to/dir`.
+Pass a directory to install elsewhere: `native/fts5_cjk/build.sh /path/to/dir`.
 
 Uses the system `sqlite3ext.h` when available, else the vendored copy in
 `vendor/` — no libsqlite3-dev required.
