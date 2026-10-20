@@ -1739,6 +1739,11 @@ class ToolExecutor:
             if parent_exec_call_id_var.get() is not None and inherited is not None:
                 deadline = min(deadline, inherited)
             deadline_token = tool_execution_deadline_var.set(deadline)
+            # Admission and deadline use the direct bridge attribution; the tool
+            # body may start an independent runtime and must not inherit it.
+            is_code = getattr(tool, "is_code_execution", False)
+            parent_token = None if is_code else parent_exec_call_id_var.set(None)
+            bridge_token = None if is_code else nested_tool_call_var.set(None)
             try:
                 # 本次 attempt 的**唯一**绝对 deadline：本行建立、放进 contextvar
                 # 供 Tool 转发给执行后端，后端不得重新起算。机制见 ADR-0039。
@@ -1753,6 +1758,10 @@ class ToolExecutor:
                 # 分类表查找（isinstance 连子类一起认）在 _ToolFailure.from_exception。
                 result = _ToolFailure.from_exception(e, name).to_result()
             finally:
+                if bridge_token is not None:
+                    nested_tool_call_var.reset(bridge_token)
+                if parent_token is not None:
+                    parent_exec_call_id_var.reset(parent_token)
                 tool_execution_deadline_var.reset(deadline_token)
 
             duration_ms = round((perf_counter() - t0) * 1000, 1)

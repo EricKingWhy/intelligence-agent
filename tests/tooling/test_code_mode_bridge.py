@@ -211,3 +211,50 @@ async def test_child_retains_resource_exclusion_against_other_executor(tmp_path)
     results = await asyncio.wait_for(asyncio.gather(outer, other), timeout=1)
     assert all(batch[0].result.ok for batch in results)
     assert observed == ['nested', 'other']
+
+
+@pytest.mark.asyncio
+async def test_delegated_runtime_keeps_its_model_tool_results(tmp_path):
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from agent_harness.agent import AgentRuntime
+    from agent_harness.session.derive import derive_messages
+    from tests.scripted_model import ScriptedModel
+
+    child_session = make_session(tmp_path / 'child')
+    child_model = ScriptedModel([
+        AIMessage(content='', tool_calls=[
+            {'id': 'child-model-read', 'name': 'read', 'args': {}},
+        ]),
+        AIMessage(content='done'),
+    ])
+    child_registry = ToolRegistry()
+    child_registry.register(_ProbeTool(name='read', description='Read'))
+    child_runtime = AgentRuntime(
+        model=child_model, registry=child_registry, executor=ToolExecutor(child_registry),
+    )
+    inherited_bridges = []
+
+    class Delegator(_ProbeTool):
+        async def execute(self, args):
+            # The production in-process provider drives the child in this task.
+            inherited_bridges.append(nested_tool_call_var.get())
+            await child_runtime.run(child_session, 'Read the value')
+            return ToolResult.success(message='delegated')
+
+    registry = ToolRegistry()
+    registry.register(Delegator(name='read', description='Delegate'))
+    registry.register(_Composer(name='exec', description='Compose'))
+    result, = await ToolExecutor(registry).execute_batch([
+        {'id': 'outer', 'name': 'exec', 'args': {}},
+    ])
+    assert result.result.ok
+    child_results = [event for event in child_session.events if event.type == 'tool/result']
+    assert len(child_results) == 1
+    assert 'parent_exec_call_id' not in child_results[0].data
+    assert inherited_bridges == [None]
+    messages = derive_messages(child_session.events)
+    results = [message for message in messages if isinstance(message, ToolMessage)]
+    assert len(results) == 1
+    assert '工具执行被中断' not in results[0].content
+    assert results[0].tool_call_id == 'child-model-read'
