@@ -1,0 +1,13 @@
+{
+  "head": "6547475151d6a4d9072fe06f7f83592f55618a19",
+  "tree": "d3a62e8e2abebb866a3abfd9e5bbcd89f1ad8af1",
+  "cwd": "/tmp/ia-validated/web",
+  "argv": [
+    "sh",
+    "-c",
+    "node node_modules/vitest/vitest.mjs run && node node_modules/vite/bin/vite.js build"
+  ],
+  "exit_code": 0,
+  "started_at": 1792498366.618744,
+  "wall_seconds": 56.63288378715515
+}

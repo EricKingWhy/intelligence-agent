@@ -265,7 +265,8 @@ def _protected_fact_request_result(
 
 def _tool_budget_delta(operation: Operation) -> dict | None:
     """Preserve the one-call budget fact for recovered user-input prompts."""
-    if operation.tool_name not in USER_INPUT_TOOL_NAMES:
+    if (operation.tool_name not in USER_INPUT_TOOL_NAMES
+            and operation.parent_exec_call_id is None):
         return None
     attempts = 0
     if operation.result_json:
@@ -677,6 +678,13 @@ class RecoveryCoordinator:
 
             # 步骤 6（写入阶段）：按决策 append 合成事件，restore 一致性。
             for item in plan:
+                operation = operations_by_call_id.get(item.tool_call_id)
+                parent = (operation.parent_exec_call_id if operation is not None else next((
+                    event.data.get("parent_exec_call_id") for event in session.events
+                    if event.type == TOOL_CALL
+                    and event.data.get("tool_call_id") == item.tool_call_id
+                ), None))
+                parent_data = {"parent_exec_call_id": parent} if parent is not None else {}
                 if item.needs_call_event:
                     session.append(
                         TOOL_CALL,
@@ -684,6 +692,7 @@ class RecoveryCoordinator:
                             "tool_call_id": item.tool_call_id,
                             "tool_name": item.tool_name,
                             "args": item.call_event_args(),
+                            **parent_data,
                         },
                         run_id=item.run_id,
                         agent_id=item.agent_id,
@@ -729,6 +738,7 @@ class RecoveryCoordinator:
                 result_data = {
                     "tool_call_id": item.tool_call_id,
                     "content": item.content,
+                    **parent_data,
                 }
                 if item.budget_delta is not None:
                     result_data["budget_delta"] = item.budget_delta
@@ -1126,6 +1136,8 @@ class RecoveryCoordinator:
                         "tool_call_id": operation.tool_call_id,
                         "tool_name": operation.tool_name,
                         "args": _args_from_identity(operation.args_identity) or {},
+                        **({"parent_exec_call_id": operation.parent_exec_call_id}
+                           if operation.parent_exec_call_id is not None else {}),
                     },
                     run_id=operation.run_id,
                     agent_id=operation.agent_id,
@@ -1142,7 +1154,9 @@ class RecoveryCoordinator:
             ):
                 session.append(
                     TOOL_RESULT,
-                    {"tool_call_id": operation.tool_call_id, "content": content},
+                    {"tool_call_id": operation.tool_call_id, "content": content,
+                     **({"parent_exec_call_id": operation.parent_exec_call_id}
+                        if operation.parent_exec_call_id is not None else {})},
                     run_id=operation.run_id,
                     agent_id=operation.agent_id,
                 )

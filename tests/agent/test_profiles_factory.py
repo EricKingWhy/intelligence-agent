@@ -65,7 +65,7 @@ def _grant_all(registry: ToolRegistry) -> frozenset[str]:
 _DECLARED_SCOPES: dict[str, frozenset[str]] = {
     # main = coding ∪ research ∪ {delegate, inspect_artifact}（supervisor 面）
     "main": frozenset({
-        "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
+        "exec", "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
         "git_status", "git_diff", "retrieve_memory", "remember_this",
         "forget_memory", "retrieve_knowledge", "read_knowledge_source",
         "web_search", "delegate", "inspect_artifact",
@@ -73,7 +73,7 @@ _DECLARED_SCOPES: dict[str, frozenset[str]] = {
     }),
     # #202 / ADR-0031 D8：记忆工具（检索 + 显式写入 + 删除）对 coding 开放
     "coding": frozenset({
-        "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
+        "exec", "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
         "git_status", "git_diff", "retrieve_memory", "remember_this",
         "forget_memory",
         "update_plan",  # W-26（#380）：进度清单整表覆盖

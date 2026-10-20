@@ -1553,6 +1553,10 @@ def derive_messages_with_source_ranges(
                 messages.append((AIMessage(content=content), (event.seq, event.seq)))
 
         elif event.type == TOOL_RESULT:
+            # Nested results are durable evidence and budget facts, not model
+            # tool messages: only the enclosing exec has a model-issued call.
+            if event.data.get("parent_exec_call_id") is not None:
+                continue
             tool_call_id = event.data.get("tool_call_id", "")
             content = event.data.get("content", "")
             messages.append((

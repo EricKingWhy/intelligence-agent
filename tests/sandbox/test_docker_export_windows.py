@@ -219,3 +219,35 @@ def test_export_to_host_copies_real_docker_workspace(
     # Windows tar extraction does not map Unix read-only mode onto the host file.
     if os.name != "nt":
         assert readonly.stat().st_mode & stat.S_IWRITE == 0
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX exported file modes')
+def test_export_preserves_readonly_bit_after_safe_tar_filter(monkeypatch, tmp_path):
+    sandbox = _sandbox(monkeypatch, _archive([('readonly.txt', b'read only', 0o444)]))
+    destination = tmp_path / 'export'
+    sandbox.export_to_host(destination)
+    exported = destination / 'readonly.txt'
+    assert exported.read_bytes() == b'read only'
+    assert exported.stat().st_mode & stat.S_IWUSR == 0
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX exported hardlink modes')
+def test_export_preserves_readonly_mode_for_hardlink_members(monkeypatch, tmp_path):
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode='w') as archive:
+        member = tarfile.TarInfo('workspace/readonly.txt')
+        member.mode = 0o444
+        member.size = len(b'read only')
+        archive.addfile(member, io.BytesIO(b'read only'))
+        alias = tarfile.TarInfo('workspace/alias.txt')
+        alias.type = tarfile.LNKTYPE
+        alias.linkname = member.name
+        alias.mode = 0o444
+        archive.addfile(alias)
+    sandbox = _sandbox(monkeypatch, payload.getvalue())
+    destination = tmp_path / 'export'
+    sandbox.export_to_host(destination)
+    for name in ('readonly.txt', 'alias.txt'):
+        exported = destination / name
+        assert exported.read_bytes() == b'read only'
+        assert exported.stat().st_mode & stat.S_IWUSR == 0

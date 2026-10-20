@@ -1,5 +1,9 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
+
+- 2026-10-20：#1360 已交付；Issue CLOSED，PR #1426（`等待merge`）等待维护者合并。Gate-0 收据 6/6 PASS，GitHub Gate-0/E2E/gitleaks 通过。PR 显示 BEHIND；遵从用户要求未同步 main。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
+
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
 > 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等，`SPEC_ROOT` 见 `AGENTS.md` §1）保持冻结，不被进度修改。
 > 每完成一个 Phase，更新本文件对应行的状态 + commit hash + Gate 证据。

@@ -4,7 +4,7 @@
  *
  * 断言纪律（同 i-keyboard §注释）：断言**发出去的请求及其载荷**，不断言 UI 文字
  * 回显——会话行渲染复用夹具 first_user_message，无从区分发没发。命令 → API 的
- * 映射（/plan → workflow-mode、/goal → task/definition、/compact → context/compact）
+ * 映射（/plan → workflow-mode、/goal → goal、/compact → context/compact）
  * 是本票对后端契约的唯一集成断言面。
  *
  * mock 策略：routeApi 铺底（未知路径 404），slash 端点用独立 page.route **叠加**
@@ -14,6 +14,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { routeApi, sessionRow, type FrameSpec } from './fixtures';
+import type { GoalCommandResult } from '../src/lib/api';
 
 const SID = 'slash-session-1';
 
@@ -59,7 +60,7 @@ async function mockSlashEndpoints(page: Page, calls: SlashCalls, events: FrameSp
       });
     }
     if (path === `/api/sessions/${SID}/task` && method === 'GET') {
-      // /goal 无参查看分支走这里（本 spec 只锁带参路径，404 分支由单测覆盖）
+      // 任务交付投影仍走 /task；#1359 的 /goal 使用独立的持久目标接口。
       return jsonFulfill(route, {
         task: {
           defined: false, task_text: null, read_write_intent: null, cwd: null,
@@ -190,20 +191,43 @@ test('/plan toggle：事件流已处 plan → POST {mode:"normal"}（last-wins �
   expect(res.request().postDataJSON()).toEqual({ mode: 'normal' });
 });
 
-test('/goal 带参：POST task/definition {task_text}，不当聊天发给 agent', async ({ page }) => {
+test('/goal 带参：POST goal {operation, objective}，不当聊天发给 agent', async ({ page }) => {
   const calls: SlashCalls = { workflowMode: [], taskDefinition: [], compact: 0 };
   await routeApi(page, { sessions: [sessionRow(SID)], events: IDLE_FRAMES });
   await mockSlashEndpoints(page, calls);
+  let goalPosts = 0;
+  await page.route(`**/api/sessions/${SID}/goal`, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    goalPosts += 1;
+    const body = route.request().postDataJSON() as { objective: string };
+    const response: GoalCommandResult = {
+      status: 'applied',
+      activation: 'armed',
+      goal: {
+        defined: true, goal_id: 'slash-goal-1', revision: 1,
+        objective: body.objective, phase: 'active',
+        blocked_reason: null, pause_reason: null,
+        max_goal_rounds: 32, rounds_started: 0, needs_interview: true,
+      },
+    };
+    return route.fulfill({
+      status: 200, body: JSON.stringify(response), contentType: 'application/json',
+    });
+  });
   await openIdleSession(page);
 
   const definePost = page.waitForResponse(
-    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/sessions/${SID}/task/definition`,
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/sessions/${SID}/goal`,
   );
-  // 多词参数整体作为 task_text（票面提交拦截正则）
+  // #1359：多词参数整体作为持久目标 objective，由 create 命令提交。
   await page.getByLabel('Agent 任务').fill('/goal 修复登录超时并补回归测试');
   await page.getByLabel('Agent 任务').press('Enter');
   const res = await definePost;
-  expect(res.request().postDataJSON()).toEqual({ task_text: '修复登录超时并补回归测试' });
+  expect(res.request().postDataJSON()).toEqual({
+    operation: 'create', objective: '修复登录超时并补回归测试',
+  });
+  expect(goalPosts).toBe(1);
+  expect(calls.taskDefinition).toHaveLength(0);
   // 拦截语义：这条输入绝不能误触其他命令端点（不当聊天也不串命令）
   expect(calls.workflowMode).toHaveLength(0);
   expect(calls.compact).toBe(0);

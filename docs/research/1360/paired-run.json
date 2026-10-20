@@ -1,0 +1,18 @@
+{
+  "head": "3288f93799b7b17efff66f46eeb2da031d433fda",
+  "tree": "71cbe85ec8fc731ec59766cb696df4962e205615",
+  "cwd": "/tmp/ia-release",
+  "argv": [
+    "/tmp/ia-release/.venv/bin/python",
+    "scripts/benchmark_code_mode.py",
+    "--model-config",
+    "/tmp/1360-model.json",
+    "--output",
+    "/tmp/1360-release-paired.json",
+    "--runtime-root",
+    "/tmp/1360-release-paired"
+  ],
+  "exit_code": 0,
+  "started_at": 1792482518.9575427,
+  "wall_seconds": 1666.579933166504
+}
