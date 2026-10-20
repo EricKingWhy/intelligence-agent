@@ -1,6 +1,6 @@
 # dsh-context attribution — `web/src/insights/`
 
-This module adapts parts of **dsh-context** (`deepseek-ai/dsh-context`), read at
+This module adapts parts of **dsh-context** (`bowenliang123/dsh-context`), read at
 commit `1bc481c`. Upstream is licensed under the **Apache License 2.0**; the full
 license text is in `LICENSE` next to this file.
 

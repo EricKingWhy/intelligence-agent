@@ -1,4 +1,6 @@
-/** 跨会话洞察页（#1420）：全屏浮层，从会话栏入口进入。
+/** 跨会话洞察页（#1420）：全屏浮层，从会话栏入口进入。（ADAPT：dsh-context
+ *  `src/client/components/overviewPanel.tsx` @1bc481c，Apache-2.0；页面信息架构
+ *  沿用，渲染与数据流是本仓针对 overview DTO 的新代码。）
  *
  *  页面外壳永远先渲染——API 失败只把内容区降级成错误 / 空态，绝不白屏（票面铁律）。
  *  所有数字来自 `GET /api/insights/overview`；热力图点日只做客户端过滤，不回源。

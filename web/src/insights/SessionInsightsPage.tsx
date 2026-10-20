@@ -1,4 +1,6 @@
-/** 单会话洞察页（#1420）：上下文 / Fleet 两个子页。
+/** 单会话洞察页（#1420）：上下文 / Fleet 两个子页。（ADAPT：dsh-context
+ *  `src/client/components/contextView.tsx` @1bc481c，Apache-2.0；上下文 / Fleet
+ *  子页拆分与「构成 → 趋势 → 事件」顺序沿用，布局与数据流是本仓新代码。）
  *
  *  上下文数据来自 `GET /api/sessions/{id}/context-timeline`（window + requests +
  *  events 一次取齐）；Fleet 来自 `GET /api/sessions/{id}/fleet`，独立请求、独立

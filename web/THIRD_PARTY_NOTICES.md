@@ -74,7 +74,7 @@ upstream code (written against this repo's CSP and controlled-endpoint contract)
   object. No VS Code source is copied: this repo's bridge shape and its
   degrade-to-`''` rule are its own, written against `HOST_PATHS_GLOBAL`.
 
-## dsh-context (`deepseek-ai/dsh-context`) — #1420 context insights
+## dsh-context (`bowenliang123/dsh-context`) — #1420 context insights
 
 - **Commit read for this adaptation:** `1bc481c`
 - **License:** Apache License 2.0
