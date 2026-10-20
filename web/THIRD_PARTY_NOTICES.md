@@ -74,6 +74,22 @@ upstream code (written against this repo's CSP and controlled-endpoint contract)
   object. No VS Code source is copied: this repo's bridge shape and its
   degrade-to-`''` rule are its own, written against `HOST_PATHS_GLOBAL`.
 
+## dsh-context (`deepseek-ai/dsh-context`) — #1420 context insights
+
+- **Commit read for this adaptation:** `1bc481c`
+- **License:** Apache License 2.0
+- **Full license text:** `src/insights/LICENSE` (copied from the upstream
+  `LICENSE` at that commit)
+- **Provenance ledger and modification notes:** `src/insights/NOTICE.md`
+
+Adapted files: `src/insights/components/Donut.tsx` (`donut.tsx`),
+`Heatmap.tsx` (`heatmap.tsx`), `CompositionBar.tsx` (`stackedBar.tsx`),
+`TrendChart.tsx` (`trendChart.tsx`), `src/insights/InsightsPage.tsx`
+(`overviewPanel.tsx`), and `src/insights/SessionInsightsPage.tsx`
+(`contextView.tsx`). `FleetView.tsx` is a new implementation — upstream Fleet is
+host-coupled and this repo's DTO only exposes self/ancestors/children cards.
+All other files in `src/insights/` contain no upstream code.
+
 ## LibreChat (`danny-avila/LibreChat`)
 
 - **Commit read for this reference:** `e1dfc10449ff713faffacd60273fddcfe2c0a698`

@@ -47,10 +47,13 @@ import { changedFiles, hasSuccessfulBashCall } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
+  insightsAvailable,
   resolveActiveTab,
   type CapabilityDescriptor,
   type SurfaceKey,
 } from './lib/capabilities';
+import { InsightsPage } from './insights/InsightsPage';
+import { SessionInsightsPage } from './insights/SessionInsightsPage';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
@@ -300,6 +303,8 @@ export default function App() {
     }
   }, []);
   const surfaces = useMemo(() => deriveSurfaces(capabilities), [capabilities]);
+  /** #1420：洞察入口只在能力显式声明 `insights: true` 时出现；缺键 / 拉取失败 = 隐藏。 */
+  const insightsEnabled = useMemo(() => insightsAvailable(capabilities), [capabilities]);
   const tabs = useMemo(() => centerTabs(surfaces), [surfaces]);
   /** 用户选中的面。渲染用 `activeTab`（下面一轮 `resolveActiveTab`）：能力翻假时
    *  那个面会从 `tabs` 里消失，**渲染必须当场落到仍可见的面**，而不是先渲染一个
@@ -1462,6 +1467,33 @@ export default function App() {
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #1296：值班是独立工作区页面，开合状态只属于当前界面，不持久化。
   const [watchtowerOpen, setWatchtowerOpen] = useState(false);
+  // #1420：洞察也是独立工作区页面。`insightsOpen` = 跨会话页；
+  // `sessionInsightsId` = 单会话页。两者互斥，且都受能力开关闸门。
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [sessionInsightsId, setSessionInsightsId] = useState<string | null>(null);
+  const insightsViewOpen = insightsEnabled && (insightsOpen || sessionInsightsId !== null);
+  const handleOpenInsights = useCallback(() => {
+    setSessionInsightsId(null);
+    setInsightsOpen(true);
+  }, []);
+  const handleOpenSessionInsights = useCallback((sessionId: string) => {
+    setInsightsOpen(false);
+    setSessionInsightsId(sessionId);
+  }, []);
+  const handleCloseInsights = useCallback(() => setInsightsOpen(false), []);
+  const handleCloseSessionInsights = useCallback(() => setSessionInsightsId(null), []);
+  const handleOpenSessionFromInsights = useCallback((sessionId: string) => {
+    setInsightsOpen(false);
+    setSessionInsightsId(null);
+    handleSelect(sessionId);
+  }, [handleSelect]);
+  // 能力翻假（部署关模块 / 旧后端）时立刻收起页面，不让一个已打开的页面悬空。
+  useEffect(() => {
+    if (!insightsEnabled) {
+      setInsightsOpen(false);
+      setSessionInsightsId(null);
+    }
+  }, [insightsEnabled]);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
   // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
@@ -1705,10 +1737,11 @@ export default function App() {
   return (
     <div className="app-frame">
       <SkipLinks
-        inspectorVisible={!watchtowerOpen && inspectorOpen}
-        regionsVisible={!watchtowerOpen && !(panel.expanded && inspectorOpen)}
+        inspectorVisible={!watchtowerOpen && !insightsViewOpen && inspectorOpen}
+        regionsVisible={!watchtowerOpen && !insightsViewOpen && !(panel.expanded && inspectorOpen)}
         composerVisible={
           !watchtowerOpen &&
+          !insightsViewOpen &&
           !(panel.expanded && inspectorOpen) &&
           activeTab === 'chat' &&
           !composerLocked
@@ -1732,6 +1765,7 @@ export default function App() {
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
+        onOpenSessionInsights={insightsEnabled ? handleOpenSessionInsights : undefined}
         awaitingDecision={hasPendingDecisions}
         sessions={sessions}
         titlesById={titlesById}
@@ -1760,11 +1794,27 @@ export default function App() {
         />
       )}
 
+      {insightsViewOpen && insightsOpen && (
+        <InsightsPage
+          onClose={handleCloseInsights}
+          onOpenSession={handleOpenSessionFromInsights}
+        />
+      )}
+
+      {insightsViewOpen && sessionInsightsId !== null && (
+        <SessionInsightsPage
+          sessionId={sessionInsightsId}
+          onClose={handleCloseSessionInsights}
+          onOpenSession={handleOpenSessionFromInsights}
+        />
+      )}
+
       <main
-        hidden={watchtowerOpen}
+        hidden={watchtowerOpen || insightsViewOpen}
         className={
           `app-regions ${inspectorOpen ? '' : 'inspector-closed'}` +
-          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '')
+          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '') +
+          (insightsViewOpen ? ' app-regions-insights-hidden' : '')
         }
         /* #183 AC6：面板宽度是**视图状态**（不持久化）——用 CSS 变量喂给栅格，
            `.app-regions` 的第三列读它。窄屏（<1200px）仍由既有断点接管。 */
@@ -1801,6 +1851,8 @@ export default function App() {
           onSetArchived={handleSetArchived}
           /* #1200：侧栏一级常驻入口——插件管理窗口（MCP + Skills 启停）。 */
           onOpenPlugins={handleOpenPlugins}
+          /* #1420：能力显式声明 insights:true 才给入口；缺键 = 隐藏。 */
+          onOpenInsights={insightsEnabled ? handleOpenInsights : undefined}
         />
 
         <section

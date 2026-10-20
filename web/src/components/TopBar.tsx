@@ -10,7 +10,7 @@
  */
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Brain, Check, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
+import { Brain, ChartNoAxesColumn, Check, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
 import { formatDateTime } from '../lib/format';
@@ -56,6 +56,9 @@ interface Props {
   /** #1197 项 5B：打开「上下文窗口」挡位选择器。可选——未提供时不渲染入口
    *  （同 `onOpenRecoveryList` 的先例：既有测试夹具零迁移）。 */
   onOpenContextWindow?: (sessionId: string) => void;
+  /** #1420：打开当前会话的上下文洞察页（上下文 / Fleet）。可选——能力未声明
+   *  或测试夹具未提供时不渲染入口。 */
+  onOpenSessionInsights?: (sessionId: string) => void;
   /** #1030：后端待裁决清单非空（`GET /api/sessions/{id}/recovery` 或 409 载荷）。
    *  可选 + 缺省 false——既有测试夹具零迁移（同 `onOpenRecoveryList` 的先例）。
    *  为真时徽标显示一等态「待裁决」而非「思考中」：坏死 run 的 `run_status` 停在
@@ -96,7 +99,7 @@ function DensityRadioGroup({ density, onDensityChange }: Pick<Props, 'density' |
   );
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, onOpenSessionInsights, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
   useEffect(() => onTokenChange(() => setTokenLive(getToken())), []);
@@ -112,6 +115,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   /** 本次菜单关闭是否由「打开 API 身份令牌」引起：只在那一次阻止 Radix 归还焦点。
    *  不能按「面板此刻是否打开」判断——面板已开时用 Esc/其它菜单项关菜单也会被误吞。 */
   const authFocusPendingRef = useRef(false);
+  /** 同上：本次菜单关闭由「打开上下文洞察」引起时，别把焦点还给触发器——
+   *  洞察页挂载后要接管焦点（否则 Esc 落在触发器上，页面关不掉）。 */
+  const insightsFocusPendingRef = useRef(false);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -363,9 +369,14 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               className="rail-menu appbar-more-menu"
               align="end"
               sideOffset={6}
-              /* 选中「API 身份令牌」后菜单关闭：默认会把焦点还给触发器，
-                 面板里的输入框就接不到 Esc。阻止这次归还，由面板 effect 接管。 */
+              /* 选中「API 身份令牌」/「上下文洞察」后菜单关闭：默认会把焦点还给触发器，
+                 面板 / 页面里的控件就接不到 Esc。阻止这次归还，由目标界面 effect 接管。 */
               onCloseAutoFocus={(event) => {
+                if (insightsFocusPendingRef.current) {
+                  insightsFocusPendingRef.current = false;
+                  event.preventDefault();
+                  return;
+                }
                 if (!authFocusPendingRef.current) return;
                 authFocusPendingRef.current = false;
                 event.preventDefault();
@@ -420,6 +431,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                   onSelect={() => onOpenContextWindow(sessionId)}
                 >
                   <SlidersHorizontal size={14} aria-hidden="true" /> 上下文窗口
+                </DropdownMenu.Item>
+              )}
+              {sessionId && onOpenSessionInsights && (
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => {
+                    // 洞察页挂载后会把焦点落到返回按钮；阻止 Radix 随后抢回触发器。
+                    insightsFocusPendingRef.current = true;
+                    onOpenSessionInsights(sessionId);
+                  }}
+                >
+                  <ChartNoAxesColumn size={14} aria-hidden="true" /> 上下文洞察
                 </DropdownMenu.Item>
               )}
               <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenApprovePolicy}>
