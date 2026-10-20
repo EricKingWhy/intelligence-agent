@@ -51,7 +51,6 @@ from agent_harness.memory.v2 import (
 )
 from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.capability import MemoryV2Service
-from agent_harness.memory.v2.commands import explicit_remember_matches
 from agent_harness.memory.v2.eligibility import (
     MEMORY_OPT_OUT_FIELD,
     decide_run_end_eligibility,
@@ -433,12 +432,12 @@ _ISOLATION_CASES = frozenset({"wrong_project_isolation"})
 #: Cases that must replay the same claimed job and observe a zero-write terminal echo.
 _REPLAY_CASES = frozenset({"secret_replay_probe", "replay_committed_job"})
 
-#: Recall-label anchors per recall case. A formed record whose content contains the
-#: literal anchor is mapped to the label; unmapped hits keep their raw id. The anchors
-#: are corpus literals, not reads of `case.expected`.
-_RECALL_LABELS: dict[str, tuple[str, str]] = {
-    "cross_session_recall_one": ("gold-project-name", "Sample Harbor"),
-    "cross_session_recall_two": ("gold-pagination", "cursor pagination"),
+#: Recall-target label per recall case. The label is registered against the record id
+#: when this run writes the formed record (`written` from the job), never by matching
+#: record content or by reading `case.expected`; unmapped hits keep their raw id.
+_RECALL_LABELS: dict[str, str] = {
+    "cross_session_recall_one": "gold-project-name",
+    "cross_session_recall_two": "gold-pagination",
 }
 _RECALL_CASES = frozenset(_RECALL_LABELS)
 
@@ -514,6 +513,10 @@ _INELIGIBLE_SCRIPTS: dict[str, dict[str, Any]] = {
 
 #: The explicit-command secret probe: the tool boundary must refuse to persist it.
 _EXPLICIT_SECRET_PROBE = "explicit_remember_secret_probe"
+#: `RememberMemoryV2Tool`'s refusal text when it matched the secret rule. Both the
+#: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED, so the
+#: message is the only discriminator the tool's return exposes (tools.py:207-211).
+_EXPLICIT_SECRET_REFUSAL = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
 
 
 def _trusted_identity(case_id: str) -> TrustedMemoryIdentity:
@@ -803,8 +806,13 @@ async def _verify_deleted_memory_erasure(
     trusted: TrustedMemoryIdentity,
     root_id: str,
     memory_ids: set[str],
+    contents: Sequence[str] = (),
 ) -> bool:
-    """Deletion must erase the complete SQLite chain and every derived index row."""
+    """Deletion must erase the complete SQLite chain, its index rows, and markdown.
+
+    markdown is the authoritative surface (#1353 §2): the derived SQLite/index layers
+    can be clean while the deleted fact survives there, so check it explicitly.
+    """
     async with connect(database_path) as connection:
         async with connection.execute(
             "SELECT COUNT(*) AS count FROM memory_v2_records WHERE root_id=?", (root_id,),
@@ -820,10 +828,19 @@ async def _verify_deleted_memory_erasure(
     contains = getattr(index, "contains", None)
     if contains is None:
         return False
-    return not any([
+    if any([
         await contains(memory_id, trusted, MemoryScope.PROJECT)
         for memory_id in memory_ids
-    ])
+    ]):
+        return False
+    markdown = service.markdown
+    if markdown is None:
+        return False
+    surface = "\n".join(
+        markdown.read_raw_checked(markdown.path_for(target))[0]
+        for target in ("memory", "user")
+    )
+    return all(content not in surface for content in contents if content)
 
 
 async def _verify_cross_session_lifecycle(
@@ -918,6 +935,7 @@ async def _verify_cross_session_lifecycle(
                 storage_erasure_verified = await _verify_deleted_memory_erasure(
                     database_path=database_path, service=service, trusted=trusted,
                     root_id=record.root_id, memory_ids=version_ids,
+                    contents=(record.content, content),
                 )
                 detail_response = await client.get(
                     f"/api/memories/{edited_id}", headers=headers, params=params,
@@ -1125,6 +1143,18 @@ def _model_outputs(
     return formation, adjudication
 
 
+def _secret_policy_rejected(observer_rows: Sequence[tuple[str, Mapping[str, Any]]]) -> bool:
+    """True only when the selection observer recorded a policy rejection for a secret.
+
+    "Zero writes" alone does not prove the secret rule fired — an abstention writes
+    nothing too. The rejection attribution is the executor's own observation.
+    """
+    return any(
+        name == "selection" and (metadata.get("counts") or {}).get("secret", 0) > 0
+        for name, metadata in observer_rows
+    )
+
+
 def _observed(
     *,
     eligibility: Any,
@@ -1167,11 +1197,18 @@ def _observed(
                 if event_id in event_by_id
             }
         )
-    elif script is not None and script.get("evidence_event_id") == "assistant":
+    else:
+        source_authority = []
+    if not source_authority and script is not None and (
+        script.get("evidence_event_id") == "assistant"
+    ):
         # The (policy-rejected) candidate was attributed to the assistant, so the run's
         # observable authority is the assistant, not the user who asked the question.
         source_authority = ["assistant"]
-    else:
+    elif not source_authority:
+        # No record in `written` carries provenance from this run — e.g. an INVALIDATE
+        # decision returns the seed row it invalidated, whose source events belong to
+        # an earlier run. The authority of this run's decision is its user message.
         source_authority = sorted(
             {
                 resolve_evidence_source(event).value
@@ -1270,7 +1307,9 @@ def _observed(
         }
     )
     observed["secret_probe_blocked"] = (
-        secret_write_count == 0 if secret_probe_blocked is None else secret_probe_blocked
+        _secret_policy_rejected(observer_rows)
+        if secret_probe_blocked is None
+        else secret_probe_blocked
     )
     observed["prohibited_outcomes"] = (
         ["secret_write"] if observed["secret_write_count"] else []
@@ -1410,10 +1449,6 @@ async def _execute_wired(
         finally:
             memory_session_var.reset(session_token)
             identity_context_var.reset(identity_token)
-        explicit_remember_applied = explicit_remember_matches(
-            case.synthetic_input,
-            script["content"],
-        )
         explicit_action = "ADD" if explicit_result.ok else "NOOP"
         written = tuple(
             await service.list_active(
@@ -1422,6 +1457,28 @@ async def _execute_wired(
                 limit=100,
             )
         )
+        # Derived from the tool's own return, not recomputed from the corpus input:
+        # either the boundary persisted a record with explicit-command provenance, or it
+        # recognised the instruction and refused it on the secret rule. Any other
+        # failure (including "no explicit instruction") leaves this False.
+        persisted = next(
+            (record for record in written if record.content == script["content"]),
+            None,
+        )
+        explicit_remember_applied = bool(
+            (
+                explicit_result.ok
+                and persisted is not None
+                and persisted.source_type is SourceType.EXPLICIT_COMMAND
+            )
+            or explicit_result.message == _EXPLICIT_SECRET_REFUSAL
+        )
+        if case.case_id == _EXPLICIT_SECRET_PROBE:
+            # The tool boundary is its own observation: the refusal text is the only
+            # discriminator between "secret rule fired" and "not an explicit command".
+            secret_probe_blocked = (
+                explicit_result.message == _EXPLICIT_SECRET_REFUSAL and not written
+            )
     else:
         if case.case_id in _ISOLATION_CASES:
             # Same content, genuinely foreign project identity: the peer's memory must
@@ -1570,14 +1627,11 @@ async def _execute_wired(
     recall_ids: list[str] = []
     lifecycle_evidence: Mapping[str, bool] | None = None
     if case.case_id in _RECALL_CASES:
-        label, anchor = _RECALL_LABELS[case.case_id]
-        # Labels attach to the records this run actually returned, matched by their
-        # literal anchor — never by the corpus expectation.
-        recalled_labels = {
-            record.id: label
-            for record in written
-            if anchor.casefold() in record.content.casefold()
-        }
+        label = _RECALL_LABELS[case.case_id]
+        # Registered from the job's own return (`written`) as the record is persisted;
+        # the label is the corpus's recall_target literal, the one expectation copy the
+        # gate's scoring contract forces into the adapter.
+        recalled_labels = {record.id: label for record in written}
         hits = await service.hybrid_search(
             case.synthetic_input,
             trusted,
