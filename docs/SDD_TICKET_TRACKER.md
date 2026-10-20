@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**补修中（2026-10-21，#1360）**：本地分支 `codex/1360-code-mode` 到 `36ae9396`，尚未推送 PR #1426。补丁修复 Windows Docker `NpipeSocket.recv()` 兼容和 `ZoneInfo` 缺少 Windows tzdata，并补流读取回归测试。两轴复审 PASS、P0–P4=0；定向 worker 4、transport 2、Watchtower 28、context/evaluation 587 项通过。全量后端测试在 42% 按用户指示中止，观察到 1 个未定位失败（使用 `--tb=no`），之后相关范围未复现；不计作全量通过。初次 Gate-0 5/6，仅 coverage 因本轮台账未落账失败；见月档，落账后重跑。
+
 **已交付（2026-10-20，#1360；Issue CLOSED，PR #1426 等待维护者合并）**：PR [#1426](https://github.com/EricKingWhy/intelligence-agent/pull/1426) 已推送并标记 `等待merge`；分支 `codex/1360-code-mode`，基线 `204c9152`，最终产品代码 `6547475`。双轴审查 P0–P4=0；后端全量 8762 passed / 78 skipped / 43 deselected（SHA `3288f937`，最终测试修复后按用户批准复用），Vitest 166 files / 2263 tests passed、各 1 skipped，Vite build 成功，Playwright 840 passed。review coverage exit 0；Gate-0 收据 `docs/gate/2b08b04effffc347c8dcea2688ad36b3de0cb4ad.json` 为 6/6 PASS；GitHub Gate-0、PR E2E smoke、gitleaks 已通过（PR HEAD `f6e8db3a`）。PR 显示 `BEHIND`；按用户指示不追 main，由维护者合并前处理。
 
 **施工中（2026-10-19 起，#1359 阶段 3 / 目标轮次自动续跑；2026-10-20 审查 P0×3 修复）**：Issue [#1359](https://github.com/EricKingWhy/intelligence-agent/issues/1359) OPEN；worktree `intelligence-agent-wt/1359-goal`，分支 `claude/1359-goal-durable`，HEAD `3f2b1732`（tree `1dc86a7bd824cef65b89af420e5a79c089153e10`），基线 `183c049c`；阶段 0–2 = `183c049c` / `ea0830fa` / `f6953129`，阶段 3 实现 `40687752`，注释对齐 `4cd5c762`，决策 (b) 落地 `091f1736`，审查 P0×3 修复 `3f2b1732`。未 push / 未开 PR / 未 merge，集成负责人 EricKingWhy。

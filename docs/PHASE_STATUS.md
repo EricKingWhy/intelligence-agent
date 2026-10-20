@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-21：#1360 在本地分支 `36ae9396` 补入 Windows 兼容修复与 socket 回归；PR #1426 待推送。两轴复审 PASS、P0–P4=0。全量后端运行按用户指示停在 42%，含 1 个未定位失败；context/evaluation 587 项复跑通过，不记全量通过。Gate-0 首次 5/6（coverage 待落本轮 review 行）；后续状态见月档。
+
 - 2026-10-20：#1360 已交付；Issue CLOSED，PR #1426（`等待merge`）等待维护者合并。Gate-0 收据 6/6 PASS，GitHub Gate-0/E2E/gitleaks 通过。PR 显示 BEHIND；遵从用户要求未同步 main。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
 
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
