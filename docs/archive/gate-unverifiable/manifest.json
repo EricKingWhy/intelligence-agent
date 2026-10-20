@@ -1,0 +1,24 @@
+{
+  "user_approved_on": "2026-10-20",
+  "reason": "Commit objects absent in all three local clones; GitHub exact fetch rejected with not our ref. Archived receipts preserve original bytes and are not current verified gate evidence.",
+  "receipts": [
+    {
+      "original_path": "docs/gate/04000f634a3b8f0cfe9ddf087b7eaccf460bc3f6.json",
+      "archive_path": "docs/archive/gate-unverifiable/04000f634a3b8f0cfe9ddf087b7eaccf460bc3f6.json",
+      "sha256": "bb203cccaa1b818993716d8db76ac2194ddb4294061215b548a83fc9cc550751",
+      "status": "unverifiable"
+    },
+    {
+      "original_path": "docs/gate/8ebf3a0b9cde5c99af2ec96ae06db030b41c060e.json",
+      "archive_path": "docs/archive/gate-unverifiable/8ebf3a0b9cde5c99af2ec96ae06db030b41c060e.json",
+      "sha256": "3bddde191cf8818206cc33fa49e3f00664ac2ef54a6c3f07a4e8267253c137c0",
+      "status": "unverifiable"
+    },
+    {
+      "original_path": "docs/gate/9d8dc5d05d5592d21eca7cffb5a50c4086a19e49.json",
+      "archive_path": "docs/archive/gate-unverifiable/9d8dc5d05d5592d21eca7cffb5a50c4086a19e49.json",
+      "sha256": "bc9ed5cde7fa51a6c1d1e8819dd4cd4ed990b01e001bf7053674013ab1e22c7f",
+      "status": "unverifiable"
+    }
+  ]
+}
