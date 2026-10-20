@@ -53,7 +53,13 @@ class DockerCodeWorker:
     def _read_exact(self, size: int) -> bytes:
         pieces = bytearray()
         while len(pieces) < size:
-            chunk = self._socket.read(size - len(pieces))
+            stream = getattr(self._socket, '_sock', self._socket)
+            read = getattr(stream, 'read', None)
+            chunk = (
+                read(size - len(pieces))
+                if callable(read)
+                else stream.recv(size - len(pieces))
+            )
             if not chunk:
                 raise EOFError('Code worker closed its bridge')
             pieces.extend(chunk)
