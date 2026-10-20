@@ -5696,6 +5696,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 8px 2px;
   color: var(--text-tertiary);
   font-size: 9px;
+  /* #1419 标签密度按**轴自身**宽度收缩：窄面板的 track 只有 46px，5 枚 mm:ss
+     必然叠成墨迹（见下方 `@container tl-axis` 的密度规则）。 */
+  container-type: inline-size;
+  container-name: tl-axis;
 }
 .tl-axis-track {
   position: relative;
@@ -5723,6 +5727,27 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .tl-axis-tick:last-child .tl-axis-label {
   transform: translateX(-100%);
+}
+
+/* #1419 标签密度：默认只留首/中/尾三枚（tick 竖线全保留）。几何账：
+ *   track = 轴宽 − 109（padding 16 + gap 24 + 固定列 69）再按 1fr:1.1fr 分；
+ *   三枚标签（首左对齐 / 中居中 / 尾右对齐）不重叠需 track ≥ 4×w首 + 2×w中
+ *   = 4×19 + 2×17 = 110px（实测 9px 字体 "0ms" 19 / "38s" 17）。
+ *   默认面板 340px 时 track 只有 46px（`@container inspector (max-width: 380px)`
+ *   的 46px 定宽列），三枚也放不下 ⇒ 见下方窄面板的端点外挂。 */
+.tl-axis-track > .tl-axis-tick:nth-child(2) .tl-axis-label,
+.tl-axis-track > .tl-axis-tick:nth-child(4) .tl-axis-label {
+  display: none;
+}
+
+/* 宽轴（≥560px ⇒ 默认模板下 track ≥236px）：五枚全显不重叠。
+ *   最紧的是第 4 枚与末枚：需 track ≥ 4×w末 + 2×w4 = 4×43 + 34 = 206px
+ *   （w末 取 7 字符 "125m30s" 的上界 43px）。 */
+@container tl-axis (min-width: 560px) {
+  .tl-axis-track > .tl-axis-tick:nth-child(2) .tl-axis-label,
+  .tl-axis-track > .tl-axis-tick:nth-child(4) .tl-axis-label {
+    display: inline;
+  }
 }
 
 /* run 泳道头：不是卡片，是一条分隔+元信息；组内卡片才是交互面。 */
@@ -6161,6 +6186,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .tl-axis {
     padding-inline: 6px;
+  }
+  /* #1419 窄面板 track 定宽 46px：三枚标签（首/中/尾）横向放不下
+     （首 19 + 尾 31 = 50 > 46）⇒ 端点标签挂到轴的两端之外，中间保持居中。
+     轴行的主列/时长列在刻度行是空的，外挂不会压到文字。 */
+  .tl-axis-tick:first-child .tl-axis-label {
+    transform: translateX(-100%);
+  }
+  .tl-axis-tick:last-child .tl-axis-label {
+    transform: none;
   }
 }
 
