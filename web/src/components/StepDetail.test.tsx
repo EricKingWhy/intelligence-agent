@@ -59,7 +59,7 @@ describe('TimelineTab 尾窗裁剪', () => {
     expect(html).toContain('timeline-window-bar');
     expect(html).toContain(`共 ${total} 条`);
     // 窗口是"最近"而非"最早"——最后一行必须在
-    expect(html).toContain(`>${total - 1}<`);
+    expect(html).toContain(`#${total - 1}`);
     // 最早一行被折叠
     expect(html).not.toContain('>--1<');
   });
@@ -67,7 +67,7 @@ describe('TimelineTab 尾窗裁剪', () => {
   it('窗口行 key 用全局序号：扩展窗口后既有行 identity 稳定（append-only 契约）', () => {
     // key = hidden + i：对 2000 事件窗口 200，最后可见行全局序号 1999
     const html = renderTab(bigConversation(2000));
-    expect(html).toContain(`>${2000 - 1}<`);
+    expect(html).toContain(`#${2000 - 1}`);
     expect(rowCount(html)).toBe(TIMELINE_WINDOW_DEFAULT);
   });
 

@@ -5025,6 +5025,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 /* ── StepDetail（右：Run Inspector，嵌在 frame 内，无独立边框） ── */
 .step-detail {
+  /* #1419：票面要求的卡片边框 token。仓库全局只有 --border-subtle/-strong，
+     没有 --border；在面板作用域内补别名，避免新增全局 token（index.css 不归本票）。 */
+  --border: var(--border-subtle);
   background: var(--bg-inspector);
   /* 结构分层：面板自身不滚动——header/tabs 钉在顶部，内容在 .detail-body 内滚
      （长内容不得把 tabs 滚出视口，否则 tab 行不可达）。 */
@@ -5578,59 +5581,559 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     animation: none;
   }
 }
-.timeline-row {
+/* ── #1419 Timeline 甘特卡片流 ───────────────────────────────────────────────
+ * 结构：全宽卡片（.timeline-card）内嵌甘特条（.tl-track > .tl-bar），条只是
+ * "时间位置"的可视化，不承担点击面——点击面是整张卡片的 .timeline-row。
+ * 颜色全部走 token（无字面量）；条的状态色 = 语义色，与筛选「失败」同判据。 */
+.detail-timeline {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-sm);
-  width: 100%;
-  padding: 3px var(--space-sm);
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 筛选条：sticky 在滚动容器顶部，滚动时仍能切筛选/跳实时。 */
+.tl-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 2px 0 6px;
+  background: var(--bg-inspector);
+}
+.tl-filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
   background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font: 500 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-apple),
+    border-color var(--dur-fast) var(--ease-apple),
+    color var(--dur-fast) var(--ease-apple);
+}
+.tl-chip:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.tl-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+.tl-chip.is-on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--accent-text);
+}
+.tl-chip-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.tl-chip.is-on .tl-chip-count {
+  color: var(--accent-text-strong);
+}
+.tl-chip-fail.is-on {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  color: var(--danger);
+}
+.tl-chip-fail.is-on .tl-chip-count {
+  color: var(--danger);
+}
+.tl-live-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font: 500 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple), color var(--dur-fast) var(--ease-apple);
+}
+.tl-live-jump:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.tl-live-jump:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+.tl-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+  animation: tl-live-pulse 1.8s var(--ease-apple) infinite;
+}
+
+/* 时间轴刻度：列宽与卡片 grid 完全一致（第一列图标 / 末列 chevron 留空）。 */
+.tl-axis {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) minmax(54px, 1.1fr) 40px 11px;
+  gap: 6px;
+  align-items: end;
+  padding: 0 8px 2px;
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+.tl-axis-track {
+  position: relative;
+  height: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tl-axis-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 4px;
+  background: var(--border-strong);
+}
+.tl-axis-label {
+  position: absolute;
+  left: 0;
+  bottom: 5px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 9px;
+  color: var(--text-tertiary);
+}
+.tl-axis-tick:first-child .tl-axis-label {
+  transform: none;
+}
+.tl-axis-tick:last-child .tl-axis-label {
+  transform: translateX(-100%);
+}
+
+/* run 泳道头：不是卡片，是一条分隔+元信息；组内卡片才是交互面。 */
+.tl-run-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  margin-top: 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+.tl-run-name {
+  font: 600 var(--text-xs) var(--font-ui);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.tl-run-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.tl-run-time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* 卡片：整行是点击面；hover 抬 1px + popover 阴影（120ms，与全局卡片语言一致）。 */
+.timeline-card {
+  position: relative;
+  margin: 2px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  overflow: hidden;
+  transition:
+    transform 120ms var(--ease-apple),
+    box-shadow 120ms var(--ease-apple),
+    border-color 120ms var(--ease-apple),
+    background 120ms var(--ease-apple);
+}
+.timeline-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-popover);
+}
+.timeline-card.sel {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-elevated));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.timeline-card.expanded {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+.timeline-card[data-state='fail'] {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface-elevated));
+}
+.timeline-card[data-state='run'] {
+  border-color: color-mix(in srgb, var(--success) 32%, var(--border));
+}
+.timeline-card.is-new {
+  animation: tl-flash 1.2s var(--ease-apple);
+}
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) minmax(54px, 1.1fr) 40px 11px;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   cursor: pointer;
   font: inherit;
   text-align: left;
-  color: var(--color-foreground);
+  color: var(--text-primary);
   transition: background var(--dur-fast) var(--ease-apple);
 }
 .timeline-row:hover {
-  background: var(--color-hover);
+  background: var(--surface-hover);
 }
 .timeline-row:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
-/* #183：被选中（详情正在显示它）的行。与 `.detail-tool-row.sel` 同一视觉语言——
-   左侧 accent 竖条 + 淡底，全站"这是当前项"只有一种说法。 */
+/* 旧 `.timeline-row.sel` 的底/竖条已上移到卡片（卡片才有边框），这里只保留
+   语义占位，防止旧选择器在卡片内再叠一层。 */
 .timeline-row.sel {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  box-shadow: inset 2px 0 0 0 var(--accent);
+  background: transparent;
+  box-shadow: none;
 }
-.tl-seq {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--color-subtle-foreground);
-  min-width: 3ch;
-  text-align: right;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
+
+.timeline-row::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  justify-self: center;
+  background: var(--text-tertiary);
 }
-.tl-type {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  /* UI-02（R1 One Voice）：事件类型名是数据标识不是交互件——中性次级色，
-   * 不再借 accent（整列粉色让「粉=可点/关键」的信号失效）。状态字仍走语义色。 */
-  color: var(--color-muted-foreground);
-  flex-shrink: 0;
+.timeline-row[data-cat='tool']::before {
+  background: var(--info);
 }
-.tl-summary {
+.timeline-row[data-cat='model']::before {
+  background: var(--accent-text);
+}
+.timeline-row[data-cat='agent']::before,
+.timeline-row[data-cat='user']::before {
+  background: var(--warning);
+}
+.timeline-row[data-cat='run']::before {
+  background: var(--success);
+}
+
+.tl-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tl-title {
   font-size: var(--text-xs);
-  color: var(--color-muted-foreground);
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+  line-height: 1.35;
+}
+.tl-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.tl-seq {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  min-width: auto;
+  text-align: left;
+  flex-shrink: 0;
+}
+.tl-type {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-meta-sep {
+  opacity: 0.55;
+}
+.tl-time {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.tl-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+.tl-tag-tool {
+  font-family: var(--font-mono);
+}
+.tl-tag-fail {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.tl-tag-run {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+/* 甘特条：点事件 = 8px 圆点；有跨度 = 真实比例条（最小 0.35% + min-width 8px）。 */
+.tl-track {
+  position: relative;
+  height: 14px;
+  min-width: 0;
+}
+.tl-track::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 6px;
+  height: 1px;
+  background: var(--border-subtle);
+}
+/* 条本身用 ::after，不占 DOM 节点：left/width 由行内 CSS 变量给。 */
+.tl-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: var(--bar-left, 0%);
+  width: var(--bar-width, 0%);
+  height: 10px;
+  min-width: 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 70%, var(--surface-overlay));
+}
+.tl-track[data-state='ok']::after {
+  background: color-mix(in srgb, var(--success) 62%, var(--surface-overlay));
+}
+.tl-track[data-state='fail']::after {
+  background: color-mix(in srgb, var(--danger) 70%, var(--surface-overlay));
+}
+.tl-track[data-state='run']::after {
+  background: color-mix(in srgb, var(--success) 52%, var(--surface-overlay));
+  animation: tl-bar-breathe 2s var(--ease-apple) infinite;
+}
+.tl-track[data-state='idle']::after {
+  background: color-mix(in srgb, var(--text-tertiary) 52%, var(--surface-overlay));
+}
+.tl-track.is-point::after {
+  width: 8px;
+  height: 8px;
+  top: 3px;
+  border-radius: 50%;
+}
+.tl-track.is-empty::before {
+  content: '—';
+  left: 0;
+  right: auto;
+  top: 2px;
+  width: auto;
+  height: auto;
+  background: none;
+  font-size: 9px;
+  color: var(--text-tertiary);
+}
+.tl-track.is-empty::after {
+  display: none;
+}
+.tl-bar-label {
+  position: absolute;
+  inset: 2px 2px 2px 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--on-solid);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tl-dur {
+  font-size: 10px;
+  color: var(--text-secondary);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.timeline-row::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  transform: rotate(45deg);
+  color: var(--text-tertiary);
+  transition: transform 160ms var(--ease-apple);
+  justify-self: center;
+}
+.timeline-card.expanded .timeline-row::after {
+  transform: rotate(135deg);
+}
+
+/* 就地展开：0fr→1fr（高度动画不读布局），内容只在展开时挂载——
+ * 展开不会让窗口外的行进入 DOM（.timeline-row 数量不变）。 */
+.tl-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-expand) var(--ease-apple);
+}
+.tl-expand.open {
+  grid-template-rows: 1fr;
+}
+.tl-inner {
+  min-height: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface-workspace) 55%, transparent);
+}
+.tl-drill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.tl-drill-type {
+  color: var(--text-secondary);
+}
+
+/* seq 缺口：不是卡片，是"日志断了"的事实提示；只在「全部」筛选下出现。 */
+.tl-gap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  margin: 0 0 4px;
+  color: var(--warning);
+  font-size: 10px;
+}
+.tl-gap::before,
+.tl-gap::after {
+  content: '';
+  flex: 1;
+  border-top: 1px dashed color-mix(in srgb, var(--warning) 35%, transparent);
+}
+
+.tl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 28px 12px;
+  color: var(--text-tertiary);
+}
+.tl-empty-title {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.tl-empty-hint {
+  font-size: var(--text-xs);
+}
+.tl-empty-reset {
+  margin-top: 2px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent-text);
+  font: 500 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+}
+.tl-empty-reset:hover {
+  background: var(--accent-muted);
+}
+
+@keyframes tl-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--success) 8%, transparent);
+  }
+}
+@keyframes tl-bar-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+@keyframes tl-flash {
+  0% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* 窄面板：标签先让位，甘特条保留（它是本 tab 的主信息）。 */
+@container inspector (max-width: 380px) {
+  .timeline-row,
+  .tl-axis {
+    grid-template-columns: 16px minmax(0, 1fr) 46px 34px 10px;
+    gap: 4px;
+  }
+  .tl-tag,
+  .tl-run-time {
+    display: none;
+  }
+  .tl-axis {
+    padding-inline: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-card,
+  .timeline-row::after,
+  .tl-expand {
+    transition: none;
+  }
+  .timeline-card.is-new,
+  .tl-live-dot,
+  .tl-bar-run {
+    animation: none;
+  }
 }
 
 /* Terminal tab：命令执行面聚合 */
