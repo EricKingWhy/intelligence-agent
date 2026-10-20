@@ -528,7 +528,13 @@ class TestToolContentPrefix:
         archive.append_message("big", "tool", full, tool_name="big", timestamp=time.time())
 
         assert archive.search_messages("前缀关键词", limit=5)
-        assert not archive.search_messages(tail, limit=5), "8192 之后的内容不得进 FTS 索引"
+        # 索引 bound 不变：FTS 索引本身看不到 8192 之后的内容（LIKE 兜底是 canonical
+        # 全文路径，F4 起按设计不再受此 bound 限制）。
+        with _raw(archive.db_path) as conn:
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?", ('"后缀关键词B"',)
+            ).fetchone()[0]
+        assert hits == 0, "8192 之后的内容不得进 FTS 索引"
 
         rows = archive.get_messages("big")
         assert rows[0]["content"] == full, "存储仍是全文"
@@ -802,3 +808,231 @@ class TestStoreObserverWiring:
         # state.db 落在 sessions root 下（裸文件，不是目录）：列表只认目录。
         assert (root / "state.db").exists()
         assert store.list_session_ids() == [sid]
+
+
+# ------------------------------------------- 修复轮 B：检索语义（Hermes 对齐） ---
+
+
+class TestOrRelaxedRetry:
+    """F3：精确查询与子串回退全部零命中后，用 any-term OR 再试一次。"""
+
+    def test_paraphrase_query_hits_via_or_retry(self, archive: SessionArchive) -> None:
+        archive.ensure_session("para", source="interactive", started_at=time.time())
+        archive.append_message(
+            "para", "user",
+            "Sarah prefers the standup meeting scheduled on Thursday mornings",
+            timestamp=time.time(),
+        )
+        rows = archive.search_messages(
+            "when does Sarah like her standup scheduled", limit=5,
+        )
+        assert rows, "隐式 AND 全零命中后必须用 OR 放宽重试"
+        assert rows[0]["session_id"] == "para"
+
+    def test_single_term_and_explicit_operators_do_not_relax(self) -> None:
+        from agent_harness.storage.session_archive import _or_relaxed_query
+
+        assert _or_relaxed_query("standup") is None
+        assert _or_relaxed_query("alpha OR beta") is None
+        assert _or_relaxed_query("alpha NOT beta") is None
+        assert _or_relaxed_query('"docker networking" tls') == '"docker networking" OR tls'
+
+    def test_not_query_keeps_exact_semantics(self, archive: SessionArchive) -> None:
+        archive.ensure_session("neg", source="interactive", started_at=time.time())
+        archive.append_message("neg", "user", "alpha beta", timestamp=time.time())
+        # 放宽会把该行搜出来；显式 NOT 必须保持精确语义。
+        assert archive.search_messages("alpha NOT beta", limit=5) == []
+
+
+class TestLikeFallback:
+    """F4：LIKE 兜底三列 OR、全文扫描、tool 角色走全文路径。"""
+
+    def test_two_terms_match_sentence_containing_one(self, archive: SessionArchive) -> None:
+        archive.ensure_session("like-or", source="interactive", started_at=time.time())
+        archive.append_message("like-or", "user", "我们部署了新版本", timestamp=time.time())
+        rows = archive.search_messages("部署 回滚", limit=5)
+        assert rows, "LIKE 兜底必须是 term 之间 OR（任一命中即可）"
+
+    def test_tool_name_column_is_searched(self, archive: SessionArchive) -> None:
+        archive.ensure_session("like-toolname", source="interactive", started_at=time.time())
+        archive.append_message(
+            "like-toolname", "tool", "无关内容", tool_name="数据库迁移",
+            timestamp=time.time(),
+        )
+        rows = archive.search_messages("迁移", role_filter=("tool",), limit=5)
+        assert rows, "tool_name 列必须参与 LIKE 匹配"
+
+    def test_tool_role_searches_full_canonical_content(self, archive: SessionArchive) -> None:
+        archive.ensure_session("tool-full", source="interactive", started_at=time.time())
+        full = "x" * FTS_TOOL_CONTENT_PREFIX_CHARS + " postfixmarkerB"
+        archive.append_message("tool-full", "tool", full, timestamp=time.time())
+
+        # 普通 FTS 路由仍只覆盖索引 bound（8192 前缀）。
+        assert archive.search_messages("postfixmarkerB", limit=5) == []
+        # 显式 tool 角色是 opt-in 全文路径。
+        rows = archive.search_messages("postfixmarkerB", role_filter=("tool",), limit=5)
+        assert [r["session_id"] for r in rows] == ["tool-full"]
+
+
+class TestTitleDiscovery:
+    """F5：DISCOVERY 先按会话标题解析。"""
+
+    def test_title_match_returns_session_title_entry(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "titled", source="interactive", started_at=time.time(), title="项目甲",
+        )
+        archive.append_message("titled", "user", "无关内容", timestamp=time.time())
+
+        out = archive.session_search(query="项目甲")
+        assert out["count"] == 1
+        entry = out["results"][0]
+        assert entry["session_id"] == "titled"
+        assert entry["matched_role"] == "session_title"
+        assert entry["snippet"] == "Session title matched: 项目甲"
+        assert entry["detail"] == "full"
+
+    def test_numbered_continuation_preferred(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("t1", source="interactive", started_at=now, title="项目甲")
+        archive.ensure_session("t2", source="interactive", started_at=now + 10, title="项目甲 #2")
+        assert archive.resolve_session_by_title("项目甲") == "t2"
+        assert archive.resolve_session_by_title("不存在的标题") is None
+
+    def test_like_wildcards_escaped_in_numbered_lookup(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("pct", source="interactive", started_at=now, title="100%完成")
+        archive.ensure_session("decoy", source="interactive", started_at=now + 10,
+                               title="100X完成 #2")
+        assert archive.resolve_session_by_title("100%完成") == "pct"
+
+    def test_hidden_source_title_not_returned(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "hidden-title", source="subagent", started_at=time.time(), title="隐藏项目乙",
+        )
+        archive.append_message("hidden-title", "user", "无关内容", timestamp=time.time())
+        out = archive.session_search(query="隐藏项目乙")
+        assert out["results"] == []
+
+    def test_current_live_lineage_title_not_returned(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "cur-title", source="interactive", started_at=time.time(), title="当前项目丙",
+        )
+        archive.append_message("cur-title", "user", "无关内容", timestamp=time.time())
+        out = archive.session_search(query="当前项目丙", current_session_id="cur-title")
+        assert out["results"] == []
+
+
+class TestScrollHermesAlignment:
+    """F6：当前 live context 硬拒绝 + 同 lineage 透明 rebind。"""
+
+    def _seed_lineage(self, archive: SessionArchive) -> dict[str, int]:
+        now = time.time()
+        archive.ensure_session("parent", source="interactive", started_at=now, title="父会话")
+        archive.ensure_session(
+            "child", source="interactive", started_at=now + 1,
+            parent_session_id="parent", title="子会话",
+        )
+        archive.ensure_session("other", source="interactive", started_at=now, title="旁支")
+        archive.append_message("parent", "user", "父会话消息", timestamp=now)
+        child_id = archive.append_message("child", "user", "子会话消息", timestamp=now + 1)
+        other_id = archive.append_message("other", "user", "旁支消息", timestamp=now)
+        return {"child": child_id, "other": other_id}
+
+    def test_anchor_in_current_lineage_is_rejected(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(
+            session_id="parent", around_message_id=ids["child"], current_session_id="parent",
+        )
+        assert out["success"] is False
+        assert out["error"].startswith("scroll rejected: anchor lives in the current session lineage")
+
+    def test_same_lineage_child_anchor_rebinds_to_owner(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(session_id="parent", around_message_id=ids["child"])
+        assert out.get("success") is not False
+        assert out["session_id"] == "child"
+        assert out["session_meta"]["title"] == "子会话"
+        assert any(m.get("anchor") for m in out["messages"])
+
+    def test_foreign_lineage_anchor_errors(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(session_id="other", around_message_id=ids["child"])
+        assert out["success"] is False
+        assert out["error"] == f"around_message_id {ids['child']} not in session_id other"
+
+
+class TestFtsCorruptionFailOpen:
+    """F9：FTS 损坏（DatabaseError）时降级 LIKE，不向调用方抛异常。"""
+
+    def test_corrupt_fts_falls_back_to_like(self, archive: SessionArchive) -> None:
+        archive.ensure_session("corrupt", source="interactive", started_at=time.time())
+        archive.append_message(
+            "corrupt", "user", "hello world marker", timestamp=time.time(),
+        )
+        with _raw(archive.db_path) as conn:
+            conn.execute("DELETE FROM messages_fts_data")
+            conn.commit()
+
+        rows = archive.search_messages("hello world marker", limit=5)
+        assert [r["session_id"] for r in rows] == ["corrupt"]
+
+
+class TestCurrentLineageExceptions:
+    """F10：当前 lineage 命中的三个例外 + F15 空结果提示。"""
+
+    def _set_end_reason(self, archive: SessionArchive, session_id: str, reason: str | None) -> None:
+        with _raw(archive.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET end_reason = ? WHERE id = ?", (reason, session_id),
+            )
+            conn.commit()
+
+    def test_compression_ended_parent_is_discoverable(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("comp-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "comp-child", source="interactive", started_at=now + 1,
+            parent_session_id="comp-parent",
+        )
+        archive.append_message("comp-parent", "user", "压缩前关键词", timestamp=now)
+        self._set_end_reason(archive, "comp-parent", "compression")
+
+        out = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert [r["session_id"] for r in out["results"]] == ["comp-parent"]
+
+    def test_reset_ended_parent_is_discoverable(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("reset-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "reset-child", source="interactive", started_at=now + 1,
+            parent_session_id="reset-parent",
+        )
+        archive.append_message("reset-parent", "user", "重置前关键词", timestamp=now)
+        self._set_end_reason(archive, "reset-parent", "session_reset")
+
+        out = archive.session_search(query="重置前关键词", current_session_id="reset-child")
+        assert [r["session_id"] for r in out["results"]] == ["reset-parent"]
+
+    def test_live_lineage_hit_skipped_with_message(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("live-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "live-child", source="interactive", started_at=now + 1,
+            parent_session_id="live-parent",
+        )
+        archive.append_message("live-parent", "user", "仍在上下文关键词", timestamp=now)
+
+        out = archive.session_search(query="仍在上下文关键词", current_session_id="live-child")
+        assert out["results"] == []
+        assert "message" in out and out["message"].startswith("No matching sessions found")
+
+    def test_compacted_row_on_current_session_is_discoverable(
+        self, archive: SessionArchive,
+    ) -> None:
+        archive.ensure_session("cur-session", source="interactive", started_at=time.time())
+        archive.append_message(
+            "cur-session", "user", "压缩归档关键词", timestamp=time.time(),
+            active=0, compacted=1,
+        )
+        out = archive.session_search(query="压缩归档关键词", current_session_id="cur-session")
+        assert [r["session_id"] for r in out["results"]] == ["cur-session"]

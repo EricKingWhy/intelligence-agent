@@ -76,6 +76,17 @@ _DISCOVER_SCAN_LIMIT = 300
 #: 压缩摘要前缀：不进 bookends（Hermes `session_search_tool.py:52`）。
 _COMPACTION_PREFIXES = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
 
+#: 明确结束上一段对话、且**不**把 transcript 带进后继的 end_reason 词表。
+#: 来源: Hermes `hermes_state_common.py:181-182`（`_BOUNDARY_END_REASONS`）与
+#: `tools/session_search_tool.py:206-212`（fresh-reset 集合由其派生）。
+_FRESH_RESET_END_REASONS = frozenset({
+    "session_reset", "session_switch", "idle", "daily", "suspended",
+    "resume_pending_expired", "new_session",
+})
+
+#: LIKE 分词的 token 切法：引号短语整体作为一个单元（Hermes `hermes_state_search.py:42`）。
+_LIKE_TOKEN_RE = re.compile(r'"[^"]+"|\S+')
+
 _RELATIVE_BOUND_RE = re.compile(r"^(\d+)\s*(h|d|w)$", re.IGNORECASE)
 _RELATIVE_UNIT_SECONDS = {"h": 3_600, "d": 86_400, "w": 604_800}
 
@@ -498,6 +509,28 @@ def _sanitize_fts5_query(query: str) -> str:
     return sanitized.strip()
 
 
+def _escape_like(term: str) -> str:
+    """转义 LIKE 通配符（配合 `ESCAPE '\\'`）。"""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _or_relaxed_query(query: str) -> str | None:
+    """把隐式 AND 查询改写成 any-term OR；不适用时返回 None。
+
+    少于两个可搜单元（单词无法放宽）或出现显式 `OR`/`NOT`（调用方表达了精确语义）
+    时返回 None。引号短语保持整体：`"docker networking" tls` → `"docker networking" OR tls`。
+    来源: Hermes `hermes_state_search.py:876-888`。
+    """
+    units: list[str] = []
+    for raw_token in _LIKE_TOKEN_RE.findall(query):
+        upper = raw_token.upper()
+        if upper in {"OR", "NOT"}:
+            return None
+        if upper != "AND":
+            units.append(raw_token)
+    return " OR ".join(units) if len(units) >= 2 else None
+
+
 def _parse_time_bound(value: str | None) -> float | None:
     """ISO 日期/时间或相对时长（`7d`/`24h`/`2w`）→ UTC 时间戳。"""
     if value is None:
@@ -871,6 +904,51 @@ class SessionArchive:
             current = parent
         return session_id
 
+    def _same_lineage(self, a: str, b: str) -> bool:
+        """来源: Hermes `tools/session_search_tool.py:201-203`。"""
+        return bool(a and b and self.lineage_root(a) == self.lineage_root(b))
+
+    def _session_left_live_context(self, session_id: str) -> bool:
+        """transcript 是否已离开所有人的 live context。
+
+        `compression`（已摘要进子会话）或 fresh reset（子会话从空开始）为真；仍在
+        委派中的子会话（end_reason 为空）与 branched 父会话仍是当前上下文。
+        来源: Hermes `tools/session_search_tool.py:206-212`。
+        """
+        meta = self.get_session(session_id) if session_id else None
+        end_reason = (meta or {}).get("end_reason")
+        return end_reason == "compression" or end_reason in _FRESH_RESET_END_REASONS
+
+    def _is_compacted_message(self, message_id: int | None) -> bool:
+        """compaction 归档行（`active=0, compacted=1`）已不在 live context。
+
+        rewind/undo 行是 `active=0, compacted=0`，仍算上下文内。
+        来源: Hermes `tools/session_search_tool.py:231-236`。
+        """
+        if not message_id:
+            return False
+        row = self._conn.execute(
+            "SELECT active, compacted FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        return row is not None and row["active"] == 0 and row["compacted"] == 1
+
+    def resolve_session_by_title(self, title: str) -> str | None:
+        """标题 → session id，优先最新的 `"<title> #N"` 续篇。
+
+        来源: Hermes `hermes_state_titles.py:167-186`。
+        """
+        exact = self._conn.execute(
+            "SELECT id FROM sessions WHERE title = ? ORDER BY started_at DESC LIMIT 1", (title,)
+        ).fetchone()
+        numbered = self._conn.execute(
+            "SELECT id FROM sessions WHERE title LIKE ? ESCAPE '\\' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (f"{_escape_like(title)} #%",),
+        ).fetchone()
+        if numbered is not None:
+            return numbered["id"]
+        return exact["id"] if exact is not None else None
+
     def search_messages(
         self,
         query: str,
@@ -888,11 +966,22 @@ class SessionArchive:
         sanitized = _sanitize_fts5_query(query or "")
         if not sanitized:
             return []
+        # 一次性物化：生成器在下面的 `in` 判断里会被消费掉。
+        role_filter = list(role_filter) if role_filter else None
         order = "ORDER BY m.timestamp DESC, rank"
         if sort == "oldest":
             order = "ORDER BY m.timestamp ASC, rank"
         elif sort == "newest":
             order = "ORDER BY m.timestamp DESC, rank"
+
+        # 显式 tool 角色是全文 opt-in 路径：tool 行索引只有前缀，canonical LIKE 才有全文。
+        # 来源: Hermes `hermes_state_search.py:1105-1108`。
+        if role_filter and "tool" in role_filter:
+            return self._like_rows(
+                sanitized, order=order, limit=limit, offset=offset,
+                role_filter=role_filter, source_filter=source_filter,
+                exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+            )
 
         if _contains_cjk(sanitized):
             return self._search_cjk(
@@ -905,6 +994,7 @@ class SessionArchive:
             "messages_fts", sanitized, order=order, limit=limit, offset=offset,
             role_filter=role_filter, source_filter=source_filter,
             exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+            raw_query=sanitized,
         )
         if rows:
             return rows
@@ -918,9 +1008,22 @@ class SessionArchive:
                     table, _quote_fts_tokens(sanitized), order=order, limit=limit,
                     offset=offset, role_filter=role_filter, source_filter=source_filter,
                     exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+                    raw_query=sanitized,
                 )
                 if rows:
                     return rows
+        # OR-relaxed retry：隐式 AND 让改写的多词查询漏掉只缺一个词的存句。
+        # 只在精确查询与子串回退全零命中后触发，命中仍保留原 sort（rank 让覆盖更多
+        # 词的行靠前）。单 term / 显式 OR/NOT 不放宽。
+        # 来源: Hermes `hermes_state_search.py:1181-1188`。
+        relaxed = _or_relaxed_query(sanitized)
+        if relaxed is not None:
+            rows = self._match_rows(
+                "messages_fts", relaxed, order=order, limit=limit, offset=offset,
+                role_filter=role_filter, source_filter=source_filter,
+                exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+                raw_query=sanitized,
+            )
         return rows
 
     def _search_cjk(
@@ -936,6 +1039,7 @@ class SessionArchive:
                 "messages_fts_cjk", match, order=order, limit=limit, offset=offset,
                 role_filter=role_filter, source_filter=source_filter,
                 exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+                raw_query=raw,
             )
             if rows:
                 return rows
@@ -945,6 +1049,7 @@ class SessionArchive:
                 "messages_fts_trigram", match, order=order, limit=limit, offset=offset,
                 role_filter=role_filter, source_filter=source_filter,
                 exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+                raw_query=raw,
             )
             if rows:
                 return rows
@@ -953,11 +1058,12 @@ class SessionArchive:
             "messages_fts", match, order=order, limit=limit, offset=offset,
             role_filter=role_filter, source_filter=source_filter,
             exclude_sources=exclude_sources, after_ts=after_ts, before_ts=before_ts,
+            raw_query=raw,
         )
         if rows:
             return rows
         return self._like_rows(
-            raw, limit=limit, offset=offset, role_filter=role_filter,
+            raw, order=order, limit=limit, offset=offset, role_filter=role_filter,
             source_filter=source_filter, exclude_sources=exclude_sources,
             after_ts=after_ts, before_ts=before_ts,
         )
@@ -989,7 +1095,8 @@ class SessionArchive:
         return " AND ".join(clauses), params
 
     def _match_rows(
-        self, table: str, match: str, *, order: str, limit: int, offset: int, **filters: Any,
+        self, table: str, match: str, *, order: str, limit: int, offset: int,
+        raw_query: str | None = None, **filters: Any,
     ) -> list[dict[str, Any]]:
         where, params = self._where(**filters)
         sql = f"""
@@ -1008,19 +1115,40 @@ class SessionArchive:
             rows = self._conn.execute(sql, (match, *params, limit, offset)).fetchall()
         except sqlite3.OperationalError:
             return []
+        except sqlite3.DatabaseError:
+            # 损坏（非语法错）：派生索引不可用，但 canonical 行仍在——降级 LIKE。
+            # 来源: Hermes `hermes_state_search.py:957` / `:1127-1141`。
+            logger.warning(
+                "%s FTS 检索命中损坏错误；降级 canonical LIKE", table, exc_info=True,
+            )
+            if raw_query is None:
+                raise
+            return self._like_rows(
+                raw_query, order=order, limit=limit, offset=offset, **filters,
+            )
         return [dict(row) for row in rows]
 
-    def _like_rows(self, raw: str, *, limit: int, offset: int, **filters: Any) -> list[dict[str, Any]]:
+    def _like_rows(
+        self, raw: str, *, order: str, limit: int, offset: int, **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """canonical 行 LIKE 扫描：每个 term 一个三列 OR 子句，term 之间 OR。
+
+        `content` / `tool_name` / `tool_calls` 三列都要看（词可能只在 tool 名里）；
+        扫的是 canonical 全文——索引 bound 不是检索 bound，显式 tool 搜索本来就该
+        看到 8192 之后的内容。来源: Hermes `hermes_state_search.py:48-50`、`:1209-1220`。
+        """
         where, params = self._where(**filters)
-        terms = [t for t in _non_operator_tokens(raw)] or [raw]
-        # 与 FTS 投影保持一致：tool 行只匹配前 N 字符（存储仍是全文）。
-        # 否则 LIKE 子串扫描会绕过 8192 上限，把索引外的内容「搜」出来。
-        projected = (
-            "CASE WHEN m.role = 'tool' "
-            f"THEN substr(COALESCE(m.content, ''), 1, {FTS_TOOL_CONTENT_PREFIX_CHARS}) "
-            "ELSE m.content END"
+        # LIKE 扫描没有 `rank` 列：沿用调用方的时间方向，去掉 rank。
+        like_order = "ORDER BY m.timestamp ASC, m.id ASC" if " ASC" in order else \
+            "ORDER BY m.timestamp DESC, m.id DESC"
+        terms = [t.strip('"').strip() for t in _non_operator_tokens(raw)] or [raw]
+        terms = [t for t in terms if t] or [raw]
+        clause = (
+            "(COALESCE(m.content, '') LIKE ? ESCAPE '\\' "
+            "OR COALESCE(m.tool_name, '') LIKE ? ESCAPE '\\' "
+            "OR COALESCE(m.tool_calls, '') LIKE ? ESCAPE '\\')"
         )
-        like_clause = " AND ".join(f"{projected} LIKE ? ESCAPE '\\'" for _ in terms)
+        like_clause = " OR ".join(clause for _ in terms)
         sql = f"""
             SELECT m.id, m.session_id, m.role,
                    substr(COALESCE(m.content, ''), 1, 160) AS snippet,
@@ -1028,13 +1156,11 @@ class SessionArchive:
                    s.started_at AS session_started
             FROM messages AS m
             JOIN sessions AS s ON s.id = m.session_id
-            WHERE {where} AND {like_clause}
-            ORDER BY m.timestamp DESC
+            WHERE {where} AND ({like_clause})
+            {like_order}
             LIMIT ? OFFSET ?
         """
-        escaped = [
-            "%" + t.replace("%", "\\%").replace("_", "\\_") + "%" for t in terms
-        ]
+        escaped = [f"%{_escape_like(t)}%" for t in terms for _ in range(3)]
         try:
             rows = self._conn.execute(sql, (*params, *escaped, limit, offset)).fetchall()
         except sqlite3.OperationalError:
@@ -1121,11 +1247,8 @@ class SessionArchive:
         except (TypeError, ValueError):
             return {"mode": "scroll", "success": False, "error": "scroll requires integer around_message_id"}
         window = max(1, min(int(window), 20))
-        meta = self.get_session(session_id)
-        if meta is None:
-            return {"mode": "scroll", "success": False, "error": f"session_id not found: {session_id}"}
         anchor_row = self._conn.execute(
-            "SELECT session_id FROM messages WHERE id = ?", (anchor,)
+            "SELECT session_id, active, compacted FROM messages WHERE id = ?", (anchor,)
         ).fetchone()
         owning = anchor_row["session_id"] if anchor_row is not None else None
         if owning is None:
@@ -1133,10 +1256,41 @@ class SessionArchive:
                 "mode": "scroll", "success": False,
                 "error": f"around_message_id {anchor} not found",
             }
+        # 锚点仍在调用方 live context → 硬拒绝（不降级成 note）。
+        # 判据照抄 Hermes `_anchor_in_live_context`（`session_search_tool.py:522-528`）。
+        if current_session_id and self._anchor_in_live_context(anchor_row, owning, current_session_id):
+            return {
+                "mode": "scroll", "success": False,
+                "error": "scroll rejected: anchor lives in the current session lineage "
+                         "(already in your active context)",
+            }
+        meta = self.get_session(session_id)
+        if meta is None:
+            return {"mode": "scroll", "success": False, "error": f"session_id not found: {session_id}"}
+        out: dict[str, Any] = {}
+        if owning != session_id:
+            # 请求方把父 session_id 配上了子会话里的 message id：仅同 lineage 透明
+            # rebind，且 session_meta 一律取 owning 会话。来源: Hermes `:544-556`。
+            if not self._same_lineage(session_id, owning):
+                return {
+                    "mode": "scroll", "success": False,
+                    "error": f"around_message_id {anchor} not in session_id {session_id}",
+                }
+            out["warning"] = (
+                f"around_message_id {anchor} lives in {owning} (child of {session_id}); "
+                "rebound transparently"
+            )
+            session_id = owning
+            meta = self.get_session(owning) or meta
         rows = self._conn.execute(
             "SELECT * FROM messages WHERE session_id = ? AND id BETWEEN ? AND ? ORDER BY id",
             (owning, anchor - window, anchor + window),
         ).fetchall()
+        if not rows:
+            return {
+                "mode": "scroll", "success": False,
+                "error": f"around_message_id {anchor} not in session_id {session_id}",
+            }
         messages = [
             _shape_message(dict(row), anchor_id=anchor, max_content_len=_SCROLL_MAX_CONTENT)
             for row in rows
@@ -1149,7 +1303,7 @@ class SessionArchive:
             "SELECT COUNT(*) FROM messages WHERE session_id = ? AND id > ?",
             (owning, anchor + window),
         ).fetchone()[0]
-        out: dict[str, Any] = {
+        out.update({
             "mode": "scroll",
             "session_id": owning,
             "around_message_id": anchor,
@@ -1158,15 +1312,31 @@ class SessionArchive:
             "messages": messages,
             "messages_before": before,
             "messages_after": after,
-        }
-        if current_session_id and self.lineage_root(current_session_id) == self.lineage_root(owning):
-            out["note"] = "anchor lives in the current session lineage (already in active context)"
+        })
         return out
+
+    def _anchor_in_live_context(
+        self, anchor_row: sqlite3.Row, owning: str, current_session_id: str,
+    ) -> bool:
+        """锚点是否仍在调用方 live context（是则 SCROLL 拒绝）。
+
+        同 lineage 且已离开 live context 的历史（compacted 行、compression 结束的
+        父会话、/new 重置的前任）放行；rewind/undo 行（active=0, compacted≠1）
+        从不算「已离开上下文」。来源: Hermes `tools/session_search_tool.py:522-528`。
+        """
+        if not self._same_lineage(owning, current_session_id):
+            return False
+        if anchor_row["active"] == 0 and anchor_row["compacted"] == 1:
+            return False
+        return anchor_row["active"] == 0 or not self._session_left_live_context(owning)
 
     def _discover(
         self, query: str, *, limit: int, sort: str | None, after_ts: float | None,
         before_ts: float | None, current_session_id: str | None,
     ) -> dict[str, Any]:
+        current_root = self.lineage_root(current_session_id) if current_session_id else None
+        # 先试标题：模型常引用记得的会话名。来源: Hermes `:276-313`。
+        title_entry = self._title_match(query, current_root, after_ts, before_ts)
         raw = self.search_messages(
             query, limit=_DISCOVER_SCAN_LIMIT, role_filter=("user", "assistant"),
             exclude_sources=HIDDEN_SESSION_SOURCES, after_ts=after_ts, before_ts=before_ts,
@@ -1174,16 +1344,7 @@ class SessionArchive:
         )
         # cron 降权：稳定排序让交互会话永远排在前面（Hermes #19434）。
         raw = sorted(raw, key=lambda r: (r.get("source") or "") in DEMOTED_SESSION_SOURCES)
-        current_root = self.lineage_root(current_session_id) if current_session_id else None
-        seen: dict[str, dict[str, Any]] = {}
-        for row in raw:
-            if len(seen) >= limit:
-                break
-            root = self.lineage_root(row["session_id"])
-            if current_root and root == current_root:
-                continue
-            seen.setdefault(root, {**row, "_lineage_root": root})
-        if not raw:
+        if not raw and title_entry is None:
             return {
                 "mode": "discover", "query": query, "results": [], "count": 0,
                 "message": (
@@ -1191,15 +1352,95 @@ class SessionArchive:
                     "broaden with OR, exact-match with quoted phrases, or prefix-match with `deploy*`."
                 ),
             }
-        results = []
-        first = True
+        seen: dict[str, dict[str, Any]] = {}
+        results: list[dict[str, Any]] = []
+        if title_entry is not None:
+            results.append(title_entry)
+            # 该 lineage 不再被 FTS 结果重复加入。
+            seen[title_entry.pop("_lineage_root", None) or title_entry["session_id"]] = {}
+        for row in raw:
+            if len(seen) >= limit:
+                break
+            root = self.lineage_root(row["session_id"])
+            if root in seen:
+                continue
+            # 当前 lineage 的命中跳过，除非 transcript 已离开 live context：
+            # (a) owning 会话 compression / fresh-reset 结束；(b) 命中行是 compacted 行；
+            # (c) 命中就在 current_session_id 本身且是 compacted 行。
+            # 来源: Hermes `tools/session_search_tool.py:388-415`。
+            is_compacted_hit = self._is_compacted_message(row.get("id"))
+            if current_root and root == current_root and not (
+                self._session_left_live_context(row["session_id"]) or is_compacted_hit
+            ):
+                continue
+            if (
+                current_session_id and row["session_id"] == current_session_id
+                and not is_compacted_hit
+            ):
+                continue
+            seen[root] = {**row, "_lineage_root": root}
+        first = title_entry is not None
         for root, match in seen.items():
+            if not match:
+                continue
             entry = self._hydrate(root, match, full=first)
             first = False
             if entry is not None:
                 results.append(entry)
-        return {"mode": "discover", "query": query, "results": results,
-                "count": len(results), "sessions_searched": len(seen)}
+        # 全部命中都被当前 lineage 跳过时不能静默空结果（F15）。
+        out: dict[str, Any] = {
+            "mode": "discover", "query": query, "results": results,
+            "count": len(results), "sessions_searched": len(seen),
+        }
+        if not results:
+            out["message"] = (
+                "No matching sessions found. FTS5 ANDs all terms by default — "
+                "broaden with OR, exact-match with quoted phrases, or prefix-match with `deploy*`."
+            )
+        return out
+
+    def _title_match(
+        self, query: str, current_root: str | None,
+        after_ts: float | None, before_ts: float | None,
+    ) -> dict[str, Any] | None:
+        """查询命中会话标题时的 DISCOVERY entry；否则 None。
+
+        来源: Hermes `tools/session_search_tool.py:276-313`。
+        """
+        title_query = query.strip().strip("`'\"")
+        if not title_query:
+            return None
+        session_id = self.resolve_session_by_title(title_query)
+        if not session_id:
+            return None
+        root = self.lineage_root(session_id)
+        # 同 lineage 的标题命中只在会话已离开 live context 时可召回。
+        if current_root and root == current_root and not self._session_left_live_context(session_id):
+            return None
+        meta = self.get_session(root) or self.get_session(session_id) or {}
+        if meta.get("source") in HIDDEN_SESSION_SOURCES:
+            return None
+        started = meta.get("started_at")
+        if after_ts is not None and (started is None or started < after_ts):
+            return None
+        if before_ts is not None and (started is None or started >= before_ts):
+            return None
+        messages = self.get_messages(session_id)
+        anchor_id = messages[0]["id"] if messages else None
+        title = meta.get("title") or title_query
+        entry = self._hydrate(
+            root,
+            {"id": anchor_id, "session_id": session_id, "role": None, "snippet": ""},
+            full=True,
+        ) or {}
+        entry.update(
+            matched_role="session_title",
+            snippet=f"Session title matched: {title}",
+            title=title,
+            detail="full",
+        )
+        entry["_lineage_root"] = root
+        return entry
 
     def _hydrate(self, lineage_root: str, match: dict[str, Any], *, full: bool) -> dict[str, Any] | None:
         meta = self.get_session(lineage_root) or self.get_session(match["session_id"]) or {}
