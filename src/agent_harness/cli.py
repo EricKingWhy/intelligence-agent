@@ -128,6 +128,7 @@ from agent_harness.session.lineage import (
 )
 from agent_harness.session.service import SessionContextCompaction
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
+from agent_harness.storage.session_archive import install_session_archive
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
@@ -1282,6 +1283,9 @@ async def run(
         # 按 (session_id, run_id) 从**这一份**日志切本轮事件，所以必须注入而不是让装配层
         # 按目录约定另建一份（两份分叉的症状是"job 永远切片为空"，没有任何东西报路径不一致）。
         store = JsonlSessionStore(root=workspace_root / "sessions")
+        # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
+        # store 级观察者是本路径唯一覆盖点。
+        install_session_archive(store, workspace_root / "sessions" / "state.db")
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
