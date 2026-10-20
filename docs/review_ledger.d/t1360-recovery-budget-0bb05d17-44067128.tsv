@@ -1,0 +1,1 @@
+2026-10-21	#1360 post-merge recovery budget fix; two-axis review found and closed the P2 quota-accounting gap; final Spec and Standards re-review clean (P0–P4=0); focused PENDING and real Docker kill/recovery tests 2 passed; ruff and diff-check passed	0bb05d17beb80234e3a843d411e0ce196014ef65..44067128abadd4be9c20519b69b984dce95b1060
