@@ -97,6 +97,8 @@ async def _run_gate(dataset_path: Path, *, report_path: Path | None = None):
 @pytest.fixture(scope="module")
 def gold_run(tmp_path_factory):
     """One full 27-case run; AC1, AC4 and AC3's control group share it."""
+    # AC4 asserts the path shape and the content; the report lives under pytest's tmp
+    # dir so the run leaves nothing in the repo tree (test_eval_skeleton.py unlinks).
     report_dir = tmp_path_factory.mktemp("gold-reports")
     run_id = uuid.uuid4().hex
     report_path = report_dir / f"memory-v2-gold-{run_id}.json"
@@ -232,6 +234,51 @@ def test_gate_writes_the_report_without_a_pass_rate_field(gold_run):
     assert len(written["case_results"]) == 27
     assert all({"case_id", "status"} <= item.keys() for item in written["case_results"])
     assert written["failures"] == []
+
+
+class _NoExpectedCase:
+    """Proxy over a `GoldCase` that trips if the adapter reads `case.expected`."""
+
+    def __init__(self, case):
+        object.__setattr__(self, "_case", case)
+
+    def __getattr__(self, name):
+        if name == "expected":
+            raise AssertionError("the adapter read case.expected")
+        return getattr(self._case, name)
+
+
+def test_adapter_never_reads_case_expected(tmp_path, monkeypatch):
+    """The whole corpus runs with `.expected` poisoned: observations come from returns only."""
+    _pin_identity(monkeypatch)
+
+    async def capture(case):
+        return await execute_case(_NoExpectedCase(case))
+
+    report = asyncio.run(run_memory_gold_gate(capture, dataset_path=DEFAULT_GOLD_PATH))
+    assert report["status"] == "passed", report["failures"]
+
+
+def test_degenerate_adapter_cannot_look_green(tmp_path, monkeypatch):
+    """Anti-collapse backstop: a real adapter that observes nothing for every case fails."""
+    _pin_identity(monkeypatch)
+
+    async def degenerate(_case):
+        return {
+            "status": "executed",
+            "observed": neutral_observation(),
+            "trace_id": uuid.uuid4().hex,
+        }
+
+    report = asyncio.run(run_memory_gold_gate(degenerate, dataset_path=DEFAULT_GOLD_PATH))
+
+    assert report["status"] == "failed"
+    assert "blocking_threshold_failed" in report["failures"]
+    # All-NOOP neutrals can look right on the abstention metrics; what they cannot do
+    # is produce writes or evidence of a secret probe.
+    assert report["metrics"]["write_precision"]["pass"] is False
+    assert report["metrics"]["write_target_coverage"]["pass"] is False
+    assert report["metrics"]["secret_path_coverage"]["pass"] is False
 
 
 def test_collapsing_executor_cannot_look_green(tmp_path, monkeypatch):
