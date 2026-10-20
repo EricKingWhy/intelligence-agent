@@ -54,6 +54,7 @@ from agent_harness.session.event import (
     CONTEXT_WINDOW_CHANGED,
     MODEL_REQUEST,
 )
+from agent_harness.session.lineage import build_lineage_index, build_lineage_tree
 from agent_harness.web.app import session_service
 from agent_harness.web.context_usage import resolve_context_usage_payload
 from agent_harness.web.delegations import _project_delegations
@@ -165,61 +166,59 @@ async def _overview(
         session_id = summary.session_id
         events = await anyio.to_thread.run_sync(state.store.read_events, session_id)
 
-        # 会话卡与 KPI 的时间轴：只计窗口内的 model/request（turns 按窗口内
-        # model/completed 计）。窗口外的事件仍进热力图（8 周独立窗口）。
-        in_window = _in_window(events, start)
+        # 一次扫描同时喂两张时间轴：会话卡 / KPI 只计窗口内事件（turns 按窗口内
+        # model/completed 计），日折叠 / 热力图扫**全部**事件——热力图恒为近 8 周，
+        # 比 range=7d 宽；daily 多出的窗口外日期由 `_date_series(start=...)` 裁掉。
         window_tokens = 0
         window_turns = 0
         window_tool_runs = 0
         window_active_ms = 0
-        window_cached = 0
-        window_prompt = 0
-        for event in in_window:
+        session_in_window = False
+        for event in events:
             data = event.data if isinstance(event.data, dict) else {}
-            if event.type == MODEL_REQUEST:
-                usage = data.get("usage")
-                if isinstance(usage, dict):
-                    total = usage.get("total_tokens")
-                    if _is_int(total):
+            usage = data.get("usage") if isinstance(data, dict) else None
+            total = usage.get("total_tokens") if isinstance(usage, dict) else None
+            is_request = event.type == MODEL_REQUEST
+            # 日折叠只需要 model/request 的 time；range=all 时窗口判定恒真，
+            # 其余事件不必解析时间（流式 delta 事件可以很多）。
+            day = (
+                _parse_date(event.time)
+                if is_request or start is not None
+                else None
+            )
+            in_window = start is None or (day is not None and day >= start)
+            if in_window:
+                session_in_window = True
+            if is_request:
+                if _is_int(total):
+                    if in_window:
                         window_tokens += total
-                    cached = usage.get("cached_tokens")
-                    if _is_int(cached):
-                        window_cached += cached
-                        cached_reported = True
-                    prompt = usage.get("prompt_tokens")
-                    if _is_int(prompt):
-                        window_prompt += prompt
-                duration = data.get("duration_ms")
-                if _is_int(duration):
-                    window_active_ms += duration
-            elif event.type == "model/completed":
+                    if day is not None:
+                        daily[day] += total
+                        if day >= heat_start:
+                            heat[day] += total
+                if in_window:
+                    if isinstance(usage, dict):
+                        cached = usage.get("cached_tokens")
+                        if _is_int(cached):
+                            cached_sum += cached
+                            cached_reported = True
+                        prompt = usage.get("prompt_tokens")
+                        if _is_int(prompt):
+                            prompt_sum += prompt
+                    duration = data.get("duration_ms")
+                    if _is_int(duration):
+                        window_active_ms += duration
+            elif in_window and event.type == "model/completed":
                 window_turns += 1
-            elif event.type == "tool/result":
+            elif in_window and event.type == "tool/result":
                 delta = data.get("budget_delta")
                 if isinstance(delta, dict):
                     calls = delta.get("tool_calls")
                     if _is_int(calls) and calls > 0:
                         window_tool_runs += calls
 
-        # 日折叠 / 热力图：扫**全部**事件，不扫 `in_window`——热力图恒为近 8 周，
-        # 比 range=7d 宽；daily 多出的窗口外日期由 `_date_series(start=...)` 裁掉。
-        for event in events:
-            if event.type != MODEL_REQUEST:
-                continue
-            usage = event.data.get("usage") if isinstance(event.data, dict) else None
-            total = usage.get("total_tokens") if isinstance(usage, dict) else None
-            if not _is_int(total):
-                continue
-            day = _parse_date(event.time)
-            if day is None:
-                continue
-            daily[day] += total
-            if day >= heat_start:
-                heat[day] += total
-
-        cached_sum += window_cached
-        prompt_sum += window_prompt
-        if in_window:
+        if session_in_window:
             kpi["sessions"] += 1
         kpi["billed_tokens"] += window_tokens
         kpi["turns"] += window_turns
@@ -253,7 +252,8 @@ async def _overview(
     rows.sort(key=lambda r: r["last_active_at"] or "", reverse=True)
     return {
         "kpi": kpi,
-        "daily": _date_series(daily, start or _earliest(daily, today), today),
+        # all 档：时间轴从最早有数据日（没有数据就今天）开始。
+        "daily": _date_series(daily, start or (min(daily) if daily else today), today),
         "heatmap": _date_series(heat, heat_start, today),
         "composition": composition,
         "coverage": {
@@ -282,17 +282,6 @@ def _composition_of(
     }
 
 
-def _in_window(events: list[Any], start: date | None) -> list[Any]:
-    if start is None:
-        return events
-    out = []
-    for event in events:
-        day = _parse_date(event.time)
-        if day is not None and day >= start:
-            out.append(event)
-    return out
-
-
 def _date_series(buckets: dict[date, int], start: date, end: date) -> list[dict]:
     """[start, end] 按日补齐（无数据日 = 真 0，不是伪造——它就是那天没请求）。"""
     out = []
@@ -301,10 +290,6 @@ def _date_series(buckets: dict[date, int], start: date, end: date) -> list[dict]
         out.append({"date": day.isoformat(), "tokens": buckets.get(day, 0)})
         day += timedelta(days=1)
     return out
-
-
-def _earliest(buckets: dict[date, int], fallback: date) -> date:
-    return min(buckets) if buckets else fallback
 
 
 def _parse_date(value: Any) -> date | None:
@@ -357,8 +342,10 @@ def _request_series(
 
 
 def _request_row(event: Any) -> dict:
-    data = event.data if isinstance(event.data, dict) else {}
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    # 调用方（`_request_series`）已用 `_has_usage` 保证 `data` / `usage` 都是 dict
+    # 且 `total_tokens` 是 int——这里不再重复形状校验。
+    data = event.data
+    usage = data["usage"]
     return {
         "seq": event.seq,
         "time": event.time,
@@ -436,11 +423,6 @@ async def _fleet(
     state: AppState, session_id: str, validate_session_id: Callable[[str], str]
 ) -> dict:
     """当前 agent + 祖先链 + 子代理（票面三段；根会话的 ancestors 为空数组）。"""
-    from agent_harness.session.lineage import (
-        build_lineage_index,
-        build_lineage_tree,
-    )
-
     events = await _session_events(state, session_id, validate_session_id)
     await state.ensure_stores()
     metas = await build_lineage_index(state.store, state.session_meta_store)

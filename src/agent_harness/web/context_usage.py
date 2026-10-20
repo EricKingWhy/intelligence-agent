@@ -171,9 +171,9 @@ def resolve_context_usage_payload(
     tool_definitions: list[dict[str, Any]] = []
     active = state.run_manager.get_active(session_id)
     if active is not None and active.runtime is not None:
-        builder = active.runtime._context_builder
-        if builder is not None:
-            builder_snapshot = builder.usage_snapshot(active.session)
+        # `AgentRuntime.__init__` 恒赋 `_context_builder`（`runtime.py:1404`：
+        # `context_builder or ContextBuilder(...)`），故这里无需再判 None。
+        builder_snapshot = active.runtime._context_builder.usage_snapshot(active.session)
         tool_definitions = active.runtime.registry.export_model_definitions()
     else:
         cached = state.context_snapshots.get(session_id)
