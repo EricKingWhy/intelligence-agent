@@ -15,15 +15,16 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock,
+  AlertTriangle, ArrowLeft, Bot, ChevronDown, ChevronRight, Clock,
   Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
-  Package, Pin, ShieldCheck, TerminalSquare, X,
+  Package, Pin, ShieldCheck, TerminalSquare, User, X,
 } from 'lucide-react';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
-import { allTools, summarizeEvent } from '../lib/projection';
+import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
+import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
 import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
 import {
@@ -32,9 +33,9 @@ import {
 } from '../lib/inspectorPanel';
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import {
-  barGeometry, deriveEventTimings, eventCategory, eventMatchesFilter, filterCounts,
+  barGeometry, deriveEventTimings, deriveTimelineEventKeys, eventCategory, eventMatchesFilter, filterCounts,
   formatAxisLabel, formatClock, seqGapMarkers, timelineAxis,
-  type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
+  type EventCategory, type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
 } from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
@@ -102,6 +103,12 @@ const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
 /** 稳定空集合 / 空表——memo 与依赖比较用（每次新建 `new Set()` 会永久失效）。 */
 const EMPTY_KEYS: ReadonlySet<string> = new Set();
 const EMPTY_TIMINGS: ReadonlyMap<string, EventTiming> = new Map();
+const EMPTY_EVENT_KEYS: ReadonlyMap<AgentEvent, string> = new Map();
+
+/** #1419 P3-9：同时展开的卡片上限。每张展开卡都挂载完整的 `EventInspector` /
+ *  JsonTree，连续展开会让 Inspector 的 DOM/内存无界增长；3 张足够对照上下文，
+ *  超出时按 Set 插入顺序淘汰最早展开的一张（确定、可解释）。 */
+const MAX_EXPANDED_CARDS = 3;
 
 /** #1106：工具行的 run 归属——projection 存的 `raw_call` 是 tool/call 事件的
  *  **verbatim 整信封拷贝**（含 run_id），归属以它对账（事件真值，与 projection
@@ -125,6 +132,11 @@ interface Props {
   /** #183 面板视图状态（钉住 / 整页 / 宽度 / peek 开合）。状态归 App——面板宽度与整页
    *  要改的是 `.app-regions` 的栅格，StepDetail 只是消费方与触发方。 */
   panel: InspectorPanelState;
+  /** #1419 P2-3：面板当前是否展开（App 的 `inspectorOpen`）。展开态是视图状态，
+   *  面板一旦关闭（按钮 / Esc / 会话切换 / 断点 / rail 菜单）就必须清空；这些
+   *  关闭路径有一半绕过 `onPanelAction`，所以用这个**原语**统一收敛。缺省 true
+   *  （独立渲染/测试不传时保持旧行为）。 */
+  open?: boolean;
   /** #183 面板动作。**显式动作而不是 toggle**：Esc 要的是"退出整页"而非"翻转整页"，
    *  用一个 `toggle` 表达两件事会让"连按两次 = 回到原点"这类事故无法从类型上排除。 */
   onPanelAction: (action: InspectorPanelAction) => void;
@@ -167,7 +179,7 @@ export type InspectorPanelAction =
  * 逐项稳定性核对表、否决 `areEqual` 的理由，见
  * `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction, awaitingDecision = false }: Props) {
+export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, open = true, onPanelAction, awaitingDecision = false }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——`useMemo` 不许出现在
    * 下方任何 early-return 之后（Rules of Hooks：两次渲染的 hook 数必须一致）。
@@ -185,9 +197,19 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   const dragRef = useRef<{ startX: number; startW: number; available: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   /* #1419：筛选与展开是**面板级**视图状态（不是 TimelineTab 内部状态）——
-   * Enter/Esc 在面板根捕获，面板关闭要清空；会话切换用 sessionId 键隔离。 */
+   * Enter/Esc 在面板根捕获，面板关闭要清空；会话切换按 sessionId 分槽
+   * （`Map<sessionId, Set<timelineKey>>`），A 展开后切到 B 再回来不会覆盖 A。 */
   const [timelineFilter, setTimelineFilter] = useState<TimelineFilter>('all');
-  const [expandedState, setExpandedState] = useState<{ sessionId: string; keys: Set<string> } | null>(null);
+  /* P2-3：展开集连同「写入时的面板开合」一起存。关闭路径有一半绕过
+   * `onPanelAction`（会话切换/断点/rail 菜单直接 `setInspectorOpen(false)`），
+   * 所以以 `open` 这个**原语**为准：开合一变，上一轮的集合整体作废。
+   * 这是 React 的「渲染期调整 state」：`open` 是 prop，派生状态与它不一致时
+   * 当场重置（比 effect 少一轮提交，也不会让"关闭期间"的旧集合在重开后复活）。 */
+  const [expandedStore, setExpandedStore] = useState<{
+    open: boolean;
+    bySession: ReadonlyMap<string, ReadonlySet<string>>;
+  }>(() => ({ open, bySession: new Map() }));
+  if (expandedStore.open !== open) setExpandedStore({ open, bySession: new Map() });
 
   /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
    *
@@ -204,6 +226,17 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   const timelineTimings = useMemo(
     () => (conversation ? deriveEventTimings(conversation.events, tools) : EMPTY_TIMINGS),
     [conversation?.eventsVersion, tools], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  /* #1419 P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号）。timing 仍按
+   * `eventKey` 存（同一 eventKey 的事件共享同一份 timing），选中/展开/DOM id 用
+   * 这张表的**唯一键**。 */
+  const timelineKeys = useMemo(
+    () => (conversation ? deriveTimelineEventKeys(conversation.events) : EMPTY_EVENT_KEYS),
+    [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const timelineKeyOf = useCallback(
+    (event: AgentEvent) => timelineKeys.get(event) ?? eventKey(event),
+    [timelineKeys],
   );
   const pulse = useMemo(() => deriveRunPulse(conversation, streaming, awaitingDecision),
     [ // eslint-disable-line react-hooks/exhaustive-deps
@@ -270,7 +303,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
          * 当前筛选看不到的事件上（否则 Enter 会展开一个不可见卡片）。 */
         return events
           .filter((e) => eventMatchesFilter(e, timelineFilter, timelineTimings.get(eventKey(e))))
-          .map((e) => ({ key: eventKey(e), focus: () => onFocusEvent(e) }));
+          .map((e) => ({ key: timelineKeyOf(e), focus: () => onFocusEvent(e) }));
       }
       case 'chat':
         return tools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
@@ -281,26 +314,43 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     }
   }, [ // eslint-disable-line react-hooks/exhaustive-deps
     tab, conversation?.eventsVersion, tools, commandTools, onFocusEvent, onFocusTool,
-    timelineFilter, timelineTimings,
+    timelineFilter, timelineTimings, timelineKeyOf,
   ]);
 
-  /* #1419：展开键 = `eventKey()`（与选中态同源），状态按 sessionId 隔离——切会话/钻取
-   * 子会话时旧会话的展开不会串台；面板关闭时由 `clearExpanded` 显式清空。 */
+  /* #1419：展开键 = Timeline 行身份（`eventKey`，seq-less 同键事件追加序号），
+   * 状态按 sessionId 分槽——切会话/钻取子会话时旧会话的展开不会串台；面板关闭
+   * 后重开必须没有残留（判据是 `open`，见 `expandedStore` 的注释）。 */
   const toggleExpanded = useCallback((key: string) => {
     const sid = conversation?.session_id;
     if (!sid) return;
-    setExpandedState((prev) => {
-      const next = new Set(prev?.sessionId === sid ? prev.keys : EMPTY_KEYS);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return { sessionId: sid, keys: next };
+    setExpandedStore((prev) => {
+      const next = new Map(prev.bySession);
+      const current = new Set(next.get(sid) ?? EMPTY_KEYS);
+      if (current.has(key)) current.delete(key);
+      else {
+        current.add(key);
+        /* P3-9：超出上限时淘汰最早展开的一张（Set 保持插入顺序）。 */
+        while (current.size > MAX_EXPANDED_CARDS) {
+          const oldest = current.values().next().value;
+          if (oldest === undefined) break;
+          current.delete(oldest);
+        }
+      }
+      if (current.size === 0) next.delete(sid);
+      else next.set(sid, current);
+      return { open, bySession: next };
     });
-  }, [conversation?.session_id]);
+  }, [conversation?.session_id, open]);
   const clearExpanded = useCallback(() => {
     const sid = conversation?.session_id;
     if (!sid) return;
-    setExpandedState((prev) => (prev?.sessionId === sid ? { sessionId: sid, keys: new Set() } : prev));
-  }, [conversation?.session_id]);
+    setExpandedStore((prev) => {
+      if (!prev.bySession.has(sid)) return prev;
+      const next = new Map(prev.bySession);
+      next.delete(sid);
+      return { open, bySession: next };
+    });
+  }, [conversation?.session_id, open]);
   /* 点击卡片 = 选中 + 关掉 App 的自动 peek + 跳中心列 + 就地展开。顺序不能反：
    * `onFocusEvent` 会同步开 peek，随后 `close-peek` 用函数式更新把它关掉（同批提交，
    * 不闪）。 */
@@ -345,14 +395,17 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   // #186：归档 diff 的「就地展开」要按会话读 artifact 内容——归属只能由 session 决定
   // （artifact_id 是内容哈希，跨会话可重名），所以从投影的会话 id 取，不另存一份。
   const sessionId = conversation.session_id;
-  const expandedKeys = expandedState?.sessionId === sessionId ? expandedState.keys : EMPTY_KEYS;
-  /** 面板关闭是唯一会丢掉"正在看的上下文"的动作：先清展开，再派发关闭。 */
+  /* 面板开合变了 ⇒ `expandedStore` 在渲染期已整体重置（见其注释），这里只读。 */
+  const expandedBySession = expandedStore.bySession;
+  const expandedKeys = expandedBySession.get(sessionId) ?? EMPTY_KEYS;
+  /** 面板关闭是唯一会丢掉"正在看的上下文"的动作：先清展开，再派发关闭。
+   *  App 侧绕过本入口的关闭（会话切换/断点/rail 菜单）由 `open` 派生重置兜底。 */
   const dispatchPanelAction = (action: Parameters<typeof onPanelAction>[0]) => {
     if (action.type === 'close') clearExpanded();
     onPanelAction(action);
   };
   const selectedKey =
-    focus.kind === 'event' ? eventKey(focus.event) : focus.kind === 'tool' ? toolKey(focus.tool) : null;
+    focus.kind === 'event' ? timelineKeyOf(focus.event) : focus.kind === 'tool' ? toolKey(focus.tool) : null;
   const selectedIndex = selectedKey === null ? -1 : listTargets.findIndex((t) => t.key === selectedKey);
   const hasSelection = focus.kind === 'event' || focus.kind === 'tool';
 
@@ -360,10 +413,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     if (listTargets.length === 0) return;
     const next = nextSelectionIndex(selectedIndex, delta, listTargets.length);
     if (next < 0 || next === selectedIndex) return;
-    /* 只移动**选中项**，不搬 DOM 焦点：焦点搬家的收益（读屏"当前项"与视觉一致）
-       由行上的 `aria-current` 承担，而代价是一个新的失败模式——选中项滚出 Timeline
-       的渲染窗口时那一行还不存在，`focus()` 会静默打空、焦点留在旧行上。行内的
-       滚动与窗口展开归 Timeline 自己（它知道窗口边界）。 */
+    /* 选中项与 DOM 焦点一起移动（读屏"当前项"与视觉一致，Enter 也要求焦点在行上）。
+       代价是一个已知的失败模式：`listTargets` 覆盖**筛选后**的全部事件，而 DOM 只有
+       渲染窗口内的行——选中项落到窗口外时 `focus()` 会静默打空，焦点留在旧行上。
+       这不是数据错误：`selectedKey` 已经变了，Timeline 的 `effectiveWindow` 会按它
+       扩窗、`scrollIntoView` 把行带进视野；下一次 ↑/↓ 时 `focus()` 才命中。 */
     listTargets[next].focus();
     /* #1419：Timeline 的 ↑/↓ 是"选卡片"，不是"开预览"——App 的 onFocusEvent 会顺手
      * 打开 peek，这里立即关掉，保持与点击卡片同一套语义。 */
@@ -371,9 +425,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   };
 
   /** Space 的生效范围：清单与面板 chrome。详情面板内部有自己的按钮（复制/标签条），
-   *  表单域与详情内部一律不抢——否则"在详情里按空格切换标签"会变成开合预览。 */
+   *  表单域与详情内部一律不抢——否则"在详情里按空格切换标签"会变成开合预览。
+   *  P2-2：按钮/链接的 Space 是**原生激活**（chips、手风琴头、钻取 tabs、CopyButton），
+   *  必须与 Enter 分支同一张排除表；只有 `.timeline-row`（卡片本体）保留 Space=peek。 */
   const spaceExcluded = (target: HTMLElement) =>
-    Boolean(target.closest('input, textarea, select, [contenteditable="true"], .detail-peek'));
+    Boolean(target.closest('input, textarea, select, [contenteditable="true"], .detail-peek, button:not(.timeline-row), a'));
 
   /** #183 面板键位（AC2/AC5/AC7）。挂在 <aside> 上而**不是 window**：
    *  ① 只有焦点在面板内才生效——面板外的 Esc 仍归全局"中断流式"（既有行为）；
@@ -403,6 +459,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       if (target.closest('input, textarea, select, [contenteditable="true"], .detail-peek, [role="dialog"]')) return;
       if (target.closest('button:not(.timeline-row), a')) return;
       if (selectedKey === null) return;
+      /* P3-10：选中卡被当前筛选隐藏时（listTargets 只含筛选结果），Enter 不能把
+       * 一个不可见的 key 塞进展开集——否则清除筛选后会"凭空"出现一张展开卡。 */
+      if (!listTargets.some((t) => t.key === selectedKey)) return;
       e.preventDefault();
       toggleExpanded(selectedKey);
       return;
@@ -663,6 +722,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onFilterChange={setTimelineFilter}
               timings={timelineTimings}
               tools={tools}
+              eventKeys={timelineKeys}
             />
           )}
           {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} />}
@@ -760,6 +820,27 @@ function modelSamples(events: readonly AgentEvent[]): ModelSample[] {
   });
 }
 
+/** P2-4：会话成本 = 所有 model/request 的 cost_usd 十进制相加（wire 上是字符串，
+ *  走 `runBudget` 的同一份十进制实现）。任何一笔缺失/形状不合 ⇒ null（粘性不可得，
+ *  绝不把缺的一笔当 0 报一个偏小的会话总额）。 */
+function sessionCostText(events: readonly AgentEvent[]): string | null {
+  const requests = events.filter((e) => e.type === EventType.MODEL_REQUEST);
+  const source = requests.length > 0 ? requests : events.filter((e) => e.type === EventType.MODEL_COMPLETED);
+  let total = '0';
+  for (const e of source) {
+    const raw = typeof e.data.cost_usd === 'string'
+      ? e.data.cost_usd
+      : typeof e.data.cost_usd === 'number' && Number.isFinite(e.data.cost_usd)
+        ? String(e.data.cost_usd)
+        : null;
+    if (raw === null) return null;
+    const next = addDecimalTexts(total, raw);
+    if (next === null) return null;
+    total = next;
+  }
+  return source.length > 0 ? total : null;
+}
+
 function seriesOf(samples: readonly ModelSample[], key: keyof ModelSample): number[] {
   return samples.flatMap((s) => (s[key] === null ? [] : [s[key] as number]));
 }
@@ -819,21 +900,31 @@ function OverviewMetrics({
   runDuration: string | null;
 }) {
   const samples = useMemo(() => modelSamples(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-  const usage = conversation.usage_total;
+  /* P2-4：四张卡的 value / label / sparkline 必须同作用域。
+   *  - tokens / 成本 = **会话级**（`session_usage_total` + 当前 run 的流式累计；
+   *    成本 = 全会话 model/request 十进制相加），文案写「会话累计」；
+   *  - 耗时 = **本轮**（`runDuration` 来自 deriveRunSummary 的最近 run），文案写
+   *    「本轮耗时」，sparkline/最长单次都只取当前 run 的样本。 */
+  const usage = displayedSessionUsage(conversation);
   const prompt = usage?.prompt_tokens ?? null;
   const completion = usage?.completion_tokens ?? null;
-  const cost = conversation.cost_usd;
+  const costText = useMemo(
+    () => sessionCostText(conversation.events),
+    [conversation.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const totalTokens = usage?.total_tokens ?? null;
-  const perMillion = cost !== null && totalTokens !== null && totalTokens > 0
-    ? `$${((cost / totalTokens) * 1_000_000).toFixed(2)} / M tok`
+  const perMillion = costText !== null && totalTokens !== null && totalTokens > 0
+    ? `$${((Number(costText) / totalTokens) * 1_000_000).toFixed(2)} / M tok`
     : '无完整用量，无法折算';
-  const durations = seriesOf(samples, 'duration');
-  const turnDurations = conversation.turns.flatMap((t) => {
-    const start = t.started_at ? Date.parse(t.started_at) : NaN;
-    const end = t.completed_at ? Date.parse(t.completed_at) : NaN;
-    return Number.isFinite(start) && Number.isFinite(end) && end >= start ? [end - start] : [];
-  });
-  const timeSeries = durations.length >= 2 ? durations : turnDurations;
+  const sampleCount = samples.length;
+  const samplesSub = sampleCount > 0 ? `会话累计 · ${sampleCount} 次模型调用` : '尚无模型调用';
+  const runSamples = useMemo(() => {
+    const runEvents = conversation.run_id
+      ? conversation.events.filter((e) => e.run_id === conversation.run_id)
+      : conversation.events;
+    return modelSamples(runEvents);
+  }, [conversation.eventsVersion, conversation.run_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const timeSeries = seriesOf(runSamples, 'duration');
   const longest = timeSeries.length > 0 ? Math.max(...timeSeries) : null;
   return (
     <div className="ov-metrics">
@@ -841,28 +932,28 @@ function OverviewMetrics({
         label="输入 tokens"
         icon={Hash}
         value={prompt !== null ? prompt.toLocaleString() : '—'}
-        sub={conversation.turns.length > 0 ? `${conversation.turns.length} 轮累计` : '尚无轮次'}
+        sub={samplesSub}
         series={seriesOf(samples, 'prompt')}
       />
       <MetricCard
         label="输出 tokens"
         icon={Hash}
         value={completion !== null ? completion.toLocaleString() : '—'}
-        sub={completion !== null ? '按 model/completed 聚合' : '等待用量回填'}
+        sub={completion !== null ? samplesSub : '等待用量回填'}
         series={seriesOf(samples, 'completion')}
       />
       <MetricCard
-        label="成本"
+        label="会话成本"
         icon={Database}
-        value={cost !== null ? `$${cost}` : '—'}
+        value={costText !== null ? `$${costText}` : '—'}
         sub={perMillion}
         series={seriesOf(samples, 'cost')}
       />
       <MetricCard
-        label="耗时"
+        label="本轮耗时"
         icon={Clock}
         value={runDuration ?? '—'}
-        sub={longest !== null ? `最长单次 ${formatShortDuration(longest)}` : '无耗时样本'}
+        sub={longest !== null ? `本轮最长单次 ${formatShortDuration(longest)}` : '本轮无耗时样本'}
         series={timeSeries}
       />
     </div>
@@ -1373,6 +1464,45 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
+/** 类型图标（P3-6）：定稿原型 `.fc-lead` 是 20px 图标盒，不是 5px 类别点。 */
+const CATEGORY_ICON: Record<EventCategory, typeof ListTree> = {
+  tool: TerminalSquare,
+  model: Layers,
+  agent: Bot,
+  run: Clock,
+  user: User,
+  other: ListTree,
+};
+
+/** P3-2：投影对 run/model 类事件没有单行摘要（`emptySummary`），Timeline 卡片
+ *  标题不能因此退回原始类型串。只补这几类**可读**标题，其余仍按投影口径回退
+ *  到类型名（未知事件保留原始类型是设计选择）。 */
+function timelineTitle(event: AgentEvent): string {
+  const summary = eventSummary(event);
+  if (summary) return summary;
+  const model = typeof event.data.model === 'string' && event.data.model ? event.data.model : null;
+  switch (event.type) {
+    case EventType.SESSION_STARTED:
+      return '会话开始';
+    case EventType.SESSION_RESUMED:
+      return '会话恢复';
+    case EventType.RUN_STARTED:
+      return model ? `任务开始 · ${model}` : '任务开始';
+    case EventType.MODEL_STARTED:
+      return model ? `模型开始生成 · ${model}` : '模型开始生成';
+    case EventType.MODEL_REQUEST:
+      return model ? `模型请求 · ${model}` : '模型请求';
+    case EventType.MODEL_REQUEST_STARTED:
+      return model ? `模型请求开始 · ${model}` : '模型请求开始';
+    case EventType.MODEL_FAILED:
+      return '模型调用失败';
+    case EventType.USER_INPUT_REQUESTED:
+      return '等待用户输入';
+    default:
+      return event.type;
+  }
+}
+
 /** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
  *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。
  *  step_id 语义：**缺失或 null** 都 = 无归属（后端省略值为 null 的字段 → 键缺失；
@@ -1405,6 +1535,7 @@ export function TimelineTab({
   onFilterChange,
   timings,
   tools = EMPTY_TOOLS,
+  eventKeys,
 }: {
   conversation: ConversationState;
   onFocusEvent: (e: AgentEvent) => void;
@@ -1418,6 +1549,9 @@ export function TimelineTab({
   onFilterChange?: (f: TimelineFilter) => void;
   timings?: ReadonlyMap<string, EventTiming>;
   tools?: readonly ToolCall[];
+  /** #1419 P2-1：事件对象 → Timeline 行身份（seq-less 同键事件带序号）。
+   *  省略时退回 `eventKey`（独立渲染/旧测试兼容）。 */
+  eventKeys?: ReadonlyMap<AgentEvent, string>;
 }) {
   // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
   // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
@@ -1436,11 +1570,19 @@ export function TimelineTab({
   const activeFilter = filter ?? localFilter;
   const setFilter = onFilterChange ?? setLocalFilter;
   const activeExpanded = expandedKeys ?? localExpanded;
+  const keyOf = useCallback((e: AgentEvent) => eventKeys?.get(e) ?? eventKey(e), [eventKeys]);
   const toggleExpanded = onToggleExpand ?? ((key: string) => {
     setLocalExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
-      else next.add(key);
+      else {
+        next.add(key);
+        while (next.size > MAX_EXPANDED_CARDS) {
+          const oldest = next.values().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
+      }
       return next;
     });
   });
@@ -1472,7 +1614,7 @@ export function TimelineTab({
     [conversation.eventsVersion, activeFilter, timingsMap], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const selectedFilteredIndex = selectedKey
-    ? filtered.findIndex(({ e }) => eventKey(e) === selectedKey)
+    ? filtered.findIndex(({ e }) => keyOf(e) === selectedKey)
     : -1;
   /* #183：键盘选中项必须在**渲染窗口**里，否则"选中了却看不见"（↑/↓ 到窗口外
    * 就停在原地）。窗口下界由选中项**派生**（`effectiveWindow`），不在 effect 里
@@ -1484,7 +1626,7 @@ export function TimelineTab({
     selectedFilteredIndex >= 0 ? Math.max(windowSize, filtered.length - selectedFilteredIndex) : windowSize;
   const hidden = Math.max(0, filtered.length - effectiveWindow);
   const visible = hidden > 0 ? filtered.slice(hidden) : filtered;
-  visibleRef.current = new Map(visible.map((v) => [eventKey(v.e), v.e]));
+  visibleRef.current = new Map(visible.map((v) => [keyOf(v.e), v.e]));
 
   /* 选中项滚进视野：`nearest` 保证已经在视野里时**不动**（否则每次 ↑/↓ 都会把
      列表拉到中间，滚动位置就"丢"了——AC1 要的正是滚动位置不被选中的副作用骚扰）。 */
@@ -1519,7 +1661,7 @@ export function TimelineTab({
     if (abs < 0) return;
     setWindowSize((w) => Math.max(w, total - abs));
     if (!eventMatchesFilter(liveEvent, activeFilter, timingsMap.get(eventKey(liveEvent)))) setFilter('all');
-    setFlashKey(eventKey(liveEvent));
+    setFlashKey(keyOf(liveEvent));
   };
 
   // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
@@ -1537,7 +1679,9 @@ export function TimelineTab({
   }, []);
 
   const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
-    const btn = (e.target as HTMLElement).closest?.('[data-tl-i]') as HTMLElement | null;
+    /* P1-1：卡片行的身份属性是 `data-list-key`（旧行才有 `data-tl-i`）；
+     * 用错选择器会让 tip 永远为 null，hover 浮层整条功能不可达。 */
+    const btn = (e.target as HTMLElement).closest?.('[data-list-key]') as HTMLElement | null;
     if (btn === lastRowRef.current) return;
     lastRowRef.current = btn;
     if (!btn) {
@@ -1560,14 +1704,23 @@ export function TimelineTab({
     setTip(null);
   };
 
+  /* P4-1：fallback 也要保持引用稳定——否则 standalone 渲染时每次提交都换新
+   * 回调，`TimelineCard` 的 memo 被击穿（生产路径传稳定 `onSelectEvent`）。
+   * 写成单一体而不是 `onSelectEvent ?? (…)`：后者会让 exhaustive-deps 判不出
+   * 依赖，回调反而在每次提交时重建。 */
+  const selectEvent = useCallback((e: AgentEvent) => {
+    if (onSelectEvent) {
+      onSelectEvent(e);
+      return;
+    }
+    onFocusEvent(e);
+    onJumpToStream?.(e);
+  }, [onSelectEvent, onFocusEvent, onJumpToStream]);
+
   if (total === 0) {
     return <TabEmpty hint="本会话尚无事件。" icon={ListTree} />;
   }
 
-  const selectEvent = onSelectEvent ?? ((e: AgentEvent) => {
-    onFocusEvent(e);
-    onJumpToStream?.(e);
-  });
   const lanes = buildLanes(visible, runGroups);
   const chips: { id: TimelineFilter; label: string; count: number; tone?: 'fail' }[] = [
     { id: 'all', label: '全部', count: counts.all },
@@ -1651,13 +1804,14 @@ export function TimelineTab({
               )}
             </div>
             {items.map(({ e, i }) => {
-              const key = eventKey(e);
+              const key = keyOf(e);
               const expanded = activeExpanded.has(key);
               return (
                 <Fragment key={i}>
                   <TimelineCard
+                    rowKey={key}
                     event={e}
-                    timing={timingsMap.get(key)}
+                    timing={timingsMap.get(eventKey(e))}
                     axis={axis}
                     selected={selectedKey === key}
                     expanded={expanded}
@@ -1763,6 +1917,7 @@ function SeqGapBanner({ gap }: { gap: SeqGap }) {
 }
 
 const TimelineCard = memo(function TimelineCard({
+  rowKey,
   event,
   timing,
   axis,
@@ -1772,6 +1927,8 @@ const TimelineCard = memo(function TimelineCard({
   onSelect,
   onToggle,
 }: {
+  /** P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号），不是裸 `eventKey`。 */
+  rowKey: string;
   event: AgentEvent;
   timing?: EventTiming;
   axis: TimelineAxis | null;
@@ -1781,9 +1938,10 @@ const TimelineCard = memo(function TimelineCard({
   onSelect: (e: AgentEvent) => void;
   onToggle: (key: string) => void;
 }) {
-  const key = eventKey(event);
+  const key = rowKey;
   const status: TimelineStatus = timing?.status ?? 'idle';
   const category = eventCategory(event);
+  const LeadIcon = CATEGORY_ICON[category];
   const bar = timing && axis ? barGeometry(timing, axis) : null;
   const showBarLabel = Boolean(
     timing?.durationMs != null && axis && timing.durationMs / axis.maxMs >= 0.1,
@@ -1809,10 +1967,16 @@ const TimelineCard = memo(function TimelineCard({
           onToggle(key);
         }}
       >
+        <span className="tl-lead" aria-hidden="true">
+          <LeadIcon size={11} />
+        </span>
         <span className="tl-main">
-          <span className="tl-title">{eventSummary(event) || event.type}</span>
+          <span className="tl-title">{timelineTitle(event)}</span>
           <span className="tl-meta">
-            {`#${event.seq ?? '·'} · ${event.type}${clock ? ` · ${clock}` : ''}${event.step_id != null ? ` · step ${event.step_id}` : ''}${toolName ? ` · ${toolName}` : ''}`}
+            {/* P3-5：meta 文本单独包一层可收缩节点，尾部状态 tag 才不会被裁掉。 */}
+            <span className="tl-meta-text">
+              {`#${event.seq ?? '·'} · ${event.type}${clock ? ` · ${clock}` : ''}${event.step_id != null ? ` · step ${event.step_id}` : ''}${toolName ? ` · ${toolName}` : ''}`}
+            </span>
             {status === 'fail' && <span className="tl-tag tl-tag-fail">失败</span>}
             {status === 'run' && <span className="tl-tag tl-tag-run">运行中</span>}
           </span>

@@ -5582,7 +5582,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
 }
 /* ── #1419 Timeline 甘特卡片流 ───────────────────────────────────────────────
- * 结构：全宽卡片（.timeline-card）内嵌甘特条（.tl-track > .tl-bar），条只是
+ * 结构：全宽卡片（.timeline-card）内嵌甘特条（.tl-track::after），条只是
  * "时间位置"的可视化，不承担点击面——点击面是整张卡片的 .timeline-row。
  * 颜色全部走 token（无字面量）；条的状态色 = 语义色，与筛选「失败」同判据。 */
 .detail-timeline {
@@ -5792,7 +5792,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 .timeline-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) minmax(54px, 1.1fr) 40px 11px;
+  grid-template-columns: 20px minmax(0, 1fr) minmax(54px, 1.1fr) 40px 11px;
   align-items: center;
   gap: 6px;
   width: 100%;
@@ -5820,26 +5820,47 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: none;
 }
 
-.timeline-row::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  justify-self: center;
-  background: var(--text-tertiary);
+/* P3-6：类型图标盒（对齐定稿原型 `.fc-lead` 的 20px / 6px 圆角），不是类别圆点。 */
+.tl-lead {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-hover);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle);
 }
-.timeline-row[data-cat='tool']::before {
-  background: var(--info);
+.timeline-row[data-cat='tool'] .tl-lead {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 28%, var(--border-subtle));
 }
-.timeline-row[data-cat='model']::before {
-  background: var(--accent-text);
+.timeline-row[data-cat='model'] .tl-lead {
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
 }
-.timeline-row[data-cat='agent']::before,
-.timeline-row[data-cat='user']::before {
-  background: var(--warning);
+.timeline-row[data-cat='agent'] .tl-lead {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
 }
-.timeline-row[data-cat='run']::before {
-  background: var(--success);
+.timeline-row[data-cat='user'] .tl-lead {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
+}
+.timeline-row[data-cat='run'] .tl-lead {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border-subtle));
+}
+.timeline-row[data-state='fail'] .tl-lead,
+.timeline-card[data-state='fail'] .tl-lead {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-subtle));
 }
 
 .tl-main {
@@ -5866,25 +5887,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: 10px;
   color: var(--text-tertiary);
 }
-.tl-seq {
-  font-size: 10px;
-  color: var(--text-tertiary);
-  min-width: auto;
-  text-align: left;
-  flex-shrink: 0;
-}
-.tl-type {
-  font-size: 10px;
-  color: var(--text-tertiary);
+/* P3-5：meta 主体必须可收缩（省略号），否则尾部「失败/运行中」tag 会被裁掉。 */
+.tl-meta-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.tl-meta-sep {
-  opacity: 0.55;
-}
-.tl-time {
-  color: var(--text-tertiary);
-  flex-shrink: 0;
 }
 .tl-tag {
   display: inline-flex;
@@ -5896,9 +5903,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-secondary);
   font-size: 9px;
   flex-shrink: 0;
-}
-.tl-tag-tool {
-  font-family: var(--font-mono);
 }
 .tl-tag-fail {
   color: var(--danger);
@@ -5914,6 +5918,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   position: relative;
   height: 14px;
   min-width: 0;
+  overflow: hidden; /* P3-3：末端/开端的条与点不得溢出到耗时列 */
 }
 .tl-track::before {
   content: '';
@@ -5953,6 +5958,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   width: 8px;
   height: 8px;
   top: 3px;
+  /* P3-3：点以中心定位，中心夹在 [4px, 100%-4px]，两端都完整可见。 */
+  left: clamp(4px, var(--bar-left, 0%), calc(100% - 4px));
+  transform: translateX(-50%);
   border-radius: 50%;
 }
 .tl-track.is-empty::before {
@@ -5969,9 +5977,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-track.is-empty::after {
   display: none;
 }
+/* P3-4：标签贴在条内（随条起止/宽度），不是横跨整条轨道。 */
 .tl-bar-label {
   position: absolute;
-  inset: 2px 2px 2px 2px;
+  top: 2px;
+  bottom: 2px;
+  left: var(--bar-left, 0%);
+  width: var(--bar-width, 0%);
+  min-width: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6013,6 +6026,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .tl-expand.open {
   grid-template-rows: 1fr;
+}
+/* P3-8：展开子树是条件挂载的，普通 transition 没有起始帧。`@starting-style`
+ *  让"刚挂载且已是 1fr"从 0fr 起步，展开动画真实发生（不靠 effect 内 setState）。 */
+@starting-style {
+  .tl-expand.open {
+    grid-template-rows: 0fr;
+  }
 }
 .tl-inner {
   min-height: 0;
@@ -6249,13 +6269,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── #1419 Overview：指标卡 + 8 个折叠段 ─────────────────────────────────────
  * 折叠段内容始终挂载（inert/aria-hidden 关掉焦点与读屏），收起不丢数据；
  * 展开用 grid-template-rows 0fr→1fr，不读布局。 */
-.ov-metrics {
+.step-detail .ov-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin-bottom: 8px;
 }
-.ov-metric {
+.step-detail .ov-metric {
   min-width: 0;
   padding: 7px 8px;
   border: 1px solid var(--border);
@@ -6266,17 +6286,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     box-shadow 120ms var(--ease-apple),
     border-color 120ms var(--ease-apple);
 }
-.ov-metric:hover {
+.step-detail .ov-metric:hover {
   transform: translateY(-1px);
   border-color: var(--border-strong);
   box-shadow: var(--shadow-popover);
 }
-.ov-metric-head {
+.step-detail .ov-metric-head {
   display: flex;
   align-items: center;
   gap: 4px;
 }
-.ov-metric-label {
+.step-detail .ov-metric-label {
   flex: 1;
   font-size: 10px;
   color: var(--text-tertiary);
@@ -6284,12 +6304,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ov-metric-icon {
+.step-detail .ov-metric-icon {
   color: var(--accent-text);
   opacity: 0.65;
   flex-shrink: 0;
 }
-.ov-metric-value {
+.step-detail .ov-metric-value {
   margin-top: 2px;
   font-size: var(--text-lg);
   line-height: 1.2;
@@ -6299,27 +6319,27 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ov-spark {
+.step-detail .ov-spark {
   display: block;
   width: 100%;
   height: 24px;
   margin: 2px 0;
   overflow: visible;
 }
-.ov-spark polyline {
+.step-detail .ov-spark polyline {
   fill: none;
   stroke: var(--accent-text);
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ov-metric-flat {
+.step-detail .ov-metric-flat {
   height: 24px;
   margin: 2px 0;
   border-bottom: 1px dashed var(--border-subtle);
   opacity: 0.6;
 }
-.ov-metric-sub {
+.step-detail .ov-metric-sub {
   font-size: 9px;
   line-height: 1.4;
   color: var(--text-tertiary);
@@ -6328,18 +6348,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   white-space: nowrap;
 }
 
-.ov-acc-list {
+.step-detail .ov-acc-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.ov-acc {
+.step-detail .ov-acc {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-elevated);
   overflow: hidden;
 }
-.ov-acc-head {
+.step-detail .ov-acc-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6354,58 +6374,58 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-apple);
 }
-.ov-acc-head:hover {
+.step-detail .ov-acc-head:hover {
   background: var(--surface-hover);
 }
-.ov-acc-head:focus-visible {
+.step-detail .ov-acc-head:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
-.ov-acc-icon {
+.step-detail .ov-acc-icon {
   display: inline-flex;
   color: var(--accent-text);
   opacity: 0.75;
 }
-.ov-acc-title {
+.step-detail .ov-acc-title {
   flex: 1;
   text-align: left;
 }
-.ov-acc-state {
+.step-detail .ov-acc-state {
   font-size: 9px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
   color: var(--text-tertiary);
 }
-.ov-acc-chev {
+.step-detail .ov-acc-chev {
   color: var(--text-tertiary);
   transition: transform 160ms var(--ease-apple);
   flex-shrink: 0;
 }
-.ov-acc.open .ov-acc-chev {
+.step-detail .ov-acc.open .ov-acc-chev {
   transform: rotate(180deg);
 }
-.ov-acc-body {
+.step-detail .ov-acc-body {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows var(--dur-expand) var(--ease-apple);
 }
-.ov-acc.open .ov-acc-body {
+.step-detail .ov-acc.open .ov-acc-body {
   grid-template-rows: 1fr;
 }
-.ov-acc-in {
+.step-detail .ov-acc-in {
   min-height: 0;
   overflow: hidden;
 }
-.ov-acc .detail-section {
+.step-detail .ov-acc .detail-section {
   padding: 0 8px 8px;
   margin: 0;
   border-top: 0;
 }
-.ov-acc .detail-section > .detail-section-title {
+.step-detail .ov-acc .detail-section > .detail-section-title {
   display: none;
 }
-.ov-acc .detail-empty-hint {
+.step-detail .ov-acc .detail-empty-hint {
   padding: 2px 0 6px;
 }
 /* 其余 tab 的卡片面（只加 className，不动结构/事件/文案）：统一 1px 边框 +
@@ -6415,19 +6435,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: var(--radius-md);
   transition:
     transform 120ms var(--ease-apple),
-    box-shadow 120ms var(--ease-apple),
-    border-color 120ms var(--ease-apple);
+    box-shadow 120ms var(--ease-apple);
 }
 .step-detail .detail-card:hover {
   transform: translateY(-1px);
-  border-color: var(--border-strong);
   box-shadow: var(--shadow-popover);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ov-metric,
-  .ov-acc-chev,
-  .ov-acc-body {
+  .step-detail .ov-metric,
+  .step-detail .ov-acc-chev,
+  .step-detail .ov-acc-body {
     transition: none;
   }
 }

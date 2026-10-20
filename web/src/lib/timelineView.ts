@@ -3,12 +3,16 @@
  *  真相仍是 `conversation.events`（不变量 #22）：这里不新增数据源，只把事件里
  *  已有的时间/状态折叠成卡片需要的形状：
  *    - `start`：事件自己的 `time`（历史事件）或工具调用的 `started_at`（SSE 回退）；
+ *      `model/request` 的账本事件在请求**结束**时落盘，起点取配对的
+ *      `model/request-started`，否则用 `time - duration_ms` 回推（P1-2）；
  *    - `durationMs`：只取**可配对**的真实跨度（tool/call↔tool/result、
  *      model/request 的 `duration_ms`、delegation-started↔finished、run 起止）；
  *      不可得 = null，渲染层显示「—」，不编 0、不拿相邻事件间隔冒充耗时；
  *    - `status`：ok / fail / run / idle，失败筛选与状态色共用同一判据。
  *
- *  展开键值不在这里生成：统一复用 `eventKey()`（`lib/inspectorPanel.ts`）。
+ *  全局事件身份仍是 `eventKey()`（`lib/inspectorPanel.ts`）；Timeline 行的
+ *  选中/展开/DOM id 用 `deriveTimelineEventKeys()` 给 seq-less 同键事件补序号，
+ *  不改 `eventKey` 的全局语义。
  */
 import { EventType } from '../types';
 import type { AgentEvent, ToolCall } from '../types';
@@ -335,7 +339,7 @@ export function formatClock(iso: string | null | undefined): string | null {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** 轴刻度标签：0s / 15s / 1m / 1m30s——固定单位，不随 locale 漂移。 */
+/** 轴刻度标签：0ms / 15s / 1m / 1m30s——固定单位，不随 locale 漂移。 */
 export function formatAxisLabel(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '';
   if (ms < 1000) return `${Math.round(ms)}ms`;
