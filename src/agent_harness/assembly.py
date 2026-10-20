@@ -77,7 +77,6 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
     ToolExposure,
     ToolReconcileInfo,
-    exposure_of,
 )
 from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
@@ -850,7 +849,7 @@ async def build_runtime(
     # （fail-closed，V1 不支持对它配额）。
     tool_exposure: ToolExposureController | None = None
     if any(
-        exposure_of(tool) is ToolExposure.DEFERRED for tool in registry.list()
+        registry.resolve_exposure(tool) is ToolExposure.DEFERRED for tool in registry.list()
     ):
         tool_exposure = ToolExposureController(registry)
         registry.register(ToolSearchTool(tool_exposure))

@@ -114,6 +114,8 @@ def _attach_schema_passthrough(
 class MCPTool(Tool):
     """一个 remote MCP 工具的统一契约包装（每次连接 discovery 生成一个实例）。"""
 
+    defer_when_many = True
+
     def __init__(
         self,
         connection: MCPServerConnection,

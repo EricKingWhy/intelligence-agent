@@ -22,7 +22,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from agent_harness.tooling.contract import Tool, ToolExposure, exposure_of
+from agent_harness.tooling.contract import Tool, ToolExposure
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ToolResult
 
@@ -69,9 +69,9 @@ class ToolExposureController:
         """当前应绑定给模型的定义集：direct + 已激活 deferred，按注册顺序。"""
         definitions: list[dict] = []
         for tool in self._registry.list():
-            if exposure_of(tool) is ToolExposure.DIRECT or (
+            if self._registry.resolve_exposure(tool) is ToolExposure.DIRECT or (
                 tool.name in self._activated
-                and exposure_of(tool) is ToolExposure.DEFERRED
+                and self._registry.resolve_exposure(tool) is ToolExposure.DEFERRED
             ):
                 definitions.append({
                     "name": tool.name,
@@ -92,7 +92,7 @@ class ToolExposureController:
             return []
         scored: list[tuple[int, int, Tool]] = []
         for order, tool in enumerate(self._registry.list()):
-            if exposure_of(tool) is not ToolExposure.DEFERRED:
+            if self._registry.resolve_exposure(tool) is not ToolExposure.DEFERRED:
                 continue
             doc_text = " ".join((
                 tool.name,
