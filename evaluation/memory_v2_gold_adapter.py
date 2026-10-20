@@ -1,12 +1,14 @@
 """Gold-case adapter: drive the real Memory V2 service from `run_memory_gold_gate`.
 
-The `positive_write` cases, the explicit-remember boundary, the NOOP and
-ineligible families, the secret probes (automatic / direct / api_edit /
-fallback / replay) and the foreign-project isolation probe run through the real
-formation pipeline (real SQLite + markdown stores in a per-case tmp dir,
-`InMemoryMemoryV2Index`, scripted model outputs). Observations come only from
-returned structures and service state; the adapter never reads `case.expected`.
-All other cases keep the neutral stub. The gate itself is read-only here.
+Every case in the gold corpus now runs through the real formation pipeline
+(real SQLite + markdown stores in a per-case tmp dir, `InMemoryMemoryV2Index`,
+scripted model outputs): positive writes, the explicit-remember boundary, the
+NOOP and ineligible families, the secret probes (automatic / direct / api_edit /
+fallback / replay), the foreign-project isolation probe, contradiction
+supersession/invalidation, cross-session recall plus lifecycle, the transient
+fallback lane, and job replay. Observations come only from returned structures
+and service state; the adapter never reads `case.expected`. The gate itself is
+read-only here.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from agent_harness.memory.v2 import (
     SourceType,
     TrustedMemoryIdentity,
 )
+from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.commands import explicit_remember_matches
 from agent_harness.memory.v2.eligibility import (
@@ -220,9 +223,10 @@ class _GoldWorkspaceIndex:
         )
 
 
-#: Scripted model outputs for the 5 wired cases. These content strings are the
+#: Scripted model outputs for the wired cases. These content strings are the
 #: synthetic corpus constants the model is asked to refine to; they are literals
-#: here, not reads of `case.expected`.
+#: here, not reads of `case.expected`. `action` selects UPDATE/INVALIDATE against
+#: the seeded predecessor; ADD is the default.
 _SCRIPTS: dict[str, dict[str, Any]] = {
     "positive_semantic_preference": {
         "kind": "semantic",
@@ -304,6 +308,91 @@ _SCRIPTS: dict[str, dict[str, Any]] = {
             "category": "project_fact",
         },
     },
+    # Contradiction family: the adjudicator names the seeded predecessor.
+    "contradiction_supersession": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "The synthetic deploy window is Thursday.",
+        "payload": {
+            "subject": "synthetic deploy window",
+            "fact": "The synthetic deploy window is Thursday.",
+            "category": "project_fact",
+        },
+        "action": "UPDATE",
+        "reason_code": "enrich_existing",
+    },
+    "contradiction_user_wins": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "The synthetic project codename is Cedar Lantern.",
+        "payload": {
+            "subject": "synthetic project codename",
+            "fact": "The synthetic project codename is Cedar Lantern.",
+            "category": "project_fact",
+        },
+        "action": "UPDATE",
+        "reason_code": "user_authority_wins",
+    },
+    "contradiction_invalidation": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "The synthetic deploy window is no longer Monday.",
+        "payload": {
+            "subject": "synthetic deploy window",
+            "fact": "The synthetic deploy window is no longer Monday.",
+            "category": "project_fact",
+        },
+        "action": "INVALIDATE",
+        "reason_code": "contradicts_existing",
+    },
+    # Cross-session recall: the user message (formation input) is this session's fact;
+    # `case.synthetic_input` is the later recall query.
+    "cross_session_recall_one": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "On our synthetic project, the prototype is named Sample Harbor.",
+        "payload": {
+            "subject": "prototype name",
+            "fact": "On our synthetic project, the prototype is named Sample Harbor.",
+            "category": "project_fact",
+        },
+    },
+    "cross_session_recall_two": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "The project API uses cursor pagination for listings.",
+        "payload": {
+            "subject": "project API listings",
+            "fact": "The project API uses cursor pagination for listings.",
+            "category": "project_fact",
+        },
+    },
+    "primary_transient_fallback": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": (
+            "The synthetic project's public listing API uses cursor pagination for "
+            "stable pages."
+        ),
+        "payload": {
+            "subject": "public listing API",
+            "fact": (
+                "The synthetic project's public listing API uses cursor pagination for "
+                "stable pages."
+            ),
+            "category": "project_fact",
+        },
+    },
+    "replay_committed_job": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "The synthetic project retains audit events for 90 days.",
+        "payload": {
+            "subject": "audit event retention",
+            "fact": "The synthetic project retains audit events for 90 days.",
+            "category": "project_fact",
+        },
+    },
 }
 
 #: Scripted candidate for the automatic/fallback/replay secret probes. The model
@@ -342,7 +431,40 @@ _SECRET_BOUNDARY_PATHS: dict[str, str] = {
 _ISOLATION_CASES = frozenset({"wrong_project_isolation"})
 
 #: Cases that must replay the same claimed job and observe a zero-write terminal echo.
-_REPLAY_CASES = frozenset({"secret_replay_probe"})
+_REPLAY_CASES = frozenset({"secret_replay_probe", "replay_committed_job"})
+
+#: Recall-label anchors per recall case. A formed record whose content contains the
+#: literal anchor is mapped to the label; unmapped hits keep their raw id. The anchors
+#: are corpus literals, not reads of `case.expected`.
+_RECALL_LABELS: dict[str, tuple[str, str]] = {
+    "cross_session_recall_one": ("gold-project-name", "Sample Harbor"),
+    "cross_session_recall_two": ("gold-pagination", "cursor pagination"),
+}
+_RECALL_CASES = frozenset(_RECALL_LABELS)
+
+#: Distractor seeds so the recall query has to rank the real fact into the top six.
+_RECALL_DISTRACTORS: tuple[str, ...] = (
+    "Project status summaries should stay concise.",
+    "The release cutoff is Wednesday.",
+    "Deployments require approval before production.",
+    "Generated reports go to the archive bucket.",
+    "A nightly job checks database backups.",
+    "Support escalations go to the on-call engineer.",
+    "Service authentication uses signed tokens.",
+)
+
+#: Seeded predecessor per contradiction case (the version the user contradicts).
+_CONTRADICTION_SEEDS: dict[str, str] = {
+    "contradiction_supersession": "The synthetic deploy window is Monday.",
+    "contradiction_user_wins": "The synthetic project codename is Amber Fox.",
+    "contradiction_invalidation": "The synthetic deploy window is Monday.",
+}
+
+#: The one lifecycle case: it exercises form → recall → why → edit → versions → delete.
+_LIFECYCLE_CASES = frozenset({"cross_session_recall_one"})
+
+#: The one transient-fallback case (primary exhausts retries, fallback answers).
+_FALLBACK_CASES = frozenset({"primary_transient_fallback"})
 
 #: Cases whose only write path is the explicit `remember_this` tool.
 _EXPLICIT_CASES = frozenset({"explicit_remember", "explicit_remember_secret_probe"})
@@ -660,6 +782,177 @@ async def _verify_untrusted_recall_stays_data(
     }
 
 
+def _gold_auth_headers(identity: TrustedMemoryIdentity) -> dict[str, str]:
+    token = jwt.encode(
+        {
+            "tenant_id": identity.tenant_id,
+            "user_id": identity.user_id,
+            "scopes": ["user"],
+            "exp": int(time.time()) + 600,
+        },
+        _GATE_JWT_SECRET,
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _verify_deleted_memory_erasure(
+    *,
+    database_path: Path,
+    service: MemoryV2Service,
+    trusted: TrustedMemoryIdentity,
+    root_id: str,
+    memory_ids: set[str],
+) -> bool:
+    """Deletion must erase the complete SQLite chain and every derived index row."""
+    async with connect(database_path) as connection:
+        async with connection.execute(
+            "SELECT COUNT(*) AS count FROM memory_v2_records WHERE root_id=?", (root_id,),
+        ) as cursor:
+            remaining_records = (await cursor.fetchone())["count"]
+        async with connection.execute(
+            "SELECT memory_id FROM memory_v2_tombstones WHERE root_id=?", (root_id,),
+        ) as cursor:
+            tombstone_ids = {row["memory_id"] for row in await cursor.fetchall()}
+    if remaining_records != 0 or not memory_ids <= tombstone_ids:
+        return False
+    index = getattr(service, "_index", None)
+    contains = getattr(index, "contains", None)
+    if contains is None:
+        return False
+    return not any([
+        await contains(memory_id, trusted, MemoryScope.PROJECT)
+        for memory_id in memory_ids
+    ])
+
+
+async def _verify_cross_session_lifecycle(
+    *,
+    database_path: Path,
+    sessions: JsonlSessionStore,
+    service: MemoryV2Service,
+    trusted: TrustedMemoryIdentity,
+    workspace_index: _GoldWorkspaceIndex,
+    record: Any,
+    recall_session_id: str,
+    source_session_id: str,
+    automatic_recall_selected: bool,
+) -> dict[str, bool]:
+    """Drive the public memory API through why → edit → versions → delete → tombstone."""
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(database_path.parent / "gold-web"),
+        model_api_key="test-only-not-a-credential",
+        jwt_secret=_GATE_JWT_SECRET,
+    )
+    app = create_app(settings, enable_cors=False)
+    state = app.state.agent
+    await state.ensure_stores()
+    state.store = sessions
+    state.workspace_index = workspace_index
+    state._registry = object()
+    state._wiring = SimpleNamespace(memory_v2=service, degradations={})
+    headers = _gold_auth_headers(trusted)
+    params = {"project_id": trusted.project_id}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://memory-v2-gold.test",
+    ) as client:
+        why_response = await client.get(
+            f"/api/sessions/{recall_session_id}/memory-recalls", headers=headers,
+        )
+        why_records = [
+            memory for item in why_response.json()
+            for memory in item.get("memories", [])
+            if memory.get("memory_id") == record.id
+        ] if why_response.status_code == 200 else []
+        why = why_records[0] if why_records else {}
+        why_verified = (
+            why_response.status_code == 200
+            and why.get("source_session_id") == source_session_id
+            and bool(why.get("source_event_ids"))
+            and isinstance(why.get("ranking", {}).get("score"), (int, float))
+        )
+        content = record.content
+        if len(content) <= 480:
+            content = f"User confirmed: {content}"
+        edit_response = await client.patch(
+            f"/api/memories/{record.id}", headers=headers, params=params,
+            json={
+                "expected_version": record.version,
+                "content": content,
+                "payload": record.payload.model_dump(mode="json"),
+            },
+        )
+        edit = edit_response.json() if edit_response.status_code == 200 else {}
+        edited_id = edit.get("id")
+        edited = (
+            edit.get("version") == record.version + 1
+            and edit.get("source_type") == SourceType.USER_EDIT.value
+            and isinstance(edited_id, str)
+        )
+        history_verified = False
+        deleted = False
+        tombstone_verified = False
+        storage_erasure_verified = False
+        why_after_delete_empty = False
+        if edited:
+            versions_response = await client.get(
+                f"/api/memories/{record.id}/versions", headers=headers, params=params,
+            )
+            history = versions_response.json() if versions_response.status_code == 200 else []
+            history_verified = sorted(
+                item.get("version") for item in history if type(item.get("version")) is int
+            ) == [1, 2]
+            version_ids = {record.id, edited_id}
+            version_ids.update(
+                item.get("id") for item in history if isinstance(item.get("id"), str)
+            )
+            delete_response = await client.delete(
+                f"/api/memories/{edited_id}", headers=headers, params=params,
+            )
+            deleted = (
+                delete_response.status_code == 200
+                and delete_response.json().get("deleted") is True
+            )
+            if deleted:
+                storage_erasure_verified = await _verify_deleted_memory_erasure(
+                    database_path=database_path, service=service, trusted=trusted,
+                    root_id=record.root_id, memory_ids=version_ids,
+                )
+                detail_response = await client.get(
+                    f"/api/memories/{edited_id}", headers=headers, params=params,
+                )
+                tombstone = (
+                    detail_response.json() if detail_response.status_code == 200 else {}
+                )
+                tombstone_verified = tombstone.get("status") == "deleted"
+                after_response = await client.get(
+                    f"/api/sessions/{recall_session_id}/memory-recalls", headers=headers,
+                )
+                why_after_delete_empty = (
+                    after_response.status_code == 200
+                    and all(
+                        memory.get("memory_id") != record.id
+                        for item in after_response.json()
+                        for memory in item.get("memories", [])
+                    )
+                )
+    return {
+        "formed_from_source_session": (
+            record.source_session_id == source_session_id
+            and bool(record.source_event_ids)
+        ),
+        "automatic_recall_selected": automatic_recall_selected,
+        "why_recalled_api_verified": why_verified,
+        "authoritative_edit_verified": edited,
+        "version_history_verified": history_verified,
+        "deletion_verified": deleted,
+        "tombstone_verified": tombstone_verified,
+        "storage_erasure_verified": storage_erasure_verified,
+        "recall_hidden_after_delete": why_after_delete_empty,
+    }
+
+
 def _roles() -> MemoryModelRoles:
     return MemoryModelRoles(
         primary=ModelConfig(
@@ -681,7 +974,7 @@ def _roles() -> MemoryModelRoles:
 
 
 def _events_for_case(
-    case: GoldCase, session_id: str, run_id: str
+    case: GoldCase, session_id: str, run_id: str, *, user_content: str | None = None,
 ) -> list[SessionEvent]:
     ineligible = _INELIGIBLE_SCRIPTS.get(case.case_id)
     if case.case_id == "unsupported_assistant_claim":
@@ -690,7 +983,7 @@ def _events_for_case(
         }
         assistant_content = case.synthetic_input
     else:
-        user_data = {"content": case.synthetic_input}
+        user_data = {"content": case.synthetic_input if user_content is None else user_content}
         assistant_content = "Acknowledged."
     if ineligible is not None:
         if ineligible.get("injected"):
@@ -764,7 +1057,9 @@ def _events_for_case(
     return events
 
 
-def _model_outputs(script: Mapping[str, Any] | None) -> tuple[str, str]:
+def _model_outputs(
+    script: Mapping[str, Any] | None, *, target_id: str | None = None,
+) -> tuple[str, str]:
     """Formation/adjudication text for one scripted candidate, or a NO_MEMORY abstention."""
     if script is None:
         return (
@@ -809,15 +1104,19 @@ def _model_outputs(script: Mapping[str, Any] | None) -> tuple[str, str]:
         {"decision": "CANDIDATES", "candidates": [candidate], "skip_reason": None},
         ensure_ascii=False,
     )
+    action = script.get("action", "ADD")
     verdict = {key: value for key, value in candidate.items() if key != "sensitivity"}
     adjudication = json.dumps(
         {
             "results": [
                 {
-                    "action": "ADD",
-                    "target_memory_id": None,
-                    "reason_code": "durable_new",
-                    "result": verdict,
+                    "action": action,
+                    "target_memory_id": target_id if action != "ADD" else None,
+                    "reason_code": script.get(
+                        "reason_code",
+                        "durable_new" if action == "ADD" else "enrich_existing",
+                    ),
+                    "result": None if action == "INVALIDATE" else verdict,
                 }
             ]
         },
@@ -848,6 +1147,8 @@ def _observed(
     unauthorized_recall_count: int = 0,
     unauthorized_mutation_count: int = 0,
     untrusted_evidence: Mapping[str, bool] | None = None,
+    recall_ids_top6: Sequence[str] = (),
+    lifecycle_evidence: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Build the 31-field observation from returned records and service state."""
     observed = neutral_observation()
@@ -934,6 +1235,7 @@ def _observed(
             "kind": kind,
             "scope": scope,
             "source_authority": source_authority,
+            "recall_ids_top6": list(recall_ids_top6),
             "secret_probe_path": secret_probe_path,
             "secret_probe_attempted": secret_probe_attempted,
             "explicit_remember_applied": explicit_remember_applied,
@@ -981,6 +1283,9 @@ def _observed(
         observed.update(untrusted_evidence)
         if untrusted_evidence.get("untrusted_recall_safe") is not True:
             observed["prohibited_outcomes"].append("privileged_prompt_effect")
+    if lifecycle_evidence is not None:
+        observed["lifecycle_evidence"] = dict(lifecycle_evidence)
+        observed["lifecycle_verified"] = all(lifecycle_evidence.values())
     if not eligibility.eligible and written:
         observed["prohibited_outcomes"].append("ineligible_write")
     if script is not None and script.get("sensitivity") == "sensitive" and written:
@@ -1002,7 +1307,12 @@ async def _execute_wired(
     session_id = f"gold-{uuid.uuid4().hex}"
     run_id = f"run-{uuid.uuid4().hex}"
     trusted = _trusted_identity(case.case_id)
-    events = _events_for_case(case, session_id, run_id)
+    events = _events_for_case(
+        case, session_id, run_id,
+        # The recall cases' "user message" is the fact to retain; the case input is
+        # the later recall query.
+        user_content=script["content"] if case.case_id in _RECALL_CASES else None,
+    )
     ineligible = _INELIGIBLE_SCRIPTS.get(case.case_id)
     terminal_status = ineligible["terminal_status"] if ineligible else STATUS_COMPLETED
     eligibility = decide_run_end_eligibility(
@@ -1120,9 +1430,19 @@ async def _execute_wired(
                 _seed_draft(case.synthetic_input, _foreign_project_identity(trusted)),
                 _foreign_project_identity(trusted),
             )
-        formation, adjudication = _model_outputs(script)
+        target_id: str | None = None
+        if case.case_id in _CONTRADICTION_SEEDS:
+            # The real adjudicator target is the seeded predecessor returned by the service.
+            predecessor = await service.create(
+                _seed_draft(_CONTRADICTION_SEEDS[case.case_id], trusted), trusted,
+            )
+            target_id = predecessor.id
+        elif case.case_id in _RECALL_CASES:
+            for distractor in _RECALL_DISTRACTORS:
+                await service.create(_seed_draft(distractor, trusted), trusted)
+        formation, adjudication = _model_outputs(script, target_id=target_id)
         formation_queue: list[Any] = [formation]
-        if secret_probe_path == "fallback":
+        if secret_probe_path == "fallback" or case.case_id in _FALLBACK_CASES:
             # Primary exhausts three transient attempts, then the fallback lane answers.
             formation_queue = [TimeoutError()] * _PRIMARY_TRANSIENT_FAILURES + [formation]
         invoker = FakeInvoker(
@@ -1247,8 +1567,90 @@ async def _execute_wired(
         status=MemoryStatus.INVALIDATED,
         limit=100,
     )
+    recall_ids: list[str] = []
+    lifecycle_evidence: Mapping[str, bool] | None = None
+    if case.case_id in _RECALL_CASES:
+        label, anchor = _RECALL_LABELS[case.case_id]
+        # Labels attach to the records this run actually returned, matched by their
+        # literal anchor — never by the corpus expectation.
+        recalled_labels = {
+            record.id: label
+            for record in written
+            if anchor.casefold() in record.content.casefold()
+        }
+        hits = await service.hybrid_search(
+            case.synthetic_input,
+            trusted,
+            scopes=(MemoryScope.PROJECT,),
+            limit=6,
+        )
+        recall_ids = [
+            recalled_labels.get(hit.record.id, hit.record.id) for hit in hits
+        ][:6]
+        recall_ids.extend("" for _ in range(6 - len(recall_ids)))
+        if case.case_id in _LIFECYCLE_CASES:
+            query_session_id = f"gold-recall-{uuid.uuid4().hex}"
+            query_run_id = f"run-recall-{uuid.uuid4().hex}"
+            sessions = JsonlSessionStore(root=workspace.root / "sessions")
+            workspace_index = _GoldWorkspaceIndex(
+                trusted.project_id or "", [session_id, query_session_id],
+            )
+            query_session = Session.start(sessions, session_id=query_session_id)
+            query_session.append(
+                USER_MESSAGE,
+                {"content": case.synthetic_input},
+                run_id=query_run_id,
+            )
+            identity_token = set_identity_context(
+                IdentityContext(trusted.tenant_id, trusted.user_id, ["user"])
+            )
+            recall_run_token = run_context_var.set(query_run_id)
+            try:
+                injected = await MemoryV2ContextProvider(
+                    service, workspace_index=workspace_index,
+                ).select(query_session, 2000)
+            finally:
+                run_context_var.reset(recall_run_token)
+                identity_context_var.reset(identity_token)
+            recall_items = [
+                item
+                for event in query_session.events
+                if event.type == MEMORY_RECALLED
+                for item in event.data.get("memories", [])
+                if isinstance(item, dict)
+            ]
+            selected_ids = [
+                item.get("memory_id")
+                for item in recall_items
+                if item.get("memory_id") in recalled_labels
+            ]
+            automatic_recall_selected = False
+            selected_record = None
+            for memory_id in selected_ids:
+                selected = await service.read(memory_id, trusted)
+                if selected_record is None:
+                    selected_record = selected
+                automatic_recall_selected |= any(
+                    selected.content in str(message.content) for message in injected
+                )
+            if selected_record is not None:
+                lifecycle_evidence = await _verify_cross_session_lifecycle(
+                    database_path=workspace.db_path,
+                    sessions=sessions,
+                    service=service,
+                    trusted=trusted,
+                    workspace_index=workspace_index,
+                    record=selected_record,
+                    recall_session_id=query_session_id,
+                    source_session_id=session_id,
+                    automatic_recall_selected=automatic_recall_selected,
+                )
     if explicit_action is not None:
         action = explicit_action
+    elif result is not None and superseded:
+        action = "UPDATE"
+    elif result is not None and invalidated:
+        action = "INVALIDATE"
     elif written:
         adjudication_actions = [
             action
@@ -1281,6 +1683,8 @@ async def _execute_wired(
         unauthorized_recall_count=unauthorized_recall_count,
         unauthorized_mutation_count=unauthorized_mutation_count,
         untrusted_evidence=untrusted_evidence,
+        recall_ids_top6=recall_ids,
+        lifecycle_evidence=lifecycle_evidence,
     )
     completed = observed.pop("_completed")
     status = (
@@ -1412,7 +1816,9 @@ def _print_slice(dataset: Path, raw: Sequence[Mapping[str, Any]]) -> None:
             f"explicit_applied={observed['explicit_remember_applied']} "
             f"written={observed['written_count']} "
             f"add_update={observed['add_update_record_count']} "
-            f"match={observed['write_match_count']}"
+            f"match={observed['write_match_count']} "
+            f"recall_ids={observed['recall_ids_top6']} "
+            f"lifecycle={observed.get('lifecycle_verified')}"
         )
     for name in (
         "noop_accuracy",
@@ -1430,6 +1836,9 @@ def _print_slice(dataset: Path, raw: Sequence[Mapping[str, Any]]) -> None:
         "write_precision",
         "write_target_coverage",
         "kind_accuracy",
+        "contradiction_handling",
+        "cross_session_recall_at_6",
+        "cross_session_lifecycle",
     ):
         metric = slice_report["metrics"][name]
         print(
