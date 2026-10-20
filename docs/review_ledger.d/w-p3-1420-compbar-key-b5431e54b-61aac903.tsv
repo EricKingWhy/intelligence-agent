@@ -1,0 +1,1 @@
+2026-10-20	机械归属（非两轴独立审查主张）：#1420 P3 修复 CompositionBar 阈值 mark 的 React key（mark.ratio → mark.label），消除 auto_compact 与 hard_guard 阈值相等时的重复 key；仅改 web/src/insights/components/CompositionBar.tsx 一行。验证：web 下 `npx vitest run src/insights` 3 文件 32 例全绿（rc=0）、`npx tsc -b` 零输出（rc=0）。	b5431e54b..61aac903c
