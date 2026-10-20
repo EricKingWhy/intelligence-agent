@@ -495,6 +495,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .appbar-more-menu {
   min-width: 200px;
 }
+/* #1410：密度四档在「更多工具」里的副本默认不渲染——只有 ≤560px 才显示，
+   桌面档仍走独立的密度下拉，避免出现两个并列入口。 */
+.appbar-more-density {
+  display: none;
+}
+.appbar-more-density-label {
+  padding: 4px var(--space-sm);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
 .appbar-menu-warn {
   margin-left: auto;
   color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
@@ -6270,8 +6281,45 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 预算 = 560 − 16×2 − 484 − 28 − 8 ≈ 8px ⇒ 560 已放不下，取 560 是"整串标题
  * 至少不再参与挤压"的下界（561–~716 档由标题自己的省略号兜住，见上方注释）。 */
 @media (max-width: 560px) {
+  .appbar {
+    /* #1410：三列改成 logo / 余量 / 菜单——中间拿到全部剩余宽度，会话名自己
+       省略；不再用等宽 1fr 把中间挤成 auto 的 max-content 预算。 */
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
   .appbar-title {
     display: none;
+  }
+  /* #1410：≤820 隐藏的会话组在这一档回来——顶栏保留「当前会话 + 运行状态」，
+     设置项全收进右侧唯一菜单。 */
+  .appbar-center {
+    display: flex;
+    justify-self: stretch;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .appbar-center .appbar-session {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .appbar-center .appbar-session-name {
+    min-width: 0;
+    max-width: none;
+  }
+  .appbar-center .run-pulse {
+    flex: none;
+    white-space: nowrap;
+  }
+  /* 顶栏右簇只留「更多工具」一个入口：密度触发器隐藏，四档改到菜单里；
+     预算/等待等长尾信息在 390 宽度下让位给会话名与状态。 */
+  .appbar-right .appbar-density-trigger {
+    display: none;
+  }
+  .appbar-center .budget-badge,
+  .appbar-center .wait-hint {
+    display: none;
+  }
+  .appbar-more-density {
+    display: block;
   }
 }
 

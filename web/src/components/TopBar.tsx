@@ -71,8 +71,32 @@ interface Props {
   onSelectSession?: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
+/** #1410：密度四档的菜单体。桌面档挂在独立的密度下拉里，≤560px 时同一个
+ *  组件也挂进「更多工具」——顶栏只留一个菜单入口。两侧共用同一份受控状态
+ *  （`density` / `onDensityChange`），不存在第二套密度真相。 */
+function DensityRadioGroup({ density, onDensityChange }: Pick<Props, 'density' | 'onDensityChange'>) {
+  return (
+    <DropdownMenu.RadioGroup
+      value={density}
+      onValueChange={(value) => onDensityChange(value as TraceDensity)}
+    >
+      {DENSITIES.map((d) => (
+        <DropdownMenu.RadioItem
+          key={d}
+          value={d}
+          className="rail-menu-item appbar-density-item"
+        >
+          <span>{DENSITY_LABEL[d]}</span>
+          <DropdownMenu.ItemIndicator>
+            <Check size={14} aria-hidden="true" />
+          </DropdownMenu.ItemIndicator>
+        </DropdownMenu.RadioItem>
+      ))}
+    </DropdownMenu.RadioGroup>
+  );
+}
 
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
   useEffect(() => onTokenChange(() => setTokenLive(getToken())), []);
@@ -303,23 +327,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               sideOffset={6}
               aria-label="显示密度"
             >
-              <DropdownMenu.RadioGroup
-                value={density}
-                onValueChange={(value) => onDensityChange(value as TraceDensity)}
-              >
-                {DENSITIES.map((d) => (
-                  <DropdownMenu.RadioItem
-                    key={d}
-                    value={d}
-                    className="rail-menu-item appbar-density-item"
-                  >
-                    <span>{DENSITY_LABEL[d]}</span>
-                    <DropdownMenu.ItemIndicator>
-                      <Check size={14} aria-hidden="true" />
-                    </DropdownMenu.ItemIndicator>
-                  </DropdownMenu.RadioItem>
-                ))}
-              </DropdownMenu.RadioGroup>
+              <DensityRadioGroup density={density} onDensityChange={onDensityChange} />
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -363,6 +371,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                 event.preventDefault();
               }}
             >
+              {/* #1410：≤560px 顶栏隐藏独立的密度触发器，四档收进这个菜单
+                  （CSS 控制显隐；桌面档这里 display:none，不产生第二个入口）。 */}
+              <div className="appbar-more-density">
+                <DropdownMenu.Label className="appbar-more-density-label">
+                  显示密度
+                </DropdownMenu.Label>
+                <DensityRadioGroup density={density} onDensityChange={onDensityChange} />
+                <DropdownMenu.Separator className="rail-menu-sep" />
+              </div>
               <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenMemories}>
                 <Brain size={14} aria-hidden="true" /> 记忆管理
               </DropdownMenu.Item>
