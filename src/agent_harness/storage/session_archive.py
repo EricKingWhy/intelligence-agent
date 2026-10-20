@@ -881,6 +881,25 @@ class SessionArchive:
                  parent_session_id, model, title),
             )
 
+    def end_session(self, session_id: str, end_reason: str) -> bool:
+        """关闭会话行（**首写获胜**：已有 `ended_at` 的行不再改写）。
+
+        来源: Hermes `hermes_state_sessions.py:483-490` @ `b324b1f7`
+        （`UPDATE ... WHERE id = ? AND ended_at IS NULL`）；与本类
+        `_sweep_orphaned_sessions` 的关闭语义一致。行不存在 / 已关闭
+        ⇒ 命中 0 行，静默返回 False（`/new` 的 fail-open 路径依赖它）。
+        """
+        with self._cursor() as conn:
+            cur = conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? "
+                "WHERE id = ? AND ended_at IS NULL",
+                (time.time(), end_reason, session_id),
+            )
+            changed = cur.rowcount > 0
+        if not changed:
+            logger.debug("end_session 未命中（不存在或已关闭）: %s", session_id)
+        return changed
+
     def append_message(
         self,
         session_id: str,
