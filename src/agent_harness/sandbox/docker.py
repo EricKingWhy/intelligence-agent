@@ -65,6 +65,16 @@ def _glob_match_posix(rel_path: str, pattern: str) -> bool:
     )
 
 
+def _export_data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+    filtered = tarfile.data_filter(member, destination)
+    # data_filter grants owner write access for extraction. Preserve a POSIX
+    # source's read-only bit without restoring unsafe mode bits or link paths.
+    if (filtered is not None and filtered.isfile() and os.name != "nt"
+            and filtered.mode is not None and not member.mode & stat.S_IWUSR):
+        return filtered.replace(mode=filtered.mode & ~stat.S_IWUSR)
+    return filtered
+
+
 def _validate_windows_archive_members(members: list[tarfile.TarInfo]) -> None:
     reserved_names = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
         f"{prefix}{number}"
@@ -1356,7 +1366,7 @@ class DockerSandbox(Sandbox):
                     members = archive.getmembers()
                     if os.name == "nt":
                         _validate_windows_archive_members(members)
-                    archive.extractall(path=raw_dir, members=members, filter="data")
+                    archive.extractall(path=raw_dir, members=members, filter=_export_data_filter)
                 raw = Path(raw_dir)
                 extracted = list(raw.iterdir())
                 source = (
