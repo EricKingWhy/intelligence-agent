@@ -25,6 +25,7 @@ class Operation(BaseModel):
     """Persisted identity and current state of one Tool invocation."""
 
     tool_call_id: str
+    parent_exec_call_id: str | None = None
     session_id: str
     run_id: str | None = None
     agent_id: str | None = None

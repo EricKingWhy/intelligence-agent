@@ -22,7 +22,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from agent_harness.tooling.contract import Tool, ToolExposure, exposure_of
+from agent_harness.tooling.contract import Tool, ToolExposure, ToolPermission
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ToolResult
 
@@ -60,6 +60,12 @@ class ToolExposureController:
         self._registry = registry
         self._activated: set[str] = set()
 
+    def is_deferred(self, name: str) -> bool:
+        return any(
+            tool.name == name and self._registry.resolve_exposure(tool) is ToolExposure.DEFERRED
+            for tool in self._registry.list()
+        )
+
     @property
     def activated(self) -> frozenset[str]:
         """当前已激活的 deferred 工具名（只读快照）。"""
@@ -69,15 +75,11 @@ class ToolExposureController:
         """当前应绑定给模型的定义集：direct + 已激活 deferred，按注册顺序。"""
         definitions: list[dict] = []
         for tool in self._registry.list():
-            if exposure_of(tool) is ToolExposure.DIRECT or (
+            if self._registry.resolve_exposure(tool) is ToolExposure.DIRECT or (
                 tool.name in self._activated
-                and exposure_of(tool) is ToolExposure.DEFERRED
+                and self._registry.resolve_exposure(tool) is ToolExposure.DEFERRED
             ):
-                definitions.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.args_schema.model_json_schema(),
-                })
+                definitions.append(self._registry.model_definition(tool))
         return definitions
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -92,7 +94,7 @@ class ToolExposureController:
             return []
         scored: list[tuple[int, int, Tool]] = []
         for order, tool in enumerate(self._registry.list()):
-            if exposure_of(tool) is not ToolExposure.DEFERRED:
+            if self._registry.resolve_exposure(tool) is not ToolExposure.DEFERRED:
                 continue
             doc_text = " ".join((
                 tool.name,
@@ -106,11 +108,7 @@ class ToolExposureController:
         matches = [tool for _, _, tool in scored[:limit]]
         self._activated.update(tool.name for tool in matches)
         return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.args_schema.model_json_schema(),
-            }
+            self._registry.model_definition(tool)
             for tool in matches
         ]
 
@@ -123,6 +121,9 @@ class ToolSearchTool(Tool):
     就发现不了任何 deferred 工具。
     """
 
+    permission = ToolPermission.READ_ONLY
+    replay_safe = True
+
     def __init__(self, controller: ToolExposureController) -> None:
         self._controller = controller
 
@@ -132,13 +133,19 @@ class ToolSearchTool(Tool):
 
     @property
     def description(self) -> str:
+        code_hint = (
+            " For large-result filtering or many tool calls, search for exec before "
+            "retrieving the raw data; it can process intermediate results in code."
+            if self._controller.is_deferred("exec")
+            else ""
+        )
         return (
             "Search for additional tools that are not listed in the current tool "
             "menu. Use this when the task seems to need a capability you do not "
             "see among the available tools (for example a specific domain lookup). "
             "Provide keyword(s) describing the capability; matching tools are "
             "loaded and become callable in the next turn."
-        )
+        ) + code_hint
 
     @property
     def args_schema(self) -> type[BaseModel]:

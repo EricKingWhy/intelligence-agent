@@ -1,0 +1,12 @@
+{
+  "head": "a826bdf24773a1268c3f690a33f99ae850978f7b",
+  "tree": "ae516c0835ea486cd4e81704b598a39eb2c89966",
+  "cwd": "/tmp/ia-validated",
+  "argv": [
+    "bash",
+    "scripts/run_tests_clean.sh"
+  ],
+  "exit_code": 0,
+  "started_at": 1792482618.1088548,
+  "wall_seconds": 634.1828253269196
+}

@@ -22,7 +22,7 @@ import agent_harness.agent.runtime as runtime_module
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.run_budget import TRIGGER_LOCAL_TURNS
 from agent_harness.agent.types import STATUS_PAUSED
-from agent_harness.context.builder import ContextWindowExceededError
+from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
 from agent_harness.observability.port import NullSpan, NullTracer, Span, Tracer
 from agent_harness.session import (
@@ -515,7 +515,7 @@ class _OverflowingContextBuilder:
         raise ContextWindowExceededError("超限")
 
 
-class _CompactingContextBuilder:
+class _CompactingContextBuilder(ContextBuilder):
     """ContextBuilder 替身：投影时落一条 context/compacted 事实（非异常路径）。
 
     runtime 读这条事件的 `compacted_turn_count` 喂给 context span 的收口——
@@ -545,7 +545,7 @@ async def test_compaction_count_reaches_the_context_span_metadata(tmp_path, monk
     registry = ToolRegistry()
     runtime = AgentRuntime(
         ScriptedModel([AIMessage(content="答")]), registry, ToolExecutor(registry),
-        context_builder=_CompactingContextBuilder(),
+        context_builder=_CompactingContextBuilder(ScriptedModel([])),
     )
 
     await runtime.run(make_session(tmp_path), "hi")

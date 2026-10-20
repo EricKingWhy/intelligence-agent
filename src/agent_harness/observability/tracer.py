@@ -307,9 +307,12 @@ class RunTracer:
         型 + 具体目标命名（绝不用 tool/span 隐藏 SubAgent 结构）。"""
         if self._root is None:
             return None
+        binding = current_trace_binding.get()
+        parent = (binding.observation if binding is not None
+                  and binding.trace_id == self.trace_id else self._root)
         return self._quiet(
             "tool_span_started",
-            lambda: self._root.start_observation(
+            lambda: parent.start_observation(
                 name=tool_name,
                 as_type="agent" if is_delegate else "tool",
                 **self._content_fields("input", args),

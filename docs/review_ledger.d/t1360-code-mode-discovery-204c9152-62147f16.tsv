@@ -1,0 +1,1 @@
+2026-10-20	#1360 discovery; fixed point 204c9152. Spec/Standards NEEDS-FIX, one shared P1: exec attribution leaked into delegated model history. Read-only runtime red proof; repaired by 4ee0a1be. Evidence: docs/phase_status/2026-10.md (#1360).	204c9152d6007771bf3b2c335b8ef45003eba8e1..62147f16b4e425a83b385ef2ee5c7c89222df3ff
