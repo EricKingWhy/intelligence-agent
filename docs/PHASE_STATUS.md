@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-20：#1360 code mode 本地验收完成；最终代码 `6547475`，双轴审查及 Gate-0 6/6 PASS（正式收据待 clean-tree run）；PR 待创建，由维护者合并。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
+- 2026-10-20：#1360 已交付；Issue CLOSED，PR #1426（`等待merge`）等待维护者合并。Gate-0 收据 6/6 PASS，GitHub Gate-0/E2E/gitleaks 通过。PR 显示 BEHIND；遵从用户要求未同步 main。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
 
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
 > 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等，`SPEC_ROOT` 见 `AGENTS.md` §1）保持冻结，不被进度修改。
