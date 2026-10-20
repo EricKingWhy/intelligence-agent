@@ -1183,11 +1183,18 @@ class TestEndSession:
             "comp-child", source="interactive", started_at=now + 1,
             parent_session_id="comp-parent",
         )
+        # 另一条 lineage：让下面的比较有非空基线（否则 `after == before` 是空集自比）。
+        archive.ensure_session("other", source="interactive", started_at=now)
         archive.append_message("comp-parent", "user", "压缩前关键词", timestamp=now)
+        archive.append_message("other", "user", "压缩前关键词", timestamp=now)
         before = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert [r["session_id"] for r in before["results"]] == ["other"], (
+            "基线必须非空，且同 lineage 仍在 live context 的 comp-parent 被跳过"
+        )
         # 压缩 = 消息级投影（`active=0, compacted=1`），不写会话行。
         archive.append_message(
-            "comp-parent", "assistant", "摘要", timestamp=now, active=0, compacted=1,
+            "comp-parent", "assistant", "压缩摘要关键词", timestamp=now,
+            active=0, compacted=1,
         )
         meta = archive.get_session("comp-parent")
         assert meta is not None
@@ -1196,6 +1203,11 @@ class TestEndSession:
 
         after = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
         assert after == before, "压缩不得改变 DISCOVERY 行为"
+        # 压缩行本身按 `is_compacted_hit` 放行——证明确实走到了 DISCOVERY 的有结果分支。
+        compacted = archive.session_search(
+            query="压缩摘要关键词", current_session_id="comp-child",
+        )
+        assert [r["session_id"] for r in compacted["results"]] == ["comp-parent"]
 
 
 # ----------------------------------- 批次 D：auto-prune 90 天（Hermes 对齐） ---

@@ -881,13 +881,13 @@ class SessionArchive:
                  parent_session_id, model, title),
             )
 
-    def end_session(self, session_id: str, end_reason: str) -> bool:
+    def end_session(self, session_id: str, end_reason: str) -> None:
         """关闭会话行（**首写获胜**：已有 `ended_at` 的行不再改写）。
 
         来源: Hermes `hermes_state_sessions.py:483-490` @ `b324b1f7`
         （`UPDATE ... WHERE id = ? AND ended_at IS NULL`）；与本类
         `_sweep_orphaned_sessions` 的关闭语义一致。行不存在 / 已关闭
-        ⇒ 命中 0 行，静默返回 False（`/new` 的 fail-open 路径依赖它）。
+        ⇒ 命中 0 行，静默跳过（调用方的 fail-open 依赖它不抛）。
         """
         with self._cursor() as conn:
             cur = conn.execute(
@@ -895,10 +895,8 @@ class SessionArchive:
                 "WHERE id = ? AND ended_at IS NULL",
                 (time.time(), end_reason, session_id),
             )
-            changed = cur.rowcount > 0
-        if not changed:
-            logger.debug("end_session 未命中（不存在或已关闭）: %s", session_id)
-        return changed
+            if cur.rowcount <= 0:
+                logger.debug("end_session 未命中（不存在或已关闭）: %s", session_id)
 
     def append_message(
         self,
@@ -1828,6 +1826,19 @@ class SessionArchiveObserver:
         store.set_event_observer(self)
 
     # -- 观察者入口 --------------------------------------------------------
+
+    def end_session(self, session_id: str, end_reason: str) -> None:
+        """结束会话行（`/new` 换会话的唯一调用口）。
+
+        fail-open 边界与 `__call__` 同一条：归档是派生索引，写失败只记 warning。
+        """
+        try:
+            self.archive.end_session(session_id, end_reason)
+        except Exception:
+            logger.warning(
+                "会话归档结束行失败（session=%s, reason=%s）",
+                session_id, end_reason, exc_info=True,
+            )
 
     def __call__(self, session_id: str, event: Any) -> None:
         try:

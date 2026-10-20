@@ -3304,19 +3304,13 @@ def create_app(
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
-        # #1418：先建新会话、成功后才结束前任（建失败不许误杀旧会话）。
-        # 归档是派生索引，写失败只记 warning（fail-open）；previous 不存在 /
-        # 已被关闭 ⇒ end_session 命中 0 行，静默跳过（首写获胜）。
+        # #1418：**必须**在建会话成功之后——建失败不许误杀旧会话。
+        # fail-open 与首写获胜语义在 `SessionArchiveObserver.end_session`。
         if req.previous_session_id:
-            try:
-                archive = state.session_archive_observer.archive
-                await anyio.to_thread.run_sync(
-                    partial(archive.end_session, req.previous_session_id, "new_session")
-                )
-            except Exception:  # 派生索引不得反噬主路径
-                logging.getLogger("agent_harness.web").warning(
-                    "结束前任会话归档行失败: %s", req.previous_session_id, exc_info=True,
-                )
+            await anyio.to_thread.run_sync(
+                partial(state.session_archive_observer.end_session,
+                        req.previous_session_id, "new_session")
+            )
 
         # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
         # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。

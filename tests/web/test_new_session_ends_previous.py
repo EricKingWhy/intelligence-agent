@@ -119,6 +119,26 @@ def test_repeated_new_is_idempotent(client):
     assert _archive(app).get_session(old) == first
 
 
+def test_create_failure_does_not_end_previous_session(client):
+    """顺序不变量：**先建新会话、成功后才 end 旧会话**。
+
+    非法 workspace 在落盘前就被 `_validate_workspace_name` 拒绝（422），
+    此时前任会话必须原封不动——建失败不许误杀旧会话。
+    """
+    client, app = client
+    old = _create(client)
+
+    resp = client.post(
+        "/api/sessions?launch=false",
+        json={"previous_session_id": old, "workspace": "/abs/path"},
+    )
+    assert resp.status_code == 422, resp.text
+    meta = _archive(app).get_session(old)
+    assert meta is not None
+    assert meta["end_reason"] is None, "建会话失败时不得结束前任"
+    assert meta["ended_at"] is None
+
+
 def test_end_failure_is_fail_open(client, monkeypatch):
     """归档写入失败只记 warning：建会话请求照常成功（派生索引不反噬主路径）。"""
     client, app = client
