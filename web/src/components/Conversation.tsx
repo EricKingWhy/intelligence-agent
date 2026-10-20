@@ -526,8 +526,14 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
       )}
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={setScrollNode}>
-        {/* 虚拟化：绝对定位行 + 动态测高（PRD §20.2）。只有窗口内 turn 参与 DOM。 */}
-        <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+        {/* 虚拟化：绝对定位行 + 动态测高（PRD §20.2）。只有窗口内 turn 参与 DOM。
+            `flexShrink: 0` 是 #1414 的修复，不是装饰：本容器是 `.conversation-scroll`
+            （flex column）的 flex item，默认 `flex-shrink: 1`；它的子行全部 absolute、
+            不贡献 min-content 高度，于是内容超出视口时浏览器把它从 totalSize 压到
+            「视口剩余高度」，而尾部卡片（失效审批卡 / ask_user / 错误条）按**压缩后**
+            的底边定位，绝对定位行再按原坐标绘制上去 → 两团文字重叠。锁定不收缩后，
+            尾部卡片永远排在 totalSize 之后。 */}
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', flexShrink: 0 }}>
           {virtualizer.getVirtualItems().map((vi) => (
             <div
               key={vi.key}
