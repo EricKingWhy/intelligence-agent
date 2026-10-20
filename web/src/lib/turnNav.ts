@@ -49,10 +49,18 @@ export function deriveTurnNav(
   compactions: readonly ContextCompaction[],
 ): TurnNavItem[] {
   // 只有正整数 turn_index 可导航（null = 旧版后端缺字段；≤0 = 防御性丢弃）。
-  const visible = turns.filter((t) => t.turn_index !== null && t.turn_index > 0);
+  // 被取代的轮（ADR-0030 supersede）整段不渲染（`TurnView` 返回 null），既没有
+  // 可滚动目标、也不该占一颗「不在当前视图中」的灰药丸——它们不是压缩掉的。
+  const visible = turns.filter(
+    (t) => t.turn_index !== null && t.turn_index > 0 && t.superseded !== true,
+  );
   if (visible.length === 0) return [];
 
   const maxIndex = visible.reduce((m, t) => Math.max(m, t.turn_index as number), 0);
+  const firstIndex = visible.reduce(
+    (m, t) => Math.min(m, t.turn_index as number),
+    Number.POSITIVE_INFINITY,
+  );
   const stepByIdx = new Map<number, number>();
   for (const t of visible) stepByIdx.set(t.turn_index as number, t.step_id);
   const compacted = compactedThrough(compactions);
@@ -65,6 +73,9 @@ export function deriveTurnNav(
       items.push({ turnIndex: i, stepId, offReason: null, title: `跳到第 ${i} 轮` });
       continue;
     }
+    // 只置灰**视图起点之前**那段前缀（票面写死）：视图中间缺号（被取代 / 未投影）
+    // 不是「滚不到」，给一颗灰药丸反而暗示那里有一轮可看。
+    if (i > firstIndex) continue;
     const offReason = i <= compacted ? 'compacted' : 'not-visible';
     items.push({
       turnIndex: i,

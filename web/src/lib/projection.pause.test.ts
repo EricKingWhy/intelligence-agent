@@ -407,6 +407,31 @@ describe('run/resumed — 同 run 恢复的投影（#312）', () => {
     expect(s.turns[2].user_message).toBe(''); // 同 run 恢复没有新 user/message
   });
 
+  it('恢复续轮继承同一 run 的 turn_index（#1429 F6：导航不漏一轮）', () => {
+    let s = projectHistory('s', upToPause());
+    // 前提：`upToPause` 的第 2 轮是同一 run 里 run/started 之后新建的 step，按既有
+    // 契约不带 turn_index（轮次标签只落在每个 run 的首个 step 上——本次修复不改这条）。
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, null]);
+    s = applyEvent(s, resumedEvent(12));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 13, step_id: 3, data: { step: 3 } }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, seq: 14, step_id: 3, data: { content: '继续做完' } }));
+    // 续轮没有自己的 run/started 可回填，靠 run/resumed 交出的会话镜像继承。
+    expect(s.turns[2].turn_index).toBe(1);
+    expect(s.resumed_turn_index).toBe(1);
+  });
+
+  it('恢复后用户发新消息 ⇒ 继承作废（新轮在 run/started 之前不带上一轮的号）', () => {
+    let s = projectHistory('s', upToPause());
+    s = applyEvent(s, resumedEvent(12));
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, seq: 13, data: { content: '换个做法' } }));
+    // 关键窗口：新轮已建、run/started 还没到——此时不能顶着上一轮的 turn_index。
+    expect(s.turns[2].turn_index).toBeNull();
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, seq: 14, data: { turn_index: 2 } }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 15, step_id: 3, data: { step: 3 } }));
+    expect(s.turns[2].turn_index).toBe(2);
+    expect(s.resumed_turn_index).toBeNull();
+  });
+
   it('重放幂等：逐帧应用与 projectHistory 重建同一投影（刷新后一致）', () => {
     const events = [...upToPause(), resumedEvent(12)];
     let stepped = initConversation('s');

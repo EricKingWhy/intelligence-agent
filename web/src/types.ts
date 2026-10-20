@@ -10,6 +10,7 @@
 export { EventType, STREAM_ONLY_TYPES, type EventTypeValue } from './generated/event-types';
 
 import type { ImageAttachmentRef } from './lib/attachmentRefs';
+import type { ErrorShape } from './lib/toolShapes';
 
 /** A single SSE frame from POST /api/sessions or durable event from GET events. */
 export interface AgentEvent {
@@ -283,6 +284,11 @@ export interface ToolCall {
     artifactId?: string;
     artifactTool?: string;
   };
+  /** 失败分类（#1429 F1）：`tool/result` 的序列化信封 `{ok, message, error_code}`
+   *  里 `ok=false` 时的错误码与文案。**投影期解析一次**——视图不再回头拆
+   *  `result` / `raw_result`（`result` 在 `data` 为空时只保留 message 字符串，
+   *  error_code 在那里已经不存在了）。成功 / 无信封 = 字段缺席。 */
+  error?: ErrorShape;
   started_at?: string;
   completed_at?: string;
   /**
@@ -951,6 +957,11 @@ export interface ConversationState {
   /** T9 #139：当前 run 的轮次索引（1-based）。来自 RUN_STARTED.data.turn_index。
    *  null = 尚未收到 RUN_STARTED 或字段缺失。UI 可据此显示「第 N 轮」。 */
   turn_index: number | null;
+  /** #1429 F6：恢复续轮要继承的轮次号。`run/resumed` 不携带 turn_index，但恢复
+   *  沿用**同一逻辑 run**（后端不变量：同一 run 只有一条 run/started）⇒ 该 run 的
+   *  轮次号就是 `turn_index` 里的会话镜像。只在 run/resumed 之后、下一次
+   *  run/started 或 user/message 之前有效（那两者代表新 run，轮次号由它们自己带）。 */
+  resumed_turn_index: number | null;
   /** #537：**最近一个 run** 的 run 作用域 ceiling 回显（run/started.data.budget.run
    *  解析；run/resumed.data.limits.run 在恢复后更新）。null = 该 run 没配 run 预算
    *  （徽标整段不渲染）。失效规则与 `requested_model` 同：新 run/started 重置。 */

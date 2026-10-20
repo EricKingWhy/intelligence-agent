@@ -11,7 +11,7 @@ import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
-import { parseArtifactMarker } from './toolShapes';
+import { parseArtifactMarker, parseErrorShape } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 import { parseImageRefs, type ImageAttachmentRef } from './attachmentRefs';
 
@@ -212,6 +212,7 @@ export function initConversation(session_id: string): ConversationState {
     pending_plan_approval: null,
     run_failure: null,
     turn_index: null,
+    resumed_turn_index: null,
     requested_model: null,
     model_run_id: null,
       seenSeqs: new Set(),
@@ -278,6 +279,10 @@ function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => 
   const idx = state.turns.findIndex((t) => t.step_id === step);
   if (idx === -1) {
     const turn = newTurn(step);
+    // #1429 F6：恢复续轮（`run/resumed` 之后的新执行按 step_base+1 建轮）继承同一
+    // run 的轮次号。没有它，续轮的 `turn_index` 是 null ⇒ 不进轮次导航，导航 N 与
+    // 实际渲染轮数对不上。字段在 run/started / user/message 处作废（新 run 自带号）。
+    if (state.resumed_turn_index !== null) turn.turn_index = state.resumed_turn_index;
     state.turns = [...state.turns, turn];
     fn(turn);
     return;
@@ -476,6 +481,9 @@ function truncateQueueSummary(content: string, max = 40): string {
 // ── applyEvent 的 per-type 投影 ──
 
 function projectUserMessage(state: ConversationState, event: AgentEvent): void {
+  // #1429 F6：用户新输入 = 新 run 的前奏，本轮轮次号由随后的 run/started 决定——
+  // 不能继承恢复续轮的号（否则新轮带着上一轮的 turn_index，导航会出现重复药丸）。
+  state.resumed_turn_index = null;
   const step = resolveStep(event, state);
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
@@ -788,6 +796,8 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   const idx = event.data.turn_index;
   const hasIdx = typeof idx === 'number' && Number.isFinite(idx);
   if (hasIdx) state.turn_index = idx; // 会话级镜像（Langfuse / turn 元数据消费）
+  // #1429 F6：新 run 自带轮次号，恢复续轮的继承意图到此作废（无论本事件有没有带值）。
+  state.resumed_turn_index = null;
   // 当轮 = 最后一个 turn：生产时序为 user/message（建轮）→ run/started，
   // 故 RUN_STARTED 到达时本轮 turn 已存在。不调用 withTurnAt——它在无匹配时
   // 会新建空 turn，而 RUN_STARTED 本身不携带 step（在途 run 的 step 无法解析），
@@ -955,6 +965,12 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
       tool.status = ok ? 'success' : 'failed';
     }
     tool.result = parsedData ?? parsed?.message ?? data.content;
+    // #1429 F1：失败分类只在**信封**里（`data` 为空时 result 退化成 message 字符串，
+    // error_code 已在上面那行丢掉）。这里解析一次落成 per-tool 事实，视图不再
+    // 回头拆 `result`/`raw_result`。ok=true / 无信封 ⇒ 无 error 字段（零伪造）。
+    const errorShape = tool.status === 'failed' ? parseErrorShape(parsed) : null;
+    if (errorShape) tool.error = errorShape;
+    else delete tool.error;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
     // directly into ToolResult.data — not nested under data.diff. Detect them here.
     // >2000 字符的 before/after 变为截断摘要并内嵌 "use <读回工具>(<id>)" marker
@@ -1266,6 +1282,9 @@ function projectRunResumed(state: ConversationState, event: AgentEvent): void {
   state.run_paused = null;
   clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   state.run_status = 'running';
+  // #1429 F6：恢复沿用同一逻辑 run（同一 run_id、同一 turn_index），续轮没有自己的
+  // run/started 可回填 ⇒ 把会话镜像里的轮次号交给下一条新建的轮继承。
+  state.resumed_turn_index = state.turn_index;
   // #537：恢复后的 ceilings 用**恢复事件自带的新快照**更新（run/resumed 载荷的
   // data.limits.run 与 run/paused 同形，值是恢复生效后的 effective limits）——
   // 徽标与暂停面板消费同一条恢复链，不 fetch 第二份。载荷没带 limits（旧会话

@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { ContextCompaction, Turn } from '../types';
 import { compactedThrough, deriveTurnNav, turnAnchor } from './turnNav';
 
-const turn = (stepId: number, turnIndex: number | null): Turn => ({
+const turn = (stepId: number, turnIndex: number | null, over: Partial<Turn> = {}): Turn => ({
   step_id: stepId,
   user_message: 'hi',
   model: { text: '', status: 'done' },
@@ -18,6 +18,7 @@ const turn = (stepId: number, turnIndex: number | null): Turn => ({
   status: 'done',
   turn_index: turnIndex,
   user_message_seq: stepId,
+  ...over,
 });
 
 const compact = (n: number): ContextCompaction => ({
@@ -87,6 +88,34 @@ describe('deriveTurnNav — 1..N 与置灰（表驱动）', () => {
         { i: 2, step: null, off: 'compacted' },
         { i: 3, step: null, off: 'compacted' },
         { i: 4, step: 4, off: null },
+      ],
+    },
+    {
+      name: '被取代的轮整段不渲染 ⇒ 不进导航（中段缺口跳过，不置灰）',
+      turns: [turn(1, 1), turn(2, 2, { superseded: true }), turn(3, 3)],
+      compactions: [],
+      want: [
+        { i: 1, step: 1, off: null },
+        { i: 3, step: 3, off: null },
+      ],
+    },
+    {
+      name: '中段缺口（turn_index 缺号）不置灰：只有视图起点之前的前缀才灰',
+      turns: [turn(1, 1), turn(3, 3)],
+      compactions: [],
+      want: [
+        { i: 1, step: 1, off: null },
+        { i: 3, step: 3, off: null },
+      ],
+    },
+    {
+      name: '被取代的轮排在视图最前 ⇒ 首个可见轮是 2，只有 1 置灰',
+      turns: [turn(1, 1, { superseded: true }), turn(2, 2), turn(3, 3)],
+      compactions: [compact(1)],
+      want: [
+        { i: 1, step: null, off: 'compacted' },
+        { i: 2, step: 2, off: null },
+        { i: 3, step: 3, off: null },
       ],
     },
     {
