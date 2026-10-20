@@ -17,6 +17,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+// node 内置模块没有声明（web 的 tsconfig 只带 vite/client），同 askUserMockup.test.ts。
+// @ts-expect-error node 内置模块没有声明
+import { readFileSync } from 'node:fs';
+// @ts-expect-error node 内置模块没有声明
+import { dirname, join } from 'node:path';
+// @ts-expect-error node 内置模块没有声明
+import { fileURLToPath } from 'node:url';
 
 import type { ToolCall } from '../types';
 import { initConversation } from '../lib/projection';
@@ -152,6 +159,32 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
   });
 });
 
+describe('#1325 S6 — 折叠提示用用户语言', () => {
+  // 渲染侧覆盖 TOOLS / DIFFS / ARTIFACTS 三处；第 4 处（TimelineTab 自己的窗口条）
+  // 在 jsdom 里进不到（需要整棵 Timeline），由文件末尾的**源码守卫**兜住：
+  // 旧措辞零命中 + 新措辞恰好 4 处（AC6 的 grep 判据可执行化）。
+  const hints = () => [...container.querySelectorAll('.timeline-window-hint')].map((el) => el.textContent ?? '');
+
+  it('TOOLS / DIFFS / ARTIFACTS 三处提示一致，且不再出现内部术语「真相」', () => {
+    render(<ChatTab conversation={initConversation('f5')} tools={mkTools(N, 'plain')} onFocusTool={noop} />);
+    expect(hints()).toHaveLength(1);
+    expect(hints()[0]).toContain('前段已折叠，可展开查看');
+    expect(hints()[0]).not.toContain('真相');
+
+    for (const el of [
+      <ChangesTab key="d" tools={mkTools(N, 'diff')} sessionId="f5" />,
+      <ArtifactsTab key="a" tools={mkTools(N, 'artifact')} sessionId="f5" />,
+    ]) {
+      act(() => root.unmount());
+      root = createRoot(container);
+      render(el);
+      expect(hints()).toHaveLength(1);
+      expect(hints()[0]).toContain('前段已折叠，可展开查看');
+      expect(hints()[0]).not.toContain('真相');
+    }
+  });
+});
+
 describe('F5 尾窗：窗口不改变任何一行的存在的意义（AC6 守卫）', () => {
   it('TOOLS：窗口化只裁首段，保留的是**尾部**连续段（无空洞）', () => {
     render(<ChatTab conversation={initConversation('f5')} tools={mkTools(N, 'plain')} onFocusTool={noop} />);
@@ -163,5 +196,23 @@ describe('F5 尾窗：窗口不改变任何一行的存在的意义（AC6 守卫
     const idx = names.map((t) => Number(t.slice('tool-'.length)));
     expect(idx).toEqual(idx.map((_, i) => idx[0] + i));
     expect(idx[idx.length - 1]).toBe(N - 1);
+  });
+});
+
+// 源码守卫（AC6 的 grep 判据可执行化）：在模块顶层读，同 askUserMockup.test.ts。
+// 注意本文件是 jsdom 环境——jsdom 会把全局 `URL` 换成基于 document 基址的实现，
+// `new URL(..., import.meta.url)` 会解析成 http://localhost/...，必须走 fileURLToPath。
+const stepDetailSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'StepDetail.tsx'),
+  'utf8',
+);
+
+describe('#1325 S6 — 四处窗口提示的源码守卫（AC6）', () => {
+  it('旧措辞在 StepDetail.tsx 零命中', () => {
+    expect(stepDetailSource).not.toContain('真相完整保留');
+  });
+
+  it('新措辞恰好 4 处（TOOLS / Timeline / DIFFS / ARTIFACTS）', () => {
+    expect((stepDetailSource.match(/前段已折叠，可展开查看/g) ?? []).length).toBe(4);
   });
 });

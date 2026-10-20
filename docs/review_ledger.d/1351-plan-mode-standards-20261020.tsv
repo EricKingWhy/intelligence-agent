@@ -1,0 +1,1 @@
+2026-10-20	#1351 修后 Standards 独立复审：真实 MCP fake-server 经 ToolRegistry 与 ToolExecutor(PLAN)执行且收到调用；先前测试缺少行为验证的 P2 已关闭。	aef37498fdb8d655a84e37ec5728d8dcf6dd334f..27dc7b97892de4b33d7dcd6f5b781f250c23b638

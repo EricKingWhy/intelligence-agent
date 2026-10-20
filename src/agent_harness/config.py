@@ -1,6 +1,7 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings
@@ -136,6 +137,12 @@ class Settings(BaseSettings):
     # 钉住。
     memory_primary_provider: str = "senseaudio"
     memory_fallback_provider: str = "qwen"
+    # #1353 M7：后台记忆形成的人面向通知档位（上游 `notification_mode`）。
+    # `off` 不发 `memory/human_updated`；`on` 只发计数/指纹；`verbose` 另把内容预览
+    # 写进日志（事件载荷不变——不变量 #22）。部署级（重启生效），与面板级
+    # `write_approval` / `fallback_enabled` 分层。消费点唯一：
+    # `memory/v2/assembly.build_memory_formation`。
+    memory_notification_mode: Literal["off", "on", "verbose"] = "on"
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

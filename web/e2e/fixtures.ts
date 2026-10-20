@@ -463,6 +463,16 @@ export interface ApiMock {
     sessionId: string,
     archived: boolean,
   ) => Promise<boolean> | boolean;
+  // ── #1322 逻辑回放 ──
+  /** GET `/api/sessions/{id}/replay` 的拦截口（计数 / 延迟撑开"回放中"窗口 /
+   *  伪造 404）。返回 true = 已处理。
+   *
+   *  语义对齐后端 `web/lineage.py::replay_session`：缺省 200 → `{session_id,
+   *  count, steps}`，steps 是逐事件重建行。重放**零副作用**（只读），mock 不碰
+   *  任何会话状态——与归档 / 硬删那两条有状态 mock 刻意不同。 */
+  onReplayGet?: (route: Route, sessionId: string) => Promise<boolean> | boolean;
+  /** 回放步骤 fixture（缺省 = `DEFAULT_REPLAY_STEPS`，4 条可渲染事件）。 */
+  replaySteps?: { seq: number; type: string; line: string }[];
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -597,6 +607,14 @@ export interface MemoryFixture {
   payload?: Record<string, unknown> | null;
 }
 
+/** #1322：回放端点缺省步骤 fixture（4 条可渲染事件，形状 = 后端 `replay_session`）。 */
+export const DEFAULT_REPLAY_STEPS = [
+  { seq: 2, type: 'user/message', line: '[user] 列出文件' },
+  { seq: 3, type: 'tool/call', line: '[tool] bash(command=ls)' },
+  { seq: 4, type: 'tool/result', line: '  → result (frozen):\n  │ a.txt\n  │ b.txt' },
+  { seq: 5, type: 'model/completed', line: '[assistant] 有两个文件' },
+];
+
 /** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
 export function sessionRow(
   sessionId: string,
@@ -616,6 +634,9 @@ export function sessionRow(
     // 所以 mock 也给一个字面量默认值——前端类型把它声明成可选就会让"漏读"变成
     // `undefined`（静默假），这条默认值让 mock 与真后端的形状一致。
     archived: false,
+    // #1308：真后端恒发两字段（写入侧截断后的最后一条 user/agent 消息）。
+    last_user_message: null,
+    last_agent_message: null,
     ...over,
   };
 }
@@ -970,6 +991,19 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       // 幂等：重复归档仍是 true（后端用 upsert/set_archived，不是"翻转"）。
       sessionState[at] = { ...(sessionState[at] as Record<string, unknown>), archived: target };
       return json(route, { id: sid, archived: target });
+    }
+    // ── #1322 逻辑回放（只读 mock：语义对齐 `web/lineage.py::replay_session`）──
+    const sessionReplayMatch = /^\/api\/sessions\/([^/]+)\/replay$/.exec(path);
+    if (sessionReplayMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(sessionReplayMatch[1]);
+      if (mock.onReplayGet && (await mock.onReplayGet(route, sid))) return undefined;
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      // 404 的 detail 照抄后端那句（`session 'x' not found`），不自己编。
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      const steps = mock.replaySteps ?? DEFAULT_REPLAY_STEPS;
+      return json(route, { session_id: sid, count: steps.length, steps });
     }
     // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
     const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);

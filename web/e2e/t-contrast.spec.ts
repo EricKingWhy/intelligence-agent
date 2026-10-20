@@ -338,7 +338,7 @@ async function openTaskReview(
   const summary = page.locator('.task-review-summary');
   await expect(summary).toBeVisible();
   await summary.getByRole('button', { name: '详细审阅' }).click();
-  await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '详细审阅' })).toBeVisible();
 }
 
 for (const theme of ['dark', 'light'] as const) {
@@ -792,7 +792,7 @@ for (const theme of ['dark', 'light'] as const) {
       },
     };
     await openTaskReview(page, theme, state);
-    const panel = page.getByRole('dialog', { name: '任务审阅' });
+    const panel = page.getByRole('dialog', { name: '详细审阅' });
     // 先确认各选择器都在场（缺席会让 measure throw 而不是静默假绿）
     await expect(panel.locator('.task-review-tag.warn').first()).toBeVisible();
     await expect(panel.locator('.task-review-disambiguation')).toBeVisible();
@@ -839,7 +839,7 @@ for (const theme of ['dark', 'light'] as const) {
 
     // 关面板 → 改投影态 → 重开（useTaskReview 以 sessionId 为键，重开即重拉服务端投影）。
     await page.locator('.task-review-panel .ctx-usage-close').click();
-    await expect(page.getByRole('dialog', { name: '任务审阅' })).toBeHidden();
+    await expect(page.getByRole('dialog', { name: '详细审阅' })).toBeHidden();
     state.task.product_state = 'pending_verification';
     await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
     const pending = page.locator('.task-review-chip.state-pending_verification');
@@ -898,7 +898,7 @@ for (const theme of ['dark', 'light'] as const) {
       gitDiff: { exit_code: 0, stdout: '@@ -1,2 +1,2 @@\n context line\n-removed line\n+added line', stderr: '', artifact_ref: null },
     };
     await openTaskReview(page, theme, state);
-    const panel = page.getByRole('dialog', { name: '任务审阅' });
+    const panel = page.getByRole('dialog', { name: '详细审阅' });
     const SELECTORS = [
       '.task-review-result-tag.r-fail',
       '.task-review-result-tag.r-blocked',

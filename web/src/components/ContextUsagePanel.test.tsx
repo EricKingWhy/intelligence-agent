@@ -10,14 +10,20 @@ import {
 } from '../lib/api';
 import { ContextUsagePanel } from './ContextUsagePanel';
 
-vi.mock('../lib/api', () => ({
-  getContextUsage: vi.fn(),
-  compactSession: vi.fn(),
-  describeSessionError: vi.fn((e: unknown, fallback: string) => {
-    const message = (e as Error | null)?.message;
-    return message || fallback;
-  }),
-}));
+// #1325 S5：useCompactSession 用真 `SessionError` 做 `reason` 分派——部分 mock
+// 必须带上 actual 导出，否则 `instanceof` 在 mock 边界上拿到 undefined。
+vi.mock('../lib/api', async () => {
+  const actual = await vi.importActual<typeof import('../lib/api')>('../lib/api');
+  return {
+    ...actual,
+    getContextUsage: vi.fn(),
+    compactSession: vi.fn(),
+    describeSessionError: vi.fn((e: unknown, fallback: string) => {
+      const message = (e as Error | null)?.message;
+      return message || fallback;
+    }),
+  };
+});
 
 function usage(overrides: Partial<ContextUsage> = {}): ContextUsage {
   return {

@@ -34,6 +34,7 @@
 | `GOAL_CHANGED` | `goal/changed` |
 | `GUARD_STUCK` | `guard/stuck` |
 | `MEMORY_DEGRADED` | `memory/degraded` |
+| `MEMORY_HUMAN_UPDATED` | `memory/human_updated` |
 | `MEMORY_RECALLED` | `memory/recalled` |
 | `MEMORY_UPDATED` | `memory/updated` |
 | `MESSAGE_QUEUED` | `message/queued` |

@@ -44,12 +44,12 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
 def _new_session(client: TestClient) -> str:
     """造一个**真实形态**的会话：事件流 + workspace 映射。
 
-    只 `Session.start(store)` 是不够的——`Session.load(workspace_registry=…)` 会去
-    查 workspace 映射，缺席就抛 `KeyError`（`sandbox/registry.py:225`）。真实会话
-    由 `POST /api/sessions` 建立时映射一定存在，所以这里补上 `create` 才是**忠实**
-    的夹具（不是为迁就实现而放宽断言）。那条既有缺陷的显式记录在
-    `tests/web/test_workspace_files_api.py:815`
-    （`test_session_without_workspace_mapping_is_404_not_500`）。
+    只 `Session.start(store)` 是不够的——真实会话由 `POST /api/sessions` 建立时
+    workspace 映射一定存在，所以这里补上 `create` 才是**忠实**的夹具（不是为迁就
+    实现而放宽断言）。映射缺席的会话另有专测：`Session.load` 自 #1235 起降级为
+    `sandbox=None`（`tests/web/test_1235_session_load_without_mapping.py`）；
+    文件路由仍按 404 处理
+    （`tests/web/test_workspace_files_api.py::test_session_without_workspace_mapping_is_404_not_500`）。
     """
     agent = client.app.state.agent
     session = Session.start(agent.store)

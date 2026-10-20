@@ -152,6 +152,7 @@
   min-height: 0;
 }
 
+/* 整卡可点（打开会话）：指针语义。拖拽卡已有 `cursor: grab`，它优先级更高。 */
 .kanban-card {
   display: flex;
   flex-direction: column;
@@ -160,6 +161,7 @@
   background: var(--surface-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  cursor: pointer;
 }
 .kanban-card[draggable='true'] {
   cursor: grab;
@@ -183,10 +185,57 @@
   color: var(--text-primary);
   overflow-wrap: anywhere;
 }
+/* #1306 未读：加粗（Orca `AgentKanbanCard.tsx:247` 的 `font-semibold` = 600）。
+   只改字重不改色——颜色已经被注意力覆盖层占用，再上一档会和"在等你"混同。 */
+.kanban-card-title.is-unread {
+  font-weight: 600;
+}
+.kanban-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .kanban-card-hint {
   margin: 0;
   font-size: var(--text-xs);
   color: var(--text-tertiary);
+}
+/* #1308 卡片正文：最后一条 user / agent 消息。
+   形状抄 Orca `AgentKanbanCard.tsx:255-268`（`line-clamp-1` / `line-clamp-2`）；
+   本仓无 Tailwind，clamp 用与 `.kanban-card-attention-text` 相同的纯 CSS 形状。
+   两行都用 `--text-xs`（12px）：Orca 的 user 行是 11px，但本仓字号地板是 12px
+   （PRD D3 / UI-02），层级改用颜色区分（user 次级 / agent 主色）。 */
+.kanban-card-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kanban-card-msg-prefix {
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.kanban-card-msg-user {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+.kanban-card-msg-agent {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+.kanban-card-msg-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kanban-card-msg-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .kanban-card-attention {
   display: flex;

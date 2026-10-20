@@ -76,6 +76,9 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ),
     # #1204：通用提问工具，与澄清工具同一道回答通道开关，同为根会话工具
     ("AskUserTool", "agent_harness.tools.ask_user"),
+    # #1356：计划提交/审批工具，与 ask_user 同构（都要真人回答），走同一条
+    # 根会话专属注册路（见 `_UNSCOPED_TOOL_REASONS`）
+    ("SubmitPlanTool", "agent_harness.tools.submit_plan"),
     # knowledge / memory / websearch / skills / multiagent / ticker（demo）
     ("RetrieveKnowledgeTool", "agent_harness.knowledge.tools"),
     ("ReadKnowledgeSourceTool", "agent_harness.knowledge.tools"),
@@ -83,6 +86,8 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("RetrieveMemoryV2Tool", "agent_harness.memory.v2.search_tool"),
     ("RememberMemoryV2Tool", "agent_harness.memory.v2.tools"),
     ("ForgetMemoryV2Tool", "agent_harness.memory.v2.tools"),
+    # #1353 M1：markdown 长期记忆工具（由 _wire_memory_v2 注册，走统一执行路径）
+    ("MemoryTool", "agent_harness.memory.v2.memory_tool"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
     ("LoadSkillTool", "agent_harness.skills.tool"),
     # #529 T-529-5：沉淀闭环工具（统一执行路径，不变量 #7）
@@ -133,12 +138,25 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
         "同一道回答通道开关）；coding AgentSpec 同时用于委派 child，故不放入共享 tool_scope，"
         "根 coding 在 profile 收窄后单独接回、grantable_names 恒剔除"
     ),
+    "submit_plan": (
+        "只供直接用户会话的根 main/coding Runtime 使用（与 ask_user 同一道回答通道"
+        "开关，且依赖 artifact store 落计划正文）；未在任何档位声明（与 "
+        "`ingest_document` 同口径），故 `grantable_names` 无从产生它——不在 "
+        "`ROOT_ONLY_TOOL_NAMES` 也不在 `_CODING_TOOLS`，排除机制是「从未登记」而非"
+        "「收窄后接回再剔除」（#1356 审查 P3-3）"
+    ),
     "ingest_document": (
         "知识库**写入**工具，未在任何档位声明（子代理走只读检索 retrieve_knowledge / "
         "read_knowledge_source）"
     ),
     "load_skill": (
         "skills 能力工具（`skills/tool.py`），未在任何档位声明：技能包由 main 加载"
+    ),
+    "memory": (
+        "#1353 M1 markdown 长期记忆工具（`memory/v2/memory_tool.py`）：由 "
+        "`_wire_memory_v2` 在 V2 store 就绪时注册，未进任何档位 scope——单用户记忆面"
+        "只在根会话开放（子代理记忆面待决）；写操作仍受 WORKSPACE_WRITE 权限与 "
+        "markdown 目录闸门约束"
     ),
     "promote_skill": (
         "#529 沉淀提议工具（`skills/promote_tool.py`），未在任何档位声明：只写 "

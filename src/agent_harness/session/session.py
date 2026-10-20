@@ -45,6 +45,7 @@ from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     EVENT_TYPES,
     MESSAGE_QUEUED,
+    MODEL_COMPLETED,
     PERMISSION_RESOLVED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -71,8 +72,15 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
-#: 看板投影触发集：只有这些事件会改变 `product_state` 或注意力。
+#: 看板投影触发集：只有这些事件会改变投影字段（产品态 / 注意力 / 最后消息）。
 #: 触发集外的事件只推进 sidecar 水位（见 BoardProjectionStore.update_from_events）。
+#:
+#: `ponytail:` #1308 起把 `USER_MESSAGE` 与 `MODEL_COMPLETED` 纳入——卡片正文要显示
+#: 「最后一条 user / agent 消息」，这两类事件才会改那两个字段。**成本变化是有意的**：
+#: `MODEL_COMPLETED` 每个模型回合一条（runtime 三处写入），长 run 几十上百回合，
+#: T1 的「单 run 约 4–8 次重放」上限被抬高到模型回合频率（消息新鲜度优先）。
+#: 升级路径见 `board_projection.py` 的「已知上限」段（增量 fold / 尾部 O(1) 扫描），
+#: 不是另写一份投影语义。
 _BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
     {
         TASK_DEFINED,
@@ -81,6 +89,8 @@ _BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
         TASK_ACCEPTED,
         TASK_ACCEPTANCE_RELEASED,
         RUN_STARTED,
+        USER_MESSAGE,
+        MODEL_COMPLETED,
         USER_INPUT_REQUESTED,
         TOOL_APPROVAL_REQUESTED,
         PERMISSION_RESOLVED,
@@ -89,19 +99,13 @@ _BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
 
 
 def _board_projection_needs_recompute(event: SessionEvent) -> bool:
-    """触发集判定；answer-bearing USER_MESSAGE 是票面遗漏的注意力清除点。
+    """触发集判定（#1308 起 ``USER_MESSAGE`` / ``MODEL_COMPLETED`` 已在集合内）。
 
-    票面写「USER_MESSAGE 不改注意力」，但 ``pending_input_request`` 的「未答复」
-    谓词正是「该 request_id 不在任一带 ``input_request_id`` 的 USER_MESSAGE 里」——
-    用户提交答案（或整卡跳过 / 超时）时注意力确实变了。只对带
-    ``input_request_id`` 的 USER_MESSAGE 重算：普通聊天消息仍然只推进水位，
-    不会把触发集扩成每条用户消息一次 O(事件数) 重放。
+    T1 只对带 ``input_request_id`` 的 USER_MESSAGE 重算（那是注意力清除点）；
+    #1308 把两类消息事件整体纳入，因为它们会改「最后一条消息」字段。保留本函数
+    作为唯一判定点：钩子只认 ``recompute`` 布尔，触发集的形状不泄漏到 append 路径。
     """
-    if event.type in _BOARD_PROJECTION_TRIGGER_TYPES:
-        return True
-    return event.type == USER_MESSAGE and isinstance(
-        event.data.get("input_request_id"), str
-    )
+    return event.type in _BOARD_PROJECTION_TRIGGER_TYPES
 
 
 def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
@@ -338,16 +342,26 @@ class Session:
         用于「恢复语义已由上游完成」的场景——崩溃路径先经 RecoveryCoordinator
         按 Ledger 精确回填（不变量 #13/#14），再 load 出 Session 继续跑，
         避免与恢复标记重复再写一条 `session/resumed`。
+
+        sandbox 是**尽力而为**的（#1235）：映射文件缺失（历史会话 / 映射卷被清空 /
+        手工构造）时降级为 ``sandbox=None``，与不传 registry 同义——写路径端点
+        只用 load 追加事件，不该因映射缺席 500。需要 sandbox 的调用方自行判空。
+        但「映射此刻不可用」仍然上抛 `WorkspaceBindingError`（硬删除进行中 /
+        重绑定 / Docker 持久卷缺失），那不是「没有映射」。
         """
         events = store.read_events(session_id)
         if not events:
             raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
 
-        sandbox = (
-            workspace_registry.get(session_id)
-            if workspace_registry is not None
-            else None
-        )
+        sandbox = None
+        if workspace_registry is not None:
+            try:
+                sandbox = workspace_registry.get(session_id)
+            except KeyError:
+                logger.warning(
+                    "Session %s 没有 workspace 映射，sandbox 降级为 None（#1235）",
+                    session_id,
+                )
         validate_event_seq(session_id, events)
         return cls(session_id, store, events, sandbox=sandbox)
 
@@ -361,7 +375,8 @@ class Session:
     ) -> Session:
         """加载已有 Session：校验 seq、修复 dangling、append session/resumed。
 
-        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox。
+        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox；
+        查不到映射时与 `load` 同口径降级为 None（见 `load` 的 #1235 说明）。
         """
         session = cls.load(store, session_id, workspace_registry=workspace_registry)
 

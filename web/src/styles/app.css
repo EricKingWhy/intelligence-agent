@@ -1234,6 +1234,86 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.6;
   color: var(--text-primary);
 }
+/* #1322：逻辑回放浮层。定位 / 材质 / 入场全部继承 .project-dialog（它在上面那条
+ * 共用选择器组里），这里只补回放特有的进度条与逐事件列表。**零新增 token**——只用
+ * 既有语义变量，故 §15 的暗/亮双主题同步没有新增项要维护。 */
+.replay-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: 96px;
+}
+.replay-progress-head {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.replay-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.replay-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width var(--dur-out) var(--ease-apple);
+}
+.replay-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.replay-step {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.replay-step-seq,
+.replay-step-type {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.replay-step-seq {
+  color: var(--text-tertiary);
+}
+.replay-step-type {
+  color: var(--text-secondary);
+}
+.replay-step-line {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.replay-empty {
+  padding: var(--space-sm) 0;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.replay-done {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-primary);
+}
 /* 待删对象的身份块（会话硬删确认面，#172）：标题 + id 片段——用户据此确认"我点的
  * 是这一条"。材质沿用 .project-input（surface-2 + border-subtle + radius-sm），
  * 不引入新 token：§15 的双主题同步只对新增/改动 token 有要求，这里一个都没动。 */
@@ -3690,6 +3770,138 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .ask-user-closed .ask-user-btn {
   margin-left: auto;
+}
+
+/* ── #1356 计划审批：对话流内嵌卡片 ──────────────────────────────────────
+   与 `.ask-user-*` 同族材质（同一视觉语汇、同一 token 面），差别只在正文区：
+   计划是**长文本 markdown**，所以给固定最大高度 + 内部滚动——卡片不能把整段
+   对话挤出视口（用户要一边读计划一边往上翻模型说过什么）。
+   三裁决的主次：批准是唯一主按钮；要求修改/拒绝是次按钮。反馈框**常驻**在按钮上方
+   （可选），三个按钮各点一次即提交——不让用户猜「点几下才生效」。 */
+.plan-approval-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: var(--space-md) 0 var(--space-lg);
+}
+.plan-approval-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.plan-approval-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ask-user-pulse 1.6s var(--ease-apple) infinite;
+}
+.plan-approval-card {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.plan-approval-plan {
+  padding: var(--space-md) var(--space-lg) 0;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.plan-approval-files {
+  padding: var(--space-sm) var(--space-lg) 0;
+}
+.plan-approval-files-title {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-xs);
+}
+.plan-approval-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+.plan-approval-file {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-sm);
+  overflow-wrap: anywhere;
+}
+.plan-approval-feedback {
+  display: block;
+  width: calc(100% - 2 * var(--space-lg));
+  margin: var(--space-sm) var(--space-lg) 0;
+  box-sizing: border-box;
+  min-height: 72px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+}
+.plan-approval-feedback:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.plan-approval-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg) var(--space-lg);
+  margin-top: var(--space-xs);
+  flex-wrap: wrap;
+}
+.plan-approval-btn {
+  font-size: var(--text-sm);
+  padding: 6px var(--space-lg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-family: inherit;
+  transition: border-color var(--dur-fast) var(--ease-apple), color var(--dur-fast) var(--ease-apple);
+}
+.plan-approval-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.plan-approval-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface-canvas);
+  font-weight: 500;
+}
+.plan-approval-btn.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.plan-approval-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.plan-approval-error {
+  margin: 0 var(--space-lg) var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--surface-danger);
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+  font-size: var(--text-xs);
 }
 
 /* Radix 用 Title 命名 dialog（读屏名）；卡片头部已有可见标题，这里视觉隐藏。 */
@@ -9729,6 +9941,13 @@ button.json-row {
   padding: var(--space-sm);
   font-size: var(--text-sm);
   color: var(--text-tertiary);
+}
+/* #1325 S7：加载态与空态同一排版，只多一个 spinner 的横向间距；颜色沿用
+   空态（tertiary 是元数据层，不是可读正文）。 */
+.plugin-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
 }
 .plugin-detail {
   flex: 1;

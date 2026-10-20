@@ -76,7 +76,7 @@ const SEND_BLOCKED_REASON = '附件上传中，请等待完成';
 
 /** #1283 P1：composer 被锁的**真实原因**——文案全部由它映射，不再各写一份三元链。
  *  优先级与 #1223 的既有行为逐字一致：约束澄清 > ask_user > 审批。 */
-type LockReason = 'constraint' | 'ask_user' | 'approval';
+type LockReason = 'constraint' | 'ask_user' | 'plan_approval' | 'approval';
 
 interface LockCopy {
   hint: string;
@@ -98,6 +98,13 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
     placeholder: '等待回答…',
     permissionHint: '等待回答当前提问后再改档',
   },
+  // #1356：计划审批是**待答用户输入**（`resume_basis: 'user_input'`），不是工具
+  // 审批——所以文案说「裁决计划」，与 `approval`（工具调用审批）明确区分。
+  plan_approval: {
+    hint: '请先裁决当前计划，再发送新消息',
+    placeholder: '等待计划裁决…',
+    permissionHint: '等待计划裁决后再改档',
+  },
   approval: {
     hint: '等待审批决策后再继续',
     placeholder: '等待审批决策…',
@@ -108,11 +115,12 @@ const LOCK_COPY: Record<LockReason, LockCopy> = {
 /** 队列条（编辑/立即/flush）的 title。只有**待答用户输入**会锁队列条，审批锁
  *  没有队列语义。用**窄键必填表**（#1283 复审 P4）：将来新增纳入锁定的 kind 却
  *  漏填文案时 `tsc` 直接报错，而不是靠运行期 `?? ''` 静默出空 title。 */
-type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user'>;
+type QueueLockReason = Extract<LockReason, 'constraint' | 'ask_user' | 'plan_approval'>;
 
 const QUEUE_HINT: Record<QueueLockReason, string> = {
   constraint: '请先回答当前约束澄清',
   ask_user: '请先回答当前提问',
+  plan_approval: '请先裁决当前计划',
 };
 
 /** 发送 / 保存的统一受理契约（#1029）：显式 `false` = **未受理**（409 / 网络失败 /
@@ -132,6 +140,9 @@ interface Props {
    *  语义（把用户引向对话流里的待回答卡片，而不是让他发新消息撞后端 409）。
    *  文案必须**中性**：ask_user 是通用提问、不是约束澄清，见下方 `lockReason`。 */
   askUserInputPending?: boolean;
+  /** #1356：待裁决的计划（`kind=plan_approval`）同样锁住新消息——与上面两支**同一条**
+   *  锁定语义（同走 `resume_basis: 'user_input'`，新 run 会撞后端 409）。 */
+  planApprovalInputPending?: boolean;
   /** 返回值 = 这次发送**是否已被受理**（#1029，契约见 `SubmitResult`）：
    *  - `false` ⇒ 未受理（待裁决 409 / 网络失败 / 422…），文本与已进请求的草稿
    *    **原样留在输入框**，等用户处理完再发（`11 §6.1`：「409 冲突后 MUST 刷新权威
@@ -258,6 +269,7 @@ export const Composer = memo(function Composer({
   approvalPending = false,
   constraintInputPending = false,
   askUserInputPending = false,
+  planApprovalInputPending = false,
   onSubmit,
   onSteer,
   projectAvailable = null,
@@ -443,9 +455,11 @@ export const Composer = memo(function Composer({
     ? 'constraint'
     : askUserInputPending
       ? 'ask_user'
-      : approvalPending
-        ? 'approval'
-        : null;
+      : planApprovalInputPending
+        ? 'plan_approval'
+        : approvalPending
+          ? 'approval'
+          : null;
   const locked = lockReason !== null;
   // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = locked && !streaming;
@@ -456,7 +470,9 @@ export const Composer = memo(function Composer({
    *  否则输入框锁了、队列条还能点，用户照样撞后端 409。标题按具体待答项中性化。
    *  #1283 P2-2：队列项的「编辑→保存」也走 `POST /messages {queue_id}`，同一把锁。 */
   const pendingUserInputReason: QueueLockReason | null =
-    lockReason === 'constraint' || lockReason === 'ask_user' ? lockReason : null;
+    lockReason === 'constraint' || lockReason === 'ask_user' || lockReason === 'plan_approval'
+      ? lockReason
+      : null;
   const pendingUserInputLocked = pendingUserInputReason !== null;
   const pendingUserInputHint = pendingUserInputReason === null
     ? ''
