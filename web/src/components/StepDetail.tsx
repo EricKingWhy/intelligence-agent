@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
-import { formatBytes, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatBytes, formatCoarseDuration, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { timelineHeadline } from '../lib/timelineHeadline';
 import { lineDiff } from '../lib/lineDiff';
@@ -40,6 +40,7 @@ import {
   type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
 } from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
+import { useTickingNow } from '../hooks/useTickingNow';
 import { ApprovalCard } from './ApprovalCard';
 import { ArtifactViewer } from './ArtifactViewer';
 import { ConstraintInheritance } from './ConstraintInheritance';
@@ -2590,38 +2591,167 @@ function ChangeCard({
 
 // ── Terminal tab：bash 调用聚合（命令执行面） ──
 
-function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void; selectedKey?: string | null }) {
+/** 输出井的行着色（效果图 `termLines` 的规则，逐条移植）。
+ *
+ *  只认**行首/整行**特征，不比效果图更宽：
+ *    `$ ` 开头        → cmd（紫，终端提示符）
+ *    ERROR/FAILED/E / assert/failed/Error → er（红）
+ *    passed / [100%] / no tests ran / [ 74%] → ok（绿）
+ *    `^...`           → dim（点阵进度行压暗）
+ *  其余沿用正文灰。**这是纯展示着色**：不改文本、不推断语义，行内容逐字来自 stdout/stderr。 */
+function termLineClass(line: string): string {
+  if (line.startsWith('$ ')) return 'cmd';
+  if (/^(ERROR|FAILED|E )|assert |failed|Error/.test(line)) return 'er';
+  if (/passed|\[100%\]|no tests ran|\[ *\d+%\]/.test(line)) return 'ok';
+  if (/^\.+/.test(line)) return 'dim';
+  return '';
+}
+
+/** 一个命令一张卡（效果图 `.term`）。结构复用 `.step*`（同一套卡头/折叠动画，
+ *  效果图里两者本来就是同一份样式），只多输出井 `.term-out` 与卡尾 `.term-foot`。
+ *
+ *  默认展开规则来自效果图：**失败/中断/进行中的默认展开**（要看的就是它），
+ *  成功的默认折叠（卡头已经给出 `exit · 耗时 · seq`，信息不丢）。 */
+function TermCard({
+  tool, selected, onFocusTool,
+}: {
+  tool: ToolCall;
+  selected: boolean;
+  onFocusTool: (t: ToolCall) => void;
+}) {
+  const running = tool.status === 'running';
+  const [open, setOpen] = useState(tool.status !== 'success');
+  /* 秒级 ticker 只在**这张卡**里跑（规格 03 §7.1 ticker 隔离）：已运行时长是真的
+     时钟差，不是效果图里那个每 2.4s 自增的演示计数器。 */
+  const now = useTickingNow(1000);
+  const result = commandResult(tool);
+  const command = String(tool.args.command ?? '');
+  const seq = toolSeq(tool);
+  const dur = formatDuration(tool.started_at, tool.completed_at);
+  const liveText = (tool.output ?? []).map((c) => c.text).join('');
+  const stdout = liveText !== '' ? liveText : result?.stdout ?? '';
+  const stderr = liveText !== '' ? '' : result?.stderr ?? '';
+  const exit = result?.exit_code;
+  /* 状态词/图标：效果图 fail 红 / run 琥珀 + 绿字 live / ok 绿。`stopped`（中断）
+     不是错误，用 warn 一档，不冒充 fail。 */
+  const ico = tool.status === 'failed' ? 'fail' : running || tool.status === 'stopped' ? 'warn' : 'ok';
+  const word = tool.status === 'failed' ? 'fail' : running ? 'live' : tool.status === 'stopped' ? 'stop' : 'ok';
+  const wordClass = tool.status === 'failed' ? 'del' : tool.status === 'stopped' ? 'warn' : 'add';
+  /* 已运行时长：<60s 用工具级精度（`X.Xs`），更长用粗粒度（`M分S秒`）——一次
+     `pytest` 跑 3 分钟时 `180.4s` 读起来没有意义；时钟倒挂（负值）两个格式化都
+     返回空串，于是不画数字（与 `formatDuration` 同一口径）。 */
+  const elapsedMs = running && tool.started_at ? now - new Date(tool.started_at).getTime() : NaN;
+  const elapsed = Number.isFinite(elapsedMs) && elapsedMs >= 0
+    ? (elapsedMs < 60_000 ? formatShortDuration(elapsedMs) : formatCoarseDuration(elapsedMs) ?? '')
+    : '';
+  /* 展示截断先做（`truncateForDisplay` 是渲染层防御，投影仍是全量真相），
+     再切行——20k 字符的 split 只做一次，不在 map 里重复。 */
+  const lines = `${stdout}${stderr !== '' ? `${stdout !== '' ? '\n' : ''}${stderr}` : ''}`;
+  const shown = lines === '' ? null : truncateForDisplay(lines).split('\n');
+  return (
+    <section className="step term" data-term={tool.tool_call_id} aria-expanded={open}>
+      <button
+        type="button"
+        className={`step-head${selected ? ' sel' : ''}`}
+        aria-expanded={open}
+        data-list-key={toolKey(tool)}
+        aria-current={selected ? 'true' : undefined}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`step-ico ${ico}`}>
+          <TerminalSquare size={10} aria-hidden="true" />
+        </span>
+        <span className="step-main">
+          <span className="step-title" title={command}>
+            <span className="term-prompt">$</span> {command}
+          </span>
+          <span className="step-meta">
+            {/* 中断先于 exit 码：被取消的命令可能带着半截 exit 码，语义仍是「中断」。 */}
+            <span>
+              {running ? '进行中'
+                : tool.status === 'stopped' ? '已中断'
+                  : exit !== undefined ? `exit ${exit}` : '—'}
+            </span>
+            {dur !== null && <><span>·</span><span>{dur}</span></>}
+            {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+          </span>
+        </span>
+        <span className="step-nums">
+          <span className={wordClass}>{word}</span>
+        </span>
+        <ChevronDown size={10} className="step-chev" aria-hidden="true" />
+      </button>
+      <div className="step-body">
+        <div>
+          <div className="step-in">
+            {shown !== null ? (
+              <pre className="term-out">
+                {shown.map((line, i) => (
+                  <span key={i} className={termLineClass(line)}>
+                    {line}{i < shown.length - 1 ? '\n' : ''}
+                  </span>
+                ))}
+                {running && <span className="caret" aria-hidden="true" />}
+              </pre>
+            ) : (
+              <div className="fc-note">{running ? '命令执行中，暂无输出' : '这次调用没有输出'}</div>
+            )}
+            <div className="term-foot">
+              {running ? (
+                <>
+                  <span className="term-live-dot" aria-hidden="true" />
+                  <span>跟随中 · 已运行</span>
+                  {elapsed !== '' && <span className="mono">{elapsed}</span>}
+                </>
+              ) : (
+                <>
+                  <span>来源</span>
+                  {seq !== null && <span className="mono">seq {seq}</span>}
+                  <span>·</span>
+                  <span>{stderr !== '' ? 'stderr 有内容' : 'stdout'}</span>
+                </>
+              )}
+              <span className="grow" />
+              <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+                查看事件
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void; selectedKey?: string | null }) {
   // 判定与读取都来自 lib/commandOutput（票面 AC2）：
   // "什么算一次命令"只允许有一处答案——两边各写一份会各自演化。
   // F2（#272）：同上（过滤谓词仍是 lib/commandOutput 的唯一那份 `isCommand`）。
   const bashes = useMemo(() => tools.filter(isCommand), [tools]);
+  const failed = useMemo(() => bashes.filter((t) => t.status === 'failed').length, [bashes]);
   if (bashes.length === 0) {
     return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
   return (
     <>
-      {bashes.map((t) => {
-        const result = commandResult(t);
-        const selected = selectedKey != null && toolKey(t) === selectedKey;
-        return (
-          <button
-            key={t.tool_call_id}
-            className={`detail-terminal-row detail-card${selected ? ' sel' : ''}`}
-            data-list-key={toolKey(t)}
-            aria-current={selected ? 'true' : undefined}
-            onClick={() => onFocusTool(t)}
-          >
-            <div className="detail-terminal-cmd">
-              <span className="bash-prompt">$</span>
-              <code>{String(t.args.command ?? '')}</code>
-            </div>
-            {result?.stdout !== undefined && <pre className="detail-terminal-out">{truncateForDisplay(result.stdout)}</pre>}
-            {result?.exit_code !== undefined && (
-              <span className={`exit-badge ${result.exit_code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {result.exit_code}</span>
-            )}
-          </button>
-        );
-      })}
+      {/* #1419 M-1：段头（效果图 `.pane-head`）= 标签 + mono `N 条 · M 失败` + 右 bash 胶囊。 */}
+      <div className="pane-head">
+        <span className="lbl">命令历史</span>
+        <span className="n">{bashes.length} 条 · {failed} 失败</span>
+        <span className="grow" />
+        <span className="ov-badge">
+          <TerminalSquare size={9} aria-hidden="true" />
+          bash
+        </span>
+      </div>
+      {bashes.map((t) => (
+        <TermCard
+          key={t.tool_call_id}
+          tool={t}
+          selected={selectedKey != null && toolKey(t) === selectedKey}
+          onFocusTool={onFocusTool}
+        />
+      ))}
     </>
   );
 }
