@@ -1727,19 +1727,10 @@ async def execute_case(case: GoldCase) -> Mapping[str, Any]:
             await service.aclose()
 
 
-def _patch_identity() -> None:
-    """AC1: pin code identity so a dirty/untracked tree cannot fail the run."""
-    import evaluation.memory_v2_quality as gate
-
-    pinned = {"code_sha": "0" * 40, "tree_sha": "0" * 40}
-    gate.capture_code_identity = lambda: dict(pinned)
-
-
 async def _smoke(
     dataset_path: str | Path,
     report_path: str | Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    _patch_identity()
     raw: list[dict[str, Any]] = []
 
     async def capture(case: GoldCase) -> Mapping[str, Any]:
@@ -1843,7 +1834,12 @@ def main(argv: list[str] | None = None) -> int:
     run_id = uuid.uuid4().hex
     report_path = REPORT_DIR / f"memory-v2-gold-{run_id}.json"
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    report, raw = asyncio.run(_smoke(dataset, report_path))
+    try:
+        report, raw = asyncio.run(_smoke(dataset, report_path))
+    except RuntimeError as error:
+        # The gate's clean-tree check is authoritative: a dirty tree gets no report.
+        print(f"refused: {error}")
+        return 2
     print(
         f"run_id={run_id} status={report.get('status')} "
         f"cases={report.get('case_counts')} report={report_path}"
