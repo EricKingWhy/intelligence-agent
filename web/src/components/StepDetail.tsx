@@ -15,9 +15,9 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, Bot, ChevronDown, ChevronRight, Clock,
+  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock,
   Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
-  Package, Pin, ShieldCheck, TerminalSquare, User, X,
+  Package, Pin, ShieldCheck, TerminalSquare, X,
 } from 'lucide-react';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
@@ -35,7 +35,7 @@ import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSum
 import {
   barGeometry, deriveEventTimings, deriveTimelineEventKeys, eventCategory, eventMatchesFilter, filterCounts,
   formatAxisLabel, formatClock, seqGapMarkers, timelineAxis,
-  type EventCategory, type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
+  type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
 } from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
@@ -1464,15 +1464,15 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
-/** 类型图标（P3-6）：定稿原型 `.fc-lead` 是 20px 图标盒，不是 5px 类别点。 */
-const CATEGORY_ICON: Record<EventCategory, typeof ListTree> = {
-  tool: TerminalSquare,
-  model: Layers,
-  agent: Bot,
-  run: Clock,
-  user: User,
-  other: ListTree,
-};
+/** 类型图标（P3-6）：定稿原型 `.fc-lead` 是 20px 图标盒，不是 5px 类别点。
+ *
+ *  #1419 perf：图标是每行 SSR 成本最敏感的一处——探针口径下每多一个元素约
+ *  +0.9ms/200 行。实测路径：lucide 组件 22.3ms → 逐行内联 SVG 13.1ms →
+ *  `<symbol>`+`<use>` 12.9ms → **零 DOM 节点（本形态）**。图标整体下沉到 CSS：
+ *  20px 盒 = `.timeline-row::before`，11px 图标 = `.tl-dur::before` 的
+ *  `mask-image`（形状数据只存在于 app.css，逐字取自 lucide-react@1.40.0，ISC；
+ *  颜色由 `--tl-icon-color` 给）。几何不变：20px 盒 − 2×1px 边框 − 2×3.5px
+ *  内边距 = 11px 视口，与改造前 `size={11}` 一致。 */
 
 /** P3-2：投影对 run/model 类事件没有单行摘要（`emptySummary`），Timeline 卡片
  *  标题不能因此退回原始类型串。只补这几类**可读**标题，其余仍按投影口径回退
@@ -1941,14 +1941,14 @@ const TimelineCard = memo(function TimelineCard({
   const key = rowKey;
   const status: TimelineStatus = timing?.status ?? 'idle';
   const category = eventCategory(event);
-  const LeadIcon = CATEGORY_ICON[category];
   const bar = timing && axis ? barGeometry(timing, axis) : null;
   const showBarLabel = Boolean(
     timing?.durationMs != null && axis && timing.durationMs / axis.maxMs >= 0.1,
   );
   const clock = formatClock(event.time);
   const toolName = typeof event.data.tool_name === 'string' ? event.data.tool_name : null;
-  const expandId = `tl-expand-${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  /* 只有展开行需要 DOM id；未展开行不再每行跑一次正则替换。 */
+  const expandId = expanded ? `tl-expand-${key.replace(/[^a-zA-Z0-9_-]/g, '_')}` : undefined;
   return (
     <div
       className={`timeline-card${selected ? ' sel' : ''}${expanded ? ' expanded' : ''}${flash ? ' is-new' : ''}`}
@@ -1961,15 +1961,12 @@ const TimelineCard = memo(function TimelineCard({
         data-cat={category}
         aria-current={selected ? 'true' : undefined}
         aria-expanded={expanded}
-        aria-controls={expanded ? expandId : undefined}
+        aria-controls={expandId}
         onClick={() => {
           onSelect(event);
           onToggle(key);
         }}
       >
-        <span className="tl-lead" aria-hidden="true">
-          <LeadIcon size={11} />
-        </span>
         <span className="tl-main">
           <span className="tl-title">{timelineTitle(event)}</span>
           <span className="tl-meta">

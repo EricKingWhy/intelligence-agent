@@ -4963,9 +4963,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: none;
 }
 .composer-send:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-accent) 82%, #000);
+  background: color-mix(in srgb, var(--color-accent) 82%, var(--overlay-scrim));
   border-color: transparent;
-  color: #fff;
+  color: var(--on-solid);
   transform: translateY(-1px);
   box-shadow: 0 4px 12px color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
@@ -5791,6 +5791,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 
 .timeline-row {
+  position: relative;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) minmax(54px, 1.1fr) 40px 11px;
   align-items: center;
@@ -5820,47 +5821,67 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: none;
 }
 
-/* P3-6：类型图标盒（对齐定稿原型 `.fc-lead` 的 20px / 6px 圆角），不是类别圆点。 */
-.tl-lead {
+/* P3-6：类型图标盒（对齐定稿原型 `.fc-lead` 的 20px / 6px 圆角），不是类别圆点。
+ * #1419 perf：图标是每行 SSR 成本最敏感的一处（探针口径下每多一个元素约
+ * +0.9ms/200 行），所以整只图标做成**零 DOM 节点**：盒 = `.timeline-row::before`
+ * （grid 第 1 列），图形 = `.tl-dur::before` 的 `mask-image`（绝对定位盖在盒中心）。
+ * 形状数据只在这里出现一次（逐字取自 lucide-react@1.40.0，ISC）；颜色走
+ * `--tl-icon-color` / `--tl-tint`。几何不变：20px 盒 − 2×1px 边框 − 2×3.5px
+ * 内边距 = 11px 视口（原 `size={11}`）。 */
+.timeline-row::before {
+  content: '';
   width: 20px;
   height: 20px;
+  box-sizing: border-box;
   border-radius: 6px;
-  display: grid;
-  place-items: center;
-  background: var(--surface-hover);
-  color: var(--text-tertiary);
-  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--tl-tint, transparent) 12%, var(--surface-hover));
+  border: 1px solid color-mix(in srgb, var(--tl-tint, var(--border-subtle)) 28%, var(--border-subtle));
 }
-.timeline-row[data-cat='tool'] .tl-lead {
-  color: var(--info);
-  background: color-mix(in srgb, var(--info) 12%, transparent);
-  border-color: color-mix(in srgb, var(--info) 28%, var(--border-subtle));
+/* 图形层：11px mask 落在盒的内视口（1px 边框 + 3.5px 内边距 = 4.5px）。 */
+.tl-dur::before {
+  content: '';
+  position: absolute;
+  left: 12.5px;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  transform: translateY(-50%);
+  background: var(--tl-icon-color, var(--text-tertiary));
+  -webkit-mask: var(--tl-icon) center / 11px 11px no-repeat;
+  mask: var(--tl-icon) center / 11px 11px no-repeat;
+  pointer-events: none;
 }
-.timeline-row[data-cat='model'] .tl-lead {
-  color: var(--accent-text);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
+.timeline-row[data-cat='tool'] {
+  --tl-tint: var(--info);
+  --tl-icon-color: var(--info);
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='m7%2011%202-2-2-2'/%3E%3Cpath%20d='M11%2013h4'/%3E%3Crect%20width='18'%20height='18'%20x='3'%20y='3'%20rx='2'%20ry='2'/%3E%3C/svg%3E");
 }
-.timeline-row[data-cat='agent'] .tl-lead {
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
-  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
+.timeline-row[data-cat='model'] {
+  --tl-tint: var(--accent);
+  --tl-icon-color: var(--accent-text);
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M12.83%202.18a2%202%200%200%200-1.66%200L2.6%206.08a1%201%200%200%200%200%201.83l8.58%203.91a2%202%200%200%200%201.66%200l8.58-3.9a1%201%200%200%200%200-1.83z'/%3E%3Cpath%20d='M2%2012a1%201%200%200%200%20.58.91l8.6%203.91a2%202%200%200%200%201.65%200l8.58-3.9A1%201%200%200%200%2022%2012'/%3E%3Cpath%20d='M2%2017a1%201%200%200%200%20.58.91l8.6%203.91a2%202%200%200%200%201.65%200l8.58-3.9A1%201%200%200%200%2022%2017'/%3E%3C/svg%3E");
 }
-.timeline-row[data-cat='user'] .tl-lead {
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
-  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
+.timeline-row[data-cat='agent'] {
+  --tl-tint: var(--warning);
+  --tl-icon-color: var(--warning);
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M12%208V4H8'/%3E%3Crect%20width='16'%20height='12'%20x='4'%20y='8'%20rx='2'/%3E%3Cpath%20d='M2%2014h2'/%3E%3Cpath%20d='M20%2014h2'/%3E%3Cpath%20d='M15%2013v2'/%3E%3Cpath%20d='M9%2013v2'/%3E%3C/svg%3E");
 }
-.timeline-row[data-cat='run'] .tl-lead {
-  color: var(--success);
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-  border-color: color-mix(in srgb, var(--success) 28%, var(--border-subtle));
+.timeline-row[data-cat='user'] {
+  --tl-tint: var(--warning);
+  --tl-icon-color: var(--warning);
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M19%2021v-2a4%204%200%200%200-4-4H9a4%204%200%200%200-4%204v2'/%3E%3Ccircle%20cx='12'%20cy='7'%20r='4'/%3E%3C/svg%3E");
 }
-.timeline-row[data-state='fail'] .tl-lead,
-.timeline-card[data-state='fail'] .tl-lead {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-subtle));
+.timeline-row[data-cat='run'] {
+  --tl-tint: var(--success);
+  --tl-icon-color: var(--success);
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Ccircle%20cx='12'%20cy='12'%20r='10'/%3E%3Cpath%20d='M12%206v6l4%202'/%3E%3C/svg%3E");
+}
+.timeline-row[data-cat='other'] {
+  --tl-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='white'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M8%205h13'/%3E%3Cpath%20d='M13%2012h8'/%3E%3Cpath%20d='M13%2019h8'/%3E%3Cpath%20d='M3%2010a2%202%200%200%200%202%202h3'/%3E%3Cpath%20d='M3%205v12a2%202%200%200%200%202%202h3'/%3E%3C/svg%3E");
+}
+.timeline-card[data-state='fail'] .timeline-row {
+  --tl-tint: var(--danger);
+  --tl-icon-color: var(--danger);
 }
 
 .tl-main {
@@ -6974,7 +6995,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     border-radius: var(--radius-md);
     /* 遮罩 28%（比既有 `ctx-usage-overlay` 的 32% 浅）：抽屉是"轻量 disclosure"，
        背后仍是用户要看的会话内容；模态浮层才用更重的 32%。 */
-    box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, #000 28%, transparent);
+    box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, var(--overlay-scrim) 28%, transparent);
   }
   /* 展开态的开关退到左上角（与标题同一行的阅读起点），收起态居中在图标轨里。 */
   .session-rail.rail-drawer-open .rail-drawer-btn {
@@ -7179,7 +7200,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .copy-btn.copied {
   color: var(--color-success);
-  color: var(--color-success, #22a06b);
   /* #1372 改动 7：成功态要容纳「已复制」三个字，不再固定 24px 方块。 */
   width: auto;
   gap: 4px;
