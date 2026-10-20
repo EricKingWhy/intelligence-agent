@@ -157,6 +157,9 @@ def test_web_create_launch_false_with_task_is_422(tmp_path):
     assert resp.status_code == 422
     assert list(app.state.agent.workspaces_root.iterdir()) == []
     assert list(app.state.agent.sessions_root.iterdir()) == []
+    # #1418 F-5：归档库也是惰性建库（接线在 AppState 构造期，落盘在首条归档
+    # 事件），被拒请求不得把 state.db 建出来。
+    assert not (app.state.agent.sessions_root / "state.db").exists()
 
 
 def test_web_create_launch_default_still_sse(tmp_path):

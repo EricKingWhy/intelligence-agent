@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from agent_harness.tooling.contract import Tool, ToolExposure, exposure_of
 
+DYNAMIC_EXPOSURE_THRESHOLD = 30
+
 
 class ToolRegistry:
     """Tool 路由目录：name → Tool。
@@ -62,6 +64,32 @@ class ToolRegistry:
                 derived.register(tool)
         return derived
 
+    def resolve_exposure(self, tool: Tool) -> ToolExposure:
+        """Resolve the model menu after profile/permission narrowing (#1360).
+
+        Explicit exposure wins. Only provider tools opting into size-based
+        deferral change; core tool definitions remain byte-for-byte identical.
+        Infrastructure tools do not move the threshold when registered.
+        """
+        declared = exposure_of(tool)
+        count = sum(t.name not in {"exec", "tool_search"} for t in self._tools.values())
+        if tool.name == "exec":
+            return (ToolExposure.DEFERRED if count > DYNAMIC_EXPOSURE_THRESHOLD
+                    else ToolExposure.HIDDEN)
+        if (declared is ToolExposure.DIRECT
+                and getattr(tool, "defer_when_many", False)
+                and count > DYNAMIC_EXPOSURE_THRESHOLD):
+            return ToolExposure.DEFERRED
+        return declared
+
+    def model_definition(self, tool: Tool) -> dict:
+        describe = getattr(tool, "description_for_registry", None)
+        return {
+            "name": tool.name,
+            "description": describe(self) if callable(describe) else tool.description,
+            "parameters": tool.args_schema.model_json_schema(),
+        }
+
     def export_model_definitions(self) -> list[dict]:
         """导出给模型/SDK 的工具菜单：name + description + parameters。
 
@@ -78,11 +106,7 @@ class ToolRegistry:
         - 薄层就好，避免抽象（Scope Lock：不拆 Adapter/Plugin 框架）。
         """
         return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.args_schema.model_json_schema(),
-            }
+            self.model_definition(tool)
             for tool in self._tools.values()
-            if exposure_of(tool) is ToolExposure.DIRECT
+            if self.resolve_exposure(tool) is ToolExposure.DIRECT
         ]

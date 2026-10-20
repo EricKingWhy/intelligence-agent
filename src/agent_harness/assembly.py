@@ -77,7 +77,6 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
     ToolExposure,
     ToolReconcileInfo,
-    exposure_of,
 )
 from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
@@ -95,6 +94,7 @@ from agent_harness.tools import (
     WriteTool,
 )
 from agent_harness.tools.ask_user import AskUserTool
+from agent_harness.tools.exec import ExecTool
 from agent_harness.tools.register_constraint import RegisterConstraintTool
 from agent_harness.tools.request_constraint_resolution import (
     REGISTER_CONSTRAINT_HANDOFF,
@@ -110,6 +110,7 @@ from agent_harness.workspace.index import SessionHeaders
 #: 白名单里的工具会让 `tests/agent/test_tool_scope_reconciliation.py` 变红——加工具
 #: 时改这里，别在函数里再写一份。
 BUILTIN_LOCAL_TOOLS: tuple[type[Tool], ...] = (
+    ExecTool,
     ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
     GlobTool, GrepTool, GitStatusTool, GitDiffTool,
 )
@@ -850,7 +851,7 @@ async def build_runtime(
     # （fail-closed，V1 不支持对它配额）。
     tool_exposure: ToolExposureController | None = None
     if any(
-        exposure_of(tool) is ToolExposure.DEFERRED for tool in registry.list()
+        registry.resolve_exposure(tool) is ToolExposure.DEFERRED for tool in registry.list()
     ):
         tool_exposure = ToolExposureController(registry)
         registry.register(ToolSearchTool(tool_exposure))
