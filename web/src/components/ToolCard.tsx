@@ -16,12 +16,13 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { memo } from 'react';
-import { Check, Scissors, Square, X } from 'lucide-react';
+import { memo, useEffect, useId, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AlertTriangle, ArrowRight, Check, ChevronDown, Scissors, Square, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { defaultLevelFor, toolEventKey, type DisclosureLevel } from '../lib/disclosure';
-import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatDuration, formatShortDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { KIND_ICON, toolKind } from '../lib/eventKind';
 import {
   GREP_TRUNCATED_SUFFIX,
@@ -32,7 +33,9 @@ import {
   stripGrepTruncatedSuffix,
   type ReadShape,
 } from '../lib/toolShapes';
+import { useTickingNow } from '../hooks/useTickingNow';
 import { CopyButton } from './CopyButton';
+import { Collapse } from './Collapse';
 import { ToolOutputStream } from './ToolOutputStream';
 import { ArtifactViewer } from './ArtifactViewer';
 import { DiffBlock } from './DiffBlock';
@@ -82,60 +85,133 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
     onFocus?.(tool);
   };
 
+  /* #1429 打磨点 5：参数中间省略。头段可收缩（CSS ellipsis），尾段固定——
+     行宽不足时省略号落在**中段**，尾部的路径/文件仍可辨（V2 `.tc-arg .ma/.mb`）。 */
+  const argsSummary = summarizeArgs(tool);
+  const argsParts = splitArgsForDisplay(argsSummary);
+  const argsTruncatable = argsParts.tail !== '';
+  const [argTip, setArgTip] = useState<{ x: number; y: number } | null>(null);
+  const tipId = useId();
+  const closeTip = () => setArgTip(null);
+  useEffect(() => {
+    if (argTip === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeTip();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [argTip]);
+
+  const detailOpen = effectiveLevel >= 1;
+  const bodyOpen = effectiveLevel >= 2;
+  /* V2 `.tc` 的两种状态底色：失败淡红、运行中主色呼吸条。 */
+  const stateClass =
+    tool.status === 'failed' ? ' is-fail' : tool.status === 'running' ? ' is-run' : '';
+  const copyText =
+    typeof tool.result === 'string'
+      ? tool.result
+      : tool.result === undefined
+        ? ''
+        : JSON.stringify(tool.result, null, 2);
+
   return (
-    <>
-      {/* data-stream-key：Main↔Inspector 联动定位锚（PRD §9.2 反向跳转目标）+ pulse */}
-      <div
-        className={`act-node-wrap${tool.status === 'failed' ? ' act-node-wrap-error' : ''}`}
-        data-stream-key={`tool:${tool.tool_call_id}`}
+    <div
+      /* data-stream-key：Main↔Inspector 联动定位锚（PRD §9.2 反向跳转目标）+ pulse */
+      className={`act-node-wrap act-card${stateClass}`}
+      data-stream-key={`tool:${tool.tool_call_id}`}
+    >
+      <button
+        className={`act-node act-node-${density}`}
+        onClick={handleRowClick}
+        aria-level={effectiveLevel}
+        aria-expanded={detailOpen}
       >
-        <button
-          className={`act-node act-node-${density}`}
-          onClick={handleRowClick}
-          aria-level={effectiveLevel}
-          aria-expanded={effectiveLevel > 0}
-        >
-          <span className={`act-status act-status-${tool.status}`}>
-            {tool.status === 'success' && <Check size={14} />}
-            {tool.status === 'failed' && <X size={14} />}
-            {tool.status === 'stopped' && <Square size={14} />}
-            {tool.status === 'running' && <span className="status-spinner" />}
+        <span className={`act-status act-status-${tool.status}`}>
+          {tool.status === 'success' && <Check size={14} />}
+          {tool.status === 'failed' && <X size={14} />}
+          {tool.status === 'stopped' && <Square size={14} />}
+          {tool.status === 'running' && <span className="status-spinner" />}
+        </span>
+        {density !== 'compact' && <span className="act-icon" data-kind={kind}><KindIcon size={14} /></span>}
+      {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
+      {(() => {
+        const mcp = splitMcpToolName(tool.name);
+        return mcp ? (
+          <span className="act-name">
+            <span className="act-server" title={`MCP server: ${mcp.server}`}>{mcp.server}</span>
+            {mcp.tool}
           </span>
-          {density !== 'compact' && <span className="act-icon" data-kind={kind}><KindIcon size={14} /></span>}
-        {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
-        {(() => {
-          const mcp = splitMcpToolName(tool.name);
-          return mcp ? (
-            <span className="act-name">
-              <span className="act-server" title={`MCP server: ${mcp.server}`}>{mcp.server}</span>
-              {mcp.tool}
+        ) : (
+          <span className="act-name">{tool.name}</span>
+        );
+      })()}
+      {density !== 'compact' && (
+        <span
+          className="act-args"
+          data-full={argsTruncatable ? argsSummary : undefined}
+          tabIndex={argsTruncatable ? 0 : undefined}
+          aria-describedby={argTip !== null ? tipId : undefined}
+          onMouseEnter={(e) => {
+            if (!argsTruncatable) return;
+            const r = e.currentTarget.getBoundingClientRect();
+            setArgTip({ x: r.left, y: r.bottom + 4 });
+          }}
+          onMouseLeave={closeTip}
+          onFocus={(e) => {
+            if (!argsTruncatable) return;
+            const r = e.currentTarget.getBoundingClientRect();
+            setArgTip({ x: r.left, y: r.bottom + 4 });
+          }}
+          onBlur={closeTip}
+        >
+          <span className="act-args-head">{argsParts.head}</span>
+          {argsParts.tail !== '' && <span className="act-args-tail">{argsParts.tail}</span>}
+        </span>
+      )}
+      {density === 'compact' && (
+        <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
+      )}
+      <span className="act-duration">
+        {duration ?? (tool.status === 'running' ? <LiveToolDuration startedAt={tool.started_at} /> : null)}
+      </span>
+      <ChevronDown size={11} className="act-chev" aria-hidden="true" />
+      </button>
+      {/* V2 打磨点 3：悬停浮现的快捷动作（复制 / 定位）。定位走 Inspector 联动
+          （`onFocus`），不做工具级重试——失败卡按 P0-1 裁决只呈现错误。 */}
+      {(hasInspect || copyText !== '') && (
+        <span className="act-quick-acts">
+          {copyText !== '' && (
+            <span className="act-quick-act">
+              <CopyButton text={copyText} label="复制输出" />
             </span>
-          ) : (
-            <span className="act-name">{tool.name}</span>
-          );
-        })()}
-        {density !== 'compact' && <span className="act-args">{summarizeArgs(tool)}</span>}
-        {duration && <span className="act-duration">{duration}</span>}
-        {density === 'compact' && (
-          <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
-        )}
-        </button>
-        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。
-            真按钮（code-review P0：span+tabIndex=-1 键盘不可达）——Tab 聚焦后
-            Enter/Space 原生触发，:focus-visible 时浮现（样式已覆盖）。 */}
-        {hasInspect && (
-          <button
-            type="button"
-            className="act-inspect-chip"
-            onClick={(e) => {
-              e.stopPropagation();
-              onFocus?.(tool);
-            }}
-          >
-            Inspect
-          </button>
-        )}
-      </div>
+          )}
+          {hasInspect && (
+            <button
+              type="button"
+              className="act-quick-act act-quick-locate"
+              title="在右栏定位这次调用"
+              aria-label="在右栏定位这次调用"
+              onClick={(e) => {
+                e.stopPropagation();
+                onFocus?.(tool);
+              }}
+            >
+              <ArrowRight size={11} />
+            </button>
+          )}
+        </span>
+      )}
+      {argTip !== null && typeof document !== 'undefined' && createPortal(
+        <span
+          id={tipId}
+          className="arg-tip is-on"
+          role="tooltip"
+          style={{ left: argTip.x, top: argTip.y }}
+        >
+          {argsSummary}
+        </span>,
+        document.body,
+      )}
 
       {/* T3（#96）：流式输出尾窗——running 渲染 chunks 活流（S14 活流不需展开）；
           终态以 result 校准（契约 C2「tool/result 终态全量兜底」——delta 缺口/
@@ -145,62 +221,63 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
         <ToolOutputStream chunks={tool.output} streaming={tool.status === 'running'} />
       )}
 
-      {/* 失败摘要行（PRD §5.2 Error：TIMEOUT · 10.0s 式轻量摘要）——保持折叠，
-          只给关键错误信号；完整 Raw 留给 Inspector（D6：失败不强制全展开）。 */}
+      {/* 失败卡关键错误行（#1429 打磨点 8）：默认露出、红字 + 淡红底、不画框。
+          只呈现错误，不给工具级重试按钮（P0-1 裁决）；完整 Raw 仍在 L2。 */}
       {errorShape && (
-        <div className="act-error-summary" role="status">
-          <span className="act-error-code">{errorShape.errorCode}</span>
-          {errorShape.message && <span className="act-error-msg">{truncate(errorShape.message, 120)}</span>}
+        <div className="act-error-line" role="status">
+          <AlertTriangle size={11} aria-hidden="true" />
+          <span>
+            <b className="act-error-code">{errorShape.errorCode}</b>
+            {errorShape.message && ` — ${truncate(errorShape.message, 160)}`}
+          </span>
         </div>
       )}
 
-      {/* L1 inline detail：Input/Output 摘要（C3 微标签分区，与 Inspector io-tabs 同语言）。 */}
-      {effectiveLevel >= 1 && (
-        <div className="act-detail-inline">
-          <div className="act-field">
-            <div className="act-field-label">输入</div>
-            <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
-          </div>
-          {tool.result !== undefined && (
-            <div className="act-field">
-              <div className="act-field-label">输出</div>
-              <pre className="act-detail-result">
-                {truncate(
-                  typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
-                  400,
-                )}
-              </pre>
-            </div>
-          )}
+      {/* L1 inline detail：Input/Output 摘要（C3 微标签分区，与 Inspector io-tabs 同语言）。
+          展开/收起走 grid-rows 0fr→1fr（打磨点 2）；收起后子树卸载，balanced 档
+          DOM 里仍然没有内联明细。 */}
+      <Collapse open={detailOpen} className="act-detail-inline">
+        <div className="act-field">
+          <div className="act-field-label">输入</div>
+          <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
         </div>
-      )}
+        {tool.result !== undefined && (
+          <div className="act-field">
+            <div className="act-field-label">输出</div>
+            <pre className="act-detail-result">
+              {truncate(
+                typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
+                400,
+              )}
+            </pre>
+          </div>
+        )}
+      </Collapse>
 
       {/* L2 advanced inline：完整内容面（四形态专属块）+ 原始事件 JSON。 */}
-      {effectiveLevel >= 2 && (
-        <div className="tool-card-body">
-          {isBash && <BashBlock tool={tool} />}
-          {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} sessionId={sessionId} />}
-          {slice && <ArtifactSliceBlock slice={slice} />}
-          {readShape && <ReadBlock shape={readShape} />}
-          {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
-          {/* 被截断处的「就地展开」（#186 AC2）：判据用**投影**挂上的 `tool.artifact`
-              （来自 `artifact/externalized`），不在视图里解析 marker——标记长什么样是
-              后端的事，前端只认投影这一份真相（AC7 / 不变量 #22）。与 Artifacts 清单
-              共用 `ArtifactViewer`，不新开导航面。
-              这里同时覆盖命令输出与通用结果两条外置路径（不需要各写一遍）。
+      <Collapse open={bodyOpen} className="tool-card-body">
+        {isBash && <BashBlock tool={tool} />}
+        {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} sessionId={sessionId} />}
+        {slice && <ArtifactSliceBlock slice={slice} />}
+        {readShape && <ReadBlock shape={readShape} />}
+        {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
+        {/* 被截断处的「就地展开」（#186 AC2）：判据用**投影**挂上的 `tool.artifact`
+            （来自 `artifact/externalized`），不在视图里解析 marker——标记长什么样是
+            后端的事，前端只认投影这一份真相（AC7 / 不变量 #22）。与 Artifacts 清单
+            共用 `ArtifactViewer`，不新开导航面。
+            这里同时覆盖命令输出与通用结果两条外置路径（不需要各写一遍）。
 
-              归档 diff 例外：那一份已经由上面的 `DiffBlock` 给了展开入口（`tool.diff`
-              归档时，内容就是同一个 artifact），再渲染一次会变成两个同名同效的按钮。 */}
-          {tool.artifact && sessionId && !(isDiffTool && tool.diff?.archived) && (
-            <ArtifactViewer
-              sessionId={sessionId}
-              artifactId={tool.artifact.artifact_id}
-              label="查看完整内容"
-            />
-          )}
-        </div>
-      )}
-      {effectiveLevel >= 2 && (tool.raw_call || tool.raw_result) && (
+            归档 diff 例外：那一份已经由上面的 `DiffBlock` 给了展开入口（`tool.diff`
+            归档时，内容就是同一个 artifact），再渲染一次会变成两个同名同效的按钮。 */}
+        {tool.artifact && sessionId && !(isDiffTool && tool.diff?.archived) && (
+          <ArtifactViewer
+            sessionId={sessionId}
+            artifactId={tool.artifact.artifact_id}
+            label="查看完整内容"
+          />
+        )}
+      </Collapse>
+      {bodyOpen && (tool.raw_call || tool.raw_result) && (
         <div className="act-raw">
           {tool.raw_call && (
             <div className="act-raw-section">
@@ -216,9 +293,27 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
           )}
         </div>
       )}
-    </>
+    </div>
   );
 });
+
+/** 运行中工具的已运行时长（只给"已跑多久"，不给假百分比）。 */
+function LiveToolDuration({ startedAt }: { startedAt?: string }) {
+  const now = useTickingNow(1000);
+  if (!startedAt) return null;
+  const text = formatShortDuration(now - new Date(startedAt).getTime());
+  return text === '' ? null : <>{text}</>;
+}
+
+/** 中间省略的切分：短串不切；长串保留尾部 `ARG_TAIL_CHARS` 字符作为固定尾段。 */
+const ARG_TAIL_CHARS = 32;
+function splitArgsForDisplay(summary: string): { head: string; tail: string } {
+  if (summary.length <= ARG_TAIL_CHARS * 2) return { head: summary, tail: '' };
+  return {
+    head: summary.slice(0, summary.length - ARG_TAIL_CHARS),
+    tail: summary.slice(summary.length - ARG_TAIL_CHARS),
+  };
+}
 
 function summarizeArgs(tool: ToolCall, max = 60): string {
   const a = tool.args;
