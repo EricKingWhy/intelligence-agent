@@ -42,58 +42,72 @@ const LONG_PROFILE: FrameSpec[] = EVENTS.map((f) =>
   f.type === 'run/started' ? { ...f, data: { agent_profile: 'research_review' } } : f,
 );
 
-test('AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清单不消失', async ({ page }) => {
+test('AC1：点卡片就地展开；↑↓ 移动选中且 peek 不出现；Enter 开合', async ({ page }) => {
   await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
 
-  // 鼠标点击即选中即预览（AC3：不做键盘唯一）
+  // 鼠标点击 = 选中 + 就地展开；不再开右侧 peek（#1419 的新交互）。
   await rows.nth(1).click();
   await expect(rows.nth(1)).toHaveAttribute('aria-current', 'true');
-  const peek = page.locator('.detail-peek');
-  await expect(peek).toBeVisible();
-  await expect(peek.locator('.detail-peek-kind')).toHaveText('run/started');
+  const expanded = page.locator('.timeline-card.expanded');
+  await expect(expanded).toHaveCount(1);
+  await expect(expanded.locator('.tl-drill')).toContainText('run/started');
+  await expect(page.locator('.detail-peek')).toBeHidden();
 
-  // ↑ 回到第一条 → 详情跟着换（不重新挂载：容器还是同一个）
+  // ↑ 回到第一条：选中移动，但展开卡不被清掉（展开是独立视图状态）。
   await page.keyboard.press('ArrowUp');
   await expect(rows.nth(0)).toHaveAttribute('aria-current', 'true');
-  await expect(peek.locator('.detail-peek-kind')).toHaveText('session/started');
+  await expect(expanded).toHaveCount(1);
+  await expect(page.locator('.detail-peek')).toBeHidden();
 
-  // ↓ 两次 → 到第三条（user/message）
+  // ↓ 两次 → 第三条（user/message）。
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('ArrowDown');
   await expect(rows.nth(2)).toHaveAttribute('aria-current', 'true');
-  await expect(peek.locator('.detail-peek-kind')).toHaveText('user/message');
+  await expect(page.locator('.detail-peek')).toBeHidden();
 
-  // 清单仍在（同框）——此前 focus 非 run 时清单整个被替换掉
+  // Enter 开合当前选中卡片。
+  await page.keyboard.press('Enter');
+  await expect(rows.nth(2)).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.timeline-card.expanded')).toHaveCount(2);
+  await page.keyboard.press('Enter');
+  await expect(rows.nth(2)).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.timeline-card.expanded')).toHaveCount(1);
+
+  // 清单仍在（同框）——此前 focus 非 run 时清单整个被替换掉。
   await expect(rows).toHaveCount(EVENTS.length);
-  // 只有一行是当前项（aria 如实，不是"每行都亮"）
   await expect(page.locator('.timeline-row[aria-current="true"]')).toHaveCount(1);
-
-  // 两端不环绕：在第一条上再按 ↑ 仍停在第一条
-  await rows.nth(0).click();
-  await page.keyboard.press('ArrowUp');
-  await expect(rows.nth(0)).toHaveAttribute('aria-current', 'true');
 });
 
-test('AC2：Esc 关预览但面板与清单都还在（关闭不卸载）', async ({ page }) => {
+test('AC2：Esc 分层——先收展开卡，再关 peek；面板与清单都还在', async ({ page }) => {
   await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
 
   await rows.nth(2).click();
+  const expanded = page.locator('.timeline-card.expanded');
+  await expect(expanded).toHaveCount(1);
+
+  // Space 语义不变：召出同一选中项的 peek。
+  await page.keyboard.press('Space');
   const peek = page.locator('.detail-peek');
   await expect(peek).toBeVisible();
 
+  // 第一层 Esc：只收展开卡，peek 与面板不动。
   await page.keyboard.press('Escape');
+  await expect(expanded).toHaveCount(0);
+  await expect(peek).toBeVisible();
+  await expect(page.locator('.step-detail')).toBeVisible();
 
-  // 关掉：视觉上不可见，但**仍在 DOM 里**（hidden 而不是卸载）
+  // 第二层 Esc：关 peek（hidden 而不是卸载），面板与清单原封不动。
+  await page.keyboard.press('Escape');
   await expect(peek).toBeHidden();
   await expect(peek).toHaveCount(1);
-  // 面板与清单原封不动
   await expect(page.locator('.step-detail')).toBeVisible();
   await expect(rows).toHaveCount(EVENTS.length);
-  // 选中项保留：再按 Space 能立刻把同一个目标的预览召回来（下面那条用例直接接着验）
+
+  // 选中项保留：Space 能立刻把同一个目标的预览召回来。
   await page.keyboard.press('Space');
   await expect(peek).toBeVisible();
   await expect(peek.locator('.detail-peek-kind')).toHaveText('user/message');
@@ -105,8 +119,8 @@ test('AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义
   const rows = await openSession(page);
 
   await rows.nth(1).click();
+  await page.keyboard.press('Escape'); // 先收掉点击产生的展开卡
   const peek = page.locator('.detail-peek');
-  await page.keyboard.press('Escape');
   await expect(peek).toBeHidden();
 
   // 快按：松开后仍然开着
@@ -174,8 +188,13 @@ test('AC5：整页往返（面板按钮 + 命令面板两个入口）', async ({
   await expect(page.locator('.session-rail')).toBeHidden();
   await expect(expand).toHaveAttribute('aria-pressed', 'true');
 
-  // Esc 先退回整页（分层：这一层不通，用户会以为卡死在整页里）
+  // Esc 先退回整页（分层：这一层不通，用户会以为卡死在整页里）。
+  // #1419 后点击卡片会先展开一层，所以第一下 Esc 收展开、第二下才退整页。
   await page.locator('.timeline-row').first().click();
+  await expect(page.locator('.timeline-card.expanded')).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.timeline-card.expanded')).toHaveCount(0);
+  await expect(page.locator('.app-regions')).toHaveClass(/inspector-fullpage/);
   await page.keyboard.press('Escape');
   await expect(page.locator('.app-regions')).not.toHaveClass(/inspector-fullpage/);
   await expect(page.locator('.session-rail')).toBeVisible();
