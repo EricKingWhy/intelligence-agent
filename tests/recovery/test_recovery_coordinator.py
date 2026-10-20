@@ -18,6 +18,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.recovery import (
     PendingPolicy,
     RecoveryCoordinator,
@@ -291,6 +292,16 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
 
     results = _result_events(recovered)
     assert "call-1" in results
+    result_event = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-1"
+    )
+    assert result_event.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 1,
+        "tool_attempts": 0,
+    }
+    assert consumed_from_events(recovered.events).tool_calls_by_tool == {"bash": 1}
     skipped = ToolResult.model_validate_json(results["call-1"])
     assert skipped.ok is False
     # 跳过文案必须真的在场（T8 迁移到 frame:recovery_skipped）——取错组装分区

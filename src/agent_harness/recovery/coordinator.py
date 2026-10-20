@@ -263,11 +263,8 @@ def _protected_fact_request_result(
     )
 
 
-def _tool_budget_delta(operation: Operation) -> dict | None:
-    """Preserve the one-call budget fact for recovered user-input prompts."""
-    if (operation.tool_name not in USER_INPUT_TOOL_NAMES
-            and operation.parent_exec_call_id is None):
-        return None
+def _tool_budget_delta(operation: Operation) -> dict:
+    """Preserve the accepted-call budget fact when recovery synthesizes a result."""
     attempts = 0
     if operation.result_json:
         result = _try_parse_result_json(operation.result_json, operation.tool_name)
@@ -969,6 +966,7 @@ class RecoveryCoordinator:
                 run_id=run_id,
                 agent_id=agent_id,
                 args=args,
+                budget_delta=budget_delta,
             )
 
         return None
@@ -1152,11 +1150,16 @@ class RecoveryCoordinator:
                 and event.data.get("tool_call_id") == operation.tool_call_id
                 for event in session.events
             ):
+                result_data = {
+                    "tool_call_id": operation.tool_call_id,
+                    "content": content,
+                    **({"parent_exec_call_id": operation.parent_exec_call_id}
+                       if operation.parent_exec_call_id is not None else {}),
+                }
+                result_data["budget_delta"] = _tool_budget_delta(operation)
                 session.append(
                     TOOL_RESULT,
-                    {"tool_call_id": operation.tool_call_id, "content": content,
-                     **({"parent_exec_call_id": operation.parent_exec_call_id}
-                        if operation.parent_exec_call_id is not None else {})},
+                    result_data,
                     run_id=operation.run_id,
                     agent_id=operation.agent_id,
                 )
