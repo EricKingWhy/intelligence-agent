@@ -24,7 +24,7 @@ import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatCoarseDuration, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { timelineHeadline } from '../lib/timelineHeadline';
-import { lineDiff } from '../lib/lineDiff';
+import { lineDiff, type LineDiffResult } from '../lib/lineDiff';
 import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
 import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
@@ -1244,7 +1244,11 @@ export function ChatTab({
                   走既有 postApproval 通路与既有 409/404 语义，不在这里造第二条提交路径。
                   `autoFocus` 必须为 false——全局 Ctrl+Enter 只该由中心列那一张卡挂载，
                   否则一次按键会向同一个 approval_id 发两次 POST。 */}
+              {/* `key` 必须绑 approval_id：`ApprovalCard` 的 submitted/busy/error
+                  是组件本地状态，槽位复用会让"批准了 A 之后轮到的 B"继承 A 的
+                  已提交态——按钮消失、错误横幅串台。换 id 即换实例。 */}
               <ApprovalCard
+                key={actionableApprovals[0].approval_id}
                 sessionId={conversation.session_id}
                 approval={actionableApprovals[0]}
                 onGone={() => onApprovalGone(actionableApprovals[0].approval_id)}
@@ -2004,7 +2008,9 @@ export function TimelineTab({
       timing?.durationMs != null ? formatShortDuration(timing.durationMs) : null,
     ].filter((part): part is string => Boolean(part)).join(' · ');
     const summary = eventSummary(ev) || null;
-    const rows = 1 + 1 + (summary ? 1 : 0) + lines.length;
+    /* 行数 = 标题 + meta + 摘要 + 内容行 + 底部提示（`.tl-tooltip-hint` **恒定渲染**）。
+       漏掉提示行会让"朝上放"的浮层矮一行，正好盖住指针所在的那一行。 */
+    const rows = 1 + 1 + (summary ? 1 : 0) + lines.length + 1;
     const r = btn.getBoundingClientRect();
     const tipH = rows * TIP_LINE_H + TIP_PADDING;
     const above = r.top > tipH + TIP_TOP_MARGIN;
@@ -2444,21 +2450,31 @@ export function ChangesTab({
   const [diffWindow, setDiffWindow] = useState(CHANGES_WINDOW_DEFAULT);
   const hiddenDiffs = Math.max(0, diffs.length - diffWindow);
   const visibleDiffs = hiddenDiffs > 0 ? diffs.slice(hiddenDiffs) : diffs;
-  /* #1419 C-1：+A −D 由 before/after 两份文本算出来（`lib/lineDiff`）。任一文件
-     超出规模闸（算不出准确计数）就整体显示「—」——半个和比没有和更误导。 */
+  /* 每个文件的 diff **只算一次**：段头的 `+A −D` 与卡片本体共用同一张表。
+     分开算等于每次投影更新把 O(n·m) 的 LCS 跑两遍（规模闸内单个文件最多
+     1e6 格 ≈ 4MB），百文件改动集下就是双倍分配。归档态没有可比对的两份文本 ⇒
+     表里存 null，卡片据此回到 `DiffBlock` 的归档占位。 */
+  const diffResults = useMemo(() => {
+    const map = new Map<string, LineDiffResult | null>();
+    for (const t of diffs) {
+      const d = t.diff!;
+      map.set(t.tool_call_id, d.archived ? null : lineDiff(d.before ?? '', d.after ?? ''));
+    }
+    return map;
+  }, [diffs]);
+  /* #1419 C-1：+A −D 来自上表。任一文件超出规模闸（算不出准确计数）就整体显示
+     「—」——半个和比没有和更误导。 */
   const totals = useMemo(() => {
     let added = 0;
     let removed = 0;
-    for (const t of diffs) {
-      const d = t.diff!;
-      if (d.archived) continue;
-      const r = lineDiff(d.before ?? '', d.after ?? '');
+    for (const r of diffResults.values()) {
+      if (r === null) continue;
       if (r.added === null || r.removed === null) return null;
       added += r.added;
       removed += r.removed;
     }
     return { added, removed };
-  }, [diffs]);
+  }, [diffResults]);
   const archivedCount = useMemo(() => diffs.filter((t) => t.diff?.archived).length, [diffs]);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
@@ -2499,7 +2515,13 @@ export function ChangesTab({
         </div>
       )}
       {visibleDiffs.map((t) => (
-        <ChangeCard key={t.tool_call_id} tool={t} sessionId={sessionId} onFocusTool={onFocusTool} />
+        <ChangeCard
+          key={t.tool_call_id}
+          tool={t}
+          result={diffResults.get(t.tool_call_id) ?? null}
+          sessionId={sessionId}
+          onFocusTool={onFocusTool}
+        />
       ))}
     </>
   );
@@ -2513,19 +2535,17 @@ export function ChangesTab({
  *  输入过大（超出 `LINE_DIFF_MAX_CELLS`）同理回到 `DiffBlock` 的整段对照，
  *  并**不给 +/− 计数**（算不出来就不报数）。 */
 function ChangeCard({
-  tool, sessionId, onFocusTool,
+  tool, result, sessionId, onFocusTool,
 }: {
   tool: ToolCall;
+  /** 段头算好的 diff（同一文件只算一次）；归档态为 null。 */
+  result: LineDiffResult | null;
   sessionId?: string;
   onFocusTool?: (tool: ToolCall) => void;
 }) {
   const [open, setOpen] = useState(false);
   const diff = tool.diff!;
   const path = String(tool.args.path ?? tool.args.file_path ?? '');
-  const result = useMemo(
-    () => (diff.archived ? null : lineDiff(diff.before ?? '', diff.after ?? '')),
-    [diff],
-  );
   const seq = toolSeq(tool);
   const dur = formatDuration(tool.started_at, tool.completed_at);
   const unified = result?.mode === 'unified' ? result : null;
@@ -2535,7 +2555,7 @@ function ChangeCard({
       .join('\n')
     : `${diff.before ?? ''}\n---\n${diff.after ?? ''}`;
   return (
-    <section className="step" data-change={tool.tool_call_id} aria-expanded={open}>
+    <section className="step" data-change={tool.tool_call_id}>
       <button
         type="button"
         className="step-head"
@@ -2627,6 +2647,23 @@ function termLineClass(line: string): string {
  *
  *  默认展开规则来自效果图：**失败/中断/进行中的默认展开**（要看的就是它），
  *  成功的默认折叠（卡头已经给出 `exit · 耗时 · seq`，信息不丢）。 */
+/** 秒级已运行时长。**只在 running 卡里挂载**——`useTickingNow(1000)` 是每秒一次
+ *  的重渲染，挂在每张卡上等于给整面命令历史（可能上百条）各开一个 1s 定时器，
+ *  而终态卡的时长是定值（`formatDuration` 已经算过），根本不需要 tick。
+ *
+ *  格式化口径：<60s 用工具级精度（`X.Xs`），更长用粗粒度（`M分S秒`）——一次
+ *  `pytest` 跑 3 分钟时 `180.4s` 读起来没有意义；时钟倒挂（负值）两个格式化都
+ *  返回空串，于是不画数字（与 `formatDuration` 同一口径）。 */
+function LiveElapsed({ startedAt }: { startedAt?: string }) {
+  const now = useTickingNow(1000);
+  const started = startedAt ? new Date(startedAt).getTime() : NaN;
+  const elapsedMs = Number.isFinite(started) ? now - started : NaN;
+  const text = Number.isFinite(elapsedMs) && elapsedMs >= 0
+    ? (elapsedMs < 60_000 ? formatShortDuration(elapsedMs) : formatCoarseDuration(elapsedMs) ?? '')
+    : '';
+  return text !== '' ? <span className="mono">{text}</span> : null;
+}
+
 function TermCard({
   tool, selected, onFocusTool,
 }: {
@@ -2636,9 +2673,6 @@ function TermCard({
 }) {
   const running = tool.status === 'running';
   const [open, setOpen] = useState(tool.status !== 'success');
-  /* 秒级 ticker 只在**这张卡**里跑（规格 03 §7.1 ticker 隔离）：已运行时长是真的
-     时钟差，不是效果图里那个每 2.4s 自增的演示计数器。 */
-  const now = useTickingNow(1000);
   const result = commandResult(tool);
   const command = String(tool.args.command ?? '');
   const seq = toolSeq(tool);
@@ -2652,19 +2686,12 @@ function TermCard({
   const ico = tool.status === 'failed' ? 'fail' : running || tool.status === 'stopped' ? 'warn' : 'ok';
   const word = tool.status === 'failed' ? 'fail' : running ? 'live' : tool.status === 'stopped' ? 'stop' : 'ok';
   const wordClass = tool.status === 'failed' ? 'del' : tool.status === 'stopped' ? 'warn' : 'add';
-  /* 已运行时长：<60s 用工具级精度（`X.Xs`），更长用粗粒度（`M分S秒`）——一次
-     `pytest` 跑 3 分钟时 `180.4s` 读起来没有意义；时钟倒挂（负值）两个格式化都
-     返回空串，于是不画数字（与 `formatDuration` 同一口径）。 */
-  const elapsedMs = running && tool.started_at ? now - new Date(tool.started_at).getTime() : NaN;
-  const elapsed = Number.isFinite(elapsedMs) && elapsedMs >= 0
-    ? (elapsedMs < 60_000 ? formatShortDuration(elapsedMs) : formatCoarseDuration(elapsedMs) ?? '')
-    : '';
   /* 展示截断先做（`truncateForDisplay` 是渲染层防御，投影仍是全量真相），
      再切行——20k 字符的 split 只做一次，不在 map 里重复。 */
   const lines = `${stdout}${stderr !== '' ? `${stdout !== '' ? '\n' : ''}${stderr}` : ''}`;
   const shown = lines === '' ? null : truncateForDisplay(lines).split('\n');
   return (
-    <section className="step term" data-term={tool.tool_call_id} aria-expanded={open}>
+    <section className="step term" data-term={tool.tool_call_id}>
       <button
         type="button"
         className={`step-head${selected ? ' sel' : ''}`}
@@ -2716,7 +2743,7 @@ function TermCard({
                 <>
                   <span className="term-live-dot" aria-hidden="true" />
                   <span>跟随中 · 已运行</span>
-                  {elapsed !== '' && <span className="mono">{elapsed}</span>}
+                  <LiveElapsed startedAt={tool.started_at} />
                 </>
               ) : (
                 <>

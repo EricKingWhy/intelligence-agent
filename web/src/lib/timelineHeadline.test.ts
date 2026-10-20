@@ -86,6 +86,45 @@ describe('timelineHeadline（T-8 人话标题）', () => {
       .toBe('工具返回 · 完成');
   });
 
+  it('TOOL_RESULT：纯文本内容不表达失败——成功的纯文本输出仍是「完成」', () => {
+    /* 回归：`failureReason` 曾把任何非 `{ok:false}` 的内容当失败原因，于是每条
+       `ls` / `cat` 的纯文本结果都显示成「失败：<stdout 首行>」。 */
+    const plain = timelineHeadline(
+      ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content: 'a.py\nb.py' }),
+      call('bash', { command: 'ls' }),
+    );
+    expect(plain.title).toBe('跑 ls · 完成');
+    // JSON 标量同理（`"text"` / `42` / `null` 都不是失败信封）。
+    for (const scalar of ['"text"', '42', 'null', '[]']) {
+      expect(timelineHeadline(
+        ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content: scalar }),
+        call('read', { path: 'a/b.py' }),
+      ).title).toBe('读 b.py · 完成');
+    }
+  });
+
+  it('TOOL_RESULT：真失败但信封无 ok 时，按 call 状态取首行兜底', () => {
+    const failed = timelineHeadline(
+      ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content: 'Traceback: boom\n  at x' }),
+      { ...call('bash', { command: 'pytest' }), status: 'failed' },
+    );
+    expect(failed.title).toBe('跑 pytest · 失败：Traceback: boom');
+  });
+
+  it('TOOL_RESULT：命令失败时标题带真实退出码（与 stderr 首行并列）', () => {
+    const failed = timelineHeadline(
+      ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content: '{"ok":false,"message":"2 failed"}' }),
+      { ...call('bash', { command: 'pytest tests/api' }), status: 'failed', result: { exit_code: 2 } },
+    );
+    expect(failed.title).toBe('跑 pytest tests/api · 失败：exit 2 · 2 failed');
+    // 只有退出码时不留空分隔符。
+    const codeOnly = timelineHeadline(
+      ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content: '{"ok":false}' }),
+      { ...call('bash', { command: 'false' }), status: 'failed', result: { exit_code: 1 } },
+    );
+    expect(codeOnly.title).toBe('跑 false · 失败：exit 1 · 无错误详情');
+  });
+
   it('model/completed：标题 + 真实 token 副行；无 usage 时 note 为 null（不占位）', () => {
     const withUsage = timelineHeadline(ev(EventType.MODEL_COMPLETED, {
       model: 'deepseek-v4', usage: { prompt_tokens: 8420, completion_tokens: 1420 },

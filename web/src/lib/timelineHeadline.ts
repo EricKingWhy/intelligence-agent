@@ -97,25 +97,39 @@ function toolCallTitle(name: string, args: Record<string, unknown>): string {
   return scalar ? `${name} · ${firstLine(String(scalar[1]), 36)}` : name;
 }
 
-/** TOOL_RESULT 的失败原因：优先后端 `error_code`，其次 `message`，再次首行内容。
- *  返回 null = 内容不表达失败（`ok !== false`）。 */
+/** TOOL_RESULT 的失败原因：优先后端 `error_code`，其次 `message`，再次 `exit_code`。
+ *  返回 null = **内容本身不表达失败**。
+ *
+ *  ⚠ 判据只有一条：信封里 `ok === false`。裸文本、JSON 标量（数字/字符串/`null`）、
+ *  以及 `ok` 缺席的信封一律返回 null——"结果里有文字"不等于"结果失败了"，把首行
+ *  文本当失败原因会让每条成功的纯文本输出都显示成「失败：<stdout 首行>」。真失败
+ *  但信封没有 `ok` 时，调用方按 `call.status === 'failed'` 取内容首行兜底。 */
 function failureReason(content: unknown): string | null {
   if (typeof content !== 'string') return null;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    if (parsed && typeof parsed === 'object') {
-      if (parsed.ok !== false) return null;
-      const code = typeof parsed.error_code === 'string' ? parsed.error_code : null;
-      const message = typeof parsed.message === 'string' ? parsed.message : null;
-      if (code && message) return `${code} · ${firstLine(message, 28)}`;
-      if (code) return code;
-      if (message) return firstLine(message, 36);
-      return '无错误详情';
-    }
+    parsed = JSON.parse(content);
   } catch {
-    // 非 JSON：按纯文本取首行。
+    return null;
   }
-  return firstLine(content, 36);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const envelope = parsed as Record<string, unknown>;
+  if (envelope.ok !== false) return null;
+  const code = typeof envelope.error_code === 'string' ? envelope.error_code : null;
+  const message = typeof envelope.message === 'string' ? envelope.message : null;
+  if (code && message) return `${code} · ${firstLine(message, 28)}`;
+  if (code) return code;
+  if (message) return firstLine(message, 36);
+  return '无错误详情';
+}
+
+/** 命令的退出码（`tool.result.exit_code`）：bash 失败时标题优先用它——`exit 2` 比
+ *  「失败：<stderr 首行>」更能定位问题，两者都在时并列。 */
+function resultExitCode(call: ToolCall | null | undefined): number | null {
+  const result = call?.result;
+  if (typeof result !== 'object' || result === null) return null;
+  const code = (result as Record<string, unknown>).exit_code;
+  return typeof code === 'number' && Number.isFinite(code) ? code : null;
 }
 
 export interface TimelineHeadline {
@@ -143,8 +157,16 @@ export function timelineHeadline(event: AgentEvent, call?: ToolCall | null): Tim
       const base = callName ? toolCallTitle(callName, callArgs) : '工具返回';
       const reason = failureReason(data.content);
       if (reason !== null || call?.status === 'failed') {
+        const exitCode = resultExitCode(call);
         const detail = reason ?? (typeof data.content === 'string' ? firstLine(data.content, 36) : '');
-        return { title: detail ? `${base} · 失败：${detail}` : `${base} · 失败`, note: null };
+        /* 退出码优先：`exit 2` 是后端给的确切事实，比 stderr 首行更可定位。
+           两者都有时并列（`exit 2 · <首行>`），不丢信息。 */
+        const parts = [
+          exitCode !== null ? `exit ${exitCode}` : null,
+          detail || null,
+        ].filter((part): part is string => Boolean(part));
+        const tail = parts.length > 0 ? `：${parts.join(' · ')}` : '';
+        return { title: `${base} · 失败${tail}`, note: null };
       }
       if (call?.status === 'stopped') return { title: `${base} · 已中断`, note: null };
       return { title: `${base} · 完成`, note: null };

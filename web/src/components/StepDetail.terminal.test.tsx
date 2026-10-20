@@ -52,6 +52,8 @@ const render = (tools: ToolCall[]) =>
   act(() => root!.render(<TerminalTab tools={tools} onFocusTool={noop} />));
 const cards = () => Array.from(container!.querySelectorAll<HTMLElement>('.term'));
 const card = (i: number) => cards()[i];
+/** 卡头按钮（`aria-expanded` 的唯一载体）。 */
+const headOf = (i: number) => card(i)!.querySelector<HTMLElement>('.step-head')!;
 
 describe('#1419 Terminal M-1 段头', () => {
   it('标签 + `N 条 · M 失败` + bash 胶囊，计数来自 status', () => {
@@ -104,18 +106,19 @@ describe('#1419 Terminal M-2 命令卡头', () => {
       bash({ id: 'bad', seq: 2, status: 'failed' }),
       bash({ id: 'run', seq: 3, status: 'running', completed_at: undefined, result: undefined }),
     ]);
-    expect(card(0)!.getAttribute('aria-expanded')).toBe('false');
-    expect(card(1)!.getAttribute('aria-expanded')).toBe('true');
-    expect(card(2)!.getAttribute('aria-expanded')).toBe('true');
+    /* `aria-expanded` 挂在**卡头按钮**上（`<section>` 不是控件，带这个属性无意义）。 */
+    expect(headOf(0).getAttribute('aria-expanded')).toBe('false');
+    expect(headOf(1).getAttribute('aria-expanded')).toBe('true');
+    expect(headOf(2).getAttribute('aria-expanded')).toBe('true');
   });
 
   it('点卡头能开合（折叠体不卸载，与效果图同一套 grid-rows 动画）', () => {
     render([bash({ id: 'ok', seq: 1 })]);
-    const head = card(0)!.querySelector<HTMLElement>('.step-head')!;
+    const head = headOf(0);
     act(() => head.click());
-    expect(card(0)!.getAttribute('aria-expanded')).toBe('true');
+    expect(head.getAttribute('aria-expanded')).toBe('true');
     act(() => head.click());
-    expect(card(0)!.getAttribute('aria-expanded')).toBe('false');
+    expect(head.getAttribute('aria-expanded')).toBe('false');
   });
 });
 

@@ -6448,10 +6448,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--fx-bar-fail);
   box-shadow: inset 0 1px 0 var(--fx-bar-sheen), 0 0 0 1px var(--fx-danger-line);
 }
-/* 运行中：琥珀实色 + 115° 斜纹以 `barStripe 1.2s linear infinite` 流动。 */
+/* 运行中：琥珀实色 + 115° 斜纹以 `barStripe 1.2s linear infinite` 流动。
+ *
+ * 斜纹强度按效果图 `.fc-bar.bar-run::after{opacity:.4}` 折算：条纹色 = sheen 与
+ * 琥珀底的 40% 混色（`color-mix` 与"40% 覆盖层压在同一底色上"等价，且不用为
+ * 它多开一层伪元素——`.tl-track` 的 ::before/::after 已经被中线与条本体占满）。
+ * 位移与条纹周期同值（9px / 1.2s = 一个周期一拍），与 `translateX(0→9px)` 同速。 */
 .tl-track[data-state='run']::after {
   background:
-    repeating-linear-gradient(115deg, transparent 0 5px, var(--fx-bar-sheen) 5px 9px),
+    repeating-linear-gradient(
+      115deg,
+      transparent 0 5px,
+      color-mix(in srgb, var(--fx-bar-sheen) 40%, var(--fx-bar-warn)) 5px 9px
+    ),
     var(--fx-bar-warn);
   box-shadow: inset 0 1px 0 var(--fx-bar-sheen), 0 0 0 1px var(--fx-warn-line);
   animation: barStripe 1.2s linear infinite;
@@ -6747,7 +6756,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     background-position: 0 0;
   }
   to {
-    background-position: 18px 0;
+    background-position: 9px 0;
   }
 }
 @keyframes fadeIn {
