@@ -36,6 +36,16 @@ export const CENTER_MIN_W = 360;
 export const PEEK_TAP_MS = 250;
 
 /**
+ * 键盘连按调整面板宽时，`available` 的复用窗口（ms）。
+ *
+ * 拖动路径在 pointerdown 时测一次；键盘没有"按下"这个锚点，只能按**连按序列**
+ * 近似：窗口内复用同一个 `available`，超过窗口或视口宽度变了才重测。理由见
+ * `StepDetail.onResizeKeyDown`——过渡期间栅格三轨各自插值，「中心列 + 面板」的
+ * 和值会漂 ±13px，逐次现读会让夹取上限随按键时机抖动。
+ */
+export const KEY_RESIZE_BURST_MS = 400;
+
+/**
  * 把目标宽度夹进 `[INSPECTOR_MIN_W, INSPECTOR_MAX_W]`，并保证中心列仍留
  * `CENTER_MIN_W`。
  *

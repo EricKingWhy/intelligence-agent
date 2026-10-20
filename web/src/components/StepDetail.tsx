@@ -31,7 +31,7 @@ import { permissionView } from '../lib/permission';
 import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
 import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
-  PEEK_TAP_MS, clampInspectorWidth, escAction, eventKey, nextSelectionIndex, toolKey,
+  KEY_RESIZE_BURST_MS, PEEK_TAP_MS, clampInspectorWidth, escAction, eventKey, nextSelectionIndex, toolKey,
 } from '../lib/inspectorPanel';
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import {
@@ -225,6 +225,8 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   const spaceHoldTimer = useRef<number | null>(null);
   const spaceHeldLong = useRef(false);
   const dragRef = useRef<{ startX: number; startW: number; available: number } | null>(null);
+  /** 键盘连按序列的 `available` 缓存（见 `onResizeKeyDown`）。 */
+  const keyResizeRef = useRef<{ available: number; at: number; viewport: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   /* #1419：筛选与展开是**面板级**视图状态（不是 TimelineTab 内部状态）——
    * Enter/Esc 在面板根捕获，面板关闭要清空；会话切换按 sessionId 分槽
@@ -574,8 +576,21 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     e.stopPropagation(); // 与清单 ↑/↓ 分开：这里左右调宽度
+    /* `available` = 中心列 + 面板，是拖宽期间的不变量——但**只在过渡结束后**成立：
+     * 栅格 `grid-template-columns` 的三条轨道各自插值，连按方向键时逐次现读
+     * `clientWidth` 会读到插值中途的值（实测同一棵树连按 7 次，和值在 1019–1033
+     * 之间漂移 ±13px），夹取上限于是随按键时机抖动，最坏把中心列压到
+     * `CENTER_MIN_W` 以下。指针路径靠 `dragRef.available` 在按下时测一次；键盘
+     * 这里给同一条语义：**一次连按序列测一次**（400ms 无按键即视为新序列，
+     * 视口宽度变了立刻重测）。 */
+    const now = performance.now();
+    const cached = keyResizeRef.current;
+    const usable = cached !== null
+      && now - cached.at < KEY_RESIZE_BURST_MS
+      && cached.viewport === window.innerWidth;
     const workspace = panelRef.current?.parentElement?.querySelector<HTMLElement>('.app-workspace');
-    const available = (workspace?.clientWidth ?? 0) + panel.width;
+    const available = usable ? cached.available : (workspace?.clientWidth ?? 0) + panel.width;
+    keyResizeRef.current = { available, at: now, viewport: window.innerWidth };
     const next = panel.width + (e.key === 'ArrowRight' ? -step : step);
     onPanelAction({ type: 'resize', width: clampInspectorWidth(next, available) });
   };
