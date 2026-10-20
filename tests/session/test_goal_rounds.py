@@ -264,7 +264,7 @@ async def test_maybe_queue_requires_active_armed_and_danger_mode(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_maybe_queue_respects_workspace_write_and_round_limit(tmp_path: Path) -> None:
+async def test_maybe_queue_parks_on_workspace_write_and_respects_round_limit(tmp_path: Path) -> None:
     state, session = _start(tmp_path, permission_mode="workspace-write")
     service = session_service(state)
     append_goal_change(session, "create", objective=_GOOD)
@@ -383,6 +383,54 @@ async def test_no_progress_pauses_goal_and_disarms(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_goal_round_queued_before_edit_is_recycled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`message/queued` 与投递之间的窗口里改了目标 ⇒ 旧轮次不得投递。
+
+    只复核 ``phase is ACTIVE`` 不够：`edit`（或 `clear` + `create`）不改相位却换了
+    objective，旧提示词会带着上一版目标跑一轮，`round_started` 还记到新目标头上。
+    投递口按排队项自带的 `goal_id`/`revision` 判过期：回收旧项、按当前版本重排一轮。
+    """
+    state, session = _start(tmp_path)
+    service = session_service(state)
+    sid = session.session_id
+    append_goal_change(session, "create", objective=_GOOD)
+    service._goal_armed.add(sid)
+    await service._maybe_queue_goal_round(sid)
+    queued = [e for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED]
+    assert len(queued) == 1
+    assert queued[0].data["goal_id"] is not None and queued[0].data["revision"] == 1
+
+    new_objective = _GOOD.replace("把登录页修好", "把注册页修好")
+    assert (await service.set_goal(sid, "edit", objective=new_objective)).ok
+
+    # 投递本身（runtime 装配）不是本用例的作用面：钉住"送进 run 的是哪条文本"即可。
+    delivered: list[str] = []
+
+    async def _run_id() -> str:
+        return "run-1"
+
+    async def _fake_launch(*, task: str | None = None, **_kwargs):
+        delivered.append(task or "")
+        return SimpleNamespace(run=SimpleNamespace(wait_run_id=_run_id))
+
+    monkeypatch.setattr(service, "resume_and_launch", _fake_launch)
+
+    # 旧轮次在唯一投递口被回收；同一次投递尝试里按**当前**版本重排一轮。
+    await service.deliver_next_undelivered(session_id=sid)
+    events = state.store.read_events(sid)
+    assert [e.data["queue_id"] for e in events if e.type == QUEUE_CANCELLED] == [
+        queued[0].data["queue_id"]
+    ]
+    assert len(delivered) == 1
+    assert "把注册页修好" in delivered[0]
+    assert "把登录页修好" not in delivered[0]
+    goal = effective_goal(events)
+    assert goal.revision == 3 and goal.rounds_started == 1  # r1 → edit r2 → round_started r3
+
+
+@pytest.mark.asyncio
 async def test_pause_after_queue_cancels_the_pending_goal_round(tmp_path: Path) -> None:
     """P2-6 / AC2：`message/queued` 与投递之间的窗口——pause 后该轮必须被回收。
 
@@ -412,6 +460,43 @@ async def test_pause_after_queue_cancels_the_pending_goal_round(tmp_path: Path) 
     # pause 之后终态驱动不再入队新轮次。
     await service._maybe_queue_goal_round(sid)
     assert len([e for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED]) == 1
+
+
+@pytest.mark.asyncio
+async def test_goal_round_cancel_does_not_skip_queued_user_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回收 goal 轮次后必须重选队首：排在它后面的普通输入照常投递。"""
+    state, session = _start(tmp_path)
+    service = session_service(state)
+    sid = session.session_id
+    append_goal_change(session, "create", objective=_GOOD)
+    service._goal_armed.add(sid)
+    await service._maybe_queue_goal_round(sid)
+    goal_queue_id = next(
+        e.data["queue_id"] for e in state.store.read_events(sid) if e.type == MESSAGE_QUEUED
+    )
+    await service._queue_incoming_message(
+        session_id=sid, content="普通消息", revoke_fact_id=None, refutes_event_id=None,
+        protected_facts=None, remember_as_procedural_rule=False, user_input_metadata={},
+    )
+    assert (await service.set_goal(sid, "pause")).ok
+
+    delivered: list[str] = []
+
+    async def _run_id() -> str:
+        return "run-1"
+
+    async def _fake_launch(*, task: str | None = None, **_kwargs):
+        delivered.append(task or "")
+        return SimpleNamespace(run=SimpleNamespace(wait_run_id=_run_id))
+
+    monkeypatch.setattr(service, "resume_and_launch", _fake_launch)
+    await service.deliver_next_undelivered(session_id=sid)
+    assert delivered == ["普通消息"]
+    events = state.store.read_events(sid)
+    assert [e.data["queue_id"] for e in events if e.type == QUEUE_CANCELLED] == [goal_queue_id]
+    assert effective_goal(events).rounds_started == 0
 
 
 @pytest.mark.asyncio

@@ -269,7 +269,7 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     expect(c.reportError.mock.calls[0][0]).toContain('/goal edit <objective>');
   });
 
-  it('/goal 409（revision 冲突）→ reportError 带当前 revision 引导（AC3）', async () => {
+  it('/goal 409（revision 冲突）→ reportError 带当前 revision 与可执行的重试指引（AC3）', async () => {
     const mod = await import('./api');
     vi.mocked(mod.getGoalState).mockResolvedValue(snapshot());
     vi.mocked(mod.postGoalCommand).mockRejectedValue(
@@ -279,7 +279,9 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     await cmd('goal').run('edit 新目标', asCtx(c));
     const msg = c.reportError.mock.calls[0][0] as string;
     expect(msg).toContain('当前是 r3');
-    expect(msg).toContain('/goal 查看当前 revision');
+    // slash 界面没有传 expected_revision 的语法 ⇒ 文案不能教用户打一个传不了的字段。
+    expect(msg).toContain('重试即可');
+    expect(msg).not.toContain('再带 expected_revision 重试');
   });
 
   it('/goal edit 先读当前 revision 再带 expected_revision（AC3 的 UI 面）', async () => {
@@ -327,6 +329,19 @@ describe('#1195 命令执行层（run 语义，findings 修回）', () => {
     const c = makeCtx();
     await cmd('goal').run(undefined, asCtx(c));
     expect(c.prefillInput).not.toHaveBeenCalled();
+  });
+
+  it('AC6：create 路径同样进访谈（不只 show）', async () => {
+    const mod = await import('./api');
+    vi.mocked(mod.postGoalCommand).mockResolvedValue(
+      result({ objective: '## Objective\n投 20 份简历', needs_interview: true }),
+    );
+    const c = makeCtx();
+    await cmd('goal').run('## Objective\n投 20 份简历', asCtx(c));
+    const draft = c.prefillInput.mock.calls[0][0] as string;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Success criteria');
+    expect(draft).toContain('## Verification');
   });
 
   it('/goal 其他错误（422）原样上抛（Composer 统一呈现），不加引导', async () => {

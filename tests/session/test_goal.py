@@ -219,8 +219,50 @@ def test_bad_payload_is_skipped_last_wins(tmp_path) -> None:
     good_id = effective_goal(session.events).goal_id
     session.append(GOAL_CHANGED, {"operation": "edit", "revision": "many"})
     session.append(GOAL_CHANGED, "not-a-dict")  # type: ignore[arg-type]
+    # 轮次越界（99/2）也是坏载荷：写侧已挡住，但历史事件 / 外部写入仍可能带上。
+    base = effective_goal(session.events)
+    session.append(
+        GOAL_CHANGED,
+        {
+            "operation": "round_started",
+            "goal_id": base.goal_id,
+            "revision": base.revision + 1,
+            "objective": base.objective,
+            "phase": "active",
+            "max_goal_rounds": 2,
+            "rounds_started": 99,
+        },
+    )
     state = effective_goal(session.events)
     assert state.defined and state.goal_id == good_id
+    # 越界那条被跳过 ⇒ 投影仍是 create 那条（rounds_started 没被 99 顶掉）。
+    assert state.rounds_started == 0 and state.revision == 1
+
+
+def test_edit_rejects_max_rounds_below_rounds_started(tmp_path) -> None:
+    """写侧与读侧同口径：不得写出读侧会当坏载荷跳过的快照。"""
+    session = _session(tmp_path)
+    append_goal_change(session, "create", objective=_GOOD, max_goal_rounds=2)
+    base = effective_goal(session.events)
+    session.append(
+        GOAL_CHANGED,
+        {
+            "operation": "round_started",
+            "goal_id": base.goal_id,
+            "revision": base.revision + 1,
+            "objective": base.objective,
+            "phase": "active",
+            "max_goal_rounds": 2,
+            "rounds_started": 2,
+        },
+    )
+    before = len(session.events)
+    out = append_goal_change(session, "edit", objective=_GOOD, max_goal_rounds=1)
+    assert not out.ok and out.error_kind == "conflict"
+    assert "2" in out.reason  # 报出已开始轮次，用户才知道该填多少
+    assert len(session.events) == before
+    # 等于已开始轮次是合法的（轮次已用尽但快照仍可读）。
+    assert append_goal_change(session, "edit", objective=_GOOD, max_goal_rounds=2).ok
 
 
 def test_no_goal_projection_on_plain_session(tmp_path) -> None:

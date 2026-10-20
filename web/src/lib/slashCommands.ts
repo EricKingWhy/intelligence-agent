@@ -163,7 +163,9 @@ function goalConflictMessage(e: SessionError): string {
  *
  *  贴 omp `/guided-goal` 的追问思路但不做独立表单/命令：缺哪段就补哪段的空壳，
  *  用户在输入框里填完按 Enter 就是一次 `/goal edit`。只补两段**可测判据**
- *  （`needs_interview` 的判据），其余段落不代填——猜出来的目标比模糊的目标更坏。 */
+ *  （`needs_interview` 的判据），其余段落不代填——猜出来的目标比模糊的目标更坏。
+ *  ⚠ 下面两份标题是后端 `goal.py::_INTERVIEW_REQUIRED_SECTIONS` 的副本：判据
+ *  变了两边都要改（`needs_interview` 由后端算，这里只决定补哪段壳）。 */
 export function interviewDraft(objective: string): string {
   const missing = ['## Success criteria', '## Verification'].filter((s) => !objective.includes(s));
   const body = `${objective.trimEnd()}\n\n${missing.map((s) => `${s}\n`).join('\n')}`;

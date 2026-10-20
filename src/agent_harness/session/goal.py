@@ -183,6 +183,7 @@ def _decode_snapshot(data: object) -> GoalState | None:
         not isinstance(rounds_started, int)
         or isinstance(rounds_started, bool)
         or rounds_started < 0
+        or rounds_started > max_rounds  # 坏载荷（99/2）不得被当成合法快照
     ):
         return None
     if phase is GoalPhase.BLOCKED and not isinstance(blocked_reason, dict):
@@ -551,6 +552,13 @@ def append_goal_change(
         if error is not None:
             return _failure(current, "shape", error)
         assert text is not None and rounds is not None and phase is not None  # error 已返回
+        if rounds < current.rounds_started:
+            # 与 `_decode_snapshot` 的形状校验同一条口径：快照若写进
+            # rounds_started > max_goal_rounds，读侧会把它当坏载荷跳过（目标凭空消失）。
+            return _failure(
+                current, "conflict",
+                f"max_goal_rounds={rounds} 低于已开始轮次 {current.rounds_started}",
+            )
         next_objective = text
         next_max_rounds = rounds
         next_phase = phase

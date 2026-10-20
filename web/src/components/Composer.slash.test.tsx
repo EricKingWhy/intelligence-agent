@@ -530,6 +530,22 @@ describe('#1195 /goal 无参查看', () => {
     expect(draft).toContain('## Verification');
     expect(draft.split('## Success criteria').length - 1).toBe(1);
   });
+
+  /* 菜单点选路径会保留命令前的前缀（B-S-3 定位切除）：草稿整条替换会把那段前缀
+     吞掉 ⇒ 有残留必须明说。纯命令路径（框已清空）不该冒出这句噪音。 */
+  it('AC6：菜单点选且命令前有前缀 → 草稿覆盖后可见提示', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\n投 20 份简历', 'active', { needs_interview: true }),
+    );
+    await typeText('帮我 /go');
+    const item = container.querySelector('[data-slash-name="goal"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(textarea().value.startsWith('/goal edit ')).toBe(true);
+    expect(slashInfo()).toContain('原有内容已被替换');
+  });
 });
 
 describe('#1195 /permission /model 拉起现有 UI', () => {
@@ -718,7 +734,7 @@ describe('#1195 findings 修回 — 菜单与反馈面', () => {
     press('Enter');
     await act(async () => {});
     expect(slashError()).toContain('当前是 r2');
-    expect(slashError()).toContain('/goal 查看当前 revision');
+    expect(slashError()).toContain('重试即可');
   });
 
   it('无会话时带参命令给可见反馈且不清输入（A-P3-1）', async () => {
