@@ -95,6 +95,20 @@ def write_report(path, report):
     assert path.read_bytes() == data
 
 
+def extract_answer(text):
+    """Grade the final JSON answer, separately recording exact-format compliance."""
+    text = text.strip()
+    start = text.rfind('{')
+    try:
+        payload = json.loads(text[start:]) if start >= 0 else None
+    except ValueError as error:
+        raise ValueError('No final JSON answer') from error
+    if (not isinstance(payload, dict) or set(payload) != {'answer'}
+            or type(payload['answer']) not in (int, float)):
+        raise ValueError('Final answer must contain one numeric answer')
+    return payload['answer'], start == 0
+
+
 async def run_pair_member(index, mode, config, root):
     kind, task, expected = task_for(index)
     run_root = root / f'{index:02}-{mode}'
@@ -113,6 +127,7 @@ async def run_pair_member(index, mode, config, root):
     error = None
     result = None
     answer = None
+    format_ok = False
     file_ok = kind != 'write'
     try:
         await asyncio.to_thread(sandbox.ensure_started)
@@ -143,10 +158,7 @@ async def run_pair_member(index, mode, config, root):
             ),
         )
         result = await asyncio.wait_for(runtime.run(session, task), timeout=240)
-        final = result.final_text.strip()
-        if final.startswith('```'):
-            final = '\n'.join(final.splitlines()[1:-1])
-        answer = json.loads(final)['answer']
+        answer, format_ok = extract_answer(result.final_text)
         if kind == 'write':
             file_ok = (await asyncio.to_thread(sandbox.read_text, 'answer.txt')).strip() == str(expected)
     except Exception as exc:  # noqa: BLE001 -- preserve failed pair members in the report
@@ -159,6 +171,7 @@ async def run_pair_member(index, mode, config, root):
     row = {
         'task': index, 'kind': kind, 'mode': mode, 'prompt': task,
         'expected': expected, 'answer': answer, 'file_ok': file_ok,
+        'format_ok': format_ok, 'final_text': result.final_text if result is not None else None,
         'ok': result is not None and result.status == 'completed' and answer == expected and file_ok,
         'status': result.status if result is not None else 'error', 'error': error,
         'model_round_trips': sum(event.type == 'model/completed' for event in session.events),

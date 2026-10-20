@@ -60,3 +60,21 @@ async def test_discovered_mcp_tool_can_be_searched_activated_and_called():
         ])
         assert result[0].result.ok
         assert server.calls[0].name == 'lookup_17'
+
+
+@pytest.mark.asyncio
+async def test_discovery_is_available_in_read_only_plan_mode():
+    from agent_harness.session.workflow import WorkflowMode
+    from agent_harness.tooling.contract import PermissionPolicy
+    from tests.tooling.test_tool_exposure import _registry_with_deferred
+
+    registry = _registry_with_deferred()
+    controller = ToolExposureController(registry)
+    registry.register(ToolSearchTool(controller))
+    result, = await ToolExecutor(
+        registry, policy=PermissionPolicy.READ_ONLY, workflow_mode=WorkflowMode.PLAN,
+    ).execute_batch([
+        {'id': 'search', 'name': 'tool_search', 'args': {'query': 'weather'}},
+    ])
+    assert result.result.ok
+    assert controller.activated == frozenset({'weather_lookup'})

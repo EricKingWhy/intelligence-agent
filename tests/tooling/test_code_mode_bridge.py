@@ -169,3 +169,45 @@ async def test_nested_results_do_not_create_orphan_model_messages(tmp_path):
     session.append(TOOL_RESULT, {'tool_call_id': 'outer', 'content': 'small final'})
     messages = derive_messages(session.events)
     assert [message.tool_call_id for message in messages if isinstance(message, ToolMessage)] == ['outer']
+
+
+@pytest.mark.asyncio
+async def test_child_retains_resource_exclusion_against_other_executor(tmp_path):
+    import asyncio
+
+    from agent_harness.tooling.resource_locks import ResourceLockRegistry
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    observed = []
+
+    class LockedRead(_ProbeTool):
+        def resource_keys(self, args):
+            return ['shared-workspace-file']
+
+        async def execute(self, args):
+            observed.append(args.topic)
+            if args.topic == 'nested':
+                entered.set()
+                await release.wait()
+            return ToolResult.success(message='Read')
+
+    registry = ToolRegistry()
+    registry.register(LockedRead(name='read', description='Read'))
+    registry.register(_Composer(name='exec', description='Compose'))
+    locks = ResourceLockRegistry()
+    first = ToolExecutor(registry, resource_locks=locks)
+    second = ToolExecutor(registry, resource_locks=locks)
+    outer = asyncio.create_task(first.execute_batch([
+        {'id': 'outer', 'name': 'exec', 'args': {}},
+    ]))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    other = asyncio.create_task(second.execute_batch([
+        {'id': 'other', 'name': 'read', 'args': {'topic': 'other'}},
+    ]))
+    await asyncio.sleep(0)
+    assert observed == ['nested']
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(outer, other), timeout=1)
+    assert all(batch[0].result.ok for batch in results)
+    assert observed == ['nested', 'other']

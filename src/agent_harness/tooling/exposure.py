@@ -22,7 +22,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from agent_harness.tooling.contract import Tool, ToolExposure
+from agent_harness.tooling.contract import Tool, ToolExposure, ToolPermission
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ToolResult
 
@@ -59,6 +59,12 @@ class ToolExposureController:
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
         self._activated: set[str] = set()
+
+    def is_deferred(self, name: str) -> bool:
+        return any(
+            tool.name == name and self._registry.resolve_exposure(tool) is ToolExposure.DEFERRED
+            for tool in self._registry.list()
+        )
 
     @property
     def activated(self) -> frozenset[str]:
@@ -115,6 +121,9 @@ class ToolSearchTool(Tool):
     就发现不了任何 deferred 工具。
     """
 
+    permission = ToolPermission.READ_ONLY
+    replay_safe = True
+
     def __init__(self, controller: ToolExposureController) -> None:
         self._controller = controller
 
@@ -124,13 +133,19 @@ class ToolSearchTool(Tool):
 
     @property
     def description(self) -> str:
+        code_hint = (
+            " For large-result filtering or many tool calls, search for exec before "
+            "retrieving the raw data; it can process intermediate results in code."
+            if self._controller.is_deferred("exec")
+            else ""
+        )
         return (
             "Search for additional tools that are not listed in the current tool "
             "menu. Use this when the task seems to need a capability you do not "
             "see among the available tools (for example a specific domain lookup). "
             "Provide keyword(s) describing the capability; matching tools are "
             "loaded and become callable in the next turn."
-        )
+        ) + code_hint
 
     @property
     def args_schema(self) -> type[BaseModel]:
