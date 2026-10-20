@@ -75,7 +75,6 @@ from agent_harness.context.project_instructions import (
     project_instruction_store,
     release_project_instruction_store,
 )
-from agent_harness.context.tokens import estimate_tokens
 from agent_harness.context.window import effective_context_window
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
@@ -179,7 +178,7 @@ from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.board import BoardBroadcaster
-from agent_harness.web.context_usage import build_context_usage_payload
+from agent_harness.web.context_usage import resolve_context_usage_payload
 from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
@@ -2657,6 +2656,14 @@ def create_app(
 
     register_delegation_routes(app, validate_session_id=validate_session_id)
 
+    # #1420 上下文洞察模块路由（独立 router 文件——只读数据面，token 真相源 = 事件流）。
+    # 开关关闭时**不注册**（直连 404）：模块缺席不得在 Core 上留下半个入口
+    # （不变量 #21）；capability manifest 同步下发 `insights` 标志供前端显隐。
+    if settings.insights_enabled:
+        from agent_harness.web.insights import register_insights_routes
+
+        register_insights_routes(app, validate_session_id=validate_session_id)
+
     # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
     # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
     from agent_harness.web.task_delivery import register_task_routes
@@ -3881,31 +3888,9 @@ def create_app(
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
 
-        # builder 快照 + 工具定义：优先在途 run；run 已终结 ⇒ 收口缓存；都没有
-        # ⇒ 交给 build_context_usage_payload 按事件流落 usage_only/no_data
-        # （不伪造，也不重建一个假 registry 来算工具桶）。两者必须同源取
-        # （同一个 runtime 的 builder + registry），分开取会得到两个真相。
-        builder_snapshot = None
-        tool_definitions: list[dict[str, Any]] = []
-        active = app.state.agent.run_manager.get_active(session_id)
-        if active is not None and active.runtime is not None:
-            builder = active.runtime._context_builder
-            if builder is not None:
-                builder_snapshot = builder.usage_snapshot(active.session)
-            tool_definitions = active.runtime.registry.export_model_definitions()
-        else:
-            cached = app.state.agent.context_snapshots.get(session_id)
-            if cached is not None:
-                builder_snapshot, tool_definitions = cached
-
-        payload = build_context_usage_payload(
-            settings=app.state.agent.settings,
-            builder_snapshot=builder_snapshot,
-            tool_definitions=tool_definitions,
-            estimate_tokens=estimate_tokens,
-            events=events,
-        )
-        return payload
+        # 快照来源优先级与洞察模块共用**同一个**解析入口（#1420）——分开各写一遍
+        # 会让同一时刻两个端点给出两个真相（对账验收直接红）。
+        return resolve_context_usage_payload(app.state.agent, session_id, events)
 
     @app.get("/api/sessions/{session_id}/context-settings")
     async def get_context_settings(session_id: str) -> ContextSettings:
