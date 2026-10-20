@@ -102,7 +102,7 @@ REPORT_DIR = Path(__file__).with_name("reports")
 
 
 def neutral_observation() -> dict[str, Any]:
-    """All 31 `_REQUIRED_OBSERVATION_FIELDS` with type-correct neutral values."""
+    """The 31 required fields plus the 6 conditionally-required probe/lifecycle ones."""
     return {
         "eligibility": False,
         "action": "NOOP",
@@ -210,12 +210,12 @@ class _GoldWorkspaceIndex:
         self._project_id = project_id
         self._session_ids = frozenset(session_ids)
 
-    def get(self, project_id: str):
+    def get(self, project_id: str) -> SimpleNamespace | None:
         return (
             SimpleNamespace(id=project_id) if project_id == self._project_id else None
         )
 
-    def workspace_of_session(self, session_id: str):
+    def workspace_of_session(self, session_id: str) -> SimpleNamespace | None:
         return (
             SimpleNamespace(id=self._project_id)
             if session_id in self._session_ids
@@ -1703,26 +1703,15 @@ async def _execute_wired(
 
 
 async def execute_case(case: GoldCase) -> Mapping[str, Any]:
-    """Run one gold case: real wiring for the wired families, neutral otherwise."""
-    wired = (
-        case.case_id in _SCRIPTS
-        or case.case_id in _NOOP_SCRIPTS
-        or case.case_id in _INELIGIBLE_SCRIPTS
-        or case.case_id in _SECRET_PIPELINE_CASES
-        or case.case_id in _SECRET_BOUNDARY_PATHS
-        or case.case_id in _ISOLATION_CASES
-        or case.case_id in _REPLAY_CASES
-    )
-    if not wired:
-        started = time.perf_counter()
-        with TemporaryDirectory(prefix=f"gold-{case.case_id}-") as tmp:
-            workspace = CaseWorkspace(Path(tmp))
-            workspace.markdown_dir.mkdir(parents=True, exist_ok=True)
-            observed = neutral_observation()
-            observed["latency_ms"] = int((time.perf_counter() - started) * 1000)
+    """Run one gold case through its real wiring.
+
+    Every case in the current corpus is wired; a corpus case with no wiring fails
+    loudly instead of reporting a neutral observation that might read as genuine.
+    """
+    if case.case_id not in _wired_case_ids():
         return {
-            "status": "executed",
-            "observed": observed,
+            "status": "failed",
+            "error_type": "UnwiredGoldCase",
             "trace_id": uuid.uuid4().hex,
             "model_attempts": [],
         }

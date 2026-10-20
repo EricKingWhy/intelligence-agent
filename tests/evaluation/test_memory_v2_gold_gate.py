@@ -8,6 +8,7 @@ recall path, mutation sensitivity, and the written report.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
@@ -27,6 +28,7 @@ from agent_harness.memory.v2 import (
     SourceType,
     TrustedMemoryIdentity,
 )
+from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
@@ -93,11 +95,9 @@ async def _run_gate(dataset_path: Path, *, report_path: Path | None = None):
 
 
 @pytest.fixture(scope="module")
-def gold_run():
+def gold_run(tmp_path_factory):
     """One full 27-case run; AC1, AC4 and AC3's control group share it."""
-    import asyncio
-
-    report_dir = Path(memory_v2_quality.__file__).with_name("reports")
+    report_dir = tmp_path_factory.mktemp("gold-reports")
     run_id = uuid.uuid4().hex
     report_path = report_dir / f"memory-v2-gold-{run_id}.json"
     with pytest.MonkeyPatch.context() as patch:
@@ -136,7 +136,12 @@ def test_gold_gate_passes_all_27_cases_with_ticket_denominators(gold_run):
 
 def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
     """AC2: seeds written through `MemoryTool` never reach `memory_v2_fts`; `create` does."""
-    import asyncio
+    async def fts_match_count(db_path: Path, term: str) -> int:
+        async with connect(db_path) as connection, connection.execute(
+            "SELECT count(*) AS n FROM memory_v2_fts WHERE memory_v2_fts MATCH ?",
+            (term,),
+        ) as cursor:
+            return (await cursor.fetchone())["n"]
 
     async def scenario():
         store = SqliteMemoryV2Store(tmp_path / "memory_v2.sqlite3")
@@ -153,9 +158,7 @@ def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
             content=f"The synthetic {term} prefers concise summaries.",
         ))
         assert result.ok is True
-        assert await store.keyword_search(
-            [term], trusted, scope=MemoryScope.USER_GLOBAL, limit=6,
-        ) == []
+        assert await fts_match_count(store.database_path, term) == 0
 
         record = await service.create(MemoryDraftV2(
             kind=MemoryKind.SEMANTIC,
@@ -170,6 +173,7 @@ def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
             source_session_id="gold-seed-session", source_event_ids=["gold-seed-event"],
             evidence=[EvidenceItem(role="user", excerpt=f"{term} fact", hash="0" * 64)],
         ), trusted)
+        assert await fts_match_count(store.database_path, term) > 0
         hits = await store.keyword_search(
             [term], trusted, scope=MemoryScope.USER_GLOBAL, limit=6,
         )
@@ -179,9 +183,10 @@ def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
     asyncio.run(scenario())
 
 
-def test_mutated_action_makes_noop_accuracy_block_the_run(tmp_path, monkeypatch):
+def test_mutated_action_makes_noop_accuracy_block_the_run(tmp_path, monkeypatch, gold_run):
     """AC3: flipping one expected action to NOOP turns the gate red on noop_accuracy."""
-    import asyncio
+    # Control group: the unmutated corpus must pass, in this test's own body.
+    assert gold_run[0]["status"] == "passed", gold_run[0]["failures"]
 
     corpus, _ = load_memory_gold(DEFAULT_GOLD_PATH)
     mutated = copy.deepcopy(corpus)
@@ -231,8 +236,6 @@ def test_gate_writes_the_report_without_a_pass_rate_field(gold_run):
 
 def test_collapsing_executor_cannot_look_green(tmp_path, monkeypatch):
     """Anti-collapse: an executor that lies (all ADD, written=99, 3 secret writes) fails."""
-    import asyncio
-
     async def collapse(_case):
         observed = neutral_observation()
         observed.update({
