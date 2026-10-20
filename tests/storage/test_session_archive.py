@@ -30,15 +30,16 @@ from pydantic import BaseModel
 from agent_harness.agent import AgentRuntime
 from agent_harness.session import Session
 from agent_harness.session.event import SessionEvent
+from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.session_archive import (
     FTS_TOOL_CONTENT_PREFIX_CHARS,
     MAX_FTS5_QUERY_CHARS,
     SessionArchive,
     SessionArchiveObserver,
-    SessionArchiveWriter,
+    _sanitize_fts5_query,
+    install_session_archive,
 )
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
-from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -345,14 +346,19 @@ def _runtime(scripted: ScriptedModel) -> AgentRuntime:
     )
 
 
+def _archived_session(tmp_path: Path, archive: SessionArchive) -> Session:
+    """生产写路径：`Session → JsonlSessionStore.append_event → 观察者 → 归档库`。"""
+    store = JsonlSessionStore(root=tmp_path)
+    install_session_archive(
+        store, archive.db_path, cjk_so_path=archive.cjk_so_path,
+    )
+    return Session.start(store)
+
+
 def _run_with_archive(
     tmp_path: Path, archive: SessionArchive, scripted: ScriptedModel,
-    *, source: str = "interactive",
 ) -> tuple[Session, object]:
-    session = make_session(tmp_path)
-    archive.ensure_session(session.session_id, source=source, started_at=time.time())
-    writer = SessionArchiveWriter(archive, session.session_id)
-    writer.attach(session)
+    session = _archived_session(tmp_path, archive)
     runtime = _runtime(scripted)
     result = _run(runtime, session)
     return session, result
@@ -397,10 +403,7 @@ class TestThreeRoundConversation:
         self, tmp_path: Path, archive: SessionArchive,
     ) -> None:
         scripted = ScriptedModel([AIMessage(content="流式终态"), AIMessage(content="再一轮")])
-        session = make_session(tmp_path)
-        archive.ensure_session(session.session_id, source="interactive", started_at=time.time())
-        writer = SessionArchiveWriter(archive, session.session_id)
-        writer.attach(session)
+        session = _archived_session(tmp_path, archive)
         runtime = _runtime(scripted)
         import asyncio
 
@@ -486,10 +489,33 @@ class TestSessionSearchShapes:
         out = archive.session_search(query="部署", after="7d")
         assert [r["session_id"] for r in out["results"]] == ["new"]
 
-    def test_cjk_query_routes_to_cjk_index(self, archive: SessionArchive) -> None:
+    def test_cjk_query_routes_to_cjk_index(
+        self, archive: SessionArchive, cjk_so: Path,
+    ) -> None:
         archive.ensure_session("zh", source="interactive", started_at=time.time())
         archive.append_message("zh", "user", "修改服务器配置后重启", timestamp=time.time())
+        assert archive.cjk_available is True, "fixture 已编出 .so，CJK 索引必须可用"
+        # 直查 CJK 索引：证明该词真的进了 messages_fts_cjk，而不是降级路径命中。
+        conn = _raw_cjk(archive.db_path, cjk_so)
+        try:
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_cjk WHERE messages_fts_cjk MATCH ?",
+                ('"服务"',),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert hits == 1, "2 字 CJK 词必须由 cjk_unicode61 索引命中"
+        # 路由：首个 MATCH 表必须是 CJK 索引（证明走的是 CJK 路径而非降级路径）。
+        tried: list[str] = []
+        original = archive._match_rows
+
+        def spy(table: str, *args, **kwargs):
+            tried.append(table)
+            return original(table, *args, **kwargs)
+
+        archive._match_rows = spy  # type: ignore[method-assign]
         assert archive.search_messages("服务", limit=5), "2 字 CJK 词必须能命中（cjk_unicode61 大二元）"
+        assert tried == ["messages_fts_cjk"], tried
 
     def test_discovery_lineage_root_field(self, archive: SessionArchive) -> None:
         """F12：lineage root 写进 `lineage_root`，不是误导性的 `parent_session_id`。"""
@@ -510,8 +536,10 @@ class TestSessionSearchShapes:
     def test_query_input_is_capped(self, archive: SessionArchive) -> None:
         archive.ensure_session("cap", source="interactive", started_at=time.time())
         archive.append_message("cap", "user", "x" * (MAX_FTS5_QUERY_CHARS + 500), timestamp=time.time())
-        # 超长输入不得抛异常，且被截断处理
-        archive.search_messages("x" * (MAX_FTS5_QUERY_CHARS + 500), limit=5)
+        # 超长输入不得抛异常，且被截断到上限
+        oversized = "x" * (MAX_FTS5_QUERY_CHARS + 500)
+        assert len(_sanitize_fts5_query(oversized)) <= MAX_FTS5_QUERY_CHARS
+        archive.search_messages(oversized, limit=5)
 
 
 # ------------------------------------------------------------------- AC4 ---
@@ -559,17 +587,23 @@ class TestToolContentPrefix:
 
 class TestConcurrencyAndCrash:
     def test_concurrent_writers_lose_nothing(self, archive: SessionArchive) -> None:
+        """AC5：`messages.id` 自增序 == 写入提交序（记录与 append 同处一个临界区）。"""
         archive.ensure_session("c", source="interactive", started_at=time.time())
         threads = 8
         per_thread = 25
         errors: list[BaseException] = []
+        # 一把锁把 append 与「记录返回值」包成原子段：记录顺序即提交顺序。
+        commit_lock = threading.Lock()
+        committed: list[int] = []
 
         def worker(n: int) -> None:
             try:
                 for i in range(per_thread):
-                    archive.append_message(
-                        "c", "user", f"thread-{n}-msg-{i}", timestamp=time.time(),
-                    )
+                    with commit_lock:
+                        message_id = archive.append_message(
+                            "c", "user", f"thread-{n}-msg-{i}", timestamp=time.time(),
+                        )
+                        committed.append(message_id)
             except BaseException as exc:  # noqa: BLE001 - 测试要收集全部失败
                 errors.append(exc)
 
@@ -581,8 +615,10 @@ class TestConcurrencyAndCrash:
         assert not errors
         rows = archive.get_messages("c")
         assert len(rows) == threads * per_thread
-        assert [r["id"] for r in rows] == sorted(r["id"] for r in rows)
+        table_ids = [r["id"] for r in rows]  # `ORDER BY id`
         assert len({r["content"] for r in rows}) == threads * per_thread
+        assert committed == sorted(committed), "提交序必须与自增 id 序一致"
+        assert committed == table_ids, "记录到的提交序必须与表内 id 序逐个相等"
 
     def test_kill_9_leaves_openable_consistent_db(
         self, tmp_path: Path, cjk_so: Path,
@@ -647,44 +683,61 @@ class TestEventStreamUntouched:
     def _payload(self, events) -> list[tuple[str, tuple[str, ...]]]:
         return [(e.type, tuple(sorted(e.data))) for e in events]
 
-    def test_writer_does_not_change_event_payloads(
+    def test_observer_does_not_change_event_payloads(
         self, tmp_path: Path, archive: SessionArchive,
     ) -> None:
-        scripted = ScriptedModel([
-            AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "echo", "args": {"text": "相同载荷"},
-                    "id": "call_arc_2", "type": "tool_call",
-                }],
-            ),
-            AIMessage(content="完成"),
-        ])
-        plain = make_session(tmp_path / "plain")
-        _run(_runtime(scripted), plain)
+        """不变量 #22：挂归档观察者前后，落盘事件的类型与 `data` 键逐条相同。"""
+        def scripted() -> ScriptedModel:
+            return ScriptedModel([
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "echo", "args": {"text": "相同载荷"},
+                        "id": "call_arc_2", "type": "tool_call",
+                    }],
+                ),
+                AIMessage(content="完成"),
+            ])
 
-        scripted2 = ScriptedModel([
-            AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "echo", "args": {"text": "相同载荷"},
-                    "id": "call_arc_2", "type": "tool_call",
-                }],
-            ),
-            AIMessage(content="完成"),
-        ])
-        archived = make_session(tmp_path / "archived")
-        archive.ensure_session(archived.session_id, source="interactive", started_at=time.time())
-        SessionArchiveWriter(archive, archived.session_id).attach(archived)
-        _run(_runtime(scripted2), archived)
+        plain = Session.start(JsonlSessionStore(root=tmp_path / "plain"))
+        _run(_runtime(scripted()), plain)
+
+        archived = _archived_session(tmp_path / "archived", archive)
+        _run(_runtime(scripted()), archived)
 
         assert self._payload(plain.events) == self._payload(archived.events)
-        # 归档写者不往事件流塞自己的事件类型
+        # 归档观察者不往事件流塞自己的事件类型
         assert {e.type for e in archived.events} == {e.type for e in plain.events}
 
-    def test_no_large_content_added_to_event_types(self, archive: SessionArchive) -> None:
-        """归档库存在与否，事件类型集合不变（不变量 #22：派生索引不是 Session 真相）。"""
-        assert archive is not None
+    def test_no_large_content_added_to_event_types(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        """`append_event` 的返回值在有无观察者时 `data` 键集合逐个相同（不变量 #22）。"""
+        from agent_harness.session.event import (
+            MODEL_COMPLETED,
+            TOOL_RESULT,
+            USER_MESSAGE,
+        )
+
+        sequence = [
+            (USER_MESSAGE, {"content": "问题"}),
+            (MODEL_COMPLETED, {"content": "回答", "tool_calls": None}),
+            (TOOL_RESULT, {"tool_call_id": "c1", "content": "大载荷" * 100}),
+        ]
+
+        def feed(store: JsonlSessionStore, sid: str) -> list[tuple[str, tuple[str, ...]]]:
+            seen: list[tuple[str, tuple[str, ...]]] = []
+            for seq, (event_type, data) in enumerate(sequence):
+                event = store.append_event(
+                    sid, SessionEvent(type=event_type, session_id=sid, seq=seq, data=data),
+                )
+                seen.append((event.type, tuple(sorted(event.data))))
+            return seen
+
+        plain_store = JsonlSessionStore(root=tmp_path / "plain")
+        archived_store = JsonlSessionStore(root=tmp_path / "archived")
+        SessionArchiveObserver(archive).attach(archived_store)
+        assert feed(plain_store, "sid-plain") == feed(archived_store, "sid-archived")
 
 
 # ------------------------------------------------------- 产品接线（#1389 6) ---

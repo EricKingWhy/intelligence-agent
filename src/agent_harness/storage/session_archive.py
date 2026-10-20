@@ -42,10 +42,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from agent_harness.session import Session
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -1497,65 +1494,6 @@ class SessionArchive:
             "model": meta.get("model"),
             "title": meta.get("title"),
         }
-
-
-# ----------------------------------------------------------------- writer ---
-
-
-class SessionArchiveWriter:
-    """把 Session 落盘后的**终态消息**写进归档库（独立于事件流）。
-
-    挂在 `Session.add_listener`（事件落盘成功后回调），只认：
-
-    * `user/message` → role=user
-    * `model/completed` → role=assistant（`model/delta` 流式 chunk 一律不归档）
-    * `tool/result` → role=tool（content 是 ToolResult 的 JSON 全文）
-
-    失败只记 warning，绝不破坏 append 契约。
-    """
-
-    _ARCHIVED_EVENTS = frozenset({"user/message", "model/completed", "tool/result"})
-
-    def __init__(self, archive: SessionArchive, session_id: str) -> None:
-        self.archive = archive
-        self.session_id = session_id
-        self._attached = False
-
-    def attach(self, session: Session) -> None:
-        if self._attached:
-            return
-        session.add_listener(self._on_event)
-        self._attached = True
-
-    def _on_event(self, event: Any) -> None:
-        if event.type not in self._ARCHIVED_EVENTS:
-            return
-        try:
-            self._archive_event(event)
-        except Exception:
-            logger.warning(
-                "会话归档写入失败（session=%s, event=%s）",
-                self.session_id, event.type, exc_info=True,
-            )
-
-    def _archive_event(self, event: Any) -> None:
-        data = event.data or {}
-        if event.type == "user/message":
-            self.archive.append_message(
-                self.session_id, "user", data.get("content"), timestamp=time.time(),
-            )
-        elif event.type == "model/completed":
-            tool_calls = data.get("tool_calls")
-            self.archive.append_message(
-                self.session_id, "assistant", data.get("content"),
-                tool_calls=json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                timestamp=time.time(),
-            )
-        elif event.type == "tool/result":
-            self.archive.append_message(
-                self.session_id, "tool", data.get("content"),
-                tool_call_id=data.get("tool_call_id"), timestamp=time.time(),
-            )
 
 
 # --------------------------------------------------------------- 产品接线 --
