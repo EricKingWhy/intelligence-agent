@@ -863,6 +863,53 @@ class TestStoreObserverWiring:
         assert (root / "state.db").exists()
         assert store.list_session_ids() == [sid]
 
+    def test_concurrent_first_access_builds_single_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1418 F-3：多个线程同时首访 `.archive` 只建一个实例、不抛。
+
+        首建 check-then-set 若在锁外，各线程会各建一个 `SessionArchive`
+        并各跑一次 `initialize()`，后写者覆盖前者（连接泄漏 + 重复维护）。
+        """
+        from agent_harness.storage import session_archive as module
+
+        observer = SessionArchiveObserver(
+            tmp_path / "sessions" / "state.db", auto_prune=False,
+        )
+        init_calls: list[SessionArchive] = []
+        real_initialize = module.SessionArchive.initialize
+
+        def slow_initialize(self: SessionArchive) -> None:
+            # 拉宽竞态窗口：没有锁时其它线程必然也通过 `_archive is None` 检查。
+            init_calls.append(self)
+            time.sleep(0.05)
+            real_initialize(self)
+
+        monkeypatch.setattr(module.SessionArchive, "initialize", slow_initialize)
+
+        results: list[SessionArchive] = []
+        errors: list[BaseException] = []
+        start = threading.Barrier(8)
+
+        def hit() -> None:
+            try:
+                start.wait()
+                results.append(observer.archive)
+            except BaseException as exc:  # noqa: BLE001 - 测试要看到任何异常
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(results) == 8
+        assert len(init_calls) == 1, "首建必须只跑一次 initialize()"
+        assert len({id(arc) for arc in results}) == 1, "所有线程必须拿到同一实例"
+        assert observer.archive is results[0]
+
 
 # ------------------------------------------- 修复轮 B：检索语义（Hermes 对齐） ---
 
@@ -1090,6 +1137,128 @@ class TestCurrentLineageExceptions:
         )
         out = archive.session_search(query="压缩归档关键词", current_session_id="cur-session")
         assert [r["session_id"] for r in out["results"]] == ["cur-session"]
+
+
+# ----------------------------------- #1418：end_session（首写获胜） --------
+
+class TestEndSession:
+    """#1418：`SessionArchive.end_session` 抄 Hermes 首写获胜语义。
+
+    来源: Hermes `hermes_state_sessions.py:483-490` @ `b324b1f7`
+    （`UPDATE ... WHERE id = ? AND ended_at IS NULL`）；与本仓
+    `_sweep_orphaned_sessions`（同为首写获胜）对齐。
+    """
+
+    def test_writes_ended_at_and_end_reason(self, archive: SessionArchive) -> None:
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        meta = archive.get_session("old")
+        assert meta is not None
+        assert meta["end_reason"] == "new_session"
+        assert meta["ended_at"] is not None
+
+    def test_first_write_wins(self, archive: SessionArchive) -> None:
+        """已有 ended_at 时不得覆写——Hermes 原语义（其侧如压缩结束）。
+
+        本仓当前没有写 `end_reason='compression'` 的生产方（压缩是消息级投影）；
+        本用例用裸 SQL 预置结束态，模拟「已有首个写入方」。
+        """
+        archive.ensure_session("comp", source="interactive", started_at=time.time())
+        with _raw(archive.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+                (1_000.0, "compression", "comp"),
+            )
+            conn.commit()
+        archive.end_session("comp", "new_session")
+        meta = archive.get_session("comp")
+        assert meta is not None
+        assert meta["end_reason"] == "compression", "首写获胜：压缩结束不得被 new_session 覆写"
+        assert meta["ended_at"] == 1_000.0
+
+    def test_repeated_calls_are_idempotent(self, archive: SessionArchive) -> None:
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        first = archive.get_session("old")
+        archive.end_session("old", "new_session")
+        assert archive.get_session("old") == first, "重复结束必须零副作用"
+
+    def test_missing_session_is_a_silent_noop(self, archive: SessionArchive) -> None:
+        """previous 不存在（或从未被观察者登记过）→ 命中 0 行，不抛。"""
+        archive.end_session("never-seen", "new_session")
+        assert archive.get_session("never-seen") is None
+
+    def test_end_reason_is_in_the_fresh_reset_vocabulary(self, archive: SessionArchive) -> None:
+        """AC3 ①：落列值 == `new_session`，且该值在谓词词表里（不许自造线值）。"""
+        from agent_harness.storage.session_archive import _FRESH_RESET_END_REASONS
+
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        meta = archive.get_session("old")
+        assert meta is not None
+        assert meta["end_reason"] == "new_session"
+        assert meta["end_reason"] in _FRESH_RESET_END_REASONS
+
+    def test_predicate_returns_truthy_after_end(self, archive: SessionArchive) -> None:
+        """AC3 ②：谓词级激活（手工造同父链数据）。
+
+        诚实边界（P0-2 选 A）：生产 `/new` 的新旧会话不同 lineage，
+        `_discover` 的跨会话跳过在生产路径暂不触达；本用例只证明
+        「落值后谓词对该会话返回真值」这一层，不冒充端到端触达。
+        """
+        now = time.time()
+        archive.ensure_session("parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "child", source="interactive", started_at=now + 1,
+            parent_session_id="parent",
+        )
+        archive.append_message("parent", "user", "结束前关键词", timestamp=now)
+        assert archive._session_left_live_context("parent") is False, "结束前必须是假"
+
+        archive.end_session("parent", "new_session")
+
+        assert archive._session_left_live_context("parent") is True
+        # 同父链数据：谓词真值确实放行了 DISCOVERY 的同 lineage 命中。
+        out = archive.session_search(query="结束前关键词", current_session_id="child")
+        assert [r["session_id"] for r in out["results"]] == ["parent"]
+
+    def test_compressed_session_keeps_null_end_reason(self, archive: SessionArchive) -> None:
+        """AC4 回归：压缩后会话 end_reason 保持 NULL，DISCOVERY 行为不变。
+
+        压缩在本仓是**消息级**投影（`active=0, compacted=1`），不写会话行；
+        end_session 只由 /new 调用，压缩会话没被 /new 走过 ⇒ 保持 NULL。
+        """
+        now = time.time()
+        archive.ensure_session("comp-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "comp-child", source="interactive", started_at=now + 1,
+            parent_session_id="comp-parent",
+        )
+        # 另一条 lineage：让下面的比较有非空基线（否则 `after == before` 是空集自比）。
+        archive.ensure_session("other", source="interactive", started_at=now)
+        archive.append_message("comp-parent", "user", "压缩前关键词", timestamp=now)
+        archive.append_message("other", "user", "压缩前关键词", timestamp=now)
+        before = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert [r["session_id"] for r in before["results"]] == ["other"], (
+            "基线必须非空，且同 lineage 仍在 live context 的 comp-parent 被跳过"
+        )
+        # 压缩 = 消息级投影（`active=0, compacted=1`），不写会话行。
+        archive.append_message(
+            "comp-parent", "assistant", "压缩摘要关键词", timestamp=now,
+            active=0, compacted=1,
+        )
+        meta = archive.get_session("comp-parent")
+        assert meta is not None
+        assert meta["end_reason"] is None, "压缩不得写会话行 end_reason"
+        assert archive._session_left_live_context("comp-parent") is False
+
+        after = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert after == before, "压缩不得改变 DISCOVERY 行为"
+        # 压缩行本身按 `is_compacted_hit` 放行——证明确实走到了 DISCOVERY 的有结果分支。
+        compacted = archive.session_search(
+            query="压缩摘要关键词", current_session_id="comp-child",
+        )
+        assert [r["session_id"] for r in compacted["results"]] == ["comp-parent"]
 
 
 # ----------------------------------- 批次 D：auto-prune 90 天（Hermes 对齐） ---

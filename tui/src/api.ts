@@ -95,10 +95,17 @@ export class ApiClient {
    * /messages 投递（launch=true 与 task 组合的 SSE 响应对 TUI 无用，
    * 事件统一走 GET /stream 订阅消费）。
    */
-  createSession(): Promise<{ session_id?: string }> {
+  createSession(previousSessionId?: string): Promise<{ session_id?: string }> {
+    // #1418：只有 TUI `/new` 带 previous_session_id；服务端建新会话成功后
+    // 才结束前任（`end_reason="new_session"`）。其他入口（`--session new`、
+    // Web 空会话）不传，请求体逐字不变。
+    // 显式判空：`undefined` 与空串都视为「未提供」（空串不是合法 session id，
+    // 传上去只会让服务端静默跳过，没必要把它写进请求体）。
+    const provided = previousSessionId !== undefined && previousSessionId.length > 0;
+    const body = provided ? { previous_session_id: previousSessionId } : {};
     return this.request("/api/sessions?launch=false", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     });
   }
 

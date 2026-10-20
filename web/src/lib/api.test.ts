@@ -1462,6 +1462,8 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
     expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
     expect(cap.calls[0].body).not.toHaveProperty('task');
+    // #1418：只有 TUI `/new` 才带 previous_session_id；Web 空会话入口不结束任何会话。
+    expect(cap.calls[0].body).not.toHaveProperty('previous_session_id');
     expect(created).toEqual({ sessionId: 'sid-1' });
   });
 

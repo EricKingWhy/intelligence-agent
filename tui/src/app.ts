@@ -654,7 +654,8 @@ export class TuiApp {
           break;
         case "/new": {
           const task = args.join(" ").trim();
-          const created = await this.api.createSession();
+          // #1418：换会话 = 新会话建成功后结束前任（服务端同请求内完成）。
+          const created = await this.api.createSession(this.options.sessionId);
           const newId = created.session_id;
           if (typeof newId !== "string" || !newId) {
             this.appendNote("create failed: 服务端未返回 session_id");
