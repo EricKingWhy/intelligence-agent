@@ -5,6 +5,7 @@ import { eventKey } from './inspectorPanel';
 import {
   barGeometry,
   deriveEventTimings,
+  deriveTimelineEventKeys,
   eventMatchesFilter,
   filterCounts,
   formatAxisLabel,
@@ -63,11 +64,43 @@ describe('#1419 Timeline timing（真实数据，不编耗时）', () => {
       seq: 1,
       time: '2026-10-20T10:00:02.000Z',
     });
-    expect(deriveEventTimings([request]).get(eventKey(request))?.durationMs).toBe(2400);
+    const onlyDone = deriveEventTimings([request]).get(eventKey(request))!;
+    expect(onlyDone.durationMs).toBe(2400);
+    // P1-2：没有 request-started 时，起点 = 落盘时刻 − duration_ms。
+    expect(onlyDone.start).toBe(Date.parse('2026-10-20T10:00:02.000Z') - 2400);
 
     const started = ev({ type: EventType.MODEL_REQUEST_STARTED, data: { request_id: 'q1' }, seq: 1, time: '2026-10-20T10:00:00.000Z' });
     const done = ev({ type: EventType.MODEL_REQUEST, data: { request_id: 'q1', outcome: 'completed' }, seq: 2, time: '2026-10-20T10:00:01.250Z' });
-    expect(deriveEventTimings([started, done]).get(eventKey(done))?.durationMs).toBe(1250);
+    const paired = deriveEventTimings([started, done]).get(eventKey(done))!;
+    expect(paired.durationMs).toBe(1250);
+    // P1-2 复现夹具：started(t=0) + request(t=2.4s, duration=2400) ⇒ 条起点 0，不是 2400。
+    expect(paired.start).toBe(Date.parse('2026-10-20T10:00:00.000Z'));
+  });
+
+  it('P1-2 复现：model/request 条起点回到请求开始（不是完成时刻）', () => {
+    const started = ev({
+      type: EventType.MODEL_REQUEST_STARTED,
+      data: { request_id: 'q1' },
+      seq: 1,
+      run_id: 'r1',
+      time: '2026-10-20T10:00:00.000Z',
+    });
+    const done = ev({
+      type: EventType.MODEL_REQUEST,
+      data: { request_id: 'q1', outcome: 'completed', duration_ms: 2400 },
+      seq: 2,
+      run_id: 'r1',
+      time: '2026-10-20T10:00:02.400Z',
+    });
+    const completed = ev({ type: EventType.RUN_COMPLETED, data: {}, seq: 3, run_id: 'r1', time: '2026-10-20T10:00:05.000Z' });
+    const timings = deriveEventTimings([started, done, completed]);
+    const timing = timings.get(eventKey(done))!;
+    expect(timing.start).toBe(Date.parse('2026-10-20T10:00:00.000Z'));
+    expect(timing.durationMs).toBe(2400);
+    const axis = timelineAxis(timings)!;
+    const bar = barGeometry(timing, axis)!;
+    expect(bar.left).toBe(0);
+    expect(bar.width).toBe(48); // 2400 / 5000
   });
 
   it('run/started↔run/completed：run 跨度可算；delegation 同理', () => {
@@ -131,8 +164,23 @@ describe('#1419 筛选计数 / 缺口 / 格式', () => {
     expect(events.filter((e) => eventMatchesFilter(e, 'all', timings.get(eventKey(e))))).toHaveLength(4);
   });
 
-  it('seqGapMarkers 保留插入位置与缺失条数（1→6 = 缺 4 条）', () => {
+  it('seqGapMarkers 保留插入位置与缺失条数（3→6 = 缺 2 条）', () => {
     expect(seqGapMarkers(events)).toEqual([{ afterIndex: 2, from: 3, to: 6, missing: 2 }]);
+  });
+
+  it('P2-1：seq-less 事件在 Timeline 层有稳定区分键，eventKey 本身不变', () => {
+    const a = ev({ type: EventType.MODEL_STARTED, data: {}, seq: null, run_id: 'r1', time: '2026-10-20T10:00:00.000Z' });
+    const b = ev({ type: EventType.MODEL_STARTED, data: {}, seq: null, run_id: 'r1', time: '2026-10-20T10:00:01.000Z' });
+    const c = ev({ type: EventType.MODEL_STARTED, data: {}, seq: null, run_id: 'r1', time: '2026-10-20T10:00:02.000Z' });
+    expect(eventKey(a)).toBe(eventKey(b));
+    const keys = deriveTimelineEventKeys([a, b, c]);
+    expect(new Set(keys.values()).size).toBe(3);
+    expect(keys.get(a)).toBe(eventKey(a));
+    expect(keys.get(b)).toBe(`${eventKey(a)}#1`);
+    expect(keys.get(c)).toBe(`${eventKey(a)}#2`);
+    // 唯一键的事件保持原键（既有选中/展开语义不变）。
+    const unique = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1' }, seq: 7, run_id: 'r1' });
+    expect(deriveTimelineEventKeys([unique]).get(unique)).toBe(eventKey(unique));
   });
 
   it('formatClock 本地时钟 / formatAxisLabel 固定单位', () => {

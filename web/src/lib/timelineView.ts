@@ -140,6 +140,25 @@ function baseStatus(e: AgentEvent): TimelineStatus {
   return 'idle';
 }
 
+/** Timeline 行身份表（按事件对象）：`eventKey` 对 seq-less 事件不唯一
+ *  （同一 run 的多条 `model/started` 都算 `event:<session>:<run>:`），而 Timeline
+ *  的选中/展开/`aria-controls` 必须以**单个事件对象**为粒度。这里在 `eventKey`
+ *  基础上给同键事件追加数组内出现序号（第一条保持原键，后续 `#1`、`#2`…）。
+ *
+ *  只给 Timeline 渲染/交互用；`eventKey` 的全局语义（其他消费方的身份比较）不变。
+ *  键只依赖 `events` 的追加顺序——事件只追加、不重排，所以窗口/筛选变化不会漂移。 */
+export function deriveTimelineEventKeys(events: readonly AgentEvent[]): Map<AgentEvent, string> {
+  const seen = new Map<string, number>();
+  const keys = new Map<AgentEvent, string>();
+  for (const e of events) {
+    const base = eventKey(e);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    keys.set(e, n === 0 ? base : `${base}#${n}`);
+  }
+  return keys;
+}
+
 /** 所有事件的 timing 表（键 = `eventKey`）。O(N)，调用方用 `useMemo` 收敛。 */
 export function deriveEventTimings(
   events: readonly AgentEvent[],
@@ -196,13 +215,18 @@ export function deriveEventTimings(
         status = 'run';
       }
     } else if (e.type === EventType.MODEL_REQUEST) {
+      const requestId = typeof data.request_id === 'string' ? data.request_id : null;
+      const started = requestId ? requestStarted.get(requestId) : undefined;
+      const startedAt = started ? timeMs(started.time) : null;
       durationMs = finiteNumber(data.duration_ms);
-      if (durationMs === null) {
-        const requestId = typeof data.request_id === 'string' ? data.request_id : null;
-        const started = requestId ? requestStarted.get(requestId) : undefined;
-        const startedAt = started ? timeMs(started.time) : null;
-        if (startedAt !== null && start !== null && start >= startedAt) durationMs = start - startedAt;
+      if (durationMs === null && startedAt !== null && start !== null && start >= startedAt) {
+        durationMs = start - startedAt;
       }
+      /* P1-2：`model/request` 在响应**完成后**才落盘（time = 落盘时刻），不是请求
+       * 开始时刻。条起点必须回到请求开始：优先 `model/request-started` 的 time，
+       * 缺失时用 `time − duration_ms` 回推；两者都不可得才保留落盘时刻。 */
+      if (startedAt !== null) start = startedAt;
+      else if (durationMs !== null && start !== null) start = start - durationMs;
     } else if (e.type === EventType.AGENT_DELEGATION_STARTED) {
       const child = typeof data.child_session_id === 'string' ? data.child_session_id : null;
       const end = child ? delegationEnd.get(child) : undefined;
