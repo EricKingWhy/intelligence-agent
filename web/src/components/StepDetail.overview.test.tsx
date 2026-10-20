@@ -111,6 +111,64 @@ describe('#1419 Overview', () => {
     expect(section('checkpoint').textContent).toContain('后端未暴露');
   });
 
+  /* #1419 O-3：待审批段内嵌的是**真实**审批卡（ApprovalCard 三钮 = postApproval 的
+   * 三条既有决策），且整段带琥珀态；已失效（stale）与 App 记下的 404（goneApprovalIds）
+   * 都不放按钮——那两类点下去只会换来一次注定失败的 POST。 */
+  it('O-3：待审批 → 决定段琥珀态 + 真实审批卡；stale / gone 都不出卡', () => {
+    const pending = (id: string, stale?: boolean) => ({
+      approval_id: id,
+      tool_name: 'bash',
+      tool_call_id: 'tc-1',
+      action_type: 'shell',
+      title: '需要审批',
+      description: 'rm -rf .cache/',
+      arguments_preview: { command: 'rm -rf .cache/' },
+      permission: 'ask',
+      policy: 'standard',
+      reason: '超出改动范围',
+      allowed_decisions: ['approve', 'deny'],
+      ...(stale === undefined ? {} : { stale }),
+    });
+    const withApprovals = (list: ReturnType<typeof pending>[]) => {
+      const conv = conversation();
+      return { ...conv, pending_approvals: list } as ConversationState;
+    };
+
+    // 待审批：琥珀态 + 真卡（卡内三个决策钮来自 ApprovalCard）
+    act(() => root!.render(
+      <ChatTab
+        conversation={withApprovals([pending('ap-1')])}
+        tools={[]}
+        onApprovalGone={() => {}}
+        onApprovalDecided={() => {}}
+      />,
+    ));
+    expect(section('decide').classList.contains('is-attn')).toBe(true);
+    expect(section('decide').textContent).toContain('1 项待审批');
+    const card = section('decide').querySelector('.approval-card')!;
+    expect(card).not.toBeNull();
+    expect(card.textContent).toContain('rm -rf .cache/');
+
+    // stale（run 已终结的孤儿）→ 不出卡，段也不是琥珀态
+    act(() => root!.render(
+      <ChatTab conversation={withApprovals([pending('ap-1', true)])} tools={[]} />,
+    ));
+    expect(section('decide').querySelector('.approval-card')).toBeNull();
+    expect(section('decide').classList.contains('is-attn')).toBe(false);
+
+    // App 已记下 404 → 同样不出卡
+    act(() => root!.render(
+      <ChatTab
+        conversation={withApprovals([pending('ap-1')])}
+        tools={[]}
+        goneApprovalIds={new Set(['ap-1'])}
+        onApprovalGone={() => {}}
+        onApprovalDecided={() => {}}
+      />,
+    ));
+    expect(section('decide').querySelector('.approval-card')).toBeNull();
+  });
+
   it('点击标题开合；收起后 aria-hidden 与 inert 同步', () => {
     render();
     const run = section('run');

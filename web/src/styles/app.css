@@ -7274,6 +7274,57 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   text-transform: uppercase;
   color: var(--fx-ghost);
 }
+/* 效果图 `.ov-toggle`：「展开全部 N 条」这类段内文字钮（不是按钮，不占行高）。 */
+.step-detail .ov-toggle {
+  align-self: flex-start;
+  padding: 0 1px;
+  border: 0;
+  background: transparent;
+  font-size: 9px;
+  color: var(--fx-primary-ink);
+}
+.step-detail .ov-toggle:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* 效果图 `.badge`：段内联的小胶囊（fallback 标注、来源标记）。 */
+.step-detail .ov-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--fx-hairline);
+  border-radius: 4px;
+  background: var(--fx-surface-2);
+  font-size: 8.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--fx-mute);
+}
+/* 效果图 `.ov-kv`：段内两列 kv（dt 灰、dd 主色、`.mono` 走等宽）。 */
+.step-detail .ov-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  font-size: 9px;
+}
+.step-detail .ov-kv dt {
+  white-space: nowrap;
+  color: var(--fx-faint);
+}
+.step-detail .ov-kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fx-ink-2);
+}
+.step-detail .ov-kv dd.mono {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
 
 /* 效果图 `.decide*`：待审批卡（琥珀井）+ 已决行（绿/红）。 */
 .step-detail .decide {
@@ -7512,6 +7563,37 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
   box-shadow: inset 2px 0 0 0 var(--accent),
     inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 24%, transparent);
+}
+/* #1419 Overview：同一行在 Inspector 折叠段里走效果图 `.ov-row` 的紧凑字阶
+   （9.5px 正文 + 8.5px mono 的 `#seq`/耗时），不是 tab 级的 13px 大行。带
+   `.ov-acc` 前缀，只作用于总览段，tab 级工具列表不受影响。 */
+.step-detail .ov-acc .detail-tool-row {
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--fx-hairline-soft);
+  border-radius: 5px;
+  background: var(--fx-canvas-soft);
+  font: 400 9.5px var(--font-ui);
+  color: var(--fx-ink-2);
+}
+.step-detail .ov-acc .detail-tool-row .detail-tool-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 9.5px;
+}
+.step-detail .ov-acc .detail-tool-row .k {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--fx-faint);
+}
+.step-detail .ov-acc .detail-tool-row .v {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--fx-mute);
 }
 
 /* PERMISSION 段（#184）：待审批行复刻工具行的视觉语言（同样是"点进去"的行），

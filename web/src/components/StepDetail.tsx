@@ -15,7 +15,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Clock, Cpu,
+  AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, Clock, Cpu,
   Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
   Package, Pin, ShieldCheck, TerminalSquare, X, Zap,
 } from 'lucide-react';
@@ -39,6 +39,7 @@ import {
   type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
 } from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
+import { ApprovalCard } from './ApprovalCard';
 import { ArtifactViewer } from './ArtifactViewer';
 import { ConstraintInheritance } from './ConstraintInheritance';
 import { ConstraintsTab } from './ConstraintsTab';
@@ -145,6 +146,16 @@ interface Props {
    *  让 Inspector 头标与顶栏对同一会话说同一个态——#312 的先例：一个独立态不许在
    *  一侧被粗化。**必须是稳定的原语**（memo 有效性依赖 prop 身份，见上方操作约束）。 */
   awaitingDecision?: boolean;
+  /* #1419 O-3：总览「需要你来决定」段内嵌**真实**审批卡（`ApprovalCard`），三个按钮
+   * 走既有 `postApproval` 通路，不新造第二条提交路径。这三项与中心列审批卡同源：
+   * `goneApprovalIds` 是 App 记下的「后端已回 404」集合，两个回调分别上报失效与
+   * 决策成功（后者触发一次对账 resync）。全部由 App 的 useState/useCallback 持有，
+   * 身份稳定，`memo` 有效性不受影响。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
+  /** 与 `Conversation` 的同名回调同签名（`useSession.resyncAfterDecision`）：
+   *  决策 POST 成功后按 sessionId 对账一次，保证决策后事件有一条消费路径。 */
+  onApprovalDecided?: (sessionId: string) => void;
 }
 
 /** #183 面板视图状态（全部**不持久化**，不变量 #22）。 */
@@ -180,7 +191,7 @@ export type InspectorPanelAction =
  * 逐项稳定性核对表、否决 `areEqual` 的理由，见
  * `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, open = true, onPanelAction, awaitingDecision = false }: Props) {
+export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, open = true, onPanelAction, awaitingDecision = false, goneApprovalIds, onApprovalGone, onApprovalDecided }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——`useMemo` 不许出现在
    * 下方任何 early-return 之后（Rules of Hooks：两次渲染的 hook 数必须一致）。
@@ -783,6 +794,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onJumpToApproval={onJumpToApproval}
               selectedKey={selectedKey}
               awaitingDecision={awaitingDecision}
+              goneApprovalIds={goneApprovalIds}
+              onApprovalGone={onApprovalGone}
+              onApprovalDecided={onApprovalDecided}
             />
           )}
           {tab === 'timeline' && (
@@ -1110,8 +1124,16 @@ function OverviewSection({
   );
 }
 
+/** #1419 O-4：工具行的 `#seq`。序号取自 `raw_call`（投影原样保存的事件负载），
+ *  缺失时不画——绝不按数组下标编一个序号出来。 */
+function toolSeq(t: ToolCall): number | null {
+  const seq = (t.raw_call as { seq?: unknown } | undefined)?.seq;
+  return typeof seq === 'number' ? seq : null;
+}
+
 export function ChatTab({
   conversation, tools, onFocusTool, onJumpToApproval, selectedKey, awaitingDecision = false,
+  goneApprovalIds, onApprovalGone, onApprovalDecided,
 }: {
   conversation: ConversationState;
   tools: ToolCall[];
@@ -1125,6 +1147,13 @@ export function ChatTab({
   selectedKey?: string | null;
   /** #1030：与顶栏/Inspector 头标同源的待裁决事实（见 Props 同名注释）。 */
   awaitingDecision?: boolean;
+  /** #1419 O-3：真实审批回调（见 Props 同名注释）。缺省时段内不画按钮——
+   *  只读场景（子会话视图）不渲染一个点不动的审批卡。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
+  /** 与 `Conversation` 的同名回调同签名（`useSession.resyncAfterDecision`）：
+   *  决策 POST 成功后按 sessionId 对账一次，保证决策后事件有一条消费路径。 */
+  onApprovalDecided?: (sessionId: string) => void;
 }) {
   // Run 状态 + 时长由 lib/runState 的 deriveRunSummary 单一提供：粗标签的
   // 「取消 ≠ 失败」语义、以及「终态集合必须含 run/interrupted」这条与顶栏脉冲
@@ -1135,6 +1164,29 @@ export function ChatTab({
    * memo）。本 tab 只在 `tab === 'chat'` 时挂载，这一层省的是驻留期间的重渲染。 */
   const runningToolCount = useMemo(() => tools.filter((t) => t.status === 'running').length, [tools]);
   const failedToolCount = useMemo(() => tools.filter((t) => t.status === 'failed').length, [tools]);
+  /* #1419 O-3：工具段的「平均耗时」= 已有起止时间的调用取均值。没有一组完整时间戳
+   * 就算不出来 → 显示「—」，不拿 0 冒充（零伪造指标）。 */
+  const avgToolDuration = useMemo(() => {
+    const spans = tools
+      .map((t) => {
+        const text = formatDuration(t.started_at, t.completed_at);
+        return text === null ? null : t;
+      })
+      .filter((t): t is ToolCall => t !== null)
+      .map((t) => new Date(t.completed_at!).getTime() - new Date(t.started_at!).getTime());
+    if (spans.length === 0) return null;
+    return spans.reduce((a, b) => a + b, 0) / spans.length;
+  }, [tools]);
+  /* #1419 O-1/O-3：段头右侧的 mono 摘要与「需要你来决定」的琥珀态，都由这一份视图派生。
+   * 「可操作」= 投影没标 stale（run 已终结的孤儿）且 App 没记下它已 404——这两类点了
+   * 只会换来一次注定失败的 POST，段内不放按钮；它们仍在 PERMISSION 段里留痕。 */
+  const permView = permissionView(conversation);
+  const actionableApprovals = useMemo(
+    () => permView.pending.filter((a) => a.stale !== true && !(goneApprovalIds?.has(a.approval_id) ?? false)),
+    [permView.pending, goneApprovalIds],
+  );
+  const gaps = useMemo(() => seqGaps(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const compactionCount = conversation.compactions.length;
 
   /* F5（#279）TOOLS 尾窗：此前全量渲染（N=500 单次 38.7ms，40fps 合帧下就是满载）。
    * 选中项必须留在窗口里——同 `TimelineTab` 的 `effectiveWindow`（#183）：键盘 ↑/↓ 的移动域
@@ -1153,7 +1205,86 @@ export function ChatTab({
     <>
       <OverviewMetrics conversation={conversation} runDuration={runDuration} />
       <div className="ov-acc-list">
-      <OverviewSection id="run" title="RUN" icon={Hash} defaultOpen>
+      {/* #1419 O-3：效果图把「需要你来决定」放在第一位——它是有待办时的唯一入口，
+          埋在一列灰卡中间就等于没有。琥珀态由 `actionableApprovals` 驱动。 */}
+      <OverviewSection
+        id="decide"
+        title="需要你来决定"
+        icon={AlertTriangle}
+        attn={actionableApprovals.length > 0}
+        defaultOpen
+        kv={
+          actionableApprovals.length > 0
+            ? <><b>{actionableApprovals.length}</b> 项待审批</>
+            : '已处理'
+        }
+      >
+      {actionableApprovals.length > 0 && (
+        <div className="detail-section">
+          {onApprovalGone && onApprovalDecided ? (
+            <>
+              {/* 真实审批卡（#37 的同一个组件）：三个按钮（批准 / 拒绝 / 以后都允许）
+                  走既有 postApproval 通路与既有 409/404 语义，不在这里造第二条提交路径。
+                  `autoFocus` 必须为 false——全局 Ctrl+Enter 只该由中心列那一张卡挂载，
+                  否则一次按键会向同一个 approval_id 发两次 POST。 */}
+              <ApprovalCard
+                sessionId={conversation.session_id}
+                approval={actionableApprovals[0]}
+                onGone={() => onApprovalGone(actionableApprovals[0].approval_id)}
+                onDecided={() => onApprovalDecided(conversation.session_id)}
+              />
+              {actionableApprovals.length > 1 && (
+                <div className="ov-empty">
+                  <AlertTriangle size={11} aria-hidden="true" />
+                  另有 {actionableApprovals.length - 1} 项待审批 · 逐条在会话里处理
+                </div>
+              )}
+            </>
+          ) : (
+            /* 只读场景（子会话视图）：不给假按钮，如实说明去哪儿处理。 */
+            <div className="ov-empty">
+              <AlertTriangle size={11} aria-hidden="true" />
+              {actionableApprovals.length} 项待审批 · 请在主会话里处理
+            </div>
+          )}
+        </div>
+      )}
+      {conversation.reconcile_queue.length > 0 ? (
+        <div className="detail-section">
+          <div className="detail-section-title">
+            <AlertTriangle size={14} /> 需要你来决定
+          </div>
+          {conversation.reconcile_queue.map((r, i) => (
+            <div key={i} className="detail-reconcile-row">
+              <div className="detail-row">
+                <span className="detail-key">工具</span>
+                <span className="detail-val">{r.tool_name}</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">参数身份</span>
+                <code className="detail-val detail-val-mono">{r.args_identity}</code>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">状态</span>
+                <span className="detail-val detail-val-tag">{r.state}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        actionableApprovals.length === 0 && (
+          <div className="detail-empty-hint">无待裁决操作</div>
+        )
+      )}
+      </OverviewSection>
+
+      <OverviewSection
+        id="run"
+        title="任务 RUN"
+        icon={Hash}
+        defaultOpen
+        kv={<>{runStatusLabel} · 第 {conversation.turns.length} 轮</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
           <Hash size={14} /> 任务
@@ -1214,6 +1345,18 @@ export function ChatTab({
           <span className="detail-key">耗时</span>
           <span className="detail-val">{runDuration ?? '—'}</span>
         </div>
+        {/* #1419 O-5：fallback 胶囊——只有真的发生过切换才出现（`model_fallback`
+            由 `model/fallback` 事件写入），没有这条事实就不画徽标。 */}
+        {conversation.model_fallback && (
+          <div className="detail-row">
+            <span className="detail-key">模型切换</span>
+            <span className="detail-val">
+              <span className="ov-badge">
+                fallback → {conversation.model_fallback.to_model}
+              </span>
+            </span>
+          </div>
+        )}
         <div className="detail-row">
           <span className="detail-key">字数</span>
           <span className="detail-val num">
@@ -1245,25 +1388,36 @@ export function ChatTab({
             <span className="detail-val detail-val-muted">未追踪</span>
           )}
         </div>
+        {/* #1419 O-5：健康注。效果图写「上下文健康 · 未触发压缩」——后端不提供窗口
+            容量，所以这里只报**能证明的那一半**：压缩发生了几次。没有容量就没有百分比，
+            不编一个。 */}
+        <div className="ov-empty">
+          <Check size={11} aria-hidden="true" />
+          {compactionCount === 0
+            ? '上下文健康 · 未触发压缩'
+            : `已压缩 ${compactionCount} 次`}
+        </div>
       </div>
       </OverviewSection>
 
-      <OverviewSection id="tools" title="TOOLS" icon={Package} defaultOpen>
+      <OverviewSection
+        id="tools"
+        title="工具调用"
+        icon={Package}
+        defaultOpen
+        kv={<><b>{tools.length}</b> 次 · 失败 {failedToolCount}</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
           <Package size={14} /> TOOLS
         </div>
-        <div className="detail-row">
-          <span className="detail-key">计数</span>
-          <span className="detail-val">{tools.length}</span>
-        </div>
-        <div className="detail-row">
-          <span className="detail-key">活跃</span>
-          <span className="detail-val">{runningToolCount}</span>
-        </div>
-        <div className="detail-row">
-          <span className="detail-key">失败</span>
-          <span className="detail-val">{failedToolCount}</span>
+        {/* #1419 O-4：效果图 2×2 统计格（总调用 / 失败 / 平均 / 进行中）。四项都是
+            现有投影上的真实计数；「平均」没有完整时间戳时显示「—」而不是 0。 */}
+        <div className="ov-pair">
+          <div className="ov-row"><span className="k">总调用</span><span className="grow" /><span className="v">{tools.length}</span></div>
+          <div className="ov-row"><span className="k">失败</span><span className="grow" /><span className="v">{failedToolCount}</span></div>
+          <div className="ov-row"><span className="k">平均</span><span className="grow" /><span className="v">{avgToolDuration === null ? '—' : formatShortDuration(avgToolDuration)}</span></div>
+          <div className="ov-row"><span className="k">进行中</span><span className="grow" /><span className="v">{runningToolCount}</span></div>
         </div>
         {hiddenTools > 0 && (
           /* 窗口条直接复用 Timeline 的类：`app.css` 里 `.timeline-window-bar/-earlier/-hint`
@@ -1293,19 +1447,32 @@ export function ChatTab({
             >
               <ChevronRight size={14} />
               <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              {toolSeq(t) !== null && <span className="k">#{String(toolSeq(t)).padStart(2, '0')}</span>}
               <span className="detail-tool-name">{t.name}</span>
+              {formatDuration(t.started_at, t.completed_at) !== null && (
+                <span className="v">{formatDuration(t.started_at, t.completed_at)}</span>
+              )}
             </button>
           ) : (
             <div key={t.tool_call_id} className={`${rowClass} detail-tool-row-static`}>
               <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              {toolSeq(t) !== null && <span className="k">#{String(toolSeq(t)).padStart(2, '0')}</span>}
               <span className="detail-tool-name">{t.name}</span>
+              {formatDuration(t.started_at, t.completed_at) !== null && (
+                <span className="v">{formatDuration(t.started_at, t.completed_at)}</span>
+              )}
             </div>
           );
         })}
       </div>
       </OverviewSection>
 
-      <OverviewSection id="context" title="CONTEXT" icon={Layers}>
+      <OverviewSection
+        id="context"
+        title="上下文"
+        icon={Layers}
+        kv={compactionCount > 0 ? `${compactionCount} 次压缩` : '未压缩'}
+      >
       {conversation.compactions.length > 0 ? (
         <div className="detail-section">
           <div className="detail-section-title">
@@ -1334,35 +1501,12 @@ export function ChatTab({
       )}
       </OverviewSection>
 
-      <OverviewSection id="decide" title="决定" icon={AlertTriangle} defaultOpen>
-      {conversation.reconcile_queue.length > 0 ? (
-        <div className="detail-section">
-          <div className="detail-section-title">
-            <AlertTriangle size={14} /> 需要你来决定
-          </div>
-          {conversation.reconcile_queue.map((r, i) => (
-            <div key={i} className="detail-reconcile-row">
-              <div className="detail-row">
-                <span className="detail-key">工具</span>
-                <span className="detail-val">{r.tool_name}</span>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">参数身份</span>
-                <code className="detail-val detail-val-mono">{r.args_identity}</code>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">状态</span>
-                <span className="detail-val detail-val-tag">{r.state}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="detail-empty-hint">无待裁决操作</div>
-      )}
-      </OverviewSection>
-
-      <OverviewSection id="trace" title="TRACE" icon={ListTree}>
+      <OverviewSection
+        id="trace"
+        title="事件轨迹"
+        icon={ListTree}
+        kv={<><b>{conversation.events.length}</b> 事件{gaps.length > 0 ? ` · ${gaps.length} 处缺口` : ''}</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
           <ListTree size={14} /> TRACE
@@ -1377,7 +1521,7 @@ export function ChatTab({
             <span className="detail-val">{conversation.unknown_events.length}</span>
           </div>
         )}
-        {seqGaps(conversation.events).map((gap, i) => (
+        {gaps.map((gap, i) => (
           <div key={i} className="detail-row detail-row-warn">
             <span className="detail-key">seq 缺口</span>
             <span className="detail-val detail-val-mono">{gap}</span>
@@ -1386,7 +1530,7 @@ export function ChatTab({
       </div>
       </OverviewSection>
 
-      <OverviewSection id="model" title="MODEL" icon={Database}>
+      <OverviewSection id="model" title="模型" icon={Database} kv={conversation.model ?? conversation.requested_model ?? '—'}>
       {/* MODEL：后端 Gap 1 已落地（model/completed + run/completed 观测字段）。
           全部缺失时保留空槽语义（提示而非留白），有任一真值则逐行渲染，
           缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。
@@ -1460,7 +1604,7 @@ export function ChatTab({
       )}
       </OverviewSection>
 
-      <OverviewSection id="checkpoint" title="CHECKPOINT" icon={Database}>
+      <OverviewSection id="checkpoint" title="检查点" icon={Database} kv="无 API">
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
           <Database size={14} /> CHECKPOINT
@@ -1469,7 +1613,13 @@ export function ChatTab({
       </div>
       </OverviewSection>
 
-      <OverviewSection id="permission" title="PERMISSION" icon={ShieldCheck} defaultOpen>
+      <OverviewSection
+        id="permission"
+        title="权限"
+        icon={ShieldCheck}
+        defaultOpen
+        kv={<>待审批 {permView.pending.length}</>}
+      >
       <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
       </OverviewSection>
       </div>

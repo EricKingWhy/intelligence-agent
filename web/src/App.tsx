@@ -2190,6 +2190,9 @@ export default function App() {
           open={inspectorOpen}
           onPanelAction={onPanelAction}
           awaitingDecision={hasPendingDecisions}
+          goneApprovalIds={goneApprovalIds}
+          onApprovalGone={onApprovalGone}
+          onApprovalDecided={resyncAfterDecision}
         />
       </main>
 
