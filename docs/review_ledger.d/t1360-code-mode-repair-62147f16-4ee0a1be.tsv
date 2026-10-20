@@ -1,0 +1,1 @@
+2026-10-20	#1360 repair; fixed point 62147f16. Spec APPROVE / Standards PASS; P0-P4=0. Each independently ran child-runtime regression and isolated single-match attribution mutation; normal/error/cancel context and inherited deadline checked. Evidence: docs/phase_status/2026-10.md (#1360).	62147f16b4e425a83b385ef2ee5c7c89222df3ff..4ee0a1be50ecf6dda68db599074e040846654661
