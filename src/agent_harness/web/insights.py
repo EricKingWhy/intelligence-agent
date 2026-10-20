@@ -14,7 +14,8 @@ RUN INSPECTOR**（用户裁决：层级不同 + 故障隔离 + 可单独开关�
   token 字段 + `duration_ms`。**不读** `/api/sessions/{id}/usage`（存储字节）、
   **不读** `storage/session_archive.py` 的 token/cost 列（从未写入）。
 - 计费 token := `total_tokens`；缓存命中率 := Σ`cached_tokens` ÷ Σ`prompt_tokens`
-  （求和口径，与 `context_usage.cache_summary` 同源，不是逐调用算术平均）；
+  （与 `context_usage.cache_summary` 是**同一个求和公式**，不是逐调用算术平均；
+  数据源不同——这里只认 `model/request` 事件，`cache_summary` 只认 `model/completed`）；
   活跃时长 := Σ`duration_ms`；按日折叠按事件 `time`（ISO-8601）解析为**本地日期**。
 - **v1 无成本**：任何响应不得出现 cost/$ 字段（仓库裁决 `reports_cost=False`）。
 - 构成聚合**仅基于有快照会话**的最新 context-usage 快照，分类求和 = 快照总量；
@@ -40,7 +41,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
 
-from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.session.errors import (
     EventLogCorruptError,
     InvalidSessionId,
@@ -164,8 +164,6 @@ async def _overview(
     for summary in summaries:
         session_id = summary.session_id
         events = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        consumed = consumed_from_events(events)
-        tokens = consumed.total_tokens or 0
 
         # 会话卡与 KPI 的时间轴：只计窗口内的 model/request（turns 按窗口内
         # model/completed 计）。窗口外的事件仍进热力图（8 周独立窗口）。
@@ -234,7 +232,7 @@ async def _overview(
             # 没有则回落 session_id（列表总得有个可读标签，不伪造"未命名"）。
             "title": summary.first_user_message or session_id,
             "workspace": summary.workspace.title if summary.workspace else None,
-            "billed_tokens": window_tokens if start is not None else tokens,
+            "billed_tokens": window_tokens,
             "turns": window_turns,
             "last_active_at": summary.last_event_time,
         })
@@ -340,11 +338,16 @@ def _request_series(
     的用量快照——它是该轮结束时窗口的真实状态）。
     `mode=delta`：与上一条做**有符号**差；首条无基线记 0。`duration_ms` 不是
     累计量，恒报原值（不参与差分）。
+
+    先过滤**没有 `usage.total_tokens`** 的 `model/request`：那是 provider 失败 /
+    fallback 失败写下的尝试（`runtime.py::record_request_failed`），不是一条可画
+    的 token 请求——补 0 会画出假 0 柱、delta 出负值、turn 折叠把整轮归零。被过滤
+    的尝试其 `duration_ms` 也不计入（它没有用量，不是这一轮的有效观测）。
     """
     series = [
         _request_row(event)
         for event in events
-        if event.type == MODEL_REQUEST
+        if event.type == MODEL_REQUEST and _has_usage(event)
     ]
     if granularity == "turn":
         series = _collapse_by_run(events, series)
@@ -412,6 +415,16 @@ def _delta(series: list[dict]) -> list[dict]:
     return out
 
 
+def _has_usage(event: Any) -> bool:
+    """该请求是否带可画的用量（`usage.total_tokens` 为 int）。
+
+    失败尝试（`runtime.py::record_request_failed`）只写 `outcome/http_status/
+    duration_ms`，没有 `usage` ⇒ 不是 token 请求，不进序列。
+    """
+    usage = event.data.get("usage") if isinstance(event.data, dict) else None
+    return isinstance(usage, dict) and _is_int(usage.get("total_tokens"))
+
+
 def _int_or_zero(value: Any) -> int:
     return value if _is_int(value) else 0
 
@@ -465,8 +478,9 @@ async def _card(
 ) -> dict:
     """一张 fleet 卡：`status` / `<tokens_key>` / `last_active_at`。
 
-    `tokens` 走与 context-usage **同一个**解析入口——有快照会话是精确窗口占用，
-    无快照时是 usage_only 的最近一次输入规模（票面：不伪造 0，state 语义同源）。
+    字段清单以票面契约为准（**没有** `state` 位）。`tokens` 数值照抄 context-usage
+    的 `used_tokens`：有快照是精确窗口占用，无快照是 usage_only 的最近一次输入规模；
+    `no_data` 时该数也是 0——本卡不区分"没有数据"与"占用为 0"（票面未给字段）。
     `last_active_at` 是该会话最后一条事件时间（票面："最近活动"即此字段）。
     """
     if events is None:

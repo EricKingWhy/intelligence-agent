@@ -171,8 +171,35 @@ def test_overview_kpi_turns_and_tool_runs_match_consumed_from_events(tmp_path) -
     body = _client(tmp_path).get("/api/insights/overview?range=all").json()
     consumed = consumed_from_events(_request_events(tmp_path, "s1"))
     assert body["kpi"]["turns"] == consumed.agent_turns == 2
-    assert body["kpi"]["tool_runs"] == 3
+    assert body["kpi"]["tool_runs"] == consumed.tool_calls == 3
     assert body["kpi"]["billed_tokens"] == consumed.total_tokens == 11
+
+
+def _failed_request(duration_ms: int = 5) -> dict:
+    """`runtime.py::record_request_failed` 写出的无 usage 失败尝试（真实形状）。"""
+    return {
+        "role": "main", "outcome": "failed", "request_id": "x",
+        "duration_ms": duration_ms, "http_status": 500,
+    }
+
+
+def test_overview_billed_tokens_ignores_failed_requests_without_usage(tmp_path) -> None:
+    """无 usage 的失败 `model/request` 不得把会话行 token 归 0（也不伪造 0）。
+
+    会话行与 KPI 共用同一窗口累加结果：三档 range 下两者相等且等于成功请求的
+    101。`consumed_from_events` 对缺 `total_tokens` 的请求返回粘性 None，会话行
+    走它再 `or 0` 会在 `range=all` 下与 KPI 打架（审查 C-P1-1）。
+    """
+    _seed(tmp_path, {"s1": [
+        (MODEL_REQUEST, {"usage": _usage(100, 1, 0, 101), "duration_ms": 7}, 0),
+        (MODEL_REQUEST, _failed_request(), 0),
+    ]})
+    client = _client(tmp_path)
+    for range_key in ("7d", "30d", "all"):
+        body = client.get(f"/api/insights/overview?range={range_key}").json()
+        row = body["sessions"][0]
+        assert body["kpi"]["billed_tokens"] == 101, range_key
+        assert row["billed_tokens"] == body["kpi"]["billed_tokens"], range_key
 
 
 def test_overview_cache_hit_rate_is_cached_over_prompt(tmp_path) -> None:
@@ -319,6 +346,77 @@ def test_context_timeline_turn_granularity_collapses_a_run(tmp_path) -> None:
     assert turn[0]["prompt_tokens"] == 200, "折叠成该 run 的最后一条"
     assert turn[0]["duration_ms"] == 1000, "同 run 的 duration 求和"
     assert turn[1]["prompt_tokens"] == 300
+
+
+def test_context_timeline_skips_failed_requests_without_usage(tmp_path) -> None:
+    """无 usage 的失败尝试不进 token 序列：不出 0 行、不出负增量。
+
+    序列：成功(101) → 失败(无 usage) → 成功(252)。失败尝试既不是一条可画的
+    token 请求，也不该让 `mode=delta` 出现负值（审查 C-P1-2）。
+    """
+    app = create_app(
+        Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
+        enable_cors=False,
+    )
+    store = app.state.agent.store
+
+    async def _run() -> None:
+        session = Session.start(store, session_id="s1")
+        seq = session.append(USER_MESSAGE, {"content": "hi"}).seq
+        rows = (
+            {"usage": _usage(100, 1, 0, 101), "duration_ms": 7},
+            _failed_request(),
+            {"usage": _usage(250, 2, 0, 252), "duration_ms": 9},
+        )
+        for data in rows:
+            seq += 1
+            store.append_event("s1", SessionEvent(
+                seq=seq, type=MODEL_REQUEST, session_id="s1", run_id="r1", data=data,
+            ))
+
+    asyncio.run(_run())
+    client = _client(tmp_path)
+    total = client.get("/api/sessions/s1/context-timeline").json()["requests"]
+    assert [(r["prompt_tokens"], r["total_tokens"]) for r in total] == [
+        (100, 101), (250, 252),
+    ], "失败尝试不补 0 行"
+    delta = client.get(
+        "/api/sessions/s1/context-timeline?mode=delta"
+    ).json()["requests"]
+    assert [r["total_tokens"] for r in delta] == [0, 151], "无负增量"
+
+
+def test_context_timeline_turn_fold_keeps_usage_when_last_attempt_failed(tmp_path) -> None:
+    """同一 run「成功 + 末尾失败」：折叠保留成功用量，失败尝试的 duration 不计入。
+
+    失败尝试已被过滤 ⇒ 它既不是末条用量来源，其 `duration_ms` 也不进 turn 的
+    时长求和（票面口径：逐请求序列只看有 usage 的请求）。
+    """
+    app = create_app(
+        Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
+        enable_cors=False,
+    )
+    store = app.state.agent.store
+
+    async def _run() -> None:
+        session = Session.start(store, session_id="s1")
+        seq = session.append(USER_MESSAGE, {"content": "hi"}).seq
+        for data in (
+            {"usage": _usage(1000, 50, 0, 1050), "duration_ms": 10},
+            _failed_request(duration_ms=5),
+        ):
+            seq += 1
+            store.append_event("s1", SessionEvent(
+                seq=seq, type=MODEL_REQUEST, session_id="s1", run_id="r1", data=data,
+            ))
+
+    asyncio.run(_run())
+    turn = _client(tmp_path).get(
+        "/api/sessions/s1/context-timeline?granularity=turn"
+    ).json()["requests"]
+    assert len(turn) == 1
+    assert turn[0]["total_tokens"] == 1050, "整轮用量不得被失败尝试归零"
+    assert turn[0]["duration_ms"] == 10, "失败尝试的 duration 不计入"
 
 
 def test_context_timeline_delta_mode(tmp_path) -> None:
