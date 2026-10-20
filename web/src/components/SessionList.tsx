@@ -638,7 +638,7 @@ export const SessionList = memo(function SessionList({
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Portal>
                           <DropdownMenu.Content
-                            className="rail-menu"
+                            className="rail-menu rail-menu-sheet"
                             align="end"
                             sideOffset={4}
                             // #945 / #1177：选中「重命名项目」/「新建会话」时焦点已被主动
@@ -1117,7 +1117,7 @@ function SessionRow({
           </DropdownMenu.Trigger>
         </Tip>
         <DropdownMenu.Portal>
-          <DropdownMenu.Content className="rail-menu" align="end" sideOffset={4}>
+          <DropdownMenu.Content className="rail-menu rail-menu-sheet" align="end" sideOffset={4}>
             {inProject ? (
               <>
                 <DropdownMenu.Item

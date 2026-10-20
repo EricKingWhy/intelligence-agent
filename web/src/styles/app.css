@@ -1491,6 +1491,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
 }
+/* #1411：底部 sheet 从下沿抬起；不复用 `rail-menu-in` 的 scale（贴底放大
+   会让左右边距看起来在跳）。 */
+@keyframes rail-sheet-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .rail-menu {
     /* stylelint-disable-next-line color-no-hex -- var() 兜底语义（#1364 改动 5 豁免） */
@@ -6258,6 +6264,45 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     position: fixed;
     inset: 0;
     z-index: -1;
+  }
+
+  /* ── #1411：窄屏行/项目菜单改底部 sheet ──
+   * 390 档下 Radix 默认贴着触发按钮弹出（实测 x=103、宽 168、31px 行高），
+   * 既贴屏幕边缘又难命中。这里把 popper wrapper 拉回视口原点并去掉位移，
+   * 内容固定到底部：左右 12px 边距、可滚、行高 ≥44px。
+   * 遮罩直接画在 wrapper 上并**接管指针**：它铺满视口，点击落在 sheet 外时由
+   * Radix 的 outside-pointerdown 关闭菜单，且不会穿透到下面的会话行
+   * （`pointer-events: none` 会让那一下同时点中正文——那不是遮罩，是透传）。
+   * 仅 `.rail-menu-sheet` 生效——顶栏的密度/更多菜单保持既有下拉形态。 */
+  [data-radix-popper-content-wrapper]:has(> .rail-menu-sheet) {
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    transform: none !important;
+    pointer-events: auto;
+    background: color-mix(in srgb, var(--overlay-scrim) 28%, transparent);
+  }
+  .rail-menu.rail-menu-sheet {
+    position: fixed;
+    top: auto;
+    right: var(--space-md);
+    bottom: var(--space-md);
+    left: var(--space-md);
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    max-height: min(70vh, 520px);
+    overflow-y: auto;
+    pointer-events: auto;
+    border-radius: var(--radius-lg);
+    transform-origin: center bottom;
+    box-shadow: var(--edge-light), var(--shadow-popover);
+    animation: rail-sheet-in var(--dur-palette) var(--ease-apple);
+  }
+  .rail-menu.rail-menu-sheet .rail-menu-item {
+    min-height: 44px;
+    padding-block: 10px;
   }
 
   /* #1368：窄屏把记忆卡的操作列改成竖排——正文列留住可读宽度，按钮文字仍横排

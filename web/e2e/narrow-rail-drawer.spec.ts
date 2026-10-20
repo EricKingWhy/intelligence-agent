@@ -140,6 +140,32 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     expect(await railWidth(rail)).toBeLessThanOrEqual(COLLAPSED_MAX);
   });
 
+  test('#1411：行菜单是底部 sheet（12px 边距、44px 行高），遮罩拦下穿透', async ({ page }) => {
+    await routeApi(page, mock);
+    await page.goto('/');
+    await page.locator('.rail-drawer-btn').click();
+
+    await rowOf(page, 's2').locator('.rail-menu-btn').click();
+    const menu = page.locator('.rail-menu-sheet');
+    await expect(menu).toBeVisible();
+
+    const box = (await menu.boundingBox())!;
+    const vp = page.viewportSize()!;
+    // 用户可见判据：左右下各留 12px，菜单不再贴屏幕边缘。
+    expect(Math.round(box.x), '左边距').toBe(12);
+    expect(Math.round(vp.width - (box.x + box.width)), '右边距').toBe(12);
+    expect(Math.round(vp.height - (box.y + box.height)), '下边距').toBe(12);
+    // 触控目标：每个菜单项行高 ≥44px（不是桌面的 31px）。
+    const item = page.getByRole('menuitem', { name: '移出项目' });
+    expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+    // 遮罩接管指针：点 sheet 外只关闭菜单，不能同时点中下面的会话行。
+    // 修复前 wrapper 是 pointer-events:none，这一下会穿透并选中会话。
+    await page.mouse.click(100, 200);
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator('.session-item.selected')).toHaveCount(0);
+  });
+
   test('空态按钮只留图标：文字不渲染，因此不可能竖排（P1-4）', async ({ page }) => {
     await routeApi(page, { sessions: [], projects: [] });
     await page.goto('/');
@@ -268,10 +294,49 @@ test.describe('#1368 390：控件排版（P1-2 / P1-3 / P2-3）', () => {
       h: Math.round(el.getBoundingClientRect().height),
     }));
     // 高度就是"产品名不再折行"的机械读数：改前三行把顶栏撑到 67px（Lane A 实测），
-    // 单行是 48px。**不断言 `.appbar` 整体的 scrollWidth**：右侧图标簇在 390 本来
-    // 就溢出（P2-1 顶栏信息过载，本票范围外），把它写进这里等于要求本票修另一个问题。
+    // 单行是 48px。**本用例不断言 `.appbar` 整体的 scrollWidth**：右侧图标簇在 390
+    // 的溢出是 #1410 的范围，已由下面那条用例单独钉住。
     expect(box.h).toBeLessThanOrEqual(60);
     await expect(page.locator('.appbar-logo')).toBeVisible();
+  });
+
+  test('#1410：390 顶栏保留会话名/状态，密度收进唯一「…」菜单，无横向溢出', async ({ page }) => {
+    await routeApi(page, mock);
+    await page.goto('/');
+
+    // 先选一条会话：顶栏中间应当出现「会话名 + 运行状态」，而不是只剩 logo。
+    await page.locator('.rail-drawer-btn').click();
+    await rowOf(page, 's2').locator('.session-item').click();
+    await expect(page.locator('.appbar-center .appbar-session')).toBeVisible();
+    await expect(page.locator('.appbar-center .run-pulse')).toBeVisible();
+
+    const m = await page.evaluate(() => {
+      const bar = document.querySelector('.appbar') as HTMLElement;
+      const density = document.querySelector('.appbar-density-trigger') as HTMLElement;
+      const more = document.querySelector('.appbar-more-trigger') as HTMLElement;
+      const center = document.querySelector('.appbar-center') as HTMLElement;
+      return {
+        scrollWidth: bar.scrollWidth,
+        clientWidth: bar.clientWidth,
+        densityDisplay: getComputedStyle(density).display,
+        moreDisplay: getComputedStyle(more).display,
+        centerDisplay: getComputedStyle(center).display,
+      };
+    });
+    // 用户可见症状：溢出会让最右控件被 `.app-frame{overflow:hidden}` 裁掉。
+    expect(m.scrollWidth, '顶栏不得横向溢出').toBeLessThanOrEqual(m.clientWidth);
+    expect(m.centerDisplay).toBe('flex');
+    expect(m.densityDisplay, '独立密度触发器在 390 收起').toBe('none');
+    expect(m.moreDisplay).not.toBe('none');
+
+    // 密度四档必须仍然可达——收进「更多工具」，不是消失。
+    await page.getByRole('button', { name: '更多工具' }).click();
+    for (const label of ['紧凑', '均衡', '详细', 'Raw']) {
+      await expect(page.getByRole('menuitemradio', { name: label })).toBeVisible();
+    }
+    // 不是只渲染了四行：选中后真的改档（与桌面共用同一份受控状态）。
+    await page.getByRole('menuitemradio', { name: '紧凑' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-density', 'compact');
   });
 });
 
