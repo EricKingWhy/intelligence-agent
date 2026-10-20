@@ -16,7 +16,7 @@ import type { InspectorFocus, InspectorPanelAction } from './StepDetail';
 
 const EVENTS: AgentEvent[] = [
   { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:00.000Z' },
-  { type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'ls' } }, seq: 2, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:01.000Z' },
+  { type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'ls' } }, seq: 2, run_id: 'r1', step_id: 1, session_id: 'tl', time: '2026-10-20T10:00:01.000Z' },
   { type: EventType.TOOL_RESULT, data: { tool_call_id: 't1', content: '{"ok":true}' }, seq: 3, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:02.500Z' },
   { type: EventType.MODEL_REQUEST, data: { outcome: 'completed', duration_ms: 900 }, seq: 4, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:03.000Z' },
   { type: EventType.RUN_COMPLETED, data: {}, seq: 5, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:05.000Z' },
@@ -58,6 +58,7 @@ function Host({ conv, onAction }: { conv: ConversationState; onAction?: (a: Insp
         onFocusTool={() => undefined}
         onFocusEvent={onFocusEvent}
         panel={panel}
+        open={open}
         onPanelAction={onPanelAction}
       />
     </main>
@@ -66,6 +67,44 @@ function Host({ conv, onAction }: { conv: ConversationState; onAction?: (a: Insp
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+
+/** P2-3 多槽夹具：A/B 两个会话共用同一个 Inspector（面板保持展开，模拟钉住）。 */
+function SwitchHost({ a, b }: { a: ConversationState; b: ConversationState }) {
+  const [active, setActive] = useState(a);
+  const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
+  const [panel, setPanel] = useState({ pinned: true, expanded: false, width: 360, peekOpen: false });
+  const onFocusEvent = useCallback((event: AgentEvent) => {
+    setFocus({ kind: 'event', event });
+    setPanel((cur) => (cur.peekOpen ? cur : { ...cur, peekOpen: true }));
+  }, []);
+  const onPanelAction = useCallback((action: InspectorPanelAction) => {
+    setPanel((cur) => {
+      if (action.type === 'close-peek') return { ...cur, peekOpen: false };
+      return cur;
+    });
+  }, []);
+  const pick = (next: ConversationState) => {
+    setFocus({ kind: 'run' });
+    setActive(next);
+  };
+  return (
+    <main className="app-regions">
+      <button className="host-a" onClick={() => pick(a)}>A</button>
+      <button className="host-b" onClick={() => pick(b)}>B</button>
+      <StepDetail
+        conversation={active}
+        streaming
+        focus={focus}
+        onFocusRun={() => setFocus({ kind: 'run' })}
+        onFocusTool={() => undefined}
+        onFocusEvent={onFocusEvent}
+        panel={panel}
+        open
+        onPanelAction={onPanelAction}
+      />
+    </main>
+  );
+}
 
 beforeAll(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -177,7 +216,7 @@ describe('#1419 Timeline 卡片流交互', () => {
     expect(card).toBeTruthy();
 
     const live = applyEvent(conversation(), {
-      type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 6, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:06.000Z',
+      type: EventType.TEXT_DELTA, data: { delta: 'x' }, seq: 6, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:06.000Z',
     });
     render(<Host conv={live} />);
     expect(rows()).toHaveLength(EVENTS.length + 1);
@@ -189,7 +228,7 @@ describe('#1419 Timeline 卡片流交互', () => {
     let big = initConversation('big');
     for (let i = 0; i < 600; i++) {
       big = applyEvent(big, {
-        type: EventType.MODEL_DELTA,
+        type: EventType.TEXT_DELTA,
         data: { delta: 'x' },
         seq: i,
         run_id: 'r1',
@@ -214,5 +253,111 @@ describe('#1419 Timeline 卡片流交互', () => {
     expect(container!.querySelector('.tl-empty')).not.toBeNull();
     click(container!.querySelector('.tl-empty-reset'));
     expect(rows()).toHaveLength(EVENTS.length);
+  });
+
+  it('P1-1：hover 卡片出现 tooltip（完整时间 + step）', () => {
+    render(<Host conv={conversation()} />);
+    act(() => {
+      rows()[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+    });
+    const tip = container!.querySelector<HTMLElement>('.tl-tooltip');
+    expect(tip).not.toBeNull();
+    expect(tip!.textContent).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(tip!.textContent).toContain('step 1');
+  });
+
+  it('P2-1：同 run 多条 seq-less model/started —— 点一张只展开一张，DOM id 不重复', () => {
+    const seqLess: ConversationState = ([
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'sl', time: '2026-10-20T10:00:00.000Z' },
+      { type: EventType.MODEL_STARTED, data: { model: 'gpt' }, seq: null, run_id: 'r1', session_id: 'sl', time: '2026-10-20T10:00:01.000Z' },
+      { type: EventType.MODEL_STARTED, data: { model: 'gpt' }, seq: null, run_id: 'r1', session_id: 'sl', time: '2026-10-20T10:00:02.000Z' },
+      { type: EventType.RUN_COMPLETED, data: {}, seq: 4, run_id: 'r1', session_id: 'sl', time: '2026-10-20T10:00:03.000Z' },
+    ] as AgentEvent[]).reduce(applyEvent, initConversation('sl'));
+    render(<Host conv={seqLess} />);
+    click(rows()[1]);
+    expect(expandedCards()).toHaveLength(1);
+    expect(rows()[1].getAttribute('aria-expanded')).toBe('true');
+    expect(rows()[2].getAttribute('aria-expanded')).toBe('false');
+    const ids = Array.from(container!.querySelectorAll<HTMLElement>('[id^="tl-expand-"]')).map((el) => el.id);
+    expect(ids).toHaveLength(1);
+    expect(rows()[1].getAttribute('aria-controls')).toBe(ids[0]);
+    expect(rows()[2].getAttribute('aria-controls')).toBeNull();
+    // 第二张也能独立展开（键不冲突）。
+    click(rows()[2]);
+    expect(expandedCards()).toHaveLength(2);
+    expect(new Set(Array.from(container!.querySelectorAll<HTMLElement>('[id^="tl-expand-"]')).map((el) => el.id)).size).toBe(2);
+  });
+
+  it('P2-2：Space 不再抢按钮/链接的原生激活；卡片本体仍保留 Space=peek', () => {
+    render(<Host conv={conversation()} />);
+    const chip = Array.from(container!.querySelectorAll<HTMLElement>('.tl-chip'))
+      .find((c) => c.textContent?.includes('工具'))!;
+    const chipSpace = new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true });
+    act(() => chip.dispatchEvent(chipSpace));
+    expect(chipSpace.defaultPrevented).toBe(false);
+
+    const rowSpace = new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true });
+    act(() => rows()[1].dispatchEvent(rowSpace));
+    expect(rowSpace.defaultPrevented).toBe(true);
+  });
+
+  it('P2-3：App 侧关闭（绕过 onPanelAction）也清空展开；重开无残留', () => {
+    render(<Host conv={conversation()} />);
+    click(rows()[1]);
+    expect(expandedCards()).toHaveLength(1);
+    click(container!.querySelector('.host-toggle')); // 模拟 rail 菜单 / 会话切换的外部关闭
+    expect(container!.querySelector('main')!.getAttribute('data-open')).toBe('false');
+    click(container!.querySelector('.host-toggle'));
+    expect(container!.querySelector('main')!.getAttribute('data-open')).toBe('true');
+    expect(expandedCards()).toHaveLength(0);
+  });
+
+  it('P2-3：A/B 会话各自维护展开集，切回不覆盖', () => {
+    const a = EVENTS.map((e) => ({ ...e, session_id: 'sa' })).reduce(applyEvent, initConversation('sa'));
+    const b = EVENTS.map((e) => ({ ...e, session_id: 'sb' })).reduce(applyEvent, initConversation('sb'));
+    render(<SwitchHost a={a} b={b} />);
+    click(rows()[1]);
+    expect(expandedCards()).toHaveLength(1);
+
+    click(container!.querySelector('.host-b'));
+    click(rows()[2]);
+    expect(expandedCards()).toHaveLength(1);
+
+    click(container!.querySelector('.host-a'));
+    expect(rows()[1].getAttribute('aria-expanded')).toBe('true');
+    expect(rows()[2].getAttribute('aria-expanded')).toBe('false');
+
+    click(container!.querySelector('.host-b'));
+    expect(rows()[2].getAttribute('aria-expanded')).toBe('true');
+    expect(rows()[1].getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('P3-9：同时展开上限 3 张，超出淘汰最早一张', () => {
+    render(<Host conv={conversation()} />);
+    click(rows()[0]);
+    click(rows()[1]);
+    click(rows()[2]);
+    expect(expandedCards()).toHaveLength(3);
+    click(rows()[3]);
+    expect(expandedCards()).toHaveLength(3);
+    expect(rows()[0].getAttribute('aria-expanded')).toBe('false');
+    expect(rows()[1].getAttribute('aria-expanded')).toBe('true');
+    expect(rows()[3].getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('P3-10：选中卡被筛选隐藏时 Enter 不展开（清筛选后不凭空出现）', () => {
+    render(<Host conv={conversation()} />);
+    click(rows()[3]); // model/request：选中 + 展开
+    click(rows()[3]); // 收起，选中仍在
+    expect(expandedCards()).toHaveLength(0);
+    const chip = Array.from(container!.querySelectorAll<HTMLElement>('.tl-chip'))
+      .find((c) => c.textContent?.includes('工具'))!;
+    click(chip);
+    expect(rows().some((r) => r.textContent?.includes('model/request'))).toBe(false);
+    key('Enter');
+    const all = Array.from(container!.querySelectorAll<HTMLElement>('.tl-chip'))
+      .find((c) => c.textContent?.includes('全部'))!;
+    click(all);
+    expect(expandedCards()).toHaveLength(0);
   });
 });

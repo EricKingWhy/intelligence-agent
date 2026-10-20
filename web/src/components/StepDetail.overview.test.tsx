@@ -46,7 +46,7 @@ const section = (id: string) => container!.querySelector<HTMLElement>(`[data-ov-
 const click = (el: Element | null | undefined) => act(() => (el as HTMLElement).click());
 
 describe('#1419 Overview', () => {
-  it('4 张指标卡：值来自 usage_total / cost_usd，不补 0', () => {
+  it('4 张指标卡：值来自 session_usage_total / model/request 成本，不补 0', () => {
     render();
     const metrics = Array.from(container!.querySelectorAll<HTMLElement>('.ov-metric'));
     expect(metrics).toHaveLength(4);
@@ -55,6 +55,44 @@ describe('#1419 Overview', () => {
     expect(text[1]).toContain('110');
     expect(text[2]).toContain('$0.3');
     expect(text[3]).toContain('5.0s');
+  });
+
+  it('P2-4：多 run 夹具 —— tokens/成本是会话累计，耗时是本轮，三者文案同作用域', () => {
+    const multi = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'ov2', time: '2026-10-20T10:00:00.000Z' },
+      { type: EventType.MODEL_REQUEST, data: { outcome: 'completed', duration_ms: 1000, usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }, cost_usd: '0.10' }, seq: 2, run_id: 'r1', session_id: 'ov2', time: '2026-10-20T10:00:01.000Z' },
+      { type: EventType.RUN_COMPLETED, data: { usage_total: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }, cost_usd: 0.1 }, seq: 3, run_id: 'r1', session_id: 'ov2', time: '2026-10-20T10:00:02.000Z' },
+      { type: EventType.RUN_STARTED, data: {}, seq: 4, run_id: 'r2', session_id: 'ov2', time: '2026-10-20T10:00:10.000Z' },
+      { type: EventType.MODEL_REQUEST, data: { outcome: 'completed', duration_ms: 2000, usage: { prompt_tokens: 120, completion_tokens: 60, total_tokens: 180 }, cost_usd: '0.20' }, seq: 5, run_id: 'r2', session_id: 'ov2', time: '2026-10-20T10:00:11.000Z' },
+      { type: EventType.RUN_COMPLETED, data: { usage_total: { prompt_tokens: 120, completion_tokens: 60, total_tokens: 180 }, cost_usd: 0.2 }, seq: 6, run_id: 'r2', session_id: 'ov2', time: '2026-10-20T10:00:12.000Z' },
+    ];
+    const conv = multi.reduce(applyEvent, initConversation('ov2'));
+    act(() => root!.render(<ChatTab conversation={conv} tools={[]} />));
+    const metrics = Array.from(container!.querySelectorAll<HTMLElement>('.ov-metric'));
+    const text = metrics.map((m) => m.textContent ?? '');
+    expect(text[0]).toContain('220'); // 会话累计（r1+r2），不是最近 run 的 120
+    expect(text[1]).toContain('110');
+    expect(text[2]).toContain('$0.30'); // 两笔 model/request 相加
+    expect(text[0]).toContain('会话累计');
+    expect(text[2]).toContain('会话成本');
+    expect(text[3]).toContain('本轮耗时');
+    expect(text[3]).toContain('2.0s');
+    expect(text[3]).toContain('本轮最长单次 2.0s');
+  });
+
+  it('P3-12：缺失 usage 显示「—」，不补 0', () => {
+    const missing = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'ov3', time: '2026-10-20T10:00:00.000Z' },
+      { type: EventType.MODEL_REQUEST, data: { outcome: 'completed', duration_ms: 500 }, seq: 2, run_id: 'r1', session_id: 'ov3', time: '2026-10-20T10:00:01.000Z' },
+      { type: EventType.RUN_COMPLETED, data: {}, seq: 3, run_id: 'r1', session_id: 'ov3', time: '2026-10-20T10:00:02.000Z' },
+    ];
+    const conv = missing.reduce(applyEvent, initConversation('ov3'));
+    act(() => root!.render(<ChatTab conversation={conv} tools={[]} />));
+    const values = Array.from(container!.querySelectorAll<HTMLElement>('.ov-metric-value')).map((el) => el.textContent);
+    expect(values[0]).toBe('—');
+    expect(values[1]).toBe('—');
+    expect(values[2]).toBe('—');
+    expect(values).not.toContain('0');
   });
 
   it('8 个折叠段；默认展开 RUN/TOOLS/决定/PERMISSION，其余收起且内容仍在 DOM', () => {
