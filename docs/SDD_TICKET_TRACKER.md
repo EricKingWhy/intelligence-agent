@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**补修中（2026-10-21，#1360）**：本地分支 `codex/1360-code-mode` 到 `36ae9396`，尚未推送 PR #1426。补丁修复 Windows Docker `NpipeSocket.recv()` 兼容和 `ZoneInfo` 缺少 Windows tzdata，并补流读取回归测试。两轴复审 PASS、P0–P4=0；定向 worker 4、transport 2、Watchtower 28、context/evaluation 587 项通过。全量后端测试在 42% 按用户指示中止，观察到 1 个未定位失败（使用 `--tb=no`），之后相关范围未复现；不计作全量通过。初次 Gate-0 5/6，仅 coverage 因本轮台账未落账失败；见月档，落账后重跑。
+**补修中（2026-10-21，#1360）**：分支 `codex/1360-code-mode` 的本地 tip 为 `9ae67746`，Windows 补修尚未推送到 PR #1426。修复 Windows Docker `NpipeSocket.recv()` 兼容、增加流读取回归，并将经哈希核验的 tzdata 2026.5 wheel 补入 Windows 离线运行时锁。两轴复审 PASS、P0–P4=0；worker 4、transport 2、Watchtower 28、context/evaluation 587、installer lock 5 项通过；desktop `npm test` 与 `npm run check` 通过。后端全量测试按用户要求未重跑；此前 42% 中断红点经 179 节点增量复现定位为 `test_closure_covers_pyproject_runtime_deps` 缺 tzdata，修后该锁文件测试 5 项通过；全量仍不宣称通过。Gate-0 6/6 仅适用于前一树 f62a6990；当前 tip 的 Gate-0 待重跑。见月档。
 
 **已交付（2026-10-20，#1360；Issue CLOSED，PR #1426 等待维护者合并）**：PR [#1426](https://github.com/EricKingWhy/intelligence-agent/pull/1426) 已推送并标记 `等待merge`；分支 `codex/1360-code-mode`，基线 `204c9152`，最终产品代码 `6547475`。双轴审查 P0–P4=0；后端全量 8762 passed / 78 skipped / 43 deselected（SHA `3288f937`，最终测试修复后按用户批准复用），Vitest 166 files / 2263 tests passed、各 1 skipped，Vite build 成功，Playwright 840 passed。review coverage exit 0；Gate-0 收据 `docs/gate/2b08b04effffc347c8dcea2688ad36b3de0cb4ad.json` 为 6/6 PASS；GitHub Gate-0、PR E2E smoke、gitleaks 已通过（PR HEAD `f6e8db3a`）。PR 显示 `BEHIND`；按用户指示不追 main，由维护者合并前处理。
 

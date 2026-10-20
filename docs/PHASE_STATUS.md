@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-21：#1360 在本地分支 `36ae9396` 补入 Windows 兼容修复与 socket 回归；PR #1426 待推送。两轴复审 PASS、P0–P4=0。全量后端运行按用户指示停在 42%，含 1 个未定位失败；context/evaluation 587 项复跑通过，不记全量通过。Gate-0 首次 5/6（coverage 待落本轮 review 行）；后续状态见月档。
+- 2026-10-21：#1360 本地补修 tip `9ae67746`（PR #1426 尚未更新）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补入 tzdata 2026.5。两轴复审 PASS；installer lock 5 项、desktop `npm test` 与 `npm run check` 通过。后端全量按用户要求未重跑；中断时出现的红点已由小范围复现定位并修复，不宣称全量通过。前一树 f62a6990 Gate-0 6/6；当前 tip Gate-0 待重跑。详见月档。
 
 - 2026-10-20：#1360 已交付；Issue CLOSED，PR #1426（`等待merge`）等待维护者合并。Gate-0 收据 6/6 PASS，GitHub Gate-0/E2E/gitleaks 通过。PR 显示 BEHIND；遵从用户要求未同步 main。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
 
