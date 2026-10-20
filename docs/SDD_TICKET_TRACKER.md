@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**当前后续修复中（2026-10-21，#1360）**：PR #1426 于 2026-10-20 合入 main（merge `20280a99`）。合并后复审发现 P2：RecoveryCoordinator 恢复合成的外层 `exec` 与 PENDING 结果漏记已接纳调用，可能使续跑低估 tool quota；修复提交 `44067128`（分支 `codex/fix-1360-recovery-budget`），两轴复审无新发现；PENDING 与 Docker kill/recovery 定向测试 2 passed，ruff 与 diff-check 通过。后续 PR 尚未创建。既有 Windows runtime lock 补修明细见月档。
+**当前后续修复中（2026-10-21，#1360）**：PR #1426 于 2026-10-20 合入 main（merge `20280a99`）。合并后复审发现 P2：RecoveryCoordinator 恢复合成的外层 `exec` 与 PENDING 结果漏记已接纳调用，可能使续跑低估 tool quota；修复提交 `44067128`（分支 `codex/fix-1360-recovery-budget`），两轴复审无新发现；PENDING 与 Docker kill/recovery 定向测试 2 passed，ruff 与 diff-check 通过。后续 PR [#1431](https://github.com/EricKingWhy/intelligence-agent/pull/1431) 已开并标记 `等待merge`；Gate-0 收据见 `docs/gate/ac99f3f107b1679363770b305a5ba3ad5d0b422b.json`。既有 Windows runtime lock 补修明细见月档。
 
 **Windows runtime lock 补修记录（2026-10-21，#1360）**：分支 `codex/1360-code-mode` 本地 tip `61ba21c4`（tree `9558d446d2d0d931108bfdae12cbade5ea8ae8d2`），PR #1426 已于 2026-10-20 合入（merge `20280a99`）；已 fetch 最新 `origin/main`，其为本分支祖先，无需合并。修复 Windows Docker `NpipeSocket.recv()` 兼容、增加流读取回归，并将经哈希核验的 tzdata 2026.5 wheel 补入 Windows 离线运行时锁。两轴复审 PASS、P0–P4=0；worker 4、transport 2、Watchtower 28、context/evaluation 587、installer lock 5 项通过，desktop `npm test` 与 `npm run check` 通过。后端全量按用户要求未重跑；中断全量的红点已由 179 节点增量切片定位为 installer lock 缺少 tzdata 并修复，全量仍不宣称通过。增量 Gate-0 3/3（diff-check/guards/coverage）与裸 Gate-0 6/6 通过；收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`，295.29s。coverage 有 14 条历史 receipt-present 首周 warn-only 提醒，未影响 6/6 判定。详见月档。
 
