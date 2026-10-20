@@ -38,12 +38,15 @@ from agent_harness.memory.v2 import (
 )
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.commands import explicit_remember_matches
-from agent_harness.memory.v2.eligibility import decide_run_end_eligibility
+from agent_harness.memory.v2.eligibility import (
+    MEMORY_OPT_OUT_FIELD,
+    decide_run_end_eligibility,
+)
 from agent_harness.memory.v2.executor import MemoryJobExecutor, MemoryModelStage
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.jobs import MemoryJobStage, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
-from agent_harness.memory.v2.policy import resolve_evidence_source
+from agent_harness.memory.v2.policy import find_secret, resolve_evidence_source
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.runner import MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -267,7 +270,66 @@ _SCRIPTS: dict[str, dict[str, Any]] = {
             "category": "project_fact",
         },
     },
+    "explicit_remember_secret_probe": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "api_key=NEVER-A-REAL-CREDENTIAL",
+        "payload": {
+            "subject": "api_key",
+            "fact": "api_key=NEVER-A-REAL-CREDENTIAL",
+            "category": "project_fact",
+        },
+    },
 }
+
+#: Cases whose only write path is the explicit `remember_this` tool.
+_EXPLICIT_CASES = frozenset({"explicit_remember", "explicit_remember_secret_probe"})
+
+#: Scripted model outputs for the NOOP family. A `None` formation script is the
+#: model's abstention; the other entries are candidates the runtime policy must
+#: reject (assistant-only evidence, sensitive self-report). The candidate content
+#: is a literal corpus-style constant, never read from `case.expected`.
+_NOOP_SCRIPTS: dict[str, dict[str, Any] | None] = {
+    "transient_noop": None,
+    "unsupported_assistant_claim": {
+        "kind": "semantic",
+        "scope": "user_global",
+        "content": "The user's favorite editor is Pine.",
+        "payload": {
+            "subject": "favorite editor",
+            "fact": "The user's favorite editor is Pine.",
+            # `profile` makes this a user fact, so R6 rejects assistant-only evidence.
+            "category": "profile",
+        },
+        "evidence_event_id": "assistant",
+    },
+    "sensitive_without_consent": {
+        "kind": "semantic",
+        "scope": "project",
+        "content": "Synthetic health detail without an explicit request to remember it.",
+        "payload": {
+            "subject": "synthetic health detail",
+            "fact": "Synthetic health detail without an explicit request to remember it.",
+            "category": "project_fact",
+        },
+        "sensitivity": "sensitive",
+        "sensitive_category": "health",
+    },
+}
+
+#: Trigger scripts for the ineligible family. Each entry is the run-end shape the
+#: runtime must act on: terminal status, event set, and whether the message came
+#: from the runtime rather than the user.
+_INELIGIBLE_SCRIPTS: dict[str, dict[str, Any]] = {
+    "ineligible_cancelled": {"terminal_status": "cancelled"},
+    "ineligible_startup_failure": {"terminal_status": "failed"},
+    "ineligible_no_model_call": {"terminal_status": STATUS_COMPLETED, "model_call": False},
+    "ineligible_no_genuine_user_input": {"terminal_status": STATUS_COMPLETED, "injected": True},
+    "explicit_opt_out": {"terminal_status": STATUS_COMPLETED, "opt_out": True},
+}
+
+#: The explicit-command secret probe: the tool boundary must refuse to persist it.
+_EXPLICIT_SECRET_PROBE = "explicit_remember_secret_probe"
 
 
 def _trusted_identity(case_id: str) -> TrustedMemoryIdentity:
@@ -295,6 +357,20 @@ def _roles() -> MemoryModelRoles:
 def _events_for_case(
     case: GoldCase, session_id: str, run_id: str
 ) -> list[SessionEvent]:
+    ineligible = _INELIGIBLE_SCRIPTS.get(case.case_id)
+    if case.case_id == "unsupported_assistant_claim":
+        user_data: dict[str, Any] = {
+            "content": "What should be retained from this synthetic conversation?"
+        }
+        assistant_content = case.synthetic_input
+    else:
+        user_data = {"content": case.synthetic_input}
+        assistant_content = "Acknowledged."
+    if ineligible is not None:
+        if ineligible.get("injected"):
+            user_data["injected_by"] = "memory-v2-gold-runner"
+        if ineligible.get("opt_out"):
+            user_data[MEMORY_OPT_OUT_FIELD] = True
     tool_calls = (
         [
             {"id": f"{case.case_id}-call-{number}", "name": tool_name, "args": {}}
@@ -313,20 +389,23 @@ def _events_for_case(
             type=USER_MESSAGE,
             session_id=session_id,
             run_id=run_id,
-            data={"content": case.synthetic_input},
-        ),
-        SessionEvent(
-            event_id=f"{case.case_id}-assistant",
-            seq=2,
-            type=MODEL_COMPLETED,
-            session_id=session_id,
-            run_id=run_id,
-            data={
-                "content": "Acknowledged.",
-                **({"tool_calls": tool_calls} if tool_calls else {}),
-            },
+            data=user_data,
         ),
     ]
+    if ineligible is None or ineligible.get("model_call", True):
+        events.append(
+            SessionEvent(
+                event_id=f"{case.case_id}-assistant",
+                seq=2,
+                type=MODEL_COMPLETED,
+                session_id=session_id,
+                run_id=run_id,
+                data={
+                    "content": assistant_content,
+                    **({"tool_calls": tool_calls} if tool_calls else {}),
+                },
+            )
+        )
     for offset, tool_call in enumerate(tool_calls):
         events.append(
             SessionEvent(
@@ -359,8 +438,23 @@ def _events_for_case(
     return events
 
 
-def _model_outputs(script: Mapping[str, Any]) -> tuple[str, str]:
+def _model_outputs(script: Mapping[str, Any] | None) -> tuple[str, str]:
+    """Formation/adjudication text for one scripted candidate, or a NO_MEMORY abstention."""
+    if script is None:
+        return (
+            json.dumps(
+                {
+                    "decision": "NO_MEMORY",
+                    "candidates": [],
+                    "skip_reason": "no_durable_value",
+                },
+                ensure_ascii=False,
+            ),
+            "",
+        )
     content = script["content"]
+    # Evidence aliases are `e1`/`e2` in projection order (user then assistant).
+    alias = {"user": "e1", "assistant": "e2"}[script.get("evidence_event_id", "user")]
     candidate: dict[str, Any] = {
         "kind": script["kind"],
         "tier": "collection",
@@ -369,9 +463,17 @@ def _model_outputs(script: Mapping[str, Any]) -> tuple[str, str]:
         "payload": {"kind": script["kind"], **script["payload"]},
         "importance": 0.8,
         "strength": 0.9,
-        "evidence": [{"event_id": "e1", "role": "user", "excerpt": content[:300]}],
-        "sensitivity": "ordinary",
+        "evidence": [
+            {
+                "event_id": alias,
+                "role": script.get("evidence_event_id", "user"),
+                "excerpt": content[:300],
+            }
+        ],
+        "sensitivity": script.get("sensitivity", "ordinary"),
     }
+    if script.get("sensitive_category") is not None:
+        candidate["sensitive_category"] = script["sensitive_category"]
     if script["kind"] == "procedural":
         candidate["evidence"] += [
             {"event_id": "e3", "role": "tool", "excerpt": "run integration tests"},
@@ -411,8 +513,10 @@ def _observed(
     observer_rows: Sequence[tuple[str, Mapping[str, Any]]],
     result: Any,
     elapsed_ms: int,
-    script: Mapping[str, Any],
+    script: Mapping[str, Any] | None,
     explicit_remember_applied: bool,
+    secret_probe_path: str = "none",
+    secret_probe_attempted: bool = False,
 ) -> dict[str, Any]:
     """Build the 31-field observation from returned records and service state."""
     observed = neutral_observation()
@@ -431,6 +535,10 @@ def _observed(
                 if event_id in event_by_id
             }
         )
+    elif script is not None and script.get("evidence_event_id") == "assistant":
+        # The (policy-rejected) candidate was attributed to the assistant, so the run's
+        # observable authority is the assistant, not the user who asked the question.
+        source_authority = ["assistant"]
     else:
         source_authority = sorted(
             {
@@ -444,7 +552,8 @@ def _observed(
         record for record in written if record.status is not MemoryStatus.INVALIDATED
     )
     write_match_count = int(
-        any(
+        script is not None
+        and any(
             record.kind.value == script["kind"]
             and record.scope.value == script["scope"]
             and write_fact_matches(record.content, script["content"])
@@ -472,6 +581,7 @@ def _observed(
     observed.update(
         {
             "eligibility": eligibility.eligible,
+            "trigger_job_created": trigger_job_created,
             "trigger_reason": (
                 eligibility.skip_reason.value
                 if eligibility.skip_reason is not None
@@ -481,7 +591,8 @@ def _observed(
             "kind": kind,
             "scope": scope,
             "source_authority": source_authority,
-            "trigger_job_created": trigger_job_created,
+            "secret_probe_path": secret_probe_path,
+            "secret_probe_attempted": secret_probe_attempted,
             "explicit_remember_applied": explicit_remember_applied,
             "written_count": len(written),
             "add_update_record_count": len(add_update_records),
@@ -515,6 +626,13 @@ def _observed(
     observed["prohibited_outcomes"] = (
         ["secret_write"] if observed["secret_write_count"] else []
     )
+    if not eligibility.eligible and written:
+        observed["prohibited_outcomes"].append("ineligible_write")
+    if script is not None and script.get("sensitivity") == "sensitive" and written:
+        observed["prohibited_outcomes"].append("sensitive_write")
+    observed["ineligible_trigger_write_count"] = int(
+        not eligibility.eligible and bool(written)
+    )
     observed["_completed"] = completed
     return observed
 
@@ -524,14 +642,16 @@ async def _execute_wired(
     workspace: CaseWorkspace,
     service: MemoryV2Service,
     jobs: SqliteMemoryV2JobStore,
-    script: Mapping[str, Any],
+    script: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     session_id = f"gold-{uuid.uuid4().hex}"
     run_id = f"run-{uuid.uuid4().hex}"
     trusted = _trusted_identity(case.case_id)
     events = _events_for_case(case, session_id, run_id)
+    ineligible = _INELIGIBLE_SCRIPTS.get(case.case_id)
+    terminal_status = ineligible["terminal_status"] if ineligible else STATUS_COMPLETED
     eligibility = decide_run_end_eligibility(
-        terminal_status=STATUS_COMPLETED,
+        terminal_status=terminal_status,
         events=events,
     )
     observer_rows: list[tuple[str, Mapping[str, Any]]] = []
@@ -540,9 +660,14 @@ async def _execute_wired(
     explicit_remember_applied = False
     explicit_action: str | None = None
     written: tuple[Any, ...] = ()
+    secret_probe_path = (
+        "explicit_remember" if case.case_id == _EXPLICIT_SECRET_PROBE else "none"
+    )
+    secret_probe_attempted = case.case_id == _EXPLICIT_SECRET_PROBE
     started = time.monotonic()
 
-    if case.case_id == "explicit_remember":
+    if case.case_id in _EXPLICIT_CASES:
+        assert script is not None
         # Explicit writes go through the production `remember_this` boundary.
         sessions = JsonlSessionStore(root=workspace.root / "sessions")
         user_event = events[0]
@@ -650,27 +775,31 @@ async def _execute_wired(
             trigger_job = await runtime.notify_run_finished(
                 session_id=session_id,
                 run_id=run_id,
-                terminal_status=STATUS_COMPLETED,
+                terminal_status=terminal_status,
                 events=events,
             )
         finally:
             identity_context_var.reset(identity_token)
         trigger_job_created = trigger_job is not None
         if trigger_job is None:
-            return {"status": "failed", "error_type": "EligibleRunWasNotEnqueued"}
-        claimed = await jobs.claim(worker_id="memory-v2-gold-runner")
-        if claimed is None:
-            return {"status": "failed", "error_type": "MemoryJobNotClaimed"}
-        result = await executor.run(
-            claimed,
-            worker_id="memory-v2-gold-runner",
-            run_events=events,
-            roles=_roles(),
-        )
-        await runtime.aclose()
-        if result is None:
-            return {"status": "failed", "error_type": "MemoryJobOwnershipLost"}
-        written = result.written
+            # Ineligible run: the notifier must enqueue nothing. Still measure it.
+            await runtime.aclose()
+            if eligibility.eligible:
+                return {"status": "failed", "error_type": "EligibleRunWasNotEnqueued"}
+        else:
+            claimed = await jobs.claim(worker_id="memory-v2-gold-runner")
+            if claimed is None:
+                return {"status": "failed", "error_type": "MemoryJobNotClaimed"}
+            result = await executor.run(
+                claimed,
+                worker_id="memory-v2-gold-runner",
+                run_events=events,
+                roles=_roles(),
+            )
+            await runtime.aclose()
+            if result is None:
+                return {"status": "failed", "error_type": "MemoryJobOwnershipLost"}
+            written = result.written
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     active: list[Any] = []
@@ -713,6 +842,8 @@ async def _execute_wired(
         elapsed_ms=elapsed_ms,
         script=script,
         explicit_remember_applied=explicit_remember_applied,
+        secret_probe_path=secret_probe_path,
+        secret_probe_attempted=secret_probe_attempted,
     )
     completed = observed.pop("_completed")
     status = (
@@ -731,9 +862,13 @@ async def _execute_wired(
 
 
 async def execute_case(case: GoldCase) -> Mapping[str, Any]:
-    """Run one gold case: real wiring for the 5 wired cases, neutral otherwise."""
-    script = _SCRIPTS.get(case.case_id)
-    if script is None:
+    """Run one gold case: real wiring for the wired families, neutral otherwise."""
+    wired = (
+        case.case_id in _SCRIPTS
+        or case.case_id in _NOOP_SCRIPTS
+        or case.case_id in _INELIGIBLE_SCRIPTS
+    )
+    if not wired:
         started = time.perf_counter()
         with TemporaryDirectory(prefix=f"gold-{case.case_id}-") as tmp:
             workspace = CaseWorkspace(Path(tmp))
@@ -746,6 +881,7 @@ async def execute_case(case: GoldCase) -> Mapping[str, Any]:
             "trace_id": uuid.uuid4().hex,
             "model_attempts": [],
         }
+    script = _SCRIPTS.get(case.case_id, _NOOP_SCRIPTS.get(case.case_id))
     with TemporaryDirectory(prefix=f"gold-{case.case_id}-") as tmp:
         workspace = CaseWorkspace(Path(tmp))
         service, jobs = await workspace.open()
@@ -789,28 +925,44 @@ async def _smoke(
     return report, raw
 
 
+def _wired_case_ids() -> set[str]:
+    return {*_SCRIPTS, *_NOOP_SCRIPTS, *_INELIGIBLE_SCRIPTS}
+
+
 def _print_slice(dataset: Path, raw: Sequence[Mapping[str, Any]]) -> None:
     corpus, cases = load_memory_gold(dataset)
-    selected = [case for case in cases if case.case_id in _SCRIPTS]
-    results = [item for item in raw if item["case_id"] in _SCRIPTS]
+    wired = _wired_case_ids()
+    selected = [case for case in cases if case.case_id in wired]
+    results = [item for item in raw if item["case_id"] in wired]
     slice_report = evaluate_memory_gold(corpus, selected, results)
-    print("wired_cases:", ", ".join(sorted(_SCRIPTS)))
+    print("wired_cases:", ", ".join(sorted(wired)))
     for item in results:
         observed = item["observed"]
         print(
             f"  {item['case_id']}: status={item['status']} "
             f"action={observed['action']} kind={observed['kind']} "
             f"scope={observed['scope']} eligibility={observed['eligibility']} "
+            f"trigger_reason={observed['trigger_reason']} "
+            f"job_created={observed['trigger_job_created']} "
+            f"ineligible_writes={observed['ineligible_trigger_write_count']} "
             f"authority={observed['source_authority']} "
+            f"secret_path={observed['secret_probe_path']} "
+            f"secret_attempted={observed['secret_probe_attempted']} "
+            f"secret_blocked={observed['secret_probe_blocked']} "
+            f"explicit_applied={observed['explicit_remember_applied']} "
             f"written={observed['written_count']} "
             f"add_update={observed['add_update_record_count']} "
             f"match={observed['write_match_count']}"
         )
     for name in (
+        "noop_accuracy",
+        "ineligible_trigger_writes",
+        "ineligible_trigger_jobs",
+        "secret_writes",
+        "secret_path_coverage",
         "write_precision",
         "write_target_coverage",
         "kind_accuracy",
-        "secret_writes",
     ):
         metric = slice_report["metrics"][name]
         print(
