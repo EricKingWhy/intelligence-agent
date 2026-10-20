@@ -40,6 +40,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -84,7 +85,6 @@ _CJK_RANGES = (
 )
 _FTS5_SPECIAL_RE = re.compile(r"""[+{}():"^@/#&|~\[\]<>,;!?$=\\']""")
 _QUOTED_PHRASE_RE = re.compile(r'"[^"]*"')
-_QUOTED_PHRASE = re.compile(r'"[^"]*"')
 _FTS_OPERATORS = frozenset({"AND", "OR", "NOT"})
 
 _BUSY_TIMEOUT_MS = 10_000
@@ -120,6 +120,19 @@ _PROGRESS = (
 )
 
 _SCHEMA_SQL = """
+-- 待裁决列（#1389 票面「全量建表、零裁剪」）：裁决前不许删，详见 issue #1389。
+--   sessions：billing_* / estimated_cost_usd / actual_cost_usd / cost_status /
+--             cost_source / pricing_version（计费与成本）、handoff_*（交接）、
+--             compression_*（压缩恢复）、chat_id / chat_type / thread_id /
+--             session_key / user_id / created_source / profile_name /
+--             transport_profile / origin_json / expiry_finalized / display_name /
+--             archived / auto_archived / pinned / hidden（平台与归档语义）。
+--   messages：codex_*（模型侧 reasoning 载荷）、display_* / message_uid /
+--             absorbed_message_uids / tool_call_uids / tool_call_uid /
+--             platform_message_id（展示与去重）、effect_disposition / observed
+--             （副作用对账）、api_content / _compressed_summary / active /
+--             compacted（压缩与检索可见性）。
+--   session_model_usage：billing_* / *_cost_usd / cost_status / cost_source（计费）。
 CREATE TABLE IF NOT EXISTS system_prompts (
     hash TEXT PRIMARY KEY,
     prompt TEXT NOT NULL
@@ -495,7 +508,6 @@ def _parse_time_bound(value: str | None) -> float | None:
     match = _RELATIVE_BOUND_RE.match(text)
     if match:
         return time.time() - int(match.group(1)) * _RELATIVE_UNIT_SECONDS[match.group(2).lower()]
-    from datetime import UTC, datetime
 
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
     parsed = datetime.fromisoformat(normalized)
@@ -610,19 +622,44 @@ class SessionArchive:
         self._initialize_cjk()
 
     def _initialize_cjk(self) -> None:
-        """CJK 表与**它的**触发器分开建：索引不完整时触发器必须保持缺席。"""
+        """CJK 表与**它的**触发器分开建：索引不完整时触发器必须保持缺席。
+
+        三分支语义照抄 Hermes `hermes_state_fts.py:243-300`；本仓无 `optimize-storage`
+        命令，所以 Hermes 在那边做的「stale 索引整体重建 + 回填」收敛到本方法
+        （`_reset_cjk_if_stale` / `_backfill_cjk`）。
+        """
         available = self._load_cjk_extension()
         with self._cursor() as conn:
             if not available:
-                # fail-open：摘触发器，写路径继续可用；检索降级 trigram/LIKE。
-                for name in _CJK_TRIGGERS:
-                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                self._degrade_cjk(conn)
+                return
+            # 缺口范围未知的 stale 索引只能从零重建（Hermes `_fts_cjk_reset_if_stale`）。
+            self._reset_cjk_if_stale(conn)
+            self._ensure_cjk_schema(conn)
+            self._backfill_cjk(conn)
+
+    def _degrade_cjk(self, conn: sqlite3.Connection) -> None:
+        """fail-open：摘触发器，写路径继续可用；检索降级 trigram/LIKE。"""
+        cjk_present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_cjk'"
+        ).fetchone()
+        if cjk_present:
+            live = [
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                    f"AND name IN ({','.join('?' for _ in _CJK_TRIGGERS)})",
+                    _CJK_TRIGGERS,
+                ).fetchall()
+            ]
+            if live:
+                # 先落 stale 标记再摘触发器：两步之间崩溃只会多留一个保守标记。
                 conn.execute(
                     "INSERT INTO state_meta(key, value) VALUES(?, '1') "
                     "ON CONFLICT(key) DO UPDATE SET value='1'",
                     (_FTS_CJK_STALE_KEY,),
                 )
-                self._cjk_available = False
+                for name in live:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
                 # debug 而非 warning/info：缺扩展是**预期内**的降级路径（没编
                 # .so 的机器与全部测试环境都走这条）。任何 ≥INFO 的记录都会以
                 # `system_log` 进 agent.jsonl，把「事件流里只有那五类事件」的
@@ -632,14 +669,97 @@ class SessionArchive:
                     "fts5_cjk tokenizer 不可用（%s）；CJK 索引降级为 trigram/LIKE",
                     self.cjk_so_path,
                 )
-                return
-            stale = conn.execute(
-                "SELECT value FROM state_meta WHERE key = ?", (_FTS_CJK_STALE_KEY,)
-            ).fetchone()
-            conn.executescript(_CJK_TABLE_SQL)
-            if stale is None:
-                conn.executescript(_CJK_TRIGGER_SQL)
-            self._cjk_available = stale is None
+        self._cjk_available = False
+
+    def _reset_cjk_if_stale(self, conn: sqlite3.Connection) -> None:
+        """stale 索引（触发器曾被摘掉，缺口范围未知）→ 表/视图/触发器全弃，从零重建。"""
+        if conn.execute(
+            "SELECT 1 FROM state_meta WHERE key = ?", (_FTS_CJK_STALE_KEY,)
+        ).fetchone() is None:
+            return
+        for name in _CJK_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute("DROP TABLE IF EXISTS messages_fts_cjk")
+        conn.execute("DROP VIEW IF EXISTS messages_fts_cjk_src")
+        conn.execute(
+            "DELETE FROM state_meta WHERE key IN (?, 'fts_cjk_rebuild_high_water', "
+            "'fts_cjk_rebuild_progress')",
+            (_FTS_CJK_STALE_KEY,),
+        )
+
+    def _ensure_cjk_schema(self, conn: sqlite3.Connection) -> None:
+        """Hermes `_ensure_fts_cjk_schema` 三分支（loaded+absent / loaded+present / stale）。
+
+        loaded+absent：建表、删 stale、有数据则设回填标记对；
+        loaded+present：stale 在则**不**重装触发器（缺口未知），否则建触发器；
+        `cjk_available` = 无回填标记 pending。
+        """
+        cjk_present = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_cjk'"
+        ).fetchone())
+        conn.executescript(_CJK_TABLE_SQL)
+        if not cjk_present:
+            # 老 stale 标记指向的表已经不存在了。
+            conn.execute("DELETE FROM state_meta WHERE key = ?", (_FTS_CJK_STALE_KEY,))
+            # 空库天生完整；有数据的库靠 id 门控的标记对撑到回填完成。
+            if conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE role <> 'tool'"
+            ).fetchone()[0] > 0:
+                high_water = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+                for key, value in (
+                    ("fts_cjk_rebuild_high_water", str(high_water)),
+                    ("fts_cjk_rebuild_progress", "0"),
+                ):
+                    conn.execute(
+                        "INSERT INTO state_meta(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, value),
+                    )
+        if conn.execute(
+            "SELECT 1 FROM state_meta WHERE key = ?", (_FTS_CJK_STALE_KEY,)
+        ).fetchone():
+            # 缺口范围未知：不重装触发器（Hermes 原语义）。
+            self._cjk_available = False
+            return
+        conn.executescript(_CJK_TRIGGER_SQL)
+        backfill_pending = conn.execute(
+            "SELECT 1 FROM state_meta WHERE key = 'fts_cjk_rebuild_high_water' LIMIT 1"
+        ).fetchone()
+        self._cjk_available = backfill_pending is None
+
+    def _backfill_cjk(self, conn: sqlite3.Connection) -> None:
+        """把标记对覆盖的行补进 CJK 索引，完成后清标记、置可用。
+
+        Hermes 把这一步放在 `optimize-storage` 里分块跑（让出写锁给在线网关）；
+        本仓的回填只发生在启动时的一次 `initialize()`，整批一个事务更简单，也不会有
+        半截索引——崩溃即整体回滚，下次打开从标记对重来。
+        ponytail: 大库首次装扩展时这一次写入会占着写锁，需要在线让锁时再改分块提交。
+        """
+        row = conn.execute(
+            "SELECT value FROM state_meta WHERE key = 'fts_cjk_rebuild_high_water'"
+        ).fetchone()
+        if row is None:
+            return
+        high_water = int(row[0])
+        conn.execute(
+            "INSERT INTO messages_fts_cjk(rowid, content, tool_name, tool_calls) "
+            "SELECT id, content, tool_name, tool_calls FROM messages "
+            "WHERE id <= ? AND role <> 'tool'",
+            (high_water,),
+        )
+        # 边界清扫：高水位附近可能漏掉的行（Hermes `_BOUNDARY_SWEEP_SQL`）。
+        conn.execute(
+            "INSERT INTO messages_fts_cjk(rowid, content, tool_name, tool_calls) "
+            "SELECT m.id, m.content, m.tool_name, m.tool_calls FROM messages AS m "
+            "WHERE m.id > ? AND m.id <= ? AND m.role <> 'tool' "
+            "AND NOT EXISTS (SELECT 1 FROM messages_fts_cjk_docsize AS d WHERE d.id = m.id)",
+            (high_water - 1_000, high_water + 1_000),
+        )
+        conn.execute(
+            "DELETE FROM state_meta WHERE key IN "
+            "('fts_cjk_rebuild_high_water', 'fts_cjk_rebuild_progress')"
+        )
+        self._cjk_available = True
 
     def _load_cjk_extension(self) -> bool:
         """探测本连接上 `cjk_unicode61` 是否可用（扩展在 `_connect` 已加载）。"""
@@ -698,7 +818,6 @@ class SessionArchive:
         timestamp: float | None = None,
         active: int = 1,
         compacted: int = 0,
-        **extra: Any,
     ) -> int:
         """一条 INSERT（append-only 写路径）。FTS 由触发器同步索引。"""
         columns = {
@@ -711,7 +830,6 @@ class SessionArchive:
             "timestamp": timestamp if timestamp is not None else time.time(),
             "active": active,
             "compacted": compacted,
-            **{k: v for k, v in extra.items() if v is not None},
         }
         names = ", ".join(columns)
         placeholders = ", ".join("?" for _ in columns)
@@ -1127,7 +1245,7 @@ class SessionArchive:
             entry["bookend_start"] = []
             entry["bookend_end"] = []
         if lineage_root and lineage_root != entry["session_id"]:
-            entry["parent_session_id"] = lineage_root
+            entry["lineage_root"] = lineage_root
         return entry
 
     @staticmethod

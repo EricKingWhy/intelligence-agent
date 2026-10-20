@@ -102,6 +102,16 @@ def _names(db_path: Path, kind: str) -> set[str]:
     return {row["name"] for row in rows}
 
 
+def _raw_cjk(db_path: Path, so: Path) -> sqlite3.Connection:
+    """裸连接读 `messages_fts_cjk`：tokenizer 按连接登记，必须先加载扩展。"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.enable_load_extension(True)
+    conn.load_extension(str(so))
+    conn.enable_load_extension(False)
+    return conn
+
+
 # ------------------------------------------------------------------- AC1 ---
 
 
@@ -159,6 +169,25 @@ class TestSchema:
             ).fetchone()["sql"]
         assert "AFTER UPDATE OF content, tool_name, tool_calls, role ON messages" in sql
 
+    def test_cjk_insert_trigger_when_matches_hermes(self, archive: SessionArchive) -> None:
+        """F14：WHEN 的括号形式与 Hermes 逐字一致（单层，不包成 `AND ((…))`）。"""
+        with _raw(archive.db_path) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='messages_fts_cjk_insert'"
+            ).fetchone()["sql"]
+        assert "AND (new.id > COALESCE(" in sql
+        assert "AND ((new.id" not in sql
+
+    def test_append_message_rejects_unknown_columns(self, archive: SessionArchive) -> None:
+        """F13：`append_message` 不接受任意列名注入。"""
+        archive.ensure_session("inject", source="interactive", started_at=time.time())
+        with pytest.raises(TypeError):
+            archive.append_message(  # type: ignore[call-arg]
+                "inject", "user", "内容", timestamp=time.time(), display_kind="hidden",
+            )
+        assert archive.get_messages("inject") == []
+
     def test_pending_columns_exist(self, archive: SessionArchive) -> None:
         """票面「待裁决列全量建表」—— 裁决前一个不许少。"""
         with _raw(archive.db_path) as conn:
@@ -189,6 +218,98 @@ class TestSchema:
             assert conn.execute(
                 "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'fts%'"
             ).fetchone()[0] == 0
+
+
+class TestCjkSelfHeal:
+    """F1：无扩展的打开只降级、不把索引永久打死；扩展回来时自愈并补齐缺口。"""
+
+    def _seed(self, arc: SessionArchive, session_id: str = "zh") -> None:
+        arc.ensure_session(session_id, source="interactive", started_at=time.time())
+        arc.append_message(session_id, "user", "修改服务器配置后重启", timestamp=time.time())
+
+    def test_open_without_extension_marks_stale_and_drops_triggers(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        db = tmp_path / "sessions" / "state.db"
+        with_so = SessionArchive(db, cjk_so_path=cjk_so)
+        with_so.initialize()
+        self._seed(with_so)
+        with_so.close()
+
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        assert degraded.cjk_available is False
+        triggers = _names(db, "trigger")
+        assert not {t for t in triggers if t.startswith("messages_fts_cjk_")}
+        with _raw(db) as conn:
+            assert conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'fts_cjk_stale'"
+            ).fetchone()["value"] == "1"
+        # 降级期写入照常（触发器已摘，写路径不受影响）
+        degraded.append_message("zh", "user", "降级期间的新消息", timestamp=time.time())
+        degraded.close()
+
+    def test_reopen_with_extension_heals_stale_index(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        db = tmp_path / "sessions" / "state.db"
+        first = SessionArchive(db, cjk_so_path=cjk_so)
+        first.initialize()
+        self._seed(first)
+        first.close()
+
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        degraded.append_message("zh", "user", "降级期间写入的青花瓷", timestamp=time.time())
+        degraded.close()
+
+        healed = SessionArchive(db, cjk_so_path=cjk_so)
+        healed.initialize()
+        assert healed.cjk_available is True
+        with _raw(db) as conn:
+            assert conn.execute(
+                "SELECT 1 FROM state_meta WHERE key = 'fts_cjk_stale'"
+            ).fetchone() is None
+            assert conn.execute(
+                "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'fts_cjk_rebuild%'"
+            ).fetchone()[0] == 0
+            non_tool = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE role <> 'tool'"
+            ).fetchone()[0]
+        conn = _raw_cjk(db, cjk_so)
+        try:
+            indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_cjk").fetchone()[0]
+            assert indexed == non_tool, "自愈后 CJK 索引必须补齐全部非 tool 行"
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_cjk WHERE messages_fts_cjk MATCH ?",
+                ('"青花瓷"',),
+            ).fetchone()[0]
+            assert hits == 1, "降级期写入的行也要在回填后进索引"
+        finally:
+            conn.close()
+        # 触发器已装回：新行实时进索引
+        healed.append_message("zh", "user", "恢复后的兵马俑", timestamp=time.time())
+        assert healed.search_messages("兵马俑", limit=5)
+        assert healed.search_messages("服务", limit=5)
+        healed.close()
+
+    def test_reopen_with_extension_creates_index_on_legacy_db(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        """表从未存在过的库（一直在无扩展环境用）：装上扩展后建表 + 回填。"""
+        db = tmp_path / "sessions" / "state.db"
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        self._seed(degraded)
+        degraded.close()
+        assert "messages_fts_cjk" not in _names(db, "table")
+
+        healed = SessionArchive(db, cjk_so_path=cjk_so)
+        healed.initialize()
+        assert healed.cjk_available is True
+        assert "messages_fts_cjk" in _names(db, "table")
+        assert healed.search_messages("服务", limit=5)
+        healed.close()
 
 
 # ------------------------------------------------------------------- AC2 ---
@@ -369,6 +490,22 @@ class TestSessionSearchShapes:
         archive.ensure_session("zh", source="interactive", started_at=time.time())
         archive.append_message("zh", "user", "修改服务器配置后重启", timestamp=time.time())
         assert archive.search_messages("服务", limit=5), "2 字 CJK 词必须能命中（cjk_unicode61 大二元）"
+
+    def test_discovery_lineage_root_field(self, archive: SessionArchive) -> None:
+        """F12：lineage root 写进 `lineage_root`，不是误导性的 `parent_session_id`。"""
+        now = time.time()
+        archive.ensure_session("root", source="interactive", started_at=now)
+        archive.ensure_session(
+            "child", source="interactive", started_at=now, parent_session_id="root",
+        )
+        archive.append_message("child", "user", "子会话里的关键词 灯塔", timestamp=now)
+
+        out = archive.session_search(query="灯塔", limit=5)
+        assert out["count"] == 1
+        entry = out["results"][0]
+        assert entry["session_id"] == "child"
+        assert entry["lineage_root"] == "root"
+        assert "parent_session_id" not in entry
 
     def test_query_input_is_capped(self, archive: SessionArchive) -> None:
         archive.ensure_session("cap", source="interactive", started_at=time.time())
