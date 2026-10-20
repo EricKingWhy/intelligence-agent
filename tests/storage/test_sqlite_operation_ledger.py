@@ -120,6 +120,7 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
         "started_at",
         "finished_at",
         "reconcile_meta",
+        "parent_exec_call_id",
     }
     # C5 复合主键：session_id 是 pk 序 1，tool_call_id 是 pk 序 2
     assert columns["session_id"][5] == 1
@@ -320,3 +321,26 @@ async def test_update_state_concurrent_writer_raises_runtimeerror(
 
     assert excinfo.value.args[0] == "Operation 'call-race' changed concurrently"
     assert fired, "竞态未注入（_utc_now_iso 未被调用）"
+
+
+@pytest.mark.asyncio
+async def test_additive_parent_migration_preserves_existing_operation(tmp_path):
+    database_path = tmp_path / 'old.db'
+    ledger = SqliteOperationLedger(database_path)
+    await ledger.initialize()
+    original = Operation(
+        tool_call_id='existing', session_id='session', tool_name='write',
+        args_identity='{}', state=OperationState.PENDING,
+    )
+    await ledger.create(original)
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute('ALTER TABLE operations DROP COLUMN parent_exec_call_id')
+        await connection.commit()
+    await ledger.initialize()
+    await ledger.initialize()
+    assert await ledger.get('session', 'existing') == original
+    nested = original.model_copy(update={
+        'tool_call_id': 'child', 'parent_exec_call_id': 'outer',
+    })
+    await ledger.create(nested)
+    assert await ledger.get('session', 'child') == nested

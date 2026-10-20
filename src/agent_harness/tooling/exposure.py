@@ -73,11 +73,7 @@ class ToolExposureController:
                 tool.name in self._activated
                 and self._registry.resolve_exposure(tool) is ToolExposure.DEFERRED
             ):
-                definitions.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.args_schema.model_json_schema(),
-                })
+                definitions.append(self._registry.model_definition(tool))
         return definitions
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -106,11 +102,7 @@ class ToolExposureController:
         matches = [tool for _, _, tool in scored[:limit]]
         self._activated.update(tool.name for tool in matches)
         return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.args_schema.model_json_schema(),
-            }
+            self._registry.model_definition(tool)
             for tool in matches
         ]
 

@@ -94,6 +94,12 @@ from agent_harness.tooling.contract import (
 )
 from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.decision_hooks import DecisionHookRunner, DecisionVerdict
+from agent_harness.tooling.nested import (
+    NestedExecutionFailure,
+    nested_tool_call_var,
+    parent_exec_call_id_var,
+    parent_exec_metadata,
+)
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.permission_rules import PermissionRuleSet, RuleVerdict
@@ -650,7 +656,8 @@ class ToolExecutor:
             is_delegate=is_delegate,
         )
         binding_token = None
-        if obs_span is not None and is_delegate and tracer.trace_id:
+        if (obs_span is not None and tracer.trace_id
+                and (is_delegate or getattr(tool, "is_code_execution", False))):
             binding_token = current_trace_binding.set(
                 TraceBinding(trace_id=tracer.trace_id, observation=obs_span),
             )
@@ -695,8 +702,11 @@ class ToolExecutor:
         # ToolResult / Ledger / 事件语义（异常原样传播）。
         try:
             try:
-                result = await self._execute_with_resource_locks(
+                result = await self._execute_in_scope(
                     tool_call_id, name, tool, validated, attempts=attempts,
+                    operation_context=operation_context, session=session,
+                    step_id=step_id, tracer=tracer, tool_quota=tool_quota,
+                    run_deadline=run_deadline,
                 )
             except asyncio.CancelledError:
                 if self._operation_ledger is not None:
@@ -1023,7 +1033,8 @@ class ToolExecutor:
         """
         return session.append(
             TOOL_CALL,
-            {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args},
+            {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args,
+             **parent_exec_metadata()},
             run_id=run_id, step_id=step_id,
         )
 
@@ -1060,7 +1071,9 @@ class ToolExecutor:
         缺省 None = 不落这个键——恢复/悬空修复合成的结果不是接纳点产物，它们对
         `tool_calls` 的贡献是 0（见 ADR-0045 的"计数与上界"一节）。
         """
-        data: dict[str, Any] = {"tool_call_id": tool_call_id, "content": content}
+        data: dict[str, Any] = {
+            "tool_call_id": tool_call_id, "content": content, **parent_exec_metadata(),
+        }
         if budget_delta is not None:
             data["budget_delta"] = budget_delta
         return session.append(
@@ -1199,6 +1212,7 @@ class ToolExecutor:
                 agent_id=operation_context.agent_id,
                 tool_name=name,
                 args_identity=args_identity,
+                parent_exec_call_id=parent_exec_call_id_var.get(),
                 state=OperationState.PENDING,
                 started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
             )
@@ -1604,6 +1618,74 @@ class ToolExecutor:
                 identity.tool_name,
             )
 
+    async def _execute_in_scope(
+        self, tool_call_id, name, tool, validated, *, attempts,
+        operation_context, session, step_id, tracer, tool_quota, run_deadline,
+    ) -> ToolResult:
+        if not getattr(tool, "is_code_execution", False):
+            return await self._execute_with_resource_locks(
+                tool_call_id, name, tool, validated, attempts=attempts,
+            )
+        # The computation tool owns no workspace resource: children retain their
+        # normal locks, including exclusion against other agents/executors.
+        serial = asyncio.Lock()
+
+        async def invoke(child_name: str, args: dict[str, Any]) -> ToolResult:
+            async with serial:
+                child = ToolCall(id=f"exec_{uuid4().hex}", name=child_name, args=args)
+                parent_token = parent_exec_call_id_var.set(tool_call_id)
+                try:
+                    run_id = operation_context.run_id if operation_context else None
+                    if session is not None:
+                        self.emit_call_event(
+                            session, tool_call_id=child.id, tool_name=child.name,
+                            args=args, run_id=run_id, step_id=step_id,
+                        )
+                    target = None
+                    with suppress(KeyError):
+                        target = self._registry.get(child_name)
+                    if (getattr(target, "is_code_execution", False)
+                            or self._is_batch_exclusive(child)):
+                        result = ToolResult.failure(
+                            message="Recursive code execution and blocking user-input tools cannot run inside exec.",
+                            error_code=ErrorCode.PERMISSION_DENIED,
+                        )
+                        delta = _rejected_delta(child_name)
+                    else:
+                        execution, = await self.execute_batch(
+                            [child], operation_context=operation_context, session=session,
+                            step_id=step_id, tracer=tracer, tool_quota=tool_quota,
+                            run_deadline=run_deadline,
+                        )
+                        result, delta = execution.result, execution.budget_delta
+                        if session is not None:
+                            self.emit_pending_events(
+                                session, pending_events=execution.pending_events,
+                                run_id=run_id, step_id=step_id,
+                            )
+                    if session is not None:
+                        self.emit_result_event(
+                            session, tool_call_id=child.id, content=result.model_dump_json(),
+                            run_id=run_id, step_id=step_id, budget_delta=delta,
+                        )
+                    return result
+                except Exception as error:
+                    # A child ledger/event failure must abort the run, rather
+                    # than being converted to a retryable outer tool failure.
+                    raise NestedExecutionFailure(error) from error
+                finally:
+                    parent_exec_call_id_var.reset(parent_token)
+
+        token = nested_tool_call_var.set(invoke)
+        try:
+            return await self._execute_with_resource_locks(
+                tool_call_id, name, tool, validated, attempts=attempts,
+            )
+        except NestedExecutionFailure as error:
+            raise error.cause from error
+        finally:
+            nested_tool_call_var.reset(token)
+
     async def _execute_with_resource_locks(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
         *, attempts: list[dict[str, Any]] | None = None,
@@ -1653,6 +1735,9 @@ class ToolExecutor:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             t0 = perf_counter()
             deadline = t0 + tool.timeout_seconds
+            inherited = tool_execution_deadline_var.get()
+            if parent_exec_call_id_var.get() is not None and inherited is not None:
+                deadline = min(deadline, inherited)
             deadline_token = tool_execution_deadline_var.set(deadline)
             try:
                 # 本次 attempt 的**唯一**绝对 deadline：本行建立、放进 contextvar

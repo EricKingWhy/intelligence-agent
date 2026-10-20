@@ -72,7 +72,7 @@ _CODING_TOOLS = frozenset({
     "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
     "git_status", "git_diff", "retrieve_memory",
     "remember_this", "forget_memory",
-    "update_plan",
+    "update_plan", "exec",
 })
 
 #: research/review 角色的只读工具集（spec §8：Knowledge/Web/MCP 只读，无

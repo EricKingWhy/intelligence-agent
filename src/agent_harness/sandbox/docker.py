@@ -451,6 +451,12 @@ class DockerSandbox(Sandbox):
             },
         )
 
+    def code_worker(self):
+        """Create an unstarted no-egress worker without the workspace volume."""
+        from agent_harness.sandbox.code_worker import DockerCodeWorker
+
+        return DockerCodeWorker(self._client, self._image, self._container_name)
+
     def workspace_volume_exists(self) -> bool:
         """具名私有卷是否仍存在（#1132）。
 

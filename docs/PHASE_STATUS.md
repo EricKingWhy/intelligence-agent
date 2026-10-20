@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-20：#1360 code mode 共存分工施工中（既有 Phase 2/3/4/15 的后续增强）；用户批准 B 隔离边界，基线含已合并 #1359。当前状态与待验收项见 `docs/SDD_TICKET_TRACKER.md` 的 #1360 条目；方案依据见 `docs/research/2026-10-20-1360-code-mode.md`。
+
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
 > 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等，`SPEC_ROOT` 见 `AGENTS.md` §1）保持冻结，不被进度修改。
 > 每完成一个 Phase，更新本文件对应行的状态 + commit hash + Gate 证据。

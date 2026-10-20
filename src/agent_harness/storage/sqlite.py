@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS operations (
     started_at TEXT,
     finished_at TEXT,
     reconcile_meta TEXT,
+    parent_exec_call_id TEXT,
     PRIMARY KEY (session_id, tool_call_id)
 )
 """
@@ -220,8 +221,15 @@ class SqliteOperationLedger(OperationLedger):
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
+            await connection.execute("BEGIN IMMEDIATE")
             await self._reject_legacy_schema(connection)
             await connection.execute(_OPERATIONS_DDL)
+            cursor = await connection.execute("PRAGMA table_info(operations)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "parent_exec_call_id" not in columns:
+                await connection.execute(
+                    "ALTER TABLE operations ADD COLUMN parent_exec_call_id TEXT"
+                )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_operations_session "
                 "ON operations(session_id, started_at)"
@@ -256,8 +264,8 @@ class SqliteOperationLedger(OperationLedger):
                 INSERT INTO operations (
                     tool_call_id, session_id, run_id, agent_id, tool_name,
                     args_identity, state, result_json, artifact_ref, started_at,
-                    finished_at, reconcile_meta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, reconcile_meta, parent_exec_call_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     operation.tool_call_id,
@@ -272,6 +280,7 @@ class SqliteOperationLedger(OperationLedger):
                     operation.started_at,
                     operation.finished_at,
                     operation.reconcile_meta,
+                    operation.parent_exec_call_id,
                 ),
             )
             await connection.commit()

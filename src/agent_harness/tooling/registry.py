@@ -82,6 +82,14 @@ class ToolRegistry:
             return ToolExposure.DEFERRED
         return declared
 
+    def model_definition(self, tool: Tool) -> dict:
+        describe = getattr(tool, "description_for_registry", None)
+        return {
+            "name": tool.name,
+            "description": describe(self) if callable(describe) else tool.description,
+            "parameters": tool.args_schema.model_json_schema(),
+        }
+
     def export_model_definitions(self) -> list[dict]:
         """导出给模型/SDK 的工具菜单：name + description + parameters。
 
@@ -98,11 +106,7 @@ class ToolRegistry:
         - 薄层就好，避免抽象（Scope Lock：不拆 Adapter/Plugin 框架）。
         """
         return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.args_schema.model_json_schema(),
-            }
+            self.model_definition(tool)
             for tool in self._tools.values()
             if self.resolve_exposure(tool) is ToolExposure.DIRECT
         ]
