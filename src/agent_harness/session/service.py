@@ -215,6 +215,18 @@ from agent_harness.session.evidence import (
     derive_evidence_state,
     evaluate_evidence_freshness,
 )
+from agent_harness.session.goal import (
+    APPROVAL_REQUIRED_CODE,
+    GOAL_ORIGIN,
+    NO_PROGRESS_CODE,
+    GoalOutcome,
+    GoalPhase,
+    GoalState,
+    append_goal_change,
+    effective_goal,
+    goal_rounds_stalled,
+    render_goal_round_prompt,
+)
 from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.model_switch import (
     ModelChange,
@@ -269,6 +281,7 @@ from agent_harness.session.task import (
     apply_task_definition,
     apply_verification,
     derive_task_state,
+    validate_criteria,
 )
 from agent_harness.session.workflow import (
     WorkflowMode,
@@ -435,6 +448,35 @@ def _has_procedural_rule_signal(
         and event.data.get("remember_as_procedural_rule") is True
         for event in events
     )
+
+
+def _last_user_message_is_goal_round(events: list[SessionEvent]) -> bool:
+    """最近一条用户消息是否由自动续跑产生（用于区分"该检查无进展"的运行）。"""
+    for event in reversed(events):
+        if event.type == USER_MESSAGE:
+            return event.data.get("origin") == GOAL_ORIGIN
+    return False
+
+
+#: #1359 阶段 3：终态驱动的 per-session 串行化。快速收敛的自动轮次可能在
+#: ``deliver_next_undelivered`` 还没记完 ``round_started`` / ``queue/consumed``
+#: 前就再次终态，嵌套的 ``on_run_terminal`` 会读到"同一轮仍待投递"而漏续跑。
+#: 锁覆盖「判定 → 入队 → 投递」，其中投递会等到 ``run_id``（``wait_run_id``，5s
+#: 上限）——即持锁跨了 run 启动等待，刻意如此：``round_started`` 的记账必须排在
+#: 同一 session 的下一次判定之前。等 run_id 不会反向依赖本锁（run_id 在
+#: ``begin_run`` 早期就落盘），因此无死锁。
+#: 与 ``SessionService._compact_in_flight`` 同一条寿命理由：Service 可能是每
+#: 请求新建的，状态必须进程级共享。每 session 一把、从不回收——量级等于活跃会话
+#: 数，除非单进程跑上万会话否则不值得加清理。
+_TERMINAL_DRIVE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _terminal_drive_lock(session_id: str) -> asyncio.Lock:
+    lock = _TERMINAL_DRIVE_LOCKS.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TERMINAL_DRIVE_LOCKS[session_id] = lock
+    return lock
 
 
 # ── 数据载体 ──────────────────────────────────────────────────────────
@@ -1401,6 +1443,18 @@ class SessionService:
     # set/pop（见 `compact_session_context` 的 finally），不会遮蔽共享字典。
     _compact_in_flight: ClassVar[dict[str, bool]] = {}
 
+    # #1359 阶段 1：目标自动续跑的**进程内**授权集合（armed 的 session_id）。
+    # 与 `_compact_in_flight` 同一条理由：`web/app.py::session_service()` 每请求新建
+    # 一个 SessionService，实例字段跨请求不共享。**不落盘**（抄 dsh）：它描述"本进程
+    # 是否允许自动续跑"，不是目标事实；进程重启 / `resume_and_launch` / `fork` 后为空。
+    _goal_armed: ClassVar[set[str]] = set()
+
+    # #1359 阶段 3 决策 b：显式 ``/goal resume`` 授予的**一轮**续跑额度
+    # （进程内，不落盘，与 ``_goal_armed`` 同寿命）。非 danger 档下每轮终态都会
+    # 撞审批闸门；没有这笔额度的话，resume 之后连一轮都跑不起来（刚置 active
+    # 就被重新 park）。额度在 ``_maybe_queue_goal_round`` 决定入队时消费一次。
+    _goal_resume_round_allowance: ClassVar[set[str]] = set()
+
     def __init__(
         self,
         *,
@@ -1794,6 +1848,9 @@ class SessionService:
         self,
         *,
         task: str,
+        # #1359 阶段 2：创建即定义时的结构化验收清单（形状校验走
+        # `apply_task_definition` 的写侧规则，本层不复制第二套）。
+        criteria: object = None,
         workspace_name: str | None = None,
         cwd: str | None = None,
         local_max_agent_turns: int | None = None,
@@ -1880,6 +1937,12 @@ class SessionService:
         """
         if remember_as_procedural_rule and (not launch or not task.strip()):
             raise ValueError("remember_as_procedural_rule requires a launched non-blank user task")
+        # #1359 阶段 2：criteria 的形态校验先于一切副作用（不建 workspace、不落
+        # session/started）。`apply_task_definition` 在会话已落盘后才跑，那里失败
+        # 只能跳过定义——客户端会以为验收项存了。规则单一来源 = task.py。
+        criteria_error = validate_criteria(criteria)
+        if criteria_error is not None:
+            raise InvalidDecision(f"criteria 非法：{criteria_error}")
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
@@ -2084,6 +2147,7 @@ class SessionService:
             session=session,
             runtime=runtime,
             task=task,
+            criteria=criteria,
             workspace=workspace,
             workspace_name=workspace_name,
             cwd=cwd,
@@ -2103,6 +2167,7 @@ class SessionService:
         session: Session,
         runtime: Any,
         task: str,
+        criteria: object = None,
         workspace: Path,
         workspace_name: str | None,
         cwd: str | None,
@@ -2139,7 +2204,9 @@ class SessionService:
             # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
             # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
             # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
-            task_outcome = apply_task_definition(session, task_text=task)
+            task_outcome = apply_task_definition(
+                session, task_text=task, criteria=criteria,
+            )
             if not task_outcome.ok:
                 logger.warning(
                     "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"
@@ -2285,6 +2352,19 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # #1359 AC10：resume 后自动续跑必须**重新授权**（抄 dsh：resume 是新进程
+        # 上下文，旧进程的 armed 不继承）。放在这里 = 任何 resume 失败路径都不会
+        # 留下 armed（失败不改任何状态，成功也必须先 disarm 再由 `/goal resume` 武装）。
+        # 判据是**入口形态**而不是"谁调用"：只有真正的 resume / replay —— 同 run
+        # 续跑（``task=None``）或显式带 ``resume_run_id`` / ``resume_basis`` —— 才
+        # disarm。普通新任务消息（``send_message`` / POST /resume 带 task / 内部 goal
+        # 轮次投递，三者都把正文当新任务）不是 resume：在这里 disarm 会让
+        # `/goal create` 之后的**第一条用户消息**把授权扔掉，目标从此不再自动续跑。
+        if task is None or resume_run_id is not None or resume_basis is not None:
+            self._goal_armed.discard(session_id)
+            # 决策 b 的一轮额度同寿命：授权被撤销时额度也不该留着（否则之后
+            # 某条重新武装的路径会凭空多跑一轮）。
+            self._goal_resume_round_allowance.discard(session_id)
         if session_id in self._budget_recovery_failed_sessions:
             from agent_harness.recovery.scan import record_constraint_tool_results
 
@@ -3510,6 +3590,8 @@ class SessionService:
             remember_as_procedural_rule=remember_as_procedural_rule,
             # #823 / MM-02：附件引用随排队项一起留（投递时会带进新的 user/message）。
             attachments=user_input_metadata.get("attachments"),
+            # #1359 阶段 3：来源随排队项落盘（重启重建时靠它恢复 goal 语义）。
+            origin=user_input_metadata.get("origin"),
         )
         self._append_session_event(
             session_id, MESSAGE_QUEUED,
@@ -4065,6 +4147,30 @@ class SessionService:
         )
         return undelivered_inputs(events)
 
+    async def _record_goal_round_started(self, session_id: str) -> None:
+        """AC8：一条 goal 轮次真正进入模型历史后，`rounds_started` 才 +1。
+
+        调用点固定在 ``deliver_next_undelivered`` 拿到 run_id 之后——run/started
+        必然在 user/message 之后落盘，所以这个时点等价于 dsh 的
+        "entered step 的 user/message 才消耗轮次"。记账失败只记日志：投递已经
+        发生，不能因为一条账目事件回滚整个续跑。
+        """
+        try:
+            existing = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id
+            )
+            outcome = await self._apply_write_with_conflict_retry(
+                session_id,
+                existing,
+                lambda session: append_goal_change(session, "round_started"),
+            )
+            if not outcome.ok:
+                logger.warning(
+                    "goal 轮次记账被拒（session=%s）：%s", session_id, outcome.reason,
+                )
+        except Exception:
+            logger.exception("goal 轮次记账失败（session=%s）", session_id)
+
     async def deliver_next_undelivered(
         self,
         *,
@@ -4104,9 +4210,38 @@ class SessionService:
         if nxt.attachments:
             # #823 / MM-02：排队/steer 项投递成新 run 时，附件引用随之进入 user/message。
             user_input_metadata["attachments"] = nxt.attachments
+        if nxt.origin is not None:
+            # #1359 阶段 3：来源随 user/message 落盘（goal = 自动续跑轮次）。
+            user_input_metadata["origin"] = nxt.origin
         events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
+        if nxt.origin == GOAL_ORIGIN and nxt.kind == KIND_QUEUE:
+            # P2-6：goal 轮次在 `message/queued` 与投递之间存在窗口。这期间用户
+            # `/goal pause|complete|clear`（或撞审批 / 无进展 park）后，终态驱动
+            # 仍会把它送出去跑一轮——AC2「pause 后不再续跑」在这个窗口不成立。
+            # 判据放在**唯一投递口**：所有来源都路由到这里，比在每个改相位的地方
+            # 各写一份回收逻辑更小也更难漏。回收后重新选队首（普通输入照常投递）。
+            #
+            # 只复核相位不够：`edit`（以及 `clear` + `create`）不改 active 相位却在
+            # 窗口里换了目标，旧提示词会带着**上一版 objective** 跑一轮，之后
+            # `round_started` 还记到新目标头上。入队时把渲染所依据的
+            # `goal_id`/`revision` 写进排队项，投递前逐字比对，不一致即过期。
+            goal_now = effective_goal(events)
+            stale = (nxt.goal_id, nxt.revision) != (goal_now.goal_id, goal_now.revision)
+            live = goal_now.defined and goal_now.phase is GoalPhase.ACTIVE
+            if not live or stale:
+                await self.cancel_queue(session_id=session_id, queue_id=nxt.input_id)
+                if live:
+                    # 目标还 active，只是版本变了：丢掉这条就再也没有 run 终态来
+                    # 续跑（静默停摆）。按当前版本重新入队一轮，代价是那一轮的
+                    # objective 已是新版——正是 edit 的语义。
+                    await self._maybe_queue_goal_round(session_id)
+                # 递归重选队首：普通输入排在后面时不该被 goal 轮次的回收连带跳过。
+                # 每层都消费掉一条 goal 项，队列有限 ⇒ 必然收敛。
+                return await self.deliver_next_undelivered(
+                    session_id=session_id, amend=amend,
+                )
         if _has_procedural_rule_signal(events, nxt.kind, nxt.input_id):
             user_input_metadata["remember_as_procedural_rule"] = True
         launched = await self.resume_and_launch(
@@ -4115,6 +4250,10 @@ class SessionService:
         )
         # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
         run_id = await launched.run.wait_run_id()
+        if nxt.origin == GOAL_ORIGIN and run_id is not None:
+            # AC8：run/started 已落盘 ⇒ 本轮的 user/message 必已在模型历史里。
+            # 只有这条路径写 round_started（排队未投递 / 投递失败都不消耗轮次）。
+            await self._record_goal_round_started(session_id)
         if nxt.kind == KIND_QUEUE:
             await self._message_queues.take_queue_item(
                 session_id=session_id, queue_id=nxt.input_id,
@@ -4132,6 +4271,139 @@ class SessionService:
             )
         return launched
 
+    async def _maybe_queue_goal_round(self, session_id: str) -> None:
+        """run 终态后决定是否自动续跑一轮目标（#1359 阶段 3 / AC7–AC10）。
+
+        准入是四个**独立**条件的合取（任一不成立就静默不续跑）：
+
+        1. 目标投影 ``phase == active``；
+        2. session 在本进程的 activation 集合里（``/goal create|resume`` 武装）；
+        3. ``rounds_started < max_goal_rounds``；
+        4. 进程配置 ``goal_auto_round_enabled``（默认关；activation 只在本进程内存里，
+           重启后必须仍默认关，否则落盘的目标会在重启后自行续跑）。
+
+        决策 b（撞审批点就 park）：非 ``danger-full-access`` 档下自动续跑会在
+        审批闸门停下（根 registry 恒有 ``bash``：DANGER + MUTATING，其他档位
+        也得逐次审批写类工具）——此时**不入队**，而是把目标置 ``blocked`` +
+        ``blocked_reason={code: "approval-required"}``。人处理审批 / 改档后
+        ``/goal resume``，该次显式 resume 授予**一轮**续跑额度，下一轮正常入队；
+        跑完再终态时若仍是非 danger 档就重新 park
+        （``_goal_resume_round_allowance``）。否则自动续跑会停在审批卡上，形成
+        "目标 active 却无人推进"的静默卡死。
+
+        另外两条是语义护栏，不是新条件：已有未投递的 goal 轮次时不重复入队；
+        刚结束的若是 goal 轮次且最近两轮无进展（digest 相同或为空），把目标置
+        ``paused`` 并附 ``pause_reason``（AC9），不再入队。
+        """
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            return
+        if not self._settings.goal_auto_round_enabled:  # 上线开关（票面发布说明）
+            return
+        state = effective_goal(events)
+        if not state.defined or state.phase is not GoalPhase.ACTIVE:
+            return
+        if session_id not in self._goal_armed:
+            return
+        if state.rounds_started >= state.max_goal_rounds:
+            return
+        pending = undelivered_inputs(events)
+        if any(item.origin == GOAL_ORIGIN for item in pending):
+            return  # 已有一条在队列里，避免终态重复入队
+        if _last_user_message_is_goal_round(events) and goal_rounds_stalled(events):
+            await self._pause_goal_for_no_progress(session_id, events, state)
+            return
+        mode = _effective_permission_mode(events)
+        if mode is not PermissionPolicy.DANGER_FULL_ACCESS:
+            if session_id not in self._goal_resume_round_allowance:
+                await self._block_goal_for_approval(session_id, events, state, mode)
+                return
+            self._goal_resume_round_allowance.discard(session_id)
+        prompt = render_goal_round_prompt(state, state.rounds_started + 1)
+        await self._queue_incoming_message(
+            session_id=session_id,
+            content=prompt,
+            revoke_fact_id=None,
+            refutes_event_id=None,
+            protected_facts=None,
+            remember_as_procedural_rule=False,
+            # `goal_id`/`revision` = 本条提示词渲染所依据的目标版本；投递口据此
+            # 判定排队期间目标是否已被 edit / clear+create 换掉（过期轮次回收）。
+            user_input_metadata={
+                "origin": GOAL_ORIGIN,
+                "goal_id": state.goal_id,
+                "revision": state.revision,
+            },
+        )
+
+    async def _block_goal_for_approval(
+        self,
+        session_id: str,
+        events: list[SessionEvent],
+        state: GoalState,
+        mode: PermissionPolicy | None,
+    ) -> None:
+        """决策 b（#1359 阶段 3）：非 danger 档下撞审批点 → ``blocked`` 而不是入队。
+
+        判据是权限档：根 registry 恒注册 ``bash``（DANGER + MUTATING），
+        ``workspace-write`` 下它需审批、``read-only`` 下写类 MUTATING 工具也需
+        审批——非 ``danger-full-access`` 档的下一轮必然撞审批闸门。目标停在
+        ``blocked`` 上语义诚实：不是"完成"，也不是"用户暂停"，人处理完审批
+        （或改档）后 ``/goal resume`` 即恢复续跑。
+        """
+        outcome = await self._apply_write_with_conflict_retry(
+            session_id,
+            events,
+            lambda session: append_goal_change(
+                session,
+                "block",
+                blocked_reason={
+                    "code": APPROVAL_REQUIRED_CODE,
+                    "message": (
+                        f"自动续跑会在审批点停下（当前权限档 "
+                        f"{mode.value if mode is not None else '未声明'} 不是 "
+                        "danger-full-access）；处理审批或修改权限档后 /goal resume"
+                    ),
+                },
+                expected_revision=state.revision,
+            ),
+        )
+        if outcome.ok:
+            self._goal_armed.discard(session_id)
+            logger.info("goal 撞审批点，已置 blocked（session=%s）", session_id)
+        else:
+            logger.warning(
+                "goal 置 blocked 被拒（session=%s）：%s", session_id, outcome.reason,
+            )
+
+    async def _pause_goal_for_no_progress(
+        self, session_id: str, events: list[SessionEvent], state: GoalState,
+    ) -> None:
+        """AC9：连续两轮无工具进展 → paused + 可读原因（不删目标，可 resume）。"""
+        outcome = await self._apply_write_with_conflict_retry(
+            session_id,
+            events,
+            lambda session: append_goal_change(
+                session,
+                "pause",
+                pause_reason={
+                    "code": NO_PROGRESS_CODE,
+                    "message": (
+                        "最近两轮没有产生新的工具活动（digest 相同或为空），"
+                        "自动续跑已暂停；处理后可 /goal resume"
+                    ),
+                },
+                expected_revision=state.revision,
+            ),
+        )
+        if outcome.ok:
+            self._goal_armed.discard(session_id)
+            logger.info("goal 无进展，已暂停自动续跑（session=%s）", session_id)
+        else:
+            logger.warning(
+                "goal 无进展暂停被拒（session=%s）：%s", session_id, outcome.reason,
+            )
+
     async def on_run_terminal(self, session_id: str) -> None:
         """run 终态后的唯一驱动点（ADR-0030 D4 / §4.7）——接力投递下一条输入。
 
@@ -4143,27 +4415,36 @@ class SessionService:
         不被调用，行为与接线前一致。
         """
         await self.refresh_progress_file(session_id)  # W-05：里程碑/失败结论边界
-        if self._run_manager.get_active(session_id) is not None:
-            return  # 已有在途 run（用户手动开了）：不要双驱
-        try:
-            await self.deliver_next_undelivered(session_id=session_id)
-        except ActiveRunConflict:
-            # 心跳式竞态：另一个入口在同一刻拉起 run。不丢事实——输入仍在事件流，
-            # 下一个终态会再次尝试（这里刻意不 requeue：我们从没把它弹出内存镜像，
-            # 投递决策读的是事件流，见 deliver_next_undelivered 的说明）。
-            logger.info(
-                "终态驱动遇在途 run 竞态（session=%s）——输入留在事件流待下次接力",
-                session_id,
-            )
-        except SessionNotFound:
-            logger.warning("终态驱动：session=%s 不存在，跳过接力", session_id)
-        except WorkspaceNotFound as e:
-            # #624-1：cwd 在 run 期间被外部删除（#615① 同形；P3 跟进批后由子型
-            # SessionCwdUnavailable 携带，此处刻意捕父类——「未注册」形态到达时
-            # 同款跳过语义也成立）。与 SessionNotFound 同款"留待下次"口径
-            # （outbox：投递失败不丢消息）；不是 HTTP 调用方路径，
-            # deliver_next_undelivered 的 409/404 翻译契约不受影响。
-            logger.warning("终态驱动：session=%s 的 cwd 不可用，跳过接力：%s", session_id, e)
+        async with _terminal_drive_lock(session_id):
+            if self._run_manager.get_active(session_id) is not None:
+                return  # 已有在途 run（用户手动开了）：不要双驱
+            try:
+                await self._maybe_queue_goal_round(session_id)
+            except Exception:
+                logger.exception(
+                    "goal 自动续跑判定失败（session=%s），继续投递普通输入", session_id
+                )
+            try:
+                await self.deliver_next_undelivered(session_id=session_id)
+            except ActiveRunConflict:
+                # 心跳式竞态：另一个入口在同一刻拉起 run。不丢事实——输入仍在事件流，
+                # 下一个终态会再次尝试（这里刻意不 requeue：我们从没把它弹出内存镜像，
+                # 投递决策读的是事件流，见 deliver_next_undelivered 的说明）。
+                logger.info(
+                    "终态驱动遇在途 run 竞态（session=%s）——输入留在事件流待下次接力",
+                    session_id,
+                )
+            except SessionNotFound:
+                logger.warning("终态驱动：session=%s 不存在，跳过接力", session_id)
+            except WorkspaceNotFound as e:
+                # #624-1：cwd 在 run 期间被外部删除（#615① 同形；P3 跟进批后由子型
+                # SessionCwdUnavailable 携带，此处刻意捕父类——「未注册」形态到达时
+                # 同款跳过语义也成立）。与 SessionNotFound 同款"留待下次"口径
+                # （outbox：投递失败不丢消息）；不是 HTTP 调用方路径，
+                # deliver_next_undelivered 的 409/404 翻译契约不受影响。
+                logger.warning(
+                    "终态驱动：session=%s 的 cwd 不可用，跳过接力：%s", session_id, e
+                )
 
     # ── 取消 ─────────────────────────────────────────────────────────
 
@@ -6092,6 +6373,7 @@ class SessionService:
                         events, item.kind, item.input_id,
                     ),
                     attachments=item.attachments,
+                    origin=item.origin,
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -6926,6 +7208,78 @@ class SessionService:
         )
         append_workflow_mode_change(session, mode)
         return {"id": session_id, "mode": mode.value}
+
+    # ── #1359 阶段 1：持久目标对象（goal/changed）──────────────────────────
+    def goal_activation(self, session_id: str) -> str:
+        """进程内 activation 的**唯一**读点（``armed`` / ``disarmed``）。
+
+        不落盘（见 ``_goal_armed`` 注释），所以它既不是事件也不是投影；GET 与
+        POST 回执都从这里取，避免两处各写一份 ``"armed" if ... else``。
+        """
+        return "armed" if session_id in self._goal_armed else "disarmed"
+
+    async def goal_state(self, session_id: str) -> dict[str, Any]:
+        """只读目标投影 + 进程内 activation（`11 §6.1` 同类：零副作用）。
+
+        未定义目标返回 ``defined=False`` 的快照而不是 404——"没有目标"是正常
+        状态（与 ``task_state`` 返回 None 的分工不同：GET 端点总是 200）。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        state = effective_goal(events)
+        return {
+            "id": session_id,
+            "goal": state.to_payload(),
+            "activation": self.goal_activation(session_id),
+        }
+
+    async def set_goal(
+        self,
+        session_id: str,
+        operation: str,
+        *,
+        objective: object = None,
+        blocked_reason: object = None,
+        max_goal_rounds: object = None,
+        expected_revision: object = None,
+    ) -> GoalOutcome:
+        """目标生命周期命令（#1359 阶段 1）。
+
+        守卫与写路径照抄 ``set_workflow_mode`` / ``task_definition``：形态 422 先于
+        404；非 live 路径经 ``_apply_write_with_conflict_retry``（撞号重读重跑）。
+        校验与 CAS 全在 ``append_goal_change``（唯一写入口）——拒绝 = 零事件。
+
+        activation 是**命令的副作用而不是事件**（抄 dsh）：create/resume → armed；
+        pause/complete/block/clear → disarmed；edit 不动。
+        """
+        self._validate_session_id(session_id)
+        existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        outcome = await self._apply_write_with_conflict_retry(
+            session_id,
+            existing,
+            lambda session: append_goal_change(
+                session,
+                operation,
+                objective=objective,
+                blocked_reason=blocked_reason,
+                max_goal_rounds=max_goal_rounds,
+                expected_revision=expected_revision,
+            ),
+        )
+        if outcome.ok:
+            if operation in ("create", "resume"):
+                self._goal_armed.add(session_id)
+                # 决策 b：只有**显式 resume** 授予一轮额度；create 不授予——非
+                # danger 档下创建后的首个终态同样撞审批闸门，就该 park。
+                if operation == "resume":
+                    self._goal_resume_round_allowance.add(session_id)
+            elif operation in ("pause", "complete", "block", "clear"):
+                self._goal_armed.discard(session_id)
+                self._goal_resume_round_allowance.discard(session_id)
+            await self.refresh_progress_file(session_id)
+        return outcome
 
     # ── #1190：会话级约束管理面板（受保护事实查看 + 主动撤销）──────────────
     async def list_protected_facts(self, session_id: str) -> list[dict[str, Any]]:

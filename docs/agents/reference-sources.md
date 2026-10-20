@@ -222,6 +222,15 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 Windsurf 直接开展，未先补本清单。机制摘要 / 契合点 / 判定见
 `docs/plans/plugin-manager/design.md` §2 与 §2.1。
 
+### 长期目标 / 目标轮次自动续跑（2026-10-20 新增，#1359 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| DeepSeek Harness（本地克隆 `D:\reference\deepseek-harness` @ `5badb15009ae1756c3afe0ae0cef1faafc290ccc`，MIT） | 目标域与轮次驱动的同族实现（本仓 PORT DESIGN 的对照） | `packages/goal/goal/src/domain.ts`：`GoalSnapshotChangeMeta`（`kind:'goal/change'` + **完整快照** `goal` + `roundsStarted`）与 `GoalClearChangeMeta`（`clear` 只带 `cleared: GoalRef` 墓碑、**无 goal 字段**）组成 `GoalChangeMeta`；`GoalMessageSource`（`kind:'goal'` + `goalId` / `revision` / `round`，轮次消息的来源归属）；`FoldedGoal`（纯 replay 折叠，含 `lastRef` = 含墓碑的最后一次变更）；`GoalChanged`（在线通知，`goal` 对 clear 缺席）；错误码表 `GoalErrorCode`（`GOAL_STALE_REVISION` 等）。`packages/goal/goal/src/types.ts`：`GoalSnapshot` / `GoalView` / `GoalActivation` 三层（durable 快照 vs 在线视图 vs 进程内激活）。`packages/goal/goal-round-driver/src/prompt.ts:12-26`：`renderGoalRoundPrompt` 的 `<goal_round>` 块（`<goal_round>` 起于 **:15**；Objective 以 JSON 字符串嵌入、`Round: n/max`、"以当前 workspace / 工具结果 / durable session state 为准，勿信早先叙述"） |
+| oh-my-pi（npm `@oh-my-pi/pi-coding-agent` v18.8.5，MIT） | 自动续跑的**无进展停机**判据（本仓 digest 口径的来源） | `src/goals/state.ts:54-70` `goalContinuationActivity`：对一轮消息里的 `toolCall`（`["call", name, arguments]`）与 `toolResult`（`["result", toolName, content, isError]`）逐个做稳定序列化摘要、以 `:` 连接；**两轮摘要相同 / 皆空 ⇒ 无进展，停止自动续跑** |
+
+**引用纪律**：两条均为本机实读核实（DSH 用 `git -C ... rev-parse HEAD` 取 commit；omp 从 npm 安装目录读，版本取 `package.json` 的 `version`）；两个包 `package.json` 的 `license` 均为 `MIT`。判定（ADAPT）见 Reuse Matrix §3；`goal/changed` 的语义规格见 Spec `03_SESSION_EVENT_MODEL.md` §3.5。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；

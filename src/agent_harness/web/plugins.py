@@ -40,7 +40,10 @@ if TYPE_CHECKING:
 #: `/` 菜单的内置命令（#1195 定稿命令表，D2=A 单一注册表）。
 #: 元数据由后端提供，前端只保留按 name 查表的 `run` 回调（#1200 Phase 3）。
 BUILTIN_SLASH_COMMANDS: tuple[dict[str, str], ...] = (
-    {"name": "goal", "description": "设置或查看长期任务目标"},
+    {
+        "name": "goal",
+        "description": "设置、查看或管理长期任务目标（暂停/恢复/编辑/清除）",
+    },
     {"name": "plan", "description": "进入或退出计划模式"},
     {"name": "compact", "description": "压缩以上对话内容"},
     {"name": "permission", "description": "切换权限预设（沙箱模式与审批策略）"},

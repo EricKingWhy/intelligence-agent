@@ -19,11 +19,12 @@
 import { fuzzyScore } from './commands';
 import { EventType, type AgentEvent } from '../types';
 import {
-  getTaskState,
+  getGoalState,
+  postGoalCommand,
   postSessionCommand,
-  describeSessionError,
   SessionError,
-  TaskNotDefinedError,
+  type GoalSnapshot,
+  type GoalStatePayload,
   type SlashRegistryCommand as SlashRegistryEntry,
 } from './api';
 
@@ -45,6 +46,9 @@ export interface SlashCommandContext {
   reportError: (message: string) => void;
   /** 中性信息上报口（查看结果 / 执行回执——不是错误，不染红；审查 B-S-4）。 */
   reportInfo: (message: string) => void;
+  /** 把文本写回输入框（**一次性**的访谈入口，AC6）：用户接着补段落后按 Enter 走
+   *  `/goal edit`，不新增表单组件、不新增端点。 */
+  prefillInput: (text: string) => void;
   /** `/compact` 触发：由 Composer 驱动 `useCompactSession` 三态宿主（#1197 契约）。
    *  状态机（压缩中/被拒/失败/成功对比）归宿主，本文件不持有压缩状态。 */
   runCompact: () => Promise<void>;
@@ -83,36 +87,156 @@ async function runPlan(_args: string | undefined, ctx: SlashCommandContext): Pro
   await postSessionCommand(ctx.sessionId, '/workflow-mode', { mode: next });
 }
 
+/** `/goal` 的子命令文法（抄 dsh `command-goal` 的 `parseGoalCommand`）。
+ *
+ *  控制词**只有占满整个输入**才识别：`/goal pause after verification` 是
+ *  objective（创建/编辑目标），不是 pause——否则一个自然语言目标会被误解析成
+ *  生命周期命令。`edit` 单独出现算"缺 objective"的编辑（给可操作错误，不创建
+ *  一个叫 edit 的目标）。其余一律当 objective。 */
+export type GoalCommand =
+  | { kind: 'show' }
+  | { kind: 'create'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'invalid-edit' }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export function parseGoalCommand(rawInput: string | undefined): GoalCommand {
+  const input = (rawInput ?? '').trim();
+  if (input.length === 0) return { kind: 'show' };
+  const control = input.toLowerCase();
+  if (control === 'clear') return { kind: 'clear' };
+  if (control === 'pause') return { kind: 'pause' };
+  if (control === 'resume') return { kind: 'resume' };
+  if (control === 'edit') return { kind: 'invalid-edit' };
+  if (/^edit(?=\s)/i.test(input)) return { kind: 'edit', objective: input.slice(4).trim() };
+  return { kind: 'create', objective: input };
+}
+
+/** `/goal` 无参回执：objective/phase/轮数/activation/可用命令（票面 AC1 与 UX）。
+ *  纯函数，便于单测；blocked 时附 code + message。 */
+export function formatGoalSnapshot(
+  snapshot: Pick<GoalSnapshot, 'goal' | 'activation'>,
+): string {
+  const g = snapshot.goal;
+  if (!g.defined) return '当前会话未定义目标。用 /goal <objective> 创建。';
+  const lines = [
+    `目标：${g.objective ?? ''}`,
+    `状态：${g.phase ?? '?'}`,
+    `轮数：${g.rounds_started}/${g.max_goal_rounds}`,
+    // AC3：带版本号，409 文案里的「查看当前 revision」才可执行。
+    `版本：r${g.revision}`,
+    `自动续跑：${snapshot.activation}`,
+  ];
+  if (g.phase === 'blocked' && g.blocked_reason) {
+    lines.push(`阻塞：${g.blocked_reason.code}: ${g.blocked_reason.message}`);
+  }
+  // AC9：区分「系统判无进展」与「用户主动暂停」——只有前者带 pause_reason。
+  if (g.phase === 'paused' && g.pause_reason) {
+    lines.push(`暂停原因：${g.pause_reason.code}: ${g.pause_reason.message}`);
+  }
+  if (g.needs_interview) {
+    lines.push('目标缺少 ## Success criteria 或 ## Verification 段，建议先补全再执行。');
+  }
+  lines.push(`可用命令：${goalCommandHint(g)}`);
+  return lines.join('\n');
+}
+
+/** 当前相位下真正有意义的下一批命令（抄 dsh `commandHint`）。 */
+export function goalCommandHint(g: GoalStatePayload): string {
+  if (g.phase === 'complete') return '/goal <objective>，/goal clear';
+  if (g.phase === 'paused' || g.phase === 'blocked') {
+    return '/goal edit <objective>，/goal resume，/goal clear';
+  }
+  return '/goal edit <objective>，/goal pause，/goal clear';
+}
+
+/** 409 的可操作文案（AC3：把 revision 冲突翻成"当前是 rN"）。
+ *  slash 界面没有传 `expected_revision` 的语法——`edit` 自己会先读当前 revision，
+ *  所以这里只说"重试"，不教用户输入一个他打不出来的字段。 */
+function goalConflictMessage(e: SessionError): string {
+  return `${e.message}。slash 命令会自动重读当前 revision，重试即可；走 REST 的调用方需带 expected_revision`;
+}
+
+/** AC6 的"进入访谈"：把缺失段落补成草稿写回输入框。
+ *
+ *  贴 omp `/guided-goal` 的追问思路但不做独立表单/命令：缺哪段就补哪段的空壳，
+ *  用户在输入框里填完按 Enter 就是一次 `/goal edit`。只补两段**可测判据**
+ *  （`needs_interview` 的判据），其余段落不代填——猜出来的目标比模糊的目标更坏。
+ *  ⚠ 下面两份标题是后端 `goal.py::_INTERVIEW_REQUIRED_SECTIONS` 的副本：判据
+ *  变了两边都要改（`needs_interview` 由后端算，这里只决定补哪段壳）。 */
+export function interviewDraft(objective: string): string {
+  const missing = ['## Success criteria', '## Verification'].filter((s) => !objective.includes(s));
+  const body = `${objective.trimEnd()}\n\n${missing.map((s) => `${s}\n`).join('\n')}`;
+  return `/goal edit ${body}`;
+}
+
+/** AC6 的落点：任何拿到快照的路径（show / create / edit）都走同一条判定。
+ *  只在 `defined && needs_interview && objective` 时写回草稿——已经写全的目标不打断用户。 */
+function enterInterviewIfNeeded(
+  snapshot: Pick<GoalSnapshot, 'goal'>,
+  ctx: SlashCommandContext,
+): void {
+  const g = snapshot.goal;
+  if (g.defined && g.needs_interview && g.objective) {
+    ctx.prefillInput(interviewDraft(g.objective));
+  }
+}
+
 async function runGoal(args: string | undefined, ctx: SlashCommandContext): Promise<void> {
-  const text = args?.trim();
-  if (text) {
-    // 带参 = 设置（票面 §4.2：请求体 `{task_text}`；422/404 由 reportError 透出）。
-    try {
-      await postSessionCommand(ctx.sessionId, '/task/definition', { task_text: text });
-    } catch (e) {
-      if (e instanceof SessionError && e.status === 409) {
-        // 二次设置必 409（后端语义：task/defined 全流至多一条，不覆盖）。裸 409
-        // detail 只说"已定义"不给下一步（审查 A-P2-2）——补一条可操作的引导。
-        ctx.reportError(
-          `${e.message}。已有目标时 /goal 不再覆盖；输入 /goal（无参数）可查看当前目标`,
-        );
+  const command = parseGoalCommand(args);
+  try {
+    switch (command.kind) {
+      case 'show': {
+        // 查看结果（含未定义目标）是中性信息，不染红（审查 B-S-4/A-P3-2）。
+        const snapshot = await getGoalState(ctx.sessionId);
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        // AC6：`needs_interview: true` 不只是提示——把补全草稿写回输入框，
+        // 用户填空后 Enter 即 `/goal edit`（"进入访谈"的最小实现）。
+        enterInterviewIfNeeded(snapshot, ctx);
         return;
       }
-      throw e;
+      case 'invalid-edit':
+        ctx.reportError('用法：/goal edit <objective>（edit 后必须跟目标文本）');
+        return;
+      case 'create': {
+        const snapshot = await postGoalCommand(ctx.sessionId, {
+          operation: 'create',
+          objective: command.objective,
+        });
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        // AC6 的创建路径：刚 create 的目标若缺可测判据，同样把用户带进访谈，
+        // 否则用户得再输一次裸 `/goal` 才被带走。
+        enterInterviewIfNeeded(snapshot, ctx);
+        return;
+      }
+      case 'edit': {
+        // AC3：edit 是 CAS 写——先读当前 revision 再带 expected_revision，
+        // 否则并发编辑变成后写覆盖，而 409 文案又让用户去「查看 revision」。
+        const snapshot = await postGoalCommand(ctx.sessionId, {
+          operation: 'edit',
+          objective: command.objective,
+          expected_revision: (await getGoalState(ctx.sessionId)).goal.revision,
+        });
+        ctx.reportInfo(formatGoalSnapshot(snapshot));
+        enterInterviewIfNeeded(snapshot, ctx);
+        return;
+      }
+      case 'pause':
+      case 'resume':
+      case 'clear':
+        ctx.reportInfo(
+          formatGoalSnapshot(await postGoalCommand(ctx.sessionId, { operation: command.kind })),
+        );
+        return;
     }
-    return;
-  }
-  // 无参 = 查看：结果与「未定义」（404，TaskNotDefinedError）都是中性信息——
-  // 不是错误，走 reportInfo（审查 B-S-4/A-P3-2）；其余失败才 reportError。
-  try {
-    const state = await getTaskState(ctx.sessionId);
-    ctx.reportInfo(state.task_text ? `当前目标：${state.task_text}` : '当前会话未定义目标');
   } catch (e) {
-    if (e instanceof TaskNotDefinedError) {
-      ctx.reportInfo('当前会话未定义目标');
+    if (e instanceof SessionError && e.status === 409) {
+      ctx.reportError(goalConflictMessage(e));
       return;
     }
-    ctx.reportError(describeSessionError(e, '查看目标失败'));
+    throw e;
   }
 }
 

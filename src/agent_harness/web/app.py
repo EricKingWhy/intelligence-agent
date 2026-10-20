@@ -612,6 +612,13 @@ class CreateSessionRequest(_AmendValueValidators):
     # （runtime 侧无意义但不危险）；max_length 封顶原因不变：task 会逐字持久化
     # 进 JSONL（user/message）并整体进模型上下文。R5 显式规则标记只接受非空白 task。
     task: str | None = Field(default=None, min_length=1, max_length=100_000)
+    # #1359 阶段 2：创建即定义时的**结构化验收清单**（形状与
+    # `POST /task/definition` 的 criteria 同一条写侧规则，见
+    # `session/task.py::_parse_criteria`）。此前前端把「完成目标」拼进 task
+    # 字符串，验收项在事件流里不可检索、也不进三轴投影；改为随创建请求直通，
+    # task 保持 prompt 原文。只与非空 task 一起合法（单独给 criteria 无可归属
+    # 的定义 → 422）。
+    criteria: list[dict] | None = None
     # #298 R5：仅用户显式勾选时，Runtime 才把该真实输入作为单事件规则证据。
     remember_as_procedural_rule: bool = False
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
@@ -2670,6 +2677,12 @@ def create_app(
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # #1359 阶段 1 持久目标对象路由（独立 router：投影/写入口单源在
+    # session/goal.py，本模块只留一行接入面）
+    from agent_harness.web.goal_delivery import register_goal_routes
+
+    register_goal_routes(app, validate_session_id=validate_session_id)
+
     # W-08 / #352 证据投影路由（独立 router：记录 + 服务端投影查询；
     # 投影单源在 session/evidence.py，本模块只留一行接入面）
     from agent_harness.web.evidence_delivery import register_evidence_routes
@@ -3179,6 +3192,13 @@ def create_app(
         if launch and req.task is None:
             # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
             raise HTTPException(status_code=422, detail="Field required (task)")
+        # #1359 阶段 2：criteria 只属于任务定义。没有非空 task 就没有 task/defined
+        # 可挂验收项——静默丢弃会让客户端以为存了。launch=false 与空白 task 都拒。
+        if req.criteria is not None and (req.task is None or not req.task.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail="criteria 需要非空 task：验收项随创建时的任务定义一起落盘",
+            )
         service = session_service(app.state.agent)
         state = app.state.agent
 
@@ -3240,6 +3260,8 @@ def create_app(
         try:
             result = await service.create_and_launch(
                 task=req.task,
+                # #1359 阶段 2：结构化验收清单随创建直通 task/defined。
+                criteria=req.criteria,
                 workspace_name=req.workspace,
                 cwd=cwd,
                 # `#318`：新建会话没有 session 账行 ⇒ session CAS 版本是矛盾请求。
