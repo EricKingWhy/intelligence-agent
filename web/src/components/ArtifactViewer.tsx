@@ -150,11 +150,15 @@ export function ArtifactViewer({
   label = '完整内容',
   /** 一开始就展开（清单里点开的那一行用 true）。 */
   defaultOpen = false,
+  /** 只要内容、不要那个开合钮：预览面板（`ArtifactsTab` 的选中项）由外层决定看哪一份，
+   *  再挂一个「查看内容」按钮就变成两套开合语义。取数逻辑仍是这一份。 */
+  bare = false,
 }: {
   sessionId: string;
   artifactId: string;
   label?: string;
   defaultOpen?: boolean;
+  bare?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [state, setState] = useState<ArtifactContentState>({ status: 'loading' });
@@ -193,21 +197,36 @@ export function ArtifactViewer({
       });
   }, [sessionId, artifactId]);
 
-  // 只在**真的展开**时取数：没展开就请求等于替用户读了他没要的东西。
+  // 只在**真的要内容**时取数：没展开就请求等于替用户读了他没要的东西。
+  // `bare`（预览面板）没有开合钮，选中即要内容，故直接视为展开。
   // 换一个产物（`artifactId` 变）时 `load` 是新函数，effect 随之重跑。
+  const wantContent = bare || open;
   useEffect(() => {
-    if (!open) return;
+    if (!wantContent) return;
     aliveRef.current = true;
     load();
     return () => {
       aliveRef.current = false;
     };
-  }, [open, load]);
+  }, [wantContent, load]);
 
   const retry = () => {
     setState({ status: 'loading' });
     load();
   };
+
+  if (bare) {
+    return (
+      <div className="artifact-viewer artifact-viewer-bare">
+        <ArtifactContentView state={state} artifactId={artifactId} />
+        {state.status === 'error' && (
+          <button type="button" className="artifact-retry" onClick={retry}>
+            重试
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="artifact-viewer">

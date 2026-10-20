@@ -121,7 +121,9 @@ describe('F5 尾窗：默认挂载节点数有上限（AC3）', () => {
 
   it('ARTIFACTS：N=500 时默认行数 ≤ 100（改造前 = 500）', () => {
     render(<ArtifactsTab tools={mkTools(N, 'artifact')} sessionId="f5" />);
-    expect(rows('.detail-section')).toBeLessThanOrEqual(CEIL);
+    /* #1419 A-1：产出项的结构类名从 `.detail-section` 换成效果图的 `.art-card`
+       （计数语义不变：一张卡 = 一个产出文件）。 */
+    expect(rows('.art-card')).toBeLessThanOrEqual(CEIL);
   });
 });
 
@@ -152,12 +154,12 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
     act(() => root.unmount());
     root = createRoot(container);
     render(<ArtifactsTab tools={mkTools(N, 'artifact')} sessionId="f5" />);
-    const beforeArtifacts = rows('.detail-section');
+    const beforeArtifacts = rows('.art-card');
     expect(beforeArtifacts).toBeLessThan(N);
     clickEarlier();
-    expect(rows('.detail-section')).toBeGreaterThan(beforeArtifacts);
+    expect(rows('.art-card')).toBeGreaterThan(beforeArtifacts);
     for (let i = 0; i < 10 && earlierButton(); i++) clickEarlier();
-    expect(rows('.detail-section')).toBe(N);
+    expect(rows('.art-card')).toBe(N);
   });
 });
 

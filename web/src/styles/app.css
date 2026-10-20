@@ -7336,6 +7336,149 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: var(--fx-shadow-lift);
 }
 
+/* ── #1419 A：产出文件卡 + 预览面板（效果图 `.art-*` / `.art-preview`） ── */
+.step-detail .art-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+.step-detail .art-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--fx-hairline);
+  border-radius: var(--fx-r-card);
+  background: var(--fx-card);
+  box-shadow: var(--fx-edge-hi);
+  text-align: left;
+  transition:
+    border-color var(--fx-dur) var(--fx-ease),
+    background var(--fx-dur) var(--fx-ease),
+    transform var(--fx-dur) var(--fx-ease);
+}
+.step-detail .art-card:hover {
+  border-color: var(--fx-hairline-strong);
+  background: var(--fx-card-hover);
+  transform: translateY(-1px);
+}
+.step-detail .art-card.is-on {
+  border-color: var(--fx-primary-line);
+  background: var(--fx-primary-softer);
+}
+.step-detail .art-thumb {
+  display: grid;
+  place-items: center;
+  height: 54px;
+  overflow: hidden;
+  border: 1px solid var(--fx-hairline-soft);
+  border-radius: 6px;
+  background: var(--fx-canvas-soft);
+  color: var(--fx-ghost);
+}
+.step-detail .art-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--fx-ink-2);
+}
+.step-detail .art-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--fx-faint);
+}
+.step-detail .art-meta .grow {
+  flex: 1;
+}
+.step-detail .art-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  align-self: flex-start;
+  height: 15px;
+  padding: 0 5px;
+  border: 1px solid var(--fx-ok-line);
+  border-radius: 4px;
+  background: var(--fx-ok-bg);
+  font-size: 8px;
+  font-weight: 650;
+  color: var(--fx-ok-ink);
+}
+.step-detail .art-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--fx-hairline);
+  border-radius: var(--fx-r-card);
+  background: var(--fx-card);
+  box-shadow: var(--fx-edge-hi);
+}
+.step-detail .art-preview .pv-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 9.5px;
+  color: var(--fx-ink-2);
+}
+.step-detail .art-preview .pv-head svg {
+  flex: 0 0 auto;
+  color: var(--fx-ghost);
+}
+.step-detail .art-preview .pv-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.step-detail .art-preview .pv-head .grow {
+  flex: 1;
+}
+.step-detail .art-preview .pv-head .mono {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--fx-faint);
+}
+.step-detail .art-preview .pv-sub {
+  gap: 4px;
+  font-size: 8.5px;
+  color: var(--fx-faint);
+}
+.step-detail .art-preview .pv-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 8.5px;
+  color: var(--fx-faint);
+}
+.step-detail .art-preview .pv-foot .grow {
+  flex: 1;
+}
+.step-detail .art-preview .pv-foot code {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--fx-mute);
+}
+/* 预览里的内容块（`ArtifactViewer` 的裸模式）收紧到面板内尺寸。 */
+.step-detail .art-preview .artifact-content-lines {
+  max-height: 220px;
+  font-size: 9px;
+}
+
 /* ── #1419 M：命令卡（效果图 `.term*`）——复用 `.step*` 卡头，只多输出井与卡尾 ──
  *
  *  效果图里 `.term` 与 `.step` 是同一份卡样式（同 border/radius/shadow、同

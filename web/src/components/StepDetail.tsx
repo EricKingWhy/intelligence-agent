@@ -823,7 +823,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
           {tab === 'terminal' && (
             <TerminalTab tools={tools} onFocusTool={onFocusTool} selectedKey={selectedKey} />
           )}
-          {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} />}
+          {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} onFocusTool={onFocusTool} />}
           {tab === 'constraints' && <ConstraintsTab sessionId={sessionId} />}
         </div>
 
@@ -2765,7 +2765,66 @@ export const ARTIFACTS_WINDOW_DEFAULT = 20;
 export const ARTIFACTS_WINDOW_STEP = 100;
 
 /** 导出理由同 `ChangesTab`：`tab` 是内部状态，SSR 测试与 F5 成本探针进不到这个面。 */
-export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: string }) {
+/** 产出文件的展示名：写类工具的 `args.path`（后端确实给了路径）优先，
+ *  没有路径就用**产生它的工具名 + 编号前 8 位**——artifact 本体没有文件名这个概念
+ *  （`ArtifactRef` 只有 id/size/mime/source_tool），编一个 `output.txt` 是替后端撒谎。 */
+function artifactLabel(tool: ToolCall): string {
+  const path = tool.args.path ?? tool.args.file_path;
+  if (typeof path === 'string' && path !== '') return path;
+  return `${tool.name} · ${tool.artifact!.artifact_id.slice(0, 8)}`;
+}
+
+/** #1419 A-2：选中项的预览面板（效果图 `.art-preview`）。
+ *
+ *  内容走**同一个** `ArtifactViewer`（`bare`：只要内容、不要第二套开合语义），
+ *  所以"读不到 / 没有存储 / 已不在本会话"三种失败态与别处一字不差。 */
+function ArtifactPreview({
+  tool, sessionId, onFocusTool,
+}: {
+  tool: ToolCall;
+  sessionId: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
+  const art = tool.artifact!;
+  const seq = toolSeq(tool);
+  const clock = formatClock(tool.completed_at ?? tool.started_at);
+  const size = art.size === null ? '未知大小' : formatBytes(art.size);
+  return (
+    <div className="art-preview">
+      <div className="pv-head">
+        <FileCheck2 size={11} aria-hidden="true" />
+        <span className="pv-name" title={artifactLabel(tool)}>{artifactLabel(tool)}</span>
+        <span className="grow" />
+        <span className="mono">{size}{clock !== null ? ` · ${clock}` : ''}</span>
+      </div>
+      <div className="pv-head pv-sub">
+        <span className="mono">{tool.name}</span>
+        {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+        <span>·</span>
+        <span className="mono">{art.mime_type ?? '类型未知'}</span>
+      </div>
+      <ArtifactViewer sessionId={sessionId} artifactId={art.artifact_id} bare />
+      <div className="pv-foot">
+        <code className="mono" title="artifact id（内容哈希）">{art.artifact_id.slice(0, 16)}</code>
+        <span className="grow" />
+        <CopyButton text={art.artifact_id} label="复制 artifact 编号" />
+        {onFocusTool && (
+          <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+            查看事件
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ArtifactsTab({
+  tools, sessionId, onFocusTool,
+}: {
+  tools: ToolCall[];
+  sessionId: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
   // Artifacts only reach this tab through the projection attaching an ArtifactRef
   // to the producing ToolCall (lib/projection.ts ARTIFACT_CREATED case). If an
   // artifact/created event's tool isn't found by the projection, that's a
@@ -2773,15 +2832,30 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
   // path (invariant #22).
   // F2（#272）：同上。
   const artifacts = useMemo(() => tools.filter((t) => t.artifact), [tools]);
-  // F5（#279）尾窗：同 `ChangesTab`（本面也无选中态）；`useState` 必须在这条 early-return 之前。
+  // F5（#279）尾窗：同 `ChangesTab`；`useState` 必须在下面那条 early-return **之前**。
   const [artifactWindow, setArtifactWindow] = useState(ARTIFACTS_WINDOW_DEFAULT);
+  /* #1419 A-2：选中项（预览面板的宿主）。`null` = 还没手动选过 ⇒ 默认看最新一份
+     （与尾窗「显示最近 N 条」同一取向），而不是列表第一条。 */
+  const [pickedId, setPickedId] = useState<string | null>(null);
   const hiddenArtifacts = Math.max(0, artifacts.length - artifactWindow);
   const visibleArtifacts = hiddenArtifacts > 0 ? artifacts.slice(hiddenArtifacts) : artifacts;
   if (artifacts.length === 0) {
     return <TabEmpty hint="本次会话没有产出文件。" icon={Package} />;
   }
+  const picked = visibleArtifacts.find((t) => t.tool_call_id === pickedId)
+    ?? visibleArtifacts[visibleArtifacts.length - 1];
   return (
     <>
+      {/* #1419 A-1：段头（效果图 `.pane-head`）= 标签 + mono 计数 + 右产出文件胶囊。 */}
+      <div className="pane-head">
+        <span className="lbl">产出文件</span>
+        <span className="n">{artifacts.length} 个</span>
+        <span className="grow" />
+        <span className="ov-badge">
+          <Package size={9} aria-hidden="true" />
+          artifact
+        </span>
+      </div>
       {hiddenArtifacts > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -2795,39 +2869,45 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
           </span>
         </div>
       )}
-      {visibleArtifacts.map((t) => (
-        <div key={t.tool_call_id} className="detail-section detail-card">
-          <div className="detail-section-title">
-            <FileCheck2 size={14} /> {t.name}
-          </div>
-          <div className="detail-row">
-            <span className="detail-key">编号</span>
-            <code className="detail-val detail-val-mono">{t.artifact!.artifact_id.slice(0, 16)}</code>
-          </div>
-          {/* 元数据可空（AC5）：缺了就说"未知"，不拿默认值冒充。
-              真后端里 size/mime_type 由 store 决定是否持久化（MinIO 不持久化
-              source_tool），编一个 `0 B` / `application/octet-stream` 是在替它撒谎。 */}
-          <div className="detail-row">
-            <span className="detail-key">大小</span>
-            <span className="detail-val">
-              {t.artifact!.size === null ? '未知' : formatBytes(t.artifact!.size)}
-            </span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-key">类型</span>
-            <span className="detail-val detail-val-mono">
-              {t.artifact!.mime_type ?? '未知'}
-            </span>
-          </div>
-          {/* 内容按需读取（#186 AC1）——地址是 #185 的只读端点，会话归属由 URL 的
-              session_id 决定（artifact_id 是内容哈希，跨会话可重名）。 */}
-          <ArtifactViewer
-            sessionId={sessionId}
-            artifactId={t.artifact!.artifact_id}
-            label="查看内容"
-          />
-        </div>
-      ))}
+      {/* 2 列卡片网格（效果图 `.art-grid`）。卡上只放**已有事实**：名/大小/seq/工具/
+          时间 + 「已生成」——产出文件列表里的每一项都来自 `artifact/created`，
+          这个徽标说的是这件事本身，不是新推断。 */}
+      <div className="art-grid">
+        {visibleArtifacts.map((t) => {
+          const art = t.artifact!;
+          const seq = toolSeq(t);
+          const clock = formatClock(t.completed_at ?? t.started_at);
+          const on = picked.tool_call_id === t.tool_call_id;
+          return (
+            <button
+              key={t.tool_call_id}
+              type="button"
+              className={`art-card${on ? ' is-on' : ''}`}
+              aria-pressed={on}
+              data-list-key={toolKey(t)}
+              title={artifactLabel(t)}
+              onClick={() => setPickedId(t.tool_call_id)}
+            >
+              <span className="art-thumb">
+                <FileCheck2 size={18} aria-hidden="true" />
+              </span>
+              <span className="art-name">{artifactLabel(t)}</span>
+              <span className="art-meta">
+                <span>{art.size === null ? '未知' : formatBytes(art.size)}</span>
+                {seq !== null && <><span>·</span><span>seq {seq}</span></>}
+                <span className="grow" />
+                <span>{t.name}</span>
+                {clock !== null && <><span>·</span><span>{clock.slice(0, 5)}</span></>}
+              </span>
+              <span className="art-badge">
+                <Check size={9} aria-hidden="true" />
+                已生成
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <ArtifactPreview tool={picked} sessionId={sessionId} onFocusTool={onFocusTool} />
     </>
   );
 }
