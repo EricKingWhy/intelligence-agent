@@ -8,7 +8,8 @@
 import { describe, expect, it } from 'vitest';
 import { FACT_TYPE_LABELS, factTypeLabel } from './constraints';
 
-/** 口径文件「逐枚举定名」表，顺序 = 后端六枚举声明序。 */
+/** 口径文件「逐枚举定名」表，顺序 = #1176 PRD:52 / 既有 `TYPE_OPTIONS` 顺序（六类），
+ *  其后为补充 7 类——后端可产出的**已知**全集，chips 仍只六类（`TYPE_OPTIONS` 不动）。 */
 const CANONICAL: readonly (readonly [string, string])[] = [
   ['constraint', '约束'],
   ['user_goal', '用户目标'],
@@ -16,6 +17,13 @@ const CANONICAL: readonly (readonly [string, string])[] = [
   ['work_boundary', '工作边界'],
   ['failed_approach', '失败尝试'],
   ['evidence_ref', '证据引用'],
+  ['authorization_revocation', '授权撤销'],
+  ['unresolved_operation', '待对账操作'],
+  ['user_instruction', '用户指令'],
+  ['acceptance_criterion', '验收标准'],
+  ['exact_identifier', '精确标识'],
+  ['confirmed_decision', '已确认决策'],
+  ['task_progress', '任务进度'],
 ];
 
 describe('factTypeLabel', () => {
@@ -23,11 +31,11 @@ describe('factTypeLabel', () => {
     expect(factTypeLabel(type)).toBe(label);
   });
 
-  it('映射键集与六枚举恰好相等（防漏、防多）', () => {
+  it('映射键集与 13 类已知全集恰好相等（防漏、防多）', () => {
     expect(Object.keys(FACT_TYPE_LABELS).sort()).toEqual(CANONICAL.map(([type]) => type).sort());
   });
 
-  it.each(['future_type', '', 'CONSTRAINT'])(
+  it.each(['future_type', '', 'CONSTRAINT', '__proto__', 'constructor', 'toString'])(
     '未知值 %j → 「其他类型」（不原样回显机器码）',
     (type) => {
       expect(factTypeLabel(type)).toBe('其他类型');
