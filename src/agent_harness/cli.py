@@ -3554,6 +3554,9 @@ async def _memory_command(
                 f"去重={counts['deduplicated']}"
                 f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
             ),
+            # #1441 §2：kind 缺失（NULL/空串/未知值）一律默认 MEMORY.md——这半条是
+            # 追认的简化，但用户必须能从报告里看见有多少条走了兜底（此前静默混入）。
+            f"kind 缺失默认归入 MEMORY.md：{counts['kind_defaulted']} 条",
         ]
         failed = bool(counts["skipped"])
         if failed:
