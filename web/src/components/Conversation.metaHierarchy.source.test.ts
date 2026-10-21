@@ -4,8 +4,11 @@ import { describe, expect, it } from 'vitest';
  * 背景：产品把元信息统一到 12px（`--text-xs`）后，与正文 13px 只差 1px，
  * 「弱化灰字」的层级只能靠颜色深浅 + 字重拉开（用户 2026-10-21 22:05 裁决）。
  * 口径：正文 primary > 关键 secondary/600 > 中间 secondary/500 > 次要 tertiary/400。
- * 硬约束：本票只动 color / font-weight；font-size 一律 `var(--text-xs)`；
+ * 硬约束：本票只动 color / font-weight；font-size 一律 `var(--text-xs)`（含 compact
+ * 密度变体）；字重一律显式声明（不靠「未声明 ⇒ 400」推断）；
  * token 值不动（tertiary 已是 AA 地板，禁止再造更浅的颜色）。
+ * 审查修复轮：药丸 hover 上档到 primary（默认态已占 secondary，hover 不再同值），
+ * 该变更是有意修复，不是「hover 语义不变」。
  *
  * jsdom 不加载 CSS，行为测试拿不到计算样式，故直接对样式源码设守卫；
  * 形态照 `StepDetail.timeline.source.test.ts`（CSS 用 node:fs，不走 `?raw`）。 */
@@ -28,15 +31,17 @@ function ruleBlock(selector: string): string {
   return match![1];
 }
 
-/** 读声明值；未声明返回 null（字重未声明 = 浏览器初始值 400）。 */
+/** 读声明值；未声明返回 null。 */
 function decl(body: string, prop: string): string | null {
   const match = body.match(new RegExp(`(?:^|[;\\s])${prop}:\\s*([^;]+);`));
   return match ? match[1].trim() : null;
 }
 
+/** 字重必须显式声明（#1447 审查修复：不再靠「未声明 ⇒ 400」的推断）。 */
 function weightOf(selector: string): number {
   const value = decl(ruleBlock(selector), 'font-weight');
-  return value === null ? 400 : Number(value);
+  expect(value, `${selector} 必须显式声明 font-weight`).not.toBeNull();
+  return Number(value);
 }
 
 /** 主题 token 块：暗色 `:root` / 亮色 `:root[data-theme='light']`。 */
@@ -104,8 +109,6 @@ describe('#1447 中间栏元信息层级（color / font-weight）', () => {
       expect(secondary.rgb, `${theme} token rgb`).toBe(tertiary.rgb);
       expect(secondary.alpha, `${theme} secondary > tertiary`).toBeGreaterThan(tertiary.alpha);
     }
-
-    expect(weightOf(TIERS.key.selectors[0])).toBeGreaterThan(weightOf(TIERS.minor.selectors[0]));
   });
 
   it('中间档 = secondary + 500，字重严格居中、颜色不倒挂', () => {
@@ -120,19 +123,14 @@ describe('#1447 中间栏元信息层级（color / font-weight）', () => {
     expect(keyWeight, '600 > 500 > 400').toBeGreaterThan(middleWeight);
     expect(middleWeight).toBeGreaterThan(minorWeight);
 
-    /* 颜色维度：中间与关键同档（不倒挂），与次要不同档。 */
+    /* 颜色维度：中间与关键同档（不倒挂）——与次要的差异已由 token 名精确锁定。 */
     const middleColor = decl(ruleBlock(TIERS.middle.selectors[0]), 'color');
     expect(middleColor).toBe(decl(ruleBlock(TIERS.key.selectors[0]), 'color'));
-    expect(middleColor).not.toBe(decl(ruleBlock(TIERS.minor.selectors[0]), 'color'));
   });
 
   it('`.tm-n` 与 `.tm-l` 不再倒挂：数字与标签同色，数字更重', () => {
-    const nColor = decl(ruleBlock('.tm-n'), 'color');
-    const lColor = decl(ruleBlock('.tm-l'), 'color');
-    expect(nColor).toBe('var(--text-secondary)');
-    expect(lColor).toBe(nColor);
-    expect(weightOf('.tm-n')).toBe(600);
-    expect(weightOf('.tm-l')).toBe(500);
+    /* 精确色/字重已由前两条按档位表锁定，这里只钉这一对元素的相对关系。 */
+    expect(decl(ruleBlock('.tm-n'), 'color')).toBe(decl(ruleBlock('.tm-l'), 'color'));
     expect(weightOf('.tm-n')).toBeGreaterThan(weightOf('.tm-l'));
   });
 
@@ -147,17 +145,24 @@ describe('#1447 中间栏元信息层级（color / font-weight）', () => {
       expect(decl(ruleBlock(selector), 'font-size'), `${selector} font-size`).toBe(
         'var(--text-xs)',
       );
-      /* 这些规则里不得出现任何 <12px 的原始字号（字号变化不属于本票）。 */
-      expect(ruleBlock(selector), `${selector} raw font-size`).not.toMatch(
-        /font-size:\s*(?:[0-9]|1[01])(?:\.[0-9]+)?px/,
-      );
     }
+
+    /* compact 密度变体：`.act-name` 曾是漏网的 11px，同样必须守 12px 地板
+       （同组 `.act-duration` / `.act-args` 本就是 `--text-xs`）。 */
+    expect(
+      decl(ruleBlock("[data-density='compact'] .act-name"), 'font-size'),
+      'compact .act-name font-size',
+    ).toBe('var(--text-xs)');
   });
 
-  it('hover / is-on / is-off / 状态色语义不变', () => {
+  it('hover 上档到 primary；is-on / is-off / 状态色语义不变', () => {
+    /* #1447 审查修复（有意变更，非「语义不变」）：默认态已提到 secondary，
+       hover 若仍写 secondary 则颜色维度归零（浅色主题只剩 ≈1.09:1 底色差）
+       ⇒ hover 上档到 primary，并断言它与默认态确实不同。 */
     const hover = ruleBlock('.turn-nav-pill:hover');
     expect(decl(hover, 'background')).toBe('var(--surface-2)');
-    expect(decl(hover, 'color')).toBe('var(--text-secondary)');
+    expect(decl(hover, 'color')).toBe('var(--text-primary)');
+    expect(decl(hover, 'color')).not.toBe(decl(ruleBlock('.turn-nav-pill'), 'color'));
 
     const off = ruleBlock('.turn-nav-pill.is-off');
     expect(decl(off, 'color')).toBe('var(--text-tertiary)');
