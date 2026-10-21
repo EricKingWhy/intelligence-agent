@@ -1,6 +1,7 @@
 # Phase Status — 实施进度追踪
 
 
+- 2026-10-22：#1451 已关闭（代码尚未集成），本地分支 `codex/issue-1450-1451` / commit `ff4ff0ab5ee7a63ebfc42cc41a2151c5e4099c13`；Timeline 与键盘导航共用一次派生的筛选行。全量 Vitest 192 files passed / 1 skipped、2586 passed / 1 skipped；指定 Playwright 双视口 34 passed；lint/build exit 0。双轴 PASS、P0–P4=0，Phase 10 保持 COMPLETED；性能探针低于冻结预算，不宣称加速。关单评论 https://github.com/EricKingWhy/intelligence-agent/issues/1451#issuecomment-6326237988，详见月档。
 - 2026-10-22：#1450 已关闭（代码尚未集成），本地分支 `codex/issue-1450-1451` / commit `6cda0043f85c83b50847983438d261260ec1a490`；取消语义在 Tool Card、Inspector 标题和失败筛选间一致。focused Vitest 8 files / 381 passed；Playwright fixture replay 2/2（1280/1920）；build/lint exit 0；双轴 PASS、P0–P4=0。Phase 10 保持 COMPLETED，关单评论 https://github.com/EricKingWhy/intelligence-agent/issues/1450#issuecomment-6325677695，详见月档。
 - 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
 
