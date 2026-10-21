@@ -583,33 +583,57 @@ export default function App() {
    * 落点 = **最后一个** `run/interrupted` 事件本体：投影 `run_interrupted` 只留
    * step/seq/reason，不含 run_id，也不含 `focusEvent` 需要的完整事件。`run/started`
    * 会清空投影，所以投影非 null 时事件必然在 `conversation.events` 里（投影由它派生）；
-   * 找不到时按钮仍渲染，只打开右栏、不抛错。
+   * 找不到时按钮仍渲染，退回 run 级 focus 再打开右栏，不抛错。
    *
    * 「忽略」照抄既有 dismiss 模式（`contextFullDismissedRunId`）：App 级
    * `useState<string|null>` 存被忽略对象的标识，渲染时比对；视图状态不持久化。
    * 标识首选事件 `run_id`（同一次中断唯一）；匿名 run（后端 `detect_unterminated_runs`
    * 允许 run_id 为 None）退到该事件的 seq / 该次中断的 `interrupted_seq`。 */
   const interruptedEvent = useMemo(() => {
-    const events = conversation?.events;
-    if (!events) return null;
+    // 常见路径（没有中断的会话）不扫全表：流式期间每个 delta 都会产生新
+    // conversation（projection 的 copy-on-write），O(N) 反向扫描会累计成 O(N²)。
+    if (!conversation?.run_interrupted) return null;
+    const events = conversation.events;
     for (let i = events.length - 1; i >= 0; i -= 1) {
-      if (events[i].type === EventType.RUN_INTERRUPTED) return events[i];
+      const event = events[i];
+      // quarantine 帧（eventValidate 拒收）保留 type 但 seq/run_id 归一成 null；
+      // 持久化的 run/interrupted 必有 seq，跳过它们才与投影事实同源（P4-2）。
+      if (event.type === EventType.RUN_INTERRUPTED && event.seq !== null) return event;
     }
     return null;
   }, [conversation]);
-  const interruptedIdentity =
-    interruptedEvent?.run_id ??
-    (interruptedEvent?.seq != null ? `seq:${interruptedEvent.seq}` : null) ??
-    (conversation?.run_interrupted?.interrupted_seq != null
-      ? `interrupted:${conversation.run_interrupted.interrupted_seq}`
-      : 'unknown');
+  /* 标识 = 会话前缀 + 该次中断的身份。run_id 用**真值**判断（`||` 而不是 `??`）：
+   * 后端允许匿名 run（run_id=None），旧数据还可能出现空串——空串必须继续回退到
+   * seq，否则同一会话的两次匿名/空串中断会共用一个标识，第二次被静默吞掉。
+   * seq 是每会话单调（契约 C5），不是全局唯一，所以必须带 `conversation.session_id`
+   * 前缀：在 A 会话点「忽略」不能连 B 会话同 seq 的中断一起隐藏。
+   * 不再保留第三级 `'unknown'` 常量兜底：投影非 null 时事件必然在场（投影由它
+   * 派生）；即使事件被 quarantine 跳过，投影的 `interrupted_seq` 也是后端
+   * `InterruptedRun.interrupted_seq: int` 的契约字段，可直接作为该次中断的序号
+   * （只有形状合法却缺 seq 的非持久化帧才可能落到它，仍比常量兜底可区分）。 */
+  const interruptedIdentity = (() => {
+    if (!conversation?.run_interrupted) return null;
+    const prefix = conversation.session_id;
+    if (interruptedEvent) {
+      return `${prefix}:${interruptedEvent.run_id || `seq:${interruptedEvent.seq}`}`;
+    }
+    return `${prefix}:interrupted:${conversation.run_interrupted.interrupted_seq}`;
+  })();
   const [dismissedInterruptedIdentity, setDismissedInterruptedIdentity] = useState<string | null>(null);
   const handleInspectInterruption = useCallback(() => {
+    // 正常数据：定位到中断事件本体。事件缺失（防御性边界）：退回 run 级 focus，
+    // 不把上一次无关的 focus 留在右栏（P4-1）。
     if (interruptedEvent) focusEvent(interruptedEvent);
+    else focusRun();
     setInspectorOpen(true);
-  }, [interruptedEvent, focusEvent, setInspectorOpen]);
+    // 依赖与相邻的 `focusChild` 一致：不列 useState 的稳定 setter。
+  }, [interruptedEvent, focusEvent, focusRun]);
   const handleDismissInterruption = useCallback(() => {
     setDismissedInterruptedIdentity(interruptedIdentity);
+    // 横幅整块卸载后，被点击的按钮消失，浏览器会把焦点丢到 body。落到主工作区
+    // 容器（`#region-main` 带 tabIndex=-1，SkipLinks 的既有落点），下一次 Tab
+    // 从会话区内部继续，而不是从页面开头重来。
+    document.getElementById('region-main')?.focus();
   }, [interruptedIdentity]);
 
   /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
@@ -2046,10 +2070,12 @@ export default function App() {
               </span>
               {/* F-06（#1449）：两个动作都是纯前端视图操作——「看缺口」把中断事件
                   本身定位到右栏（复用 focusEvent 的 peek 语义），「忽略」按中断
-                  标识收起这一屏。后端没有部分重跑能力，这里**不**造重跑入口。 */}
+                  标识收起这一屏。后端没有部分重跑能力，这里**不**造重跑入口。
+                  按钮走专用类（`.interrupt-action`），不裸用全局 `.recover-btn`：
+                  崩溃恢复面板与本横幅可能同屏，全局选择器保持单一含义。 */}
               <button
                 type="button"
-                className="recover-btn"
+                className="interrupt-action interrupt-action-primary"
                 onClick={handleInspectInterruption}
                 title="在右栏 Inspector 定位到这次中断的事件"
               >
@@ -2057,7 +2083,7 @@ export default function App() {
               </button>
               <button
                 type="button"
-                className="interrupt-dismiss"
+                className="interrupt-action interrupt-dismiss"
                 onClick={handleDismissInterruption}
                 title="收起这条中断提示（不改变会话事实）"
               >

@@ -9445,18 +9445,23 @@ button.json-row {
 }
 /* #1136：字色 ink-mix（同 .app-error 族，见 app.css:175 注释）；14% 底、hover 升 22%。
    P4-2：按钮内的 <RotateCcw> 走 currentColor，随字色一起压深是期望（图标与按钮文案
-   同属一个控件标签）。 */
-.recover-btn {
+   同属一个控件标签）。
+   F-06（#1449）：中断横幅的动作按钮（.interrupt-action）与 .recover-btn 共享同一套
+   结构声明（同一实测按钮族）；差异只在配色 / 底色，各自单独写。 */
+.recover-btn,
+.interrupt-action {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
   padding: 3px var(--space-sm);
   font: 550 var(--text-xs) var(--font-ui);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.recover-btn {
   color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
   background: color-mix(in srgb, var(--warning) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
-  border-radius: var(--radius-full);
-  cursor: pointer;
 }
 .recover-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--warning) 22%, transparent);
@@ -9465,7 +9470,8 @@ button.json-row {
   opacity: 0.6;
   cursor: default;
 }
-.recover-btn:focus-visible {
+.recover-btn:focus-visible,
+.interrupt-action:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
@@ -10535,30 +10541,39 @@ button.json-row {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* F-06（#1449）：中断横幅现在带两个纯前端动作。文案占满剩余宽度（按钮不缩），
-   动作按钮沿用 .recover-btn 的 --warning 族（#1136 已量对比度）；「忽略」是次级
-   动作，用同色系透明底，不抢主按钮的视觉重量。两者都只引用既有 token。 */
+/* F-06（#1449）：中断横幅现在带两个纯前端动作。文案占满剩余宽度，动作按钮
+   不缩（`.interrupt-action` 上的 flex-shrink:0）；按钮结构与 .recover-btn 共享
+   （见 app.css:9451 的并列选择器），配色差异各自写：主动作沿用 #1136 已量的
+   --warning 族，「忽略」是次级动作，用同色系透明底，不抢主按钮的视觉重量。
+   两者都只引用既有 token。 */
 .interrupt-banner-text {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.interrupt-dismiss {
+.interrupt-action {
   flex-shrink: 0;
-  padding: 3px var(--space-sm);
-  font: 550 var(--text-xs) var(--font-ui);
+}
+
+/* 主动作：配色与 .recover-btn 相同（#1136 已量对比度），但用横幅自己的类名，
+   避免全局 `.recover-btn` 在「崩溃 + 中断」同屏时双匹配。 */
+.interrupt-action-primary {
+  color: color-mix(in srgb, var(--warning) 45%, var(--text-primary));
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.interrupt-action-primary:hover {
+  background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+
+/* 「忽略」是次级动作：同色系透明底，不抢主按钮的视觉重量。 */
+.interrupt-dismiss {
   color: inherit;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-full);
-  cursor: pointer;
 }
 .interrupt-dismiss:hover {
   background: color-mix(in srgb, var(--warning) 14%, transparent);
-}
-.interrupt-dismiss:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
 }
 
 /* 待裁决横幅（#1030 缺陷②/③）：与 interrupt-banner 同族，但**带一个动作**。

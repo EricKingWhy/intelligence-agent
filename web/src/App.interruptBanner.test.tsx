@@ -9,6 +9,11 @@
  *   3. 「忽略」⇒ 横幅消失；同一标识（同一次中断）不重现，新标识（新一次中断）重现。
  *
  *  mock 写法照抄 `App.contextFullRouting.test.tsx`（真 App + 可控 `useSession`）。
+ *
+ *  超时：本文件每条用例显式 `30_000`。默认 5s 在本机 2 核高负载（并行 agent 施工）
+ *  下会假红——单文件实测墙钟 45–82s，失败点在 `mount()` 附近而不是断言；这里没有
+ *  性能断言，30s 只是给真实渲染留出墙钟。兄弟文件不设超时是默认体例，本文件按
+ *  `#1449` 审查 P4-5 注明差异原因。
  */
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -119,6 +124,26 @@ function twoInterruptions(): ConversationState {
   return events.reduce((state, e) => applyEvent(state, e), initConversation('s1'));
 }
 
+/** 直接构造一条 run/interrupted（不带 run/started）：只关心横幅与标识。 */
+function singleInterruption(
+  seqNo: number,
+  runId: string | null,
+  sessionId = 's1',
+): ConversationState {
+  return applyEvent(
+    initConversation(sessionId),
+    {
+      session_id: sessionId,
+      time: '2026-10-21T00:00:00Z',
+      type: EventType.RUN_INTERRUPTED,
+      seq: seqNo,
+      run_id: runId,
+      step_id: 1,
+      data: { interrupted_seq: seqNo - 1, reason: 'anonymous' },
+    },
+  );
+}
+
 function buttonByText(text: string): HTMLButtonElement | undefined {
   return Array.from(document.body.querySelectorAll('button')).find(
     (b) => (b.textContent ?? '').trim() === text,
@@ -189,6 +214,10 @@ describe('F-06 中断横幅的两个动作', () => {
     expect(banner!.textContent).toContain('上次任务在第 1 步中断');
     expect(buttonByText('在右栏看缺口')).toBeTruthy();
     expect(buttonByText('忽略')).toBeTruthy();
+    // S-P3-2：横幅动作走专用类，不再命中全局 `.recover-btn`（否则「崩溃 + 中断」
+    // 同屏时 e2e 的严格模式 `.recover-btn` locator 会双匹配）。
+    expect(banner!.querySelectorAll('.recover-btn')).toHaveLength(0);
+    expect(banner!.querySelectorAll('.interrupt-action')).toHaveLength(2);
 
     await act(async () => { root!.unmount(); });
     container!.remove();
@@ -218,10 +247,12 @@ describe('F-06 中断横幅的两个动作', () => {
     expect(peek!.textContent).toContain('run/interrupted');
     expect(peek!.textContent).toContain('run-second');
     expect(peek!.textContent).not.toContain('run-first');
-    // 时间线（默认 tab）该行被选中。
+    // 时间线（默认 tab）该行被选中——并且必须是中断事件本身，不是任意一行。
     const selectedRow = el.querySelector('.timeline-row.sel');
     expect(selectedRow).not.toBeNull();
     expect(selectedRow!.getAttribute('aria-current')).toBe('true');
+    expect(selectedRow!.textContent).toContain('run/interrupted');
+    expect(selectedRow!.textContent).toContain('#4');
   }, 30_000);
 
   it('「忽略」⇒ 横幅消失；同一次中断不重现，新一次中断重新出现', async () => {
@@ -245,5 +276,84 @@ describe('F-06 中断横幅的两个动作', () => {
     expect(again).not.toBeNull();
     expect(buttonByText('在右栏看缺口')).toBeTruthy();
     expect(buttonByText('忽略')).toBeTruthy();
+  }, 30_000);
+
+  it('匿名 run（run_id=null）按 seq 回退：同一次中断不重现，新的匿名中断重现', async () => {
+    await mountWith(singleInterruption(2, null));
+    expect(document.querySelector('.interrupt-banner')).not.toBeNull();
+
+    await act(async () => { buttonByText('忽略')!.click(); });
+    expect(document.querySelector('.interrupt-banner')).toBeNull();
+
+    // 同一标识（seq:2）重渲染：不重现。
+    await act(async () => { H.set({ ...H.conv! }); });
+    expect(document.querySelector('.interrupt-banner')).toBeNull();
+
+    // 新的匿名中断（seq 变）：标识变化 ⇒ 重新出现。
+    await act(async () => { H.set(singleInterruption(11, null)); });
+    expect(document.querySelector('.interrupt-banner')).not.toBeNull();
+  }, 30_000);
+
+  it('空串 run_id 回退到 seq：两次空串中断不会共用一个标识', async () => {
+    await mountWith(singleInterruption(2, ''));
+    expect(document.querySelector('.interrupt-banner')).not.toBeNull();
+
+    await act(async () => { buttonByText('忽略')!.click(); });
+    expect(document.querySelector('.interrupt-banner')).toBeNull();
+
+    // 修复前标识是 ''（`??` 不跳过空串），第二次空串中断会被静默吞掉。
+    await act(async () => { H.set(singleInterruption(11, '')); });
+    expect(document.querySelector('.interrupt-banner')).not.toBeNull();
+  }, 30_000);
+
+  it('跨会话同 seq 的匿名中断不互相吞：标识带会话前缀', async () => {
+    await mountWith(singleInterruption(7, null, 's1'));
+    await act(async () => { buttonByText('忽略')!.click(); });
+    expect(document.querySelector('.interrupt-banner')).toBeNull();
+
+    // 每会话 seq 独立：s2 的匿名中断同样 seq=7，但用户从未忽略过它。
+    await act(async () => { H.set(singleInterruption(7, null, 's2')); });
+    expect(document.querySelector('.interrupt-banner')).not.toBeNull();
+  }, 30_000);
+
+  it('更晚的畸形 run/interrupted（quarantine，seq=null）不抢「看缺口」落点', async () => {
+    const valid = singleInterruption(2, 'run-valid');
+    const withBad = applyEvent(valid, {
+      type: EventType.RUN_INTERRUPTED,
+      data: 'BAD-RAW',
+    } as unknown as AgentEvent);
+    const el = await mountWith(withBad);
+
+    await act(async () => { buttonByText('在右栏看缺口')!.click(); });
+    const peek = el.querySelector('.detail-peek');
+    expect(peek).not.toBeNull();
+    // 落点必须是那条合法中断（带 run_id），不是 seq=null 的 quarantine 帧。
+    expect(peek!.textContent).toContain('run-valid');
+    expect(peek!.textContent).toContain('run/interrupted');
+  }, 30_000);
+
+  it('事件缺失的降级：看缺口回到 run 级 focus，不保留无关旧 focus', async () => {
+    const base = twoInterruptions();
+    // 投影仍非 null（run_interrupted 来自第二次中断），但事件日志里没有它：
+    // 模拟 P4-1 的防御性边界。
+    const conv = { ...base, events: base.events.filter((e) => e.type !== EventType.RUN_INTERRUPTED) };
+    const el = await mountWith(conv);
+
+    // 先点时间线一行，制造一个无关的旧 focus（peek 打开）。
+    const row = el.querySelector<HTMLElement>('.timeline-row');
+    expect(row).not.toBeNull();
+    await act(async () => { row!.click(); });
+    expect(el.querySelector('.detail-peek')).not.toBeNull();
+
+    await act(async () => { buttonByText('在右栏看缺口')!.click(); });
+    // focusRun 收起 peek；修复前只打开 Inspector，旧 focus 原样保留。
+    expect(el.querySelector('.detail-peek')).toBeNull();
+  }, 30_000);
+
+  it('「忽略」后焦点落到主工作区容器，不留在 body', async () => {
+    await mountWith(singleInterruption(2, 'run-focus'));
+    await act(async () => { buttonByText('忽略')!.click(); });
+    expect(document.querySelector('.interrupt-banner')).toBeNull();
+    expect(document.activeElement).toBe(document.getElementById('region-main'));
   }, 30_000);
 });
