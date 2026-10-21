@@ -123,6 +123,33 @@ async def test_build_runtime_wires_full_stack(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_runtime_wires_memory_formation(tmp_path):
+    """`wiring.memory_formation` 必须按引用接进 Runtime（#1439 F-03 的唯一生产入口）。
+
+    这条钉的是 `assembly.py` 的 `memory_formation=wiring.memory_formation` 一行：
+    删掉它，Runtime 的终结臂静默走"没有宿主"路径、F-03 的 run-start 重置也不会发生，
+    而此前全部测试仍然全绿（消融变异 G：0 failed）。
+    """
+    settings = _settings(tmp_path)
+    stores = _stores(tmp_path)
+    await initialize_stores(stores)
+    formation = object()
+    wiring = CapabilityWiring(memory_formation=formation)
+
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModelFactory()):
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id="s", workspace=tmp_path / "w",
+            max_agent_turns=5,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+        )
+
+    assert runtime._memory_formation is formation
+
+
+@pytest.mark.asyncio
 async def test_build_runtime_wires_capability_tools_and_manual_approval(tmp_path):
     """wiring.tools 进 ToolRegistry（统一 Executor 路径，不变量 #7）、
     wiring.context_providers 进 ContextBuilder；manual 模式危险操作默认拒绝。"""

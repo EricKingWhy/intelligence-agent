@@ -347,14 +347,15 @@ class MemoryFormationNotifier(Protocol):
     两半的分工：`notify_run_started` 是轮次边界的**重置**（Hermes
     `turn_context._reset_per_turn_agent_state` 的 turn-start 同位），
     `notify_run_finished` 是终结入队。两者都必须幂等、且都不许把故障抛回 Runtime。
-    Runtime 用 `getattr` 探测前者——只关心终结接缝的替身（集成测试的合成宿主）不必
-    为一个空操作补齐方法；生产宿主 `MemoryJobRunner` 两个都实现。
+
+    **必需面只有 `notify_run_finished`。** 轮次重置是端口之外的可选扩展能力：Runtime
+    用 `getattr` 探测它，只关心终结接缝的替身（集成测试的合成宿主）不必为一个空操作
+    补齐方法；生产宿主 `MemoryJobRunner` 两个都实现。所以这里不声明
+    `notify_run_started`——声明了就等于说"替身必须有它"，与上面的探测口径矛盾。
 
     `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
     能对"给进来的东西真的满足契约"下断言，而不是只靠注解。
     """
-
-    def notify_run_started(self) -> None: ...
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
@@ -443,11 +444,19 @@ class MemoryJobRunner:
 
         同步、不抛：Runtime 在 run 的最前面调它，那时还没有可终结的 run，抛异常会变成
         "run 没开始就失败"。store 缺席（纯 SQLite 部署 / 未接 markdown）时是 no-op。
+
+        **预算是进程级而非 run 级**（与上面的单例同源）：计数器挂在共享 store 上，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零——单用户
+        部署里并发 run 罕见，影响小；多用户共享一个进程时这是真实的口径缺口，彻底
+        修法要按 session 分桶，超出本票范围。
         """
-        markdown = getattr(self.memory_v2, "markdown", None)
-        reset = getattr(markdown, "reset_consolidation_failures", None)
-        if callable(reset):
-            reset()
+        try:
+            markdown = getattr(self.memory_v2, "markdown", None)
+            reset = getattr(markdown, "reset_consolidation_failures", None)
+            if callable(reset):
+                reset()
+        except Exception:
+            logger.exception("Memory V2 run-start 重置失败（旁路，不影响本轮）")
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,

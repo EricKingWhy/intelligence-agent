@@ -182,7 +182,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 class MarkdownMemoryStore:
-    """有界、文件支撑的 curated memory；一次会话一个实例。
+    """有界、文件支撑的 curated memory；**进程级单例**，跨 run / session 复用。
 
     ``_snapshot`` 按 session 冻结：首次渲染后，同一 session 内逐字节不变（前缀缓存稳定，
     M9）；缓存按插入序 FIFO 淘汰最早的 session（上限 ``SNAPSHOT_CACHE_LIMIT``），被淘汰
@@ -231,12 +231,16 @@ class MarkdownMemoryStore:
     # ------------------------------------------------------------------ 熔断
 
     def reset_consolidation_failures(self) -> None:
-        """轮次边界调用：每个 run 开始时由记忆宿主归零（#1439 F-03）。
+        """轮次边界调用：每个新 run 开始时由记忆宿主归零（#1439 F-03）。
 
         调用链：`AgentRuntime._drive` 的 run-start → `MemoryJobRunner.notify_run_started`
-        → 本方法。计数语义因此是「**本轮**（本次 run）内的连续失败数」，与
-        `MAX_CONSOLIDATION_FAILURES_PER_TURN` 的名字一致；不重置时它会跨 run 累积，
-        长进程里后续 run 的自纠机会被提前掐断。
+        → 本方法。目标是让「连续失败数」回到 `MAX_CONSOLIDATION_FAILURES_PER_TURN`
+        所描述的 per-run 口径；不重置时它会跨 run 累积，长进程里后续 run 的自纠机会
+        被提前掐断。
+
+        **这是尽力而为的 per-run 预算，不是硬保证**：计数器是本进程单例上的裸 int，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零，正在累计
+        的那一侧会被中途续满额度。单用户部署里并发 run 罕见，影响小。
         """
         self._consolidation_failures = 0
 

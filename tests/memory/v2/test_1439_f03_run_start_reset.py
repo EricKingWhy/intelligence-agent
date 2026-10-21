@@ -16,8 +16,10 @@
   第 4 次 TERMINAL；下一个 run 的第 1 次失败又可自纠。对照组用**不实现**
   `notify_run_started` 的宿主——那正是修复前的形状，新 run 第 1 次失败即 TERMINAL，
   这条对照就是本 bug 的回归断言。
+- **续跑层**：同 run 续跑（`LaunchRunBudget(run_id=...)`）**不**归零——续跑是同一逻辑
+  run 的继续，`#312` 要求计数器与 stuck 指纹都不重置。
 - **宿主层**（`MemoryJobRunner.notify_run_started`）：它把调用转给
-  `memory_v2.markdown`；没有 markdown 面时是 no-op 且不抛。
+  `memory_v2.markdown`；没有 markdown 面时是 no-op，store 抛异常时吞掉。
 """
 
 from __future__ import annotations
@@ -29,11 +31,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.run_budget import LaunchRunBudget
 from agent_harness.memory.v2.markdown_store import MAX_CONSOLIDATION_FAILURES_PER_TURN
 from agent_harness.memory.v2.memory_tool import MemoryTool
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.runner import MemoryJobRunner
-from agent_harness.session import TOOL_RESULT
+from agent_harness.session import RUN_STARTED, TOOL_RESULT
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 from tests.memory.v2._markdown_memory_1353 import build_store, call
@@ -65,14 +68,17 @@ class _RunStartSpy:
         return None
 
 
-def _runtime(store: Any, notifier: Any, model: Any) -> AgentRuntime:
+def _runtime(store: Any, notifier: Any, model: Any, *, run_budget: Any = None) -> AgentRuntime:
     """真 Runtime + 真 `MemoryTool`；**每个 run 建一个**——与生产同形
-    （`build_runtime` 每轮调用），而 store / 宿主是跨 run 的进程级单例。"""
+    （`build_runtime` 每轮调用），而 store / 宿主是跨 run 的进程级单例。
+
+    `run_budget` 带 `run_id` 时是**同 run 续跑**（`#312`），Runtime 不再 `begin_run`。
+    """
     registry = ToolRegistry()
     registry.register(MemoryTool(store))
     return AgentRuntime(
         model=model, registry=registry, executor=ToolExecutor(registry),
-        max_agent_turns=20, memory_formation=notifier,
+        max_agent_turns=20, memory_formation=notifier, run_budget=run_budget,
     )
 
 
@@ -93,13 +99,16 @@ def _fail_round(run_tag: str, index: int) -> AIMessage:
 
 async def _run(
     store: Any, notifier: Any, session: Any, *, run_tag: str, failures: int,
+    run_budget: Any = None,
 ) -> list[dict]:
     """跑一个 run：`failures` 次零命中 replace，然后正常收尾。返回本 run 的工具结果。"""
     model = ScriptedModel(
         [_fail_round(run_tag, i) for i in range(failures)] + [AIMessage(content="好的。")]
     )
     before = len(session.events)
-    result = await _runtime(store, notifier, model).run(session, f"run {run_tag}")
+    result = await _runtime(store, notifier, model, run_budget=run_budget).run(
+        session, None if run_budget is not None else f"run {run_tag}",
+    )
     assert result.status == "completed", f"run {run_tag} 没有正常收口：{result.status}"
     return [
         json.loads(event.data["content"])
@@ -178,6 +187,34 @@ async def test_without_the_run_start_seam_the_new_run_fails_immediately(tmp_path
     assert notifier.started == 0
 
 
+async def test_a_resumed_run_does_not_get_a_fresh_budget(tmp_path) -> None:
+    """同 run 续跑**不**归零（`#312` 不变量）：续跑是同一逻辑 run 的继续。
+
+    续跑的输入是 `LaunchRunBudget(run_id=...)`，Runtime 因此不再 `begin_run`。记忆预算
+    若在续跑时也归零，同一个逻辑 run 就凭空多出 3 次自纠机会——与"计数器与 stuck
+    指纹都不重置"（`runtime.py` 的 `#312` 注释）字面冲突。本用例把这条钉住：run 1
+    用满额度后，以同一 run_id 续跑，续跑的第 1 次失败必须是第 4 次（TERMINAL）。
+    """
+    store = build_store(tmp_path)
+    notifier = _RunStartSpy(store)
+    session = make_session(tmp_path / "sessions")
+
+    first = await _run(store, notifier, session, run_tag="a", failures=CAP)
+    assert all(_self_correctable(payload) for payload in first)
+    assert notifier.started == 1
+    run_id = next(e.run_id for e in session.events if e.type == RUN_STARTED)
+
+    resumed = await _run(
+        store, notifier, session, run_tag="b", failures=1,
+        run_budget=LaunchRunBudget(run_id=run_id, turn_index=1),
+    )
+
+    assert _terminal(resumed[0]), (
+        "续跑第 1 次失败被判可自纠 —— 续跑时归零了预算，违反 `#312` 不重置不变量"
+    )
+    assert notifier.started == 1, "同 run 续跑不得再发一次 run-start 重置"
+
+
 # --------------------------------------------------------------------------------------
 # 宿主层：MemoryJobRunner 把 run-start 转给 markdown 面
 # --------------------------------------------------------------------------------------
@@ -211,3 +248,12 @@ async def test_runner_run_start_is_a_noop_without_markdown() -> None:
     """纯 SQLite 部署 / 未接 markdown：没有可重置的东西，且不得抛。"""
     _runner(None).notify_run_started()
     _runner(type("_V2", (), {"markdown": None})()).notify_run_started()
+
+
+async def test_runner_run_start_swallows_store_failures() -> None:
+    """store 侧抛异常也必须吞掉：run 还没开始，记忆是旁路（`#1439` C-03）。"""
+    class _Boom:
+        def reset_consolidation_failures(self) -> None:
+            raise RuntimeError("disk on fire")
+
+    _runner(type("_V2", (), {"markdown": _Boom()})()).notify_run_started()
