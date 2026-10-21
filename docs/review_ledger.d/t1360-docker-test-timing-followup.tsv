@@ -1,0 +1,2 @@
+2026-10-21	#1360 timing-test discovery review: Standards PASS; Spec P2=1 (10s exec warm-up could time out on cold Docker)	995750c1b914aa57044aad3b5339358269f6411f..c3ea571009a99328d39d6e976239d6b6a7f8717d
+2026-10-21	#1360 follow-up review after both tests use ensure_started(): Standards + Spec PASS, P0-P4=0; closes cold-start timing P2	995750c1b914aa57044aad3b5339358269f6411f..79062c892f85511b38e3c24a2440f7266d1ef6f6
