@@ -1,0 +1,1 @@
+2026-10-21	机械归属（集成线 merge，非内容审查主张）：merge 7b2aab24d = PR #1425 并入预演分支（#1420 上下文洞察独立模块，分支 claude/1420-context-insights  tip 0280a1d65，其各笔归属见该分支自带台账行）；两父 6d662fa87/0280a1d65，merge-base=5a23f44f2，git show --cc 文件数 0（GitHub 判 CLEAN、无冲突解决面），三树互不相等（合并 9c656419a/父一 6be9ef305/父二 078f32b3c）；内容审查轨迹见 PR #1425 与 #1420 施工线记录	0280a1d65..7b2aab24d
