@@ -110,6 +110,9 @@ async def project_entry(
 
     ``existing`` 覆盖两种情形：已投影过（幂等），以及同一文本已在**另一个** target 上
     投影过（跨文件去重——两行会让 `retrieve_memory` 返回两句一模一样的话）。
+
+    去重域只含**工具来源**行（`find_active_by_digest` 的 WHERE 写死了
+    `projection_source='tool'`）：服务来源行是独立的逻辑记忆，同文本也不抑制投影。
     """
     content = normalize_entry(content)
     if not content or _skip_reason(content) is not None:
@@ -124,35 +127,78 @@ async def project_entry(
 
 
 async def retract_entry(
-    store: SqliteMemoryV2Store, target: str, content: str,
+    store: SqliteMemoryV2Store, markdown: MarkdownMemoryStore, target: str, content: str,
     trusted: TrustedMemoryIdentity, *, reason: str,
-) -> bool:
-    """撤回一条**工具来源** active 行（落 tombstone）；服务来源行即使内容相同也不动。"""
+) -> str:
+    """撤回一条**工具来源** active 行（落 tombstone）；返回处理结果。
+
+    - ``deleted``：删掉了；
+    - ``absent``：没有可删的行（没投影过 / 已被删）；
+    - ``kept``：**另一个文件**仍有同一段文本，跳过删除——工具行可以同时服务两个文件，
+      按一个文件的删除去删共享行会让另一个文件在检索层凭空消失（审查 Corr P2-1）；
+    - ``pending``：删除失败，已写进待投影账本等下一轮重试（审查 Std P2-3）。
+
+    服务来源行即使内容相同也不动：`find_active_by_digest` 只认 `projection_source='tool'`。
+    """
     content = normalize_entry(content)
     if not content:
-        return False
-    record = await store.find_tool_projection(trusted, target, entry_digest(content))
+        return "absent"
+    digest = entry_digest(content)
+    outcome = await _retract(store, markdown, target, content, trusted, reason=reason)
+    if outcome != "pending":
+        await store.clear_projection(trusted, target, digest)
+    return outcome
+
+
+async def _retract(
+    store: SqliteMemoryV2Store, markdown: MarkdownMemoryStore, target: str, content: str,
+    trusted: TrustedMemoryIdentity, *, reason: str,
+) -> str:
+    """撤回执行体（不碰账本）：三条路径共用同一份口径。
+
+    删除条件 = 这段文本**两个文件都没有了**。工具行是按文本共享的（一行可服务两个
+    文件），所以查找也不看 target——否则从"没有那行"的文件里删会找不到共享行，
+    另一个文件清空后它就成了孤儿（审查 Corr P2-1 / P2-2 的统一口径）。
+    """
+    digest = entry_digest(content)
+    if any(digest in {entry_digest(entry) for entry in markdown.entries(name)}
+           for name in ("memory", "user")):
+        return "kept"
+    record = await store.find_active_by_digest(trusted, digest)
     if record is None:
-        return False
+        return "absent"
+    # write-ahead：删除前先记账（重复入队是幂等的，且保留 attempts）。
+    await store.enqueue_projection(trusted, target, content)
     try:
         await store.delete(record.id, trusted, reason=reason)
     except KeyError:
-        return False
-    return True
+        return "absent"
+    except Exception as error:  # noqa: BLE001 — 派生层失败不得回滚权威写入（见模块约定）
+        logger.warning(
+            "memory retraction pending (%s/%s): %s", target, digest[:12], type(error).__name__)
+        await store.record_projection_failure(trusted, target, digest, type(error).__name__)
+        return "pending"
+    return "deleted"
 
 
 class _Summary(dict):
-    """投影结果汇总；`pending` 只在有失败时置真。"""
+    """投影结果汇总；`pending` 只在有失败时置真，`desired` 只在全量对账时有意义。"""
 
     def __init__(self) -> None:
-        super().__init__(created=0, deleted=0, skipped=[], pending=False)
+        super().__init__(created=0, deleted=0, skipped=[], pending=False, desired=0)
 
     def skipped_add(self, target: str, content: str, reason: str) -> None:
         self["skipped"].append([target, entry_digest(content), reason])
 
+    def count_retraction(self, outcome: str) -> None:
+        if outcome == "deleted":
+            self["deleted"] += 1
+        elif outcome == "pending":
+            self["pending"] = True
+
 
 async def _project(
-    store: SqliteMemoryV2Store, markdown: MarkdownMemoryStore, target: str, content: str,
+    store: SqliteMemoryV2Store, target: str, content: str,
     trusted: TrustedMemoryIdentity, *, session_id: str | None, event_id: str | None,
     summary: _Summary,
 ) -> None:
@@ -211,31 +257,29 @@ async def apply_write(
         removed = response.get("removed_entries") or {}
         for index, operation in enumerate(operations, 1):
             action = operation.get("action")
-            if index in removed and await retract_entry(
-                store, target, removed[index], trusted, reason="markdown_removed",
-            ):
-                summary["deleted"] += 1
-            if index in replaced and await retract_entry(
-                store, target, replaced[index], trusted, reason="markdown_replaced",
-            ):
-                summary["deleted"] += 1
+            if index in removed:
+                summary.count_retraction(await retract_entry(
+                    store, markdown, target, removed[index], trusted, reason="markdown_removed"))
+            if index in replaced:
+                summary.count_retraction(await retract_entry(
+                    store, markdown, target, replaced[index], trusted,
+                    reason="markdown_replaced"))
             if action in ("add", "replace"):
                 await _project(
-                    store, markdown, target, operation.get("content") or "", trusted,
+                    store, target, operation.get("content") or "", trusted,
                     session_id=session_id, event_id=event_id, summary=summary)
         return summary
 
     if removed_entry := response.get("removed_entry"):
-        if await retract_entry(store, target, removed_entry, trusted, reason="markdown_removed"):
-            summary["deleted"] += 1
+        summary.count_retraction(await retract_entry(
+            store, markdown, target, removed_entry, trusted, reason="markdown_removed"))
         return summary
-    if (replaced_entry := response.get("replaced_entry")) and await retract_entry(
-        store, target, replaced_entry, trusted, reason="markdown_replaced",
-    ):
-        summary["deleted"] += 1
+    if replaced_entry := response.get("replaced_entry"):
+        summary.count_retraction(await retract_entry(
+            store, markdown, target, replaced_entry, trusted, reason="markdown_replaced"))
     if content:
         await _project(
-            store, markdown, target, content, trusted,
+            store, target, content, trusted,
             session_id=session_id, event_id=event_id, summary=summary)
     return summary
 
@@ -244,25 +288,35 @@ async def drain_pending(
     store: SqliteMemoryV2Store, markdown: MarkdownMemoryStore,
     trusted: TrustedMemoryIdentity,
 ) -> dict[str, Any]:
-    """重试待投影账本；markdown 已没有该条目的行直接丢弃（权威说没有就是没有）。
+    """重试待投影账本——**双向**：账本行表达的是"这条的派生态与权威不一致"。
+
+    - 内容仍在 markdown 里 ⇒ 重试**投影**；
+    - 内容已不在 markdown 里 ⇒ 重试**撤回**（撤回失败也会进账本，见 `retract_entry`）。
 
     收敛判据：`remaining == 0` 且每个 markdown 条目都有一条 active 派生行（或出现在
     `skipped` 里）。行数在快照时就固定，所以循环天然有界。
     """
     drained = 0
     errors: list[list[str]] = []
+    # 摘要集合按 target 预先算一次：逐行重算是 O(n·m)（审查 Std P3-2）。
+    present = {target: {entry_digest(entry) for entry in markdown.entries(target)}
+               for target in ("memory", "user")}
     for row in await store.pending_projections(trusted):
         target = str(row["target"])
         content = str(row["content"])
         digest = str(row["content_digest"])
-        if normalize_entry(content) not in {normalize_entry(e) for e in markdown.entries(target)}:
-            await store.clear_projection(trusted, target, digest)
-            continue
         try:
-            await project_entry(
-                store, target, content, trusted,
-                session_id=row["session_id"], event_id=row["event_id"],
-            )
+            if digest in present[target]:
+                await project_entry(
+                    store, target, content, trusted,
+                    session_id=row["session_id"], event_id=row["event_id"],
+                )
+            elif await _retract(
+                store, markdown, target, content, trusted, reason="markdown_removed",
+            ) == "pending":
+                # 失败留痕（attempts/last_error）已在 `_retract` 里写过，这里只记错误。
+                errors.append([target, digest, "DeleteError"])
+                continue
         except Exception as error:  # noqa: BLE001 — 一条失败不能挡住后面的行
             errors.append([target, digest, type(error).__name__])
             await store.record_projection_failure(trusted, target, digest, type(error).__name__)
@@ -285,27 +339,19 @@ async def reproject_target(
     summary = _Summary()
     entries = {entry_digest(entry): entry for entry in markdown.entries(target)}
     summary["desired"] = len(entries)
-    other_target = "user" if target == "memory" else "memory"
-    other = {entry_digest(entry) for entry in markdown.entries(other_target)}
-    actual = set(await store.tool_projection_digests(trusted, target))
+    actual = await store.tool_projection_digests(trusted, target)
 
     for digest, entry in entries.items():
         if digest in actual:
             continue
         await _project(
-            store, markdown, target, entry, trusted,
+            store, target, entry, trusted,
             session_id=None, event_id=None, summary=summary)
-    for digest in actual - entries.keys():
-        if digest in other:
+    for digest, content in actual.items():
+        if digest in entries:
             continue
-        record = await store.find_tool_projection(trusted, target, digest)
-        if record is None:
-            continue
-        try:
-            await store.delete(record.id, trusted, reason="markdown_removed")
-        except KeyError:
-            continue
-        summary["deleted"] += 1
+        summary.count_retraction(await retract_entry(
+            store, markdown, target, content, trusted, reason="markdown_removed"))
     return summary
 
 

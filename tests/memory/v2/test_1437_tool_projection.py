@@ -6,16 +6,24 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from agent_harness.memory.v2 import reprojection
+from agent_harness.identity import (
+    IdentityContext,
+    identity_context_var,
+    set_identity_context,
+)
+from agent_harness.memory.types import memory_session_var
+from agent_harness.memory.v2 import origin, reprojection
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, entry_digest
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
+from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
     EvidenceItem,
@@ -65,7 +73,7 @@ def _tombstone_hashes(db_path) -> list[str]:
         return [
             value
             for (raw,) in connection.execute("SELECT content_hashes FROM memory_v2_tombstones")
-            for value in __import__("json").loads(raw)
+            for value in json.loads(raw)
         ]
 
 
@@ -89,10 +97,23 @@ def _flaky_create(store: SqliteMemoryV2Store, state: dict, error_type=sqlite3.Op
     return flaky
 
 
+def _flaky_delete(store: SqliteMemoryV2Store, state: dict, error_type=sqlite3.OperationalError):
+    """注入删除失败（撤回路径的 write-ahead 用例）。"""
+    real = store.delete
+
+    async def flaky(memory_id, trusted, **kwargs):
+        if state["fail"]:
+            raise error_type("disk I/O error")
+        return await real(memory_id, trusted, **kwargs)
+
+    return flaky
+
+
 # ---------------------------------------------------------------- AC1：add 后可检索
 
 
 async def test_add_target_memory_is_retrievable(tmp_path) -> None:
+    """AC1 端到端：`memory` 工具写入 → `retrieve_memory` 工具能搜到（审查 Corr P4-2）。"""
     store, markdown, service = await build(tmp_path)
     tool = MemoryTool(markdown, service=service)
 
@@ -103,10 +124,14 @@ async def test_add_target_memory_is_retrievable(tmp_path) -> None:
     assert result.ok is True, result
     records = await store.list_active(TRUSTED, limit=10)
     assert [record.content for record in records] == ["用户习惯清晨喝冷萃咖啡"]
-    hits = await service.hybrid_search(
-        "冷萃", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
-    )
-    assert [hit.record.content for hit in hits] == ["用户习惯清晨喝冷萃咖啡"]
+    search = RetrieveMemoryV2Tool(service)
+    identity_token = set_identity_context(IdentityContext("local", "local", ["user"]))
+    try:
+        found = await search.execute(search.args_schema(query="冷萃", limit=5))
+    finally:
+        identity_context_var.reset(identity_token)
+    assert found.ok is True, found
+    assert [item["content"] for item in found.data["memories"]] == ["用户习惯清晨喝冷萃咖啡"]
 
 
 async def test_add_target_user_is_retrievable(tmp_path) -> None:
@@ -328,14 +353,147 @@ async def test_remove_then_add_same_content_is_not_blocked_by_tombstone(tmp_path
         "会被删掉再加回"]
 
 
+async def test_remove_keeps_the_row_while_the_other_file_still_has_it(tmp_path) -> None:
+    """审查 Corr P2-1 回归：同一文本在两个文件里时，删一个文件不得删掉共享的派生行。"""
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="两个文件都有这句话"))).ok is True
+    await markdown.add("user", "两个文件都有这句话")
+    await service.reproject(TRUSTED, "user")
+    assert len(await store.list_active(TRUSTED, limit=10)) == 1
+
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="两个文件都有这句话"))).ok is True
+
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "两个文件都有这句话"]
+    hits = await service.hybrid_search(
+        "两个文件", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert len(hits) == 1
+    assert _pending_rows(store.database_path) == []
+
+    # 两个文件都删掉后，共享行才该消失。
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="user", old_text="两个文件都有这句话"))).ok is True
+    assert await store.list_active(TRUSTED, limit=10) == []
+
+
+async def test_concurrent_identical_creates_collapse_to_one_row(tmp_path) -> None:
+    """审查 Corr P2-2 回归：对账键上的部分唯一索引兜住并发双写。"""
+    store, _markdown, _service = await build(tmp_path)
+    draft = reprojection.draft_for("memory", "并发同内容")
+
+    first = await store.create(draft, TRUSTED, projection_source="tool",
+                               projection_target="memory")
+    with pytest.raises(ValueError, match="conflicts with an existing row"):
+        await store.create(draft, TRUSTED, projection_source="tool",
+                           projection_target="memory")
+
+    assert [record.id for record in await store.list_active(TRUSTED, limit=10)] == [first.id]
+    assert set(await store.tool_projection_digests(TRUSTED, "memory")) == {
+        entry_digest("并发同内容")}
+
+
+async def test_project_scope_service_row_does_not_suppress_the_tool_projection(tmp_path) -> None:
+    """审查 Corr P2-3 回归：去重域只含工具行，PROJECT scope 的服务行不得挡住投影。"""
+    store, markdown, service = await build(tmp_path)
+    trusted = TrustedMemoryIdentity("local", "local", "project-a")
+    await service.create(MemoryDraftV2(
+        kind=MemoryKind.SEMANTIC, tier=MemoryTier.COLLECTION, scope=MemoryScope.PROJECT,
+        project_id="project-a", content="用户偏好简洁的回答",
+        payload=SemanticPayload(
+            subject="s", fact="用户偏好简洁的回答", category=SemanticCategory.PREFERENCE),
+        importance=0.8, strength=0.8, source_type=SourceType.AUTOMATIC,
+        source_session_id="s-1", source_event_ids=["e-1"],
+        evidence=[EvidenceItem(role="user", excerpt="简洁", hash="0" * 64)],
+    ), trusted)
+    markdown.path_for("user").write_text("用户偏好简洁的回答", encoding="utf-8")
+    markdown.load_from_disk()
+
+    summary = await service.reproject(trusted, "user")
+
+    assert (summary["created"], summary["desired"]) == (1, 1), summary
+    assert set(await store.tool_projection_digests(trusted, "user")) == {
+        entry_digest("用户偏好简洁的回答")}
+    second = await service.reproject(trusted, "user")
+    assert (second["created"], second["deleted"]) == (0, 0), second
+
+
+async def test_failed_retraction_leaves_a_pending_row_that_drains_to_deletion(
+    tmp_path, monkeypatch,
+) -> None:
+    """审查 Std P2-3 回归：删除失败也要落账本；drain 之后该条目不再可检索。"""
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="先写进去再删不掉"))).ok is True
+    state = {"fail": True}
+    monkeypatch.setattr(store, "delete", _flaky_delete(store, state))
+
+    result = await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="先写进去再删不掉"))
+
+    assert result.ok is True, result
+    assert result.data["projection"] == "pending"
+    rows = _pending_rows(store.database_path)
+    assert [(target, content, attempts, last_error) for target, _d, content, attempts,
+            last_error in rows] == [("memory", "先写进去再删不掉", 1, "OperationalError")]
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "先写进去再删不掉"]
+
+    state["fail"] = False
+    summary = await reprojection.drain_pending(store, markdown, TRUSTED)
+
+    assert summary == {"drained": 1, "remaining": 0, "errors": []}, summary
+    assert await store.list_active(TRUSTED, limit=10) == []
+    hits = await service.hybrid_search(
+        "删不掉", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert hits == []
+    assert entry_digest("先写进去再删不掉") in _tombstone_hashes(store.database_path)
+
+
+async def test_session_read_failure_still_projects(tmp_path, monkeypatch) -> None:
+    """审查 Corr P3-1 回归：会话存储读失败只丢 provenance，不丢投影。"""
+    store, markdown, service = await build(tmp_path)
+
+    class BrokenSessions:
+        def read_events(self, session_id):
+            raise OSError("session store unavailable")
+
+    tool = MemoryTool(markdown, service=service, sessions=BrokenSessions())
+    token = memory_session_var.set("session-1")
+    # 后台来源不跑 add 软校验（它自己也读会话），这里只隔离投影路径的会话读取。
+    origin_token = origin.set_origin(origin.BACKGROUND_REVIEW)
+    try:
+        result = await tool.execute(_MemoryArgs(
+            action="add", target="memory", content="会话挂了也要投影"))
+    finally:
+        origin.reset_origin(origin_token)
+        memory_session_var.reset(token)
+
+    assert result.ok is True, result
+    assert result.data["projection"] == "done"
+    assert "会话挂了也要投影" in markdown.path_for("memory").read_text(encoding="utf-8")
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "会话挂了也要投影"]
+    assert _pending_rows(store.database_path) == []
+
+
 async def test_replace_and_remove_propagate_to_the_derived_layer(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
     tool = MemoryTool(markdown, service=service)
     await tool.execute(_MemoryArgs(action="add", target="memory", content="old fact"))
+    old_root = (await store.list_active(TRUSTED, limit=10))[0].root_id
 
     assert (await tool.execute(_MemoryArgs(
         action="replace", target="memory", old_text="old fact", content="new fact"))).ok is True
-    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == ["new fact"]
+    records = await store.list_active(TRUSTED, limit=10)
+    assert [record.content for record in records] == ["new fact"]
+    # 门审条件 ④：工具行的 replace 是「删旧行 + 建新 root」，不是同一 root 的 v2。
+    assert (records[0].version, records[0].root_id != old_root) == (1, True)
     assert entry_digest("old fact") in _tombstone_hashes(store.database_path)
 
     assert (await tool.execute(_MemoryArgs(

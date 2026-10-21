@@ -143,7 +143,8 @@ def test_seed_memory_tool_reaches_fts_like_service_create(tmp_path):
     `test_seed_memory_tool_skips_fts_while_service_create_hits_it`），它固化了
     「工具写入不投影」这一分叉。依据：#1437 用户裁决（2026-10-21 19:16，票内评论）
     F-01 选**甲案：补投影**——工具写入也要进派生层，分叉本身已被裁决为缺陷。
-    其余断言（`:178` 的 `> 0` 与 `keyword_search` 返回 `[record.id]`）原样保留。
+    其余断言（base `:178` 的 `> 0` 与 `keyword_search` 返回 `[record.id]`）原样保留。
+    docstring 里的行号都是 **base 387bdcc8 的行号**，不是本树的行号。
     """
     async def fts_match_count(db_path: Path, term: str) -> int:
         async with connect(db_path) as connection, connection.execute(

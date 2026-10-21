@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS memory_v2_records (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_active
     ON memory_v2_records(root_id) WHERE status = 'active';
+-- #1437 F-06b：投影对账键上的部分唯一索引。键形状 = (tenant, user, content)——
+-- **不带 target**：一条工具行可以同时服务 MEMORY.md 与 USER.md 里的同一段文本
+-- （`project_entry` 的跨文件去重就是这个语义），带上 target 反而会放行两行。
+-- 只约束工具来源的 active 行：服务来源行各有自己的 root/版本链，不该被这条键合并。
+CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_tool_projection
+    ON memory_v2_records(tenant_id, user_id, content)
+    WHERE status = 'active' AND projection_source = 'tool';
 CREATE INDEX IF NOT EXISTS memory_v2_owner
     ON memory_v2_records(tenant_id, user_id, scope, project_id);
 CREATE TABLE IF NOT EXISTS memory_v2_outbox (
@@ -160,6 +167,17 @@ _COLUMNS = (
     "source_session_id, source_event_ids, evidence, valid_at, invalidated_at, superseded_by, "
     "created_at, updated_at, projection_source, projection_target"
 )
+
+#: #1437：`projection_target` 的合法取值。待投影账本表上有 CHECK，记录表没有——
+#: 给记录表补 CHECK 要重建表（SQLite 不支持 ALTER ADD CONSTRAINT），代价远大于收益，
+#: 所以在写入口做同一份校验（`create` / `enqueue_projection` / 两个投影查询）。
+_PROJECTION_TARGETS = frozenset({"memory", "user"})
+
+
+def _require_projection_target(target: str | None) -> None:
+    """`projection_target` 只允许两个文件名（服务来源行为 `None`）。"""
+    if target is not None and target not in _PROJECTION_TARGETS:
+        raise ValueError(f"unknown projection target {target!r}")
 
 
 def _utc_now() -> str:
@@ -361,6 +379,7 @@ class SqliteMemoryV2Store:
         只在 SQLite 列上存在，不进 `MemoryRecordV2` 契约。工具写入传
         ``projection_source="tool"`` + 目标文件名，服务写入用默认值。
         """
+        _require_projection_target(projection_target)
         return await self._insert(
             draft, trusted, root_id=None, version=1, previous=None, connection=connection,
             projection_source=projection_source, projection_target=projection_target)
@@ -869,15 +888,29 @@ class SqliteMemoryV2Store:
     # ----------------------------------------------------------------------------------
     # 投影对账（#1437 F-06 / F-06b）
     # ----------------------------------------------------------------------------------
+    #
+    # 三个查询都把来源/target 写进 WHERE（只回退到该身份、该 target 的工具行），
+    # 但正文摘要仍在 Python 侧比对：`entry_digest` 是 sha256，SQLite 没有内置函数，
+    # 想下推就得另存一列摘要。当前规模（单用户数百条）下这几次扫描是常数级开销，
+    # 不值得为此加列 + 回填迁移；真到万级再按 `ponytail` 的口径加 `content_digest`
+    # 列与索引（与 `memory_v2_one_tool_projection` 合并建设）。
+
+    @staticmethod
+    def _require_projection_target(target: str) -> str:
+        """`projection_target` 只允许两个文件名（代码层校验，理由见常量注释）。"""
+        _require_projection_target(target)
+        return target
 
     async def tool_projection_digests(
         self, trusted: TrustedMemoryIdentity, target: str,
-    ) -> list[str]:
-        """该身份、该 target 下所有 active 工具来源行的正文摘要。
+    ) -> dict[str, str]:
+        """该身份、该 target 下 active 工具来源行的 ``{正文摘要: 正文}``。
 
         `reproject_target` 用它算「派生层已有 vs markdown 现有」的差集；扫描条件写死
         `projection_source='tool'`，所以服务来源行永远不在结果里（非干扰论证第 1 条）。
+        带正文是为了让删除侧能直接复用 `retract_entry`（它按 content 定位），不必再查一次。
         """
+        self._require_projection_target(target)
         async with (
             connect(self.database_path) as connection,
             connection.execute(
@@ -887,17 +920,27 @@ class SqliteMemoryV2Store:
                 (trusted.tenant_id, trusted.user_id, target),
             ) as cursor,
         ):
-            return [self._digest(row["content"]) for row in await cursor.fetchall()]
+            return {self._digest(row["content"]): row["content"]
+                    for row in await cursor.fetchall()}
 
     async def find_active_by_digest(
         self, trusted: TrustedMemoryIdentity, digest: str,
     ) -> MemoryRecordV2 | None:
-        """按正文摘要找一条 active 行（**任何来源**）。用于跨 target 去重与服务行保护。"""
+        """按正文摘要找一条 active **工具来源**行（任一 target）。
+
+        去重域**只含工具来源**：服务来源行是独立的逻辑记忆，内容相同也不该抑制投影
+        （#1437 审查 Corr P2-3 的 PROJECT scope 误抑制就是这么来的）。也不按 scope
+        过滤——工具行恒为 `user_global`，而跨 scope 的同文本服务行本就不在域内。
+
+        不按 target 过滤：一条工具行可以同时服务两个文件（见 `project_entry` 的
+        跨文件去重语义与 `memory_v2_one_tool_projection` 的键形状）。
+        """
         async with (
             connect(self.database_path) as connection,
             connection.execute(
                 "SELECT * FROM memory_v2_records "
-                "WHERE tenant_id=? AND user_id=? AND status='active'",
+                "WHERE tenant_id=? AND user_id=? AND projection_source='tool' "
+                "AND status='active'",
                 (trusted.tenant_id, trusted.user_id),
             ) as cursor,
         ):
@@ -907,30 +950,13 @@ class SqliteMemoryV2Store:
                 return _to_record(row)
         return None
 
-    async def find_tool_projection(
-        self, trusted: TrustedMemoryIdentity, target: str, digest: str,
-    ) -> MemoryRecordV2 | None:
-        """按摘要找该 target 的 active **工具来源**行；服务来源行永远不返回。"""
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT * FROM memory_v2_records "
-                "WHERE tenant_id=? AND user_id=? AND projection_source='tool' "
-                "AND projection_target=? AND status='active'",
-                (trusted.tenant_id, trusted.user_id, target),
-            ) as cursor,
-        ):
-            rows = await cursor.fetchall()
-        for row in rows:
-            if self._digest(row["content"]) == digest:
-                return _to_record(row)
-        return None
-
+    @retry_on_busy
     async def enqueue_projection(
         self, trusted: TrustedMemoryIdentity, target: str, content: str, *,
         session_id: str | None = None, event_id: str | None = None,
     ) -> None:
-        """写一行待投影账本（`INSERT OR REPLACE`，保留已有 `attempts`）。"""
+        """写一行待投影账本（`ON CONFLICT DO UPDATE`：保留已有 `attempts`/`last_error`）。"""
+        self._require_projection_target(target)
         async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
@@ -960,10 +986,12 @@ class SqliteMemoryV2Store:
         ):
             return [dict(row) for row in await cursor.fetchall()]
 
+    @retry_on_busy
     async def clear_projection(
         self, trusted: TrustedMemoryIdentity, target: str, digest: str,
     ) -> None:
         async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
                 "DELETE FROM memory_v2_projection_pending "
                 "WHERE tenant_id=? AND user_id=? AND target=? AND content_digest=?",
@@ -971,6 +999,7 @@ class SqliteMemoryV2Store:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def record_projection_failure(
         self, trusted: TrustedMemoryIdentity, target: str, digest: str, error_type: str,
     ) -> None:
