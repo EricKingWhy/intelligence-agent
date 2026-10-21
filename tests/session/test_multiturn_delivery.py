@@ -1075,6 +1075,7 @@ async def test_create_fails_if_hard_delete_wins_before_completion(
             launch=launch,
             auto_approve=True,
             auto_approve_explicit=True,
+            sandbox_backend="local",
         )
     )
 
@@ -1128,6 +1129,7 @@ async def test_create_launch_holds_session_lock_through_post_start_work(
             task="创建与硬删并发",
             auto_approve=True,
             auto_approve_explicit=True,
+            sandbox_backend="local",
         )
     )
 
@@ -1179,6 +1181,7 @@ async def test_create_without_launch_serializes_delete_after_completion(
             launch=False,
             auto_approve=True,
             auto_approve_explicit=True,
+            sandbox_backend="local",
         )
     )
 

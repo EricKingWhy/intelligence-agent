@@ -118,6 +118,8 @@ def test_timeout_stops_detached_workspace_mutation(docker_sandbox: object) -> No
 @docker_required
 def test_cancel_stops_late_workspace_mutation(docker_sandbox: object) -> None:
     marker = "/workspace/late-cancel-marker"
+    # Keep Docker's cold container startup outside the cancellation window.
+    assert docker_sandbox.exec("true", timeout=10).exit_code == 0
     cancel_event = threading.Event()
     result_holder: list[ExecResult] = []
     ready = threading.Event()
