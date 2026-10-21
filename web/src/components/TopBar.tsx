@@ -234,8 +234,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-center">
-        {/* #1448：会话名区块按**选中身份**渲染，不按 `conversation`——切到新会话 /
-            空态时 `conversation` 可能还残留旧会话一帧，按它渲染会闪出旧标题。 */}
+        {/* #1448：会话身份横幅（标题 + 切换器）按**选中身份**渲染，不按 `conversation`——
+            切到新会话 / 空态时 `conversation` 可能还残留旧会话一帧，按它渲染会闪出旧标题。 */}
         {sessionId !== null && (
           canSwitchSession ? (
             <DropdownMenu.Root>
