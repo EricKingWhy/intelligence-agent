@@ -26,7 +26,13 @@ import {
 } from '../lib/followLatest';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
 import { GROUP_LABEL, groupChain, type ToolGroup, type ToolGroupStatus } from '../lib/toolGroups';
-import { deriveTurnNav, turnAnchor, type TurnNavItem } from '../lib/turnNav';
+import {
+  CURRENT_TURN_BAND_RATIO,
+  currentTurnIndex,
+  deriveTurnNav,
+  turnAnchor,
+  type TurnNavItem,
+} from '../lib/turnNav';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { Collapse } from './Collapse';
 import type {
@@ -252,6 +258,8 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
     () => deriveTurnNav(turns, conversation?.compactions ?? []),
     [turns, conversation],
   );
+  // #1429 尾项：当前所在轮（V2 `.is-on`）——判定纯函数在 lib/turnNav，见 useCurrentTurn。
+  const activeTurnIndex = useCurrentTurn(turns, virtualizer, scrollRef, turnNavItems.length > 1);
   /* 轮次跳转：按 step_id 找虚拟化下标再 scrollToIndex——窗口外的行不在 DOM 里，
      不能靠 querySelector 定位。 */
   const jumpToTurn = useCallback(
@@ -559,7 +567,9 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
         />
       )}
       {/* #1429 打磨点 6：轮次导航钉在滚动区上方（虚拟化行之外，不参与测高）。 */}
-      {turnNavItems.length > 1 && <TurnNav items={turnNavItems} onJump={jumpToTurn} />}
+      {turnNavItems.length > 1 && (
+        <TurnNav items={turnNavItems} activeTurn={activeTurnIndex} onJump={jumpToTurn} />
+      )}
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={setScrollNode}>
         {/* 虚拟化：绝对定位行 + 动态测高（PRD §20.2）。只有窗口内 turn 参与 DOM。
@@ -1346,14 +1356,83 @@ function LiveGroupDuration({ startedAt }: { startedAt: string }) {
   return text === '' ? null : <span className="act-group-total">{text}</span>;
 }
 
+/** #1429 尾项：把「阅读位置」映射成当前轮号（V2 `.turn-nav button.is-on` 的行为）。
+ *
+ *  阅读位置 = 滚动容器顶边；行偏移取自虚拟器（`getVirtualItems` + `scrollOffset`），
+ *  判定是 `lib/turnNav.ts::currentTurnIndex` 的纯函数。
+ *
+ *  为什么不是「渲染期直接算」：react-virtual 只在可见范围 / `isScrolling` 变化时才
+ *  重渲染，滚动不足一行时组件不重渲染 ⇒ 渲染期算出来的高亮会滞后最多一行（V2 的
+ *  IntersectionObserver 是连续的）。这里挂一个 passive `scroll` 监听 + rAF 合帧：
+ *  滚动本身**不引起任何重渲染**，只有当前轮号真的变了才 setState（每跨一轮一次）。
+ *
+ *  `turns` 在依赖里：投影每次提交都换引用，effect 重挂一次监听并重算一次——
+ *  代价是两次 DOM 调用，换来「新轮到达 / 压缩 / 视图起点变化」时高亮必然同步。
+ */
+/** 判定当前轮只需要虚拟器的这两项（真 `Virtualizer` 与测试替身都满足）。 */
+type TurnVirtualizer = {
+  getVirtualItems: () => readonly { index: number; start: number; end: number }[];
+  scrollOffset?: number | null;
+};
+
+function useCurrentTurn(
+  turns: readonly Turn[],
+  virtualizer: TurnVirtualizer,
+  scrollRef: { current: HTMLElement | null },
+  enabled: boolean,
+): number | null {
+  const [activeTurn, setActiveTurn] = useState<number | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    const el = scrollRef.current;
+    if (el === null) return;
+    let frame = 0;
+    const sync = () => {
+      frame = 0;
+      // `scrollOffset` 在虚拟器尚未观测到滚动元素时是 null——退回到 DOM 自己的
+      // `scrollTop`（与行 `start` 同一坐标系；本容器 `scrollMargin` 为 0）。
+      // 判定带 = 容器顶部 32%（V2 的 rootMargin），见 CURRENT_TURN_BAND_RATIO。
+      const next = currentTurnIndex(
+        turns,
+        virtualizer.getVirtualItems(),
+        virtualizer.scrollOffset ?? el.scrollTop,
+        el.clientHeight * CURRENT_TURN_BAND_RATIO,
+        // 到底 = 末轮顶边可能永远进不了阅读带（滚不动），按「在看最后一轮」判。
+        // `scrollHeight > clientHeight` 是前提：没有布局的环境（jsdom / 空会话）
+        // 两者都是 0，否则会被误判成「已到底」。
+        el.scrollHeight > el.clientHeight + 1 &&
+          el.scrollTop + el.clientHeight >= el.scrollHeight - 1,
+      );
+      setActiveTurn((prev) => (prev === next ? prev : next));
+    };
+    const onScroll = () => {
+      if (frame === 0) frame = requestAnimationFrame(sync);
+    };
+    // 首帧用微任务、不用 rAF：effect 里同步 setState 会多一轮级联渲染（react 的
+    // set-state-in-effect 告警），rAF 又要求浏览器给出下一帧（测试/后台标签页会拖）。
+    // 微任务在同一提交后立即跑，量到的就是挂载时的阅读位置。
+    queueMicrotask(sync);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [turns, virtualizer, scrollRef, enabled]);
+  // 导航只有一颗药丸时不需要高亮；退出时不要把旧会话的轮号带回来。
+  return enabled ? activeTurn : null;
+}
+
 /** #1429 打磨点 6：轮次导航（1..N 药丸 + 压缩置灰）。粘在对话列顶部——它不在
  *  滚动容器里，滚到任何位置都可见；点击走虚拟化 `scrollToIndex`，目标行即使
  *  不在已挂载窗口内也能滚到。 */
 function TurnNav({
   items,
+  activeTurn,
   onJump,
 }: {
   items: TurnNavItem[];
+  /** 当前阅读位置所属轮次号；null = 尚未判定（SSR / 空窗口）。 */
+  activeTurn: number | null;
   onJump: (stepId: number) => void;
 }) {
   return (
@@ -1362,10 +1441,13 @@ function TurnNav({
         <button
           key={item.turnIndex}
           type="button"
-          className={`turn-nav-pill${item.stepId === null ? ' is-off' : ''}`}
+          className={`turn-nav-pill${item.stepId === null ? ' is-off' : ''}${
+            item.turnIndex === activeTurn ? ' is-on' : ''
+          }`}
           disabled={item.stepId === null}
           title={item.title}
           aria-label={item.title}
+          aria-current={item.turnIndex === activeTurn ? 'location' : undefined}
           onClick={() => {
             if (item.stepId !== null) onJump(item.stepId);
           }}

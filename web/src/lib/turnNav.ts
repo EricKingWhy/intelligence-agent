@@ -43,6 +43,85 @@ export function turnAnchor(turnIndex: number): string {
   return `#turn-${turnIndex}`;
 }
 
+/** 行顶与阅读位置比较时的亚像素容差（见 `rowAtOffset`）。 */
+const ROW_EPSILON_PX = 0.5;
+
+/** 「阅读带」占滚动容器高度的比例：V2 的 `IntersectionObserver` 用
+ *  `rootMargin: "0px 0px -68% 0px"`，即只把容器**顶部 32%** 当作判定带
+ *  （`center-v2.html:4478`）。这里照抄同一比例，保证换轮时机与视觉基线一致。 */
+export const CURRENT_TURN_BAND_RATIO = 0.32;
+
+/** 虚拟化窗口内的一行（只取判定当前轮需要的字段；与 `VirtualItem` 结构兼容）。 */
+export interface TurnRowSpan {
+  index: number;
+  /** 行顶在列表坐标系里的偏移（与虚拟器的 `scrollOffset` 同一坐标系）。 */
+  start: number;
+  end: number;
+}
+
+/** 阅读位置（滚动容器顶边，列表坐标系）对应的行。窗口为空（SSR / 尚未测量）⇒ null。
+ *
+ *  口径 = V2 观察器：把「阅读带」`[offset, offset + band]` 里**行顶最靠上**的那一行
+ *  当作当前行（V2 取 topmost intersecting `.turn-mark`）。带内没有行顶（正处在一个
+ *  长轮中间）时退回「阅读线所在行」（V2 此时不触发回调、保留上一个值，等价于不换）。
+ *
+ *  `band` 的作用（不是装饰）：`scrollToIndex({ align: 'start' })` 到列表末尾时，
+ *  目标轮顶边可能停在阅读线**下方**若干像素（容器已到底、滚不动），纯「顶边所在行」
+ *  会把高亮留在上一轮；V2 的带判定此时仍把目标轮算作当前轮。
+ *
+ *  `ROW_EPSILON_PX` 吸收分数像素：跳转落点与实测行顶可能差零点几像素。 */
+export function rowAtOffset(
+  rows: readonly TurnRowSpan[],
+  offset: number,
+  band = 0,
+): number | null {
+  if (rows.length === 0) return null;
+  // ① 带内行顶最靠上的那一行。
+  for (const r of rows) {
+    if (r.start > offset + band + ROW_EPSILON_PX) break;
+    if (r.start >= offset - ROW_EPSILON_PX) return r.index;
+  }
+  // ② 带内没有行顶：阅读线所在行（最后一行 start <= offset）。
+  let row = rows[0].index;
+  for (const r of rows) {
+    if (r.start > offset + ROW_EPSILON_PX) break;
+    row = r.index;
+  }
+  return row;
+}
+
+/** 当前所在轮（V2 `.turn-nav button.is-on` 的判定）：从阅读行向前找最近的**可导航**
+ *  轮次（`turn_index` 为正且未被取代）。
+ *
+ *  为什么不直接取阅读行的 `turn_index`：被取代的轮整段不渲染、没有药丸；旧版后端
+ *  缺 `turn_index` 的续轮也没有药丸。这两类行都"属于"上一颗可导航药丸——沿用上一轮
+ *  比清空高亮更接近用户在读的内容，也不会在滚动经过零高行时闪断。
+ *  行下标先夹到 `turns` 范围内（窗口与 turns 短暂不同步时防御，不抛错）。
+ *
+ *  `atEnd`（滚动容器已到底）：**取最后一个可导航轮**，不按阅读带判。两处依据：
+ *  ① 到底时容器滚不动，末轮顶边可能永远进不了阅读带（列表比一屏短时尤其明显）——
+ *     药丸点「跳到第 N 轮」却高亮不到第 N 轮，与票面「跳转后高亮随之落到目标轮」
+ *     直接冲突；② 读到底本来就是「在看最后一轮」。这是相对 V2 观察器几何的**有意
+ *     偏差**（V2 到底时会停在带内最靠上的轮），登记在报告里。 */
+export function currentTurnIndex(
+  turns: readonly Turn[],
+  rows: readonly TurnRowSpan[],
+  offset: number,
+  band = 0,
+  atEnd = false,
+): number | null {
+  if (rows.length === 0) return null;
+  const row = atEnd ? rows[rows.length - 1].index : rowAtOffset(rows, offset, band);
+  if (row === null) return null;
+  for (let i = Math.min(row, turns.length - 1); i >= 0; i -= 1) {
+    const t = turns[i];
+    if (t.superseded === true) continue;
+    const n = t.turn_index;
+    if (n !== null && n > 0) return n;
+  }
+  return null;
+}
+
 /** 由渲染序列 + 压缩记录推导导航项（1..N 升序）。 */
 export function deriveTurnNav(
   turns: readonly Turn[],

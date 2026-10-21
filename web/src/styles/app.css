@@ -2564,6 +2564,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: transparent;
   color: var(--text-tertiary);
 }
+/* 当前所在轮（#1429 尾项，V2 `.turn-nav button.is-on`）：soft 底 + ink 字 + 600。
+   ink 桥 = `color-mix(accent 45%, text-primary)`（FIDELITY §12 第 7 条既有口径），
+   soft 底复用产品 `--accent-soft`（= V2 `--primary-soft`），不新造 token。
+   声明在 `:hover` 之后 ⇒ 与 V2 一致：悬停当前轮不换底。与 `.is-off` 互斥
+   （不可达轮次永远不会是当前轮）。 */
+.turn-nav-pill.is-on {
+  background: var(--accent-soft);
+  color: color-mix(in srgb, var(--accent) 45%, var(--text-primary));
+  font-weight: 600;
+}
 .conversation-scroll {
   flex: 1;
   overflow-y: auto;
