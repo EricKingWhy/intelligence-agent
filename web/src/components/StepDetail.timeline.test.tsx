@@ -8,7 +8,7 @@ import { useCallback, useState } from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyEvent, initConversation } from '../lib/projection';
+import { applyEvent, initConversation, projectHistory } from '../lib/projection';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState } from '../types';
 import { StepDetail } from './StepDetail';
@@ -254,6 +254,41 @@ describe('#1419 Timeline 卡片流交互', () => {
     expect(container!.querySelector('.tl-empty')).not.toBeNull();
     click(container!.querySelector('.tl-empty-reset'));
     expect(rows()).toHaveLength(EVENTS.length);
+  });
+
+  it('取消 ToolResult 的标题与失败筛选计数一致', () => {
+    const conv = projectHistory('tl-cancel', [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'cancel-run', session_id: 'tl-cancel', time: '2026-10-20T10:00:00.000Z' },
+      {
+        type: EventType.TOOL_CALL,
+        data: { tool_call_id: 'tc-cancel', tool_name: 'bash', args: { command: 'sleep 1' } },
+        seq: 2,
+        run_id: 'cancel-run',
+        step_id: 1,
+        session_id: 'tl-cancel',
+        time: '2026-10-20T10:00:01.000Z',
+      },
+      {
+        type: EventType.TOOL_RESULT,
+        data: {
+          tool_call_id: 'tc-cancel',
+          content: '{"ok":false,"message":"cancelled","data":{"cancelled":true}}',
+        },
+        seq: 3,
+        run_id: 'cancel-run',
+        step_id: 1,
+        session_id: 'tl-cancel',
+        time: '2026-10-20T10:00:02.000Z',
+      },
+    ] as AgentEvent[]);
+    render(<Host conv={conv} />);
+
+    const resultRow = rows().find((row) => row.textContent?.includes('tool/result'))!;
+    expect(resultRow.textContent).toContain('已中断');
+    const fail = container!.querySelector<HTMLElement>('.tl-chip-fail')!;
+    expect(fail.textContent).toContain('0');
+    click(fail);
+    expect(rows()).toHaveLength(0);
   });
 
   it('P1-1：hover 卡片出现 tooltip（完整时间 + step）', () => {

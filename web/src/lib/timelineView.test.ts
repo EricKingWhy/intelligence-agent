@@ -51,6 +51,20 @@ describe('#1419 Timeline timing（真实数据，不编耗时）', () => {
     expect(deriveEventTimings([call, cancelled]).get(eventKey(call))?.status).toBe('idle');
   });
 
+  it('ToolResult 解释接受旧兼容对象，未知形状保持 idle', () => {
+    const parsedObject = { ...result, data: { tool_call_id: 'tc1', content: { ok: true, data: {} } } };
+    expect(deriveEventTimings([call, parsedObject]).get(eventKey(parsedObject))?.status).toBe('ok');
+    const cancelledObject = {
+      ...result,
+      data: { tool_call_id: 'tc1', content: { ok: true, error_code: 'CANCELLED', data: { cancelled: true } } },
+    };
+    expect(deriveEventTimings([call, cancelledObject]).get(eventKey(cancelledObject))?.status).toBe('idle');
+    for (const content of ['plain text', '{broken', '42', '"text"', 'null', '[]', { message: 'legacy' }]) {
+      const unknown = { ...result, data: { tool_call_id: 'tc1', content } };
+      expect(deriveEventTimings([call, unknown]).get(eventKey(unknown))?.status).toBe('idle');
+    }
+  });
+
   it('无配对结果：耗时 null（不拿相邻事件间隔冒充），运行态为 run', () => {
     const timings = deriveEventTimings([call]);
     expect(timings.get(eventKey(call))?.durationMs).toBeNull();

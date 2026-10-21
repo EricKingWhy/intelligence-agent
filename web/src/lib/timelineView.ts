@@ -17,6 +17,7 @@
 import { EventType } from '../types';
 import type { AgentEvent, ToolCall } from '../types';
 import { eventKey } from './inspectorPanel';
+import { interpretToolResult } from './toolShapes';
 
 export type TimelineStatus = 'ok' | 'fail' | 'run' | 'idle';
 export type TimelineFilter = 'all' | 'tool' | 'model' | 'fail';
@@ -62,10 +63,6 @@ const IDLE_TYPES = new Set<string>([
   EventType.OPERATION_RECONCILE_REQUIRED,
 ]);
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
-}
-
 function timeMs(value: unknown): number | null {
   if (typeof value !== 'string' || !value) return null;
   const ms = Date.parse(value);
@@ -74,24 +71,6 @@ function timeMs(value: unknown): number | null {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-/** `tool/result.data.content` 是后端 `ToolResult.model_dump_json()` 的字符串；
- *  兼容已解析对象（测试/未来契约）。`cancelled` 是中断 ≠ 失败（同投影口径）。 */
-function toolResultOutcome(data: Record<string, unknown>): { ok: boolean | null; cancelled: boolean } {
-  let parsed: unknown = data.content;
-  if (typeof parsed === 'string') {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      return { ok: null, cancelled: false };
-    }
-  }
-  const record = asRecord(parsed);
-  if (!record) return { ok: null, cancelled: false };
-  const inner = asRecord(record.data);
-  const cancelled = inner?.cancelled === true;
-  return { ok: typeof record.ok === 'boolean' ? record.ok : null, cancelled };
 }
 
 function toolStatus(status: ToolCall['status'] | undefined): TimelineStatus {
@@ -135,10 +114,9 @@ function baseStatus(e: AgentEvent): TimelineStatus {
     return 'ok';
   }
   if (e.type === EventType.TOOL_RESULT) {
-    const outcome = toolResultOutcome(e.data);
-    if (outcome.cancelled) return 'idle';
-    if (outcome.ok === true) return 'ok';
-    if (outcome.ok === false) return 'fail';
+    const { outcome } = interpretToolResult(e.data.content, 'serialized-or-object');
+    if (outcome === 'success') return 'ok';
+    if (outcome === 'failure') return 'fail';
     return 'idle';
   }
   return 'idle';
