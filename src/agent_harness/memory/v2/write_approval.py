@@ -26,8 +26,8 @@ allow / stage——``blocked`` 是**审批结果**（用户明确拒绝）而不
 
   **审批回调不接 `approval_queue`（追认偏离）**：#1438 已就此项作出裁决（用户
   2026-10-21 评论，issue #1438）——不强接队列，理由是上面那条作用域约束仍然成立，
-  且 M6 自建的 ``memory_v2_staged`` 表已经承载了审批态与 pinning。本偏离并入
-  「#1353 偏差清单追认」由后续批次统一留痕；本票只做这段注记。
+  且 M6 自建的 ``memory_v2_staged`` 表已经承载了审批态与 pinning。该偏离已登记于
+  #1353 `issuecomment-6315586413`。
 
 # entry pinning（堵 TOCTOU）
 

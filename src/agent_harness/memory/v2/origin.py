@@ -11,10 +11,9 @@
 - 垫片：`tools.RememberMemoryV2Tool` / `ForgetMemoryV2Tool` 的显式写入。
 
 **没有** ``approval_replay`` 这个值（#1438 §4.1 兜底，2026-10-21 用户裁决后删除）：
-审批重放没有可落标的地方——`MemoryRecordV2` 无 origin 字段，`memory_v2_staged` 加列
-会改动 `StagedWriteStore` 的公开面（AC7 白名单钉住），而 `evaluate_gate` 在重放段
-根本不被调用（`approve()` 直接走 `markdown` 重放）。留一个无写入点、无消费方的常量
-就是死代码，正是本票要清掉的那一类。
+审批重放既没有可落标的地方（`MemoryRecordV2` 无 origin 字段），也没有消费方——
+`evaluate_gate` 在重放段根本不被调用（`approve()` 直接走 `markdown` 重放）。留一个
+无写入点、无消费方的常量就是死代码，正是本票要清掉的那一类。
 """
 
 from __future__ import annotations

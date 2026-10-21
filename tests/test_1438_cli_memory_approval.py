@@ -1,18 +1,23 @@
 """#1438 F-13a：审批面的端到端验收（CLI `agent-harness memory pending|approve|reject`）。
 
-走 `_memory_command`（`_main_memory` 去掉 argparse/打印的部分），装配用生产同一个
-`build_memory_v2_service`——CLI 与 web 是同一条领域路径，判据也应是同一组：
-列表形状、批准落盘、拒绝丢弃、pin 失效拒绝且保留、不存在的 id 拒绝。
+票面 §4.3 点名两段，这里都覆盖：
+
+- `_memory_command`（`:3532` 起，领域路径与渲染）：装配用生产同一个
+  `build_memory_v2_service`——CLI 与 web 是同一条领域路径，判据也应是同一组：
+  列表形状、批准落盘、拒绝丢弃、pin 失效拒绝且保留、不存在的 id 拒绝；
+- `_main_memory`（`:3499` 起，argparse + 打印 + 退出码）：见文件末尾一节。
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from agent_harness.cli import _memory_command
+from agent_harness import cli
+from agent_harness.cli import _main_memory, _memory_command
 from agent_harness.config import Settings
 from agent_harness.memory.v2.assembly import build_memory_v2_service
 from agent_harness.memory.v2.commands import trusted_identity_for_session
@@ -117,3 +122,60 @@ async def test_approve_and_reject_unknown_ids_are_refused(tmp_path):
 
     assert approve_output == "未落盘：No such pending memory write."
     assert reject_output == "No such pending memory write."
+
+
+# --------------------------------------------------------------------------------------
+# `_main_memory` 入口层（票面 §4.3 的第二段）：argparse 装配、打印、退出码
+# --------------------------------------------------------------------------------------
+
+
+def _main(monkeypatch, settings: Settings) -> None:
+    """把入口层的外部依赖钉到 tmp 工作区：Settings 与日志落盘。"""
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "setup_logging", lambda *args, **kwargs: None)
+
+
+def test_main_memory_pending_prints_the_listing(monkeypatch, tmp_path, capsys):
+    settings = _settings(tmp_path)
+    staged_id = asyncio.run(_stage(settings, {
+        "target": "memory", "action": "add", "content": "用户喜欢冰美式", "old_text": None}))
+    _main(monkeypatch, settings)
+
+    _main_memory(["pending"])  # 成功路径不得抛 SystemExit
+
+    printed = capsys.readouterr().out
+    assert f"id={staged_id}" in printed and "用户喜欢冰美式" in printed
+
+
+def test_main_memory_refused_approve_prints_reason_and_exits_zero(monkeypatch, tmp_path, capsys):
+    """审批被拒是业务结果，不是进程失败：打印原因、退出码 0（见 `_main_memory` docstring）。"""
+    _main(monkeypatch, _settings(tmp_path))
+
+    _main_memory(["approve", "stg_never_existed"])
+
+    assert capsys.readouterr().out.strip() == "未落盘：No such pending memory write."
+
+
+def test_main_memory_raises_exit_code_two_when_the_command_reports_failure(
+    monkeypatch, tmp_path, capsys,
+):
+    """`failed=True` → 打印完整输出后 `SystemExit(2)`（脚本化调用必须看得见失败）。"""
+    _main(monkeypatch, _settings(tmp_path))
+
+    async def _failed(settings, args):
+        return "迁移完成：未导出 1 条", True
+
+    monkeypatch.setattr(cli, "_memory_command", _failed)
+    with pytest.raises(SystemExit) as excinfo:
+        _main_memory(["migrate"])
+
+    assert excinfo.value.code == 2
+    assert "未导出 1 条" in capsys.readouterr().out
+
+
+def test_main_memory_requires_a_subcommand(monkeypatch, tmp_path):
+    """argparse 装配生效：缺子命令 → SystemExit(2)，而不是静默跑空。"""
+    _main(monkeypatch, _settings(tmp_path))
+    with pytest.raises(SystemExit) as excinfo:
+        _main_memory([])
+    assert excinfo.value.code == 2

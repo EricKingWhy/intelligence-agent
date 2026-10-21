@@ -73,8 +73,10 @@ def test_gate_routing_matrix(gate_on: bool, source: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize("gate_on", [False, True])
-@pytest.mark.parametrize("source", [origin.FOREGROUND, origin.BACKGROUND_REVIEW])
-def test_gate_never_blocks_for_any_input(gate_on: bool, source: str) -> None:
+@pytest.mark.parametrize("source", [origin.FOREGROUND, origin.BACKGROUND_REVIEW, None])
+def test_gate_never_blocks_for_any_input(gate_on: bool, source: str | None) -> None:
+    """任何**被接受**的输入都不产 blocked；矩阵只覆盖显式传参，这里补 `origin=None`
+    （回落到环境标）那一格。未知来源不是"输入"，它走响亮报错，见下一例。"""
     assert evaluate_gate(MemorySettingsV2(write_approval=gate_on), source).blocked is False
 
 
@@ -94,10 +96,15 @@ def test_set_origin_rejects_unknown_values() -> None:
         origin.set_origin("assistant_tool")  # 上游字面值，不是本仓的取值
 
 
-def test_gate_rejects_an_unknown_origin_instead_of_silently_staging() -> None:
-    """打标写错字必须响亮：静默 stage 会把"来源不明"伪装成"来源合法"。"""
+@pytest.mark.parametrize("gate_on", [False, True])
+def test_gate_rejects_an_unknown_origin_instead_of_silently_staging(gate_on: bool) -> None:
+    """打标写错字必须响亮：静默 stage 会把"来源不明"伪装成"来源合法"。
+
+    gate 关那一格同时钉住校验在早返回**之前**——否则将来把校验挪到 allow 分支后面，
+    门关时未知来源会静默放行，而现有测试全绿。
+    """
     with pytest.raises(ValueError, match="unknown memory write origin"):
-        evaluate_gate(MemorySettingsV2(write_approval=True), "assistant_tool")
+        evaluate_gate(MemorySettingsV2(write_approval=gate_on), "assistant_tool")
 
 
 def test_approval_replay_marker_is_gone_with_rationale() -> None:

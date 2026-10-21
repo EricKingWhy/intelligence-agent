@@ -3506,6 +3506,9 @@ def _main_memory(argv: list[str]) -> None:
     与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
     做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
     web 的 `_trusted_v2()` 同源。
+
+    退出码：approve/reject 被拒（pin 失效、id 不存在）是**业务结果**不是进程失败，
+    照常打印原因并退 0；只有命令自报失败（迁移有未导出条目）才退 2。
     """
     parser = argparse.ArgumentParser(prog="agent-harness memory")
     subcommands = parser.add_subparsers(dest="command", required=True)

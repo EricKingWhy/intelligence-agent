@@ -275,8 +275,9 @@ class MemoryTool(Tool):
         ``staged: True`` 必须一路带到模型与 M7 的摘要里——这条写入**没有落盘**，把它报成
         "已更新"会让用户在下一个 session 里找不到记忆。
 
-        进门先打 ``FOREGROUND``（#1438）：`memory` 工具只会被前台回合调用，环境里若残留
-        别的标（比如同一 task 里刚跑过后台 job），这里必须自己钉住来源，退出时还原。
+        进门先打 ``FOREGROUND``（#1438）：钉住的是 `evaluate_gate` 读到的来源，退出时
+        还原。**不覆盖** `execute` 里更早跑的 `_add_soft_check`——那条守卫按环境标判定
+        （生产中后台 job 在独立 task 内且 `finally` 还原，前台调用看不到后台标）。
         """
         if self._service is None or self._staged is None:
             return None
