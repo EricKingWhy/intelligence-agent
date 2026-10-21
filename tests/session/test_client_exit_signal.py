@@ -638,6 +638,9 @@ class _FaultInjectingLedger:
     async def update_state(self, *args, **kwargs) -> None:
         return await self._inner.update_state(*args, **kwargs)
 
+    async def record_attempt(self, session_id: str, tool_call_id: str) -> None:
+        await self._inner.record_attempt(session_id, tool_call_id)
+
     async def initialize(self) -> None:
         return await self._inner.initialize()
 

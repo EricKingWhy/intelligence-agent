@@ -960,16 +960,30 @@ def _add_tool_delta(
     - **贡献为 0 的工具名不落进表**（准入前被拒的调用写 `tool_calls: 0`）：表是"消耗了
       多少"，不是"出现过哪些工具名"；留下 0 行只会让投影里多出一堆没花过配额的名字。
     """
-    if calls is None or attempts is None or not isinstance(raw, Mapping):
+    if not isinstance(raw, Mapping):
         return calls, attempts
     name = raw.get("tool_name")
     if not isinstance(name, str) or not name:
         return calls, attempts
-    for key, table in (("tool_calls", calls), ("tool_attempts", attempts)):
-        value = raw.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            continue
-        table[name] = table.get(name, 0) + value
+    call_delta = raw.get("tool_calls")
+    if (
+        calls is not None
+        and isinstance(call_delta, int)
+        and not isinstance(call_delta, bool)
+        and call_delta > 0
+    ):
+        calls[name] = calls.get(name, 0) + call_delta
+    if attempts is not None:
+        attempt_delta = raw.get("tool_attempts")
+        if "tool_attempts" in raw and attempt_delta is None:
+            # Explicit null marks a migrated Ledger count as unknown.
+            attempts = None
+        elif (
+            isinstance(attempt_delta, int)
+            and not isinstance(attempt_delta, bool)
+            and attempt_delta > 0
+        ):
+            attempts[name] = attempts.get(name, 0) + attempt_delta
     return calls, attempts
 
 

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.storage import OperationContext, SqliteOperationLedger
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tools.exec import ExecTool
@@ -131,6 +132,15 @@ async def test_real_kill_recovers_child_without_replaying_committed_write(docker
         assert len(nested) == 1
         assert nested[0].data['parent_exec_call_id'] == 'outer'
         assert nested[0].data['budget_delta']['tool_calls'] == 1
+        outer = [event for event in recovered.events if event.type == 'tool/result'
+                 and event.data.get('tool_call_id') == 'outer']
+        assert len(outer) == 1
+        assert outer[0].data['budget_delta']['tool_name'] == 'exec'
+        assert outer[0].data['budget_delta']['tool_calls'] == 1
+        assert outer[0].data['budget_delta']['tool_attempts'] == 1
+        consumed = consumed_from_events(recovered.events)
+        assert consumed.tool_calls_by_tool == {'exec': 1, 'write': 1}
+        assert consumed.tool_attempts_by_tool == {'exec': 1, 'write': 1}
         assert docker_sandbox.read_text('committed.txt') == 'once'
     finally:
         # Clean only this test's orphaned computation worker. Production workers
