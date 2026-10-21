@@ -77,13 +77,17 @@ describe('MemoryPanel list states', () => {
     expect(document.body.querySelector('.memory-error')).toBeNull();
   });
 
-  it('shows degraded capability separately from empty and error states', async () => {
+  it('shows degraded capability as a neutral empty state (no red failure, no retry)', async () => {
     await renderPanel(memoriesState({ disabled: 'memory capability 未启用' }));
 
-    expect(document.body.querySelector('.memory-degraded')?.textContent).toContain('记忆未启用');
-    expect(document.body.querySelector('.memory-empty')).toBeNull();
+    // #1372 改动 9：未启用 = 配置缺省，不是故障——中性空态 + 去设置入口。
+    const empty = document.body.querySelector('.memory-empty.memory-disabled');
+    expect(empty?.textContent).toContain('记忆管理未启用');
     expect(document.body.querySelector('.memory-error')).toBeNull();
-    expect(document.body.querySelector('.memory-degraded')?.querySelector('button')).toBeNull();
+    expect(document.body.querySelector('.memory-degraded')).toBeNull();
+    const action = empty?.querySelector('button');
+    expect(action?.textContent).toBe('查看记忆设置');
+    expect(empty?.textContent).not.toContain('重试');
   });
 
   it('keeps retryable read errors visible and retries the failed page', async () => {

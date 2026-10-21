@@ -81,7 +81,7 @@ describe('#368 CleanupPreviewDialog', () => {
     expect(text()).toContain('2 MiB');
     // blocked：中文解释
     expect(text()).toContain('art_c');
-    expect(text()).toContain('有在途任务');
+    expect(text()).toContain('有任务还没跑完');
     // 证据失效警示
     expect(text()).toContain('将有 2 条证据失去可回读原件');
   });

@@ -20,26 +20,15 @@
 
 import { expect, test, type Page } from '@playwright/test';
 import {
-  AGENT_PROFILES,
-  MODELS,
-  PERMISSION_MODES,
-  REASONING_EFFORTS,
+  LIVE_FRAMES,
   RUN,
   SID,
   T,
-  fulfillSse,
-  routeApi,
+  inspectorCeiling,
+  routeStreaming,
   submitTask,
   type FrameSpec,
 } from './fixtures';
-
-/** 未终态的流：run 一直 running ⇒ `streaming` 恒真、Esc 提示与停止按钮常驻
- *  （与 o-wait-hint.spec.ts 同一手法：mock 只给有限帧，模式停在 live）。 */
-const LIVE_FRAMES: FrameSpec[] = [
-  { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
-  { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
-  { type: 'user/message', data: { content: '跑一下' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
-];
 
 const LIVE_WITH_PLAN: FrameSpec[] = [
   ...LIVE_FRAMES,
@@ -61,31 +50,6 @@ const DONE_FRAMES: FrameSpec[] = [
   { type: 'model/completed', data: { content: '跑完了' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
   { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
 ];
-
-const sessionRow = {
-  session_id: SID,
-  event_count: LIVE_FRAMES.length,
-  first_event_time: T,
-  last_event_time: T,
-  first_user_message: '跑一下',
-  trace_id: null,
-  trace_url: null,
-};
-
-async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES) {
-  await routeApi(page, {
-    sessions: [{ ...sessionRow, event_count: frames.length }],
-    models: MODELS,
-    permissionModes: PERMISSION_MODES,
-    agentProfiles: AGENT_PROFILES,
-    reasoningEfforts: REASONING_EFFORTS,
-    onSessionPost: (route) => fulfillSse(route, frames),
-    // 服务端仍在跑（模型还没吐新内容）：快照即全量、连接保持——这正是「流式中」
-    // 的真相，界面必须维持生成态（停止按钮 / Esc 提示在场）。
-    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
-    events: frames,
-  });
-}
 
 /** 在页面里量「谁和谁相交」——相交判定必须在有布局的地方做，不能拿快照里的
  *  近似值在 Node 侧比。返回的是**越界名单**（空数组 = 干净），不是布尔值：
@@ -128,9 +92,13 @@ test('#194：流式中提示与停止按钮同侧，且不压任何档位控件�
 
   expect(await overlaps(page)).toEqual({ hintVsControls: [], actionsVsControls: [] });
 
-  /* 再用"窄工作区"复现一次：把 Inspector 拖到上限 480（向左拖 = 变宽，#197 语义），
-     此时中心列只剩 ~560px、档位行会顶到右端——正是动作簇必须让位的那种布局。
-     不用更小的视口代替：e2e 只在 1280/1920 两档跑，拖宽能造出比两者都窄的工作区。 */
+  /* 再用"窄工作区"复现一次：把 Inspector 拖到夹取上限（向左拖 = 变宽，#197 语义），
+     此时中心列只剩 CENTER_MIN_W=360、档位行会顶到右端——正是动作簇必须让位的那种布局。
+     不用更小的视口代替：e2e 只在 1280/1920 两档跑，拖宽能造出比两者都窄的工作区。
+     #1419 上限提到 820 后，上限不再恒等于 820：`clampInspectorWidth` 同时保
+     `available − 360`。available 在三栏栅格里随视口走（1280 视口 1020、1920 视口
+     1678），所以 1280 只能拖到 660、1920 才到 820。这里按**组件同口径**算出期望值
+     （中心列 clientWidth + 面板宽，不含面板边框），而不是写死一个数。 */
   const resizer = page.locator('.detail-resizer');
   await expect(resizer).toBeVisible();
   const box = await resizer.boundingBox();
@@ -140,7 +108,8 @@ test('#194：流式中提示与停止按钮同侧，且不压任何档位控件�
   await page.mouse.down();
   await page.mouse.move(box.x + 3 - 600, y, { steps: 8 });
   await page.mouse.up();
-  await expect(resizer).toHaveAttribute('aria-valuenow', '480');
+  const expectedMax = await inspectorCeiling(page);
+  await expect(resizer).toHaveAttribute('aria-valuenow', String(expectedMax));
 
   // 提示仍与按钮同侧，且没有任何档位控件被压住
   await expect(hint).toBeVisible();

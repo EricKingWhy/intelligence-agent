@@ -7,10 +7,11 @@
  *  票面锚点：docs/design/t435-budget-ui-interaction-design.md
  *  §2.1 tokens 档位 100k/250k/500k/1M/自定义（不做 token→次数换算）；
  *  §2.2 deadline 时长档 30m/1h/2h/4h/自定义时长，datetime-local 保留为高级路径，
- *  预览「≈ 10-02 15:30 截止（2 小时后）」，过期 → 「已过期」（仅前置提示）；
+ *  预览「≈ 2026-10-02 15:30 截止（2 小时后）」，过期 → 「已过期」（仅前置提示）；
  *  §2.5 默认值用 placeholder / 「默认」表达。 */
 
 import { parseDurationToken, resolveDeadlineDraft } from './amend';
+import { formatDateTime } from './format';
 
 /** tokens 档位（§2.1）。`id` 即 OptionPicker 的 value；draft 命中档位时存的就是
  *  数字字符串（`'500000'`），toCreateBudget 原样消费。 */
@@ -68,12 +69,9 @@ export function tokensLabel(draft: string): string | null {
   return String(value);
 }
 
-/** 本地时刻 → `MM-DD HH:mm`（同年）或 `YYYY-MM-DD HH:mm`（跨年，消歧）。 */
-function localStamp(date: Date, now: Date): string {
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  const md = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-  return date.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${date.getFullYear()}-${md} ${hm}`;
+/** 本地时刻 → 全站统一 `YYYY-MM-DD HH:mm`（#1372 改动 10）。 */
+function localStamp(date: Date): string {
+  return formatDateTime(date.toISOString()) ?? '';
 }
 
 /** 时长 token → 相对语（`'2h'` → '2 小时后'、`'30m'` → '30 分钟后'）；非时长 → null。 */
@@ -98,7 +96,7 @@ export function deadlinePreview(
   if (date.getTime() < now.getTime()) return { text: '已过期', expired: true };
   const relative = relativeText(draft);
   const suffix = relative ? `（${relative}）` : '';
-  return { text: `≈ ${localStamp(date, now)} 截止${suffix}`, expired: false };
+  return { text: `≈ ${localStamp(date)} 截止${suffix}`, expired: false };
 }
 
 /** Composer trigger 的常显摘要（§2.5「默认值用 placeholder 表达」）：
@@ -115,10 +113,10 @@ export function budgetSummary(turns: string, tokens: string, deadline: string): 
   const deadlineText = isDuration
     ? deadline.trim()
     : resolved !== undefined
-      ? localStamp(new Date(resolved), new Date())
+      ? localStamp(new Date(resolved))
       : null;
   if (!turnsSet && tokensText === null && deadlineText === null) return '默认';
-  const parts = [`turns ${turnsSet ? turnsTrimmed : '默认'}`];
+  const parts = [`轮数 ${turnsSet ? turnsTrimmed : '默认'}`];
   if (tokensText !== null) parts.push(tokensText);
   if (deadlineText !== null) parts.push(deadlineText);
   return parts.join(' · ');

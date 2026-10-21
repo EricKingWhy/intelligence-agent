@@ -48,12 +48,12 @@ describe('工具 Raw 档（B-D7）', () => {
       root.render(createElement(ToolEventSections, { tool }));
     });
     const rawTab = Array.from(container.querySelectorAll<HTMLButtonElement>('.io-tab'))
-      .find((b) => b.textContent?.trim() === 'Raw');
+      .find((b) => b.textContent?.trim() === '原始');
     expect(rawTab).toBeTruthy();
     act(() => rawTab!.click());
 
     const labels = copyLabels();
-    expect(labels).toEqual(['复制 Raw（tool/call）', '复制 Raw（tool/result）']);
+    expect(labels).toEqual(['复制原始（tool/call）', '复制原始（tool/result）']);
     expect(new Set(labels).size).toBe(labels.length);
   });
 });

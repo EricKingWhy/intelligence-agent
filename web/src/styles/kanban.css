@@ -100,6 +100,17 @@
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
+/* 空态：没有卡片时仍保留面板结构。 */
+.kanban-empty {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-chrome);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
 /* 四列横向排布；窄屏横向滚动（列有最小宽度，不把卡片挤成一条）。 */
 .kanban-board {
   display: flex;

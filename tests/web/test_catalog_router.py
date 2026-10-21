@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.wiring import CapabilityWiring
+from agent_harness.config import Settings
 from agent_harness.web.catalog import (
     get_catalog_state,
     register_catalog_routes,
@@ -14,6 +15,11 @@ from agent_harness.web.catalog import (
 
 
 class _FakeState:
+    # `CatalogState` 协议声明 settings 是必需字段（#1420 起 `/api/capabilities`
+    # 读 `settings.insights_enabled`）；fake 只实现 get_wiring 会让冒烟打成
+    # AttributeError——补上最小实现，而不是让生产代码用 getattr 兜 fake 的缺。
+    settings = Settings()
+
     async def get_wiring(self):
         return CapabilityRegistry(), CapabilityWiring()
 

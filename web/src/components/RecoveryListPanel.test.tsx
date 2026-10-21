@@ -143,7 +143,7 @@ describe('RecoveryListPanel', () => {
     await render();
     const degraded = document.querySelector('.recovery-list-degraded');
     expect(degraded).not.toBeNull();
-    expect(degraded!.textContent).toContain('上次运行信息不可用');
+    expect(degraded!.textContent).toContain('上次任务信息不可用');
     expect(document.querySelector('.recovery-list-item')).toBeNull();
     expect(degraded!.querySelector<HTMLButtonElement>('.recovery-resume-btn')?.disabled).toBe(true);
   });

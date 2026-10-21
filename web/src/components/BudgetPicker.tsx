@@ -23,6 +23,7 @@ import * as Popover from '@radix-ui/react-popover';
 import { useId, useState } from 'react';
 import { ChevronDown, ChevronRight, Coins, RotateCw, Timer, Wallet } from 'lucide-react';
 import { OptionPicker } from './OptionPicker';
+import { Tip } from './Tooltip';
 import { parseDurationToken } from '../lib/amend';
 import {
   DURATION_CUSTOM_ID,
@@ -79,7 +80,8 @@ export function BudgetPickerPanel({
   // 预览只跟随被接线的维（面板里没有的那一维不产生预览行）。
   const preview = onDeadlineChange !== undefined ? deadlinePreview(deadline, now) : null;
   const summary = budgetSummary(turns, tokens, deadline);
-  const hasBudgetOverrides = turns.trim() !== '' || tokens.trim() !== '' || deadline.trim() !== '';
+  // 与 trigger 的 `data-selected` 同一判据：只有**有效**覆盖值才允许出现「重置」。
+  const hasBudgetOverrides = summary !== '默认';
 
   const resetBudget = () => {
     setCustomTokensPicked(false);
@@ -101,9 +103,9 @@ export function BudgetPickerPanel({
               className="budget-picker-dimension-copy"
               htmlFor={turnsInputId}
             >
-              <span className="budget-picker-dimension-name">turns 上限</span>
+              <span className="budget-picker-dimension-name">轮数上限</span>
               <span className="budget-picker-dimension-hint">
-                本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。
+                这次任务最多执行多少轮；留空用默认值。到上限会自动暂停，调高上限后可继续。
               </span>
             </label>
             <span className="budget-picker-dimension-control">
@@ -117,7 +119,7 @@ export function BudgetPickerPanel({
                 onChange={(e) => onTurnsChange(e.target.value)}
                 placeholder="默认"
                 disabled={disabled}
-                aria-label="预算上限（Agent turns，留空为默认）"
+                aria-label="轮数上限（留空用默认值）"
               />
               <span className="budget-picker-unit">轮</span>
             </span>
@@ -131,19 +133,19 @@ export function BudgetPickerPanel({
               <Coins size={14} />
             </span>
             <span className="budget-picker-dimension-copy">
-              <span className="budget-picker-dimension-name">tokens 上限</span>
+              <span className="budget-picker-dimension-name" title="约等于中文字数">字数上限</span>
               <span className="budget-picker-dimension-hint">
-                本次 run 的总 token 上限？
+                这次任务最多能用多少字？
               </span>
             </span>
             <div className="composer-budget budget-picker-dimension-control">
               <OptionPicker
-                ariaLabel="预算 tokens 档位"
-                title="本次 run 的总 token 上限？"
+                ariaLabel="字数档位"
+                title="这次任务最多能用多少字？"
                 icon={Coins}
                 options={TOKEN_OPTIONS}
                 value={tokensTierId(tokens)}
-                placeholder="tokens 上限"
+                placeholder="字数上限"
                 disabled={disabled}
                 onChange={(value) => {
                   if (value === null) {
@@ -162,8 +164,8 @@ export function BudgetPickerPanel({
                 }}
                 footer={
                   tokensCustom ? (
-                    <label className="composer-budget" title="自定义总 token 绝对上限；留空 = 不设。">
-                      <span className="composer-budget-label">自定义 tokens</span>
+                    <label className="composer-budget" title="自定义总字数上限；留空 = 不设。">
+                      <span className="composer-budget-label">自定义字数</span>
                       <input
                         type="number"
                         min={1}
@@ -173,7 +175,7 @@ export function BudgetPickerPanel({
                         onChange={(e) => onTokensChange(e.target.value)}
                         placeholder="默认"
                         disabled={disabled}
-                        aria-label="预算上限（总 tokens，留空为默认）"
+                        aria-label="字数上限（留空用默认值）"
                       />
                     </label>
                   ) : undefined
@@ -193,13 +195,13 @@ export function BudgetPickerPanel({
               <span className="budget-picker-dimension-copy">
                 <span className="budget-picker-dimension-name">截止时长</span>
                 <span className="budget-picker-dimension-hint">
-                  本次 run 距截止还有多久？
+                  这次任务距截止还有多久？
                 </span>
               </span>
               <div className="composer-budget budget-picker-dimension-control">
                 <OptionPicker
                   ariaLabel="预算截止时长档位"
-                  title="本次 run 距截止还有多久？"
+                  title="这次任务距截止还有多久？"
                   icon={Timer}
                   options={DURATION_OPTIONS}
                   value={durationTierId(deadline)}
@@ -285,7 +287,7 @@ export function BudgetPickerPanel({
         <span className="budget-picker-status">
           <span className="budget-picker-status-dot" aria-hidden="true" />
           <span className="budget-picker-status-text">
-            {summary === '默认' ? '当前：默认（后端默认，全不设限）' : '当前：' + summary}
+            {summary === '默认' ? '当前：默认（都不设限）' : '当前：' + summary}
           </span>
         </span>
         {hasBudgetOverrides && (
@@ -313,6 +315,10 @@ interface BudgetPickerProps {
   disabled?: boolean;
 }
 
+/** 预算 chip 的完整说明（tooltip 与 disabled 时的原生 title 同源，#1365 术语）。 */
+const BUDGET_TIP =
+  '这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。';
+
 /** 单入口：trigger 常显摘要（§2.5——「默认」即全空，设了才展开对应部分）。 */
 export function BudgetPicker({
   turns,
@@ -323,22 +329,33 @@ export function BudgetPicker({
   onDeadlineChange,
   disabled = false,
 }: BudgetPickerProps) {
+  // 摘要与选中态同源：非法草稿（如 turns='abc'）在 `budgetSummary` 里就是「默认」，
+  // 不能出现「chip 亮着、摘要却写默认」的分裂状态。
+  const summary = budgetSummary(turns, tokens, deadline);
+  const hasBudgetOverrides = summary !== '默认';
   return (
     <Popover.Root>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control composer-budget-trigger"
-          aria-label="预算"
-          title="本次 run 的预算（turns / tokens / 截止）；留空 = 后端默认。到顶/到点自动暂停，可在恢复面板调整后继续。"
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{budgetSummary(turns, tokens, deadline)}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（预算 chip）。#1370 的
+          data-selected 与「预算：」前缀保留（选中态/摘要语义不变）。 */}
+      <Tip content={BUDGET_TIP}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control composer-budget-trigger"
+            aria-label="预算"
+            /* #1370 P0-9：「选中才给底色」——设了任一维才浮出，全空仍是透明的「预算：默认」。 */
+            data-selected={hasBudgetOverrides ? 'true' : undefined}
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+            /* 同 ModelPicker：disabled 收不到指针事件，原生 title 兜底完整说明。 */
+            title={disabled ? BUDGET_TIP : undefined}
+          >
+            <Wallet size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current">{`预算：${summary}`}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className="picker-content budget-picker-content budget-picker-content--v2"
@@ -351,10 +368,10 @@ export function BudgetPicker({
               <Wallet size={15} />
             </span>
             <span className="budget-picker-head-copy">
-              <span className="budget-picker-head-title">本次 run 的预算</span>
+              <span className="budget-picker-head-title">这次任务的预算</span>
               <span className="budget-picker-head-subtitle">
-                <span className="budget-picker-head-highlight">留空 = 无限制（后端默认）</span>
-                {' · 到顶自动暂停，可在恢复时上调'}
+                <span className="budget-picker-head-highlight">留空 = 不限制（默认）</span>
+                {' · 到上限会自动暂停，可在恢复时调高'}
               </span>
             </span>
           </div>

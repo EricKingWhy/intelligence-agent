@@ -6,10 +6,53 @@
  * backdrop blur 只用于该浮层（PRD §15 / 冻结视觉原则）。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Search } from 'lucide-react';
+import {
+  Activity,
+  ArrowDownToLine,
+  Brain,
+  Command,
+  Copy,
+  ExternalLink,
+  LayoutList,
+  Maximize2,
+  PanelRight,
+  Plus,
+  Search,
+  ShieldCheck,
+  SunMoon,
+  TextCursorInput,
+  type LucideIcon,
+} from 'lucide-react';
 import { filterCommands, type CommandItem } from '../lib/commands';
+
+/** 分组标题以 App.tsx 实际传入的 group 为准（actions / density / events）。 */
+const GROUP_LABELS: Record<CommandItem['group'], string> = {
+  actions: '操作',
+  density: '密度',
+  events: '运行事件',
+};
+
+/** 行首图标：按命令 id 给最接近的语义；未来新增命令回落到所属分组的图标。 */
+const COMMAND_ICONS: Record<string, LucideIcon> = {
+  'toggle-inspector': PanelRight,
+  'toggle-inspector-fullpage': Maximize2,
+  'new-session': Plus,
+  'jump-latest': ArrowDownToLine,
+  'copy-run-id': Copy,
+  'copy-trace-id': Copy,
+  'open-trace': ExternalLink,
+  'toggle-theme': SunMoon,
+  'focus-composer': TextCursorInput,
+  'manage-memories': Brain,
+  'manage-approve-policy': ShieldCheck,
+};
+const GROUP_ICONS: Record<CommandItem['group'], LucideIcon> = {
+  actions: Command,
+  density: LayoutList,
+  events: Activity,
+};
 
 interface Props {
   open: boolean;
@@ -97,22 +140,33 @@ export function CommandPalette({ open, onOpenChange, items, onAfterClose }: Prop
             {results.length === 0 && (
               <div className="palette-empty">无匹配命令</div>
             )}
-            {results.map((cmd, i) => (
-              <button
-                key={cmd.id}
-                role="option"
-                aria-selected={i === active}
-                className={`palette-item palette-item-${cmd.group}${i === active ? ' active' : ''}`}
-                onMouseEnter={() => setActive(i)}
-                onClick={() => {
-                  onOpenChange(false);
-                  cmd.run();
-                }}
-              >
-                <span className="palette-item-label">{cmd.label}</span>
-                {cmd.hint && <span className="palette-item-hint">{cmd.hint}</span>}
-              </button>
-            ))}
+            {results.map((cmd, i) => {
+              const Icon = COMMAND_ICONS[cmd.id] ?? GROUP_ICONS[cmd.group];
+              const showGroup = i === 0 || results[i - 1].group !== cmd.group;
+              return (
+                <Fragment key={cmd.id}>
+                  {showGroup && (
+                    <div className="palette-group" role="presentation">
+                      {GROUP_LABELS[cmd.group]}
+                    </div>
+                  )}
+                  <button
+                    role="option"
+                    aria-selected={i === active}
+                    className={`palette-item palette-item-${cmd.group}${i === active ? ' active' : ''}`}
+                    onMouseEnter={() => setActive(i)}
+                    onClick={() => {
+                      onOpenChange(false);
+                      cmd.run();
+                    }}
+                  >
+                    <Icon size={14} className="palette-item-icon" aria-hidden="true" />
+                    <span className="palette-item-label">{cmd.label}</span>
+                    {cmd.meta && <span className="palette-item-meta">{cmd.meta}</span>}
+                  </button>
+                </Fragment>
+              );
+            })}
           </div>
           <div className="palette-footer">
             <span>↑↓ 选择</span>

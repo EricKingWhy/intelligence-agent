@@ -21,6 +21,7 @@ import { reasoningIsOpen } from '../lib/disclosure';
 import { FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, useFollowResetOnStop, type FollowState } from '../lib/followLatest';
 import { useTickingNow } from '../hooks/useTickingNow';
 import type { TraceDensity } from '../lib/density';
+import { Collapse } from './Collapse';
 
 /** reasoning 开合控制 API（useReasoningDisclosure 返回形状；缺省时组件内
  *  本地 state 兜底——测试/独立渲染可用，生产由 App 统一提供）。 */
@@ -208,11 +209,11 @@ export const ReasoningBlockView = memo(function ReasoningBlockView({
           aria-hidden="true"
         />
       </button>
-      {open && (
-        <div className="reasoning-expanded" id={bodyId}>
-          <ExpandedBody text={block.text} streaming={block.status === 'streaming'} />
-        </div>
-      )}
+      {/* 展开/收起走 grid-rows 0fr→1fr（#1429 打磨点 2）；收起后子树卸载，
+          折叠态 DOM 里没有正文（与改造前一致）。 */}
+      <Collapse open={open} className="reasoning-expanded" id={bodyId}>
+        <ExpandedBody text={block.text} streaming={block.status === 'streaming'} />
+      </Collapse>
     </div>
   );
 });

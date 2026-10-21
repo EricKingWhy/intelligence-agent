@@ -73,14 +73,14 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   // 已暂停（#312）：预算到顶，**等着被恢复**——中性色 + 暂停图标。不能用
   // 「已完成」的绿对勾（那是"这场跑完了"），也不能用失败的红叉（没有失败）。
   paused: { label: '已暂停', className: 'pulse-paused', Icon: PauseCircle },
-  // 待裁决（#1030）：坏死 run（run_status 停在 'running'）与重启后的中断 run
-  // 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。这是与
-  // 「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --warning（"需要人
-  // 动手"，同 .interrupt-banner），**刻意不用 --info**：info 在本仓是"中性提示"，
-  // 会把"必须我裁决"读成"稍等就好"；且纯 --warning 文字在 12% 底色上亮色实测
-  // 2.91:1，不达 AA（故 CSS 里用 ink-mix，实测 6.53:1，见 app.css）。无动画：
-  // 等待是静止态，闪动会读成"还在跑"。
-  'awaiting-decision': { label: '待裁决', className: 'pulse-awaiting-decision', Icon: Gavel },
+  // 待裁决（#1030；#1372 与 tool 的 warning 拆开）：坏死 run（run_status 停在 'running'）
+  // 与重启后的中断 run 都可能挂着 UNKNOWN Operation——**不裁决这条会话就永远走不动**。
+  // 这是与「思考中」截然相反的事实：后者在跑，前者在等人。色域走 --danger（"必须人
+  // 动手，否则永远不动"），**刻意不用 --info**：info 在本仓是"中性提示"，会把"必须我
+  // 裁决"读成"稍等就好"；纯 --danger 文字在 10% 底色上亮色不达 AA（故 CSS 里用
+  // ink-mix，实测见 app.css 与 e2e/t-contrast.spec.ts #1030 用例）。无动画：等待是
+  // 静止态，闪动会读成"还在跑"。
+  'awaiting-decision': { label: '等你决定', className: 'pulse-awaiting-decision', Icon: Gavel },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };
 
@@ -267,7 +267,7 @@ function coarsenPulseState(state: RunPulseState): string {
       // #1030：同 #312 的理由——「待裁决」既不是「运行中」（它没在跑）也不是
       // 「已中断」（它没结束，只是在等人）。粗化成任何一档都会让 Inspector 与
       // 顶栏对同一会话各说一套。
-      return '待裁决';
+      return '等你决定';
     case 'interrupted':
       return '已中断';
     case 'cancelled':
@@ -347,8 +347,8 @@ function deriveRunStartedField(
  * 生效 agent_profile——最后一个 `run/started` 携带的值（纯事件真值，无状态）。
  *
  * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
- * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
- * 编造运行条件，正是 #198 要修的不可回溯根因）。
+ * 旧数据（字段缺失）返回 null，调用方不渲染档位（#1408：未知不是与真实状态
+ * 同权的徽标）——不伪造 "main"（那是编造运行条件，正是 #198 要修的不可回溯根因）。
  *
  * #1106：`focusedRunId` 给出时按聚焦 run 取值（见 `deriveRunStartedField`）。
  */
@@ -461,21 +461,21 @@ export function recoverDoneMessage(r: {
 }): string {
   const remaining =
     r.stillUnterminated && r.stillDangling
-      ? '仍缺 run 终态且有未配对工具调用'
+      ? '仍缺结束状态，且有没配上结果的工具调用'
       : r.stillUnterminated
-        ? '仍缺 run 终态'
+        ? '仍缺结束状态'
         : r.stillDangling
-          ? '仍有未配对工具调用'
+          ? '仍有没配上结果的工具调用'
           : null;
   const fixed =
     r.repaired > 0
       ? r.terminalRepaired
-        ? `已恢复：回填 ${r.repaired} 条工具结果，并补齐 run 终态`
-        : `已恢复：回填 ${r.repaired} 条工具结果`
+        ? `已恢复：补回 ${r.repaired} 条工具结果，并补上结束状态`
+        : `已恢复：补回 ${r.repaired} 条工具结果`
       : r.terminalRepaired
-        ? '已恢复：补齐 run 终态'
+        ? '已恢复：补上结束状态'
         : null;
   if (fixed) return remaining ? `${fixed}（${remaining}，可重试）` : fixed;
-  if (remaining) return `已恢复：本次无回填项（${remaining}，可重试）`;
+  if (remaining) return `已恢复：本次没有要补回的内容（${remaining}，可重试）`;
   return '已恢复：无可修复项（会话事件已完整）';
 }

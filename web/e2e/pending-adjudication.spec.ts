@@ -104,7 +104,7 @@ test.describe('#1030 待裁决呈现', () => {
     await openSession(page, { sessions: [ROW], events: zombieEvents(), pendingDecisions: PENDING });
 
     const pulse = page.locator('.run-pulse');
-    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toContainText('等你决定');
     await expect(pulse).not.toContainText('思考中');
     await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
   });
@@ -148,7 +148,7 @@ test.describe('#1030 待裁决呈现', () => {
     // 票面现场的旧误导（徽标「已中断」+ 看似痊愈）不再出现：徽标如实说「待裁决」，
     // 横幅是被动通知（无裁决入口）——后端下次恢复时按操作类型自动结清。
     const pulse = page.locator('.run-pulse');
-    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toContainText('等你决定');
     await expect(pulse).not.toContainText('已中断');
     await expect(page.locator('.adjudication-banner')).toBeVisible();
     await expect(page.locator('.recovery-decision-panel')).toHaveCount(0);

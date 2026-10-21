@@ -238,7 +238,7 @@ export function PlanList({
     : runStatus === 'completed'
       ? allCompleted
         ? `✓ 任务完成 ${completed.length}/${items.length}`
-        : `✓ 本次运行结束 ${completed.length}/${items.length}`
+        : `✓ 本次任务结束 ${completed.length}/${items.length}`
       : null;
 
   const openGroup: FoldSide | null = hoverGroup ?? pinnedGroup;

@@ -128,7 +128,7 @@ afterEach(async () => {
 });
 
 describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
-  it('结构化 409：结局携带后端 pending_decisions，点亮 recoverState 供 App 渲染裁决面板', async () => {
+  it('结构化 409：结局携带后端 pending_decisions，点亮 recoverState 供 App 渲染待处理列表', async () => {
     vi.mocked(apiSendMessage).mockResolvedValue(recoveryConflict409());
     await mount();
     await enterViewing(SID);
@@ -156,8 +156,8 @@ describe('#1029 发送路径 · 待裁决 409 的结局分派', () => {
     });
 
     const error = captured.hook!.error ?? '';
-    expect(error).toContain('待人工裁决');
-    expect(error).toContain('裁决面板');
+    expect(error).toContain('需要你来决定');
+    expect(error).toContain('待处理列表');
     // 协议原文（POST /recover、tool_call_id、verdict 词表）不进用户层横幅
     expect(error).not.toContain('POST /api/sessions');
     expect(error).not.toContain('tool_call_id=');

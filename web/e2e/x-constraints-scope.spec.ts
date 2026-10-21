@@ -10,7 +10,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { RUN, SID, T, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
+import { RUN, SID, T, fulfillSse, routeApi, submitTask, toggleReusableRule, type FrameSpec } from './fixtures';
 
 const HEAD: FrameSpec[] = [
   { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
@@ -74,8 +74,8 @@ async function openConstraints(page: Page, mock: Record<string, unknown>): Promi
   await page.goto('/');
   await submitTask(page, '跑个任务');
   await page
-    .getByRole('tablist', { name: 'Inspector 视图' })
-    .getByRole('tab', { name: 'Constraints' })
+    .getByRole('tablist', { name: '运行详情视图' })
+    .getByRole('tab', { name: '我的要求' })
     .click();
   await expect(panel(page)).toBeVisible();
 }
@@ -118,7 +118,7 @@ test('非 git（projectAvailable=false）：登记三选一「本项目」置灰
   await page.goto('/');
   await submitTask(page, '跑个任务');
 
-  await page.locator('#remember-as-procedural-rule').check();
+  await toggleReusableRule(page);
   const group = page.getByRole('group', { name: '登记作用域' });
   await expect(group.getByRole('button', { name: '本项目' })).toBeDisabled();
   await expect(group.getByRole('button', { name: '本会话' })).toBeEnabled();
@@ -139,7 +139,7 @@ test('登记透传：勾选 + 选「本项目」→ /messages 的 protected_fact
   await submitTask(page, '跑个任务');
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
 
-  await page.locator('#remember-as-procedural-rule').check();
+  await toggleReusableRule(page);
   const group = page.getByRole('group', { name: '登记作用域' });
   // 默认「本会话」选中 + hint 逐字。
   await expect(group.getByRole('button', { name: '本会话' })).toHaveAttribute('aria-pressed', 'true');

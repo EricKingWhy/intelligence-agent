@@ -46,10 +46,10 @@ export function ContextFullDialog({ open, onEndRun, onChangeModel }: ContextFull
         <Dialog.Overlay className="palette-overlay" />
         <Dialog.Content className="project-dialog context-full-dialog">
           <Dialog.Title className="project-dialog-title">
-            <AlertTriangle size={14} aria-hidden="true" /> 上下文已经满了
+            <AlertTriangle size={14} aria-hidden="true" /> 记忆容量已经满了
           </Dialog.Title>
           <Dialog.Description className="project-dialog-desc">
-            前面没有可压缩的内容，换个窗口更大的模型继续吧。
+            前面没有可以精简的内容，换一个记忆容量更大的模型继续吧。
           </Dialog.Description>
           <div className="project-dialog-actions">
             <button type="button" className="btn-ghost" onClick={onEndRun}>

@@ -43,7 +43,7 @@ test('时间线「加载更早 N 条」：真实点击展开折叠的前段，�
   await expect(page.locator('.session-item').first()).toContainText('长会话');
 
   // 默认 tab 就是 Timeline（`useState<Tab>('timeline')`）；Inspector 在 ≥1200px 默认展开
-  await expect(page.getByRole('tab', { name: 'Timeline' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '时间线' })).toHaveAttribute('aria-selected', 'true');
 
   const rows = page.locator('.timeline-row');
   await expect(page.locator('.timeline-window-bar')).toContainText(`共 ${TOTAL} 条`);
