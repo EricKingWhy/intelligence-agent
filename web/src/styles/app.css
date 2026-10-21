@@ -274,6 +274,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .skeleton {
     animation: none !important;
   }
+  /* #1429 中间对话区新增动效：呼吸条 / 运行点 / 折叠展开 / 快捷动作淡入。
+     折叠展开在 reduce 下直接跳到终态（transition 归零 ⇒ 无插值）。 */
+  .act-card.is-run::before,
+  .act-node .act-status-running .status-spinner,
+  .act-group-head .act-status-running .status-spinner {
+    animation: none !important;
+  }
+  .disc-body,
+  .turn-nav-pill,
+  .act-quick-acts,
+  .arg-tip,
+  .act-duration {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+  }
   /* 主题切换的三个可见面：不靠 index.css 的全局 * 规则兜底，显式落在这里。 */
   .app-regions,
   .appbar,
@@ -2494,14 +2509,78 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+/* #1429 打磨点 6：轮次导航钉在滚动区上方（虚拟化行之外，不参与测高）。
+   它不在滚动容器里 ⇒ 滚到任何位置都可见；药丸点击走虚拟化 scrollToIndex。 */
+.turn-nav {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: var(--space-sm) var(--space-xl) 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.turn-nav::-webkit-scrollbar {
+  display: none;
+}
+.turn-nav-pill {
+  flex: 0 0 auto;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple), color var(--dur-fast) var(--ease-apple);
+}
+.turn-nav-pill:hover {
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+.turn-nav-pill:active {
+  transform: scale(0.94);
+}
+.turn-nav-pill:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+/* 压缩置灰（打磨点 6）：划线 + 半透明，不可点；措辞由 title 给出。 */
+.turn-nav-pill.is-off {
+  color: var(--text-tertiary);
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.turn-nav-pill.is-off:hover {
+  background: transparent;
+  color: var(--text-tertiary);
+}
+/* 当前所在轮（#1429 尾项，V2 `.turn-nav button.is-on`）：soft 底 + ink 字 + 600。
+   ink 桥 = `color-mix(accent 45%, text-primary)`（FIDELITY §12 第 7 条既有口径），
+   soft 底复用产品 `--accent-soft`（= V2 `--primary-soft`），不新造 token。
+   声明在 `:hover` 之后 ⇒ 与 V2 一致：悬停当前轮不换底。与 `.is-off` 互斥
+   （不可达轮次永远不会是当前轮）。 */
+.turn-nav-pill.is-on {
+  background: var(--accent-soft);
+  color: color-mix(in srgb, var(--accent) 45%, var(--text-primary));
+  font-weight: 600;
 }
 .conversation-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-xl) var(--space-xl) var(--space-lg);
+  padding: var(--space-lg2) var(--space-xl) var(--space-xl);
   display: flex;
   flex-direction: column;
-  gap: var(--space-xl);
+  gap: var(--space-lg2);
   /* 关掉浏览器滚动锚定：容器内是虚拟化绝对定位行（动态测高，流式期间 spacer
      高度连续变化），锚定会在测高跳变时替用户重设 scrollTop —— 表现为「往上
      顶回去」。跟随逻辑由 lib/followLatest 显式掌管，不要浏览器再猜一次。 */
@@ -2513,6 +2592,31 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .conversation-scroll:hover,
 .conversation-scroll:focus-within {
   scrollbar-color: var(--color-border) transparent;
+}
+/* 内容列（V2 `.chat-in`）：800px 上限居中。虚拟化行与尾部卡片（错误条 / ask /
+   审批 / 记忆活动）共用这一列，正文行宽才与设计稿一致。 */
+.conversation-inner {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  /* 与虚拟化容器同理（#1414）：本列是 `.conversation-scroll` 的 flex item，
+     允许收缩会把绝对定位行压到尾部卡片下面。 */
+  flex-shrink: 0;
+}
+.conversation-tail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg2);
+  flex-shrink: 0;
+}
+/* 三栏挤到 1180px 以下时，中间栏让出边距换行宽（V2 窄档口径）。 */
+@media (max-width: 1180px) {
+  .conversation-scroll {
+    padding: var(--space-md) var(--space-md) var(--space-lg2);
+  }
+  .turn-nav {
+    padding: var(--space-xs) var(--space-md) 0;
+  }
 }
 .conversation-empty {
   flex: 1;
@@ -2598,14 +2702,90 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-md);
   animation: turn-in var(--dur-in) var(--ease-apple);
 }
-/* T9 #139 轮次标签：克制、低对比、inline——不抢用户消息与执行链的注意力。 */
-.turn-index-label {
-  align-self: flex-start;
+/* ── 轮次标记（#1429 打磨点 6）：一行小字 + 一条细线 ──
+ * T9 #139 的轮次标签并入这一行：`.turn-index-label` 保留为渲染契约 hook（测试与
+ * 定位依赖），视觉由 `.tm-n` 承接。V2 的 faint/mute/ghost 三档灰在本仓只有
+ * `--text-secondary` / `--text-tertiary` 两级，取「标签偏亮、数字与耗时偏暗」。 */
+.turn-mark {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  /* V2 的轮间节奏 = `.chat-in` gap 18 + `.turn-mark` margin-top 22 = 40px；
+   * 本仓 gap 是 `--space-lg2`(20)，故 margin-top 取同值补齐到 40。 */
+  margin: var(--space-lg2) 0 0;
+  scroll-margin-top: 14px;
+}
+.turn-mark:first-child {
+  margin-top: 0;
+}
+.turn-index-label,
+.tm-n {
+  align-self: baseline;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--color-muted-foreground);
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
   user-select: none;
+}
+.tm-l {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+}
+.tm-d {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+}
+.tm-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+  align-self: center;
+}
+.tm-anchor {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-apple), color var(--dur-fast) var(--ease-apple);
+}
+.turn-mark:hover .tm-anchor,
+.turn-mark:focus-within .tm-anchor {
+  opacity: 1;
+}
+.tm-anchor:hover {
+  color: var(--text-primary);
+}
+.tm-anchor.is-done {
+  opacity: 1;
+  color: var(--success);
+  width: auto;
+  padding: 0 4px;
+}
+/* 反向联动落点：目标轮次的细线亮起（V2 `.turn-mark.is-hit`）。 */
+.turn-mark.is-hit .tm-line {
+  background: var(--accent);
+}
+.turn-mark.is-hit .tm-n {
+  color: var(--accent-text);
 }
 @keyframes turn-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -2634,14 +2814,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .msg-user {
   justify-content: flex-end;
 }
+/* 用户气泡（V2 `.bub`）：中性底，无渐变无描边无阴影；右下角收口指向说话人。 */
 .msg-bubble-user {
-  background: var(--color-hover);
-  border: 1px solid var(--border-subtle);
-  color: var(--color-foreground);
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
-  max-width: 78%;
-  font-size: var(--text-base);
+  background: var(--surface-2);
+  border: 0;
+  color: var(--text-primary);
+  padding: 9px 13px;
+  /* V2 `.bub` 的 11/11/3/11 是不对称气泡形：吸附到 `--radius-lg` / `--radius-xs`
+   * （各差 1px，桥 2 已批准偏差），保住右上圆、右下收的形态。 */
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg);
+  max-width: 86%;
+  font-size: var(--text-sm);
+  line-height: 1.68;
+  text-wrap: pretty;
 }
 .fork-btn {
   margin-top: var(--space-xs);
@@ -2836,7 +3021,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .msg-body {
   flex: 1;
   min-width: 0;
-  max-width: 78ch; /* 宽屏行宽控制：一行超过 ~78 字符可读性显著下降 */
+  max-width: 66ch; /* 宽屏行宽控制（V2 `.prose` max-width:66ch） */
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -2866,11 +3051,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* Assistant 输出：干净 typography，不套 Card（MASTER.md：玻璃不用于正文文本块） */
 .model-output {
   padding: 2px 0;
-  font-size: var(--text-base);
-  line-height: 1.7;
-  color: var(--color-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.74;
+  /* 桥 1：V2 `.prose` 的 `--ink-2` → `--text-secondary`（正文比标题弱一档）。 */
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+  /* #1429 F9：与 V2 `.prose` 对齐——末行不留孤字（`text-wrap` 可继承，段落/列表
+     一并生效；不支持该属性的浏览器按 `wrap` 处理，无回退风险）。 */
+  text-wrap: pretty;
 }
 /* markdown 渲染后按 block 排版；pre-wrap 只留给流式纯文本场景 */
 .model-output .md-paragraph,
@@ -2906,13 +3095,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .model-output .md-link:hover {
   color: var(--accent-text-strong);
 }
+/* 行内 code（V2 `.prose code`）：去边框，只留底色；字号吸附 12px 地板。 */
 .model-output code {
   font-family: var(--font-mono);
-  font-size: 0.92em;
-  background: var(--color-hover);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 1px 5px;
+  font-size: var(--text-xs);
+  background: var(--surface-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 1px 4px;
 }
 .model-output .md-code-block {
   background: var(--terminal-bg);
@@ -2948,23 +3138,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   50% { opacity: 0; }
 }
 
-/* ── Execution Chain（Trace Ladder，签名 #2）：model 段 ↔ 工具节点按事件真序交错 ── */
+/* ── Execution Chain（Trace Ladder，签名 #2）：model 段 ↔ 工具节点按事件真序交错 ──
+ * V2 的核心减法：去掉左侧竖线与缩进轨——工具卡自己用浅底 + 细分隔线表达"一组连续
+ * 动作"，链不再画第二套结构。 */
 .act-chain {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
-  padding-left: var(--space-md);
-}
-/* 执行链竖线：两端渐隐的 1px 线（有头有尾的"轨道"感，而非生硬灰条） */
-.act-chain::before {
-  content: '';
-  position: absolute;
-  left: 3.75px;
-  top: 14px;
-  bottom: 14px;
-  width: 1px;
-  background: linear-gradient(to bottom, transparent, var(--border-subtle) 12%, var(--border-subtle) 88%, transparent);
+  gap: var(--space-sm);
 }
 .act-chain .model-output {
   position: relative;
@@ -2990,48 +3171,178 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   width: 1px;
   background: linear-gradient(to bottom, transparent, var(--border-subtle) 12%, var(--border-subtle) 88%, transparent);
 }
+/* ── 工具卡（#1429 打磨点 3/8）：无边框浅底 + 细分隔线 ──
+ * V2 `.tc`：卡片自己承载底色与行分隔，链不再画轨道；失败淡红底、运行中左侧
+ * 2px 主色条呼吸（`::before` 只画状态条，`::after` 只画分隔线，互不抢占）。 */
+.act-card {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  transition: background var(--dur-fast) var(--ease-apple);
+}
+.act-card::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--border-subtle) 60%, transparent);
+  pointer-events: none;
+}
+.act-card:last-child::after {
+  display: none;
+}
+.act-card.is-fail {
+  background: color-mix(in srgb, color-mix(in srgb, var(--danger) 10%, transparent) 62%, var(--surface-elevated));
+}
+.act-card.is-run {
+  background: color-mix(in srgb, color-mix(in srgb, var(--accent) 8%, transparent) 72%, var(--surface-elevated));
+}
+.act-card.is-run::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 2px 0 0 var(--accent);
+  animation: act-card-breathe 2.4s var(--ease-apple) infinite;
+}
+@keyframes act-card-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+/* #1429 P3：`.act-card.is-run` 的行底色已经承担"运行中"（左侧呼吸条 + 淡主色底），
+ * 状态点的 2px 灰环在这一行里是多画的第三层——去掉环只留顶弧。全局 spinner 几何
+ * 不动（`.status-spinner` 仍是 12px/2px，组头与其它位置照旧）。 */
+.act-card.is-run .status-spinner {
+  border-width: 0;
+  border-top-width: 2px;
+}
+/* ── 展开/收起动画（#1429 打磨点 2）：grid-template-rows 0fr → 1fr ──
+ * 由浏览器插值行高，内容高度未知也能动；不引第三方动画依赖。时长用 `--dur-in`
+ * （本仓没有 V2 的 `--dur-med` 档），缓动是新 token `--ease-spring`。 */
+.disc-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-in) var(--ease-spring);
+}
+.disc-body.is-open {
+  grid-template-rows: 1fr;
+}
+.disc-in {
+  overflow: hidden;
+  min-height: 0;
+}
+/* 收起态零残留（#1429 复审 P3）：`0fr` 只压**内容**高度，内层的 padding / border
+ * 是盒模型的一部分，压不掉——`.act-detail-inline` 会留 8px、`.tool-card-body` 会留
+ * 18px（padding-block + border-block）的空盒子。收起期间显式清零，过渡结束整棵子树
+ * 由 `Collapse` 卸载。展开态不受影响（`:not(.is-open)` 只在收起态命中）。 */
+.disc-body:not(.is-open) > .disc-in {
+  padding-block: 0;
+  border-block-width: 0;
+}
+/* ── 工具分组（#1429 打磨点 1）：组头是一行字，子行只做缩进 ── */
+.act-group {
+  min-width: 0;
+}
+.act-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  transition: color var(--dur-fast) var(--ease-apple);
+}
+.act-group-head:hover {
+  color: var(--text-secondary);
+}
+.act-group-head:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.act-group-ico {
+  width: 13px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+.act-group-head b {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.act-group-kinds {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.act-group-total {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.act-group-chev {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-fast) var(--ease-apple);
+}
+.act-group-head[aria-expanded='true'] .act-group-chev {
+  transform: rotate(180deg);
+}
+.act-group-body {
+  padding-left: 15px;
+}
+/* 组内排布直接画在 `Collapse` 的内层（`#1429 F2`）：少一层 div，展开态的计算样式
+ * 与原来 `.act-group-in` 完全一致（flex 列 + 2px 间距 + 3px/2px 内距）。 */
+.act-group-body > .disc-in {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 0 2px;
+}
 .act-node {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
   width: 100%;
-  padding: var(--space-xs) var(--space-sm);
+  padding: 7px 10px;
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  color: var(--color-foreground);
+  color: var(--text-secondary);
   text-align: left;
   font: inherit;
+  min-width: 0;
   transition: background var(--dur-fast) var(--ease-apple);
-}
-/* 状态左条（oh-my-pi 卡片语言）：inset shadow 画 2px 色条，零布局位移。
- * :has() 由状态徽章反推节点状态——成功/失败弱化一档，运行中全强度 + shimmer。 */
-.act-node:has(.act-status-running) {
-  box-shadow: inset 2px 0 0 0 var(--warning);
-  /* running shimmer：warning 7% 柔光从左向右扫——"正在发生"信号；
-   * reduced-motion 由全局块关闭。 */
-  background-image: linear-gradient(
-    90deg,
-    transparent 25%,
-    color-mix(in srgb, var(--warning) 7%, transparent) 50%,
-    transparent 75%
-  );
-  background-size: 200% 100%;
-  animation: act-running-shimmer 2.2s linear infinite;
-}
-.act-node:has(.act-status-success) {
-  box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--success) 45%, transparent);
-}
-.act-node:has(.act-status-failed) {
-  box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent);
-}
-.act-node:has(.act-status-stopped) {
-  box-shadow: inset 2px 0 0 0 var(--text-tertiary);
-}
-@keyframes act-running-shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
 }
 .act-node:hover {
   background: var(--color-hover);
@@ -3043,41 +3354,69 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
-/* act-node 内容列缩进基线（Standards 轴 Duplicated Code 收敛）：状态列 16px
- * + 余量，行下附属块（错误摘要/委派子会话行/摘要区）统一对齐 act-name。 */
+.act-chev {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-fast) var(--ease-apple);
+}
+.act-node[aria-expanded='true'] .act-chev {
+  transform: rotate(180deg);
+}
+/* act-node 内容列缩进基线（Standards 轴 Duplicated Code 收敛）：状态列 + 余量，
+ * 行下附属块（错误行/委派子会话行/摘要区）统一对齐 act-name。 */
 :root {
   --act-content-indent: calc(var(--space-sm) + 18px + var(--space-sm));
 }
-/* 失败摘要行（PRD §5.2 Error）：L0 下方的轻量错误信号——低饱和红 code + 弱化
- * message，不满屏红、不强制展开；完整 Raw 留给 Inspector。缩进对齐 act-name。 */
-.act-error-summary {
+/* 失败卡关键错误行（打磨点 8）：默认露出，红字 + 淡红底，不画框。
+ * 只呈现错误——P0-1 裁决不做工具级重试按钮。 */
+.act-error-line {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-sm);
-  padding: 0 var(--space-sm) var(--space-xs) var(--act-content-indent);
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--danger) 11%, transparent);
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
-  line-height: 1.4;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.act-error-line svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--danger);
 }
 .act-error-code {
   font-family: var(--font-mono);
-  font-weight: 550;
+  font-weight: 650;
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   letter-spacing: 0.02em;
-}
-.act-error-msg {
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* ── Phase 13 委派编排节点（DelegationNode，ADR-0015）──
  * 与工具卡同一 act-node 骨架 + DSH 四态状态列；行下常驻子会话身份行
  * （可见可复制可跳转）。摘要默认折叠——child 内幕留在子会话视图，
  * 父流只外显编排事实。 */
+/* 委派卡（V2 `.del`）：浅底 + 左侧 2px 主色条，与工具卡同一卡片语言。
+ * 短类名 `.del` 不搬（BUILD-REPORT §4.3 命名碰撞），视觉由 `.deleg-node` 承接。 */
 .deleg-node {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
+  background: var(--surface-elevated);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  overflow: hidden;
   animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 .deleg-row-expandable {
@@ -3174,44 +3513,111 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-tertiary);
 }
 
-/* hover Inspect chip（PRD §9.1）：行尾浮现的小动作入口，克制不抢焦点 */
+/* 定位锚：`data-stream-key` 挂在卡片根上（Inspector 反向联动落点）。 */
 .act-node-wrap {
   position: relative;
 }
-.act-node-wrap-error .act-node {
-  background: color-mix(in srgb, var(--danger) 5%, transparent);
-}
-.act-inspect-chip {
+/* ── 悬停快捷动作（#1429 打磨点 3）：复制 / 定位 ──
+ * 浮现逻辑沿用旧 Inspect chip 的克制口径：默认不可见、hover 或键盘聚焦才出现；
+ * 出现时行尾的耗时让位（同一位置，不叠字）。 */
+.act-quick-acts {
   position: absolute;
-  right: var(--space-sm);
-  top: 50%;
-  transform: translateY(-50%);
-  font-family: inherit; /* button 元素不继承字体栈——chip 与行内文字同源 */
-  font-size: var(--text-xs);
-  line-height: 1;
-  padding: 3px 7px;
+  right: 6px;
+  top: 3px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 2px;
+  /* V2 `.tc-acts` 用 `--v2-r-sm`（4px）——桥 2 的 4px 档 = `--radius-xs`。 */
   border-radius: var(--radius-xs);
   border: 1px solid var(--border-subtle);
   background: var(--surface-2);
-  color: var(--text-secondary);
-  cursor: pointer;
+  visibility: hidden;
   opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-apple);
+  transform: translateY(-1px);
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-apple), transform var(--dur-fast) var(--ease-apple),
+    visibility var(--dur-fast);
   z-index: 1;
 }
-.act-node-wrap:hover .act-inspect-chip,
-.act-inspect-chip:focus-visible {
+.act-card:hover .act-quick-acts,
+.act-card:focus-within .act-quick-acts {
   opacity: 1;
+  transform: none;
+  pointer-events: auto;
+  visibility: visible;
 }
-.act-inspect-chip:hover {
+/* 只在**确实有快捷动作**时让耗时让位：没有复制文本、也没接 Inspector 联动的行
+ * （`copyText === '' && !onFocus`）不渲染 `.act-quick-acts`，此时耗时必须留着。 */
+.act-card:has(.act-quick-acts):hover .act-duration,
+.act-card:has(.act-quick-acts):focus-within .act-duration {
+  opacity: 0;
+}
+.act-quick-act {
+  width: 20px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple), color var(--dur-fast) var(--ease-apple);
+}
+.act-quick-act:hover {
+  background: var(--surface-elevated);
   color: var(--text-primary);
-  border-color: var(--border-strong);
+}
+.act-quick-act:active {
+  transform: scale(0.94);
+}
+/* 复用 CopyButton 的剪贴板语义（含非安全上下文回退），只收窄成行内小图标。 */
+.act-quick-acts .copy-btn {
+  width: 20px;
+  height: 18px;
+  border-radius: var(--radius-xs);
+}
+/* 成功态在 20px 图标位里只换图标（Check），不撑宽——否则整排动作会跳动。 */
+.act-quick-acts .copy-btn.copied {
+  width: 20px;
+}
+.act-quick-acts .copy-btn-label {
+  display: none;
+}
+/* ── 参数完整值提示（#1429 打磨点 5）：fixed 单例，挂 body ── */
+.arg-tip {
+  position: fixed;
+  z-index: 260;
+  pointer-events: none;
+  max-width: 520px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-popover);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity var(--dur-fast) var(--ease-apple), transform var(--dur-fast) var(--ease-apple);
+}
+.arg-tip.is-on {
+  opacity: 1;
+  transform: none;
 }
 
 /* ── Model 段语义行（PRD §5.2/§10）：思考中 / 中间输出，ZCode 式动作语言 ── */
 .stream-jump-pulse {
+  /* 描边环画在盒内（负 offset），不占布局、不覆盖底色与既有 inset 色条。 */
+  outline: 2px solid transparent;
+  outline-offset: -2px;
   animation: event-pulse var(--dur-pulse) var(--ease-apple);
-  border-radius: var(--radius-sm);
 }
 .model-kind-row {
   display: flex;
@@ -3249,10 +3655,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  color: var(--color-muted-foreground);
+  width: 13px;
+  height: 13px;
+  color: var(--text-tertiary);
   flex-shrink: 0;
+}
+/* 失败 / 运行中的工具行用状态色点亮类型图标（V2 `.tc.is-fail .tc-ico`）。 */
+.act-card.is-fail .act-icon {
+  color: var(--danger);
+}
+.act-card.is-run .act-icon {
+  color: var(--accent-text);
 }
 /* F-10：工具类型只用图标色区分，不占用 accent（CTA/链接专用）。 */
 .act-icon[data-kind='terminal'] { color: var(--info); }
@@ -3264,22 +3677,52 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-name {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  font-weight: 550;
+  font-weight: 600;
   color: var(--text-secondary);
   flex-shrink: 0;
+  white-space: nowrap;
+}
+.act-card.is-fail .act-name {
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
 }
 .act-node[aria-expanded='true'] .act-name {
   color: var(--accent-text);
 }
+/* 参数：一行元信息，紧接工具名，同色同字号；头段可收缩带省略号，尾段固定
+ * （#1429 打磨点 5 的中间省略）。 */
 .act-args {
+  /* 不拆分时（短参数）本元素自己就是省略容器：块级 + 溢出隐藏 + 尾省略，
+     比常驻一个 `.act-args-head` 子盒少一个节点。 */
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--color-muted-foreground);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+/* 长参数拆分后（`splitArgsForDisplay`）才走 flex，省略号落中段、尾部路径可辨。 */
+.act-args:has(.act-args-head) {
+  display: flex;
+}
+.act-args-head {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
-  min-width: 0;
+}
+.act-args-tail {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.act-args[data-full] {
+  cursor: help;
+}
+.act-card.is-fail .act-args {
+  color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
+  opacity: 0.82;
 }
 .act-duration {
   font-family: var(--font-mono);
@@ -3287,6 +3730,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+  transition: opacity var(--dur-fast) var(--ease-apple);
 }
 /* Status icon：filled badge 风格——实心圆底 + 反白 icon。
  *  参考 GitHub commit status / Vercel deployment state。 */
@@ -3312,6 +3756,54 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-status-stopped {
   background: var(--text-tertiary);
 }
+/* ── 工具行 / 组头的状态列（#1429）：12px 图标 glyph，不画实心徽章 ──
+ * 只在本票的中间栏上下文内覆盖：`.act-status` 同时被 KanbanCard / SubagentRoster
+ * 复用（右栏与看板），那两处保持既有实心徽章，不随本票改皮。 */
+/* 手写 glyph（`Glyph.tsx`）的绘制契约：路径本身零内联属性，fill/stroke 全由这一条
+ * 规则给（与 `.act-chev` 同值）。缺了它浏览器落回 SVG 默认 `fill:black / stroke:none`
+ * ——零面积路径（X 的交叉线、terminal 的横线）直接不渲染，圆会被填成实心块，
+ * `currentColor` 也不再参与（`#1429` 复审 P1）。 */
+.glyph {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.act-node .act-status,
+.act-group-head .act-status {
+  width: 12px;
+  height: 12px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+.act-node .act-status svg,
+.act-group-head .act-status svg {
+  width: 10px;
+  height: 10px;
+}
+.act-node .act-status-failed,
+.act-group-head .act-status-failed {
+  color: var(--danger);
+}
+.act-node .act-status-running,
+.act-group-head .act-status-running {
+  color: var(--accent-text);
+}
+.act-node .act-status-running .status-spinner,
+.act-group-head .act-status-running .status-spinner {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-text);
+  animation: act-pulse-dot 1.6s var(--ease-apple) infinite;
+}
+@keyframes act-pulse-dot {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-text) 70%, transparent); }
+  70% { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
 
 /* ── Trace Density 档位差异（Phase 4） ── */
 /* Compact：状态行 only——图标与参数弱化为一行小字 */
@@ -3327,9 +3819,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* Detailed / Raw：节点下内联展开全字段 + 原始事件 JSON */
 .act-detail-inline {
   margin: 2px 0 var(--space-xs) 0;
-  padding-left: var(--space-lg);
-  display: flex;
-  flex-direction: column;
+}
+/* 收起残留（#1429 P3）：内距挪进 `.disc-in`，收起态由 `.disc-body:not(.is-open)
+ * > .disc-in` 把 padding-block 清零（0fr 只压内容，压不掉盒模型）。外层只剩 margin，
+ * 内层高度为 0，不再留 8px 空盒子。展开态内距数值不变（0 10px 8px）。 */
+.act-detail-inline > .disc-in {
+  padding: 0 10px 8px;
 }
 /* F-09：输入/输出不再各自成盒（消除 tool-card > field 双层边框/底色）。
  * label 作左列，字段之间只用一条 1px 分隔线；内容沿用单一 surface。 */
@@ -3364,7 +3859,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .act-detail-result {
   max-height: 280px;
-  color: var(--color-foreground);
+  /* 桥 1：V2 `.tc-pre` 的 `--ink-2`（输出正文比工具名弱一档）。 */
+  color: var(--text-secondary);
 }
 .act-raw {
   display: flex;
@@ -3487,6 +3983,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tool-card-body {
   margin-left: calc(var(--space-md) + var(--space-sm) + 18px);
   margin-top: var(--space-xs);
+  animation: reveal-in var(--dur-in) var(--ease-apple);
+}
+/* 收起残留（#1429 P3）：底色/边框/内距/圆角画在 `.disc-in` 上，收起态由
+ * `.disc-body:not(.is-open) > .disc-in` 把 padding-block 与 border-block 清零
+ * （0fr 压不掉盒模型，实测曾留 18px 空盒子）。展开态盒子的数值全部照旧。 */
+.tool-card-body > .disc-in {
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
   background: var(--terminal-bg);
@@ -3494,7 +3996,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--terminal-fg);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 @keyframes reveal-in {
   from { opacity: 0; transform: translateY(-2px); }
@@ -3662,12 +4163,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 原 `glass` 类与 `0 0 20px` 辉光已撤；改用加大内边距（16/20）承担
  * "安全决策面比普通卡片呼吸更多"。终态收敛到对应语义色（决定已做出，
  * 不再索取注意力）。 */
+/* 审批卡（V2 `.appr`）：中性浅底 + 左侧 2px warning 条，不铺满 warning 底。 */
 .approval-card {
-  border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
-  border-left: 3px solid var(--color-warning);
-  background: color-mix(in srgb, var(--color-warning) 7%, transparent);
-  padding: var(--space-lg) var(--space-lg2);
-  border-radius: var(--radius-lg);
+  border: 0;
+  background: var(--surface-elevated);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--warning) 55%, transparent);
+  padding: var(--space-md) var(--space-lg);
+  /* #1429 桥 2：V2 语义卡统一 6px 圆角（`.appr` / `.ask` / `.plan` 都是 --v2-r）。 */
+  border-radius: var(--radius-sm);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -3867,6 +4370,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    给同一份间距——两条分支的左对齐与上间距据此一致（审查 P3）。 */
 .conversation > .conversation-error {
   margin: var(--space-xl) var(--space-xl) 0;
+  max-width: 800px;
+  align-self: center;
+  width: 100%;
 }
 .conversation-error-icon {
   flex: none;
@@ -4104,10 +4610,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-style: normal;
   flex: none;
 }
+/* 提问卡（V2 `.ask`）：中性浅底 + 左侧 2px 主色条。 */
 .ask-user-card {
   background: var(--surface-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
   overflow: hidden;
 }
 .ask-user-top {
@@ -4400,10 +4908,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--accent);
   animation: ask-user-pulse 1.6s var(--ease-apple) infinite;
 }
+/* 计划审批卡（V2 `.plan`）：中性浅底 + 左侧 2px 主色条。 */
 .plan-approval-card {
   background: var(--surface-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
   overflow: hidden;
 }
 .plan-approval-plan {
@@ -9727,7 +10237,7 @@ button.json-row {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 3px 6px;
+  padding: 2px 0;
   margin: 0;
   background: none;
   border: none;
@@ -9735,6 +10245,7 @@ button.json-row {
   cursor: pointer;
   color: var(--text-tertiary);
   font: inherit;
+  font-size: var(--text-xs);
   font-size: var(--text-xs);
   line-height: 1.5;
   text-align: left;
@@ -9820,22 +10331,23 @@ button.json-row {
 }
 
 /* 展开面（S8）：有界滚动 + 贴底跟随 + 上滚浮现跳到最新 */
+/* 展开面（V2 `.rc-body`）：思考块退成一段可折叠文字——无卡面、无左侧色条，
+ * 只留缩进与低对比正文（"无卡排版"是本设计稿的签名）。 */
 .reasoning-expanded {
   position: relative;
-  margin: 2px 0 4px 24px;
+  margin: 2px 0 4px 0;
 }
 .reasoning-text {
   max-height: 260px;
   overflow-y: auto;
   white-space: pre-wrap;
   overflow-wrap: break-word;
-  font-size: var(--text-sm);
-  line-height: 1.65;
+  font-size: var(--text-xs);
+  line-height: 1.7;
   color: var(--text-secondary);
-  padding: var(--space-sm) var(--space-md);
-  border-left: 2px solid color-mix(in srgb, var(--accent) 32%, transparent);
-  background: color-mix(in srgb, var(--surface-1) 60%, transparent);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: var(--space-sm) 0 var(--space-xs) 19px;
+  border: 0;
+  background: transparent;
 }
 .reasoning-jump {
   position: absolute;

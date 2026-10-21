@@ -29,6 +29,8 @@ describe('initConversation', () => {
       run_usage_live: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
+      // #1429 F6：恢复续轮的轮次号继承槽（初值 = 无继承）。
+      resumed_turn_index: null,
       // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
       run_paused: null,
       pending_constraint_input: null,

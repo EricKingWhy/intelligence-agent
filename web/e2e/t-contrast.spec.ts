@@ -1373,10 +1373,10 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'user/message', data: { content: '跑失败的工具' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'tool/call', data: { tool_call_id: 'tc-e', tool_name: 'bash', args: { command: 'false' } }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
-      /* 错误信封要嵌在 data 里：投影把 tool.result 落成 parsed.data（projection.ts
-         `tool.result = parsedData ?? message`），而 ToolCard 的 parseErrorShape 只认
-         {ok:false,error_code} 对象——扁平放顶层会被落成 message 字符串、摘要行不渲染。 */
-      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', data: { ok: false, error_code: 'TIMEOUT', message: '命令超时' } }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
+      /* 生产序列化形状：`ToolResult.failure()` 只写 ok/message/error_code（无 data），
+         `model_dump_json()` 因此输出顶层 `error_code` + `"data": null`；投影只解析顶层
+         信封（`projection.ts` `parseErrorShape(parsed)`）。 */
+      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', error_code: 'TIMEOUT', data: null }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'run/completed', data: {}, seq: 6, session_id: sid, run_id: 're', time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '跑失败的工具');
