@@ -653,7 +653,8 @@ def test_remember_args_accept_payload_text_outside_consented_content():
     原用例（`test_remember_args_reject_payload_text_outside_consented_content`）钉住
     `_payload_text_is_covered_by_content` 的硬闸；裁决 3 明定垫片「放弃 verbatim 校验，
     折中为 add 的软校验」。软校验在执行期比对**本轮 user message**（见
-    `test_remember_tool_uses_soft_check_*`），参数面不再对 payload 做逐字包含检查。
+    `test_1440_shim_drift.py::test_remember_tool_uses_soft_check_*`），参数面不再
+    对 payload 做逐字包含检查。
     """
     for subject, fact in (("I", "I have lupus"), ("I have lupus", "I prefer tea")):
         args = _RememberV2Args(
