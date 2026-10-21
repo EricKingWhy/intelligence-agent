@@ -10,7 +10,8 @@
    （`RememberMemoryV2Tool` / `ForgetMemoryV2Tool`）；
 3. `_add_soft_check` 的来源守卫不再恒真：后台 origin 下守卫分支被走到。
 
-`APPROVAL_REPLAY` 已按票面 §4.1 的兜底删除（无落点、无消费方），判据见文末。
+`APPROVAL_REPLAY` 已按票面 §4.1 的兜底删除（无落点、无消费方），判据见
+`test_approval_replay_marker_is_gone_with_rationale` 与 `origin.py` 模块 docstring。
 """
 
 from __future__ import annotations
