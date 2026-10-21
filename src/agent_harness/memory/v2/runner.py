@@ -336,17 +336,25 @@ def run_slice_bounds(
 
 @runtime_checkable
 class MemoryFormationNotifier(Protocol):
-    """运行时把一轮终结交给记忆形成的唯一入口（#298 T7b）。
+    """运行时把一轮的**开始与终结**交给记忆形成的唯一入口（#298 T7b / #1439 F-03）。
 
     为什么是 Protocol，而不是让 `agent/runtime.py` 直接收 `MemoryJobRunner`：Runtime
     需要的只是"把这一轮告诉宿主"这一件事，而 `MemoryJobRunner` 是**作业宿主子系统**
     ——它自己拥有服务循环、认领、恢复、模型调用器与事件出口。让 agent 核心依赖那一整套
     （连同它背后的 jobs / executor / policy / formation 全链）等于把"运行时收尾"与
-    "记忆作业怎么跑"焊在一起；而这个端口只有一行签名。
+    "记忆作业怎么跑"焊在一起；而这个端口只有两行签名。
+
+    两半的分工：`notify_run_started` 是轮次边界的**重置**（Hermes
+    `turn_context._reset_per_turn_agent_state` 的 turn-start 同位），
+    `notify_run_finished` 是终结入队。两者都必须幂等、且都不许把故障抛回 Runtime。
+    Runtime 用 `getattr` 探测前者——只关心终结接缝的替身（集成测试的合成宿主）不必
+    为一个空操作补齐方法；生产宿主 `MemoryJobRunner` 两个都实现。
 
     `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
     能对"给进来的东西真的满足契约"下断言，而不是只靠注解。
     """
+
+    def notify_run_started(self) -> None: ...
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
@@ -423,8 +431,23 @@ class MemoryJobRunner:
         return self._max_concurrency
 
     # ----------------------------------------------------------------------------------
-    # 入队（Runtime 的终结臂调用）
+    # 轮次边界（Runtime 的 run-start / 终结臂调用）
     # ----------------------------------------------------------------------------------
+
+    def notify_run_started(self) -> None:
+        """一次 run 开始：把「本轮 consolidation 失败预算」归零（#1439 F-03）。
+
+        与 Hermes `turn_context._reset_per_turn_agent_state`（turn start 统一重置）同位：
+        markdown store 是**进程级单例**（`build_memory_v2_service` 建一次，跨 run 复用），
+        不在这里归零，计数就会跨 run 累积、长进程里后续 run 第 1 次失败就被判 TERMINAL。
+
+        同步、不抛：Runtime 在 run 的最前面调它，那时还没有可终结的 run，抛异常会变成
+        "run 没开始就失败"。store 缺席（纯 SQLite 部署 / 未接 markdown）时是 no-op。
+        """
+        markdown = getattr(self.memory_v2, "markdown", None)
+        reset = getattr(markdown, "reset_consolidation_failures", None)
+        if callable(reset):
+            reset()
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,

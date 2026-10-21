@@ -1704,6 +1704,11 @@ class AgentRuntime:
             telemetry=telemetry,
         )
         mirrored_request_event_seqs: set[int] = set()
+        # 轮次边界（#1439 F-03）：记忆侧的 per-turn 状态（consolidation 失败预算）
+        # 在此归零——与 Hermes `turn_context._reset_per_turn_agent_state` 的 turn-start
+        # 同位。放在 try 之前、任何持久化之前：那时还没有可终结的 run，所以这里
+        # 必须自己吞掉故障（与 `_notify_memory_formation` 同一条旁路纪律）。
+        self._notify_memory_run_started()
         try:
             constraint_context_token = current_constraint_tool_context_var.set(None)
             # 写入 user 消息事件
@@ -4234,6 +4239,26 @@ class AgentRuntime:
                 [e for e in session.since(start)
                  if e.type not in _MEMORY_EXCLUDED_EVENT_TYPES],
             )
+
+    def _notify_memory_run_started(self) -> None:
+        """run 开始边界把记忆侧的 per-turn 状态归零（#1439 F-03）。
+
+        端口用 `getattr` 而不是硬调用：`MemoryFormationNotifier` 是**结构**端口，
+        测试与集成替身只实现 `notify_run_finished`（它们不关心轮次预算）；缺席即
+        没有可重置的东西——与 `_notify_memory_formation` 的 `notifier is None`
+        同一判据，而不是给每个替身补一个空方法。
+
+        **失败隔离**：本调用在 `begin_run` 之前，此刻抛异常等于"run 还没开始就失败"，
+        而记忆是旁路——坏了只落日志。
+        """
+        notifier = self._memory_formation
+        reset = getattr(notifier, "notify_run_started", None)
+        if not callable(reset):
+            return
+        try:
+            reset()
+        except Exception:
+            logger.exception("run 开始时的记忆侧重置失败（旁路，不影响本轮）")
 
     async def _notify_memory_formation(
         self, arms: _TerminalArms, *, terminal_status: str,
