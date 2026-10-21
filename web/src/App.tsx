@@ -89,14 +89,15 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type {
-  AskUserAnswer,
-  ConstraintInputAnswer,
-  PlanApprovalAnswer,
-  ToolCall,
-  PresetTask,
-  AgentEvent,
-  UndeliveredInput,
+import {
+  EventType,
+  type AskUserAnswer,
+  type ConstraintInputAnswer,
+  type PlanApprovalAnswer,
+  type ToolCall,
+  type PresetTask,
+  type AgentEvent,
+  type UndeliveredInput,
 } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
@@ -576,6 +577,40 @@ export default function App() {
     userToggledRef.current = true;
     setInspectorOpen((v) => !v);
   };
+
+  /* F-06（#1449）：中断横幅的两个纯前端动作（看缺口 / 忽略）。
+   *
+   * 落点 = **最后一个** `run/interrupted` 事件本体：投影 `run_interrupted` 只留
+   * step/seq/reason，不含 run_id，也不含 `focusEvent` 需要的完整事件。`run/started`
+   * 会清空投影，所以投影非 null 时事件必然在 `conversation.events` 里（投影由它派生）；
+   * 找不到时按钮仍渲染，只打开右栏、不抛错。
+   *
+   * 「忽略」照抄既有 dismiss 模式（`contextFullDismissedRunId`）：App 级
+   * `useState<string|null>` 存被忽略对象的标识，渲染时比对；视图状态不持久化。
+   * 标识首选事件 `run_id`（同一次中断唯一）；匿名 run（后端 `detect_unterminated_runs`
+   * 允许 run_id 为 None）退到该事件的 seq / 该次中断的 `interrupted_seq`。 */
+  const interruptedEvent = useMemo(() => {
+    const events = conversation?.events;
+    if (!events) return null;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      if (events[i].type === EventType.RUN_INTERRUPTED) return events[i];
+    }
+    return null;
+  }, [conversation]);
+  const interruptedIdentity =
+    interruptedEvent?.run_id ??
+    (interruptedEvent?.seq != null ? `seq:${interruptedEvent.seq}` : null) ??
+    (conversation?.run_interrupted?.interrupted_seq != null
+      ? `interrupted:${conversation.run_interrupted.interrupted_seq}`
+      : 'unknown');
+  const [dismissedInterruptedIdentity, setDismissedInterruptedIdentity] = useState<string | null>(null);
+  const handleInspectInterruption = useCallback(() => {
+    if (interruptedEvent) focusEvent(interruptedEvent);
+    setInspectorOpen(true);
+  }, [interruptedEvent, focusEvent, setInspectorOpen]);
+  const handleDismissInterruption = useCallback(() => {
+    setDismissedInterruptedIdentity(interruptedIdentity);
+  }, [interruptedIdentity]);
 
   /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
    *
@@ -1993,7 +2028,9 @@ export default function App() {
               <AdjudicationTechDetail message={recoverState.message} />
             </div>
           )}
-          {conversation?.run_interrupted && !streaming && (
+          {conversation?.run_interrupted &&
+            !streaming &&
+            interruptedIdentity !== dismissedInterruptedIdentity && (
             <div className="interrupt-banner" role="status" aria-live="polite">
               {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
                   带步号事件之前就死了（run/started 本身不带 step，检测器只能
@@ -2001,15 +2038,37 @@ export default function App() {
                   run/interrupted 里有 2 条信封整个不带 step_id（run/started 后
                   紧接 interrupted，如 c63ce4d3-3b26-40bb-8e8c-e3af8dd33035）——
                   渲染成「第 ? 步」等于把「还没开始就断了」说成一个未知数字。*/}
-              {conversation.run_interrupted.step_id !== null
-                ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
-                : '上次任务在首个步骤开始前中断'}
-              （原因：{conversation.run_interrupted.reason}）
+              <span className="interrupt-banner-text">
+                {conversation.run_interrupted.step_id !== null
+                  ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
+                  : '上次任务在首个步骤开始前中断'}
+                （原因：{conversation.run_interrupted.reason}）
+              </span>
+              {/* F-06（#1449）：两个动作都是纯前端视图操作——「看缺口」把中断事件
+                  本身定位到右栏（复用 focusEvent 的 peek 语义），「忽略」按中断
+                  标识收起这一屏。后端没有部分重跑能力，这里**不**造重跑入口。 */}
+              <button
+                type="button"
+                className="recover-btn"
+                onClick={handleInspectInterruption}
+                title="在右栏 Inspector 定位到这次中断的事件"
+              >
+                在右栏看缺口
+              </button>
+              <button
+                type="button"
+                className="interrupt-dismiss"
+                onClick={handleDismissInterruption}
+                title="收起这条中断提示（不改变会话事实）"
+              >
+                忽略
+              </button>
             </div>
           )}
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
-              出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
-              预算暂停有（抬高绝对 ceiling → 同 run 恢复）。
+              出现 run/interrupted），但两者刻意不是同一个组件——中断只有两个纯前端
+              视图动作（F-06：右栏定位 / 忽略），预算暂停有恢复动作（抬高绝对 ceiling
+              → 同 run 恢复）。
               #968：stuck 暂停没有这个动作——后端对 stuck 的 budget_increase 一律 409
               （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer

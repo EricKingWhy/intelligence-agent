@@ -10535,6 +10535,32 @@ button.json-row {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* F-06（#1449）：中断横幅现在带两个纯前端动作。文案占满剩余宽度（按钮不缩），
+   动作按钮沿用 .recover-btn 的 --warning 族（#1136 已量对比度）；「忽略」是次级
+   动作，用同色系透明底，不抢主按钮的视觉重量。两者都只引用既有 token。 */
+.interrupt-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.interrupt-dismiss {
+  flex-shrink: 0;
+  padding: 3px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.interrupt-dismiss:hover {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+.interrupt-dismiss:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 /* 待裁决横幅（#1030 缺陷②/③）：与 interrupt-banner 同族，但**带一个动作**。
    --warning 色域与「中断」同族是刻意的：两者都在说"这个会话没在正常推进"，
    而本条的区分点是**可行动**（有「去裁决」按钮）与文案层次，不是颜色。
