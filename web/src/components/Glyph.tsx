@@ -8,8 +8,11 @@
  *
  * 这里只收**每行都出现**的少数几个：状态三态（成功 / 失败 / 中断）与四类工具图标。
  * 路径数据原样取自仓库已安装的 lucide-react（`dist/esm/icons/*.mjs`），形状完全
- * 相同——尺寸、颜色、描边宽度全部由 CSS 给（`.act-status svg` / `.act-icon svg`），
- * 元素本身零内联样式。`Glyph.test.tsx` 逐图标比对 lucide 的渲染结果，防止抄错。
+ * 相同——元素本身零内联样式：**盒尺寸**由宿主给（`.act-status svg` 10px、
+ * `.act-icon` / `.act-group-ico` 13px），**绘制规则**（`fill:none; stroke:currentColor;
+ * stroke-width:2; round cap/join`）由 `app.css` 的 `.glyph` 规则给。`Glyph.test.tsx`
+ * 逐图标比对 lucide 的几何形状，并断言 `.glyph` 绘制规则在 `app.css` 里仍然存在
+ * （规则被删 ⇒ 图标落回 SVG 默认的黑色实心，测试必须转红）。
  */
 
 import { KIND_ICON, type RuntimeEventKind } from '../lib/eventKind';
