@@ -3226,6 +3226,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   min-height: 0;
 }
+/* 收起态零残留（#1429 复审 P3）：`0fr` 只压**内容**高度，内层的 padding / border
+ * 是盒模型的一部分，压不掉——`.act-detail-inline` 会留 8px、`.tool-card-body` 会留
+ * 18px（padding-block + border-block）的空盒子。收起期间显式清零，过渡结束整棵子树
+ * 由 `Collapse` 卸载。展开态不受影响（`:not(.is-open)` 只在收起态命中）。 */
+.disc-body:not(.is-open) > .disc-in {
+  padding-block: 0;
+  border-block-width: 0;
+}
 /* ── 工具分组（#1429 打磨点 1）：组头是一行字，子行只做缩进 ── */
 .act-group {
   min-width: 0;
@@ -3805,9 +3813,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-detail-inline {
   margin: 2px 0 var(--space-xs) 0;
 }
-/* 收起残留（#1429 P3）：内距挪进 `.disc-in`。收起态网格行 0fr，外层只剩 margin；
- * 内层被 `overflow:hidden` + `min-height:0` 压成 0 高度，不再留 8px 空盒子。
- * 展开态内距数值不变（0 10px 8px），只是换了一层绘制。 */
+/* 收起残留（#1429 P3）：内距挪进 `.disc-in`，收起态由 `.disc-body:not(.is-open)
+ * > .disc-in` 把 padding-block 清零（0fr 只压内容，压不掉盒模型）。外层只剩 margin，
+ * 内层高度为 0，不再留 8px 空盒子。展开态内距数值不变（0 10px 8px）。 */
 .act-detail-inline > .disc-in {
   padding: 0 10px 8px;
 }
@@ -3970,9 +3978,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   margin-top: var(--space-xs);
   animation: reveal-in var(--dur-in) var(--ease-apple);
 }
-/* 收起残留（#1429 P3）：底色/边框/内距/圆角画在 `.disc-in` 上。0fr 收起时容器只剩
- * margin，内层高度为 0（border-box 下边框随之收为零），不再留一条 2px 的空盒子。
- * 展开态盒子的数值全部照旧（padding / radius / background / border 逐项未改）。 */
+/* 收起残留（#1429 P3）：底色/边框/内距/圆角画在 `.disc-in` 上，收起态由
+ * `.disc-body:not(.is-open) > .disc-in` 把 padding-block 与 border-block 清零
+ * （0fr 压不掉盒模型，实测曾留 18px 空盒子）。展开态盒子的数值全部照旧。 */
 .tool-card-body > .disc-in {
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
