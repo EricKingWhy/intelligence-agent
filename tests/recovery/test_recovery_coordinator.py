@@ -18,8 +18,11 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.recovery import (
     PendingPolicy,
+    ReconcileCallback,
+    ReconcileVerdict,
     RecoveryCoordinator,
     RecoveryError,
     SkipPendingPolicy,
@@ -110,6 +113,7 @@ def _make_coordinator(
     database_path: Path | None,
     *,
     pending_policy: PendingPolicy | None = None,
+    reconcile_callback: ReconcileCallback | None = None,
     workspace_registry=None,
 ) -> RecoveryCoordinator:
     return RecoveryCoordinator(
@@ -117,6 +121,7 @@ def _make_coordinator(
         workspace_registry=workspace_registry,
         operation_ledger=ledger,
         pending_policy=pending_policy,
+        reconcile_callback=reconcile_callback,
         database_path=database_path,
         lock_timeout_seconds=1.0,
     )
@@ -212,7 +217,7 @@ async def test_failed_and_cancelled_operations_synthesize_accurate_results(
         OperationState.CANCELLED,
         session.session_id,
         result_json=ToolResult.failure(
-            "cancelled by cascade",
+            "工具 'bash' 未执行：串行批次中的前序工具已永久失败。",
             error_code=ErrorCode.CANCELLED,
             retryable=False,
         ).model_dump_json(),
@@ -225,7 +230,17 @@ async def test_failed_and_cancelled_operations_synthesize_accurate_results(
     failed = ToolResult.model_validate_json(results["call-f"])
     cancelled = ToolResult.model_validate_json(results["call-c"])
     assert failed.ok is False and failed.message == "boom"
-    assert cancelled.ok is False and cancelled.message == "cancelled by cascade"
+    assert cancelled.ok is False and "未执行" in cancelled.message
+    cancelled_event = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-c"
+    )
+    assert cancelled_event.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 0,
+        "tool_attempts": 0,
+    }
+    assert consumed_from_events(recovered.events).tool_calls_by_tool == {"bash": 1}
 
 
 @pytest.mark.asyncio
@@ -291,6 +306,16 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
 
     results = _result_events(recovered)
     assert "call-1" in results
+    result_event = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-1"
+    )
+    assert result_event.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 1,
+        "tool_attempts": 0,
+    }
+    assert consumed_from_events(recovered.events).tool_calls_by_tool == {"bash": 1}
     skipped = ToolResult.model_validate_json(results["call-1"])
     assert skipped.ok is False
     # 跳过文案必须真的在场（T8 迁移到 frame:recovery_skipped）——取错组装分区
@@ -405,6 +430,88 @@ async def test_unresolved_operation_refused_without_callback(tmp_path: Path) -> 
 
     # 拒绝即零写入：无 tool/result，也无 session/resumed。
     assert store.read_events(crashed.session_id) == events_before
+
+
+@pytest.mark.asyncio
+async def test_reconcile_preserves_durable_attempt_count_without_result_json(
+    tmp_path: Path,
+) -> None:
+    class _Abandon(ReconcileCallback):
+        async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
+            return ReconcileVerdict.ABANDON
+
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, "call-1", OperationState.RUNNING, crashed.session_id)
+    await ledger.record_attempt(crashed.session_id, "call-1")
+
+    coordinator = _make_coordinator(
+        store,
+        ledger,
+        tmp_path / "state.db",
+        reconcile_callback=_Abandon(),
+    )
+    recovered = await coordinator.recover(crashed.session_id)
+
+    result = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-1"
+    )
+    assert result.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 1,
+        "tool_attempts": 1,
+    }
+    assert consumed_from_events(recovered.events).tool_attempts_by_tool == {"bash": 1}
+
+
+@pytest.mark.asyncio
+async def test_legacy_running_operation_keeps_attempt_count_unknown_after_recovery(
+    tmp_path: Path,
+) -> None:
+    class _Abandon(ReconcileCallback):
+        async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
+            return ReconcileVerdict.ABANDON
+
+    database_path = tmp_path / "state.db"
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(database_path)
+    await ledger.initialize()
+    await _seed_operation(ledger, "call-1", OperationState.RUNNING, crashed.session_id)
+    await ledger.record_attempt(crashed.session_id, "call-1")
+    await ledger.record_attempt(crashed.session_id, "call-1")
+
+    # Simulate a database produced before the durable counter existed. The old
+    # executions are no longer inferable after this column is removed.
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute("ALTER TABLE operations DROP COLUMN attempt_count")
+        await connection.commit()
+    await ledger.initialize()
+    migrated = await ledger.get(crashed.session_id, "call-1")
+    assert migrated is not None and migrated.attempt_count is None
+    with pytest.raises(ValueError, match="attempts are unknown"):
+        await ledger.record_attempt(crashed.session_id, "call-1")
+
+    coordinator = _make_coordinator(
+        store, ledger, database_path, reconcile_callback=_Abandon(),
+    )
+    recovered = await coordinator.recover(crashed.session_id)
+
+    result = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-1"
+    )
+    assert result.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 1,
+        "tool_attempts": None,
+    }
+    consumed = consumed_from_events(recovered.events)
+    assert consumed.tool_calls_by_tool == {"bash": 1}
+    assert consumed.tool_attempts_by_tool is None
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,7 @@ per-tool 临界点与恢复判据、上界配置的形状校验与注册名校�
 - **`tool_attempts` 取自 `result.metadata["attempt"]`**（ToolExecutor 重试环写的尝试序号）：
   在结果被 overflow 截断（`model_copy`）后仍然存活，所以它是"这一次真实执行了几回"的权威读数。
   形状不是正整数时记 0（宁少不多）。
+- **中断恢复计数（#1360）**：每次进入 `Tool.execute` 前，ToolExecutor 原子递增 Operation Ledger 的 `attempt_count`。正常完成的预算增量仍取 `result.metadata["attempt"]`；恢复合成结果优先使用 Ledger 计数，旧记录回退到结果 metadata。Ledger 只补足结果未落盘时的尝试事实；`tool/result.data.budget_delta` 仍是 run 预算的唯一事实源。
 - **run 账本按 delta 求和**：`consumed_from_events` 的 TOOL_RESULT 分支把它们折进
   `tool_calls_by_tool` / `tool_attempts_by_tool`（`_add_tool_delta`，0 = no-op），
   **总数是两张表的和**（`BudgetConsumed.tool_calls` / `tool_attempts` 是派生属性）——

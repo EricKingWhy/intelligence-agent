@@ -493,9 +493,22 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
       'context_providers',
       'budget',
       'max_steps',
+      'criteria',
     ]) {
       expect(cap.calls[0].body).not.toHaveProperty(key);
     }
+  });
+
+  it('#1359 阶段 2：criteria 有值 → 带键；空数组 → 不发键（= 后端无验收项）', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '跑一遍回归测试', criteria: [{ text: 'pytest 全绿' }] });
+    expect(cap.calls[0].body).toEqual({
+      task: '跑一遍回归测试',
+      criteria: [{ text: 'pytest 全绿' }],
+    });
+
+    await startSession({ task: 't', criteria: [] });
+    expect(cap.calls[1].body).not.toHaveProperty('criteria');
   });
 
   it('显式规则信号为 true 时才带键', async () => {
@@ -1449,6 +1462,8 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
     expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
     expect(cap.calls[0].body).not.toHaveProperty('task');
+    // #1418：只有 TUI `/new` 才带 previous_session_id；Web 空会话入口不结束任何会话。
+    expect(cap.calls[0].body).not.toHaveProperty('previous_session_id');
     expect(created).toEqual({ sessionId: 'sid-1' });
   });
 

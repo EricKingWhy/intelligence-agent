@@ -233,7 +233,7 @@ async function installWsRoute(
 /** 后端 `web/plugins.py::BUILTIN_SLASH_COMMANDS` 的镜像（e2e 不启真后端）。
  *  只镜像"存在哪些命令 + 展示元数据"；执行回调仍在前端 `BUILTIN_RUNS`。 */
 const BUILTIN_SLASH_FIXTURE = [
-  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'goal', kind: 'builtin', description: '设置、查看或管理长期任务目标（暂停/恢复/编辑/清除）' },
   { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
   { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
   { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
@@ -1715,8 +1715,8 @@ export const PERMISSION_MODES = [
 /** `GET /api/agent-profiles` 的默认载荷（形状 = 后端 `AGENT_PROFILE_DESCRIPTIONS`
  *  + `agent/profiles.py::tool_scope_summary` 的 `tool_scope`）。
  *
- *  `tool_scope` 三个数**逐值镜像后端实测值**（main 18/18、coding 13/18、
- *  research_review 7/18）——后端那两个函数会随 scope 改动漂移，两侧各有一把锁
+ *  `tool_scope` 三个数**逐值镜像后端实测值**（main 19/19、coding 14/19、
+ *  research_review 7/19）——后端那两个函数会随 scope 改动漂移，两侧各有一把锁
  *  （后端 `test_web_phase5_staged_endpoints.py::test_tool_scope_counts_match_declared_scopes`，
  *  前端 `lib/agentProfileScope.test.ts`）；改 scope 请同时看这两处。
  *  只写要断言的事实：`display_name`/`description` 的文案不参与断言。 */
@@ -1726,7 +1726,7 @@ export const AGENT_PROFILES = [
     display_name: 'Main',
     description: '通用编排代理（默认）',
     icon: 'layers',
-    tool_scope: { open: 18, total: 18, excluded: [] },
+    tool_scope: { open: 19, total: 19, excluded: [] },
   },
   {
     id: 'coding',
@@ -1734,8 +1734,8 @@ export const AGENT_PROFILES = [
     description: '代码编辑、调试和构建任务专用',
     icon: 'code',
     tool_scope: {
-      open: 13,
-      total: 18,
+      open: 14,
+      total: 19,
       excluded: [
         'delegate', 'inspect_artifact', 'read_knowledge_source',
         'retrieve_knowledge', 'web_search',
@@ -1749,9 +1749,9 @@ export const AGENT_PROFILES = [
     icon: 'search',
     tool_scope: {
       open: 7,
-      total: 18,
+      total: 19,
       excluded: [
-        'apply_patch', 'bash', 'delegate', 'edit', 'forget_memory',
+        'apply_patch', 'bash', 'delegate', 'edit', 'exec', 'forget_memory',
         'git_diff', 'git_status', 'inspect_artifact', 'remember_this', 'update_plan', 'write',
       ],
     },

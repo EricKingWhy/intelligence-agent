@@ -39,6 +39,23 @@ async def test_create_pending_operation_can_be_loaded(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_rejects_unknown_attempt_count(tmp_path: Path) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    operation = Operation(
+        tool_call_id="call-unknown-attempts",
+        session_id="session-1",
+        tool_name="read",
+        args_identity="{}",
+        state=OperationState.PENDING,
+        attempt_count=None,
+    )
+
+    with pytest.raises(ValueError, match="known attempt count"):
+        await ledger.create(operation)
+
+
+@pytest.mark.asyncio
 async def test_operation_moves_to_terminal_state_with_recovery_data(
     tmp_path: Path,
 ) -> None:
@@ -70,6 +87,46 @@ async def test_operation_moves_to_terminal_state_with_recovery_data(
     assert succeeded.finished_at is not None
     with pytest.raises(ValueError, match="SUCCEEDED -> RUNNING"):
         await ledger.update_state("session-1", "call-2", OperationState.RUNNING)
+
+
+@pytest.mark.asyncio
+async def test_attempt_count_is_durable_for_running_operation(tmp_path: Path) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-attempts",
+            session_id="session-1",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+        )
+    )
+    await ledger.update_state("session-1", "call-attempts", OperationState.RUNNING)
+
+    await ledger.record_attempt("session-1", "call-attempts")
+    await ledger.record_attempt("session-1", "call-attempts")
+    persisted = await ledger.get("session-1", "call-attempts")
+
+    assert persisted is not None and persisted.attempt_count == 2
+
+
+@pytest.mark.asyncio
+async def test_record_attempt_requires_running_operation(tmp_path: Path) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-pending",
+            session_id="session-1",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+        )
+    )
+
+    with pytest.raises(ValueError, match="PENDING"):
+        await ledger.record_attempt("session-1", "call-pending")
 
 
 @pytest.mark.asyncio
@@ -120,11 +177,14 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
         "started_at",
         "finished_at",
         "reconcile_meta",
+        "parent_exec_call_id",
+        "attempt_count",
     }
     # C5 复合主键：session_id 是 pk 序 1，tool_call_id 是 pk 序 2
     assert columns["session_id"][5] == 1
     assert columns["tool_call_id"][5] == 2
     assert columns["artifact_ref"][3] == 0
+    assert columns["attempt_count"][3] == 0
 
 
 # ── B 组加固（R4-5）：连接级并发 PRAGMA ──
@@ -320,3 +380,27 @@ async def test_update_state_concurrent_writer_raises_runtimeerror(
 
     assert excinfo.value.args[0] == "Operation 'call-race' changed concurrently"
     assert fired, "竞态未注入（_utc_now_iso 未被调用）"
+
+
+@pytest.mark.asyncio
+async def test_additive_parent_migration_preserves_existing_operation(tmp_path):
+    database_path = tmp_path / 'old.db'
+    ledger = SqliteOperationLedger(database_path)
+    await ledger.initialize()
+    original = Operation(
+        tool_call_id='existing', session_id='session', tool_name='write',
+        args_identity='{}', state=OperationState.PENDING,
+    )
+    await ledger.create(original)
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute('ALTER TABLE operations DROP COLUMN parent_exec_call_id')
+        await connection.execute('ALTER TABLE operations DROP COLUMN attempt_count')
+        await connection.commit()
+    await ledger.initialize()
+    await ledger.initialize()
+    assert await ledger.get('session', 'existing') == original
+    nested = original.model_copy(update={
+        'tool_call_id': 'child', 'parent_exec_call_id': 'outer',
+    })
+    await ledger.create(nested)
+    assert await ledger.get('session', 'child') == nested

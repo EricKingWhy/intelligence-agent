@@ -875,6 +875,18 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               ?.click(),
           reportError: (message) => setSlashError(message),
           reportInfo: (message) => setSlashInfo(message),
+          // AC6：访谈草稿写回输入框（命令受理后的 `setValue('')` 先同步跑完，
+          // 这里的异步回填因此不会被它覆盖掉）。菜单点选路径会保留命令前的前缀
+          // （B-S-3 定位切除），草稿整条替换会把那段前缀静默吞掉 ⇒ 有残留就明说。
+          prefillInput: (text) => {
+            const replaced = (inputRef.current?.value ?? '').trim();
+            setValue(text);
+            if (replaced !== '') {
+              setSlashInfo((prev) =>
+                `${prev ? `${prev}\n\n` : ''}访谈草稿已写入输入框，原有内容已被替换。`,
+              );
+            }
+          },
           // A-P1-3：压缩走共享三态宿主；成功回执（含被拒=零写入）落中性 info 面，
           // 失败由 hook 的 compactError 面呈现（后端 detail 原样）。
           runCompact: () =>

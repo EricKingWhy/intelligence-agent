@@ -521,7 +521,7 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   await openPicker();
   await expect(foot).toBeVisible();
-  await expect(foot).toHaveText('该档位声明开放 13 个工具（全部档位声明 18 个）');
+  await expect(foot).toHaveText('该档位声明开放 14 个工具（全部档位声明 19 个）');
   // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
   // #1372：原生 title 迁到 radix tooltip，提示内容仍在可访问名（aria-label）里，
   // 且**以可见文字开头**（WCAG 2.5.3 Label in Name）。

@@ -51,11 +51,13 @@ class _LedgerObservingTool(_IdentityTool):
         self._call_id = call_id
         self._session_id = session_id
         self.observed_states: list[OperationState] = []
+        self.observed_attempt_counts: list[int] = []
 
     async def execute(self, args: BaseModel) -> ToolResult:
         operation = await self._ledger.get(self._session_id, self._call_id)
         assert operation is not None
         self.observed_states.append(operation.state)
+        self.observed_attempt_counts.append(operation.attempt_count)
         return await super().execute(args)
 
 
@@ -64,6 +66,7 @@ class _FlakyLedgerObservingTool(_LedgerObservingTool):
         operation = await self._ledger.get(self._session_id, self._call_id)
         assert operation is not None
         self.observed_states.append(operation.state)
+        self.observed_attempt_counts.append(operation.attempt_count)
         if len(self.observed_states) < 3:
             return ToolResult.failure(
                 "temporary",
@@ -123,6 +126,7 @@ async def test_tool_execution_is_durable_before_and_after_side_effect(
     persisted = await ledger.get("session-1", "call-1")
     assert execution.result.ok is True
     assert tool.observed_states == [OperationState.RUNNING]
+    assert tool.observed_attempt_counts == [1]
     assert persisted is not None
     assert persisted.state is OperationState.SUCCEEDED
     assert persisted.session_id == "session-1"
@@ -151,8 +155,10 @@ async def test_retries_share_one_operation(tmp_path: Path) -> None:
     assert execution.result.ok is True
     assert execution.result.metadata["attempt"] == 3
     assert tool.observed_states == [OperationState.RUNNING] * 3
+    assert tool.observed_attempt_counts == [1, 2, 3]
     assert len(operations) == 1
     assert operations[0].state is OperationState.SUCCEEDED
+    assert operations[0].attempt_count == 3
 
 
 @pytest.mark.asyncio

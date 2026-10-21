@@ -75,6 +75,9 @@ class TestSessionEventDTO:
             # #1197 项 1：会话级上下文窗口挡位（状态事件，不投影成消息；
             # 投影见 context/window.py derive，倒序 last-wins）。
             "context/window-changed",
+            # #1359 阶段 1：持久目标对象（状态事件，不投影成消息；投影见
+            # session/goal.py::effective_goal，倒序 last-wins）。
+            "goal/changed",
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",

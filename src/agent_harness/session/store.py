@@ -302,6 +302,32 @@ class JsonlSessionStore:
         self._state_guard = threading.Lock()
         # #516 并发列表的单飞闸（用户裁决第五选项）：见 _ScanGate 的契约边界。
         self._scan_gate = _ScanGate()
+        # #1389：落盘后的可选观察者（归档索引）。**纯通知**——与本类的一切
+        # 判定、锁、缓存无关，异常只记日志。所有生产写路径（web / CLI run /
+        # 委派 / fork）最终都经 `append_event` 落盘，故挂在这里一处即全覆盖。
+        self._event_observer: Callable[[str, SessionEvent], None] | None = None
+
+    def set_event_observer(
+        self, observer: Callable[[str, SessionEvent], None] | None,
+    ) -> None:
+        """登记「事件已落盘」的观察者（#1389 归档索引）。
+
+        观察者在 fsync 之后、锁外被调用：它拿到的是**已提交的事实**，慢或
+        失败都不影响写入本身（`Session.append` 的耐久性契约不变）。
+        """
+        self._event_observer = observer
+
+    def _notify_observer(self, session_id: str, event: SessionEvent) -> None:
+        observer = self._event_observer
+        if observer is None:
+            return
+        try:
+            observer(session_id, event)
+        except Exception:
+            logger.warning(
+                "事件观察者失败（session=%s, type=%s）", session_id, event.type,
+                exc_info=True,
+            )
 
     def _session_dir(self, session_id: str) -> Path:
         return self._root / session_id
@@ -458,6 +484,8 @@ class JsonlSessionStore:
                     self._last_seq[session_id] = (
                         event.seq, stat.st_size, stat.st_mtime_ns,
                     )
+        # 锁外通知（#1389）：观察者是派生索引，绝不与写临界区共享失败面。
+        self._notify_observer(session_id, event)
         return event
 
     def _neutralize_torn_tail(self, path: Path) -> None:

@@ -1,5 +1,11 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
+
+- 2026-10-21：#1360 PR #1431 Recovery attempt budget follow-up 已同步基线 `origin/main=14f5217a`；双轴复审 PASS、P0–P4=0。同步后后端全量为 8797 passed / 17 failed / 129 skipped / 43 deselected，后续按用户要求只做失败节点增量复验，不宣称全量通过；6 个相关测试通过。Gate-0 收据 `docs/gate/49653220f7927ff071bb9423d9404d55cbbc8d67.json` 为 6/6 PASS。PR OPEN / `等待merge`，待 CI gate0。详见 Tracker 与月档。
+
+- 2026-10-20：#1360 已交付；Issue CLOSED，PR #1426（`等待merge`）等待维护者合并。Gate-0 收据 6/6 PASS，GitHub Gate-0/E2E/gitleaks 通过。PR 显示 BEHIND；遵从用户要求未同步 main。详情见 `docs/SDD_TICKET_TRACKER.md` 与月档。
+
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
 > 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等，`SPEC_ROOT` 见 `AGENTS.md` §1）保持冻结，不被进度修改。
 > 每完成一个 Phase，更新本文件对应行的状态 + commit hash + Gate 证据。
@@ -39,6 +45,7 @@
 ---
 
 ## 当前工作焦点
+- **施工中（2026-10-19 起 · #1359 阶段 3）**：目标轮次自动续跑 + 无进展暂停 + 决策 (b) 撞审批点 park。分支 `claude/1359-goal-durable` @ `3f2b1732`（tree `1dc86a7b…`），基线 `183c049c`。准入（决策 b，王浩宇 2026-10-20 00:25 推翻 17:42 的 a）：`active` ∧ armed ∧ 轮次未用尽 ∧ 无未投递 goal 轮次；非 `danger-full-access` 档 ⇒ `blocked` + `approval-required`，`/goal resume` 授一轮额度（入队即消费）；disarm 只认 resume 入口（`task=None` 或显式 `resume_run_id`/`resume_basis`），普通新任务消息保留授权；`origin` 贯穿 `message/queued`→`user/message`→重启重建；`round_started` 只在拿到 run_id 后 +1；提示词 = dsh `prompt.ts:12-26` + omp 两句防漂移；AC9 digest 只取 `{ok,message,data}`（剔除 attempt/耗时）⇒ 最近两轮相同/为空 ⇒ `paused` + `pause_reason(no-progress)`。focused 36 passed；全量 27F/8537P/181S vs 同沙箱基线 27F/8525P（失败集逐条相同，无新增红）；ruff clean。两轴审查行与覆盖闸门待补。详见 Tracker/月档。
 - **集成索引（2026-10-20 · PR 栈）**：#1374 → #1362 → #1361 → #1354 → #1347；#1347 最终 head `599302e1f7e5c21ba26181570e2249a25d316fe8` 同步至 #1354 merge 后的最新 main。Gate-0、Chromium E2E smoke、gitleaks、review coverage 均通过；Gate-1 三条失败与 main/#1354 基线相同，详见 `docs/phase_status/2026-10.md`。本批不改变 Roadmap Phase 状态。
 - **施工中（2026-10-18 · #1321）**：会话认领 6s 硬超时误报（P0）。分支 `fix/issue-1321-claim-timeout` @ 代码 tip `c3370860`；`discoverNewSessionId` 改可配置预算（默认 20s / 150ms / 15s）+ equal-jitter 指数退避，认领超时文案与提交失败区分。沙箱慢负载 20/20（list 1500ms、新会话 12s 可见，p50/p99 ≈1502/1508ms），旧树 0/3 红。Gate-0 5/6（唯一 ❌ = coverage，恰本批 2 笔）；后端全量 8585P/22F（17 live_gate 环境 + 4 基线同签名 + 1 coverage 自指）、vitest 2207P、e2e 812P、build rc=0。PR [#1332](https://github.com/EricKingWhy/intelligence-agent/pull/1332) 已开，待审查后 merge（CI gate0 5/6 = 预期 coverage 红；e2e smoke / gitleaks pass；独立双轴审查双 CONDITIONAL，修复轮已处置 findings，待复审）。详见 Tracker/月档。
 - **施工中（2026-10-17 · #1284）**：#1224 复审 P2×3 修补（快照权威），分支 `codebuddy/1284-1224-review-fix` @ tip `e4393b33`。三轮双轴审查（发现轮 REQUEST_CHANGES/A-W-F → 修后重审 P4×6 → P4 收口+merge 重审两轴 APPROVE 0 finding）；沙箱全量门禁 8378P/2F（两条均归因：coverage 自指预期红 + host_dirs 既有环境红）；台账 3 行落盘；PR 开放待 merge。详见 Tracker/月档。

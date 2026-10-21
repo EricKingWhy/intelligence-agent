@@ -27,9 +27,11 @@ from agent_harness.session.derive import (
     _USER_GOAL_VALUE_MAX_CHARS,
     COMPACTION_SUMMARY_MESSAGE_NAME,
     ProtectedFact,
+    _bounded_goal_value,
     serialize_protected_facts,
 )
 from agent_harness.session.event import CONTEXT_COMPACTED, SessionEvent
+from agent_harness.session.goal import effective_goal
 from agent_harness.session.plan import PlanItem, derive_plan
 
 logger = logging.getLogger("agent_harness.context.compactor")
@@ -962,11 +964,11 @@ class ContextCompactor:
                 )
                 candidate_summary_text = _assemble_summary(
                     early, model_sections, protected_facts, trusted_summaries,
-                    source_ranges=early_ranges,
+                    source_ranges=early_ranges, events=events,
                 )
                 _validate_summary(
                     candidate_summary_text, early, protected_facts,
-                    trusted_summaries, source_ranges=early_ranges,
+                    trusted_summaries, source_ranges=early_ranges, events=events,
                 )
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
@@ -1499,29 +1501,43 @@ def _carrier_instruction_line(
     return f"当前生效指令：{body}"
 
 
-def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
+def _current_goal_body(
+    events: list[SessionEvent] | None,
+    protected_facts: list[ProtectedFact] | None,
+) -> str:
     """#556 裁决 C：目标节只保留**当前生效目标**（+ 归档计数行）。
 
-    「当前生效目标」的判定与保护事实通道**同源**：`derive_protected_facts` 从
-    全量 SessionEvent 确定性地划出 user_goal sources（首条 + 每次 supersede 前
-    最近一条，`tests/session/test_derive_supersede.py`），取 `source_seq` 最大的
-    一条 = 最后一次目标声明——纯函数、重放逐字节稳定。值以 JSON 字符串编码
-    （旧 [0] 即 JSON，形状延续；防节边界伪造与 strip 失配），本身走 #430 的
-    2000 字符投影上限（超长自带截断标记 + source_event_id 回读指针）：大首消息
-    折叠为引用 + 回读 ref，原文活在事件流；历史 goal 不再逐字累积，一行归档
-    计数指回 SessionEvent 持久历史（不变量 #6：完整保存 ≠ 完整注入）。
+    #1359 阶段 0：生效 ``goal/changed`` 存在时**优先**取
+    ``effective_goal(events).objective``——与 `/goal`、progress.md 同一投影
+    （三处读侧收敛，AC4）。没有目标事件时回落保护事实通道：`source_seq` 最大
+    的 user_goal = 最后一次目标声明（首条 + 每次 supersede，纯函数、重放逐字
+    节稳定）。值以 JSON 字符串编码（旧 [0] 即 JSON，形状延续；防节边界伪造与
+    strip 失配），本身走 #430 的 2000 字符投影上限（超长自带截断标记 +
+    source_event_id 回读指针）：大首消息折叠为引用 + 回读 ref，原文活在事件流；
+    历史 goal 不再逐字累积，一行归档计数指回 SessionEvent 持久历史（不变量
+    #6：完整保存 ≠ 完整注入）。
     """
     goals = [
         fact for fact in (protected_facts or [])
         if fact.type == "user_goal"
     ]
-    if not goals:
+    state = effective_goal(events or [])
+    if state.defined and state.objective:
+        raw = state.objective
+        value = _bounded_goal_value(raw, state.source_event_id or "")
+    elif state.authoritative:
+        # `clear` 墓碑 = 没有目标。不回落旧 user_goal 事实（换源后旧事实已
+        # superseded，这里按"无目标"投影，与 /goal 一致）。
         return "(none)"
-    current = max(goals, key=lambda fact: fact.source_seq)
+    else:
+        if not goals:
+            return "(none)"
+        current = max(goals, key=lambda fact: fact.source_seq)
+        value = current.value
     # JSON 字符串编码（旧 [0] 即 JSON，形状延续）：节内容回读时有外层 strip
     #（`_parse_summary_sections`），裸文本的尾随空白/换行会破坏精确比对；
     # 编码同时隔离 goal 正文里 heading 样式的行（防伪造节边界）。
-    body = json.dumps(current.value, ensure_ascii=False)
+    body = json.dumps(value, ensure_ascii=False)
     archived = len(goals) - 1
     if archived > 0:
         body += (
@@ -1601,6 +1617,7 @@ def _programmatic_summary_sections(
     protected_facts: list[ProtectedFact] | None = None,
     source_ranges: list[tuple[int, int] | None] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
+    events: list[SessionEvent] | None = None,
 ) -> dict[str, str]:
     """四个程序化节（#556 裁决 C：全部**有界**，规则为确定性纯函数）。
 
@@ -1711,7 +1728,7 @@ def _programmatic_summary_sections(
     # + 当前生效指令承载位 + 条件归档计数行（仅本段内除承载位外的更早活跃
     # 用户消息 > 0 时；按段计，不跨压缩累积，与"不链式继承"一致）。
     section0 = (
-        f"{_current_goal_body(protected_facts)}\n"
+        f"{_current_goal_body(events, protected_facts)}\n"
         f"{_carrier_instruction_line(messages, source_ranges)}"
     )
     archived_turns = (
@@ -1760,10 +1777,12 @@ def _assemble_summary(
     protected_facts: list[ProtectedFact] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
     source_ranges: list[tuple[int, int] | None] | None = None,
+    events: list[SessionEvent] | None = None,
 ) -> str:
     programmatic = _programmatic_summary_sections(
         messages, protected_facts,
         source_ranges=source_ranges, trusted_summaries=trusted_summaries,
+        events=events,
     )
     bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
     for index, body in enumerate(model_sections, start=2):
@@ -1779,11 +1798,13 @@ def _validate_summary(
     protected_facts: list[ProtectedFact] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
     source_ranges: list[tuple[int, int] | None] | None = None,
+    events: list[SessionEvent] | None = None,
 ) -> None:
     sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
     expected = _programmatic_summary_sections(
         messages, protected_facts,
         source_ranges=source_ranges, trusted_summaries=trusted_summaries,
+        events=events,
     )
     for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
         if sections[index] != expected[_SUMMARY_HEADINGS[index]]:

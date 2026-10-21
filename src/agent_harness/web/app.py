@@ -167,6 +167,7 @@ from agent_harness.storage import (
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.session_archive import install_session_archive
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
@@ -610,6 +611,13 @@ class CreateSessionRequest(_AmendValueValidators):
     # （runtime 侧无意义但不危险）；max_length 封顶原因不变：task 会逐字持久化
     # 进 JSONL（user/message）并整体进模型上下文。R5 显式规则标记只接受非空白 task。
     task: str | None = Field(default=None, min_length=1, max_length=100_000)
+    # #1359 阶段 2：创建即定义时的**结构化验收清单**（形状与
+    # `POST /task/definition` 的 criteria 同一条写侧规则，见
+    # `session/task.py::_parse_criteria`）。此前前端把「完成目标」拼进 task
+    # 字符串，验收项在事件流里不可检索、也不进三轴投影；改为随创建请求直通，
+    # task 保持 prompt 原文。只与非空 task 一起合法（单独给 criteria 无可归属
+    # 的定义 → 422）。
+    criteria: list[dict] | None = None
     # #298 R5：仅用户显式勾选时，Runtime 才把该真实输入作为单事件规则证据。
     remember_as_procedural_rule: bool = False
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
@@ -660,6 +668,12 @@ class CreateSessionRequest(_AmendValueValidators):
     # 冲突→自动 worktree 并行隔离）。"worktree"（默认）：cwd 被占时自动建
     # worktree 并用其路径建会话；"queue"：走既有租约排队（次选项）。
     on_conflict: str = Field(default="worktree")
+
+    # #1418：TUI `/new` 的「换会话」语义——建新会话成功后再关闭前任会话行
+    # （`end_reason="new_session"`，存储层派生归档字段，不是事件）。
+    # 只有 `/new` 携带；`/sessions` 切换、`/quit`、Web 空会话入口都不带。
+    # 缺省 None ⇒ 既有调用方行为逐字不变。
+    previous_session_id: str | None = None
 
     @field_validator("autonomy")
     @classmethod
@@ -1290,6 +1304,12 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # #1389：会话全文存档 + FTS5（派生检索索引，不是 Session 真相）。
+        # 挂一次 store 级观察者即覆盖本进程的全部写路径。best-effort：建库失败
+        # 只降级为"没有历史搜索"，不影响会话本身。
+        self.session_archive_observer = install_session_archive(
+            self.store, self.sessions_root / "state.db",
+        )
         # #1191（Phase 2）：项目/全局级约束的独立规则层（用户裁决 Fork 2 = A：
         # 不碰 memory v2）。只构造一次（持有进程内写锁）；根目录同在 workspace_dir 下。
         self.scoped_constraint_store = ScopedConstraintStore(
@@ -2670,6 +2690,12 @@ def create_app(
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # #1359 阶段 1 持久目标对象路由（独立 router：投影/写入口单源在
+    # session/goal.py，本模块只留一行接入面）
+    from agent_harness.web.goal_delivery import register_goal_routes
+
+    register_goal_routes(app, validate_session_id=validate_session_id)
+
     # W-08 / #352 证据投影路由（独立 router：记录 + 服务端投影查询；
     # 投影单源在 session/evidence.py，本模块只留一行接入面）
     from agent_harness.web.evidence_delivery import register_evidence_routes
@@ -3179,6 +3205,13 @@ def create_app(
         if launch and req.task is None:
             # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
             raise HTTPException(status_code=422, detail="Field required (task)")
+        # #1359 阶段 2：criteria 只属于任务定义。没有非空 task 就没有 task/defined
+        # 可挂验收项——静默丢弃会让客户端以为存了。launch=false 与空白 task 都拒。
+        if req.criteria is not None and (req.task is None or not req.task.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail="criteria 需要非空 task：验收项随创建时的任务定义一起落盘",
+            )
         service = session_service(app.state.agent)
         state = app.state.agent
 
@@ -3240,6 +3273,8 @@ def create_app(
         try:
             result = await service.create_and_launch(
                 task=req.task,
+                # #1359 阶段 2：结构化验收清单随创建直通 task/defined。
+                criteria=req.criteria,
                 workspace_name=req.workspace,
                 cwd=cwd,
                 # `#318`：新建会话没有 session 账行 ⇒ session CAS 版本是矛盾请求。
@@ -3275,6 +3310,24 @@ def create_app(
             raise sandbox_unavailable_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
+
+        # #1418：**必须**在建会话成功之后——建失败不许误杀旧会话。
+        # fail-open 与首写获胜语义在 `SessionArchiveObserver.end_session`。
+        # 先过仓内统一的 id 校验：非法格式等同「前任不存在」，静默跳过
+        # （AC2 契约；这里绝不能 422/500）。
+        if req.previous_session_id:
+            try:
+                validate_session_id(req.previous_session_id)
+            except InvalidSessionId:
+                logging.getLogger("agent_harness.web").warning(
+                    "previous_session_id 形态非法，跳过结束前任：%r…（len=%d）",
+                    req.previous_session_id[:64], len(req.previous_session_id),
+                )
+            else:
+                await anyio.to_thread.run_sync(
+                    partial(state.session_archive_observer.end_session,
+                            req.previous_session_id, "new_session")
+                )
 
         # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
         # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。

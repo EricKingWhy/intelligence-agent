@@ -10,7 +10,7 @@
  *   6. 全角 ／ 不触发；无会话（sessionId=null）菜单不触发；
  *   7. API 失败（409/422）错误可见（reportError 面），不静默吞。
  *
- *  mock 面：`lib/api`（compactSession/getTaskState 传输）+ `lib/auth`（getToken）。
+ *  mock 面：`lib/api`（compactSession/getGoalState/postGoalCommand 传输）+ `lib/auth`（getToken）。
  *  slashCommands 的 sessionFetch 走全局 fetch ⇒ 同样 mock（Workflow-mode / task
  *  definition 两个端点没有 client，fetch 是真实出口）。
  */
@@ -23,7 +23,8 @@ vi.mock('../lib/api', async (importOriginal) => {
   return {
     ...actual,
     compactSession: vi.fn(),
-    getTaskState: vi.fn(),
+    getGoalState: vi.fn(),
+    postGoalCommand: vi.fn(),
     getSlashRegistry: vi.fn(),
   };
 });
@@ -34,11 +35,12 @@ vi.mock('../lib/auth', async (importOriginal) => {
 
 import {
   compactSession,
+  getGoalState,
   getSlashRegistry,
-  getTaskState,
+  postGoalCommand,
+  type GoalSnapshot,
   type SessionContextCompacted,
   type SlashRegistryCommand,
-  type TaskState,
 } from '../lib/api';
 import { Composer } from './Composer';
 
@@ -52,7 +54,7 @@ let fetchMock: Mock;
 
 /** #1200：后端 registry 的固定投影（5 builtin + 3 skill，含插件命名空间）。 */
 const REGISTRY: SlashRegistryCommand[] = [
-  { name: 'goal', kind: 'builtin', description: '设置或查看长期任务目标' },
+  { name: 'goal', kind: 'builtin', description: '设置、查看或管理长期任务目标（暂停/恢复/编辑/清除）' },
   { name: 'plan', kind: 'builtin', description: '进入或退出计划模式' },
   { name: 'compact', kind: 'builtin', description: '压缩以上对话内容' },
   { name: 'permission', kind: 'builtin', description: '切换权限预设（沙箱模式与审批策略）' },
@@ -62,18 +64,32 @@ const REGISTRY: SlashRegistryCommand[] = [
   { name: 'code-review', kind: 'skill', description: '双轴代码审查', namespace: 'acme' },
 ];
 
-const taskState = (text: string | null): TaskState => ({
-  defined: text !== null,
-  task_text: text,
-  read_write_intent: null,
-  cwd: null,
-  authorization: null,
-  criteria: [],
-  verification: {},
-  acceptance: null,
-  version: 1,
-  open_run_ids: [],
-  product_state: '',
+const goalSnapshot = (
+  objective: string | null,
+  phase: GoalSnapshot['goal']['phase'] = 'active',
+  over: Partial<GoalSnapshot['goal']> = {},
+): GoalSnapshot => ({
+  id: 's-1',
+  activation: phase === 'active' ? 'armed' : 'disarmed',
+  goal: {
+    defined: objective !== null,
+    goal_id: objective === null ? null : 'goal-1',
+    revision: 1,
+    objective,
+    phase: objective === null ? null : phase,
+    blocked_reason: null,
+    pause_reason: null,
+    max_goal_rounds: 32,
+    rounds_started: 0,
+    needs_interview: false,
+    ...over,
+  },
+});
+
+/** POST 回执不带 `id`（后端 `_apply` 形状）——与 GET 快照分开构造。 */
+const goalResult = (...args: Parameters<typeof goalSnapshot>) => ({
+  status: 'applied',
+  ...goalSnapshot(...args),
 });
 
 const textarea = (): HTMLTextAreaElement => container.querySelector('#composer-input')!;
@@ -162,7 +178,8 @@ beforeEach(async () => {
   onSubmit = vi.fn();
   onSteer = vi.fn();
   vi.mocked(compactSession).mockReset();
-  vi.mocked(getTaskState).mockReset();
+  vi.mocked(getGoalState).mockReset();
+  vi.mocked(postGoalCommand).mockReset();
   vi.mocked(getSlashRegistry).mockReset();
   vi.mocked(getSlashRegistry).mockResolvedValue(REGISTRY);
   fetchMock = vi.fn();
@@ -303,7 +320,7 @@ describe('#1195 触发与渲染', () => {
     press('Enter');
     // 注册表里的 skill 赢：走 onSubmit 让后端展开，而不是本地跑内置 /goal。
     expect(onSubmit).toHaveBeenCalledWith('/goal 目标文本', false, [], 'session');
-    expect(getTaskState).not.toHaveBeenCalled();
+    expect(getGoalState).not.toHaveBeenCalled();
   });
 
   it('命名空间 skill 的 aria-activedescendant 指向真实存在的选项 id', async () => {
@@ -425,14 +442,14 @@ describe('#1195 键盘交互', () => {
 
 describe('#1195 带参提交拦截', () => {
   it('/goal <文本> 拦截：本地执行，不发聊天', async () => {
-    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('每天投20份简历'));
     await typeText('/goal 每天投20份简历');
     press('Enter');
     await act(async () => {});
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition'));
-    expect(calls).toHaveLength(1);
-    const init = calls[0][1];
-    expect(JSON.parse(init.body)).toEqual({ task_text: '每天投20份简历' });
+    expect(postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'create',
+      objective: '每天投20份简历',
+    });
     expect(onSubmit).not.toHaveBeenCalled();
     expect(textarea().value).toBe('');
   });
@@ -457,37 +474,77 @@ describe('#1195 错误可见', () => {
   });
 
   it('/goal 带参 422 → 后端 detail 透出', async () => {
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ detail: 'task_text 不能为空' }), { status: 422 }),
+    vi.mocked(postGoalCommand).mockRejectedValue(
+      new (await import('../lib/api')).SessionError(422, 'objective 不能为空'),
     );
-    await typeText('/goal   ');
-    // 带参拦截要求非空 args；直接用 /goal x 触发设置失败路径
     await typeText('/goal x');
     press('Enter');
     await act(async () => {});
-    expect(slashError()).toContain('task_text');
+    expect(slashError()).toContain('objective');
   });
 });
 
 describe('#1195 /goal 无参查看', () => {
   it('已定义 → 中性 info 面展示当前目标', async () => {
-    vi.mocked(getTaskState).mockResolvedValue(taskState('每天投20份简历'));
+    vi.mocked(getGoalState).mockResolvedValue(goalSnapshot('每天投20份简历'));
     await typeText('/goal');
     press('Enter');
     await act(async () => {});
-    expect(getTaskState).toHaveBeenCalledWith('s-1');
-    expect(slashInfo()).toContain('当前目标：每天投20份简历');
+    expect(getGoalState).toHaveBeenCalledWith('s-1');
+    expect(slashInfo()).toContain('每天投20份简历');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 
-  it('未定义（TaskNotDefinedError）→ 中性 info 如实展示', async () => {
-    const mod = await import('../lib/api');
-    vi.mocked(getTaskState).mockRejectedValue(new mod.TaskNotDefinedError('未定义任务'));
+  it('未定义 → 中性 info 如实展示', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(goalSnapshot(null));
     await typeText('/goal');
     press('Enter');
     await act(async () => {});
     expect(slashInfo()).toContain('未定义');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
+  });
+
+  it('AC6：needs_interview → 缺失段落草稿写回输入框（进入访谈）', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\n投 20 份简历', 'active', { needs_interview: true }),
+    );
+    await typeText('/goal');
+    press('Enter');
+    await act(async () => {});
+    const draft = textarea().value;
+    expect(draft.startsWith('/goal edit ')).toBe(true);
+    expect(draft).toContain('## Success criteria');
+    expect(draft).toContain('## Verification');
+    // 已验证段落不重复补：草稿里目标文本只出现一次。
+    expect(draft.indexOf('## Objective')).toBe(draft.lastIndexOf('## Objective'));
+  });
+
+  it('AC6：已有 Success criteria 只补缺的 Verification（不重排目标）', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\nA\n\n## Success criteria\nB', 'active', { needs_interview: true }),
+    );
+    await typeText('/goal');
+    press('Enter');
+    await act(async () => {});
+    const draft = textarea().value;
+    expect(draft).toContain('## Verification');
+    expect(draft.split('## Success criteria').length - 1).toBe(1);
+  });
+
+  /* 菜单点选路径会保留命令前的前缀（B-S-3 定位切除）：草稿整条替换会把那段前缀
+     吞掉 ⇒ 有残留必须明说。纯命令路径（框已清空）不该冒出这句噪音。 */
+  it('AC6：菜单点选且命令前有前缀 → 草稿覆盖后可见提示', async () => {
+    vi.mocked(getGoalState).mockResolvedValue(
+      goalSnapshot('## Objective\n投 20 份简历', 'active', { needs_interview: true }),
+    );
+    await typeText('帮我 /go');
+    const item = container.querySelector('[data-slash-name="goal"]')!;
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(textarea().value.startsWith('/goal edit ')).toBe(true);
+    expect(slashInfo()).toContain('原有内容已被替换');
   });
 });
 
@@ -592,14 +649,13 @@ describe('#1195 /permission /model 拉起现有 UI', () => {
 
 describe('#1195 findings 修回 — 提交拦截汇合点（A-P1-1/A-P2-1/A-P2-3）', () => {
   it('Ctrl+Enter 对 /goal 带参同样拦截：本地执行，不 steer（A-P1-1）', async () => {
-    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('每天投20份简历'));
     await typeText('/goal 每天投20份简历');
     press('Enter', { ctrlKey: true });
     await act(async () => {});
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition'));
-    expect(calls).toHaveLength(1);
-    expect(JSON.parse((calls[0][1] as RequestInit).body as string)).toEqual({
-      task_text: '每天投20份简历',
+    expect(postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'create',
+      objective: '每天投20份简历',
     });
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onSteer).not.toHaveBeenCalled();
@@ -607,29 +663,29 @@ describe('#1195 findings 修回 — 提交拦截汇合点（A-P1-1/A-P2-1/A-P2-3
   });
 
   it('发送按钮点击对 /goal 带参同样拦截（A-P1-1）', async () => {
-    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.mocked(postGoalCommand).mockResolvedValue(goalResult('另一个目标'));
     await typeText('/goal 另一个目标');
     await act(async () => {
       (container.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click();
     });
     await act(async () => {});
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition'));
-    expect(calls).toHaveLength(1);
+    expect(postGoalCommand).toHaveBeenCalledWith('s-1', {
+      operation: 'create',
+      objective: '另一个目标',
+    });
     expect(onSubmit).not.toHaveBeenCalled();
     expect(textarea().value).toBe('');
   });
 
   it('尾随空格 /goal␣ + Enter 落查看分支（A-P2-1）', async () => {
-    vi.mocked(getTaskState).mockResolvedValue(taskState('已有目标'));
+    vi.mocked(getGoalState).mockResolvedValue(goalSnapshot('已有目标'));
     await typeText('/goal ');
     press('Enter');
     await act(async () => {});
-    expect(getTaskState).toHaveBeenCalledWith('s-1');
-    expect(
-      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/task/definition')),
-    ).toHaveLength(0);
+    expect(getGoalState).toHaveBeenCalledWith('s-1');
+    expect(postGoalCommand).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(slashInfo()).toContain('当前目标：已有目标');
+    expect(slashInfo()).toContain('已有目标');
   });
 
   it('locked（审批待决）时命令不执行、也不当聊天发（A-P2-3）', async () => {
@@ -660,25 +716,25 @@ describe('#1195 findings 修回 — 菜单与反馈面', () => {
   });
 
   it('/goal 查看结果走中性 info 面（role=status），不是红色 alert（B-S-4/A-P3-2）', async () => {
-    vi.mocked(getTaskState).mockResolvedValue(taskState('每天投20份简历'));
+    vi.mocked(getGoalState).mockResolvedValue(goalSnapshot('每天投20份简历'));
     await typeText('/goal');
     press('Enter');
     await act(async () => {});
     const info = container.querySelector('[data-testid=slash-info]');
     expect(info?.getAttribute('role')).toBe('status');
-    expect(info?.textContent).toContain('当前目标：每天投20份简历');
+    expect(info?.textContent).toContain('目标：每天投20份简历');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 
-  it('/goal 二次设置 409 → detail + 可操作引导（A-P2-2）', async () => {
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ detail: '任务已定义（task/defined 全流至多一条）' }), { status: 409 }),
+  it('/goal 409（revision 冲突）→ detail + 可操作引导（AC3）', async () => {
+    vi.mocked(postGoalCommand).mockRejectedValue(
+      new (await import('../lib/api')).SessionError(409, 'revision 冲突：请求基于 r1，当前是 r2'),
     );
     await typeText('/goal 换个目标');
     press('Enter');
     await act(async () => {});
-    expect(slashError()).toContain('任务已定义');
-    expect(slashError()).toContain('/goal（无参数）可查看当前目标');
+    expect(slashError()).toContain('当前是 r2');
+    expect(slashError()).toContain('重试即可');
   });
 
   it('无会话时带参命令给可见反馈且不清输入（A-P3-1）', async () => {

@@ -1,0 +1,14 @@
+{
+  "head": "6547475151d6a4d9072fe06f7f83592f55618a19",
+  "tree": "d3a62e8e2abebb866a3abfd9e5bbcd89f1ad8af1",
+  "cwd": "/tmp/ia-validated/web",
+  "argv": [
+    "node",
+    "node_modules/@playwright/test/cli.js",
+    "test",
+    "--workers=2"
+  ],
+  "exit_code": 0,
+  "started_at": 1792498423.2874544,
+  "wall_seconds": 968.2983300685883
+}

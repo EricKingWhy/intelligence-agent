@@ -463,7 +463,7 @@ class TestBashTool:
     async def test_stdout_stderr_in_data(self, executor: ToolExecutor):
         """data 含 stdout、stderr、duration_ms 四个字段。"""
         result = await executor.execute(
-            _tool_call("bash", {"command": "echo out & echo err 1>&2"})
+            _tool_call("bash", {"command": "echo out && echo err 1>&2"})
         )
 
         assert result.result.ok is True

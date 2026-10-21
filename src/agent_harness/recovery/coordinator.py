@@ -263,20 +263,38 @@ def _protected_fact_request_result(
     )
 
 
-def _tool_budget_delta(operation: Operation) -> dict | None:
-    """Preserve the one-call budget fact for recovered user-input prompts."""
-    if operation.tool_name not in USER_INPUT_TOOL_NAMES:
-        return None
-    attempts = 0
+def _tool_budget_delta(operation: Operation) -> dict:
+    """Preserve accepted-call and attempt facts when recovery synthesizes a result."""
+    attempts: int | None = operation.attempt_count
+    tool_calls = 1
     if operation.result_json:
         result = _try_parse_result_json(operation.result_json, operation.tool_name)
         if result is not None:
             value = result.metadata.get("attempt")
-            if isinstance(value, int) and not isinstance(value, bool):
-                attempts = value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                # Older ledgers have no durable counter; completed results retain
+                # the final retry number in metadata. New ledgers count each start,
+                # including attempts whose process died before a result was saved.
+                attempts = value if attempts is None else max(attempts, value)
+            if operation.state is OperationState.CANCELLED and (
+                result.metadata.get("budget_admitted") is False
+                or (
+                    result.error_code is ErrorCode.CANCELLED
+                    and value is None
+                    and result.message.startswith(
+                        f"工具 '{operation.tool_name}' 未执行："
+                    )
+                )
+            ):
+                # The cascade-cancel path writes a Ledger row for recovery
+                # pairing, but never passes the ToolExecutor admission point.
+                # The message check preserves the same fact for rows written
+                # before `budget_admitted` became durable in result metadata.
+                tool_calls = 0
+                attempts = 0
     return {
         "tool_name": operation.tool_name,
-        "tool_calls": 1,
+        "tool_calls": tool_calls,
         "tool_attempts": attempts,
     }
 
@@ -677,6 +695,13 @@ class RecoveryCoordinator:
 
             # 步骤 6（写入阶段）：按决策 append 合成事件，restore 一致性。
             for item in plan:
+                operation = operations_by_call_id.get(item.tool_call_id)
+                parent = (operation.parent_exec_call_id if operation is not None else next((
+                    event.data.get("parent_exec_call_id") for event in session.events
+                    if event.type == TOOL_CALL
+                    and event.data.get("tool_call_id") == item.tool_call_id
+                ), None))
+                parent_data = {"parent_exec_call_id": parent} if parent is not None else {}
                 if item.needs_call_event:
                     session.append(
                         TOOL_CALL,
@@ -684,6 +709,7 @@ class RecoveryCoordinator:
                             "tool_call_id": item.tool_call_id,
                             "tool_name": item.tool_name,
                             "args": item.call_event_args(),
+                            **parent_data,
                         },
                         run_id=item.run_id,
                         agent_id=item.agent_id,
@@ -729,6 +755,7 @@ class RecoveryCoordinator:
                 result_data = {
                     "tool_call_id": item.tool_call_id,
                     "content": item.content,
+                    **parent_data,
                 }
                 if item.budget_delta is not None:
                     result_data["budget_delta"] = item.budget_delta
@@ -959,6 +986,7 @@ class RecoveryCoordinator:
                 run_id=run_id,
                 agent_id=agent_id,
                 args=args,
+                budget_delta=budget_delta,
             )
 
         return None
@@ -1126,6 +1154,8 @@ class RecoveryCoordinator:
                         "tool_call_id": operation.tool_call_id,
                         "tool_name": operation.tool_name,
                         "args": _args_from_identity(operation.args_identity) or {},
+                        **({"parent_exec_call_id": operation.parent_exec_call_id}
+                           if operation.parent_exec_call_id is not None else {}),
                     },
                     run_id=operation.run_id,
                     agent_id=operation.agent_id,
@@ -1140,9 +1170,16 @@ class RecoveryCoordinator:
                 and event.data.get("tool_call_id") == operation.tool_call_id
                 for event in session.events
             ):
+                result_data = {
+                    "tool_call_id": operation.tool_call_id,
+                    "content": content,
+                    **({"parent_exec_call_id": operation.parent_exec_call_id}
+                       if operation.parent_exec_call_id is not None else {}),
+                }
+                result_data["budget_delta"] = _tool_budget_delta(operation)
                 session.append(
                     TOOL_RESULT,
-                    {"tool_call_id": operation.tool_call_id, "content": content},
+                    result_data,
                     run_id=operation.run_id,
                     agent_id=operation.agent_id,
                 )

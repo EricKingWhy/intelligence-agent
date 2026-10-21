@@ -1,0 +1,1 @@
+2026-10-20	#1360 user-approved minimal E2E fixture repair after SDD 8.3.8 escalation; Spec PASS / Standards PASS, P0-P4=0. POST /goal mock and exact create/objective request assertion only; focused Playwright 12 passed.	a826bdf24773a1268c3f690a33f99ae850978f7b..6547475151d6a4d9072fe06f7f83592f55618a19

@@ -1,0 +1,1565 @@
+"""#1389 会话全文存档 + FTS5（移植 Hermes `b324b1f7` state.db）。
+
+覆盖票面 AC1–AC6：
+
+- AC1 建表 / 触发器清单（三套 FTS × insert/delete/update）
+- AC2 三轮对话（含一次工具调用）按 `messages.id` 自增序可查全文 + FTS 能搜 tool 结果
+- AC3 `session_search` 四形态 + hidden/demoted
+- AC4 tool 行 >8192 字符：索引只取前缀，存储与 READ 仍是全文
+- AC5 并发写不丢不乱序；kill -9 后可打开 + `integrity-check` 通过
+- AC6 事件流 schema 无新增大字段（有/无归档写者的事件载荷逐字段相同）
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import textwrap
+import threading
+import time
+from pathlib import Path
+
+import pytest
+from langchain_core.messages import AIMessage
+from pydantic import BaseModel
+
+from agent_harness.agent import AgentRuntime
+from agent_harness.session import Session
+from agent_harness.session.event import SessionEvent
+from agent_harness.session.store import JsonlSessionStore
+from agent_harness.storage.session_archive import (
+    AUTO_VACUUM_MIN_FREELIST_RATIO,
+    FTS_TOOL_CONTENT_PREFIX_CHARS,
+    MAX_FTS5_QUERY_CHARS,
+    SessionArchive,
+    SessionArchiveObserver,
+    _sanitize_fts5_query,
+    install_session_archive,
+)
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
+from tests.scripted_model import ScriptedModel
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CJK_SOURCE = REPO_ROOT / "native" / "fts5_cjk" / "fts5_cjk.c"
+CJK_VENDOR = REPO_ROOT / "native" / "fts5_cjk" / "vendor"
+
+
+# ---------------------------------------------------------------- fixtures --
+
+
+def _build_cjk_so(dest: Path) -> Path | None:
+    """按 Hermes `build.sh` 的口径编译 cjk_unicode61 tokenizer；无编译器返回 None。"""
+    if not CJK_SOURCE.exists() or shutil.which("gcc") is None:
+        return None
+    so = dest / "libfts5_cjk.so"
+    cmd = ["gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra"]
+    if not _has_system_sqlite_header():
+        cmd += ["-I", str(CJK_VENDOR)]
+    cmd += [str(CJK_SOURCE), "-o", str(so)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return None
+    return so
+
+
+def _has_system_sqlite_header() -> bool:
+    proc = subprocess.run(
+        ["gcc", "-E", "-xc", "-"], input="#include <sqlite3ext.h>\n",
+        capture_output=True, text=True, check=False,
+    )
+    return proc.returncode == 0
+
+
+@pytest.fixture(scope="session")
+def cjk_so(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    so = _build_cjk_so(tmp_path_factory.mktemp("fts5-cjk"))
+    if so is None:
+        pytest.skip("cjk_unicode61 tokenizer 无法编译（缺 gcc 或缺少源码）")
+    return so
+
+
+@pytest.fixture()
+def archive(tmp_path: Path, cjk_so: Path) -> SessionArchive:
+    db = tmp_path / "sessions" / "state.db"
+    arc = SessionArchive(db, cjk_so_path=cjk_so)
+    arc.initialize()
+    return arc
+
+
+def _raw(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _names(db_path: Path, kind: str) -> set[str]:
+    with _raw(db_path) as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = ?", (kind,)
+        ).fetchall()
+    return {row["name"] for row in rows}
+
+
+def _raw_cjk(db_path: Path, so: Path) -> sqlite3.Connection:
+    """裸连接读 `messages_fts_cjk`：tokenizer 按连接登记，必须先加载扩展。"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.enable_load_extension(True)
+    conn.load_extension(str(so))
+    conn.enable_load_extension(False)
+    return conn
+
+
+# ------------------------------------------------------------------- AC1 ---
+
+
+class TestSchema:
+    def test_tables_present(self, archive: SessionArchive) -> None:
+        tables = _names(archive.db_path, "table")
+        assert {
+            "sessions",
+            "messages",
+            "messages_fts",
+            "messages_fts_trigram",
+            "messages_fts_cjk",
+            "state_meta",
+            "system_prompts",
+            "session_model_usage",
+        } <= tables
+        # `*_src` 是 external-content 的投影视图，不是实体表。
+        assert {
+            "messages_fts_src",
+            "messages_fts_trigram_src",
+            "messages_fts_cjk_src",
+        } <= _names(archive.db_path, "view")
+
+    def test_trigger_inventory(self, archive: SessionArchive) -> None:
+        triggers = _names(archive.db_path, "trigger")
+        for family in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
+            assert {
+                f"{family}_insert",
+                f"{family}_delete",
+                f"{family}_update",
+            } <= triggers
+
+    def test_base_update_trigger_scoped_to_content_columns(self, archive: SessionArchive) -> None:
+        """compaction 归档翻转 active/compacted **故意不触发**（Hermes #68858/#73639）。"""
+        with _raw(archive.db_path) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='messages_fts_update'"
+            ).fetchone()["sql"]
+        assert "AFTER UPDATE OF content, tool_name, tool_calls, role ON messages" in sql
+
+    def test_trigram_update_trigger_scope(self, archive: SessionArchive) -> None:
+        with _raw(archive.db_path) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='messages_fts_trigram_update'"
+            ).fetchone()["sql"]
+        assert "AFTER UPDATE OF content, tool_name, role ON messages" in sql
+
+    def test_cjk_update_trigger_scope(self, archive: SessionArchive) -> None:
+        with _raw(archive.db_path) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='messages_fts_cjk_update'"
+            ).fetchone()["sql"]
+        assert "AFTER UPDATE OF content, tool_name, tool_calls, role ON messages" in sql
+
+    def test_cjk_insert_trigger_when_matches_hermes(self, archive: SessionArchive) -> None:
+        """F14：WHEN 的括号形式与 Hermes 逐字一致（单层，不包成 `AND ((…))`）。"""
+        with _raw(archive.db_path) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='messages_fts_cjk_insert'"
+            ).fetchone()["sql"]
+        assert "AND (new.id > COALESCE(" in sql
+        assert "AND ((new.id" not in sql
+
+    def test_append_message_rejects_unknown_columns(self, archive: SessionArchive) -> None:
+        """F13：`append_message` 不接受任意列名注入。"""
+        archive.ensure_session("inject", source="interactive", started_at=time.time())
+        with pytest.raises(TypeError):
+            archive.append_message(  # type: ignore[call-arg]
+                "inject", "user", "内容", timestamp=time.time(), display_kind="hidden",
+            )
+        assert archive.get_messages("inject") == []
+
+    def test_pending_columns_exist(self, archive: SessionArchive) -> None:
+        """票面「待裁决列全量建表」—— 裁决前一个不许少。"""
+        with _raw(archive.db_path) as conn:
+            session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+            message_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        assert {
+            "billing_provider", "billing_base_url", "billing_mode", "estimated_cost_usd",
+            "actual_cost_usd", "cost_status", "cost_source", "pricing_version",
+            "handoff_state", "handoff_platform", "handoff_error",
+            "compression_failure_cooldown_until", "compression_failure_error",
+            "compression_fallback_streak", "compression_ineffective_count",
+            "compression_recovery_deadline", "compression_overload_streak",
+            "chat_id", "chat_type", "thread_id", "session_key", "user_id", "created_source",
+            "profile_name", "transport_profile", "origin_json", "expiry_finalized",
+            "display_name", "archived", "auto_archived", "pinned", "hidden",
+        } <= session_cols
+        assert {
+            "codex_reasoning_items", "codex_message_items",
+            "display_kind", "display_metadata", "display_identity", "display_order",
+            "message_uid", "absorbed_message_uids", "tool_call_uids", "tool_call_uid",
+            "platform_message_id", "effect_disposition", "observed",
+            "api_content", "_compressed_summary", "active", "compacted",
+        } <= message_cols
+
+    def test_rebuild_markers_default_open(self, archive: SessionArchive) -> None:
+        """新库无回填 ⇒ 门控恒真（无 marker 行时两条触发器都照常索引）。"""
+        with _raw(archive.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'fts%'"
+            ).fetchone()[0] == 0
+
+
+class TestCjkSelfHeal:
+    """F1：无扩展的打开只降级、不把索引永久打死；扩展回来时自愈并补齐缺口。"""
+
+    def _seed(self, arc: SessionArchive, session_id: str = "zh") -> None:
+        arc.ensure_session(session_id, source="interactive", started_at=time.time())
+        arc.append_message(session_id, "user", "修改服务器配置后重启", timestamp=time.time())
+
+    def test_open_without_extension_marks_stale_and_drops_triggers(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        db = tmp_path / "sessions" / "state.db"
+        with_so = SessionArchive(db, cjk_so_path=cjk_so)
+        with_so.initialize()
+        self._seed(with_so)
+        with_so.close()
+
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        assert degraded.cjk_available is False
+        triggers = _names(db, "trigger")
+        assert not {t for t in triggers if t.startswith("messages_fts_cjk_")}
+        with _raw(db) as conn:
+            assert conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'fts_cjk_stale'"
+            ).fetchone()["value"] == "1"
+        # 降级期写入照常（触发器已摘，写路径不受影响）
+        degraded.append_message("zh", "user", "降级期间的新消息", timestamp=time.time())
+        degraded.close()
+
+    def test_reopen_with_extension_heals_stale_index(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        db = tmp_path / "sessions" / "state.db"
+        first = SessionArchive(db, cjk_so_path=cjk_so)
+        first.initialize()
+        self._seed(first)
+        first.close()
+
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        degraded.append_message("zh", "user", "降级期间写入的青花瓷", timestamp=time.time())
+        degraded.close()
+
+        healed = SessionArchive(db, cjk_so_path=cjk_so)
+        healed.initialize()
+        assert healed.cjk_available is True
+        with _raw(db) as conn:
+            assert conn.execute(
+                "SELECT 1 FROM state_meta WHERE key = 'fts_cjk_stale'"
+            ).fetchone() is None
+            assert conn.execute(
+                "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'fts_cjk_rebuild%'"
+            ).fetchone()[0] == 0
+            non_tool = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE role <> 'tool'"
+            ).fetchone()[0]
+        conn = _raw_cjk(db, cjk_so)
+        try:
+            indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_cjk").fetchone()[0]
+            assert indexed == non_tool, "自愈后 CJK 索引必须补齐全部非 tool 行"
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_cjk WHERE messages_fts_cjk MATCH ?",
+                ('"青花瓷"',),
+            ).fetchone()[0]
+            assert hits == 1, "降级期写入的行也要在回填后进索引"
+        finally:
+            conn.close()
+        # 触发器已装回：新行实时进索引
+        healed.append_message("zh", "user", "恢复后的兵马俑", timestamp=time.time())
+        assert healed.search_messages("兵马俑", limit=5)
+        assert healed.search_messages("服务", limit=5)
+        healed.close()
+
+    def test_reopen_with_extension_creates_index_on_legacy_db(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        """表从未存在过的库（一直在无扩展环境用）：装上扩展后建表 + 回填。"""
+        db = tmp_path / "sessions" / "state.db"
+        degraded = SessionArchive(db, cjk_so_path=tmp_path / "absent.so")
+        degraded.initialize()
+        self._seed(degraded)
+        degraded.close()
+        assert "messages_fts_cjk" not in _names(db, "table")
+
+        healed = SessionArchive(db, cjk_so_path=cjk_so)
+        healed.initialize()
+        assert healed.cjk_available is True
+        assert "messages_fts_cjk" in _names(db, "table")
+        assert healed.search_messages("服务", limit=5)
+        healed.close()
+
+
+# ------------------------------------------------------------------- AC2 ---
+
+
+class EchoArgs(BaseModel):
+    text: str = ""
+
+
+class EchoTool(Tool):
+    @property
+    def name(self) -> str:
+        return "echo"
+
+    @property
+    def description(self) -> str:
+        return "回显一段文本。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return EchoArgs
+
+    async def execute(self, args: EchoArgs) -> ToolResult:
+        return ToolResult.success(message=f"ECHO[{args.text}]", data={"text": args.text})
+
+
+def _runtime(scripted: ScriptedModel) -> AgentRuntime:
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    return AgentRuntime(
+        model=scripted, registry=registry, executor=ToolExecutor(registry),
+        max_agent_turns=10,
+    )
+
+
+def _archived_session(tmp_path: Path, archive: SessionArchive) -> Session:
+    """生产写路径：`Session → JsonlSessionStore.append_event → 观察者 → 归档库`。"""
+    store = JsonlSessionStore(root=tmp_path)
+    install_session_archive(
+        store, archive.db_path, cjk_so_path=archive.cjk_so_path,
+    )
+    return Session.start(store)
+
+
+def _run_with_archive(
+    tmp_path: Path, archive: SessionArchive, scripted: ScriptedModel,
+) -> tuple[Session, object]:
+    session = _archived_session(tmp_path, archive)
+    runtime = _runtime(scripted)
+    result = _run(runtime, session)
+    return session, result
+
+
+def _run(runtime: AgentRuntime, session: Session):
+    import asyncio
+
+    return asyncio.run(runtime.run(session, "请回显 hello-archive"))
+
+
+class TestThreeRoundConversation:
+    def test_messages_in_id_order_and_tool_result_searchable(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        round1 = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "echo", "args": {"text": "存档关键词-青花瓷"},
+                "id": "call_arc_1", "type": "tool_call",
+            }],
+        )
+        scripted = ScriptedModel([round1, AIMessage(content="工具已执行完成")])
+        session, result = _run_with_archive(tmp_path, archive, scripted)
+
+        rows = archive.get_messages(session.session_id)
+        assert [r["role"] for r in rows] == ["user", "assistant", "tool", "assistant"]
+        assert [r["id"] for r in rows] == sorted(r["id"] for r in rows)
+        assert "请回显 hello-archive" in rows[0]["content"]
+        assert "call_arc_1" in rows[1]["tool_calls"]
+        tool_call_id = rows[2]["tool_call_id"]
+        assert tool_call_id == "call_arc_1"
+        assert "ECHO[存档关键词-青花瓷]" in rows[2]["content"]
+        assert rows[3]["content"] == "工具已执行完成"
+
+        hits = archive.search_messages("青花瓷", limit=10)
+        assert hits, "FTS5 必须能搜到 tool 结果里的关键词"
+        assert any(hit["session_id"] == session.session_id for hit in hits)
+        assert result.status == "completed"
+
+    def test_delta_chunks_are_not_archived(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        scripted = ScriptedModel([AIMessage(content="流式终态"), AIMessage(content="再一轮")])
+        session = _archived_session(tmp_path, archive)
+        runtime = _runtime(scripted)
+        import asyncio
+
+        async def drive() -> None:
+            async for _ in runtime.run_stream(session, "流式问题"):
+                pass
+
+        asyncio.run(drive())
+        roles = [r["role"] for r in archive.get_messages(session.session_id)]
+        # delta 不落库：一轮只有 user + 终态各一条，没有逐 chunk 的重复行
+        assert roles == ["user", "assistant"]
+        assert archive.get_messages(session.session_id)[-1]["content"] == "流式终态"
+
+
+# ------------------------------------------------------------------- AC3 ---
+
+
+class TestSessionSearchShapes:
+    def _seed(self, archive: SessionArchive) -> dict[str, str]:
+        now = time.time()
+        ids = {}
+        for sid, source, text in (
+            ("s-interactive", "interactive", "用户主会话 讨论 部署 方案 甲"),
+            ("s-subagent", "subagent", "子代理会话 讨论 部署 方案 乙"),
+            ("s-fork", "fork", "分支会话 讨论 部署 方案 丙"),
+            ("s-cron", "cron", "定时任务 讨论 部署 方案 丁"),
+        ):
+            archive.ensure_session(sid, source=source, started_at=now)
+            archive.append_message(sid, "user", text, timestamp=now)
+            archive.append_message(sid, "assistant", f"{text} 答复", timestamp=now + 1)
+            ids[source] = sid
+        return ids
+
+    def test_discovery_hides_subagent_and_fork(self, archive: SessionArchive) -> None:
+        ids = self._seed(archive)
+        out = archive.session_search(query="部署")
+        found = {r["session_id"] for r in out["results"]}
+        assert ids["interactive"] in found
+        assert ids["cron"] in found
+        assert ids["subagent"] not in found
+        assert ids["fork"] not in found
+
+    def test_discovery_demotes_cron(self, archive: SessionArchive) -> None:
+        ids = self._seed(archive)
+        out = archive.session_search(query="部署")
+        assert out["results"][0]["session_id"] == ids["interactive"]
+        assert out["results"][0]["source"] == "interactive"
+
+    def test_scroll_anchor(self, archive: SessionArchive) -> None:
+        self._seed(archive)
+        rows = archive.get_messages("s-interactive")
+        anchor = rows[1]["id"]
+        out = archive.session_search(session_id="s-interactive", around_message_id=anchor, window=1)
+        assert out["mode"] == "scroll"
+        window_ids = [m["id"] for m in out["messages"]]
+        assert anchor in window_ids
+        assert any(m.get("anchor") for m in out["messages"])
+
+    def test_read_shape_caps_content(self, archive: SessionArchive) -> None:
+        self._seed(archive)
+        big = "长" * 5000
+        archive.append_message("s-interactive", "tool", big, tool_name="big", timestamp=time.time())
+        out = archive.session_search(session_id="s-interactive")
+        assert out["mode"] == "read"
+        big_rows = [m for m in out["messages"] if m.get("tool_name") == "big"]
+        assert big_rows and big_rows[0]["content_truncated"] is True
+        assert len(big_rows[0]["content"]) <= 2000 + 1
+
+    def test_browse_lists_recent_sessions(self, archive: SessionArchive) -> None:
+        ids = self._seed(archive)
+        out = archive.session_search()
+        assert out["mode"] == "browse"
+        listed = {r["session_id"] for r in out["results"]}
+        assert ids["interactive"] in listed
+        assert ids["subagent"] not in listed
+
+    def test_relative_time_bounds(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("old", source="interactive", started_at=now - 30 * 86400)
+        archive.append_message("old", "user", "远古部署话题", timestamp=now - 30 * 86400)
+        archive.ensure_session("new", source="interactive", started_at=now)
+        archive.append_message("new", "user", "近期部署话题", timestamp=now)
+        out = archive.session_search(query="部署", after="7d")
+        assert [r["session_id"] for r in out["results"]] == ["new"]
+
+    def test_cjk_query_routes_to_cjk_index(
+        self, archive: SessionArchive, cjk_so: Path,
+    ) -> None:
+        archive.ensure_session("zh", source="interactive", started_at=time.time())
+        archive.append_message("zh", "user", "修改服务器配置后重启", timestamp=time.time())
+        assert archive.cjk_available is True, "fixture 已编出 .so，CJK 索引必须可用"
+        # 直查 CJK 索引：证明该词真的进了 messages_fts_cjk，而不是降级路径命中。
+        conn = _raw_cjk(archive.db_path, cjk_so)
+        try:
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_cjk WHERE messages_fts_cjk MATCH ?",
+                ('"服务"',),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert hits == 1, "2 字 CJK 词必须由 cjk_unicode61 索引命中"
+        # 路由：首个 MATCH 表必须是 CJK 索引（证明走的是 CJK 路径而非降级路径）。
+        tried: list[str] = []
+        original = archive._match_rows
+
+        def spy(table: str, *args, **kwargs):
+            tried.append(table)
+            return original(table, *args, **kwargs)
+
+        archive._match_rows = spy  # type: ignore[method-assign]
+        assert archive.search_messages("服务", limit=5), "2 字 CJK 词必须能命中（cjk_unicode61 大二元）"
+        assert tried == ["messages_fts_cjk"], tried
+
+    def test_discovery_lineage_root_field(self, archive: SessionArchive) -> None:
+        """F12：lineage root 写进 `lineage_root`，不是误导性的 `parent_session_id`。"""
+        now = time.time()
+        archive.ensure_session("root", source="interactive", started_at=now)
+        archive.ensure_session(
+            "child", source="interactive", started_at=now, parent_session_id="root",
+        )
+        archive.append_message("child", "user", "子会话里的关键词 灯塔", timestamp=now)
+
+        out = archive.session_search(query="灯塔", limit=5)
+        assert out["count"] == 1
+        entry = out["results"][0]
+        assert entry["session_id"] == "child"
+        assert entry["lineage_root"] == "root"
+        assert "parent_session_id" not in entry
+
+    def test_query_input_is_capped(self, archive: SessionArchive) -> None:
+        archive.ensure_session("cap", source="interactive", started_at=time.time())
+        archive.append_message("cap", "user", "x" * (MAX_FTS5_QUERY_CHARS + 500), timestamp=time.time())
+        # 超长输入不得抛异常，且被截断到上限
+        oversized = "x" * (MAX_FTS5_QUERY_CHARS + 500)
+        assert len(_sanitize_fts5_query(oversized)) <= MAX_FTS5_QUERY_CHARS
+        archive.search_messages(oversized, limit=5)
+
+
+# ------------------------------------------------------------------- AC4 ---
+
+
+class TestToolContentPrefix:
+    def test_index_only_sees_prefix_but_storage_keeps_full(
+        self, archive: SessionArchive,
+    ) -> None:
+        archive.ensure_session("big", source="interactive", started_at=time.time())
+        head = "前缀关键词A" + "填" * FTS_TOOL_CONTENT_PREFIX_CHARS
+        tail = "后缀关键词B"
+        full = head + tail
+        archive.append_message("big", "tool", full, tool_name="big", timestamp=time.time())
+
+        assert archive.search_messages("前缀关键词", limit=5)
+        # 索引 bound 不变：FTS 索引本身看不到 8192 之后的内容（LIKE 兜底是 canonical
+        # 全文路径，F4 起按设计不再受此 bound 限制）。
+        with _raw(archive.db_path) as conn:
+            hits = conn.execute(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?", ('"后缀关键词B"',)
+            ).fetchone()[0]
+        assert hits == 0, "8192 之后的内容不得进 FTS 索引"
+
+        rows = archive.get_messages("big")
+        assert rows[0]["content"] == full, "存储仍是全文"
+
+        out = archive.session_search(session_id="big")
+        assert out["mode"] in ("read", "scroll")
+        assert out["message_count"] == 1
+
+    def test_projection_view_matches_prefix(self, archive: SessionArchive) -> None:
+        archive.ensure_session("p", source="interactive", started_at=time.time())
+        full = "甲" * (FTS_TOOL_CONTENT_PREFIX_CHARS + 10)
+        archive.append_message("p", "tool", full, tool_name="p", timestamp=time.time())
+        with _raw(archive.db_path) as conn:
+            projected = conn.execute(
+                "SELECT content FROM messages_fts_src WHERE tool_name='p'"
+            ).fetchone()["content"]
+        assert projected == full[:FTS_TOOL_CONTENT_PREFIX_CHARS]
+
+
+# ------------------------------------------------------------------- AC5 ---
+
+
+class TestConcurrencyAndCrash:
+    def test_concurrent_writers_lose_nothing(self, archive: SessionArchive) -> None:
+        """AC5：`messages.id` 自增序 == 写入提交序（记录与 append 同处一个临界区）。"""
+        archive.ensure_session("c", source="interactive", started_at=time.time())
+        threads = 8
+        per_thread = 25
+        errors: list[BaseException] = []
+        # 一把锁把 append 与「记录返回值」包成原子段：记录顺序即提交顺序。
+        commit_lock = threading.Lock()
+        committed: list[int] = []
+
+        def worker(n: int) -> None:
+            try:
+                for i in range(per_thread):
+                    with commit_lock:
+                        message_id = archive.append_message(
+                            "c", "user", f"thread-{n}-msg-{i}", timestamp=time.time(),
+                        )
+                        committed.append(message_id)
+            except BaseException as exc:  # noqa: BLE001 - 测试要收集全部失败
+                errors.append(exc)
+
+        workers = [threading.Thread(target=worker, args=(n,)) for n in range(threads)]
+        for t in workers:
+            t.start()
+        for t in workers:
+            t.join()
+        assert not errors
+        rows = archive.get_messages("c")
+        assert len(rows) == threads * per_thread
+        table_ids = [r["id"] for r in rows]  # `ORDER BY id`
+        assert len({r["content"] for r in rows}) == threads * per_thread
+        assert committed == sorted(committed), "提交序必须与自增 id 序一致"
+        assert committed == table_ids, "记录到的提交序必须与表内 id 序逐个相等"
+
+    def test_kill_9_leaves_openable_consistent_db(
+        self, tmp_path: Path, cjk_so: Path,
+    ) -> None:
+        db_path = tmp_path / "sessions" / "state.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        script = textwrap.dedent(
+            """
+            import sys, time
+            from pathlib import Path
+            from agent_harness.storage.session_archive import SessionArchive
+
+            arc = SessionArchive(Path(sys.argv[1]), cjk_so_path=Path(sys.argv[2]))
+            arc.initialize()
+            arc.ensure_session("k", source="interactive", started_at=time.time())
+            i = 0
+            while True:
+                arc.append_message("k", "user", f"crash-{i}", timestamp=time.time())
+                i += 1
+                sys.stdout.write("x")
+                sys.stdout.flush()
+            """
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, str(db_path), str(cjk_so)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+        try:
+            deadline = time.time() + 30
+            seen = 0
+            while seen < 40 and time.time() < deadline:
+                chunk = proc.stdout.read(40 - seen)
+                if not chunk:
+                    break
+                seen += len(chunk)
+            assert seen >= 40, proc.stderr.read().decode() if proc.stderr else "no progress"
+        finally:
+            proc.send_signal(signal.SIGKILL)
+            proc.wait(timeout=10)
+
+        # 裸连接读不了 cjk 表（tokenizer 是**按连接**登记的）：先加载扩展再校验。
+        with _raw(db_path) as conn:
+            conn.enable_load_extension(True)
+            conn.load_extension(str(cjk_so))
+            conn.enable_load_extension(False)
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert conn.execute(
+                "INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')"
+            ) is not None
+            rows = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        assert rows >= 40
+        reopened = SessionArchive(db_path, cjk_so_path=cjk_so)
+        assert reopened.get_messages("k")
+
+
+# ------------------------------------------------------------------- AC6 ---
+
+
+class TestEventStreamUntouched:
+    def _payload(self, events) -> list[tuple[str, tuple[str, ...]]]:
+        return [(e.type, tuple(sorted(e.data))) for e in events]
+
+    def test_observer_does_not_change_event_payloads(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        """不变量 #22：挂归档观察者前后，落盘事件的类型与 `data` 键逐条相同。"""
+        def scripted() -> ScriptedModel:
+            return ScriptedModel([
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "echo", "args": {"text": "相同载荷"},
+                        "id": "call_arc_2", "type": "tool_call",
+                    }],
+                ),
+                AIMessage(content="完成"),
+            ])
+
+        plain = Session.start(JsonlSessionStore(root=tmp_path / "plain"))
+        _run(_runtime(scripted()), plain)
+
+        archived = _archived_session(tmp_path / "archived", archive)
+        _run(_runtime(scripted()), archived)
+
+        assert self._payload(plain.events) == self._payload(archived.events)
+        # 归档观察者不往事件流塞自己的事件类型
+        assert {e.type for e in archived.events} == {e.type for e in plain.events}
+
+    def test_observer_does_not_change_append_event_return_values(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        """`append_event` 的返回值在有无观察者时 `data` 键集合逐个相同（不变量 #22）。"""
+        from agent_harness.session.event import (
+            MODEL_COMPLETED,
+            TOOL_RESULT,
+            USER_MESSAGE,
+        )
+
+        sequence = [
+            (USER_MESSAGE, {"content": "问题"}),
+            (MODEL_COMPLETED, {"content": "回答", "tool_calls": None}),
+            (TOOL_RESULT, {"tool_call_id": "c1", "content": "大载荷" * 100}),
+        ]
+
+        def feed(store: JsonlSessionStore, sid: str) -> list[tuple[str, tuple[str, ...]]]:
+            seen: list[tuple[str, tuple[str, ...]]] = []
+            for seq, (event_type, data) in enumerate(sequence):
+                event = store.append_event(
+                    sid, SessionEvent(type=event_type, session_id=sid, seq=seq, data=data),
+                )
+                seen.append((event.type, tuple(sorted(event.data))))
+            return seen
+
+        plain_store = JsonlSessionStore(root=tmp_path / "plain")
+        archived_store = JsonlSessionStore(root=tmp_path / "archived")
+        SessionArchiveObserver(archive).attach(archived_store)
+        assert feed(plain_store, "sid-plain") == feed(archived_store, "sid-archived")
+
+
+# ------------------------------------------------------- 产品接线（#1389 6) ---
+
+
+class TestStoreObserverWiring:
+    """写入钩子挂在 `JsonlSessionStore` 上：一处接线覆盖全部生产写路径。"""
+
+    def _store(self, tmp_path: Path) -> object:
+        from agent_harness.session.store import JsonlSessionStore
+
+        return JsonlSessionStore(root=tmp_path / "sessions")
+
+    def test_observer_archives_terminal_events_only(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        from agent_harness.session.event import (
+            MODEL_COMPLETED,
+            MODEL_DELTA,
+            USER_MESSAGE,
+        )
+
+        store = self._store(tmp_path)
+        SessionArchiveObserver(archive).attach(store)
+        sid = "sess-observer"
+        store.append_event(
+            sid, SessionEvent(type=USER_MESSAGE, session_id=sid, seq=0,
+                              data={"content": "观察者写入"}),
+        )
+        store.append_event(
+            sid, SessionEvent(type=MODEL_DELTA, session_id=sid, seq=1,
+                              data={"content": "流式 chunk"}),
+        )
+        store.append_event(
+            sid, SessionEvent(type=MODEL_COMPLETED, session_id=sid, seq=2,
+                              data={"content": "终态"}),
+        )
+        rows = archive.get_messages(sid)
+        assert [r["role"] for r in rows] == ["user", "assistant"]
+        assert rows[1]["content"] == "终态"
+
+    def test_observer_failure_never_breaks_append(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        from agent_harness.session.event import USER_MESSAGE
+
+        store = self._store(tmp_path)
+
+        def boom(session_id: str, event: object) -> None:
+            raise RuntimeError("档案库炸了")
+
+        store.set_event_observer(boom)
+        event = store.append_event(
+            "sess-boom",
+            SessionEvent(type=USER_MESSAGE, session_id="sess-boom", seq=0,
+                         data={"content": "写入必须成功"}),
+        )
+        assert event.seq == 0
+        assert archive.get_messages("sess-boom") == []
+
+    def test_source_vocabulary_mapping(
+        self, tmp_path: Path, archive: SessionArchive,
+    ) -> None:
+        """fork → hidden、委派子会话 → subagent(hidden)、普通 → interactive。"""
+        from agent_harness.session.event import (
+            SESSION_FORKED,
+            SESSION_STARTED,
+            USER_MESSAGE,
+        )
+
+        store = self._store(tmp_path)
+        SessionArchiveObserver(archive).attach(store)
+        store.append_event(
+            "sess-normal",
+            SessionEvent(type=SESSION_STARTED, session_id="sess-normal", seq=0, data={}),
+        )
+        store.append_event(
+            "sess-child",
+            SessionEvent(type=SESSION_STARTED, session_id="sess-child", seq=0,
+                         data={"delegation_tree_id": "tree-1"}),
+        )
+        store.append_event(
+            "sess-fork",
+            SessionEvent(type=SESSION_FORKED, session_id="sess-fork", seq=0,
+                         data={"parent_session_id": "sess-normal"}),
+        )
+        assert archive.get_session("sess-normal")["source"] == "interactive"
+        assert archive.get_session("sess-child")["source"] == "subagent"
+        fork = archive.get_session("sess-fork")
+        assert fork["source"] == "fork"
+        assert fork["parent_session_id"] == "sess-normal"
+
+        # hidden 语义：fork / subagent 不出现在 DISCOVERY 结果里
+        for sid in ("sess-normal", "sess-child", "sess-fork"):
+            store.append_event(
+                sid, SessionEvent(type=USER_MESSAGE, session_id=sid, seq=1,
+                                  data={"content": "共同关键词 灯塔"}),
+            )
+        hits = archive.session_search(query="灯塔", limit=10)
+        assert {h["session_id"] for h in hits["results"]} == {"sess-normal"}
+
+    def test_install_creates_nothing_until_first_event(self, tmp_path: Path) -> None:
+        """接线本身零磁盘痕迹（422 请求不留尾巴的不变量），建库后才不干扰会话列表。"""
+        from agent_harness.session.event import USER_MESSAGE
+        from agent_harness.storage.session_archive import install_session_archive
+
+        store = self._store(tmp_path)
+        root = tmp_path / "sessions"
+        install_session_archive(store, root / "state.db")
+        assert not root.exists() or list(root.iterdir()) == []
+
+        sid = "sess-real"
+        store.append_event(
+            sid, SessionEvent(type=USER_MESSAGE, session_id=sid, seq=0,
+                              data={"content": "真实会话"}),
+        )
+        store.append_event(
+            sid, SessionEvent(type=USER_MESSAGE, session_id=sid, seq=1,
+                              data={"content": "第二笔"}),
+        )
+        # state.db 落在 sessions root 下（裸文件，不是目录）：列表只认目录。
+        assert (root / "state.db").exists()
+        assert store.list_session_ids() == [sid]
+
+    def test_concurrent_first_access_builds_single_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1418 F-3：多个线程同时首访 `.archive` 只建一个实例、不抛。
+
+        首建 check-then-set 若在锁外，各线程会各建一个 `SessionArchive`
+        并各跑一次 `initialize()`，后写者覆盖前者（连接泄漏 + 重复维护）。
+        """
+        from agent_harness.storage import session_archive as module
+
+        observer = SessionArchiveObserver(
+            tmp_path / "sessions" / "state.db", auto_prune=False,
+        )
+        init_calls: list[SessionArchive] = []
+        real_initialize = module.SessionArchive.initialize
+
+        def slow_initialize(self: SessionArchive) -> None:
+            # 拉宽竞态窗口：没有锁时其它线程必然也通过 `_archive is None` 检查。
+            init_calls.append(self)
+            time.sleep(0.05)
+            real_initialize(self)
+
+        monkeypatch.setattr(module.SessionArchive, "initialize", slow_initialize)
+
+        results: list[SessionArchive] = []
+        errors: list[BaseException] = []
+        start = threading.Barrier(8)
+
+        def hit() -> None:
+            try:
+                start.wait()
+                results.append(observer.archive)
+            except BaseException as exc:  # noqa: BLE001 - 测试要看到任何异常
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(results) == 8
+        assert len(init_calls) == 1, "首建必须只跑一次 initialize()"
+        assert len({id(arc) for arc in results}) == 1, "所有线程必须拿到同一实例"
+        assert observer.archive is results[0]
+
+
+# ------------------------------------------- 修复轮 B：检索语义（Hermes 对齐） ---
+
+
+class TestOrRelaxedRetry:
+    """F3：精确查询与子串回退全部零命中后，用 any-term OR 再试一次。"""
+
+    def test_paraphrase_query_hits_via_or_retry(self, archive: SessionArchive) -> None:
+        archive.ensure_session("para", source="interactive", started_at=time.time())
+        archive.append_message(
+            "para", "user",
+            "Sarah prefers the standup meeting scheduled on Thursday mornings",
+            timestamp=time.time(),
+        )
+        rows = archive.search_messages(
+            "when does Sarah like her standup scheduled", limit=5,
+        )
+        assert rows, "隐式 AND 全零命中后必须用 OR 放宽重试"
+        assert rows[0]["session_id"] == "para"
+
+    def test_single_term_and_explicit_operators_do_not_relax(self) -> None:
+        from agent_harness.storage.session_archive import _or_relaxed_query
+
+        assert _or_relaxed_query("standup") is None
+        assert _or_relaxed_query("alpha OR beta") is None
+        assert _or_relaxed_query("alpha NOT beta") is None
+        assert _or_relaxed_query('"docker networking" tls') == '"docker networking" OR tls'
+
+    def test_not_query_keeps_exact_semantics(self, archive: SessionArchive) -> None:
+        archive.ensure_session("neg", source="interactive", started_at=time.time())
+        archive.append_message("neg", "user", "alpha beta", timestamp=time.time())
+        # 放宽会把该行搜出来；显式 NOT 必须保持精确语义。
+        assert archive.search_messages("alpha NOT beta", limit=5) == []
+
+
+class TestLikeFallback:
+    """F4：LIKE 兜底三列 OR、全文扫描、tool 角色走全文路径。"""
+
+    def test_two_terms_match_sentence_containing_one(self, archive: SessionArchive) -> None:
+        archive.ensure_session("like-or", source="interactive", started_at=time.time())
+        archive.append_message("like-or", "user", "我们部署了新版本", timestamp=time.time())
+        rows = archive.search_messages("部署 回滚", limit=5)
+        assert rows, "LIKE 兜底必须是 term 之间 OR（任一命中即可）"
+
+    def test_tool_name_column_is_searched(self, archive: SessionArchive) -> None:
+        archive.ensure_session("like-toolname", source="interactive", started_at=time.time())
+        archive.append_message(
+            "like-toolname", "tool", "无关内容", tool_name="数据库迁移",
+            timestamp=time.time(),
+        )
+        rows = archive.search_messages("迁移", role_filter=("tool",), limit=5)
+        assert rows, "tool_name 列必须参与 LIKE 匹配"
+
+    def test_tool_role_searches_full_canonical_content(self, archive: SessionArchive) -> None:
+        archive.ensure_session("tool-full", source="interactive", started_at=time.time())
+        full = "x" * FTS_TOOL_CONTENT_PREFIX_CHARS + " postfixmarkerB"
+        archive.append_message("tool-full", "tool", full, timestamp=time.time())
+
+        # 普通 FTS 路由仍只覆盖索引 bound（8192 前缀）。
+        assert archive.search_messages("postfixmarkerB", limit=5) == []
+        # 显式 tool 角色是 opt-in 全文路径。
+        rows = archive.search_messages("postfixmarkerB", role_filter=("tool",), limit=5)
+        assert [r["session_id"] for r in rows] == ["tool-full"]
+
+
+class TestTitleDiscovery:
+    """F5：DISCOVERY 先按会话标题解析。"""
+
+    def test_title_match_returns_session_title_entry(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "titled", source="interactive", started_at=time.time(), title="项目甲",
+        )
+        archive.append_message("titled", "user", "无关内容", timestamp=time.time())
+
+        out = archive.session_search(query="项目甲")
+        assert out["count"] == 1
+        entry = out["results"][0]
+        assert entry["session_id"] == "titled"
+        assert entry["matched_role"] == "session_title"
+        assert entry["snippet"] == "Session title matched: 项目甲"
+        assert entry["detail"] == "full"
+
+    def test_numbered_continuation_preferred(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("t1", source="interactive", started_at=now, title="项目甲")
+        archive.ensure_session("t2", source="interactive", started_at=now + 10, title="项目甲 #2")
+        assert archive.resolve_session_by_title("项目甲") == "t2"
+        assert archive.resolve_session_by_title("不存在的标题") is None
+
+    def test_like_wildcards_escaped_in_numbered_lookup(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("pct", source="interactive", started_at=now, title="100%完成")
+        archive.ensure_session("decoy", source="interactive", started_at=now + 10,
+                               title="100X完成 #2")
+        assert archive.resolve_session_by_title("100%完成") == "pct"
+
+    def test_hidden_source_title_not_returned(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "hidden-title", source="subagent", started_at=time.time(), title="隐藏项目乙",
+        )
+        archive.append_message("hidden-title", "user", "无关内容", timestamp=time.time())
+        out = archive.session_search(query="隐藏项目乙")
+        assert out["results"] == []
+
+    def test_current_live_lineage_title_not_returned(self, archive: SessionArchive) -> None:
+        archive.ensure_session(
+            "cur-title", source="interactive", started_at=time.time(), title="当前项目丙",
+        )
+        archive.append_message("cur-title", "user", "无关内容", timestamp=time.time())
+        out = archive.session_search(query="当前项目丙", current_session_id="cur-title")
+        assert out["results"] == []
+
+
+class TestScrollHermesAlignment:
+    """F6：当前 live context 硬拒绝 + 同 lineage 透明 rebind。"""
+
+    def _seed_lineage(self, archive: SessionArchive) -> dict[str, int]:
+        now = time.time()
+        archive.ensure_session("parent", source="interactive", started_at=now, title="父会话")
+        archive.ensure_session(
+            "child", source="interactive", started_at=now + 1,
+            parent_session_id="parent", title="子会话",
+        )
+        archive.ensure_session("other", source="interactive", started_at=now, title="旁支")
+        archive.append_message("parent", "user", "父会话消息", timestamp=now)
+        child_id = archive.append_message("child", "user", "子会话消息", timestamp=now + 1)
+        other_id = archive.append_message("other", "user", "旁支消息", timestamp=now)
+        return {"child": child_id, "other": other_id}
+
+    def test_anchor_in_current_lineage_is_rejected(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(
+            session_id="parent", around_message_id=ids["child"], current_session_id="parent",
+        )
+        assert out["success"] is False
+        assert out["error"].startswith("scroll rejected: anchor lives in the current session lineage")
+
+    def test_same_lineage_child_anchor_rebinds_to_owner(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(session_id="parent", around_message_id=ids["child"])
+        assert out.get("success") is not False
+        assert out["session_id"] == "child"
+        assert out["session_meta"]["title"] == "子会话"
+        assert any(m.get("anchor") for m in out["messages"])
+
+    def test_foreign_lineage_anchor_errors(self, archive: SessionArchive) -> None:
+        ids = self._seed_lineage(archive)
+        out = archive.session_search(session_id="other", around_message_id=ids["child"])
+        assert out["success"] is False
+        assert out["error"] == f"around_message_id {ids['child']} not in session_id other"
+
+
+class TestFtsCorruptionFailOpen:
+    """F9：FTS 损坏（DatabaseError）时降级 LIKE，不向调用方抛异常。"""
+
+    def test_corrupt_fts_falls_back_to_like(self, archive: SessionArchive) -> None:
+        archive.ensure_session("corrupt", source="interactive", started_at=time.time())
+        archive.append_message(
+            "corrupt", "user", "hello world marker", timestamp=time.time(),
+        )
+        with _raw(archive.db_path) as conn:
+            conn.execute("DELETE FROM messages_fts_data")
+            conn.commit()
+
+        rows = archive.search_messages("hello world marker", limit=5)
+        assert [r["session_id"] for r in rows] == ["corrupt"]
+
+
+class TestCurrentLineageExceptions:
+    """F10：当前 lineage 命中的三个例外 + F15 空结果提示。"""
+
+    def _set_end_reason(self, archive: SessionArchive, session_id: str, reason: str | None) -> None:
+        with _raw(archive.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET end_reason = ? WHERE id = ?", (reason, session_id),
+            )
+            conn.commit()
+
+    def test_compression_ended_parent_is_discoverable(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("comp-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "comp-child", source="interactive", started_at=now + 1,
+            parent_session_id="comp-parent",
+        )
+        archive.append_message("comp-parent", "user", "压缩前关键词", timestamp=now)
+        self._set_end_reason(archive, "comp-parent", "compression")
+
+        out = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert [r["session_id"] for r in out["results"]] == ["comp-parent"]
+
+    def test_reset_ended_parent_is_discoverable(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("reset-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "reset-child", source="interactive", started_at=now + 1,
+            parent_session_id="reset-parent",
+        )
+        archive.append_message("reset-parent", "user", "重置前关键词", timestamp=now)
+        self._set_end_reason(archive, "reset-parent", "session_reset")
+
+        out = archive.session_search(query="重置前关键词", current_session_id="reset-child")
+        assert [r["session_id"] for r in out["results"]] == ["reset-parent"]
+
+    def test_live_lineage_hit_skipped_with_message(self, archive: SessionArchive) -> None:
+        now = time.time()
+        archive.ensure_session("live-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "live-child", source="interactive", started_at=now + 1,
+            parent_session_id="live-parent",
+        )
+        archive.append_message("live-parent", "user", "仍在上下文关键词", timestamp=now)
+
+        out = archive.session_search(query="仍在上下文关键词", current_session_id="live-child")
+        assert out["results"] == []
+        assert "message" in out and out["message"].startswith("No matching sessions found")
+
+    def test_compacted_row_on_current_session_is_discoverable(
+        self, archive: SessionArchive,
+    ) -> None:
+        archive.ensure_session("cur-session", source="interactive", started_at=time.time())
+        archive.append_message(
+            "cur-session", "user", "压缩归档关键词", timestamp=time.time(),
+            active=0, compacted=1,
+        )
+        out = archive.session_search(query="压缩归档关键词", current_session_id="cur-session")
+        assert [r["session_id"] for r in out["results"]] == ["cur-session"]
+
+
+# ----------------------------------- #1418：end_session（首写获胜） --------
+
+class TestEndSession:
+    """#1418：`SessionArchive.end_session` 抄 Hermes 首写获胜语义。
+
+    来源: Hermes `hermes_state_sessions.py:483-490` @ `b324b1f7`
+    （`UPDATE ... WHERE id = ? AND ended_at IS NULL`）；与本仓
+    `_sweep_orphaned_sessions`（同为首写获胜）对齐。
+    """
+
+    def test_writes_ended_at_and_end_reason(self, archive: SessionArchive) -> None:
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        meta = archive.get_session("old")
+        assert meta is not None
+        assert meta["end_reason"] == "new_session"
+        assert meta["ended_at"] is not None
+
+    def test_first_write_wins(self, archive: SessionArchive) -> None:
+        """已有 ended_at 时不得覆写——Hermes 原语义（其侧如压缩结束）。
+
+        本仓当前没有写 `end_reason='compression'` 的生产方（压缩是消息级投影）；
+        本用例用裸 SQL 预置结束态，模拟「已有首个写入方」。
+        """
+        archive.ensure_session("comp", source="interactive", started_at=time.time())
+        with _raw(archive.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+                (1_000.0, "compression", "comp"),
+            )
+            conn.commit()
+        archive.end_session("comp", "new_session")
+        meta = archive.get_session("comp")
+        assert meta is not None
+        assert meta["end_reason"] == "compression", "首写获胜：压缩结束不得被 new_session 覆写"
+        assert meta["ended_at"] == 1_000.0
+
+    def test_repeated_calls_are_idempotent(self, archive: SessionArchive) -> None:
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        first = archive.get_session("old")
+        archive.end_session("old", "new_session")
+        assert archive.get_session("old") == first, "重复结束必须零副作用"
+
+    def test_missing_session_is_a_silent_noop(self, archive: SessionArchive) -> None:
+        """previous 不存在（或从未被观察者登记过）→ 命中 0 行，不抛。"""
+        archive.end_session("never-seen", "new_session")
+        assert archive.get_session("never-seen") is None
+
+    def test_end_reason_is_in_the_fresh_reset_vocabulary(self, archive: SessionArchive) -> None:
+        """AC3 ①：落列值 == `new_session`，且该值在谓词词表里（不许自造线值）。"""
+        from agent_harness.storage.session_archive import _FRESH_RESET_END_REASONS
+
+        archive.ensure_session("old", source="interactive", started_at=time.time())
+        archive.end_session("old", "new_session")
+        meta = archive.get_session("old")
+        assert meta is not None
+        assert meta["end_reason"] == "new_session"
+        assert meta["end_reason"] in _FRESH_RESET_END_REASONS
+
+    def test_predicate_returns_truthy_after_end(self, archive: SessionArchive) -> None:
+        """AC3 ②：谓词级激活（手工造同父链数据）。
+
+        诚实边界（P0-2 选 A）：生产 `/new` 的新旧会话不同 lineage，
+        `_discover` 的跨会话跳过在生产路径暂不触达；本用例只证明
+        「落值后谓词对该会话返回真值」这一层，不冒充端到端触达。
+        """
+        now = time.time()
+        archive.ensure_session("parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "child", source="interactive", started_at=now + 1,
+            parent_session_id="parent",
+        )
+        archive.append_message("parent", "user", "结束前关键词", timestamp=now)
+        assert archive._session_left_live_context("parent") is False, "结束前必须是假"
+
+        archive.end_session("parent", "new_session")
+
+        assert archive._session_left_live_context("parent") is True
+        # 同父链数据：谓词真值确实放行了 DISCOVERY 的同 lineage 命中。
+        out = archive.session_search(query="结束前关键词", current_session_id="child")
+        assert [r["session_id"] for r in out["results"]] == ["parent"]
+
+    def test_compressed_session_keeps_null_end_reason(self, archive: SessionArchive) -> None:
+        """AC4 回归：压缩后会话 end_reason 保持 NULL，DISCOVERY 行为不变。
+
+        压缩在本仓是**消息级**投影（`active=0, compacted=1`），不写会话行；
+        end_session 只由 /new 调用，压缩会话没被 /new 走过 ⇒ 保持 NULL。
+        """
+        now = time.time()
+        archive.ensure_session("comp-parent", source="interactive", started_at=now)
+        archive.ensure_session(
+            "comp-child", source="interactive", started_at=now + 1,
+            parent_session_id="comp-parent",
+        )
+        # 另一条 lineage：让下面的比较有非空基线（否则 `after == before` 是空集自比）。
+        archive.ensure_session("other", source="interactive", started_at=now)
+        archive.append_message("comp-parent", "user", "压缩前关键词", timestamp=now)
+        archive.append_message("other", "user", "压缩前关键词", timestamp=now)
+        before = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert [r["session_id"] for r in before["results"]] == ["other"], (
+            "基线必须非空，且同 lineage 仍在 live context 的 comp-parent 被跳过"
+        )
+        # 压缩 = 消息级投影（`active=0, compacted=1`），不写会话行。
+        archive.append_message(
+            "comp-parent", "assistant", "压缩摘要关键词", timestamp=now,
+            active=0, compacted=1,
+        )
+        meta = archive.get_session("comp-parent")
+        assert meta is not None
+        assert meta["end_reason"] is None, "压缩不得写会话行 end_reason"
+        assert archive._session_left_live_context("comp-parent") is False
+
+        after = archive.session_search(query="压缩前关键词", current_session_id="comp-child")
+        assert after == before, "压缩不得改变 DISCOVERY 行为"
+        # 压缩行本身按 `is_compacted_hit` 放行——证明确实走到了 DISCOVERY 的有结果分支。
+        compacted = archive.session_search(
+            query="压缩摘要关键词", current_session_id="comp-child",
+        )
+        assert [r["session_id"] for r in compacted["results"]] == ["comp-parent"]
+
+
+# ----------------------------------- 批次 D：auto-prune 90 天（Hermes 对齐） ---
+
+_DAY = 86_400.0
+
+
+def _age_session(
+    archive: SessionArchive, session_id: str, *, days: float,
+    ended: bool = False, pinned: bool = False, source: str | None = None,
+) -> None:
+    """把会话的时间戳整体推回 *days* 天前（裸 SQL：archive API 只写 now）。"""
+    ts = time.time() - days * _DAY
+    with _raw(archive.db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET started_at = ?, last_activity_at = ?, "
+            "ended_at = ?, pinned = ?" + (", source = ?" if source else "") + " WHERE id = ?",
+            (ts, ts, ts if ended else None, int(pinned), *([source] if source else []), session_id),
+        )
+        conn.execute("UPDATE messages SET timestamp = ? WHERE session_id = ?", (ts, session_id))
+        conn.commit()
+
+
+class TestAutoPrune:
+    """§3：照抄 Hermes `maybe_auto_prune_and_vacuum` 的保留策略。"""
+
+    def _seed(self, archive: SessionArchive, sid: str, text: str, **kw: object) -> None:
+        archive.ensure_session(
+            sid, source=str(kw.pop("source", "interactive")), started_at=time.time(),
+        )
+        archive.append_message(sid, "user", text, timestamp=time.time())
+
+    def test_ended_100_days_is_pruned(self, archive: SessionArchive) -> None:
+        self._seed(archive, "old-ended", "古老会话关键词")
+        _age_session(archive, "old-ended", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("old-ended") is None
+        assert archive.get_messages("old-ended") == []
+        # FTS 行由 delete 触发器连带删：检索不得再命中。
+        assert archive.search_messages("古老会话关键词") == []
+
+    def test_ended_10_days_is_kept(self, archive: SessionArchive) -> None:
+        self._seed(archive, "recent-ended", "十天前会话")
+        _age_session(archive, "recent-ended", days=10, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("recent-ended") is not None
+        assert len(archive.get_messages("recent-ended")) == 1
+
+    def test_open_interactive_100_days_is_kept(self, archive: SessionArchive) -> None:
+        """open（ended_at IS NULL）即视为在跑：interactive 一律不删不 close。"""
+        self._seed(archive, "old-open", "没结束的会话")
+        _age_session(archive, "old-open", days=100, ended=False)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0 and out["closed"] == 0
+        meta = archive.get_session("old-open")
+        assert meta is not None and meta["ended_at"] is None
+
+    def test_pinned_ended_100_days_is_kept(self, archive: SessionArchive) -> None:
+        self._seed(archive, "pinned-old", "置顶会话")
+        _age_session(archive, "pinned-old", days=100, ended=True, pinned=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("pinned-old") is not None
+
+    def test_stale_open_cron_100_days_is_closed_not_deleted(self, archive: SessionArchive) -> None:
+        self._seed(archive, "stale-cron", "定时任务会话", source="cron")
+        _age_session(archive, "stale-cron", days=100, ended=False, source="cron")
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 1 and out["pruned"] == 0
+        meta = archive.get_session("stale-cron")
+        assert meta is not None, "stale open 只能 close，不能删"
+        assert meta["ended_at"] is not None
+        assert meta["end_reason"] == "startup_orphan_reap"
+        assert len(archive.get_messages("stale-cron")) == 1, "消息必须保留（可恢复）"
+
+    def test_stale_open_subagent_and_fork_are_closed(self, archive: SessionArchive) -> None:
+        for sid, source in (("stale-sub", "subagent"), ("stale-fork", "fork")):
+            self._seed(archive, sid, f"{source} 会话", source=source)
+            _age_session(archive, sid, days=100, ended=False, source=source)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 2
+        for sid in ("stale-sub", "stale-fork"):
+            assert archive.get_session(sid)["end_reason"] == "startup_orphan_reap"
+
+    def test_closed_orphan_gets_full_retention_window(self, archive: SessionArchive) -> None:
+        """先 prune 后 sweep：本轮被 close 的孤儿不会被同轮删掉。"""
+        self._seed(archive, "just-closed", "孤儿会话", source="cron")
+        _age_session(archive, "just-closed", days=100, ended=False, source="cron")
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["closed"] == 1 and out["pruned"] == 0
+        assert archive.get_session("just-closed") is not None
+
+    def test_orphan_reaped_row_ages_from_its_close(self, archive: SessionArchive) -> None:
+        """sweep 关闭的行按 `ended_at` 计龄：下一轮（24h 后）不得立刻删。"""
+        self._seed(archive, "reaped", "被关闭的孤儿", source="cron")
+        _age_session(archive, "reaped", days=100, ended=False, source="cron")
+        archive.maybe_auto_prune_and_vacuum(now=time.time() - 10 * _DAY)
+        assert archive.get_session("reaped")["end_reason"] == "startup_orphan_reap"
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0, "刚关闭的孤儿还欠一个完整 retention 窗口"
+        assert archive.get_session("reaped") is not None
+
+    def test_orphan_reaped_row_pruned_after_retention_from_close(
+        self, archive: SessionArchive,
+    ) -> None:
+        self._seed(archive, "reaped-old", "早该删的孤儿", source="cron")
+        _age_session(archive, "reaped-old", days=200, ended=False, source="cron")
+        archive.maybe_auto_prune_and_vacuum(now=time.time() - 100 * _DAY)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("reaped-old") is None
+
+    def test_throttle_skips_within_min_interval(self, archive: SessionArchive) -> None:
+        self._seed(archive, "throttled-old", "节流会话")
+        _age_session(archive, "throttled-old", days=100, ended=True)
+        archive._set_meta("last_auto_prune", str(time.time()))
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["skipped"] is True
+        assert out["pruned"] == 0
+        assert archive.get_session("throttled-old") is not None
+
+    def test_empty_run_still_records_last_auto_prune(self, archive: SessionArchive) -> None:
+        out = archive.maybe_auto_prune_and_vacuum(now=1_000_000.0)
+
+        assert out["skipped"] is False and out["pruned"] == 0
+        assert float(archive._get_meta("last_auto_prune")) == 1_000_000.0
+
+    def test_auto_prune_false_is_skipped(self, archive: SessionArchive) -> None:
+        self._seed(archive, "disabled-old", "禁用开关会话")
+        _age_session(archive, "disabled-old", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum(auto_prune=False)
+
+        assert out["skipped"] is True and out["pruned"] == 0
+        assert archive.get_session("disabled-old") is not None
+        assert archive._get_meta("last_auto_prune") is None, "禁用时不得写节流时间"
+
+    def test_negative_retention_is_skipped(self, archive: SessionArchive) -> None:
+        self._seed(archive, "neg-old", "负 retention")
+        _age_session(archive, "neg-old", days=1, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum(retention_days=-1)
+
+        assert out["skipped"] is True and out["pruned"] == 0
+        assert archive.get_session("neg-old") is not None
+
+    def test_activity_uses_latest_message_not_just_last_activity_at(
+        self, archive: SessionArchive,
+    ) -> None:
+        """activity = freshest of last_activity_at / 最新消息 / started_at。"""
+        self._seed(archive, "fresh-msg", "旧行新消息")
+        with _raw(archive.db_path) as conn:
+            # 会话行很旧，但最新消息是刚才：不得被判超窗。
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?",
+                (time.time() - 200 * _DAY, time.time() - 200 * _DAY, "fresh-msg"),
+            )
+            conn.execute(
+                "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+                (time.time(), "fresh-msg"),
+            )
+            conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (time.time(), "fresh-msg"))
+            conn.commit()
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 0
+        assert archive.get_session("fresh-msg") is not None
+
+    def test_prune_orphans_children_outside_window(self, archive: SessionArchive) -> None:
+        self._seed(archive, "old-parent", "父会话")
+        archive.ensure_session(
+            "young-child", source="interactive", started_at=time.time(),
+            parent_session_id="old-parent",
+        )
+        archive.append_message("young-child", "user", "子会话", timestamp=time.time())
+        _age_session(archive, "old-parent", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert archive.get_session("old-parent") is None
+        child = archive.get_session("young-child")
+        assert child is not None and child["parent_session_id"] is None
+
+    def test_never_raises_on_broken_store(self, archive: SessionArchive) -> None:
+        """维护失败绝不能反噬写入：只记 warning 并在结果里带 error。"""
+        with _raw(archive.db_path) as conn:
+            conn.execute("DROP TABLE messages")
+            conn.commit()
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["error"]
+        assert out["skipped"] is False
+
+    def test_small_prune_does_not_vacuum(self, archive: SessionArchive) -> None:
+        """删过行但 freelist 占比不够 25% → 不 VACUUM，结果带可断言比率。"""
+        self._seed(archive, "tiny-old", "小库会话")
+        _age_session(archive, "tiny-old", days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert out["vacuumed"] is False
+        assert "freelist_ratio" in out and out["freelist_ratio"] <= 0.25
+        assert archive._get_meta("last_vacuum") is None
+
+    def test_vacuum_runs_when_freelist_high(self, archive: SessionArchive) -> None:
+        for i in range(40):
+            sid = f"bulk-{i}"
+            self._seed(archive, sid, "x" * 200_000)
+            _age_session(archive, sid, days=100, ended=True)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 40
+        assert out["freelist_ratio"] > AUTO_VACUUM_MIN_FREELIST_RATIO
+        assert out["vacuumed"] is True
+        assert archive._get_meta("last_vacuum") is not None
+        assert archive._freelist_ratio() == 0.0
+
+    def test_vacuum_throttled_by_min_interval_days(self, archive: SessionArchive) -> None:
+        for i in range(40):
+            sid = f"bulk-{i}"
+            self._seed(archive, sid, "x" * 200_000)
+            _age_session(archive, sid, days=100, ended=True)
+        archive._set_meta("last_vacuum", str(time.time()))
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 40
+        assert out["vacuumed"] is False
+        assert "freelist_ratio" not in out, "时间节流未过时不该考虑 VACUUM"
+
+    def test_vacuum_runs_when_freelist_ratio_unknown(
+        self, archive: SessionArchive, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """占比读不到（None）→ 退回时间节流照常 VACUUM（Hermes `hermes_state_maintenance.py:482`）。"""
+        self._seed(archive, "tiny-old", "小库会话")
+        _age_session(archive, "tiny-old", days=100, ended=True)
+        monkeypatch.setattr(archive, "_freelist_ratio", lambda: None)
+
+        out = archive.maybe_auto_prune_and_vacuum()
+
+        assert out["pruned"] == 1
+        assert out["freelist_ratio"] is None
+        assert out["vacuumed"] is True
+        assert archive._get_meta("last_vacuum") is not None
+
+    def test_observer_runs_maintenance_once_on_materialize(self, tmp_path: Path) -> None:
+        """接线：首次物化 archive 后跑一次，之后同一观察者不再重跑。"""
+        from agent_harness.session.event import USER_MESSAGE
+
+        calls: list[dict[str, object]] = []
+        real = SessionArchive.maybe_auto_prune_and_vacuum
+
+        def spy(self: SessionArchive, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return real(self, **kwargs)
+
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(SessionArchive, "maybe_auto_prune_and_vacuum", spy)
+            install_session_archive(
+                store, tmp_path / "sessions" / "state.db",
+                auto_prune=True, retention_days=30, min_interval_hours=6,
+            )
+            assert calls == [], "接线本身不得建库/跑维护"
+            store.append_event(
+                "sess-m", SessionEvent(type=USER_MESSAGE, session_id="sess-m", seq=0,
+                                       data={"content": "第一次写入"}),
+            )
+            store.append_event(
+                "sess-m", SessionEvent(type=USER_MESSAGE, session_id="sess-m", seq=1,
+                                       data={"content": "第二次写入"}),
+            )
+
+        assert len(calls) == 1
+        assert calls[0] == {
+            "auto_prune": True, "retention_days": 30, "min_interval_hours": 6,
+        }

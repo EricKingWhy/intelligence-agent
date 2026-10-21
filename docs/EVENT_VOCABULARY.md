@@ -7,12 +7,12 @@
 - **漂移守卫**：`tests/test_event_vocabulary_generated.py`
 - **语义 / 分层 / 历史名映射**：`goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/03_SESSION_EVENT_MODEL.md` §3–§3.3（本表只列枚举，不解释语义）
 
-**合计 73 个类型：71 持久化 + 2 仅广播。**
+**合计 74 个类型：72 持久化 + 2 仅广播。**
 
 「持久化」= 进 append-only JSONL，`replay` / `fork` / `derive_messages` 可见；
 「仅广播」= 流式瞬时信号，MUST NOT 落盘（不变量 #4：Event ≠ Diagnostic Log）。
 
-## 持久化（71）
+## 持久化（72）
 
 | 常量 | 事件类型 |
 | --- | --- |
@@ -31,6 +31,7 @@
 | `ERROR` | `error` |
 | `EVIDENCE_RECORDED` | `evidence/recorded` |
 | `FORK_IN_PROGRESS` | `fork/in-progress` |
+| `GOAL_CHANGED` | `goal/changed` |
 | `GUARD_STUCK` | `guard/stuck` |
 | `MEMORY_DEGRADED` | `memory/degraded` |
 | `MEMORY_HUMAN_UPDATED` | `memory/human_updated` |

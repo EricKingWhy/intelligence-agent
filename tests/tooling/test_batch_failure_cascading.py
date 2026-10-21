@@ -147,6 +147,8 @@ async def test_serial_batch_cancels_remaining_calls_after_retry_exhaustion(
         ErrorCode.CANCELLED,
         ErrorCode.CANCELLED,
     ]
+    assert results[1].result.metadata["budget_admitted"] is False
+    assert results[2].result.metadata["budget_admitted"] is False
     operations = await ledger.list_for_session("session-1")
     assert [operation.state for operation in operations] == [
         OperationState.FAILED,

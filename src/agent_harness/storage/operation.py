@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from enum import Enum
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 
 class OperationState(str, Enum):
@@ -25,6 +25,7 @@ class Operation(BaseModel):
     """Persisted identity and current state of one Tool invocation."""
 
     tool_call_id: str
+    parent_exec_call_id: str | None = None
     session_id: str
     run_id: str | None = None
     agent_id: str | None = None
@@ -36,6 +37,8 @@ class Operation(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     reconcile_meta: str | None = None
+    #: None means this row has no durable attempt history.
+    attempt_count: int | None = Field(default=0, ge=0)
 
     @computed_field
     @property
@@ -143,6 +146,10 @@ class OperationLedger(ABC):
         reconcile_meta: str | None = None,
     ) -> Operation:
         """Move one Operation to an allowed next state and return it."""
+
+    @abstractmethod
+    async def record_attempt(self, session_id: str, tool_call_id: str) -> None:
+        """Durably record one Tool.execute attempt for a RUNNING operation."""
 
     @abstractmethod
     async def list_for_session(self, session_id: str) -> list[Operation]:

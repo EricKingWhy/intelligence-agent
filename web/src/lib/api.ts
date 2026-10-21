@@ -304,6 +304,14 @@ export interface BudgetPayload {
 
 export interface StartSessionPayload {
   task: string;
+  /** #1359 阶段 2：创建即定义时的**结构化验收清单**。此前「完成目标」被拼进
+   *  `task` 字符串（验收项不进三轴投影、事件流里不可检索）；现在作为独立字段
+   *  直通 `task/defined.criteria`，`task` 保持 prompt 原文。
+   *
+   *  形状与 `POST /task/definition` 的 criteria 同一写侧规则（后端
+   *  `_parse_criteria`）：`text` 必填，`item_id` / `confirmed` 由后端补全。
+   *  只与非空 task 一起合法（单独给 → 422）。 */
+  criteria?: { text: string }[];
   /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
   remember_as_procedural_rule?: boolean;
   workspace?: string;
@@ -925,6 +933,8 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 /** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
+  criteria: (p) =>
+    p.criteria && p.criteria.length > 0 ? ['criteria', p.criteria] : null,
   remember_as_procedural_rule: (p) =>
     p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
@@ -3717,6 +3727,74 @@ async function parseTaskResponse<T>(
 export async function getTaskState(sessionId: string): Promise<TaskState> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/task`);
   return parseTaskResponse(res, '加载任务状态失败', (body) => (body?.task ?? null) as TaskState, true);
+}
+
+// ── #1359 阶段 1：持久目标对象（`goal/changed` 投影 + 生命周期命令）──
+
+export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
+export type GoalActivation = 'armed' | 'disarmed';
+
+/** 后端 `GoalState.to_payload()` 的逐字段投影（前端不重算状态机）。 */
+export interface GoalStatePayload {
+  defined: boolean;
+  goal_id: string | null;
+  revision: number;
+  objective: string | null;
+  phase: GoalPhase | null;
+  blocked_reason: { code: string; message: string } | null;
+  /** AC9：paused 的成因（系统判无进展 / 用户暂停由 `phase` 本身区分）。 */
+  pause_reason: { code: string; message: string } | null;
+  max_goal_rounds: number;
+  rounds_started: number;
+  /** AC6 可测判据：缺 `## Success criteria` 或 `## Verification` 段。 */
+  needs_interview: boolean;
+}
+
+/** `GET|POST /api/sessions/{id}/goal` 的回执（目标快照 + 进程内 activation）。 */
+export interface GoalSnapshot {
+  id: string;
+  goal: GoalStatePayload;
+  activation: GoalActivation;
+}
+
+/** POST 回执：`{status, goal, activation}`，**不带 `id`**（后端 `_apply` 的形状）。
+ *  与 GET 快照分开声明——写成 `GoalSnapshot` 会让 `id` 成为类型谎报。 */
+export interface GoalCommandResult {
+  status: string;
+  goal: GoalStatePayload;
+  activation: GoalActivation;
+}
+
+/** 生命周期命令体（`operation` 值域与后端 Literal 同表）。 */
+export interface GoalCommandBody {
+  operation: 'create' | 'edit' | 'pause' | 'resume' | 'complete' | 'block' | 'clear';
+  objective?: string;
+  blocked_reason?: { code: string; message: string };
+  max_goal_rounds?: number;
+  /** CAS：并发 edit 后者收 409 + 当前 revision（AC3）。 */
+  expected_revision?: number;
+}
+
+/** GET /api/sessions/{id}/goal —— 目标投影 + activation（未定义目标也 200）。 */
+export async function getGoalState(sessionId: string): Promise<GoalSnapshot> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/goal`);
+  if (!res.ok) throw await sessionError(res, '加载目标失败');
+  return (await res.json()) as GoalSnapshot;
+}
+
+/** POST /api/sessions/{id}/goal —— 唯一生命周期命令入口。
+ *  422 = 形状非法、409 = 状态/CAS 对不上（`SessionError.status` 供调用方分流）。 */
+export async function postGoalCommand(
+  sessionId: string,
+  body: GoalCommandBody,
+): Promise<GoalCommandResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/goal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await sessionError(res, '目标命令执行失败');
+  return (await res.json()) as GoalCommandResult;
 }
 
 /** GET /api/sessions/{id}/evidence —— 证据投影 + 服务端新鲜度（只读）。
