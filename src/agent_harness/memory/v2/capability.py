@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 import aiosqlite
 
+from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.policy import find_secret
@@ -151,6 +152,47 @@ class MemoryV2Service:
     async def invalidate(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         await self._mirror_markdown(None, previous_id=memory_id, trusted=trusted)
         return await self._store.invalidate(memory_id, trusted)
+
+    # ----------------------------------------------------------------------------------
+    # 工具写入 → 派生层投影（#1437 F-01 甲案 / F-06 / F-06b）
+    # ----------------------------------------------------------------------------------
+    #
+    # 刻意**不**复用 `create()`：它第一步就是 `_mirror_markdown`，而这里的 markdown 写入
+    # 已经由 `MemoryTool` 提交过了，再镜像一遍会把 replace/batch 的内容写第二次。
+    # 这一节只读 markdown、只写 SQLite。
+
+    async def project_tool_write(
+        self, target: str, response: dict[str, Any], trusted: TrustedMemoryIdentity, *,
+        session_id: str | None = None, event_id: str | None = None,
+        operations: Sequence[dict[str, Any]] | None = None, content: str | None = None,
+    ) -> dict[str, Any]:
+        """把一次已落盘的 markdown 写入投影到派生层；失败只留 pending 账本，不抛。
+
+        写入成功后顺带 drain 一次历史账本（设计稿 §4.2 的重试触发点 1）：派生层此刻是
+        健康的，之前积压的行可以在同一轮收敛。本次写入自己失败时跳过——那时派生层正
+        不可用，重试只会再失败一次并抬高 `attempts`。
+        """
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        summary = await reprojection.apply_write(
+            self._store, markdown, target, response, trusted,
+            operations=operations, content=content,
+            session_id=session_id, event_id=event_id,
+        )
+        if not summary["pending"]:
+            await reprojection.drain_pending(self._store, markdown, trusted)
+        return summary
+
+    async def reproject(
+        self, trusted: TrustedMemoryIdentity, target: str,
+    ) -> dict[str, Any]:
+        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。"""
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        await reprojection.drain_pending(self._store, markdown, trusted)
+        return await reprojection.reproject_target(self._store, markdown, trusted, target)
 
     # ----------------------------------------------------------------------------------
     # markdown 权威面（#1353 §2）

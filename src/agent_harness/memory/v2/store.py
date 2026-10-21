@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS memory_v2_records (
     source_event_ids TEXT NOT NULL, evidence TEXT NOT NULL,
     valid_at TEXT, invalidated_at TEXT, superseded_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    projection_source TEXT NOT NULL DEFAULT 'service',
+    projection_target TEXT,
     UNIQUE(root_id, version)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_active
@@ -121,6 +123,24 @@ CREATE TABLE IF NOT EXISTS memory_v2_settings (
 -- 任何 `SqliteMemoryV2Store.initialize()` 都应得到完整 schema；反过来让 store 反向
 -- import 审批模块会造成循环依赖。
 """ + STAGED_SCHEMA + """
+-- #1437 F-06：write-ahead 待投影账本。"markdown 已提交、记录还不存在"这个状态
+-- `memory_v2_outbox` 表达不了（outbox 行恒与记录行同事务写），所以单列一张表。
+-- 存 content 全文而不是只存摘要：drain 时 markdown 可能已被 replace/remove，
+-- 账本必须记得"当初想投影什么"，再拿它去当前条目里核对。
+CREATE TABLE IF NOT EXISTS memory_v2_projection_pending (
+    tenant_id TEXT NOT NULL,
+    user_id   TEXT NOT NULL,
+    target    TEXT NOT NULL CHECK (target IN ('memory','user')),
+    content_digest TEXT NOT NULL,
+    content   TEXT NOT NULL,
+    session_id TEXT,
+    event_id  TEXT,
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, user_id, target, content_digest)
+);
+
 -- #1353 §5：词法检索腿的 FTS5 虚表（rowid = memory_v2_records.rowid）。
 -- 只收 content：`keyword_search` 的语义就是"只搜规范内容"，不搜 payload/evidence。
 -- 刻意**不是** `content='memory_v2_records'` 的外部内容表：CJK 需要逐字切分才能命中
@@ -138,7 +158,7 @@ _COLUMNS = (
     "memory_id, schema_version, root_id, version, kind, tier, scope, tenant_id, user_id, "
     "project_id, content, payload, status, importance, strength, source_type, "
     "source_session_id, source_event_ids, evidence, valid_at, invalidated_at, superseded_by, "
-    "created_at, updated_at"
+    "created_at, updated_at, projection_source, projection_target"
 )
 
 
@@ -289,6 +309,12 @@ class SqliteMemoryV2Store:
             await _add_column_if_missing(
                 connection, "memory_v2_settings", "write_approval",
                 "INTEGER NOT NULL DEFAULT 0")
+            # #1437：工具写入的来源标记。旧行自动落 'service'——现存行确实都来自服务路径。
+            await _add_column_if_missing(
+                connection, "memory_v2_records", "projection_source",
+                "TEXT NOT NULL DEFAULT 'service'")
+            await _add_column_if_missing(
+                connection, "memory_v2_records", "projection_target", "TEXT")
             # #1353 §5：虚表与记录表行数一致 ⇒ 已同步，跳过全量重扫。
             # ponytail: 行数比对只能发现"少了/多了"（典型是 FTS 建表前就存在的旧库），
             # 发现不了"条数相同但内容被外部改过"；真需要就加一张 fts_version 表，
@@ -327,10 +353,17 @@ class SqliteMemoryV2Store:
     async def create(
         self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
+        projection_source: str = "service", projection_target: str | None = None,
     ) -> MemoryRecordV2:
-        """新建一条逻辑记忆（version=1，root_id=自己的 id）。"""
+        """新建一条逻辑记忆（version=1，root_id=自己的 id）。
+
+        ``projection_source``/``projection_target`` 是**存储层内部**的来源标记（#1437）：
+        只在 SQLite 列上存在，不进 `MemoryRecordV2` 契约。工具写入传
+        ``projection_source="tool"`` + 目标文件名，服务写入用默认值。
+        """
         return await self._insert(
-            draft, trusted, root_id=None, version=1, previous=None, connection=connection)
+            draft, trusted, root_id=None, version=1, previous=None, connection=connection,
+            projection_source=projection_source, projection_target=projection_target)
 
     @retry_on_busy
     async def update(
@@ -391,6 +424,7 @@ class SqliteMemoryV2Store:
         self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         root_id: str | None, version: int, previous: aiosqlite.Row | None,
         connection: aiosqlite.Connection | None = None,
+        projection_source: str = "service", projection_target: str | None = None,
     ) -> MemoryRecordV2:
         """插入一条新的 active 版本；`previous` 非空时同事务把它置为 superseded。"""
         memory_id = str(uuid4())
@@ -429,8 +463,8 @@ class SqliteMemoryV2Store:
             try:
                 await conn.execute(
                     f"INSERT INTO memory_v2_records ({_COLUMNS}) VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    self._values(record))
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._values(record, projection_source, projection_target))
             except aiosqlite.IntegrityError as error:
                 # 不在这里 rollback：自开事务时由 `write_connection` 收尾，借用事务时
                 # 回滚是拥有者的事（见 `write_connection` 的说明）。
@@ -832,6 +866,126 @@ class SqliteMemoryV2Store:
             await connection.commit()
         return count
 
+    # ----------------------------------------------------------------------------------
+    # 投影对账（#1437 F-06 / F-06b）
+    # ----------------------------------------------------------------------------------
+
+    async def tool_projection_digests(
+        self, trusted: TrustedMemoryIdentity, target: str,
+    ) -> list[str]:
+        """该身份、该 target 下所有 active 工具来源行的正文摘要。
+
+        `reproject_target` 用它算「派生层已有 vs markdown 现有」的差集；扫描条件写死
+        `projection_source='tool'`，所以服务来源行永远不在结果里（非干扰论证第 1 条）。
+        """
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT content FROM memory_v2_records "
+                "WHERE tenant_id=? AND user_id=? AND projection_source='tool' "
+                "AND projection_target=? AND status='active'",
+                (trusted.tenant_id, trusted.user_id, target),
+            ) as cursor,
+        ):
+            return [self._digest(row["content"]) for row in await cursor.fetchall()]
+
+    async def find_active_by_digest(
+        self, trusted: TrustedMemoryIdentity, digest: str,
+    ) -> MemoryRecordV2 | None:
+        """按正文摘要找一条 active 行（**任何来源**）。用于跨 target 去重与服务行保护。"""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT * FROM memory_v2_records "
+                "WHERE tenant_id=? AND user_id=? AND status='active'",
+                (trusted.tenant_id, trusted.user_id),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        for row in rows:
+            if self._digest(row["content"]) == digest:
+                return _to_record(row)
+        return None
+
+    async def find_tool_projection(
+        self, trusted: TrustedMemoryIdentity, target: str, digest: str,
+    ) -> MemoryRecordV2 | None:
+        """按摘要找该 target 的 active **工具来源**行；服务来源行永远不返回。"""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT * FROM memory_v2_records "
+                "WHERE tenant_id=? AND user_id=? AND projection_source='tool' "
+                "AND projection_target=? AND status='active'",
+                (trusted.tenant_id, trusted.user_id, target),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        for row in rows:
+            if self._digest(row["content"]) == digest:
+                return _to_record(row)
+        return None
+
+    async def enqueue_projection(
+        self, trusted: TrustedMemoryIdentity, target: str, content: str, *,
+        session_id: str | None = None, event_id: str | None = None,
+    ) -> None:
+        """写一行待投影账本（`INSERT OR REPLACE`，保留已有 `attempts`）。"""
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute(
+                "INSERT INTO memory_v2_projection_pending "
+                "(tenant_id, user_id, target, content_digest, content, session_id, event_id, "
+                "attempts, last_error, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?) "
+                "ON CONFLICT(tenant_id, user_id, target, content_digest) DO UPDATE SET "
+                "content=excluded.content, session_id=excluded.session_id, "
+                "event_id=excluded.event_id, updated_at=excluded.updated_at",
+                (trusted.tenant_id, trusted.user_id, target, self._digest(content), content,
+                 session_id, event_id, self._now().isoformat()),
+            )
+            await connection.commit()
+
+    async def pending_projections(
+        self, trusted: TrustedMemoryIdentity,
+    ) -> list[dict[str, object]]:
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT target, content_digest, content, session_id, event_id, attempts "
+                "FROM memory_v2_projection_pending WHERE tenant_id=? AND user_id=? "
+                "ORDER BY updated_at, target, content_digest",
+                (trusted.tenant_id, trusted.user_id),
+            ) as cursor,
+        ):
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def clear_projection(
+        self, trusted: TrustedMemoryIdentity, target: str, digest: str,
+    ) -> None:
+        async with connect(self.database_path) as connection:
+            await connection.execute(
+                "DELETE FROM memory_v2_projection_pending "
+                "WHERE tenant_id=? AND user_id=? AND target=? AND content_digest=?",
+                (trusted.tenant_id, trusted.user_id, target, digest),
+            )
+            await connection.commit()
+
+    async def record_projection_failure(
+        self, trusted: TrustedMemoryIdentity, target: str, digest: str, error_type: str,
+    ) -> None:
+        """失败留痕：只记**异常类型名**，不记内容（与 `memory_tool` 的告警同口径）。"""
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute(
+                "UPDATE memory_v2_projection_pending "
+                "SET attempts=attempts+1, last_error=?, updated_at=? "
+                "WHERE tenant_id=? AND user_id=? AND target=? AND content_digest=?",
+                (error_type, self._now().isoformat(), trusted.tenant_id, trusted.user_id,
+                 target, digest),
+            )
+            await connection.commit()
+
     async def _root_rows(
         self, connection: aiosqlite.Connection, root_id: str,
         trusted: TrustedMemoryIdentity,
@@ -1044,7 +1198,10 @@ class SqliteMemoryV2Store:
             raise ValueError(f"cannot {action} a {row['status']} memory record")
 
     @staticmethod
-    def _values(record: MemoryRecordV2) -> tuple:
+    def _values(
+        record: MemoryRecordV2, projection_source: str = "service",
+        projection_target: str | None = None,
+    ) -> tuple:
         return (
             record.id, record.schema_version, record.root_id, record.version,
             record.kind.value, record.tier.value, record.scope.value,
@@ -1055,6 +1212,7 @@ class SqliteMemoryV2Store:
             json.dumps([item.model_dump() for item in record.evidence], ensure_ascii=False),
             record.valid_at, record.invalidated_at, record.superseded_by,
             record.created_at, record.updated_at,
+            projection_source, projection_target,
         )
 
 

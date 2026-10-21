@@ -46,8 +46,9 @@ from typing import Any
 from uuid import uuid4
 
 from agent_harness.memory.v2._sqlite import connect, stamp
+from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
-from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2
+from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2, SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.storage.sqlite import retry_on_busy
 
@@ -139,9 +140,15 @@ class StagedWriteStore:
     不存已批准状态）也**不**扩展 ``memory_v2_jobs``（那是 job 态，staged 是审批态）。
     """
 
-    def __init__(self, database_path: Path, markdown: MarkdownMemoryStore) -> None:
+    def __init__(
+        self, database_path: Path, markdown: MarkdownMemoryStore,
+        store: SqliteMemoryV2Store | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
         self.markdown = markdown
+        #: #1437：审批重放的写入也要进派生层。缺省 `None` = 纯 markdown 部署，重放只落权威面
+        #: （与 `MemoryTool(markdown)` 无 service 时同形）。
+        self.store = store
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +304,7 @@ class StagedWriteStore:
             return GateDecision(
                 blocked=True, message=str(response.get("error") or "Replay failed.")), None
         await self._set_status(staged_id, APPROVED, expected=AWAITING)
+        await self._project(staged, trusted, response)
         return GateDecision(allow=True), response
 
     async def reject(
@@ -340,6 +348,28 @@ class StagedWriteStore:
             cursor = await connection.execute(sql, parameters)
             await connection.commit()
             return cursor.rowcount == 1
+
+    async def _project(
+        self, staged: StagedWrite, trusted: TrustedMemoryIdentity, response: dict[str, Any],
+    ) -> None:
+        """#1437：审批重放落盘后补投影（与工具直写同一入口）。
+
+        只在 approve **成功返回前**调用；失败只留 pending 账本与一条不含内容的 warning，
+        绝不影响 `GateDecision(allow=True)`——markdown 已提交，重放不能因为派生层故障
+        变成"没批准"。
+        """
+        if self.store is None:
+            return
+        payload = staged.payload
+        target = str(payload["target"])
+        try:
+            await reprojection.apply_write(
+                self.store, self.markdown, target, response, trusted,
+                operations=payload.get("operations"),
+                content=None if payload.get("action") == "remove" else payload.get("content"),
+            )
+        except Exception as error:  # noqa: BLE001 — 投影失败不得回滚已批准的写入
+            logger.warning("staged projection failed (%s): %s", target, type(error).__name__)
 
     async def _replay(self, staged: StagedWrite) -> dict[str, Any] | None:
         """按 stage 时的形状重放；``None`` = 缺 pin 的 legacy record（拒绝）。"""
