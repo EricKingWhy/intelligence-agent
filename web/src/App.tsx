@@ -626,8 +626,10 @@ export default function App() {
     if (interruptedEvent) focusEvent(interruptedEvent);
     else focusRun();
     setInspectorOpen(true);
-    // 依赖与相邻的 `focusChild` 一致：不列 useState 的稳定 setter。
-  }, [interruptedEvent, focusEvent, focusRun]);
+    // `setInspectorOpen` 是 useState 的稳定 setter，引用在组件生命周期内恒定；
+    // 列进 deps 不改变行为，但与 oxlint 推断的依赖一致（复审 R-2）。相邻
+    // `focusChild` 省略 setter 是既有体例差异，不复制它的 lint 债。
+  }, [interruptedEvent, focusEvent, focusRun, setInspectorOpen]);
   const handleDismissInterruption = useCallback(() => {
     setDismissedInterruptedIdentity(interruptedIdentity);
     // 横幅整块卸载后，被点击的按钮消失，浏览器会把焦点丢到 body。落到主工作区
