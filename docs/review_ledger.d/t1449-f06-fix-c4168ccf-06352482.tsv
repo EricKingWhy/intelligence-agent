@@ -1,0 +1,1 @@
+2026-10-21	#1449 F-06 findings 修复轮（非两轴独立审查）：按两份审查 findings 修 App.tsx 中断横幅的忽略标识/事件扫描/焦点落点/按钮专用类与 app.css 共享声明，补行为测试并扩 e2e 对比度守卫；TDD 红绿与全量读数见 ~/workspace/overnight-test/walk-p2-fixes/logs/f06-targeted-vitest-red.log、f06-targeted-vitest-green.log、f06-full-vitest-after-fix.log 及同目录 f06-fix-report.md；Gate-0 收据见 docs/gate 下本树读数；独立两轴审查仍待协调员派单，本行不冒充。	c4168ccf..06352482
