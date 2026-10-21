@@ -879,9 +879,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                 ta.style.opacity = '0';
                 document.body.appendChild(ta);
                 ta.select();
-                document.execCommand('copy');
+                // execCommand 返回 false = 浏览器拒绝复制（只读文档 / 权限策略），
+                // 此时亮「已复制」同样是伪造反馈——与上面 clipboard 失败分支同一条规矩。
+                const ok = document.execCommand('copy');
                 ta.remove();
-                done();
+                if (ok) done();
               }
             }}
           >

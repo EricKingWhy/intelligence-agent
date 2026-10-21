@@ -407,6 +407,7 @@ describe('#1429 轮次锚点', () => {
     act(() => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, 'execCommand');
   });
 
   it('点 `#` 复制 `#turn-N` 文本（不承诺深链）', async () => {
@@ -441,6 +442,29 @@ describe('#1429 轮次锚点', () => {
     });
     expect(btn.textContent).not.toBe('已复制');
     expect(btn.title).toBe('复制轮次锚点');
+  });
+
+  it('无 clipboard API 时走 execCommand；它返回 false 同样不亮「已复制」（复审 P3）', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: undefined });
+    const exec = vi.fn().mockReturnValue(false);
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
+
+    await act(async () => {
+      root.render(<TurnView turn={turn({ turn_index: 3 })} turnIndex={3} model={null} density="balanced" />);
+    });
+    const btn = container.querySelector('.tm-anchor') as HTMLButtonElement;
+    await act(async () => {
+      btn.click();
+    });
+    expect(exec).toHaveBeenCalledWith('copy');
+    expect(btn.textContent).not.toBe('已复制');
+
+    // 正对照：返回 true 才亮反馈（装置不是恒假）
+    exec.mockReturnValue(true);
+    await act(async () => {
+      btn.click();
+    });
+    expect(btn.textContent).toBe('已复制');
   });
 });
 
