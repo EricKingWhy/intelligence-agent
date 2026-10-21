@@ -391,7 +391,7 @@ test('AC8：头部必须容得下最长档位名（不溢出面板、控制按�
    * 退出头部、宽面板必须完整可见。不锁的话，"窄面板下它其实是隐藏的"这件事没有
    * 任何测试会发现——`g-visual-qa.spec.ts` 对它用的是 `toHaveText`，隐藏元素照样通过。
    * #1419 后默认宽度 520 > 360，容器查询在默认宽度下**不生效**，所以这条路径必须
-   * 主动拖窄才走得到；文案也从「N runs · M 事件」换成了效果图口径的裸 run_id。 */
+   * 主动拖窄才走得到。文案按 #1435 裁决 A 恢复 #1365 口径（全会话范围，不显示 run 短码）。 */
   // 上一步停在上限；两个方向都按"越界撞夹取"来走（Shift 步长 64，夹取 320/上限）
   await slam('ArrowRight', span);
   await expect(resizer).toHaveAttribute('aria-valuenow', '320');
@@ -399,7 +399,7 @@ test('AC8：头部必须容得下最长档位名（不溢出面板、控制按�
   await slam('ArrowLeft', span);
   await expect(resizer).toHaveAttribute('aria-valuenow', String(ceiling));
   await expect(page.locator('.detail-run-id')).toBeVisible();
-  await expect(page.locator('.detail-run-id')).toHaveText('e2e-run-0001');
+  await expect(page.locator('.detail-run-id')).toHaveText('共 1 轮 · 6 事件');
 
   // 最窄处仍然**真的能点**（Playwright 会做可操作性检查：视口外/被遮挡会超时）
   await slam('ArrowRight', span);
