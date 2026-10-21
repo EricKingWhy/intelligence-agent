@@ -1,4 +1,4 @@
-/** Caret — 折叠指示的 V 形描边（#1429 打磨点 2/3 的 chevron）。
+/** Caret — 折叠指示的 V 形描边（#1429 打磨点 2 的 chevron）。
  *
  * 形状与 lucide `ChevronDown` 完全相同（`m6 9 6 6 6-6`，2px 圆头描边），但**不带**
  * lucide 组件的 11 个默认属性。这不是手抄图标库：`<ChevronDown size={11}/>` 每次

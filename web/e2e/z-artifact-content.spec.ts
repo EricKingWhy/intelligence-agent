@@ -91,7 +91,8 @@ async function openSession(page: import('@playwright/test').Page, frames: FrameS
  *  为止（不写死点击次数：默认档位不同会差一次）。
  *
  *  `tool-card-body` 是 `.act-card` 的**后代**（`Collapse` 的网格容器，`.disc-in` 在内），
- *  但它在 `aria-level < 2` 时根本不挂载（`openedOnce` 门），所以断言前必须先点开——
+ *  但它在 `aria-level < 2` 时根本不挂载（挂载门是 `bodyOpen`，即 `effectiveLevel >= 2`；
+ *  `openedOnce` 只是"开过一次就保持挂载、让收起动画跑完"的闩锁），所以断言前必须先点开——
  *  页面级选择器足够：本 spec 的 fixture 只有一个工具。 */
 async function expandToolToL2(page: import('@playwright/test').Page) {
   const row = page.locator('.act-node').first();
