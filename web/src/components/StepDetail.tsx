@@ -643,21 +643,16 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
           </div>
           <div className="ih-sub">
-            {/* UI-03 头标对齐：时间线平铺全会话事件，副行给**范围**（最近 run id ·
-                轮次），而不是单个 run 短码。完整 run 列表留在 title 里。 */}
-            {conversation.run_id && (
+            {/* UI-03 头标对齐（#1435 恢复 #1365 口径）：时间线平铺全会话事件，
+                头标就描述全会话范围（共 N 轮 · M 事件）——不显示单个 run 短码，
+                完整 run 列表留在 title 里。#1419 效果图的 run-id 短码在此让位。 */}
+            {conversation.events.length > 0 && (
               <span
-                className="detail-run-id mono"
-                title={`最近任务：${conversation.run_id}${runIdList.length > 1 ? `（共 ${runIdList.length} 轮：${runIdList.join(', ')}）` : ''}`}
+                className="detail-run-id mono num"
+                title={`任务：${runIdList.join(', ')}`}
               >
-                {conversation.run_id}
+                共 {runIdList.length} 轮 · {conversation.events.length} 事件
               </span>
-            )}
-            {conversation.run_id && <span className="ih-sep">·</span>}
-            {conversation.turn_index !== null ? (
-              <span>第 {conversation.turn_index} 轮</span>
-            ) : (
-              runIdList.length > 0 && <span>共 {runIdList.length} 轮</span>
             )}
             {/* #226：模型徽标——`model` 是 provider 回显，`requested_model` 是我们
                 发出去的值。两个都在时按效果图 `badge-primary` 显示实际模型，请求侧
