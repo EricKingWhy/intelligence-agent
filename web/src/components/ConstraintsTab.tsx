@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import type {
   ConstraintScope,
@@ -136,18 +137,22 @@ function FactRow({
   const superseded = fact.status === 'superseded';
   const inactive = revoked || superseded;
   const dot = FACT_TYPE_DOTS[fact.type] ?? 'var(--cn-type-default)';
+  /* #1419 R-3/R-4：状态色边框（`data-status` 驱动）+ 内容主字 + 类型灰后缀 +
+   * 右上状态徽标 + 元信息行右端 mono 编号。卡片结构照效果图 `.rq-item`。 */
   return (
-    <div className={`cn-row${inactive ? ' revoked' : ''}`} data-status={fact.status}>
+    <div className="cn-row" data-status={fact.status}>
       <div className="cn-row-main">
-        <div className="cn-kicker">
+        <CollapsibleValue text={renderValue(fact.value)} />
+        <div className="cn-meta">
           <span className="cn-type">
             <span className="cn-tdot" style={{ background: dot }} aria-hidden="true" />
             {fact.type}
           </span>
-        </div>
-        <CollapsibleValue text={renderValue(fact.value)} />
-        <div className="cn-meta">
-          <code className="cn-fact-id">{fact.fact_id}</code>
+          {/* #1419 R-4 继承胶囊：非本会话来源即「继承」（scope 是后端真字段，
+              不是效果图里的编造名）。分组眉标仍保留——胶囊让单条卡自证来源。 */}
+          {fact.scope !== 'session' && (
+            <span className="cn-inherit">继承 · {SCOPE_LABELS[fact.scope]}</span>
+          )}
           {fact.registered_at && <span>{formatFactTime(fact.registered_at)} 登记</span>}
           {fact.source_seq !== null && <span>来源事件 #seq {fact.source_seq}</span>}
           {fact.revoked_at && (
@@ -156,20 +161,24 @@ function FactRow({
               {fact.revoked_by ? ` · ${operatorLabel(fact.revoked_by)}` : ''}
             </span>
           )}
+          <span className="cn-grow" />
+          <code className="cn-fact-id">{fact.fact_id}</code>
         </div>
       </div>
       <div className="cn-row-side">
         {fact.overridden_by !== null && <span className="cn-ov">被本会话覆盖</span>}
-        <span className="cn-pill">
+        <span className="cn-pill" data-s={inactive ? 'off' : 'on'}>
           <span className="cn-pill-dot" style={{ background: statusDot(fact.status) }} aria-hidden="true" />
           {statusLabel(fact.status)}
         </span>
+        {/* #1419 R-6：幽灵钮（✕ + 文案），点击仍走二次确认弹窗。 */}
         <button
           type="button"
           className="cn-revoke"
           disabled={inactive}
           onClick={() => onRequestRevoke(fact)}
         >
+          <X size={11} aria-hidden="true" />
           {inactive ? statusLabel(fact.status) : '撤销'}
         </button>
       </div>
@@ -241,6 +250,11 @@ export function ConstraintsView({
   );
   const countFor = (filter: StatusFilter) =>
     facts.filter((fact) => matchesStatus(fact.status, filter)).length;
+  /* #1419 R-1：汇总行的三个数都是真事实。效果图第三个是「待确认」——后端没有
+   * pending 这个状态（`active | revoked | superseded`），也不存在「确认生效」端点，
+   * 故第三个数是「已撤销」（= revoked + superseded，与「已撤销」筛同一判据）。 */
+  const activeTotal = facts.filter((fact) => fact.status === 'active').length;
+  const offTotal = facts.length - activeTotal;
   /** 组计数 = 该组**生效中**条数（票面 §五.2 的「N 条生效中」）。
    *
    *  生效判据与注入侧同源（§五.1）：`status==='active'` **且** `overridden_by===null`
@@ -308,6 +322,14 @@ export function ConstraintsView({
         {PRIORITY_BAR_TAIL}
       </div>
 
+      {/* #1419 R-1：汇总行（效果图 `.pane-head` 的位置与形态）。 */}
+      <div className="cn-summary">
+        <span className="cn-summary-lbl">要求清单</span>
+        <span className="cn-summary-n">
+          {facts.length} 条 · {activeTotal} 生效 · {offTotal} 已撤销
+        </span>
+      </div>
+
       <div className="cn-toolbar">
         <div className="cn-tabs" role="tablist" aria-label="要求状态筛选">
           {STATUS_TABS.map((tab) => (
@@ -324,19 +346,29 @@ export function ConstraintsView({
             </button>
           ))}
         </div>
-        <select
-          className="cn-type-select"
-          aria-label="按类型筛选"
-          value={typeFilter}
-          onChange={(e) => onTypeFilter(e.target.value)}
-        >
-          <option value="">全部类型</option>
+        {/* #1419 R-2：类型筛选从原生 `<select>` 换成效果图的 chip 组（`aria-pressed`
+            表达选中；真实类型 6 个 + 「全部类型」，520px 面板内自然换行）。 */}
+        <div className="cn-type-chips" role="group" aria-label="按类型筛选">
+          <button
+            type="button"
+            className={`cn-chip${typeFilter === '' ? ' on' : ''}`}
+            aria-pressed={typeFilter === ''}
+            onClick={() => onTypeFilter('')}
+          >
+            全部类型
+          </button>
           {TYPE_OPTIONS.map((type) => (
-            <option key={type} value={type}>
+            <button
+              key={type}
+              type="button"
+              className={`cn-chip${typeFilter === type ? ' on' : ''}`}
+              aria-pressed={typeFilter === type}
+              onClick={() => onTypeFilter(type)}
+            >
               {type}
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
       </div>
 
       <div className="cn-list">{body}</div>

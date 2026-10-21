@@ -356,6 +356,10 @@ MANUAL_FOCUSED = [
     "tests",      # 整个测试目录 = 重车道 pytest-full 本身（子集才便宜 ⇒ 全量不内联）
     "web/e2e",    # playwright 重车道
     "web/src",    # vitest：cwd 是 web/，且同类干净树上的读数非确定（有红有绿）⇒ 见 focused_runner
+    # 单文件 vitest（`frontend-headline` / `frontend-linediff` 两行）：形态与 `web/src` 同源——
+    # 仍是 `web/` 下的 vitest，cwd 与读数非确定性两条血证一条不少 ⇒ 只登记、不内联。
+    "web/src/lib/lineDiff.test.ts",
+    "web/src/lib/timelineHeadline.test.ts",
 ]
 
 

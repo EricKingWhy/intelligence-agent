@@ -2157,3 +2157,19 @@ export async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAM
     events: frames,
   });
 }
+
+/** Inspector 拖宽的实际上限（#1419）：`min(820, available − 360)`，而
+ *  `available = 中心列 clientWidth + 面板宽`（StepDetail 的 `onResizeStart` 口径，
+ *  不含面板边框）。available 随视口变 ⇒ e2e 两档视口的上限不同（1280 → 660、
+ *  1920 → 820），断言里写死 820 只在 1920 成立。
+ *
+ *  面板拖宽时中心列等量变窄、两者之和不变，所以任意时刻量都对。 */
+export async function inspectorCeiling(page: Page): Promise<number> {
+  const available = await page.evaluate(() => {
+    const ws = document.querySelector('.app-workspace');
+    const now = Number(document.querySelector('.detail-resizer')?.getAttribute('aria-valuenow'));
+    if (!(ws instanceof HTMLElement) || !Number.isFinite(now)) throw new Error('量不到中心列/手柄');
+    return ws.clientWidth + now;
+  });
+  return Math.max(320, Math.min(820, Math.round(available - 360)));
+}

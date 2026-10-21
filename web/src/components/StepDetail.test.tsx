@@ -59,7 +59,7 @@ describe('TimelineTab 尾窗裁剪', () => {
     expect(html).toContain('timeline-window-bar');
     expect(html).toContain(`共 ${total} 条`);
     // 窗口是"最近"而非"最早"——最后一行必须在
-    expect(html).toContain(`>${total - 1}<`);
+    expect(html).toContain(`#${total - 1}`);
     // 最早一行被折叠
     expect(html).not.toContain('>--1<');
   });
@@ -67,7 +67,7 @@ describe('TimelineTab 尾窗裁剪', () => {
   it('窗口行 key 用全局序号：扩展窗口后既有行 identity 稳定（append-only 契约）', () => {
     // key = hidden + i：对 2000 事件窗口 200，最后可见行全局序号 1999
     const html = renderTab(bigConversation(2000));
-    expect(html).toContain(`>${2000 - 1}<`);
+    expect(html).toContain(`#${2000 - 1}`);
     expect(rowCount(html)).toBe(TIMELINE_WINDOW_DEFAULT);
   });
 
@@ -297,7 +297,7 @@ describe('TimelineTab run 分组头（UI-03）', () => {
 
 // ── #183 AC9 / #186 AC3：Inspector 的 Changes tab 与中心列共用同一个 diff 渲染器 ──
 
-describe('ChangesTab 使用 DiffBlock（diff 只有一份渲染器）', () => {
+describe('ChangesTab：行级 unified diff（#1419 C-3），归档/过大仍走 DiffBlock', () => {
   const editTool = (over: Partial<ToolCall>): ToolCall => ({
     tool_call_id: 'tc-diff',
     name: 'edit',
@@ -311,13 +311,40 @@ describe('ChangesTab 使用 DiffBlock（diff 只有一份渲染器）', () => {
   const renderChanges = (tools: ToolCall[]) =>
     renderToString(createElement(ChangesTab, { tools })).replaceAll('<!-- -->', '');
 
-  it('普通 diff：走 DiffBlock 的结构（.diff-block + .diff-cols），不是自己内联的裸 .diff-cols', () => {
+  /* #1419 C-3 改写了本面的渲染：普通 diff 走 `lib/lineDiff` 的行级 unified 视图
+   * （双列行号 + 红绿底 + `+/−` 号），不再复用中心列的双栏 `DiffBlock`——效果图的
+   * 「变更」面是 unified 的，双栏在 520px 宽下每列只剩 ~240px。
+   * 归档/过大两种没有可比对文本的情况仍然回 `DiffBlock`（下面两条用例钉住）。 */
+  it('普通 diff：走行级 unified 视图（.dline 带双列行号 + / − 号），不是双栏 .diff-cols', () => {
     const html = renderChanges([editTool({})]);
-    expect(html).toContain('diff-block');
-    expect(html).toContain('变更前');
-    expect(html).toContain('变更后');
+    expect(html).toContain('class="step"');
+    expect(html).toContain('dline del');
+    expect(html).toContain('dline add');
+    // 行号是算出来的真值：删除行是变更前第 1 行，新增行是变更后第 1 行
+    expect(html).toMatch(/dline del"><span class="ln">1<\/span><span class="ln"><\/span>/);
+    expect(html).toMatch(/dline add"><span class="ln"><\/span><span class="ln">1<\/span>/);
     expect(html).toContain('old');
     expect(html).toContain('new');
+    // 双栏不再出现在这一面
+    expect(html).not.toContain('diff-cols');
+    expect(html).not.toContain('变更前');
+  });
+
+  it('段头是效果图的 `.pane-head`：标签 + `N 文件 · +A −D` + 归档徽标（真实事实）', () => {
+    const html = renderChanges([editTool({}), editTool({ tool_call_id: 'tc-2', diff: { before: 'x\n', after: 'x\ny\n', truncated: false } })]);
+    expect(html).toContain('class="pane-head"');
+    expect(html).toContain('工作树改动');
+    expect(html).toContain('2 文件');
+    expect(html).toContain('+2 −1');
+    // 没有归档文件 ⇒ 不画徽标（效果图的「已落盘」后端无此事实，不许编）
+    expect(html).not.toContain('已归档 0');
+  });
+
+  it('卡头给出真实元信息：路径 / 工具名 / +A −D 计数', () => {
+    const html = renderChanges([editTool({})]);
+    expect(html).toContain('src/a.ts');
+    expect(html).toContain('<span class="add">+1</span>');
+    expect(html).toContain('<span class="del">−1</span>');
   });
 
   it('归档 diff：渲染归档占位，**不把 marker 原文当文件内容**（收敛前这里会显示假内容）', () => {

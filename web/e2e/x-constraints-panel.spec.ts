@@ -115,14 +115,18 @@ test('AC1：页眉/会话行在场，默认「生效中」只列 active', async 
   await expect(panel(page)).not.toContainText('不要改动生产环境配置');
 });
 
-test('AC2：类型下拉按 type 过滤（纯展示层，不重拉）', async ({ page }) => {
+test('AC2：类型 chip 按 type 过滤（纯展示层，不重拉）', async ({ page }) => {
   const second: FactRow = { ...ACTIVE_FACT, fact_id: 'f-active-2', type: 'evidence_ref', value: '证据：pytest 全绿' };
   await openConstraints(page, { protectedFacts: [ACTIVE_FACT, second] });
 
   await expect(panel(page)).toContainText('不要改动生产环境配置');
   await expect(panel(page)).toContainText('证据：pytest 全绿');
 
-  await panel(page).getByLabel('按类型筛选').selectOption('evidence_ref');
+  // #1419 R-2：类型筛选由原生 `<select>` 换成 chip 组（`aria-pressed` 表达选中）。
+  await panel(page)
+    .getByRole('group', { name: '按类型筛选' })
+    .getByRole('button', { name: 'evidence_ref' })
+    .click();
   await expect(panel(page)).toContainText('证据：pytest 全绿');
   await expect(panel(page)).not.toContainText('不要改动生产环境配置');
 });

@@ -2239,8 +2239,12 @@ export default function App() {
           onJumpToStream={jumpToStream}
           onJumpToApproval={jumpToApproval}
           panel={panel}
+          open={inspectorOpen}
           onPanelAction={onPanelAction}
           awaitingDecision={hasPendingDecisions}
+          goneApprovalIds={goneApprovalIds}
+          onApprovalGone={onApprovalGone}
+          onApprovalDecided={resyncAfterDecision}
         />
       </main>
 

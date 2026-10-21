@@ -24,6 +24,7 @@ import {
   RUN,
   SID,
   T,
+  inspectorCeiling,
   routeStreaming,
   submitTask,
   type FrameSpec,
@@ -91,9 +92,13 @@ test('#194：流式中提示与停止按钮同侧，且不压任何档位控件�
 
   expect(await overlaps(page)).toEqual({ hintVsControls: [], actionsVsControls: [] });
 
-  /* 再用"窄工作区"复现一次：把 Inspector 拖到上限 480（向左拖 = 变宽，#197 语义），
-     此时中心列只剩 ~560px、档位行会顶到右端——正是动作簇必须让位的那种布局。
-     不用更小的视口代替：e2e 只在 1280/1920 两档跑，拖宽能造出比两者都窄的工作区。 */
+  /* 再用"窄工作区"复现一次：把 Inspector 拖到夹取上限（向左拖 = 变宽，#197 语义），
+     此时中心列只剩 CENTER_MIN_W=360、档位行会顶到右端——正是动作簇必须让位的那种布局。
+     不用更小的视口代替：e2e 只在 1280/1920 两档跑，拖宽能造出比两者都窄的工作区。
+     #1419 上限提到 820 后，上限不再恒等于 820：`clampInspectorWidth` 同时保
+     `available − 360`。available 在三栏栅格里随视口走（1280 视口 1020、1920 视口
+     1678），所以 1280 只能拖到 660、1920 才到 820。这里按**组件同口径**算出期望值
+     （中心列 clientWidth + 面板宽，不含面板边框），而不是写死一个数。 */
   const resizer = page.locator('.detail-resizer');
   await expect(resizer).toBeVisible();
   const box = await resizer.boundingBox();
@@ -103,7 +108,8 @@ test('#194：流式中提示与停止按钮同侧，且不压任何档位控件�
   await page.mouse.down();
   await page.mouse.move(box.x + 3 - 600, y, { steps: 8 });
   await page.mouse.up();
-  await expect(resizer).toHaveAttribute('aria-valuenow', '480');
+  const expectedMax = await inspectorCeiling(page);
+  await expect(resizer).toHaveAttribute('aria-valuenow', String(expectedMax));
 
   // 提示仍与按钮同侧，且没有任何档位控件被压住
   await expect(hint).toBeVisible();

@@ -327,11 +327,13 @@ describe('F2 — 反例守卫（记忆化的键是输入，不是"永不重渲�
 
     click('button.timeline-row');
 
-    // 「组件确实重渲染了」的证据是 DOM 结果（而不是派生计数——见文件头那段）。
-    const peek = container!.querySelector('.detail-peek');
-    expect(peek).not.toBeNull();
-    expect(peek!.getAttribute('data-peek')).toBe('on'); // 详情真的可见（"点了有反应"）
-    expect(peek!.textContent).toContain('选中项详情');
+    // #1419：点击卡片 = 就地展开（不再开右侧 peek）；「有反应」的证据是展开区挂载。
+    expect(container!.querySelector('.detail-peek')?.getAttribute('data-peek')).toBe('off');
+    const card = container!.querySelector('.timeline-card.expanded');
+    expect(card).not.toBeNull();
+    // #1419 T-10：展开区首行是 `#seq · type` 段头（原「钻取」标签退役）。
+    expect(card!.querySelector('.tl-drill')?.textContent).toContain('#1 · run/started');
+    expect(card!.querySelector('.timeline-row')?.getAttribute('aria-expanded')).toBe('true');
     // #1106：聚焦事件带信封 run_id ⇒ focusedRunId 变化 ⇒ 头标档位徽标必须重算
     // （徽标跟随聚焦 run，这正是本票要的行为）；allTools / 脉冲仍不重算——
     // focus 不是它们的键（收窄 AC3 的那层收益对它们依然成立）。
