@@ -16,7 +16,7 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { memo, useEffect, useRef, useState, type FocusEvent } from 'react';
+import { memo, useEffect, useRef, useState, type FocusEvent, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowRight, Scissors } from 'lucide-react';
 import type { ToolCall } from '../types';
@@ -122,6 +122,14 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
   /* 快捷动作（复制 / 定位）只在行被 hover 或聚焦后挂载——理由见下方 JSX 注释。
      失焦时若焦点落进本卡内部（Tab 到复制按钮），保持挂载。 */
   const [actionsShown, setActionsShown] = useState(false);
+  /* 焦点仍在卡内时不卸载快捷动作：Tab 到复制按钮的瞬间指针已离开卡片，无条件
+     `setActionsShown(false)` 会把正要激活的按钮抽走（#1429 复审 P3）。与 onRowBlur
+     同一条判据，两条退出路径共用。 */
+  const onRowLeave = (e: MouseEvent<HTMLDivElement>) => {
+    const active = document.activeElement;
+    if (active instanceof Node && e.currentTarget.contains(active)) return;
+    setActionsShown(false);
+  };
   const onRowBlur = (e: FocusEvent<HTMLDivElement>) => {
     const next = e.relatedTarget;
     if (next instanceof Node && e.currentTarget.contains(next)) return;
@@ -153,7 +161,7 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       className={`act-node-wrap act-card${stateClass}`}
       data-stream-key={`tool:${tool.tool_call_id}`}
       onMouseEnter={() => setActionsShown(true)}
-      onMouseLeave={() => setActionsShown(false)}
+      onMouseLeave={onRowLeave}
       onFocus={() => setActionsShown(true)}
       onBlur={onRowBlur}
     >
@@ -163,7 +171,11 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
         aria-level={effectiveLevel}
         aria-expanded={detailOpen}
         /* 键盘路径：行 button 是真焦点目标；聚焦即给出全量参数 tooltip，
-           失焦关闭（Esc 在 window 级监听里，两条路径共用）。 */
+           失焦关闭（Esc 在 window 级监听里，两条路径共用）。
+           `aria-describedby` 也挂在 button 上——tooltip 的触发者与读屏的关联点
+           必须是**同一个**可聚焦元素（#1429 复审 P3：挂在不可聚焦的 `.act-args`
+           span 上，键盘用户永远读不到它描述的内容）。 */
+        aria-describedby={argTip !== null ? tipId : undefined}
         onFocus={openArgTip}
         onBlur={closeTip}
       >
@@ -190,7 +202,6 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
           ref={argsRef}
           className="act-args"
           data-full={argsTruncatable ? argsSummary : undefined}
-          aria-describedby={argTip !== null ? tipId : undefined}
           onMouseEnter={openArgTip}
           onMouseLeave={closeTip}
         >

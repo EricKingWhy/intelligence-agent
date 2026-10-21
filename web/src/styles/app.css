@@ -3708,11 +3708,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .act-args[data-full] {
   cursor: help;
 }
-.act-args[data-full]:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-  border-radius: var(--radius-xs);
-}
 .act-card.is-fail .act-args {
   color: color-mix(in srgb, var(--danger) 45%, var(--text-primary));
   opacity: 0.82;

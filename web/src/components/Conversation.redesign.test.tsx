@@ -329,6 +329,41 @@ describe('#1429 参数中间省略', () => {
     await act(async () => (container.querySelector('.act-node') as HTMLButtonElement).focus());
     const tip = document.body.querySelector('.arg-tip');
     expect(tip?.textContent).toBe(command);
+    // #1429 复审 P3：tooltip 的触发者（行 button）必须自己带 `aria-describedby`；
+    // 挂到不可聚焦的 `.act-args` span 上，读屏用户永远拿不到这层描述。
+    const row = container.querySelector('.act-node') as HTMLButtonElement;
+    expect(row.getAttribute('aria-describedby')).toBe(tip?.id);
+    expect(container.querySelector('.act-args')?.hasAttribute('aria-describedby')).toBe(false);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('指针离开时焦点仍在卡内 ⇒ 快捷动作不卸载（Tab 到复制按钮不被抽走）', async () => {
+    const t = turn({
+      tools: [tool({ tool_call_id: 'a5', name: 'bash', args: { command: 'ls' }, result: 'out' })],
+      activities: [{ kind: 'tool' as const, tool_call_id: 'a5' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<TurnView turn={t} model={null} density="balanced" />);
+    });
+    const wrap = container.querySelector('.act-card') as HTMLElement;
+    const row = container.querySelector('.act-node') as HTMLButtonElement;
+    await act(async () => row.focus());
+    expect(container.querySelector('.act-quick-acts')).not.toBeNull();
+
+    // 焦点进卡内（快捷动作按钮），随后指针离开卡片区域。
+    const actBtn = container.querySelector('.act-quick-acts button') as HTMLButtonElement;
+    expect(actBtn).not.toBeNull();
+    await act(async () => actBtn.focus());
+    await act(async () => {
+      wrap.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+      wrap.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    });
+    expect(container.querySelector('.act-quick-acts')).not.toBeNull();
 
     act(() => root.unmount());
     container.remove();
