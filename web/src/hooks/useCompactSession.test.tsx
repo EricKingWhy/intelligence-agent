@@ -49,7 +49,7 @@ async function runCompact() {
 }
 
 describe('#1325 S5 — 压缩被拒按 reason 映射中文', () => {
-  it('409 + no_early_turns → 中文「没有可压缩的早期内容」，不含 UUID / 英文原文', async () => {
+  it('409 + no_early_turns → 中文「没有可以精简的早期内容」，不含 UUID / 英文原文', async () => {
     compactSession.mockRejectedValue(
       new api.SessionError(
         409,
@@ -58,7 +58,7 @@ describe('#1325 S5 — 压缩被拒按 reason 映射中文', () => {
       ),
     );
     await runCompact();
-    expect(current?.compactError).toBe('没有可压缩的早期内容');
+    expect(current?.compactError).toBe('没有可以精简的早期内容');
   });
 
   it('其余 409（run_busy）保持后端可读文案，不被误映射', async () => {

@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    # #1420：上下文洞察独立模块开关（票面「不碰」段定义）。关闭时三组洞察路由
+    # **不注册**（直连 404），Core 路由零影响（不变量 #21）；capability manifest
+    # 同步下发同名布尔，前端据此显隐一级入口（标志缺失 = 关闭）。
+    insights_enabled: bool = True
     # #1026：摘要请求墙钟随请求规模线性缩放（base + kt × slope，消融候选①）。
     # base 默认 30s 维持小请求的既有墙钟；slope 默认 0.25s/kt 使 ~167k 请求
     # 得 ~71.75s（阶段 A 实测锚：同路径 16.8s 成功、30s 恒败 ⇒ ≥60s 需求）。

@@ -4,6 +4,7 @@
  *  `only-export-components`），这些纯函数直接单测、也可被别处复用。 */
 
 import type { ConstraintScope } from './api';
+import { formatDateTime } from './format';
 
 /** 作用域三选一的中文标签（#1191 §四.1 / §五.2）——**单一 owner**。
  *
@@ -27,13 +28,10 @@ export const FACT_TYPE_DOTS: Record<string, string> = {
   evidence_ref: 'var(--cn-type-evidence-ref)',
 };
 
-/** ISO 时间 → `MM-DD HH:mm`（本地时区）；坏值原样返回，不猜。 */
+/** ISO 时间 → 全站统一 `YYYY-MM-DD HH:mm`（本地时区）；坏值原样返回，不猜。 */
 export function formatFactTime(iso: string | null): string {
   if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return formatDateTime(iso) ?? iso;
 }
 
 /** 操作人展示：本地信任身份的哨兵 `local` → 「本人操作」，其余原样（真实优先）。 */

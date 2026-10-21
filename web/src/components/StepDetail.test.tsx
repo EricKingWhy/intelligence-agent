@@ -59,7 +59,7 @@ describe('TimelineTab 尾窗裁剪', () => {
     expect(html).toContain('timeline-window-bar');
     expect(html).toContain(`共 ${total} 条`);
     // 窗口是"最近"而非"最早"——最后一行必须在
-    expect(html).toContain(`>${total - 1}<`);
+    expect(html).toContain(`#${total - 1}`);
     // 最早一行被折叠
     expect(html).not.toContain('>--1<');
   });
@@ -67,7 +67,7 @@ describe('TimelineTab 尾窗裁剪', () => {
   it('窗口行 key 用全局序号：扩展窗口后既有行 identity 稳定（append-only 契约）', () => {
     // key = hidden + i：对 2000 事件窗口 200，最后可见行全局序号 1999
     const html = renderTab(bigConversation(2000));
-    expect(html).toContain(`>${2000 - 1}<`);
+    expect(html).toContain(`#${2000 - 1}`);
     expect(rowCount(html)).toBe(TIMELINE_WINDOW_DEFAULT);
   });
 
@@ -99,11 +99,11 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
   it('有 result 时默认 Output 选中（看结果优先）', () => {
     const html = renderTool(toolBase);
     expect(html).toContain('io-tabs');
-    expect(html).toContain('>Overview<');
-    expect(html).toContain('>Input<');
-    expect(html).toContain('>Output<');
+    expect(html).toContain('>概览<');
+    expect(html).toContain('>输入<');
+    expect(html).toContain('>输出<');
     // 默认 Output 选中（aria-selected）
-    expect(html).toMatch(/aria-selected="true"[^>]*>Output</);
+    expect(html).toMatch(/aria-selected="true"[^>]*>输出</);
     // Output 面板内容在（exit_code 键来自 result 对象树）
     expect(html).toContain('exit_code');
     // Input 面板默认不渲染其 args 内容（command 是 args 独有键）
@@ -112,23 +112,23 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
   it('无 result（运行中）：默认 Overview，元信息可见且无 Output 标签', () => {
     const html = renderTool({ ...toolBase, result: undefined, status: 'running' });
-    expect(html).toContain('>Overview<');
-    expect(html).toMatch(/aria-selected="true"[^>]*>Overview</);
-    expect(html).not.toContain('>Output<');
+    expect(html).toContain('>概览<');
+    expect(html).toMatch(/aria-selected="true"[^>]*>概览</);
+    expect(html).not.toContain('>输出<');
     // Overview 元信息：tool_call_id / status
-    expect(html).toContain('tool_call_id');
+    expect(html).toContain('调用编号');
     expect(html).toContain('running');
   });
 
   it('有 raw_call/raw_result 才出现 Raw 标签；raw 面板渲染原始事件树', () => {
     const noRaw = renderTool(toolBase);
-    expect(noRaw).not.toContain('>Raw<');
+    expect(noRaw).not.toContain('>原始<');
     const withRaw = renderTool({
       ...toolBase,
       raw_call: { type: 'tool/call', data: { x: 1 } },
       raw_result: { type: 'tool/result', data: { y: 2 } },
     } as ToolCall);
-    expect(withRaw).toContain('>Raw<');
+    expect(withRaw).toContain('>原始<');
     // Raw 面板（含两个「复制 Raw」按钮）只在选中 Raw 档时渲染 ⇒ SSR 首帧看不到，
     // 故这里无法锁住其 aria-label（真机审计 B-D7 的整改见 e2e/真机复验）。
   });
@@ -211,19 +211,19 @@ describe('EventInspector Overview（BUG-008）', () => {
 
   it('step_id 键缺失：不渲染空的 step 幽灵行（否则出现「step」后跟空值）', () => {
     const html = renderEvent(baseEvent);
-    expect(html).not.toContain('>step<');
+    expect(html).not.toContain('>步骤<');
     // 阳性对照——面板整体确实渲染了（避免「整个面板没渲染」这种空洞绿）
     expect(html).toContain('run/started');
-    expect(html).toContain('>seq<');
+    expect(html).toContain('>序号<');
   });
 
   it('同一渲染点的相邻语义：number 渲染 step 行（含值 7），null 哨兵不渲染（0 与数值不是哨兵）', () => {
     const withStepHtml = renderEvent(withStep(7));
-    expect(withStepHtml).toContain('>step<');
+    expect(withStepHtml).toContain('>步骤<');
     expect(withStepHtml).toContain('>7<');
-    expect(renderEvent(withStep(0))).toContain('>step<');
+    expect(renderEvent(withStep(0))).toContain('>步骤<');
     expect(renderEvent(withStep(0))).toContain('>0<');
-    expect(renderEvent(withStep(null))).not.toContain('>step<');
+    expect(renderEvent(withStep(null))).not.toContain('>步骤<');
   });
 });
 
@@ -247,6 +247,20 @@ describe('StepDetail child focus（v2 PRD §10.5 委派钻取）', () => {
     expect(html).toContain('research_review');
     expect(html).toContain('child-back-btn');
   });
+
+  it('target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    const html = renderToString(createElement(StepDetail, {
+      conversation: conv,
+      streaming: false,
+      focus: { kind: 'child', childSessionId: 'c1234567890', target: '' },
+      onFocusRun: noop,
+      onFocusTool: noop,
+      onFocusEvent: noop,
+      ...panelProps,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('子会话 · —');
+    expect(html).not.toContain('子会话 · ?');
+  });
 });
 
 describe('TimelineTab run 分组头（UI-03）', () => {
@@ -254,8 +268,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     const html = renderTab(twoRunConversation());
     const headers = (html.match(/tl-run-header/g) || []).length;
     expect(headers).toBe(2);
-    expect(html).toContain('Run 1');
-    expect(html).toContain('Run 2');
+    expect(html).toContain('第 1 轮执行');
+    expect(html).toContain('第 2 轮执行');
     expect(html).toContain('run-badge-completed');
     expect(html).toContain('run-badge-running');
     // 第一组 4 事件（session/started 归入 r1 组）；打在 .tl-run-count 上防 tl-seq 误命中
@@ -276,14 +290,14 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 Run 1 正是本票要防的事故）
     expect(html).not.toContain('run-badge-completed');
     expect(html).toContain('tl-run-header');
-    expect(html).toContain('>Run 2</span>');
-    expect(html).not.toContain('>Run 1</span>');
+    expect(html).toContain('>第 2 轮执行</span>');
+    expect(html).not.toContain('>第 1 轮执行</span>');
   });
 });
 
 // ── #183 AC9 / #186 AC3：Inspector 的 Changes tab 与中心列共用同一个 diff 渲染器 ──
 
-describe('ChangesTab 使用 DiffBlock（diff 只有一份渲染器）', () => {
+describe('ChangesTab：行级 unified diff（#1419 C-3），归档/过大仍走 DiffBlock', () => {
   const editTool = (over: Partial<ToolCall>): ToolCall => ({
     tool_call_id: 'tc-diff',
     name: 'edit',
@@ -297,13 +311,40 @@ describe('ChangesTab 使用 DiffBlock（diff 只有一份渲染器）', () => {
   const renderChanges = (tools: ToolCall[]) =>
     renderToString(createElement(ChangesTab, { tools })).replaceAll('<!-- -->', '');
 
-  it('普通 diff：走 DiffBlock 的结构（.diff-block + .diff-cols），不是自己内联的裸 .diff-cols', () => {
+  /* #1419 C-3 改写了本面的渲染：普通 diff 走 `lib/lineDiff` 的行级 unified 视图
+   * （双列行号 + 红绿底 + `+/−` 号），不再复用中心列的双栏 `DiffBlock`——效果图的
+   * 「变更」面是 unified 的，双栏在 520px 宽下每列只剩 ~240px。
+   * 归档/过大两种没有可比对文本的情况仍然回 `DiffBlock`（下面两条用例钉住）。 */
+  it('普通 diff：走行级 unified 视图（.dline 带双列行号 + / − 号），不是双栏 .diff-cols', () => {
     const html = renderChanges([editTool({})]);
-    expect(html).toContain('diff-block');
-    expect(html).toContain('变更前');
-    expect(html).toContain('变更后');
+    expect(html).toContain('class="step"');
+    expect(html).toContain('dline del');
+    expect(html).toContain('dline add');
+    // 行号是算出来的真值：删除行是变更前第 1 行，新增行是变更后第 1 行
+    expect(html).toMatch(/dline del"><span class="ln">1<\/span><span class="ln"><\/span>/);
+    expect(html).toMatch(/dline add"><span class="ln"><\/span><span class="ln">1<\/span>/);
     expect(html).toContain('old');
     expect(html).toContain('new');
+    // 双栏不再出现在这一面
+    expect(html).not.toContain('diff-cols');
+    expect(html).not.toContain('变更前');
+  });
+
+  it('段头是效果图的 `.pane-head`：标签 + `N 文件 · +A −D` + 归档徽标（真实事实）', () => {
+    const html = renderChanges([editTool({}), editTool({ tool_call_id: 'tc-2', diff: { before: 'x\n', after: 'x\ny\n', truncated: false } })]);
+    expect(html).toContain('class="pane-head"');
+    expect(html).toContain('工作树改动');
+    expect(html).toContain('2 文件');
+    expect(html).toContain('+2 −1');
+    // 没有归档文件 ⇒ 不画徽标（效果图的「已落盘」后端无此事实，不许编）
+    expect(html).not.toContain('已归档 0');
+  });
+
+  it('卡头给出真实元信息：路径 / 工具名 / +A −D 计数', () => {
+    const html = renderChanges([editTool({})]);
+    expect(html).toContain('src/a.ts');
+    expect(html).toContain('<span class="add">+1</span>');
+    expect(html).toContain('<span class="del">−1</span>');
   });
 
   it('归档 diff：渲染归档占位，**不把 marker 原文当文件内容**（收敛前这里会显示假内容）', () => {

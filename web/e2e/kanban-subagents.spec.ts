@@ -90,7 +90,7 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     await openBoard(page);
 
     const card = cardOf(page, 's-exec');
-    const toggle = card.getByRole('button', { name: '子智能体' });
+    const toggle = card.getByRole('button', { name: '子任务' });
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
@@ -107,10 +107,10 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     // 全部来自 roster 的单一事实源，本票不复制映射。
     await expect(card.locator('.agent-row')).toHaveCount(2);
     await expect(card.getByText('完成')).toBeVisible();
-    await expect(card.getByText('12.8K tok · 估算')).toBeVisible();
+    await expect(card.getByText('12.8K 字 · 估算')).toBeVisible();
     await expect(card.getByText('耗时 1分30秒')).toBeVisible();
     await expect(card.getByText('失败')).toBeVisible();
-    await expect(card.getByText('500 tok')).toBeVisible();
+    await expect(card.getByText('500 字')).toBeVisible();
 
     // 折叠按钮不冒泡成"打开会话"：点完看板仍在。
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
@@ -125,7 +125,7 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     await openBoard(page);
 
     const card = cardOf(page, 's-exec');
-    const toggle = card.getByRole('button', { name: '子智能体' });
+    const toggle = card.getByRole('button', { name: '子任务' });
 
     await toggle.click();
     await expect(card.locator('.agent-row')).toHaveCount(2);
@@ -152,18 +152,18 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     await openBoard(page);
 
     const card = cardOf(page, 's-exec');
-    const toggle = card.getByRole('button', { name: '子智能体' });
+    const toggle = card.getByRole('button', { name: '子任务' });
 
     await toggle.click();
-    await expect(card.getByText('无子智能体')).toBeVisible();
+    await expect(card.getByText('无子任务')).toBeVisible();
     await expect(card.locator('.agent-row')).toHaveCount(0);
     await expect.poll(() => requests.length).toBe(1);
 
     // 空结果也是"结果"：缓存住，不因为列表为空就重拉。
     await toggle.click();
-    await expect(card.getByText('无子智能体')).toHaveCount(0);
+    await expect(card.getByText('无子任务')).toHaveCount(0);
     await toggle.click();
-    await expect(card.getByText('无子智能体')).toBeVisible();
+    await expect(card.getByText('无子任务')).toBeVisible();
     await page.waitForTimeout(200);
     expect(requests).toHaveLength(1);
   });
@@ -175,7 +175,7 @@ test.describe('#1307 看板子智能体按需拉取', () => {
       delegations: DELEGATIONS,
     });
     await openBoard(page);
-    await cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }).click();
+    await cardOf(page, 's-exec').getByRole('button', { name: '子任务' }).click();
     await expect.poll(() => requests.length).toBe(1);
 
     await page.getByRole('button', { name: '关闭看板' }).click();
@@ -184,9 +184,9 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     // 顺带清掉一切，绿了也证明不了缓存边界）。
     await page.getByLabel('看板').click();
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
-    await expect(cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }))
+    await expect(cardOf(page, 's-exec').getByRole('button', { name: '子任务' }))
       .toHaveAttribute('aria-expanded', 'false');
-    await cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }).click();
+    await cardOf(page, 's-exec').getByRole('button', { name: '子任务' }).click();
     // 卡片随看板卸载、本地态归零 ⇒ 重新展开必须再拉一次（这是"缓存到看板关闭"的边界，
     // 不是"永久缓存"）。折叠态也回到收起：重开时按钮先是 aria-expanded=false。
     await expect.poll(() => requests.length).toBe(2);
@@ -212,13 +212,13 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     for (const id of ['s-backlog', 's-verify', 's-accepted']) {
       const card = cardOf(page, id);
       await expect(card).toBeVisible();
-      await expect(card.getByRole('button', { name: '子智能体' })).toHaveCount(0);
+      await expect(card.getByRole('button', { name: '子任务' })).toHaveCount(0);
       await expect(card.locator('button[aria-expanded]')).toHaveCount(0);
     }
 
     // 对照：执行中卡的一次展开证明网络管道是通的（否则"零请求"可能只是没测到），
     // 且这三个会话始终不在请求列表里。
-    await cardOf(page, 's-exec').getByRole('button', { name: '子智能体' }).click();
+    await cardOf(page, 's-exec').getByRole('button', { name: '子任务' }).click();
     await expect.poll(() => requests.length).toBe(1);
     expect(requests).toEqual(['s-exec']);
   });

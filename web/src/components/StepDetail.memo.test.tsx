@@ -195,10 +195,10 @@ describe('F2 — AC1 `memo` 包裹', () => {
     render(<InspectorHost conversation={seed()} tick={0} />);
     const badge = (label: string) =>
       container!.querySelector(`button[aria-label="${label}"] .detail-tab-count`)?.textContent;
-    expect(badge('Timeline')).toBe('5');
-    expect(badge('Terminal')).toBe('1');
-    expect(badge('Changes')).toBe('0');
-    expect(badge('Artifacts')).toBe('0');
+    expect(badge('时间线')).toBe('5');
+    expect(badge('终端')).toBe('1');
+    expect(badge('变更')).toBe('0');
+    expect(badge('产出文件')).toBe('0');
   });
 });
 
@@ -211,7 +211,7 @@ describe('F2 — AC3(a) 与对话无关的提交不得让派生重算', () => {
     const before = counts();
     expect(before.all).toBe(1); // 挂载各算一次
 
-    click('button[aria-label="关闭 Inspector"]');
+    click('button[aria-label="关闭运行详情"]');
     // 刻意设计：关闭只是换祖先 class，组件**不卸载**（App.tsx:920-923）。
     expect(container!.querySelector('[data-panel="inspector"]')).not.toBeNull();
     expect(container!.querySelector('.app-regions')!.className).toContain('inspector-closed');
@@ -327,11 +327,13 @@ describe('F2 — 反例守卫（记忆化的键是输入，不是"永不重渲�
 
     click('button.timeline-row');
 
-    // 「组件确实重渲染了」的证据是 DOM 结果（而不是派生计数——见文件头那段）。
-    const peek = container!.querySelector('.detail-peek');
-    expect(peek).not.toBeNull();
-    expect(peek!.getAttribute('data-peek')).toBe('on'); // 详情真的可见（"点了有反应"）
-    expect(peek!.textContent).toContain('选中项详情');
+    // #1419：点击卡片 = 就地展开（不再开右侧 peek）；「有反应」的证据是展开区挂载。
+    expect(container!.querySelector('.detail-peek')?.getAttribute('data-peek')).toBe('off');
+    const card = container!.querySelector('.timeline-card.expanded');
+    expect(card).not.toBeNull();
+    // #1419 T-10：展开区首行是 `#seq · type` 段头（原「钻取」标签退役）。
+    expect(card!.querySelector('.tl-drill')?.textContent).toContain('#1 · run/started');
+    expect(card!.querySelector('.timeline-row')?.getAttribute('aria-expanded')).toBe('true');
     // #1106：聚焦事件带信封 run_id ⇒ focusedRunId 变化 ⇒ 头标档位徽标必须重算
     // （徽标跟随聚焦 run，这正是本票要的行为）；allTools / 脉冲仍不重算——
     // focus 不是它们的键（收窄 AC3 的那层收益对它们依然成立）。

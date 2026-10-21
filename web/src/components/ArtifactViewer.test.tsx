@@ -93,7 +93,7 @@ describe('#186 AC1：三态如实', () => {
 
   it('detail 为空时不补一句自造的错误文案', () => {
     const html = render({ status: 'error', kind: 'error', detail: '', code: null });
-    expect(html).toContain('读取 artifact 内容失败');
+    expect(html).toContain('读取产出文件失败');
     expect(html).not.toContain('artifact-content-detail');
   });
 });

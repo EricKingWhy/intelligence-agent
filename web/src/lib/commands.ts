@@ -13,8 +13,9 @@ export interface CommandItem {
    *  但 `Toggle Theme` / `Copy Run ID` / `Compact` 这些英文说法要照样搜得到——
    *  否则用英文肌肉记忆输入的老用户会以为命令没了。 */
   keywords?: string;
-  /** 右侧弱化提示：快捷键 / 事件类型 / 状态。 */
-  hint?: string;
+  /** label 后的 12px tertiary 补充：分类归属 / 状态 / 标识（不画成键帽）。
+   *  真实快捷键只出现在底部 footer；当前命令集没有逐项快捷键。 */
+  meta?: string;
   group: 'actions' | 'density' | 'events';
   run: () => void;
 }

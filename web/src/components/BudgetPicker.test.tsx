@@ -34,22 +34,27 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
 
   it('三维全接 → turns 输入 / tokens 档位 trigger / datetime 高级路径全在场（aria-label 沿用旧名）', () => {
     const out = html(createElement(BudgetPickerPanel, full));
-    expect(out).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(out).toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="轮数上限（留空用默认值）"');
+    expect(out).toContain('aria-label="字数档位"');
     expect(out).toContain('aria-label="预算截止时间（留空为不设）"');
     expect(out).toContain('type="datetime-local"');
   });
 
+  it('非法草稿不算有效覆盖 → 不渲染「恢复默认」（与 trigger 摘要同判据）', () => {
+    const out = html(createElement(BudgetPickerPanel, { ...full, turns: 'abc' }));
+    expect(out).not.toContain('恢复默认');
+  });
+
   it('未接 onChange 的维不渲染其控件（不渲染吞输入的死框，#426 语义原样）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, onTokensChange: undefined, onDeadlineChange: undefined }));
-    expect(out).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(out).not.toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="轮数上限（留空用默认值）"');
+    expect(out).not.toContain('aria-label="字数档位"');
     expect(out).not.toContain('aria-label="预算截止时间（留空为不设）"');
   });
 
   it('tokens 草稿命中档位 → 档位 trigger 显示紧凑标签（500k）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, tokens: '500000' }));
-    expect(out).toContain('aria-label="预算 tokens 档位"');
+    expect(out).toContain('aria-label="字数档位"');
     expect(out).toContain('>500k<');
   });
 
@@ -60,7 +65,7 @@ describe('BudgetPickerPanel — 三维控件（#536）', () => {
 
   it('tokens 草稿为空 → 档位 trigger 显示 placeholder（tokens 上限）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, tokens: '' }));
-    expect(out).toContain('>tokens 上限<');
+    expect(out).toContain('>字数上限<');
   });
 
   it('deadline 时长草稿（2h）→ 时长档 trigger 显示「2 小时」', () => {
@@ -82,15 +87,15 @@ describe('BudgetPickerPanel — 截止预览行（#536 §2.2）', () => {
     expect(out).not.toContain('composer-budget-preview');
   });
 
-  it('时长草稿 → 「≈ MM-DD HH:mm 截止（2 小时后）」', () => {
+  it('时长草稿 → 「≈ YYYY-MM-DD HH:mm 截止（2 小时后）」', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, deadline: '2h' }));
-    expect(out).toMatch(/≈ \d{2}-\d{2} \d{2}:\d{2} 截止（2 小时后）/);
+    expect(out).toMatch(/≈ \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止（2 小时后）/);
     expect(out).not.toContain('composer-budget-preview--danger');
   });
 
   it('datetime 高级路径 → 「≈ … 截止」（无相对语）', () => {
     const out = html(createElement(BudgetPickerPanel, { ...full, deadline: '2026-10-02T15:30' }));
-    expect(out).toMatch(/≈ \d{2}-\d{2} \d{2}:\d{2} 截止<\/span>/);
+    expect(out).toMatch(/≈ \d{4}-\d{2}-\d{2} \d{2}:\d{2} 截止<\/span>/);
   });
 
   it('已过期（datetime 早于 now）→ 「已过期」 + --danger 修饰类', () => {
@@ -107,21 +112,35 @@ describe('BudgetPicker — 单入口 trigger（#536 §2.3/§2.5）', () => {
     deadline: '', onDeadlineChange: noop,
   };
 
-  it('trigger aria-label="预算" + 全空摘要「默认」', () => {
+  it('trigger aria-label="预算" + 全空摘要「预算：默认」（#1370 3d：入口常显前缀）', () => {
     const out = html(createElement(BudgetPicker, full));
     expect(out).toContain('aria-label="预算"');
-    expect(out).toContain('>默认<');
+    expect(out).toContain('>预算：默认<');
+    // 「选中才给底色」：全空 = 未选态，不带 data-selected。
+    expect(out).not.toContain('data-selected="true"');
   });
 
   it('草稿有值 → 摘要随 drafts 变化（turns 5 · 500k · 2h）', () => {
     const out = html(
       createElement(BudgetPicker, { ...full, turns: '5', tokens: '500000', deadline: '2h' }),
     );
-    expect(out).toContain('>turns 5 · 500k · 2h<');
+    expect(out).toContain('>预算：轮数 5 · 500k · 2h<');
+    // 有任一维落定 ⇒ 选中态（#1370 P0-9）。
+    expect(out).toContain('data-selected="true"');
   });
 
-  it('disabled → aria-disabled="true"（SSR 可见，同 OptionPicker 契约）', () => {
+  it('非法草稿（turns=abc）→ 摘要「预算：默认」，且不亮选中态（与摘要同源）', () => {
+    const out = html(createElement(BudgetPicker, { ...full, turns: 'abc' }));
+    expect(out).toContain('>预算：默认<');
+    expect(out).not.toContain('data-selected="true"');
+  });
+
+  it('disabled → aria-disabled="true" + 原生 title 兜底完整说明（#1372）', () => {
     const out = html(createElement(BudgetPicker, { ...full, disabled: true }));
     expect(out).toContain('aria-disabled="true"');
+    // disabled 收不到指针事件 ⇒ Radix tooltip 打不开；完整预算说明不能因此丢失。
+    expect(out).toContain(
+      'title="这次任务的预算（轮数 / 字数 / 截止时间）；留空用默认值。到上限或到点会自动暂停，可在恢复面板调整后继续。"',
+    );
   });
 });

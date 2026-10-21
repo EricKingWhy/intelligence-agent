@@ -109,6 +109,13 @@ beforeEach(() => {
   rejectUpload = null;
   progressCallback = null;
   abortSpy = vi.fn<() => void>();
+  // Radix DropdownMenu（#1405 附件菜单）依赖 ResizeObserver；jsdom 没有。
+  vi.stubGlobal('ResizeObserver', class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  });
+  Element.prototype.scrollIntoView = () => {};
   vi.mocked(uploadAttachment).mockImplementation((_sessionId, _file, onProgress) => {
     progressCallback = onProgress ?? null;
     return {
@@ -155,6 +162,27 @@ const sendButton = (): HTMLButtonElement =>
   container.querySelector<HTMLButtonElement>('button[aria-label="发送"]')!;
 const attachButton = (): HTMLButtonElement =>
   container.querySelector<HTMLButtonElement>('button[aria-label="添加图片"]')!;
+/** #1405：附图入口现在是「+」菜单；真正被门禁挡住的是菜单里的图片项。 */
+function openAddMenu(): void {
+  act(() => {
+    const trigger = attachButton();
+    trigger.focus();
+    trigger.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+  });
+}
+const addImageItem = (): HTMLElement | null =>
+  document.querySelector<HTMLElement>('[data-testid="composer-add-image"]');
+function imageEntryDisabled(): boolean {
+  openAddMenu();
+  expect(addImageItem()).not.toBeNull();
+  const disabled = addImageItem()!.getAttribute('aria-disabled') === 'true';
+  act(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  return disabled;
+}
 
 async function typeText(text: string): Promise<void> {
   await act(async () => {
@@ -348,9 +376,10 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     { name: 'text-only', default: true, supportsVision: false },
   ] as ModelCatalogEntry[];
 
-  it('supports_vision=false：入口禁用 + 可见原因，粘贴/拖放都不入栏', async () => {
+  it('supports_vision=false：图片项禁用 + 可见原因，粘贴/拖放都不入栏', async () => {
     paint({ models: visionOff });
-    expect(attachButton().disabled).toBe(true);
+    expect(attachButton().disabled).toBe(false);
+    expect(imageEntryDisabled()).toBe(true);
     const hint = container.querySelector('.composer-attach-hint');
     expect(hint?.textContent).toContain('supports_vision=false');
 
@@ -377,17 +406,19 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
-  it('supportsVision 缺失（后端沉默）→ 不误判为不支持，入口可用', () => {
+  it('supportsVision 缺失（后端沉默）→ 不误判为不支持，图片项可用', () => {
     paint({ models: [{ name: 'unknown', default: true }] as ModelCatalogEntry[] });
     expect(attachButton().disabled).toBe(false);
+    expect(imageEntryDisabled()).toBe(false);
     expect(container.querySelector('.composer-attach-hint')).toBeNull();
   });
 
   it('P4-2：无会话 × supports_vision=false——视觉门禁优先，懒建不触发', async () => {
     const ensureSession = vi.fn(async () => 'sess-new');
     paint({ sessionId: null, models: visionOff, onEnsureSession: ensureSession });
-    // 「会话缺失」不再是门禁（#1015），但模型不支持视觉仍是：入口禁用 + 可见原因。
-    expect(attachButton().disabled).toBe(true);
+    // 「会话缺失」不再是门禁（#1015），但模型不支持视觉仍是：图片项禁用 + 可见原因。
+    expect(attachButton().disabled).toBe(false);
+    expect(imageEntryDisabled()).toBe(true);
     expect(container.querySelector('.composer-attach-hint')?.textContent).toContain(
       'supports_vision=false',
     );

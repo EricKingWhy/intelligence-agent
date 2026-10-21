@@ -189,8 +189,11 @@ test('#1356 AC11：计划卡与 PlanList 同屏互不干扰（批准后清单不
 test('#1356 AC11：计划审批锁住 composer，且不污染进度清单', async ({ page }) => {
   await openPlanCard(page);
 
-  await expect(page.locator('.composer-locked-hint')).toHaveText('请先裁决当前计划，再发送新消息');
+  await expect(page.locator('.composer-locked-hint')).toHaveText('请先决定当前计划怎么处理，再发送新消息');
   await expect(page.locator('.composer-dock textarea')).toBeDisabled();
+  // #1372 r3 P3：disabled 控件不可聚焦——「跳到输入框」必须同时消失，否则按了没反应。
+  await expect(page.getByRole('link', { name: '跳到输入框' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: '跳到会话区' })).toHaveCount(1);
   // 方案 4 的行为级边界：计划正文不进 `task/plan_updated` ⇒ 进度清单不存在。
   await expect(page.locator('.plan-list')).toHaveCount(0);
 });

@@ -36,7 +36,7 @@
  * 等投影说话——resolved 事件到达后审批离开 pending 队列，卡片由调用方
  * （内联位 / 模态）随投影卸载。 */
 import { useEffect, useRef, useState } from 'react';
-import { ShieldAlert, ShieldCheck, Check, X } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Check, X, AlertTriangle } from 'lucide-react';
 import type { PendingApproval } from '../types';
 import { postApproval, AlreadyResolvedError, ApprovalGoneError } from '../lib/api';
 import { classifyPreviewArgs } from '../lib/approvalPreview';
@@ -70,6 +70,14 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #1367（P0-3）：记住上一次提交的决策——错误条里的「重试」原样重发它
+  // （不重读按钮状态：用户在错误后可能改了粒度选择，但"重试"的语义是重发失败
+  //  的那一次，不是重新挑一次）。
+  const [lastAttempt, setLastAttempt] = useState<{
+    approved: boolean;
+    decision?: string;
+    granularity?: 'exact' | 'command';
+  } | null>(null);
   // #684 第三档：点「以后都允许」后展开粒度选择器（精确 / 命令级）。粒度是**用户
   // 显式再选一次**才提交——不在展开时就默认某一档（F21 显式授权）。
   const [policyOpen, setPolicyOpen] = useState(false);
@@ -91,6 +99,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
     granularity?: 'exact' | 'command',
   ) => {
     if (busy || invalid || submitted) return;
+    setLastAttempt({ approved, decision, granularity });
     setBusy(true);
     setError(null);
     try {
@@ -214,12 +223,25 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
         <p className="approval-invalid-note" role="status">
           {submitted
             ? '决策已提交——该审批随后失效，最终结果以事件流为准。'
-            : '该审批已失效——所在运行已结束或服务已重启，决策无法再提交。'}
+            : '该审批已失效——所在任务已结束或服务已重启，决策无法再提交。'}
         </p>
       )}
       {error && !invalid && (
-        <div className="approval-error" role="alert">
-          {error}
+        <div className="approval-error approval-error-inline" role="alert">
+          <AlertTriangle size={14} className="approval-error-icon" aria-hidden="true" />
+          <span className="approval-error-text">{error}</span>
+          {lastAttempt !== null && (
+            <button
+              type="button"
+              className="approval-error-retry"
+              disabled={busy}
+              onClick={() =>
+                void decide(lastAttempt.approved, lastAttempt.decision, lastAttempt.granularity)
+              }
+            >
+              重试
+            </button>
+          )}
         </div>
       )}
       {!submitted && (

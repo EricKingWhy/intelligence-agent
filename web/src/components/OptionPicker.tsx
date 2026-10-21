@@ -44,6 +44,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import { focusPickerListOnOpen } from '../lib/pickerFocus';
+import { Tip } from './Tooltip';
 
 /** 一行选项的数据。`description` 为空 → 不渲染描述行（不填占位文案）。
  *  `icon` 缺省 → 图标槽留空（槽本身恒在，见 `OptionRowContent`）。 */
@@ -115,10 +116,14 @@ export function OptionRowContent({
 }
 
 interface Props {
-  /** `aria-label`（也是 trigger 的 `title`）。由调用方传入。 */
+  /** trigger 的 `aria-label`。原生 `title` 另由 `hint` / `disabledHint` 组合，不再等于此值。 */
   ariaLabel: string;
   /** 面板头部的问句标题（这个下拉在决定什么）。 */
   title: string;
+  /** #1370 P0-9：trigger 的说明文案（"这是什么、改了会怎样"）——与 `title`（面板头部的
+   *  问句）分工不同：问句回答"在决定什么"，本字段回答"改了会发生什么"。走原生 `title`
+   *  属性（票 8 才接 Radix tooltip）；缺省 = 沿用原规则（选中项标题/描述）。 */
+  hint?: string;
   icon: LucideIcon;
   /** 未选中时 trigger 上的文案。 */
   placeholder: string;
@@ -161,6 +166,7 @@ interface Props {
 export function OptionPicker({
   ariaLabel,
   title,
+  hint,
   icon: Icon,
   placeholder,
   options,
@@ -184,6 +190,8 @@ export function OptionPicker({
   // 描述（`研究审查\n只读：不含 write / edit…`）——零视觉占位，文案零前端硬编码
   // （把 tool_scope 写成前端常量就是抄第二份知识，profiles.py 一改就漂移）。
   const triggerTitle = selected ? `${selected.title}\n${selected.description ?? ''}`.trimEnd() : ariaLabel;
+  /** #1370：tooltip 第一行先说"这是什么、改了会怎样"，第二行仍是选中项的后端描述。 */
+  const tooltipTitle = hint === undefined ? triggerTitle : `${hint}\n${triggerTitle}`;
   const triggerLabel = selected?.title ?? placeholder;
   const searchHidden = options.length <= 5; // 阈值与 picker-search-visibility 契约一致
   const listRef = useRef<HTMLDivElement>(null);
@@ -208,21 +216,50 @@ export function OptionPicker({
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="composer-control"
-          aria-label={ariaLabel}
-          title={disabled && disabledHint ? disabledHint : triggerTitle}
-          // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
-          aria-disabled={disabled || undefined}
-          disabled={disabled}
-        >
-          <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
-          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
-        </button>
-      </Popover.Trigger>
+      {/* #1372 改动 6：原生 title → radix tooltip（composer 档位 chip）。
+          #1370 P0-9 + 审查 P3-1 保留：data-selected 选中态；disabled 时
+          `disabledHint` 只解释"为什么不能点"，与 hint（"这是什么/改了会怎样"）
+          两段并排，整句不顶掉。 */}
+      <Tip
+        content={
+          disabled && disabledHint
+            ? hint === undefined
+              ? disabledHint
+              : `${hint}\n${disabledHint}`
+            : tooltipTitle
+        }
+      >
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="composer-control"
+            aria-label={ariaLabel}
+            /* #1370 P0-9：「选中才给底色」——默认态（null / 未选）透明，有生效值才浮出底色。
+             * 生效值包含备用模型投影出的默认档（`effectiveReasoningEffort`），那时这一档
+             * 就是本轮真正生效的档位，所以照样亮。 */
+            data-selected={effectiveValue ? 'true' : undefined}
+            /* #1372：disabled 时 Radix tooltip 收不到指针事件，保留原生 title 作
+               降级通道——否则用户看不到「为什么不可点」，那是无障碍回退不是第二套
+               提示系统。启用态一律只走 radix tooltip。 */
+            title={
+              disabled
+                ? disabledHint === undefined
+                  ? triggerTitle
+                  : hint === undefined
+                    ? disabledHint
+                    : `${hint}\n${disabledHint}`
+                : undefined
+            }
+            // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+          >
+            <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
+            <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
+            <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
+          </button>
+        </Popover.Trigger>
+      </Tip>
       <Popover.Portal>
         <Popover.Content
           className={`picker-content${customContent !== undefined ? ' picker-content-custom' : ''}`}
