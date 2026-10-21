@@ -198,6 +198,7 @@ class MarkdownMemoryStore:
         user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
         memory_enabled: bool = True,
         user_profile_enabled: bool = True,
+        notification_mode: str = "on",
     ) -> None:
         self.directory = Path(memory_dir)
         self.memory_entries: list[str] = []
@@ -206,6 +207,9 @@ class MarkdownMemoryStore:
         self.user_char_limit = user_char_limit
         self.memory_enabled = memory_enabled
         self.user_profile_enabled = user_profile_enabled
+        #: #1440 P3-3：漂移通知也遵守 `memory_notification_mode`（部署级档位）。
+        #: 默认 `on` 保持其它构造点（测试 / migration）行为不变。
+        self.notification_mode = str(notification_mode or "on").lower()
         #: session_id → {target: rendered}；会话开始渲染一次，会话结束才失效（M9）。
         self._snapshot: dict[str, dict[str, str]] = {}
         self._consolidation_failures = 0
@@ -435,7 +439,10 @@ class MarkdownMemoryStore:
         它——journey 反向依赖本模块（环）。`entries` 是**被备份的那份磁盘内容**的解析
         结果，不是本次写入后的条目。没有当前 Session（直调存储、无 run 上下文）就不发：
         观察不能反过来要求调用方提供会话。通知失败只告警，绝不影响写入。
+        `notification_mode == "off"` 时不发（#1440 P3-3：部署级开关对两个通知源一致）。
         """
+        if self.notification_mode == "off":
+            return
         session = current_session_var.get()
         if session is None:
             return

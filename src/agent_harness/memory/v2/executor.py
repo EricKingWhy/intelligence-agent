@@ -75,6 +75,7 @@ from agent_harness.memory.v2.budget import (
     MemoryModelRole,
     next_attempt,
 )
+from agent_harness.memory.v2.capability import MemoryContentRejected
 from agent_harness.memory.v2.formation import (
     AdjudicatedContent,
     AdjudicationAction,
@@ -1534,12 +1535,16 @@ def _tally(values: Iterable[str]) -> dict[str, int]:
 def _discard_key(error: BaseException) -> str:
     """一条动作被丢弃的稳定归因（进 job 的 `state.discarded`）。
 
-    `_UnresolvedEvidence` 在前（它是 `ValueError` 的子类，先判才不会落进末条）；`PermissionError`
-    次之（`UntrustedIdentityError` 是它的子类，而"越权"比"冲突"更值得单独看见——把越权归进
+    `_UnresolvedEvidence` 在前（它是 `ValueError` 的子类，先判才不会落进末条）；
+    `MemoryContentRejected` 次之（#1440 P4：它是 `PermissionError` 的子类，但"内容被拒"
+    不是越权，混进 `target_unauthorized` 会让诊断读错因）；`PermissionError` 再其次
+    （`UntrustedIdentityError` 是它的子类，而"越权"比"冲突"更值得单独看见——把越权归进
     "冲突"会让一次跨用户的 UPDATE 尝试看起来像一次普通版本竞争）。
     """
     if isinstance(error, _UnresolvedEvidence):
         return "evidence_unresolved"
+    if isinstance(error, MemoryContentRejected):
+        return "content_rejected"
     if isinstance(error, PermissionError):
         return "target_unauthorized"
     if isinstance(error, KeyError):

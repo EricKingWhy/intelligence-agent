@@ -153,6 +153,49 @@ async def test_remember_tool_uses_soft_check_to_accept_paraphrase_and_reject_fab
     }
 
 
+@pytest.mark.asyncio
+async def test_soft_check_strips_edge_punctuation_like_the_baseline(
+    service_store, tmp_path,
+):
+    """#1440 P3-1：content 带边缘标点/引号时仍能找到依据（基线也放行）。
+
+    软校验的规范化只有 casefold + 空白折叠；不剥标点就会误拒"把用户原句加句号后写入"
+    这种常见形态。三个探针是两轴审查的原文（英文句号 / 英文引号 / 中文句号）。
+    """
+    service, store = service_store
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    tool = RememberMemoryV2Tool(service, sessions)
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        period = await _remember(
+            tool, sessions, "punct-period",
+            "Please remember I have lupus", content="I have lupus.",
+        )
+        quotes = await _remember(
+            tool, sessions, "punct-quotes",
+            "Please remember I have lupus", content='"I have lupus"',
+        )
+        chinese = await _remember(
+            tool, sessions, "punct-chinese",
+            "请记住我喜欢喝茶", content="我喜欢喝茶。",
+        )
+        fabricated = await _remember(
+            tool, sessions, "punct-fabricated",
+            "Please remember I prefer oolong tea.", content="I have lupus.",
+        )
+    finally:
+        identity_context_var.reset(identity_token)
+
+    for result in (period, quotes, chinese):
+        assert result.ok, result.message
+    assert {record.content for record in await store.list_records(TRUSTED)} == {
+        "I have lupus.", '"I have lupus"', "我喜欢喝茶。",
+    }
+    # 剥标点只影响边缘比较，不放宽防编造：句号版本仍必须在本轮消息里有依据。
+    assert not fabricated.ok
+    assert fabricated.error_code is ErrorCode.INVALID_ARGUMENT
+
+
 def test_remember_args_infer_kind_and_tier_from_content():
     """§1 AC2 参数面：缺省 kind/tier/payload 按票面映射表推断；显式值永远优先。"""
     # 缺省 + target=memory（内容无偏好/画像信号）→ semantic / collection
@@ -179,9 +222,39 @@ def test_remember_args_infer_kind_and_tier_from_content():
     assert isinstance(explicit_kind.payload, EpisodicPayload)
     assert explicit_kind.payload.lesson == "I prefer dark mode"
 
-    # 显式 tier 优先于推断
+    # 缺省 tier：只有 semantic 能进 profile（§4.2），其余一律 collection。
     explicit_tier = _RememberV2Args(content="I prefer dark mode", tier="collection")
     assert explicit_tier.tier is MemoryTier.COLLECTION
+
+
+def test_explicit_memory_target_vetoes_the_profile_heuristic():
+    """#1440 P3-2：显式 `target="memory"` 是否决权，缺省才是"没表态"。
+
+    票面映射表把 `target=user` 与"内容为偏好/画像类"写成或关系；但工具 description
+    告诉模型 `memory` = 助手笔记，模型显式表态时内容启发式不得改判到 USER.md。
+    """
+    vetoed = _RememberV2Args(content="I prefer dark mode", target="memory")
+    assert vetoed.target == "memory"
+    assert vetoed.tier is MemoryTier.COLLECTION
+    assert vetoed.payload.category is SemanticCategory.PREFERENCE
+
+    # 缺省（没表态）仍按内容兜底；target=user 仍是正向。
+    assert _RememberV2Args(content="I prefer dark mode").tier is MemoryTier.PROFILE
+    assert _RememberV2Args(
+        content="I prefer dark mode", target="user",
+    ).tier is MemoryTier.PROFILE
+
+
+def test_payload_instance_contributes_its_kind_to_inference():
+    """#1440 P4-6：payload 传**实例**时也读它的 kind，而不是落回 semantic 再报组合错。"""
+    inferred = _RememberV2Args(
+        content="CI hung on Windows", payload=EpisodicPayload(
+            situation="CI hung on Windows", action="查日志", outcome="端口占用",
+            lesson="先确认端口",
+        ),
+    )
+    assert inferred.kind is MemoryKind.EPISODIC
+    assert inferred.tier is MemoryTier.COLLECTION
 
 
 @pytest.mark.asyncio
@@ -274,6 +347,32 @@ async def test_drift_backup_emits_content_free_notification(tmp_path):
     payload_text = json.dumps(data, ensure_ascii=False)
     assert "tool entry" not in payload_text
     assert "hand-written fact" not in payload_text
+
+
+@pytest.mark.asyncio
+async def test_drift_notification_respects_the_off_mode(tmp_path):
+    """#1440 P3-3：`memory_notification_mode="off"` 时漂移不发通知（写入照常成功）。"""
+    store = MarkdownMemoryStore(memory_dir=tmp_path / "memories", notification_mode="off")
+    store.load_from_disk()
+    assert (await call(store.add, "memory", "tool entry"))["success"] is True
+    path = path_of(store, "memory")
+    path.write_text("tool entry   \n§\nhand-written fact", encoding="utf-8")
+
+    session = make_session(tmp_path / "sessions")
+    marker = session.mark()
+    token = current_session_var.set(session)
+    try:
+        result = await call(
+            store.replace, "memory", "hand-written fact", "hand-written fact, updated"
+        )
+    finally:
+        current_session_var.reset(token)
+
+    assert result["success"] is True
+    assert result.get("drift_backup")
+    assert [
+        event for event in session.since(marker) if event.type == MEMORY_HUMAN_UPDATED
+    ] == []
 
 
 @pytest.mark.asyncio
@@ -384,5 +483,4 @@ async def test_budget_overrun_returns_budget_exhausted_with_three_part_message(t
     assert "当前条目" in result.message
     assert fill in result.message
     assert "TRANSIENT" not in result.error_code
-    assert "jasmine" not in result.message
     assert Path(markdown.path_for("memory")).read_text(encoding="utf-8-sig").count(fill) == 1

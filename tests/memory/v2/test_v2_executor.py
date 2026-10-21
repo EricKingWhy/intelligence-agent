@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
-from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.capability import MemoryContentRejected, MemoryV2Service
 from agent_harness.memory.v2.executor import (
     _ADJUDICATION_PROMPT,
     _FORMATION_PROMPT,
@@ -27,6 +27,7 @@ from agent_harness.memory.v2.executor import (
     MemoryJobExecutor,
     MemoryModelCall,
     MemoryModelStage,
+    _discard_key,
 )
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.jobs import (
@@ -1633,3 +1634,13 @@ async def test_a_verdict_whose_evidence_resolves_to_nothing_is_discarded(env: En
     assert len(result.written) == 1
     assert sink.events[0][1]["actions"] == {"ADD": 1}
     assert (await env.jobs.get(job.job_id)).state["discarded"] == {"evidence_unresolved": 1}
+
+
+def test_content_rejection_has_its_own_discard_bucket():
+    """#1440 P4：`MemoryContentRejected` 是 `PermissionError` 子类，但归因不是"越权"。
+
+    内容被拒（凭证/注入）与身份无权是两件事；混进 `target_unauthorized` 会让诊断
+    把"这条内容不安全"读成"这次写入跨了用户"。
+    """
+    assert _discard_key(MemoryContentRejected("凭证")) == "content_rejected"
+    assert _discard_key(PermissionError("越权")) == "target_unauthorized"

@@ -388,11 +388,17 @@ _MEMORY_ERROR_STATUS: dict[type[Exception], int] = {
 def memory_http_error(exc: Exception) -> HTTPException:
     """memory 领域 / 归属异常 → `HTTPException`；状态码取自 `_MEMORY_ERROR_STATUS`。
 
-    与另外两张表同款：直接索引，未登记类型由覆盖测试先红挡住。
+    **沿 MRO 查找**（#1440 P2-1），不是另外两张表的精确类型索引：`MemoryContentRejected`
+    是 `PermissionError` 的子类，精确查表会 KeyError → 500，而它的语义与父类一致
+    （403，只是 detail 说真因）。子类命中父类那一行，登记面仍是本表。
+
+    未登记类型（MRO 上一条都不中）仍是 `KeyError`，由覆盖测试先红挡住。
     """
-    return HTTPException(
-        status_code=_MEMORY_ERROR_STATUS[type(exc)], detail=str(exc)
-    )
+    for cls in type(exc).__mro__:
+        status = _MEMORY_ERROR_STATUS.get(cls)
+        if status is not None:
+            return HTTPException(status_code=status, detail=str(exc))
+    raise KeyError(type(exc))
 
 
 #: storage 共享库错误 → HTTP status 的第四张表（#515 / #569）。

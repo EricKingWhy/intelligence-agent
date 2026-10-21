@@ -56,14 +56,27 @@ logger = logging.getLogger(__name__)
 
 
 #: 内容侧的"偏好/画像类"信号（#1353 §0 裁决 3 的 kind 推断表：target=user **或**内容为
-#: 偏好/画像类）。ponytail: 词面启发式，只决定落 USER.md 还是 MEMORY.md；误判代价是
-#: 记忆文件分拣不理想，不影响正确性。要更准就把判断交给模型显式传 target/kind。
+#: 偏好/画像类）。ponytail: 词面启发式，只在**没给 target** 时兜底；误判代价不止文件分拣
+#: ——`tier=profile` 还强制 `USER_GLOBAL` + `project_id=None`（§4.2），一条项目事实会被
+#: 提升成跨项目用户画像，影响注入范围。假阳性样例：`I am using PostgreSQL 16 for this
+#: project`（`I am`）、`We always run migrations before deploy`（`We always`）、
+#: `我是不是该用 pytest-xdist`（`我是`）。模型显式传 `target="memory"` 可否决。
 _PROFILE_CONTENT = re.compile(
     r"\b(?:i|we)\s+(?:prefer|like|love|enjoy|always|usually|never|am|'m)\b|"
     r"\bmy\s+(?:name|role|job|title|timezone|preferred|favorite|favourite)\b|"
     r"(?:我|本人)(?:更?喜欢|偏好|习惯|叫|是|通常|一般)|我的(?:名字|姓名|职业|角色|时区|偏好)",
     re.IGNORECASE,
 )
+
+
+def _strip_edge_punctuation(content: str) -> str:
+    """剥 content 边缘的空白与标点，与基线 `commands.explicit_remember_matches` 同款字符集。
+
+    #1440 P3-1：软校验的规范化只做 casefold + 空白折叠，标点会让 `I have lupus.` 对
+    `…I have lupus` 子串命中失败——方向是误拒合法转述，与 #1353 立项动机相反。
+    `memory_tool._add_soft_check` 共用同一套规范化函数，其标点形态留作后续票据。
+    """
+    return content.strip(" \t\r\n\"'“”‘’.,!?。！？;；")
 
 
 def _synthesize_payload(kind: MemoryKind, content: str, tier: MemoryTier) -> MemoryPayload:
@@ -94,7 +107,9 @@ class _RememberV2Args(BaseModel):
 
     content: str = Field(min_length=1, max_length=500)
     #: `user` = 用户画像/偏好（USER.md）；`memory` = 助手笔记（MEMORY.md）。与 `memory` 工具同名同义。
-    target: Literal["memory", "user"] = "memory"
+    #: 缺省 `None` = 没表态，允许内容启发式兜底；显式 `memory` 是**否决权**（#1440 P3-2）：
+    #: 模型按 description 说"这是助手笔记"时，内容侧的 `_PROFILE_CONTENT` 不得改判到 USER.md。
+    target: Literal["memory", "user"] | None = None
     kind: MemoryKind | None = None
     tier: MemoryTier | None = None
     payload: MemoryPayload | None = None
@@ -132,8 +147,9 @@ class _RememberV2Args(BaseModel):
     def _infer_kind_tier_payload(cls, data: Any) -> Any:
         """票面映射表（#1353 §0 裁决 3 / #1440 §1）：显式值永远优先。
 
-        - 显式 `kind` → 以显式为准；否则取 payload 自带的 kind；再否则推断。
-        - `tier` 缺省：semantic 且（target=user 或内容为偏好/画像类）→ profile，其余 collection。
+        - 显式 `kind` → 以显式为准；否则取 payload 自带的 kind（dict 或实例）；再否则推断。
+        - `tier` 缺省：semantic 且（target=user 或 target 未表态且内容为偏好/画像类）→
+          profile，其余 collection。显式 `target="memory"` 是否决权（#1440 P3-2）。
         - `payload` 缺省 → `_synthesize_payload` 由 content 确定性派生。
         """
         if not isinstance(data, dict):
@@ -145,19 +161,28 @@ class _RememberV2Args(BaseModel):
                 parsed_payload = json.loads(raw_payload)
             except (ValueError, RecursionError):
                 return data  # 非法字符串：原样留给字段级 coercion 报 Pydantic 原错误
-        # 显式值永远优先（票面映射表）。`kind` 也可由 payload 自带的判别字段补上。
+        # 显式值永远优先（票面映射表）。`kind` 也可由 payload 自带的判别字段补上；
+        # 实例形态（`EpisodicPayload(...)`）没有 `.get`，读属性——否则会落回 semantic，
+        # 再由组合校验报出"payload kind 不匹配"这种绕口的错（#1440 P4-6）。
         explicit_kind = data.get("kind")
+        payload_kind = (
+            parsed_payload.get("kind") if isinstance(parsed_payload, dict)
+            else getattr(parsed_payload, "kind", None)
+        )
         kind: MemoryKind
         if explicit_kind is not None:
             kind = MemoryKind(explicit_kind)
-        elif isinstance(parsed_payload, dict) and parsed_payload.get("kind"):
-            kind = MemoryKind(parsed_payload["kind"])
+        elif payload_kind:
+            kind = MemoryKind(payload_kind)
         else:
             kind = MemoryKind.SEMANTIC
         content = data.get("content")
-        target = data.get("target") or "memory"
+        target = data.get("target")
+        # target=user 正向；target=memory 否决；未表态（None / 非法值留给字段校验）才看内容。
         profile_signal = target == "user" or (
-            isinstance(content, str) and bool(_PROFILE_CONTENT.search(content))
+            target is None
+            and isinstance(content, str)
+            and bool(_PROFILE_CONTENT.search(content))
         )
         # 缺省 tier：只有 semantic 能进 profile（§4.2），其余一律 collection。
         tier = data.get("tier") or (
@@ -199,7 +224,8 @@ class RememberMemoryV2Tool(Tool):
             "content 必填（≤500 字符）：写用户本轮消息里的原话或它的连续片段；"
             "允许把用户原话压缩成一条条目，但必须能在本轮用户消息里找到依据——"
             "凭空编造的内容会被软校验拒绝。"
-            "target 可选：user（用户画像/偏好，写入 USER.md）| memory（助手笔记，写入 MEMORY.md，默认）。"
+            "target 可选：user（用户画像/偏好，写入 USER.md）| memory（助手笔记，写入 MEMORY.md）。"
+            "不传则按内容推断；显式传 memory 会压制内容推断（助手笔记不会被当成画像）。"
             "kind/tier/payload 均可省略，运行时按 target 与内容推断："
             "semantic（稳定事实/偏好）| episodic（情境/行动/结果/教训）| procedural（操作规则）；"
             "需要精确控制时再显式给出，payload 结构随 kind："
@@ -245,7 +271,11 @@ class RememberMemoryV2Tool(Tool):
                 )
             # #1440 F-05 / #1353 §0 裁决 3：不再做逐字摘录校验，只做 add 软校验——
             # content 必须能在本 run 的 user message 里找到依据（规范化后子串命中）。
-            if source is None or not _grounded_in_user_message(args.content, source_text):
+            # 规范化前先剥边缘标点，与基线 `explicit_remember_matches` 同款（#1440 P3-1）：
+            # 模型把用户原句加句号/引号后写入是常见形态，不剥就会误拒合法转述。
+            if source is None or not _grounded_in_user_message(
+                _strip_edge_punctuation(args.content), source_text,
+            ):
                 return ToolResult.failure(
                     message=(
                         "content 必须能在本轮用户消息里找到依据（软校验）；"

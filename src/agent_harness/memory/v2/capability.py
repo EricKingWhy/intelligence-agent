@@ -197,8 +197,9 @@ class MemoryV2Service:
         """markdown 的失败是**返回值**（`success=False`），不是异常。
 
         权威面没写成就不能继续写 SQLite 投影：调用方看到的必须是一次失败写入，
-        而不是"派生层有、权威层没有"的分叉。错误文案只带 store 的 message，
-        不回显条目内容。
+        而不是"派生层有、权威层没有"的分叉。错误文案带 store 的 message；**预算类失败
+        例外地带上当前条目列表**（`current_entries`），供模型就地合并——条目只进模型
+        可见的 message，不进事件流（不变量 #22）。
         """
         if response.get("success"):
             return
@@ -579,8 +580,9 @@ class MemoryV2Service:
 class MemoryContentRejected(PermissionError):
     """内容本身被拒（凭证/密钥/注入模式），与"身份无权"是两件事（#1440 F-12）。
 
-    继承 `PermissionError` 是为了不改变入口层的 403 语义（`_MEMORY_ERROR_STATUS`
-    直接索引类型）；垫片层先捕获本类、再捕获裸 `PermissionError`，真因才不会被
+    继承 `PermissionError` 是为了保持入口层的 403 语义：`memory_http_error` 沿 MRO 查
+    `_MEMORY_ERROR_STATUS`，本类命中父类那一行（#1440 P2-1 之前是精确类型索引，子类
+    会 KeyError 成 500）。垫片层先捕获本类、再捕获裸 `PermissionError`，真因才不会被
     "当前身份无权"吞掉。
     """
 

@@ -89,7 +89,10 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     relay = MemoryV2IndexRelay(store, index)
     # #1353 §2：markdown 是权威面（`<workspace_dir>/memories/MEMORY.md` / `USER.md`），
     # SQLite 降为派生/历史层。注入后 create/update/invalidate 先落 markdown 再投影。
-    markdown = MarkdownMemoryStore(Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME)
+    markdown = MarkdownMemoryStore(
+        Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME,
+        notification_mode=settings.memory_notification_mode,
+    )
     markdown.load_from_disk()
     # #1353 M6：待审区与 job/record 同一个库文件（决定二）；与 markdown 同生共死。
     staged = StagedWriteStore(database, markdown)
