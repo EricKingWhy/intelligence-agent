@@ -62,7 +62,12 @@ export function deriveTurnNav(
     Number.POSITIVE_INFINITY,
   );
   const stepByIdx = new Map<number, number>();
-  for (const t of visible) stepByIdx.set(t.turn_index as number, t.step_id);
+  // 首写胜：药丸「第 N 轮」必须跳到**这一轮的开头**。若同一 turn_index 意外落在多个
+  // 渲染轮上（恢复续轮的继承曾如此），后写会让药丸跳到后半段（#1429 复审 P2）。
+  for (const t of visible) {
+    const idx = t.turn_index as number;
+    if (!stepByIdx.has(idx)) stepByIdx.set(idx, t.step_id);
+  }
   const compacted = compactedThrough(compactions);
 
   const items: TurnNavItem[] = [];

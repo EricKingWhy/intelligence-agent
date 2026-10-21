@@ -128,6 +128,15 @@ describe('deriveTurnNav — 1..N 与置灰（表驱动）', () => {
       ],
     },
     {
+      name: '同一 turn_index 落在多个渲染轮 ⇒ 药丸指向轮首（首写胜）',
+      turns: [turn(1, 1), turn(2, 1), turn(3, 2)],
+      compactions: [],
+      want: [
+        { i: 1, step: 1, off: null },
+        { i: 2, step: 3, off: null },
+      ],
+    },
+    {
       name: '无轮 → 空导航',
       turns: [],
       compactions: [compact(2)],

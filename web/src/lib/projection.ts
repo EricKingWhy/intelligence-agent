@@ -279,10 +279,15 @@ function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => 
   const idx = state.turns.findIndex((t) => t.step_id === step);
   if (idx === -1) {
     const turn = newTurn(step);
-    // #1429 F6：恢复续轮（`run/resumed` 之后的新执行按 step_base+1 建轮）继承同一
-    // run 的轮次号。没有它，续轮的 `turn_index` 是 null ⇒ 不进轮次导航，导航 N 与
-    // 实际渲染轮数对不上。字段在 run/started / user/message 处作废（新 run 自带号）。
-    if (state.resumed_turn_index !== null) turn.turn_index = state.resumed_turn_index;
+    // #1429 F6 / 复审 P2：恢复续轮（`run/resumed` 之后的新执行按 step_base+1 建轮）继承
+    // 同一 run 的轮次号。**只交给该 run 的首个续轮**：继承槽消费即清空，且该号已被
+    // 现有轮占用时不再打标（一次恢复连开多个 step 曾得到 [1,1,1]——同一 run 出现重复
+    // 「第 N 轮」，导航目标被后写覆盖）。`turnNav` 的首写守卫是第二道保险。
+    const inherited = state.resumed_turn_index;
+    state.resumed_turn_index = null;
+    if (inherited !== null && !state.turns.some((t) => t.turn_index === inherited)) {
+      turn.turn_index = inherited;
+    }
     state.turns = [...state.turns, turn];
     fn(turn);
     return;
