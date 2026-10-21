@@ -264,17 +264,37 @@ def _protected_fact_request_result(
 
 
 def _tool_budget_delta(operation: Operation) -> dict:
-    """Preserve the accepted-call budget fact when recovery synthesizes a result."""
-    attempts = 0
+    """Preserve accepted-call and attempt facts when recovery synthesizes a result."""
+    attempts = operation.attempt_count
+    tool_calls = 1
     if operation.result_json:
         result = _try_parse_result_json(operation.result_json, operation.tool_name)
         if result is not None:
             value = result.metadata.get("attempt")
-            if isinstance(value, int) and not isinstance(value, bool):
-                attempts = value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                # Older ledgers have no durable counter; completed results retain
+                # the final retry number in metadata. New ledgers count each start,
+                # including attempts whose process died before a result was saved.
+                attempts = max(attempts, value)
+            if operation.state is OperationState.CANCELLED and (
+                result.metadata.get("budget_admitted") is False
+                or (
+                    result.error_code is ErrorCode.CANCELLED
+                    and value is None
+                    and result.message.startswith(
+                        f"工具 '{operation.tool_name}' 未执行："
+                    )
+                )
+            ):
+                # The cascade-cancel path writes a Ledger row for recovery
+                # pairing, but never passes the ToolExecutor admission point.
+                # The message check preserves the same fact for rows written
+                # before `budget_admitted` became durable in result metadata.
+                tool_calls = 0
+                attempts = 0
     return {
         "tool_name": operation.tool_name,
-        "tool_calls": 1,
+        "tool_calls": tool_calls,
         "tool_attempts": attempts,
     }
 

@@ -73,6 +73,46 @@ async def test_operation_moves_to_terminal_state_with_recovery_data(
 
 
 @pytest.mark.asyncio
+async def test_attempt_count_is_durable_for_running_operation(tmp_path: Path) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-attempts",
+            session_id="session-1",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+        )
+    )
+    await ledger.update_state("session-1", "call-attempts", OperationState.RUNNING)
+
+    await ledger.record_attempt("session-1", "call-attempts")
+    await ledger.record_attempt("session-1", "call-attempts")
+    persisted = await ledger.get("session-1", "call-attempts")
+
+    assert persisted is not None and persisted.attempt_count == 2
+
+
+@pytest.mark.asyncio
+async def test_record_attempt_requires_running_operation(tmp_path: Path) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-pending",
+            session_id="session-1",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+        )
+    )
+
+    with pytest.raises(ValueError, match="PENDING"):
+        await ledger.record_attempt("session-1", "call-pending")
+
+
+@pytest.mark.asyncio
 async def test_list_for_session_excludes_other_sessions(tmp_path: Path) -> None:
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()
@@ -121,6 +161,7 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
         "finished_at",
         "reconcile_meta",
         "parent_exec_call_id",
+        "attempt_count",
     }
     # C5 复合主键：session_id 是 pk 序 1，tool_call_id 是 pk 序 2
     assert columns["session_id"][5] == 1
@@ -335,6 +376,7 @@ async def test_additive_parent_migration_preserves_existing_operation(tmp_path):
     await ledger.create(original)
     async with aiosqlite.connect(database_path) as connection:
         await connection.execute('ALTER TABLE operations DROP COLUMN parent_exec_call_id')
+        await connection.execute('ALTER TABLE operations DROP COLUMN attempt_count')
         await connection.commit()
     await ledger.initialize()
     await ledger.initialize()

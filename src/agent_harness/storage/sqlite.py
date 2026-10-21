@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS operations (
     finished_at TEXT,
     reconcile_meta TEXT,
     parent_exec_call_id TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     PRIMARY KEY (session_id, tool_call_id)
 )
 """
@@ -230,6 +231,11 @@ class SqliteOperationLedger(OperationLedger):
                 await connection.execute(
                     "ALTER TABLE operations ADD COLUMN parent_exec_call_id TEXT"
                 )
+            if "attempt_count" not in columns:
+                await connection.execute(
+                    "ALTER TABLE operations ADD COLUMN attempt_count "
+                    "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)"
+                )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_operations_session "
                 "ON operations(session_id, started_at)"
@@ -264,8 +270,8 @@ class SqliteOperationLedger(OperationLedger):
                 INSERT INTO operations (
                     tool_call_id, session_id, run_id, agent_id, tool_name,
                     args_identity, state, result_json, artifact_ref, started_at,
-                    finished_at, reconcile_meta, parent_exec_call_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, reconcile_meta, parent_exec_call_id, attempt_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     operation.tool_call_id,
@@ -281,8 +287,37 @@ class SqliteOperationLedger(OperationLedger):
                     operation.finished_at,
                     operation.reconcile_meta,
                     operation.parent_exec_call_id,
+                    operation.attempt_count,
                 ),
             )
+            await connection.commit()
+
+    @retry_on_busy
+    async def record_attempt(self, session_id: str, tool_call_id: str) -> None:
+        """Atomically count an invocation before entering ``Tool.execute``."""
+        async with _connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                UPDATE operations
+                SET attempt_count = attempt_count + 1
+                WHERE session_id = ? AND tool_call_id = ? AND state = ?
+                """,
+                (session_id, tool_call_id, OperationState.RUNNING.value),
+            )
+            if cursor.rowcount != 1:
+                cursor = await connection.execute(
+                    "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
+                    (session_id, tool_call_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"Operation '{tool_call_id}' does not exist")
+                operation = self._to_operation(row)
+                raise ValueError(
+                    "Operation attempts can only be recorded while RUNNING; "
+                    f"'{tool_call_id}' is {operation.state.value}"
+                )
             await connection.commit()
 
     async def get(self, session_id: str, tool_call_id: str) -> Operation | None:

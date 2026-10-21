@@ -1238,6 +1238,7 @@ class ToolExecutor:
             message=f"工具 '{name}' 未执行：{reason}",
             error_code=ErrorCode.CANCELLED,
             retryable=False,
+            metadata={"budget_admitted": False},
         )
 
         if self._operation_ledger is not None:
@@ -1625,6 +1626,7 @@ class ToolExecutor:
         if not getattr(tool, "is_code_execution", False):
             return await self._execute_with_resource_locks(
                 tool_call_id, name, tool, validated, attempts=attempts,
+                operation_context=operation_context,
             )
         # The computation tool owns no workspace resource: children retain their
         # normal locks, including exclusion against other agents/executors.
@@ -1680,6 +1682,7 @@ class ToolExecutor:
         try:
             return await self._execute_with_resource_locks(
                 tool_call_id, name, tool, validated, attempts=attempts,
+                operation_context=operation_context,
             )
         except NestedExecutionFailure as error:
             raise error.cause from error
@@ -1689,6 +1692,7 @@ class ToolExecutor:
     async def _execute_with_resource_locks(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
         *, attempts: list[dict[str, Any]] | None = None,
+        operation_context: OperationContext | None = None,
     ) -> ToolResult:
         """#525 一期（IMP-14）：resource 锁消费点。
 
@@ -1705,15 +1709,18 @@ class ToolExecutor:
         if not self._resource_locks or not keys:
             return await self._execute_with_retry(
                 tool_call_id, name, tool, validated, attempts=attempts,
+                operation_context=operation_context,
             )
         async with self._resource_locks.hold(keys):
             return await self._execute_with_retry(
                 tool_call_id, name, tool, validated, attempts=attempts,
+                operation_context=operation_context,
             )
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
         *, attempts: list[dict[str, Any]] | None = None,
+        operation_context: OperationContext | None = None,
     ) -> ToolResult:
         """阶段3 主体：每次尝试被 timeout 包住，retryable 位驱动是否再来一轮。
 
@@ -1733,6 +1740,11 @@ class ToolExecutor:
         result: ToolResult | None = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            if self._operation_ledger is not None:
+                assert operation_context is not None
+                await self._operation_ledger.record_attempt(
+                    operation_context.session_id, tool_call_id
+                )
             t0 = perf_counter()
             deadline = t0 + tool.timeout_seconds
             inherited = tool_execution_deadline_var.get()
