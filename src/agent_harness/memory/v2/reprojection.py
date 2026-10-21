@@ -211,14 +211,14 @@ async def apply_write(
         removed = response.get("removed_entries") or {}
         for index, operation in enumerate(operations, 1):
             action = operation.get("action")
-            if index in removed:
-                if await retract_entry(store, target, removed[index], trusted,
-                                       reason="markdown_removed"):
-                    summary["deleted"] += 1
-            if index in replaced:
-                if await retract_entry(store, target, replaced[index], trusted,
-                                       reason="markdown_replaced"):
-                    summary["deleted"] += 1
+            if index in removed and await retract_entry(
+                store, target, removed[index], trusted, reason="markdown_removed",
+            ):
+                summary["deleted"] += 1
+            if index in replaced and await retract_entry(
+                store, target, replaced[index], trusted, reason="markdown_replaced",
+            ):
+                summary["deleted"] += 1
             if action in ("add", "replace"):
                 await _project(
                     store, markdown, target, operation.get("content") or "", trusted,
@@ -229,10 +229,10 @@ async def apply_write(
         if await retract_entry(store, target, removed_entry, trusted, reason="markdown_removed"):
             summary["deleted"] += 1
         return summary
-    if replaced_entry := response.get("replaced_entry"):
-        if await retract_entry(store, target, replaced_entry, trusted,
-                               reason="markdown_replaced"):
-            summary["deleted"] += 1
+    if (replaced_entry := response.get("replaced_entry")) and await retract_entry(
+        store, target, replaced_entry, trusted, reason="markdown_replaced",
+    ):
+        summary["deleted"] += 1
     if content:
         await _project(
             store, markdown, target, content, trusted,

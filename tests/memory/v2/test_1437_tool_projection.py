@@ -10,13 +10,11 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
 from agent_harness.memory.v2 import reprojection
-from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
-from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, MarkdownMemoryStore, entry_digest
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, entry_digest
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
@@ -112,7 +110,7 @@ async def test_add_target_memory_is_retrievable(tmp_path) -> None:
 
 
 async def test_add_target_user_is_retrievable(tmp_path) -> None:
-    store, markdown, service = await build(tmp_path)
+    _, markdown, service = await build(tmp_path)
     tool = MemoryTool(markdown, service=service)
 
     result = await tool.execute(_MemoryArgs(
@@ -427,7 +425,7 @@ async def test_projection_failure_does_not_block_approval(tmp_path, monkeypatch)
     pending = await tool.execute(_MemoryArgs(action="add", target="memory", content="投影失败也批准"))
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
 
-    decision, response = await staged.approve(pending.data["pending_id"], TRUSTED)
+    decision, _ = await staged.approve(pending.data["pending_id"], TRUSTED)
 
     assert decision.allow is True, decision
     assert "投影失败也批准" in markdown.path_for("memory").read_text(encoding="utf-8")

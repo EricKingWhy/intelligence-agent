@@ -45,10 +45,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2 import reprojection
+from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
-from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2, SqliteMemoryV2Store
+from agent_harness.memory.v2.store import (
+    STAGED_SCHEMA,
+    MemorySettingsV2,
+    SqliteMemoryV2Store,
+)
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.storage.sqlite import retry_on_busy
 
