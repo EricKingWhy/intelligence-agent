@@ -156,6 +156,7 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     eventsVersion: 0,
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
     run_interrupted: null, run_failure: null, turn_index: null,
+    resumed_turn_index: null,
     run_paused: null,
     pending_constraint_input: null,
     requested_model: null,
@@ -366,7 +367,7 @@ describe('decideFollowUpOutcome — /messages 结局的单一分派表（#221）
     })).toEqual({ kind: 'fail', text: '存在需人工裁决的高风险操作：tool=bash call_id=c1' });
     // detail 缺失时才退回泛化文案
     expect(decideFollowUpOutcome({ ...base, status: 409 })).toEqual({
-      kind: 'fail', text: '存在需要人工裁决的高风险操作',
+      kind: 'fail', text: '存在需要你决定的高风险操作',
     });
   });
 

@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.context.window import effective_context_window
 from agent_harness.session import MODEL_COMPLETED
 
@@ -153,6 +154,38 @@ def last_call_usage(events: list[Any]) -> dict[str, Any] | None:
     if last is None:
         return None
     return {"kind": "last_call_prompt_tokens", "calls_with_usage": calls, **last}
+
+
+def resolve_context_usage_payload(
+    state: Any, session_id: str, events: list[Any]
+) -> dict[str, Any]:
+    """解析「当前窗口」payload 的**唯一入口**（`/context-usage` 与洞察模块共用）。
+
+    快照来源优先级（两处必须逐字相同，否则同一时刻两个端点会给出两个真相）：
+    在途 run 的 live builder（+ 同一 runtime 的 registry 工具定义）→ run 收口时
+    缓存的 `AppState.context_snapshots` → 都没有则按事件流落 usage_only/no_data。
+
+    `state` 是 `web.app.AppState`（这里用 Any 只为避免反向 import）。
+    """
+    builder_snapshot: dict[str, Any] | None = None
+    tool_definitions: list[dict[str, Any]] = []
+    active = state.run_manager.get_active(session_id)
+    if active is not None and active.runtime is not None:
+        # `AgentRuntime.__init__` 恒赋 `_context_builder`（`runtime.py:1404`：
+        # `context_builder or ContextBuilder(...)`），故这里无需再判 None。
+        builder_snapshot = active.runtime._context_builder.usage_snapshot(active.session)
+        tool_definitions = active.runtime.registry.export_model_definitions()
+    else:
+        cached = state.context_snapshots.get(session_id)
+        if cached is not None:
+            builder_snapshot, tool_definitions = cached
+    return build_context_usage_payload(
+        settings=state.settings,
+        builder_snapshot=builder_snapshot,
+        tool_definitions=tool_definitions,
+        estimate_tokens=estimate_tokens,
+        events=events,
+    )
 
 
 def build_context_usage_payload(

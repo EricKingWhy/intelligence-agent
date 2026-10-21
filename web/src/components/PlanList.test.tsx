@@ -131,7 +131,7 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
   it('运行正常结束但清单未全完时显示实际计数', () => {
     act(() => root.render(createElement(PlanList, { items: threeState, runStatus: 'completed' })));
     const toggle = container.querySelector<HTMLButtonElement>('.plan-list-summary-toggle');
-    expect(toggle?.textContent).toContain('✓ 本次运行结束 1/3');
+    expect(toggle?.textContent).toContain('✓ 本次任务结束 1/3');
     expect(toggle?.textContent).not.toContain('任务完成');
   });
 

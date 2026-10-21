@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
 import { applyEvent, initConversation, projectHistory, summarizeEvent } from './projection';
+import { deriveTurnNav } from './turnNav';
 import { deadlineInstant, isDeadlinePause } from './runBudget';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
@@ -405,6 +406,74 @@ describe('run/resumed — 同 run 恢复的投影（#312）', () => {
     expect(s.turns[1].model.text).toBe('B 也改完');
     expect(s.turns[2].model.text).toBe('继续做完');
     expect(s.turns[2].user_message).toBe(''); // 同 run 恢复没有新 user/message
+  });
+
+  it('恢复续轮：同一 run 的轮次号在渲染序列里只出现一次（#1429 复审 P2）', () => {
+    let s = projectHistory('s', upToPause());
+    // 前提：`upToPause` 的第 2 轮是同一 run 里 run/started 之后新建的 step，按既有
+    // 契约不带 turn_index（轮次标签只落在每个 run 的首个 step 上——本次修复不改这条）。
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, null]);
+    s = applyEvent(s, resumedEvent(12));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 13, step_id: 3, data: { step: 3 } }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, seq: 14, step_id: 3, data: { content: '继续做完' } }));
+    // 恢复沿用同一逻辑 run（同一 turn_index）：该号已经在这一轮的首个 turn 上。
+    // 续轮再打一次就是重复「第 1 轮」标签（复审实测 [1,null,1]）——占用去重拦掉。
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, null, null]);
+    // 继承槽是一次性的：交出即清空，后续 step 不会反复拿到同一号码。
+    expect(s.resumed_turn_index).toBeNull();
+  });
+
+  it('恢复后连开多个 step：同一 run 的号只出现一次（不重复标签、导航指向轮首）', () => {
+    let s = projectHistory('s', upToPause());
+    s = applyEvent(s, resumedEvent(12));
+    for (const [seq, stepId] of [[13, 3], [14, 4], [15, 5]] as const) {
+      s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq, step_id: stepId, data: { step: stepId } }));
+    }
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, null, null, null, null]);
+    // 视图里 1 号轮只出现一次 ⇒ 药丸「1」仍指向这一轮的开头（step 1）。
+    const nav = deriveTurnNav(s.turns, s.compactions);
+    expect(nav.map((n) => [n.turnIndex, n.stepId])).toEqual([[1, 1]]);
+  });
+
+  it('继承槽只消费一次：轮首不在投影里时才落到首个续轮（防御分支）', () => {
+    // 合成序列（真实流里 user/message 先于 run/started，轮首几乎总在投影里；这里
+    // 去掉它，单独锁槽位契约）：run/started 只更新会话镜像、不建轮 ⇒ 恢复后第一个
+    // 新建轮拿到该号，之后的新建轮不再拿。
+    let s = projectHistory('s', [
+      ev({ type: EventType.RUN_STARTED, seq: 1, data: { turn_index: 2 } }),
+      pausedEvent(2),
+      resumedEvent(3),
+    ]);
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 4, step_id: 5, data: { step: 5 } }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 5, step_id: 6, data: { step: 6 } }));
+    expect(s.turns.map((t) => t.turn_index)).toEqual([2, null]);
+    expect(s.resumed_turn_index).toBeNull();
+  });
+
+  it('用户回答后续跑（USER_MESSAGE 先于 RUN_RESUMED）：不产生重复标签，导航不指错轮', () => {
+    let s = projectHistory('s', upToPause());
+    // 后端顺序（service.py `_commit_paused_resume`）：先落回答的 USER_MESSAGE，
+    // 再 SESSION_RESUMED / RUN_RESUMED。此刻续轮已在槽位置位之前建好 ⇒ 它没有号。
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, seq: 12, data: { content: '用方案 B' } }));
+    s = applyEvent(s, resumedEvent(13));
+    expect(s.turns[2].turn_index).toBeNull();
+    // 之后新建的续轮：run/resumed 交出的 1 号已被首轮占用 ⇒ 不重复打标。
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 14, step_id: 4, data: { step: 4 } }));
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, null, null, null]);
+    const nav = deriveTurnNav(s.turns, s.compactions);
+    expect(nav.map((n) => [n.turnIndex, n.stepId])).toEqual([[1, 1]]);
+  });
+
+  it('恢复后用户发新消息 ⇒ 继承作废（新轮在 run/started 之前不带上一轮的号）', () => {
+    let s = projectHistory('s', upToPause());
+    s = applyEvent(s, resumedEvent(12));
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, seq: 13, data: { content: '换个做法' } }));
+    // 关键窗口：新轮已建、run/started 还没到——此时不能顶着上一轮的 turn_index。
+    expect(s.turns[2].turn_index).toBeNull();
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, seq: 14, data: { turn_index: 2 } }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, seq: 15, step_id: 3, data: { step: 3 } }));
+    expect(s.turns[2].turn_index).toBe(2);
+    expect(s.resumed_turn_index).toBeNull();
   });
 
   it('重放幂等：逐帧应用与 projectHistory 重建同一投影（刷新后一致）', () => {

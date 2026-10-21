@@ -141,16 +141,16 @@ describe('#183 AC7 面板控制键的可访问性语义', () => {
 
   it('关闭按钮有可读名（不是只有一个 X 图标）', () => {
     const html = renderStepDetail({ conversation: conv, focus: { kind: 'run' } });
-    expect(html).toContain('aria-label="关闭 Inspector"');
+    expect(html).toContain('aria-label="关闭运行详情"');
   });
 
-  it('拖宽手柄是 separator：方向 + 当前/上下限都如实报（320→480）', () => {
+  it('拖宽手柄是 separator：方向 + 当前/上下限都如实报（320→820）', () => {
     const html = renderStepDetail({ conversation: conv, focus: { kind: 'run' }, panelOver: { width: 400 } });
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-orientation="vertical"');
     expect(html).toContain('aria-valuenow="400"');
     expect(html).toContain('aria-valuemin="320"');
-    expect(html).toContain('aria-valuemax="480"');
+    expect(html).toContain('aria-valuemax="820"');
   });
 
   it('详情与面板控制在同一容器内：Esc 的层级只作用于面板内部的焦点', () => {
@@ -195,5 +195,27 @@ describe('#183 AC9 单一渲染器：Inspector 的命令输出走中心列同一
     });
     expect(html).not.toContain('tool-out-stream');
     expect(html).toContain('sum');
+  });
+});
+
+describe('#1435 头标恢复全会话范围口径（裁决 A）', () => {
+  /* #1365 的产品口径：时间线平铺全会话事件，头标描述全会话范围；#1419 效果图曾
+     把它换成最近 run 的短码。这里锁死「N = 全会话轮数、M = 全会话事件数」，
+     防止再次被单 run 短码覆盖。 */
+  it('run 头标 = 共 N 轮 · M 事件，title 列全会话 run', () => {
+    let s = initConversation('s1435');
+    const evts: AgentEvent[] = [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 's1435' },
+      { type: EventType.USER_MESSAGE, data: { content: '第一轮' }, seq: 2, run_id: 'r1', step_id: 1, session_id: 's1435' },
+      { type: EventType.RUN_COMPLETED, data: {}, seq: 3, run_id: 'r1', session_id: 's1435' },
+      { type: EventType.RUN_STARTED, data: {}, seq: 4, run_id: 'r2', session_id: 's1435' },
+      { type: EventType.USER_MESSAGE, data: { content: '第二轮' }, seq: 5, run_id: 'r2', step_id: 2, session_id: 's1435' },
+      { type: EventType.RUN_COMPLETED, data: {}, seq: 6, run_id: 'r2', session_id: 's1435' },
+    ];
+    for (const e of evts) s = applyEvent(s, e);
+    const html = renderStepDetail({ conversation: s, focus: { kind: 'run' } });
+    expect(html).toMatch(
+      /<span class="detail-run-id mono num" title="任务：r1, r2">共 2 轮 · 6 事件<\/span>/,
+    );
   });
 });

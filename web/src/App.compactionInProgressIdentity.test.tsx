@@ -53,11 +53,14 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
       selectedId: H.selectedId,
       conversation: H.conversation,
       loadingHistory: true,
+      historySkeleton: true,
       streaming: false,
       reconnecting: false,
       error: null,
       sessionsError: null,
       titlesById: {},
+      sendFailure: null,
+      runFailedBeforePlan: null,
       recoverState: {
         status: 'idle', message: null, conflict: false, repaired: 0,
         terminalRepaired: false, stillUnterminated: false, stillDangling: false,
@@ -168,7 +171,7 @@ describe('#1264 自动路径「正在压缩」的会话身份闸', () => {
     H.conversation = conversationFor('s-B', true);
     await mount();
 
-    expect(compactingRow()?.textContent).toContain('正在压缩上下文');
+    expect(compactingRow()?.textContent).toContain('正在精简早期对话');
   });
 
   it('正证：身份相符但没有压缩在途时，状态行不出现（非推断）', async () => {

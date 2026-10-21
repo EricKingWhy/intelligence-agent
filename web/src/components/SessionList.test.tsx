@@ -53,6 +53,7 @@ const noopAsync = async (): Promise<never> => {
 
 function render(props: {
   sessions?: SessionSummary[];
+  sessionsLoading?: boolean;
   projects?: Project[];
   projectsError?: string | null;
   sessionsError?: string | null;
@@ -63,6 +64,7 @@ function render(props: {
   return renderToString(
     createElement(SessionList, {
       sessions: props.sessions ?? [],
+      sessionsLoading: props.sessionsLoading ?? false,
       projects: props.projects ?? [],
       selectedId: props.selectedId ?? null,
       liveSessionId: null,
@@ -159,6 +161,33 @@ describe('会话列表加载失败（F9）', () => {
     expect(html).toContain('s-2');
     expect(html).toContain('已损坏');
     expect(html).toContain('session-item-corrupted');
+  });
+});
+
+/** #1371：首屏 loading 只渲染骨架，不渲染空态文案；已有列表的刷新不闪骨架。 */
+describe('会话列表骨架屏（#1371）', () => {
+  it('首次加载：渲染骨架，不出现「暂无会话」', () => {
+    const html = render({ sessionsLoading: true });
+
+    expect(html).toContain('rail-skeleton');
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain('aria-busy');
+    expect(html).toContain('正在加载会话列表');
+    expect(html).not.toContain(EMPTY_HINT);
+  });
+
+  it('已有列表的后续刷新：继续渲染真实行，不闪骨架', () => {
+    const html = render({ sessions: [session('s-1')], sessionsLoading: true });
+
+    expect(html).toContain('s-1');
+    expect(html).not.toContain('rail-skeleton');
+  });
+
+  it('settle 且真空：骨架退场，空态照旧出现（反证骨架不是把空态整片删了）', () => {
+    const html = render({ sessionsLoading: false });
+
+    expect(html).not.toContain('rail-skeleton');
+    expect(html).toContain(EMPTY_HINT);
   });
 });
 

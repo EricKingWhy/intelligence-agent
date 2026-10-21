@@ -49,7 +49,40 @@ export function formatTimestamp(iso: string | null | undefined): string | null {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
 }
 
-/** 相对时间：把 ISO 时间戳渲染成 '刚刚 / N 分钟前 / N 小时前 / N 天前 / M月D日'。
+/** 面向用户的日期时间（本地时区，到分钟）：'YYYY-MM-DD HH:mm'（#1372 改动 10）。
+ *
+ *  为什么单独一个函数而不是复用 `formatTimestamp`：后者带秒与毫秒，是事件级证据的
+ *  精度；面向用户的状态行（开始时间 / 完成时间 / 记忆时间 / 最近检查）只需要到分钟。
+ *  两种精度都是同一套「YYYY-MM-DD HH:mm」前缀，不再出现 `toLocaleString()` 的
+ *  `9/7/2026, 12:00:00 AM` 这类随环境漂移的格式。
+ *  非法或缺失时间返回 null——调用方决定隐藏该行。 */
+export function formatDateTime(
+  iso: string | null | undefined,
+  timeZone?: string,
+): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  if (timeZone) {
+    // 自动值班的规则带自己的 IANA 时区：同一格式，但按规则时区取时分。
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+  }
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 相对时间：把 ISO 时间戳渲染成 '刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY-MM-DD HH:mm'。
+ *  超过一周落到 `formatDateTime` 的绝对格式（不再用 locale 的「9月7日」）。
  *  now 参数化以避免 Date.now() 副作用（可测、可由 tick hook 注入最新值）。
  *  缺省 now 用 Date.now()，保持调用点零改动。 */
 export function formatRelativeTime(iso: string | null, now: number = Date.now()): string {
@@ -62,7 +95,8 @@ export function formatRelativeTime(iso: string | null, now: number = Date.now())
   if (hours < 24) return `${hours} 小时前`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days} 天前`;
-  return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  // #1372 改动 10：超过一周不再落回 locale 的「9月7日」，统一全站日期时间格式。
+  return formatDateTime(iso) ?? '';
 }
 
 /** 字节数人性化——**唯一实现**（#937 / M-22 收口：此前 format.ts / attachments.ts /

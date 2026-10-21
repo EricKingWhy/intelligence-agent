@@ -61,7 +61,7 @@ const resolveToken = (page: Page, value: string) =>
 test.describe('#181 窄屏触摸：⋯ 菜单不依赖 hover', () => {
   test.use({ viewport: { width: 800, height: 900 }, hasTouch: true, isMobile: true });
 
-  test('AC1/AC2：空闲态 ⋯ 即可见，且会话级 / 项目级同款地 tap 得开', async ({ page }) => {
+  test('AC1/AC2：空闲态 ⋯ 即可见；收起轨 tap 选会话，菜单走抽屉（#1393）', async ({ page }) => {
     await routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1] });
     await page.goto('/');
 
@@ -98,12 +98,20 @@ test.describe('#181 窄屏触摸：⋯ 菜单不依赖 hover', () => {
     const box = await sessionRow.locator('.session-item').boundingBox();
     expect(Math.round(box?.width ?? 0), '会话行的可点宽度').toBeGreaterThanOrEqual(20);
     expect(Math.round(box?.height ?? 0), '会话行的可点高度').toBeGreaterThanOrEqual(20);
-    /* 这里**不**断言"点行内空白处能选会话"：实测 ⋯ 芯片（20px）居中压在行中央，行相对
-       x∈[4,24) 命中的是它——而且它在 `opacity: 0` 时**照样接收指针事件**（`elementFromPoint`
-       验证过）。也就是说"点行中央 = 打开菜单"是这条窄轨**修复前就有**的既成事实（未显形的
-       ⋯ 也会拦下这一击，反而更怪）；本票把它变成看得见的入口，没有引入这个重叠。要让
-       "点行中央选会话"成立得改槽位模型（例如窄屏行不再收缩成内容宽 29px），issue 明确说
-       这类改动要一次性定案，不在可达性票里顺手做。 */
+    /* #1393：收起轨的 tap 语义是「选中会话」——⋯ 只占视觉槽位，命中权由
+       `pointer-events: none` 让回给行按钮（修复前 `opacity: 0` 的它照样拦 tap）。
+       菜单入口在触摸档是抽屉展开态：那里是桌面形态行，⋯ 常显且在行尾，不跟会话点
+       抢同一个槽位。两条一起才闭环：点得中会话，菜单也仍然可达。 */
+    const itemBox = await sessionRow.locator('.session-item').boundingBox();
+    await page.touchscreen.tap(
+      (itemBox?.x ?? 0) + (itemBox?.width ?? 0) / 2,
+      (itemBox?.y ?? 0) + (itemBox?.height ?? 0) / 2,
+    );
+    await expect(sessionRow.locator('.session-item')).toHaveClass(/selected/);
+    await expect(page.locator('.rail-menu')).toHaveCount(0);
+
+    await page.locator('.rail-drawer-btn').tap();
+    await expect(page.locator('.session-rail')).toHaveClass(/rail-drawer-open/);
 
     await sessionBtn.tap();
     await expect(page.getByRole('menuitem', { name: '移出项目' })).toBeVisible();

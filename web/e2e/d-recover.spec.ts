@@ -76,13 +76,13 @@ test('恢复成功：提示明确可见，且入口消失后提示不跟着消�
       await route.fulfill({ status: 200, body: JSON.stringify(repairedEvents()), contentType: 'application/json' });
     },
   });
-  await expect(page.locator('.recover-hint')).toContainText('未配对');
+  await expect(page.locator('.recover-hint')).toContainText('没配上结果');
 
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
   await expect(done).toContainText('已恢复');
-  await expect(done).toContainText('回填 1 条工具结果');
+  await expect(done).toContainText('补回 1 条工具结果');
   // 关键：修好后事件已完整 → canRecover 转假、入口卸载，提示必须仍在场
   await expect(page.locator('.recover-btn')).toHaveCount(0);
   await expect(page.locator('.recover-hint')).toHaveCount(0);
@@ -101,7 +101,7 @@ test('后端未能回填时不谎报「已完整」——如实说明仍缺终�
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
-  await expect(done).toContainText('仍缺 run 终态');
+  await expect(done).toContainText('仍缺结束状态');
   await expect(done).not.toContainText('已完整');
   // 仍是可恢复态 → 入口保留，用户可重试（不是死路）
   await expect(page.locator('.recover-btn')).toBeVisible();
@@ -136,7 +136,7 @@ test('只补上 run 终态（无工具回填）时如实说「补齐 run 终态�
   await page.locator('.recover-btn').click();
 
   const done = page.locator('.recover-done');
-  await expect(done).toContainText('补齐 run 终态');
+  await expect(done).toContainText('补上结束状态');
   // 「无可修复项」会把一次真实的修复说成没修——这正是要防的谎报
   await expect(done).not.toContainText('无可修复项');
   await expect(done).not.toContainText('已完整');
@@ -164,6 +164,7 @@ test('恢复遇 409：裁决提示单独成形（自动处理口径），不混�
   // 声明"下次恢复会按操作类型自动处理"，后端原文只在折叠的技术详情层。
   const conflict = page.locator('.recover-conflict');
   await expect(conflict).toContainText('自动处理');
+  await expect(conflict).toContainText('结果还没结清');
   await expect(conflict).not.toContainText('需要你裁决');
   await expect(conflict).not.toContainText('POST /api/sessions');
   await expect(conflict).not.toContainText('tool_call_id');
@@ -227,5 +228,5 @@ test('中断在某个步骤：横幅仍报具体步号', async ({ page }) => {
   await page.goto('/');
   await page.locator('.session-item').first().click();
 
-  await expect(page.locator('.interrupt-banner')).toContainText('上次运行在第 1 步中断');
+  await expect(page.locator('.interrupt-banner')).toContainText('上次任务在第 1 步中断');
 });

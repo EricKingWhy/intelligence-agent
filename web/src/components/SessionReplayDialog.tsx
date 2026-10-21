@@ -1,8 +1,13 @@
 /** 会话「重放」浮层（`#1322`，spec 03 §6 / ADR-0017 决策 4）。
  *
- *  与「硬删」确认面（`DeleteSessionDialog`）同构：二次确认浮层 + 表单状态放在
- *  **只在打开时挂载**的内层组件里（`{target && <Form/>}`），关闭即丢弃——上一次的
- *  进度 / 错误不会漏到下一次。
+ *  二次确认浮层：表单状态在内层 `SessionReplayForm` 里。为了关闭时能把焦点还给
+ *  行内 ⋯，Content 不随 target 立刻卸载（卸载会触发 FocusScope 清理、焦点掉回
+ *  body）。表单用「打开批次」作 key：每次从关闭态打开都强制重挂载，上一次的
+ *  进度 / 错误 / 在途请求结果不可能漏进下一次。
+ *
+ *  为什么不是「关闭时 reset」：Radix 的 `onCloseAutoFocus` 在 Content 卸载后的
+ *  0ms 定时器里才派发，那时表单已卸载，`setState` 全是 no-op；而退场动画内重开
+ *  会取消卸载、留下旧实例——两条路径都绕过了 reset。key 重挂载对两条都成立。
  *
  *  为什么是浮层而不是行内：README 把「可重放」写成核心能力，入口却只在 CLI。
  *  本浮层把这条能力搬到 Web 的可观测工作台里（对齐 Langfuse session view 的
@@ -15,7 +20,7 @@
  *  （重放零副作用，不改任何会话真相）。数据来自 `replaySession`（只读端点）。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Play, X } from 'lucide-react';
 import { describeSessionError, replaySession, type SessionReplayStep } from '../lib/api';
@@ -25,6 +30,9 @@ export interface ReplaySessionTarget {
   id: string;
   /** 行标题（首条用户消息投影）；空串 = 只显示 id 片段。 */
   title: string;
+  /** #1372 改动 3：关闭时把焦点还给谁。菜单项在菜单关闭时已卸载，Radix 的默认
+   *  归还目标会变成 body；调用方传行内那个稳定的 ⋯ 触发按钮。 */
+  restoreFocus?: HTMLElement | null;
 }
 
 interface Props {
@@ -39,6 +47,25 @@ interface Props {
 const REVEAL_MS = 60;
 
 export function SessionReplayDialog({ target, onOpenChange }: Props) {
+  // #1372 改动 3：关闭时父组件立即把 target 置空，若这里跟着卸载 Content，
+  // Radix 的 FocusScope 会连同 onCloseAutoFocus 一起消失，焦点掉回 body。
+  // 保留最后一个 target 让 Content 撑到 Presence 完成退场（DOM 仍由 Radix 卸载），
+  // onCloseAutoFocus 才有机会把焦点还给行内 ⋯。
+  const [lastTarget, setLastTarget] = useState(target);
+  /** 打开批次：每次 target 从无到有（调用方传新对象）自增，作为表单 key。
+   *  Content 的挂载/卸载由 Radix 管；这里只保证每次打开都是全新表单实例。 */
+  const [openBatch, setOpenBatch] = useState(0);
+  if (target && target !== lastTarget) {
+    setLastTarget(target);
+    setOpenBatch((n) => n + 1);
+  }
+  /** 当前是否处于打开态（0ms 卸载回调可能晚于一次快速重开）。
+   *  用 layout effect 而非渲染期写 ref：只在已提交的树上更新，被丢弃的渲染不会
+   *  留下错误的镜像；layout effect 在同一提交内同步执行，先于 0ms 卸载定时器。 */
+  const openRef = useRef(target !== null);
+  useLayoutEffect(() => {
+    openRef.current = target !== null;
+  }, [target]);
   return (
     <Dialog.Root
       open={target !== null}
@@ -48,7 +75,24 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {target && <SessionReplayForm target={target} />}
+        {lastTarget && (
+          <SessionReplayForm
+            key={openBatch}
+            target={lastTarget}
+            /* 0ms 卸载回调可能晚于一次快速重开：只有对话框此刻仍关闭才归还焦点，
+               否则会把焦点从新实例的初焦位置拽到旧行内按钮（P4）。 */
+            canRestoreFocus={() => !openRef.current}
+            /* 只释放 DOM 引用：Content 若在退场时卸载，FocusScope 的卸载清理会
+               再把焦点抢回 body（AC2 实测红）。target 本身保留到下次打开。
+               只在仍是同一个 target 时清：0ms 卸载回调可能晚于一次快速重开，
+               不能把新打开的 restoreFocus 一并清掉。 */
+            onClosed={() =>
+              setLastTarget((prev) =>
+                prev === lastTarget ? { ...prev, restoreFocus: null } : prev,
+              )
+            }
+          />
+        )}
       </Dialog.Portal>
     </Dialog.Root>
   );
@@ -56,7 +100,17 @@ export function SessionReplayDialog({ target, onOpenChange }: Props) {
 
 type Phase = 'confirm' | 'running' | 'done';
 
-function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
+function SessionReplayForm({
+  target,
+  onClosed,
+  canRestoreFocus,
+}: {
+  target: ReplaySessionTarget;
+  /** 退场完成、焦点已归还后清掉保留的 target（不再持有一个已卸载的 DOM 引用）。 */
+  onClosed: () => void;
+  /** 卸载回调触发时对话框是否仍处于关闭态（快速重开时为 false）。 */
+  canRestoreFocus: () => boolean;
+}) {
   const [phase, setPhase] = useState<Phase>('confirm');
   const [steps, setSteps] = useState<SessionReplayStep[]>([]);
   /** 已推进到的步数（0..steps.length）。`running` 且 `loaded` 时由定时器自增。 */
@@ -100,6 +154,9 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
   return (
     <Dialog.Content
       className="project-dialog replay-dialog"
+      /* #1372 改动 3：radix 1.1.23 的 Dialog.Content 不渲染 aria-modal（本地源码无该
+         输出，Lane D 实测 ariaModal=null）。显式补上，读屏才知道这是模态层。 */
+      aria-modal="true"
       data-replay-phase={phase}
       data-replay-revealed={revealed}
       data-replay-count={steps.length}
@@ -109,6 +166,15 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
         if (!cancelRef.current) return;
         e.preventDefault();
         cancelRef.current.focus();
+      }}
+      onCloseAutoFocus={(event) => {
+        // Esc / 关闭后回到打开它的那个 ⋯ 按钮。目标已不在文档里就交回 Radix 默认。
+        const restore = target.restoreFocus;
+        if (restore?.isConnected && canRestoreFocus()) {
+          event.preventDefault();
+          restore.focus();
+        }
+        onClosed();
       }}
     >
       <div className="project-dialog-head">
@@ -134,7 +200,7 @@ function SessionReplayForm({ target }: { target: ReplaySessionTarget }) {
           <div className="project-dialog-desc">
             将<strong>零副作用</strong>地重放该会话历史：
             <ul className="project-dialog-list">
-              <li>从已持久化的事件重新派生视图，工具结果一律呈现<strong>冻结终态</strong></li>
+              <li>从已持久化的事件重新派生视图，工具结果一律呈现<strong>冻结的结束状态</strong></li>
               <li>不触发模型 / 工具调用，不产生任何外部副作用</li>
               <li>
                 <strong>不写入</strong>原会话事件流——原会话一字不变

@@ -29,11 +29,10 @@ export function StuckPausedPanel({ paused }: StuckPausedPanelProps) {
     <div className="pause-panel" role="status" aria-live="polite">
       <div className="pause-panel-head">
         <PauseCircle size={14} aria-hidden="true" />
-        <span>已因疑似卡住暂停——同一 run 的非终态收口，不是失败</span>
+        <span>已因疑似卡住暂停——这次任务只是暂停，不是出错</span>
       </div>
       <div className="pause-panel-facts">
-        原因 {paused.reason}（{pauseReasonLabel(paused)}）· 命中模式 {paused.trigger_dimension} ·
-        预算版本 {paused.version} · 收口 {paused.closeout_source}
+        原因：{pauseReasonLabel(paused)} · 预算版本 {paused.version}
         {paused.trace_id ? ` · trace ${paused.trace_id}` : ''}
       </div>
       {continuation && (
@@ -54,7 +53,7 @@ export function StuckPausedPanel({ paused }: StuckPausedPanelProps) {
         </div>
       )}
       <div className="pause-panel-facts">
-        恢复方式：提供新指示（steer）——在下方输入框输入，按 Ctrl/Cmd+Enter 发送；或做出环境 / 策略变更后再恢复。恢复需要变更依据，本面板不提供一键恢复。
+        恢复方式：给出新指示——在下方输入框输入，按 Ctrl/Cmd+Enter 发送；或者调整环境 / 规则后再继续。继续前需要说明你改了什么，本面板不提供一键继续。
       </div>
     </div>
   );

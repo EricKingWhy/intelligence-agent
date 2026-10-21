@@ -770,7 +770,7 @@ describe('#1195 findings 修回 — 菜单与反馈面', () => {
 });
 
 describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）', () => {
-  it('压缩中：spinner 面可见（正在压缩上下文…），在途重复触发不重复请求', async () => {
+  it('压缩中：spinner 面可见（正在精简早期对话…），在途重复触发不重复请求', async () => {
     let resolveCompact!: (v: SessionContextCompacted) => void;
     vi.mocked(compactSession).mockImplementation(
       () => new Promise((res) => { resolveCompact = res; }),
@@ -780,7 +780,7 @@ describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）',
     await act(async () => {});
     const compacting = container.querySelector('[data-testid=slash-compacting]');
     expect(compacting?.getAttribute('role')).toBe('status');
-    expect(compacting?.textContent).toContain('正在压缩上下文');
+    expect(compacting?.textContent).toContain('正在精简早期对话');
     press('Enter');
     await act(async () => {});
     expect(compactSession).toHaveBeenCalledTimes(1);
@@ -790,10 +790,10 @@ describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）',
     });
     await act(async () => {});
     expect(container.querySelector('[data-testid=slash-compacting]')).toBeNull();
-    expect(slashInfo()).toContain('压缩完成：100,000 → 40,000 tok');
+    expect(slashInfo()).toContain('精简完成：100,000 → 40,000 字');
   });
 
-  it('被拒（compacted_turn_count=0 零写入）：中性信息「没有可压缩的早期内容」，不是错误', async () => {
+  it('被拒（compacted_turn_count=0 零写入）：中性信息「没有可以精简的早期内容」，不是错误', async () => {
     vi.mocked(compactSession).mockResolvedValue({
       bracket_id: null, source_seq_start: null, source_seq_end: null,
       tokens_before: 500, tokens_after: 500, compacted_turn_count: 0, summary_model: null,
@@ -801,7 +801,7 @@ describe('#1195 findings 修回 — /compact 三态（A-P1-3，#1197 契约）',
     await typeText('/compact');
     press('Enter');
     await act(async () => {});
-    expect(slashInfo()).toBe('没有可压缩的早期内容');
+    expect(slashInfo()).toBe('没有可以精简的早期内容');
     expect(container.querySelector('[data-testid=slash-error]')).toBeNull();
   });
 
@@ -855,7 +855,7 @@ describe('#1264 Shape A — 自动路径的"正在压缩"面（投影驱动，�
     await mount('s-1', { compactionInProgress: true });
     const status = container.querySelector('[data-testid=slash-compacting]');
     expect(status?.getAttribute('role')).toBe('status');
-    expect(status?.textContent).toContain('正在压缩上下文');
+    expect(status?.textContent).toContain('正在精简早期对话');
   });
 
   it('compactionInProgress=false 且无手动压缩 ⇒ 状态行不存在（不伪造在途）', async () => {

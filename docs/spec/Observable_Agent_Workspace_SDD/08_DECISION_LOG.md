@@ -138,3 +138,17 @@ Runtime consumption is a follow-up batch with explicit capability/status evidenc
   `registry.filtered` (ADR-0020a).
 - `context_providers` → session-level subset selection by provider `name`,
   dynamic discovery endpoint projection (ADR-0020b).
+
+---
+
+## Supersede — 2026-10-19（#1364「设计 token 工程约束 + 主色替换」，随改版 8 票已批）
+
+| # | Superseded decision | New decision | Authority / 依据 |
+|---|---|---|---|
+| 14 | **D** — original accent, with subtle pale-pink character.（`--accent: #f1b3ca`，亮色 `#b2406e`） | **Accent = indigo `#533afd`**（Stripe Indigo 品牌档，白底 6.19:1），只用于 CTA/焦点，不再是"每行都出现"的粉色点缀。配套：`--accent-strong: #4434d4`（实底 hover，白字 7.81:1）、`--accent-press: #2e2b8c`（`:active`，白字 11.41:1）、`--accent-text: #9a8bff`（暗色**文字**档，实测 canvas/chrome/elevated/overlay = 6.99/6.79/6.38/5.08:1；亮色档 = `#533afd`）、`--accent-text-strong: #b3a6ff`（暗色 hover 文字）。 | Ticket #1364（随改版 8 票已批，2026-10-19）。原条目**保留不删**：它是当时用户决策的忠实记录，本条只声明其被取代。 |
+
+**为什么 accent 要拆 fill / text 两档**（#1364 施工期一手实测，非估算）：`#533afd` 当文字用在暗色底上只有
+2.35–3.24:1（canvas 3.24 / chrome 3.15 / elevated 2.88 / overlay 2.35），低于 AA 4.5，且会让 `e2e/t-contrast.spec.ts` 的 `.composer-session-target-new-btn`
+用例直接变红；而它当**实底**配白字是 6.19:1。同一个值不可能同时满足两个角色，故暗色下拆成
+fill（`--accent`）与 text（`--accent-text`）。亮色下 `--accent` 本身已 5.49–6.19:1，两个 text token
+直接等于 `#533afd` / `#4434d4`。

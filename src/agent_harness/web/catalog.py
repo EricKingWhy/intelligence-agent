@@ -259,7 +259,9 @@ async def list_capabilities(
     registry, _wiring = await state.get_wiring()
     return {
         "capabilities": [
-            core_manifest_entry(),
+            core_manifest_entry(
+                insights_enabled=state.settings.insights_enabled,
+            ),
             *[descriptor_manifest_entry(d) for d in registry.available()],
         ],
     }

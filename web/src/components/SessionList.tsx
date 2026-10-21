@@ -19,17 +19,20 @@
  *  真实的层级要表达，两套切分叠在一起会让同一行出现在两个不同的分类逻辑下。
  */
 
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
   Archive,
   ArrowDown,
   ArrowUp,
+  ChartNoAxesColumn,
   ChevronRight,
   Ellipsis,
   Folder,
   FolderOpen,
   FolderPlus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Puzzle,
   TriangleAlert,
@@ -57,9 +60,13 @@ import {
 import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
 import { SessionReplayDialog, type ReplaySessionTarget } from './SessionReplayDialog';
 import { TaskCreationDialog } from './TaskCreationDialog';
+import { SessionListSkeleton } from './SessionListSkeleton';
+import { Tip } from './Tooltip';
 
 interface Props {
   sessions: SessionSummary[];
+  /** #1371：会话列表首次加载中（骨架屏）。缺省 false = 既有调用方/测试的语义。 */
+  sessionsLoading?: boolean;
   projects: Project[];
   selectedId: string | null;
   /** The session currently receiving a live stream (live dot). */
@@ -105,12 +112,15 @@ interface Props {
   onSetArchived: (sessionId: string, archived: boolean) => Promise<string | null>;
   /** #1200：打开「插件」管理窗口（侧栏一级入口，常驻）。 */
   onOpenPlugins: () => void;
+  /** #1420：打开跨会话洞察页。可选——能力未声明 / 测试夹具未提供时不渲染入口。 */
+  onOpenInsights?: () => void;
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
 // 稳定，跳过每个 delta 的会话栏重渲染；相对时间刷新由内部 useTickingNow 独立驱动。
 export const SessionList = memo(function SessionList({
   sessions,
+  sessionsLoading = false,
   projects,
   selectedId,
   liveSessionId,
@@ -131,6 +141,7 @@ export const SessionList = memo(function SessionList({
   onDeleteSession,
   onSetArchived,
   onOpenPlugins,
+  onOpenInsights,
 }: Props) {
   const now = useTickingNow();
   /** 「显示已归档」开关（#171 AC10）：**视图状态**，持久化到 localStorage 但**不重拉
@@ -151,6 +162,11 @@ export const SessionList = memo(function SessionList({
 
   // 折叠状态是**视图**状态（不持久化，与 Inspector 折叠同一立场）。
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** #1368：窄屏（≤820px）会话抽屉的展开态。**纯呈现状态**——它只决定 `.session-rail`
+   *  是否以覆盖层出现（CSS 在窄屏把它换成 fixed 覆盖），不参与会话数据流：选中会话
+   *  仍然只走 `onSelect`，栅格轨道与 `.app-workspace` 的起点一个像素都不动。
+   *  桌面档这条状态无视觉作用（相关规则全在 `@media (max-width: 820px)` 里）。 */
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
   /** 待硬删的会话（null = 确认面关闭）——与项目软删分开一个状态：两者的后果与
@@ -186,6 +202,46 @@ export const SessionList = memo(function SessionList({
   const [dropTarget, setDropTarget] = useState<{ projectId: string; before: string | null } | null>(
     null,
   );
+
+  // ── #1368：窄屏抽屉的三个出口（选中 / Escape / 断点穿越）──
+  /** 选中会话 = 关抽屉 + 原有选择。窄屏下抽屉是覆盖层，不关就会挡住刚选中的内容。 */
+  const selectSession = (id: string) => {
+    setDrawerOpen(false);
+    onSelect(id);
+  };
+  /** Escape 关抽屉：覆盖层必须有不依赖鼠标的退出路径（键盘用户不能只剩"再点一次按钮"）。
+   *  "点抽屉外收起"由遮罩节点承担（`.rail-scrim`，只在展开时渲染）——**不用 document
+   *  pointerdown 判"目标不在 rail 内"**：那样关闭与"点到下面的界面"是同一次点，
+   *  抽屉一层的遮罩会变成直接操作正文（例如点到发送键）。遮罩把这次点吃掉，
+   *  关闭就只是关闭。
+   *
+   *  ⚠ **必须认领这个 Esc**（`preventDefault`），与 `PlanList.tsx` 的关闭路径同形：
+   *  App 的全局 Esc（中断在途 run）以 `defaultPrevented` 作为"已有更近的 handler
+   *  认领了它"的统一信号——不打断这个标记，一次关抽屉会**同时**取消正在跑的 run。 */
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setDrawerOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [drawerOpen]);
+  /** 断点穿越复位：抽屉是窄档的临时覆盖层，离开窄档时它已经没有对应物——
+   *  不复位的话「390 打开 → 拉宽到桌面 → 再缩回 390」会让抽屉**自己又开着**
+   *  并接管点击（宽档时类还在，视觉上无副作用，正是这种"看不见的残留"最难发现）。
+   *  用 `matchMedia` 而不是 `resize`：判据与 CSS 的 `@media (max-width: 820px)`
+   *  是同一个条件，不存在两份断点漂移。 */
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const narrow = window.matchMedia('(max-width: 820px)');
+    const onBreakpoint = () => {
+      if (!narrow.matches) setDrawerOpen(false);
+    };
+    narrow.addEventListener('change', onBreakpoint);
+    return () => narrow.removeEventListener('change', onBreakpoint);
+  }, [drawerOpen]);
 
   /** 选中会话所在的项目永远保持展开：折叠一个"里面有当前会话"的项目等于把用户
    *  正在看的行藏起来——界面不该出现这种自相矛盾的状态。 */
@@ -259,7 +315,7 @@ export const SessionList = memo(function SessionList({
     });
   };
 
-  const showEmpty = sessions.length === 0 && projects.length === 0;
+  const showEmpty = !sessionsLoading && sessions.length === 0 && projects.length === 0;
   /** 会话列表**没拿到**（不是"确实没有"）——F9：`sessions === []` 同时是"真没有会话"
    *  与"这次请求失败了"的形状，两者**必须分开说**。
    *
@@ -272,58 +328,127 @@ export const SessionList = memo(function SessionList({
    *  注意它**不等于** `sessionsError !== null` 之外还要看别的：只要这次没拿到，
    *  无论之前有没有成功过都不说"暂无会话"（有旧数据时列表照旧渲染，空态本来就不成立）。 */
   const sessionsUnavailable = sessionsError !== null;
+  /** 首屏骨架的挂载条件：只有「首次请求未 settle 且还没有任何行」才算 loading。
+   *  后续刷新（已有列表）不闪骨架。 */
+  const sessionsPending = sessionsLoading && sessions.length === 0;
 
   return (
-    <aside className="session-rail">
+    <aside
+      className={`session-rail${drawerOpen ? ' rail-drawer-open' : ''}`}
+      id="region-sessions"
+      role="region"
+      aria-label="会话区"
+      tabIndex={-1}
+    >
+      {/* #1372：skip-link 地标（`region-sessions`）。与 #1368 的抽屉状态类共存：
+          抽屉开关只改 class，id/role 不动，键盘"跳到会话区"两种形态都落得到。 */}
+      {/* #1368：抽屉的点击遮罩。只在展开时存在，`position: fixed; inset: 0; z-index: -1`
+          由 CSS 给：它铺满视口、命中区吃掉"点抽屉外"这一下（关闭与"点到下面的正文"
+          不再是同一次点击），但画在轨自己的背景之下 —— 抽屉表面不会被它压暗
+          （视觉遮罩仍是轨本身那条大扩散 box-shadow）。
+          遮罩**只吃指针、不是键盘模态**（无 `inert` / 焦点陷阱，Tab 仍可走到正文）：
+          这是票面选定的「轻量 disclosure」语义——抽屉是窄屏的列表展开，不是必须
+          先答完才能继续的对话框（那类才是 `.palette-overlay` 的模态）。 */}
+      {drawerOpen ? (
+        <div className="rail-scrim" aria-hidden="true" onPointerDown={() => setDrawerOpen(false)} />
+      ) : null}
+      {/* #1368：窄屏专属的抽屉开关。桌面档 `display:none`（轨本来就有 240px 正文，
+          不需要抽屉）；窄屏折叠态它排在图标轨顶部，展开态留在抽屉左上角当关闭键。
+          `aria-controls` 指向会话列表本体（不是整个 aside）：开关控制的是列表的
+          呈现，且该 id 只在列表确实渲染时存在。 */}
+      <button
+        className="icon-btn rail-drawer-btn"
+        onClick={() => setDrawerOpen((open) => !open)}
+        aria-expanded={drawerOpen}
+        aria-controls="session-rail-list"
+        aria-label={drawerOpen ? '收起会话列表' : '展开会话列表'}
+        title={drawerOpen ? '收起会话列表' : '展开会话列表'}
+      >
+        {drawerOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+      </button>
       <div className="session-list-header">
         <span className="panel-label">会话</span>
-        {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
-        <button
-          className="icon-btn rail-plugins-btn"
-          onClick={onOpenPlugins}
-          aria-label="插件"
-          title="插件：MCP Servers 与 Skills 的启用 / 禁用"
-        >
-          <Puzzle size={14} />
-        </button>
-        {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
-            「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
-            （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
-        {showEmpty ? (
-          <div className="session-list-actions rail-empty-actions">
-            <button className="rail-empty-btn-primary" onClick={() => setCreateOpen(true)}>
-              新建项目
+        {/* #1397：标题左侧、动作整组右侧——插件按钮并入动作组，不再作为 header 的
+            第三个子项被 `space-between` 摊到 240px 轨的中间。 */}
+        <div className={`session-list-actions${showEmpty ? ' rail-empty-actions' : ''}`}>
+          {/* #1200：插件是**一级常驻入口**（不随会话/项目增删出现或消失）。 */}
+          <Tip content="插件：MCP Servers 与 Skills 的启用 / 禁用">
+            <button className="icon-btn rail-plugins-btn" onClick={onOpenPlugins} aria-label="插件">
+              <Puzzle size={14} />
             </button>
-            <button className="rail-empty-btn-ghost" onClick={onNew}>
-              新会话
-            </button>
-          </div>
-        ) : (
-          <div className="session-list-actions">
-            {/* #171：「显示已归档」——`aria-pressed` 是开关的语义（不是两个动作按钮），
-                按下态给 accent 色（CSS）。icon-only 与本栏其余动作一致。 */}
+          </Tip>
+          {/* #1420：上下文洞察入口，紧随插件按钮——同属"一级常驻工具入口"，
+              capability 缺失时前端不下发该 prop，按钮整体不渲染。 */}
+          {onOpenInsights && (
+            <Tip content="上下文洞察——跨会话 token 用量与构成">
+              <button
+                className="icon-btn rail-insights-btn"
+                onClick={onOpenInsights}
+                aria-label="上下文洞察"
+              >
+                <ChartNoAxesColumn size={14} />
+              </button>
+            </Tip>
+          )}
+          {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
+              「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
+              （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
+          {showEmpty ? (
+            <>
+            {/* #1368：窄屏 56px 图标轨里，这两个按钮的文字会逐字折成竖排（红线段）。
+                正解是**图标 + 标签**：标签在折叠轨里 `display:none`（`.rail-empty-btn-label`），
+                桌面档与展开的抽屉里照常显示文字——文字按钮是 UI-05 的可识别性契约，
+                不能为了窄屏把它删掉。`aria-label` 让图标态的可访问名称仍是全文。 */}
             <button
-              className={`icon-btn rail-archived-toggle${showArchived ? ' on' : ''}`}
-              aria-pressed={showArchived}
-              onClick={toggleArchived}
-              aria-label="显示已归档会话"
-              title="显示已归档会话（归档只改列表可见性，不删任何东西）"
-            >
-              <Archive size={14} />
-            </button>
-            <button
-              className="icon-btn"
+              className="rail-empty-btn-primary"
               onClick={() => setCreateOpen(true)}
               aria-label="新建项目"
               title="新建项目：注册一个已存在的目录"
             >
-              <FolderPlus size={14} />
+              <FolderPlus size={14} aria-hidden="true" />
+              <span className="rail-empty-btn-label">新建项目</span>
             </button>
-            <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
-              <Plus size={14} />
+            <button
+              className="rail-empty-btn-ghost"
+              onClick={onNew}
+              aria-label="新会话"
+              title="新会话"
+            >
+              <Plus size={14} aria-hidden="true" />
+              <span className="rail-empty-btn-label">新会话</span>
             </button>
-          </div>
-        )}
+            </>
+          ) : (
+            <>
+            {/* #171：「显示已归档」——`aria-pressed` 是开关的语义（不是两个动作按钮），
+                按下态给 accent 色（CSS）。icon-only 与本栏其余动作一致。 */}
+            <Tip content="显示已归档会话（归档只改列表可见性，不删任何东西）">
+              <button
+                className={`icon-btn rail-archived-toggle${showArchived ? ' on' : ''}`}
+                aria-pressed={showArchived}
+                onClick={toggleArchived}
+                aria-label="显示已归档会话"
+              >
+                <Archive size={14} />
+              </button>
+            </Tip>
+            <Tip content="新建项目：注册一个已存在的目录">
+              <button
+                className="icon-btn"
+                onClick={() => setCreateOpen(true)}
+                aria-label="新建项目"
+              >
+                <FolderPlus size={14} />
+              </button>
+            </Tip>
+            <Tip content="新建会话">
+              <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
+                <Plus size={14} />
+              </button>
+            </Tip>
+            </>
+          )}
+        </div>
       </div>
 
       {/* `opError` 优先（动作级、更具体），它出现时**不再并列**列表加载错误：归档走
@@ -372,29 +497,53 @@ export const SessionList = memo(function SessionList({
         </div>
       ) : null}
 
-      <div className="session-items">
-        {showEmpty && !sessionsUnavailable && (
-          <div className="empty-hint">暂无会话，提交任务即可开始。</div>
-        )}
-        {/* 不是真空态，但开关把**每一行**都收起来了——必须说清楚，否则侧栏看起来像坏了
-            （且给出去处：顶部那个开关）。
-            两个守卫都不能省：
-            - `sessions.length > 0`：项目已注册但还没有任何会话时 `visibleCount` 同样是 0，
-              不加这条会渲染出「0 条都已归档」——把"没有会话"说成"都归档了"（不变量 #21）。
-            - `!showArchived`：开关已经开着还提示"点开关查看"，指向一个已经按下的按钮。
-            数字取真正归档的条数而不是 `sessions.length`：后者把未归档但也看不见的行
-            （理论上不存在的状态）也算进去，是在替数据说话。 */}
-        {!showEmpty && sessions.length > 0 && !showArchived && visibleCount === 0 && (
-          <div className="empty-hint">
-            没有可见的会话：{archivedCount} 条都已归档。点侧栏顶部的
-            <Archive size={12} aria-hidden="true" /> 图标查看。
-          </div>
+      {/* `id` 是抽屉开关 `aria-controls` 的落点（#1368）：指向**列表本体**而不是整个
+          aside——开关控制的是这份列表的呈现，且展开/收起不改变它的身份。 */}
+      <div className="session-items" id="session-rail-list">
+        {sessionsPending ? (
+          <SessionListSkeleton />
+        ) : (
+          <>
+            {showEmpty && !sessionsUnavailable && (
+              <div className="empty-hint">暂无会话，提交任务即可开始。</div>
+            )}
+            {/* 不是真空态，但开关把**每一行**都收起来了——必须说清楚，否则侧栏看起来像坏了
+                （且给出去处：顶部那个开关）。
+                两个守卫都不能省：
+                - `sessions.length > 0`：项目已注册但还没有任何会话时 `visibleCount` 同样是 0，
+                  不加这条会渲染出「0 条都已归档」——把"没有会话"说成"都归档了"（不变量 #21）。
+                - `!showArchived`：开关已经开着还提示"点开关查看"，指向一个已经按下的按钮。
+                数字取真正归档的条数而不是 `sessions.length`：后者把未归档但也看不见的行
+                （理论上不存在的状态）也算进去，是在替数据说话。 */}
+            {!showEmpty && sessions.length > 0 && !showArchived && visibleCount === 0 && (
+              <div className="empty-hint">
+                没有可见的会话：{archivedCount} 条都已归档。点侧栏顶部的
+                <Archive size={12} aria-hidden="true" /> 图标查看。
+              </div>
+            )}
+          </>
         )}
 
+        {/* 项目区**不**被会话骨架替换：会话与项目是两条独立请求，
+            若 `listSessions` 悬挂，整块被骨架盖住会让项目区永久不可达。骨架只代表
+            「会话行未到」，项目结构照常可见；loading 窗口内不渲染依赖 sessions 的
+            计数/缺失提示，避免把"还没拿到"说成"没有会话"。 */}
         <section className="rail-section" aria-label="项目">
+          {/* #1400：项目区用常规 section header + 右侧「+」表达空态入口，
+              不再复刻拖放区的 dashed 大卡。空态本身只剩一行说明 + 文字链接。 */}
+          <div className="rail-section-label">
+            项目
+            <button
+              className="icon-btn rail-section-add"
+              onClick={() => setCreateOpen(true)}
+              aria-label="新建项目"
+              title="新建项目：注册一个已存在的目录"
+            >
+              <Plus size={12} aria-hidden="true" />
+            </button>
+          </div>
           {projects.length > 0 ? (
             <>
-              <div className="rail-section-label">项目</div>
               {model.groups.map(({ project, sessions: rows, missing }) => {
                 const expanded = isExpanded(project);
                 const listId = `rail-project-${project.id}`;
@@ -403,6 +552,9 @@ export const SessionList = memo(function SessionList({
                 const contextArmed = activeProjectId === project.id;
                 // 落点提示只在本项目内亮：跨项目拖动不是重排（见 handleDrop）。
                 const dropEnabled = drag?.projectId === project.id;
+                // 会话行未到的窗口里 `rows` 必然是空数组——此时计数取项目账本的
+                // 归属数（唯一可得的事实），否则会显示「0 个会话」并渲染空项目提示。
+                const rowCount = sessionsPending ? project.session_ids.length : rows.length;
                 return (
                   <section className="rail-project" key={project.id}>
                     <div className="rail-project-head">
@@ -455,9 +607,9 @@ export const SessionList = memo(function SessionList({
                           // 打红）。改说「新会话」既传达同一状态，又不与那个入口撞名。
                           // 武装态文案共三处（本 aria-label / 下方 title / 可见 chip），改动须同步。
                           aria-label={`${project.title}：${
-                            expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`
+                            expanded ? '收起项目' : `展开项目（${rowCount} 个会话）`
                           }${contextArmed ? '；已选中为新会话的目标目录，再点一次取消' : ''}`}
-                          title={`${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}${
+                          title={`${expanded ? '收起项目' : `展开项目（${rowCount} 个会话）`}${
                             contextArmed ? ' · 已选中为「新建会话」目标目录（再点一次取消）' : ''
                           }`}
                         >
@@ -489,7 +641,7 @@ export const SessionList = memo(function SessionList({
                               aria-label="目录当前不存在"
                             />
                           )}
-                          <span className="rail-project-count num">{rows.length}</span>
+                          <span className="rail-project-count num">{rowCount}</span>
                         </button>
                       )}
                       <DropdownMenu.Root>
@@ -503,7 +655,7 @@ export const SessionList = memo(function SessionList({
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Portal>
                           <DropdownMenu.Content
-                            className="rail-menu"
+                            className="rail-menu rail-menu-sheet"
                             align="end"
                             sideOffset={4}
                             // #945 / #1177：选中「重命名项目」/「新建会话」时焦点已被主动
@@ -569,7 +721,7 @@ export const SessionList = memo(function SessionList({
 
                     {expanded && (
                       <div className="rail-project-rows" id={listId}>
-                        {rows.length === 0 && (
+                        {rows.length === 0 && !sessionsPending && (
                           // 空项目不再引导用户"去未分组找 cwd 匹配的会话"——WS-6 之后
                           // 在项目里直接开任务就是最短路径，旧文案的语义已被本入口取代
                           // （AC10：占位区替换为该入口按钮）。
@@ -601,7 +753,7 @@ export const SessionList = memo(function SessionList({
                               dropTarget?.projectId === project.id &&
                               dropTarget.before === s.session_id
                             }
-                            onSelect={onSelect}
+                            onSelect={selectSession}
                             onMove={handleMove}
                             onDetach={(sessionId) =>
                               void runOp('移出项目失败', () =>
@@ -645,7 +797,7 @@ export const SessionList = memo(function SessionList({
                             放到最后
                           </div>
                         )}
-                        {missing > 0 && (
+                        {missing > 0 && !sessionsPending && (
                           <div
                             className="rail-project-missing"
                             title="账本里有这些会话 id，但会话日志不存在（已被删除或不属于本机）"
@@ -666,62 +818,71 @@ export const SessionList = memo(function SessionList({
             // （sessions 与 projects 都为 0）下的文案整段吞掉，与文字按钮指涉
             // 自相矛盾，正是本票要消灭的断点。
             !projectsError && (
-              <div className="rail-project-empty rail-project-empty-first">
-                还没有项目。注册一个已存在的目录，同目录的会话就会归到一起。
-                <button className="rail-empty-action" onClick={() => setCreateOpen(true)}>
-                  注册项目目录 →
+              <div className="rail-project-empty rail-project-empty-hint">
+                还没有项目，
+                <button
+                  className="rail-empty-action"
+                  onClick={() => setCreateOpen(true)}
+                  title="注册一个已存在的目录，同目录的会话就会归到一起"
+                >
+                  注册项目目录
                 </button>
               </div>
             )
           )}
         </section>
 
-        <section className="rail-section" aria-label="未分组">
-          <div className="rail-section-label">
-            未分组
-            <span className="rail-section-count num">{model.ungrouped.length}</span>
-          </div>
-          {model.ungrouped.length === 0 && projects.length > 0 && (
-            <div className="rail-project-empty">所有会话都已归入项目。</div>
-          )}
-          <div>
-            {model.ungrouped.map((s) => (
-              <SessionRow
-                key={s.session_id}
-                session={s}
-                title={titlesById[s.session_id] ?? ''}
-                selected={selectedId === s.session_id}
-                live={liveSessionId === s.session_id}
-                now={now}
-                projectId={null}
-                ledger={[]}
-                /* #1028 AC3（**部分满足**，已知收缩）：仅就**可得**的 cwd（= 选中会话的
-                   事件流）就地标注，历史未加载行不编路径——`SessionSummary` 本身不含
-                   cwd，未选中的行此刻没有真值可标。故不是"每行都标"，而是"标得起的那一
-                   行才标"；这是数据可得性自洽，不是缺陷，但如实登记在此以免被读成"每行
-                   都带 cwd 标注"。 */
-                ownerCwd={selectedId === s.session_id ? selectedCwd : null}
-                dragging={false}
-                dropEnabled={false}
-                dropBefore={false}
-                onSelect={onSelect}
-                onMove={handleMove}
-                onDetach={() => undefined}
-                onAttachPick={setAttachFor}
-                onOpenCreate={() => setCreateOpen(true)}
-                onDragStartRow={() => undefined}
-                onDragEndRow={resetDrag}
-                onDragOverRow={() => undefined}
-                onDropRow={() => undefined}
-                onDelete={setDeletingSession}
-                onSetArchived={(sessionId, archived) =>
-                  void handleSetArchived(sessionId, archived)
-                }
-                onReplay={setReplayTarget}
-              />
-            ))}
-          </div>
-        </section>
+        {/* #1371：首屏会话未到时整个未分组区被骨架代替（`session-items` 那块已渲染
+            SessionListSkeleton），这里不再重复渲染行。 */}
+        {!sessionsPending && (
+          <section className="rail-section" aria-label="未分组">
+            <div className="rail-section-label">
+              未分组
+              <span className="rail-section-count num">{model.ungrouped.length}</span>
+            </div>
+            {model.ungrouped.length === 0 && projects.length > 0 && (
+              <div className="rail-project-empty">所有会话都已归入项目。</div>
+            )}
+            <div>
+              {model.ungrouped.map((s) => (
+                <SessionRow
+                  key={s.session_id}
+                  session={s}
+                  title={titlesById[s.session_id] ?? ''}
+                  selected={selectedId === s.session_id}
+                  live={liveSessionId === s.session_id}
+                  now={now}
+                  projectId={null}
+                  ledger={[]}
+                  /* #1028 AC3（**部分满足**，已知收缩）：仅就**可得**的 cwd（= 选中会话的
+                     事件流）就地标注，历史未加载行不编路径——`SessionSummary` 本身不含
+                     cwd，未选中的行此刻没有真值可标。故不是"每行都标"，而是"标得起的那一
+                     行才标"；这是数据可得性自洽，不是缺陷，但如实登记在此以免被读成"每行
+                     都带 cwd 标注"。 */
+                  ownerCwd={selectedId === s.session_id ? selectedCwd : null}
+                  dragging={false}
+                  dropEnabled={false}
+                  dropBefore={false}
+                  // #1368：选中 = 关抽屉 + 原有选择（直接调 onSelect prop 会绕过关抽屉）。
+                  onSelect={selectSession}
+                  onMove={handleMove}
+                  onDetach={() => undefined}
+                  onAttachPick={setAttachFor}
+                  onOpenCreate={() => setCreateOpen(true)}
+                  onDragStartRow={() => undefined}
+                  onDragEndRow={resetDrag}
+                  onDragOverRow={() => undefined}
+                  onDropRow={() => undefined}
+                  onDelete={setDeletingSession}
+                  onSetArchived={(sessionId, archived) =>
+                    void handleSetArchived(sessionId, archived)
+                  }
+                  onReplay={setReplayTarget}
+                />
+              ))}
+            </div>
+          </section>
+        )}
       </div>
 
       <CreateProjectDialog
@@ -850,9 +1011,13 @@ function SessionRow({
   const index = ledger.indexOf(s.session_id);
   // #1028：本行的归属标注文案（有选中会话的 cwd 才算；纯函数，算一次供 title/label 复用）。
   const owner = ownerCwd != null ? describeOwnership(null, ownerCwd) : null;
+  // #1372 改动 1：会话条目与 ⋯ 合并为一个 Tab 停留点。⋯ 按钮仍可由鼠标点、
+  // 也能被 Shift+F10 打开的菜单接住焦点，但不进 Tab 序（tabIndex=-1）。
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div
-      className={`session-row${inProject ? ' session-row-in-project' : ''}${dragging ? ' dragging' : ''}`}
+      className={`session-row${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}`}
       draggable={inProject}
       onDragStart={(e) => {
         if (!inProject) return;
@@ -880,6 +1045,17 @@ function SessionRow({
       <button
         className={`session-item ${selected ? 'selected' : ''}`}
         onClick={() => onSelect(s.session_id)}
+        aria-keyshortcuts="Shift+F10"
+        onKeyDown={(event) => {
+          // APG 上下文菜单快捷键：Shift+F10 打开当前项的菜单，焦点交给 Radix。
+          // 行按钮默认动作是「选中会话」而不是弹出，因此**不挂** aria-haspopup——
+          // 那会把默认动作声明成弹出。菜单语义由 ⋯ 触发器承担（Radix 注入
+          // aria-haspopup/aria-expanded）；aria-keyshortcuts 只声明这条捷径。
+          if (event.shiftKey && event.key === 'F10') {
+            event.preventDefault();
+            setMenuOpen(true);
+          }
+        }}
         title={`${s.session_id} · ${s.event_count} 事件${inProject ? '' : ' · 未分组'}`}
       >
         <span
@@ -887,10 +1063,18 @@ function SessionRow({
           aria-hidden="true"
         />
         <div className="session-item-body">
-          {title && <div className="session-item-title">{title.slice(0, 48)}</div>}
-          <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
+          {/* #1399：标题独占首行，12 位会话 ID 下移到 meta 行（ID · 事件数 · 时间）。
+              240px 轨里标题不再与 ID 争行尾；完整 session_id 仍在行按钮的 title 里。 */}
+          {title && (
+            <div className="session-item-head">
+              <div className="session-item-title">{title.slice(0, 48)}</div>
+            </div>
+          )}
           <div className="session-item-meta num">
-            {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+            <span className="session-item-id mono">{s.session_id.slice(0, 12)}</span>
+            <span className="session-item-meta-rest">
+              {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+            </span>
           </div>
           {/* #171：「已归档」徽标。只有打开「显示已归档」时这一行才会被渲染出来
               （默认视图里已归档行整个不渲染，见 buildRailModel），所以徽标是**这一行
@@ -936,17 +1120,21 @@ function SessionRow({
           )}
         </div>
       </button>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button
-            className="icon-btn rail-menu-btn"
-            aria-label={`会话 ${s.session_id.slice(0, 8)} 操作`}
-          >
-            <Ellipsis size={14} />
-          </button>
-        </DropdownMenu.Trigger>
+      <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
+        <Tip content="会话操作">
+          <DropdownMenu.Trigger asChild>
+            <button
+              ref={menuTriggerRef}
+              className="icon-btn rail-menu-btn"
+              aria-label={`会话 ${s.session_id.slice(0, 8)} 操作`}
+              tabIndex={-1}
+            >
+              <Ellipsis size={14} />
+            </button>
+          </DropdownMenu.Trigger>
+        </Tip>
         <DropdownMenu.Portal>
-          <DropdownMenu.Content className="rail-menu" align="end" sideOffset={4}>
+          <DropdownMenu.Content className="rail-menu rail-menu-sheet" align="end" sideOffset={4}>
             {inProject ? (
               <>
                 <DropdownMenu.Item
@@ -999,7 +1187,16 @@ function SessionRow({
                 （讲清"零副作用地重放"，见 SessionReplayDialog）。 */}
             <DropdownMenu.Item
               className="rail-menu-item"
-              onSelect={() => onReplay({ id: s.session_id, title })}
+              onSelect={() =>
+                onReplay({
+                  id: s.session_id,
+                  title,
+                  // #1372 改动 3：菜单项在菜单关闭时被卸载，Radix 的默认焦点归还
+                  // 会落到 body。把「稳定的那个触发按钮」（行内 ⋯）记下来，
+                  // 由重放浮层关闭时显式归还。
+                  restoreFocus: menuTriggerRef.current,
+                })
+              }
             >
               重放会话…
             </DropdownMenu.Item>

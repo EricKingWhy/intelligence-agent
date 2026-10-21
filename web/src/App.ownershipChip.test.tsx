@@ -52,11 +52,14 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
       selectedId: H.selectedId,
       conversation: H.conversation,
       loadingHistory: true,
+      historySkeleton: true,
       streaming: false,
       reconnecting: false,
       error: null,
       sessionsError: null,
       titlesById: {},
+      sendFailure: null,
+      runFailedBeforePlan: null,
       recoverState: {
         status: 'idle', message: null, conflict: false, repaired: 0,
         terminalRepaired: false, stillUnterminated: false, stillDangling: false,
@@ -119,7 +122,7 @@ async function mount(): Promise<void> {
 }
 
 function chipText(): string | null {
-  return container!.querySelector('.composer-owner-chip')?.textContent ?? null;
+  return container!.querySelector('.composer-ownership')?.textContent ?? null;
 }
 
 beforeEach(() => {

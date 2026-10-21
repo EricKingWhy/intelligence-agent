@@ -17,6 +17,11 @@
  *  jsdom 不实现 `scrollIntoView`（打桩）；900ms 移除用捕获的 timeout 回调手动
  *  触发——不引假计时器，避免把 Radix 模态自用的定时器一起冻住。
  */
+// node 内置模块没有声明（web 的 tsconfig 只带 vite/client）。
+// @ts-expect-error node 内置模块没有声明
+import { readFileSync } from 'node:fs';
+// @ts-expect-error node 内置模块没有声明
+import { cwd } from 'node:process';
 import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -169,5 +174,26 @@ describe('#459 — approval: jumpRequest → 内联卡脉冲', () => {
   it('未知 approval key：无脉冲（负向对照——查询不是「匹配一切」）', () => {
     render(host({ key: 'approval:ap-404', nonce: 1 }));
     expect(container!.querySelector('.stream-jump-pulse')).toBeNull();
+  });
+});
+
+describe('#1429 复审 P3 — 脉冲只画描边环，不接管背景/阴影', () => {
+  /* jsdom 环境里 `import.meta.url` 不是 file: URL（`readFileSync` 直接拒绝），
+     vitest 的 cwd 是 `web/`——按它定位样式文件。 */
+  const base = cwd();
+  const indexCss = readFileSync(`${base}/src/index.css`, 'utf8');
+  const appCss = readFileSync(`${base}/src/styles/app.css`, 'utf8');
+  const frames = /@keyframes event-pulse\s*\{([^}]*)\}/.exec(indexCss)?.[1] ?? '';
+  const rule = /\.stream-jump-pulse\s*\{([^}]*)\}/.exec(appCss)?.[1] ?? '';
+
+  it('keyframes 只动 outline-color（背景与 box-shadow 会抹掉卡片的底色/左侧色条）', () => {
+    expect(frames).toMatch(/outline-color/);
+    expect(frames).not.toMatch(/box-shadow/);
+    expect(frames).not.toMatch(/(^|[^-\w])background/);
+  });
+
+  it('.stream-jump-pulse 声明盒内描边环', () => {
+    expect(rule).toMatch(/outline:\s*2px solid/);
+    expect(rule).toMatch(/outline-offset:\s*-2px/);
   });
 });
