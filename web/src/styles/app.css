@@ -3604,8 +3604,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 /* ── Model 段语义行（PRD §5.2/§10）：思考中 / 中间输出，ZCode 式动作语言 ── */
 .stream-jump-pulse {
+  /* 描边环画在盒内（负 offset），不占布局、不覆盖底色与既有 inset 色条。 */
+  outline: 2px solid transparent;
+  outline-offset: -2px;
   animation: event-pulse var(--dur-pulse) var(--ease-apple);
-  border-radius: var(--radius-sm);
 }
 .model-kind-row {
   display: flex;
