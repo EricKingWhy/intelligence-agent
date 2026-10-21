@@ -1,1 +1,1 @@
-2026-10-21	#1439 Phase A 双轴 fresh 审查（Standards + Correctness，独立 reviewer）：F-03 补 run-start 重置实现、F-04 追认前置、F-11 甲案；结论 APPROVE-with-findings，findings 由 Phase B 逐项处置	387bdcc8..60df5a5b
+2026-10-21	#1439 Phase A 双轴 fresh 审查（Standards + Correctness，独立 reviewer）：F-03 补 run-start 重置实现、F-04 追认前置、F-11 甲案；两轴结论各按原文：Standards PASS-WITH-FINDINGS（0 P0/0 P1/2 P2/3 P3）、Correctness APPROVE_WITH_FINDINGS（0 P0/0 P1/1 P2/5 P3/4 P4），findings 由 Phase B 逐项处置	387bdcc8..60df5a5b

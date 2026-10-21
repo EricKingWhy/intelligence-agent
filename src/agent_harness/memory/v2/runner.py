@@ -336,22 +336,21 @@ def run_slice_bounds(
 
 @runtime_checkable
 class MemoryFormationNotifier(Protocol):
-    """运行时把一轮的**开始与终结**交给记忆形成的唯一入口（#298 T7b / #1439 F-03）。
+    """运行时把一轮的**终结**交给记忆形成的唯一入口（#298 T7b / #1439 F-03）。
 
     为什么是 Protocol，而不是让 `agent/runtime.py` 直接收 `MemoryJobRunner`：Runtime
     需要的只是"把这一轮告诉宿主"这一件事，而 `MemoryJobRunner` 是**作业宿主子系统**
     ——它自己拥有服务循环、认领、恢复、模型调用器与事件出口。让 agent 核心依赖那一整套
     （连同它背后的 jobs / executor / policy / formation 全链）等于把"运行时收尾"与
-    "记忆作业怎么跑"焊在一起；而这个端口只有两行签名。
+    "记忆作业怎么跑"焊在一起；而这个端口只有一行签名。
 
-    两半的分工：`notify_run_started` 是轮次边界的**重置**（Hermes
-    `turn_context._reset_per_turn_agent_state` 的 turn-start 同位），
-    `notify_run_finished` 是终结入队。两者都必须幂等、且都不许把故障抛回 Runtime。
+    `notify_run_finished` 是终结入队，必须幂等、且不许把故障抛回 Runtime。
 
-    **必需面只有 `notify_run_finished`。** 轮次重置是端口之外的可选扩展能力：Runtime
-    用 `getattr` 探测它，只关心终结接缝的替身（集成测试的合成宿主）不必为一个空操作
-    补齐方法；生产宿主 `MemoryJobRunner` 两个都实现。所以这里不声明
-    `notify_run_started`——声明了就等于说"替身必须有它"，与上面的探测口径矛盾。
+    **轮次重置是端口之外的可选扩展能力。** Runtime 用 `getattr` 探测
+    `notify_run_started`（Hermes `turn_context._reset_per_turn_agent_state` 的
+    turn-start 同位）：只关心终结接缝的替身（集成测试的合成宿主）不必为一个空操作补齐
+    方法，生产宿主 `MemoryJobRunner` 则两个都实现（同样幂等、同样不抛）。所以这里不
+    声明它——声明了就等于说"替身必须有它"，与探测口径矛盾。
 
     `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
     能对"给进来的东西真的满足契约"下断言，而不是只靠注解。

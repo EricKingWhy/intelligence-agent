@@ -8,14 +8,14 @@
 于是计数跨 run 累积：长进程里第 N 个 run 第一次失败就可能直接 TERMINAL，自纠机会被
 提前掐断。上游把重置放在 turn 边界（`agent/turn_context.py:619`
 `_reset_per_turn_agent_state`），本仓对应点是 run 开始边界
-（`AgentRuntime._drive` → `MemoryFormationNotifier.notify_run_started`）。
+（`AgentRuntime._drive` → 宿主的 `notify_run_started`，端口外的可选扩展）。
 
-# 两层判据
+# 三层判据
 
 - **接缝层**（真 Runtime + 真 `MemoryTool` + 真 store）：一次 run 内 3 次失败仍可自纠、
   第 4 次 TERMINAL；下一个 run 的第 1 次失败又可自纠。对照组用**不实现**
-  `notify_run_started` 的宿主——那正是修复前的形状，新 run 第 1 次失败即 TERMINAL，
-  这条对照就是本 bug 的回归断言。
+  `notify_run_started` 的宿主——那正是修复前生产宿主的形状，新 run 第 1 次失败即
+  TERMINAL，这条对照就是本 bug 的回归断言。
 - **续跑层**：同 run 续跑（`LaunchRunBudget(run_id=...)`）**不**归零——续跑是同一逻辑
   run 的继续，`#312` 要求计数器与 stuck 指纹都不重置。
 - **宿主层**（`MemoryJobRunner.notify_run_started`）：它把调用转给
@@ -50,8 +50,8 @@ CAP = MAX_CONSOLIDATION_FAILURES_PER_TURN
 class _RunStartSpy:
     """真实记忆宿主的最小替身：`notify_run_started` 直接落到真 store 上。
 
-    `seam=False` 时不实现 `notify_run_started`——那是修复前 `MemoryFormationNotifier`
-    的形状（Runtime 用 `getattr` 探测，缺席即不重置），对照组的 bug 就靠它复现。
+    `seam=False` 时不实现 `notify_run_started`——那是修复前生产宿主的形状（Runtime
+    用 `getattr` 探测，缺席即不重置），对照组的 bug 就靠它复现。
     """
 
     def __init__(self, store: Any, *, seam: bool = True) -> None:

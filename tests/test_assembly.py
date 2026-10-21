@@ -128,7 +128,7 @@ async def test_build_runtime_wires_memory_formation(tmp_path):
 
     这条钉的是 `assembly.py` 的 `memory_formation=wiring.memory_formation` 一行：
     删掉它，Runtime 的终结臂静默走"没有宿主"路径、F-03 的 run-start 重置也不会发生，
-    而此前全部测试仍然全绿（消融变异 G：0 failed）。
+    而删掉这一行之前全部测试仍然全绿——本用例就是补上的那条红。
     """
     settings = _settings(tmp_path)
     stores = _stores(tmp_path)

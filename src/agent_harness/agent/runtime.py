@@ -1794,9 +1794,10 @@ class AgentRuntime:
                 run_id = launch_budget.run_id
                 turn_index = launch_budget.turn_index or 1
             else:
-                # 轮次边界（#1439 F-03）：记忆侧的 per-turn 状态（consolidation 失败
-                # 预算）在新 run 开始时归零——与 Hermes `turn_context._reset_per_turn
-                # _agent_state` 的 turn-start 同位。必须在 `resuming` 判定之后且只在
+                # 轮次边界（#1439 F-03）：记忆侧的 per-run 状态（consolidation 失败
+                # 预算）在新 run 开始时归零。上游 Hermes 把这个重置放在 turn 边界
+                # （`turn_context._reset_per_turn_agent_state`），本仓的对应边界是
+                # run 开始（一个 run 可以有多轮）。必须在 `resuming` 判定之后且只在
                 # 非续跑分支：同 run 续跑不重置计数器（`#312` 不变量），否则续跑会
                 # 重新获得 3 次自纠机会。此处还没有可终结的 run，故障由通知方法自己
                 # 吞掉（与 `_notify_memory_formation` 同一条旁路纪律）。
