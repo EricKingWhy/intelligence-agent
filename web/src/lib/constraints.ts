@@ -28,6 +28,30 @@ export const FACT_TYPE_DOTS: Record<string, string> = {
   evidence_ref: 'var(--cn-type-evidence-ref)',
 };
 
+/** 事实类型的中文名（#1445 / F-04）——**单一 owner**，与 `SCOPE_LABELS` / `FACT_TYPE_DOTS`
+ *  同处同模式。
+ *
+ *  口径出处：issue #1445 与 `~/workspace/overnight-test/walk-p2-fixes/f04-wording.md`
+ *  （逐枚举定名，逐字照用；`constraint` / `authorization` / `evidence_ref` 为既有口径，
+ *  `user_goal` / `work_boundary` / `failed_approach` 为按枚举字面与既有词根新拟）。
+ *  原始枚举是机器码，不是给用户看的筛选标签——chips 与行内类型都走 `factTypeLabel`。 */
+export const FACT_TYPE_LABELS: Record<string, string> = {
+  constraint: '约束',
+  user_goal: '用户目标',
+  authorization: '授权',
+  work_boundary: '工作边界',
+  failed_approach: '失败尝试',
+  evidence_ref: '证据引用',
+};
+
+/** 未知 / 未来枚举的兜底（口径文件「未知值兜底」）。依据 = `modelAvailability.ts:20-40`
+ *  的模式：机器码**绝不原样打给用户**，未知码只给保守通用词、不猜具体含义；**不是**
+ *  `permission.ts` `decisionLabel` 那种「未知值原样返回」——chips 是用户筛选标签，
+ *  原样回显 snake_case 正是 #1445 本身的 bug 形状。筛选仍按原始值匹配（只改显示名）。 */
+export function factTypeLabel(type: string): string {
+  return FACT_TYPE_LABELS[type] ?? '其他类型';
+}
+
 /** ISO 时间 → 全站统一 `YYYY-MM-DD HH:mm`（本地时区）；坏值原样返回，不猜。 */
 export function formatFactTime(iso: string | null): string {
   if (!iso) return '';
