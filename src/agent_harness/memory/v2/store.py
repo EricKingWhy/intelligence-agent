@@ -92,13 +92,10 @@ CREATE TABLE IF NOT EXISTS memory_v2_records (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_active
     ON memory_v2_records(root_id) WHERE status = 'active';
--- #1437 F-06b：投影对账键上的部分唯一索引。键形状 = (tenant, user, content)——
--- **不带 target**：一条工具行可以同时服务 MEMORY.md 与 USER.md 里的同一段文本
--- （`project_entry` 的跨文件去重就是这个语义），带上 target 反而会放行两行。
--- 只约束工具来源的 active 行：服务来源行各有自己的 root/版本链，不该被这条键合并。
-CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_tool_projection
-    ON memory_v2_records(tenant_id, user_id, content)
-    WHERE status = 'active' AND projection_source = 'tool';
+-- #1437 F-06b：投影对账键上的部分唯一索引——**不在这里建**。它引用
+-- `projection_source`，而旧库要等 `initialize()` 补列之后才有这一列；写进 `_SCHEMA`
+-- 会让 `executescript` 在 ALTER 之前就炸（审查 Corr N1）。建索引的正文与键形状
+-- 论证在 `_TOOL_PROJECTION_INDEX`。
 CREATE INDEX IF NOT EXISTS memory_v2_owner
     ON memory_v2_records(tenant_id, user_id, scope, project_id);
 CREATE TABLE IF NOT EXISTS memory_v2_outbox (
@@ -156,6 +153,21 @@ CREATE TABLE IF NOT EXISTS memory_v2_projection_pending (
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_v2_fts USING fts5(content);
 """
 
+#: #1437 F-06b：投影对账键上的部分唯一索引。键形状 = (tenant, user, content)——
+#: **不带 target**：一条工具行可以同时服务 MEMORY.md 与 USER.md 里的同一段文本
+#: （`project_entry` 的跨文件去重就是这个语义），带上 target 反而会放行两行。
+#: 只约束工具来源的 active 行：服务来源行各有自己的 root/版本链，不该被这条键合并。
+#:
+#: 不放进 `_SCHEMA`：它引用 `projection_source`，旧库要等 `initialize()` 补完列才有
+#: （审查 Corr N1——放 `_SCHEMA` 会让 `executescript` 在建列前抛 `no such column`，
+#: 既有部署直接起不来）。同理必须容忍历史重复行（N1b）：P2-2 竞态存在期间建出的库
+#: 可能已有两行同文本工具行，建索引会 `UNIQUE constraint failed`，升级即失败。
+_TOOL_PROJECTION_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_tool_projection
+    ON memory_v2_records(tenant_id, user_id, content)
+    WHERE status = 'active' AND projection_source = 'tool';
+"""
+
 #: FTS5 的 `unicode61` 分词器把连续 CJK 当成**一个** token（实测 `用户喜欢冰美式咖啡` 是一个
 #: token），于是"咖啡"永远匹配不到。索引侧按**单字**切 CJK、查询侧把词也切成单字短语，
 #: 两边就对齐了：`"冰 美 式"` 命中 `冰美式` 且不乱序。英文仍按空白/标点分词，不受影响。
@@ -170,7 +182,7 @@ _COLUMNS = (
 
 #: #1437：`projection_target` 的合法取值。待投影账本表上有 CHECK，记录表没有——
 #: 给记录表补 CHECK 要重建表（SQLite 不支持 ALTER ADD CONSTRAINT），代价远大于收益，
-#: 所以在写入口做同一份校验（`create` / `enqueue_projection` / 两个投影查询）。
+#: 所以在写入口做同一份校验（`create` / `enqueue_projection` / 带 target 的投影查询）。
 _PROJECTION_TARGETS = frozenset({"memory", "user"})
 
 
@@ -301,6 +313,35 @@ async def _add_column_if_missing(
         await connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+async def _ensure_tool_projection_index(connection) -> None:
+    """建 `_TOOL_PROJECTION_INDEX`；撞上历史重复行就降级为普通索引（审查 Corr N1b）。
+
+    重复行只可能来自 P2-2 竞态存在的那段时间，且它们本就是同一个逻辑事实——删掉
+    后来的那条不丢信息（markdown 才是权威，下一轮 `reproject` 会按需重建）。但**不在
+    迁移里删数据**：升级路径不该悄悄丢行，降级 + 一条 warning 让人看得见。
+    普通索引仍覆盖查询（唯一性退化为代码层去重，与 P2-2 修复前的行为一致）。
+
+    降级不是永久的：每轮启动重试一次升级，重复行被 `reproject` 清掉之后自动回到唯一索引。
+    """
+    async with connection.execute("PRAGMA index_list(memory_v2_records)") as cursor:
+        existing = {row["name"]: bool(row["unique"]) for row in await cursor.fetchall()}
+    if existing.get("memory_v2_one_tool_projection") is True:
+        return
+    if "memory_v2_one_tool_projection" in existing:
+        await connection.execute("DROP INDEX IF EXISTS memory_v2_one_tool_projection")
+    try:
+        await connection.executescript(_TOOL_PROJECTION_INDEX)
+    except aiosqlite.IntegrityError:
+        logger.warning(
+            "memory_v2_one_tool_projection could not be created (duplicate tool rows from "
+            "an older build); falling back to a non-unique index. Run a full reprojection "
+            "to collapse the duplicates.")
+        await connection.execute(
+            "CREATE INDEX IF NOT EXISTS memory_v2_one_tool_projection "
+            "ON memory_v2_records(tenant_id, user_id, content) "
+            "WHERE status = 'active' AND projection_source = 'tool'")
+
+
 class SqliteMemoryV2Store:
     """V2 权威记录存储。所有写方法都是"记录行 + outbox 意图"单事务。"""
 
@@ -333,6 +374,7 @@ class SqliteMemoryV2Store:
                 "TEXT NOT NULL DEFAULT 'service'")
             await _add_column_if_missing(
                 connection, "memory_v2_records", "projection_target", "TEXT")
+            await _ensure_tool_projection_index(connection)
             # #1353 §5：虚表与记录表行数一致 ⇒ 已同步，跳过全量重扫。
             # ponytail: 行数比对只能发现"少了/多了"（典型是 FTS 建表前就存在的旧库），
             # 发现不了"条数相同但内容被外部改过"；真需要就加一张 fts_version 表，
@@ -889,8 +931,10 @@ class SqliteMemoryV2Store:
     # 投影对账（#1437 F-06 / F-06b）
     # ----------------------------------------------------------------------------------
     #
-    # 三个查询都把来源/target 写进 WHERE（只回退到该身份、该 target 的工具行），
-    # 但正文摘要仍在 Python 侧比对：`entry_digest` 是 sha256，SQLite 没有内置函数，
+    # 两个查询都把来源写进 WHERE，只回退到该身份的工具行；`tool_projection_digests`
+    # 另按 target 收窄，`find_active_by_digest` **刻意不按 target 过滤**（一条工具行可
+    # 同时服务两个文件）。正文摘要仍在 Python 侧比对：`entry_digest` 是 sha256，
+    # SQLite 没有内置函数，
     # 想下推就得另存一列摘要。当前规模（单用户数百条）下这几次扫描是常数级开销，
     # 不值得为此加列 + 回填迁移；真到万级再按 `ponytail` 的口径加 `content_digest`
     # 列与索引（与 `memory_v2_one_tool_projection` 合并建设）。
@@ -902,38 +946,75 @@ class SqliteMemoryV2Store:
         return target
 
     async def tool_projection_digests(
-        self, trusted: TrustedMemoryIdentity, target: str,
+        self, trusted: TrustedMemoryIdentity, target: str | None = None,
     ) -> dict[str, str]:
-        """该身份、该 target 下 active 工具来源行的 ``{正文摘要: 正文}``。
+        """该身份下 active 工具来源行的 ``{正文摘要: 正文}``；``target`` 省略即不分文件。
 
         `reproject_target` 用它算「派生层已有 vs markdown 现有」的差集；扫描条件写死
         `projection_source='tool'`，所以服务来源行永远不在结果里（非干扰论证第 1 条）。
-        带正文是为了让删除侧能直接复用 `retract_entry`（它按 content 定位），不必再查一次。
+        带正文是为了让删除侧能直接复用撤回逻辑（它按 content 定位），不必再查一次。
+
+        对账必须**不分 target**：一条工具行可以同时服务两个文件（去重键不带 target），
+        按 target 取会让共享行在对不上的那一侧变成看不见的孤儿（审查 Corr N5）。
         """
-        self._require_projection_target(target)
+        sql = ("SELECT content FROM memory_v2_records "
+               "WHERE tenant_id=? AND user_id=? AND projection_source='tool' AND status='active'")
+        params: list[object] = [trusted.tenant_id, trusted.user_id]
+        if target is not None:
+            self._require_projection_target(target)
+            sql += " AND projection_target=?"
+            params.append(target)
         async with (
             connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT content FROM memory_v2_records "
-                "WHERE tenant_id=? AND user_id=? AND projection_source='tool' "
-                "AND projection_target=? AND status='active'",
-                (trusted.tenant_id, trusted.user_id, target),
-            ) as cursor,
+            connection.execute(sql, params) as cursor,
         ):
             return {self._digest(row["content"]): row["content"]
                     for row in await cursor.fetchall()}
 
     async def find_active_by_digest(
-        self, trusted: TrustedMemoryIdentity, digest: str,
+        self, trusted: TrustedMemoryIdentity, digest: str, *,
+        scope: MemoryScope | None = None, project_id: str | None = None,
     ) -> MemoryRecordV2 | None:
-        """按正文摘要找一条 active **工具来源**行（任一 target）。
+        """按正文摘要找一条 active 行，用于「这条要不要再投影」的去重判定。
 
-        去重域**只含工具来源**：服务来源行是独立的逻辑记忆，内容相同也不该抑制投影
-        （#1437 审查 Corr P2-3 的 PROJECT scope 误抑制就是这么来的）。也不按 scope
-        过滤——工具行恒为 `user_global`，而跨 scope 的同文本服务行本就不在域内。
+        两个调用方的去重域不同，所以来源过滤是**参数**而不是写死的：
+
+        - 投影去重（`project_entry`）：任何来源都算，含 service——设计 §5.3 第 2 条
+          要求「同一文本只投影一条」，否则 `retrieve_memory` 会把同一句话返回两次
+          （审查 Corr N2）。服务行本身就是这句话的派生态，再建工具行就是重复。
+        - 撤回（`_retract`）：只认工具来源——服务行是独立的逻辑记忆，撤回不得删它。
+
+        ``scope``/``project_id`` 限定可见性：工具行恒为 `user_global`，一条 PROJECT
+        服务行不该挡住 `USER_GLOBAL` 的投影（审查 Corr P2-3）。
 
         不按 target 过滤：一条工具行可以同时服务两个文件（见 `project_entry` 的
         跨文件去重语义与 `memory_v2_one_tool_projection` 的键形状）。
+        """
+        sql = ("SELECT * FROM memory_v2_records "
+               "WHERE tenant_id=? AND user_id=? AND status='active'")
+        params: list[object] = [trusted.tenant_id, trusted.user_id]
+        if scope is not None:
+            sql += " AND scope=?"
+            params.append(scope.value)
+            if scope is MemoryScope.PROJECT:
+                sql += " AND project_id=?"
+                params.append(project_id)
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(sql, params) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        for row in rows:
+            if self._digest(row["content"]) == digest:
+                return _to_record(row)
+        return None
+
+    async def find_tool_by_digest(
+        self, trusted: TrustedMemoryIdentity, digest: str,
+    ) -> MemoryRecordV2 | None:
+        """按正文摘要找一条 active **工具来源**行（任一 target）——撤回用。
+
+        服务来源行即使内容相同也不返回：删它会连带删掉一条独立的逻辑记忆。
         """
         async with (
             connect(self.database_path) as connection,

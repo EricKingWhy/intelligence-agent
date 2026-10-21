@@ -77,6 +77,15 @@ def _tombstone_hashes(db_path) -> list[str]:
         ]
 
 
+def _index_names(db_path) -> dict[str, bool]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            name: bool(unique)
+            for name, unique in connection.execute(
+                "SELECT name, \"unique\" FROM pragma_index_list('memory_v2_records')")
+        }
+
+
 def _digests(markdown: MarkdownMemoryStore, target: str) -> set[str]:
     return {entry_digest(entry) for entry in markdown.entries(target)}
 
@@ -588,3 +597,128 @@ async def test_projection_failure_does_not_block_approval(tmp_path, monkeypatch)
     assert decision.allow is True, decision
     assert "投影失败也批准" in markdown.path_for("memory").read_text(encoding="utf-8")
     assert len(_pending_rows(store.database_path)) == 1
+
+
+# ------------------------------------------------- Phase B 复审回归（Corr N1–N5）
+
+
+async def test_legacy_database_without_projection_columns_still_initializes(tmp_path) -> None:
+    """审查 Corr N1 回归：`#1437` 之前建的库要能升级，不能在建索引时抛 no such column。"""
+    db_path = tmp_path / "legacy.db"
+    legacy = SqliteMemoryV2Store(db_path)
+    await legacy.initialize()
+    await legacy.create(reprojection.draft_for("memory", "旧库里的记忆"), TRUSTED)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX memory_v2_one_tool_projection")
+        connection.execute("ALTER TABLE memory_v2_records DROP COLUMN projection_source")
+        connection.execute("ALTER TABLE memory_v2_records DROP COLUMN projection_target")
+
+    store = SqliteMemoryV2Store(db_path)
+    await store.initialize()
+
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "旧库里的记忆"]
+    assert _index_names(db_path)["memory_v2_one_tool_projection"] is True
+    assert _projection_columns(db_path) == [("service", None)]
+
+
+async def test_legacy_duplicate_tool_rows_degrade_to_a_plain_index(tmp_path) -> None:
+    """审查 Corr N1b 回归：撞过 P2-2 竞态的旧库要能启动（降级为普通索引），不丢行。"""
+    store, _markdown, _service = await build(tmp_path)
+    db_path = store.database_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX memory_v2_one_tool_projection")
+    draft = reprojection.draft_for("memory", "历史重复行")
+    for _ in range(2):
+        await store.create(draft, TRUSTED, projection_source="tool", projection_target="memory")
+
+    restarted = SqliteMemoryV2Store(db_path)
+    await restarted.initialize()
+
+    assert _index_names(db_path)["memory_v2_one_tool_projection"] is False
+    assert len(await restarted.list_active(TRUSTED, limit=10)) == 2
+
+
+async def test_service_row_with_the_same_text_does_not_duplicate_the_projection(tmp_path) -> None:
+    """审查 Corr N2 回归：同文本的服务行在场时，工具写入不得造第二行（设计 §5.3 第 2 条）。"""
+    store, markdown, service = await build(tmp_path)
+    await service.create(MemoryDraftV2(
+        kind=MemoryKind.SEMANTIC, tier=MemoryTier.COLLECTION, scope=MemoryScope.USER_GLOBAL,
+        content="用户喜欢喝乌龙茶", payload=SemanticPayload(
+            subject="s", fact="用户喜欢喝乌龙茶", category=SemanticCategory.PREFERENCE),
+        importance=0.8, strength=0.8, source_type=SourceType.AUTOMATIC,
+        source_session_id="s-1", source_event_ids=["e-1"],
+        evidence=[EvidenceItem(role="user", excerpt="乌龙茶", hash="0" * 64)],
+    ), TRUSTED)
+
+    result = await MemoryTool(markdown, service=service).execute(_MemoryArgs(
+        action="add", target="user", content="用户喜欢喝乌龙茶"))
+
+    assert result.ok is True, result
+    assert result.data["projection"] == "done"
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "用户喜欢喝乌龙茶"]
+    hits = await service.hybrid_search(
+        "乌龙茶", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert [hit.record.content for hit in hits] == ["用户喜欢喝乌龙茶"]
+
+
+async def test_retraction_reads_the_other_file_from_disk_not_the_stale_snapshot(tmp_path) -> None:
+    """审查 Corr N3 回归：另一进程写进另一个文件的同文本，本会话撤回时不得被误删。"""
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="两个进程都写了这句"))).ok is True
+    # 另一个进程直接写 USER.md：本进程的快照里没有它。
+    other = MarkdownMemoryStore(markdown.directory)
+    await other.add("user", "两个进程都写了这句")
+    assert markdown.entries("user") == []
+
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="两个进程都写了这句"))).ok is True
+
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "两个进程都写了这句"]
+    hits = await service.hybrid_search(
+        "两个进程", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert len(hits) == 1
+
+
+async def test_kept_retraction_keeps_the_pending_row(tmp_path, monkeypatch) -> None:
+    """审查 Corr N4 回归：`kept` 只说明"这次别删"，不得清掉仍待收敛的账本行。"""
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="双文件条目"))).ok is True
+    monkeypatch.undo()
+    assert [row[0] for row in _pending_rows(store.database_path)] == ["memory"]
+    # 同文本也出现在 USER.md（另一个进程写的，本进程快照里没有）。
+    other = MarkdownMemoryStore(markdown.directory)
+    await other.add("user", "双文件条目")
+
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="双文件条目"))).ok is True
+
+    assert [row[0] for row in _pending_rows(store.database_path)] == ["memory"]
+
+
+async def test_reproject_on_either_target_reclaims_a_shared_row(tmp_path) -> None:
+    """审查 Corr N5 回归：共享行从两个文件都消失后，任一 target 的全量对账都能回收它。"""
+    store, markdown, service = await build(tmp_path)
+    markdown.path_for("memory").write_text("共享行", encoding="utf-8")
+    markdown.path_for("user").write_text("共享行", encoding="utf-8")
+    markdown.load_from_disk()
+    await service.reproject(TRUSTED, "memory")
+    assert len(await store.list_active(TRUSTED, limit=10)) == 1
+
+    markdown.path_for("memory").write_text("", encoding="utf-8")
+    markdown.path_for("user").write_text("", encoding="utf-8")
+    markdown.load_from_disk()
+
+    summary = await service.reproject(TRUSTED, "user")
+
+    assert summary["deleted"] == 1, summary
+    assert await store.list_active(TRUSTED, limit=10) == []

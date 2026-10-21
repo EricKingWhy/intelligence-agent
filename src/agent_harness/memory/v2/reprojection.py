@@ -101,6 +101,18 @@ def _skip_reason(content: str) -> str | None:
     return None
 
 
+def _disk_entries(markdown: MarkdownMemoryStore, target: str) -> list[str]:
+    """读**磁盘**上的活条目——markdown 是权威面，进程内列表可能落后于别的进程。
+
+    读不出来（文件存在但不可读）时退回活条目列表：宁可少删，也不要把一次读失败
+    当成"文件已经空了"而误删派生行。
+    """
+    raw, read_ok = markdown.read_raw_checked(markdown.path_for(target))
+    if not read_ok:
+        return markdown.entries(target)
+    return list(dict.fromkeys(MarkdownMemoryStore._parse_entries(raw)))
+
+
 async def project_entry(
     store: SqliteMemoryV2Store, target: str, content: str,
     trusted: TrustedMemoryIdentity, *, session_id: str | None = None,
@@ -111,13 +123,16 @@ async def project_entry(
     ``existing`` 覆盖两种情形：已投影过（幂等），以及同一文本已在**另一个** target 上
     投影过（跨文件去重——两行会让 `retrieve_memory` 返回两句一模一样的话）。
 
-    去重域只含**工具来源**行（`find_active_by_digest` 的 WHERE 写死了
-    `projection_source='tool'`）：服务来源行是独立的逻辑记忆，同文本也不抑制投影。
+    去重域是「目标可见范围内的任何来源」（设计 §5.3 第 2 条，审查 Corr N2）：服务行
+    本身就是这句话的派生态，再建工具行会让检索命中两次。但只算 `USER_GLOBAL`——
+    工具行恒为该 scope，一条 PROJECT 服务行不该挡住投影（审查 Corr P2-3）。
     """
     content = normalize_entry(content)
     if not content or _skip_reason(content) is not None:
         return "skipped"
-    if await store.find_active_by_digest(trusted, entry_digest(content)) is not None:
+    if await store.find_active_by_digest(
+        trusted, entry_digest(content), scope=MemoryScope.USER_GLOBAL,
+    ) is not None:
         return "existing"
     await store.create(
         draft_for(target, content, session_id=session_id, event_id=event_id), trusted,
@@ -138,47 +153,56 @@ async def retract_entry(
       按一个文件的删除去删共享行会让另一个文件在检索层凭空消失（审查 Corr P2-1）；
     - ``pending``：删除失败，已写进待投影账本等下一轮重试（审查 Std P2-3）。
 
-    服务来源行即使内容相同也不动：`find_active_by_digest` 只认 `projection_source='tool'`。
+    服务来源行即使内容相同也不动：`find_tool_by_digest` 只认 `projection_source='tool'`。
     """
     content = normalize_entry(content)
     if not content:
         return "absent"
     digest = entry_digest(content)
-    outcome = await _retract(store, markdown, target, content, trusted, reason=reason)
-    if outcome != "pending":
+    outcome, _ = await _retract(store, markdown, target, content, trusted, reason=reason)
+    if outcome in ("deleted", "absent"):
+        # `kept` 不清账本：它只说明「这次别删」，不说明「已经一致」。清掉会让另一个
+        # 文件里那条权威条目既没有派生行、也没有重试记录（审查 Corr N4）。
         await store.clear_projection(trusted, target, digest)
     return outcome
 
 
 async def _retract(
     store: SqliteMemoryV2Store, markdown: MarkdownMemoryStore, target: str, content: str,
-    trusted: TrustedMemoryIdentity, *, reason: str,
-) -> str:
-    """撤回执行体（不碰账本）：三条路径共用同一份口径。
+    trusted: TrustedMemoryIdentity, *, reason: str, present: set[str] | None = None,
+) -> tuple[str, str | None]:
+    """撤回执行体（不碰账本）：三条路径共用同一份口径；返回 ``(结果, 失败类型)``。
 
     删除条件 = 这段文本**两个文件都没有了**。工具行是按文本共享的（一行可服务两个
     文件），所以查找也不看 target——否则从"没有那行"的文件里删会找不到共享行，
     另一个文件清空后它就成了孤儿（审查 Corr P2-1 / P2-2 的统一口径）。
+
+    两个文件的判定**直读磁盘**（`_disk_entries`），不读活条目列表：`_mutate` 只重读
+    被写的那一个 target，另一个文件在整场会话里都是陈旧快照——别的进程写进去的文本
+    会被判成"已经没了"而误删共享行，且本会话内不自愈（审查 Corr N3）。
+    ``present`` 是调用方已经算好的两文件摘要并集（批量路径复用，避免 O(n·m)，审查 N7）。
     """
     digest = entry_digest(content)
-    if any(digest in {entry_digest(entry) for entry in markdown.entries(name)}
-           for name in ("memory", "user")):
-        return "kept"
-    record = await store.find_active_by_digest(trusted, digest)
+    if present is None:
+        present = {entry_digest(entry)
+                   for name in ("memory", "user") for entry in _disk_entries(markdown, name)}
+    if digest in present:
+        return "kept", None
+    record = await store.find_tool_by_digest(trusted, digest)
     if record is None:
-        return "absent"
+        return "absent", None
     # write-ahead：删除前先记账（重复入队是幂等的，且保留 attempts）。
     await store.enqueue_projection(trusted, target, content)
     try:
         await store.delete(record.id, trusted, reason=reason)
     except KeyError:
-        return "absent"
+        return "absent", None
     except Exception as error:  # noqa: BLE001 — 派生层失败不得回滚权威写入（见模块约定）
         logger.warning(
             "memory retraction pending (%s/%s): %s", target, digest[:12], type(error).__name__)
         await store.record_projection_failure(trusted, target, digest, type(error).__name__)
-        return "pending"
-    return "deleted"
+        return "pending", type(error).__name__
+    return "deleted", None
 
 
 class _Summary(dict):
@@ -294,12 +318,13 @@ async def drain_pending(
     - 内容已不在 markdown 里 ⇒ 重试**撤回**（撤回失败也会进账本，见 `retract_entry`）。
 
     收敛判据：`remaining == 0` 且每个 markdown 条目都有一条 active 派生行（或出现在
-    `skipped` 里）。行数在快照时就固定，所以循环天然有界。
+    `skipped` 里）。循环遍历的是账本快照，所以天然有界；`remaining` 是**再查一次**
+    的结果，不是循环上界（审查 Corr N6）。
     """
     drained = 0
     errors: list[list[str]] = []
     # 摘要集合按 target 预先算一次：逐行重算是 O(n·m)（审查 Std P3-2）。
-    present = {target: {entry_digest(entry) for entry in markdown.entries(target)}
+    present = {target: {entry_digest(entry) for entry in _disk_entries(markdown, target)}
                for target in ("memory", "user")}
     for row in await store.pending_projections(trusted):
         target = str(row["target"])
@@ -311,12 +336,17 @@ async def drain_pending(
                     store, target, content, trusted,
                     session_id=row["session_id"], event_id=row["event_id"],
                 )
-            elif await _retract(
-                store, markdown, target, content, trusted, reason="markdown_removed",
-            ) == "pending":
-                # 失败留痕（attempts/last_error）已在 `_retract` 里写过，这里只记错误。
-                errors.append([target, digest, "DeleteError"])
-                continue
+            else:
+                outcome, error_type = await _retract(
+                    store, markdown, target, content, trusted, reason="markdown_removed",
+                )
+                if outcome == "pending":
+                    # 失败留痕（attempts/last_error）已在 `_retract` 里写过，这里只记错误。
+                    errors.append([target, digest, error_type or "DeleteError"])
+                    continue
+                if outcome == "kept":
+                    # 另一个文件还有它：账本行表达"待收敛"仍然成立，留给下一轮。
+                    continue
         except Exception as error:  # noqa: BLE001 — 一条失败不能挡住后面的行
             errors.append([target, digest, type(error).__name__])
             await store.record_projection_failure(trusted, target, digest, type(error).__name__)
@@ -335,11 +365,18 @@ async def reproject_target(
 
     幂等：读的是文件**当前**条目与派生层**当前**状态的差集，不依赖顺序/时间戳/水位。
     删除判定看**两个文件**——同一文本还在另一个文件里就不删，避免 ping-pong。
+
+    `actual` 用**不按 target 过滤**的工具行全集：一条工具行可以同时服务两个文件
+    （去重键不带 target），按 target 取会让共享行只在对的那一侧可见——对 `user`
+    做全量对账时它既不在 `entries` 里也删不掉，成了对账看不见的孤儿（审查 Corr N5）。
     """
     summary = _Summary()
-    entries = {entry_digest(entry): entry for entry in markdown.entries(target)}
+    entries = {entry_digest(entry): entry for entry in _disk_entries(markdown, target)}
     summary["desired"] = len(entries)
-    actual = await store.tool_projection_digests(trusted, target)
+    actual = await store.tool_projection_digests(trusted)
+    # 两文件摘要并集只算一次：删除循环里逐条重算是 O(n·m)（审查 Corr N7）。
+    present = {entry_digest(entry)
+               for name in ("memory", "user") for entry in _disk_entries(markdown, name)}
 
     for digest, entry in entries.items():
         if digest in actual:
@@ -350,8 +387,12 @@ async def reproject_target(
     for digest, content in actual.items():
         if digest in entries:
             continue
-        summary.count_retraction(await retract_entry(
-            store, markdown, target, content, trusted, reason="markdown_removed"))
+        outcome, _ = await _retract(
+            store, markdown, target, content, trusted,
+            reason="markdown_removed", present=present)
+        if outcome != "pending":
+            await store.clear_projection(trusted, target, digest)
+        summary.count_retraction(outcome)
     return summary
 
 
