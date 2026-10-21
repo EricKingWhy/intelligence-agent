@@ -1,8 +1,9 @@
 """#1441 §3（F-13b）：M7 人面向通知——三档、去重、只认成功、待审不报成落地、载荷只带计数/指纹。
 
 纯函数（`summarize_background_review_actions` / `review_messages_for`）直接钉语义；
-事件出口用 `MemoryJobRunner._notify_human` 直调 + 记录型 sink——`_run_one` 到这里的
-唯一一行就是 `self._notify_human(job, result)`，再套一层真实泵只会把同一断言写得更长。
+事件出口用 `MemoryJobRunner._notify_human` 直调 + 记录型 sink。最后一条用例补上真实
+`_run_one` 路径（注入只返回已提交结果的假 executor），钉住 `runner.py` 里那唯一一行
+`self._notify_human(job, result)`——删掉它，直调用例全绿而这条会红。
 """
 
 from __future__ import annotations
@@ -212,3 +213,47 @@ async def test_review_messages_render_committed_records_as_successful_entries() 
     assert [m["role"] for m in messages] == ["assistant", "tool"]
     payload = json.loads(messages[1]["content"])
     assert payload == {"success": True, "target": "memory", "message": "Entry added."}
+
+
+# ---------------------------------------------------------------- 真实接线路径
+
+
+class _FakeExecutor:
+    """只跑到 `_notify_human`：返回一个已提交结果，其余参数原样忽略。"""
+
+    def __init__(self, result: MemoryJobResult) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def run(self, job, **_kwargs) -> MemoryJobResult:
+        self.calls += 1
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_run_one_wires_the_notification_to_the_event_sink(tmp_path) -> None:
+    """`runner.py` 的 `self._notify_human(job, result)` 是唯一接线行：删掉它本用例必须红。
+
+    直调 `_notify_human` 的用例证明不了这件事——它们绕过了 `_run_one`。
+    """
+    sink = RecordingSink()
+    jobs = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+    await jobs.initialize()
+    record = make_record(memory_id="mem-1", content="用户偏好简洁直接的回答")
+    executor = _FakeExecutor(_result(record))
+    runner = MemoryJobRunner(
+        jobs=jobs, sessions=JsonlSessionStore(tmp_path / "sessions"), executor=executor,
+        roles=MemoryModelRoles(primary=ModelConfig(
+            provider="p", model_name="m", api_key="k", base_url="http://localhost:1",
+            temperature=0.0), fallback=None),
+        sink=sink, notification_mode="on",
+    )
+
+    result = await runner._run_one(_job())
+
+    assert executor.calls == 1
+    assert result is executor._result
+    assert [event[0] for event in sink.events] == [MEMORY_HUMAN_UPDATED]
+    _, data, run_id = sink.events[0]
+    assert data["memory_ids"] == ["mem-1"]
+    assert run_id == "run-1"

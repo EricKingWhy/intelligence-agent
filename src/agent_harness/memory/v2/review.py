@@ -2,7 +2,8 @@
 
 移植自 NousResearch/hermes-agent ``agent/background_review.py``（commit
 b324b1f7ed52369ab4bd3b1a03378729120b0f01，2026-10-02，MIT，Copyright (c) 2025
-Nous Research）。六个常量逐字照搬，只有工具名按本仓替换（见下）。
+Nous Research）。六个常量中四块逐字照搬，`SKILL_REVIEW_PROMPT` /
+`COMBINED_REVIEW_PROMPT` 按本仓机制改写（工具名替换 + Protected skills 段删除，见下）。
 
 # 编排不在这里
 
