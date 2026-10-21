@@ -200,10 +200,19 @@ class MemoryV2Service:
         而不是"派生层有、权威层没有"的分叉。错误文案只带 store 的 message，
         不回显条目内容。
         """
-        if not response.get("success"):
-            raise MarkdownAuthorityError(
-                f"markdown {operation} failed: {response.get('error') or 'unknown error'}",
-            )
+        if response.get("success"):
+            return
+        message = str(response.get("error") or "unknown error")
+        entries = response.get("current_entries")
+        # `usage` 只由预算类失败携带（`_failure_with_entries` / `_batch_failure`）；
+        # 零命中之类的可自纠失败带 `current_entries` 但不带 `usage`，不能报成预算耗尽。
+        if response.get("usage") and entries:
+            # #1440 F-12：带上活条目列表的预算失败——当前用量与上限已在 store 文案里，
+            # 条目是模型就地合并的唯一依据（与 `memory_tool._result` 同形）。
+            # 条目只进模型可见的 message，不进事件流（不变量 #22）。
+            message += "\n\n当前条目：\n" + "\n".join(f"- {entry}" for entry in entries)
+            raise MarkdownBudgetExhausted(f"markdown {operation} failed: {message}")
+        raise MarkdownAuthorityError(f"markdown {operation} failed: {message}")
 
     async def _mirror_markdown(
         self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
@@ -561,14 +570,27 @@ class MemoryV2Service:
         texts = [draft.content, draft.payload.model_dump_json()]
         texts.extend(item.excerpt for item in draft.evidence)
         if find_secret(*texts) is not None:
-            raise PermissionError("memory content contains a credential or secret")
+            raise MemoryContentRejected("该内容匹配凭证或密钥规则，不能写入长期记忆。")
         for text in texts:
             if first_threat_message(text, scope="strict") is not None:
-                raise PermissionError("memory content contains a threat pattern")
+                raise MemoryContentRejected("该内容匹配注入或外泄模式，不能写入长期记忆。")
+
+
+class MemoryContentRejected(PermissionError):
+    """内容本身被拒（凭证/密钥/注入模式），与"身份无权"是两件事（#1440 F-12）。
+
+    继承 `PermissionError` 是为了不改变入口层的 403 语义（`_MEMORY_ERROR_STATUS`
+    直接索引类型）；垫片层先捕获本类、再捕获裸 `PermissionError`，真因才不会被
+    "当前身份无权"吞掉。
+    """
 
 
 class MarkdownAuthorityError(RuntimeError):
     """markdown 权威面拒绝了这次写入（成功与否是返回值，不是异常）。"""
+
+
+class MarkdownBudgetExhausted(MarkdownAuthorityError):
+    """权威面因**预算/条目合并**拒绝——永久条件，重试落在同一条上限上（#1440 F-12）。"""
 
 
 class StaleMemoryVersion(ValueError):

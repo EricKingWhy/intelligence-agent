@@ -40,6 +40,8 @@ from agent_harness.memory.v2.threat_patterns import (
 from agent_harness.memory.v2.threat_patterns import (
     scan_for_threats,
 )
+from agent_harness.session.context import current_session_var, run_context_var
+from agent_harness.session.event import MEMORY_HUMAN_UPDATED
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +427,36 @@ class MarkdownMemoryStore:
             return str(bak_path) + " (BACKUP FAILED — file unchanged on disk)"
         return str(bak_path)
 
+    def _notify_drift(self, target: str, backup: str, entries: Sequence[str]) -> None:
+        """#1353 §0 裁决 4 / #1440 F-07：漂移备份发生 → 用户侧通知。
+
+        载荷只带计数 / 指纹 / 备份指针，**不带正文**（不变量 #22：事件流不是第二份
+        记忆真相）。指纹算法与 `journey.memory_fingerprint` 逐字相同，但不能 import
+        它——journey 反向依赖本模块（环）。`entries` 是**被备份的那份磁盘内容**的解析
+        结果，不是本次写入后的条目。没有当前 Session（直调存储、无 run 上下文）就不发：
+        观察不能反过来要求调用方提供会话。通知失败只告警，绝不影响写入。
+        """
+        session = current_session_var.get()
+        if session is None:
+            return
+        try:
+            session.append(
+                MEMORY_HUMAN_UPDATED,
+                {
+                    "count": len(entries),
+                    "fingerprints": [
+                        hashlib.sha256(entry.strip().encode("utf-8")).hexdigest()[:12]
+                        for entry in entries
+                    ],
+                    "backup": backup,
+                    "target": target,
+                    "source": "markdown_drift",
+                },
+                run_id=run_context_var.get(),
+            )
+        except Exception as error:  # noqa: BLE001 — 通知是观察，不能破坏写入
+            logger.warning("漂移备份通知发送失败（%s）：%s", type(error).__name__, target)
+
     def _mutate(
         self, target: str, mutator: Callable[[list[str], int], Any], *, skip_drift: bool = False,
     ) -> dict[str, Any]:
@@ -436,8 +468,12 @@ class MarkdownMemoryStore:
 
         ``mutator`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
         返回任何 dict 时原样透传且**不落盘**（错误 dict，或只读闭包的 dry-run 结果）。
+        漂移备份已发生时，错误 dict 也合并 ``drift_backup``（#1440 F-07：失败路径不能
+        丢掉"备份在哪"这个事实，与成功路径同形）。
         """
         path = self.path_for(target)
+        bak: str | None = None
+        drift_entries: list[str] = []
         with self._guard, self._file_lock(path):
             raw, read_ok = self.read_raw_checked(path)
             if not read_ok:
@@ -445,17 +481,23 @@ class MarkdownMemoryStore:
             bak = None if skip_drift else self._detect_external_drift(target, raw)
             # 漂移时仍以磁盘为准：解析结果就是权威内容，写回只是规范化。
             self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
+            if bak:
+                drift_entries = list(self._entries_for(target))
             result = mutator(self._entries_for(target), self._char_limit(target))
             if isinstance(result, dict):
-                return result
-            self._set_entries(target, result[0])
-            self._ensure_directory()
-            self._write_file(path, result[0])
-            extra_fields = result[2] if len(result) > 2 else {}
-            response = self._success_response(target, result[1], **extra_fields)
-            if bak:
-                response["drift_backup"] = bak
-            return response
+                response = {**result, "drift_backup": bak} if bak else result
+            else:
+                self._set_entries(target, result[0])
+                self._ensure_directory()
+                self._write_file(path, result[0])
+                extra_fields = result[2] if len(result) > 2 else {}
+                response = self._success_response(target, result[1], **extra_fields)
+                if bak:
+                    response["drift_backup"] = bak
+        if bak:
+            # 锁外发通知：事件写盘（fsync）不该占着记忆文件的写锁。
+            self._notify_drift(target, bak, drift_entries)
+        return response
 
     def _failure_with_entries(self, target: str, message: str) -> dict[str, Any]:
         """携带活条目列表的 consolidation 失败，让模型就地合并。"""
@@ -516,6 +558,11 @@ class MarkdownMemoryStore:
         # add 会重写整个文件，所以要和其他写路径一样走漂移备份：手改后追加不是漂移
         # （`_detect_external_drift` 只在 round-trip 失败或单条超限时返回备份路径），
         # 但**无法 round-trip** 的手改会在 add 时被静默规范化——没有备份就等于吞掉。
+        # 这是对上游 `add(..., skip_drift=True)`（`memory_tool_store.py:294-296`）的
+        # **有意偏差**：#1353 §0 裁决 1（漂移语义反转：手改合法 → 备份 + 以文件为准）
+        # 的必然推论，与 F-08 同源；追认记录见 #1441「#1353 偏差清单追认」（与
+        # 「生命周期语义」F-04 同批留痕）。回退成上游不对称会重新制造
+        # 「add 时手改不备份」的洞。
         return self._mutate(target, _add)
 
     def _replace_sync(
