@@ -19,13 +19,12 @@ import {
   escAction,
   eventKey,
   nextSelectionIndex,
-  spaceReleaseCloses,
   toolKey,
 } from './inspectorPanel';
 
-describe('INSPECTOR_DEFAULT_W — 初始宽度（#197）', () => {
-  it('是 340：比下限高 20px，两个拖拽方向都留可见余量', () => {
-    expect(INSPECTOR_DEFAULT_W).toBe(340);
+describe('INSPECTOR_DEFAULT_W — 初始宽度（#1419 对齐效果图）', () => {
+  it('是 520：效果图 `--insp-w:520px`', () => {
+    expect(INSPECTOR_DEFAULT_W).toBe(520);
   });
 
   it('严格落在 [下限, 上限] 之内，且**不等于**下限（等于下限时向右拖永远无变化）', () => {
@@ -45,7 +44,7 @@ describe('clampInspectorWidth — 拖宽范围与中心列保护（AC6）', () =
     expect(clampInspectorWidth(400.6, 1440)).toBe(401);
   });
 
-  it('上限 480：拖过头也只到 480', () => {
+  it('上限 820：拖过头也只到 820（效果图手柄的 aria-valuemax）', () => {
     expect(clampInspectorWidth(900, 1440)).toBe(INSPECTOR_MAX_W);
   });
 
@@ -54,8 +53,8 @@ describe('clampInspectorWidth — 拖宽范围与中心列保护（AC6）', () =
   });
 
   it('中心列保护：可用宽度不够时，上限压到 available - CENTER_MIN_W', () => {
-    // 中心列 + 面板合计只有 700 → 面板最多 700-360 = 340（而不是 480）
-    expect(clampInspectorWidth(480, 700)).toBe(700 - CENTER_MIN_W);
+    // 中心列 + 面板合计只有 700 → 面板最多 700-360 = 340（而不是 820）
+    expect(clampInspectorWidth(820, 700)).toBe(700 - CENTER_MIN_W);
     expect(clampInspectorWidth(900, 700)).toBe(340);
   });
 
@@ -88,16 +87,9 @@ describe('nextSelectionIndex — 清单内 ↑/↓ 移动（AC1/AC2）', () => {
 });
 
 describe('Space 快按/按住（AC2：快按=保持打开，按住=松手关闭）', () => {
-  it('阈值本身不算「按住」（边界取"快按"，不因一次抖动就关）', () => {
-    expect(spaceReleaseCloses(PEEK_TAP_MS)).toBe(false);
-    expect(spaceReleaseCloses(PEEK_TAP_MS - 1)).toBe(false);
-  });
-
-  it('超过阈值才算按住 → 松手关闭', () => {
-    expect(spaceReleaseCloses(PEEK_TAP_MS + 1)).toBe(true);
-    expect(spaceReleaseCloses(1500)).toBe(true);
-  });
-
+  /* 判据本身（"阈值到点时键还按着吗"）由 `e2e/y-inspector-peek.spec.ts` 的 AC2
+   * Space 用例双向钉住：零延迟 press 保持打开、450ms 按住松手即关。这里只锁阈值
+   * 的量级——它是人类可感的"快按"时长，不是随手写的大数。 */
   it('阈值是一个人类可感的"快按"时长（150–400ms），不是随手写的大数', () => {
     expect(PEEK_TAP_MS).toBeGreaterThanOrEqual(150);
     expect(PEEK_TAP_MS).toBeLessThanOrEqual(400);

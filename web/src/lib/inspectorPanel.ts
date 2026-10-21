@@ -10,27 +10,40 @@
  *  transient — NOT persisted"）。
  */
 
-/** 面板宽度范围（PRD §3.7：320 → 480，不持久化）。 */
+/** 面板宽度范围（#1419：对齐融合版效果图 `--insp-w:520px` / 手柄
+ *  `aria-valuemin=360 aria-valuemax=820`）。下限仍是 320——窄面板降级路径
+ *  （icon-only、容器查询）就建立在它上面，效果图没有覆盖那条行为。 */
 export const INSPECTOR_MIN_W = 320;
-export const INSPECTOR_MAX_W = 480;
+export const INSPECTOR_MAX_W = 820;
 
 /**
- * 初始宽度（#197）：比下限高 20px，**不是**随手挑的中间值。
+ * 初始宽度（#1419）：效果图的 `--insp-w:520px`。
  *
  * 面板右停靠、拖宽手柄挂在它的**左缘**（StepDetail 的 `onResizeMove`）⇒ 向左拖变宽、
- * 向右拖变窄。默认值若等于下限，向右拖会被夹取**永远吃掉** ⇒ 用户第一次拖拽就得到
- * "这个手柄坏了"的结论，而真相是下限在起作用。340 让两个方向都有可见余量
- * （向右 20px 到下限、向左 140px 到上限）。
- *
- * 不持久化（不变量 #22）：刷新回到这个值。
+ * 向右拖变窄。520 让两个方向都有余量（向左 300px 到上限、向右 200px 到下限）；
+ * 上限 820 与下限 320 一样不持久化（不变量 #22）：刷新回到这个值。
  */
-export const INSPECTOR_DEFAULT_W = 340;
+export const INSPECTOR_DEFAULT_W = 520;
 
 /** 中心列最小可用宽度：拖宽不得把它压垮（AC6）。 */
 export const CENTER_MIN_W = 360;
 
-/** Space「快按」阈值（ms）：≤ 阈值 = 保持打开，> 阈值 = 松手关闭（Linear peek）。 */
+/**
+ * Space「快按」阈值（ms）：阈值到点时键还按着 = 按住（松手关闭），否则 = 快按
+ * （保持打开）。判定在 `StepDetail` 的 `spaceHoldTimer`——**不是**两个事件
+ * `timeStamp` 相减，那个差里混着组件自己的重渲染时间。
+ */
 export const PEEK_TAP_MS = 250;
+
+/**
+ * 键盘连按调整面板宽时，`available` 的复用窗口（ms）。
+ *
+ * 拖动路径在 pointerdown 时测一次；键盘没有"按下"这个锚点，只能按**连按序列**
+ * 近似：窗口内复用同一个 `available`，超过窗口或视口宽度变了才重测。理由见
+ * `StepDetail.onResizeKeyDown`——过渡期间栅格三轨各自插值，「中心列 + 面板」的
+ * 和值会漂 ±13px，逐次现读会让夹取上限随按键时机抖动。
+ */
+export const KEY_RESIZE_BURST_MS = 400;
 
 /**
  * 把目标宽度夹进 `[INSPECTOR_MIN_W, INSPECTOR_MAX_W]`，并保证中心列仍留
@@ -43,11 +56,11 @@ export const PEEK_TAP_MS = 250;
  * 可用空间小到连下限都保不住时**下限优先**：面板本身必须可用；那种宽度下
  * 外层的窄屏折叠（<1200px）已经在管这件事，把一个 200px 的面板交出去只会更难用。
  *
- * ⚠ **这个上限在当前布局下恒等于 `INSPECTOR_MAX_W`**：三栏栅格只在 ≥1201px 生效，
- * 那里 `available = viewport − 240 ≥ 961`，`available − CENTER_MIN_W > 480`。
- * 所以中心列保护是一道**防御性**的夹取（换 rail 宽度、加第四栏、或提高
- * `INSPECTOR_MAX_W` 时它就会生效），目前**只由单元测试**覆盖——e2e 到不了那个宽度
- * （<1200px 的折叠分支把面板列写死成 280px）。改布局的人请同时看这条。
+ * ⚠ **#1419 起中心列保护真的会生效**：上限提到 820 后，`available − CENTER_MIN_W`
+ * 在三栏栅格（≥1201px）里不再恒大于上限——1920 视口下 `available = 1680`、可用
+ * 上限 820；1440 视口下 `available = 1200`、上限 820；1201 视口下只有 601。
+ * 也就是说宽视口能拖到效果图的 820，窄视口会被中心列保护压在 `available − 360`。
+ * e2e 仍到不了最宽（<1200px 的折叠分支把面板列写死成 280px），边界由单元测试覆盖。
  */
 export function clampInspectorWidth(desired: number, available: number): number {
   const ceiling = Math.min(INSPECTOR_MAX_W, available - CENTER_MIN_W);
@@ -64,11 +77,6 @@ export function nextSelectionIndex(current: number, delta: number, count: number
   if (count <= 0) return -1;
   if (current < 0) return delta > 0 ? 0 : count - 1;
   return Math.max(0, Math.min(count - 1, current + delta));
-}
-
-/** Space 松手是否应当关闭 peek：只有「按住」才关（快按 = 保持打开）。 */
-export function spaceReleaseCloses(heldMs: number): boolean {
-  return heldMs > PEEK_TAP_MS;
 }
 
 /** Esc 在当前状态下该做哪一件事（层级：整页 → 预览 → 收起）。 */

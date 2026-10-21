@@ -6,7 +6,7 @@
  *   - 未配置（本地开发）：无 token 照常可用。
  *
  * 前端策略：token 是开发者设置项（localStorage `ahi.apiToken`），api.ts 统一
- * 注入；401 通过 onUnauthorized 广播给 UI（App 横幅引导 + TopBar 钥匙图标提示）。
+ * 注入；401 通过 onUnauthorized 广播给 UI（App 横幅引导 + 「更多工具」入口提示点）。
  * 不解析 token claims——前端不复制后端的验签职责，零伪造。
  */
 

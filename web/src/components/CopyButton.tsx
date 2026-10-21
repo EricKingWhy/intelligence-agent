@@ -50,7 +50,15 @@ export const CopyButton = memo(function CopyButton({ text, label = '复制' }: P
       aria-label={copied ? '已复制' : label}
       title={copied ? '已复制' : label}
     >
-      {copied ? <Check size={14} /> : <Copy size={14} />}
+      {copied ? (
+        <>
+          <Check size={14} />
+          {/* #1372 改动 7：可见的「已复制」反馈——只换图标时用户得盯着按钮才知道成功。 */}
+          <span className="copy-btn-label">已复制</span>
+        </>
+      ) : (
+        <Copy size={14} />
+      )}
     </button>
   );
 });

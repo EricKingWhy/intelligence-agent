@@ -31,7 +31,7 @@ function StatBadge({ file }: { file: FileChange }) {
     return (
       <span
         className="changes-stat changes-stat-limited"
-        title={`统计不可得：${file.limited === 'archived' ? '内容已归档为 artifact（超过 2000 字符）' : '内容过长已被截断（>50KB）'}`}
+        title={`统计不可得：${file.limited === 'archived' ? '内容已归档为产出文件（超过 2000 字符）' : '内容过长已被截断（>50KB）'}`}
       >
         —
       </span>

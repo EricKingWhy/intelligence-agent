@@ -34,7 +34,7 @@ function pausedFrames(): FrameSpec[] {
         budget_version: 1,
         consumed: { agent_turns: 2, total_tokens: 1234 },
         limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-        resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+        resume_requirements: ['抬高字数上限后继续这次任务'],
       },
     },
   ];
@@ -82,15 +82,15 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   // ① 纯 UI 设置预算三维（#536 单入口 popover——设计稿 §2.3，替换 #426 三平铺）。
   //    面板内三维控件的 aria-label 沿用 #426 旧名（turns / tokens 自定义 / datetime）。
   await page.locator('.composer-budget-trigger[aria-label="预算"]').click();
-  const turnsInput = page.getByLabel('预算上限（Agent turns，留空为默认）');
+  const turnsInput = page.getByLabel('轮数上限（留空用默认值）');
   const resetButton = page.getByRole('button', { name: '恢复默认' });
   await expect(resetButton).not.toBeVisible();
   await turnsInput.fill('3');
   // tokens 走「自定义」档：点开档位 → 点自定义行（onChange 返回 false，面板不关，
   // 数值输入框出现在 footer）→ 填自定义值。
-  await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
+  await page.locator('.composer-control[aria-label="字数档位"]').click();
   await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
-  await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
+  await page.getByLabel('字数上限（留空用默认值）').fill('1234');
   // deadline 走高级路径（datetime-local 直填，#536 §2.2 保留项）。
   const deadlineDetails = page.locator('.budget-picker-advanced');
   const deadlineInput = page.getByLabel('预算截止时间（留空为不设）');
@@ -102,16 +102,16 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   await expect(resetButton).toBeVisible();
   await resetButton.click();
   await expect(turnsInput).toHaveValue('');
-  await expect(page.getByLabel('预算上限（总 tokens，留空为默认）')).not.toBeVisible();
+  await expect(page.getByLabel('字数上限（留空用默认值）')).not.toBeVisible();
   await expect(deadlineInput).toHaveValue('');
   await expect(resetButton).not.toBeVisible();
-  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('默认');
-  await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（后端默认，全不设限）');
+  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('预算：默认');
+  await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（都不设限）');
 
   await turnsInput.fill('3');
-  await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
+  await page.locator('.composer-control[aria-label="字数档位"]').click();
   await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
-  await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
+  await page.getByLabel('字数上限（留空用默认值）').fill('1234');
   await deadlineInput.fill(deadlineLocal);
   await submitTask(page, '跑一个长任务');
 
@@ -134,12 +134,12 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   //    重连退避（500ms×2³）走完需要几秒 ⇒ 放宽这一条 expect 的超时。
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
-  await expect(panel).toContainText('已在预算到顶处暂停');
-  await expect(panel).toContainText('抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复');
+  await expect(panel).toContainText('预算或安全上限已到，任务暂停了');
+  await expect(panel).toContainText('抬高字数上限后继续这次任务');
 
   // ④ UI 抬高卡住的那一维 → 恢复同一 run
-  await panel.getByLabel(/恢复用的绝对 ceiling/).fill('9999');
-  await panel.getByRole('button', { name: '恢复同一 run' }).click();
+  await panel.getByLabel(/恢复用的上限/).fill('9999');
+  await panel.getByRole('button', { name: '继续这次任务' }).click();
 
   // ⑤ 面板收起（run/resumed 清 run_paused）之后，恢复请求体必已发出：同 run CAS
   //    + budget_increase + 抬高的绝对值（字段名由 resumeTarget 从触发维度导出）。

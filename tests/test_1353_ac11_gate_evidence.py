@@ -24,7 +24,8 @@ RECEIPTS = REPO_ROOT / "docs" / "gate"
 WEB = REPO_ROOT / "web"
 
 #: 协议 §14.10 / `docs/agents/verification.md` §2 的机械车道全集（顺序即 `build_lanes` 的构造顺序）。
-EXPECTED_LANES = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
+#: #1364 加 stylelint 为第 5 条机械车道（7 条）。
+EXPECTED_LANES = ("diff-check", "ruff", "oxlint", "tsc", "stylelint", "guards", "coverage")
 
 _REQUIRED_RECEIPT_KEYS = ("sha", "tree", "lanes", "wall_seconds", "tool_versions")
 
@@ -53,11 +54,11 @@ def _receipts() -> list[Path]:
     return sorted(RECEIPTS.glob("*.json"))
 
 
-def test_gate0_declares_exactly_the_six_mechanical_lanes():
+def test_gate0_declares_exactly_the_seven_mechanical_lanes():
     gate0 = _load_gate0()
 
     declared = tuple(gate0.GATE0_LANE_IDS)
-    assert len(declared) == 6, f"Gate-0 应为六条机械车道，实际 {declared!r}"
+    assert len(declared) == 7, f"Gate-0 应为七条机械车道，实际 {declared!r}"
     assert set(declared) == set(EXPECTED_LANES), f"车道集合漂移：{declared!r}"
 
     built = gate0.build_lanes("")

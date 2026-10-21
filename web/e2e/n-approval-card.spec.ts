@@ -320,15 +320,19 @@ test('POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错�
   await expect(card.locator('.approval-approve')).toBeEnabled();
   await expect(card.locator('.approval-deny')).toBeEnabled();
   expect(approveCalls).toHaveLength(1);
+  // #1367 AC3：错误条 = 图标 + 条内「重试」（重试不再散落在条外的决策按钮里）。
+  await expect(card.locator('.approval-error .approval-error-icon')).toBeVisible();
+  await expect(card.locator('.approval-error .approval-error-retry')).toBeVisible();
   // UI-01：仍 pending → composer 仍锁定
   await expect(page.locator('#composer-input')).toBeDisabled();
   await expect(page.locator('.composer-locked-hint')).toBeVisible();
 
-  // 重试：第二次点批准 → 仍然 500 → 仍然 pending
-  await card.locator('.approval-approve').click();
+  // 重试：条内「重试」原样重发刚才那次决策 → 仍然 500 → 仍然 pending
+  await card.locator('.approval-error-retry').click();
   await expect(card.locator('.approval-title')).toHaveText('需要审批');
   await expect(card.locator('.approval-error')).toBeVisible();
   expect(approveCalls).toHaveLength(2);
+  expect(approveCalls[1]).toEqual(approveCalls[0]);
 });
 
 /** POST /approve 返回 409 → 幂等成功，翻「决策已提交」。

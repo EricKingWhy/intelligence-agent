@@ -168,7 +168,7 @@ test('t6b 外部触发：错误态——两次轮询之间跑完且失败的外�
   await expect(page.locator('.timeline-row')).toHaveCount(rowsBefore + 3, { timeout: 15_000 });
   await expect(page.locator('.msg.msg-user').last()).toContainText('外部启动然后失败');
   // 失败归因在 Inspector 的 Overview tab（ChatTab 的 RUN 摘要区）
-  await page.getByRole('tab', { name: 'Overview' }).click();
+  await page.getByRole('tab', { name: '概览' }).click();
   await expect(page.locator('.run-failure-val')).toContainText('provider_5xx', { timeout: 15_000 });
   await expect.poll(() => wsSubscribes.length).toBe(0);
 });

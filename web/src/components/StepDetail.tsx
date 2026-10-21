@@ -12,25 +12,36 @@
  * 顶部返回按钮回 Timeline（无弹窗——"上下文 Inspector"）。
  */
 
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
-  Hash, Layers, ListTree, Maximize2, Minimize2, Package, Pin, ShieldCheck,
-  TerminalSquare, X,
+  AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, Clock, Cpu,
+  Database, FileCheck2, FileDiff, Hash, Layers, ListTree, Maximize2, Minimize2,
+  Package, Pin, ShieldCheck, TerminalSquare, X, Zap,
 } from 'lucide-react';
+import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
-import { formatBytes, formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatBytes, formatCoarseDuration, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
-import { allTools, summarizeEvent } from '../lib/projection';
+import { timelineHeadline } from '../lib/timelineHeadline';
+import { lineDiff, type LineDiffResult } from '../lib/lineDiff';
+import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
+import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
 import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
 import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
-  clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
+  KEY_RESIZE_BURST_MS, PEEK_TAP_MS, clampInspectorWidth, escAction, eventKey, nextSelectionIndex, toolKey,
 } from '../lib/inspectorPanel';
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
+import {
+  barGeometry, deriveEventTimings, deriveTimelineEventKeys, eventCategory, eventMatchesFilter, filterCounts,
+  formatAxisLabel, formatClock, seqGapMarkers, timelineAxis,
+  type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
+} from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
+import { useTickingNow } from '../hooks/useTickingNow';
+import { ApprovalCard } from './ApprovalCard';
 import { ArtifactViewer } from './ArtifactViewer';
 import { ConstraintInheritance } from './ConstraintInheritance';
 import { ConstraintsTab } from './ConstraintsTab';
@@ -38,6 +49,7 @@ import { CopyButton } from './CopyButton';
 import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
 import { ToolOutputStream } from './ToolOutputStream';
+import { Tip } from './Tooltip';
 
 /** Inspector focus: Run-level overview, a drilled-in event, or a child session
  *  (Phase 13 委派钻取，v2 PRD §10.5 "delegation start ↔ child run" 配对）。 */
@@ -62,13 +74,24 @@ const TAB_ICONS: Record<Tab, typeof ListTree> = {
 };
 
 const TABS: readonly { id: Tab; label: string }[] = [
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'chat', label: 'Overview' },
-  { id: 'changes', label: 'Changes' },
-  { id: 'terminal', label: 'Terminal' },
-  { id: 'artifacts', label: 'Artifacts' },
-  { id: 'constraints', label: 'Constraints' },
+  { id: 'timeline', label: '时间线' },
+  { id: 'chat', label: '概览' },
+  { id: 'changes', label: '变更' },
+  { id: 'terminal', label: '终端' },
+  { id: 'artifacts', label: '产出文件' },
+  { id: 'constraints', label: '我的要求' },
 ];
+
+/** #1372 改动 8：统计行每个图标的指标口径（tooltip 用）。计数是**本会话**口径，
+ *  与 tab 上的数字同源（`tabCounts`），这里只解释"这个数在数什么"。 */
+const TAB_TIPS: Record<Tab, string> = {
+  timeline: '时间线：本会话全部事件，按 run 分组',
+  chat: '概览：run 状态、轮次、耗时、tokens 与工具计数',
+  changes: '改动：产生 diff 的工具调用（本会话）',
+  terminal: '输出：命令类工具调用（bash 等）',
+  artifacts: '产物：本会话创建的 artifact 引用',
+  constraints: '约束：本会话生效的长期规则',
+};
 
 // C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
 // 与行边的 4px 间隙、上方放置需要的 16px 顶部裕量）。改一个地方即可。
@@ -81,6 +104,15 @@ const TIP_TOP_MARGIN = 16;
  *  `useMemo` 的依赖比较是**引用比较**，每次渲染新建的 `[]` 会让记忆化永久失效。 */
 const EMPTY_TOOLS: ToolCall[] = [];
 const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
+/** 稳定空集合 / 空表——memo 与依赖比较用（每次新建 `new Set()` 会永久失效）。 */
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
+const EMPTY_TIMINGS: ReadonlyMap<string, EventTiming> = new Map();
+const EMPTY_EVENT_KEYS: ReadonlyMap<AgentEvent, string> = new Map();
+
+/** #1419 P3-9：同时展开的卡片上限。每张展开卡都挂载完整的 `EventInspector` /
+ *  JsonTree，连续展开会让 Inspector 的 DOM/内存无界增长；3 张足够对照上下文，
+ *  超出时按 Set 插入顺序淘汰最早展开的一张（确定、可解释）。 */
+const MAX_EXPANDED_CARDS = 3;
 
 /** #1106：工具行的 run 归属——projection 存的 `raw_call` 是 tool/call 事件的
  *  **verbatim 整信封拷贝**（含 run_id），归属以它对账（事件真值，与 projection
@@ -104,6 +136,11 @@ interface Props {
   /** #183 面板视图状态（钉住 / 整页 / 宽度 / peek 开合）。状态归 App——面板宽度与整页
    *  要改的是 `.app-regions` 的栅格，StepDetail 只是消费方与触发方。 */
   panel: InspectorPanelState;
+  /** #1419 P2-3：面板当前是否展开（App 的 `inspectorOpen`）。展开态是视图状态，
+   *  面板一旦关闭（按钮 / Esc / 会话切换 / 断点 / rail 菜单）就必须清空；这些
+   *  关闭路径有一半绕过 `onPanelAction`，所以用这个**原语**统一收敛。缺省 true
+   *  （独立渲染/测试不传时保持旧行为）。 */
+  open?: boolean;
   /** #183 面板动作。**显式动作而不是 toggle**：Esc 要的是"退出整页"而非"翻转整页"，
    *  用一个 `toggle` 表达两件事会让"连按两次 = 回到原点"这类事故无法从类型上排除。 */
   onPanelAction: (action: InspectorPanelAction) => void;
@@ -111,6 +148,16 @@ interface Props {
    *  让 Inspector 头标与顶栏对同一会话说同一个态——#312 的先例：一个独立态不许在
    *  一侧被粗化。**必须是稳定的原语**（memo 有效性依赖 prop 身份，见上方操作约束）。 */
   awaitingDecision?: boolean;
+  /* #1419 O-3：总览「需要你来决定」段内嵌**真实**审批卡（`ApprovalCard`），三个按钮
+   * 走既有 `postApproval` 通路，不新造第二条提交路径。这三项与中心列审批卡同源：
+   * `goneApprovalIds` 是 App 记下的「后端已回 404」集合，两个回调分别上报失效与
+   * 决策成功（后者触发一次对账 resync）。全部由 App 的 useState/useCallback 持有，
+   * 身份稳定，`memo` 有效性不受影响。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
+  /** 与 `Conversation` 的同名回调同签名（`useSession.resyncAfterDecision`）：
+   *  决策 POST 成功后按 sessionId 对账一次，保证决策后事件有一条消费路径。 */
+  onApprovalDecided?: (sessionId: string) => void;
 }
 
 /** #183 面板视图状态（全部**不持久化**，不变量 #22）。 */
@@ -146,7 +193,7 @@ export type InspectorPanelAction =
  * 逐项稳定性核对表、否决 `areEqual` 的理由，见
  * `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction, awaitingDecision = false }: Props) {
+export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, open = true, onPanelAction, awaitingDecision = false, goneApprovalIds, onApprovalGone, onApprovalDecided }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——`useMemo` 不许出现在
    * 下方任何 early-return 之后（Rules of Hooks：两次渲染的 hook 数必须一致）。
@@ -157,12 +204,44 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))], // eslint-disable-line react-hooks/exhaustive-deps
     [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
   );
+  /* #1419：头部标题取**第一条用户消息**（真实数据）。会话模型没有独立的
+   * run_title 字段——不编一个，也不把最后一条消息当标题。 */
+  const runTitle = useMemo(() => {
+    const raw = conversation?.turns[0]?.user_message ?? '';
+    const firstLine = raw.split('\n').find((line) => line.trim())?.trim() ?? '';
+    return firstLine.length > 72 ? `${firstLine.slice(0, 72)}…` : firstLine;
+  }, [conversation?.turns]);
   /* #183：面板根节点（拖宽要量出"中心列 + 面板"的实际可用宽度）与键盘计时/拖拽状态。
    * 同样是 hook——必须在 early-return 之前。 */
   const panelRef = useRef<HTMLElement>(null);
-  const spaceDownAt = useRef<number | null>(null);
+  /* #1419 AC2「快按 = 保持打开，按住 = 松手关闭」的判据：**阈值到点时键还按着吗**，
+   * 不是「keydown 与 keyup 两个 `timeStamp` 之差」。
+   *
+   * 后者会把**我们自己**的渲染时间算进"按住时长"：keydown 里打开 peek 触发的重渲染
+   * （520px 面板 + 卡片流）在并行跑 e2e / 主线程忙时能吃掉几百毫秒，于是一次零延迟的
+   * `keyboard.press('Space')` 被量成 400ms+ 的长按，peek 刚开就被松手关掉（实测两
+   * worker 并行 6 次复现 5 次）。计时器只在主线程**空闲**时才会走到点——那恰好就是
+   * "用户真的还按着"的意思；排队中的渲染与事件不参与计量。 */
+  const spaceHoldTimer = useRef<number | null>(null);
+  const spaceHeldLong = useRef(false);
   const dragRef = useRef<{ startX: number; startW: number; available: number } | null>(null);
+  /** 键盘连按序列的 `available` 缓存（见 `onResizeKeyDown`）。 */
+  const keyResizeRef = useRef<{ available: number; at: number; viewport: number } | null>(null);
   const [resizing, setResizing] = useState(false);
+  /* #1419：筛选与展开是**面板级**视图状态（不是 TimelineTab 内部状态）——
+   * Enter/Esc 在面板根捕获，面板关闭要清空；会话切换按 sessionId 分槽
+   * （`Map<sessionId, Set<timelineKey>>`），A 展开后切到 B 再回来不会覆盖 A。 */
+  const [timelineFilter, setTimelineFilter] = useState<TimelineFilter>('all');
+  /* P2-3：展开集连同「写入时的面板开合」一起存。关闭路径有一半绕过
+   * `onPanelAction`（会话切换/断点/rail 菜单直接 `setInspectorOpen(false)`），
+   * 所以以 `open` 这个**原语**为准：开合一变，上一轮的集合整体作废。
+   * 这是 React 的「渲染期调整 state」：`open` 是 prop，派生状态与它不一致时
+   * 当场重置（比 effect 少一轮提交，也不会让"关闭期间"的旧集合在重开后复活）。 */
+  const [expandedStore, setExpandedStore] = useState<{
+    open: boolean;
+    bySession: ReadonlyMap<string, ReadonlySet<string>>;
+  }>(() => ({ open, bySession: new Map() }));
+  if (expandedStore.open !== open) setExpandedStore({ open, bySession: new Map() });
 
   /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
    *
@@ -175,6 +254,22 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   // 单一走法（#190）：与中心列「输出」面共用 projection.allTools——不在本文件内再造一份。
   const tools = useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS),
     [conversation?.turns]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* #1419：Timeline 卡片流的派生表只算一次，列表/筛选/键盘导航共用。 */
+  const timelineTimings = useMemo(
+    () => (conversation ? deriveEventTimings(conversation.events, tools) : EMPTY_TIMINGS),
+    [conversation?.eventsVersion, tools], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  /* #1419 P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号）。timing 仍按
+   * `eventKey` 存（同一 eventKey 的事件共享同一份 timing），选中/展开/DOM id 用
+   * 这张表的**唯一键**。 */
+  const timelineKeys = useMemo(
+    () => (conversation ? deriveTimelineEventKeys(conversation.events) : EMPTY_EVENT_KEYS),
+    [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const timelineKeyOf = useCallback(
+    (event: AgentEvent) => timelineKeys.get(event) ?? eventKey(event),
+    [timelineKeys],
+  );
   const pulse = useMemo(() => deriveRunPulse(conversation, streaming, awaitingDecision),
     [ // eslint-disable-line react-hooks/exhaustive-deps
       conversation?.run_interrupted, conversation?.run_status, conversation?.run_cancelled,
@@ -198,6 +293,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   const reasoningEffort = useMemo(
     () => (conversation ? deriveReasoningEffort(conversation.events, focusedRunId) : null),
     [conversation?.eventsVersion, focusedRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* #1419：副行模型徽标——provider 回显优先，其次请求侧（两者都在时回显胜出，
+   * 请求值进 title）。都不在 ⇒ 不渲染，不伪造模型名。 */
+  const headerModel = conversation?.model ?? conversation?.requested_model ?? null;
+  /* 效果图 `.live-dot`：只在真的在跑时呼吸（终态会话挂一个常亮绿点会被读成"还在跑"）。 */
+  const isLive = streaming && (pulse.state === 'thinking' || pulse.state === 'tool');
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
    * filter 逐字一致——收敛成三张表后 tab 计数与列表内容同源，也顺手消掉了每次提交三次
@@ -235,9 +335,12 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
          *     **全部** compiler 类规则一起跳过（连无关的真告警一起吞），那是放宽校验；
          *  2. 指令必须落在**依赖数组那一行**，写在回调行上是**装饰**（不生效）。 */
         const events = conversation?.events;
+        if (!events) return EMPTY_TARGETS;
+        /* #1419：键盘移动域与筛选后的可视列表同源——↑/↓ 不会把选中态送到
+         * 当前筛选看不到的事件上（否则 Enter 会展开一个不可见卡片）。 */
         return events
-          ? events.map((e) => ({ key: eventKey(e), focus: () => onFocusEvent(e) }))
-          : EMPTY_TARGETS;
+          .filter((e) => eventMatchesFilter(e, timelineFilter, timelineTimings.get(eventKey(e))))
+          .map((e) => ({ key: timelineKeyOf(e), focus: () => onFocusEvent(e) }));
       }
       case 'chat':
         return tools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
@@ -248,7 +351,51 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     }
   }, [ // eslint-disable-line react-hooks/exhaustive-deps
     tab, conversation?.eventsVersion, tools, commandTools, onFocusEvent, onFocusTool,
+    timelineFilter, timelineTimings, timelineKeyOf,
   ]);
+
+  /* #1419：展开键 = Timeline 行身份（`eventKey`，seq-less 同键事件追加序号），
+   * 状态按 sessionId 分槽——切会话/钻取子会话时旧会话的展开不会串台；面板关闭
+   * 后重开必须没有残留（判据是 `open`，见 `expandedStore` 的注释）。 */
+  const toggleExpanded = useCallback((key: string) => {
+    const sid = conversation?.session_id;
+    if (!sid) return;
+    setExpandedStore((prev) => {
+      const next = new Map(prev.bySession);
+      const current = new Set(next.get(sid) ?? EMPTY_KEYS);
+      if (current.has(key)) current.delete(key);
+      else {
+        current.add(key);
+        /* P3-9：超出上限时淘汰最早展开的一张（Set 保持插入顺序）。 */
+        while (current.size > MAX_EXPANDED_CARDS) {
+          const oldest = current.values().next().value;
+          if (oldest === undefined) break;
+          current.delete(oldest);
+        }
+      }
+      if (current.size === 0) next.delete(sid);
+      else next.set(sid, current);
+      return { open, bySession: next };
+    });
+  }, [conversation?.session_id, open]);
+  const clearExpanded = useCallback(() => {
+    const sid = conversation?.session_id;
+    if (!sid) return;
+    setExpandedStore((prev) => {
+      if (!prev.bySession.has(sid)) return prev;
+      const next = new Map(prev.bySession);
+      next.delete(sid);
+      return { open, bySession: next };
+    });
+  }, [conversation?.session_id, open]);
+  /* 点击卡片 = 选中 + 关掉 App 的自动 peek + 跳中心列 + 就地展开。顺序不能反：
+   * `onFocusEvent` 会同步开 peek，随后 `close-peek` 用函数式更新把它关掉（同批提交，
+   * 不闪）。 */
+  const onSelectTimelineEvent = useCallback((event: AgentEvent) => {
+    onFocusEvent(event);
+    onPanelAction({ type: 'close-peek' });
+    onJumpToStream?.(event);
+  }, [onFocusEvent, onPanelAction, onJumpToStream]);
 
   if (!conversation) {
     return (
@@ -267,10 +414,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     return (
       <aside className="step-detail" data-panel="inspector">
         <div className="detail-header">
-          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话 Run 视图">
-            <ArrowLeft size={14} /> Run
+          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话的运行详情">
+            <ArrowLeft size={14} /> 返回
           </button>
-          <span className="panel-label">子会话 · {focus.target || '?'}</span>
+          <span className="panel-label">子会话 · {focus.target || '—'}</span>
           <span className="detail-run-id mono num" title={`child session ${focus.childSessionId}`}>
             {focus.childSessionId.slice(0, 8)}
           </span>
@@ -285,8 +432,17 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   // #186：归档 diff 的「就地展开」要按会话读 artifact 内容——归属只能由 session 决定
   // （artifact_id 是内容哈希，跨会话可重名），所以从投影的会话 id 取，不另存一份。
   const sessionId = conversation.session_id;
+  /* 面板开合变了 ⇒ `expandedStore` 在渲染期已整体重置（见其注释），这里只读。 */
+  const expandedBySession = expandedStore.bySession;
+  const expandedKeys = expandedBySession.get(sessionId) ?? EMPTY_KEYS;
+  /** 面板关闭是唯一会丢掉"正在看的上下文"的动作：先清展开，再派发关闭。
+   *  App 侧绕过本入口的关闭（会话切换/断点/rail 菜单）由 `open` 派生重置兜底。 */
+  const dispatchPanelAction = (action: Parameters<typeof onPanelAction>[0]) => {
+    if (action.type === 'close') clearExpanded();
+    onPanelAction(action);
+  };
   const selectedKey =
-    focus.kind === 'event' ? eventKey(focus.event) : focus.kind === 'tool' ? toolKey(focus.tool) : null;
+    focus.kind === 'event' ? timelineKeyOf(focus.event) : focus.kind === 'tool' ? toolKey(focus.tool) : null;
   const selectedIndex = selectedKey === null ? -1 : listTargets.findIndex((t) => t.key === selectedKey);
   const hasSelection = focus.kind === 'event' || focus.kind === 'tool';
 
@@ -294,17 +450,23 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     if (listTargets.length === 0) return;
     const next = nextSelectionIndex(selectedIndex, delta, listTargets.length);
     if (next < 0 || next === selectedIndex) return;
-    /* 只移动**选中项**，不搬 DOM 焦点：焦点搬家的收益（读屏"当前项"与视觉一致）
-       由行上的 `aria-current` 承担，而代价是一个新的失败模式——选中项滚出 Timeline
-       的渲染窗口时那一行还不存在，`focus()` 会静默打空、焦点留在旧行上。行内的
-       滚动与窗口展开归 Timeline 自己（它知道窗口边界）。 */
+    /* 选中项与 DOM 焦点一起移动（读屏"当前项"与视觉一致，Enter 也要求焦点在行上）。
+       代价是一个已知的失败模式：`listTargets` 覆盖**筛选后**的全部事件，而 DOM 只有
+       渲染窗口内的行——选中项落到窗口外时 `focus()` 会静默打空，焦点留在旧行上。
+       这不是数据错误：`selectedKey` 已经变了，Timeline 的 `effectiveWindow` 会按它
+       扩窗、`scrollIntoView` 把行带进视野；下一次 ↑/↓ 时 `focus()` 才命中。 */
     listTargets[next].focus();
+    /* #1419：Timeline 的 ↑/↓ 是"选卡片"，不是"开预览"——App 的 onFocusEvent 会顺手
+     * 打开 peek，这里立即关掉，保持与点击卡片同一套语义。 */
+    if (tab === 'timeline') onPanelAction({ type: 'close-peek' });
   };
 
   /** Space 的生效范围：清单与面板 chrome。详情面板内部有自己的按钮（复制/标签条），
-   *  表单域与详情内部一律不抢——否则"在详情里按空格切换标签"会变成开合预览。 */
+   *  表单域与详情内部一律不抢——否则"在详情里按空格切换标签"会变成开合预览。
+   *  P2-2：按钮/链接的 Space 是**原生激活**（chips、手风琴头、钻取 tabs、CopyButton），
+   *  必须与 Enter 分支同一张排除表；只有 `.timeline-row`（卡片本体）保留 Space=peek。 */
   const spaceExcluded = (target: HTMLElement) =>
-    Boolean(target.closest('input, textarea, select, [contenteditable="true"], .detail-peek'));
+    Boolean(target.closest('input, textarea, select, [contenteditable="true"], .detail-peek, button:not(.timeline-row), a'));
 
   /** #183 面板键位（AC2/AC5/AC7）。挂在 <aside> 上而**不是 window**：
    *  ① 只有焦点在面板内才生效——面板外的 Esc 仍归全局"中断流式"（既有行为）；
@@ -315,10 +477,30 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     if (target.closest('[role="dialog"]')) return; // 弹层优先（同 App 的既有口径）
     if (e.key === 'Escape') {
       e.stopPropagation();
+      /* #1419 分层 Esc：先收起展开卡片（哪怕同时有 peek/全屏），再走既有层级。
+       * 这样"Esc 一下退一层"的直觉不会因为新增展开态而跳级。 */
+      if (tab === 'timeline' && expandedKeys.size > 0) {
+        clearExpanded();
+        return;
+      }
       const action = escAction({ expanded: panel.expanded, peekOpen: panel.peekOpen && hasSelection });
-      if (action === 'exit-fullpage') onPanelAction({ type: 'expand', value: false });
+      if (action === 'exit-fullpage') dispatchPanelAction({ type: 'expand', value: false });
       else if (action === 'close-peek') onPanelAction({ type: 'close-peek' });
-      else onPanelAction({ type: 'close' });
+      else dispatchPanelAction({ type: 'close' });
+      return;
+    }
+    if (e.key === 'Enter') {
+      /* #1419：Enter 开合**选中卡片**。只在 Timeline 生效；详情展开区里的按钮、
+       * 表单域、peek/弹层有自己的 Enter 语义，一律不抢。 */
+      if (tab !== 'timeline' || focus.kind !== 'event') return;
+      if (target.closest('input, textarea, select, [contenteditable="true"], .detail-peek, [role="dialog"]')) return;
+      if (target.closest('button:not(.timeline-row), a')) return;
+      if (selectedKey === null) return;
+      /* P3-10：选中卡被当前筛选隐藏时（listTargets 只含筛选结果），Enter 不能把
+       * 一个不可见的 key 塞进展开集——否则清除筛选后会"凭空"出现一张展开卡。 */
+      if (!listTargets.some((t) => t.key === selectedKey)) return;
+      e.preventDefault();
+      toggleExpanded(selectedKey);
       return;
     }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -331,20 +513,29 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
       if (spaceExcluded(target)) return;
       e.preventDefault(); // 不让浏览器把它当"滚动/激活当前按钮"
       if (e.repeat) return; // 长按的重复事件不重置计时
-      spaceDownAt.current = performance.now();
+      if (spaceHoldTimer.current === null) {
+        spaceHeldLong.current = false;
+        spaceHoldTimer.current = window.setTimeout(() => {
+          spaceHeldLong.current = true;
+          spaceHoldTimer.current = null;
+        }, PEEK_TAP_MS);
+      }
       // 已有选中项但预览关着 → Space = 预览（Linear：Space 开 peek）。
       if (hasSelection && !panel.peekOpen) onPanelAction({ type: 'open-peek' });
     }
   };
 
-  /** AC2：快按 = 保持打开，按住 = 松手关闭。判定在 lib/inspectorPanel（有测试钉住）。 */
+  /** AC2：快按 = 保持打开，按住 = 松手关闭。判据见 `spaceHoldTimer` 的注释。 */
   const onPanelKeyUp = (e: ReactKeyboardEvent<HTMLElement>) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (spaceExcluded(e.target as HTMLElement)) return;
-    const startedAt = spaceDownAt.current;
-    spaceDownAt.current = null;
-    if (startedAt === null) return;
-    if (spaceReleaseCloses(performance.now() - startedAt)) onPanelAction({ type: 'close-peek' });
+    if (spaceHoldTimer.current !== null) {
+      window.clearTimeout(spaceHoldTimer.current);
+      spaceHoldTimer.current = null;
+    }
+    const held = spaceHeldLong.current;
+    spaceHeldLong.current = false;
+    if (held) onPanelAction({ type: 'close-peek' });
   };
 
   /** AC6 拖宽：`available` 用**实测**的「中心列 + 面板」宽度（不含 rail——窄屏 rail
@@ -385,8 +576,21 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     e.stopPropagation(); // 与清单 ↑/↓ 分开：这里左右调宽度
+    /* `available` = 中心列 + 面板，是拖宽期间的不变量——但**只在过渡结束后**成立：
+     * 栅格 `grid-template-columns` 的三条轨道各自插值，连按方向键时逐次现读
+     * `clientWidth` 会读到插值中途的值（实测同一棵树连按 7 次，和值在 1019–1033
+     * 之间漂移 ±13px），夹取上限于是随按键时机抖动，最坏把中心列压到
+     * `CENTER_MIN_W` 以下。指针路径靠 `dragRef.available` 在按下时测一次；键盘
+     * 这里给同一条语义：**一次连按序列测一次**（400ms 无按键即视为新序列，
+     * 视口宽度变了立刻重测）。 */
+    const now = performance.now();
+    const cached = keyResizeRef.current;
+    const usable = cached !== null
+      && now - cached.at < KEY_RESIZE_BURST_MS
+      && cached.viewport === window.innerWidth;
     const workspace = panelRef.current?.parentElement?.querySelector<HTMLElement>('.app-workspace');
-    const available = (workspace?.clientWidth ?? 0) + panel.width;
+    const available = usable ? cached.available : (workspace?.clientWidth ?? 0) + panel.width;
+    keyResizeRef.current = { available, at: now, viewport: window.innerWidth };
     const next = panel.width + (e.key === 'ArrowRight' ? -step : step);
     onPanelAction({ type: 'resize', width: clampInspectorWidth(next, available) });
   };
@@ -396,6 +600,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   return (
     <aside
       className="step-detail"
+      id="region-inspector"
+      role="region"
+      aria-label="Inspector 面板"
+      tabIndex={-1}
       data-panel="inspector"
       data-expanded={panel.expanded ? 'true' : 'false'}
       data-resizing={resizing ? 'true' : 'false'}
@@ -408,7 +616,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         className="detail-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="调整 Inspector 宽度"
+        aria-label="调整运行详情宽度"
         aria-valuenow={panel.width}
         aria-valuemin={INSPECTOR_MIN_W}
         aria-valuemax={INSPECTOR_MAX_W}
@@ -421,48 +629,88 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         onKeyDown={onResizeKeyDown}
       />
       <div className="detail-header">
-        <span className="panel-label">Run Inspector</span>
-        <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* #198：生效档位徽标——#1106 起按**当前聚焦 run** 取值（选中项的信封
-            run_id 对账；无聚焦回退最后一个 run/started）。旧数据无字段时显示
-            「档位未知」（不伪造 "main"）。title 如实标注取值范围。 */}
-        <span
-          className="detail-profile-badge mono num"
-          title={
-            focusedRunId !== null
-              ? `agent_profile: ${agentProfile ?? '未知（聚焦 run 未携带）'}（聚焦 run 的生效档位）`
-              : `agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}（最近一个 run 的生效档位）`
-          }
-        >
-          {agentProfile ?? '档位未知'}
-        </span>
-        {/* #1093：请求侧推理档位——#1106 起按**当前聚焦 run** 取值（无聚焦回退
-            最后一个 run/started）。未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠ 默认档，
-            不伪造 "default"）。title 如实标注取值范围。 */}
-        {reasoningEffort !== null && (
-          <span
-            className="detail-effort-badge mono num"
-            title={
-              focusedRunId !== null
-                ? `reasoning_effort: ${reasoningEffort}（聚焦 run 请求侧选中的推理档位）`
-                : `reasoning_effort: ${reasoningEffort}（最近一个 run 请求侧选中的推理档位）`
-            }
-          >
-            推理 · {reasoningEffort}
-          </span>
-        )}
-        {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
-            （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
-            （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与
-            Overview 的 run 行）。 */}
-        {conversation.events.length > 0 && (
-          <span
-            className="detail-run-id mono num"
-            title={`runs: ${runIdList.join(', ')}`}
-          >
-            {runIdList.length} runs · {conversation.events.length} 事件
-          </span>
-        )}
+        <div className="detail-header-main">
+          <div className="ih-eyebrow">
+            <Zap size={10} aria-hidden="true" />
+            RUN INSPECTOR
+          </div>
+          <div className="ih-title">
+            <h2 className="ih-title-text" title={runTitle || undefined}>
+              {runTitle || '运行详情'}
+            </h2>
+            {/* 效果图 `.live-dot`：只在真的在跑时呼吸。 */}
+            {isLive && <span className="ih-live-dot" aria-hidden="true" />}
+            <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
+          </div>
+          <div className="ih-sub">
+            {/* UI-03 头标对齐（#1435 恢复 #1365 口径）：时间线平铺全会话事件，
+                头标就描述全会话范围（共 N 轮 · M 事件）——不显示单个 run 短码，
+                完整 run 列表留在 title 里。#1419 效果图的 run-id 短码在此让位。 */}
+            {conversation.events.length > 0 && (
+              <span
+                className="detail-run-id mono num"
+                title={`任务：${runIdList.join(', ')}`}
+              >
+                共 {runIdList.length} 轮 · {conversation.events.length} 事件
+              </span>
+            )}
+            {/* #226：模型徽标——`model` 是 provider 回显，`requested_model` 是我们
+                发出去的值。两个都在时按效果图 `badge-primary` 显示实际模型，请求侧
+                写进 title（"请求了 A、跑的是 B"是可解释的事实，不是矛盾）。 */}
+            {headerModel !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="badge ih-model-badge mono"
+                  title={
+                    conversation.requested_model && conversation.requested_model !== headerModel
+                      ? `实际模型 ${headerModel} · 请求 ${conversation.requested_model}`
+                      : `模型 ${headerModel}`
+                  }
+                >
+                  <Cpu size={9} aria-hidden="true" />
+                  {headerModel}
+                </span>
+              </>
+            )}
+            {/* #198：生效档位——#1106 起按**当前聚焦 run** 取值（选中项的信封
+                run_id 对账；无聚焦回退最后一个 run/started）。#1408：头部只留
+                运行状态 pill；档位改为徽标文本，未知＝不渲染（不伪造 "main"）。 */}
+            {agentProfile !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="detail-profile-badge mono num"
+                  title={
+                    focusedRunId !== null
+                      ? `agent_profile: ${agentProfile}（聚焦任务的生效档位）`
+                      : `agent_profile: ${agentProfile}（最近一次任务的生效档位）`
+                  }
+                >
+                  <ShieldCheck size={9} aria-hidden="true" />
+                  {agentProfile}
+                </span>
+              </>
+            )}
+            {/* #1093：请求侧推理档位——未声明时该键缺席 ⇒ 整段不渲染（不可得 ≠
+                默认档，不伪造 "default"）。 */}
+            {reasoningEffort !== null && (
+              <>
+                <span className="ih-sep">·</span>
+                <span
+                  className="detail-effort-badge mono num"
+                  title={
+                    focusedRunId !== null
+                      ? `reasoning_effort: ${reasoningEffort}（聚焦任务请求侧选中的推理档位）`
+                      : `reasoning_effort: ${reasoningEffort}（最近一次任务请求侧选中的推理档位）`
+                  }
+                >
+                  推理 · {reasoningEffort}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
         {/* #183 AC4/AC5/AC7：钉住 / 整页 / 关闭。三个都是键盘可达的按钮，开关类用
             `aria-pressed` 如实上报（不是靠 icon 换形状暗示状态）。 */}
         <span className="detail-header-actions">
@@ -477,7 +725,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             onClick={() => onPanelAction({ type: 'pin', value: !panel.pinned })}
             title="钉住：切换会话时不自动收起（视图状态，不持久化）"
           >
-            <Pin size={13} aria-hidden="true" />
+            <Pin size={12} aria-hidden="true" />
             <span className="detail-ctrl-label">钉住</span>
           </button>
           <button
@@ -488,47 +736,55 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
             onClick={() => onPanelAction({ type: 'expand', value: !panel.expanded })}
             title={panel.expanded ? '退回（Esc）' : '整页打开：长 trace / 大 diff 宽读'}
           >
-            {panel.expanded ? <Minimize2 size={13} aria-hidden="true" /> : <Maximize2 size={13} aria-hidden="true" />}
+            {panel.expanded ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
             <span className="detail-ctrl-label">整页</span>
           </button>
           <button
             type="button"
             className="detail-ctrl"
-            aria-label="关闭 Inspector"
-            onClick={() => onPanelAction({ type: 'close' })}
+            aria-label="关闭运行详情"
+            onClick={() => dispatchPanelAction({ type: 'close' })}
             title="关闭（Esc）"
           >
-            <X size={13} aria-hidden="true" />
+            <X size={12} aria-hidden="true" />
           </button>
         </span>
       </div>
 
-      <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
+      <div className="detail-tabs" role="tablist" aria-label="运行详情视图">
         {TABS.map((t) => {
           const Icon = TAB_ICONS[t.id];
           /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
           const count = tabCounts[t.id];
           return (
-            <button
+            <Tip
               key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
-              onClick={() => setTab(t.id)}
-              title={t.label}
-              /* 计数徽标是 tab 的真实文本内容：窄面板 label 隐藏（容器查询
-                 icon-only）后它就成了唯一可访问名，getByRole(tab, 'Timeline')
-                 会变成 name '4'。aria-label 钉住语义名，不受徽标/显隐影响。 */
-              aria-label={t.label}
+              content={`${TAB_TIPS[t.id]}${count !== undefined ? `（当前 ${count} 条）` : ''}`}
             >
-              <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
-              <span className="detail-tab-label">{t.label}</span>
-              {count !== undefined && (
-                <span className="detail-tab-count num" aria-hidden="true">
-                  {count}
-                </span>
-              )}
-            </button>
+              <button
+                role="tab"
+                aria-selected={tab === t.id}
+                className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
+                onClick={() => setTab(t.id)}
+                /* 计数徽标是 tab 的真实文本内容：窄面板 label 隐藏（容器查询
+                   icon-only）后它就成了唯一可访问名，getByRole(tab, 'Timeline')
+                   会变成 name '4'。aria-label 钉住语义名，不受徽标/显隐影响。 */
+                aria-label={t.label}
+              >
+                <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
+                <span className="detail-tab-label">{t.label}</span>
+                {count !== undefined && (
+                  <span className="detail-tab-count num" aria-hidden="true">
+                    {count}
+                  </span>
+                )}
+                {/* 效果图 `.tab .alert-dot`：有待确认的约束输入时提醒（真实数据：
+                    `conversation.pending_constraint_input`）。 */}
+                {t.id === 'constraints' && conversation?.pending_constraint_input != null && (
+                  <span className="detail-tab-alert" aria-hidden="true" />
+                )}
+              </button>
+            </Tip>
           );
         })}
       </div>
@@ -550,6 +806,9 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onJumpToApproval={onJumpToApproval}
               selectedKey={selectedKey}
               awaitingDecision={awaitingDecision}
+              goneApprovalIds={goneApprovalIds}
+              onApprovalGone={onApprovalGone}
+              onApprovalDecided={onApprovalDecided}
             />
           )}
           {tab === 'timeline' && (
@@ -559,13 +818,22 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onFocusEvent={onFocusEvent}
               onJumpToStream={onJumpToStream}
               selectedKey={selectedKey}
+              expandedKeys={expandedKeys}
+              onToggleExpand={toggleExpanded}
+              onSelectEvent={onSelectTimelineEvent}
+              filter={timelineFilter}
+              onFilterChange={setTimelineFilter}
+              timings={timelineTimings}
+              tools={tools}
+              eventKeys={timelineKeys}
+              streaming={streaming}
             />
           )}
-          {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} />}
+          {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} onFocusTool={onFocusTool} />}
           {tab === 'terminal' && (
             <TerminalTab tools={tools} onFocusTool={onFocusTool} selectedKey={selectedKey} />
           )}
-          {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} />}
+          {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} onFocusTool={onFocusTool} />}
           {tab === 'constraints' && <ConstraintsTab sessionId={sessionId} />}
         </div>
 
@@ -622,8 +890,262 @@ const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
 export const TOOLS_WINDOW_DEFAULT = 50;
 export const TOOLS_WINDOW_STEP = 200;
 
+
+/** #1419 Overview 指标卡的采样：只从**真实事件**取，取不到就 null（不补 0）。
+ *  优先 model/request（每次调用一个点，带 usage/cost/duration），退到
+ *  model/completed（部分 provider 只在完成事件回填 usage）。 */
+interface ModelSample {
+  prompt: number | null;
+  completion: number | null;
+  cost: number | null;
+  duration: number | null;
+}
+
+function finite(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function modelSamples(events: readonly AgentEvent[]): ModelSample[] {
+  const requests = events.filter((e) => e.type === EventType.MODEL_REQUEST);
+  const source = requests.length > 0 ? requests : events.filter((e) => e.type === EventType.MODEL_COMPLETED);
+  return source.map((e) => {
+    const usage = recordOf(e.data.usage);
+    const cost = typeof e.data.cost_usd === 'string' ? Number(e.data.cost_usd) : finite(e.data.cost_usd);
+    return {
+      prompt: finite(usage?.prompt_tokens),
+      completion: finite(usage?.completion_tokens),
+      cost: cost !== null && Number.isFinite(cost) ? cost : null,
+      duration: finite(e.data.duration_ms),
+    };
+  });
+}
+
+/** P2-4：会话成本 = 所有 model/request 的 cost_usd 十进制相加（wire 上是字符串，
+ *  走 `runBudget` 的同一份十进制实现）。任何一笔缺失/形状不合 ⇒ null（粘性不可得，
+ *  绝不把缺的一笔当 0 报一个偏小的会话总额）。 */
+function sessionCostText(events: readonly AgentEvent[]): string | null {
+  const requests = events.filter((e) => e.type === EventType.MODEL_REQUEST);
+  const source = requests.length > 0 ? requests : events.filter((e) => e.type === EventType.MODEL_COMPLETED);
+  let total = '0';
+  for (const e of source) {
+    const raw = typeof e.data.cost_usd === 'string'
+      ? e.data.cost_usd
+      : typeof e.data.cost_usd === 'number' && Number.isFinite(e.data.cost_usd)
+        ? String(e.data.cost_usd)
+        : null;
+    if (raw === null) return null;
+    const next = addDecimalTexts(total, raw);
+    if (next === null) return null;
+    total = next;
+  }
+  return source.length > 0 ? total : null;
+}
+
+function seriesOf(samples: readonly ModelSample[], key: keyof ModelSample): number[] {
+  return samples.flatMap((s) => (s[key] === null ? [] : [s[key] as number]));
+}
+
+/** 采样点太多时按等距抽 24 个：只影响图形密度，不改变数值口径。 */
+function sparkValues(values: readonly number[]): number[] {
+  if (values.length <= 24) return [...values];
+  return Array.from({ length: 24 }, (_, i) => values[Math.round((i / 23) * (values.length - 1))]);
+}
+
+/* #1419 O-2：效果图的 spark 是「面积 + 折线 + 末端圆点」（`.spark .ar/.ln/.dt`），
+ * 几何按 `sparkHTML` 的口径：viewBox 0 0 100 34，左右各留 2、上下各留 4，
+ * 相邻点用中点做三次贝塞尔控制点（圆滑，不插值出新数据）。 */
+function Sparkline({ values, label }: { values: readonly number[]; label: string }) {
+  if (values.length < 2) return null;
+  const points = sparkValues(values);
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const w = 100;
+  const h = 34;
+  const padX = 2;
+  const padY = 4;
+  const pts = points.map((v, i) => [
+    padX + (i * (w - padX * 2)) / (points.length - 1),
+    h - padY - ((v - min) / span) * (h - padY * 2),
+  ]);
+  let line = `M${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1];
+    const [x1, y1] = pts[i];
+    const cx = (x0 + x1) / 2;
+    line += ` C${cx.toFixed(2)} ${y0.toFixed(2)} ${cx.toFixed(2)} ${y1.toFixed(2)} ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+  }
+  const last = pts[pts.length - 1];
+  const area = `${line} L${last[0].toFixed(2)} ${h} L${pts[0][0].toFixed(2)} ${h} Z`;
+  return (
+    <div className="ov-spark" role="img" aria-label={label}>
+      <svg viewBox="0 0 100 34" preserveAspectRatio="none">
+        <path className="ov-spark-ar" d={area} />
+        <path className="ov-spark-ln" d={line} />
+        <circle className="ov-spark-dt" cx={last[0].toFixed(2)} cy={last[1].toFixed(2)} r="1.6" />
+      </svg>
+    </div>
+  );
+}
+
+function MetricCard({
+  label, value, unit, sub, series, icon: Icon,
+}: {
+  label: string;
+  value: string;
+  /** 单位后缀（效果图 `.v .u`：`128,940 tok`）。缺省不渲染。 */
+  unit?: string;
+  sub: string;
+  series: readonly number[];
+  icon: typeof Hash;
+}) {
+  return (
+    <div className="ov-metric">
+      <div className="ov-metric-head">
+        <Icon size={9} className="ov-metric-icon" aria-hidden="true" />
+        <span className="ov-metric-label">{label}</span>
+      </div>
+      <div className="ov-metric-value num">
+        {value}
+        {unit && <span className="ov-metric-unit">{unit}</span>}
+      </div>
+      <div className="ov-metric-sub">{sub}</div>
+      {series.length >= 2 ? (
+        <Sparkline values={series} label={`${label}趋势`} />
+      ) : (
+        <div className="ov-metric-flat" aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
+function OverviewMetrics({
+  conversation, runDuration,
+}: {
+  conversation: ConversationState;
+  runDuration: string | null;
+}) {
+  const samples = useMemo(() => modelSamples(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* P2-4：四张卡的 value / label / sparkline 必须同作用域。
+   *  - tokens / 成本 = **会话级**（`session_usage_total` + 当前 run 的流式累计；
+   *    成本 = 全会话 model/request 十进制相加），文案写「会话累计」；
+   *  - 耗时 = **本轮**（`runDuration` 来自 deriveRunSummary 的最近 run），文案写
+   *    「本轮耗时」，sparkline/最长单次都只取当前 run 的样本。 */
+  const usage = displayedSessionUsage(conversation);
+  const prompt = usage?.prompt_tokens ?? null;
+  const completion = usage?.completion_tokens ?? null;
+  const costText = useMemo(
+    () => sessionCostText(conversation.events),
+    [conversation.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const totalTokens = usage?.total_tokens ?? null;
+  const perMillion = costText !== null && totalTokens !== null && totalTokens > 0
+    ? `$${((Number(costText) / totalTokens) * 1_000_000).toFixed(2)} / M tok`
+    : '无完整用量，无法折算';
+  const sampleCount = samples.length;
+  const samplesSub = sampleCount > 0 ? `会话累计 · ${sampleCount} 次模型调用` : '尚无模型调用';
+  const runSamples = useMemo(() => {
+    const runEvents = conversation.run_id
+      ? conversation.events.filter((e) => e.run_id === conversation.run_id)
+      : conversation.events;
+    return modelSamples(runEvents);
+  }, [conversation.eventsVersion, conversation.run_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const timeSeries = seriesOf(runSamples, 'duration');
+  const longest = timeSeries.length > 0 ? Math.max(...timeSeries) : null;
+  return (
+    <div className="ov-metrics">
+      <MetricCard
+        label="输入 tokens"
+        icon={Hash}
+        value={prompt !== null ? prompt.toLocaleString() : '—'}
+        unit={prompt !== null ? 'tok' : undefined}
+        sub={samplesSub}
+        series={seriesOf(samples, 'prompt')}
+      />
+      <MetricCard
+        label="输出 tokens"
+        icon={Hash}
+        value={completion !== null ? completion.toLocaleString() : '—'}
+        unit={completion !== null ? 'tok' : undefined}
+        sub={completion !== null ? samplesSub : '等待用量回填'}
+        series={seriesOf(samples, 'completion')}
+      />
+      <MetricCard
+        label="会话成本"
+        icon={Database}
+        value={costText !== null ? `$${costText}` : '—'}
+        sub={perMillion}
+        series={seriesOf(samples, 'cost')}
+      />
+      <MetricCard
+        label="本轮耗时"
+        icon={Clock}
+        value={runDuration ?? '—'}
+        sub={longest !== null ? `本轮最长单次 ${formatShortDuration(longest)}` : '本轮无耗时样本'}
+        series={timeSeries}
+      />
+    </div>
+  );
+}
+
+/** Overview 折叠段：内容**始终挂载**（SSR/测试与“收起不丢数据”），关闭时
+ *  `inert` + aria-hidden 阻止焦点与读屏。 */
+function OverviewSection({
+  id, title, icon: Icon, kv, attn = false, defaultOpen = false, className, children,
+}: {
+  id: string;
+  title: string;
+  icon: typeof Hash;
+  /** 段头右侧的 mono 摘要（效果图 `.acc-kv`：`13 次 · 失败 2`）。
+   *  取代旧的「收起/展开」文字钮——开合态由 chevron 旋转表达。 */
+  kv?: ReactNode;
+  /** 效果图 `.acc.is-attn`：有待处理事项时整段琥珀描边 + 顶部琥珀渐变，
+   *  让"需要你来决定"在一列灰卡里自己跳出来。 */
+  attn?: boolean;
+  defaultOpen?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = `ov-body-${id}`;
+  return (
+    <section
+      className={`ov-acc${open ? ' open' : ''}${attn ? ' is-attn' : ''}${className ? ` ${className}` : ''}`}
+      data-ov-section={id}
+    >
+      <button
+        type="button"
+        className="ov-acc-head"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="ov-acc-icon"><Icon size={10} aria-hidden="true" /></span>
+        <span className="ov-acc-title">{title}</span>
+        {kv != null && <span className="ov-acc-kv">{kv}</span>}
+        <ChevronDown size={10} className="ov-acc-chev" aria-hidden="true" />
+      </button>
+      <div className="ov-acc-body" id={bodyId} aria-hidden={!open} inert={!open ? true : undefined}>
+        <div className="ov-acc-in">{children}</div>
+      </div>
+    </section>
+  );
+}
+
+/** #1419 O-4：工具行的 `#seq`。序号取自 `raw_call`（投影原样保存的事件负载），
+ *  缺失时不画——绝不按数组下标编一个序号出来。 */
+function toolSeq(t: ToolCall): number | null {
+  const seq = (t.raw_call as { seq?: unknown } | undefined)?.seq;
+  return typeof seq === 'number' ? seq : null;
+}
+
 export function ChatTab({
   conversation, tools, onFocusTool, onJumpToApproval, selectedKey, awaitingDecision = false,
+  goneApprovalIds, onApprovalGone, onApprovalDecided,
 }: {
   conversation: ConversationState;
   tools: ToolCall[];
@@ -637,6 +1159,13 @@ export function ChatTab({
   selectedKey?: string | null;
   /** #1030：与顶栏/Inspector 头标同源的待裁决事实（见 Props 同名注释）。 */
   awaitingDecision?: boolean;
+  /** #1419 O-3：真实审批回调（见 Props 同名注释）。缺省时段内不画按钮——
+   *  只读场景（子会话视图）不渲染一个点不动的审批卡。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
+  /** 与 `Conversation` 的同名回调同签名（`useSession.resyncAfterDecision`）：
+   *  决策 POST 成功后按 sessionId 对账一次，保证决策后事件有一条消费路径。 */
+  onApprovalDecided?: (sessionId: string) => void;
 }) {
   // Run 状态 + 时长由 lib/runState 的 deriveRunSummary 单一提供：粗标签的
   // 「取消 ≠ 失败」语义、以及「终态集合必须含 run/interrupted」这条与顶栏脉冲
@@ -647,6 +1176,29 @@ export function ChatTab({
    * memo）。本 tab 只在 `tab === 'chat'` 时挂载，这一层省的是驻留期间的重渲染。 */
   const runningToolCount = useMemo(() => tools.filter((t) => t.status === 'running').length, [tools]);
   const failedToolCount = useMemo(() => tools.filter((t) => t.status === 'failed').length, [tools]);
+  /* #1419 O-3：工具段的「平均耗时」= 已有起止时间的调用取均值。没有一组完整时间戳
+   * 就算不出来 → 显示「—」，不拿 0 冒充（零伪造指标）。 */
+  const avgToolDuration = useMemo(() => {
+    const spans = tools
+      .map((t) => {
+        const text = formatDuration(t.started_at, t.completed_at);
+        return text === null ? null : t;
+      })
+      .filter((t): t is ToolCall => t !== null)
+      .map((t) => new Date(t.completed_at!).getTime() - new Date(t.started_at!).getTime());
+    if (spans.length === 0) return null;
+    return spans.reduce((a, b) => a + b, 0) / spans.length;
+  }, [tools]);
+  /* #1419 O-1/O-3：段头右侧的 mono 摘要与「需要你来决定」的琥珀态，都由这一份视图派生。
+   * 「可操作」= 投影没标 stale（run 已终结的孤儿）且 App 没记下它已 404——这两类点了
+   * 只会换来一次注定失败的 POST，段内不放按钮；它们仍在 PERMISSION 段里留痕。 */
+  const permView = permissionView(conversation);
+  const actionableApprovals = useMemo(
+    () => permView.pending.filter((a) => a.stale !== true && !(goneApprovalIds?.has(a.approval_id) ?? false)),
+    [permView.pending, goneApprovalIds],
+  );
+  const gaps = useMemo(() => seqGaps(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const compactionCount = conversation.compactions.length;
 
   /* F5（#279）TOOLS 尾窗：此前全量渲染（N=500 单次 38.7ms，40fps 合帧下就是满载）。
    * 选中项必须留在窗口里——同 `TimelineTab` 的 `effectiveWindow`（#183）：键盘 ↑/↓ 的移动域
@@ -663,12 +1215,98 @@ export function ChatTab({
 
   return (
     <>
+      <OverviewMetrics conversation={conversation} runDuration={runDuration} />
+      <div className="ov-acc-list">
+      {/* #1419 O-3：效果图把「需要你来决定」放在第一位——它是有待办时的唯一入口，
+          埋在一列灰卡中间就等于没有。琥珀态由 `actionableApprovals` 驱动。 */}
+      <OverviewSection
+        id="decide"
+        title="需要你来决定"
+        icon={AlertTriangle}
+        attn={actionableApprovals.length > 0}
+        defaultOpen
+        kv={
+          actionableApprovals.length > 0
+            ? <><b>{actionableApprovals.length}</b> 项待审批</>
+            : '已处理'
+        }
+      >
+      {actionableApprovals.length > 0 && (
+        <div className="detail-section">
+          {onApprovalGone && onApprovalDecided ? (
+            <>
+              {/* 真实审批卡（#37 的同一个组件）：三个按钮（批准 / 拒绝 / 以后都允许）
+                  走既有 postApproval 通路与既有 409/404 语义，不在这里造第二条提交路径。
+                  `autoFocus` 必须为 false——全局 Ctrl+Enter 只该由中心列那一张卡挂载，
+                  否则一次按键会向同一个 approval_id 发两次 POST。 */}
+              {/* `key` 必须绑 approval_id：`ApprovalCard` 的 submitted/busy/error
+                  是组件本地状态，槽位复用会让"批准了 A 之后轮到的 B"继承 A 的
+                  已提交态——按钮消失、错误横幅串台。换 id 即换实例。 */}
+              <ApprovalCard
+                key={actionableApprovals[0].approval_id}
+                sessionId={conversation.session_id}
+                approval={actionableApprovals[0]}
+                onGone={() => onApprovalGone(actionableApprovals[0].approval_id)}
+                onDecided={() => onApprovalDecided(conversation.session_id)}
+              />
+              {actionableApprovals.length > 1 && (
+                <div className="ov-empty">
+                  <AlertTriangle size={11} aria-hidden="true" />
+                  另有 {actionableApprovals.length - 1} 项待审批 · 逐条在会话里处理
+                </div>
+              )}
+            </>
+          ) : (
+            /* 只读场景（子会话视图）：不给假按钮，如实说明去哪儿处理。 */
+            <div className="ov-empty">
+              <AlertTriangle size={11} aria-hidden="true" />
+              {actionableApprovals.length} 项待审批 · 请在主会话里处理
+            </div>
+          )}
+        </div>
+      )}
+      {conversation.reconcile_queue.length > 0 ? (
+        <div className="detail-section">
+          <div className="detail-section-title">
+            <AlertTriangle size={14} /> 需要你来决定
+          </div>
+          {conversation.reconcile_queue.map((r, i) => (
+            <div key={i} className="detail-reconcile-row">
+              <div className="detail-row">
+                <span className="detail-key">工具</span>
+                <span className="detail-val">{r.tool_name}</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">参数身份</span>
+                <code className="detail-val detail-val-mono">{r.args_identity}</code>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">状态</span>
+                <span className="detail-val detail-val-tag">{r.state}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        actionableApprovals.length === 0 && (
+          <div className="detail-empty-hint">无待裁决操作</div>
+        )
+      )}
+      </OverviewSection>
+
+      <OverviewSection
+        id="run"
+        title="任务 RUN"
+        icon={Hash}
+        defaultOpen
+        kv={<>{runStatusLabel} · 第 {conversation.turns.length} 轮</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={14} /> RUN
+          <Hash size={14} /> 任务
         </div>
         <div className="detail-row">
-          <span className="detail-key">run</span>
+          <span className="detail-key">任务</span>
           <code className="detail-val detail-val-mono">{conversation.run_id ?? '—'}</code>
         </div>
         <div className="detail-row">
@@ -710,21 +1348,33 @@ export function ChatTab({
             </div>
           )}
         <div className="detail-row">
-          <span className="detail-key">轮次</span>
+          <span className="detail-key">轮数</span>
           <span className="detail-val">{conversation.turns.length}</span>
         </div>
         {runStart && (
           <div className="detail-row">
             <span className="detail-key">开始</span>
-            <span className="detail-val">{new Date(runStart).toLocaleTimeString()}</span>
+            <span className="detail-val">{formatDateTime(runStart) ?? runStart}</span>
           </div>
         )}
         <div className="detail-row">
           <span className="detail-key">耗时</span>
           <span className="detail-val">{runDuration ?? '—'}</span>
         </div>
+        {/* #1419 O-5：fallback 胶囊——只有真的发生过切换才出现（`model_fallback`
+            由 `model/fallback` 事件写入），没有这条事实就不画徽标。 */}
+        {conversation.model_fallback && (
+          <div className="detail-row">
+            <span className="detail-key">模型切换</span>
+            <span className="detail-val">
+              <span className="ov-badge">
+                fallback → {conversation.model_fallback.to_model}
+              </span>
+            </span>
+          </div>
+        )}
         <div className="detail-row">
-          <span className="detail-key">tokens</span>
+          <span className="detail-key">字数</span>
           <span className="detail-val num">
             {conversation.usage_total && conversation.usage_total.total_tokens !== null
               ? conversation.usage_total.total_tokens.toLocaleString()
@@ -736,7 +1386,7 @@ export function ChatTab({
             trace_id 有值但 trace_url 缺 → 纯 mono code（可复制，手动粘到 Langfuse 搜索）；
             两者都 null（Langfuse 未启用）→「未追踪」灰字（预期降级非故障）。 */}
         <div className="detail-row">
-          <span className="detail-key">Trace</span>
+          <span className="detail-key">追踪</span>
           {conversation.trace_id ? (
             conversation.trace_url ? (
               <a
@@ -754,23 +1404,36 @@ export function ChatTab({
             <span className="detail-val detail-val-muted">未追踪</span>
           )}
         </div>
+        {/* #1419 O-5：健康注。效果图写「上下文健康 · 未触发压缩」——后端不提供窗口
+            容量，所以这里只报**能证明的那一半**：压缩发生了几次。没有容量就没有百分比，
+            不编一个。 */}
+        <div className="ov-empty">
+          <Check size={11} aria-hidden="true" />
+          {compactionCount === 0
+            ? '上下文健康 · 未触发压缩'
+            : `已压缩 ${compactionCount} 次`}
+        </div>
       </div>
+      </OverviewSection>
 
+      <OverviewSection
+        id="tools"
+        title="工具调用"
+        icon={Package}
+        defaultOpen
+        kv={<><b>{tools.length}</b> 次 · 失败 {failedToolCount}</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
           <Package size={14} /> TOOLS
         </div>
-        <div className="detail-row">
-          <span className="detail-key">计数</span>
-          <span className="detail-val">{tools.length}</span>
-        </div>
-        <div className="detail-row">
-          <span className="detail-key">活跃</span>
-          <span className="detail-val">{runningToolCount}</span>
-        </div>
-        <div className="detail-row">
-          <span className="detail-key">失败</span>
-          <span className="detail-val">{failedToolCount}</span>
+        {/* #1419 O-4：效果图 2×2 统计格（总调用 / 失败 / 平均 / 进行中）。四项都是
+            现有投影上的真实计数；「平均」没有完整时间戳时显示「—」而不是 0。 */}
+        <div className="ov-pair">
+          <div className="ov-row"><span className="k">总调用</span><span className="grow" /><span className="v">{tools.length}</span></div>
+          <div className="ov-row"><span className="k">失败</span><span className="grow" /><span className="v">{failedToolCount}</span></div>
+          <div className="ov-row"><span className="k">平均</span><span className="grow" /><span className="v">{avgToolDuration === null ? '—' : formatShortDuration(avgToolDuration)}</span></div>
+          <div className="ov-row"><span className="k">进行中</span><span className="grow" /><span className="v">{runningToolCount}</span></div>
         </div>
         {hiddenTools > 0 && (
           /* 窗口条直接复用 Timeline 的类：`app.css` 里 `.timeline-window-bar/-earlier/-hint`
@@ -800,18 +1463,33 @@ export function ChatTab({
             >
               <ChevronRight size={14} />
               <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              {toolSeq(t) !== null && <span className="k">#{String(toolSeq(t)).padStart(2, '0')}</span>}
               <span className="detail-tool-name">{t.name}</span>
+              {formatDuration(t.started_at, t.completed_at) !== null && (
+                <span className="v">{formatDuration(t.started_at, t.completed_at)}</span>
+              )}
             </button>
           ) : (
             <div key={t.tool_call_id} className={`${rowClass} detail-tool-row-static`}>
               <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              {toolSeq(t) !== null && <span className="k">#{String(toolSeq(t)).padStart(2, '0')}</span>}
               <span className="detail-tool-name">{t.name}</span>
+              {formatDuration(t.started_at, t.completed_at) !== null && (
+                <span className="v">{formatDuration(t.started_at, t.completed_at)}</span>
+              )}
             </div>
           );
         })}
       </div>
+      </OverviewSection>
 
-      {conversation.compactions.length > 0 && (
+      <OverviewSection
+        id="context"
+        title="上下文"
+        icon={Layers}
+        kv={compactionCount > 0 ? `${compactionCount} 次压缩` : '未压缩'}
+      >
+      {conversation.compactions.length > 0 ? (
         <div className="detail-section">
           <div className="detail-section-title">
             <Layers size={14} /> CONTEXT
@@ -819,11 +1497,11 @@ export function ChatTab({
           {conversation.compactions.map((c, i) => (
             <div key={i} className="detail-compaction-row">
               <div className="detail-row">
-                <span className="detail-key">压缩轮次</span>
+                <span className="detail-key">精简轮数</span>
                 <span className="detail-val">{c.compacted_turn_count}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">Token 估算</span>
+                <span className="detail-key">字数估算</span>
                 <span className="detail-val">{c.token_estimate.toLocaleString()}</span>
               </div>
               {c.fallback_used && (
@@ -834,32 +1512,17 @@ export function ChatTab({
             </div>
           ))}
         </div>
+      ) : (
+        <div className="detail-empty-hint">暂无上下文精简记录</div>
       )}
+      </OverviewSection>
 
-      {conversation.reconcile_queue.length > 0 && (
-        <div className="detail-section">
-          <div className="detail-section-title">
-            <AlertTriangle size={14} /> 需人工裁决
-          </div>
-          {conversation.reconcile_queue.map((r, i) => (
-            <div key={i} className="detail-reconcile-row">
-              <div className="detail-row">
-                <span className="detail-key">工具</span>
-                <span className="detail-val">{r.tool_name}</span>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">参数身份</span>
-                <code className="detail-val detail-val-mono">{r.args_identity}</code>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">状态</span>
-                <span className="detail-val detail-val-tag">{r.state}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
+      <OverviewSection
+        id="trace"
+        title="事件轨迹"
+        icon={ListTree}
+        kv={<><b>{conversation.events.length}</b> 事件{gaps.length > 0 ? ` · ${gaps.length} 处缺口` : ''}</>}
+      >
       <div className="detail-section">
         <div className="detail-section-title">
           <ListTree size={14} /> TRACE
@@ -874,14 +1537,16 @@ export function ChatTab({
             <span className="detail-val">{conversation.unknown_events.length}</span>
           </div>
         )}
-        {seqGaps(conversation.events).map((gap, i) => (
+        {gaps.map((gap, i) => (
           <div key={i} className="detail-row detail-row-warn">
             <span className="detail-key">seq 缺口</span>
             <span className="detail-val detail-val-mono">{gap}</span>
           </div>
         ))}
       </div>
+      </OverviewSection>
 
+      <OverviewSection id="model" title="模型" icon={Database} kv={conversation.model ?? conversation.requested_model ?? '—'}>
       {/* MODEL：后端 Gap 1 已落地（model/completed + run/completed 观测字段）。
           全部缺失时保留空槽语义（提示而非留白），有任一真值则逐行渲染，
           缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。
@@ -924,7 +1589,7 @@ export function ChatTab({
               <span className="detail-key">请求模型</span>
               <span
                 className="detail-val detail-val-mono"
-                title="本轮请求侧的模型标识：run/started 携带的 model（持久事件）= 装配给 provider 的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
+                title="本轮请求侧的模型标识：任务开始事件携带的 model（持久事件）= 装配给模型服务商的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
               >
                 {conversation.requested_model}
               </span>
@@ -943,7 +1608,7 @@ export function ChatTab({
             <span className="detail-key">用量</span>
             <span className="detail-val">
               {conversation.usage_total
-                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} tok（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
+                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} 字（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
                 : '—'}
             </span>
           </div>
@@ -953,12 +1618,26 @@ export function ChatTab({
           </div>
         </div>
       )}
-      <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
+      </OverviewSection>
+
+      <OverviewSection id="checkpoint" title="检查点" icon={Database} kv="无 API">
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
           <Database size={14} /> CHECKPOINT
         </div>
         <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
+      </div>
+      </OverviewSection>
+
+      <OverviewSection
+        id="permission"
+        title="权限"
+        icon={ShieldCheck}
+        defaultOpen
+        kv={<>待审批 {permView.pending.length}</>}
+      >
+      <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
+      </OverviewSection>
       </div>
     </>
   );
@@ -1027,7 +1706,7 @@ function PermissionSection({
         ),
       )}
       <div className="detail-row">
-        <span className="detail-key">已裁决</span>
+        <span className="detail-key">已处理</span>
         <span className={`detail-val${view.decisions.length === 0 ? ' detail-val-muted' : ''}`}>
           {view.decisionsLabel}
         </span>
@@ -1066,6 +1745,47 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
+/** 类型图标（P3-6）：定稿原型 `.fc-lead` 是 20px 图标盒，不是 5px 类别点。
+ *
+ *  #1419 perf：图标是每行 SSR 成本最敏感的一处——探针口径下每多一个元素约
+ *  +0.9ms/200 行。实测路径：lucide 组件 22.3ms → 逐行内联 SVG 13.1ms →
+ *  `<symbol>`+`<use>` 12.9ms → **零 DOM 节点（本形态）**。图标整体下沉到 CSS：
+ *  20px 盒 = `.timeline-row::before`，11px 图标 = `.tl-dur::before` 的
+ *  `mask-image`（形状数据只存在于 app.css，逐字取自 lucide-react@1.40.0，ISC；
+ *  颜色由 `--tl-icon-color` 给）。几何不变：20px 盒 − 2×1px 边框 − 2×3.5px
+ *  内边距 = 11px 视口，与改造前 `size={11}` 一致。 */
+
+/** P3-2：投影对 run/model 类事件没有单行摘要（`emptySummary`），Timeline 卡片
+ *  标题不能因此退回原始类型串。只补这几类**可读**标题，其余仍按投影口径回退
+ *  到类型名（未知事件保留原始类型是设计选择）。 */
+function timelineTitle(event: AgentEvent, call?: ToolCall | null): string {
+  const headline = timelineHeadline(event, call);
+  if (headline.title) return headline.title;
+  const summary = eventSummary(event);
+  if (summary) return summary;
+  const model = typeof event.data.model === 'string' && event.data.model ? event.data.model : null;
+  switch (event.type) {
+    case EventType.SESSION_STARTED:
+      return '会话开始';
+    case EventType.SESSION_RESUMED:
+      return '会话恢复';
+    case EventType.RUN_STARTED:
+      return model ? `任务开始 · ${model}` : '任务开始';
+    case EventType.MODEL_STARTED:
+      return model ? `模型开始生成 · ${model}` : '模型开始生成';
+    case EventType.MODEL_REQUEST:
+      return model ? `模型请求 · ${model}` : '模型请求';
+    case EventType.MODEL_REQUEST_STARTED:
+      return model ? `模型请求开始 · ${model}` : '模型请求开始';
+    case EventType.MODEL_FAILED:
+      return '模型调用失败';
+    case EventType.USER_INPUT_REQUESTED:
+      return '等待用户输入';
+    default:
+      return event.type;
+  }
+}
+
 /** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
  *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。
  *  step_id 语义：**缺失或 null** 都 = 无归属（后端省略值为 null 的字段 → 键缺失；
@@ -1083,41 +1803,130 @@ export function formatEventTooltip(e: AgentEvent): string[] {
 interface TipState {
   x: number;
   y: number;
+  /** 事件标题（人话模板）——T-11 富信息浮层的首行。 */
+  title: string;
+  /** `#seq · type · 时刻`（mono 副行）。 */
+  meta: string;
+  /** 投影摘要；无摘要时不渲染该行。 */
+  summary: string | null;
+  /** 既有行（完整时间戳 + step，`formatEventTooltip` 口径）。 */
   lines: string[];
 }
 
-export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, selectedKey }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void; onJumpToStream?: (e: AgentEvent) => void; selectedKey?: string | null }) {
+export function TimelineTab({
+  conversation,
+  onFocusEvent,
+  onJumpToStream,
+  selectedKey,
+  expandedKeys,
+  onToggleExpand,
+  onSelectEvent,
+  filter,
+  onFilterChange,
+  timings,
+  tools = EMPTY_TOOLS,
+  eventKeys,
+  streaming = false,
+}: {
+  conversation: ConversationState;
+  onFocusEvent: (e: AgentEvent) => void;
+  onJumpToStream?: (e: AgentEvent) => void;
+  selectedKey?: string | null;
+  /** #1419：受控展开集合（面板级）；独立 SSR 渲染时可省略 → 组件内部自管。 */
+  expandedKeys?: ReadonlySet<string>;
+  onToggleExpand?: (key: string) => void;
+  onSelectEvent?: (e: AgentEvent) => void;
+  filter?: TimelineFilter;
+  onFilterChange?: (f: TimelineFilter) => void;
+  timings?: ReadonlyMap<string, EventTiming>;
+  tools?: readonly ToolCall[];
+  /** #1419 P2-1：事件对象 → Timeline 行身份（seq-less 同键事件带序号）。
+   *  省略时退回 `eventKey`（独立渲染/旧测试兼容）。 */
+  eventKeys?: ReadonlyMap<AgentEvent, string>;
+  /** 底部状态条的同步态（`已同步` / `跟随中`）；独立渲染默认终态。 */
+  streaming?: boolean;
+}) {
   // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
   // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
   // （流式合帧 40fps 下 Timeline tab 每秒烧 14s CPU）——200 行窗口 ≈4ms，流畅。
+  // #1419：筛选先于窗口——筛选结果再走 200 行窗口，展开卡片只在已渲染行内挂载。
   const total = conversation.events.length;
   const [windowSize, setWindowSize] = useState(TIMELINE_WINDOW_DEFAULT);
+  const [localFilter, setLocalFilter] = useState<TimelineFilter>('all');
+  const [localExpanded, setLocalExpanded] = useState<ReadonlySet<string>>(EMPTY_KEYS);
+  const [flashKey, setFlashKey] = useState<string | null>(null);
   // C4：hover 时间戳浮层——单元素 fixed 浮层 + 容器事件委托（零每行 handler）。
   const [tip, setTip] = useState<TipState | null>(null);
-  const visibleRef = useRef<AgentEvent[]>([]);
+  const visibleRef = useRef<Map<string, AgentEvent>>(new Map());
   const lastRowRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const activeFilter = filter ?? localFilter;
+  const setFilter = onFilterChange ?? setLocalFilter;
+  const activeExpanded = expandedKeys ?? localExpanded;
+  const keyOf = useCallback((e: AgentEvent) => eventKeys?.get(e) ?? eventKey(e), [eventKeys]);
+  const toggleExpanded = onToggleExpand ?? ((key: string) => {
+    setLocalExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else {
+        next.add(key);
+        while (next.size > MAX_EXPANDED_CARDS) {
+          const oldest = next.values().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
+      }
+      return next;
+    });
+  });
+  const timingsMap = useMemo(
+    () => timings ?? deriveEventTimings(conversation.events, tools),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timings, conversation.eventsVersion, tools],
+  );
+  /* T-8：TOOL_RESULT 行标题要复用 call 的模板（result 自身内容只有 `ok`）。
+   * 按 tool_call_id 建索引；`tools` 引用稳定（上游 memo），索引跟着它重建。 */
+  const callById = useMemo(
+    () => new Map(tools.map((t) => [t.tool_call_id, t])),
+    [tools],
+  );
+
   /* run 分组派生（N2 #271）：键用 `eventsVersion`——写 `events` 不是"省一次重算"，而是
    * **永不重算**（组头不出现、计数不涨，是正确性缺陷）。契约与代价见 ADR-0037 D3 / D5.4；
    * 豁免形式见上方 `runIdList` / `listTargets`。 */
   const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const counts = useMemo(
+    () => filterCounts(conversation.events, timingsMap),
+    [conversation.eventsVersion, timingsMap], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const axis = useMemo(() => timelineAxis(timingsMap), [timingsMap]);
+  const gapByIndex = useMemo(() => {
+    const map = new Map<number, SeqGap>();
+    for (const gap of seqGapMarkers(conversation.events)) map.set(gap.afterIndex, gap);
+    return map;
+  }, [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const filtered = useMemo(
+    () => conversation.events
+      .map((e, i) => ({ e, i }))
+      .filter(({ e }) => eventMatchesFilter(e, activeFilter, timingsMap.get(eventKey(e)))),
+    [conversation.eventsVersion, activeFilter, timingsMap], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const selectedFilteredIndex = selectedKey
+    ? filtered.findIndex(({ e }) => keyOf(e) === selectedKey)
+    : -1;
   /* #183：键盘选中项必须在**渲染窗口**里，否则"选中了却看不见"（↑/↓ 到窗口外
    * 就停在原地）。窗口下界由选中项**派生**（`effectiveWindow`），不在 effect 里
    * setState：那是纯函数关系，用 effect 追会多一轮渲染（oxlint
    * `react(set-state-in-effect)` 说的就是这条）。`windowSize` 只保存用户手动
-   * "加载更早"的意图，两者取大——精确到 `total - selectedIndex`，不是一把拉到全量
-   * （全量渲染正是 200 行窗口要避免的成本，见文件头的实测）。
-   *
-   * N2（#271）：依赖键是 `eventsVersion`——依赖 `events` 引用等于把查找结果冻结在首帧
-   * （契约见 ADR-0037 D3）。 */
-  const selectedIndex = useMemo(() => {
-    if (!selectedKey) return -1;
-    return conversation.events.findIndex((e) => eventKey(e) === selectedKey); // eslint-disable-line react-hooks/exhaustive-deps
-  }, [conversation.eventsVersion, selectedKey]); // eslint-disable-line react-hooks/exhaustive-deps
+   * "加载更早"的意图，两者取大——精确到 `filtered.length - selectedFilteredIndex`，
+   * 不是一把拉到全量（全量渲染正是 200 行窗口要避免的成本，见文件头的实测）。 */
   const effectiveWindow =
-    selectedIndex >= 0 ? Math.max(windowSize, total - selectedIndex) : windowSize;
-  const hidden = Math.max(0, total - effectiveWindow);
+    selectedFilteredIndex >= 0 ? Math.max(windowSize, filtered.length - selectedFilteredIndex) : windowSize;
+  const hidden = Math.max(0, filtered.length - effectiveWindow);
+  const visible = hidden > 0 ? filtered.slice(hidden) : filtered;
+  visibleRef.current = new Map(visible.map((v) => [keyOf(v.e), v.e]));
+
   /* 选中项滚进视野：`nearest` 保证已经在视野里时**不动**（否则每次 ↑/↓ 都会把
      列表拉到中间，滚动位置就"丢"了——AC1 要的正是滚动位置不被选中的副作用骚扰）。 */
   useEffect(() => {
@@ -1126,6 +1935,33 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
       ?.querySelector<HTMLElement>(`[data-list-key="${selectedKey}"]`)
       ?.scrollIntoView({ block: 'nearest' });
   }, [selectedKey]);
+
+  /* 跳转实时流：先把窗口扩到目标行，再滚到它并闪一下；不修改选中态（那是 App 的
+   * focus，Timeline 不越权）。`flashKey` 的清理在 effect 里，避免渲染期定时器。 */
+  const liveEvent = useMemo(() => {
+    for (let i = conversation.events.length - 1; i >= 0; i--) {
+      const e = conversation.events[i];
+      if (timingsMap.get(eventKey(e))?.status === 'run') return e;
+    }
+    if (conversation.run_status === 'running') return conversation.events[conversation.events.length - 1] ?? null;
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.eventsVersion, conversation.run_status, timingsMap]);
+  useEffect(() => {
+    if (!flashKey) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-list-key="${flashKey}"]`);
+    el?.scrollIntoView({ block: 'center' });
+    const timer = window.setTimeout(() => setFlashKey(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [flashKey]);
+  const jumpToLive = () => {
+    if (!liveEvent) return;
+    const abs = conversation.events.indexOf(liveEvent);
+    if (abs < 0) return;
+    setWindowSize((w) => Math.max(w, total - abs));
+    if (!eventMatchesFilter(liveEvent, activeFilter, timingsMap.get(eventKey(liveEvent)))) setFilter('all');
+    setFlashKey(keyOf(liveEvent));
+  };
 
   // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
   useEffect(() => {
@@ -1141,38 +1977,119 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
     };
   }, []);
 
-  if (total === 0) {
-    return <TabEmpty hint="本会话尚无事件。" icon={ListTree} />;
-  }
-  const visible = hidden > 0 ? conversation.events.slice(hidden) : conversation.events;
-  visibleRef.current = visible;
-
   const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
-    const btn = (e.target as HTMLElement).closest?.('[data-tl-i]') as HTMLElement | null;
+    /* P1-1：卡片行的身份属性是 `data-list-key`（旧行才有 `data-tl-i`）；
+     * 用错选择器会让 tip 永远为 null，hover 浮层整条功能不可达。 */
+    const btn = (e.target as HTMLElement).closest?.('[data-list-key]') as HTMLElement | null;
     if (btn === lastRowRef.current) return;
     lastRowRef.current = btn;
     if (!btn) {
       setTip(null);
       return;
     }
-    const ev = visibleRef.current[Number(btn.dataset.tlI)];
+    const ev = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
     const lines = ev ? formatEventTooltip(ev) : [];
-    if (lines.length === 0) {
+    if (!ev) {
       setTip(null);
       return;
     }
+    /* T-11 富信息：标题 / `#seq · type · 时刻` / 摘要 + 既有时间戳与 step 行。
+     * 行数参与定位高度计算（TIP_LINE_H 每行）。 */
+    const timing = timingsMap.get(eventKey(ev));
+    const meta = [
+      ev.seq != null ? `#${ev.seq}` : null,
+      ev.type,
+      formatClock(ev.time),
+      timing?.durationMs != null ? formatShortDuration(timing.durationMs) : null,
+    ].filter((part): part is string => Boolean(part)).join(' · ');
+    const summary = eventSummary(ev) || null;
+    /* 行数 = 标题 + meta + 摘要 + 内容行 + 底部提示（`.tl-tooltip-hint` **恒定渲染**）。
+       漏掉提示行会让"朝上放"的浮层矮一行，正好盖住指针所在的那一行。 */
+    const rows = 1 + 1 + (summary ? 1 : 0) + lines.length + 1;
     const r = btn.getBoundingClientRect();
-    const tipH = lines.length * TIP_LINE_H + TIP_PADDING;
+    const tipH = rows * TIP_LINE_H + TIP_PADDING;
     const above = r.top > tipH + TIP_TOP_MARGIN;
-    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP, lines });
+    setTip({
+      x: Math.max(8, r.left + 6),
+      y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP,
+      title: timelineTitle(ev),
+      meta,
+      summary,
+      lines,
+    });
   };
   const handleLeave = () => {
     lastRowRef.current = null;
     setTip(null);
   };
 
+  /* P4-1：fallback 也要保持引用稳定——否则 standalone 渲染时每次提交都换新
+   * 回调，`TimelineCard` 的 memo 被击穿（生产路径传稳定 `onSelectEvent`）。
+   * 写成单一体而不是 `onSelectEvent ?? (…)`：后者会让 exhaustive-deps 判不出
+   * 依赖，回调反而在每次提交时重建。 */
+  const selectEvent = useCallback((e: AgentEvent) => {
+    if (onSelectEvent) {
+      onSelectEvent(e);
+      return;
+    }
+    onFocusEvent(e);
+    onJumpToStream?.(e);
+  }, [onSelectEvent, onFocusEvent, onJumpToStream]);
+
+  if (total === 0) {
+    return <TabEmpty hint="本会话尚无事件。" icon={ListTree} />;
+  }
+
+  const lanes = buildLanes(visible, runGroups);
+  const chips: { id: TimelineFilter; label: string; count: number; tone?: 'fail' }[] = [
+    { id: 'all', label: '全部', count: counts.all },
+    { id: 'tool', label: '工具', count: counts.tool },
+    { id: 'model', label: '模型', count: counts.model },
+    { id: 'fail', label: '失败', count: counts.fail, tone: 'fail' },
+  ];
+
   return (
     <div className="detail-timeline" ref={listRef} onMouseOver={handleOver} onMouseLeave={handleLeave}>
+      <div className="tl-toolbar">
+        <div className="tl-filters" role="group" aria-label="Timeline 筛选">
+          {chips.map((chip) => (
+            <button
+              key={chip.id}
+              type="button"
+              className={`tl-chip${chip.tone ? ` tl-chip-${chip.tone}` : ''}${activeFilter === chip.id ? ' is-on' : ''}`}
+              aria-pressed={activeFilter === chip.id}
+              onClick={() => setFilter(chip.id)}
+            >
+              <span>{chip.label}</span>
+              <span className="tl-chip-count num">{chip.count}</span>
+            </button>
+          ))}
+        </div>
+        {liveEvent && (
+          <>
+            {/* T-12：运行态的「实时」紫钮——真实语义 = 正在跟随实时流，点击跳到最后
+                一条运行中事件。效果图那颗是"插入合成事件"，不移植（不造数据）。 */}
+            {streaming && (
+              <button
+                type="button"
+                className="tl-chip tl-chip-live is-on"
+                onClick={jumpToLive}
+                title="正在跟随实时流 · 跳到最新事件"
+              >
+                <Zap size={9} aria-hidden="true" />
+                实时
+              </button>
+            )}
+            <button type="button" className="tl-live-jump" onClick={jumpToLive} title="展开窗口并定位到最后一条运行中事件">
+              <span className="tl-live-dot" aria-hidden="true" />
+              跳转到实时流
+            </button>
+          </>
+        )}
+      </div>
+
+      {axis && <TimelineAxisBar axis={axis} />}
+
       {hidden > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -1184,95 +2101,319 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
             加载更早 {Math.min(TIMELINE_WINDOW_STEP, hidden)} 条
           </button>
           <span className="timeline-window-hint">
-            显示最近 {visible.length} / 共 {total} 条（前段已折叠，可展开查看）
+            显示最近 {visible.length} / 共 {filtered.length} 条（前段已折叠，可展开查看）
           </span>
         </div>
       )}
-      {/* UI-03：run 分组头——按 run_id 首现顺序插入分隔行（序数取自**全会话**
-          遍历，尾窗裁剪后组号不重排）；组与窗口的交集非空才渲染头。
-          data-tl-i 仍是 visible 窗口内下标（hover 反查契约不变）。 */}
-      {runGroups.map((g) => {
-        const from = Math.max(g.start, hidden);
-        const to = Math.min(g.start + g.count, total);
-        if (from >= to) return null;
+
+      {filtered.length === 0 ? (
+        <div className="tl-empty">
+          <span className="tl-empty-title">没有匹配的事件</span>
+          <span className="tl-empty-hint">当前筛选：{chips.find((c) => c.id === activeFilter)?.label}</span>
+          <button type="button" className="tl-empty-reset" onClick={() => setFilter('all')}>清除筛选</button>
+        </div>
+      ) : lanes.map(({ group, items }) => {
+        const timing = laneTiming(group, conversation.events, timingsMap);
+        const failCount = items.filter(({ e }) => timingsMap.get(eventKey(e))?.status === 'fail').length;
         return (
-          <Fragment key={g.start}>
+          <Fragment key={group.start}>
             <div
               className="tl-run-header"
-              title={g.runId ? `run ${g.runId}` : '会话开场（无 run 归属）'}
+              data-status={group.status}
+              title={group.runId ? `任务 ${group.runId}` : '会话开场（不属于任何一次任务）'}
             >
-              <span className="tl-run-name">{g.runId ? `Run ${g.ordinal}` : '会话'}</span>
-              {g.runId && (
-                <span className={`run-badge run-badge-${g.status}`}>
-                  {RUN_GROUP_STATUS_LABEL[g.status]}
+              {/* T-2：运行中泳道组头底线的扫光段（`.gh-live` 同款）。 */}
+              {group.status === 'running' && (
+                <span className="tl-run-live" aria-hidden="true"><i /></span>
+              )}
+              <span
+                className="tl-run-dot"
+                data-status={group.status}
+                aria-hidden="true"
+              />
+              <span className="tl-run-name">{group.runId ? `第 ${group.ordinal} 轮执行` : '会话'}</span>
+              {group.runId && (
+                <span className={`run-badge run-badge-${group.status}`}>
+                  {RUN_GROUP_STATUS_LABEL[group.status]}
                 </span>
               )}
-              <span className="tl-run-count num">{g.count} 事件</span>
+              <span className="tl-run-count num">
+                {items.length === group.count ? `${group.count} 事件` : `${items.length}/${group.count} 事件`}
+              </span>
+              {/* T-1：失败数只在真有时出现，`--danger-ink` 加粗。 */}
+              {failCount > 0 && <span className="tl-run-fail num">{failCount} 失败</span>}
+              {timing?.start != null && (
+                <span className="tl-run-time num">
+                  {formatClock(new Date(timing.start).toISOString())}
+                  {timing.durationMs != null ? ` · ${formatShortDuration(timing.durationMs)}` : ''}
+                </span>
+              )}
             </div>
-            {Array.from({ length: to - from }, (_, k) => {
-              const abs = from + k;
-              /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
-               * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
+            {items.map(({ e, i }) => {
+              const key = keyOf(e);
+              const expanded = activeExpanded.has(key);
               return (
-                <TimelineRow
-                  key={abs}
-                  index={abs - hidden}
-                  event={conversation.events[abs]}
-                  onFocusEvent={onFocusEvent}
-                  onJumpToStream={onJumpToStream}
-                  selected={selectedKey != null && eventKey(conversation.events[abs]) === selectedKey}
-                />
+                <Fragment key={i}>
+                  <TimelineCard
+                    rowKey={key}
+                    event={e}
+                    call={e.type === EventType.TOOL_RESULT
+                      ? callById.get(String(e.data.tool_call_id ?? '')) ?? null
+                      : null}
+                    timing={timingsMap.get(eventKey(e))}
+                    axis={axis}
+                    selected={selectedKey === key}
+                    expanded={expanded}
+                    flash={flashKey === key}
+                    onSelect={selectEvent}
+                    onToggle={toggleExpanded}
+                    onLocate={onJumpToStream}
+                  />
+                  {activeFilter === 'all' && gapByIndex.has(i) && (
+                    <SeqGapBanner gap={gapByIndex.get(i)!} />
+                  )}
+                </Fragment>
               );
             })}
           </Fragment>
         );
       })}
+
       {tip && (
         <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+          <div className="tl-tooltip-title">{tip.title}</div>
+          <div className="tl-tooltip-meta mono">{tip.meta}</div>
+          {tip.summary && <div className="tl-tooltip-summary">{tip.summary}</div>}
           {tip.lines.map((l, i) => (
             <div key={i} className="tl-tooltip-line">
               {l}
             </div>
           ))}
+          <div className="tl-tooltip-hint">点击展开四段详情</div>
         </div>
       )}
+
+      {/* T-14 底部状态条：左「已显示 / 总数 事件」，右键盘提示 + 同步点。
+          数字全部来自当前筛选与窗口（真实状态），不是效果图的常量。 */}
+      <div className="tl-foot">
+        <span className="tl-foot-count mono">
+          {visible.length} / {filtered.length} 事件
+        </span>
+        <span className="tl-foot-grow" />
+        <span className="tl-foot-kbd">
+          <span className="tl-kbd">↑</span>
+          <span className="tl-kbd">↓</span>
+          选择
+        </span>
+        <span className="tl-foot-kbd">
+          <span className="tl-kbd">↵</span>
+          展开
+        </span>
+        <span className="tl-foot-sync" data-live={streaming ? 'true' : undefined}>
+          {streaming ? '跟随中' : '已同步'}
+        </span>
+      </div>
     </div>
   );
 }
 
-// memo：投影层 events 数组为追加式（既有事件引用稳定），流式期间新 delta 到达时
-// 旧行跳过 summarizeEvent 重算——只有新增行参与渲染。
-const TimelineRow = memo(function TimelineRow({
-  index,
-  event,
-  onFocusEvent,
-  onJumpToStream,
-  selected,
-}: {
-  /** 可见窗口内下标（hover 浮层经 data-tl-i 反查事件）。 */
-  index: number;
-  event: AgentEvent;
-  onFocusEvent: (e: AgentEvent) => void;
-  onJumpToStream?: (e: AgentEvent) => void;
-  /** #183：是否为当前选中项（`aria-current` 如实上报，不是只加一层颜色）。 */
-  selected?: boolean;
-}) {
+interface VisibleItem {
+  e: AgentEvent;
+  i: number;
+}
+
+type RunGroup = ReturnType<typeof groupEventsByRun>[number];
+
+/** 把窗口内的筛选结果按 run 组桶化：组内无可见项 ⇒ 组头不渲染。 */
+function buildLanes(visible: readonly VisibleItem[], groups: readonly RunGroup[]): { group: RunGroup; items: VisibleItem[] }[] {
+  const out: { group: RunGroup; items: VisibleItem[] }[] = [];
+  let gi = 0;
+  for (const item of visible) {
+    while (gi < groups.length && item.i >= groups[gi].start + groups[gi].count) gi++;
+    const group = groups[gi];
+    if (!group) continue;
+    const last = out[out.length - 1];
+    if (last && last.group.start === group.start) last.items.push(item);
+    else out.push({ group, items: [item] });
+  }
+  return out;
+}
+
+/** run 泳道的时间跨度：组内最早 start → 最晚 finish；不可得 = null。 */
+function laneTiming(
+  group: RunGroup,
+  events: readonly AgentEvent[],
+  timings: ReadonlyMap<string, EventTiming>,
+): EventTiming | null {
+  let start: number | null = null;
+  let end: number | null = null;
+  const to = Math.min(group.start + group.count, events.length);
+  for (let i = group.start; i < to; i++) {
+    const timing = timings.get(eventKey(events[i]));
+    if (!timing || timing.start === null) continue;
+    start = start === null ? timing.start : Math.min(start, timing.start);
+    const finish = timing.start + (timing.durationMs ?? 0);
+    end = end === null ? finish : Math.max(end, finish);
+  }
+  if (start === null) return null;
+  const status: TimelineStatus = group.status === 'failed' ? 'fail'
+    : group.status === 'running' ? 'run'
+      : group.status === 'completed' ? 'ok'
+        : 'idle';
+  return { start, durationMs: end !== null && end >= start ? end - start : null, status };
+}
+
+function TimelineAxisBar({ axis }: { axis: TimelineAxis }) {
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
   return (
-    <button
-      className={`timeline-row${selected ? ' sel' : ''}`}
-      data-tl-i={index}
-      data-list-key={eventKey(event)}
-      aria-current={selected ? 'true' : undefined}
-      onClick={() => {
-        onFocusEvent(event);
-        // PRD §9.2 反向联动：选中行同时定位中间主区（App 层处理 pulse）。
-        onJumpToStream?.(event);
-      }}
+    <div className="tl-axis" aria-hidden="true">
+      <span className="tl-axis-gutter" />
+      <span className="tl-axis-main" />
+      <span className="tl-axis-track">
+        {ticks.map((t) => (
+          <span key={t} className="tl-axis-tick" style={{ left: `${t * 100}%` }}>
+            <span className="tl-axis-label num">{formatAxisLabel(axis.maxMs * t)}</span>
+          </span>
+        ))}
+      </span>
+      <span className="tl-axis-dur" />
+      <span className="tl-axis-chev" />
+    </div>
+  );
+}
+
+function SeqGapBanner({ gap }: { gap: SeqGap }) {
+  return (
+    <div className="tl-gap" role="note">
+      <AlertTriangle size={12} />
+      <span className="tl-gap-txt">seq {gap.from} → {gap.to} 缺失（{gap.missing} 条）</span>
+    </div>
+  );
+}
+
+const TimelineCard = memo(function TimelineCard({
+  rowKey,
+  event,
+  call,
+  timing,
+  axis,
+  selected,
+  expanded,
+  flash,
+  onSelect,
+  onToggle,
+  onLocate,
+}: {
+  /** P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号），不是裸 `eventKey`。 */
+  rowKey: string;
+  event: AgentEvent;
+  /** T-8：TOOL_RESULT 行要复用对应 call 的标题模板（result 自己只有 `ok`）。 */
+  call?: ToolCall | null;
+  timing?: EventTiming;
+  axis: TimelineAxis | null;
+  selected: boolean;
+  expanded: boolean;
+  flash: boolean;
+  onSelect: (e: AgentEvent) => void;
+  onToggle: (key: string) => void;
+  /** T-10：展开区「定位到会话」——反向联动中心列（PRD §9.2）。 */
+  onLocate?: (e: AgentEvent) => void;
+}) {
+  const key = rowKey;
+  const status: TimelineStatus = timing?.status ?? 'idle';
+  const category = eventCategory(event);
+  const bar = timing && axis ? barGeometry(timing, axis) : null;
+  const showBarLabel = Boolean(
+    timing?.durationMs != null && axis && timing.durationMs / axis.maxMs >= 0.1,
+  );
+  const clock = formatClock(event.time);
+  const toolName = typeof event.data.tool_name === 'string' ? event.data.tool_name : null;
+  /* T-8：人话标题 + 真实副行细节（模型用量等）。纯函数、只用事件字段。 */
+  const headline = timelineHeadline(event, call);
+  /* 只有展开行需要 DOM id；未展开行不再每行跑一次正则替换。 */
+  const expandId = expanded ? `tl-expand-${key.replace(/[^a-zA-Z0-9_-]/g, '_')}` : undefined;
+  return (
+    <div
+      className={`timeline-card${selected ? ' sel' : ''}${expanded ? ' expanded' : ''}${flash ? ' is-new' : ''}`}
+      data-state={status}
     >
-      <span className="tl-seq">{event.seq ?? '·'}</span>
-      <span className="tl-type">{event.type}</span>
-      <span className="tl-summary">{eventSummary(event)}</span>
-    </button>
+      <button
+        type="button"
+        className={`timeline-row${selected ? ' sel' : ''}`}
+        data-list-key={key}
+        data-cat={category}
+        aria-current={selected ? 'true' : undefined}
+        aria-expanded={expanded}
+        aria-controls={expandId}
+        onClick={() => {
+          onSelect(event);
+          onToggle(key);
+        }}
+      >
+        <span className="tl-main">
+          <span className="tl-title">{timelineTitle(event, call)}</span>
+          <span className="tl-meta">
+            {/* P3-5：meta 文本单独包一层可收缩节点，尾部状态 tag 才不会被裁掉。 */}
+            <span className="tl-meta-text">
+              {`#${event.seq ?? '·'} · ${event.type}${clock ? ` · ${clock}` : ''}${event.step_id != null ? ` · step ${event.step_id}` : ''}${toolName ? ` · ${toolName}` : ''}`}
+            </span>
+            {/* T-8：真实可得细节（模型用量）；没有就不占位。 */}
+            {headline.note && <span className="tl-note mono">{headline.note}</span>}
+            {status === 'fail' && <span className="tl-tag tl-tag-fail">失败</span>}
+            {status === 'run' && <span className="tl-tag tl-tag-run">运行中</span>}
+          </span>
+        </span>
+        <span
+          className={`tl-track${bar?.point ? ' is-point' : ''}${bar ? '' : ' is-empty'}`}
+          data-state={bar ? status : undefined}
+          style={bar ? ({
+            '--bar-left': `${bar.left}%`,
+            ...(bar.point ? {} : { '--bar-width': `${bar.width}%` }),
+          } as CSSProperties) : undefined}
+          aria-hidden="true"
+        >
+          {showBarLabel && timing?.durationMs != null && (
+            <span className="tl-bar-label num">{formatShortDuration(timing.durationMs)}</span>
+          )}
+        </span>
+        <span className="tl-dur num">
+          {timing?.durationMs != null ? formatShortDuration(timing.durationMs) : '—'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="tl-expand open" id={expandId}>
+          <div className="tl-inner">
+            {/* T-10 段头（效果图 `.fc-drill`）：`#seq · type` 左，时刻 · 耗时右。 */}
+            <div className="tl-drill">
+              <span className="tl-drill-type mono">
+                {event.seq != null ? `#${event.seq}` : '#·'} · {event.type}
+              </span>
+              <span className="tl-drill-grow" />
+              <Clock size={10} aria-hidden="true" />
+              <span className="mono">
+                {clock ?? '—'}
+                {timing?.durationMs != null ? ` · ${formatShortDuration(timing.durationMs)}` : ''}
+              </span>
+            </div>
+            <EventInspector focus={{ kind: 'event', event }} />
+            {/* 效果图 `.fc-acts`：反向定位到中心列（PRD §9.2 的既有通路）。 */}
+            {onLocate && (
+              <div className="tl-acts">
+                <button
+                  type="button"
+                  className="tl-btn"
+                  onClick={() => onLocate(event)}
+                  title="在会话里滚动定位到这条事件"
+                >
+                  <ArrowLeft size={10} aria-hidden="true" />
+                  定位到会话
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 });
 
@@ -1286,7 +2427,15 @@ export const CHANGES_WINDOW_STEP = 200;
 
 /** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
  *  状态，从 `StepDetail` 外面进不到这个面）。 */
-export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?: string }) {
+export function ChangesTab({
+  tools, sessionId, onFocusTool,
+}: {
+  tools: ToolCall[];
+  sessionId?: string;
+  /** 「查看事件」的落点：与终端面同一路径（选中该工具并让中心列滚到它）。
+   *  缺省时不画这个按钮——只读场景（子会话视图）不画点不动的按钮。 */
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
   // F2（#272）：`tools` 由调用方 memo 提供，过滤跟着它的引用走——面板关闭期间本组件
   // 仍挂载（`hidden` 不卸载），此前每次提交都要重扫一遍工具表。
   const diffs = useMemo(() => tools.filter((t) => t.diff), [tools]);
@@ -1296,11 +2445,57 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
   const [diffWindow, setDiffWindow] = useState(CHANGES_WINDOW_DEFAULT);
   const hiddenDiffs = Math.max(0, diffs.length - diffWindow);
   const visibleDiffs = hiddenDiffs > 0 ? diffs.slice(hiddenDiffs) : diffs;
+  /* 每个文件的 diff **只算一次**：段头的 `+A −D` 与卡片本体共用同一张表。
+     分开算等于每次投影更新把 O(n·m) 的 LCS 跑两遍（规模闸内单个文件最多
+     1e6 格 ≈ 4MB），百文件改动集下就是双倍分配。归档态没有可比对的两份文本 ⇒
+     表里存 null，卡片据此回到 `DiffBlock` 的归档占位。 */
+  const diffResults = useMemo(() => {
+    const map = new Map<string, LineDiffResult | null>();
+    for (const t of diffs) {
+      const d = t.diff!;
+      map.set(t.tool_call_id, d.archived ? null : lineDiff(d.before ?? '', d.after ?? ''));
+    }
+    return map;
+  }, [diffs]);
+  /* #1419 C-1：+A −D 来自上表。任一文件超出规模闸（算不出准确计数）就整体显示
+     「—」——半个和比没有和更误导。 */
+  const totals = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const r of diffResults.values()) {
+      if (r === null) continue;
+      if (r.added === null || r.removed === null) return null;
+      added += r.added;
+      removed += r.removed;
+    }
+    return { added, removed };
+  }, [diffResults]);
+  const archivedCount = useMemo(() => diffs.filter((t) => t.diff?.archived).length, [diffs]);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
   }
   return (
     <>
+      {/* #1419 C-1：段头（效果图 `.pane-head`）= 小字标签 + mono 计数 + 右徽标。
+          计数全部来自已有字段：`+A −D` 由 `lib/lineDiff` 算，`archived`（内容已归档
+          成产出文件）是投影上的事实。效果图的「已落盘」在后端没有对应事实，故不画；
+          徽标位改用真实事实「已归档 N」——同一视觉位、不编数据。 */}
+      <div className="pane-head">
+        <span className="lbl">工作树改动</span>
+        <span className="n">
+          {diffs.length} 文件
+          {totals === null
+            ? ' · +— −—'
+            : ` · +${totals.added} −${totals.removed}`}
+        </span>
+        <span className="grow" />
+        {archivedCount > 0 && (
+          <span className="ov-badge">
+            <FileDiff size={9} aria-hidden="true" />
+            已归档 {archivedCount}
+          </span>
+        )}
+      </div>
       {hiddenDiffs > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -1315,56 +2510,285 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
         </div>
       )}
       {visibleDiffs.map((t) => (
-        <div key={t.tool_call_id} className="detail-section">
-          <div className="detail-section-title">
-            <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
-          </div>
-          {/* 这里此前自己内联一份 `.diff-cols`——同一份 before/after 在 Inspector 与
-              中心列各有一套渲染，且这套**认不出归档态**（before/after 已被换成
-              `use read_artifact(<id>)` marker 摘要时，会把 marker 原文当 diff 正文
-              渲染出来，即"显示了一段并不存在的文件内容"）。收敛到 `DiffBlock`
-              （#183 AC9 / #186 AC3）后归档占位态与中心列逐字一致。 */}
-          <DiffBlock diff={t.diff!} sessionId={sessionId} />
-        </div>
+        <ChangeCard
+          key={t.tool_call_id}
+          tool={t}
+          result={diffResults.get(t.tool_call_id) ?? null}
+          sessionId={sessionId}
+          onFocusTool={onFocusTool}
+        />
       ))}
     </>
   );
 }
 
+/** #1419 C-2..C-4：一个文件一张卡（效果图 `.step`）。
+ *
+ *  展开 = **行级 unified diff**（`lib/lineDiff` 的双列行号 + 红绿底 + `+/−` 号）。
+ *  归档态（before/after 已被换成 `use read_artifact(<id>)` marker）没有可比对的两份
+ *  文本 —— 回到 `DiffBlock` 的归档占位 + 产出文件读取，不假装能算 diff。
+ *  输入过大（超出 `LINE_DIFF_MAX_CELLS`）同理回到 `DiffBlock` 的整段对照，
+ *  并**不给 +/− 计数**（算不出来就不报数）。 */
+function ChangeCard({
+  tool, result, sessionId, onFocusTool,
+}: {
+  tool: ToolCall;
+  /** 段头算好的 diff（同一文件只算一次）；归档态为 null。 */
+  result: LineDiffResult | null;
+  sessionId?: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const diff = tool.diff!;
+  const path = String(tool.args.path ?? tool.args.file_path ?? '');
+  const seq = toolSeq(tool);
+  const dur = formatDuration(tool.started_at, tool.completed_at);
+  const unified = result?.mode === 'unified' ? result : null;
+  const copyText = unified
+    ? unified.rows
+      .map((r) => (r.kind === 'add' ? `+ ${r.text}` : r.kind === 'del' ? `- ${r.text}` : `  ${r.text}`))
+      .join('\n')
+    : `${diff.before ?? ''}\n---\n${diff.after ?? ''}`;
+  return (
+    <section className="step" data-change={tool.tool_call_id}>
+      <button
+        type="button"
+        className="step-head"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`step-ico ${diff.truncated || diff.archived ? 'warn' : 'ok'}`}>
+          <FileDiff size={10} aria-hidden="true" />
+        </span>
+        <span className="step-main">
+          <span className="step-title" title={path}>
+            {path !== '' ? path : tool.name}
+          </span>
+          <span className="step-meta">
+            <span className="mono">{tool.name}</span>
+            {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+            {dur !== null && <><span>·</span><span>{dur}</span></>}
+            {diff.archived && <><span>·</span><span>已归档</span></>}
+          </span>
+        </span>
+        <span className="step-nums">
+          {unified ? (
+            <>
+              <span className="add">+{unified.added}</span>
+              <span className="del">−{unified.removed}</span>
+            </>
+          ) : (
+            <span className="del">{diff.archived ? '归档' : '过大'}</span>
+          )}
+        </span>
+        <ChevronDown size={10} className="step-chev" aria-hidden="true" />
+      </button>
+      <div className="step-body">
+        <div>
+          <div className="step-in">
+            {/* 截断是投影上的事实（正文被裁到 2000 字符），文案与中心列一字不差。 */}
+            {diff.truncated && <div className="fc-note">内容过长，已截断显示</div>}
+            {unified ? (
+              <div className="diff">
+                {unified.rows.map((r, i) => (
+                  <div key={i} className={`dline${r.kind === 'ctx' ? '' : ` ${r.kind}`}`}>
+                    <span className="ln">{r.left ?? ''}</span>
+                    <span className="ln">{r.right ?? ''}</span>
+                    <span className="code">
+                      {r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '} {r.text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              /* 归档 / 过大：整段对照（既有渲染器，认得出归档态）。 */
+              <DiffBlock diff={diff} sessionId={sessionId} />
+            )}
+            <div className="fc-acts">
+              {onFocusTool && (
+                <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+                  查看事件
+                </button>
+              )}
+              <CopyButton text={copyText} label={`复制 ${path || tool.name} 的 diff`} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ── Terminal tab：bash 调用聚合（命令执行面） ──
 
-function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void; selectedKey?: string | null }) {
+/** 输出井的行着色（效果图 `termLines` 的规则，逐条移植）。
+ *
+ *  只认**行首/整行**特征，不比效果图更宽：
+ *    `$ ` 开头        → cmd（紫，终端提示符）
+ *    ERROR/FAILED/E / assert/failed/Error → er（红）
+ *    passed / [100%] / no tests ran / [ 74%] → ok（绿）
+ *    `^...`           → dim（点阵进度行压暗）
+ *  其余沿用正文灰。**这是纯展示着色**：不改文本、不推断语义，行内容逐字来自 stdout/stderr。 */
+function termLineClass(line: string): string {
+  if (line.startsWith('$ ')) return 'cmd';
+  if (/^(ERROR|FAILED|E )|assert |failed|Error/.test(line)) return 'er';
+  if (/passed|\[100%\]|no tests ran|\[ *\d+%\]/.test(line)) return 'ok';
+  if (/^\.+/.test(line)) return 'dim';
+  return '';
+}
+
+/** 一个命令一张卡（效果图 `.term`）。结构复用 `.step*`（同一套卡头/折叠动画，
+ *  效果图里两者本来就是同一份样式），只多输出井 `.term-out` 与卡尾 `.term-foot`。
+ *
+ *  默认展开规则来自效果图：**失败/中断/进行中的默认展开**（要看的就是它），
+ *  成功的默认折叠（卡头已经给出 `exit · 耗时 · seq`，信息不丢）。 */
+/** 秒级已运行时长。**只在 running 卡里挂载**——`useTickingNow(1000)` 是每秒一次
+ *  的重渲染，挂在每张卡上等于给整面命令历史（可能上百条）各开一个 1s 定时器，
+ *  而终态卡的时长是定值（`formatDuration` 已经算过），根本不需要 tick。
+ *
+ *  格式化口径：<60s 用工具级精度（`X.Xs`），更长用粗粒度（`M分S秒`）——一次
+ *  `pytest` 跑 3 分钟时 `180.4s` 读起来没有意义；时钟倒挂（负值）两个格式化都
+ *  返回空串，于是不画数字（与 `formatDuration` 同一口径）。 */
+function LiveElapsed({ startedAt }: { startedAt?: string }) {
+  const now = useTickingNow(1000);
+  const started = startedAt ? new Date(startedAt).getTime() : NaN;
+  const elapsedMs = Number.isFinite(started) ? now - started : NaN;
+  const text = Number.isFinite(elapsedMs) && elapsedMs >= 0
+    ? (elapsedMs < 60_000 ? formatShortDuration(elapsedMs) : formatCoarseDuration(elapsedMs) ?? '')
+    : '';
+  return text !== '' ? <span className="mono">{text}</span> : null;
+}
+
+function TermCard({
+  tool, selected, onFocusTool,
+}: {
+  tool: ToolCall;
+  selected: boolean;
+  onFocusTool: (t: ToolCall) => void;
+}) {
+  const running = tool.status === 'running';
+  const [open, setOpen] = useState(tool.status !== 'success');
+  const result = commandResult(tool);
+  const command = String(tool.args.command ?? '');
+  const seq = toolSeq(tool);
+  const dur = formatDuration(tool.started_at, tool.completed_at);
+  const liveText = (tool.output ?? []).map((c) => c.text).join('');
+  const stdout = liveText !== '' ? liveText : result?.stdout ?? '';
+  const stderr = liveText !== '' ? '' : result?.stderr ?? '';
+  const exit = result?.exit_code;
+  /* 状态词/图标：效果图 fail 红 / run 琥珀 + 绿字 live / ok 绿。`stopped`（中断）
+     不是错误，用 warn 一档，不冒充 fail。 */
+  const ico = tool.status === 'failed' ? 'fail' : running || tool.status === 'stopped' ? 'warn' : 'ok';
+  const word = tool.status === 'failed' ? 'fail' : running ? 'live' : tool.status === 'stopped' ? 'stop' : 'ok';
+  const wordClass = tool.status === 'failed' ? 'del' : tool.status === 'stopped' ? 'warn' : 'add';
+  /* 展示截断先做（`truncateForDisplay` 是渲染层防御，投影仍是全量真相），
+     再切行——20k 字符的 split 只做一次，不在 map 里重复。 */
+  const lines = `${stdout}${stderr !== '' ? `${stdout !== '' ? '\n' : ''}${stderr}` : ''}`;
+  const shown = lines === '' ? null : truncateForDisplay(lines).split('\n');
+  return (
+    <section className="step term" data-term={tool.tool_call_id}>
+      <button
+        type="button"
+        className={`step-head${selected ? ' sel' : ''}`}
+        aria-expanded={open}
+        data-list-key={toolKey(tool)}
+        aria-current={selected ? 'true' : undefined}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`step-ico ${ico}`}>
+          <TerminalSquare size={10} aria-hidden="true" />
+        </span>
+        <span className="step-main">
+          <span className="step-title" title={command}>
+            <span className="term-prompt">$</span> {command}
+          </span>
+          <span className="step-meta">
+            {/* 中断先于 exit 码：被取消的命令可能带着半截 exit 码，语义仍是「中断」。 */}
+            <span>
+              {running ? '进行中'
+                : tool.status === 'stopped' ? '已中断'
+                  : exit !== undefined ? `exit ${exit}` : '—'}
+            </span>
+            {dur !== null && <><span>·</span><span>{dur}</span></>}
+            {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+          </span>
+        </span>
+        <span className="step-nums">
+          <span className={wordClass}>{word}</span>
+        </span>
+        <ChevronDown size={10} className="step-chev" aria-hidden="true" />
+      </button>
+      <div className="step-body">
+        <div>
+          <div className="step-in">
+            {shown !== null ? (
+              <pre className="term-out">
+                {shown.map((line, i) => (
+                  <span key={i} className={termLineClass(line)}>
+                    {line}{i < shown.length - 1 ? '\n' : ''}
+                  </span>
+                ))}
+                {running && <span className="caret" aria-hidden="true" />}
+              </pre>
+            ) : (
+              <div className="fc-note">{running ? '命令执行中，暂无输出' : '这次调用没有输出'}</div>
+            )}
+            <div className="term-foot">
+              {running ? (
+                <>
+                  <span className="term-live-dot" aria-hidden="true" />
+                  <span>跟随中 · 已运行</span>
+                  <LiveElapsed startedAt={tool.started_at} />
+                </>
+              ) : (
+                <>
+                  <span>来源</span>
+                  {seq !== null && <span className="mono">seq {seq}</span>}
+                  <span>·</span>
+                  <span>{stderr !== '' ? 'stderr 有内容' : 'stdout'}</span>
+                </>
+              )}
+              <span className="grow" />
+              <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+                查看事件
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void; selectedKey?: string | null }) {
   // 判定与读取都来自 lib/commandOutput（票面 AC2）：
   // "什么算一次命令"只允许有一处答案——两边各写一份会各自演化。
   // F2（#272）：同上（过滤谓词仍是 lib/commandOutput 的唯一那份 `isCommand`）。
   const bashes = useMemo(() => tools.filter(isCommand), [tools]);
+  const failed = useMemo(() => bashes.filter((t) => t.status === 'failed').length, [bashes]);
   if (bashes.length === 0) {
     return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
   return (
     <>
-      {bashes.map((t) => {
-        const result = commandResult(t);
-        const selected = selectedKey != null && toolKey(t) === selectedKey;
-        return (
-          <button
-            key={t.tool_call_id}
-            className={`detail-terminal-row${selected ? ' sel' : ''}`}
-            data-list-key={toolKey(t)}
-            aria-current={selected ? 'true' : undefined}
-            onClick={() => onFocusTool(t)}
-          >
-            <div className="detail-terminal-cmd">
-              <span className="bash-prompt">$</span>
-              <code>{String(t.args.command ?? '')}</code>
-            </div>
-            {result?.stdout !== undefined && <pre className="detail-terminal-out">{truncateForDisplay(result.stdout)}</pre>}
-            {result?.exit_code !== undefined && (
-              <span className={`exit-badge ${result.exit_code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {result.exit_code}</span>
-            )}
-          </button>
-        );
-      })}
+      {/* #1419 M-1：段头（效果图 `.pane-head`）= 标签 + mono `N 条 · M 失败` + 右 bash 胶囊。 */}
+      <div className="pane-head">
+        <span className="lbl">命令历史</span>
+        <span className="n">{bashes.length} 条 · {failed} 失败</span>
+        <span className="grow" />
+        <span className="ov-badge">
+          <TerminalSquare size={9} aria-hidden="true" />
+          bash
+        </span>
+      </div>
+      {bashes.map((t) => (
+        <TermCard
+          key={t.tool_call_id}
+          tool={t}
+          selected={selectedKey != null && toolKey(t) === selectedKey}
+          onFocusTool={onFocusTool}
+        />
+      ))}
     </>
   );
 }
@@ -1378,7 +2802,66 @@ export const ARTIFACTS_WINDOW_DEFAULT = 20;
 export const ARTIFACTS_WINDOW_STEP = 100;
 
 /** 导出理由同 `ChangesTab`：`tab` 是内部状态，SSR 测试与 F5 成本探针进不到这个面。 */
-export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: string }) {
+/** 产出文件的展示名：写类工具的 `args.path`（后端确实给了路径）优先，
+ *  没有路径就用**产生它的工具名 + 编号前 8 位**——artifact 本体没有文件名这个概念
+ *  （`ArtifactRef` 只有 id/size/mime/source_tool），编一个 `output.txt` 是替后端撒谎。 */
+function artifactLabel(tool: ToolCall): string {
+  const path = tool.args.path ?? tool.args.file_path;
+  if (typeof path === 'string' && path !== '') return path;
+  return `${tool.name} · ${tool.artifact!.artifact_id.slice(0, 8)}`;
+}
+
+/** #1419 A-2：选中项的预览面板（效果图 `.art-preview`）。
+ *
+ *  内容走**同一个** `ArtifactViewer`（`bare`：只要内容、不要第二套开合语义），
+ *  所以"读不到 / 没有存储 / 已不在本会话"三种失败态与别处一字不差。 */
+function ArtifactPreview({
+  tool, sessionId, onFocusTool,
+}: {
+  tool: ToolCall;
+  sessionId: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
+  const art = tool.artifact!;
+  const seq = toolSeq(tool);
+  const clock = formatClock(tool.completed_at ?? tool.started_at);
+  const size = art.size === null ? '未知大小' : formatBytes(art.size);
+  return (
+    <div className="art-preview">
+      <div className="pv-head">
+        <FileCheck2 size={11} aria-hidden="true" />
+        <span className="pv-name" title={artifactLabel(tool)}>{artifactLabel(tool)}</span>
+        <span className="grow" />
+        <span className="mono">{size}{clock !== null ? ` · ${clock}` : ''}</span>
+      </div>
+      <div className="pv-head pv-sub">
+        <span className="mono">{tool.name}</span>
+        {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
+        <span>·</span>
+        <span className="mono">{art.mime_type ?? '类型未知'}</span>
+      </div>
+      <ArtifactViewer sessionId={sessionId} artifactId={art.artifact_id} bare />
+      <div className="pv-foot">
+        <code className="mono" title="artifact id（内容哈希）">{art.artifact_id.slice(0, 16)}</code>
+        <span className="grow" />
+        <CopyButton text={art.artifact_id} label="复制 artifact 编号" />
+        {onFocusTool && (
+          <button className="ov-toggle" type="button" onClick={() => onFocusTool(tool)}>
+            查看事件
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ArtifactsTab({
+  tools, sessionId, onFocusTool,
+}: {
+  tools: ToolCall[];
+  sessionId: string;
+  onFocusTool?: (tool: ToolCall) => void;
+}) {
   // Artifacts only reach this tab through the projection attaching an ArtifactRef
   // to the producing ToolCall (lib/projection.ts ARTIFACT_CREATED case). If an
   // artifact/created event's tool isn't found by the projection, that's a
@@ -1386,15 +2869,30 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
   // path (invariant #22).
   // F2（#272）：同上。
   const artifacts = useMemo(() => tools.filter((t) => t.artifact), [tools]);
-  // F5（#279）尾窗：同 `ChangesTab`（本面也无选中态）；`useState` 必须在这条 early-return 之前。
+  // F5（#279）尾窗：同 `ChangesTab`；`useState` 必须在下面那条 early-return **之前**。
   const [artifactWindow, setArtifactWindow] = useState(ARTIFACTS_WINDOW_DEFAULT);
+  /* #1419 A-2：选中项（预览面板的宿主）。`null` = 还没手动选过 ⇒ 默认看最新一份
+     （与尾窗「显示最近 N 条」同一取向），而不是列表第一条。 */
+  const [pickedId, setPickedId] = useState<string | null>(null);
   const hiddenArtifacts = Math.max(0, artifacts.length - artifactWindow);
   const visibleArtifacts = hiddenArtifacts > 0 ? artifacts.slice(hiddenArtifacts) : artifacts;
   if (artifacts.length === 0) {
-    return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
+    return <TabEmpty hint="本次会话没有产出文件。" icon={Package} />;
   }
+  const picked = visibleArtifacts.find((t) => t.tool_call_id === pickedId)
+    ?? visibleArtifacts[visibleArtifacts.length - 1];
   return (
     <>
+      {/* #1419 A-1：段头（效果图 `.pane-head`）= 标签 + mono 计数 + 右产出文件胶囊。 */}
+      <div className="pane-head">
+        <span className="lbl">产出文件</span>
+        <span className="n">{artifacts.length} 个</span>
+        <span className="grow" />
+        <span className="ov-badge">
+          <Package size={9} aria-hidden="true" />
+          artifact
+        </span>
+      </div>
       {hiddenArtifacts > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -1408,39 +2906,45 @@ export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionI
           </span>
         </div>
       )}
-      {visibleArtifacts.map((t) => (
-        <div key={t.tool_call_id} className="detail-section">
-          <div className="detail-section-title">
-            <FileCheck2 size={14} /> {t.name}
-          </div>
-          <div className="detail-row">
-            <span className="detail-key">ID</span>
-            <code className="detail-val detail-val-mono">{t.artifact!.artifact_id.slice(0, 16)}</code>
-          </div>
-          {/* 元数据可空（AC5）：缺了就说"未知"，不拿默认值冒充。
-              真后端里 size/mime_type 由 store 决定是否持久化（MinIO 不持久化
-              source_tool），编一个 `0 B` / `application/octet-stream` 是在替它撒谎。 */}
-          <div className="detail-row">
-            <span className="detail-key">大小</span>
-            <span className="detail-val">
-              {t.artifact!.size === null ? '未知' : formatBytes(t.artifact!.size)}
-            </span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-key">类型</span>
-            <span className="detail-val detail-val-mono">
-              {t.artifact!.mime_type ?? '未知'}
-            </span>
-          </div>
-          {/* 内容按需读取（#186 AC1）——地址是 #185 的只读端点，会话归属由 URL 的
-              session_id 决定（artifact_id 是内容哈希，跨会话可重名）。 */}
-          <ArtifactViewer
-            sessionId={sessionId}
-            artifactId={t.artifact!.artifact_id}
-            label="查看内容"
-          />
-        </div>
-      ))}
+      {/* 2 列卡片网格（效果图 `.art-grid`）。卡上只放**已有事实**：名/大小/seq/工具/
+          时间 + 「已生成」——产出文件列表里的每一项都来自 `artifact/created`，
+          这个徽标说的是这件事本身，不是新推断。 */}
+      <div className="art-grid">
+        {visibleArtifacts.map((t) => {
+          const art = t.artifact!;
+          const seq = toolSeq(t);
+          const clock = formatClock(t.completed_at ?? t.started_at);
+          const on = picked.tool_call_id === t.tool_call_id;
+          return (
+            <button
+              key={t.tool_call_id}
+              type="button"
+              className={`art-card${on ? ' is-on' : ''}`}
+              aria-pressed={on}
+              data-list-key={toolKey(t)}
+              title={artifactLabel(t)}
+              onClick={() => setPickedId(t.tool_call_id)}
+            >
+              <span className="art-thumb">
+                <FileCheck2 size={18} aria-hidden="true" />
+              </span>
+              <span className="art-name">{artifactLabel(t)}</span>
+              <span className="art-meta">
+                <span>{art.size === null ? '未知' : formatBytes(art.size)}</span>
+                {seq !== null && <><span>·</span><span>seq {seq}</span></>}
+                <span className="grow" />
+                <span>{t.name}</span>
+                {clock !== null && <><span>·</span><span>{clock.slice(0, 5)}</span></>}
+              </span>
+              <span className="art-badge">
+                <Check size={9} aria-hidden="true" />
+                已生成
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <ArtifactPreview tool={picked} sessionId={sessionId} onFocusTool={onFocusTool} />
     </>
   );
 }
@@ -1468,10 +2972,10 @@ function EventInspector({ focus }: { focus: EventFocus }) {
   const rawJson = JSON.stringify(event, null, 2);
 
   const tabs: readonly { id: EventIoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    { id: 'output', label: 'Output' },
-    { id: 'raw', label: 'Raw' },
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    { id: 'output', label: '输出' },
+    { id: 'raw', label: '原始' },
   ];
 
   return (
@@ -1498,32 +3002,32 @@ function EventInspector({ focus }: { focus: EventFocus }) {
           </div>
           {event.seq !== null && (
             <div className="detail-row">
-              <span className="detail-key">seq</span>
+              <span className="detail-key">序号</span>
               <span className="detail-val detail-val-mono num">{event.seq}</span>
             </div>
           )}
           {event.time && (
             <div className="detail-row">
-              <span className="detail-key">time</span>
+              <span className="detail-key">时间</span>
               <span className="detail-val detail-val-mono">{event.time}</span>
             </div>
           )}
           {/* 宽松判空（语义见 formatEventTooltip 文档）：缺失/null 都不渲染 step 行。 */}
           {event.step_id != null && (
             <div className="detail-row">
-              <span className="detail-key">step</span>
+              <span className="detail-key">步骤</span>
               <span className="detail-val num">{event.step_id}</span>
             </div>
           )}
           {event.run_id && (
             <div className="detail-row">
-              <span className="detail-key">run</span>
+              <span className="detail-key">任务</span>
               <span className="detail-val detail-val-mono">{event.run_id.slice(0, 16)}</span>
             </div>
           )}
           {event.event_id && (
             <div className="detail-row">
-              <span className="detail-key">event_id</span>
+              <span className="detail-key">事件编号</span>
               <span className="detail-val detail-val-mono">{event.event_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1531,7 +3035,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'input' && (
         <div className="detail-section">
-          <div className="detail-section-title">Input (data)</div>
+          <div className="detail-section-title">输入数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1542,7 +3046,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'output' && (
         <div className="detail-section">
-          <div className="detail-section-title">Output (data)</div>
+          <div className="detail-section-title">输出数据</div>
           <div className="detail-code-wrap">
             <CopyButton text={dataJson} label="复制 JSON" />
             <div className="detail-json">
@@ -1553,9 +3057,9 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       )}
       {tab === 'raw' && (
         <div className="detail-section">
-          <div className="detail-section-title">Raw</div>
+          <div className="detail-section-title">原始</div>
           <div className="detail-code-wrap">
-            <CopyButton text={rawJson} label="复制 Raw" />
+            <CopyButton text={rawJson} label="复制原始" />
             <div className="detail-json">
               <JsonTree value={event} />
             </div>
@@ -1597,10 +3101,10 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const [wantTab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'overview');
 
   const tabs: readonly { id: IoTab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'input', label: 'Input' },
-    ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
-    ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
+    { id: 'overview', label: '概览' },
+    { id: 'input', label: '输入' },
+    ...(hasOutput ? [{ id: 'output', label: '输出' } as const] : []),
+    ...(hasRaw ? [{ id: 'raw', label: '原始' } as const] : []),
   ];
   /* 渲染期收窄到仍然存在的段（同 #182 `resolveActiveTab` 的口径）：选中项在清单里
      移动时这个组件实例**不重建**（AC1），于是 `useState` 的初始值会留在上一个工具
@@ -1637,20 +3141,20 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
       {tab === 'overview' && (
         <div className="detail-overview">
           <div className="detail-row">
-            <span className="detail-key">tool</span>
+            <span className="detail-key">工具</span>
             <span className="detail-val detail-val-mono">{tool.name}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-key">tool_call_id</span>
+            <span className="detail-key">调用编号</span>
             <span className="detail-val detail-val-mono">{tool.tool_call_id.slice(0, 16)}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-key">status</span>
+            <span className="detail-key">状态</span>
             <span className="detail-val detail-val-tag">{tool.status}</span>
           </div>
           {tool.started_at && (
             <div className="detail-row">
-              <span className="detail-key">started</span>
+              <span className="detail-key">开始时间</span>
               <span className="detail-val detail-val-mono">{tool.started_at}</span>
             </div>
           )}
@@ -1662,7 +3166,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           )}
           {tool.artifact && (
             <div className="detail-row">
-              <span className="detail-key">artifact</span>
+              <span className="detail-key">产出文件</span>
               <span className="detail-val detail-val-mono">{tool.artifact.artifact_id.slice(0, 16)}</span>
             </div>
           )}
@@ -1702,7 +3206,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_call && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/call 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw（tool/call）" />
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制原始（tool/call）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_call} />
               </div>
@@ -1711,7 +3215,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_result && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/result 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw（tool/result）" />
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制原始（tool/result）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_result} />
               </div>
@@ -1779,7 +3283,7 @@ function ChildTimeline({ events }: { events: AgentEvent[] }) {
   return (
     <div className="detail-section">
       <div className="detail-section-title">
-        <ListTree size={14} /> CHILD TIMELINE
+        <ListTree size={14} /> 子任务时间线
       </div>
       {total > CHILD_TIMELINE_WINDOW && (
         <div className="detail-row detail-row-warn">显示最近 {CHILD_TIMELINE_WINDOW} 条 / 共 {total} 条</div>

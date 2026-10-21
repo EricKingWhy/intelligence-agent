@@ -84,7 +84,7 @@ test('六态逐项结果 + 缺证据 + 两轴 + UNKNOWN 留槽', async ({ page }
 
   // Internal event diagnostics are available only after explicit disclosure.
   await panel.locator('.task-review-diagnostic-disclosure > summary').click();
-  await expect(panel).toContainText('需 reconcile（来源未接入）');
+  await expect(panel).toContainText('需核对（来源未接入）');
 });
 
 test('可交付 + 证据已过期并存：chip 文案不被前端修正，仅叠加消歧警示', async ({ page }) => {

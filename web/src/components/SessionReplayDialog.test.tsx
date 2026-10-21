@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactElement } from 'react';
+import { act, useState, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 vi.mock('../lib/api', async (importOriginal) => {
@@ -138,6 +138,116 @@ describe('SessionReplayDialog', () => {
     clickButton('开始重放');
     await waitFor(() => (document.body.textContent ?? '').includes('没有可回放的内容'));
     expect(document.body.textContent).toContain('回放完成 · 0 个可渲染事件');
+  });
+
+  it('关闭后重开同一会话：回到确认态，不残留上一次进度', async () => {
+    vi.mocked(replaySession).mockResolvedValue({ session_id: 's1', count: 4, steps: STEPS });
+    function Harness(): ReactElement {
+      const [target, setTarget] = useState<{ id: string; title: string } | null>({
+        id: 's1',
+        title: '我的会话',
+      });
+      return (
+        <>
+          <button type="button" onClick={() => setTarget({ id: 's1', title: '我的会话' })}>
+            重新打开
+          </button>
+          <SessionReplayDialog
+            target={target}
+            onOpenChange={(open) => {
+              if (!open) setTarget(null);
+            }}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    clickButton('开始重放');
+    await waitFor(() => (document.body.textContent ?? '').includes('回放完成'));
+    expect(document.body.textContent).toContain('已重放 4/4');
+
+    clickButton('完成');
+    await waitFor(() => !document.querySelector('.replay-progress'));
+    clickButton('重新打开');
+
+    await waitFor(() => buttons().some((b) => b.textContent?.trim() === '开始重放'));
+    expect(document.body.textContent).not.toContain('已重放');
+    expect(document.querySelector('.replay-progress')).toBeNull();
+  });
+
+  it('打开状态下换 target：表单重挂载回确认态（openBatch key 的判别性护栏）', async () => {
+    vi.mocked(replaySession).mockResolvedValue({ session_id: 's1', count: 4, steps: STEPS });
+    function Harness(): ReactElement {
+      const [target, setTarget] = useState<{ id: string; title: string } | null>({
+        id: 's1',
+        title: '我的会话',
+      });
+      return (
+        <>
+          <button type="button" onClick={() => setTarget({ id: 's2', title: '另一个会话' })}>
+            换会话
+          </button>
+          <SessionReplayDialog
+            target={target}
+            onOpenChange={(open) => {
+              if (!open) setTarget(null);
+            }}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    clickButton('开始重放');
+    await waitFor(() => (document.body.textContent ?? '').includes('回放完成'));
+    expect(document.body.textContent).toContain('已重放 4/4');
+
+    clickButton('换会话');
+    await waitFor(() => buttons().some((b) => b.textContent?.trim() === '开始重放'));
+    // 没有 key 时同一个表单实例只会换 target 文本，phase 仍停在 done。
+    expect(document.body.textContent).not.toContain('已重放');
+    expect(document.querySelector('.replay-progress')).toBeNull();
+    expect(document.body.textContent).toContain('另一个会话');
+  });
+
+  it('关闭时在途请求返回：结果被丢弃（不写进下一次打开）', async () => {
+    let resolve!: (value: { session_id: string; count: number; steps: typeof STEPS }) => void;
+    vi.mocked(replaySession).mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    function Harness(): ReactElement {
+      const [target, setTarget] = useState<{ id: string; title: string } | null>({
+        id: 's1',
+        title: '我的会话',
+      });
+      return (
+        <>
+          <button type="button" onClick={() => setTarget({ id: 's1', title: '我的会话' })}>
+            重新打开
+          </button>
+          <SessionReplayDialog
+            target={target}
+            onOpenChange={(open) => {
+              if (!open) setTarget(null);
+            }}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    clickButton('开始重放');
+    const token = (replaySession as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(token).toBe(1);
+    clickButton('取消');
+    await act(async () => {
+      resolve({ session_id: 's1', count: 4, steps: STEPS });
+      await Promise.resolve();
+    });
+    clickButton('重新打开');
+    await waitFor(() => buttons().some((b) => b.textContent?.trim() === '开始重放'));
+    expect(document.querySelector('.replay-progress')).toBeNull();
+    expect(document.body.textContent).not.toContain('已重放');
   });
 
   it('失败：后端 detail 留在原地，可重试（回到确认态）', async () => {
