@@ -516,7 +516,7 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await expect(foot).toHaveCount(0);
   await closePicker();
 
-  // ② 被收窄的档位（编程 = coding，13/18）⇒ 逐字给出那句话（**声明**口径）。
+  // ② 被收窄的档位（编程 = coding，14/19）⇒ 逐字给出那句话（**声明**口径）。
   //    数字与 `agentProfileScope.test.ts:47` 同源（be73a2d0 同步了单测、漏了这里）。
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   await openPicker();
@@ -526,7 +526,7 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   // #1372：原生 title 迁到 radix tooltip，提示内容仍在可访问名（aria-label）里，
   // 且**以可见文字开头**（WCAG 2.5.3 Label in Name）。
   const note = foot.locator('span[aria-label]');
-  await expect(note).toHaveAttribute('aria-label', /^该档位声明开放 13 个工具（全部档位声明 18 个）；Coding未声明开放：/);
+  await expect(note).toHaveAttribute('aria-label', /^该档位声明开放 14 个工具（全部档位声明 19 个）；Coding未声明开放：/);
   await expect(note).toHaveAttribute('aria-label', /delegate/);
   await expect(note).toHaveAttribute('aria-label', /web_search/);
   // #1372：title 迁到 radix tooltip 后必须真的能挂载（不是只剩 aria-label）。
