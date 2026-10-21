@@ -33,7 +33,8 @@ export const FACT_TYPE_DOTS: Record<string, string> = {
  *
  *  口径出处：issue #1445 与 `~/workspace/overnight-test/walk-p2-fixes/f04-wording.md`
  *  （逐枚举定名，逐字照用；`constraint` / `authorization` / `evidence_ref` 为既有口径，
- *  `user_goal` / `work_boundary` / `failed_approach` 为按枚举字面与既有词根新拟）。
+ *  `user_goal` / `work_boundary` / `failed_approach` 为按枚举字面与既有词根新拟）；
+ *  补充 7 类定名见同目录 `f04-wording-addendum.md`（双轴审查 F1 裁决）。
  *  原始枚举是机器码，不是给用户看的筛选标签——chips 与行内类型都走 `factTypeLabel`。
  *
  *  键集 = 后端可产出的**已知**全集 13 类（derive `_USER_FACT_TYPES` 九值 +

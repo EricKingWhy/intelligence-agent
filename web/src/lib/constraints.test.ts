@@ -35,7 +35,7 @@ describe('factTypeLabel', () => {
     expect(Object.keys(FACT_TYPE_LABELS).sort()).toEqual(CANONICAL.map(([type]) => type).sort());
   });
 
-  it.each(['future_type', '', 'CONSTRAINT', '__proto__', 'constructor', 'toString'])(
+  it.each(['future_type', '', 'CONSTRAINT', '__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
     '未知值 %j → 「其他类型」（不原样回显机器码）',
     (type) => {
       expect(factTypeLabel(type)).toBe('其他类型');
