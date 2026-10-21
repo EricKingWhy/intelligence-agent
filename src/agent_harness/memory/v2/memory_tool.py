@@ -274,12 +274,19 @@ class MemoryTool(Tool):
 
         ``staged: True`` 必须一路带到模型与 M7 的摘要里——这条写入**没有落盘**，把它报成
         "已更新"会让用户在下一个 session 里找不到记忆。
+
+        进门先打 ``FOREGROUND``（#1438）：`memory` 工具只会被前台回合调用，环境里若残留
+        别的标（比如同一 task 里刚跑过后台 job），这里必须自己钉住来源，退出时还原。
         """
         if self._service is None or self._staged is None:
             return None
-        session_id = memory_session_var.get() or ""
-        trusted = trusted_identity_for_session(session_id, self._workspace_index)
-        decision = evaluate_gate(await self._service.get_settings(trusted))
+        token = origin.set_origin(origin.FOREGROUND)
+        try:
+            session_id = memory_session_var.get() or ""
+            trusted = trusted_identity_for_session(session_id, self._workspace_index)
+            decision = evaluate_gate(await self._service.get_settings(trusted))
+        finally:
+            origin.reset_origin(token)
         if decision.allow:
             return None
         pins, error = await self._staged.resolve_pins(payload)
