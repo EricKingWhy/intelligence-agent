@@ -308,6 +308,29 @@ describe('#1429 参数中间省略', () => {
     expect(html).not.toContain('data-full');
   });
 
+  it('delegate / ask_user 这类自洽长文本参数按 80 字收口（不进 data-full 全量）', async () => {
+    const task = `重构 ${'x'.repeat(300)} 并跑测试`;
+    const t = turn({
+      tools: [tool({ tool_call_id: 'a4', name: 'delegate', args: { target: 'coder', task } })],
+      activities: [{ kind: 'tool' as const, tool_call_id: 'a4' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<TurnView turn={t} model={null} density="balanced" />);
+    });
+    const args = container.querySelector('.act-args') as HTMLElement;
+    const full = args.getAttribute('data-full') ?? '';
+    expect(full.length).toBe(81); // 80 字 + 省略号
+    expect(full.endsWith('…')).toBe(true);
+    expect(full).not.toContain(task);
+    expect(args.textContent).toContain(full.slice(0, 20));
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('bash 长命令不预截断：data-full 是全量，tooltip 也显示全量（#1429 F5）', async () => {
     const command =
       'npm run build --workspace web --output-path /very/long/directory/name/for/testing/purposes';

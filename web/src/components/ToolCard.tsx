@@ -370,16 +370,21 @@ function splitArgsForDisplay(summary: string): { head: string; tail: string } {
   };
 }
 
-/** 行内参数摘要。默认**不预截断**（#1429 F5）：中间省略靠 `splitArgsForDisplay`
- *  + CSS ellipsis，先砍到 60 字会让 64 字阈值永远触发不了，长命令连 tooltip 都只剩
- *  前 60 字。`max` 只给 compact 档用（那一档本来就只放一行短摘要）。 */
+/** 参数单行摘要。`bash.command` 与 `path` **原样全量**（#1429 F5：长命令/长路径是
+ *  可读性的核心，截断后 `data-full` 与 tooltip 只剩残句）；其余工具（`delegate` 的
+ *  `task`、`ask_user` 的 `questions` 等）按 80 字收口——这些值是自洽长文本，整段流进
+ *  行内文本、`data-full` 与 tooltip 只会把行撑爆并让 DOM 字节随载荷线性膨胀
+ *  （#1429 复审 P2）。`max` 只给 compact 档用（那一档本来就只放一行短摘要）。 */
 function summarizeArgs(tool: ToolCall, max?: number): string {
   const a = tool.args;
   const raw = tool.name === 'bash'
     ? String(a.command ?? '')
     : 'path' in a
       ? String(a.path)
-      : Object.entries(a).slice(0, 2).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+      : truncate(
+          Object.entries(a).slice(0, 2).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' '),
+          80,
+        );
   return max === undefined ? raw : truncate(raw, max);
 }
 
