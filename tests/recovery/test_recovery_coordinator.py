@@ -468,6 +468,53 @@ async def test_reconcile_preserves_durable_attempt_count_without_result_json(
 
 
 @pytest.mark.asyncio
+async def test_legacy_running_operation_keeps_attempt_count_unknown_after_recovery(
+    tmp_path: Path,
+) -> None:
+    class _Abandon(ReconcileCallback):
+        async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
+            return ReconcileVerdict.ABANDON
+
+    database_path = tmp_path / "state.db"
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(database_path)
+    await ledger.initialize()
+    await _seed_operation(ledger, "call-1", OperationState.RUNNING, crashed.session_id)
+    await ledger.record_attempt(crashed.session_id, "call-1")
+    await ledger.record_attempt(crashed.session_id, "call-1")
+
+    # Simulate a database produced before the durable counter existed. The old
+    # executions are no longer inferable after this column is removed.
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute("ALTER TABLE operations DROP COLUMN attempt_count")
+        await connection.commit()
+    await ledger.initialize()
+    migrated = await ledger.get(crashed.session_id, "call-1")
+    assert migrated is not None and migrated.attempt_count is None
+    with pytest.raises(ValueError, match="attempts are unknown"):
+        await ledger.record_attempt(crashed.session_id, "call-1")
+
+    coordinator = _make_coordinator(
+        store, ledger, database_path, reconcile_callback=_Abandon(),
+    )
+    recovered = await coordinator.recover(crashed.session_id)
+
+    result = next(
+        event for event in recovered.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == "call-1"
+    )
+    assert result.data["budget_delta"] == {
+        "tool_name": "bash",
+        "tool_calls": 1,
+        "tool_attempts": None,
+    }
+    consumed = consumed_from_events(recovered.events)
+    assert consumed.tool_calls_by_tool == {"bash": 1}
+    assert consumed.tool_attempts_by_tool is None
+
+
+@pytest.mark.asyncio
 async def test_recovery_appends_session_resumed(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path / "sessions")
     crashed = _make_crashed_session(store)

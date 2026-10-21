@@ -265,7 +265,7 @@ def _protected_fact_request_result(
 
 def _tool_budget_delta(operation: Operation) -> dict:
     """Preserve accepted-call and attempt facts when recovery synthesizes a result."""
-    attempts = operation.attempt_count
+    attempts: int | None = operation.attempt_count
     tool_calls = 1
     if operation.result_json:
         result = _try_parse_result_json(operation.result_json, operation.tool_name)
@@ -275,7 +275,7 @@ def _tool_budget_delta(operation: Operation) -> dict:
                 # Older ledgers have no durable counter; completed results retain
                 # the final retry number in metadata. New ledgers count each start,
                 # including attempts whose process died before a result was saved.
-                attempts = max(attempts, value)
+                attempts = value if attempts is None else max(attempts, value)
             if operation.state is OperationState.CANCELLED and (
                 result.metadata.get("budget_admitted") is False
                 or (

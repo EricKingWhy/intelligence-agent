@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS operations (
     finished_at TEXT,
     reconcile_meta TEXT,
     parent_exec_call_id TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    attempt_count INTEGER CHECK (attempt_count IS NULL OR attempt_count >= 0),
     PRIMARY KEY (session_id, tool_call_id)
 )
 """
@@ -234,7 +234,13 @@ class SqliteOperationLedger(OperationLedger):
             if "attempt_count" not in columns:
                 await connection.execute(
                     "ALTER TABLE operations ADD COLUMN attempt_count "
-                    "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)"
+                    "INTEGER CHECK (attempt_count IS NULL OR attempt_count >= 0)"
+                )
+                # A PENDING operation proves Tool.execute never started. Older
+                # RUNNING rows have no durable attempt history and must stay unknown.
+                await connection.execute(
+                    "UPDATE operations SET attempt_count = 0 WHERE state = ?",
+                    (OperationState.PENDING.value,),
                 )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_operations_session "
@@ -264,6 +270,8 @@ class SqliteOperationLedger(OperationLedger):
     async def create(self, operation: Operation) -> None:
         if operation.state is not OperationState.PENDING:
             raise ValueError("A new Operation must start in PENDING")
+        if operation.attempt_count is None:
+            raise ValueError("A new Operation must have a known attempt count")
         async with _connect(self.database_path) as connection:
             await connection.execute(
                 """
@@ -302,6 +310,7 @@ class SqliteOperationLedger(OperationLedger):
                 UPDATE operations
                 SET attempt_count = attempt_count + 1
                 WHERE session_id = ? AND tool_call_id = ? AND state = ?
+                  AND attempt_count IS NOT NULL
                 """,
                 (session_id, tool_call_id, OperationState.RUNNING.value),
             )
@@ -314,6 +323,14 @@ class SqliteOperationLedger(OperationLedger):
                 if row is None:
                     raise KeyError(f"Operation '{tool_call_id}' does not exist")
                 operation = self._to_operation(row)
+                if (
+                    operation.state is OperationState.RUNNING
+                    and operation.attempt_count is None
+                ):
+                    raise ValueError(
+                        "Operation attempts are unknown; reconcile before execution "
+                        f"('{tool_call_id}')"
+                    )
                 raise ValueError(
                     "Operation attempts can only be recorded while RUNNING; "
                     f"'{tool_call_id}' is {operation.state.value}"

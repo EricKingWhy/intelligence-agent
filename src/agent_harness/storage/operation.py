@@ -37,7 +37,8 @@ class Operation(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     reconcile_meta: str | None = None
-    attempt_count: int = Field(default=0, ge=0)
+    #: None means this row has no durable attempt history.
+    attempt_count: int | None = Field(default=0, ge=0)
 
     @computed_field
     @property
