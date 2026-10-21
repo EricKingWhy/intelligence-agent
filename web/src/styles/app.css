@@ -4963,9 +4963,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: none;
 }
 .composer-send:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-accent) 82%, #000);
+  background: color-mix(in srgb, var(--color-accent) 82%, var(--overlay-scrim));
   border-color: transparent;
-  color: #fff;
+  color: var(--on-solid);
   transform: translateY(-1px);
   box-shadow: 0 4px 12px color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
@@ -6267,7 +6267,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     border-radius: var(--radius-md);
     /* 遮罩 28%（比既有 `ctx-usage-overlay` 的 32% 浅）：抽屉是"轻量 disclosure"，
        背后仍是用户要看的会话内容；模态浮层才用更重的 32%。 */
-    box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, #000 28%, transparent);
+    box-shadow: var(--shadow-overlay), 0 0 0 100vmax color-mix(in srgb, var(--overlay-scrim) 28%, transparent);
   }
   /* 展开态的开关退到左上角（与标题同一行的阅读起点），收起态居中在图标轨里。 */
   .session-rail.rail-drawer-open .rail-drawer-btn {
@@ -6472,7 +6472,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .copy-btn.copied {
   color: var(--color-success);
-  color: var(--color-success, #22a06b);
   /* #1372 改动 7：成功态要容纳「已复制」三个字，不再固定 24px 方块。 */
   width: auto;
   gap: 4px;
