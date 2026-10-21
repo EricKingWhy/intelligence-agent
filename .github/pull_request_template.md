@@ -5,4 +5,4 @@
   正是 guards 的 `receipt-present` 检查要消灭的。
 - 规则出处：`docs/SDD_WORKFLOW_PROTOCOL.md` §8.1（冻结树 / 读数传递）、issue #1338 改动 3。
 
-- [ ] 收据已入库：`docs/gate/<sha>.json` 存在且 gate0 6/6 PASS（`result: PASS`、`passed == total`）
+- [ ] 收据已入库：`docs/gate/<sha>.json` 存在且 gate0 全部车道 PASS（`result: PASS`、`passed == total`；车道数以 `scripts/gate0.py --list` 为准）

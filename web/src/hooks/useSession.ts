@@ -26,8 +26,6 @@ import { EventType, type AgentEvent, type ConversationState, type FailedDraft, t
 import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import {
-  SessionClaimAmbiguousError,
-  SessionClaimTimeoutError,
   wsStreamResponse,
   discoverNewSessionId,
   sessionIdBaselineDetailed,
@@ -183,6 +181,41 @@ export function shouldShowHistoryLoading(
   return false;
 }
 
+/** #1371：对话区**这一帧**是否应渲染历史骨架（渲染期派生，不依赖 effect）。
+ *
+ *  `loadingHistory` 由 `useEffect` 写入——被动效应在提交并**绘制之后**才 flush，
+ *  所以 idle→viewing（点开侧栏某个会话）或 A→B 切换的第一次渲染里它还是 false，
+ *  而 `conversation` 分别还是 null / 上一会话的投影 ⇒ 会先画一帧「暂无对话」或
+ *  上一会话内容，下一拍才换骨架。冷启动路径靠 `loadingHistory` 初值修掉了，但
+ *  「空态列表 → 点开会话」没有；渲染期派生把三条路径一起覆盖：
+ *
+ *  - 首帧冷启动：`loadingHistory` 初值即 true；
+ *  - idle→viewing / A→B：`viewing` 目标与当前投影的 session_id 不一致 ⇒ true；
+ *  - live→viewing 自迁移：`conversation.session_id === mode.sessionId` ⇒ false，
+ *    保留 `shouldShowHistoryLoading` 的「后台对账不闪占位符」语义。
+ *
+ *  `settledSessionId` 是**本次选中**已落地（成功或失败）的目标会话：读取失败时
+ *  `conversation` 仍是 null，若只看「投影不一致」会让骨架永不退场、把失败说成
+ * 「还在加载」。失败时骨架必须让位给空态 + 错误横幅（同样的道理也适用于
+ * 已删除会话——那条路径直接回 idle，不经过这里）。
+ *
+ *  它的有效域是**一次选中**：`selectSession` 入口同步复位（见该处注释），所以
+ *  「落地过 → 回 idle → 再点同一会话」的第一次渲染不会命中这条短路，而是按
+ *  「投影不一致」重新挂骨架。
+ *
+ *  `live` 模式不参与：流帧自己画内容（提交后的第一帧由 composer 的提交态承接）。 */
+export function shouldShowHistorySkeleton(
+  mode: SessionMode,
+  conversation: ConversationState | null,
+  loadingHistory: boolean,
+  settledSessionId: string | null = null,
+): boolean {
+  if (loadingHistory) return true;
+  if (mode.kind !== 'viewing') return false;
+  if (settledSessionId === mode.sessionId) return false;
+  return conversation?.session_id !== mode.sessionId;
+}
+
 /** P1-3 delta 合帧提交器（HANDOFF_PERF_FRONTEND §6）：~24ms 窗口内多个 delta
  * 只触发一次 React 提交。语义边界——只合并「提交」，不合并「折叠」：每帧仍
  * 逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent 进本地 conv（真相不
@@ -252,6 +285,202 @@ export function isUnknownModelError(message: string | null | undefined): boolean
   );
 }
 
+/** #1367（P0-3）：错误文案分层——**纯呈现层**，不改任何上报链路。
+ *
+ *  输入是两种既有事实：① 投影里的 `run_failure`（`run/failed.data.reason` +
+ *  `message`，后端 `model/failure.py` 已把能分类的故障写成固定可读句）；
+ *  ② 单槽 `error` 横幅的原文（`提交失败：…` / `续聊失败：…`，含浏览器抛的
+ *  `Failed to fetch`）。输出「一句人话原因 + 一句去哪里改 + 原始详情」。
+ *
+ *  401 与 400 在**事件载荷里本来就不同**：后端的未分类兜底句把 HTTP 状态码写进
+ *  `message`（`运行失败（X，HTTP 401）：…`），分类命中的故障则给稳定 reason
+ *  （`provider_auth_failed` / `provider_model_not_found`）。分层只读这两处，
+ *  不猜、不改后端。
+ *
+ *  红线：面向用户的 title/hint **绝不出现「见后端日志」**（小白没有后端，Lane H
+ *  卡点 2）；后端原文只进折叠的 `detail`。 */
+export type FailureKind = 'auth' | 'model' | 'network' | 'server' | 'unknown';
+
+/** #1367：一次发送失败的回执。
+ *
+ *  `retryable` 由**写入点**声明：只有「请求根本没被受理」的失败才能安全重发；
+ *  认定不了结局的（POST 已发出、响应丢失 / 已认领的迟到失败）一律 false——
+ *  重发会重复投递或再造一个会话。
+ *
+ *  `onRetry` 是**产生失败的那次动作**的重放闭包：调用方在发起时把它绑到本次入参
+ *  上（而不是某个共享的「上一次提交」槽位）。这样条内「重试」永远重发失败的那
+ *  一次，非 Composer 入口（steer / 编辑轮次 / 队列项）不提供它，只呈现不给按钮。
+ *  渲染判据是 `retryable && onRetry !== undefined`。 */
+export interface SendFailure {
+  message: string;
+  retryable: boolean;
+  onRetry?: () => Promise<boolean> | void;
+}
+
+export interface FailureCopy {
+  kind: FailureKind;
+  /** 一句人话原因。 */
+  title: string;
+  /** 一句「去哪里改」；unknown 分支可能为空。 */
+  hint: string;
+  /** 原始详情（折叠区展示，逐字保留事实）。 */
+  detail: string;
+  /** 本次失败是否真的会带出一个可用的重试动作：既影响 network 文案措辞，
+   *  **也**决定内联条是否渲染「重试」按钮。 */
+  retryable: boolean;
+}
+
+/** 浏览器 fetch 断网 / 连接被拒的跨引擎签名（Chrome `Failed to fetch`、
+ *  Safari `Load failed`、Firefox `NetworkError`）+ 后端传输层分类文案。 */
+const NETWORK_FAILURE_MARKERS = [
+  'Failed to fetch',
+  'NetworkError',
+  'Load failed',
+  'ERR_CONNECTION',
+  'ERR_INTERNET_DISCONNECTED',
+  'ERR_NETWORK',
+  '无法连接模型供应商',
+];
+
+/** 单槽横幅前缀（`useSession` 自己写的几种）；不是用户要看的原因，剥掉。 */
+const ERROR_WRAPPER_PREFIX = /^(?:提交失败|续聊失败|继续接收失败|投递失败|加载历史事件失败)[：:]\s*/;
+
+/** 后端兜底句尾的日志指针（Lane H 卡点 2 的原句）。只从人话层剥掉，
+ *  `detail` 仍保留逐字原文。 */
+function stripLogPointer(text: string): string {
+  return text
+    .replace(/[；;，,]\s*完整原始信息见后端日志/g, '')
+    .replace(/[；;，,]\s*详见后端日志/g, '')
+    .trim();
+}
+
+/** 后端 `run/failed` 的 reason 是**开集**（异常类名也会当码值传下来，见
+ *  `lib/projection.ts::projectRunFailed`）。已有稳定语义的翻成人话；其余不把
+ *  码值摊给用户（原文仍在折叠详情里）。 */
+const REASON_HUMAN: Record<string, string> = {
+  orphaned: '运行被中断（没有正常结束）',
+  cancelled: '运行已取消',
+  interrupted: '运行被中断',
+  process_restart: '运行被进程重启打断',
+  timeout: '模型响应超时',
+  APITimeoutError: '模型响应超时',
+  RateLimitError: '模型供应商限流',
+  model_error: '模型调用出错',
+};
+
+/** `运行失败（BadRequestError，HTTP 400）：…` 的模板前缀：括号里是异常类名与
+ *  HTTP 码。类名不进人话层（审查 P3），只在折叠详情里逐字保留。 */
+const RUN_FAILURE_TEMPLATE = /^运行失败（[^）]*）\s*[：:，,]?\s*/;
+
+export function describeFailure(
+  raw: { reason?: string | null; message?: string | null } | string | null | undefined,
+  opts?: {
+    retryable?: boolean;
+    /** 失败来源：`send` = 浏览器→后端（fetch 断网），`run` = 后端→模型供应商
+     *  （run 事件已送达浏览器，后端显然是活的）。两者的处方不同，不能共用一个
+     *  「断网」桶（审查 C-P2-3）。 */
+    source?: 'send' | 'run';
+  },
+): FailureCopy {
+  const reason = typeof raw === 'string' || raw === null || raw === undefined ? null : raw.reason ?? null;
+  const detail = (typeof raw === 'string' ? raw : raw?.message ?? '').trim();
+  const retryable = opts?.retryable === true;
+  const fromRun = opts?.source === 'run';
+  const haystack = `${reason ?? ''} ${detail}`;
+  const status = /\bHTTP\s+(\d{3})\b/i.exec(detail)?.[1] ?? null;
+  const statusCode = status === null ? null : Number(status);
+
+  if (NETWORK_FAILURE_MARKERS.some((marker) => haystack.includes(marker))) {
+    return {
+      kind: 'network',
+      title: fromRun ? '连不上模型服务' : '连不上服务',
+      hint: fromRun
+        ? '服务到模型供应商的连接不通，请检查供应商地址 / 网关配置后重新发送。'
+        : retryable
+          ? '网络断了或后端没启动。检查网络后点重试。'
+          : '网络断了或后端没启动。检查网络后重新发送。',
+      detail,
+      retryable,
+    };
+  }
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    reason === 'provider_auth_failed' ||
+    /AuthenticationError|PermissionDeniedError|Unauthorized/i.test(haystack)
+  ) {
+    return {
+      kind: 'auth',
+      title: '模型的密钥不对',
+      hint: '请检查 .env 的 MODEL_API_KEY。',
+      detail,
+      retryable: false,
+    };
+  }
+  // 分类命中的非鉴权故障（内容审查 / 账户不可用）自带可读句，别硬塞进模型名分支。
+  if (reason === 'provider_content_moderation' || reason === 'provider_account_unavailable') {
+    return { kind: 'unknown', title: stripLogPointer(detail), hint: '', detail, retryable: false };
+  }
+  if (
+    reason === 'provider_model_not_found' ||
+    /model.{0,4}not.{0,4}found|模型不存在/i.test(haystack)
+  ) {
+    return {
+      kind: 'model',
+      title: '这个模型名不存在',
+      hint: '请检查 .env 的 MODEL_NAME，或在模型选择器里换一个模型。',
+      detail,
+      retryable: false,
+    };
+  }
+  // 裸 4xx 的未分类兜底：后端原文是「模型供应商拒绝了请求」，涵盖参数非法 /
+  // 上下文超限 / 词表拒绝等——**不等于**模型名不存在。给中性文案 + 原文详情，
+  // 不提供错误处方（审查 C-P2-4；票面「400 → MODEL_NAME」的表述收窄为
+  // 「带 `provider_model_not_found` 判据才算模型名问题」）。
+  if (statusCode === 400 || statusCode === 404) {
+    return {
+      kind: 'unknown',
+      title: `请求被供应商拒绝（HTTP ${statusCode}）`,
+      hint: '',
+      detail,
+      retryable: false,
+    };
+  }
+  if (statusCode !== null && statusCode >= 500) {
+    return {
+      kind: 'server',
+      title: `模型服务出错了（HTTP ${statusCode}）`,
+      hint: '服务端暂时不可用，稍后重新发送。',
+      detail,
+      retryable: false,
+    };
+  }
+  const human = stripLogPointer(detail.replace(ERROR_WRAPPER_PREFIX, ''));
+  /* 人话层不摊码值/异常类名（审查 P3）：带 `运行失败（X，HTTP n）：…` 模板的
+     原文只留「运行失败（HTTP n）：<原因句>」，括号里的类名留给折叠详情；
+     reason 开集里已知的几个翻成中文，未知的只落兜底「运行失败」。 */
+  const template = RUN_FAILURE_TEMPLATE.exec(human);
+  const statusLabel = statusCode === null ? null : `运行失败（HTTP ${statusCode}）`;
+  let title: string;
+  if (template !== null) {
+    const rest = human.slice(template[0].length).trim();
+    const label = statusLabel ?? '运行失败';
+    title = rest === '' ? label : `${label}：${rest}`;
+  } else if (human !== '') {
+    title = human;
+  } else {
+    const known = reason === null ? undefined : REASON_HUMAN[reason];
+    title = statusLabel ?? known ?? '运行失败';
+  }
+  return {
+    kind: 'unknown',
+    title,
+    hint: '',
+    detail,
+    retryable: false,
+  };
+}
+
 /** 续聊 422 的稳定文案（handoff §5 P2，P1 修复后）：/messages 的 422 现在可能来自
  *  session_id 非法 / 未知 model 或 context_providers（仅 idle→launched 时校验）/
  *  非法 reasoning_effort 或 agent_profile 取值——不再等同于「未知模型」。
@@ -302,7 +531,7 @@ export type FollowUpOutcome =
  *  也没法手写 POST。所以用户层换成这一句，把「发生了什么 + 下一步点哪里」说清楚；
  *  协议原文仍留在裁决面板的 `message` 里（折叠/次要位置），不丢事实。 */
 export const RECOVERY_CONFLICT_ERROR_TEXT =
-  '会话待人工裁决：有高风险操作的结果未知（不知道它到底生没生效），请先在下方裁决面板逐条处理，' +
+  '会话需要你来决定：有高风险操作的结果未知（不知道它到底有没有生效），请先在下方待处理列表里逐条处理，' +
   '完成后再重发这条消息';
 
 /** 把一条已落定的 `/messages` 响应映射成「接下来做什么」。**纯函数**，窗内窗外共用
@@ -348,7 +577,7 @@ export function decideFollowUpOutcome(input: {
         pendingDecisions,
       };
     }
-    return { kind: 'fail', text: detail || '存在需要人工裁决的高风险操作' };
+    return { kind: 'fail', text: detail || '存在需要你决定的高风险操作' };
   }
   if (status === 422) return { kind: 'fail', text: CONTINUE_PARAMS_ERROR_TEXT };
   if (status === 404) {
@@ -409,8 +638,21 @@ export function useSession() {
     return stored ? { kind: 'viewing', sessionId: stored } : { kind: 'idle' };
   });
   const [conversation, setConversation] = useState<ConversationState | null>(null);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  /** #1371：首帧就带会话（localStorage 恢复）时，历史还没开始读——初值直接 true，
+   *  避免 effect 落地前先画一帧「暂无对话」空态。effect 仍按 `switchingSession`
+   *  接管后续迁移（同会话对账不闪骨架）。 */
+  const [loadingHistory, setLoadingHistory] = useState(() => mode.kind !== 'idle');
   const [error, setError] = useState<string | null>(null);
+  /** #1367（P0-3）：**本次提交/续聊**的失败回执（断网类由此走对话区内联条）。
+   *
+   *  为什么不直接复用上面的 `error`：它是**单槽**，后面任何一条无关错误
+   *  （加载历史失败、投递失败……）都会把它顶掉，而内联条上的「重试」绑定的是
+   *  「重发刚刚这次 submit」——拿单槽去推断动作归属，会把别人的错误接上重发
+   *  旧任务的动作（会重复造会话）。本字段只在两个发送入口的失败分支写入、
+   *  在入口处与切会话时清空，`retryable` 由写入点自己声明（投递已被受理的
+   *  迟到失败不给重试，重发会重复投递）。它不改任何上报链路，只是同一句失败
+   *  原文的呈现层副本。 */
+  const [sendFailure, setSendFailure] = useState<SendFailure | null>(null);
   /** 会话**列表**加载失败原因（F9 / 真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。
    *
    *  为什么是独立一条通道、而不是复用上面的 `error`：`error` 是**单槽**主区横幅，
@@ -420,6 +662,13 @@ export function useSession() {
    *  区域级通道不会被后续错误顶掉，与既有的 `projectsError`（同文件旁边的项目列表）
    *  完全同形——两者是同一类事实，不该一个有一个没有。 */
   const [sessionsError, setSessionsError] = useState<string | null>(null);
+  /** #1371：会话列表**首次**加载的显式状态位（骨架屏的挂载依据）。
+   *
+   *  `sessions === []` 同时是「正在加载」与「确实没有会话」的形状——骨架屏不能靠
+   *  空数组猜。这里只加一个视图状态：首次请求 settle（成功或失败）即置 false，
+   *  之后的刷新不再闪骨架（旧列表继续显示）。数据流（`sessions` 的唯一写入者）不变。 */
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const sessionsLoadedRef = useRef(false);
   // Session Rail 行标题缓存（Session Model E 轮）：查看某会话时从首条 user/message
   // 投影出标题，本地缓存供 SessionList 行渲染。无缓存时回退到短 ID——不伪造。
   const [titlesById, setTitlesById] = useState<Record<string, string>>({});
@@ -539,6 +788,16 @@ export function useSession() {
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
   const streaming = mode.kind === 'live';
+  /** #1371：已落地（成功或失败）的目标会话。见 `shouldShowHistorySkeleton` 的
+   *  `settledSessionId` 参数：读取失败时不能继续挂骨架。 */
+  const [historySettledId, setHistorySettledId] = useState<string | null>(null);
+  /** #1371：对话区骨架的渲染判据（渲染期派生，覆盖 effect 落地前的那一帧）。 */
+  const historySkeleton = shouldShowHistorySkeleton(
+    mode,
+    conversation,
+    loadingHistory,
+    historySettledId,
+  );
 
   // Load session list on mount.
   /** 重新拉取会话列表。返回**是否成功**——`sessions` 的唯一写入者，所以调用方
@@ -572,6 +831,12 @@ export function useSession() {
     } catch (e) {
       setSessionsError(`加载会话列表失败：${(e as Error).message}`);
       return false;
+    } finally {
+      // 首次 settle（成功或失败）即收起骨架；失败态由 sessionsError 单独表达。
+      if (!sessionsLoadedRef.current) {
+        sessionsLoadedRef.current = true;
+        setSessionsLoading(false);
+      }
     }
   }, []);
 
@@ -612,9 +877,19 @@ export function useSession() {
     prevModeRef.current = mode;
     if (mode.kind === 'idle') {
       setConversation(null);
+      // #1371：这里**必须**复位。旧实现两支直接 return，而 `finally` 的写入会被
+      // cleanup 的 `cancelled=true` 跳过 ⇒ 若用户在历史落地前点「新建会话」，或
+      // 历史未落地就发送（mode 变 live），`loadingHistory` 会永久停在 true：
+      // 骨架屏（role=status 的 shimmer）从此不退场，整片对话区是空白，用户连
+      // 「正在加载」都看不到。live 期间复位是安全的——流帧自己画内容；回到
+      // viewing 时 effect 会按 `shouldShowHistoryLoading` 重新裁决。
+      setLoadingHistory(false);
       return;
     }
-    if (mode.kind !== 'viewing') return;
+    if (mode.kind !== 'viewing') {
+      setLoadingHistory(false);
+      return;
+    }
     const sid = mode.sessionId;
     let cancelled = false;
     // live→viewing 迁移：conversation 已是同会话真相，后台静默重读对账，
@@ -629,7 +904,10 @@ export function useSession() {
     // 不这么做，真机表现是「面板出现了，但 409 那句话同帧消失」。
     // ⚠ 顺序不能动：这句在下面 `setError('续聊失败：…')` 之前跑，判的是**上一拍**
     // 的 `mode`（即「发送前就是 viewing」）——正是 `switchingSession` 的定义。
-    if (switchingSession) setError(null);
+    if (switchingSession) {
+      setError(null);
+      setSendFailure(null);
+    }
     // #1193：plan-stuck 横幅**不需要**在这里清——它是 `conversation.events` 的
     // 投影，切会话即随新会话的事件重建（旧会话的记录不跨会话存活；切回来时
     // 事件仍在，横幅照旧在场——这正是它该有的样子）。
@@ -672,10 +950,19 @@ export function useSession() {
           setMode({ kind: 'idle' });
           return;
         }
+        // #1371：切会话（或首开）失败时，`conversation` 还是**上一会话**的投影：
+        // 收骨架（`finally` 记 settled）之后它会被当成目标会话的正文画在新标题下，
+        // 与「失败退到空态 + 错误横幅」的契约相悖。同会话后台重读失败不清——
+        // 那份投影本来就属于这个会话，错误横幅是唯一该变的东西。
+        if (switchingSession) setConversation(null);
         setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
-        if (!cancelled) setLoadingHistory(false);
+        if (!cancelled) {
+          setLoadingHistory(false);
+          // 成功与失败都要记：失败时 `conversation` 仍是 null，判据靠这条收骨架。
+          setHistorySettledId(sid);
+        }
       });
     return () => {
       cancelled = true;
@@ -1115,9 +1402,16 @@ export function useSession() {
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,
-      opts?: { ownError?: boolean; onWorktreeCreated?: (path: string) => void },
+      opts?: {
+        ownError?: boolean;
+        onWorktreeCreated?: (path: string) => void;
+        /** #1367：失败回执的「重试」动作——由**发起这次提交的入口**绑定本次入参
+         *  （见 `SendFailure.onRetry`）。不传 = 这条失败不给重试按钮。 */
+        onRetry?: () => Promise<boolean> | void;
+      },
     ): Promise<string | null> => {
       setError(null);
+      setSendFailure(null);
       setConversation(null);
       liveSidRef.current = null;
       setReconnecting(false);
@@ -1128,6 +1422,13 @@ export function useSession() {
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: null });
+      /** #1321 AC4 / #1367 审查 P1-1：POST 已发出、且「短窗内落定」没有给出结论
+       *  （= 已进入差分认领）之后，**任何**抛错都不能断言「请求没被受理」——
+       *  认领超时与 POST 的迟到网络错误都属这一类。只有在这里之前的失败
+       *  （短窗 4xx/422、或基线都读不到的降级路径）才允许给重试。
+       *  判据是流程位置，不是错误类型（`instanceof` 反推会把 `late.failure`
+       *  这条最危险的形态判成「可重发」）。 */
+      let claimOutcomeUnknown = false;
       try {
         // 交付层（EdgeOne / CloudStudio Gateway）会把整个 SSE 响应攒到**流结束**
         // 才下发（实测 `POST /api/sessions` 的响应头要 44.2s 才到 ≈ run 全长），
@@ -1193,6 +1494,10 @@ export function useSession() {
         // ⚠ 分工（#1148 双轴审查 P2）：`late.failure` **只**供下面 `discoverNewSessionId`
         // 抛错时取用（认领超时的兜底原因）；认领**成功**之后的 POST 失败不走它，走
         // 下方 `started.catch` 的回填通道。两条通道互斥，别把 `late.failure` 当活代码读。
+        //
+        // #1367 审查 P1-1：从这里起 POST 已在途、结局只能靠认领确认 ⇒ 任何失败都
+        // 不给重试（见 `claimOutcomeUnknown` 注释）。
+        claimOutcomeUnknown = true;
         const late = { failure: null as Error | null };
         started.catch((e) => {
           late.failure = e instanceof Error ? e : new Error(String(e));
@@ -1235,7 +1540,10 @@ export function useSession() {
           if (streamGenRef.current !== gen) return;
           if (opts?.ownError) return;
           reportDetachedFailure(payload.task);
-          setError(`提交失败：${(e as Error).message}`);
+          const message = `提交失败：${(e as Error).message}`;
+          setError(message);
+          // 会话已认领、POST 迟到失败：重发会造出第二个会话 ⇒ 只呈现、不给重试。
+          setSendFailure({ message, retryable: false });
         });
         // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
@@ -1249,22 +1557,23 @@ export function useSession() {
         if (streamGenRef.current !== gen) return '提交已被新的会话取代';
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
-        // #1321 AC4：认领超时 != 提交失败。差分轮询超时只说明「还没在列表里
-        // 认出新会话」，而 POST 已经发出、后端通常已经落盘（票面实测：页面报
-        // 失败时会话其实已在跑）。把它渲染成「提交失败」会让用户重试，从而
-        // 造出第二个会话。这里改用可行动提示，并保留输入框原文（返回非 null）。
-        let message: string;
-        if (e instanceof SessionClaimTimeoutError) {
-          message = `提交可能已成功，但未接上会话：${e.message}。请刷新页面后从左侧会话列表继续。`;
-        } else if (e instanceof SessionClaimAmbiguousError) {
-          // #1333：歧义也不是提交失败（会话很可能已创建，只是无法确认
-          // 是哪一条）。渲染成「提交失败」会诱导用户重试、造出重复会话
-          //（#1321 AC4 同一教训）。文案里保留可识别的「无法确认」。
-          message = `提交可能已成功，但${e.message}。请刷新页面后从左侧会话列表找到本次提交的会话。`;
-        } else {
-          message = `提交失败：${(e as Error).message}`;
+        // #1367 审查 P1-1：`claimOutcomeUnknown` 把同一条守卫扩到**所有**认领期
+        // 失败——尤其是「POST 迟到网络错误」（`late.failure`），它此前抛的是普通
+        // Error，被 `instanceof SessionClaimTimeoutError` 判成可重发，正是最危险的
+        // 「服务端很可能已落盘」形态。结局不明一律不可重试；能证明没受理的
+        // （短窗 4xx / 降级路径的 POST 失败）才给重试动作。
+        const outcomeUnknown = claimOutcomeUnknown;
+        const message = outcomeUnknown
+          ? `提交可能已成功，但未接上会话：${(e as Error).message}。请刷新页面后从左侧会话列表继续。`
+          : `提交失败：${(e as Error).message}`;
+        if (!opts?.ownError) {
+          setError(message);
+          setSendFailure({
+            message,
+            retryable: !outcomeUnknown,
+            ...(outcomeUnknown || opts?.onRetry === undefined ? {} : { onRetry: opts.onRetry }),
+          });
         }
-        if (!opts?.ownError) setError(message);
         return message;
       }
     },
@@ -1487,6 +1796,7 @@ export function useSession() {
       },
     ): Promise<boolean> => {
       setError(null);
+      setSendFailure(null);
       // 上一次的失败回执到此作废（#1148）：它只对触发它的那次投递有意义，已经兑现过
       // （用户拿到过那段原文）就该清掉——否则任何一次 Composer 重挂都会把这段旧原文
       // 再注入一次，而那条消息可能早已重发成功。
@@ -1660,7 +1970,9 @@ export function useSession() {
               if (streamGenRef.current !== myGen) return;
               myGen = ++streamGenRef.current;
               setMode({ kind: 'viewing', sessionId });
-              setError(`续聊失败：${(e as Error).message}`);
+              const message = `续聊失败：${(e as Error).message}`;
+              setError(message);
+              setSendFailure({ message, retryable: false });
               reportDetachedFailure(content);
               return;
             }
@@ -1679,7 +1991,9 @@ export function useSession() {
                这次投递。 */
             myGen = ++streamGenRef.current;
             setMode({ kind: 'viewing', sessionId });
-            setError(`续聊失败：${(e as Error).message}`);
+            const message = `续聊失败：${(e as Error).message}`;
+            setError(message);
+            setSendFailure({ message, retryable: false });
             reportDetachedFailure(content);
           });
         // await 期间已被取代（切会话 / 取消 / 又发了一条）⇒ 到此为止：下面两行会
@@ -1722,7 +2036,14 @@ export function useSession() {
            「保留输入」契约覆盖的那一支）。改 mode 会触发历史装载 effect：它整表重建
            conversation，并把还没进事件流的用户文本从界面上抹掉——「保留输入」这个
            契约当场自相矛盾。 */
-        setError(`续聊失败：${(e as Error).message}`);
+        const message = `续聊失败：${(e as Error).message}`;
+        setError(message);
+        /* #1367 审查 C-P2-1：**不给重试**。窗内 fetch reject 只证明「响应没回来」，
+           不能证明请求没被受理——服务端可能已 launched/queued，重发会重复投递
+           （与 composer 保留文本形成第二条重发通道）。票面的「断网重试」由新建
+           会话路径（`submitTask` 的降级支）满足；这里只呈现原因，用户按 Enter
+           重新发送时由自己确认。 */
+        setSendFailure({ message, retryable: false });
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
@@ -1767,6 +2088,12 @@ export function useSession() {
     // 用户显式切到某个会话 = 明确要看它：忘掉自动接流的去重记账，让「切走
     // 再切回来」照常再接一次（自动重入的死循环不经过这里，断点仍在）。
     if (id) resumeAttemptedRef.current = forgetResumeAttempt(resumeAttemptedRef.current, id);
+    // #1371：`historySettledId` 只对**这一次选中**有效。不在这里同步复位的话，
+    // 「A 已落地 → 新建会话 → 再点 A」的第一次渲染会命中 `settled === A` 的短路：
+    // 此时 `conversation` 已被 idle 分支清空、`loadingHistory` 也被复位 ⇒ 先画一帧
+    // 「暂无对话」，装载 effect 下一拍才换骨架。复位必须在这个事件处理器里（与
+    // `setMode` 同批提交），放进 effect 就晚一帧了。
+    setHistorySettledId(null);
     streamGenRef.current += 1;
     stallCheckRef.current = null;
     setReconnecting(false);
@@ -2260,7 +2587,7 @@ export function useSession() {
             if (i === 2) {
               const detail = await readErrorDetail(res);
               throw new Error(
-                detail || '投递被拒绝（409）：在途 run 未收口，或存在需人工裁决的遗留操作',
+                detail || '发送被拒绝：这次任务还没结束，或还有需要你决定的遗留操作',
               );
             }
             await new Promise((r) => setTimeout(r, 1000));
@@ -2325,12 +2652,15 @@ export function useSession() {
 
   return {
     sessions,
+    sessionsLoading,
     selectedId,
     conversation,
     loadingHistory,
+    historySkeleton,
     streaming,
     reconnecting,
     error,
+    sendFailure,
     runFailedBeforePlan,
     sessionsError,
     titlesById,
@@ -2357,3 +2687,6 @@ export function useSession() {
     resyncAfterDecision,
   };
 }
+
+/** hook 的返回值契约（测试替身与消费者按名引用，不各自算 `ReturnType<typeof …>`）。 */
+export type SessionApi = ReturnType<typeof useSession>;

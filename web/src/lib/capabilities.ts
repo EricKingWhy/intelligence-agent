@@ -74,6 +74,10 @@ export const DEFAULT_SURFACES: Readonly<Record<SurfaceKey, boolean>> = {
 export interface CapabilityDescriptor {
   id: string;
   surfaces: Partial<Record<SurfaceKey, boolean>>;
+  /** #1420：部署级「上下文洞察」模块开关（后端 core 条目下发）。
+   *  只认布尔；缺省（旧后端 / 插件条目）**不是 false 的别名**——入口显隐按
+   *  `insightsAvailable` 统一判「任一能力显式 true」，缺键即关闭。 */
+  insights?: boolean;
 }
 
 /** 响应体解析：**防御式**，坏数据一律降级成空列表（能力是可选供给，不该炸界面）。
@@ -96,8 +100,21 @@ export function parseCapabilities(body: unknown): CapabilityDescriptor[] {
         if (typeof s[key] === 'boolean') surfaces[key] = s[key];
       }
     }
-    return [{ id: r.id, surfaces }];
+    const descriptor: CapabilityDescriptor = { id: r.id, surfaces };
+    // #1420：`insights` 只认布尔。字符串 "true" / 1 之类不是契约（与 surfaces 同口径）。
+    if (typeof r.insights === 'boolean') descriptor.insights = r.insights;
+    return [descriptor];
   });
+}
+
+/** #1420：洞察入口是否可见。**任一**能力显式声明 `insights: true` 才开；
+ *  能力数据拿不到（null / 空列表）、旧后端缺键、或部署关掉模块 → false。
+ *  与 `deriveSurfaces` 的并集语义一致；缺省不补 true——标志缺失 = 隐藏入口。 */
+export function insightsAvailable(
+  capabilities: readonly CapabilityDescriptor[] | null | undefined,
+): boolean {
+  if (!capabilities) return false;
+  return capabilities.some((capability) => capability.insights === true);
 }
 
 /** 能力列表 → 每个面是否可见。
@@ -152,11 +169,11 @@ export function resolveActiveTab(
  *  `←/→` 是横排 tab 的标准键；`↑/↓` 一并支持（票面只说"方向键"，横排下不该失效）。
  *  与 tab 无关的键返回 `null`——组件据此**不 preventDefault**，不吞掉别的按键语义。
  */
-export function tabKeyTarget(
-  tabs: readonly { key: SurfaceKey }[],
-  active: SurfaceKey,
+export function tabKeyTarget<K extends string>(
+  tabs: readonly { key: K }[],
+  active: K,
   key: string,
-): SurfaceKey | null {
+): K | null {
   if (tabs.length === 0) return null;
   const at = Math.max(
     0,

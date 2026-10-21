@@ -1,0 +1,1 @@
+2026-10-20	#1419 视觉保真度返工：G/T/O/C/M/A/R 六段对齐融合版效果图 + 标题误报修复（审查轮 5 文件：failureReason 只认信封 ok===false + exit_code 进标题、aria-expanded 归位卡头按钮、ChangesTab diff 单次计算、LiveElapsed 只挂 running 卡、运行态斜纹 40% 混色；另补 verification map 两行）	1508b6b3d..081784779

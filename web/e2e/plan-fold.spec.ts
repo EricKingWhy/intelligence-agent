@@ -110,7 +110,7 @@ test('#1184 progress panel stays in layout without covering messages or composer
     await page.setViewportSize(viewport);
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    await expect(toggle).toContainText('✓ 本次运行结束 11/17');
+    await expect(toggle).toContainText('✓ 本次任务结束 11/17');
 
     const stripBox = await toggle.boundingBox();
     const collapsedScroll = await scroll.boundingBox();

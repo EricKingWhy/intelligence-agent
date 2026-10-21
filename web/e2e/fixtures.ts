@@ -1870,6 +1870,10 @@ export async function pickControl(
   expected: string,
 ): Promise<void> {
   const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+  // #1405：Agent / Reasoning 默认收在「更多」披露里；未展开时先展开。
+  if (!(await trigger.isVisible())) {
+    await openMore(page);
+  }
   // `:visible` 限定当前打开的浮层：关闭动画期间上一层 listbox 仍是 DOM 节点，
   // 不加过滤会 strict mode violation（探针实测命中 2 个）。
   const listbox = page.locator('[role="listbox"]:visible').last();
@@ -1886,6 +1890,25 @@ export async function pickControl(
   // 不等它真正卸载，下一次 open 的 Enter 会撞在正在关闭的浮层上——表现为
   // 「浮层像是开了，选中却没生效」，且只在连续两次调用时复现（探针实测）。
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+}
+
+/** #1405：展开 Composer 的「更多」披露（Agent / 推理深度）。幂等。 */
+export async function openMore(page: Page): Promise<void> {
+  const trigger = page.getByRole('button', { name: '更多设置' });
+  if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
+    await trigger.click();
+  }
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+}
+
+/** #1405：规则开关在附件「+」菜单里。打开菜单 → 点选开关（菜单随之关闭），
+ *  用 dock 里出现的作用域三选一作为"已勾选"的可见结果断言。 */
+export async function toggleReusableRule(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '添加图片' }).click();
+  const item = page.locator('#remember-as-procedural-rule');
+  await expect(item).toHaveAttribute('aria-checked', 'false');
+  await item.click();
+  await expect(page.getByRole('group', { name: '登记作用域' })).toBeVisible();
 }
 
 /** 选二级列表里的**第一个可选模型**（`FIRST_SELECTABLE_MODEL`，#1016 后默认条目
@@ -1937,6 +1960,14 @@ async function activeMenuItem(page: Page): Promise<string> {
 export async function pressMenuItemKey(page: Page, key: string, expected: string): Promise<void> {
   await page.keyboard.press(key);
   await expect.poll(() => activeMenuItem(page), { message: `${key} 之后焦点应移到 ${expected}` }).toContain(expected);
+}
+
+/** #1372：顶栏收纳后，配置 / 诊断类入口（身份令牌、上下文容量、上下文窗口、
+ *  持久审批规则、自动值班、Inspector 开关）在「更多工具」菜单里。Radix 菜单关闭即
+ *  卸载 ⇒ 每次调用都从打开菜单开始；菜单项是 `menuitem` 角色，不是 `button`。 */
+export async function clickTopBarMenuItem(page: Page, name: string): Promise<void> {
+  await page.getByRole('button', { name: '更多工具' }).click();
+  await page.getByRole('menuitem', { name }).click();
 }
 
 /** 打开模型菜单（键盘路径）并等初焦落到菜单项上（同 `pressMenuItemKey` 的延迟移焦成因）。 */
@@ -2089,4 +2120,56 @@ export async function mockAuthRequired(page: Page): Promise<void> {
       body: JSON.stringify({ detail: 'Missing identity token' }),
     }),
   );
+}
+
+/** #194 / #1368：一个「服务端仍在跑」的会话夹具——mock 只给有限帧、模式停在 live，
+ *  提交任务后界面维持流式态（停止按钮 + Esc 提示常驻）。`o-wait-hint.spec.ts` 同款手法。
+ *
+ *  放在这里而不是各 spec 各写一份：流式×动作簇（#194）与流式×抽屉（#1368）考的是
+ *  同一件事（"动作簇在场时谁给谁让位"），夹具漂移会让两条断言测不同的世界。 */
+export const LIVE_FRAMES: FrameSpec[] = [
+  { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+  { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+  { type: 'user/message', data: { content: '跑一下' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+];
+
+export async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES): Promise<void> {
+  await routeApi(page, {
+    sessions: [
+      {
+        session_id: SID,
+        event_count: frames.length,
+        first_event_time: T,
+        last_event_time: T,
+        first_user_message: '跑一下',
+        trace_id: null,
+        trace_url: null,
+      },
+    ],
+    models: MODELS,
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+    onSessionPost: (route) => fulfillSse(route, frames),
+    // 服务端仍在跑（模型还没吐新内容）：快照即全量、连接保持——这正是「流式中」
+    // 的真相，界面必须维持生成态（停止按钮 / Esc 提示在场）。
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+    events: frames,
+  });
+}
+
+/** Inspector 拖宽的实际上限（#1419）：`min(820, available − 360)`，而
+ *  `available = 中心列 clientWidth + 面板宽`（StepDetail 的 `onResizeStart` 口径，
+ *  不含面板边框）。available 随视口变 ⇒ e2e 两档视口的上限不同（1280 → 660、
+ *  1920 → 820），断言里写死 820 只在 1920 成立。
+ *
+ *  面板拖宽时中心列等量变窄、两者之和不变，所以任意时刻量都对。 */
+export async function inspectorCeiling(page: Page): Promise<number> {
+  const available = await page.evaluate(() => {
+    const ws = document.querySelector('.app-workspace');
+    const now = Number(document.querySelector('.detail-resizer')?.getAttribute('aria-valuenow'));
+    if (!(ws instanceof HTMLElement) || !Number.isFinite(now)) throw new Error('量不到中心列/手柄');
+    return ws.clientWidth + now;
+  });
+  return Math.max(320, Math.min(820, Math.round(available - 360)));
 }

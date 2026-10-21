@@ -244,7 +244,7 @@ describe('#353 TaskReviewPanel — 文件/diff/快照', () => {
 });
 
 describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
-  it('失败尝试列出 failed 验收项；UNKNOWN 留槽显示"需 reconcile（来源未接入）"不推断', async () => {
+  it('失败尝试列出 failed 验收项；UNKNOWN 留槽显示"需核对（来源未接入）"不推断', async () => {
     getTaskState.mockResolvedValue(taskState({
       criteria: [criterion('ac-1', '导入去重'), criterion('ac-2', '错误行不谎报完成')],
       verification: {
@@ -255,10 +255,10 @@ describe('#353 TaskReviewPanel — 失败尝试 / UNKNOWN / 三操作', () => {
     }));
     await renderPanel();
     expect(host.querySelector('.task-review-section[aria-label="失败尝试"]')?.textContent).toContain('错误行不谎报完成');
-    expect(text()).toContain('需 reconcile（来源未接入）');
+    expect(text()).toContain('需核对（来源未接入）');
     const diagnostics = host.querySelector('.task-review-diagnostic-disclosure') as HTMLDetailsElement;
     expect(diagnostics.open).toBe(false);
-    expect(diagnostics.textContent).toContain('Operation Ledger');
+    expect(diagnostics.textContent).toContain('操作记录');
     // #1325 S3：对照表要求整行删除内部投影术语（普通用户不需要理解）。
     expect(diagnostics.textContent).not.toContain('open_run_ids');
     expect(diagnostics.textContent).not.toContain('交付投影');

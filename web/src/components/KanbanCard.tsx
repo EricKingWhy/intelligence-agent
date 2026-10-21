@@ -207,17 +207,17 @@ export function KanbanCard({ session, now, draggable, onDragStart, unread, onOpe
             }}
           >
             <ChevronDown size={14} className="chev" aria-hidden="true" />
-            <span className="roster-label">子智能体</span>
+            <span className="roster-label">子任务</span>
           </button>
 
           {expanded && roster.status === 'loading' && (
             <p className="kanban-card-hint">加载中…</p>
           )}
           {expanded && roster.status === 'error' && (
-            <p className="kanban-card-hint">子智能体加载失败</p>
+            <p className="kanban-card-hint">子任务加载失败</p>
           )}
           {expanded && roster.status === 'ready' && roster.rows.length === 0 && (
-            <p className="kanban-card-hint">无子智能体</p>
+            <p className="kanban-card-hint">无子任务</p>
           )}
           {expanded &&
             roster.status === 'ready' &&

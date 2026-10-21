@@ -38,6 +38,13 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   onSubmit = vi.fn<(...args: SubmitArgs) => void>();
+  // Radix DropdownMenu（#1405 附件菜单）依赖 ResizeObserver；jsdom 没有。
+  vi.stubGlobal('ResizeObserver', class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  });
+  Element.prototype.scrollIntoView = () => {};
 });
 
 afterEach(() => {
@@ -63,8 +70,24 @@ function paint(projectAvailable: boolean | null = null): void {
   });
 }
 
-const checkbox = (): HTMLInputElement =>
-  container.querySelector<HTMLInputElement>('#remember-as-procedural-rule')!;
+const addTrigger = (): HTMLButtonElement =>
+  container.querySelector<HTMLButtonElement>('button[aria-label="添加图片"]')!;
+/** #1405：规则开关在附件「+」菜单里，portal 渲染到 document.body。 */
+const ruleItem = (): HTMLElement | null =>
+  document.querySelector<HTMLElement>('#remember-as-procedural-rule');
+function toggleRule(): void {
+  act(() => {
+    const trigger = addTrigger();
+    trigger.focus();
+    trigger.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+  });
+  expect(ruleItem()).not.toBeNull();
+  act(() => {
+    ruleItem()!.click();
+  });
+}
 const pills = (): HTMLButtonElement[] =>
   [...container.querySelectorAll<HTMLButtonElement>('button.composer-scope-pill')];
 const pillByText = (label: string): HTMLButtonElement => {
@@ -95,6 +118,21 @@ function pressEnter(): void {
 }
 
 describe('Composer 登记作用域（#1191 Phase 2）', () => {
+  it('#1405：规则开关只在附件菜单里出现，不常驻 dock', () => {
+    paint();
+    expect(ruleItem()).toBeNull();
+    act(() => {
+      const trigger = addTrigger();
+      trigger.focus();
+      trigger.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(ruleItem()).not.toBeNull();
+    expect(ruleItem()!.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(ruleItem()!.getAttribute('aria-checked')).toBe('false');
+  });
+
   it('未勾选：不渲染三选一与 hint', () => {
     paint();
     expect(pills().length).toBe(0);
@@ -103,7 +141,7 @@ describe('Composer 登记作用域（#1191 Phase 2）', () => {
 
   it('勾选后出现三选一，默认「本会话」选中，hint 逐字（票面 §四.1/§四.2）', () => {
     paint();
-    act(() => checkbox().click());
+    toggleRule();
     expect(pills().map((b) => (b.textContent ?? '').trim())).toEqual([
       '本会话',
       '本项目',
@@ -116,7 +154,7 @@ describe('Composer 登记作用域（#1191 Phase 2）', () => {
 
   it('切换选中项 → hint 逐字跟随', () => {
     paint();
-    act(() => checkbox().click());
+    toggleRule();
     act(() => pillByText('本项目').click());
     expect(hintText()).toBe('写入项目级存储，本仓库开的所有会话都生效，别的项目不受影响。');
     act(() => pillByText('我的全局').click());
@@ -125,7 +163,7 @@ describe('Composer 登记作用域（#1191 Phase 2）', () => {
 
   it('非 git（projectAvailable=false）→ 「本项目」置灰不可选（票面 §七.4）', () => {
     paint(false);
-    act(() => checkbox().click());
+    toggleRule();
     expect(pillByText('本项目').disabled).toBe(true);
     expect(pillByText('本会话').disabled).toBe(false);
     expect(pillByText('我的全局').disabled).toBe(false);
@@ -133,7 +171,7 @@ describe('Composer 登记作用域（#1191 Phase 2）', () => {
 
   it('提交：默认「本会话」→ scope=session', async () => {
     paint(true);
-    act(() => checkbox().click());
+    toggleRule();
     await typeText('记住：TDD 先行');
     pressEnter();
     expect(onSubmit).toHaveBeenLastCalledWith('记住：TDD 先行', true, [], 'session');
@@ -141,7 +179,7 @@ describe('Composer 登记作用域（#1191 Phase 2）', () => {
 
   it('提交：选「本项目」→ scope=project', async () => {
     paint(true);
-    act(() => checkbox().click());
+    toggleRule();
     act(() => pillByText('本项目').click());
     await typeText('本项目都要 TDD');
     pressEnter();

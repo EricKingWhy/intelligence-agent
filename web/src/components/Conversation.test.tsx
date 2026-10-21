@@ -2,7 +2,7 @@
  *  done 段一次性 markdown——HANDOFF_PERF_FRONTEND §6 P0-2 方案 a）。 */
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChainNodeView, TurnView } from './Conversation';
+import { ChainNodeView, Conversation, TurnView } from './Conversation';
 import type { ChainNode } from '../lib/projection';
 import type { ReasoningBlock, ToolCall, Turn } from '../types';
 import type { Disclosure } from '../lib/disclosure';
@@ -220,13 +220,24 @@ describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10
         onOpenSession={() => undefined}
       />,
     );
-    expect(withEntries).toContain('Inspect 子会话');
+    expect(withEntries).toContain('查看子会话');
     expect(withEntries).toContain('打开子会话');
     const without = renderToStaticMarkup(
       <ChainNodeView node={delegationNode} density="balanced" />,
     );
-    expect(without).not.toContain('Inspect 子会话');
+    expect(without).not.toContain('查看子会话');
     expect(without).not.toContain('打开子会话');
+  });
+
+  it('target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView
+        node={{ kind: 'delegation', delegation: { ...delegationNode.delegation, target: '' } }}
+        density="balanced"
+      />,
+    );
+    expect(html).toContain('委派 → —');
+    expect(html).not.toContain('委派 → ?');
   });
 });
 
@@ -297,7 +308,7 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
       <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
     );
     expect(html).toContain('fork-btn');
-    expect(html).toContain('分叉');
+    expect(html).toContain('从这里另开一条新会话');
   });
 
   it('无锚点（user_message_seq 为 null）→ 不渲染按钮（不造假入口）', () => {
@@ -326,14 +337,40 @@ describe('TurnView — 分叉入口（BUG-001）', () => {
       <TurnView turn={turn()} model={null} density="balanced" onFork={onFork} isFirstUserTurn />,
     );
     expect(html).toContain('fork-btn');
-    expect(html).toContain('空会话');
+    expect(html).toContain('新会话会是空的');
   });
 
   it('非第 1 轮：沿用常规标题（不出现空会话提示）', () => {
     const html = renderToStaticMarkup(
       <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
     );
-    expect(html).toContain('从此处分叉新会话');
-    expect(html).not.toContain('空会话');
+    expect(html).toContain('从这里另开一条新会话');
+    expect(html).not.toContain('新会话会是空的');
+  });
+});
+
+/** #1371：历史加载期只渲染骨架，不渲染「暂无对话」空态（替换关系）。 */
+describe('Conversation — 加载期骨架屏（#1371）', () => {
+  it('loadingHistory=true：渲染骨架与 role=status，不出现空态文案', () => {
+    const html = renderToStaticMarkup(
+      <Conversation conversation={null} loadingHistory density="balanced" />,
+    );
+
+    expect(html).toContain('conversation-loading');
+    expect(html).toContain('role="status"');
+    // 不带 aria-busy：busy 期间 live region 抑制播报，区域 settle 即卸载。
+    expect(html).not.toContain('aria-busy');
+    expect(html).toContain('正在加载对话历史');
+    expect(html).not.toContain('暂无对话');
+    expect(html).not.toContain('正在加载历史…');
+  });
+
+  it('loadingHistory=false 且无会话：空态照旧出现（反证骨架不是把空态删了）', () => {
+    const html = renderToStaticMarkup(
+      <Conversation conversation={null} loadingHistory={false} density="balanced" />,
+    );
+
+    expect(html).not.toContain('conversation-loading');
+    expect(html).toContain('暂无对话');
   });
 });

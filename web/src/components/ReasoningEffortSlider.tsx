@@ -45,23 +45,23 @@ type SliderStyle = CSSProperties & {
 };
 
 const PARTICLE_COUNT = 22;
-const BLUE = [77, 147, 248] as const;
-const VIOLET = [147, 51, 234] as const;
-const DEEP_VIOLET = [76, 29, 149] as const;
 
-function mixColor(from: readonly number[], to: readonly number[], amount: number): string {
-  const channels = from.map((value, index) =>
-    Math.round(value + ((to[index] ?? value) - value) * amount)
-      .toString(16)
-      .padStart(2, '0'),
-  );
-  return '#' + channels.join('');
+/* 颜色只来自 token（#1364）：三个停靠点与 index.css 的 `--effort-track-start` /
+ * `--effort-gradient-3` / `--effort-gradient-end` 同源。混色交给 CSS
+ * `color-mix(in srgb, ...)`：与原先逐通道线性插值等价（sRGB 不透明混色，误差 ≤1/255），
+ * 且不需要在 TSX 里保留任何颜色字面量。 */
+const TRACK_START = 'var(--effort-track-start)';
+const TRACK_VIOLET = 'var(--effort-gradient-3)';
+const TRACK_DEEP = 'var(--effort-gradient-end)';
+
+function mixColor(from: string, to: string, amount: number): string {
+  return `color-mix(in srgb, ${to} ${(amount * 100).toFixed(3)}%, ${from})`;
 }
 
 function colorAt(progress: number): string {
-  if (progress <= 1 / 3) return '#4d93f8';
-  if (progress <= 2 / 3) return mixColor(BLUE, VIOLET, (progress - 1 / 3) * 3);
-  return mixColor(VIOLET, DEEP_VIOLET, (progress - 2 / 3) * 3);
+  if (progress <= 1 / 3) return TRACK_START;
+  if (progress <= 2 / 3) return mixColor(TRACK_START, TRACK_VIOLET, (progress - 1 / 3) * 3);
+  return mixColor(TRACK_VIOLET, TRACK_DEEP, (progress - 2 / 3) * 3);
 }
 
 function toneAt(optionIndex: number, optionCount: number): 'default' | 'blue' | 'violet' | 'deep' {
@@ -179,7 +179,7 @@ export function ReasoningEffortSlider({
           />
         ))}
         <input
-          aria-label="Reasoning Effort slider"
+          aria-label="推理档位"
           aria-valuetext={valueText}
           className="reasoning-effort-slider__input"
           disabled={disabled}

@@ -120,7 +120,7 @@
   cursor: pointer;
   border: 1px solid var(--accent);
   background: var(--accent-soft);
-  color: var(--accent-strong);
+  color: var(--accent-text-strong);
 }
 
 .recovery-resume-btn:disabled {

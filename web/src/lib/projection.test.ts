@@ -29,6 +29,8 @@ describe('initConversation', () => {
       run_usage_live: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
+      // #1429 F6：恢复续轮的轮次号继承槽（初值 = 无继承）。
+      resumed_turn_index: null,
       // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
       run_paused: null,
       pending_constraint_input: null,
@@ -1362,7 +1364,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'hello', model: 'qwen-plus-0911', usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 } },
-    }))).toBe('qwen-plus-0911 · 1801 tok');
+    }))).toBe('qwen-plus-0911 · 1801 字');
     expect(summarizeEvent(ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hello' } }))).toBe('5 字符');
   });
 
@@ -1370,7 +1372,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.RUN_COMPLETED,
       data: { usage_total: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 }, cost_usd: 0.0024 },
-    }))).toBe('1801 tok · $0.0024');
+    }))).toBe('1801 字 · $0.0024');
     expect(summarizeEvent(ev({ type: EventType.RUN_COMPLETED, data: {} }))).toBe('');
   });
 
@@ -1381,6 +1383,50 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     ]) {
       expect(summarizeEvent(ev({ type }))).toBe('');
     }
+  });
+
+  it('TOOL_CALL：参数提炼人话摘要，不输出裸 JSON（#1416）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'rg -n icon src' } },
+    }))).toBe('bash · rg -n icon src');
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't2', tool_name: 'read', args: { path: 'src/App.tsx' } },
+    }))).toBe('read · src/App.tsx');
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't3', tool_name: 'edit', args: { path: 'src/App.tsx' } },
+    }))).toBe('edit · src/App.tsx');
+    // 通用回退：key: value 键值行；嵌套值只报形状，不展开成第二份 JSON。
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: {
+        tool_call_id: 't4',
+        tool_name: 'mcp__demo__query',
+        args: { query: 'hello', limit: 3, nested: { a: 1 } },
+      },
+    }))).toBe('mcp__demo__query · query: hello · limit: 3 · nested: 1 字段');
+  });
+
+  it('TOOL_CALL：长参数单行截断加省略号；无参数只显示工具名（#1416）', () => {
+    const long = summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'x'.repeat(80) } },
+    }));
+    expect(long).toBe(`bash · ${'x'.repeat(60)}…`);
+    expect(long).not.toMatch(/[{}"]/);
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't2', tool_name: 'bash', args: {} },
+    }))).toBe('bash');
+  });
+
+  it('TOOL_CALL：tool_name 缺失显示 —，不显示 ?（#1417）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1' },
+    }))).toBe('—');
   });
 });
 
@@ -1531,17 +1577,17 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   // #1280 AC4：`error`（#1193 致命失败信号）不再空摘要——message 是可读原因。
   // 与 summarizeRunFailed 同规则不截断（完整句子，ADR-0033 §2.3）。
-  it('summarizeEvent：ERROR 带 message → 「运行失败 · 原因」（全文不截断）；缺失 → 「运行失败」', () => {
+  it('summarizeEvent：ERROR 带 message → 「任务失败 · 原因」（全文不截断）；缺失 → 「任务失败」', () => {
     expect(summarizeEvent(ev({
       type: EventType.ERROR,
       data: { code: 'run-failed-before-plan', message: '模型调用失败' },
-    }))).toBe('运行失败 · 模型调用失败');
+    }))).toBe('任务失败 · 模型调用失败');
     const long = 'x'.repeat(60);
     expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: long } }))).toBe(
-      `运行失败 · ${long}`,
+      `任务失败 · ${long}`,
     );
-    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('运行失败');
-    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('运行失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: {} }))).toBe('任务失败');
+    expect(summarizeEvent(ev({ type: EventType.ERROR, data: { message: '   ' } }))).toBe('任务失败');
   });
 
   // ── 事件语义注册表（架构深化 C2）：穷尽性由 tsc 强制
@@ -2118,6 +2164,19 @@ describe('Phase 13 — delegation 投影（ADR-0015）', () => {
     expect(summarizeEvent(finished('child-1', 'failed', ''))).toBe('research_review 失败');
   });
 
+  it('summarizeEvent：target 缺失按空态约定显示 —，不显示 ?（#1417）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.AGENT_DELEGATION_STARTED,
+      data: { task: '任务', child_session_id: 'child-1' },
+      step_id: 1,
+    }))).toBe('委派 → —');
+    expect(summarizeEvent(ev({
+      type: EventType.AGENT_DELEGATION_FINISHED,
+      data: { child_session_id: 'child-1', status: 'completed' },
+      step_id: 1,
+    }))).toBe('— 完成');
+  });
+
   it('copy-on-write：委派回填只克隆宿主 turn；同会话其它 turn 引用不变', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
     s = applyEvent(s, started('child-1'));
@@ -2635,12 +2694,12 @@ describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
   const T = '2026-09-12T00:00:00Z';
   const base = { session_id: 's', time: T };
 
-  it('session/forked → 「已分叉」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
+  it('session/forked → 「已另开一条」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
     const s = applyEvent(initConversation('f'), {
       ...base, type: EventType.SESSION_FORKED, seq: 1, run_id: 'r',
       data: { from_seq: 3, child_session_id: 'child-1' },
     });
-    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已分叉');
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已另开一条');
   });
 
   it('tool/approval-requested → 「等待审批 · {tool_name}」', () => {

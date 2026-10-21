@@ -24,6 +24,7 @@ import {
   SURFACE_KEYS,
   centerTabs,
   deriveSurfaces,
+  insightsAvailable,
   parseCapabilities,
   resolveActiveTab,
   tabKeyTarget,
@@ -258,5 +259,30 @@ describe('#182：响应体解析（防御式，与 api.ts 既有口径一致）'
     const parsed = parseCapabilities({ capabilities: [{ id: 'x', surfaces: 'nope' }] });
     expect(parsed).toHaveLength(1);
     expect(parsed[0].surfaces).toEqual({});
+  });
+});
+
+describe('#1420：洞察模块开关', () => {
+  it('只认布尔 true；缺键 / 空列表 / 拉取失败都隐藏入口', () => {
+    expect(insightsAvailable(null)).toBe(false);
+    expect(insightsAvailable([])).toBe(false);
+    expect(insightsAvailable(parseCapabilities({ capabilities: [{ id: 'core', surfaces: {} }] }))).toBe(false);
+    expect(insightsAvailable(parseCapabilities({
+      capabilities: [{ id: 'core', surfaces: {}, insights: 'true' }],
+    }))).toBe(false);
+    expect(insightsAvailable(parseCapabilities({
+      capabilities: [{ id: 'core', surfaces: {}, insights: true }],
+    }))).toBe(true);
+  });
+
+  it('多个能力取并集：任一显式 true 即开；显式 false 不覆盖另一个 true', () => {
+    expect(insightsAvailable([
+      { id: 'a', surfaces: {}, insights: false },
+      { id: 'b', surfaces: {}, insights: true },
+    ])).toBe(true);
+    expect(insightsAvailable([
+      { id: 'a', surfaces: {}, insights: false },
+      { id: 'b', surfaces: {} },
+    ])).toBe(false);
   });
 });
