@@ -560,9 +560,9 @@ class MarkdownMemoryStore:
         # 但**无法 round-trip** 的手改会在 add 时被静默规范化——没有备份就等于吞掉。
         # 这是对上游 `add(..., skip_drift=True)`（`memory_tool_store.py:294-296`）的
         # **有意偏差**：#1353 §0 裁决 1（漂移语义反转：手改合法 → 备份 + 以文件为准）
-        # 的必然推论，与 F-08 同源；追认记录见 #1441「#1353 偏差清单追认」（与
-        # 「生命周期语义」F-04 同批留痕）。回退成上游不对称会重新制造
-        # 「add 时手改不备份」的洞。
+        # 的必然推论，与 F-08 同源；追认记录见 #1441「#1353 偏差清单追认」，已落盘于
+        # https://github.com/EricKingWhy/intelligence-agent/issues/1353#issuecomment-6315586413
+        # （含 a-05 实测证据）。回退成上游不对称会重新制造「add 时手改不备份」的洞。
         return self._mutate(target, _add)
 
     def _replace_sync(
