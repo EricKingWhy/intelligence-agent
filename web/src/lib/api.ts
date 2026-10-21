@@ -3238,6 +3238,146 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+// ── 上下文洞察模块（#1420）──
+//
+// 三组只读端点（后端 `web/insights.py`），口径全部由后端给：前端不估算、不补数、
+// 不维护第二套真相（不变量 #22）。**只 token 口径，任何视图不出现成本字段**
+// （票面裁决；后端响应本来也没有 cost/$）。
+
+/** 跨会话聚合的时间窗（后端 `range=7d|30d|all`）。 */
+export type InsightsRange = '7d' | '30d' | 'all';
+
+/** 逐请求趋势的两种粒度 / 两种模式（与后端 query 参数同名同义）。 */
+export type ContextGranularity = 'step' | 'turn';
+export type ContextMode = 'total' | 'delta';
+
+export interface InsightsKpi {
+  sessions: number;
+  /** 计费 token := Σ `total_tokens`（票面口径）。 */
+  billed_tokens: number;
+  /** Σ cached ÷ Σ prompt；一次缓存明细都没上报时为 null（不显示 0%）。 */
+  cache_hit_rate: number | null;
+  turns: number;
+  tool_runs: number;
+  active_ms: number;
+}
+
+export interface InsightsDayPoint {
+  date: string;
+  tokens: number;
+}
+
+/** 构成聚合：仅「有快照会话」计入，六桶求和 = 快照总量。 */
+export interface InsightsComposition {
+  system_prompt: number;
+  tools_system: number;
+  tools_mcp: number;
+  messages: number;
+  skills: number;
+  other: number;
+}
+
+export interface InsightsSessionRow {
+  session_id: string;
+  /** 首条用户消息；没有时后端回落 session_id（可读标签，不是伪造标题）。 */
+  title: string;
+  workspace: string | null;
+  billed_tokens: number;
+  turns: number;
+  last_active_at: string | null;
+}
+
+export interface InsightsOverview {
+  kpi: InsightsKpi;
+  daily: InsightsDayPoint[];
+  /** 恒为近 8 周（与 range 无关）。 */
+  heatmap: InsightsDayPoint[];
+  composition: InsightsComposition;
+  coverage: { snapshotted_sessions: number; total_sessions: number };
+  sessions: InsightsSessionRow[];
+}
+
+export interface ContextRequestPoint {
+  seq: number;
+  time: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+}
+
+export interface ContextEventPoint {
+  seq: number;
+  time: string;
+  type: string;
+}
+
+export interface ContextTimeline {
+  /** 与 `GET /context-usage` **同形状同值**（后端共用同一个解析入口）。 */
+  window: ContextUsage;
+  requests: ContextRequestPoint[];
+  events: ContextEventPoint[];
+}
+
+export interface FleetAgentCard {
+  session_id: string;
+  status: string;
+  tokens: number;
+  last_active_at: string | null;
+}
+
+export interface FleetChildCard {
+  session_id: string;
+  status: string;
+  used_tokens: number;
+  last_active_at: string | null;
+}
+
+export interface FleetPayload {
+  self: FleetAgentCard;
+  /** 根会话为空数组 ⇒ UI 隐藏父列（票面）。 */
+  ancestors: FleetAgentCard[];
+  children: FleetChildCard[];
+}
+
+/** GET /api/insights/overview —— 跨会话聚合（只读）。
+ *  `workspace_id` 未注册时后端 404（与 `GET /api/sessions` 同一翻译）。 */
+export async function getInsightsOverview(
+  range: InsightsRange,
+  workspaceId?: string,
+): Promise<InsightsOverview> {
+  const query = new URLSearchParams({ range });
+  if (workspaceId) query.set('workspace_id', workspaceId);
+  const res = await apiFetch(`/api/insights/overview?${query.toString()}`);
+  if (res.status === 404) throw new NotFoundError('工作区不存在');
+  if (!res.ok) throw new Error(`insights overview ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/sessions/{id}/context-timeline —— 单会话窗口 / 逐请求 / 上下文事件（只读）。 */
+export async function getContextTimeline(
+  sessionId: string,
+  granularity: ContextGranularity = 'step',
+  mode: ContextMode = 'total',
+): Promise<ContextTimeline> {
+  const query = new URLSearchParams({ granularity, mode });
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context-timeline?${query.toString()}`,
+  );
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`context-timeline ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/sessions/{id}/fleet —— 当前 / 父 / 子 agent 家族（只读）。 */
+export async function getSessionFleet(sessionId: string): Promise<FleetPayload> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/fleet`);
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`session fleet ${res.status}`);
+  return res.json();
+}
+
 /** 上下文窗口挡位设置（`GET/PATCH /api/sessions/{id}/context-settings`，后端
  *  `web/app.py:3613/3634`）。**形状是后端 DTO 原样透传**——挡位清单以后端为准，
  *  前端不硬编码副本：`tiers` 就是权威列表，选择器只按它渲染。

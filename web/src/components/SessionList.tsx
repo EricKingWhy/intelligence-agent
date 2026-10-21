@@ -25,6 +25,7 @@ import {
   Archive,
   ArrowDown,
   ArrowUp,
+  ChartNoAxesColumn,
   ChevronRight,
   Ellipsis,
   Folder,
@@ -111,6 +112,8 @@ interface Props {
   onSetArchived: (sessionId: string, archived: boolean) => Promise<string | null>;
   /** #1200：打开「插件」管理窗口（侧栏一级入口，常驻）。 */
   onOpenPlugins: () => void;
+  /** #1420：打开跨会话洞察页。可选——能力未声明 / 测试夹具未提供时不渲染入口。 */
+  onOpenInsights?: () => void;
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
@@ -138,6 +141,7 @@ export const SessionList = memo(function SessionList({
   onDeleteSession,
   onSetArchived,
   onOpenPlugins,
+  onOpenInsights,
 }: Props) {
   const now = useTickingNow();
   /** 「显示已归档」开关（#171 AC10）：**视图状态**，持久化到 localStorage 但**不重拉
@@ -373,6 +377,19 @@ export const SessionList = memo(function SessionList({
               <Puzzle size={14} />
             </button>
           </Tip>
+          {/* #1420：上下文洞察入口，紧随插件按钮——同属"一级常驻工具入口"，
+              capability 缺失时前端不下发该 prop，按钮整体不渲染。 */}
+          {onOpenInsights && (
+            <Tip content="上下文洞察——跨会话 token 用量与构成">
+              <button
+                className="icon-btn rail-insights-btn"
+                onClick={onOpenInsights}
+                aria-label="上下文洞察"
+              >
+                <ChartNoAxesColumn size={14} />
+              </button>
+            </Tip>
+          )}
           {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
               「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
               （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
