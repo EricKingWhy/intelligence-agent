@@ -670,6 +670,12 @@ class CreateSessionRequest(_AmendValueValidators):
     # worktree 并用其路径建会话；"queue"：走既有租约排队（次选项）。
     on_conflict: str = Field(default="worktree")
 
+    # #1418：TUI `/new` 的「换会话」语义——建新会话成功后再关闭前任会话行
+    # （`end_reason="new_session"`，存储层派生归档字段，不是事件）。
+    # 只有 `/new` 携带；`/sessions` 切换、`/quit`、Web 空会话入口都不带。
+    # 缺省 None ⇒ 既有调用方行为逐字不变。
+    previous_session_id: str | None = None
+
     @field_validator("autonomy")
     @classmethod
     def _validate_autonomy(cls, v: str | None) -> str | None:
@@ -3297,6 +3303,24 @@ def create_app(
             raise sandbox_unavailable_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
+
+        # #1418：**必须**在建会话成功之后——建失败不许误杀旧会话。
+        # fail-open 与首写获胜语义在 `SessionArchiveObserver.end_session`。
+        # 先过仓内统一的 id 校验：非法格式等同「前任不存在」，静默跳过
+        # （AC2 契约；这里绝不能 422/500）。
+        if req.previous_session_id:
+            try:
+                validate_session_id(req.previous_session_id)
+            except InvalidSessionId:
+                logging.getLogger("agent_harness.web").warning(
+                    "previous_session_id 形态非法，跳过结束前任：%r…（len=%d）",
+                    req.previous_session_id[:64], len(req.previous_session_id),
+                )
+            else:
+                await anyio.to_thread.run_sync(
+                    partial(state.session_archive_observer.end_session,
+                            req.previous_session_id, "new_session")
+                )
 
         # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
         # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。
