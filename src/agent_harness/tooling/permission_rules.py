@@ -325,8 +325,8 @@ def _has_outside_path_syntax(args: list[str], command: str) -> bool:
 
 
 def _has_windows_absolute_path(command: str) -> bool:
-    """识别 shlex 会吞掉反斜杠的 Windows 盘符/UNC 绝对路径。"""
-    if "\\\\" in command:
+    """识别 shlex 会吞掉反斜杠的 Windows 路径或转义语法。"""
+    if "\\" in command:
         return True
     return any(
         command[index].isalpha()

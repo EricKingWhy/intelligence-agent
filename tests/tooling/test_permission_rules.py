@@ -100,6 +100,7 @@ class TestBashClassification:
             "cat /etc/passwd",
             "cat ~",
             r"cat C:\outside.txt",
+            r"cat \outside.txt",
             "cat local.txt\nrm local.txt",
             "tree -o result.txt",
             "file -C",
