@@ -98,7 +98,8 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     )
     markdown.load_from_disk()
     # #1353 M6：待审区与 job/record 同一个库文件（决定二）；与 markdown 同生共死。
-    staged = StagedWriteStore(database, markdown)
+    # #1437：注入 store 后，审批重放的写入也投影进派生层（与工具直写同一入口）。
+    staged = StagedWriteStore(database, markdown, store=store)
     await staged.initialize()
     # #1461：被审批门拦下的后台写入。同一库文件（与 staged 同生共死），writer 就是本
     # service——promote 用 executor 那套 `*_in` 在它自己的事务里重放。

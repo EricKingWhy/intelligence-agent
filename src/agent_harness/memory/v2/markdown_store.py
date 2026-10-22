@@ -280,6 +280,18 @@ class MarkdownMemoryStore:
         except (OSError, UnicodeDecodeError):
             return "", False
 
+    def disk_entries(self, target: str) -> list[str] | None:
+        """**磁盘**上的活条目（去重）；文件存在但读不出来时返回 ``None``。
+
+        返回 ``None`` 而不是空列表，是因为调用方要区分"文件确实空了"与"这次没读到"：
+        对账拿后者当空集合会把派生层整片删掉。进程内 ``entries()`` 是会话快照，
+        另一个文件在整场会话里都不会刷新，不能替代这个读法。
+        """
+        raw, read_ok = self.read_raw_checked(self.path_for(target))
+        if not read_ok:
+            return None
+        return list(dict.fromkeys(self._parse_entries(raw)))
+
     def load_from_disk(self) -> None:
         """读入两个文件并把**当前会话**的快照冻住。
 
