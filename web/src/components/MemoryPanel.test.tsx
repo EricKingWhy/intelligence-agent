@@ -253,6 +253,22 @@ describe('#1477 面板关闭后焦点回到常驻控件', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it('菜单解析不出触发器：不归焦（交回 Radix 默认，不乱归焦）', async () => {
+    const { trigger, menu, item } = mountMoreMenu();
+    // 有 [role=menu] 祖先但 aria-labelledby 缺失 ⇒ 解析不出常驻触发器。
+    menu.removeAttribute('aria-labelledby');
+    item.focus();
+
+    await renderPanel(memoriesState());
+    menu.remove();
+
+    await closePanel();
+
+    // fail-safe：不把焦点送给「更多工具」触发器，也不造一个新的落点。
+    expect(document.activeElement).not.toBe(trigger);
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('入口本身是常驻按钮：关闭后焦点仍回到该按钮（旧行为不回归）', async () => {
     const button = document.createElement('button');
     button.textContent = '记忆管理';
