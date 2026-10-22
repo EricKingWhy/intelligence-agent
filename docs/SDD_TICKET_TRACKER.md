@@ -6,15 +6,19 @@
 - **Phase B 修复（`016fd452`，2 文件 +192/−4）**：审查出处 `~/workspace/ticket-1461/review-correctness.md`（P0=0 / **P1×1** / P2×2 / P3×3 / P4×3）与 `~/workspace/ticket-1461/review-standards.md`（P0=0 / P1=0 / P2×2 / P3×4 / P4×6）。**P1**（必修）= `promote` 把 INVALIDATED record 同时放进 `records` 与 `invalidated`，`mirror_committed` 先删后加 ⇒ 已撤回内容写回 `MEMORY.md`（markdown 僵尸）⇒ 改为镜像 `records` 只传 `MemoryStatus.ACTIVE`（与 `executor._apply` `:1300-1305` 同口径）；**P2-2** = `promote` 转状态不查 rowcount ⇒ 并发双 promote 各重放整批、落重复记录 ⇒ 改 CAS（`rowcount != 1` 回滚并返回「已处置」，与 `discard` 同口径）；**P2-1** = AC7② 补 `discard` 后同 payload 段（变异甲红证）；**P3-3** = 补 4 条测试（settings 读失败 fail-closed / CLI promote 审计 / Web promote 审计）。用例 14 → **19**。**未修**：P3-1 / P3-2 待用户裁决，P4 与 S-5/S-7/S-9/S-11 记账不修。
 - **读数（云端沙箱 `shell/ia-test`）**：Phase A 树 `76798cd6`，`tests/memory` 全量 `pytest -n 4 --basetemp=/home/agent/bt-1461` = **1121 passed / 33 skipped / 0 failed**（**首跑 105s；复跑 16.36s**——同批不同次的墙钟，不是两批）；基线 `a5ecbd52` 同环境 **1107 passed / 33 skipped / 0 failed** ⇒ 零回归，增量 14 条 = Phase A 新用例。Phase B 树 `016fd452` 同命令（`--basetemp=/home/agent/bt-1461b`，日志 `r1461-memory-phaseb.log`）= **1126 passed / 33 skipped / 0 failed（19.78s）**，相对基线 +19 = 14 + 本轮 5 条。`ruff check` 改动 py 文件 All checks passed。
 - **Gate-0（沙箱，实跑）**：补齐 `web/node_modules`（`pnpm install --frozen-lockfile`）与 `origin/main` 引用（沙箱 bundle 克隆无该 ref）后——Phase A 对台账行落盘后的 `0f5aeb3a` 实跑 **7/7 PASS**（21.0s，收据 `docs/gate/0f5aeb3aa854e27981137a45cc9424b75351e9e1.json`，tree `905409b1`）；Phase B **在新代码 tip 上实跑**：`016fd452`（tree `02bb14de`）裸跑 6/7、唯一红 = coverage 自指（本轮 2 笔尚无台账行），台账行落盘后的 `f3d4318`（tree `a465c6ee`）裸跑 **7/7 PASS**（23.2s，收据 `docs/gate/f3d431836a20ce2e4b6e2e69cd1350cc7d12ce14.json`）。两次的中间态 6/7 机制相同：coverage 覆盖闸门自指，台账行落盘即转绿。补齐依赖前的裸读数为 2/7（oxlint/tsc/stylelint 结构性缺 `web/node_modules` + guards 缺 `origin/main` + coverage 自指），与基线 `a5ecbd52` 同环境 3/7 同因，均非本票代码问题。
-- **§8.1 判据原文（Phase B，冻结代码 tip `016fd452` → 收据树 `f3d4318`）**：
-  判据前置自证：`git rev-parse --verify "016fd4523bc18ce69d5da133cb93e9a6560f3167^{commit}"` = `016fd4523bc18ce69d5da133cb93e9a6560f3167`、`git rev-parse --verify "f3d431836a20ce2e4b6e2e69cd1350cc7d12ce14^{commit}"` = `f3d431836a20ce2e4b6e2e69cd1350cc7d12ce14`（分次调用，均 exit 0）。
-  ① `git diff --name-status --no-renames 016fd4523bc18ce69d5da133cb93e9a6560f3167 f3d431836a20ce2e4b6e2e69cd1350cc7d12ce14` 原文：
+- **§8.1 判据原文（Phase B，冻结代码 tip `016fd452`）**：
+  判据前置自证：`git rev-parse --verify "016fd4523bc18ce69d5da133cb93e9a6560f3167^{commit}"` = `016fd4523bc18ce69d5da133cb93e9a6560f3167`、`git rev-parse --verify "HEAD^{commit}"` = 本笔 HEAD（分次调用，均 exit 0）。
+  ① `git diff --name-status --no-renames 016fd4523bc18ce69d5da133cb93e9a6560f3167 HEAD` 原文：
   ```
+  M	docs/PHASE_STATUS.md
+  M	docs/SDD_TICKET_TRACKER.md
+  A	docs/gate/f3d431836a20ce2e4b6e2e69cd1350cc7d12ce14.json
+  M	docs/phase_status/2026-10.md
   A	docs/review_ledger.d/t1461-formation-gate-phaseb-3b9f2599-016fd452.tsv
   ```
-  （状态列只有 `A`；路径命中 `DOC_PATTERN`。`f3d4318` 之后的收据笔 `c47e516e` 只加 `docs/gate/f3d4318….json`，同 `A`、同命中，故 `016fd452..HEAD` 亦成立。）
+  （状态列只有 `A` / `M`，无 `D`/`R`/`C`/`T`；5 条路径全部命中 `DOC_PATTERN`。收据笔 `f3d4318` 上同一命令的输出只有第一条台账行 —— 收据就是在那棵树上跑的，tree `a465c6ee`。）
   ② `git status --short` 原文 = **空**（无输出）。
-  ⇒ 判为「跑过门禁的树 = 被集成的代码面」，`f3d4318` 的 7/7 读数对代码 tip `016fd452` 有效。
+  ⇒ 判为「跑过门禁的树 = 被集成的代码面」，`f3d4318` 的 7/7 读数对代码 tip `016fd452` 有效；其后各笔均为 docs / 台账 / 收据。
 - **残余 / 待办**：**P3-1（查重顺序敏感）/ P3-2（count=0 通知）待用户裁决**；推送与 PR 描述由协调员派发；`evaluate_gate` 的 docstring 口径已随设计 §4.7 更新；白名单外改动 6 处 + kill-child 辅助已在月档逐条登记被迫理由（详见 `docs/phase_status/2026-10.md` #1461 节）。
 
 **当前后续修复中（2026-10-21，#1360）**：PR #1431（Recovery per-tool attempt budget）已同步基线 `origin/main=14f5217a`。同步后 backend full run 为 8797 passed / 17 failed / 129 skipped / 43 deselected；17 个失败节点已做 focused 复验，暴露的 Docker 冷启动时序和 Session 测试后端隔离问题已修复；相关 6 个测试通过，其余 13 个原失败节点在 focused 轮通过。按用户要求不重复耗时全量，不宣称全量通过。Standards + Spec 两轴通过，P0–P4=0；coverage exit 0。Gate-0 6/6 PASS，收据 `docs/gate/49653220f7927ff071bb9423d9404d55cbbc8d67.json`（tree `3f14c4c01ef2b0482ebc25335799aa3282524eef`，284.93s；首周 receipt-present warn-only）。PR #1431 OPEN，标签 `等待merge`，待服务端 gate0 通过后合并。
