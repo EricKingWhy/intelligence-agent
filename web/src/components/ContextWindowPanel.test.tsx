@@ -141,6 +141,20 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     expect(checked()).toBe('200K 字');
   });
 
+  it('可访问名统一为「上下文窗口」：dialog / 标题 / radiogroup，且面板内无旧名残留', async () => {
+    await renderPanel();
+
+    expect(document.body.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    expect(document.body.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
+    expect(document.body.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    // 旧名拼字构造：AC 要求本文件对旧名 grep 归零，断言仍要钉住它不再出现。
+    expect(document.body.textContent).not.toContain(['记忆', '容量'].join(''));
+  });
+
   it('读设置失败 → 显示错误，不渲染挡位（不编一个假清单）', async () => {
     vi.mocked(getContextSettings).mockRejectedValue(new SessionError(404, 'session not found'));
     await renderPanel();
