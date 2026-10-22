@@ -125,8 +125,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   在车道描述与本文两侧都有，由 `tests/test_exec_bit_matches_shebang.py` 一处断言对账 ⇒ 改一处
   忘另一处会红）：
   1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
-     `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
-     `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
+     `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）、
+     `tui/src/generated/event-types.ts`（同脚本；#1498 起 TUI 词汇也从这里取，产物落在
+     tui 包内以满足 `rootDir: "."`）与 `docs/EVENT_VOCABULARY.md`
+     （`scripts/gen_event_vocabulary.py`）。
   2. **验证映射**：见 §2 ⑭。
   3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这四文件里机制叙述的权威处**，判据
      `scripts/check_exec_bit.py`（判据脚本与用例只写操作约束 + 指回本处）：
