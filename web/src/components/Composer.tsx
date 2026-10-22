@@ -250,10 +250,15 @@ interface Props {
   selectedReasoningEffort?: string | null;
   reasoningEffortProjection?: ActiveFallbackModelProjection | null;
   onReasoningEffortChange?: (id: string | null) => void;
-  // ── #426/#536：新建会话的预算入口（turns / total_tokens / deadline_at，单入口
+  // ── #426/#536：预算入口（turns / total_tokens / deadline_at，单入口
   //    popover——BudgetPicker）。各维草稿是输入原样字符串，判形/换算在映射层
-  //    `toCreateBudget` 一处。**仅新建会话态显示**（`permissionInSession=false`）：
-  //    预算属于启动 run 的请求（#422），续聊 /messages 不带 budget（#308）。
+  //    `toCreateBudget` 一处。**两态（新建 / 已选会话）都显示**（#1444 推翻 #308 的
+  //    UI 隐藏）：新建态随 create 请求发 `budget.run`；已选态随下一次 `/messages`
+  //    提交作为 amend 发出（后端 idle→launched 新 run 消费，queued / steer 只判定
+  //    丢弃——#308 的真实约束是「在途 run 不改写」，不是「续聊提交不得携带下一 run
+  //    的预算声明」）。budget 的映射点是 lib/amend.ts 的 `toCreateBudget`
+  //    （`toAmendFields` 只管 model / agent_profile / reasoning_effort），wire
+  //    约束以后端 /messages 契约为准。
   budgetRunTurns?: string;
   onBudgetRunTurnsChange?: (value: string) => void;
   /** `budget.run.max_total_tokens` 的草稿。 */
@@ -1106,13 +1111,14 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
     .filter((name): name is string => name !== null)
     .join(' · ');
 
-  // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器
+  // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器。
+  // #1444：预算入口两态都在（已选会话态也可能只剩它一个）⇒ 不再按会话态排除。
   const hasControls =
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
     modelReasoningEfforts.length > 0 ||
-    (!permissionInSession && onBudgetRunTurnsChange !== undefined);
+    onBudgetRunTurnsChange !== undefined;
 
   return (
     <div className="composer-wrap">
@@ -1688,13 +1694,14 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               </>
             )}
             {/* #536：预算三项收敛为单入口 popover（设计稿 §2.3，替换 #426 三平铺）。
-                会话内不显示——budget.run 属于**启动 run** 的请求（#422），续聊不带
-                budget（#308）。留空 = 后端默认（不发键）；到顶/到点自动暂停，恢复
-                面板抬高后继续。判形/换算唯一执行点在 lib/amend.ts（映射层）。 */}
-            {!permissionInSession &&
-              (onBudgetRunTurnsChange !== undefined ||
-                onBudgetRunTokensChange !== undefined ||
-                onBudgetRunDeadlineChange !== undefined) && (
+                #1444：**两态都显示**——新建态随 create 请求发 `budget.run`；已选态
+                随下一次 `/messages` 提交作为 amend 发出（后端 idle→launched 新 run
+                消费，queued / steer 只判定丢弃；#308 约束的是在途 run 不被改写）。
+                留空 = 后端默认（不发键）；到顶/到点自动暂停，恢复面板抬高后继续。
+                判形/换算唯一执行点在 lib/amend.ts（映射层）。 */}
+            {(onBudgetRunTurnsChange !== undefined ||
+              onBudgetRunTokensChange !== undefined ||
+              onBudgetRunDeadlineChange !== undefined) && (
               <BudgetPicker
                 turns={budgetRunTurns ?? ''}
                 onTurnsChange={onBudgetRunTurnsChange}
