@@ -5,7 +5,7 @@
  *    `StuckPausedPanel.test.tsx`）只锁静态渲染；这里锁「事件载荷 → 投影 → 面板」
  *    的接线——两个面板共用 `.pause-panel-continuation`，两处各锁一条。
  * ② stuck 路由限制（`11 §6.1` MUST NOT 一键重试）：`reason=stuck` 走
- *    `StuckPausedPanel`，面板无 ceiling 输入框、无「恢复同一 run」按钮，且**不发**
+ *    `StuckPausedPanel`，面板无 ceiling 输入框、无「继续这次任务」按钮，且**不发**
  *    `POST /api/sessions/{id}/resume`（恢复需要变更依据）。
  * ③ 预算恢复 409：`POST /api/sessions/{id}/resume` 的请求体逐字（同 run CAS +
  *    budget_increase + 绝对 ceiling）；409 后界面显示后端 detail（`恢复被拒绝：…`），
@@ -111,7 +111,7 @@ test('① continuation 四键逐字上屏（PausedPanel）', async ({ page }) =>
   ]);
 });
 
-test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /resume', async ({ page }) => {
+test('② stuck 暂停：引导面板不提供一键继续，且不发 POST /resume', async ({ page }) => {
   let resumeCalls = 0;
   await routeApi(page, { sessions: [ROW], events: stuckFrames() });
   // 后注册的路由先匹配：若界面真的发了恢复请求，这里会记到（并如实回 409）。
