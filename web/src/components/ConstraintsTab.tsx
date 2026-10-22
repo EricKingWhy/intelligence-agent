@@ -32,7 +32,7 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { FACT_TYPE_DOTS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
+import { FACT_TYPE_DOTS, SCOPE_LABELS, factTypeLabel, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
@@ -146,7 +146,7 @@ function FactRow({
         <div className="cn-meta">
           <span className="cn-type">
             <span className="cn-tdot" style={{ background: dot }} aria-hidden="true" />
-            {fact.type}
+            {factTypeLabel(fact.type)}
           </span>
           {/* #1419 R-4 继承胶囊：非本会话来源即「继承」（scope 是后端真字段，
               不是效果图里的编造名）。分组眉标仍保留——胶囊让单条卡自证来源。 */}
@@ -365,7 +365,7 @@ export function ConstraintsView({
               aria-pressed={typeFilter === type}
               onClick={() => onTypeFilter(type)}
             >
-              {type}
+              {factTypeLabel(type)}
             </button>
           ))}
         </div>
