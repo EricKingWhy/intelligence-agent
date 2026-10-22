@@ -140,9 +140,18 @@ class Settings(BaseSettings):
     # #1353 M7：后台记忆形成的人面向通知档位（上游 `notification_mode`）。
     # `off` 不发 `memory/human_updated`；`on` 只发计数/指纹；`verbose` 另把内容预览
     # 写进日志（事件载荷不变——不变量 #22）。部署级（重启生效），与面板级
-    # `write_approval` / `fallback_enabled` 分层。消费点唯一：
-    # `memory/v2/assembly.build_memory_formation`。
+    # `write_approval` / `fallback_enabled` 分层。消费点两处，都在
+    # `memory/v2/assembly.py`：`build_memory_formation`（形成通知）与
+    # `build_memory_v2_service` → `MarkdownMemoryStore`（漂移通知，#1440 P3-3）。
     memory_notification_mode: Literal["off", "on", "verbose"] = "on"
+    # #1441 §1（F-09）：curated memory 的容量预算（字符数，与模型无关）。上游
+    # `hermes_cli/config_defaults.py:1321-1322` 同值同单位，经
+    # `tools/memory_tool.py` 的 `load_on_disk_store` 读 `memory` 配置段。消费点两处，
+    # 同一份预算：`memory/v2/assembly.build_memory_v2_service`（运行时）与
+    # `memory/v2/migration.migrate_active_records`（CLI `memory migrate`，由 `cli.py` 传入）。
+    # 部署级（重启生效）；`MarkdownMemoryStore` 的构造参数仍可覆盖，测试路径不变。
+    memory_char_limit: int = Field(default=2200, gt=0)
+    user_char_limit: int = Field(default=1375, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

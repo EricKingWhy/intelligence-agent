@@ -11,7 +11,7 @@ import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
-import { parseArtifactMarker, parseErrorShape } from './toolShapes';
+import { interpretToolResult, parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 import { parseImageRefs, type ImageAttachmentRef } from './attachmentRefs';
 
@@ -974,22 +974,22 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
     // Backend serializes the full ToolResult via model_dump_json() — so content is
     // a JSON string shaped {ok, message, data, error_code, retryable, metadata, ...}.
     // The structured payload (incl. diff for edit/write) lives under `.data`.
-    const parsed = tryParseContent(data.content);
-    const ok = parsed?.ok === true;
-    const parsedData = (parsed?.data ?? null) as Record<string, unknown> | null;
+    const interpreted = interpretToolResult(data.content);
+    const parsed = interpreted.envelope;
+    const parsedData = (interpreted.data ?? null) as Record<string, unknown> | null;
     const tool = cloneTool(turn.tools[toolIdx]);
     // bash 被超时/断连取消（data.cancelled，df4f7d8 §1.3）≠ 普通失败：
     // 映射到 stopped（中断 ≠ 错误，与 finalizeRun 的 stopped 同一语义域）。
-    if (parsedData?.cancelled === true) {
+    if (interpreted.outcome === 'cancelled') {
       tool.status = 'stopped';
     } else {
-      tool.status = ok ? 'success' : 'failed';
+      tool.status = interpreted.outcome === 'success' ? 'success' : 'failed';
     }
     tool.result = parsedData ?? parsed?.message ?? data.content;
     // #1429 F1：失败分类只在**信封**里（`data` 为空时 result 退化成 message 字符串，
     // error_code 已在上面那行丢掉）。这里解析一次落成 per-tool 事实，视图不再
     // 回头拆 `result`/`raw_result`。ok=true / 无信封 ⇒ 无 error 字段（零伪造）。
-    const errorShape = tool.status === 'failed' ? parseErrorShape(parsed) : null;
+    const errorShape = tool.status === 'failed' ? interpreted.error : null;
     if (errorShape) tool.error = errorShape;
     else delete tool.error;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)

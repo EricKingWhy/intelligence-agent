@@ -22,7 +22,7 @@ import {
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatBytes, formatCoarseDuration, formatDateTime, formatDuration, formatShortDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
-import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
+import type { RunGroup, RunGroupStatus } from '../lib/timelineGroups';
 import { timelineHeadline } from '../lib/timelineHeadline';
 import { lineDiff, type LineDiffResult } from '../lib/lineDiff';
 import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
@@ -35,9 +35,10 @@ import {
 } from '../lib/inspectorPanel';
 import { deriveAgentProfile, deriveReasoningEffort, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import {
-  barGeometry, deriveEventTimings, deriveTimelineEventKeys, eventCategory, eventMatchesFilter, filterCounts,
-  formatAxisLabel, formatClock, seqGapMarkers, timelineAxis,
-  type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineStatus,
+  barGeometry, deriveTimelineModel, deriveTimelineView, eventCategory,
+  formatAxisLabel, formatClock,
+  type EventTiming, type SeqGap, type TimelineAxis, type TimelineFilter, type TimelineRow,
+  type TimelineStatus, type TimelineView,
 } from '../lib/timelineView';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { useTickingNow } from '../hooks/useTickingNow';
@@ -106,8 +107,6 @@ const EMPTY_TOOLS: ToolCall[] = [];
 const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
 /** 稳定空集合 / 空表——memo 与依赖比较用（每次新建 `new Set()` 会永久失效）。 */
 const EMPTY_KEYS: ReadonlySet<string> = new Set();
-const EMPTY_TIMINGS: ReadonlyMap<string, EventTiming> = new Map();
-const EMPTY_EVENT_KEYS: ReadonlyMap<AgentEvent, string> = new Map();
 
 /** #1419 P3-9：同时展开的卡片上限。每张展开卡都挂载完整的 `EventInspector` /
  *  JsonTree，连续展开会让 Inspector 的 DOM/内存无界增长；3 张足够对照上下文，
@@ -254,21 +253,18 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   // 单一走法（#190）：与中心列「输出」面共用 projection.allTools——不在本文件内再造一份。
   const tools = useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS),
     [conversation?.turns]); // eslint-disable-line react-hooks/exhaustive-deps
-  /* #1419：Timeline 卡片流的派生表只算一次，列表/筛选/键盘导航共用。 */
-  const timelineTimings = useMemo(
-    () => (conversation ? deriveEventTimings(conversation.events, tools) : EMPTY_TIMINGS),
+  /* #1451: one light base model feeds the filtered rows shared by the timeline and keyboard navigation. */
+  const timelineModel = useMemo(
+    () => (conversation ? deriveTimelineModel(conversation.events, tools) : null),
     [conversation?.eventsVersion, tools], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  /* #1419 P2-1：Timeline 行身份（`eventKey` + seq-less 同键序号）。timing 仍按
-   * `eventKey` 存（同一 eventKey 的事件共享同一份 timing），选中/展开/DOM id 用
-   * 这张表的**唯一键**。 */
-  const timelineKeys = useMemo(
-    () => (conversation ? deriveTimelineEventKeys(conversation.events) : EMPTY_EVENT_KEYS),
-    [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
+  const timelineView = useMemo(
+    () => (timelineModel ? deriveTimelineView(timelineModel, timelineFilter) : null),
+    [timelineModel, timelineFilter],
   );
   const timelineKeyOf = useCallback(
-    (event: AgentEvent) => timelineKeys.get(event) ?? eventKey(event),
-    [timelineKeys],
+    (event: AgentEvent) => timelineModel?.eventKeys.get(event) ?? eventKey(event),
+    [timelineModel],
   );
   const pulse = useMemo(() => deriveRunPulse(conversation, streaming, awaitingDecision),
     [ // eslint-disable-line react-hooks/exhaustive-deps
@@ -336,11 +332,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
          *  2. 指令必须落在**依赖数组那一行**，写在回调行上是**装饰**（不生效）。 */
         const events = conversation?.events;
         if (!events) return EMPTY_TARGETS;
-        /* #1419：键盘移动域与筛选后的可视列表同源——↑/↓ 不会把选中态送到
-         * 当前筛选看不到的事件上（否则 Enter 会展开一个不可见卡片）。 */
-        return events
-          .filter((e) => eventMatchesFilter(e, timelineFilter, timelineTimings.get(eventKey(e))))
-          .map((e) => ({ key: timelineKeyOf(e), focus: () => onFocusEvent(e) }));
+        /* #1451: keyboard movement consumes the same filtered rows passed to TimelineTab. */
+        return timelineView?.rows.map(({ event, rowKey }) => ({
+          key: rowKey,
+          focus: () => onFocusEvent(event),
+        })) ?? EMPTY_TARGETS;
       }
       case 'chat':
         return tools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
@@ -350,8 +346,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
         return EMPTY_TARGETS;
     }
   }, [ // eslint-disable-line react-hooks/exhaustive-deps
-    tab, conversation?.eventsVersion, tools, commandTools, onFocusEvent, onFocusTool,
-    timelineFilter, timelineTimings, timelineKeyOf,
+    tab, conversation?.eventsVersion, timelineView, tools, commandTools, onFocusEvent, onFocusTool,
   ]);
 
   /* #1419：展开键 = Timeline 行身份（`eventKey`，seq-less 同键事件追加序号），
@@ -823,9 +818,7 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
               onSelectEvent={onSelectTimelineEvent}
               filter={timelineFilter}
               onFilterChange={setTimelineFilter}
-              timings={timelineTimings}
-              tools={tools}
-              eventKeys={timelineKeys}
+              view={timelineView ?? undefined}
               streaming={streaming}
             />
           )}
@@ -1823,9 +1816,8 @@ export function TimelineTab({
   onSelectEvent,
   filter,
   onFilterChange,
-  timings,
+  view: suppliedView,
   tools = EMPTY_TOOLS,
-  eventKeys,
   streaming = false,
 }: {
   conversation: ConversationState;
@@ -1838,11 +1830,9 @@ export function TimelineTab({
   onSelectEvent?: (e: AgentEvent) => void;
   filter?: TimelineFilter;
   onFilterChange?: (f: TimelineFilter) => void;
-  timings?: ReadonlyMap<string, EventTiming>;
+  /** Shared production model; standalone renders derive the same model locally. */
+  view?: TimelineView;
   tools?: readonly ToolCall[];
-  /** #1419 P2-1：事件对象 → Timeline 行身份（seq-less 同键事件带序号）。
-   *  省略时退回 `eventKey`（独立渲染/旧测试兼容）。 */
-  eventKeys?: ReadonlyMap<AgentEvent, string>;
   /** 底部状态条的同步态（`已同步` / `跟随中`）；独立渲染默认终态。 */
   streaming?: boolean;
 }) {
@@ -1857,13 +1847,12 @@ export function TimelineTab({
   const [flashKey, setFlashKey] = useState<string | null>(null);
   // C4：hover 时间戳浮层——单元素 fixed 浮层 + 容器事件委托（零每行 handler）。
   const [tip, setTip] = useState<TipState | null>(null);
-  const visibleRef = useRef<Map<string, AgentEvent>>(new Map());
+  const visibleRef = useRef<Map<string, TimelineRow>>(new Map());
   const lastRowRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const activeFilter = filter ?? localFilter;
   const setFilter = onFilterChange ?? setLocalFilter;
   const activeExpanded = expandedKeys ?? localExpanded;
-  const keyOf = useCallback((e: AgentEvent) => eventKeys?.get(e) ?? eventKey(e), [eventKeys]);
   const toggleExpanded = onToggleExpand ?? ((key: string) => {
     setLocalExpanded((prev) => {
       const next = new Set(prev);
@@ -1879,41 +1868,18 @@ export function TimelineTab({
       return next;
     });
   });
-  const timingsMap = useMemo(
-    () => timings ?? deriveEventTimings(conversation.events, tools),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timings, conversation.eventsVersion, tools],
+  const model = useMemo(
+    () => suppliedView?.model ?? deriveTimelineModel(conversation.events, tools),
+    [suppliedView?.model, conversation.eventsVersion, tools], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  /* T-8：TOOL_RESULT 行标题要复用 call 的模板（result 自身内容只有 `ok`）。
-   * 按 tool_call_id 建索引；`tools` 引用稳定（上游 memo），索引跟着它重建。 */
-  const callById = useMemo(
-    () => new Map(tools.map((t) => [t.tool_call_id, t])),
-    [tools],
+  const timelineView = useMemo(
+    () => suppliedView ?? deriveTimelineView(model, activeFilter),
+    [suppliedView, model, activeFilter],
   );
-
-  /* run 分组派生（N2 #271）：键用 `eventsVersion`——写 `events` 不是"省一次重算"，而是
-   * **永不重算**（组头不出现、计数不涨，是正确性缺陷）。契约与代价见 ADR-0037 D3 / D5.4；
-   * 豁免形式见上方 `runIdList` / `listTargets`。 */
-  const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-  const counts = useMemo(
-    () => filterCounts(conversation.events, timingsMap),
-    [conversation.eventsVersion, timingsMap], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-  const axis = useMemo(() => timelineAxis(timingsMap), [timingsMap]);
-  const gapByIndex = useMemo(() => {
-    const map = new Map<number, SeqGap>();
-    for (const gap of seqGapMarkers(conversation.events)) map.set(gap.afterIndex, gap);
-    return map;
-  }, [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const filtered = useMemo(
-    () => conversation.events
-      .map((e, i) => ({ e, i }))
-      .filter(({ e }) => eventMatchesFilter(e, activeFilter, timingsMap.get(eventKey(e)))),
-    [conversation.eventsVersion, activeFilter, timingsMap], // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  const { timings: timingsMap, callById, runGroups, counts, axis, gapByIndex } = model;
+  const filtered = timelineView.rows;
   const selectedFilteredIndex = selectedKey
-    ? filtered.findIndex(({ e }) => keyOf(e) === selectedKey)
+    ? filtered.findIndex(({ rowKey }) => rowKey === selectedKey)
     : -1;
   /* #183：键盘选中项必须在**渲染窗口**里，否则"选中了却看不见"（↑/↓ 到窗口外
    * 就停在原地）。窗口下界由选中项**派生**（`effectiveWindow`），不在 effect 里
@@ -1925,7 +1891,7 @@ export function TimelineTab({
     selectedFilteredIndex >= 0 ? Math.max(windowSize, filtered.length - selectedFilteredIndex) : windowSize;
   const hidden = Math.max(0, filtered.length - effectiveWindow);
   const visible = hidden > 0 ? filtered.slice(hidden) : filtered;
-  visibleRef.current = new Map(visible.map((v) => [keyOf(v.e), v.e]));
+  visibleRef.current = new Map(visible.map((row) => [row.rowKey, row]));
 
   /* 选中项滚进视野：`nearest` 保证已经在视野里时**不动**（否则每次 ↑/↓ 都会把
      列表拉到中间，滚动位置就"丢"了——AC1 要的正是滚动位置不被选中的副作用骚扰）。 */
@@ -1938,15 +1904,15 @@ export function TimelineTab({
 
   /* 跳转实时流：先把窗口扩到目标行，再滚到它并闪一下；不修改选中态（那是 App 的
    * focus，Timeline 不越权）。`flashKey` 的清理在 effect 里，避免渲染期定时器。 */
-  const liveEvent = useMemo(() => {
-    for (let i = conversation.events.length - 1; i >= 0; i--) {
-      const e = conversation.events[i];
-      if (timingsMap.get(eventKey(e))?.status === 'run') return e;
+  const liveRow = useMemo(() => {
+    for (let i = model.rows.length - 1; i >= 0; i--) {
+      const row = model.rows[i];
+      if (row.timing?.status === 'run') return row;
     }
-    if (conversation.run_status === 'running') return conversation.events[conversation.events.length - 1] ?? null;
+    if (conversation.run_status === 'running') return model.rows[model.rows.length - 1] ?? null;
     return null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversation.eventsVersion, conversation.run_status, timingsMap]);
+  }, [model, conversation.run_status]);
+  const liveEvent = liveRow?.event ?? null;
   useEffect(() => {
     if (!flashKey) return;
     const el = listRef.current?.querySelector<HTMLElement>(`[data-list-key="${flashKey}"]`);
@@ -1955,12 +1921,10 @@ export function TimelineTab({
     return () => window.clearTimeout(timer);
   }, [flashKey]);
   const jumpToLive = () => {
-    if (!liveEvent) return;
-    const abs = conversation.events.indexOf(liveEvent);
-    if (abs < 0) return;
-    setWindowSize((w) => Math.max(w, total - abs));
-    if (!eventMatchesFilter(liveEvent, activeFilter, timingsMap.get(eventKey(liveEvent)))) setFilter('all');
-    setFlashKey(keyOf(liveEvent));
+    if (!liveRow) return;
+    setWindowSize((w) => Math.max(w, total - liveRow.rawIndex));
+    if (!timelineView.rows.includes(liveRow)) setFilter('all');
+    setFlashKey(liveRow.rowKey);
   };
 
   // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
@@ -1987,15 +1951,16 @@ export function TimelineTab({
       setTip(null);
       return;
     }
-    const ev = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
+    const row = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
+    const ev = row?.event;
     const lines = ev ? formatEventTooltip(ev) : [];
-    if (!ev) {
+    if (!ev || !row) {
       setTip(null);
       return;
     }
     /* T-11 富信息：标题 / `#seq · type · 时刻` / 摘要 + 既有时间戳与 step 行。
      * 行数参与定位高度计算（TIP_LINE_H 每行）。 */
-    const timing = timingsMap.get(eventKey(ev));
+    const timing = row.timing;
     const meta = [
       ev.seq != null ? `#${ev.seq}` : null,
       ev.type,
@@ -2114,7 +2079,7 @@ export function TimelineTab({
         </div>
       ) : lanes.map(({ group, items }) => {
         const timing = laneTiming(group, conversation.events, timingsMap);
-        const failCount = items.filter(({ e }) => timingsMap.get(eventKey(e))?.status === 'fail').length;
+        const failCount = items.filter(({ timing }) => timing?.status === 'fail').length;
         return (
           <Fragment key={group.start}>
             <div
@@ -2149,8 +2114,8 @@ export function TimelineTab({
                 </span>
               )}
             </div>
-            {items.map(({ e, i }) => {
-              const key = keyOf(e);
+            {items.map((row) => {
+              const { event: e, rawIndex: i, rowKey: key, timing: eventTiming } = row;
               const expanded = activeExpanded.has(key);
               return (
                 <Fragment key={i}>
@@ -2160,7 +2125,7 @@ export function TimelineTab({
                     call={e.type === EventType.TOOL_RESULT
                       ? callById.get(String(e.data.tool_call_id ?? '')) ?? null
                       : null}
-                    timing={timingsMap.get(eventKey(e))}
+                    timing={eventTiming}
                     axis={axis}
                     selected={selectedKey === key}
                     expanded={expanded}
@@ -2217,19 +2182,12 @@ export function TimelineTab({
   );
 }
 
-interface VisibleItem {
-  e: AgentEvent;
-  i: number;
-}
-
-type RunGroup = ReturnType<typeof groupEventsByRun>[number];
-
 /** 把窗口内的筛选结果按 run 组桶化：组内无可见项 ⇒ 组头不渲染。 */
-function buildLanes(visible: readonly VisibleItem[], groups: readonly RunGroup[]): { group: RunGroup; items: VisibleItem[] }[] {
-  const out: { group: RunGroup; items: VisibleItem[] }[] = [];
+function buildLanes(visible: readonly TimelineRow[], groups: readonly RunGroup[]): { group: RunGroup; items: TimelineRow[] }[] {
+  const out: { group: RunGroup; items: TimelineRow[] }[] = [];
   let gi = 0;
   for (const item of visible) {
-    while (gi < groups.length && item.i >= groups[gi].start + groups[gi].count) gi++;
+    while (gi < groups.length && item.rawIndex >= groups[gi].start + groups[gi].count) gi++;
     const group = groups[gi];
     if (!group) continue;
     const last = out[out.length - 1];
